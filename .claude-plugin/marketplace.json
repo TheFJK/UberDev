@@ -1,0 +1,17 @@
+{
+  "name": "uberdev",
+  "owner": {
+    "name": "TheFJK",
+    "url": "https://github.com/TheFJK"
+  },
+  "plugins": [
+    {
+      "name": "uberdev",
+      "source": "./plugins/uberdev",
+      "description": "GitHub workflow commands + bundled workflow skills and PR review agents — /solve spawns autonomous agents to solve issues, /issue creates well-investigated issues.",
+      "version": "0.2.0",
+      "category": "workflow",
+      "tags": ["github", "issue-tracking", "autonomous-agents", "cmux", "skills", "code-review"]
+    }
+  ]
+}
