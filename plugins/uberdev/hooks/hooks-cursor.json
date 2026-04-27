@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "./hooks/session-start"
+      }
+    ],
+    "userPromptSubmit": [
+      {
+        "command": "./hooks/inject-brainstorm-answers"
+      }
+    ]
+  }
+}

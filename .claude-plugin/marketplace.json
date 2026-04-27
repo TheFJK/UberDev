@@ -8,10 +8,10 @@
     {
       "name": "uberdev",
       "source": "./plugins/uberdev",
-      "description": "GitHub workflow commands + bundled workflow skills and PR review agents — /solve spawns autonomous agents to solve issues, /issue creates well-investigated issues.",
-      "version": "0.2.0",
+      "description": "GitHub workflow commands + full Superpowers skill suite (brainstorm with visual companion, write-plan, execute-plan, subagent-driven-dev wave-based parallel execution, finish-branch, systematic-debugging, TDD, worktrees, parallel-agents, verification, code-review pair, writing-skills, using-uberdev primer) and PR review agents. /solve spawns autonomous agents in cmux/Ghostty/iTerm; /issue creates well-investigated, deduped issues.",
+      "version": "0.3.0",
       "category": "workflow",
-      "tags": ["github", "issue-tracking", "autonomous-agents", "cmux", "skills", "code-review"]
+      "tags": ["github", "issue-tracking", "autonomous-agents", "cmux", "skills", "code-review", "tdd", "brainstorm", "visual-companion", "debugging", "worktrees"]
     }
   ]
 }

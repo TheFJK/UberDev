@@ -1,7 +1,7 @@
 {
   "name": "uberdev",
-  "version": "0.2.1",
-  "description": "GitHub workflow commands: /solve spawns autonomous agents in cmux/Ghostty/iTerm to solve issues with tier-aware triage; /issue creates well-investigated, deduped, label-validated issues. Bundles workflow skills (brainstorm, write-plan, execute-plan, subagent-driven-dev) and PR review agents (code-reviewer, code-simplifier, comment-analyzer, pr-test-analyzer, silent-failure-hunter, type-design-analyzer) so /solve runs standalone. v0.2.1 adds wave-based parallel execution: plans declare task dependencies and file ownership, and subagent-driven-dev dispatches every wave's tasks concurrently in one shared worktree with controller-only git to eliminate index races.",
+  "version": "0.3.0",
+  "description": "GitHub workflow commands: /solve spawns autonomous agents in cmux/Ghostty/iTerm to solve issues with tier-aware triage; /issue creates well-investigated, deduped, label-validated issues. Full Superpowers skill suite ported and rebranded for UberDev: brainstorm (with browser-based visual companion), write-plan, execute-plan, subagent-driven-dev (wave-based parallel execution), finish-branch, systematic-debugging, test-driven-development, using-git-worktrees, dispatching-parallel-agents, verification-before-completion, requesting/receiving-code-review, writing-skills, using-uberdev. Bundles PR review agents (code-reviewer, code-simplifier, comment-analyzer, plan-reviewer, pr-test-analyzer, silent-failure-hunter, type-design-analyzer) and a SessionStart hook that injects the using-uberdev primer. v0.3.0 ports the remaining Superpowers skills, adds the brainstorm visual companion (local server + frame-template.html, persisting sessions to .uberdev/brainstorm/), and brings hooks + plugin docs over.",
   "author": {
     "name": "TheFJK",
     "url": "https://github.com/TheFJK"
@@ -9,5 +9,5 @@
   "homepage": "https://github.com/TheFJK/UberDev",
   "repository": "https://github.com/TheFJK/UberDev",
   "license": "MIT",
-  "keywords": ["github", "gh-cli", "autonomous-agents", "cmux", "issue-tracking", "workflow", "skills", "code-review", "tdd", "brainstorm"]
+  "keywords": ["github", "gh-cli", "autonomous-agents", "cmux", "issue-tracking", "workflow", "skills", "code-review", "tdd", "brainstorm", "visual-companion", "debugging", "worktrees"]
 }

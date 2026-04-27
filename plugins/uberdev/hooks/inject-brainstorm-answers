@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# UserPromptSubmit hook for the UberDev brainstorm visual companion.
+#
+# Drains any pending click/submit events from the active brainstorm session
+# into the user's next turn as a <uberdev-brainstorm-answers> block, then
+# truncates the events file so the same answers aren't replayed.
+#
+# Discovery (newest non-empty file wins):
+#   1. CWD/.uberdev/brainstorm/<session>/state/events  (per-project sessions)
+#   2. /tmp/brainstorm/state/events                    (legacy /tmp fallback)
+#
+# Stale events (> 1 hour old) are skipped to avoid replaying a previous session.
+
+set -euo pipefail
+shopt -s nullglob
+
+readonly STALE_AFTER_SECONDS=3600
+
+# Portable mtime — macOS `stat -f %m`, GNU `stat -c %Y`. Empty string on failure.
+file_mtime() {
+  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || true
+}
+
+# Pick the newest non-empty events file across all candidate locations.
+# Sets `newest` and `newest_mtime` (both empty if no candidate qualifies).
+newest=""
+newest_mtime=0
+consider() {
+  local f="$1"
+  [ -s "$f" ] || return 0
+  local m
+  m="$(file_mtime "$f")"
+  [ -n "$m" ] || return 0
+  if [ "$m" -gt "$newest_mtime" ]; then
+    newest="$f"
+    newest_mtime="$m"
+  fi
+}
+
+# Per-project sessions
+if [ -d "${PWD}/.uberdev/brainstorm" ]; then
+  while IFS= read -r f; do
+    consider "$f"
+  done < <(find "${PWD}/.uberdev/brainstorm" -type f -path "*/state/events" -print 2>/dev/null)
+fi
+# Legacy /tmp fallback
+[ -f "/tmp/brainstorm/state/events" ] && consider "/tmp/brainstorm/state/events"
+
+# No pending answers, or only stale ones → exit silently.
+[ -n "$newest" ] || exit 0
+age=$(( $(date +%s) - newest_mtime ))
+[ "$age" -le "$STALE_AFTER_SECONDS" ] || exit 0
+
+# Drain the events file atomically (read, then truncate).
+events="$(cat "$newest")"
+: > "$newest"
+[ -n "$events" ] || exit 0
+
+# Emit as additional context. The <uberdev-brainstorm-answers> marker is
+# documented in SKILL.md / visual-companion.md so Claude knows to read it.
+cat <<EOF
+
+<uberdev-brainstorm-answers source="$newest">
+The user submitted the following answers in the brainstorm visual companion. Treat
+these as the user's response — do not ask them to repeat in chat. Each line is one
+JSON event in click order; the final event is typically a 'submit' carrying the
+locked-in choice plus any additional selections.
+
+$events
+</uberdev-brainstorm-answers>
+EOF
