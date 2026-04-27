@@ -42,17 +42,15 @@ Run a comprehensive pull request review using multiple specialized agents, each 
    - **If types added/modified**: uberdev:type-design-analyzer
    - **After passing review**: uberdev:code-simplifier (polish and refine)
 
-5. **Launch Review Agents**
+5. **Launch Review Agents — parallel by default**
 
-   **Sequential approach** (one at a time):
-   - Easier to understand and act on
-   - Each report is complete before next
-   - Good for interactive review
+   **Dispatch all applicable agents concurrently in a single message** (one assistant turn, multiple Task tool_use blocks). Each agent sees the full diff and produces an independent report — they do not share state, so there is no reason to serialize them.
 
-   **Parallel approach** (user can request):
-   - Launch all agents simultaneously
-   - Faster for comprehensive review
-   - Results come back together
+   This is a deliberate divergence from upstream `pr-review-toolkit`, which defaults to sequential. Parallel matches the orchestrator-first principle and the canonical fanout pattern used by `/uberdev:simplify`.
+
+   **Sequential fallback** (only when explicitly requested via `sequential` argument):
+   - Useful for interactive walkthroughs where you want to act on each report before the next
+   - Otherwise, prefer parallel — wall-time scales with the slowest reviewer, not the sum
 
 6. **Aggregate Results**
 
@@ -106,10 +104,10 @@ Run a comprehensive pull request review using multiple specialized agents, each 
 # Simplifies code after passing review
 ```
 
-**Parallel review:**
+**Sequential override** (default is parallel):
 ```
-/uberdev:review-pr all parallel
-# Launches all agents in parallel
+/uberdev:review-pr all sequential
+# Force one-at-a-time dispatch — use only for interactive walkthroughs
 ```
 
 ## Agent Descriptions:

@@ -27,6 +27,12 @@ Parse `$DESC`. Determine:
 
 > `enhancement` is a **label**, never a commit type. Titles always use `feat(scope):` / `fix(scope):` / `chore(scope):` / `refactor(scope):`.
 
+## Phases 2–4: Parallel Investigation
+
+Phases 2, 3, and 4 are **read-only and independent** — they don't share state. Dispatch them as **three Task agents in a single message** (one assistant turn, three `Task` tool_use blocks) and aggregate their reports before drafting in Phase 5. Each phase below documents one agent's brief.
+
+If `$NO_EXPLORE=1` you may run the three phases inline (no Task overhead) since each becomes a small Grep/`gh` invocation. For everything else, parallel fanout is the default — typical wall-time savings are 60-70% versus running the three serially.
+
 ## Phase 2: Investigate Codebase
 
 **Gate the depth:**
@@ -63,6 +69,16 @@ COMMITLINT=$(find . -maxdepth 3 \( -name "commitlint.config.js" -o -name "commit
 
 - **Labels:** open `/tmp/issue-labels-$$.json`, pick the base (`bug` for `fix`, `enhancement` for `feat`) **only if it exists in the repo**, then add context labels by matching investigation keywords against real label names (e.g., `infrastructure`, `dx`, `security`, `docs`). Never invent labels.
 - **Scope:** if `$COMMITLINT` is set, Read it, extract the `scope-enum` array, and constrain the Phase 1 scope pick to that list. If the derived scope isn't in the list, flag to the user and propose the closest match.
+
+## Phase 4.5: Aggregate
+
+Wait for all three Phase 2-4 agents to return. Reconcile their reports:
+
+- **Phase 2 output** → `## Likely area` content for the draft
+- **Phase 3 output** → `## Related` section, plus regression flagging if a closed issue matches
+- **Phase 4 output** → final label set + validated scope (or a flag if commitlint scope-enum doesn't include the proposed scope)
+
+If any agent returns a blocking question (e.g., "open match found, comment instead?") raise it to the user **before** drafting Phase 5.
 
 ## Phase 5: Draft Issue
 

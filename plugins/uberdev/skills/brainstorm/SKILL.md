@@ -69,6 +69,17 @@ digraph brainstorming {
 - Present options conversationally with your recommendation and reasoning
 - Lead with your recommended option and explain why
 
+**Parallel exploration for high-stakes designs:**
+
+For architectural changes, large features, or any design where the wrong choice is expensive to reverse, the 2-3 approaches benefit from **independent parallel exploration** instead of single-agent sequential generation. A single thread tends to anchor on the first idea — parallel agents who don't see each other reach different reasoning paths.
+
+Pattern: in a single message, dispatch 2-3 `Task` agents, each tasked with **one specific design direction** (e.g., "explore the event-driven approach with BullMQ", "explore the polling approach with cron", "explore the webhook approach"). Each agent receives the same project context but only its own direction; they do not see each other's output. Aggregate their trade-off lists, then present the consolidated comparison to the user with your recommendation.
+
+**Skip parallel exploration when:**
+- The design is small/local (a single function, a config tweak — single-thread is fine)
+- One approach is obviously dominant (don't burn agents to confirm the obvious)
+- Token budget is tight and the user is iterating fast — a quick text-based comparison is more responsive than a multi-agent spawn
+
 **Presenting the design:**
 
 - Once you believe you understand what you're building, present the design as a single coherent message

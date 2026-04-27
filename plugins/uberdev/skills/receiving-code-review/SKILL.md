@@ -204,6 +204,35 @@ You understand 1,2,3,6. Unclear on 4,5.
 
 When replying to inline review comments on GitHub, reply in the comment thread (`gh api repos/{owner}/{repo}/pulls/{pr}/comments/{id}/replies`), not as a top-level PR comment.
 
+## Multi-Reviewer Parallel Triage
+
+When a PR has feedback from **2 or more reviewers** (human or agent — `code-reviewer`, `silent-failure-hunter`, etc.), do not process them serially. Each reviewer's feedback is independent and can be triaged in parallel.
+
+Pattern: in a single message, dispatch one `Task` triage agent per reviewer. Each agent receives:
+
+- The reviewer's full set of comments
+- The PR diff (`gh pr diff`)
+- The plan or spec the PR implements
+
+Each agent produces a structured triage:
+
+```
+**Critical** (must fix before merge): <list with file:line + evidence>
+**Important** (should fix): <list>
+**Minor** (defer / batch later): <list>
+**Refute** (technically wrong / disagree): <list with reasoning>
+**Need clarification**: <list of items requiring back-and-forth>
+```
+
+Aggregate the per-reviewer triages into one consolidated action plan. De-duplicate items where two reviewers flag the same thing (merge their evidence). For "Refute" items across reviewers, surface to the user — disagreement between reviewers usually means the answer isn't obvious.
+
+Then apply the rest of this skill (verify, ask before assuming, push back where wrong, implement one item at a time) to the consolidated list.
+
+**Skip parallel triage when:**
+- Only one reviewer left feedback — single-thread is faster
+- Feedback volume is small (≤5 items total) — overhead exceeds benefit
+- Reviewers' comments interlock (e.g., reviewer B builds on reviewer A's points) — serialize so context flows
+
 ## The Bottom Line
 
 **External feedback = suggestions to evaluate, not orders to follow.**

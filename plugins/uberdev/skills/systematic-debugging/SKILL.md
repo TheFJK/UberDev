@@ -146,10 +146,11 @@ You MUST complete each phase before proceeding to the next.
 
 **Scientific method:**
 
-1. **Form Single Hypothesis**
+1. **Form Hypothesis (or Hypotheses)**
    - State clearly: "I think X is the root cause because Y"
    - Write it down
    - Be specific, not vague
+   - **If you have 2+ plausible hypotheses, do not pick prematurely.** See "Parallel hypothesis testing" below.
 
 2. **Test Minimally**
    - Make the SMALLEST possible change to test hypothesis
@@ -166,6 +167,37 @@ You MUST complete each phase before proceeding to the next.
    - Don't pretend to know
    - Ask for help
    - Research more
+
+#### Parallel hypothesis testing
+
+When the bug has **2 or more plausible root causes** and the evidence so far doesn't disambiguate, do not serialize hypothesis-by-hypothesis. Fan out one read-only investigator agent per hypothesis in a single message.
+
+**Pattern:**
+
+```
+Task tool x N (one assistant turn, N tool_use blocks):
+
+  Agent 1: "Test hypothesis A: <X is the root cause because Y>.
+            Run only read-only probes (grep, log inspection, targeted git blame).
+            Do not modify code. Report: evidence FOR, evidence AGAINST,
+            confidence (high/medium/low), and what would prove or disprove this."
+
+  Agent 2: "Test hypothesis B: <...>"  (same template)
+
+  Agent 3: "Test hypothesis C: <...>"  (same template)
+```
+
+**Rules:**
+
+1. Each agent is **read-only**. No writes, no commits, no test runs that mutate state. They probe and report.
+2. Each agent gets only its own hypothesis — they do NOT see each other's reasoning. This prevents anchoring.
+3. Aggregate the three reports. Pick the hypothesis with the strongest evidence FOR + weakest evidence AGAINST. If two are tied, the user (or you) decides.
+4. Only **then** proceed to Phase 4 with the chosen root cause. Do not implement fixes for multiple hypotheses simultaneously — serial fixes from a parallel investigation is the safe pattern.
+
+**When NOT to parallelize:**
+- Single obvious hypothesis — testing it serially is faster than spinning up an agent.
+- Hypotheses are entangled (testing A changes the conditions for B) — serialize them.
+- The probes themselves are destructive (require restarting services, mutating DB state) — never parallelize destructive probes.
 
 ### Phase 4: Implementation
 

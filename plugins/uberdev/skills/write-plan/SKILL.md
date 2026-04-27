@@ -22,6 +22,20 @@ Assume they are a skilled developer, but know almost nothing about our toolset o
 
 If the spec covers multiple independent subsystems, it should have been broken into sub-project specs during brainstorming. If it wasn't, suggest breaking this into separate plans — one per subsystem. Each plan should produce working, testable software on its own.
 
+## Optional: Parallel alternative-plan generation (opt-in for high-stakes plans)
+
+For very large or architecturally consequential plans (10+ tasks, cross-module restructuring, migration plans), the decomposition itself is a design decision worth exploring more than once. Default behavior is single-pass plan authoring; **opt in** to alternative-plan generation only when the user explicitly asks for it or when you reasonably judge the plan's structure is high-leverage.
+
+Pattern: in a single message, dispatch 2-3 `Task` agents, each tasked with drafting the same plan but using a **different decomposition strategy**:
+
+- **Agent A — by-module:** decompose by source-tree module (each task touches one module's files)
+- **Agent B — by-data-flow:** decompose along the data path (each task moves data one step further through the system)
+- **Agent C — by-feature-slice:** decompose by user-visible feature (each task delivers one end-to-end slice, even if it touches many modules)
+
+Each draft must include the standard plan headers (`Depends on:`, `Wave:`, `Owns:`) so they can be compared on equal footing. Aggregate by surfacing each plan's `## Execution Waves` summary side-by-side; the user (or you, with explicit reasoning) picks the winning decomposition. Discard the others.
+
+**Cost note:** this triples plan-authoring tokens. Only worth it when a wrong decomposition would cost significantly more downstream than three plan drafts cost upfront.
+
 ## File Structure
 
 Before defining tasks, map out which files will be created or modified and what each one is responsible for. This is where decomposition decisions get locked in.

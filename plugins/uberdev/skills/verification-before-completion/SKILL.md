@@ -130,6 +130,36 @@ From 24 failure memories:
 - Implications of success
 - ANY communication suggesting completion/correctness
 
+## Parallel Verification Dispatch
+
+When you have multiple **independent** verification dimensions to check (tests, lint, build, typecheck, smoke tests), they should run **in parallel**, not serially. Wall-time scales with the slowest check, not the sum.
+
+**Two patterns, pick by tool budget:**
+
+**Pattern A: parallel `Bash` calls in a single message** (lightest)
+
+Run each verification command in a single message with multiple `Bash` tool_use blocks (use `run_in_background: true` if any one is long). Each call returns its own exit code + output. Aggregate manually. Best for 2-4 quick checks on the same machine.
+
+**Pattern B: parallel `Task` subagent fanout** (when output is large)
+
+Dispatch one `Task` agent per dimension in a single message. Each agent runs its check, reads the output, classifies pass/fail with evidence, and reports a concise verdict. Best when individual outputs are large (full test suite logs, type-checker spew) — keeps your main context lean.
+
+**Required regardless of pattern:** every claim still needs **fresh evidence in this message**. The Iron Law applies to parallel verification just like serial — you cannot claim "tests pass" until you see the test command's exit code in the current turn.
+
+**Example brief for Pattern B:**
+
+```
+Task(subagent_type=general-purpose,
+     prompt="Run `pnpm test`. Report:
+       - Exit code
+       - Pass/fail counts (e.g., '34/34' or '32/34, 2 failures')
+       - First 10 lines of any failure output
+       - Final verdict: PASS or FAIL
+     Do not interpret beyond what the command output shows.")
+```
+
+Aggregate reports → if any returned FAIL, fix that dimension before claiming completion.
+
 ## The Bottom Line
 
 **No shortcuts for verification.**
