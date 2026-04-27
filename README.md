@@ -4,7 +4,7 @@
 
 **A personal Claude Code marketplace bundling opinionated GitHub-workflow slash commands.**
 
-[![Version](https://img.shields.io/badge/version-0.2.1-blue)](https://github.com/TheFJK/UberDev)
+[![Version](https://img.shields.io/badge/version-0.3.1-blue)](https://github.com/TheFJK/UberDev)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8B5CF6)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Repo Agnostic](https://img.shields.io/badge/repo--agnostic-yes-success)](#configuration)
@@ -344,10 +344,12 @@ Result: maximum parallelism on edits, deterministic commit history, zero merge c
 | Version | Status | Adds |
 |---|---|---|
 | **v0.1.0** | Released | `/solve`, `/issue` — repo-agnostic, no project-board logic |
-| **v0.2.0** | Current | Bundles 4 workflow skills (`brainstorm`, `write-plan`, `execute-plan`, `subagent-driven-dev`), 6 review agents (`code-reviewer`, `code-simplifier`, `comment-analyzer`, `pr-test-analyzer`, `silent-failure-hunter`, `type-design-analyzer`), and 2 commands (`/uberdev:review-pr`, `/uberdev:simplify`) — `/solve` runs standalone with no superpowers / pr-review-toolkit / code-simplifier dependency |
-| **v0.2.1** | Current | **Wave-based parallel execution (Pattern B):** `write-plan` requires `Depends on:` / `Wave:` / `Owns:` per task and an `## Execution Waves` summary; `subagent-driven-dev` dispatches every task in a wave concurrently in one shared feature-branch worktree, with the controller (not the implementers) running git to avoid index races. Cuts wall-time on multi-task plans roughly N× per wave with zero merge ceremony. |
-| **v0.3** | Planned | Optional per-repo `.claude/board.json` for re-enabling project-board auto-add |
-| **v0.4** | Maybe | Linux + Windows terminal dispatchers; configurable model pin via env |
+| **v0.2.0** | Released | Bundles 4 workflow skills (`brainstorm`, `write-plan`, `execute-plan`, `subagent-driven-dev`), 6 review agents (`code-reviewer`, `code-simplifier`, `comment-analyzer`, `pr-test-analyzer`, `silent-failure-hunter`, `type-design-analyzer`), and 2 commands (`/uberdev:review-pr`, `/uberdev:simplify`) — `/solve` runs standalone with no superpowers / pr-review-toolkit / code-simplifier dependency |
+| **v0.2.1** | Released | **Wave-based parallel execution (Pattern B):** `write-plan` requires `Depends on:` / `Wave:` / `Owns:` per task and an `## Execution Waves` summary; `subagent-driven-dev` dispatches every task in a wave concurrently in one shared feature-branch worktree, with the controller (not the implementers) running git to avoid index races. Cuts wall-time on multi-task plans roughly N× per wave with zero merge ceremony. |
+| **v0.3.0** | Released | Full Superpowers parity port (remaining skills: `systematic-debugging`, `test-driven-development`, `using-git-worktrees`, `dispatching-parallel-agents`, `verification-before-completion`, `requesting-code-review`, `receiving-code-review`, `writing-skills`, `using-uberdev`); brainstorm Visual Companion (Neo Brutalism UI, local server + frame-template.html, sessions persist to `.uberdev/brainstorm/`); SessionStart hook injects the `using-uberdev` primer. |
+| **v0.3.1** | Current | **`/uberdev:simplify` realigned with Anthropic's built-in `/simplify`:** three-parallel-agent orchestrator — Code Reuse, Code Quality, Efficiency reviewers fan out concurrently in a single Task-tool turn; controller aggregates findings and fixes them. Iron rule preserved (no behavior changes), plus uberdev's separate `refactor:` commit mandate. Was previously a single-agent dispatch — drift fix bringing parity with the canonical flow shipped in the Claude Code binary. |
+| **v0.4** | Planned | Optional per-repo `.claude/board.json` for re-enabling project-board auto-add |
+| **v0.5** | Maybe | Linux + Windows terminal dispatchers; configurable model pin via env |
 
 ---
 
@@ -370,7 +372,7 @@ UberDev ships these so `/solve` and `/issue` work standalone — **no `superpowe
 | Agent | `uberdev:type-design-analyzer` | verbatim from `pr-review-toolkit` |
 | Agent | `uberdev:code-simplifier` | verbatim from [`code-simplifier`](https://github.com/anthropics/claude-code) v1.0.0 (Apache 2.0, Anthropic) |
 | Command | `/uberdev:review-pr` | adapted from `pr-review-toolkit:/review-pr` |
-| Command | `/uberdev:simplify` | new — thin wrapper dispatching `uberdev:code-simplifier` over the current diff |
+| Command | `/uberdev:simplify` | mirrors Anthropic's built-in `/simplify` (3-phase orchestrator: identify diff → fan out 3 parallel review agents — Reuse, Quality, Efficiency — → aggregate + fix → separate `refactor:` commit) |
 
 Adaptations for the skills: dropped Visual Companion section from `brainstorm` (browser-based mockup server, never used by spawned headless `/solve` agents); retargeted all `superpowers:*` cross-references to `uberdev:*`; replaced references to non-bundled superpowers skills (`using-git-worktrees`, `test-driven-development`, `requesting-code-review`, `finishing-a-development-branch`) with inline prose preserving the discipline. Bundled upstream license texts are in `plugins/uberdev/licenses/`.
 
