@@ -57,6 +57,29 @@ rm -i ~/.claude/commands/solve.md ~/.claude/commands/issue.md
 
 ---
 
+## Updating
+
+Claude Code does **not** auto-update third-party plugins by default — third-party marketplaces ship with auto-update **off**. Two options:
+
+### Manual update (default)
+
+```bash
+/plugin marketplace update uberdev   # refresh marketplace metadata
+/plugin install uberdev@uberdev      # reinstall to pull the new version
+```
+
+Or interactively: `/plugin` → **Installed** → select `uberdev` → re-install.
+
+### Enable auto-update for this marketplace (one-time)
+
+`/plugin` → **Marketplaces** tab → select `uberdev` → toggle auto-update on. Claude Code then picks up new versions whenever the `version` field in `plugin.json` is bumped.
+
+> **Disabling everything:** set `DISABLE_AUTOUPDATER=1` in your shell environment to globally disable Claude Code's auto-updater (affects Claude Code itself + every plugin).
+
+Each release bumps the `version` field in `.claude-plugin/plugin.json`, so auto-update users get clean version transitions; manual users see the new version listed under the marketplace entry.
+
+---
+
 ## Prerequisites
 
 | Requirement | Why |
