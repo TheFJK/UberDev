@@ -23,11 +23,17 @@ Load plan, review critically, execute all tasks, report when complete.
 
 ### Step 2: Execute Tasks
 
-For each task:
-1. Mark as in_progress
-2. Follow each step exactly (plan has bite-sized steps)
-3. Run verifications as specified
-4. Mark as completed
+The plan declares an `## Execution Waves` summary. Inline execution can't truly parallelize, but the wave order must still be honored: never start a task whose `Depends on:` list includes an unfinished task.
+
+For each wave (in order):
+  For each task in the wave (any order is fine — they're independent):
+    1. Mark as in_progress
+    2. Follow each step exactly (plan has bite-sized steps)
+    3. Run verifications as specified
+    4. Mark as completed
+  After every task in the wave is complete, run the project's full test command before starting the next wave.
+
+If you spot tasks that are clearly independent and your platform supports it, prefer `uberdev:subagent-driven-dev` — it will dispatch the wave's implementers in parallel and finish significantly faster.
 
 **Apply TDD discipline within each task:** write a minimal failing test for the new behavior FIRST, run it to see it fail for the expected reason, write the simplest code that makes it pass, run again to see green, then refactor while green. Don't write production code without a failing test in front of it. (The plan's tasks should already encode this — these notes apply if a task is loose on TDD.)
 

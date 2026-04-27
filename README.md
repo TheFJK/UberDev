@@ -4,7 +4,7 @@
 
 **A personal Claude Code marketplace bundling opinionated GitHub-workflow slash commands.**
 
-[![Version](https://img.shields.io/badge/version-0.1.0-blue)](https://github.com/TheFJK/UberDev)
+[![Version](https://img.shields.io/badge/version-0.2.1-blue)](https://github.com/TheFJK/UberDev)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8B5CF6)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Repo Agnostic](https://img.shields.io/badge/repo--agnostic-yes-success)](#configuration)
@@ -261,6 +261,58 @@ The marketplace can host additional plugins later — drop a new folder under `p
 | **macOS-first terminal dispatch** | `osascript` for iTerm / Terminal.app, native cmux/Ghostty CLI for those, `nohup` fallback elsewhere. |
 | **Triage hint in every issue body** | Lets `/solve` skip re-classification and pick the right workflow without rereading the whole body. |
 | **Conventional commits enforced** | `feat(scope):` / `fix(scope):` / `chore(scope):` / `refactor(scope):`. `enhancement` is a **label**, never a type. |
+| **Wave-based parallel execution** *(see below)* | Plans declare task dependencies + file ownership; `subagent-driven-dev` fires every wave's tasks concurrently in one shared worktree. Controller-only git eliminates index races without per-task worktree ceremony. |
+
+---
+
+## Wave-based parallel execution (Pattern B)
+
+`/solve` and `/uberdev:subagent-driven-dev` execute multi-task plans in **waves**: every task in a wave dispatches in parallel, waves run sequentially.
+
+### How a plan declares it
+
+`uberdev:write-plan` requires three new headers per task and an `## Execution Waves` summary:
+
+```markdown
+## Execution Waves
+
+- **wave-1** (parallel): T1, T2, T3
+- **wave-2** (parallel, depends on wave-1): T4, T5
+- **wave-3** (sequential, depends on wave-2): T6
+
+### Task 4: Recovery modes
+
+**Depends on:** T1
+**Wave:** wave-2
+**Owns (file allowlist):** src/recovery.ts, tests/recovery.test.ts
+```
+
+Tasks share a wave **only** if their `Owns` allowlists are pairwise disjoint. Overlap → bump the later task to the next wave. The plan-writer's self-review checks acyclic deps + disjoint allowlists before saving.
+
+### How execution stays race-free
+
+| Concern | Pattern B solution |
+|---|---|
+| Two implementers writing the same file | Plan declares disjoint `Owns` allowlists; each implementer prompt enforces an allowlist + a denylist of sibling-owned paths |
+| Concurrent `git add` / `git commit` racing on `.git/index.lock` | **Implementers never run git.** They edit files, run their tests, and report changed paths. The controller stages and commits per task, sequentially, in task ID order |
+| A regression introduced by parallel edits hiding until later | Controller runs the project's full test suite once after all wave commits land — before any review dispatches |
+| Reviewer of task A reading task B's code | Spec + code-quality reviewer prompts include the task's `BASE_SHA`, `HEAD_SHA`, and explicit allowlist; reviewers ignore changes outside |
+| Worktree sprawl | One shared feature-branch worktree across all waves. No merge step between waves. Same worktree `/solve` already creates. |
+
+### Why one shared worktree, not one per agent
+
+Per-agent worktrees would isolate filesystems but add N `git worktree add` calls, an N-way merge step at the end of every wave, and cross-worktree resync time. Pattern B drops all of that by:
+
+1. Letting agents share the worktree (safe because the plan proves disjoint file ownership).
+2. Refusing to let agents touch git at all (safe because the controller serializes commits).
+
+Result: maximum parallelism on edits, deterministic commit history, zero merge ceremony.
+
+### Trade-offs you should know
+
+- **Plans must decompose into truly disjoint file sets.** If wave-1 is one bottleneck task that everything depends on, you don't actually get parallelism — fix the decomposition.
+- **Implementers can't self-stage.** If your task naturally wants ad-hoc commits (e.g., a bisect-friendly history mid-task), Pattern B forces you to wait for the controller. For most tasks that's fine.
+- **The full-suite run between waves costs wall-time.** It's the trade for catching regressions before review dispatch instead of during.
 
 ---
 
@@ -270,6 +322,7 @@ The marketplace can host additional plugins later — drop a new folder under `p
 |---|---|---|
 | **v0.1.0** | Released | `/solve`, `/issue` — repo-agnostic, no project-board logic |
 | **v0.2.0** | Current | Bundles 4 workflow skills (`brainstorm`, `write-plan`, `execute-plan`, `subagent-driven-dev`), 6 review agents (`code-reviewer`, `code-simplifier`, `comment-analyzer`, `pr-test-analyzer`, `silent-failure-hunter`, `type-design-analyzer`), and 2 commands (`/uberdev:review-pr`, `/uberdev:simplify`) — `/solve` runs standalone with no superpowers / pr-review-toolkit / code-simplifier dependency |
+| **v0.2.1** | Current | **Wave-based parallel execution (Pattern B):** `write-plan` requires `Depends on:` / `Wave:` / `Owns:` per task and an `## Execution Waves` summary; `subagent-driven-dev` dispatches every task in a wave concurrently in one shared feature-branch worktree, with the controller (not the implementers) running git to avoid index races. Cuts wall-time on multi-task plans roughly N× per wave with zero merge ceremony. |
 | **v0.3** | Planned | Optional per-repo `.claude/board.json` for re-enabling project-board auto-add |
 | **v0.4** | Maybe | Linux + Windows terminal dispatchers; configurable model pin via env |
 

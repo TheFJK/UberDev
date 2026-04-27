@@ -33,6 +33,32 @@ Before defining tasks, map out which files will be created or modified and what 
 
 This structure informs the task decomposition. Each task should produce self-contained changes that make sense independently.
 
+## Wave Decomposition (MANDATORY)
+
+After mapping the file structure, build the dependency graph and group tasks into **waves**. Tasks in the same wave dispatch in parallel; waves run sequentially.
+
+**Rules for assigning waves:**
+1. A task with `Depends on: none` goes in `wave-1`.
+2. A task's wave = `max(wave of each dependency) + 1`.
+3. Two tasks can share a wave **only if** their `Owns` allowlists are strictly disjoint. Any shared file = move the later task to the next wave.
+4. Schema/contract tasks (types, interfaces, DB migrations, shared constants) almost always belong to `wave-1` alone — most other tasks depend on them.
+
+The wave's executor (`uberdev:subagent-driven-dev`) dispatches all wave tasks concurrently in the **same shared feature-branch worktree**, with each implementer restricted to its `Owns` allowlist. The controller — not the implementers — runs git, so disjoint allowlists are sufficient to prevent collisions.
+
+**Required plan-level summary (immediately after the header):**
+
+```markdown
+## Execution Waves
+
+- **wave-1** (parallel): T1, T2, T3
+- **wave-2** (parallel, depends on wave-1): T4, T5
+- **wave-3** (sequential, depends on wave-2): T6
+
+Worker dispatches each wave concurrently; controller waits for the wave to finish before starting the next.
+```
+
+This summary is what `uberdev:subagent-driven-dev` reads to decide its dispatch pattern. If you can't produce a sensible wave summary, the plan's task boundaries are wrong — fix the decomposition before continuing.
+
 ## Bite-Sized Task Granularity
 
 **Each step is one action (2-5 minutes):**
@@ -62,8 +88,14 @@ This structure informs the task decomposition. Each task should produce self-con
 
 ## Task Structure
 
+Every task MUST declare its dependencies and parallel-dispatch wave. Without this, `uberdev:subagent-driven-dev` can't safely fire tasks concurrently and falls back to slow sequential execution.
+
 ````markdown
 ### Task N: [Component Name]
+
+**Depends on:** [task IDs this requires, or `none`]
+**Wave:** [wave-N — tasks in the same wave dispatch in parallel]
+**Owns (file allowlist):** [explicit list of paths this task may create/edit — used to enforce no overlap with sibling tasks in the same wave]
 
 **Files:**
 - Create: `exact/path/to/file.py`
@@ -128,6 +160,12 @@ After writing the complete plan, look at the spec with fresh eyes and check the 
 **2. Placeholder scan:** Search your plan for red flags — any of the patterns from the "No Placeholders" section above. Fix them.
 
 **3. Type consistency:** Do the types, method signatures, and property names you used in later tasks match what you defined in earlier tasks? A function called `clearLayers()` in Task 3 but `clearFullLayers()` in Task 7 is a bug.
+
+**4. Wave correctness:**
+- Does every task declare `Depends on:`, `Wave:`, and `Owns:`?
+- Are dependencies acyclic? (Task A → B → A is a planning bug.)
+- For each wave, are all `Owns` allowlists pairwise disjoint? Any overlap means the wave is unsafe — split it.
+- Is wave-1 a single bottleneck task? That's a smell — can the schema/contract work be split, or are downstream tasks under-decomposed?
 
 If you find issues, fix them inline. No need to re-review — just fix and move on. If you find a spec requirement with no task, add the task.
 

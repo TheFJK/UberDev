@@ -11,8 +11,9 @@ Task tool (uberdev:code-reviewer):
 
   WHAT_WAS_IMPLEMENTED: [from implementer's report]
   PLAN_OR_REQUIREMENTS: Task N from [plan-file]
-  BASE_SHA: [commit before task]
-  HEAD_SHA: [current commit]
+  BASE_SHA: [commit before this task — for the wave's first reviewed task this is the wave's starting SHA; for later tasks in the same wave it's the previous task's commit SHA, since the controller committed in task ID order]
+  HEAD_SHA: [this task's commit SHA]
+  ALLOWED_PATHS: [task's file allowlist — review nothing outside these]
   DESCRIPTION: [task summary]
 
   Review focus:

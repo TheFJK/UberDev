@@ -18,6 +18,15 @@ Task tool (general-purpose):
 
     [From implementer's report]
 
+    ## Where to Look
+
+    The controller has already committed this task. Inspect the change at:
+    - **Commit SHA:** [task commit SHA]
+    - **Diff:** `git show <SHA>` or `git diff <SHA>^ <SHA>`
+    - **Allowlisted files for this task:** [paths from the wave's ownership map]
+
+    Do not review changes outside those paths — sibling tasks in the same wave own their own files and have their own reviews.
+
     ## CRITICAL: Do Not Trust the Report
 
     The implementer finished suspiciously quickly. Their report may be incomplete,

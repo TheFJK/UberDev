@@ -16,6 +16,23 @@ Task tool (general-purpose):
 
     [Scene-setting: where this fits, dependencies, architectural context]
 
+    ## Wave & File Ownership
+
+    - **Wave:** [wave-N]
+    - **Working directory:** [absolute path to the shared feature-branch worktree — same CWD as sibling tasks]
+    - **Sibling tasks running in parallel right now:** [list of other task IDs in this wave]
+    - **Files you OWN and may edit (allowlist):** [explicit list from the task's "Files" section]
+    - **Files owned by sibling tasks (denylist — never read for write, never edit):** [union of sibling allowlists]
+    - **Files outside both lists:** read-only — you may read them for context but must not modify.
+
+    If you discover you need to modify a denylisted or out-of-scope file, STOP and report `BLOCKED — file collision: <path>`. Do not silently edit it; the controller will resequence the wave.
+
+    ## NO GIT COMMANDS
+
+    Do NOT run `git add`, `git commit`, `git stash`, `git restore`, `git reset`, `git checkout`, or any other git command that mutates state. The controller stages and commits your work after you finish, in a deterministic order with sibling tasks. Reading commands (`git status`, `git diff`, `git log`) are fine if you need them for context.
+
+    Why: sibling implementers are editing different files in the same worktree concurrently. If you stage or commit, you'll race on `.git/index.lock` or capture their unstaged work. The controller serializes git so this can't happen.
+
     ## Before You Begin
 
     If you have questions about:
@@ -29,14 +46,13 @@ Task tool (general-purpose):
     ## Your Job
 
     Once you're clear on requirements:
-    1. Implement exactly what the task specifies
+    1. Implement exactly what the task specifies (only files in your allowlist)
     2. Write tests (following TDD if task says to)
-    3. Verify implementation works
-    4. Commit your work
-    5. Self-review (see below)
-    6. Report back
+    3. Run your task's tests and verify they pass
+    4. Self-review (see below)
+    5. Report back with the list of paths you changed (the controller will commit them)
 
-    Work from: [directory]
+    Work from: [absolute worktree path from "Wave & File Ownership" above — do not `cd` elsewhere]
 
     **While you work:** If you encounter something unexpected or unclear, **ask questions**.
     It's always OK to pause and clarify. Don't guess or make assumptions.
@@ -101,9 +117,10 @@ Task tool (general-purpose):
 
     When done, report:
     - **Status:** DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT
+    - **Changed paths (REQUIRED on DONE / DONE_WITH_CONCERNS):** flat list of every file path you created or modified, exactly as the controller will pass to `git add`. Do not include unchanged files. Do not include directories.
+    - **Suggested commit message:** one line, conventional-commit style — the controller may use it as-is or refine
     - What you implemented (or what you attempted, if blocked)
     - What you tested and test results
-    - Files changed
     - Self-review findings (if any)
     - Any issues or concerns
 

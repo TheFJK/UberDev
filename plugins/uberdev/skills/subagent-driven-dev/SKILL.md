@@ -5,11 +5,15 @@ description: Use when executing implementation plans with independent tasks in t
 
 # Subagent-Driven Development
 
-Execute plan by dispatching fresh subagent per task, with two-stage review after each: spec compliance review first, then code quality review.
+Execute plan **wave-by-wave**. Within each wave, dispatch all implementer subagents **in parallel** inside the same feature-branch worktree, then run two-stage review (spec compliance, then code quality) per task. Move to the next wave only after every task in the current wave is approved and committed.
 
 **Why subagents:** You delegate tasks to specialized agents with isolated context. By precisely crafting their instructions and context, you ensure they stay focused and succeed at their task. They should never inherit your session's context or history — you construct exactly what they need. This also preserves your own context for coordination work.
 
-**Core principle:** Fresh subagent per task + two-stage review (spec then quality) = high quality, fast iteration
+**Why parallel waves:** Sequential execution of independent tasks wastes wall-clock time. The plan's `## Execution Waves` summary already proves which tasks are safe to run concurrently — honor it.
+
+**Why one shared worktree (Pattern B):** Per-agent worktrees add filesystem ceremony and a merge step. Instead, the wave's implementers all work in the feature-branch worktree on **strictly disjoint file sets** (enforced by the plan's `Worktree-safe:` declarations). To prevent git-index races, **implementers never run git** — they edit files and report changed paths; the controller stages and commits per task in a deterministic order after the wave finishes.
+
+**Core principle:** Parallel-by-default within a wave + disjoint file sets + controller-only git = maximum throughput, zero races.
 
 ## When to Use
 
@@ -39,48 +43,84 @@ digraph when_to_use {
 
 ## The Process
 
+### High-Level Flow
+
+1. **Read plan once.** Extract every task's full text and the `## Execution Waves` summary.
+2. **Create TodoWrite** with one todo per task, labeled with its wave (e.g., `[wave-2] Task 4: ...`).
+3. **Verify clean baseline:** `git status` is clean; you're on the feature branch in the feature-branch worktree.
+4. **For each wave (sequential):**
+   a. Dispatch every implementer in the wave **in a single message** with multiple `Agent` tool calls. All run in the current worktree. Each implementer gets an explicit allowlist of files it owns and an explicit denylist of files owned by sibling tasks.
+   b. **Implementers never run git.** They edit files, run their tests, and report `Status + changed file paths + test results`.
+   c. Wait for all wave implementers to report.
+   d. For each completed implementer (in task ID order, sequential): controller stages **only that task's reported paths** with `git add <paths>` and commits with the task-specific message.
+   e. Run the project's full test command in the worktree once after all wave commits land. If it fails, identify which task regressed and re-dispatch that task's implementer with the failure context. Re-test until green.
+   f. For each committed task: dispatch spec reviewer (parallel across the wave).
+   g. Loop spec fix-up per task until all spec reviewers approve. Fix dispatches still don't run git — controller amends the task's commit (or creates a fix-up commit) using the implementer's reported new paths.
+   h. Dispatch code quality reviewers (parallel). Same fix-loop pattern.
+   i. Mark every task in the wave complete in TodoWrite.
+5. After the final wave, dispatch the **whole-implementation final reviewer**.
+6. Hand off to `uberdev:finish-branch`.
+
+### Parallel Dispatch Pattern
+
+```
+[wave-1] →  Agent(T1, edits files only)  ┐
+            Agent(T2, edits files only)  ├─ all in ONE message, shared CWD
+            Agent(T3, edits files only)  ┘
+                ↓ wait for all three
+            controller: git add <T1 paths> && git commit  (sequential, deterministic)
+            controller: git add <T2 paths> && git commit
+            controller: git add <T3 paths> && git commit
+            controller: run full test suite
+                ↓
+            spec reviewers (parallel) → fix loop → re-reviews
+            quality reviewers (parallel) → fix loop → re-reviews
+                ↓ no merge step — already on feature branch
+[wave-2] →  Agent(T4, edits files only)  ┐
+            Agent(T5, edits files only)  ┘  (parallel, depend on wave-1 commits)
+            ...
+```
+
+### File-Ownership Enforcement
+
+Before dispatching a wave, build the wave's ownership map:
+
+```
+T2 owns: src/recovery.ts, tests/recovery.test.ts
+T3 owns: src/progress.ts, tests/progress.test.ts
+T4 owns: src/telemetry.ts, tests/telemetry.test.ts
+```
+
+Every implementer prompt receives **its own allowlist + the union of sibling-owned paths as a denylist**. If two tasks claim the same file, the wave decomposition is wrong — bump one to the next wave before dispatching.
+
+### Per-Task Inner Loop (unchanged)
+
 ```dot
-digraph process {
+digraph per_task {
     rankdir=TB;
+    "Implementer (in worktree)" [shape=box];
+    "Implementer questions?" [shape=diamond];
+    "Answer & re-dispatch" [shape=box];
+    "Spec reviewer" [shape=box];
+    "Spec OK?" [shape=diamond];
+    "Implementer fixes spec" [shape=box];
+    "Code quality reviewer" [shape=box];
+    "Quality OK?" [shape=diamond];
+    "Implementer fixes quality" [shape=box];
+    "Task complete" [shape=box style=filled fillcolor=lightgreen];
 
-    subgraph cluster_per_task {
-        label="Per Task";
-        "Dispatch implementer subagent (./implementer-prompt.md)" [shape=box];
-        "Implementer subagent asks questions?" [shape=diamond];
-        "Answer questions, provide context" [shape=box];
-        "Implementer subagent implements, tests, commits, self-reviews" [shape=box];
-        "Dispatch spec reviewer subagent (./spec-reviewer-prompt.md)" [shape=box];
-        "Spec reviewer subagent confirms code matches spec?" [shape=diamond];
-        "Implementer subagent fixes spec gaps" [shape=box];
-        "Dispatch code quality reviewer subagent (./code-quality-reviewer-prompt.md)" [shape=box];
-        "Code quality reviewer subagent approves?" [shape=diamond];
-        "Implementer subagent fixes quality issues" [shape=box];
-        "Mark task complete in TodoWrite" [shape=box];
-    }
-
-    "Read plan, extract all tasks with full text, note context, create TodoWrite" [shape=box];
-    "More tasks remain?" [shape=diamond];
-    "Dispatch final code reviewer subagent for entire implementation" [shape=box];
-    "Use uberdev:finish-branch" [shape=box style=filled fillcolor=lightgreen];
-
-    "Read plan, extract all tasks with full text, note context, create TodoWrite" -> "Dispatch implementer subagent (./implementer-prompt.md)";
-    "Dispatch implementer subagent (./implementer-prompt.md)" -> "Implementer subagent asks questions?";
-    "Implementer subagent asks questions?" -> "Answer questions, provide context" [label="yes"];
-    "Answer questions, provide context" -> "Dispatch implementer subagent (./implementer-prompt.md)";
-    "Implementer subagent asks questions?" -> "Implementer subagent implements, tests, commits, self-reviews" [label="no"];
-    "Implementer subagent implements, tests, commits, self-reviews" -> "Dispatch spec reviewer subagent (./spec-reviewer-prompt.md)";
-    "Dispatch spec reviewer subagent (./spec-reviewer-prompt.md)" -> "Spec reviewer subagent confirms code matches spec?";
-    "Spec reviewer subagent confirms code matches spec?" -> "Implementer subagent fixes spec gaps" [label="no"];
-    "Implementer subagent fixes spec gaps" -> "Dispatch spec reviewer subagent (./spec-reviewer-prompt.md)" [label="re-review"];
-    "Spec reviewer subagent confirms code matches spec?" -> "Dispatch code quality reviewer subagent (./code-quality-reviewer-prompt.md)" [label="yes"];
-    "Dispatch code quality reviewer subagent (./code-quality-reviewer-prompt.md)" -> "Code quality reviewer subagent approves?";
-    "Code quality reviewer subagent approves?" -> "Implementer subagent fixes quality issues" [label="no"];
-    "Implementer subagent fixes quality issues" -> "Dispatch code quality reviewer subagent (./code-quality-reviewer-prompt.md)" [label="re-review"];
-    "Code quality reviewer subagent approves?" -> "Mark task complete in TodoWrite" [label="yes"];
-    "Mark task complete in TodoWrite" -> "More tasks remain?";
-    "More tasks remain?" -> "Dispatch implementer subagent (./implementer-prompt.md)" [label="yes"];
-    "More tasks remain?" -> "Dispatch final code reviewer subagent for entire implementation" [label="no"];
-    "Dispatch final code reviewer subagent for entire implementation" -> "Use uberdev:finish-branch";
+    "Implementer (in worktree)" -> "Implementer questions?";
+    "Implementer questions?" -> "Answer & re-dispatch" [label="yes"];
+    "Answer & re-dispatch" -> "Implementer (in worktree)";
+    "Implementer questions?" -> "Spec reviewer" [label="no"];
+    "Spec reviewer" -> "Spec OK?";
+    "Spec OK?" -> "Implementer fixes spec" [label="no"];
+    "Implementer fixes spec" -> "Spec reviewer";
+    "Spec OK?" -> "Code quality reviewer" [label="yes"];
+    "Code quality reviewer" -> "Quality OK?";
+    "Quality OK?" -> "Implementer fixes quality" [label="no"];
+    "Implementer fixes quality" -> "Code quality reviewer";
+    "Quality OK?" -> "Task complete" [label="yes"];
 }
 ```
 
@@ -129,13 +169,19 @@ Implementer subagents report one of four statuses. Handle each appropriately:
 You: I'm using Subagent-Driven Development to execute this plan.
 
 [Read plan file once: docs/uberdev/plans/feature-plan.md]
-[Extract all 5 tasks with full text and context]
-[Create TodoWrite with all tasks]
+[Extract all 5 tasks + Execution Waves summary:
+   wave-1: T1 (schema)
+   wave-2: T2, T3, T4 (parallel — different files)
+   wave-3: T5 (depends on T2,T3,T4)
+]
+[Create TodoWrite labeled by wave]
 
-Task 1: Hook installation script
+=== WAVE 1 ===
 
-[Get Task 1 text and context (already extracted)]
-[Dispatch implementation subagent with full task text + context]
+Task 1: Hook installation script (alone in wave-1)
+T1 owns: scripts/install-hook.sh, tests/install-hook.test.sh
+
+[Dispatch implementer in shared worktree, full task text + allowlist + "no git commands"]
 
 Implementer: "Before I begin - should the hook be installed at user or system level?"
 
@@ -143,60 +189,63 @@ You: "User level (~/.config/uberdev/hooks/)"
 
 Implementer: "Got it. Implementing now..."
 [Later] Implementer:
-  - Implemented install-hook command
-  - Added tests, 5/5 passing
+  - Edited scripts/install-hook.sh, tests/install-hook.test.sh
+  - Tests 5/5 passing
   - Self-review: Found I missed --force flag, added it
-  - Committed
+  - Status: DONE — paths: [scripts/install-hook.sh, tests/install-hook.test.sh]
+
+[Controller: git add scripts/install-hook.sh tests/install-hook.test.sh && git commit -m "feat: install-hook script"]
+[Run full test suite — green]
 
 [Dispatch spec compliance reviewer]
 Spec reviewer: ✅ Spec compliant - all requirements met, nothing extra
 
-[Get git SHAs, dispatch code quality reviewer]
+[Dispatch code quality reviewer]
 Code reviewer: Strengths: Good test coverage, clean. Issues: None. Approved.
 
 [Mark Task 1 complete]
 
-Task 2: Recovery modes
+=== WAVE 2 ===
 
-[Get Task 2 text and context (already extracted)]
-[Dispatch implementation subagent with full task text + context]
+Ownership map:
+  T2 owns: src/recovery.ts, tests/recovery.test.ts
+  T3 owns: src/progress.ts, tests/progress.test.ts
+  T4 owns: src/telemetry.ts, tests/telemetry.test.ts
 
-Implementer: [No questions, proceeds]
-Implementer:
-  - Added verify/repair modes
-  - 8/8 tests passing
-  - Self-review: All good
-  - Committed
+[Single message, three Agent calls in parallel — same shared worktree, no git permitted]
+  Agent(T2: Recovery modes,    allow=[T2 paths], deny=[T3+T4 paths])
+  Agent(T3: Progress reporting, allow=[T3 paths], deny=[T2+T4 paths])
+  Agent(T4: Telemetry hooks,    allow=[T4 paths], deny=[T2+T3 paths])
 
-[Dispatch spec compliance reviewer]
-Spec reviewer: ❌ Issues:
-  - Missing: Progress reporting (spec says "report every 100 items")
-  - Extra: Added --json flag (not requested)
+[Wait for all three implementers to report back with their changed paths]
 
-[Implementer fixes issues]
-Implementer: Removed --json flag, added progress reporting
+[Controller, sequential — one commit per task in task ID order]
+  git add <T2 paths> && git commit -m "feat: recovery modes"
+  git add <T3 paths> && git commit -m "feat: progress reporting"
+  git add <T4 paths> && git commit -m "feat: telemetry hooks"
 
-[Spec reviewer reviews again]
-Spec reviewer: ✅ Spec compliant now
+[Run full test suite — green]
 
-[Dispatch code quality reviewer]
-Code reviewer: Strengths: Solid. Issues (Important): Magic number (100)
+[Single message: spec reviewers for T2, T3, T4 in parallel]
+[Loop: any failed spec review → re-dispatch that task's implementer (no git); controller amends or fix-up commits using reported paths; re-review until ✅]
 
-[Implementer fixes]
-Implementer: Extracted PROGRESS_INTERVAL constant
+[Single message: code quality reviewers for T2, T3, T4 in parallel]
+[Loop: any failed quality review → same fix pattern → re-review until ✅]
 
-[Code reviewer reviews again]
-Code reviewer: ✅ Approved
+[Mark Tasks 2, 3, 4 complete]
 
-[Mark Task 2 complete]
+=== WAVE 3 ===
 
-...
+[T5 alone — depends on wave-2 commits being on the branch]
+[Dispatch implementer in shared worktree]
+[Controller commits → run full suite → spec review → fix loop → quality review → fix loop → mark complete]
 
-[After all tasks]
-[Dispatch final code-reviewer]
-Final reviewer: All requirements met, ready to merge
+=== FINAL PASS ===
 
-Done!
+[Dispatch whole-implementation final reviewer]
+Final reviewer: All requirements met, ready to merge.
+
+[Hand off to uberdev:finish-branch]
 ```
 
 ## Advantages
@@ -237,7 +286,12 @@ Done!
 - Start implementation on main/master branch without explicit user consent
 - Skip reviews (spec compliance OR code quality)
 - Proceed with unfixed issues
-- Dispatch multiple implementation subagents in parallel (conflicts)
+- Dispatch multiple implementers **without explicit file allowlists/denylists** — they will trample each other's edits
+- Let implementer subagents run **any** git command (`add`, `commit`, `stash`, `restore`) — that's the controller's job
+- Use `git add -A` or `git add .` to stage a task's commit — always pass the implementer's reported paths explicitly
+- Dispatch implementers from **different waves** in parallel — wave-N depends on wave-(N-1) being committed first
+- Skip the post-wave full-test-suite run — without it, a regression introduced by parallel edits hides until much later
+- Run tasks sequentially when the plan declares them in the same wave (defeats the whole point)
 - Make subagent read plan file (provide full text instead)
 - Skip scene-setting context (subagent needs to understand where task fits)
 - Ignore subagent questions (answer before letting them proceed)
