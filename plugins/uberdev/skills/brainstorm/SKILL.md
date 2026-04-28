@@ -96,6 +96,7 @@ If the user invoked this skill with `--turbo` (e.g. via `/turbo`), skip the clar
 1. After parallel research synthesis, present the 2-3 approaches with your recommendation as **informational text** (so the user can audit the design choice post-hoc).
 2. Auto-select the recommendation — proceed straight to "Presenting the design" without waiting for user input.
 3. Continue through design → spec → write-plan exactly as the non-turbo flow does. Spec and plan are written to disk before implementation, and the user can interrupt to revise at any point — see "Single forward pass" in Key Principles.
+4. **Propagate `--turbo` forward.** When invoking `uberdev:write-plan` (and any downstream skill it hands off to), pass `--turbo` so the entire pipeline stays unattended. Dropping the flag at any handoff turns `/turbo` into an attended flow.
 
 **Exploring approaches:**
 
@@ -144,6 +145,7 @@ Fix any issues inline. No need to re-review — just fix and move on.
 **Implementation:**
 
 - Immediately invoke the `uberdev:write-plan` skill to create a detailed implementation plan. **No "review the spec" pause.** If the user wants to revise the spec, they'll interrupt; otherwise the plan-writing phase is the next forward step.
+- **Forward `--turbo` if it was in `$ARGUMENTS`** — invoke as `uberdev:write-plan --turbo …` so the downstream pipeline (write-plan → subagent-driven-dev → finish-branch) stays unattended end-to-end.
 - Do NOT invoke any other skill. `uberdev:write-plan` is the next step.
 
 ## Key Principles

@@ -63,7 +63,7 @@ digraph when_to_use {
    h. Dispatch code quality reviewers (parallel). Same fix-loop pattern.
    i. Mark every task in the wave complete in TodoWrite.
 5. After the final wave, dispatch the **whole-implementation final reviewer**.
-6. Hand off to `uberdev:finish-branch`.
+6. Hand off to `uberdev:finish-branch`. **If `--turbo` was in `$ARGUMENTS`, propagate it** — invoke as `uberdev:finish-branch --turbo` so the branch close-out auto-selects "Push and Create PR" instead of prompting.
 
 ### Parallel Dispatch Pattern
 

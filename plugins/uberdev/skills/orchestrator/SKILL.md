@@ -108,7 +108,7 @@ If verification fails: re-dispatch up to 2 times with feedback. Then fall back t
 
 ### Phase 5: subagent-driven-dev
 
-Invoke `uberdev:subagent-driven-dev` skill (NOT a Task() — actual skill invocation via Skill tool). Pass `plan_path`. The existing skill handles wave dispatch, review, and PR creation.
+Invoke `uberdev:subagent-driven-dev` skill (NOT a Task() — actual skill invocation via Skill tool). Pass `plan_path`. **If the orchestrator was invoked with `--turbo`, also pass `--turbo`** so the downstream chain (`subagent-driven-dev → finish-branch`) stays unattended and `finish-branch` auto-selects "Push and Create PR" instead of prompting. The existing skill handles wave dispatch, review, and PR creation.
 
 ## Tier profiles (summary)
 

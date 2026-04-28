@@ -187,7 +187,7 @@ If you find issues, fix them inline. No need to re-review — just fix and move 
 
 After saving the plan, hand off non-interactively:
 
-- **Default path (subagent-driven):** announce "Plan saved to `docs/uberdev/plans/<filename>.md`. Handing off to `uberdev:subagent-driven-dev`." and invoke that skill. This is the recommended path and runs without user prompts.
+- **Default path (subagent-driven):** announce "Plan saved to `docs/uberdev/plans/<filename>.md`. Handing off to `uberdev:subagent-driven-dev`." and invoke that skill. This is the recommended path and runs without user prompts. **If `--turbo` is in `$ARGUMENTS`** (forwarded from `uberdev:brainstorm` via `/turbo`), invoke as `uberdev:subagent-driven-dev --turbo` so the downstream pipeline (subagent-driven-dev → finish-branch) also stays unattended.
 - **Inline override:** if the user explicitly asked for inline execution in their original prompt (e.g. they typed `/uberdev:write-plan --inline`), invoke `uberdev:execute-plan` instead.
 
 **Why no prompt:** when invoked from `uberdev:orchestrator` (the `/solve` and `/turbo` integration path), this skill runs as a subagent that returns a structured summary — there's no user-facing terminal to prompt. The skill is also invokable standalone, but defaulting to subagent-driven matches what 99% of standalone users picked anyway.
