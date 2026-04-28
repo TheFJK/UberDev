@@ -7,6 +7,8 @@ description: "You MUST use this before any creative work - creating features, bu
 
 Help turn ideas into fully formed designs and specs through natural collaborative dialogue.
 
+Brainstorm operates as an orchestrator: dispatch parallel research agents to ground the design in real codebase + library context BEFORE asking clarifying questions. The agent is the manager, not the worker.
+
 Start by understanding the current project context, then ask clarifying questions one at a time to refine the idea. Once you understand what you're building, present the design, write the spec, and hand off to `uberdev:write-plan`. **Single forward pass — no per-section approval gates, no "review the spec" pauses.** The clarifying-questions phase is information-gathering; everything after that is the agent committing to its best design and moving forward.
 
 **Note:** Don't write code or scaffold projects during brainstorming — that's `uberdev:write-plan`'s job. Brainstorming output is a spec doc, not implementation.
@@ -20,29 +22,34 @@ Every project goes through this process. A todo list, a single-function utility,
 You MUST create a task for each of these items and complete them in order:
 
 1. **Explore project context** — check files, docs, recent commits
-2. **Offer visual companion** (if topic will involve visual questions) — its own message, not combined with a clarifying question. See the Visual Companion section below.
-3. **Ask clarifying questions** — one at a time, understand purpose/constraints/success criteria
-4. **Propose 2-3 approaches** — with trade-offs and your recommendation
-5. **Present design** — in sections scaled to their complexity (informative, not approval-gated)
-6. **Write design doc** — save to `docs/uberdev/specs/YYYY-MM-DD-<topic>-design.md` and commit
-7. **Spec self-review** — quick inline check for placeholders, contradictions, ambiguity, scope (see below)
-8. **Transition to implementation** — invoke `uberdev:write-plan` skill to create implementation plan
+2. **Dispatch parallel research agents** (heuristic from prompt) — 2-3 `Explore`/`general-purpose` agents in one message researching codebase patterns, prior art, and library docs; synthesize findings (3-5 bullets) before continuing. Skip only for truly trivial tasks. See "Parallel research dispatch" below.
+3. **Offer visual companion** (if topic will involve visual questions) — its own message, not combined with a clarifying question. See the Visual Companion section below.
+4. **Ask clarifying questions** — one at a time, informed by research; understand purpose/constraints/success criteria
+5. **Propose 2-3 approaches** — with trade-offs and your recommendation, grounded in research findings
+6. **Present design** — in sections scaled to their complexity (informative, not approval-gated)
+7. **Write design doc** — save to `docs/uberdev/specs/YYYY-MM-DD-<topic>-design.md` and commit
+8. **Spec self-review** — quick inline check for placeholders, contradictions, ambiguity, scope (see below)
+9. **Transition to implementation** — invoke `uberdev:write-plan` skill to create implementation plan
 
 ## Process Flow
 
 ```dot
 digraph brainstorming {
     "Explore project context" [shape=box];
+    "Dispatch parallel research\n(heuristic from prompt)" [shape=box];
+    "Synthesize findings" [shape=box];
     "Ask clarifying questions" [shape=box];
-    "Propose 2-3 approaches" [shape=box];
+    "Propose 2-3 approaches\n(research-informed)" [shape=box];
     "Present design sections" [shape=box];
     "Write design doc" [shape=box];
     "Spec self-review\n(fix inline)" [shape=box];
     "Invoke uberdev:write-plan skill" [shape=doublecircle];
 
-    "Explore project context" -> "Ask clarifying questions";
-    "Ask clarifying questions" -> "Propose 2-3 approaches";
-    "Propose 2-3 approaches" -> "Present design sections";
+    "Explore project context" -> "Dispatch parallel research\n(heuristic from prompt)";
+    "Dispatch parallel research\n(heuristic from prompt)" -> "Synthesize findings";
+    "Synthesize findings" -> "Ask clarifying questions";
+    "Ask clarifying questions" -> "Propose 2-3 approaches\n(research-informed)";
+    "Propose 2-3 approaches\n(research-informed)" -> "Present design sections";
     "Present design sections" -> "Write design doc";
     "Write design doc" -> "Spec self-review\n(fix inline)";
     "Spec self-review\n(fix inline)" -> "Invoke uberdev:write-plan skill";
@@ -63,22 +70,32 @@ digraph brainstorming {
 - Only one question per message - if a topic needs more exploration, break it into multiple questions
 - Focus on understanding: purpose, constraints, success criteria
 
+**Parallel research dispatch (default first step):**
+
+After project-context exploration, before clarifying questions, dispatch 2-3 research agents in a single message to gather context in parallel. Read the user's request and infer the research questions yourself — don't ask the user what to research.
+
+Heuristics for inferring research questions:
+- "How do we currently do X in this codebase?" → `Explore` agent
+- "What's the standard pattern for Y in <library/framework>?" → `general-purpose` agent with Context7 / web search
+- "Has anyone built this before? What went wrong?" → `general-purpose` agent with web search
+- "Are there existing utilities that already do part of this?" → `Explore` agent
+
+Synthesize findings into a brief summary (3-5 bullets) before engaging the user with clarifying questions. The 2-3 approaches you propose later MUST be grounded in this research, not speculation.
+
+For architecturally consequential choices (large features, expensive-to-reverse decisions), this same dispatch pattern is also useful for **independent parallel exploration** of design directions — give each agent one specific direction to investigate (e.g., "event-driven with BullMQ", "polling with cron", "webhook"), then aggregate their trade-off lists. See `uberdev:dispatching-parallel-agents` for the general pattern.
+
+**Skip parallel research only when:**
+- Truly trivial: config tweak, rename, single-line fix, typo
+- One approach is obviously dominant AND no codebase context is needed
+- User has already provided exhaustive inline context
+
+Default: dispatch the agents. The cost of three concurrent reads is small; the cost of speculating without grounding is rework.
+
 **Exploring approaches:**
 
-- Propose 2-3 different approaches with trade-offs
+- Propose 2-3 different approaches with trade-offs, grounded in the research synthesis above
 - Present options conversationally with your recommendation and reasoning
 - Lead with your recommended option and explain why
-
-**Parallel exploration for high-stakes designs:**
-
-For architectural changes, large features, or any design where the wrong choice is expensive to reverse, the 2-3 approaches benefit from **independent parallel exploration** instead of single-agent sequential generation. A single thread tends to anchor on the first idea — parallel agents who don't see each other reach different reasoning paths.
-
-Pattern: in a single message, dispatch 2-3 `Task` agents, each tasked with **one specific design direction** (e.g., "explore the event-driven approach with BullMQ", "explore the polling approach with cron", "explore the webhook approach"). Each agent receives the same project context but only its own direction; they do not see each other's output. Aggregate their trade-off lists, then present the consolidated comparison to the user with your recommendation.
-
-**Skip parallel exploration when:**
-- The design is small/local (a single function, a config tweak — single-thread is fine)
-- One approach is obviously dominant (don't burn agents to confirm the obvious)
-- Token budget is tight and the user is iterating fast — a quick text-based comparison is more responsive than a multi-agent spawn
 
 **Presenting the design:**
 
