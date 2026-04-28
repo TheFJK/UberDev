@@ -24,7 +24,7 @@ You MUST create a task for each of these items and complete them in order:
 1. **Explore project context** — check files, docs, recent commits
 2. **Dispatch parallel research agents** (heuristic from prompt) — 2-3 `Explore`/`general-purpose` agents in one message researching codebase patterns, prior art, and library docs; synthesize findings (3-5 bullets) before continuing. Skip only for truly trivial tasks. See "Parallel research dispatch" below.
 3. **Offer visual companion** (if topic will involve visual questions) — its own message, not combined with a clarifying question. See the Visual Companion section below.
-4. **Ask clarifying questions** — one at a time, informed by research; understand purpose/constraints/success criteria
+4. **Ask clarifying questions** — one at a time, informed by research; understand purpose/constraints/success criteria *(skipped in turbo mode — see "Turbo Mode" section)*
 5. **Propose 2-3 approaches** — with trade-offs and your recommendation, grounded in research findings
 6. **Present design** — in sections scaled to their complexity (informative, not approval-gated)
 7. **Write design doc** — save to `docs/uberdev/specs/YYYY-MM-DD-<topic>-design.md` and commit
@@ -87,6 +87,18 @@ For architecturally consequential choices, this pattern also supports independen
 - One approach is obviously dominant AND no codebase context is needed
 - User has already provided exhaustive inline context
 
+**Turbo mode (when `--turbo` is in `$ARGUMENTS`):**
+
+If the user invoked this skill with `--turbo` (e.g. via `/turbo`), skip the clarifying-questions loop entirely:
+
+1. After parallel research synthesis, present the 2-3 approaches with your recommendation as **informational text** (so the user can audit the design choice post-hoc).
+2. Auto-select the recommendation — proceed straight to "Presenting the design" without waiting for user input.
+3. Continue through design → spec → write-plan exactly as the non-turbo flow does.
+
+**Why this is safe:** the lead-agent's recommendation is grounded in the parallel-research synthesis (not speculation), spec & plan are still written to disk before implementation waves dispatch, and the user can interrupt any time to revise.
+
+**This is NOT an approval gate.** Turbo mode strengthens the existing "Single forward pass" principle (see Key Principles) by removing the Q&A loop — it does NOT introduce a new pause for sign-off.
+
 **Exploring approaches:**
 
 - Propose 2-3 different approaches with trade-offs, grounded in the research synthesis above
@@ -142,7 +154,7 @@ Fix any issues inline. No need to re-review — just fix and move on.
 - **Multiple choice preferred** - Easier to answer than open-ended when possible
 - **YAGNI ruthlessly** - Remove unnecessary features from all designs
 - **Explore alternatives** - Always propose 2-3 approaches before settling
-- **Single forward pass** - Once clarifying questions are done, move design → spec → write-plan in one flow without approval gates. The user can interrupt to revise; don't proactively pause for sign-off.
+- **Single forward pass** - Once clarifying questions are done, move design → spec → write-plan in one flow without approval gates. The user can interrupt to revise; don't proactively pause for sign-off. *Turbo mode (`--turbo` in args) takes this further by collapsing the clarifying-questions loop entirely — it never adds a gate, only removes one.*
 
 ## Visual Companion
 
