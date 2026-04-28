@@ -72,7 +72,7 @@ assert_grep "$FINISH_BRANCH" \
   'Merge back to|Push and create a Pull Request|Keep the branch as-is|Discard this work' \
   "finish-branch still presents the 4-option default-mode menu"
 assert_grep "$BRAINSTORM" \
-  'one at a time|clarifying questions' \
+  'clarifying questions.*one at a time|[Aa]sk clarifying questions' \
   "brainstorm still describes the default clarifying-questions loop"
 
 echo
