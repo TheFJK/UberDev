@@ -17,7 +17,7 @@
    \___/|_.__/ \___|_|  |____/ \___| \_/  
 ```
 
-**Two commands. Zero ceremony. Every issue, triaged and shipped.**
+**Three commands. Zero ceremony. Every issue, triaged and shipped.**
 
 </div>
 
@@ -25,11 +25,12 @@
 
 ## TL;DR
 
-Two slash commands that turn issue triage and resolution into one-line operations:
+Three slash commands that turn issue triage and resolution into one-line operations:
 
 | Command | What it does |
 |---|---|
 | **`/solve <issue-number>`** | Spawns an autonomous Claude agent in a new terminal session (cmux / Ghostty / iTerm / Terminal.app / nohup) with **tier-aware triage** so trivial issues skip the brainstorm and large ones get the full plan-and-review pipeline. |
+| **`/turbo <issue-number>`** | **Unattended `/solve`** — same pipeline, but the brainstorm phase auto-accepts the lead agent's recommended design instead of asking clarifying questions. Use when you trust the research-grounded recommendation and want issue → PR with no babysitting. Pair with `--auto` for max autonomy. |
 | **`/issue <description>`** | Creates a **well-investigated, deduped, label-validated** GitHub issue from a one-line ask — including codebase search, full-text dedup against closed issues (regression signals), commitlint scope validation, and a triage hint that `/solve` reads later. |
 
 Both are **repo-agnostic** — they auto-detect the current repo via `gh repo view`. No per-repo config required.
@@ -129,6 +130,30 @@ claude \
 ```
 
 After opening its PR, the spawned agent **renames its own terminal tab** from `#123 <issue-title>` to `PR #456 <pr-title>` via OSC escape sequences (or cmux's workspace API).
+
+---
+
+## `/turbo` — unattended issue resolution
+
+Identical to `/solve` for trivial / small tiers. For medium / large tiers, the brainstorm phase auto-accepts the lead agent's recommendation instead of asking clarifying questions — so the whole pipeline runs without user input.
+
+### When to use which
+
+| Combo | Brainstorm Q&A | Tool gating |
+|---|---|---|
+| `/solve 42` | interactive | manual per-tool gating |
+| `/solve 42 --auto` | interactive | AI classifier (auto-approves safe ops) |
+| `/turbo 42` | auto-accept recommendation | manual per-tool gating |
+| `/turbo 42 --auto` | auto-accept recommendation | AI classifier — **max autonomy** |
+
+`/turbo` and `--auto` are **orthogonal**: `/turbo` governs brainstorm interactivity; `--auto` governs Claude Code's per-tool permission mode. Pair them for unattended issue → PR.
+
+### Safety
+
+- Spec & plan are still written to disk before implementation waves dispatch — audit them to course-correct.
+- A stderr banner before terminal spawn confirms turbo mode is active.
+- Trivial / small tiers don't run brainstorm anyway, so `/turbo` is functionally identical to `/solve` there. The intent-signaling name + `--auto` shortcut is the only difference.
+- No new approval gates introduced — turbo only **removes** the clarifying-questions stop, never **adds** one.
 
 ---
 
