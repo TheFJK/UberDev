@@ -185,20 +185,17 @@ If you find issues, fix them inline. No need to re-review — just fix and move 
 
 ## Execution Handoff
 
-After saving the plan, offer execution choice:
+After saving the plan, hand off non-interactively:
 
-**"Plan complete and saved to `docs/uberdev/plans/<filename>.md`. Two execution options:**
+- **Default path (subagent-driven):** announce "Plan saved to `docs/uberdev/plans/<filename>.md`. Handing off to `uberdev:subagent-driven-dev`." and invoke that skill. This is the recommended path and runs without user prompts.
+- **Inline override:** if the user explicitly asked for inline execution in their original prompt (e.g. they typed `/uberdev:write-plan --inline`), invoke `uberdev:execute-plan` instead.
 
-**1. Subagent-Driven (recommended)** - I dispatch a fresh subagent per task, review between tasks, fast iteration
+**Why no prompt:** when invoked from `uberdev:orchestrator` (the `/solve` and `/turbo` integration path), this skill runs as a subagent that returns a structured summary — there's no user-facing terminal to prompt. The skill is also invokable standalone, but defaulting to subagent-driven matches what 99% of standalone users picked anyway.
 
-**2. Inline Execution** - Execute tasks in this session using execute-plan, batch execution with checkpoints
-
-**Which approach?"**
-
-**If Subagent-Driven chosen:**
+**If subagent-driven (default):**
 - **REQUIRED SUB-SKILL:** Use `uberdev:subagent-driven-dev`
 - Fresh subagent per task + two-stage review
 
-**If Inline Execution chosen:**
+**If inline override:**
 - **REQUIRED SUB-SKILL:** Use `uberdev:execute-plan`
 - Batch execution with checkpoints for review
