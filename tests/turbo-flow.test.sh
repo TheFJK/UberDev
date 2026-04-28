@@ -16,6 +16,7 @@ BRAINSTORM="$REPO_ROOT/plugins/uberdev/skills/brainstorm/SKILL.md"
 WRITE_PLAN="$REPO_ROOT/plugins/uberdev/skills/write-plan/SKILL.md"
 SUBAGENT_DRIVEN="$REPO_ROOT/plugins/uberdev/skills/subagent-driven-dev/SKILL.md"
 FINISH_BRANCH="$REPO_ROOT/plugins/uberdev/skills/finish-branch/SKILL.md"
+TURBO_CMD="$REPO_ROOT/plugins/uberdev/commands/turbo.md"
 
 PASS=0
 FAIL=0
@@ -55,6 +56,24 @@ echo "== finish-branch auto-selects PR option under --turbo =="
 assert_grep "$FINISH_BRANCH" \
   '[Tt]urbo.*(Option 2|Push and [Cc]reate)|(Option 2|Push and [Cc]reate).*[Tt]urbo' \
   "finish-branch auto-selects Push and Create PR under turbo"
+
+echo
+echo "== /turbo command entry point invokes brainstorm --turbo =="
+assert_grep "$TURBO_CMD" \
+  'brainstorm --turbo|brainstorm.*--turbo' \
+  "turbo command file invokes brainstorm with --turbo (chain entry point)"
+
+echo
+echo "== Default-mode paths preserved (regression canaries) =="
+assert_grep "$WRITE_PLAN" \
+  'Inline Execution|Subagent-Driven \(recommended\)' \
+  "write-plan still offers the two-option default-mode prompt"
+assert_grep "$FINISH_BRANCH" \
+  'Merge back to|Push and create a Pull Request|Keep the branch as-is|Discard this work' \
+  "finish-branch still presents the 4-option default-mode menu"
+assert_grep "$BRAINSTORM" \
+  'one at a time|clarifying questions' \
+  "brainstorm still describes the default clarifying-questions loop"
 
 echo
 echo "== Summary =="
