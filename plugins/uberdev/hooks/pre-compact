@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# PreCompact hook for uberdev plugin.
+#
+# Compaction can drop in-memory context. Before that happens, archive any
+# compaction-vulnerable files under .claude/ (auto-memory.md and similar) by
+# appending them with a timestamp header to .claude/session-archive.md.
+#
+# Quiet, non-blocking — exits 0 on success or when nothing needs archiving.
+
+set -u
+
+archive_target="${PWD}/.claude/session-archive.md"
+source_file="${PWD}/.claude/auto-memory.md"
+
+# Nothing to archive — silent success.
+[ -f "$source_file" ] || exit 0
+
+# Make sure the .claude/ dir is real (not a symlink we'd be writing through).
+[ -d "${PWD}/.claude" ] || exit 0
+
+timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date 2>/dev/null || echo "unknown-time")"
+
+{
+    printf '\n\n## Archived %s\n\n' "$timestamp"
+    cat "$source_file" 2>/dev/null || true
+} >> "$archive_target" 2>/dev/null || true
+
+exit 0

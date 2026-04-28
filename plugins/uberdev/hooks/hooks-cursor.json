@@ -10,6 +10,16 @@
       {
         "command": "./hooks/inject-brainstorm-answers"
       }
+    ],
+    "sessionEnd": [
+      {
+        "command": "./hooks/session-end"
+      }
+    ],
+    "preCompact": [
+      {
+        "command": "./hooks/pre-compact"
+      }
     ]
   }
 }

@@ -149,3 +149,28 @@ A question about a UI topic is not automatically a visual question. "What does p
 
 If they agree to the companion, read the detailed guide before proceeding:
 `skills/brainstorm/visual-companion.md`
+
+## Fast-path: direction selection without visual companion
+
+When you've generated 2-4 design directions and the user just needs to pick one (no visual mockup work yet), use AskUserQuestion instead of file-polling:
+
+```
+AskUserQuestion({
+  question: "Which design direction should we explore further?",
+  options: [
+    { label: "A", description: "Direction A: ..." },
+    { label: "B", description: "Direction B: ..." },
+    { label: "C", description: "Direction C: ..." }
+  ]
+})
+```
+
+**Use AskUserQuestion when:**
+- You have a small, discrete set of options (2-5)
+- The user does not need to interact with a visual mockup yet
+- Speed matters (no companion server startup needed)
+
+**Use the visual companion when:**
+- The user wants to see live HTML/CSS mockups
+- Multiple design dimensions need parallel exploration
+- The decision is informed by visual artifacts, not just descriptions

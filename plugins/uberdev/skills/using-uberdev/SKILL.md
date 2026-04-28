@@ -115,3 +115,22 @@ The skill itself tells you which.
 ## User Instructions
 
 Instructions say WHAT, not HOW. "Add X" or "Fix Y" doesn't mean skip workflows.
+
+## Per-project configuration
+
+UberDev reads optional config from `.claude/uberdev.local.md` in your project root. The file uses YAML frontmatter for typed settings:
+
+```yaml
+---
+solve_tier_default: small        # one of: small, medium, large
+review_depth: full               # one of: quick, full
+solve_terminal: ghostty          # one of: ghostty, iterm, cmux
+parallel_solve: true
+---
+
+# Notes (optional, free-form markdown for human reference)
+```
+
+Settings take effect on next SessionStart. Environment variables (`SOLVE_TERMINAL`, etc.) override file settings — use whichever is more convenient for your workflow.
+
+**Recommendation:** commit this file to share workflow conventions across the team; or add it to `.gitignore` if individual preferences differ.
