@@ -185,6 +185,16 @@ If you find issues, fix them inline. No need to re-review — just fix and move 
 
 ## Execution Handoff
 
+**Turbo mode (when `--turbo` is in `$ARGUMENTS`):**
+
+If the user invoked this skill with `--turbo` (typically forwarded from `uberdev:brainstorm` via `/turbo`), **skip the execution-mode prompt entirely** and auto-dispatch `uberdev:subagent-driven-dev --turbo`. Turbo is always subagent-driven — there is no inline-vs-subagent choice. Forward `--turbo` so the downstream pipeline also stays unattended.
+
+Announce, then dispatch:
+
+> "Plan complete and saved to `docs/uberdev/plans/<filename>.md`. Turbo mode — auto-dispatching `uberdev:subagent-driven-dev --turbo`."
+
+**Default mode (no `--turbo` flag):**
+
 After saving the plan, offer execution choice:
 
 **"Plan complete and saved to `docs/uberdev/plans/<filename>.md`. Two execution options:**

@@ -48,6 +48,14 @@ Or ask: "This branch split from main - is that correct?"
 
 ### Step 3: Present Options
 
+**Turbo mode (when `--turbo` is in `$ARGUMENTS`):**
+
+If invoked with `--turbo` (typically forwarded from `uberdev:subagent-driven-dev` via `/turbo`), **skip the prompt** and auto-select **Option 2 (Push and create a Pull Request)**. Announce the choice, then proceed straight to Step 4 → Option 2.
+
+> "Implementation complete. Turbo mode — auto-selecting Option 2 (Push and create PR)."
+
+**Default mode:**
+
 Present exactly these 4 options:
 
 ```
