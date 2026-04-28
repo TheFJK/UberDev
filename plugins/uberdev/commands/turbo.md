@@ -126,7 +126,7 @@ EOF
 **medium** *(and `--full`)*:
 
 ```bash
-echo "/uberdev:brainstorm --turbo solve GH issue #$ISSUE_NUM" > /tmp/solve-prompt-$ISSUE_NUM.txt
+echo "/uberdev:orchestrator --turbo solve GH issue #$ISSUE_NUM" > /tmp/solve-prompt-$ISSUE_NUM.txt
 ```
 
 ### 5. Write launcher script
