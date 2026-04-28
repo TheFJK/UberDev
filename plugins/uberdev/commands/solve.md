@@ -1,6 +1,6 @@
 ---
 description: "Spawn an autonomous Claude agent in a new terminal/cmux workspace to solve a GitHub issue, with auto-triage and tier-appropriate workflow"
-argument-hint: "<issue-number> [--trivial|--small|--full] [--terminal=cmux|ghostty|iterm|terminal|nohup]"
+argument-hint: "<issue-number> [--trivial|--small|--full] [--auto] [--terminal=cmux|ghostty|iterm|terminal|nohup]"
 allowed-tools: ["Bash", "Read", "Task"]
 ---
 
@@ -10,11 +10,12 @@ Spawn an autonomous Claude agent in a new cmux workspace to solve GitHub issue *
 
 **RULES:** Do NOT use the Task tool or internal subagents. Use bash commands only.
 
-**Usage:** `/solve <issue-number> [--trivial|--small|--full] [--terminal=cmux|ghostty|iterm|terminal|nohup]`
+**Usage:** `/solve <issue-number> [--trivial|--small|--full] [--auto] [--terminal=cmux|ghostty|iterm|terminal|nohup]`
 
 - No flag → **auto-triage** by reading the issue (labels + body + title)
 - `--trivial` / `--small` / `--full` → override classification manually
 - `--terminal=…` → override terminal detection (else `$SOLVE_TERMINAL` env var, else auto-detect)
+- `--auto` → enable `--permission-mode auto` (Claude Code's AI classifier — auto-approves safe ops; blocks force push / `rm -rf` on pre-existing files / exfil / self-modification / `--dangerously-skip-permissions`). Else `SOLVE_AUTO=1` env var, else `solve_auto: true` in `.claude/uberdev.local.md`.
 
 ## Triage heuristics (Step 3 applies this table)
 
@@ -36,12 +37,27 @@ Extract issue number (first numeric token) + optional override flag:
 ISSUE_NUM=$(echo "$ARGUMENTS" | grep -oE '^[0-9]+' | head -1)
 OVERRIDE=$(echo "$ARGUMENTS" | grep -oE '\-\-(trivial|small|full)' | head -1 | sed 's/--//')
 TERMINAL_OVERRIDE=$(echo "$ARGUMENTS" | grep -oE '\-\-terminal=[a-z]+' | head -1 | sed 's/--terminal=//')
+AUTO_FLAG=$(echo "$ARGUMENTS" | grep -oE '\-\-auto' | head -1)
 if [[ -z "$ISSUE_NUM" ]]; then
-  echo "Usage: /solve <issue-number> [--trivial|--small|--full] [--terminal=cmux|ghostty|iterm|terminal|nohup]"
+  echo "Usage: /solve <issue-number> [--trivial|--small|--full] [--auto] [--terminal=cmux|ghostty|iterm|terminal|nohup]"
   exit 1
 fi
 # --full is an alias for medium/large (keeps current behavior)
 [[ "$OVERRIDE" == "full" ]] && OVERRIDE="medium"
+
+# AUTO_MODE precedence: CLI flag > env var > per-repo config > default off.
+# When set, the spawned agent runs --permission-mode auto (Claude Code's AI
+# classifier), NOT --dangerously-skip-permissions (which the classifier itself
+# soft-denies as "Create Unsafe Agents").
+if [[ -n "$AUTO_FLAG" ]]; then
+  AUTO_MODE=1
+elif [[ "$SOLVE_AUTO" == "1" ]]; then
+  AUTO_MODE=1
+elif [[ -f .claude/uberdev.local.md ]] && grep -qE '^solve_auto:[[:space:]]*true[[:space:]]*$' .claude/uberdev.local.md; then
+  AUTO_MODE=1
+else
+  AUTO_MODE=0
+fi
 ```
 
 ### 2. Detect repo
@@ -136,9 +152,14 @@ echo "Starting claude agent for issue #ISSUE_NUM (tier: TIER)..."
 # Interactive TUI mode: positional arg (no -p) so user sees the Claude CLI
 # MODEL: pinned to Opus 4.7 with 1M context. Brackets MUST be single-quoted
 # (zsh would otherwise treat [1m] as a character-class glob and abort under set -e).
-# Issue bodies are remote-fetched; auto-approving tools would let a malicious
-# title/body trigger RCE. Run interactively so the user gates each permission.
-CLAUDE_BIN --model 'claude-opus-4-7[1m]' --effort max --worktree solve-issue-ISSUE_NUM "$PROMPT"
+# PERMISSION MODE: issue bodies are remote-fetched (untrusted). Default mode
+# gates every tool use. PERM_FLAG=--permission-mode auto enables Claude Code's
+# AI classifier — auto-approves safe ops (read, in-scope edits, tests, push to
+# feature branch) and soft-denies dangerous ones (force push, rm -rf on
+# pre-existing files, exfil, self-modification). Strictly safer than
+# --dangerously-skip-permissions for autonomous /solve runs.
+PERM_FLAG="PERM_FLAG_VALUE"
+CLAUDE_BIN --model 'claude-opus-4-7[1m]' --effort max --worktree solve-issue-ISSUE_NUM $PERM_FLAG "$PROMPT"
 SCRIPT_EOF
 # BSD/macOS sed needs '-i ""'; GNU sed needs bare '-i'.
 SED_INPLACE=(-i '')
@@ -150,6 +171,9 @@ sed "${SED_INPLACE[@]}" "s/ISSUE_NUM/$ISSUE_NUM/g" /tmp/solve-$ISSUE_NUM.sh
 sed "${SED_INPLACE[@]}" "s/TIER/$TIER/g" /tmp/solve-$ISSUE_NUM.sh
 # DETECTED_TERMINAL is set by Step 5.5 below; if you reorder, move that step before Step 5.
 sed "${SED_INPLACE[@]}" "s/DETECTED_TERMINAL/${TERMINAL:-cmux}/g" /tmp/solve-$ISSUE_NUM.sh
+PERM_FLAG_VAL=""
+[[ "$AUTO_MODE" == "1" ]] && PERM_FLAG_VAL="--permission-mode auto"
+sed "${SED_INPLACE[@]}" "s|PERM_FLAG_VALUE|$PERM_FLAG_VAL|g" /tmp/solve-$ISSUE_NUM.sh
 chmod +x /tmp/solve-$ISSUE_NUM.sh
 ```
 
@@ -205,6 +229,7 @@ case "$TERMINAL" in
 esac
 
 echo "Dispatching via: $TERMINAL"
+echo "Permission mode: $([[ "$AUTO_MODE" == "1" ]] && echo 'auto (Claude Code AI classifier)' || echo 'default (manual per-tool gating)')"
 ```
 
 ### 6. Spawn agent in new terminal session
@@ -261,7 +286,7 @@ cmux's native notifier is preferred (matches existing UX); otherwise fall throug
 
 ```bash
 sleep 1
-NOTIFY_BODY="Agent spawned for issue #$ISSUE_NUM (tier: $TIER, terminal: $TERMINAL)"
+NOTIFY_BODY="Agent spawned for issue #$ISSUE_NUM (tier: $TIER, terminal: $TERMINAL$([[ "$AUTO_MODE" == "1" ]] && echo ', auto'))"
 if [[ "$TERMINAL" == "cmux" ]] && command -v cmux >/dev/null 2>&1; then
   cmux notify --title "Orchestrator" --body "$NOTIFY_BODY"
 elif command -v terminal-notifier >/dev/null 2>&1; then
