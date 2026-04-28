@@ -58,16 +58,28 @@ assert_grep "$FINISH_BRANCH" \
   "finish-branch auto-selects Push and Create PR under turbo"
 
 echo
-echo "== /turbo command entry point invokes brainstorm --turbo =="
+echo "== /turbo command entry point dispatches --turbo into the pipeline =="
+# After the orchestrator landed (PR #8), medium/large /turbo enters via
+# /uberdev:orchestrator --turbo; small/trivial tiers skip brainstorm entirely.
+# Either entry-point name + --turbo proves the dispatch contract.
 assert_grep "$TURBO_CMD" \
-  'brainstorm --turbo|brainstorm.*--turbo' \
-  "turbo command file invokes brainstorm with --turbo (chain entry point)"
+  'orchestrator --turbo|brainstorm --turbo|--turbo.*orchestrator|--turbo.*brainstorm' \
+  "turbo command file dispatches --turbo into the pipeline (orchestrator or brainstorm entry)"
+
+echo
+echo "== orchestrator forwards --turbo into subagent-driven-dev =="
+# Orchestrator → subagent-driven-dev is the medium/large /turbo handoff site.
+# Without --turbo here, finish-branch still prompts at the end of the pipeline.
+ORCHESTRATOR="$REPO_ROOT/plugins/uberdev/skills/orchestrator/SKILL.md"
+assert_grep "$ORCHESTRATOR" \
+  '--turbo.*subagent-driven-dev|subagent-driven-dev.*--turbo|pass.*--turbo|with `--turbo`' \
+  "orchestrator Phase 5 forwards --turbo to subagent-driven-dev"
 
 echo
 echo "== Default-mode paths preserved (regression canaries) =="
 assert_grep "$WRITE_PLAN" \
-  'Inline Execution|Subagent-Driven \(recommended\)' \
-  "write-plan still offers the two-option default-mode prompt"
+  'Default path \(subagent-driven\)|Inline override' \
+  "write-plan default-mode handoff still names both subagent-driven (default) and inline override paths"
 assert_grep "$FINISH_BRANCH" \
   'Merge back to|Push and create a Pull Request|Keep the branch as-is|Discard this work' \
   "finish-branch still presents the 4-option default-mode menu"
