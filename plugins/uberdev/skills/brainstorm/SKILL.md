@@ -9,7 +9,7 @@ Help turn ideas into fully formed designs and specs through natural collaborativ
 
 Brainstorm operates as an orchestrator: dispatch parallel research agents to ground the design in real codebase + library context BEFORE asking clarifying questions. The agent is the manager, not the worker.
 
-Start by understanding the current project context, then ask clarifying questions one at a time to refine the idea. Once you understand what you're building, present the design, write the spec, and hand off to `uberdev:write-plan`. **Single forward pass — no per-section approval gates, no "review the spec" pauses.** The clarifying-questions phase is information-gathering; everything after that is the agent committing to its best design and moving forward.
+Start by understanding the current project context, dispatch parallel research agents (see checklist step 2), then ask clarifying questions one at a time to refine the idea. Once you understand what you're building, present the design, write the spec, and hand off to `uberdev:write-plan`. **Single forward pass — no per-section approval gates, no "review the spec" pauses.** The clarifying-questions phase is information-gathering; everything after that is the agent committing to its best design and moving forward.
 
 **Note:** Don't write code or scaffold projects during brainstorming — that's `uberdev:write-plan`'s job. Brainstorming output is a spec doc, not implementation.
 
@@ -75,21 +75,17 @@ digraph brainstorming {
 After project-context exploration, before clarifying questions, dispatch 2-3 research agents in a single message to gather context in parallel. Read the user's request and infer the research questions yourself — don't ask the user what to research.
 
 Heuristics for inferring research questions:
-- "How do we currently do X in this codebase?" → `Explore` agent
-- "What's the standard pattern for Y in <library/framework>?" → `general-purpose` agent with Context7 / web search
-- "Has anyone built this before? What went wrong?" → `general-purpose` agent with web search
-- "Are there existing utilities that already do part of this?" → `Explore` agent
+- Codebase questions ("how do we currently do X?", "any existing utilities for this?") → `Explore` agent
+- Library / prior-art questions ("standard pattern for Y?", "has anyone built this before?") → `general-purpose` agent with Context7 / web search
 
-Synthesize findings into a brief summary (3-5 bullets) before engaging the user with clarifying questions. The 2-3 approaches you propose later MUST be grounded in this research, not speculation.
+Synthesize findings into a brief summary before engaging the user with clarifying questions. The 2-3 approaches you propose later MUST be grounded in this research, not speculation.
 
-For architecturally consequential choices (large features, expensive-to-reverse decisions), this same dispatch pattern is also useful for **independent parallel exploration** of design directions — give each agent one specific direction to investigate (e.g., "event-driven with BullMQ", "polling with cron", "webhook"), then aggregate their trade-off lists. See `uberdev:dispatching-parallel-agents` for the general pattern.
+For architecturally consequential choices, this pattern also supports independent parallel exploration of design directions (one agent per direction). See `uberdev:dispatching-parallel-agents`.
 
 **Skip parallel research only when:**
 - Truly trivial: config tweak, rename, single-line fix, typo
 - One approach is obviously dominant AND no codebase context is needed
 - User has already provided exhaustive inline context
-
-Default: dispatch the agents. The cost of three concurrent reads is small; the cost of speculating without grounding is rework.
 
 **Exploring approaches:**
 

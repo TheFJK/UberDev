@@ -7,7 +7,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 ## [Unreleased]
 
 ### Changed
-- `brainstorm` skill: parallel research dispatch promoted from optional ("for high-stakes designs") to **default first step**. After project-context exploration and before clarifying questions, brainstorm now dispatches 2-3 `Explore`/`general-purpose` agents in parallel — heuristically inferred from the user's prompt, not asked. Skipped only for truly trivial tasks (renames, single-line fixes). The 2-3 approaches proposed later are grounded in research, not speculation. Brainstorm now operates as an orchestrator (manager, not worker), aligning with the global orchestrator-first principle. Approval gates intentionally not added — the clarifying-questions phase is the approval; "single forward pass" stays.
+- `brainstorm` skill: parallel research dispatch promoted to **default first step** (before clarifying questions; skipped only for trivial tasks). The 2-3 proposed approaches are now grounded in research synthesis, not speculation. No approval gates added — "single forward pass" stays.
 
 ## [0.5.0] - 2026-04-28
 
