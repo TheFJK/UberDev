@@ -141,7 +141,7 @@ shasum -a 256 <plan_path> | awk '{print substr($1,1,8)}'
 ### Step 6: Determine next-phase recommendation
 
 - `next_phase_recommendation: --paranoid` — if the plan touches ≥ 10 tasks OR the wave-decomposer self-check flagged unresolved issues.
-- `next_phase_recommendation: abort` — only if a hard constraint makes the plan infeasible (e.g. the spec requires a file that is permanently denyisted).
+- `next_phase_recommendation: abort` — only if a hard constraint makes the plan infeasible (e.g. the spec requires a file that is permanently denylisted).
 - `next_phase_recommendation: auto` — otherwise.
 
 ## Output
