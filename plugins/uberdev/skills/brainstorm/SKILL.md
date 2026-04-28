@@ -93,11 +93,7 @@ If the user invoked this skill with `--turbo` (e.g. via `/turbo`), skip the clar
 
 1. After parallel research synthesis, present the 2-3 approaches with your recommendation as **informational text** (so the user can audit the design choice post-hoc).
 2. Auto-select the recommendation — proceed straight to "Presenting the design" without waiting for user input.
-3. Continue through design → spec → write-plan exactly as the non-turbo flow does.
-
-**Why this is safe:** the lead-agent's recommendation is grounded in the parallel-research synthesis (not speculation), spec & plan are still written to disk before implementation waves dispatch, and the user can interrupt any time to revise.
-
-**This is NOT an approval gate.** Turbo mode strengthens the existing "Single forward pass" principle (see Key Principles) by removing the Q&A loop — it does NOT introduce a new pause for sign-off.
+3. Continue through design → spec → write-plan exactly as the non-turbo flow does. Spec and plan are written to disk before implementation, and the user can interrupt to revise at any point — see "Single forward pass" in Key Principles.
 
 **Exploring approaches:**
 

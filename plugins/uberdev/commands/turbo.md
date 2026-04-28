@@ -17,7 +17,7 @@ Spawn an autonomous Claude agent in a new cmux workspace to solve GitHub issue *
 - No flag → **auto-triage** by reading the issue (labels + body + title)
 - `--trivial` / `--small` / `--full` → override classification manually
 - `--terminal=…` → override terminal detection (else `$SOLVE_TERMINAL` env var, else auto-detect)
-- `--auto` → enable `--permission-mode auto` (orthogonal to `/turbo`'s brainstorm-interactivity flag — **`/turbo <issue> --auto` is the max-autonomy combo**)
+- `--auto` → enable `--permission-mode auto` (Claude Code's AI classifier — auto-approves safe ops; blocks force push / `rm -rf` on pre-existing files / exfil / self-modification / `--dangerously-skip-permissions`). Else `SOLVE_AUTO=1` env var, else `solve_auto: true` in `.claude/uberdev.local.md`. Orthogonal to `/turbo`'s brainstorm-interactivity flag — **`/turbo <issue> --auto` is the max-autonomy combo**.
 
 **Behavior vs `/solve`:**
 - **trivial / small tiers:** identical to `/solve` (these tiers don't run brainstorm anyway).
@@ -236,8 +236,12 @@ esac
 
 echo "Dispatching via: $TERMINAL"
 echo "Permission mode: $([[ "$AUTO_MODE" == "1" ]] && echo 'auto (Claude Code AI classifier)' || echo 'default (manual per-tool gating)')"
-echo "⚠️  TURBO MODE — brainstorm questions auto-answered with lead-agent recommendations." >&2
-echo "    Spec and plan are still written to disk before implementation; review the artifacts to course-correct." >&2
+# Banner only fires for medium tier — trivial/small don't run brainstorm, so "questions
+# auto-answered" would be misleading there (no questions would have been asked anyway).
+if [[ "$TIER" == "medium" ]]; then
+  echo "⚠️  TURBO MODE — brainstorm questions auto-answered with lead-agent recommendations." >&2
+  echo "    Spec and plan are still written to disk before implementation; review the artifacts to course-correct." >&2
+fi
 ```
 
 ### 6. Spawn agent in new terminal session
