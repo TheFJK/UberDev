@@ -25,7 +25,7 @@ Parse args:
 ## Phase pipeline
 
 ### Phase 0: setup
-1. Generate a run-id: `RUN_ID=$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)`
+1. Generate a run-id: `RUN_ID=$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD 2>/dev/null || echo nohead)` (the `|| echo nohead` is defensive — at very early worktree-init the HEAD ref may not yet resolve; the timestamp prefix alone keeps `RUN_ID` unique within a session).
 2. Create research dir: `mkdir -p .uberdev/research/$RUN_ID`
 3. Fetch issue body and store in a variable for prompt injection.
 4. Determine tier from issue labels and content (use the same heuristics as `/solve` and `/turbo` triage tables; default `medium`).
@@ -69,7 +69,12 @@ Wait for return. Parse YAML.
 3. `grep -E "^## (Goal|Architecture|Components)" $artifact_path | wc -l` ≥ 3 (required sections present)
 4. content sha matches reported `artifact_sha` (recompute and compare)
 
-If any check fails: re-dispatch with verification feedback. Max 2 attempts. Then fall back: invoke `uberdev:brainstorm` skill in-main with `auto_pick: true`, capture its output path, continue.
+If any check fails: re-dispatch with verification feedback. Max 2 attempts. Then fall back to **in-main spec synthesis** (do NOT invoke `uberdev:brainstorm` — its handoff would re-trigger plan-writing and conflict with Phase 4):
+1. Read all four research summary files.
+2. Read the most recent prior spec under `docs/uberdev/specs/` as a template.
+3. Synthesise the spec yourself in-main and write it to `docs/uberdev/specs/$(date +%Y-%m-%d)-$topic_slug-design.md`.
+4. Set `spec_path` to that file. Log `phase=spec-writer fallback=in-main`.
+5. Continue to Phase 3.5 / Phase 4 normally.
 
 ### Phase 3.5: spec-reviewer (gated)
 
@@ -94,7 +99,12 @@ Dispatch `plan-writer` with `spec_path`, `tier`, `topic_slug`. The plan-writer i
 
 Verification: `[ -f $artifact_path ]`, `[ $(wc -c < $artifact_path) -gt 500 ]`, `grep -E "^## Execution Waves" $artifact_path` succeeds, content sha matches.
 
-If verification fails: re-dispatch up to 2 times with feedback. Then fall back to `uberdev:write-plan` in-main.
+If verification fails: re-dispatch up to 2 times with feedback. Then fall back to **in-main plan synthesis** (do NOT invoke `uberdev:write-plan` skill — its `## Execution Handoff` will itself transition to `uberdev:subagent-driven-dev`, which would duplicate-invoke once Phase 5 fires):
+1. Read the spec.
+2. Synthesise the wave-decomposed plan yourself in-main, mirroring the `uberdev:write-plan` template (For agentic workers note, Goal, Architecture, Tech Stack, `## Execution Waves` summary, `## Task N:` blocks with `Depends on:` / `Wave:` / `Owns:` / `Files:` / `- [ ]` checkbox steps).
+3. Write to `docs/uberdev/plans/$(date +%Y-%m-%d)-$topic_slug.md`.
+4. Set `plan_path` to that file. Log `phase=plan-writer fallback=in-main`.
+5. Continue to Phase 5.
 
 ### Phase 5: subagent-driven-dev
 
