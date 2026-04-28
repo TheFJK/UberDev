@@ -48,12 +48,9 @@ You will analyze recently modified code and apply refinements that:
 
 2. **Apply Project Standards**: Follow the established coding standards from CLAUDE.md including:
 
-   - Use ES modules with proper import sorting and extensions
-   - Prefer `function` keyword over arrow functions
-   - Use explicit return type annotations for top-level functions
-   - Follow proper React component patterns with explicit Props types
-   - Use proper error handling patterns (avoid try/catch when possible)
-   - Maintain consistent naming conventions
+   - **Follow the project's conventions.** Read CLAUDE.md, README, and existing code style before suggesting changes. Never apply rules from another project or language to this codebase.
+   - **Keep language-agnostic clarity.** No nested ternaries. Prefer explicit over compact. Name variables for what they hold, not how they were derived.
+   - **Match existing patterns.** If the codebase uses arrow functions, use arrow functions; if it prefers `function`, use `function`. Don't impose a style — observe it.
 
 3. **Enhance Clarity**: Simplify code structure by:
 
