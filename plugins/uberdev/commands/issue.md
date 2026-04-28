@@ -1,3 +1,9 @@
+---
+description: "Create a GitHub issue with classification, codebase investigation, duplicate search, and label/scope validation"
+argument-hint: "<description> [--no-explore]"
+allowed-tools: ["Bash", "Glob", "Grep", "Read", "Task"]
+---
+
 # Create GitHub Issue
 
 User's description: $ARGUMENTS
@@ -33,11 +39,39 @@ Phases 2, 3, and 4 are **read-only and independent** — they don't share state.
 
 If `$NO_EXPLORE=1` you may run the three phases inline (no Task overhead) since each becomes a small Grep/`gh` invocation. For everything else, parallel fanout is the default — typical wall-time savings are 60-70% versus running the three serially.
 
+## Phase 1.5: Pre-fanout — resolve variables (CRITICAL)
+
+Subagents do **not** inherit shell context. If you pass `$REPO`, `$DESC`, `$KEYWORDS`, `$NO_EXPLORE`, or `$COMMITLINT` into a Task brief, the subagent receives the literal string `$REPO` and either fails or searches globally. Resolve every shell variable in this orchestrator turn first, then **interpolate the literal values** into each subagent prompt before dispatch.
+
+```bash
+# Already resolved in Phase 0: $REPO, $DESC, $NO_EXPLORE
+# Resolve the rest here, in the orchestrator's bash session, BEFORE dispatching agents.
+
+# Pick top 3-5 keywords from $DESC (space-separated, not quoted) — used by Phase 3.
+KEYWORDS="<chosen keywords>"
+
+# Locate commitlint config if present — used by Phase 4.
+COMMITLINT=$(find . -maxdepth 3 \( -name "commitlint.config.js" -o -name "commitlint.config.cjs" -o -name "commitlint.config.mjs" -o -name "commitlint.config.ts" \) -not -path "*/node_modules/*" | head -1)
+
+# Echo the resolved values so you can copy them verbatim into each agent brief.
+echo "REPO=$REPO"
+echo "DESC=$DESC"
+echo "KEYWORDS=$KEYWORDS"
+echo "NO_EXPLORE=$NO_EXPLORE"
+echo "COMMITLINT=$COMMITLINT"
+```
+
+When constructing each Task agent's prompt, **substitute the resolved string** (e.g., `TheFJK/UberDev`, `auth login token`, `./commitlint.config.ts`) into the brief. Do not write `$REPO` or `$KEYWORDS` in any agent prompt — those are shell-only variables and have no meaning inside a subagent.
+
 ## Phase 2: Investigate Codebase
+
+**Agent brief — interpolate the resolved `$DESC`, `$REPO`, and `$NO_EXPLORE` values from Phase 1.5 before dispatch.** A brief should look like:
+
+> Investigate the codebase for an issue described as: `<resolved DESC text here>`. Repo is `<resolved REPO, e.g. TheFJK/UberDev>`. NO_EXPLORE flag is `<0 or 1>`.
 
 **Gate the depth:**
 
-- If `$NO_EXPLORE=1` → shallow: Grep + Glob only.
+- If `NO_EXPLORE=1` (literal `1` in the brief) → shallow: Grep + Glob only.
 - Else if type=`feat` with multi-module scope, OR type=`fix` whose title hints at `refactor`/`migrate`/`rewrite`/`architecture` — spawn the **Explore** subagent (per CLAUDE.md: ">3 queries → Explore").
 - Else → Grep + Glob directly.
 
@@ -47,11 +81,13 @@ The investigation also refines the preliminary tier from Phase 1: if investigati
 
 ## Phase 3: Duplicate Search — full-text, includes closed
 
+**Agent brief — interpolate the resolved `$REPO` and `$KEYWORDS` values from Phase 1.5 directly into the command.** The brief tells the agent to run a literal command shaped like (with values substituted, NOT `$VAR` references):
+
 ```bash
-# Extract top 3-5 keywords from $DESC, space-separated (not quoted)
-KEYWORDS="<chosen keywords>"
-gh search issues --repo "$REPO" $KEYWORDS --limit 10 --json number,title,state,url
+gh search issues --repo TheFJK/UberDev "auth login token" --limit 10 --json number,title,state,url
 ```
+
+(Substitute `TheFJK/UberDev` with the actual `$REPO` value and `auth login token` with the actual `$KEYWORDS` value resolved in Phase 1.5. The agent has no shell variables — only literal strings work.)
 
 Review results:
 
@@ -60,15 +96,16 @@ Review results:
 
 ## Phase 4: Label + scope validation against repo reality
 
-```bash
-gh label list --limit 100 --json name,description > /tmp/issue-labels-$$.json
+**Agent brief — interpolate the resolved `$REPO` and `$COMMITLINT` values from Phase 1.5.** The brief tells the agent to run literal commands like:
 
-# Locate commitlint config if present
-COMMITLINT=$(find . -maxdepth 3 \( -name "commitlint.config.js" -o -name "commitlint.config.cjs" -o -name "commitlint.config.mjs" -o -name "commitlint.config.ts" \) -not -path "*/node_modules/*" | head -1)
+```bash
+gh label list --repo TheFJK/UberDev --limit 100 --json name,description > /tmp/issue-labels-$$.json
 ```
 
+(Substitute `TheFJK/UberDev` with the actual `$REPO` value. If `$COMMITLINT` resolved to an empty string in Phase 1.5, tell the agent "no commitlint config found, skip scope validation"; otherwise pass the resolved literal path, e.g. `./commitlint.config.ts`.)
+
 - **Labels:** open `/tmp/issue-labels-$$.json`, pick the base (`bug` for `fix`, `enhancement` for `feat`) **only if it exists in the repo**, then add context labels by matching investigation keywords against real label names (e.g., `infrastructure`, `dx`, `security`, `docs`). Never invent labels.
-- **Scope:** if `$COMMITLINT` is set, Read it, extract the `scope-enum` array, and constrain the Phase 1 scope pick to that list. If the derived scope isn't in the list, flag to the user and propose the closest match.
+- **Scope:** if a commitlint path was provided in the brief, Read it, extract the `scope-enum` array, and constrain the Phase 1 scope pick to that list. If the derived scope isn't in the list, flag to the user and propose the closest match.
 
 ## Phase 4.5: Aggregate
 

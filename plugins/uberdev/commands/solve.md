@@ -1,3 +1,9 @@
+---
+description: "Spawn an autonomous Claude agent in a new terminal/cmux workspace to solve a GitHub issue, with auto-triage and tier-appropriate workflow"
+argument-hint: "<issue-number> [--trivial|--small|--full] [--terminal=cmux|ghostty|iterm|terminal|nohup]"
+allowed-tools: ["Bash", "Read", "Task"]
+---
+
 # Solve GitHub Issue
 
 Spawn an autonomous Claude agent in a new cmux workspace to solve GitHub issue **#$ARGUMENTS**.
@@ -130,15 +136,22 @@ echo "Starting claude agent for issue #ISSUE_NUM (tier: TIER)..."
 # Interactive TUI mode: positional arg (no -p) so user sees the Claude CLI
 # MODEL: pinned to Opus 4.7 with 1M context. Brackets MUST be single-quoted
 # (zsh would otherwise treat [1m] as a character-class glob and abort under set -e).
-CLAUDE_BIN --model 'claude-opus-4-7[1m]' --effort max --worktree solve-issue-ISSUE_NUM --dangerously-skip-permissions "$PROMPT"
+# SECURITY: no --dangerously-skip-permissions. Issue bodies are remote-fetched from
+# GitHub and a malicious title/body could trigger RCE under auto-approve. The agent
+# runs in its own terminal where the user can grant permission prompts interactively.
+CLAUDE_BIN --model 'claude-opus-4-7[1m]' --effort max --worktree solve-issue-ISSUE_NUM "$PROMPT"
 SCRIPT_EOF
-sed -i '' "s|REPO_ROOT|$(pwd)|g" /tmp/solve-$ISSUE_NUM.sh
+# Portable in-place sed: BSD/macOS requires `-i ''` (empty backup suffix as a separate arg);
+# GNU/Linux sed treats `''` as the input filename and crashes. Detect once, reuse below.
+SED_INPLACE=(-i '')
+[[ "$(uname)" == "Linux" ]] && SED_INPLACE=(-i)
+sed "${SED_INPLACE[@]}" "s|REPO_ROOT|$(pwd)|g" /tmp/solve-$ISSUE_NUM.sh
 REAL_CLAUDE=$(WRAPPER_DIR=$(dirname "$(which claude)"); for d in ${(s/:/)PATH}; do [[ "$d" == "$WRAPPER_DIR" ]] && continue; [[ -x "$d/claude" ]] && echo "$d/claude" && break; done)
-sed -i '' "s|CLAUDE_BIN|${REAL_CLAUDE:-$(which claude)}|g" /tmp/solve-$ISSUE_NUM.sh
-sed -i '' "s/ISSUE_NUM/$ISSUE_NUM/g" /tmp/solve-$ISSUE_NUM.sh
-sed -i '' "s/TIER/$TIER/g" /tmp/solve-$ISSUE_NUM.sh
+sed "${SED_INPLACE[@]}" "s|CLAUDE_BIN|${REAL_CLAUDE:-$(which claude)}|g" /tmp/solve-$ISSUE_NUM.sh
+sed "${SED_INPLACE[@]}" "s/ISSUE_NUM/$ISSUE_NUM/g" /tmp/solve-$ISSUE_NUM.sh
+sed "${SED_INPLACE[@]}" "s/TIER/$TIER/g" /tmp/solve-$ISSUE_NUM.sh
 # DETECTED_TERMINAL is set by Step 5.5 below; if you reorder, move that step before Step 5.
-sed -i '' "s/DETECTED_TERMINAL/${TERMINAL:-cmux}/g" /tmp/solve-$ISSUE_NUM.sh
+sed "${SED_INPLACE[@]}" "s/DETECTED_TERMINAL/${TERMINAL:-cmux}/g" /tmp/solve-$ISSUE_NUM.sh
 chmod +x /tmp/solve-$ISSUE_NUM.sh
 ```
 
