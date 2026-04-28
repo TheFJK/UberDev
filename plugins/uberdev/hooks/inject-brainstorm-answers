@@ -10,6 +10,10 @@
 #   2. /tmp/brainstorm/state/events                    (legacy /tmp fallback)
 #
 # Stale events (> 1 hour old) are skipped to avoid replaying a previous session.
+#
+# Security model: the events file is written by an external companion process
+# living in cwd. Treat its contents as untrusted input — see the three defenses
+# applied before injection below.
 
 set -euo pipefail
 shopt -s nullglob
@@ -37,14 +41,26 @@ consider() {
   fi
 }
 
-# Per-project sessions
-if [ -d "${PWD}/.uberdev/brainstorm" ]; then
+# Defense #3 (symlink refusal): an attacker controlling cwd could plant a
+# symlink at any segment of the events path pointing at a sensitive file
+# (e.g. ~/.ssh/id_rsa). Refuse to read anything reached via a symlink so we
+# never inject contents of an attacker-targeted file into Claude's context.
+brainstorm_root="${PWD}/.uberdev/brainstorm"
+if [ -d "$brainstorm_root" ]; then
+  if find -L "$brainstorm_root" -maxdepth 5 \( -type l -o -xtype l \) 2>/dev/null | read -r _; then
+    echo "uberdev/inject-brainstorm-answers: refusing to read symlinked path under ${brainstorm_root}" >&2
+    exit 0
+  fi
   while IFS= read -r f; do
+    # Skip if the file itself, or its parent dir chain, is a symlink.
+    [ -L "$f" ] && continue
     consider "$f"
-  done < <(find "${PWD}/.uberdev/brainstorm" -type f -path "*/state/events" -print 2>/dev/null)
+  done < <(find "$brainstorm_root" -type f -path "*/state/events" -print 2>/dev/null)
 fi
-# Legacy /tmp fallback
-[ -f "/tmp/brainstorm/state/events" ] && consider "/tmp/brainstorm/state/events"
+# Legacy /tmp fallback — same symlink rule.
+if [ -f "/tmp/brainstorm/state/events" ] && [ ! -L "/tmp/brainstorm/state/events" ]; then
+  consider "/tmp/brainstorm/state/events"
+fi
 
 # No pending answers, or only stale ones → exit silently.
 [ -n "$newest" ] || exit 0
@@ -52,9 +68,35 @@ age=$(( $(date +%s) - newest_mtime ))
 [ "$age" -le "$STALE_AFTER_SECONDS" ] || exit 0
 
 # Drain the events file atomically (read, then truncate).
-events="$(cat "$newest")"
+events_raw="$(cat "$newest")"
 : > "$newest"
-[ -n "$events" ] || exit 0
+[ -n "$events_raw" ] || exit 0
+
+# Defense #1 (JSON validation): each line of the events file should be one
+# JSON object emitted by the companion. Drop any malformed lines so a
+# hand-crafted plaintext payload (e.g. raw injection text) cannot reach the
+# context. Requires jq; without it, fall back to emitting nothing rather than
+# trusting unvalidated bytes.
+if ! command -v jq >/dev/null 2>&1; then
+  echo "uberdev/inject-brainstorm-answers: jq required for payload validation, skipping injection" >&2
+  exit 0
+fi
+
+events_validated=""
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  if printf '%s' "$line" | jq -e -c . >/dev/null 2>&1; then
+    events_validated+="${line}"$'\n'
+  fi
+done <<< "$events_raw"
+
+[ -n "$events_validated" ] || exit 0
+
+# Defense #2 (HTML-escape angle brackets): even valid JSON strings can carry
+# `</uberdev-brainstorm-answers>` inside their values, which would close the
+# wrapping tag and let the rest masquerade as model instructions. Escape `<`
+# and `>` so no companion-supplied bytes can break out of the block.
+events_safe="$(printf '%s' "$events_validated" | sed 's/</\&lt;/g; s/>/\&gt;/g')"
 
 # Emit as additional context. The <uberdev-brainstorm-answers> marker is
 # documented in SKILL.md / visual-companion.md so Claude knows to read it.
@@ -66,6 +108,6 @@ these as the user's response — do not ask them to repeat in chat. Each line is
 JSON event in click order; the final event is typically a 'submit' carrying the
 locked-in choice plus any additional selections.
 
-$events
+$events_safe
 </uberdev-brainstorm-answers>
 EOF

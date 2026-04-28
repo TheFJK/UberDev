@@ -7,51 +7,50 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# Require jq for safe JSON encoding. The previous manual escape function
+# missed control bytes 0x00-0x1f and `%` (which printf would interpret as a
+# format specifier, corrupting output). If jq is missing, degrade gracefully:
+# emit an empty injection rather than risk producing malformed JSON.
+if ! command -v jq >/dev/null 2>&1; then
+    if [ -n "${CURSOR_PLUGIN_ROOT:-}" ]; then
+        printf '{"additional_context":""}\n'
+    elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -z "${COPILOT_CLI:-}" ]; then
+        printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":""}}\n'
+    else
+        printf '{"additionalContext":""}\n'
+    fi
+    exit 0
+fi
+
 # Check if legacy skills directory exists and build warning
 warning_message=""
 legacy_skills_dir="${HOME}/.config/uberdev/skills"
 if [ -d "$legacy_skills_dir" ]; then
-    warning_message="\n\n<important-reminder>IN YOUR FIRST REPLY AFTER SEEING THIS MESSAGE YOU MUST TELL THE USER:⚠️ **WARNING:** UberDev now uses Claude Code's skills system. Custom skills in ~/.config/uberdev/skills will not be read. Move custom skills to ~/.claude/skills instead. To make this message go away, remove ~/.config/uberdev/skills</important-reminder>"
+    warning_message=$'\n\n<important-reminder>IN YOUR FIRST REPLY AFTER SEEING THIS MESSAGE YOU MUST TELL THE USER:⚠️ **WARNING:** UberDev now uses Claude Code\'s skills system. Custom skills in ~/.config/uberdev/skills will not be read. Move custom skills to ~/.claude/skills instead. To make this message go away, remove ~/.config/uberdev/skills</important-reminder>'
 fi
 
 # Read using-uberdev content
 using_uberdev_content=$(cat "${PLUGIN_ROOT}/skills/using-uberdev/SKILL.md" 2>&1 || echo "Error reading using-uberdev skill")
 
-# Escape string for JSON embedding using bash parameter substitution.
-# Each ${s//old/new} is a single C-level pass - orders of magnitude
-# faster than the character-by-character loop this replaces.
-escape_for_json() {
-    local s="$1"
-    s="${s//\\/\\\\}"
-    s="${s//\"/\\\"}"
-    s="${s//$'\n'/\\n}"
-    s="${s//$'\r'/\\r}"
-    s="${s//$'\t'/\\t}"
-    printf '%s' "$s"
-}
+# Build the full session context as a raw string, then let jq handle JSON
+# encoding in one shot — covers control bytes, quotes, backslashes, and `%`.
+session_context=$'<EXTREMELY_IMPORTANT>\nYou have uberdev superpowers.\n\n**Below is the full content of your \'uberdev:using-uberdev\' skill - your introduction to using skills. For all other skills, use the \'Skill\' tool:**\n\n'"${using_uberdev_content}"$'\n\n'"${warning_message}"$'\n</EXTREMELY_IMPORTANT>'
 
-using_uberdev_escaped=$(escape_for_json "$using_uberdev_content")
-warning_escaped=$(escape_for_json "$warning_message")
-session_context="<EXTREMELY_IMPORTANT>\nYou have uberdev superpowers.\n\n**Below is the full content of your 'uberdev:using-uberdev' skill - your introduction to using skills. For all other skills, use the 'Skill' tool:**\n\n${using_uberdev_escaped}\n\n${warning_escaped}\n</EXTREMELY_IMPORTANT>"
-
-# Output context injection as JSON.
+# Output context injection as JSON, built with jq so the string is encoded safely.
 # Cursor hooks expect additional_context (snake_case).
 # Claude Code hooks expect hookSpecificOutput.additionalContext (nested).
 # Copilot CLI (v1.0.11+) and others expect additionalContext (top-level, SDK standard).
 # Claude Code reads BOTH additional_context and hookSpecificOutput without
 # deduplication, so we must emit only the field the current platform consumes.
-#
-# Uses printf instead of heredoc to work around bash 5.3+ heredoc hang.
-# See: https://github.com/obra/superpowers/issues/571 (upstream issue from forked plugin)
 if [ -n "${CURSOR_PLUGIN_ROOT:-}" ]; then
   # Cursor sets CURSOR_PLUGIN_ROOT (may also set CLAUDE_PLUGIN_ROOT)
-  printf '{\n  "additional_context": "%s"\n}\n' "$session_context"
+  jq -n --arg ctx "$session_context" '{additional_context: $ctx}'
 elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -z "${COPILOT_CLI:-}" ]; then
   # Claude Code sets CLAUDE_PLUGIN_ROOT without COPILOT_CLI
-  printf '{\n  "hookSpecificOutput": {\n    "hookEventName": "SessionStart",\n    "additionalContext": "%s"\n  }\n}\n' "$session_context"
+  jq -n --arg ctx "$session_context" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}'
 else
   # Copilot CLI (sets COPILOT_CLI=1) or unknown platform — SDK standard format
-  printf '{\n  "additionalContext": "%s"\n}\n' "$session_context"
+  jq -n --arg ctx "$session_context" '{additionalContext: $ctx}'
 fi
 
 exit 0
