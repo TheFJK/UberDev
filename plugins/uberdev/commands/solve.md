@@ -16,6 +16,7 @@ Spawn an autonomous Claude agent in a new cmux workspace to solve GitHub issue *
 - `--trivial` / `--small` / `--full` → override classification manually
 - `--terminal=…` → override terminal detection (else `$SOLVE_TERMINAL` env var, else auto-detect)
 - `--auto` → enable `--permission-mode auto` (Claude Code's AI classifier — auto-approves safe ops; blocks force push / `rm -rf` on pre-existing files / exfil / self-modification / `--dangerously-skip-permissions`). Else `SOLVE_AUTO=1` env var, else `solve_auto: true` in `.claude/uberdev.local.md`.
+- `SOLVE_GHOSTTY_NEW_WINDOW=1` env var → force the legacy *new window* dispatch instead of tab-spawning into the originating Ghostty window (Ghostty terminal only).
 
 ## Triage heuristics (Step 3 applies this table)
 
@@ -247,14 +248,41 @@ case "$TERMINAL" in
     cmux new-workspace --name "$TAB_NAME" --description "$DESCRIPTION" --command "zsh -l $SCRIPT"
     ;;
   ghostty)
-    # Ghostty has no AppleScript do-script; `open -na` spawns a new window of the running app.
-    # We use --command= rather than -e: Ghostty's -e appends to its configured shell,
-    # which on macOS defaults to `/usr/bin/login -flp <user>`. Per login(1), tokens after
-    # the username are parsed as KEY=VALUE env assignments — so `-e "zsh -l $SCRIPT"` is
-    # read as env vars, fails the `=` check, and drops into an interactive login shell
-    # without ever running the script. --command= replaces the shell wrapper entirely,
-    # and the launcher's own `#!/bin/zsh -l` shebang preserves login-shell semantics.
-    open -na Ghostty --args --command="$SCRIPT"
+    # Tab-spawn into the originating Ghostty window when /solve was invoked from
+    # inside Ghostty (TERM_PROGRAM=ghostty). Ghostty's macOS CLI rejects
+    # `+new-window` ("not supported on this platform") and its AppleScript
+    # dictionary doesn't expose `make new tab` cleanly, so we drive the
+    # default Cmd+T keybind via System Events and type the launcher path.
+    # Fall through to legacy new-window dispatch when:
+    #   - SOLVE_GHOSTTY_NEW_WINDOW=1 (explicit opt-out),
+    #   - TERM_PROGRAM != ghostty (no originating window — e.g. SOLVE_TERMINAL=ghostty
+    #     forced from another terminal),
+    #   - or the AppleScript fails (Accessibility permission denied, custom keybind, etc.).
+    TAB_SPAWNED=0
+    if [[ "$SOLVE_GHOSTTY_NEW_WINDOW" != "1" ]] && [[ "$TERM_PROGRAM" == "ghostty" ]]; then
+      if osascript >/dev/null 2>&1 <<APPLESCRIPT
+tell application "Ghostty" to activate
+delay 0.15
+tell application "System Events"
+  keystroke "t" using command down
+  delay 0.25
+  keystroke "zsh -l $SCRIPT"
+  keystroke return
+end tell
+APPLESCRIPT
+      then
+        TAB_SPAWNED=1
+      else
+        echo "warning: ghostty tab-spawn failed (Accessibility permission or non-default keybind?); falling back to new window." >&2
+      fi
+    fi
+    if [[ "$TAB_SPAWNED" != "1" ]]; then
+      # Legacy new-window dispatch. --command= rather than -e: Ghostty's -e appends to
+      # its login shell, which on macOS parses post-username tokens as KEY=VALUE env
+      # assignments — `-e "zsh -l $SCRIPT"` would never run the script. The launcher's
+      # `#!/bin/zsh -l` shebang preserves login-shell semantics inside `--command=`.
+      open -na Ghostty --args --command="$SCRIPT"
+    fi
     ;;
   iterm)
     osascript <<APPLESCRIPT
