@@ -66,7 +66,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Bundled commands: `/uberdev:review-pr`, `/uberdev:simplify`.
 
 ### Changed
-- Documentation: README expanded with `Updating` section explaining manual vs auto-update for third-party marketplaces (`docs:` commit `007763` on 2026-04-27 superseded by this release).
+- Documentation: README expanded with `Updating` section explaining manual vs auto-update for third-party marketplaces (`docs:` commit `007537b` on 2026-04-27 superseded by this release).
 
 [unreleased]: https://github.com/TheFJK/UberDev/compare/v0.4.0...HEAD
 [0.4.0]: https://github.com/TheFJK/UberDev/compare/v0.3.1...v0.4.0

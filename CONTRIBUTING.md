@@ -6,30 +6,20 @@ Thanks for considering a contribution. UberDev is a small, opinionated Claude Co
 
 ## Quick start
 
-```bash
-# 1. Clone your fork
-git clone https://github.com/<you>/UberDev.git
-cd UberDev
+See [Install](README.md#install) in the README. Contributor delta: clone your fork and `/plugin marketplace add /absolute/path/to/UberDev` (your local checkout) instead of `marketplace add TheFJK/UberDev`.
 
-# 2. Add the local checkout as a Claude Code marketplace
-/plugin marketplace add /absolute/path/to/UberDev
-
-# 3. Install the plugin from your local marketplace
-/plugin install uberdev@uberdev
-
-# 4. Smoke-test
-/uberdev:issue trivial typo in README install step
-```
-
-See Anthropic's [plugin install docs](https://docs.claude.com/en/docs/claude-code/plugins) for marketplace mechanics and the [marketplace.json reference](https://docs.claude.com/en/docs/claude-code/plugin-marketplaces) if you're adding a new plugin.
-
-When you change a plugin file, re-run `/plugin install uberdev@uberdev` to pick up the edits — Claude Code caches plugin assets per session.
+When you change a plugin file, re-run `/plugin install uberdev@uberdev` to pick up the edits — Claude Code caches plugin assets per session. See Anthropic's [plugin install docs](https://docs.claude.com/en/docs/claude-code/plugins) and the [marketplace.json reference](https://docs.claude.com/en/docs/claude-code/plugin-marketplaces) if you're adding a new plugin.
 
 ---
 
 ## Repo layout
 
-`.claude-plugin/marketplace.json` is the marketplace manifest — it lists every plugin this repo ships. The plugin itself lives at `plugins/uberdev/`, where `commands/` holds slash-command bodies, `agents/` holds reusable subagent prompts, `skills/` holds discoverable workflow skills, and `hooks/` holds `SessionStart` / `PreToolUse` event handlers. The plugin manifest is `plugins/uberdev/.claude-plugin/plugin.json`. Bundled upstream license texts (Anthropic, Jesse Vincent) sit under `plugins/uberdev/licenses/`.
+See [Repo layout](README.md#repo-layout) in the README. Contributor-only additions:
+
+- `plugins/uberdev/agents/` — reusable subagent prompts that orchestrator commands compose.
+- `plugins/uberdev/skills/` — discoverable workflow skills (each is a folder with `SKILL.md` + optional supporting files).
+- `plugins/uberdev/hooks/` — `SessionStart` / `PreToolUse` / `SessionEnd` / `PreCompact` event handlers, wired in `hooks.json`.
+- `plugins/uberdev/licenses/` — bundled upstream license texts (Anthropic, Jesse Vincent) for the verbatim/adapted components listed in the README's "Bundled" section.
 
 ---
 
@@ -43,7 +33,7 @@ Use the existing files as templates rather than starting from scratch — they e
 
 **Skill** — copy a skill directory under `plugins/uberdev/skills/` (e.g. `brainstorm/` or `write-plan/`). Each skill is a folder with a `SKILL.md` (frontmatter `name` + `description`) plus optional supporting files. The `description` is what the dispatcher matches against — make it specific.
 
-**Hook** — copy `plugins/uberdev/hooks/session_start.sh`. Hooks are wired in `plugins/uberdev/hooks/hooks.json`.
+**Hook** — copy `plugins/uberdev/hooks/session-start` (or any sibling: `session-end`, `pre-compact`, `inject-brainstorm-answers`). Hooks are wired in `plugins/uberdev/hooks/hooks.json`.
 
 If your change is large enough to need a design discussion, open a draft issue first.
 

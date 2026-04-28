@@ -16,7 +16,7 @@ source_file="${PWD}/.claude/auto-memory.md"
 [ -f "$source_file" ] || exit 0
 
 # Make sure the .claude/ dir is real (not a symlink we'd be writing through).
-[ -d "${PWD}/.claude" ] || exit 0
+[ -d "${PWD}/.claude" ] && [ ! -L "${PWD}/.claude" ] || exit 0
 
 timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date 2>/dev/null || echo "unknown-time")"
 

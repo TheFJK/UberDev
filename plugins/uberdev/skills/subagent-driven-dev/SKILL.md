@@ -15,23 +15,9 @@ Execute plan **wave-by-wave**. Within each wave, dispatch all implementer subage
 
 **Core principle:** Parallel-by-default within a wave + disjoint file sets + controller-only git = maximum throughput, zero races.
 
-## Isolation: always use worktrees for parallel writes
+## Isolation: Pattern B is the opt-out
 
-When dispatching agents in parallel that may write to overlapping files, set `isolation: "worktree"` on each Agent tool call. Claude Code creates a temporary git worktree per agent so writes happen on isolated branches and merge back without races.
-
-**Example dispatch:**
-```
-Agent({
-  description: "Implement feature X",
-  subagent_type: "general-purpose",
-  isolation: "worktree",
-  prompt: "..."
-})
-```
-
-**When to skip:** if your batches are partitioned so no two agents touch the same file (verified by listing target paths up front), worktrees add overhead without benefit. Default to isolation; opt out only when partitioning is provable. **This skill's Pattern B is exactly that opt-out** — every wave's allowlist/denylist makes file-set disjointness provable, and the controller (not the agents) runs git, so isolation would be wasted ceremony here. For any **other** parallel dispatch (review fanouts, ad-hoc multi-agent edits, brainstorm spikes), default to `isolation: "worktree"`.
-
-**Why:** prevents concurrent-write races, especially in code-edit waves where multiple agents may converge on shared files (e.g., a shared types file, a config root). Worktrees auto-clean if the agent makes no changes.
+This skill's wave-based controller-only-git approach is intentionally **not** worktree-isolated — it relies on provable file-set partitioning per wave. For any *other* parallel-agent dispatch (review fanouts, ad-hoc multi-agent edits), default to `isolation: "worktree"` on the Agent tool calls — see the `uberdev:dispatching-parallel-agents` skill.
 
 ## When to Use
 

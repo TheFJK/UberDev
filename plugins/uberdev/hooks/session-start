@@ -30,7 +30,7 @@ if [ -d "$legacy_skills_dir" ]; then
 fi
 
 # Read using-uberdev content
-using_uberdev_content=$(cat "${PLUGIN_ROOT}/skills/using-uberdev/SKILL.md" 2>&1 || echo "Error reading using-uberdev skill")
+using_uberdev_content=$(cat "${PLUGIN_ROOT}/skills/using-uberdev/SKILL.md" 2>/dev/null || echo "Error reading using-uberdev skill")
 
 # Build the full session context as a raw string, then let jq handle JSON
 # encoding in one shot — covers control bytes, quotes, backslashes, and `%`.

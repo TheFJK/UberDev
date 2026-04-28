@@ -41,21 +41,13 @@ consider() {
   fi
 }
 
-# Defense #3 (symlink refusal): an attacker controlling cwd could plant a
-# symlink at any segment of the events path pointing at a sensitive file
-# (e.g. ~/.ssh/id_rsa). Refuse to read anything reached via a symlink so we
-# never inject contents of an attacker-targeted file into Claude's context.
+# Refuse symlinked paths so an attacker controlling cwd can't redirect us at sensitive files.
 brainstorm_root="${PWD}/.uberdev/brainstorm"
 if [ -d "$brainstorm_root" ]; then
-  if find -L "$brainstorm_root" -maxdepth 5 \( -type l -o -xtype l \) 2>/dev/null | read -r _; then
-    echo "uberdev/inject-brainstorm-answers: refusing to read symlinked path under ${brainstorm_root}" >&2
-    exit 0
-  fi
   while IFS= read -r f; do
-    # Skip if the file itself, or its parent dir chain, is a symlink.
     [ -L "$f" ] && continue
     consider "$f"
-  done < <(find "$brainstorm_root" -type f -path "*/state/events" -print 2>/dev/null)
+  done < <(find "$brainstorm_root" -maxdepth 5 -type f -path "*/state/events" 2>/dev/null)
 fi
 # Legacy /tmp fallback — same symlink rule.
 if [ -f "/tmp/brainstorm/state/events" ] && [ ! -L "/tmp/brainstorm/state/events" ]; then
@@ -72,30 +64,17 @@ events_raw="$(cat "$newest")"
 : > "$newest"
 [ -n "$events_raw" ] || exit 0
 
-# Defense #1 (JSON validation): each line of the events file should be one
-# JSON object emitted by the companion. Drop any malformed lines so a
-# hand-crafted plaintext payload (e.g. raw injection text) cannot reach the
-# context. Requires jq; without it, fall back to emitting nothing rather than
-# trusting unvalidated bytes.
+# Drop non-JSON lines so a hand-crafted plaintext payload can't reach the prompt.
 if ! command -v jq >/dev/null 2>&1; then
   echo "uberdev/inject-brainstorm-answers: jq required for payload validation, skipping injection" >&2
   exit 0
 fi
 
-events_validated=""
-while IFS= read -r line; do
-  [ -z "$line" ] && continue
-  if printf '%s' "$line" | jq -e -c . >/dev/null 2>&1; then
-    events_validated+="${line}"$'\n'
-  fi
-done <<< "$events_raw"
+events_validated="$(printf '%s' "$events_raw" | jq -R -c 'fromjson? // empty' 2>/dev/null || true)"
 
 [ -n "$events_validated" ] || exit 0
 
-# Defense #2 (HTML-escape angle brackets): even valid JSON strings can carry
-# `</uberdev-brainstorm-answers>` inside their values, which would close the
-# wrapping tag and let the rest masquerade as model instructions. Escape `<`
-# and `>` so no companion-supplied bytes can break out of the block.
+# Escape <,> so payload bytes can't close the wrapping tag and impersonate model instructions.
 events_safe="$(printf '%s' "$events_validated" | sed 's/</\&lt;/g; s/>/\&gt;/g')"
 
 # Emit as additional context. The <uberdev-brainstorm-answers> marker is

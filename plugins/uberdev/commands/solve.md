@@ -136,13 +136,11 @@ echo "Starting claude agent for issue #ISSUE_NUM (tier: TIER)..."
 # Interactive TUI mode: positional arg (no -p) so user sees the Claude CLI
 # MODEL: pinned to Opus 4.7 with 1M context. Brackets MUST be single-quoted
 # (zsh would otherwise treat [1m] as a character-class glob and abort under set -e).
-# SECURITY: no --dangerously-skip-permissions. Issue bodies are remote-fetched from
-# GitHub and a malicious title/body could trigger RCE under auto-approve. The agent
-# runs in its own terminal where the user can grant permission prompts interactively.
+# Issue bodies are remote-fetched; auto-approving tools would let a malicious
+# title/body trigger RCE. Run interactively so the user gates each permission.
 CLAUDE_BIN --model 'claude-opus-4-7[1m]' --effort max --worktree solve-issue-ISSUE_NUM "$PROMPT"
 SCRIPT_EOF
-# Portable in-place sed: BSD/macOS requires `-i ''` (empty backup suffix as a separate arg);
-# GNU/Linux sed treats `''` as the input filename and crashes. Detect once, reuse below.
+# BSD/macOS sed needs '-i ""'; GNU sed needs bare '-i'.
 SED_INPLACE=(-i '')
 [[ "$(uname)" == "Linux" ]] && SED_INPLACE=(-i)
 sed "${SED_INPLACE[@]}" "s|REPO_ROOT|$(pwd)|g" /tmp/solve-$ISSUE_NUM.sh

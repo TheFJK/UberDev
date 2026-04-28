@@ -9,16 +9,13 @@ set -u
 # 1. Stale answer cache used by inject-brainstorm-answers fallbacks.
 rm -f "${HOME}/.claude/.uberdev-answers" 2>/dev/null || true
 
-# 2. Plugin-owned tmp files. Scope is intentionally narrow: only the
-#    `uberdev-` prefix, never `/tmp/*` broadly.
+# 2. Plugin-owned tmp files.
 rm -rf /tmp/uberdev-* 2>/dev/null || true
 
 # 3. Brainstorm event files older than 24h under per-project state dirs.
 #    -mtime +1 = strictly older than 24h. Wrap each find in `|| true` so a
 #    permission error or missing parent never aborts the script.
-if [ -d "${PWD}/.uberdev/brainstorm" ]; then
-    find "${PWD}/.uberdev/brainstorm" \
-        -type f -path "*/state/events" -mtime +1 -delete 2>/dev/null || true
-fi
+find "${PWD}/.uberdev/brainstorm" \
+    -type f -path "*/state/events" -mtime +1 -delete 2>/dev/null || true
 
 exit 0
