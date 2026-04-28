@@ -102,9 +102,9 @@ Auto-classifies a GitHub issue into a tier, then spawns an agent with a tier-app
 |---|---|---|
 | **trivial** | Labels `typo`, `docs`, `chore`, `good-first-issue`. Body <300 chars. Single file named. | Direct edit → test if touched code is tested → `/uberdev:simplify` → PR |
 | **small** | Clear reproduction + error. Localized to one module. Estimated ≤50 LOC. | Lightweight TodoWrite plan (3–6 tasks) → TDD → `/uberdev:simplify` → PR |
-| **medium / large** *(default)* | Labels `epic`, `architectural`, `infrastructure`. ≥3 files mentioned. Cross-package scope. Open questions. | Full `/uberdev:brainstorm` → `/uberdev:write-plan` → `/uberdev:subagent-driven-dev` → `/uberdev:review-pr` |
+| **medium / large** *(default)* | Labels `epic`, `architectural`, `infrastructure`. ≥3 files mentioned. Cross-package scope. Open questions. | Full `/uberdev:orchestrator` (research fanout → optional Q&A → spec-writer → optional spec-reviewer → plan-writer) → `/uberdev:subagent-driven-dev` → `/uberdev:review-pr` |
 
-> **When in doubt, default to medium.** The spawned agent is explicitly told it may escalate to `/uberdev:brainstorm` mid-flight if the scope proves larger than triaged — **misclassification is recoverable, not catastrophic.**
+> **When in doubt, default to medium.** The spawned agent is explicitly told it may escalate to `/uberdev:orchestrator` mid-flight if the scope proves larger than triaged — **misclassification is recoverable, not catastrophic.**
 
 ### Manual overrides
 
