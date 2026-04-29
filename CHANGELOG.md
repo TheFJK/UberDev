@@ -4,6 +4,43 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-04-29
+
+### Added
+- **CI shape-check workflow** at `.github/workflows/test.yml` — single ubuntu-latest job runs all `tests/*.test.sh` on every push and PR with `permissions: contents: read` and `timeout-minutes: 5`. `actions/checkout@v4` major-tag pin.
+- **Plan-drift awareness in per-task spec reviewer** (`subagent-driven-dev`). New `## Plan Task Description` placeholder in `spec-reviewer-prompt.md`; new `plan_task_description` dispatch parameter in `SKILL.md` step 4f with a ~3000-token excerpt size guard. Reviewer DO-list bullet directs flagging *plan drift* (structural deviation from plan even when spec appears satisfied — e.g., implementer skipped prescribed steps, swapped libraries, merged tasks).
+- **Threat model section** in `plugins/uberdev/skills/brainstorm/SKILL.md` — documents localhost-only bind, single-user assumption, no auth, no proxy/tunnel for the brainstorm WebSocket+HTTP companion server.
+- **Shared reviewer-prompt template** at `plugins/uberdev/skills/_shared/document-reviewer-template.md` — canonical Status/Issues/Recommendations skeleton referenced (via back-link comments) from `brainstorm/spec-document-reviewer-prompt.md` and `write-plan/plan-document-reviewer-prompt.md`. Skills don't auto-include partials; this is a documentation convention plus drift-defense reference.
+- **2 new test suites:**
+  - `tests/spec-reviewer-plan-aware.test.sh` (3/3) — verifies plan-drift wiring in spec-reviewer prompt + SKILL.md.
+  - `tests/audit-fixups.test.sh` (12/12) — regression coverage for the C1/C3/C4/C5 review-fixup contracts: code-simplifier auto-trigger gate, stop-server `stopped_no_cleanup` JSON status, `gh` prereq moved from theatre command-files to `hooks/session-start`, brainstorm `## Threat model` section anchor.
+- **Configuration documentation** in `README.md`: split into Implemented (`solve_terminal`, `solve_auto`) and Planned (`solve_tier_default`, `review_depth`, `parallel_solve`) tables with YAML-frontmatter example and env-var override precedence.
+- **Tracked public docs**: `docs/rfc/` is now ignored-with-exception (`docs/*` + `!docs/rfc/`) so RFCs referenced from README/CHANGELOG resolve in clones; `plugins/uberdev/docs/testing.md` smoke-test matrix tracked.
+
+### Changed
+- **3 shell hooks hardened against symlink and path-traversal abuse:**
+  - `hooks/inject-brainstorm-answers`: previous `[ -L "$f" ]` symlink check covered only the resolved file, not ancestors. Replaced with `is_safe_path()` helper that canonicalizes and walks every ancestor; refuses a symlinked root entirely; falls back to `python3 os.path.realpath` on macOS where BSD `realpath -m` is missing. `is_safe_path()` rejections now log to stderr (previously silent).
+  - `skills/brainstorm/scripts/stop-server.sh`: replaced `[[ "$SESSION_DIR" == /tmp/* ]]` glob (passed for `/tmp/../home/...` traversals) with canonicalize-then-exact-prefix `case` over `/tmp/brainstorm-*` and `/private/tmp/brainstorm-*`. JSON shape now distinguishes success (`"stopped"`) from skipped cleanup (`"stopped_no_cleanup"` with `"reason"` field) — callers can detect partial failures.
+  - `hooks/session-end`: replaced `rm -rf /tmp/uberdev-*` (followed symlinks) with `find -H /tmp -maxdepth 1 \( -name 'uberdev-*' -type d \) -not -type l -exec rm -rf {} +`. The `-H` is required because `/tmp` is itself a symlink on macOS.
+- **`canonicalize()` helper** (used by the two hardened hooks): captures python3/realpath stderr into a variable and emits a useful diagnostic on total failure with helper-name prefix. Admins can now distinguish "tool unavailable" from "path rejected."
+- **`code-simplifier` agent description AND body** narrowed to require explicit invocation. Body's "operate autonomously and proactively, refining code immediately after it's written" prose removed — it had directly contradicted the new gating frontmatter. The agent now activates ONLY when invoked via `/uberdev:simplify` or by the `subagent-driven-dev` post-wave fanout. Examples retained but framed as "illustrating logic, not licensing auto-trigger."
+- **`gh` prerequisite check moved from markdown-command-file theatre to a real runtime guard** in `hooks/session-start` — Claude reads command markdown as instructions, not bash, so the prior `command -v gh || exit 1` blocks were never executed. New session-start check mirrors the existing `jq` check and injects a one-time visible warning when `gh` is missing without failing the session.
+- **`/solve` ↔ `/turbo` divergence annotated**: verified Claude Code commands do not support textual file partials (the `@path` syntax is context-attachment, not substitution), so the original "extract `_solve-shared.md`" plan was infeasible. Both files now carry a `DUPLICATION NOTE — KEEP IN SYNC` banner with section-anchor references plus inline `<!-- DELTA -->` markers at every divergence point. Inline markers are the source of truth; the banner index is for navigation only. Out-of-scope follow-up: `/turbo` trivial/small tier omits the `post-impl-review` invocation that `/solve` includes.
+- `eval "$VAR=1"` → `declare "$VAR=1"` in `skills/brainstorm/SKILL.md:124` and `skills/orchestrator/SKILL.md:68`. Currently safe (TOPIC iterates a hardcoded list) but a footgun if ever driven from external input.
+- `hooks-cursor.json` paths normalized from `./hooks/...` to `${CLAUDE_PLUGIN_ROOT}/hooks/...` matching `hooks.json`.
+- `.gitignore` adds `.env*`, `*.key`, `*.pem`, `*.p12`, `*.pfx`, `id_rsa*`, `node_modules/`, `*.log`, `.claude/`, plus explicit ignores for `plugins/uberdev/docs/{plans,uberdev,windows}/` (local-only design notes).
+- Generic-ified `/Volumes/FJK SSD/...` example paths in `commands/{solve,turbo}.md` to `/Users/me/My Project/...`.
+
+### Security
+- 3 P0 path-traversal/symlink hazards in shell hooks closed (above).
+- `server.cjs` carries an explicit localhost-only / single-user / unauthenticated header note pointing to the new SKILL.md threat model section.
+
+### Backwards compatibility
+- `stop-server.sh` JSON: callers parsing the literal `"stopped"` string would now correctly fail-loud when cleanup is skipped (the new `stopped_no_cleanup` status replaces `stopped` only on partial failure). `grep -rn '"stopped"'` confirmed no in-repo consumers depend on the old shape.
+- Markdown `command -v gh || exit 1` removal is invisible to runtime (the blocks were never executed); the new session-start warning replaces them.
+
+Closes the audit findings catalogued by the multi-agent research sweep on PR #13.
+
 ## [0.9.0] - 2026-04-29
 
 ### Added
