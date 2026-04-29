@@ -9,8 +9,16 @@ set -u
 # 1. Stale answer cache used by inject-brainstorm-answers fallbacks.
 rm -f "${HOME}/.claude/.uberdev-answers" 2>/dev/null || true
 
-# 2. Plugin-owned tmp files.
-rm -rf /tmp/uberdev-* 2>/dev/null || true
+# 2. Plugin-owned tmp files. Use `find` instead of `rm -rf /tmp/uberdev-*` so a
+#    symlink at /tmp/uberdev-evil → /etc (or anywhere else) can't redirect the
+#    delete onto a sensitive directory. `-type d` already excludes symlinks
+#    (a symlink-to-dir is `-type l`, not `-type d`), and `-not -type l` is
+#    explicit defense-in-depth. `-maxdepth 1` keeps this scoped to /tmp's
+#    direct children — descent into matched dirs is handled by `rm -rf`.
+#    `-H` follows the /tmp argument itself (necessary on macOS where /tmp is a
+#    symlink to /private/tmp) but does NOT follow symlinks encountered during
+#    traversal — which is exactly the safety property we want.
+find -H /tmp -maxdepth 1 \( -name 'uberdev-*' -type d \) -not -type l -exec rm -rf {} + 2>/dev/null || true
 
 # 3. Brainstorm event files older than 24h under per-project state dirs.
 #    -mtime +1 = strictly older than 24h. Wrap each find in `|| true` so a

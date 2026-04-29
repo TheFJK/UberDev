@@ -45,9 +45,33 @@ if [[ -f "$PID_FILE" ]]; then
 
   rm -f "$PID_FILE" "${STATE_DIR}/server.log"
 
-  # Only delete ephemeral /tmp directories
-  if [[ "$SESSION_DIR" == /tmp/* ]]; then
-    rm -rf "$SESSION_DIR"
+  # Only delete ephemeral /tmp directories. Canonicalize first so a path like
+  # /tmp/../home/victim can't slip past a glob-style prefix check, then match
+  # exact `/tmp/brainstorm-*` (or `/private/tmp/brainstorm-*` on macOS, where
+  # /tmp is a symlink to /private/tmp). BSD realpath (default on macOS) lacks
+  # `-m` and fails on missing paths, so prefer python3 and fall back to realpath.
+  if command -v python3 >/dev/null 2>&1; then
+    SESSION_DIR_CANON="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$SESSION_DIR" 2>/dev/null)"
+  elif command -v realpath >/dev/null 2>&1; then
+    SESSION_DIR_CANON="$(realpath "$SESSION_DIR" 2>/dev/null)"
+  else
+    SESSION_DIR_CANON=""
+  fi
+
+  if [[ -n "$SESSION_DIR_CANON" ]]; then
+    case "$SESSION_DIR_CANON" in
+      /tmp/brainstorm-*|/private/tmp/brainstorm-*)
+        rm -rf "$SESSION_DIR_CANON"
+        ;;
+      *)
+        # Path resolved outside the expected ephemeral root — refuse.
+        # Keep stop-server's contract (prints JSON + exits 0 on stop) intact;
+        # the session dir simply isn't cleaned in this case.
+        echo "stop-server: refusing to clean session dir outside /tmp/brainstorm-*: $SESSION_DIR_CANON" >&2
+        ;;
+    esac
+  else
+    echo "stop-server: unable to canonicalize SESSION_DIR, skipping cleanup: $SESSION_DIR" >&2
   fi
 
   echo '{"status": "stopped"}'

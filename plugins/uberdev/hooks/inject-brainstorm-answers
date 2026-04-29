@@ -41,16 +41,52 @@ consider() {
   fi
 }
 
+# Canonicalize a path without requiring it to exist. BSD realpath (default on
+# macOS) can't resolve non-existent paths and lacks `-m`, so prefer python3 and
+# fall back to `realpath` only when python3 is missing. Empty stdout = failure.
+canonicalize() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null
+  elif command -v realpath >/dev/null 2>&1; then
+    realpath "$1" 2>/dev/null
+  else
+    return 1
+  fi
+}
+
+# Reject if the candidate escapes $brainstorm_root or if any ancestor directory
+# (or the file itself) along the literal path is a symlink. This blocks the
+# attack where a malicious cwd plants a regular `events` file under a symlinked
+# parent dir — `[ -L "$f" ]` alone misses that, so we walk every component.
+is_safe_path() {
+  local root="$1" path="$2"
+  local canonical canonical_root
+  canonical="$(canonicalize "$path")" || return 1
+  canonical_root="$(canonicalize "$root")" || return 1
+  [ -n "$canonical" ] && [ -n "$canonical_root" ] || return 1
+  case "$canonical" in
+    "$canonical_root"/*) ;;
+    *) return 1 ;;
+  esac
+  # Walk literal path components: reject if any is a symlink.
+  local p="$path"
+  while [ "$p" != "$root" ] && [ "$p" != "/" ] && [ -n "$p" ]; do
+    [ -L "$p" ] && return 1
+    p="$(dirname "$p")"
+  done
+  return 0
+}
+
 # Refuse symlinked paths so an attacker controlling cwd can't redirect us at sensitive files.
 brainstorm_root="${PWD}/.uberdev/brainstorm"
-if [ -d "$brainstorm_root" ]; then
+if [ -d "$brainstorm_root" ] && [ ! -L "$brainstorm_root" ]; then
   while IFS= read -r f; do
-    [ -L "$f" ] && continue
+    is_safe_path "$brainstorm_root" "$f" || continue
     consider "$f"
   done < <(find "$brainstorm_root" -maxdepth 5 -type f -path "*/state/events" 2>/dev/null)
 fi
-# Legacy /tmp fallback — same symlink rule.
-if [ -f "/tmp/brainstorm/state/events" ] && [ ! -L "/tmp/brainstorm/state/events" ]; then
+# Legacy /tmp fallback — same symlink rule, with full ancestor walk.
+if [ -f "/tmp/brainstorm/state/events" ] && is_safe_path "/tmp/brainstorm" "/tmp/brainstorm/state/events"; then
   consider "/tmp/brainstorm/state/events"
 fi
 
