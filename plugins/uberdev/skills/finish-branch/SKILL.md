@@ -109,10 +109,14 @@ Both sections are read-only dumps; finish-branch does not block on confidence th
 QUESTIONS_FILE=""
 if [ -n "${RUN_ID:-}" ] && [ -f ".uberdev/research/$RUN_ID/questions.md" ]; then
   QUESTIONS_FILE=".uberdev/research/$RUN_ID/questions.md"
-elif [ -f ".uberdev/research/run-$(date +%Y%m%d)*/questions.md" ] 2>/dev/null; then
-  # Fallback: pick the most recent run-<RUN_ID>/questions.md for cases where
-  # $RUN_ID was not exported across processes.
-  QUESTIONS_FILE=$(ls -t .uberdev/research/*/questions.md 2>/dev/null | head -1)
+else
+  # Fallback: pick the most recent .uberdev/research/*/questions.md for cases
+  # where $RUN_ID was not exported across processes. (Glob expansion does NOT
+  # happen inside `[ -f ... ]`, so we use ls and a non-empty check instead.)
+  CANDIDATE=$(ls -t .uberdev/research/*/questions.md 2>/dev/null | head -1)
+  if [ -n "$CANDIDATE" ] && [ -f "$CANDIDATE" ]; then
+    QUESTIONS_FILE="$CANDIDATE"
+  fi
 fi
 
 # Read the post-impl-review aggregate (and pr-test-analyzer if present) for

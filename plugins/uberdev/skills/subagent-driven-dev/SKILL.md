@@ -252,10 +252,11 @@ Ownership map:
 [Dispatch implementer in shared worktree]
 [Controller commits → run full suite → spec review → fix loop → quality review → fix loop → mark complete]
 
-=== FINAL PASS ===
+=== AFTER ALL WAVES ===
 
-[Dispatch whole-implementation final reviewer]
-Final reviewer: All requirements met, ready to merge.
+[Per-wave uberdev:post-impl-review has already covered code quality across every wave]
+[For large tier: orchestrator Phase 5.5 dispatches pr-test-analyzer pre-merge after this skill returns]
+[No additional whole-implementation reviewer fanout from this skill]
 
 [Hand off to uberdev:finish-branch]
 ```

@@ -58,6 +58,7 @@ if [ -d "$RESEARCH_DIR" ]; then
       fi
       F_MTIME_EPOCH=$(stat -f %m "$F" 2>/dev/null || stat -c %Y "$F" 2>/dev/null)
       if [ -z "$ISSUE_UPDATED_EPOCH" ] || [ -z "$F_MTIME_EPOCH" ]; then
+        echo "warning: failed to normalise updatedAt or $F mtime; using full parallel dispatch for $TOPIC" >&2
         continue
       fi
       if [ "$F_MTIME_EPOCH" -lt "$ISSUE_UPDATED_EPOCH" ]; then
@@ -177,7 +178,7 @@ Invoke `uberdev:subagent-driven-dev` skill (NOT a Task() — actual skill invoca
 
 ### Phase 5.5: pr-test-analyzer (large tier only, pre-merge)
 
-After `subagent-driven-dev` returns control and BEFORE `finish-branch` dispatches PR creation, large-tier runs dispatch the `pr-test-analyzer` agent (single Task() call) with `commit_range` (`HEAD~N..HEAD` covering all wave commits), `spec_path`, `plan_path`, and `acceptance_criteria` extracted from the spec.
+After `subagent-driven-dev` returns control and BEFORE `finish-branch` dispatches PR creation, large-tier runs dispatch the `pr-test-analyzer` agent (single Task() call) with `commit_range` (`HEAD~N..HEAD` covering all wave commits), `spec_path`, `plan_path`, `acceptance_criteria` extracted from the spec, AND `summary_dir: .uberdev/research/$RUN_ID/`. The dispatch prompt MUST require the agent to write its findings to `<summary_dir>/pr-test-analyzer.md` (the canonical path `finish-branch` reads from when composing the PR body's `## Reviewer findings summary` section).
 
 Parse the analyzer's YAML return (`gaps[]`, `severity`, `confidence`). Append findings to the orchestrator's run-summary used by `finish-branch` for the PR body's `## Reviewer findings summary` section.
 

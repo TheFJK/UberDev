@@ -44,7 +44,7 @@ decisions:
 risks:
   - <one-line risk>
   ... (0-6 entries)
-next_phase_recommendation: auto | escalate-large | escalate-paranoid
+next_phase_recommendation: auto
 ```
 
 ## Authoring rules

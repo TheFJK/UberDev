@@ -49,7 +49,7 @@ decisions:
   - <one-line decision, e.g. "Recommend adding a test for recovery.ts before the bugfix lands">
 risks:
   - <one-line risk, e.g. "No matching source file for tests/foo.test.ts — possible orphan test">
-next_phase_recommendation: auto | escalate-large
+next_phase_recommendation: auto
 ```
 
 ## Authoring rules
