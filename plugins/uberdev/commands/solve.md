@@ -24,20 +24,29 @@ Editing rules:
 - Intentional deltas are flagged inline with `<!-- DELTA from /turbo: ... -->`
   comments. Do NOT remove these markers without first removing the divergence
   itself.
+- Inline `<!-- DELTA -->` markers are the source of truth; the list below is
+  an index for navigation only — when the index drifts from the inline
+  markers, the inline markers win.
 
-Known intentional deltas (top-of-file → bottom-of-file):
-  1. Description / page header / opening paragraph (interactive vs unattended).
-  2. Usage example (`/solve` vs `/turbo`).
-  3. `--auto` flag note (turbo has extra "max-autonomy combo" sentence).
-  4. Triage-table workflow column (solve mentions pre-collected research +
-     post-impl-review skill; turbo's table is shorter — see DELTA #4 note for
-     the historical divergence we have NOT yet harmonized).
-  5. Trivial/small bash-heredoc prompts (solve includes pre-collected-research
-     + post-impl-review steps that turbo's heredocs omit — see DELTA notes).
-  6. Medium-tier orchestrator prompt (`solve` vs `--turbo solve`).
-  7. Step 5.5 turbo-mode banner stderr emit (turbo only).
-  8. Step 6 ghostty comment (`/solve` vs `/turbo` in invoker reference).
-  9. Step 7 notify body (turbo appends `, turbo`).
+Known intentional deltas — index by section anchor (top-of-file → bottom-of-file):
+  - DELTA in the page header / opening paragraph (interactive vs unattended framing).
+  - DELTA in the Usage example (`/solve` vs `/turbo` invocation).
+  - DELTA in the `--auto` flag note (turbo's note has the extra "max-autonomy combo" sentence).
+  - DELTA in the Triage table's "Spawned workflow" column (solve mentions
+    pre-collected research + post-impl-review skill; turbo's row is shorter —
+    see the inline triage-table DELTA marker for the historical divergence we
+    have NOT yet harmonized).
+  - DELTA in Step 4's trivial bash heredoc (solve adds pre-collected-research +
+    post-impl-review steps that turbo's heredoc omits — see inline marker).
+  - DELTA in Step 4's small bash heredoc (same divergence as the trivial
+    heredoc — see inline marker).
+  - DELTA in Step 4's medium-tier orchestrator prompt (bare `solve` here vs
+    `--turbo solve` in turbo.md).
+  - DELTA in Step 5.5's turbo-mode banner stderr emit (turbo-only block; absent
+    from this file).
+  - DELTA in Step 6's ghostty comment (`/solve` vs `/turbo` in the invoker
+    reference text).
+  - DELTA in Step 7's notify body (turbo appends `, turbo`).
 
 If you find yourself editing the shared body in only one file: STOP and
 mirror to the other before committing.
@@ -59,14 +68,14 @@ Spawn an autonomous Claude agent in a new cmux workspace to solve GitHub issue *
 
 ## Triage heuristics (Step 3 applies this table)
 
-<!-- DELTA from /turbo: this table's trivial/small workflow column is RICHER
-than turbo.md's (mentions pre-collected research read + uberdev:post-impl-review
-skill invocation). turbo.md still says only "Direct edit → test → simplify → PR"
-in its triage table and its trivial/small bash heredocs likewise omit the
-pre-collected-research and post-impl-review steps. The harmonization (either
-add post-impl-review to /turbo's trivial/small, or remove from /solve's) is
-out of scope for the dedup pass — flagged for a follow-up. Do NOT silently
-"sync" the two tables; that would change behavior. -->
+<!-- DELTA from /turbo (Triage table workflow column): this table's trivial/small
+workflow column is RICHER than turbo.md's (mentions pre-collected research read
++ uberdev:post-impl-review skill invocation). turbo.md still says only "Direct
+edit → test → simplify → PR" in its triage table and its trivial/small bash
+heredocs likewise omit the pre-collected-research and post-impl-review steps.
+The harmonization (either add post-impl-review to /turbo's trivial/small, or
+remove from /solve's) is out of scope for the dedup pass — flagged for a
+follow-up. Do NOT silently "sync" the two tables; that would change behavior. -->
 
 | Tier | Signals (any strong match) | Spawned workflow |
 |------|----------------------------|------------------|
@@ -78,14 +87,11 @@ out of scope for the dedup pass — flagged for a follow-up. Do NOT silently
 
 ## Steps
 
-### 0. Prerequisites
-
-Fail fast if required CLIs are missing. The `session-start` hook only checks `jq` (see `hooks/session-start:14`); `gh` is not validated there, so this command-level guard catches the gap.
-
-```bash
-command -v gh >/dev/null 2>&1 || { echo "❌ gh CLI required — install via https://cli.github.com" >&2; exit 1; }
-command -v jq >/dev/null 2>&1 || { echo "❌ jq required — install via your package manager (brew install jq)" >&2; exit 1; }
-```
+<!-- Prereqs (gh, jq) verified at session start by hooks/session-start. The
+     previous `command -v gh` block here was theatre — Claude reads command
+     files as instructions, not bash, so the check was never actually executed
+     at command-invocation time. Real runtime guards live in the session-start
+     hook (jq fails the hook fast; gh injects a one-time warning when missing). -->
 
 ### 1. Parse arguments
 

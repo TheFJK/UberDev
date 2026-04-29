@@ -4,10 +4,20 @@ on:
   push:
   pull_request:
 
+# Least-privilege default. PR runs from forks otherwise inherit a write token
+# and would gate on enabling `Send write tokens to workflows from fork pull
+# requests` in repo settings. Read-only is sufficient for shape checks.
+permissions:
+  contents: read
+
 jobs:
   shape-checks:
     name: shape-checks
     runs-on: ubuntu-latest
+    # 5 minutes is generous for ~70 grep-and-assert checks on the small repo.
+    # Caps the default 360-min budget so a hung test from a fork PR can't burn
+    # the public-repo Actions allowance. Bump if the suite legitimately grows.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - name: Run shape-check tests

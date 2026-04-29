@@ -1,8 +1,8 @@
 // SECURITY NOTE: This WebSocket+HTTP server binds to localhost only and is
 // unauthenticated by design. It is for the single-user local brainstorm
 // visual companion — never expose it to a network interface or run on
-// shared/multi-user hosts. See plugins/uberdev/skills/brainstorm/SKILL.md
-// for the threat model.
+// shared/multi-user hosts. See the "Threat model" section in
+// plugins/uberdev/skills/brainstorm/SKILL.md for the full trust model.
 
 const crypto = require('crypto');
 const http = require('http');

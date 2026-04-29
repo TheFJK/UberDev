@@ -43,15 +43,32 @@ consider() {
 
 # Canonicalize a path without requiring it to exist. BSD realpath (default on
 # macOS) can't resolve non-existent paths and lacks `-m`, so prefer python3 and
-# fall back to `realpath` only when python3 is missing. Empty stdout = failure.
+# fall back to `realpath` only when python3 is missing.
+#
+# Stderr policy: capture both helpers' stderr into a temp variable and emit it
+# ONLY on total failure. Previous `2>/dev/null` everywhere collapsed real tool
+# errors (broken python3, ENOENT, etc) into the same silent return as a
+# legitimately rejected path — admins lost the signal needed to debug.
 canonicalize() {
+  local p="$1" out err=""
   if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null
-  elif command -v realpath >/dev/null 2>&1; then
-    realpath "$1" 2>/dev/null
-  else
-    return 1
+    out=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$p" 2>&1)
+    if [ $? -eq 0 ]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+    err="$out"
   fi
+  if command -v realpath >/dev/null 2>&1; then
+    out=$(realpath "$p" 2>&1)
+    if [ $? -eq 0 ]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+    err="${err}${err:+; }${out}"
+  fi
+  echo "inject-brainstorm-answers/canonicalize: failed to resolve '$p' (${err:-no python3 or realpath available})" >&2
+  return 1
 }
 
 # Reject if the candidate escapes $brainstorm_root or if any ancestor directory
@@ -78,16 +95,26 @@ is_safe_path() {
 }
 
 # Refuse symlinked paths so an attacker controlling cwd can't redirect us at sensitive files.
+# Rejections log to stderr so a deliberate symlink-attack attempt isn't silently dropped —
+# previously `is_safe_path … || continue` made an attacker-controlled cwd indistinguishable
+# from a legitimately empty events file.
 brainstorm_root="${PWD}/.uberdev/brainstorm"
 if [ -d "$brainstorm_root" ] && [ ! -L "$brainstorm_root" ]; then
   while IFS= read -r f; do
-    is_safe_path "$brainstorm_root" "$f" || continue
+    if ! is_safe_path "$brainstorm_root" "$f"; then
+      echo "inject-brainstorm-answers: rejected unsafe path (symlink or escape detected): $f" >&2
+      continue
+    fi
     consider "$f"
   done < <(find "$brainstorm_root" -maxdepth 5 -type f -path "*/state/events" 2>/dev/null)
 fi
 # Legacy /tmp fallback — same symlink rule, with full ancestor walk.
-if [ -f "/tmp/brainstorm/state/events" ] && is_safe_path "/tmp/brainstorm" "/tmp/brainstorm/state/events"; then
-  consider "/tmp/brainstorm/state/events"
+if [ -f "/tmp/brainstorm/state/events" ]; then
+  if is_safe_path "/tmp/brainstorm" "/tmp/brainstorm/state/events"; then
+    consider "/tmp/brainstorm/state/events"
+  else
+    echo "inject-brainstorm-answers: rejected unsafe path (symlink or escape detected): /tmp/brainstorm/state/events" >&2
+  fi
 fi
 
 # No pending answers, or only stale ones → exit silently.

@@ -249,3 +249,14 @@ AskUserQuestion({
 - The user wants to see live HTML/CSS mockups
 - Multiple design dimensions need parallel exploration
 - The decision is informed by visual artifacts, not just descriptions
+
+## Threat model
+
+The visual companion's WebSocket+HTTP server (`scripts/server.cjs`) is built around a **single-user, localhost-only** trust model — security guarantees are enforced by the operating environment, not by the server code itself.
+
+- **Localhost-only bind.** The server listens on `127.0.0.1` by design. Never override the bind address to a routable interface (`0.0.0.0`, `::`, or a specific external IP) — there is no transport encryption and no auth, so any reachable network peer would gain full read/write access to brainstorm session state.
+- **No authentication.** The protocol assumes the caller is the local user who started the server. There are no tokens, no per-origin checks beyond CORS-on-localhost, and no rate limits.
+- **Single-user assumption.** Do NOT run on a shared / multi-user host (e.g. a build agent, a VPS with multiple SSH users, a remote desktop). Any local user could connect to the loopback port and read/write session data.
+- **No exposure via reverse proxy or tunnel.** Do not front the server with nginx, Caddy, ngrok, Cloudflare Tunnel, or similar — that re-introduces the network-exposure risk the bind decision is designed to prevent.
+
+If the use case ever requires multi-user or network access, the correct path is a new server with a proper auth model — not loosening the bind address on this one.
