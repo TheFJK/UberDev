@@ -65,6 +65,19 @@ CI is light by design (this plugin is markdown + shell scripts, not a build pipe
 
 For pure markdown / docs edits, install the plugin locally and confirm the affected command or skill loads without warning (`/plugin` → Installed → `uberdev` shows no errors).
 
+### Running tests locally
+
+Run all shape-check tests with:
+
+```bash
+bash tests/turbo-flow.test.sh
+bash tests/issue-causal-fanout.test.sh
+bash tests/post-impl-review.test.sh
+bash tests/spec-reviewer-plan-aware.test.sh
+```
+
+These also run in CI on every push and PR (`.github/workflows/test.yml`). All four are shape-checks against prompt files — no runtime behavioral tests yet.
+
 ---
 
 ## Code of conduct

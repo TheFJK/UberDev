@@ -4,6 +4,54 @@ argument-hint: "<issue-number> [--trivial|--small|--full] [--auto] [--terminal=c
 allowed-tools: ["Bash", "Read", "Task"]
 ---
 
+<!--
+DUPLICATION NOTE — KEEP IN SYNC WITH commands/turbo.md.
+
+The bulk of this file (Steps 1-8 — argument parsing, repo detection, issue
+fetch/classify, launcher-script template, terminal detection, spawn dispatch,
+notify, post-action retitle) is byte-identical to commands/turbo.md by design.
+Claude Code commands do not support file partials / textual @-include — the
+`@${CLAUDE_PLUGIN_ROOT}/...` syntax attaches files as context for Claude to
+read, not as in-place text substitution — so we keep two parallel files
+instead of an extracted shared partial.
+
+Editing rules:
+- Any change to the shared procedural body (Steps 1-8 plumbing) MUST be
+  mirrored into the equivalent section of turbo.md before the edit lands.
+- Diff after editing: `diff -u plugins/uberdev/commands/{solve,turbo}.md`
+  should surface only the intentional deltas marked with `DELTA from /turbo`
+  comments below.
+- Intentional deltas are flagged inline with `<!-- DELTA from /turbo: ... -->`
+  comments. Do NOT remove these markers without first removing the divergence
+  itself.
+- Inline `<!-- DELTA -->` markers are the source of truth; the list below is
+  an index for navigation only — when the index drifts from the inline
+  markers, the inline markers win.
+
+Known intentional deltas — index by section anchor (top-of-file → bottom-of-file):
+  - DELTA in the page header / opening paragraph (interactive vs unattended framing).
+  - DELTA in the Usage example (`/solve` vs `/turbo` invocation).
+  - DELTA in the `--auto` flag note (turbo's note has the extra "max-autonomy combo" sentence).
+  - DELTA in the Triage table's "Spawned workflow" column (solve mentions
+    pre-collected research + post-impl-review skill; turbo's row is shorter —
+    see the inline triage-table DELTA marker for the historical divergence we
+    have NOT yet harmonized).
+  - DELTA in Step 4's trivial bash heredoc (solve adds pre-collected-research +
+    post-impl-review steps that turbo's heredoc omits — see inline marker).
+  - DELTA in Step 4's small bash heredoc (same divergence as the trivial
+    heredoc — see inline marker).
+  - DELTA in Step 4's medium-tier orchestrator prompt (bare `solve` here vs
+    `--turbo solve` in turbo.md).
+  - DELTA in Step 5.5's turbo-mode banner stderr emit (turbo-only block; absent
+    from this file).
+  - DELTA in Step 6's ghostty comment (`/solve` vs `/turbo` in the invoker
+    reference text).
+  - DELTA in Step 7's notify body (turbo appends `, turbo`).
+
+If you find yourself editing the shared body in only one file: STOP and
+mirror to the other before committing.
+-->
+
 # Solve GitHub Issue
 
 Spawn an autonomous Claude agent in a new cmux workspace to solve GitHub issue **#$ARGUMENTS**.
@@ -20,6 +68,15 @@ Spawn an autonomous Claude agent in a new cmux workspace to solve GitHub issue *
 
 ## Triage heuristics (Step 3 applies this table)
 
+<!-- DELTA from /turbo (Triage table workflow column): this table's trivial/small
+workflow column is RICHER than turbo.md's (mentions pre-collected research read
++ uberdev:post-impl-review skill invocation). turbo.md still says only "Direct
+edit → test → simplify → PR" in its triage table and its trivial/small bash
+heredocs likewise omit the pre-collected-research and post-impl-review steps.
+The harmonization (either add post-impl-review to /turbo's trivial/small, or
+remove from /solve's) is out of scope for the dedup pass — flagged for a
+follow-up. Do NOT silently "sync" the two tables; that would change behavior. -->
+
 | Tier | Signals (any strong match) | Spawned workflow |
 |------|----------------------------|------------------|
 | **trivial** | Labels: `typo`, `docs`, `documentation`, `chore`, `good-first-issue`. Body <300 chars after stripping markdown. Title matches `typo\|rename\|bump\|version\|readme`. No stack trace. Single file named. | Read pre-collected research (constraints, prior-art, security) → minimal edit → test (if touched code is tested) → `/uberdev:simplify` → `uberdev:post-impl-review` → PR. **No brainstorm, no multi-step plan.** |
@@ -29,6 +86,12 @@ Spawn an autonomous Claude agent in a new cmux workspace to solve GitHub issue *
 **When in doubt, default to medium/large.** The spawned agent is explicitly told it may escalate to `/uberdev:brainstorm` mid-flight if the scope proves larger than triaged — misclassification is recoverable, not catastrophic.
 
 ## Steps
+
+<!-- Prereqs (gh, jq) verified at session start by hooks/session-start. The
+     previous `command -v gh` block here was theatre — Claude reads command
+     files as instructions, not bash, so the check was never actually executed
+     at command-invocation time. Real runtime guards live in the session-start
+     hook (jq fails the hook fast; gh injects a one-time warning when missing). -->
 
 ### 1. Parse arguments
 
@@ -82,6 +145,15 @@ Determine `TIER`:
 
 ### 4. Write tier-appropriate prompt
 
+<!-- DELTA from /turbo: this entire Step 4 diverges between solve.md and
+turbo.md. /solve's trivial+small heredocs include `Read pre-collected
+research` (step 2) and `Invoke uberdev:post-impl-review skill` (step 7/6),
+which /turbo's heredocs omit. /solve's medium prompt is bare
+`/uberdev:orchestrator …`; /turbo's is `/uberdev:orchestrator --turbo …`.
+Do NOT mirror this section blindly across files — the divergence is
+intentional (post-impl-review wiring is being rolled in via /solve first,
+/turbo will follow in a later issue). -->
+
 **trivial:**
 
 ```bash
@@ -123,6 +195,10 @@ EOF
 
 **medium** *(and `--full`)*:
 
+<!-- DELTA from /turbo: bare `orchestrator …` here vs `orchestrator --turbo …`
+in turbo.md. The `--turbo` flag is what tells the orchestrator to auto-pick
+brainstorm answers instead of pausing for user input. -->
+
 ```bash
 echo "/uberdev:orchestrator solve GH issue #$ISSUE_NUM" > /tmp/solve-prompt-$ISSUE_NUM.txt
 ```
@@ -140,7 +216,7 @@ set -e
 export TERMINAL="DETECTED_TERMINAL"
 
 # cd to repo root (cmux may start in a different directory)
-# Path is quoted because repo paths may contain spaces (e.g. /Volumes/FJK SSD/...)
+# Path is quoted because repo paths may contain spaces (e.g. /Users/me/My Project/...)
 cd "REPO_ROOT"
 
 # Clean up stale worktree AND branch from previous runs

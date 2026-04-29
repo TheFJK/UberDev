@@ -272,11 +272,41 @@ For docs/typo issues unrelated to code logic:
 
 ## Configuration
 
-| Env var | Purpose | Default |
-|---|---|---|
-| `SOLVE_TERMINAL` | Override `/solve`'s terminal dispatcher (`cmux` / `ghostty` / `iterm` / `terminal` / `nohup`) | Auto-detect |
+Per-repo settings live in `.claude/uberdev.local.md` (YAML frontmatter; ignored by git). Env vars override file values.
 
-That's it. No `.env` files, no per-repo config, no plugin settings to wire up.
+```yaml
+---
+# Implemented — read by command logic today
+solve_terminal: ghostty       # ghostty | iterm | cmux | terminal | nohup
+solve_auto: false             # boolean — auto-accept brainstorm recommendations (=`/turbo` semantics)
+
+# Planned — documents the intended config surface; no parsing logic yet
+solve_tier_default: medium    # one of: small | medium | large
+review_depth: full            # quick | full
+parallel_solve: true          # boolean — fan out parallel /solve invocations
+---
+```
+
+### Implemented keys
+
+These are wired into command logic today.
+
+| Env var | File key | Purpose | Status |
+|---|---|---|---|
+| `SOLVE_TERMINAL` | `solve_terminal` | Override `/solve`'s terminal dispatcher (`cmux` / `ghostty` / `iterm` / `terminal` / `nohup`) | live |
+| `SOLVE_AUTO` | `solve_auto` | When `1`/`true`, spawned agent runs with `--permission-mode auto` | live |
+
+### Planned keys
+
+Documented to fix the config surface ahead of implementation; **the plugin does not yet parse these**, so setting them today is a no-op. Tracked for a future minor release.
+
+| File key | Intended purpose | Status |
+|---|---|---|
+| `solve_tier_default` | Default tier when `/solve` can't classify confidently (instead of the current "medium" hardcode) | planned |
+| `review_depth` | Switch `/uberdev:review-pr` between a quick subset and the full agent fanout | planned |
+| `parallel_solve` | Allow `/solve` to fan out parallel invocations across a queue of issues | planned |
+
+Precedence: CLI flag > env var > `.claude/uberdev.local.md` > default. Missing file → defaults apply silently. No `.env` files, no plugin settings to wire up.
 
 ---
 

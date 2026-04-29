@@ -4,6 +4,58 @@ argument-hint: "<issue-number> [--trivial|--small|--full] [--auto] [--terminal=c
 allowed-tools: ["Bash", "Read", "Task"]
 ---
 
+<!--
+DUPLICATION NOTE — KEEP IN SYNC WITH commands/solve.md.
+
+The bulk of this file (Steps 1-8 — argument parsing, repo detection, issue
+fetch/classify, launcher-script template, terminal detection, spawn dispatch,
+notify, post-action retitle) is byte-identical to commands/solve.md by design.
+Claude Code commands do not support file partials / textual @-include — the
+`@${CLAUDE_PLUGIN_ROOT}/...` syntax attaches files as context for Claude to
+read, not as in-place text substitution — so we keep two parallel files
+instead of an extracted shared partial.
+
+Editing rules:
+- Any change to the shared procedural body (Steps 1-8 plumbing) MUST be
+  mirrored into the equivalent section of solve.md before the edit lands.
+- Diff after editing: `diff -u plugins/uberdev/commands/{solve,turbo}.md`
+  should surface only the intentional deltas marked with `DELTA from /solve`
+  comments below.
+- Intentional deltas are flagged inline with `<!-- DELTA from /solve: ... -->`
+  comments. Do NOT remove these markers without first removing the divergence
+  itself.
+- Inline `<!-- DELTA -->` markers are the source of truth; the list below is
+  an index for navigation only — when the index drifts from the inline
+  markers, the inline markers win.
+
+Known intentional deltas — index by section anchor (top-of-file → bottom-of-file):
+  - DELTA in the page header / opening paragraph (unattended vs interactive framing).
+  - DELTA in the Usage example (`/turbo` vs `/solve` invocation).
+  - DELTA in the `--auto` flag note (this file's note has the extra "max-autonomy
+    combo" sentence).
+  - DELTA in the `Behavior vs /solve` callout (turbo-only block; absent from solve.md).
+  - DELTA in the Triage table's "Spawned workflow" column (turbo's trivial/small
+    are SHORTER than solve.md's — turbo omits the `Read pre-collected research`
+    and `uberdev:post-impl-review` steps; see the inline triage-table DELTA
+    marker for the historical divergence we have NOT yet harmonized).
+  - DELTA in the `Non-blocking Q&A (medium/large under --turbo)` paragraph
+    after the triage table (turbo-only block).
+  - DELTA in Step 4's trivial bash heredoc (turbo's heredoc omits the
+    pre-collected-research + post-impl-review steps solve.md includes —
+    see inline marker).
+  - DELTA in Step 4's small bash heredoc (same divergence as the trivial
+    heredoc — see inline marker).
+  - DELTA in Step 4's medium-tier orchestrator prompt (`--turbo solve` here
+    vs bare `solve` in solve.md).
+  - DELTA in Step 5.5's turbo-mode banner stderr emit (turbo-only block).
+  - DELTA in Step 6's ghostty comment (`/turbo` vs `/solve` in the invoker
+    reference text).
+  - DELTA in Step 7's notify body (turbo appends `, turbo`).
+
+If you find yourself editing the shared body in only one file: STOP and
+mirror to the other before committing.
+-->
+
 # Solve GitHub Issue (Unattended)
 
 Spawn an autonomous Claude agent in a new cmux workspace to solve GitHub issue **#$ARGUMENTS** with **brainstorm Q&A auto-answered**.
@@ -20,11 +72,23 @@ Spawn an autonomous Claude agent in a new cmux workspace to solve GitHub issue *
 - `--auto` → enable `--permission-mode auto` (Claude Code's AI classifier — auto-approves safe ops; blocks force push / `rm -rf` on pre-existing files / exfil / self-modification / `--dangerously-skip-permissions`). Else `SOLVE_AUTO=1` env var, else `solve_auto: true` in `.claude/uberdev.local.md`. Orthogonal to `/turbo`'s brainstorm-interactivity flag — **`/turbo <issue> --auto` is the max-autonomy combo**.
 - `SOLVE_GHOSTTY_NEW_WINDOW=1` env var → force the legacy *new window* dispatch instead of tab-spawning into the originating Ghostty window (Ghostty terminal only).
 
+<!-- DELTA from /solve: this `Behavior vs /solve` callout is turbo-only; it
+explains the brainstorm-loop collapse and post-impl review wiring for users
+arriving from /solve. -->
+
 **Behavior vs `/solve`:**
 - **trivial / small tiers:** identical to `/solve` (these tiers don't run brainstorm anyway).
 - **medium / large tiers:** brainstorm runs WITHOUT the clarifying-question loop. Parallel research still runs (recommendation grounding preserved). Spec → plan → implementation waves proceed in a single forward pass. After implementation, `subagent-driven-dev` invokes `uberdev:post-impl-review` (5-agent advisory fanout) per wave; large tier additionally fires `pr-test-analyzer` pre-merge. Findings are summarised in the PR body under `## Reviewer findings summary`.
 
 ## Triage heuristics (Step 3 applies this table)
+
+<!-- DELTA from /solve (Triage table workflow column): this table's trivial/small
+workflow column is SHORTER than solve.md's. solve.md mentions `Read pre-collected
+research` and `uberdev:post-impl-review` skill in those tiers; turbo's table
+here (and the matching bash heredocs in Step 4 below) does NOT. The
+harmonization (either add post-impl-review to turbo's trivial/small, or remove
+from solve's) is out of scope for the dedup pass — flagged for a follow-up.
+Do NOT silently "sync" the two tables; that would change behavior. -->
 
 | Tier | Signals (any strong match) | Spawned workflow |
 |------|----------------------------|------------------|
@@ -34,9 +98,18 @@ Spawn an autonomous Claude agent in a new cmux workspace to solve GitHub issue *
 
 **When in doubt, default to medium/large.** The spawned agent is explicitly told it may escalate to `/uberdev:brainstorm` mid-flight if the scope proves larger than triaged — misclassification is recoverable, not catastrophic.
 
+<!-- DELTA from /solve: this `Non-blocking Q&A` paragraph is turbo-only; it
+documents the auto-pick + log-to-PR-body machinery that backs --turbo. -->
+
 **Non-blocking Q&A (medium/large under `--turbo`):** as of #11, the orchestrator's Phase 2 generates clarifying questions in-thread, auto-picks each answer using research-bundle synthesis, and writes them to `.uberdev/research/$RUN_ID/questions.md`. `finish-branch` reads this file when composing the PR body and appends a `## Open questions answered by /turbo` table (Question | Choice | Confidence). This preserves the "best-guess + log" pattern (canonical per the GPT-5 prompting guide): the audit trail is in the PR body, ready for reviewer eyes, without blocking unattended execution. Low-confidence answers are highlighted but do NOT trigger automated blocking — that's a deferred follow-up (#11 Open question 3).
 
 ## Steps
+
+<!-- Prereqs (gh, jq) verified at session start by hooks/session-start. The
+     previous `command -v gh` block here was theatre — Claude reads command
+     files as instructions, not bash, so the check was never actually executed
+     at command-invocation time. Real runtime guards live in the session-start
+     hook (jq fails the hook fast; gh injects a one-time warning when missing). -->
 
 ### 1. Parse arguments
 
@@ -90,6 +163,14 @@ Determine `TIER`:
 
 ### 4. Write tier-appropriate prompt
 
+<!-- DELTA from /solve: this entire Step 4 diverges between solve.md and
+turbo.md. /turbo's trivial+small heredocs OMIT the `Read pre-collected
+research` step and the `Invoke uberdev:post-impl-review skill` step that
+solve.md includes. /turbo's medium prompt uses `--turbo` flag; solve.md does
+not. Do NOT mirror this section blindly across files — the divergence is
+intentional (post-impl-review wiring rolled into /solve first; /turbo will
+follow in a separate issue). -->
+
 **trivial:**
 
 ```bash
@@ -127,6 +208,10 @@ EOF
 
 **medium** *(and `--full`)*:
 
+<!-- DELTA from /solve: `--turbo` flag here vs bare `orchestrator …` in
+solve.md. The `--turbo` flag is what tells the orchestrator to auto-pick
+brainstorm answers instead of pausing for user input. -->
+
 ```bash
 echo "/uberdev:orchestrator --turbo solve GH issue #$ISSUE_NUM" > /tmp/solve-prompt-$ISSUE_NUM.txt
 ```
@@ -144,7 +229,7 @@ set -e
 export TERMINAL="DETECTED_TERMINAL"
 
 # cd to repo root (cmux may start in a different directory)
-# Path is quoted because repo paths may contain spaces (e.g. /Volumes/FJK SSD/...)
+# Path is quoted because repo paths may contain spaces (e.g. /Users/me/My Project/...)
 cd "REPO_ROOT"
 
 # Clean up stale worktree AND branch from previous runs
@@ -325,6 +410,9 @@ esac
 ### 7. Brief delay and confirm
 
 cmux's native notifier is preferred (matches existing UX); otherwise fall through to `terminal-notifier` then `osascript display notification`.
+
+<!-- DELTA from /solve: NOTIFY_BODY appends `, turbo` suffix so the desktop
+notification distinguishes /turbo runs from /solve runs at a glance. -->
 
 ```bash
 sleep 1

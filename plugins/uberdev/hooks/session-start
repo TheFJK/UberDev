@@ -22,6 +22,18 @@ if ! command -v jq >/dev/null 2>&1; then
     exit 0
 fi
 
+# Check for gh CLI — required by /solve, /turbo, /issue, /uberdev:finish-branch,
+# and uberdev:review-pr. Unlike jq (load-bearing for THIS hook's JSON output),
+# gh is consumed by downstream commands, so we don't fail the session — we just
+# inject a one-time warning into the additional-context block. The previous
+# `command -v gh` blocks at the top of commands/{solve,turbo,issue}.md were
+# theatre: Claude reads markdown command files as instructions, not bash, so
+# they were never actually executed. This is the real runtime guard.
+gh_warning=""
+if ! command -v gh >/dev/null 2>&1; then
+    gh_warning=$'\n\n<important-reminder>The `gh` CLI is not installed. Commands that depend on it (/solve, /turbo, /issue, /uberdev:finish-branch, /uberdev:review-pr) will fail with "command not found" when invoked. Install via https://cli.github.com (e.g. `brew install gh`).</important-reminder>'
+fi
+
 # Check if legacy skills directory exists and build warning
 warning_message=""
 legacy_skills_dir="${HOME}/.config/uberdev/skills"
@@ -34,7 +46,7 @@ using_uberdev_content=$(cat "${PLUGIN_ROOT}/skills/using-uberdev/SKILL.md" 2>/de
 
 # Build the full session context as a raw string, then let jq handle JSON
 # encoding in one shot — covers control bytes, quotes, backslashes, and `%`.
-session_context=$'<EXTREMELY_IMPORTANT>\nYou have uberdev superpowers.\n\n**Below is the full content of your \'uberdev:using-uberdev\' skill - your introduction to using skills. For all other skills, use the \'Skill\' tool:**\n\n'"${using_uberdev_content}"$'\n\n'"${warning_message}"$'\n</EXTREMELY_IMPORTANT>'
+session_context=$'<EXTREMELY_IMPORTANT>\nYou have uberdev superpowers.\n\n**Below is the full content of your \'uberdev:using-uberdev\' skill - your introduction to using skills. For all other skills, use the \'Skill\' tool:**\n\n'"${using_uberdev_content}"$'\n\n'"${warning_message}${gh_warning}"$'\n</EXTREMELY_IMPORTANT>'
 
 # Output context injection as JSON, built with jq so the string is encoded safely.
 # Cursor hooks expect additional_context (snake_case).

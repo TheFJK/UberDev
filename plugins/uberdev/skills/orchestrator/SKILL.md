@@ -65,7 +65,7 @@ if [ -d "$RESEARCH_DIR" ]; then
         continue
       fi
       VAR="SHORTCIRCUIT_$(echo "$TOPIC" | tr '[:lower:]-' '[:upper:]_')"
-      eval "$VAR=1"
+      declare "$VAR=1"  # was: eval "$VAR=1" — safer indirection, no shell-injection risk if VAR ever becomes attacker-controlled
     done
   fi
 fi

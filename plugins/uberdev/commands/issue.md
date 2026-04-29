@@ -14,6 +14,12 @@ Auto-classifies → investigates the codebase → checks duplicates (full-text, 
 
 ## Phase 0: Detect repo + parse flags
 
+<!-- Prereqs (gh, jq) verified at session start by hooks/session-start. The
+     previous `command -v gh` block here was theatre — Claude reads command
+     files as instructions, not bash, so the check was never actually executed
+     at command-invocation time. Real runtime guards live in the session-start
+     hook (jq fails the hook fast; gh injects a one-time warning when missing). -->
+
 ```bash
 REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 NO_EXPLORE=$(echo "$ARGUMENTS" | grep -qE '\-\-no-explore' && echo 1 || echo 0)
