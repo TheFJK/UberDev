@@ -18,6 +18,11 @@ ehthumbs.db
 docs/*
 !docs/rfc/
 
+# Local-only design notes under the plugin (testing.md is the only tracked file there)
+plugins/uberdev/docs/plans/
+plugins/uberdev/docs/uberdev/
+plugins/uberdev/docs/windows/
+
 # UberDev runtime state (e.g. brainstorm visual companion sessions)
 .uberdev/
 

@@ -272,11 +272,24 @@ For docs/typo issues unrelated to code logic:
 
 ## Configuration
 
-| Env var | Purpose | Default |
-|---|---|---|
-| `SOLVE_TERMINAL` | Override `/solve`'s terminal dispatcher (`cmux` / `ghostty` / `iterm` / `terminal` / `nohup`) | Auto-detect |
+Per-repo settings live in `.claude/uberdev.local.md` (YAML frontmatter; ignored by git). Env vars override file values.
 
-That's it. No `.env` files, no per-repo config, no plugin settings to wire up.
+```yaml
+---
+solve_tier_default: medium    # one of: small | medium | large
+review_depth: full            # quick | full
+solve_terminal: ghostty       # ghostty | iterm | cmux
+parallel_solve: true          # boolean — fan out parallel /solve invocations
+solve_auto: false             # boolean — auto-accept brainstorm recommendations (=`/turbo` semantics)
+---
+```
+
+| Env var | File key | Purpose |
+|---|---|---|
+| `SOLVE_TERMINAL` | `solve_terminal` | Override `/solve`'s terminal dispatcher (`cmux` / `ghostty` / `iterm` / `terminal` / `nohup`) |
+| `SOLVE_AUTO` | `solve_auto` | When `1`/`true`, spawned agent runs with `--permission-mode auto` |
+
+Precedence: CLI flag > env var > `.claude/uberdev.local.md` > default. Missing file → defaults apply silently. No `.env` files, no plugin settings to wire up.
 
 ---
 

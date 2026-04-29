@@ -14,7 +14,12 @@ Auto-classifies → investigates the codebase → checks duplicates (full-text, 
 
 ## Phase 0: Detect repo + parse flags
 
+Fail fast if required CLIs are missing. The `session-start` hook only checks `jq` (see `hooks/session-start:14`); `gh` is not validated there, so this command-level guard catches the gap.
+
 ```bash
+command -v gh >/dev/null 2>&1 || { echo "❌ gh CLI required — install via https://cli.github.com" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "❌ jq required — install via your package manager (brew install jq)" >&2; exit 1; }
+
 REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 NO_EXPLORE=$(echo "$ARGUMENTS" | grep -qE '\-\-no-explore' && echo 1 || echo 0)
 DESC=$(echo "$ARGUMENTS" | sed -E 's/ *--no-explore//g')

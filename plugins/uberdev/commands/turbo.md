@@ -96,6 +96,15 @@ documents the auto-pick + log-to-PR-body machinery that backs --turbo. -->
 
 ## Steps
 
+### 0. Prerequisites
+
+Fail fast if required CLIs are missing. The `session-start` hook only checks `jq` (see `hooks/session-start:14`); `gh` is not validated there, so this command-level guard catches the gap.
+
+```bash
+command -v gh >/dev/null 2>&1 || { echo "❌ gh CLI required — install via https://cli.github.com" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "❌ jq required — install via your package manager (brew install jq)" >&2; exit 1; }
+```
+
 ### 1. Parse arguments
 
 Extract issue number (first numeric token) + optional override flag:

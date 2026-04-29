@@ -3,22 +3,22 @@
   "hooks": {
     "sessionStart": [
       {
-        "command": "./hooks/session-start"
+        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-start"
       }
     ],
     "userPromptSubmit": [
       {
-        "command": "./hooks/inject-brainstorm-answers"
+        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inject-brainstorm-answers"
       }
     ],
     "sessionEnd": [
       {
-        "command": "./hooks/session-end"
+        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-end"
       }
     ],
     "preCompact": [
       {
-        "command": "./hooks/pre-compact"
+        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pre-compact"
       }
     ]
   }
