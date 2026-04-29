@@ -4,7 +4,7 @@
 
 **A personal Claude Code marketplace bundling opinionated GitHub-workflow slash commands.**
 
-[![Version](https://img.shields.io/badge/version-0.7.1-blue)](https://github.com/TheFJK/UberDev)
+[![Version](https://img.shields.io/badge/version-0.8.0-blue)](https://github.com/TheFJK/UberDev)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8B5CF6)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Repo Agnostic](https://img.shields.io/badge/repo--agnostic-yes-success)](#configuration)
@@ -203,7 +203,9 @@ flowchart TD
 - [ ] P3 — minor / cosmetic
 
 ## Likely root cause
-[Analysis from Phase 2 — connect symptom to specific code]
+- **Symptom:** [observable failure mode in user-facing terms]
+- **Mechanism:** [the specific code/data path that produces the symptom; cite a concrete artifact such as a function call site, log line, or config value]
+- **Owning code:** `path/to/File` — `Class.method()` — [why this is the assumption to challenge]
 
 ## Likely area
 - `path/to/File` — `ClassName.methodName()` — [why relevant]
@@ -229,8 +231,8 @@ flowchart TD
 ## Relevant code
 - `path/to/File` — `ClassName` — [how it relates]
 
-## Proposed approach
-[Implementation strategy informed by Phase 2 investigation]
+## What changes
+[The capability being added or behavior being modified — externally visible result, contract change, or new affordance. No implementation strategy.]
 
 ## Acceptance criteria
 - [ ] [criterion]
@@ -377,9 +379,10 @@ Result: maximum parallelism on edits, deterministic commit history, zero merge c
 | **v0.5.0** | Released | **Hardening + perf + new platform features.** Security: closes RCE in `/solve` (drops `--dangerously-skip-permissions`), prompt-injection in `inject-brainstorm-answers` (per-line JSON validation, `<`/`>` escaping, symlinked-path refusal), and fragile JSON in `session-start` (jq-based encoding). Critical bug fix: v0.4.0 `/issue` parallel fanout was silently broken — vars now resolved in orchestrator and baked literally into each subagent brief. Perf: 5 detail agents → Haiku 4.5 (~15-20% wall-time on `/uberdev:review-pr`); per-line `jq` fork in brainstorm-answers hook → streaming `jq -R 'fromjson?'` (~200-500ms saved per user prompt). New: `SessionEnd` + `PreCompact` hooks; `.claude/uberdev.local.md` per-project config; `AskUserQuestion` fast-path in `brainstorm`; cross-platform `sed -i` in `/solve`; YAML frontmatter on `/issue` and `/solve`; tightened `allowed-tools`; `CONTRIBUTING.md` + `CHANGELOG.md` (Keep-a-Changelog 1.1.0); stack-agnostic `code-simplifier`. |
 | **v0.6.0** | Released | **Unattended workflow + Ghostty integration.** New `/turbo <issue>` — unattended `/solve` that auto-accepts brainstorm recommendations for medium/large tier (parallel research still runs — recommendation grounding preserved); trivial/small tier behaves identically to `/solve`. New `/solve --auto` and `/turbo --auto` flags enable Claude Code's `--permission-mode auto` classifier (auto-approves safe ops; blocks force push, exfil, self-modification, `--dangerously-skip-permissions`). `/solve` and `/turbo` Ghostty dispatcher tab-spawns into the originating Ghostty window when invoked from inside Ghostty (per-project workspaces stay grouped); `SOLVE_GHOSTTY_NEW_WINDOW=1` forces legacy new-window dispatch; AppleScript failures fall back automatically. `brainstorm` skill: parallel research dispatch promoted to default first step (proposed approaches grounded in research synthesis, not speculation). Removed deprecated slash-command shims `/uberdev:brainstorm`, `/uberdev:execute-plan`, `/uberdev:write-plan` (Superpowers-port leftovers — invoke skills directly via the Skill tool). |
 | **v0.7.0** | Released | **Writer-subagent orchestrator.** New `/uberdev:orchestrator` skill — 5-phase pipeline used by `/solve` and `/turbo` for medium/large tier: research fanout (parallel Sonnet subagents) → optional Q&A (skipped for `/turbo`) → spec-writer (Opus) → optional spec-reviewer (Opus, gated by `--paranoid` for medium tier; always for large tier) → plan-writer (Opus, with internal research fanout) → existing `subagent-driven-dev`. Each writer returns a structured YAML summary; orchestrator main holds pointers, not raw artifacts — reclaims context for wave dispatch and error recovery. 8 new agent definitions: `research-codebase`, `research-patterns`, `research-prior-art`, `research-constraints` (Sonnet); `spec-writer`, `spec-reviewer`, `spec-reviser`, `plan-writer` (Opus). New `--paranoid` flag enables spec-reviewer for medium tier. `/solve` and `/turbo` medium/large prompts now invoke `/uberdev:orchestrator` instead of `/uberdev:brainstorm` directly; trivial/small paths unchanged. `write-plan` execution handoff is now non-interactive (default subagent-driven, explicit opt-in for inline). Closes #5 architecturally — `/turbo` no longer halts on a "Subagent-Driven vs. Inline Execution?" prompt. |
-| **v0.7.1** | Current | **`/turbo` end-to-end unattended chain.** Threads `--turbo` through every handoff (`brainstorm` → `write-plan` → `subagent-driven-dev` → `finish-branch`, plus the `orchestrator` Phase 5 → `subagent-driven-dev` link that PR #8 introduced). `finish-branch` auto-selects "Push and Create PR" under `--turbo` instead of prompting; pre-existing Step 5 contradiction (Quick Reference / Red Flags said cleanup runs only for Options 1 & 4, but Step 5 listed Options 1, 2, 4) resolved in favor of consistency — Option 2 leaves the worktree alive for PR-feedback fixups. New `tests/turbo-flow.test.sh` (9 contract assertions) locks the `--turbo` propagation contract at every handoff site so a future skill edit can't silently re-attend the flow. |
-| **v0.8** | Maybe | Optional per-repo `.claude/board.json` for re-enabling project-board auto-add |
-| **v0.9** | Maybe | Linux + Windows terminal dispatchers; configurable model pin via env |
+| **v0.7.1** | Released | **`/turbo` end-to-end unattended chain.** Threads `--turbo` through every handoff (`brainstorm` → `write-plan` → `subagent-driven-dev` → `finish-branch`, plus the `orchestrator` Phase 5 → `subagent-driven-dev` link that PR #8 introduced). `finish-branch` auto-selects "Push and Create PR" under `--turbo` instead of prompting; pre-existing Step 5 contradiction (Quick Reference / Red Flags said cleanup runs only for Options 1 & 4, but Step 5 listed Options 1, 2, 4) resolved in favor of consistency — Option 2 leaves the worktree alive for PR-feedback fixups. New `tests/turbo-flow.test.sh` (9 contract assertions) locks the `--turbo` propagation contract at every handoff site so a future skill edit can't silently re-attend the flow. |
+| **v0.8.0** | Current | **`/uberdev:issue` deep root-cause research fanout + WHAT/HOW boundary.** Phase 2 dispatches a 2-agent parallel fanout (`research-codebase` + `research-patterns`) alongside the existing Phase 3/4 agents — four agents fan out together in a single message; Phase 4.5 aggregates all four returns. Bug-template `## Likely root cause` becomes a causal triple (Symptom / Mechanism / Owning code) with optional 5 Whys for non-trivial bugs; bare file-path lists in this section are forbidden. Feat-template `## Proposed approach` is renamed to `## What changes` (field-name pressure replaces rules-text pressure). New "Body authoring rules" subsection ahead of the templates codifies WHAT/HOW. Research summaries persist to `.uberdev/research/issue-<N>/` (renamed from `run-<RUN_ID>/` after `gh issue create`); `/uberdev:brainstorm` step 2 short-circuits on this directory per-topic with mtime-based staleness fallback, eliminating the duplicate codebase-research round when invoked downstream of `/issue`. New `tests/issue-causal-fanout.test.sh` (structural assertions, modelled on `tests/turbo-flow.test.sh`) locks the contract invariants. RFC at `docs/rfc/2026-04-29-issue-deep-root-cause-research-fanout.md`. No breaking change — `**Triage hint:**`, severity checkboxes, label format, and conventional-commit titles preserved verbatim. Closes #9. |
+| **v0.9** | Maybe | Optional per-repo `.claude/board.json` for re-enabling project-board auto-add |
+| **v0.10** | Maybe | Linux + Windows terminal dispatchers; configurable model pin via env |
 
 ---
 

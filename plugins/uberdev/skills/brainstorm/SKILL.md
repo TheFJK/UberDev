@@ -24,7 +24,7 @@ Every project goes through this process. A todo list, a single-function utility,
 You MUST create a task for each of these items and complete them in order:
 
 1. **Explore project context** — check files, docs, recent commits
-2. **Dispatch parallel research agents** (heuristic from prompt) — 2-3 `Explore`/`general-purpose` agents in one message researching codebase patterns, prior art, and library docs; synthesize findings (3-5 bullets) before continuing. Skip only for truly trivial tasks. See "Parallel research dispatch" below.
+2. **Dispatch parallel research agents** (heuristic from prompt) — 2-3 `Explore`/`general-purpose` agents in one message researching codebase patterns, prior art, and library docs; synthesize findings (3-5 bullets) before continuing. Skip only for truly trivial tasks. **Issue-research short-circuit:** if invoked with an issue number context (e.g. via `/solve <N>` or `/turbo <N>`) and `.uberdev/research/issue-<N>/` exists, read its summaries (`codebase.md` and, if present, `patterns.md`) and treat them as the codebase + in-repo-prior-art research input — skip dispatching the equivalent agents. The short-circuit is **per-topic**, not all-or-nothing: continue to dispatch agents for topics not covered (e.g. external prior art via WebSearch/Context7). See "Parallel research dispatch" and "Issue-research short-circuit" below.
 3. **Offer visual companion** (if topic will involve visual questions) — its own message, not combined with a clarifying question. See the Visual Companion section below.
 4. **Ask clarifying questions** — one at a time, informed by research; understand purpose/constraints/success criteria *(skipped in turbo mode — see "Turbo Mode" section)*
 5. **Propose 2-3 approaches** — with trade-offs and your recommendation, grounded in research findings
@@ -83,6 +83,41 @@ Heuristics for inferring research questions:
 Synthesize findings into a brief summary before engaging the user with clarifying questions. The 2-3 approaches you propose later MUST be grounded in this research, not speculation.
 
 For architecturally consequential choices, this pattern also supports independent parallel exploration of design directions (one agent per direction). See `uberdev:dispatching-parallel-agents`.
+
+**Issue-research short-circuit (when an issue number is in scope):**
+
+When this skill is invoked downstream of `/uberdev:issue` (i.e. the conversation has an issue number), `/issue` may have already run a 2-agent fanout (`research-codebase` + `research-patterns`) and persisted summaries to `.uberdev/research/issue-<N>/`. Read those instead of re-dispatching:
+
+```bash
+RESEARCH_DIR=".uberdev/research/issue-$ISSUE"
+if [ -d "$RESEARCH_DIR" ] && [ -f "$RESEARCH_DIR/codebase.md" ]; then
+  ISSUE_UPDATED_ISO=$(gh issue view "$ISSUE" --json updatedAt --jq .updatedAt)
+  # Normalise both timestamps to epoch seconds for portable comparison
+  # (BSD/macOS first, GNU/Linux fallback). Avoids the macOS/Linux mtime-format
+  # mismatch that would silently mis-rank summaries against gh's RFC-3339 output.
+  ISSUE_UPDATED_EPOCH=$(date -j -f '%Y-%m-%dT%H:%M:%SZ' "$ISSUE_UPDATED_ISO" +%s 2>/dev/null \
+                      || date -d "$ISSUE_UPDATED_ISO" +%s)
+  CODEBASE_MTIME_EPOCH=$(stat -f %m "$RESEARCH_DIR/codebase.md" 2>/dev/null \
+                       || stat -c %Y "$RESEARCH_DIR/codebase.md")
+  if [ "$CODEBASE_MTIME_EPOCH" -lt "$ISSUE_UPDATED_EPOCH" ]; then
+    # Stale: research summary is older than the most recent issue-body edit
+    # → fall through to the full parallel-dispatch path so re-research picks up the change.
+    :
+  else
+    # Fresh: read codebase.md (and patterns.md if present) verbatim into the synthesis
+    # step. Per-topic skip flags tell the dispatch step which agents to omit.
+    SHORTCIRCUIT_CODEBASE=1
+    [ -f "$RESEARCH_DIR/patterns.md" ] && SHORTCIRCUIT_PATTERNS=1
+  fi
+fi
+```
+
+- **Per-topic skip, not all-or-nothing.** If `codebase.md` exists, skip the codebase-equivalent agent. If `patterns.md` exists, skip the in-repo-prior-art agent. Continue to dispatch agents for topics NOT covered (e.g. external prior art via WebSearch/Context7).
+- **Stale check.** If the summary's mtime is older than `gh issue view <N> --json updatedAt --jq .updatedAt`, the issue body was edited after the research ran — fall back to the full parallel dispatch.
+- **Malformed-summary fallback.** If the directory exists but the summary file is missing the `summary` section or is otherwise unreadable, log a one-line warning and fall through to the full parallel dispatch. Do not block.
+- **Backwards compatibility.** Issues created before this change have no `.uberdev/research/issue-<N>/` directory; `[ -d ... ]` returns false and the skill proceeds with the existing parallel-dispatch path. No data migration needed.
+
+The synthesis step reads the summary text into context verbatim; no re-derivation required.
 
 **Skip parallel research only when:**
 - Truly trivial: config tweak, rename, single-line fix, typo
