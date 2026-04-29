@@ -1,3 +1,11 @@
+<!--
+  This file is a thin Task-tool dispatch wrapper that delegates to the `uberdev:code-reviewer`
+  agent. The full reviewer prompt (checklist + output format + example) lives in:
+  ../requesting-code-review/code-reviewer.md
+  Both files share the Strengths / Critical / Important / Minor verdict shape — keep that
+  verdict shape in sync if one side changes.
+-->
+
 # Code Quality Reviewer Prompt Template
 
 Use this template when dispatching a code quality reviewer subagent.

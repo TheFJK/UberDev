@@ -1,9 +1,11 @@
 ---
 name: code-simplifier
 description: |
-  Use this agent when code has been written or modified and needs to be simplified for clarity, consistency, and maintainability while preserving all functionality. This agent should be triggered automatically after completing a coding task or writing a logical chunk of code. It simplifies code by following project best practices while retaining all functionality. The agent focuses only on recently modified code unless instructed otherwise.
+  Use ONLY when explicitly invoked via the `/uberdev:simplify` command, or by the `subagent-driven-dev` skill's post-wave step (via the `uberdev:post-impl-review` fanout). Do not auto-trigger on conversational mentions of "simplify", "clean up", "refactor", or after generic coding work — let the user or the controller dispatch this agent intentionally to avoid duplicating work that the per-wave post-impl-review fanout already performs.
 
-  Examples:
+  When invoked, the agent simplifies recently-modified code for clarity, consistency, and maintainability while preserving all functionality. It applies project best practices without altering behavior. The agent focuses only on recently modified code unless instructed otherwise.
+
+  Examples (illustrating the simplification logic — these are NOT auto-trigger licenses; the gating rule above still applies):
 
   <example>
   Context: The assistant has just implemented a new feature that adds user authentication to an API endpoint.

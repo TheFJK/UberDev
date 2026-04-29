@@ -1,3 +1,11 @@
+<!--
+  This file is the canonical full code-reviewer prompt template (checklist + output format + example).
+  Mirror file: ../subagent-driven-dev/code-quality-reviewer-prompt.md, which is a thin Task-tool
+  dispatch wrapper that delegates to the `uberdev:code-reviewer` agent. Both files share the
+  Strengths / Critical / Important / Minor verdict shape — keep that verdict shape in sync if
+  one side changes.
+-->
+
 # Code Review Agent
 
 You are reviewing code changes for production readiness.

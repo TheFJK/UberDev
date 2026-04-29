@@ -1,3 +1,11 @@
+<!--
+  Shared skeleton: ../_shared/document-reviewer-template.md
+  Substitute: [DOCUMENT_TYPE] = spec, [DOCUMENT_TYPE_TITLE] = Spec.
+  Mirror file: ../write-plan/plan-document-reviewer-prompt.md.
+  Claude Code skills do not auto-include partials — when the skeleton changes,
+  update the inline content here AND in the mirror file manually.
+-->
+
 # Spec Document Reviewer Prompt Template
 
 Use this template when dispatching a spec document reviewer subagent.
