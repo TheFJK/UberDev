@@ -25,4 +25,5 @@ jobs:
           bash tests/turbo-flow.test.sh && \
           bash tests/issue-causal-fanout.test.sh && \
           bash tests/post-impl-review.test.sh && \
-          bash tests/spec-reviewer-plan-aware.test.sh
+          bash tests/spec-reviewer-plan-aware.test.sh && \
+          bash tests/audit-fixups.test.sh
