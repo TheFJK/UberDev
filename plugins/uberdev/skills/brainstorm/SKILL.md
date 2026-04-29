@@ -91,23 +91,36 @@ When this skill is invoked downstream of `/uberdev:issue` (i.e. the conversation
 ```bash
 RESEARCH_DIR=".uberdev/research/issue-$ISSUE"
 if [ -d "$RESEARCH_DIR" ] && [ -f "$RESEARCH_DIR/codebase.md" ]; then
-  ISSUE_UPDATED_ISO=$(gh issue view "$ISSUE" --json updatedAt --jq .updatedAt)
-  # Normalise both timestamps to epoch seconds for portable comparison
-  # (BSD/macOS first, GNU/Linux fallback). Avoids the macOS/Linux mtime-format
-  # mismatch that would silently mis-rank summaries against gh's RFC-3339 output.
-  ISSUE_UPDATED_EPOCH=$(date -j -f '%Y-%m-%dT%H:%M:%SZ' "$ISSUE_UPDATED_ISO" +%s 2>/dev/null \
-                      || date -d "$ISSUE_UPDATED_ISO" +%s)
-  CODEBASE_MTIME_EPOCH=$(stat -f %m "$RESEARCH_DIR/codebase.md" 2>/dev/null \
-                       || stat -c %Y "$RESEARCH_DIR/codebase.md")
-  if [ "$CODEBASE_MTIME_EPOCH" -lt "$ISSUE_UPDATED_EPOCH" ]; then
-    # Stale: research summary is older than the most recent issue-body edit
-    # → fall through to the full parallel-dispatch path so re-research picks up the change.
-    :
+  # Malformed-summary check — file must contain a `summary` field per the
+  # research-codebase YAML return contract. If absent, fall through with a warning
+  # rather than read garbage into the synthesis step.
+  if ! grep -q '^summary:' "$RESEARCH_DIR/codebase.md"; then
+    echo "warning: $RESEARCH_DIR/codebase.md missing 'summary:' field; using full parallel dispatch" >&2
   else
-    # Fresh: read codebase.md (and patterns.md if present) verbatim into the synthesis
-    # step. Per-topic skip flags tell the dispatch step which agents to omit.
-    SHORTCIRCUIT_CODEBASE=1
-    [ -f "$RESEARCH_DIR/patterns.md" ] && SHORTCIRCUIT_PATTERNS=1
+    ISSUE_UPDATED_ISO=$(gh issue view "$ISSUE" --json updatedAt --jq .updatedAt 2>/dev/null)
+    if [ -z "$ISSUE_UPDATED_ISO" ]; then
+      echo "warning: failed to fetch issue #$ISSUE updatedAt (gh auth/network/missing); using full parallel dispatch" >&2
+    else
+      # Normalise both timestamps to epoch seconds for portable comparison
+      # (BSD/macOS first, GNU/Linux fallback). Avoids the macOS/Linux mtime-format
+      # mismatch that would silently mis-rank summaries against gh's RFC-3339 output.
+      ISSUE_UPDATED_EPOCH=$(date -j -f '%Y-%m-%dT%H:%M:%SZ' "$ISSUE_UPDATED_ISO" +%s 2>/dev/null \
+                          || date -d "$ISSUE_UPDATED_ISO" +%s 2>/dev/null)
+      CODEBASE_MTIME_EPOCH=$(stat -f %m "$RESEARCH_DIR/codebase.md" 2>/dev/null \
+                           || stat -c %Y "$RESEARCH_DIR/codebase.md" 2>/dev/null)
+      if [ -z "$ISSUE_UPDATED_EPOCH" ] || [ -z "$CODEBASE_MTIME_EPOCH" ]; then
+        echo "warning: failed to normalise updatedAt or codebase.md mtime; using full parallel dispatch" >&2
+      elif [ "$CODEBASE_MTIME_EPOCH" -lt "$ISSUE_UPDATED_EPOCH" ]; then
+        # Stale: research summary is older than the most recent issue-body edit
+        # → fall through to the full parallel-dispatch path so re-research picks up the change.
+        :
+      else
+        # Fresh: read codebase.md (and patterns.md if present) verbatim into the synthesis
+        # step. Per-topic skip flags tell the dispatch step which agents to omit.
+        SHORTCIRCUIT_CODEBASE=1
+        [ -f "$RESEARCH_DIR/patterns.md" ] && SHORTCIRCUIT_PATTERNS=1
+      fi
+    fi
   fi
 fi
 ```

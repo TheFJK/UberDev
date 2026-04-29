@@ -231,11 +231,23 @@ ISSUE_NUM=$(echo "$ISSUE_URL" | grep -oE '[0-9]+$')
 ```
 
 ```bash
+if [ -z "$ISSUE_NUM" ]; then
+  echo "error: gh issue create did not return a parseable URL: '$ISSUE_URL'" >&2
+  echo "error: research artifacts remain at $SUMMARY_DIR (not bound to an issue)" >&2
+  return 1
+fi
 if [ -d "$SUMMARY_DIR" ]; then
   if ! mv "$SUMMARY_DIR" ".uberdev/research/issue-$ISSUE_NUM" 2>/dev/null; then
-    # Cross-filesystem fallback (e.g. tmpfs vs. local mount)
-    cp -R "$SUMMARY_DIR" ".uberdev/research/issue-$ISSUE_NUM" && rm -rf "$SUMMARY_DIR"
-    echo "warning: SUMMARY_DIR rename used cp+rm fallback (cross-filesystem)" >&2
+    # mv failed (typically cross-filesystem EXDEV; could also be perms/disk).
+    if cp -R "$SUMMARY_DIR" ".uberdev/research/issue-$ISSUE_NUM"; then
+      echo "warning: SUMMARY_DIR rename used cp+rm fallback (cross-filesystem)" >&2
+      if ! rm -rf "$SUMMARY_DIR"; then
+        echo "warning: cp succeeded but rm failed; both copies remain on disk" >&2
+      fi
+    else
+      echo "error: both mv and cp failed; research artifacts remain at $SUMMARY_DIR (manual cleanup required)" >&2
+      return 1
+    fi
   fi
 fi
 ```

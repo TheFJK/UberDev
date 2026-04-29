@@ -105,6 +105,15 @@ echo "== Phase 7 binds artifacts to issue number =="
 assert_grep "$ISSUE_CMD" \
   'mv "\$SUMMARY_DIR" "\.uberdev/research/issue-\$ISSUE_NUM"' \
   "Phase 7 renames SUMMARY_DIR to .uberdev/research/issue-\$ISSUE_NUM"
+assert_grep "$ISSUE_CMD" \
+  'warning: SUMMARY_DIR rename used cp\+rm fallback' \
+  "Phase 7 cp+rm fallback emits a stderr warning"
+assert_grep "$ISSUE_CMD" \
+  'error: gh issue create did not return a parseable URL' \
+  "Phase 7 guards against empty ISSUE_NUM with explicit error"
+assert_grep "$ISSUE_CMD" \
+  'error: both mv and cp failed' \
+  "Phase 7 escalates when both mv and cp fail (no silent loss)"
 
 echo
 echo "== Body authoring rules subsection present =="
@@ -126,6 +135,15 @@ assert_grep "$BRAINSTORM" \
 assert_grep "$BRAINSTORM" \
   'gh issue view.*updatedAt|updatedAt.*gh issue view' \
   "brainstorm stale check uses gh issue view updatedAt"
+assert_grep "$BRAINSTORM" \
+  'CODEBASE_MTIME_EPOCH.*-lt.*ISSUE_UPDATED_EPOCH' \
+  "brainstorm stale check uses -lt operator (summary older than issue update = stale)"
+assert_grep "$BRAINSTORM" \
+  'missing.*summary:.*field|summary:.*missing' \
+  "brainstorm implements the malformed-summary fallback the prose claims"
+assert_grep "$BRAINSTORM" \
+  'failed to fetch.*updatedAt|gh auth/network' \
+  "brainstorm warns and falls through when gh issue view returns empty"
 assert_grep "$BRAINSTORM" \
   'Per-topic skip|per-topic, not all-or-nothing' \
   "brainstorm short-circuit is documented as per-topic, not all-or-nothing"
