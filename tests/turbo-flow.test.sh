@@ -16,6 +16,7 @@ BRAINSTORM="$REPO_ROOT/plugins/uberdev/skills/brainstorm/SKILL.md"
 WRITE_PLAN="$REPO_ROOT/plugins/uberdev/skills/write-plan/SKILL.md"
 SUBAGENT_DRIVEN="$REPO_ROOT/plugins/uberdev/skills/subagent-driven-dev/SKILL.md"
 FINISH_BRANCH="$REPO_ROOT/plugins/uberdev/skills/finish-branch/SKILL.md"
+ORCHESTRATOR="$REPO_ROOT/plugins/uberdev/skills/orchestrator/SKILL.md"
 TURBO_CMD="$REPO_ROOT/plugins/uberdev/commands/turbo.md"
 
 PASS=0
@@ -70,7 +71,6 @@ echo
 echo "== orchestrator forwards --turbo into subagent-driven-dev =="
 # Orchestrator → subagent-driven-dev is the medium/large /turbo handoff site.
 # Without --turbo here, finish-branch still prompts at the end of the pipeline.
-ORCHESTRATOR="$REPO_ROOT/plugins/uberdev/skills/orchestrator/SKILL.md"
 assert_grep "$ORCHESTRATOR" \
   '--turbo.*subagent-driven-dev|subagent-driven-dev.*--turbo|pass.*--turbo|with `--turbo`' \
   "orchestrator Phase 5 forwards --turbo to subagent-driven-dev"
@@ -86,6 +86,41 @@ assert_grep "$FINISH_BRANCH" \
 assert_grep "$BRAINSTORM" \
   'clarifying questions.*one at a time|[Aa]sk clarifying questions' \
   "brainstorm still describes the default clarifying-questions loop"
+
+echo
+echo "== orchestrator wires always-on reviewers =="
+assert_grep "$ORCHESTRATOR" 'questions\.md' \
+  "orchestrator writes questions.md under --turbo"
+assert_grep "$ORCHESTRATOR" 'spec-reviewer' \
+  "spec-reviewer wired in orchestrator"
+# Old --paranoid gate REMOVED — assert the new always-on prose is present and the gate prose is absent.
+assert_grep "$ORCHESTRATOR" 'always run for medium AND large|always-on for medium and large' \
+  "spec-reviewer documented as always-on for medium+large"
+if grep -qE 'tier == .?medium.? AND .?--paranoid' "$ORCHESTRATOR"; then
+  echo "  FAIL  old --paranoid gate prose still present"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  old --paranoid gate prose removed"
+  PASS=$((PASS + 1))
+fi
+assert_grep "$ORCHESTRATOR" 'plan-reviewer' \
+  "plan-reviewer wired in orchestrator (Phase 4.5)"
+assert_grep "$ORCHESTRATOR" 'post-impl-review' \
+  "post-impl-review skill referenced from orchestrator"
+assert_grep "$ORCHESTRATOR" 'pr-test-analyzer' \
+  "pr-test-analyzer wired for large tier (Phase 5.5)"
+
+echo
+echo "== subagent-driven-dev invokes post-impl-review after each wave =="
+assert_grep "$SUBAGENT_DRIVEN" 'post-impl-review' \
+  "post-impl-review skill referenced from subagent-driven-dev"
+
+echo
+echo "== finish-branch composes new PR-body sections =="
+assert_grep "$FINISH_BRANCH" 'Open questions answered by /turbo' \
+  "finish-branch PR body has Open questions answered by /turbo section"
+assert_grep "$FINISH_BRANCH" 'Reviewer findings summary' \
+  "finish-branch PR body has Reviewer findings summary section"
 
 echo
 echo "== Summary =="

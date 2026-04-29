@@ -79,6 +79,23 @@ assert_grep "$ISSUE_CMD" \
   "Phase 2 keeps the single-message-fanout invariant"
 
 echo
+echo "== Phase 2-4 dispatches all 8 research/scope agents =="
+assert_grep "$ISSUE_CMD" 'research-codebase' "research-codebase agent named in /issue"
+assert_grep "$ISSUE_CMD" 'research-patterns' "research-patterns agent named in /issue"
+assert_grep "$ISSUE_CMD" 'research-prior-art' "research-prior-art agent named in /issue"
+assert_grep "$ISSUE_CMD" 'research-constraints' "research-constraints agent named in /issue"
+assert_grep "$ISSUE_CMD" 'research-security' "research-security agent named in /issue"
+assert_grep "$ISSUE_CMD" 'research-test-coverage' "research-test-coverage agent named in /issue"
+assert_grep "$ISSUE_CMD" 'eight Task agents|8 Task agents' "/issue prose mentions 8-agent count"
+assert_grep "$ISSUE_CMD" 'security\.md' "security.md aggregated in Phase 4.5"
+assert_grep "$ISSUE_CMD" 'test-coverage\.md' "test-coverage.md aggregated in Phase 4.5"
+
+echo
+echo "== --no-explore narrows to 4 in-repo agents =="
+assert_grep "$ISSUE_CMD" 'NO_EXPLORE=1.*codebase.*patterns.*constraints.*test-coverage|in-repo agents only' \
+  "/issue --no-explore documents 4-agent in-repo subset (codebase + patterns + constraints + test-coverage)"
+
+echo
 echo "== --no-explore placeholder verbatim =="
 assert_grep "$ISSUE_CMD" \
   'shallow mode — no fanout run; root cause to be confirmed in /brainstorm' \
@@ -150,7 +167,7 @@ assert_grep "$BRAINSTORM" \
   'gh issue view.*updatedAt|updatedAt.*gh issue view' \
   "brainstorm stale check uses gh issue view updatedAt"
 assert_grep "$BRAINSTORM" \
-  'CODEBASE_MTIME_EPOCH.*-lt.*ISSUE_UPDATED_EPOCH' \
+  '_MTIME_EPOCH.*-lt.*ISSUE_UPDATED_EPOCH' \
   "brainstorm stale check uses -lt operator (summary older than issue update = stale)"
 assert_grep "$BRAINSTORM" \
   'missing.*summary:.*field|summary:.*missing' \

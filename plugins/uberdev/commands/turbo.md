@@ -22,7 +22,7 @@ Spawn an autonomous Claude agent in a new cmux workspace to solve GitHub issue *
 
 **Behavior vs `/solve`:**
 - **trivial / small tiers:** identical to `/solve` (these tiers don't run brainstorm anyway).
-- **medium / large tiers:** brainstorm runs WITHOUT the clarifying-question loop. Parallel research still runs (recommendation grounding preserved). Spec → plan → implementation waves proceed in a single forward pass.
+- **medium / large tiers:** brainstorm runs WITHOUT the clarifying-question loop. Parallel research still runs (recommendation grounding preserved). Spec → plan → implementation waves proceed in a single forward pass. After implementation, `subagent-driven-dev` invokes `uberdev:post-impl-review` (5-agent advisory fanout) per wave; large tier additionally fires `pr-test-analyzer` pre-merge. Findings are summarised in the PR body under `## Reviewer findings summary`.
 
 ## Triage heuristics (Step 3 applies this table)
 
@@ -33,6 +33,8 @@ Spawn an autonomous Claude agent in a new cmux workspace to solve GitHub issue *
 | **medium/large** *(default)* | Labels: `epic`, `needs-discussion`, `architectural`, `infrastructure` (multi-service), `refactor`. ≥3 files/modules mentioned. Missing clear problem statement. Questions in body (`?`, "alternatives:", "options:"). Cross-package scope. | Full `/uberdev:brainstorm` → `/uberdev:write-plan` → `/uberdev:subagent-driven-dev` → `/uberdev:review-pr` pipeline. |
 
 **When in doubt, default to medium/large.** The spawned agent is explicitly told it may escalate to `/uberdev:brainstorm` mid-flight if the scope proves larger than triaged — misclassification is recoverable, not catastrophic.
+
+**Non-blocking Q&A (medium/large under `--turbo`):** as of #11, the orchestrator's Phase 2 generates clarifying questions in-thread, auto-picks each answer using research-bundle synthesis, and writes them to `.uberdev/research/$RUN_ID/questions.md`. `finish-branch` reads this file when composing the PR body and appends a `## Open questions answered by /turbo` table (Question | Choice | Confidence). This preserves the "best-guess + log" pattern (canonical per the GPT-5 prompting guide): the audit trail is in the PR body, ready for reviewer eyes, without blocking unattended execution. Low-confidence answers are highlighted but do NOT trigger automated blocking — that's a deferred follow-up (#11 Open question 3).
 
 ## Steps
 

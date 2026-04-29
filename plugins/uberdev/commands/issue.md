@@ -35,7 +35,7 @@ Parse `$DESC`. Determine:
 
 ## Phases 2–4: Parallel Investigation
 
-Phases 2, 3, and 4 are **read-only and independent** — they don't share state. When `NO_EXPLORE=0`, Phase 2 itself dispatches **two** Task agents (`research-codebase`, `research-patterns`); together with Phase 3 and Phase 4 that is **four** Task agents fanned out **in a single assistant turn** (one message, four `Task` tool_use blocks). Phase 4.5 aggregates all four returns. When `NO_EXPLORE=1`, Phase 2 collapses to inline Grep/Glob and the fanout shrinks to Phase 3 + Phase 4 only (two Task agents in one message).
+Phases 2, 3, and 4 are **read-only and independent** — they don't share state. When `NO_EXPLORE=0`, Phase 2 itself dispatches **six** Task agents (`research-codebase`, `research-patterns`, `research-prior-art`, `research-constraints`, `research-security`, `research-test-coverage`); together with Phase 3 and Phase 4 that is **eight Task agents** fanned out **in a single assistant turn** (one message, eight `Task` tool_use blocks). Phase 4.5 aggregates all eight returns. When `NO_EXPLORE=1`, Phase 2 narrows to the in-repo agents only (`research-codebase`, `research-patterns`, `research-constraints`, `research-test-coverage`) — four Task agents fanned out together; Phase 3 and Phase 4 are also skipped under shallow mode (web/external lookups gated).
 
 ## Phase 1.5: Pre-fanout — resolve variables (CRITICAL)
 
@@ -51,6 +51,8 @@ mkdir -p "$SUMMARY_DIR"
 echo "REPO=$REPO"; echo "DESC=$DESC"; echo "KEYWORDS=$KEYWORDS"; echo "NO_EXPLORE=$NO_EXPLORE"; echo "COMMITLINT=$COMMITLINT"; echo "RUN_ID=$RUN_ID"; echo "SUMMARY_DIR=$SUMMARY_DIR"
 ```
 
+After the dispatch fanout completes, `$SUMMARY_DIR` holds eight artifact files: `codebase.md`, `patterns.md`, `prior-art.md`, `constraints.md`, `security.md`, `test-coverage.md` (Phase 2-4.5), plus `dup-search.md` (Phase 3) and `label-validation.md` (Phase 4). These six research-agent artifacts use the universal YAML return contract.
+
 Every Phase 2-4 agent brief below interpolates these literal resolved values (including `$SUMMARY_DIR` resolved as e.g. `.uberdev/research/run-20260429-143022-604fdb3`); never `$VAR` references.
 
 ## Phase 2: Investigate Codebase
@@ -59,10 +61,19 @@ Investigate the codebase for the issue described in `$DESC` (resolved). Repo is 
 
 **Gate the depth:**
 
-- If `NO_EXPLORE=1` (literal `1` in the brief) → shallow: Grep + Glob only, inline (no Task dispatch). The bug template's `## Likely root cause` falls back to the placeholder string `[shallow mode — no fanout run; root cause to be confirmed in /brainstorm]` (Phase 5 handles the substitution).
-- Else → dispatch a 2-agent parallel fanout (`research-codebase` + `research-patterns`) as Task() calls **in the same single message as the Phase 3 (Duplicate Search) and Phase 4 (Label/Scope Validation) Task() calls** — i.e. all four agents fan out together in one message. Each brief carries the literal resolved values for `issue_body` (the user's `$DESC` plus type/scope from Phase 1), `working_dir` (the absolute repo root), and `summary_dir` (the literal resolved value of `$SUMMARY_DIR`, e.g. `.uberdev/research/run-20260429-143022-604fdb3`).
+- If `NO_EXPLORE=1` (literal `1` in the brief) → narrow fanout: dispatch only the **four in-repo agents** (`research-codebase`, `research-patterns`, `research-constraints`, `research-test-coverage`) as Task() calls in **one message, four `Task` tool_use blocks** — a single assistant turn. The web-fetching agents (`research-prior-art`, `research-security`) are skipped because shallow mode gates external lookups. Phase 3 (duplicate search) and Phase 4 (label/scope validation) are **also skipped** under `NO_EXPLORE=1` (existing behavior). The bug template's `## Likely root cause` still falls back to the placeholder string `[shallow mode — no fanout run; root cause to be confirmed in /brainstorm]` when investigation cannot establish a causal triple (Phase 5 handles the substitution).
+- Else (`NO_EXPLORE=0`) → dispatch a **6-agent parallel fanout** for Phase 2: `research-codebase`, `research-patterns`, `research-prior-art`, `research-constraints`, `research-security`, `research-test-coverage`. These six Task() calls go out **in the same single message as the Phase 3 (Duplicate Search) and Phase 4 (Label/Scope Validation) Task() calls** — i.e. all **eight agents fan out together in one message** (single assistant turn, eight `Task` tool_use blocks). Each brief carries the literal resolved values for `issue_body` (the user's `$DESC` plus type/scope from Phase 1), `working_dir` (the absolute repo root), and `summary_dir` (the literal resolved value of `$SUMMARY_DIR`, e.g. `.uberdev/research/run-20260429-143022-604fdb3`).
 
-Each research agent writes its summary to `<summary_dir>/<artifact>.md` (`codebase.md` and `patterns.md` respectively) and returns the universal YAML block per the orchestrator contract. The producer (Phase 4.5) reads the YAML returns and the summary files; it holds pointers, not raw research content.
+Each research agent writes its summary to `<summary_dir>/<artifact>.md` and returns the universal YAML block per the orchestrator contract:
+
+- `research-codebase` → `codebase.md` — symptom/mechanism/owning-code triple + likely-area list grounded in real symbols.
+- `research-patterns` → `patterns.md` — prior bug/feature patterns in this repo's history relevant to the issue.
+- `research-prior-art` → `prior-art.md` — relevant external libraries/patterns/RFCs (web fetch); skipped under `NO_EXPLORE=1`.
+- `research-constraints` → `constraints.md` — repo-policy / dependency / architectural constraints bounding implementation.
+- `research-security` → `security.md` — Semgrep findings (or equivalent) with severity; skipped under `NO_EXPLORE=1`.
+- `research-test-coverage` → `test-coverage.md` — coverage signals around the touched code (uncovered surface flagged).
+
+The producer (Phase 4.5) reads the YAML returns and the summary files; it holds pointers, not raw research content.
 
 Either path must produce a **Likely area** list with real file paths and symbol names. Never guess paths. If you can't find anything relevant, say so explicitly in the draft rather than inventing.
 
@@ -96,10 +107,14 @@ If `$COMMITLINT` resolved to an empty string in Phase 1.5, skip scope validation
 
 ## Phase 4.5: Aggregate
 
-Wait for all dispatched agents to return (4 agents when `NO_EXPLORE=0`; 2 agents when `NO_EXPLORE=1`). Reconcile their reports:
+Wait for all dispatched agents to return (**8 agents** when `NO_EXPLORE=0`: 6 research agents + Phase 3 + Phase 4; **4 agents** when `NO_EXPLORE=1`: codebase + patterns + constraints + test-coverage only). Reconcile their reports:
 
-- **`research-codebase` summary (`codebase.md`)** → drives the bug template's `## Likely root cause` symptom/mechanism/owning-code triple AND the `## Likely area` list. Required for `fix` issues; if `BLOCKED`, abort the fanout with a diagnostic and prompt the user to retry or pass `--no-explore`.
+- **`research-codebase` summary (`codebase.md`)** → drives the bug template's `## Likely root cause` symptom/mechanism/owning-code triple AND the `## Likely area` list. **Required for `fix` issues**; if `BLOCKED`, abort the fanout with a diagnostic and prompt the user to retry or pass `--no-explore`.
 - **`research-patterns` summary (`patterns.md`)** → drives the `## Related` section's prior-pattern bullets and informs the causal chain when prior bugs exist. Optional — if `BLOCKED`, log a one-line warning and continue without it.
+- **`research-prior-art` summary (`prior-art.md`)** → drives the `feat` template's NEW `## Current ecosystem` section (2-4 bullets of relevant prior art / library options / patterns from outside the repo). Optional — `BLOCKED` logs a warning and continues; the section can be omitted from the draft if no signal.
+- **`research-constraints` summary (`constraints.md`)** → drives a NEW `## Constraints` section (always included in the `feat` template; 2-4 bullets of architectural / repo-policy / dependency constraints). Optional — `BLOCKED` logs a warning and continues.
+- **`research-security` summary (`security.md`)** → drives the `fix` template's NEW `## Security signals` section IF any `extra.severity === "ERROR"` findings; otherwise the section is omitted. Optional — `BLOCKED` logs a warning and continues.
+- **`research-test-coverage` summary (`test-coverage.md`)** → informs the bug template's `## Likely area` (e.g., highlighting uncovered files near the suspected mechanism) and may flag uncovered surface in the `feat` template's `## Acceptance criteria`. Optional — `BLOCKED` logs a warning and continues.
 - **Phase 3 output** → `## Related` section closed/open issue links, plus regression flagging if a closed issue matches.
 - **Phase 4 output** → final label set + validated scope (or a flag if commitlint scope-enum doesn't include the proposed scope).
 
@@ -153,6 +168,10 @@ Show the user a complete draft BEFORE creating.
 
 - `path/to/File` — `ClassName.methodName()` — [why relevant]
 
+## Security signals
+
+[Pulled from `security.md` summary IF any `extra.severity === "ERROR"` findings; otherwise omit this section. List Semgrep findings in `file:line — rule_id — message` format, max 5.]
+
 ## Reproduction
 
 1. [Steps]
@@ -183,6 +202,14 @@ Show the user a complete draft BEFORE creating.
 ## What changes
 
 [The capability being added or the behavior being modified, described in WHAT terms — externally visible result, contract change, or new affordance. No implementation strategy. Implementation belongs in /uberdev:brainstorm.]
+
+## Current ecosystem
+
+[Pulled from `prior-art.md` summary — 2-4 bullets of relevant prior art / library options / patterns from outside the repo.]
+
+## Constraints
+
+[Pulled from `constraints.md` summary — 2-4 bullets of architectural / repo-policy / dependency constraints that bound the implementation.]
 
 ## Acceptance criteria
 

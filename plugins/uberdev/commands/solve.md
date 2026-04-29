@@ -22,8 +22,8 @@ Spawn an autonomous Claude agent in a new cmux workspace to solve GitHub issue *
 
 | Tier | Signals (any strong match) | Spawned workflow |
 |------|----------------------------|------------------|
-| **trivial** | Labels: `typo`, `docs`, `documentation`, `chore`, `good-first-issue`. Body <300 chars after stripping markdown. Title matches `typo\|rename\|bump\|version\|readme`. No stack trace. Single file named. | Direct edit → test (if touched code is tested) → `/uberdev:simplify` → PR. **No brainstorm, no multi-step plan.** |
-| **small** | Clear reproduction + error message. Localized to one module/package. Estimated ≤50 LOC. Labels: `bug` (scoped) or none. Not cross-cutting. | Lightweight TodoWrite plan (3–6 tasks) → TDD → `/uberdev:simplify` → PR. **No brainstorm.** |
+| **trivial** | Labels: `typo`, `docs`, `documentation`, `chore`, `good-first-issue`. Body <300 chars after stripping markdown. Title matches `typo\|rename\|bump\|version\|readme`. No stack trace. Single file named. | Read pre-collected research (constraints, prior-art, security) → minimal edit → test (if touched code is tested) → `/uberdev:simplify` → `uberdev:post-impl-review` → PR. **No brainstorm, no multi-step plan.** |
+| **small** | Clear reproduction + error message. Localized to one module/package. Estimated ≤50 LOC. Labels: `bug` (scoped) or none. Not cross-cutting. | Read pre-collected research → lightweight TodoWrite plan (3–6 tasks) → TDD → `/uberdev:simplify` → `uberdev:post-impl-review` → PR. **No brainstorm.** |
 | **medium/large** *(default)* | Labels: `epic`, `needs-discussion`, `architectural`, `infrastructure` (multi-service), `refactor`. ≥3 files/modules mentioned. Missing clear problem statement. Questions in body (`?`, "alternatives:", "options:"). Cross-package scope. | Full `/uberdev:brainstorm` → `/uberdev:write-plan` → `/uberdev:subagent-driven-dev` → `/uberdev:review-pr` pipeline. |
 
 **When in doubt, default to medium/large.** The spawned agent is explicitly told it may escalate to `/uberdev:brainstorm` mid-flight if the scope proves larger than triaged — misclassification is recoverable, not catastrophic.
@@ -90,11 +90,13 @@ Solve GH issue #$ISSUE_NUM directly. Triaged as TRIVIAL.
 
 Steps:
 1. \`gh issue view $ISSUE_NUM\` — read the ask.
-2. Make the minimal edit. No redesign, no surrounding refactor, no "while I'm here" cleanup.
-3. Add/update a test ONLY if the touched code is already tested.
-4. Run the relevant test file + lint for that package.
-5. /uberdev:simplify before push (mandatory per CLAUDE.md).
-6. Commit with conventional message. Open PR with \`Closes #$ISSUE_NUM\` in the body.
+2. **Read pre-collected research** — for each file in \`.uberdev/research/issue-$ISSUE_NUM/{constraints,prior-art,security}.md\` that exists, read the \`summary:\` block and inline its key findings into your working context. These were collected at \`/issue\` creation time. If the directory is missing, skip this step (backwards-compat with pre-#11 issues).
+3. Make the minimal edit. No redesign, no surrounding refactor, no "while I'm here" cleanup.
+4. Add/update a test ONLY if the touched code is already tested.
+5. Run the relevant test file + lint for that package.
+6. /uberdev:simplify before push (mandatory per CLAUDE.md).
+7. **Invoke \`uberdev:post-impl-review\` skill** with \`changed_paths\` = the files you edited and \`commit_range\` = your single commit. Skill returns the 5-agent advisory finding table; surface it to your output but do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
+8. Commit with conventional message. Open PR with \`Closes #$ISSUE_NUM\` in the body. Include the post-impl-review aggregate table under \`## Reviewer findings summary\` in the PR body.
 
 Skip /uberdev:brainstorm. Skip multi-step planning. Escalate to /uberdev:brainstorm ONLY if the scope turns out to be materially larger than triaged.
 EOF
@@ -108,10 +110,12 @@ Solve GH issue #$ISSUE_NUM with a lightweight plan. Triaged as SMALL.
 
 Steps:
 1. \`gh issue view $ISSUE_NUM\` — read the ask.
-2. Write 3–6 TodoWrite tasks. Skip /uberdev:brainstorm — scope is clear.
-3. TDD: write the failing test first, then implement, then green.
-4. /uberdev:simplify before push (mandatory).
-5. Commit + PR with \`Closes #$ISSUE_NUM\`.
+2. **Read pre-collected research** — for each file in \`.uberdev/research/issue-$ISSUE_NUM/{constraints,prior-art,security}.md\` that exists, read the \`summary:\` block and inline its key findings into your TodoWrite plan as constraints/considerations. Backwards-compat: if the directory is missing, proceed without inlined summaries.
+3. Write 3–6 TodoWrite tasks. Skip /uberdev:brainstorm — scope is clear.
+4. TDD: write the failing test first, then implement, then green.
+5. /uberdev:simplify before push (mandatory).
+6. **Invoke \`uberdev:post-impl-review\` skill** with \`changed_paths\` = files edited across all TodoWrite tasks and \`commit_range\` = the commits made. Surface the aggregate finding table in your output and the PR body.
+7. Commit + PR with \`Closes #$ISSUE_NUM\`. PR body includes the post-impl-review aggregate under \`## Reviewer findings summary\`.
 
 Escalate to /uberdev:brainstorm if the scope proves larger than triaged.
 EOF
