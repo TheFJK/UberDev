@@ -96,19 +96,69 @@ Then: Cleanup worktree (Step 5)
 
 #### Option 2: Push and Create PR
 
-```bash
-# Push branch
-git push -u origin <feature-branch>
+Option 2 PR-body composition: in addition to the standard Summary + Test Plan, two conditional sections are appended when their source artifacts exist:
 
-# Create PR
-gh pr create --title "<title>" --body "$(cat <<'EOF'
+- **`## Open questions answered by /turbo`** — table rendered from `.uberdev/research/$RUN_ID/questions.md` (written by orchestrator Phase 2 under `--turbo`). Columns: Question | Choice | Confidence. Reviewers can scan for `medium`/`low` confidence rows quickly.
+- **`## Reviewer findings summary`** — concatenated post-impl-review aggregates (per-wave, written by `uberdev:post-impl-review` from `subagent-driven-dev`) and any `pr-test-analyzer` output (large tier only).
+
+Both sections are read-only dumps; finish-branch does not block on confidence threshold or reviewer verdict (per #11 Q1: advisory only, auto-fix deferred).
+
+```bash
+# Read the orchestrator's questions.md (--turbo non-blocking Q&A log) if present.
+# Note: the file lives under the orchestrator's $RUN_ID working dir, NOT issue-$N.
+QUESTIONS_FILE=""
+if [ -n "${RUN_ID:-}" ] && [ -f ".uberdev/research/$RUN_ID/questions.md" ]; then
+  QUESTIONS_FILE=".uberdev/research/$RUN_ID/questions.md"
+elif [ -f ".uberdev/research/run-$(date +%Y%m%d)*/questions.md" ] 2>/dev/null; then
+  # Fallback: pick the most recent run-<RUN_ID>/questions.md for cases where
+  # $RUN_ID was not exported across processes.
+  QUESTIONS_FILE=$(ls -t .uberdev/research/*/questions.md 2>/dev/null | head -1)
+fi
+
+# Read the post-impl-review aggregate (and pr-test-analyzer if present) for
+# the Reviewer findings summary section.
+REVIEW_FILES=$(ls -t .uberdev/research/*/post-impl-review-wave-*.md .uberdev/research/issue-*/post-impl-review.md .uberdev/research/*/pr-test-analyzer.md 2>/dev/null | tr '\n' ' ')
+
+# Compose PR body
+PR_BODY_FILE=$(mktemp)
+cat > "$PR_BODY_FILE" <<'EOF_HEADER'
 ## Summary
 <2-3 bullets of what changed>
 
 ## Test Plan
 - [ ] <verification steps>
-EOF
-)"
+EOF_HEADER
+
+if [ -n "$QUESTIONS_FILE" ] && [ -f "$QUESTIONS_FILE" ]; then
+  {
+    echo
+    echo "## Open questions answered by /turbo"
+    echo
+    echo "The following questions were answered automatically — please review:"
+    echo
+    # Extract questions and auto-picks; render as a markdown table.
+    awk '/^## Q[0-9]+:/{q=$0; sub(/^## Q[0-9]+: */, "", q)} /^\*\*Auto-pick:\*\*/{a=$0; sub(/^\*\*Auto-pick:\*\* */, "", a)} /^\*\*Confidence:\*\*/{c=$0; sub(/^\*\*Confidence:\*\* */, "", c); print "| " q " | " a " | " c " |"}' "$QUESTIONS_FILE" | (echo "| Question | Choice | Confidence |"; echo "|----------|--------|------------|"; cat)
+  } >> "$PR_BODY_FILE"
+fi
+
+if [ -n "$REVIEW_FILES" ]; then
+  {
+    echo
+    echo "## Reviewer findings summary"
+    echo
+    for f in $REVIEW_FILES; do
+      [ -f "$f" ] || continue
+      echo "### $(basename "$f")"
+      cat "$f"
+      echo
+    done
+  } >> "$PR_BODY_FILE"
+fi
+
+# Push and create PR
+git push -u origin <feature-branch>
+gh pr create --title "<title>" --body-file "$PR_BODY_FILE"
+rm -f "$PR_BODY_FILE"
 ```
 
 Then: Cleanup worktree (Step 5)
