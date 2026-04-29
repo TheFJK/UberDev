@@ -167,7 +167,7 @@ assert_grep "$BRAINSTORM" \
   'gh issue view.*updatedAt|updatedAt.*gh issue view' \
   "brainstorm stale check uses gh issue view updatedAt"
 assert_grep "$BRAINSTORM" \
-  'CODEBASE_MTIME_EPOCH.*-lt.*ISSUE_UPDATED_EPOCH' \
+  '_MTIME_EPOCH.*-lt.*ISSUE_UPDATED_EPOCH' \
   "brainstorm stale check uses -lt operator (summary older than issue update = stale)"
 assert_grep "$BRAINSTORM" \
   'missing.*summary:.*field|summary:.*missing' \
