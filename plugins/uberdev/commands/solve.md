@@ -140,7 +140,7 @@ set -e
 export TERMINAL="DETECTED_TERMINAL"
 
 # cd to repo root (cmux may start in a different directory)
-# Path is quoted because repo paths may contain spaces (e.g. /Volumes/FJK SSD/...)
+# Path is quoted because repo paths may contain spaces (e.g. /Users/me/My Project/...)
 cd "REPO_ROOT"
 
 # Clean up stale worktree AND branch from previous runs
