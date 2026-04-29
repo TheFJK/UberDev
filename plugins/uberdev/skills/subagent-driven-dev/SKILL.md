@@ -58,7 +58,12 @@ digraph when_to_use {
    c. Wait for all wave implementers to report.
    d. For each completed implementer (in task ID order, sequential): controller stages **only that task's reported paths** with `git add <paths>` and commits with the task-specific message.
    e. Run the project's full test command in the worktree once after all wave commits land. If it fails, identify which task regressed and re-dispatch that task's implementer with the failure context. Re-test until green.
-   f. For each committed task: dispatch spec reviewer (parallel across the wave).
+   f. For each committed task: dispatch spec reviewer (parallel across the wave). Pass each spec reviewer the dispatch parameters from `./spec-reviewer-prompt.md`:
+      - `[FULL TEXT of task requirements]`: the spec excerpt for this task
+      - `[plan_task_description]`: the FULL text of the plan entry for this task (from the wave's plan section, including Worktree-safe paths and any prescribed steps) — enables the reviewer to detect *plan drift* where the implementation satisfies the spec but deviates structurally from the plan
+      - `[task commit SHA]`: the SHA the controller produced when committing this task's reported paths
+      - `[paths from the wave's ownership map]`: the allowlist for this task (reviewer must not look outside it)
+      - `[From implementer's report]`: the implementer's status + claimed paths/test results
    g. Loop spec fix-up per task until all spec reviewers approve. Fix dispatches still don't run git — controller amends the task's commit (or creates a fix-up commit) using the implementer's reported new paths.
    h. Dispatch code quality reviewers (parallel). Same fix-loop pattern.
    i. Mark every task in the wave complete in TodoWrite.

@@ -14,6 +14,10 @@ Task tool (general-purpose):
 
     [FULL TEXT of task requirements]
 
+    ## Plan Task Description (what the plan said this task should do)
+
+    [FULL TEXT of plan task entry, including its Worktree-safe paths and any prescribed steps]
+
     ## What Implementer Claims They Built
 
     [From implementer's report]
@@ -42,6 +46,7 @@ Task tool (general-purpose):
     - Compare actual implementation to requirements line by line
     - Check for missing pieces they claimed to implement
     - Look for extra features they didn't mention
+    - Cross-check the implementation against the **Plan Task Description** above. Implementers sometimes satisfy the spec broadly but skip plan-prescribed steps, swap libraries, merge two tasks, or reorder dependencies. Flag any structural deviation from the plan even when the spec appears satisfied — this is *plan drift*, distinct from spec compliance.
 
     ## Your Job
 
