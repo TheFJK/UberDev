@@ -7,10 +7,21 @@
 # invocation. Tests run in CI before merge.
 
 set -u
+set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ISSUE_CMD="$REPO_ROOT/plugins/uberdev/commands/issue.md"
 BRAINSTORM="$REPO_ROOT/plugins/uberdev/skills/brainstorm/SKILL.md"
+
+# Pre-flight: refuse to run if the files we're asserting against are missing
+# or unreadable — without this, every assertion fails with a confusing
+# "pattern not found" instead of the real cause.
+for f in "$ISSUE_CMD" "$BRAINSTORM"; do
+  if [ ! -r "$f" ]; then
+    echo "FATAL: required file missing or unreadable: $f" >&2
+    exit 2
+  fi
+done
 
 PASS=0
 FAIL=0
@@ -43,8 +54,11 @@ assert_no_grep() {
 
 echo "== Phase 1.5 resolves RUN_ID and SUMMARY_DIR =="
 assert_grep "$ISSUE_CMD" \
-  'RUN_ID="\$\(date \+%Y%m%d-%H%M%S\)-\$\(git rev-parse --short HEAD\)"' \
+  'RUN_ID="\$\(date \+%Y%m%d-%H%M%S\)-\$\(git rev-parse --short HEAD' \
   "Phase 1.5 sets RUN_ID with date+git-sha"
+assert_grep "$ISSUE_CMD" \
+  'git rev-parse --short HEAD 2>/dev/null \|\| echo nohead' \
+  "Phase 1.5 RUN_ID has defensive nohead fallback (mirrors orchestrator)"
 assert_grep "$ISSUE_CMD" \
   'SUMMARY_DIR="\.uberdev/research/run-\$RUN_ID"' \
   "Phase 1.5 sets SUMMARY_DIR under .uberdev/research/run-"

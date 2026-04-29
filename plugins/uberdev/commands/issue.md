@@ -45,7 +45,7 @@ Subagents have no shell context, so resolve every variable here and interpolate 
 # Already resolved in Phase 0: $REPO, $DESC, $NO_EXPLORE
 KEYWORDS="<top 3-5 keywords from $DESC, space-separated>"
 COMMITLINT=$(find . -maxdepth 3 \( -name "commitlint.config.js" -o -name "commitlint.config.cjs" -o -name "commitlint.config.mjs" -o -name "commitlint.config.ts" \) -not -path "*/node_modules/*" | head -1)
-RUN_ID="$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)"
+RUN_ID="$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD 2>/dev/null || echo nohead)"
 SUMMARY_DIR=".uberdev/research/run-$RUN_ID"
 mkdir -p "$SUMMARY_DIR"
 echo "REPO=$REPO"; echo "DESC=$DESC"; echo "KEYWORDS=$KEYWORDS"; echo "NO_EXPLORE=$NO_EXPLORE"; echo "COMMITLINT=$COMMITLINT"; echo "RUN_ID=$RUN_ID"; echo "SUMMARY_DIR=$SUMMARY_DIR"
