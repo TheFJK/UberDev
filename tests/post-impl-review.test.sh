@@ -10,8 +10,9 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 POST_IMPL="$REPO_ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md"
 SOLVE_CMD="$REPO_ROOT/plugins/uberdev/commands/solve.md"
 SUBAGENT_DRIVEN="$REPO_ROOT/plugins/uberdev/skills/subagent-driven-dev/SKILL.md"
+SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
 
-for f in "$POST_IMPL" "$SOLVE_CMD" "$SUBAGENT_DRIVEN"; do
+for f in "$POST_IMPL" "$SOLVE_CMD" "$SUBAGENT_DRIVEN" "$SOLVE_PIPELINE"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -46,8 +47,8 @@ assert_grep "$POST_IMPL" 'single message|SINGLE message|one assistant turn|ONE a
 
 echo
 echo "== Skill referenced from both call sites =="
-assert_grep "$SOLVE_CMD" 'post-impl-review|uberdev:post-impl-review' \
-  "/solve command references post-impl-review (trivial/small inline prompt)"
+assert_grep "$SOLVE_PIPELINE" 'post-impl-review|uberdev:post-impl-review' \
+  "solve-pipeline skill references post-impl-review (trivial/small inline prompt; gated on AUTO_MODE=0)"
 assert_grep "$SUBAGENT_DRIVEN" 'post-impl-review|uberdev:post-impl-review' \
   "subagent-driven-dev references post-impl-review (per-wave invocation)"
 
