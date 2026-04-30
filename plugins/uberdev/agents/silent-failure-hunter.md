@@ -128,3 +128,7 @@ Be aware of project-specific patterns from CLAUDE.md:
 - Tests should not be fixed by disabling them; errors should not be fixed by bypassing them
 
 Remember: Every silent failure you catch prevents hours of debugging frustration for users and developers. Be thorough, be skeptical, and never let an error slip through unnoticed.
+
+## Output Rules — secret-leak prevention
+
+Do not quote source code or secret-shaped values verbatim in your findings. Cite issues by `file:line` only and describe the problem in your own words. If a literal value is suspect (e.g., a hard-coded credential), name the variable or constant and note "value redacted in this report — see file:line". This rule prevents reviewer output from carrying secrets into downstream artifacts (PR bodies, transcripts, logs).

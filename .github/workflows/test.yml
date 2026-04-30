@@ -27,4 +27,7 @@ jobs:
           bash tests/post-impl-review.test.sh && \
           bash tests/spec-reviewer-plan-aware.test.sh && \
           bash tests/audit-fixups.test.sh && \
-          bash tests/aliases.test.sh
+          bash tests/review-pr.test.sh && \
+          bash tests/finish-branch-auto-chain.test.sh && \
+          bash tests/aliases.test.sh && \
+          bash tests/merge.test.sh
