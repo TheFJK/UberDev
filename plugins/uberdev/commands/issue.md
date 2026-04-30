@@ -42,15 +42,13 @@ Parse `$DESC`. Determine:
 
 > `enhancement` is a **label**, never a commit type. Titles always use `feat(scope):` / `fix(scope):` / `chore(scope):` / `refactor(scope):`.
 
-## Phases 2–4: Parallel Investigation
+## Phase 2: Dispatch the two Sonnet scouts (single assistant turn)
 
 Phase 2 dispatches **two Task agents** in a single assistant turn (one message, two `Task` tool_use blocks): `uberdev:codebase-scout` and `uberdev:triage-scout`. Both pin `model: sonnet` in their frontmatter and re-name Sonnet in their description string for audit-trail visibility. Their returns are inline YAML; nothing is persisted to disk.
 
 > **Model-pinning escape hatch.** If you observe the scouts running on Opus despite their frontmatter, set `CLAUDE_CODE_SUBAGENT_MODEL=sonnet` as a global override (tracked at `affaan-m/everything-claude-code#173`).
 
-## Phase 2: Dispatch the two Sonnet scouts (single assistant turn)
-
-Dispatch both scouts in **one message, two `Task` tool_use blocks**. Each brief carries the literal resolved values for `description` (the user's `$DESC` from Phase 0), `working_dir` (the absolute repo root), and `repo_slug` (the resolved `$REPO`).
+Each brief carries the literal resolved values for `description` (the user's `$DESC` from Phase 0), `issue_type` (from Phase 1 classification), `working_dir` (the absolute repo root), and `repo_slug` (the resolved `$REPO`).
 
 - **`uberdev:codebase-scout`** — receives `{description, issue_type, working_dir, model_hint: sonnet}` and returns YAML with `likely_area: [paths]` and (if `issue_type=fix`) `likely_root_cause: "one-line hypothesis"`. Drives the bug template's `## Likely area` and `## Likely root cause` sections.
 - **`uberdev:triage-scout`** — receives `{description, issue_type, working_dir, repo_slug, model_hint: sonnet}` and returns YAML with `duplicates: [{number, title, state}]`, `valid_labels: [...]`, `valid_scope: "..."`, `commitlint_present: true|false`. Drives the duplicate section, the `--label` flags, and the title scope. (`issue_type` is required so the scout picks the base label — `bug` for `fix`, `enhancement` for `feat` — without re-classifying.)

@@ -79,6 +79,9 @@ assert_grep "$ISSUE_CMD" \
 assert_grep "$ISSUE_CMD" \
   'single message|one message|same single message|single assistant turn' \
   "Phase 2 keeps the single-message-fanout invariant"
+assert_grep "$ISSUE_CMD" \
+  'issue_type' \
+  "Phase 2 dispatch payload includes issue_type (so triage-scout picks base label without re-classifying)"
 
 echo
 echo "== 8-agent fanout removed from /issue =="
