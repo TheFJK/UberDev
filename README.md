@@ -131,7 +131,7 @@ Plugin commands are addressed as `/uberdev:<command>` by default — the
 no field for declaring top-level (un-namespaced) commands. For a daily
 driver, that 9-character tax adds up.
 
-`/uberdev:install-aliases` resolves it by dropping five short-form
+`/uberdev:install-aliases` resolves it by dropping six short-form
 forwarders into `~/.claude/commands/`:
 
 | Short form    | Canonical             |
@@ -405,7 +405,7 @@ Per-repo settings live in `.claude/uberdev.local.md` (YAML frontmatter; ignored 
 solve_terminal: ghostty       # ghostty | iterm | cmux | terminal | nohup
 solve_auto: false             # boolean — auto-accept brainstorm recommendations (=`/turbo` semantics)
 integration_branch: main      # /merge target branch (overrides gh repo view default)
-bot_authors_allow_list:       # /merge: PR authors allowed to bypass user-confirm gate
+bot_authors_allow_list:       # /merge: PR authors that bypass the per-PR preflight collaborator gate
   - dependabot[bot]
   - renovate[bot]
 
@@ -425,7 +425,7 @@ These are wired into command logic today.
 | `SOLVE_TERMINAL` | `solve_terminal` | Override `/solve`'s terminal dispatcher (`cmux` / `ghostty` / `iterm` / `terminal` / `nohup`) | live |
 | `SOLVE_AUTO` | `solve_auto` | When `1`/`true`, spawned agent runs with `--permission-mode auto` | live |
 | `UBERDEV_INTEGRATION_BRANCH` | `integration_branch` | `/merge` target branch. Precedence: `--integration-branch` CLI flag > env var > config file > `gh repo view --json defaultBranchRef` | live |
-| — | `bot_authors_allow_list` | `/merge`: PR authors that skip the user-confirm gate (default `["dependabot[bot]", "renovate[bot]"]`) | live |
+| — | `bot_authors_allow_list` | `/merge`: PR authors that bypass the per-PR preflight collaborator gate (default `["dependabot[bot]", "renovate[bot]"]`) | live |
 
 ### Planned keys
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for issue #16 — top-level aliases for the six most-used uberdev
-# commands (/issue, /solve, /turbo, /simplify, /review-pr).
+# commands (/issue, /solve, /turbo, /simplify, /review-pr, /merge).
 #
 # Plugin commands are addressed as `/uberdev:<command>` because Claude Code's
 # plugin manifest enforces the `<plugin-name>:` prefix on every plugin
