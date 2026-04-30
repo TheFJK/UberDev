@@ -10,7 +10,7 @@ User's description: $ARGUMENTS
 
 **Usage:** `/issue <description> [--no-explore]`
 
-Auto-classifies → investigates the codebase → checks duplicates (full-text, incl. closed) → validates labels + scope against repo reality → drafts → confirms → creates → offers `/solve` as follow-up.
+Auto-classifies → dispatches **two Task agents** in a single assistant turn (`uberdev:codebase-scout` + `uberdev:triage-scout`, both running on Sonnet) → drafts the body inline from their YAML returns → confirms with the user → creates → offers `/solve` as follow-up. Median wall-clock under 30s.
 
 ## Phase 0: Detect repo + parse flags
 
@@ -24,6 +24,9 @@ Auto-classifies → investigates the codebase → checks duplicates (full-text, 
 REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 NO_EXPLORE=$(echo "$ARGUMENTS" | grep -qE '\-\-no-explore' && echo 1 || echo 0)
 DESC=$(echo "$ARGUMENTS" | sed -E 's/ *--no-explore//g')
+if [ "$NO_EXPLORE" = "1" ]; then
+  echo "notice: --no-explore is deprecated; the default fanout is now 2 Sonnet scouts. Removal target: v1.0.0" >&2
+fi
 ```
 
 Work with `$DESC` from here on — the flags shouldn't bleed into the issue body.
@@ -33,7 +36,7 @@ Work with `$DESC` from here on — the flags shouldn't bleed into the issue body
 Parse `$DESC`. Determine:
 
 - **Type** — `fix` (bug/broken), `feat` (new capability; covers "enhancements"), `chore` (cleanup), `refactor` (structural-only, no behavior change)
-- **Candidate scope** (one word, validated in Phase 4)
+- **Candidate scope** (one word, validated in Phase 2 via `uberdev:triage-scout`)
 - **Core problem** — one-sentence distillation
 - **Preliminary tier** for the eventual `/solve` handoff: `trivial` / `small` / `medium` — based on how localized the ask sounds *before* investigation
 
@@ -41,90 +44,34 @@ Parse `$DESC`. Determine:
 
 ## Phases 2–4: Parallel Investigation
 
-Phases 2, 3, and 4 are **read-only and independent** — they don't share state. When `NO_EXPLORE=0`, Phase 2 itself dispatches **six** Task agents (`research-codebase`, `research-patterns`, `research-prior-art`, `research-constraints`, `research-security`, `research-test-coverage`); together with Phase 3 and Phase 4 that is **eight Task agents** fanned out **in a single assistant turn** (one message, eight `Task` tool_use blocks). Phase 4.5 aggregates all eight returns. When `NO_EXPLORE=1`, Phase 2 narrows to the in-repo agents only (`research-codebase`, `research-patterns`, `research-constraints`, `research-test-coverage`) — four Task agents fanned out together; Phase 3 and Phase 4 are also skipped under shallow mode (web/external lookups gated).
+Phase 2 dispatches **two Task agents** in a single assistant turn (one message, two `Task` tool_use blocks): `uberdev:codebase-scout` and `uberdev:triage-scout`. Both pin `model: sonnet` in their frontmatter and re-name Sonnet in their description string for audit-trail visibility. Their returns are inline YAML; nothing is persisted to disk.
 
-## Phase 1.5: Pre-fanout — resolve variables (CRITICAL)
+> **Model-pinning escape hatch.** If you observe the scouts running on Opus despite their frontmatter, set `CLAUDE_CODE_SUBAGENT_MODEL=sonnet` as a global override (tracked at `affaan-m/everything-claude-code#173`).
 
-Subagents have no shell context, so resolve every variable here and interpolate literal values into each brief.
+## Phase 2: Dispatch the two Sonnet scouts (single assistant turn)
 
-```bash
-# Already resolved in Phase 0: $REPO, $DESC, $NO_EXPLORE
-KEYWORDS="<top 3-5 keywords from $DESC, space-separated>"
-COMMITLINT=$(find . -maxdepth 3 \( -name "commitlint.config.js" -o -name "commitlint.config.cjs" -o -name "commitlint.config.mjs" -o -name "commitlint.config.ts" \) -not -path "*/node_modules/*" | head -1)
-RUN_ID="$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD 2>/dev/null || echo nohead)"
-SUMMARY_DIR=".uberdev/research/run-$RUN_ID"
-mkdir -p "$SUMMARY_DIR"
-echo "REPO=$REPO"; echo "DESC=$DESC"; echo "KEYWORDS=$KEYWORDS"; echo "NO_EXPLORE=$NO_EXPLORE"; echo "COMMITLINT=$COMMITLINT"; echo "RUN_ID=$RUN_ID"; echo "SUMMARY_DIR=$SUMMARY_DIR"
-```
+Dispatch both scouts in **one message, two `Task` tool_use blocks**. Each brief carries the literal resolved values for `description` (the user's `$DESC` from Phase 0), `working_dir` (the absolute repo root), and `repo_slug` (the resolved `$REPO`).
 
-After the dispatch fanout completes, `$SUMMARY_DIR` holds eight artifact files: `codebase.md`, `patterns.md`, `prior-art.md`, `constraints.md`, `security.md`, `test-coverage.md` (Phase 2-4.5), plus `dup-search.md` (Phase 3) and `label-validation.md` (Phase 4). These six research-agent artifacts use the universal YAML return contract.
+- **`uberdev:codebase-scout`** — receives `{description, issue_type, working_dir, model_hint: sonnet}` and returns YAML with `likely_area: [paths]` and (if `issue_type=fix`) `likely_root_cause: "one-line hypothesis"`. Drives the bug template's `## Likely area` and `## Likely root cause` sections.
+- **`uberdev:triage-scout`** — receives `{description, working_dir, repo_slug, model_hint: sonnet}` and returns YAML with `duplicates: [{number, title, state}]`, `valid_labels: [...]`, `valid_scope: "..."`, `commitlint_present: true|false`. Drives the duplicate section, the `--label` flags, and the title scope.
 
-Every Phase 2-4 agent brief below interpolates these literal resolved values (including `$SUMMARY_DIR` resolved as e.g. `.uberdev/research/run-20260429-143022-604fdb3`); never `$VAR` references.
+If the codebase scout returns `status: BLOCKED` (no real paths grounded), the main thread substitutes `"No clear area identified — defer to /brainstorm"` in the `## Likely area` section. **Never invent paths.**
 
-## Phase 2: Investigate Codebase
+If the triage scout returns `status: DONE_WITH_CONCERNS` for `valid_labels` (e.g. `gh label list` failed), the main thread proceeds without a `--label` flag and notes the omission to the user before Phase 4.
 
-Investigate the codebase for the issue described in `$DESC` (resolved). Repo is the resolved `$REPO`. NO_EXPLORE flag is the resolved `$NO_EXPLORE` (0 or 1).
+## Phase 3: Compose body from scout returns
 
-**Gate the depth:**
+Parse both YAML returns from Phase 2 and:
 
-- If `NO_EXPLORE=1` (literal `1` in the brief) → narrow fanout: dispatch only the **four in-repo agents** (`research-codebase`, `research-patterns`, `research-constraints`, `research-test-coverage`) as Task() calls in **one message, four `Task` tool_use blocks** — a single assistant turn. The web-fetching agents (`research-prior-art`, `research-security`) are skipped because shallow mode gates external lookups. Phase 3 (duplicate search) and Phase 4 (label/scope validation) are **also skipped** under `NO_EXPLORE=1` (existing behavior). The bug template's `## Likely root cause` still falls back to the placeholder string `[shallow mode — no fanout run; root cause to be confirmed in /brainstorm]` when investigation cannot establish a causal triple (Phase 5 handles the substitution).
-- Else (`NO_EXPLORE=0`) → dispatch a **6-agent parallel fanout** for Phase 2: `research-codebase`, `research-patterns`, `research-prior-art`, `research-constraints`, `research-security`, `research-test-coverage`. These six Task() calls go out **in the same single message as the Phase 3 (Duplicate Search) and Phase 4 (Label/Scope Validation) Task() calls** — i.e. all **eight agents fan out together in one message** (single assistant turn, eight `Task` tool_use blocks). Each brief carries the literal resolved values for `issue_body` (the user's `$DESC` plus type/scope from Phase 1), `working_dir` (the absolute repo root), and `summary_dir` (the literal resolved value of `$SUMMARY_DIR`, e.g. `.uberdev/research/run-20260429-143022-604fdb3`).
+1. Pick the bug or feat template based on the Phase 1 classification.
+2. Insert `## Likely area` (unconditional, from `codebase-scout.likely_area`).
+3. For `fix` issues, insert `## Likely root cause` populated with the one-line `codebase-scout.likely_root_cause`. **Do not** generate a Symptom/Mechanism/Owning-code triple here — the bug template's existing causal-triple labels remain in the file as a hard contract, but populating them is `/uberdev:brainstorm`'s job. Authoring note in the rendered template makes this explicit.
+4. Add `## Possible duplicates` only if `triage-scout.duplicates` is non-empty. Closed matches get a regression-warning suffix.
+5. Set `--label` flags on `gh issue create` from `triage-scout.valid_labels`.
+6. Use `triage-scout.valid_scope` in the title's `<type(scope):>` prefix.
+7. **Do not** include the deprecated "Current ecosystem", "Constraints", or "Security signals" headings — they are removed from the templates entirely (see Phase 4 templates below).
 
-Each research agent writes its summary to `<summary_dir>/<artifact>.md` and returns the universal YAML block per the orchestrator contract:
-
-- `research-codebase` → `codebase.md` — symptom/mechanism/owning-code triple + likely-area list grounded in real symbols.
-- `research-patterns` → `patterns.md` — prior bug/feature patterns in this repo's history relevant to the issue.
-- `research-prior-art` → `prior-art.md` — relevant external libraries/patterns/RFCs (web fetch); skipped under `NO_EXPLORE=1`.
-- `research-constraints` → `constraints.md` — repo-policy / dependency / architectural constraints bounding implementation.
-- `research-security` → `security.md` — Semgrep findings (or equivalent) with severity; skipped under `NO_EXPLORE=1`.
-- `research-test-coverage` → `test-coverage.md` — coverage signals around the touched code (uncovered surface flagged).
-
-The producer (Phase 4.5) reads the YAML returns and the summary files; it holds pointers, not raw research content.
-
-Either path must produce a **Likely area** list with real file paths and symbol names. Never guess paths. If you can't find anything relevant, say so explicitly in the draft rather than inventing.
-
-The investigation also refines the preliminary tier from Phase 1: if investigation shows the change sprawls across ≥3 packages, bump the tier up.
-
-## Phase 3: Duplicate Search — full-text, includes closed
-
-Run a command shaped like:
-
-```bash
-gh search issues --repo TheFJK/UberDev "auth login token" --limit 10 --json number,title,state,url
-```
-
-Review results:
-
-- **Open match** → show the URL, ask whether to comment on it or close-as-dup instead of creating a new issue.
-- **Closed match** → potential **regression** signal. Include the closed issue URL in the new issue's `## Related` section.
-
-## Phase 4: Label + scope validation against repo reality
-
-Run a command shaped like:
-
-```bash
-gh label list --repo TheFJK/UberDev --limit 100 --json name,description > /tmp/issue-labels-$$.json
-```
-
-If `$COMMITLINT` resolved to an empty string in Phase 1.5, skip scope validation; otherwise use the resolved literal path (e.g. `./commitlint.config.ts`).
-
-- **Labels:** open `/tmp/issue-labels-$$.json`, pick the base (`bug` for `fix`, `enhancement` for `feat`) **only if it exists in the repo**, then add context labels by matching investigation keywords against real label names (e.g., `infrastructure`, `dx`, `security`, `docs`). Never invent labels.
-- **Scope:** if a commitlint path was provided in the brief, Read it, extract the `scope-enum` array, and constrain the Phase 1 scope pick to that list. If the derived scope isn't in the list, flag to the user and propose the closest match.
-
-## Phase 4.5: Aggregate
-
-Wait for all dispatched agents to return (**8 agents** when `NO_EXPLORE=0`: 6 research agents + Phase 3 + Phase 4; **4 agents** when `NO_EXPLORE=1`: codebase + patterns + constraints + test-coverage only). Reconcile their reports:
-
-- **`research-codebase` summary (`codebase.md`)** → drives the bug template's `## Likely root cause` symptom/mechanism/owning-code triple AND the `## Likely area` list. **Required for `fix` issues**; if `BLOCKED`, abort the fanout with a diagnostic and prompt the user to retry or pass `--no-explore`.
-- **`research-patterns` summary (`patterns.md`)** → drives the `## Related` section's prior-pattern bullets and informs the causal chain when prior bugs exist. Optional — if `BLOCKED`, log a one-line warning and continue without it.
-- **`research-prior-art` summary (`prior-art.md`)** → drives the `feat` template's NEW `## Current ecosystem` section (2-4 bullets of relevant prior art / library options / patterns from outside the repo). Optional — `BLOCKED` logs a warning and continues; the section can be omitted from the draft if no signal.
-- **`research-constraints` summary (`constraints.md`)** → drives a NEW `## Constraints` section (always included in the `feat` template; 2-4 bullets of architectural / repo-policy / dependency constraints). Optional — `BLOCKED` logs a warning and continues.
-- **`research-security` summary (`security.md`)** → drives the `fix` template's NEW `## Security signals` section IF any `extra.severity === "ERROR"` findings; otherwise the section is omitted. Optional — `BLOCKED` logs a warning and continues.
-- **`research-test-coverage` summary (`test-coverage.md`)** → informs the bug template's `## Likely area` (e.g., highlighting uncovered files near the suspected mechanism) and may flag uncovered surface in the `feat` template's `## Acceptance criteria`. Optional — `BLOCKED` logs a warning and continues.
-- **Phase 3 output** → `## Related` section closed/open issue links, plus regression flagging if a closed issue matches.
-- **Phase 4 output** → final label set + validated scope (or a flag if commitlint scope-enum doesn't include the proposed scope).
-
-If any agent returns a blocking question (e.g., "open match found, comment instead?") raise it to the user **before** drafting Phase 5.
+If any blocking concern surfaces (e.g. an open duplicate match), raise it to the user **before** drafting Phase 4.
 
 ## Body authoring rules — WHAT, not HOW
 
@@ -132,7 +79,7 @@ The issue body says *what* is broken or wanted; it never says *how* to fix it. S
 
 This boundary is enforced both by the templates below (the bug template's `## Likely root cause` is a causal triple; the feat template's `## What changes` describes externally visible result, not implementation) and by the rules subsection at the end of this file.
 
-## Phase 5: Draft Issue
+## Phase 4: Draft Issue
 
 Show the user a complete draft BEFORE creating.
 
@@ -167,16 +114,11 @@ Show the user a complete draft BEFORE creating.
 - **Mechanism:** [the specific code/data path that produces the symptom; cite a concrete artifact such as a function call site, log line, or config value]
 - **Owning code:** `path/to/File` — `Class.method()` — [why this is the assumption to challenge]
 
-<!-- AUTHORING NOTE (do not include in rendered issue body): For non-trivial bugs, expand mechanism into a 5 Whys causal chain (each rung citing a file+symbol). -->
-<!-- AUTHORING NOTE (do not include in rendered issue body): Bare file-path lists are forbidden in this section — use `## Likely area` for those. The triple is the smallest causal unit; this rule is a hard contract enforced by `tests/issue-causal-fanout.test.sh`. -->
+<!-- AUTHORING NOTE (do not include in rendered issue body): The codebase-scout populates a one-line hypothesis here at /issue creation time. The full Symptom/Mechanism/Owning-code triple is filled in by /uberdev:brainstorm at solve time when running on fresh code. -->
 
 ## Likely area
 
 - `path/to/File` — `ClassName.methodName()` — [why relevant]
-
-## Security signals
-
-[Pulled from `security.md` summary IF any `extra.severity === "ERROR"` findings; otherwise omit this section. List Semgrep findings in `file:line — rule_id — message` format, max 5.]
 
 ## Reproduction
 
@@ -184,12 +126,10 @@ Show the user a complete draft BEFORE creating.
 
 ## Related
 
-- [Any closed/open issues from Phase 3, else "none"]
+- [Any closed/open issues from `triage-scout.duplicates`, else "none"]
 
 **Triage hint:** <trivial|small|medium>
 ```
-
-> **`--no-explore` placeholder.** When `NO_EXPLORE=1` and type=`fix`, substitute the entire `## Likely root cause` section body with the literal string `[shallow mode — no fanout run; root cause to be confirmed in /brainstorm]` (one paragraph, no bullets). The section heading itself stays. Reader knows root cause was deferred, not omitted.
 
 ### Feature (`feat`) — covers enhancements
 
@@ -208,14 +148,6 @@ Show the user a complete draft BEFORE creating.
 ## What changes
 
 [The capability being added or the behavior being modified, described in WHAT terms — externally visible result, contract change, or new affordance. No implementation strategy. Implementation belongs in /uberdev:brainstorm.]
-
-## Current ecosystem
-
-[Pulled from `prior-art.md` summary — 2-4 bullets of relevant prior art / library options / patterns from outside the repo.]
-
-## Constraints
-
-[Pulled from `constraints.md` summary — 2-4 bullets of architectural / repo-policy / dependency constraints that bound the implementation.]
 
 ## Acceptance criteria
 
@@ -245,49 +177,25 @@ Show the user a complete draft BEFORE creating.
 **Triage hint:** <trivial|small|medium>
 ```
 
-## Phase 6: Confirm
+## Phase 5: Confirm
 
 **STOP and show the draft to the user.** Wait for confirmation, edits, or approval. Do not create the issue yet.
 
-## Phase 7: Create issue
+## Phase 6: Create issue
 
 ```bash
 ISSUE_URL=$(gh issue create \
   --title "<type(scope): description>" \
   --label "<comma,separated,labels>" \
   --body "$(cat <<'EOF'
-<body from Phase 5>
+<body from Phase 4>
 EOF
 )")
 echo "$ISSUE_URL"
 ISSUE_NUM=$(echo "$ISSUE_URL" | grep -oE '[0-9]+$')
 ```
 
-```bash
-if [ -z "$ISSUE_NUM" ]; then
-  echo "error: gh issue create did not return a parseable URL: '$ISSUE_URL'" >&2
-  echo "error: research artifacts remain at $SUMMARY_DIR (not bound to an issue)" >&2
-  return 1
-fi
-if [ -d "$SUMMARY_DIR" ]; then
-  if ! mv "$SUMMARY_DIR" ".uberdev/research/issue-$ISSUE_NUM" 2>/dev/null; then
-    # mv failed (typically cross-filesystem EXDEV; could also be perms/disk).
-    if cp -R "$SUMMARY_DIR" ".uberdev/research/issue-$ISSUE_NUM"; then
-      echo "warning: SUMMARY_DIR rename used cp+rm fallback (cross-filesystem)" >&2
-      if ! rm -rf "$SUMMARY_DIR"; then
-        echo "warning: cp succeeded but rm failed; both copies remain on disk" >&2
-      fi
-    else
-      echo "error: both mv and cp failed; research artifacts remain at $SUMMARY_DIR (manual cleanup required)" >&2
-      return 1
-    fi
-  fi
-fi
-```
-
-This binds research artifacts to the issue number atomically (or via cp+rm fallback). `/uberdev:brainstorm` looks up `.uberdev/research/issue-<N>/` keyed on the issue number to short-circuit duplicate research.
-
-## Phase 8: Offer follow-up
+## Phase 7: Offer follow-up
 
 Print a structured confirmation so the user can copy-paste the next action:
 
@@ -314,3 +222,4 @@ Next step: /solve $ISSUE_NUM
 - **Always confirm** — show the full draft, wait for explicit approval before `gh issue create`.
 - **No screenshots section** — user adds those manually after creation if needed.
 - **WHAT/HOW boundary enforced** — issue body never contains an implementation checklist or fix design; that work belongs in `/uberdev:brainstorm`. Bug template's `## Likely root cause` is a causal triple (symptom/mechanism/owning code), not a file list. Feat template's `## What changes` describes externally visible result, not implementation strategy.
+- **Model-pinning escape hatch** — if you observe the scouts running on Opus despite frontmatter `model: sonnet`, set `CLAUDE_CODE_SUBAGENT_MODEL=sonnet` as a global override. Tracked at `affaan-m/everything-claude-code#173`.
