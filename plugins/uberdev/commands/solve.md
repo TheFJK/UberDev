@@ -162,7 +162,7 @@ Solve GH issue #$ISSUE_NUM directly. Triaged as TRIVIAL.
 
 Steps:
 1. \`gh issue view $ISSUE_NUM\` — read the ask.
-2. **Read pre-collected research** — for each file in \`.uberdev/research/issue-$ISSUE_NUM/{constraints,prior-art,security}.md\` that exists, read the \`summary:\` block and inline its key findings into your working context. These were collected at \`/issue\` creation time. If the directory is missing, skip this step (backwards-compat with pre-#11 issues).
+2. **Read pre-collected research (legacy cache)** — for each file in \`.uberdev/research/issue-$ISSUE_NUM/{constraints,prior-art,security}.md\` that exists, read the \`summary:\` block and inline its key findings into your working context. After issue #14 the cache is no longer written by \`/issue\`, so this step typically no-ops; left in place for legacy issues whose research was persisted under the previous fanout.
 3. Make the minimal edit. No redesign, no surrounding refactor, no "while I'm here" cleanup.
 4. Add/update a test ONLY if the touched code is already tested.
 5. Run the relevant test file + lint for that package.
@@ -182,7 +182,7 @@ Solve GH issue #$ISSUE_NUM with a lightweight plan. Triaged as SMALL.
 
 Steps:
 1. \`gh issue view $ISSUE_NUM\` — read the ask.
-2. **Read pre-collected research** — for each file in \`.uberdev/research/issue-$ISSUE_NUM/{constraints,prior-art,security}.md\` that exists, read the \`summary:\` block and inline its key findings into your TodoWrite plan as constraints/considerations. Backwards-compat: if the directory is missing, proceed without inlined summaries.
+2. **Read pre-collected research (legacy cache)** — for each file in \`.uberdev/research/issue-$ISSUE_NUM/{constraints,prior-art,security}.md\` that exists, read the \`summary:\` block and inline its key findings into your TodoWrite plan as constraints/considerations. After issue #14 the cache is no longer written by \`/issue\`, so this step typically no-ops; left in place for legacy issues.
 3. Write 3–6 TodoWrite tasks. Skip /uberdev:brainstorm — scope is clear.
 4. TDD: write the failing test first, then implement, then green.
 5. /uberdev:simplify before push (mandatory).

@@ -1,7 +1,9 @@
 # RFC — `/uberdev:issue` Deep Root-Cause Research Fanout
 
+> **Status update (2026-04-30):** Partially superseded by issue #14 — the 8-agent fanout at `/issue` creation is replaced by a 2-agent Sonnet fanout (`uberdev:codebase-scout` + `uberdev:triage-scout`). Solve-time research in `/uberdev:orchestrator` is unchanged and remains the deep-research engine for medium/large tier issues. See `docs/uberdev/specs/2026-04-30-slim-issue-2-sonnet-scouts-design.md`.
+
 **Date:** 2026-04-29
-**Status:** Implemented (v0.9.0)
+**Status:** Partially superseded by #14 (was: Implemented v0.9.0)
 **Issue:** #11
 
 ## Summary

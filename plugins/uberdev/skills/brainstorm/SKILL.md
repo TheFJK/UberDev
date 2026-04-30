@@ -24,7 +24,7 @@ Every project goes through this process. A todo list, a single-function utility,
 You MUST create a task for each of these items and complete them in order:
 
 1. **Explore project context** — check files, docs, recent commits
-2. **Dispatch parallel research agents** (heuristic from prompt) — 2-3 `Explore`/`general-purpose` agents in one message researching codebase patterns, prior art, and library docs; synthesize findings (3-5 bullets) before continuing. Skip only for truly trivial tasks. **Issue-research short-circuit:** if invoked with an issue number context (e.g. via `/solve <N>` or `/turbo <N>`) and `.uberdev/research/issue-<N>/` exists, read its summaries (`codebase.md` and, if present, `patterns.md`) and treat them as the codebase + in-repo-prior-art research input — skip dispatching the equivalent agents. The short-circuit is **per-topic**, not all-or-nothing: continue to dispatch agents for topics not covered (e.g. external prior art via WebSearch/Context7). See "Parallel research dispatch" and "Issue-research short-circuit" below.
+2. **Dispatch parallel research agents** (heuristic from prompt) — 2-3 `Explore`/`general-purpose` agents in one message researching codebase patterns, prior art, and library docs; synthesize findings (3-5 bullets) before continuing. Skip only for truly trivial tasks. See "Parallel research dispatch" below.
 3. **Offer visual companion** (if topic will involve visual questions) — its own message, not combined with a clarifying question. See the Visual Companion section below.
 4. **Ask clarifying questions** — one at a time, informed by research; understand purpose/constraints/success criteria *(skipped in turbo mode — see "Turbo Mode" section)*
 5. **Propose 2-3 approaches** — with trade-offs and your recommendation, grounded in research findings
@@ -83,54 +83,6 @@ Heuristics for inferring research questions:
 Synthesize findings into a brief summary before engaging the user with clarifying questions. The 2-3 approaches you propose later MUST be grounded in this research, not speculation.
 
 For architecturally consequential choices, this pattern also supports independent parallel exploration of design directions (one agent per direction). See `uberdev:dispatching-parallel-agents`.
-
-**Issue-research short-circuit (when an issue number is in scope):**
-
-When this skill is invoked downstream of `/uberdev:issue` (i.e. the conversation has an issue number), `/issue` may have already run an 8-agent fanout (6 research artifacts + 2 scope artifacts) and persisted summaries to `.uberdev/research/issue-<N>/`. Read those instead of re-dispatching:
-
-```bash
-RESEARCH_DIR=".uberdev/research/issue-$ISSUE"
-SHORTCIRCUIT_CODEBASE=0
-SHORTCIRCUIT_PATTERNS=0
-SHORTCIRCUIT_PRIOR_ART=0
-SHORTCIRCUIT_CONSTRAINTS=0
-SHORTCIRCUIT_SECURITY=0
-SHORTCIRCUIT_TEST_COVERAGE=0
-if [ -d "$RESEARCH_DIR" ]; then
-  ISSUE_UPDATED_ISO=$(gh issue view "$ISSUE" --json updatedAt --jq .updatedAt 2>/dev/null)
-  if [ -z "$ISSUE_UPDATED_ISO" ]; then
-    echo "warning: failed to fetch issue #$ISSUE updatedAt (gh auth/network/missing); using full parallel dispatch" >&2
-  else
-    ISSUE_UPDATED_EPOCH=$(date -j -f '%Y-%m-%dT%H:%M:%SZ' "$ISSUE_UPDATED_ISO" +%s 2>/dev/null \
-                        || date -d "$ISSUE_UPDATED_ISO" +%s 2>/dev/null)
-    for TOPIC in codebase patterns prior-art constraints security test-coverage; do
-      F="$RESEARCH_DIR/${TOPIC}.md"
-      [ -f "$F" ] || continue
-      if ! grep -q '^summary:' "$F"; then
-        echo "warning: $F missing 'summary:' field; using full parallel dispatch for $TOPIC" >&2
-        continue
-      fi
-      F_MTIME_EPOCH=$(stat -f %m "$F" 2>/dev/null || stat -c %Y "$F" 2>/dev/null)
-      if [ -z "$ISSUE_UPDATED_EPOCH" ] || [ -z "$F_MTIME_EPOCH" ]; then
-        echo "warning: failed to normalise updatedAt or $F mtime; using full parallel dispatch for $TOPIC" >&2
-        continue
-      fi
-      if [ "$F_MTIME_EPOCH" -lt "$ISSUE_UPDATED_EPOCH" ]; then
-        # Stale: research summary older than issue update — fall through to dispatch.
-        continue
-      fi
-      # Fresh: set the per-topic skip flag.
-      VAR="SHORTCIRCUIT_$(echo "$TOPIC" | tr '[:lower:]-' '[:upper:]_')"
-      declare "$VAR=1"  # was: eval "$VAR=1" — safer indirection, no shell-injection risk if VAR ever becomes attacker-controlled
-    done
-  fi
-fi
-```
-
-- **Per-topic skip, not all-or-nothing.** Six topic flags (codebase, patterns, prior-art, constraints, security, test-coverage) are checked independently; brainstorm dispatches only the agents whose flag is 0.
-- **Stale check.** Per-topic: if the topic's `<topic>.md` mtime < `gh issue view <N> --json updatedAt` epoch, fall through to dispatch for that topic.
-- **Malformed-summary fallback.** Per-topic: if `<topic>.md` is missing the `summary:` field, log a one-line warning and dispatch for that topic.
-- **Backwards compatibility.** Issues created before this change have only 2-4 artifacts; the per-topic loop reads what exists, dispatches what's missing. Issues with no `.uberdev/research/issue-<N>/` directory at all → `[ -d ... ]` returns false; full parallel dispatch fires unchanged.
 
 The synthesis step reads the summary text into context verbatim; no re-derivation required.
 
