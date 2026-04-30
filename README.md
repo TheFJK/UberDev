@@ -48,13 +48,18 @@ Both are **repo-agnostic** — they auto-detect the current repo via `gh repo vi
 
 # 3. Smoke-test
 /uberdev:issue trivial typo in README install step
+
+# 4. (Recommended) Install short-form aliases so /issue, /solve, /turbo,
+#    /simplify, /review-pr work without the /uberdev: prefix.
+/uberdev:install-aliases
 ```
 
-Optional — once verified, deconflict any pre-existing global commands so the unqualified `/solve` and `/issue` resolve to the plugin:
-
-```bash
-rm -i ~/.claude/commands/solve.md ~/.claude/commands/issue.md
-```
+Step 4 is the ergonomics step: by default, plugin commands are addressed
+as `/uberdev:<command>` because Claude Code's plugin manifest enforces a
+`<plugin-name>:` prefix on every command. The `/uberdev:install-aliases`
+helper drops one-way forwarders into `~/.claude/commands/` so you can
+type `/issue …` instead of `/uberdev:issue …`. The long form keeps
+working — this is purely additive. See [Short-form aliases](#short-form-aliases) below.
 
 ---
 
@@ -78,6 +83,53 @@ Or interactively: `/plugin` → **Installed** → select `uberdev` → re-instal
 > **Disabling everything:** set `DISABLE_AUTOUPDATER=1` in your shell environment to globally disable Claude Code's auto-updater (affects Claude Code itself + every plugin).
 
 Each release bumps the `version` field in `.claude-plugin/plugin.json`, so auto-update users get clean version transitions; manual users see the new version listed under the marketplace entry.
+
+---
+
+## Short-form aliases
+
+Plugin commands are addressed as `/uberdev:<command>` by default — the
+`uberdev:` prefix is required by Claude Code's plugin manifest, which has
+no field for declaring top-level (un-namespaced) commands. For a daily
+driver, that 9-character tax adds up.
+
+`/uberdev:install-aliases` resolves it by dropping five short-form
+forwarders into `~/.claude/commands/`:
+
+| Short form    | Canonical             |
+|---            |---                    |
+| `/issue`      | `/uberdev:issue`      |
+| `/solve`      | `/uberdev:solve`      |
+| `/turbo`      | `/uberdev:turbo`      |
+| `/simplify`   | `/uberdev:simplify`   |
+| `/review-pr`  | `/uberdev:review-pr`  |
+
+```bash
+/uberdev:install-aliases             # install forwarders (skip-if-exists)
+/uberdev:install-aliases --dry-run   # preview without writing
+/uberdev:install-aliases --force     # refresh existing managed forwarders
+/uberdev:uninstall-aliases           # remove (only marker-tagged files)
+```
+
+**Design notes:**
+
+- **One-way forwarding, not duplication.** Each forwarder is a thin file
+  that points at the canonical `/uberdev:<command>` body — there is no
+  second copy of `issue.md` to maintain.
+- **Backwards-compatible.** Existing `/uberdev:<command>` invocations
+  keep working unchanged. Docs, plugin manifests, and muscle memory that
+  reference the long form are unaffected.
+- **Collision-safe.** If a short name is already taken (built-in like
+  `/review`, another plugin's command, or a hand-authored
+  `~/.claude/commands/<name>.md`), the install command skips it with a
+  warning rather than overwriting. That's why this proposal uses
+  `/review-pr` — `/review` is a Claude Code built-in.
+- **Marker-scoped uninstall.** Forwarders carry `<!-- managed-by:
+  uberdev-aliases -->` so `/uberdev:uninstall-aliases` only removes
+  files we own.
+- **Re-run after plugin reinstall.** Forwarders capture the absolute
+  plugin path at install time. If you reinstall the plugin to a
+  different location, run `/uberdev:install-aliases --force` to refresh.
 
 ---
 
