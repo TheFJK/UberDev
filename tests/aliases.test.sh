@@ -218,7 +218,7 @@ for canonical in issue solve turbo simplify review-pr; do
     FAIL=$((FAIL + 1))
     continue
   fi
-  if grep -F "${canonical}|${canonical}|${canon_tools}" "$INSTALL_CMD" > /dev/null; then
+  if grep -F "${canonical}|${canonical}|${canon_tools}" "$REPO_ROOT/plugins/uberdev/lib/aliases-sync.sh" > /dev/null; then
     echo "  PASS  /$canonical — ALIASES row matches canonical allowed-tools"
     PASS=$((PASS + 1))
   else
