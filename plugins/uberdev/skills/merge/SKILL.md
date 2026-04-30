@@ -39,6 +39,7 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `AUTO_CONFIRM_FLAGS` | `--yes`, `-y` (CLI flags) | Phase 2.4, Phase 4.5 |
 | `AUTO_CONFIRM_DEFAULT_MULTI` | `false` — `--all` / multi-PR scope prompts unless `--yes` or `auto_confirm: true` | Phase 2.4 |
 | `AUTO_CONFIRM_DEFAULT_SINGLE` | `true` — single-PR scope (no `--all`) skips the plan prompt by default | Phase 2.4 |
+| `AUTO_CONFIRM_REASON_ENUM` | `single-pr-default`, `cli-flag`, `config-auto_confirm` (audit-log `data.reason` values when auto-confirm is ON) | Phase 2.4 |
 
 ## Inputs
 
@@ -66,8 +67,8 @@ Auto-confirm resolution (CLI flag wins, then config, then scope-based default):
 1. **CLI flag** `--yes` / `-y` (see `AUTO_CONFIRM_FLAGS`) → auto-confirm ON for this run.
 2. **Config file** `.claude/uberdev.local.md` YAML key `AUTO_CONFIRM_KEY` (`auto_confirm: true|false`) → repo-local default. `true` enables; `false` disables.
 3. **Scope-based default** (when neither flag nor config is set):
-   - Single-PR scope (no `--all`, exactly 1 PR in the post-gate merge set) → `AUTO_CONFIRM_DEFAULT_SINGLE` (`true`). The user named the PR explicitly; the [y/N] prompt is redundant. The plan table is still rendered for transparency.
-   - `--all` / multi-PR scope (`gh pr list` enumerated more than 1 PR) → `AUTO_CONFIRM_DEFAULT_MULTI` (`false`). User-explicit confirmation is required because the PR list is computed by /merge, not specified by the user.
+   - Single-PR scope (exactly 1 PR in the post-gate merge set) → `AUTO_CONFIRM_DEFAULT_SINGLE` (`true`). The explicit PR number is the consent; the plan table still renders for transparency.
+   - Multi-PR scope (`--all`, more than 1 PR) → `AUTO_CONFIRM_DEFAULT_MULTI` (`false`). The PR list is computed, not user-specified, so confirmation is required.
 
 When auto-confirm is ON, Phase 2.4 skips the `[y/N]` prompt and Phase 4.5 lists stale branches without per-branch rebase prompts (see those phases for exact behavior).
 
@@ -155,7 +156,7 @@ Resolve `auto_confirm` per the precedence chain in `## Inputs` (CLI flag → con
 
 **If auto-confirm is ON:**
 - Render the plan table for transparency.
-- Emit `order_proposed` + `order_confirmed` events to `audit.jsonl` with the resolution reason recorded in `data` (e.g., `{"reason": "single-pr-default"}`, `{"reason": "cli-flag"}`, `{"reason": "config-auto_confirm"}`).
+- Emit `order_proposed` + `order_confirmed` events to `audit.jsonl` with the resolution reason recorded in `data.reason` (one of `AUTO_CONFIRM_REASON_ENUM`: `single-pr-default`, `cli-flag`, `config-auto_confirm`). Use the literal enum value — do not invent new strings.
 - Proceed directly to Phase 3 — no `[y/N]` prompt.
 
 **If auto-confirm is OFF (default for `--all` / multi-PR scope unless `--yes` or `auto_confirm: true`):**
@@ -285,7 +286,7 @@ Display the list to the user. Behavior depends on the `auto_confirm` resolution 
 
 - Anything other than the literal string `yes` skips. **Never auto-execute** — destructive enough to deserve explicit per-branch consent (spec Non-goal).
 
-In either mode, /merge **never auto-rebases** stale local branches without an explicit per-branch typed `yes`. Auto-confirm only suppresses the prompt; it does not authorise the action.
+**Invariant:** /merge **never** runs `git rebase` automatically. Auto-confirm suppresses the prompt and skips the offer; it does not substitute for the typed `yes` that interactive mode requires.
 
 ### Step 4.6 — Release the lock
 
@@ -310,7 +311,7 @@ In either mode, /merge **never auto-rebases** stale local branches without an ex
 - **Splitting the conflict-resolver Task() fanout across multiple assistant turns.** Single message. Mirrors `uberdev:post-impl-review`.
 - **Writing the resolution patch outside the conflict set.** Each agent owns ONE file; touching `.github/`, `.git/`, hooks, or any path outside its file_path is rejected (treated as REFUSED).
 - **Skipping the test gate** before pushing the resolution commit. No skip path. Failing tests block that PR's merge.
-- **Auto-rebasing stale local branches** in Phase 4. List only (auto-confirm mode) or list + per-branch typed confirmation (interactive mode). Auto-confirm suppresses the prompt; it does NOT authorise auto-rebase.
+- **Auto-rebasing stale local branches** in Phase 4. Phase 4.5 invariant: never run `git rebase` automatically — auto-confirm only suppresses the offer.
 - **Prompting `[y/N]` after the user typed `/merge <PR#>`.** Single-PR scope is auto-confirm by default; the explicit PR number is the consent. Only `--all` / multi-PR scope keeps the prompt unless `--yes` or `auto_confirm: true`.
 - **Auto-creating a merge commit** when `git pull --ff-only` fails. Fail-loud; never recover via merge commit.
 - **`--admin`/`--bypass-protections` without a free-text waiver.** Every bypass invocation MUST log `admin_bypass`+`waiver_recorded` events with the user's stated reason.

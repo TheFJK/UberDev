@@ -205,6 +205,85 @@ else
 fi
 
 echo
+echo "== M17: SKILL.md declares AUTO_CONFIRM_* constants and the auto-confirm precedence chain =="
+# M17 locks the new auto-confirm spec invariants from the PR that
+# softened Phase 2.4. Without these asserts, a future "simplify the
+# prose" pass could silently delete the constants or the precedence
+# chain — the implementation would still work, but readers (human and
+# LLM) would lose the contract.
+assert_grep "$SKILL_FILE" '`AUTO_CONFIRM_KEY`' \
+  "M17.1 — AUTO_CONFIRM_KEY constant declared"
+assert_grep "$SKILL_FILE" '`AUTO_CONFIRM_FLAGS`' \
+  "M17.2 — AUTO_CONFIRM_FLAGS constant declared (CLI flags)"
+assert_grep "$SKILL_FILE" '`AUTO_CONFIRM_DEFAULT_(SINGLE|MULTI)`' \
+  "M17.3 — AUTO_CONFIRM_DEFAULT_SINGLE/MULTI constants declared"
+assert_grep "$SKILL_FILE" 'Auto-confirm resolution.*CLI flag wins' \
+  "M17.4 — auto-confirm precedence chain (CLI > config > scope) documented in Inputs"
+
+echo
+echo "== M18: SKILL.md Phase 2.4 documents both auto-confirm ON and OFF branches =="
+# M18 prevents silent deletion of either branch — interactive [y/N]
+# users (auto-confirm OFF) and auto-mode users (auto-confirm ON) must
+# both stay supported.
+if awk '/^### Step 2\.4/,/^## Phase 3/' "$SKILL_FILE" | \
+     grep -qE 'If auto-confirm is ON' && \
+   awk '/^### Step 2\.4/,/^## Phase 3/' "$SKILL_FILE" | \
+     grep -qE 'If auto-confirm is OFF'; then
+  echo "  PASS  M18.1 — Phase 2.4 documents both auto-confirm ON and OFF branches"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M18.1 — Phase 2.4 must document BOTH 'If auto-confirm is ON' AND 'If auto-confirm is OFF'"
+  FAIL=$((FAIL + 1))
+fi
+assert_grep "$SKILL_FILE" 'Apply this plan\?' \
+  "M18.2 — interactive-mode prompt 'Apply this plan?' present"
+
+echo
+echo "== M19: SKILL.md Phase 4.5 states the no-auto-rebase invariant AND covers both modes =="
+# M19 is load-bearing: Phase 4.5 stale-branch handling MUST never
+# auto-rebase. Auto-confirm only suppresses the offer; it never
+# authorises destructive history-rewriting. A future edit that wires
+# auto-confirm to auto-rebase "for efficiency" could silently rewind
+# the user's in-flight work.
+assert_grep "$SKILL_FILE" 'never\*\* runs `git rebase` automatically|Never auto-execute' \
+  "M19.1 — Phase 4.5 'never auto-rebase' invariant stated"
+if awk '/^### Step 4\.5/,/^### Step 4\.6/' "$SKILL_FILE" | \
+     grep -qE 'If auto-confirm is ON' && \
+   awk '/^### Step 4\.5/,/^### Step 4\.6/' "$SKILL_FILE" | \
+     grep -qE 'If auto-confirm is OFF'; then
+  echo "  PASS  M19.2 — Phase 4.5 documents both auto-confirm ON (list-only) and OFF (per-branch typed yes) branches"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M19.2 — Phase 4.5 must document BOTH 'If auto-confirm is ON' AND 'If auto-confirm is OFF'"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== M20: commands/merge.md exposes --yes / -y in argument-hint AND Usage line =="
+# M20 keeps the dispatcher's frontmatter and body in sync. argument-hint
+# powers slash-help auto-completion; Usage is the human-readable line.
+# Drift between the two confuses the user.
+assert_grep "$CMD_FILE" '^argument-hint:.*--yes\|-y' \
+  "M20.1 — argument-hint frontmatter lists --yes|-y"
+assert_grep "$CMD_FILE" '^\*\*Usage:\*\*.*--yes\|-y' \
+  "M20.2 — Usage line lists --yes|-y"
+assert_grep "$CMD_FILE" '`--yes` / `-y`.*skip' \
+  "M20.3 — doc bullet for --yes / -y describes prompt suppression"
+
+echo
+echo "== M21: using-uberdev/SKILL.md documents auto_confirm in YAML example AND precedence recap =="
+USING_SKILL_FILE="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/SKILL.md"
+if [ ! -r "$USING_SKILL_FILE" ]; then
+  echo "  FAIL  M21 — using-uberdev SKILL.md missing or unreadable: $USING_SKILL_FILE"
+  FAIL=$((FAIL + 1))
+else
+  assert_grep "$USING_SKILL_FILE" '^auto_confirm:' \
+    "M21.1 — auto_confirm key present in YAML example"
+  assert_grep "$USING_SKILL_FILE" '\*\*`auto_confirm` precedence:\*\*' \
+    "M21.2 — auto_confirm precedence paragraph present"
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

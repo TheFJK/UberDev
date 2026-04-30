@@ -20,6 +20,6 @@ Land approved PRs into the integration branch — ordering, strategy, conflict r
 - `--integration-branch=<name>` → override config / env / repo-default.
 - `--bypass-protections` → admin-bypass branch protections (audit-logged with required free-text waiver).
 
-**Auto-confirm:** the plan-confirm `[y/N]` prompt is suppressed when (1) `--yes` / `-y` is passed, (2) `.claude/uberdev.local.md` sets `auto_confirm: true`, OR (3) the post-gate merge set contains exactly one PR (single-PR scope default — the explicit PR number is the consent).
+**Auto-confirm:** the plan-confirm `[y/N]` prompt is suppressed when (1) `--yes` / `-y` is passed, (2) `.claude/uberdev.local.md` sets `auto_confirm: true`, OR (3) the post-gate merge set contains exactly one PR (single-PR scope default — the explicit PR number is the consent). Under auto-confirm, the Phase 4.5 stale-branch offer also becomes list-only — no per-branch prompts and no auto-rebase. /merge **never** runs `git rebase` automatically; auto-confirm only suppresses the offer.
 
 Now invoke the `uberdev:merge` skill — it owns the 4-phase pipeline (pre-flight gate, merge plan, merge + parallel conflict-resolve, post-merge local sync). The skill renders inline, so `$ARGUMENTS` remains in scope for its bash blocks.
