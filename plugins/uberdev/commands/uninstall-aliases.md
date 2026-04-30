@@ -75,8 +75,11 @@ if [ -f "$MARKER" ]; then
   if [ "$DRY_RUN" = "1" ]; then
     echo "  PLAN  version-marker — would remove $MARKER"
   else
-    rm -f "$MARKER"
-    echo "  GONE  version-marker — removed $MARKER"
+    if rm -f "$MARKER" 2>/dev/null && [ ! -e "$MARKER" ]; then
+      echo "  GONE  version-marker — removed $MARKER"
+    else
+      echo "  FAIL  version-marker — could not remove $MARKER (check permissions)" >&2
+    fi
   fi
 fi
 
