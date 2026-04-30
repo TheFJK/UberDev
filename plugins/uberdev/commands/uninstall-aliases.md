@@ -1,5 +1,5 @@
 ---
-description: "Remove short-form aliases (/issue, /solve, /turbo, /simplify, /review-pr) installed by /uberdev:install-aliases"
+description: "Remove short-form aliases (/issue, /solve, /turbo, /simplify, /review-pr, /merge) installed by /uberdev:install-aliases"
 argument-hint: "[--dry-run]"
 allowed-tools: ["Bash"]
 ---
@@ -22,7 +22,7 @@ DRY_RUN=0
 [[ " $ARGUMENTS " == *" --dry-run "* ]] && DRY_RUN=1
 
 DEST_DIR="$HOME/.claude/commands"
-SHORTS='issue solve turbo simplify review-pr'
+SHORTS='issue solve turbo simplify review-pr merge'
 
 REMOVED=0
 KEPT=0

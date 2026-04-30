@@ -1,5 +1,5 @@
 ---
-description: "Install short-form aliases (/issue, /solve, /turbo, /simplify, /review-pr) as one-way forwarders to /uberdev:<command>"
+description: "Install short-form aliases (/issue, /solve, /turbo, /simplify, /review-pr, /merge) as one-way forwarders to /uberdev:<command>"
 argument-hint: "[--force] [--dry-run]"
 allowed-tools: ["Bash", "Read"]
 ---
@@ -14,7 +14,7 @@ field for top-level aliases, so the only mechanism is shipping forwarder
 files into the user's standalone `~/.claude/commands/` directory (where
 filename = command name, no plugin prefix). See issue #16.
 
-This command writes five such forwarders. Each is **one-way** — it points
+This command writes six such forwarders. Each is **one-way** — it points
 at the canonical `/uberdev:<command>` rather than duplicating its body.
 Existing `/uberdev:<command>` invocations are unaffected; this is purely
 additive ergonomics.
@@ -28,6 +28,7 @@ additive ergonomics.
 | `/turbo`     | `/uberdev:turbo` |
 | `/simplify`  | `/uberdev:simplify` |
 | `/review-pr` | `/uberdev:review-pr` |
+| `/merge`     | `/uberdev:merge` |
 
 Note `/review-pr` rather than `/review`: `/review` is a built-in
 Claude Code command, and the issue's collision rule is "plugin namespacing
@@ -76,7 +77,8 @@ ALIASES='issue|issue|["Bash", "Glob", "Grep", "Read", "Task"]
 solve|solve|["Bash", "Read", "Task"]
 turbo|turbo|["Bash", "Read", "Task"]
 simplify|simplify|["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", "Write"]
-review-pr|review-pr|["Bash(git*)", "Bash(gh*)", "Glob", "Grep", "Read", "Task"]'
+review-pr|review-pr|["Bash(git*)", "Bash(gh*)", "Glob", "Grep", "Read", "Task"]
+merge|merge|["Bash", "Glob", "Grep", "Read", "Task"]'
 
 # Built-in Claude Code commands; never overwrite these even with --force.
 # /review is the load-bearing entry here (we already use /review-pr to dodge

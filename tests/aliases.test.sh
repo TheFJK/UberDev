@@ -39,7 +39,8 @@ CANON_DIR="$REPO_ROOT/plugins/uberdev/commands"
 # pre-flighted too.
 for f in "$INSTALL_CMD" "$UNINSTALL_CMD" "$README" \
          "$CANON_DIR/issue.md" "$CANON_DIR/solve.md" "$CANON_DIR/turbo.md" \
-         "$CANON_DIR/simplify.md" "$CANON_DIR/review-pr.md"; do
+         "$CANON_DIR/simplify.md" "$CANON_DIR/review-pr.md" \
+         "$CANON_DIR/merge.md"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -79,7 +80,7 @@ echo "== A1: install-aliases command exists and registers all 5 aliases =="
 # canonical command names since those are the targets the forwarders must
 # point at; if any is missing, the user-visible alias for that command
 # silently won't be installed.
-for canonical in issue solve turbo simplify review-pr; do
+for canonical in issue solve turbo simplify review-pr merge; do
   assert_grep "$INSTALL_CMD" \
     "uberdev:${canonical}\\b" \
     "install-aliases references canonical /uberdev:${canonical}"
@@ -202,7 +203,7 @@ assert_grep "$INSTALL_CMD" \
 # both the canonical name and the same JSON array. The check is
 # fixed-string (-F) on the JSON tail, so trivial reformatting that
 # preserves byte-equality stays green.
-for canonical in issue solve turbo simplify review-pr; do
+for canonical in issue solve turbo simplify review-pr merge; do
   canon_file="$CANON_DIR/${canonical}.md"
   # Strip the `allowed-tools: ` prefix, leaving just the JSON array.
   canon_tools=$(grep -E '^allowed-tools:[[:space:]]*' "$canon_file" \
