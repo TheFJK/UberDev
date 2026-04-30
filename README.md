@@ -34,7 +34,7 @@ Four slash commands that turn issue triage and resolution into one-line operatio
 | **`/issue <description>`** | Creates a **well-investigated, deduped, label-validated** GitHub issue from a one-line ask — including codebase search, full-text dedup against closed issues (regression signals), commitlint scope validation, and a triage hint that `/solve` reads later. |
 | **`/merge [<PR#> | --all]`** | **Lands an approved PR** into the integration branch — ordering, strategy, conflict resolution, and local sync automated. The natural successor to `finish-branch` Option 2 in the lifecycle `/issue → /solve → push → /review-pr → /merge`. |
 
-Both are **repo-agnostic** — they auto-detect the current repo via `gh repo view`. No per-repo config required.
+All four are **repo-agnostic** — they auto-detect the current repo via `gh repo view`. No per-repo config required.
 
 ---
 
@@ -424,7 +424,7 @@ These are wired into command logic today.
 |---|---|---|---|
 | `SOLVE_TERMINAL` | `solve_terminal` | Override `/solve`'s terminal dispatcher (`cmux` / `ghostty` / `iterm` / `terminal` / `nohup`) | live |
 | `SOLVE_AUTO` | `solve_auto` | When `1`/`true`, spawned agent runs with `--permission-mode auto` | live |
-| `INTEGRATION_BRANCH` | `integration_branch` | `/merge` target branch. Precedence: `--integration-branch` CLI flag > env var > config file > `gh repo view --json defaultBranchRef` | live |
+| `UBERDEV_INTEGRATION_BRANCH` | `integration_branch` | `/merge` target branch. Precedence: `--integration-branch` CLI flag > env var > config file > `gh repo view --json defaultBranchRef` | live |
 | — | `bot_authors_allow_list` | `/merge`: PR authors that skip the user-confirm gate (default `["dependabot[bot]", "renovate[bot]"]`) | live |
 
 ### Planned keys

@@ -171,14 +171,11 @@ echo "== M15: SKILL.md Phase 3 spells out resolution-commit format AND the no-Cl
 # well-meaning future edit could silently re-introduce the trailer.
 assert_grep "$SKILL_FILE" 'chore\(merge\):' \
   "M15.1 — Conventional Commits prefix 'chore(merge):' literal present"
-# Use a single grep that requires both 'MUST NOT' (or 'must not') AND the
-# 'Co-Authored-By' literal in the same file. Window-grep using awk for
-# proximity (within 5 lines).
-if awk '
-  /Co-Authored-By/ { for (i=NR-5;i<=NR+5;i++) lines[i]=1 }
-  /MUST NOT|must not/ && lines[NR] { found=1; exit }
-  END { exit !found }
-' "$SKILL_FILE"; then
+# Use grep -B5 -A5 to slice a 5-line bidirectional window around every
+# 'Co-Authored-By' hit, then grep that window for 'MUST NOT'. This catches
+# the marker whether it appears before OR after the Co-Authored-By literal,
+# which awk's forward-streaming approach misses.
+if grep -B5 -A5 'Co-Authored-By' "$SKILL_FILE" | grep -qE 'MUST NOT|must not'; then
   echo "  PASS  M15.2 — 'MUST NOT' (or 'must not') near Co-Authored-By reference"
   PASS=$((PASS + 1))
 else
