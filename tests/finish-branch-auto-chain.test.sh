@@ -87,16 +87,30 @@ assert_not_grep "$FINISH_BRANCH" \
   "review-pr is NOT invoked via Task (regression canary)"
 
 echo
-echo "== Title passed via --title-file (NOT interpolated --title) =="
-assert_grep "$FINISH_BRANCH" \
-  '--title-file' \
-  "--title-file used for gh pr create"
+echo "== Title injection closed via heredoc + quoted-variable read-back =="
+# `gh pr create --title-file` does not exist (verified against gh v2.83.1).
+# The actual injection-close uses: heredoc with single-quoted EOF (no shell
+# expansion of agent-composed text) → IFS= read into a bash variable → pass
+# to `gh --title "$VAR"` (double-quoted variable expansion is byte-verbatim,
+# no backtick/dollar re-evaluation).
 assert_grep "$FINISH_BRANCH" \
   'TITLE_FILE=\$\(mktemp\)|TITLE_FILE=' \
   "TITLE_FILE mktemp pattern present"
+assert_grep "$FINISH_BRANCH" \
+  "<<'PR_TITLE_EOF'|<<\"PR_TITLE_EOF\"|<<PR_TITLE_EOF" \
+  "title written via single-quoted heredoc (no shell expansion of agent text)"
+assert_grep "$FINISH_BRANCH" \
+  'IFS= read -r PR_TITLE_VAR' \
+  "title read back into a bash variable for safe quoted expansion"
+assert_grep "$FINISH_BRANCH" \
+  'gh pr create --title "\$PR_TITLE_VAR"' \
+  "gh --title receives a double-quoted variable (no shell re-evaluation)"
 assert_not_grep "$FINISH_BRANCH" \
-  'gh pr create --title "<title>"|gh pr create --title "\$' \
-  "interpolated gh pr create --title \"<title>\" absent (regression canary)"
+  'gh pr create --title "<title>"' \
+  "literal <title> placeholder absent (regression canary — would be LLM-substitution-injectable)"
+assert_not_grep "$FINISH_BRANCH" \
+  'gh pr create.*--title-file|gh pr edit.*--title-file' \
+  "--title-file flag NOT used in any gh command (gh v2.83.1+ does not support it — would fail every invocation)"
 
 echo
 echo "== Pre-push secret scan: covers staged diff AND PR body file =="

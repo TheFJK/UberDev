@@ -172,59 +172,109 @@ if [ -n "$REVIEW_FILES" ]; then
   } >> "$PR_BODY_FILE"
 fi
 
-# Compose PR title via --title-file (closes title-injection at the old line 164).
-# `gh pr create --title-file` reads the title from a file directly — no shell
-# interpolation between agent-composed text and `gh`. `printf %q` is
-# defense-in-depth that neutralizes any shell-meta if the title-file path itself
-# is ever logged or echoed.
-TITLE_FILE=$(mktemp)
-printf '%q\n' "<title>" > "$TITLE_FILE"
+# Compose PR title via heredoc + read-back, NOT --title (which would shell-interpret
+# any backticks / $() in the agent-composed title text). The heredoc with a
+# single-quoted EOF marker prevents shell expansion of the title content; the
+# subsequent read-back into a quoted bash variable preserves the bytes verbatim
+# when passed to `gh --title`. This closes the title-injection vector without
+# inventing a `--title-file` flag (which gh does not support).
+TITLE_FILE=$(mktemp) || { echo "ERROR: mktemp failed for title file" >&2; exit 1; }
+cat > "$TITLE_FILE" <<'PR_TITLE_EOF'
+<title>
+PR_TITLE_EOF
+
+# Read title back into a quoted variable — bytes pass through verbatim, no shell
+# expansion. Single-line title only; reject multi-line titles defensively.
+IFS= read -r PR_TITLE_VAR < "$TITLE_FILE" || { echo "ERROR: failed to read title file" >&2; rm -f "$TITLE_FILE" "$PR_BODY_FILE"; exit 1; }
 
 # Pre-push secret scan: layered defense (gitleaks primary + regex fallback)
-# over BOTH the staged diff AND the composed PR-body file. Either hit aborts
-# the push BEFORE any text reaches GitHub. Worktree is preserved for
-# investigation per Q12.
+# over BOTH the to-be-pushed commit range AND the composed PR-body file. Either
+# hit aborts the push BEFORE any text reaches GitHub. Worktree is preserved for
+# investigation. Uses set -o pipefail locally so gitleaks errors surface instead
+# of being silently swallowed by the downstream grep filter.
 run_secret_scan_stdin() {
-  # Primary: gitleaks (when installed)
+  # Primary: gitleaks (when installed). gitleaks exits 0 if no leaks found,
+  # non-zero (default 1) if leaks found via --exit-code, or >1 on actual
+  # errors. We use the exit code as the authoritative signal — output-text
+  # filtering is unreliable because info messages like "no leaks found"
+  # would false-positive a substring match. On non-zero exit, we surface
+  # the captured output so the caller's error message has detail.
   if command -v gitleaks >/dev/null 2>&1; then
-    gitleaks stdin --no-git --no-banner 2>&1 | grep -E '(WRN|finding:)' || true
-    return
+    local out rc
+    out=$(gitleaks stdin --no-banner --redact 2>&1) ; rc=$?
+    if [[ $rc -eq 0 ]]; then
+      return 0  # clean — no output, caller continues
+    fi
+    # Non-zero: leak found OR gitleaks crashed (fail-CLOSED on either).
+    # Emit captured output so caller's ERROR message names the offending rule.
+    printf '%s\n' "$out"
+    return 0  # signal via output, not exit code (caller checks [[ -n $SCAN_OUT ]])
   fi
   # Fallback: inline regex floor — high-true-positive patterns only.
   grep -E -o '(AKIA[0-9A-Z]{16}|gh[ps]_[A-Za-z0-9]{36,255}|-----BEGIN [A-Z ]*PRIVATE KEY-----)' || true
-  if [[ -z "${UBERDEV_SCAN_WARNED:-}" ]]; then
-    echo "WARNING: gitleaks not installed — using regex fallback only. Recommend: brew install gitleaks" >&2
-    export UBERDEV_SCAN_WARNED=1
-  fi
 }
 
-# Scan target 1: staged diff
-SCAN_OUT=$(git diff --staged | run_secret_scan_stdin)
-if [[ -n "$SCAN_OUT" ]]; then
-  echo "ERROR: secret found in staged diff: $SCAN_OUT" >&2
+# Emit gitleaks-missing warning ONCE in the parent shell (subshell exports don't
+# propagate, so the warning must live outside run_secret_scan_stdin to avoid
+# printing twice).
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "WARNING: gitleaks not installed — using regex fallback only. Recommend: brew install gitleaks" >&2
+fi
+
+# Helper: abort if scan output is non-empty. Cleans up tmp files and preserves worktree.
+abort_if_secret() {
+  local label="$1" hit="$2"
+  [[ -n "$hit" ]] || return 0
+  echo "ERROR: secret found in $label: $hit" >&2
   echo "Push aborted. Worktree preserved. Investigate and rerun." >&2
   rm -f "$TITLE_FILE" "$PR_BODY_FILE"
   exit 1
+}
+
+# Scan target 1: the diff that will actually be pushed (commits ahead of upstream).
+# Falls back to staged diff for fresh branches that have no remote tracking yet.
+if PUSH_DIFF=$(git diff @{u}..HEAD 2>/dev/null) && [[ -n "$PUSH_DIFF" ]]; then
+  SCAN_OUT=$(printf '%s' "$PUSH_DIFF" | run_secret_scan_stdin)
+else
+  # No upstream set or empty diff → scan staged + recent commits since the merge-base
+  BASE_REF=$(git rev-parse --verify origin/main 2>/dev/null \
+          || git rev-parse --verify origin/master 2>/dev/null \
+          || git merge-base HEAD HEAD~1 2>/dev/null \
+          || echo "")
+  if [[ -n "$BASE_REF" ]]; then
+    SCAN_OUT=$(git diff "$BASE_REF..HEAD" | run_secret_scan_stdin)
+  else
+    SCAN_OUT=$(git diff --staged | run_secret_scan_stdin)
+  fi
 fi
+abort_if_secret "to-be-pushed diff" "$SCAN_OUT"
 
 # Scan target 2: composed PR body file
 SCAN_OUT=$(run_secret_scan_stdin < "$PR_BODY_FILE")
-if [[ -n "$SCAN_OUT" ]]; then
-  echo "ERROR: secret found in composed PR body: $SCAN_OUT" >&2
-  echo "Push aborted. Worktree preserved. Investigate and rerun." >&2
+abort_if_secret "composed PR body" "$SCAN_OUT"
+
+# Both scans clean → push and create PR. Each step is exit-code-checked so a
+# failure surfaces explicitly (rather than silently proceeding to the next step).
+if ! git push -u origin <feature-branch>; then
+  echo "ERROR: git push failed. Branch state preserved. Worktree retained. Investigate and rerun." >&2
   rm -f "$TITLE_FILE" "$PR_BODY_FILE"
   exit 1
 fi
 
-# Both scans clean → push and create PR
-git push -u origin <feature-branch>
-
-# Capture PR URL from gh stdout; regex-validate; abort chain on parse-fail.
-PR_URL=$(gh pr create --title-file "$TITLE_FILE" --body-file "$PR_BODY_FILE")
+# Capture PR URL from gh stdout AND its exit code together. gh returns the
+# created PR URL on stdout when successful; non-zero exit on auth/network/quota
+# errors. The `if !` branch surfaces gh's failure explicitly (PR_URL captures
+# stderr via 2>&1 in the failure case to keep the diagnostic).
+if ! PR_URL=$(gh pr create --title "$PR_TITLE_VAR" --body-file "$PR_BODY_FILE" 2>&1); then
+  echo "ERROR: gh pr create failed: $PR_URL" >&2
+  echo "Branch state preserved. Worktree retained. Investigate and rerun." >&2
+  rm -f "$TITLE_FILE" "$PR_BODY_FILE"
+  exit 1
+fi
 PR_URL_REGEX='^https://github\.com/[^/]+/[^/]+/pull/[0-9]+$'
 if [[ ! "$PR_URL" =~ $PR_URL_REGEX ]]; then
   echo "ERROR: gh pr create returned non-parseable URL: $PR_URL" >&2
-  echo "Branch state preserved. Worktree retained. Investigate and rerun." >&2
+  echo "Branch state preserved. Worktree retained. Do NOT chain into review-pr. Investigate and rerun." >&2
   rm -f "$TITLE_FILE" "$PR_BODY_FILE"
   exit 1
 fi
