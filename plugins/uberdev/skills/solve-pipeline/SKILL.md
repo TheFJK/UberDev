@@ -35,7 +35,7 @@ OVERRIDE=$(echo "$ARGUMENTS" | grep -oE '\-\-(trivial|small|full)' | head -1 | s
 TERMINAL_OVERRIDE=$(echo "$ARGUMENTS" | grep -oE '\-\-terminal=[a-z]+' | head -1 | sed 's/--terminal=//')
 AUTO_FLAG=$(echo "$ARGUMENTS" | grep -oE '\-\-auto' | head -1)
 if [[ -z "$ISSUE_NUM" ]]; then
-  echo "Usage: /solve <issue-number> [--trivial|--small|--full] [--auto] [--terminal=cmux|ghostty|iterm|terminal|nohup]"
+  echo "Usage: /uberdev:solve|/uberdev:turbo <issue-number> [--trivial|--small|--full] [--auto] [--terminal=cmux|ghostty|iterm|terminal|nohup]"
   exit 1
 fi
 # --full is an alias for medium/large (keeps current behavior)
@@ -84,7 +84,7 @@ The trivial/small heredocs gate the post-impl-review step on `AUTO_MODE=0`. The 
 
 ```bash
 if [[ "$AUTO_MODE" != "1" ]]; then
-  # === SOLVE_TRIVIAL_HEREDOC: byte-identical to commands/solve.md trivial heredoc ===
+  # trivial heredoc — interactive (/solve): pre-collected-research read + post-impl-review wired
   cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
 Solve GH issue #$ISSUE_NUM directly. Triaged as TRIVIAL.
 
@@ -101,7 +101,7 @@ Steps:
 Skip /uberdev:brainstorm. Skip multi-step planning. Escalate to /uberdev:brainstorm ONLY if the scope turns out to be materially larger than triaged.
 EOF
 else
-  # === TURBO_TRIVIAL_HEREDOC: byte-identical to commands/turbo.md trivial heredoc ===
+  # trivial heredoc — turbo (/turbo): no research read, no post-impl-review
   cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
 Solve GH issue #$ISSUE_NUM directly. Triaged as TRIVIAL.
 
@@ -122,7 +122,7 @@ fi
 
 ```bash
 if [[ "$AUTO_MODE" != "1" ]]; then
-  # === SOLVE_SMALL_HEREDOC: byte-identical to commands/solve.md small heredoc ===
+  # small heredoc — interactive (/solve): pre-collected-research read + post-impl-review wired
   cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
 Solve GH issue #$ISSUE_NUM with a lightweight plan. Triaged as SMALL.
 
@@ -138,7 +138,7 @@ Steps:
 Escalate to /uberdev:brainstorm if the scope proves larger than triaged.
 EOF
 else
-  # === TURBO_SMALL_HEREDOC: byte-identical to commands/turbo.md small heredoc ===
+  # small heredoc — turbo (/turbo): no research read, no post-impl-review
   cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
 Solve GH issue #$ISSUE_NUM with a lightweight plan. Triaged as SMALL.
 
@@ -255,7 +255,7 @@ case "$TERMINAL" in
       TERMINAL="nohup"
     elif [[ -z "$CMUX_SOCKET" || ! -S "$CMUX_SOCKET" ]]; then
       echo "warning: TERMINAL=cmux requested but \$CMUX_SOCKET is not a live socket." >&2
-      echo "         Run /solve from inside an active cmux session, or unset SOLVE_TERMINAL/--terminal." >&2
+      echo "         Run /solve or /turbo from inside an active cmux session, or unset SOLVE_TERMINAL/--terminal." >&2
       echo "         Falling back to nohup." >&2
       TERMINAL="nohup"
     fi
