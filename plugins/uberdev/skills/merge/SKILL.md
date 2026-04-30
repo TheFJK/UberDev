@@ -102,12 +102,145 @@ If only one PR is in scope and its pre-flight fails: abort the run (nothing to m
 
 ## Phase 2 — Merge plan
 
-<!-- Body filled in by wave-2 (Phase 1) and wave-3 (Phases 2/3/4). Do not edit the heading text. -->
+### Step 2.1 — ORDER (Q4 layered algorithm)
+
+Build the merge order with no full simulation:
+
+1. **Hard dependencies** (highest priority): a PR-B base ref equal to PR-A head ref → PR-A must land before PR-B. Also parse `body` for `Depends on #([0-9]+)` (whitelist regex) and add those edges. Topo-sort the resulting graph. **On cycle: surface the full cycle path to the user and abort the run. Never auto-break.**
+2. **File-overlap pair count** (next): from the file-overlap matrix computed in Phase 1.5, prefer orders that minimise "later PR forced into conflict-resolve" by counting shared file paths between each pair. PRs with non-empty overlap are scheduled sequentially relative to each other (Q1 same-file degradation: PR-A first, re-probe PR-B against new tip).
+3. **Approval-age tie-break**: among otherwise-equivalent PRs, order older-`createdAt`-first.
+
+Skip Step 2.1 if only 1 PR is in scope (no ordering decision to make).
+
+### Step 2.2 — PER-PR STRATEGY (D11 heuristic + D-LABEL override)
+
+For each PR, compute strategy signal-by-signal:
+
+1. Per-invocation flag `--squash` / `--rebase` / `--merge` always wins.
+2. Else: PR label matching `MERGE_STRATEGY_LABEL_PREFIX<name>` where `<name>` ∈ `STRATEGY_ENUM` wins (D-LABEL).
+3. Else: heuristic.
+   - All commits start with conventional-commit prefix (`feat:`, `fix:`, `chore:`, `refactor:`, `test:`, `docs:`) → rebase candidate.
+   - Any commit message matches `WIP_MESSAGE_REGEX` → squash candidate.
+   - Commit count ≤ `CONVENTIONAL_COMMIT_THRESHOLD` (3) AND all conventional → rebase or fast-forward.
+   - Single-commit PR → rebase.
+   - Mixed signals → default to squash (safer for `git bisect` than a true merge commit).
+
+Other label syntaxes (`strategy:<name>`, `merge:<name>`) are NOT recognised — only the `MERGE_STRATEGY_LABEL_PREFIX` literal matches.
+
+### Step 2.3 — Render the unified plan table
+
+Render a single markdown table with these columns: `PR#`, `title`, `strategy`, `reasoning` (one-line citing the dominant signal — flag, label, conventional-commit ratio, etc.), `conflict-resolve-needed?` (Y/N from probe; Phase 3 will re-probe but a Phase-2 merge-tree pass gives the user a preview).
+
+### Step 2.4 — Single confirm gate (the ONLY user-confirm point in /merge)
+
+Display the plan table to the user. Prompt: "Apply this plan? [y/N]". On `y`: proceed to Phase 3. On anything else: abort cleanly, write `order_proposed`+`error` events to `audit.jsonl`, release the lock.
+
+**There are no other user-confirm gates in /merge.** Do NOT prompt after each PR merges. (Spec Non-goal: "no mid-flow gates after each PR merges.")
 
 ## Phase 3 — Merge and conflict-resolve
 
-<!-- Body filled in by wave-2 (Phase 1) and wave-3 (Phases 2/3/4). Do not edit the heading text. -->
+Phase 2 has produced a fixed plan (order + per-PR strategy). Phase 3 executes it. **No strategy decisions are made here.**
+
+For each PR in confirmed order:
+
+### Step 3.1 — Probe (D9, non-destructive)
+
+Run `git merge-tree --write-tree <integration_branch> <headRefOid>`. Exit 0 = clean; exit 1 = conflicts. **Never** use `git merge --no-commit --no-ff` — `merge-tree` is the canonical non-destructive primitive (no working-tree mutation). On conflict, parse the "Conflicted file info" section to enumerate the conflicted file paths.
+
+### Step 3.2 — Clean-merge path
+
+If probe was clean: run `gh pr merge <N> --<strategy> --match-head-commit <headRefOid>`. The `--match-head-commit` flag is mandatory — it is the TOCTOU guard that fails fast if the PR HEAD moved between probe and merge. On `gh pr merge` failure: abort that PR, emit `merge_executed`+`error` events, continue with rest of queue.
+
+### Step 3.3 — Conflict-resolve path
+
+If probe found conflicts:
+
+i. **Fork preflight (Q3 gate):** re-check `isCrossRepository` + `headRepository.owner.type` + `maintainerCanModify`. Org-owned fork or `maintainerCanModify == false` → refuse, surface handoff, skip PR, queue continues.
+
+ii. **Create scratch worktree (D10):** `git worktree add .claude/worktrees/merge-<run-id> <integration_branch>` where `<run-id> = $(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)`. Verify `.claude/worktrees/` is gitignored (per `using-git-worktrees`).
+
+iii. **Dispatch one Task() per conflicted file IN A SINGLE ASSISTANT TURN.**
+
+This is the critical invariant. All Task() calls for this PR's conflict set MUST be in ONE assistant turn — splitting across messages defeats parallelism (mirrors `uberdev:post-impl-review` SKILL.md fanout shape). Each Task() invokes `agents/conflict-resolver.md` with `file_path`, `pr_branch=<headRefName>`, `integration_branch`, `base_sha=<merge-base>`, `working_dir=<scratch worktree root>`.
+
+**Sequential degradation (Q1):** for same-file PR pairs flagged in Phase 1.5, the per-file fanout proceeds normally — same-file collisions only matter ACROSS PRs (PR-A's resolution must land first; PR-B re-probes against new tip). Within a single PR's resolution, all Task() agents own disjoint files by construction.
+
+iv. **Apply resolutions** in the scratch worktree as each agent returns. Aggregate the YAML returns; halt the queue if any agent returns `status: AMBIGUOUS` or `status: REFUSED` (clear handoff per AC).
+
+v. **Pre-push test gate (D16, mandatory, no skip path).** Run the project's test command in the scratch worktree before any push. Test command discovery order: `package.json:scripts.test` > `Makefile` `test` target > `cargo test` if `Cargo.toml` exists > `pytest` if `pytest.ini`/`pyproject.toml` exists > `go test ./...` if `go.mod` exists. **Failing tests block the push for that PR; rest of queue continues.** No `--fast` mode, no override flag.
+
+vi. **Push the resolution commit (D13, fast-forward only).**
+
+Commit message format: `chore(merge): resolve conflicts in <comma-separated-files>` (Conventional Commits prefix mandatory). If >3 files: `chore(merge): resolve conflicts in <N> files`. **The resolution commit MUST NOT include `Co-Authored-By: Claude` trailer or any "🤖 Generated with Claude Code" footer** per global CLAUDE.md (cited verbatim in the spec). Author = current `git config user.email` / `user.name`; never an agent identity.
+
+Push: `git push origin HEAD:<headRefName>`. **Never `--force`. Never `--force-with-lease`** against a PR head ref. Resolution is a NEW commit on top of existing head. If push fails non-FF: fail-closed, emit `push_resolution`+`error` to audit log, halt queue with clear divergence message.
+
+vii. **Retry `gh pr merge`** with the new head SHA (re-fetch `headRefOid` after push).
+
+viii. **Tear down the scratch worktree** per `using-git-worktrees` protocol: `git worktree remove --force <path>`. On failure: `git worktree prune` retry. If still failing: surface manual cleanup instructions; **never `rm -rf`**.
+
+### Step 3.4 — Failure-mode summary
+
+On any single-PR failure (test gate fail, push fail, gh pr merge fail, agent AMBIGUOUS/REFUSED): abort REST of queue (or that PR only — see error-handling table in spec). Already-merged PRs stay merged. Emit structured event to `audit.jsonl`. Surface clear handoff to user.
 
 ## Phase 4 — Post-merge local sync
 
-<!-- Body filled in by wave-2 (Phase 1) and wave-3 (Phases 2/3/4). Do not edit the heading text. -->
+For every PR that successfully merged in Phase 3:
+
+### Step 4.1 — Fetch + prune
+
+```bash
+git fetch --prune origin
+```
+
+### Step 4.2 — Fast-forward the local integration branch
+
+```bash
+git checkout <integration_branch>
+git pull --ff-only origin <integration_branch>
+```
+
+**`--ff-only` is mandatory.** If `git pull --ff-only` fails (the local branch has diverged): fail-loud with a clear message — likely a concurrent merge or out-of-band push to integration. **Never auto-create a merge commit** to recover (spec Non-goal). User decides next step.
+
+### Step 4.3 — Worktree teardown
+
+For every worktree that was created for this run (PR feature worktrees AND any scratch worktrees from Phase 3):
+
+```bash
+git worktree remove --force <path>
+```
+
+Per `using-git-worktrees` protocol. On failure: `git worktree prune` retry. If still failing: surface manual cleanup instructions; **never `rm -rf`**.
+
+### Step 4.4 — Local feature-branch deletion
+
+For every successfully-merged PR's feature branch on the local clone:
+
+```bash
+git branch -d <feature-branch>
+```
+
+`-d` (not `-D`): refuse to delete branches not fully merged into integration. On refuse: surface message; do NOT escalate to `-D`.
+
+### Step 4.5 — Stale-branch list+offer (D17, NEVER auto-execute rebase)
+
+Enumerate local branches whose merge-base with the new integration tip is older than the previous integration tip:
+
+```bash
+git for-each-ref --format='%(refname:short)' refs/heads | while read b; do
+  base=$(git merge-base "$b" <integration_branch>)
+  [ "$base" != "<previous-integration-tip>" ] && echo "$b"
+done
+```
+
+Display the list to the user. For each branch, offer per-branch rebase ONLY after typed user confirmation:
+
+```
+Rebase <branch> onto <integration_branch>? Type 'yes' to confirm: _
+```
+
+Anything other than the literal string `yes` skips. **Never auto-execute** — destructive enough to deserve explicit per-branch consent (spec Non-goal).
+
+### Step 4.6 — Release the lock
+
+`flock` releases automatically on process exit. Explicit unlock not required.
