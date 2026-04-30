@@ -4,6 +4,18 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-04-30
+
+### Added
+- **Top-level command aliases** (#16, PR #17) — `/uberdev:install-aliases` writes one-way forwarders into `~/.claude/commands/` so the five daily-driver commands work without the `uberdev:` namespace prefix: `/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`. `/uberdev:uninstall-aliases` removes them (marker-scoped — hand-authored files preserved). Existing `/uberdev:<command>` invocations are unchanged (additive only). Forwarders capture the absolute plugin-install path at write time; no body duplication. Run `/uberdev:install-aliases` once after plugin install to opt in. `tests/aliases.test.sh` (27 assertions) pins the marker contract, collision detection, and README discoverability.
+
+### Changed
+- **`/issue` slimmed to 2 Sonnet scouts** (#14, PR #18) — replaces the prior 8-Opus-agent research fanout (Phases 1.5/2-4/4.5/7) with a thin 2-Sonnet-scout fanout (`codebase-scout`, `triage-scout`) dispatched in a single assistant turn. **Median wall-clock drops from minutes to under 30s.** New dedicated agents at `plugins/uberdev/agents/codebase-scout.md` and `triage-scout.md`, both pinning `model: sonnet` with four-layer defence-in-depth against the upstream `affaan-m/everything-claude-code#173` model-frontmatter regression. Documented escape hatch: `CLAUDE_CODE_SUBAGENT_MODEL=sonnet`. `--no-explore` soft-deprecated (notice + no-op, removal target v1.0.0). `## Security signals` / `## Current ecosystem` / `## Constraints` sections removed from `/issue` templates. `brainstorm/SKILL.md`'s issue-research short-circuit removed (orchestrator solve-time fanout unchanged). RFC `2026-04-29-issue-deep-root-cause-research-fanout.md` annotated as partially superseded.
+- **`/solve` and `/turbo` deduped via shared skill** (#15, PR #19) — extracts the ~360-line shared launcher pipeline (arg parsing, repo detection, tier classification, prompt heredoc, terminal spawn, notify, retitle) from `commands/solve.md` (430 → 27 lines) and `commands/turbo.md` (452 → 29 lines) into a new inline skill at `plugins/uberdev/skills/solve-pipeline/SKILL.md` (397 lines). Both commands now set `export AUTO_MODE={0,1}` and invoke the skill; the 10 `DELTA from /solve:` / `DELTA from /turbo:` markers and the `DUPLICATION NOTE` banner are gone — divergence is now expressed as `if [[ "$AUTO_MODE" == "1" ]]` conditionals in a single source of truth. Renamed the legacy `AUTO_MODE` (permission-mode flag) to `AUTO_PERMISSIONS` inside the skill to disambiguate from the new `AUTO_MODE` (turbo-vs-interactive). `tests/audit-fixups.test.sh` adds C6/C7 (skill exists, no `context:` frontmatter, AUTO_PERMISSIONS count ≥ 3, both wrappers ≤ 100 lines); `tests/turbo-flow.test.sh` pins both wrapper-to-skill links and the AUTO_MODE exports. Suite goes 83 → 92 assertions.
+
+### Backwards compatibility
+- **No user-facing breakage.** `/uberdev:solve` and `/uberdev:turbo` invocations are byte-equivalent in behavior; the wrappers now delegate to `solve-pipeline`. `/uberdev:issue --no-explore` still parses but is soft-deprecated. The `legacy cache` heredoc step in solve-pipeline's trivial/small tiers no-ops on issues created after the #14 redesign (no more `.uberdev/research/issue-N/` writes from `/issue`); legacy issues whose research was persisted under the previous fanout still get inlined.
+
 ## [0.10.0] - 2026-04-29
 
 ### Added
