@@ -34,6 +34,14 @@ Claude Code command, and the issue's collision rule is "plugin namespacing
 always wins over short alias" — but built-ins ship with Claude Code itself,
 so we sidestep the collision by using a slightly different short name.
 
+## Implementation note
+
+The ALIASES table and forwarder template are defined in
+`plugins/uberdev/lib/aliases-sync.sh` (the single source of truth, also
+used by `hooks/session-start` for auto-install). `tests/aliases.test.sh`
+section A6 enforces drift between the helper's ALIASES rows and each
+canonical command's `allowed-tools` frontmatter.
+
 ## Run
 
 ```bash
@@ -51,6 +59,10 @@ if [ -z "$PLUGIN_ROOT" ] || [ ! -d "$PLUGIN_ROOT/commands" ]; then
   exit 1
 fi
 
+# Source the shared helper (single source of truth for ALIASES + write logic).
+# shellcheck source=lib/aliases-sync.sh
+. "$PLUGIN_ROOT/lib/aliases-sync.sh"
+
 DEST_DIR="$HOME/.claude/commands"
 if [ "$DRY_RUN" != "1" ]; then
   mkdir -p "$DEST_DIR" || {
@@ -58,38 +70,6 @@ if [ "$DRY_RUN" != "1" ]; then
     exit 1
   }
 fi
-
-# Per-alias config: short-name|canonical-name|JSON-array-of-allowed-tools.
-#
-# allowed-tools is HARDCODED here, not auto-extracted from each canonical's
-# frontmatter. It must be kept byte-identical to the canonical's
-# `allowed-tools` line so the forwarder grants the same tool surface — no
-# more, no less. If a canonical is updated to need a new tool, this table
-# must be updated to match.
-#
-# `tests/aliases.test.sh` section A6 enforces this drift-detection contract:
-# the suite reads each canonical's `allowed-tools` line and asserts the
-# matching ALIASES row contains the same value. So forgetting to update
-# this list will fail CI rather than silently shipping under-privileged
-# forwarders.
-ALIASES='issue|issue|["Bash", "Glob", "Grep", "Read", "Task"]
-solve|solve|["Bash", "Read", "Task"]
-turbo|turbo|["Bash", "Read", "Task"]
-simplify|simplify|["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", "Write"]
-review-pr|review-pr|["Bash(git*)", "Bash(gh*)", "Glob", "Grep", "Read", "Task"]'
-
-# Built-in Claude Code commands; never overwrite these even with --force.
-# /review is the load-bearing entry here (we already use /review-pr to dodge
-# it, but if someone adds another canonical short-named like a built-in, the
-# guard catches it).
-#
-# Manually maintained — Claude Code's plugin reference doesn't expose a
-# machine-readable list of reserved short-names, so on a major Claude Code
-# release this list should be re-checked against the current built-in set
-# (https://code.claude.com/docs/en/plugins-reference). If a new built-in
-# is added that collides with an alias, this list is the right place to
-# add the guard.
-BUILTINS='init review security-review statusline-setup help clear plugin'
 
 echo "Installing uberdev short-form aliases…"
 echo "  source: $PLUGIN_ROOT/commands"
@@ -102,37 +82,30 @@ INSTALLED=0
 SKIPPED=0
 
 while IFS='|' read -r SHORT CANON TOOLS; do
+  [ -n "$SHORT" ] || continue
   TARGET="$DEST_DIR/${SHORT}.md"
   CANON_FILE="$PLUGIN_ROOT/commands/${CANON}.md"
 
   if [ ! -f "$CANON_FILE" ]; then
     echo "  SKIP  /$SHORT — canonical not found at $CANON_FILE"
-    SKIPPED=$((SKIPPED + 1))
-    continue
+    SKIPPED=$((SKIPPED + 1)); continue
   fi
+  case " $BUILTINS " in
+    *" $SHORT "*)
+      echo "  SKIP  /$SHORT — collides with a Claude Code built-in; use /uberdev:$CANON"
+      SKIPPED=$((SKIPPED + 1)); continue ;;
+  esac
 
-  # Built-in collision — refuse even with --force, since clobbering a
-  # built-in would brick the user's environment.
-  if [[ " $BUILTINS " == *" $SHORT "* ]]; then
-    echo "  SKIP  /$SHORT — collides with a Claude Code built-in; use /uberdev:$CANON"
-    SKIPPED=$((SKIPPED + 1))
-    continue
-  fi
-
-  # Collision check: a single grep against TARGET answers both "does it
-  # exist?" and "is it ours?" — grep with 2>/dev/null returns non-zero
-  # silently if the file is missing, so we don't need a separate -e stat.
-  if grep -q 'managed-by: uberdev-aliases' "$TARGET" 2>/dev/null; then
+  # Collision check via the shared marker test.
+  if _aliases_check_marker "$TARGET"; then
     if [ "$FORCE" != "1" ]; then
       echo "  KEEP  /$SHORT — already installed (use --force to refresh)"
-      SKIPPED=$((SKIPPED + 1))
-      continue
+      SKIPPED=$((SKIPPED + 1)); continue
     fi
     echo "  REPL  /$SHORT — refreshing existing managed forwarder"
   elif [ -e "$TARGET" ]; then
     echo "  SKIP  /$SHORT — $TARGET exists and is not managed by uberdev (won't overwrite)"
-    SKIPPED=$((SKIPPED + 1))
-    continue
+    SKIPPED=$((SKIPPED + 1)); continue
   fi
 
   if [ "$DRY_RUN" = "1" ]; then
@@ -140,46 +113,13 @@ while IFS='|' read -r SHORT CANON TOOLS; do
     continue
   fi
 
-  # Write the forwarder. Heredoc is unquoted so $SHORT/$CANON/$TOOLS/
-  # $PLUGIN_ROOT/$CANON_FILE expand HERE — those values are baked into
-  # the forwarder once at install time. $ARGUMENTS and ${CLAUDE_PLUGIN_ROOT}
-  # are escaped with a leading backslash so they remain LITERAL in the
-  # written file; Claude Code's harness substitutes them later, when the
-  # user actually invokes the alias (so each invocation gets the user's
-  # then-current args, not the empty $ARGUMENTS at install time).
-  cat > "$TARGET" <<EOF
----
-description: "Alias for /uberdev:$CANON"
-argument-hint: "<args>  # forwarded to /uberdev:$CANON"
-allowed-tools: $TOOLS
----
-
-<!-- managed-by: uberdev-aliases -->
-<!-- Generated by /uberdev:install-aliases. Remove via /uberdev:uninstall-aliases. -->
-<!-- Do not edit by hand — re-run /uberdev:install-aliases --force to regenerate. -->
-
-# /$SHORT — alias for /uberdev:$CANON
-
-This is a top-level shorthand for the canonical \`/uberdev:$CANON\`.
-Treat this invocation exactly as if the user had typed
-\`/uberdev:$CANON \$ARGUMENTS\`. There is no logic here — the canonical
-command file lives in the uberdev plugin install.
-
-- **canonical command**: \`$CANON_FILE\`
-- **\${CLAUDE_PLUGIN_ROOT}** (resolved at install time): \`$PLUGIN_ROOT\`
-- **user arguments**: \`\$ARGUMENTS\`
-
-**Action:** Read the canonical command file with the \`Read\` tool, then
-follow its instructions exactly. Wherever the canonical references
-\`\${CLAUDE_PLUGIN_ROOT}\`, substitute the resolved path above. Pass
-\`\$ARGUMENTS\` through unchanged.
-
-If the canonical path is stale (e.g. you reinstalled the plugin to a
-different location), re-run \`/uberdev:install-aliases --force\` to
-regenerate this file.
-EOF
-  echo "  OK    /$SHORT → /uberdev:$CANON"
-  INSTALLED=$((INSTALLED + 1))
+  if _aliases_write_forwarder "$SHORT" "$CANON" "$TOOLS" "$PLUGIN_ROOT" "$TARGET"; then
+    echo "  OK    /$SHORT → /uberdev:$CANON"
+    INSTALLED=$((INSTALLED + 1))
+  else
+    echo "  FAIL  /$SHORT → write failed"
+    SKIPPED=$((SKIPPED + 1))
+  fi
 done <<< "$ALIASES"
 
 echo
