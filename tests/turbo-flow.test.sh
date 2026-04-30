@@ -70,6 +70,26 @@ assert_grep "$SOLVE_PIPELINE" \
   "solve-pipeline skill (medium tier) dispatches --turbo into the pipeline"
 
 echo
+echo "== Differential guard: AUTO_MODE!=1 medium dispatch dispatches WITHOUT --turbo (#15) =="
+# pr-test-analyzer Gap #2: the positive --turbo assertion above asserts --turbo
+# appears somewhere in the skill; this asserts the interactive (/solve) medium
+# branch dispatches the orchestrator WITHOUT --turbo, so a future edit that
+# accidentally hardcoded --turbo would break this test.
+SOLVE_MEDIUM_DISPATCH=$(awk '
+  /^if \[\[ "\$AUTO_MODE" == "1" \]\]; then$/ { in_turbo=1; next }
+  in_turbo && /^else$/ { in_turbo=0; in_solve=1; next }
+  in_solve && /^fi$/ { in_solve=0; next }
+  in_solve && /orchestrator.*solve GH issue/ { print }
+' "$SOLVE_PIPELINE")
+if grep -qE -- '--turbo' <<<"$SOLVE_MEDIUM_DISPATCH"; then
+  echo "  FAIL  AUTO_MODE!=1 medium dispatch MUST NOT contain --turbo (interactive /solve regression)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  AUTO_MODE!=1 medium dispatch correctly omits --turbo (interactive /solve preserved)"
+  PASS=$((PASS + 1))
+fi
+
+echo
 echo "== thin /solve and /turbo wrappers invoke the solve-pipeline skill =="
 SOLVE_PIPELINE_REF='uberdev:solve-pipeline|solve-pipeline skill'
 assert_grep "$SOLVE_CMD" "$SOLVE_PIPELINE_REF" \

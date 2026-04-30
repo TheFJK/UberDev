@@ -198,6 +198,19 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# pr-test-analyzer Gap #3 (#15 collision guard): the legacy permission-mode
+# pattern `[[ "$AUTO_MODE" == "1" ]] && PERM_FLAG_VAL=...` must NOT reappear.
+# AUTO_MODE is now the turbo flag; the permission-mode flag is AUTO_PERMISSIONS.
+# A copy-paste accident reintroducing the old pattern would silently alias the
+# two semantics — the test catches it.
+if grep -qE '\[\[ "\$AUTO_MODE" == "1" \]\][[:space:]]*&&[[:space:]]*PERM_FLAG_VAL' "$SOLVE_PIPELINE"; then
+  echo "  FAIL  solve-pipeline contains legacy AUTO_MODE/PERM_FLAG_VAL pattern (Risk 1 collision regression)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  solve-pipeline does NOT contain legacy AUTO_MODE/PERM_FLAG_VAL pattern (collision guard intact)"
+  PASS=$((PASS + 1))
+fi
+
 echo
 echo "== C7: thin /solve and /turbo line-count budget (#15 refactor) =="
 for f in "$SOLVE_CMD" "$TURBO_CMD"; do
