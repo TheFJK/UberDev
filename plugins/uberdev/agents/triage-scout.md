@@ -13,6 +13,7 @@ Validate labels and scope against the **real** repo state, and surface possible 
 
 ```yaml
 description: "<verbatim user description>"
+issue_type: fix | feat | refactor | test | docs | chore
 working_dir: "<absolute path>"
 repo_slug: "<owner>/<repo>"
 model_hint: sonnet   # audit-trail aid

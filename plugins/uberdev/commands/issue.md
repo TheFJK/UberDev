@@ -53,7 +53,7 @@ Phase 2 dispatches **two Task agents** in a single assistant turn (one message, 
 Dispatch both scouts in **one message, two `Task` tool_use blocks**. Each brief carries the literal resolved values for `description` (the user's `$DESC` from Phase 0), `working_dir` (the absolute repo root), and `repo_slug` (the resolved `$REPO`).
 
 - **`uberdev:codebase-scout`** — receives `{description, issue_type, working_dir, model_hint: sonnet}` and returns YAML with `likely_area: [paths]` and (if `issue_type=fix`) `likely_root_cause: "one-line hypothesis"`. Drives the bug template's `## Likely area` and `## Likely root cause` sections.
-- **`uberdev:triage-scout`** — receives `{description, working_dir, repo_slug, model_hint: sonnet}` and returns YAML with `duplicates: [{number, title, state}]`, `valid_labels: [...]`, `valid_scope: "..."`, `commitlint_present: true|false`. Drives the duplicate section, the `--label` flags, and the title scope.
+- **`uberdev:triage-scout`** — receives `{description, issue_type, working_dir, repo_slug, model_hint: sonnet}` and returns YAML with `duplicates: [{number, title, state}]`, `valid_labels: [...]`, `valid_scope: "..."`, `commitlint_present: true|false`. Drives the duplicate section, the `--label` flags, and the title scope. (`issue_type` is required so the scout picks the base label — `bug` for `fix`, `enhancement` for `feat` — without re-classifying.)
 
 If the codebase scout returns `status: BLOCKED` (no real paths grounded), the main thread substitutes `"No clear area identified — defer to /brainstorm"` in the `## Likely area` section. **Never invent paths.**
 
