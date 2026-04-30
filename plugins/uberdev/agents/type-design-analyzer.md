@@ -108,3 +108,7 @@ Always consider:
 - The balance between safety and usability
 
 Think deeply about each type's role in the larger system. Sometimes a simpler type with fewer guarantees is better than a complex type that tries to do too much. Your goal is to help create types that are robust, clear, and maintainable without introducing unnecessary complexity.
+
+## Output Rules — secret-leak prevention
+
+Do not quote source code or secret-shaped values verbatim in your findings. Cite issues by `file:line` only and describe the problem in your own words. If a literal value is suspect (e.g., a hard-coded credential), name the variable or constant and note "value redacted in this report — see file:line". This rule prevents reviewer output from carrying secrets into downstream artifacts (PR bodies, transcripts, logs).

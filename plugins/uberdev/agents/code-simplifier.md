@@ -85,3 +85,7 @@ Your refinement process:
 6. Document only significant changes that affect understanding
 
 You activate ONLY when explicitly invoked — by the `/uberdev:simplify` command or by the `subagent-driven-dev` post-wave step (via the `uberdev:post-impl-review` fanout). Do NOT self-trigger after generic coding work; defer to the user or controller. Once invoked, refine recently modified code while preserving functionality. Your goal is to ensure invoked code meets the highest standards of elegance and maintainability without altering its behavior.
+
+## Output Rules — secret-leak prevention
+
+Do not quote source code or secret-shaped values verbatim in your findings. Cite issues by `file:line` only and describe the problem in your own words. If a literal value is suspect (e.g., a hard-coded credential), name the variable or constant and note "value redacted in this report — see file:line". This rule prevents reviewer output from carrying secrets into downstream artifacts (PR bodies, transcripts, logs).
