@@ -275,11 +275,16 @@ echo "== S2: second session is a no-op =="
 S2_HOME="$(mktemp -d)"
 HOME="$S2_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
   bash "$HOOK" >/dev/null 2>/dev/null || true
-# Capture mtimes after first run
-declare -A S2_MTIMES
+# Capture mtimes after first run. Bash 3.2 (the macOS /bin/bash) lacks
+# associative arrays, so write one mtime-per-line to a temp file keyed by
+# short name, and grep them back for comparison. The five short names are
+# fixed; review-pr would be illegal as a bash variable name.
+S2_MT_FILE="$(mktemp)"
 for short in issue solve turbo simplify review-pr; do
-  S2_MTIMES[$short]="$(stat -f %m "$S2_HOME/.claude/commands/${short}.md" 2>/dev/null \
-                        || stat -c %Y "$S2_HOME/.claude/commands/${short}.md" 2>/dev/null)"
+  mt="$(stat -f %m "$S2_HOME/.claude/commands/${short}.md" 2>/dev/null \
+         || stat -c %Y "$S2_HOME/.claude/commands/${short}.md" 2>/dev/null \
+         || echo "")"
+  printf '%s %s\n' "$short" "$mt" >> "$S2_MT_FILE"
 done
 sleep 1
 S2_STDERR="$(mktemp)"
@@ -288,9 +293,12 @@ HOME="$S2_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
 S2_OK=1
 for short in issue solve turbo simplify review-pr; do
   NEW="$(stat -f %m "$S2_HOME/.claude/commands/${short}.md" 2>/dev/null \
-         || stat -c %Y "$S2_HOME/.claude/commands/${short}.md" 2>/dev/null)"
-  if [ "$NEW" != "${S2_MTIMES[$short]}" ]; then S2_OK=0; break; fi
+         || stat -c %Y "$S2_HOME/.claude/commands/${short}.md" 2>/dev/null \
+         || echo "")"
+  OLD="$(awk -v k="$short" '$1==k {print $2}' "$S2_MT_FILE")"
+  if [ "$NEW" != "$OLD" ]; then S2_OK=0; break; fi
 done
+rm -f "$S2_MT_FILE"
 if [ "$S2_OK" = "1" ]; then
   echo "  PASS  S2: no mtime changes on second session"; PASS=$((PASS + 1))
 else
@@ -310,10 +318,13 @@ HOME="$S3_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
   bash "$HOOK" >/dev/null 2>/dev/null || true
 # Rewrite version-marker to a stale value
 printf '0.10.0\n' > "$S3_HOME/.claude/.uberdev-aliases-version"
-declare -A S3_MTIMES
+# Capture pre-refresh mtimes via a flat temp file (bash 3.2 compat — see S2).
+S3_MT_FILE="$(mktemp)"
 for short in issue solve turbo simplify review-pr; do
-  S3_MTIMES[$short]="$(stat -f %m "$S3_HOME/.claude/commands/${short}.md" 2>/dev/null \
-                        || stat -c %Y "$S3_HOME/.claude/commands/${short}.md" 2>/dev/null)"
+  mt="$(stat -f %m "$S3_HOME/.claude/commands/${short}.md" 2>/dev/null \
+         || stat -c %Y "$S3_HOME/.claude/commands/${short}.md" 2>/dev/null \
+         || echo "")"
+  printf '%s %s\n' "$short" "$mt" >> "$S3_MT_FILE"
 done
 sleep 1
 S3_STDERR="$(mktemp)"
@@ -322,9 +333,12 @@ HOME="$S3_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
 S3_OK=1
 for short in issue solve turbo simplify review-pr; do
   NEW="$(stat -f %m "$S3_HOME/.claude/commands/${short}.md" 2>/dev/null \
-         || stat -c %Y "$S3_HOME/.claude/commands/${short}.md" 2>/dev/null)"
-  if [ "$NEW" = "${S3_MTIMES[$short]}" ]; then S3_OK=0; break; fi
+         || stat -c %Y "$S3_HOME/.claude/commands/${short}.md" 2>/dev/null \
+         || echo "")"
+  OLD="$(awk -v k="$short" '$1==k {print $2}' "$S3_MT_FILE")"
+  if [ "$NEW" = "$OLD" ]; then S3_OK=0; break; fi
 done
+rm -f "$S3_MT_FILE"
 if [ "$S3_OK" = "1" ]; then
   echo "  PASS  S3: forwarders rewritten on version mismatch"; PASS=$((PASS + 1))
 else
