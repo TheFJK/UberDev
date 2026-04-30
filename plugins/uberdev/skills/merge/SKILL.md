@@ -55,7 +55,50 @@ Branch names (from any tier) MUST be validated against `BRANCH_NAME_REGEX` befor
 
 ## Phase 1 — Pre-flight gate
 
-<!-- Body filled in by wave-2 (Phase 1) and wave-3 (Phases 2/3/4). Do not edit the heading text. -->
+### Step 1.1 — Acquire the single-instance lock
+
+Use `flock` against `LOCK_FILE_PATH` (declared in `## Constants`). Default fail-fast on contention with message `"another /merge run in progress, PID <X>"`. `--wait` flag opt-in for queueing. Stale-lock cleanup: if PID dead, release.
+
+### Step 1.2 — Read integration_branch via the four-tier precedence chain (D8)
+
+1. CLI flag `--integration-branch=<name>` (highest)
+2. env var `INTEGRATION_BRANCH_ENV_VAR`
+3. `.claude/uberdev.local.md` YAML frontmatter `INTEGRATION_BRANCH_KEY`
+4. `gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name'`
+
+Validate the resolved name against `BRANCH_NAME_REGEX` BEFORE any shell argv use. Reject and abort on regex fail.
+
+### Step 1.3 — Ask-and-persist branch (D8a) when all four tiers are empty
+
+If the four-tier chain returns nothing (network-detached clone, missing remote): prompt user once for a branch name. Validate against `BRANCH_NAME_REGEX`. Offer "Save to `.claude/uberdev.local.md`? [Y/n]". On yes: use `mktemp + mv` atomic write pattern (mirrors `install.sh:89`) — write new YAML frontmatter (or upsert the `integration_branch:` key) to a sibling tempfile in the same directory via `mktemp --tmpdir="$(dirname "$TARGET")" uberdev.local.XXXXXX` (same-filesystem guarantee for atomic rename; bare `mktemp` defaults to `$TMPDIR` and breaks atomicity when `.claude/` is on a different filesystem), `fsync`, then `mv -f` over the target. On no: hold the value only for the current run.
+
+### Step 1.4 — Per-PR pre-flight gate
+
+Project the JSON: `gh pr view <N> --json state,isDraft,reviewDecision,statusCheckRollup,headRepository,maintainerCanModify,isCrossRepository,headRefName,headRefOid,baseRefName,body,commits,labels,createdAt,author`.
+
+Per-PR gate conditions (ALL must pass):
+- `state == "OPEN"`
+- `isDraft == false`
+- `reviewDecision == "APPROVED"`
+- `statusCheckRollup` all green OR explicit `--bypass-protections` waiver
+- PR author is repo collaborator OR `author.login` ∈ `bot_authors_allow_list` (config key, default `["dependabot[bot]", "renovate[bot]"]` per D-BOTS) OR explicit per-PR consent
+
+On any condition fail: list the specific failing condition for that PR. Exclude from merge set. **Never silently skip** — every fail emits a `gate_fail` event to `audit.jsonl` AND surfaces in the user-facing summary. Continue with passing PRs.
+
+### Step 1.5 — Compute file-overlap matrix (Q1 same-file degradation pre-compute)
+
+For every pair of in-scope PRs, run `git diff --name-only <integration_branch>..<pr-N-head>` and intersect path sets. Pairs with non-empty intersection are flagged for sequential ordering in Phase 2 (PR-A first, then re-probe PR-B against new tip). Distinct-file pairs remain eligible for parallel conflict-resolve in Phase 3.
+
+### Step 1.6 — Fork-PR preflight (Q3 two-step gate)
+
+For every cross-repository PR (`isCrossRepository == true`):
+- Same-repo head: proceed.
+- User-owned fork + `maintainerCanModify == true`: probe with `git push --dry-run` first. Permission OK → proceed.
+- Org-owned fork OR `maintainerCanModify == false`: refuse conflict-resolve. Surface handoff to PR author. Skip that PR (queue continues). Clean-merge case still flows via `gh pr merge` since GitHub natively handles fork merges.
+
+### Step 1.7 — Single-PR pre-flight fail edge case
+
+If only one PR is in scope and its pre-flight fails: abort the run (nothing to merge).
 
 ## Phase 2 — Merge plan
 
