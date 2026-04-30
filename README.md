@@ -404,6 +404,7 @@ Per-repo settings live in `.claude/uberdev.local.md` (YAML frontmatter; ignored 
 # Implemented — read by command logic today
 solve_terminal: ghostty       # ghostty | iterm | cmux | terminal | nohup
 solve_auto: false             # boolean — auto-accept brainstorm recommendations (=`/turbo` semantics)
+auto_install_aliases: true    # boolean — install short-form forwarders at SessionStart (default: true)
 integration_branch: main      # /merge target branch (overrides gh repo view default)
 bot_authors_allow_list:       # /merge: PR authors that bypass the per-PR preflight collaborator gate
   - dependabot[bot]
@@ -424,6 +425,7 @@ These are wired into command logic today.
 |---|---|---|---|
 | `SOLVE_TERMINAL` | `solve_terminal` | Override `/solve`'s terminal dispatcher (`cmux` / `ghostty` / `iterm` / `terminal` / `nohup`) | live |
 | `SOLVE_AUTO` | `solve_auto` | When `1`/`true`, spawned agent runs with `--permission-mode auto` | live |
+| `UBERDEV_NO_AUTO_ALIAS` | `auto_install_aliases` | When `1`/`true` (env) or `false` (file), suppresses session-start auto-installation of `/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge` forwarders | live |
 | `UBERDEV_INTEGRATION_BRANCH` | `integration_branch` | `/merge` target branch. Precedence: `--integration-branch` CLI flag > env var > config file > `gh repo view --json defaultBranchRef` | live |
 | — | `bot_authors_allow_list` | `/merge`: PR authors that bypass the per-PR preflight collaborator gate (default `["dependabot[bot]", "renovate[bot]"]`) | live |
 

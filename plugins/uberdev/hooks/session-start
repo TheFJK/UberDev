@@ -41,6 +41,20 @@ if [ -d "$legacy_skills_dir" ]; then
     warning_message=$'\n\n<important-reminder>IN YOUR FIRST REPLY AFTER SEEING THIS MESSAGE YOU MUST TELL THE USER:⚠️ **WARNING:** UberDev now uses Claude Code\'s skills system. Custom skills in ~/.config/uberdev/skills will not be read. Move custom skills to ~/.claude/skills instead. To make this message go away, remove ~/.config/uberdev/skills</important-reminder>'
 fi
 
+# ── auto-alias sync (issue #21) ──────────────────────────────────────
+# Install / refresh top-level forwarders /issue, /solve, /turbo, /simplify,
+# /review-pr in ~/.claude/commands. Idempotent: if installed_version ==
+# plugin_version, the helper returns immediately. Opt out with
+# UBERDEV_NO_AUTO_ALIAS=1 or `auto_install_aliases: false` in
+# .claude/uberdev.local.md. The helper handles all error paths internally
+# and returns 0; the `|| true` is defence-in-depth so set -e cannot abort
+# the hook if the helper ever does emit non-zero.
+if [ -f "${PLUGIN_ROOT}/lib/aliases-sync.sh" ]; then
+  # shellcheck source=../lib/aliases-sync.sh
+  . "${PLUGIN_ROOT}/lib/aliases-sync.sh"
+  aliases_sync_main || true
+fi
+
 # Read using-uberdev content
 using_uberdev_content=$(cat "${PLUGIN_ROOT}/skills/using-uberdev/SKILL.md" 2>/dev/null || echo "Error reading using-uberdev skill")
 

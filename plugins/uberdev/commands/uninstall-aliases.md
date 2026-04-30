@@ -8,10 +8,12 @@ allowed-tools: ["Bash"]
 
 User flags: `$ARGUMENTS` (`--dry-run` to preview without removing)
 
-Removes the user-level forwarder files written by `/uberdev:install-aliases`.
+Removes the user-level forwarder files written by `/uberdev:install-aliases`
+AND the auto-install version-marker (`~/.claude/.uberdev-aliases-version`).
 Marker-scoped: only files carrying `managed-by: uberdev-aliases` are
 removed, so a hand-authored `~/.claude/commands/issue.md` (or any other
-short name) is preserved untouched.
+short name) is preserved untouched. Removing the version-marker ensures
+the next session-start hook will treat the system as freshly installed.
 
 ## Run
 
@@ -63,6 +65,24 @@ done
 echo
 echo "Summary: $REMOVED removed, $KEPT kept"
 [ "$DRY_RUN" = "1" ] && echo "(dry-run — nothing actually removed)"
+
+# Remove version-marker file (issue #21).
+# Without this, the next session-start hook's idempotency check would
+# see installed_version == plugin_version and skip the install — making
+# the uninstall silently incomplete.
+MARKER="$HOME/.claude/.uberdev-aliases-version"
+if [ -f "$MARKER" ]; then
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "  PLAN  version-marker — would remove $MARKER"
+  else
+    if rm -f "$MARKER" 2>/dev/null && [ ! -e "$MARKER" ]; then
+      echo "  GONE  version-marker — removed $MARKER"
+    else
+      echo "  FAIL  version-marker — could not remove $MARKER (check permissions)" >&2
+    fi
+  fi
+fi
+
 echo
 echo "Reinstall with: /uberdev:install-aliases"
 ```

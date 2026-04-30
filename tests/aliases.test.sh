@@ -40,7 +40,8 @@ CANON_DIR="$REPO_ROOT/plugins/uberdev/commands"
 for f in "$INSTALL_CMD" "$UNINSTALL_CMD" "$README" \
          "$CANON_DIR/issue.md" "$CANON_DIR/solve.md" "$CANON_DIR/turbo.md" \
          "$CANON_DIR/simplify.md" "$CANON_DIR/review-pr.md" \
-         "$CANON_DIR/merge.md"; do
+         "$CANON_DIR/merge.md" \
+         "$REPO_ROOT/.github/workflows/test.yml"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -75,6 +76,11 @@ assert_grep_not() {
   fi
 }
 
+# Stub PLUGIN_ROOT to the worktree so the hook can read plugin.json
+HOOK="$REPO_ROOT/plugins/uberdev/hooks/session-start"
+PLUGIN_JSON="$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json"
+PLUGIN_VERSION="$(jq -r .version "$PLUGIN_JSON")"
+
 echo "== A1: install-aliases command exists and registers all 6 aliases =="
 # Each canonical /uberdev:<name> must be wired up. We grep for the literal
 # canonical command names since those are the targets the forwarders must
@@ -91,8 +97,8 @@ done
 # uninstall would either be unsafe (might delete user-authored files) or
 # impossible (couldn't tell ours apart). Both files must agree on the literal.
 MARKER='managed-by:[[:space:]]*uberdev-aliases'
-assert_grep "$INSTALL_CMD" "$MARKER" \
-  "install-aliases writes the 'managed-by: uberdev-aliases' marker into forwarders"
+assert_grep "$REPO_ROOT/plugins/uberdev/lib/aliases-sync.sh" "$MARKER" \
+  "lib/aliases-sync.sh writes the 'managed-by: uberdev-aliases' marker into forwarders"
 assert_grep "$UNINSTALL_CMD" "$MARKER" \
   "uninstall-aliases keys off the same 'managed-by: uberdev-aliases' marker"
 
@@ -188,9 +194,9 @@ echo "== A6: alias forwarders mirror each canonical's allowed-tools =="
 # `allowed-tools: $TOOLS` — same variable name parsed from the ALIASES
 # rows. Together, A6's two halves guarantee canonical → ALIASES → written
 # forwarder share one source of truth.
-assert_grep "$INSTALL_CMD" \
+assert_grep "$REPO_ROOT/plugins/uberdev/lib/aliases-sync.sh" \
   '^allowed-tools: \$TOOLS$' \
-  "install-aliases heredoc writes the \$TOOLS variable from the ALIASES table"
+  "lib/aliases-sync.sh heredoc writes the \$TOOLS variable from the ALIASES table"
 
 # The ALIASES table in install-aliases.md hardcodes per-alias allowed-tools.
 # That value MUST equal the canonical command's `allowed-tools:` line, byte
@@ -213,7 +219,7 @@ for canonical in issue solve turbo simplify review-pr merge; do
     FAIL=$((FAIL + 1))
     continue
   fi
-  if grep -F "${canonical}|${canonical}|${canon_tools}" "$INSTALL_CMD" > /dev/null; then
+  if grep -F "${canonical}|${canonical}|${canon_tools}" "$REPO_ROOT/plugins/uberdev/lib/aliases-sync.sh" > /dev/null; then
     echo "  PASS  /$canonical — ALIASES row matches canonical allowed-tools"
     PASS=$((PASS + 1))
   else
@@ -223,6 +229,316 @@ for canonical in issue solve turbo simplify review-pr merge; do
     FAIL=$((FAIL + 1))
   fi
 done
+
+echo
+echo "== S1: fresh install — first session installs all 6 aliases =="
+S1_HOME="$(mktemp -d)"
+S1_STDERR="$(mktemp)"
+HOME="$S1_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  bash "$HOOK" >/dev/null 2>"$S1_STDERR" || true
+
+for short in issue solve turbo simplify review-pr merge; do
+  if [ -f "$S1_HOME/.claude/commands/${short}.md" ] \
+     && grep -q 'managed-by: uberdev-aliases' "$S1_HOME/.claude/commands/${short}.md"; then
+    echo "  PASS  S1: /$short installed with marker"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S1: /$short missing or unmarkered"
+    FAIL=$((FAIL + 1))
+  fi
+done
+if [ "$(cat "$S1_HOME/.claude/.uberdev-aliases-version" 2>/dev/null || true)" = "$PLUGIN_VERSION" ]; then
+  echo "  PASS  S1: version marker contains $PLUGIN_VERSION"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S1: version marker missing or wrong"
+  FAIL=$((FAIL + 1))
+fi
+if grep -q "first run: installed 6 aliases" "$S1_STDERR"; then
+  echo "  PASS  S1: first-run summary line on stderr"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S1: first-run summary line missing"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$S1_HOME" "$S1_STDERR"
+
+echo
+echo "== S2: second session is a no-op =="
+S2_HOME="$(mktemp -d)"
+S2_STDERR="$(mktemp)"
+HOME="$S2_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  bash "$HOOK" >/dev/null 2>/dev/null || true
+
+# Precondition: first run must have produced the 5 forwarders. Without this
+# guard, the mtime capture below silently picks up empty strings for absent
+# files, the post-run lookup also returns "", and `[ "" = "" ]` makes the
+# section spuriously PASS — masking the very TDD red signal we want.
+S2_PREFLIGHT_OK=1
+for short in issue solve turbo simplify review-pr merge; do
+  [ -f "$S2_HOME/.claude/commands/${short}.md" ] || S2_PREFLIGHT_OK=0
+done
+
+if [ "$S2_PREFLIGHT_OK" != "1" ]; then
+  echo "  FAIL  S2: precondition — first run did not produce forwarders"; FAIL=$((FAIL + 1))
+else
+  # Capture mtimes after first run. Bash 3.2 (the macOS /bin/bash) lacks
+  # associative arrays, so write one mtime-per-line to a temp file keyed by
+  # short name, and grep them back for comparison. The five short names are
+  # fixed; review-pr would be illegal as a bash variable name.
+  S2_MT_FILE="$(mktemp)"
+  for short in issue solve turbo simplify review-pr merge; do
+    mt="$(stat -c %Y "$S2_HOME/.claude/commands/${short}.md" 2>/dev/null \
+           || stat -f %m "$S2_HOME/.claude/commands/${short}.md" 2>/dev/null \
+           || echo "")"
+    printf '%s %s\n' "$short" "$mt" >> "$S2_MT_FILE"
+  done
+  sleep 1
+  HOME="$S2_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+    bash "$HOOK" >/dev/null 2>"$S2_STDERR" || true
+  S2_OK=1
+  for short in issue solve turbo simplify review-pr merge; do
+    NEW="$(stat -c %Y "$S2_HOME/.claude/commands/${short}.md" 2>/dev/null \
+           || stat -f %m "$S2_HOME/.claude/commands/${short}.md" 2>/dev/null \
+           || echo "")"
+    OLD="$(awk -v k="$short" '$1==k {print $2}' "$S2_MT_FILE")"
+    if [ "$NEW" != "$OLD" ]; then S2_OK=0; break; fi
+  done
+  rm -f "$S2_MT_FILE"
+  if [ "$S2_OK" = "1" ]; then
+    echo "  PASS  S2: no mtime changes on second session"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S2: forwarder mtimes changed on second session"; FAIL=$((FAIL + 1))
+  fi
+  if ! grep -q "first run:" "$S2_STDERR"; then
+    echo "  PASS  S2: stderr is silent on second session"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S2: first-run line printed on second session"; FAIL=$((FAIL + 1))
+  fi
+fi
+rm -rf "$S2_HOME" "$S2_STDERR"
+
+echo
+echo "== S3: plugin upgrade refreshes forwarders =="
+S3_HOME="$(mktemp -d)"
+S3_STDERR="$(mktemp)"
+HOME="$S3_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  bash "$HOOK" >/dev/null 2>/dev/null || true
+
+# Precondition: first run must have produced the 5 forwarders before we can
+# meaningfully test that a stale-marker rewrite changes their mtimes. Same
+# spurious-PASS trap as S2 if absent.
+S3_PREFLIGHT_OK=1
+for short in issue solve turbo simplify review-pr merge; do
+  [ -f "$S3_HOME/.claude/commands/${short}.md" ] || S3_PREFLIGHT_OK=0
+done
+
+if [ "$S3_PREFLIGHT_OK" != "1" ]; then
+  echo "  FAIL  S3: precondition — first run did not produce forwarders"; FAIL=$((FAIL + 1))
+else
+  # Rewrite version-marker to a stale value
+  printf '0.10.0\n' > "$S3_HOME/.claude/.uberdev-aliases-version"
+  # Capture pre-refresh mtimes via a flat temp file (bash 3.2 compat — see S2).
+  S3_MT_FILE="$(mktemp)"
+  for short in issue solve turbo simplify review-pr merge; do
+    mt="$(stat -c %Y "$S3_HOME/.claude/commands/${short}.md" 2>/dev/null \
+           || stat -f %m "$S3_HOME/.claude/commands/${short}.md" 2>/dev/null \
+           || echo "")"
+    printf '%s %s\n' "$short" "$mt" >> "$S3_MT_FILE"
+  done
+  sleep 1
+  HOME="$S3_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+    bash "$HOOK" >/dev/null 2>"$S3_STDERR" || true
+  S3_OK=1
+  for short in issue solve turbo simplify review-pr merge; do
+    NEW="$(stat -c %Y "$S3_HOME/.claude/commands/${short}.md" 2>/dev/null \
+           || stat -f %m "$S3_HOME/.claude/commands/${short}.md" 2>/dev/null \
+           || echo "")"
+    OLD="$(awk -v k="$short" '$1==k {print $2}' "$S3_MT_FILE")"
+    if [ "$NEW" = "$OLD" ]; then S3_OK=0; break; fi
+  done
+  rm -f "$S3_MT_FILE"
+  if [ "$S3_OK" = "1" ]; then
+    echo "  PASS  S3: forwarders rewritten on version mismatch"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S3: forwarders not refreshed on version mismatch"; FAIL=$((FAIL + 1))
+  fi
+  if [ "$(cat "$S3_HOME/.claude/.uberdev-aliases-version" 2>/dev/null || true)" = "$PLUGIN_VERSION" ]; then
+    echo "  PASS  S3: version marker updated to $PLUGIN_VERSION"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S3: version marker not updated"; FAIL=$((FAIL + 1))
+  fi
+  if ! grep -q "first run:" "$S3_STDERR"; then
+    echo "  PASS  S3: stderr silent on refresh (Q5)"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S3: first-run line printed on refresh"; FAIL=$((FAIL + 1))
+  fi
+fi
+rm -rf "$S3_HOME" "$S3_STDERR"
+
+echo
+echo "== S4: UBERDEV_NO_AUTO_ALIAS=1 short-circuits =="
+# Variant a: env var
+S4A_HOME="$(mktemp -d)"
+HOME="$S4A_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  UBERDEV_NO_AUTO_ALIAS=1 bash "$HOOK" >/dev/null 2>/dev/null || true
+if [ ! -e "$S4A_HOME/.claude/commands/issue.md" ] \
+   && [ ! -e "$S4A_HOME/.claude/.uberdev-aliases-version" ]; then
+  echo "  PASS  S4a: env var blocks all writes"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S4a: writes happened despite env var"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$S4A_HOME"
+
+# Variant b: uberdev.local.md
+S4B_HOME="$(mktemp -d)"
+S4B_PWD="$(mktemp -d)"
+mkdir -p "$S4B_PWD/.claude"
+cat > "$S4B_PWD/.claude/uberdev.local.md" <<'EOF'
+---
+auto_install_aliases: false
+---
+EOF
+( cd "$S4B_PWD" && \
+  HOME="$S4B_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+    bash "$HOOK" >/dev/null 2>/dev/null || true )
+if [ ! -e "$S4B_HOME/.claude/commands/issue.md" ]; then
+  echo "  PASS  S4b: uberdev.local.md blocks writes"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S4b: writes happened despite uberdev.local.md opt-out"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$S4B_HOME" "$S4B_PWD"
+
+# Variant c: both → env var wins (no writes)
+S4C_HOME="$(mktemp -d)"
+HOME="$S4C_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  UBERDEV_NO_AUTO_ALIAS=1 bash "$HOOK" >/dev/null 2>/dev/null || true
+if [ ! -e "$S4C_HOME/.claude/commands/issue.md" ]; then
+  echo "  PASS  S4c: env+file → no writes"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S4c: writes happened with both opt-outs set"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$S4C_HOME"
+
+echo
+echo "== S5: hand-authored file survives marker-scoped skip =="
+S5_HOME="$(mktemp -d)"
+mkdir -p "$S5_HOME/.claude/commands"
+printf '# my custom solve\n' > "$S5_HOME/.claude/commands/solve.md"
+S5_STDERR="$(mktemp)"
+HOME="$S5_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  bash "$HOOK" >/dev/null 2>"$S5_STDERR" || true
+if [ "$(cat "$S5_HOME/.claude/commands/solve.md")" = "# my custom solve" ]; then
+  echo "  PASS  S5: hand-authored solve.md preserved byte-for-byte"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S5: hand-authored solve.md was overwritten"; FAIL=$((FAIL + 1))
+fi
+S5_INSTALLED=0
+for short in issue turbo simplify review-pr merge; do
+  if grep -q 'managed-by: uberdev-aliases' "$S5_HOME/.claude/commands/${short}.md" 2>/dev/null; then
+    S5_INSTALLED=$((S5_INSTALLED + 1))
+  fi
+done
+if [ "$S5_INSTALLED" = "5" ]; then
+  echo "  PASS  S5: other 5 forwarders installed"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S5: only $S5_INSTALLED of 5 non-collision forwarders installed"; FAIL=$((FAIL + 1))
+fi
+if grep -q "installed 5 aliases, skipped 1 conflicts (solve)" "$S5_STDERR"; then
+  echo "  PASS  S5: stderr summary reports skip"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S5: stderr did not report skip"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$S5_HOME" "$S5_STDERR"
+
+echo
+echo "== S5b: symlinked ~/.claude/commands is refused =="
+S5B_HOME="$(mktemp -d)"
+S5B_DECOY="$(mktemp -d)"
+mkdir -p "$S5B_HOME/.claude"
+ln -s "$S5B_DECOY" "$S5B_HOME/.claude/commands"
+S5B_STDERR="$(mktemp)"
+HOME="$S5B_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  bash "$HOOK" >/dev/null 2>"$S5B_STDERR" || true
+if grep -q "refusing to sync" "$S5B_STDERR"; then
+  echo "  PASS  S5b: symlinked commands dir refused"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S5b: symlink refusal stderr line missing"; FAIL=$((FAIL + 1))
+fi
+if [ -z "$(ls -A "$S5B_DECOY")" ]; then
+  echo "  PASS  S5b: no writes into symlink target"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S5b: files written into symlinked dir"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$S5B_HOME" "$S5B_DECOY" "$S5B_STDERR"
+
+echo
+echo "== S6: uninstall-aliases removes version-marker =="
+S6_HOME="$(mktemp -d)"
+HOME="$S6_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  bash "$HOOK" >/dev/null 2>/dev/null || true
+# Static check: the uninstall-aliases command's bash body removes the marker.
+if grep -qE 'rm[[:space:]]+-f[[:space:]]+"\$MARKER"|rm[[:space:]]+-f[[:space:]]+.*\.uberdev-aliases-version' \
+   "$REPO_ROOT/plugins/uberdev/commands/uninstall-aliases.md"; then
+  echo "  PASS  S6: uninstall-aliases.md contains version-marker rm"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S6: uninstall-aliases.md does not remove version-marker"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$S6_HOME"
+
+echo
+echo "== S7: unreadable version-marker degrades to first-run =="
+S7_HOME="$(mktemp -d)"
+mkdir -p "$S7_HOME/.claude"
+printf '0.10.0\n' > "$S7_HOME/.claude/.uberdev-aliases-version"
+chmod 000 "$S7_HOME/.claude/.uberdev-aliases-version"
+HOME="$S7_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  bash "$HOOK" >/dev/null 2>/dev/null || true
+chmod 644 "$S7_HOME/.claude/.uberdev-aliases-version" 2>/dev/null || true
+if [ -f "$S7_HOME/.claude/commands/issue.md" ]; then
+  echo "  PASS  S7: hook proceeded despite unreadable marker"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S7: hook crashed or skipped on unreadable marker"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$S7_HOME"
+
+echo
+echo "== S8: two concurrent sessions converge byte-correctly =="
+S8_HOME="$(mktemp -d)"
+HOME="$S8_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  bash "$HOOK" >/dev/null 2>/dev/null &
+S8_P1=$!
+HOME="$S8_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  bash "$HOOK" >/dev/null 2>/dev/null &
+S8_P2=$!
+wait "$S8_P1" "$S8_P2" || true
+S8_OK=1
+for short in issue solve turbo simplify review-pr merge; do
+  f="$S8_HOME/.claude/commands/${short}.md"
+  if [ ! -s "$f" ] || ! grep -q 'managed-by: uberdev-aliases' "$f"; then
+    S8_OK=0; break
+  fi
+done
+if [ "$S8_OK" = "1" ]; then
+  echo "  PASS  S8: all 6 forwarders well-formed after race"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S8: race produced malformed/empty forwarder"; FAIL=$((FAIL + 1))
+fi
+if [ "$(cat "$S8_HOME/.claude/.uberdev-aliases-version" 2>/dev/null)" = "$PLUGIN_VERSION" ]; then
+  echo "  PASS  S8: version-marker correct after race"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S8: version-marker corrupt after race"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$S8_HOME"
+
+echo
+echo "== S9: aliases.test.sh is wired into CI =="
+CI_YML="$REPO_ROOT/.github/workflows/test.yml"
+if grep -qE 'aliases\.test\.sh' "$CI_YML"; then
+  echo "  PASS  S9: aliases.test.sh referenced in test.yml"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S9: aliases.test.sh missing from test.yml"; FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== Summary =="
