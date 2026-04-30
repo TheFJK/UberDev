@@ -17,7 +17,7 @@
    \___/|_.__/ \___|_|  |____/ \___| \_/  
 ```
 
-**Three commands. Zero ceremony. Every issue, triaged and shipped.**
+**Four commands. Zero ceremony. Every issue, triaged and shipped.**
 
 </div>
 
@@ -25,13 +25,14 @@
 
 ## TL;DR
 
-Three slash commands that turn issue triage and resolution into one-line operations:
+Four slash commands that turn issue triage and resolution into one-line operations:
 
 | Command | What it does |
 |---|---|
 | **`/solve <issue-number>`** | Spawns an autonomous Claude agent in a new terminal session (cmux / Ghostty / iTerm / Terminal.app / nohup) with **tier-aware triage** so trivial issues skip the brainstorm and large ones get the full plan-and-review pipeline. |
 | **`/turbo <issue-number>`** | **Unattended `/solve`** — same pipeline, but the brainstorm phase auto-accepts the lead agent's recommended design instead of asking clarifying questions. Use when you trust the research-grounded recommendation and want issue → PR with no babysitting. Pair with `--auto` for max autonomy. |
 | **`/issue <description>`** | Creates a **well-investigated, deduped, label-validated** GitHub issue from a one-line ask — including codebase search, full-text dedup against closed issues (regression signals), commitlint scope validation, and a triage hint that `/solve` reads later. |
+| **`/merge [<PR#> | --all]`** | **Lands an approved PR** into the integration branch — ordering, strategy, conflict resolution, and local sync automated. The natural successor to `finish-branch` Option 2 in the lifecycle `/issue → /solve → push → /review-pr → /merge`. |
 
 Both are **repo-agnostic** — they auto-detect the current repo via `gh repo view`. No per-repo config required.
 
@@ -140,6 +141,7 @@ forwarders into `~/.claude/commands/`:
 | `/turbo`      | `/uberdev:turbo`      |
 | `/simplify`   | `/uberdev:simplify`   |
 | `/review-pr`  | `/uberdev:review-pr`  |
+| `/merge`      | `/uberdev:merge`      |
 
 ```bash
 /uberdev:install-aliases             # install forwarders (skip-if-exists)
@@ -246,6 +248,38 @@ Identical to `/solve` for trivial / small tiers. For medium / large tiers, the b
 
 ---
 
+## `/merge` — post-review PR landing
+
+After a PR is approved, lands it into the integration branch — ordering, per-PR strategy, conflict resolution via parallel per-file agents, and local sync (worktree teardown, stale-branch list+offer) all automated. The natural successor to `finish-branch` Option 2.
+
+### Phases
+
+1. **Pre-flight gate** — per-PR open/not-draft/approved/CI-green check; file-overlap matrix; fork preflight; integration-branch resolved (CLI flag > env var > config file > `gh repo view --json defaultBranchRef`); single-instance lock acquired.
+2. **Merge plan** — order (topo-sort hard deps → file-overlap heuristic → approval-age tie-break) + per-PR strategy (conventional-commit ratio + WIP-msg count + `merge-strategy:<name>` label). Single user-confirm gate.
+3. **Merge + resolve** — non-destructive `git merge-tree` probe; clean PRs go via `gh pr merge --<strategy>`; conflicted PRs get one parallel agent per conflicted file in a scratch worktree, project test gate, fast-forward push back (Conventional Commits prefix, no Claude trailer).
+4. **Local sync** — `git fetch --prune`, `git pull --ff-only` on integration branch, worktree teardown, stale-rooted branch list+offer (never auto-rebase).
+
+### Configuration
+
+Add to `.claude/uberdev.local.md`:
+
+```yaml
+---
+integration_branch: main
+bot_authors_allow_list:
+  - dependabot[bot]
+  - renovate[bot]
+---
+```
+
+Or override per-invocation: `--integration-branch=develop`.
+
+### Audit log
+
+Every run writes `.uberdev/runs/<run-id>/audit.jsonl` with one JSON line per event (gate, order, strategy, probe, agent, patch, test, push, merge, sync). Path is surfaced in the final summary.
+
+---
+
 ## `/issue` — investigation-first issue creation
 
 Eight-phase pipeline that does the legwork **before** you draft, **before** you create, and **before** you spend a sprint chasing a duplicate ticket.
@@ -270,6 +304,8 @@ flowchart TD
     M --> O
     N --> O
 ```
+
+After the spawned agent's PR is approved (and the user has run `/uberdev:review-pr` per CLAUDE.md), run `/merge <PR#>` to land it. `/merge` automates ordering, strategy, conflict resolution, and local sync — see [`/merge` section](#merge--post-review-pr-landing) above.
 
 ### Templates
 
@@ -368,6 +404,10 @@ Per-repo settings live in `.claude/uberdev.local.md` (YAML frontmatter; ignored 
 # Implemented — read by command logic today
 solve_terminal: ghostty       # ghostty | iterm | cmux | terminal | nohup
 solve_auto: false             # boolean — auto-accept brainstorm recommendations (=`/turbo` semantics)
+integration_branch: main      # /merge target branch (overrides gh repo view default)
+bot_authors_allow_list:       # /merge: PR authors allowed to bypass user-confirm gate
+  - dependabot[bot]
+  - renovate[bot]
 
 # Planned — documents the intended config surface; no parsing logic yet
 solve_tier_default: medium    # one of: small | medium | large
@@ -384,6 +424,8 @@ These are wired into command logic today.
 |---|---|---|---|
 | `SOLVE_TERMINAL` | `solve_terminal` | Override `/solve`'s terminal dispatcher (`cmux` / `ghostty` / `iterm` / `terminal` / `nohup`) | live |
 | `SOLVE_AUTO` | `solve_auto` | When `1`/`true`, spawned agent runs with `--permission-mode auto` | live |
+| `INTEGRATION_BRANCH` | `integration_branch` | `/merge` target branch. Precedence: `--integration-branch` CLI flag > env var > config file > `gh repo view --json defaultBranchRef` | live |
+| — | `bot_authors_allow_list` | `/merge`: PR authors that skip the user-confirm gate (default `["dependabot[bot]", "renovate[bot]"]`) | live |
 
 ### Planned keys
 
@@ -503,6 +545,7 @@ Result: maximum parallelism on edits, deterministic commit history, zero merge c
 | **v0.9.0** | Current | **`/uberdev:issue` 4→8 agent fanout + always-on quality reviewers + non-blocking `/turbo` Q&A.** Phase 2-4 fanout grows from 4 → 8 Task agents in a single turn (existing 4 PLUS `research-prior-art`, `research-constraints`, `research-security` Semgrep+awesome-secure-defaults, `research-test-coverage`); issue templates gain `## Current ecosystem`, `## Constraints`, conditional `## Security signals`. `NO_EXPLORE=1` narrows to in-repo only. Tier-independent quality bar via artifact reuse + always-on reviewers: orchestrator Phase 1 short-circuits per-topic against `.uberdev/research/issue-<N>/`; spec-reviewer always-on for medium AND large (`--paranoid` deprecated as no-op); new Phase 4.5 `plan-reviewer` (1-retry, non-blocking); new Phase 5.5 `pr-test-analyzer` pre-merge for large tier. New `uberdev:post-impl-review` skill (5-agent advisory fanout: code-reviewer + simplifier + silent-failure-hunter + type-design-analyzer + comment-analyzer) invoked by `/solve` trivial/small AND `subagent-driven-dev` after each wave. `/turbo` Q&A becomes non-blocking — Phase 2 auto-picks each clarifying answer using research-bundle synthesis and writes `questions.md`; `finish-branch` Option 2 reads it and appends `## Open questions answered by /turbo` + `## Reviewer findings summary` to the PR body. Closes #11. |
 | **v0.10** | Maybe | Optional per-repo `.claude/board.json` for re-enabling project-board auto-add |
 | **v0.11** | Maybe | Linux + Windows terminal dispatchers; configurable model pin via env |
+| **v0.12** | Released | **`/merge` — post-review PR landing.** Top-level command + `uberdev:merge` skill (4-phase pipeline: pre-flight gate, merge plan, parallel conflict-resolve in scratch worktree, local sync). New `agents/conflict-resolver.md` (one per conflicted file, single-message fanout). New `tests/merge.test.sh` (16 shape-check assertions; M15 enforces the no-`Co-Authored-By: Claude`-trailer rule on resolution commits, M16 enforces the same-directory `mktemp` pattern that guarantees atomic writes of `.claude/uberdev.local.md`). New `integration_branch` config key (CLI flag > env var > config > `gh repo view`). New `bot_authors_allow_list` config key (default `["dependabot[bot]", "renovate[bot]"]`). Closes #24. |
 
 ---
 

@@ -26,4 +26,6 @@ jobs:
           bash tests/issue-causal-fanout.test.sh && \
           bash tests/post-impl-review.test.sh && \
           bash tests/spec-reviewer-plan-aware.test.sh && \
-          bash tests/audit-fixups.test.sh
+          bash tests/audit-fixups.test.sh && \
+          bash tests/aliases.test.sh && \
+          bash tests/merge.test.sh
