@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# UberDev bootstrap installer.
+#
+# Works around an upstream Claude Code bug where `/plugin install` populates
+# the cache + installed_plugins.json but does NOT write enabledPlugins in
+# ~/.claude/settings.json — so commands silently 404 until that key is
+# patched in by hand. Refs: anthropics/claude-code#20661, #15524.
+#
+# What this script does:
+#   1. Best-effort runs the marketplace-add + install slash commands via
+#      `claude --print` (no-op if claude isn't on PATH or doesn't accept
+#      slash commands in print mode — the jq-patch below is the real fix).
+#   2. jq-patches ~/.claude/settings.json to set
+#      enabledPlugins["uberdev@uberdev"] = true. Idempotent: re-running is
+#      a no-op, and unrelated keys / sibling enabledPlugins entries are
+#      preserved.
+#
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/TheFJK/UberDev/main/install.sh | bash
+# or, after cloning:
+#   ./install.sh
+
+set -euo pipefail
+
+PLUGIN_KEY="uberdev@uberdev"
+MARKETPLACE_REPO="${UBERDEV_MARKETPLACE:-TheFJK/UberDev}"
+SETTINGS_DIR="${HOME}/.claude"
+SETTINGS="${SETTINGS_DIR}/settings.json"
+
+# ── Pre-flight ────────────────────────────────────────────────────────────────
+if ! command -v jq >/dev/null 2>&1; then
+  echo "ERROR: 'jq' is required but not found in PATH." >&2
+  echo "       macOS:   brew install jq" >&2
+  echo "       Debian:  sudo apt install jq" >&2
+  echo "       Other:   https://jqlang.github.io/jq/download/" >&2
+  exit 1
+fi
+
+# ── Step 1: marketplace-add + install (best-effort, non-interactive) ──────────
+# Best-effort because the user-visible workaround is the jq-patch below — it's
+# what unblocks /uberdev:* commands. `|| true` swallows failures so a stale
+# claude binary or a CC version that doesn't run slash commands in --print
+# mode doesn't break the install.
+if command -v claude >/dev/null 2>&1; then
+  echo "→ Adding marketplace ${MARKETPLACE_REPO} and installing ${PLUGIN_KEY}…"
+  claude --print "/plugin marketplace add ${MARKETPLACE_REPO}" >/dev/null 2>&1 || true
+  claude --print "/plugin install ${PLUGIN_KEY}" >/dev/null 2>&1 || true
+else
+  echo "⚠️  'claude' CLI not found on PATH." >&2
+  echo "   Run these inside Claude Code, then re-run this installer to enable:" >&2
+  echo "     /plugin marketplace add ${MARKETPLACE_REPO}" >&2
+  echo "     /plugin install ${PLUGIN_KEY}" >&2
+fi
+
+# ── Step 2: jq-patch enabledPlugins (the actual bug workaround) ───────────────
+mkdir -p "${SETTINGS_DIR}"
+
+# Bootstrap an empty settings.json if it doesn't exist yet. We only do this
+# when the file is missing — we do NOT overwrite an existing file even if
+# it's empty/malformed (see the jq -e guard below).
+if [ ! -f "${SETTINGS}" ]; then
+  echo '{}' > "${SETTINGS}"
+fi
+
+# Refuse to clobber a malformed settings.json. If a user has hand-edited
+# their settings into invalid JSON, silently rewriting it would destroy
+# their work; surface the problem instead and let them fix it.
+if ! jq -e . "${SETTINGS}" >/dev/null 2>&1; then
+  echo "ERROR: ${SETTINGS} is not valid JSON; refusing to patch." >&2
+  echo "       Fix the file manually (e.g. 'jq . ${SETTINGS}'), then re-run." >&2
+  exit 1
+fi
+
+# Atomic patch via temp-file + mv: the original is only replaced after jq
+# writes a valid JSON document, so a mid-write crash leaves settings.json
+# intact. The trap always runs (any exit path); on the success path it's a
+# no-op because mv has already renamed $TMP out from under it.
+TMP="$(mktemp "${TMPDIR:-/tmp}/uberdev-settings.XXXXXX")"
+trap 'rm -f "$TMP"' EXIT
+
+# `.enabledPlugins // {}` defaults the key to an empty object when absent,
+# so users without any prior plugin config get a well-formed entry. Setting
+# `[$key] = true` is idempotent: a re-run on already-enabled state is a
+# byte-level no-op. Sibling enabledPlugins entries (other plugins) are
+# preserved verbatim because we mutate a single key, not the whole object.
+jq --arg key "${PLUGIN_KEY}" \
+  '.enabledPlugins = (.enabledPlugins // {}) | .enabledPlugins[$key] = true' \
+  "${SETTINGS}" > "${TMP}"
+mv "${TMP}" "${SETTINGS}"
+
+echo "✓ uberdev installed and enabled in ${SETTINGS}."
+echo "  Restart Claude Code (or run /reload-plugins) to load the plugin."
