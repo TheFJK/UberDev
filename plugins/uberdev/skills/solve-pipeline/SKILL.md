@@ -41,18 +41,19 @@ fi
 # --full is an alias for medium/large (keeps current behavior)
 [[ "$OVERRIDE" == "full" ]] && OVERRIDE="medium"
 
-# AUTO_MODE precedence: CLI flag > env var > per-repo config > default off.
-# When set, the spawned agent runs --permission-mode auto (Claude Code's AI
-# classifier), NOT --dangerously-skip-permissions (which the classifier itself
-# soft-denies as "Create Unsafe Agents").
+# AUTO_PERMISSIONS precedence (controls --permission-mode auto on the spawned agent):
+#   CLI flag > env var > per-repo config > default off.
+# NOTE: AUTO_PERMISSIONS is distinct from AUTO_MODE. AUTO_MODE is set by the
+# caller (solve.md=0, turbo.md=1) to gate turbo-vs-interactive behavior in
+# Steps 4, 5.5, 7. Naming kept disjoint to prevent collision (see spec Risk 1).
 if [[ -n "$AUTO_FLAG" ]]; then
-  AUTO_MODE=1
+  AUTO_PERMISSIONS=1
 elif [[ "$SOLVE_AUTO" == "1" ]]; then
-  AUTO_MODE=1
+  AUTO_PERMISSIONS=1
 elif [[ -f .claude/uberdev.local.md ]] && grep -qE '^solve_auto:[[:space:]]*true[[:space:]]*$' .claude/uberdev.local.md; then
-  AUTO_MODE=1
+  AUTO_PERMISSIONS=1
 else
-  AUTO_MODE=0
+  AUTO_PERMISSIONS=0
 fi
 ```
 
@@ -213,7 +214,7 @@ sed "${SED_INPLACE[@]}" "s/TIER/$TIER/g" /tmp/solve-$ISSUE_NUM.sh
 # DETECTED_TERMINAL is set by Step 5.5 below; if you reorder, move that step before Step 5.
 sed "${SED_INPLACE[@]}" "s/DETECTED_TERMINAL/${TERMINAL:-cmux}/g" /tmp/solve-$ISSUE_NUM.sh
 PERM_FLAG_VAL=""
-[[ "$AUTO_MODE" == "1" ]] && PERM_FLAG_VAL="--permission-mode auto"
+[[ "$AUTO_PERMISSIONS" == "1" ]] && PERM_FLAG_VAL="--permission-mode auto"
 sed "${SED_INPLACE[@]}" "s|PERM_FLAG_VALUE|$PERM_FLAG_VAL|g" /tmp/solve-$ISSUE_NUM.sh
 chmod +x /tmp/solve-$ISSUE_NUM.sh
 ```
@@ -270,7 +271,7 @@ case "$TERMINAL" in
 esac
 
 echo "Dispatching via: $TERMINAL"
-echo "Permission mode: $([[ "$AUTO_MODE" == "1" ]] && echo 'auto (Claude Code AI classifier)' || echo 'default (manual per-tool gating)')"
+echo "Permission mode: $([[ "$AUTO_PERMISSIONS" == "1" ]] && echo 'auto (Claude Code AI classifier)' || echo 'default (manual per-tool gating)')"
 
 # TURBO MODE banner (turbo only; medium tier only)
 if [[ "$AUTO_MODE" == "1" && "$TIER" == "medium" ]]; then
@@ -360,7 +361,7 @@ cmux's native notifier is preferred (matches existing UX); otherwise fall throug
 
 ```bash
 sleep 1
-NOTIFY_BODY="Agent spawned for issue #$ISSUE_NUM (tier: $TIER, terminal: $TERMINAL$([[ "$AUTO_MODE" == "1" ]] && echo ', auto')$([[ "$AUTO_MODE" == "1" ]] && echo ', turbo'))"
+NOTIFY_BODY="Agent spawned for issue #$ISSUE_NUM (tier: $TIER, terminal: $TERMINAL$([[ "$AUTO_PERMISSIONS" == "1" ]] && echo ', auto')$([[ "$AUTO_MODE" == "1" ]] && echo ', turbo'))"
 if [[ "$TERMINAL" == "cmux" ]] && command -v cmux >/dev/null 2>&1; then
   cmux notify --title "Orchestrator" --body "$NOTIFY_BODY"
 elif command -v terminal-notifier >/dev/null 2>&1; then
