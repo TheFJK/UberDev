@@ -30,11 +30,16 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL_CMD="$REPO_ROOT/plugins/uberdev/commands/install-aliases.md"
 UNINSTALL_CMD="$REPO_ROOT/plugins/uberdev/commands/uninstall-aliases.md"
 README="$REPO_ROOT/README.md"
+CANON_DIR="$REPO_ROOT/plugins/uberdev/commands"
 
 # Pre-flight: refuse to run if any asserted-against file is missing or
 # unreadable. Without this, every assertion fails with a confusing "pattern
 # not found" instead of the real cause (mirrors audit-fixups.test.sh).
-for f in "$INSTALL_CMD" "$UNINSTALL_CMD" "$README"; do
+# Section A6 also reads each canonical's frontmatter, so those files are
+# pre-flighted too.
+for f in "$INSTALL_CMD" "$UNINSTALL_CMD" "$README" \
+         "$CANON_DIR/issue.md" "$CANON_DIR/solve.md" "$CANON_DIR/turbo.md" \
+         "$CANON_DIR/simplify.md" "$CANON_DIR/review-pr.md"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -170,6 +175,40 @@ for short in /issue /solve /turbo /simplify /review-pr; do
   assert_grep "$README" \
     "${short}\\b" \
     "README mentions short form ${short}"
+done
+
+echo
+echo "== A6: alias forwarders mirror each canonical's allowed-tools =="
+# The ALIASES table in install-aliases.md hardcodes per-alias allowed-tools.
+# That value MUST equal the canonical command's `allowed-tools:` line, byte
+# for byte — otherwise the forwarder grants a different (usually narrower)
+# tool surface than the canonical, and the alias silently breaks at the
+# first tool the canonical needs but the forwarder can't use.
+#
+# We grep the canonical's allowed-tools line, normalize whitespace, and
+# look for a matching ALIASES row in install-aliases.md that contains
+# both the canonical name and the same JSON array. The check is
+# fixed-string (-F) on the JSON tail, so trivial reformatting that
+# preserves byte-equality stays green.
+for canonical in issue solve turbo simplify review-pr; do
+  canon_file="$CANON_DIR/${canonical}.md"
+  # Strip the `allowed-tools: ` prefix, leaving just the JSON array.
+  canon_tools=$(grep -E '^allowed-tools:[[:space:]]*' "$canon_file" \
+                | head -1 | sed -E 's/^allowed-tools:[[:space:]]*//')
+  if [ -z "$canon_tools" ]; then
+    echo "  FAIL  /$canonical — could not extract allowed-tools from $canon_file"
+    FAIL=$((FAIL + 1))
+    continue
+  fi
+  if grep -F "${canonical}|${canonical}|${canon_tools}" "$INSTALL_CMD" > /dev/null; then
+    echo "  PASS  /$canonical — ALIASES row matches canonical allowed-tools"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  /$canonical — ALIASES row drift detected"
+    echo "        canonical allowed-tools: $canon_tools"
+    echo "        expected ALIASES row:    ${canonical}|${canonical}|${canon_tools}"
+    FAIL=$((FAIL + 1))
+  fi
 done
 
 echo

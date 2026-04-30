@@ -46,19 +46,32 @@ DRY_RUN=0
 
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT}"
 if [ -z "$PLUGIN_ROOT" ] || [ ! -d "$PLUGIN_ROOT/commands" ]; then
-  echo "❌ CLAUDE_PLUGIN_ROOT not set or invalid; cannot resolve canonical commands."
-  echo "   This command must be run from within Claude Code with the uberdev plugin enabled."
+  echo "❌ CLAUDE_PLUGIN_ROOT not set or invalid; cannot resolve canonical commands." >&2
+  echo "   This command must be run from within Claude Code with the uberdev plugin enabled." >&2
   exit 1
 fi
 
 DEST_DIR="$HOME/.claude/commands"
-[ "$DRY_RUN" = "1" ] || mkdir -p "$DEST_DIR"
+if [ "$DRY_RUN" != "1" ]; then
+  mkdir -p "$DEST_DIR" || {
+    echo "❌ Failed to create $DEST_DIR (permissions? disk full?)" >&2
+    exit 1
+  }
+fi
 
 # Per-alias config: short-name|canonical-name|JSON-array-of-allowed-tools.
-# allowed-tools is mirrored from each canonical's frontmatter so the
-# forwarder grants exactly the same tool surface — no more, no less. If a
-# canonical is updated to need a new tool, this list must be updated too;
-# the alias contract is "behave as the canonical".
+#
+# allowed-tools is HARDCODED here, not auto-extracted from each canonical's
+# frontmatter. It must be kept byte-identical to the canonical's
+# `allowed-tools` line so the forwarder grants the same tool surface — no
+# more, no less. If a canonical is updated to need a new tool, this table
+# must be updated to match.
+#
+# `tests/aliases.test.sh` section A6 enforces this drift-detection contract:
+# the suite reads each canonical's `allowed-tools` line and asserts the
+# matching ALIASES row contains the same value. So forgetting to update
+# this list will fail CI rather than silently shipping under-privileged
+# forwarders.
 ALIASES='issue|issue|["Bash", "Glob", "Grep", "Read", "Task"]
 solve|solve|["Bash", "Read", "Task"]
 turbo|turbo|["Bash", "Read", "Task"]
@@ -121,9 +134,12 @@ while IFS='|' read -r SHORT CANON TOOLS; do
   fi
 
   # Write the forwarder. Heredoc is unquoted so $SHORT/$CANON/$TOOLS/
-  # $PLUGIN_ROOT/$CANON_FILE expand at install time. Variables we want
-  # left literal in the file ($ARGUMENTS, ${CLAUDE_PLUGIN_ROOT}) are
-  # escaped with a leading backslash.
+  # $PLUGIN_ROOT/$CANON_FILE expand HERE — those values are baked into
+  # the forwarder once at install time. $ARGUMENTS and ${CLAUDE_PLUGIN_ROOT}
+  # are escaped with a leading backslash so they remain LITERAL in the
+  # written file; Claude Code's harness substitutes them later, when the
+  # user actually invokes the alias (so each invocation gets the user's
+  # then-current args, not the empty $ARGUMENTS at install time).
   cat > "$TARGET" <<EOF
 ---
 description: "Alias for /uberdev:$CANON"
@@ -168,7 +184,3 @@ echo "Remove with: /uberdev:uninstall-aliases"
 ```
 
 After running the script, briefly relay the per-alias outcome to the user.
-Do not invoke any of the canonical commands (`/uberdev:issue`, etc.) as
-part of installation — installation is purely a filesystem operation, and
-running the canonicals here would be confusing side-effects from a setup
-command.
