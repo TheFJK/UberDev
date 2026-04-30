@@ -126,11 +126,19 @@ solve_tier_default: small        # one of: small, medium, large
 review_depth: full               # one of: quick, full
 solve_terminal: ghostty          # one of: ghostty, iterm, cmux
 parallel_solve: true
+integration_branch: main         # branch /merge lands PRs into; default = repo default branch
+bot_authors_allow_list:          # PRs from these author logins bypass the
+  - dependabot[bot]              # external-contributor refusal logic
+  - renovate[bot]
 ---
 
 # Notes (optional, free-form markdown for human reference)
 ```
 
 Settings take effect on next SessionStart. Environment variables (`SOLVE_TERMINAL`, etc.) override file settings — use whichever is more convenient for your workflow.
+
+**`integration_branch` precedence:** CLI flag `--integration-branch=<name>` > env var `UBERDEV_INTEGRATION_BRANCH` > config file (this YAML) > `gh repo view --json defaultBranchRef`. If all four tiers are empty, `/merge` asks once and offers to persist the answer to this file via an atomic `mktemp + mv` write.
+
+**`bot_authors_allow_list` semantics:** literal `author.login` matched case-sensitively. Default covers Dependabot and Renovate.
 
 **Recommendation:** commit this file to share workflow conventions across the team; or add it to `.gitignore` if individual preferences differ.
