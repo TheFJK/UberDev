@@ -39,7 +39,8 @@ CANON_DIR="$REPO_ROOT/plugins/uberdev/commands"
 # pre-flighted too.
 for f in "$INSTALL_CMD" "$UNINSTALL_CMD" "$README" \
          "$CANON_DIR/issue.md" "$CANON_DIR/solve.md" "$CANON_DIR/turbo.md" \
-         "$CANON_DIR/simplify.md" "$CANON_DIR/review-pr.md"; do
+         "$CANON_DIR/simplify.md" "$CANON_DIR/review-pr.md" \
+         "$REPO_ROOT/.github/workflows/test.yml"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -72,15 +73,6 @@ assert_grep_not() {
     echo "  PASS  $desc"
     PASS=$((PASS + 1))
   fi
-}
-
-# Sandbox helper: spawn a temp HOME dir, run a hook invocation, capture
-# stderr/stdout. Each S* section calls this with its own setup closure.
-with_sandbox_home() {
-  local tmp_home
-  tmp_home="$(mktemp -d)"
-  trap "rm -rf '$tmp_home'" RETURN
-  HOME="$tmp_home" "$@"
 }
 
 # Stub PLUGIN_ROOT to the worktree so the hook can read plugin.json
@@ -273,86 +265,113 @@ rm -rf "$S1_HOME" "$S1_STDERR"
 echo
 echo "== S2: second session is a no-op =="
 S2_HOME="$(mktemp -d)"
-HOME="$S2_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
-  bash "$HOOK" >/dev/null 2>/dev/null || true
-# Capture mtimes after first run. Bash 3.2 (the macOS /bin/bash) lacks
-# associative arrays, so write one mtime-per-line to a temp file keyed by
-# short name, and grep them back for comparison. The five short names are
-# fixed; review-pr would be illegal as a bash variable name.
-S2_MT_FILE="$(mktemp)"
-for short in issue solve turbo simplify review-pr; do
-  mt="$(stat -f %m "$S2_HOME/.claude/commands/${short}.md" 2>/dev/null \
-         || stat -c %Y "$S2_HOME/.claude/commands/${short}.md" 2>/dev/null \
-         || echo "")"
-  printf '%s %s\n' "$short" "$mt" >> "$S2_MT_FILE"
-done
-sleep 1
 S2_STDERR="$(mktemp)"
 HOME="$S2_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
-  bash "$HOOK" >/dev/null 2>"$S2_STDERR" || true
-S2_OK=1
+  bash "$HOOK" >/dev/null 2>/dev/null || true
+
+# Precondition: first run must have produced the 5 forwarders. Without this
+# guard, the mtime capture below silently picks up empty strings for absent
+# files, the post-run lookup also returns "", and `[ "" = "" ]` makes the
+# section spuriously PASS — masking the very TDD red signal we want.
+S2_PREFLIGHT_OK=1
 for short in issue solve turbo simplify review-pr; do
-  NEW="$(stat -f %m "$S2_HOME/.claude/commands/${short}.md" 2>/dev/null \
-         || stat -c %Y "$S2_HOME/.claude/commands/${short}.md" 2>/dev/null \
-         || echo "")"
-  OLD="$(awk -v k="$short" '$1==k {print $2}' "$S2_MT_FILE")"
-  if [ "$NEW" != "$OLD" ]; then S2_OK=0; break; fi
+  [ -f "$S2_HOME/.claude/commands/${short}.md" ] || S2_PREFLIGHT_OK=0
 done
-rm -f "$S2_MT_FILE"
-if [ "$S2_OK" = "1" ]; then
-  echo "  PASS  S2: no mtime changes on second session"; PASS=$((PASS + 1))
+
+if [ "$S2_PREFLIGHT_OK" != "1" ]; then
+  echo "  FAIL  S2: precondition — first run did not produce forwarders"; FAIL=$((FAIL + 1))
 else
-  echo "  FAIL  S2: forwarder mtimes changed on second session"; FAIL=$((FAIL + 1))
-fi
-if ! grep -q "first run:" "$S2_STDERR"; then
-  echo "  PASS  S2: stderr is silent on second session"; PASS=$((PASS + 1))
-else
-  echo "  FAIL  S2: first-run line printed on second session"; FAIL=$((FAIL + 1))
+  # Capture mtimes after first run. Bash 3.2 (the macOS /bin/bash) lacks
+  # associative arrays, so write one mtime-per-line to a temp file keyed by
+  # short name, and grep them back for comparison. The five short names are
+  # fixed; review-pr would be illegal as a bash variable name.
+  S2_MT_FILE="$(mktemp)"
+  for short in issue solve turbo simplify review-pr; do
+    mt="$(stat -f %m "$S2_HOME/.claude/commands/${short}.md" 2>/dev/null \
+           || stat -c %Y "$S2_HOME/.claude/commands/${short}.md" 2>/dev/null \
+           || echo "")"
+    printf '%s %s\n' "$short" "$mt" >> "$S2_MT_FILE"
+  done
+  sleep 1
+  HOME="$S2_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+    bash "$HOOK" >/dev/null 2>"$S2_STDERR" || true
+  S2_OK=1
+  for short in issue solve turbo simplify review-pr; do
+    NEW="$(stat -f %m "$S2_HOME/.claude/commands/${short}.md" 2>/dev/null \
+           || stat -c %Y "$S2_HOME/.claude/commands/${short}.md" 2>/dev/null \
+           || echo "")"
+    OLD="$(awk -v k="$short" '$1==k {print $2}' "$S2_MT_FILE")"
+    if [ "$NEW" != "$OLD" ]; then S2_OK=0; break; fi
+  done
+  rm -f "$S2_MT_FILE"
+  if [ "$S2_OK" = "1" ]; then
+    echo "  PASS  S2: no mtime changes on second session"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S2: forwarder mtimes changed on second session"; FAIL=$((FAIL + 1))
+  fi
+  if ! grep -q "first run:" "$S2_STDERR"; then
+    echo "  PASS  S2: stderr is silent on second session"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S2: first-run line printed on second session"; FAIL=$((FAIL + 1))
+  fi
 fi
 rm -rf "$S2_HOME" "$S2_STDERR"
 
 echo
 echo "== S3: plugin upgrade refreshes forwarders =="
 S3_HOME="$(mktemp -d)"
-HOME="$S3_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
-  bash "$HOOK" >/dev/null 2>/dev/null || true
-# Rewrite version-marker to a stale value
-printf '0.10.0\n' > "$S3_HOME/.claude/.uberdev-aliases-version"
-# Capture pre-refresh mtimes via a flat temp file (bash 3.2 compat — see S2).
-S3_MT_FILE="$(mktemp)"
-for short in issue solve turbo simplify review-pr; do
-  mt="$(stat -f %m "$S3_HOME/.claude/commands/${short}.md" 2>/dev/null \
-         || stat -c %Y "$S3_HOME/.claude/commands/${short}.md" 2>/dev/null \
-         || echo "")"
-  printf '%s %s\n' "$short" "$mt" >> "$S3_MT_FILE"
-done
-sleep 1
 S3_STDERR="$(mktemp)"
 HOME="$S3_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
-  bash "$HOOK" >/dev/null 2>"$S3_STDERR" || true
-S3_OK=1
+  bash "$HOOK" >/dev/null 2>/dev/null || true
+
+# Precondition: first run must have produced the 5 forwarders before we can
+# meaningfully test that a stale-marker rewrite changes their mtimes. Same
+# spurious-PASS trap as S2 if absent.
+S3_PREFLIGHT_OK=1
 for short in issue solve turbo simplify review-pr; do
-  NEW="$(stat -f %m "$S3_HOME/.claude/commands/${short}.md" 2>/dev/null \
-         || stat -c %Y "$S3_HOME/.claude/commands/${short}.md" 2>/dev/null \
-         || echo "")"
-  OLD="$(awk -v k="$short" '$1==k {print $2}' "$S3_MT_FILE")"
-  if [ "$NEW" = "$OLD" ]; then S3_OK=0; break; fi
+  [ -f "$S3_HOME/.claude/commands/${short}.md" ] || S3_PREFLIGHT_OK=0
 done
-rm -f "$S3_MT_FILE"
-if [ "$S3_OK" = "1" ]; then
-  echo "  PASS  S3: forwarders rewritten on version mismatch"; PASS=$((PASS + 1))
+
+if [ "$S3_PREFLIGHT_OK" != "1" ]; then
+  echo "  FAIL  S3: precondition — first run did not produce forwarders"; FAIL=$((FAIL + 1))
 else
-  echo "  FAIL  S3: forwarders not refreshed on version mismatch"; FAIL=$((FAIL + 1))
-fi
-if [ "$(cat "$S3_HOME/.claude/.uberdev-aliases-version")" = "$PLUGIN_VERSION" ]; then
-  echo "  PASS  S3: version marker updated to $PLUGIN_VERSION"; PASS=$((PASS + 1))
-else
-  echo "  FAIL  S3: version marker not updated"; FAIL=$((FAIL + 1))
-fi
-if ! grep -q "first run:" "$S3_STDERR"; then
-  echo "  PASS  S3: stderr silent on refresh (Q5)"; PASS=$((PASS + 1))
-else
-  echo "  FAIL  S3: first-run line printed on refresh"; FAIL=$((FAIL + 1))
+  # Rewrite version-marker to a stale value
+  printf '0.10.0\n' > "$S3_HOME/.claude/.uberdev-aliases-version"
+  # Capture pre-refresh mtimes via a flat temp file (bash 3.2 compat — see S2).
+  S3_MT_FILE="$(mktemp)"
+  for short in issue solve turbo simplify review-pr; do
+    mt="$(stat -f %m "$S3_HOME/.claude/commands/${short}.md" 2>/dev/null \
+           || stat -c %Y "$S3_HOME/.claude/commands/${short}.md" 2>/dev/null \
+           || echo "")"
+    printf '%s %s\n' "$short" "$mt" >> "$S3_MT_FILE"
+  done
+  sleep 1
+  HOME="$S3_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+    bash "$HOOK" >/dev/null 2>"$S3_STDERR" || true
+  S3_OK=1
+  for short in issue solve turbo simplify review-pr; do
+    NEW="$(stat -f %m "$S3_HOME/.claude/commands/${short}.md" 2>/dev/null \
+           || stat -c %Y "$S3_HOME/.claude/commands/${short}.md" 2>/dev/null \
+           || echo "")"
+    OLD="$(awk -v k="$short" '$1==k {print $2}' "$S3_MT_FILE")"
+    if [ "$NEW" = "$OLD" ]; then S3_OK=0; break; fi
+  done
+  rm -f "$S3_MT_FILE"
+  if [ "$S3_OK" = "1" ]; then
+    echo "  PASS  S3: forwarders rewritten on version mismatch"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S3: forwarders not refreshed on version mismatch"; FAIL=$((FAIL + 1))
+  fi
+  if [ "$(cat "$S3_HOME/.claude/.uberdev-aliases-version" 2>/dev/null || true)" = "$PLUGIN_VERSION" ]; then
+    echo "  PASS  S3: version marker updated to $PLUGIN_VERSION"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S3: version marker not updated"; FAIL=$((FAIL + 1))
+  fi
+  if ! grep -q "first run:" "$S3_STDERR"; then
+    echo "  PASS  S3: stderr silent on refresh (Q5)"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S3: first-run line printed on refresh"; FAIL=$((FAIL + 1))
+  fi
 fi
 rm -rf "$S3_HOME" "$S3_STDERR"
 
