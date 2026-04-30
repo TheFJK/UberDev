@@ -61,7 +61,7 @@ fi
 
 echo
 echo "== M3: commands/merge.md references uberdev:merge skill =="
-assert_grep "$CMD_FILE" 'uberdev:merge\b' \
+assert_grep "$CMD_FILE" 'uberdev:merge([^-A-Za-z0-9_]|$)' \
   "M3 — invokes uberdev:merge (not merge-prs or any other name)"
 # Negative: must NOT reference the rejected skill name 'merge-prs'.
 if grep -qE 'merge-prs\b' "$CMD_FILE"; then

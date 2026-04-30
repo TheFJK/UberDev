@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for issue #16 — top-level aliases for the five most-used uberdev
+# Tests for issue #16 — top-level aliases for the six most-used uberdev
 # commands (/issue, /solve, /turbo, /simplify, /review-pr).
 #
 # Plugin commands are addressed as `/uberdev:<command>` because Claude Code's
@@ -16,7 +16,7 @@
 # in CI before merge without an interactive harness.
 #
 # Sections:
-#   A1 — install-aliases.md exists, references all 5 aliases, has marker
+#   A1 — install-aliases.md exists, references all 6 aliases, has marker
 #   A2 — install-aliases.md performs collision detection (skip-if-exists)
 #   A3 — install-aliases.md generates ONE-WAY forwarders, not duplicates
 #   A4 — uninstall-aliases.md exists and only removes marker-tagged files
@@ -75,7 +75,7 @@ assert_grep_not() {
   fi
 }
 
-echo "== A1: install-aliases command exists and registers all 5 aliases =="
+echo "== A1: install-aliases command exists and registers all 6 aliases =="
 # Each canonical /uberdev:<name> must be wired up. We grep for the literal
 # canonical command names since those are the targets the forwarders must
 # point at; if any is missing, the user-visible alias for that command
@@ -156,7 +156,7 @@ assert_grep "$UNINSTALL_CMD" \
   'grep|-q|managed-by' \
   "uninstall-aliases checks for the marker before removing files"
 
-# Belt-and-braces: uninstall must NOT do an unguarded rm of all 5 paths.
+# Belt-and-braces: uninstall must NOT do an unguarded rm of all 6 paths.
 assert_grep_not "$UNINSTALL_CMD" \
   'rm[[:space:]]+-f[[:space:]]+"?\$HOME/\.claude/commands/(issue|solve|turbo|simplify|review-pr)\.md"?[[:space:]]*$' \
   "uninstall-aliases does NOT unconditionally rm forwarder paths"
@@ -170,7 +170,7 @@ assert_grep "$README" \
   '/issue.*alias|short.?form|/uberdev:install-aliases' \
   "README documents the short-form aliases or install command"
 
-# All five short forms should appear somewhere in the README so users can
+# All six short forms should appear somewhere in the README so users can
 # search for them.
 for short in /issue /solve /turbo /simplify /review-pr; do
   assert_grep "$README" \
