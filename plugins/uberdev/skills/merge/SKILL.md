@@ -94,7 +94,7 @@ For every pair of in-scope PRs, run `git diff --name-only <integration_branch>..
 For every cross-repository PR (`isCrossRepository == true`):
 - Same-repo head: proceed.
 - User-owned fork + `maintainerCanModify == true`: probe with `git push --dry-run` first. Permission OK → proceed.
-- Org-owned fork OR `maintainerCanModify == false`: refuse conflict-resolve. Surface handoff to PR author. Skip that PR (queue continues). Clean-merge case still flows via `gh pr merge` since GitHub natively handles fork merges.
+- org-owned fork OR `maintainerCanModify == false`: refuse conflict-resolve. Surface handoff to PR author. Skip that PR (queue continues). Clean-merge case still flows via `gh pr merge` since GitHub natively handles fork merges.
 
 ### Step 1.7 — Single-PR pre-flight fail edge case
 
@@ -106,7 +106,7 @@ If only one PR is in scope and its pre-flight fails: abort the run (nothing to m
 
 Build the merge order with no full simulation:
 
-1. **Hard dependencies** (highest priority): a PR-B base ref equal to PR-A head ref → PR-A must land before PR-B. Also parse `body` for `Depends on #([0-9]+)` (whitelist regex) and add those edges. Topo-sort the resulting graph. **On cycle: surface the full cycle path to the user and abort the run. Never auto-break.**
+1. **Hard dependencies** (highest priority): a PR-B base ref equal to PR-A head ref → PR-A must land before PR-B. Also parse `body` for `Depends on #([0-9]+)` (whitelist regex) and add those edges. topo-sort the resulting graph. **On cycle: surface the full cycle path to the user and abort the run. Never auto-break.**
 2. **File-overlap pair count** (next): from the file-overlap matrix computed in Phase 1.5, prefer orders that minimise "later PR forced into conflict-resolve" by counting shared file paths between each pair. PRs with non-empty overlap are scheduled sequentially relative to each other (Q1 same-file degradation: PR-A first, re-probe PR-B against new tip).
 3. **Approval-age tie-break**: among otherwise-equivalent PRs, order older-`createdAt`-first.
 
@@ -121,7 +121,7 @@ For each PR, compute strategy signal-by-signal:
 3. Else: heuristic.
    - All commits start with conventional-commit prefix (`feat:`, `fix:`, `chore:`, `refactor:`, `test:`, `docs:`) → rebase candidate.
    - Any commit message matches `WIP_MESSAGE_REGEX` → squash candidate.
-   - Commit count ≤ `CONVENTIONAL_COMMIT_THRESHOLD` (3) AND all conventional → rebase or fast-forward.
+   - Commit count ≤ `CONVENTIONAL_COMMIT_THRESHOLD` (3) AND all conventional → rebase.
    - Single-commit PR → rebase.
    - Mixed signals → default to squash (safer for `git bisect` than a true merge commit).
 
@@ -155,7 +155,7 @@ If probe was clean: run `gh pr merge <N> --<strategy> --match-head-commit <headR
 
 If probe found conflicts:
 
-i. **Fork preflight (Q3 gate):** re-check `isCrossRepository` + `headRepository.owner.type` + `maintainerCanModify`. Org-owned fork or `maintainerCanModify == false` → refuse, surface handoff, skip PR, queue continues.
+i. **Fork preflight (Q3 gate):** re-check `isCrossRepository` + `headRepository.owner.type` + `maintainerCanModify`. org-owned fork or `maintainerCanModify == false` → refuse, surface handoff, skip PR, queue continues.
 
 ii. **Create scratch worktree (D10):** `git worktree add .claude/worktrees/merge-<run-id> <integration_branch>` where `<run-id> = $(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)`. Verify `.claude/worktrees/` is gitignored (per `using-git-worktrees`).
 
@@ -169,7 +169,7 @@ iv. **Apply resolutions** in the scratch worktree as each agent returns. Aggrega
 
 v. **Pre-push test gate (D16, mandatory, no skip path).** Run the project's test command in the scratch worktree before any push. Test command discovery order: `package.json:scripts.test` > `Makefile` `test` target > `cargo test` if `Cargo.toml` exists > `pytest` if `pytest.ini`/`pyproject.toml` exists > `go test ./...` if `go.mod` exists. **Failing tests block the push for that PR; rest of queue continues.** No `--fast` mode, no override flag.
 
-vi. **Push the resolution commit (D13, fast-forward only).**
+vi. **Push the resolution commit (D13, non-force push only).**
 
 Commit message format: `chore(merge): resolve conflicts in <comma-separated-files>` (Conventional Commits prefix mandatory). If >3 files: `chore(merge): resolve conflicts in <N> files`. **The resolution commit MUST NOT include `Co-Authored-By: Claude` trailer or any "🤖 Generated with Claude Code" footer** per global CLAUDE.md (cited verbatim in the spec). Author = current `git config user.email` / `user.name`; never an agent identity.
 
@@ -181,7 +181,7 @@ viii. **Tear down the scratch worktree** per `using-git-worktrees` protocol: `gi
 
 ### Step 3.4 — Failure-mode summary
 
-On any single-PR failure (test gate fail, push fail, gh pr merge fail, agent AMBIGUOUS/REFUSED): abort REST of queue (or that PR only — see error-handling table in spec). Already-merged PRs stay merged. Emit structured event to `audit.jsonl`. Surface clear handoff to user.
+On any single-PR failure (test gate fail, push fail, gh pr merge fail, agent AMBIGUOUS/REFUSED): abort REST of queue (or that PR only — see error-handling table in spec). Already-merged PRs stay merged. Emit structured event to `.uberdev/runs/<run-id>/audit.jsonl`. Surface clear handoff to user.
 
 ## Phase 4 — Post-merge local sync
 
