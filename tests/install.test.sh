@@ -21,6 +21,7 @@
 #   I6 — refuses to clobber malformed settings.json (exits non-zero, file untouched)
 #   I7 — README documents the install.sh / curl|bash one-liner
 #   I8 — script does not contain destructive shapes (rm -rf $HOME, etc.)
+#   I9 — re-run flips a manually-disabled (false) entry back to true
 
 # `set -e` is intentionally NOT enabled: a failed assertion must NOT abort the
 # rest of the suite. We track PASS/FAIL counters explicitly and exit non-zero
@@ -254,6 +255,31 @@ assert_grep_not "$INSTALL_SH" \
 assert_grep_not "$INSTALL_SH" \
   'rm[[:space:]]+-rf[[:space:]]+"?\$\{?HOME\}?/\.claude[/"]?[[:space:]]*$' \
   "install.sh does NOT rm -rf the user's ~/.claude directory"
+
+echo
+echo "== I9: re-run flips a manually-disabled entry back to true =="
+# A user (or a future /uberdev:doctor command) may have set the entry to
+# false to temporarily disable the plugin. Re-running install.sh must flip
+# it back to true — otherwise the bug-workaround silently no-ops on the
+# very state it's meant to fix. Guards against a future refactor that
+# guards the assignment behind an `if .enabledPlugins[$key] then ...`
+# check, which would preserve the false value instead of overwriting it.
+SANDBOX="$(make_sandbox)"
+seed_settings "$SANDBOX" '{"enabledPlugins":{"uberdev@uberdev":false}}'
+if run_install "$SANDBOX"; then
+  if jq -e '.enabledPlugins["uberdev@uberdev"] == true' \
+       "$SANDBOX/.claude/settings.json" >/dev/null 2>&1; then
+    echo "  PASS  pre-existing false entry flipped back to true"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  pre-existing false entry was not flipped to true"
+    echo "        settings.json: $(cat "$SANDBOX/.claude/settings.json")"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  echo "  FAIL  install.sh exited non-zero with pre-existing false entry"
+  FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== Summary =="

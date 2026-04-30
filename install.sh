@@ -53,7 +53,11 @@ else
 fi
 
 # ── Step 2: jq-patch enabledPlugins (the actual bug workaround) ───────────────
-mkdir -p "${SETTINGS_DIR}"
+mkdir -p "${SETTINGS_DIR}" || {
+  echo "ERROR: failed to create ${SETTINGS_DIR}." >&2
+  echo "       Check permissions on ${HOME}, then re-run." >&2
+  exit 1
+}
 
 # Bootstrap an empty settings.json if it doesn't exist yet. We only do this
 # when the file is missing — we do NOT overwrite an existing file even if
@@ -62,12 +66,14 @@ if [ ! -f "${SETTINGS}" ]; then
   echo '{}' > "${SETTINGS}"
 fi
 
-# Refuse to clobber a malformed settings.json. If a user has hand-edited
-# their settings into invalid JSON, silently rewriting it would destroy
-# their work; surface the problem instead and let them fix it.
-if ! jq -e . "${SETTINGS}" >/dev/null 2>&1; then
+# Refuse to clobber a malformed settings.json. If a user has hand-edited their
+# settings into invalid JSON, silently rewriting it would destroy their work;
+# surface jq's actual parse error so the user knows where to fix it.
+if ! jq_err="$(jq -e . "${SETTINGS}" 2>&1 >/dev/null)"; then
   echo "ERROR: ${SETTINGS} is not valid JSON; refusing to patch." >&2
-  echo "       Fix the file manually (e.g. 'jq . ${SETTINGS}'), then re-run." >&2
+  # jq prefixes its output with 'jq: ' already; pass through as-is, indented.
+  echo "${jq_err}" | sed 's/^/       /' >&2
+  echo "       Fix the file manually, then re-run." >&2
   exit 1
 fi
 
@@ -75,7 +81,12 @@ fi
 # writes a valid JSON document, so a mid-write crash leaves settings.json
 # intact. The trap always runs (any exit path); on the success path it's a
 # no-op because mv has already renamed $TMP out from under it.
-TMP="$(mktemp "${TMPDIR:-/tmp}/uberdev-settings.XXXXXX")"
+#
+# TMP lives in $SETTINGS_DIR (not $TMPDIR) so it shares a filesystem with
+# $SETTINGS — that makes the mv a true rename(2) syscall (atomic) instead of
+# a copy-then-unlink fallback that crosses filesystems non-atomically. The
+# leading `.` makes it a hidden file in case the move is interrupted.
+TMP="$(mktemp "${SETTINGS_DIR}/.settings.XXXXXX")"
 trap 'rm -f "$TMP"' EXIT
 
 # `.enabledPlugins // {}` defaults the key to an empty object when absent,
@@ -86,7 +97,12 @@ trap 'rm -f "$TMP"' EXIT
 jq --arg key "${PLUGIN_KEY}" \
   '.enabledPlugins = (.enabledPlugins // {}) | .enabledPlugins[$key] = true' \
   "${SETTINGS}" > "${TMP}"
-mv "${TMP}" "${SETTINGS}"
+
+if ! mv "${TMP}" "${SETTINGS}"; then
+  echo "ERROR: failed to write ${SETTINGS}." >&2
+  echo "       Check permissions on ${SETTINGS_DIR}, then re-run." >&2
+  exit 1
+fi
 
 echo "✓ uberdev installed and enabled in ${SETTINGS}."
 echo "  Restart Claude Code (or run /reload-plugins) to load the plugin."

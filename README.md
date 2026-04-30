@@ -82,7 +82,12 @@ If you'd rather not pipe a script from the internet, do the same three things by
 /plugin marketplace add TheFJK/UberDev
 /plugin install uberdev@uberdev
 
-# 2. In your shell, patch the enabledPlugins entry the upstream bug skips:
+# 2. In your shell, patch the enabledPlugins entry the upstream bug skips.
+#    The first line bootstraps an empty settings.json if missing (or empty)
+#    so jq has a valid object to merge into; without it, an absent or
+#    zero-byte file would either error out or get overwritten with empty
+#    output by the redirect.
+[ -s ~/.claude/settings.json ] || echo '{}' > ~/.claude/settings.json
 jq '.enabledPlugins = (.enabledPlugins // {}) | .enabledPlugins["uberdev@uberdev"] = true' \
    ~/.claude/settings.json > ~/.claude/settings.json.tmp \
    && mv ~/.claude/settings.json.tmp ~/.claude/settings.json
