@@ -46,30 +46,43 @@ git merge-base HEAD main 2>/dev/null || git merge-base HEAD master 2>/dev/null
 
 Or ask: "This branch split from main - is that correct?"
 
-### Step 3: Present Options
+### Step 3: Mode selection (precedence: --turbo > --interactive > default)
 
-**Turbo mode (when `--turbo` is in `$ARGUMENTS`):**
+Detect flags from `$ARGUMENTS`:
 
-If invoked with `--turbo` (typically forwarded from `uberdev:subagent-driven-dev` via `/turbo`), **skip the prompt** and auto-select **Option 2 (Push and create a Pull Request)**. Announce the choice, then proceed straight to Step 4 → Option 2.
+1. **Turbo mode** — if `--turbo` is in `$ARGUMENTS`:
+   Skip the prompt, auto-select **Option 2 (Push and create a Pull Request)**, and chain into `/uberdev:review-pr` (forwarding `--turbo`). Announce:
 
-> "Implementation complete. Turbo mode — auto-selecting Option 2 (Push and create PR)."
+   > "Implementation complete. Turbo mode — auto-selecting Option 2 (Push and create PR). Chaining into /uberdev:review-pr (--turbo)."
 
-**Default mode:**
+   Proceed to Step 4 → Option 2.
 
-Present exactly these 4 options:
+2. **Interactive mode** — if `--interactive` is in `$ARGUMENTS` (and `--turbo` is NOT):
+   Present the legacy 4-option menu below. If the user picks Option 2, chain into `/uberdev:review-pr` (no `--turbo`). Other options behave as today.
 
-```
-Implementation complete. What would you like to do?
+   ```
+   Implementation complete. What would you like to do?
 
-1. Merge back to <base-branch> locally
-2. Push and create a Pull Request
-3. Keep the branch as-is (I'll handle it later)
-4. Discard this work
+   1. Merge back to <base-branch> locally
+   2. Push and create a Pull Request
+   3. Keep the branch as-is (I'll handle it later)
+   4. Discard this work
 
-Which option?
-```
+   Which option?
+   ```
 
-**Don't add explanation** - keep options concise.
+   **Don't add explanation** — keep options concise.
+
+3. **Default mode** — neither flag set (the always-PR path):
+   Auto-select **Option 2 (Push and create a Pull Request)** and chain into `/uberdev:review-pr` (no `--turbo` forwarded). Announce:
+
+   > "Implementation complete. Pushing branch and creating PR. Chaining into /uberdev:review-pr…"
+
+   Proceed to Step 4 → Option 2.
+
+**Conflict resolution:** if both `--turbo` and `--interactive` are present, `--turbo` wins (turbo's contract is unattended end-to-end; interactive prompts are mutually exclusive).
+
+**Discoverability:** the `--interactive` flag restores the legacy 4-option menu (Merge back to base / Push and create a Pull Request / Keep the branch as-is / Discard) for users who want it. The default is now always-PR; this fulfills the `~/.claude/CLAUDE.md` mandate "MANDATORY: run `/uberdev:review-pr` after pushing the PR. No exceptions, hotfixes included."
 
 ### Step 4: Execute Choice
 
@@ -159,11 +172,77 @@ if [ -n "$REVIEW_FILES" ]; then
   } >> "$PR_BODY_FILE"
 fi
 
-# Push and create PR
+# Compose PR title via --title-file (closes title-injection at the old line 164).
+# `gh pr create --title-file` reads the title from a file directly — no shell
+# interpolation between agent-composed text and `gh`. `printf %q` is
+# defense-in-depth that neutralizes any shell-meta if the title-file path itself
+# is ever logged or echoed.
+TITLE_FILE=$(mktemp)
+printf '%q\n' "<title>" > "$TITLE_FILE"
+
+# Pre-push secret scan: layered defense (gitleaks primary + regex fallback)
+# over BOTH the staged diff AND the composed PR-body file. Either hit aborts
+# the push BEFORE any text reaches GitHub. Worktree is preserved for
+# investigation per Q12.
+run_secret_scan_stdin() {
+  # Primary: gitleaks (when installed)
+  if command -v gitleaks >/dev/null 2>&1; then
+    gitleaks stdin --no-git --no-banner 2>&1 | grep -E '(WRN|finding:)' || true
+    return
+  fi
+  # Fallback: inline regex floor — high-true-positive patterns only.
+  grep -E -o '(AKIA[0-9A-Z]{16}|gh[ps]_[A-Za-z0-9]{36,255}|-----BEGIN [A-Z ]*PRIVATE KEY-----)' || true
+  if [[ -z "${UBERDEV_SCAN_WARNED:-}" ]]; then
+    echo "WARNING: gitleaks not installed — using regex fallback only. Recommend: brew install gitleaks" >&2
+    export UBERDEV_SCAN_WARNED=1
+  fi
+}
+
+# Scan target 1: staged diff
+SCAN_OUT=$(git diff --staged | run_secret_scan_stdin)
+if [[ -n "$SCAN_OUT" ]]; then
+  echo "ERROR: secret found in staged diff: $SCAN_OUT" >&2
+  echo "Push aborted. Worktree preserved. Investigate and rerun." >&2
+  rm -f "$TITLE_FILE" "$PR_BODY_FILE"
+  exit 1
+fi
+
+# Scan target 2: composed PR body file
+SCAN_OUT=$(run_secret_scan_stdin < "$PR_BODY_FILE")
+if [[ -n "$SCAN_OUT" ]]; then
+  echo "ERROR: secret found in composed PR body: $SCAN_OUT" >&2
+  echo "Push aborted. Worktree preserved. Investigate and rerun." >&2
+  rm -f "$TITLE_FILE" "$PR_BODY_FILE"
+  exit 1
+fi
+
+# Both scans clean → push and create PR
 git push -u origin <feature-branch>
-gh pr create --title "<title>" --body-file "$PR_BODY_FILE"
-rm -f "$PR_BODY_FILE"
+
+# Capture PR URL from gh stdout; regex-validate; abort chain on parse-fail.
+PR_URL=$(gh pr create --title-file "$TITLE_FILE" --body-file "$PR_BODY_FILE")
+PR_URL_REGEX='^https://github\.com/[^/]+/[^/]+/pull/[0-9]+$'
+if [[ ! "$PR_URL" =~ $PR_URL_REGEX ]]; then
+  echo "ERROR: gh pr create returned non-parseable URL: $PR_URL" >&2
+  echo "Branch state preserved. Worktree retained. Investigate and rerun." >&2
+  rm -f "$TITLE_FILE" "$PR_BODY_FILE"
+  exit 1
+fi
+echo "PR created: $PR_URL"
+rm -f "$TITLE_FILE" "$PR_BODY_FILE"
 ```
+
+**Chain hand-off (always-PR path, default + turbo):**
+
+After the PR is created and `PR_URL` is validated, **invoke `uberdev:review-pr` via the `Skill` tool** with the captured `PR_URL`. Forward `--turbo` if it was in `$ARGUMENTS`. The chain is **fire-and-surface, not fire-and-block**: review-pr's findings surface to the user via its own output, but `finish-branch` does NOT block on `REVISIONS_REQUIRED` (advisory only, per #11 Q1).
+
+> Invoke `uberdev:review-pr` via the Skill tool with the captured `PR_URL`. Forward `--turbo` if present. Findings are ADVISORY — do NOT block on `REVISIONS_REQUIRED` at this layer (the auto-fix loop is deferred per #11 Q1).
+
+Mirrors the canonical `subagent-driven-dev → post-impl-review` precedent (commit `73b2562`). `commands/review-pr.md` has no `disable-model-invocation` flag, so the `Skill` tool can invoke the slash command directly without promotion.
+
+A review-pr failure (e.g., reviewer agent crash, `gh pr view` error) is loud-logged but does NOT roll back the PR or branch state. `finish-branch` returns success once the PR is open and the chain has been kicked off.
+
+Use the `Skill` tool for this dispatch — never the agent-spawning tool.
 
 Then: Cleanup worktree (Step 5)
 
@@ -260,3 +339,6 @@ git worktree remove <worktree-path>
 
 **Pairs with:**
 - The worktree-setup prose inlined in `uberdev:execute-plan` and `uberdev:subagent-driven-dev` — this skill cleans up the worktree those skills created.
+
+**Chains into:**
+- **`uberdev:review-pr`** — invoked via the `Skill` tool after PR creation on the always-PR path (default mode + `--turbo`). Mirrors `subagent-driven-dev → post-impl-review` (commit `73b2562`). Advisory only — `finish-branch` does not block on reviewer verdict.
