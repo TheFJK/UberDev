@@ -12,11 +12,13 @@ set -o pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ISSUE_CMD="$REPO_ROOT/plugins/uberdev/commands/issue.md"
 BRAINSTORM="$REPO_ROOT/plugins/uberdev/skills/brainstorm/SKILL.md"
+CODEBASE_SCOUT="$REPO_ROOT/plugins/uberdev/agents/codebase-scout.md"
+TRIAGE_SCOUT="$REPO_ROOT/plugins/uberdev/agents/triage-scout.md"
 
 # Pre-flight: refuse to run if the files we're asserting against are missing
 # or unreadable — without this, every assertion fails with a confusing
 # "pattern not found" instead of the real cause.
-for f in "$ISSUE_CMD" "$BRAINSTORM"; do
+for f in "$ISSUE_CMD" "$BRAINSTORM" "$CODEBASE_SCOUT" "$TRIAGE_SCOUT"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -52,54 +54,61 @@ assert_no_grep() {
   fi
 }
 
-echo "== Phase 1.5 resolves RUN_ID and SUMMARY_DIR =="
-assert_grep "$ISSUE_CMD" \
-  'RUN_ID="\$\(date \+%Y%m%d-%H%M%S\)-\$\(git rev-parse --short HEAD' \
-  "Phase 1.5 sets RUN_ID with date+git-sha"
-assert_grep "$ISSUE_CMD" \
-  'git rev-parse --short HEAD 2>/dev/null \|\| echo nohead' \
-  "Phase 1.5 RUN_ID has defensive nohead fallback (mirrors orchestrator)"
-assert_grep "$ISSUE_CMD" \
-  'SUMMARY_DIR="\.uberdev/research/run-\$RUN_ID"' \
-  "Phase 1.5 sets SUMMARY_DIR under .uberdev/research/run-"
-assert_grep "$ISSUE_CMD" \
+echo "== Phase 1.5 SUMMARY_DIR setup is removed =="
+assert_no_grep "$ISSUE_CMD" \
+  'RUN_ID="\$\(date \+%Y%m%d-%H%M%S\)' \
+  "Phase 1.5 RUN_ID stamping removed"
+assert_no_grep "$ISSUE_CMD" \
+  'SUMMARY_DIR="\.uberdev/research/run-' \
+  "Phase 1.5 SUMMARY_DIR removed"
+assert_no_grep "$ISSUE_CMD" \
   'mkdir -p "\$SUMMARY_DIR"' \
-  "Phase 1.5 mkdir -p \$SUMMARY_DIR"
+  "Phase 1.5 mkdir removed"
 
 echo
-echo "== Phase 2 dispatches research-codebase + research-patterns =="
+echo "== Phase 2 dispatches the two Sonnet scouts =="
 assert_grep "$ISSUE_CMD" \
-  'research-codebase' \
-  "Phase 2 names research-codebase agent"
+  'two Task agents|2 Task agents' \
+  "/issue prose mentions 2-agent count"
 assert_grep "$ISSUE_CMD" \
-  'research-patterns' \
-  "Phase 2 names research-patterns agent"
+  'uberdev:codebase-scout' \
+  "/issue dispatches uberdev:codebase-scout"
+assert_grep "$ISSUE_CMD" \
+  'uberdev:triage-scout' \
+  "/issue dispatches uberdev:triage-scout"
 assert_grep "$ISSUE_CMD" \
   'single message|one message|same single message|single assistant turn' \
   "Phase 2 keeps the single-message-fanout invariant"
 
 echo
-echo "== Phase 2-4 dispatches all 8 research/scope agents =="
-assert_grep "$ISSUE_CMD" 'research-codebase' "research-codebase agent named in /issue"
-assert_grep "$ISSUE_CMD" 'research-patterns' "research-patterns agent named in /issue"
-assert_grep "$ISSUE_CMD" 'research-prior-art' "research-prior-art agent named in /issue"
-assert_grep "$ISSUE_CMD" 'research-constraints' "research-constraints agent named in /issue"
-assert_grep "$ISSUE_CMD" 'research-security' "research-security agent named in /issue"
-assert_grep "$ISSUE_CMD" 'research-test-coverage' "research-test-coverage agent named in /issue"
-assert_grep "$ISSUE_CMD" 'eight Task agents|8 Task agents' "/issue prose mentions 8-agent count"
-assert_grep "$ISSUE_CMD" 'security\.md' "security.md aggregated in Phase 4.5"
-assert_grep "$ISSUE_CMD" 'test-coverage\.md' "test-coverage.md aggregated in Phase 4.5"
+echo "== 8-agent fanout removed from /issue =="
+assert_no_grep "$ISSUE_CMD" 'research-codebase' "research-codebase no longer dispatched by /issue"
+assert_no_grep "$ISSUE_CMD" 'research-patterns' "research-patterns no longer dispatched by /issue"
+assert_no_grep "$ISSUE_CMD" 'research-prior-art' "research-prior-art no longer dispatched by /issue"
+assert_no_grep "$ISSUE_CMD" 'research-constraints' "research-constraints no longer dispatched by /issue"
+assert_no_grep "$ISSUE_CMD" 'research-security' "research-security no longer dispatched by /issue"
+assert_no_grep "$ISSUE_CMD" 'research-test-coverage' "research-test-coverage no longer dispatched by /issue"
+assert_no_grep "$ISSUE_CMD" 'eight Task agents|8 Task agents' "8-agent count prose removed"
+assert_no_grep "$ISSUE_CMD" 'security\.md' "security.md aggregation removed from /issue"
+assert_no_grep "$ISSUE_CMD" 'test-coverage\.md' "test-coverage.md aggregation removed from /issue"
 
 echo
-echo "== --no-explore narrows to 4 in-repo agents =="
-assert_grep "$ISSUE_CMD" 'NO_EXPLORE=1.*codebase.*patterns.*constraints.*test-coverage|in-repo agents only' \
-  "/issue --no-explore documents 4-agent in-repo subset (codebase + patterns + constraints + test-coverage)"
-
-echo
-echo "== --no-explore placeholder verbatim =="
+echo "== --no-explore is soft-deprecated =="
+assert_no_grep "$ISSUE_CMD" \
+  'NO_EXPLORE=1.*codebase.*patterns.*constraints.*test-coverage|in-repo agents only' \
+  "/issue --no-explore 4-agent subset prose removed"
 assert_grep "$ISSUE_CMD" \
+  'notice: --no-explore is deprecated' \
+  "/issue emits soft-deprecation notice for --no-explore"
+assert_grep "$ISSUE_CMD" \
+  'Removal target: v1\.0\.0' \
+  "/issue --no-explore deprecation cites removal target v1.0.0"
+
+echo
+echo "== --no-explore placeholder string removed =="
+assert_no_grep "$ISSUE_CMD" \
   'shallow mode — no fanout run; root cause to be confirmed in /brainstorm' \
-  "--no-explore placeholder string appears verbatim"
+  "shallow-mode placeholder string removed (no longer reachable)"
 
 echo
 echo "== Bug template: causal triple labels =="
@@ -132,19 +141,16 @@ assert_grep "$ISSUE_CMD" \
   "bug template severity checkbox block default-P2 preserved"
 
 echo
-echo "== Phase 7 binds artifacts to issue number =="
-assert_grep "$ISSUE_CMD" \
-  'mv "\$SUMMARY_DIR" "\.uberdev/research/issue-\$ISSUE_NUM"' \
-  "Phase 7 renames SUMMARY_DIR to .uberdev/research/issue-\$ISSUE_NUM"
-assert_grep "$ISSUE_CMD" \
+echo "== Phase 7 cache-binding step removed =="
+assert_no_grep "$ISSUE_CMD" \
+  'mv "\$SUMMARY_DIR"' \
+  "Phase 7 mv \$SUMMARY_DIR removed"
+assert_no_grep "$ISSUE_CMD" \
   'warning: SUMMARY_DIR rename used cp\+rm fallback' \
-  "Phase 7 cp+rm fallback emits a stderr warning"
-assert_grep "$ISSUE_CMD" \
-  'error: gh issue create did not return a parseable URL' \
-  "Phase 7 guards against empty ISSUE_NUM with explicit error"
-assert_grep "$ISSUE_CMD" \
+  "Phase 7 cp+rm fallback warning removed"
+assert_no_grep "$ISSUE_CMD" \
   'error: both mv and cp failed' \
-  "Phase 7 escalates when both mv and cp fail (no silent loss)"
+  "Phase 7 mv/cp escalation removed"
 
 echo
 echo "== Body authoring rules subsection present =="
@@ -156,31 +162,58 @@ assert_grep "$ISSUE_CMD" \
   "Rules subsection has WHAT/HOW boundary bullet"
 
 echo
-echo "== Brainstorm short-circuit reads .uberdev/research/issue-N =="
-assert_grep "$BRAINSTORM" \
+echo "== Brainstorm short-circuit subsection removed =="
+assert_no_grep "$BRAINSTORM" \
   '\.uberdev/research/issue-' \
-  "brainstorm references .uberdev/research/issue- path"
-assert_grep "$BRAINSTORM" \
+  "brainstorm no longer references .uberdev/research/issue- path"
+assert_no_grep "$BRAINSTORM" \
   'Issue-research short-circuit' \
-  "brainstorm has Issue-research short-circuit subsection"
-assert_grep "$BRAINSTORM" \
+  "brainstorm Issue-research short-circuit subsection removed"
+assert_no_grep "$BRAINSTORM" \
   'gh issue view.*updatedAt|updatedAt.*gh issue view' \
-  "brainstorm stale check uses gh issue view updatedAt"
-assert_grep "$BRAINSTORM" \
+  "brainstorm no longer uses gh issue view updatedAt stale check"
+assert_no_grep "$BRAINSTORM" \
   '_MTIME_EPOCH.*-lt.*ISSUE_UPDATED_EPOCH' \
-  "brainstorm stale check uses -lt operator (summary older than issue update = stale)"
-assert_grep "$BRAINSTORM" \
-  'missing.*summary:.*field|summary:.*missing' \
-  "brainstorm implements the malformed-summary fallback the prose claims"
-assert_grep "$BRAINSTORM" \
-  'failed to fetch.*updatedAt|gh auth/network' \
-  "brainstorm warns and falls through when gh issue view returns empty"
-assert_grep "$BRAINSTORM" \
+  "brainstorm no longer uses mtime stale comparison"
+assert_no_grep "$BRAINSTORM" \
   'Per-topic skip|per-topic, not all-or-nothing' \
-  "brainstorm short-circuit is documented as per-topic, not all-or-nothing"
-assert_grep "$BRAINSTORM" \
-  'Backwards compatibility|Backward compatibility' \
-  "brainstorm documents backwards-compat fallthrough"
+  "brainstorm no longer documents per-topic skip"
+
+echo
+echo "== Scout agents pinned to Sonnet (defence-in-depth) =="
+assert_grep "$CODEBASE_SCOUT" \
+  '^model: sonnet$' \
+  "codebase-scout YAML frontmatter pins model: sonnet"
+assert_grep "$CODEBASE_SCOUT" \
+  'runs on Sonnet|Sonnet)' \
+  "codebase-scout description names Sonnet (audit trail)"
+assert_grep "$TRIAGE_SCOUT" \
+  '^model: sonnet$' \
+  "triage-scout YAML frontmatter pins model: sonnet"
+assert_grep "$TRIAGE_SCOUT" \
+  'runs on Sonnet|Sonnet)' \
+  "triage-scout description names Sonnet (audit trail)"
+assert_grep "$ISSUE_CMD" \
+  'CLAUDE_CODE_SUBAGENT_MODEL' \
+  "/issue documents CLAUDE_CODE_SUBAGENT_MODEL escape hatch"
+
+echo
+echo "== Surviving bug-template sections =="
+assert_grep "$ISSUE_CMD" \
+  '## Likely area' \
+  "## Likely area heading survives in bug template"
+assert_grep "$ISSUE_CMD" \
+  '## Likely root cause' \
+  "## Likely root cause heading survives in bug template"
+assert_no_grep "$ISSUE_CMD" \
+  '## Security signals' \
+  "## Security signals heading removed from bug template"
+assert_no_grep "$ISSUE_CMD" \
+  '## Current ecosystem' \
+  "## Current ecosystem heading removed from feat template"
+assert_no_grep "$ISSUE_CMD" \
+  '## Constraints' \
+  "## Constraints heading removed from feat template"
 
 echo
 echo "== Summary =="
