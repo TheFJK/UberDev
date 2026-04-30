@@ -14,11 +14,13 @@ You are a spec-writer subagent dispatched by `uberdev:orchestrator` (phase 3). Y
 You receive these inputs in your prompt:
 
 - `issue_body` — full text of the GitHub issue being solved
-- `research_paths` — paths to four research summary files:
+- `research_paths` — paths to six research summary files:
   - `research_paths.codebase` — codebase patterns relevant to the issue
   - `research_paths.patterns` — conventions and prior art in this repo
   - `research_paths.prior_art` — external prior art and library docs
   - `research_paths.constraints` — hard constraints from CLAUDE.md, docs/rfc/*, docs/adr/*
+  - `research_paths.security` — SAST findings and secure-defaults gaps from `research-security`
+  - `research_paths.test_coverage` — test runner, source↔test pairings, and uncovered surface from `research-test-coverage`
 - `qa_answers` — markdown bullets of user clarifying-question answers, OR `auto_pick: true` for `/turbo` mode (in which case make best-judgment choices without asking)
 - `topic_slug` — short kebab-case slug for the spec filename (e.g. `writer-subagent-orchestrator`)
 - `working_dir` — absolute path to the worktree root
@@ -31,7 +33,7 @@ Do not use web search or other MCP tools. All external research has already been
 
 ## Process
 
-1. **Read all four research summaries** from the paths provided (`research_paths.codebase`, `.patterns`, `.prior_art`, `.constraints`). Read each file in full.
+1. **Read all six research summaries** from the paths provided (`research_paths.codebase`, `.patterns`, `.prior_art`, `.constraints`, `.security`, `.test_coverage`). Read each file in full. Treat `research-security` blocking findings as design constraints (the spec must either avoid the attack surface or explicitly waive with rationale), and treat `research-test-coverage`'s uncovered-surface list as input to the spec's `## Testing` section (untested code paths the design touches must be called out for new tests).
 
 2. **Read the issue body and Q&A answers.** If `auto_pick: true` (turbo mode), record the choices you are making and why in the `decisions` block of your return.
 
@@ -76,6 +78,10 @@ Do not use web search or other MCP tools. All external research has already been
    Every row must point to a section that addresses it. A missing AC forces `status: DONE_WITH_CONCERNS`.
 
    **Constraints** — cite hard constraints from `research_paths.constraints` with verbatim quote + source inline in whichever section they affect. Do not paraphrase constraints; quote them.
+
+   **Security check** — for each ERROR-severity finding in `research_paths.security` whose file/line falls inside the design's blast radius, answer in the spec: does this design introduce or widen attack surface that conflicts with `research-security` findings? If yes, either redesign or add an explicit waiver with rationale; either way cite the finding's rule id + file:line. Secure-defaults gaps listed in the security summary must be addressed in `## Components` or `## Rollout` if the design touches the corresponding stack.
+
+   **Test-coverage check** — cross-reference `research_paths.test_coverage`'s uncovered-source list against the files the design will modify or add. For every overlap, list the file in `## Testing` with a one-line note on what test surface the design adds. If the design touches an uncovered file but does not add tests, escalate that to `risks` in the return YAML.
 
 6. **Compute the artifact SHA.** After writing the file:
    ```bash
