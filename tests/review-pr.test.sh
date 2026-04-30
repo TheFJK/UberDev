@@ -58,14 +58,16 @@ assert_grep "$REVIEW_PR" 'single message|SINGLE message|one assistant turn|ONE a
   "parallel-fanout invariant documented"
 
 echo
-echo "== Aspect arguments listed =="
-assert_grep "$REVIEW_PR" 'comments' "aspect: comments"
-assert_grep "$REVIEW_PR" 'tests'    "aspect: tests"
-assert_grep "$REVIEW_PR" 'errors'   "aspect: errors"
-assert_grep "$REVIEW_PR" 'types'    "aspect: types"
-assert_grep "$REVIEW_PR" 'code'     "aspect: code"
-assert_grep "$REVIEW_PR" 'simplify' "aspect: simplify"
-assert_grep "$REVIEW_PR" 'all'      "aspect: all"
+echo "== Aspect arguments listed in Available Review Aspects =="
+# Lock the documented bullet shape: bare-word grep would over-match prose;
+# anchoring on '**name** -' fails loud if an aspect is dropped from the list.
+assert_grep "$REVIEW_PR" '\*\*comments\*\*[[:space:]]+-' "aspect: comments listed in Available Review Aspects"
+assert_grep "$REVIEW_PR" '\*\*tests\*\*[[:space:]]+-'    "aspect: tests listed in Available Review Aspects"
+assert_grep "$REVIEW_PR" '\*\*errors\*\*[[:space:]]+-'   "aspect: errors listed in Available Review Aspects"
+assert_grep "$REVIEW_PR" '\*\*types\*\*[[:space:]]+-'    "aspect: types listed in Available Review Aspects"
+assert_grep "$REVIEW_PR" '\*\*code\*\*[[:space:]]+-'     "aspect: code listed in Available Review Aspects"
+assert_grep "$REVIEW_PR" '\*\*simplify\*\*[[:space:]]+-' "aspect: simplify listed in Available Review Aspects"
+assert_grep "$REVIEW_PR" '\*\*all\*\*[[:space:]]+-'      "aspect: all listed in Available Review Aspects"
 
 echo
 echo "== No-quoting output rule present in each of the 6 reviewer agents =="

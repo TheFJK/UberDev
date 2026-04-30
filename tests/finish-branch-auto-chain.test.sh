@@ -71,10 +71,10 @@ assert_grep "$FINISH_BRANCH" \
 echo
 echo "== PR_URL regex-validate (parse-fail aborts chain) =="
 assert_grep "$FINISH_BRANCH" \
-  'https://github\.com/\[\^/\]\+/\[\^/\]\+/pull/\[0-9\]\+' \
+  'https://github\\\.com/\[\^/\]\+/\[\^/\]\+/pull/\[0-9\]\+' \
   "PR_URL regex validation present (^https://github.com/.../.../pull/N)"
 assert_grep "$FINISH_BRANCH" \
-  'non-parseable URL|abort.*chain|parse-fail' \
+  'non-parseable URL|abort.*chain into.*review-pr|do NOT chain' \
   "abort-on-parse-fail prose present"
 
 echo
