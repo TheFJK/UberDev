@@ -18,6 +18,8 @@ SUBAGENT_DRIVEN="$REPO_ROOT/plugins/uberdev/skills/subagent-driven-dev/SKILL.md"
 FINISH_BRANCH="$REPO_ROOT/plugins/uberdev/skills/finish-branch/SKILL.md"
 ORCHESTRATOR="$REPO_ROOT/plugins/uberdev/skills/orchestrator/SKILL.md"
 TURBO_CMD="$REPO_ROOT/plugins/uberdev/commands/turbo.md"
+SOLVE_CMD="$REPO_ROOT/plugins/uberdev/commands/solve.md"
+SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
 
 PASS=0
 FAIL=0
@@ -63,9 +65,41 @@ echo "== /turbo command entry point dispatches --turbo into the pipeline =="
 # After the orchestrator landed (PR #8), medium/large /turbo enters via
 # /uberdev:orchestrator --turbo; small/trivial tiers skip brainstorm entirely.
 # Either entry-point name + --turbo proves the dispatch contract.
-assert_grep "$TURBO_CMD" \
+assert_grep "$SOLVE_PIPELINE" \
   'orchestrator --turbo|brainstorm --turbo|--turbo.*orchestrator|--turbo.*brainstorm' \
-  "turbo command file dispatches --turbo into the pipeline (orchestrator or brainstorm entry)"
+  "solve-pipeline skill (medium tier) dispatches --turbo into the pipeline"
+
+echo
+echo "== Differential guard: AUTO_MODE!=1 medium dispatch dispatches WITHOUT --turbo (#15) =="
+# pr-test-analyzer Gap #2: the positive --turbo assertion above asserts --turbo
+# appears somewhere in the skill; this asserts the interactive (/solve) medium
+# branch dispatches the orchestrator WITHOUT --turbo, so a future edit that
+# accidentally hardcoded --turbo would break this test.
+SOLVE_MEDIUM_DISPATCH=$(awk '
+  /^if \[\[ "\$AUTO_MODE" == "1" \]\]; then$/ { in_turbo=1; next }
+  in_turbo && /^else$/ { in_turbo=0; in_solve=1; next }
+  in_solve && /^fi$/ { in_solve=0; next }
+  in_solve && /orchestrator.*solve GH issue/ { print }
+' "$SOLVE_PIPELINE")
+if grep -qE -- '--turbo' <<<"$SOLVE_MEDIUM_DISPATCH"; then
+  echo "  FAIL  AUTO_MODE!=1 medium dispatch MUST NOT contain --turbo (interactive /solve regression)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  AUTO_MODE!=1 medium dispatch correctly omits --turbo (interactive /solve preserved)"
+  PASS=$((PASS + 1))
+fi
+
+echo
+echo "== thin /solve and /turbo wrappers invoke the solve-pipeline skill =="
+SOLVE_PIPELINE_REF='uberdev:solve-pipeline|solve-pipeline skill'
+assert_grep "$SOLVE_CMD" "$SOLVE_PIPELINE_REF" \
+  "/solve thin wrapper invokes the solve-pipeline skill"
+assert_grep "$TURBO_CMD" "$SOLVE_PIPELINE_REF" \
+  "/turbo thin wrapper invokes the solve-pipeline skill"
+assert_grep "$SOLVE_CMD" 'export AUTO_MODE=0' \
+  "/solve thin wrapper sets AUTO_MODE=0 (interactive)"
+assert_grep "$TURBO_CMD" 'export AUTO_MODE=1' \
+  "/turbo thin wrapper sets AUTO_MODE=1 (unattended)"
 
 echo
 echo "== orchestrator forwards --turbo into subagent-driven-dev =="
