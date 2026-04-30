@@ -114,12 +114,23 @@ echo "== Default-mode paths preserved (regression canaries) =="
 assert_grep "$WRITE_PLAN" \
   'Default path \(subagent-driven\)|Inline override' \
   "write-plan default-mode handoff still names both subagent-driven (default) and inline override paths"
+# Q11 (issue #20): default mode no longer presents the menu — it auto-pushes.
+# The 4-option menu is gated under --interactive only.
 assert_grep "$FINISH_BRANCH" \
-  'Merge back to|Push and create a Pull Request|Keep the branch as-is|Discard this work' \
-  "finish-branch still presents the 4-option default-mode menu"
+  '[Dd]efault.*[Aa]uto.*Option 2|[Dd]efault mode.*Option 2|always-PR' \
+  "finish-branch default mode auto-pushes PR (no menu)"
+assert_grep "$FINISH_BRANCH" \
+  '--interactive.*Merge back to|--interactive.*4-option|--interactive.*4 option|interactive.*Push and create a Pull Request|interactive.*Keep the branch as-is' \
+  "finish-branch --interactive restores 4-option menu"
 assert_grep "$BRAINSTORM" \
   'clarifying questions.*one at a time|[Aa]sk clarifying questions' \
   "brainstorm still describes the default clarifying-questions loop"
+
+echo
+echo "== finish-branch chains into review-pr after PR creation (Q1) =="
+assert_grep "$FINISH_BRANCH" \
+  'Skill.*review-pr|Skill\("uberdev:review-pr"\)|uberdev:review-pr.*Skill' \
+  "finish-branch invokes uberdev:review-pr via Skill tool after PR creation"
 
 echo
 echo "== orchestrator wires always-on reviewers =="
