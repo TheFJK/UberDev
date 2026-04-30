@@ -52,10 +52,13 @@ DRY_RUN=0
 [[ " $ARGUMENTS " == *" --force "* ]] && FORCE=1
 [[ " $ARGUMENTS " == *" --dry-run "* ]] && DRY_RUN=1
 
-PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT}"
+# Plugin-root resolution: same fallback chain as lib/aliases-sync.sh
+# (PLUGIN_ROOT > CLAUDE_PLUGIN_ROOT > CURSOR_PLUGIN_ROOT) so this command
+# works in Cursor environments too — not just Claude Code.
+PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
 if [ -z "$PLUGIN_ROOT" ] || [ ! -d "$PLUGIN_ROOT/commands" ]; then
-  echo "❌ CLAUDE_PLUGIN_ROOT not set or invalid; cannot resolve canonical commands." >&2
-  echo "   This command must be run from within Claude Code with the uberdev plugin enabled." >&2
+  echo "❌ Plugin root not set or invalid (checked PLUGIN_ROOT, CLAUDE_PLUGIN_ROOT, CURSOR_PLUGIN_ROOT); cannot resolve canonical commands." >&2
+  echo "   This command must be run from within Claude Code or Cursor with the uberdev plugin enabled." >&2
   exit 1
 fi
 
