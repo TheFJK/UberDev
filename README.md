@@ -40,26 +40,63 @@ Both are **repo-agnostic** — they auto-detect the current repo via `gh repo vi
 ## Install
 
 ```bash
-# 1. Add this repo as a Claude Code marketplace
-/plugin marketplace add TheFJK/UberDev
+# One-liner — installs the plugin and patches the missing enabledPlugins entry.
+curl -fsSL https://raw.githubusercontent.com/TheFJK/UberDev/main/install.sh | bash
+```
 
-# 2. Install the plugin
-/plugin install uberdev@uberdev
+Then, in Claude Code:
 
-# 3. Smoke-test
+```bash
+# Smoke-test
 /uberdev:issue trivial typo in README install step
 
-# 4. (Recommended) Install short-form aliases so /issue, /solve, /turbo,
-#    /simplify, /review-pr work without the /uberdev: prefix.
+# (Recommended) Install short-form aliases so /issue, /solve, /turbo,
+# /simplify, /review-pr work without the /uberdev: prefix.
 /uberdev:install-aliases
 ```
 
-Step 4 is the ergonomics step: by default, plugin commands are addressed
+> **Why a bootstrap script?** Upstream Claude Code has a bug
+> ([anthropics/claude-code#20661](https://github.com/anthropics/claude-code/issues/20661))
+> where `/plugin install` populates the cache and `installed_plugins.json`
+> but **does not** write `enabledPlugins` in `~/.claude/settings.json` —
+> so `/uberdev:*` commands silently 404 until that key is added by hand.
+> `install.sh` does the install **and** jq-patches `enabledPlugins` so
+> commands resolve immediately. It's idempotent — re-running on an
+> already-enabled environment is a no-op, and any unrelated keys
+> (theme, model, sibling plugins) are preserved verbatim. Requires `jq`.
+
+The aliases step is the ergonomics step: by default, plugin commands are addressed
 as `/uberdev:<command>` because Claude Code's plugin manifest enforces a
 `<plugin-name>:` prefix on every command. The `/uberdev:install-aliases`
 helper drops one-way forwarders into `~/.claude/commands/` so you can
 type `/issue …` instead of `/uberdev:issue …`. The long form keeps
 working — this is purely additive. See [Short-form aliases](#short-form-aliases) below.
+
+<details>
+<summary><strong>Manual install (without curl|bash)</strong></summary>
+
+If you'd rather not pipe a script from the internet, do the same three things by hand:
+
+```bash
+# 1. Inside Claude Code:
+/plugin marketplace add TheFJK/UberDev
+/plugin install uberdev@uberdev
+
+# 2. In your shell, patch the enabledPlugins entry the upstream bug skips.
+#    The first line bootstraps an empty settings.json if missing (or empty)
+#    so jq has a valid object to merge into; without it, an absent or
+#    zero-byte file would either error out or get overwritten with empty
+#    output by the redirect.
+[ -s ~/.claude/settings.json ] || echo '{}' > ~/.claude/settings.json
+jq '.enabledPlugins = (.enabledPlugins // {}) | .enabledPlugins["uberdev@uberdev"] = true' \
+   ~/.claude/settings.json > ~/.claude/settings.json.tmp \
+   && mv ~/.claude/settings.json.tmp ~/.claude/settings.json
+
+# 3. Back in Claude Code:
+/reload-plugins
+```
+
+</details>
 
 ---
 
