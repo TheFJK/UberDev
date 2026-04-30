@@ -40,7 +40,7 @@ _aliases_write_forwarder() {
   DEST_DIR="$(dirname "$TARGET")"
   local TMP
   TMP="$(mktemp "$DEST_DIR/.${SHORT}.md.XXXXXX")" || return 1
-  cat > "$TMP" <<EOF
+  { cat > "$TMP" <<EOF
 ---
 description: "Alias for /uberdev:$CANON"
 argument-hint: "<args>  # forwarded to /uberdev:$CANON"
@@ -71,6 +71,7 @@ If the canonical path is stale (e.g. you reinstalled the plugin to a
 different location), re-run \`/uberdev:install-aliases --force\` to
 regenerate this file.
 EOF
+  } || { rm -f "$TMP"; return 1; }
   mv -f "$TMP" "$TARGET" || { rm -f "$TMP"; return 1; }
   return 0
 }
@@ -91,9 +92,9 @@ _aliases_check_marker() {
 #   - $PWD/.claude/uberdev.local.md (file, optional)
 aliases_sync_main() {
   # 1. Opt-out gates (env + file). Env wins (precedence: env > file > default).
-  if [ "${UBERDEV_NO_AUTO_ALIAS:-}" = "1" ]; then
-    return 0
-  fi
+  case "${UBERDEV_NO_AUTO_ALIAS:-}" in
+    1|true|TRUE|yes|YES) return 0 ;;
+  esac
   if grep -qE '^auto_install_aliases:[[:space:]]*false[[:space:]]*$' \
        "${PWD}/.claude/uberdev.local.md" 2>/dev/null; then
     return 0
@@ -138,6 +139,7 @@ aliases_sync_main() {
   # 6. Per-alias loop.
   local INSTALLED_LIST=()
   local SKIPPED_LIST=()
+  local FAILED_LIST=()
   local SHORT CANON TOOLS TARGET
   while IFS='|' read -r SHORT CANON TOOLS; do
     [ -n "$SHORT" ] || continue
@@ -154,6 +156,8 @@ aliases_sync_main() {
     # Atomic write (per-iteration cleanup is inside _aliases_write_forwarder).
     if _aliases_write_forwarder "$SHORT" "$CANON" "$TOOLS" "$PLUGIN_ROOT_LOCAL" "$TARGET"; then
       INSTALLED_LIST+=("$SHORT")
+    else
+      FAILED_LIST+=("$SHORT")
     fi
   done <<< "$ALIASES"
 
@@ -169,7 +173,11 @@ aliases_sync_main() {
     if [ "${#SKIPPED_LIST[@]}" -gt 0 ]; then
       skipped_str="${SKIPPED_LIST[*]}"
     fi
-    echo "first run: installed ${#INSTALLED_LIST[@]} aliases, skipped ${#SKIPPED_LIST[@]} conflicts (${skipped_str}); opt out with UBERDEV_NO_AUTO_ALIAS=1" >&2
+    local failed_str=""
+    if [ "${#FAILED_LIST[@]}" -gt 0 ]; then
+      failed_str=", failed ${#FAILED_LIST[@]} (${FAILED_LIST[*]})"
+    fi
+    echo "first run: installed ${#INSTALLED_LIST[@]} aliases, skipped ${#SKIPPED_LIST[@]} conflicts (${skipped_str})${failed_str}; opt out with UBERDEV_NO_AUTO_ALIAS=1" >&2
   fi
   return 0
 }
