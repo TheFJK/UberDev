@@ -96,8 +96,8 @@ done
 # uninstall would either be unsafe (might delete user-authored files) or
 # impossible (couldn't tell ours apart). Both files must agree on the literal.
 MARKER='managed-by:[[:space:]]*uberdev-aliases'
-assert_grep "$INSTALL_CMD" "$MARKER" \
-  "install-aliases writes the 'managed-by: uberdev-aliases' marker into forwarders"
+assert_grep "$REPO_ROOT/plugins/uberdev/lib/aliases-sync.sh" "$MARKER" \
+  "lib/aliases-sync.sh writes the 'managed-by: uberdev-aliases' marker into forwarders"
 assert_grep "$UNINSTALL_CMD" "$MARKER" \
   "uninstall-aliases keys off the same 'managed-by: uberdev-aliases' marker"
 
@@ -193,9 +193,9 @@ echo "== A6: alias forwarders mirror each canonical's allowed-tools =="
 # `allowed-tools: $TOOLS` — same variable name parsed from the ALIASES
 # rows. Together, A6's two halves guarantee canonical → ALIASES → written
 # forwarder share one source of truth.
-assert_grep "$INSTALL_CMD" \
+assert_grep "$REPO_ROOT/plugins/uberdev/lib/aliases-sync.sh" \
   '^allowed-tools: \$TOOLS$' \
-  "install-aliases heredoc writes the \$TOOLS variable from the ALIASES table"
+  "lib/aliases-sync.sh heredoc writes the \$TOOLS variable from the ALIASES table"
 
 # The ALIASES table in install-aliases.md hardcodes per-alias allowed-tools.
 # That value MUST equal the canonical command's `allowed-tools:` line, byte
