@@ -82,6 +82,13 @@ review-pr|review-pr|["Bash(git*)", "Bash(gh*)", "Glob", "Grep", "Read", "Task"]'
 # /review is the load-bearing entry here (we already use /review-pr to dodge
 # it, but if someone adds another canonical short-named like a built-in, the
 # guard catches it).
+#
+# Manually maintained — Claude Code's plugin reference doesn't expose a
+# machine-readable list of reserved short-names, so on a major Claude Code
+# release this list should be re-checked against the current built-in set
+# (https://code.claude.com/docs/en/plugins-reference). If a new built-in
+# is added that collides with an alias, this list is the right place to
+# add the guard.
 BUILTINS='init review security-review statusline-setup help clear plugin'
 
 echo "Installing uberdev short-form aliases…"

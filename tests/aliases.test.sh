@@ -179,6 +179,18 @@ done
 
 echo
 echo "== A6: alias forwarders mirror each canonical's allowed-tools =="
+# Bind the drift contract to the actual write logic. A6 below verifies the
+# ALIASES table matches each canonical's frontmatter, but doesn't catch a
+# bug where the heredoc writes a different variable to the forwarder's
+# `allowed-tools` line (e.g., `allowed-tools: $WRONGVAR`). This thin
+# assertion closes that gap by requiring the write line to read exactly
+# `allowed-tools: $TOOLS` — same variable name parsed from the ALIASES
+# rows. Together, A6's two halves guarantee canonical → ALIASES → written
+# forwarder share one source of truth.
+assert_grep "$INSTALL_CMD" \
+  '^allowed-tools: \$TOOLS$' \
+  "install-aliases heredoc writes the \$TOOLS variable from the ALIASES table"
+
 # The ALIASES table in install-aliases.md hardcodes per-alias allowed-tools.
 # That value MUST equal the canonical command's `allowed-tools:` line, byte
 # for byte — otherwise the forwarder grants a different (usually narrower)
