@@ -107,6 +107,8 @@ aliases_sync_main() {
   [ -n "$PLUGIN_ROOT_LOCAL" ] || return 0
   [ -f "$PLUGIN_ROOT_LOCAL/.claude-plugin/plugin.json" ] || return 0
 
+  # HOME guard (fail-open under set -u if HOME is unset).
+  [ -n "${HOME:-}" ] || return 0
   local DEST_DIR="$HOME/.claude/commands"
   local MARKER="$HOME/.claude/.uberdev-aliases-version"
   local VERSION INSTALLED FIRST_RUN
@@ -177,6 +179,8 @@ aliases_sync_main() {
 # Forwarder removal stays in commands/uninstall-aliases.md (uses BUILTINS
 # marker check for safety); this helper handles only the marker-file part.
 aliases_sync_remove() {
+  # HOME guard (fail-open under set -u if HOME is unset).
+  [ -n "${HOME:-}" ] || return 0
   local MARKER="$HOME/.claude/.uberdev-aliases-version"
   if [ -f "$MARKER" ]; then
     rm -f "$MARKER" && echo "removed $MARKER"
