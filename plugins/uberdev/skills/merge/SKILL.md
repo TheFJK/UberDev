@@ -20,7 +20,7 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | Name | Value | Used by |
 |---|---|---|
 | `STRATEGY_ENUM` | `squash`, `rebase`, `merge` | D11 (per-PR strategy), D-LABEL |
-| `WIP_MESSAGE_REGEX` | `/^(wip|fix|update|misc|asdf|address review|typo)/i` | D11 |
+| `WIP_MESSAGE_REGEX` | `/^(wip\|fix\|update\|misc\|asdf\|address review\|typo)/i` | D11 |
 | `CONVENTIONAL_COMMIT_THRESHOLD` | 3 (max commit count for rebase candidate) | D11 |
 | `PATCH_LINE_CAP` | 200 | D16 (agent rejection threshold) |
 | `PATCH_FILE_CAP` | 5 | D16 |
