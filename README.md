@@ -368,6 +368,7 @@ Per-repo settings live in `.claude/uberdev.local.md` (YAML frontmatter; ignored 
 # Implemented — read by command logic today
 solve_terminal: ghostty       # ghostty | iterm | cmux | terminal | nohup
 solve_auto: false             # boolean — auto-accept brainstorm recommendations (=`/turbo` semantics)
+auto_install_aliases: true    # boolean — install short-form forwarders at SessionStart (default: true)
 
 # Planned — documents the intended config surface; no parsing logic yet
 solve_tier_default: medium    # one of: small | medium | large
@@ -384,6 +385,7 @@ These are wired into command logic today.
 |---|---|---|---|
 | `SOLVE_TERMINAL` | `solve_terminal` | Override `/solve`'s terminal dispatcher (`cmux` / `ghostty` / `iterm` / `terminal` / `nohup`) | live |
 | `SOLVE_AUTO` | `solve_auto` | When `1`/`true`, spawned agent runs with `--permission-mode auto` | live |
+| `UBERDEV_NO_AUTO_ALIAS` | `auto_install_aliases` | When `1`/`true` (env) or `false` (file), suppresses session-start auto-installation of `/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr` forwarders | live |
 
 ### Planned keys
 

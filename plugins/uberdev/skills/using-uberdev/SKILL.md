@@ -126,11 +126,14 @@ solve_tier_default: small        # one of: small, medium, large
 review_depth: full               # one of: quick, full
 solve_terminal: ghostty          # one of: ghostty, iterm, cmux
 parallel_solve: true
+auto_install_aliases: true       # boolean — auto-install /issue, /solve, /turbo, /simplify, /review-pr at SessionStart (default: true; env override: UBERDEV_NO_AUTO_ALIAS=1)
 ---
 
 # Notes (optional, free-form markdown for human reference)
 ```
 
 Settings take effect on next SessionStart. Environment variables (`SOLVE_TERMINAL`, etc.) override file settings — use whichever is more convenient for your workflow.
+
+**Auto-installed aliases:** UberDev's SessionStart hook installs five top-level forwarder commands (`/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`) into `~/.claude/commands/` on first session and refreshes them on plugin upgrade. Hand-authored files at any of those paths are preserved (the hook detects them via a `managed-by: uberdev-aliases` marker and skips). Disable per-project with `auto_install_aliases: false` or globally with `UBERDEV_NO_AUTO_ALIAS=1`. Remove already-installed forwarders with `/uberdev:uninstall-aliases`.
 
 **Recommendation:** commit this file to share workflow conventions across the team; or add it to `.gitignore` if individual preferences differ.
