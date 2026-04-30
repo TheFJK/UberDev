@@ -184,14 +184,17 @@ cat > "$TITLE_FILE" <<'PR_TITLE_EOF'
 PR_TITLE_EOF
 
 # Read title back into a quoted variable — bytes pass through verbatim, no shell
-# expansion. Single-line title only; reject multi-line titles defensively.
+# expansion. `IFS= read -r` reads the first line only; if the title file ever
+# contains multiple lines (shouldn't, per the heredoc above), subsequent lines
+# are silently dropped. Empty-title rejection happens implicitly via the
+# downstream `gh pr create` failure path.
 IFS= read -r PR_TITLE_VAR < "$TITLE_FILE" || { echo "ERROR: failed to read title file" >&2; rm -f "$TITLE_FILE" "$PR_BODY_FILE"; exit 1; }
 
 # Pre-push secret scan: layered defense (gitleaks primary + regex fallback)
 # over BOTH the to-be-pushed commit range AND the composed PR-body file. Either
 # hit aborts the push BEFORE any text reaches GitHub. Worktree is preserved for
-# investigation. Uses set -o pipefail locally so gitleaks errors surface instead
-# of being silently swallowed by the downstream grep filter.
+# investigation. The scan helper signals via output (non-empty = leak found)
+# rather than exit code so callers compose with `[[ -n $SCAN_OUT ]]`.
 run_secret_scan_stdin() {
   # Primary: gitleaks (when installed). gitleaks exits 0 if no leaks found,
   # non-zero (default 1) if leaks found via --exit-code, or >1 on actual
@@ -236,10 +239,14 @@ abort_if_secret() {
 if PUSH_DIFF=$(git diff @{u}..HEAD 2>/dev/null) && [[ -n "$PUSH_DIFF" ]]; then
   SCAN_OUT=$(printf '%s' "$PUSH_DIFF" | run_secret_scan_stdin)
 else
-  # No upstream set or empty diff → scan staged + recent commits since the merge-base
-  BASE_REF=$(git rev-parse --verify origin/main 2>/dev/null \
+  # No upstream set or empty diff → scan from origin's default branch. Falls
+  # back to literal main/master, then to the branch's root commit (catches
+  # everything since branch creation). Note: `git merge-base HEAD HEAD~1` is
+  # degenerate (= HEAD~1) and was removed — it scanned only the last commit.
+  BASE_REF=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/@@' \
+          || git rev-parse --verify origin/main 2>/dev/null \
           || git rev-parse --verify origin/master 2>/dev/null \
-          || git merge-base HEAD HEAD~1 2>/dev/null \
+          || git rev-list --max-parents=0 HEAD 2>/dev/null \
           || echo "")
   if [[ -n "$BASE_REF" ]]; then
     SCAN_OUT=$(git diff "$BASE_REF..HEAD" | run_secret_scan_stdin)

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Shape-locks the always-PR + auto-review-pr chain in finish-branch/SKILL.md:
 # mode-selection precedence (--turbo > --interactive > default), captured-and-
-# validated PR_URL, Skill-tool chain into uberdev:review-pr, --title-file
-# (NOT interpolated --title), and the layered pre-push secret scan covering
-# both staged diff AND composed PR body file.
+# validated PR_URL, Skill-tool chain into uberdev:review-pr, the heredoc + IFS
+# read-back title pattern (NOT --title-file, which gh does not support), and
+# the layered pre-push secret scan covering both staged diff AND composed PR
+# body file.
 
 set -u
 set -o pipefail
