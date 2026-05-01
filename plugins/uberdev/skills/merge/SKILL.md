@@ -33,9 +33,9 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `MERGE_STRATEGY_LABEL_PREFIX` | `merge-strategy:` | D-LABEL |
 | `INTEGRATION_BRANCH_KEY` | `integration_branch` (config key) | D8 |
 | `INTEGRATION_BRANCH_ENV_VAR` | `UBERDEV_INTEGRATION_BRANCH` | D8 |
-| `INTEGRATION_BRANCH_FALLBACK` | `main` | D8 (used when all four resolution tiers are empty) |
-| `AUTO_CONFIRM_KEY` | `auto_confirm` (config key in `.claude/uberdev.local.md`) **(deprecated; no behavioural effect)** | Phase 2.4, Phase 4.5 |
-| `AUTO_CONFIRM_FLAGS` | `--yes`, `-y` (CLI flags) **(deprecated; no behavioural effect)** | Phase 2.4, Phase 4.5 |
+| `INTEGRATION_BRANCH_FALLBACK` | `main` (hardcoded literal — autopilot picks the GitHub-default convention rather than prompting; users override out-of-band via `integration_branch:` config) | D8, Phase 1.3 (used when all four resolution tiers are empty) |
+| `AUTO_CONFIRM_KEY` | `auto_confirm` (config key in `.claude/uberdev.local.md`) **(deprecated; no behavioural effect)** | Phase 2.4 (no-op acknowledgement only; Phase 4.5 no longer consumes this key under unconditional autopilot) |
+| `AUTO_CONFIRM_FLAGS` | `--yes`, `-y` (CLI flags) **(deprecated; no behavioural effect)** | Phase 2.4 (no-op acknowledgement only; Phase 4.5 no longer consumes these flags under unconditional autopilot) |
 | `AUTO_CONFIRM_REASON_ENUM` | `autopilot-default` (only value emitted under autopilot; `single-pr-default`, `cli-flag`, `config-auto_confirm` are historical from pre-autopilot runs and are unreachable now) | Phase 2.4 |
 | `STRATEGY_REASON_ENUM` | `cli-flag`, `pr-label`, `heuristic-conventional`, `heuristic-wip`, `heuristic-single-commit`, `heuristic-mixed` | Phase 2.2, Phase 3.3 (audit-log `data.reason` for `strategy_chosen`) |
 | `PARK_REASON_ENUM` | `refused`, `ambiguous`, `test-fail-exhausted`, `push-non-ff` | Phase 3.3 (audit-log `data.reason` for `pr_parked`) |
@@ -102,7 +102,13 @@ If the four-tier chain returns nothing (network-detached clone, missing remote):
 git ls-remote --exit-code --heads origin "<INTEGRATION_BRANCH_FALLBACK>" >/dev/null 2>&1
 ```
 
-If the check fails (the repo's default branch is not `main` — e.g., `master`, `trunk`, `develop`): emit one stderr line — `error: fallback branch '<INTEGRATION_BRANCH_FALLBACK>' does not exist on origin; cannot proceed with autopilot. Set integration_branch in .claude/uberdev.local.md to your repo's default.` — emit an `error` audit event with `data.reason="fallback-branch-missing"`, and exit cleanly (no halt, no prompt — the user has a clear actionable next step). This is the only Phase-1 path where /merge declines to run for a config reason; it is NOT a halt of an in-flight queue, and it does not block the autopilot contract for properly-configured repos.
+If the check fails (the repo's default branch is not `main` — e.g., `master`, `trunk`, `develop`), execute these three actions **in order**:
+
+1. Emit an `error` audit event to `audit.jsonl` with `data.reason="fallback-branch-missing"`.
+2. Emit one stderr line: `error: fallback branch '<INTEGRATION_BRANCH_FALLBACK>' does not exist on origin; cannot proceed with autopilot. Set integration_branch in .claude/uberdev.local.md to your repo's default.`
+3. Exit cleanly (no halt, no prompt — the user has a clear actionable next step).
+
+This is the only Phase-1 path where /merge declines to run for a config reason. The clean exit is **not** a halt of an in-flight queue (no PRs have been processed yet), and it does not block the autopilot contract for properly-configured repos. M34's failure-mode-table check still holds — the failure mode here is a Phase-1 config-validation refusal, not an in-flight queue halt.
 
 ### Step 1.4 — Per-PR pre-flight gate
 
@@ -114,7 +120,9 @@ Per-PR gate conditions (ALL must pass):
 - `reviewDecision == "APPROVED"`
 - `statusCheckRollup` all green OR explicit `--bypass-protections` waiver
 
-**Author identity is NOT a gate condition.** Any approved, CI-green PR is eligible regardless of whether the author is a repo collaborator, a bot, or an external contributor. The trust anchor for /merge is the `reviewDecision == "APPROVED"` requirement plus GitHub branch protections — not an author allow-list. (The `bot_authors_allow_list` config key is deprecated; see `## Deprecated Flags`.)
+**Author identity is NOT a gate condition.** Any approved, CI-green PR is eligible regardless of whether the author is a repo collaborator, a bot, or an external contributor. The trust anchor for /merge is the `reviewDecision == "APPROVED"` requirement plus GitHub branch protections — not an author allow-list. (The `bot_authors_allow_list` config key is deprecated; see `commands/merge.md` `## Deprecated Flags` and `using-uberdev/SKILL.md`.)
+
+> **Note for editors:** the trust-anchor sentence above ("the trust anchor … is `reviewDecision == "APPROVED"` plus GitHub branch protections") is intentionally repeated in `## Common Mistakes` (Phase 1.4 regression guard), `commands/merge.md` (Autopilot + Deprecated Flags), and `skills/using-uberdev/SKILL.md` (`bot_authors_allow_list` semantics). Each site serves a different reader; do not consolidate to a single source of truth. If you change the contract here, update those four mirrors in the same change.
 
 On any condition fail: list the specific failing condition for that PR. Exclude from merge set. **Never silently skip** — every fail emits a `gate_fail` event to `audit.jsonl` AND surfaces in the user-facing summary. Continue with passing PRs.
 
@@ -139,7 +147,7 @@ If only one PR is in scope and its pre-flight fails: emit the `gate_fail` event,
 
 Build the merge order with no full simulation:
 
-1. **Hard dependencies** (highest priority): a PR-B base ref equal to PR-A head ref → PR-A must land before PR-B. Also parse `body` for `Depends on #([0-9]+)` (whitelist regex) and add those edges. topo-sort the resulting graph. **On cycle: emit one stderr line citing the full cycle path, drop the cycle's edges, fall through to createdAt order for the cycle members, and continue.** Never halt — the user can re-issue dependency edits and re-run /merge if the auto-break ordering proves wrong.
+1. **Hard dependencies** (highest priority): a PR-B base ref equal to PR-A head ref → PR-A must land before PR-B. Also parse `body` for `Depends on #([0-9]+)` (whitelist regex) and add those edges. topo-sort the resulting graph. **On cycle: emit one stderr line citing the full cycle path, drop the cycle's edges, fall through to createdAt order for the cycle members, and continue.** Never halt — the user can re-issue dependency edits and re-run /merge if the auto-break ordering proves wrong. **No audit event is emitted for cycle-break by design** — the stderr line is the canonical surface (cycle-break is a planning-phase decision, not a per-PR outcome; `AUDIT_EVENT_ENUM` intentionally has no `cycle_detected` member). Implementers MUST NOT add an audit event here without spec-level changes.
 2. **File-overlap pair count** (next): from the file-overlap matrix computed in Phase 1.5, prefer orders that minimise "later PR forced into conflict-resolve" by counting shared file paths between each pair. PRs with non-empty overlap are scheduled sequentially relative to each other (Q1 same-file degradation: PR-A first, re-probe PR-B against new tip).
 3. **Approval-age tie-break**: among otherwise-equivalent PRs, order older-`createdAt`-first.
 
@@ -228,7 +236,7 @@ vi. **Push the resolution commit (D13, non-force push only).**
 
 Commit message format: `chore(merge): resolve conflicts in <comma-separated-files>` (Conventional Commits prefix mandatory). If >3 files: `chore(merge): resolve conflicts in <N> files`. **The resolution commit MUST NOT include `Co-Authored-By: Claude` trailer or any "🤖 Generated with Claude Code" footer** per global CLAUDE.md (cited verbatim in the spec). Author = current `git config user.email` / `user.name`; never an agent identity.
 
-Push: `git push origin HEAD:<headRefName>`. **Never `--force`. Never `--force-with-lease`** against a PR head ref. Resolution is a NEW commit on top of existing head. If push fails non-FF (the PR head moved during conflict-resolve — someone else pushed in between): emit `push_resolution`+`error` to audit log, **park THIS PR via `drop` strategy** with `PARK_REASON_ENUM` value `push-non-ff`, and **continue with the next PR**. The queue does NOT halt — the user can re-run /merge once the divergence is reconciled out-of-band, and the still-pending PRs from this run will be picked up.
+Push: `git push origin HEAD:<headRefName>`. **Never `--force`. Never `--force-with-lease`** against a PR head ref. Resolution is a NEW commit on top of existing head. If push fails non-FF (the PR head moved during conflict-resolve — someone else pushed in between): emit `push_resolution`+`error` to audit log, **park THIS PR via `drop` strategy** with `PARK_REASON_ENUM` value `push-non-ff`, and **continue with the next PR**. The queue does NOT halt — the parked PR is dropped from THIS run; a future `/merge` invocation will re-evaluate it against the Phase 1.4 gate (`APPROVED` + CI-green) and pick it up if it still qualifies.
 
 vii. **Retry `gh pr merge`** with the new head SHA (re-fetch `headRefOid` after push).
 

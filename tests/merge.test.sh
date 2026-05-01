@@ -357,15 +357,18 @@ fi
 
 echo
 echo "== M23: SKILL.md AUDIT_EVENT_ENUM declares all autopilot events =="
+# Cache the AUDIT_EVENT_ENUM row once; greps below run against the variable
+# (mirrors the M22 STRATEGY_ROW pattern — one extraction, six in-memory checks).
+AUDIT_EVENT_ROW=$(grep -E '^\| `AUDIT_EVENT_ENUM` \|' "$SKILL_FILE" || true)
 for ev in pr_parked stale_branch_rebase_decision deprecated_flag_used agent_strategy_switch test_fail_agent_decision; do
-  if grep -E '^\| `AUDIT_EVENT_ENUM` \|' "$SKILL_FILE" | grep -qE "\`$ev\`"; then
+  if echo "$AUDIT_EVENT_ROW" | grep -qE "\`$ev\`"; then
     pass "M23.$ev — AUDIT_EVENT_ENUM declares \`$ev\`"
   else
     fail "M23.$ev — AUDIT_EVENT_ENUM missing \`$ev\`"
   fi
 done
 # Negative assertion: pr_deferred was removed alongside the defer strategy.
-if grep -E '^\| `AUDIT_EVENT_ENUM` \|' "$SKILL_FILE" | grep -qE '`pr_deferred`'; then
+if echo "$AUDIT_EVENT_ROW" | grep -qE '`pr_deferred`'; then
   fail "M23.no-pr_deferred — AUDIT_EVENT_ENUM MUST NOT list \`pr_deferred\` (removed alongside the defer strategy)"
 else
   pass "M23.no-pr_deferred — AUDIT_EVENT_ENUM correctly omits the removed \`pr_deferred\` event"

@@ -24,11 +24,11 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Changed
 - **`/uberdev:merge` initial autopilot pass** (#35, PR #35) — removed the `[y/N]` plan-confirm prompt at Phase 2.4; deprecated `--yes` / `-y` CLI flags and the `auto_confirm` config key (parsed without effect, with a stderr deprecation notice and a `deprecated_flag_used` audit event). Stale-branch handling at Phase 4.5 became autopilot agent-decided with safety-precondition gates (FF-able OR non-conflicting probe AND not a PR head ref AND no force-push protection). Constants table grew with `AUTO_CONFIRM_KEY`, `AUTO_CONFIRM_FLAGS`, `AUTO_CONFIRM_REASON_ENUM`, `STALE_REBASE_DECISION_ENUM`, `TEST_FAIL_DECISION_ENUM`, `DEPRECATED_FLAGS_NOTE`. Six new audit events added: `pr_parked`, `pr_deferred`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision`. Test-fail handling at Phase 3.3v gained a 1-retry-1-switch agent-decided branch tree (re-resolve / strategy-switch / park) with audit-logged choices.
-- **`/uberdev:review-pr` chains a mandatory simplify-pass** (PR #34) — Phase 1 review-and-fix loop is followed by Phase 2 simplify fanout; pre-push standalone `/simplify` calls collapsed since they duplicated work.
+- **`/uberdev:review-pr` chains a mandatory simplify-pass** (PR #32) — Phase 1 review-and-fix loop is followed by Phase 2 simplify fanout; pre-push standalone `/simplify` calls collapsed since they duplicated work.
 - **`/uberdev:review-pr` collapses duplicate `/simplify` pass** (PR #37) — the pre-push `/simplify` call in trivial/small heredocs duplicated work already done by Phase 2 of `/uberdev:review-pr`. Removed from solve-pipeline heredocs; saves three Task agent invocations per `/solve` trivial/small run with no quality loss.
 
 ### Fixed
-- **`/solve` Ghostty dispatch instance leak** (#31, PR #31) — the auto-dispatched Claude agent no longer poisons the user's running Ghostty session.
+- **`/solve` Ghostty dispatch instance leak** (#31, PR #33) — the auto-dispatched Claude agent no longer poisons the user's running Ghostty session.
 - **Trust-boundary asymmetries flagged by `/uberdev:review-pr`** — orchestrator and merge skills tightened against prompt-injection-shaped content in untrusted external inputs (PR/issue bodies, conflict markers).
 
 ## [0.12.0] - 2026-04-30
