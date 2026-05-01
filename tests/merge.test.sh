@@ -22,6 +22,18 @@
 #   M14 — agents/conflict-resolver.md exists with frontmatter + return contract.
 #   M15 — SKILL.md Phase 3 spells out chore(merge): commit format AND no-Claude-trailer rule (D13).
 #   M16 — SKILL.md Phase 1 atomic-write uses same-directory mktemp pattern (D8a).
+#   M17 — SKILL.md declares AUTO_CONFIRM_* constants (deprecated) and DEPRECATED_FLAGS_NOTE.
+#   M18 — SKILL.md Phase 2.4 is unconditional autopilot (no ON/OFF branches, no [y/N] prompt).
+#   M19 — SKILL.md Phase 4.5 carries autopilot affirmative-decision invariant.
+#   M20 — commands/merge.md surfaces --yes / -y as DEPRECATED.
+#   M21 — using-uberdev/SKILL.md flags auto_confirm as DEPRECATED.
+#   M22 — SKILL.md STRATEGY_ENUM declares defer and drop.
+#   M23 — SKILL.md AUDIT_EVENT_ENUM declares all new autopilot events.
+#   M24 — SKILL.md declares PARK_REASON_ENUM, STRATEGY_REASON_ENUM, STALE_REBASE_DECISION_ENUM.
+#   M25 — SKILL.md Phase 3.3v test-fail covers RE-RESOLVE/STRATEGY-SWITCH/PARK with bounds.
+#   M26 — SKILL.md Phase 4.5 documents agent-decided rebase with safety preconditions.
+#   M27 — SKILL.md run-summary block describes Parked and Deferred outcomes.
+#   M28 — SKILL.md prints bot_authors_allow_list at run start AND in run-summary block.
 
 set -u
 set -o pipefail

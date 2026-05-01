@@ -37,9 +37,9 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `INTEGRATION_BRANCH_ENV_VAR` | `UBERDEV_INTEGRATION_BRANCH` | D8 |
 | `AUTO_CONFIRM_KEY` | `auto_confirm` (config key in `.claude/uberdev.local.md`) **(deprecated; no behavioural effect)** | Phase 2.4, Phase 4.5 |
 | `AUTO_CONFIRM_FLAGS` | `--yes`, `-y` (CLI flags) **(deprecated; no behavioural effect)** | Phase 2.4, Phase 4.5 |
-| `AUTO_CONFIRM_REASON_ENUM` | `single-pr-default`, `cli-flag`, `config-auto_confirm`, `autopilot-default` (audit-log `data.reason` values for `order_confirmed`/`order_proposed` events) | Phase 2.4 |
-| `STRATEGY_REASON_ENUM` | `cli-flag`, `pr-label`, `heuristic-conventional`, `heuristic-wip`, `heuristic-single-commit`, `heuristic-mixed`, `external-author-deferred`, `agent-park-refused`, `agent-park-ambiguous`, `agent-park-test-fail-exhausted`, `agent-defer-flake` | Phase 2.2, Phase 3.3 (audit-log `data.reason` for `strategy_chosen`) |
-| `PARK_REASON_ENUM` | `REFUSED`, `AMBIGUOUS`, `test-fail-exhausted`, `push-non-ff`, `external-author-not-allow-listed` | Phase 3.3 (audit-log `data.reason` for `pr_parked`) |
+| `AUTO_CONFIRM_REASON_ENUM` | `autopilot-default` (only value emitted under autopilot; `single-pr-default`, `cli-flag`, `config-auto_confirm` are historical from pre-autopilot runs and are unreachable now) | Phase 2.4 |
+| `STRATEGY_REASON_ENUM` | `cli-flag`, `pr-label`, `heuristic-conventional`, `heuristic-wip`, `heuristic-single-commit`, `heuristic-mixed`, `external-author-deferred` | Phase 2.2, Phase 3.3 (audit-log `data.reason` for `strategy_chosen`) |
+| `PARK_REASON_ENUM` | `refused`, `ambiguous`, `test-fail-exhausted`, `external-author-not-allow-listed` | Phase 3.3 (audit-log `data.reason` for `pr_parked`) |
 | `STALE_REBASE_DECISION_ENUM` | `rebased-ff-clean`, `rebased-non-conflicting`, `skipped-conflicts`, `skipped-pr-head-ref`, `skipped-non-tracking`, `rebase-aborted` | Phase 4.5 (audit-log `data.choice` for `stale_branch_rebase_decision`) |
 | `TEST_FAIL_DECISION_ENUM` | `re-resolve`, `strategy-switch`, `park` | Phase 3.3v (audit-log `data.choice` for `test_fail_agent_decision`) |
 | `DEPRECATED_FLAGS_NOTE` | `warning: --yes / -y / auto_confirm are deprecated; /merge is now fully unattended. The flag has no behavioural effect.` | Phase 1 (stderr emission), `commands/merge.md` (Deprecated Flags section), `using-uberdev/SKILL.md` |
@@ -79,7 +79,14 @@ At the very start of the run (before lock acquisition), emit a one-line banner t
 
 This is transparency for the new trust boundary (see C9). The same allow-list is reprinted in the final run-summary block as an audit anchor — two prints, one at each lifecycle moment (start and end).
 
-**Failure handling:** if `.claude/uberdev.local.md` cannot be read or the YAML cannot be parsed, treat `bot_authors_allow_list` as empty (default-strict — every external-author PR will defer in Phase 2.2 step 3). Emit an `error` audit event with `data.reason="allow-list-read-failed"` and proceed with the safe-default empty list. The banner still emits, with `Allow-listed authors: <none>`.
+**Failure handling:** if `.claude/uberdev.local.md` cannot be read or the YAML cannot be parsed:
+
+1. Emit a prominent stderr alert: `WARNING: /merge could not read or parse .claude/uberdev.local.md; defaulting bot_authors_allow_list to empty (no external authors allowed). Run will defer all external-author PRs. Check the config file and retry.`
+2. Emit an `error` audit event with `data.reason="allow-list-read-failed"`.
+3. Treat `bot_authors_allow_list` as empty (default-strict — every external-author PR will defer in Phase 2.2 step 3).
+4. The Phase 1.0 banner still emits, with `Allow-listed authors: <none>`.
+
+This is non-fatal — the run continues so the user can see it complete and re-run after fixing the config.
 
 ### Step 1.1 — Acquire the single-instance lock
 
@@ -200,7 +207,7 @@ This is the critical invariant. All Task() calls for this PR's conflict set MUST
 
 **Sequential degradation (Q1):** for same-file PR pairs flagged in Phase 1.5, the per-file fanout proceeds normally — same-file collisions only matter ACROSS PRs (PR-A's resolution must land first; PR-B re-probes against new tip). Within a single PR's resolution, all Task() agents own disjoint files by construction.
 
-iv. **Apply resolutions** in the scratch worktree as each agent returns. Aggregate the YAML returns. **If any agent returns `status: AMBIGUOUS` or `status: REFUSED`:** park THIS PR via `drop` strategy. Emit `pr_parked` to `audit.jsonl` with `data.reason` set to the literal status (`AMBIGUOUS` or `REFUSED`, ∈ `PARK_REASON_ENUM`), `data.strategy="drop"`, and `data.rationale` carrying the agent's structured handoff. Surface the agent's structured handoff in the run summary. **Continue with the next PR — the queue does NOT halt.**
+iv. **Apply resolutions** in the scratch worktree as each agent returns. Aggregate the YAML returns. **If any agent returns `status: AMBIGUOUS` or `status: REFUSED`:** park THIS PR via `drop` strategy. Emit `pr_parked` to `audit.jsonl` with `data.reason` set to the lowercase form (`ambiguous` or `refused`, ∈ `PARK_REASON_ENUM`); the agent's uppercase return status is normalized for audit-log uniformity. `data.strategy="drop"`, and `data.rationale` carrying the agent's structured handoff. Surface the agent's structured handoff in the run summary. **Continue with the next PR — the queue does NOT halt.**
 
 v. **Pre-push test gate (D16, ALWAYS RUNS).** Test command discovery order: `package.json:scripts.test` > `Makefile` `test` target > `cargo test` if `Cargo.toml` exists > `pytest` if `pytest.ini`/`pyproject.toml` exists > `go test ./...` if `go.mod` exists.
 
@@ -208,7 +215,7 @@ On test PASS: emit `test_pass`; proceed to push (step vi).
 
 On test FAIL: agent picks the best applicable branch from (a), (b), (c); (a) and (b) may each be exercised at most once before falling to (c). Each choice is logged as `test_fail_agent_decision` audit event with `data.choice` (∈ `TEST_FAIL_DECISION_ENUM`) and a one-line `data.rationale`:
 
-(a) **RE-RESOLVE** (`data.choice="re-resolve"`) — re-dispatch the conflict-resolver fanout (single-message Task() per conflicted file) for the same conflict set with the prior failure context attached. **Max 1 retry per PR per run.** On second test pass: proceed to push. On second test fail: agent may switch to (b) if the switch budget is unused, otherwise fall through to (c).
+(a) **RE-RESOLVE** (`data.choice="re-resolve"`) — re-dispatch the conflict-resolver fanout (single-message Task() per conflicted file) for the same conflict set with the prior failure context attached. **Max 1 retry per PR per run.** **On conflict-resolver agent dispatch failure during re-dispatch** (timeout, agent crash, unhandled error before all per-file resolutions return): treat as equivalent to test fail and proceed to (b) if the switch budget is unused, otherwise fall through to (c). Emit a `test_fail_agent_decision` event with `data.choice="re-resolve"` and `data.rationale="agent-dispatch-failure"`. On second test pass: proceed to push. On second test fail: agent may switch to (b) if the switch budget is unused, otherwise fall through to (c).
 
 (b) **STRATEGY-SWITCH** (`data.choice="strategy-switch"`) — switch strategy (e.g. `squash` ↔ `merge`), re-probe via `git merge-tree --write-tree`, re-resolve if the new probe reports conflicts. **Max 1 switch per PR per run.** Emits `agent_strategy_switch` audit event with `data.from`, `data.to`, `data.rationale`. On test pass after switch: proceed to push. On test fail after switch: fall through to (c).
 
@@ -235,8 +242,8 @@ viii. **Tear down the scratch worktree** per `using-git-worktrees` protocol: `gi
 | `test_fail` after exhausting (a)/(b)/(c) in Step 3.3v | park via `drop` (`data.reason="test-fail-exhausted"`) | continues |
 | `push_resolution` non-FF (Step 3.3vi) | halt rest of queue | halted (data integrity) |
 | `gh pr merge` failure (Step 3.2 / 3.3vii) | abort that PR; emit `merge_executed`+`error` | continues |
-| conflict-resolver `AMBIGUOUS` | park via `drop` (`data.reason="AMBIGUOUS"`) | continues |
-| conflict-resolver `REFUSED` | park via `drop` (`data.reason="REFUSED"`) | continues |
+| conflict-resolver `AMBIGUOUS` | park via `drop` (`data.reason="ambiguous"`) | continues |
+| conflict-resolver `REFUSED` | park via `drop` (`data.reason="refused"`) | continues |
 | dependency cycle (Phase 2.1) | abort whole run; surface cycle path | n/a (already aborted) |
 | local pull non-FF (Phase 4.2) | fail loud, no auto-fix | halted (data integrity) |
 | external-author-not-allow-listed (Phase 2.2 step 3) | strategy `defer` → one-pass park via `drop` (`data.reason="external-author-not-allow-listed"`) | continues |

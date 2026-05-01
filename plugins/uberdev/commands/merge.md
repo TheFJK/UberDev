@@ -12,9 +12,9 @@ Land approved PRs into the integration branch — ordering, strategy, conflict r
 
 **Usage:** `/merge [<PR#> | --all] [--yes|-y (deprecated)] [--squash|--rebase|--merge] [--integration-branch=<name>] [--bypass-protections]`
 
-- No args → land the PR for the current branch (errors if none). Single-PR scope auto-confirms by default.
-- `<PR#>` → land a specific PR. Single-PR scope auto-confirms by default.
-- `--all` → land every open APPROVED PR with passing CI. Multi-PR scope prompts unless `--yes` or `auto_confirm: true` config.
+- No args → land the PR for the current branch (errors if none).
+- `<PR#>` → land a specific PR.
+- `--all` → land every open APPROVED PR with passing CI.
 - `--yes` / `-y` → **(deprecated; no behavioural effect)** parsed for backward compat; `/merge` is fully unattended (autopilot) and skips all prompts unconditionally. First encounter per run emits a one-line stderr deprecation notice. See `## Deprecated Flags` below.
 - `--squash` / `--rebase` / `--merge` → override per-PR strategy heuristic.
 - `--integration-branch=<name>` → override config / env / repo-default.
