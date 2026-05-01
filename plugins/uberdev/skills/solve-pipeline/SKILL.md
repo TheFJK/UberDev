@@ -97,7 +97,7 @@ Steps:
 6. **Invoke \`uberdev:post-impl-review\` skill** with \`changed_paths\` = the files you edited and \`commit_range\` = your single commit. Skill returns the 5-agent advisory finding table; surface it to your output but do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
 7. Commit with conventional message. Open PR with \`Closes #$ISSUE_NUM\` in the body. Include the post-impl-review aggregate table under \`## Reviewer findings summary\` in the PR body.
 
-Do NOT run /uberdev:simplify standalone before push — it runs automatically as Phase 2 of /uberdev:review-pr on the post-Phase-1 diff (full PR + review-fix commits), which is strictly more complete than any pre-push pass.
+Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
 Skip /uberdev:brainstorm. Skip multi-step planning. Escalate to /uberdev:brainstorm ONLY if the scope turns out to be materially larger than triaged.
 EOF
@@ -113,7 +113,7 @@ Steps:
 4. Run the relevant test file + lint for that package.
 5. Commit with conventional message. Open PR with \`Closes #$ISSUE_NUM\` in the body.
 
-Do NOT run /uberdev:simplify standalone before push — it runs automatically as Phase 2 of /uberdev:review-pr on the post-Phase-1 diff (full PR + review-fix commits), which is strictly more complete than any pre-push pass.
+Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
 Skip /uberdev:brainstorm. Skip multi-step planning. Escalate to /uberdev:brainstorm ONLY if the scope turns out to be materially larger than triaged.
 EOF
@@ -136,7 +136,7 @@ Steps:
 5. **Invoke \`uberdev:post-impl-review\` skill** with \`changed_paths\` = files edited across all TodoWrite tasks and \`commit_range\` = the commits made. Surface the aggregate finding table in your output and the PR body.
 6. Commit + PR with \`Closes #$ISSUE_NUM\`. PR body includes the post-impl-review aggregate under \`## Reviewer findings summary\`.
 
-Do NOT run /uberdev:simplify standalone before push — it runs automatically as Phase 2 of /uberdev:review-pr on the post-Phase-1 diff (full PR + review-fix commits), which is strictly more complete than any pre-push pass.
+Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
 Escalate to /uberdev:brainstorm if the scope proves larger than triaged.
 EOF
@@ -151,7 +151,7 @@ Steps:
 3. TDD: write the failing test first, then implement, then green.
 4. Commit + PR with \`Closes #$ISSUE_NUM\`.
 
-Do NOT run /uberdev:simplify standalone before push — it runs automatically as Phase 2 of /uberdev:review-pr on the post-Phase-1 diff (full PR + review-fix commits), which is strictly more complete than any pre-push pass.
+Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
 Escalate to /uberdev:brainstorm if the scope proves larger than triaged.
 EOF
