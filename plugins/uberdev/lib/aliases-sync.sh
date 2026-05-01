@@ -25,7 +25,7 @@ ALIASES='issue|issue|["Bash", "Glob", "Grep", "Read", "Task"]
 solve|solve|["Bash", "Read", "Task"]
 turbo|turbo|["Bash", "Read", "Task"]
 simplify|simplify|["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", "Write"]
-review-pr|review-pr|["Bash(git*)", "Bash(gh*)", "Glob", "Grep", "Read", "Task"]
+review-pr|review-pr|["Bash(git*)", "Bash(gh*)", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", "Write"]
 merge|merge|["Bash", "Glob", "Grep", "Read", "Task"]'
 
 # Built-in Claude Code commands; never overwrite these.
