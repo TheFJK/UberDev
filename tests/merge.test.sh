@@ -39,6 +39,7 @@
 #   M31 — SKILL.md Phase 4.2 auto-rebases on ff-only fail (no halt).
 #   M32 — SKILL.md Phase 3.3vi parks PR on push-non-FF (no halt).
 #   M33 — SKILL.md Phase 2.1 auto-breaks dependency cycles (no halt).
+#   M34 — SKILL.md Phase 3.4 failure-mode table contains no 'halt' actions.
 
 set -u
 set -o pipefail
@@ -214,11 +215,20 @@ echo "== M16: SKILL.md Phase 1.3 falls back to literal main without prompting OR
 # persist), no `[Y/n]`. Without this negative guard, a well-meaning future
 # edit could re-introduce ask-and-persist and silently re-add a prompt.
 PHASE_1_3_BLOCK=$(awk '/^### Step 1\.3/,/^### Step 1\.4/' "$SKILL_FILE")
-if echo "$PHASE_1_3_BLOCK" | grep -qE 'mktemp|mv -f|\[Y/n\]|persist the answer'; then
+if echo "$PHASE_1_3_BLOCK" | grep -qE 'mktemp|\bmv\b|\[Y/n\]|persist the answer'; then
   fail "M16 — Phase 1.3 MUST NOT ask-and-persist; it falls back to INTEGRATION_BRANCH_FALLBACK with no disk write"
   echo "         (the prior atomic-rename pattern was removed alongside the prompt)"
 else
   pass "M16 — Phase 1.3 is a pure literal-fallback step (no mktemp / no mv / no prompt)"
+fi
+
+# M16b — Phase 1.3 verifies the fallback branch exists on origin before proceeding.
+# Without this, repos whose default branch is not `main` would hit a confusing
+# `gh pr merge --base main` 404 several phases downstream.
+if echo "$PHASE_1_3_BLOCK" | grep -qE 'git ls-remote.*--heads.*origin|fallback-branch-missing'; then
+  pass "M16b — Phase 1.3 verifies fallback branch exists on origin before proceeding"
+else
+  fail "M16b — Phase 1.3 MUST verify the fallback branch exists on origin (\`git ls-remote --heads origin\`) and emit \`fallback-branch-missing\` on miss"
 fi
 
 echo
@@ -536,14 +546,35 @@ if echo "$PHASE_2_1" | grep -qE 'createdAt|drop the cycle|fall through'; then
 else
   fail "M33.auto-break — Phase 2.1 MUST auto-break cycles (drop edges + fall through to createdAt order)"
 fi
-if echo "$PHASE_2_1" | grep -qE 'Never halt|never halts|never auto-break'; then
-  if echo "$PHASE_2_1" | grep -qE 'Never halt|never halts'; then
-    pass "M33.no-halt — Phase 2.1 explicitly forbids halting on cycle"
-  else
-    fail "M33.no-halt — Phase 2.1 MUST forbid halting; the prior 'never auto-break' rule is now reversed (auto-break IS the new contract)"
-  fi
+# Single positive check + explicit regression check against the OLD "never auto-break" rule.
+if echo "$PHASE_2_1" | grep -qE 'Never halt|never halts'; then
+  pass "M33.no-halt — Phase 2.1 explicitly forbids halting on cycle"
 else
-  fail "M33.no-halt — Phase 2.1 MUST explicitly forbid halting on cycle"
+  fail "M33.no-halt — Phase 2.1 MUST contain 'Never halt' / 'never halts' (the cycle-auto-break contract)"
+fi
+# Negative regression guard: the OLD rule "Never auto-break" must be gone — it's
+# now reversed (auto-break IS the new contract).
+if echo "$PHASE_2_1" | grep -qE 'Never auto-break|never auto-break\b'; then
+  fail "M33.no-old-rule — Phase 2.1 MUST NOT carry the old 'Never auto-break' prose (auto-break IS the new contract)"
+else
+  pass "M33.no-old-rule — Phase 2.1 correctly omits the reversed 'Never auto-break' rule"
+fi
+
+echo
+echo "== M34: SKILL.md Phase 3.4 failure-mode table contains no 'halt' actions =="
+# The table is the canonical contract for the no-halt invariant. M28/M29/...
+# guard the prose; M34 guards the table directly. The Action column must
+# never list 'halt' for any failure mode. Lock contention is in Phase 1.1
+# (out-of-scope for this table); every Phase-3 failure mode here is a
+# per-PR park or auto-recovery, never a queue halt.
+PHASE_3_4=$(awk '/^### Step 3\.4/,/^## Phase 4/' "$SKILL_FILE")
+# Look only at table rows (lines starting with `| `) inside Phase 3.4.
+TABLE_HALT_ROWS=$(echo "$PHASE_3_4" | grep -E '^\| ' | grep -iE '\bhalt\b' || true)
+if [ -z "$TABLE_HALT_ROWS" ]; then
+  pass "M34 — Phase 3.4 failure-mode table lists no 'halt' actions"
+else
+  fail "M34 — Phase 3.4 failure-mode table MUST NOT list 'halt' as any Action; offending row(s):"
+  echo "$TABLE_HALT_ROWS" | sed 's/^/         /'
 fi
 
 echo

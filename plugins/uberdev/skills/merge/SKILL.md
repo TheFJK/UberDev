@@ -96,6 +96,14 @@ Validate the resolved name against `BRANCH_NAME_REGEX` BEFORE any shell argv use
 
 If the four-tier chain returns nothing (network-detached clone, missing remote): use the literal `INTEGRATION_BRANCH_FALLBACK` (`main`) and emit one stderr line: `warning: integration_branch unresolved from CLI / env / config / gh; falling back to 'main'. Set integration_branch in .claude/uberdev.local.md to silence this.` Validate the fallback against `BRANCH_NAME_REGEX` (it passes by construction). **Never prompt the user.** No persist step — autopilot does not ask, it acts; if the user wants a different default, they edit the config file out-of-band.
 
+**Fallback-branch existence check.** Before proceeding to Step 1.4 with the fallback, verify the branch actually exists on `origin`:
+
+```bash
+git ls-remote --exit-code --heads origin "<INTEGRATION_BRANCH_FALLBACK>" >/dev/null 2>&1
+```
+
+If the check fails (the repo's default branch is not `main` — e.g., `master`, `trunk`, `develop`): emit one stderr line — `error: fallback branch '<INTEGRATION_BRANCH_FALLBACK>' does not exist on origin; cannot proceed with autopilot. Set integration_branch in .claude/uberdev.local.md to your repo's default.` — emit an `error` audit event with `data.reason="fallback-branch-missing"`, and exit cleanly (no halt, no prompt — the user has a clear actionable next step). This is the only Phase-1 path where /merge declines to run for a config reason; it is NOT a halt of an in-flight queue, and it does not block the autopilot contract for properly-configured repos.
+
 ### Step 1.4 — Per-PR pre-flight gate
 
 Project the JSON: `gh pr view <N> --json state,isDraft,reviewDecision,statusCheckRollup,headRepository,maintainerCanModify,isCrossRepository,headRefName,headRefOid,baseRefName,body,commits,labels,createdAt,author`.

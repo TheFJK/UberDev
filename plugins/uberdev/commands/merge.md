@@ -28,11 +28,12 @@ The following flags / config keys are accepted for backward compat but have no b
 
 - `--yes`, `-y` (CLI flags)
 - `auto_confirm: true|false` (config key in `.claude/uberdev.local.md`)
+- `bot_authors_allow_list: [...]` (config key in `.claude/uberdev.local.md`) — as of v0.14.0, /merge no longer gates on PR-author identity; any APPROVED + CI-green PR is eligible regardless of author. The trust anchor is `reviewDecision == "APPROVED"` plus GitHub branch protections. The key remains parseable for backward compat.
 
-On first encounter per run, /merge emits this stderr notice (verbatim):
+On first encounter per run, /merge emits this stderr notice (verbatim) for the autopilot flags:
 
 > `warning: --yes / -y / auto_confirm are deprecated; /merge is now fully unattended. The flag has no behavioural effect.`
 
-An audit event `deprecated_flag_used` is recorded once per encounter. No version-gated removal — flags stay parseable indefinitely. Pattern follows Terraform / npm CLI deprecation precedent.
+An audit event `deprecated_flag_used` is recorded once per encounter. No version-gated removal — keys stay parseable indefinitely. Pattern follows Terraform / npm CLI deprecation precedent.
 
 Now invoke the `uberdev:merge` skill — it owns the 4-phase pipeline (pre-flight gate, merge plan, merge + parallel conflict-resolve, post-merge local sync). The skill renders inline, so `$ARGUMENTS` remains in scope for its bash blocks.
