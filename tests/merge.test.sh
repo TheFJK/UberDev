@@ -284,6 +284,151 @@ else
 fi
 
 echo
+echo "== M22: SKILL.md STRATEGY_ENUM declares defer and drop =="
+if grep -E '^\| `STRATEGY_ENUM` \|' "$SKILL_FILE" | grep -qE '`defer`' && \
+   grep -E '^\| `STRATEGY_ENUM` \|' "$SKILL_FILE" | grep -qE '`drop`'; then
+  echo "  PASS  M22 — STRATEGY_ENUM lists both \`defer\` and \`drop\`"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M22 — STRATEGY_ENUM row in Constants must list both \`defer\` and \`drop\`"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== M23: SKILL.md AUDIT_EVENT_ENUM declares all new autopilot events =="
+for ev in pr_parked pr_deferred stale_branch_rebase_decision deprecated_flag_used agent_strategy_switch test_fail_agent_decision; do
+  if grep -E '^\| `AUDIT_EVENT_ENUM` \|' "$SKILL_FILE" | grep -qE "\`$ev\`"; then
+    echo "  PASS  M23.$ev — AUDIT_EVENT_ENUM declares \`$ev\`"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  M23.$ev — AUDIT_EVENT_ENUM missing \`$ev\`"
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+echo
+echo "== M24: SKILL.md declares PARK_REASON_ENUM, STRATEGY_REASON_ENUM, STALE_REBASE_DECISION_ENUM =="
+for c in PARK_REASON_ENUM STRATEGY_REASON_ENUM STALE_REBASE_DECISION_ENUM; do
+  assert_grep "$SKILL_FILE" "\`$c\`" "M24.$c — \`$c\` constant declared"
+done
+# M24.PARK_REASON_ENUM values
+assert_grep "$SKILL_FILE" '`test-fail-exhausted`' \
+  "M24.PARK.test-fail — PARK_REASON_ENUM lists \`test-fail-exhausted\`"
+assert_grep "$SKILL_FILE" '`external-author-not-allow-listed`' \
+  "M24.PARK.ext-author — PARK_REASON_ENUM lists \`external-author-not-allow-listed\`"
+
+echo
+echo "== M25: SKILL.md Phase 3.3v test-fail response covers re-resolve / strategy-switch / park =="
+PHASE_3_3V=$(awk '/^v\. \*\*Pre-push test gate/,/^vi\. \*\*Push the resolution/' "$SKILL_FILE")
+for branch in 'RE-RESOLVE' 'STRATEGY-SWITCH' 'PARK'; do
+  if echo "$PHASE_3_3V" | grep -qE "$branch"; then
+    echo "  PASS  M25.$branch — Phase 3.3v documents $branch branch"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  M25.$branch — Phase 3.3v MUST document $branch branch (agent-decided test-fail response)"
+    FAIL=$((FAIL + 1))
+  fi
+done
+if echo "$PHASE_3_3V" | grep -qE 'Max 1 retry|max.{0,5}1.{0,5}retry'; then
+  echo "  PASS  M25.bound-retry — Phase 3.3v bounds re-resolve to max 1 retry"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M25.bound-retry — Phase 3.3v MUST cap re-resolve at max 1 retry per PR per run"
+  FAIL=$((FAIL + 1))
+fi
+if echo "$PHASE_3_3V" | grep -qE 'Max 1 switch|max.{0,5}1.{0,5}switch'; then
+  echo "  PASS  M25.bound-switch — Phase 3.3v bounds strategy-switch to max 1 per PR per run"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M25.bound-switch — Phase 3.3v MUST cap strategy-switch at max 1 per PR per run"
+  FAIL=$((FAIL + 1))
+fi
+if echo "$PHASE_3_3V" | grep -qE 'max 3 test runs per PR per run|Worst-case test runs per PR per run:[[:space:]]*3|3 test runs per PR per run'; then
+  echo "  PASS  M25.worst-case — Phase 3.3v states max 3 test runs per PR per run"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M25.worst-case — Phase 3.3v MUST state max 3 test runs per PR per run (initial + re-resolve-retry + strategy-switch-retry)"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== M26: SKILL.md Phase 4.5 documents agent-decided rebase with safety preconditions =="
+PHASE_4_5=$(awk '/^### Step 4\.5/,/^### Step 4\.6/' "$SKILL_FILE")
+if echo "$PHASE_4_5" | grep -qE 'never rebases without an explicit affirmative decision'; then
+  echo "  PASS  M26.invariant — Phase 4.5 carries the Q2 'never rebases without affirmative decision' invariant"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M26.invariant — Phase 4.5 MUST include verbatim 'never rebases without an explicit affirmative decision'"
+  FAIL=$((FAIL + 1))
+fi
+if echo "$PHASE_4_5" | grep -qE "agent's typed decision-record is the affirmative form|structured decision-record"; then
+  echo "  PASS  M26.affirmation — Phase 4.5 names the typed decision-record as the affirmative form"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M26.affirmation — Phase 4.5 MUST state the typed decision-record is the affirmative form for autopilot mode"
+  FAIL=$((FAIL + 1))
+fi
+for cond in 'merge-tree --write-tree' 'PR head ref' 'force-push'; do
+  if echo "$PHASE_4_5" | grep -qE "$cond"; then
+    echo "  PASS  M26.precond[$cond] — Phase 4.5 references safety precondition: $cond"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  M26.precond[$cond] — Phase 4.5 MUST reference $cond as part of safety preconditions"
+    FAIL=$((FAIL + 1))
+  fi
+done
+for choice in 'rebased-ff-clean' 'skipped-conflicts' 'skipped-pr-head-ref' 'rebase-aborted'; do
+  if echo "$PHASE_4_5" | grep -qE "\`$choice\`"; then
+    echo "  PASS  M26.choice[$choice] — Phase 4.5 emits STALE_REBASE_DECISION_ENUM value \`$choice\`"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  M26.choice[$choice] — Phase 4.5 MUST document STALE_REBASE_DECISION_ENUM value \`$choice\`"
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+echo
+echo "== M27: SKILL.md run-summary block describes Parked and Deferred outcomes =="
+SUMMARY_BLOCK=$(awk '/^### Run-summary block/,/^## /' "$SKILL_FILE")
+for outcome in Parked Deferred; do
+  if echo "$SUMMARY_BLOCK" | grep -qE "^[[:space:]]*${outcome}:"; then
+    echo "  PASS  M27.$outcome — run-summary block names $outcome outcome at top level"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  M27.$outcome — run-summary block MUST list ${outcome}: <count> at top level (alongside Merged/Skipped/Aborted)"
+    FAIL=$((FAIL + 1))
+  fi
+done
+for field in 'strategy:' 'rationale:' 'outcome:' 'park reason:'; do
+  if echo "$SUMMARY_BLOCK" | grep -qiE "$field"; then
+    echo "  PASS  M27.field[$field] — run-summary detail block names \"$field\" field"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  M27.field[$field] — run-summary detail block MUST include \"$field\" field"
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+echo
+echo "== M28: SKILL.md prints bot_authors_allow_list at run start AND in run-summary block =="
+PHASE_1=$(awk '/^## Phase 1/,/^## Phase 2/' "$SKILL_FILE")
+if echo "$PHASE_1" | grep -qiE '/merge autopilot — allow-listed authors|/merge autopilot -- allow-listed authors|^### Step 1\.0|allow-listed authors:'; then
+  echo "  PASS  M28.preflight — Phase 1 prints bot_authors_allow_list summary at run start"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M28.preflight — Phase 1 MUST print bot_authors_allow_list summary at run start (pre-flight banner)"
+  FAIL=$((FAIL + 1))
+fi
+SUMMARY_BLOCK=$(awk '/^### Run-summary block/,/^## /' "$SKILL_FILE")
+if echo "$SUMMARY_BLOCK" | grep -qiE 'Allow-listed authors|allow-list|bot_authors_allow_list'; then
+  echo "  PASS  M28.summary — run-summary block re-prints bot_authors_allow_list as audit anchor"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M28.summary — run-summary block MUST re-print bot_authors_allow_list (audit anchor)"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
