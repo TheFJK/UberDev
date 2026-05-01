@@ -110,6 +110,13 @@ fi
 assert_grep "$REVIEW_PR" \
   'separate commit|distinct commit|separately from the review[- ]fix' \
   "auto-applied simplify edits commit separately from review-fix commits"
+# Lock the conventional-commit TYPE (refactor:), not just "separately". A change
+# from refactor: to chore:/fix:/feat: would otherwise pass the assertion above.
+# The pattern requires "refactor:" within scanning distance of "simplify" so the
+# bare token doesn't false-positive on unrelated prose mentioning refactor:.
+assert_grep "$REVIEW_PR" \
+  'simplify.*refactor:|refactor:.*simplify|[Aa]uto-apply simplify.*refactor:' \
+  "auto-applied simplify edits commit as refactor: conventional commit"
 assert_grep "$REVIEW_PR" \
   '--no-simplify' \
   "--no-simplify opt-out flag documented"
