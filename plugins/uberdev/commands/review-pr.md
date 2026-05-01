@@ -79,7 +79,7 @@ Pass `--no-simplify` (anywhere in the arguments) to skip Phase 2 and preserve th
 
    **Advisory-only findings** (where a lens declines to edit because the change carries behavior risk, or the agent flags a concern outside the iron-rule envelope) are **never silently dropped** — they surface in the Phase 2 row of the final aggregation table (step 8) so the human reviewer sees them.
 
-   **Non-blocking**: if the simplify-phase fanout itself fails (timeout, agent error, parse failure), `/review-pr` still exits successfully and reports the Phase 2 outcome as `BLOCKED` in the final aggregation. Phase 1 review-fix work is **not undone**, and the command continues regardless of Phase 2 verdicts.
+   **Non-blocking**: if the simplify-phase fanout itself fails (timeout, agent error, parse failure), `/review-pr` still exits successfully and reports the Phase 2 row's Status as `blocked` in the final aggregation (lowercase, matching the Status enum in step 9). Phase 1 review-fix work is **not undone**, and the command continues regardless of Phase 2 verdicts.
 
 8. **Final Aggregation — distinguish review-phase vs simplify-phase findings**
 
