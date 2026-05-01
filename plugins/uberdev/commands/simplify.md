@@ -61,16 +61,21 @@ Wait for all three agents to complete. Aggregate their findings and fix each iss
 
 When done:
 1. Briefly summarize what was fixed (or confirm the code was already clean).
-2. Stage the simplifications and commit as a **separate `refactor:` conventional commit** — keep the simplification diff distinct from the feature/fix commits that preceded it. This is mandated by the global "always /simplify before push" rule in user `CLAUDE.md`.
+2. Stage the simplifications and commit as a **separate `refactor:` conventional commit** — keep the simplification diff distinct from the feature/fix commits that preceded it. This separate-commit boundary is mirrored by `/uberdev:review-pr` Phase 2 (which dispatches the same three lenses), so reviewers can always tell "feature/fix" apart from "simplify pass" by commit boundary alone.
 
 ## When to run
 
-- Before pushing — per the global "always /simplify before push" rule.
-- After a non-trivial implementation or bug fix has landed but before review.
-- After accepting code-review feedback that involves restructuring.
+The canonical place `/simplify` runs in the chain is **automatically as Phase 2 of `/uberdev:review-pr`** — every PR review chains a mandatory simplify pass after the review-and-fix loop, applying all three lenses to the full `<base>..HEAD` diff (original commits + Phase 1 review-fix commits). That run is strictly more complete than any pre-push call would be, so a separate pre-push `/simplify` is **not** part of `/solve` or `/turbo` — re-running it would duplicate work on a smaller diff.
+
+Standalone invocations are still valid for these out-of-chain cases:
+
+- After a non-trivial implementation or bug fix has landed but you don't intend to open a PR yet (e.g. iterating on a long-lived branch).
+- After accepting code-review feedback that involves restructuring, before re-requesting review.
+- Ad-hoc, when you want to clean up a specific edit without going through the full `/review-pr` fanout.
 
 ## When NOT to run
 
+- Inside a `/solve` / `/turbo` heredoc before push — Phase 2 of `/uberdev:review-pr` already covers it on a strictly larger diff.
 - On greenfield code that's still being designed.
 - Mid-debugging — simplify after the bug is understood and fixed.
 - On generated code, vendored deps, or test fixtures.

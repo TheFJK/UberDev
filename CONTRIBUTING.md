@@ -51,7 +51,7 @@ Branches mirror commit types: `feat/short-name`, `fix/short-name`, `refactor/sho
 
 1. Push your branch and open a PR against `main`.
 2. Reference the issue with `Closes #N` in the PR body — merge will auto-close it.
-3. **Run `/simplify` (or `/uberdev:simplify`) before requesting review** and commit the result as a separate `refactor:` commit. This is non-negotiable; it's how we keep the plugin lean.
+3. **Open the PR and let `/uberdev:review-pr` Phase 2 run automatically** — it dispatches the three simplify lenses on the post-Phase-1 diff (full PR + review-fix commits) and lands the result as a separate `refactor:` commit. Do not run `/simplify` standalone before opening the PR — it would duplicate Phase 2 on a strictly smaller diff.
 4. Confirm the existing smoke tests still pass — see _Local testing_ below.
 5. Keep the PR focused. One topic per PR. Split unrelated changes.
 
