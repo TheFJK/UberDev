@@ -91,6 +91,19 @@ assert_grep "$GHOSTTY" \
   '(keystroke "t"|="t"[[:space:]]*(#|$))' \
   "ghostty tab-spawn path still uses Cmd+T (no regression on the originally-working path)"
 
+# If the dispatch parameterizes via a spawn-key variable (current
+# implementation), the AppleScript heredoc must consume it via
+# `keystroke "$GHOSTTY_SPAWN_KEY"` — otherwise both `="n"` and `="t"`
+# assignments could exist while the keystroke is hardcoded to one of them,
+# silently breaking the path that doesn't match the hardcode. Hedge: skip
+# this check if neither path uses the variable form (i.e. both are inlined
+# as separate heredocs), which is also contract-compliant.
+if grep -qE 'GHOSTTY_SPAWN_KEY=' <<<"$GHOSTTY"; then
+  assert_grep "$GHOSTTY" \
+    'keystroke "\$GHOSTTY_SPAWN_KEY"' \
+    "AppleScript heredoc consumes the spawn-key via variable (not hardcoded once both branches set it)"
+fi
+
 # When AppleScript itself is unusable (Accessibility denied, custom keybind),
 # the final fallback must be nohup — never `open -na Ghostty --args --command=`.
 # Anchored within the ghostty arm so the default `nohup|*)` arm doesn't satisfy this.

@@ -333,12 +333,14 @@ tell application "System Events"
 end tell
 APPLESCRIPT
     then
-      :  # dispatched via keystroke; no instance default was set
+      echo "Dispatched into Ghostty (Cmd+$GHOSTTY_SPAWN_KEY)."
     else
       # AppleScript path failed (Accessibility permission denied or non-default
-      # Cmd+T/Cmd+N keybind). Fall back to a detached nohup run — never to
-      # `open -na Ghostty --args --command=...` because that re-introduces the
-      # issue #31 instance-default poison.
+      # Cmd+T/Cmd+N keybind). Fall back to a detached nohup run — nohup runs the
+      # launcher in a background shell of the current process, never passing any
+      # flag to the Ghostty app itself, so it can't reintroduce the issue #31
+      # instance-default poison the way `open -na Ghostty --args --command=...`
+      # would.
       GHOSTTY_LOG="/tmp/solve-$ISSUE_NUM.log"
       nohup zsh -l "$SCRIPT" > "$GHOSTTY_LOG" 2>&1 &
       echo "warning: ghostty AppleScript dispatch failed (Accessibility permission or non-default Cmd+T/N keybind?); spawned detached agent (PID $!). Logs: $GHOSTTY_LOG" >&2
