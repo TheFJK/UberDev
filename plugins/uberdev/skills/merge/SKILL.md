@@ -41,6 +41,7 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `STRATEGY_REASON_ENUM` | `cli-flag`, `pr-label`, `heuristic-conventional`, `heuristic-wip`, `heuristic-single-commit`, `heuristic-mixed`, `external-author-deferred`, `agent-park-refused`, `agent-park-ambiguous`, `agent-park-test-fail-exhausted`, `agent-defer-flake` | Phase 2.2, Phase 3.3 (audit-log `data.reason` for `strategy_chosen`) |
 | `PARK_REASON_ENUM` | `REFUSED`, `AMBIGUOUS`, `test-fail-exhausted`, `push-non-ff`, `external-author-not-allow-listed` | Phase 3.3 (audit-log `data.reason` for `pr_parked`) |
 | `STALE_REBASE_DECISION_ENUM` | `rebased-ff-clean`, `rebased-non-conflicting`, `skipped-conflicts`, `skipped-pr-head-ref`, `skipped-non-tracking`, `rebase-aborted` | Phase 4.5 (audit-log `data.choice` for `stale_branch_rebase_decision`) |
+| `TEST_FAIL_DECISION_ENUM` | `re-resolve`, `strategy-switch`, `park` | Phase 3.3v (audit-log `data.choice` for `test_fail_agent_decision`) |
 | `DEPRECATED_FLAGS_NOTE` | `warning: --yes / -y / auto_confirm are deprecated; /merge is now fully unattended. The flag has no behavioural effect.` | Phase 1 (stderr emission), `commands/merge.md` (Deprecated Flags section), `using-uberdev/SKILL.md` |
 
 ## Inputs
@@ -53,7 +54,7 @@ Argument parsing:
 - **`--squash` / `--rebase` / `--merge`** — per-invocation strategy override (see `STRATEGY_ENUM`); applies to every PR in the run.
 - **`--integration-branch=<name>`** — per-invocation override of the integration-branch precedence chain (see below).
 - **`--bypass-protections`** — admin-bypass branch protections; requires a free-text waiver and is audit-logged.
-- **`--yes` / `-y`** — skip the Phase 2.4 plan-confirm prompt and the Phase 4.5 stale-branch per-branch prompts for this run (see `AUTO_CONFIRM_FLAGS` and the auto-confirm resolution chain below).
+- **`--yes` / `-y`** — accepted for backward compat (deprecated; no behavioural effect — see `## Inputs` autopilot paragraph).
 
 Integration-branch resolution (four-tier precedence chain, highest wins):
 
@@ -64,17 +65,21 @@ Integration-branch resolution (four-tier precedence chain, highest wins):
 
 Branch names (from any tier) MUST be validated against `BRANCH_NAME_REGEX` before being used as a shell argv. Reject and error out on any name that fails the regex; do not pass unvalidated input to `git`, `gh`, or any subprocess.
 
-Auto-confirm resolution (CLI flag wins, then config, then scope-based default):
-
-1. **CLI flag** `--yes` / `-y` (see `AUTO_CONFIRM_FLAGS`) → auto-confirm ON for this run.
-2. **Config file** `.claude/uberdev.local.md` YAML key `AUTO_CONFIRM_KEY` (`auto_confirm: true|false`) → repo-local default. `true` enables; `false` disables.
-3. **Scope-based default** (when neither flag nor config is set):
-   - Single-PR scope (exactly 1 PR in the post-gate merge set) → `AUTO_CONFIRM_DEFAULT_SINGLE` (`true`). The explicit PR number is the consent; the plan table still renders for transparency.
-   - Multi-PR scope (`--all`, more than 1 PR) → `AUTO_CONFIRM_DEFAULT_MULTI` (`false`). The PR list is computed, not user-specified, so confirmation is required.
-
-When auto-confirm is ON, Phase 2.4 skips the `[y/N]` prompt and Phase 4.5 lists stale branches without per-branch rebase prompts (see those phases for exact behavior).
+**Autopilot (always ON).** `--yes` / `-y` (see `AUTO_CONFIRM_FLAGS`) and the `auto_confirm:` config key (see `AUTO_CONFIRM_KEY`) are accepted for backward compat — parsed without error — but have **no behavioural effect**. On first encounter per run, /merge emits the verbatim `DEPRECATED_FLAGS_NOTE` to stderr and records a `deprecated_flag_used` audit event. The Phase 2.4 plan-confirm and Phase 4.5 stale-branch behaviours are unconditional autopilot — see those phases.
 
 ## Phase 1 — Pre-flight gate
+
+### Step 1.0 — Pre-flight banner
+
+At the very start of the run (before lock acquisition), emit a one-line banner to stderr:
+
+```
+/merge autopilot — allow-listed authors: <comma-separated bot_authors_allow_list contents>
+```
+
+This is transparency for the new trust boundary (see C9). The same allow-list is reprinted in the final run-summary block as an audit anchor — two prints, one at each lifecycle moment (start and end).
+
+**Failure handling:** if `.claude/uberdev.local.md` cannot be read or the YAML cannot be parsed, treat `bot_authors_allow_list` as empty (default-strict — every external-author PR will defer in Phase 2.2 step 3). Emit an `error` audit event with `data.reason="allow-list-read-failed"` and proceed with the safe-default empty list. The banner still emits, with `Allow-listed authors: <none>`.
 
 ### Step 1.1 — Acquire the single-instance lock
 
@@ -139,12 +144,15 @@ For each PR, compute strategy signal-by-signal:
 
 1. Per-invocation flag `--squash` / `--rebase` / `--merge` always wins.
 2. Else: PR label matching `MERGE_STRATEGY_LABEL_PREFIX<name>` where `<name>` ∈ `STRATEGY_ENUM` wins (D-LABEL).
-3. Else: heuristic.
+3. **External-author defer (D-BOTS):** if `author.login` is NOT in `bot_authors_allow_list` AND author is NOT a repo collaborator, emit strategy `defer` with `data.reason="external-author-deferred"` (∈ `STRATEGY_REASON_ENUM`). Emit `strategy_chosen` audit event. The PR is parked at the end of the run and promoted directly to `drop` in the final summary with `PARK_REASON_ENUM` value `external-author-not-allow-listed` (one-pass park; no end-of-run retry — stable cause, not flake). This step gates only the strategy decision; the existing fork preflight (Step 1.6) remains the authoritative gate for cross-repo PRs. **Failure handling:** if the `gh` API call to determine collaborator status fails (network, auth, rate limit, JSON parse error), treat author as NOT a collaborator (safe-default — defer rather than allow). Emit an `error` audit event with `data.reason="collaborator-check-failed"` alongside the `strategy_chosen` event.
+4. Else: heuristic.
    - All commits start with conventional-commit prefix (`feat:`, `fix:`, `chore:`, `refactor:`, `test:`, `docs:`) → rebase candidate.
    - Any commit message matches `WIP_MESSAGE_REGEX` → squash candidate.
    - Commit count ≤ `CONVENTIONAL_COMMIT_THRESHOLD` (3) AND all conventional → rebase.
    - Single-commit PR → rebase.
    - Mixed signals → default to squash (safer for `git bisect` than a true merge commit).
+
+Note: `drop` and `defer` are NOT direct outputs of this heuristic for in-scope PRs (except step 3); they are emitted later — Phase 3.3v on `test-fail-exhausted`, Phase 3.3iv on AMBIGUOUS/REFUSED. Consumers disambiguate strategy outcomes via paired audit events — `strategy_chosen` followed by `merge_executed` (for git-merge strategies) vs. `pr_parked`/`pr_deferred` (for queue actions).
 
 Other label syntaxes (`strategy:<name>`, `merge:<name>`) are NOT recognised — only the `MERGE_STRATEGY_LABEL_PREFIX` literal matches.
 
@@ -152,22 +160,17 @@ Other label syntaxes (`strategy:<name>`, `merge:<name>`) are NOT recognised — 
 
 Render a single markdown table with these columns: `PR#`, `title`, `strategy`, `reasoning` (one-line citing the dominant signal — flag, label, conventional-commit ratio, etc.), `conflict-resolve-needed?` (Y/N from probe; Phase 3 will re-probe but a Phase-2 merge-tree pass gives the user a preview).
 
-### Step 2.4 — Plan-confirm gate (single, scope-conditional)
+### Step 2.4 — Plan-confirm gate (autopilot — no prompt)
 
-Resolve `auto_confirm` per the precedence chain in `## Inputs` (CLI flag → config → scope-based default).
+Render the unified plan table from Step 2.3 for transparency. Then, **unconditionally** and without any `[y/N]` prompt:
 
-**If auto-confirm is ON:**
-- Render the plan table for transparency.
-- Emit `order_proposed` + `order_confirmed` events to `audit.jsonl` with the resolution reason recorded in `data.reason` (one of `AUTO_CONFIRM_REASON_ENUM`: `single-pr-default`, `cli-flag`, `config-auto_confirm`). Use the literal enum value — do not invent new strings.
-- Proceed directly to Phase 3 — no `[y/N]` prompt.
+- Emit `order_proposed` to `audit.jsonl` with `data.order=[<pr#>...]`.
+- Emit `order_confirmed` to `audit.jsonl` with `data.reason="autopilot-default"` (∈ `AUTO_CONFIRM_REASON_ENUM`). Use the literal enum value — do not invent free-text strings.
+- Proceed directly to Phase 3.
 
-**If auto-confirm is OFF (default for `--all` / multi-PR scope unless `--yes` or `auto_confirm: true`):**
-- Display the plan table.
-- Prompt: `Apply this plan? [y/N]`.
-- On `y`: emit `order_confirmed`, proceed to Phase 3.
-- On anything else: abort cleanly, write `order_proposed` + `error` events to `audit.jsonl`, release the lock.
+The plan-table `strategy` column now ranges over the extended `STRATEGY_ENUM` (`squash`, `rebase`, `merge`, `defer`, `drop`). PRs with strategy `defer` enter Phase 3 and are parked-as-drop on the first pass (see C4 — external-author defer is one-pass park).
 
-**This is the ONLY plan-level confirm gate in /merge.** Do NOT prompt after each PR merges. (Spec Non-goal: "no mid-flow gates after each PR merges.") Phase 4.5 stale-branch handling has its own conditional prompt — see that step.
+**There is NO `Apply this plan?` prompt under any condition.** Autopilot is unconditional. `--yes` / `-y` / `auto_confirm` are no-ops; their first encounter per run emits `DEPRECATED_FLAGS_NOTE` to stderr and a `deprecated_flag_used` audit event, then the run continues.
 
 ## Phase 3 — Merge and conflict-resolve
 
@@ -197,9 +200,23 @@ This is the critical invariant. All Task() calls for this PR's conflict set MUST
 
 **Sequential degradation (Q1):** for same-file PR pairs flagged in Phase 1.5, the per-file fanout proceeds normally — same-file collisions only matter ACROSS PRs (PR-A's resolution must land first; PR-B re-probes against new tip). Within a single PR's resolution, all Task() agents own disjoint files by construction.
 
-iv. **Apply resolutions** in the scratch worktree as each agent returns. Aggregate the YAML returns; halt the queue if any agent returns `status: AMBIGUOUS` or `status: REFUSED` (clear handoff per AC).
+iv. **Apply resolutions** in the scratch worktree as each agent returns. Aggregate the YAML returns. **If any agent returns `status: AMBIGUOUS` or `status: REFUSED`:** park THIS PR via `drop` strategy. Emit `pr_parked` to `audit.jsonl` with `data.reason` set to the literal status (`AMBIGUOUS` or `REFUSED`, ∈ `PARK_REASON_ENUM`), `data.strategy="drop"`, and `data.rationale` carrying the agent's structured handoff. Surface the agent's structured handoff in the run summary. **Continue with the next PR — the queue does NOT halt.**
 
-v. **Pre-push test gate (D16, mandatory, no skip path).** Run the project's test command in the scratch worktree before any push. Test command discovery order: `package.json:scripts.test` > `Makefile` `test` target > `cargo test` if `Cargo.toml` exists > `pytest` if `pytest.ini`/`pyproject.toml` exists > `go test ./...` if `go.mod` exists. **Failing tests block the push for that PR; rest of queue continues.** No `--fast` mode, no override flag.
+v. **Pre-push test gate (D16, ALWAYS RUNS).** Test command discovery order: `package.json:scripts.test` > `Makefile` `test` target > `cargo test` if `Cargo.toml` exists > `pytest` if `pytest.ini`/`pyproject.toml` exists > `go test ./...` if `go.mod` exists.
+
+On test PASS: emit `test_pass`; proceed to push (step vi).
+
+On test FAIL: agent picks the best applicable branch from (a), (b), (c); (a) and (b) may each be exercised at most once before falling to (c). Each choice is logged as `test_fail_agent_decision` audit event with `data.choice` (∈ `TEST_FAIL_DECISION_ENUM`) and a one-line `data.rationale`:
+
+(a) **RE-RESOLVE** (`data.choice="re-resolve"`) — re-dispatch the conflict-resolver fanout (single-message Task() per conflicted file) for the same conflict set with the prior failure context attached. **Max 1 retry per PR per run.** On second test pass: proceed to push. On second test fail: agent may switch to (b) if the switch budget is unused, otherwise fall through to (c).
+
+(b) **STRATEGY-SWITCH** (`data.choice="strategy-switch"`) — switch strategy (e.g. `squash` ↔ `merge`), re-probe via `git merge-tree --write-tree`, re-resolve if the new probe reports conflicts. **Max 1 switch per PR per run.** Emits `agent_strategy_switch` audit event with `data.from`, `data.to`, `data.rationale`. On test pass after switch: proceed to push. On test fail after switch: fall through to (c).
+
+(c) **PARK** (`data.choice="park"`) — park this PR via `drop` strategy with `data.reason="test-fail-exhausted"` (∈ `PARK_REASON_ENUM`); emit `pr_parked`; surface in run summary with the failure tail; continue queue with next PR.
+
+**PARK is the terminal floor.** No further retry branches exist beyond (a) and (b). After both bounds are exhausted (max 1 retry from (a) + max 1 switch from (b), each consumed at most once), PARK is unconditional — the implementation MUST NOT introduce any additional retry path.
+
+**Bounds (max 1 retry, max 1 switch) are policy-enforced.** Worst-case: max 3 test runs per PR per run (initial fail → re-resolve+test fail → strategy-switch+re-resolve+test fail → park). Queue ALWAYS continues. Only data-integrity failures (push non-FF, dependency cycle) still halt the queue — see Step 3.4.
 
 vi. **Push the resolution commit (D13, non-force push only).**
 
@@ -213,7 +230,18 @@ viii. **Tear down the scratch worktree** per `using-git-worktrees` protocol: `gi
 
 ### Step 3.4 — Failure-mode summary
 
-On any single-PR failure (test gate fail, push fail, gh pr merge fail, agent AMBIGUOUS/REFUSED): abort REST of queue (or that PR only — see error-handling table in spec). Already-merged PRs stay merged. Emit structured event to `.uberdev/runs/<run-id>/audit.jsonl`. Surface clear handoff to user.
+| Failure mode | Action | Queue state |
+|---|---|---|
+| `test_fail` after exhausting (a)/(b)/(c) in Step 3.3v | park via `drop` (`data.reason="test-fail-exhausted"`) | continues |
+| `push_resolution` non-FF (Step 3.3vi) | halt rest of queue | halted (data integrity) |
+| `gh pr merge` failure (Step 3.2 / 3.3vii) | abort that PR; emit `merge_executed`+`error` | continues |
+| conflict-resolver `AMBIGUOUS` | park via `drop` (`data.reason="AMBIGUOUS"`) | continues |
+| conflict-resolver `REFUSED` | park via `drop` (`data.reason="REFUSED"`) | continues |
+| dependency cycle (Phase 2.1) | abort whole run; surface cycle path | n/a (already aborted) |
+| local pull non-FF (Phase 4.2) | fail loud, no auto-fix | halted (data integrity) |
+| external-author-not-allow-listed (Phase 2.2 step 3) | strategy `defer` → one-pass park via `drop` (`data.reason="external-author-not-allow-listed"`) | continues |
+
+Already-merged PRs stay merged. Every event hits `audit.jsonl`. Every parked PR appears in the run-summary block with its `PARK_REASON_ENUM` value and the structured handoff (where applicable).
 
 ## Phase 4 — Post-merge local sync
 
@@ -262,7 +290,7 @@ git branch -d <feature-branch>
 
 `-d` (not `-D`): refuse to delete branches not fully merged into integration. On refuse: surface message; do NOT escalate to `-D`.
 
-### Step 4.5 — Stale-branch list+offer (D17, NEVER auto-execute rebase)
+### Step 4.5 — Stale-branch agent-decides (D17 autopilot)
 
 Enumerate local branches whose merge-base with the new integration tip is older than the previous integration tip:
 
@@ -273,22 +301,25 @@ git for-each-ref --format='%(refname:short)' refs/heads | while read b; do
 done
 ```
 
-Display the list to the user. Behavior depends on the `auto_confirm` resolution from `## Inputs`:
+For each stale branch, the agent decides (per-branch). Each decision emits one `stale_branch_rebase_decision` audit event with `data.branch`, `data.choice` (∈ `STALE_REBASE_DECISION_ENUM`), and `data.rationale`.
 
-**If auto-confirm is ON** (CLI `--yes`, `auto_confirm: true` config, or single-PR scope default):
-- List the stale branches with a one-line note: `These branches will need a manual rebase next time you check them out.`
-- Do NOT prompt and do NOT auto-rebase. The rebase is destructive (rewrites history) and could break in-flight work — staying hands-off is the safe default in auto-confirm mode.
+1. **Probe rebaseability** via `git merge-tree --write-tree <integration_branch> <stale_branch>` — clean exit = rebase would be conflict-free. **FF detection:** run `git merge-base --is-ancestor <integration_branch> <stale_branch>` after the merge-tree clean check; ancestor relationship → FF-able (decision tree rule 1); non-ancestor + clean merge-tree → non-conflicting (decision tree rule 2).
+2. **Safety preconditions** (ALL must hold to rebase):
+   (a) the branch is NOT a PR head ref currently in the autopilot's merge set — cross-checked via `gh pr list --head <branch> --json number,state` (state ∈ {OPEN, MERGED}).
+   (b) the branch has a remote-tracking ref that does NOT have force-push protection (probed via `gh api repos/:owner/:repo/branches/<branch>/protection` — 200 with `allow_force_pushes.enabled=false` means protected). Local-only branches without a remote-tracking ref do NOT satisfy this precondition; they SKIP via the `skipped-non-tracking` rule below — local-only branches may represent in-progress unpushed work and are not safe to rebase blindly.
 
-**If auto-confirm is OFF:**
-- For each branch, offer per-branch rebase ONLY after typed user confirmation:
+   **Failure handling on API probes:** if `gh pr list --head <branch>` fails (network, auth, rate limit, JSON parse error), treat the branch as potentially a PR head ref (safe default) and emit `data.choice="skipped-pr-head-ref"` with `data.rationale="gh-pr-list-api-unreachable"`. If `gh api .../protection` fails, treat as protected and emit `data.choice="skipped-non-tracking"` with `data.rationale="protection-api-unreachable"`. Never rebase when safety status cannot be determined.
+3. **Decide** (decision tree, first match wins; emit `data.choice` ∈ `STALE_REBASE_DECISION_ENUM`):
+   - FF-able + safety met → `git rebase <integration_branch>`; emit choice `rebased-ff-clean`.
+   - Non-conflicting probe + safety met → `git rebase <integration_branch>`; emit choice `rebased-non-conflicting`.
+   - Conflicts in probe → SKIP; emit choice `skipped-conflicts` with `data.rationale` citing the conflicting file paths.
+   - PR head ref in scope → SKIP; emit choice `skipped-pr-head-ref`.
+   - No tracking branch → SKIP; emit choice `skipped-non-tracking`.
+   - `git rebase` fails mid-way → `git rebase --abort` to restore the original head; emit choice `rebase-aborted`; continue with the next branch.
 
-  ```
-  Rebase <branch> onto <integration_branch>? Type 'yes' to confirm: _
-  ```
+**Force-push to PR head refs remains absolutely forbidden.** Any branch with force-push protection that requires rewinding falls into `skipped-pr-head-ref` or `skipped-non-tracking`.
 
-- Anything other than the literal string `yes` skips. **Never auto-execute** — destructive enough to deserve explicit per-branch consent (spec Non-goal).
-
-**Invariant:** /merge **never** runs `git rebase` automatically. Auto-confirm suppresses the prompt and skips the offer; it does not substitute for the typed `yes` that interactive mode requires.
+**Invariant:** /merge never rebases without an explicit affirmative decision; the agent's typed decision-record is the affirmative form for autopilot mode. The structured decision-record (above — choice + rationale + safety-precondition checks, all written to `audit.jsonl`) supersedes the prior "never auto-rebase without typed `yes`" prose because the structured decision-record is an equivalently rigorous form of affirmation. Force-push to PR head refs remains forbidden absolutely.
 
 ### Step 4.6 — Release the lock
 
@@ -299,9 +330,9 @@ Display the list to the user. Behavior depends on the `auto_confirm` resolution 
 | Phase | Inputs | Outputs | Abort conditions |
 |---|---|---|---|
 | 1 — Pre-flight | argv, PR list, integration_branch (resolved), bot allow-list | passing PR set, file-overlap matrix, fork preflight verdicts, lock acquired | lock contention (default fail-fast); single-PR fail when only one PR in scope; gh JSON unreadable |
-| 2 — Merge plan | passing PR set + file-overlap matrix + auto-confirm resolution | ordered plan table {PR#, strategy, reasoning, conflict-resolve?}; user confirm IF auto-confirm OFF | hard-dep cycle; user declines confirm (only when prompted) |
-| 3 — Merge + resolve | confirmed plan | per-PR merge result (success/skipped/aborted) + audit events | test gate fail (that PR aborts); agent AMBIGUOUS/REFUSED (queue halts); push non-FF (queue halts); fork org-owned (that PR skips) |
-| 4 — Local sync | merged PR list | local integration ff'd, worktrees removed, branches deleted, stale-branch offers | `git pull --ff-only` non-FF (fail-loud); branch not fully merged (refuse `-d`) |
+| 2 — Merge plan | passing PR set + per-PR strategy heuristics | ordered plan table {PR#, strategy, reasoning, conflict-resolve?}; order_proposed + order_confirmed audit events | hard-dep cycle (auto-aborts run) |
+| 3 — Merge + resolve | confirmed plan | per-PR merge result (success/skipped/aborted) + audit events | test gate fail after re-resolve+strategy-switch (that PR parks via `drop`); agent AMBIGUOUS/REFUSED (that PR parks via `drop`); push non-FF (queue halts — data integrity); fork org-owned (that PR skips) |
+| 4 — Local sync | merged PR list | local integration ff'd, worktrees removed, branches deleted, stale-branch decisions logged via stale_branch_rebase_decision events | `git pull --ff-only` non-FF (fail-loud); branch not fully merged (refuse `-d`) |
 
 ## Common Mistakes
 
@@ -313,8 +344,8 @@ Display the list to the user. Behavior depends on the `auto_confirm` resolution 
 - **Splitting the conflict-resolver Task() fanout across multiple assistant turns.** Single message. Mirrors `uberdev:post-impl-review`.
 - **Writing the resolution patch outside the conflict set.** Each agent owns ONE file; touching `.github/`, `.git/`, hooks, or any path outside its file_path is rejected (treated as REFUSED).
 - **Skipping the test gate** before pushing the resolution commit. No skip path. Failing tests block that PR's merge.
-- **Auto-rebasing stale local branches** in Phase 4. Phase 4.5 invariant: never run `git rebase` automatically — auto-confirm only suppresses the offer.
-- **Prompting `[y/N]` after the user typed `/merge <PR#>`.** Single-PR scope is auto-confirm by default; the explicit PR number is the consent. Only `--all` / multi-PR scope keeps the prompt unless `--yes` or `auto_confirm: true`.
+- **Skipping safety preconditions on Phase 4.5 stale-branch rebase.** Autopilot's typed decision-record IS the affirmative form, but the FF-able-or-non-conflicting probe AND not-a-PR-head-ref AND no-force-push-protection checks are non-negotiable. A rebase without all three preconditions = bug. Force-push to PR head refs remains absolutely forbidden.
+- **Prompting under any condition.** /merge is autopilot end-to-end. No `[y/N]` plan-confirm. No per-branch typed-`yes` for stale rebase. No per-PR confirmation after merge. The plan table renders for transparency; the queue proceeds.
 - **Auto-creating a merge commit** when `git pull --ff-only` fails. Fail-loud; never recover via merge commit.
 - **`--admin`/`--bypass-protections` without a free-text waiver.** Every bypass invocation MUST log `admin_bypass`+`waiver_recorded` events with the user's stated reason.
 
@@ -329,7 +360,7 @@ Refuse signals — abort or skip the PR with clear handoff:
 - Out-of-hunk edits in agent patch (any change outside the conflict-set hunks)
 - Agent patch touches `.github/`, `.git/`, hooks, or any path outside the PR's conflict set
 - Generated/lockfile (`package-lock.json`, `Cargo.lock`, etc.) in conflict set with no clear textual evidence — defer to PR author
-- PR author NOT in `bot_authors_allow_list` AND NOT a repo collaborator AND no explicit per-PR consent given (Non-goal: auto-merging non-collaborator PRs)
+- PR author NOT in `bot_authors_allow_list` AND NOT a repo collaborator → strategy `defer` (Phase 2.2 step 3); promoted to `drop` with `PARK_REASON_ENUM` value `external-author-not-allow-listed` at end of run (one-pass park, no flake retry).
 - Hard-dependency cycle in Phase 2 ordering — never auto-break (AC + spec Non-goal)
 
 ## Integration
@@ -358,11 +389,25 @@ At end of run, emit a summary block:
 
 ```
 /merge complete.
+  Allow-listed authors: <comma-separated bot_authors_allow_list contents>
   Merged:   <N> PRs (<list of #N>)
   Skipped:  <M> PRs (<list with reasons>)
+  Parked:   <P> PRs (<list with park reason and one-line rationale>)
+  Deferred: <D> PRs (<list — defer outcomes that did not retry-into-merge>)
   Aborted:  <K> PRs (<list with reasons>)
   Audit:    <AUDIT_LOG_DIR_PATTERN><AUDIT_LOG_FILENAME>
   Duration: <wall-clock>
+
+Per-PR detail block (one per PR in the run):
+
+  PR #<N> — <title>
+    strategy: <merge|rebase|squash|defer|drop>
+    rationale: <one-line, citing dominant signal — flag, label, heuristic, agent-decided>
+    outcome: <Merged|Skipped|Parked|Deferred|Aborted>
+    park reason: <PARK_REASON_ENUM value>          (only if outcome is Parked)
+    audit events: <count>
 ```
 
-Per spec: every `skipped` / `false-positive` / `errored` MUST be surfaced in the final summary. **No silent skips.**
+**Print twice rule:** the `Allow-listed authors:` line MUST also be emitted at run start as a Phase 1.0 pre-flight banner (see Step 1.0). Two prints — pre-flight banner and run-summary block — anchor the trust boundary at both lifecycle moments.
+
+Per spec: every `skipped` / `parked` / `deferred` / `aborted` MUST be surfaced here. **No silent skips.** Audit log path printed last; users grep for `pr_parked`, `pr_deferred`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision` to reconstruct the run.
