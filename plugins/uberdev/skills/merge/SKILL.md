@@ -19,7 +19,7 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 
 | Name | Value | Used by |
 |---|---|---|
-| `STRATEGY_ENUM` | `squash`, `rebase`, `merge` | D11 (per-PR strategy), D-LABEL |
+| `STRATEGY_ENUM` | `squash`, `rebase`, `merge`, `defer`, `drop` | D11 (per-PR strategy), D-LABEL, Phase 3.3 (park), Phase 2.2 (defer) |
 | `WIP_MESSAGE_REGEX` | `/^(wip\|misc\|asdf\|address review\|typo)/i` | D11 |
 | `CONVENTIONAL_COMMIT_THRESHOLD` | 3 (max commit count for rebase candidate) | D11 |
 | `PATCH_LINE_CAP` | 200 | D16 (agent rejection threshold) |
@@ -27,7 +27,7 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `LOCK_FILE_PATH` | `.git/uberdev-merge.lock` | D14 |
 | `AUDIT_LOG_DIR_PATTERN` | `.uberdev/runs/<run-id>/` | D15 |
 | `AUDIT_LOG_FILENAME` | `audit.jsonl` | D15 |
-| `AUDIT_EVENT_ENUM` | `gate_pass`, `gate_fail`, `order_proposed`, `order_confirmed`, `strategy_chosen`, `probe_clean`, `probe_conflict`, `agent_dispatched`, `agent_returned`, `patch_applied`, `test_pass`, `test_fail`, `push_resolution`, `merge_executed`, `local_sync`, `branch_deleted`, `worktree_removed`, `admin_bypass`, `waiver_recorded`, `error` | D15 |
+| `AUDIT_EVENT_ENUM` | `gate_pass`, `gate_fail`, `order_proposed`, `order_confirmed`, `strategy_chosen`, `probe_clean`, `probe_conflict`, `agent_dispatched`, `agent_returned`, `patch_applied`, `test_pass`, `test_fail`, `push_resolution`, `merge_executed`, `local_sync`, `branch_deleted`, `worktree_removed`, `admin_bypass`, `waiver_recorded`, `error`, `pr_parked`, `pr_deferred`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision` | D15 |
 | `SCRATCH_WORKTREE_PATTERN` | `.claude/worktrees/merge-<run-id>/` | D10 |
 | `BRANCH_NAME_REGEX` | `^[A-Za-z0-9._/-]{1,255}$` | D8 (validation before shell argv use) |
 | `MERGE_STRATEGY_LABEL_PREFIX` | `merge-strategy:` | D-LABEL |
@@ -35,11 +35,13 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `BOT_AUTHORS_DEFAULT` | `["dependabot[bot]", "renovate[bot]"]` | D-BOTS |
 | `INTEGRATION_BRANCH_KEY` | `integration_branch` (config key) | D8 |
 | `INTEGRATION_BRANCH_ENV_VAR` | `UBERDEV_INTEGRATION_BRANCH` | D8 |
-| `AUTO_CONFIRM_KEY` | `auto_confirm` (config key in `.claude/uberdev.local.md`) | Phase 2.4, Phase 4.5 |
-| `AUTO_CONFIRM_FLAGS` | `--yes`, `-y` (CLI flags) | Phase 2.4, Phase 4.5 |
-| `AUTO_CONFIRM_DEFAULT_MULTI` | `false` — `--all` / multi-PR scope prompts unless `--yes` or `auto_confirm: true` | Phase 2.4 |
-| `AUTO_CONFIRM_DEFAULT_SINGLE` | `true` — single-PR scope (no `--all`) skips the plan prompt by default | Phase 2.4 |
-| `AUTO_CONFIRM_REASON_ENUM` | `single-pr-default`, `cli-flag`, `config-auto_confirm` (audit-log `data.reason` values when auto-confirm is ON) | Phase 2.4 |
+| `AUTO_CONFIRM_KEY` | `auto_confirm` (config key in `.claude/uberdev.local.md`) **(deprecated; no behavioural effect)** | Phase 2.4, Phase 4.5 |
+| `AUTO_CONFIRM_FLAGS` | `--yes`, `-y` (CLI flags) **(deprecated; no behavioural effect)** | Phase 2.4, Phase 4.5 |
+| `AUTO_CONFIRM_REASON_ENUM` | `single-pr-default`, `cli-flag`, `config-auto_confirm`, `autopilot-default` (audit-log `data.reason` values for `order_confirmed`/`order_proposed` events) | Phase 2.4 |
+| `STRATEGY_REASON_ENUM` | `cli-flag`, `pr-label`, `heuristic-conventional`, `heuristic-wip`, `heuristic-single-commit`, `heuristic-mixed`, `external-author-deferred`, `agent-park-refused`, `agent-park-ambiguous`, `agent-park-test-fail-exhausted`, `agent-defer-flake` | Phase 2.2, Phase 3.3 (audit-log `data.reason` for `strategy_chosen`) |
+| `PARK_REASON_ENUM` | `REFUSED`, `AMBIGUOUS`, `test-fail-exhausted`, `push-non-ff`, `external-author-not-allow-listed` | Phase 3.3 (audit-log `data.reason` for `pr_parked`) |
+| `STALE_REBASE_DECISION_ENUM` | `rebased-ff-clean`, `rebased-non-conflicting`, `skipped-conflicts`, `skipped-pr-head-ref`, `skipped-non-tracking`, `rebase-aborted` | Phase 4.5 (audit-log `data.choice` for `stale_branch_rebase_decision`) |
+| `DEPRECATED_FLAGS_NOTE` | `warning: --yes / -y / auto_confirm are deprecated; /merge is now fully unattended. The flag has no behavioural effect.` | Phase 1 (stderr emission), `commands/merge.md` (Deprecated Flags section), `using-uberdev/SKILL.md` |
 
 ## Inputs
 
