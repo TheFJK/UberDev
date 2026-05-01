@@ -30,4 +30,5 @@ jobs:
           bash tests/review-pr.test.sh && \
           bash tests/finish-branch-auto-chain.test.sh && \
           bash tests/aliases.test.sh && \
-          bash tests/merge.test.sh
+          bash tests/merge.test.sh && \
+          bash tests/ghostty-dispatch-no-instance-leak.test.sh

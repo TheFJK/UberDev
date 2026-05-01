@@ -295,40 +295,53 @@ case "$TERMINAL" in
     cmux new-workspace --name "$TAB_NAME" --description "$DESCRIPTION" --command "zsh -l $SCRIPT"
     ;;
   ghostty)
-    # Tab-spawn into the originating Ghostty window when /solve or /turbo was invoked from
-    # inside Ghostty (TERM_PROGRAM=ghostty). Ghostty's macOS CLI rejects
-    # `+new-window` ("not supported on this platform") and its AppleScript
-    # dictionary doesn't expose `make new tab` cleanly, so we drive the
-    # default Cmd+T keybind via System Events and type the launcher path.
-    # Fall through to legacy new-window dispatch when:
-    #   - SOLVE_GHOSTTY_NEW_WINDOW=1 (explicit opt-out),
-    #   - TERM_PROGRAM != ghostty (no originating window — e.g. SOLVE_TERMINAL=ghostty
-    #     forced from another terminal),
-    #   - or the AppleScript fails (Accessibility permission denied, custom keybind, etc.).
-    TAB_SPAWNED=0
-    if [[ "$SOLVE_GHOSTTY_NEW_WINDOW" != "1" ]] && [[ "$TERM_PROGRAM" == "ghostty" ]]; then
-      if osascript >/dev/null 2>&1 <<APPLESCRIPT
+    # Drive Ghostty via AppleScript keystrokes (Cmd+T for tab, Cmd+N for window)
+    # and type the launcher path into the new tab/window. Keystroke dispatch
+    # types into a shell that's already started — it never sets any instance
+    # default, so future tabs/windows the user opens manually stay clean.
+    #
+    # Why we DON'T use `open -na Ghostty --args --command="$SCRIPT"`: Ghostty
+    # treats `--command=` passed via `open --args` as the running instance's
+    # default command. Once set, every Cmd+T / Cmd+N the user opens manually
+    # re-runs the launcher, racing the original agent and "poisoning" the
+    # Ghostty process for its lifetime (issue #31). There is no Ghostty CLI
+    # form that reliably runs a command once without sticking it as the default.
+    #
+    # Tab vs window:
+    #   - Cmd+T (tab) when /solve was invoked from inside Ghostty
+    #     (TERM_PROGRAM=ghostty) and SOLVE_GHOSTTY_NEW_WINDOW != "1": we have
+    #     an originating window to tab into.
+    #   - Cmd+N (window) when SOLVE_GHOSTTY_NEW_WINDOW=1 (explicit opt-out) or
+    #     TERM_PROGRAM != ghostty (e.g. SOLVE_TERMINAL=ghostty from iTerm —
+    #     no originating window to tab into).
+    if [[ "$SOLVE_GHOSTTY_NEW_WINDOW" == "1" ]] || [[ "$TERM_PROGRAM" != "ghostty" ]]; then
+      GHOSTTY_SPAWN_KEY="n"   # Cmd+N → new window
+      GHOSTTY_LAUNCH_DELAY="0.5"  # cold-launch may need longer if Ghostty isn't running
+    else
+      GHOSTTY_SPAWN_KEY="t"   # Cmd+T → new tab in the originating window
+      GHOSTTY_LAUNCH_DELAY="0.15"
+    fi
+
+    if osascript >/dev/null 2>&1 <<APPLESCRIPT
 tell application "Ghostty" to activate
-delay 0.15
+delay $GHOSTTY_LAUNCH_DELAY
 tell application "System Events"
-  keystroke "t" using command down
+  keystroke "$GHOSTTY_SPAWN_KEY" using command down
   delay 0.25
   keystroke "zsh -l $SCRIPT"
   keystroke return
 end tell
 APPLESCRIPT
-      then
-        TAB_SPAWNED=1
-      else
-        echo "warning: ghostty tab-spawn failed (Accessibility permission or non-default keybind?); falling back to new window." >&2
-      fi
-    fi
-    if [[ "$TAB_SPAWNED" != "1" ]]; then
-      # Legacy new-window dispatch. --command= rather than -e: Ghostty's -e appends to
-      # its login shell, which on macOS parses post-username tokens as KEY=VALUE env
-      # assignments — `-e "zsh -l $SCRIPT"` would never run the script. The launcher's
-      # `#!/bin/zsh -l` shebang preserves login-shell semantics inside `--command=`.
-      open -na Ghostty --args --command="$SCRIPT"
+    then
+      :  # dispatched via keystroke; no instance default was set
+    else
+      # AppleScript path failed (Accessibility permission denied or non-default
+      # Cmd+T/Cmd+N keybind). Fall back to a detached nohup run — never to
+      # `open -na Ghostty --args --command=...` because that re-introduces the
+      # issue #31 instance-default poison.
+      GHOSTTY_LOG="/tmp/solve-$ISSUE_NUM.log"
+      nohup zsh -l "$SCRIPT" > "$GHOSTTY_LOG" 2>&1 &
+      echo "warning: ghostty AppleScript dispatch failed (Accessibility permission or non-default Cmd+T/N keybind?); spawned detached agent (PID $!). Logs: $GHOSTTY_LOG" >&2
     fi
     ;;
   iterm)
