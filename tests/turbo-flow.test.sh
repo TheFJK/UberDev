@@ -37,6 +37,19 @@ assert_grep() {
   fi
 }
 
+assert_not_grep() {
+  local file="$1" pattern="$2" desc="$3"
+  if grep -qE -e "$pattern" "$file"; then
+    echo "  FAIL  $desc"
+    echo "        file:    $file"
+    echo "        pattern: $pattern (should NOT match)"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  $desc"
+    PASS=$((PASS + 1))
+  fi
+}
+
 echo "== brainstorm propagates --turbo to write-plan =="
 assert_grep "$BRAINSTORM" \
   'write-plan.*--turbo|--turbo.*write-plan' \
@@ -173,21 +186,22 @@ echo "== /simplify runs ONCE in the chain — at /review-pr Phase 2, not pre-pus
 # before push. The canonical simplify pass is Phase 2 of /uberdev:review-pr,
 # which sees the post-Phase-1 diff (full PR + review-fix commits) and is
 # strictly more complete than any pre-push call. This guard fails loud if a
-# future edit re-introduces the duplication.
-if grep -qE '^[[:space:]]*[0-9]+\.[[:space:]]+/(uberdev:)?simplify[[:space:]]+before[[:space:]]+push' "$SOLVE_PIPELINE"; then
-  echo "  FAIL  no /simplify-before-push step in solve-pipeline heredocs"
-  echo "        file: $SOLVE_PIPELINE"
-  echo "        regression: pre-push /simplify call duplicates /review-pr Phase 2"
-  FAIL=$((FAIL + 1))
-else
-  echo "  PASS  no /simplify-before-push step in solve-pipeline heredocs"
-  PASS=$((PASS + 1))
-fi
+# future edit re-introduces the duplication. Anchored on the numbered-step form
+# (`^[0-9]+\.\s+/simplify before push`) so the regression-prevention prose
+# elsewhere in the same file (and the directive added to each heredoc) is not
+# matched.
+assert_not_grep "$SOLVE_PIPELINE" \
+  '^[[:space:]]*[0-9]+\.[[:space:]]+/(uberdev:)?simplify[[:space:]]+before[[:space:]]+push' \
+  "no /simplify-before-push numbered step in solve-pipeline heredocs"
 # Positive lock: each of the 4 trivial/small heredocs (trivial-solve, trivial-turbo,
 # small-solve, small-turbo) must explicitly tell the spawned agent NOT to run
 # /simplify standalone. Anchoring the count at 4 catches both deletion and the
 # subtler regression where one heredoc loses the directive while three keep it.
-DIRECTIVE_COUNT=$(grep -cE 'Do NOT run /uberdev:simplify standalone before push' "$SOLVE_PIPELINE" || true)
+# `|| echo "0"` (not `|| true`) — `grep -c` exits 1 when count=0 (expected) but
+# exits 2 on real errors (unreadable file, malformed regex); the echo fallback
+# keeps the no-match path numeric while letting genuine errors surface via the
+# stderr-redirected grep.
+DIRECTIVE_COUNT=$(grep -cE 'Do NOT run /uberdev:simplify standalone before push' "$SOLVE_PIPELINE" 2>/dev/null || echo "0")
 if [[ "$DIRECTIVE_COUNT" -eq 4 ]]; then
   echo "  PASS  all 4 trivial/small heredocs include the no-pre-push-simplify directive (count=4)"
   PASS=$((PASS + 1))
