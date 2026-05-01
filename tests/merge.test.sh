@@ -27,13 +27,18 @@
 #   M19 — SKILL.md Phase 4.5 carries autopilot affirmative-decision invariant.
 #   M20 — commands/merge.md surfaces --yes / -y as DEPRECATED.
 #   M21 — using-uberdev/SKILL.md flags auto_confirm as DEPRECATED.
-#   M22 — SKILL.md STRATEGY_ENUM declares defer and drop.
+#   M22 — SKILL.md STRATEGY_ENUM declares drop (and does NOT declare the removed `defer`).
 #   M23 — SKILL.md AUDIT_EVENT_ENUM declares all new autopilot events.
 #   M24 — SKILL.md declares PARK_REASON_ENUM, STRATEGY_REASON_ENUM, STALE_REBASE_DECISION_ENUM.
 #   M25 — SKILL.md Phase 3.3v test-fail covers RE-RESOLVE/STRATEGY-SWITCH/PARK with bounds.
 #   M26 — SKILL.md Phase 4.5 documents agent-decided rebase with safety preconditions.
-#   M27 — SKILL.md run-summary block describes Parked and Deferred outcomes.
-#   M28 — SKILL.md prints bot_authors_allow_list at run start AND in run-summary block.
+#   M27 — SKILL.md run-summary block describes Parked outcomes.
+#   M28 — SKILL.md pre-flight banner advertises the no-prompts-no-halts autopilot contract.
+#   M29 — SKILL.md Phase 1.4 explicitly removes the PR-author allow-list as a gate condition.
+#   M30 — SKILL.md Phase 1.3 falls back to literal `main` (no integration-branch prompt).
+#   M31 — SKILL.md Phase 4.2 auto-rebases on ff-only fail (no halt).
+#   M32 — SKILL.md Phase 3.3vi parks PR on push-non-FF (no halt).
+#   M33 — SKILL.md Phase 2.1 auto-breaks dependency cycles (no halt).
 
 set -u
 set -o pipefail
@@ -200,21 +205,20 @@ else
 fi
 
 echo
-echo "== M16: SKILL.md Phase 1 atomic-write uses same-directory mktemp pattern (D8a) =="
-# M16 is load-bearing: D8a's atomic write of .claude/uberdev.local.md
-# relies on mv -f being atomic, which is only true when source and
-# destination share a filesystem. A bare `mktemp` defaults to $TMPDIR
-# and can degrade to copy+delete on machines where .claude/ lives on a
-# different volume. Phase 1 MUST root the tempfile in the target's
-# directory (sibling tempfile pattern). Without this assertion, a
-# well-meaning future edit could silently re-introduce $TMPDIR-based
-# mktemp and break atomicity.
-if awk '/^## Phase 1/,/^## Phase 2/' "$SKILL_FILE" | \
-     grep -qE 'mktemp[^|`]*(--tmpdir="?\$\(dirname|"\$\{?TARGET\}?\.[A-Za-z]*X{3,}"|"\$TARGET\.[A-Za-z]*X{3,}")'; then
-  pass "M16 — Phase 1 mktemp roots tempfile in target directory (atomic mv guaranteed)"
+echo "== M16: SKILL.md Phase 1.3 falls back to literal main without prompting OR writing to disk (autopilot) =="
+# M16 was originally an atomic-rename mktemp guard for the ask-and-persist
+# integration_branch flow in Step 1.3. That flow was removed when /merge
+# became unconditional autopilot — autopilot does not ask, and so does not
+# write. The replacement assertion verifies Step 1.3 is now a pure
+# literal-fallback step: no `mktemp`, no `mv` (since there's nothing to
+# persist), no `[Y/n]`. Without this negative guard, a well-meaning future
+# edit could re-introduce ask-and-persist and silently re-add a prompt.
+PHASE_1_3_BLOCK=$(awk '/^### Step 1\.3/,/^### Step 1\.4/' "$SKILL_FILE")
+if echo "$PHASE_1_3_BLOCK" | grep -qE 'mktemp|mv -f|\[Y/n\]|persist the answer'; then
+  fail "M16 — Phase 1.3 MUST NOT ask-and-persist; it falls back to INTEGRATION_BRANCH_FALLBACK with no disk write"
+  echo "         (the prior atomic-rename pattern was removed alongside the prompt)"
 else
-  fail "M16 — Phase 1 mktemp must use same-directory pattern (--tmpdir=\"\$(dirname …)\" or \"\$TARGET.XXXXXX\")"
-  echo "         (bare mktemp defaults to \$TMPDIR; mv -f across filesystems is NOT atomic)"
+  pass "M16 — Phase 1.3 is a pure literal-fallback step (no mktemp / no mv / no prompt)"
 fi
 
 echo
@@ -328,34 +332,51 @@ else
 fi
 
 echo
-echo "== M22: SKILL.md STRATEGY_ENUM declares defer and drop =="
-if grep -E '^\| `STRATEGY_ENUM` \|' "$SKILL_FILE" | grep -qE '`defer`' && \
-   grep -E '^\| `STRATEGY_ENUM` \|' "$SKILL_FILE" | grep -qE '`drop`'; then
-  pass "M22 — STRATEGY_ENUM lists both \`defer\` and \`drop\`"
+echo "== M22: SKILL.md STRATEGY_ENUM declares drop (and does NOT declare the removed defer) =="
+STRATEGY_ROW=$(grep -E '^\| `STRATEGY_ENUM` \|' "$SKILL_FILE" || true)
+if echo "$STRATEGY_ROW" | grep -qE '`drop`'; then
+  pass "M22.drop — STRATEGY_ENUM lists \`drop\`"
 else
-  fail "M22 — STRATEGY_ENUM row in Constants must list both \`defer\` and \`drop\`"
+  fail "M22.drop — STRATEGY_ENUM row in Constants must list \`drop\`"
+fi
+if echo "$STRATEGY_ROW" | grep -qE '`defer`'; then
+  fail "M22.no-defer — STRATEGY_ENUM MUST NOT list \`defer\` (the defer strategy was removed when author-identity gating was deleted)"
+else
+  pass "M22.no-defer — STRATEGY_ENUM correctly omits the removed \`defer\` strategy"
 fi
 
 echo
-echo "== M23: SKILL.md AUDIT_EVENT_ENUM declares all new autopilot events =="
-for ev in pr_parked pr_deferred stale_branch_rebase_decision deprecated_flag_used agent_strategy_switch test_fail_agent_decision; do
+echo "== M23: SKILL.md AUDIT_EVENT_ENUM declares all autopilot events =="
+for ev in pr_parked stale_branch_rebase_decision deprecated_flag_used agent_strategy_switch test_fail_agent_decision; do
   if grep -E '^\| `AUDIT_EVENT_ENUM` \|' "$SKILL_FILE" | grep -qE "\`$ev\`"; then
     pass "M23.$ev — AUDIT_EVENT_ENUM declares \`$ev\`"
   else
     fail "M23.$ev — AUDIT_EVENT_ENUM missing \`$ev\`"
   fi
 done
+# Negative assertion: pr_deferred was removed alongside the defer strategy.
+if grep -E '^\| `AUDIT_EVENT_ENUM` \|' "$SKILL_FILE" | grep -qE '`pr_deferred`'; then
+  fail "M23.no-pr_deferred — AUDIT_EVENT_ENUM MUST NOT list \`pr_deferred\` (removed alongside the defer strategy)"
+else
+  pass "M23.no-pr_deferred — AUDIT_EVENT_ENUM correctly omits the removed \`pr_deferred\` event"
+fi
 
 echo
 echo "== M24: SKILL.md declares PARK_REASON_ENUM, STRATEGY_REASON_ENUM, STALE_REBASE_DECISION_ENUM =="
 for c in PARK_REASON_ENUM STRATEGY_REASON_ENUM STALE_REBASE_DECISION_ENUM; do
   assert_grep "$SKILL_FILE" "\`$c\`" "M24.$c — \`$c\` constant declared"
 done
-# M24.PARK_REASON_ENUM values
+# M24.PARK_REASON_ENUM values: test-fail-exhausted (kept) + push-non-ff (new); external-author-not-allow-listed removed.
 assert_grep "$SKILL_FILE" '`test-fail-exhausted`' \
   "M24.PARK.test-fail — PARK_REASON_ENUM lists \`test-fail-exhausted\`"
-assert_grep "$SKILL_FILE" '`external-author-not-allow-listed`' \
-  "M24.PARK.ext-author — PARK_REASON_ENUM lists \`external-author-not-allow-listed\`"
+assert_grep "$SKILL_FILE" '`push-non-ff`' \
+  "M24.PARK.push-non-ff — PARK_REASON_ENUM lists \`push-non-ff\` (Phase 3.3vi parks instead of halting)"
+PARK_ROW=$(grep -E '^\| `PARK_REASON_ENUM` \|' "$SKILL_FILE" || true)
+if echo "$PARK_ROW" | grep -qE '`external-author-not-allow-listed`'; then
+  fail "M24.PARK.no-ext-author — PARK_REASON_ENUM MUST NOT list \`external-author-not-allow-listed\` (author-identity gate removed)"
+else
+  pass "M24.PARK.no-ext-author — PARK_REASON_ENUM correctly omits the removed \`external-author-not-allow-listed\` reason"
+fi
 
 echo
 echo "== M25: SKILL.md Phase 3.3v test-fail response covers re-resolve / strategy-switch / park =="
@@ -412,15 +433,19 @@ for choice in 'rebased-ff-clean' 'skipped-conflicts' 'skipped-pr-head-ref' 'reba
 done
 
 echo
-echo "== M27: SKILL.md run-summary block describes Parked and Deferred outcomes =="
+echo "== M27: SKILL.md run-summary block describes Parked outcome =="
 SUMMARY_BLOCK=$(awk '/^### Run-summary block/,/^## /' "$SKILL_FILE")
-for outcome in Parked Deferred; do
-  if echo "$SUMMARY_BLOCK" | grep -qE "^[[:space:]]*${outcome}:"; then
-    pass "M27.$outcome — run-summary block names $outcome outcome at top level"
-  else
-    fail "M27.$outcome — run-summary block MUST list ${outcome}: <count> at top level (alongside Merged/Skipped/Aborted)"
-  fi
-done
+if echo "$SUMMARY_BLOCK" | grep -qE '^[[:space:]]*Parked:'; then
+  pass "M27.Parked — run-summary block names Parked outcome at top level"
+else
+  fail "M27.Parked — run-summary block MUST list Parked: <count> at top level (alongside Merged/Skipped/Aborted)"
+fi
+# Negative: Deferred was removed alongside the defer strategy.
+if echo "$SUMMARY_BLOCK" | grep -qE '^[[:space:]]*Deferred:'; then
+  fail "M27.no-Deferred — run-summary block MUST NOT list Deferred: (removed alongside defer strategy)"
+else
+  pass "M27.no-Deferred — run-summary block correctly omits the removed Deferred outcome"
+fi
 for field in 'strategy:' 'rationale:' 'outcome:' 'park reason:'; do
   if echo "$SUMMARY_BLOCK" | grep -qiE "$field"; then
     pass "M27.field[$field] — run-summary detail block names \"$field\" field"
@@ -430,18 +455,95 @@ for field in 'strategy:' 'rationale:' 'outcome:' 'park reason:'; do
 done
 
 echo
-echo "== M28: SKILL.md prints bot_authors_allow_list at run start AND in run-summary block =="
-PHASE_1=$(awk '/^## Phase 1/,/^## Phase 2/' "$SKILL_FILE")
-if echo "$PHASE_1" | grep -qiE '/merge autopilot — allow-listed authors|/merge autopilot -- allow-listed authors|^### Step 1\.0|allow-listed authors:'; then
-  pass "M28.preflight — Phase 1 prints bot_authors_allow_list summary at run start"
+echo "== M28: SKILL.md pre-flight banner advertises no-prompts-no-halts autopilot contract =="
+# Scope the negative grep to JUST the Step 1.0 banner block — Phase 1.4
+# legitimately mentions bot_authors_allow_list to call out its deprecated
+# status, and that prose should not trip this assertion.
+STEP_1_0=$(awk '/^### Step 1\.0/,/^### Step 1\.1/' "$SKILL_FILE")
+if echo "$STEP_1_0" | grep -qE 'no prompts.*no halts|no halts.*no prompts'; then
+  pass "M28.preflight — pre-flight banner advertises the no-prompts-no-halts autopilot contract"
 else
-  fail "M28.preflight — Phase 1 MUST print bot_authors_allow_list summary at run start (pre-flight banner)"
+  fail "M28.preflight — Step 1.0 banner MUST surface the no-prompts-no-halts autopilot contract verbatim"
 fi
-SUMMARY_BLOCK=$(awk '/^### Run-summary block/,/^## /' "$SKILL_FILE")
-if echo "$SUMMARY_BLOCK" | grep -qiE 'Allow-listed authors|allow-list|bot_authors_allow_list'; then
-  pass "M28.summary — run-summary block re-prints bot_authors_allow_list as audit anchor"
+# Negative: legacy bot_authors_allow_list banner was removed from Step 1.0.
+if echo "$STEP_1_0" | grep -qiE 'allow-listed authors|bot_authors_allow_list'; then
+  fail "M28.no-allow-list — Step 1.0 banner MUST NOT print bot_authors_allow_list (the trust-boundary gate was removed)"
 else
-  fail "M28.summary — run-summary block MUST re-print bot_authors_allow_list (audit anchor)"
+  pass "M28.no-allow-list — Step 1.0 banner correctly omits the removed bot_authors_allow_list listing"
+fi
+
+echo
+echo "== M29: SKILL.md Phase 1.4 explicitly removes the PR-author allow-list as a gate condition =="
+PHASE_1_4=$(awk '/^### Step 1\.4/,/^### Step 1\.5/' "$SKILL_FILE")
+if echo "$PHASE_1_4" | grep -qiE 'Author identity is NOT a gate condition'; then
+  pass "M29.no-author-gate — Phase 1.4 explicitly states author identity is NOT a gate"
+else
+  fail "M29.no-author-gate — Phase 1.4 MUST explicitly state \"Author identity is NOT a gate condition\""
+fi
+if echo "$PHASE_1_4" | grep -qiE 'PR author is repo collaborator|author\.login.*bot_authors_allow_list'; then
+  fail "M29.no-old-condition — Phase 1.4 MUST NOT contain the old author-collaborator gate clause"
+else
+  pass "M29.no-old-condition — Phase 1.4 correctly omits the removed author-collaborator gate clause"
+fi
+
+echo
+echo "== M30: SKILL.md Phase 1.3 falls back to literal main (no integration-branch prompt) =="
+PHASE_1_3=$(awk '/^### Step 1\.3/,/^### Step 1\.4/' "$SKILL_FILE")
+if echo "$PHASE_1_3" | grep -qE 'INTEGRATION_BRANCH_FALLBACK'; then
+  pass "M30.fallback — Phase 1.3 references INTEGRATION_BRANCH_FALLBACK"
+else
+  fail "M30.fallback — Phase 1.3 MUST reference INTEGRATION_BRANCH_FALLBACK (literal main)"
+fi
+if echo "$PHASE_1_3" | grep -qiE 'Never prompt'; then
+  pass "M30.never-prompt — Phase 1.3 explicitly forbids prompting"
+else
+  fail "M30.never-prompt — Phase 1.3 MUST explicitly state \"Never prompt the user\""
+fi
+
+echo
+echo "== M31: SKILL.md Phase 4.2 auto-rebases on ff-only fail (no halt) =="
+PHASE_4_2=$(awk '/^### Step 4\.2/,/^### Step 4\.3/' "$SKILL_FILE")
+if echo "$PHASE_4_2" | grep -qE 'auto-rebase|git rebase origin/'; then
+  pass "M31.auto-rebase — Phase 4.2 auto-rebases on ff-only fail"
+else
+  fail "M31.auto-rebase — Phase 4.2 MUST auto-rebase local onto origin on ff-only fail"
+fi
+if echo "$PHASE_4_2" | grep -qiE 'MUST NOT halt|never halt|does NOT halt'; then
+  pass "M31.no-halt — Phase 4.2 explicitly forbids halting on local divergence"
+else
+  fail "M31.no-halt — Phase 4.2 MUST explicitly state the run does NOT halt on local divergence"
+fi
+
+echo
+echo "== M32: SKILL.md Phase 3.3vi parks PR on push-non-FF (no halt) =="
+PHASE_3_3VI=$(awk '/^vi\. \*\*Push the resolution/,/^vii\. /' "$SKILL_FILE")
+if echo "$PHASE_3_3VI" | grep -qE 'park THIS PR|park.*drop.*push-non-ff|push-non-ff'; then
+  pass "M32.park — Phase 3.3vi parks PR on push-non-FF"
+else
+  fail "M32.park — Phase 3.3vi MUST park PR via drop on push-non-FF (instead of halting)"
+fi
+if echo "$PHASE_3_3VI" | grep -qE 'continue with the next PR|queue does NOT halt|queue continues'; then
+  pass "M32.continue — Phase 3.3vi states queue continues after park"
+else
+  fail "M32.continue — Phase 3.3vi MUST state the queue continues after parking the PR"
+fi
+
+echo
+echo "== M33: SKILL.md Phase 2.1 auto-breaks dependency cycles (no halt) =="
+PHASE_2_1=$(awk '/^### Step 2\.1/,/^### Step 2\.2/' "$SKILL_FILE")
+if echo "$PHASE_2_1" | grep -qE 'createdAt|drop the cycle|fall through'; then
+  pass "M33.auto-break — Phase 2.1 auto-breaks cycles via createdAt fallback"
+else
+  fail "M33.auto-break — Phase 2.1 MUST auto-break cycles (drop edges + fall through to createdAt order)"
+fi
+if echo "$PHASE_2_1" | grep -qE 'Never halt|never halts|never auto-break'; then
+  if echo "$PHASE_2_1" | grep -qE 'Never halt|never halts'; then
+    pass "M33.no-halt — Phase 2.1 explicitly forbids halting on cycle"
+  else
+    fail "M33.no-halt — Phase 2.1 MUST forbid halting; the prior 'never auto-break' rule is now reversed (auto-break IS the new contract)"
+  fi
+else
+  fail "M33.no-halt — Phase 2.1 MUST explicitly forbid halting on cycle"
 fi
 
 echo
