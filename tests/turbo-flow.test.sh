@@ -168,6 +168,41 @@ assert_grep "$FINISH_BRANCH" 'Reviewer findings summary' \
   "finish-branch PR body has Reviewer findings summary section"
 
 echo
+echo "== /simplify runs ONCE in the chain — at /review-pr Phase 2, not pre-push =="
+# Chain-level invariant: trivial/small heredocs MUST NOT call /simplify standalone
+# before push. The canonical simplify pass is Phase 2 of /uberdev:review-pr,
+# which sees the post-Phase-1 diff (full PR + review-fix commits) and is
+# strictly more complete than any pre-push call. This guard fails loud if a
+# future edit re-introduces the duplication.
+if grep -qE '^[[:space:]]*[0-9]+\.[[:space:]]+/(uberdev:)?simplify[[:space:]]+before[[:space:]]+push' "$SOLVE_PIPELINE"; then
+  echo "  FAIL  no /simplify-before-push step in solve-pipeline heredocs"
+  echo "        file: $SOLVE_PIPELINE"
+  echo "        regression: pre-push /simplify call duplicates /review-pr Phase 2"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  no /simplify-before-push step in solve-pipeline heredocs"
+  PASS=$((PASS + 1))
+fi
+# Positive lock: each of the 4 trivial/small heredocs (trivial-solve, trivial-turbo,
+# small-solve, small-turbo) must explicitly tell the spawned agent NOT to run
+# /simplify standalone. Anchoring the count at 4 catches both deletion and the
+# subtler regression where one heredoc loses the directive while three keep it.
+DIRECTIVE_COUNT=$(grep -cE 'Do NOT run /uberdev:simplify standalone before push' "$SOLVE_PIPELINE" || true)
+if [[ "$DIRECTIVE_COUNT" -eq 4 ]]; then
+  echo "  PASS  all 4 trivial/small heredocs include the no-pre-push-simplify directive (count=4)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  all 4 trivial/small heredocs include the no-pre-push-simplify directive"
+  echo "        file: $SOLVE_PIPELINE"
+  echo "        expected count: 4 (trivial-solve, trivial-turbo, small-solve, small-turbo)"
+  echo "        actual count:   $DIRECTIVE_COUNT"
+  FAIL=$((FAIL + 1))
+fi
+assert_grep "$REPO_ROOT/plugins/uberdev/commands/simplify.md" \
+  'canonical place.*/simplify.*runs.*Phase 2|Phase 2 of .*review-pr' \
+  "simplify.md names /review-pr Phase 2 as the canonical simplify run site"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
