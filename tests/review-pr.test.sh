@@ -77,6 +77,57 @@ for f in "${AGENT_FILES[@]}"; do
 done
 
 echo
+echo "== Mandatory simplify pass after review-and-fix loop (#30) =="
+# /uberdev:review-pr is a true two-phase command: review fanout + fix loop,
+# THEN a mandatory simplify-agent fanout (the three lenses from /simplify),
+# THEN a final aggregation. Each assertion below shape-locks one acceptance
+# criterion from issue #30.
+# Anchor on the ordered arrow form "review fanout → fix loop → simplify
+# fanout → final aggregation". The arrows are the load-bearing landmarks —
+# without them, any prose mentioning the four words anywhere passes (the
+# previous loose alternative was tautological).
+assert_grep "$REVIEW_PR" \
+  'review fanout.*fix loop.*simplify fanout.*final aggregation' \
+  "phase ordering documented (review → fix → simplify → aggregation)"
+assert_grep "$REVIEW_PR" \
+  '[Cc]ode [Rr]euse|reuse[- ]review|reuse lens' \
+  "simplify lens 1: reuse named"
+assert_grep "$REVIEW_PR" \
+  '[Cc]ode [Qq]uality|quality[- ]review|quality lens' \
+  "simplify lens 2: quality named"
+assert_grep "$REVIEW_PR" \
+  '[Cc]ode [Ee]fficiency|efficiency[- ]review|efficiency lens' \
+  "simplify lens 3: efficiency named"
+# Case-insensitive collapses SINGLE/single and ONE/one — three alternatives
+# instead of six.
+if grep -qiE 'simplify.*single message|simplify.*one assistant turn|single message.*simplify' "$REVIEW_PR"; then
+  echo "  PASS  simplify-phase agents dispatched in a single message"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  simplify-phase agents dispatched in a single message"
+  echo "        file: $REVIEW_PR"
+  FAIL=$((FAIL + 1))
+fi
+assert_grep "$REVIEW_PR" \
+  'separate commit|distinct commit|separately from the review[- ]fix' \
+  "auto-applied simplify edits commit separately from review-fix commits"
+assert_grep "$REVIEW_PR" \
+  '--no-simplify' \
+  "--no-simplify opt-out flag documented"
+# Anchor advisory routing on the WHERE (Phase 2 / aggregation), not just the
+# bare word "advisory" anywhere in the file.
+assert_grep "$REVIEW_PR" \
+  '[Aa]dvisory[- ]only.*surface|surface in the Phase 2 row|never silently dropped|advisory.*aggregation' \
+  "advisory simplify findings appear in final aggregation"
+# Anchor non-blocking on Phase 2 / simplify context, not just the bare word
+# anywhere in the file.
+assert_grep "$REVIEW_PR" \
+  '[Ss]implify[- ]phase fanout itself fails|simplify.*do(es)? not undo|[Nn]on-blocking.*simplify|simplify.*[Nn]on-blocking|continues regardless of Phase 2' \
+  "non-blocking: simplify-phase failure does not undo review-and-fix"
+assert_grep "$REVIEW_PR" \
+  'review[- ]phase.*simplify[- ]phase|simplify[- ]phase.*review[- ]phase|review-phase vs simplify-phase|distinguish.*phase' \
+  "final aggregation distinguishes review-phase vs simplify-phase findings"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
