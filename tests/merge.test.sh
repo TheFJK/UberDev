@@ -137,9 +137,11 @@ assert_grep "$SKILL_FILE" '\.uberdev/runs/.*audit\.jsonl' \
   "M11 — audit log path declared"
 
 echo
-echo "== M12: SKILL.md mandates pre-push test gate (D16, no skip path) =="
-assert_grep "$SKILL_FILE" 'test gate|test command runs in scratch worktree|run the project' \
-  "M12 — pre-push test gate prose present"
+echo "== M12: SKILL.md mandates pre-push test gate runs ALWAYS, with agent-decided fail response =="
+assert_grep "$SKILL_FILE" 'ALWAYS RUNS|test gate.*always' \
+  "M12.1 — Phase 3.3v test gate ALWAYS RUNS prose present"
+assert_grep "$SKILL_FILE" 'agent picks ONE of three|agent picks one of three|agent picks the best applicable branch' \
+  "M12.2 — Phase 3.3v agent-decided test-fail response prose present"
 
 echo
 echo "== M13: SKILL.md describes fork-PR preflight refusal for org-owned forks (Q3) =="
@@ -215,72 +217,127 @@ assert_grep "$SKILL_FILE" '`AUTO_CONFIRM_KEY`' \
   "M17.1 — AUTO_CONFIRM_KEY constant declared"
 assert_grep "$SKILL_FILE" '`AUTO_CONFIRM_FLAGS`' \
   "M17.2 — AUTO_CONFIRM_FLAGS constant declared (CLI flags)"
-assert_grep "$SKILL_FILE" '`AUTO_CONFIRM_DEFAULT_(SINGLE|MULTI)`' \
-  "M17.3 — AUTO_CONFIRM_DEFAULT_SINGLE/MULTI constants declared"
-assert_grep "$SKILL_FILE" 'Auto-confirm resolution.*CLI flag wins' \
-  "M17.4 — auto-confirm precedence chain (CLI > config > scope) documented in Inputs"
+if grep -qE '^\| `AUTO_CONFIRM_DEFAULT_(SINGLE|MULTI)`' "$SKILL_FILE"; then
+  echo "  FAIL  M17.3 — AUTO_CONFIRM_DEFAULT_(SINGLE|MULTI) constants must be REMOVED for autopilot (no scope-based default)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  M17.3 — AUTO_CONFIRM_DEFAULT_(SINGLE|MULTI) constants correctly absent (autopilot is unconditional)"
+  PASS=$((PASS + 1))
+fi
+assert_grep "$SKILL_FILE" 'Autopilot \(always ON\)|Autopilot.*always.*ON' \
+  "M17.4 — Inputs section declares 'Autopilot (always ON)' (autopilot mode, no precedence chain)"
+assert_grep "$SKILL_FILE" '`DEPRECATED_FLAGS_NOTE`' \
+  "M17.5 — DEPRECATED_FLAGS_NOTE constant declared"
+assert_grep "$SKILL_FILE" 'no behavioural effect' \
+  "M17.6 — DEPRECATED_FLAGS_NOTE value contains 'no behavioural effect'"
 
 echo
-echo "== M18: SKILL.md Phase 2.4 documents both auto-confirm ON and OFF branches =="
-# M18 prevents silent deletion of either branch — interactive [y/N]
-# users (auto-confirm OFF) and auto-mode users (auto-confirm ON) must
-# both stay supported.
-if awk '/^### Step 2\.4/,/^## Phase 3/' "$SKILL_FILE" | \
-     grep -qE 'If auto-confirm is ON' && \
-   awk '/^### Step 2\.4/,/^## Phase 3/' "$SKILL_FILE" | \
-     grep -qE 'If auto-confirm is OFF'; then
-  echo "  PASS  M18.1 — Phase 2.4 documents both auto-confirm ON and OFF branches"
+echo "== M18: SKILL.md Phase 2.4 is unconditional autopilot (no ON/OFF branches, no [y/N] prompt) =="
+PHASE_2_4=$(awk '/^### Step 2\.4/,/^## Phase 3/' "$SKILL_FILE")
+if echo "$PHASE_2_4" | grep -qE 'If auto-confirm is ON|If auto-confirm is OFF'; then
+  echo "  FAIL  M18.1 — Phase 2.4 must NOT contain 'If auto-confirm is ON/OFF' branches (autopilot is unconditional)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  M18.1 — Phase 2.4 has NO ON/OFF branches (autopilot is unconditional)"
+  PASS=$((PASS + 1))
+fi
+if echo "$PHASE_2_4" | grep -qE 'autopilot|Autopilot'; then
+  echo "  PASS  M18.2 — Phase 2.4 carries autopilot prose"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  M18.1 — Phase 2.4 must document BOTH 'If auto-confirm is ON' AND 'If auto-confirm is OFF'"
+  echo "  FAIL  M18.2 — Phase 2.4 MUST mention autopilot"
   FAIL=$((FAIL + 1))
 fi
-assert_grep "$SKILL_FILE" 'Apply this plan\?' \
-  "M18.2 — interactive-mode prompt 'Apply this plan?' present"
-
-echo
-echo "== M19: SKILL.md Phase 4.5 states the no-auto-rebase invariant AND covers both modes =="
-# M19 is load-bearing: Phase 4.5 stale-branch handling MUST never
-# auto-rebase. Auto-confirm only suppresses the offer; it never
-# authorises destructive history-rewriting. A future edit that wires
-# auto-confirm to auto-rebase "for efficiency" could silently rewind
-# the user's in-flight work.
-assert_grep "$SKILL_FILE" 'never\*\* runs `git rebase` automatically|Never auto-execute' \
-  "M19.1 — Phase 4.5 'never auto-rebase' invariant stated"
-if awk '/^### Step 4\.5/,/^### Step 4\.6/' "$SKILL_FILE" | \
-     grep -qE 'If auto-confirm is ON' && \
-   awk '/^### Step 4\.5/,/^### Step 4\.6/' "$SKILL_FILE" | \
-     grep -qE 'If auto-confirm is OFF'; then
-  echo "  PASS  M19.2 — Phase 4.5 documents both auto-confirm ON (list-only) and OFF (per-branch typed yes) branches"
+# A positive prompt would have either [y/N] near it, OR `Apply this plan?` without
+# a preceding "NO" / "no" within the same line. Scan for that pattern.
+if echo "$PHASE_2_4" | grep -qE '\[y/N\].*Apply this plan\?|Apply this plan\?.*\[y/N\]'; then
+  echo "  FAIL  M18.3 — Phase 2.4 must NOT contain a positive 'Apply this plan?' [y/N] prompt (autopilot is unconditional)"
+  FAIL=$((FAIL + 1))
+elif echo "$PHASE_2_4" | grep -E 'Apply this plan\?' | grep -qvE '\bNO\b|\bno\b'; then
+  echo "  FAIL  M18.3 — Phase 2.4 has 'Apply this plan?' without a NO/no qualifier (likely a positive prompt)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  M18.3 — Phase 2.4 has no positive 'Apply this plan?' prompt"
+  PASS=$((PASS + 1))
+fi
+if echo "$PHASE_2_4" | grep -qE 'autopilot-default'; then
+  echo "  PASS  M18.4 — Phase 2.4 emits 'autopilot-default' as data.reason for order_confirmed"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  M19.2 — Phase 4.5 must document BOTH 'If auto-confirm is ON' AND 'If auto-confirm is OFF'"
+  echo "  FAIL  M18.4 — Phase 2.4 MUST emit data.reason='autopilot-default' for order_confirmed"
   FAIL=$((FAIL + 1))
 fi
 
 echo
-echo "== M20: commands/merge.md exposes --yes / -y in argument-hint AND Usage line =="
-# M20 keeps the dispatcher's frontmatter and body in sync. argument-hint
-# powers slash-help auto-completion; Usage is the human-readable line.
-# Drift between the two confuses the user.
+echo "== M19: SKILL.md Phase 4.5 carries the autopilot affirmative-decision invariant =="
+PHASE_4_5=$(awk '/^### Step 4\.5/,/^### Step 4\.6/' "$SKILL_FILE")
+if echo "$PHASE_4_5" | grep -qE 'never rebases without an explicit affirmative decision'; then
+  echo "  PASS  M19.1 — Phase 4.5 carries Q2 invariant 'never rebases without an explicit affirmative decision'"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M19.1 — Phase 4.5 MUST contain verbatim 'never rebases without an explicit affirmative decision'"
+  FAIL=$((FAIL + 1))
+fi
+if echo "$PHASE_4_5" | grep -qE "agent's typed decision-record is the affirmative form|typed decision-record is the affirmative form"; then
+  echo "  PASS  M19.2 — Phase 4.5 names the typed decision-record as the affirmative form"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M19.2 — Phase 4.5 MUST state 'the agent's typed decision-record is the affirmative form for autopilot mode'"
+  FAIL=$((FAIL + 1))
+fi
+if echo "$PHASE_4_5" | grep -qE 'If auto-confirm is ON|If auto-confirm is OFF'; then
+  echo "  FAIL  M19.3 — Phase 4.5 must NOT branch on auto-confirm (autopilot is unconditional)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  M19.3 — Phase 4.5 has no auto-confirm ON/OFF branching (autopilot is unconditional)"
+  PASS=$((PASS + 1))
+fi
+if echo "$PHASE_4_5" | grep -qE 'Force-push to PR head refs remains absolutely forbidden|Never `--force`|never --force|Force-push to PR head refs remains forbidden absolutely'; then
+  echo "  PASS  M19.4 — Phase 4.5 preserves the no-force-push invariant"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M19.4 — Phase 4.5 MUST preserve the 'no force-push to PR head refs' invariant"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== M20: commands/merge.md surfaces --yes / -y as DEPRECATED with stable user-facing notice =="
 assert_grep "$CMD_FILE" '^argument-hint:.*--yes\|-y' \
-  "M20.1 — argument-hint frontmatter lists --yes|-y"
+  "M20.1 — argument-hint frontmatter still lists --yes|-y (parsed for backward compat)"
 assert_grep "$CMD_FILE" '^\*\*Usage:\*\*.*--yes\|-y' \
-  "M20.2 — Usage line lists --yes|-y"
-assert_grep "$CMD_FILE" '`--yes` / `-y`.*skip' \
-  "M20.3 — doc bullet for --yes / -y describes prompt suppression"
+  "M20.2 — Usage line still lists --yes|-y"
+assert_grep "$CMD_FILE" '## Deprecated Flags' \
+  "M20.3 — '## Deprecated Flags' section present"
+assert_grep "$CMD_FILE" 'no behavioural effect' \
+  "M20.4 — deprecation notice text 'no behavioural effect' present"
+assert_grep "$CMD_FILE" '`--yes` / `-y`.*deprecated|deprecated.*`--yes` / `-y`' \
+  "M20.5 — bullet for --yes / -y is annotated deprecated"
+if grep -qE 'autopilot|Autopilot' "$CMD_FILE"; then
+  echo "  PASS  M20.6 — commands/merge.md mentions autopilot mode"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M20.6 — commands/merge.md MUST describe autopilot mode"
+  FAIL=$((FAIL + 1))
+fi
 
 echo
-echo "== M21: using-uberdev/SKILL.md documents auto_confirm in YAML example AND precedence recap =="
+echo "== M21: using-uberdev/SKILL.md auto_confirm key documented as DEPRECATED =="
 USING_SKILL_FILE="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/SKILL.md"
 if [ ! -r "$USING_SKILL_FILE" ]; then
   echo "  FAIL  M21 — using-uberdev SKILL.md missing or unreadable: $USING_SKILL_FILE"
   FAIL=$((FAIL + 1))
 else
   assert_grep "$USING_SKILL_FILE" '^auto_confirm:' \
-    "M21.1 — auto_confirm key present in YAML example"
+    "M21.1 — auto_confirm key still present in YAML example (parsed for backward compat)"
   assert_grep "$USING_SKILL_FILE" '\*\*`auto_confirm` precedence:\*\*' \
-    "M21.2 — auto_confirm precedence paragraph present"
+    "M21.2 — auto_confirm precedence paragraph still present (now flags deprecation)"
+  if grep -qiE 'DEPRECATED' "$USING_SKILL_FILE"; then
+    echo "  PASS  M21.3 — using-uberdev/SKILL.md flags auto_confirm as DEPRECATED"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  M21.3 — using-uberdev/SKILL.md MUST flag auto_confirm as DEPRECATED"
+    FAIL=$((FAIL + 1))
+  fi
 fi
 
 echo
