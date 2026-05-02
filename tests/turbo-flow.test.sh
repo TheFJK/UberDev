@@ -122,35 +122,65 @@ assert_grep "$SOLVE_CMD" \
 
 echo
 echo "== solve-pipeline accepts multiple issue numbers (multi-issue dispatch) =="
-# /turbo 5 6 7 must spawn one agent per issue in parallel. The skill scans every
-# space-separated token in $ARGUMENTS, collects only purely-numeric tokens
-# (anchored regex — `--terminal=foo123` must NOT pollute), dedupes, validates
-# every issue up front (Phase A), and only then spawns (Phase B). If any issue
-# fails validation, the entire batch aborts with no agents dispatched.
+# /turbo 5 6 7 must spawn one agent per issue in parallel. The skill tokenizes
+# $ARGUMENTS via a portable bash-and-zsh-safe pipeline (`tr ' ' '\n' | grep -E
+# '^[0-9]+$' | awk '!seen[$0]++'`), validates every issue up front (Phase A),
+# and only then spawns (Phase B). If any issue fails validation, the entire
+# batch aborts with no agents dispatched.
+#
+# zsh footgun: a naive `for token in $ARGUMENTS; do …` does NOT word-split
+# scalar parameters in zsh (SH_WORD_SPLIT off by default), so `/turbo 5 6 7`
+# would die at the usage check. The pipeline avoids this — `arr=($(cmd))`
+# word-splits the substitution output on $IFS in BOTH bash and zsh.
 assert_grep "$SOLVE_PIPELINE" \
-  'ISSUE_NUMS=\(\)' \
-  "solve-pipeline declares ISSUE_NUMS array (multi-issue parser)"
+  "ISSUE_NUMS=\(\\\$\(echo .*ARGUMENTS" \
+  "solve-pipeline declares ISSUE_NUMS via portable subshell pipeline"
 assert_grep "$SOLVE_PIPELINE" \
-  'for token in \$ARGUMENTS' \
-  "solve-pipeline iterates tokens for numeric extraction"
+  "tr ' ' '\\\\n'" \
+  "solve-pipeline tokenizes \$ARGUMENTS via tr (portable across bash/zsh)"
 assert_grep "$SOLVE_PIPELINE" \
-  '\^\[0-9\]\+\$' \
-  "solve-pipeline anchors numeric token regex (rejects --terminal=foo123)"
+  "grep -E '\^\[0-9\]\+\\\$'" \
+  "solve-pipeline filters to purely-numeric tokens (anchored ^[0-9]+\$ rejects --terminal=foo123)"
+assert_grep "$SOLVE_PIPELINE" \
+  "awk '!seen\[\\\$0\]\+\+'" \
+  "solve-pipeline dedupes via awk !seen[\$0]++ (preserves first-seen order, prevents same-issue worktree race)"
+assert_grep "$SOLVE_PIPELINE" \
+  'SH_WORD_SPLIT|word-split|word split' \
+  "solve-pipeline comment explains the zsh word-split footgun (regression-prevention)"
 assert_grep "$SOLVE_PIPELINE" \
   'no agents dispatched' \
   "solve-pipeline aborts before spawning if any issue fails Phase A validation"
+assert_grep "$SOLVE_PIPELINE" \
+  'printf .error: %s.*ERRORS\[@\]' \
+  "Phase A prints ALL accumulated errors before abort (not just the last one)"
 assert_grep "$SOLVE_PIPELINE" \
   'Phase A|validate.*all issues|validate-all-first' \
   "solve-pipeline names the Phase A validate-all-first contract"
 assert_grep "$SOLVE_PIPELINE" \
   'for ISSUE_NUM in "\$\{ISSUE_NUMS\[@\]\}"' \
   "solve-pipeline loops Phase B over validated issues"
+# TURBO MODE banner must be hoisted out of the per-issue loop and printed
+# at most once per /turbo invocation. Locking both the dedup loop AND the
+# `break` after the first medium-tier hit keeps it from regressing to
+# per-spawn (which would stack N identical banners on a 3-medium batch).
+assert_grep "$SOLVE_PIPELINE" \
+  'TURBO MODE.*banner.*once|print once.*medium|once before.*loop' \
+  "TURBO MODE banner documented as printed-once (not per-spawn)"
+assert_grep "$SOLVE_PIPELINE" \
+  'for n in "\$\{ISSUE_NUMS\[@\]\}".*\n.*medium.*\n.*break|TIERS\[\$n\].*medium' \
+  "TURBO MODE banner uses break after first medium-tier hit (dedup mechanic)"
 assert_grep "$SOLVE_PIPELINE" \
   'TERMINAL.*==.*ghostty.*\&\&.*ISSUE_NUMS|sleep 0\.6' \
   "solve-pipeline serializes Ghostty multi-spawn (keystroke race mitigation, sleep 0.6)"
 assert_grep "$SOLVE_PIPELINE" \
   'SPAWNED\[@\]|\$\{#SPAWNED\[@\]\}' \
   "solve-pipeline emits a single summary notification (not per-spawn) using SPAWNED array"
+assert_grep "$SOLVE_PIPELINE" \
+  'DISPATCH_FAILED' \
+  "Phase B tracks per-issue dispatch failures (no silent partial-batch failures)"
+assert_grep "$SOLVE_PIPELINE" \
+  'DISPATCH_RC=\$\?' \
+  "Phase B captures dispatch exit status after the case statement"
 # REAL_CLAUDE detection must be hoisted out of the per-issue loop (cosmetic
 # optimization — same value across spawns). Anchor: it appears in Step 3
 # (terminal detection) before the Phase B loop.

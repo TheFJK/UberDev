@@ -32,14 +32,18 @@ This skill is invoked inline by `commands/solve.md` and `commands/turbo.md`. The
 Extract one or more issue numbers + optional override flags. The parser scans every space-separated token in `$ARGUMENTS` and collects only those that are **purely numeric** (anchored regex `^[0-9]+$`); deduplicates so `/turbo 5 5 6` doesn't race two agents into the same worktree path; and rejects empty input.
 
 ```bash
-ISSUE_NUMS=()
-for token in $ARGUMENTS; do
-  [[ "$token" =~ ^[0-9]+$ ]] && ISSUE_NUMS+=("$token")
-done
-# Dedupe (preserves first-seen order). Same-issue race would collide on
-# .claude/worktrees/solve-issue-N/ — the second spawn's `git worktree remove --force`
-# would nuke the first's checkout mid-run.
-ISSUE_NUMS=($(printf '%s\n' "${ISSUE_NUMS[@]}" | awk '!seen[$0]++'))
+# Pipeline form (portable across bash and zsh). The naive `for token in
+# $ARGUMENTS; do …` loop does NOT word-split scalar parameters in zsh —
+# zsh's SH_WORD_SPLIT is off by default, so the loop runs ONCE with the entire
+# argument string as a single token, the regex rejects it, and `/turbo 5 6 7`
+# dies at the usage check. The pipeline below tokenizes via `tr ' ' '\n'`,
+# filters to purely-numeric tokens (anchored `^[0-9]+$` rejects flag tokens
+# like `--terminal=foo123` even when they contain digits), and dedupes
+# preserving first-seen order (same-issue race would collide on the shared
+# worktree path `.claude/worktrees/solve-issue-N/` — the second spawn's
+# `git worktree remove --force` would nuke the first's checkout mid-run).
+# Array assignment `arr=($(...))` word-splits on $IFS in BOTH bash and zsh.
+ISSUE_NUMS=($(echo "$ARGUMENTS" | tr ' ' '\n' | grep -E '^[0-9]+$' | awk '!seen[$0]++'))
 
 OVERRIDE=$(echo "$ARGUMENTS" | grep -oE '\-\-(trivial|small|full)' | head -1 | sed 's/--//')
 TERMINAL_OVERRIDE=$(echo "$ARGUMENTS" | grep -oE '\-\-terminal=[a-z]+' | head -1 | sed 's/--terminal=//')
@@ -152,14 +156,27 @@ for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
     ERRORS+=("#$ISSUE_NUM: state=$STATE (must be OPEN)")
     continue
   fi
-  # TITLE: jq -r .title <<<"$ISSUE_JSON", truncated at ~40 chars at a word
-  #        boundary, append … if longer.
-  # TIER:  apply triage table above to {title, body, labels} → TIER; $OVERRIDE
-  #        wins if set; default "medium" on ambiguity. Be honest about scope —
-  #        a "refactor the whole auth module" body is medium even with quiet
-  #        labels.
-  TITLES[$ISSUE_NUM]="$TITLE"  # set per the rule above
-  TIERS[$ISSUE_NUM]="$TIER"    # set per the rule above
+  # Title: jq the raw value, then truncate to 40 chars (with ellipsis) so the
+  # tab/workspace name fits. Refine at the word boundary if you can — the
+  # naive char-cut below is a safe default that always produces a non-empty
+  # string with a stable upper bound.
+  TITLE_RAW=$(jq -r .title <<<"$ISSUE_JSON")
+  if [[ ${#TITLE_RAW} -gt 40 ]]; then
+    TITLE="${TITLE_RAW:0:40}…"
+  else
+    TITLE="$TITLE_RAW"
+  fi
+  # Tier: $OVERRIDE if the user passed --trivial|--small|--full, else default
+  # to "medium" (the safe escalation tier — full brainstorm + plan + review
+  # pipeline). Apply the triage table above to {title, body, labels} to
+  # downgrade to "trivial" or "small" when the issue is genuinely scoped that
+  # way; be honest about scope (a "refactor the whole auth module" body is
+  # medium even with quiet labels). The default keeps the dispatch valid even
+  # if the heuristic refinement is skipped — better to over-engineer a trivial
+  # fix than to under-spec a real refactor.
+  TIER="${OVERRIDE:-medium}"
+  TITLES[$ISSUE_NUM]="$TITLE"
+  TIERS[$ISSUE_NUM]="$TIER"
 done
 
 if [[ ${#ERRORS[@]} -gt 0 ]]; then
@@ -183,10 +200,11 @@ fi
 
 ### 5. Per-issue dispatch (Phase B — spawn one agent per issue)
 
-For each validated issue, write its prompt heredoc, write its launcher script, and spawn it into the chosen terminal. Each spawn is an independent OS process / cmux workspace; together they run in parallel. The for-loop opens at the top of this code block and closes after the dispatch case in Step 5c (`done`); sub-steps 5a/5b/5c are documentation breakdowns of the loop body — their bash blocks all execute inside the same loop iteration.
+For each validated issue, write its prompt heredoc, write its launcher script, and spawn it into the chosen terminal. Each spawn is an independent OS process / cmux workspace; together they run in parallel. The for-loop opens at the top of this code block and closes after the dispatch case in Step 5c (`done`); sub-steps 5a/5b/5c are documentation breakdowns of the loop body — their bash blocks all execute inside the same loop iteration. Per-issue dispatch outcomes are tracked in `SPAWNED` (success) and `DISPATCH_FAILED` (failure) so the user sees exactly which issues spawned and which didn't — no silent partial-batch failures.
 
 ```bash
 SPAWNED=()
+DISPATCH_FAILED=()
 for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
   TIER="${TIERS[$ISSUE_NUM]}"
   TITLE="${TITLES[$ISSUE_NUM]}"
@@ -427,27 +445,48 @@ APPLESCRIPT
     ;;
 esac
 
-SPAWNED+=("#$ISSUE_NUM ($TIER)")
+# Track per-issue dispatch outcome. `$?` after the case is the exit status of
+# the last command in the matched branch; the Ghostty branch ends in an `echo`
+# (success) on either AppleScript-success or AppleScript-fail-then-nohup
+# fallback paths, so both record as success — the agent IS spawned either way,
+# just via a different mechanism. cmux/iTerm/Terminal record their actual
+# dispatch return code so a dead cmux socket or AppleScript permission denial
+# surfaces in the failure list instead of silently dropping the issue.
+DISPATCH_RC=$?
+if [[ $DISPATCH_RC -eq 0 ]]; then
+  SPAWNED+=("#$ISSUE_NUM ($TIER)")
+else
+  DISPATCH_FAILED+=("#$ISSUE_NUM ($TERMINAL exit=$DISPATCH_RC)")
+fi
 
 # Ghostty keystroke dispatch is asynchronous; firing Cmd+T three times in
 # <100 ms can race all three keystrokes into the first-created tab. Pause
 # between Ghostty spawns gives the new tab time to materialize before the
-# next keystroke fires. cmux uses an IPC API, iTerm/Terminal use scripted
-# `create window`/`do script` (Apple Event queue serializes), nohup needs
-# nothing — only Ghostty needs the pause, and only when batch size > 1.
+# next keystroke fires. cmux uses an IPC API; iTerm/Terminal use scripted
+# `create window`/`do script` (the Apple Event queue serializes
+# same-application AppleScript calls in practice); nohup needs nothing.
+# Only Ghostty needs the pause, and only when batch size > 1.
 if [[ "$TERMINAL" == "ghostty" && ${#ISSUE_NUMS[@]} -gt 1 ]]; then
   sleep 0.6
 fi
 done
+
+# Phase B per-issue dispatch failure summary. Surfaces partial-batch failures
+# loudly so the user knows exactly which issues didn't spawn — never silently
+# drop a failure into the void.
+if [[ ${#DISPATCH_FAILED[@]} -gt 0 ]]; then
+  echo "warning: ${#DISPATCH_FAILED[@]} of ${#ISSUE_NUMS[@]} dispatch(es) failed:" >&2
+  printf '  - %s\n' "${DISPATCH_FAILED[@]}" >&2
+fi
 ```
 
 ### 6. Brief delay and confirm — single summary notification
 
-cmux's native notifier is preferred (matches existing UX); otherwise fall through to `terminal-notifier` then `osascript display notification`. **One summary notification per `/turbo` invocation** — N back-to-back notifications would be noisy.
+cmux's native notifier is preferred (matches existing UX); otherwise fall through to `terminal-notifier` then `osascript display notification`. **One summary notification per `/turbo` invocation** — N back-to-back notifications would be noisy. The body lists every successfully spawned issue and (if any) the count of dispatch failures.
 
 ```bash
 sleep 1
-NOTIFY_BODY="Spawned ${#SPAWNED[@]} agent$([[ ${#SPAWNED[@]} -ne 1 ]] && echo s): $(IFS=', '; echo "${SPAWNED[*]}") (terminal: $TERMINAL$([[ "$AUTO_PERMISSIONS" == "1" ]] && echo ', auto')$([[ "$AUTO_MODE" == "1" ]] && echo ', turbo'))"
+NOTIFY_BODY="Spawned ${#SPAWNED[@]} agent$([[ ${#SPAWNED[@]} -ne 1 ]] && echo s): $(IFS=', '; echo "${SPAWNED[*]}") (terminal: $TERMINAL$([[ "$AUTO_PERMISSIONS" == "1" ]] && echo ', auto')$([[ "$AUTO_MODE" == "1" ]] && echo ', turbo'))$([[ ${#DISPATCH_FAILED[@]} -gt 0 ]] && echo " — ${#DISPATCH_FAILED[@]} dispatch failure(s), see stderr")"
 if [[ "$TERMINAL" == "cmux" ]] && command -v cmux >/dev/null 2>&1; then
   cmux notify --title "Orchestrator" --body "$NOTIFY_BODY"
 elif command -v terminal-notifier >/dev/null 2>&1; then
