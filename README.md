@@ -166,6 +166,8 @@ Identical to `/solve` for trivial / small. For medium / large, the brainstorm ph
 
 `/turbo` and `--auto` are orthogonal: `/turbo` governs brainstorm interactivity; `--auto` governs Claude Code's per-tool permission mode.
 
+**Multi-issue dispatch.** `/turbo 5 6 7` validates all three issues up front (open + classifiable) and spawns three independent agents — one terminal tab/workspace each, all running in parallel. Override flags (`--trivial|--small|--full`, `--auto`, `--terminal=...`) apply batch-wide. If any issue is closed, missing, or fails `gh` fetch, the run aborts before spawning anything (`no agents dispatched`). `/solve` accepts the same syntax.
+
 Spec & plan are still written to disk before implementation — audit them mid-flight to course-correct.
 
 ---
