@@ -234,6 +234,33 @@ assert_grep "$FINISH_BRANCH" \
   "finish-branch invokes uberdev:review-pr via Skill tool after PR creation"
 
 echo
+echo "== orchestrator Phase 2 imperative gate (interactive /solve must NOT collapse into /turbo) =="
+# These assertions defend against the prose-drift regression that made /solve
+# behave like /turbo: a freshly-spawned LLM read "optional Q&A" + soft Phase 2
+# wording and skipped the only step that distinguishes the two modes.
+assert_grep "$ORCHESTRATOR" \
+  'You MUST ask 3-5 clarifying questions' \
+  "Phase 2 non-turbo prose uses imperative MUST (not 'unchanged — ask')"
+assert_grep "$ORCHESTRATOR" \
+  'Do NOT proceed to Phase 3 until the user has answered' \
+  "Phase 2 non-turbo includes explicit gate to Phase 3"
+assert_grep "$ORCHESTRATOR" \
+  'only signal that distinguishes .*/solve.* from .*/turbo' \
+  "Phase 2 documents itself as the sole /solve-vs-/turbo signal (anti-skip prose)"
+assert_grep "$ORCHESTRATOR" \
+  'select:AskUserQuestion' \
+  "Phase 2 instructs ToolSearch select:AskUserQuestion (deferred-tool caveat)"
+assert_grep "$ORCHESTRATOR" \
+  'Do NOT silently auto-pick on tool-load failure' \
+  "Phase 2 forbids silent auto-pick fallback (turns /solve into /turbo invisibly)"
+assert_not_grep "$ORCHESTRATOR" \
+  'optional Q&A' \
+  "skill description does NOT call Q&A 'optional' (mis-signals to spawned agents)"
+assert_not_grep "$ORCHESTRATOR" \
+  'optional spec-reviewer' \
+  "skill description does NOT call spec-reviewer 'optional' (it is always-on for medium/large)"
+
+echo
 echo "== orchestrator wires always-on reviewers =="
 assert_grep "$ORCHESTRATOR" 'questions\.md' \
   "orchestrator writes questions.md under --turbo"
