@@ -158,8 +158,8 @@ On all four sub-conditions met: emit `gate_pass` with `data.trust_anchor="uberde
 
 > **Note for editors:** the layered trust-anchor sentence above (PATH_1 platform anchor + PATH_2 uberdev trust trail) is intentionally repeated across **five mirror sites**, each serving a different reader audience. Do not consolidate to a single source of truth. If you change the contract here, update all five mirrors in the same change. Mirror sites:
 >
-> 1. `plugins/uberdev/skills/merge/SKILL.md:123` (this section — Phase 1.4 trust-resolution body, the canonical wording).
-> 2. `plugins/uberdev/skills/merge/SKILL.md` `## Common Mistakes` (Phase 1.4 regression guard — see "Adding an author allow-list back as a gate" entry, around line 375).
+> 1. `plugins/uberdev/skills/merge/SKILL.md:157` (this section — Phase 1.4 trust-resolution body, the canonical wording).
+> 2. `plugins/uberdev/skills/merge/SKILL.md:415` (`## Common Mistakes` Phase 1.4 regression guard — see "Adding an author allow-list back as a gate" entry).
 > 3. `plugins/uberdev/commands/merge.md:23` (Autopilot paragraph — user-facing CLI documentation).
 > 4. `plugins/uberdev/commands/merge.md:31` (Deprecated Flags `bot_authors_allow_list` description).
 > 5. `plugins/uberdev/skills/using-uberdev/SKILL.md:146` (`bot_authors_allow_list` config-key semantics).
