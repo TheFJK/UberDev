@@ -2,10 +2,10 @@
 
 # UberDev
 
-**A personal Claude Code marketplace bundling opinionated GitHub-workflow slash commands.**
+**Personal Claude Code marketplace — opinionated GitHub-workflow slash commands.**
 
-[![Version](https://img.shields.io/badge/version-0.9.0-blue)](https://github.com/TheFJK/UberDev)
-[![License](https://img.shields.io/badge/license-MIT-green)](#license)
+[![Version](https://img.shields.io/badge/version-0.14.0-blue)](./CHANGELOG.md)
+[![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8B5CF6)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Repo Agnostic](https://img.shields.io/badge/repo--agnostic-yes-success)](#configuration)
 
@@ -17,24 +17,33 @@
    \___/|_.__/ \___|_|  |____/ \___| \_/  
 ```
 
-**Four commands. Zero ceremony. Every issue, triaged and shipped.**
+**Five commands. Zero ceremony. Every issue, triaged, shipped, merged.**
 
 </div>
 
 ---
 
-## TL;DR
+## Heads up — this plugin burns tokens fast
 
-Four slash commands that turn issue triage and resolution into one-line operations:
+UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-Sonnet-scout fanout, `/uberdev:review-pr` and `/uberdev:simplify` fan out 3–5 reviewers concurrently, `/solve` waves dispatch every task in parallel, `/merge` spawns one conflict-resolver per conflicted file. That's where the speed and quality come from — and that's where the cost comes from.
+
+**Recommended setup: 2× Claude Max ×20 subscriptions.** A single Pro or single Max usage window genuinely is not enough headroom for a normal day of `/turbo` + `/review-pr` + `/merge` cycles. Expect to hit the limit mid-task on a single seat.
+
+**If that's too much, scale down:** prefer `/solve --trivial` / `--small` (skips the orchestrator), skip `/turbo` (interactive `/solve` runs fewer agents), or use a less aggressive plugin. The defaults are tuned for *"ship faster, pay for it"* — a deliberate choice, not a bug.
+
+---
+
+## TL;DR
 
 | Command | What it does |
 |---|---|
-| **`/solve <issue-number>`** | Spawns an autonomous Claude agent in a new terminal session (cmux / Ghostty / iTerm / Terminal.app / nohup) with **tier-aware triage** so trivial issues skip the brainstorm and large ones get the full plan-and-review pipeline. |
-| **`/turbo <issue-number>`** | **Unattended `/solve`** — same pipeline, but the brainstorm phase auto-accepts the lead agent's recommended design instead of asking clarifying questions. Use when you trust the research-grounded recommendation and want issue → PR with no babysitting. Pair with `--auto` for max autonomy. |
-| **`/issue <description>`** | Creates a **well-investigated, deduped, label-validated** GitHub issue from a one-line ask — including codebase search, full-text dedup against closed issues (regression signals), commitlint scope validation, and a triage hint that `/solve` reads later. |
-| **`/merge [<PR#> | --all]`** | **Lands an approved PR** into the integration branch — ordering, strategy, conflict resolution, and local sync automated. The natural successor to `finish-branch` Option 2 in the lifecycle `/issue → /solve → push → /review-pr → /merge`. |
+| **`/solve <issue#>`** | Spawns an autonomous Claude agent in a new terminal (cmux / Ghostty / iTerm / Terminal.app / nohup). Tier-aware: trivial issues skip brainstorm; large ones get the full orchestrator → spec → plan → wave-dispatch → review pipeline. |
+| **`/turbo <issue#>`** | Unattended `/solve`. Same pipeline, but the brainstorm phase auto-accepts the lead agent's recommendation and Q&A is resolved against the research bundle. Use when you trust the recommendation and want issue → PR with no babysitting. |
+| **`/issue <description>`** | Creates a well-investigated, deduped, label-validated GitHub issue from a one-line ask. 2-Sonnet-scout fanout (codebase + triage) runs in <30 s, with conventional-commit titling and template-by-type. |
+| **`/review-pr [<PR#>]`** | Comprehensive PR review using specialized agents fanned out in parallel — code review, simplifier, silent-failure hunter, type-design analyzer, comment analyzer, test analyzer. |
+| **`/merge [<PR#> \| --all]`** | Lands an approved PR into the integration branch — autopilot. Ordering, per-PR strategy, conflict resolution (one parallel agent per conflicted file), and local sync, all unattended. |
 
-All four are **repo-agnostic** — they auto-detect the current repo via `gh repo view`. No per-repo config required.
+Every command is **repo-agnostic** — they auto-detect via `gh repo view`. No per-repo config required.
 
 ---
 
@@ -45,51 +54,27 @@ All four are **repo-agnostic** — they auto-detect the current repo via `gh rep
 curl -fsSL https://raw.githubusercontent.com/TheFJK/UberDev/main/install.sh | bash
 ```
 
-Then, in Claude Code:
+Then in Claude Code:
 
 ```bash
-# Smoke-test
-/uberdev:issue trivial typo in README install step
-
-# (Recommended) Install short-form aliases so /issue, /solve, /turbo,
-# /simplify, /review-pr work without the /uberdev: prefix.
-/uberdev:install-aliases
+/uberdev:issue trivial typo in README install step   # smoke-test
 ```
 
-> **Why a bootstrap script?** Upstream Claude Code has a bug
-> ([anthropics/claude-code#20661](https://github.com/anthropics/claude-code/issues/20661))
-> where `/plugin install` populates the cache and `installed_plugins.json`
-> but **does not** write `enabledPlugins` in `~/.claude/settings.json` —
-> so `/uberdev:*` commands silently 404 until that key is added by hand.
-> `install.sh` does the install **and** jq-patches `enabledPlugins` so
-> commands resolve immediately. It's idempotent — re-running on an
-> already-enabled environment is a no-op, and any unrelated keys
-> (theme, model, sibling plugins) are preserved verbatim. Requires `jq`.
+The six short-form aliases (`/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`) are auto-installed on first session and refreshed on plugin upgrade. Opt out with `auto_install_aliases: false` in `.claude/uberdev.local.md` or `UBERDEV_NO_AUTO_ALIAS=1`.
 
-The aliases step is the ergonomics step: by default, plugin commands are addressed
-as `/uberdev:<command>` because Claude Code's plugin manifest enforces a
-`<plugin-name>:` prefix on every command. The `/uberdev:install-aliases`
-helper drops one-way forwarders into `~/.claude/commands/` so you can
-type `/issue …` instead of `/uberdev:issue …`. The long form keeps
-working — this is purely additive. See [Short-form aliases](#short-form-aliases) below.
+> **Why a bootstrap script?** Upstream Claude Code has a bug ([anthropics/claude-code#20661](https://github.com/anthropics/claude-code/issues/20661)) where `/plugin install` populates the cache but does not write `enabledPlugins` in `~/.claude/settings.json` — so `/uberdev:*` commands silently 404. `install.sh` does the install **and** jq-patches `enabledPlugins`. Idempotent. Requires `jq`.
 
 <details>
 <summary><strong>Manual install (without curl|bash)</strong></summary>
-
-If you'd rather not pipe a script from the internet, do the same three things by hand:
 
 ```bash
 # 1. Inside Claude Code:
 /plugin marketplace add TheFJK/UberDev
 /plugin install uberdev@uberdev
 
-# 2. In your shell, patch the enabledPlugins entry the upstream bug skips.
-#    The first line bootstraps an empty settings.json if missing (or empty)
-#    so jq has a valid object to merge into; without it, an absent or
-#    zero-byte file would either error out or get overwritten with empty
-#    output by the redirect.
+# 2. In your shell — patch the entry the upstream bug skips:
 [ -s ~/.claude/settings.json ] || echo '{}' > ~/.claude/settings.json
-jq '.enabledPlugins = (.enabledPlugins // {}) | .enabledPlugins["uberdev@uberdev"] = true' \
+jq '.enabledPlugins["uberdev@uberdev"] = true' \
    ~/.claude/settings.json > ~/.claude/settings.json.tmp \
    && mv ~/.claude/settings.json.tmp ~/.claude/settings.json
 
@@ -103,72 +88,18 @@ jq '.enabledPlugins = (.enabledPlugins // {}) | .enabledPlugins["uberdev@uberdev
 
 ## Updating
 
-Claude Code does **not** auto-update third-party plugins by default — third-party marketplaces ship with auto-update **off**. Two options:
+Third-party plugins ship with auto-update **off**. Two options:
 
-### Manual update (default)
-
-```bash
-/plugin marketplace update uberdev   # refresh marketplace metadata
-/plugin install uberdev@uberdev      # reinstall to pull the new version
-```
-
-Or interactively: `/plugin` → **Installed** → select `uberdev` → re-install.
-
-### Enable auto-update for this marketplace (one-time)
-
-`/plugin` → **Marketplaces** tab → select `uberdev` → toggle auto-update on. Claude Code then picks up new versions whenever the `version` field in `plugin.json` is bumped.
-
-> **Disabling everything:** set `DISABLE_AUTOUPDATER=1` in your shell environment to globally disable Claude Code's auto-updater (affects Claude Code itself + every plugin).
-
-Each release bumps the `version` field in `.claude-plugin/plugin.json`, so auto-update users get clean version transitions; manual users see the new version listed under the marketplace entry.
-
----
-
-## Short-form aliases
-
-Plugin commands are addressed as `/uberdev:<command>` by default — the
-`uberdev:` prefix is required by Claude Code's plugin manifest, which has
-no field for declaring top-level (un-namespaced) commands. For a daily
-driver, that 9-character tax adds up.
-
-`/uberdev:install-aliases` resolves it by dropping six short-form
-forwarders into `~/.claude/commands/`:
-
-| Short form    | Canonical             |
-|---            |---                    |
-| `/issue`      | `/uberdev:issue`      |
-| `/solve`      | `/uberdev:solve`      |
-| `/turbo`      | `/uberdev:turbo`      |
-| `/simplify`   | `/uberdev:simplify`   |
-| `/review-pr`  | `/uberdev:review-pr`  |
-| `/merge`      | `/uberdev:merge`      |
+**Manual (default)** — refresh marketplace metadata, then reinstall:
 
 ```bash
-/uberdev:install-aliases             # install forwarders (skip-if-exists)
-/uberdev:install-aliases --dry-run   # preview without writing
-/uberdev:install-aliases --force     # refresh existing managed forwarders
-/uberdev:uninstall-aliases           # remove (only marker-tagged files)
+/plugin marketplace update uberdev
+/plugin install uberdev@uberdev
 ```
 
-**Design notes:**
+**Auto-update for this marketplace** — `/plugin` → **Marketplaces** → select `uberdev` → toggle auto-update on. Picks up new versions when `version` in `plugin.json` is bumped.
 
-- **One-way forwarding, not duplication.** Each forwarder is a thin file
-  that points at the canonical `/uberdev:<command>` body — there is no
-  second copy of `issue.md` to maintain.
-- **Backwards-compatible.** Existing `/uberdev:<command>` invocations
-  keep working unchanged. Docs, plugin manifests, and muscle memory that
-  reference the long form are unaffected.
-- **Collision-safe.** If a short name is already taken (built-in like
-  `/review`, another plugin's command, or a hand-authored
-  `~/.claude/commands/<name>.md`), the install command skips it with a
-  warning rather than overwriting. That's why this proposal uses
-  `/review-pr` — `/review` is a Claude Code built-in.
-- **Marker-scoped uninstall.** Forwarders carry `<!-- managed-by:
-  uberdev-aliases -->` so `/uberdev:uninstall-aliases` only removes
-  files we own.
-- **Re-run after plugin reinstall.** Forwarders capture the absolute
-  plugin path at install time. If you reinstall the plugin to a
-  different location, run `/uberdev:install-aliases --force` to refresh.
+Disable Claude Code's auto-updater globally with `DISABLE_AUTOUPDATER=1` in your shell environment.
 
 ---
 
@@ -176,8 +107,9 @@ forwarders into `~/.claude/commands/`:
 
 | Requirement | Why |
 |---|---|
-| **`gh` CLI** authenticated against your target repos | Used for repo detection, label/scope validation, dedup search, issue creation |
-| **macOS** (Apple Silicon or Intel) | Terminal dispatch uses `osascript` for iTerm/Terminal.app; Linux/Windows degrade to detached `nohup` |
+| **`gh` CLI** authenticated against your target repos | Repo detection, label/scope validation, dedup search, issue & PR ops |
+| **`jq`** | Used by `install.sh` and `/merge` |
+| **macOS** (Apple Silicon or Intel) | Terminal dispatch via `osascript` for iTerm/Terminal.app; Linux/Windows degrade to detached `nohup` |
 | **Claude Code 2.x+** with plugin support | Required for `/plugin marketplace add` |
 | **One of:** cmux, Ghostty, iTerm2, Terminal.app | `/solve` auto-detects; falls back to detached `nohup` if none found |
 
@@ -187,207 +119,91 @@ forwarders into `~/.claude/commands/`:
 
 Auto-classifies a GitHub issue into a tier, then spawns an agent with a tier-appropriate workflow.
 
-### Triage tiers
-
 | Tier | Auto-detected from… | Spawned workflow |
 |---|---|---|
-| **trivial** | Labels `typo`, `docs`, `chore`, `good-first-issue`. Body <300 chars. Single file named. | Direct edit → test if touched code is tested → `/uberdev:simplify` → PR |
-| **small** | Clear reproduction + error. Localized to one module. Estimated ≤50 LOC. | Lightweight TodoWrite plan (3–6 tasks) → TDD → `/uberdev:simplify` → PR |
-| **medium / large** *(default)* | Labels `epic`, `architectural`, `infrastructure`. ≥3 files mentioned. Cross-package scope. Open questions. | Full `/uberdev:orchestrator` (research fanout → optional Q&A → spec-writer → optional spec-reviewer → plan-writer) → `/uberdev:subagent-driven-dev` → `/uberdev:review-pr` |
+| **trivial** | Labels `typo`/`docs`/`chore`/`good-first-issue`. Body <300 chars. Single file named. | Direct edit → test if touched code is tested → `/uberdev:simplify` → PR |
+| **small** | Clear repro + error. Localized to one module. ≤50 LOC. | Lightweight TodoWrite plan (3–6 tasks) → TDD → `/uberdev:simplify` → PR |
+| **medium / large** *(default)* | Labels `epic`/`architectural`/`infrastructure`. ≥3 files mentioned. Cross-package. | `/uberdev:orchestrator` (research fanout → optional Q&A → spec-writer → spec-reviewer (always-on for medium+) → plan-writer → plan-reviewer) → `/uberdev:subagent-driven-dev` wave dispatch → `/uberdev:review-pr` |
 
-> **When in doubt, default to medium.** The spawned agent is explicitly told it may escalate to `/uberdev:orchestrator` mid-flight if the scope proves larger than triaged — **misclassification is recoverable, not catastrophic.**
+> **Misclassification is recoverable** — the spawned agent can escalate to `/uberdev:orchestrator` mid-flight if the scope proves larger than triaged. When in doubt, defaults to medium.
 
-### Manual overrides
+**Manual overrides:**
 
 ```bash
-/solve 123 --trivial                  # Force trivial tier
-/solve 123 --small                    # Force small tier
-/solve 123 --full                     # Force medium/large
-/solve 123 --terminal=ghostty         # Force terminal dispatcher
-SOLVE_TERMINAL=cmux /solve 123        # Same, via env var
+/solve 123 --trivial                  # force trivial tier
+/solve 123 --small                    # force small tier
+/solve 123 --full                     # force medium/large
+/solve 123 --terminal=ghostty         # force terminal dispatcher
+SOLVE_TERMINAL=cmux /solve 123        # same, via env
 ```
 
-### What runs in the spawned terminal
-
-The agent inherits a model pin and effort cap so behavior is reproducible across runs:
+**What runs in the spawned terminal** — model and effort are pinned so behavior is reproducible across runs:
 
 ```bash
 claude \
   --model 'claude-opus-4-7[1m]' \
   --effort max \
   --worktree solve-issue-123 \
-  --dangerously-skip-permissions \
   "$PROMPT"
 ```
 
-After opening its PR, the spawned agent **renames its own terminal tab** from `#123 <issue-title>` to `PR #456 <pr-title>` via OSC escape sequences (or cmux's workspace API).
+After opening its PR, the agent renames its own terminal tab from `#123 <issue-title>` to `PR #456 <pr-title>` via OSC escape sequences (or cmux's workspace API).
+
+**Wave-based parallel execution** — multi-task plans declare `Depends on:` / `Wave:` / `Owns:` per task. Tasks share a wave only if their `Owns` allowlists are pairwise disjoint. Implementers never run git (controller serializes commits) — eliminates `.git/index.lock` races without per-task worktree ceremony. Maximum parallelism on edits, deterministic commit history, zero merge ceremony between waves.
 
 ---
 
 ## `/turbo` — unattended issue resolution
 
-Identical to `/solve` for trivial / small tiers. For medium / large tiers, the brainstorm phase auto-accepts the lead agent's recommendation instead of asking clarifying questions — so the whole pipeline runs without user input.
-
-### When to use which
+Identical to `/solve` for trivial / small. For medium / large, the brainstorm phase **auto-accepts the lead agent's recommendation** instead of asking clarifying questions, and Phase 2 Q&A becomes non-blocking — clarifying answers are auto-picked from the research-bundle synthesis and written to `questions.md` for audit.
 
 | Combo | Brainstorm Q&A | Tool gating |
 |---|---|---|
-| `/solve 42` | interactive | manual per-tool gating |
-| `/solve 42 --auto` | interactive | AI classifier (auto-approves safe ops) |
-| `/turbo 42` | auto-accept recommendation | manual per-tool gating |
-| `/turbo 42 --auto` | auto-accept recommendation | AI classifier — **max autonomy** |
+| `/solve 42` | interactive | manual per-tool |
+| `/solve 42 --auto` | interactive | AI classifier |
+| `/turbo 42` | auto-accept | manual per-tool |
+| `/turbo 42 --auto` | auto-accept | AI classifier — **max autonomy** |
 
-`/turbo` and `--auto` are **orthogonal**: `/turbo` governs brainstorm interactivity; `--auto` governs Claude Code's per-tool permission mode. Pair them for unattended issue → PR.
+`/turbo` and `--auto` are orthogonal: `/turbo` governs brainstorm interactivity; `--auto` governs Claude Code's per-tool permission mode.
 
-### Safety
-
-- Spec & plan are still written to disk before implementation waves dispatch — audit them to course-correct.
-- A stderr banner before terminal spawn confirms turbo mode is active.
-- Trivial / small tiers don't run brainstorm anyway, so `/turbo` is functionally identical to `/solve` there. The intent-signaling name + `--auto` shortcut is the only difference.
-- No new approval gates introduced — turbo only **removes** the clarifying-questions stop, never **adds** one.
+Spec & plan are still written to disk before implementation — audit them mid-flight to course-correct.
 
 ---
 
-## `/merge` — post-review PR landing
+## `/merge` — post-review PR landing (autopilot)
 
-After a PR is approved, lands it into the integration branch — ordering, per-PR strategy, conflict resolution via parallel per-file agents, and local sync (worktree teardown, stale-branch list+offer) all automated. The natural successor to `finish-branch` Option 2.
+Lands approved PRs into the integration branch — fully unattended. No prompts, no halts. Per-PR failures park; the queue continues.
 
-### Phases
+1. **Pre-flight gate** — open / not-draft / approved (`reviewDecision == "APPROVED"`) / CI-green; integration branch resolved (CLI flag > env var > config > `gh repo view`'s default > literal `main`); single-instance lock.
+2. **Merge plan** — order (topo-sort hard deps → file-overlap heuristic → approval-age tie-break) + per-PR strategy (conventional-commit ratio + WIP-msg count + `merge-strategy:<name>` label).
+3. **Merge + resolve** — non-destructive `git merge-tree` probe; clean PRs via `gh pr merge --<strategy>`; conflicted PRs get one parallel agent per conflicted file in a scratch worktree, project test gate, fast-forward push back (Conventional Commits prefix, no Claude trailer).
+4. **Local sync** — `git fetch --prune`, `git pull --ff-only` on integration branch (auto-rebase on ff-only fail), worktree teardown, stale-rooted branch list (never auto-rebase).
 
-1. **Pre-flight gate** — per-PR open/not-draft/approved/CI-green check; file-overlap matrix; fork preflight; integration-branch resolved (CLI flag > env var > config file > `gh repo view --json defaultBranchRef`); single-instance lock acquired.
-2. **Merge plan** — order (topo-sort hard deps → file-overlap heuristic → approval-age tie-break) + per-PR strategy (conventional-commit ratio + WIP-msg count + `merge-strategy:<name>` label). Single user-confirm gate.
-3. **Merge + resolve** — non-destructive `git merge-tree` probe; clean PRs go via `gh pr merge --<strategy>`; conflicted PRs get one parallel agent per conflicted file in a scratch worktree, project test gate, fast-forward push back (Conventional Commits prefix, no Claude trailer).
-4. **Local sync** — `git fetch --prune`, `git pull --ff-only` on integration branch, worktree teardown, stale-rooted branch list+offer (never auto-rebase).
+**Audit log** — `.uberdev/runs/<run-id>/audit.jsonl`, one JSON line per event (gate, order, strategy, probe, agent, patch, test, push, merge, sync). Path surfaced in the final summary.
 
-### Configuration
-
-Add to `.claude/uberdev.local.md`:
+**Configuration** in `.claude/uberdev.local.md`:
 
 ```yaml
 ---
 integration_branch: main
-bot_authors_allow_list:
-  - dependabot[bot]
-  - renovate[bot]
 ---
 ```
 
-Or override per-invocation: `--integration-branch=develop`.
+Or per-invocation: `--integration-branch=develop`.
 
-### Audit log
-
-Every run writes `.uberdev/runs/<run-id>/audit.jsonl` with one JSON line per event (gate, order, strategy, probe, agent, patch, test, push, merge, sync). Path is surfaced in the final summary.
+> **Note (v0.14.0):** `bot_authors_allow_list`, `auto_confirm`, and `--yes`/`-y` are deprecated no-ops. Autopilot has no author gate and asks no questions; the trust anchor is `reviewDecision == "APPROVED"` plus GitHub branch protections.
 
 ---
 
 ## `/issue` — investigation-first issue creation
 
-Eight-phase pipeline that does the legwork **before** you draft, **before** you create, and **before** you spend a sprint chasing a duplicate ticket.
+Pipeline: classify → 2-Sonnet-scout fanout (`codebase-scout` + `triage-scout`, parallel in one turn — dedup against closed issues, label/scope validation against `gh label list` and commitlint) → draft → user-confirm → create → print `Next step: /solve N`. Median wall-clock under 30 seconds.
 
-```mermaid
-flowchart TD
-    A["/issue 'Login fails on Safari for empty password'"] --> B[Phase 1: Classify type / scope / core problem]
-    B --> C[Phase 2: Investigate codebase]
-    C --> D[Phase 3: Duplicate search<br/>full-text, includes closed]
-    D --> E[Phase 4: Validate labels + scope<br/>against gh label list & commitlint]
-    E --> F[Phase 5: Draft]
-    F --> G{Phase 6: User confirms?}
-    G -- edits --> F
-    G -- yes --> H[Phase 7: Create issue]
-    H --> I[Phase 8: Print 'Next step: /solve N']
-    I --> J["/solve N"]
-    J --> K{Triage tier from issue body}
-    K -- trivial --> L[Direct edit → PR]
-    K -- small --> M[Plan + TDD → PR]
-    K -- medium/large --> N[uberdev: brainstorm + write-plan + execute + review-pr → PR]
-    L --> O[Rename tab: 'PR #M ...']
-    M --> O
-    N --> O
-```
+Templates by type — bug (`fix`), feature (`feat`), or chore/refactor — each producing conventional-commit-style titles and a body footed with `**Triage hint:** <trivial|small|medium>` that `/solve` reads later to pick the workflow without reclassifying.
 
-After the spawned agent's PR is approved (and the user has run `/uberdev:review-pr` per CLAUDE.md), run `/merge <PR#>` to land it. `/merge` automates ordering, strategy, conflict resolution, and local sync — see [`/merge` section](#merge--post-review-pr-landing) above.
+After the spawned agent's PR is approved (and you've run `/uberdev:review-pr`), run `/merge <PR#>` to land it.
 
-### Templates
-
-`/issue` produces conventional-commit-style titles and one of four body templates depending on type:
-
-<details>
-<summary><strong>Bug (<code>fix</code>)</strong> — click to expand</summary>
-
-```markdown
-## Bug
-[Clear description — what's broken]
-
-## Expected behavior / Observed behavior
-...
-
-## Severity
-- [ ] P0 — pages on-call, system down
-- [ ] P1 — major feature broken
-- [x] P2 — normal bug (default)
-- [ ] P3 — minor / cosmetic
-
-## Likely root cause
-- **Symptom:** [observable failure mode in user-facing terms]
-- **Mechanism:** [the specific code/data path that produces the symptom; cite a concrete artifact such as a function call site, log line, or config value]
-- **Owning code:** `path/to/File` — `Class.method()` — [why this is the assumption to challenge]
-
-## Likely area
-- `path/to/File` — `ClassName.methodName()` — [why relevant]
-
-## Reproduction
-1. ...
-
-## Related
-- [Closed/open issues from Phase 3 dedup search, else "none"]
-
-**Triage hint:** <trivial|small|medium>
-```
-
-</details>
-
-<details>
-<summary><strong>Feature (<code>feat</code>)</strong></summary>
-
-```markdown
-## Summary
-[What and why]
-
-## Relevant code
-- `path/to/File` — `ClassName` — [how it relates]
-
-## What changes
-[The capability being added or behavior being modified — externally visible result, contract change, or new affordance. No implementation strategy.]
-
-## Acceptance criteria
-- [ ] [criterion]
-
-## Related
-- [Prior issues, if any]
-
-**Triage hint:** <trivial|small|medium>
-```
-
-</details>
-
-<details>
-<summary><strong>Chore / Refactor</strong></summary>
-
-```markdown
-## Summary
-[What needs doing and why]
-
-## Relevant code
-- `path/to/File` — [context]
-
-**Triage hint:** <trivial|small|medium>
-```
-
-</details>
-
-### Skip the codebase investigation
-
-For docs/typo issues unrelated to code logic:
+**Skip the codebase investigation** for docs/typo issues unrelated to code logic:
 
 ```bash
 /issue Fix the install step in the README — wrong command --no-explore
@@ -401,66 +217,62 @@ Per-repo settings live in `.claude/uberdev.local.md` (YAML frontmatter; ignored 
 
 ```yaml
 ---
-# Implemented — read by command logic today
 solve_terminal: ghostty       # ghostty | iterm | cmux | terminal | nohup
-solve_auto: false             # boolean — auto-accept brainstorm recommendations (=`/turbo` semantics)
-auto_install_aliases: true    # boolean — install short-form forwarders at SessionStart (default: true)
+solve_auto: false             # auto-accept brainstorm recommendations (= /turbo)
+auto_install_aliases: true    # install short-form forwarders at SessionStart
 integration_branch: main      # /merge target branch (overrides gh repo view default)
-bot_authors_allow_list:       # /merge: PR authors that bypass the per-PR preflight collaborator gate
-  - dependabot[bot]
-  - renovate[bot]
-
-# Planned — documents the intended config surface; no parsing logic yet
-solve_tier_default: medium    # one of: small | medium | large
-review_depth: full            # quick | full
-parallel_solve: true          # boolean — fan out parallel /solve invocations
 ---
 ```
 
-### Implemented keys
-
-These are wired into command logic today.
-
-| Env var | File key | Purpose | Status |
-|---|---|---|---|
-| `SOLVE_TERMINAL` | `solve_terminal` | Override `/solve`'s terminal dispatcher (`cmux` / `ghostty` / `iterm` / `terminal` / `nohup`) | live |
-| `SOLVE_AUTO` | `solve_auto` | When `1`/`true`, spawned agent runs with `--permission-mode auto` | live |
-| `UBERDEV_NO_AUTO_ALIAS` | `auto_install_aliases` | When `1`/`true` (env) or `false` (file), suppresses session-start auto-installation of `/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge` forwarders | live |
-| `UBERDEV_INTEGRATION_BRANCH` | `integration_branch` | `/merge` target branch. Precedence: `--integration-branch` CLI flag > env var > config file > `gh repo view --json defaultBranchRef` | live |
-| — | `bot_authors_allow_list` | `/merge`: PR authors that bypass the per-PR preflight collaborator gate (default `["dependabot[bot]", "renovate[bot]"]`) | live |
-
-### Planned keys
-
-Documented to fix the config surface ahead of implementation; **the plugin does not yet parse these**, so setting them today is a no-op. Tracked for a future minor release.
-
-| File key | Intended purpose | Status |
+| Env var | File key | Purpose |
 |---|---|---|
-| `solve_tier_default` | Default tier when `/solve` can't classify confidently (instead of the current "medium" hardcode) | planned |
-| `review_depth` | Switch `/uberdev:review-pr` between a quick subset and the full agent fanout | planned |
-| `parallel_solve` | Allow `/solve` to fan out parallel invocations across a queue of issues | planned |
+| `SOLVE_TERMINAL` | `solve_terminal` | Override `/solve`'s terminal dispatcher (`cmux` / `ghostty` / `iterm` / `terminal` / `nohup`) |
+| `SOLVE_AUTO` | `solve_auto` | When `1`/`true`, spawned agent runs with `--permission-mode auto` |
+| `UBERDEV_NO_AUTO_ALIAS` | `auto_install_aliases` | When `1`/`true` (env) or `false` (file), suppresses session-start auto-install of `/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge` forwarders |
+| `UBERDEV_INTEGRATION_BRANCH` | `integration_branch` | `/merge` target branch |
 
-Precedence: CLI flag > env var > `.claude/uberdev.local.md` > default. Missing file → defaults apply silently. No `.env` files, no plugin settings to wire up.
+Precedence: CLI flag > env var > `.claude/uberdev.local.md` > default. Missing file → defaults apply silently.
 
 ---
 
-## Repo layout
+## Short-form aliases
 
-```
-UberDev/
-├── .claude-plugin/
-│   └── marketplace.json          ← Marketplace manifest (lists 1 plugin)
-├── plugins/
-│   └── uberdev/
-│       ├── .claude-plugin/
-│       │   └── plugin.json       ← Plugin manifest
-│       └── commands/
-│           ├── solve.md          ← /solve command body (251 lines)
-│           └── issue.md          ← /issue command body (204 lines)
-├── .gitignore
-└── README.md
+Plugin commands are addressed as `/uberdev:<command>` by default — the `uberdev:` prefix is required by Claude Code's plugin manifest. Auto-install drops six forwarders into `~/.claude/commands/`:
+
+| Short form | Canonical |
+|---|---|
+| `/issue` | `/uberdev:issue` |
+| `/solve` | `/uberdev:solve` |
+| `/turbo` | `/uberdev:turbo` |
+| `/simplify` | `/uberdev:simplify` |
+| `/review-pr` | `/uberdev:review-pr` |
+| `/merge` | `/uberdev:merge` |
+
+```bash
+/uberdev:install-aliases             # install (skip-if-exists)
+/uberdev:install-aliases --dry-run   # preview without writing
+/uberdev:install-aliases --force     # refresh existing managed forwarders
+/uberdev:uninstall-aliases           # remove (only marker-tagged files)
 ```
 
-The marketplace can host additional plugins later — drop a new folder under `plugins/` and add an entry to `marketplace.json`.
+Forwarders carry `<!-- managed-by: uberdev-aliases -->` so uninstall is scoped to files we own. Hand-authored `~/.claude/commands/<name>.md` files are never overwritten — collisions skip with a warning. If you reinstall the plugin to a different location, `--force` refreshes the captured paths.
+
+---
+
+## Bundled (since v0.2.0)
+
+UberDev ships these so all commands work standalone — **no `superpowers`, `pr-review-toolkit`, or `code-simplifier` plugin install required**.
+
+| Type | Slugs | Source |
+|---|---|---|
+| Skills | `brainstorm`, `write-plan`, `execute-plan`, `subagent-driven-dev`, `finish-branch`, `systematic-debugging`, `test-driven-development`, `using-git-worktrees`, `dispatching-parallel-agents`, `verification-before-completion`, `requesting-code-review`, `receiving-code-review`, `writing-skills` | adapted from [`superpowers`](https://github.com/obra/superpowers) (MIT, Jesse Vincent) |
+| Skills | `orchestrator`, `merge`, `solve-pipeline`, `post-impl-review`, `using-uberdev` | UberDev original |
+| Agents | `code-reviewer`, `comment-analyzer`, `pr-test-analyzer`, `silent-failure-hunter`, `type-design-analyzer` | from [`pr-review-toolkit`](https://github.com/anthropics/claude-code) (Apache 2.0) |
+| Agents | `code-simplifier` | from [`code-simplifier`](https://github.com/anthropics/claude-code) (Apache 2.0) |
+| Agents | `plan-reviewer`, `spec-writer`, `spec-reviewer`, `spec-reviser`, `plan-writer`, `research-codebase`, `research-patterns`, `research-prior-art`, `research-constraints`, `research-security`, `research-test-coverage`, `codebase-scout`, `triage-scout`, `conflict-resolver` | UberDev original |
+| Commands | `/uberdev:review-pr`, `/uberdev:simplify` | adapted; `review-pr` defaults to **parallel** fanout (divergence from upstream) |
+
+Bundled upstream license texts in `plugins/uberdev/licenses/`.
 
 ---
 
@@ -468,111 +280,21 @@ The marketplace can host additional plugins later — drop a new folder under `p
 
 | Decision | Rationale |
 |---|---|
-| **Repo-agnostic by default** | Both commands derive `$REPO` from `gh repo view` at runtime. No hardcoded org/project IDs. |
-| **No GitHub Project board auto-add** | Kept out of v0.1 to stay portable. May return in v0.2 via opt-in `.claude/board.json`. |
-| **Model pin baked in** *(in `solve.md`)* | Spawned agents run on `claude-opus-4-7[1m]` for reproducibility across runs. Forks should adjust to their preferred model. |
-| **macOS-first terminal dispatch** | `osascript` for iTerm / Terminal.app, native cmux/Ghostty CLI for those, `nohup` fallback elsewhere. |
-| **Triage hint in every issue body** | Lets `/solve` skip re-classification and pick the right workflow without rereading the whole body. |
-| **Conventional commits enforced** | `feat(scope):` / `fix(scope):` / `chore(scope):` / `refactor(scope):`. `enhancement` is a **label**, never a type. |
-| **Wave-based parallel execution** *(see below)* | Plans declare task dependencies + file ownership; `subagent-driven-dev` fires every wave's tasks concurrently in one shared worktree. Controller-only git eliminates index races without per-task worktree ceremony. |
+| **Repo-agnostic by default** | Commands derive `$REPO` from `gh repo view` at runtime. No hardcoded org/project IDs. |
+| **No GitHub Project board auto-add** | Portability over board affordance. May return via opt-in `.claude/board.json`. |
+| **Model pin baked in** *(in `solve.md`)* | Spawned agents run on `claude-opus-4-7[1m]` for reproducibility. Forks should adjust. |
+| **macOS-first terminal dispatch** | `osascript` for iTerm/Terminal.app; native CLI for cmux/Ghostty; `nohup` fallback elsewhere. |
+| **Triage hint in every issue body** | `/solve` skips re-classification and picks the right workflow without re-reading the body. |
+| **Conventional commits enforced** | `feat(scope):` / `fix(scope):` / `chore(scope):` / `refactor(scope):`. `enhancement` is a label, never a type. |
+| **`/merge` autopilot has no author gate** | Trust anchor is `reviewDecision == "APPROVED"` + GitHub branch protections. Bot vs. human vs. external contributor — same eligibility. |
+| **No `Co-Authored-By: Claude` trailer** | Commits and PR bodies use the user's authorship only. |
+| **Wave-based parallel execution** | Plans declare task dependencies + file ownership; `subagent-driven-dev` fires every wave's tasks concurrently in one shared worktree. Controller-only git eliminates index races without per-task worktree ceremony. |
 
 ---
 
-## Wave-based parallel execution (Pattern B)
+## Changelog
 
-`/solve` and `/uberdev:subagent-driven-dev` execute multi-task plans in **waves**: every task in a wave dispatches in parallel, waves run sequentially.
-
-### How a plan declares it
-
-`uberdev:write-plan` requires three new headers per task and an `## Execution Waves` summary:
-
-```markdown
-## Execution Waves
-
-- **wave-1** (parallel): T1, T2, T3
-- **wave-2** (parallel, depends on wave-1): T4, T5
-- **wave-3** (sequential, depends on wave-2): T6
-
-### Task 4: Recovery modes
-
-**Depends on:** T1
-**Wave:** wave-2
-**Owns (file allowlist):** src/recovery.ts, tests/recovery.test.ts
-```
-
-Tasks share a wave **only** if their `Owns` allowlists are pairwise disjoint. Overlap → bump the later task to the next wave. The plan-writer's self-review checks acyclic deps + disjoint allowlists before saving.
-
-### How execution stays race-free
-
-| Concern | Pattern B solution |
-|---|---|
-| Two implementers writing the same file | Plan declares disjoint `Owns` allowlists; each implementer prompt enforces an allowlist + a denylist of sibling-owned paths |
-| Concurrent `git add` / `git commit` racing on `.git/index.lock` | **Implementers never run git.** They edit files, run their tests, and report changed paths. The controller stages and commits per task, sequentially, in task ID order |
-| A regression introduced by parallel edits hiding until later | Controller runs the project's full test suite once after all wave commits land — before any review dispatches |
-| Reviewer of task A reading task B's code | Spec + code-quality reviewer prompts include the task's `BASE_SHA`, `HEAD_SHA`, and explicit allowlist; reviewers ignore changes outside |
-| Worktree sprawl | One shared feature-branch worktree across all waves. No merge step between waves. Same worktree `/solve` already creates. |
-
-### Why one shared worktree, not one per agent
-
-Per-agent worktrees would isolate filesystems but add N `git worktree add` calls, an N-way merge step at the end of every wave, and cross-worktree resync time. Pattern B drops all of that by:
-
-1. Letting agents share the worktree (safe because the plan proves disjoint file ownership).
-2. Refusing to let agents touch git at all (safe because the controller serializes commits).
-
-Result: maximum parallelism on edits, deterministic commit history, zero merge ceremony.
-
-### Trade-offs you should know
-
-- **Plans must decompose into truly disjoint file sets.** If wave-1 is one bottleneck task that everything depends on, you don't actually get parallelism — fix the decomposition.
-- **Implementers can't self-stage.** If your task naturally wants ad-hoc commits (e.g., a bisect-friendly history mid-task), Pattern B forces you to wait for the controller. For most tasks that's fine.
-- **The full-suite run between waves costs wall-time.** It's the trade for catching regressions before review dispatch instead of during.
-
----
-
-## Roadmap
-
-| Version | Status | Adds |
-|---|---|---|
-| **v0.1.0** | Released | `/solve`, `/issue` — repo-agnostic, no project-board logic |
-| **v0.2.0** | Released | Bundles 4 workflow skills (`brainstorm`, `write-plan`, `execute-plan`, `subagent-driven-dev`), 6 review agents (`code-reviewer`, `code-simplifier`, `comment-analyzer`, `pr-test-analyzer`, `silent-failure-hunter`, `type-design-analyzer`), and 2 commands (`/uberdev:review-pr`, `/uberdev:simplify`) — `/solve` runs standalone with no superpowers / pr-review-toolkit / code-simplifier dependency |
-| **v0.2.1** | Released | **Wave-based parallel execution (Pattern B):** `write-plan` requires `Depends on:` / `Wave:` / `Owns:` per task and an `## Execution Waves` summary; `subagent-driven-dev` dispatches every task in a wave concurrently in one shared feature-branch worktree, with the controller (not the implementers) running git to avoid index races. Cuts wall-time on multi-task plans roughly N× per wave with zero merge ceremony. |
-| **v0.3.0** | Released | Full Superpowers parity port (remaining skills: `systematic-debugging`, `test-driven-development`, `using-git-worktrees`, `dispatching-parallel-agents`, `verification-before-completion`, `requesting-code-review`, `receiving-code-review`, `writing-skills`, `using-uberdev`); brainstorm Visual Companion (Neo Brutalism UI, local server + frame-template.html, sessions persist to `.uberdev/brainstorm/`); SessionStart hook injects the `using-uberdev` primer. |
-| **v0.3.1** | Released | **`/uberdev:simplify` realigned with Anthropic's built-in `/simplify`:** three-parallel-agent orchestrator — Code Reuse, Code Quality, Efficiency reviewers fan out concurrently in a single Task-tool turn; controller aggregates findings and fixes them. Iron rule preserved (no behavior changes), plus uberdev's separate `refactor:` commit mandate. Was previously a single-agent dispatch — drift fix bringing parity with the canonical flow shipped in the Claude Code binary. |
-| **v0.4.0** | Released | **Parallel fanout spread across the plugin.** `/uberdev:review-pr` flips default from sequential to **parallel** (all applicable review agents dispatch concurrently in a single turn — divergence from upstream `pr-review-toolkit`). `/uberdev:issue` Phase 2/3/4 (codebase investigation + duplicate search + label/scope validation) now runs as three parallel agents, ~60-70% wall-time savings. `verification-before-completion` documents parallel verification dispatch (independent test/lint/build/typecheck checks). `systematic-debugging` adds **competing-hypothesis fanout** — read-only investigators, one per hypothesis, no anchoring. `brainstorm` gains optional parallel design-direction exploration for high-stakes designs. `write-plan` gains opt-in alternative-plan generation (3 decomposition strategies). `receiving-code-review` adds multi-reviewer parallel triage. |
-| **v0.5.0** | Released | **Hardening + perf + new platform features.** Security: closes RCE in `/solve` (drops `--dangerously-skip-permissions`), prompt-injection in `inject-brainstorm-answers` (per-line JSON validation, `<`/`>` escaping, symlinked-path refusal), and fragile JSON in `session-start` (jq-based encoding). Critical bug fix: v0.4.0 `/issue` parallel fanout was silently broken — vars now resolved in orchestrator and baked literally into each subagent brief. Perf: 5 detail agents → Haiku 4.5 (~15-20% wall-time on `/uberdev:review-pr`); per-line `jq` fork in brainstorm-answers hook → streaming `jq -R 'fromjson?'` (~200-500ms saved per user prompt). New: `SessionEnd` + `PreCompact` hooks; `.claude/uberdev.local.md` per-project config; `AskUserQuestion` fast-path in `brainstorm`; cross-platform `sed -i` in `/solve`; YAML frontmatter on `/issue` and `/solve`; tightened `allowed-tools`; `CONTRIBUTING.md` + `CHANGELOG.md` (Keep-a-Changelog 1.1.0); stack-agnostic `code-simplifier`. |
-| **v0.6.0** | Released | **Unattended workflow + Ghostty integration.** New `/turbo <issue>` — unattended `/solve` that auto-accepts brainstorm recommendations for medium/large tier (parallel research still runs — recommendation grounding preserved); trivial/small tier behaves identically to `/solve`. New `/solve --auto` and `/turbo --auto` flags enable Claude Code's `--permission-mode auto` classifier (auto-approves safe ops; blocks force push, exfil, self-modification, `--dangerously-skip-permissions`). `/solve` and `/turbo` Ghostty dispatcher tab-spawns into the originating Ghostty window when invoked from inside Ghostty (per-project workspaces stay grouped); `SOLVE_GHOSTTY_NEW_WINDOW=1` forces legacy new-window dispatch; AppleScript failures fall back automatically. `brainstorm` skill: parallel research dispatch promoted to default first step (proposed approaches grounded in research synthesis, not speculation). Removed deprecated slash-command shims `/uberdev:brainstorm`, `/uberdev:execute-plan`, `/uberdev:write-plan` (Superpowers-port leftovers — invoke skills directly via the Skill tool). |
-| **v0.7.0** | Released | **Writer-subagent orchestrator.** New `/uberdev:orchestrator` skill — 5-phase pipeline used by `/solve` and `/turbo` for medium/large tier: research fanout (parallel Sonnet subagents) → optional Q&A (skipped for `/turbo`) → spec-writer (Opus) → optional spec-reviewer (Opus, gated by `--paranoid` for medium tier; always for large tier) → plan-writer (Opus, with internal research fanout) → existing `subagent-driven-dev`. Each writer returns a structured YAML summary; orchestrator main holds pointers, not raw artifacts — reclaims context for wave dispatch and error recovery. 8 new agent definitions: `research-codebase`, `research-patterns`, `research-prior-art`, `research-constraints` (Sonnet); `spec-writer`, `spec-reviewer`, `spec-reviser`, `plan-writer` (Opus). New `--paranoid` flag enables spec-reviewer for medium tier. `/solve` and `/turbo` medium/large prompts now invoke `/uberdev:orchestrator` instead of `/uberdev:brainstorm` directly; trivial/small paths unchanged. `write-plan` execution handoff is now non-interactive (default subagent-driven, explicit opt-in for inline). Closes #5 architecturally — `/turbo` no longer halts on a "Subagent-Driven vs. Inline Execution?" prompt. |
-| **v0.7.1** | Released | **`/turbo` end-to-end unattended chain.** Threads `--turbo` through every handoff (`brainstorm` → `write-plan` → `subagent-driven-dev` → `finish-branch`, plus the `orchestrator` Phase 5 → `subagent-driven-dev` link that PR #8 introduced). `finish-branch` auto-selects "Push and Create PR" under `--turbo` instead of prompting; pre-existing Step 5 contradiction (Quick Reference / Red Flags said cleanup runs only for Options 1 & 4, but Step 5 listed Options 1, 2, 4) resolved in favor of consistency — Option 2 leaves the worktree alive for PR-feedback fixups. New `tests/turbo-flow.test.sh` (9 contract assertions) locks the `--turbo` propagation contract at every handoff site so a future skill edit can't silently re-attend the flow. |
-| **v0.8.0** | Released | **`/uberdev:issue` deep root-cause research fanout + WHAT/HOW boundary.** Phase 2 dispatches a 2-agent parallel fanout (`research-codebase` + `research-patterns`) alongside the existing Phase 3/4 agents — four agents fan out together in a single message; Phase 4.5 aggregates all four returns. Bug-template `## Likely root cause` becomes a causal triple (Symptom / Mechanism / Owning code) with optional 5 Whys for non-trivial bugs; bare file-path lists in this section are forbidden. Feat-template `## Proposed approach` is renamed to `## What changes` (field-name pressure replaces rules-text pressure). New "Body authoring rules" subsection ahead of the templates codifies WHAT/HOW. Research summaries persist to `.uberdev/research/issue-<N>/` (renamed from `run-<RUN_ID>/` after `gh issue create`); `/uberdev:brainstorm` step 2 short-circuits on this directory per-topic with mtime-based staleness fallback, eliminating the duplicate codebase-research round when invoked downstream of `/issue`. New `tests/issue-causal-fanout.test.sh` (structural assertions, modelled on `tests/turbo-flow.test.sh`) locks the contract invariants. RFC at `docs/rfc/2026-04-29-issue-deep-root-cause-research-fanout.md`. No breaking change — `**Triage hint:**`, severity checkboxes, label format, and conventional-commit titles preserved verbatim. Closes #9. |
-| **v0.9.0** | Current | **`/uberdev:issue` 4→8 agent fanout + always-on quality reviewers + non-blocking `/turbo` Q&A.** Phase 2-4 fanout grows from 4 → 8 Task agents in a single turn (existing 4 PLUS `research-prior-art`, `research-constraints`, `research-security` Semgrep+awesome-secure-defaults, `research-test-coverage`); issue templates gain `## Current ecosystem`, `## Constraints`, conditional `## Security signals`. `NO_EXPLORE=1` narrows to in-repo only. Tier-independent quality bar via artifact reuse + always-on reviewers: orchestrator Phase 1 short-circuits per-topic against `.uberdev/research/issue-<N>/`; spec-reviewer always-on for medium AND large (`--paranoid` deprecated as no-op); new Phase 4.5 `plan-reviewer` (1-retry, non-blocking); new Phase 5.5 `pr-test-analyzer` pre-merge for large tier. New `uberdev:post-impl-review` skill (5-agent advisory fanout: code-reviewer + simplifier + silent-failure-hunter + type-design-analyzer + comment-analyzer) invoked by `/solve` trivial/small AND `subagent-driven-dev` after each wave. `/turbo` Q&A becomes non-blocking — Phase 2 auto-picks each clarifying answer using research-bundle synthesis and writes `questions.md`; `finish-branch` Option 2 reads it and appends `## Open questions answered by /turbo` + `## Reviewer findings summary` to the PR body. Closes #11. |
-| **v0.10** | Maybe | Optional per-repo `.claude/board.json` for re-enabling project-board auto-add |
-| **v0.11** | Maybe | Linux + Windows terminal dispatchers; configurable model pin via env |
-| **v0.12** | Released | **`/merge` — post-review PR landing.** Top-level command + `uberdev:merge` skill (4-phase pipeline: pre-flight gate, merge plan, parallel conflict-resolve in scratch worktree, local sync). New `agents/conflict-resolver.md` (one per conflicted file, single-message fanout). New `tests/merge.test.sh` (16 shape-check assertions; M15 enforces the no-`Co-Authored-By: Claude`-trailer rule on resolution commits, M16 enforces the same-directory `mktemp` pattern that guarantees atomic writes of `.claude/uberdev.local.md`). New `integration_branch` config key (CLI flag > env var > config > `gh repo view`). New `bot_authors_allow_list` config key (default `["dependabot[bot]", "renovate[bot]"]`). Closes #24. |
-
----
-
-## Bundled (since v0.2.0)
-
-UberDev ships these so `/solve` and `/issue` work standalone — **no `superpowers`, `pr-review-toolkit`, or `code-simplifier` plugin install required**.
-
-| Type | Slug | Source |
-|---|---|---|
-| Skill | `uberdev:brainstorm` | adapted from [`superpowers:brainstorming`](https://github.com/obra/superpowers) (MIT, Jesse Vincent) |
-| Skill | `uberdev:write-plan` | adapted from `superpowers:writing-plans` |
-| Skill | `uberdev:execute-plan` | adapted from `superpowers:executing-plans` |
-| Skill | `uberdev:subagent-driven-dev` | adapted from `superpowers:subagent-driven-development` |
-| Skill | `uberdev:finish-branch` | adapted from `superpowers:finishing-a-development-branch` (renamed) |
-| Agent | `uberdev:code-reviewer` | verbatim from [`pr-review-toolkit`](https://github.com/anthropics/claude-code) (Apache 2.0, Anthropic) — CLAUDE.md/style compliance focus |
-| Agent | `uberdev:plan-reviewer` | adapted from [`superpowers:code-reviewer`](https://github.com/obra/superpowers) (MIT, Jesse Vincent) — plan-vs-implementation focus (renamed `code-reviewer` → `plan-reviewer` to avoid slug collision) |
-| Agent | `uberdev:comment-analyzer` | verbatim from `pr-review-toolkit` |
-| Agent | `uberdev:pr-test-analyzer` | verbatim from `pr-review-toolkit` |
-| Agent | `uberdev:silent-failure-hunter` | verbatim from `pr-review-toolkit` |
-| Agent | `uberdev:type-design-analyzer` | verbatim from `pr-review-toolkit` |
-| Agent | `uberdev:code-simplifier` | verbatim from [`code-simplifier`](https://github.com/anthropics/claude-code) v1.0.0 (Apache 2.0, Anthropic) |
-| Command | `/uberdev:review-pr` | adapted from `pr-review-toolkit:/review-pr` |
-| Command | `/uberdev:simplify` | mirrors Anthropic's built-in `/simplify` (3-phase orchestrator: identify diff → fan out 3 parallel review agents — Reuse, Quality, Efficiency — → aggregate + fix → separate `refactor:` commit) |
-
-Adaptations for the skills: dropped Visual Companion section from `brainstorm` (browser-based mockup server, never used by spawned headless `/solve` agents); retargeted all `superpowers:*` cross-references to `uberdev:*`; replaced references to non-bundled superpowers skills (`using-git-worktrees`, `test-driven-development`, `requesting-code-review`, `finishing-a-development-branch`) with inline prose preserving the discipline. Bundled upstream license texts are in `plugins/uberdev/licenses/`.
+Release notes live in [`CHANGELOG.md`](./CHANGELOG.md) (Keep-a-Changelog 1.1.0 / SemVer). The GitHub releases tab is intentionally kept lean — `CHANGELOG.md` is authoritative.
 
 ---
 
@@ -581,7 +303,7 @@ Adaptations for the skills: dropped Visual Companion section from `brainstorm` (
 <details>
 <summary><strong>Why "UberDev"?</strong></summary>
 
-Personal brand. The marketplace name and repo are `UberDev`; the plugin inside is `uberdev` (lowercase to match Claude Code naming conventions).
+Personal brand. Marketplace and repo are `UberDev`; the plugin inside is `uberdev` (lowercase to match Claude Code naming conventions).
 
 </details>
 
@@ -593,20 +315,13 @@ Partially. The terminal-dispatch chain falls through to `nohup` (detached backgr
 </details>
 
 <details>
-<summary><strong>Why no <code>LICENSE</code> file?</strong></summary>
-
-License is declared in `plugin.json` (`"license": "MIT"`) which is enough for the plugin metadata. A repo-root `LICENSE` file may land in a future patch for GitHub UI parity.
-
-</details>
-
-<details>
 <summary><strong>How do I disable the plugin without uninstalling?</strong></summary>
 
 ```
 /plugin disable uberdev@uberdev
 ```
 
-Or edit `~/.claude/settings.json` and flip the entry to `false`:
+Or edit `~/.claude/settings.json`:
 
 ```json
 "enabledPlugins": {
@@ -616,11 +331,22 @@ Or edit `~/.claude/settings.json` and flip the entry to `false`:
 
 </details>
 
+<details>
+<summary><strong>I'm hitting Claude usage limits constantly. What do I do?</strong></summary>
+
+Either upgrade — the headline warning recommends 2× Claude Max ×20 for sustained daily use — or scale down: prefer `/solve --trivial` / `--small`, skip `/turbo`, skip `/uberdev:review-pr`, or use a less aggressive plugin. UberDev's defaults are tuned for "ship faster, pay for it" — that's a deliberate choice.
+
+</details>
+
 ---
+
+## Contributing
+
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
 ## License
 
-MIT. See [`plugins/uberdev/.claude-plugin/plugin.json`](plugins/uberdev/.claude-plugin/plugin.json) for the manifest declaration. A standalone `LICENSE` file may land later.
+MIT. See [`LICENSE`](./LICENSE).
 
 ---
 
