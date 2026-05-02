@@ -327,6 +327,38 @@ else
   echo "        actual count:   $DIRECTIVE_COUNT"
   FAIL=$((FAIL + 1))
 fi
+# Positive lock — the negative no-pre-push-simplify directive only makes sense
+# if /uberdev:review-pr is actually invoked post-push (its Phase 2 is where
+# simplify lives). Without an explicit invocation step in each heredoc, the
+# spawned trivial/small agent calls `gh pr create` and stops — the chain into
+# /review-pr never fires and the simplify ceremony silently no-ops on every
+# trivial/small PR. Anchor the count at 4 so a future edit cannot delete the
+# positive directive from one heredoc while leaving three intact.
+INVOKE_COUNT=$(grep -cF 'Capture the PR URL' "$SOLVE_PIPELINE" 2>/dev/null || echo "0")
+if [[ "$INVOKE_COUNT" -eq 4 ]]; then
+  echo "  PASS  all 4 trivial/small heredocs explicitly invoke uberdev:review-pr post-push (count=4)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  all 4 trivial/small heredocs must invoke uberdev:review-pr via Skill tool after gh pr create"
+  echo "        file: $SOLVE_PIPELINE"
+  echo "        expected count: 4 (trivial-solve, trivial-turbo, small-solve, small-turbo)"
+  echo "        actual count:   $INVOKE_COUNT"
+  FAIL=$((FAIL + 1))
+fi
+# Turbo heredocs must forward --turbo into /review-pr so the chain stays
+# unattended (mirrors finish-branch's --turbo forwarding pattern). Two turbo
+# heredocs (trivial-turbo, small-turbo) → count=2.
+TURBO_FORWARD_COUNT=$(grep -cF 'uberdev:review-pr --turbo' "$SOLVE_PIPELINE" 2>/dev/null || echo "0")
+if [[ "$TURBO_FORWARD_COUNT" -eq 2 ]]; then
+  echo "  PASS  both turbo heredocs (trivial-turbo, small-turbo) forward --turbo into /review-pr (count=2)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  both turbo heredocs must invoke 'uberdev:review-pr --turbo' to keep the chain unattended"
+  echo "        file: $SOLVE_PIPELINE"
+  echo "        expected count: 2 (trivial-turbo, small-turbo)"
+  echo "        actual count:   $TURBO_FORWARD_COUNT"
+  FAIL=$((FAIL + 1))
+fi
 assert_grep "$REPO_ROOT/plugins/uberdev/commands/simplify.md" \
   'canonical place.*/simplify.*runs.*Phase 2|Phase 2 of .*review-pr' \
   "simplify.md names /review-pr Phase 2 as the canonical simplify run site"

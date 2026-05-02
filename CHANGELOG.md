@@ -4,6 +4,20 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.2] - 2026-05-02
+
+### Fixed
+- **Trivial- and small-tier `/solve` and `/turbo` PRs were silently skipping the `/uberdev:review-pr` chain — and with it the entire Phase 2 simplify ceremony.** The 4 heredocs in `solve-pipeline/SKILL.md` (`trivial-solve`, `trivial-turbo`, `small-solve`, `small-turbo`) ended with `Open PR with Closes #N` and a *negative* directive ("Do NOT run `/uberdev:simplify` standalone before push — Phase 2 of `/uberdev:review-pr` runs it automatically"), but **never told the spawned agent to actually invoke `/uberdev:review-pr` after `gh pr create`**. Trivial/small bypass `finish-branch` entirely (they call `gh pr create` directly), so the canonical chain hand-off (`finish-branch` Option 2 → invoke `uberdev:review-pr` via the Skill tool, line 296) never fired either. The chain was implicit — the spawned agent had to read user-global `CLAUDE.md` ("MANDATORY: run `/uberdev:review-pr` after pushing the PR. No exceptions, hotfixes included.") and infer the next step on its own. Same class of bug as the orchestrator Phase 2 fix in v0.15.1: the heredoc-prose was relying on inference where it should have been imperative.
+- **Net effect of the bug:** trivial/small PRs got a Phase-1 review fanout *only if* the spawned agent independently decided to run `/review-pr`; the 3-lens simplify pass (reuse / quality / efficiency) — wired to fire as Phase 2 of `/review-pr` — never ran on trivial/small at all. Medium/large was unaffected (orchestrator → subagent-driven-dev → finish-branch → invoke `uberdev:review-pr` is hard-coded and locked by an existing test assertion).
+- **Tightened all 4 heredocs.** Added an explicit numbered final step to each: `Capture the PR URL from gh pr create output and invoke the uberdev:review-pr [--turbo] skill via the Skill tool with that URL. This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory — do NOT block on REVISIONS_REQUIRED.` Turbo heredocs forward `--turbo` into `/review-pr` to keep the chain unattended (mirrors `finish-branch`'s `--turbo` propagation pattern).
+
+### Added
+- **`tests/turbo-flow.test.sh` 55 → 57 assertions.** Two new positive locks:
+  - `Capture the PR URL` literal anchor count must equal 4 (one per heredoc; future edits cannot delete the directive from one heredoc while leaving three intact).
+  - `uberdev:review-pr --turbo` literal anchor count must equal 2 (trivial-turbo, small-turbo) so a future edit cannot drop `--turbo` propagation and re-introduce attended-mode regressions on trivial/small turbo runs.
+
+  These mirror the pre-existing count=4 lock on the negative `Do NOT run /uberdev:simplify standalone before push` directive — both directives now move in lockstep, neither can drift without test failure.
+
 ## [0.15.1] - 2026-05-02
 
 ### Fixed
