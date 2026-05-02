@@ -346,14 +346,19 @@ SCRIPT_EOF
 # BSD/macOS sed needs '-i ""'; GNU sed needs bare '-i'.
 SED_INPLACE=(-i '')
 [[ "$(uname)" == "Linux" ]] && SED_INPLACE=(-i)
-sed "${SED_INPLACE[@]}" "s|REPO_ROOT|$(pwd)|g" /tmp/solve-$ISSUE_NUM.sh
-sed "${SED_INPLACE[@]}" "s|CLAUDE_BIN|$REAL_CLAUDE|g" /tmp/solve-$ISSUE_NUM.sh
-sed "${SED_INPLACE[@]}" "s/ISSUE_NUM/$ISSUE_NUM/g" /tmp/solve-$ISSUE_NUM.sh
-sed "${SED_INPLACE[@]}" "s/TIER/$TIER/g" /tmp/solve-$ISSUE_NUM.sh
-sed "${SED_INPLACE[@]}" "s/DETECTED_TERMINAL/${TERMINAL:-cmux}/g" /tmp/solve-$ISSUE_NUM.sh
 PERM_FLAG_VAL=""
 [[ "$AUTO_PERMISSIONS" == "1" ]] && PERM_FLAG_VAL="--permission-mode auto"
-sed "${SED_INPLACE[@]}" "s|PERM_FLAG_VALUE|$PERM_FLAG_VAL|g" /tmp/solve-$ISSUE_NUM.sh
+# All placeholders are unique tokens with no cross-substitution risk; collapse
+# six sed invocations (six forks per spawn × N issues) into one. Per-expression
+# delimiter choice (`|` for path-bearing values, `/` for enums) is preserved.
+sed "${SED_INPLACE[@]}" \
+  -e "s|REPO_ROOT|$(pwd)|g" \
+  -e "s|CLAUDE_BIN|$REAL_CLAUDE|g" \
+  -e "s/ISSUE_NUM/$ISSUE_NUM/g" \
+  -e "s/TIER/$TIER/g" \
+  -e "s/DETECTED_TERMINAL/${TERMINAL:-cmux}/g" \
+  -e "s|PERM_FLAG_VALUE|$PERM_FLAG_VAL|g" \
+  /tmp/solve-$ISSUE_NUM.sh
 chmod +x /tmp/solve-$ISSUE_NUM.sh
 ```
 
