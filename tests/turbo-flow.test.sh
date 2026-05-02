@@ -166,9 +166,15 @@ assert_grep "$SOLVE_PIPELINE" \
 assert_grep "$SOLVE_PIPELINE" \
   'TURBO MODE.*banner.*once|print once.*medium|once before.*loop' \
   "TURBO MODE banner documented as printed-once (not per-spawn)"
+# Two single-line assertions (grep -E without -z does not match across newlines —
+# a multi-line `.*\n.*` alternation half is dead code). Lock the dedup loop and
+# the break-on-first-medium guard separately.
 assert_grep "$SOLVE_PIPELINE" \
-  'for n in "\$\{ISSUE_NUMS\[@\]\}".*\n.*medium.*\n.*break|TIERS\[\$n\].*medium' \
-  "TURBO MODE banner uses break after first medium-tier hit (dedup mechanic)"
+  'for n in "\$\{ISSUE_NUMS\[@\]\}"' \
+  "TURBO MODE banner loops over ISSUE_NUMS to scan tiers (dedup mechanic)"
+assert_grep "$SOLVE_PIPELINE" \
+  'TIERS\[\$n\].*medium' \
+  "TURBO MODE banner checks TIERS[\$n] == medium (with break after first hit)"
 assert_grep "$SOLVE_PIPELINE" \
   'TERMINAL.*==.*ghostty.*\&\&.*ISSUE_NUMS|sleep 0\.6' \
   "solve-pipeline serializes Ghostty multi-spawn (keystroke race mitigation, sleep 0.6)"
