@@ -4,6 +4,18 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.1] - 2026-05-02
+
+### Fixed
+- **`/solve` was silently collapsing into `/turbo` for medium/large tier.** The launcher heredoc was correct (no `--turbo` written when `AUTO_MODE=0`, locked by the existing differential guard at `tests/turbo-flow.test.sh:91-103`); the regression was in `plugins/uberdev/skills/orchestrator/SKILL.md` prose. Phase 2 Q&A is the **only** phase that distinguishes `/solve` from `/turbo` for medium/large — every other phase (research fanout, spec-writer, spec-reviewer, plan-writer, plan-reviewer, subagent-driven-dev, finish-branch auto-PR) is unattended in both modes — and the prose around Phase 2 was too soft for a freshly-spawned LLM with no prior-conversation anchor:
+  - **Skill description** called Q&A `optional` and spec-reviewer `optional`. Both stale: spec-reviewer is always-on for medium/large per Phase 3.5, and Q&A is the load-bearing /solve-vs-/turbo signal. "Optional" read as "agent's choice" → spawned agents skipped Q&A → /solve felt like /turbo.
+  - **Phase 2 non-turbo prose** led with `unchanged — ask 3-5 clarifying questions…`. The word `unchanged` referenced previous-version behavior, but a freshly-spawned LLM has no "previous version" to reference; the line read as filler with no imperative force. No `MUST`, no gate language, nothing preventing the LLM from concluding "the issue is well-specified, no questions needed".
+  - **`AskUserQuestion` is a deferred tool** in current Claude Code harnesses (calling without `ToolSearch` first throws `InputValidationError`). The skill never mentioned this; a spawned agent that hit the error could silently fall back to "best guess" and continue — indistinguishable from turbo.
+- **Tightened all three sites.** Phase 2 now leads with "this phase is the only signal that distinguishes /solve from /turbo… Do not skip", uses imperative `You MUST ask 3-5 clarifying questions`, adds explicit `Do NOT proceed to Phase 3 until the user has answered` gate, and includes a `ToolSearch` instruction (`select:AskUserQuestion`) with a `Do NOT silently auto-pick on tool-load failure` rule. Skill description rewritten to drop "optional" mis-signals: `research fanout → Q&A [interactive unless --turbo] → spec-writer → spec-reviewer [always-on for medium/large] → plan-writer → plan-reviewer [always-on] → subagent-driven-dev`.
+
+### Added
+- **`tests/turbo-flow.test.sh` 48 → 55 assertions.** New `orchestrator Phase 2 imperative gate` section locks the imperative phrasing (`You MUST ask 3-5 clarifying questions`), the explicit `Do NOT proceed to Phase 3` gate, the "only signal that distinguishes /solve from /turbo" anti-skip prose, the `ToolSearch select:AskUserQuestion` deferred-tool callout, and the `Do NOT silently auto-pick on tool-load failure` rule. Two `assert_not_grep` canaries ban the stale `optional Q&A` and `optional spec-reviewer` strings from re-appearing in the description. Full suite still passes (322 assertions across 11 test files).
+
 ## [0.15.0] - 2026-05-02
 
 ### Refactored (simplify-loop edits from `/uberdev:review-pr` Phase 2)
