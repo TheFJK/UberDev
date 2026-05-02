@@ -49,10 +49,12 @@ assert_grep_not() {
 # assertion.
 NONCOMMENT=$(grep -vE '^[[:space:]]*#' "$SOLVE_PIPELINE")
 
-# Just the dispatch case under "### 6. Spawn agent in new terminal session" —
-# avoids accidental matches against the earlier validation block (which also
-# has a `ghostty)` arm but with different content).
-DISPATCH=$(awk '/^### 6\. Spawn agent in new terminal session$/,/^### 7\./' "$SOLVE_PIPELINE")
+# Just the dispatch case under the per-issue "Spawn agent in new terminal
+# session" sub-step (multi-issue refactor moved this from `### 6.` to
+# `#### 5c.` inside the Phase B for-loop). Avoid matches against the earlier
+# Step 3 terminal-detection validation block (which also has a `ghostty)` arm
+# but with different content) by anchoring on the dispatch heading specifically.
+DISPATCH=$(awk '/^#### 5c\. Spawn agent in new terminal session$/,/^### 6\./' "$SOLVE_PIPELINE")
 
 # Just the ghostty arm body (between `  ghostty)` and the next `    ;;`) so the
 # nohup-fallback assertion proves the fallback lives inside the ghostty case,

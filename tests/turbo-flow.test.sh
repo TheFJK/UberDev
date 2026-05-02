@@ -113,6 +113,58 @@ assert_grep "$SOLVE_CMD" 'export AUTO_MODE=0' \
   "/solve thin wrapper sets AUTO_MODE=0 (interactive)"
 assert_grep "$TURBO_CMD" 'export AUTO_MODE=1' \
   "/turbo thin wrapper sets AUTO_MODE=1 (unattended)"
+assert_grep "$TURBO_CMD" \
+  'argument-hint:.*<issue-number>.*\[<issue-number>' \
+  "/turbo argument-hint documents multi-issue syntax"
+assert_grep "$SOLVE_CMD" \
+  'argument-hint:.*<issue-number>.*\[<issue-number>' \
+  "/solve argument-hint documents multi-issue syntax"
+
+echo
+echo "== solve-pipeline accepts multiple issue numbers (multi-issue dispatch) =="
+# /turbo 5 6 7 must spawn one agent per issue in parallel. The skill scans every
+# space-separated token in $ARGUMENTS, collects only purely-numeric tokens
+# (anchored regex — `--terminal=foo123` must NOT pollute), dedupes, validates
+# every issue up front (Phase A), and only then spawns (Phase B). If any issue
+# fails validation, the entire batch aborts with no agents dispatched.
+assert_grep "$SOLVE_PIPELINE" \
+  'ISSUE_NUMS=\(\)' \
+  "solve-pipeline declares ISSUE_NUMS array (multi-issue parser)"
+assert_grep "$SOLVE_PIPELINE" \
+  'for token in \$ARGUMENTS' \
+  "solve-pipeline iterates tokens for numeric extraction"
+assert_grep "$SOLVE_PIPELINE" \
+  '\^\[0-9\]\+\$' \
+  "solve-pipeline anchors numeric token regex (rejects --terminal=foo123)"
+assert_grep "$SOLVE_PIPELINE" \
+  'no agents dispatched' \
+  "solve-pipeline aborts before spawning if any issue fails Phase A validation"
+assert_grep "$SOLVE_PIPELINE" \
+  'Phase A|validate.*all issues|validate-all-first' \
+  "solve-pipeline names the Phase A validate-all-first contract"
+assert_grep "$SOLVE_PIPELINE" \
+  'for ISSUE_NUM in "\$\{ISSUE_NUMS\[@\]\}"' \
+  "solve-pipeline loops Phase B over validated issues"
+assert_grep "$SOLVE_PIPELINE" \
+  'TERMINAL.*==.*ghostty.*\&\&.*ISSUE_NUMS|sleep 0\.6' \
+  "solve-pipeline serializes Ghostty multi-spawn (keystroke race mitigation, sleep 0.6)"
+assert_grep "$SOLVE_PIPELINE" \
+  'SPAWNED\[@\]|\$\{#SPAWNED\[@\]\}' \
+  "solve-pipeline emits a single summary notification (not per-spawn) using SPAWNED array"
+# REAL_CLAUDE detection must be hoisted out of the per-issue loop (cosmetic
+# optimization — same value across spawns). Anchor: it appears in Step 3
+# (terminal detection) before the Phase B loop.
+SP_REAL_CLAUDE_LINE=$(grep -n 'REAL_CLAUDE=\$(' "$SOLVE_PIPELINE" | head -1 | cut -d: -f1)
+SP_PHASE_B_LINE=$(grep -n 'for ISSUE_NUM in "\${ISSUE_NUMS\[@\]}"' "$SOLVE_PIPELINE" | tail -1 | cut -d: -f1)
+if [[ -n "$SP_REAL_CLAUDE_LINE" && -n "$SP_PHASE_B_LINE" && "$SP_REAL_CLAUDE_LINE" -lt "$SP_PHASE_B_LINE" ]]; then
+  echo "  PASS  REAL_CLAUDE resolution hoisted before Phase B loop (line $SP_REAL_CLAUDE_LINE before $SP_PHASE_B_LINE)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  REAL_CLAUDE must be resolved once before the per-issue loop"
+  echo "        REAL_CLAUDE line: ${SP_REAL_CLAUDE_LINE:-not found}"
+  echo "        Phase B line:    ${SP_PHASE_B_LINE:-not found}"
+  FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== orchestrator forwards --turbo into subagent-driven-dev =="

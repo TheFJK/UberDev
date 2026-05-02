@@ -4,6 +4,24 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-05-02
+
+### Added
+- **`/turbo` and `/solve` accept multiple issue numbers** — `/turbo 5 6 7` (and `/solve 5 6 7`) validates each listed issue (OPEN + classifiable) before dispatching, then spawns one autonomous Claude agent per issue into its own terminal session (cmux workspace / Ghostty tab / iTerm window / Terminal.app window / nohup background process). Per-issue artifacts are namespaced by `$ISSUE_NUM` (`/tmp/solve-prompt-N.txt`, `/tmp/solve-N.sh`, `.claude/worktrees/solve-issue-N/`, `worktree-solve-issue-N` branch, `#N <title>` tab) so the spawns are collision-free. Single-issue invocation behaviour is byte-identical. Override flags (`--trivial|--small|--full`, `--auto`, `--terminal=...`) apply batch-wide; per-issue overrides are not supported (run separate invocations for different tiers).
+- **Phase A validate-all-first contract in `solve-pipeline/SKILL.md`** — if any of the listed issues is closed, missing, or fails `gh` fetch, all errors are printed and the run aborts with `no agents dispatched` **before** spawning anything. No partial-state cleanup ever required. Phase B then loops the per-issue dispatch (write prompt → write launcher → spawn into chosen terminal).
+
+### Changed
+- **`solve-pipeline/SKILL.md` restructured into Phase A (validate) + Phase B (spawn).** Step 1 parses `ISSUE_NUMS` array (anchored `^[0-9]+$` rejects `--terminal=foo123`-style flag tokens; dedupe prevents same-issue race on shared worktree path). Step 3 hoists terminal detection + REAL_CLAUDE binary resolution + TURBO MODE banner out of the per-issue loop (terminal-detect runs once; banner prints once if any tier is medium). Steps 4 (was 3) becomes Phase A; Steps 5a/5b/5c (were 4/5/6) execute inside the Phase B `for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do ... done` loop. The medium `if [[ "$AUTO_MODE" == "1" ]]; then ... else ... fi` block is preserved at column 0 (zsh/bash do not require indentation inside `for ... done`), so `tests/turbo-flow.test.sh`'s differential-guard awk anchor remains valid.
+- **Ghostty multi-spawn serialized with 600 ms pause.** AppleScript `Cmd+T` keystroke dispatch is asynchronous; firing three keystrokes in <100 ms can race all three into the first-created tab. Pause applies only when `TERMINAL=ghostty` AND `${#ISSUE_NUMS[@]} > 1`. cmux (IPC API), iTerm/Terminal (scripted `create window`/`do script`, Apple Event queue serializes), and nohup all spawn race-free without the pause.
+- **Notifications batched.** One summary `cmux notify` / `terminal-notifier` / `osascript display notification` per `/turbo` invocation listing all spawned issues, replacing the prior N per-spawn notifications. Removes notification flooding on multi-issue runs.
+- **`tests/turbo-flow.test.sh` 29 → 40 assertions.** New section locks the multi-issue parser (`ISSUE_NUMS=()`, `for token in $ARGUMENTS`, anchored `^[0-9]+$`), Phase A contract (`no agents dispatched` abort path + Phase A naming), Phase B loop construct (`for ISSUE_NUM in "${ISSUE_NUMS[@]}"`), Ghostty serialization (`sleep 0.6`), batched-summary notification (`SPAWNED[@]`), and REAL_CLAUDE-hoist line-ordering (resolution before Phase B loop). Wrapper section gains argument-hint shape assertions for both `/solve` and `/turbo` documenting the multi-issue syntax.
+- **`tests/ghostty-dispatch-no-instance-leak.test.sh` awk anchor updated.** The dispatch case moved from `### 6.` to `#### 5c.` inside the new Phase B for-loop; the test's section-extraction awk pattern follows. Same 7 assertions as before; no contract change.
+- **`/turbo` and `/solve` command frontmatter** updated: `argument-hint` becomes `<issue-number> [<issue-number>...]`; `description` notes multi-issue dispatch; usage examples added showing `/turbo 5 6 7`.
+- **README.md `/turbo` section** gains a "Multi-issue dispatch" paragraph after the orthogonality table.
+
+### Backwards compatibility
+- **No user-facing breakage.** `/turbo 42` and `/solve 42` (single-issue) behaviour is byte-identical to 0.14.0. New multi-issue syntax is purely additive. No flag deprecations. Plugin manifest version bumped 0.14.0 → 0.15.0; marketplace `version` bumped to match so `/plugin marketplace update uberdev` picks up the release.
+
 ## [0.14.0] - 2026-05-01
 
 ### Changed
