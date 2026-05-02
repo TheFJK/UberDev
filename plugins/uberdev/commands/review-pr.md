@@ -64,6 +64,8 @@ Pass `--no-simplify` (anywhere in the arguments) to skip Phase 2 and preserve th
 
    Auto-apply the review fixes from the agent findings as one or more `fix:` / `refactor:` conventional commits. These are the **review-phase commits** — keep them distinct from the Phase 2 simplify commit (separate-commit invariant below).
 
+   **Green-run predicate (Phase 1 contribution):** Phase 1 contributes to a green run iff after auto-apply convergence the verdict is `APPROVE`. `REVISIONS_REQUIRED` and `REJECT` end Phase 1 with no trust-signal emission and `/review-pr` exits with code 1 (see step 9 exit-code contract). The full green predicate combines this with Phase 2's status (defined in step 7) — only `(Phase 1 == APPROVE) AND (Phase 2 status ∈ {ran/APPROVE, skipped})` triggers trust-signal emission.
+
 7. **Phase 2 — Mandatory Simplify Pass** (skip iff `SIMPLIFY_PHASE=0`)
 
    After Phase 1 fixes land, dispatch the three simplify lenses (**Code Reuse Review**, **Code Quality Review**, **Code Efficiency Review**) as a parallel fanout — **all three Task() calls in a SINGLE assistant message, ONE assistant turn**, mirroring the `uberdev:post-impl-review` single-message dispatch contract. The lens-by-lens checklist (what each agent looks for) is the canonical definition in `/uberdev:simplify` Phase 2 — refer there rather than restate.
@@ -77,9 +79,24 @@ Pass `--no-simplify` (anywhere in the arguments) to skip Phase 2 and preserve th
 
    **Auto-apply simplify edits** in a separate `refactor:` conventional commit, distinct from the Phase 1 review-fix commits. Reviewers must be able to tell "review fixes" apart from "simplify pass" by commit boundary alone — this distinct commit boundary is mandatory, not stylistic.
 
+   **On green Phase 2 (status ∈ {ran/APPROVE, skipped}), append the trust-signal trailer to the simplify-pass commit body:**
+
+   ```
+   Reviewed-by: uberdev/review-pr@<head-sha>
+   ```
+
+   where `<head-sha>` is the FULL 40-character SHA returned by `git rev-parse HEAD` immediately after the commit-write completes (NOT the abbreviated short-SHA — downstream `/merge` parser greps the literal 40-hex form). The trailer is the load-bearing trust artifact for `/merge` Phase 1.4 trust resolution (see `skills/merge/SKILL.md` Constants `REVIEW_PR_TRAILER_PREFIX`).
+
+   **When Phase 2 is `skipped`** (no simplify commit exists because `--no-simplify` was set or no simplify-eligible diff was found): append the trailer via `git commit --amend` to the most-recent commit on the PR head — typically the last Phase 1 auto-apply fix commit, or the user's tip commit if no Phase 1 fixes were needed. The amend recomputes the head SHA, so the trailer payload binds to the **post-amend** SHA, not the pre-amend SHA. Recompute `git rev-parse HEAD` after the amend before writing the trailer payload. This commit goes through pre-commit hooks normally — never `--no-verify`. Author = current `git config user.email` / `user.name`; the trailer is procedural attribution to the `/review-pr` command (not a Claude attribution).
+
    **Advisory-only findings** (where a lens declines to edit because the change carries behavior risk, or the agent flags a concern outside the iron-rule envelope) are **never silently dropped** — they surface in the Phase 2 row of the final aggregation table (step 8) so the human reviewer sees them.
 
-   **Non-blocking**: if the simplify-phase fanout itself fails (timeout, agent error, parse failure), `/review-pr` still exits successfully and reports the Phase 2 row's Status as `blocked` in the final aggregation (lowercase, matching the Status enum in step 9). Phase 1 review-fix work is **not undone**, and the command continues regardless of Phase 2 verdicts.
+   **Non-blocking but exit-coded.** Phase 2 status governs the exit code (see step 9 exit-code contract):
+
+   - `ran/APPROVE` or `skipped` → eligible for green; exit 0 if Phase 1 was APPROVE.
+   - `blocked` (timeout, agent error, parse failure, aggregator crash) → exit 2. Phase 1 review-fix work is **not undone** — those commits land normally — but no trust-signal artifacts (label / trailer / JSON) are emitted, and the exit code surfaces the silent-failure mode that previously got swallowed. The Phase 2 row's Status is `blocked` (lowercase). Fix the aggregator before re-running.
+
+   Phase 2 verdict ≠ Phase 2 status: an APPROVE verdict with `ran` status counts toward green; REVISIONS_REQUIRED or REJECT verdicts do NOT block trust-signal emission (they surface as advisory findings in the final aggregation table — see step 8). The trust-signal predicate is rooted in *status* (did the fanout complete cleanly?), not *verdict*.
 
 8. **Final Aggregation — distinguish review-phase vs simplify-phase findings**
 
@@ -123,6 +140,67 @@ Pass `--no-simplify` (anywhere in the arguments) to skip Phase 2 and preserve th
    3. Consider suggestions
    4. Re-run review after fixes
    ```
+
+## Trust-Signal Emission (on green run)
+
+After the final aggregation table renders, evaluate the green-run predicate:
+
+```
+GREEN := (Phase 1 verdict == "APPROVE") AND (Phase 2 status ∈ {"ran/APPROVE", "skipped"})
+```
+
+On GREEN, emit three SHA-bound durable artifacts in lockstep (all reference the same post-emission `headRefOid`):
+
+1. **Label** — `gh pr edit <N> --add-label uberdev-approved` (idempotent — `gh` no-ops if the label is already present). The literal label string is `uberdev-approved` (see `skills/merge/SKILL.md` Constants `UBERDEV_APPROVED_LABEL`).
+
+2. **Trailer** — already emitted in step 7 on the simplify commit (or amended onto the most-recent commit when Phase 2 is `skipped`). Verify with `git log -1 --format=%B | grep -E '^Reviewed-by: uberdev/review-pr@[a-f0-9]{40}$'` before proceeding to artifact 3.
+
+3. **Audit JSON** — write to `.uberdev/runs/<run-id>/review-pr-verdict.json`:
+
+```json
+{
+  "pr": <int>,
+  "sha": "<full-40-char-head-sha>",
+  "verdict": "APPROVE",
+  "phases": {
+    "phase1": {"status": "ran", "verdict": "APPROVE"},
+    "phase2": {"status": "ran/APPROVE" | "skipped", "verdict": "APPROVE" | null}
+  },
+  "timestamp": "<ISO8601>"
+}
+```
+
+The JSON is **local debug telemetry only** — `.uberdev/` is gitignored, so the JSON does NOT cross-clone. `/merge` consumes the trailer as the load-bearing trust artifact and treats the JSON as a corroborating presence check. See `skills/merge/SKILL.md` Phase 1.4 Path 2 for the consumer side.
+
+On any artifact-emission failure (label add fails, JSON write fails): exit 2 (treat as `blocked`-equivalent because the trust-signal contract is broken). Print the failing `gh` / filesystem stderr; suggest re-running `/review-pr`.
+
+### Run-ID format
+
+`<run-id>` MUST be derived as:
+
+```bash
+RUN_ID="$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)"
+```
+
+This mirrors the convention in `skills/merge/SKILL.md:209` (Phase 3.3ii scratch worktree path). Before any path concatenation, validate `<run-id>` against the regex:
+
+```
+^[0-9]{8}-[0-9]{6}-[a-f0-9]+$
+```
+
+See `skills/merge/SKILL.md` Constants `RUN_ID_REGEX`. If the regex match fails (defensive — should never trigger with internally-generated values), exit 2 and print: `BUG: run-id <value> does not match ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ — file an issue`. The regex constraint forecloses path-traversal if a future iteration ever sources `<run-id>` from external input.
+
+## Exit-Code Contract
+
+| Exit code | Condition |
+|-----------|-----------|
+| `0` | GREEN — Phase 1 verdict == `APPROVE` AND Phase 2 status ∈ {`ran/APPROVE`, `skipped`} |
+| `1` | Phase 1 verdict ∈ {`REJECT`, `REVISIONS_REQUIRED`} (regardless of Phase 2) |
+| `2` | Phase 2 status == `blocked` (fanout crash, agent error, aggregator failure, artifact-emission failure) |
+
+Exit code `2` is a **behavioral break** from the previous always-exit-0 contract. Callers that scripted `/review-pr` against the old "always exits successfully" prose must either ignore the exit code (preserve old behavior) or branch on it (use new behavior). The new contract surfaces silent reviewer-crash failures that the trust signal exists to eliminate. Documented in CHANGELOG.
+
+The exit code is rooted in Phase 2 *status*, not Phase 2 *verdict* — a `ran/APPROVE` exit-0 may still contain advisory `REVISIONS_REQUIRED` simplify findings surfaced in the aggregation table (step 8).
 
 ## Usage Examples:
 

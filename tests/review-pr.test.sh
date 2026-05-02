@@ -135,6 +135,62 @@ assert_grep "$REVIEW_PR" \
   "final aggregation distinguishes review-phase vs simplify-phase findings"
 
 echo
+echo "== R1–R6: SHA-bound trust signal (issue #40) =="
+
+# R1 — green-run predicate codified (AC2). Anchor on both phase predicates so
+# bare prose mentioning "APPROVE" doesn't false-positive.
+assert_grep "$REVIEW_PR" \
+  'Phase 1.*APPROVE.*Phase 2.*(ran/APPROVE|skipped)|GREEN.*Phase 1.*APPROVE.*Phase 2' \
+  "R1 — green-run predicate prose present"
+
+# R2 — label-emit gh command literal (AC1). Lock the verbatim gh subcommand
+# so a future implementer can't quietly switch label-add to a different API.
+assert_grep "$REVIEW_PR" \
+  'gh pr edit.*--add-label uberdev-approved' \
+  "R2 — label-emit gh command literal present"
+
+# R3 — trailer-format prose with verbatim 40-char SHA (AC1, AC13). The
+# downstream parser greps this exact form; test pins the literal.
+assert_grep "$REVIEW_PR" \
+  'Reviewed-by: uberdev/review-pr@' \
+  "R3 — trailer-format prefix literal present"
+assert_grep "$REVIEW_PR" \
+  '40[- ]character|40-char|\[a-f0-9\]\{40\}' \
+  "R3.sha-len — full 40-character SHA requirement called out"
+
+# R4 — exit-code table 0 / 1 / 2 (AC3). Three asserts so a partial table
+# (e.g. only 0 and 1) fails loudly.
+assert_grep "$REVIEW_PR" \
+  '\| `0` \|.*GREEN' \
+  "R4.exit0 — exit code 0 row present (GREEN)"
+assert_grep "$REVIEW_PR" \
+  '\| `1` \|.*Phase 1.*(REJECT|REVISIONS_REQUIRED)' \
+  "R4.exit1 — exit code 1 row present (REJECT/REVISIONS_REQUIRED)"
+assert_grep "$REVIEW_PR" \
+  '\| `2` \|.*Phase 2.*blocked' \
+  "R4.exit2 — exit code 2 row present (blocked)"
+
+# R5 — :82-83 prose distinguishes skipped (exit 0) from blocked (exit 2)
+# (AC12). Anchor the new wording so the old "still exits successfully"
+# prose cannot quietly resurface.
+assert_grep "$REVIEW_PR" \
+  '(ran/APPROVE|skipped).*eligible for green|skipped.*exit 0|blocked.*exit 2' \
+  "R5.skipped-vs-blocked — Phase 2 status prose distinguishes skipped vs blocked"
+if grep -qE 'still exits successfully' "$REVIEW_PR"; then
+  echo "  FAIL  R5.no-old-prose — old 'still exits successfully' prose must be removed"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  R5.no-old-prose — old 'still exits successfully' prose removed"
+  PASS=$((PASS + 1))
+fi
+
+# R6 — run-id regex constraint cited (AC11). Pin the exact regex so a
+# future loosening (e.g. dropping the timestamp prefix) trips the test.
+assert_grep "$REVIEW_PR" \
+  '\^\[0-9\]\{8\}-\[0-9\]\{6\}-\[a-f0-9\]\+\$' \
+  "R6 — run-id regex literal present"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
