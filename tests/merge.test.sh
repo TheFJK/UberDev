@@ -81,6 +81,21 @@ assert_grep() {
   fi
 }
 
+# Negative-presence helper — mirrors `assert_no_grep` in
+# tests/issue-causal-fanout.test.sh so the convention stays one-name across
+# the suite. Use this instead of inline `if grep ... ; then FAIL=... else
+# PASS=... fi` blocks for "must NOT match" assertions.
+assert_no_grep() {
+  local file="$1" pattern="$2" desc="$3"
+  if grep -qE -e "$pattern" "$file"; then
+    fail "$desc"
+    echo "        file:    $file"
+    echo "        pattern (must NOT appear): $pattern"
+  else
+    pass "$desc"
+  fi
+}
+
 echo "== M1: commands/merge.md exists with required frontmatter =="
 assert_grep "$CMD_FILE" '^description:' "M1.1 — has description key"
 assert_grep "$CMD_FILE" '^argument-hint:' "M1.2 — has argument-hint key"
@@ -612,13 +627,8 @@ assert_grep "$SKILL_FILE" \
   "M38 — stale-SHA primitive compares against live headRefOid (not local ref)"
 # Negative: must NOT compare against `git rev-parse HEAD` or `origin/<branch>`
 # for the stale-SHA check (those are stale by definition vs. the PR head ref).
-if grep -E 'stale[- ]SHA.*git rev-parse HEAD' "$SKILL_FILE" >/dev/null 2>&1; then
-  echo "  FAIL  M38.no-local-ref — stale-SHA check must not compare against local git rev-parse HEAD"
-  FAIL=$((FAIL + 1))
-else
-  echo "  PASS  M38.no-local-ref — stale-SHA check does not compare against local git rev-parse HEAD"
-  PASS=$((PASS + 1))
-fi
+assert_no_grep "$SKILL_FILE" 'stale[- ]SHA.*git rev-parse HEAD' \
+  "M38.no-local-ref — stale-SHA check does not compare against local git rev-parse HEAD"
 
 echo
 echo "== M39: SKILL.md RUN_ID_REGEX constant present (AC11) =="
@@ -679,13 +689,8 @@ echo
 echo "== M46: SKILL.md editor note corrected to 'five mirror sites' with enumeration (D8, AC14) =="
 assert_grep "$SKILL_FILE" 'five mirror sites' "M46.count — editor note says 'five mirror sites' (not 'four mirrors')"
 # Negative regression guard against the old wording.
-if grep -E 'those four mirrors' "$SKILL_FILE" >/dev/null 2>&1; then
-  echo "  FAIL  M46.no-old — old 'those four mirrors' editor-note wording must be removed"
-  FAIL=$((FAIL + 1))
-else
-  echo "  PASS  M46.no-old — old 'those four mirrors' wording removed"
-  PASS=$((PASS + 1))
-fi
+assert_no_grep "$SKILL_FILE" 'those four mirrors' \
+  "M46.no-old — old 'those four mirrors' wording removed"
 # Enumeration: 5 numbered list entries citing file:section.
 ENUM_HITS=$(grep -cE '^> [1-5]\. `plugins/uberdev/' "$SKILL_FILE" || true)
 if [ "$ENUM_HITS" -eq 5 ]; then

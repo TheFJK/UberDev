@@ -39,6 +39,19 @@ assert_grep() {
   fi
 }
 
+# Negative-presence helper — mirrors `assert_no_grep` in
+# tests/issue-causal-fanout.test.sh. Use for "must NOT match" assertions
+# instead of inline `if grep ... ; then FAIL=... else PASS=... fi` blocks.
+assert_no_grep() {
+  local file="$1" pattern="$2" desc="$3"
+  if grep -qE -e "$pattern" "$file"; then
+    echo "  FAIL  $desc"; echo "        file: $file"; echo "        pattern (must NOT appear): $pattern"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
+  fi
+}
+
 echo "== /uberdev:review-pr command file present with frontmatter =="
 assert_grep "$REVIEW_PR" '^description:' "frontmatter has description"
 assert_grep "$REVIEW_PR" '^allowed-tools:' "frontmatter has allowed-tools"
@@ -176,13 +189,8 @@ assert_grep "$REVIEW_PR" \
 assert_grep "$REVIEW_PR" \
   '(ran/APPROVE|skipped).*eligible for green|skipped.*exit 0|blocked.*exit 2' \
   "R5.skipped-vs-blocked — Phase 2 status prose distinguishes skipped vs blocked"
-if grep -qE 'still exits successfully' "$REVIEW_PR"; then
-  echo "  FAIL  R5.no-old-prose — old 'still exits successfully' prose must be removed"
-  FAIL=$((FAIL + 1))
-else
-  echo "  PASS  R5.no-old-prose — old 'still exits successfully' prose removed"
-  PASS=$((PASS + 1))
-fi
+assert_no_grep "$REVIEW_PR" 'still exits successfully' \
+  "R5.no-old-prose — old 'still exits successfully' prose removed"
 
 # R6 — run-id regex constraint cited (AC11). Pin the exact regex so a
 # future loosening (e.g. dropping the timestamp prefix) trips the test.
