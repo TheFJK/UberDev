@@ -99,7 +99,49 @@ Probe for `flock(1)` availability via `command -v flock` BEFORE invoking it. `fl
 
 - **`flock` available** (Linux, or macOS with Homebrew `flock`): use `flock` against `LOCK_FILE_PATH` (declared in `## Constants`). Default fail-fast on contention with message `"another /merge run in progress, PID <X>"`. `--wait` flag opt-in for queueing. Stale-lock cleanup: if PID dead, release.
 
-- **`flock` missing** (stock macOS, minimal container images, BSDs): fall back to a portable `mkdir`-based mutex at `${LOCK_FILE_PATH}.d/` (the directory sibling of the flock path). `mkdir` is POSIX-guaranteed atomic for exclusive creation, so two concurrent `/merge` runs cannot both succeed. On success, write `$$` to `${LOCK_FILE_PATH}.d/pid` so contention diagnostics carry the holder PID. On `mkdir` failure (directory already exists), read the PID file and probe liveness via `kill -0 <pid> 2>/dev/null`: if the holder is dead, the lock is stale — `rm -rf "${LOCK_FILE_PATH}.d"` and retry `mkdir` once; if still held, fail-fast with the same `"another /merge run in progress, PID <X>"` message.
+- **`flock` missing** (stock macOS, minimal container images, BSDs): fall back to a portable `mkdir`-based mutex at `${LOCK_FILE_PATH}.d/` (the directory sibling of the flock path). `mkdir` is POSIX-guaranteed atomic for exclusive creation, so two concurrent `/merge` runs cannot both succeed. Concrete acquisition + cleanup pattern:
+
+  ```bash
+  LOCK_DIR="${LOCK_FILE_PATH}.d"
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    # Acquired. Stamp PID then install cleanup trap before any other work.
+    if ! printf '%s\n' "$$" > "$LOCK_DIR/pid" 2>/dev/null; then
+      rmdir "$LOCK_DIR" 2>/dev/null || rm -rf "$LOCK_DIR"
+      echo "error: cannot stamp PID into $LOCK_DIR/pid (filesystem error)" >&2
+      exit 1
+    fi
+    trap 'rm -rf "$LOCK_DIR"' EXIT INT TERM
+  else
+    # mkdir failed. Distinguish stale-holder vs live-contention vs filesystem error.
+    if [ ! -d "$LOCK_DIR" ]; then
+      # mkdir failed for a non-EEXIST reason (ENOSPC, EACCES, EROFS, parent missing).
+      echo "error: cannot create $LOCK_DIR (filesystem error — disk full / permission / read-only fs)" >&2
+      exit 1
+    fi
+    HOLDER_PID="$(cat "$LOCK_DIR/pid" 2>/dev/null || echo)"
+    if [ -n "$HOLDER_PID" ] && kill -0 "$HOLDER_PID" 2>/dev/null; then
+      echo "another /merge run in progress, PID $HOLDER_PID" >&2
+      exit 1
+    fi
+    # Stale (holder dead OR PID file empty / unreadable). Clean up and retry once.
+    rm -rf "$LOCK_DIR"
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+      # Lost the race to another live /merge during cleanup, OR the FS broke between attempts.
+      echo "another /merge run in progress, PID $(cat "$LOCK_DIR/pid" 2>/dev/null || echo unknown)" >&2
+      exit 1
+    fi
+    printf '%s\n' "$$" > "$LOCK_DIR/pid"
+    trap 'rm -rf "$LOCK_DIR"' EXIT INT TERM
+  fi
+  ```
+
+  **Load-bearing failure-mode distinctions** (these silent-collapse cases were the reason issue #51 was misdiagnosed; do not let a future simplification re-collapse them):
+  - Missing-`flock` probe miss → silent fall-through to mkdir branch (**NOT contention**).
+  - `mkdir` EEXIST + holder alive → fail-fast `"another /merge run in progress, PID <X>"` (**true contention**).
+  - `mkdir` EEXIST + holder dead OR PID file empty → stale; clean up; retry `mkdir` once.
+  - `mkdir` non-EEXIST (ENOSPC, EACCES, EROFS, parent missing) → distinct `"filesystem error"` diagnostic (**NOT contention**).
+  - PID-file write failure (disk full immediately after `mkdir` succeeded) → release the lock dir; distinct `"cannot stamp PID"` diagnostic (**NOT contention**).
+  - `kill -0` exit 1 (process dead OR cross-UID permission denied) → treated as stale; safe under the run's own UID assumption (UberDev runs as the user, never cross-UID).
 
 The missing-`flock` case (`command -v flock` returns empty / exit 1) is **NOT contention** and MUST NOT emit the contention diagnostic — it is a tool-availability branch, taken silently as a fall-through to the portable mutex. Without this guard, every `/merge` invocation on a stock macOS install reports a false-positive "another /merge run in progress" before doing any work; that mis-classification was the root cause of issue #51.
 
@@ -421,7 +463,7 @@ For each stale branch, the agent decides (per-branch). Each decision emits one `
 
 ### Step 4.6 — Release the lock
 
-`flock` releases automatically on process exit; no explicit unlock required for the flock path. The `mkdir`-based fallback (Step 1.1, missing-`flock` branch) does NOT auto-release — the run MUST explicitly `rmdir "${LOCK_FILE_PATH}.d"` (or `rm -rf` to also drop the inner PID file) on every exit path, including signal-handler cleanup, so the next `/merge` does not encounter a stale-but-recently-held directory before its `kill -0` liveness probe runs.
+`flock` releases automatically on process exit; no explicit unlock required for the flock path. The `mkdir`-based fallback (Step 1.1, missing-`flock` branch) does NOT auto-release — cleanup is handled by the `trap 'rm -rf "$LOCK_DIR"' EXIT INT TERM` installed in Step 1.1 immediately after acquisition. That trap fires on normal exit, on Ctrl-C (SIGINT), and on SIGTERM. SIGKILL is uncatchable by definition; the safety net for a SIGKILL'd holder is the next `/merge` invocation's `kill -0` liveness probe, which detects the dead holder and triggers the stale-cleanup-and-retry path. Step 4.6 therefore has no explicit work to do for the fallback path beyond letting the trap fire — but the trap installation in Step 1.1 is non-negotiable.
 
 ## Quick Reference
 

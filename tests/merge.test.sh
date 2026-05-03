@@ -1035,10 +1035,26 @@ else
   fi
   # Phase 4.6 must clean up the mkdir fallback explicitly (flock auto-releases; mkdir does not).
   PHASE_4_6_BLOCK=$(awk '/^### Step 4\.6/,/^## Quick Reference/' "$SKILL_FILE")
-  if echo "$PHASE_4_6_BLOCK" | grep -qE '\brmdir\b|remove.*lock dir|cleanup.*fallback'; then
+  if echo "$PHASE_4_6_BLOCK" | grep -qE '\brmdir\b|rm -rf.*LOCK_DIR|remove.*lock dir|cleanup.*fallback|trap.*EXIT'; then
     pass "M62.4 — Step 4.6 documents explicit cleanup for the mkdir fallback"
   else
-    fail "M62.4 — Step 4.6 must document explicit cleanup (rmdir) for the mkdir fallback path"
+    fail "M62.4 — Step 4.6 must document explicit cleanup (rmdir / trap EXIT) for the mkdir fallback path"
+  fi
+  # M62.5 — Step 1.1 must distinguish mkdir filesystem errors from contention so users see the
+  # right diagnostic. Without this, ENOSPC / EACCES / EROFS get mis-reported as "another /merge
+  # run in progress" — the same silent-failure family as the original issue #51 mis-classification.
+  if echo "$PHASE_1_1_BLOCK" | grep -qE 'filesystem error|ENOSPC|EACCES|EROFS|non-EEXIST'; then
+    pass "M62.5 — Step 1.1 distinguishes mkdir filesystem errors from lock contention"
+  else
+    fail "M62.5 — Step 1.1 must distinguish mkdir filesystem errors (ENOSPC / EACCES / EROFS) from lock contention so the diagnostic does not mis-fire"
+  fi
+  # M62.6 — Step 1.1 must prescribe a concrete trap so cleanup-on-exit is consistent across
+  # every codegen pass. "MUST install a trap" without the literal trap line is hopeful prose;
+  # the literal `trap ... EXIT INT TERM` syntax pins the contract.
+  if echo "$PHASE_1_1_BLOCK" | grep -qE 'trap.*EXIT[ ]+INT[ ]+TERM|trap.*EXIT.*TERM'; then
+    pass "M62.6 — Step 1.1 prescribes concrete trap syntax (trap ... EXIT INT TERM) for fallback cleanup"
+  else
+    fail "M62.6 — Step 1.1 must prescribe concrete trap syntax (trap 'rm -rf \$LOCK_DIR' EXIT INT TERM) so cleanup-on-exit is generated consistently"
   fi
 fi
 
