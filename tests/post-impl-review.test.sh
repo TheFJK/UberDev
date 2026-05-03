@@ -50,7 +50,116 @@ echo "== Skill referenced from both call sites =="
 assert_grep "$SOLVE_PIPELINE" 'post-impl-review|uberdev:post-impl-review' \
   "solve-pipeline skill references post-impl-review (trivial/small inline prompt; gated on AUTO_MODE=0)"
 assert_grep "$SUBAGENT_DRIVEN" 'post-impl-review|uberdev:post-impl-review' \
-  "subagent-driven-dev references post-impl-review (per-wave invocation)"
+  "subagent-driven-dev references post-impl-review (end-of-issue invocation)"
+
+echo
+echo "== End-of-issue post-impl-review wording is canonical in subagent-driven-dev =="
+assert_grep "$SUBAGENT_DRIVEN" 'End-of-issue post-impl-review' \
+  "subagent-driven-dev step 5 codifies the consolidated end-of-issue invocation"
+assert_grep "$SUBAGENT_DRIVEN" 'WAVE.*final|WAVE: .final.' \
+  "subagent-driven-dev passes WAVE=final to post-impl-review (drives -wave-final.md filename)"
+assert_grep "$SUBAGENT_DRIVEN" 'BASELINE_SHA=.*git rev-parse HEAD' \
+  "subagent-driven-dev captures BASELINE_SHA before the wave loop for robust commit_range"
+assert_grep "$SUBAGENT_DRIVEN" 'ALL_CHANGED_PATHS' \
+  "subagent-driven-dev declares the ALL_CHANGED_PATHS accumulator for the consolidated invocation"
+assert_grep "$SUBAGENT_DRIVEN" 'Accumulate end-of-issue inputs' \
+  "subagent-driven-dev step 4j codifies path accumulation across waves (no per-wave dispatch)"
+
+echo
+echo "== Anti-regression: per-wave post-impl-review wording is GONE from subagent-driven-dev wave-loop =="
+# Whole-file count of "per-wave" inside the wave-loop region must be 0. The Red Flag bullet
+# elsewhere in the file uses "post-wave full-test-suite" (different phrase, about the
+# full-test-suite run that stays in the loop — unrelated to the relocation), so we anchor on
+# the wave-loop section only via awk range. Anchor-existence guard added below: if either
+# range header is renamed (e.g. ### -> ##, or wording changes), awk silently returns empty
+# and grep would report 0 hits — a false PASS. Verify both anchors exist first.
+if ! grep -q '^### High-Level Flow' "$SUBAGENT_DRIVEN" || ! grep -q '^### Parallel Dispatch Pattern' "$SUBAGENT_DRIVEN"; then
+  echo "  FAIL  awk anchors '### High-Level Flow' / '### Parallel Dispatch Pattern' missing — wave-loop region cannot be extracted (rename detected?)"
+  FAIL=$((FAIL + 1))
+else
+  WAVE_LOOP_REGION=$(awk '/^### High-Level Flow/,/^### Parallel Dispatch Pattern/' "$SUBAGENT_DRIVEN")
+  if [ -z "$WAVE_LOOP_REGION" ]; then
+    echo "  FAIL  awk extracted empty wave-loop region (anchors found but range did not match)"
+    FAIL=$((FAIL + 1))
+  else
+    # `grep -c` always prints the count to stdout (even 0), but exits 1 on zero matches.
+    # `|| true` keeps the count clean (avoids "0\n0" from `|| echo 0`) and tolerates the non-zero exit.
+    WAVE_LOOP_HITS=$(grep -cE "per-wave|after each wave" <<<"$WAVE_LOOP_REGION" || true)
+    if [[ "$WAVE_LOOP_HITS" -eq 0 ]]; then
+      echo "  PASS  per-wave / after-each-wave wording removed from wave-loop region"
+      PASS=$((PASS + 1))
+    else
+      echo "  FAIL  per-wave / after-each-wave wording must be 0 in wave-loop region (got $WAVE_LOOP_HITS)"
+      FAIL=$((FAIL + 1))
+    fi
+  fi
+fi
+
+# Obsolete step 5 prose must be fully gone
+if grep -qE "per-wave post-impl-review has already covered" "$SUBAGENT_DRIVEN"; then
+  echo "  FAIL  obsolete step 5 wording 'per-wave post-impl-review has already covered' must be removed"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  obsolete step 5 wording removed"
+  PASS=$((PASS + 1))
+fi
+
+echo
+echo "== post-impl-review/SKILL.md prose updated for end-of-issue invocation =="
+assert_grep "$POST_IMPL" 'end-of-issue from subagent-driven-dev' \
+  "frontmatter description names end-of-issue caller"
+assert_grep "$POST_IMPL" 'once after all waves complete' \
+  "When to invoke section names once-at-end-of-issue semantics"
+assert_grep "$POST_IMPL" 'post-impl-review-wave-final\.md' \
+  "output artifact docstring names the canonical -final.md filename"
+if grep -qE 'after each wave commits' "$POST_IMPL"; then
+  echo "  FAIL  obsolete 'after each wave commits' wording must be removed from post-impl-review When-to-invoke"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  obsolete 'after each wave commits' wording removed"
+  PASS=$((PASS + 1))
+fi
+
+echo
+echo "== orchestrator tier-profile table reflects end-of-issue (via SDD) for medium and large =="
+ORCHESTRATOR="$REPO_ROOT/plugins/uberdev/skills/orchestrator/SKILL.md"
+if [ ! -r "$ORCHESTRATOR" ]; then
+  echo "  FAIL  orchestrator SKILL.md missing or unreadable"
+  FAIL=$((FAIL + 1))
+else
+  # See note above: `|| true` (not `|| echo "0"`) to avoid "0\n0" when grep finds zero matches.
+  END_OF_ISSUE_CELLS=$(grep -cE 'end-of-issue \(via SDD\)' "$ORCHESTRATOR" || true)
+  if [[ "$END_OF_ISSUE_CELLS" -eq 2 ]]; then
+    echo "  PASS  tier-profile table has 2 end-of-issue (via SDD) cells (medium + large)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  tier-profile table must have 2 'end-of-issue (via SDD)' cells (got $END_OF_ISSUE_CELLS)"
+    FAIL=$((FAIL + 1))
+  fi
+  if grep -qE 'per-wave \(via SDD\)' "$ORCHESTRATOR"; then
+    echo "  FAIL  obsolete 'per-wave (via SDD)' cells must be removed from tier-profile table"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  obsolete 'per-wave (via SDD)' cells removed"
+    PASS=$((PASS + 1))
+  fi
+fi
+
+echo
+echo "== code-simplifier agent self-trigger guard drops 'post-wave' wording =="
+CODE_SIMPLIFIER="$REPO_ROOT/plugins/uberdev/agents/code-simplifier.md"
+if [ ! -r "$CODE_SIMPLIFIER" ]; then
+  echo "  FAIL  code-simplifier.md missing or unreadable"
+  FAIL=$((FAIL + 1))
+else
+  if grep -q "post-wave" "$CODE_SIMPLIFIER"; then
+    echo "  FAIL  'post-wave' must be removed from code-simplifier.md self-trigger guard"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  'post-wave' wording removed from code-simplifier.md"
+    PASS=$((PASS + 1))
+  fi
+fi
 
 echo
 echo "== Negative guard: turbo (AUTO_MODE==1) trivial+small heredoc BODIES omit post-impl-review (#15) =="

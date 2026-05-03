@@ -184,7 +184,7 @@ Trivial/small tier bypass orchestrator entirely; plan-reviewer is N/A there.
 
 ### Phase 5: subagent-driven-dev
 
-Invoke `uberdev:subagent-driven-dev` skill (NOT a Task() — actual skill invocation via Skill tool). Pass `plan_path`. **If the orchestrator was invoked with `--turbo`, also pass `--turbo`** so the downstream chain (`subagent-driven-dev → finish-branch`) stays unattended and `finish-branch` auto-selects "Push and Create PR" instead of prompting. The existing skill handles wave dispatch, review, and PR creation. `subagent-driven-dev` internally calls `uberdev:post-impl-review` after each wave completes — see `plugins/uberdev/skills/post-impl-review/SKILL.md`. Findings are advisory at this layer (non-blocking on `REVISIONS_REQUIRED`); the auto-fix loop is deferred per Q1 of the design spec.
+Invoke `uberdev:subagent-driven-dev` skill (NOT a Task() — actual skill invocation via Skill tool). Pass `plan_path`. **If the orchestrator was invoked with `--turbo`, also pass `--turbo`** so the downstream chain (`subagent-driven-dev → finish-branch`) stays unattended and `finish-branch` auto-selects "Push and Create PR" instead of prompting. The existing skill handles wave dispatch, review, and PR creation. `subagent-driven-dev` internally calls `uberdev:post-impl-review` once after all waves complete (consolidated end-of-issue invocation) — see `plugins/uberdev/skills/post-impl-review/SKILL.md`. Findings are advisory at this layer (non-blocking on `REVISIONS_REQUIRED`); the auto-fix loop is deferred per Q1 of the design spec.
 
 ### Phase 5.5: pr-test-analyzer (large tier only, pre-merge)
 
@@ -200,8 +200,8 @@ Why large-only: signal-to-noise on smaller changes is poor; medium tier may revi
 |---|---|---|---|---|---|---|
 | trivial | (orchestrator should not be invoked) | — | — | — | — | — |
 | small | 1 (codebase only) | none | none | 1 | — (orch not invoked) | — |
-| medium | 6 (gated by SHORTCIRCUIT_<TOPIC>) | always | always | 3 | per-wave (via SDD) | — |
-| large | 6 (gated by SHORTCIRCUIT_<TOPIC>) | always | always | 3 | per-wave (via SDD) | pre-merge |
+| medium | 6 (gated by SHORTCIRCUIT_<TOPIC>) | always | always | 3 | end-of-issue (via SDD) | — |
+| large | 6 (gated by SHORTCIRCUIT_<TOPIC>) | always | always | 3 | end-of-issue (via SDD) | pre-merge |
 
 `--turbo` orthogonally skips Phase 2 Q&A (replaced with auto-pick + questions.md log). Tier classification rule: same as `/solve` triage table (read from issue labels + body).
 

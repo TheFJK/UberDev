@@ -112,7 +112,7 @@ Then: Cleanup worktree (Step 5)
 Option 2 PR-body composition: in addition to the standard Summary + Test Plan, two conditional sections are appended when their source artifacts exist:
 
 - **`## Open questions answered by /turbo`** — table rendered from `.uberdev/research/$RUN_ID/questions.md` (written by orchestrator Phase 2 under `--turbo`). Columns: Question | Choice | Confidence. Reviewers can scan for `medium`/`low` confidence rows quickly.
-- **`## Reviewer findings summary`** — concatenated post-impl-review aggregates (per-wave, written by `uberdev:post-impl-review` from `subagent-driven-dev`) and any `pr-test-analyzer` output (large tier only).
+- **`## Reviewer findings summary`** — the consolidated end-of-issue post-impl-review aggregate (`post-impl-review-wave-final.md`, written by `uberdev:post-impl-review` from `subagent-driven-dev`) and any `pr-test-analyzer` output (large tier only). The read-site glob below (`post-impl-review-wave-*.md`) deliberately matches the new `-final.md` filename and any legacy per-wave artifacts.
 
 Both sections are read-only dumps; finish-branch does not block on confidence threshold or reviewer verdict (per #11 Q1: advisory only, auto-fix deferred).
 
