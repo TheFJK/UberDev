@@ -27,17 +27,24 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `LOCK_FILE_PATH` | `.git/uberdev-merge.lock` | D14 |
 | `AUDIT_LOG_DIR_PATTERN` | `.uberdev/runs/<run-id>/` | D15 |
 | `AUDIT_LOG_FILENAME` | `audit.jsonl` | D15 |
-| `AUDIT_EVENT_ENUM` | `gate_pass`, `gate_fail`, `order_proposed`, `order_confirmed`, `strategy_chosen`, `probe_clean`, `probe_conflict`, `agent_dispatched`, `agent_returned`, `patch_applied`, `test_pass`, `test_fail`, `push_resolution`, `merge_executed`, `local_sync`, `branch_deleted`, `worktree_removed`, `admin_bypass`, `waiver_recorded`, `error`, `pr_parked`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision` | D15. Field-level extensions: gate_pass.data.trust_anchor ∈ TRUST_ANCHOR_ENUM; gate_fail.data.reason ∈ GATE_FAIL_REASON_ENUM (see Phase 1.4) |
+| `AUDIT_EVENT_ENUM` | `gate_pass`, `gate_fail`, `order_proposed`, `order_confirmed`, `strategy_chosen`, `probe_clean`, `probe_conflict`, `agent_dispatched`, `agent_returned`, `patch_applied`, `test_pass`, `test_fail`, `push_resolution`, `merge_executed`, `local_sync`, `branch_deleted`, `worktree_removed`, `admin_bypass`, `waiver_recorded`, `error`, `pr_parked`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision`, `trust_trail_agent_decision`, `merge_strategy_agent_decision`, `merge_strategy_fanout_wave_started` | D15. Field-level extensions: gate_pass.data.trust_anchor ∈ TRUST_ANCHOR_ENUM; gate_fail.data.reason ∈ GATE_FAIL_REASON_ENUM (see Phase 1.4). **Deprecated (never emitted post-v0.17.0):** `admin_bypass`, `waiver_recorded` |
 | `SCRATCH_WORKTREE_PATTERN` | `.claude/worktrees/merge-<run-id>/` | D10 |
 | `BRANCH_NAME_REGEX` | `^[A-Za-z0-9._/-]{1,255}$` | D8 (validation before shell argv use) |
 | `MERGE_STRATEGY_LABEL_PREFIX` | `merge-strategy:` | D-LABEL |
+| `STRATEGY_OVERRIDE_FLAGS` | `--squash`, `--rebase`, `--merge` (CLI flags) **(deprecated; no behavioural effect)** | Phase 1 (stderr emission), `commands/merge.md` Deprecated Flags section |
+| `STRATEGY_FLAGS_DEPRECATED_NOTE` | `warning: --squash / --rebase / --merge are deprecated; /merge is fully unattended and the merge-strategy-decider agent picks per-PR strategy. The flag has no behavioural effect.` | Phase 1 (stderr emission), `commands/merge.md` Deprecated Flags section |
+| `BYPASS_PROTECTIONS_DEPRECATED_NOTE` | `warning: --bypass-protections is deprecated; /merge trust resolution is now agent-decided (trust-trail-evaluator). The flag has no behavioural effect.` | Phase 1 (stderr emission), `commands/merge.md` Deprecated Flags section |
+| `TRUST_TRAIL_VERDICT_ENUM` | `PASS`, `STALE`, `INVALID`, `FORCE_PUSHED` | Phase 1.4 PATH_2 sub-condition (c); audit-log `trust_trail_agent_decision.data.choice` |
+| `MERGE_STRATEGY_DECIDER_VERDICT_ENUM` | `squash`, `rebase`, `merge` (strict subset of `STRATEGY_ENUM` — `drop` excluded by design) | Phase 2.2; audit-log `merge_strategy_agent_decision.data.choice` |
+| `GATE_FAIL_REASON_TRUST_TRAIL_AGENT_INVALID_INPUT` | `trust_trail_agent_invalid_input` (new 7th member of `GATE_FAIL_REASON_ENUM`) | Phase 1.4 PATH_2 sub-condition (c) caller mapping for `INVALID` verdicts (both subreasons); audit-log `gate_fail.data.reason` |
+| `MAX_PARALLEL_AGENTS` | integer `10` (default) | Phase 2.2 fanout chunking; queues with >`MAX_PARALLEL_AGENTS` PRs are split into `ceil(N / MAX_PARALLEL_AGENTS)` sequential single-message waves. Override via `.claude/uberdev.local.md` is out-of-scope for this issue. |
 | `INTEGRATION_BRANCH_KEY` | `integration_branch` (config key) | D8 |
 | `INTEGRATION_BRANCH_ENV_VAR` | `UBERDEV_INTEGRATION_BRANCH` | D8 |
 | `INTEGRATION_BRANCH_FALLBACK` | `main` (hardcoded literal — autopilot picks the GitHub-default convention rather than prompting; users override out-of-band via `integration_branch:` config) | D8, Phase 1.3 (used when all four resolution tiers are empty) |
 | `AUTO_CONFIRM_KEY` | `auto_confirm` (config key in `.claude/uberdev.local.md`) **(deprecated; no behavioural effect)** | Phase 2.4 (no-op acknowledgement only; Phase 4.5 no longer consumes this key under unconditional autopilot) |
 | `AUTO_CONFIRM_FLAGS` | `--yes`, `-y` (CLI flags) **(deprecated; no behavioural effect)** | Phase 2.4 (no-op acknowledgement only; Phase 4.5 no longer consumes these flags under unconditional autopilot) |
 | `AUTO_CONFIRM_REASON_ENUM` | `autopilot-default` (only value emitted under autopilot; `single-pr-default`, `cli-flag`, `config-auto_confirm` are historical from pre-autopilot runs and are unreachable now) | Phase 2.4 |
-| `STRATEGY_REASON_ENUM` | `cli-flag`, `pr-label`, `heuristic-conventional`, `heuristic-wip`, `heuristic-single-commit`, `heuristic-mixed` | Phase 2.2, Phase 3.3 (audit-log `data.reason` for `strategy_chosen`) |
+| `STRATEGY_REASON_ENUM` | `cli-flag` (deprecated; never emitted post-v0.17.0), `pr-label` (deprecated as authoritative; reused by agent rationale), `heuristic-conventional` (deprecated as authoritative; reused by agent rationale), `heuristic-wip` (deprecated as authoritative; reused by agent rationale), `heuristic-single-commit` (deprecated as authoritative; reused by agent rationale), `heuristic-mixed` (deprecated as authoritative; reused by agent rationale), `agent_decided` | Phase 2.2, Phase 3.3 (audit-log `data.reason` for `strategy_chosen`) |
 | `PARK_REASON_ENUM` | `refused`, `ambiguous`, `test-fail-exhausted`, `push-non-ff` | Phase 3.3 (audit-log `data.reason` for `pr_parked`) |
 | `STALE_REBASE_DECISION_ENUM` | `rebased-ff-clean`, `rebased-non-conflicting`, `skipped-conflicts`, `skipped-pr-head-ref`, `skipped-non-tracking`, `rebase-aborted` | Phase 4.5 (audit-log `data.choice` for `stale_branch_rebase_decision`) |
 | `TEST_FAIL_DECISION_ENUM` | `re-resolve`, `strategy-switch`, `park` | Phase 3.3v (audit-log `data.choice` for `test_fail_agent_decision`) |
@@ -45,8 +52,8 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `UBERDEV_APPROVED_LABEL` | `uberdev-approved` | Phase 1.4 (PATH_2 label presence check) |
 | `REVIEW_PR_TRAILER_PREFIX` | `Reviewed-by: uberdev/review-pr@` | Phase 1.4 (PATH_2 trailer extraction); regex form `^Reviewed-by: uberdev/review-pr@([a-f0-9]{40})$` |
 | `RUN_ID_REGEX` | `^[0-9]{8}-[0-9]{6}-[a-f0-9]+$` | Phase 1.4 (PATH_2 audit-JSON path validation); also enforced producer-side in `commands/review-pr.md` |
-| `TRUST_ANCHOR_ENUM` | `reviewDecision_approved`, `uberdev_review_trail`, `bypass_with_waiver` | Phase 1.4 (audit-log `gate_pass.data.trust_anchor`) |
-| `GATE_FAIL_REASON_ENUM` | `review_decision_not_approved`, `trust_trail_missing`, `trust_trail_stale_sha`, `trust_trail_label_missing`, `trust_trail_trailer_missing`, `trust_trail_json_missing`, `ci_red`, `pr_state_not_open`, `is_draft`, `merge_state_blocked` | Phase 1.4 (audit-log `gate_fail.data.reason`) |
+| `TRUST_ANCHOR_ENUM` | `reviewDecision_approved`, `uberdev_review_trail`, `bypass_with_waiver` (deprecated; never emitted post-v0.17.0) | Phase 1.4 (audit-log `gate_pass.data.trust_anchor`) |
+| `GATE_FAIL_REASON_ENUM` | `review_decision_not_approved`, `trust_trail_missing`, `trust_trail_stale_sha`, `trust_trail_label_missing`, `trust_trail_trailer_missing`, `trust_trail_json_missing`, `trust_trail_agent_invalid_input` | Phase 1.4 (audit-log `gate_fail.data.reason`) |
 
 ## Inputs
 
