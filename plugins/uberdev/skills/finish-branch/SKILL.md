@@ -136,9 +136,12 @@ fi
 # the Reviewer findings summary section.
 REVIEW_FILES=$(ls -t .uberdev/research/*/post-impl-review-wave-*.md .uberdev/research/issue-*/post-impl-review.md .uberdev/research/*/pr-test-analyzer.md 2>/dev/null | tr '\n' ' ')
 
-# Compose PR body
+# Compose PR body. Heredoc delimiter is unquoted (`<<EOF`, not the single-
+# quoted form) to avoid Claude's permission-pattern evaluator `unmatched '`
+# bug (#42). The agent must compose the body free of `$`, backticks, and
+# backslash — unquoted heredocs don't shield these from shell expansion.
 PR_BODY_FILE=$(mktemp)
-cat > "$PR_BODY_FILE" <<'EOF_HEADER'
+cat > "$PR_BODY_FILE" <<EOF_HEADER
 ## Summary
 <2-3 bullets of what changed>
 
@@ -172,14 +175,16 @@ if [ -n "$REVIEW_FILES" ]; then
   } >> "$PR_BODY_FILE"
 fi
 
-# Compose PR title via heredoc + read-back, NOT --title (which would shell-interpret
-# any backticks / $() in the agent-composed title text). The heredoc with a
-# single-quoted EOF marker prevents shell expansion of the title content; the
-# subsequent read-back into a quoted bash variable preserves the bytes verbatim
-# when passed to `gh --title`. This closes the title-injection vector without
-# inventing a `--title-file` flag (which gh does not support).
+# Compose PR title via heredoc + read-back into a bash variable, then pass to
+# `gh --title "$PR_TITLE_VAR"` — double-quoted variable expansion is byte-
+# verbatim, no backtick/dollar re-evaluation. The heredoc delimiter is
+# unquoted (`<<PR_TITLE_EOF`, not the single-quoted form) to avoid Claude's
+# permission-pattern evaluator `unmatched '` bug (#42); the agent must
+# compose the title free of `$`, backticks, and backslash. This closes the
+# title-injection vector without inventing a `--title-file` flag (which gh
+# does not support).
 TITLE_FILE=$(mktemp) || { echo "ERROR: mktemp failed for title file" >&2; exit 1; }
-cat > "$TITLE_FILE" <<'PR_TITLE_EOF'
+cat > "$TITLE_FILE" <<PR_TITLE_EOF
 <title>
 PR_TITLE_EOF
 

@@ -90,16 +90,17 @@ assert_not_grep "$FINISH_BRANCH" \
 echo
 echo "== Title injection closed via heredoc + quoted-variable read-back =="
 # `gh pr create --title-file` does not exist (verified against gh v2.83.1).
-# The actual injection-close uses: heredoc with single-quoted EOF (no shell
-# expansion of agent-composed text) → IFS= read into a bash variable → pass
+# The injection-close uses: heredoc → IFS= read into a bash variable → pass
 # to `gh --title "$VAR"` (double-quoted variable expansion is byte-verbatim,
-# no backtick/dollar re-evaluation).
+# no backtick/dollar re-evaluation). Heredoc delimiter is unquoted (#42 bug:
+# the single-quoted form trips Claude's permission-pattern evaluator); the
+# agent must keep the title free of `$`, backticks, and backslash.
 assert_grep "$FINISH_BRANCH" \
   'TITLE_FILE=\$\(mktemp\)|TITLE_FILE=' \
   "TITLE_FILE mktemp pattern present"
 assert_grep "$FINISH_BRANCH" \
-  "<<'PR_TITLE_EOF'|<<\"PR_TITLE_EOF\"|<<PR_TITLE_EOF" \
-  "title written via single-quoted heredoc (no shell expansion of agent text)"
+  '<<PR_TITLE_EOF' \
+  "title written via unquoted heredoc <<PR_TITLE_EOF (#42)"
 assert_grep "$FINISH_BRANCH" \
   'IFS= read -r PR_TITLE_VAR' \
   "title read back into a bash variable for safe quoted expansion"
@@ -145,6 +146,21 @@ echo "== Anti-attribution guard: no Co-Authored-By in any new prose =="
 assert_not_grep "$FINISH_BRANCH" \
   'Co-Authored-By' \
   "Co-Authored-By absent (CLAUDE.md attribution rule)"
+
+echo
+echo "== Issue #42: heredoc delimiters tokenizer-safe (no <<'X' or <<\"X\" form) =="
+# Quoted heredoc delimiters (`<<'EOF'` / `<<"EOF"`) trigger a Claude
+# permission-pattern evaluator bug: the tokenizer doesn't honor heredoc
+# semantics, so the leading quote of the delimiter opens an unmatched quote
+# that pairs with the next `'` in the block (the regex assignment), inverting
+# quote-balance and surfacing as `(eval): unmatched '`. Use unquoted `<<EOF`
+# form; the agent must compose title/body bytes free of `$`, backticks,
+# and backslash. Note: the assertion does NOT match `<<\EOF` (backslash-
+# escaped delimiter, semantically equivalent to the quoted form but
+# tokenizer-safe — no quote chars, so it doesn't trip the evaluator).
+assert_not_grep "$FINISH_BRANCH" \
+  "<<-?['\"][A-Za-z_][A-Za-z0-9_]*['\"]" \
+  "no quoted heredoc delimiters (Claude permission-evaluator unmatched ' bug, #42)"
 
 echo
 echo "== Summary =="
