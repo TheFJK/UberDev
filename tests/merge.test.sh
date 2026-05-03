@@ -919,11 +919,9 @@ for FILE in "$SKILL_FILE" "$CMD_FILE" "$USING_FILE"; do
 done
 
 echo
-echo "== M55: trust_trail_stale_sha enum value preserved (existing M37 row) =="
-assert_grep "$SKILL_FILE" 'trust_trail_stale_sha' \
-  "M55 — trust_trail_stale_sha still declared in GATE_FAIL_REASON_ENUM"
+# M55 (deleted, simplify pass): was a literal duplicate of M37.gfr3 — same regex,
+# same file; M37.gfr3 already covers the trust_trail_stale_sha preservation invariant.
 
-echo
 echo "== M56: trust-trail-evaluator agent input contract cites live gh pr view --json headRefOid =="
 TTE_FILE="$REPO_ROOT/plugins/uberdev/agents/trust-trail-evaluator.md"
 if grep -qE 'gh pr view.*--json headRefOid|live.*headRefOid' "$TTE_FILE"; then
@@ -935,12 +933,11 @@ else
 fi
 
 echo
-echo "== M57: five mirror sites updated atomically — re-runs M44/M45/M46 invariants =="
-# M44/M45/M46 are run as their own test blocks above; M57 is a meta-check that
-# they all pass after the issue #47 update. The summary check below catches any failure.
-echo "  NOTE  M57 — see M44, M45, M46 above; this is a meta-marker for atomicity."
+# M57 (deleted, simplify pass): was a meta-marker that emitted a NOTE line without
+# incrementing PASS/FAIL or asserting anything. Atomicity across the five mirror sites
+# is enforced by M44/M45/M46/M54 directly; the meta-marker contributed nothing
+# beyond a comment masquerading as a test result.
 
-echo
 echo "== M58: SKILL.md Constants table declares GATE_FAIL_REASON_TRUST_TRAIL_AGENT_INVALID_INPUT and MAX_PARALLEL_AGENTS =="
 assert_grep "$SKILL_FILE" '\| `GATE_FAIL_REASON_TRUST_TRAIL_AGENT_INVALID_INPUT` \|.*trust_trail_agent_invalid_input' \
   "M58.1 — GATE_FAIL_REASON_TRUST_TRAIL_AGENT_INVALID_INPUT row with literal value"
