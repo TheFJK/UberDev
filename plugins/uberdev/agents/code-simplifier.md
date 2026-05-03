@@ -89,5 +89,3 @@ You activate ONLY when explicitly invoked — by the `/uberdev:simplify` command
 ## Output Rules — secret-leak prevention
 
 Do not quote source code or secret-shaped values verbatim in your findings. Cite issues by `file:line` only and describe the problem in your own words. If a literal value is suspect (e.g., a hard-coded credential), name the variable or constant and note "value redacted in this report — see file:line". This rule prevents reviewer output from carrying secrets into downstream artifacts (PR bodies, transcripts, logs).
-
-To apply findings, the user runs `/uberdev:simplify` or `/uberdev:review-pr` Phase 2.
