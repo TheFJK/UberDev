@@ -623,26 +623,33 @@ assert_grep "$SKILL_FILE" 'uberdev_review_trail'    "M36.tea2 — TRUST_ANCHOR_E
 assert_grep "$SKILL_FILE" 'bypass_with_waiver'      "M36.tea3 — TRUST_ANCHOR_ENUM value bypass_with_waiver"
 
 echo
-echo "== M37: SKILL.md GATE_FAIL_REASON_ENUM — 7 members post issue #47 =="
-# M37: updated for issue #47 — GATE_FAIL_REASON_ENUM expanded for trust_trail_agent_invalid_input.
-# The pre-redesign 6-member count literal is deleted and replaced by 7.
-assert_grep "$SKILL_FILE" 'review_decision_not_approved'      "M37.gfr1 — gate_fail reason review_decision_not_approved"
-assert_grep "$SKILL_FILE" 'trust_trail_missing'                "M37.gfr2 — gate_fail reason trust_trail_missing"
-assert_grep "$SKILL_FILE" 'trust_trail_stale_sha'              "M37.gfr3 — gate_fail reason trust_trail_stale_sha"
-assert_grep "$SKILL_FILE" 'trust_trail_label_missing'          "M37.gfr4 — gate_fail reason trust_trail_label_missing"
-assert_grep "$SKILL_FILE" 'trust_trail_trailer_missing'        "M37.gfr5 — gate_fail reason trust_trail_trailer_missing"
-assert_grep "$SKILL_FILE" 'trust_trail_json_missing'           "M37.gfr6 — gate_fail reason trust_trail_json_missing"
-assert_grep "$SKILL_FILE" 'trust_trail_agent_invalid_input'    "M37.gfr7 — gate_fail reason trust_trail_agent_invalid_input (NEW)"
+echo "== M37: SKILL.md GATE_FAIL_REASON_ENUM — 11 members (7 trust-resolution + 4 pre-condition) post issue #47 =="
+# M37: updated for issue #47 — GATE_FAIL_REASON_ENUM expanded for trust_trail_agent_invalid_input
+# (7 trust-resolution reasons) + 4 pre-condition reasons restored after type-design review
+# flagged a prose/enum mismatch (Step 1.4 pre-flight gates emit pr_state_not_open / is_draft /
+# ci_red / merge_state_blocked unconditionally; those values must be in the enum).
+assert_grep "$SKILL_FILE" 'review_decision_not_approved'      "M37.gfr1 — trust-resolution reason review_decision_not_approved"
+assert_grep "$SKILL_FILE" 'trust_trail_missing'                "M37.gfr2 — trust-resolution reason trust_trail_missing"
+assert_grep "$SKILL_FILE" 'trust_trail_stale_sha'              "M37.gfr3 — trust-resolution reason trust_trail_stale_sha"
+assert_grep "$SKILL_FILE" 'trust_trail_label_missing'          "M37.gfr4 — trust-resolution reason trust_trail_label_missing"
+assert_grep "$SKILL_FILE" 'trust_trail_trailer_missing'        "M37.gfr5 — trust-resolution reason trust_trail_trailer_missing"
+assert_grep "$SKILL_FILE" 'trust_trail_json_missing'           "M37.gfr6 — trust-resolution reason trust_trail_json_missing"
+assert_grep "$SKILL_FILE" 'trust_trail_agent_invalid_input'    "M37.gfr7 — trust-resolution reason trust_trail_agent_invalid_input (NEW)"
+assert_grep "$SKILL_FILE" 'pr_state_not_open'                  "M37.precond1 — pre-condition reason pr_state_not_open"
+assert_grep "$SKILL_FILE" 'is_draft'                           "M37.precond2 — pre-condition reason is_draft"
+assert_grep "$SKILL_FILE" 'ci_red'                             "M37.precond3 — pre-condition reason ci_red"
+assert_grep "$SKILL_FILE" 'merge_state_blocked'                "M37.precond4 — pre-condition reason merge_state_blocked"
 ENUM_ROW=$(grep -E '\| `GATE_FAIL_REASON_ENUM` \|' "$SKILL_FILE" || true)
 # `[a-z_]+` matches lowercase snake_case reason tokens only (not the
-# UPPERCASE enum-name `GATE_FAIL_REASON_ENUM` itself), so the count
-# equals exactly the number of reasons backticked in the row.
+# UPPERCASE enum-name `GATE_FAIL_REASON_ENUM` itself, and not dotted
+# tokens like `gate_fail.data.reason`), so the count equals exactly
+# the number of reasons backticked in the row: 7 trust-resolution + 4 pre-condition = 11.
 REASON_COUNT=$(echo "$ENUM_ROW" | grep -oE '`[a-z_]+`' | wc -l | tr -d ' ')
-if [ "$REASON_COUNT" -eq 7 ]; then
-  echo "  PASS  M37.count — GATE_FAIL_REASON_ENUM row contains exactly 7 reasons"
+if [ "$REASON_COUNT" -eq 11 ]; then
+  echo "  PASS  M37.count — GATE_FAIL_REASON_ENUM row contains exactly 11 reasons (7 trust-resolution + 4 pre-condition)"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  M37.count — GATE_FAIL_REASON_ENUM row contains $REASON_COUNT reasons; expected exactly 7"
+  echo "  FAIL  M37.count — GATE_FAIL_REASON_ENUM row contains $REASON_COUNT reasons; expected exactly 11"
   FAIL=$((FAIL + 1))
 fi
 
