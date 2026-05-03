@@ -27,7 +27,7 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `LOCK_FILE_PATH` | `.git/uberdev-merge.lock` | D14 |
 | `AUDIT_LOG_DIR_PATTERN` | `.uberdev/runs/<run-id>/` | D15 |
 | `AUDIT_LOG_FILENAME` | `audit.jsonl` | D15 |
-| `AUDIT_EVENT_ENUM` | `gate_pass`, `gate_fail`, `order_proposed`, `order_confirmed`, `strategy_chosen`, `probe_clean`, `probe_conflict`, `agent_dispatched`, `agent_returned`, `patch_applied`, `test_pass`, `test_fail`, `push_resolution`, `merge_executed`, `local_sync`, `branch_deleted`, `worktree_removed`, `admin_bypass`, `waiver_recorded`, `error`, `pr_parked`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision` | D15 |
+| `AUDIT_EVENT_ENUM` | `gate_pass`, `gate_fail`, `order_proposed`, `order_confirmed`, `strategy_chosen`, `probe_clean`, `probe_conflict`, `agent_dispatched`, `agent_returned`, `patch_applied`, `test_pass`, `test_fail`, `push_resolution`, `merge_executed`, `local_sync`, `branch_deleted`, `worktree_removed`, `admin_bypass`, `waiver_recorded`, `error`, `pr_parked`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision` | D15. Field-level extensions: gate_pass.data.trust_anchor ∈ TRUST_ANCHOR_ENUM; gate_fail.data.reason ∈ GATE_FAIL_REASON_ENUM (see Phase 1.4) |
 | `SCRATCH_WORKTREE_PATTERN` | `.claude/worktrees/merge-<run-id>/` | D10 |
 | `BRANCH_NAME_REGEX` | `^[A-Za-z0-9._/-]{1,255}$` | D8 (validation before shell argv use) |
 | `MERGE_STRATEGY_LABEL_PREFIX` | `merge-strategy:` | D-LABEL |
@@ -42,6 +42,11 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `STALE_REBASE_DECISION_ENUM` | `rebased-ff-clean`, `rebased-non-conflicting`, `skipped-conflicts`, `skipped-pr-head-ref`, `skipped-non-tracking`, `rebase-aborted` | Phase 4.5 (audit-log `data.choice` for `stale_branch_rebase_decision`) |
 | `TEST_FAIL_DECISION_ENUM` | `re-resolve`, `strategy-switch`, `park` | Phase 3.3v (audit-log `data.choice` for `test_fail_agent_decision`) |
 | `DEPRECATED_FLAGS_NOTE` | `warning: --yes / -y / auto_confirm are deprecated; /merge is now fully unattended. The flag has no behavioural effect.` | Phase 1 (stderr emission), `commands/merge.md` (Deprecated Flags section), `using-uberdev/SKILL.md` |
+| `UBERDEV_APPROVED_LABEL` | `uberdev-approved` | Phase 1.4 (PATH_2 label presence check) |
+| `REVIEW_PR_TRAILER_PREFIX` | `Reviewed-by: uberdev/review-pr@` | Phase 1.4 (PATH_2 trailer extraction); regex form `^Reviewed-by: uberdev/review-pr@([a-f0-9]{40})$` |
+| `RUN_ID_REGEX` | `^[0-9]{8}-[0-9]{6}-[a-f0-9]+$` | Phase 1.4 (PATH_2 audit-JSON path validation); also enforced producer-side in `commands/review-pr.md` |
+| `TRUST_ANCHOR_ENUM` | `reviewDecision_approved`, `uberdev_review_trail`, `bypass_with_waiver` | Phase 1.4 (audit-log `gate_pass.data.trust_anchor`) |
+| `GATE_FAIL_REASON_ENUM` | `review_decision_not_approved`, `trust_trail_missing`, `trust_trail_stale_sha`, `trust_trail_label_missing`, `trust_trail_trailer_missing`, `trust_trail_json_missing`, `ci_red`, `pr_state_not_open`, `is_draft`, `merge_state_blocked` | Phase 1.4 (audit-log `gate_fail.data.reason`) |
 
 ## Inputs
 
@@ -110,19 +115,54 @@ If the check fails (the repo's default branch is not `main` — e.g., `master`, 
 
 This is the only Phase-1 path where /merge declines to run for a config reason. The clean exit is **not** a halt of an in-flight queue (no PRs have been processed yet), and it does not block the autopilot contract for properly-configured repos. M34's failure-mode-table check still holds — the failure mode here is a Phase-1 config-validation refusal, not an in-flight queue halt.
 
-### Step 1.4 — Per-PR pre-flight gate
+### Step 1.4 — Per-PR pre-flight gate (trust resolution)
 
 Project the JSON: `gh pr view <N> --json state,isDraft,reviewDecision,statusCheckRollup,headRepository,maintainerCanModify,isCrossRepository,headRefName,headRefOid,baseRefName,body,commits,labels,createdAt,author`.
 
-Per-PR gate conditions (ALL must pass):
-- `state == "OPEN"`
-- `isDraft == false`
-- `reviewDecision == "APPROVED"`
-- `statusCheckRollup` all green OR explicit `--bypass-protections` waiver
+Pre-conditions that ALL must pass regardless of trust path (real blockers):
 
-**Author identity is NOT a gate condition.** Any approved, CI-green PR is eligible regardless of whether the author is a repo collaborator, a bot, or an external contributor. The trust anchor for /merge is the `reviewDecision == "APPROVED"` requirement plus GitHub branch protections — not an author allow-list. (The `bot_authors_allow_list` config key is deprecated; see `commands/merge.md` `## Deprecated Flags` and `using-uberdev/SKILL.md`.)
+- `state == "OPEN"` — else gate_fail with `data.reason="pr_state_not_open"`.
+- `isDraft == false` — else gate_fail with `data.reason="is_draft"`.
+- `statusCheckRollup` all green OR explicit `--bypass-protections` waiver — else gate_fail with `data.reason="ci_red"`.
 
-> **Note for editors:** the trust-anchor sentence above ("the trust anchor … is `reviewDecision == "APPROVED"` plus GitHub branch protections") is intentionally repeated in `## Common Mistakes` (Phase 1.4 regression guard), `commands/merge.md` (Autopilot + Deprecated Flags), and `skills/using-uberdev/SKILL.md` (`bot_authors_allow_list` semantics). Each site serves a different reader; do not consolidate to a single source of truth. If you change the contract here, update those four mirrors in the same change.
+**Trust resolution** (NOT a single-condition gate — see D11 reframe). Probe three trust paths in priority order; first hit wins:
+
+**PATH_1 — platform anchor (team / branch protection):**
+
+```
+reviewDecision == "APPROVED"
+```
+
+On hit: emit `gate_pass` with `data.trust_anchor="reviewDecision_approved"` (∈ `TRUST_ANCHOR_ENUM`). Proceed.
+
+**PATH_2 — uberdev review trail (solo-dev / no-protection):**
+
+ALL of the following must hold:
+
+a. `"uberdev-approved" ∈ labels` (see `UBERDEV_APPROVED_LABEL` constant) — else gate_fail with `data.reason="trust_trail_label_missing"`.
+b. The most-recent commit body contains a trailer matching `^Reviewed-by: uberdev/review-pr@([a-f0-9]{40})$` (extract via `git log -1 --format=%B | grep -E ...`; see `REVIEW_PR_TRAILER_PREFIX` constant) — else gate_fail with `data.reason="trust_trail_trailer_missing"`.
+c. The extracted `<trailer-sha>` MUST equal **live** `gh pr view <N> --json headRefOid` (NOT any local ref). On mismatch: gate_fail with `data.reason="trust_trail_stale_sha"` and the diagnostic: `/review-pr ran on commit <trailer-sha> but PR head is now <live-sha> — re-run /review-pr, then re-invoke /merge`. (See M3 stale-SHA primitive below.)
+d. ∃ a file matching `.uberdev/runs/<run-id>/review-pr-verdict.json` whose `"sha"` field equals `headRefOid` (presence + SHA-match check; the JSON is local-only debug telemetry per D1 — its absence on a fresh clone is by design). The `<run-id>` directory name MUST match `RUN_ID_REGEX` before any path concatenation (D4, F8 path-traversal hardening) — else gate_fail with `data.reason="trust_trail_json_missing"`.
+
+On all four sub-conditions met: emit `gate_pass` with `data.trust_anchor="uberdev_review_trail"`. Proceed.
+
+**PATH_3 — admin bypass (unchanged):**
+
+`--bypass-protections` flag with free-text waiver. On hit: emit `gate_pass` with `data.trust_anchor="bypass_with_waiver"` (also emits the existing `admin_bypass`+`waiver_recorded` events per Common Mistakes line). Proceed.
+
+**Otherwise:** none of the three paths fired. Emit `gate_fail` with the most specific `data.reason` from `GATE_FAIL_REASON_ENUM` for the failing sub-condition (e.g. `review_decision_not_approved` if PATH_1 failed and PATH_2 had no label, vs `trust_trail_stale_sha` if PATH_2's trailer existed but the SHA was stale). General refusal diagnostic when no trust trail exists at all: `/review-pr hasn't run on commit <sha> — run /review-pr first, then re-invoke /merge`.
+
+**Stale-SHA verification primitive (D3).** The PATH_2 (c) check fires on ANY trailer-SHA mismatch — not just force-push. Force-push, `git commit --amend`, `git rebase`, and squash-merge all change the PR head SHA without changing branch history in identical ways from the trust signal's point of view. Always compare against **live** `gh pr view <N> --json headRefOid` — never against a local ref (`HEAD`, `origin/<branch>`, etc.) which may be stale. The single comparison primitive covers all rewrite types with a single code path and a single diagnostic.
+
+**Author identity is NOT a gate condition** in any path. Phase 1.4 trust resolution accepts EITHER `reviewDecision == "APPROVED"` (team / branch-protection path; PATH_1) OR a green `/review-pr` trail bound to current HEAD SHA (solo-dev / no-protection path; PATH_2) — author identity is not a gate in either path. The `bot_authors_allow_list` config key is deprecated; see `commands/merge.md` `## Deprecated Flags` and `using-uberdev/SKILL.md`.
+
+> **Note for editors:** the layered trust-anchor sentence above (PATH_1 platform anchor + PATH_2 uberdev trust trail) is intentionally repeated across **five mirror sites**, each serving a different reader audience. Do not consolidate to a single source of truth. If you change the contract here, update all five mirrors in the same change. Mirror sites:
+>
+> 1. `plugins/uberdev/skills/merge/SKILL.md:157` (this section — Phase 1.4 trust-resolution body, the canonical wording).
+> 2. `plugins/uberdev/skills/merge/SKILL.md:415` (`## Common Mistakes` Phase 1.4 regression guard — see "Adding an author allow-list back as a gate" entry).
+> 3. `plugins/uberdev/commands/merge.md:23` (Autopilot paragraph — user-facing CLI documentation).
+> 4. `plugins/uberdev/commands/merge.md:31` (Deprecated Flags `bot_authors_allow_list` description).
+> 5. `plugins/uberdev/skills/using-uberdev/SKILL.md:146` (`bot_authors_allow_list` config-key semantics).
 
 On any condition fail: list the specific failing condition for that PR. Exclude from merge set. **Never silently skip** — every fail emits a `gate_fail` event to `audit.jsonl` AND surfaces in the user-facing summary. Continue with passing PRs.
 
@@ -372,7 +412,8 @@ For each stale branch, the agent decides (per-branch). Each decision emits one `
 - **Prompting under any condition.** /merge is autopilot end-to-end. No `[y/N]` plan-confirm. No per-branch typed-`yes` for stale rebase. No per-PR confirmation after merge. No prompt for integration-branch when all four resolution tiers are empty (fall back to `INTEGRATION_BRANCH_FALLBACK`). The plan table renders for transparency; the queue proceeds.
 - **Halting the run.** There are no halt paths left except lock contention by another live `/merge`. Push non-FF, dependency cycles, ff-only divergence, conflict-resolver REFUSED/AMBIGUOUS, test fail — every one is per-PR park or auto-recovery. If you find yourself writing `halt queue` or `abort the run`, stop and re-read this skill.
 - **Auto-creating a merge commit or `reset --hard`** when `git pull --ff-only` fails. Use `git rebase` for auto-recovery; on rebase conflict, abort the rebase (preserving local head) and surface the divergence in the summary. Never overwrite local state.
-- **Adding an author allow-list back as a gate.** PR-author identity is intentionally NOT a Phase 1.4 gate condition. The trust anchor is `reviewDecision == "APPROVED"` plus GitHub branch protections. `bot_authors_allow_list` is deprecated and parsed only for backward compat — it has no behavioural effect.
+- **Adding an author allow-list back as a gate.** PR-author identity is intentionally NOT a Phase 1.4 gate condition in any path. Phase 1.4 trust resolution accepts EITHER `reviewDecision == "APPROVED"` (PATH_1, team / branch-protection path) OR a green `/review-pr` trail bound to current HEAD SHA (PATH_2, solo-dev / no-protection path) — author identity is not a gate in either path. `bot_authors_allow_list` is deprecated and parsed only for backward compat — it has no behavioural effect.
+- **Adding the trust trail without re-running /review-pr against the current head SHA.** Manually adding the `uberdev-approved` label or copying a stale `Reviewed-by:` trailer onto a new commit is a regression — Phase 1.4 PATH_2 (c) compares the trailer SHA against live `headRefOid` and refuses via `data.reason="trust_trail_stale_sha"`. The fix is to re-run `/review-pr` on the current HEAD; never bypass the SHA check by hand-editing the trailer.
 - **`--admin`/`--bypass-protections` without a free-text waiver.** Every bypass invocation MUST log `admin_bypass`+`waiver_recorded` events with the user's stated reason.
 
 ## Red Flags

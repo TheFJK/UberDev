@@ -81,6 +81,21 @@ assert_grep() {
   fi
 }
 
+# Negative-presence helper — mirrors `assert_no_grep` in
+# tests/issue-causal-fanout.test.sh so the convention stays one-name across
+# the suite. Use this instead of inline `if grep ... ; then FAIL=... else
+# PASS=... fi` blocks for "must NOT match" assertions.
+assert_no_grep() {
+  local file="$1" pattern="$2" desc="$3"
+  if grep -qE -e "$pattern" "$file"; then
+    fail "$desc"
+    echo "        file:    $file"
+    echo "        pattern (must NOT appear): $pattern"
+  else
+    pass "$desc"
+  fi
+}
+
 echo "== M1: commands/merge.md exists with required frontmatter =="
 assert_grep "$CMD_FILE" '^description:' "M1.1 — has description key"
 assert_grep "$CMD_FILE" '^argument-hint:' "M1.2 — has argument-hint key"
@@ -578,6 +593,112 @@ if [ -z "$TABLE_HALT_ROWS" ]; then
 else
   fail "M34 — Phase 3.4 failure-mode table MUST NOT list 'halt' as any Action; offending row(s):"
   echo "$TABLE_HALT_ROWS" | sed 's/^/         /'
+fi
+
+echo
+echo "== M35: SKILL.md Phase 1.4 prose contains PATH_1 / PATH_2 / PATH_3 trust-resolution structure (issue #40) =="
+assert_grep "$SKILL_FILE" 'PATH_1' "M35.path1 — PATH_1 (platform anchor) named"
+assert_grep "$SKILL_FILE" 'PATH_2' "M35.path2 — PATH_2 (uberdev review trail) named"
+assert_grep "$SKILL_FILE" 'PATH_3' "M35.path3 — PATH_3 (admin bypass) named"
+assert_grep "$SKILL_FILE" 'trust resolution|trust-resolution' "M35.reframe — trust-resolution reframe present"
+
+echo
+echo "== M36: SKILL.md gate_pass.data.trust_anchor enum values present (AC5) =="
+assert_grep "$SKILL_FILE" 'reviewDecision_approved' "M36.tea1 — TRUST_ANCHOR_ENUM value reviewDecision_approved"
+assert_grep "$SKILL_FILE" 'uberdev_review_trail'    "M36.tea2 — TRUST_ANCHOR_ENUM value uberdev_review_trail"
+assert_grep "$SKILL_FILE" 'bypass_with_waiver'      "M36.tea3 — TRUST_ANCHOR_ENUM value bypass_with_waiver"
+
+echo
+echo "== M37: SKILL.md gate_fail.data.reason enum values present (AC5) =="
+assert_grep "$SKILL_FILE" 'review_decision_not_approved' "M37.gfr1 — gate_fail reason review_decision_not_approved"
+assert_grep "$SKILL_FILE" 'trust_trail_missing'           "M37.gfr2 — gate_fail reason trust_trail_missing"
+assert_grep "$SKILL_FILE" 'trust_trail_stale_sha'         "M37.gfr3 — gate_fail reason trust_trail_stale_sha"
+assert_grep "$SKILL_FILE" 'trust_trail_label_missing'     "M37.gfr4 — gate_fail reason trust_trail_label_missing"
+assert_grep "$SKILL_FILE" 'trust_trail_trailer_missing'   "M37.gfr5 — gate_fail reason trust_trail_trailer_missing"
+assert_grep "$SKILL_FILE" 'trust_trail_json_missing'      "M37.gfr6 — gate_fail reason trust_trail_json_missing"
+
+echo
+echo "== M38: SKILL.md stale-SHA detection compares trailer vs live headRefOid (AC7, AC10) =="
+# Anchor on the verbatim "live" qualifier so a future implementer can't
+# silently substitute a local ref. Two-of-three alternatives so phrasing
+# variations don't false-fail.
+assert_grep "$SKILL_FILE" \
+  'live.*headRefOid|gh pr view.*--json headRefOid.*NOT.*local|NOT.*local ref' \
+  "M38 — stale-SHA primitive compares against live headRefOid (not local ref)"
+# Negative: must NOT compare against `git rev-parse HEAD` or `origin/<branch>`
+# for the stale-SHA check (those are stale by definition vs. the PR head ref).
+assert_no_grep "$SKILL_FILE" 'stale[- ]SHA.*git rev-parse HEAD' \
+  "M38.no-local-ref — stale-SHA check does not compare against local git rev-parse HEAD"
+
+echo
+echo "== M39: SKILL.md RUN_ID_REGEX constant present (AC11) =="
+assert_grep "$SKILL_FILE" '\| `RUN_ID_REGEX` \|' "M39 — RUN_ID_REGEX constant declared in Constants table"
+assert_grep "$SKILL_FILE" '\^\[0-9\]\{8\}-\[0-9\]\{6\}-\[a-f0-9\]\+\$' \
+  "M39.regex — RUN_ID_REGEX value is the spec-mandated regex literal"
+
+echo
+echo "== M40: SKILL.md UBERDEV_APPROVED_LABEL constant present (AC1) =="
+assert_grep "$SKILL_FILE" '\| `UBERDEV_APPROVED_LABEL` \|.*`uberdev-approved`' \
+  "M40 — UBERDEV_APPROVED_LABEL constant declared with literal value"
+
+echo
+echo "== M41: SKILL.md REVIEW_PR_TRAILER_PREFIX constant present (AC13) =="
+assert_grep "$SKILL_FILE" '\| `REVIEW_PR_TRAILER_PREFIX` \|.*Reviewed-by: uberdev/review-pr@' \
+  "M41 — REVIEW_PR_TRAILER_PREFIX constant declared with literal trailer prefix"
+
+echo
+echo "== M42: SKILL.md TRUST_ANCHOR_ENUM constant present (AC5) =="
+assert_grep "$SKILL_FILE" '\| `TRUST_ANCHOR_ENUM` \|' \
+  "M42 — TRUST_ANCHOR_ENUM constant row declared"
+
+echo
+echo "== M43: SKILL.md GATE_FAIL_REASON_ENUM constant present (AC5) =="
+assert_grep "$SKILL_FILE" '\| `GATE_FAIL_REASON_ENUM` \|' \
+  "M43 — GATE_FAIL_REASON_ENUM constant row declared"
+
+echo
+echo "== M44: commands/merge.md mirror sites synced (AC6) =="
+# Both mirror sites (lines 23 + 31 in the original spec; positions may have
+# drifted slightly post-edit) must contain the PATH_1 + PATH_2 layered
+# wording. Two assertions so a partial sync (one site updated, one
+# stale) fails loudly.
+PATH_HITS_CMD=$(grep -cE 'PATH_1.*PATH_2|PATH_2.*PATH_1' "$CMD_FILE" || true)
+if [ "$PATH_HITS_CMD" -ge 2 ]; then
+  echo "  PASS  M44 — commands/merge.md contains ≥ 2 mirror sites with PATH_1+PATH_2 layered wording"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M44 — commands/merge.md contains $PATH_HITS_CMD mirror sites; expected ≥ 2 (Autopilot paragraph + Deprecated Flags bullet)"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== M45: using-uberdev/SKILL.md mirror site synced (AC6) =="
+# Path is repo-relative; resolve from REPO_ROOT.
+USING_FILE="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/SKILL.md"
+if [ ! -r "$USING_FILE" ]; then
+  echo "  FAIL  M45 — required file missing: $USING_FILE"
+  FAIL=$((FAIL + 1))
+else
+  assert_grep "$USING_FILE" 'PATH_1.*PATH_2|PATH_2.*PATH_1' \
+    "M45 — using-uberdev/SKILL.md bot_authors_allow_list paragraph contains PATH_1+PATH_2 layered wording"
+  assert_grep "$USING_FILE" 'uberdev-approved.*Reviewed-by: uberdev/review-pr' \
+    "M45.trail — using-uberdev/SKILL.md mentions the trail composition (label + trailer)"
+fi
+
+echo
+echo "== M46: SKILL.md editor note corrected to 'five mirror sites' with enumeration (D8, AC14) =="
+assert_grep "$SKILL_FILE" 'five mirror sites' "M46.count — editor note says 'five mirror sites' (not 'four mirrors')"
+# Negative regression guard against the old wording.
+assert_no_grep "$SKILL_FILE" 'those four mirrors' \
+  "M46.no-old — old 'those four mirrors' wording removed"
+# Enumeration: 5 numbered list entries citing file:section.
+ENUM_HITS=$(grep -cE '^> [1-5]\. `plugins/uberdev/' "$SKILL_FILE" || true)
+if [ "$ENUM_HITS" -eq 5 ]; then
+  echo "  PASS  M46.enum — editor note enumerates exactly 5 mirror sites by file:path"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M46.enum — editor note has $ENUM_HITS enumerated mirror-site entries; expected 5"
+  FAIL=$((FAIL + 1))
 fi
 
 echo

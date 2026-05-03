@@ -4,6 +4,24 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`/review-pr` → `/merge` SHA-bound trust signal (#40)** — `/review-pr` on a green run now emits three durable artifacts: PR label `uberdev-approved`, commit trailer `Reviewed-by: uberdev/review-pr@<head-sha>` (full 40-character SHA), and local audit JSON at `.uberdev/runs/<run-id>/review-pr-verdict.json`. The trailer is the load-bearing trust artifact (intrinsically SHA-bound via the git object DAG); label and JSON are corroborating defense-in-depth presence checks. `/merge` Phase 1.4 reframes from a single-condition gate to **trust-resolution** with three paths: PATH_1 (`reviewDecision == "APPROVED"` — team / branch-protection), PATH_2 (`/review-pr` trail bound to live `headRefOid` — solo-dev / no-protection), PATH_3 (`--bypass-protections` admin override). New `gate_pass.data.trust_anchor` ∈ `{reviewDecision_approved, uberdev_review_trail, bypass_with_waiver}` and `gate_fail.data.reason` ∈ `{review_decision_not_approved, trust_trail_missing, trust_trail_stale_sha, trust_trail_label_missing, trust_trail_trailer_missing, trust_trail_json_missing, ci_red, pr_state_not_open, is_draft, merge_state_blocked}` field-level extensions land on the existing `gate_pass` / `gate_fail` events (no new event names).
+- **Stale-SHA detection covers force-push + amend + rebase + squash uniformly.** Phase 1.4 PATH_2 (c) compares the trailer's embedded `<head-sha>` against **live** `gh pr view <N> --json headRefOid` (NOT against any local ref). One verification primitive covers all rewrite types. Refusal diagnostic: `/review-pr ran on commit <trailer-sha> but PR head is now <live-sha> — re-run /review-pr, then re-invoke /merge`.
+- **Five new constants** in `skills/merge/SKILL.md`: `UBERDEV_APPROVED_LABEL`, `REVIEW_PR_TRAILER_PREFIX`, `RUN_ID_REGEX` (`^[0-9]{8}-[0-9]{6}-[a-f0-9]+$` — path-traversal hardening), `TRUST_ANCHOR_ENUM`, `GATE_FAIL_REASON_ENUM`.
+- **Editor note at `skills/merge/SKILL.md:125` corrected** from "four mirrors" to "five mirror sites" with explicit file:section enumeration of all 5 (this skill body, this skill's `## Common Mistakes`, `commands/merge.md:23`, `commands/merge.md:31`, `skills/using-uberdev/SKILL.md:146`).
+
+### Changed
+- **`/review-pr` exit codes are now 0 / 1 / 2** (was always 0). `0` = green (Phase 1 APPROVE + Phase 2 status ∈ {ran/APPROVE, skipped}); `1` = Phase 1 REJECT or REVISIONS_REQUIRED; `2` = Phase 2 status `blocked` (fanout crash, agent error, aggregator failure, artifact-emission failure). **Behavioral break** for callers that scripted against the always-0 contract — either ignore the exit code (preserve old behavior) or branch on it (use new behavior). Surfaces silent reviewer-crash failures that the trust signal exists to eliminate.
+- **`commands/review-pr.md:82-83` prose updated in lockstep** with the exit-code contract change. Distinguishes "skipped" (Phase 2 not run; eligible for green; exit 0) from "blocked" (Phase 2 fanout crashed; exit 2). The previous "still exits successfully" wording is removed.
+- **`tests/merge.test.sh` 103 → 130 assertions** (12 new M-blocks M35–M46, 27 new sub-assertions covering trust-signal constants, PATH_1/PATH_2/PATH_3 trust-resolution structure, gate_pass/gate_fail enum values, stale-SHA primitive, and mirror-site sync). **`tests/review-pr.test.sh` 33 → 43 assertions** (R1–R6, 10 new sub-assertions covering the green-run predicate, label/trailer literals, exit-code table, and run-id regex).
+
+### Backwards compatibility
+- **Trust-signal emission is additive on green runs.** Existing `/review-pr` invocations on REJECT / REVISIONS_REQUIRED paths produce no new artifacts (label not added, trailer not written, JSON not created). The exit-code change is the only behavioral break; CHANGELOG calls it out explicitly.
+- **`/merge` Phase 1.4 trust resolution preserves PATH_1 (existing `reviewDecision == "APPROVED"` behavior).** Team-mode callers with branch protection are unchanged. PATH_2 is only consulted if PATH_1 fails. PATH_3 (`--bypass-protections`) is unmodified.
+- **No new packages, no infra changes, no schema migrations.** Pure additive markdown driver edits + bash shape-check tests. Rollback is a single PR that removes the artifact-emission logic, reverts Phase 1.4 to the single-condition gate, and resets the 5 mirror sites.
+
 ## [0.15.2] - 2026-05-02
 
 ### Fixed
