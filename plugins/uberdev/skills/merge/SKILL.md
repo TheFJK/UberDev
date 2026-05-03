@@ -95,7 +95,13 @@ This is transparency for the autopilot contract — every blocking gate has been
 
 ### Step 1.1 — Acquire the single-instance lock
 
-Use `flock` against `LOCK_FILE_PATH` (declared in `## Constants`). Default fail-fast on contention with message `"another /merge run in progress, PID <X>"`. `--wait` flag opt-in for queueing. Stale-lock cleanup: if PID dead, release.
+Probe for `flock(1)` availability via `command -v flock` BEFORE invoking it. `flock` is not part of the macOS base system, so the unguarded invocation path must not be the only one. Branch on the probe:
+
+- **`flock` available** (Linux, or macOS with Homebrew `flock`): use `flock` against `LOCK_FILE_PATH` (declared in `## Constants`). Default fail-fast on contention with message `"another /merge run in progress, PID <X>"`. `--wait` flag opt-in for queueing. Stale-lock cleanup: if PID dead, release.
+
+- **`flock` missing** (stock macOS, minimal container images, BSDs): fall back to a portable `mkdir`-based mutex at `${LOCK_FILE_PATH}.d/` (the directory sibling of the flock path). `mkdir` is POSIX-guaranteed atomic for exclusive creation, so two concurrent `/merge` runs cannot both succeed. On success, write `$$` to `${LOCK_FILE_PATH}.d/pid` so contention diagnostics carry the holder PID. On `mkdir` failure (directory already exists), read the PID file and probe liveness via `kill -0 <pid> 2>/dev/null`: if the holder is dead, the lock is stale — `rm -rf "${LOCK_FILE_PATH}.d"` and retry `mkdir` once; if still held, fail-fast with the same `"another /merge run in progress, PID <X>"` message.
+
+The missing-`flock` case (`command -v flock` returns empty / exit 1) is **NOT contention** and MUST NOT emit the contention diagnostic — it is a tool-availability branch, taken silently as a fall-through to the portable mutex. Without this guard, every `/merge` invocation on a stock macOS install reports a false-positive "another /merge run in progress" before doing any work; that mis-classification was the root cause of issue #51.
 
 ### Step 1.2 — Read integration_branch via the four-tier precedence chain (D8)
 
@@ -415,7 +421,7 @@ For each stale branch, the agent decides (per-branch). Each decision emits one `
 
 ### Step 4.6 — Release the lock
 
-`flock` releases automatically on process exit. Explicit unlock not required.
+`flock` releases automatically on process exit; no explicit unlock required for the flock path. The `mkdir`-based fallback (Step 1.1, missing-`flock` branch) does NOT auto-release — the run MUST explicitly `rmdir "${LOCK_FILE_PATH}.d"` (or `rm -rf` to also drop the inner PID file) on every exit path, including signal-handler cleanup, so the next `/merge` does not encounter a stale-but-recently-held directory before its `kill -0` liveness probe runs.
 
 ## Quick Reference
 
