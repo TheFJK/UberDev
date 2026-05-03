@@ -971,6 +971,39 @@ for KW in 'trailer_sha_not_in_local_clone' 'git fetch --prune' 'retry_attempt' '
 done
 
 echo
+echo "== M61: trust-trail-evaluator handles sibling-equivalent commits (non-ancestor + empty tree diff) as PASS =="
+# Motivating case: /review-pr's `git commit --amend` produces a sibling commit with identical
+# tree contents but a different SHA. The trailer references the pre-amend SHA, which is not
+# an ancestor of the post-amend HEAD. Pre-fix, the agent's Step 2 short-circuited to
+# FORCE_PUSHED on Exit 1 without ever checking the tree diff, blocking legitimate trust trails.
+TTE_FILE="$REPO_ROOT/plugins/uberdev/agents/trust-trail-evaluator.md"
+if [ ! -r "$TTE_FILE" ]; then
+  echo "  FAIL  M61 — agent file missing: $TTE_FILE"
+  FAIL=$((FAIL + 1))
+else
+  # Negative: Step 2 Exit 1 must NOT short-circuit to FORCE_PUSHED — must defer to Step 3.
+  if grep -qE 'Exit 1[^E]*[Vv]erdict:?[[:space:]]*`?FORCE_PUSHED' "$TTE_FILE"; then
+    echo "  FAIL  M61.no-shortcircuit — Step 2 Exit 1 must NOT short-circuit to FORCE_PUSHED; should continue to Step 3 for tree-diff check (sibling-equivalent case)"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  M61.no-shortcircuit — Step 2 Exit 1 correctly defers FORCE_PUSHED decision to Step 3"
+    PASS=$((PASS + 1))
+  fi
+  # Positive: Process documents the is_ancestor flag passed from Step 2 to Step 3.
+  assert_grep "$TTE_FILE" 'is_ancestor' \
+    "M61.is_ancestor-flag — Process documents the is_ancestor flag passed from Step 2 to Step 3"
+  # Positive: Step 3 cites the sibling-equivalent case (commit --amend with identical tree).
+  assert_grep "$TTE_FILE" 'sibling' \
+    "M61.sibling-cited — Step 3 cites the sibling-equivalent case"
+  # Positive: Step 3 documents non-ancestor + non-empty-diff → FORCE_PUSHED.
+  assert_grep "$TTE_FILE" 'is_ancestor=false.*FORCE_PUSHED|non-ancestor.*FORCE_PUSHED' \
+    "M61.real-rewrite — Step 3 documents non-ancestor + non-empty-diff FORCE_PUSHED (real history rewrite)"
+  # Positive: cite the motivating commit --amend case so future maintainers see the why.
+  assert_grep "$TTE_FILE" 'commit --amend' \
+    "M61.amend-cited — agent file cites commit --amend as the motivating case"
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

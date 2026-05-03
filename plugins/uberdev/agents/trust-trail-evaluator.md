@@ -27,13 +27,15 @@ Read, Bash (limited to `git merge-base`, `git diff --shortstat`, `git log --onel
 1. Validate inputs against `^[a-f0-9]{40}$`. If either SHA fails, return `verdict: INVALID` with `rationale: "input-malformed"` plus `signals_inspected: []`. The caller treats this as the `INVALID / input-malformed` row of the verdict-mapping table (see `## Decisions` PATH_2 (c) replacement in spec) — `gate_fail` immediately with `data.reason="trust_trail_agent_invalid_input"`, no retry.
 2. Probe ancestry via `git merge-base --is-ancestor <trailer_sha> <head_ref_oid>` (run in `working_dir`):
    - Exit 128 → `verdict: INVALID` with `rationale: "trailer-sha-not-in-local-clone"` plus `signals_inspected: ["git-merge-base"]`. The caller treats this as the `INVALID / trailer-sha-not-in-local-clone` row of the verdict-mapping table — runs ONE bounded `git fetch --prune origin <branch>` and re-dispatches once (max retry=1). If the second dispatch still returns INVALID (any subreason), `gate_fail` with `data.reason="trust_trail_agent_invalid_input"`. Never recursive.
-   - Exit 1 → `verdict: FORCE_PUSHED` with `rationale: "<trailer_sha> is not an ancestor of <head_ref_oid> — history rewritten"` plus `signals_inspected: ["git-merge-base"]`.
-   - Exit 0 → continue to Step 3.
-3. Probe diff-empty via `git diff --shortstat <trailer_sha> <head_ref_oid>`:
+   - Exit 0 → continue to Step 3 with `is_ancestor=true`.
+   - Exit 1 → continue to Step 3 with `is_ancestor=false`. **Do NOT short-circuit to FORCE_PUSHED.** `git commit --amend` produces sibling commits (same parent, different SHA, often identical tree) — non-ancestor in the DAG sense but trust-equivalent when the tree is unchanged. Step 3's tree-diff check is the discriminator: empty tree diff with `is_ancestor=false` is a sibling-equivalent rewrite (PASS); non-empty tree diff with `is_ancestor=false` is real history rewriting (FORCE_PUSHED).
+3. Probe diff-empty via `git diff --shortstat <trailer_sha> <head_ref_oid>` plus the `is_ancestor` flag from Step 2:
    - Empty diff AND SHAs equal → `verdict: PASS` with `rationale: "trailer matches live head"`.
-   - Empty diff AND ancestor → `verdict: PASS` with `rationale: "fast-forward fixup commits between trailer and head are diff-empty"`.
-   - Non-empty → `verdict: STALE` with `rationale: "<N> insertions, <M> deletions between trailer and head"` (cite the shortstat values).
-4. Probe log-empty via `git log <trailer_sha>..<head_ref_oid> --oneline`:
+   - Empty diff AND `is_ancestor=true` → `verdict: PASS` with `rationale: "fast-forward fixup commits between trailer and head are diff-empty"`.
+   - Empty diff AND `is_ancestor=false` → `verdict: PASS` with `rationale: "sibling commit with identical tree (commit --amend produced a fresh SHA without changing tree contents)"` plus `signals_inspected: ["git-merge-base", "git-diff-shortstat"]`.
+   - Non-empty diff AND `is_ancestor=true` → `verdict: STALE` with `rationale: "<N> insertions, <M> deletions between trailer and head"` (cite the shortstat values).
+   - Non-empty diff AND `is_ancestor=false` → `verdict: FORCE_PUSHED` with `rationale: "<trailer_sha> is not an ancestor of <head_ref_oid> AND tree contents differ — history rewritten (<N> insertions, <M> deletions)"` plus `signals_inspected: ["git-merge-base", "git-diff-shortstat"]`.
+4. Probe log-empty via `git log <trailer_sha>..<head_ref_oid> --oneline` (only meaningful when `is_ancestor=true`; for `is_ancestor=false` the verdict is already determined by Step 3's tree-diff check and this step is skipped):
    - Empty → `verdict: PASS` (degenerate; SHAs equal or fast-forward chain has zero new commits).
    - Non-empty AND diff-empty (Step 3 returned empty) → still `verdict: PASS` (post-review commits exist but their cumulative diff is empty by construction).
 5. Cross-reference PR-state corroborators advisory only — `gh pr view <N> --json statusCheckRollup` to confirm CI passed at `head_ref_oid`, and `gh api repos/:owner/:repo/pulls/<N>/commits` to confirm the trailer commit is in the PR's commit list. NEVER overturn the structural primitive verdict from steps 2-4.
