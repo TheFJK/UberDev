@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-05-04
+
+### Fixed
+- **`/merge` Step 1.1 lock acquisition no longer mis-classifies missing `flock(1)` on macOS as lock contention.** `flock` is not part of the macOS base system, so the previous unguarded invocation exited 127 (`command not found: flock`), and Step 1.1's error-translation classified every non-zero exit as genuine contention — surfacing `"another /merge run in progress"` on stock-macOS users' very first invocation with no actual contender. `/merge` was effectively unusable on macOS without a separate `brew install flock`. `skills/merge/SKILL.md` Step 1.1 now probes `command -v flock` BEFORE invoking it and branches: flock-available path is unchanged; flock-missing path falls back to a portable `mkdir`-based mutex at `${LOCK_FILE_PATH}.d/` (POSIX-atomic for exclusive creation), with a PID-stamp file powering the existing `kill -0` stale-lock cleanup. Concrete bash code block prescribes the acquisition + cleanup pattern including the explicit `trap 'rm -rf "$LOCK_DIR"' EXIT INT TERM` that Step 4.6 references as the cleanup contract. Failure-mode distinctions are now load-bearing prose: missing-flock → silent fall-through (NOT contention); mkdir EEXIST + holder alive → contention; mkdir EEXIST + holder dead OR PID empty → stale, retry once; mkdir non-EEXIST (ENOSPC, EACCES, EROFS, parent missing) → distinct `"filesystem error"` diagnostic; PID-write failure → release lock dir + distinct `"cannot stamp PID"` diagnostic. The new prose closes both the original mis-classification AND three derivative silent-failure surfaces (FS-error vs contention conflation, unguarded PID-write, hopeful "MUST install trap" without literal syntax) surfaced by Phase 1 review of PR #53. Issue #51.
+- **`tests/merge.test.sh` 197 → 203 assertions** (M62 block: 6 sub-assertions covering the `command -v flock` probe, the mkdir fallback, the explicit `MUST NOT.*contention` mis-classification guard, the Step 4.6 cleanup contract, the FS-error-distinct-from-contention requirement, and the literal `trap ... EXIT INT TERM` syntax). Repo-wide 475 → 481 pass / 0 fail.
+
+### Backwards compatibility
+- **No API or contract change.** `LOCK_FILE_PATH` constant unchanged; the contention diagnostic message string unchanged; the existing flock-on-Linux path unchanged. The fix is internal to Step 1.1's branch structure and adds a new portable-mutex code path for the missing-`flock` case. Existing flock-equipped systems (Linux, macOS-with-Homebrew-flock) see no behavior change.
+
 ## [0.17.1] - 2026-05-04
 
 ### Fixed
