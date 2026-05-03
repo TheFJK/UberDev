@@ -7,7 +7,7 @@ description: Shared post-implementation review fanout — dispatches 5 advisory 
 
 ## Overview
 
-5 reviewer agents fire in PARALLEL inside a single assistant turn; their findings are aggregated into a single non-blocking summary returned to the caller. The reviewers are advisory — at this layer the caller continues regardless of `REVISIONS_REQUIRED` verdicts. This keeps wall-clock cost low (one round-trip for five perspectives) while still applying multi-axis scrutiny to every wave's commit.
+5 reviewer agents fire in PARALLEL inside a single assistant turn; their findings are aggregated into a single non-blocking summary returned to the caller. The reviewers are advisory — at this layer the caller continues regardless of `REVISIONS_REQUIRED` verdicts. This keeps wall-clock cost low (one round-trip for five perspectives) while still applying multi-axis scrutiny to the consolidated end-of-issue diff (or a trivial/small single commit).
 
 **Announce at start:** "I'm using the post-impl-review skill to fan out the 5 reviewer agents."
 
@@ -114,7 +114,7 @@ Counting rules:
 
 Return a prose summary of the aggregation table above to the caller. Example:
 
-> Post-impl review for wave 2 of issue #11 complete. 5 reviewers ran in parallel. Aggregated: 0 blockers, 2 suggestions (code-simplifier flagged a dead branch in `foo.ts`; comment-analyzer flagged a stale TODO in `bar.ts`). Full table at `.uberdev/research/$RUN_ID/post-impl-review-wave-2.md`. Continue.
+> Post-impl review for issue #11 complete (end-of-issue). 5 reviewers ran in parallel. Aggregated: 0 blockers, 2 suggestions (code-simplifier flagged a dead branch in `foo.ts`; comment-analyzer flagged a stale TODO in `bar.ts`). Full table at `.uberdev/research/$RUN_ID/post-impl-review-wave-final.md`. Continue.
 
 Findings are advisory at this layer — **the caller does NOT block on `REVISIONS_REQUIRED`**. (This skill is audit-only by design. The aggregated file is the artifact downstream tooling reads to triage findings; to apply simplifier findings, run `/uberdev:simplify` or `/uberdev:review-pr` Phase 2.)
 
