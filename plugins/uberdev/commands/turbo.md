@@ -12,7 +12,7 @@ Spawn an autonomous Claude agent in a new cmux workspace per GitHub issue in **#
 
 **Behavior vs `/solve`:**
 - **trivial / small tiers:** identical to `/solve` except `uberdev:post-impl-review` is NOT invoked (asymmetry preserved from prior behavior).
-- **medium / large tiers:** brainstorm runs WITHOUT the clarifying-question loop. Parallel research still runs (recommendation grounding preserved). `/uberdev:orchestrator` is dispatched with the unattended-mode flag; `subagent-driven-dev` invokes `uberdev:post-impl-review` per wave; large tier additionally fires `pr-test-analyzer` pre-merge. Findings are summarised in the PR body under `## Reviewer findings summary`.
+- **medium / large tiers:** brainstorm runs WITHOUT the clarifying-question loop. Parallel research still runs (recommendation grounding preserved). `/uberdev:orchestrator` is dispatched with the unattended-mode flag; `subagent-driven-dev` invokes `uberdev:post-impl-review` once at end-of-issue (consolidated across all waves); large tier additionally fires `pr-test-analyzer` pre-merge. Findings are summarised in the PR body under `## Reviewer findings summary`.
 
 **Multi-issue dispatch:** `/turbo 5 6 7` validates all three issues up front (open + classifiable) and then spawns three independent agents — one terminal tab/workspace each, all running in parallel. If any issue is closed, missing, or fails `gh` fetch, the run aborts before spawning anything (`no agents dispatched`). Override flags apply batch-wide.
 
