@@ -170,13 +170,13 @@ Honest fast-forward fixup commits added between `/review-pr` and `/merge` (e.g.,
 
 **Author identity is NOT a gate condition** in any path. Phase 1.4 trust resolution accepts EITHER `reviewDecision == "APPROVED"` (team / branch-protection path; PATH_1) OR a green `/review-pr` trail bound to current HEAD SHA (solo-dev / no-protection path; PATH_2) — author identity is not a gate in either path. The `bot_authors_allow_list` config key is deprecated; see `commands/merge.md` `## Deprecated Flags` and `using-uberdev/SKILL.md`.
 
-> **Note for editors:** the layered trust-anchor sentence above (PATH_1 platform anchor + PATH_2 uberdev trust trail) is intentionally repeated across **five mirror sites**, each serving a different reader audience. Do not consolidate to a single source of truth. If you change the contract here, update all five mirrors in the same change. Mirror sites:
+> **Note for editors:** the layered trust-anchor sentence above (PATH_1 platform anchor + PATH_2 uberdev trust trail) is intentionally repeated across **five mirror sites**, each serving a different reader audience. Do not consolidate to a single source of truth. If you change the contract here, update all five mirrors in the same change. Mirror sites are identified by section/heading (line numbers shift with prose edits — use the anchors below):
 >
-> 1. `plugins/uberdev/skills/merge/SKILL.md:157` (this section — Phase 1.4 trust-resolution body, the canonical wording).
-> 2. `plugins/uberdev/skills/merge/SKILL.md:415` (`## Common Mistakes` Phase 1.4 regression guard — see "Adding an author allow-list back as a gate" entry).
-> 3. `plugins/uberdev/commands/merge.md:23` (Autopilot paragraph — user-facing CLI documentation).
-> 4. `plugins/uberdev/commands/merge.md:31` (Deprecated Flags `bot_authors_allow_list` description).
-> 5. `plugins/uberdev/skills/using-uberdev/SKILL.md:146` (`bot_authors_allow_list` config-key semantics).
+> 1. `plugins/uberdev/skills/merge/SKILL.md` — `### Step 1.4 — Per-PR pre-flight gate (trust resolution)` body, the **"Author identity is NOT a gate condition"** paragraph (this section, the canonical wording).
+> 2. `plugins/uberdev/skills/merge/SKILL.md` — `## Common Mistakes`, the **"Adding an author allow-list back as a gate"** bullet (Phase 1.4 regression guard).
+> 3. `plugins/uberdev/commands/merge.md` — the **Autopilot paragraph** (user-facing CLI documentation; the sentence beginning "Phase 1.4 trust resolution accepts EITHER…").
+> 4. `plugins/uberdev/commands/merge.md` — `## Deprecated Flags`, the **`bot_authors_allow_list` config-key bullet**.
+> 5. `plugins/uberdev/skills/using-uberdev/SKILL.md` — the **`bot_authors_allow_list` semantics paragraph**.
 
 On any condition fail: list the specific failing condition for that PR. Exclude from merge set. **Never silently skip** — every fail emits a `gate_fail` event to `audit.jsonl` AND surfaces in the user-facing summary. Continue with passing PRs.
 
