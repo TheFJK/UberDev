@@ -27,17 +27,24 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `LOCK_FILE_PATH` | `.git/uberdev-merge.lock` | D14 |
 | `AUDIT_LOG_DIR_PATTERN` | `.uberdev/runs/<run-id>/` | D15 |
 | `AUDIT_LOG_FILENAME` | `audit.jsonl` | D15 |
-| `AUDIT_EVENT_ENUM` | `gate_pass`, `gate_fail`, `order_proposed`, `order_confirmed`, `strategy_chosen`, `probe_clean`, `probe_conflict`, `agent_dispatched`, `agent_returned`, `patch_applied`, `test_pass`, `test_fail`, `push_resolution`, `merge_executed`, `local_sync`, `branch_deleted`, `worktree_removed`, `admin_bypass`, `waiver_recorded`, `error`, `pr_parked`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision` | D15. Field-level extensions: gate_pass.data.trust_anchor ∈ TRUST_ANCHOR_ENUM; gate_fail.data.reason ∈ GATE_FAIL_REASON_ENUM (see Phase 1.4) |
+| `AUDIT_EVENT_ENUM` | `gate_pass`, `gate_fail`, `order_proposed`, `order_confirmed`, `strategy_chosen`, `probe_clean`, `probe_conflict`, `agent_dispatched`, `agent_returned`, `patch_applied`, `test_pass`, `test_fail`, `push_resolution`, `merge_executed`, `local_sync`, `branch_deleted`, `worktree_removed`, `admin_bypass`, `waiver_recorded`, `error`, `pr_parked`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision`, `trust_trail_agent_decision`, `merge_strategy_agent_decision`, `merge_strategy_fanout_wave_started` | D15. Field-level extensions: gate_pass.data.trust_anchor ∈ TRUST_ANCHOR_ENUM; gate_fail.data.reason ∈ GATE_FAIL_REASON_ENUM (see Phase 1.4). **Deprecated (never emitted post-v0.17.0):** `admin_bypass`, `waiver_recorded` |
 | `SCRATCH_WORKTREE_PATTERN` | `.claude/worktrees/merge-<run-id>/` | D10 |
 | `BRANCH_NAME_REGEX` | `^[A-Za-z0-9._/-]{1,255}$` | D8 (validation before shell argv use) |
 | `MERGE_STRATEGY_LABEL_PREFIX` | `merge-strategy:` | D-LABEL |
+| `STRATEGY_OVERRIDE_FLAGS` | `--squash`, `--rebase`, `--merge` (CLI flags) **(deprecated; no behavioural effect)** | Phase 1 (stderr emission), `commands/merge.md` Deprecated Flags section |
+| `STRATEGY_FLAGS_DEPRECATED_NOTE` | `warning: --squash / --rebase / --merge are deprecated; /merge is fully unattended and the merge-strategy-decider agent picks per-PR strategy. The flag has no behavioural effect.` | Phase 1 (stderr emission), `commands/merge.md` Deprecated Flags section |
+| `BYPASS_PROTECTIONS_DEPRECATED_NOTE` | `warning: --bypass-protections is deprecated; /merge trust resolution is now agent-decided (trust-trail-evaluator). The flag has no behavioural effect.` | Phase 1 (stderr emission), `commands/merge.md` Deprecated Flags section |
+| `TRUST_TRAIL_VERDICT_ENUM` | `PASS`, `STALE`, `INVALID`, `FORCE_PUSHED` | Phase 1.4 PATH_2 sub-condition (c); audit-log `trust_trail_agent_decision.data.choice` |
+| `MERGE_STRATEGY_DECIDER_VERDICT_ENUM` | `squash`, `rebase`, `merge` (strict subset of `STRATEGY_ENUM` — `drop` excluded by design) | Phase 2.2; audit-log `merge_strategy_agent_decision.data.choice` |
+| `GATE_FAIL_REASON_TRUST_TRAIL_AGENT_INVALID_INPUT` | `trust_trail_agent_invalid_input` (new 7th member of `GATE_FAIL_REASON_ENUM`) | Phase 1.4 PATH_2 sub-condition (c) caller mapping for `INVALID` verdicts (both subreasons); audit-log `gate_fail.data.reason` |
+| `MAX_PARALLEL_AGENTS` | integer `10` (default) | Phase 2.2 fanout chunking; queues with >`MAX_PARALLEL_AGENTS` PRs are split into `ceil(N / MAX_PARALLEL_AGENTS)` sequential single-message waves. Override via `.claude/uberdev.local.md` is out-of-scope for this issue. |
 | `INTEGRATION_BRANCH_KEY` | `integration_branch` (config key) | D8 |
 | `INTEGRATION_BRANCH_ENV_VAR` | `UBERDEV_INTEGRATION_BRANCH` | D8 |
 | `INTEGRATION_BRANCH_FALLBACK` | `main` (hardcoded literal — autopilot picks the GitHub-default convention rather than prompting; users override out-of-band via `integration_branch:` config) | D8, Phase 1.3 (used when all four resolution tiers are empty) |
 | `AUTO_CONFIRM_KEY` | `auto_confirm` (config key in `.claude/uberdev.local.md`) **(deprecated; no behavioural effect)** | Phase 2.4 (no-op acknowledgement only; Phase 4.5 no longer consumes this key under unconditional autopilot) |
 | `AUTO_CONFIRM_FLAGS` | `--yes`, `-y` (CLI flags) **(deprecated; no behavioural effect)** | Phase 2.4 (no-op acknowledgement only; Phase 4.5 no longer consumes these flags under unconditional autopilot) |
 | `AUTO_CONFIRM_REASON_ENUM` | `autopilot-default` (only value emitted under autopilot; `single-pr-default`, `cli-flag`, `config-auto_confirm` are historical from pre-autopilot runs and are unreachable now) | Phase 2.4 |
-| `STRATEGY_REASON_ENUM` | `cli-flag`, `pr-label`, `heuristic-conventional`, `heuristic-wip`, `heuristic-single-commit`, `heuristic-mixed` | Phase 2.2, Phase 3.3 (audit-log `data.reason` for `strategy_chosen`) |
+| `STRATEGY_REASON_ENUM` | `cli-flag` (deprecated; never emitted post-v0.17.0), `pr-label` (deprecated as authoritative; reused by agent rationale), `heuristic-conventional` (deprecated as authoritative; reused by agent rationale), `heuristic-wip` (deprecated as authoritative; reused by agent rationale), `heuristic-single-commit` (deprecated as authoritative; reused by agent rationale), `heuristic-mixed` (deprecated as authoritative; reused by agent rationale), `agent_decided` | Phase 2.2, Phase 3.3 (audit-log `data.reason` for `strategy_chosen`) |
 | `PARK_REASON_ENUM` | `refused`, `ambiguous`, `test-fail-exhausted`, `push-non-ff` | Phase 3.3 (audit-log `data.reason` for `pr_parked`) |
 | `STALE_REBASE_DECISION_ENUM` | `rebased-ff-clean`, `rebased-non-conflicting`, `skipped-conflicts`, `skipped-pr-head-ref`, `skipped-non-tracking`, `rebase-aborted` | Phase 4.5 (audit-log `data.choice` for `stale_branch_rebase_decision`) |
 | `TEST_FAIL_DECISION_ENUM` | `re-resolve`, `strategy-switch`, `park` | Phase 3.3v (audit-log `data.choice` for `test_fail_agent_decision`) |
@@ -45,8 +52,10 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `UBERDEV_APPROVED_LABEL` | `uberdev-approved` | Phase 1.4 (PATH_2 label presence check) |
 | `REVIEW_PR_TRAILER_PREFIX` | `Reviewed-by: uberdev/review-pr@` | Phase 1.4 (PATH_2 trailer extraction); regex form `^Reviewed-by: uberdev/review-pr@([a-f0-9]{40})$` |
 | `RUN_ID_REGEX` | `^[0-9]{8}-[0-9]{6}-[a-f0-9]+$` | Phase 1.4 (PATH_2 audit-JSON path validation); also enforced producer-side in `commands/review-pr.md` |
-| `TRUST_ANCHOR_ENUM` | `reviewDecision_approved`, `uberdev_review_trail`, `bypass_with_waiver` | Phase 1.4 (audit-log `gate_pass.data.trust_anchor`) |
-| `GATE_FAIL_REASON_ENUM` | `review_decision_not_approved`, `trust_trail_missing`, `trust_trail_stale_sha`, `trust_trail_label_missing`, `trust_trail_trailer_missing`, `trust_trail_json_missing`, `ci_red`, `pr_state_not_open`, `is_draft`, `merge_state_blocked` | Phase 1.4 (audit-log `gate_fail.data.reason`) |
+| `TRUST_ANCHOR_ENUM` | `reviewDecision_approved`, `uberdev_review_trail`, `bypass_with_waiver` (deprecated; never emitted post-v0.17.0) | Phase 1.4 (audit-log `gate_pass.data.trust_anchor`) |
+| `GATE_FAIL_REASON_ENUM` | **trust-resolution reasons** (PATH_1 / PATH_2): `review_decision_not_approved`, `trust_trail_missing`, `trust_trail_stale_sha`, `trust_trail_label_missing`, `trust_trail_trailer_missing`, `trust_trail_json_missing`, `trust_trail_agent_invalid_input`. **Pre-condition gate reasons** (Step 1.4 pre-flight, evaluated before trust resolution): `pr_state_not_open`, `is_draft`, `ci_red`, `merge_state_blocked`. Total 11 members — the seven trust-resolution reasons are subject to M37's enum-row count assertion; the four pre-condition reasons are emitted by Step 1.4 pre-flight gates that fire regardless of trust path. | Phase 1.4 (audit-log `gate_fail.data.reason`) |
+| `TRUST_TRAIL_VERDICT_INVALID_SUBREASON_ENUM` | `input_malformed` (immediate gate_fail; no retry), `trailer_sha_not_in_local_clone` (one bounded `git fetch --prune` + re-dispatch with `data.retry_attempt=1`; second INVALID is terminal) | Phase 1.4 PATH_2 sub-condition (c); audit-log `trust_trail_agent_decision.data.subreason` when `data.choice="INVALID"` |
+| `TRUST_TRAIL_AGENT_DECISION_RETRY_ATTEMPT_RANGE` | integer enum `{0, 1}` (0 = first dispatch; 1 = bounded retry on `trailer_sha_not_in_local_clone`; never recursive) | Phase 1.4 PATH_2 sub-condition (c); audit-log `trust_trail_agent_decision.data.retry_attempt` |
 
 ## Inputs
 
@@ -55,9 +64,9 @@ Argument parsing:
 - **No args** — use the current branch's PR if one exists. If the current branch has no open PR, error out with a clear message pointing to `finish-branch`.
 - **`<PR#>`** (single positional integer) — single-PR mode; operate on exactly that PR number.
 - **`--all`** — enumerate all open PRs that are APPROVED and have passing required CI checks; treat the result as the input set.
-- **`--squash` / `--rebase` / `--merge`** — per-invocation strategy override (see `STRATEGY_ENUM`); applies to every PR in the run.
+- **`--squash` / `--rebase` / `--merge`** — accepted for backward compat **(deprecated; no behavioural effect — see `## Inputs` autopilot paragraph and `commands/merge.md` `## Deprecated Flags`)**. The `merge-strategy-decider` agent picks per-PR strategy from PR-shape signals; the CLI flag is parsed without error, emits `STRATEGY_FLAGS_DEPRECATED_NOTE` once per run on first encounter, and records a `deprecated_flag_used` audit event. The flag does NOT override the agent's choice for any PR.
 - **`--integration-branch=<name>`** — per-invocation override of the integration-branch precedence chain (see below).
-- **`--bypass-protections`** — admin-bypass branch protections; requires a free-text waiver and is audit-logged.
+- **`--bypass-protections`** — accepted for backward compat **(deprecated; no behavioural effect — see `## Inputs` autopilot paragraph and `commands/merge.md` `## Deprecated Flags`)**. Trust resolution is fully agent-decided via `trust-trail-evaluator` (Phase 1.4 PATH_2 sub-condition (c)); there is no PATH_3 admin-bypass anchor and no CI-red waiver. The flag is parsed without error, emits `BYPASS_PROTECTIONS_DEPRECATED_NOTE` once per run on first encounter, and records a `deprecated_flag_used` audit event. `admin_bypass` and `waiver_recorded` audit events are declared in `AUDIT_EVENT_ENUM` but never emitted post-v0.17.0.
 - **`--yes` / `-y`** — accepted for backward compat (deprecated; no behavioural effect — see `## Inputs` autopilot paragraph).
 
 Integration-branch resolution (four-tier precedence chain, highest wins; on full miss, fall back to `INTEGRATION_BRANCH_FALLBACK` — never prompt):
@@ -70,7 +79,7 @@ Integration-branch resolution (four-tier precedence chain, highest wins; on full
 
 Branch names (from any tier) MUST be validated against `BRANCH_NAME_REGEX` before being used as a shell argv. Reject and error out on any name that fails the regex; do not pass unvalidated input to `git`, `gh`, or any subprocess.
 
-**Autopilot (always ON).** `--yes` / `-y` (see `AUTO_CONFIRM_FLAGS`) and the `auto_confirm:` config key (see `AUTO_CONFIRM_KEY`) are accepted for backward compat — parsed without error — but have **no behavioural effect**. On first encounter per run, /merge emits the verbatim `DEPRECATED_FLAGS_NOTE` to stderr and records a `deprecated_flag_used` audit event. The Phase 2.4 plan-confirm and Phase 4.5 stale-branch behaviours are unconditional autopilot — see those phases. **No prompts, no halts, no author gates** — every blocker is either resolved by an agent (conflict-resolve) or surfaced in the run summary while the queue continues.
+**Autopilot (always ON).** `--yes` / `-y` (see `AUTO_CONFIRM_FLAGS`) and the `auto_confirm:` config key (see `AUTO_CONFIRM_KEY`) are accepted for backward compat — parsed without error — but have **no behavioural effect**. On first encounter per run, /merge emits the verbatim `DEPRECATED_FLAGS_NOTE` to stderr and records a `deprecated_flag_used` audit event. Encountering `--squash` / `--rebase` / `--merge` (`STRATEGY_OVERRIDE_FLAGS`) for the first time emits `STRATEGY_FLAGS_DEPRECATED_NOTE` to stderr and records one `deprecated_flag_used` event; encountering `--bypass-protections` for the first time emits `BYPASS_PROTECTIONS_DEPRECATED_NOTE` and records one `deprecated_flag_used` event. The Phase 2.4 plan-confirm and Phase 4.5 stale-branch behaviours are unconditional autopilot — see those phases. **No prompts, no halts, no author gates** — every blocker is either resolved by an agent (conflict-resolve) or surfaced in the run summary while the queue continues.
 
 ## Phase 1 — Pre-flight gate
 
@@ -123,9 +132,9 @@ Pre-conditions that ALL must pass regardless of trust path (real blockers):
 
 - `state == "OPEN"` — else gate_fail with `data.reason="pr_state_not_open"`.
 - `isDraft == false` — else gate_fail with `data.reason="is_draft"`.
-- `statusCheckRollup` all green OR explicit `--bypass-protections` waiver — else gate_fail with `data.reason="ci_red"`.
+- `statusCheckRollup` all green — else gate_fail with `data.reason="ci_red"`. **No bypass clause exists post-v0.17.0** (`--bypass-protections` is a no-op; CI-red is unconditionally a `gate_fail`).
 
-**Trust resolution** (NOT a single-condition gate — see D11 reframe). Probe three trust paths in priority order; first hit wins:
+**Trust resolution** (NOT a single-condition gate — see D11 reframe). Probe two trust paths in priority order; first hit wins:
 
 **PATH_1 — platform anchor (team / branch protection):**
 
@@ -141,28 +150,35 @@ ALL of the following must hold:
 
 a. `"uberdev-approved" ∈ labels` (see `UBERDEV_APPROVED_LABEL` constant) — else gate_fail with `data.reason="trust_trail_label_missing"`.
 b. The most-recent commit body contains a trailer matching `^Reviewed-by: uberdev/review-pr@([a-f0-9]{40})$` (extract via `git log -1 --format=%B | grep -E ...`; see `REVIEW_PR_TRAILER_PREFIX` constant) — else gate_fail with `data.reason="trust_trail_trailer_missing"`.
-c. The extracted `<trailer-sha>` MUST equal **live** `gh pr view <N> --json headRefOid` (NOT any local ref). On mismatch: gate_fail with `data.reason="trust_trail_stale_sha"` and the diagnostic: `/review-pr ran on commit <trailer-sha> but PR head is now <live-sha> — re-run /review-pr, then re-invoke /merge`. (See M3 stale-SHA primitive below.)
+c. The extracted `<trailer-sha>` is delegated to the `trust-trail-evaluator` agent for verdict resolution. Dispatch in a single-message `Task("trust-trail-evaluator")` with inputs `pr_number=<N>`, `head_ref_oid=<live gh pr view --json headRefOid>`, `trailer_sha=<extracted from trailer regex match>`, `working_dir=<cwd>`, and the optional `pr_body_excerpt` / `commit_messages_excerpt` wrapped in `<external-untrusted-input source="github-pr-body">…</external-untrusted-input>` and `<external-untrusted-input source="github-commits">…</external-untrusted-input>` envelopes respectively. The agent inspects ancestor + diff-empty + log-empty primitives and returns a verdict ∈ `TRUST_TRAIL_VERDICT_ENUM` (`PASS` / `STALE` / `INVALID` / `FORCE_PUSHED`) plus rationale plus `signals_inspected` list. The caller maps verdicts to events as follows (canonical reference; the agent file's return-contract prose mirrors this word-for-word):
+
+      - `PASS` → emit `trust_trail_agent_decision` with `data.choice="PASS"`, `data.retry_attempt=0`, then `gate_pass` with `data.trust_anchor="uberdev_review_trail"`. Proceed.
+      - `STALE` → emit `trust_trail_agent_decision` with `data.choice="STALE"`, `data.retry_attempt=0`, then `gate_fail` with `data.reason="trust_trail_stale_sha"` (existing enum value preserved per M37). Diagnostic: agent's rationale, no `--bypass-protections` reference.
+      - `INVALID / input_malformed` (e.g., trailer regex parse failure, label query failure, malformed JSON in audit corroborator) → emit `trust_trail_agent_decision` with `data.choice="INVALID"`, `data.subreason="input_malformed"`, `data.retry_attempt=0`, then `gate_fail` immediately with `data.reason="trust_trail_agent_invalid_input"` (NEW `GATE_FAIL_REASON_ENUM` member; see Constants `GATE_FAIL_REASON_TRUST_TRAIL_AGENT_INVALID_INPUT`). No retry. Diagnostic: agent's rationale.
+      - `INVALID / trailer_sha_not_in_local_clone` (the exit-128 case from `git merge-base --is-ancestor` when the trailer SHA is not in the local clone — common after a fresh clone or when an old `/review-pr` trailer points at a commit that's been GC'd locally) → emit `trust_trail_agent_decision` with `data.choice="INVALID"`, `data.subreason="trailer_sha_not_in_local_clone"`, `data.retry_attempt=0`. Caller runs ONE bounded `git fetch --prune origin <branch>` then re-dispatches the trust-trail-evaluator agent in a single-message `Task()`. **Fetch-failure handling:** if the `git fetch` itself exits non-zero (network error, auth failure, branch deleted from origin, rate limit), the caller emits one stderr line `warning: git fetch origin <branch> failed (exit <N>); the trust-trail re-dispatch will run against the existing local clone and may return INVALID — verify network and git credentials, then re-run /merge`, records an `error` audit event with `data.reason="git_fetch_failed"` `data.branch=<branch>` `data.exit_code=<N>`, and proceeds to re-dispatch unchanged (the autopilot contract continues; the queue does not halt). Emit `trust_trail_agent_decision` with `data.retry_attempt=1` for the second invocation. If the second dispatch returns any verdict other than `PASS`, `gate_fail` with the appropriate reason: a second `INVALID` (any subreason) maps to `data.reason="trust_trail_agent_invalid_input"`; `STALE` / `FORCE_PUSHED` map to `data.reason="trust_trail_stale_sha"` per the rows above. The retry is bounded at 1 — never recursive — mirroring Phase 3.3v's max-1-retry policy.
+      - `FORCE_PUSHED` → emit `trust_trail_agent_decision` with `data.choice="FORCE_PUSHED"`, `data.retry_attempt=0`, then `gate_fail` with `data.reason="trust_trail_stale_sha"`. Diagnostic: agent's rationale.
+
+      Any verdict from (c) other than `PASS` short-circuits sub-condition (d): the caller emits `gate_fail` immediately and does NOT evaluate (d). (d) is only checked when (c) returned `PASS`.
+
 d. ∃ a file matching `.uberdev/runs/<run-id>/review-pr-verdict.json` whose `"sha"` field equals `headRefOid` (presence + SHA-match check; the JSON is local-only debug telemetry per D1 — its absence on a fresh clone is by design). The `<run-id>` directory name MUST match `RUN_ID_REGEX` before any path concatenation (D4, F8 path-traversal hardening) — else gate_fail with `data.reason="trust_trail_json_missing"`.
 
 On all four sub-conditions met: emit `gate_pass` with `data.trust_anchor="uberdev_review_trail"`. Proceed.
 
-**PATH_3 — admin bypass (unchanged):**
+Honest fast-forward fixup commits added between `/review-pr` and `/merge` (e.g., trivial typo fixes, comment touch-ups whose cumulative diff is empty) evaluate to `PASS` without forcing the user to re-run `/review-pr`. Force-pushes that rewrite history evaluate to `FORCE_PUSHED`. The user does NOT need to re-run `/review-pr` for trivial fixups; that prescription is retired post-v0.17.0.
 
-`--bypass-protections` flag with free-text waiver. On hit: emit `gate_pass` with `data.trust_anchor="bypass_with_waiver"` (also emits the existing `admin_bypass`+`waiver_recorded` events per Common Mistakes line). Proceed.
+**Otherwise:** neither of the two paths fired. Emit `gate_fail` with the most specific `data.reason` from `GATE_FAIL_REASON_ENUM` for the failing sub-condition (e.g. `review_decision_not_approved` if PATH_1 failed and PATH_2 had no label, vs `trust_trail_stale_sha` if PATH_2's trailer existed but the SHA was stale). General refusal diagnostic when no trust trail exists at all: `/review-pr hasn't run on commit <sha> — run /review-pr first to establish a trust trail; the next /merge invocation will pick this PR up automatically.`
 
-**Otherwise:** none of the three paths fired. Emit `gate_fail` with the most specific `data.reason` from `GATE_FAIL_REASON_ENUM` for the failing sub-condition (e.g. `review_decision_not_approved` if PATH_1 failed and PATH_2 had no label, vs `trust_trail_stale_sha` if PATH_2's trailer existed but the SHA was stale). General refusal diagnostic when no trust trail exists at all: `/review-pr hasn't run on commit <sha> — run /review-pr first, then re-invoke /merge`.
-
-**Stale-SHA verification primitive (D3).** The PATH_2 (c) check fires on ANY trailer-SHA mismatch — not just force-push. Force-push, `git commit --amend`, `git rebase`, and squash-merge all change the PR head SHA without changing branch history in identical ways from the trust signal's point of view. Always compare against **live** `gh pr view <N> --json headRefOid` — never against a local ref (`HEAD`, `origin/<branch>`, etc.) which may be stale. The single comparison primitive covers all rewrite types with a single code path and a single diagnostic.
+**Stale-SHA verification primitive (D3, agent-delegated post-v0.17.0).** The PATH_2 (c) check is delegated to `trust-trail-evaluator`. The agent inspects three structural primitives — `git merge-base --is-ancestor <trailer-sha> <live-headRefOid>`, `git diff --shortstat <trailer-sha> <live-headRefOid>`, and `git log <trailer-sha>..<live-headRefOid> --oneline` — to distinguish `PASS` (honest fast-forward fixup with empty cumulative diff), `STALE` (non-empty diff between trailer and current head), `INVALID` (input-malformed or trailer SHA not in local clone), and `FORCE_PUSHED` (history rewritten; trailer not an ancestor). The agent's `head_ref_oid` input is the live `gh pr view <N> --json headRefOid` value (never a local ref like `HEAD` or `origin/<branch>`); M38's live-headRefOid mandate is preserved as the agent's input contract. The single dispatch primitive covers all rewrite types with one return-contract YAML and one set of caller-side mappings.
 
 **Author identity is NOT a gate condition** in any path. Phase 1.4 trust resolution accepts EITHER `reviewDecision == "APPROVED"` (team / branch-protection path; PATH_1) OR a green `/review-pr` trail bound to current HEAD SHA (solo-dev / no-protection path; PATH_2) — author identity is not a gate in either path. The `bot_authors_allow_list` config key is deprecated; see `commands/merge.md` `## Deprecated Flags` and `using-uberdev/SKILL.md`.
 
-> **Note for editors:** the layered trust-anchor sentence above (PATH_1 platform anchor + PATH_2 uberdev trust trail) is intentionally repeated across **five mirror sites**, each serving a different reader audience. Do not consolidate to a single source of truth. If you change the contract here, update all five mirrors in the same change. Mirror sites:
+> **Note for editors:** the layered trust-anchor sentence above (PATH_1 platform anchor + PATH_2 uberdev trust trail) is intentionally repeated across **five mirror sites**, each serving a different reader audience. Do not consolidate to a single source of truth. If you change the contract here, update all five mirrors in the same change. Mirror sites are identified by section/heading (line numbers shift with prose edits — use the anchors below):
 >
-> 1. `plugins/uberdev/skills/merge/SKILL.md:157` (this section — Phase 1.4 trust-resolution body, the canonical wording).
-> 2. `plugins/uberdev/skills/merge/SKILL.md:415` (`## Common Mistakes` Phase 1.4 regression guard — see "Adding an author allow-list back as a gate" entry).
-> 3. `plugins/uberdev/commands/merge.md:23` (Autopilot paragraph — user-facing CLI documentation).
-> 4. `plugins/uberdev/commands/merge.md:31` (Deprecated Flags `bot_authors_allow_list` description).
-> 5. `plugins/uberdev/skills/using-uberdev/SKILL.md:146` (`bot_authors_allow_list` config-key semantics).
+> 1. `plugins/uberdev/skills/merge/SKILL.md` — `### Step 1.4 — Per-PR pre-flight gate (trust resolution)` body, the **"Author identity is NOT a gate condition"** paragraph (this section, the canonical wording).
+> 2. `plugins/uberdev/skills/merge/SKILL.md` — `## Common Mistakes`, the **"Adding an author allow-list back as a gate"** bullet (Phase 1.4 regression guard).
+> 3. `plugins/uberdev/commands/merge.md` — the **Autopilot paragraph** (user-facing CLI documentation; the sentence beginning "Phase 1.4 trust resolution accepts EITHER…").
+> 4. `plugins/uberdev/commands/merge.md` — `## Deprecated Flags`, the **`bot_authors_allow_list` config-key bullet**.
+> 5. `plugins/uberdev/skills/using-uberdev/SKILL.md` — the **`bot_authors_allow_list` semantics paragraph**.
 
 On any condition fail: list the specific failing condition for that PR. Exclude from merge set. **Never silently skip** — every fail emits a `gate_fail` event to `audit.jsonl` AND surfaces in the user-facing summary. Continue with passing PRs.
 
@@ -193,22 +209,32 @@ Build the merge order with no full simulation:
 
 Skip Step 2.1 if only 1 PR is in scope (no ordering decision to make).
 
-### Step 2.2 — PER-PR STRATEGY (D11 heuristic + D-LABEL override)
+### Step 2.2 — PER-PR STRATEGY (agent-decided)
 
-For each PR, compute strategy signal-by-signal:
+For each PR in the in-scope set, dispatch a `merge-strategy-decider` agent. Inputs per PR: `pr_number`, `commit_count` (from `git rev-list --count <integration_branch>..<head_ref_oid>`), `conventional_commit_ratio` (from a regex pass over `git log <integration_branch>..<head_ref_oid> --format=%s` matching `^(feat|fix|chore|refactor|test|docs)(\(.+\))?:`), `wip_marker_present` (from a regex pass over the same log matching `WIP_MESSAGE_REGEX`), `divergence_commits` (`git rev-list --count <merge-base>..<head_ref_oid>`), `label_hint` (suffix of any `merge-strategy:<name>` label on the PR, advisory; null otherwise; wrapped in `<external-untrusted-input source="github-pr-label">…</external-untrusted-input>` envelope), `repo_convention` (recorded preference from `.claude/uberdev.local.md` `merge_strategy:` key, null if absent), `working_dir`.
 
-1. Per-invocation flag `--squash` / `--rebase` / `--merge` always wins.
-2. Else: PR label matching `MERGE_STRATEGY_LABEL_PREFIX<name>` where `<name>` ∈ `STRATEGY_ENUM` wins (D-LABEL).
-3. Else: heuristic.
-   - All commits start with conventional-commit prefix (`feat:`, `fix:`, `chore:`, `refactor:`, `test:`, `docs:`) → rebase candidate.
-   - Any commit message matches `WIP_MESSAGE_REGEX` → squash candidate.
-   - Commit count ≤ `CONVENTIONAL_COMMIT_THRESHOLD` (3) AND all conventional → rebase.
-   - Single-commit PR → rebase.
-   - Mixed signals → default to squash (safer for `git bisect` than a true merge commit).
+**Fanout dispatch.** Dispatch ALL `merge-strategy-decider` Task() calls for the in-scope PR set in ONE assistant turn — the single-message Task() invariant (mirrors `uberdev:post-impl-review` and the conflict-resolver fanout shape).
 
-Note: `drop` is NOT a direct output of this heuristic; it is emitted later — Phase 3.3v on `test-fail-exhausted`, Phase 3.3iv on AMBIGUOUS/REFUSED, Phase 3.3vi on `push-non-ff`. Consumers disambiguate strategy outcomes via paired audit events — `strategy_chosen` followed by `merge_executed` (for git-merge strategies) vs. `pr_parked` (for queue actions).
+**Fanout chunking.** For queues with more than `MAX_PARALLEL_AGENTS` PRs (default `10` — see Constants), split the fanout into `ceil(N / MAX_PARALLEL_AGENTS)` sequential single-message waves; each wave still obeys the single-message invariant within its slice.
 
-Other label syntaxes (`strategy:<name>`, `merge:<name>`) are NOT recognised — only the `MERGE_STRATEGY_LABEL_PREFIX` literal matches.
+Each wave emits a `merge_strategy_fanout_wave_started` audit event.
+
+The event's `data.wave_index` field is 1-based; `data.wave_size` is the count of agents in this wave.
+
+Queues at or below `MAX_PARALLEL_AGENTS` fire one wave with `data.wave_index=1` and `data.wave_size=N`; the event is still emitted for consistency.
+
+**Verdict-to-event mapping.** Each agent returns a strategy ∈ `MERGE_STRATEGY_DECIDER_VERDICT_ENUM` (`squash`, `rebase`, `merge` — `drop` is intentionally excluded; it is a Phase 3 outcome only) plus rationale plus `signals_inspected`. Per PR, the caller emits:
+
+1. `merge_strategy_agent_decision` with `data.choice=<strategy>`, `data.rationale=<rationale>`, `data.signals_inspected=<list>`.
+2. `strategy_chosen` with `data.strategy=<strategy>` and `data.reason="agent_decided"` (∈ `STRATEGY_REASON_ENUM`).
+
+**PR-label hint is advisory, NOT authoritative.** A `merge-strategy:<name>` PR label (where `<name>` ∈ `{squash, rebase, merge}`) is passed to the agent as `label_hint`; the agent weighs it against the structural signals. The label NEVER overrides a hard structural constraint (e.g., never emits `rebase` when `wip_marker_present == true` even if the label says rebase). Other label syntaxes (`strategy:<name>`, `merge:<name>`) are NOT recognised — only the `MERGE_STRATEGY_LABEL_PREFIX` literal matches.
+
+**Refusal handling.** If an agent refuses (input-malformed, prompt-injection-shaped envelope, label_hint suffix outside `{squash, rebase, merge}`), the calling skill emits one user-facing stderr line `warning: merge-strategy-decider refused for PR #<N> (reason: <refusal_reason>); falling back to squash strategy. See audit log for details.`, falls back to the `squash` default with `data.reason="agent_decided"` and `data.rationale="agent-refusal-fallback"`, and emits an `error` audit event with `data.reason="merge_strategy_agent_refusal"` `data.pr=<N>` `data.refusal_reason=<reason>`. The fallback rationale also surfaces in the run-summary per-PR detail block under the existing `rationale:` line so the user sees why the strategy was forced to squash without grepping the audit log. The queue continues.
+
+**CLI strategy flags are no-ops.** `--squash` / `--rebase` / `--merge` are deprecated (see `## Inputs` and `commands/merge.md` `## Deprecated Flags`); the agent owns the decision regardless of any CLI-flag presence. The pre-v0.17.0 rule that gave per-invocation flags absolute priority is retired — the flag does not override the agent's verdict for any PR.
+
+Note: `drop` is NOT a direct output of the agent; it is emitted later — Phase 3.3v on `test-fail-exhausted`, Phase 3.3iv on AMBIGUOUS/REFUSED, Phase 3.3vi on `push-non-ff`. Consumers disambiguate strategy outcomes via paired audit events — `strategy_chosen` (`data.reason="agent_decided"`) followed by `merge_executed` (for git-merge strategies) vs. `pr_parked` (for queue actions).
 
 ### Step 2.3 — Render the unified plan table
 
@@ -293,6 +319,8 @@ viii. **Tear down the scratch worktree** per `using-git-worktrees` protocol: `gi
 | conflict-resolver `REFUSED` | park via `drop` (`data.reason="refused"`) | continues |
 | dependency cycle (Phase 2.1) | break edges, fall back to createdAt order; emit cycle path to stderr | continues |
 | local pull non-FF (Phase 4.2) | auto-rebase local onto origin; on rebase conflict, abort rebase and surface in summary | continues |
+| `trust_trail_agent_decision` returns `INVALID / input_malformed` (Phase 1.4 PATH_2 (c)) | `gate_fail` with `data.reason="trust_trail_agent_invalid_input"`; PR excluded from merge set | continues |
+| `trust_trail_agent_decision` returns `INVALID / trailer_sha_not_in_local_clone` (Phase 1.4 PATH_2 (c)) | One bounded `git fetch --prune origin <branch>` + re-dispatch (max retry=1); persistent INVALID → `gate_fail` with `data.reason="trust_trail_agent_invalid_input"`; PR excluded from merge set | continues |
 
 **No halt conditions remain.** Already-merged PRs stay merged. Every event hits `audit.jsonl`. Every parked PR appears in the run-summary block with its `PARK_REASON_ENUM` value and the structured handoff (where applicable).
 
@@ -413,8 +441,9 @@ For each stale branch, the agent decides (per-branch). Each decision emits one `
 - **Halting the run.** There are no halt paths left except lock contention by another live `/merge`. Push non-FF, dependency cycles, ff-only divergence, conflict-resolver REFUSED/AMBIGUOUS, test fail — every one is per-PR park or auto-recovery. If you find yourself writing `halt queue` or `abort the run`, stop and re-read this skill.
 - **Auto-creating a merge commit or `reset --hard`** when `git pull --ff-only` fails. Use `git rebase` for auto-recovery; on rebase conflict, abort the rebase (preserving local head) and surface the divergence in the summary. Never overwrite local state.
 - **Adding an author allow-list back as a gate.** PR-author identity is intentionally NOT a Phase 1.4 gate condition in any path. Phase 1.4 trust resolution accepts EITHER `reviewDecision == "APPROVED"` (PATH_1, team / branch-protection path) OR a green `/review-pr` trail bound to current HEAD SHA (PATH_2, solo-dev / no-protection path) — author identity is not a gate in either path. `bot_authors_allow_list` is deprecated and parsed only for backward compat — it has no behavioural effect.
-- **Adding the trust trail without re-running /review-pr against the current head SHA.** Manually adding the `uberdev-approved` label or copying a stale `Reviewed-by:` trailer onto a new commit is a regression — Phase 1.4 PATH_2 (c) compares the trailer SHA against live `headRefOid` and refuses via `data.reason="trust_trail_stale_sha"`. The fix is to re-run `/review-pr` on the current HEAD; never bypass the SHA check by hand-editing the trailer.
-- **`--admin`/`--bypass-protections` without a free-text waiver.** Every bypass invocation MUST log `admin_bypass`+`waiver_recorded` events with the user's stated reason.
+- **Adding the trust trail without re-running /review-pr against the current head SHA.** Manually copying a stale `Reviewed-by:` trailer onto a new commit is a regression — Phase 1.4 PATH_2 (c) dispatches `trust-trail-evaluator`, which inspects ancestor + diff-empty + log-empty primitives. Trivial fast-forward fixups added after `/review-pr` evaluate to `PASS` without re-run; non-empty cumulative diffs evaluate to `STALE` and gate_fail with `data.reason="trust_trail_stale_sha"`; force-pushes evaluate to `FORCE_PUSHED`. Never hand-edit the trailer; the agent owns the decision.
+- **Treating `--bypass-protections` as a live admin-bypass anchor.** It is deprecated as a no-op post-v0.17.0 — the trust-trail-evaluator agent subsumes its job; there is no PATH_3 admin-bypass anchor and no CI-red waiver. The flag is parsed without error indefinitely (Terraform / npm CLI deprecation precedent), emits `BYPASS_PROTECTIONS_DEPRECATED_NOTE` once per run on first encounter, and records a `deprecated_flag_used` audit event. `admin_bypass` and `waiver_recorded` events are declared in `AUDIT_EVENT_ENUM` for backward-compat with audit-log consumers but are NEVER emitted post-v0.17.0.
+- **Inlining strategy heuristics in Phase 2.2 instead of dispatching `merge-strategy-decider`.** The agent owns the decision; the skill normalises inputs (commit_count, conventional_commit_ratio, divergence_commits, wip_marker_present, label_hint, repo_convention) and surfaces the verdict to the audit log via `merge_strategy_agent_decision` and `strategy_chosen` (`data.reason="agent_decided"`). There is NO "Per-invocation flag always wins" clause — `--squash` / `--rebase` / `--merge` are no-ops post-v0.17.0.
 
 ## Red Flags
 
@@ -448,6 +477,8 @@ Every phase writes one JSON line per event to `AUDIT_LOG_DIR_PATTERN` + `AUDIT_L
 
 `event` MUST be one of `AUDIT_EVENT_ENUM` (declared in `## Constants`). Surface the audit log path in the final user-facing summary so the user can grep for `gate_fail`, `error`, etc.
 
+**Field-level note for the new agent-decision events:** `data.choice` for `trust_trail_agent_decision` ranges over `TRUST_TRAIL_VERDICT_ENUM` (`PASS` / `STALE` / `INVALID` / `FORCE_PUSHED`); `data.choice` for `merge_strategy_agent_decision` ranges over `MERGE_STRATEGY_DECIDER_VERDICT_ENUM` (`squash` / `rebase` / `merge` — never `drop`). For `trust_trail_agent_decision` with `data.choice="INVALID"`, `data.subreason ∈ {input_malformed, trailer_sha_not_in_local_clone}` and `data.retry_attempt ∈ {0, 1}` are recorded. For `merge_strategy_fanout_wave_started`, `data.wave_index` is 1-based and `data.wave_size` is the count of agents dispatched in that wave.
+
 ### Run-summary block (final user-facing output)
 
 At end of run, emit a summary block:
@@ -459,6 +490,7 @@ At end of run, emit a summary block:
   Parked:   <P> PRs (<list with park reason and one-line rationale>)
   Aborted:  <K> PRs (<list with reasons>)
   Local sync: <ok | auto-rebased | rebase-conflict-surfaced>
+  Strategy fanout: <N> PRs in <K> wave(s) of size ≤<MAX_PARALLEL_AGENTS>   (only when fanout chunked)
   Audit:    <AUDIT_LOG_DIR_PATTERN><AUDIT_LOG_FILENAME>
   Duration: <wall-clock>
 
@@ -466,7 +498,10 @@ Per-PR detail block (one per PR in the run):
 
   PR #<N> — <title>
     strategy: <merge|rebase|squash|drop>
-    rationale: <one-line, citing dominant signal — flag, label, heuristic, agent-decided>
+    rationale: <one-line, citing dominant signal from merge-strategy-decider — wip-marker, single-commit, conventional-ratio, divergence, label-hint, repo-convention, or agent-refusal-fallback>
+    trust trail verdict: <PASS | STALE | INVALID | FORCE_PUSHED>   (only if PATH_2 fired)
+                          (subreason=<input_malformed | trailer_sha_not_in_local_clone>; retry_attempt=<0 | 1>)
+                          (only if verdict is INVALID)
     outcome: <Merged|Skipped|Parked|Aborted>
     park reason: <PARK_REASON_ENUM value>          (only if outcome is Parked)
     audit events: <count>
