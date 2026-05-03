@@ -118,7 +118,7 @@ Probe for `flock(1)` availability via `command -v flock` BEFORE invoking it. `fl
       echo "error: cannot create $LOCK_DIR (filesystem error — disk full / permission / read-only fs)" >&2
       exit 1
     fi
-    HOLDER_PID="$(cat "$LOCK_DIR/pid" 2>/dev/null || echo)"
+    HOLDER_PID="$(cat "$LOCK_DIR/pid" 2>/dev/null || printf '')"
     if [ -n "$HOLDER_PID" ] && kill -0 "$HOLDER_PID" 2>/dev/null; then
       echo "another /merge run in progress, PID $HOLDER_PID" >&2
       exit 1
