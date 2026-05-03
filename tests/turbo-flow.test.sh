@@ -234,6 +234,33 @@ assert_grep "$FINISH_BRANCH" \
   "finish-branch invokes uberdev:review-pr via Skill tool after PR creation"
 
 echo
+echo "== orchestrator Phase 2 imperative gate (interactive /solve must NOT collapse into /turbo) =="
+# These assertions defend against the prose-drift regression that made /solve
+# behave like /turbo: a freshly-spawned LLM read "optional Q&A" + soft Phase 2
+# wording and skipped the only step that distinguishes the two modes.
+assert_grep "$ORCHESTRATOR" \
+  'You MUST ask 3-5 clarifying questions' \
+  "Phase 2 non-turbo prose uses imperative MUST (not 'unchanged — ask')"
+assert_grep "$ORCHESTRATOR" \
+  'Do NOT proceed to Phase 3 until the user has answered' \
+  "Phase 2 non-turbo includes explicit gate to Phase 3"
+assert_grep "$ORCHESTRATOR" \
+  'only signal that distinguishes .*/solve.* from .*/turbo' \
+  "Phase 2 documents itself as the sole /solve-vs-/turbo signal (anti-skip prose)"
+assert_grep "$ORCHESTRATOR" \
+  'select:AskUserQuestion' \
+  "Phase 2 instructs ToolSearch select:AskUserQuestion (deferred-tool caveat)"
+assert_grep "$ORCHESTRATOR" \
+  'Do NOT silently auto-pick on tool-load failure' \
+  "Phase 2 forbids silent auto-pick fallback (turns /solve into /turbo invisibly)"
+assert_not_grep "$ORCHESTRATOR" \
+  'optional Q&A' \
+  "skill description does NOT call Q&A 'optional' (mis-signals to spawned agents)"
+assert_not_grep "$ORCHESTRATOR" \
+  'optional spec-reviewer' \
+  "skill description does NOT call spec-reviewer 'optional' (it is always-on for medium/large)"
+
+echo
 echo "== orchestrator wires always-on reviewers =="
 assert_grep "$ORCHESTRATOR" 'questions\.md' \
   "orchestrator writes questions.md under --turbo"
@@ -298,6 +325,38 @@ else
   echo "        file: $SOLVE_PIPELINE"
   echo "        expected count: 4 (trivial-solve, trivial-turbo, small-solve, small-turbo)"
   echo "        actual count:   $DIRECTIVE_COUNT"
+  FAIL=$((FAIL + 1))
+fi
+# Positive lock — the negative no-pre-push-simplify directive only makes sense
+# if /uberdev:review-pr is actually invoked post-push (its Phase 2 is where
+# simplify lives). Without an explicit invocation step in each heredoc, the
+# spawned trivial/small agent calls `gh pr create` and stops — the chain into
+# /review-pr never fires and the simplify ceremony silently no-ops on every
+# trivial/small PR. Anchor the count at 4 so a future edit cannot delete the
+# positive directive from one heredoc while leaving three intact.
+INVOKE_COUNT=$(grep -cF 'Capture the PR URL' "$SOLVE_PIPELINE" 2>/dev/null || echo "0")
+if [[ "$INVOKE_COUNT" -eq 4 ]]; then
+  echo "  PASS  all 4 trivial/small heredocs explicitly invoke uberdev:review-pr post-push (count=4)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  all 4 trivial/small heredocs must invoke uberdev:review-pr via Skill tool after gh pr create"
+  echo "        file: $SOLVE_PIPELINE"
+  echo "        expected count: 4 (trivial-solve, trivial-turbo, small-solve, small-turbo)"
+  echo "        actual count:   $INVOKE_COUNT"
+  FAIL=$((FAIL + 1))
+fi
+# Turbo heredocs must forward --turbo into /review-pr so the chain stays
+# unattended (mirrors finish-branch's --turbo forwarding pattern). Two turbo
+# heredocs (trivial-turbo, small-turbo) → count=2.
+TURBO_FORWARD_COUNT=$(grep -cF 'uberdev:review-pr --turbo' "$SOLVE_PIPELINE" 2>/dev/null || echo "0")
+if [[ "$TURBO_FORWARD_COUNT" -eq 2 ]]; then
+  echo "  PASS  both turbo heredocs (trivial-turbo, small-turbo) forward --turbo into /review-pr (count=2)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  both turbo heredocs must invoke 'uberdev:review-pr --turbo' to keep the chain unattended"
+  echo "        file: $SOLVE_PIPELINE"
+  echo "        expected count: 2 (trivial-turbo, small-turbo)"
+  echo "        actual count:   $TURBO_FORWARD_COUNT"
   FAIL=$((FAIL + 1))
 fi
 assert_grep "$REPO_ROOT/plugins/uberdev/commands/simplify.md" \

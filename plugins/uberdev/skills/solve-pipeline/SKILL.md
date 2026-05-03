@@ -232,6 +232,7 @@ Steps:
 5. Run the relevant test file + lint for that package.
 6. **Invoke \`uberdev:post-impl-review\` skill** with \`changed_paths\` = the files you edited and \`commit_range\` = your single commit. Skill returns the 5-agent advisory finding table; surface it to your output but do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
 7. Commit with conventional message. Open PR with \`Closes #$ISSUE_NUM\` in the body. Include the post-impl-review aggregate table under \`## Reviewer findings summary\` in the PR body.
+8. **Capture the PR URL from \`gh pr create\` output and invoke the \`uberdev:review-pr\` skill via the Skill tool with that URL.** This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory — do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
@@ -248,6 +249,7 @@ Steps:
 3. Add/update a test ONLY if the touched code is already tested.
 4. Run the relevant test file + lint for that package.
 5. Commit with conventional message. Open PR with \`Closes #$ISSUE_NUM\` in the body.
+6. **Capture the PR URL from \`gh pr create\` output and invoke the \`uberdev:review-pr --turbo\` skill via the Skill tool with that URL.** This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory.
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
@@ -271,6 +273,7 @@ Steps:
 4. TDD: write the failing test first, then implement, then green.
 5. **Invoke \`uberdev:post-impl-review\` skill** with \`changed_paths\` = files edited across all TodoWrite tasks and \`commit_range\` = the commits made. Surface the aggregate finding table in your output and the PR body.
 6. Commit + PR with \`Closes #$ISSUE_NUM\`. PR body includes the post-impl-review aggregate under \`## Reviewer findings summary\`.
+7. **Capture the PR URL from \`gh pr create\` output and invoke the \`uberdev:review-pr\` skill via the Skill tool with that URL.** This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory — do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
@@ -286,6 +289,7 @@ Steps:
 2. Write 3–6 TodoWrite tasks. Skip /uberdev:brainstorm — scope is clear.
 3. TDD: write the failing test first, then implement, then green.
 4. Commit + PR with \`Closes #$ISSUE_NUM\`.
+5. **Capture the PR URL from \`gh pr create\` output and invoke the \`uberdev:review-pr --turbo\` skill via the Skill tool with that URL.** This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory.
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 

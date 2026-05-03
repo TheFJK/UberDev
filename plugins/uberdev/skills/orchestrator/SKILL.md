@@ -1,6 +1,6 @@
 ---
 name: orchestrator
-description: "Writer-subagent orchestrator for /solve and /turbo medium/large tier. Drives a 5-phase pipeline (research fanout → optional Q&A → spec-writer → optional spec-reviewer → plan-writer → subagent-driven-dev). Use when /solve or /turbo prompt invokes /uberdev:orchestrator. Standalone invocation also works for ad-hoc design tasks."
+description: "Writer-subagent orchestrator for /solve and /turbo medium/large tier. Drives a 5-phase pipeline (research fanout → Q&A [interactive unless --turbo] → spec-writer → spec-reviewer [always-on for medium/large] → plan-writer → plan-reviewer [always-on] → subagent-driven-dev). Use when /solve or /turbo prompt invokes /uberdev:orchestrator. Standalone invocation also works for ad-hoc design tasks."
 ---
 
 # Writer-Subagent Orchestrator
@@ -99,9 +99,13 @@ If parse fails → re-dispatch the failed agent ONCE with the format example pin
 
 ### Phase 2: Q&A
 
-**Non-turbo (interactive):** unchanged — ask 3-5 clarifying questions one at a time via AskUserQuestion, store in `qa_answers`. Use the research bundle to inform the questions (e.g. "research-codebase found that file X follows pattern A but the issue suggests pattern B; which?"). If a Q&A answer reveals scope shift, dispatch ONE narrow follow-up research agent (NOT a full fanout) and incorporate its return.
+**This phase is the only signal that distinguishes `/solve` from `/turbo` for medium/large tier.** Every other phase (research, spec-writer, spec-reviewer, plan-writer, plan-reviewer, subagent-driven-dev, finish-branch auto-PR) is unattended in both modes. Skipping Phase 2 in non-turbo mode collapses `/solve` into `/turbo`. **Do not skip.**
 
-**Turbo (`--turbo` set):** instead of skipping entirely, generate the same set of clarifying questions in-thread, auto-pick each answer using the spec-writer's `decisions`-block synthesis logic (best guess from research artifacts), and write to `.uberdev/research/$RUN_ID/questions.md` in the format below (Q-N heading, `**Auto-pick:**`, `**Rationale:**`, `**Confidence:** high|medium|low`). The `decisions` array fed to spec-writer has the same shape as a non-turbo run, just with `auto_pick: true` flagged.
+**Non-turbo (interactive — DEFAULT when `--turbo` is absent):** You MUST ask 3-5 clarifying questions, one at a time, via `AskUserQuestion`, and store the answers in `qa_answers`. Do NOT proceed to Phase 3 until the user has answered. Use the research bundle to inform the questions (e.g. "research-codebase found that file X follows pattern A but the issue suggests pattern B; which?"). If a Q&A answer reveals scope shift, dispatch ONE narrow follow-up research agent (NOT a full fanout) and incorporate its return.
+
+> **Tooling caveat — AskUserQuestion is a deferred tool in current Claude Code harnesses.** Calling it without first loading its schema fails with `InputValidationError`. Before your first call, run `ToolSearch` with `query: "select:AskUserQuestion"` to load the schema. **Do NOT silently auto-pick on tool-load failure** — that turns `/solve` into `/turbo` invisibly. If `ToolSearch` itself fails (rare), abort Phase 2 with a clear stderr error and surface to the user; never fall through to auto-pick in non-turbo mode.
+
+**Turbo (`--turbo` set — only path that auto-picks):** instead of skipping entirely, generate the same set of clarifying questions in-thread, auto-pick each answer using the spec-writer's `decisions`-block synthesis logic (best guess from research artifacts), and write to `.uberdev/research/$RUN_ID/questions.md` in the format below (Q-N heading, `**Auto-pick:**`, `**Rationale:**`, `**Confidence:** high|medium|low`). The `decisions` array fed to spec-writer has the same shape as a non-turbo run, just with `auto_pick: true` flagged.
 
 Format:
 ```markdown
