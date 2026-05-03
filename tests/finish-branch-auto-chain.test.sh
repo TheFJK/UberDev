@@ -100,7 +100,7 @@ assert_grep "$FINISH_BRANCH" \
   "TITLE_FILE mktemp pattern present"
 assert_grep "$FINISH_BRANCH" \
   '<<PR_TITLE_EOF' \
-  "title written via unquoted heredoc (post-#42; agent keeps title free of metachars)"
+  "title written via unquoted heredoc <<PR_TITLE_EOF (#42)"
 assert_grep "$FINISH_BRANCH" \
   'IFS= read -r PR_TITLE_VAR' \
   "title read back into a bash variable for safe quoted expansion"
@@ -155,7 +155,9 @@ echo "== Issue #42: heredoc delimiters tokenizer-safe (no <<'X' or <<\"X\" form)
 # that pairs with the next `'` in the block (the regex assignment), inverting
 # quote-balance and surfacing as `(eval): unmatched '`. Use unquoted `<<EOF`
 # form; the agent must compose title/body bytes free of `$`, backticks,
-# and backslash.
+# and backslash. Note: the assertion does NOT match `<<\EOF` (backslash-
+# escaped delimiter, semantically equivalent to the quoted form but
+# tokenizer-safe — no quote chars, so it doesn't trip the evaluator).
 assert_not_grep "$FINISH_BRANCH" \
   "<<-?['\"][A-Za-z_][A-Za-z0-9_]*['\"]" \
   "no quoted heredoc delimiters (Claude permission-evaluator unmatched ' bug, #42)"
