@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-05-03
+
 ### Added
 - **`/review-pr` → `/merge` SHA-bound trust signal (#40)** — `/review-pr` on a green run now emits three durable artifacts: PR label `uberdev-approved`, commit trailer `Reviewed-by: uberdev/review-pr@<head-sha>` (full 40-character SHA), and local audit JSON at `.uberdev/runs/<run-id>/review-pr-verdict.json`. The trailer is the load-bearing trust artifact (intrinsically SHA-bound via the git object DAG); label and JSON are corroborating defense-in-depth presence checks. `/merge` Phase 1.4 reframes from a single-condition gate to **trust-resolution** with three paths: PATH_1 (`reviewDecision == "APPROVED"` — team / branch-protection), PATH_2 (`/review-pr` trail bound to live `headRefOid` — solo-dev / no-protection), PATH_3 (`--bypass-protections` admin override). New `gate_pass.data.trust_anchor` ∈ `{reviewDecision_approved, uberdev_review_trail, bypass_with_waiver}` and `gate_fail.data.reason` ∈ `{review_decision_not_approved, trust_trail_missing, trust_trail_stale_sha, trust_trail_label_missing, trust_trail_trailer_missing, trust_trail_json_missing, ci_red, pr_state_not_open, is_draft, merge_state_blocked}` field-level extensions land on the existing `gate_pass` / `gate_fail` events (no new event names).
 - **Stale-SHA detection covers force-push + amend + rebase + squash uniformly.** Phase 1.4 PATH_2 (c) compares the trailer's embedded `<head-sha>` against **live** `gh pr view <N> --json headRefOid` (NOT against any local ref). One verification primitive covers all rewrite types. Refusal diagnostic: `/review-pr ran on commit <trailer-sha> but PR head is now <live-sha> — re-run /review-pr, then re-invoke /merge`.
@@ -16,6 +18,12 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - **`/review-pr` exit codes are now 0 / 1 / 2** (was always 0). `0` = green (Phase 1 APPROVE + Phase 2 status ∈ {ran/APPROVE, skipped}); `1` = Phase 1 REJECT or REVISIONS_REQUIRED; `2` = Phase 2 status `blocked` (fanout crash, agent error, aggregator failure, artifact-emission failure). **Behavioral break** for callers that scripted against the always-0 contract — either ignore the exit code (preserve old behavior) or branch on it (use new behavior). Surfaces silent reviewer-crash failures that the trust signal exists to eliminate.
 - **`commands/review-pr.md:82-83` prose updated in lockstep** with the exit-code contract change. Distinguishes "skipped" (Phase 2 not run; eligible for green; exit 0) from "blocked" (Phase 2 fanout crashed; exit 2). The previous "still exits successfully" wording is removed.
 - **`tests/merge.test.sh` 103 → 130 assertions** (12 new M-blocks M35–M46, 27 new sub-assertions covering trust-signal constants, PATH_1/PATH_2/PATH_3 trust-resolution structure, gate_pass/gate_fail enum values, stale-SHA primitive, and mirror-site sync). **`tests/review-pr.test.sh` 33 → 43 assertions** (R1–R6, 10 new sub-assertions covering the green-run predicate, label/trailer literals, exit-code table, and run-id regex).
+
+### Fixed
+- **`code-simplifier` agent persona reframed as audit-only (#43)** — frontmatter description and system-prompt body claimed the agent "applies project best practices", but `code-simplifier` dispatched by `uberdev:post-impl-review` only emits YAML findings and never modifies files. The mismatch silently dropped simplifier value on every wave/inline review (LLM read the persona literally, expected to write code, then emitted nothing actionable). Reframe touches `plugins/uberdev/agents/code-simplifier.md` (frontmatter description, system-prompt body, three example blocks, audit/refinement-process steps — all now read as audit-only: "audits", "advisory findings", "you do not modify files") and `plugins/uberdev/skills/post-impl-review/SKILL.md` (skill description marks reviewers as advisory; Q1-deferral and "Per Q1" wording replaced with an explicit audit-only invariant plus pointers to the writer entry points `/uberdev:simplify` and `/uberdev:review-pr` Phase 2). Output Rules block (cite-by-`file:line` + secret-leak prevention) preserved verbatim. Out of scope: agent rename, post-impl-review delegating to apply machinery, no SDD or solve-pipeline changes — both already treat aggregation as advisory PR-body text.
+
+### Refactored
+- **Drop redundant applier-pointer trailer in `code-simplifier` system prompt (#43)** — Phase 2 `/uberdev:review-pr` simplify pass converged across all three lenses (reuse, quality, efficiency) on the same finding: the appended Output Rules trailer ("To apply findings, the user runs `/uberdev:simplify` or `/uberdev:review-pr` Phase 2.") duplicated the identical applier pointer already present in the line-87 closing activation paragraph ("a follow-up `/uberdev:simplify` / `/uberdev:review-pr` Phase 2 invocation can act on. **You do not modify files.**"). Iron rule preserved: documented contract is unchanged — line 87 retains both the applier pointer and the bolded **You do not modify files.** sentinel; the `## Output Rules — secret-leak prevention` block remains byte-identical. Tightens the system prompt by ~20 tokens per dispatch — `code-simplifier` runs on every wave/inline review, so the saving compounds.
 
 ### Backwards compatibility
 - **Trust-signal emission is additive on green runs.** Existing `/review-pr` invocations on REJECT / REVISIONS_REQUIRED paths produce no new artifacts (label not added, trailer not written, JSON not created). The exit-code change is the only behavioral break; CHANGELOG calls it out explicitly.
@@ -332,7 +340,8 @@ Closes #9.
 ### Changed
 - Documentation: README expanded with `Updating` section explaining manual vs auto-update for third-party marketplaces (`docs:` commit `007537b` on 2026-04-27 superseded by this release).
 
-[unreleased]: https://github.com/TheFJK/UberDev/compare/v0.9.0...HEAD
+[unreleased]: https://github.com/TheFJK/UberDev/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/TheFJK/UberDev/compare/v0.15.2...v0.16.0
 [0.9.0]: https://github.com/TheFJK/UberDev/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/TheFJK/UberDev/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/TheFJK/UberDev/compare/v0.7.0...v0.7.1
