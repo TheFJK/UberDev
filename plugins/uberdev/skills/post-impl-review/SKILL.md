@@ -1,6 +1,6 @@
 ---
 name: post-impl-review
-description: Shared post-implementation review fanout — dispatches 5 advisory reviewer agents (code-reviewer, simplifier, silent-failure-hunter, type-design-analyzer, comment-analyzer) IN A SINGLE MESSAGE and aggregates findings. Use after implementation completes (per-wave from subagent-driven-dev, or post-impl from /solve trivial/small inline prompt).
+description: Shared post-implementation review fanout — dispatches 5 advisory reviewer agents (code-reviewer, simplifier, silent-failure-hunter, type-design-analyzer, comment-analyzer) IN A SINGLE MESSAGE and aggregates findings. Use after implementation completes (end-of-issue from subagent-driven-dev, or post-impl from /solve trivial/small inline prompt).
 ---
 
 # Post-Implementation Review
@@ -13,7 +13,7 @@ description: Shared post-implementation review fanout — dispatches 5 advisory 
 
 ## When to invoke
 
-- **`uberdev:subagent-driven-dev`** — after each wave commits, before moving to the next wave. Findings inform (but do not block) the next wave dispatch.
+- **`uberdev:subagent-driven-dev`** — once after all waves complete, before handing off to `finish-branch`. Findings are advisory and surface in the PR body's `## Reviewer findings summary`.
 - **`/solve` trivial/small inline prompt** — after the implementer's commit lands. Findings get attached to the PR body or follow-up issue.
 
 ## Critical invariant — single-message fanout
@@ -88,7 +88,7 @@ Failure handling:
 Aggregate the 5 returns into the table format below plus the bottom line `Aggregated: N blockers, M suggestions. Continue.`
 
 Write the aggregation to:
-- `.uberdev/research/$RUN_ID/post-impl-review-wave-$WAVE.md` (per-wave use from `subagent-driven-dev`)
+- `.uberdev/research/$RUN_ID/post-impl-review-wave-final.md` (end-of-issue use from `subagent-driven-dev`; `WAVE=final` is the only value passed)
 - `.uberdev/research/issue-$N/post-impl-review.md` (trivial/small inline use from `/solve`)
 
 Aggregation table format:
@@ -131,7 +131,7 @@ Findings are advisory at this layer — **the caller does NOT block on `REVISION
 ## Integration
 
 **Called by:**
-- **`uberdev:subagent-driven-dev`** — after each wave's implementer commits land, before dispatching the next wave.
+- **`uberdev:subagent-driven-dev`** — once after all waves' implementer commits land, before handing off to `finish-branch`.
 - **`/solve` trivial/small inline prompt** — after the implementer's single commit lands.
 
 **Does NOT call:**
