@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-05-04
+
+### Fixed
+- **`trust-trail-evaluator` no longer rejects sibling-equivalent commits as `FORCE_PUSHED`.** The agent's Process Step 2 short-circuited to `FORCE_PUSHED` on `git merge-base --is-ancestor` exit 1 (non-ancestor) without ever running the tree-diff check. This blocked legitimate `/review-pr` trust trails produced by `/review-pr`'s own `git commit --amend` trailer rewrite, which generates a sibling commit (same parent, different SHA, identical tree contents) that is non-ancestor in the DAG sense but trust-equivalent. Concrete repro on first encounter: PR #50's HEAD `a410dda` was a sibling of trailer SHA `201a2dbb` via the Phase 2 trailer-amend with byte-identical trees (`git diff --shortstat` empty), yet the agent emitted `FORCE_PUSHED` → `gate_fail` → unscalable `/merge` wall. Fix defers the `FORCE_PUSHED` decision to Step 3: Step 2 now passes an `is_ancestor` flag (true on exit 0, false on exit 1) to Step 3, where the four-quadrant decision matrix combines ancestor relationship with tree-diff result — `empty diff AND is_ancestor=false` → `PASS` (sibling-equivalent rewrite), `non-empty AND is_ancestor=false` → `FORCE_PUSHED` (real history rewriting). The verdict enum stays at four members (`PASS` / `STALE` / `INVALID` / `FORCE_PUSHED`); caller-side mappings unchanged. Step 4 (log-empty) is skipped when `is_ancestor=false` because Step 3's tree-diff check is already authoritative for the non-ancestor branch. `skills/merge/SKILL.md` prose updated in lockstep — both the `Honest fast-forward fixup` paragraph and the `Stale-SHA verification primitive (D3)` paragraph now mention sibling-equivalent commits.
+- **`tests/merge.test.sh` 192 → 197 assertions** (M61 block: 5 sub-assertions covering the four-quadrant decision matrix, the `is_ancestor` flag plumbing, the cited `commit --amend` motivating case, and a negative regression guard against the pre-fix `Exit 1 → verdict: FORCE_PUSHED` short-circuit). Repo-wide 470 → 475 pass / 0 fail.
+
+### Backwards compatibility
+- **No API or contract change.** The verdict enum, audit-event names, gate_fail reason strings, and caller-side mapping table are all unchanged. The fix is internal to the agent's verdict-derivation logic. PRs that previously emitted `FORCE_PUSHED` for true history rewriting still emit `FORCE_PUSHED`; the fix narrows the verdict to ONLY those cases (non-ancestor AND tree contents differ). PRs that previously emitted `STALE` for ancestor + non-empty diff still emit `STALE`. The change set is purely additive on the PASS path.
+
 ## [0.17.0] - 2026-05-04
 
 ### Changed (BREAKING)
