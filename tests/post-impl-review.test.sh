@@ -59,23 +59,40 @@ assert_grep "$SUBAGENT_DRIVEN" 'End-of-issue post-impl-review' \
 assert_grep "$SUBAGENT_DRIVEN" 'WAVE.*final|WAVE: .final.' \
   "subagent-driven-dev passes WAVE=final to post-impl-review (drives -wave-final.md filename)"
 assert_grep "$SUBAGENT_DRIVEN" 'BASELINE_SHA=.*git rev-parse HEAD' \
-  "subagent-driven-dev captures BASELINE_SHA at start of step 4 for robust commit_range"
+  "subagent-driven-dev captures BASELINE_SHA before the wave loop for robust commit_range"
+assert_grep "$SUBAGENT_DRIVEN" 'ALL_CHANGED_PATHS' \
+  "subagent-driven-dev declares the ALL_CHANGED_PATHS accumulator for the consolidated invocation"
+assert_grep "$SUBAGENT_DRIVEN" 'Accumulate end-of-issue inputs' \
+  "subagent-driven-dev step 4j codifies path accumulation across waves (no per-wave dispatch)"
 
 echo
 echo "== Anti-regression: per-wave post-impl-review wording is GONE from subagent-driven-dev wave-loop =="
-# Whole-file count of "per-wave" inside the wave-loop region must be 0. The line 311 Red Flag
-# uses "post-wave full-test-suite" (different phrase, about the full-test-suite run that stays
-# in the loop — unrelated to the relocation), so we anchor on the wave-loop section only.
-WAVE_LOOP_REGION=$(awk '/^### High-Level Flow/,/^### Parallel Dispatch Pattern/' "$SUBAGENT_DRIVEN")
-# `grep -c` always prints the count to stdout (even 0), but exits 1 on zero matches.
-# `|| true` keeps the count clean (avoids "0\n0" from `|| echo 0`) and tolerates the non-zero exit.
-WAVE_LOOP_HITS=$(grep -cE "per-wave|after each wave" <<<"$WAVE_LOOP_REGION" || true)
-if [[ "$WAVE_LOOP_HITS" -eq 0 ]]; then
-  echo "  PASS  per-wave / after-each-wave wording removed from wave-loop region"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL  per-wave / after-each-wave wording must be 0 in wave-loop region (got $WAVE_LOOP_HITS)"
+# Whole-file count of "per-wave" inside the wave-loop region must be 0. The Red Flag bullet
+# elsewhere in the file uses "post-wave full-test-suite" (different phrase, about the
+# full-test-suite run that stays in the loop — unrelated to the relocation), so we anchor on
+# the wave-loop section only via awk range. Anchor-existence guard added below: if either
+# range header is renamed (e.g. ### -> ##, or wording changes), awk silently returns empty
+# and grep would report 0 hits — a false PASS. Verify both anchors exist first.
+if ! grep -q '^### High-Level Flow' "$SUBAGENT_DRIVEN" || ! grep -q '^### Parallel Dispatch Pattern' "$SUBAGENT_DRIVEN"; then
+  echo "  FAIL  awk anchors '### High-Level Flow' / '### Parallel Dispatch Pattern' missing — wave-loop region cannot be extracted (rename detected?)"
   FAIL=$((FAIL + 1))
+else
+  WAVE_LOOP_REGION=$(awk '/^### High-Level Flow/,/^### Parallel Dispatch Pattern/' "$SUBAGENT_DRIVEN")
+  if [ -z "$WAVE_LOOP_REGION" ]; then
+    echo "  FAIL  awk extracted empty wave-loop region (anchors found but range did not match)"
+    FAIL=$((FAIL + 1))
+  else
+    # `grep -c` always prints the count to stdout (even 0), but exits 1 on zero matches.
+    # `|| true` keeps the count clean (avoids "0\n0" from `|| echo 0`) and tolerates the non-zero exit.
+    WAVE_LOOP_HITS=$(grep -cE "per-wave|after each wave" <<<"$WAVE_LOOP_REGION" || true)
+    if [[ "$WAVE_LOOP_HITS" -eq 0 ]]; then
+      echo "  PASS  per-wave / after-each-wave wording removed from wave-loop region"
+      PASS=$((PASS + 1))
+    else
+      echo "  FAIL  per-wave / after-each-wave wording must be 0 in wave-loop region (got $WAVE_LOOP_HITS)"
+      FAIL=$((FAIL + 1))
+    fi
+  fi
 fi
 
 # Obsolete step 5 prose must be fully gone
