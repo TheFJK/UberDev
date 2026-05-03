@@ -284,9 +284,27 @@ assert_grep "$ORCHESTRATOR" 'pr-test-analyzer' \
   "pr-test-analyzer wired for large tier (Phase 5.5)"
 
 echo
-echo "== subagent-driven-dev invokes post-impl-review after each wave =="
+echo "== subagent-driven-dev invokes post-impl-review once at end-of-issue =="
 assert_grep "$SUBAGENT_DRIVEN" 'post-impl-review' \
   "post-impl-review skill referenced from subagent-driven-dev"
+assert_grep "$SUBAGENT_DRIVEN" 'End-of-issue post-impl-review' \
+  "subagent-driven-dev codifies end-of-issue invocation (not per-wave)"
+assert_grep "$SUBAGENT_DRIVEN" 'WAVE.*final|WAVE: .final.' \
+  "subagent-driven-dev passes WAVE=final to drive -wave-final.md filename"
+
+echo
+echo "== turbo medium/large parity: end-of-issue post-impl-review documented in turbo.md =="
+assert_grep "$TURBO_CMD" 'post-impl-review.* once at end-of-issue' \
+  "turbo.md documents end-of-issue post-impl-review for medium/large"
+assert_grep "$TURBO_CMD" 'consolidated across all waves' \
+  "turbo.md names the consolidated semantics (one fanout, all waves)"
+if grep -qE 'uberdev:post-impl-review. per wave' "$TURBO_CMD"; then
+  echo "  FAIL  obsolete 'per wave' wording in turbo.md medium/large bullet must be removed"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  turbo.md medium/large bullet drops 'per wave' wording"
+  PASS=$((PASS + 1))
+fi
 
 echo
 echo "== finish-branch composes new PR-body sections =="
