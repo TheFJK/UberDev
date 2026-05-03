@@ -138,8 +138,8 @@ REVIEW_FILES=$(ls -t .uberdev/research/*/post-impl-review-wave-*.md .uberdev/res
 
 # Compose PR body. Heredoc delimiter is unquoted (`<<EOF`, not the single-
 # quoted form) to avoid Claude's permission-pattern evaluator `unmatched '`
-# bug (#42). The agent fills the placeholders below with normal markdown —
-# no $/backticks/backslash. Backslash-escape any literal metacharacter.
+# bug (#42). The agent must compose the body free of `$`, backticks, and
+# backslash — unquoted heredocs don't shield these from shell expansion.
 PR_BODY_FILE=$(mktemp)
 cat > "$PR_BODY_FILE" <<EOF_HEADER
 ## Summary
@@ -179,10 +179,10 @@ fi
 # `gh --title "$PR_TITLE_VAR"` — double-quoted variable expansion is byte-
 # verbatim, no backtick/dollar re-evaluation. The heredoc delimiter is
 # unquoted (`<<PR_TITLE_EOF`, not the single-quoted form) to avoid Claude's
-# permission-pattern evaluator `unmatched '` bug (#42); the agent therefore
-# composes the title free of $/backticks/backslash (typical PR titles have
-# none). This closes the title-injection vector without inventing a
-# `--title-file` flag (which gh does not support).
+# permission-pattern evaluator `unmatched '` bug (#42); the agent must
+# compose the title free of `$`, backticks, and backslash. This closes the
+# title-injection vector without inventing a `--title-file` flag (which gh
+# does not support).
 TITLE_FILE=$(mktemp) || { echo "ERROR: mktemp failed for title file" >&2; exit 1; }
 cat > "$TITLE_FILE" <<PR_TITLE_EOF
 <title>

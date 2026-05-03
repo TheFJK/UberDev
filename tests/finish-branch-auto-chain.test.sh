@@ -94,7 +94,7 @@ echo "== Title injection closed via heredoc + quoted-variable read-back =="
 # to `gh --title "$VAR"` (double-quoted variable expansion is byte-verbatim,
 # no backtick/dollar re-evaluation). Heredoc delimiter is unquoted (#42 bug:
 # the single-quoted form trips Claude's permission-pattern evaluator); the
-# agent therefore keeps the title free of $/backticks/backslash.
+# agent must keep the title free of `$`, backticks, and backslash.
 assert_grep "$FINISH_BRANCH" \
   'TITLE_FILE=\$\(mktemp\)|TITLE_FILE=' \
   "TITLE_FILE mktemp pattern present"
@@ -154,8 +154,8 @@ echo "== Issue #42: heredoc delimiters tokenizer-safe (no <<'X' or <<\"X\" form)
 # semantics, so the leading quote of the delimiter opens an unmatched quote
 # that pairs with the next `'` in the block (the regex assignment), inverting
 # quote-balance and surfacing as `(eval): unmatched '`. Use unquoted `<<EOF`
-# form; the agent must compose title/body bytes free of shell metacharacters
-# ($, backticks, backslash) — typical PR Summary text has none.
+# form; the agent must compose title/body bytes free of `$`, backticks,
+# and backslash.
 assert_not_grep "$FINISH_BRANCH" \
   "<<-?['\"][A-Za-z_][A-Za-z0-9_]*['\"]" \
   "no quoted heredoc delimiters (Claude permission-evaluator unmatched ' bug, #42)"
