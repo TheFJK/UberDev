@@ -1,6 +1,6 @@
 ---
 name: post-impl-review
-description: Shared post-implementation review fanout — dispatches 5 reviewer agents (code-reviewer, simplifier, silent-failure-hunter, type-design-analyzer, comment-analyzer) IN A SINGLE MESSAGE and aggregates findings. Use after implementation completes (per-wave from subagent-driven-dev, or post-impl from /solve trivial/small inline prompt).
+description: Shared post-implementation review fanout — dispatches 5 advisory reviewer agents (code-reviewer, simplifier, silent-failure-hunter, type-design-analyzer, comment-analyzer) IN A SINGLE MESSAGE and aggregates findings. Use after implementation completes (per-wave from subagent-driven-dev, or post-impl from /solve trivial/small inline prompt).
 ---
 
 # Post-Implementation Review
@@ -108,7 +108,7 @@ Aggregated: 0 blockers, 1 suggestion. Continue.
 Counting rules:
 - "blockers" = sum of `severity: blocker` findings across all 5 returns.
 - "suggestions" = sum of `severity: suggestion` findings across all 5 returns.
-- The trailing `Continue.` is fixed text — this skill is non-blocking by design (Q1 deferral: spec-reviser-style auto-fix loop is out of scope).
+- The trailing `Continue.` is fixed text — this skill is non-blocking and audit-only by design. To apply simplifier findings (or any other reviewer's findings), invoke `/uberdev:simplify` or `/uberdev:review-pr` Phase 2 — those commands own the apply-and-commit loop.
 
 ## Output (returned to caller, NOT a YAML block)
 
@@ -116,7 +116,7 @@ Return a prose summary of the aggregation table above to the caller. Example:
 
 > Post-impl review for wave 2 of issue #11 complete. 5 reviewers ran in parallel. Aggregated: 0 blockers, 2 suggestions (code-simplifier flagged a dead branch in `foo.ts`; comment-analyzer flagged a stale TODO in `bar.ts`). Full table at `.uberdev/research/$RUN_ID/post-impl-review-wave-2.md`. Continue.
 
-Findings are advisory at this layer — **the caller does NOT block on `REVISIONS_REQUIRED`**. (Per Q1: spec-reviser-style auto-fix loop is deferred. The aggregated file is the artifact downstream tooling reads if it wants to triage findings later.)
+Findings are advisory at this layer — **the caller does NOT block on `REVISIONS_REQUIRED`**. (This skill is audit-only by design. The aggregated file is the artifact downstream tooling reads to triage findings; to apply simplifier findings, run `/uberdev:simplify` or `/uberdev:review-pr` Phase 2.)
 
 ## Failure modes
 
