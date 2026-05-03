@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-05-03
+
+### Fixed
+- **`finish-branch` permission-pattern `unmatched '` (#42, #45)** — Single-quoted heredoc delimiters (`<<'EOF_HEADER'`, `<<'PR_TITLE_EOF'`) in `plugins/uberdev/skills/finish-branch/SKILL.md` tripped Claude Code's permission-pattern evaluator with `(eval): unmatched '`, leaving `/finish-branch` and the `/finish` alias unrunnable (manual `gh pr create` was the only escape hatch). The evaluator's shell tokenizer doesn't honor heredoc literal-context semantics — it paired the delimiter's leading `'` with the next `'` it saw (the `PR_URL_REGEX='…'` assignment), inverted quote-balance from there, and surfaced the regex's trailing `'` as the unmatched-quote error. Fix: drop the quotes from both delimiters (`<<EOF_HEADER` / `<<PR_TITLE_EOF`); the agent contract now requires composed PR title and body bytes free of `$`, backticks, and backslash (typical PR Summary text already satisfies this). The title-injection guard is preserved end-to-end by the existing `gh --title "$PR_TITLE_VAR"` double-quoted byte-verbatim expansion. Test coverage adds an `assert_not_grep` regression canary that rejects any `<<'X'` or `<<"X"` form anywhere in the skill (`tests/finish-branch-auto-chain.test.sh` 23 → 24 assertions).
+
 ## [0.16.0] - 2026-05-03
 
 ### Added
