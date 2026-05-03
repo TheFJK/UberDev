@@ -132,7 +132,7 @@ Pre-conditions that ALL must pass regardless of trust path (real blockers):
 - `isDraft == false` — else gate_fail with `data.reason="is_draft"`.
 - `statusCheckRollup` all green — else gate_fail with `data.reason="ci_red"`. **No bypass clause exists post-v0.17.0** (`--bypass-protections` is a no-op; CI-red is unconditionally a `gate_fail`).
 
-**Trust resolution** (NOT a single-condition gate — see D11 reframe). Probe three trust paths in priority order; first hit wins:
+**Trust resolution** (NOT a single-condition gate — see D11 reframe). Probe two trust paths in priority order; first hit wins:
 
 **PATH_1 — platform anchor (team / branch protection):**
 
@@ -156,10 +156,13 @@ c. The extracted `<trailer-sha>` is delegated to the `trust-trail-evaluator` age
       - `INVALID / trailer_sha_not_in_local_clone` (the exit-128 case from `git merge-base --is-ancestor` when the trailer SHA is not in the local clone — common after a fresh clone or when an old `/review-pr` trailer points at a commit that's been GC'd locally) → emit `trust_trail_agent_decision` with `data.choice="INVALID"`, `data.subreason="trailer_sha_not_in_local_clone"`, `data.retry_attempt=0`. Caller runs ONE bounded `git fetch --prune origin <branch>` then re-dispatches the trust-trail-evaluator agent in a single-message `Task()`. Emit `trust_trail_agent_decision` with `data.retry_attempt=1` for the second invocation. If the second dispatch returns any verdict other than `PASS`, `gate_fail` with the appropriate reason: a second `INVALID` (any subreason) maps to `data.reason="trust_trail_agent_invalid_input"`; `STALE` / `FORCE_PUSHED` map to `data.reason="trust_trail_stale_sha"` per the rows above. The retry is bounded at 1 — never recursive — mirroring Phase 3.3v's max-1-retry policy.
       - `FORCE_PUSHED` → emit `trust_trail_agent_decision` with `data.choice="FORCE_PUSHED"`, `data.retry_attempt=0`, then `gate_fail` with `data.reason="trust_trail_stale_sha"`. Diagnostic: agent's rationale.
 
-Honest fast-forward fixup commits added between `/review-pr` and `/merge` (e.g., trivial typo fixes, comment touch-ups whose cumulative diff is empty) evaluate to `PASS` without forcing the user to re-run `/review-pr`. Force-pushes that rewrite history evaluate to `FORCE_PUSHED`. The user does NOT need to re-run `/review-pr` for trivial fixups; that prescription is retired post-v0.17.0.
+      Any verdict from (c) other than `PASS` short-circuits sub-condition (d): the caller emits `gate_fail` immediately and does NOT evaluate (d). (d) is only checked when (c) returned `PASS`.
+
 d. ∃ a file matching `.uberdev/runs/<run-id>/review-pr-verdict.json` whose `"sha"` field equals `headRefOid` (presence + SHA-match check; the JSON is local-only debug telemetry per D1 — its absence on a fresh clone is by design). The `<run-id>` directory name MUST match `RUN_ID_REGEX` before any path concatenation (D4, F8 path-traversal hardening) — else gate_fail with `data.reason="trust_trail_json_missing"`.
 
 On all four sub-conditions met: emit `gate_pass` with `data.trust_anchor="uberdev_review_trail"`. Proceed.
+
+Honest fast-forward fixup commits added between `/review-pr` and `/merge` (e.g., trivial typo fixes, comment touch-ups whose cumulative diff is empty) evaluate to `PASS` without forcing the user to re-run `/review-pr`. Force-pushes that rewrite history evaluate to `FORCE_PUSHED`. The user does NOT need to re-run `/review-pr` for trivial fixups; that prescription is retired post-v0.17.0.
 
 **Otherwise:** neither of the two paths fired. Emit `gate_fail` with the most specific `data.reason` from `GATE_FAIL_REASON_ENUM` for the failing sub-condition (e.g. `review_decision_not_approved` if PATH_1 failed and PATH_2 had no label, vs `trust_trail_stale_sha` if PATH_2's trailer existed but the SHA was stale). General refusal diagnostic when no trust trail exists at all: `/review-pr hasn't run on commit <sha> — run /review-pr first, then re-invoke /merge`.
 
