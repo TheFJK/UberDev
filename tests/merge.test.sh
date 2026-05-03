@@ -596,10 +596,24 @@ else
 fi
 
 echo
-echo "== M35: SKILL.md Phase 1.4 prose contains PATH_1 / PATH_2 / PATH_3 trust-resolution structure (issue #40) =="
-assert_grep "$SKILL_FILE" 'PATH_1' "M35.path1 — PATH_1 (platform anchor) named"
-assert_grep "$SKILL_FILE" 'PATH_2' "M35.path2 — PATH_2 (uberdev review trail) named"
-assert_grep "$SKILL_FILE" 'PATH_3' "M35.path3 — PATH_3 (admin bypass) named"
+echo "== M35: SKILL.md Phase 1.4 enumerated set drops PATH_3 (issue #47) =="
+# M35: updated for issue #47 — PATH_3 retired; PATH_1 + PATH_2 only.
+# Pre-redesign assertion that PATH_3 is named in Phase 1.4 is REMOVED, not extended.
+PHASE_14_BODY=$(awk '/^### Step 1.4/,/^### Step 1.5/' "$SKILL_FILE")
+if echo "$PHASE_14_BODY" | grep -qE 'PATH_1.*PATH_2|PATH_2.*PATH_1'; then
+  echo "  PASS  M35.path12 — Phase 1.4 body still names PATH_1 and PATH_2"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M35.path12 — Phase 1.4 body must still name PATH_1 and PATH_2"
+  FAIL=$((FAIL + 1))
+fi
+if echo "$PHASE_14_BODY" | grep -qE 'PATH_3'; then
+  echo "  FAIL  M35.no-path3 — Phase 1.4 body must NOT name PATH_3 (retired in issue #47)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  M35.no-path3 — Phase 1.4 body correctly omits PATH_3 (retired)"
+  PASS=$((PASS + 1))
+fi
 assert_grep "$SKILL_FILE" 'trust resolution|trust-resolution' "M35.reframe — trust-resolution reframe present"
 
 echo
@@ -609,13 +623,28 @@ assert_grep "$SKILL_FILE" 'uberdev_review_trail'    "M36.tea2 — TRUST_ANCHOR_E
 assert_grep "$SKILL_FILE" 'bypass_with_waiver'      "M36.tea3 — TRUST_ANCHOR_ENUM value bypass_with_waiver"
 
 echo
-echo "== M37: SKILL.md gate_fail.data.reason enum values present (AC5) =="
-assert_grep "$SKILL_FILE" 'review_decision_not_approved' "M37.gfr1 — gate_fail reason review_decision_not_approved"
-assert_grep "$SKILL_FILE" 'trust_trail_missing'           "M37.gfr2 — gate_fail reason trust_trail_missing"
-assert_grep "$SKILL_FILE" 'trust_trail_stale_sha'         "M37.gfr3 — gate_fail reason trust_trail_stale_sha"
-assert_grep "$SKILL_FILE" 'trust_trail_label_missing'     "M37.gfr4 — gate_fail reason trust_trail_label_missing"
-assert_grep "$SKILL_FILE" 'trust_trail_trailer_missing'   "M37.gfr5 — gate_fail reason trust_trail_trailer_missing"
-assert_grep "$SKILL_FILE" 'trust_trail_json_missing'      "M37.gfr6 — gate_fail reason trust_trail_json_missing"
+echo "== M37: SKILL.md GATE_FAIL_REASON_ENUM — 7 members post issue #47 =="
+# M37: updated for issue #47 — GATE_FAIL_REASON_ENUM expanded for trust_trail_agent_invalid_input.
+# The pre-redesign 6-member count literal is deleted and replaced by 7.
+assert_grep "$SKILL_FILE" 'review_decision_not_approved'      "M37.gfr1 — gate_fail reason review_decision_not_approved"
+assert_grep "$SKILL_FILE" 'trust_trail_missing'                "M37.gfr2 — gate_fail reason trust_trail_missing"
+assert_grep "$SKILL_FILE" 'trust_trail_stale_sha'              "M37.gfr3 — gate_fail reason trust_trail_stale_sha"
+assert_grep "$SKILL_FILE" 'trust_trail_label_missing'          "M37.gfr4 — gate_fail reason trust_trail_label_missing"
+assert_grep "$SKILL_FILE" 'trust_trail_trailer_missing'        "M37.gfr5 — gate_fail reason trust_trail_trailer_missing"
+assert_grep "$SKILL_FILE" 'trust_trail_json_missing'           "M37.gfr6 — gate_fail reason trust_trail_json_missing"
+assert_grep "$SKILL_FILE" 'trust_trail_agent_invalid_input'    "M37.gfr7 — gate_fail reason trust_trail_agent_invalid_input (NEW)"
+ENUM_ROW=$(grep -E '\| `GATE_FAIL_REASON_ENUM` \|' "$SKILL_FILE" || true)
+# `[a-z_]+` matches lowercase snake_case reason tokens only (not the
+# UPPERCASE enum-name `GATE_FAIL_REASON_ENUM` itself), so the count
+# equals exactly the number of reasons backticked in the row.
+REASON_COUNT=$(echo "$ENUM_ROW" | grep -oE '`[a-z_]+`' | wc -l | tr -d ' ')
+if [ "$REASON_COUNT" -eq 7 ]; then
+  echo "  PASS  M37.count — GATE_FAIL_REASON_ENUM row contains exactly 7 reasons"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M37.count — GATE_FAIL_REASON_ENUM row contains $REASON_COUNT reasons; expected exactly 7"
+  FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== M38: SKILL.md stale-SHA detection compares trailer vs live headRefOid (AC7, AC10) =="
@@ -681,8 +710,14 @@ if [ ! -r "$USING_FILE" ]; then
 else
   assert_grep "$USING_FILE" 'PATH_1.*PATH_2|PATH_2.*PATH_1' \
     "M45 — using-uberdev/SKILL.md bot_authors_allow_list paragraph contains PATH_1+PATH_2 layered wording"
-  assert_grep "$USING_FILE" 'uberdev-approved.*Reviewed-by: uberdev/review-pr' \
-    "M45.trail — using-uberdev/SKILL.md mentions the trail composition (label + trailer)"
+  # M45.trail: updated for issue #47 — T6 rewrote using-uberdev/SKILL.md mirror to
+  # describe the agent-decided trail (ancestor + diff-empty + log-empty primitives,
+  # verdict enum {PASS, STALE, INVALID, FORCE_PUSHED}). The old label+trailer
+  # composition string was retired from this mirror site.
+  assert_grep "$USING_FILE" 'trust-trail-evaluator' \
+    "M45.trail — using-uberdev/SKILL.md names the trust-trail-evaluator agent"
+  assert_grep "$USING_FILE" 'PASS, STALE, INVALID, FORCE_PUSHED|PASS.*STALE.*INVALID.*FORCE_PUSHED' \
+    "M45.verdict — using-uberdev/SKILL.md cites the verdict enum"
 fi
 
 echo
@@ -700,6 +735,236 @@ else
   echo "  FAIL  M46.enum — editor note has $ENUM_HITS enumerated mirror-site entries; expected 5"
   FAIL=$((FAIL + 1))
 fi
+
+echo
+echo "== M47: agents/trust-trail-evaluator.md exists with frontmatter + return contract =="
+TTE_FILE="$REPO_ROOT/plugins/uberdev/agents/trust-trail-evaluator.md"
+if [ ! -r "$TTE_FILE" ]; then
+  echo "  FAIL  M47 — agent file missing: $TTE_FILE"
+  FAIL=$((FAIL + 1))
+else
+  assert_grep "$TTE_FILE" '^name: trust-trail-evaluator'           "M47.1 — agent name frontmatter"
+  assert_grep "$TTE_FILE" '^model: sonnet'                          "M47.2 — agent model frontmatter"
+  assert_grep "$TTE_FILE" '^description: '                           "M47.3 — agent description frontmatter non-empty"
+  assert_grep "$TTE_FILE" '^## Inputs'                              "M47.4 — Inputs section present"
+  assert_grep "$TTE_FILE" '^## Tools authorised'                    "M47.5 — Tools authorised section present"
+  assert_grep "$TTE_FILE" '^## Process'                             "M47.6 — Process section present"
+  assert_grep "$TTE_FILE" '^## Refusal triggers'                    "M47.7 — Refusal triggers section present"
+  assert_grep "$TTE_FILE" '^## Return contract'                     "M47.8 — Return contract section present"
+  assert_grep "$TTE_FILE" 'verdict: PASS \| STALE \| INVALID \| FORCE_PUSHED' "M47.9 — verdict enum in return-contract YAML"
+fi
+
+echo
+echo "== M48: agents/merge-strategy-decider.md exists with frontmatter + return contract =="
+MSD_FILE="$REPO_ROOT/plugins/uberdev/agents/merge-strategy-decider.md"
+if [ ! -r "$MSD_FILE" ]; then
+  echo "  FAIL  M48 — agent file missing: $MSD_FILE"
+  FAIL=$((FAIL + 1))
+else
+  assert_grep "$MSD_FILE" '^name: merge-strategy-decider'           "M48.1 — agent name frontmatter"
+  assert_grep "$MSD_FILE" '^model: sonnet'                          "M48.2 — agent model frontmatter"
+  assert_grep "$MSD_FILE" '^description: '                          "M48.3 — agent description frontmatter non-empty"
+  assert_grep "$MSD_FILE" '^## Inputs'                              "M48.4 — Inputs section present"
+  assert_grep "$MSD_FILE" '^## Tools authorised'                    "M48.5 — Tools authorised section present"
+  assert_grep "$MSD_FILE" '^## Process'                             "M48.6 — Process section present"
+  assert_grep "$MSD_FILE" '^## Refusal triggers'                    "M48.7 — Refusal triggers section present"
+  assert_grep "$MSD_FILE" '^## Return contract'                     "M48.8 — Return contract section present"
+  assert_grep "$MSD_FILE" 'strategy: squash \| rebase \| merge'     "M48.9 — strategy enum in return-contract YAML"
+  # Negative: drop must NOT appear as a verdict in the return-contract YAML
+  YAML_BLOCK=$(awk '/^```yaml$/,/^```$/' "$MSD_FILE")
+  if echo "$YAML_BLOCK" | grep -qE '^strategy:.*drop'; then
+    echo "  FAIL  M48.no-drop — return-contract YAML must NOT name 'drop' as a verdict"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  M48.no-drop — return-contract YAML correctly omits 'drop'"
+    PASS=$((PASS + 1))
+  fi
+fi
+
+echo
+echo "== M49: SKILL.md Phase 1.4 PATH_2 (c) dispatches trust-trail-evaluator via Task() =="
+PHASE_14_BODY=$(awk '/^### Step 1.4/,/^### Step 1.5/' "$SKILL_FILE")
+if echo "$PHASE_14_BODY" | grep -qE 'trust-trail-evaluator'; then
+  echo "  PASS  M49.1 — Phase 1.4 names trust-trail-evaluator agent"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M49.1 — Phase 1.4 must name trust-trail-evaluator agent in PATH_2 (c) dispatch"
+  FAIL=$((FAIL + 1))
+fi
+if echo "$PHASE_14_BODY" | grep -qE 'Task\('; then
+  echo "  PASS  M49.2 — Phase 1.4 mentions Task() dispatch"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M49.2 — Phase 1.4 must mention Task() dispatch for trust-trail-evaluator"
+  FAIL=$((FAIL + 1))
+fi
+if echo "$PHASE_14_BODY" | grep -qE 'PATH_3'; then
+  echo "  FAIL  M49.no-path3-bypass — Phase 1.4 must NOT name PATH_3 (admin-bypass anchor retired)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  M49.no-path3-bypass — PATH_3 correctly absent from Phase 1.4"
+  PASS=$((PASS + 1))
+fi
+
+echo
+echo "== M50: SKILL.md Phase 2.2 dispatches merge-strategy-decider via Task() =="
+PHASE_22_BODY=$(awk '/^### Step 2.2/,/^### Step 2.3/' "$SKILL_FILE")
+if echo "$PHASE_22_BODY" | grep -qE 'merge-strategy-decider'; then
+  echo "  PASS  M50.1 — Phase 2.2 names merge-strategy-decider agent"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M50.1 — Phase 2.2 must name merge-strategy-decider agent"
+  FAIL=$((FAIL + 1))
+fi
+if echo "$PHASE_22_BODY" | grep -qE 'Task\('; then
+  echo "  PASS  M50.2 — Phase 2.2 mentions Task() dispatch"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M50.2 — Phase 2.2 must mention Task() dispatch for merge-strategy-decider"
+  FAIL=$((FAIL + 1))
+fi
+if echo "$PHASE_22_BODY" | grep -qE 'Per-invocation flag always wins'; then
+  echo "  FAIL  M50.no-cli-wins — Phase 2.2 must NOT contain 'Per-invocation flag always wins' clause"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  M50.no-cli-wins — CLI-flag-wins clause correctly absent from Phase 2.2"
+  PASS=$((PASS + 1))
+fi
+
+echo
+echo "== M51: SKILL.md Constants table contains TRUST_TRAIL_VERDICT_ENUM, MERGE_STRATEGY_DECIDER_VERDICT_ENUM, deprecation notes =="
+assert_grep "$SKILL_FILE" '\| `TRUST_TRAIL_VERDICT_ENUM` \|.*PASS.*STALE.*INVALID.*FORCE_PUSHED' \
+  "M51.1 — TRUST_TRAIL_VERDICT_ENUM row with literal verdict values"
+assert_grep "$SKILL_FILE" '\| `MERGE_STRATEGY_DECIDER_VERDICT_ENUM` \|.*squash.*rebase.*merge' \
+  "M51.2 — MERGE_STRATEGY_DECIDER_VERDICT_ENUM row with literal strategy subset"
+assert_grep "$SKILL_FILE" '\| `STRATEGY_FLAGS_DEPRECATED_NOTE` \|' \
+  "M51.3 — STRATEGY_FLAGS_DEPRECATED_NOTE row"
+assert_grep "$SKILL_FILE" '\| `BYPASS_PROTECTIONS_DEPRECATED_NOTE` \|' \
+  "M51.4 — BYPASS_PROTECTIONS_DEPRECATED_NOTE row"
+
+echo
+echo "== M52: SKILL.md AUDIT_EVENT_ENUM contains new agent-decision events; STRATEGY_REASON_ENUM contains agent_decided =="
+AUDIT_ROW=$(grep -E '\| `AUDIT_EVENT_ENUM` \|' "$SKILL_FILE" || true)
+for EV in trust_trail_agent_decision merge_strategy_agent_decision merge_strategy_fanout_wave_started; do
+  if echo "$AUDIT_ROW" | grep -qE "$EV"; then
+    echo "  PASS  M52.$EV — AUDIT_EVENT_ENUM declares $EV"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  M52.$EV — AUDIT_EVENT_ENUM must declare $EV"
+    FAIL=$((FAIL + 1))
+  fi
+done
+if grep -qE '\| `STRATEGY_REASON_ENUM` \|.*agent_decided' "$SKILL_FILE"; then
+  echo "  PASS  M52.agent_decided — STRATEGY_REASON_ENUM declares agent_decided"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M52.agent_decided — STRATEGY_REASON_ENUM must declare agent_decided"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== M53: commands/merge.md Deprecated Flags section lists --squash, --rebase, --merge, --bypass-protections =="
+CMD_DEP_BODY=$(awk '/^## Deprecated Flags/,EOF' "$CMD_FILE")
+for FL in '--squash' '--rebase' '--merge' '--bypass-protections'; do
+  # Use `grep -e <pattern>` so flag-style patterns starting with `--` are
+  # not parsed as grep options (BSD grep on macOS is strict about this).
+  if echo "$CMD_DEP_BODY" | grep -qE -e "$FL"; then
+    echo "  PASS  M53.$FL — Deprecated Flags section names $FL"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  M53.$FL — Deprecated Flags section must name $FL"
+    FAIL=$((FAIL + 1))
+  fi
+done
+if echo "$CMD_DEP_BODY" | grep -qE 'warning: --squash / --rebase / --merge are deprecated'; then
+  echo "  PASS  M53.notice-strategy — verbatim STRATEGY_FLAGS_DEPRECATED_NOTE present"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M53.notice-strategy — verbatim STRATEGY_FLAGS_DEPRECATED_NOTE missing"
+  FAIL=$((FAIL + 1))
+fi
+if echo "$CMD_DEP_BODY" | grep -qE 'warning: --bypass-protections is deprecated'; then
+  echo "  PASS  M53.notice-bypass — verbatim BYPASS_PROTECTIONS_DEPRECATED_NOTE present"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M53.notice-bypass — verbatim BYPASS_PROTECTIONS_DEPRECATED_NOTE missing"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== M54: no forbidden 'use --bypass-protections to override' / 're-run /review-pr, then re-invoke /merge' wording in any mirror site =="
+USING_FILE="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/SKILL.md"
+for FILE in "$SKILL_FILE" "$CMD_FILE" "$USING_FILE"; do
+  if grep -qE 'supply --bypass-protections to override|use --bypass-protections to override' "$FILE"; then
+    echo "  FAIL  M54.bypass-override — forbidden 'supply/use --bypass-protections to override' in $FILE"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  M54.bypass-override — $FILE clean of bypass-override prose"
+    PASS=$((PASS + 1))
+  fi
+  if grep -qE 're-run /review-pr, then re-invoke /merge' "$FILE"; then
+    echo "  FAIL  M54.re-run-prescription — forbidden 're-run /review-pr, then re-invoke /merge' in $FILE"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  M54.re-run-prescription — $FILE clean of re-run prescription"
+    PASS=$((PASS + 1))
+  fi
+done
+
+echo
+echo "== M55: trust_trail_stale_sha enum value preserved (existing M37 row) =="
+assert_grep "$SKILL_FILE" 'trust_trail_stale_sha' \
+  "M55 — trust_trail_stale_sha still declared in GATE_FAIL_REASON_ENUM"
+
+echo
+echo "== M56: trust-trail-evaluator agent input contract cites live gh pr view --json headRefOid =="
+TTE_FILE="$REPO_ROOT/plugins/uberdev/agents/trust-trail-evaluator.md"
+if grep -qE 'gh pr view.*--json headRefOid|live.*headRefOid' "$TTE_FILE"; then
+  echo "  PASS  M56 — agent inputs cite live headRefOid (M38 mandate preserved)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M56 — agent inputs MUST cite live gh pr view --json headRefOid (per M38 mandate)"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== M57: five mirror sites updated atomically — re-runs M44/M45/M46 invariants =="
+# M44/M45/M46 are run as their own test blocks above; M57 is a meta-check that
+# they all pass after the issue #47 update. The summary check below catches any failure.
+echo "  NOTE  M57 — see M44, M45, M46 above; this is a meta-marker for atomicity."
+
+echo
+echo "== M58: SKILL.md Constants table declares GATE_FAIL_REASON_TRUST_TRAIL_AGENT_INVALID_INPUT and MAX_PARALLEL_AGENTS =="
+assert_grep "$SKILL_FILE" '\| `GATE_FAIL_REASON_TRUST_TRAIL_AGENT_INVALID_INPUT` \|.*trust_trail_agent_invalid_input' \
+  "M58.1 — GATE_FAIL_REASON_TRUST_TRAIL_AGENT_INVALID_INPUT row with literal value"
+assert_grep "$SKILL_FILE" '\| `MAX_PARALLEL_AGENTS` \|.*10' \
+  "M58.2 — MAX_PARALLEL_AGENTS row with default 10"
+
+echo
+echo "== M59: SKILL.md Phase 2.2 documents MAX_PARALLEL_AGENTS chunking + merge_strategy_fanout_wave_started =="
+PHASE_22_BODY=$(awk '/^### Step 2.2/,/^### Step 2.3/' "$SKILL_FILE")
+for KW in 'MAX_PARALLEL_AGENTS' 'merge_strategy_fanout_wave_started' 'wave_index' 'wave_size'; do
+  if echo "$PHASE_22_BODY" | grep -qE "$KW"; then
+    echo "  PASS  M59.$KW — Phase 2.2 mentions $KW"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  M59.$KW — Phase 2.2 must mention $KW"
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+echo
+echo "== M60: SKILL.md Phase 1.4 PATH_2 (c) specifies INVALID retry path with git fetch --prune + max retry=1 =="
+PHASE_14_BODY=$(awk '/^### Step 1.4/,/^### Step 1.5/' "$SKILL_FILE")
+for KW in 'trailer_sha_not_in_local_clone' 'git fetch --prune' 'retry_attempt' 'input_malformed'; do
+  if echo "$PHASE_14_BODY" | grep -qE "$KW"; then
+    echo "  PASS  M60.$KW — Phase 1.4 mentions $KW"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  M60.$KW — Phase 1.4 must mention $KW"
+    FAIL=$((FAIL + 1))
+  fi
+done
 
 echo
 echo "== Summary =="
