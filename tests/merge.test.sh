@@ -1004,6 +1004,61 @@ else
 fi
 
 echo
+echo "== M62: SKILL.md Step 1.1 guards against missing flock(1) (issue #51) =="
+# Motivating case: macOS ships without flock(1), so the unguarded `flock` invocation
+# in Step 1.1 exits 127 ("command not found") and the prior prose mis-classified
+# every non-zero exit from the lock invocation as genuine contention. Result:
+# stock-macOS users see "another /merge run in progress" with no actual contender.
+# This test pins the contract that Step 1.1 (a) detects flock availability before
+# invoking it, (b) provides a portable fallback (mkdir-based mutex is the natural
+# POSIX-atomic choice) so /merge works out-of-the-box, and (c) explicitly
+# distinguishes the missing-binary path from real contention so the diagnostic
+# never mis-fires again.
+PHASE_1_1_BLOCK=$(awk '/^### Step 1\.1/,/^### Step 1\.2/' "$SKILL_FILE")
+if [ -z "$PHASE_1_1_BLOCK" ]; then
+  fail "M62 — could not slice Step 1.1 block; heading layout changed"
+else
+  if echo "$PHASE_1_1_BLOCK" | grep -qE 'command -v flock'; then
+    pass "M62.1 — Step 1.1 probes flock availability via 'command -v flock' before invoking it"
+  else
+    fail "M62.1 — Step 1.1 must probe flock availability via 'command -v flock' before invoking it"
+  fi
+  if echo "$PHASE_1_1_BLOCK" | grep -qE '\bmkdir\b'; then
+    pass "M62.2 — Step 1.1 specifies a portable mkdir-based mutex fallback"
+  else
+    fail "M62.2 — Step 1.1 must specify a portable mkdir-based mutex fallback (POSIX-atomic, no flock dep)"
+  fi
+  if echo "$PHASE_1_1_BLOCK" | grep -qE '(MUST NOT|must not|never).*(contention|contended)|missing.*flock.*not.*contention|not.*lock.*contention'; then
+    pass "M62.3 — Step 1.1 explicitly forbids classifying missing-flock as contention"
+  else
+    fail "M62.3 — Step 1.1 must explicitly state that the missing-flock case is NOT contention (the issue-#51 mis-classification regression guard)"
+  fi
+  # Phase 4.6 must clean up the mkdir fallback explicitly (flock auto-releases; mkdir does not).
+  PHASE_4_6_BLOCK=$(awk '/^### Step 4\.6/,/^## Quick Reference/' "$SKILL_FILE")
+  if echo "$PHASE_4_6_BLOCK" | grep -qE '\brmdir\b|rm -rf.*LOCK_DIR|remove.*lock dir|cleanup.*fallback|trap.*EXIT'; then
+    pass "M62.4 — Step 4.6 documents explicit cleanup for the mkdir fallback"
+  else
+    fail "M62.4 — Step 4.6 must document explicit cleanup (rmdir / trap EXIT) for the mkdir fallback path"
+  fi
+  # M62.5 — Step 1.1 must distinguish mkdir filesystem errors from contention so users see the
+  # right diagnostic. Without this, ENOSPC / EACCES / EROFS get mis-reported as "another /merge
+  # run in progress" — the same silent-failure family as the original issue #51 mis-classification.
+  if echo "$PHASE_1_1_BLOCK" | grep -qE 'filesystem error|ENOSPC|EACCES|EROFS|non-EEXIST'; then
+    pass "M62.5 — Step 1.1 distinguishes mkdir filesystem errors from lock contention"
+  else
+    fail "M62.5 — Step 1.1 must distinguish mkdir filesystem errors (ENOSPC / EACCES / EROFS) from lock contention so the diagnostic does not mis-fire"
+  fi
+  # M62.6 — Step 1.1 must prescribe a concrete trap so cleanup-on-exit is consistent across
+  # every codegen pass. "MUST install a trap" without the literal trap line is hopeful prose;
+  # the literal `trap ... EXIT INT TERM` syntax pins the contract.
+  if echo "$PHASE_1_1_BLOCK" | grep -qE 'trap.*EXIT[ ]+INT[ ]+TERM|trap.*EXIT.*TERM'; then
+    pass "M62.6 — Step 1.1 prescribes concrete trap syntax (trap ... EXIT INT TERM) for fallback cleanup"
+  else
+    fail "M62.6 — Step 1.1 must prescribe concrete trap syntax (trap 'rm -rf \$LOCK_DIR' EXIT INT TERM) so cleanup-on-exit is generated consistently"
+  fi
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
