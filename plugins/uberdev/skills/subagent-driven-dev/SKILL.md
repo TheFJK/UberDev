@@ -72,7 +72,7 @@ digraph when_to_use {
       - The wave's commit count is implicit in `git log` since `BASELINE_SHA`; no manual counter required.
 5. **End-of-issue post-impl-review.** After the wave loop exits (every wave's tasks committed and reviewed), invoke `uberdev:post-impl-review` skill (Skill tool, NOT Task) **exactly once** with the accumulated state:
    - `changed_paths`: `ALL_CHANGED_PATHS` (deduped union of every wave's reported paths)
-   - `commit_range`: `<BASELINE_SHA>..HEAD` (captured at start of step 3) — equivalently `HEAD~$(git rev-list --count <BASELINE_SHA>..HEAD)..HEAD`. The `git rev-list --count` form is robust to spec/quality fix-up commits that increment the on-branch commit count beyond raw task count.
+   - `commit_range`: `<BASELINE_SHA>..HEAD` (anchor captured at start of step 3 — see step 3 for the fix-up-commit robustness rationale; equivalent commit-count form: `HEAD~$(git rev-list --count <BASELINE_SHA>..HEAD)..HEAD`).
    - `tier`: passed through from the orchestrator (medium/large)
    - `WAVE`: `final` — drives the output artifact filename `.uberdev/research/$RUN_ID/post-impl-review-wave-final.md`. The existing `finish-branch` glob `post-impl-review-wave-*.md` matches without any read-path change.
    Skill returns the aggregate findings table. Findings are ADVISORY — do NOT block on `REVISIONS_REQUIRED` at this layer. Append findings to the running session log so `finish-branch` can compose the PR body's `## Reviewer findings summary`.
@@ -92,7 +92,7 @@ digraph when_to_use {
                 ↓
             spec reviewers (parallel) → fix loop → re-reviews
             quality reviewers (parallel) → fix loop → re-reviews
-                ↓ accumulate ALL_CHANGED_PATHS; no advisory fanout between waves
+                ↓ accumulate ALL_CHANGED_PATHS into running set
                 ↓ no merge step — already on feature branch
 [wave-2] →  Agent(T4, edits files only)  ┐
             Agent(T5, edits files only)  ┘  (parallel, depend on wave-1 commits)
@@ -266,11 +266,8 @@ Ownership map:
 
 === AFTER ALL WAVES ===
 
-[Invoke uberdev:post-impl-review skill ONCE with changed_paths=ALL_CHANGED_PATHS,
- commit_range=<BASELINE_SHA>..HEAD, tier passed through, WAVE=final]
-[5 advisory reviewer agents fan out in a single message; aggregate written to
- .uberdev/research/$RUN_ID/post-impl-review-wave-final.md]
-[Findings are advisory — no blocking on REVISIONS_REQUIRED]
+[Invoke uberdev:post-impl-review skill ONCE — see step 5 for inputs and artifact path]
+[5 advisory reviewer agents fan out in a single message; findings are advisory]
 [For large tier: orchestrator Phase 5.5 dispatches pr-test-analyzer pre-merge after this skill returns]
 
 [Hand off to uberdev:finish-branch]
