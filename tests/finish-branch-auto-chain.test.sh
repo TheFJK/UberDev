@@ -142,6 +142,58 @@ assert_grep "$FINISH_BRANCH" \
   "worktree-preservation rule for Options 2/3 still present"
 
 echo
+echo "== Issue #67: PR-body composition glob updated for post-push relocation =="
+# Glob #1 — widened from `post-impl-review-wave-*.md` to `post-impl-review-*.md`
+# so it matches both the new canonical filename (post-impl-review-final.md,
+# written by /uberdev:review-pr Phase 1) AND any legacy `-wave-final.md`
+# artifacts left over from pre-refactor SDD step 5 runs (zero-migration).
+assert_grep "$FINISH_BRANCH" \
+  'post-impl-review-\*\.md' \
+  "G1 — glob #1 widened to post-impl-review-*.md (no wave- infix)"
+# Anti-regression: the old wave-* glob must NOT appear in any executable ls -t line
+if grep -E '^\s*REVIEW_FILES=.*post-impl-review-wave-\*\.md' "$FINISH_BRANCH" >/dev/null; then
+  echo "  FAIL  G1.regression — old glob 'post-impl-review-wave-*.md' must not appear in any live REVIEW_FILES= ls line"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  G1.regression — old wave-*.md glob removed from live REVIEW_FILES= ls line"
+  PASS=$((PASS + 1))
+fi
+# Glob #2 — RETAINED for legacy artifact matching.
+assert_grep "$FINISH_BRANCH" \
+  'issue-\*/post-impl-review\.md' \
+  "G2 — glob #2 .uberdev/research/issue-*/post-impl-review.md RETAINED for legacy artifact matching"
+
+echo
+echo "== Issue #67: Options 1/3/4 bypass caveat documented in interactive-mode docs =="
+assert_grep "$FINISH_BRANCH" \
+  'Options 1, 3, 4 bypass post-impl review|Options 1.*3.*4.*bypass.*post-impl|bypass.*Options 1.*3.*4' \
+  "C1 — Options 1/3/4 caveat prose present (interactive-mode bypass documentation)"
+assert_grep "$FINISH_BRANCH" \
+  'Only Option 2.*preserves the chain|Option 2.*preserves the chain' \
+  "C2 — caveat names Option 2 as the only chain-preserving choice"
+assert_grep "$FINISH_BRANCH" \
+  '/uberdev:review-pr.*Phase 1.*5-reviewer|5-reviewer.*post-impl-review fanout|post-impl-review.*sole live caller' \
+  "C3 — caveat cross-references /uberdev:review-pr Phase 1 as the post-impl-review host"
+
+echo
+echo "== Issue #67: Quick Reference table includes Post-impl review column =="
+assert_grep "$FINISH_BRANCH" \
+  '\| Post-impl review \|' \
+  "QR1 — Quick Reference table has Post-impl review column header"
+assert_grep "$FINISH_BRANCH" \
+  '1\. Merge locally.*\|.*bypassed' \
+  "QR2 — Option 1 row marks Post-impl review as bypassed"
+assert_grep "$FINISH_BRANCH" \
+  '2\. Create PR.*\|.*runs' \
+  "QR3 — Option 2 row marks Post-impl review as runs (via /review-pr Phase 1)"
+assert_grep "$FINISH_BRANCH" \
+  '3\. Keep as-is.*\|.*bypassed' \
+  "QR4 — Option 3 row marks Post-impl review as bypassed"
+assert_grep "$FINISH_BRANCH" \
+  '4\. Discard.*\|.*bypassed' \
+  "QR5 — Option 4 row marks Post-impl review as bypassed"
+
+echo
 echo "== Anti-attribution guard: no Co-Authored-By in any new prose =="
 assert_not_grep "$FINISH_BRANCH" \
   'Co-Authored-By' \
