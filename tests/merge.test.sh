@@ -623,11 +623,14 @@ assert_grep "$SKILL_FILE" 'uberdev_review_trail'    "M36.tea2 — TRUST_ANCHOR_E
 assert_grep "$SKILL_FILE" 'bypass_with_waiver'      "M36.tea3 — TRUST_ANCHOR_ENUM value bypass_with_waiver"
 
 echo
-echo "== M37: SKILL.md GATE_FAIL_REASON_ENUM — 11 members (7 trust-resolution + 4 pre-condition) post issue #47 =="
-# M37: updated for issue #47 — GATE_FAIL_REASON_ENUM expanded for trust_trail_agent_invalid_input
-# (7 trust-resolution reasons) + 4 pre-condition reasons restored after type-design review
-# flagged a prose/enum mismatch (Step 1.4 pre-flight gates emit pr_state_not_open / is_draft /
-# ci_red / merge_state_blocked unconditionally; those values must be in the enum).
+echo "== M37: SKILL.md GATE_FAIL_REASON_ENUM — 12 members (8 trust-resolution + 4 pre-condition) post issue #52 =="
+# M37: updated for issue #52 — GATE_FAIL_REASON_ENUM expanded for trust_trail_json_sha_mismatch
+# (8 trust-resolution reasons) + 4 pre-condition reasons. Issue #52 split the (d) sub-condition's
+# JSON-absent vs JSON-present-but-SHA-mismatch cases: absent → advisory only (by-design on fresh
+# clone, see D1); present-but-mismatch → gate_fail trust_trail_json_sha_mismatch (genuine staleness
+# signal). Earlier issue #47 added trust_trail_agent_invalid_input. The four pre-condition reasons
+# (pr_state_not_open / is_draft / ci_red / merge_state_blocked) are emitted by Step 1.4 pre-flight
+# gates that fire regardless of trust path.
 assert_grep "$SKILL_FILE" 'review_decision_not_approved'      "M37.gfr1 — trust-resolution reason review_decision_not_approved"
 assert_grep "$SKILL_FILE" 'trust_trail_missing'                "M37.gfr2 — trust-resolution reason trust_trail_missing"
 assert_grep "$SKILL_FILE" 'trust_trail_stale_sha'              "M37.gfr3 — trust-resolution reason trust_trail_stale_sha"
@@ -635,6 +638,7 @@ assert_grep "$SKILL_FILE" 'trust_trail_label_missing'          "M37.gfr4 — tru
 assert_grep "$SKILL_FILE" 'trust_trail_trailer_missing'        "M37.gfr5 — trust-resolution reason trust_trail_trailer_missing"
 assert_grep "$SKILL_FILE" 'trust_trail_json_missing'           "M37.gfr6 — trust-resolution reason trust_trail_json_missing"
 assert_grep "$SKILL_FILE" 'trust_trail_agent_invalid_input'    "M37.gfr7 — trust-resolution reason trust_trail_agent_invalid_input (NEW)"
+assert_grep "$SKILL_FILE" 'trust_trail_json_sha_mismatch'      "M37.gfr8 — trust-resolution reason trust_trail_json_sha_mismatch (NEW)"
 assert_grep "$SKILL_FILE" 'pr_state_not_open'                  "M37.precond1 — pre-condition reason pr_state_not_open"
 assert_grep "$SKILL_FILE" 'is_draft'                           "M37.precond2 — pre-condition reason is_draft"
 assert_grep "$SKILL_FILE" 'ci_red'                             "M37.precond3 — pre-condition reason ci_red"
@@ -645,11 +649,11 @@ ENUM_ROW=$(grep -E '\| `GATE_FAIL_REASON_ENUM` \|' "$SKILL_FILE" || true)
 # tokens like `gate_fail.data.reason`), so the count equals exactly
 # the number of reasons backticked in the row: 7 trust-resolution + 4 pre-condition = 11.
 REASON_COUNT=$(echo "$ENUM_ROW" | grep -oE '`[a-z_]+`' | wc -l | tr -d ' ')
-if [ "$REASON_COUNT" -eq 11 ]; then
-  echo "  PASS  M37.count — GATE_FAIL_REASON_ENUM row contains exactly 11 reasons (7 trust-resolution + 4 pre-condition)"
+if [ "$REASON_COUNT" -eq 12 ]; then
+  echo "  PASS  M37.count — GATE_FAIL_REASON_ENUM row contains exactly 12 reasons (8 trust-resolution + 4 pre-condition)"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  M37.count — GATE_FAIL_REASON_ENUM row contains $REASON_COUNT reasons; expected exactly 11"
+  echo "  FAIL  M37.count — GATE_FAIL_REASON_ENUM row contains $REASON_COUNT reasons; expected exactly 12"
   FAIL=$((FAIL + 1))
 fi
 
@@ -1057,6 +1061,30 @@ else
     fail "M62.6 — Step 1.1 must prescribe concrete trap syntax (trap 'rm -rf \$LOCK_DIR' EXIT INT TERM) so cleanup-on-exit is generated consistently"
   fi
 fi
+
+echo
+echo "== M63: Phase 1.4 PATH_2 sub-condition (d) hybrid present/absent behavior (issue #52) =="
+
+assert_grep "$SKILL_FILE" 'trust_trail_json_absent' \
+  "M63.absent-advisory — JSON-absent advisory reason documented in PATH_2 (d) prose"
+
+assert_grep "$SKILL_FILE" 'trust_trail_json_sha_mismatch' \
+  "M63.mismatch-gatefail — JSON-present SHA-mismatch gate_fail reason documented in PATH_2 (d) prose"
+
+# M63.missing-retired — scoped to Phase 1.4 body (between Step 1.4 heading and Step 1.5 heading);
+# the OLD reason must NOT appear as a gate_fail data.reason inside the (d) bullet body.
+PHASE_14_BODY=$(awk '/^### Step 1\.4/,/^### Step 1\.5/' "$SKILL_FILE")
+if echo "$PHASE_14_BODY" | grep -qE 'gate_fail.*data\.reason="trust_trail_json_missing"'; then
+  fail "M63.missing-retired — gate_fail with trust_trail_json_missing must NOT appear inside Phase 1.4 PATH_2 (d) prose post-#52"
+else
+  pass "M63.missing-retired — Phase 1.4 PATH_2 (d) no longer emits gate_fail trust_trail_json_missing (deprecation-pattern preserved at the constants row only)"
+fi
+
+assert_grep "$SKILL_FILE" 'absence on a fresh clone is by design|fresh clone.*by design' \
+  "M63.absence-by-design — design-intent prose for fresh-clone JSON absence preserved"
+
+assert_grep "$SKILL_FILE" 'short-circuit.*sub-condition.*d|d.*only.*checked.*c.*returned.*PASS' \
+  "M63.short-circuit-preserved — (c) short-circuit-on-non-PASS clause still documented in PATH_2"
 
 echo
 echo "== Summary =="
