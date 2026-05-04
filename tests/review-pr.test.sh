@@ -199,6 +199,21 @@ assert_grep "$REVIEW_PR" \
   "R6 — run-id regex literal present"
 
 echo
+echo "== R7: --turbo flag defined as acknowledged no-op (issue #52 Defect 2) =="
+
+assert_grep "$REVIEW_PR" 'argument-hint:.*--turbo' \
+  "R7.argument-hint — --turbo flag declared in argument-hint frontmatter"
+
+assert_grep "$REVIEW_PR" '\-\-turbo.*no-op|no-op.*--turbo|acknowledged no-op|forwarder-compatibility.*--turbo' \
+  "R7.acknowledged-noop — prose describes --turbo as an acknowledged no-op"
+
+assert_grep "$REVIEW_PR" '[Dd]etect.*--turbo|--turbo.*strip|strip.*--turbo' \
+  "R7.detection-strip — Step 1 (Determine Review Scope) detects and strips --turbo from aspect list"
+
+assert_grep "$REVIEW_PR" '\-\-turbo.*does NOT (alter|mutate|change)|--turbo.*identical|deterministic.*SHA.*binding' \
+  "R7.no-mutation — prose states --turbo does NOT mutate SIMPLIFY_PHASE / Phase 2 behavior"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
