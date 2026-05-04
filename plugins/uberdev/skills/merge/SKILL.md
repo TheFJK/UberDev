@@ -213,7 +213,7 @@ The `jq '.[] | select(.isDraft==false)'` filter is belt-and-suspenders against a
 
 If the `gh` invocation returns an empty array (all PRs are drafts, or no open PRs exist on `$integration_branch`), the candidate set is empty — Step 1.7's clean-exit-0 contract applies (see Step 1.7's bare-mode cross-reference).
 
-Step 1.2.5 does NOT re-run the bare-mode fast-path query (that lives in Step 1.0.5). The two steps are intentionally split because the bare-mode fast-path query has zero dependency on `$integration_branch` while `DISCOVERY_FILTER` requires it — collapsing them into a single Step 1.0.5 would invert the dependency on `$integration_branch` and break the pipeline.
+This step is the `$integration_branch`-dependent half of the split detection introduced in Step 1.0.5; the two steps are intentionally separate (see Step 1.0.5 for the rationale) and collapsing them would invert the dependency on `$integration_branch`. Do not collapse.
 
 ### Step 1.3 — Last-resort fallback when all four tiers are empty
 

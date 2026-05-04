@@ -1193,12 +1193,15 @@ if [ "$PREFLIGHT_FORMAT_ROWS" = "1" ]; then
 else
   fail "M67.unique — PREFLIGHT_SUMMARY_FORMAT MUST be declared exactly once in Constants table (got $PREFLIGHT_FORMAT_ROWS rows; spec Q5)"
 fi
-if grep -qE 'merging %d PR%s in order: %s' "$SKILL_FILE"; then
+# Mirror M65/M66: scope sub-checks to the row literal so future Step 2.2 prose
+# additions that quote the format string don't accidentally satisfy these.
+PREFLIGHT_FORMAT_ROW=$(grep -E '^\| `PREFLIGHT_SUMMARY_FORMAT` \|' "$SKILL_FILE" || true)
+if echo "$PREFLIGHT_FORMAT_ROW" | grep -qE 'merging %d PR%s in order: %s'; then
   pass "M67.format-literal — PREFLIGHT_SUMMARY_FORMAT contains the literal 'merging %d PR%s in order: %s'"
 else
   fail "M67.format-literal — PREFLIGHT_SUMMARY_FORMAT MUST contain literal 'merging %d PR%s in order: %s' (spec Q5)"
 fi
-if grep -qE '80-char|80 char' "$SKILL_FILE"; then
+if echo "$PREFLIGHT_FORMAT_ROW" | grep -qE '80-char|80 char'; then
   pass "M67.wrap-convention — Constants prose mentions 80-char line-wrap convention"
 else
   fail "M67.wrap-convention — Constants prose MUST mention the 80-char line-wrap convention for long PR-number lists (spec Q5)"
@@ -1347,8 +1350,7 @@ if echo "$PHASE_14_BLOCK" | grep -qE 'for each|per discovered PR|per-PR|every PR
 else
   fail "M73.per-pr-fanout — Phase 1.4 MUST preserve 'for each' / 'per discovered PR' / 'per-PR' fanout language (AC#2: bare-discover does not relax dispatch shape)"
 fi
-STEP_22_FOR_M73=$(awk '/^### Step 2\.2/,/^### Step 2\.3/' "$SKILL_FILE")
-if echo "$STEP_22_FOR_M73" | grep -qE 'ONE assistant turn|single-message Task|single-message invariant'; then
+if echo "$STEP_22_BLOCK" | grep -qE 'ONE assistant turn|single-message Task|single-message invariant'; then
   pass "M73.single-message-preserved — Step 2.2 fanout preserves the single-message Task() invariant"
 else
   fail "M73.single-message-preserved — Step 2.2 MUST preserve 'ONE assistant turn' / 'single-message Task()' invariant (AC#2/AC#4: bare-discover changes candidate set but not dispatch shape)"
