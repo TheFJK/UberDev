@@ -647,7 +647,7 @@ ENUM_ROW=$(grep -E '\| `GATE_FAIL_REASON_ENUM` \|' "$SKILL_FILE" || true)
 # `[a-z_]+` matches lowercase snake_case reason tokens only (not the
 # UPPERCASE enum-name `GATE_FAIL_REASON_ENUM` itself, and not dotted
 # tokens like `gate_fail.data.reason`), so the count equals exactly
-# the number of reasons backticked in the row: 7 trust-resolution + 4 pre-condition = 11.
+# the number of reasons backticked in the row: 8 trust-resolution + 4 pre-condition = 12.
 REASON_COUNT=$(echo "$ENUM_ROW" | grep -oE '`[a-z_]+`' | wc -l | tr -d ' ')
 if [ "$REASON_COUNT" -eq 12 ]; then
   echo "  PASS  M37.count — GATE_FAIL_REASON_ENUM row contains exactly 12 reasons (8 trust-resolution + 4 pre-condition)"
