@@ -155,21 +155,41 @@ fi
 
 echo
 echo "== Both AUTO_MODE branches of trivial+small heredocs omit post-impl-review (#67) =="
-AUTO_MODE_0_BODIES=$(awk '
-  /^if \[\[ "\$AUTO_MODE" != "1" \]\]; then$/ { in_solve=1; next }
-  in_solve && /^else$/ { in_solve=0; next }
-  in_solve && /<< EOF$/ { in_heredoc=1; next }
-  in_solve && in_heredoc && /^EOF$/ { in_heredoc=0; next }
-  in_solve && in_heredoc { print }
-' "$SOLVE_PIPELINE")
-AUTO_MODE_1_BODIES=$(awk '
-  /^if \[\[ "\$AUTO_MODE" != "1" \]\]; then$/ { in_solve=1; next }
-  in_solve && /^else$/ { in_solve=0; in_turbo=1; next }
-  in_turbo && /^fi$/ { in_turbo=0; next }
-  in_turbo && /<< EOF$/ { in_heredoc=1; next }
-  in_turbo && in_heredoc && /^EOF$/ { in_heredoc=0; next }
-  in_turbo && in_heredoc { print }
-' "$SOLVE_PIPELINE")
+# Anchor presence guard — if the extraction anchors disappear from solve-pipeline
+# (e.g., heredoc reshape), awk silently produces empty output and the grep below
+# returns 1 ("no match"), causing both assertions to PASS when they should
+# report a setup error. Validate the anchors exist before extracting.
+if ! grep -qE '^if \[\[ "\$AUTO_MODE" != "1" \]\]; then$' "$SOLVE_PIPELINE" \
+   || ! grep -qE '^else$' "$SOLVE_PIPELINE"; then
+  echo "  FAIL  setup error: AUTO_MODE branch anchors not found in $SOLVE_PIPELINE — heredoc reshaped? Update the awk extraction in tests/post-impl-review.test.sh."
+  FAIL=$((FAIL + 1))
+else
+  AUTO_MODE_0_BODIES=$(awk '
+    /^if \[\[ "\$AUTO_MODE" != "1" \]\]; then$/ { in_solve=1; next }
+    in_solve && /^else$/ { in_solve=0; next }
+    in_solve && /<< EOF$/ { in_heredoc=1; next }
+    in_solve && in_heredoc && /^EOF$/ { in_heredoc=0; next }
+    in_solve && in_heredoc { print }
+  ' "$SOLVE_PIPELINE")
+  AUTO_MODE_1_BODIES=$(awk '
+    /^if \[\[ "\$AUTO_MODE" != "1" \]\]; then$/ { in_solve=1; next }
+    in_solve && /^else$/ { in_solve=0; in_turbo=1; next }
+    in_turbo && /^fi$/ { in_turbo=0; next }
+    in_turbo && /<< EOF$/ { in_heredoc=1; next }
+    in_turbo && in_heredoc && /^EOF$/ { in_heredoc=0; next }
+    in_turbo && in_heredoc { print }
+  ' "$SOLVE_PIPELINE")
+  # Body-non-empty guard — the trivial+small heredocs MUST exist post-refactor
+  # (only their bodies must omit post-impl-review). Empty extraction = setup error.
+  if [ -z "$AUTO_MODE_0_BODIES" ]; then
+    echo "  FAIL  setup error: AUTO_MODE=0 heredoc bodies extracted as empty — heredoc reshaped or removed? Update the awk extraction."
+    FAIL=$((FAIL + 1))
+  fi
+  if [ -z "$AUTO_MODE_1_BODIES" ]; then
+    echo "  FAIL  setup error: AUTO_MODE=1 heredoc bodies extracted as empty — heredoc reshaped or removed? Update the awk extraction."
+    FAIL=$((FAIL + 1))
+  fi
+fi
 if grep -qE 'post-impl-review|uberdev:post-impl-review' <<<"$AUTO_MODE_0_BODIES"; then
   echo "  FAIL  AUTO_MODE=0 (interactive) trivial/small heredoc BODIES MUST NOT mention post-impl-review (per #67 — pre-push call sites removed)"
   FAIL=$((FAIL + 1))
