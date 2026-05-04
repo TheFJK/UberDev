@@ -88,7 +88,7 @@ Dispatch the research subagents in a SINGLE message with multiple Task() calls. 
 
 **Per-repo fanout cap (issue #63).** Before dispatching the medium/large
 fanout's 6 research subagents, source
-`${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh` and call
+`${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh` and call
 `CAP=$(uberdev_read_int_in_range fanout_concurrency.research UBERDEV_FANOUT_RESEARCH 1 50 6)`.
 When `CAP < 6`, split the 6 Task() calls into `ceil(6 / CAP)` sequential
 single-message waves — each wave still obeys the single-message
@@ -100,8 +100,8 @@ Default 6, range [1, 50], precedence env > config > default.
 
 ```bash
 # Phase 1 fanout cap (issue #63)
-if [ -r "${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh" ]; then
-  . "${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh"
+if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
+  . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
   FANOUT_RESEARCH_CAP="$(uberdev_read_int_in_range fanout_concurrency.research UBERDEV_FANOUT_RESEARCH 1 50 6)"
 else
   FANOUT_RESEARCH_CAP=6

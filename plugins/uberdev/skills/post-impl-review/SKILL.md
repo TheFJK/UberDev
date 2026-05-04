@@ -56,8 +56,8 @@ with the configured value. v2 issue can extend.
 
 ```bash
 # Pre-flight: read advisory timeout (issue #63)
-if [ -r "${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh" ]; then
-  . "${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh"
+if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
+  . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
   REVIEW_PR_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.review_pr UBERDEV_REVIEW_PR_TIMEOUT 60 86400 900)"
   # Record the advisory value to the run audit (no kill).
   if [ -d ".uberdev" ]; then
@@ -90,7 +90,7 @@ In ONE assistant turn, fire 5 Task() calls in parallel. Each receives the same b
 | `comment-analyzer` | `agents/comment-analyzer.md` | Stale, redundant, or load-bearing comments |
 
 **Per-repo fanout cap (issue #63).** Before dispatching the 5 reviewer
-agents, source `${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh` and
+agents, source `${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh` and
 call `CAP=$(uberdev_read_int_in_range fanout_concurrency.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 5)`.
 When `CAP < 5`, split the 5 Task() calls into `ceil(5 / CAP)` sequential
 single-message waves — each wave still obeys the single-message
@@ -100,8 +100,8 @@ precedence env > config > default.
 
 ```bash
 # Step 2 fanout cap (issue #63)
-if [ -r "${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh" ]; then
-  . "${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh"
+if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
+  . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
   POST_IMPL_REVIEW_CAP="$(uberdev_read_int_in_range fanout_concurrency.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 5)"
 else
   POST_IMPL_REVIEW_CAP=5

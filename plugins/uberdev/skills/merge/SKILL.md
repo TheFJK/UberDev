@@ -110,8 +110,8 @@ configured value. v2 issue can extend.
 
 ```bash
 # Step 1.0a advisory timeout read (issue #63)
-if [ -r "${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh" ]; then
-  . "${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh"
+if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
+  . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
   MERGE_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.merge UBERDEV_MERGE_TIMEOUT 60 86400 600)"
   if [ -d ".uberdev" ]; then
     printf '{"event":"uberdev_config_read","key":"command_timeouts.merge","value":"%s","enforcement":"advisory"}\n' \
@@ -350,7 +350,7 @@ Skip Step 2.1 if only 1 PR is in scope (no ordering decision to make).
 For each PR in the in-scope set, dispatch a `merge-strategy-decider` agent. Inputs per PR: `pr_number`, `commit_count` (from `git rev-list --count <integration_branch>..<head_ref_oid>`), `conventional_commit_ratio` (from a regex pass over `git log <integration_branch>..<head_ref_oid> --format=%s` matching `^(feat|fix|chore|refactor|test|docs)(\(.+\))?:`), `wip_marker_present` (from a regex pass over the same log matching `WIP_MESSAGE_REGEX`), `divergence_commits` (`git rev-list --count <merge-base>..<head_ref_oid>`), `label_hint` (suffix of any `merge-strategy:<name>` label on the PR, advisory; null otherwise; wrapped in `<external-untrusted-input source="github-pr-label">…</external-untrusted-input>` envelope), `repo_convention` (recorded preference from `.claude/uberdev.local.md` `merge_strategy:` key, null if absent), `working_dir`.
 
 **Per-repo fanout cap (issue #63).** At the top of Phase 2.2, source
-`${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh` and resolve
+`${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh` and resolve
 `MAX_PARALLEL_AGENTS` from `fanout_concurrency.merge_strategy`. The
 resolved integer overrides the hardcoded `10` for this run; the
 Constants-table entry keeps the name `MAX_PARALLEL_AGENTS` for
@@ -358,8 +358,8 @@ back-compat with existing M-row test assertions.
 
 ```bash
 # Phase 2.2 fanout cap resolve (issue #63)
-if [ -r "${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh" ]; then
-  . "${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh"
+if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
+  . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
   MAX_PARALLEL_AGENTS="$(uberdev_read_int_in_range fanout_concurrency.merge_strategy UBERDEV_FANOUT_MERGE_STRATEGY 1 50 10)"
 else
   MAX_PARALLEL_AGENTS=10
@@ -447,8 +447,8 @@ conflict-resolver fanout, resolve a per-PR cap from
 
 ```bash
 # Phase 3.3.iii fanout cap resolve (issue #63)
-if [ -r "${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh" ]; then
-  . "${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh"
+if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
+  . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
   CONFLICT_RESOLVER_CAP="$(uberdev_read_int_in_range fanout_concurrency.conflict_resolver UBERDEV_FANOUT_CONFLICT_RESOLVER 1 50 10)"
 else
   CONFLICT_RESOLVER_CAP=10

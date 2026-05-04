@@ -186,9 +186,9 @@ for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
   #   solve_tier_floor    — env: SOLVE_TIER_FLOOR    — enum
   #   solve_tier_ceiling  — env: SOLVE_TIER_CEILING  — enum
   # Helpers from plugins/uberdev/lib/config-read.sh.
-  if [ -r "${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh" ]; then
+  if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
     # shellcheck source=/dev/null
-    . "${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh"
+    . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
     FLOOR="$(uberdev_read_enum solve_tier_floor   SOLVE_TIER_FLOOR   "trivial|small|medium|large" "")"
     CEILING="$(uberdev_read_enum solve_tier_ceiling SOLVE_TIER_CEILING "trivial|small|medium|large" "")"
     TIER="$(uberdev_clamp_tier "$TIER" "$FLOOR" "$CEILING")"
@@ -374,10 +374,13 @@ echo "Starting claude agent for issue #ISSUE_NUM (tier: TIER)..."
 # pre-existing files, exfil, self-modification). Strictly safer than
 # --dangerously-skip-permissions for autonomous /solve runs.
 PERM_FLAG="PERM_FLAG_VALUE"
-# Resolve /solve wall-clock timeout (issue #63). Helper from plugins/uberdev/lib.
-if [ -r "${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh" ]; then
+# Resolve /solve wall-clock timeout (issue #63). Helper path is sed-substituted
+# at heredoc-write time below — the launcher runs in a fresh terminal session
+# that does NOT inherit $CLAUDE_PLUGIN_ROOT, so we resolve the path now (mirrors
+# the REPO_ROOT / CLAUDE_BIN substitution pattern).
+if [ -r "CLAUDE_PLUGIN_ROOT_VAL/lib/config-read.sh" ]; then
   # shellcheck source=/dev/null
-  . "${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh"
+  . "CLAUDE_PLUGIN_ROOT_VAL/lib/config-read.sh"
   SOLVE_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.solve UBERDEV_SOLVE_TIMEOUT 60 86400 3600)"
 else
   SOLVE_TIMEOUT=3600
@@ -408,6 +411,7 @@ sed "${SED_INPLACE[@]}" \
   -e "s/TIER/$TIER/g" \
   -e "s/DETECTED_TERMINAL/${TERMINAL:-cmux}/g" \
   -e "s|PERM_FLAG_VALUE|$PERM_FLAG_VAL|g" \
+  -e "s|CLAUDE_PLUGIN_ROOT_VAL|${CLAUDE_PLUGIN_ROOT:-}|g" \
   /tmp/solve-$ISSUE_NUM.sh
 chmod +x /tmp/solve-$ISSUE_NUM.sh
 ```
