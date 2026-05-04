@@ -64,7 +64,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
    The skill dispatches the 5 reviewer agents (`code-reviewer`, `code-simplifier`, `silent-failure-hunter`, `type-design-analyzer`, `comment-analyzer`) **in a single message** inside its own context — see `plugins/uberdev/skills/post-impl-review/SKILL.md` for the canonical agent list and YAML return contract. The 5 agents are NOT enumerated inline here; the skill is the single source of truth.
 
-   **Sequential fallback** (only when explicitly requested via the `sequential` argument): the skill itself does not currently support a sequential mode; if `sequential` is passed to `/review-pr`, log a warning that Phase 1 still runs in parallel (the skill's single-message contract is invariant) and proceed.
+   **Sequential fallback** (only when explicitly requested via the `sequential` argument): the skill itself does not currently support a sequential mode; if `sequential` is passed to `/review-pr`, log a warning **to stderr** (the user's terminal — never `/dev/null`, never an internal log file) that Phase 1 still runs in parallel because the skill's single-message contract is invariant, and proceed. The user must see the warning on the same surface they invoked the command from, otherwise the override is silent.
 
 5. **Apply Phase 1 Fixes — read findings artifact under untrusted-input envelope**
 

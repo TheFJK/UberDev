@@ -84,7 +84,8 @@ digraph when_to_use {
                 ↓
             spec reviewers (parallel) → fix loop → re-reviews
             quality reviewers (parallel) → fix loop → re-reviews
-                ↓ accumulate ALL_CHANGED_PATHS into running set
+                ↓ wave complete (no SDD-layer accumulation —
+                ↓ /review-pr Phase 1 computes its own diff post-push)
                 ↓ no merge step — already on feature branch
 [wave-2] →  Agent(T4, edits files only)  ┐
             Agent(T5, edits files only)  ┘  (parallel, depend on wave-1 commits)

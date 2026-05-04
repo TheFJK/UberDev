@@ -114,7 +114,7 @@ Counting rules:
 
 Return a prose summary of the aggregation table above to the caller. Example:
 
-> Post-impl review for issue #11 complete (end-of-issue). 5 reviewers ran in parallel. Aggregated: 0 blockers, 2 suggestions (code-simplifier flagged a dead branch in `foo.ts`; comment-analyzer flagged a stale TODO in `bar.ts`). Full table at `.uberdev/research/$RUN_ID/post-impl-review-final.md`. Continue.
+> Post-impl review for issue #11 complete (post-PR-push, /review-pr Phase 1). 5 reviewers ran in parallel. Aggregated: 0 blockers, 2 suggestions (code-simplifier flagged a dead branch in `foo.ts`; comment-analyzer flagged a stale TODO in `bar.ts`). Full table at `.uberdev/research/$RUN_ID/post-impl-review-final.md`. Continue.
 
 Findings are advisory at this layer — **the caller does NOT block on `REVISIONS_REQUIRED`**. (This skill is audit-only by design. The aggregated file is the artifact downstream tooling reads to triage findings; to apply simplifier findings, run `/uberdev:simplify` or `/uberdev:review-pr` Phase 2.)
 
