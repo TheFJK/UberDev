@@ -1092,25 +1092,33 @@ echo
 echo "== M64: SKILL.md run-summary per-PR conflict-files sub-block (issue #60) =="
 # SUMMARY_BLOCK is set at file scope by M27; reuse it. PHASE_33IV is M64-specific.
 PHASE_33IV=$(awk '/^iv\. \*\*Apply resolutions\*\*/,/^v\. /' "$SKILL_FILE")
+# CONFLICT_BLOCK: the new conflict-files sub-block within the run-summary
+# template fence. Bounding to this slice keeps the field/tag/conditional
+# assertions from matching incidental occurrences elsewhere in the file.
+CONFLICT_BLOCK=$(echo "$SUMMARY_BLOCK" | awk '/^[[:space:]]*conflict files:/,/^```$/')
 # SANITIZE_BODY: bound the sanitize_agent_text body so M64.sanitize-impl below
 # matches the helper definition itself, not an incidental occurrence elsewhere.
 SANITIZE_BODY=$(awk '/sanitize_agent_text\(\) \{/,/^[[:space:]]*\}[[:space:]]*$/' "$SKILL_FILE")
 
-# AC1 + AC4 — per-file conflict sub-block presence (4 fields).
+# AC1 + AC4 — per-file conflict sub-block presence (4 fields). Case-sensitive
+# (literal -F) so a future "Conflict Files:" or "VERDICT:" mistake fails loudly
+# instead of silently matching the lowercase contract.
 for field in 'conflict files:' 'verdict:' 'justification:' 'risks:'; do
-  if echo "$SUMMARY_BLOCK" | grep -qiE "$field"; then
-    pass "M64.field[$field] — run-summary detail block names \"$field\" (parked-PR conflict sub-block)"
+  if echo "$CONFLICT_BLOCK" | grep -qF "$field"; then
+    pass "M64.field[$field] — conflict-files sub-block names \"$field\" (lowercase, within sub-block)"
   else
-    fail "M64.field[$field] — run-summary detail block MUST include \"$field\" for parked-PR conflict-resolver context"
+    fail "M64.field[$field] — conflict-files sub-block MUST include \"$field\" lowercase, within the sub-block (not just elsewhere in SKILL.md)"
   fi
 done
 
-# Q1 decision — verdict casing must be lowercase, bracketed (2 tags).
+# Q1 decision — verdict casing must be lowercase, bracketed (2 tags), and the
+# tags must appear inside the conflict-files sub-block (not in an unrelated
+# example or comment elsewhere in the run-summary section).
 for tag in '\[refused\]' '\[ambiguous\]'; do
-  if echo "$SUMMARY_BLOCK" | grep -qE "$tag"; then
-    pass "M64.tag[$tag] — verdict casing matches PARK_REASON_ENUM (lowercase, bracketed)"
+  if echo "$CONFLICT_BLOCK" | grep -qE "$tag"; then
+    pass "M64.tag[$tag] — verdict casing matches PARK_REASON_ENUM (lowercase, bracketed) within sub-block"
   else
-    fail "M64.tag[$tag] — verdict in conflict sub-block MUST be lowercase bracketed form ($tag); see PARK_REASON_ENUM"
+    fail "M64.tag[$tag] — verdict tag $tag MUST appear inside the conflict-files sub-block (lowercase bracketed form per PARK_REASON_ENUM)"
   fi
 done
 
@@ -1123,9 +1131,15 @@ for prose_token in 'resolution_summary' 'risks' 'sanitize_agent_text' 'fmt -w 80
   fi
 done
 
-# AC3 — conditional render: the new block must be guarded.
-assert_grep "$SKILL_FILE" 'only if outcome is Parked AND park reason' \
-  "M64.conditional — conflict-files sub-block render-condition documented (gates RESOLVED path unchanged)"
+# AC3 — conditional render: the gate clause must appear INSIDE the
+# conflict-files sub-block template, not merely somewhere in SKILL.md. This
+# catches the regression where the gate is removed from the template but the
+# phrase survives in surrounding prose.
+if echo "$CONFLICT_BLOCK" | grep -qF 'only if outcome is Parked AND park reason'; then
+  pass "M64.conditional — conflict-files sub-block render-condition documented inline with the sub-block (gates RESOLVED path unchanged)"
+else
+  fail "M64.conditional — conflict-files sub-block MUST inline the render-condition clause; gate removal from template would leave RESOLVED path unprotected"
+fi
 
 # Sanitization helper body must be present (literal C0/C1+DEL strip range)
 # AND must appear within the awk-bounded sanitize_agent_text() function — so
