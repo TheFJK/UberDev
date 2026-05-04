@@ -71,6 +71,8 @@ Detect flags from `$ARGUMENTS`:
    Which option?
    ```
 
+   > **Caveat — Options 1, 3, 4 bypass post-impl review.** Options 1 (Merge back to base locally), 3 (Keep the branch as-is), and 4 (Discard this work) skip `gh pr create` entirely, and therefore skip the chain into `/uberdev:review-pr` whose Phase 1 hosts the 5-reviewer post-impl-review fanout (per `plugins/uberdev/skills/post-impl-review/SKILL.md` "When to invoke" — `/uberdev:review-pr` Phase 1 is the sole live caller). Users who pick Options 1, 3, or 4 explicitly opt out of automated post-impl review for that branch. Only Option 2 (Push and create a Pull Request) preserves the chain. The default mode (always-PR, no flags) and `--turbo` mode both auto-select Option 2 — neither is affected by this bypass.
+
    **Don't add explanation** — keep options concise.
 
 3. **Default mode** — neither flag set (the always-PR path):
@@ -112,7 +114,7 @@ Then: Cleanup worktree (Step 5)
 Option 2 PR-body composition: in addition to the standard Summary + Test Plan, two conditional sections are appended when their source artifacts exist:
 
 - **`## Open questions answered by /turbo`** — table rendered from `.uberdev/research/$RUN_ID/questions.md` (written by orchestrator Phase 2 under `--turbo`). Columns: Question | Choice | Confidence. Reviewers can scan for `medium`/`low` confidence rows quickly.
-- **`## Reviewer findings summary`** — the consolidated end-of-issue post-impl-review aggregate (`post-impl-review-wave-final.md`, written by `uberdev:post-impl-review` from `subagent-driven-dev`) and any `pr-test-analyzer` output (large tier only). The read-site glob below (`post-impl-review-wave-*.md`) deliberately matches the new `-final.md` filename and any legacy per-wave artifacts.
+- **`## Reviewer findings summary`** — the post-impl-review aggregate (`post-impl-review-final.md`, written by `uberdev:post-impl-review` from `/uberdev:review-pr` Phase 1 after PR push) and any `pr-test-analyzer` output (large tier only). The read-site glob below (`post-impl-review-*.md`) matches both the new `-final.md` filename and any legacy `-wave-final.md` artifacts left over from pre-refactor runs (zero-migration).
 
 Both sections are read-only dumps; finish-branch does not block on confidence threshold or reviewer verdict (per #11 Q1: advisory only, auto-fix deferred).
 
@@ -134,7 +136,7 @@ fi
 
 # Read the post-impl-review aggregate (and pr-test-analyzer if present) for
 # the Reviewer findings summary section.
-REVIEW_FILES=$(ls -t .uberdev/research/*/post-impl-review-wave-*.md .uberdev/research/issue-*/post-impl-review.md .uberdev/research/*/pr-test-analyzer.md 2>/dev/null | tr '\n' ' ')
+REVIEW_FILES=$(ls -t .uberdev/research/*/post-impl-review-*.md .uberdev/research/issue-*/post-impl-review.md .uberdev/research/*/pr-test-analyzer.md 2>/dev/null | tr '\n' ' ')
 
 # Compose PR body. Heredoc delimiter is unquoted (`<<EOF`, not the single-
 # quoted form) to avoid Claude's permission-pattern evaluator `unmatched '`
@@ -354,12 +356,12 @@ git worktree remove <worktree-path>
 
 ## Quick Reference
 
-| Option | Merge | Push | Keep Worktree | Cleanup Branch |
-|--------|-------|------|---------------|----------------|
-| 1. Merge locally | ✓ | - | - | ✓ |
-| 2. Create PR | - | ✓ | ✓ | - |
-| 3. Keep as-is | - | - | ✓ | - |
-| 4. Discard | - | - | - | ✓ (force) |
+| Option | Merge | Push | Keep Worktree | Cleanup Branch | Post-impl review |
+|--------|-------|------|---------------|----------------|------------------|
+| 1. Merge locally | ✓ | - | - | ✓ | bypassed (no PR) |
+| 2. Create PR | - | ✓ | ✓ | - | runs (via /review-pr Phase 1) |
+| 3. Keep as-is | - | - | ✓ | - | bypassed (no PR) |
+| 4. Discard | - | - | - | ✓ (force) | bypassed (no PR) |
 
 ## Common Mistakes
 
