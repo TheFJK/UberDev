@@ -24,7 +24,8 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 1. **Determine Review Scope**
    - Check git status to identify changed files
    - Parse arguments to see if user requested specific review aspects
-   - Detect `--no-simplify` token in `$ARGUMENTS` and strip it from the aspect list — sets `SIMPLIFY_PHASE=0`, otherwise `SIMPLIFY_PHASE=1` (default). Detect `--turbo` token in `$ARGUMENTS` and strip it from the aspect list — `--turbo` is an acknowledged no-op (forwarder-compatibility for `finish-branch`'s turbo-mode auto-chain); it does NOT mutate `SIMPLIFY_PHASE` or any other phase variable.
+   - Detect `--no-simplify` token in `$ARGUMENTS` and strip it from the aspect list — sets `SIMPLIFY_PHASE=0`, otherwise `SIMPLIFY_PHASE=1` (default).
+   - Detect `--turbo` token in `$ARGUMENTS` and strip it from the aspect list — acknowledged no-op (rationale above); it does NOT mutate `SIMPLIFY_PHASE` or any other phase variable.
    - Default: Run all applicable reviews + Phase 2 simplify pass
 
 2. **Available Review Aspects:**
