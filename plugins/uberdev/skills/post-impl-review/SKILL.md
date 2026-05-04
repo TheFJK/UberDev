@@ -42,6 +42,31 @@ If a reviewer agent surfaces a finding that "we should re-plan", record it as a 
 
 ## Process
 
+### Pre-flight: command_timeouts.review_pr (advisory-only)
+
+Before Step 1, read `command_timeouts.review_pr` from
+`.claude/uberdev.local.md` (env: `UBERDEV_REVIEW_PR_TIMEOUT`; default
+900s; range [60, 86400]). The value is **advisory in v1** — this skill
+does NOT enforce a wall-clock kill (the 5 Task() reviewers run inside
+the caller's Claude turn; enforcing kill semantics there would require
+deeper orchestrator-loop changes, which is out of scope per Q1
+auto-pick). The resolved value is recorded in the audit log under
+`uberdev_config_read` so post-run forensics can correlate slow runs
+with the configured value. v2 issue can extend.
+
+```bash
+# Pre-flight: read advisory timeout (issue #63)
+if [ -r "${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh" ]; then
+  . "${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh"
+  REVIEW_PR_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.review_pr UBERDEV_REVIEW_PR_TIMEOUT 60 86400 900)"
+  # Record the advisory value to the run audit (no kill).
+  if [ -d ".uberdev" ]; then
+    printf '{"event":"uberdev_config_read","key":"command_timeouts.review_pr","value":"%s","enforcement":"advisory"}\n' \
+      "$REVIEW_PR_TIMEOUT" >> ".uberdev/audit.jsonl" 2>/dev/null || true
+  fi
+fi
+```
+
 ### Step 1: Build the shared reviewer brief
 
 Assemble a single brief that all 5 reviewers will receive verbatim:
@@ -63,6 +88,25 @@ In ONE assistant turn, fire 5 Task() calls in parallel. Each receives the same b
 | `silent-failure-hunter` | `agents/silent-failure-hunter.md` | Swallowed errors, ignored returns, silent fallbacks |
 | `type-design-analyzer` | `agents/type-design-analyzer.md` | `any`/`unknown` misuse, type safety holes |
 | `comment-analyzer` | `agents/comment-analyzer.md` | Stale, redundant, or load-bearing comments |
+
+**Per-repo fanout cap (issue #63).** Before dispatching the 5 reviewer
+agents, source `${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh` and
+call `CAP=$(uberdev_read_int_in_range fanout_concurrency.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 5)`.
+When `CAP < 5`, split the 5 Task() calls into `ceil(5 / CAP)` sequential
+single-message waves — each wave still obeys the single-message
+invariant. When `CAP >= 5` (default), dispatch all 5 in one wave
+(today's behaviour, unchanged). Default 5, range [1, 50],
+precedence env > config > default.
+
+```bash
+# Step 2 fanout cap (issue #63)
+if [ -r "${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh" ]; then
+  . "${CLAUDE_PLUGIN_ROOT}/uberdev/lib/config-read.sh"
+  POST_IMPL_REVIEW_CAP="$(uberdev_read_int_in_range fanout_concurrency.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 5)"
+else
+  POST_IMPL_REVIEW_CAP=5
+fi
+```
 
 Each return MUST be in this YAML shape (each agent's own frontmatter codifies it):
 
