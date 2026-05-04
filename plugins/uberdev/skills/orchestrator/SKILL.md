@@ -86,7 +86,7 @@ Dispatch the research subagents in a SINGLE message with multiple Task() calls. 
 - `small` tier: dispatch only `research-codebase`
 - `medium`/`large`: dispatch `research-codebase`, `research-patterns`, `research-prior-art`, `research-constraints`, `research-security`, `research-test-coverage` — gated by per-topic SHORTCIRCUIT_<TOPIC> flags. All Task() calls remain in a single message.
 
-**Per-repo fanout cap (issue #63).** Before dispatching the medium/large
+**Per-repo fanout cap.** Before dispatching the medium/large
 fanout's 6 research subagents, source
 `${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh` and call
 `CAP=$(uberdev_read_int_in_range fanout_concurrency.research UBERDEV_FANOUT_RESEARCH 1 50 6)`.
@@ -99,7 +99,7 @@ unaffected (only 1 agent dispatched). Mirrors the
 Default 6, range [1, 50], precedence env > config > default.
 
 ```bash
-# Phase 1 fanout cap (issue #63)
+# Phase 1 fanout cap
 if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
   . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
   FANOUT_RESEARCH_CAP="$(uberdev_read_int_in_range fanout_concurrency.research UBERDEV_FANOUT_RESEARCH 1 50 6)"

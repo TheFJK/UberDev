@@ -133,19 +133,19 @@ bot_authors_allow_list:          # DEPRECATED — no behavioural effect. /merge 
   - dependabot[bot]
   - renovate[bot]
 
-# --- /solve tier clamp (issue #63) ---
+# --- /solve tier clamp ---
 solve_tier_floor: small          # one of: trivial, small, medium, large; clamps auto-triage UP to floor; default unset (no lower clamp); env: SOLVE_TIER_FLOOR
 solve_tier_ceiling: medium       # one of: trivial, small, medium, large; clamps auto-triage DOWN to ceiling; default unset (no upper clamp); env: SOLVE_TIER_CEILING
 
-# --- per-phase parallel fanout caps (issue #63) ---
+# --- per-phase parallel fanout caps ---
 # dot-path refs: fanout_concurrency.research, fanout_concurrency.post_impl_review, fanout_concurrency.merge_strategy, fanout_concurrency.conflict_resolver
 fanout_concurrency:
   research: 6                    # int [1, 50]; orchestrator Phase 1 research-fanout cap; default 6; env: UBERDEV_FANOUT_RESEARCH
   post_impl_review: 5            # int [1, 50]; post-impl-review reviewer fanout cap; default 5; env: UBERDEV_FANOUT_POST_IMPL_REVIEW
   merge_strategy: 10             # int [1, 50]; /merge Phase 2.2 strategy-decider fanout cap; default 10; env: UBERDEV_FANOUT_MERGE_STRATEGY (alias for MAX_PARALLEL_AGENTS in merge/SKILL.md Constants)
-  conflict_resolver: 10          # int [1, 50]; /merge Phase 3.3 conflict-resolver fanout cap; default 10; env: UBERDEV_FANOUT_CONFLICT_RESOLVER (NEW — Phase 3.3 was uncapped pre-#63)
+  conflict_resolver: 10          # int [1, 50]; /merge Phase 3.3 conflict-resolver fanout cap; default 10; env: UBERDEV_FANOUT_CONFLICT_RESOLVER (NEW — Phase 3.3 was uncapped previously)
 
-# --- per-command wall-clock timeouts (issue #63) ---
+# --- per-command wall-clock timeouts ---
 # dot-path refs: command_timeouts.solve, command_timeouts.review_pr, command_timeouts.merge
 command_timeouts:
   solve: 3600                    # int seconds [60, 86400]; ENFORCED via /solve launcher timeout(1) wrap; default 3600 (1h); env: UBERDEV_SOLVE_TIMEOUT
@@ -166,7 +166,7 @@ Settings take effect on next SessionStart. Environment variables (`SOLVE_TERMINA
 
 **`auto_confirm` precedence:** **DEPRECATED.** As of the autopilot release, `auto_confirm` (config) and `--yes` / `-y` (CLI) are no-ops — `/merge` is fully unattended end-to-end. The flag is still parsed without error for backward compat; first encounter per run emits one stderr line: `warning: --yes / -y / auto_confirm are deprecated; /merge is now fully unattended. The flag has no behavioural effect.` An audit event `deprecated_flag_used` is recorded. No grace-window removal planned. See `commands/merge.md` `## Deprecated Flags`.
 
-**`solve_tier_floor` / `solve_tier_ceiling` (issue #63):** clamp the
+**`solve_tier_floor` / `solve_tier_ceiling`:** clamp the
 `/solve` auto-triage tier into `[floor, ceiling]`. Both keys take an
 enum value from `{trivial, small, medium, large}`. Asymmetric clamps
 are supported (set only floor or only ceiling). If `floor > ceiling`,
@@ -174,7 +174,7 @@ one stderr warning fires (`floor_gt_ceiling`) and BOTH are ignored.
 Env overrides: `SOLVE_TIER_FLOOR`, `SOLVE_TIER_CEILING`. Default:
 unset on both sides.
 
-**`fanout_concurrency.{research, post_impl_review, merge_strategy, conflict_resolver}` (issue #63):**
+**`fanout_concurrency.{research, post_impl_review, merge_strategy, conflict_resolver}`:**
 per-phase cap on parallel agent fanout. Each value is an int in
 `[1, 50]`. When the in-scope agent count exceeds the cap, the host
 skill splits dispatch into `ceil(N / cap)` sequential single-message
@@ -188,7 +188,7 @@ fanout was previously uncapped — queues of 11+ conflicted files in a
 single PR now chunk into multiple waves (intentional behavioural
 change; matches the `merge_strategy` chunking precedent).
 
-**`command_timeouts.{solve, review_pr, merge}` (issue #63):** per-command
+**`command_timeouts.{solve, review_pr, merge}`:** per-command
 wall-clock timeout in seconds, range `[60, 86400]` (1m–24h).
 **Enforcement scope:** only `command_timeouts.solve` is enforced — the
 `/solve` launcher wraps the `claude` invocation in `timeout(1)` (and

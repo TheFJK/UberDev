@@ -1,7 +1,7 @@
 # plugins/uberdev/lib/config-read.sh
 #
 # Shared library for reading + validating the new optional config keys
-# under .claude/uberdev.local.md (issue #63). SOURCED, never executed.
+# under .claude/uberdev.local.md. SOURCED, never executed.
 # No shebang (sourced only); .sh extension (convention).
 #
 # Public surface (functions):
@@ -73,17 +73,21 @@ _uberdev_warn_invalid() {
 }
 
 # _uberdev_audit_invalid KEY VAL REASON DEFAULT
-# Append one JSON line to .uberdev/audit.jsonl if writable (best-effort;
-# no error if path missing — fail-open per session-start.sh:14-23 jq pattern).
+# Append one JSON line to .uberdev/audit.jsonl when the audit dir exists.
+# Missing dir is silent (operators opt-in by creating .uberdev/). A write
+# failure on an existing dir (read-only file, full disk, stale NFS) surfaces
+# one stderr line so the operator sees the audit gap.
 _uberdev_audit_invalid() {
   local key="$1" val="$2" reason="$3" default="$4"
   local audit_dir="${PWD}/.uberdev"
   [ -d "$audit_dir" ] || return 0
   local ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
-  printf '{"event":"uberdev_config_invalid","key":"%s","value":"%s","reason":"%s","fallback_to":"%s","ts":"%s"}\n' \
+  if ! printf '{"event":"uberdev_config_invalid","key":"%s","value":"%s","reason":"%s","fallback_to":"%s","ts":"%s"}\n' \
     "$key" "$val" "$reason" "$default" "$ts" \
-    >> "$audit_dir/audit.jsonl" 2>/dev/null || true
+    >> "$audit_dir/audit.jsonl" 2>/dev/null; then
+    echo "warning: failed to write config audit event for $key (audit.jsonl write-protected?)" >&2
+  fi
 }
 
 # _uberdev_read_nested KEY_PATH FILE
