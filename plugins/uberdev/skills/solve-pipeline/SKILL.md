@@ -13,8 +13,8 @@ This skill is invoked inline by `commands/solve.md` and `commands/turbo.md`. The
 
 | Tier | Signals (any strong match) | Spawned workflow |
 |------|----------------------------|------------------|
-| **trivial** | Labels: `typo`, `docs`, `documentation`, `chore`, `good-first-issue`. Body <300 chars after stripping markdown. Title matches `typo\|rename\|bump\|version\|readme`. No stack trace. Single file named. | Read pre-collected research → minimal edit → test (if touched code is tested) → (if `AUTO_MODE=0`: `uberdev:post-impl-review`) → PR. **No brainstorm, no multi-step plan.** Phase 2 of `/uberdev:review-pr` runs the simplify lenses after the PR opens. |
-| **small** | Clear reproduction + error message. Localized to one module/package. Estimated ≤50 LOC. Labels: `bug` (scoped) or none. Not cross-cutting. | Read pre-collected research → lightweight TodoWrite plan (3–6 tasks) → TDD → (if `AUTO_MODE=0`: `uberdev:post-impl-review`) → PR. **No brainstorm.** Phase 2 of `/uberdev:review-pr` runs the simplify lenses after the PR opens. |
+| **trivial** | Labels: `typo`, `docs`, `documentation`, `chore`, `good-first-issue`. Body <300 chars after stripping markdown. Title matches `typo\|rename\|bump\|version\|readme`. No stack trace. Single file named. | Read pre-collected research → minimal edit → test (if touched code is tested) → PR. **No brainstorm, no multi-step plan.** Phase 1 of `/uberdev:review-pr` runs the post-impl reviewer fanout and Phase 2 runs the simplify lenses after the PR opens. |
+| **small** | Clear reproduction + error message. Localized to one module/package. Estimated ≤50 LOC. Labels: `bug` (scoped) or none. Not cross-cutting. | Read pre-collected research → lightweight TodoWrite plan (3–6 tasks) → TDD → PR. **No brainstorm.** Phase 1 of `/uberdev:review-pr` runs the post-impl reviewer fanout and Phase 2 runs the simplify lenses after the PR opens. |
 | **medium/large** *(default)* | Labels: `epic`, `needs-discussion`, `architectural`, `infrastructure` (multi-service), `refactor`. ≥3 files/modules mentioned. Missing clear problem statement. Cross-package scope. | Full `/uberdev:brainstorm` → `/uberdev:write-plan` → `/uberdev:subagent-driven-dev` → `/uberdev:review-pr` pipeline. |
 
 **When in doubt, default to medium/large.** Misclassification is recoverable.
@@ -212,7 +212,7 @@ for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
 
 #### 5a. Write tier-appropriate prompt
 
-The trivial/small heredocs gate the post-impl-review step on `AUTO_MODE=0`. The medium prompt branches on `AUTO_MODE=1` to inject `--turbo` into the orchestrator dispatch.
+The trivial/small heredocs no longer run the pre-push reviewer fanout — both AUTO_MODE branches push directly and chain into `/uberdev:review-pr`, whose Phase 1 now hosts the 5-reviewer fanout. The medium prompt branches on `AUTO_MODE=1` to inject `--turbo` into the orchestrator dispatch.
 
 The `if/else/fi` blocks below stay at column 0 (zsh and bash do not require physical indentation inside `for ... done`); `tests/turbo-flow.test.sh` anchors its differential-guard awk on `^if \[\[ "\$AUTO_MODE" == "1" \]\]; then$` and must keep matching unchanged. Do not indent these blocks when the loop wraps them.
 
@@ -220,7 +220,7 @@ The `if/else/fi` blocks below stay at column 0 (zsh and bash do not require phys
 
 ```bash
 if [[ "$AUTO_MODE" != "1" ]]; then
-# trivial heredoc — interactive (/solve): pre-collected-research read + post-impl-review wired
+# trivial heredoc — interactive (/solve): pre-collected-research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
 cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
 Solve GH issue #$ISSUE_NUM directly. Triaged as TRIVIAL.
 
@@ -230,16 +230,15 @@ Steps:
 3. Make the minimal edit. No redesign, no surrounding refactor, no "while I'm here" cleanup.
 4. Add/update a test ONLY if the touched code is already tested.
 5. Run the relevant test file + lint for that package.
-6. **Invoke \`uberdev:post-impl-review\` skill** with \`changed_paths\` = the files you edited and \`commit_range\` = your single commit. Skill returns the 5-agent advisory finding table; surface it to your output but do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
-7. Commit with conventional message. Open PR with \`Closes #$ISSUE_NUM\` in the body. Include the post-impl-review aggregate table under \`## Reviewer findings summary\` in the PR body.
-8. **Capture the PR URL from \`gh pr create\` output and invoke the \`uberdev:review-pr\` skill via the Skill tool with that URL.** This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory — do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
+6. Commit with conventional message. Open PR with \`Closes #$ISSUE_NUM\` in the body.
+7. **Capture the PR URL from \`gh pr create\` output and invoke the \`uberdev:review-pr\` skill via the Skill tool with that URL.** This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory — do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
 Skip /uberdev:brainstorm. Skip multi-step planning. Escalate to /uberdev:brainstorm ONLY if the scope turns out to be materially larger than triaged.
 EOF
 else
-# trivial heredoc — turbo (/turbo): no research read, no post-impl-review
+# trivial heredoc — turbo (/turbo): no research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
 cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
 Solve GH issue #$ISSUE_NUM directly. Triaged as TRIVIAL.
 
@@ -262,7 +261,7 @@ fi
 
 ```bash
 if [[ "$AUTO_MODE" != "1" ]]; then
-# small heredoc — interactive (/solve): pre-collected-research read + post-impl-review wired
+# small heredoc — interactive (/solve): pre-collected-research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
 cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
 Solve GH issue #$ISSUE_NUM with a lightweight plan. Triaged as SMALL.
 
@@ -271,16 +270,15 @@ Steps:
 2. **Read pre-collected research (legacy cache)** — for each file in \`.uberdev/research/issue-$ISSUE_NUM/{constraints,prior-art,security}.md\` that exists, read the \`summary:\` block and inline its key findings into your TodoWrite plan as constraints/considerations. After issue #14 the cache is no longer written by \`/issue\`, so this step typically no-ops; left in place for legacy issues.
 3. Write 3–6 TodoWrite tasks. Skip /uberdev:brainstorm — scope is clear.
 4. TDD: write the failing test first, then implement, then green.
-5. **Invoke \`uberdev:post-impl-review\` skill** with \`changed_paths\` = files edited across all TodoWrite tasks and \`commit_range\` = the commits made. Surface the aggregate finding table in your output and the PR body.
-6. Commit + PR with \`Closes #$ISSUE_NUM\`. PR body includes the post-impl-review aggregate under \`## Reviewer findings summary\`.
-7. **Capture the PR URL from \`gh pr create\` output and invoke the \`uberdev:review-pr\` skill via the Skill tool with that URL.** This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory — do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
+5. Commit + PR with \`Closes #$ISSUE_NUM\`.
+6. **Capture the PR URL from \`gh pr create\` output and invoke the \`uberdev:review-pr\` skill via the Skill tool with that URL.** This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory — do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
 Escalate to /uberdev:brainstorm if the scope proves larger than triaged.
 EOF
 else
-# small heredoc — turbo (/turbo): no research read, no post-impl-review
+# small heredoc — turbo (/turbo): no research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
 cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
 Solve GH issue #$ISSUE_NUM with a lightweight plan. Triaged as SMALL.
 

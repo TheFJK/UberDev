@@ -51,7 +51,7 @@ digraph when_to_use {
 
 1. **Read plan once.** Extract every task's full text and the `## Execution Waves` summary.
 2. **Create TodoWrite** with one todo per task, labeled with its wave (e.g., `[wave-2] Task 4: ...`).
-3. **Verify clean baseline:** `git status` is clean; you're on the feature branch in the feature-branch worktree. Capture `BASELINE_SHA=$(git rev-parse HEAD)` — this anchors the consolidated post-impl-review's `commit_range` at end-of-issue (`<BASELINE_SHA>..HEAD`), and is robust to spec/quality fix-up commits that increment the on-branch commit count beyond raw task count.
+3. **Verify clean baseline:** `git status` is clean; you're on the feature branch in the feature-branch worktree. Capture `BASELINE_SHA=$(git rev-parse HEAD)` — useful only for diagnostic logging now that the post-impl-review's `commit_range` is computed independently inside `/uberdev:review-pr` Phase 1.
 4. **For each wave (sequential):**
    a. Dispatch every implementer in the wave **in a single message** with multiple `Agent` tool calls. All run in the current worktree. Each implementer gets an explicit allowlist of files it owns and an explicit denylist of files owned by sibling tasks.
    b. **Implementers never run git.** They edit files, run their tests, and report `Status + changed file paths + test results`.
@@ -67,16 +67,8 @@ digraph when_to_use {
    g. Loop spec fix-up per task until all spec reviewers approve. Fix dispatches still don't run git — controller amends the task's commit (or creates a fix-up commit) using the implementer's reported new paths.
    h. Dispatch code quality reviewers (parallel). Same fix-loop pattern.
    i. Mark every task in the wave complete in TodoWrite.
-   j. **Accumulate end-of-issue inputs** (no skill dispatch — the consolidated post-impl-review now fires after the wave loop, see step 5):
-      - Append every reported path from this wave's implementers to the running set `ALL_CHANGED_PATHS` (deduplicate).
-      - The wave's commit count is implicit in `git log` since `BASELINE_SHA`; no manual counter required.
-5. **End-of-issue post-impl-review.** After the wave loop exits (every wave's tasks committed and reviewed), invoke `uberdev:post-impl-review` skill (Skill tool, NOT Task) **exactly once** with the accumulated state:
-   - `changed_paths`: `ALL_CHANGED_PATHS` (deduped union of every wave's reported paths)
-   - `commit_range`: `<BASELINE_SHA>..HEAD` (anchor captured at start of step 3 — see step 3 for the fix-up-commit robustness rationale; equivalent commit-count form: `HEAD~$(git rev-list --count <BASELINE_SHA>..HEAD)..HEAD`).
-   - `tier`: passed through from the orchestrator (medium/large)
-   - `WAVE`: `final` — drives the output artifact filename `.uberdev/research/$RUN_ID/post-impl-review-wave-final.md`. The existing `finish-branch` glob `post-impl-review-wave-*.md` matches without any read-path change.
-   Skill returns the aggregate findings table. Findings are ADVISORY — do NOT block on `REVISIONS_REQUIRED` at this layer. Append findings to the running session log so `finish-branch` can compose the PR body's `## Reviewer findings summary`.
-6. Hand off to `uberdev:finish-branch`. **If `--turbo` was in `$ARGUMENTS`, propagate it** — invoke as `uberdev:finish-branch --turbo` so the branch close-out auto-selects "Push and Create PR" instead of prompting. For large tier, the orchestrator's Phase 5.5 (`pr-test-analyzer`) runs *after* this skill returns; no additional reviewer fanout from `subagent-driven-dev` itself beyond the consolidated step 5 above.
+   j. **Mark wave complete.** No additional accumulation required at the SDD layer — `/uberdev:review-pr` Phase 1, chained post-push from `finish-branch`, computes its own `changed_paths` and `commit_range` against the pushed PR.
+5. Hand off to `uberdev:finish-branch`. **If `--turbo` was in `$ARGUMENTS`, propagate it** — invoke as `uberdev:finish-branch --turbo` so the branch close-out auto-selects "Push and Create PR" instead of prompting. For large tier, the orchestrator's Phase 5.5 (`pr-test-analyzer`) runs *after* this skill returns. Post-implementation reviewer fanout is hosted by `/uberdev:review-pr` Phase 1 (chained from `finish-branch` after PR push); no reviewer fanout is dispatched from `subagent-driven-dev` itself.
 
 ### Parallel Dispatch Pattern
 
@@ -92,17 +84,19 @@ digraph when_to_use {
                 ↓
             spec reviewers (parallel) → fix loop → re-reviews
             quality reviewers (parallel) → fix loop → re-reviews
-                ↓ accumulate ALL_CHANGED_PATHS into running set
+                ↓ wave complete (no SDD-layer accumulation —
+                ↓ /review-pr Phase 1 computes its own diff post-push)
                 ↓ no merge step — already on feature branch
 [wave-2] →  Agent(T4, edits files only)  ┐
             Agent(T5, edits files only)  ┘  (parallel, depend on wave-1 commits)
             ...
 [wave-N] →  ...  (last wave finishes)
                 ↓
-            uberdev:post-impl-review (5 agents, 1 message) — ONCE, end-of-issue
-            advisory — no blocking
-                ↓
             hand off to uberdev:finish-branch
+                ↓ (finish-branch pushes PR, then chains)
+            /uberdev:review-pr
+                Phase 1: uberdev:post-impl-review (5 agents, 1 message)
+                Phase 2: simplify lenses (3 agents, 1 message)
 ```
 
 ### File-Ownership Enforcement
@@ -266,11 +260,9 @@ Ownership map:
 
 === AFTER ALL WAVES ===
 
-[Invoke uberdev:post-impl-review skill ONCE — see step 5 for inputs and artifact path]
-[5 advisory reviewer agents fan out in a single message; findings are advisory]
-[For large tier: orchestrator Phase 5.5 dispatches pr-test-analyzer pre-merge after this skill returns]
+[For large tier: orchestrator Phase 5.5 dispatches pr-test-analyzer pre-merge after the next handoff returns]
 
-[Hand off to uberdev:finish-branch]
+[Hand off to uberdev:finish-branch — which pushes the PR and chains into /uberdev:review-pr Phase 1 (5 reviewer agents, advisory)]
 ```
 
 ## Advantages

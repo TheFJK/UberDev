@@ -57,6 +57,11 @@ assert_grep "$REVIEW_PR" '^description:' "frontmatter has description"
 assert_grep "$REVIEW_PR" '^allowed-tools:' "frontmatter has allowed-tools"
 
 echo
+# Note: post-#67 these agent names appear in the "## Agent Descriptions"
+# section (and Phase 2's simplify-lens prose), NOT in Phase 1's inline
+# dispatch list — Phase 1 now delegates to Skill(uberdev:post-impl-review).
+# The single source of truth for the 5 post-impl-review agents is
+# plugins/uberdev/skills/post-impl-review/SKILL.md.
 echo "== All 6 reviewer agents named in /uberdev:review-pr =="
 assert_grep "$REVIEW_PR" 'code-reviewer'         "code-reviewer named"
 assert_grep "$REVIEW_PR" 'pr-test-analyzer'      "pr-test-analyzer named"
@@ -100,7 +105,7 @@ echo "== Mandatory simplify pass after review-and-fix loop (#30) =="
 # without them, any prose mentioning the four words anywhere passes (the
 # previous loose alternative was tautological).
 assert_grep "$REVIEW_PR" \
-  'review fanout.*fix loop.*simplify fanout.*final aggregation' \
+  '(review fanout|post-impl-review fanout).*fix loop.*simplify fanout.*final aggregation' \
   "phase ordering documented (review → fix → simplify → aggregation)"
 assert_grep "$REVIEW_PR" \
   '[Cc]ode [Rr]euse|reuse[- ]review|reuse lens' \
@@ -212,6 +217,39 @@ assert_grep "$REVIEW_PR" '[Dd]etect.*--turbo|--turbo.*strip|strip.*--turbo' \
 
 assert_grep "$REVIEW_PR" '\-\-turbo.*does NOT (alter|mutate|change)|--turbo.*identical|deterministic.*SHA.*binding' \
   "R7.no-mutation — prose states --turbo does NOT mutate SIMPLIFY_PHASE / Phase 2 behavior"
+
+echo
+echo "== R8: Phase 1 invokes Skill(uberdev:post-impl-review) + reads canonical artifact + applies trust-boundary envelope (#67) =="
+
+# R8.1 — Phase 1 invokes the post-impl-review skill via the Skill tool
+assert_grep "$REVIEW_PR" \
+  'Skill\(uberdev:post-impl-review\)|Skill tool.*uberdev:post-impl-review|uberdev:post-impl-review.*Skill tool' \
+  "R8.1 — Phase 1 invokes uberdev:post-impl-review via the Skill tool"
+
+# R8.2 — Phase 1 apply-loop reads the canonical findings artifact
+assert_grep "$REVIEW_PR" \
+  'post-impl-review-final\.md' \
+  "R8.2 — Phase 1 apply-loop reads .uberdev/research/<RUN_ID>/post-impl-review-final.md"
+
+# R8.3 — apply-loop wraps the read content in the trust-boundary envelope
+assert_grep "$REVIEW_PR" \
+  'external-untrusted-input source="post-impl-review-aggregate"' \
+  "R8.3 — apply-loop wraps the read content in <external-untrusted-input source=\"post-impl-review-aggregate\">"
+
+# R8.4 — Phase 1 generates its own RUN_ID (decoupled from any subagent-driven-dev RUN_ID)
+assert_grep "$REVIEW_PR" \
+  'RUN_ID="\$\(date \+%Y%m%d-%H%M%S\)-\$\(git rev-parse --short HEAD\)"' \
+  "R8.4 — Phase 1 mints its own RUN_ID per the canonical /review-pr Run-ID format"
+
+# R8.5 — fallback prose: missing/empty artifact → log warning + continue to Phase 2
+assert_grep "$REVIEW_PR" \
+  '[Mm]issing or empty.*[Pp]hase 2|all 5 reviewers returned .BLOCKED.|continue to Phase 2 with' \
+  "R8.5 — Phase 1 falls back to Phase 2 with zero auto-applied fixes when artifact is missing/empty"
+
+# R8.6 — separate-commit invariant preserved (Phase 1 fix: vs Phase 2 refactor:)
+assert_grep "$REVIEW_PR" \
+  'review-phase commits.*distinct from the Phase 2 simplify commit|Phase 1.*fix.*distinct from.*Phase 2|separate-commit invariant' \
+  "R8.6 — Phase 1 vs Phase 2 separate-commit invariant preserved"
 
 echo
 echo "== Summary =="

@@ -284,13 +284,16 @@ assert_grep "$ORCHESTRATOR" 'pr-test-analyzer' \
   "pr-test-analyzer wired for large tier (Phase 5.5)"
 
 echo
-echo "== subagent-driven-dev invokes post-impl-review once at end-of-issue =="
+echo "== subagent-driven-dev: post-impl-review hosted by /review-pr Phase 1 (#67) =="
+# Cross-references in SDD prose still point readers to the new location.
 assert_grep "$SUBAGENT_DRIVEN" 'post-impl-review' \
-  "post-impl-review skill referenced from subagent-driven-dev"
-assert_grep "$SUBAGENT_DRIVEN" 'End-of-issue post-impl-review' \
-  "subagent-driven-dev codifies end-of-issue invocation (not per-wave)"
-assert_grep "$SUBAGENT_DRIVEN" 'WAVE.*final|WAVE: .final.' \
-  "subagent-driven-dev passes WAVE=final to drive -wave-final.md filename"
+  "post-impl-review cross-referenced from subagent-driven-dev (points to /review-pr Phase 1 host)"
+# Anti-regression: SDD no longer codifies the end-of-issue invocation it used to dispatch
+# (the load-bearing call site moved to /review-pr Phase 1 per #67).
+assert_not_grep "$SUBAGENT_DRIVEN" 'End-of-issue post-impl-review' \
+  "subagent-driven-dev no longer codifies end-of-issue invocation (#67 moved fanout to /review-pr Phase 1)"
+assert_not_grep "$SUBAGENT_DRIVEN" 'WAVE.*final|WAVE: .final.' \
+  "subagent-driven-dev no longer passes WAVE=final (no in-skill post-impl-review dispatch post-#67)"
 
 echo
 echo "== turbo medium/large parity: end-of-issue post-impl-review documented in turbo.md =="
