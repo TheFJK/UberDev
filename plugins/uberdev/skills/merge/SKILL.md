@@ -333,7 +333,7 @@ This is the critical invariant. All Task() calls for this PR's conflict set MUST
 
 **Sequential degradation (Q1):** for same-file PR pairs flagged in Phase 1.5, the per-file fanout proceeds normally — same-file collisions only matter ACROSS PRs (PR-A's resolution must land first; PR-B re-probes against new tip). Within a single PR's resolution, all Task() agents own disjoint files by construction.
 
-iv. **Apply resolutions** in the scratch worktree as each agent returns. Aggregate the YAML returns. **If any agent returns `status: AMBIGUOUS` or `status: REFUSED`:** park THIS PR via `drop` strategy. Emit `pr_parked` to `audit.jsonl` with `data.reason` set to the lowercase form (`ambiguous` or `refused`, ∈ `PARK_REASON_ENUM`); the agent's uppercase return status is normalized for audit-log uniformity. `data.strategy="drop"`, and `data.rationale` carrying the agent's structured handoff. Surface the agent's structured handoff in the run summary. **Continue with the next PR — the queue does NOT halt.**
+iv. **Apply resolutions** in the scratch worktree as each agent returns. Aggregate the YAML returns. **If any agent returns `status: AMBIGUOUS` or `status: REFUSED`:** park THIS PR via `drop` strategy. Emit `pr_parked` to `audit.jsonl` with `data.reason` set to the lowercase form (`ambiguous` or `refused`, ∈ `PARK_REASON_ENUM`); the agent's uppercase return status is normalized for audit-log uniformity. `data.strategy="drop"`, and `data.rationale` carrying the agent's structured handoff. Read `resolution_summary` (the justification) and `risks[]` (additional bullet detail) from each per-file YAML return where `status ∈ {AMBIGUOUS, REFUSED}`. Pass each string through `sanitize_agent_text` (defined in the run-summary block section) before embedding into the per-PR detail block. This strips C0/C1 control bytes and DEL but keeps `\n` and `\t`. Render the agent's uppercase status (`REFUSED` / `AMBIGUOUS`) as a lowercase bracketed tag (`[refused]` / `[ambiguous]`) — same casing as the audit-log `data.reason`. Wrap each justification + risks line at 80 columns via `fmt -w 80`. These fields appear in the run summary's per-PR detail block under a `conflict files:` sub-block (see `### Run-summary block`) only if outcome is Parked AND park reason ∈ {refused, ambiguous}. **Continue with the next PR — the queue does NOT halt.**
 
 v. **Pre-push test gate (D16, ALWAYS RUNS).** Test command discovery order: `package.json:scripts.test` > `Makefile` `test` target > `cargo test` if `Cargo.toml` exists > `pytest` if `pytest.ini`/`pyproject.toml` exists > `go test ./...` if `go.mod` exists.
 
@@ -559,6 +559,28 @@ Per-PR detail block (one per PR in the run):
     outcome: <Merged|Skipped|Parked|Aborted>
     park reason: <PARK_REASON_ENUM value>          (only if outcome is Parked)
     audit events: <count>
+    conflict files:                                  (only if outcome is Parked AND park reason ∈ {refused, ambiguous})
+      - file: <relative path>
+        verdict: [refused] | [ambiguous]             (lowercase, ∈ PARK_REASON_ENUM)
+        justification: <sanitize_agent_text(resolution_summary) | fmt -w 80>
+        risks:                                       (only if agent return's risks[] is non-empty)
+          - <sanitize_agent_text(risks[0]) | fmt -w 80>
+          - <...>
 ```
+
+- **Conditional render.** The `conflict files:` sub-block appears ONLY when `outcome` is `Parked` AND `park reason` is `refused` or `ambiguous`. For `test-fail-exhausted` and `push-non-ff`, the sub-block is omitted (those park reasons have no per-file conflict context).
+- **Field source mapping.** `file` ← agent input `file_path`. `verdict` ← agent return `status`, lowercased and bracketed. `justification` ← agent return `resolution_summary`. `risks` ← agent return `risks[]`.
+- **Sanitization.** Each text field passes through `sanitize_agent_text` before display:
+  ```sh
+  sanitize_agent_text() {
+    # Strip C0 (0x00–0x1F except \n \t) + DEL (0x7F) + C1 (0x80–0x9F).
+    # Preserves newlines + tabs so multi-line wrap continues to work.
+    LC_ALL=C tr -d '\000-\010\013-\037\177\200-\237'
+  }
+  ```
+  Audit-log `data.rationale` keeps the **raw** bytes (forensic value). Sanitization happens at terminal-render time only.
+- **Wrap width.** Apply `fmt -w 80` to `justification` and each `risks[]` entry. Continuation lines indent 8 spaces (one indent level past `- file:`) so they visually attach to the parent item.
+- **Verdict casing.** Always lowercase, always bracketed (`[refused]`, `[ambiguous]`). Same lowercase form used for the audit-log `data.reason` per `PARK_REASON_ENUM`.
+- **Single source of truth.** The full untruncated agent rationale lives in `audit.jsonl` under `pr_parked.data.rationale`. The summary block is a human-readable surface; the user can `jq '.data.rationale' .uberdev/runs/<run-id>/audit.jsonl` to retrieve raw bytes if needed.
 
 Per spec: every `skipped` / `parked` / `aborted` MUST be surfaced here. **No silent skips.** Audit log path printed last; users grep for `pr_parked`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision`, `local_sync` to reconstruct the run.
