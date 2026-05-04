@@ -221,7 +221,8 @@ echo "== Issue #55: no English possessives/contractions in bash-block #-comments
 # does not honor comment context; every ' toggles quote-state, pairing with
 # the next unrelated ' downstream and inverting quote-balance until a later
 # ' surfaces as `unmatched '`). Rephrase comment prose to drop possessives
-# and contractions (gh failure, the caller error, etc.). Backtick-quoted
+# and contractions (e.g. gh's → the gh, caller's → the caller, don't → do
+# not). Backtick-quoted
 # documentation forms like `unmatched '` are unaffected — the regex below
 # matches only ' adjacent to letters, not ' next to backticks/spaces.
 assert_not_grep "$FINISH_BRANCH" \
