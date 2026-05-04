@@ -110,6 +110,14 @@ trap 'rm -f "$TMP"' EXIT
 
 for FILE in "${FILES[@]}"; do
   UPSTREAM_URL="https://raw.githubusercontent.com/obra/superpowers/${FRESH_SHA}/skills/${FILE}"
+  LOCAL_PATH="plugins/uberdev/skills/${FILE}"
+  # Pre-validate local file exists and is readable — diff exit 2 (error) is otherwise
+  # indistinguishable from exit 1 (differ) in a single if/else and would silently
+  # mis-report a missing or corrupt local file as "DIFFER".
+  if [ ! -r "$LOCAL_PATH" ]; then
+    echo "$FILE  LOCAL_MISSING_OR_UNREADABLE ($LOCAL_PATH)" >&2
+    continue
+  fi
   # --fail propagates HTTP 4xx/5xx as non-zero exit; --max-time bounds the network wait
   RC=0
   curl -sSL --fail --max-time 30 "$UPSTREAM_URL" -o "$TMP" || RC=$?
@@ -117,11 +125,15 @@ for FILE in "${FILES[@]}"; do
     echo "$FILE  FETCH_FAILED (curl exit $RC, URL: $UPSTREAM_URL)" >&2
     continue
   fi
-  if diff "$TMP" "plugins/uberdev/skills/${FILE}" > /dev/null; then
-    echo "$FILE  MATCH"
-  else
-    echo "$FILE  DIFFER"
-  fi
+  # Capture diff exit code: 0 = match, 1 = differ, >=2 = error (e.g. read failure
+  # despite the pre-check above — disk I/O could still surface here).
+  DIFF_RC=0
+  diff "$TMP" "$LOCAL_PATH" > /dev/null || DIFF_RC=$?
+  case "$DIFF_RC" in
+    0) echo "$FILE  MATCH" ;;
+    1) echo "$FILE  DIFFER" ;;
+    *) echo "$FILE  DIFF_ERROR (diff exit $DIFF_RC)" >&2 ;;
+  esac
 done
 ```
 
