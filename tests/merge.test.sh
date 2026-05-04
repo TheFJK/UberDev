@@ -40,6 +40,8 @@
 #   M32 — SKILL.md Phase 3.3vi parks PR on push-non-FF (no halt).
 #   M33 — SKILL.md Phase 2.1 auto-breaks dependency cycles (no halt).
 #   M34 — SKILL.md Phase 3.4 failure-mode table contains no 'halt' actions.
+#   M64 — SKILL.md run-summary per-PR detail block includes conflict-files sub-block
+#         for parked PRs with per-file verdict + justification (issue #60).
 
 set -u
 set -o pipefail
@@ -1085,6 +1087,48 @@ assert_grep "$SKILL_FILE" 'absence on a fresh clone is by design|fresh clone.*by
 
 assert_grep "$SKILL_FILE" 'short-circuit.*sub-condition.*d|d.*only.*checked.*c.*returned.*PASS' \
   "M63.short-circuit-preserved — (c) short-circuit-on-non-PASS clause still documented in PATH_2"
+
+echo
+echo "== M64: SKILL.md run-summary per-PR conflict-files sub-block (issue #60) =="
+# Re-extract SUMMARY_BLOCK and Phase 3.3iv slices for safety; M64 runs as a
+# standalone echo block, so we cannot rely on M27's variables being in scope.
+SUMMARY_BLOCK=$(awk '/^### Run-summary block/,/^## /' "$SKILL_FILE")
+PHASE_33IV=$(awk '/^iv\. \*\*Apply resolutions\*\*/,/^v\. /' "$SKILL_FILE")
+
+# AC1 + AC4 — per-file conflict sub-block presence (4 fields).
+for field in 'conflict files:' 'verdict:' 'justification:' 'risks:'; do
+  if echo "$SUMMARY_BLOCK" | grep -qiE "$field"; then
+    pass "M64.field[$field] — run-summary detail block names \"$field\" (parked-PR conflict sub-block)"
+  else
+    fail "M64.field[$field] — run-summary detail block MUST include \"$field\" for parked-PR conflict-resolver context"
+  fi
+done
+
+# Q1 decision — verdict casing must be lowercase, bracketed (2 tags).
+for tag in '\[refused\]' '\[ambiguous\]'; do
+  if echo "$SUMMARY_BLOCK" | grep -qE "$tag"; then
+    pass "M64.tag[$tag] — verdict casing matches PARK_REASON_ENUM (lowercase, bracketed)"
+  else
+    fail "M64.tag[$tag] — verdict in conflict sub-block MUST be lowercase bracketed form ($tag); see PARK_REASON_ENUM"
+  fi
+done
+
+# Phase 3.3iv prose must explicitly name the source fields (4 tokens).
+for prose_token in 'resolution_summary' 'risks' 'sanitize_agent_text' 'fmt -w 80'; do
+  if echo "$PHASE_33IV" | grep -qF "$prose_token"; then
+    pass "M64.prose[$prose_token] — Phase 3.3iv mentions \"$prose_token\""
+  else
+    fail "M64.prose[$prose_token] — Phase 3.3iv MUST mention \"$prose_token\" so consumer wiring is unambiguous"
+  fi
+done
+
+# AC3 — conditional render: the new block must be guarded.
+assert_grep "$SKILL_FILE" 'only if outcome is Parked AND park reason' \
+  "M64.conditional — conflict-files sub-block render-condition documented (gates RESOLVED path unchanged)"
+
+# Sanitization helper body must be present (literal C0/C1+DEL strip range).
+assert_grep "$SKILL_FILE" "tr -d '\\\\000-\\\\010\\\\013-\\\\037\\\\177\\\\200-\\\\237'" \
+  "M64.sanitize-impl — sanitize_agent_text body documents the C0/C1+DEL strip range"
 
 echo
 echo "== Summary =="
