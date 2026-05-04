@@ -4,7 +4,7 @@
 
 **Personal Claude Code marketplace — opinionated GitHub-workflow slash commands.**
 
-[![Version](https://img.shields.io/badge/version-0.14.0-blue)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.18.0-blue)](./CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8B5CF6)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Repo Agnostic](https://img.shields.io/badge/repo--agnostic-yes-success)](#configuration)
@@ -41,7 +41,7 @@ UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-Sonn
 | **`/turbo <issue#>`** | Unattended `/solve`. Same pipeline, but the brainstorm phase auto-accepts the lead agent's recommendation and Q&A is resolved against the research bundle. Use when you trust the recommendation and want issue → PR with no babysitting. |
 | **`/issue <description>`** | Creates a well-investigated, deduped, label-validated GitHub issue from a one-line ask. 2-Sonnet-scout fanout (codebase + triage) runs in <30 s, with conventional-commit titling and template-by-type. |
 | **`/review-pr [<PR#>]`** | Comprehensive PR review using specialized agents fanned out in parallel — code review, simplifier, silent-failure hunter, type-design analyzer, comment analyzer, test analyzer. |
-| **`/merge [<PR#> \| --all]`** | Lands an approved PR into the integration branch — autopilot. Ordering, per-PR strategy, conflict resolution (one parallel agent per conflicted file), and local sync, all unattended. |
+| **`/merge [<PR#> \| --all]`** | Lands an approved PR into the integration branch — autopilot. Bare invocation auto-discovers scope: single PR for the current branch, or all eligible open PRs against `integration_branch`. Ordering, per-PR strategy, conflict resolution (one parallel agent per conflicted file), and local sync, all unattended. |
 
 Every command is **repo-agnostic** — they auto-detect via `gh repo view`. No per-repo config required.
 
@@ -175,6 +175,11 @@ Spec & plan are still written to disk before implementation — audit them mid-f
 ## `/merge` — post-review PR landing (autopilot)
 
 Lands approved PRs into the integration branch — fully unattended. No prompts, no halts. Per-PR failures park; the queue continues.
+
+**Invocation modes:**
+- `/merge <PR#>` — land a specific PR.
+- `/merge --all` — land every eligible open PR (APPROVED + CI-green) against `integration_branch`.
+- `/merge` (no args) — context-aware. On a PR feature branch: single-PR fast path. Otherwise: auto-discover and land every eligible open PR against `integration_branch` (same path as `--all`, with a pre-flight stderr summary listing the discovered set).
 
 1. **Pre-flight gate** — open / not-draft / approved (`reviewDecision == "APPROVED"`) / CI-green; integration branch resolved (CLI flag > env var > config > `gh repo view`'s default > literal `main`); single-instance lock.
 2. **Merge plan** — order (topo-sort hard deps → file-overlap heuristic → approval-age tie-break) + per-PR strategy (conventional-commit ratio + WIP-msg count + `merge-strategy:<name>` label).
