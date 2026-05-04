@@ -1,6 +1,6 @@
 ---
 description: "Comprehensive PR review using specialized agents"
-argument-hint: "[review-aspects] [--no-simplify]"
+argument-hint: "[review-aspects] [--no-simplify] [--turbo]"
 allowed-tools: ["Bash(git*)", "Bash(gh*)", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", "Write"]
 ---
 
@@ -17,12 +17,14 @@ Run a comprehensive pull request review using multiple specialized agents, each 
 
 Pass `--no-simplify` (anywhere in the arguments) to skip Phase 2 and preserve the legacy single-pass behavior. Cost trade-off: Phase 2 adds three extra agent invocations per run; opt out for fast feedback loops on iterative review (e.g. when you've already run `/uberdev:simplify` separately).
 
+Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finish-branch`'s turbo-mode auto-chain. `/review-pr` accepts `--turbo` for forwarder-compatibility and parses it without error, but its presence does NOT alter Phase 1, Phase 2, or trust-signal emission — the run produces an identical Phase 2 simplify commit, identical trailer payload, identical artifact triplet (label + trailer + JSON). Single code path → deterministic SHA binding for the `Reviewed-by:` trailer. The flag is documented here so the producer-defines-its-API contract is explicit (no LLM interpretation latitude).
+
 ## Review Workflow:
 
 1. **Determine Review Scope**
    - Check git status to identify changed files
    - Parse arguments to see if user requested specific review aspects
-   - Detect `--no-simplify` token in `$ARGUMENTS` and strip it from the aspect list — sets `SIMPLIFY_PHASE=0`, otherwise `SIMPLIFY_PHASE=1` (default)
+   - Detect `--no-simplify` token in `$ARGUMENTS` and strip it from the aspect list — sets `SIMPLIFY_PHASE=0`, otherwise `SIMPLIFY_PHASE=1` (default). Detect `--turbo` token in `$ARGUMENTS` and strip it from the aspect list — `--turbo` is an acknowledged no-op (forwarder-compatibility for `finish-branch`'s turbo-mode auto-chain); it does NOT mutate `SIMPLIFY_PHASE` or any other phase variable.
    - Default: Run all applicable reviews + Phase 2 simplify pass
 
 2. **Available Review Aspects:**
