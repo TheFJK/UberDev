@@ -40,6 +40,8 @@
 #   M32 — SKILL.md Phase 3.3vi parks PR on push-non-FF (no halt).
 #   M33 — SKILL.md Phase 2.1 auto-breaks dependency cycles (no halt).
 #   M34 — SKILL.md Phase 3.4 failure-mode table contains no 'halt' actions.
+#   M64 — SKILL.md run-summary per-PR detail block includes conflict-files sub-block
+#         for parked PRs with per-file verdict + justification (issue #60).
 #   M64 — SKILL.md Inputs "No args" bullet documents bare-discover dual path (single-PR fast path OR multi-discover fall-through).
 #   M65 — SKILL.md Constants table declares DISCOVERY_FILTER exactly once with --base / --state open / draft:false.
 #   M66 — SKILL.md Constants table declares BARE_MODE_FAST_PATH_QUERY exactly once with --head / --state open / draft:false.
@@ -1106,6 +1108,69 @@ assert_grep "$SKILL_FILE" 'absence on a fresh clone is by design|fresh clone.*by
 
 assert_grep "$SKILL_FILE" 'short-circuit.*sub-condition.*d|d.*only.*checked.*c.*returned.*PASS' \
   "M63.short-circuit-preserved — (c) short-circuit-on-non-PASS clause still documented in PATH_2"
+
+echo
+echo "== M64: SKILL.md run-summary per-PR conflict-files sub-block (issue #60) =="
+# SUMMARY_BLOCK is set at file scope by M27; reuse it. PHASE_33IV is M64-specific.
+PHASE_33IV=$(awk '/^iv\. \*\*Apply resolutions\*\*/,/^v\. /' "$SKILL_FILE")
+# CONFLICT_BLOCK: the new conflict-files sub-block within the run-summary
+# template fence. Bounding to this slice keeps the field/tag/conditional
+# assertions from matching incidental occurrences elsewhere in the file.
+CONFLICT_BLOCK=$(echo "$SUMMARY_BLOCK" | awk '/^[[:space:]]*conflict files:/,/^```$/')
+# SANITIZE_BODY: bound the sanitize_agent_text body so M64.sanitize-impl below
+# matches the helper definition itself, not an incidental occurrence elsewhere.
+SANITIZE_BODY=$(awk '/sanitize_agent_text\(\) \{/,/^[[:space:]]*\}[[:space:]]*$/' "$SKILL_FILE")
+
+# AC1 + AC4 — per-file conflict sub-block presence (4 fields). Case-sensitive
+# (literal -F) so a future "Conflict Files:" or "VERDICT:" mistake fails loudly
+# instead of silently matching the lowercase contract.
+for field in 'conflict files:' 'verdict:' 'justification:' 'risks:'; do
+  if echo "$CONFLICT_BLOCK" | grep -qF "$field"; then
+    pass "M64.field[$field] — conflict-files sub-block names \"$field\" (lowercase, within sub-block)"
+  else
+    fail "M64.field[$field] — conflict-files sub-block MUST include \"$field\" lowercase, within the sub-block (not just elsewhere in SKILL.md)"
+  fi
+done
+
+# Q1 decision — verdict casing must be lowercase, bracketed (2 tags), and the
+# tags must appear inside the conflict-files sub-block (not in an unrelated
+# example or comment elsewhere in the run-summary section).
+for tag in '\[refused\]' '\[ambiguous\]'; do
+  if echo "$CONFLICT_BLOCK" | grep -qE "$tag"; then
+    pass "M64.tag[$tag] — verdict casing matches PARK_REASON_ENUM (lowercase, bracketed) within sub-block"
+  else
+    fail "M64.tag[$tag] — verdict tag $tag MUST appear inside the conflict-files sub-block (lowercase bracketed form per PARK_REASON_ENUM)"
+  fi
+done
+
+# Phase 3.3iv prose must explicitly name the source fields (4 tokens).
+for prose_token in 'resolution_summary' 'risks' 'sanitize_agent_text' 'fmt -w 80'; do
+  if echo "$PHASE_33IV" | grep -qF "$prose_token"; then
+    pass "M64.prose[$prose_token] — Phase 3.3iv mentions \"$prose_token\""
+  else
+    fail "M64.prose[$prose_token] — Phase 3.3iv MUST mention \"$prose_token\" so consumer wiring is unambiguous"
+  fi
+done
+
+# AC3 — conditional render: the gate clause must appear INSIDE the
+# conflict-files sub-block template, not merely somewhere in SKILL.md. This
+# catches the regression where the gate is removed from the template but the
+# phrase survives in surrounding prose.
+if echo "$CONFLICT_BLOCK" | grep -qF 'only if outcome is Parked AND park reason'; then
+  pass "M64.conditional — conflict-files sub-block render-condition documented inline with the sub-block (gates RESOLVED path unchanged)"
+else
+  fail "M64.conditional — conflict-files sub-block MUST inline the render-condition clause; gate removal from template would leave RESOLVED path unprotected"
+fi
+
+# Sanitization helper body must be present (literal C0/C1+DEL strip range)
+# AND must appear within the awk-bounded sanitize_agent_text() function — so
+# the assertion fails if the helper definition is removed but the byte range
+# survives in a comment or example elsewhere.
+if echo "$SANITIZE_BODY" | grep -qF "tr -d '\\000-\\010\\013-\\037\\177\\200-\\237'"; then
+  pass "M64.sanitize-impl — sanitize_agent_text body documents the C0/C1+DEL strip range (within helper definition)"
+else
+  fail "M64.sanitize-impl — sanitize_agent_text body MUST contain literal C0/C1+DEL strip range inside the helper definition"
+fi
 
 echo
 echo "== M64: SKILL.md Inputs 'No args' bullet documents bare-discover dual path =="
