@@ -252,6 +252,49 @@ assert_grep "$REVIEW_PR" \
   "R8.6 — Phase 1 vs Phase 2 separate-commit invariant preserved"
 
 echo
+echo "== R9: trust-trail-anchor empty-commit pattern (post-v0.18.1 — replaces per-simplify-commit trailer + amend) =="
+
+# R9.1 — anchor-commit pattern named in /review-pr Trust-Signal Emission section
+assert_grep "$REVIEW_PR" \
+  'trust[- ]trail[- ]anchor|trust trail anchor' \
+  "R9.1 — trust-trail-anchor commit pattern named"
+
+# R9.2 — anchor commit uses git commit --allow-empty (NOT --amend); regression guard for the
+# v0.18.0 trailer-on-simplify-commit bug where the trailer SHA pointed at the parent.
+assert_grep "$REVIEW_PR" \
+  'git commit --allow-empty' \
+  "R9.2 — anchor commit literal git commit --allow-empty present"
+
+# R9.3 — explicit prose that --amend is NEVER used in trust-signal emission so push never
+# requires --force-with-lease. Pin the regression-guard prose so a future implementer can't
+# silently re-introduce amend-and-force-push.
+assert_grep "$REVIEW_PR" \
+  '`git commit --amend` is \*\*NEVER\*\* used|amend is \*\*NEVER\*\* used|never requires `--force-with-lease`' \
+  "R9.3 — anchor commit explicitly avoids --amend / force-push"
+
+# R9.4 — trailer SHA references the anchor commit's parent (not the anchor's own SHA — the
+# chicken-and-egg sidestep). PARENT_SHA capture variable must be the parent of the anchor.
+assert_grep "$REVIEW_PR" \
+  'PARENT_SHA="\$\(git rev-parse HEAD\)"|trailer pointing at its parent' \
+  "R9.4 — trailer SHA captured as parent of the anchor (PARENT_SHA before --allow-empty)"
+
+# R9.5 — anchor commit subject is chore(review-pr): trust trail anchor
+assert_grep "$REVIEW_PR" \
+  'chore\(review-pr\):.*trust trail anchor' \
+  "R9.5 — anchor commit subject is chore(review-pr): trust trail anchor"
+
+# R9.6 — Phase 2 simplify commit body does NOT carry the trailer (regression guard for the
+# bug being fixed: trailer-on-simplify-commit landed parent SHA into the trailer body).
+assert_grep "$REVIEW_PR" \
+  "Phase 2's simplify commit body itself does \*\*NOT\*\* carry the .Reviewed-by:. trailer|simplify commit body itself does NOT carry|simplify commit body does .NOT. carry" \
+  "R9.6 — Phase 2 simplify commit body does NOT carry the Reviewed-by trailer"
+
+# R9.7 — anchor-commit failure path is explicit in artifact-emission failure prose
+assert_grep "$REVIEW_PR" \
+  'anchor commit fails|anchor commit.*fails' \
+  "R9.7 — artifact-emission failure prose covers anchor commit failure"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

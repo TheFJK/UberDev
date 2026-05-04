@@ -93,15 +93,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
    **Auto-apply simplify edits** in a separate `refactor:` conventional commit, distinct from the Phase 1 review-fix commits. Reviewers must be able to tell "review fixes" apart from "simplify pass" by commit boundary alone — this distinct commit boundary is mandatory, not stylistic.
 
-   **On green Phase 2 (status ∈ {ran/APPROVE, skipped}), append the trust-signal trailer to the simplify-pass commit body:**
-
-   ```
-   Reviewed-by: uberdev/review-pr@<head-sha>
-   ```
-
-   where `<head-sha>` is the FULL 40-character SHA returned by `git rev-parse HEAD` immediately after the commit-write completes (NOT the abbreviated short-SHA — downstream `/merge` parser greps the literal 40-hex form). The trailer is the load-bearing trust artifact for `/merge` Phase 1.4 trust resolution (see `skills/merge/SKILL.md` Constants `REVIEW_PR_TRAILER_PREFIX`).
-
-   **When Phase 2 is `skipped`** (no simplify commit exists because `--no-simplify` was set or no simplify-eligible diff was found): append the trailer via `git commit --amend` to the most-recent commit on the PR head — typically the last Phase 1 auto-apply fix commit, or the user's tip commit if no Phase 1 fixes were needed. The amend recomputes the head SHA, so the trailer payload binds to the **post-amend** SHA, not the pre-amend SHA. Recompute `git rev-parse HEAD` after the amend before writing the trailer payload. This commit goes through pre-commit hooks normally — never `--no-verify`. Author = current `git config user.email` / `user.name`; the trailer is procedural attribution to the `/review-pr` command (not a Claude attribution).
+   **On green Phase 2 (status ∈ {ran/APPROVE, skipped}), defer trust-signal emission to the dedicated end-of-run step** (see "Trust-Signal Emission" below). Phase 2's simplify commit body itself does **NOT** carry the `Reviewed-by:` trailer — the trailer is emitted as a separate trust-trail-anchor empty commit at the very end of `/review-pr`. This guarantees the trailer's referenced SHA always anchors the actual end-of-run HEAD regardless of how many Phase 1 / Phase 2 commits land, sidestepping the parent-vs-self SHA-mismatch class of bugs that per-simplify-commit-trailer patterns produce when Phase 2 makes a real commit on top of Phase 1's last commit. The trailer payload format is unchanged — `Reviewed-by: uberdev/review-pr@<40-char-sha>` — only the carrier-commit choice changes (anchor commit, not simplify commit).
 
    **Advisory-only findings** (where a lens declines to edit because the change carries behavior risk, or the agent flags a concern outside the iron-rule envelope) are **never silently dropped** — they surface in the Phase 2 row of the final aggregation table (step 7) so the human reviewer sees them.
 
@@ -165,9 +157,24 @@ GREEN := (Phase 1 verdict == "APPROVE") AND (Phase 2 status ∈ {"ran/APPROVE", 
 
 On GREEN, emit three SHA-bound durable artifacts in lockstep (all reference the same post-emission `headRefOid`):
 
-1. **Label** — `gh pr edit <N> --add-label uberdev-approved` (idempotent — `gh` no-ops if the label is already present). The literal label string is `uberdev-approved` (see `skills/merge/SKILL.md` Constants `UBERDEV_APPROVED_LABEL`).
+1. **Trust-trail-anchor commit** — emit ONE empty commit at HEAD whose body carries the trailer pointing at its parent. The parent SHA — captured **before** the anchor commit — is the load-bearing trust artifact for `/merge` Phase 1.4 trust resolution (see `skills/merge/SKILL.md` Constants `REVIEW_PR_TRAILER_PREFIX`):
 
-2. **Trailer** — already emitted in step 6 on the simplify commit (or amended onto the most-recent commit when Phase 2 is `skipped`). Verify with `git log -1 --format=%B | grep -E '^Reviewed-by: uberdev/review-pr@[a-f0-9]{40}$'` before proceeding to artifact 3.
+   ```bash
+   PARENT_SHA="$(git rev-parse HEAD)"   # full 40-char SHA — NOT --short
+   git commit --allow-empty -m "chore(review-pr): trust trail anchor for #<PR>
+
+   Reviewed-by: uberdev/review-pr@${PARENT_SHA}"
+   git push origin HEAD
+   ```
+
+   Why an empty anchor commit (and not a per-simplify-commit trailer or `git commit --amend`):
+   - **Empty diff by construction** (`--allow-empty`). `trust-trail-evaluator` PASSes via the empty-cumulative-diff path: `git merge-base --is-ancestor <PARENT_SHA> HEAD` → YES, `git diff <PARENT_SHA> HEAD` → empty → `PASS`. Independent of how many Phase 1 / Phase 2 commits landed.
+   - **Always a fresh new commit on top.** `git commit --amend` is **NEVER** used, so push **never** requires `--force-with-lease`. Works identically whether Phase 1 / Phase 2 already pushed mid-run or batched their pushes.
+   - **Self-pinning trailer.** The trailer references the anchor's parent — the actual end-of-run HEAD before the anchor — so the SHA is captured *deterministically* at the only moment it can be written without chicken-and-egg. No reliance on amend-recompute or sibling-equivalence heuristics on the agent side.
+
+   The anchor commit goes through pre-commit hooks normally — never `--no-verify`. Author = current `git config user.email` / `user.name`; the trailer is procedural attribution to the `/review-pr` command. Per global CLAUDE.md, the anchor commit MUST NOT include a `Co-Authored-By: Claude` trailer or any `🤖 Generated with Claude Code` footer. The trailer payload (`Reviewed-by: uberdev/review-pr@<40-hex>`) is the only trailer in the body. Verify with `git log -1 --format=%B | grep -E '^Reviewed-by: uberdev/review-pr@[a-f0-9]{40}$'` before proceeding to artifact 2.
+
+2. **Label** — `gh pr edit <N> --add-label uberdev-approved` (idempotent — `gh` no-ops if the label is already present). The literal label string is `uberdev-approved` (see `skills/merge/SKILL.md` Constants `UBERDEV_APPROVED_LABEL`).
 
 3. **Audit JSON** — write to `.uberdev/runs/<run-id>/review-pr-verdict.json`:
 
@@ -186,7 +193,7 @@ On GREEN, emit three SHA-bound durable artifacts in lockstep (all reference the 
 
 The JSON is **local debug telemetry only** — `.uberdev/` is gitignored, so the JSON does NOT cross-clone. `/merge` consumes the trailer as the load-bearing trust artifact and treats the JSON as a corroborating presence check. See `skills/merge/SKILL.md` Phase 1.4 Path 2 for the consumer side.
 
-On any artifact-emission failure (label add fails, JSON write fails): exit 2 (treat as `blocked`-equivalent because the trust-signal contract is broken). Print the failing `gh` / filesystem stderr; suggest re-running `/review-pr`.
+On any artifact-emission failure (anchor commit fails — pre-commit hook rejection, push rejection, network failure; label add fails; JSON write fails): exit 2 (treat as `blocked`-equivalent because the trust-signal contract is broken). Print the failing `git` / `gh` / filesystem stderr; suggest re-running `/review-pr`.
 
 ### Run-ID format
 

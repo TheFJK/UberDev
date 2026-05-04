@@ -999,10 +999,13 @@ done
 
 echo
 echo "== M61: trust-trail-evaluator handles sibling-equivalent commits (non-ancestor + empty tree diff) as PASS =="
-# Motivating case: /review-pr's `git commit --amend` produces a sibling commit with identical
-# tree contents but a different SHA. The trailer references the pre-amend SHA, which is not
-# an ancestor of the post-amend HEAD. Pre-fix, the agent's Step 2 short-circuited to
-# FORCE_PUSHED on Exit 1 without ever checking the tree diff, blocking legitimate trust trails.
+# Motivating case (post-v0.18.1): user-side `git commit --amend` between /review-pr and /merge
+# produces a sibling commit with identical tree contents but a different SHA. The trailer
+# references the pre-amend SHA, which is not an ancestor of the post-amend HEAD. Pre-fix, the
+# agent's Step 2 short-circuited to FORCE_PUSHED on Exit 1 without ever checking the tree diff,
+# blocking legitimate trust trails. (/review-pr itself no longer amends post-v0.18.1 — it
+# emits an empty trust-trail-anchor commit instead — but sibling-equivalence remains supported
+# for user-side amends.)
 TTE_FILE="$REPO_ROOT/plugins/uberdev/agents/trust-trail-evaluator.md"
 if [ ! -r "$TTE_FILE" ]; then
   echo "  FAIL  M61 — agent file missing: $TTE_FILE"
