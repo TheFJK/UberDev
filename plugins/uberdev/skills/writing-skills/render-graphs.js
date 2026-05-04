@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Vendored from obra/superpowers@e7a2d16476bf042e9add4699c9d018a90f86e4a6 (MIT) — see plugins/uberdev/licenses/superpowers-MIT.txt
 
 /**
  * Render graphviz diagrams from a skill's SKILL.md to SVG files.

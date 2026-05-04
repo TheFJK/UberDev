@@ -1,3 +1,4 @@
+<!-- Vendored from obra/superpowers@e7a2d16476bf042e9add4699c9d018a90f86e4a6 (MIT) — see plugins/uberdev/licenses/superpowers-MIT.txt -->
 # Skill authoring best practices
 
 > Learn how to write effective Skills that Claude can discover and use successfully.

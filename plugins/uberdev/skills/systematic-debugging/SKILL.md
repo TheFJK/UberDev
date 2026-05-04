@@ -2,6 +2,7 @@
 name: systematic-debugging
 description: Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes
 ---
+<!-- Vendored from obra/superpowers@e7a2d16476bf042e9add4699c9d018a90f86e4a6 (MIT) — see plugins/uberdev/licenses/superpowers-MIT.txt; local rewrite: 'superpowers:' → 'uberdev:'; local additions: 'Parallel hypothesis testing' section -->
 
 # Systematic Debugging
 
