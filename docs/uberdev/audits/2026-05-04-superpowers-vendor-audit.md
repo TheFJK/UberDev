@@ -49,12 +49,34 @@ Special-case allowlist (intentional local divergence — recorded in per-file pr
 
 ## Acceptance-criteria mapping
 
-| Issue #57 AC | Evidence |
-|--------------|----------|
-| TDD: `testing-anti-patterns.md` vendored, frontmatter adapted, referenced from TDD parent SKILL.md | File present at `plugins/uberdev/skills/test-driven-development/testing-anti-patterns.md` since v0.3.0 commit `41d072b`. Sub-file correctly has no YAML frontmatter (per UberDev convention). Referenced from parent SKILL.md "Testing Anti-Patterns" section. Provenance pinned in this PR (line 1). |
-| writing-skills: all three depth files vendored, frontmatter adapted, referenced from parent SKILL.md, spot-checked by authoring a small new skill | All three files (`anthropic-best-practices.md`, `persuasion-principles.md`, `testing-skills-with-subagents.md`) present since v0.3.0 commit `41d072b`. Parent SKILL.md references all three. AC2 spot-check evidence: 30+ orchestrator agent definitions under `plugins/uberdev/agents/` (e.g., `research-codebase.md`, `spec-writer.md`, `plan-writer.md`, `spec-reviewer.md`, `plan-reviewer.md`) were authored or maintained against `writing-skills/SKILL.md` principles. The skill's File Organization, frontmatter shape (`name:`/`description:` two-field), and discovery rules (trigger-driven loading from a centralised list) are all reflected in those agent files. Spot-check confirmed 2026-05-04 by listing `plugins/uberdev/agents/` and grepping for the required two-field frontmatter shape — every file conforms. `testing-skills-with-subagents.md` carries the special-case `local rewrite` suffix in its provenance header. |
-| systematic-debugging: side-by-side diff documented, missing sub-files vendored, parent SKILL.md updated, validated against a recent real bugfix | The Inventory + diff-results table above IS the side-by-side diff. All 11 systematic-debugging files (parent SKILL.md + 7 markdown sub-files + 3 adjacent supporting files: `condition-based-waiting-example.ts`, `find-polluter.sh`, `CREATION-LOG.md`) present and either MATCH or expected-DIFFER (parent SKILL.md has the rebrand + local 'Parallel hypothesis testing' section, recorded in its provenance header suffix). AC3 validated-against-recent-real-bugfix evidence: PR #53 (commit `1dff86c`, merged 2026-05-04, 'fix(merge): guard Step 1.1 against missing flock(1) on macOS'). Bug: silent failure of `/merge` Step 1.1 on macOS hosts where `flock(1)` is not preinstalled. Applied root-cause-tracing.md (traced backward through `/merge` call stack to the missing utility) + defense-in-depth.md (added explicit guard with actionable error message before any locked operation, plus a documentation note in `commands/merge.md`). The `systematic-debugging/SKILL.md` Plan Test First / Stay Curious / Verify Assumption Before Patch flow is followed end-to-end in the PR's commit messages and the resulting code change. |
-| License attribution preserved across all three groups (upstream is MIT) | Four-layer attribution stack: LICENSE + `plugins/uberdev/licenses/superpowers-MIT.txt` + README credit + per-file provenance headers (added in this PR). |
+### AC1 — TDD: `testing-anti-patterns.md` vendored, frontmatter adapted, referenced from TDD parent SKILL.md
+
+- **Location:** `plugins/uberdev/skills/test-driven-development/testing-anti-patterns.md` — present since v0.3.0 commit `41d072b`.
+- **Frontmatter:** Sub-file correctly has no YAML frontmatter (per UberDev convention).
+- **Reference:** Linked from parent SKILL.md "Testing Anti-Patterns" section.
+- **Provenance:** Pinned in this PR on line 1.
+
+### AC2 — writing-skills: all three depth files vendored, frontmatter adapted, referenced from parent SKILL.md, spot-checked by authoring a small new skill
+
+- **Files:** `anthropic-best-practices.md`, `persuasion-principles.md`, `testing-skills-with-subagents.md` — all present since v0.3.0 commit `41d072b`.
+- **Reference:** Parent SKILL.md references all three.
+- **Spot-check evidence:** 30+ orchestrator agent definitions under `plugins/uberdev/agents/` (e.g., `research-codebase.md`, `spec-writer.md`, `plan-writer.md`, `spec-reviewer.md`, `plan-reviewer.md`) were authored or maintained against `writing-skills/SKILL.md` principles. The skill's File Organization, frontmatter shape (`name:`/`description:` two-field), and discovery rules (trigger-driven loading from a centralised list) are all reflected in those agent files.
+- **Spot-check verification (2026-05-04):** Listed `plugins/uberdev/agents/` and grepped for the required two-field frontmatter shape — every file conforms.
+- **Local divergence:** `testing-skills-with-subagents.md` carries the special-case `local rewrite` suffix in its provenance header.
+
+### AC3 — systematic-debugging: side-by-side diff documented, missing sub-files vendored, parent SKILL.md updated, validated against a recent real bugfix
+
+- **Side-by-side diff:** The Inventory + diff-results table above IS the side-by-side diff.
+- **File coverage:** All 11 systematic-debugging files present (parent SKILL.md + 7 markdown sub-files + 3 adjacent supporting files: `condition-based-waiting-example.ts`, `find-polluter.sh`, `CREATION-LOG.md`).
+- **Diff status:** Each file is MATCH or expected-DIFFER. The parent SKILL.md has the rebrand + local 'Parallel hypothesis testing' section, recorded in its provenance header suffix.
+- **Validated-against-recent-real-bugfix evidence:** PR #53 (commit `1dff86c`, merged 2026-05-04, 'fix(merge): guard Step 1.1 against missing flock(1) on macOS').
+  - **Bug:** Silent failure of `/merge` Step 1.1 on macOS hosts where `flock(1)` is not preinstalled.
+  - **Skills applied:** `root-cause-tracing.md` (traced backward through `/merge` call stack to the missing utility) + `defense-in-depth.md` (added explicit guard with actionable error message before any locked operation, plus a documentation note in `commands/merge.md`).
+  - **Process flow:** The `systematic-debugging/SKILL.md` Plan Test First / Stay Curious / Verify Assumption Before Patch flow is followed end-to-end in the PR's commit messages and the resulting code change.
+
+### AC4 — License attribution preserved across all three groups (upstream is MIT)
+
+- **Four-layer attribution stack:** LICENSE + `plugins/uberdev/licenses/superpowers-MIT.txt` + README credit + per-file provenance headers (added in this PR).
 
 ## Re-diff procedure (for next re-sync)
 
@@ -139,9 +161,7 @@ done
 
 ## Notes
 
-- `testing-skills-with-subagents.md` has a known 4-byte local rewrite (`superpowers:` → `uberdev:`) recorded in its provenance header.
-- `writing-skills/SKILL.md` has the same rebrand pattern (4 occurrences) recorded in its provenance header.
-- `systematic-debugging/SKILL.md` has the rebrand pattern (3 occurrences) PLUS a local "Parallel hypothesis testing" section enhancement, both recorded in its provenance header.
+- The 3 known-divergent files and their per-file divergence patterns are recorded in two canonical places: the special-case allowlist (above) and the bash heredoc's `# Known-divergent files` block. Each divergence is also pinned in the affected file's provenance header.
 - `find-polluter.sh` and `render-graphs.js` carry their provenance header on **line 2** to preserve the shebangs.
-- Re-diff next time the upstream is bumped or anytime a security audit asks for a fresh trust trail.
+- Re-diff whenever the upstream is bumped or a security audit requests a fresh trust trail.
 - Follow-up issue recommended: adopt `tests/skill-references.test.sh` per the test-coverage research, validating sub-file existence + parent SKILL.md reference pairs across ALL UberDev skills (not just the three vendored ones).
