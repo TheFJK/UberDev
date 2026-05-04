@@ -43,3 +43,6 @@ node_modules/
 id_rsa
 id_rsa.*
 .claude/
+
+# Local-only Claude project instructions (personal, not for the published plugin)
+CLAUDE.md
