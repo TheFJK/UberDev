@@ -1336,13 +1336,8 @@ if grep -qE '^- No args.*errors if none' "$CMD_FILE"; then
 else
   pass "M72.no-old-usage — commands/merge.md Usage bullet 1 correctly omits the old 'errors if none' wording"
 fi
-# M2 length cap re-asserted — file must remain ≤ 50 lines.
-CMD_LINE_COUNT=$(wc -l < "$CMD_FILE" | tr -d ' ')
-if [ "$CMD_LINE_COUNT" -le 50 ]; then
-  pass "M72.length-cap — commands/merge.md is $CMD_LINE_COUNT lines (≤ 50 thin-dispatcher cap; M2 invariant)"
-else
-  fail "M72.length-cap — commands/merge.md MUST be ≤ 50 lines (got $CMD_LINE_COUNT; M2 thin-dispatcher cap)"
-fi
+# M72.length-cap dropped — duplicate of M2 (line 115). M2 already enforces the ≤50-line
+# thin-dispatcher cap on every run; re-asserting it inside M72 added no coverage.
 
 echo
 echo "== M73: SKILL.md Phase 1.4 'per discovered PR' fanout + Step 2.2 single-message invariant preserved =="

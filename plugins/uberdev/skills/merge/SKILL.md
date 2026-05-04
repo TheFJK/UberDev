@@ -103,14 +103,14 @@ When `/merge` is invoked with no positional `<PR#>` and no `--all` flag (the bar
 
 Procedure:
 
-1. Resolve `current_branch := git symbolic-ref --short HEAD 2>/dev/null`. On failure (detached HEAD), set `current_branch=""` and treat the candidate count as 0 (multi-discover fall-through).
+1. Resolve `current_branch := git symbolic-ref --short HEAD 2>/dev/null`. On failure (detached HEAD), set `current_branch=""`, **skip step 2 entirely**, and treat `N := 0` (multi-discover fall-through). Do not invoke `BARE_MODE_FAST_PATH_QUERY` with an empty `--head` value — `gh pr list --head ""` is undefined behaviour.
 2. Run the canonical `BARE_MODE_FAST_PATH_QUERY` (declared in `## Constants`):
 
    ```bash
    gh pr list --head "$current_branch" --state open --search "draft:false" --json number,headRefOid
    ```
 
-   The result is a JSON array; let `N := len(result)`.
+   The result is a JSON array; let `N := len(result)`. **`gh` failure-mode handling** (network, auth, rate limit, 5xx) is a cross-cutting concern across all `gh pr list` invocations in the skill (`--all` discovery has the same shape); follow-up issue tracks unified hardening across both bare-discover Step 1.0.5 / Step 1.2.5 and the existing `--all` path. Until then: a `gh` failure producing empty stdout will be observed as `N=0`, falling through to multi-discover; surface the breadcrumb at step 3 unchanged.
 
 3. Branch on `N` (three-way):
 
@@ -130,7 +130,7 @@ Procedure:
 
      The pipeline proceeds to Step 1.1 (lock) and Step 1.2 (integration_branch resolution); Step 1.2.5 will apply the multi-discover dispatch filter and seed the candidate set.
 
-   - `N > 1` → **ambiguity hard error**. Emit one stderr line `error: current branch '<current_branch>' has multiple open PRs (#A #B); use --all or <PR#> to disambiguate.` and exit 1. (Rare; cross-fork edge case.)
+   - `N > 1` → **ambiguity hard error**. Emit one stderr line `error: current branch '<current_branch>' has multiple open PRs (#A #B); use --all or <PR#> to disambiguate.` and exit 1. (Rare; cross-fork edge case.) **No audit event is emitted by design** — the stderr line is the canonical surface (cardinality matches Phase 2.1's cycle-break stderr-only convention; `AUDIT_EVENT_ENUM` intentionally has no `bare_mode_ambiguous` member). The audit log is bound to a `run_id` allocated at Step 1.1 (lock acquisition), and Step 1.0.5 runs pre-lock — so there is no audit context yet. Implementers MUST NOT add an audit event here without spec-level changes.
 
 When `--all` was passed on the command line, **Step 1.0.5 is skipped entirely** — the multi-discover discriminator is set unconditionally, and the pipeline proceeds to Step 1.1.
 
@@ -209,7 +209,7 @@ candidates=$(gh pr list --base "$integration_branch" --state open --search "draf
   | jq '[.[] | select(.isDraft==false)]')
 ```
 
-The `jq '.[] | select(.isDraft==false)'` filter is belt-and-suspenders against any future `gh` API change that might surface drafts despite the `--search "draft:false"` flag. The candidate array is the input set for Phase 1.4 (per-PR trust gate fanout). **This is the only place `DISCOVERY_FILTER` is invoked**; both bare-mode (multi-discover) and `--all` route through this single dispatch point so the two modes share one canonical filter (Q4).
+The `jq '.[] | select(.isDraft==false)'` filter is belt-and-suspenders against any future `gh` API change that might surface drafts despite the `--search "draft:false"` flag. The candidate array is the input set for Phase 1.4 (per-PR trust gate fanout). **This is the only place `DISCOVERY_FILTER` is invoked**; both bare-mode (multi-discover) and `--all` route through this single dispatch point so the two modes share one canonical filter (Q4). **`gh` and `jq` failure-mode handling** is a cross-cutting concern shared with Step 1.0.5 (see that step's note); a transient `gh` failure or `jq` parse error producing an empty pipeline output is currently observed as a legitimate empty candidate set (Step 1.7 clean-exit-0 applies). Follow-up issue tracks unified hardening across bare-discover and the existing `--all` path; until then, post-hoc forensics rely on `gh` CLI's own stderr emission rather than a structured audit event.
 
 If the `gh` invocation returns an empty array (all PRs are drafts, or no open PRs exist on `$integration_branch`), the candidate set is empty — Step 1.7's clean-exit-0 contract applies (see Step 1.7's bare-mode cross-reference).
 
