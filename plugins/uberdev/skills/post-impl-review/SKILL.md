@@ -7,7 +7,7 @@ description: Shared post-implementation review fanout — dispatches 5 advisory 
 
 ## Overview
 
-5 reviewer agents fire in PARALLEL inside a single assistant turn; their findings are aggregated into a single non-blocking summary returned to the caller. The reviewers are advisory — at this layer the caller continues regardless of `REVISIONS_REQUIRED` verdicts. This keeps wall-clock cost low (one round-trip for five perspectives) while still applying multi-axis scrutiny to the consolidated end-of-issue diff (or a trivial/small single commit).
+5 reviewer agents fire in PARALLEL inside a single assistant turn; their findings are aggregated into a single non-blocking summary returned to the caller. The reviewers are advisory — at this layer the caller continues regardless of `REVISIONS_REQUIRED` verdicts. This keeps wall-clock cost low (one round-trip for five perspectives) while still applying multi-axis scrutiny to the pushed-PR diff (the only live caller is `/uberdev:review-pr` Phase 1 — see "When to invoke" below).
 
 **Announce at start:** "I'm using the post-impl-review skill to fan out the 5 reviewer agents."
 
@@ -36,8 +36,8 @@ If a reviewer agent surfaces a finding that "we should re-plan", record it as a 
 
 ## Inputs (passed by caller)
 
-- `changed_paths` — list of files modified by the implementation (e.g. one wave's diff, or one trivial-tier commit's diff).
-- `commit_range` — git rev range for diff context, e.g. `HEAD~3..HEAD`.
+- `changed_paths` — list of files modified by the implementation (e.g. `gh pr diff <N> --name-only` output from `/uberdev:review-pr` Phase 1).
+- `commit_range` — git rev range for diff context, e.g. `<base>..HEAD` where `<base>` is the PR base ref.
 - `tier` — one of `trivial` / `small` / `medium` / `large`. Used only for reviewer model selection (Haiku for trivial/small, Sonnet for medium/large) per each agent's frontmatter.
 
 ## Process

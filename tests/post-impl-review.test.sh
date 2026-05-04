@@ -114,14 +114,6 @@ else
   PASS=$((PASS + 1))
 fi
 
-if grep -qE "End-of-issue post-impl-review\." "$SUBAGENT_DRIVEN"; then
-  echo "  FAIL  obsolete step 5 wording 'End-of-issue post-impl-review.' must be removed per #67"
-  FAIL=$((FAIL + 1))
-else
-  echo "  PASS  obsolete step 5 wording 'End-of-issue post-impl-review.' removed"
-  PASS=$((PASS + 1))
-fi
-
 echo
 echo "== post-impl-review/SKILL.md names /uberdev:review-pr Phase 1 as sole live caller (#67) =="
 assert_grep "$POST_IMPL" '/uberdev:review-pr Phase 1' \
