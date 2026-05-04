@@ -14,9 +14,12 @@
 Thumbs.db
 ehthumbs.db
 
-# Local-only design docs (kept on disk, not published) — except RFCs which are public
+# Local-only design docs (kept on disk, not published) — except RFCs and audits which are public
 docs/*
 !docs/rfc/
+!docs/uberdev/
+docs/uberdev/*
+!docs/uberdev/audits/
 
 # Local-only design notes under the plugin (testing.md is the only tracked file there)
 plugins/uberdev/docs/plans/
