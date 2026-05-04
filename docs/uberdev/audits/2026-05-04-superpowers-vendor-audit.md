@@ -60,8 +60,15 @@ Special-case allowlist (intentional local divergence — recorded in per-file pr
 
 ```bash
 # Run from repo root
+set -euo pipefail
+
 FRESH_SHA=$(git ls-remote https://github.com/obra/superpowers HEAD | awk '{print $1}')
+if [ -z "$FRESH_SHA" ] || [ ${#FRESH_SHA} -ne 40 ]; then
+  echo "ERROR: failed to fetch upstream HEAD SHA (got: '$FRESH_SHA')" >&2
+  exit 1
+fi
 FETCH_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+echo "Re-diff against obra/superpowers@$FRESH_SHA (fetched $FETCH_TS)"
 
 FILES=(
   "test-driven-development/SKILL.md"
@@ -98,10 +105,23 @@ FILES=(
 #   writing-skills/testing-skills-with-subagents.md — superpowers:->uberdev: rebrand (4-byte delta)
 #   systematic-debugging/SKILL.md — superpowers:->uberdev: rebrand + local 'Parallel hypothesis testing' section
 
+TMP=$(mktemp)
+trap 'rm -f "$TMP"' EXIT
+
 for FILE in "${FILES[@]}"; do
   UPSTREAM_URL="https://raw.githubusercontent.com/obra/superpowers/${FRESH_SHA}/skills/${FILE}"
-  curl -sSL "$UPSTREAM_URL" -o /tmp/u
-  diff /tmp/u "plugins/uberdev/skills/${FILE}" > /dev/null && echo "$FILE  MATCH" || echo "$FILE  DIFFER"
+  # --fail propagates HTTP 4xx/5xx as non-zero exit; --max-time bounds the network wait
+  RC=0
+  curl -sSL --fail --max-time 30 "$UPSTREAM_URL" -o "$TMP" || RC=$?
+  if [ "$RC" -ne 0 ]; then
+    echo "$FILE  FETCH_FAILED (curl exit $RC, URL: $UPSTREAM_URL)" >&2
+    continue
+  fi
+  if diff "$TMP" "plugins/uberdev/skills/${FILE}" > /dev/null; then
+    echo "$FILE  MATCH"
+  else
+    echo "$FILE  DIFFER"
+  fi
 done
 ```
 
