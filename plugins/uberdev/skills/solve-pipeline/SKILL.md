@@ -174,18 +174,14 @@ for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
   # medium even with quiet labels). The default keeps the dispatch valid even
   # if the heuristic refinement is skipped — better to over-engineer a trivial
   # fix than to under-spec a real refactor.
-  # Per-repo clamp (issue #63): if `.claude/uberdev.local.md` defines
-  # `solve_tier_floor` / `solve_tier_ceiling`, the resolved $TIER is
-  # clamped into [floor, ceiling] via `uberdev_clamp_tier` from
-  # plugins/uberdev/lib/config-read.sh. floor > ceiling emits a
-  # `floor_gt_ceiling` warning and is ignored; absence on either side
-  # is unbounded that side. Env overrides: SOLVE_TIER_FLOOR /
-  # SOLVE_TIER_CEILING.
   TIER="${OVERRIDE:-medium}"
-  # Tier-clamp via .claude/uberdev.local.md (issue #63):
-  #   solve_tier_floor    — env: SOLVE_TIER_FLOOR    — enum
-  #   solve_tier_ceiling  — env: SOLVE_TIER_CEILING  — enum
-  # Helpers from plugins/uberdev/lib/config-read.sh.
+  # Per-repo tier clamp: if `.claude/uberdev.local.md` defines
+  # `solve_tier_floor` (env: SOLVE_TIER_FLOOR) or `solve_tier_ceiling` (env:
+  # SOLVE_TIER_CEILING), the resolved $TIER is clamped into [floor, ceiling]
+  # via `uberdev_clamp_tier` from `plugins/uberdev/lib/config-read.sh`. Both
+  # keys take an enum from {trivial, small, medium, large}; absence on either
+  # side is unbounded that side; floor > ceiling emits a `floor_gt_ceiling`
+  # warning and is ignored.
   if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
     # shellcheck source=/dev/null
     . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
@@ -328,7 +324,7 @@ fi
 
 The launcher `cd`s to repo root, cleans stale worktree, logs errors, keeps terminal open on failure. `REAL_CLAUDE` was resolved once in Step 3 (same value across every spawn).
 
-**Wall-clock timeout (issue #63).** The launcher reads
+**Wall-clock timeout.** The launcher reads
 `command_timeouts.solve` from `.claude/uberdev.local.md` (env override:
 `UBERDEV_SOLVE_TIMEOUT`; default 3600s; range [60, 86400]) and wraps the
 `claude` invocation in `timeout(1)` when the binary is on PATH. If
@@ -374,27 +370,29 @@ echo "Starting claude agent for issue #ISSUE_NUM (tier: TIER)..."
 # pre-existing files, exfil, self-modification). Strictly safer than
 # --dangerously-skip-permissions for autonomous /solve runs.
 PERM_FLAG="PERM_FLAG_VALUE"
-# Resolve /solve wall-clock timeout (issue #63). Helper path is sed-substituted
-# at heredoc-write time below — the launcher runs in a fresh terminal session
-# that does NOT inherit $CLAUDE_PLUGIN_ROOT, so we resolve the path now (mirrors
-# the REPO_ROOT / CLAUDE_BIN substitution pattern).
+# Wall-clock timeout: helper path is sed-substituted at heredoc-write time below
+# because the launcher runs in a fresh terminal session that does not inherit
+# $CLAUDE_PLUGIN_ROOT (mirrors the REPO_ROOT / CLAUDE_BIN substitution pattern).
 if [ -r "CLAUDE_PLUGIN_ROOT_VAL/lib/config-read.sh" ]; then
   # shellcheck source=/dev/null
   . "CLAUDE_PLUGIN_ROOT_VAL/lib/config-read.sh"
   SOLVE_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.solve UBERDEV_SOLVE_TIMEOUT 60 86400 3600)"
 else
+  echo "warning: config-read.sh not found at CLAUDE_PLUGIN_ROOT_VAL/lib/; uberdev.local.md timeout settings ignored" >&2
   SOLVE_TIMEOUT=3600
 fi
 
 # Wrap claude in timeout(1) when the binary is on PATH; fail-open otherwise
-# (matches session-start.sh:14-23 jq-absent precedent).
+# (graceful degradation when required tooling is unavailable). The if/else form
+# is mandatory: zsh's default SH_WORD_SPLIT=off would treat a scalar
+# `$PREFIX="timeout 3600"` at command position as ONE token and abort with
+# "command not found: timeout 3600" under set -e.
 if command -v timeout >/dev/null 2>&1; then
-  TIMEOUT_PREFIX="timeout ${SOLVE_TIMEOUT}"
+  timeout "${SOLVE_TIMEOUT}" CLAUDE_BIN --model 'claude-opus-4-7[1m]' --effort max --worktree solve-issue-ISSUE_NUM $PERM_FLAG "$PROMPT"
 else
   echo "warning: timeout(1) not on PATH; /solve will run unwrapped (no wall-clock kill)" >&2
-  TIMEOUT_PREFIX=""
+  CLAUDE_BIN --model 'claude-opus-4-7[1m]' --effort max --worktree solve-issue-ISSUE_NUM $PERM_FLAG "$PROMPT"
 fi
-$TIMEOUT_PREFIX CLAUDE_BIN --model 'claude-opus-4-7[1m]' --effort max --worktree solve-issue-ISSUE_NUM $PERM_FLAG "$PROMPT"
 SCRIPT_EOF
 # BSD/macOS sed needs '-i ""'; GNU sed needs bare '-i'.
 SED_INPLACE=(-i '')

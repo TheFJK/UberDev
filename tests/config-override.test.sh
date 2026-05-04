@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for issue #63 — uberdev.local.md knobs expansion.
+# Tests for uberdev.local.md knobs expansion.
 #
 # Sections:
 #   U1  — config-read.sh exports the documented public surface
@@ -362,8 +362,8 @@ assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
   'command -v timeout' \
   "I2b: launcher checks timeout(1) availability"
 assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
-  'TIMEOUT_PREFIX' \
-  "I2c: launcher uses TIMEOUT_PREFIX shell var to wrap claude invocation"
+  'timeout "\$\{SOLVE_TIMEOUT\}" CLAUDE_BIN' \
+  "I2c: launcher inlines timeout(1) call directly (zsh-safe; no scalar prefix)"
 
 echo
 echo "== I3: orchestrator research fanout cap (Task 3) =="
