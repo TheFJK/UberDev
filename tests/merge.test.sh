@@ -333,10 +333,21 @@ fi
 
 echo
 echo "== M20: commands/merge.md surfaces --yes / -y as DEPRECATED with stable user-facing notice =="
-assert_grep "$CMD_FILE" '^argument-hint:.*--yes\|-y' \
-  "M20.1 — argument-hint frontmatter still lists --yes|-y (parsed for backward compat)"
-assert_grep "$CMD_FILE" '^\*\*Usage:\*\*.*--yes\|-y' \
-  "M20.2 — Usage line still lists --yes|-y"
+# M20.1 / M20.2 retired in #56 (Q3 fix #3): --yes / -y dropped from the visible
+# argument-hint and Usage signature per the deprecation lifecycle. The flag is
+# still parsed at runtime, but the active-surface hint should reflect the
+# supported surface only. Negative regression guards replace the old positives;
+# the new M72.no-yes-flag-in-hint (issue #56) is the authoritative contract.
+if grep -qE '^argument-hint:.*--yes\|-y' "$CMD_FILE"; then
+  fail "M20.1 — argument-hint frontmatter MUST NOT list --yes|-y (deprecated; #56 Q3)"
+else
+  pass "M20.1 — argument-hint frontmatter correctly omits --yes|-y (deprecated; #56 Q3)"
+fi
+if grep -qE '^\*\*Usage:\*\*.*--yes\|-y' "$CMD_FILE"; then
+  fail "M20.2 — Usage signature MUST NOT list --yes|-y (deprecated; #56 Q3)"
+else
+  pass "M20.2 — Usage signature correctly omits --yes|-y (deprecated; #56 Q3)"
+fi
 assert_grep "$CMD_FILE" '## Deprecated Flags' \
   "M20.3 — '## Deprecated Flags' section present"
 assert_grep "$CMD_FILE" 'no behavioural effect' \
