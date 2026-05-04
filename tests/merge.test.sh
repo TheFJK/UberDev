@@ -1090,10 +1090,11 @@ assert_grep "$SKILL_FILE" 'short-circuit.*sub-condition.*d|d.*only.*checked.*c.*
 
 echo
 echo "== M64: SKILL.md run-summary per-PR conflict-files sub-block (issue #60) =="
-# Re-extract SUMMARY_BLOCK and Phase 3.3iv slices for safety; M64 runs as a
-# standalone echo block, so we cannot rely on M27's variables being in scope.
-SUMMARY_BLOCK=$(awk '/^### Run-summary block/,/^## /' "$SKILL_FILE")
+# SUMMARY_BLOCK is set at file scope by M27; reuse it. PHASE_33IV is M64-specific.
 PHASE_33IV=$(awk '/^iv\. \*\*Apply resolutions\*\*/,/^v\. /' "$SKILL_FILE")
+# SANITIZE_BODY: bound the sanitize_agent_text body so M64.sanitize-impl below
+# matches the helper definition itself, not an incidental occurrence elsewhere.
+SANITIZE_BODY=$(awk '/sanitize_agent_text\(\) \{/,/^[[:space:]]*\}[[:space:]]*$/' "$SKILL_FILE")
 
 # AC1 + AC4 — per-file conflict sub-block presence (4 fields).
 for field in 'conflict files:' 'verdict:' 'justification:' 'risks:'; do
@@ -1126,9 +1127,15 @@ done
 assert_grep "$SKILL_FILE" 'only if outcome is Parked AND park reason' \
   "M64.conditional — conflict-files sub-block render-condition documented (gates RESOLVED path unchanged)"
 
-# Sanitization helper body must be present (literal C0/C1+DEL strip range).
-assert_grep "$SKILL_FILE" "tr -d '\\\\000-\\\\010\\\\013-\\\\037\\\\177\\\\200-\\\\237'" \
-  "M64.sanitize-impl — sanitize_agent_text body documents the C0/C1+DEL strip range"
+# Sanitization helper body must be present (literal C0/C1+DEL strip range)
+# AND must appear within the awk-bounded sanitize_agent_text() function — so
+# the assertion fails if the helper definition is removed but the byte range
+# survives in a comment or example elsewhere.
+if echo "$SANITIZE_BODY" | grep -qF "tr -d '\\000-\\010\\013-\\037\\177\\200-\\237'"; then
+  pass "M64.sanitize-impl — sanitize_agent_text body documents the C0/C1+DEL strip range (within helper definition)"
+else
+  fail "M64.sanitize-impl — sanitize_agent_text body MUST contain literal C0/C1+DEL strip range inside the helper definition"
+fi
 
 echo
 echo "== Summary =="
