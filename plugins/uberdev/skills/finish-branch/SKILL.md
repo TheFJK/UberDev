@@ -20,7 +20,7 @@ Guide completion of development work by presenting clear options and handling ch
 **Before presenting options, verify tests pass:**
 
 ```bash
-# Run project's test suite
+# Run the project test suite
 npm test / cargo test / pytest / go test ./...
 ```
 
@@ -119,8 +119,8 @@ Option 2 PR-body composition: in addition to the standard Summary + Test Plan, t
 Both sections are read-only dumps; finish-branch does not block on confidence threshold or reviewer verdict (per #11 Q1: advisory only, auto-fix deferred).
 
 ```bash
-# Read the orchestrator's questions.md (--turbo non-blocking Q&A log) if present.
-# Note: the file lives under the orchestrator's $RUN_ID working dir, NOT issue-$N.
+# Read the orchestrator questions.md (--turbo non-blocking Q&A log) if present.
+# Note: the file lives under the orchestrator $RUN_ID working dir, NOT issue-$N.
 QUESTIONS_FILE=""
 if [ -n "${RUN_ID:-}" ] && [ -f ".uberdev/research/$RUN_ID/questions.md" ]; then
   QUESTIONS_FILE=".uberdev/research/$RUN_ID/questions.md"
@@ -139,9 +139,9 @@ fi
 REVIEW_FILES=$(ls -t .uberdev/research/*/post-impl-review-*.md .uberdev/research/issue-*/post-impl-review.md .uberdev/research/*/pr-test-analyzer.md 2>/dev/null | tr '\n' ' ')
 
 # Compose PR body. Heredoc delimiter is unquoted (`<<EOF`, not the single-
-# quoted form) to avoid Claude's permission-pattern evaluator `unmatched '`
+# quoted form) to avoid the Claude permission-pattern evaluator `unmatched '`
 # bug (#42). The agent must compose the body free of `$`, backticks, and
-# backslash — unquoted heredocs don't shield these from shell expansion.
+# backslash — unquoted heredocs do not shield these from shell expansion.
 PR_BODY_FILE=$(mktemp)
 cat > "$PR_BODY_FILE" <<EOF_HEADER
 ## Summary
@@ -180,7 +180,7 @@ fi
 # Compose PR title via heredoc + read-back into a bash variable, then pass to
 # `gh --title "$PR_TITLE_VAR"` — double-quoted variable expansion is byte-
 # verbatim, no backtick/dollar re-evaluation. The heredoc delimiter is
-# unquoted (`<<PR_TITLE_EOF`, not the single-quoted form) to avoid Claude's
+# unquoted (`<<PR_TITLE_EOF`, not the single-quoted form) to avoid the Claude
 # permission-pattern evaluator `unmatched '` bug (#42); the agent must
 # compose the title free of `$`, backticks, and backslash. This closes the
 # title-injection vector without inventing a `--title-file` flag (which gh
@@ -192,7 +192,7 @@ PR_TITLE_EOF
 
 # Read title back into a quoted variable — bytes pass through verbatim, no shell
 # expansion. `IFS= read -r` reads the first line only; if the title file ever
-# contains multiple lines (shouldn't, per the heredoc above), subsequent lines
+# contains multiple lines (should not, per the heredoc above), subsequent lines
 # are silently dropped. Empty-title rejection happens implicitly via the
 # downstream `gh pr create` failure path.
 IFS= read -r PR_TITLE_VAR < "$TITLE_FILE" || { echo "ERROR: failed to read title file" >&2; rm -f "$TITLE_FILE" "$PR_BODY_FILE"; exit 1; }
@@ -208,7 +208,7 @@ run_secret_scan_stdin() {
   # errors. We use the exit code as the authoritative signal — output-text
   # filtering is unreliable because info messages like "no leaks found"
   # would false-positive a substring match. On non-zero exit, we surface
-  # the captured output so the caller's error message has detail.
+  # the captured output so the caller error message has detail.
   if command -v gitleaks >/dev/null 2>&1; then
     local out rc
     out=$(gitleaks stdin --no-banner --redact 2>&1) ; rc=$?
@@ -216,7 +216,7 @@ run_secret_scan_stdin() {
       return 0  # clean — no output, caller continues
     fi
     # Non-zero: leak found OR gitleaks crashed (fail-CLOSED on either).
-    # Emit captured output so caller's ERROR message names the offending rule.
+    # Emit captured output so the caller ERROR message names the offending rule.
     printf '%s\n' "$out"
     return 0  # signal via output, not exit code (caller checks [[ -n $SCAN_OUT ]])
   fi
@@ -224,7 +224,7 @@ run_secret_scan_stdin() {
   grep -E -o '(AKIA[0-9A-Z]{16}|gh[ps]_[A-Za-z0-9]{36,255}|-----BEGIN [A-Z ]*PRIVATE KEY-----)' || true
 }
 
-# Emit gitleaks-missing warning ONCE in the parent shell (subshell exports don't
+# Emit gitleaks-missing warning ONCE in the parent shell (subshell exports do not
 # propagate, so the warning must live outside run_secret_scan_stdin to avoid
 # printing twice).
 if ! command -v gitleaks >/dev/null 2>&1; then
@@ -246,8 +246,8 @@ abort_if_secret() {
 if PUSH_DIFF=$(git diff @{u}..HEAD 2>/dev/null) && [[ -n "$PUSH_DIFF" ]]; then
   SCAN_OUT=$(printf '%s' "$PUSH_DIFF" | run_secret_scan_stdin)
 else
-  # No upstream set or empty diff → scan from origin's default branch. Falls
-  # back to literal main/master, then to the branch's root commit (catches
+  # No upstream set or empty diff → scan from origin default branch. Falls
+  # back to literal main/master, then to the branch root commit (catches
   # everything since branch creation). Note: `git merge-base HEAD HEAD~1` is
   # degenerate (= HEAD~1) and was removed — it scanned only the last commit.
   BASE_REF=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/@@' \
@@ -277,7 +277,7 @@ fi
 
 # Capture PR URL from gh stdout AND its exit code together. gh returns the
 # created PR URL on stdout when successful; non-zero exit on auth/network/quota
-# errors. The `if !` branch surfaces gh's failure explicitly (PR_URL captures
+# errors. The `if !` branch surfaces gh failure from gh pr create explicitly (PR_URL captures
 # stderr via 2>&1 in the failure case to keep the diagnostic).
 if ! PR_URL=$(gh pr create --title "$PR_TITLE_VAR" --body-file "$PR_BODY_FILE" 2>&1); then
   echo "ERROR: gh pr create failed: $PR_URL" >&2
