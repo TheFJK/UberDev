@@ -303,7 +303,7 @@ Bundled upstream license texts in `plugins/uberdev/licenses/`.
 
 Upstream `obra/superpowers` gates implementation behind a user-approval HARD-GATE: brainstorm halts, asks "does this look right so far?", and waits for sign-off before any subagent runs. Per-section approval prompts and a 3-iteration review-loop cap follow the same pattern.
 
-UberDev rejects all of those. User gates trade quality for ceremony — every pause shifts review burden onto a non-expert reader (you) and adds wall-clock cost. Quality wins from **parallel research fanout** (six research agents in one shot, not sequential), **always-on reviewers** (`spec-reviewer` runs on medium/large tier per orchestrator Phase 3.5; `plan-reviewer` runs on every plan per Phase 4.5), and an **end-of-issue `post-impl-review` fanout** (5 advisory reviewers — code-reviewer, simplifier, silent-failure-hunter, type-design-analyzer, comment-analyzer — dispatched in one message after PR push via `/uberdev:review-pr`). Trust comes from review depth, not approval ceremony. Design provenance: internal design notes.
+UberDev rejects all of those. User gates trade quality for ceremony — every pause shifts review burden onto a non-expert reader (you) and adds wall-clock cost. Quality wins from **parallel research fanout** (six research agents in one shot), **always-on reviewers** (`spec-reviewer` runs on medium/large tier per orchestrator Phase 3.5; `plan-reviewer` runs on every plan per Phase 4.5), and an **end-of-issue `post-impl-review` fanout** (5 advisory reviewers — code-reviewer, code-simplifier, silent-failure-hunter, type-design-analyzer, comment-analyzer — dispatched in one message after PR push via `/uberdev:review-pr`).
 
 </details>
 
