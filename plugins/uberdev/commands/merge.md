@@ -1,6 +1,6 @@
 ---
 description: "After a PR is approved, lands it into the integration branch — ordering, strategy, conflict resolution, and local sync automated"
-argument-hint: "[<PR#> | --all] [--yes|-y (deprecated)] [--integration-branch=<name>]"
+argument-hint: "[<PR#> | --all] [--integration-branch=<name>]"
 allowed-tools: ["Bash", "Glob", "Grep", "Read", "Task"]
 ---
 
@@ -10,9 +10,9 @@ Land approved PRs into the integration branch — ordering, strategy, conflict r
 
 **RULES:** Do NOT use the Task tool or internal subagents. The skill body owns all logic.
 
-**Usage:** `/merge [<PR#> | --all] [--yes|-y (deprecated)] [--integration-branch=<name>]`
+**Usage:** `/merge [<PR#> | --all] [--integration-branch=<name>]`
 
-- No args → land the PR for the current branch (errors if none).
+- No args → context-aware: single PR if on a PR branch, else discover and land all eligible open PRs against integration_branch.
 - `<PR#>` → land a specific PR.
 - `--all` → land every open APPROVED PR with passing CI.
 - `--yes` / `-y` → **(deprecated; no behavioural effect)** parsed for backward compat; `/merge` is fully unattended (autopilot) and skips all prompts unconditionally. First encounter per run emits a one-line stderr deprecation notice. See `## Deprecated Flags` below.

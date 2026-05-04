@@ -40,6 +40,16 @@
 #   M32 — SKILL.md Phase 3.3vi parks PR on push-non-FF (no halt).
 #   M33 — SKILL.md Phase 2.1 auto-breaks dependency cycles (no halt).
 #   M34 — SKILL.md Phase 3.4 failure-mode table contains no 'halt' actions.
+#   M64 — SKILL.md Inputs "No args" bullet documents bare-discover dual path (single-PR fast path OR multi-discover fall-through).
+#   M65 — SKILL.md Constants table declares DISCOVERY_FILTER exactly once with --base / --state open / draft:false.
+#   M66 — SKILL.md Constants table declares BARE_MODE_FAST_PATH_QUERY exactly once with --head / --state open / draft:false.
+#   M67 — SKILL.md Constants table declares PREFLIGHT_SUMMARY_FORMAT with literal "merging %d PR%s in order: %s" and 80-char wrap convention.
+#   M68 — SKILL.md Step 1.0.5 mode-detect cites BARE_MODE_FAST_PATH_QUERY and three-way branch; does NOT mention DISCOVERY_FILTER (split-detection invariant).
+#   M69 — SKILL.md Step 1.2.5 multi-discover dispatch cites DISCOVERY_FILTER and $integration_branch; does NOT mention BARE_MODE_FAST_PATH_QUERY (split-detection invariant).
+#   M70 — SKILL.md Step 2.2 entry mentions PREFLIGHT_SUMMARY_FORMAT pre-flight line emitted in multi-discover mode only; full ordered set, not per-wave.
+#   M71 — SKILL.md Step 1.7 cross-references bare-mode zero-eligible (clean exit 0); preserves "Not an error, not a halt" prose.
+#   M72 — commands/merge.md frontmatter argument-hint omits --yes|-y; Usage bullet 1 documents context-aware bare-mode dual path.
+#   M73 — SKILL.md Phase 1.4 prose preserves "for each" / "per discovered PR" fanout language; Step 2.2 preserves "ONE assistant turn" single-message invariant.
 
 set -u
 set -o pipefail
@@ -323,10 +333,21 @@ fi
 
 echo
 echo "== M20: commands/merge.md surfaces --yes / -y as DEPRECATED with stable user-facing notice =="
-assert_grep "$CMD_FILE" '^argument-hint:.*--yes\|-y' \
-  "M20.1 — argument-hint frontmatter still lists --yes|-y (parsed for backward compat)"
-assert_grep "$CMD_FILE" '^\*\*Usage:\*\*.*--yes\|-y' \
-  "M20.2 — Usage line still lists --yes|-y"
+# M20.1 / M20.2 retired in #56 (Q3 fix #3): --yes / -y dropped from the visible
+# argument-hint and Usage signature per the deprecation lifecycle. The flag is
+# still parsed at runtime, but the active-surface hint should reflect the
+# supported surface only. Negative regression guards replace the old positives;
+# the new M72.no-yes-flag-in-hint (issue #56) is the authoritative contract.
+if grep -qE '^argument-hint:.*--yes\|-y' "$CMD_FILE"; then
+  fail "M20.1 — argument-hint frontmatter MUST NOT list --yes|-y (deprecated; #56 Q3)"
+else
+  pass "M20.1 — argument-hint frontmatter correctly omits --yes|-y (deprecated; #56 Q3)"
+fi
+if grep -qE '^\*\*Usage:\*\*.*--yes\|-y' "$CMD_FILE"; then
+  fail "M20.2 — Usage signature MUST NOT list --yes|-y (deprecated; #56 Q3)"
+else
+  pass "M20.2 — Usage signature correctly omits --yes|-y (deprecated; #56 Q3)"
+fi
 assert_grep "$CMD_FILE" '## Deprecated Flags' \
   "M20.3 — '## Deprecated Flags' section present"
 assert_grep "$CMD_FILE" 'no behavioural effect' \
@@ -1085,6 +1106,261 @@ assert_grep "$SKILL_FILE" 'absence on a fresh clone is by design|fresh clone.*by
 
 assert_grep "$SKILL_FILE" 'short-circuit.*sub-condition.*d|d.*only.*checked.*c.*returned.*PASS' \
   "M63.short-circuit-preserved — (c) short-circuit-on-non-PASS clause still documented in PATH_2"
+
+echo
+echo "== M64: SKILL.md Inputs 'No args' bullet documents bare-discover dual path =="
+# Anchor scoping: extract the "No args" bullet from the Inputs list. The bullet
+# starts with "- **No args**" and ends at the next "- **`<PR#" bullet (which is
+# the next argument-parsing entry). M33's awk-range pattern.
+BARE_MODE_BULLET=$(awk '/^- \*\*No args\*\*/,/^- \*\*`<PR/' "$SKILL_FILE")
+
+if echo "$BARE_MODE_BULLET" | grep -qE 'single-PR mode|context-aware'; then
+  pass "M64.fast-path-described — Inputs 'No args' bullet describes the single-PR fast path (context-aware wording)"
+else
+  fail "M64.fast-path-described — Inputs 'No args' bullet MUST describe the single-PR fast path (single-PR mode / context-aware) per spec Components § SKILL.md item 2"
+fi
+
+if echo "$BARE_MODE_BULLET" | grep -qE 'fall through.*--all|same discovery pipeline as `--all`|multi-discover'; then
+  pass "M64.multi-discover-described — Inputs 'No args' bullet describes the multi-discover fall-through to the --all pipeline"
+else
+  fail "M64.multi-discover-described — Inputs 'No args' bullet MUST describe the multi-discover fall-through (fall through / same discovery pipeline as --all / multi-discover)"
+fi
+
+if echo "$BARE_MODE_BULLET" | grep -qE 'errors if none|error out.*finish-branch'; then
+  fail "M64.no-old-error — Inputs 'No args' bullet MUST NOT carry the old 'errors if none' / 'error out…finish-branch' prose (bare-discover replaces it)"
+else
+  pass "M64.no-old-error — Inputs 'No args' bullet correctly omits the old finish-branch error wording"
+fi
+
+echo
+echo "== M65: SKILL.md Constants declares DISCOVERY_FILTER exactly once =="
+# Count constant rows where the Name column literal is `DISCOVERY_FILTER`.
+# Constants table rows match `^| \`DISCOVERY_FILTER\` |`.
+DISCOVERY_FILTER_ROWS=$(grep -cE '^\| `DISCOVERY_FILTER` \|' "$SKILL_FILE" || true)
+if [ "$DISCOVERY_FILTER_ROWS" = "1" ]; then
+  pass "M65.unique — DISCOVERY_FILTER declared exactly once in Constants table"
+else
+  fail "M65.unique — DISCOVERY_FILTER MUST be declared exactly once in Constants table (got $DISCOVERY_FILTER_ROWS rows; spec Components § SKILL.md item 1 / Q4)"
+fi
+# Value-cell content checks — must reference --base, --state open, draft:false.
+DISCOVERY_FILTER_ROW=$(grep -E '^\| `DISCOVERY_FILTER` \|' "$SKILL_FILE" || true)
+if echo "$DISCOVERY_FILTER_ROW" | grep -qE 'gh pr list --base'; then
+  pass "M65.base-flag — DISCOVERY_FILTER value cites 'gh pr list --base'"
+else
+  fail "M65.base-flag — DISCOVERY_FILTER value MUST cite 'gh pr list --base' (canonical query; spec Q4)"
+fi
+if echo "$DISCOVERY_FILTER_ROW" | grep -qE -- '--state open'; then
+  pass "M65.state-open — DISCOVERY_FILTER value cites '--state open'"
+else
+  fail "M65.state-open — DISCOVERY_FILTER value MUST cite '--state open' (canonical query; spec Q4)"
+fi
+if echo "$DISCOVERY_FILTER_ROW" | grep -qE 'draft:false'; then
+  pass "M65.draft-filter — DISCOVERY_FILTER value cites 'draft:false'"
+else
+  fail "M65.draft-filter — DISCOVERY_FILTER value MUST cite 'draft:false' (canonical query; spec Q4)"
+fi
+
+echo
+echo "== M66: SKILL.md Constants declares BARE_MODE_FAST_PATH_QUERY exactly once =="
+BARE_FAST_PATH_ROWS=$(grep -cE '^\| `BARE_MODE_FAST_PATH_QUERY` \|' "$SKILL_FILE" || true)
+if [ "$BARE_FAST_PATH_ROWS" = "1" ]; then
+  pass "M66.unique — BARE_MODE_FAST_PATH_QUERY declared exactly once in Constants table"
+else
+  fail "M66.unique — BARE_MODE_FAST_PATH_QUERY MUST be declared exactly once in Constants table (got $BARE_FAST_PATH_ROWS rows; spec Components § SKILL.md item 1)"
+fi
+BARE_FAST_PATH_ROW=$(grep -E '^\| `BARE_MODE_FAST_PATH_QUERY` \|' "$SKILL_FILE" || true)
+if echo "$BARE_FAST_PATH_ROW" | grep -qE 'gh pr list --head'; then
+  pass "M66.head-flag — BARE_MODE_FAST_PATH_QUERY value cites 'gh pr list --head'"
+else
+  fail "M66.head-flag — BARE_MODE_FAST_PATH_QUERY value MUST cite 'gh pr list --head' (current-branch detection; spec Architecture § Branch (a))"
+fi
+if echo "$BARE_FAST_PATH_ROW" | grep -qE -- '--state open'; then
+  pass "M66.state-open — BARE_MODE_FAST_PATH_QUERY value cites '--state open'"
+else
+  fail "M66.state-open — BARE_MODE_FAST_PATH_QUERY value MUST cite '--state open'"
+fi
+if echo "$BARE_FAST_PATH_ROW" | grep -qE 'draft:false'; then
+  pass "M66.draft-filter — BARE_MODE_FAST_PATH_QUERY value cites 'draft:false'"
+else
+  fail "M66.draft-filter — BARE_MODE_FAST_PATH_QUERY value MUST cite 'draft:false'"
+fi
+
+echo
+echo "== M67: SKILL.md Constants declares PREFLIGHT_SUMMARY_FORMAT with literal format string =="
+PREFLIGHT_FORMAT_ROWS=$(grep -cE '^\| `PREFLIGHT_SUMMARY_FORMAT` \|' "$SKILL_FILE" || true)
+if [ "$PREFLIGHT_FORMAT_ROWS" = "1" ]; then
+  pass "M67.unique — PREFLIGHT_SUMMARY_FORMAT declared exactly once in Constants table"
+else
+  fail "M67.unique — PREFLIGHT_SUMMARY_FORMAT MUST be declared exactly once in Constants table (got $PREFLIGHT_FORMAT_ROWS rows; spec Q5)"
+fi
+# Mirror M65/M66: scope sub-checks to the row literal so future Step 2.2 prose
+# additions that quote the format string don't accidentally satisfy these.
+PREFLIGHT_FORMAT_ROW=$(grep -E '^\| `PREFLIGHT_SUMMARY_FORMAT` \|' "$SKILL_FILE" || true)
+if echo "$PREFLIGHT_FORMAT_ROW" | grep -qE 'merging %d PR%s in order: %s'; then
+  pass "M67.format-literal — PREFLIGHT_SUMMARY_FORMAT contains the literal 'merging %d PR%s in order: %s'"
+else
+  fail "M67.format-literal — PREFLIGHT_SUMMARY_FORMAT MUST contain literal 'merging %d PR%s in order: %s' (spec Q5)"
+fi
+if echo "$PREFLIGHT_FORMAT_ROW" | grep -qE '80-char|80 char'; then
+  pass "M67.wrap-convention — Constants prose mentions 80-char line-wrap convention"
+else
+  fail "M67.wrap-convention — Constants prose MUST mention the 80-char line-wrap convention for long PR-number lists (spec Q5)"
+fi
+
+echo
+echo "== M68: SKILL.md Step 1.0.5 mode-detect cites BARE_MODE_FAST_PATH_QUERY but NOT DISCOVERY_FILTER =="
+# Range-scope to Step 1.0.5 body: from "### Step 1.0.5" to next "### Step 1." heading.
+STEP_105_BLOCK=$(awk '/^### Step 1\.0\.5/,/^### Step 1\.1/' "$SKILL_FILE")
+if [ -n "$STEP_105_BLOCK" ]; then
+  pass "M68.exists — Step 1.0.5 section exists between Step 1.0 and Step 1.1"
+else
+  fail "M68.exists — Step 1.0.5 (mode-detect) section MUST exist between Step 1.0 and Step 1.1 (spec Components § SKILL.md item 3)"
+fi
+if echo "$STEP_105_BLOCK" | grep -qE 'BARE_MODE_FAST_PATH_QUERY'; then
+  pass "M68.fast-path-query-cited — Step 1.0.5 cites BARE_MODE_FAST_PATH_QUERY"
+else
+  fail "M68.fast-path-query-cited — Step 1.0.5 MUST cite BARE_MODE_FAST_PATH_QUERY (the constant for the detection query)"
+fi
+if echo "$STEP_105_BLOCK" | grep -qE 'three-way|1.*0.*>1|fast-path.*multi-discover.*ambiguous'; then
+  pass "M68.three-way-branch — Step 1.0.5 documents the three-way branch (1 / 0 / >1)"
+else
+  fail "M68.three-way-branch — Step 1.0.5 MUST document the three-way branch on candidate count (1 / 0 / >1; spec Components § SKILL.md item 3)"
+fi
+if echo "$STEP_105_BLOCK" | grep -qE 'NOT consume.*integration_branch|does not consume.*integration_branch|deferred to Step 1\.2\.5'; then
+  pass "M68.no-integration-branch-dep — Step 1.0.5 explicitly states it does NOT consume \$integration_branch"
+else
+  fail "M68.no-integration-branch-dep — Step 1.0.5 MUST explicitly state it does NOT consume \$integration_branch (sequencing invariant; spec Architecture § Sequencing)"
+fi
+# Negative regression — Step 1.0.5 must NOT mention DISCOVERY_FILTER (which lives in Step 1.2.5).
+if echo "$STEP_105_BLOCK" | grep -qE 'DISCOVERY_FILTER'; then
+  fail "M68.no-discovery-filter — Step 1.0.5 MUST NOT mention DISCOVERY_FILTER (split-detection invariant; DISCOVERY_FILTER lives in Step 1.2.5)"
+else
+  pass "M68.no-discovery-filter — Step 1.0.5 correctly omits DISCOVERY_FILTER (lives in Step 1.2.5)"
+fi
+
+echo
+echo "== M69: SKILL.md Step 1.2.5 multi-discover dispatch cites DISCOVERY_FILTER + integration_branch =="
+STEP_125_BLOCK=$(awk '/^### Step 1\.2\.5/,/^### Step 1\.3/' "$SKILL_FILE")
+if [ -n "$STEP_125_BLOCK" ]; then
+  pass "M69.exists — Step 1.2.5 section exists between Step 1.2 and Step 1.3"
+else
+  fail "M69.exists — Step 1.2.5 (multi-discover dispatch) section MUST exist between Step 1.2 and Step 1.3 (spec Components § SKILL.md item 4)"
+fi
+if echo "$STEP_125_BLOCK" | grep -qE 'DISCOVERY_FILTER'; then
+  pass "M69.discovery-filter-cited — Step 1.2.5 cites DISCOVERY_FILTER"
+else
+  fail "M69.discovery-filter-cited — Step 1.2.5 MUST cite DISCOVERY_FILTER (spec Components § SKILL.md item 4)"
+fi
+if echo "$STEP_125_BLOCK" | grep -qE '\$integration_branch|integration_branch'; then
+  pass "M69.integration-branch-cited — Step 1.2.5 cites \$integration_branch"
+else
+  fail "M69.integration-branch-cited — Step 1.2.5 MUST cite \$integration_branch (consumed by DISCOVERY_FILTER post-Step-1.2)"
+fi
+if echo "$STEP_125_BLOCK" | grep -qE 'multi-discover|--all'; then
+  pass "M69.triggers-cited — Step 1.2.5 mentions both bare-mode and --all as triggers"
+else
+  fail "M69.triggers-cited — Step 1.2.5 MUST mention both bare-mode (multi-discover) and --all as triggers (spec Components § SKILL.md item 4)"
+fi
+# Negative regression — Step 1.2.5 must NOT mention BARE_MODE_FAST_PATH_QUERY (which lives in Step 1.0.5).
+if echo "$STEP_125_BLOCK" | grep -qE 'BARE_MODE_FAST_PATH_QUERY'; then
+  fail "M69.no-fast-path-query — Step 1.2.5 MUST NOT mention BARE_MODE_FAST_PATH_QUERY (split-detection invariant; lives in Step 1.0.5)"
+else
+  pass "M69.no-fast-path-query — Step 1.2.5 correctly omits BARE_MODE_FAST_PATH_QUERY (lives in Step 1.0.5)"
+fi
+
+echo
+echo "== M70: SKILL.md Step 2.2 entry emits PREFLIGHT_SUMMARY_FORMAT pre-flight in multi-discover mode only =="
+STEP_22_BLOCK=$(awk '/^### Step 2\.2/,/^### Step 2\.3/' "$SKILL_FILE")
+if echo "$STEP_22_BLOCK" | grep -qE 'PREFLIGHT_SUMMARY_FORMAT'; then
+  pass "M70.format-cited — Step 2.2 entry cites PREFLIGHT_SUMMARY_FORMAT"
+else
+  fail "M70.format-cited — Step 2.2 entry MUST cite PREFLIGHT_SUMMARY_FORMAT (spec Components § SKILL.md item 7)"
+fi
+if echo "$STEP_22_BLOCK" | grep -qE 'multi-discover.*mode|mode.*multi-discover|in multi-discover mode'; then
+  pass "M70.mode-gated — Step 2.2 entry pre-flight line is emitted in multi-discover mode only"
+else
+  fail "M70.mode-gated — Step 2.2 entry pre-flight line MUST be mode-gated (multi-discover mode only; not single-PR fast path; spec Q2)"
+fi
+if echo "$STEP_22_BLOCK" | grep -qE 'full ordered set|full.*ordered'; then
+  pass "M70.full-set — Step 2.2 entry pre-flight enumerates the full ordered set (not per-wave)"
+else
+  fail "M70.full-set — Step 2.2 entry pre-flight MUST enumerate the full ordered set, not a per-wave subset (spec Q5)"
+fi
+# Negative regression — pre-flight is informational, NOT a [y/N] prompt or abortable.
+if echo "$STEP_22_BLOCK" | grep -qE 'pre-flight.*\[y/N\]|y/N.*pre-flight|prompt.*pre-flight|pre-flight.*prompt|pre-flight.*abort'; then
+  fail "M70.no-prompt — Step 2.2 entry pre-flight line MUST NOT be described as a [y/N] prompt or abortable (autopilot contract; spec Q2)"
+else
+  pass "M70.no-prompt — Step 2.2 entry pre-flight correctly avoids [y/N] / abort wording"
+fi
+
+echo
+echo "== M71: SKILL.md Step 1.7 cross-references bare-mode zero-eligible (clean exit 0) =="
+STEP_17_BLOCK=$(awk '/^### Step 1\.7/,/^## Phase 2/' "$SKILL_FILE")
+if echo "$STEP_17_BLOCK" | grep -qE 'Not an error, not a halt|nothing to merge'; then
+  pass "M71.contract-preserved — Step 1.7 preserves 'Not an error, not a halt' / 'nothing to merge' baseline prose"
+else
+  fail "M71.contract-preserved — Step 1.7 MUST preserve baseline prose ('Not an error, not a halt' / 'nothing to merge') — bare-mode is a documentation-only addition"
+fi
+if echo "$STEP_17_BLOCK" | grep -qE 'bare-mode|bare-discover|bare-mode discovery|empty eligible set'; then
+  pass "M71.bare-mode-xref — Step 1.7 cross-references bare-mode zero-eligible behaviour"
+else
+  fail "M71.bare-mode-xref — Step 1.7 MUST add a cross-reference to bare-mode zero-eligible (spec Components § SKILL.md item 6 / Q3)"
+fi
+# Negative regression — must NOT introduce a non-zero exit code on the same logical state.
+if echo "$STEP_17_BLOCK" | grep -qE 'exit 1|non-zero.*exit|exit code.*1'; then
+  fail "M71.no-nonzero-exit — Step 1.7 MUST NOT introduce a non-zero exit on zero-eligible (Q3 amends issue AC #6 to clean exit 0)"
+else
+  pass "M71.no-nonzero-exit — Step 1.7 correctly preserves exit 0 (no non-zero exit reference; spec Q3)"
+fi
+
+echo
+echo "== M72: commands/merge.md argument-hint omits --yes|-y; Usage bullet documents bare-discover dual path =="
+# Frontmatter argument-hint must NOT contain the deprecated --yes|-y string.
+if grep -qE '^argument-hint: .*--yes\|-y' "$CMD_FILE"; then
+  fail "M72.no-yes-flag-in-hint — commands/merge.md argument-hint MUST NOT contain '--yes|-y' (deprecated flag dropped from active hint surface; spec Components § commands/merge.md item 1 / Q3 fix #3)"
+else
+  pass "M72.no-yes-flag-in-hint — commands/merge.md argument-hint correctly omits '--yes|-y' (deprecated flag)"
+fi
+# Frontmatter argument-hint MUST still contain --integration-branch=<name>.
+if grep -qE '^argument-hint: .*--integration-branch=<name>' "$CMD_FILE"; then
+  pass "M72.integration-branch-in-hint — commands/merge.md argument-hint preserves --integration-branch=<name>"
+else
+  fail "M72.integration-branch-in-hint — commands/merge.md argument-hint MUST preserve --integration-branch=<name> (spec Components § commands/merge.md item 1)"
+fi
+# Usage bullet 1 must describe the bare-mode dual path.
+if grep -qE '^- No args.*context-aware|^- No args.*single PR if on a PR branch.*else discover' "$CMD_FILE"; then
+  pass "M72.usage-bullet-bare-discover — Usage bullet 1 describes context-aware bare-discover dual path"
+else
+  fail "M72.usage-bullet-bare-discover — Usage bullet 1 MUST describe context-aware bare-discover (single PR if on a PR branch, else discover; spec Components § commands/merge.md item 2)"
+fi
+# Negative regression — old Usage prose 'errors if none' must be gone.
+if grep -qE '^- No args.*errors if none' "$CMD_FILE"; then
+  fail "M72.no-old-usage — commands/merge.md Usage bullet 1 MUST NOT carry the old 'errors if none' wording"
+else
+  pass "M72.no-old-usage — commands/merge.md Usage bullet 1 correctly omits the old 'errors if none' wording"
+fi
+# M72.length-cap dropped — duplicate of M2 (line 115). M2 already enforces the ≤50-line
+# thin-dispatcher cap on every run; re-asserting it inside M72 added no coverage.
+
+echo
+echo "== M73: SKILL.md Phase 1.4 'per discovered PR' fanout + Step 2.2 single-message invariant preserved =="
+PHASE_14_BLOCK=$(awk '/^### Step 1\.4/,/^### Step 1\.5/' "$SKILL_FILE")
+if echo "$PHASE_14_BLOCK" | grep -qE 'for each|per discovered PR|per-PR|every PR'; then
+  pass "M73.per-pr-fanout — Phase 1.4 prose preserves per-PR fanout language (one gate dispatch per discovered PR)"
+else
+  fail "M73.per-pr-fanout — Phase 1.4 MUST preserve 'for each' / 'per discovered PR' / 'per-PR' fanout language (AC#2: bare-discover does not relax dispatch shape)"
+fi
+if echo "$STEP_22_BLOCK" | grep -qE 'ONE assistant turn|single-message Task|single-message invariant'; then
+  pass "M73.single-message-preserved — Step 2.2 fanout preserves the single-message Task() invariant"
+else
+  fail "M73.single-message-preserved — Step 2.2 MUST preserve 'ONE assistant turn' / 'single-message Task()' invariant (AC#2/AC#4: bare-discover changes candidate set but not dispatch shape)"
+fi
+# Negative regression — Phase 1.4 must NOT hard-code single-PR-only language.
+if echo "$PHASE_14_BLOCK" | grep -qE 'only one PR can|single PR only|exactly one PR per gate|hard-coded.*single'; then
+  fail "M73.no-single-pr-hardcode — Phase 1.4 MUST NOT enumerate a fixed PR count or hard-code single-PR-only language (bare-discover supplies a multi-PR candidate set)"
+else
+  pass "M73.no-single-pr-hardcode — Phase 1.4 correctly avoids single-PR-only hard-coding"
+fi
 
 echo
 echo "== Summary =="

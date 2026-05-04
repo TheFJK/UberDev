@@ -57,12 +57,15 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `GATE_FAIL_REASON_TRUST_TRAIL_JSON_SHA_MISMATCH` | `trust_trail_json_sha_mismatch` (8th member of `GATE_FAIL_REASON_ENUM`) | Phase 1.4 PATH_2 sub-condition (d) caller mapping for JSON-present-but-SHA-mismatch (or shape-malformed) cases; audit-log `gate_fail.data.reason` |
 | `TRUST_TRAIL_VERDICT_INVALID_SUBREASON_ENUM` | `input_malformed` (immediate gate_fail; no retry), `trailer_sha_not_in_local_clone` (one bounded `git fetch --prune` + re-dispatch with `data.retry_attempt=1`; second INVALID is terminal) | Phase 1.4 PATH_2 sub-condition (c); audit-log `trust_trail_agent_decision.data.subreason` when `data.choice="INVALID"` |
 | `TRUST_TRAIL_AGENT_DECISION_RETRY_ATTEMPT_RANGE` | integer enum `{0, 1}` (0 = first dispatch; 1 = bounded retry on `trailer_sha_not_in_local_clone`; never recursive) | Phase 1.4 PATH_2 sub-condition (c); audit-log `trust_trail_agent_decision.data.retry_attempt` |
+| `BARE_MODE_FAST_PATH_QUERY` | `gh pr list --head "$current_branch" --state open --search "draft:false" --json number,headRefOid` | Step 1.0.5 (bare-mode current-branch detection — does NOT consume `$integration_branch`; the cardinality of the result drives the three-way branch) |
+| `DISCOVERY_FILTER` | `gh pr list --base "$integration_branch" --state open --search "draft:false" --json number,title,headRefOid,headRefName,baseRefName,isDraft,createdAt,reviewDecision,labels,body,author,headRepositoryOwner` followed by `jq '.[] \| select(.isDraft==false)'` (belt-and-suspenders) | Step 1.2.5 (multi-discover dispatch — runs after Step 1.2 integration_branch resolution); also referenced by `--all` for one canonical filter shared by both modes (Q4) |
+| `PREFLIGHT_SUMMARY_FORMAT` | `"merging %d PR%s in order: %s"` (literal printf-style format). When the rendered line exceeds 80 chars, fold at PR-number boundaries with a continuation indent of 2 spaces (80-char wrap convention). | Step 2.2 entry pre-flight stderr line (multi-discover mode only); the line lists the FULL ordered set regardless of `MAX_PARALLEL_AGENTS` chunking (Q5) |
 
 ## Inputs
 
 Argument parsing:
 
-- **No args** — use the current branch's PR if one exists. If the current branch has no open PR, error out with a clear message pointing to `finish-branch`.
+- **No args** — context-aware bare-discover. If the current branch has exactly one open non-draft PR (per `BARE_MODE_FAST_PATH_QUERY`), operate on that PR (single-PR mode — today's fast path is preserved). If the current branch has zero open PRs (or `current_branch` resolution fails — detached HEAD), fall through to the same discovery pipeline as `--all` (multi-discover mode; Step 1.2.5 applies `DISCOVERY_FILTER` against `$integration_branch`). Greater than one open current-branch PR is an unrecoverable ambiguity error pointing the user at `--all` or `<PR#>`.
 - **`<PR#>`** (single positional integer) — single-PR mode; operate on exactly that PR number.
 - **`--all`** — enumerate all open PRs that are APPROVED and have passing required CI checks; treat the result as the input set.
 - **`--squash` / `--rebase` / `--merge`** — accepted for backward compat **(deprecated; no behavioural effect — see `## Inputs` autopilot paragraph and `commands/merge.md` `## Deprecated Flags`)**. The `merge-strategy-decider` agent picks per-PR strategy from PR-shape signals; the CLI flag is parsed without error, emits `STRATEGY_FLAGS_DEPRECATED_NOTE` once per run on first encounter, and records a `deprecated_flag_used` audit event. The flag does NOT override the agent's choice for any PR.
@@ -93,6 +96,45 @@ At the very start of the run (before lock acquisition), emit a one-line banner t
 ```
 
 This is transparency for the autopilot contract — every blocking gate has been removed; only data-integrity edges (e.g. lock contention by another live `/merge`) can stop the run.
+
+### Step 1.0.5 — Bare-mode detection (mode-only, no dispatch)
+
+When `/merge` is invoked with no positional `<PR#>` and no `--all` flag (the bare-discover entry point), this step decides between the single-PR fast path and the multi-discover fall-through. **This step runs `BARE_MODE_FAST_PATH_QUERY` only; it does NOT consume `$integration_branch` (which is not yet resolved at this point in the pipeline). The multi-discover dispatch that depends on `$integration_branch` is deferred to Step 1.2.5.**
+
+Procedure:
+
+1. Resolve `current_branch := git symbolic-ref --short HEAD 2>/dev/null`. On failure (detached HEAD), set `current_branch=""`, **skip step 2 entirely**, and treat `N := 0` (multi-discover fall-through). Do not invoke `BARE_MODE_FAST_PATH_QUERY` with an empty `--head` value — `gh pr list --head ""` is undefined behaviour.
+2. Run the canonical `BARE_MODE_FAST_PATH_QUERY` (declared in `## Constants`):
+
+   ```bash
+   gh pr list --head "$current_branch" --state open --search "draft:false" --json number,headRefOid
+   ```
+
+   The result is a JSON array; let `N := len(result)`. **`gh` failure-mode handling** (network, auth, rate limit, 5xx) is a cross-cutting concern across all `gh pr list` invocations in the skill (`--all` discovery has the same shape); follow-up issue tracks unified hardening across both bare-discover Step 1.0.5 / Step 1.2.5 and the existing `--all` path. Until then: a `gh` failure producing empty stdout will be observed as `N=0`, falling through to multi-discover; surface the breadcrumb at step 3 unchanged.
+
+3. Branch on `N` (three-way):
+
+   - `N == 1` → **single-PR fast path** (Branch (a) in the design). Set `pr_number := result[0].number`, set the bare-mode discriminator to `fast-path`, short-circuit subsequent steps so they treat this run as if `<PR#>` was passed positionally, and emit a stderr breadcrumb:
+
+     ```
+     bare-mode: detected 1 current-branch PR (#<N>); entering single-PR mode
+     ```
+
+     Today's pipeline (Step 1.1 lock → Step 1.2 integration_branch → Phase 1.4 trust gate → Phase 2.2 → Phase 3) runs unchanged. **No pre-flight summary line** is emitted (Q2: single-PR mode preserves today's UX).
+
+   - `N == 0` → **multi-discover fall-through** (Branch (b) in the design). Set the bare-mode discriminator to `multi-discover` and emit a stderr breadcrumb:
+
+     ```
+     bare-mode: detected 0 current-branch PRs; entering multi-discover mode
+     ```
+
+     The pipeline proceeds to Step 1.1 (lock) and Step 1.2 (integration_branch resolution); Step 1.2.5 will apply the multi-discover dispatch filter and seed the candidate set.
+
+   - `N > 1` → **ambiguity hard error**. Emit one stderr line `error: current branch '<current_branch>' has multiple open PRs (#A #B); use --all or <PR#> to disambiguate.` and exit 1. (Rare; cross-fork edge case.) **No audit event is emitted by design** — the stderr line is the canonical surface (cardinality matches Phase 2.1's cycle-break stderr-only convention; `AUDIT_EVENT_ENUM` intentionally has no `bare_mode_ambiguous` member). The audit log is bound to a `run_id` allocated at Step 1.1 (lock acquisition), and Step 1.0.5 runs pre-lock — so there is no audit context yet. Implementers MUST NOT add an audit event here without spec-level changes.
+
+When `--all` was passed on the command line, **Step 1.0.5 is skipped entirely** — the multi-discover discriminator is set unconditionally, and the pipeline proceeds to Step 1.1.
+
+No new `AUDIT_EVENT_ENUM` member is introduced for Step 1.0.5; the stderr breadcrumb is the canonical audit surface (cardinality matches Phase 2.1's cycle-break stderr-only convention). Subsequent per-PR `gate_pass` / `gate_fail` events make the downstream gating decisions auditable as today.
 
 ### Step 1.1 — Acquire the single-instance lock
 
@@ -155,6 +197,24 @@ The missing-`flock` case (`command -v flock` returns empty / exit 1) is **NOT co
 
 Validate the resolved name against `BRANCH_NAME_REGEX` BEFORE any shell argv use. Reject and abort on regex fail.
 
+### Step 1.2.5 — Multi-discover dispatch (deferred from Step 1.0.5)
+
+If Step 1.0.5 set the bare-mode discriminator to `multi-discover` (or `--all` was given on the command line), apply the canonical `DISCOVERY_FILTER` (declared in `## Constants`) against the `$integration_branch` resolved by Step 1.2, and seed the Phase 1.4 candidate set with the result. Otherwise this step is a no-op.
+
+Concretely:
+
+```bash
+candidates=$(gh pr list --base "$integration_branch" --state open --search "draft:false" \
+  --json number,title,headRefOid,headRefName,baseRefName,isDraft,createdAt,reviewDecision,labels,body,author,headRepositoryOwner \
+  | jq '[.[] | select(.isDraft==false)]')
+```
+
+The `jq '.[] | select(.isDraft==false)'` filter is belt-and-suspenders against any future `gh` API change that might surface drafts despite the `--search "draft:false"` flag. The candidate array is the input set for Phase 1.4 (per-PR trust gate fanout). **This is the only place `DISCOVERY_FILTER` is invoked**; both bare-mode (multi-discover) and `--all` route through this single dispatch point so the two modes share one canonical filter (Q4). **`gh` and `jq` failure-mode handling** is a cross-cutting concern shared with Step 1.0.5 (see that step's note); a transient `gh` failure or `jq` parse error producing an empty pipeline output is currently observed as a legitimate empty candidate set (Step 1.7 clean-exit-0 applies). Follow-up issue tracks unified hardening across bare-discover and the existing `--all` path; until then, post-hoc forensics rely on `gh` CLI's own stderr emission rather than a structured audit event.
+
+If the `gh` invocation returns an empty array (all PRs are drafts, or no open PRs exist on `$integration_branch`), the candidate set is empty — Step 1.7's clean-exit-0 contract applies (see Step 1.7's bare-mode cross-reference).
+
+This step is the `$integration_branch`-dependent half of the split detection introduced in Step 1.0.5; the two steps are intentionally separate (see Step 1.0.5 for the rationale) and collapsing them would invert the dependency on `$integration_branch`. Do not collapse.
+
 ### Step 1.3 — Last-resort fallback when all four tiers are empty
 
 If the four-tier chain returns nothing (network-detached clone, missing remote): use the literal `INTEGRATION_BRANCH_FALLBACK` (`main`) and emit one stderr line: `warning: integration_branch unresolved from CLI / env / config / gh; falling back to 'main'. Set integration_branch in .claude/uberdev.local.md to silence this.` Validate the fallback against `BRANCH_NAME_REGEX` (it passes by construction). **Never prompt the user.** No persist step — autopilot does not ask, it acts; if the user wants a different default, they edit the config file out-of-band.
@@ -175,7 +235,7 @@ This is the only Phase-1 path where /merge declines to run for a config reason. 
 
 ### Step 1.4 — Per-PR pre-flight gate (trust resolution)
 
-Project the JSON: `gh pr view <N> --json state,isDraft,reviewDecision,statusCheckRollup,headRepository,maintainerCanModify,isCrossRepository,headRefName,headRefOid,baseRefName,body,commits,labels,createdAt,author`.
+For each PR in the candidate set (per-PR fanout — the gate is dispatched once per discovered PR; bare-discover does not relax this dispatch shape), project the JSON: `gh pr view <N> --json state,isDraft,reviewDecision,statusCheckRollup,headRepository,maintainerCanModify,isCrossRepository,headRefName,headRefOid,baseRefName,body,commits,labels,createdAt,author`.
 
 Pre-conditions that ALL must pass regardless of trust path (real blockers):
 
@@ -248,7 +308,7 @@ For every cross-repository PR (`isCrossRepository == true`):
 
 ### Step 1.7 — Single-PR pre-flight fail edge case
 
-If only one PR is in scope and its pre-flight fails: emit the `gate_fail` event, render the run-summary block with that PR listed under `Skipped:` and an empty `Merged:` set, and exit cleanly. **Not an error, not a halt** — there is simply nothing to merge this run.
+If only one PR is in scope and its pre-flight fails: emit the `gate_fail` event, render the run-summary block with that PR listed under `Skipped:` and an empty `Merged:` set, and exit cleanly. **Not an error, not a halt** — there is simply nothing to merge this run. Bare-mode discovery (Step 1.2.5) returning an empty eligible set — whether because no open PRs exist against `$integration_branch` or because all candidates gated out at Phase 1.4 — follows this same clean-exit-0 contract; the run-summary block reports `Merged: 0 PRs / Skipped: M PRs / Parked: P PRs` and exit 0 (Q3 amends issue #56 AC #6 to align with this precedent).
 
 ## Phase 2 — Merge plan
 
@@ -265,6 +325,18 @@ Skip Step 2.1 if only 1 PR is in scope (no ordering decision to make).
 ### Step 2.2 — PER-PR STRATEGY (agent-decided)
 
 For each PR in the in-scope set, dispatch a `merge-strategy-decider` agent. Inputs per PR: `pr_number`, `commit_count` (from `git rev-list --count <integration_branch>..<head_ref_oid>`), `conventional_commit_ratio` (from a regex pass over `git log <integration_branch>..<head_ref_oid> --format=%s` matching `^(feat|fix|chore|refactor|test|docs)(\(.+\))?:`), `wip_marker_present` (from a regex pass over the same log matching `WIP_MESSAGE_REGEX`), `divergence_commits` (`git rev-list --count <merge-base>..<head_ref_oid>`), `label_hint` (suffix of any `merge-strategy:<name>` label on the PR, advisory; null otherwise; wrapped in `<external-untrusted-input source="github-pr-label">…</external-untrusted-input>` envelope), `repo_convention` (recorded preference from `.claude/uberdev.local.md` `merge_strategy:` key, null if absent), `working_dir`.
+
+**Pre-flight summary line (multi-discover mode only).** If the bare-mode discriminator is `multi-discover` (or `--all` was given on the command line), emit one stderr line just before the fanout dispatch, formatted via `PREFLIGHT_SUMMARY_FORMAT` (declared in `## Constants`):
+
+```
+merging N PRs in order: #A #B #C ... #W
+```
+
+(For the singular case, `merging 1 PR: #N`.) The line lists the **full ordered set** regardless of `MAX_PARALLEL_AGENTS` chunking — wave dispatch is an internal scheduling detail invisible to the user (per Q5). When the rendered line exceeds 80 chars, fold at PR-number boundaries with a continuation indent of 2 spaces.
+
+**The pre-flight line is informational stderr only.**
+
+It is NOT a `[y/N]` prompt and NOT abortable — the autopilot contract from Step 1.0 (no prompts, no halts) is unconditional. Single-PR mode (Q1 fast path from Step 1.0.5) does NOT emit this line — preserving today's single-PR UX.
 
 **Fanout dispatch.** Dispatch ALL `merge-strategy-decider` Task() calls for the in-scope PR set in ONE assistant turn — the single-message Task() invariant (mirrors `uberdev:post-impl-review` and the conflict-resolver fanout shape).
 
