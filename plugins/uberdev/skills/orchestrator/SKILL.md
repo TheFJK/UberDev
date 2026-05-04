@@ -42,36 +42,66 @@ Before dispatching the research fanout, check `.uberdev/research/issue-<ISSUE_NU
 
 ```bash
 RESEARCH_DIR=".uberdev/research/issue-$ISSUE_NUM"
+LOG=".uberdev/research/$RUN_ID/orchestrator.log"
 SHORTCIRCUIT_CODEBASE=0
 SHORTCIRCUIT_PATTERNS=0
 SHORTCIRCUIT_PRIOR_ART=0
 SHORTCIRCUIT_CONSTRAINTS=0
 SHORTCIRCUIT_SECURITY=0
 SHORTCIRCUIT_TEST_COVERAGE=0
-if [ -d "$RESEARCH_DIR" ]; then
+
+# Helper: emit one per-topic observability line. Six lines per medium/large
+# run regardless of cache state — see "Per-topic observability" below for
+# the schema. `declare` is bash-only; LLM-as-executor accepts it.
+emit_topic_log() {  # args: <topic> <status> <note>
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] phase=phase1-fanout agent=research-$1 status=$2 note=$3" >> "$LOG"
+}
+
+# Global pre-gate: evaluated once before the per-topic loop. If it fires,
+# ALL six topics get the same `reason=` — never mixed with per-topic reasons.
+if [ ! -d "$RESEARCH_DIR" ]; then
+  for TOPIC in codebase patterns prior-art constraints security test-coverage; do
+    emit_topic_log "$TOPIC" dispatched "fresh-run,reason=no-cache"
+  done
+else
   ISSUE_UPDATED_ISO=$(gh issue view "$ISSUE_NUM" --json updatedAt --jq .updatedAt 2>/dev/null)
-  if [ -z "$ISSUE_UPDATED_ISO" ]; then
-    echo "warning: failed to fetch issue #$ISSUE_NUM updatedAt; using full parallel dispatch" >&2
-  else
+  ISSUE_UPDATED_EPOCH=""
+  if [ -n "$ISSUE_UPDATED_ISO" ]; then
     ISSUE_UPDATED_EPOCH=$(date -j -f '%Y-%m-%dT%H:%M:%SZ' "$ISSUE_UPDATED_ISO" +%s 2>/dev/null \
                         || date -d "$ISSUE_UPDATED_ISO" +%s 2>/dev/null)
+  fi
+  if [ -z "$ISSUE_UPDATED_EPOCH" ]; then
+    echo "warning: failed to fetch or parse issue #$ISSUE_NUM updatedAt; using full parallel dispatch" >&2
+    for TOPIC in codebase patterns prior-art constraints security test-coverage; do
+      emit_topic_log "$TOPIC" dispatched "fresh-run,reason=invalid-timestamp"
+    done
+  else
+    # Per-topic loop: each topic is evaluated independently. Different topics
+    # in the same run may fall back for different reasons or be reused.
     for TOPIC in codebase patterns prior-art constraints security test-coverage; do
       F="$RESEARCH_DIR/${TOPIC}.md"
-      [ -f "$F" ] || continue
+      if [ ! -f "$F" ]; then
+        emit_topic_log "$TOPIC" dispatched "fresh-run,reason=no-cache"
+        continue
+      fi
       if ! grep -q '^summary:' "$F"; then
         echo "warning: $F missing 'summary:' field; using full parallel dispatch for $TOPIC" >&2
+        emit_topic_log "$TOPIC" dispatched "fresh-run,reason=missing-summary"
         continue
       fi
       F_MTIME_EPOCH=$(stat -f %m "$F" 2>/dev/null || stat -c %Y "$F" 2>/dev/null)
-      if [ -z "$ISSUE_UPDATED_EPOCH" ] || [ -z "$F_MTIME_EPOCH" ]; then
-        echo "warning: failed to normalise updatedAt or $F mtime; using full parallel dispatch for $TOPIC" >&2
+      if [ -z "$F_MTIME_EPOCH" ]; then
+        echo "warning: failed to read $F mtime; using full parallel dispatch for $TOPIC" >&2
+        emit_topic_log "$TOPIC" dispatched "fresh-run,reason=invalid-timestamp"
         continue
       fi
       if [ "$F_MTIME_EPOCH" -lt "$ISSUE_UPDATED_EPOCH" ]; then
+        emit_topic_log "$TOPIC" dispatched "fresh-run,reason=stale-mtime"
         continue
       fi
       VAR="SHORTCIRCUIT_$(echo "$TOPIC" | tr '[:lower:]-' '[:upper:]_')"
-      declare "$VAR=1"  # was: eval "$VAR=1" — safer indirection, no shell-injection risk if VAR ever becomes attacker-controlled # bash-only idiom; LLM-as-executor accepts it even though POSIX sh would not
+      declare "$VAR=1"  # was: eval "$VAR=1" — safer indirection, no shell-injection risk if VAR ever becomes attacker-controlled
+      emit_topic_log "$TOPIC" reused "cache-hit,mtime=$F_MTIME_EPOCH,issue_updated_at=$ISSUE_UPDATED_EPOCH"
     done
   fi
 fi
@@ -87,14 +117,21 @@ After the short-circuit pass, dispatch Phase 1 fanout (below) but gate each `Tas
 
 **Freshness predicate.** `fresh(F) := exists(F) AND grep -q '^summary:' F AND mtime(F) >= updatedAt(issue)`.
 
-**Fall-back-to-fresh modes** (any forces `SHORTCIRCUIT_<TOPIC>=0` and a `note=fresh-run,reason=<X>` log line):
+**Fall-back-to-fresh modes.** Any of the following force `SHORTCIRCUIT_<TOPIC>=0` and a `note=fresh-run,reason=<X>` log line. There are TWO scopes:
 
-| # | Trigger | `reason=` |
-|---|---------|-----------|
-| 1 | `$RESEARCH_DIR` or `$RESEARCH_DIR/<topic>.md` missing | `no-cache` |
-| 2 | `mtime(F) < updatedAt(issue)` | `stale-mtime` |
-| 3 | File present but no `^summary:` front-matter field | `missing-summary` |
-| 4 | `gh issue view --json updatedAt` failed, OR `date -j`/`date -d` could not parse the ISO, OR `stat` produced no epoch | `invalid-timestamp` |
+- **Global pre-gate** — evaluated once before the per-topic loop. If it fires, ALL six topics fall back with the same `reason=`. The per-topic loop is not entered.
+- **Per-topic** — evaluated inside the per-topic loop. Different topics in the same run may fall back for different reasons (or be reused).
+
+| # | Scope | Trigger | `reason=` |
+|---|-------|---------|-----------|
+| 1 | global | `$RESEARCH_DIR` missing entirely | `no-cache` |
+| 2 | global | `gh issue view --json updatedAt` failed OR `date -j` / `date -d` could not parse the ISO | `invalid-timestamp` |
+| 3 | per-topic | `$RESEARCH_DIR/<topic>.md` missing | `no-cache` |
+| 4 | per-topic | File present but no `^summary:` front-matter field | `missing-summary` |
+| 5 | per-topic | `stat` for an existing file produced no epoch | `invalid-timestamp` |
+| 6 | per-topic | `mtime(F) < updatedAt(issue)` | `stale-mtime` |
+
+`invalid-timestamp` may surface globally (row 2) or per-topic (row 5) but never mixed in the same run — if a global pre-gate fires the per-topic loop is skipped entirely.
 
 **Reuse path.** When `fresh(F)`, `cp` immediately to `$RUN_ID/<topic>.md`, set `SHORTCIRCUIT_<TOPIC>=1`, emit `status=reused note=cache-hit,mtime=<e>,issue_updated_at=<e>`. `cp`-first-then-evaluate-downstream is the recommended TOCTOU sequence; single-writer-per-issue is assumed.
 
