@@ -27,24 +27,17 @@ _uberdev_discover_iso_ts() {
   date -u +%Y-%m-%dT%H:%M:%SZ
 }
 
-# _uberdev_discover_truncate FILE
-# Echo the first 512 bytes of FILE, JSON-escaped (backslashes, quotes, and
-# control bytes \n \r \t are escaped; other C0/C1 + DEL dropped via tr).
-# Bash 3.2 + POSIX tools only (no GNU-sed multiline-label extensions —
-# BSD sed on macOS rejects `:a;N;$!ba`, which would silently produce
-# unescaped raw newlines and corrupt the JSONL audit log).
-_uberdev_discover_truncate() {
-  local file="$1"
-  if [ ! -r "$file" ]; then
-    printf ''
-    return 0
-  fi
-  # Read first 512 bytes, then escape JSON-meaningful characters in awk.
-  # awk reads byte-by-byte via getc-style RS="" emulation; using the
-  # "feed each character" pattern keeps the scan portable across BSD
-  # awk (macOS) and gawk. Drop C0/C1 + DEL except \n \r \t, then escape.
-  head -c 512 "$file" 2>/dev/null \
-    | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' \
+# _uberdev_discover_json_escape_stream
+# Read stdin and emit JSON-escaped output (backslash, quote, \n \r \t
+# escaped; other C0/C1 + DEL dropped via tr). Shared body of
+# _uberdev_discover_truncate and _uberdev_discover_json_escape_str — keeps
+# the escape rules in one place so a future fix (e.g. \b / \f handling)
+# cannot drift between the two paths. Bash 3.2 + POSIX tools only
+# (no GNU-sed multiline-label extensions — BSD sed on macOS rejects
+# `:a;N;$!ba`, which would silently produce unescaped raw newlines and
+# corrupt the JSONL audit log).
+_uberdev_discover_json_escape_stream() {
+  LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' \
     | LC_ALL=C awk '
         BEGIN { ORS = ""; out = "" }
         {
@@ -59,31 +52,27 @@ _uberdev_discover_truncate() {
       '
 }
 
+# _uberdev_discover_truncate FILE
+# Echo the first 512 bytes of FILE, JSON-escaped via the shared escape
+# stream. Empty string when FILE is unreadable (best-effort).
+_uberdev_discover_truncate() {
+  local file="$1"
+  if [ ! -r "$file" ]; then
+    printf ''
+    return 0
+  fi
+  head -c 512 "$file" 2>/dev/null | _uberdev_discover_json_escape_stream
+}
+
 # _uberdev_discover_json_escape_str STRING
-# Emit STRING JSON-escaped (backslash, quote, \n \r \t escaped; other
-# C0/C1 + DEL dropped via tr). Defense-in-depth for enum-shaped fields
-# (reason, step) interpolated into audit-log JSON via bare-string printf.
-# Today every call site passes a static enum literal, so this is unreachable
-# given current callers — but the function signatures do not enforce that
-# discipline, and a future caller passing a dynamic string would otherwise
-# corrupt the audit log. Mirrors the awk shape used by
-# _uberdev_discover_truncate so behaviour is identical for any input the
-# truncate path would also accept.
+# Emit STRING JSON-escaped via the shared escape stream. Defense-in-depth
+# for enum-shaped fields (reason, step) interpolated into audit-log JSON
+# via bare-string printf. Today every call site passes a static enum
+# literal, so this is unreachable given current callers — but the function
+# signatures do not enforce that discipline, and a future caller passing a
+# dynamic string would otherwise corrupt the audit log.
 _uberdev_discover_json_escape_str() {
-  printf '%s' "$1" \
-    | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' \
-    | LC_ALL=C awk '
-        BEGIN { ORS = ""; out = "" }
-        {
-          line = $0
-          gsub(/\\/, "\\\\", line)
-          gsub(/"/, "\\\"", line)
-          gsub(/\r/, "\\r", line)
-          gsub(/\t/, "\\t", line)
-          out = out (NR > 1 ? "\\n" : "") line
-        }
-        END { print out }
-      '
+  printf '%s' "$1" | _uberdev_discover_json_escape_stream
 }
 
 # _uberdev_discover_emit_audit REASON STEP EXIT_CODE STDERR_FILE [PR_NUMBER]
