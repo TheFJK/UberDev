@@ -132,6 +132,25 @@ auto_confirm: false              # DEPRECATED — no behavioural effect. /merge 
 bot_authors_allow_list:          # DEPRECATED — no behavioural effect. /merge no longer gates on PR-author identity (any APPROVED + CI-green PR is eligible). Key parses for backward compat.
   - dependabot[bot]
   - renovate[bot]
+
+# --- /solve tier clamp ---
+solve_tier_floor: small          # one of: trivial, small, medium, large; clamps auto-triage UP to floor; default unset (no lower clamp); env: SOLVE_TIER_FLOOR
+solve_tier_ceiling: medium       # one of: trivial, small, medium, large; clamps auto-triage DOWN to ceiling; default unset (no upper clamp); env: SOLVE_TIER_CEILING
+
+# --- per-phase parallel fanout caps ---
+# dot-path refs: fanout_concurrency.research, fanout_concurrency.post_impl_review, fanout_concurrency.merge_strategy, fanout_concurrency.conflict_resolver
+fanout_concurrency:
+  research: 6                    # int [1, 50]; orchestrator Phase 1 research-fanout cap; default 6; env: UBERDEV_FANOUT_RESEARCH
+  post_impl_review: 5            # int [1, 50]; post-impl-review reviewer fanout cap; default 5; env: UBERDEV_FANOUT_POST_IMPL_REVIEW
+  merge_strategy: 10             # int [1, 50]; /merge Phase 2.2 strategy-decider fanout cap; default 10; env: UBERDEV_FANOUT_MERGE_STRATEGY (alias for MAX_PARALLEL_AGENTS in merge/SKILL.md Constants)
+  conflict_resolver: 10          # int [1, 50]; /merge Phase 3.3 conflict-resolver fanout cap; default 10; env: UBERDEV_FANOUT_CONFLICT_RESOLVER (NEW — Phase 3.3 was uncapped previously)
+
+# --- per-command wall-clock timeouts ---
+# dot-path refs: command_timeouts.solve, command_timeouts.review_pr, command_timeouts.merge
+command_timeouts:
+  solve: 3600                    # int seconds [60, 86400]; ENFORCED via /solve launcher timeout(1) wrap; default 3600 (1h); env: UBERDEV_SOLVE_TIMEOUT
+  review_pr: 900                 # int seconds [60, 86400]; ADVISORY-ONLY in v1 (parsed + audit-logged; no kill); default 900 (15m); env: UBERDEV_REVIEW_PR_TIMEOUT
+  merge: 600                     # int seconds [60, 86400]; ADVISORY-ONLY in v1 (parsed + audit-logged; no kill); default 600 (10m); env: UBERDEV_MERGE_TIMEOUT
 ---
 
 # Notes (optional, free-form markdown for human reference)
@@ -146,5 +165,49 @@ Settings take effect on next SessionStart. Environment variables (`SOLVE_TERMINA
 **`bot_authors_allow_list` semantics:** **DEPRECATED.** As of the unconditional-autopilot release, `/merge` does NOT gate on PR-author identity — every APPROVED + CI-green PR is eligible regardless of whether the author is a collaborator, a bot, or an external contributor. Phase 1.4 trust resolution accepts EITHER `reviewDecision == "APPROVED"` (PATH_1, team / branch-protection path; required reviews + status checks anchor the trust) OR a green `/review-pr` trail bound to current HEAD SHA via the `trust-trail-evaluator` agent (PATH_2, solo-dev / no-protection path; the agent reads structural primitives — ancestor + diff-empty + log-empty — and returns verdicts in `{PASS, STALE, INVALID, FORCE_PUSHED}`). Author identity is NOT a gate in either path; the new trust trail does not re-introduce author-identity gating. The key is parsed without error for backward compat but has no behavioural effect.
 
 **`auto_confirm` precedence:** **DEPRECATED.** As of the autopilot release, `auto_confirm` (config) and `--yes` / `-y` (CLI) are no-ops — `/merge` is fully unattended end-to-end. The flag is still parsed without error for backward compat; first encounter per run emits one stderr line: `warning: --yes / -y / auto_confirm are deprecated; /merge is now fully unattended. The flag has no behavioural effect.` An audit event `deprecated_flag_used` is recorded. No grace-window removal planned. See `commands/merge.md` `## Deprecated Flags`.
+
+**`solve_tier_floor` / `solve_tier_ceiling`:** clamp the
+`/solve` auto-triage tier into `[floor, ceiling]`. Both keys take an
+enum value from `{trivial, small, medium, large}`. Asymmetric clamps
+are supported (set only floor or only ceiling). If `floor > ceiling`,
+one stderr warning fires (`floor_gt_ceiling`) and BOTH are ignored.
+Env overrides: `SOLVE_TIER_FLOOR`, `SOLVE_TIER_CEILING`. Default:
+unset on both sides.
+
+**`fanout_concurrency.{research, post_impl_review, merge_strategy, conflict_resolver}`:**
+per-phase cap on parallel agent fanout. Each value is an int in
+`[1, 50]`. When the in-scope agent count exceeds the cap, the host
+skill splits dispatch into `ceil(N / cap)` sequential single-message
+waves (the per-wave single-message Task() invariant is preserved).
+Useful for rate-limited tiers and laptop runs where 10 parallel Claude
+sessions overwhelm RAM. Env overrides:
+`UBERDEV_FANOUT_{RESEARCH, POST_IMPL_REVIEW, MERGE_STRATEGY, CONFLICT_RESOLVER}`.
+Defaults: 6 / 5 / 10 / 10 respectively. Note: `conflict_resolver`
+introduces a NEW default cap of 10 in Phase 3.3 of `/merge`, where the
+fanout was previously uncapped — queues of 11+ conflicted files in a
+single PR now chunk into multiple waves (intentional behavioural
+change; matches the `merge_strategy` chunking precedent).
+
+**`command_timeouts.{solve, review_pr, merge}`:** per-command
+wall-clock timeout in seconds, range `[60, 86400]` (1m–24h).
+**Enforcement scope:** only `command_timeouts.solve` is enforced — the
+`/solve` launcher wraps the `claude` invocation in `timeout(1)` (and
+fails-open with one stderr warning if `timeout(1)` is not on PATH).
+`command_timeouts.{merge, review_pr}` are **ADVISORY-ONLY in v1**:
+they are parsed and recorded in the audit log under
+`uberdev_config_read` but NOT enforced as wall-clock kills, because
+`/merge` and `/review-pr` execute inside the calling Claude turn and
+enforcing kill semantics there requires deeper orchestrator-loop
+changes. v2 issue can extend. Env overrides:
+`UBERDEV_{SOLVE, REVIEW_PR, MERGE}_TIMEOUT`. Defaults: 3600 / 900 / 600.
+
+**Validation behaviour:** absence of any new key yields the documented
+default silently. Out-of-range / non-integer / invalid-enum values
+emit one stderr line in the verbatim format
+`warning: <KEY> = '<VAL>' is invalid (<REASON>); falling back to default <DEFAULT>`
+and record one `uberdev_config_invalid` audit event; subsequent reads
+within the same shell-process tree are silenced via the
+`UBERDEV_VALIDATED_<KEY>=1` sentinel. Validation is always non-fatal —
+no new key can abort the parent command.
 
 **Recommendation:** commit this file to share workflow conventions across the team; or add it to `.gitignore` if individual preferences differ.

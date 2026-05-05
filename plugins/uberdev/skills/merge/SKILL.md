@@ -37,7 +37,7 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `TRUST_TRAIL_VERDICT_ENUM` | `PASS`, `STALE`, `INVALID`, `FORCE_PUSHED` | Phase 1.4 PATH_2 sub-condition (c); audit-log `trust_trail_agent_decision.data.choice` |
 | `MERGE_STRATEGY_DECIDER_VERDICT_ENUM` | `squash`, `rebase`, `merge` (strict subset of `STRATEGY_ENUM` — `drop` excluded by design) | Phase 2.2; audit-log `merge_strategy_agent_decision.data.choice` |
 | `GATE_FAIL_REASON_TRUST_TRAIL_AGENT_INVALID_INPUT` | `trust_trail_agent_invalid_input` (new 7th member of `GATE_FAIL_REASON_ENUM`) | Phase 1.4 PATH_2 sub-condition (c) caller mapping for `INVALID` verdicts (both subreasons); audit-log `gate_fail.data.reason` |
-| `MAX_PARALLEL_AGENTS` | integer `10` (default) | Phase 2.2 fanout chunking; queues with >`MAX_PARALLEL_AGENTS` PRs are split into `ceil(N / MAX_PARALLEL_AGENTS)` sequential single-message waves. Override via `.claude/uberdev.local.md` is out-of-scope for this issue. |
+| `MAX_PARALLEL_AGENTS` | resolved integer (default `10`) | Phase 2.2 fanout chunking; queues with >`MAX_PARALLEL_AGENTS` PRs are split into `ceil(N / MAX_PARALLEL_AGENTS)` sequential single-message waves. **Per-repo override:** read at run start via `uberdev_read_int_in_range fanout_concurrency.merge_strategy UBERDEV_FANOUT_MERGE_STRATEGY 1 50 10`. Constant name is preserved for back-compat with existing M-row test assertions; the value is the post-config-read resolved integer. |
 | `INTEGRATION_BRANCH_KEY` | `integration_branch` (config key) | D8 |
 | `INTEGRATION_BRANCH_ENV_VAR` | `UBERDEV_INTEGRATION_BRANCH` | D8 |
 | `INTEGRATION_BRANCH_FALLBACK` | `main` (hardcoded literal — autopilot picks the GitHub-default convention rather than prompting; users override out-of-band via `integration_branch:` config) | D8, Phase 1.3 (used when all four resolution tiers are empty) |
@@ -96,6 +96,29 @@ At the very start of the run (before lock acquisition), emit a one-line banner t
 ```
 
 This is transparency for the autopilot contract — every blocking gate has been removed; only data-integrity edges (e.g. lock contention by another live `/merge`) can stop the run.
+
+### Step 1.0a — command_timeouts.merge (advisory-only)
+
+Read `command_timeouts.merge` from `.claude/uberdev.local.md` (env:
+`UBERDEV_MERGE_TIMEOUT`; default 600s; range [60, 86400]). The value is
+**advisory in v1** — `/merge` does NOT enforce a wall-clock kill (the
+pipeline executes inside the current Claude turn; wall-clock kill
+there would require orchestrator-loop changes, out of scope per Q1
+auto-pick). The resolved value is recorded under `uberdev_config_read`
+in the audit log so post-run forensics can correlate slow runs with
+configured value. v2 issue can extend.
+
+```bash
+# Step 1.0a advisory timeout read
+if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
+  . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+  MERGE_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.merge UBERDEV_MERGE_TIMEOUT 60 86400 600)"
+  if [ -d ".uberdev" ]; then
+    printf '{"event":"uberdev_config_read","key":"command_timeouts.merge","value":"%s","enforcement":"advisory"}\n' \
+      "$MERGE_TIMEOUT" >> ".uberdev/audit.jsonl" 2>/dev/null || true
+  fi
+fi
+```
 
 ### Step 1.0.5 — Bare-mode detection (mode-only, no dispatch)
 
@@ -326,6 +349,23 @@ Skip Step 2.1 if only 1 PR is in scope (no ordering decision to make).
 
 For each PR in the in-scope set, dispatch a `merge-strategy-decider` agent. Inputs per PR: `pr_number`, `commit_count` (from `git rev-list --count <integration_branch>..<head_ref_oid>`), `conventional_commit_ratio` (from a regex pass over `git log <integration_branch>..<head_ref_oid> --format=%s` matching `^(feat|fix|chore|refactor|test|docs)(\(.+\))?:`), `wip_marker_present` (from a regex pass over the same log matching `WIP_MESSAGE_REGEX`), `divergence_commits` (`git rev-list --count <merge-base>..<head_ref_oid>`), `label_hint` (suffix of any `merge-strategy:<name>` label on the PR, advisory; null otherwise; wrapped in `<external-untrusted-input source="github-pr-label">…</external-untrusted-input>` envelope), `repo_convention` (recorded preference from `.claude/uberdev.local.md` `merge_strategy:` key, null if absent), `working_dir`.
 
+**Per-repo fanout cap.** At the top of Phase 2.2, source
+`${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh` and resolve
+`MAX_PARALLEL_AGENTS` from `fanout_concurrency.merge_strategy`. The
+resolved integer overrides the hardcoded `10` for this run; the
+Constants-table entry keeps the name `MAX_PARALLEL_AGENTS` for
+back-compat with existing M-row test assertions.
+
+```bash
+# Phase 2.2 fanout cap resolve
+if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
+  . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+  MAX_PARALLEL_AGENTS="$(uberdev_read_int_in_range fanout_concurrency.merge_strategy UBERDEV_FANOUT_MERGE_STRATEGY 1 50 10)"
+else
+  MAX_PARALLEL_AGENTS=10
+fi
+```
+
 **Pre-flight summary line (multi-discover mode only).** If the bare-mode discriminator is `multi-discover` (or `--all` was given on the command line), emit one stderr line just before the fanout dispatch, formatted via `PREFLIGHT_SUMMARY_FORMAT` (declared in `## Constants`):
 
 ```
@@ -400,6 +440,29 @@ i. **Fork preflight (Q3 gate):** re-check `isCrossRepository` + `headRepository.
 ii. **Create scratch worktree (D10):** `git worktree add .claude/worktrees/merge-<run-id> <integration_branch>` where `<run-id> = $(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)`. Verify `.claude/worktrees/` is gitignored (per `using-git-worktrees`).
 
 iii. **Dispatch one Task() per conflicted file IN A SINGLE ASSISTANT TURN.**
+
+**Per-repo fanout cap.** Before dispatching the per-file
+conflict-resolver fanout, resolve a per-PR cap from
+`fanout_concurrency.conflict_resolver`:
+
+```bash
+# Phase 3.3.iii fanout cap resolve
+if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
+  . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+  CONFLICT_RESOLVER_CAP="$(uberdev_read_int_in_range fanout_concurrency.conflict_resolver UBERDEV_FANOUT_CONFLICT_RESOLVER 1 50 10)"
+else
+  CONFLICT_RESOLVER_CAP=10
+fi
+```
+
+When `len(conflicted_files) > CONFLICT_RESOLVER_CAP`, split the per-file
+Task() fanout into `ceil(len / CONFLICT_RESOLVER_CAP)` sequential
+single-message waves; each wave still obeys the single-message Task()
+invariant within its slice. This introduces a NEW default cap of 10
+where Phase 3.3 was previously uncapped (queues of 11+ conflicted
+files now chunk into multiple waves) — matches the precedent set by
+`MAX_PARALLEL_AGENTS` in Phase 2.2 and is intentional behavioural
+change. Default 10, range [1, 50], precedence env > config > default.
 
 This is the critical invariant. All Task() calls for this PR's conflict set MUST be in ONE assistant turn — splitting across messages defeats parallelism (mirrors `uberdev:post-impl-review` SKILL.md fanout shape). Each Task() invokes `agents/conflict-resolver.md` with `file_path`, `pr_branch=<headRefName>`, `integration_branch`, `base_sha=<merge-base>`, `working_dir=<scratch worktree root>`.
 
