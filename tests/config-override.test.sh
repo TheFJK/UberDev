@@ -380,8 +380,8 @@ assert_grep_in "$SKILL_DIR/orchestrator/SKILL.md" \
 echo
 echo "== I4: post-impl-review fanout cap + review_pr advisory (Task 4) =="
 assert_grep_in "$SKILL_DIR/post-impl-review/SKILL.md" \
-  'uberdev_read_int_in_range fanout_concurrency.post_impl_review[[:space:]]+UBERDEV_FANOUT_POST_IMPL_REVIEW[[:space:]]+1[[:space:]]+50[[:space:]]+5' \
-  "I4a: post-impl-review reads fanout_concurrency.post_impl_review with bounds [1,50] default 5"
+  'uberdev_read_int_in_range fanout_concurrency.post_impl_review[[:space:]]+UBERDEV_FANOUT_POST_IMPL_REVIEW[[:space:]]+1[[:space:]]+50[[:space:]]+6' \
+  "I4a: post-impl-review reads fanout_concurrency.post_impl_review with bounds [1,50] default 6"
 assert_grep_in "$SKILL_DIR/post-impl-review/SKILL.md" \
   'POST_IMPL_REVIEW_CAP' \
   "I4b: post-impl-review binds POST_IMPL_REVIEW_CAP shell var"
