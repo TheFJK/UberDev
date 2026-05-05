@@ -215,6 +215,21 @@ assert_not_grep "$FINISH_BRANCH" \
   "no quoted heredoc delimiters (Claude permission-evaluator unmatched ' bug, #42)"
 
 echo
+echo "== Issue #55: no English possessives/contractions in bash-block #-comments =="
+# Apostrophes inside #-comments in fenced bash blocks trip the Claude
+# permission-pattern evaluator (same tokenizer bug as #42 — the evaluator
+# does not honor comment context; every ' toggles quote-state, pairing with
+# the next unrelated ' downstream and inverting quote-balance until a later
+# ' surfaces as `unmatched '`). Rephrase comment prose to drop possessives
+# and contractions (e.g. gh's → the gh, caller's → the caller, don't → do
+# not). Backtick-quoted documentation forms like `unmatched '` are unaffected —
+# the regex below matches only ' adjacent to letters, not ' next to backticks
+# or spaces.
+assert_not_grep "$FINISH_BRANCH" \
+  "#.*[a-zA-Z]'[a-zA-Z]" \
+  "no apostrophes inside #-comments in bash blocks (Claude permission-evaluator unmatched ' bug, #55)"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
