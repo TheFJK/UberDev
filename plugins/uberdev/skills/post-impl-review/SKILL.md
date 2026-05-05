@@ -92,7 +92,7 @@ In ONE assistant turn, fire 6 Task() calls in parallel. Each receives the same b
 
 | Reviewer | Agent file | Lens |
 |---|---|---|
-| `code-reviewer` | `agents/code-reviewer.md` (sonnet) | Correctness, design, general code quality |
+| `code-reviewer` (correctness lens) | `agents/code-reviewer.md` (sonnet) | Correctness, design, CLAUDE.md compliance |
 | `silent-failure-hunter` | `agents/silent-failure-hunter.md` | Swallowed errors, ignored returns, silent fallbacks |
 | `type-design-analyzer` | `agents/type-design-analyzer.md` | `any`/`unknown` misuse, type safety holes |
 | `comment-analyzer` | `agents/comment-analyzer.md` | Stale, redundant, or load-bearing comments |
@@ -167,7 +167,7 @@ Counting rules:
 - "suggestions" = sum of `severity: suggestion` findings across all 6 returns.
 - The trailing `Continue.` is fixed text — this skill is non-blocking and audit-only by design. To apply simplifier findings (or any other reviewer's findings), invoke `/uberdev:simplify` or `/uberdev:review-pr` Phase 2 — those commands own the apply-and-commit loop.
 
-**Migration-window fallback for `pr-test-analyzer` (transient, removable in v0.20+):** if `pr-test-analyzer`'s return is the legacy free-form Markdown (sections "Critical Gaps", "Important Improvements", "Test Quality Issues") instead of the standard YAML, the aggregator parses each "Critical Gaps" entry as `severity: blocker` and each other entry as `severity: suggestion`, and synthesises `verdict: REVISIONS_REQUIRED` if any blocker entries exist (else `APPROVE`). This fallback exists ONLY because the agent's output contract was migrated alongside the Step 2 dispatch-table swap; once `pr-test-analyzer.md` ships with the YAML contract (see Task 3), the fallback can be removed in a follow-up minor version.
+**Migration-window fallback for `pr-test-analyzer` (transient, removable in v0.20+):** if `pr-test-analyzer`'s return is the legacy free-form Markdown (sections "Critical Gaps", "Important Improvements", "Test Quality Issues") instead of the standard YAML, the aggregator parses each "Critical Gaps" entry as `severity: blocker` and each other entry as `severity: suggestion`, and synthesises `verdict: REVISIONS_REQUIRED` if any blocker entries exist (else `APPROVE`). This fallback exists ONLY because the agent's output contract was migrated alongside the Step 2 dispatch-table swap; once `pr-test-analyzer.md` ships with the YAML contract (see `agents/pr-test-analyzer.md` Output Format section), the fallback can be removed in a follow-up minor version.
 
 ## Output (returned to caller, NOT a YAML block)
 

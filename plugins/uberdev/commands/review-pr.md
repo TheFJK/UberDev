@@ -36,13 +36,13 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
      ```
      The skill's Step 2 fanout cap reads `UBERDEV_FANOUT_POST_IMPL_REVIEW` via `uberdev_read_int_in_range`, so a value of `1` yields `ceil(6/1) = 6` sequential single-message waves. The single-message-fanout invariant is preserved within each wave.
 
-## Argument Parsing Summary
+   ### Argument Parsing Summary
 
-| Variable | Source | Default | Effect |
-|---|---|---|---|
-| `SIMPLIFY_PHASE` | `--no-simplify` token | `1` | `0` skips Phase 2 |
-| `SEQUENTIAL` | `sequential` token | `0` | `1` exports `UBERDEV_FANOUT_POST_IMPL_REVIEW=1` (stderr notice emitted) |
-| `ASPECT_LIST` | remaining tokens | `()` | passed as `aspect_emphasis` input to `Skill(uberdev:post-impl-review)` Step 4 |
+   | Variable | Source | Default | Effect |
+   |---|---|---|---|
+   | `SIMPLIFY_PHASE` | `--no-simplify` token | `1` | `0` skips Phase 2 |
+   | `SEQUENTIAL` | `sequential` token | `0` | `1` exports `UBERDEV_FANOUT_POST_IMPL_REVIEW=1` (stderr notice emitted) |
+   | `ASPECT_LIST` | remaining tokens | `()` | passed as `aspect_emphasis` input to `Skill(uberdev:post-impl-review)` Step 4 |
 
 2. **Available Review Aspects:**
 
