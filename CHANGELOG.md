@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Documentation
+- **README — explicit "we rejected upstream's HARD-GATE" stance now documented (#61).** Adds a row to the `## Design decisions worth knowing` table plus a `<details>` block answering "why doesn't UberDev pause for approval?" and naming the three trust anchors (`spec-reviewer` always-on, `plan-reviewer` always-on, `post-impl-review` end-of-issue fanout) that replace user-approval gates.
+
 ## [0.18.2] - 2026-05-04
 
 ### Changed
