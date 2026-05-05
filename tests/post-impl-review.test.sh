@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Asserts that uberdev:post-impl-review skill exists, dispatches all 5
-# reviewer agents in a single message, and is referenced from both the
-# /solve trivial/small inline prompt and subagent-driven-dev.
+# Asserts that uberdev:post-impl-review skill exists as a Phase 1 post-PR-push
+# reviewer fanout, dispatches all 6 reviewer agents in a single message
+# (5 distinct files; code-reviewer dispatched twice — general lens + correctness
+# lens), and that deprecated pre-push call sites have been removed per #67.
 
 set -u
 set -o pipefail
@@ -42,18 +43,59 @@ assert_no_grep() {
   fi
 }
 
+# Structural-assertion helpers (assert_count / assert_subagent_type / assert_in_section)
+. "$REPO_ROOT/tests/_lib_assert_structural.sh"
+
 echo "== post-impl-review skill exists with frontmatter =="
 assert_grep "$POST_IMPL" '^name: post-impl-review' "frontmatter has name: post-impl-review"
 
 echo
-echo "== 5 reviewer agents named in single message =="
+echo "== 6 reviewer agents named in single message =="
 assert_grep "$POST_IMPL" 'code-reviewer' "code-reviewer named"
-assert_grep "$POST_IMPL" 'code-simplifier|simplifier' "code-simplifier named"
+assert_grep "$POST_IMPL" 'pr-test-analyzer' "pr-test-analyzer named (6th reviewer per #73)"
 assert_grep "$POST_IMPL" 'silent-failure-hunter' "silent-failure-hunter named"
 assert_grep "$POST_IMPL" 'type-design-analyzer' "type-design-analyzer named"
 assert_grep "$POST_IMPL" 'comment-analyzer' "comment-analyzer named"
+# Anti-regression: code-simplifier MUST NOT be in the Step 2 dispatch table region
+# (it moved to Phase 2 of /uberdev:review-pr as the named lens dispatcher per #73).
+if awk '/^### Step 2:/,/^### Step 3:/' "$POST_IMPL" | grep -qE '\| .code-simplifier. \|'; then
+  echo "  FAIL  code-simplifier MUST NOT appear in Step 2 dispatch table (moved to Phase 2 lens per #73)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  code-simplifier removed from Step 2 dispatch table (Phase 1 → Phase 2 lens migration)"; PASS=$((PASS + 1))
+fi
+# F3 — dispatch table row count, anchored on the FIRST column (the reviewer
+# name) to avoid over-matching row dividers. The first column shape is
+# "| `<name>`" optionally followed by " (qualifier)" before the next pipe —
+# the second `code-reviewer` row uses " (general lens)" so we tolerate any
+# non-pipe trailing chars between the closing backtick and the next "|".
+assert_count "$POST_IMPL" '^### Step 2: ' '^### Step 3: ' '^\| .code-[a-z-]+.[^|]*\||^\| .pr-test-analyzer.[^|]*\||^\| .silent-failure-hunter.[^|]*\||^\| .type-design-analyzer.[^|]*\||^\| .comment-analyzer.[^|]*\|' \
+  6 \
+  "Step 2 dispatch table has exactly 6 reviewer rows (one per dispatch slot, including 2 code-reviewer rows)"
 assert_grep "$POST_IMPL" 'single message|SINGLE message|one assistant turn|ONE assistant turn' \
   "single-message-fanout invariant documented"
+assert_grep "$POST_IMPL" '6 Task\(\) calls.*ONE assistant turn|MUST be in ONE assistant turn' \
+  "6 Task() calls / single-message invariant documented"
+
+echo
+echo "== Aspect emphasis input + Step 1 brief assembly (#73) =="
+assert_grep "$POST_IMPL" '^- .aspect_emphasis. — optional list' \
+  "Inputs section accepts aspect_emphasis (optional list)"
+assert_in_section "$POST_IMPL" '^### Step 1: Build' '^### Step 2:' \
+  '## Emphasis' \
+  "Step 1 brief assembly mentions ## Emphasis section appended when aspect_emphasis non-empty"
+
+echo
+echo "== Fanout cap default updated 5 → 6 (#73) =="
+assert_grep "$POST_IMPL" 'uberdev_read_int_in_range fanout_concurrency\.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 6' \
+  "fanout cap default in uberdev_read_int_in_range bumped to 6 (was 5)"
+assert_grep "$POST_IMPL" 'POST_IMPL_REVIEW_CAP=6' \
+  "fanout cap fallback assignment is 6 (was 5)"
+
+echo
+echo "== pr-test-analyzer YAML migration-window fallback (#73) =="
+assert_grep "$POST_IMPL" 'Migration-window fallback for .pr-test-analyzer.' \
+  "Step 4 documents transient fallback parser for legacy free-form pr-test-analyzer output"
 
 echo
 echo "== Anti-regression: pre-push call sites removed (#67) =="

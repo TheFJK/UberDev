@@ -18,9 +18,19 @@ If `$ARGUMENTS` is non-empty, treat it as **additional focus** to add to each ag
 
 ## Phase 2: Launch Three Review Agents in Parallel
 
-Use the **Task** tool to launch all three agents concurrently **in a single message** (one assistant turn, three `Task` tool_use blocks). Pass each agent the full diff so it has the complete context. If `$ARGUMENTS` is set, append it under an `## Additional Focus` heading at the bottom of each agent brief.
+Use the **Task** tool to launch all three agents concurrently **in a single message** (one assistant turn, three `Task` tool_use blocks), each with `subagent_type: uberdev:code-simplifier`. Pass each agent the full diff so it has the complete context, plus a `## Lens emphasis: <Reuse | Quality | Efficiency>` subsection identifying the lens. If `$ARGUMENTS` is set, append it under an `## Additional Focus` heading at the bottom of each agent brief (orthogonal to lens emphasis — lens parameterises which checklist runs, additional focus narrows scope). Concrete shape per lens:
 
-### Agent 1: Code Reuse Review
+```
+Task(
+  subagent_type: uberdev:code-simplifier,
+  description: "Lens: <Reuse | Quality | Efficiency>",
+  prompt: <<diff_brief>>\n\n## Lens emphasis: <Reuse | Quality | Efficiency>\n\n## Additional Focus\n<$ARGUMENTS verbatim>
+)
+```
+
+### Lens 1: Code Reuse Review (`## Lens emphasis: Reuse`)
+
+Each lens dispatches the same `uberdev:code-simplifier` agent with the lens-emphasis subsection in the prompt body — three Task() calls in one assistant turn, single source of truth for the named-agent dispatcher.
 
 For each change:
 
@@ -28,7 +38,7 @@ For each change:
 2. **Flag any new function that duplicates existing functionality.** Suggest the existing function to use instead.
 3. **Flag any inline logic that could use an existing utility** — hand-rolled string manipulation, manual path handling, custom environment checks, ad-hoc type guards, and similar patterns are common candidates.
 
-### Agent 2: Code Quality Review
+### Lens 2: Code Quality Review (`## Lens emphasis: Quality`)
 
 Review the same changes for hacky patterns:
 
@@ -41,7 +51,7 @@ Review the same changes for hacky patterns:
 7. **Nested conditionals**: ternary chains (`a ? x : b ? y : ...`), nested if/else, or nested switch 3+ levels deep — flatten with early returns, guard clauses, a lookup table, or an if/else-if cascade
 8. **Unnecessary comments**: comments explaining WHAT the code does (well-named identifiers already do that), narrating the change, or referencing the task/caller — delete; keep only non-obvious WHY (hidden constraints, subtle invariants, workarounds)
 
-### Agent 3: Efficiency Review
+### Lens 3: Efficiency Review (`## Lens emphasis: Efficiency`)
 
 Review the same changes for efficiency:
 
@@ -53,15 +63,29 @@ Review the same changes for efficiency:
 6. **Memory**: unbounded data structures, missing cleanup, event listener leaks
 7. **Overly broad operations**: reading entire files when only a portion is needed, loading all items when filtering for one
 
-## Phase 3: Fix Issues
+## Phase 3: Fix Issues — dispatch `code-fixer` subagent
 
-Wait for all three agents to complete. Aggregate their findings and fix each issue directly. If a finding is a false positive or not worth addressing, note it and move on — do not argue with the finding, just skip it.
+Wait for all three lenses to complete. Aggregate their findings to `.uberdev/research/<RUN_ID>/simplify-final.md` (mint a fresh `RUN_ID` if standalone — same shape as `/uberdev:review-pr`'s Run-ID format, regex `^[0-9]{8}-[0-9]{6}-[a-f0-9]+$`).
 
-**Reject any suggestion that materially changes runtime behavior or removes error handling**, even if the agent recommended it. Behavior preservation is the iron rule from the top of this command.
+Dispatch a fresh `code-fixer` subagent (defined in `plugins/uberdev/agents/code-fixer.md`) to apply the findings as a single `refactor:` conventional commit — this command's main turn no longer holds apply-loop edits in-context. Use the Task tool:
 
-When done:
-1. Briefly summarize what was fixed (or confirm the code was already clean).
-2. Stage the simplifications and commit as a **separate `refactor:` conventional commit** — keep the simplification diff distinct from the feature/fix commits that preceded it. This separate-commit boundary is mirrored by `/uberdev:review-pr` Phase 2 (which dispatches the same three lenses), so reviewers can always tell "feature/fix" apart from "simplify pass" by commit boundary alone.
+```
+Task(
+  subagent_type: uberdev:code-fixer,
+  description: "Apply simplify findings as a refactor: commit",
+  prompt: <<wraps simplify-final.md under <external-untrusted-input source="post-impl-review-aggregate">,
+            commit_range, working_dir, pr_number (or n/a if standalone),
+            phase=phase2, commit_type_prefix=refactor:>>
+)
+```
+
+The agent enforces:
+- **Iron rule:** preserve behavior. The agent rejects any finding that would materially change runtime behavior or remove error handling, returning `disposition: REFUSED, reason: "behavior-change-rejected"`.
+- **Separate `refactor:` commit:** ONE `refactor:` commit only — the agent's contract locks Phase 2 to a single commit (R8.6 separate-commit invariant). Mirrors `/uberdev:review-pr` Phase 2 apply path, so reviewers can always tell "feature/fix" apart from "simplify pass" by commit boundary alone.
+
+When the agent returns:
+1. Briefly summarize what was fixed (or confirm `status: NO_FIXES_NEEDED` — the code was already clean).
+2. The agent has already staged + committed; capture `commits[0].sha` and report it to the user. Surface every `findings_disposition` row where `disposition != APPLIED` so advisory findings (false positives, behavior-change refusals) are never silently dropped.
 
 ## When to run
 
