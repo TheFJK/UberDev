@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.19.2] - 2026-05-05
+
+### Fixed
+- **`/finish-branch` skill load no longer aborts with `(eval): parse error near `)'` on the gh-pr-create comment block.** A `` `if !` `` backtick-quoted incomplete-shell-keyword inside a `#`-prefixed comment in `finish-branch/SKILL.md` (line 280) was eval'd as command substitution by the same Claude Code permission-pattern evaluator that bit #42 (heredoc delimiters) and #55 (apostrophes) — the body `if !` is unterminated bash, surfacing as a parse error and aborting the skill before the option menu / `gh pr create` path could run. Rephrased the comment to non-backticked prose ("the negated-conditional branch below") — pure prose change, zero behavioural delta. Regression canary added to `tests/finish-branch-auto-chain.test.sh` matching bash reserved words (if/then/else/elif/fi/while/for/until/do/done/case/esac/function/select/time) at the start of a backtick body inside `#`-comments; suite 36→37 passing.
+
+## [0.19.1] - 2026-05-05
+
+### Fixed
+- **`/solve` and `/turbo` Phase A validation no longer crashes with `jq: parse error: Invalid string: control characters from U+0000 through U+001F must be escaped` (exit 5).** `solve-pipeline/SKILL.md` Step 4 captured `gh issue view --json` with `2>&1`, merging gh's stderr into `$ISSUE_JSON`. On slow API responses gh's spinner (default `spinner=enabled` in `gh config`) renders ANSI escape frames containing raw `ESC` (0x1B) — a U+0000-U+001F control character that's illegal inside a JSON string per RFC 8259 §7. The mixed bytes broke `jq -r .state <<<"$ISSUE_JSON"` mid-validation, after Step 3 had already echoed `Dispatching via: <terminal>`. Fix: capture stderr to `mktemp` and only read it on the failure path; stdout stays pure JSON. Same fail-open shape as `merge/SKILL.md` Step 1.0.5.
+
 ## [0.19.0] - 2026-05-05
 
 ### Added

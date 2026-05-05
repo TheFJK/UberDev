@@ -277,8 +277,9 @@ fi
 
 # Capture PR URL from gh stdout AND its exit code together. gh returns the
 # created PR URL on stdout when successful; non-zero exit on auth/network/quota
-# errors. The `if !` branch surfaces the gh failure explicitly (PR_URL captures
-# stderr via 2>&1 in the failure case to keep the diagnostic).
+# errors. The negated-conditional branch below surfaces the gh failure
+# explicitly (PR_URL captures stderr via 2>&1 in the failure case to keep
+# the diagnostic).
 if ! PR_URL=$(gh pr create --title "$PR_TITLE_VAR" --body-file "$PR_BODY_FILE" 2>&1); then
   echo "ERROR: gh pr create failed: $PR_URL" >&2
   echo "Branch state preserved. Worktree retained. Investigate and rerun." >&2

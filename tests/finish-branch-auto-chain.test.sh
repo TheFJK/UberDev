@@ -230,6 +230,26 @@ assert_not_grep "$FINISH_BRANCH" \
   "no apostrophes inside #-comments in bash blocks (Claude permission-evaluator unmatched ' bug, #55)"
 
 echo
+echo "== Same #42/#55 bug class: no shell-keyword backticks in bash-block #-comments =="
+# Backtick-quoted bash *reserved words* inside #-comments trip the same
+# Claude permission-pattern evaluator that #42 (heredoc delimiters) and
+# #55 (apostrophes) hit: the evaluator naively eval()s text from #-comments,
+# treating backticks as command substitution. When the body inside the
+# backticks is incomplete shell (e.g. `if !`, `then`, `done`, `while x`),
+# bash reports `(eval): parse error near `)'` and aborts skill load before
+# the option menu / gh pr create path can run. Other backticks in this
+# file have *complete* command-sub bodies (`gh pr create`, `git merge-base
+# HEAD HEAD~1`, `[[ -n $SCAN_OUT ]]`) and parse cleanly, so they are
+# unaffected — this canary fires only on bare reserved words at the start
+# of a backtick body, the foot-gun shape. Keep the keyword list aligned
+# with bash's reserved words: if/then/else/elif/fi/while/for/until/do/done/
+# case/esac/function/select/time. Rephrase such comments to use
+# non-backticked prose (e.g. `if !` → "the negated-conditional branch").
+assert_not_grep "$FINISH_BRANCH" \
+  '#.*`(if|then|else|elif|fi|while|for|until|do|done|case|esac|function|select|time)([[:space:]!]|`)' \
+  "no shell-keyword backticks inside #-comments in bash blocks (Claude permission-evaluator parse-error bug, #42/#55 family)"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
