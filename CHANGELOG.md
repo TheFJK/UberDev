@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-05-05
+
+### Added
+- **`/review-pr` Phase 2 simplify-lens dispatch + new `code-fixer` agent (#73 → #74).** `/review-pr` now plumbs `aspect_emphasis` to per-reviewer dispatches, honors `sequential` mode, and dispatches `code-fixer` in Phase 3 to apply advisory simplifier findings. `/simplify` Phase 2 names the `code-simplifier` dispatcher and Phase 3 dispatches `code-fixer` (audit-and-apply).
+- **`code-fixer` agent.** New `agents/code-fixer.md` audit-and-apply agent that consumes simplifier-style YAML findings and produces patches; standalone `pr_number` is documented; defensive R8.6 guard added.
+- **Post-impl-review fanout 5 → 6.** `post-impl-review/SKILL.md` now dispatches 6 reviewers (swap `code-simplifier` for `pr-test-analyzer` in the Phase 1 fanout). `pr-test-analyzer` migrated to standard YAML output. Config override default tracks the cap change.
+- **New tests.** `tests/code-fixer-dispatch.test.sh` (locks code-fixer agent contract); `tests/simplify.test.sh` (locks `/simplify` Phase 2 + Phase 3 contract); structural assertions for 5→6 reviewer fanout in `tests/post-impl-review.test.sh`; `tests/_lib_assert_structural.sh` shared helpers; retrofitted dispatch-site assertions in `tests/review-pr.test.sh`.
+
+### Fixed
+- Stale references to "5 reviewers" in `/review-pr` and related skills propagated to "6 reviewers" so docs and audit-event text match the new fanout cap.
+- Documentation: `code-simplifier` description updated to clarify Phase 2 lens role.
+
 ## [0.19.3] - 2026-05-05
 
 ### Fixed
