@@ -59,6 +59,33 @@ _uberdev_discover_truncate() {
       '
 }
 
+# _uberdev_discover_json_escape_str STRING
+# Emit STRING JSON-escaped (backslash, quote, \n \r \t escaped; other
+# C0/C1 + DEL dropped via tr). Defense-in-depth for enum-shaped fields
+# (reason, step) interpolated into audit-log JSON via bare-string printf.
+# Today every call site passes a static enum literal, so this is unreachable
+# given current callers — but the function signatures do not enforce that
+# discipline, and a future caller passing a dynamic string would otherwise
+# corrupt the audit log. Mirrors the awk shape used by
+# _uberdev_discover_truncate so behaviour is identical for any input the
+# truncate path would also accept.
+_uberdev_discover_json_escape_str() {
+  printf '%s' "$1" \
+    | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' \
+    | LC_ALL=C awk '
+        BEGIN { ORS = ""; out = "" }
+        {
+          line = $0
+          gsub(/\\/, "\\\\", line)
+          gsub(/"/, "\\\"", line)
+          gsub(/\r/, "\\r", line)
+          gsub(/\t/, "\\t", line)
+          out = out (NR > 1 ? "\\n" : "") line
+        }
+        END { print out }
+      '
+}
+
 # _uberdev_discover_emit_audit REASON STEP EXIT_CODE STDERR_FILE [PR_NUMBER]
 # Best-effort append of one discovery_gh_failed event to the audit log.
 # Pre-lock context — no run_id required (mirrors Step 1.0a's
@@ -84,15 +111,23 @@ _uberdev_discover_emit_audit() {
   # bare-numeric in the JSON shape per the AUDIT_EVENT_ENUM doc).
   case "$exit_code" in ''|*[!0-9-]*) exit_code=-1 ;; esac
   case "$pr_number" in ''|*[!0-9]*) pr_number="" ;; esac
+  # JSON-escape string fields. Today's callers pass static enum literals
+  # (reason ∈ {gh_failed, jq_failed}; step ∈ {1.0.5, 1.2.5, 1.4}), so these
+  # escapes are no-ops in practice — the helper is here so the function
+  # contract no longer relies on caller discipline. stderr_truncated is
+  # already escaped by _uberdev_discover_truncate above.
+  local reason_escaped step_escaped
+  reason_escaped="$(_uberdev_discover_json_escape_str "$reason")"
+  step_escaped="$(_uberdev_discover_json_escape_str "$step")"
   # Ensure parent dir exists (best-effort).
   mkdir -p "$audit_dir" 2>/dev/null || true
   if [ -n "$pr_number" ]; then
     printf '{"ts":"%s","event":"discovery_gh_failed","data":{"reason":"%s","step":"%s","exit_code":%s,"gh_stderr":"%s","pr_number":%s}}\n' \
-      "$ts" "$reason" "$step" "$exit_code" "$stderr_truncated" "$pr_number" \
+      "$ts" "$reason_escaped" "$step_escaped" "$exit_code" "$stderr_truncated" "$pr_number" \
       >> "$audit_path" 2>/dev/null || true
   else
     printf '{"ts":"%s","event":"discovery_gh_failed","data":{"reason":"%s","step":"%s","exit_code":%s,"gh_stderr":"%s"}}\n' \
-      "$ts" "$reason" "$step" "$exit_code" "$stderr_truncated" \
+      "$ts" "$reason_escaped" "$step_escaped" "$exit_code" "$stderr_truncated" \
       >> "$audit_path" 2>/dev/null || true
   fi
 }
@@ -255,6 +290,12 @@ emit_gate_fail() {
   # Bare-numeric pr_number in JSON; sanitise non-integer input to 0 so the
   # emitted line stays valid JSON regardless of caller bugs.
   case "$pr_number" in ''|*[!0-9]*) pr_number=0 ;; esac
+  # JSON-escape reason. Today's only caller passes the static enum
+  # GATE_FAIL_REASON_ENUM literal "pr_view_unreachable" — escape is a no-op
+  # there. Defense-in-depth so the function contract no longer relies on
+  # caller discipline (mirrors _uberdev_discover_emit_audit).
+  local reason_escaped
+  reason_escaped="$(_uberdev_discover_json_escape_str "$reason")"
   local audit_path
   audit_path="$(_uberdev_discover_audit_path)"
   local audit_dir
@@ -263,7 +304,7 @@ emit_gate_fail() {
   ts="$(_uberdev_discover_iso_ts)"
   mkdir -p "$audit_dir" 2>/dev/null || true
   printf '{"ts":"%s","event":"gate_fail","pr":%s,"data":{"reason":"%s"}}\n' \
-    "$ts" "$pr_number" "$reason" \
+    "$ts" "$pr_number" "$reason_escaped" \
     >> "$audit_path" 2>/dev/null || true
   printf 'gate_fail: PR #%s reason=%s\n' "$pr_number" "$reason" >&2
 }
