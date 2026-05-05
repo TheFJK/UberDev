@@ -27,7 +27,7 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `LOCK_FILE_PATH` | `.git/uberdev-merge.lock` | D14 |
 | `AUDIT_LOG_DIR_PATTERN` | `.uberdev/runs/<run-id>/` | D15 |
 | `AUDIT_LOG_FILENAME` | `audit.jsonl` | D15 |
-| `AUDIT_EVENT_ENUM` | `gate_pass`, `gate_fail`, `order_proposed`, `order_confirmed`, `strategy_chosen`, `probe_clean`, `probe_conflict`, `agent_dispatched`, `agent_returned`, `patch_applied`, `test_pass`, `test_fail`, `push_resolution`, `merge_executed`, `local_sync`, `branch_deleted`, `worktree_removed`, `admin_bypass`, `waiver_recorded`, `error`, `pr_parked`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision`, `trust_trail_agent_decision`, `merge_strategy_agent_decision`, `merge_strategy_fanout_wave_started` | D15. Field-level extensions: gate_pass.data.trust_anchor ∈ TRUST_ANCHOR_ENUM; gate_fail.data.reason ∈ GATE_FAIL_REASON_ENUM (see Phase 1.4). **Deprecated (never emitted post-v0.17.0):** `admin_bypass`, `waiver_recorded` |
+| `AUDIT_EVENT_ENUM` | `gate_pass`, `gate_fail`, `order_proposed`, `order_confirmed`, `strategy_chosen`, `probe_clean`, `probe_conflict`, `agent_dispatched`, `agent_returned`, `patch_applied`, `test_pass`, `test_fail`, `push_resolution`, `merge_executed`, `local_sync`, `branch_deleted`, `worktree_removed`, `admin_bypass`, `waiver_recorded`, `error`, `pr_parked`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision`, `trust_trail_agent_decision`, `merge_strategy_agent_decision`, `merge_strategy_fanout_wave_started`, `discovery_gh_failed` | D15. Field-level extensions: gate_pass.data.trust_anchor ∈ TRUST_ANCHOR_ENUM; gate_fail.data.reason ∈ GATE_FAIL_REASON_ENUM (see Phase 1.4); discovery_gh_failed.data.reason ∈ {`gh_failed`, `jq_failed`}, .data.step ∈ {`1.0.5`, `1.2.5`, `1.4`}, .data.exit_code (int), .data.gh_stderr (string, raw stderr ≤512 bytes pre-truncation; JSON-escaping may expand to ≤2048 bytes for adversarial backslash-heavy payloads), .data.pr_number (int, optional — only set when step="1.4"). **Deprecated (never emitted post-v0.17.0):** `admin_bypass`, `waiver_recorded` |
 | `SCRATCH_WORKTREE_PATTERN` | `.claude/worktrees/merge-<run-id>/` | D10 |
 | `BRANCH_NAME_REGEX` | `^[A-Za-z0-9._/-]{1,255}$` | D8 (validation before shell argv use) |
 | `MERGE_STRATEGY_LABEL_PREFIX` | `merge-strategy:` | D-LABEL |
@@ -53,12 +53,12 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `REVIEW_PR_TRAILER_PREFIX` | `Reviewed-by: uberdev/review-pr@` | Phase 1.4 (PATH_2 trailer extraction); regex form `^Reviewed-by: uberdev/review-pr@([a-f0-9]{40})$` |
 | `RUN_ID_REGEX` | `^[0-9]{8}-[0-9]{6}-[a-f0-9]+$` | Phase 1.4 (PATH_2 audit-JSON path validation); also enforced producer-side in `commands/review-pr.md` |
 | `TRUST_ANCHOR_ENUM` | `reviewDecision_approved`, `uberdev_review_trail`, `bypass_with_waiver` (deprecated; never emitted post-v0.17.0) | Phase 1.4 (audit-log `gate_pass.data.trust_anchor`) |
-| `GATE_FAIL_REASON_ENUM` | **trust-resolution reasons** (PATH_1 / PATH_2): `review_decision_not_approved`, `trust_trail_missing`, `trust_trail_stale_sha`, `trust_trail_label_missing`, `trust_trail_trailer_missing`, `trust_trail_json_missing`, `trust_trail_agent_invalid_input`, `trust_trail_json_sha_mismatch`. **Pre-condition gate reasons** (Step 1.4 pre-flight, evaluated before trust resolution): `pr_state_not_open`, `is_draft`, `ci_red`, `merge_state_blocked`. Total 12 members — the eight trust-resolution reasons are subject to M37's enum-row count assertion; the four pre-condition reasons are emitted by Step 1.4 pre-flight gates that fire regardless of trust path. | Phase 1.4 (audit-log `gate_fail.data.reason`) |
+| `GATE_FAIL_REASON_ENUM` | **trust-resolution reasons** (PATH_1 / PATH_2): `review_decision_not_approved`, `trust_trail_missing`, `trust_trail_stale_sha`, `trust_trail_label_missing`, `trust_trail_trailer_missing`, `trust_trail_json_missing`, `trust_trail_agent_invalid_input`, `trust_trail_json_sha_mismatch`. **Pre-condition gate reasons** (Step 1.4 pre-flight, evaluated before trust resolution): `pr_state_not_open`, `is_draft`, `ci_red`, `merge_state_blocked`. **Infrastructure failure reasons** (Step 1.4 lib-call failure): `pr_view_unreachable` — emitted when the pr-view projection lib call exits non-zero; the PR is skipped, the queue continues, and a discovery-gh-failed audit event is emitted alongside. Total 13 members — the eight trust-resolution reasons are subject to M37's enum-row count assertion; the four pre-condition reasons are emitted by Step 1.4 pre-flight gates that fire regardless of trust path; the one infrastructure failure reason is emitted when the lib call itself fails. | Phase 1.4 (audit-log `gate_fail.data.reason`) |
 | `GATE_FAIL_REASON_TRUST_TRAIL_JSON_SHA_MISMATCH` | `trust_trail_json_sha_mismatch` (8th member of `GATE_FAIL_REASON_ENUM`) | Phase 1.4 PATH_2 sub-condition (d) caller mapping for JSON-present-but-SHA-mismatch (or shape-malformed) cases; audit-log `gate_fail.data.reason` |
 | `TRUST_TRAIL_VERDICT_INVALID_SUBREASON_ENUM` | `input_malformed` (immediate gate_fail; no retry), `trailer_sha_not_in_local_clone` (one bounded `git fetch --prune` + re-dispatch with `data.retry_attempt=1`; second INVALID is terminal) | Phase 1.4 PATH_2 sub-condition (c); audit-log `trust_trail_agent_decision.data.subreason` when `data.choice="INVALID"` |
 | `TRUST_TRAIL_AGENT_DECISION_RETRY_ATTEMPT_RANGE` | integer enum `{0, 1}` (0 = first dispatch; 1 = bounded retry on `trailer_sha_not_in_local_clone`; never recursive) | Phase 1.4 PATH_2 sub-condition (c); audit-log `trust_trail_agent_decision.data.retry_attempt` |
-| `BARE_MODE_FAST_PATH_QUERY` | `gh pr list --head "$current_branch" --state open --search "draft:false" --json number,headRefOid` | Step 1.0.5 (bare-mode current-branch detection — does NOT consume `$integration_branch`; the cardinality of the result drives the three-way branch) |
-| `DISCOVERY_FILTER` | `gh pr list --base "$integration_branch" --state open --search "draft:false" --json number,title,headRefOid,headRefName,baseRefName,isDraft,createdAt,reviewDecision,labels,body,author,headRepositoryOwner` followed by `jq '.[] \| select(.isDraft==false)'` (belt-and-suspenders) | Step 1.2.5 (multi-discover dispatch — runs after Step 1.2 integration_branch resolution); also referenced by `--all` for one canonical filter shared by both modes (Q4) |
+| `BARE_MODE_FAST_PATH_QUERY` | `discover_bare_fast_path` in `lib/discover.sh` (R1 in-process filter — `gh pr list --head "$current_branch" --state open --search 'draft:false' --json number,headRefOid --jq 'length'`; eliminates the external-jq pipe-pollution surface) | Step 1.0.5 (bare-mode current-branch detection — does NOT consume `$integration_branch`; the cardinality of the result drives the three-way branch). Sourced by SKILL.md, never invoked inline. |
+| `DISCOVERY_FILTER` | `discover_multi` in `lib/discover.sh` (R1 in-process filter — `gh pr list --base "$integration_branch" --state open --search 'draft:false' --json number,title,headRefOid,headRefName,baseRefName,isDraft,createdAt,reviewDecision,labels,body,author,headRepositoryOwner --jq '[.[] \| select(.isDraft==false)]'`; the belt-and-suspenders `isDraft==false` filter runs inside gh's process so no external jq pipe is ever created) | Step 1.2.5 (multi-discover dispatch — runs after Step 1.2 integration_branch resolution); also referenced by `--all` for one canonical filter shared by both modes (Q4). Sourced by SKILL.md, never invoked inline. |
 | `PREFLIGHT_SUMMARY_FORMAT` | `"merging %d PR%s in order: %s"` (literal printf-style format). When the rendered line exceeds 80 chars, fold at PR-number boundaries with a continuation indent of 2 spaces (80-char wrap convention). | Step 2.2 entry pre-flight stderr line (multi-discover mode only); the line lists the FULL ordered set regardless of `MAX_PARALLEL_AGENTS` chunking (Q5) |
 
 ## Inputs
@@ -127,13 +127,19 @@ When `/merge` is invoked with no positional `<PR#>` and no `--all` flag (the bar
 Procedure:
 
 1. Resolve `current_branch := git symbolic-ref --short HEAD 2>/dev/null`. On failure (detached HEAD), set `current_branch=""`, **skip step 2 entirely**, and treat `N := 0` (multi-discover fall-through). Do not invoke `BARE_MODE_FAST_PATH_QUERY` with an empty `--head` value — `gh pr list --head ""` is undefined behaviour.
-2. Run the canonical `BARE_MODE_FAST_PATH_QUERY` (declared in `## Constants`):
+2. Source `lib/discover.sh` (resolved via `${CLAUDE_PLUGIN_ROOT}` — the canonical plugin-root variable Claude Code injects at skill-evaluation time, mirroring the same SKILL.md's `lib/config-read.sh` precedent at line 113) and call `discover_bare_fast_path` — the canonical entry point for `BARE_MODE_FAST_PATH_QUERY` (declared in `## Constants`):
 
    ```bash
-   gh pr list --head "$current_branch" --state open --search "draft:false" --json number,headRefOid
+   if [ -r "${CLAUDE_PLUGIN_ROOT}/skills/merge/lib/discover.sh" ]; then
+     . "${CLAUDE_PLUGIN_ROOT}/skills/merge/lib/discover.sh"
+   else
+     echo "error: lib/discover.sh not found at ${CLAUDE_PLUGIN_ROOT}/skills/merge/lib/" >&2
+     exit 1
+   fi
+   N=$(discover_bare_fast_path "$current_branch") || N=0
    ```
 
-   The result is a JSON array; let `N := len(result)`. **`gh` failure-mode handling** (network, auth, rate limit, 5xx) is a cross-cutting concern across all `gh pr list` invocations in the skill (`--all` discovery has the same shape); follow-up issue tracks unified hardening across both bare-discover Step 1.0.5 / Step 1.2.5 and the existing `--all` path. Until then: a `gh` failure producing empty stdout will be observed as `N=0`, falling through to multi-discover; surface the breadcrumb at step 3 unchanged.
+   The function runs `gh pr list ... --jq 'length'` in-process (R1 root fix — no external `jq` pipe, so gh's spinner / progress bytes cannot pollute stdout and break a downstream `jq` parse). On gh-or-jq failure the function emits a `discovery_gh_failed` audit event with `data.step="1.0.5"`, prints a `warning:` breadcrumb to stderr, returns exit 1 — the caller's `|| N=0` clause normalises to `N=0` so the pipeline continues into multi-discover fall-through (step 3 below). The function contract is documented in `lib/discover.sh`; this lib extraction is the canonical hardening for the bug class previously tracked as a follow-up issue (R2 — eliminates the model-improv surface that re-introduced `2>&1` despite the spec text never asking for it).
 
 3. Branch on `N` (three-way):
 
@@ -222,19 +228,23 @@ Validate the resolved name against `BRANCH_NAME_REGEX` BEFORE any shell argv use
 
 ### Step 1.2.5 — Multi-discover dispatch (deferred from Step 1.0.5)
 
-If Step 1.0.5 set the bare-mode discriminator to `multi-discover` (or `--all` was given on the command line), apply the canonical `DISCOVERY_FILTER` (declared in `## Constants`) against the `$integration_branch` resolved by Step 1.2, and seed the Phase 1.4 candidate set with the result. Otherwise this step is a no-op.
+If Step 1.0.5 set the bare-mode discriminator to `multi-discover` (or `--all` was given on the command line), source `lib/discover.sh` and call `discover_multi` against the `$integration_branch` resolved by Step 1.2 to seed the Phase 1.4 candidate set. Otherwise this step is a no-op.
 
 Concretely:
 
 ```bash
-candidates=$(gh pr list --base "$integration_branch" --state open --search "draft:false" \
-  --json number,title,headRefOid,headRefName,baseRefName,isDraft,createdAt,reviewDecision,labels,body,author,headRepositoryOwner \
-  | jq '[.[] | select(.isDraft==false)]')
+if [ -r "${CLAUDE_PLUGIN_ROOT}/skills/merge/lib/discover.sh" ]; then
+  . "${CLAUDE_PLUGIN_ROOT}/skills/merge/lib/discover.sh"
+else
+  echo "error: lib/discover.sh not found at ${CLAUDE_PLUGIN_ROOT}/skills/merge/lib/" >&2
+  exit 1
+fi
+candidates=$(discover_multi "$integration_branch")  # always exits 0; '[]' on failure
 ```
 
-The `jq '.[] | select(.isDraft==false)'` filter is belt-and-suspenders against any future `gh` API change that might surface drafts despite the `--search "draft:false"` flag. The candidate array is the input set for Phase 1.4 (per-PR trust gate fanout). **This is the only place `DISCOVERY_FILTER` is invoked**; both bare-mode (multi-discover) and `--all` route through this single dispatch point so the two modes share one canonical filter (Q4). **`gh` and `jq` failure-mode handling** is a cross-cutting concern shared with Step 1.0.5 (see that step's note); a transient `gh` failure or `jq` parse error producing an empty pipeline output is currently observed as a legitimate empty candidate set (Step 1.7 clean-exit-0 applies). Follow-up issue tracks unified hardening across bare-discover and the existing `--all` path; until then, post-hoc forensics rely on `gh` CLI's own stderr emission rather than a structured audit event.
+The function runs `gh pr list ... --jq '[.[] | select(.isDraft==false)]'` in-process (R1 — the belt-and-suspenders `isDraft==false` filter executes inside gh's Go process on the parsed object before serialising stdout, so no external `jq` pipe is ever created and gh's spinner / progress bytes cannot break a downstream parse). The candidate array is the input set for Phase 1.4 (per-PR trust gate fanout). **The only call site of `discover_multi`** is this step — both bare-mode (multi-discover) and `--all` route through this single dispatch point so the two modes share one canonical filter (Q4). On gh-or-jq failure, the function emits a `discovery_gh_failed` audit event with `data.step="1.2.5"`, prints a `warning:` breadcrumb to stderr, and returns the literal `'[]'` to stdout — Step 1.7's clean-exit-0 contract still applies (the empty candidate set produces a clean-exit-0 run-summary block).
 
-If the `gh` invocation returns an empty array (all PRs are drafts, or no open PRs exist on `$integration_branch`), the candidate set is empty — Step 1.7's clean-exit-0 contract applies (see Step 1.7's bare-mode cross-reference).
+If `discover_multi` returns an empty array (all PRs are drafts, no open PRs exist on `$integration_branch`, or a gh-or-jq failure occurred), the candidate set is empty — Step 1.7's clean-exit-0 contract applies (see Step 1.7's bare-mode cross-reference).
 
 This step is the `$integration_branch`-dependent half of the split detection introduced in Step 1.0.5; the two steps are intentionally separate (see Step 1.0.5 for the rationale) and collapsing them would invert the dependency on `$integration_branch`. Do not collapse.
 
@@ -258,7 +268,26 @@ This is the only Phase-1 path where /merge declines to run for a config reason. 
 
 ### Step 1.4 — Per-PR pre-flight gate (trust resolution)
 
-For each PR in the candidate set (per-PR fanout — the gate is dispatched once per discovered PR; bare-discover does not relax this dispatch shape), project the JSON: `gh pr view <N> --json state,isDraft,reviewDecision,statusCheckRollup,headRepository,maintainerCanModify,isCrossRepository,headRefName,headRefOid,baseRefName,body,commits,labels,createdAt,author`.
+For each PR in the candidate set (per-PR fanout — the gate is dispatched once per discovered PR; bare-discover does not relax this dispatch shape), project the JSON via the canonical `pr_view_projection` lib function:
+
+```bash
+if [ -r "${CLAUDE_PLUGIN_ROOT}/skills/merge/lib/discover.sh" ]; then
+  . "${CLAUDE_PLUGIN_ROOT}/skills/merge/lib/discover.sh"
+else
+  echo "error: lib/discover.sh not found at ${CLAUDE_PLUGIN_ROOT}/skills/merge/lib/" >&2
+  exit 1
+fi
+PR_JSON=$(pr_view_projection "$PR_NUMBER") || {
+  emit_gate_fail "$PR_NUMBER" "pr_view_unreachable"
+  continue
+}
+PR_STATE=$(jq -r .state <<<"$PR_JSON")
+# … other fields extracted via `jq <<<"$PR_JSON"` — safe because PR_JSON
+# is byte-clean from the lib (the projection ran through gh's in-process
+# `--jq '.'` identity filter; no external pipe = no FD-pollution surface).
+```
+
+The `pr_view_projection` function wraps `gh pr view <N> --json state,isDraft,reviewDecision,statusCheckRollup,headRepository,maintainerCanModify,isCrossRepository,headRefName,headRefOid,baseRefName,body,commits,labels,createdAt,author --jq '.'` (R1 — the identity `--jq '.'` filter routes the projection through gh's in-process JSON parser before the bytes ever reach stdout, so subsequent `jq <<<"$PR_JSON"` calls cannot crash on spinner / progress pollution). On gh-or-jq failure the lib emits a `discovery_gh_failed` audit event with `data.step="1.4"` and `data.pr_number=$PR_NUMBER`, prints a `warning:` breadcrumb to stderr, and returns exit 1; the caller's `|| { … }` block then emits `gate_fail` with `data.reason="pr_view_unreachable"` (∈ `GATE_FAIL_REASON_ENUM`) via `emit_gate_fail`, skips this PR, and the queue continues. This is the only Phase-1 path where a non-trust-related infrastructure failure can park a PR.
 
 Pre-conditions that ALL must pass regardless of trust path (real blockers):
 
@@ -509,6 +538,7 @@ viii. **Tear down the scratch worktree** per `using-git-worktrees` protocol: `gi
 | local pull non-FF (Phase 4.2) | auto-rebase local onto origin; on rebase conflict, abort rebase and surface in summary | continues |
 | `trust_trail_agent_decision` returns `INVALID / input_malformed` (Phase 1.4 PATH_2 (c)) | `gate_fail` with `data.reason="trust_trail_agent_invalid_input"`; PR excluded from merge set | continues |
 | `trust_trail_agent_decision` returns `INVALID / trailer_sha_not_in_local_clone` (Phase 1.4 PATH_2 (c)) | One bounded `git fetch --prune origin <branch>` + re-dispatch (max retry=1); persistent INVALID → `gate_fail` with `data.reason="trust_trail_agent_invalid_input"`; PR excluded from merge set | continues |
+| `pr_view_projection` lib call failure (Step 1.4 — gh-or-jq exit non-zero, e.g., network / auth / rate-limit) | emit `discovery_gh_failed` (step="1.4") + `gate_fail` with `data.reason="pr_view_unreachable"`; PR excluded from merge set | continues |
 
 **No halt conditions remain.** Already-merged PRs stay merged. Every event hits `audit.jsonl`. Every parked PR appears in the run-summary block with its `PARK_REASON_ENUM` value and the structured handoff (where applicable).
 
