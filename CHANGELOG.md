@@ -6,8 +6,19 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-05-05
+
+### Added
+- **`.claude/uberdev.local.md` knob expansion (#63, #72).** New per-project tunables: `solve_tier_floor` / `solve_tier_ceiling` clamp `/solve` and `/turbo` tier classification (`small`/`medium`/`large`); `fanout_concurrency.research` / `.post_impl_review` / `.merge_strategy` / `.conflict_resolver` cap parallel agent dispatch (bounds [1,50], defaults 5/5/10/10); `command_timeouts.solve` (enforced) / `.review_pr` (advisory) / `.merge` (advisory) bound wall-clock budgets (bounds [60,86400] seconds, defaults 14400/900/600). Each key has a corresponding env-var override (`SOLVE_TIER_FLOOR`, `SOLVE_TIER_CEILING`, `UBERDEV_FANOUT_RESEARCH`, etc.). New `plugins/uberdev/lib/config-read.sh` helper (bash-`=~` regex validation; surfaces audit-write failures rather than swallowing them) is the single read site; `solve-pipeline`, `orchestrator`, `post-impl-review`, `merge`, `using-uberdev` skills wire it through. Wave-chunking math documented as `ceil(N / CAP)` per skill.
+
+### Fixed
+- **`/finish-branch` apostrophe in `#`-comments unblocks skill load (#55, #70).** Apostrophes inside `#`-prefixed permission-evaluator preamble comments tripped the YAML/Markdown skill loader and silently dropped the skill. Phrasing rewritten to remove the contraction; regression canary `tests/finish-branch-auto-chain.test.sh` added.
+- **`/solve-pipeline` `timeout(1)` invocation no longer crashes under zsh word-splitting (#63, #72).** Inlined the `timeout` call to side-step the zsh word-split footgun that surfaced when `command_timeouts.solve` was non-empty.
+- **`/solve` `CLAUDE_PLUGIN_ROOT` path correction + `sed` substitution fix (#63, #72).** Launcher template substitution now resolves correctly under the marketplace install path.
+
 ### Documentation
-- **README — explicit "we rejected upstream's HARD-GATE" stance now documented (#61).** Adds a row to the `## Design decisions worth knowing` table plus a `<details>` block answering "why doesn't UberDev pause for approval?" and naming the three trust anchors (`spec-reviewer` always-on, `plan-reviewer` always-on, `post-impl-review` end-of-issue fanout) that replace user-approval gates.
+- **README — explicit "we rejected upstream's HARD-GATE" stance now documented (#61, #69).** Adds a row to the `## Design decisions worth knowing` table plus a `<details>` block answering "why doesn't UberDev pause for approval?" and naming the three trust anchors (`spec-reviewer` always-on, `plan-reviewer` always-on, `post-impl-review` end-of-issue fanout) that replace user-approval gates.
+- **Orchestrator Phase 1 artifact-reuse contract formalised + shape-check test added (#62, #71).** `orchestrator/SKILL.md` documents how cached `.uberdev/research/<run-id>/*.md` artifacts are reused across re-runs, and `spec-writer` / `plan-writer` wrap reused artifacts in `<external-untrusted-input>` envelopes (defense-in-depth against second-order injection). New `tests/orchestrator-phase1-shortcircuit.test.sh` registered in the `shape-checks` CI chain.
 
 ## [0.18.2] - 2026-05-04
 
