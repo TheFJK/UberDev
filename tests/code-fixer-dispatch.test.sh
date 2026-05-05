@@ -153,7 +153,7 @@ assert_in_section "$CODE_FIXER" '^## Return contract' '^## Output Rules' \
 
 echo
 echo "== code-fixer.md ## Output Rules — secret-leak prevention =="
-# No-quoting rule (mirrors the 5 reviewer agents)
+# No-quoting rule (mirrors the reviewer agents)
 assert_grep "$CODE_FIXER" '[Dd]o not quote|[Nn]ever quote|no[ -]quoting' \
   "code-fixer.md retains no-quoting output rule (secret-leak prevention)"
 

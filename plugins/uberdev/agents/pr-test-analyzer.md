@@ -49,7 +49,7 @@ Inline the criticality rating into each finding's `detail:` field as the prefix 
 
 **Output Format:**
 
-Emit the standard reviewer YAML contract as the last fenced block of your reply. The five other reviewers in `uberdev:post-impl-review` use this exact shape; uniform aggregation in `post-impl-review/SKILL.md` Step 4 depends on it.
+Emit the standard reviewer YAML contract as the last fenced block of your reply. The other reviewers in `uberdev:post-impl-review` use this exact shape; uniform aggregation in `post-impl-review/SKILL.md` Step 4 depends on it.
 
 ```yaml
 verdict: APPROVE | REVISIONS_REQUIRED | REJECT

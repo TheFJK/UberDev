@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Asserts that uberdev:post-impl-review skill exists, dispatches all 5
-# reviewer agents in a single message, and is referenced from both the
-# /solve trivial/small inline prompt and subagent-driven-dev.
+# Asserts that uberdev:post-impl-review skill exists as a Phase 1 post-PR-push
+# reviewer fanout, dispatches all 6 reviewer agents in a single message
+# (5 distinct files; code-reviewer dispatched twice — general lens + correctness
+# lens), and that deprecated pre-push call sites have been removed per #67.
 
 set -u
 set -o pipefail

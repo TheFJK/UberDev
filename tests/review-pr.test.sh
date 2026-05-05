@@ -267,7 +267,7 @@ assert_grep "$REVIEW_PR" \
 
 # R8.5 — fallback prose: missing/empty artifact → log warning + continue to Phase 2
 assert_grep "$REVIEW_PR" \
-  '[Mm]issing or empty.*[Pp]hase 2|all 5 reviewers returned .BLOCKED.|continue to Phase 2 with' \
+  '[Mm]issing or empty.*[Pp]hase 2|all [0-9]+ reviewers returned .BLOCKED.|continue to Phase 2 with' \
   "R8.5 — Phase 1 falls back to Phase 2 with zero auto-applied fixes when artifact is missing/empty"
 
 # R8.6 — separate-commit invariant preserved (Phase 1 fix: vs Phase 2 refactor:)
