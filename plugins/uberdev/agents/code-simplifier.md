@@ -1,7 +1,7 @@
 ---
 name: code-simplifier
 description: |
-  Use ONLY when explicitly invoked via the `/uberdev:simplify` command, or by the `subagent-driven-dev` skill's `uberdev:post-impl-review` fanout. Do not auto-trigger on conversational mentions of "simplify", "clean up", "refactor", or after generic coding work — let the user or the controller dispatch this agent intentionally to avoid duplicating work that the end-of-issue post-impl-review fanout already performs.
+  Use ONLY when explicitly invoked as a Phase 2 lens by `/uberdev:review-pr` (three Task() calls with `subagent_type: uberdev:code-simplifier`, parameterised by `## Lens emphasis: Reuse|Quality|Efficiency`) or as a standalone audit by `/uberdev:simplify`. Do not auto-trigger on conversational mentions of "simplify", "clean up", "refactor", or after generic coding work — the agent is audit-only and the named-lens-dispatcher pattern is the single source of truth for when it runs.
 
   When invoked, the agent audits recently-modified code for simplification opportunities and returns advisory findings (`file:line` + description). It does not modify files; the controller or a downstream writer command (`/uberdev:simplify`, `/uberdev:review-pr` Phase 2) applies fixes. The agent focuses only on recently modified code unless instructed otherwise.
 
@@ -84,7 +84,7 @@ Your audit process:
 5. Verify each finding is actionable and tied to a concrete `file:line`
 6. Document only significant findings that affect understanding
 
-You activate ONLY when explicitly invoked — by the `/uberdev:simplify` command or by the `subagent-driven-dev` skill's `uberdev:post-impl-review` fanout. Do NOT self-trigger after generic coding work; defer to the user or controller. Once invoked, audit recently modified code and emit advisory findings only. Your goal is to surface concrete simplification opportunities — `file:line` + description — that the controller (or a follow-up `/uberdev:simplify` / `/uberdev:review-pr` Phase 2 invocation) can act on. **You do not modify files.**
+You activate ONLY when explicitly invoked — as a Phase 2 lens by `/uberdev:review-pr` (three concurrent Task() calls with `subagent_type: uberdev:code-simplifier`) or as a standalone audit by `/uberdev:simplify`. Do NOT self-trigger after generic coding work; defer to the user or controller. Once invoked, audit recently modified code and emit advisory findings only. Your goal is to surface concrete simplification opportunities — `file:line` + description — that the controller (or a follow-up `/uberdev:simplify` / `/uberdev:review-pr` Phase 2 + `code-fixer` apply step) can act on. **You do not modify files.**
 
 ## Output Rules — secret-leak prevention
 
