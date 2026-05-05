@@ -147,10 +147,19 @@ For every issue in `ISSUE_NUMS`, fetch via `gh issue view --json` (read-only), c
 declare -A TITLES TIERS
 ERRORS=()
 for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
-  ISSUE_JSON=$(gh issue view "$ISSUE_NUM" --json number,title,state,body,labels 2>&1) || {
-    ERRORS+=("#$ISSUE_NUM: gh fetch failed: $ISSUE_JSON")
+  # Capture stderr separately. The previous `2>&1` form merged gh's stderr
+  # into $ISSUE_JSON; gh's spinner (spinner=enabled is the default) renders
+  # ANSI escape frames containing raw ESC (0x1B) on slow API calls, polluting
+  # the JSON and tripping `jq` with "Invalid string: control characters from
+  # U+0000 through U+001F must be escaped" (exit 5). Stdout must stay pure
+  # JSON; stderr only gets read on the failure path.
+  GH_ERR=$(mktemp)
+  ISSUE_JSON=$(gh issue view "$ISSUE_NUM" --json number,title,state,body,labels 2>"$GH_ERR") || {
+    ERRORS+=("#$ISSUE_NUM: gh fetch failed: $(<"$GH_ERR")")
+    rm -f "$GH_ERR"
     continue
   }
+  rm -f "$GH_ERR"
   STATE=$(jq -r .state <<<"$ISSUE_JSON")
   if [[ "$STATE" != "OPEN" ]]; then
     ERRORS+=("#$ISSUE_NUM: state=$STATE (must be OPEN)")
