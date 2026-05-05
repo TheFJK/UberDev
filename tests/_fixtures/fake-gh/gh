@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# Test fixture: a fake `gh` binary for tests/merge-discovery-resilience.test.sh.
+#
+# The real `gh` is unavailable in CI sandboxes (and we don't want network calls
+# in unit tests), so this stub simulates it. Behaviour is selected by the
+# $FAKE_GH_MODE environment variable so each test in Layer B can prepend this
+# directory to PATH and dial in the exact (stdout, stderr, exit-code) shape
+# the function-under-test should encounter.
+#
+# Modes:
+#   success-bare       : honour gh ... --jq '<filter>' for length-of-array;
+#                        simulates a non-empty bare-discovery result. stdout=2.
+#   success-multi      : emits a JSON array with two non-draft PR objects
+#                        carrying the fields downstream code reads.
+#   success-pr-view    : emits a JSON object with all 15 fields
+#                        (state, isDraft, reviewDecision, ...).
+#   fail-net           : simulates a network-unreachable failure. exit 1,
+#                        stderr "network unreachable" (truncatable to 512B).
+#   fail-malformed     : exit 1 with malformed JSON on stdout — used to
+#                        simulate gh's --jq filter aborting because the
+#                        upstream JSON wouldn't parse (gh prints the parser
+#                        error on stderr and exits non-zero).
+#   spinner-leak       : the R1 regression we are guarding against — fake gh
+#                        emits a valid JSON array on stdout AND ANSI cursor
+#                        escapes on stderr. With the OLD `gh ... 2>&1 | jq …`
+#                        shape this would crash jq; with the NEW `gh … --jq`
+#                        in-process filter it must NOT crash because stderr
+#                        never reaches the function's stdout.
+#   fail-pr-view       : exit 2 — used by B6 to verify pr_view_projection's
+#                        failure path captures the right exit code.
+#
+# A side-effect log of the call (argv) is written to $FAKE_GH_CALL_LOG when
+# that variable is set; tests can inspect it to verify call shape (e.g. that
+# the function actually used `gh ... --jq '<filter>'` and not a piped jq).
+# This is opt-in so the default test path stays simple.
+
+set -u
+
+if [ -n "${FAKE_GH_CALL_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FAKE_GH_CALL_LOG"
+fi
+
+mode="${FAKE_GH_MODE:-}"
+
+case "$mode" in
+  success-bare)
+    # gh ... --jq 'length' over a 2-element array would print 2 on stdout.
+    # We don't actually parse the args; we trust the caller passed --jq.
+    printf '2\n'
+    exit 0
+    ;;
+
+  success-multi)
+    # Valid JSON array of two non-draft candidate PRs. Field set is the
+    # minimum the discover_multi caller is documented to read.
+    cat <<'JSON'
+[
+  {
+    "number": 101,
+    "headRefName": "feat/branch-a",
+    "headRefOid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "baseRefName": "main",
+    "isDraft": false,
+    "state": "OPEN",
+    "author": {"login": "alice"},
+    "createdAt": "2026-05-01T00:00:00Z"
+  },
+  {
+    "number": 102,
+    "headRefName": "feat/branch-b",
+    "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "baseRefName": "main",
+    "isDraft": false,
+    "state": "OPEN",
+    "author": {"login": "bob"},
+    "createdAt": "2026-05-02T00:00:00Z"
+  }
+]
+JSON
+    exit 0
+    ;;
+
+  success-pr-view)
+    # The 15 fields documented in the contract for pr_view_projection.
+    cat <<'JSON'
+{
+  "state": "OPEN",
+  "isDraft": false,
+  "reviewDecision": "APPROVED",
+  "statusCheckRollup": [],
+  "headRepository": {"name": "uberdev", "owner": {"login": "TheFJK"}},
+  "maintainerCanModify": true,
+  "isCrossRepository": false,
+  "headRefName": "feat/discover",
+  "headRefOid": "cccccccccccccccccccccccccccccccccccccccc",
+  "baseRefName": "main",
+  "body": "Closes #42",
+  "commits": [],
+  "labels": [],
+  "createdAt": "2026-05-03T00:00:00Z",
+  "author": {"login": "alice"}
+}
+JSON
+    exit 0
+    ;;
+
+  fail-net)
+    # B2: simulate a transient network failure. The "network unreachable"
+    # token must end up in the audit log's gh_stderr field (truncated to
+    # 512B by the lib).
+    printf 'network unreachable\n' >&2
+    exit 1
+    ;;
+
+  fail-malformed)
+    # B4: gh's --jq filter could not parse upstream JSON. Real gh exits
+    # non-zero in this case; the lib treats that as jq_failed.
+    printf '{"truncated\n'
+    printf 'gh: --jq parse error: unexpected end of JSON\n' >&2
+    exit 1
+    ;;
+
+  spinner-leak)
+    # B3: the headline R1 regression — valid JSON on stdout, ANSI cursor
+    # escapes on stderr. The OLD `gh ... 2>&1 | jq …` shape merged stderr
+    # into the jq input and crashed; the NEW `gh ... --jq '<filter>'`
+    # shape filters in-process so stderr can't pollute stdout.
+    # The escape sequences here mirror what spinner libraries emit
+    # (\x1b[?25l = hide cursor, \x1b[?25h = show cursor).
+    printf '\x1b[?25l' >&2
+    cat <<'JSON'
+[
+  {
+    "number": 101,
+    "headRefName": "feat/branch-a",
+    "headRefOid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "baseRefName": "main",
+    "isDraft": false,
+    "state": "OPEN",
+    "author": {"login": "alice"},
+    "createdAt": "2026-05-01T00:00:00Z"
+  }
+]
+JSON
+    printf '\x1b[?25h' >&2
+    exit 0
+    ;;
+
+  fail-pr-view)
+    printf 'pr view failure\n' >&2
+    exit 2
+    ;;
+
+  *)
+    printf 'fake-gh: unknown FAKE_GH_MODE=%s\n' "${mode}" >&2
+    exit 99
+    ;;
+esac

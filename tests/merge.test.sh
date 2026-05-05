@@ -666,17 +666,19 @@ assert_grep "$SKILL_FILE" 'pr_state_not_open'                  "M37.precond1 —
 assert_grep "$SKILL_FILE" 'is_draft'                           "M37.precond2 — pre-condition reason is_draft"
 assert_grep "$SKILL_FILE" 'ci_red'                             "M37.precond3 — pre-condition reason ci_red"
 assert_grep "$SKILL_FILE" 'merge_state_blocked'                "M37.precond4 — pre-condition reason merge_state_blocked"
+assert_grep "$SKILL_FILE" 'pr_view_unreachable'                "M37.infra1 — infrastructure-failure reason pr_view_unreachable (R2 lib-call failure)"
 ENUM_ROW=$(grep -E '\| `GATE_FAIL_REASON_ENUM` \|' "$SKILL_FILE" || true)
 # `[a-z_]+` matches lowercase snake_case reason tokens only (not the
 # UPPERCASE enum-name `GATE_FAIL_REASON_ENUM` itself, and not dotted
 # tokens like `gate_fail.data.reason`), so the count equals exactly
-# the number of reasons backticked in the row: 8 trust-resolution + 4 pre-condition = 12.
+# the number of reasons backticked in the row: 8 trust-resolution + 4
+# pre-condition + 1 infrastructure-failure (R2; v0.19.3) = 13.
 REASON_COUNT=$(echo "$ENUM_ROW" | grep -oE '`[a-z_]+`' | wc -l | tr -d ' ')
-if [ "$REASON_COUNT" -eq 12 ]; then
-  echo "  PASS  M37.count — GATE_FAIL_REASON_ENUM row contains exactly 12 reasons (8 trust-resolution + 4 pre-condition)"
+if [ "$REASON_COUNT" -eq 13 ]; then
+  echo "  PASS  M37.count — GATE_FAIL_REASON_ENUM row contains exactly 13 reasons (8 trust-resolution + 4 pre-condition + 1 infrastructure-failure)"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  M37.count — GATE_FAIL_REASON_ENUM row contains $REASON_COUNT reasons; expected exactly 12"
+  echo "  FAIL  M37.count — GATE_FAIL_REASON_ENUM row contains $REASON_COUNT reasons; expected exactly 13"
   FAIL=$((FAIL + 1))
 fi
 
@@ -1314,10 +1316,10 @@ if [ -n "$STEP_125_BLOCK" ]; then
 else
   fail "M69.exists — Step 1.2.5 (multi-discover dispatch) section MUST exist between Step 1.2 and Step 1.3 (spec Components § SKILL.md item 4)"
 fi
-if echo "$STEP_125_BLOCK" | grep -qE 'DISCOVERY_FILTER'; then
-  pass "M69.discovery-filter-cited — Step 1.2.5 cites DISCOVERY_FILTER"
+if echo "$STEP_125_BLOCK" | grep -qE 'DISCOVERY_FILTER|discover_multi'; then
+  pass "M69.discovery-filter-cited — Step 1.2.5 cites DISCOVERY_FILTER or discover_multi (R2 canonical alias)"
 else
-  fail "M69.discovery-filter-cited — Step 1.2.5 MUST cite DISCOVERY_FILTER (spec Components § SKILL.md item 4)"
+  fail "M69.discovery-filter-cited — Step 1.2.5 MUST cite DISCOVERY_FILTER or discover_multi (spec Components § SKILL.md item 4; R2 v0.19.3 introduces lib-function alias)"
 fi
 if echo "$STEP_125_BLOCK" | grep -qE '\$integration_branch|integration_branch'; then
   pass "M69.integration-branch-cited — Step 1.2.5 cites \$integration_branch"

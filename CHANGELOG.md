@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.19.3] - 2026-05-05
+
+### Fixed
+- **R1 (in-process filter):** All three `gh … --json` discovery sites in `/merge` (Steps 1.0.5, 1.2.5, 1.4) now use `gh … --jq '<filter>'` so jq runs inside the gh process on the parsed Go object before serializing stdout. No external pipe = no FD-pollution surface for the spinner-leak bug class fixed for `/solve` in `21ad417`.
+- **R2 (lib extraction):** Discovery logic factored into `plugins/uberdev/skills/merge/lib/discover.sh` (`discover_bare_fast_path` / `discover_multi` / `pr_view_projection` + `emit_gate_fail` helper). SKILL.md Steps 1.0.5 / 1.2.5 / 1.4 now source the lib via `${CLAUDE_PLUGIN_ROOT}/skills/merge/lib/discover.sh` (mirroring the existing `lib/config-read.sh` precedent — `BASH_SOURCE`/`$0` does not resolve in Claude's skill-eval context) and call the functions instead of inlining bash blocks. Eliminates the model-improv surface that re-introduced `2>&1` despite the pattern being absent from the spec text.
+- New audit event `discovery_gh_failed` (members: `reason`, `step`, `exit_code`, `gh_stderr`, `pr_number?`) and new gate_fail reason `pr_view_unreachable` (Step 1.4 infrastructure failure). `gh_stderr` is raw-truncated to ≤512 bytes pre-JSON-escaping (escaped form may expand to ≤2048 bytes for adversarial backslash-heavy stderr).
+- **JSON-injection defense in audit emit.** Numeric inputs (`exit_code`, `pr_number`) are sanitised to integers before bare-numeric `printf` substitution — non-numeric inputs are normalised (`exit_code` → `-1`, `pr_number` → `0` or omitted) so a caller bug or future field-source change cannot produce malformed JSON or inject extra fields into the audit log.
+- New test suite `tests/merge-discovery-resilience.test.sh` (67 assertions; 14/14 test files pass) with a fake-gh fixture that simulates the spinner-leak shape (ANSI on stderr while gh succeeds on stdout). Locks: no `gh … 2>&1`, no `gh … | jq`, lib uses `--jq '<filter>'` at ≥3 sites, SKILL.md sources via `${CLAUDE_PLUGIN_ROOT}` (not `BASH_SOURCE`), audit-log path configurable via `UBERDEV_AUDIT_LOG_PATH`. Pre-processes file contents (folds backslash-continuations, strips comments) so multi-line bug-shape regressions cannot hide. Includes a canary on `solve-pipeline/SKILL.md` Step 4 detecting any revert of `21ad417`.
+
 ## [0.19.2] - 2026-05-05
 
 ### Fixed
