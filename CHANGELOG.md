@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-05-06
+
+### Fixed
+- **`/solve` and `/turbo` cmux detection no longer falls through to standalone Ghostty when invoked from inside cmux.** `solve-pipeline/SKILL.md` Step 3 read `$CMUX_SOCKET`, but current cmux releases export the socket path as `$CMUX_SOCKET_PATH` and explicitly set `CMUX_SOCKET=` to empty string inside live sessions. The bare `[[ -n "$CMUX_SOCKET" ]]` check therefore failed inside cmux, the elif fell through to the ghostty arm (since `TERM_PROGRAM=ghostty` is set when cmux bundles Ghostty), and AppleScript activated *standalone* `/Applications/Ghostty.app` when present — keystrokes `zsh -l /tmp/solve-N.sh` then landed in whatever window held focus (browser address bar, etc.) instead of a fresh shell, and the agent never started. Detection and the explicit-override validation arm now read `${CMUX_SOCKET_PATH:-$CMUX_SOCKET}` so current-cmux installs are detected first and legacy installs still work. New `tests/cmux-detection.test.sh` (5/5 passing) locks in both env-var checks and guards against regressions to a bare `$CMUX_SOCKET`-only test. Workaround for unpatched 0.20.0 installs: `--terminal=cmux` or `export SOLVE_TERMINAL=cmux`.
+
 ## [0.20.0] - 2026-05-05
 
 ### Added

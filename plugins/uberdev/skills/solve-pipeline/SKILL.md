@@ -83,14 +83,14 @@ gh repo view --json nameWithOwner --jq .nameWithOwner
 
 Pick a dispatcher once, before any spawn. Priority: explicit override > cmux (only when we're inside a live cmux session) > standalone Ghostty > iTerm2 > Terminal.app > nohup-fallback. **Warp falls through to nohup** — its CLI can't dispatch a command into a new window cleanly.
 
-`TERM_PROGRAM=ghostty` is also set when you're inside cmux (cmux bundles Ghostty), so the cmux check MUST come first and MUST require `$CMUX_SOCKET` to be a live socket — otherwise we'd mis-classify a cmux session as plain Ghostty.
+`TERM_PROGRAM=ghostty` is also set when you're inside cmux (cmux bundles Ghostty), so the cmux check MUST come first and MUST require a live cmux socket — otherwise we'd mis-classify a cmux session as plain Ghostty. Current cmux releases export the socket path as `$CMUX_SOCKET_PATH`; older releases used `$CMUX_SOCKET` (and recent cmux explicitly sets `CMUX_SOCKET=` to empty string, so a bare `-n "$CMUX_SOCKET"` check fails inside a live cmux session). Read both: prefer `$CMUX_SOCKET_PATH`, fall back to `$CMUX_SOCKET`.
 
 ```bash
 if [[ -n "$TERMINAL_OVERRIDE" ]]; then
   TERMINAL="$TERMINAL_OVERRIDE"
 elif [[ -n "$SOLVE_TERMINAL" ]]; then
   TERMINAL="$SOLVE_TERMINAL"
-elif [[ -n "$CMUX_SOCKET" && -S "$CMUX_SOCKET" ]] && command -v cmux >/dev/null 2>&1; then
+elif _CMUX_SOCK="${CMUX_SOCKET_PATH:-$CMUX_SOCKET}"; [[ -n "$_CMUX_SOCK" && -S "$_CMUX_SOCK" ]] && command -v cmux >/dev/null 2>&1; then
   TERMINAL="cmux"
 elif [[ "$TERM_PROGRAM" == "ghostty" ]] && [[ -d /Applications/Ghostty.app ]]; then
   TERMINAL="ghostty"
@@ -113,8 +113,8 @@ case "$TERMINAL" in
       echo "         Install: npm i -g @manaflow-ai/cmux  (see cmux README for canonical install)" >&2
       echo "         Falling back to nohup." >&2
       TERMINAL="nohup"
-    elif [[ -z "$CMUX_SOCKET" || ! -S "$CMUX_SOCKET" ]]; then
-      echo "warning: TERMINAL=cmux requested but \$CMUX_SOCKET is not a live socket." >&2
+    elif _CMUX_SOCK="${CMUX_SOCKET_PATH:-$CMUX_SOCKET}"; [[ -z "$_CMUX_SOCK" || ! -S "$_CMUX_SOCK" ]]; then
+      echo "warning: TERMINAL=cmux requested but neither \$CMUX_SOCKET_PATH nor \$CMUX_SOCKET resolves to a live socket." >&2
       echo "         Run /solve or /turbo from inside an active cmux session, or unset SOLVE_TERMINAL/--terminal." >&2
       echo "         Falling back to nohup." >&2
       TERMINAL="nohup"
