@@ -31,7 +31,9 @@ Read only. Explicit denylist: Edit, Write, Bash, Task, WebFetch, WebSearch.
    - `env_drift`: `(lockfile.*out of sync|package.*not found|version.*mismatch|node_modules.*missing|Cargo\.lock|package-lock\.json)`
    - `stale_base`: `(merge conflict|non-fast-forward|cannot merge|behind.*base)`
 3. **Pick the highest-precedence class.** If two classes match, prefer in order: `stale_base`, `code_bug`, `env_drift`, `billing_quota`, `platform_outage`, `flaky`.
-4. **Find a signal anchor** (NOT a log quote): the **first** line number where the chosen class signal matched. Render as `<file>:<line>` if the log has a `(test_path):<line>` pattern, else `gh-run-<id>:<line-in-log>`.
+4. **Find a signal anchor** (NOT a log quote): the **first** line number where the chosen class signal matched.
+   - For `code_bug` and `env_drift` (the two classes the caller dispatches `ci-code-fixer` on): the signal anchor MUST be `<file>:<line>` — a path to a real file inside the worktree. The fixer's input validation (realpath-prefix-check) only accepts this format; emitting `gh-run-<id>:<line-in-log>` for these classes silently fails the fixer's path validation. If no `(test_path):<line>` pattern is detectable in the log, downgrade `status` to `AMBIGUOUS` so the caller routes via flaky (re-run once) rather than dispatching a fixer it cannot consume.
+   - For all other classes (`flaky`, `stale_base`, `billing_quota`, `platform_outage`): `gh-run-<id>:<line-in-log>` is allowed when no `(test_path):<line>` pattern is present, since these classes are not routed to `ci-code-fixer` (rebase / rerun / halt paths consume the anchor as a pointer-only telemetry field).
 5. **Return YAML** (see Return contract below).
 
 ## Refusal triggers
@@ -39,6 +41,21 @@ Read only. Explicit denylist: Edit, Write, Bash, Task, WebFetch, WebSearch.
 - Envelope missing → `refused-malformed-envelope`
 - Log content empty after envelope strip → `refused-empty-log`
 - No regex matched any of the six classes → `status: AMBIGUOUS`, `failure_class: null`, caller falls back to `flaky` for routing purposes (re-run once, then halt).
+
+## Status / failure_class pairing rules (load-bearing)
+
+The two enum fields are NOT independent. Both fields appearing as type-permitted independently could otherwise emit a self-contradictory return like `{status: CLASSIFIED, failure_class: null}`. The pairing constraint below is contract-enforced — emitting an invalid pairing is a contract violation; the caller (`/review-pr` Phase 3) treats an invalid pairing as `status: REFUSED` with `rationale: "invalid-status-failure-class-pairing"` and emits `ci_classify_returned` with the refusal subreason rather than dispatching a fixer against a `null` class.
+
+| `status` | `failure_class` | Validity |
+|---|---|---|
+| `CLASSIFIED` | one of the six members of `CI_FAILURE_CLASS_ENUM` | valid |
+| `CLASSIFIED` | `null` | **invalid** — caller refuses |
+| `AMBIGUOUS` | `null` | valid |
+| `AMBIGUOUS` | non-null | **invalid** — caller refuses |
+| `REFUSED` | `null` | valid |
+| `REFUSED` | non-null | **invalid** — caller refuses |
+
+You MUST emit a paired (`status`, `failure_class`) tuple from the table's "valid" rows. If you cannot determine a class with confidence, emit `AMBIGUOUS`+`null` (which the caller will re-run once via flaky path), never `CLASSIFIED`+`null`.
 
 ## Output rules — secret-leak prevention
 

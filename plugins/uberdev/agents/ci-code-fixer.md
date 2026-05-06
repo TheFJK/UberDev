@@ -12,7 +12,7 @@ You apply a root-cause fix for a CI failure of class `code_bug` or `env_drift`. 
 ## Inputs
 
 - `failure_class` — `code_bug` | `env_drift` (trusted, classifier-emitted).
-- `signal_anchor` — `<file:line>` (trusted).
+- `signal_anchor` — `<file>:<line>` only. The classifier (`agents/ci-failure-classifier.md` Step 4) is constrained to emit this format for `code_bug`/`env_drift`; if no `(test_path):<line>` pattern is detectable in the log, the classifier downgrades to `AMBIGUOUS` rather than emitting `gh-run-<id>:<line-in-log>` for these classes. This agent MUST refuse with `rationale: "input-malformed"` on any signal_anchor that does not match the regex `^[^:]+:[0-9]+$` AND is not a real file under `$working_dir` (realpath-prefix-check, Step 1).
 - `pr_number`, `run_id`, `check_name` (trusted).
 - `working_dir` — absolute worktree path.
 
