@@ -201,7 +201,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
     timeout 1200 gh pr checks "$PR_NUMBER" --watch --interval 30 --json name,status,conclusion
     ```
 
-    Wall-clock cap: **20 minutes** (`timeout 1200`). On exit code 0 → all green → `OUTCOME=green` → audit `ci_monitor_green`. Exit 8 (still pending after watch terminates — underdocumented gh exit code) → `ci_monitor_timeout` audit; halt loop iteration with `OUTCOME=halted_timeout`. Non-zero non-8 → at least one check failed → audit `ci_monitor_red`; proceed to CLASSIFY.
+    Wall-clock cap: **20 minutes** (`timeout 1200`). On exit code 0 → all green → `OUTCOME=green` → audit `ci_monitor_green`. Exit 8 (still pending after watch terminates — underdocumented gh exit code) → `ci_monitor_timeout` audit; halt loop iteration with `OUTCOME=halted` (carry differentiation in audit `data.subreason=monitor_timeout`; `halted` is the canonical CI_OUTCOME_ENUM member, not a `halted_timeout` synthetic). Non-zero non-8 → at least one check failed → audit `ci_monitor_red`; proceed to CLASSIFY.
 
     `--fail-fast` is **NOT** used (the classifier needs the complete failure picture). The 30-second `--interval` floor is intentional (rate-limit guard).
 
@@ -251,7 +251,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
     Implementation: rather than a re-entrant skill call, the orchestrator decrements the loop counter and re-enters at Step 4 (Phase 1 dispatch). Step 1 argument parsing has already run, so `RUN_ID` is preserved. The `phases.phase1` and `phases.phase2` fields in audit JSON are **rewritten** on each iteration (not appended to) — only `phases.phase3.iterations` and `phases.phase3.fix_pushes` accumulate.
 
-    Audit `ci_fix_pushed` (with `data.commit_sha` full 40-hex) when fixer push lands. On Phase 1 re-entry returning APPROVE → loop to 6c.1 (counts toward `CI_FIX_LOOP_CAP`). On Phase 1 re-entry rejecting → exit 1 with `OUTCOME=halted_post_fix_review`.
+    Audit `ci_fix_pushed` (with `data.commit_sha` full 40-hex) when fixer push lands. On Phase 1 re-entry returning APPROVE → loop to 6c.1 (counts toward `CI_FIX_LOOP_CAP`). On Phase 1 re-entry rejecting → exit 1 with `OUTCOME=halted` (carry differentiation in audit `data.subreason=post_fix_review_rejected`).
 
     ### 6c.6 HALT — turbo-aware (billing_quota / platform_outage)
 
@@ -296,13 +296,15 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
     ```json
     "phase3": {
-      "status": "ran" | "skipped_no_checks" | "skipped_no_ci_fix" | "unreachable",
+      "status": "ran" | "skipped_no_checks" | "unreachable",
       "outcome": "green" | "green_after_fix" | "skipped_no_checks" | "halted" | "loop_cap_exhausted",
       "iterations": <int>,
       "failure_classes_seen": ["code_bug", "..."],
       "fix_pushes": [{"sha": "<40-hex>", "by_agent": "ci-code-fixer" | "ci-rebase-handler"}]
     }
     ```
+
+    Note: `--no-ci-fix` mode (Step 1, `CI_FIX_PHASE=0`) keeps PROBE/MONITOR/CLASSIFY running for audit telemetry, so `phase3.status` resolves via the same PROBE-driven assignment (`ran` if probe ran end-to-end, `skipped_no_checks` if probe reported no checks, `unreachable` if `gh` failed). There is no `skipped_no_ci_fix` member because no path produces it — `--no-ci-fix` only skips ROUTE/POST-FIX/HALT and forces OUTCOME to `green`/`halted`, but the status field still records what PROBE saw.
 
     The `phases.phase3` block is **omitted entirely** when `gh` is unreachable (carve-out); a `ci_probe_unreachable` audit line is emitted to the JSONL audit log instead, and Step 7 trust-signal emission proceeds as if Phase 3 returned `skipped_no_checks`. Security trade-off: outage in `gh` MUST NOT block release; the trail still records the unreachability for `/merge`'s consumer to read out-of-band.
 
@@ -393,7 +395,7 @@ On GREEN, emit three SHA-bound durable artifacts in lockstep (all reference the 
     "phase1": {"status": "ran", "verdict": "APPROVE"},
     "phase2": {"status": "ran/APPROVE" | "skipped", "verdict": "APPROVE" | null},
     "phase3": {
-      "status": "ran" | "skipped_no_checks",
+      "status": "ran" | "skipped_no_checks" | "unreachable",
       "outcome": "green" | "green_after_fix" | "skipped_no_checks",
       "iterations": <int>,
       "failure_classes_seen": [],
