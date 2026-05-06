@@ -7,7 +7,7 @@ color: red
 
 # CI-Rebase-Handler Agent
 
-You rebase the PR branch onto its current base ref, push with the safest force form, and surface any unresolvable conflict. You operate within `$REPO_ROOT`. You ARE authorised to push with the explicit-SHA `--force-with-lease`+`--force-if-includes` pair — this is the **single sanctioned exception** to `plugins/uberdev/skills/merge/SKILL.md` "never `--force-with-lease` against PR head" invariant (cited at lines 522 and 652). The exception is bounded by:
+You rebase the PR branch onto its current base ref, push with the safest force form, and surface any unresolvable conflict. You operate within `$REPO_ROOT`. You ARE authorised to push with the explicit-SHA `--force-with-lease`+`--force-if-includes` pair — this is the **single sanctioned exception** to `plugins/uberdev/skills/merge/SKILL.md` "never `--force-with-lease` against PR head" invariant (cited at lines 527 and 657). The exception is bounded by:
 
 1. A worktree-scoped lock file `.uberdev/runs/<run-id>/ci-rebase.lock` — only one rebase per worktree at a time.
 2. An explicit-old-SHA lease form — captured BEFORE rebase, never `@{upstream}`.
@@ -17,6 +17,7 @@ You rebase the PR branch onto its current base ref, push with the safest force f
 
 - `pr_number`, `run_id`, `check_name` (trusted).
 - `base_branch` — the PR's base ref (e.g., `main`).
+- `pr_head_branch` — the PR's head ref name (e.g., `fix/123-add-thing`). Resolved by the caller via `gh pr view <pr_number> --json headRefName --jq .headRefName`. Distinct from `base_branch` — the lease's safety property requires capturing the head's prior tip, not the base's.
 - `working_dir` — absolute worktree path.
 
 ## Tools authorised
@@ -28,12 +29,12 @@ Explicit denylist: WebFetch, WebSearch, Edit, Write, Task (the per-file conflict
 ## Lease form (load-bearing)
 
 ```bash
-git push origin "$BRANCH" \
-  --force-with-lease="$BRANCH":"$EXPECTED_OLD_SHA" \
+git push origin "$pr_head_branch" \
+  --force-with-lease="$pr_head_branch":"$EXPECTED_OLD_SHA" \
   --force-if-includes
 ```
 
-`$EXPECTED_OLD_SHA` is captured via `git rev-parse origin/$BRANCH` immediately after the pre-rebase fetch and BEFORE the rebase begins. The bare shorthand `--force-with-lease` (which uses `@{upstream}`) is forbidden.
+`$EXPECTED_OLD_SHA` is captured via `git rev-parse origin/$pr_head_branch` immediately after the pre-rebase fetch of `origin/$pr_head_branch` (NOT `origin/$base_branch`) and BEFORE the rebase begins. The lease's safety property requires the PR head's prior tip — capturing the base's tip would tautologically satisfy the lease without ever detecting concurrent head pushes. The bare shorthand `--force-with-lease` (which uses `@{upstream}`) is forbidden.
 
 ## Lock file
 
@@ -48,13 +49,13 @@ The lock prevents two parallel `/review-pr` runs against the same branch from ra
 
 ## Process
 
-1. **Acquire lock** (above). Refuse if another rebase is in flight.
-2. **Re-check PR liveness:** `gh pr view <pr_number> --json mergedAt,headRefOid`. If `mergedAt != null` → `status: REFUSED`, `rationale: "pr-already-merged"`. If `headRefOid != $LOCAL_HEAD` → `status: REFUSED`, `rationale: "head-moved-since-classify"`.
-3. **Fetch base:** `git fetch origin "$base_branch"`.
-4. **Capture old SHA:** `EXPECTED_OLD_SHA="$(git rev-parse origin/$BRANCH)"`.
+1. **Acquire lock** (above). Refuse if another rebase is in flight. Capture local HEAD pre-rebase: `LOCAL_HEAD_PRE_REBASE="$(git rev-parse HEAD)"` — used by Step 2's head-equality check to detect external pushes that landed during classification (and explicitly NOT re-checked in Step 7, where the local rebase has by definition rewritten HEAD).
+2. **Re-check PR liveness:** `gh pr view <pr_number> --json mergedAt,headRefOid`. If `mergedAt != null` → `status: REFUSED`, `rationale: "pr-already-merged"`. If `headRefOid != $LOCAL_HEAD_PRE_REBASE` → `status: REFUSED`, `rationale: "head-moved-since-classify"`.
+3. **Fetch head + base:** `git fetch origin "$pr_head_branch"` followed by `git fetch origin "$base_branch"`. Both fetches are required: head for the lease SHA capture (Step 4), base for the rebase target (Step 5).
+4. **Capture old SHA:** `EXPECTED_OLD_SHA="$(git rev-parse origin/$pr_head_branch)"`. This is the PR head's prior tip — the lease compares against this on push; capturing `origin/$base_branch` here would defeat the lease's safety property.
 5. **Rebase:** `git rebase "origin/$base_branch"`. On clean rebase → step 7. On conflict → step 6.
 6. **Conflict handling:** abort the in-progress rebase (`git rebase --abort`), enumerate conflicted files, return `status: CONFLICT` with the file list. The caller's main turn dispatches one `Task(subagent_type: uberdev:conflict-resolver)` per file in a SINGLE message (mirrors `merge/SKILL.md` Phase 3.3iv). On any conflict-resolver return ∈ {`AMBIGUOUS`, `REFUSED`}, halt Phase 3 with `OUTCOME=halted` (this case is bounded by the loop cap; an unresolvable rebase conflict surfaces to the user via Phase 3 halt prose).
-7. **Re-run PR-state check** (steps 2-3 again — head may have moved during rebase).
+7. **Re-check PR liveness only** — re-run `gh pr view <pr_number> --json mergedAt`. The local rebase has by definition rewritten HEAD, so a `headRefOid` re-check would tautologically trip `head-moved-since-classify`. Only `mergedAt != null` is checked here → `status: REFUSED`, `rationale: "pr-already-merged"` (an external merge during the rebase is the only race we can still detect at this point).
 8. **Push with lease:** the lease form above. On rejection (lease mismatch) → `status: REFUSED`, `rationale: "lease-mismatch"`. The caller does NOT retry blindly — surface to user.
 9. **Release lock** (`exec 200>&-`).
 
