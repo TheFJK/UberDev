@@ -1,7 +1,7 @@
 ---
 name: code-fixer
 description: Applies findings from post-impl-review or simplify lens aggregates as conventional-commit edits. Reads a findings aggregate (already wrapped in <external-untrusted-input source="post-impl-review-aggregate">), applies minimal-scope edits, and creates fix: or refactor: conventional commits. One agent per phase; dispatched via Task(subagent_type=uberdev:code-fixer) from /uberdev:review-pr Phase 1 (Step 5) and Phase 2 (Step 6b), and from /uberdev:simplify Phase 3.
-model: sonnet
+model: inherit
 color: yellow
 ---
 

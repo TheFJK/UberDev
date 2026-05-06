@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-05-06
+
+### Changed
+- **`code-fixer` and `code-reviewer` agents now use `model: inherit`.** Previously hard-pinned to `sonnet` (code-fixer) and `opus` (code-reviewer). Inherit makes both agents track whatever model the user runs in their main Claude Code session — so when the user is on Opus 4.7 1M, every code-fixer commit and code-reviewer pass is also Opus 4.7 1M, with no per-agent model drift. Quality matters most for these two agents (they touch the diff before merge), and pinning a specific model name would gradually float behind whatever Anthropic ships next. `tests/code-fixer-dispatch.test.sh` asserts the new `^model: inherit$` contract.
+
+### Fixed
+- **`solve-pipeline/SKILL.md` Step 3 cmux detection now `set -u`-safe.** Wrapped the legacy fallback in `${CMUX_SOCKET:-}` so the fallback chain `${CMUX_SOCKET_PATH:-${CMUX_SOCKET:-}}` no longer errors on unbound `CMUX_SOCKET`. Current launcher uses `set -e` only so 0.20.1 was already correct in production, but the defensive form future-proofs against any future flip to `set -u` and matches uberdev's "no implicit unbound-var reads" convention. `tests/cmux-detection.test.sh` regex relaxed to accept both `${CMUX_SOCKET_PATH:-$CMUX_SOCKET}` and `${CMUX_SOCKET_PATH:-${CMUX_SOCKET:-}}` forms.
+- **`tests/merge-discovery-resilience.test.sh` A11 version assertion no longer hard-codes a release version.** Previously pinned to `0.19.3` (PR #75 era); the 0.20.0 release commit (`e42d20c`) forgot to update the test, leaving 3 stale-pin failures in main between 0.20.0 and 0.20.2. The fix reads the canonical version from `plugin.json` at test runtime and asserts `marketplace.json` + `README.md` badge match — so future bumps don't keep breaking this test, and a real cross-file drift (which is what A11 was meant to catch) still fires loudly.
+
 ## [0.20.1] - 2026-05-06
 
 ### Fixed

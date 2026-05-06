@@ -49,7 +49,7 @@ assert_no_grep() {
 
 echo "== code-fixer.md frontmatter =="
 assert_grep "$CODE_FIXER" '^name: code-fixer$' "frontmatter has name: code-fixer"
-assert_grep "$CODE_FIXER" '^model: sonnet$' "frontmatter has model: sonnet"
+assert_grep "$CODE_FIXER" '^model: inherit$' "frontmatter pins model: inherit (tracks parent session model — high-quality fixes use whatever Opus/Sonnet the user runs)"
 assert_grep "$CODE_FIXER" '^color: yellow$' "frontmatter has color: yellow"
 assert_grep "$CODE_FIXER" '^description: ' "frontmatter has description"
 # Description references the trust envelope tag (so the agent's role is unambiguously named)

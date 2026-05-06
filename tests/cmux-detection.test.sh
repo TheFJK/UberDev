@@ -48,8 +48,8 @@ assert_grep "$DETECTION_FILE" \
 # Both must appear in a parameter-expansion fallback chain so a missing
 # CMUX_SOCKET_PATH falls through to CMUX_SOCKET, not vice versa.
 assert_grep "$DETECTION_FILE" \
-  '\$\{CMUX_SOCKET_PATH:-\$CMUX_SOCKET\}' \
-  "Step 3 detection uses \${CMUX_SOCKET_PATH:-\$CMUX_SOCKET} fallback chain (path preferred, socket legacy)"
+  '\$\{CMUX_SOCKET_PATH:-\$\{?CMUX_SOCKET' \
+  "Step 3 detection uses \${CMUX_SOCKET_PATH:-...CMUX_SOCKET...} fallback chain (path preferred, socket legacy; matches plain or set-u-defensive forms)"
 
 # The explicit-override validation arm (TERMINAL=cmux requested but socket dead)
 # must use the same fallback so a user with --terminal=cmux on current cmux

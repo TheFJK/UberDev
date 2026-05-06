@@ -90,7 +90,7 @@ if [[ -n "$TERMINAL_OVERRIDE" ]]; then
   TERMINAL="$TERMINAL_OVERRIDE"
 elif [[ -n "$SOLVE_TERMINAL" ]]; then
   TERMINAL="$SOLVE_TERMINAL"
-elif _CMUX_SOCK="${CMUX_SOCKET_PATH:-$CMUX_SOCKET}"; [[ -n "$_CMUX_SOCK" && -S "$_CMUX_SOCK" ]] && command -v cmux >/dev/null 2>&1; then
+elif _CMUX_SOCK="${CMUX_SOCKET_PATH:-${CMUX_SOCKET:-}}"; [[ -n "$_CMUX_SOCK" && -S "$_CMUX_SOCK" ]] && command -v cmux >/dev/null 2>&1; then
   TERMINAL="cmux"
 elif [[ "$TERM_PROGRAM" == "ghostty" ]] && [[ -d /Applications/Ghostty.app ]]; then
   TERMINAL="ghostty"
@@ -113,7 +113,7 @@ case "$TERMINAL" in
       echo "         Install: npm i -g @manaflow-ai/cmux  (see cmux README for canonical install)" >&2
       echo "         Falling back to nohup." >&2
       TERMINAL="nohup"
-    elif _CMUX_SOCK="${CMUX_SOCKET_PATH:-$CMUX_SOCKET}"; [[ -z "$_CMUX_SOCK" || ! -S "$_CMUX_SOCK" ]]; then
+    elif _CMUX_SOCK="${CMUX_SOCKET_PATH:-${CMUX_SOCKET:-}}"; [[ -z "$_CMUX_SOCK" || ! -S "$_CMUX_SOCK" ]]; then
       echo "warning: TERMINAL=cmux requested but neither \$CMUX_SOCKET_PATH nor \$CMUX_SOCKET resolves to a live socket." >&2
       echo "         Run /solve or /turbo from inside an active cmux session, or unset SOLVE_TERMINAL/--terminal." >&2
       echo "         Falling back to nohup." >&2

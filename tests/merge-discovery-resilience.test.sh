@@ -304,13 +304,25 @@ assert_grep "$SOLVE_PIPELINE" 'GH_ERR=\$\(mktemp\)' \
   "A10: solve-pipeline Step 4 still has GH_ERR=\$(mktemp) (21ad417 fix intact)"
 
 echo
-echo "== A11: version bumped to 0.19.3 in three file-based locations =="
-assert_grep "$PLUGIN_JSON" '"version":[[:space:]]*"0\.19\.3"' \
-  "A11a: plugin.json version is 0.19.3"
-assert_grep "$MARKETPLACE_JSON" '"version":[[:space:]]*"0\.19\.3"' \
-  "A11b: marketplace.json version is 0.19.3"
-assert_grep "$README" 'version-0\.19\.3-blue' \
-  "A11c: README.md badge version is 0.19.3"
+echo "== A11: version pinned identically across plugin.json, marketplace.json, README.md =="
+# Read the canonical version from plugin.json (single source of truth) and
+# assert the other two file-based locations match. Previously hard-coded to
+# "0.19.3", which broke on every release bump (the 0.20.0 chore-release
+# commit forgot to also update this test, leaving 3 stale-pin failures
+# in main between 0.20.0 and 0.20.2). Reading dynamically keeps the
+# cross-file drift assertion honest without per-bump maintenance.
+A11_VERSION="$(grep -E '^[[:space:]]*"version":' "$PLUGIN_JSON" | head -1 | sed -E 's/.*"version":[[:space:]]*"([^"]+)".*/\1/')"
+if [[ -z "$A11_VERSION" ]]; then
+  echo "  FAIL  A11 setup: could not extract canonical version from $PLUGIN_JSON"
+  FAIL=$((FAIL + 1))
+else
+  # Escape periods for grep -E (the only meta-char in a SemVer-like string).
+  A11_PATTERN="${A11_VERSION//./\\.}"
+  assert_grep "$MARKETPLACE_JSON" "\"version\":[[:space:]]*\"$A11_PATTERN\"" \
+    "A11a: marketplace.json version matches plugin.json canonical ($A11_VERSION)"
+  assert_grep "$README" "version-$A11_PATTERN-blue" \
+    "A11b: README.md badge version matches plugin.json canonical ($A11_VERSION)"
+fi
 
 # --- Layer B — Functional fake-gh tests ------------------------------------
 
