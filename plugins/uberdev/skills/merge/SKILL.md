@@ -65,6 +65,10 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `CI_OUTCOME_ENUM` | `green`, `green_after_fix`, `skipped_no_checks`, `halted`, `loop_cap_exhausted` | `commands/review-pr.md` Phase 3 terminal audit + Step 7 trust-signal predicate |
 | `CI_FIX_LOOP_CAP` | `3` (prose constant, hard-coded) | `commands/review-pr.md` Phase 3 6c.7 LOOP GUARD |
 | `RERUN_FLAKY_CAP` | `1` (prose constant, hard-coded) | `commands/review-pr.md` Phase 3 6c.4 ROUTE flake re-run guard |
+| `CI_PROBE_RATE_LIMIT_FLOOR` | `200` (prose constant, hard-coded) | `commands/review-pr.md` Phase 3 6c.1 PROBE pre-flight rate-limit guard |
+| `CI_MONITOR_TIMEOUT_SEC` | `1200` (prose constant, hard-coded) | `commands/review-pr.md` Phase 3 6c.2 MONITOR wall-clock cap |
+| `CI_WATCH_INTERVAL_SEC` | `30` (prose constant, hard-coded) | `commands/review-pr.md` Phase 3 6c.2 MONITOR `gh pr checks --watch` interval |
+| `CI_LOG_TRUNCATE_LINES` | `500` (prose constant, hard-coded) | `commands/review-pr.md` Phase 3 6c.3 CLASSIFY log truncation |
 
 ## Inputs
 

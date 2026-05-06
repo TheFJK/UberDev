@@ -162,11 +162,11 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
     Phase 3 runs after Phase 2 and before trust-signal emission. It probes live CI on the post-Phase-2 HEAD, monitors pending runs, classifies red runs into one of six failure classes (`CI_FAILURE_CLASS_ENUM` defined in `plugins/uberdev/skills/merge/SKILL.md` Constants), routes to specialized fixer agents for resolvable classes, and halts via `AskUserQuestion` (or audit-only under `--turbo`) for the two classes no code change can resolve. The trust-signal anchor commit (Step 7) is gated on Phase 3's outcome.
 
-    The loop counter `CI_FIX_LOOP_ITER` starts at `0` at Phase 3 entry. The hard cap is `CI_FIX_LOOP_CAP = 3` (declared in `merge/SKILL.md` Constants). Each iteration increments only when a distinct fix-and-push occurred (HEAD SHA changed since this iteration's start). On cap exhaustion → `OUTCOME=loop_cap_exhausted`, exit 1. **The "MUST NOT introduce any additional retry path" anti-pattern guard from `merge/SKILL.md:508-516` is restated here.**
+    Loop counter and cap defined in 6c.7 LOOP GUARD below (`CI_FIX_LOOP_CAP = 3`, declared in `merge/SKILL.md` Constants). On cap exhaustion → `OUTCOME=loop_cap_exhausted`, exit 1. **The "MUST NOT introduce any additional retry path" anti-pattern guard from `merge/SKILL.md:508-516` is restated here.**
 
     ### 6c.1 PROBE — gh pr checks JSON probe
 
-    **Pre-flight rate-limit check:**
+    **Pre-flight rate-limit check:** the floor `200` below is `CI_PROBE_RATE_LIMIT_FLOOR` (declared in `merge/SKILL.md` Constants — kept numeric inline because bash does not dereference markdown constants).
 
     ```bash
     RATE_REMAINING="$(gh api rate_limit --jq .resources.core.remaining 2>/dev/null)"
@@ -218,13 +218,15 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
     ### 6c.2 MONITOR — gh pr checks --watch
 
+    The literals `1200` and `30` below are `CI_MONITOR_TIMEOUT_SEC` and `CI_WATCH_INTERVAL_SEC` respectively (declared in `merge/SKILL.md` Constants — kept numeric inline because bash does not dereference markdown constants).
+
     ```bash
     timeout 1200 gh pr checks "$PR_NUMBER" --watch --interval 30 --json name,status,conclusion
     ```
 
-    Wall-clock cap: **20 minutes** (`timeout 1200`). On exit code 0 → all green → `OUTCOME=green` → audit `ci_monitor_green`. Exit 8 (still pending after watch terminates — underdocumented gh exit code) → `ci_monitor_timeout` audit; halt loop iteration with `OUTCOME=halted` (carry differentiation in audit `data.subreason=monitor_timeout`; `halted` is the canonical CI_OUTCOME_ENUM member, not a `halted_timeout` synthetic). Non-zero non-8 → at least one check failed → audit `ci_monitor_red`; proceed to CLASSIFY.
+    Wall-clock cap: **20 minutes** (`timeout 1200` = `CI_MONITOR_TIMEOUT_SEC`). On exit code 0 → all green → `OUTCOME=green` → audit `ci_monitor_green`. Exit 8 (still pending after watch terminates — underdocumented gh exit code) → `ci_monitor_timeout` audit; halt loop iteration with `OUTCOME=halted` (carry differentiation in audit `data.subreason=monitor_timeout`; `halted` is the canonical CI_OUTCOME_ENUM member, not a `halted_timeout` synthetic). Non-zero non-8 → at least one check failed → audit `ci_monitor_red`; proceed to CLASSIFY.
 
-    `--fail-fast` is **NOT** used (the classifier needs the complete failure picture). The 30-second `--interval` floor is intentional (rate-limit guard).
+    `--fail-fast` is **NOT** used (the classifier needs the complete failure picture). The 30-second `--interval` floor (`CI_WATCH_INTERVAL_SEC`) is intentional (rate-limit guard).
 
     ### 6c.3 CLASSIFY — Task(uberdev:ci-failure-classifier)
 
@@ -232,7 +234,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
     ```
     <external-untrusted-input source="github-actions-log-pr-<N>-run-<id>">
-    …log content (truncated to last 500 lines per check)…
+    …log content (truncated to last 500 lines per check — `CI_LOG_TRUNCATE_LINES`)…
     </external-untrusted-input>
     ```
 
@@ -319,7 +321,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
     ```
     log "warning: Phase 3 halt class <X> in --turbo mode; cannot prompt; emitting halt audit + exit 1" >&2
-    audit ci_halt_<class>   # audit event ci_phase_outcome with data.outcome=halted, data.class=<X>
+    audit ci_phase_outcome data.outcome=halted data.class=<X>
     OUTCOME=halted; exit 1
     ```
 
