@@ -8,13 +8,28 @@ allowed-tools: ["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", "Wr
 
 Review all changed files for reuse, quality, and efficiency. Fix any issues found.
 
-**Iron rule:** preserve behavior. Do not change function signatures, return types, thrown exception types, or public API surface. If a simplification can't be made without behavior risk, call it out — don't apply it silently.
+**Iron rule:** preserve behavior — strict invariants defined once in `plugins/uberdev/agents/code-simplifier.md` Rule 1 (single source of truth). The fixer enforces them via `disposition: REFUSED, reason: behavior-change-rejected`.
 
 ## Phase 1: Identify Changes
 
-Run `git diff` (or `git diff HEAD` if there are staged changes) to see what changed. If there are no git changes, review the most recently modified files that the user mentioned or that you edited earlier in this conversation.
+Run `git diff` (or `git diff HEAD` if there are staged changes) to see what changed.
 
-If `$ARGUMENTS` is non-empty, treat it as **additional focus** to add to each agent's brief (see Phase 2).
+If both the diff is empty AND `$ARGUMENTS` is empty, refuse with the literal message:
+
+```
+/simplify needs either a non-empty git diff or an explicit scope hint via $ARGUMENTS
+```
+
+Also emit a fenced YAML block so callers (e.g., `/turbo`, future automation) can detect the refusal programmatically:
+
+```yaml
+status: REFUSED
+rationale: "empty-diff-and-empty-arguments"
+```
+
+Do not fall back to session-history introspection — recently-mentioned-files heuristics are non-deterministic and produce drift between runs. Exit cleanly; the user re-invokes with a scope.
+
+If `$ARGUMENTS` is non-empty, treat it as **additional focus** to add to each agent's brief (see Phase 2). When the diff is empty but `$ARGUMENTS` is non-empty, treat `$ARGUMENTS` as the scope hint (file globs, directory, or feature name) and pass it verbatim to each lens under `## Additional Focus`.
 
 ## Phase 2: Launch Three Review Agents in Parallel
 
@@ -32,40 +47,46 @@ Task(
 
 Each lens dispatches the same `uberdev:code-simplifier` agent with the lens-emphasis subsection in the prompt body — three Task() calls in one assistant turn, single source of truth for the named-agent dispatcher.
 
-For each change:
-
-1. **Search for existing utilities and helpers** that could replace newly written code. Look for similar patterns elsewhere in the codebase — common locations are utility directories, shared modules, and files adjacent to the changed ones.
-2. **Flag any new function that duplicates existing functionality.** Suggest the existing function to use instead.
-3. **Flag any inline logic that could use an existing utility** — hand-rolled string manipulation, manual path handling, custom environment checks, ad-hoc type guards, and similar patterns are common candidates.
+The per-lens checklist is defined once in the agent file under `## Lens checklists` (`plugins/uberdev/agents/code-simplifier.md`, section `Lens: Reuse`). Do not restate the checklist here — the agent's copy is the single source of truth and parameterising via `## Lens emphasis: Reuse` selects it.
 
 ### Lens 2: Code Quality Review (`## Lens emphasis: Quality`)
 
-Review the same changes for hacky patterns:
-
-1. **Redundant state**: state that duplicates existing state, cached values that could be derived, observers/effects that could be direct calls
-2. **Parameter sprawl**: adding new parameters to a function instead of generalizing or restructuring existing ones
-3. **Copy-paste with slight variation**: near-duplicate code blocks that should be unified with a shared abstraction
-4. **Leaky abstractions**: exposing internal details that should be encapsulated, or breaking existing abstraction boundaries
-5. **Stringly-typed code**: using raw strings where constants, enums (string unions), or branded types already exist in the codebase
-6. **Unnecessary JSX nesting**: wrapper Boxes/elements that add no layout value — check if inner component props (flexShrink, alignItems, etc.) already provide the needed behavior
-7. **Nested conditionals**: ternary chains (`a ? x : b ? y : ...`), nested if/else, or nested switch 3+ levels deep — flatten with early returns, guard clauses, a lookup table, or an if/else-if cascade
-8. **Unnecessary comments**: comments explaining WHAT the code does (well-named identifiers already do that), narrating the change, or referencing the task/caller — delete; keep only non-obvious WHY (hidden constraints, subtle invariants, workarounds)
+Defined in `plugins/uberdev/agents/code-simplifier.md` under `Lens: Quality`. Selected via `## Lens emphasis: Quality`.
 
 ### Lens 3: Efficiency Review (`## Lens emphasis: Efficiency`)
 
-Review the same changes for efficiency:
+Defined in `plugins/uberdev/agents/code-simplifier.md` under `Lens: Efficiency`. Selected via `## Lens emphasis: Efficiency`.
 
-1. **Unnecessary work**: redundant computations, repeated file reads, duplicate network/API calls, N+1 patterns
-2. **Missed concurrency**: independent operations run sequentially when they could run in parallel
-3. **Hot-path bloat**: new blocking work added to startup or per-request/per-render hot paths
-4. **Recurring no-op updates**: state/store updates inside polling loops, intervals, or event handlers that fire unconditionally — add a change-detection guard so downstream consumers aren't notified when nothing changed. Also: if a wrapper function takes an updater/reducer callback, verify it honors same-reference returns (or whatever the "no change" signal is) — otherwise callers' early-return no-ops are silently defeated
-5. **Unnecessary existence checks**: pre-checking file/resource existence before operating (TOCTOU anti-pattern) — operate directly and handle the error
-6. **Memory**: unbounded data structures, missing cleanup, event listener leaks
-7. **Overly broad operations**: reading entire files when only a portion is needed, loading all items when filtering for one
+### Per-lens output format
+
+Every lens returns findings in the structured shape pinned in the agent's `## Return contract` section (`location`, `severity`, `lens`, `summary`, `detail`). This is what `code-fixer` parses in Phase 3 and what the dedup policy below keys on.
 
 ## Phase 3: Fix Issues — dispatch `code-fixer` subagent
 
-Wait for all three lenses to complete. Aggregate their findings to `.uberdev/research/<RUN_ID>/simplify-final.md` (mint a fresh `RUN_ID` if standalone — same shape as `/uberdev:review-pr`'s Run-ID format, regex `^[0-9]{8}-[0-9]{6}-[a-f0-9]+$`).
+Wait for all three lenses to complete.
+
+**Mint a fresh `RUN_ID`** (same recipe as `/uberdev:review-pr`'s Run-ID, regex `^[0-9]{8}-[0-9]{6}-[a-f0-9]+$`):
+
+```bash
+RUN_ID="$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)"
+[[ "$RUN_ID" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]] || { echo "BUG: run-id $RUN_ID does not match regex" >&2; exit 2; }
+```
+
+**Anchor the aggregate path to the worktree root** so the file lands inside the current worktree (not the parent project root) when `/simplify` is invoked from a git worktree:
+
+```bash
+WORKTREE_ROOT="$(git rev-parse --show-toplevel)"
+AGG_PATH="$WORKTREE_ROOT/.uberdev/research/$RUN_ID/simplify-final.md"
+mkdir -p "$(dirname "$AGG_PATH")"
+```
+
+**Dedup policy across lenses.** Two or three lenses may flag the same `file:line`. Aggregate by the `file:line` key:
+
+- If only one lens flagged the location, write one finding row, `lens: <Reuse | Quality | Efficiency>`.
+- If two or three lenses flagged the same `file:line`, merge into ONE finding row. Set `lens: Reuse+Quality` (or whichever combination, joined by `+` in checklist order: Reuse, Quality, Efficiency). Concatenate the `summary` fields with ` | ` separators, each prefixed by its lens name (e.g., `Reuse: <summary> | Quality: <summary>`). Concatenate the `detail` fields the same way. Severity = max severity across the merged findings (`critical` > `important` > `suggestion`).
+- The fixer treats merged findings as one edit candidate.
+
+Aggregate the deduped findings into `$AGG_PATH` using the structured shape pinned in the agent's `## Return contract` section.
 
 Dispatch a fresh `code-fixer` subagent (defined in `plugins/uberdev/agents/code-fixer.md`) to apply the findings as a single `refactor:` conventional commit — this command's main turn no longer holds apply-loop edits in-context. Use the Task tool:
 
