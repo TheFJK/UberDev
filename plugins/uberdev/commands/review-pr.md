@@ -169,10 +169,22 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
     **Pre-flight rate-limit check:**
 
     ```bash
-    RATE_REMAINING="$(gh api rate_limit --jq .resources.core.remaining)"
-    if [ "$RATE_REMAINING" -lt 200 ]; then
+    RATE_REMAINING="$(gh api rate_limit --jq .resources.core.remaining 2>/dev/null)"
+    # Validate gh succeeded AND returned a non-empty integer before comparison —
+    # a depleted/adversarial GH API budget MUST NOT silently downgrade to a
+    # GREEN-eligible outcome. Empty string or non-numeric output triggers the
+    # ci_probe_unreachable carve-out (omit phases.phase3 block; Step 7 proceeds
+    # as if probe was unreachable, NOT as skipped_no_checks).
+    if ! [[ "$RATE_REMAINING" =~ ^[0-9]+$ ]]; then
+      audit ci_probe_unreachable subreason=rate_limit_query_failed
+      # phases.phase3 block omitted entirely (carve-out); skip to Step 7
+    elif [ "$RATE_REMAINING" -lt 200 ]; then
       audit ci_probe_unreachable subreason=rate_limit_low remaining=$RATE_REMAINING
-      OUTCOME=skipped_no_checks   # treat as carve-out for trust-signal purposes
+      # Treat rate-limit-low as ci_probe_unreachable carve-out — NOT a
+      # GREEN-eligible skipped_no_checks. A depleted GH API budget (potentially
+      # adversarial in CI) silently passing trust-signal is the security
+      # regression this guard prevents. phases.phase3 block omitted; Step 7
+      # proceeds as if gh were unreachable.
       # skip remaining 6c sub-steps; jump to Step 7
     fi
     ```
@@ -181,6 +193,15 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
     ```bash
     PROBE_JSON="$(gh pr checks "$PR_NUMBER" --json name,status,conclusion 2>&1)" || PROBE_RC=$?
+    # Validate PROBE_JSON is parseable JSON BEFORE the terminal-mapping
+    # branches below try to interpret it. On gh failure (non-zero exit),
+    # PROBE_JSON contains stderr text; jq parsing would silently produce
+    # null and the prose below would treat it as "no checks" instead of
+    # "probe failed" — masking a real outage as a GREEN-eligible skip.
+    if [ "${PROBE_RC:-0}" -ne 0 ] && ! jq empty <<<"$PROBE_JSON" 2>/dev/null; then
+      audit ci_probe_unreachable subreason=gh_failed_${PROBE_RC}
+      # phases.phase3 block omitted entirely; skip to Step 7
+    fi
     ```
 
     Terminal mappings (parsed as JSON; never line-grepped):
@@ -227,7 +248,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
     Audit `ci_classify_dispatched` on dispatch; `ci_classify_returned` on return (with `data.failure_class ∈ CI_FAILURE_CLASS_ENUM`).
 
-    The agent returns YAML — see `plugins/uberdev/agents/ci-failure-classifier.md` for the canonical contract. On `status: AMBIGUOUS` (no regex matched), caller falls back to treating it as `flaky` for routing purposes (re-run once, then halt).
+    The agent returns YAML — see `plugins/uberdev/agents/ci-failure-classifier.md` for the canonical contract. On `status: AMBIGUOUS` (no regex matched), caller falls back to treating it as `flaky` for routing purposes (re-run once, then halt). **Emit `ci_classify_ambiguous_routing_as_flaky` audit event when this fallback fires** — the original AMBIGUOUS state must surface in the post-mortem trail; conflating it with a known-transient `flaky` classification (without a distinct audit signal) loses root-cause context if the flaky re-run also fails.
 
     ### 6c.4 ROUTE — failure_class → downstream agent
 
@@ -235,11 +256,33 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
     case $failure_class in
       code_bug | env_drift)        dispatch Task(subagent_type: uberdev:ci-code-fixer)    ;;
       stale_base)                  dispatch Task(subagent_type: uberdev:ci-rebase-handler) ;;
-      flaky)                       gh run rerun <run-id>
+      flaky)                       if gh run rerun <run-id>; then
+                                     audit ci_flaky_rerun_queued run_id=<run-id>
+                                   else
+                                     # gh run rerun can fail on auth/rate-limit/max-reruns;
+                                     # silently dropping the exit code lets the loop hit
+                                     # CI_FIX_LOOP_CAP with no actual fix attempts. Halt
+                                     # cleanly so the user sees the rerun failure.
+                                     audit ci_flaky_rerun_failed run_id=<run-id>
+                                     OUTCOME=halted
+                                     # carry data.subreason=flaky_rerun_failed in the
+                                     # ci_phase_outcome event for post-mortem
+                                   fi
                                    # max 1 retry per distinct check (RERUN_FLAKY_CAP=1)
                                    # does NOT increment CI_FIX_LOOP_ITER
                                    ;;
       billing_quota | platform_outage)  jump to 6c.6 HALT ;;
+      *)                           # Default-case guard: defensive against future
+                                   # CI_FAILURE_CLASS_ENUM extension landing without
+                                   # a paired ROUTE arm. Silent fallthrough would
+                                   # let the loop hit CI_FIX_LOOP_CAP with no fix
+                                   # attempts; classifier-side, an unknown class is
+                                   # already a contract violation (B8 pairing rule),
+                                   # so audit + halt + exit 1 is the correct floor.
+                                   audit ci_fix_dispatch_unknown_class reason=$failure_class
+                                   OUTCOME=halted
+                                   exit 1
+                                   ;;
     esac
     ```
 
