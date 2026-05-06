@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-05-06
+
+### Added
+- **`/review-pr` Phase 3 — CI Health (#76).** New phase between Phase 2 and trust-signal emission that probes live CI, monitors pending runs, classifies red runs into one of six failure classes, dispatches per-class fix agents, and halts via `AskUserQuestion` for the two human-only classes. Closes the gap where today a green `/review-pr` run can co-exist with a red CI run, leading `/merge` to park the PR by surprise.
+  - **Phase 3 prose** added inline in `commands/review-pr.md` as Step 6c (probe → monitor → classify → route → post-fix → halt → loop guard).
+  - **3 new agents.** `agents/ci-failure-classifier.md` (regex-driven 6-class classifier; never quotes log lines verbatim — secret-leak guard), `agents/ci-code-fixer.md` (root-cause fixer for `code_bug` / `env_drift`; refuses on forbidden patterns including `--no-verify`, test-skip, error-swallow, secret-mask, new-file-creation, multi-lockfile-churn), `agents/ci-rebase-handler.md` (rebase-on-base for `stale_base`; uses `--force-with-lease=<branch>:<expected-old-sha> --force-if-includes` with worktree-scoped lock — the single sanctioned exception to `merge/SKILL.md`'s never-`--force-with-lease`-against-PR-head invariant).
+  - **`--no-ci-fix` flag.** Probe-only mode: PROBE + MONITOR + CLASSIFY run for audit telemetry; ROUTE / POST-FIX / HALT are skipped. Mirrors `--no-simplify` shape.
+  - **12 new `AUDIT_EVENT_ENUM` members** declared in `plugins/uberdev/skills/merge/SKILL.md` Constants table: `ci_probe_started`, `ci_probe_skipped_no_checks`, `ci_probe_unreachable`, `ci_monitor_green`, `ci_monitor_red`, `ci_monitor_timeout`, `ci_classify_dispatched`, `ci_classify_returned`, `ci_fix_dispatched`, `ci_fix_pushed`, `ci_loop_cap_reached`, `ci_phase_outcome`.
+  - **3 new ENUMs** declared in `merge/SKILL.md` Constants: `CI_STATUS_ENUM` (`pending`, `green`, `red`, `unreachable`); `CI_FAILURE_CLASS_ENUM` (`code_bug`, `billing_quota`, `platform_outage`, `flaky`, `env_drift`, `stale_base`); `CI_OUTCOME_ENUM` (`green`, `green_after_fix`, `skipped_no_checks`, `halted`, `loop_cap_exhausted`). Plus prose constants `CI_FIX_LOOP_CAP=3` and `RERUN_FLAKY_CAP=1`.
+
+### Changed
+- **BREAKING** (predicate-level): `/uberdev:review-pr` GREEN now requires Phase 3 outcome ∈ `{green, green_after_fix, skipped_no_checks}` in addition to Phase 1 + Phase 2 conditions. Existing trust-signal artifacts (anchor commit, label, audit JSON) keep their format. The audit JSON gains a `phases.phase3` block. Callers parsing exit codes are unaffected: 0 / 1 / 2 semantics preserved (Phase 3 halts reuse exit 1).
+- **`--turbo` scope narrowed.** R7 prose tightened from "does NOT alter Phase 1, Phase 2, or trust-signal emission" to "does NOT alter Phase 1 or Phase 2." Phase 3 halt classes (`billing_quota`, `platform_outage`) suppress the `AskUserQuestion` prompt under `--turbo` and exit 1 without emitting a trust signal — the queue would block silently otherwise. Phases 1 and 2 remain unaffected.
+- **`merge/SKILL.md` cross-references `ci-rebase-handler`** as the single sanctioned exception to its "never `--force-with-lease` against PR head" invariant. The exception is bounded by a worktree-scoped lock, an explicit-old-SHA lease form, and `--force-if-includes`.
+
+### Tests
+- **`tests/review-pr.test.sh` extended (R14–R20).** New shape assertions: Phase 3 inline block exists; GREEN predicate updated to 3-conjunct; `--no-ci-fix` documented; exit-code contract reuses 1 for Phase 3 halts; `--turbo` prose narrowed; 12 new `AUDIT_EVENT_ENUM` members in `merge/SKILL.md`; new `CI_*_ENUM` rows present.
+- **`tests/review-pr-phase3-ci.test.sh` (NEW, 9 scenarios + 3 agent-shape blocks)** — green-skip fast path, pending → green, pending → red → fix → green, 6 classification paths, loop-cap exhaustion, `--no-ci-fix` probe-only, `--turbo` halt classes, `gh` outage carve-out, audit-trail 12-event coverage; plus structural shape tests for each of the 3 new agent files (frontmatter, return-contract YAML fence, refusal triggers, no-quote-rule for the classifier).
+- **`tests/_fixtures/fake-gh/gh` extended** with 7 new modes: `ci-checks-no-checks`, `ci-checks-pending`, `ci-checks-green`, `ci-checks-red`, `ci-checks-mixed`, `gh-unreachable`, `ci-rate-limit-low`.
+
 ## [0.20.3] - 2026-05-06
 
 ### Fixed
