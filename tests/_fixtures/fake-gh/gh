@@ -28,6 +28,19 @@
 #                        never reaches the function's stdout.
 #   fail-pr-view       : exit 2 — used by B6 to verify pr_view_projection's
 #                        failure path captures the right exit code.
+#   ci-checks-no-checks  : gh pr checks output simulating "no checks reported on the
+#                          'main' branch" — Phase 3 PROBE → skipped_no_checks fast path.
+#                          stderr: 'no checks reported on the ...'; stdout empty array.
+#   ci-checks-pending    : gh pr checks --json output where every entry has
+#                          status: in_progress (drives Phase 3 PROBE → MONITOR transition).
+#   ci-checks-green      : all entries conclusion ∈ {success}; PROBE fast-path → green.
+#   ci-checks-red        : at least one entry conclusion: failure; drives PROBE → MONITOR
+#                          → CLASSIFY transition.
+#   ci-checks-mixed      : pending + red mix — exercises MONITOR settling-then-classify.
+#   gh-unreachable       : gh exits non-zero with no usable JSON (carve-out test).
+#                          stderr token: 'gh: connection refused'.
+#   ci-rate-limit-low    : gh api rate_limit response with .resources.core.remaining=42
+#                          (below the 200 floor — exercises pre-flight skip).
 #
 # A side-effect log of the call (argv) is written to $FAKE_GH_CALL_LOG when
 # that variable is set; tests can inspect it to verify call shape (e.g. that
@@ -151,8 +164,76 @@ JSON
     exit 2
     ;;
 
+  ci-checks-no-checks)
+    # Phase 3 6c.1 PROBE skipped_no_checks fast path (S1).
+    printf 'no checks reported on the %s branch\n' "${FAKE_GH_BASE_BRANCH:-main}" >&2
+    printf '[]\n'
+    exit 1
+    ;;
+
+  ci-checks-pending)
+    # Phase 3 6c.1 PROBE -> 6c.2 MONITOR transition.
+    cat <<'JSON'
+[
+  {"name": "build", "status": "in_progress", "conclusion": null},
+  {"name": "test",  "status": "in_progress", "conclusion": null}
+]
+JSON
+    exit 0
+    ;;
+
+  ci-checks-green)
+    # Phase 3 6c.1 PROBE green fast-path.
+    cat <<'JSON'
+[
+  {"name": "build", "status": "completed", "conclusion": "success"},
+  {"name": "test",  "status": "completed", "conclusion": "success"},
+  {"name": "lint",  "status": "completed", "conclusion": "skipped"}
+]
+JSON
+    exit 0
+    ;;
+
+  ci-checks-red)
+    # Phase 3 6c.1 PROBE -> CLASSIFY (one failed check).
+    cat <<'JSON'
+[
+  {"name": "build", "status": "completed", "conclusion": "success"},
+  {"name": "test",  "status": "completed", "conclusion": "failure"}
+]
+JSON
+    exit 0
+    ;;
+
+  ci-checks-mixed)
+    # Phase 3 6c.2 MONITOR settles -> 6c.3 CLASSIFY (mixed pending + red).
+    cat <<'JSON'
+[
+  {"name": "build", "status": "completed",  "conclusion": "success"},
+  {"name": "test",  "status": "completed",  "conclusion": "failure"},
+  {"name": "lint",  "status": "in_progress","conclusion": null}
+]
+JSON
+    exit 0
+    ;;
+
+  gh-unreachable)
+    # Phase 3 6c.1 PROBE carve-out (S8). Non-JSON stderr; non-zero exit.
+    printf 'gh: connection refused\n' >&2
+    exit 1
+    ;;
+
+  ci-rate-limit-low)
+    # Phase 3 6c.1 PROBE pre-flight rate_limit_low subreason.
+    cat <<'JSON'
+{"resources": {"core": {"limit": 5000, "used": 4958, "remaining": 42, "reset": 1762457600}}}
+JSON
+    exit 0
+    ;;
+
   *)
     printf 'fake-gh: unknown FAKE_GH_MODE=%s\n' "${mode}" >&2
+    printf 'fake-gh: known modes: success-bare, success-multi, success-pr-view, fail-net, fail-malformed, spinner-leak, fail-pr-view, ci-checks-no-checks, ci-checks-pending, ci-checks-green, ci-checks-red, ci-checks-mixed, gh-unreachable, ci-rate-limit-low\n' >&2
     exit 99
     ;;
 esac
