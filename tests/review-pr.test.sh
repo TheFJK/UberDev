@@ -239,7 +239,7 @@ assert_grep "$REVIEW_PR" '\-\-turbo.*no-op|no-op.*--turbo|acknowledged no-op|for
 assert_grep "$REVIEW_PR" '[Dd]etect.*--turbo|--turbo.*strip|strip.*--turbo' \
   "R7.detection-strip — Step 1 (Determine Review Scope) detects and strips --turbo from aspect list"
 
-assert_grep "$REVIEW_PR" '\-\-turbo.*does NOT (alter|mutate|change)|--turbo.*identical|deterministic.*SHA.*binding' \
+assert_grep "$REVIEW_PR" '\-\-turbo.*does NOT (alter|mutate|change).*Phase 1 or Phase 2' \
   "R7.no-mutation — prose states --turbo does NOT mutate SIMPLIFY_PHASE / Phase 2 behavior"
 
 echo
@@ -386,6 +386,68 @@ assert_subagent_type "$REVIEW_PR" 'code-simplifier' \
 # R13.2 — ## Lens emphasis: prose present (the parameterisation mechanism)
 assert_grep "$REVIEW_PR" '## Lens emphasis:' \
   "R13.2 — Phase 2 documents ## Lens emphasis subsection (Reuse|Quality|Efficiency)"
+
+echo
+echo "== R14: Phase 3 inline block exists in /review-pr.md (#76) =="
+assert_grep "$REVIEW_PR" '^## .*Phase 3|Step 6c|6c\.[0-9]' \
+  "R14 — Phase 3 / Step 6c heading present"
+
+echo
+echo "== R15: GREEN predicate gains Phase 3 outcome conjunct (#76) =="
+assert_grep "$REVIEW_PR" 'Phase 3 outcome.*green.*green_after_fix.*skipped_no_checks|green.*green_after_fix.*skipped_no_checks.*Phase 3' \
+  "R15.1 — Phase 3 outcome ∈ {green, green_after_fix, skipped_no_checks} present in GREEN predicate"
+assert_no_grep "$REVIEW_PR" '^GREEN := \(Phase 1 verdict == "APPROVE"\) AND \(Phase 2 status .* \{"ran/APPROVE", "skipped"\}\)$' \
+  "R15.2 — old 2-conjunct GREEN predicate removed (no bare 2-conjunct line)"
+
+echo
+echo "== R16: --no-ci-fix documented in argument table + frontmatter (#76) =="
+assert_grep "$REVIEW_PR" 'argument-hint:.*--no-ci-fix' \
+  "R16.1 — --no-ci-fix in frontmatter argument-hint"
+assert_grep "$REVIEW_PR" '\| `CI_FIX_PHASE` \|' \
+  "R16.2 — CI_FIX_PHASE row present in Argument Parsing Summary table"
+assert_grep "$REVIEW_PR" '[Dd]etect.*--no-ci-fix|--no-ci-fix.*strip|strip.*--no-ci-fix' \
+  "R16.3 — --no-ci-fix detection + strip step documented (mirrors --no-simplify)"
+
+echo
+echo "== R17: exit-code contract reuses 1 for Phase 3 halts (#76) =="
+assert_grep "$REVIEW_PR" 'Phase 3 outcome.*halted|halted.*loop_cap_exhausted' \
+  "R17.1 — exit-1 row mentions Phase 3 halted/loop_cap_exhausted outcomes"
+assert_no_grep "$REVIEW_PR" '\| `3` \|' \
+  "R17.2 — no new exit code 3 row introduced (Q2 decision: reuse 1)"
+
+echo
+echo "== R18: --turbo prose narrows scope to Phase 1 or Phase 2 only (#76) =="
+assert_grep "$REVIEW_PR" '--turbo.*does NOT (alter|mutate|change).*Phase 1 or Phase 2|Phase 1 or Phase 2.*--turbo' \
+  "R18.1 — --turbo no-op narrowed to 'Phase 1 or Phase 2'"
+assert_grep "$REVIEW_PR" 'Phase 3 halt classes.*billing_quota.*platform_outage|billing_quota.*platform_outage.*Phase 3' \
+  "R18.2 — Phase 3 halt-class carve-out documented (billing_quota + platform_outage)"
+
+echo
+echo "== R19: merge/SKILL.md AUDIT_EVENT_ENUM gains 12 new Phase 3 members (#76) =="
+MERGE_SKILL="$REPO_ROOT/plugins/uberdev/skills/merge/SKILL.md"
+for ev in ci_probe_started ci_probe_skipped_no_checks ci_probe_unreachable \
+          ci_monitor_green ci_monitor_red ci_monitor_timeout \
+          ci_classify_dispatched ci_classify_returned \
+          ci_fix_dispatched ci_fix_pushed \
+          ci_loop_cap_reached ci_phase_outcome; do
+  assert_grep "$MERGE_SKILL" "$ev" \
+    "R19.$ev — AUDIT_EVENT_ENUM declares \`$ev\`"
+done
+
+echo
+echo "== R20: merge/SKILL.md Constants table declares the new CI_*_ENUM rows (#76) =="
+assert_grep "$MERGE_SKILL" '\| `CI_STATUS_ENUM` \|' \
+  "R20.1 — CI_STATUS_ENUM row present"
+assert_grep "$MERGE_SKILL" '\| `CI_FAILURE_CLASS_ENUM` \|' \
+  "R20.2 — CI_FAILURE_CLASS_ENUM row present"
+assert_grep "$MERGE_SKILL" '\| `CI_OUTCOME_ENUM` \|' \
+  "R20.3 — CI_OUTCOME_ENUM row present"
+assert_grep "$MERGE_SKILL" '\| `CI_FIX_LOOP_CAP` \|' \
+  "R20.4 — CI_FIX_LOOP_CAP row present (value 3)"
+assert_grep "$MERGE_SKILL" '\| `RERUN_FLAKY_CAP` \|' \
+  "R20.5 — RERUN_FLAKY_CAP row present (value 1)"
+assert_grep "$MERGE_SKILL" '`code_bug`.*`billing_quota`.*`platform_outage`.*`flaky`.*`env_drift`.*`stale_base`' \
+  "R20.6 — CI_FAILURE_CLASS_ENUM lists all 6 classes in canonical order"
 
 echo
 echo "== Summary =="
