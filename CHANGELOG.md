@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.21.2] - 2026-05-07
+
+### Fixed
+- **`/merge` Phase 1.4 PATH_2 sub-condition (d) gate-failure storm (#78).** The trust-trail JSON gate had two compounding bugs that surfaced when a downstream consumer ran `/merge` against PR #36 with four prior `/review-pr` runs in `.uberdev/runs/`:
+  - **No PR-filter.** `skills/merge/SKILL.md:333` described sub-condition (d) as `∃ a file matching .uberdev/runs/<run-id>/review-pr-verdict.json` with no constraint on `<run-id>` and no constraint on the JSON's `.pr` field. The /merge agent's ad-hoc bash globbed every JSON in `.uberdev/runs/` and demanded each `.sha` equal `headRefOid`. Prior `/review-pr` runs (whether from earlier states of this PR or from other PRs in the same repo) left stale JSONs whose SHAs were correct *for their run* but no longer matched the current PR HEAD. Result: gate_fail across all 4 of them, even when one of them was the JSON for the current PR with a valid SHA. The gate got *harder* the more `/review-pr` history a repo accumulated — the absurd workaround was `rm -rf .uberdev/runs/`.
+  - **Strict `"sha" == headRefOid` contradicted (c)'s fixup tolerance.** `SKILL.md:341` promises *"Honest fast-forward fixup commits added between /review-pr and /merge … evaluate to PASS"* — sub-condition (c) (the `trust-trail-evaluator` agent) honors this via cumulative-diff-empty heuristics. (d)'s strict equality did not. Any empty-anchor-on-top, sibling-equivalent `commit --amend`, or trivially-empty fixup moved `headRefOid` and broke (d) while (c) still PASSed. (d), explicitly framed as **corroborating-only** at line 333, was gating *harder* than the load-bearing (c) check.
+  - **Producer recipe ambiguity.** `commands/review-pr.md:437` left the JSON's `"sha"` field as `<full-40-char-head-sha>` — undefined. The recipe at lines 416-420 only named `PARENT_SHA` (pre-anchor). Whether the JSON should record `PARENT_SHA` (matching the trailer payload) or post-anchor HEAD (matching `gh pr view --json headRefOid`) was left to agent inference, allowing producer drift.
+  - **Fix.** Sub-condition (d) is now PR-filtered (glob → retain `.pr == <N>` → most-recent run-id) and presence + shape only (run-id regex / JSON parse / 40-hex `"sha"` field). The strict `"sha" == headRefOid` equality check is RETIRED post-#78 — tamper detection is fully delegated to (c). `data.reason="trust_trail_json_sha_mismatch"` is preserved in `GATE_FAIL_REASON_ENUM` (deprecation pattern; mirrors `trust_trail_json_missing` post-#52) but its scope is narrowed to shape failures only. The `/review-pr` recipe now explicitly captures `ANCHOR_SHA="$(git rev-parse HEAD)"` after `git push origin HEAD` and uses `${ANCHOR_SHA}` in the JSON `"sha"` field — the `<full-40-char-head-sha>` placeholder is removed.
+
+### Tests
+- **`tests/merge.test.sh` M63** narrowed and extended for #78. `M63.mismatch-gatefail` rephrased to "shape-malformed gate_fail (narrowed scope post-#78)". New assertions: `M63.pr-filter` (Phase 1.4 PATH_2 (d) prose explicitly requires filtering by top-level `.pr` field), `M63.strict-equality-retired` (prose explicitly retires `"sha" == headRefOid` equality), `M63.shape-malformed-narrow` (reason emission narrowed to shape failures), `M63.most-recent-tiebreak` (deterministic tie-break to lex-greatest run-id). The `M37.gfr8` row-membership assertion is preserved (deprecation pattern keeps the enum row).
+- **`tests/review-pr.test.sh` R9.8–R9.11** (new). `R9.8` asserts `ANCHOR_SHA="$(git rev-parse HEAD)"` is captured after the push; `R9.9` asserts the JSON `"sha"` field literal `${ANCHOR_SHA}` substitution; `R9.10` is a regression guard that the ambiguous `<full-40-char-head-sha>` placeholder is gone; `R9.11` asserts the disambiguation prose between `ANCHOR_SHA` and `PARENT_SHA`.
+
 ## [0.21.1] - 2026-05-07
 
 ### Fixed

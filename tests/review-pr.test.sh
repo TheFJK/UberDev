@@ -318,6 +318,32 @@ assert_grep "$REVIEW_PR" \
   'anchor commit fails|anchor commit.*fails' \
   "R9.7 — artifact-emission failure prose covers anchor commit failure"
 
+# R9.8 (#78) — ANCHOR_SHA captured AFTER `git push origin HEAD` so the audit JSON `"sha"`
+# field can reference the anchor commit's own SHA (== post-emission headRefOid). The
+# pre-#78 recipe only named PARENT_SHA, leaving the producer agent to infer which SHA
+# went into the JSON; the inferred value drifted, breaking /merge sub-condition (d).
+assert_grep "$REVIEW_PR" \
+  'ANCHOR_SHA="\$\(git rev-parse HEAD\)"' \
+  "R9.8 — ANCHOR_SHA captured after the push (post-emission headRefOid for the audit JSON)"
+
+# R9.9 (#78) — audit JSON `"sha"` field references ${ANCHOR_SHA} explicitly, not the
+# pre-#78 ambiguous `<full-40-char-head-sha>` placeholder.
+assert_grep "$REVIEW_PR" \
+  '"sha":[[:space:]]*"\$\{ANCHOR_SHA\}"' \
+  "R9.9 — audit JSON \"sha\" field uses \${ANCHOR_SHA} (post-emission headRefOid), not a placeholder"
+
+# R9.10 (#78) — regression guard against the ambiguous `<full-40-char-head-sha>`
+# placeholder that the pre-#78 recipe used. The placeholder must not return.
+assert_no_grep "$REVIEW_PR" \
+  '<full-40-char-head-sha>' \
+  "R9.10 — ambiguous '<full-40-char-head-sha>' placeholder is not present in /review-pr (issue #78)"
+
+# R9.11 (#78) — disambiguation prose: JSON sha is ANCHOR_SHA, NOT PARENT_SHA. The
+# trailer payload references PARENT_SHA but the JSON references the anchor itself.
+assert_grep "$REVIEW_PR" \
+  'NOT[[:space:]]*\$\{PARENT_SHA\}|NOT.*PARENT_SHA|sha.*ANCHOR_SHA.*from artifact 1' \
+  "R9.11 — disambiguation prose: JSON sha is ANCHOR_SHA, not PARENT_SHA"
+
 echo
 echo "== R10 (#73): Sequential argument honored — env-var export + stderr notice =="
 

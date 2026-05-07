@@ -1091,13 +1091,13 @@ else
 fi
 
 echo
-echo "== M63: Phase 1.4 PATH_2 sub-condition (d) hybrid present/absent behavior (issue #52) =="
+echo "== M63: Phase 1.4 PATH_2 sub-condition (d) hybrid present/absent behavior (issue #52, narrowed by #78) =="
 
 assert_grep "$SKILL_FILE" 'trust_trail_json_absent' \
   "M63.absent-advisory — JSON-absent advisory reason documented in PATH_2 (d) prose"
 
 assert_grep "$SKILL_FILE" 'trust_trail_json_sha_mismatch' \
-  "M63.mismatch-gatefail — JSON-present SHA-mismatch gate_fail reason documented in PATH_2 (d) prose"
+  "M63.mismatch-gatefail — JSON shape-malformed gate_fail reason still documented (narrowed scope post-#78 — emits on shape failures only)"
 
 # M63.missing-retired — scoped to Phase 1.4 body (between Step 1.4 heading and Step 1.5 heading);
 # the OLD reason must NOT appear as a gate_fail data.reason inside the (d) bullet body.
@@ -1113,6 +1113,34 @@ assert_grep "$SKILL_FILE" 'absence on a fresh clone is by design|fresh clone.*by
 
 assert_grep "$SKILL_FILE" 'short-circuit.*sub-condition.*d|d.*only.*checked.*c.*returned.*PASS' \
   "M63.short-circuit-preserved — (c) short-circuit-on-non-PASS clause still documented in PATH_2"
+
+# Issue #78 — PR-filter and strict-SHA-equality retirement assertions, scoped to the
+# Phase 1.4 PATH_2 (d) body so they don't accidentally match other prose.
+PATH2_D_BODY=$(echo "$PHASE_14_BODY" | awk '/^d\. /,/^On all four sub-conditions met:/')
+
+if echo "$PATH2_D_BODY" | grep -qE 'top-level `?\.pr`? integer field equals'; then
+  pass "M63.pr-filter — sub-condition (d) prose explicitly requires filtering JSONs by top-level .pr field"
+else
+  fail "M63.pr-filter — sub-condition (d) prose must require filtering .uberdev/runs/*/review-pr-verdict.json by top-level .pr == <N> (issue #78)"
+fi
+
+if echo "$PATH2_D_BODY" | grep -qE 'strict.*"sha"[[:space:]]*==[[:space:]]*headRefOid.*RETIRED|equality check is RETIRED|equality check is no longer performed|RETIRED.*post-#78'; then
+  pass "M63.strict-equality-retired — sub-condition (d) prose explicitly retires strict \"sha\" == headRefOid equality check (issue #78)"
+else
+  fail "M63.strict-equality-retired — sub-condition (d) prose must explicitly retire the strict \"sha\" == headRefOid check (issue #78)"
+fi
+
+if echo "$PATH2_D_BODY" | grep -qE 'shape-malformed only|narrowed to.*shape-malformed|shape failures.*only'; then
+  pass "M63.shape-malformed-narrow — sub-condition (d) narrows trust_trail_json_sha_mismatch emission to shape-malformed cases only (issue #78)"
+else
+  fail "M63.shape-malformed-narrow — sub-condition (d) must narrow trust_trail_json_sha_mismatch to shape-malformed cases only post-#78"
+fi
+
+if echo "$PATH2_D_BODY" | grep -qE 'lex-greatest|most recent.*run-id|most-recent.*run-id'; then
+  pass "M63.most-recent-tiebreak — sub-condition (d) prose specifies tie-break to most-recent run-id when multiple JSONs match the PR (issue #78)"
+else
+  fail "M63.most-recent-tiebreak — sub-condition (d) must specify a deterministic tie-break (most-recent run-id) when multiple matching JSONs exist (issue #78)"
+fi
 
 echo
 echo "== M64: SKILL.md run-summary per-PR conflict-files sub-block (issue #60) =="

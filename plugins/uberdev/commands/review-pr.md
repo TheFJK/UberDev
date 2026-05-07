@@ -413,11 +413,12 @@ On GREEN, emit three SHA-bound durable artifacts in lockstep (all reference the 
 1. **Trust-trail-anchor commit** — emit ONE empty commit at HEAD whose body carries the trailer pointing at its parent. The parent SHA — captured **before** the anchor commit — is the load-bearing trust artifact for `/merge` Phase 1.4 trust resolution (see `skills/merge/SKILL.md` Constants `REVIEW_PR_TRAILER_PREFIX`):
 
    ```bash
-   PARENT_SHA="$(git rev-parse HEAD)"   # full 40-char SHA — NOT --short
+   PARENT_SHA="$(git rev-parse HEAD)"   # full 40-char SHA — NOT --short; goes into the trailer payload
    git commit --allow-empty -m "chore(review-pr): trust trail anchor for #<PR>
 
    Reviewed-by: uberdev/review-pr@${PARENT_SHA}"
    git push origin HEAD
+   ANCHOR_SHA="$(git rev-parse HEAD)"   # full 40-char SHA — captured AFTER the push; equals post-emission `headRefOid` (i.e., the anchor commit's own SHA, NOT the trailer's PARENT_SHA payload). Used in artifact 3's audit JSON `"sha"` field.
    ```
 
    Why an empty anchor commit (and not a per-simplify-commit trailer or `git commit --amend`):
@@ -429,12 +430,12 @@ On GREEN, emit three SHA-bound durable artifacts in lockstep (all reference the 
 
 2. **Label** — `gh pr edit <N> --add-label uberdev-approved` (idempotent — `gh` no-ops if the label is already present). The literal label string is `uberdev-approved` (see `skills/merge/SKILL.md` Constants `UBERDEV_APPROVED_LABEL`).
 
-3. **Audit JSON** — write to `.uberdev/runs/<run-id>/review-pr-verdict.json`:
+3. **Audit JSON** — write to `.uberdev/runs/<run-id>/review-pr-verdict.json`. The `"sha"` field MUST be `${ANCHOR_SHA}` from artifact 1 (the post-emission `headRefOid`, equal to the anchor commit's own SHA). It is NOT `${PARENT_SHA}` — the trailer payload references the pre-anchor parent, but the JSON `"sha"` references the anchor itself, matching what `gh pr view --json headRefOid` returns immediately after the push:
 
 ```json
 {
   "pr": <int>,
-  "sha": "<full-40-char-head-sha>",
+  "sha": "${ANCHOR_SHA}",
   "verdict": "APPROVE",
   "phases": {
     "phase1": {"status": "ran", "verdict": "APPROVE"},
