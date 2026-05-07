@@ -225,6 +225,34 @@ for f in "$SOLVE_CMD" "$TURBO_CMD"; do
 done
 
 echo
+echo "== C8: solve-pipeline 'Permission mode' line must use flat-var form (zsh-NOMATCH guard) =="
+# Regression guard for the v0.21.1 fix. The one-liner of the form
+#   echo "Permission mode: $([[ "$AUTO_PERMISSIONS" == "1" ]] && echo 'auto (...)' || echo 'default (...)')"
+# is valid bash/zsh in isolation but trips zsh's NOMATCH when an agent re-emits
+# this SKILL block into a generated launcher .sh and the inner single-quote
+# pair around the `default '...'` echo argument drops on transcription —
+# leaving the literal `(manual per-tool gating)` unquoted before the closing
+# `"`. Observed in the wild against TheFJK/WAGYPROD#35. Pattern only matches
+# the resurrected one-liner, never the new flat-var if/else form.
+if grep -qE '^echo "Permission mode: \$\(\[\[' "$SOLVE_PIPELINE"; then
+  echo "  FAIL  solve-pipeline 'Permission mode' echo collapsed back to one-liner — zsh-NOMATCH regression"
+  echo "        file:    $SOLVE_PIPELINE"
+  echo "        rule:    use the flat-var if/else form, not 'echo \"... \$([[ ... ]] && echo ... || echo ...)\"'"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  solve-pipeline 'Permission mode' echo uses flat-var form (zsh-NOMATCH guard intact)"
+  PASS=$((PASS + 1))
+fi
+# Positive companion: the flat-var form must actually be present (catches a
+# scenario where someone deletes the line entirely instead of regressing it).
+assert_grep "$SOLVE_PIPELINE" '^[[:space:]]*PERM_DESC="default \(manual per-tool gating\)"' \
+  "solve-pipeline assigns PERM_DESC=\"default (manual per-tool gating)\" in the else branch"
+assert_grep "$SOLVE_PIPELINE" '^[[:space:]]*PERM_DESC="auto \(Claude Code AI classifier\)"' \
+  "solve-pipeline assigns PERM_DESC=\"auto (Claude Code AI classifier)\" in the if branch"
+assert_grep "$SOLVE_PIPELINE" '^echo "Permission mode: \$PERM_DESC"' \
+  "solve-pipeline echoes 'Permission mode: \$PERM_DESC' (single-var interpolation, no nested substitution)"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

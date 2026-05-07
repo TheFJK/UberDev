@@ -131,7 +131,22 @@ case "$TERMINAL" in
 esac
 
 echo "Dispatching via: $TERMINAL"
-echo "Permission mode: $([[ "$AUTO_PERMISSIONS" == "1" ]] && echo 'auto (Claude Code AI classifier)' || echo 'default (manual per-tool gating)')"
+# Do NOT collapse this back into a one-liner of the form
+#   echo "Permission mode: $([[ "$AUTO_PERMISSIONS" == "1" ]] && echo 'auto (...)' || echo 'default (manual per-tool gating)')"
+# When an agent re-emits this SKILL block into a generated launcher .sh,
+# the inner single-quote pair around the `default '...'` echo argument
+# tends to drop while the outer `"..."` is preserved, leaving the literal
+# `(manual per-tool gating)` unquoted right before the closing `"`. Under
+# zsh's default NOMATCH that is an unmatched glob → `zsh:<line>: no matches
+# found: (manual per-tool gating)"` → fatal under `set -e` (observed in
+# the wild against TheFJK/WAGYPROD#35). The flat-var form below has no
+# nested-quote layers for the agent to mis-emit.
+if [[ "$AUTO_PERMISSIONS" == "1" ]]; then
+  PERM_DESC="auto (Claude Code AI classifier)"
+else
+  PERM_DESC="default (manual per-tool gating)"
+fi
+echo "Permission mode: $PERM_DESC"
 
 # Resolve the real Claude binary once (PATH walk skipping wrapper directory).
 # Hoisted out of the per-issue loop — same value for every spawn.

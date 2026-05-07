@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-05-07
+
+### Fixed
+- **`solve-pipeline/SKILL.md:134` zsh-NOMATCH transcription trap.** The "Permission mode" echo packed `$([[ "$AUTO_PERMISSIONS" == "1" ]] && echo 'auto (Claude Code AI classifier)' || echo 'default (manual per-tool gating)')` inside an outer `"…"`. The line is valid bash/zsh in isolation, but every time an agent re-emits the SKILL block into a generated `/tmp/solve-*.sh` launcher (heredoc → sed pipeline), any slip in the nested `"`/`'`/`(…)` layers leaves the literal `(manual per-tool gating)` outside a quote. Under zsh's default `NOMATCH` that becomes an unmatched glob → `zsh:<line>: no matches found: (…)` → fatal under `set -e`, and the whole solve-pipeline run aborts before the validation loop. Reproduced by user against `TheFJK/WAGYPROD#35` (`zsh:32: no matches found: (manual gating)"`).
+  - **Fix.** Hoisted the conditional out of the echo into a flat `PERM_DESC` variable populated by an `if/else`. Behaviour identical (same two strings, same `$AUTO_PERMISSIONS` semantics), but no nested substitution-with-parens-in-singlequotes pattern for the agent to mis-quote on re-emit. Comment block in the SKILL records the failure mode so future edits don't re-introduce the one-liner.
+  - **Why patch only.** No new flags, no behavioural change, no test-shape change — single-block edit in the bash recipe inside one SKILL. Per the project's bump-everywhere rule, still a patch-version bump (0.21.0 → 0.21.1) so marketplace clients pull the fix.
+
+### Tests
+- **`tests/audit-fixups.test.sh`: regression guard for the `Permission mode` one-liner.** Asserts the SKILL no longer contains `Permission mode: $([[`; the assertion never matches the new flat-var form, only matches the resurrected substitution-with-parens form. Pattern observed twice in the field at line 134, so a permanent shape guard is the standard playbook (cf. the line-385 `[1m]` glob and line-410 `timeout` word-splitting guards).
+
 ## [0.21.0] - 2026-05-06
 
 ### Added
