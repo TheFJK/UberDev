@@ -318,6 +318,84 @@ assert_grep "$REVIEW_PR" \
   'anchor commit fails|anchor commit.*fails' \
   "R9.7 — artifact-emission failure prose covers anchor commit failure"
 
+# R9.8 (#78) — ANCHOR_SHA captured AFTER `git push origin HEAD` so the audit JSON `"sha"`
+# field can reference the anchor commit's own SHA (== post-emission headRefOid). The
+# pre-#78 recipe only named PARENT_SHA, leaving the producer agent to infer which SHA
+# went into the JSON; the inferred value drifted, breaking /merge sub-condition (d).
+assert_grep "$REVIEW_PR" \
+  'ANCHOR_SHA="\$\(git rev-parse HEAD\)"' \
+  "R9.8 — ANCHOR_SHA captured after the push (post-emission headRefOid for the audit JSON)"
+
+# R9.9 (#78) — audit JSON `"sha"` field references ${ANCHOR_SHA} explicitly, not the
+# pre-#78 ambiguous `<full-40-char-head-sha>` placeholder.
+assert_grep "$REVIEW_PR" \
+  '"sha":[[:space:]]*"\$\{ANCHOR_SHA\}"' \
+  "R9.9 — audit JSON \"sha\" field uses \${ANCHOR_SHA} (post-emission headRefOid), not a placeholder"
+
+# R9.10 (#78) — regression guard against the ambiguous `<full-40-char-head-sha>`
+# placeholder that the pre-#78 recipe used. The placeholder must not return.
+assert_no_grep "$REVIEW_PR" \
+  '<full-40-char-head-sha>' \
+  "R9.10 — ambiguous '<full-40-char-head-sha>' placeholder is not present in /review-pr (issue #78)"
+
+# R9.11 (#78) — disambiguation prose: JSON sha is ANCHOR_SHA, NOT PARENT_SHA. The
+# trailer payload references PARENT_SHA but the JSON references the anchor itself.
+assert_grep "$REVIEW_PR" \
+  'NOT[[:space:]]*\$\{PARENT_SHA\}|NOT.*PARENT_SHA|sha.*ANCHOR_SHA.*from artifact 1' \
+  "R9.11 — disambiguation prose: JSON sha is ANCHOR_SHA, not PARENT_SHA"
+
+# R9.12 (#79 follow-on) — push-failure guard: the recipe MUST guard `git push origin HEAD`
+# with an explicit exit-code check before capturing ANCHOR_SHA. Without the guard, a push
+# failure (network, auth, hook rejection) would leave ANCHOR_SHA pointing at a local-only
+# HEAD; the audit JSON would then carry a SHA absent from the remote, and `/merge` would
+# fail downstream with `trust_trail_agent_invalid_input` (subreason
+# `trailer_sha_not_in_local_clone`). The spec at the artifact-emission-failure prose below
+# already mandates exit 2 on push failure — this assertion pins the guard's *recipe* form
+# so a future edit can't silently regress to a bare `git push origin HEAD` and re-create
+# the silent-failure mode. Two-of-two alternatives so a reviewer can choose `if !` or
+# `|| exit 2` style without false-failing.
+assert_grep "$REVIEW_PR" \
+  'if ! git push origin HEAD|git push origin HEAD \|\| .*exit 2' \
+  "R9.12 — git push origin HEAD guarded with exit-code check before ANCHOR_SHA capture"
+
+# R9.13 (#79 follow-on) — negative regression guard: the bare `git push origin HEAD` line
+# (no guard, no `||`, no preceding `if !`) MUST NOT appear in the trust-signal-emission
+# recipe. Anchored on the literal "git push origin HEAD" followed by end-of-line — i.e.,
+# the exact pre-#79 unguarded form. With the guard in place, the literal `git push origin
+# HEAD` only appears as the predicate inside `if ! git push origin HEAD; then`, so it's
+# never EOL-bare. This pin defends against the F1 silent-failure class returning.
+assert_no_grep "$REVIEW_PR" \
+  '^[[:space:]]*git push origin HEAD[[:space:]]*$' \
+  "R9.13 — bare 'git push origin HEAD' (unguarded, EOL-anchored) is not present"
+
+# R9.14 (#79 simplify-pass follow-on) — label-add guard symmetry: artifact 2's
+# `gh pr edit <N> --add-label uberdev-approved` MUST be guarded with the same
+# `if ! …; then exit 2; fi` form as artifact 1's push guard (R9.12). Without it,
+# a label-add failure (network, auth, rate limit, label-permission denial) leaves
+# bash continuing silently while the audit JSON gets written; `/merge` Phase 1.4
+# PATH_2 sub-condition (a) then fails downstream with `trust_trail_label_missing`.
+# The spec at the artifact-emission-failure prose mandates exit 2 on `label add
+# fails` — this assertion pins the guard's *recipe* form so a future edit can't
+# silently regress to a bare `gh pr edit` and re-create the F1 silent-failure
+# class. Two-of-two alternatives (`if !` or `|| exit 2`) so a reviewer can
+# choose either style without false-failing.
+assert_grep "$REVIEW_PR" \
+  'if ! gh pr edit.*--add-label uberdev-approved|gh pr edit.*--add-label uberdev-approved \|\| .*exit 2' \
+  "R9.14 — gh pr edit --add-label uberdev-approved guarded with exit-code check (label-add symmetry to R9.12 push guard)"
+
+# R9.15 (#79 simplify-pass follow-on) — negative regression guard: the bare
+# `gh pr edit <N> --add-label uberdev-approved` line (no guard, no `||`, no
+# preceding `if !`) MUST NOT appear at end-of-line in the trust-signal-emission
+# recipe. With the guard in place from R9.14, the literal command only appears
+# as the predicate inside `if ! gh pr edit …; then`, so it's never EOL-bare in
+# a recipe block. The recipe-bullet prose (line ~441) still describes the
+# command in inline-code form (followed by parenthetical "(idempotent — …)"),
+# which is anchored on `(idempotent` and excluded from this regex. This pin
+# defends against the F1 silent-failure class returning to artifact 2.
+assert_no_grep "$REVIEW_PR" \
+  '^[[:space:]]*gh pr edit <N> --add-label uberdev-approved[[:space:]]*$' \
+  "R9.15 — bare 'gh pr edit <N> --add-label uberdev-approved' (unguarded, EOL-anchored, recipe form) is not present"
+
 echo
 echo "== R10 (#73): Sequential argument honored — env-var export + stderr notice =="
 
