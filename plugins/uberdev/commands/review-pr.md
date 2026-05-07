@@ -417,8 +417,18 @@ On GREEN, emit three SHA-bound durable artifacts in lockstep (all reference the 
    git commit --allow-empty -m "chore(review-pr): trust trail anchor for #<PR>
 
    Reviewed-by: uberdev/review-pr@${PARENT_SHA}"
-   git push origin HEAD
-   ANCHOR_SHA="$(git rev-parse HEAD)"   # full 40-char SHA — captured AFTER the push; equals post-emission `headRefOid` (i.e., the anchor commit's own SHA, NOT the trailer's PARENT_SHA payload). Used in artifact 3's audit JSON `"sha"` field.
+   if ! git push origin HEAD; then
+     # Push failed (network, auth, rate limit, hook rejection, non-fast-forward, …).
+     # Without this guard, ANCHOR_SHA below would capture a local-only HEAD; the audit
+     # JSON would then be written with a SHA that does not exist on the remote, and
+     # `/merge` Phase 1.4 would later fail with a cryptic `trust_trail_agent_invalid_input`
+     # (subreason `trailer_sha_not_in_local_clone`). Per artifact-emission-failure prose
+     # below, exit 2 — treat as `blocked`-equivalent so the trust-signal contract is
+     # never silently broken. Re-run /review-pr after resolving the push failure.
+     echo "error: trust-trail anchor push failed (git push origin HEAD exited non-zero). Re-run /review-pr after resolving." >&2
+     exit 2
+   fi
+   ANCHOR_SHA="$(git rev-parse HEAD)"   # full 40-char SHA — captured AFTER the push (push-success guarded above); equals post-emission `headRefOid` (i.e., the anchor commit's own SHA, NOT the trailer's PARENT_SHA payload). Used in artifact 3's audit JSON `"sha"` field.
    ```
 
    Why an empty anchor commit (and not a per-simplify-commit trailer or `git commit --amend`):

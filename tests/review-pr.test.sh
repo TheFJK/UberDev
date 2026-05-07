@@ -344,6 +344,30 @@ assert_grep "$REVIEW_PR" \
   'NOT[[:space:]]*\$\{PARENT_SHA\}|NOT.*PARENT_SHA|sha.*ANCHOR_SHA.*from artifact 1' \
   "R9.11 — disambiguation prose: JSON sha is ANCHOR_SHA, not PARENT_SHA"
 
+# R9.12 (#79 follow-on) — push-failure guard: the recipe MUST guard `git push origin HEAD`
+# with an explicit exit-code check before capturing ANCHOR_SHA. Without the guard, a push
+# failure (network, auth, hook rejection) would leave ANCHOR_SHA pointing at a local-only
+# HEAD; the audit JSON would then carry a SHA absent from the remote, and `/merge` would
+# fail downstream with `trust_trail_agent_invalid_input` (subreason
+# `trailer_sha_not_in_local_clone`). The spec at the artifact-emission-failure prose below
+# already mandates exit 2 on push failure — this assertion pins the guard's *recipe* form
+# so a future edit can't silently regress to a bare `git push origin HEAD` and re-create
+# the silent-failure mode. Two-of-two alternatives so a reviewer can choose `if !` or
+# `|| exit 2` style without false-failing.
+assert_grep "$REVIEW_PR" \
+  'if ! git push origin HEAD|git push origin HEAD \|\| .*exit 2' \
+  "R9.12 — git push origin HEAD guarded with exit-code check before ANCHOR_SHA capture"
+
+# R9.13 (#79 follow-on) — negative regression guard: the bare `git push origin HEAD` line
+# (no guard, no `||`, no preceding `if !`) MUST NOT appear in the trust-signal-emission
+# recipe. Anchored on the literal "git push origin HEAD" followed by end-of-line — i.e.,
+# the exact pre-#79 unguarded form. With the guard in place, the literal `git push origin
+# HEAD` only appears as the predicate inside `if ! git push origin HEAD; then`, so it's
+# never EOL-bare. This pin defends against the F1 silent-failure class returning.
+assert_no_grep "$REVIEW_PR" \
+  '^[[:space:]]*git push origin HEAD[[:space:]]*$' \
+  "R9.13 — bare 'git push origin HEAD' (unguarded, EOL-anchored) is not present"
+
 echo
 echo "== R10 (#73): Sequential argument honored — env-var export + stderr notice =="
 

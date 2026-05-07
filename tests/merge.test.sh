@@ -646,14 +646,19 @@ assert_grep "$SKILL_FILE" 'uberdev_review_trail'    "M36.tea2 — TRUST_ANCHOR_E
 assert_grep "$SKILL_FILE" 'bypass_with_waiver'      "M36.tea3 — TRUST_ANCHOR_ENUM value bypass_with_waiver"
 
 echo
-echo "== M37: SKILL.md GATE_FAIL_REASON_ENUM — 12 members (8 trust-resolution + 4 pre-condition) post issue #52 =="
+echo "== M37: SKILL.md GATE_FAIL_REASON_ENUM — 13 members (8 trust-resolution + 4 pre-condition + 1 infrastructure-failure) post issue #52 (narrowed by #78 — see M63.{strict-equality-retired,shape-malformed-narrow}) =="
 # M37: updated for issue #52 — GATE_FAIL_REASON_ENUM expanded for trust_trail_json_sha_mismatch
 # (8 trust-resolution reasons) + 4 pre-condition reasons. Issue #52 split the (d) sub-condition's
 # JSON-absent vs JSON-present-but-SHA-mismatch cases: absent → advisory only (by-design on fresh
 # clone, see D1); present-but-mismatch → gate_fail trust_trail_json_sha_mismatch (genuine staleness
-# signal). Earlier issue #47 added trust_trail_agent_invalid_input. The four pre-condition reasons
-# (pr_state_not_open / is_draft / ci_red / merge_state_blocked) are emitted by Step 1.4 pre-flight
-# gates that fire regardless of trust path.
+# signal). Earlier issue #47 added trust_trail_agent_invalid_input. v0.19.3 added the
+# pr_view_unreachable infrastructure-failure reason (R2 lib-call failure), bringing the row total
+# to 13. Issue #78 then narrowed the trust_trail_json_sha_mismatch *emission scope* (in Phase 1.4
+# (d) prose, not the enum row) from strict-SHA-equality to shape-malformed-only — see
+# M63.strict-equality-retired and M63.shape-malformed-narrow for the prose-shape assertions; the
+# enum membership itself is unchanged by #78. The four pre-condition reasons (pr_state_not_open /
+# is_draft / ci_red / merge_state_blocked) are emitted by Step 1.4 pre-flight gates that fire
+# regardless of trust path.
 assert_grep "$SKILL_FILE" 'review_decision_not_approved'      "M37.gfr1 — trust-resolution reason review_decision_not_approved"
 assert_grep "$SKILL_FILE" 'trust_trail_missing'                "M37.gfr2 — trust-resolution reason trust_trail_missing"
 assert_grep "$SKILL_FILE" 'trust_trail_stale_sha'              "M37.gfr3 — trust-resolution reason trust_trail_stale_sha"
@@ -1140,6 +1145,19 @@ if echo "$PATH2_D_BODY" | grep -qE 'lex-greatest|most recent.*run-id|most-recent
   pass "M63.most-recent-tiebreak — sub-condition (d) prose specifies tie-break to most-recent run-id when multiple JSONs match the PR (issue #78)"
 else
   fail "M63.most-recent-tiebreak — sub-condition (d) must specify a deterministic tie-break (most-recent run-id) when multiple matching JSONs exist (issue #78)"
+fi
+
+# M63.equality-check-removed — negative regression guard against the retired strict-equality
+# phrasing returning to (d). The earlier (pre-#78) prose described the check as
+# `gate_fail when "sha" != headRefOid` (or the unicode `≠` variant); #78 retired the strict
+# equality, narrowing emission to shape-malformed-only. This guard ensures a future edit
+# can't silently re-introduce the inequality phrasing inside the (d) body. Mirrors the
+# `assert_no_grep` convention but operates on $PATH2_D_BODY (a variable, not a file) so
+# it stays consistent with the surrounding M63 inline-grep style.
+if echo "$PATH2_D_BODY" | grep -qE '"sha"[[:space:]]*!=[[:space:]]*headRefOid|"sha"[[:space:]]*≠[[:space:]]*headRefOid|sha[[:space:]]+(does[[:space:]]+not|!=)[[:space:]]+(equal|match)[[:space:]]+headRefOid'; then
+  fail "M63.equality-check-removed — strict-equality phrasing (\"sha\" != headRefOid / \"sha\" ≠ headRefOid) must NOT return to sub-condition (d) post-#78 — see M63.strict-equality-retired"
+else
+  pass "M63.equality-check-removed — sub-condition (d) does not carry the retired strict-inequality phrasing (issue #78 regression guard)"
 fi
 
 echo
