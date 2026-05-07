@@ -440,6 +440,18 @@ On GREEN, emit three SHA-bound durable artifacts in lockstep (all reference the 
 
 2. **Label** — `gh pr edit <N> --add-label uberdev-approved` (idempotent — `gh` no-ops if the label is already present). The literal label string is `uberdev-approved` (see `skills/merge/SKILL.md` Constants `UBERDEV_APPROVED_LABEL`).
 
+   ```bash
+   # Mirror artifact 1's push-failure guard: if `gh pr edit` exits non-zero
+   # (network, auth, rate limit, label-permission denial), bash continues silently
+   # and the audit JSON below gets written without the label being applied.
+   # `/merge` Phase 1.4 PATH_2 sub-condition (a) then fails downstream with a cryptic
+   # `trust_trail_label_missing`. Per artifact-emission-failure prose below, exit 2.
+   if ! gh pr edit <N> --add-label uberdev-approved; then
+     echo "error: trust-trail label add failed (gh pr edit ... exited non-zero). Re-run /review-pr after resolving." >&2
+     exit 2
+   fi
+   ```
+
 3. **Audit JSON** — write to `.uberdev/runs/<run-id>/review-pr-verdict.json`. The `"sha"` field MUST be `${ANCHOR_SHA}` from artifact 1 (the post-emission `headRefOid`, equal to the anchor commit's own SHA). It is NOT `${PARENT_SHA}` — the trailer payload references the pre-anchor parent, but the JSON `"sha"` references the anchor itself, matching what `gh pr view --json headRefOid` returns immediately after the push:
 
 ```json
