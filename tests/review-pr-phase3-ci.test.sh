@@ -125,8 +125,27 @@ assert_grep "$REVIEW_PR" 'Phase 3 halt classes.*--turbo|--turbo.*halt classes' \
   "S7.2 — Phase 3 halt-class carve-out documented for --turbo"
 assert_grep "$REVIEW_PR" 'billing_quota.*platform_outage|platform_outage.*billing_quota' \
   "S7.3 — both halt classes named together in --turbo carve-out"
-assert_no_grep "$REVIEW_PR" 'AskUserQuestion.*--turbo|--turbo.*AskUserQuestion(?!.*suppress)' \
-  "S7.4 — --turbo does NOT call AskUserQuestion (suppress prose only)"
+# S7.4 — no `AskUserQuestion(` call site lives inside the Turbo (--turbo
+# present) branch of 6c.6 HALT. The original assertion used a perl-style
+# negative lookahead `(?!...)` which is not in ERE — it triggered
+# `grep: warning: ? at start of expression` on GNU grep (Linux CI),
+# causing a false fail (and falsely passing on macOS BSD grep).
+# This awk walk tracks "Turbo" vs "Interactive" subsections in 6c.6 HALT
+# and flags any AskUserQuestion( call inside the Turbo region — which
+# would defeat the carve-out's "no prompt under --turbo" contract.
+S7_4_VIOLATIONS="$(awk '
+  /\*\*Turbo \(.--turbo. present\):\*\*/ { in_turbo=1; next }
+  /\*\*Interactive \(.--turbo. absent\):\*\*/ { in_turbo=0; next }
+  /^### / { in_turbo=0 }
+  in_turbo && /AskUserQuestion\(/ { print FILENAME ":" NR ": " $0 }
+' "$REVIEW_PR")"
+if [ -z "$S7_4_VIOLATIONS" ]; then
+  echo "  PASS  S7.4 — --turbo branch does NOT call AskUserQuestion()"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S7.4 — --turbo branch contains an AskUserQuestion() call"
+  printf '%s\n' "$S7_4_VIOLATIONS" | sed 's/^/          /'
+  FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== S8: gh outage carve-out — ci_probe_unreachable + Step 7 still runs =="
@@ -186,6 +205,53 @@ assert_grep "$REBASE_HANDLER" 'flock|ci-rebase\.lock' \
   "S12.4 — worktree lock file documented"
 assert_grep "$REBASE_HANDLER" 'pr-already-merged|head-moved-since-classify|lease-mismatch' \
   "S12.5 — refusal triggers documented"
+
+echo
+echo "== S13: stale_base CONFLICT-resolve arm (#80) =="
+# Issue #80: ci-rebase-handler returns status: CONFLICT, conflicted_files: [...]
+# but commands/review-pr.md had no procedural arm to fan out conflict-resolver
+# and resume the rebase under the original lease. The capability was tooled
+# (ci-rebase-handler.md:57 + agents/conflict-resolver.md exist) but unwired.
+# These assertions lock the procedural arm into the prose so a future edit
+# can't silently regress it back to "POST-FIX assumes REBASED".
+assert_subagent_type "$REVIEW_PR" 'conflict-resolver' \
+  "S13.1 — review-pr.md dispatches uberdev:conflict-resolver in Phase 3 CONFLICT path"
+assert_grep "$REVIEW_PR" 'conflicted_files' \
+  "S13.2 — review-pr.md prose names the conflicted_files YAML field from ci-rebase-handler return"
+assert_grep "$REVIEW_PR" 'status: CONFLICT' \
+  "S13.3 — review-pr.md prose conditions on status: CONFLICT return"
+assert_grep "$REVIEW_PR" 'SINGLE message|single message|single assistant message|single assistant turn|SINGLE assistant turn' \
+  "S13.4 — single-message Task() invariant present in CONFLICT-resolve arm"
+assert_grep "$REVIEW_PR" 'CONFLICT_RESOLVER_CAP' \
+  "S13.5 — CONFLICT_RESOLVER_CAP wave-splitting cap referenced by name"
+assert_grep "$REVIEW_PR" 'rebase_conflict_ambiguous' \
+  "S13.6 — typed data.subreason rebase_conflict_ambiguous documented"
+assert_grep "$REVIEW_PR" 'rebase_conflict_refused' \
+  "S13.7 — typed data.subreason rebase_conflict_refused documented"
+assert_grep "$REVIEW_PR" 'rebase_lease_mismatch' \
+  "S13.8 — typed data.subreason rebase_lease_mismatch documented"
+assert_grep "$REVIEW_PR" 'force-with-lease=' \
+  "S13.9 — post-resolution push uses explicit-form --force-with-lease=<branch>:<sha>"
+assert_grep "$REVIEW_PR" 'force-if-includes' \
+  "S13.10 — post-resolution push pairs --force-with-lease with --force-if-includes"
+assert_grep "$REVIEW_PR" 'EXPECTED_OLD_SHA' \
+  "S13.11 — original-lease SHA name (EXPECTED_OLD_SHA) referenced for resume push"
+assert_grep "$REVIEW_PR" 'rebase --continue|git rebase --continue' \
+  "S13.12 — RESOLVED path runs git rebase --continue before push"
+assert_grep "$REVIEW_PR" 'rebase --abort|git rebase --abort' \
+  "S13.13 — AMBIGUOUS / REFUSED arm aborts the in-progress rebase"
+assert_grep "$REVIEW_PR" 'merge/SKILL\.md.*Phase 3\.3|Phase 3\.3.*merge/SKILL\.md' \
+  "S13.14 — review-pr.md cross-references merge/SKILL.md Phase 3.3 reference pattern"
+assert_grep "$REVIEW_PR" 'Phase 3.*halt|halt Phase 3|OUTCOME=halted' \
+  "S13.15 — AMBIGUOUS / REFUSED / lease-mismatch surfaces halt-with-OUTCOME=halted"
+# Negative-regression guard: POST-FIX must NOT unconditionally assume rebase
+# success. The original bug was Step 6c.5 silently falling through to Phase 1
+# re-entry on a CONFLICT return. The procedural arm must explicitly gate
+# POST-FIX on REBASED (or call the CONFLICT-resolve arm before fix-push).
+assert_grep "$REVIEW_PR" 'status: REBASED' \
+  "S13.16 — POST-FIX path explicitly conditions on ci-rebase-handler status: REBASED"
+assert_grep "$REVIEW_PR" 'by_agent="ci-rebase-handler\+conflict-resolver"' \
+  "S13.17 — ci_fix_pushed audit event names both contributing agents on conflict-resolve push success"
 
 echo
 echo "== Summary =="
