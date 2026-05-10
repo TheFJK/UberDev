@@ -4,12 +4,10 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
 ## [0.21.3] - 2026-05-10
 
 ### Changed
-- **`PATCH_LINE_CAP` raised from 200 → 500.** The conflict-resolver agent's per-file rejection threshold (declared in `plugins/uberdev/skills/merge/SKILL.md` Constants table; enforced at `agents/conflict-resolver.md:31` Step 6 sanity-check; cited in `merge/SKILL.md:682` Anti-patterns section) now accepts resolutions up to 500 lines. Strictly additive — previously-accepted resolutions remain accepted; previously-`REFUSED`-on-cap resolutions now have a 2.5× larger headroom before tripping the guard. Other refusal triggers (`PATCH_FILE_CAP=5`, secret-shaped strings, out-of-hunk edits, prompt-injection-shaped markers, `.github/`/`.git`/hooks paths, generated lockfiles) are unchanged. Patch-version bump (no test-shape change, no API change, no other behavioural shift).
+- **`PATCH_LINE_CAP` raised from 200 → 500.** The conflict-resolver agent's per-file rejection threshold (declared in `plugins/uberdev/skills/merge/SKILL.md` Constants table; enforced at `agents/conflict-resolver.md:31` Step 6 sanity-check; cited in `merge/SKILL.md:682` Red Flags section) now accepts resolutions up to 500 lines. Strictly additive — previously-accepted resolutions remain accepted; previously-`REFUSED`-on-cap resolutions now have a 2.5× larger headroom before tripping the guard. Other refusal triggers (`PATCH_FILE_CAP=5`, secret-shaped strings, out-of-hunk edits, prompt-injection-shaped markers, `.github/`/`.git`/hooks paths, generated lockfiles) are unchanged. Patch-version bump (no test-shape change, no API change, no other behavioural shift). The textual-evidence requirement at Step 3 of `agents/conflict-resolver.md` (each agent edit must cite a verbatim quote from each side) implicitly bounds legitimate patch volume by the union of the two conflict sides; the line cap is a soft upper bound on this volume, not a security guard against runaway agents — those are bounded by `PATCH_FILE_CAP=5`, secret-regex, prompt-injection markers, and out-of-hunk-edits guards.
 
 ## [0.21.2] - 2026-05-07
 
