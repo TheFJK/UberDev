@@ -292,6 +292,85 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
     ### 6c.5 POST-FIX — re-enter Phase 1 fanout
 
+    **Branch on dispatched-fixer return status.** Before re-entry, condition on the dispatched fixer's return contract — only `ci-code-fixer` `status: APPLIED` and `ci-rebase-handler` `status: REBASED` produce a fix push that warrants Phase 1 re-entry. `ci-rebase-handler` `status: CONFLICT` triggers the CONFLICT-RESOLVE arm below; refusal statuses halt Phase 3:
+
+    - `ci-code-fixer` `status: APPLIED` (commit SHA returned, no remote write per `agents/ci-code-fixer.md` Step 6) → caller pushes the agent's commit, treats it as a fix push, falls through to "Phase 1 re-entry" below.
+    - `ci-code-fixer` `status: REFUSED` → already handled inline at the dispatch site (see Phase 1 / Phase 2 fixer-refusal prose); for the Phase 3 dispatch, emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=ci_fixer_refused_<rationale>` (lowercase, dashes-to-underscores normalised, e.g. `forbidden-pattern-no-verify` → `ci_fixer_refused_forbidden_pattern_no_verify`); exit 1.
+    - `ci-rebase-handler` `status: REBASED, new_head_sha: <40-hex>` → fall through to "Phase 1 re-entry" below (the agent already pushed; new HEAD is on remote).
+    - `ci-rebase-handler` `status: CONFLICT, conflicted_files: [...]` → execute the **CONFLICT-RESOLVE arm** below BEFORE Phase 1 re-entry. Closes #80 — the arm was previously unwired in this command, defeating the autopilot for any `stale_base` PR with conflicts.
+    - `ci-rebase-handler` `status: REFUSED, rationale: <reason>` (∈ {`pr-already-merged`, `head-moved-since-classify`, `lease-mismatch`}) → emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=ci_rebase_refused_<reason>` (lowercase, dashes-to-underscores normalised; e.g. `lease-mismatch` → `ci_rebase_refused_lease_mismatch`); exit 1.
+
+    #### CONFLICT-RESOLVE arm (mirrors `merge/SKILL.md` Phase 3.3.iii–iv)
+
+    Trigger: `ci-rebase-handler` returned `status: CONFLICT, conflicted_files: [...]`. Per `agents/ci-rebase-handler.md` Step 6 the agent has already aborted the in-progress rebase, so the worktree is back to its pre-rebase state. The caller's main turn re-creates the conflict state, fans out `conflict-resolver` per file in a SINGLE assistant turn, then continues the rebase under the original lease.
+
+    1. **Re-create conflict state.** Re-fetch and re-rebase in the PR worktree to surface conflict markers in `conflicted_files`:
+
+       ```bash
+       git fetch origin "$pr_head_branch" "$base_branch"
+       # Captured BEFORE the second rebase — used as the resume-push lease so an
+       # external push that lands during the resume window is detected. Mirrors
+       # the EXPECTED_OLD_SHA capture in agents/ci-rebase-handler.md Step 4.
+       EXPECTED_OLD_SHA="$(git rev-parse origin/$pr_head_branch)"
+       BASE_SHA="$(git merge-base origin/$pr_head_branch origin/$base_branch)"
+       git rebase "origin/$base_branch"   # exits non-zero with markers — that is expected
+       ```
+
+    2. **Resolve fanout cap.** Mirrors `merge/SKILL.md` Phase 3.3.iii cap-resolve:
+
+       ```bash
+       if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
+         . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+         CONFLICT_RESOLVER_CAP="$(uberdev_read_int_in_range fanout_concurrency.conflict_resolver UBERDEV_FANOUT_CONFLICT_RESOLVER 1 50 10)"
+       else
+         CONFLICT_RESOLVER_CAP=10
+       fi
+       ```
+
+       When `len(conflicted_files) > CONFLICT_RESOLVER_CAP`, split the per-file Task() fanout into `ceil(len / CONFLICT_RESOLVER_CAP)` sequential single-message waves; each wave still obeys the single-message Task() invariant within its slice. Default 10, range [1, 50], precedence env > config > default.
+
+    3. **Single-message Task() fanout per file.** Dispatch one `Task(subagent_type: uberdev:conflict-resolver)` per path in `conflicted_files`, ALL in ONE assistant turn (per slice if wave-split — splitting across messages defeats parallelism, mirrors `uberdev:post-impl-review` SKILL.md fanout shape):
+
+       ```
+       Task(
+         subagent_type: uberdev:conflict-resolver,
+         description: "resolve <file_path> for stale_base rebase conflict in PR #<N>",
+         prompt: file_path=<absolute path in PR worktree>, pr_branch=<pr_head_branch>,
+                 integration_branch=<base_branch>, base_sha=<BASE_SHA>,
+                 working_dir=<PR worktree root>
+       )
+       ```
+
+       Each Task() invokes `agents/conflict-resolver.md`. The agent reads the file's conflict markers, picks each side by textual evidence, applies the resolution via Edit, and returns `status: RESOLVED | AMBIGUOUS | REFUSED`.
+
+    4. **Aggregate returns.** Three terminal cases:
+
+       - **All `status: RESOLVED`:**
+
+         ```bash
+         git add <conflicted_files>
+         git rebase --continue
+         # If continuation surfaces additional conflicts (multi-stage rebase), re-enter
+         # step 3 for the new conflict set. Bounded by CI_FIX_LOOP_CAP from 6c.7 LOOP
+         # GUARD — NOT a separate retry path (anti-pattern guard restated from
+         # merge/SKILL.md:508-516).
+         NEW_HEAD_SHA="$(git rev-parse HEAD)"
+         git push origin "$pr_head_branch" \
+           --force-with-lease="$pr_head_branch":"$EXPECTED_OLD_SHA" \
+           --force-if-includes
+         ```
+
+         - On push success: emit `ci_fix_pushed` with `data.commit_sha=$NEW_HEAD_SHA` and `data.by_agent="ci-rebase-handler+conflict-resolver"` (composite — rebase agent produced the conflict set, conflict-resolver fanout produced the resolutions). Treat as a fix push: increment `CI_FIX_LOOP_ITER`, fall through to "Phase 1 re-entry" below.
+         - On push lease-mismatch (server rejects because origin/`$pr_head_branch` no longer matches `$EXPECTED_OLD_SHA`): `git rebase --abort`; emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=rebase_lease_mismatch`; exit 1. (External push during the resume window — the user re-issues `/review-pr` against the new HEAD.)
+
+       - **Any `status: AMBIGUOUS`:** `git rebase --abort`; emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=rebase_conflict_ambiguous`; exit 1. (Mirrors `merge/SKILL.md` Phase 3.3.iv park-on-AMBIGUOUS, but for `/review-pr` the equivalent terminal action is run-halt — the trail records the unresolvable conflict; the user surfaces it via the Phase 3 halt prose. Per `agents/conflict-resolver.md` line 56, AMBIGUOUS carries `resolution_summary` + `risks[]` for handoff context.)
+
+       - **Any `status: REFUSED`:** `git rebase --abort`; emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=rebase_conflict_refused`; exit 1. (e.g. lockfile / secret-shaped / out-of-set request from conflict-resolver — full refusal trigger list at `agents/conflict-resolver.md` Refusal triggers.)
+
+    5. **No additional retry path.** The arm is single-shot per `ci-rebase-handler` dispatch and bounded by `CI_FIX_LOOP_CAP` from 6c.7 LOOP GUARD. The "MUST NOT introduce any additional retry path" anti-pattern guard from `merge/SKILL.md:508-516` applies here.
+
+    **Phase 1 re-entry** (after a fix push lands — covers `ci-code-fixer` `APPLIED`, `ci-rebase-handler` `REBASED`, AND `ci-rebase-handler` `CONFLICT → all RESOLVED → push-success`).
+
     After a fixer pushes a remediation commit, the new HEAD MUST re-enter the **per-push trust-trail flow** — i.e., Phase 1 (post-impl-review fanout) and Phase 2 (simplify fanout) re-run on the post-fix diff before Phase 3 re-probes. The trust-trail anchor commit is always the **absolute last** step. This guarantees the trailer's referenced SHA covers reviewed code only.
 
     Implementation: rather than a re-entrant skill call, the orchestrator decrements the loop counter and re-enters at Step 4 (Phase 1 dispatch). Step 1 argument parsing has already run, so `RUN_ID` is preserved. The `phases.phase1` and `phases.phase2` fields in audit JSON are **rewritten** on each iteration (not appended to) — only `phases.phase3.iterations` and `phases.phase3.fix_pushes` accumulate.
