@@ -162,7 +162,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
     Phase 3 runs after Phase 2 and before trust-signal emission. It probes live CI on the post-Phase-2 HEAD, monitors pending runs, classifies red runs into one of six failure classes (`CI_FAILURE_CLASS_ENUM` defined in `plugins/uberdev/skills/merge/SKILL.md` Constants), routes to specialized fixer agents for resolvable classes, and halts via `AskUserQuestion` (or audit-only under `--turbo`) for the two classes no code change can resolve. The trust-signal anchor commit (Step 7) is gated on Phase 3's outcome.
 
-    Loop counter and cap defined in 6c.7 LOOP GUARD below (`CI_FIX_LOOP_CAP = 3`, declared in `merge/SKILL.md` Constants). On cap exhaustion → `OUTCOME=loop_cap_exhausted`, exit 1. **The "MUST NOT introduce any additional retry path" anti-pattern guard from `merge/SKILL.md:508-516` is restated here.**
+    Loop counter and cap defined in 6c.7 LOOP GUARD below (`CI_FIX_LOOP_CAP = 3`, declared in `merge/SKILL.md` Constants). On cap exhaustion → `OUTCOME=loop_cap_exhausted`, exit 1. **The "MUST NOT introduce any additional retry path" anti-pattern guard from `merge/SKILL.md` "PARK is the terminal floor" prose is restated here.**
 
     ### 6c.1 PROBE — gh pr checks JSON probe
 
@@ -356,7 +356,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
        - **All `status: RESOLVED`:**
 
          ```bash
-         git add <conflicted_files>
+         git add "${conflicted_files[@]}"
          if ! git rebase --continue; then
            # `git rebase --continue` exited non-zero. Two sub-cases:
            #   (a) Multi-stage rebase: continuation surfaced a NEW conflict set.
@@ -364,16 +364,17 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
            #       `git status --porcelain | awk '/^UU / {print $2}'` and re-enter
            #       step 3 against the NEW list (NOT the agent's original list —
            #       conflict-resolver REFUSES paths outside its pre-computed set per
-           #       agents/conflict-resolver.md:14,41). Bounded by CI_FIX_LOOP_CAP from
-           #       6c.7 LOOP GUARD — single-shot per dispatch, NOT a separate retry
-           #       path (anti-pattern guard restated from merge/SKILL.md:523, in the
-           #       "PARK is the terminal floor" prose).
+           #       `agents/conflict-resolver.md` Refusal triggers + Inputs). Bounded
+           #       by CI_FIX_LOOP_CAP from 6c.7 LOOP GUARD — single-shot per dispatch,
+           #       NOT a separate retry path (anti-pattern guard restated from
+           #       merge/SKILL.md "PARK is the terminal floor" prose).
            #   (b) Non-conflict failure (pre-commit hook rejection, GPG signing
-           #       failure, etc): `$NEW_CONFLICTED_FILES` empty → halt.
-           NEW_CONFLICTED_FILES="$(git status --porcelain | awk '/^UU / {print $2}')"
-           if [ -n "$NEW_CONFLICTED_FILES" ]; then
-             conflicted_files=( $NEW_CONFLICTED_FILES )
+           #       failure, etc): no UU entries → halt.
+           # Use mapfile -t (NOT unquoted expansion) so paths with spaces survive.
+           mapfile -t conflicted_files < <(git status --porcelain | awk '/^UU / {print $2}')
+           if [ "${#conflicted_files[@]}" -gt 0 ]; then
              # Re-enter step 3 with the new list (single-shot per CI_FIX_LOOP_CAP).
+             :
            else
              git rebase --abort
              audit ci_phase_outcome data.outcome=halted data.subreason=rebase_continue_failed
@@ -381,16 +382,21 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
            fi
          fi
          NEW_HEAD_SHA="$(git rev-parse HEAD)"
-         if ! git push origin "$pr_head_branch" \
+         # Capture push stderr so the lease-mismatch branch is reachable.
+         # An empty PUSH_STDERR with non-zero exit (extremely unlikely) is treated
+         # as generic push-failure — strictly safer than mis-emitting a
+         # rebase_lease_mismatch subreason on an unidentifiable failure.
+         PUSH_STDERR="$(git push origin "$pr_head_branch" \
               --force-with-lease="$pr_head_branch":"$EXPECTED_OLD_SHA" \
-              --force-if-includes; then
+              --force-if-includes 2>&1 1>/dev/null)" || PUSH_RC=$?
+         if [ -n "${PUSH_RC:-}" ]; then
            # Distinguish lease-mismatch (race-with-external-push during the resume
            # window) from generic push failure (auth, pre-receive hook, rate-limit,
-           # network). Lease-mismatch: server rejects with "[rejected] (stale info)"
-           # or similar against the explicit-form lease. Both halt; different
-           # data.subreason so audit consumers can route appropriately.
+           # network). Lease-mismatch: server stderr matches `\[rejected\].*(stale
+           # info|fetch first|non-fast-forward)` against the explicit-form lease.
+           # Both halt; different data.subreason so audit consumers can route.
            git rebase --abort
-           if [ -n "${LEASE_MISMATCH_DETECTED:-}" ]; then
+           if printf '%s' "$PUSH_STDERR" | grep -qE '\[rejected\].*(stale info|fetch first|non-fast-forward)'; then
              audit ci_phase_outcome data.outcome=halted data.subreason=rebase_lease_mismatch
            else
              audit ci_phase_outcome data.outcome=halted data.subreason=rebase_push_failed
@@ -451,7 +457,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
     - Iteration < 3, terminal outcome → emit `ci_phase_outcome` audit (with `data.outcome ∈ CI_OUTCOME_ENUM`), return to Step 7.
     - Iteration == 3, still red → audit `ci_loop_cap_reached`; `OUTCOME=loop_cap_exhausted`; exit 1; no anchor commit.
-    - **MUST NOT introduce any additional retry path** (anti-pattern guard restated from `merge/SKILL.md:508-516`).
+    - **MUST NOT introduce any additional retry path** (anti-pattern guard restated from `merge/SKILL.md` "PARK is the terminal floor" prose).
 
     Each iteration increments only on a **distinct commit SHA change** (HEAD SHA changed since this iteration's start). Re-runs of the same SHA on `flaky` paths use `RERUN_FLAKY_CAP=1` per distinct check — they do NOT increment `CI_FIX_LOOP_ITER`.
 
