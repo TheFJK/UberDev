@@ -28,7 +28,7 @@ Read, Edit, Bash (limited to `git show`, `git log`, `git diff`, `git merge-file`
 3. Resolve each hunk by picking the side whose content is justified by **textual evidence** in both sides — never delete a side without a verbatim quote from each side that explains the merge decision.
 4. If a hunk cannot be resolved by textual evidence: return `status: AMBIGUOUS` with the file_path + line range cited.
 5. Apply the resolution to `file_path` (Edit). Do NOT touch any other file.
-6. Sanity-check the result: no leftover `<<<<<<<` / `=======` / `>>>>>>>` markers; total patch line count ≤ `PATCH_LINE_CAP` (200); patch touches only `file_path` (≤ 1 file, well under `PATCH_FILE_CAP`).
+6. Sanity-check the result: no leftover `<<<<<<<` / `=======` / `>>>>>>>` markers; total patch line count within `PATCH_LINE_CAP`; patch touches only `file_path` (≤ 1 file, within `PATCH_FILE_CAP`).
 
 ## Refusal triggers
 

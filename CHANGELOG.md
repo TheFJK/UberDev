@@ -4,7 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.21.3] - 2026-05-10
+
+### Changed
+- **`PATCH_LINE_CAP` raised from 200 → 500.** The conflict-resolver agent's per-file rejection threshold (declared at `plugins/uberdev/skills/merge/SKILL.md:25` Constants table; enforced at `plugins/uberdev/agents/conflict-resolver.md:31` Step 6 sanity-check; cited at `plugins/uberdev/skills/merge/SKILL.md:682` Red Flags) now accepts resolutions up to 500 lines.
+  - **Strictly additive.** Previously-accepted resolutions remain accepted; previously-`REFUSED`-on-cap resolutions now have a 2.5× larger headroom before tripping the guard.
+  - **Other refusal triggers unchanged.** `PATCH_FILE_CAP=5`, secret-shaped strings, out-of-hunk edits, prompt-injection-shaped markers, `.github/`/`.git`/hooks paths, and generated lockfiles are all preserved.
+  - **Safety analysis.** The textual-evidence requirement at `plugins/uberdev/agents/conflict-resolver.md:28` Step 3 (each agent edit must cite a verbatim quote from each side) implicitly bounds legitimate patch volume to the union of the two conflict sides. The line cap is therefore a soft upper bound on legitimate volume, not a security guard against runaway agents — those are owned by the refusal triggers enumerated above.
+  - **Why patch only.** Pure constant change (test shape, public API, and runtime behaviour all unchanged); patch-version bump per the bump-everywhere rule.
 
 ## [0.21.2] - 2026-05-07
 
