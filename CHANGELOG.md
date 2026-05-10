@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.21.3] - 2026-05-10
+
+### Changed
+- **`PATCH_LINE_CAP` raised from 200 → 500.** The conflict-resolver agent's per-file rejection threshold (declared in `plugins/uberdev/skills/merge/SKILL.md` Constants table; enforced at `agents/conflict-resolver.md:31` Step 6 sanity-check; cited in `merge/SKILL.md:682` Anti-patterns section) now accepts resolutions up to 500 lines. Strictly additive — previously-accepted resolutions remain accepted; previously-`REFUSED`-on-cap resolutions now have a 2.5× larger headroom before tripping the guard. Other refusal triggers (`PATCH_FILE_CAP=5`, secret-shaped strings, out-of-hunk edits, prompt-injection-shaped markers, `.github/`/`.git`/hooks paths, generated lockfiles) are unchanged. Patch-version bump (no test-shape change, no API change, no other behavioural shift).
+
 ## [0.21.2] - 2026-05-07
 
 ### Fixed
