@@ -231,6 +231,8 @@ assert_grep "$REVIEW_PR" 'Phase 3.*halt|halt Phase 3|OUTCOME=halted' \
 # POST-FIX on REBASED (or call the CONFLICT-resolve arm before fix-push).
 assert_grep "$REVIEW_PR" 'status: REBASED' \
   "S13.16 — POST-FIX path explicitly conditions on ci-rebase-handler status: REBASED"
+assert_grep "$REVIEW_PR" 'by_agent="ci-rebase-handler\+conflict-resolver"' \
+  "S13.17 — ci_fix_pushed audit event names both contributing agents on conflict-resolve push success"
 
 echo
 echo "== Summary =="

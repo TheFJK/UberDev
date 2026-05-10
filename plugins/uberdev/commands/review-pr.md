@@ -302,9 +302,17 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
     #### CONFLICT-RESOLVE arm (mirrors `merge/SKILL.md` Phase 3.3.iii–iv)
 
-    Trigger: `ci-rebase-handler` returned `status: CONFLICT, conflicted_files: [...]`. Per `agents/ci-rebase-handler.md` Step 6 the agent has already aborted the in-progress rebase, so the worktree is back to its pre-rebase state. The caller's main turn re-creates the conflict state, fans out `conflict-resolver` per file in a SINGLE assistant turn, then continues the rebase under the original lease.
+    Trigger: `ci-rebase-handler` returned `status: CONFLICT, conflicted_files: [...]`. Per `agents/ci-rebase-handler.md` Step 6 the agent has already aborted the in-progress rebase, so the worktree is back to its pre-rebase state. The caller's main turn re-creates the conflict state in the current `/review-pr` checkout (`$REPO_ROOT`), fans out `conflict-resolver` per file in a SINGLE assistant turn, then continues the rebase under the original lease.
 
-    1. **Re-create conflict state.** Re-fetch and re-rebase in the PR worktree to surface conflict markers in `conflicted_files`:
+    **Variable bindings (caller binds before step 1).** The arm uses `$pr_head_branch`, `$base_branch`, and `$REPO_ROOT` in its bash recipes and Task() prompts. Bind them in the caller's main turn from the PR (mirrors `agents/ci-rebase-handler.md:19-21` Inputs). `$PR_NUMBER` was already bound at 6c.1 PROBE (line 195).
+
+    ```bash
+    pr_head_branch="$(gh pr view "$PR_NUMBER" --json headRefName --jq .headRefName)"
+    base_branch="$(gh pr view "$PR_NUMBER" --json baseRefName --jq .baseRefName)"
+    REPO_ROOT="$(git rev-parse --show-toplevel)"
+    ```
+
+    1. **Re-create conflict state.** Re-fetch and re-rebase in the current `/review-pr` checkout (`$REPO_ROOT`) to surface conflict markers in `conflicted_files`:
 
        ```bash
        git fetch origin "$pr_head_branch" "$base_branch"
@@ -335,9 +343,9 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
        Task(
          subagent_type: uberdev:conflict-resolver,
          description: "resolve <file_path> for stale_base rebase conflict in PR #<N>",
-         prompt: file_path=<absolute path in PR worktree>, pr_branch=<pr_head_branch>,
+         prompt: file_path=<absolute path under $REPO_ROOT>, pr_branch=<pr_head_branch>,
                  integration_branch=<base_branch>, base_sha=<BASE_SHA>,
-                 working_dir=<PR worktree root>
+                 working_dir=$REPO_ROOT
        )
        ```
 
@@ -349,25 +357,58 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
          ```bash
          git add <conflicted_files>
-         git rebase --continue
-         # If continuation surfaces additional conflicts (multi-stage rebase), re-enter
-         # step 3 for the new conflict set. Bounded by CI_FIX_LOOP_CAP from 6c.7 LOOP
-         # GUARD — NOT a separate retry path (anti-pattern guard restated from
-         # merge/SKILL.md:508-516).
+         if ! git rebase --continue; then
+           # `git rebase --continue` exited non-zero. Two sub-cases:
+           #   (a) Multi-stage rebase: continuation surfaced a NEW conflict set.
+           #       Re-bind `conflicted_files` from the live rebase state via
+           #       `git status --porcelain | awk '/^UU / {print $2}'` and re-enter
+           #       step 3 against the NEW list (NOT the agent's original list —
+           #       conflict-resolver REFUSES paths outside its pre-computed set per
+           #       agents/conflict-resolver.md:14,41). Bounded by CI_FIX_LOOP_CAP from
+           #       6c.7 LOOP GUARD — single-shot per dispatch, NOT a separate retry
+           #       path (anti-pattern guard restated from merge/SKILL.md:523, in the
+           #       "PARK is the terminal floor" prose).
+           #   (b) Non-conflict failure (pre-commit hook rejection, GPG signing
+           #       failure, etc): `$NEW_CONFLICTED_FILES` empty → halt.
+           NEW_CONFLICTED_FILES="$(git status --porcelain | awk '/^UU / {print $2}')"
+           if [ -n "$NEW_CONFLICTED_FILES" ]; then
+             conflicted_files=( $NEW_CONFLICTED_FILES )
+             # Re-enter step 3 with the new list (single-shot per CI_FIX_LOOP_CAP).
+           else
+             git rebase --abort
+             audit ci_phase_outcome data.outcome=halted data.subreason=rebase_continue_failed
+             exit 1
+           fi
+         fi
          NEW_HEAD_SHA="$(git rev-parse HEAD)"
-         git push origin "$pr_head_branch" \
-           --force-with-lease="$pr_head_branch":"$EXPECTED_OLD_SHA" \
-           --force-if-includes
+         if ! git push origin "$pr_head_branch" \
+              --force-with-lease="$pr_head_branch":"$EXPECTED_OLD_SHA" \
+              --force-if-includes; then
+           # Distinguish lease-mismatch (race-with-external-push during the resume
+           # window) from generic push failure (auth, pre-receive hook, rate-limit,
+           # network). Lease-mismatch: server rejects with "[rejected] (stale info)"
+           # or similar against the explicit-form lease. Both halt; different
+           # data.subreason so audit consumers can route appropriately.
+           git rebase --abort
+           if [ -n "${LEASE_MISMATCH_DETECTED:-}" ]; then
+             audit ci_phase_outcome data.outcome=halted data.subreason=rebase_lease_mismatch
+           else
+             audit ci_phase_outcome data.outcome=halted data.subreason=rebase_push_failed
+           fi
+           exit 1
+         fi
          ```
 
          - On push success: emit `ci_fix_pushed` with `data.commit_sha=$NEW_HEAD_SHA` and `data.by_agent="ci-rebase-handler+conflict-resolver"` (composite — rebase agent produced the conflict set, conflict-resolver fanout produced the resolutions). Treat as a fix push: increment `CI_FIX_LOOP_ITER`, fall through to "Phase 1 re-entry" below.
-         - On push lease-mismatch (server rejects because origin/`$pr_head_branch` no longer matches `$EXPECTED_OLD_SHA`): `git rebase --abort`; emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=rebase_lease_mismatch`; exit 1. (External push during the resume window — the user re-issues `/review-pr` against the new HEAD.)
+         - On push lease-mismatch (server rejects because origin/`$pr_head_branch` no longer matches `$EXPECTED_OLD_SHA`): the conditional above runs `git rebase --abort` and emits `ci_phase_outcome data.outcome=halted data.subreason=rebase_lease_mismatch`; exit 1. (External push during the resume window — the user re-issues `/review-pr` against the new HEAD.)
+         - On push failure for any other reason (auth, pre-receive hook, rate-limit, network): `git rebase --abort`; emit `ci_phase_outcome data.outcome=halted data.subreason=rebase_push_failed`; exit 1.
+         - On `git rebase --continue` failure with no fresh conflict set (pre-commit hook reject / signing failure / etc): `git rebase --abort`; emit `ci_phase_outcome data.outcome=halted data.subreason=rebase_continue_failed`; exit 1.
 
        - **Any `status: AMBIGUOUS`:** `git rebase --abort`; emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=rebase_conflict_ambiguous`; exit 1. (Mirrors `merge/SKILL.md` Phase 3.3.iv park-on-AMBIGUOUS, but for `/review-pr` the equivalent terminal action is run-halt — the trail records the unresolvable conflict; the user surfaces it via the Phase 3 halt prose. Per `agents/conflict-resolver.md` line 56, AMBIGUOUS carries `resolution_summary` + `risks[]` for handoff context.)
 
        - **Any `status: REFUSED`:** `git rebase --abort`; emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=rebase_conflict_refused`; exit 1. (e.g. lockfile / secret-shaped / out-of-set request from conflict-resolver — full refusal trigger list at `agents/conflict-resolver.md` Refusal triggers.)
 
-    5. **No additional retry path.** The arm is single-shot per `ci-rebase-handler` dispatch and bounded by `CI_FIX_LOOP_CAP` from 6c.7 LOOP GUARD. The "MUST NOT introduce any additional retry path" anti-pattern guard from `merge/SKILL.md:508-516` applies here.
+    5. **No additional retry path.** The arm is single-shot per `ci-rebase-handler` dispatch and bounded by `CI_FIX_LOOP_CAP` from 6c.7 LOOP GUARD. The "MUST NOT introduce any additional retry path" anti-pattern guard from `merge/SKILL.md:523` (in "PARK is the terminal floor" prose) applies here.
 
     **Phase 1 re-entry** (after a fix push lands — covers `ci-code-fixer` `APPLIED`, `ci-rebase-handler` `REBASED`, AND `ci-rebase-handler` `CONFLICT → all RESOLVED → push-success`).
 
