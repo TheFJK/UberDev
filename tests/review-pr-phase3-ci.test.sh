@@ -125,8 +125,27 @@ assert_grep "$REVIEW_PR" 'Phase 3 halt classes.*--turbo|--turbo.*halt classes' \
   "S7.2 — Phase 3 halt-class carve-out documented for --turbo"
 assert_grep "$REVIEW_PR" 'billing_quota.*platform_outage|platform_outage.*billing_quota' \
   "S7.3 — both halt classes named together in --turbo carve-out"
-assert_no_grep "$REVIEW_PR" 'AskUserQuestion.*--turbo|--turbo.*AskUserQuestion(?!.*suppress)' \
-  "S7.4 — --turbo does NOT call AskUserQuestion (suppress prose only)"
+# S7.4 — no `AskUserQuestion(` call site lives inside the Turbo (--turbo
+# present) branch of 6c.6 HALT. The original assertion used a perl-style
+# negative lookahead `(?!...)` which is not in ERE — it triggered
+# `grep: warning: ? at start of expression` on GNU grep (Linux CI),
+# causing a false fail (and falsely passing on macOS BSD grep).
+# This awk walk tracks "Turbo" vs "Interactive" subsections in 6c.6 HALT
+# and flags any AskUserQuestion( call inside the Turbo region — which
+# would defeat the carve-out's "no prompt under --turbo" contract.
+S7_4_VIOLATIONS="$(awk '
+  /\*\*Turbo \(.--turbo. present\):\*\*/ { in_turbo=1; next }
+  /\*\*Interactive \(.--turbo. absent\):\*\*/ { in_turbo=0; next }
+  /^### / { in_turbo=0 }
+  in_turbo && /AskUserQuestion\(/ { print FILENAME ":" NR ": " $0 }
+' "$REVIEW_PR")"
+if [ -z "$S7_4_VIOLATIONS" ]; then
+  echo "  PASS  S7.4 — --turbo branch does NOT call AskUserQuestion()"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S7.4 — --turbo branch contains an AskUserQuestion() call"
+  printf '%s\n' "$S7_4_VIOLATIONS" | sed 's/^/          /'
+  FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== S8: gh outage carve-out — ci_probe_unreachable + Step 7 still runs =="
