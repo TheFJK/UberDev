@@ -8,8 +8,8 @@
 #   M1  — commands/merge.md exists, has frontmatter, has description,
 #         argument-hint, allowed-tools.
 #   M2  — commands/merge.md is ≤ 50 lines (thin-dispatcher contract).
-#   M3  — commands/merge.md references uberdev:merge skill (not merge-prs).
-#   M4  — skills/merge/SKILL.md has all four Phase headings (1..4).
+#   M3  — commands/merge.md references uberdev:merge-pipeline skill (not merge-prs).
+#   M4  — skills/merge-pipeline/SKILL.md has all four Phase headings (1..4).
 #   M5  — SKILL.md uses git merge-tree --write-tree for conflict probe (D9).
 #   M6  — SKILL.md references the .claude/worktrees/merge-<run-id> scratch path (D10).
 #   M7  — SKILL.md documents the integration-branch precedence chain (D8).
@@ -58,7 +58,7 @@ set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CMD_FILE="$REPO_ROOT/plugins/uberdev/commands/merge.md"
-SKILL_FILE="$REPO_ROOT/plugins/uberdev/skills/merge/SKILL.md"
+SKILL_FILE="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/SKILL.md"
 AGENT_FILE="$REPO_ROOT/plugins/uberdev/agents/conflict-resolver.md"
 
 # Pre-flight: refuse to run if any asserted-against file is missing.
@@ -123,18 +123,25 @@ else
 fi
 
 echo
-echo "== M3: commands/merge.md references uberdev:merge skill =="
-assert_grep "$CMD_FILE" 'uberdev:merge([^-A-Za-z0-9_]|$)' \
-  "M3 — invokes uberdev:merge (not merge-prs or any other name)"
+echo "== M3: commands/merge.md references uberdev:merge-pipeline skill =="
+assert_grep "$CMD_FILE" 'uberdev:merge-pipeline\b' \
+  "M3 — invokes uberdev:merge-pipeline (renamed to disambiguate from /uberdev:merge command)"
 # Negative: must NOT reference the rejected skill name 'merge-prs'.
 if grep -qE 'merge-prs\b' "$CMD_FILE"; then
   fail "M3.neg — references rejected skill name 'merge-prs'"
 else
   pass "M3.neg — does NOT reference rejected skill name 'merge-prs'"
 fi
+# Regression guard: must NOT invoke the bare `uberdev:merge` skill — that name
+# collides with the /uberdev:merge command and causes double-load.
+if grep -qE 'uberdev:merge([^-A-Za-z0-9_]|$)' "$CMD_FILE"; then
+  fail "M3.collision — references bare uberdev:merge skill (collides with the command name)"
+else
+  pass "M3.collision — does NOT reference the bare uberdev:merge skill (no command/skill name collision)"
+fi
 
 echo
-echo "== M4: skills/merge/SKILL.md exists with all four phase headings =="
+echo "== M4: skills/merge-pipeline/SKILL.md exists with all four phase headings =="
 for n in 1 2 3 4; do
   case "$n" in
     1) heading='Pre-flight gate' ;;

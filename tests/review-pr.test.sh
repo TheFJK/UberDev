@@ -501,8 +501,8 @@ assert_grep "$REVIEW_PR" 'Phase 3 halt classes.*billing_quota.*platform_outage|b
   "R18.2 — Phase 3 halt-class carve-out documented (billing_quota + platform_outage)"
 
 echo
-echo "== R19: merge/SKILL.md AUDIT_EVENT_ENUM gains 12 new Phase 3 members (#76) =="
-MERGE_SKILL="$REPO_ROOT/plugins/uberdev/skills/merge/SKILL.md"
+echo "== R19: merge-pipeline/SKILL.md AUDIT_EVENT_ENUM gains 12 new Phase 3 members (#76) =="
+MERGE_SKILL="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/SKILL.md"
 for ev in ci_probe_started ci_probe_skipped_no_checks ci_probe_unreachable \
           ci_monitor_green ci_monitor_red ci_monitor_timeout \
           ci_classify_dispatched ci_classify_returned \

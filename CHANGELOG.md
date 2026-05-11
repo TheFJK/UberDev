@@ -4,6 +4,18 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.5] - 2026-05-11
+
+### Fixed
+- **`/merge` skill double-load due to command/skill name collision.** `commands/merge.md` and `skills/merge/SKILL.md` both registered under plugin-namespaced ID `uberdev:merge` — `merge` was the only uberdev surface where a slash command and a skill shared a name (every other command — `/solve`, `/issue`, `/review-pr`, `/simplify`, `/turbo` — is command-only). The collision surfaced as a duplicate `uberdev:merge` entry in the system-reminder "skills available" listing (one with the command description, one with the skill description) and at runtime as `commands/merge.md` plus `skills/merge/SKILL.md` both being pulled into context for a single `/merge` invocation. Auto-discovery on the skill's `Use when the user invokes /merge…` description compounded the load on any non-slash mention of merge intent.
+  - **Rename.** `plugins/uberdev/skills/merge/` → `plugins/uberdev/skills/merge-pipeline/` (skill `name:` frontmatter `merge` → `merge-pipeline`). The skill is now an internal implementation detail invoked exclusively by `commands/merge.md`; its description was rewritten as `Internal 4-phase pre-flight/plan/merge-resolve/sync pipeline for the /merge command. Invoked exclusively by commands/merge.md; do not call directly.` so it no longer auto-discovers on user mentions of `/merge`.
+  - **Invocation update.** `commands/merge.md:49` now invokes `uberdev:merge-pipeline` (was `uberdev:merge`).
+  - **Internal lib path updates.** Three `${CLAUDE_PLUGIN_ROOT}/skills/merge/lib/discover.sh` references in SKILL.md (Steps 1.0.5, 1.2.5, 1.4) repointed to `${CLAUDE_PLUGIN_ROOT}/skills/merge-pipeline/lib/discover.sh`.
+  - **Cross-reference path updates.** Repointed across `agents/merge-strategy-decider.md`, `agents/conflict-resolver.md` (description + calling-skill ref at line 56), `agents/trust-trail-evaluator.md`, `agents/ci-rebase-handler.md`, `commands/review-pr.md` (six occurrences across Phase 3 + trust-signal artifacts + Run-ID format prose), and the two SKILL.md mirror-site enumerators in the "Author identity is NOT a gate condition" section. Historical `skills/merge/` paths in past CHANGELOG entries are left as-is — they're frozen narration of past states.
+  - **Test-shape updates.** Four test files updated to track the new path: `tests/merge.test.sh` (`SKILL_FILE` constant, M3 header/regex, M4 echo header), `tests/merge-discovery-resilience.test.sh` (`LIB` / `SKILL` constants + A4d glob regex), `tests/review-pr.test.sh` R19 (`MERGE_SKILL` constant), `tests/review-pr-phase3-ci.test.sh` (`MERGE_SKILL` constant).
+  - **Regression guard (NEW in M3).** `tests/merge.test.sh` M3 gains a `M3.collision` assertion that fails if `commands/merge.md` ever re-references the bare `uberdev:merge` skill (which would re-introduce the name collision with the command). M3 positive assertion now demands `uberdev:merge-pipeline\b`.
+  - **No user-facing slash-command change.** `/merge` and `/uberdev:merge` continue to work exactly as before — those are commands (not skills) and their names did not change. Only the internal skill behind them moved.
+
 ## [0.21.3] - 2026-05-10
 
 ### Changed

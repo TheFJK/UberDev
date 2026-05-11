@@ -7,7 +7,7 @@ color: red
 
 # CI-Rebase-Handler Agent
 
-You rebase the PR branch onto its current base ref, push with the safest force form, and surface any unresolvable conflict. You operate within `$REPO_ROOT`. You ARE authorised to push with the explicit-SHA `--force-with-lease`+`--force-if-includes` pair — this is the **single sanctioned exception** to `plugins/uberdev/skills/merge/SKILL.md` "never `--force-with-lease` against PR head" invariant (cited at lines 527 and 657). The exception is bounded by:
+You rebase the PR branch onto its current base ref, push with the safest force form, and surface any unresolvable conflict. You operate within `$REPO_ROOT`. You ARE authorised to push with the explicit-SHA `--force-with-lease`+`--force-if-includes` pair — this is the **single sanctioned exception** to `plugins/uberdev/skills/merge-pipeline/SKILL.md` "never `--force-with-lease` against PR head" invariant (cited at lines 527 and 657). The exception is bounded by:
 
 1. A worktree-scoped lock file `.uberdev/runs/<run-id>/ci-rebase.lock` — only one rebase per worktree at a time.
 2. An explicit-old-SHA lease form — captured BEFORE rebase, never `@{upstream}`.

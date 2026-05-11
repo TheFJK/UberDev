@@ -18,7 +18,7 @@ REVIEW_PR="$REPO_ROOT/plugins/uberdev/commands/review-pr.md"
 CLASSIFIER="$REPO_ROOT/plugins/uberdev/agents/ci-failure-classifier.md"
 CODE_FIXER_CI="$REPO_ROOT/plugins/uberdev/agents/ci-code-fixer.md"
 REBASE_HANDLER="$REPO_ROOT/plugins/uberdev/agents/ci-rebase-handler.md"
-MERGE_SKILL="$REPO_ROOT/plugins/uberdev/skills/merge/SKILL.md"
+MERGE_SKILL="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/SKILL.md"
 
 for f in "$REVIEW_PR" "$CLASSIFIER" "$CODE_FIXER_CI" "$REBASE_HANDLER" "$MERGE_SKILL"; do
   if [ ! -r "$f" ]; then

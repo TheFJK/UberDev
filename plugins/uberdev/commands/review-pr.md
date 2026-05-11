@@ -160,9 +160,9 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
 6c. **Phase 3 — CI Health** (skip iff `CI_FIX_PHASE=0` is set AND mode is probe-only — see flag handling below)
 
-    Phase 3 runs after Phase 2 and before trust-signal emission. It probes live CI on the post-Phase-2 HEAD, monitors pending runs, classifies red runs into one of six failure classes (`CI_FAILURE_CLASS_ENUM` defined in `plugins/uberdev/skills/merge/SKILL.md` Constants), routes to specialized fixer agents for resolvable classes, and halts via `AskUserQuestion` (or audit-only under `--turbo`) for the two classes no code change can resolve. The trust-signal anchor commit (Step 7) is gated on Phase 3's outcome.
+    Phase 3 runs after Phase 2 and before trust-signal emission. It probes live CI on the post-Phase-2 HEAD, monitors pending runs, classifies red runs into one of six failure classes (`CI_FAILURE_CLASS_ENUM` defined in `plugins/uberdev/skills/merge-pipeline/SKILL.md` Constants), routes to specialized fixer agents for resolvable classes, and halts via `AskUserQuestion` (or audit-only under `--turbo`) for the two classes no code change can resolve. The trust-signal anchor commit (Step 7) is gated on Phase 3's outcome.
 
-    Loop counter and cap defined in 6c.7 LOOP GUARD below (`CI_FIX_LOOP_CAP = 3`, declared in `merge/SKILL.md` Constants). On cap exhaustion → `OUTCOME=loop_cap_exhausted`, exit 1. **The "MUST NOT introduce any additional retry path" anti-pattern guard from `merge/SKILL.md` "PARK is the terminal floor" prose is restated here.**
+    Loop counter and cap defined in 6c.7 LOOP GUARD below (`CI_FIX_LOOP_CAP = 3`, declared in `merge-pipeline/SKILL.md` Constants). On cap exhaustion → `OUTCOME=loop_cap_exhausted`, exit 1. **The "MUST NOT introduce any additional retry path" anti-pattern guard from `merge-pipeline/SKILL.md` "PARK is the terminal floor" prose is restated here.**
 
     ### 6c.1 PROBE — gh pr checks JSON probe
 
@@ -536,7 +536,7 @@ The Phase 3 conjunct is **predicate-level breaking** (CHANGELOG `### Changed` ca
 
 On GREEN, emit three SHA-bound durable artifacts in lockstep (all reference the same post-emission `headRefOid`):
 
-1. **Trust-trail-anchor commit** — emit ONE empty commit at HEAD whose body carries the trailer pointing at its parent. The parent SHA — captured **before** the anchor commit — is the load-bearing trust artifact for `/merge` Phase 1.4 trust resolution (see `skills/merge/SKILL.md` Constants `REVIEW_PR_TRAILER_PREFIX`):
+1. **Trust-trail-anchor commit** — emit ONE empty commit at HEAD whose body carries the trailer pointing at its parent. The parent SHA — captured **before** the anchor commit — is the load-bearing trust artifact for `/merge` Phase 1.4 trust resolution (see `skills/merge-pipeline/SKILL.md` Constants `REVIEW_PR_TRAILER_PREFIX`):
 
    ```bash
    PARENT_SHA="$(git rev-parse HEAD)"   # full 40-char SHA — NOT --short; goes into the trailer payload
@@ -564,7 +564,7 @@ On GREEN, emit three SHA-bound durable artifacts in lockstep (all reference the 
 
    The anchor commit goes through pre-commit hooks normally — never `--no-verify`. Author = current `git config user.email` / `user.name`; the trailer is procedural attribution to the `/review-pr` command. Per global CLAUDE.md, the anchor commit MUST NOT include a `Co-Authored-By: Claude` trailer or any `🤖 Generated with Claude Code` footer. The trailer payload (`Reviewed-by: uberdev/review-pr@<40-hex>`) is the only trailer in the body. Verify with `git log -1 --format=%B | grep -E '^Reviewed-by: uberdev/review-pr@[a-f0-9]{40}$'` before proceeding to artifact 2.
 
-2. **Label** — `gh pr edit <N> --add-label uberdev-approved` (idempotent — `gh` no-ops if the label is already present). The literal label string is `uberdev-approved` (see `skills/merge/SKILL.md` Constants `UBERDEV_APPROVED_LABEL`).
+2. **Label** — `gh pr edit <N> --add-label uberdev-approved` (idempotent — `gh` no-ops if the label is already present). The literal label string is `uberdev-approved` (see `skills/merge-pipeline/SKILL.md` Constants `UBERDEV_APPROVED_LABEL`).
 
    ```bash
    # Mirror artifact 1's push-failure guard: if `gh pr edit` exits non-zero
@@ -600,7 +600,7 @@ On GREEN, emit three SHA-bound durable artifacts in lockstep (all reference the 
 }
 ```
 
-The JSON is **local debug telemetry only** — `.uberdev/` is gitignored, so the JSON does NOT cross-clone. `/merge` consumes the trailer as the load-bearing trust artifact and treats the JSON as a corroborating presence check. See `skills/merge/SKILL.md` Phase 1.4 Path 2 for the consumer side.
+The JSON is **local debug telemetry only** — `.uberdev/` is gitignored, so the JSON does NOT cross-clone. `/merge` consumes the trailer as the load-bearing trust artifact and treats the JSON as a corroborating presence check. See `skills/merge-pipeline/SKILL.md` Phase 1.4 Path 2 for the consumer side.
 
 On any artifact-emission failure (anchor commit fails — pre-commit hook rejection, push rejection, network failure; label add fails; JSON write fails): exit 2 (treat as `blocked`-equivalent because the trust-signal contract is broken). Print the failing `git` / `gh` / filesystem stderr; suggest re-running `/review-pr`.
 
@@ -612,13 +612,13 @@ On any artifact-emission failure (anchor commit fails — pre-commit hook reject
 RUN_ID="$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)"
 ```
 
-This mirrors the convention in `skills/merge/SKILL.md:209` (Phase 3.3ii scratch worktree path). Before any path concatenation, validate `<run-id>` against the regex:
+This mirrors the convention in `skills/merge-pipeline/SKILL.md:209` (Phase 3.3ii scratch worktree path). Before any path concatenation, validate `<run-id>` against the regex:
 
 ```
 ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$
 ```
 
-See `skills/merge/SKILL.md` Constants `RUN_ID_REGEX`. If the regex match fails (defensive — should never trigger with internally-generated values), exit 2 and print: `BUG: run-id <value> does not match ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ — file an issue`. The regex constraint forecloses path-traversal if a future iteration ever sources `<run-id>` from external input.
+See `skills/merge-pipeline/SKILL.md` Constants `RUN_ID_REGEX`. If the regex match fails (defensive — should never trigger with internally-generated values), exit 2 and print: `BUG: run-id <value> does not match ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ — file an issue`. The regex constraint forecloses path-traversal if a future iteration ever sources `<run-id>` from external input.
 
 ## Exit-Code Contract
 

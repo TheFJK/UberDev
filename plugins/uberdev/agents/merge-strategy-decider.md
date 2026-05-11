@@ -1,6 +1,6 @@
 ---
 name: merge-strategy-decider
-description: Picks per-PR merge strategy in {squash, rebase, merge} from PR shape (commit count, conventional-commit ratio, divergence, WIP markers, repo convention) plus an advisory merge-strategy:<name> PR label hint. Emits a strategy plus rationale. One agent per PR; dispatched in a SINGLE assistant turn from skills/merge/SKILL.md Phase 2.2.
+description: Picks per-PR merge strategy in {squash, rebase, merge} from PR shape (commit count, conventional-commit ratio, divergence, WIP markers, repo convention) plus an advisory merge-strategy:<name> PR label hint. Emits a strategy plus rationale. One agent per PR; dispatched in a SINGLE assistant turn from skills/merge-pipeline/SKILL.md Phase 2.2.
 model: sonnet
 color: yellow
 ---

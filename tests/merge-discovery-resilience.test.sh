@@ -14,7 +14,7 @@
 #        then proceed past a failure that should have aborted with audit.
 #
 # The fix introduces a new bash library at
-#   plugins/uberdev/skills/merge/lib/discover.sh
+#   plugins/uberdev/skills/merge-pipeline/lib/discover.sh
 # exposing four functions that move filtering into gh's `--jq '<filter>'`
 # (in-process) and capture stderr separately via mktemp so the gh exit code
 # can be inspected and propagated to a structured audit event:
@@ -40,8 +40,8 @@ set -u
 set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-LIB="$REPO_ROOT/plugins/uberdev/skills/merge/lib/discover.sh"
-SKILL="$REPO_ROOT/plugins/uberdev/skills/merge/SKILL.md"
+LIB="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/lib/discover.sh"
+SKILL="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/SKILL.md"
 SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
 PLUGIN_JSON="$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json"
 MARKETPLACE_JSON="$REPO_ROOT/.claude-plugin/marketplace.json"
@@ -254,7 +254,7 @@ echo "== A4c: SKILL.md sources lib via \${CLAUDE_PLUGIN_ROOT} (not BASH_SOURCE) 
 # This regression-locks the fix.
 assert_no_grep "$SKILL" 'BASH_SOURCE\[0\]:-\$0' \
   "A4c: SKILL.md does NOT use BASH_SOURCE/\$0 (broken in Claude eval context)"
-assert_count_at_least "$SKILL" 'CLAUDE_PLUGIN_ROOT.*skills/merge/lib/discover\.sh' 3 \
+assert_count_at_least "$SKILL" 'CLAUDE_PLUGIN_ROOT.*skills/merge-pipeline/lib/discover\.sh' 3 \
   "A4d: SKILL.md sources lib via \${CLAUDE_PLUGIN_ROOT} at all 3 hot spots"
 
 echo
@@ -275,7 +275,13 @@ echo
 echo "== A7: SKILL.md sources lib/discover.sh from each call site =="
 # One source line per discovery step (1.0.5, 1.2.5, 1.4). The skill must
 # `source ... lib/discover.sh` (or `. lib/discover.sh`) at >= 3 places.
-assert_count_at_least "$SKILL" 'source[^\n]*lib/discover\.sh|\. *[^\n]*lib/discover\.sh' 3 \
+# NOTE: pre-v0.21.5 we used `[^\n]*` here, which BSD/GNU grep treats as the
+# char class `[^\, n]` — so any `n` between `.` and `lib/discover.sh` (such
+# as the `n` in `merge-pipeline`) silently breaks the match. We switched to
+# `.*` (matches anything but a literal newline, which is irrelevant for
+# grep's default per-line mode) for the same reach without the n-exclusion
+# foot-gun.
+assert_count_at_least "$SKILL" 'source.*lib/discover\.sh|\. .*lib/discover\.sh' 3 \
   "A7: SKILL.md sources lib/discover.sh in >= 3 places"
 
 echo

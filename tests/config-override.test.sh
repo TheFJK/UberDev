@@ -36,7 +36,7 @@ SKILL_DIR="$REPO_ROOT/plugins/uberdev/skills"
 for f in "$SKILL_DIR/solve-pipeline/SKILL.md" \
          "$SKILL_DIR/orchestrator/SKILL.md" \
          "$SKILL_DIR/post-impl-review/SKILL.md" \
-         "$SKILL_DIR/merge/SKILL.md" \
+         "$SKILL_DIR/merge-pipeline/SKILL.md" \
          "$SKILL_DIR/using-uberdev/SKILL.md"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
@@ -394,22 +394,22 @@ assert_grep_in "$SKILL_DIR/post-impl-review/SKILL.md" \
 
 echo
 echo "== I5: merge fanout caps + advisory + Constants update (Task 5) =="
-assert_grep_in "$SKILL_DIR/merge/SKILL.md" \
+assert_grep_in "$SKILL_DIR/merge-pipeline/SKILL.md" \
   'uberdev_read_int_in_range fanout_concurrency.merge_strategy[[:space:]]+UBERDEV_FANOUT_MERGE_STRATEGY[[:space:]]+1[[:space:]]+50[[:space:]]+10' \
   "I5a: merge reads fanout_concurrency.merge_strategy with bounds [1,50] default 10"
-assert_grep_in "$SKILL_DIR/merge/SKILL.md" \
+assert_grep_in "$SKILL_DIR/merge-pipeline/SKILL.md" \
   'uberdev_read_int_in_range fanout_concurrency.conflict_resolver[[:space:]]+UBERDEV_FANOUT_CONFLICT_RESOLVER[[:space:]]+1[[:space:]]+50[[:space:]]+10' \
   "I5b: merge reads fanout_concurrency.conflict_resolver with bounds [1,50] default 10"
-assert_grep_in "$SKILL_DIR/merge/SKILL.md" \
+assert_grep_in "$SKILL_DIR/merge-pipeline/SKILL.md" \
   'CONFLICT_RESOLVER_CAP' \
   "I5c: merge binds CONFLICT_RESOLVER_CAP for Phase 3.3 chunking"
-assert_grep_in "$SKILL_DIR/merge/SKILL.md" \
+assert_grep_in "$SKILL_DIR/merge-pipeline/SKILL.md" \
   'uberdev_read_int_in_range command_timeouts.merge[[:space:]]+UBERDEV_MERGE_TIMEOUT[[:space:]]+60[[:space:]]+86400[[:space:]]+600' \
   "I5d: merge reads command_timeouts.merge with bounds [60,86400] default 600"
-assert_grep_in "$SKILL_DIR/merge/SKILL.md" \
+assert_grep_in "$SKILL_DIR/merge-pipeline/SKILL.md" \
   '\| `MAX_PARALLEL_AGENTS` \| resolved integer' \
   "I5e: Constants table row updated to 'resolved integer'"
-if grep -qE 'out-of-scope for this issue' "$SKILL_DIR/merge/SKILL.md"; then
+if grep -qE 'out-of-scope for this issue' "$SKILL_DIR/merge-pipeline/SKILL.md"; then
   fail "I5f: obsolete 'out-of-scope for this issue' note still present"
 else
   pass "I5f: obsolete 'out-of-scope for this issue' note removed"
