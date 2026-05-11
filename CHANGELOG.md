@@ -4,6 +4,17 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.6] - 2026-05-12
+
+### Fixed
+- **`/solve` wall-clock kill never engaged on macOS.** `plugins/uberdev/skills/solve-pipeline/SKILL.md` Step 5b's heredoc-template launcher probed `command -v timeout` only — but macOS does **not** ship GNU `timeout(1)`. The only supported install path (`brew install coreutils`) places the binary at `gtimeout` (Homebrew's `g`-prefix avoids masking BSD utilities), so the wrap branch was dead code for the entire macOS audience: stock boxes hit the fail-open warning, and `brew install coreutils` did nothing to fix it. The user-facing symptom was `warning: timeout(1) not on PATH; /solve will run unwrapped (no wall-clock kill)` firing on every `/solve` and `/turbo` launch, with `command_timeouts.solve` (default 3600s) silently unenforced. /turbo, which runs unattended, was the most exposed: a stuck Opus-4.7 1M-context agent could burn tokens until the user manually noticed.
+  - **Fix.** The launcher template now probes `timeout` then `gtimeout` and binds the resolved path to `TIMEOUT_BIN`; the wrap branch becomes `"$TIMEOUT_BIN" "${SOLVE_TIMEOUT}" CLAUDE_BIN …`. The quoted-`"$TIMEOUT_BIN"` form keeps it as a single `argv[0]` token under zsh `SH_WORD_SPLIT=off` (mirrors the inline-`timeout` zsh-safety precedent from #63/#72). Comment block updated to call out the `gtimeout` rationale explicitly.
+  - **Misleading prose corrected.** The Step 5b narration previously called the missing-timeout case "rare on bare macOS without coreutils". It was actually the **default** behaviour on every macOS box (with or without coreutils). Rewritten to state that macOS does not ship GNU `timeout(1)`, that `brew install coreutils` installs it as `gtimeout`, and that fail-open fires only when **neither** binary is on PATH.
+  - **Remediation pointer in the warning.** The fail-open stderr line previously read `warning: timeout(1) not on PATH; /solve will run unwrapped (no wall-clock kill)` — mystery, not action. Now: `warning: neither timeout(1) nor gtimeout on PATH; /solve will run unwrapped (no wall-clock kill). Fix: brew install coreutils`.
+  - **Sibling doc synced.** `plugins/uberdev/skills/using-uberdev/SKILL.md` "Enforcement scope" paragraph (lines 193-196) now mentions the `gtimeout` fallback so the user-facing config reference matches the launcher behaviour.
+  - **Tests.** `tests/config-override.test.sh` I2 block extended: I2c now asserts `command -v gtimeout` appears in the SKILL.md heredoc, I2d asserts the new `"$TIMEOUT_BIN" "${SOLVE_TIMEOUT}" CLAUDE_BIN` wrap form (replaces the old I2c `timeout "${SOLVE_TIMEOUT}" CLAUDE_BIN` literal regex which no longer matches), I2e asserts the warning contains the `brew install coreutils` remediation pointer. Pre-fix run: I2c/I2d/I2e fail. Post-fix run: all five I2 assertions pass; full suite remains green (77/77 config-override, 1080/1080 across 18 test scripts).
+  - **Backward compatibility.** Linux and any macOS box with `timeout` shimmed onto PATH (e.g. via `brew install coreutils --with-default-names` on Intel, or manual symlink) continue down the original probe-and-wrap branch unchanged — `command -v timeout` still matches first.
+
 ## [0.21.5] - 2026-05-11
 
 ### Fixed
