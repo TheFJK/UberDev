@@ -148,7 +148,7 @@ fanout_concurrency:
 # --- per-command wall-clock timeouts ---
 # dot-path refs: command_timeouts.solve, command_timeouts.review_pr, command_timeouts.merge
 command_timeouts:
-  solve: 3600                    # int seconds [60, 86400]; ENFORCED via /solve launcher timeout(1) wrap; default 3600 (1h); env: UBERDEV_SOLVE_TIMEOUT
+  solve: 3600                    # int seconds [60, 86400]; ENFORCED via /solve launcher timeout(1)/gtimeout wrap; default 3600 (1h); env: UBERDEV_SOLVE_TIMEOUT
   review_pr: 900                 # int seconds [60, 86400]; ADVISORY-ONLY in v1 (parsed + audit-logged; no kill); default 900 (15m); env: UBERDEV_REVIEW_PR_TIMEOUT
   merge: 600                     # int seconds [60, 86400]; ADVISORY-ONLY in v1 (parsed + audit-logged; no kill); default 600 (10m); env: UBERDEV_MERGE_TIMEOUT
 ---

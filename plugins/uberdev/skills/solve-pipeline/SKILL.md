@@ -357,7 +357,7 @@ it as `gtimeout` (Homebrew's `g`-prefix avoids masking BSD utilities),
 so the launcher probes `timeout` first and falls back to `gtimeout`. If
 neither is on PATH (stock macOS without coreutils) the launcher emits
 one stderr warning (with a `brew install coreutils` remediation
-pointer) and runs unwrapped — fail-open per the `aliases-sync.sh:14-23`
+pointer) and runs unwrapped — fail-open per the `aliases-sync.sh:105`
 jq-absent precedent. `/merge` and `/review-pr` parse
 `command_timeouts.{merge, review_pr}` but only surface the values in
 the run audit log; v1 does NOT enforce wall-clock kill on those
