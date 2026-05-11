@@ -133,14 +133,12 @@ else
   pass "M3.neg — does NOT reference rejected skill name 'merge-prs'"
 fi
 # Regression guard: must NOT invoke the bare `uberdev:merge` skill — that name
-# collides with the /uberdev:merge command and causes double-load. Use a
-# literal-string match (grep -qF) against the exact bug shape so the
-# slash-command form `/uberdev:merge` (legitimate prose) cannot false-positive.
-if grep -qF '`uberdev:merge` skill' "$CMD_FILE"; then
-  fail "M3.collision — references bare uberdev:merge skill (collides with the command name)"
-else
-  pass "M3.collision — does NOT reference the bare uberdev:merge skill (no command/skill name collision)"
-fi
+# collides with the /uberdev:merge command and causes double-load. The pattern
+# `` `uberdev:merge` skill `` is a literal string with no regex metachars, so
+# `assert_no_grep`'s ERE shape works identically while honouring the helper's
+# stated contract (see helper docstring at line ~96).
+assert_no_grep "$CMD_FILE" '`uberdev:merge` skill' \
+  "M3.collision — does NOT reference the bare uberdev:merge skill (no command/skill name collision)"
 
 echo
 echo "== M4: skills/merge-pipeline/SKILL.md exists with all four phase headings =="

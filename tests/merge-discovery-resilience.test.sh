@@ -277,11 +277,13 @@ echo "== A7: SKILL.md sources lib/discover.sh from each call site =="
 # `source ... lib/discover.sh` (or `. lib/discover.sh`) at >= 3 places.
 # NOTE: pre-v0.21.5 we used `[^\n]*` here, which BSD/GNU grep treats as the
 # char class `[^\, n]` — so any `n` between `.` and `lib/discover.sh` (such
-# as the `n` in `merge-pipeline`) silently breaks the match. We switched to
-# `.*` (matches anything but a literal newline, which is irrelevant for
-# grep's default per-line mode) for the same reach without the n-exclusion
-# foot-gun.
-assert_count_at_least "$SKILL" 'source.*lib/discover\.sh|\. .*lib/discover\.sh' 3 \
+# as the `n` in `merge-pipeline`) silently broke the match. The post-v0.21.5
+# fix used `.*` for reach, but that matched prose lines in addition to the
+# real `source`/dot statements (count climbed from 3 → 6 and the regression
+# guard's intent was structurally weakened). Anchoring on `^[[:space:]]*`
+# plus the literal `.` or `source` keyword restores the intent: matches the
+# 3 real source statements at lines 143/246/284 exactly.
+assert_count_at_least "$SKILL" '^[[:space:]]*(\.|source)[[:space:]].*lib/discover\.sh' 3 \
   "A7: SKILL.md sources lib/discover.sh in >= 3 places"
 
 echo
