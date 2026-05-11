@@ -513,7 +513,7 @@ for ev in ci_probe_started ci_probe_skipped_no_checks ci_probe_unreachable \
 done
 
 echo
-echo "== R20: merge/SKILL.md Constants table declares the new CI_*_ENUM rows (#76) =="
+echo "== R20: merge-pipeline/SKILL.md Constants table declares the new CI_*_ENUM rows (#76) =="
 assert_grep "$MERGE_SKILL" '\| `CI_STATUS_ENUM` \|' \
   "R20.1 — CI_STATUS_ENUM row present"
 assert_grep "$MERGE_SKILL" '\| `CI_FAILURE_CLASS_ENUM` \|' \

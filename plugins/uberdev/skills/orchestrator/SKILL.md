@@ -158,7 +158,7 @@ single-message waves — each wave still obeys the single-message
 Task() invariant within its slice. When `CAP >= 6`, dispatch all 6 in
 one wave (today's behaviour, unchanged). The small-tier branch is
 unaffected (only 1 agent dispatched). Mirrors the
-`MAX_PARALLEL_AGENTS` chunking idiom in `merge/SKILL.md:343` Phase 2.2.
+`MAX_PARALLEL_AGENTS` chunking idiom in `merge-pipeline/SKILL.md:343` Phase 2.2.
 Default 6, range [1, 50], precedence env > config > default.
 
 ```bash

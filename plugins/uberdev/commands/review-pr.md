@@ -166,7 +166,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
     ### 6c.1 PROBE — gh pr checks JSON probe
 
-    **Pre-flight rate-limit check:** the floor `200` below is `CI_PROBE_RATE_LIMIT_FLOOR` (declared in `merge/SKILL.md` Constants — kept numeric inline because bash does not dereference markdown constants).
+    **Pre-flight rate-limit check:** the floor `200` below is `CI_PROBE_RATE_LIMIT_FLOOR` (declared in `merge-pipeline/SKILL.md` Constants — kept numeric inline because bash does not dereference markdown constants).
 
     ```bash
     RATE_REMAINING="$(gh api rate_limit --jq .resources.core.remaining 2>/dev/null)"
@@ -218,7 +218,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
     ### 6c.2 MONITOR — gh pr checks --watch
 
-    The literals `1200` and `30` below are `CI_MONITOR_TIMEOUT_SEC` and `CI_WATCH_INTERVAL_SEC` respectively (declared in `merge/SKILL.md` Constants — kept numeric inline because bash does not dereference markdown constants).
+    The literals `1200` and `30` below are `CI_MONITOR_TIMEOUT_SEC` and `CI_WATCH_INTERVAL_SEC` respectively (declared in `merge-pipeline/SKILL.md` Constants — kept numeric inline because bash does not dereference markdown constants).
 
     ```bash
     timeout 1200 gh pr checks "$PR_NUMBER" --watch --interval 30 --json name,status,conclusion
@@ -288,7 +288,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
     esac
     ```
 
-    Audit `ci_fix_dispatched` (with `data.by_agent ∈ {ci-code-fixer, ci-rebase-handler}`) on every dispatch. The `RERUN_FLAKY_CAP = 1` constant (declared in `merge/SKILL.md`) bounds flake retries inside a single iteration; the loop counter is unaffected.
+    Audit `ci_fix_dispatched` (with `data.by_agent ∈ {ci-code-fixer, ci-rebase-handler}`) on every dispatch. The `RERUN_FLAKY_CAP = 1` constant (declared in `merge-pipeline/SKILL.md`) bounds flake retries inside a single iteration; the loop counter is unaffected.
 
     ### 6c.5 POST-FIX — re-enter Phase 1 fanout
 
@@ -300,7 +300,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
     - `ci-rebase-handler` `status: CONFLICT, conflicted_files: [...]` → execute the **CONFLICT-RESOLVE arm** below BEFORE Phase 1 re-entry. Closes #80 — the arm was previously unwired in this command, defeating the autopilot for any `stale_base` PR with conflicts.
     - `ci-rebase-handler` `status: REFUSED, rationale: <reason>` (∈ {`pr-already-merged`, `head-moved-since-classify`, `lease-mismatch`}) → emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=ci_rebase_refused_<reason>` (lowercase, dashes-to-underscores normalised; e.g. `lease-mismatch` → `ci_rebase_refused_lease_mismatch`); exit 1.
 
-    #### CONFLICT-RESOLVE arm (mirrors `merge/SKILL.md` Phase 3.3.iii–iv)
+    #### CONFLICT-RESOLVE arm (mirrors `merge-pipeline/SKILL.md` Phase 3.3.iii–iv)
 
     Trigger: `ci-rebase-handler` returned `status: CONFLICT, conflicted_files: [...]`. Per `agents/ci-rebase-handler.md` Step 6 the agent has already aborted the in-progress rebase, so the worktree is back to its pre-rebase state. The caller's main turn re-creates the conflict state in the current `/review-pr` checkout (`$REPO_ROOT`), fans out `conflict-resolver` per file in a SINGLE assistant turn, then continues the rebase under the original lease.
 
@@ -324,7 +324,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
        git rebase "origin/$base_branch"   # exits non-zero with markers — that is expected
        ```
 
-    2. **Resolve fanout cap.** Mirrors `merge/SKILL.md` Phase 3.3.iii cap-resolve:
+    2. **Resolve fanout cap.** Mirrors `merge-pipeline/SKILL.md` Phase 3.3.iii cap-resolve:
 
        ```bash
        if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
@@ -367,7 +367,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
            #       `agents/conflict-resolver.md` Refusal triggers + Inputs). Bounded
            #       by CI_FIX_LOOP_CAP from 6c.7 LOOP GUARD — single-shot per dispatch,
            #       NOT a separate retry path (anti-pattern guard restated from
-           #       merge/SKILL.md "PARK is the terminal floor" prose).
+           #       merge-pipeline/SKILL.md "PARK is the terminal floor" prose).
            #   (b) Non-conflict failure (pre-commit hook rejection, GPG signing
            #       failure, etc): no UU entries → halt.
            # Use mapfile -t (NOT unquoted expansion) so paths with spaces survive.
@@ -410,11 +410,11 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
          - On push failure for any other reason (auth, pre-receive hook, rate-limit, network): `git rebase --abort`; emit `ci_phase_outcome data.outcome=halted data.subreason=rebase_push_failed`; exit 1.
          - On `git rebase --continue` failure with no fresh conflict set (pre-commit hook reject / signing failure / etc): `git rebase --abort`; emit `ci_phase_outcome data.outcome=halted data.subreason=rebase_continue_failed`; exit 1.
 
-       - **Any `status: AMBIGUOUS`:** `git rebase --abort`; emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=rebase_conflict_ambiguous`; exit 1. (Mirrors `merge/SKILL.md` Phase 3.3.iv park-on-AMBIGUOUS, but for `/review-pr` the equivalent terminal action is run-halt — the trail records the unresolvable conflict; the user surfaces it via the Phase 3 halt prose. Per `agents/conflict-resolver.md` line 56, AMBIGUOUS carries `resolution_summary` + `risks[]` for handoff context.)
+       - **Any `status: AMBIGUOUS`:** `git rebase --abort`; emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=rebase_conflict_ambiguous`; exit 1. (Mirrors `merge-pipeline/SKILL.md` Phase 3.3.iv park-on-AMBIGUOUS, but for `/review-pr` the equivalent terminal action is run-halt — the trail records the unresolvable conflict; the user surfaces it via the Phase 3 halt prose. Per `agents/conflict-resolver.md` line 56, AMBIGUOUS carries `resolution_summary` + `risks[]` for handoff context.)
 
        - **Any `status: REFUSED`:** `git rebase --abort`; emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=rebase_conflict_refused`; exit 1. (e.g. lockfile / secret-shaped / out-of-set request from conflict-resolver — full refusal trigger list at `agents/conflict-resolver.md` Refusal triggers.)
 
-    5. **No additional retry path.** The arm is single-shot per `ci-rebase-handler` dispatch and bounded by `CI_FIX_LOOP_CAP` from 6c.7 LOOP GUARD. The "MUST NOT introduce any additional retry path" anti-pattern guard from `merge/SKILL.md:523` (in "PARK is the terminal floor" prose) applies here.
+    5. **No additional retry path.** The arm is single-shot per `ci-rebase-handler` dispatch and bounded by `CI_FIX_LOOP_CAP` from 6c.7 LOOP GUARD. The "MUST NOT introduce any additional retry path" anti-pattern guard from `merge-pipeline/SKILL.md:523` (in "PARK is the terminal floor" prose) applies here.
 
     **Phase 1 re-entry** (after a fix push lands — covers `ci-code-fixer` `APPLIED`, `ci-rebase-handler` `REBASED`, AND `ci-rebase-handler` `CONFLICT → all RESOLVED → push-success`).
 
@@ -453,11 +453,11 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
     ### 6c.7 LOOP GUARD
 
-    Counter `CI_FIX_LOOP_ITER` starts at `0` at Phase 3 entry. Each fix-and-push increments. Cap = `CI_FIX_LOOP_CAP` (declared in `merge/SKILL.md` Constants — value `3`).
+    Counter `CI_FIX_LOOP_ITER` starts at `0` at Phase 3 entry. Each fix-and-push increments. Cap = `CI_FIX_LOOP_CAP` (declared in `merge-pipeline/SKILL.md` Constants — value `3`).
 
     - Iteration < 3, terminal outcome → emit `ci_phase_outcome` audit (with `data.outcome ∈ CI_OUTCOME_ENUM`), return to Step 7.
     - Iteration == 3, still red → audit `ci_loop_cap_reached`; `OUTCOME=loop_cap_exhausted`; exit 1; no anchor commit.
-    - **MUST NOT introduce any additional retry path** (anti-pattern guard restated from `merge/SKILL.md` "PARK is the terminal floor" prose).
+    - **MUST NOT introduce any additional retry path** (anti-pattern guard restated from `merge-pipeline/SKILL.md` "PARK is the terminal floor" prose).
 
     Each iteration increments only on a **distinct commit SHA change** (HEAD SHA changed since this iteration's start). Re-runs of the same SHA on `flaky` paths use `RERUN_FLAKY_CAP=1` per distinct check — they do NOT increment `CI_FIX_LOOP_ITER`.
 
@@ -740,7 +740,7 @@ Phase 3 reuses exit `1` (no new exit code introduced — Q2 decision). The audit
 
 **uberdev:ci-rebase-handler** (`subagent_type: uberdev:ci-rebase-handler`):
 - Rebases the PR branch onto its base for `stale_base` class
-- Uses `--force-with-lease=<branch>:<sha> --force-if-includes` (sanctioned exception to `merge/SKILL.md`'s never-`--force-with-lease`-against-PR-head invariant)
+- Uses `--force-with-lease=<branch>:<sha> --force-if-includes` (sanctioned exception to `merge-pipeline/SKILL.md`'s never-`--force-with-lease`-against-PR-head invariant)
 - Worktree-scoped lock prevents parallel-run lease races
 - Returns `CONFLICT` for caller to fan out `conflict-resolver` agents (single message)
 

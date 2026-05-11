@@ -133,8 +133,10 @@ else
   pass "M3.neg — does NOT reference rejected skill name 'merge-prs'"
 fi
 # Regression guard: must NOT invoke the bare `uberdev:merge` skill — that name
-# collides with the /uberdev:merge command and causes double-load.
-if grep -qE 'uberdev:merge([^-A-Za-z0-9_]|$)' "$CMD_FILE"; then
+# collides with the /uberdev:merge command and causes double-load. Use a
+# literal-string match (grep -qF) against the exact bug shape so the
+# slash-command form `/uberdev:merge` (legitimate prose) cannot false-positive.
+if grep -qF '`uberdev:merge` skill' "$CMD_FILE"; then
   fail "M3.collision — references bare uberdev:merge skill (collides with the command name)"
 else
   pass "M3.collision — does NOT reference the bare uberdev:merge skill (no command/skill name collision)"
@@ -142,6 +144,13 @@ fi
 
 echo
 echo "== M4: skills/merge-pipeline/SKILL.md exists with all four phase headings =="
+assert_grep "$SKILL_FILE" '^name: merge-pipeline$' \
+  "M4.0 — skill frontmatter name field is 'merge-pipeline' (not 'merge')"
+if [ -d "$REPO_ROOT/plugins/uberdev/skills/merge" ]; then
+  fail "M4.neg — old skills/merge/ folder still present (rename incomplete)"
+else
+  pass "M4.neg — old skills/merge/ folder correctly removed (rename complete)"
+fi
 for n in 1 2 3 4; do
   case "$n" in
     1) heading='Pre-flight gate' ;;
