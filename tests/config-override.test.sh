@@ -370,6 +370,9 @@ assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
 assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
   'brew install coreutils' \
   "I2e: missing-timeout warning includes remediation pointer"
+assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
+  'if \[\[ -n "\$TIMEOUT_BIN" \]\]; then' \
+  "I2f: launcher guards wrap branch with -n TIMEOUT_BIN check (prevents silent regression on guard inversion/removal)"
 
 echo
 echo "== I3: orchestrator research fanout cap (Task 3) =="
