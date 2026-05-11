@@ -142,7 +142,7 @@ solve_tier_ceiling: medium       # one of: trivial, small, medium, large; clamps
 fanout_concurrency:
   research: 6                    # int [1, 50]; orchestrator Phase 1 research-fanout cap; default 6; env: UBERDEV_FANOUT_RESEARCH
   post_impl_review: 5            # int [1, 50]; post-impl-review reviewer fanout cap; default 5; env: UBERDEV_FANOUT_POST_IMPL_REVIEW
-  merge_strategy: 10             # int [1, 50]; /merge Phase 2.2 strategy-decider fanout cap; default 10; env: UBERDEV_FANOUT_MERGE_STRATEGY (alias for MAX_PARALLEL_AGENTS in merge/SKILL.md Constants)
+  merge_strategy: 10             # int [1, 50]; /merge Phase 2.2 strategy-decider fanout cap; default 10; env: UBERDEV_FANOUT_MERGE_STRATEGY (alias for MAX_PARALLEL_AGENTS in merge-pipeline/SKILL.md Constants)
   conflict_resolver: 10          # int [1, 50]; /merge Phase 3.3 conflict-resolver fanout cap; default 10; env: UBERDEV_FANOUT_CONFLICT_RESOLVER (NEW — Phase 3.3 was uncapped previously)
 
 # --- per-command wall-clock timeouts ---

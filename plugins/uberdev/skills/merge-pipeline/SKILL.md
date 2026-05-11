@@ -1,9 +1,9 @@
 ---
-name: merge
-description: Use when the user invokes /merge or /uberdev:merge to land approved PRs — owns the 4-phase pre-flight/plan/merge-resolve/sync pipeline.
+name: merge-pipeline
+description: Internal 4-phase pre-flight/plan/merge-resolve/sync pipeline for the /merge command. Invoked exclusively by commands/merge.md; do not call directly.
 ---
 
-# Merge Skill
+# Merge Pipeline Skill
 
 ## Overview
 
@@ -139,10 +139,10 @@ Procedure:
 2. Source `lib/discover.sh` (resolved via `${CLAUDE_PLUGIN_ROOT}` — the canonical plugin-root variable Claude Code injects at skill-evaluation time, mirroring the same SKILL.md's `lib/config-read.sh` precedent at line 113) and call `discover_bare_fast_path` — the canonical entry point for `BARE_MODE_FAST_PATH_QUERY` (declared in `## Constants`):
 
    ```bash
-   if [ -r "${CLAUDE_PLUGIN_ROOT}/skills/merge/lib/discover.sh" ]; then
-     . "${CLAUDE_PLUGIN_ROOT}/skills/merge/lib/discover.sh"
+   if [ -r "${CLAUDE_PLUGIN_ROOT}/skills/merge-pipeline/lib/discover.sh" ]; then
+     . "${CLAUDE_PLUGIN_ROOT}/skills/merge-pipeline/lib/discover.sh"
    else
-     echo "error: lib/discover.sh not found at ${CLAUDE_PLUGIN_ROOT}/skills/merge/lib/" >&2
+     echo "error: lib/discover.sh not found at ${CLAUDE_PLUGIN_ROOT}/skills/merge-pipeline/lib/" >&2
      exit 1
    fi
    N=$(discover_bare_fast_path "$current_branch") || N=0
@@ -242,10 +242,10 @@ If Step 1.0.5 set the bare-mode discriminator to `multi-discover` (or `--all` wa
 Concretely:
 
 ```bash
-if [ -r "${CLAUDE_PLUGIN_ROOT}/skills/merge/lib/discover.sh" ]; then
-  . "${CLAUDE_PLUGIN_ROOT}/skills/merge/lib/discover.sh"
+if [ -r "${CLAUDE_PLUGIN_ROOT}/skills/merge-pipeline/lib/discover.sh" ]; then
+  . "${CLAUDE_PLUGIN_ROOT}/skills/merge-pipeline/lib/discover.sh"
 else
-  echo "error: lib/discover.sh not found at ${CLAUDE_PLUGIN_ROOT}/skills/merge/lib/" >&2
+  echo "error: lib/discover.sh not found at ${CLAUDE_PLUGIN_ROOT}/skills/merge-pipeline/lib/" >&2
   exit 1
 fi
 candidates=$(discover_multi "$integration_branch")  # always exits 0; '[]' on failure
@@ -280,10 +280,10 @@ This is the only Phase-1 path where /merge declines to run for a config reason. 
 For each PR in the candidate set (per-PR fanout — the gate is dispatched once per discovered PR; bare-discover does not relax this dispatch shape), project the JSON via the canonical `pr_view_projection` lib function:
 
 ```bash
-if [ -r "${CLAUDE_PLUGIN_ROOT}/skills/merge/lib/discover.sh" ]; then
-  . "${CLAUDE_PLUGIN_ROOT}/skills/merge/lib/discover.sh"
+if [ -r "${CLAUDE_PLUGIN_ROOT}/skills/merge-pipeline/lib/discover.sh" ]; then
+  . "${CLAUDE_PLUGIN_ROOT}/skills/merge-pipeline/lib/discover.sh"
 else
-  echo "error: lib/discover.sh not found at ${CLAUDE_PLUGIN_ROOT}/skills/merge/lib/" >&2
+  echo "error: lib/discover.sh not found at ${CLAUDE_PLUGIN_ROOT}/skills/merge-pipeline/lib/" >&2
   exit 1
 fi
 PR_JSON=$(pr_view_projection "$PR_NUMBER") || {
@@ -348,8 +348,8 @@ Honest fast-forward fixup commits added between `/review-pr` and `/merge` (e.g.,
 
 > **Note for editors:** the layered trust-anchor sentence above (PATH_1 platform anchor + PATH_2 uberdev trust trail) is intentionally repeated across **five mirror sites**, each serving a different reader audience. Do not consolidate to a single source of truth. If you change the contract here, update all five mirrors in the same change. Mirror sites are identified by section/heading (line numbers shift with prose edits — use the anchors below):
 >
-> 1. `plugins/uberdev/skills/merge/SKILL.md` — `### Step 1.4 — Per-PR pre-flight gate (trust resolution)` body, the **"Author identity is NOT a gate condition"** paragraph (this section, the canonical wording).
-> 2. `plugins/uberdev/skills/merge/SKILL.md` — `## Common Mistakes`, the **"Adding an author allow-list back as a gate"** bullet (Phase 1.4 regression guard).
+> 1. `plugins/uberdev/skills/merge-pipeline/SKILL.md` — `### Step 1.4 — Per-PR pre-flight gate (trust resolution)` body, the **"Author identity is NOT a gate condition"** paragraph (this section, the canonical wording).
+> 2. `plugins/uberdev/skills/merge-pipeline/SKILL.md` — `## Common Mistakes`, the **"Adding an author allow-list back as a gate"** bullet (Phase 1.4 regression guard).
 > 3. `plugins/uberdev/commands/merge.md` — the **Autopilot paragraph** (user-facing CLI documentation; the sentence beginning "Phase 1.4 trust resolution accepts EITHER…").
 > 4. `plugins/uberdev/commands/merge.md` — `## Deprecated Flags`, the **`bot_authors_allow_list` config-key bullet**.
 > 5. `plugins/uberdev/skills/using-uberdev/SKILL.md` — the **`bot_authors_allow_list` semantics paragraph**.

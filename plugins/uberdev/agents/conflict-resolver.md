@@ -1,6 +1,6 @@
 ---
 name: conflict-resolver
-description: Resolves a single conflicted file from a PR merge in a scratch worktree. Reads <ours> and <theirs> hunks; returns a textually-justified resolution or a clean refusal. One agent per conflicted file; dispatched in a SINGLE assistant turn from skills/merge/SKILL.md Phase 3.
+description: Resolves a single conflicted file from a PR merge in a scratch worktree. Reads <ours> and <theirs> hunks; returns a textually-justified resolution or a clean refusal. One agent per conflicted file; dispatched in a SINGLE assistant turn from skills/merge-pipeline/SKILL.md Phase 3.
 model: sonnet
 color: orange
 ---
@@ -53,4 +53,4 @@ out_of_hunk_edits: false
 risks: []
 ```
 
-`status: AMBIGUOUS` and `status: REFUSED` cause the calling skill (`uberdev:merge` Phase 3.3iv) to **park THIS PR via the `drop` strategy and continue with the next PR** — the queue does NOT halt. Emit a structured handoff in the `resolution_summary` and `risks` fields so the run-summary block can surface the park rationale; the calling skill maps your status to a `pr_parked` audit event with `data.reason="ambiguous"` or `"refused"` (lowercase, ∈ `PARK_REASON_ENUM`).
+`status: AMBIGUOUS` and `status: REFUSED` cause the calling skill (`uberdev:merge-pipeline` Phase 3.3iv) to **park THIS PR via the `drop` strategy and continue with the next PR** — the queue does NOT halt. Emit a structured handoff in the `resolution_summary` and `risks` fields so the run-summary block can surface the park rationale; the calling skill maps your status to a `pr_parked` audit event with `data.reason="ambiguous"` or `"refused"` (lowercase, ∈ `PARK_REASON_ENUM`).

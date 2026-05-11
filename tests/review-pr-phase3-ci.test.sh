@@ -18,7 +18,7 @@ REVIEW_PR="$REPO_ROOT/plugins/uberdev/commands/review-pr.md"
 CLASSIFIER="$REPO_ROOT/plugins/uberdev/agents/ci-failure-classifier.md"
 CODE_FIXER_CI="$REPO_ROOT/plugins/uberdev/agents/ci-code-fixer.md"
 REBASE_HANDLER="$REPO_ROOT/plugins/uberdev/agents/ci-rebase-handler.md"
-MERGE_SKILL="$REPO_ROOT/plugins/uberdev/skills/merge/SKILL.md"
+MERGE_SKILL="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/SKILL.md"
 
 for f in "$REVIEW_PR" "$CLASSIFIER" "$CODE_FIXER_CI" "$REBASE_HANDLER" "$MERGE_SKILL"; do
   if [ ! -r "$f" ]; then
@@ -240,8 +240,8 @@ assert_grep "$REVIEW_PR" 'rebase --continue|git rebase --continue' \
   "S13.12 — RESOLVED path runs git rebase --continue before push"
 assert_grep "$REVIEW_PR" 'rebase --abort|git rebase --abort' \
   "S13.13 — AMBIGUOUS / REFUSED arm aborts the in-progress rebase"
-assert_grep "$REVIEW_PR" 'merge/SKILL\.md.*Phase 3\.3|Phase 3\.3.*merge/SKILL\.md' \
-  "S13.14 — review-pr.md cross-references merge/SKILL.md Phase 3.3 reference pattern"
+assert_grep "$REVIEW_PR" 'merge-pipeline/SKILL\.md.*Phase 3\.3|Phase 3\.3.*merge-pipeline/SKILL\.md' \
+  "S13.14 — review-pr.md cross-references merge-pipeline/SKILL.md Phase 3.3 reference pattern"
 assert_grep "$REVIEW_PR" 'Phase 3.*halt|halt Phase 3|OUTCOME=halted' \
   "S13.15 — AMBIGUOUS / REFUSED / lease-mismatch surfaces halt-with-OUTCOME=halted"
 # Negative-regression guard: POST-FIX must NOT unconditionally assume rebase

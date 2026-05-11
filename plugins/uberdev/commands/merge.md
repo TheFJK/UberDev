@@ -46,4 +46,4 @@ Encountering `--bypass-protections` for the first time emits this stderr notice 
 
 An audit event `deprecated_flag_used` is recorded once per encounter (one per flag class per run). No version-gated removal — keys stay parseable indefinitely. Pattern follows Terraform / npm CLI deprecation precedent. The same `deprecated_flag_used` event covers all five deprecated flag classes (`--yes`, `-y`, `auto_confirm`, `--squash` / `--rebase` / `--merge`, `--bypass-protections`); no new audit-event enum value is introduced.
 
-Now invoke the `uberdev:merge` skill — it owns the 4-phase pipeline (pre-flight gate, merge plan, merge + parallel conflict-resolve, post-merge local sync). The skill renders inline, so `$ARGUMENTS` remains in scope for its bash blocks.
+Now invoke the `uberdev:merge-pipeline` skill — it owns the 4-phase pipeline (pre-flight gate, merge plan, merge + parallel conflict-resolve, post-merge local sync). The skill renders inline, so `$ARGUMENTS` remains in scope for its bash blocks.
