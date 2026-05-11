@@ -351,15 +351,19 @@ The launcher `cd`s to repo root, cleans stale worktree, logs errors, keeps termi
 **Wall-clock timeout.** The launcher reads
 `command_timeouts.solve` from `.claude/uberdev.local.md` (env override:
 `UBERDEV_SOLVE_TIMEOUT`; default 3600s; range [60, 86400]) and wraps the
-`claude` invocation in `timeout(1)` when the binary is on PATH. If
-`timeout(1)` is unavailable (rare on bare macOS without coreutils) the
-launcher emits one stderr warning and runs unwrapped — fail-open per
-the `aliases-sync.sh:14-23` jq-absent precedent. `/merge` and
-`/review-pr` parse `command_timeouts.{merge, review_pr}` but only
-surface the values in the run audit log; v1 does NOT enforce wall-clock
-kill on those commands (the orchestrator turn loop runs inside an
-existing Claude session and would need deeper changes to honour a
-kill). v2 issue can extend.
+`claude` invocation in `timeout(1)` when the binary is on PATH. macOS
+does **not** ship GNU `timeout(1)`; `brew install coreutils` installs
+it as `gtimeout` (Homebrew's `g`-prefix avoids masking BSD utilities),
+so the launcher probes `timeout` first and falls back to `gtimeout`. If
+neither is on PATH (stock macOS without coreutils) the launcher emits
+one stderr warning (with a `brew install coreutils` remediation
+pointer) and runs unwrapped — fail-open per the `aliases-sync.sh:105`
+jq-absent precedent. `/merge` and `/review-pr` parse
+`command_timeouts.{merge, review_pr}` but only surface the values in
+the run audit log; v1 does NOT enforce wall-clock kill on those
+commands (the orchestrator turn loop runs inside an existing Claude
+session and would need deeper changes to honour a kill). v2 issue can
+extend.
 
 ```bash
 cat > /tmp/solve-$ISSUE_NUM.sh << 'SCRIPT_EOF'
@@ -406,15 +410,21 @@ else
   SOLVE_TIMEOUT=3600
 fi
 
-# Wrap claude in timeout(1) when the binary is on PATH; fail-open otherwise
-# (graceful degradation when required tooling is unavailable). The if/else form
-# is mandatory: zsh's default SH_WORD_SPLIT=off would treat a scalar
-# `$PREFIX="timeout 3600"` at command position as ONE token and abort with
-# "command not found: timeout 3600" under set -e.
-if command -v timeout >/dev/null 2>&1; then
-  timeout "${SOLVE_TIMEOUT}" CLAUDE_BIN --model 'claude-opus-4-7[1m]' --effort max --worktree solve-issue-ISSUE_NUM $PERM_FLAG "$PROMPT"
+# Wrap claude in timeout(1)/gtimeout when one is on PATH; fail-open otherwise
+# (graceful degradation when required tooling is unavailable). macOS does NOT
+# ship GNU timeout; `brew install coreutils` installs it as `gtimeout` (Homebrew
+# `g`-prefix), so we probe both. The if/elif/else form is mandatory: zsh's
+# default SH_WORD_SPLIT=off would treat a scalar `$PREFIX="timeout 3600"` at
+# command position as ONE token and abort with "command not found: timeout 3600"
+# under set -e. Quoting "$TIMEOUT_BIN" keeps it as a single argv[0] token.
+TIMEOUT_BIN=""
+if   command -v timeout  >/dev/null 2>&1; then TIMEOUT_BIN=timeout
+elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT_BIN=gtimeout
+fi
+if [[ -n "$TIMEOUT_BIN" ]]; then
+  "$TIMEOUT_BIN" "${SOLVE_TIMEOUT}" CLAUDE_BIN --model 'claude-opus-4-7[1m]' --effort max --worktree solve-issue-ISSUE_NUM $PERM_FLAG "$PROMPT"
 else
-  echo "warning: timeout(1) not on PATH; /solve will run unwrapped (no wall-clock kill)" >&2
+  echo "warning: neither timeout(1) nor gtimeout on PATH; /solve will run unwrapped (no wall-clock kill). Fix: brew install coreutils" >&2
   CLAUDE_BIN --model 'claude-opus-4-7[1m]' --effort max --worktree solve-issue-ISSUE_NUM $PERM_FLAG "$PROMPT"
 fi
 SCRIPT_EOF

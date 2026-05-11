@@ -362,8 +362,17 @@ assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
   'command -v timeout' \
   "I2b: launcher checks timeout(1) availability"
 assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
-  'timeout "\$\{SOLVE_TIMEOUT\}" CLAUDE_BIN' \
-  "I2c: launcher inlines timeout(1) call directly (zsh-safe; no scalar prefix)"
+  'command -v gtimeout' \
+  "I2c: launcher probes gtimeout fallback (Homebrew coreutils installs the macOS binary as gtimeout, not timeout)"
+assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
+  '"\$TIMEOUT_BIN" "\$\{SOLVE_TIMEOUT\}" CLAUDE_BIN' \
+  "I2d: launcher inlines resolved-binary wrap call (zsh-safe; no scalar prefix)"
+assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
+  'brew install coreutils' \
+  "I2e: missing-timeout warning includes remediation pointer"
+assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
+  'if \[\[ -n "\$TIMEOUT_BIN" \]\]; then' \
+  "I2f: launcher guards wrap branch with -n TIMEOUT_BIN check (prevents silent regression on guard inversion/removal)"
 
 echo
 echo "== I3: orchestrator research fanout cap (Task 3) =="

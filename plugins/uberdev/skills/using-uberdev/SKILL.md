@@ -148,7 +148,7 @@ fanout_concurrency:
 # --- per-command wall-clock timeouts ---
 # dot-path refs: command_timeouts.solve, command_timeouts.review_pr, command_timeouts.merge
 command_timeouts:
-  solve: 3600                    # int seconds [60, 86400]; ENFORCED via /solve launcher timeout(1) wrap; default 3600 (1h); env: UBERDEV_SOLVE_TIMEOUT
+  solve: 3600                    # int seconds [60, 86400]; ENFORCED via /solve launcher timeout(1)/gtimeout wrap; default 3600 (1h); env: UBERDEV_SOLVE_TIMEOUT
   review_pr: 900                 # int seconds [60, 86400]; ADVISORY-ONLY in v1 (parsed + audit-logged; no kill); default 900 (15m); env: UBERDEV_REVIEW_PR_TIMEOUT
   merge: 600                     # int seconds [60, 86400]; ADVISORY-ONLY in v1 (parsed + audit-logged; no kill); default 600 (10m); env: UBERDEV_MERGE_TIMEOUT
 ---
@@ -191,8 +191,10 @@ change; matches the `merge_strategy` chunking precedent).
 **`command_timeouts.{solve, review_pr, merge}`:** per-command
 wall-clock timeout in seconds, range `[60, 86400]` (1m–24h).
 **Enforcement scope:** only `command_timeouts.solve` is enforced — the
-`/solve` launcher wraps the `claude` invocation in `timeout(1)` (and
-fails-open with one stderr warning if `timeout(1)` is not on PATH).
+`/solve` launcher wraps the `claude` invocation in `timeout(1)` (probing
+`gtimeout` as a fallback, since `brew install coreutils` on macOS
+installs the GNU binary under that name; fails-open with one stderr
+warning if neither is on PATH).
 `command_timeouts.{merge, review_pr}` are **ADVISORY-ONLY in v1**:
 they are parsed and recorded in the audit log under
 `uberdev_config_read` but NOT enforced as wall-clock kills, because
