@@ -4,7 +4,7 @@
 
 **Personal Claude Code marketplace — opinionated GitHub-workflow slash commands.**
 
-[![Version](https://img.shields.io/badge/version-0.21.6-blue)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.22.0-blue)](./CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8B5CF6)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Repo Agnostic](https://img.shields.io/badge/repo--agnostic-yes-success)](#configuration)
@@ -37,7 +37,7 @@ UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-Sonn
 
 | Command | What it does |
 |---|---|
-| **`/solve <issue#>`** | Spawns an autonomous Claude agent in a new terminal (cmux / Ghostty / iTerm / Terminal.app / nohup). Tier-aware: trivial issues skip brainstorm; large ones get the full orchestrator → spec → plan → wave-dispatch → review pipeline. |
+| **`/solve <issue#>`** | Spawns an autonomous Claude agent as a `claude --bg` background session (visible in `claude agents`). Tier-aware: trivial issues skip brainstorm; large ones get the full orchestrator → spec → plan → wave-dispatch → review pipeline. |
 | **`/turbo <issue#>`** | Unattended `/solve`. Same pipeline, but the brainstorm phase auto-accepts the lead agent's recommendation and Q&A is resolved against the research bundle. Use when you trust the recommendation and want issue → PR with no babysitting. |
 | **`/issue <description>`** | Creates a well-investigated, deduped, label-validated GitHub issue from a one-line ask. 2-Sonnet-scout fanout (codebase + triage) runs in <30 s, with conventional-commit titling and template-by-type. |
 | **`/review-pr [<PR#>]`** | Comprehensive PR review using specialized agents fanned out in parallel — code review, simplifier, silent-failure hunter, type-design analyzer, comment analyzer, test analyzer. |
@@ -109,9 +109,7 @@ Disable Claude Code's auto-updater globally with `DISABLE_AUTOUPDATER=1` in your
 |---|---|
 | **`gh` CLI** authenticated against your target repos | Repo detection, label/scope validation, dedup search, issue & PR ops |
 | **`jq`** | Used by `install.sh` and `/merge` |
-| **macOS** (Apple Silicon or Intel) | Terminal dispatch via `osascript` for iTerm/Terminal.app; Linux/Windows degrade to detached `nohup` |
-| **Claude Code 2.x+** with plugin support | Required for `/plugin marketplace add` |
-| **One of:** cmux, Ghostty, iTerm2, Terminal.app | `/solve` auto-detects; falls back to detached `nohup` if none found |
+| **Claude Code >= 2.1.139** with plugin support | Required for `/plugin marketplace add` AND for `claude --bg` (Agent View). `/solve` and `/turbo` hard-fail on older versions with an actionable `npm i -g @anthropic-ai/claude-code@latest` pointer. |
 
 ---
 
@@ -133,21 +131,20 @@ Auto-classifies a GitHub issue into a tier, then spawns an agent with a tier-app
 /solve 123 --trivial                  # force trivial tier
 /solve 123 --small                    # force small tier
 /solve 123 --full                     # force medium/large
-/solve 123 --terminal=ghostty         # force terminal dispatcher
-SOLVE_TERMINAL=cmux /solve 123        # same, via env
+/solve 123 --auto                     # enable --permission-mode auto (AI tool gating)
+claude agents                          # monitor active /solve and /turbo background sessions
 ```
 
-**What runs in the spawned terminal** — model and effort are pinned so behavior is reproducible across runs:
+**What runs as the background session** — model and effort are pinned so behavior is reproducible across runs:
 
 ```bash
-claude \
-  --model 'claude-opus-4-7[1m]' \
-  --effort max \
+claude --bg \
+  --prompt-file /tmp/solve-prompt-123.txt \
   --worktree solve-issue-123 \
-  "$PROMPT"
+  --model 'claude-opus-4-7[1m]'
 ```
 
-After opening its PR, the agent renames its own terminal tab from `#123 <issue-title>` to `PR #456 <pr-title>` via OSC escape sequences (or cmux's workspace API).
+Monitor with `claude agents` (the Agent View peek panel handles `AskUserQuestion` prompts inline — type the response and press Enter). Session names display natively from the `--worktree solve-issue-N` flag; no OSC tab-rename or `cmux workspace-action` is needed.
 
 **Wave-based parallel execution** — multi-task plans declare `Depends on:` / `Wave:` / `Owns:` per task. Tasks share a wave only if their `Owns` allowlists are pairwise disjoint. Implementers never run git (controller serializes commits) — eliminates `.git/index.lock` races without per-task worktree ceremony. Maximum parallelism on edits, deterministic commit history, zero merge ceremony between waves.
 
@@ -166,7 +163,7 @@ Identical to `/solve` for trivial / small. For medium / large, the brainstorm ph
 
 `/turbo` and `--auto` are orthogonal: `/turbo` governs brainstorm interactivity; `--auto` governs Claude Code's per-tool permission mode.
 
-**Multi-issue dispatch.** `/turbo 5 6 7` validates all three issues up front (open + classifiable) and spawns three independent agents — one terminal tab/workspace each, all running in parallel. Override flags (`--trivial|--small|--full`, `--auto`, `--terminal=...`) apply batch-wide. If any issue is closed, missing, or fails `gh` fetch, the run aborts before spawning anything (`no agents dispatched`). `/solve` accepts the same syntax.
+**Multi-issue dispatch.** `/turbo 5 6 7` validates all three issues up front (open + classifiable) and spawns three independent `claude --bg` sessions — each in its own `.claude/worktrees/solve-issue-N/` worktree, all running in parallel. Override flags (`--trivial|--small|--full`, `--auto`) apply batch-wide. Larger queues split into `ceil(N / cap)` sequential single-message waves (default cap 6 via `fanout_concurrency.solve_bg`). If any issue is closed, missing, or fails `gh` fetch, the run aborts before spawning anything (`no agents dispatched`). `/solve` accepts the same syntax.
 
 Spec & plan are still written to disk before implementation — audit them mid-flight to course-correct.
 
@@ -224,8 +221,9 @@ Per-repo settings live in `.claude/uberdev.local.md` (YAML frontmatter; ignored 
 
 ```yaml
 ---
-solve_terminal: ghostty       # ghostty | iterm | cmux | terminal | nohup
 solve_auto: false             # auto-accept brainstorm recommendations (= /turbo)
+fanout_concurrency:
+  solve_bg: 6                 # /turbo parallel claude --bg fanout cap (default 6, range [1, 50])
 auto_install_aliases: true    # install short-form forwarders at SessionStart
 integration_branch: main      # /merge target branch (overrides gh repo view default)
 ---
@@ -233,7 +231,7 @@ integration_branch: main      # /merge target branch (overrides gh repo view def
 
 | Env var | File key | Purpose |
 |---|---|---|
-| `SOLVE_TERMINAL` | `solve_terminal` | Override `/solve`'s terminal dispatcher (`cmux` / `ghostty` / `iterm` / `terminal` / `nohup`) |
+| `UBERDEV_FANOUT_SOLVE_BG` | `fanout_concurrency.solve_bg` | Cap on parallel `claude --bg` sessions dispatched by `/turbo`; int [1, 50], default 6 |
 | `SOLVE_AUTO` | `solve_auto` | When `1`/`true`, spawned agent runs with `--permission-mode auto` |
 | `UBERDEV_NO_AUTO_ALIAS` | `auto_install_aliases` | When `1`/`true` (env) or `false` (file), suppresses session-start auto-install of `/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge` forwarders |
 | `UBERDEV_INTEGRATION_BRANCH` | `integration_branch` | `/merge` target branch |
@@ -290,7 +288,7 @@ Bundled upstream license texts in `plugins/uberdev/licenses/`.
 | **Repo-agnostic by default** | Commands derive `$REPO` from `gh repo view` at runtime. No hardcoded org/project IDs. |
 | **No GitHub Project board auto-add** | Portability over board affordance. May return via opt-in `.claude/board.json`. |
 | **Model pin baked in** *(in `solve.md`)* | Spawned agents run on `claude-opus-4-7[1m]` for reproducibility. Forks should adjust. |
-| **macOS-first terminal dispatch** | `osascript` for iTerm/Terminal.app; native CLI for cmux/Ghostty; `nohup` fallback elsewhere. |
+| **Background sessions via `claude --bg`** | `/solve` and `/turbo` dispatch into Agent View — supervised by Claude Code's daemon, isolated per-worktree, platform-agnostic. No terminal emulator required. |
 | **Triage hint in every issue body** | `/solve` skips re-classification and picks the right workflow without re-reading the body. |
 | **Conventional commits enforced** | `feat(scope):` / `fix(scope):` / `chore(scope):` / `refactor(scope):`. `enhancement` is a label, never a type. |
 | **`/merge` autopilot has no author gate** | Trust anchor is `reviewDecision == "APPROVED"` + GitHub branch protections. Bot vs. human vs. external contributor — same eligibility. |
@@ -327,7 +325,7 @@ Personal brand. Marketplace and repo are `UberDev`; the plugin inside is `uberde
 <details>
 <summary><strong>Will <code>/solve</code> work outside macOS?</strong></summary>
 
-Partially. The terminal-dispatch chain falls through to `nohup` (detached background process with logs in `/tmp/solve-N.log`) on any platform without a recognized terminal app. You lose the per-issue tab and notifications, but the agent still runs.
+Yes — `/solve` and `/turbo` now dispatch via `claude --bg` (Agent View), which is platform-agnostic. Monitor running sessions with `claude agents`. Requires Claude Code >= 2.1.139.
 
 </details>
 
