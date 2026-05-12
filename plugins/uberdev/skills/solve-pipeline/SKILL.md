@@ -16,7 +16,7 @@ This skill is invoked inline by `commands/solve.md` and `commands/turbo.md`. The
 | `TERMINAL_FLAG_DEPRECATED_NOTE` | `warning: --terminal=cmux\|ghostty\|iterm\|terminal\|nohup is deprecated in v0.22.0; /solve and /turbo now dispatch claude --bg background sessions visible in claude agents. The flag is parsed without effect and will be removed in v1.0.0.` | Phase A stderr emission on first encounter; `commands/solve.md` / `commands/turbo.md` `## Deprecated Flags`. |
 | `MIN_CLAUDE_VERSION` | `2.1.139` | Phase A `_uberdev_require_claude_version` hard gate. |
 | `FANOUT_CONCURRENCY_SOLVE_BG_DEFAULT` | `6` | Phase A `MAX_PARALLEL_BG_AGENTS` resolution default. |
-| `SOLVE_AUDIT_EVENT_ENUM` | `agent_dispatched`, `agent_returned`, `deprecated_flag_used`, `solve_bg_fanout_wave_started`, `error` | Audit-log writers; consumers grep for `deprecated_flag_used` to identify migration laggards. |
+| `SOLVE_AUDIT_EVENT_ENUM` | `agent_dispatched`, `deprecated_flag_used`, `solve_bg_fanout_wave_started`, `error` | Audit-log writers; consumers grep for `deprecated_flag_used` to identify migration laggards. `agent_returned` was removed in v0.22.0 — `claude --bg` does not synchronously report agent completion; use `claude agents` for status. |
 
 ## Triage heuristics (Phase A applies this table)
 
@@ -251,6 +251,10 @@ _uberdev_require_claude_version "2.1.139"
 # bash-array argv form (spec-reviewer finding #1). A runtime probe is deferred until
 # upstream documents a passthrough flag — `claude --bg --help` is NOT introspective
 # in 2.1.139 (it spawns a real session).
+# TODO(upstream-claude-code-rfe): switch to file or stdin mode once a documented
+# --prompt-file / stdin-passthrough form ships in Claude Code (tracking the RFE
+# for safer prompt-passthrough). The file/stdin arms below remain in place as a
+# pre-wired migration target; today only the argv arm is exercised at runtime.
 BG_PROMPT_MODE=argv
 if [ -r "${CLAUDE_PLUGIN_ROOT:-}/lib/config-read.sh" ]; then
   # shellcheck source=/dev/null
@@ -515,6 +519,17 @@ case "$BG_PROMPT_MODE" in
     "${cmd[@]}" > "$BG_STDOUT_LOG" 2>&1
     BG_DISPATCH_RC=$?
     ;;
+  *)
+    # Defensive default arm: BG_PROMPT_MODE is hardcoded `argv` in Phase A
+    # today, so this is unreachable in normal control flow. If a future
+    # patch parameterises it (e.g. wires the upstream Claude Code
+    # --prompt-file RFE) and a typo or stale config slips through without
+    # enum validation, fall through here with rc=127 instead of silently
+    # no-op'ing through the case-switch and reporting `BG_DISPATCH_RC=0`
+    # for a dispatch that never happened — silent-failure-hunter finding B2.
+    echo "error: BG_PROMPT_MODE='$BG_PROMPT_MODE' is not one of {file, stdin, argv}" > "$BG_STDOUT_LOG"
+    BG_DISPATCH_RC=127
+    ;;
 esac
 
 if [[ "$BG_DISPATCH_RC" -eq 0 ]]; then
@@ -523,7 +538,13 @@ if [[ "$BG_DISPATCH_RC" -eq 0 ]]; then
   _uberdev_audit_emit agent_dispatched \
     "{\"issue\":$ISSUE_NUM,\"tier\":\"$TIER\",\"bg_session_id\":\"${BG_SESSION_ID:-}\",\"mode\":\"$BG_PROMPT_MODE\"}" || true
 else
-  DISPATCH_FAILED+=("#$ISSUE_NUM: $(tail -3 "$BG_STDOUT_LOG" | tr '\n' ' ')")
+  # Capture the last three log lines; if the log is empty (claude --bg
+  # crashed before writing anything to its FD 1/2, e.g. exec-failure on
+  # macOS where gtimeout exits before flushing), the user gets a pointer
+  # to the log path instead of an empty failure entry that reads like a
+  # silent success — silent-failure-hunter finding B3.
+  TAIL_OUTPUT="$(tail -3 "$BG_STDOUT_LOG" | tr '\n' ' ')"
+  DISPATCH_FAILED+=("#$ISSUE_NUM: ${TAIL_OUTPUT:-(no output captured; check /tmp/solve-bg-stdout-$ISSUE_NUM.log)}")
   _uberdev_audit_emit error \
     "{\"issue\":$ISSUE_NUM,\"phase\":\"dispatch\",\"rc\":$BG_DISPATCH_RC}" || true
 fi
