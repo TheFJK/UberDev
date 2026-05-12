@@ -7,7 +7,7 @@ description: "Shared launcher pipeline for /uberdev:solve and /uberdev:turbo. Pa
 
 This skill is invoked inline by `commands/solve.md` and `commands/turbo.md`. The caller exports `AUTO_MODE` (`0` for /solve interactive; `1` for /turbo unattended) before invocation; this skill reads `$AUTO_MODE` and `$ARGUMENTS` from the caller's shell scope.
 
-`$ARGUMENTS` may contain **one or more issue numbers** (e.g. `42` or `5 6 7`). The skill validates every issue up front (Phase A) and then dispatches one autonomous agent per issue into its own terminal session (Phase B). Per-issue artifacts (`/tmp/solve-prompt-N.txt`, `/tmp/solve-N.sh`, `.claude/worktrees/solve-issue-N/`, `worktree-solve-issue-N` branch, `#N <title>` tab) are namespaced by `$ISSUE_NUM`, so concurrent spawns are collision-free. Override flags (`--trivial|--small|--full`, `--auto`, `--terminal=...`) apply batch-wide.
+`$ARGUMENTS` may contain **one or more issue numbers** (e.g. `42` or `5 6 7`). The skill validates every issue up front (Phase A) and then dispatches one autonomous `claude --bg` background session per issue (Phase B). Per-issue artifacts (`/tmp/solve-prompt-N.txt`, `/tmp/solve-bg-stdout-N.log`, `.claude/worktrees/solve-issue-N/`, `worktree-solve-issue-N` branch) are namespaced by `$ISSUE_NUM`, so concurrent spawns are collision-free. Override flags (`--trivial|--small|--full`, `--auto`) apply batch-wide. Monitor via `claude agents`.
 
 ## Constants
 
@@ -133,80 +133,15 @@ fi
 gh repo view --json nameWithOwner --jq .nameWithOwner
 ```
 
-### 3. Detect terminal app
+### 3. (RETIRED v0.22.0 — terminal detection removed for #85)
 
-Pick a dispatcher once, before any spawn. Priority: explicit override > cmux (only when we're inside a live cmux session) > standalone Ghostty > iTerm2 > Terminal.app > nohup-fallback. **Warp falls through to nohup** — its CLI can't dispatch a command into a new window cleanly.
-
-`TERM_PROGRAM=ghostty` is also set when you're inside cmux (cmux bundles Ghostty), so the cmux check MUST come first and MUST require a live cmux socket — otherwise we'd mis-classify a cmux session as plain Ghostty. Current cmux releases export the socket path as `$CMUX_SOCKET_PATH`; older releases used `$CMUX_SOCKET` (and recent cmux explicitly sets `CMUX_SOCKET=` to empty string, so a bare `-n "$CMUX_SOCKET"` check fails inside a live cmux session). Read both: prefer `$CMUX_SOCKET_PATH`, fall back to `$CMUX_SOCKET`.
-
-```bash
-if [[ -n "$TERMINAL_OVERRIDE" ]]; then
-  TERMINAL="$TERMINAL_OVERRIDE"
-elif [[ -n "$SOLVE_TERMINAL" ]]; then
-  TERMINAL="$SOLVE_TERMINAL"
-elif _CMUX_SOCK="${CMUX_SOCKET_PATH:-${CMUX_SOCKET:-}}"; [[ -n "$_CMUX_SOCK" && -S "$_CMUX_SOCK" ]] && command -v cmux >/dev/null 2>&1; then
-  TERMINAL="cmux"
-elif [[ "$TERM_PROGRAM" == "ghostty" ]] && [[ -d /Applications/Ghostty.app ]]; then
-  TERMINAL="ghostty"
-elif [[ "$TERM_PROGRAM" == "iTerm.app" ]]; then
-  TERMINAL="iterm"
-elif [[ "$TERM_PROGRAM" == "Apple_Terminal" ]]; then
-  TERMINAL="terminal"
-else
-  TERMINAL="nohup"
-fi
-
-# Validate the chosen dispatcher is actually usable. If a user *explicitly* asked
-# for cmux/ghostty/iterm via --terminal= or $SOLVE_TERMINAL but the dispatcher
-# isn't installed, surface an actionable message and fall back to nohup so the
-# agent still spawns instead of failing inside the dispatch case below.
-case "$TERMINAL" in
-  cmux)
-    if ! command -v cmux >/dev/null 2>&1; then
-      echo "warning: TERMINAL=cmux requested but 'cmux' binary not on PATH." >&2
-      echo "         Install: npm i -g @manaflow-ai/cmux  (see cmux README for canonical install)" >&2
-      echo "         Falling back to nohup." >&2
-      TERMINAL="nohup"
-    elif _CMUX_SOCK="${CMUX_SOCKET_PATH:-${CMUX_SOCKET:-}}"; [[ -z "$_CMUX_SOCK" || ! -S "$_CMUX_SOCK" ]]; then
-      echo "warning: TERMINAL=cmux requested but neither \$CMUX_SOCKET_PATH nor \$CMUX_SOCKET resolves to a live socket." >&2
-      echo "         Run /solve or /turbo from inside an active cmux session, or unset SOLVE_TERMINAL/--terminal." >&2
-      echo "         Falling back to nohup." >&2
-      TERMINAL="nohup"
-    fi
-    ;;
-  ghostty)
-    [[ -d /Applications/Ghostty.app ]] || { echo "warning: ghostty selected but /Applications/Ghostty.app missing; falling back to nohup." >&2; TERMINAL="nohup"; }
-    ;;
-  iterm)
-    [[ -d /Applications/iTerm.app ]] || { echo "warning: iterm selected but /Applications/iTerm.app missing; falling back to nohup." >&2; TERMINAL="nohup"; }
-    ;;
-  terminal|nohup) ;;  # always available on macOS
-  *) echo "warning: unknown TERMINAL='$TERMINAL'; falling back to nohup." >&2; TERMINAL="nohup" ;;
-esac
-
-echo "Dispatching via: $TERMINAL"
-# Do NOT collapse this back into a one-liner of the form
-#   echo "Permission mode: $([[ "$AUTO_PERMISSIONS" == "1" ]] && echo 'auto (...)' || echo 'default (manual per-tool gating)')"
-# When an agent re-emits this SKILL block into a generated launcher .sh,
-# the inner single-quote pair around the `default '...'` echo argument
-# tends to drop while the outer `"..."` is preserved, leaving the literal
-# `(manual per-tool gating)` unquoted right before the closing `"`. Under
-# zsh's default NOMATCH that is an unmatched glob → `zsh:<line>: no matches
-# found: (manual per-tool gating)"` → fatal under `set -e` (observed in
-# the wild against TheFJK/WAGYPROD#35). The flat-var form below has no
-# nested-quote layers for the agent to mis-emit.
-if [[ "$AUTO_PERMISSIONS" == "1" ]]; then
-  PERM_DESC="auto (Claude Code AI classifier)"
-else
-  PERM_DESC="default (manual per-tool gating)"
-fi
-echo "Permission mode: $PERM_DESC"
-
-# Resolve the real Claude binary once (PATH walk skipping wrapper directory).
-# Hoisted out of the per-issue loop — same value for every spawn.
-REAL_CLAUDE=$(WRAPPER_DIR=$(dirname "$(which claude)"); for d in ${(s/:/)PATH}; do [[ "$d" == "$WRAPPER_DIR" ]] && continue; [[ -x "$d/claude" ]] && echo "$d/claude" && break; done)
-REAL_CLAUDE="${REAL_CLAUDE:-$(which claude)}"
-```
+The Phase A bg-dispatch probes (added near the top of the SKILL.md Phase A
+block by the v0.22.0 refactor: the claude-version gate at 2.1.139, the
+hardcoded prompt-mode (`argv`), and the `MAX_PARALLEL_BG_AGENTS`
+resolution) replace the entire former Step 3 terminal-detection cascade.
+The terminal, real-claude-path, and permission-description variables no
+longer exist; see `## Deprecated Flags` in `commands/solve.md` /
+`commands/turbo.md` for the `--terminal=` migration pointer.
 
 ### 4. Validate all issues (Phase A — validate-all-first)
 
@@ -290,9 +225,9 @@ if [[ "$AUTO_MODE" == "1" ]]; then
 fi
 
 # --- Phase A: bg dispatch probes + fanout cap (NEW v0.22.0) ---
-# All three probes run ONCE per /solve or /turbo invocation. They are
-# hoisted out of the Phase B per-issue loop because the resolved values are
-# the same for every spawn.
+# All probes run ONCE per /solve or /turbo invocation. They are hoisted out
+# of the Phase B per-issue loop because the resolved values are the same for
+# every spawn.
 _uberdev_require_claude_version "2.1.139"
 # BG_PROMPT_MODE: hardcoded `argv` because claude --bg 2.1.139 has no documented
 # --prompt-file or stdin-passthrough form (prior-art research). T6 implements the
@@ -307,15 +242,67 @@ if [ -r "${CLAUDE_PLUGIN_ROOT:-}/lib/config-read.sh" ]; then
 else
   MAX_PARALLEL_BG_AGENTS=6
 fi
+
+# --- Phase A: hoisted from retired launcher heredoc (#85 / v0.22.0) ---
+# These four variables formerly lived inside the per-issue launcher shell
+# script that Step 5b previously wrote (the per-N temp-file form is now
+# retired). The launcher is retired in v0.22.0; the values are
+# batch-invariant, so resolve them once at Phase A entry and let the
+# inline Step 5b' dispatch (Phase B) consume them.
+
+# MODEL: single-quoted to keep zsh from glob-evaluating [1m] under NOMATCH.
+MODEL='claude-opus-4-7[1m]'
+
+# PERM_FLAG: issue bodies are remote-fetched (untrusted). Default mode gates
+# every tool use. PERM_FLAG=--permission-mode auto enables Claude Code's AI
+# classifier — auto-approves safe ops (read, in-scope edits, tests, push to
+# feature branch) and soft-denies dangerous ones (force push, rm -rf on
+# pre-existing files, exfil, self-modification). Strictly safer than
+# --dangerously-skip-permissions for autonomous /solve runs.
+PERM_FLAG=""
+[[ "$AUTO_PERMISSIONS" == "1" ]] && PERM_FLAG="--permission-mode auto"
+
+# Wall-clock timeout: read command_timeouts.solve from .claude/uberdev.local.md
+# (env override: UBERDEV_SOLVE_TIMEOUT; default 3600s; range [60, 86400]).
+# config-read.sh is already sourced by the MAX_PARALLEL_BG_AGENTS block above
+# when readable, so `uberdev_read_int_in_range` is in scope here; guard with
+# `command -v` so this block is independently sourceable.
+if command -v uberdev_read_int_in_range >/dev/null 2>&1; then
+  SOLVE_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.solve UBERDEV_SOLVE_TIMEOUT 60 86400 3600)"
+elif [ -r "${CLAUDE_PLUGIN_ROOT:-}/lib/config-read.sh" ]; then
+  # shellcheck source=/dev/null
+  . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+  SOLVE_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.solve UBERDEV_SOLVE_TIMEOUT 60 86400 3600)"
+else
+  echo "warning: config-read.sh not found at ${CLAUDE_PLUGIN_ROOT:-}/lib/; uberdev.local.md timeout settings ignored" >&2
+  SOLVE_TIMEOUT=3600
+fi
+
+# Wrap claude in timeout(1)/gtimeout when one is on PATH; fail-open otherwise
+# (graceful degradation when required tooling is unavailable). macOS does NOT
+# ship GNU timeout; `brew install coreutils` installs it as `gtimeout` (Homebrew
+# `g`-prefix), so we probe both. The if/elif/else form is mandatory: zsh's
+# default SH_WORD_SPLIT=off would treat a scalar `$PREFIX="timeout 3600"` at
+# command position as ONE token and abort with "command not found: timeout 3600"
+# under set -e. Quoting "$TIMEOUT_BIN" keeps it as a single argv[0] token.
+TIMEOUT_BIN=""
+if   command -v timeout  >/dev/null 2>&1; then TIMEOUT_BIN=timeout
+elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT_BIN=gtimeout
+fi
+if [[ -z "$TIMEOUT_BIN" ]]; then
+  echo "warning: neither timeout(1) nor gtimeout on PATH; /solve will dispatch unwrapped (no wall-clock kill). Fix: brew install coreutils" >&2
+fi
 ```
 
-### 5. Per-issue dispatch (Phase B — spawn one agent per issue)
+### 5. Per-issue dispatch (Phase B — spawn one bg agent per issue)
 
-For each validated issue, write its prompt heredoc, write its launcher script, and spawn it into the chosen terminal. Each spawn is an independent OS process / cmux workspace; together they run in parallel. The for-loop opens at the top of this code block and closes after the dispatch case in Step 5c (`done`); sub-steps 5a/5b/5c are documentation breakdowns of the loop body — their bash blocks all execute inside the same loop iteration. Per-issue dispatch outcomes are tracked in `SPAWNED` (success) and `DISPATCH_FAILED` (failure) so the user sees exactly which issues spawned and which didn't — no silent partial-batch failures.
+For each validated issue, write its prompt file (Step 5a), then dispatch via `claude --bg` (Step 5b'). Step 5a runs in a serial per-issue for-loop (heredoc writes are cheap). Step 5b' is wrapped in a wave-batching outer loop (mirroring `merge-pipeline/SKILL.md:421`) that respects `MAX_PARALLEL_BG_AGENTS` — `ceil(N / cap)` sequential single-message waves, with one `solve_bg_fanout_wave_started` audit event per wave. Per-issue dispatch outcomes are tracked in `SPAWNED` (success) and `DISPATCH_FAILED` (failure) so the user sees exactly which issues spawned and which didn't — no silent partial-batch failures.
 
 ```bash
 SPAWNED=()
 DISPATCH_FAILED=()
+# Step 5a per-issue prompt-write loop: heredoc writes are cheap and serial; this
+# loop does NOT need wave-batching (only the bg dispatch does — see Step 5b').
 for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
   TIER="${TIERS[$ISSUE_NUM]}"
   TITLE="${TITLES[$ISSUE_NUM]}"
@@ -330,7 +317,24 @@ The `if/else/fi` blocks below stay at column 0 (zsh and bash do not require phys
 **trivial:**
 
 ```bash
-if [[ "$AUTO_MODE" != "1" ]]; then
+if [[ "$AUTO_MODE" == "1" ]]; then
+# trivial heredoc — turbo (/turbo): no research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
+cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
+Solve GH issue #$ISSUE_NUM directly. Triaged as TRIVIAL.
+
+Steps:
+1. \`gh issue view $ISSUE_NUM\` — read the ask.
+2. Make the minimal edit. No redesign, no surrounding refactor, no "while I'm here" cleanup.
+3. Add/update a test ONLY if the touched code is already tested.
+4. Run the relevant test file + lint for that package.
+5. Commit with conventional message. Open PR with \`Closes #$ISSUE_NUM\` in the body.
+6. **Capture the PR URL from \`gh pr create\` output and invoke the \`uberdev:review-pr --turbo\` skill via the Skill tool with that URL.** This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory.
+
+Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
+
+Skip /uberdev:brainstorm. Skip multi-step planning. Escalate to /uberdev:brainstorm ONLY if the scope turns out to be materially larger than triaged.
+EOF
+else
 # trivial heredoc — interactive (/solve): pre-collected-research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
 cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
 Solve GH issue #$ISSUE_NUM directly. Triaged as TRIVIAL.
@@ -348,30 +352,29 @@ Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:revi
 
 Skip /uberdev:brainstorm. Skip multi-step planning. Escalate to /uberdev:brainstorm ONLY if the scope turns out to be materially larger than triaged.
 EOF
-else
-# trivial heredoc — turbo (/turbo): no research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
-cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
-Solve GH issue #$ISSUE_NUM directly. Triaged as TRIVIAL.
-
-Steps:
-1. \`gh issue view $ISSUE_NUM\` — read the ask.
-2. Make the minimal edit. No redesign, no surrounding refactor, no "while I'm here" cleanup.
-3. Add/update a test ONLY if the touched code is already tested.
-4. Run the relevant test file + lint for that package.
-5. Commit with conventional message. Open PR with \`Closes #$ISSUE_NUM\` in the body.
-6. **Capture the PR URL from \`gh pr create\` output and invoke the \`uberdev:review-pr --turbo\` skill via the Skill tool with that URL.** This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory.
-
-Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
-
-Skip /uberdev:brainstorm. Skip multi-step planning. Escalate to /uberdev:brainstorm ONLY if the scope turns out to be materially larger than triaged.
-EOF
 fi
 ```
 
 **small:**
 
 ```bash
-if [[ "$AUTO_MODE" != "1" ]]; then
+if [[ "$AUTO_MODE" == "1" ]]; then
+# small heredoc — turbo (/turbo): no research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
+cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
+Solve GH issue #$ISSUE_NUM with a lightweight plan. Triaged as SMALL.
+
+Steps:
+1. \`gh issue view $ISSUE_NUM\` — read the ask.
+2. Write 3–6 TodoWrite tasks. Skip /uberdev:brainstorm — scope is clear.
+3. TDD: write the failing test first, then implement, then green.
+4. Commit + PR with \`Closes #$ISSUE_NUM\`.
+5. **Capture the PR URL from \`gh pr create\` output and invoke the \`uberdev:review-pr --turbo\` skill via the Skill tool with that URL.** This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory.
+
+Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
+
+Escalate to /uberdev:brainstorm if the scope proves larger than triaged.
+EOF
+else
 # small heredoc — interactive (/solve): pre-collected-research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
 cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
 Solve GH issue #$ISSUE_NUM with a lightweight plan. Triaged as SMALL.
@@ -388,22 +391,6 @@ Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:revi
 
 Escalate to /uberdev:brainstorm if the scope proves larger than triaged.
 EOF
-else
-# small heredoc — turbo (/turbo): no research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
-cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
-Solve GH issue #$ISSUE_NUM with a lightweight plan. Triaged as SMALL.
-
-Steps:
-1. \`gh issue view $ISSUE_NUM\` — read the ask.
-2. Write 3–6 TodoWrite tasks. Skip /uberdev:brainstorm — scope is clear.
-3. TDD: write the failing test first, then implement, then green.
-4. Commit + PR with \`Closes #$ISSUE_NUM\`.
-5. **Capture the PR URL from \`gh pr create\` output and invoke the \`uberdev:review-pr --turbo\` skill via the Skill tool with that URL.** This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory.
-
-Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
-
-Escalate to /uberdev:brainstorm if the scope proves larger than triaged.
-EOF
 fi
 ```
 
@@ -415,226 +402,130 @@ echo "/uberdev:orchestrator --turbo solve GH issue #$ISSUE_NUM" > /tmp/solve-pro
 else
 echo "/uberdev:orchestrator solve GH issue #$ISSUE_NUM" > /tmp/solve-prompt-$ISSUE_NUM.txt
 fi
+done
 ```
 
-#### 5b. Write launcher script
+#### 5b. (RETIRED v0.22.0 — launcher shell script removed for #85)
 
-The launcher `cd`s to repo root, cleans stale worktree, logs errors, keeps terminal open on failure. `REAL_CLAUDE` was resolved once in Step 3 (same value across every spawn).
+The per-issue launcher heredoc (formerly the per-N temp shell script with
+placeholder substitution), the `cd REPO_ROOT` prologue, the worktree-cleanup
+pre-step, the `timeout … CLAUDE_BIN … --worktree solve-issue-N … "$PROMPT"`
+invocation, and the BSD/GNU-`sed` placeholder substitution have all been
+replaced by the inline `claude --bg` dispatch in Step 5b' below.
+`claude --bg --worktree solve-issue-N` handles the worktree-cleanup and
+supervised-daemon spawn natively. `MODEL`, `PERM_FLAG`, `SOLVE_TIMEOUT`,
+and `TIMEOUT_BIN` have been hoisted from the launcher into Phase A
+(immediately after the bg-dispatch probes block) — see the Phase A region.
 
-**Wall-clock timeout.** The launcher reads
-`command_timeouts.solve` from `.claude/uberdev.local.md` (env override:
-`UBERDEV_SOLVE_TIMEOUT`; default 3600s; range [60, 86400]) and wraps the
-`claude` invocation in `timeout(1)` when the binary is on PATH. macOS
-does **not** ship GNU `timeout(1)`; `brew install coreutils` installs
-it as `gtimeout` (Homebrew's `g`-prefix avoids masking BSD utilities),
-so the launcher probes `timeout` first and falls back to `gtimeout`. If
-neither is on PATH (stock macOS without coreutils) the launcher emits
-one stderr warning (with a `brew install coreutils` remediation
-pointer) and runs unwrapped — fail-open per the `aliases-sync.sh:105`
-jq-absent precedent. `/merge` and `/review-pr` parse
-`command_timeouts.{merge, review_pr}` but only surface the values in
-the run audit log; v1 does NOT enforce wall-clock kill on those
-commands (the orchestrator turn loop runs inside an existing Claude
-session and would need deeper changes to honour a kill). v2 issue can
-extend.
+#### 5b'. Dispatch via `claude --bg` (NEW v0.22.0)
 
-```bash
-cat > /tmp/solve-$ISSUE_NUM.sh << 'SCRIPT_EOF'
-#!/bin/zsh -l
-set -e
+SAFE prompt-passthrough forms — Q1 decision per `docs/uberdev/specs/2026-05-12-replace-cmux-with-bg-agent-view-design.md`:
+- **`--prompt-file <path>`** → trusted path arg; file contents never reach the shell.
+- **stdin pipe** → file content streamed on FD 0; no argv quoting concern.
+- **positional argv via bash array** → backwards-compatible last resort; the prompt body lands in a single array slot, never re-evaluated through the shell.
 
-# Inherit detected terminal so Step 7 retitling can use the right mechanism.
-export TERMINAL="DETECTED_TERMINAL"
+**UNSAFE — DO NOT USE:**
+- Direct interpolation of `$PROMPT` as a single double-quoted argv slot (e.g. invoking the bg dispatcher with `"$PROMPT"` as the trailing arg) → backticks / `$(…)` in issue body shell-evaluate.
+- Re-evaluation forms (any `eval`-driven dispatch using `printf %q` to quote the prompt body) → re-evaluation of attacker-influenced text; security research §Findings classified this ERROR-class.
+- `bash -c` wrapper with `$PROMPT` interpolated inside the inner double-quoted command string → double-quote-inside-double-quote interpolation hazard.
 
-# cd to repo root (cmux may start in a different directory)
-# Path is quoted because repo paths may contain spaces (e.g. /Users/me/My Project/...)
-cd "REPO_ROOT"
+`MODEL`, `PERM_FLAG`, `SOLVE_TIMEOUT`, and `TIMEOUT_BIN` are resolved in Phase A (immediately after the bg-dispatch probes block). They're batch-invariant — resolved once per `/solve` or `/turbo` invocation, then consumed by the wave-batching dispatch below.
 
-# Clean up stale worktree AND branch from previous runs
-if git worktree list | grep -q "solve-issue-ISSUE_NUM"; then
-  git worktree remove .claude/worktrees/solve-issue-ISSUE_NUM --force 2>/dev/null || true
-fi
-git branch -D worktree-solve-issue-ISSUE_NUM 2>/dev/null || true
-
-# Load prompt
-PROMPT=$(cat /tmp/solve-prompt-ISSUE_NUM.txt)
-
-# Run agent
-echo "Starting claude agent for issue #ISSUE_NUM (tier: TIER)..."
-# Interactive TUI mode: positional arg (no -p) so user sees the Claude CLI
-# MODEL: pinned to Opus 4.7 with 1M context. Brackets MUST be single-quoted
-# (zsh would otherwise treat [1m] as a character-class glob and abort under set -e).
-# PERMISSION MODE: issue bodies are remote-fetched (untrusted). Default mode
-# gates every tool use. PERM_FLAG=--permission-mode auto enables Claude Code's
-# AI classifier — auto-approves safe ops (read, in-scope edits, tests, push to
-# feature branch) and soft-denies dangerous ones (force push, rm -rf on
-# pre-existing files, exfil, self-modification). Strictly safer than
-# --dangerously-skip-permissions for autonomous /solve runs.
-PERM_FLAG="PERM_FLAG_VALUE"
-# Wall-clock timeout: helper path is sed-substituted at heredoc-write time below
-# because the launcher runs in a fresh terminal session that does not inherit
-# $CLAUDE_PLUGIN_ROOT (mirrors the REPO_ROOT / CLAUDE_BIN substitution pattern).
-if [ -r "CLAUDE_PLUGIN_ROOT_VAL/lib/config-read.sh" ]; then
-  # shellcheck source=/dev/null
-  . "CLAUDE_PLUGIN_ROOT_VAL/lib/config-read.sh"
-  SOLVE_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.solve UBERDEV_SOLVE_TIMEOUT 60 86400 3600)"
-else
-  echo "warning: config-read.sh not found at CLAUDE_PLUGIN_ROOT_VAL/lib/; uberdev.local.md timeout settings ignored" >&2
-  SOLVE_TIMEOUT=3600
-fi
-
-# Wrap claude in timeout(1)/gtimeout when one is on PATH; fail-open otherwise
-# (graceful degradation when required tooling is unavailable). macOS does NOT
-# ship GNU timeout; `brew install coreutils` installs it as `gtimeout` (Homebrew
-# `g`-prefix), so we probe both. The if/elif/else form is mandatory: zsh's
-# default SH_WORD_SPLIT=off would treat a scalar `$PREFIX="timeout 3600"` at
-# command position as ONE token and abort with "command not found: timeout 3600"
-# under set -e. Quoting "$TIMEOUT_BIN" keeps it as a single argv[0] token.
-TIMEOUT_BIN=""
-if   command -v timeout  >/dev/null 2>&1; then TIMEOUT_BIN=timeout
-elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT_BIN=gtimeout
-fi
-if [[ -n "$TIMEOUT_BIN" ]]; then
-  "$TIMEOUT_BIN" "${SOLVE_TIMEOUT}" CLAUDE_BIN --model 'claude-opus-4-7[1m]' --effort max --worktree solve-issue-ISSUE_NUM $PERM_FLAG "$PROMPT"
-else
-  echo "warning: neither timeout(1) nor gtimeout on PATH; /solve will run unwrapped (no wall-clock kill). Fix: brew install coreutils" >&2
-  CLAUDE_BIN --model 'claude-opus-4-7[1m]' --effort max --worktree solve-issue-ISSUE_NUM $PERM_FLAG "$PROMPT"
-fi
-SCRIPT_EOF
-# BSD/macOS sed needs '-i ""'; GNU sed needs bare '-i'.
-SED_INPLACE=(-i '')
-[[ "$(uname)" == "Linux" ]] && SED_INPLACE=(-i)
-PERM_FLAG_VAL=""
-[[ "$AUTO_PERMISSIONS" == "1" ]] && PERM_FLAG_VAL="--permission-mode auto"
-# All placeholders are unique tokens with no cross-substitution risk; collapse
-# six sed invocations (six forks per spawn × N issues) into one. Per-expression
-# delimiter choice (`|` for path-bearing values, `/` for enums) is preserved.
-sed "${SED_INPLACE[@]}" \
-  -e "s|REPO_ROOT|$(pwd)|g" \
-  -e "s|CLAUDE_BIN|$REAL_CLAUDE|g" \
-  -e "s/ISSUE_NUM/$ISSUE_NUM/g" \
-  -e "s/TIER/$TIER/g" \
-  -e "s/DETECTED_TERMINAL/${TERMINAL:-cmux}/g" \
-  -e "s|PERM_FLAG_VALUE|$PERM_FLAG_VAL|g" \
-  -e "s|CLAUDE_PLUGIN_ROOT_VAL|${CLAUDE_PLUGIN_ROOT:-}|g" \
-  /tmp/solve-$ISSUE_NUM.sh
-chmod +x /tmp/solve-$ISSUE_NUM.sh
-```
-
-#### 5c. Spawn agent in new terminal session
-
-Tab/window shows issue + title; description encodes the tier for audit. Each branch invokes `zsh -l /tmp/solve-$ISSUE_NUM.sh`. Use the literal title from Phase A (already truncated). The for-loop closes here (`done`).
+The per-issue dispatch is wrapped in a wave-batching outer loop. Mirrors `merge-pipeline/SKILL.md:421`'s idiom: `ceil(N / cap)` sequential single-message waves, one `solve_bg_fanout_wave_started` audit event per wave.
 
 ```bash
-TAB_NAME="#$ISSUE_NUM $TITLE"
-DESCRIPTION="[$TIER] Solve GH issue #$ISSUE_NUM: $TITLE"
-SCRIPT="/tmp/solve-$ISSUE_NUM.sh"
-
-case "$TERMINAL" in
-  cmux)
-    cmux new-workspace --name "$TAB_NAME" --description "$DESCRIPTION" --command "zsh -l $SCRIPT"
+# --- Phase B: wave-batching outer loop (NEW v0.22.0) ---
+# The inner loop body stays at column 0 (bash and zsh do not require physical
+# indentation inside `for ((…)); do … done`); the verifier in tests/turbo-flow.test.sh
+# anchors on `^case "\$BG_PROMPT_MODE" in$` and tests/dispatch-claude-bg.test.sh
+# regex-matches the inner-body invariants.
+TOTAL_ISSUES="${#ISSUE_NUMS[@]}"
+WAVE_COUNT=$(( (TOTAL_ISSUES + MAX_PARALLEL_BG_AGENTS - 1) / MAX_PARALLEL_BG_AGENTS ))
+for (( wave_index = 1; wave_index <= WAVE_COUNT; wave_index++ )); do
+wave_start=$(( (wave_index - 1) * MAX_PARALLEL_BG_AGENTS ))
+wave_end=$(( wave_start + MAX_PARALLEL_BG_AGENTS - 1 ))
+(( wave_end >= TOTAL_ISSUES )) && wave_end=$(( TOTAL_ISSUES - 1 ))
+wave_size=$(( wave_end - wave_start + 1 ))
+_uberdev_audit_emit solve_bg_fanout_wave_started \
+  "{\"wave_index\":$wave_index,\"wave_size\":$wave_size}"
+for (( i = wave_start; i <= wave_end; i++ )); do
+ISSUE_NUM="${ISSUE_NUMS[$i]}"
+TIER="${TIERS[$ISSUE_NUM]}"
+TITLE="${TITLES[$ISSUE_NUM]}"
+BG_DISPATCH_RC=0
+BG_SESSION_ID=""
+BG_STDOUT_LOG="/tmp/solve-bg-stdout-$ISSUE_NUM.log"
+case "$BG_PROMPT_MODE" in
+  file)
+    # Trusted path arg; file contents never reach the shell as argv.
+    "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" claude --bg \
+      --prompt-file "/tmp/solve-prompt-$ISSUE_NUM.txt" \
+      --worktree "solve-issue-$ISSUE_NUM" \
+      --model "$MODEL" $PERM_FLAG > "$BG_STDOUT_LOG" 2>&1
+    BG_DISPATCH_RC=$?
     ;;
-  ghostty)
-    # Drive Ghostty via AppleScript keystrokes (Cmd+T for tab, Cmd+N for window)
-    # and type the launcher path into the new tab/window. Keystroke dispatch
-    # types into a shell that's already started — it never sets any instance
-    # default, so future tabs/windows the user opens manually stay clean.
-    #
-    # Why we DON'T use `open -na Ghostty --args --command="$SCRIPT"`: Ghostty
-    # treats `--command=` passed via `open --args` as the running instance's
-    # default command. Once set, every Cmd+T / Cmd+N the user opens manually
-    # re-runs the launcher, racing the original agent and "poisoning" the
-    # Ghostty process for its lifetime (issue #31). There is no Ghostty CLI
-    # form that reliably runs a command once without sticking it as the default.
-    #
-    # Tab vs window:
-    #   - Cmd+T (tab) when /solve was invoked from inside Ghostty
-    #     (TERM_PROGRAM=ghostty) and SOLVE_GHOSTTY_NEW_WINDOW != "1": we have
-    #     an originating window to tab into.
-    #   - Cmd+N (window) when SOLVE_GHOSTTY_NEW_WINDOW=1 (explicit opt-out) or
-    #     TERM_PROGRAM != ghostty (e.g. SOLVE_TERMINAL=ghostty from iTerm —
-    #     no originating window to tab into).
-    if [[ "$SOLVE_GHOSTTY_NEW_WINDOW" == "1" ]] || [[ "$TERM_PROGRAM" != "ghostty" ]]; then
-      GHOSTTY_SPAWN_KEY="n"   # Cmd+N → new window
-      GHOSTTY_LAUNCH_DELAY="0.5"  # cold-launch may need longer if Ghostty isn't running
-    else
-      GHOSTTY_SPAWN_KEY="t"   # Cmd+T → new tab in the originating window
-      GHOSTTY_LAUNCH_DELAY="0.15"
-    fi
-
-    if osascript >/dev/null 2>&1 <<APPLESCRIPT
-tell application "Ghostty" to activate
-delay $GHOSTTY_LAUNCH_DELAY
-tell application "System Events"
-  keystroke "$GHOSTTY_SPAWN_KEY" using command down
-  delay 0.25
-  keystroke "zsh -l $SCRIPT"
-  keystroke return
-end tell
-APPLESCRIPT
-    then
-      echo "Dispatched into Ghostty (Cmd+$GHOSTTY_SPAWN_KEY)."
-    else
-      # AppleScript path failed (Accessibility permission denied or non-default
-      # Cmd+T/Cmd+N keybind). Fall back to a detached nohup run — nohup runs the
-      # launcher in a background shell of the current process, never passing any
-      # flag to the Ghostty app itself, so it can't reintroduce the issue #31
-      # instance-default poison the way `open -na Ghostty --args --command=...`
-      # would.
-      GHOSTTY_LOG="/tmp/solve-$ISSUE_NUM.log"
-      nohup zsh -l "$SCRIPT" > "$GHOSTTY_LOG" 2>&1 &
-      echo "warning: ghostty AppleScript dispatch failed (Accessibility permission or non-default Cmd+T/N keybind?); spawned detached agent (PID $!). Logs: $GHOSTTY_LOG" >&2
-    fi
+  stdin)
+    # File content streamed on FD 0; no argv quoting concern.
+    "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" claude --bg \
+      --worktree "solve-issue-$ISSUE_NUM" \
+      --model "$MODEL" $PERM_FLAG \
+      < "/tmp/solve-prompt-$ISSUE_NUM.txt" > "$BG_STDOUT_LOG" 2>&1
+    BG_DISPATCH_RC=$?
     ;;
-  iterm)
-    osascript <<APPLESCRIPT
-tell application "iTerm"
-  activate
-  create window with default profile command "zsh -l $SCRIPT"
-end tell
-APPLESCRIPT
-    ;;
-  terminal)
-    osascript <<APPLESCRIPT
-tell application "Terminal"
-  activate
-  do script "zsh -l $SCRIPT"
-end tell
-APPLESCRIPT
-    ;;
-  nohup|*)
-    LOG="/tmp/solve-$ISSUE_NUM.log"
-    nohup zsh -l "$SCRIPT" > "$LOG" 2>&1 &
-    echo "Spawned detached (PID $!). Logs: $LOG"
+  argv)
+    # Bash array form (spec-reviewer finding 1) — single argv slot, no eval.
+    PROMPT_BODY="$(cat "/tmp/solve-prompt-$ISSUE_NUM.txt")"
+    cmd=( "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" claude --bg
+          --worktree "solve-issue-$ISSUE_NUM"
+          --model "$MODEL" )
+    # $PERM_FLAG is a known-safe string from Phase A (one of "" or
+    # "--permission-mode auto"); word-split is intentional.
+    # shellcheck disable=SC2206
+    cmd+=( $PERM_FLAG -- "$PROMPT_BODY" )
+    "${cmd[@]}" > "$BG_STDOUT_LOG" 2>&1
+    BG_DISPATCH_RC=$?
     ;;
 esac
 
-# Track per-issue dispatch outcome. `$?` after the case is the exit status of
-# the last command in the matched branch; the Ghostty branch ends in an `echo`
-# (success) on either AppleScript-success or AppleScript-fail-then-nohup
-# fallback paths, so both record as success — the agent IS spawned either way,
-# just via a different mechanism. cmux/iTerm/Terminal record their actual
-# dispatch return code so a dead cmux socket or AppleScript permission denial
-# surfaces in the failure list instead of silently dropping the issue.
-DISPATCH_RC=$?
-if [[ $DISPATCH_RC -eq 0 ]]; then
-  SPAWNED+=("#$ISSUE_NUM ($TIER)")
+if [[ "$BG_DISPATCH_RC" -eq 0 ]]; then
+  BG_SESSION_ID="$(grep -oE 'backgrounded · [0-9a-f]{8}' "$BG_STDOUT_LOG" | awk '{print $NF}' | head -1)"
+  SPAWNED+=("#$ISSUE_NUM ($TIER, bg ${BG_SESSION_ID:-?})")
+  _uberdev_audit_emit agent_dispatched \
+    "{\"issue\":$ISSUE_NUM,\"tier\":\"$TIER\",\"bg_session_id\":\"${BG_SESSION_ID:-}\",\"mode\":\"$BG_PROMPT_MODE\"}" || true
 else
-  DISPATCH_FAILED+=("#$ISSUE_NUM ($TERMINAL exit=$DISPATCH_RC)")
-fi
-
-# Ghostty keystroke dispatch is asynchronous; firing Cmd+T three times in
-# <100 ms can race all three keystrokes into the first-created tab. Pause
-# between Ghostty spawns gives the new tab time to materialize before the
-# next keystroke fires. cmux uses an IPC API; iTerm/Terminal use scripted
-# `create window`/`do script` (the Apple Event queue serializes
-# same-application AppleScript calls in practice); nohup needs nothing.
-# Only Ghostty needs the pause, and only when batch size > 1.
-if [[ "$TERMINAL" == "ghostty" && ${#ISSUE_NUMS[@]} -gt 1 ]]; then
-  sleep 0.6
+  DISPATCH_FAILED+=("#$ISSUE_NUM: $(tail -3 "$BG_STDOUT_LOG" | tr '\n' ' ')")
+  _uberdev_audit_emit error \
+    "{\"issue\":$ISSUE_NUM,\"phase\":\"dispatch\",\"rc\":$BG_DISPATCH_RC}" || true
 fi
 done
+done
+```
 
+**Why the array form not `eval`:** spec-reviewer finding 1. The array shape makes argv composition explicit and avoids re-evaluation. `"${cmd[@]}"` preserves each slot as one argv element regardless of internal whitespace, backticks, or `$(…)` in `$PROMPT_BODY`.
+
+#### 5c. (RETIRED v0.22.0 — per-terminal dispatch case statement removed for #85)
+
+The five-branch `case "$TERMINAL" in cmux) … ghostty) … iterm) …
+terminal) … nohup|*) … esac` block and the 0.6s inter-Ghostty sleep have
+been replaced by `claude --bg --worktree solve-issue-N` in Step 5b'
+above. Background sessions run in a supervised daemon (see prior-art
+docs at `code.claude.com/docs/en/agent-view`) without terminal-emulator
+initialisation races.
+
+**Why we DON'T keep an opt-in `--terminal=` path:** three branches
+(`iterm`, `terminal`, `nohup`) had **zero test coverage** today (see
+`test-coverage.md` §Coverage Map). Retaining untested code paths in
+the supported surface is a known silent-failure source; the
+deprecation note + audit event in Phase A is sufficient to honour
+existing callers without doubling maintenance burden.
+
+**Why we DON'T re-introduce the Ghostty `open --na --args` command-arg
+form:** issue #31 (PR #33) documented that the flag form poisons the
+Ghostty process's instance default for its entire lifetime. `claude --bg`
+runs in a Claude-supervised daemon and does not depend on any terminal
+emulator at all.
+
+```bash
 # Phase B per-issue dispatch failure summary. Surfaces partial-batch failures
 # loudly so the user knows exactly which issues didn't spawn — never silently
 # drop a failure into the void.
@@ -644,43 +535,25 @@ if [[ ${#DISPATCH_FAILED[@]} -gt 0 ]]; then
 fi
 ```
 
-### 6. Brief delay and confirm — single summary notification
-
-cmux's native notifier is preferred (matches existing UX); otherwise fall through to `terminal-notifier` then `osascript display notification`. **One summary notification per `/turbo` invocation** — N back-to-back notifications would be noisy. The body lists every successfully spawned issue and (if any) the count of dispatch failures.
+### 6. Final summary (replaces notification chain — v0.22.0)
 
 ```bash
-sleep 1
-NOTIFY_BODY="Spawned ${#SPAWNED[@]} agent$([[ ${#SPAWNED[@]} -ne 1 ]] && echo s): $(IFS=', '; echo "${SPAWNED[*]}") (terminal: $TERMINAL$([[ "$AUTO_PERMISSIONS" == "1" ]] && echo ', auto')$([[ "$AUTO_MODE" == "1" ]] && echo ', turbo'))$([[ ${#DISPATCH_FAILED[@]} -gt 0 ]] && echo " — ${#DISPATCH_FAILED[@]} dispatch failure(s), see stderr")"
-if [[ "$TERMINAL" == "cmux" ]] && command -v cmux >/dev/null 2>&1; then
-  cmux notify --title "Orchestrator" --body "$NOTIFY_BODY"
-elif command -v terminal-notifier >/dev/null 2>&1; then
-  terminal-notifier -title "Orchestrator" -message "$NOTIFY_BODY"
-elif command -v osascript >/dev/null 2>&1; then
-  osascript -e "display notification \"$NOTIFY_BODY\" with title \"Orchestrator\""
+echo "dispatched ${#SPAWNED[@]} background session(s) — run \`claude agents\` to monitor" >&2
+if [[ ${#SPAWNED[@]} -gt 0 ]]; then
+  printf '  %s\n' "${SPAWNED[@]}" >&2
 fi
 ```
 
-### 7. Post-action — rename tab to PR number once opened (optional)
+The single stderr emission replaces the cmux-notify / terminal-notifier /
+osascript-display-notification chain. The retirement also closes the
+latent `osascript-e-shell-var` ERROR-class finding from
+`research_paths.security` §Findings #2 as a side-effect. Agent View
+status changes are passive UI state visible via `claude agents` — never
+workflow triggers (per `memory/feedback_merge_independent.md`).
 
-After opening its PR, each spawned agent renames its own tab from `#<issue> <title>` to `PR #<pr> <title>`. cmux uses its workspace API; everything else uses OSC escape sequences (Ghostty, iTerm2, Terminal.app all honor `OSC 1` for tab title and `OSC 2` for window title). Apply the same ~40-char truncation rule if `$PR_TITLE` is long.
+### 7. (RETIRED v0.22.0 — tab retitle removed for #85)
 
-The spawned agent inherits `$TERMINAL` from its launcher (exported in Step 5b — adjust the launcher heredoc to write `export TERMINAL='$TERMINAL'` near the top if you want this to work cleanly; otherwise the agent re-detects via the same logic above).
-
-```bash
-# Inside the spawned agent, after gh pr create returns the PR number:
-PR_NUM=$(gh pr view --json number --jq .number)
-PR_TITLE=$(gh pr view --json title --jq .title)
-NEW_TITLE="PR #$PR_NUM $PR_TITLE"
-
-case "${TERMINAL:-cmux}" in
-  cmux)
-    cmux workspace-action --action rename --title "$NEW_TITLE"
-    ;;
-  ghostty|iterm|terminal)
-    # OSC 2 = window title; OSC 1 = tab/icon title. Both honored by Ghostty/iTerm2/Terminal.app.
-    printf '\e]2;%s\a' "$NEW_TITLE"
-    printf '\e]1;PR #%s\a' "$PR_NUM"
-    ;;
-  *) ;;  # nohup: no controlling terminal to retitle
-esac
-```
+Agent View displays each session's name natively from the
+`--worktree solve-issue-N` flag passed to `claude --bg`. No OSC escape
+sequence, no `cmux workspace-action --action rename` invocation, and no
+per-terminal AppleScript retitle is required.
