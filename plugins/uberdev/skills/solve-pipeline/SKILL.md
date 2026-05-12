@@ -326,19 +326,29 @@ fi
 MODEL='claude-opus-4-7[1m]'
 
 # PERM_FLAG: issue bodies are remote-fetched (untrusted). Default mode gates
-# every tool use. PERM_FLAG=--permission-mode auto enables Claude Code's AI
-# classifier — auto-approves safe ops (read, in-scope edits, tests, push to
-# feature branch) and soft-denies dangerous ones (force push, rm -rf on
+# every tool use. PERM_FLAG=( --permission-mode auto ) enables Claude Code's
+# AI classifier — auto-approves safe ops (read, in-scope edits, tests, push
+# to feature branch) and soft-denies dangerous ones (force push, rm -rf on
 # pre-existing files, exfil, self-modification). Strictly safer than
 # --dangerously-skip-permissions for autonomous /solve runs.
-PERM_FLAG=""
-[[ "$AUTO_PERMISSIONS" == "1" ]] && PERM_FLAG="--permission-mode auto"
+#
+# Array form (not scalar): zsh's default SH_WORD_SPLIT=off would treat a
+# scalar `PERM_FLAG="--permission-mode auto"` passed as unquoted `$PERM_FLAG`
+# at command position as ONE argv slot, and `claude` would reject it with
+# `error: unknown option '--permission-mode auto'`. Same trap caught the
+# TIMEOUT_BIN block above; same fix here. `"${PERM_FLAG[@]}"` at the call
+# site expands an empty array to zero slots and a populated one to its
+# elements verbatim — identical behaviour in bash and zsh.
+PERM_FLAG=()
+[[ "$AUTO_PERMISSIONS" == "1" ]] && PERM_FLAG=( --permission-mode auto )
 
 # EFFORT_FLAG is the threaded form of EFFORT_LEVEL (resolved by the Phase A
-# --effort parser block above); word-split rationale lives inline at each
-# dispatch arm. Regression guard: tests/dispatch-claude-bg.test.sh anchors on
-# `^EFFORT_FLAG="--effort `.
-EFFORT_FLAG="--effort $EFFORT_LEVEL"
+# --effort parser block above). Bash+zsh array, expanded as
+# `"${EFFORT_FLAG[@]}"` at each dispatch arm — see PERM_FLAG above for the
+# zsh-word-split rationale. Regression guard: tests/dispatch-claude-bg.test.sh
+# anchors on `^EFFORT_FLAG=\( --effort `; tests/solve-pipeline-zsh.test.sh
+# captures the dispatched argv under a real zsh subshell.
+EFFORT_FLAG=( --effort "$EFFORT_LEVEL" )
 # See `_uberdev_audit_emit` definition near the top of Phase A (anchor:
 # `^_uberdev_audit_emit\(\)`); no-op when $SOLVE_AUDIT_LOG is unset.
 _uberdev_audit_emit effort_resolved \
@@ -550,17 +560,20 @@ BG_STDOUT_LOG="/tmp/solve-bg-stdout-$ISSUE_NUM.log"
 case "$BG_PROMPT_MODE" in
   file)
     # Trusted path arg; file contents never reach the shell as argv.
+    # PERM_FLAG / EFFORT_FLAG are bash+zsh arrays — see Phase A hoist for the
+    # zsh SH_WORD_SPLIT=off rationale; `"${ARRAY[@]}"` expands identically in
+    # both shells (empty array → zero slots; populated → one slot per element).
     "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" claude --bg \
       --prompt-file "/tmp/solve-prompt-$ISSUE_NUM.txt" \
       --worktree "solve-issue-$ISSUE_NUM" \
-      --model "$MODEL" $PERM_FLAG $EFFORT_FLAG > "$BG_STDOUT_LOG" 2>&1
+      --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" > "$BG_STDOUT_LOG" 2>&1
     BG_DISPATCH_RC=$?
     ;;
   stdin)
     # File content streamed on FD 0; no argv quoting concern.
     "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" claude --bg \
       --worktree "solve-issue-$ISSUE_NUM" \
-      --model "$MODEL" $PERM_FLAG $EFFORT_FLAG \
+      --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" \
       < "/tmp/solve-prompt-$ISSUE_NUM.txt" > "$BG_STDOUT_LOG" 2>&1
     BG_DISPATCH_RC=$?
     ;;
@@ -570,12 +583,13 @@ case "$BG_PROMPT_MODE" in
     cmd=( "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" claude --bg
           --worktree "solve-issue-$ISSUE_NUM"
           --model "$MODEL" )
-    # $PERM_FLAG / $EFFORT_FLAG are known-safe strings from Phase A
-    # ($PERM_FLAG ∈ {"", "--permission-mode auto"}; $EFFORT_FLAG is
-    # "--effort <level>" where <level> passed the enum guard). Word-split is
-    # intentional: each space-separated token becomes its own argv slot.
-    # shellcheck disable=SC2206
-    cmd+=( $PERM_FLAG $EFFORT_FLAG -- "$PROMPT_BODY" )
+    # PERM_FLAG / EFFORT_FLAG are arrays from Phase A
+    # (PERM_FLAG=() or ( --permission-mode auto ); EFFORT_FLAG=( --effort <level> )).
+    # `"${ARRAY[@]}"` preserves each element as its own argv slot in both bash
+    # AND zsh — no reliance on SH_WORD_SPLIT, which is OFF by default in zsh
+    # and would otherwise collapse a scalar `--effort max` into one argv slot
+    # that `claude` rejects with `error: unknown option '--effort max'`.
+    cmd+=( "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" -- "$PROMPT_BODY" )
     "${cmd[@]}" > "$BG_STDOUT_LOG" 2>&1
     BG_DISPATCH_RC=$?
     ;;

@@ -89,25 +89,49 @@ assert_grep "$SOLVE_PIPELINE" \
   'uberdev_read_enum solve_effort UBERDEV_SOLVE_EFFORT' \
   "Phase A reads solve_effort from .claude/uberdev.local.md via uberdev_read_enum"
 assert_grep "$SOLVE_PIPELINE" \
-  '^EFFORT_FLAG="--effort \$EFFORT_LEVEL"' \
-  "Phase A hoist binds EFFORT_FLAG=\"--effort \$EFFORT_LEVEL\" (regression guard)"
+  '^EFFORT_FLAG=\( --effort "\$EFFORT_LEVEL" \)$' \
+  "Phase A hoist binds EFFORT_FLAG as a bash+zsh array — scalar form regresses to a one-slot \`--effort max\` argv element under zsh SH_WORD_SPLIT=off (PR #88)"
+assert_grep "$SOLVE_PIPELINE" \
+  '^PERM_FLAG=\(\)$' \
+  "Phase A hoist binds PERM_FLAG as an empty bash+zsh array — same zsh-word-split rationale as EFFORT_FLAG (PR #88)"
+assert_grep "$SOLVE_PIPELINE" \
+  'PERM_FLAG=\( --permission-mode auto \)' \
+  "Phase A AUTO_PERMISSIONS branch populates PERM_FLAG as an array, not a scalar"
 assert_grep "$SOLVE_PIPELINE" \
   '_uberdev_audit_emit effort_resolved' \
   "Phase A emits effort_resolved audit event with {source, level}"
 assert_grep "$SOLVE_PIPELINE" \
   'low\|medium\|high\|xhigh\|max' \
   "Phase A validates resolved level against the {low,medium,high,xhigh,max} enum"
-# Each of the three case-statement arms threads $EFFORT_FLAG immediately
-# after $PERM_FLAG. The literal `\$PERM_FLAG \$EFFORT_FLAG` token-pair must
-# appear at least three times (file arm, stdin arm, argv arm). A future edit
-# that drops the flag from any one arm would regress to silent default-effort
-# dispatch for that mode.
-EFFORT_ARMS_COUNT=$(grep -cE '\$PERM_FLAG \$EFFORT_FLAG' "$SOLVE_PIPELINE" 2>/dev/null || echo "0")
+# Each of the three case-statement arms threads ${EFFORT_FLAG[@]} immediately
+# after ${PERM_FLAG[@]}. The literal `"${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}"`
+# token-pair must appear at least three times (file arm, stdin arm, argv arm).
+# A future edit that drops the flag from any one arm would regress to silent
+# default-effort dispatch for that mode. The array-quoted form (not the prior
+# unquoted `$PERM_FLAG $EFFORT_FLAG` scalar form) is mandatory under zsh —
+# scalar word-split is OFF by default and would collapse `--effort max` into
+# one argv slot, which `claude --bg` rejects loudly.
+EFFORT_ARMS_COUNT=$(grep -cE '"\$\{PERM_FLAG\[@\]\}" "\$\{EFFORT_FLAG\[@\]\}"' "$SOLVE_PIPELINE" 2>/dev/null || echo "0")
 if [[ "$EFFORT_ARMS_COUNT" -ge 3 ]]; then
-  echo "  PASS  all three dispatch arms thread \$EFFORT_FLAG after \$PERM_FLAG (count=$EFFORT_ARMS_COUNT)"
+  echo "  PASS  all three dispatch arms thread \"\${EFFORT_FLAG[@]}\" after \"\${PERM_FLAG[@]}\" (count=$EFFORT_ARMS_COUNT)"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  expected \$PERM_FLAG \$EFFORT_FLAG token-pair in all 3 case arms (file/stdin/argv); count=$EFFORT_ARMS_COUNT"
+  echo "  FAIL  expected \"\${PERM_FLAG[@]}\" \"\${EFFORT_FLAG[@]}\" token-pair in all 3 case arms (file/stdin/argv); count=$EFFORT_ARMS_COUNT"
+  FAIL=$((FAIL + 1))
+fi
+# Tombstone: the v0.22.1 scalar form `$PERM_FLAG $EFFORT_FLAG` (no braces,
+# no quotes) must NOT reappear. A regression to that form would re-trigger
+# the v0.22.1 zsh dispatch failure documented in PR #88.
+# `grep -c` always prints a single number (0 when no matches, N otherwise),
+# so a bare command substitution suffices; appending `|| echo 0` would
+# concatenate a second "0" on the no-match path under set -u and trip
+# arithmetic comparison below.
+SCALAR_RELAPSE_COUNT=$(grep -cE '\$PERM_FLAG \$EFFORT_FLAG[^[]' "$SOLVE_PIPELINE" 2>/dev/null; true)
+if [[ "${SCALAR_RELAPSE_COUNT:-0}" -eq 0 ]]; then
+  echo "  PASS  no scalar-form \`\$PERM_FLAG \$EFFORT_FLAG\` relapse (PR #88 regression guard)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  found $SCALAR_RELAPSE_COUNT scalar-form \`\$PERM_FLAG \$EFFORT_FLAG\` instances — these break under zsh (PR #88)"
   FAIL=$((FAIL + 1))
 fi
 
