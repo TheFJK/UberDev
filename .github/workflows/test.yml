@@ -33,5 +33,6 @@ jobs:
           bash tests/aliases.test.sh && \
           bash tests/merge.test.sh && \
           bash tests/ghostty-dispatch-no-instance-leak.test.sh && \
+          bash tests/dispatch-claude-bg.test.sh && \
           bash tests/orchestrator-phase1-shortcircuit.test.sh && \
           bash tests/config-override.test.sh
