@@ -9,6 +9,15 @@ This skill is invoked inline by `commands/solve.md` and `commands/turbo.md`. The
 
 `$ARGUMENTS` may contain **one or more issue numbers** (e.g. `42` or `5 6 7`). The skill validates every issue up front (Phase A) and then dispatches one autonomous agent per issue into its own terminal session (Phase B). Per-issue artifacts (`/tmp/solve-prompt-N.txt`, `/tmp/solve-N.sh`, `.claude/worktrees/solve-issue-N/`, `worktree-solve-issue-N` branch, `#N <title>` tab) are namespaced by `$ISSUE_NUM`, so concurrent spawns are collision-free. Override flags (`--trivial|--small|--full`, `--auto`, `--terminal=...`) apply batch-wide.
 
+## Constants
+
+| Name | Value (verbatim) | Where used |
+|---|---|---|
+| `TERMINAL_FLAG_DEPRECATED_NOTE` | `warning: --terminal=cmux\|ghostty\|iterm\|terminal\|nohup is deprecated in v0.22.0; /solve and /turbo now dispatch claude --bg background sessions visible in claude agents. The flag is parsed without effect and will be removed in v1.0.0.` | Phase A stderr emission on first encounter; `commands/solve.md` / `commands/turbo.md` `## Deprecated Flags`. |
+| `MIN_CLAUDE_VERSION` | `2.1.139` | Phase A `_uberdev_require_claude_version` hard gate. |
+| `FANOUT_CONCURRENCY_SOLVE_BG_DEFAULT` | `6` | Phase A `MAX_PARALLEL_BG_AGENTS` resolution default. |
+| `SOLVE_AUDIT_EVENT_ENUM` | `agent_dispatched`, `agent_returned`, `deprecated_flag_used`, `solve_bg_fanout_wave_started`, `error` | Audit-log writers; consumers grep for `deprecated_flag_used` to identify migration laggards. |
+
 ## Triage heuristics (Phase A applies this table)
 
 | Tier | Signals (any strong match) | Spawned workflow |
@@ -32,6 +41,48 @@ This skill is invoked inline by `commands/solve.md` and `commands/turbo.md`. The
 Extract one or more issue numbers + optional override flags. The parser scans every space-separated token in `$ARGUMENTS` and collects only those that are **purely numeric** (anchored regex `^[0-9]+$`); deduplicates so `/turbo 5 5 6` doesn't race two agents into the same worktree path; and rejects empty input.
 
 ```bash
+# --- Phase A: claude version gate (NEW v0.22.0) ---
+# Hard-require Claude Code >= 2.1.139 (the `claude --bg` minimum). Older
+# versions cannot dispatch background sessions and the entire /solve and /turbo
+# contract is voided. Fail loudly with an actionable npm install pointer; do
+# not silently degrade.
+_uberdev_require_claude_version() {
+  local min="$1"
+  local cur
+  cur="$(claude --version 2>/dev/null | awk '{print $NF}' | head -1)"
+  if [[ -z "$cur" ]]; then
+    echo "error: \`claude --version\` returned no output; cannot verify version >= $min" >&2
+    exit 1
+  fi
+  if [[ "$(printf '%s\n%s\n' "$min" "$cur" | sort -V | head -1)" != "$min" ]]; then
+    echo "error: /solve and /turbo require Claude Code >= $min (found: $cur)" >&2
+    echo "       install with: npm i -g @anthropic-ai/claude-code@latest" >&2
+    exit 1
+  fi
+}
+
+_uberdev_probe_bg_prompt_mode() {
+  # Returns one of: file | stdin | argv. Probe order matches the Q1 spec
+  # decision (file > stdin > argv with bash-array + printf %q quoting).
+  local help_text
+  help_text="$(claude --bg --help 2>&1 || true)"
+  if echo "$help_text" | grep -qE '\-\-prompt-file'; then
+    echo "file"; return 0
+  fi
+  if echo "$help_text" | grep -qE '(stdin|reads from standard input|<<)'; then
+    echo "stdin"; return 0
+  fi
+  echo "argv"
+}
+
+_uberdev_audit_emit() {
+  # No-op if SOLVE_AUDIT_LOG is unset; otherwise append a JSON line.
+  [[ -n "${SOLVE_AUDIT_LOG:-}" ]] || return 0
+  local event="$1" data="${2:-{}}"
+  printf '{"ts":"%s","event":"%s","data":%s}\n' \
+    "$(date -u +%FT%TZ)" "$event" "$data" >> "$SOLVE_AUDIT_LOG"
+}
+
 # Pipeline form (portable across bash and zsh). The naive `for token in
 # $ARGUMENTS; do …` loop does NOT word-split scalar parameters in zsh —
 # zsh's SH_WORD_SPLIT is off by default, so the loop runs ONCE with the entire
@@ -46,10 +97,24 @@ Extract one or more issue numbers + optional override flags. The parser scans ev
 ISSUE_NUMS=($(echo "$ARGUMENTS" | tr ' ' '\n' | grep -E '^[0-9]+$' | awk '!seen[$0]++'))
 
 OVERRIDE=$(echo "$ARGUMENTS" | grep -oE '\-\-(trivial|small|full)' | head -1 | sed 's/--//')
-TERMINAL_OVERRIDE=$(echo "$ARGUMENTS" | grep -oE '\-\-terminal=[a-z]+' | head -1 | sed 's/--terminal=//')
+# --- Phase A: --terminal= deprecation shim (NEW v0.22.0) ---
+# The flag is parsed without error, emits TERMINAL_FLAG_DEPRECATED_NOTE once
+# per run on first encounter, records `deprecated_flag_used` audit event, and
+# has no behavioural effect. Mirrors merge-pipeline PR #49 (STRATEGY_FLAGS,
+# BYPASS_PROTECTIONS) template.
+TERMINAL_FLAG_USED="$(echo "$ARGUMENTS" | grep -oE '\-\-terminal=[a-z]+' | head -1 || true)"
+if [[ -n "$TERMINAL_FLAG_USED" ]]; then
+  echo "$TERMINAL_FLAG_DEPRECATED_NOTE" >&2
+  _uberdev_audit_emit deprecated_flag_used "{\"flag\":\"$TERMINAL_FLAG_USED\"}" || true
+fi
+# Also swallow $SOLVE_TERMINAL env var with the same deprecation note.
+if [[ -n "${SOLVE_TERMINAL:-}" ]]; then
+  echo "$TERMINAL_FLAG_DEPRECATED_NOTE" >&2
+  _uberdev_audit_emit deprecated_flag_used "{\"env\":\"SOLVE_TERMINAL\",\"value\":\"$SOLVE_TERMINAL\"}" || true
+fi
 AUTO_FLAG=$(echo "$ARGUMENTS" | grep -oE '\-\-auto' | head -1)
 if [[ ${#ISSUE_NUMS[@]} -eq 0 ]]; then
-  echo "Usage: /uberdev:solve|/uberdev:turbo <issue-number> [<issue-number>...] [--trivial|--small|--full] [--auto] [--terminal=cmux|ghostty|iterm|terminal|nohup]"
+  echo "Usage: /uberdev:solve|/uberdev:turbo <issue-number> [<issue-number>...] [--trivial|--small|--full] [--auto]"
   exit 1
 fi
 # --full is an alias for medium/large (keeps current behavior)
@@ -71,7 +136,7 @@ else
 fi
 ```
 
-`$OVERRIDE`, `$TERMINAL_OVERRIDE`, `$AUTO_FLAG`, and `$AUTO_PERMISSIONS` apply **batch-wide**. There is no per-issue override syntax — run separate `/turbo` invocations if you need different flags per issue.
+`$OVERRIDE`, `$AUTO_FLAG`, and `$AUTO_PERMISSIONS` apply **batch-wide**. There is no per-issue override syntax — run separate `/turbo` invocations if you need different flags per issue.
 
 ### 2. Detect repo
 
@@ -233,6 +298,20 @@ if [[ "$AUTO_MODE" == "1" ]]; then
       break
     fi
   done
+fi
+
+# --- Phase A: bg dispatch probes + fanout cap (NEW v0.22.0) ---
+# All three probes run ONCE per /solve or /turbo invocation. They are
+# hoisted out of the Phase B per-issue loop because the resolved values are
+# the same for every spawn.
+_uberdev_require_claude_version "2.1.139"
+BG_PROMPT_MODE="$(_uberdev_probe_bg_prompt_mode)"   # → file | stdin | argv
+if [ -r "${CLAUDE_PLUGIN_ROOT:-}/lib/config-read.sh" ]; then
+  # shellcheck source=/dev/null
+  . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+  MAX_PARALLEL_BG_AGENTS="$(uberdev_read_int_in_range fanout_concurrency.solve_bg UBERDEV_FANOUT_SOLVE_BG 1 50 6)"
+else
+  MAX_PARALLEL_BG_AGENTS=6
 fi
 ```
 
