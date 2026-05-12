@@ -16,7 +16,9 @@ This skill is invoked inline by `commands/solve.md` and `commands/turbo.md`. The
 | `TERMINAL_FLAG_DEPRECATED_NOTE` | `warning: --terminal=cmux\|ghostty\|iterm\|terminal\|nohup is deprecated in v0.22.0; /solve and /turbo now dispatch claude --bg background sessions visible in claude agents. The flag is parsed without effect and will be removed in v1.0.0.` | Phase A stderr emission on first encounter; `commands/solve.md` / `commands/turbo.md` `## Deprecated Flags`. |
 | `MIN_CLAUDE_VERSION` | `2.1.139` | Phase A `_uberdev_require_claude_version` hard gate. |
 | `FANOUT_CONCURRENCY_SOLVE_BG_DEFAULT` | `6` | Phase A `MAX_PARALLEL_BG_AGENTS` resolution default. |
-| `SOLVE_AUDIT_EVENT_ENUM` | `agent_dispatched`, `deprecated_flag_used`, `solve_bg_fanout_wave_started`, `error` | Audit-log writers; consumers grep for `deprecated_flag_used` to identify migration laggards. `agent_returned` was removed in v0.22.0 — `claude --bg` does not synchronously report agent completion; use `claude agents` for status. |
+| `EFFORT_LEVEL_DEFAULT` | `max` | Phase A `EFFORT_LEVEL` resolution; rationale: `/turbo` is unattended, quality > cost. |
+| `EFFORT_LEVEL_ENUM` | `low \| medium \| high \| xhigh \| max` | Phase A `uberdev_read_enum` validation; matches `claude --effort <level>` accepted values in Claude Code 2.1.139. |
+| `SOLVE_AUDIT_EVENT_ENUM` | `agent_dispatched`, `deprecated_flag_used`, `solve_bg_fanout_wave_started`, `effort_resolved`, `error` | Audit-log writers; consumers grep for `deprecated_flag_used` to identify migration laggards. `agent_returned` was removed in v0.22.0 — `claude --bg` does not synchronously report agent completion; use `claude agents` for status. |
 
 ## Triage heuristics (Phase A applies this table)
 
@@ -108,6 +110,50 @@ if [[ -n "${SOLVE_TERMINAL:-}" ]]; then
     "{\"env\":\"SOLVE_TERMINAL\",\"value\":$(printf %s "$SOLVE_TERMINAL" | jq -Rs .)}" || true
 fi
 AUTO_FLAG=$(echo "$ARGUMENTS" | grep -oE '\-\-auto' | head -1)
+# --- Phase A: --effort=<level> parser (NEW v0.22.1) ---
+# `claude --bg` does NOT inherit the parent session's /effort setting in
+# Claude Code 2.1.139, so every background spawn must pass `--effort <level>`
+# explicitly or the bg daemon picks its own default (regression silently
+# downgraded /turbo quality before this parser landed). Precedence:
+#   CLI flag (--effort=<level>) > env var (UBERDEV_SOLVE_EFFORT) >
+#   per-repo config (solve_effort:) > EFFORT_LEVEL_DEFAULT (`max`).
+# Default is `max` because /turbo is unattended — quality dominates wall-clock
+# and cost. Interactive /solve callers who want to spend less can pass
+# --effort=high or set solve_effort: in .claude/uberdev.local.md.
+EFFORT_FLAG_VALUE="$(echo "$ARGUMENTS" | grep -oE '\-\-effort=[a-z]+' | head -1 | sed 's/--effort=//')"
+EFFORT_SOURCE=default
+if [[ -n "$EFFORT_FLAG_VALUE" ]]; then
+  EFFORT_LEVEL="$EFFORT_FLAG_VALUE"
+  EFFORT_SOURCE=cli
+elif [[ -n "${UBERDEV_SOLVE_EFFORT:-}" ]]; then
+  EFFORT_LEVEL="$UBERDEV_SOLVE_EFFORT"
+  EFFORT_SOURCE=env
+else
+  # uberdev_read_enum reads the value itself (env then config file) and
+  # validates the enum on its own paths; when it falls through to the default
+  # the source is `default`, when the .claude/uberdev.local.md key is set the
+  # source is `config`. Best-effort tag here — exact source is recoverable
+  # from the audit-event payload if needed.
+  if [ -r "${CLAUDE_PLUGIN_ROOT:-}/lib/config-read.sh" ]; then
+    # shellcheck source=/dev/null
+    . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+  fi
+  if command -v uberdev_read_enum >/dev/null 2>&1; then
+    EFFORT_LEVEL="$(uberdev_read_enum solve_effort UBERDEV_SOLVE_EFFORT 'low|medium|high|xhigh|max' 'max')"
+    # If the config file set the key, the helper returned a non-default value.
+    if [[ "$EFFORT_LEVEL" != "max" ]]; then EFFORT_SOURCE=config; fi
+  else
+    EFFORT_LEVEL=max
+  fi
+fi
+# Explicit validation when the value came from CLI or env (uberdev_read_enum
+# validates only when it reads the value itself). Reject loudly — a typoed
+# `--effort=hgh` would otherwise pass through and `claude --effort hgh` would
+# fail at the child with a less actionable error.
+case "$EFFORT_LEVEL" in
+  low|medium|high|xhigh|max) ;;
+  *) echo "error: --effort='$EFFORT_LEVEL' not in {low,medium,high,xhigh,max}" >&2; exit 1 ;;
+esac
 if [[ ${#ISSUE_NUMS[@]} -eq 0 ]]; then
   echo "Usage: /uberdev:solve|/uberdev:turbo <issue-number> [<issue-number>...] [--trivial|--small|--full] [--auto]"
   exit 1
@@ -282,6 +328,19 @@ MODEL='claude-opus-4-7[1m]'
 # --dangerously-skip-permissions for autonomous /solve runs.
 PERM_FLAG=""
 [[ "$AUTO_PERMISSIONS" == "1" ]] && PERM_FLAG="--permission-mode auto"
+
+# EFFORT_FLAG: thread the resolved /effort level (low|medium|high|xhigh|max)
+# through to every claude --bg child argv. `claude --bg` in Claude Code 2.1.139
+# does not inherit the parent session's effort, so without this hoist every bg
+# spawn falls back to the supervised daemon's default — turning /turbo into a
+# silent quality downgrade. Word-split is intentional (matches PERM_FLAG):
+# unquoted `$EFFORT_FLAG` expands to two argv tokens (`--effort` + level), and
+# `${cmd[@]}` preserves them as separate slots in the argv arm.
+# Regression guard: tests/dispatch-claude-bg.test.sh anchors on
+# `^EFFORT_FLAG="--effort `.
+EFFORT_FLAG="--effort $EFFORT_LEVEL"
+_uberdev_audit_emit effort_resolved \
+  "{\"source\":\"$EFFORT_SOURCE\",\"level\":\"$EFFORT_LEVEL\"}" || true
 
 # Wall-clock timeout: read command_timeouts.solve from .claude/uberdev.local.md
 # (env override: UBERDEV_SOLVE_TIMEOUT; default 3600s; range [60, 86400]).
@@ -492,14 +551,14 @@ case "$BG_PROMPT_MODE" in
     "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" claude --bg \
       --prompt-file "/tmp/solve-prompt-$ISSUE_NUM.txt" \
       --worktree "solve-issue-$ISSUE_NUM" \
-      --model "$MODEL" $PERM_FLAG > "$BG_STDOUT_LOG" 2>&1
+      --model "$MODEL" $PERM_FLAG $EFFORT_FLAG > "$BG_STDOUT_LOG" 2>&1
     BG_DISPATCH_RC=$?
     ;;
   stdin)
     # File content streamed on FD 0; no argv quoting concern.
     "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" claude --bg \
       --worktree "solve-issue-$ISSUE_NUM" \
-      --model "$MODEL" $PERM_FLAG \
+      --model "$MODEL" $PERM_FLAG $EFFORT_FLAG \
       < "/tmp/solve-prompt-$ISSUE_NUM.txt" > "$BG_STDOUT_LOG" 2>&1
     BG_DISPATCH_RC=$?
     ;;
@@ -509,10 +568,12 @@ case "$BG_PROMPT_MODE" in
     cmd=( "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" claude --bg
           --worktree "solve-issue-$ISSUE_NUM"
           --model "$MODEL" )
-    # $PERM_FLAG is a known-safe string from Phase A (one of "" or
-    # "--permission-mode auto"); word-split is intentional.
+    # $PERM_FLAG / $EFFORT_FLAG are known-safe strings from Phase A
+    # ($PERM_FLAG ∈ {"", "--permission-mode auto"}; $EFFORT_FLAG is
+    # "--effort <level>" where <level> passed the enum guard). Word-split is
+    # intentional: each space-separated token becomes its own argv slot.
     # shellcheck disable=SC2206
-    cmd+=( $PERM_FLAG -- "$PROMPT_BODY" )
+    cmd+=( $PERM_FLAG $EFFORT_FLAG -- "$PROMPT_BODY" )
     "${cmd[@]}" > "$BG_STDOUT_LOG" 2>&1
     BG_DISPATCH_RC=$?
     ;;
