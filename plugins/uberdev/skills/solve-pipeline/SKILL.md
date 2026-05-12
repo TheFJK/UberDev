@@ -335,10 +335,13 @@ MODEL='claude-opus-4-7[1m]'
 # Array form (not scalar): zsh's default SH_WORD_SPLIT=off would treat a
 # scalar `PERM_FLAG="--permission-mode auto"` passed as unquoted `$PERM_FLAG`
 # at command position as ONE argv slot, and `claude` would reject it with
-# `error: unknown option '--permission-mode auto'`. Same trap caught the
-# TIMEOUT_BIN block above; same fix here. `"${PERM_FLAG[@]}"` at the call
-# site expands an empty array to zero slots and a populated one to its
-# elements verbatim — identical behaviour in bash and zsh.
+# `error: unknown option '--permission-mode auto'`. Same zsh trap as the
+# TIMEOUT_BIN block below — but the fix shape differs by token count:
+# TIMEOUT_BIN holds a single argv[0] token and uses quoted-scalar form
+# (`"$TIMEOUT_BIN"`); PERM_FLAG/EFFORT_FLAG hold multi-token sequences and
+# need array expansion. `"${PERM_FLAG[@]}"` at the call site expands an
+# empty array to zero slots and a populated one to its elements verbatim
+# — identical behaviour in bash and zsh.
 PERM_FLAG=()
 [[ "$AUTO_PERMISSIONS" == "1" ]] && PERM_FLAG=( --permission-mode auto )
 

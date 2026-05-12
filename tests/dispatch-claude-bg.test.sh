@@ -128,6 +128,12 @@ fi
 # loudly fails the test instead of silently coercing to "0" and producing
 # a false PASS. The previous form `$(... 2>/dev/null; true)` masked ALL
 # non-zero exits including rc=2, defeating the regression-guard purpose.
+# Load-bearing regex suffix: `[^[]` at the end requires a non-`[` character
+# after `EFFORT_FLAG`, which prevents false-matching the new array form
+# `${EFFORT_FLAG[@]}` (literal `$EFFORT_FLAG` followed by `[`). Removing
+# this suffix in a "simplification" pass would make the tombstone fire on
+# the correct array form and turn every run into a false FAIL — do not
+# delete without re-deriving an equivalent anchor.
 SCALAR_RELAPSE_COUNT="$(grep -cE '\$PERM_FLAG \$EFFORT_FLAG[^[]' "$SOLVE_PIPELINE" 2>/dev/null)" || GREP_RC=$?
 GREP_RC="${GREP_RC:-0}"
 if [[ "$GREP_RC" -ge 2 ]]; then
