@@ -77,6 +77,9 @@ assert_grep "$SOLVE_PIPELINE" \
   'TERMINAL_FLAG_DEPRECATED_NOTE' \
   "Constants table defines TERMINAL_FLAG_DEPRECATED_NOTE"
 assert_grep "$SOLVE_PIPELINE" \
+  '^TERMINAL_FLAG_DEPRECATED_NOTE=' \
+  "Phase A binds TERMINAL_FLAG_DEPRECATED_NOTE as a bash variable (B1 regression guard)"
+assert_grep "$SOLVE_PIPELINE" \
   'echo "\$TERMINAL_FLAG_DEPRECATED_NOTE" >&2' \
   "deprecation note emitted to stderr on first encounter"
 assert_grep "$SOLVE_PIPELINE" \

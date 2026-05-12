@@ -89,6 +89,12 @@ OVERRIDE=$(echo "$ARGUMENTS" | grep -oE '\-\-(trivial|small|full)' | head -1 | s
 # per run on first encounter, records `deprecated_flag_used` audit event, and
 # has no behavioural effect. Mirrors merge-pipeline PR #49 (STRATEGY_FLAGS,
 # BYPASS_PROTECTIONS) template.
+#
+# Bind the deprecation note shell-side (the Constants table is documentation;
+# Claude reads it as prose, not bash). Regression guard:
+# tests/dispatch-claude-bg.test.sh anchors on `^TERMINAL_FLAG_DEPRECATED_NOTE=`
+# — keep this assignment present and at column 0.
+TERMINAL_FLAG_DEPRECATED_NOTE='warning: --terminal=cmux|ghostty|iterm|terminal|nohup is deprecated in v0.22.0; /solve and /turbo now dispatch claude --bg background sessions visible in claude agents. The flag is parsed without effect and will be removed in v1.0.0.'
 TERMINAL_FLAG_USED="$(echo "$ARGUMENTS" | grep -oE '\-\-terminal=[a-z]+' | head -1 || true)"
 if [[ -n "$TERMINAL_FLAG_USED" ]]; then
   echo "$TERMINAL_FLAG_DEPRECATED_NOTE" >&2
