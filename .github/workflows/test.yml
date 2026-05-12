@@ -22,10 +22,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install zsh
         # ubuntu-latest does not ship zsh by default. tests/solve-pipeline-zsh.test.sh
-        # is a zsh-runtime fixture that locks the PR #88 regression
+        # is a zsh-runtime fixture that locks the v0.22.2 regression
         # (the v0.22.1 scalar `EFFORT_FLAG="--effort max"` broke under zsh's
         # SH_WORD_SPLIT=off). Without zsh on PATH the fixture cannot run.
-        run: sudo apt-get update -qq && sudo apt-get install -y zsh
+        # Dropped `-qq` from apt-get so install diagnostics (network, GPG,
+        # mirror failures) surface in the action log instead of being hidden
+        # behind a downstream `zsh: command not found`. Added
+        # `--no-install-recommends` to trim CI runtime (the fixture only
+        # needs the zsh binary, not the recommends graph).
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
       - name: Run shape-check tests
         run: |
           bash tests/turbo-flow.test.sh && \

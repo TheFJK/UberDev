@@ -228,7 +228,7 @@ echo '== R3: child-argv capture — ${EFFORT_FLAG[@]} reaches claude --bg with o
 # loop from SKILL.md, which would couple to too many other variables).
 # This locks the contract that:
 #   1. EFFORT_FLAG is a bash+zsh array; `"${EFFORT_FLAG[@]}"` expands to two
-#      argv slots (--effort + level) regardless of SH_WORD_SPLIT (PR #88
+#      argv slots (--effort + level) regardless of SH_WORD_SPLIT (v0.22.2
 #      regression: v0.22.1 shipped scalar `EFFORT_FLAG="--effort max"` which
 #      collapsed into one argv slot under zsh, the macOS default shell).
 #   2. The level lands as a separate argv slot, not concatenated with

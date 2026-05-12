@@ -90,10 +90,10 @@ assert_grep "$SOLVE_PIPELINE" \
   "Phase A reads solve_effort from .claude/uberdev.local.md via uberdev_read_enum"
 assert_grep "$SOLVE_PIPELINE" \
   '^EFFORT_FLAG=\( --effort "\$EFFORT_LEVEL" \)$' \
-  "Phase A hoist binds EFFORT_FLAG as a bash+zsh array — scalar form regresses to a one-slot \`--effort max\` argv element under zsh SH_WORD_SPLIT=off (PR #88)"
+  "Phase A hoist binds EFFORT_FLAG as a bash+zsh array — scalar form regresses to a one-slot \`--effort max\` argv element under zsh SH_WORD_SPLIT=off (v0.22.2 fix)"
 assert_grep "$SOLVE_PIPELINE" \
   '^PERM_FLAG=\(\)$' \
-  "Phase A hoist binds PERM_FLAG as an empty bash+zsh array — same zsh-word-split rationale as EFFORT_FLAG (PR #88)"
+  "Phase A hoist binds PERM_FLAG as an empty bash+zsh array — same zsh-word-split rationale as EFFORT_FLAG (v0.22.2 fix)"
 assert_grep "$SOLVE_PIPELINE" \
   'PERM_FLAG=\( --permission-mode auto \)' \
   "Phase A AUTO_PERMISSIONS branch populates PERM_FLAG as an array, not a scalar"
@@ -121,19 +121,26 @@ else
 fi
 # Tombstone: the v0.22.1 scalar form `$PERM_FLAG $EFFORT_FLAG` (no braces,
 # no quotes) must NOT reappear. A regression to that form would re-trigger
-# the v0.22.1 zsh dispatch failure documented in PR #88.
-# `grep -c` always prints a single number (0 when no matches, N otherwise),
-# so a bare command substitution suffices; appending `|| echo 0` would
-# concatenate a second "0" on the no-match path under set -u and trip
-# arithmetic comparison below.
-SCALAR_RELAPSE_COUNT=$(grep -cE '\$PERM_FLAG \$EFFORT_FLAG[^[]' "$SOLVE_PIPELINE" 2>/dev/null; true)
-if [[ "${SCALAR_RELAPSE_COUNT:-0}" -eq 0 ]]; then
-  echo "  PASS  no scalar-form \`\$PERM_FLAG \$EFFORT_FLAG\` relapse (PR #88 regression guard)"
+# the v0.22.1 zsh dispatch failure that v0.22.2 fixed.
+# `grep -c` prints a single number (0 when no matches, N otherwise) and
+# exits rc=0 on matches, rc=1 on zero matches, rc>=2 on regex/IO error.
+# We capture rc explicitly so that rc>=2 (regex error or unreadable file)
+# loudly fails the test instead of silently coercing to "0" and producing
+# a false PASS. The previous form `$(... 2>/dev/null; true)` masked ALL
+# non-zero exits including rc=2, defeating the regression-guard purpose.
+SCALAR_RELAPSE_COUNT="$(grep -cE '\$PERM_FLAG \$EFFORT_FLAG[^[]' "$SOLVE_PIPELINE" 2>/dev/null)" || GREP_RC=$?
+GREP_RC="${GREP_RC:-0}"
+if [[ "$GREP_RC" -ge 2 ]]; then
+  echo "  FAIL  grep exited rc=$GREP_RC on $SOLVE_PIPELINE — test harness broken (regex error or file unreadable)"
+  FAIL=$((FAIL + 1))
+elif [[ "${SCALAR_RELAPSE_COUNT:-0}" -eq 0 ]]; then
+  echo "  PASS  no scalar-form \`\$PERM_FLAG \$EFFORT_FLAG\` relapse (v0.22.2 regression guard)"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  found $SCALAR_RELAPSE_COUNT scalar-form \`\$PERM_FLAG \$EFFORT_FLAG\` instances — these break under zsh (PR #88)"
+  echo "  FAIL  found $SCALAR_RELAPSE_COUNT scalar-form \`\$PERM_FLAG \$EFFORT_FLAG\` instances — these break under zsh (v0.22.2 fixed this)"
   FAIL=$((FAIL + 1))
 fi
+unset GREP_RC
 
 echo "== Positive: Phase A constants + hardcoded BG_PROMPT_MODE =="
 assert_grep "$SOLVE_PIPELINE" \

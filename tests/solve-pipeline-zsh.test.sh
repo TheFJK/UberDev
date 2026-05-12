@@ -1,5 +1,5 @@
 #!/usr/bin/env zsh
-# Regression test for PR #88 — the v0.22.1 `/turbo` dispatch broke under zsh
+# Regression test for the v0.22.2 fix — the v0.22.1 `/turbo` dispatch broke under zsh
 # because PERM_FLAG/EFFORT_FLAG were scalars (`EFFORT_FLAG="--effort max"`)
 # and the dispatch arm relied on unquoted `$EFFORT_FLAG` word-splitting into
 # two argv slots. That assumption holds in bash but NOT in zsh: zsh's default
@@ -125,7 +125,7 @@ else
   # Negative check: the scalar-form regression would land `--effort max`
   # on a single line. This MUST not appear.
   if grep -qx -- '--effort max' "$CAPTURE_FILE"; then
-    fail "R2c: scalar-form relapse — '--effort max' appeared as a single argv slot (the bug PR #88 fixes)"
+    fail "R2c: scalar-form relapse — '--effort max' appeared as a single argv slot (the bug v0.22.2 fixed)"
   else
     pass "R2c: no '--effort max' collapsed-slot relapse"
   fi
