@@ -1,6 +1,6 @@
 ---
 description: "Unattended /solve — auto-accepts brainstorm recommendations for medium/large issues. Dispatches N parallel `claude --bg` background sessions (cap: 6 default, configurable via `fanout_concurrency.solve_bg`). Monitor with `claude agents`."
-argument-hint: "<issue-number> [<issue-number>...] [--trivial|--small|--full] [--auto]"
+argument-hint: "<issue-number> [<issue-number>...] [--trivial|--small|--full] [--auto] [--effort=<level>]"
 allowed-tools: ["Bash", "Read", "Task"]
 ---
 
@@ -18,10 +18,11 @@ Spawn an autonomous Claude agent as a `claude --bg` background session per GitHu
 
 **RULES:** Do NOT use the Task tool or internal subagents. Use bash commands only.
 
-**Usage:** `/turbo <issue-number> [<issue-number>...] [--trivial|--small|--full] [--auto]`
+**Usage:** `/turbo <issue-number> [<issue-number>...] [--trivial|--small|--full] [--auto] [--effort=<level>]`
 
 - Same flag semantics as `/solve`. `--auto` is orthogonal to `/turbo` — **`/turbo <issue> --auto` is the max-autonomy combo**.
 - Multi-issue example: `/turbo 5 6 7` ⇒ three parallel agents, one per issue. Same flag set applies to all three.
+- `--effort=<level>` (`low | medium | high | xhigh | max`) — sets the `--effort` flag passed to each `claude --bg` child. **Default is `max` for `/turbo`** (autopilot, quality > cost — `claude --bg` does NOT inherit the parent session's `/effort` setting in Claude Code 2.1.139, so without this flag every spawn falls back to the supervised daemon's default and silently downgrades quality). Override per-invocation with `--effort=high` etc. Configurable repo-wide via `solve_effort:` in `.claude/uberdev.local.md` (env override: `UBERDEV_SOLVE_EFFORT`). Precedence: CLI flag > env > config > default `max`.
 
 ## Deprecated Flags
 

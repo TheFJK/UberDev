@@ -63,6 +63,54 @@ assert_grep "$SOLVE_PIPELINE" \
   '\-\-worktree "solve-issue-\$ISSUE_NUM"' \
   "every arm passes --worktree solve-issue-N for isolation"
 
+echo "== Positive: --effort=<level> threaded into claude --bg (v0.22.1) =="
+# Regression: prior to v0.22.1, /turbo and /solve dispatched `claude --bg`
+# without any --effort flag — `claude --bg` 2.1.139 does NOT inherit the
+# parent session's effort, so every bg spawn fell back to the supervised
+# daemon's default (silent quality downgrade for /turbo). The Phase A
+# parser + EFFORT_FLAG hoist + threaded case arms close that gap; the
+# assertions below lock the contract in.
+assert_grep "$SOLVE_PIPELINE" \
+  '^\| `EFFORT_LEVEL_DEFAULT` \| `max`' \
+  "Constants table declares EFFORT_LEVEL_DEFAULT = max (autopilot default)"
+assert_grep "$SOLVE_PIPELINE" \
+  '^\| `EFFORT_LEVEL_ENUM` \| `low \\\| medium \\\| high \\\| xhigh \\\| max`' \
+  "Constants table declares EFFORT_LEVEL_ENUM = {low,medium,high,xhigh,max}"
+assert_grep "$SOLVE_PIPELINE" \
+  'effort_resolved' \
+  "SOLVE_AUDIT_EVENT_ENUM contains effort_resolved (Phase A telemetry)"
+assert_grep "$SOLVE_PIPELINE" \
+  "EFFORT_FLAG_VALUE=.*grep -oE .\\\\-\\\\-effort=\\[a-z\\]\\+" \
+  "Phase A parses --effort=<level> from \$ARGUMENTS"
+assert_grep "$SOLVE_PIPELINE" \
+  'UBERDEV_SOLVE_EFFORT' \
+  "Phase A honours UBERDEV_SOLVE_EFFORT env override"
+assert_grep "$SOLVE_PIPELINE" \
+  'uberdev_read_enum solve_effort UBERDEV_SOLVE_EFFORT' \
+  "Phase A reads solve_effort from .claude/uberdev.local.md via uberdev_read_enum"
+assert_grep "$SOLVE_PIPELINE" \
+  '^EFFORT_FLAG="--effort \$EFFORT_LEVEL"' \
+  "Phase A hoist binds EFFORT_FLAG=\"--effort \$EFFORT_LEVEL\" (regression guard)"
+assert_grep "$SOLVE_PIPELINE" \
+  '_uberdev_audit_emit effort_resolved' \
+  "Phase A emits effort_resolved audit event with {source, level}"
+assert_grep "$SOLVE_PIPELINE" \
+  'low\|medium\|high\|xhigh\|max' \
+  "Phase A validates resolved level against the {low,medium,high,xhigh,max} enum"
+# Each of the three case-statement arms threads $EFFORT_FLAG immediately
+# after $PERM_FLAG. The literal `\$PERM_FLAG \$EFFORT_FLAG` token-pair must
+# appear at least three times (file arm, stdin arm, argv arm). A future edit
+# that drops the flag from any one arm would regress to silent default-effort
+# dispatch for that mode.
+EFFORT_ARMS_COUNT=$(grep -cE '\$PERM_FLAG \$EFFORT_FLAG' "$SOLVE_PIPELINE" 2>/dev/null || echo "0")
+if [[ "$EFFORT_ARMS_COUNT" -ge 3 ]]; then
+  echo "  PASS  all three dispatch arms thread \$EFFORT_FLAG after \$PERM_FLAG (count=$EFFORT_ARMS_COUNT)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  expected \$PERM_FLAG \$EFFORT_FLAG token-pair in all 3 case arms (file/stdin/argv); count=$EFFORT_ARMS_COUNT"
+  FAIL=$((FAIL + 1))
+fi
+
 echo "== Positive: Phase A constants + hardcoded BG_PROMPT_MODE =="
 assert_grep "$SOLVE_PIPELINE" \
   '_uberdev_require_claude_version "2.1.139"' \
