@@ -310,9 +310,6 @@ TIMEOUT_BIN=""
 if   command -v timeout  >/dev/null 2>&1; then TIMEOUT_BIN=timeout
 elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT_BIN=gtimeout
 fi
-if [[ -z "$TIMEOUT_BIN" ]]; then
-  echo "warning: neither timeout(1) nor gtimeout on PATH; /solve will dispatch unwrapped (no wall-clock kill). Fix: brew install coreutils" >&2
-fi
 
 # Runtime guard: if neither timeout(1) nor gtimeout(1) is on PATH, the
 # bg dispatch below will pass empty wrap args to claude --bg, failing
