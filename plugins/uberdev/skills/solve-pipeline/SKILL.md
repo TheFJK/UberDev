@@ -18,6 +18,7 @@ This skill is invoked inline by `commands/solve.md` and `commands/turbo.md`. The
 | `FANOUT_CONCURRENCY_SOLVE_BG_DEFAULT` | `6` | Phase A `MAX_PARALLEL_BG_AGENTS` resolution default. |
 | `EFFORT_LEVEL_DEFAULT` | `max` | Phase A `EFFORT_LEVEL` resolution; rationale: `/turbo` is unattended, quality > cost. |
 | `EFFORT_LEVEL_ENUM` | `low \| medium \| high \| xhigh \| max` | Phase A `uberdev_read_enum` validation; matches `claude --effort <level>` accepted values in Claude Code 2.1.139. |
+| `EFFORT_SOURCE_ENUM` | `cli \| env \| config \| default` | Audit telemetry source tag set by the Phase A `--effort=<level>` parser; emitted in the `effort_resolved` audit event payload. |
 | `SOLVE_AUDIT_EVENT_ENUM` | `agent_dispatched`, `deprecated_flag_used`, `solve_bg_fanout_wave_started`, `effort_resolved`, `error` | Audit-log writers; consumers grep for `deprecated_flag_used` to identify migration laggards. `agent_returned` was removed in v0.22.0 — `claude --bg` does not synchronously report agent completion; use `claude agents` for status. |
 
 ## Triage heuristics (Phase A applies this table)
@@ -120,6 +121,11 @@ AUTO_FLAG=$(echo "$ARGUMENTS" | grep -oE '\-\-auto' | head -1)
 # Default is `max` because /turbo is unattended — quality dominates wall-clock
 # and cost. Interactive /solve callers who want to spend less can pass
 # --effort=high or set solve_effort: in .claude/uberdev.local.md.
+# Permissive lowercase-only regex (mirrors --terminal= precedent at line 100):
+# `--effort=HIGH`, `--effort=`, and trailing `--effort=high --effort=max`
+# silently fall through to the env/config/default chain (head -1 picks the
+# first match). Strict rejection would force users to recall casing; the
+# downstream enum guard at the validation `case` catches typos that DO match.
 EFFORT_FLAG_VALUE="$(echo "$ARGUMENTS" | grep -oE '\-\-effort=[a-z]+' | head -1 | sed 's/--effort=//')"
 EFFORT_SOURCE=default
 if [[ -n "$EFFORT_FLAG_VALUE" ]]; then
@@ -129,19 +135,24 @@ elif [[ -n "${UBERDEV_SOLVE_EFFORT:-}" ]]; then
   EFFORT_LEVEL="$UBERDEV_SOLVE_EFFORT"
   EFFORT_SOURCE=env
 else
-  # uberdev_read_enum reads the value itself (env then config file) and
-  # validates the enum on its own paths; when it falls through to the default
-  # the source is `default`, when the .claude/uberdev.local.md key is set the
-  # source is `config`. Best-effort tag here — exact source is recoverable
-  # from the audit-event payload if needed.
+  # Authoritative EFFORT_SOURCE attribution: probe the config file directly for
+  # the literal `solve_effort:` key BEFORE delegating to uberdev_read_enum. The
+  # prior inequality check `[[ "$EFFORT_LEVEL" != "max" ]]` mislabeled
+  # explicit-config-max (`solve_effort: max`) as `default`, breaking the audit
+  # telemetry contract. Mirrors the canonical config path used by
+  # `_uberdev_read_nested` in lib/config-read.sh.
+  EFFORT_CONFIG_FILE="${UBERDEV_CONFIG_FILE:-${PWD}/.claude/uberdev.local.md}"
+  if [ -f "$EFFORT_CONFIG_FILE" ] && grep -qE '^solve_effort:' "$EFFORT_CONFIG_FILE" 2>/dev/null; then
+    EFFORT_SOURCE=config
+  else
+    EFFORT_SOURCE=default
+  fi
   if [ -r "${CLAUDE_PLUGIN_ROOT:-}/lib/config-read.sh" ]; then
     # shellcheck source=/dev/null
     . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
   fi
   if command -v uberdev_read_enum >/dev/null 2>&1; then
     EFFORT_LEVEL="$(uberdev_read_enum solve_effort UBERDEV_SOLVE_EFFORT 'low|medium|high|xhigh|max' 'max')"
-    # If the config file set the key, the helper returned a non-default value.
-    if [[ "$EFFORT_LEVEL" != "max" ]]; then EFFORT_SOURCE=config; fi
   else
     EFFORT_LEVEL=max
   fi
@@ -339,6 +350,8 @@ PERM_FLAG=""
 # Regression guard: tests/dispatch-claude-bg.test.sh anchors on
 # `^EFFORT_FLAG="--effort `.
 EFFORT_FLAG="--effort $EFFORT_LEVEL"
+# See `_uberdev_audit_emit` definition near the top of Phase A (anchor:
+# `^_uberdev_audit_emit\(\)`); no-op when $SOLVE_AUDIT_LOG is unset.
 _uberdev_audit_emit effort_resolved \
   "{\"source\":\"$EFFORT_SOURCE\",\"level\":\"$EFFORT_LEVEL\"}" || true
 

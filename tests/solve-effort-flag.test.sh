@@ -55,6 +55,17 @@ fi
 # Drop the sentinel before eval.
 PARSER_BLOCK="${PARSER_BLOCK%PARSER_END*}"
 
+# Positive content guard: the extracted window MUST contain the EFFORT_LEVEL_ENUM
+# literal. Catches future Phase A `case` additions (e.g. another enum closing
+# with `esac`) that would shift the extraction window away from the --effort
+# parser. Without this guard, a wrong-window extraction silently runs an
+# unrelated block and every R1/R2 assertion fails with confusing diffs.
+if ! grep -q 'low|medium|high|xhigh|max' <<<"$PARSER_BLOCK"; then
+  echo "FATAL: extracted PARSER_BLOCK does not contain the EFFORT_LEVEL_ENUM literal" >&2
+  echo "       awk anchors may have shifted onto an adjacent case-esac block — verify SKILL.md" >&2
+  exit 2
+fi
+
 # _resolve <ARGUMENTS> [<env_override>] [<config_value>]
 # Sources the helper + parser block in a clean subshell. Returns
 # "$EFFORT_LEVEL|$EFFORT_FLAG|$EFFORT_SOURCE" on stdout.
@@ -135,6 +146,28 @@ for lvl in low medium high xhigh max; do
     fail "R1e: --effort=$lvl rejected — expected '$lvl|--effort $lvl|cli', got '$RES'"
   fi
 done
+
+# R1f: explicit `solve_effort: max` in config MUST attribute source=config
+# (regression guard for the inequality-based misattribution bug — Phase A
+# previously labelled this `default` because the resolved value matched the
+# default). The fix is the direct grep against the config file for the literal
+# `solve_effort:` key BEFORE delegating to uberdev_read_enum.
+RES="$(_resolve '128' '' 'max')"
+if [[ "$RES" = "max|--effort max|config" ]]; then
+  pass "R1f: config solve_effort=max attributed to source=config (got: $RES)"
+else
+  fail "R1f: explicit config=max should attribute source=config — expected 'max|--effort max|config', got '$RES'"
+fi
+
+# R1g: bare invocation with empty config file MUST attribute source=default
+# (companion to R1f — confirms the absence path lands on `default` and the
+# direct-grep probe does not produce false positives on an empty config).
+RES="$(_resolve '128' '' '')"
+if [[ "$RES" = "max|--effort max|default" ]]; then
+  pass "R1g: empty config attributed to source=default (got: $RES)"
+else
+  fail "R1g: empty config should attribute source=default — expected 'max|--effort max|default', got '$RES'"
+fi
 
 echo
 echo "== R2: invalid --effort=<level> values rejected loudly =="
@@ -238,6 +271,13 @@ echo "fake prompt body" > "$SANDBOX/prompt.txt"
   "${cmd[@]}" >/dev/null 2>&1
 ) || true
 
+# Explicit stub-execution check: if the stub never ran (PATH miss, exec fail,
+# Phase A parser aborted before reaching the dispatch), surface that
+# specifically instead of conflating it with a missing-argv-token failure.
+if [[ ! -f "$CAPTURE_FILE" ]] || [[ ! -s "$CAPTURE_FILE" ]]; then
+  fail "R3 precondition: claude stub did not execute (capture file missing or empty)"
+fi
+
 ARGV_DUMP="$(cat "$CAPTURE_FILE" 2>/dev/null)"
 if grep -qx -- '--effort' <<<"$ARGV_DUMP" && grep -qx 'high' <<<"$ARGV_DUMP"; then
   pass "R3a: captured argv contains '--effort' and 'high' as separate slots (word-split preserved)"
@@ -257,6 +297,55 @@ fi
 
 # Cleanup
 rm -rf "$STUB_DIR" "$SANDBOX" "$CAPTURE_FILE"
+
+echo
+echo "== R4: effort_resolved audit event is actually written =="
+# The R1/R2 tests stub _uberdev_audit_emit as a no-op to focus on the
+# precedence ladder. R4 closes the gap: extract the REAL _uberdev_audit_emit
+# function from SKILL.md, set SOLVE_AUDIT_LOG to a tmpfile, run the parser +
+# the EFFORT_FLAG/audit-emit hoist, and assert the emitted JSON line has the
+# expected shape `{event: effort_resolved, data: {source, level}}`.
+AUDIT_FN_BLOCK="$(awk '
+  /^_uberdev_audit_emit\(\)/ { capture=1 }
+  capture { print }
+  capture && /^}$/ { print "AUDIT_FN_END"; exit }
+' "$SOLVE_PIPELINE")"
+
+if ! grep -q 'AUDIT_FN_END' <<<"$AUDIT_FN_BLOCK"; then
+  fail "R4 precondition: could not extract _uberdev_audit_emit from $SOLVE_PIPELINE"
+else
+  AUDIT_FN_BLOCK="${AUDIT_FN_BLOCK%AUDIT_FN_END*}"
+
+  SANDBOX="$(mktemp -d)"
+  AUDIT_LOG="$(mktemp)"
+  mkdir -p "$SANDBOX/.claude"
+  : > "$SANDBOX/.claude/uberdev.local.md"
+  (
+    cd "$SANDBOX"
+    export CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+    export ARGUMENTS="128 --effort=high"
+    export SOLVE_AUDIT_LOG="$AUDIT_LOG"
+    unset UBERDEV_SOLVE_EFFORT
+    # Define the REAL _uberdev_audit_emit BEFORE sourcing the parser; the
+    # parser only references the function name (no early-binding capture).
+    eval "$AUDIT_FN_BLOCK"
+    eval "$PARSER_BLOCK"
+    # Mirror the SKILL.md hoist that emits the `effort_resolved` event.
+    EFFORT_FLAG="--effort $EFFORT_LEVEL"
+    _uberdev_audit_emit effort_resolved \
+      "{\"source\":\"$EFFORT_SOURCE\",\"level\":\"$EFFORT_LEVEL\"}" || true
+  ) >/dev/null 2>&1
+
+  EMITTED="$(cat "$AUDIT_LOG" 2>/dev/null)"
+  if grep -q '"event":"effort_resolved"' <<<"$EMITTED" \
+     && grep -q '"source":"cli"' <<<"$EMITTED" \
+     && grep -q '"level":"high"' <<<"$EMITTED"; then
+    pass "R4: effort_resolved audit event written with source=cli, level=high"
+  else
+    fail "R4: expected effort_resolved JSON with source=cli, level=high in $AUDIT_LOG; got: $EMITTED"
+  fi
+  rm -rf "$SANDBOX" "$AUDIT_LOG"
+fi
 
 echo
 echo "== Summary =="
