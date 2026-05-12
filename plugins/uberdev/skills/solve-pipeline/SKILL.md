@@ -123,6 +123,17 @@ elif [[ -f .claude/uberdev.local.md ]] && grep -qE '^solve_auto:[[:space:]]*true
 else
   AUTO_PERMISSIONS=0
 fi
+
+# Permission-mode description for the prompt heredocs. Flat-var if/else
+# form (NOT the v0.21.0 one-liner `echo "Permission mode: $([[…]] && echo
+# … || echo …)"` which trips zsh NOMATCH when re-emitted into a generated
+# .sh — regression guard tests/audit-fixups.test.sh C8).
+if [[ "$AUTO_PERMISSIONS" == "1" ]]; then
+  PERM_DESC="auto (Claude Code AI classifier)"
+else
+  PERM_DESC="default (manual per-tool gating)"
+fi
+echo "Permission mode: $PERM_DESC"
 ```
 
 `$OVERRIDE`, `$AUTO_FLAG`, and `$AUTO_PERMISSIONS` apply **batch-wide**. There is no per-issue override syntax — run separate `/turbo` invocations if you need different flags per issue.
@@ -292,6 +303,19 @@ fi
 if [[ -z "$TIMEOUT_BIN" ]]; then
   echo "warning: neither timeout(1) nor gtimeout on PATH; /solve will dispatch unwrapped (no wall-clock kill). Fix: brew install coreutils" >&2
 fi
+
+# Runtime guard: if neither timeout(1) nor gtimeout(1) is on PATH, the
+# bg dispatch below will pass empty wrap args to claude --bg, failing
+# silently. Detect and abort with an actionable install pointer.
+# Regression guard: tests/config-override.test.sh I2f anchors on this
+# `if [[ -n "$TIMEOUT_BIN" ]]; then` pattern; do not collapse to `[[ … ]] ||`.
+if [[ -n "$TIMEOUT_BIN" ]]; then
+  : # timeout(1) or gtimeout(1) available; bg dispatch arms wrap correctly
+else
+  echo "error: neither timeout(1) nor gtimeout(1) found on PATH" >&2
+  echo "       install with: brew install coreutils  # provides gtimeout" >&2
+  exit 1
+fi
 ```
 
 ### 5. Per-issue dispatch (Phase B — spawn one bg agent per issue)
@@ -317,24 +341,7 @@ The `if/else/fi` blocks below stay at column 0 (zsh and bash do not require phys
 **trivial:**
 
 ```bash
-if [[ "$AUTO_MODE" == "1" ]]; then
-# trivial heredoc — turbo (/turbo): no research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
-cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
-Solve GH issue #$ISSUE_NUM directly. Triaged as TRIVIAL.
-
-Steps:
-1. \`gh issue view $ISSUE_NUM\` — read the ask.
-2. Make the minimal edit. No redesign, no surrounding refactor, no "while I'm here" cleanup.
-3. Add/update a test ONLY if the touched code is already tested.
-4. Run the relevant test file + lint for that package.
-5. Commit with conventional message. Open PR with \`Closes #$ISSUE_NUM\` in the body.
-6. **Capture the PR URL from \`gh pr create\` output and invoke the \`uberdev:review-pr --turbo\` skill via the Skill tool with that URL.** This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory.
-
-Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
-
-Skip /uberdev:brainstorm. Skip multi-step planning. Escalate to /uberdev:brainstorm ONLY if the scope turns out to be materially larger than triaged.
-EOF
-else
+if [[ "$AUTO_MODE" != "1" ]]; then
 # trivial heredoc — interactive (/solve): pre-collected-research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
 cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
 Solve GH issue #$ISSUE_NUM directly. Triaged as TRIVIAL.
@@ -352,29 +359,30 @@ Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:revi
 
 Skip /uberdev:brainstorm. Skip multi-step planning. Escalate to /uberdev:brainstorm ONLY if the scope turns out to be materially larger than triaged.
 EOF
+else
+# trivial heredoc — turbo (/turbo): no research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
+cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
+Solve GH issue #$ISSUE_NUM directly. Triaged as TRIVIAL.
+
+Steps:
+1. \`gh issue view $ISSUE_NUM\` — read the ask.
+2. Make the minimal edit. No redesign, no surrounding refactor, no "while I'm here" cleanup.
+3. Add/update a test ONLY if the touched code is already tested.
+4. Run the relevant test file + lint for that package.
+5. Commit with conventional message. Open PR with \`Closes #$ISSUE_NUM\` in the body.
+6. **Capture the PR URL from \`gh pr create\` output and invoke the \`uberdev:review-pr --turbo\` skill via the Skill tool with that URL.** This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory.
+
+Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
+
+Skip /uberdev:brainstorm. Skip multi-step planning. Escalate to /uberdev:brainstorm ONLY if the scope turns out to be materially larger than triaged.
+EOF
 fi
 ```
 
 **small:**
 
 ```bash
-if [[ "$AUTO_MODE" == "1" ]]; then
-# small heredoc — turbo (/turbo): no research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
-cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
-Solve GH issue #$ISSUE_NUM with a lightweight plan. Triaged as SMALL.
-
-Steps:
-1. \`gh issue view $ISSUE_NUM\` — read the ask.
-2. Write 3–6 TodoWrite tasks. Skip /uberdev:brainstorm — scope is clear.
-3. TDD: write the failing test first, then implement, then green.
-4. Commit + PR with \`Closes #$ISSUE_NUM\`.
-5. **Capture the PR URL from \`gh pr create\` output and invoke the \`uberdev:review-pr --turbo\` skill via the Skill tool with that URL.** This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory.
-
-Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
-
-Escalate to /uberdev:brainstorm if the scope proves larger than triaged.
-EOF
-else
+if [[ "$AUTO_MODE" != "1" ]]; then
 # small heredoc — interactive (/solve): pre-collected-research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
 cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
 Solve GH issue #$ISSUE_NUM with a lightweight plan. Triaged as SMALL.
@@ -386,6 +394,22 @@ Steps:
 4. TDD: write the failing test first, then implement, then green.
 5. Commit + PR with \`Closes #$ISSUE_NUM\`.
 6. **Capture the PR URL from \`gh pr create\` output and invoke the \`uberdev:review-pr\` skill via the Skill tool with that URL.** This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory — do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
+
+Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
+
+Escalate to /uberdev:brainstorm if the scope proves larger than triaged.
+EOF
+else
+# small heredoc — turbo (/turbo): no research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
+cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
+Solve GH issue #$ISSUE_NUM with a lightweight plan. Triaged as SMALL.
+
+Steps:
+1. \`gh issue view $ISSUE_NUM\` — read the ask.
+2. Write 3–6 TodoWrite tasks. Skip /uberdev:brainstorm — scope is clear.
+3. TDD: write the failing test first, then implement, then green.
+4. Commit + PR with \`Closes #$ISSUE_NUM\`.
+5. **Capture the PR URL from \`gh pr create\` output and invoke the \`uberdev:review-pr --turbo\` skill via the Skill tool with that URL.** This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory.
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
