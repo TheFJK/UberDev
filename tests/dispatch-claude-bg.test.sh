@@ -89,27 +89,64 @@ assert_grep "$SOLVE_PIPELINE" \
   'uberdev_read_enum solve_effort UBERDEV_SOLVE_EFFORT' \
   "Phase A reads solve_effort from .claude/uberdev.local.md via uberdev_read_enum"
 assert_grep "$SOLVE_PIPELINE" \
-  '^EFFORT_FLAG="--effort \$EFFORT_LEVEL"' \
-  "Phase A hoist binds EFFORT_FLAG=\"--effort \$EFFORT_LEVEL\" (regression guard)"
+  '^EFFORT_FLAG=\( --effort "\$EFFORT_LEVEL" \)$' \
+  "Phase A hoist binds EFFORT_FLAG as a bash+zsh array — scalar form regresses to a one-slot \`--effort max\` argv element under zsh SH_WORD_SPLIT=off (v0.22.2 fix)"
+assert_grep "$SOLVE_PIPELINE" \
+  '^PERM_FLAG=\(\)$' \
+  "Phase A hoist binds PERM_FLAG as an empty bash+zsh array — same zsh-word-split rationale as EFFORT_FLAG (v0.22.2 fix)"
+assert_grep "$SOLVE_PIPELINE" \
+  'PERM_FLAG=\( --permission-mode auto \)' \
+  "Phase A AUTO_PERMISSIONS branch populates PERM_FLAG as an array, not a scalar"
 assert_grep "$SOLVE_PIPELINE" \
   '_uberdev_audit_emit effort_resolved' \
   "Phase A emits effort_resolved audit event with {source, level}"
 assert_grep "$SOLVE_PIPELINE" \
   'low\|medium\|high\|xhigh\|max' \
   "Phase A validates resolved level against the {low,medium,high,xhigh,max} enum"
-# Each of the three case-statement arms threads $EFFORT_FLAG immediately
-# after $PERM_FLAG. The literal `\$PERM_FLAG \$EFFORT_FLAG` token-pair must
-# appear at least three times (file arm, stdin arm, argv arm). A future edit
-# that drops the flag from any one arm would regress to silent default-effort
-# dispatch for that mode.
-EFFORT_ARMS_COUNT=$(grep -cE '\$PERM_FLAG \$EFFORT_FLAG' "$SOLVE_PIPELINE" 2>/dev/null || echo "0")
+# Each of the three case-statement arms threads ${EFFORT_FLAG[@]} immediately
+# after ${PERM_FLAG[@]}. The literal `"${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}"`
+# token-pair must appear at least three times (file arm, stdin arm, argv arm).
+# A future edit that drops the flag from any one arm would regress to silent
+# default-effort dispatch for that mode. The array-quoted form (not the prior
+# unquoted `$PERM_FLAG $EFFORT_FLAG` scalar form) is mandatory under zsh —
+# scalar word-split is OFF by default and would collapse `--effort max` into
+# one argv slot, which `claude --bg` rejects loudly.
+EFFORT_ARMS_COUNT=$(grep -cE '"\$\{PERM_FLAG\[@\]\}" "\$\{EFFORT_FLAG\[@\]\}"' "$SOLVE_PIPELINE" 2>/dev/null || echo "0")
 if [[ "$EFFORT_ARMS_COUNT" -ge 3 ]]; then
-  echo "  PASS  all three dispatch arms thread \$EFFORT_FLAG after \$PERM_FLAG (count=$EFFORT_ARMS_COUNT)"
+  echo "  PASS  all three dispatch arms thread \"\${EFFORT_FLAG[@]}\" after \"\${PERM_FLAG[@]}\" (count=$EFFORT_ARMS_COUNT)"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  expected \$PERM_FLAG \$EFFORT_FLAG token-pair in all 3 case arms (file/stdin/argv); count=$EFFORT_ARMS_COUNT"
+  echo "  FAIL  expected \"\${PERM_FLAG[@]}\" \"\${EFFORT_FLAG[@]}\" token-pair in all 3 case arms (file/stdin/argv); count=$EFFORT_ARMS_COUNT"
   FAIL=$((FAIL + 1))
 fi
+# Tombstone: the v0.22.1 scalar form `$PERM_FLAG $EFFORT_FLAG` (no braces,
+# no quotes) must NOT reappear. A regression to that form would re-trigger
+# the v0.22.1 zsh dispatch failure that v0.22.2 fixed.
+# `grep -c` prints a single number (0 when no matches, N otherwise) and
+# exits rc=0 on matches, rc=1 on zero matches, rc>=2 on regex/IO error.
+# We capture rc explicitly so that rc>=2 (regex error or unreadable file)
+# loudly fails the test instead of silently coercing to "0" and producing
+# a false PASS. The previous form `$(... 2>/dev/null; true)` masked ALL
+# non-zero exits including rc=2, defeating the regression-guard purpose.
+# Load-bearing regex suffix: `[^[]` at the end requires a non-`[` character
+# after `EFFORT_FLAG`, which prevents false-matching the new array form
+# `${EFFORT_FLAG[@]}` (literal `$EFFORT_FLAG` followed by `[`). Removing
+# this suffix in a "simplification" pass would make the tombstone fire on
+# the correct array form and turn every run into a false FAIL — do not
+# delete without re-deriving an equivalent anchor.
+SCALAR_RELAPSE_COUNT="$(grep -cE '\$PERM_FLAG \$EFFORT_FLAG[^[]' "$SOLVE_PIPELINE" 2>/dev/null)" || GREP_RC=$?
+GREP_RC="${GREP_RC:-0}"
+if [[ "$GREP_RC" -ge 2 ]]; then
+  echo "  FAIL  grep exited rc=$GREP_RC on $SOLVE_PIPELINE — test harness broken (regex error or file unreadable)"
+  FAIL=$((FAIL + 1))
+elif [[ "${SCALAR_RELAPSE_COUNT:-0}" -eq 0 ]]; then
+  echo "  PASS  no scalar-form \`\$PERM_FLAG \$EFFORT_FLAG\` relapse (v0.22.2 regression guard)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  found $SCALAR_RELAPSE_COUNT scalar-form \`\$PERM_FLAG \$EFFORT_FLAG\` instances — these break under zsh (v0.22.2 fixed this)"
+  FAIL=$((FAIL + 1))
+fi
+unset GREP_RC
 
 echo "== Positive: Phase A constants + hardcoded BG_PROMPT_MODE =="
 assert_grep "$SOLVE_PIPELINE" \

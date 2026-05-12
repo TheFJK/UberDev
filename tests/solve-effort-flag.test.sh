@@ -96,6 +96,11 @@ _resolve() {
     # no-op so the eval doesn't `command not found` out.
     _uberdev_audit_emit() { :; }
     eval "$PARSER_BLOCK"
+    # The SKILL.md hoist binds EFFORT_FLAG as a bash+zsh array
+    # (`EFFORT_FLAG=( --effort "$EFFORT_LEVEL" )`); reconstruct as a scalar
+    # string here purely for the R1/R2 assertion shape — the test asserts on
+    # textual output like "high|--effort high|cli", not on argv slot count.
+    # R3 below mirrors the array form to lock the dispatch contract.
     EFFORT_FLAG="--effort $EFFORT_LEVEL"
     printf '%s|%s|%s' "$EFFORT_LEVEL" "$EFFORT_FLAG" "$EFFORT_SOURCE"
   ) > "$stdout_file" 2>>"$stdout_file.err"
@@ -217,16 +222,23 @@ else
 fi
 
 echo
-echo '== R3: child-argv capture — $EFFORT_FLAG reaches claude --bg with word-split =='
+echo '== R3: child-argv capture — ${EFFORT_FLAG[@]} reaches claude --bg with one slot per element =='
 # Build a stubbed `claude` that captures its argv to a file. Invoke the
 # argv-arm dispatch shape directly (avoids extracting the wave-batching
 # loop from SKILL.md, which would couple to too many other variables).
 # This locks the contract that:
-#   1. $EFFORT_FLAG word-splits into two argv slots (--effort + level)
+#   1. EFFORT_FLAG is a bash+zsh array; `"${EFFORT_FLAG[@]}"` expands to two
+#      argv slots (--effort + level) regardless of SH_WORD_SPLIT (v0.22.2
+#      regression: v0.22.1 shipped scalar `EFFORT_FLAG="--effort max"` which
+#      collapsed into one argv slot under zsh, the macOS default shell).
 #   2. The level lands as a separate argv slot, not concatenated with
-#      --effort (a regression like `EFFORT_FLAG="--effort=$EFFORT_LEVEL"`
+#      --effort (a regression like `EFFORT_FLAG=( --effort=$EFFORT_LEVEL )`
 #      would produce one combined slot that some claude --effort parsers
 #      might still accept, but would break this assertion loudly).
+# Solve-pipeline-zsh.test.sh runs the equivalent capture under a real zsh
+# subshell to specifically guard the SH_WORD_SPLIT=off scenario; this R3
+# fixture runs under bash (#!/usr/bin/env bash above), so the bash + zsh
+# story is covered jointly.
 STUB_DIR="$(mktemp -d)"
 CAPTURE_FILE="$(mktemp)"
 cat > "$STUB_DIR/claude" <<STUB
@@ -244,6 +256,15 @@ mkdir -p "$SANDBOX/.claude"
 echo "fake prompt body" > "$SANDBOX/prompt.txt"
 
 (
+  # macOS ships bash 3.2 as /bin/bash; that version + `set -u` (inherited
+  # from the parent harness) errors on `"${PERM_FLAG[@]}"` when PERM_FLAG
+  # is an empty array — a quirk fixed in bash 4.4. The SKILL.md does not
+  # run under `set -u` in production (Claude Code's Bash tool inherits
+  # zsh, which handles empty arrays cleanly), so this is purely a
+  # test-harness portability concern. Relax `set -u` for this subshell
+  # so the empty-array mirror compiles on macOS bash 3.2; the rest of
+  # the test file keeps `set -u` for typo guarding.
+  set +u
   cd "$SANDBOX"
   export CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
   export ARGUMENTS="128 --effort=high"
@@ -253,21 +274,21 @@ echo "fake prompt body" > "$SANDBOX/prompt.txt"
   # Phase A parser resolves EFFORT_LEVEL.
   eval "$PARSER_BLOCK"
   # EFFORT_FLAG hoist (lives further down in SKILL.md outside the extracted
-  # parser window) — mirror verbatim so word-split is preserved.
-  EFFORT_FLAG="--effort $EFFORT_LEVEL"
+  # parser window) — mirror the array form verbatim so the test fails loudly
+  # if SKILL.md regresses to the scalar form that broke under zsh in v0.22.1.
+  EFFORT_FLAG=( --effort "$EFFORT_LEVEL" )
   # Stand-ins for the other Phase A variables consumed by the argv arm.
   TIMEOUT_BIN=""
   SOLVE_TIMEOUT=10
   MODEL='claude-opus-4-7[1m]'
-  PERM_FLAG=""
+  PERM_FLAG=()
   ISSUE_NUM=128
   PROMPT_BODY="$(cat "$SANDBOX/prompt.txt")"
   # Mirror the argv-arm composition from SKILL.md Step 5b' verbatim.
   cmd=( "$STUB_DIR/claude" --bg
         --worktree "solve-issue-$ISSUE_NUM"
         --model "$MODEL" )
-  # shellcheck disable=SC2206
-  cmd+=( $PERM_FLAG $EFFORT_FLAG -- "$PROMPT_BODY" )
+  cmd+=( "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" -- "$PROMPT_BODY" )
   "${cmd[@]}" >/dev/null 2>&1
 ) || true
 
@@ -331,7 +352,10 @@ else
     eval "$AUDIT_FN_BLOCK"
     eval "$PARSER_BLOCK"
     # Mirror the SKILL.md hoist that emits the `effort_resolved` event.
-    EFFORT_FLAG="--effort $EFFORT_LEVEL"
+    # The audit emit reads $EFFORT_SOURCE and $EFFORT_LEVEL directly (not via
+    # $EFFORT_FLAG), so the array-vs-scalar shape doesn't matter here; bind
+    # the array form anyway to stay consistent with the SKILL.md.
+    EFFORT_FLAG=( --effort "$EFFORT_LEVEL" )
     _uberdev_audit_emit effort_resolved \
       "{\"source\":\"$EFFORT_SOURCE\",\"level\":\"$EFFORT_LEVEL\"}" || true
   ) >/dev/null 2>&1
