@@ -49,7 +49,7 @@ Extract one or more issue numbers + optional override flags. The parser scans ev
 _uberdev_require_claude_version() {
   local min="$1"
   local cur
-  cur="$(claude --version 2>/dev/null | awk '{print $NF}' | head -1)"
+  cur="$(claude --version 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
   if [[ -z "$cur" ]]; then
     echo "error: \`claude --version\` returned no output; cannot verify version >= $min" >&2
     exit 1
@@ -61,24 +61,11 @@ _uberdev_require_claude_version() {
   fi
 }
 
-_uberdev_probe_bg_prompt_mode() {
-  # Returns one of: file | stdin | argv. Probe order matches the Q1 spec
-  # decision (file > stdin > argv with bash-array + printf %q quoting).
-  local help_text
-  help_text="$(claude --bg --help 2>&1 || true)"
-  if echo "$help_text" | grep -qE '\-\-prompt-file'; then
-    echo "file"; return 0
-  fi
-  if echo "$help_text" | grep -qE '(stdin|reads from standard input|<<)'; then
-    echo "stdin"; return 0
-  fi
-  echo "argv"
-}
-
 _uberdev_audit_emit() {
   # No-op if SOLVE_AUDIT_LOG is unset; otherwise append a JSON line.
   [[ -n "${SOLVE_AUDIT_LOG:-}" ]] || return 0
-  local event="$1" data="${2:-{}}"
+  local event="$1" data="${2-}"
+  [[ -z "$data" ]] && data='{}'
   printf '{"ts":"%s","event":"%s","data":%s}\n' \
     "$(date -u +%FT%TZ)" "$event" "$data" >> "$SOLVE_AUDIT_LOG"
 }
@@ -105,12 +92,14 @@ OVERRIDE=$(echo "$ARGUMENTS" | grep -oE '\-\-(trivial|small|full)' | head -1 | s
 TERMINAL_FLAG_USED="$(echo "$ARGUMENTS" | grep -oE '\-\-terminal=[a-z]+' | head -1 || true)"
 if [[ -n "$TERMINAL_FLAG_USED" ]]; then
   echo "$TERMINAL_FLAG_DEPRECATED_NOTE" >&2
-  _uberdev_audit_emit deprecated_flag_used "{\"flag\":\"$TERMINAL_FLAG_USED\"}" || true
+  _uberdev_audit_emit deprecated_flag_used \
+    "{\"flag\":$(printf %s "$TERMINAL_FLAG_USED" | jq -Rs .)}" || true
 fi
 # Also swallow $SOLVE_TERMINAL env var with the same deprecation note.
 if [[ -n "${SOLVE_TERMINAL:-}" ]]; then
   echo "$TERMINAL_FLAG_DEPRECATED_NOTE" >&2
-  _uberdev_audit_emit deprecated_flag_used "{\"env\":\"SOLVE_TERMINAL\",\"value\":\"$SOLVE_TERMINAL\"}" || true
+  _uberdev_audit_emit deprecated_flag_used \
+    "{\"env\":\"SOLVE_TERMINAL\",\"value\":$(printf %s "$SOLVE_TERMINAL" | jq -Rs .)}" || true
 fi
 AUTO_FLAG=$(echo "$ARGUMENTS" | grep -oE '\-\-auto' | head -1)
 if [[ ${#ISSUE_NUMS[@]} -eq 0 ]]; then
@@ -305,7 +294,12 @@ fi
 # hoisted out of the Phase B per-issue loop because the resolved values are
 # the same for every spawn.
 _uberdev_require_claude_version "2.1.139"
-BG_PROMPT_MODE="$(_uberdev_probe_bg_prompt_mode)"   # → file | stdin | argv
+# BG_PROMPT_MODE: hardcoded `argv` because claude --bg 2.1.139 has no documented
+# --prompt-file or stdin-passthrough form (prior-art research). T6 implements the
+# bash-array argv form (spec-reviewer finding #1). A runtime probe is deferred until
+# upstream documents a passthrough flag — `claude --bg --help` is NOT introspective
+# in 2.1.139 (it spawns a real session).
+BG_PROMPT_MODE=argv
 if [ -r "${CLAUDE_PLUGIN_ROOT:-}/lib/config-read.sh" ]; then
   # shellcheck source=/dev/null
   . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
