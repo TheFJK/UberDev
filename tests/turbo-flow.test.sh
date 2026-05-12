@@ -142,6 +142,12 @@ assert_grep "$SOLVE_PIPELINE" \
   "grep -E '\^\[0-9\]\+\\\$'" \
   "solve-pipeline filters to purely-numeric tokens (anchored ^[0-9]+\$ rejects --terminal=foo123)"
 assert_grep "$SOLVE_PIPELINE" \
+  'TERMINAL_FLAG_USED=.*grep -oE .\\-\\-terminal=' \
+  "Phase A captures --terminal= flag for deprecation emission (v0.22.0 deprecation shim)"
+assert_grep "$SOLVE_PIPELINE" \
+  'echo "\$TERMINAL_FLAG_DEPRECATED_NOTE" >&2' \
+  "Phase A emits TERMINAL_FLAG_DEPRECATED_NOTE to stderr on --terminal= encounter"
+assert_grep "$SOLVE_PIPELINE" \
   "awk '!seen\[\\\$0\]\+\+'" \
   "solve-pipeline dedupes via awk !seen[\$0]++ (preserves first-seen order, prevents same-issue worktree race)"
 assert_grep "$SOLVE_PIPELINE" \
@@ -176,9 +182,6 @@ assert_grep "$SOLVE_PIPELINE" \
   'TIERS\[\$n\].*medium' \
   "TURBO MODE banner checks TIERS[\$n] == medium (with break after first hit)"
 assert_grep "$SOLVE_PIPELINE" \
-  'TERMINAL.*==.*ghostty.*\&\&.*ISSUE_NUMS|sleep 0\.6' \
-  "solve-pipeline serializes Ghostty multi-spawn (keystroke race mitigation, sleep 0.6)"
-assert_grep "$SOLVE_PIPELINE" \
   'SPAWNED\[@\]|\$\{#SPAWNED\[@\]\}' \
   "solve-pipeline emits a single summary notification (not per-spawn) using SPAWNED array"
 assert_grep "$SOLVE_PIPELINE" \
@@ -187,20 +190,31 @@ assert_grep "$SOLVE_PIPELINE" \
 assert_grep "$SOLVE_PIPELINE" \
   'DISPATCH_RC=\$\?' \
   "Phase B captures dispatch exit status after the case statement"
-# REAL_CLAUDE detection must be hoisted out of the per-issue loop (cosmetic
-# optimization — same value across spawns). Anchor: it appears in Step 3
-# (terminal detection) before the Phase B loop.
-SP_REAL_CLAUDE_LINE=$(grep -n 'REAL_CLAUDE=\$(' "$SOLVE_PIPELINE" | head -1 | cut -d: -f1)
-SP_PHASE_B_LINE=$(grep -n 'for ISSUE_NUM in "\${ISSUE_NUMS\[@\]}"' "$SOLVE_PIPELINE" | tail -1 | cut -d: -f1)
-if [[ -n "$SP_REAL_CLAUDE_LINE" && -n "$SP_PHASE_B_LINE" && "$SP_REAL_CLAUDE_LINE" -lt "$SP_PHASE_B_LINE" ]]; then
-  echo "  PASS  REAL_CLAUDE resolution hoisted before Phase B loop (line $SP_REAL_CLAUDE_LINE before $SP_PHASE_B_LINE)"
+# Phase A hoist check: the version gate + BG_PROMPT_MODE assignment must
+# precede the Phase B per-issue loop (resolved once; identical for every spawn).
+SP_PHASE_A_LINE=$(grep -n '^_uberdev_require_claude_version "2.1.139"\|^BG_PROMPT_MODE=argv' "$SOLVE_PIPELINE" | head -1 | cut -d: -f1)
+SP_PHASE_B_LINE=$(grep -nE 'for ISSUE_NUM in "\$\{ISSUE_NUMS\[@\]\}"|for \(\( i = wave_start' "$SOLVE_PIPELINE" | tail -1 | cut -d: -f1)
+if [[ -n "$SP_PHASE_A_LINE" && -n "$SP_PHASE_B_LINE" && "$SP_PHASE_A_LINE" -lt "$SP_PHASE_B_LINE" ]]; then
+  echo "  PASS  Phase A hoisted before Phase B loop (line $SP_PHASE_A_LINE before $SP_PHASE_B_LINE)"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  REAL_CLAUDE must be resolved once before the per-issue loop"
-  echo "        REAL_CLAUDE line: ${SP_REAL_CLAUDE_LINE:-not found}"
-  echo "        Phase B line:    ${SP_PHASE_B_LINE:-not found}"
+  echo "  FAIL  Phase A (claude version gate + BG_PROMPT_MODE) must be hoisted before the per-issue loop"
+  echo "        Phase A line:  ${SP_PHASE_A_LINE:-not found}"
+  echo "        Phase B line:  ${SP_PHASE_B_LINE:-not found}"
   FAIL=$((FAIL + 1))
 fi
+assert_grep "$SOLVE_PIPELINE" \
+  'MAX_PARALLEL_BG_AGENTS' \
+  "Phase A binds MAX_PARALLEL_BG_AGENTS (cap for /turbo parallel bg dispatch)"
+assert_grep "$SOLVE_PIPELINE" \
+  'uberdev_read_int_in_range fanout_concurrency.solve_bg' \
+  "Phase A reads fanout_concurrency.solve_bg via uberdev_read_int_in_range"
+assert_grep "$SOLVE_PIPELINE" \
+  'solve_bg_fanout_wave_started' \
+  "Phase B emits solve_bg_fanout_wave_started audit event per wave (mirrors merge-pipeline:421)"
+assert_grep "$SOLVE_PIPELINE" \
+  '_uberdev_require_claude_version "2.1.139"' \
+  "Phase A version-gates claude --bg minimum (2.1.139)"
 
 echo
 echo "== orchestrator forwards --turbo into subagent-driven-dev =="

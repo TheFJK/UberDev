@@ -4,6 +4,44 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] - 2026-05-12
+
+### Changed
+- **`/uberdev:solve` and `/uberdev:turbo` now dispatch `claude --bg` background sessions instead of opening per-issue terminal windows (#85).** The five-branch `case "$TERMINAL" in cmux) … ghostty) … iterm) … terminal) … nohup|*) … esac` block (`solve-pipeline/SKILL.md` Step 5c) is retired wholesale. Monitor sessions via `claude agents` (Agent View). Hard-requires Claude Code >= 2.1.139.
+- **`/turbo` parallelism is capped via `fanout_concurrency.solve_bg` (default 6, range [1, 50]).** Mirrors `fanout_concurrency.merge_strategy` (#49 / v0.17.0). Larger queues split into `ceil(N / cap)` sequential single-message dispatch waves with per-wave `solve_bg_fanout_wave_started` audit events.
+- **Orchestrator artifact paths anchored to `$(git rev-parse --show-toplevel)`.** `.uberdev/research/$RUN_ID/` is now resolved via `--show-toplevel` instead of relative-CWD interpolation. Closes the worktree path-leak documented in `memory/project_uberdev_artifact_path_leak.md` (research-patterns / spec-writer artifacts previously landed in the parent project root and required a manual `cp` to the worktree).
+
+### Deprecated
+- **`--terminal=cmux|ghostty|iterm|terminal|nohup` flag and `$SOLVE_TERMINAL` env var.** Parsed without error, emit `TERMINAL_FLAG_DEPRECATED_NOTE` once per run on first encounter, record `deprecated_flag_used` audit event, no behavioural effect. Removal target: v1.0.0. Pattern matches `--squash` / `--rebase` retirement in #49 / v0.17.0 and `--bypass-protections` retirement in #35 / v0.17.0.
+- **`solve_terminal` config key in `.claude/uberdev.local.md`.** Same retirement — parsed but ignored. `using-uberdev/SKILL.md` no longer documents the key.
+- **`SOLVE_GHOSTTY_NEW_WINDOW=1` env var.** The Ghostty new-window codepath is retired; the env var is parsed but has no behavioural effect.
+
+### Removed
+- `solve-pipeline/SKILL.md` Step 3 terminal detection block (cmux socket detection, `$TERM_PROGRAM` cascade, `$REAL_CLAUDE` PATH walk).
+- `solve-pipeline/SKILL.md` Step 5b launcher shell script heredoc (`/tmp/solve-$ISSUE_NUM.sh`, the `cd "REPO_ROOT"` prologue, the worktree-cleanup pre-step, the `${TIMEOUT_BIN} ${SOLVE_TIMEOUT} CLAUDE_BIN … --worktree solve-issue-$ISSUE_NUM …` invocation).
+- `solve-pipeline/SKILL.md` Step 5c per-terminal dispatch case statement (cmux / ghostty / iterm / terminal / nohup branches) and the 0.6s inter-Ghostty sleep guard.
+- `solve-pipeline/SKILL.md` Step 6 cmux-notify / terminal-notifier / osascript-display-notification chain. Replaced by single stderr echo. Closes latent `osascript-e-shell-var` ERROR-class security finding as a side-effect.
+- `solve-pipeline/SKILL.md` Step 7 OSC tab-retitle / cmux workspace-rename block. Agent View shows session names natively from `--worktree solve-issue-N`.
+- `tests/cmux-detection.test.sh` (no longer applicable; replaced by tombstone assertions in `tests/dispatch-claude-bg.test.sh` + `tests/ghostty-dispatch-no-instance-leak.test.sh`).
+
+### Tests
+- `tests/ghostty-dispatch-no-instance-leak.test.sh` extended into a broader tombstone test: assertions added for `cmux new-workspace`, `osascript -e`, `tell application "iTerm"`, `tell application "Terminal"`, `nohup zsh -l` absence. The original `open -na Ghostty --args --command=` regression guard (PR #33) is preserved verbatim; the `#31` issue reference in solve-pipeline SKILL.md is preserved (historical rationale).
+- `tests/dispatch-claude-bg.test.sh` (NEW) — positive shape-check for the three-arm `BG_PROMPT_MODE` case-switch (`file` / `stdin` / `argv`; only `argv` fires today since `BG_PROMPT_MODE=argv` is hardcoded — `_uberdev_probe_bg_prompt_mode` was removed in `fix(solve)` 0c17169 because `claude --bg --help` is not introspective in v2.1.139), Phase A version gate (`_uberdev_require_claude_version "2.1.139"`), wave-batching (`MAX_PARALLEL_BG_AGENTS`, `solve_bg_fanout_wave_started`), deprecation shim (`TERMINAL_FLAG_DEPRECATED_NOTE`, `deprecated_flag_used`), and anti-pattern guards (no `claude --bg "$PROMPT"`, no `eval "claude --bg …"`). Wired into `.github/workflows/test.yml`.
+- `tests/turbo-flow.test.sh` retrofitted: REAL_CLAUDE-hoist assertion retired and replaced with Phase A hoist assertion (anchors on `_uberdev_require_claude_version "2.1.139"` or `BG_PROMPT_MODE=argv`); Ghostty inter-spawn sleep assertion removed; new assertions for `MAX_PARALLEL_BG_AGENTS`, `uberdev_read_int_in_range fanout_concurrency.solve_bg`, `solve_bg_fanout_wave_started`, `_uberdev_require_claude_version "2.1.139"`. The differential guard awk anchor `^if \[\[ "\$AUTO_MODE" == "1" \]\]; then$` (line 92) is preserved verbatim — the trivial and small heredoc bodies retain `!=1` form (interactive branch first, turbo in `else`) per the post-impl-review.test.sh contract.
+- `tests/config-override.test.sh` I2 section updated: I2d asserts `"$TIMEOUT_BIN" "$SOLVE_TIMEOUT" claude --bg` instead of `… CLAUDE_BIN`; new I2g asserts the three-arm `BG_PROMPT_MODE` case-switch presence. I2a / I2b / I2c / I2e / I2f preserved verbatim.
+
+### Migration
+- Callers on Claude Code < 2.1.139 see an actionable error on `/solve` invocation: `error: /solve and /turbo require Claude Code >= 2.1.139 (found: <X>). install with: npm i -g @anthropic-ai/claude-code@latest`. Update Claude Code, then re-run.
+- Callers passing `--terminal=cmux` (or any value) see one stderr line per run (`TERMINAL_FLAG_DEPRECATED_NOTE`); dispatch proceeds via `claude --bg` regardless. Remove the flag from your habit / aliases when convenient. `$SOLVE_TERMINAL` env var emits a parallel deprecation note.
+- Users with `solve_terminal: <value>` in `.claude/uberdev.local.md` should remove the line. The key parses but has no behavioural effect.
+- Artifact-path-leak fix: orchestrator-managed artifacts under `.uberdev/research/$RUN_ID/` now anchored to `$(git rev-parse --show-toplevel)`. No user action required.
+
+### Security
+- **Closed `claude-bg-arg-injection` (ERROR-class, hypothetical).** The Step 5b' dispatch case-switch prefers `--prompt-file` > stdin pipe > positional argv-via-bash-array (no `eval`). The naive `claude --bg "$PROMPT"` shape is explicitly forbidden by inline anti-pattern comment + `tests/dispatch-claude-bg.test.sh` regression guard.
+- **Closed `osascript-e-shell-var` (ERROR-class, latent at former `solve-pipeline:484`).** Step 6 retirement (osascript display notification) eliminates the interpolation site.
+- **Closed `applescript-keystroke-shell-var` / `applescript-do-script-shell-var` / `cmux-new-workspace-with-var` (WARNING-class, 4 sites).** Step 5c retirement eliminates every AppleScript / cmux IPC interpolation.
+- **Hardened `_uberdev_audit_emit` against JSON injection** (`fix(solve)` 0c17169). The two audit-emit call sites for `$TERMINAL_FLAG_USED` / `$SOLVE_TERMINAL` route values through `jq -Rs .` so env values containing quotes / backslashes / newlines produce valid escaped JSON.
+
 ## [0.21.6] - 2026-05-12
 
 ### Fixed

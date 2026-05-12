@@ -354,7 +354,7 @@ assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
   "I1d: solve-pipeline enum allows all four tier names"
 
 echo
-echo "== I2: solve-pipeline launcher timeout-wrap (Task 2) =="
+echo "== I2: solve-pipeline claude --bg dispatch timeout-wrap (v0.22.0) =="
 assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
   'uberdev_read_int_in_range command_timeouts.solve[[:space:]]+UBERDEV_SOLVE_TIMEOUT[[:space:]]+60[[:space:]]+86400[[:space:]]+3600' \
   "I2a: launcher reads command_timeouts.solve with bounds [60,86400] default 3600"
@@ -365,14 +365,17 @@ assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
   'command -v gtimeout' \
   "I2c: launcher probes gtimeout fallback (Homebrew coreutils installs the macOS binary as gtimeout, not timeout)"
 assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
-  '"\$TIMEOUT_BIN" "\$\{SOLVE_TIMEOUT\}" CLAUDE_BIN' \
-  "I2d: launcher inlines resolved-binary wrap call (zsh-safe; no scalar prefix)"
+  '"\$TIMEOUT_BIN" "\$SOLVE_TIMEOUT" claude --bg' \
+  "I2d: bg dispatch wraps claude --bg in timeout(1)/gtimeout (zsh-safe; no scalar prefix)"
 assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
   'brew install coreutils' \
   "I2e: missing-timeout warning includes remediation pointer"
 assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
   'if \[\[ -n "\$TIMEOUT_BIN" \]\]; then' \
   "I2f: launcher guards wrap branch with -n TIMEOUT_BIN check (prevents silent regression on guard inversion/removal)"
+assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
+  'case "\$BG_PROMPT_MODE" in' \
+  "I2g: bg dispatch uses three-arm BG_PROMPT_MODE case-switch (file / stdin / argv)"
 
 echo
 echo "== I3: orchestrator research fanout cap (Task 3) =="
