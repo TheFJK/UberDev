@@ -121,11 +121,8 @@ AUTO_FLAG=$(echo "$ARGUMENTS" | grep -oE '\-\-auto' | head -1)
 # Default is `max` because /turbo is unattended — quality dominates wall-clock
 # and cost. Interactive /solve callers who want to spend less can pass
 # --effort=high or set solve_effort: in .claude/uberdev.local.md.
-# Permissive lowercase-only regex (mirrors --terminal= precedent at line 100):
-# `--effort=HIGH`, `--effort=`, and trailing `--effort=high --effort=max`
-# silently fall through to the env/config/default chain (head -1 picks the
-# first match). Strict rejection would force users to recall casing; the
-# downstream enum guard at the validation `case` catches typos that DO match.
+# Lowercase-only by design — strict casing rejection would surprise users; the
+# validation `case` below catches in-enum typos.
 EFFORT_FLAG_VALUE="$(echo "$ARGUMENTS" | grep -oE '\-\-effort=[a-z]+' | head -1 | sed 's/--effort=//')"
 EFFORT_SOURCE=default
 if [[ -n "$EFFORT_FLAG_VALUE" ]]; then
@@ -135,21 +132,18 @@ elif [[ -n "${UBERDEV_SOLVE_EFFORT:-}" ]]; then
   EFFORT_LEVEL="$UBERDEV_SOLVE_EFFORT"
   EFFORT_SOURCE=env
 else
-  # Authoritative EFFORT_SOURCE attribution: probe the config file directly for
-  # the literal `solve_effort:` key BEFORE delegating to uberdev_read_enum. The
-  # prior inequality check `[[ "$EFFORT_LEVEL" != "max" ]]` mislabeled
-  # explicit-config-max (`solve_effort: max`) as `default`, breaking the audit
-  # telemetry contract. Mirrors the canonical config path used by
-  # `_uberdev_read_nested` in lib/config-read.sh.
-  EFFORT_CONFIG_FILE="${UBERDEV_CONFIG_FILE:-${PWD}/.claude/uberdev.local.md}"
-  if [ -f "$EFFORT_CONFIG_FILE" ] && grep -qE '^solve_effort:' "$EFFORT_CONFIG_FILE" 2>/dev/null; then
-    EFFORT_SOURCE=config
-  else
-    EFFORT_SOURCE=default
-  fi
+  # Probe the config file directly so explicit `solve_effort: max` attributes to
+  # `source=config`; identity-with-default of the resolved value cannot
+  # disambiguate config-set-to-default from absent-config.
   if [ -r "${CLAUDE_PLUGIN_ROOT:-}/lib/config-read.sh" ]; then
     # shellcheck source=/dev/null
     . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+  fi
+  if command -v _uberdev_read_nested >/dev/null 2>&1 \
+    && [ -n "$(_uberdev_read_nested solve_effort "$UBERDEV_CONFIG_FILE")" ]; then
+    EFFORT_SOURCE=config
+  else
+    EFFORT_SOURCE=default
   fi
   if command -v uberdev_read_enum >/dev/null 2>&1; then
     EFFORT_LEVEL="$(uberdev_read_enum solve_effort UBERDEV_SOLVE_EFFORT 'low|medium|high|xhigh|max' 'max')"
@@ -340,14 +334,9 @@ MODEL='claude-opus-4-7[1m]'
 PERM_FLAG=""
 [[ "$AUTO_PERMISSIONS" == "1" ]] && PERM_FLAG="--permission-mode auto"
 
-# EFFORT_FLAG: thread the resolved /effort level (low|medium|high|xhigh|max)
-# through to every claude --bg child argv. `claude --bg` in Claude Code 2.1.139
-# does not inherit the parent session's effort, so without this hoist every bg
-# spawn falls back to the supervised daemon's default — turning /turbo into a
-# silent quality downgrade. Word-split is intentional (matches PERM_FLAG):
-# unquoted `$EFFORT_FLAG` expands to two argv tokens (`--effort` + level), and
-# `${cmd[@]}` preserves them as separate slots in the argv arm.
-# Regression guard: tests/dispatch-claude-bg.test.sh anchors on
+# EFFORT_FLAG is the threaded form of EFFORT_LEVEL (resolved by the Phase A
+# --effort parser block above); word-split rationale lives inline at each
+# dispatch arm. Regression guard: tests/dispatch-claude-bg.test.sh anchors on
 # `^EFFORT_FLAG="--effort `.
 EFFORT_FLAG="--effort $EFFORT_LEVEL"
 # See `_uberdev_audit_emit` definition near the top of Phase A (anchor:
