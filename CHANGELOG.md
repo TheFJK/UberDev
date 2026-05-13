@@ -4,6 +4,25 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.0] - 2026-05-14
+
+### Added
+
+- **Findings-to-Issues sub-phase (`/uberdev:review-pr` Phase 2.5 + `/uberdev:simplify` Phase 3.5)** — persists deferred-critical findings (`severity ∈ {blocker, critical} AND disposition != APPLIED`) from Phase 1 (`post-impl-review`) and Phase 2 (`simplify`) aggregates as durable GitHub issues with HTML-comment fingerprint dedupe. State branching across runs: `state==open` triggers an `Also flagged on commit <SHA>` comment (no duplicate issue); `state==closed` skips (user resolved); no match creates a new issue with `--label review-pr-finding`. Hard cap `MAX_NEW=10` per run; rate-limit pre-flight aborts the sub-phase if `gh api rate_limit` remaining `< 2*MAX_NEW + 50` (verbatim pattern from `commands/review-pr.md:181-198`). All `gh issue create` / `gh issue comment` calls use `--body-file -` with stdin piping (never `--body "$VAR"`). Sub-phase NEVER fails the parent run. Closes #111.
+- **`uberdev:findings-to-issues` agent (`plugins/uberdev/agents/findings-to-issues.md`)** — single-shell-turn no-fanout agent dispatched by both `/uberdev:review-pr` Phase 2.5 and `/uberdev:simplify` Phase 3.5. Implements the dedupe + write loop. Verifies aggregate-file inputs are wrapped in `<external-untrusted-input source="post-impl-review-aggregate">` / `simplify-aggregate` envelopes before interpolation. Refuses on `input-malformed`, `rate-limit-budget-insufficient`, or `secret-scan-lib-unavailable`.
+- **`--no-defer-issues` CLI flag on `/uberdev:review-pr` and `/uberdev:simplify`** — sets `DEFER_ISSUES_PHASE=0`, short-circuits the Phase 2.5 / Phase 3.5 dispatch. Mirrors `--no-ci-fix` / `--no-simplify` shape.
+- **`defer_issues_enabled: <true|false>` config key in `.claude/uberdev.local.md`** — read via the existing `uberdev_read_enum` helper. Default `true` (always-on). Either knob (CLI flag OR config key) is sufficient to disable.
+- **`review-pr-finding` GitHub label (auto-provisioned per repo, fail-soft)** — `gh label create --force review-pr-finding --color d93f0b` runs once at the top of the sub-phase; failure emits one stderr warning and proceeds (subsequent `gh issue create --label` calls may degrade to no-label gracefully).
+
+### Refactored
+
+- **Extracted `run_secret_scan_stdin` from `plugins/uberdev/skills/finish-branch/SKILL.md` into shared library `plugins/uberdev/lib/secret-scan.sh` (public name: `uberdev_run_secret_scan_stdin`).** Source-time idempotency guard (`_UBERDEV_SECRET_SCAN_LOADED=1`) mirrors the `lib/config-read.sh` pattern. Behaviour-preserving — gitleaks primary + regex fallback + fail-CLOSED semantics identical to the pre-refactor inline function. `finish-branch/SKILL.md` now sources the library and renames its four call sites. The library is also sourced by the new `findings-to-issues` agent for candidate-body scanning before `gh issue create`. Added `tests/finish-branch.test.sh` as a regression lock.
+
+### Tests
+
+- **`tests/findings-to-issues.test.sh`** — 5 core fixture suites (parser, dedupe-fingerprint, label-idempotency, opt-out flag, config override) + 4 bonus suites (fail-CLOSED dedupe, MAX_NEW cap, secret-scan integration, fingerprint-marker reject). Fixtures under `tests/fixtures/findings-to-issues/` include synthesised aggregate `.md` files (with trust envelopes) + disposition `.yaml` files + opt-out config fixtures. Mocks `gh` inline as a shell function that captures argv and returns canned JSON.
+- **`tests/finish-branch.test.sh`** — regression lock for the `lib/secret-scan.sh` extraction (5 assertions: SKILL.md sources the lib, no longer inlines the function, lib exists, lib has idempotency guard, lib retains gitleaks primary + regex fallback).
+
 ## [0.23.5] - 2026-05-13
 
 ### Fixed

@@ -4,7 +4,7 @@
 
 **Personal Claude Code marketplace — opinionated GitHub-workflow slash commands.**
 
-[![Version](https://img.shields.io/badge/version-0.23.5-blue)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.24.0-blue)](./CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8B5CF6)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Repo Agnostic](https://img.shields.io/badge/repo--agnostic-yes-success)](#configuration)
@@ -44,6 +44,8 @@ UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-Sonn
 | **`/merge [<PR#> \| --all]`** | Lands an approved PR into the integration branch — autopilot. Bare invocation auto-discovers scope: single PR for the current branch, or all eligible open PRs against `integration_branch`. Ordering, per-PR strategy, conflict resolution (one parallel agent per conflicted file), and local sync, all unattended. |
 
 Every command is **repo-agnostic** — they auto-detect via `gh repo view`. No per-repo config required.
+
+- **Findings-to-Issues sub-phase (`/uberdev:review-pr` Phase 2.5, `/uberdev:simplify` Phase 3.5):** persists deferred-critical findings as durable GitHub issues with HTML-comment fingerprint dedupe. Opt out via `--no-defer-issues` flag or `defer_issues_enabled: false` in `.claude/uberdev.local.md`.
 
 ---
 
