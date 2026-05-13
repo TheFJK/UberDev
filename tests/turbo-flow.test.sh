@@ -366,7 +366,7 @@ fi
 # if /uberdev:review-pr is actually invoked post-push (its Phase 2 is where
 # simplify lives). The new single-path-convergence design routes trivial/small
 # through `uberdev:finish-branch`, which owns the canonical Skill("uberdev:review-pr")
-# hand-off (PR #7-equivalent contract). Without an explicit hand-off step in
+# hand-off. Without an explicit hand-off step in
 # each heredoc, the spawned trivial/small agent commits and stops — the chain
 # into /review-pr never fires and the simplify ceremony silently no-ops on
 # every trivial/small PR. Anchor the count at 4 so a future edit cannot delete
@@ -411,7 +411,7 @@ if [[ "$TRIVIAL_SMALL_GHPR_COUNT" -eq 0 ]]; then
 else
   echo "  FAIL  inline 'gh pr create' must NOT appear inside the trivial/small slice — finish-branch owns PR creation"
   echo "        file: $SOLVE_PIPELINE"
-  echo "        slice: ^\\*\\*trivial:\\*\\* through ^\\*\\*medium\\*\\*"
+  echo "        slice: **trivial:** through **medium**"
   echo "        expected count: 0"
   echo "        actual count:   $TRIVIAL_SMALL_GHPR_COUNT"
   FAIL=$((FAIL + 1))

@@ -434,7 +434,7 @@ Steps:
 4. Add/update a test ONLY if the touched code is already tested.
 5. Run the relevant test file + lint for that package.
 6. Commit with conventional message. Include \`Closes #$ISSUE_NUM\` in the eventual PR body.
-7. **Hand off to \`uberdev:finish-branch\`.** finish-branch owns push, PR creation with \`PR_URL_REGEX\` validation, and the canonical \`Skill("uberdev:review-pr")\` chain hand-off (Phase 2 runs the 3-lens simplify ceremony — reuse / quality / efficiency — on the strictly larger diff). Findings are advisory — do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
+7. **Hand off to \`uberdev:finish-branch\`.** finish-branch owns push, PR creation with URL validation, and the canonical \`Skill("uberdev:review-pr")\` chain hand-off (Phase 2 runs the 3-lens simplify ceremony — reuse / quality / efficiency — on the strictly larger diff). Findings are advisory — do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
@@ -451,7 +451,7 @@ Steps:
 3. Add/update a test ONLY if the touched code is already tested.
 4. Run the relevant test file + lint for that package.
 5. Commit with conventional message. Include \`Closes #$ISSUE_NUM\` in the eventual PR body.
-6. **Hand off to \`uberdev:finish-branch --turbo\`.** finish-branch owns push, PR creation with \`PR_URL_REGEX\` validation, and the canonical \`Skill("uberdev:review-pr --turbo")\` chain hand-off (Phase 2 runs the 3-lens simplify ceremony — reuse / quality / efficiency — on the strictly larger diff). Findings are advisory.
+6. **Hand off to \`uberdev:finish-branch --turbo\`.** finish-branch owns push, PR creation with URL validation, and the canonical \`Skill("uberdev:review-pr --turbo")\` chain hand-off (Phase 2 runs the 3-lens simplify ceremony — reuse / quality / efficiency — on the strictly larger diff). Findings are advisory.
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
@@ -474,7 +474,7 @@ Steps:
 3. Write 3–6 TodoWrite tasks. Skip /uberdev:brainstorm — scope is clear.
 4. TDD: write the failing test first, then implement, then green.
 5. Commit with conventional message. Include \`Closes #$ISSUE_NUM\` in the eventual PR body.
-6. **Hand off to \`uberdev:finish-branch\`.** finish-branch owns push, PR creation with \`PR_URL_REGEX\` validation, and the canonical \`Skill("uberdev:review-pr")\` chain hand-off (Phase 2 runs the 3-lens simplify ceremony — reuse / quality / efficiency — on the strictly larger diff). Findings are advisory — do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
+6. **Hand off to \`uberdev:finish-branch\`.** finish-branch owns push, PR creation with URL validation, and the canonical \`Skill("uberdev:review-pr")\` chain hand-off (Phase 2 runs the 3-lens simplify ceremony — reuse / quality / efficiency — on the strictly larger diff). Findings are advisory — do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
@@ -490,7 +490,7 @@ Steps:
 2. Write 3–6 TodoWrite tasks. Skip /uberdev:brainstorm — scope is clear.
 3. TDD: write the failing test first, then implement, then green.
 4. Commit with conventional message. Include \`Closes #$ISSUE_NUM\` in the eventual PR body.
-5. **Hand off to \`uberdev:finish-branch --turbo\`.** finish-branch owns push, PR creation with \`PR_URL_REGEX\` validation, and the canonical \`Skill("uberdev:review-pr --turbo")\` chain hand-off (Phase 2 runs the 3-lens simplify ceremony — reuse / quality / efficiency — on the strictly larger diff). Findings are advisory.
+5. **Hand off to \`uberdev:finish-branch --turbo\`.** finish-branch owns push, PR creation with URL validation, and the canonical \`Skill("uberdev:review-pr --turbo")\` chain hand-off (Phase 2 runs the 3-lens simplify ceremony — reuse / quality / efficiency — on the strictly larger diff). Findings are advisory.
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
