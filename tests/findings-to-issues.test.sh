@@ -71,7 +71,7 @@ assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
   'also_flagged_by|Also flagged by' 'D3 cross-lens merge appends Also flagged by line'
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
-  'gh issue list --search.*fingerprint=' 'D4 dedupe queries fingerprint in:body'
+  'gh issue list .*--search.*\$FP|gh issue list .*--search.*fingerprint=' 'D4 dedupe queries fingerprint in:body'
 
 ### Suite 3: Label-provision idempotency ----------
 echo

@@ -15,6 +15,7 @@ You read run-aggregate artifacts produced by `uberdev:post-impl-review` (Phase 1
 - `working_dir` — absolute path to the worktree root. Trusted.
 - `repo_slug` — `<owner>/<name>` form. Trusted.
 - `pr_commit_sha` — 40-hex commit SHA used for back-references in issue bodies.
+- `pr_number` — integer PR number (e.g. 112) used as `(PR #N)` back-reference in comment bodies on state==open dedupe matches. Optional; empty string when invoked outside a PR context (e.g. standalone `/uberdev:simplify` without a PR). When empty, the comment body omits the `(PR #N)` clause.
 - `max_new` — integer; defaults to `10` if not provided. Hard cap on per-run `gh issue create` calls.
 - `phase1_aggregate_path` — absolute path to the post-impl-review aggregate (`.uberdev/research/<RUN_ID>/post-impl-review-final.md`) OR empty string when invoked from `/uberdev:simplify`.
 - `phase2_aggregate_path` — absolute path to the simplify aggregate (`.uberdev/research/<RUN_ID>/simplify-final.md`) OR empty string when invoked from `/uberdev:review-pr` with `--no-simplify`.
@@ -82,7 +83,7 @@ Explicit forbidden patterns:
 
    a. Compute fingerprint: `FP=$(printf '%s:%s:%s' "$file_path" "$line" "$normalised_summary" | sha256sum | awk '{print substr($1,1,16)}')`.
 
-   b. Dedupe lookup (fail-CLOSED): `MATCH=$(gh issue list --search "review-pr-finding fingerprint=$FP in:body" --state all --limit 5 --json number,state,url 2>/dev/null)`; capture `rc=$?`. If `rc != 0`, append `{file: $file_path:$line, reason: "gh issue list rc=$rc"}` to `blocked_by_dedupe[]` and continue to next row — NEVER create the issue on lookup failure.
+   b. Dedupe lookup (fail-CLOSED): capture stderr alongside stdout so the diagnostic survives on failure — `MATCH=$(gh issue list --label review-pr-finding --state all --search "$FP in:body" --json number,state,url,body --limit 5 2>&1)`; capture `rc=$?`. If `rc != 0` OR `MATCH` does not parse as JSON (validate via `printf '%s' "$MATCH" | jq empty 2>/dev/null`), append `{file: $file_path:$line, reason: "gh issue list rc=$rc — $(printf '%s' "$MATCH" | head -c 200)"}` to `blocked_by_dedupe[]` and continue to next row — NEVER create the issue on lookup failure. The `--label review-pr-finding` filter narrows to issues this agent created; the `--search "$FP in:body"` then matches the fingerprint substring. After the search returns, verify the exact HTML-comment marker `<!-- uberdev:review-pr-finding fingerprint=$FP -->` is present in the matched issue's `body` field via local exact-string check before treating it as a dedupe hit (belt-and-braces against GH search tokenisation gaps).
 
    c. Parse match: if `MATCH` is non-empty JSON array, extract the first element's `state` and `number`.
 
