@@ -4,6 +4,12 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.2] - 2026-05-13
+
+### Fixed
+
+- **solve-pipeline:** route trivial/small heredocs through `uberdev:finish-branch` instead of inline `gh pr create` + prose Skill-invoke. All four trivial/small heredocs now end with a `Hand off to uberdev:finish-branch` directive (turbo variants append `--turbo`); the agent retains the commit step. finish-branch owns push, `gh pr create` with URL validation, and the canonical `Skill("uberdev:review-pr")` chain hand-off (with `--turbo` forwarded). All tiers now converge on the same single PR-creation + review-pr chain site, closing the silent-drop gap where a child `claude --bg` agent exiting after `gh pr create` (permission denial, classifier abort) would bypass the global mandatory-review-after-push rule. `tests/turbo-flow.test.sh` re-anchored to the new positive (Hand-off=4, finish-branch `--turbo`=2) and negative (`gh pr create`=0 inside trivial/small slice) contract; pre-push-simplify directive count=4 preserved. Closes #91.
+
 ## [0.23.1] - 2026-05-13
 
 ### Documentation

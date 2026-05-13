@@ -415,7 +415,7 @@ for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
 
 #### 5a. Write tier-appropriate prompt
 
-The trivial/small heredocs no longer run the pre-push reviewer fanout — both AUTO_MODE branches push directly and chain into `/uberdev:review-pr`, whose Phase 1 now hosts the 5-reviewer fanout. The medium prompt branches on `AUTO_MODE=1` to inject `--turbo` into the orchestrator dispatch.
+The trivial/small heredocs commit and then hand off to `uberdev:finish-branch` (with `--turbo` forwarded on the auto-mode branch) for push, PR creation, and the chain into `/uberdev:review-pr`. Medium/large dispatches `/uberdev:orchestrator`, which itself routes through `uberdev:finish-branch`. All tiers converge on the same single PR-creation + chain hand-off site, owning `PR_URL_REGEX` validation and the canonical `Skill("uberdev:review-pr")` invocation. The medium prompt branches on `AUTO_MODE=1` to inject `--turbo` into the orchestrator dispatch.
 
 The `if/else/fi` blocks below stay at column 0 (zsh and bash do not require physical indentation inside `for ... done`); `tests/turbo-flow.test.sh` anchors its differential-guard awk on `^if \[\[ "\$AUTO_MODE" == "1" \]\]; then$` and must keep matching unchanged. Do not indent these blocks when the loop wraps them.
 
@@ -433,8 +433,8 @@ Steps:
 3. Make the minimal edit. No redesign, no surrounding refactor, no "while I'm here" cleanup.
 4. Add/update a test ONLY if the touched code is already tested.
 5. Run the relevant test file + lint for that package.
-6. Commit with conventional message. Open PR with \`Closes #$ISSUE_NUM\` in the body.
-7. **Capture the PR URL from \`gh pr create\` output and invoke the \`uberdev:review-pr\` skill via the Skill tool with that URL.** This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory — do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
+6. Commit with conventional message. Include \`Closes #$ISSUE_NUM\` in the eventual PR body.
+7. **Hand off to \`uberdev:finish-branch\`.** finish-branch owns push, PR creation with URL validation, and the canonical \`Skill("uberdev:review-pr")\` chain hand-off (Phase 2 runs the 3-lens simplify ceremony — reuse / quality / efficiency — on the strictly larger diff). Findings are advisory — do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
@@ -450,8 +450,8 @@ Steps:
 2. Make the minimal edit. No redesign, no surrounding refactor, no "while I'm here" cleanup.
 3. Add/update a test ONLY if the touched code is already tested.
 4. Run the relevant test file + lint for that package.
-5. Commit with conventional message. Open PR with \`Closes #$ISSUE_NUM\` in the body.
-6. **Capture the PR URL from \`gh pr create\` output and invoke the \`uberdev:review-pr --turbo\` skill via the Skill tool with that URL.** This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory.
+5. Commit with conventional message. Include \`Closes #$ISSUE_NUM\` in the eventual PR body.
+6. **Hand off to \`uberdev:finish-branch --turbo\`.** finish-branch owns push, PR creation with URL validation, and the canonical \`Skill("uberdev:review-pr --turbo")\` chain hand-off (Phase 2 runs the 3-lens simplify ceremony — reuse / quality / efficiency — on the strictly larger diff). Findings are advisory.
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
@@ -473,8 +473,8 @@ Steps:
 2. **Read pre-collected research (legacy cache)** — for each file in \`.uberdev/research/issue-$ISSUE_NUM/{constraints,prior-art,security}.md\` that exists, read the \`summary:\` block and inline its key findings into your TodoWrite plan as constraints/considerations. After issue #14 the cache is no longer written by \`/issue\`, so this step typically no-ops; left in place for legacy issues.
 3. Write 3–6 TodoWrite tasks. Skip /uberdev:brainstorm — scope is clear.
 4. TDD: write the failing test first, then implement, then green.
-5. Commit + PR with \`Closes #$ISSUE_NUM\`.
-6. **Capture the PR URL from \`gh pr create\` output and invoke the \`uberdev:review-pr\` skill via the Skill tool with that URL.** This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory — do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
+5. Commit with conventional message. Include \`Closes #$ISSUE_NUM\` in the eventual PR body.
+6. **Hand off to \`uberdev:finish-branch\`.** finish-branch owns push, PR creation with URL validation, and the canonical \`Skill("uberdev:review-pr")\` chain hand-off (Phase 2 runs the 3-lens simplify ceremony — reuse / quality / efficiency — on the strictly larger diff). Findings are advisory — do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
@@ -489,8 +489,8 @@ Steps:
 1. \`gh issue view $ISSUE_NUM\` — read the ask.
 2. Write 3–6 TodoWrite tasks. Skip /uberdev:brainstorm — scope is clear.
 3. TDD: write the failing test first, then implement, then green.
-4. Commit + PR with \`Closes #$ISSUE_NUM\`.
-5. **Capture the PR URL from \`gh pr create\` output and invoke the \`uberdev:review-pr --turbo\` skill via the Skill tool with that URL.** This is the canonical run site for the 3-lens simplify ceremony (Phase 2: reuse / quality / efficiency); it does NOT fire if you skip this step. Findings are advisory.
+4. Commit with conventional message. Include \`Closes #$ISSUE_NUM\` in the eventual PR body.
+5. **Hand off to \`uberdev:finish-branch --turbo\`.** finish-branch owns push, PR creation with URL validation, and the canonical \`Skill("uberdev:review-pr --turbo")\` chain hand-off (Phase 2 runs the 3-lens simplify ceremony — reuse / quality / efficiency — on the strictly larger diff). Findings are advisory.
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 

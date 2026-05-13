@@ -364,34 +364,56 @@ else
 fi
 # Positive lock — the negative no-pre-push-simplify directive only makes sense
 # if /uberdev:review-pr is actually invoked post-push (its Phase 2 is where
-# simplify lives). Without an explicit invocation step in each heredoc, the
-# spawned trivial/small agent calls `gh pr create` and stops — the chain into
-# /review-pr never fires and the simplify ceremony silently no-ops on every
-# trivial/small PR. Anchor the count at 4 so a future edit cannot delete the
-# positive directive from one heredoc while leaving three intact.
-INVOKE_COUNT=$(grep -cF 'Capture the PR URL' "$SOLVE_PIPELINE" 2>/dev/null || echo "0")
+# simplify lives). The new single-path-convergence design routes trivial/small
+# through `uberdev:finish-branch`, which owns the canonical Skill("uberdev:review-pr")
+# hand-off. Without an explicit hand-off step in
+# each heredoc, the spawned trivial/small agent commits and stops — the chain
+# into /review-pr never fires and the simplify ceremony silently no-ops on
+# every trivial/small PR. Anchor the count at 4 so a future edit cannot delete
+# the hand-off line from one heredoc while leaving three intact.
+INVOKE_COUNT=$(grep -cE 'Hand off to .*uberdev:finish-branch' "$SOLVE_PIPELINE" 2>/dev/null || echo "0")
 if [[ "$INVOKE_COUNT" -eq 4 ]]; then
-  echo "  PASS  all 4 trivial/small heredocs explicitly invoke uberdev:review-pr post-push (count=4)"
+  echo "  PASS  all 4 trivial/small heredocs hand off to uberdev:finish-branch (count=4)"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  all 4 trivial/small heredocs must invoke uberdev:review-pr via Skill tool after gh pr create"
+  echo "  FAIL  all 4 trivial/small heredocs must hand off to uberdev:finish-branch (which owns the canonical review-pr chain)"
   echo "        file: $SOLVE_PIPELINE"
   echo "        expected count: 4 (trivial-solve, trivial-turbo, small-solve, small-turbo)"
   echo "        actual count:   $INVOKE_COUNT"
   FAIL=$((FAIL + 1))
 fi
-# Turbo heredocs must forward --turbo into /review-pr so the chain stays
-# unattended (mirrors finish-branch's --turbo forwarding pattern). Two turbo
-# heredocs (trivial-turbo, small-turbo) → count=2.
-TURBO_FORWARD_COUNT=$(grep -cF 'uberdev:review-pr --turbo' "$SOLVE_PIPELINE" 2>/dev/null || echo "0")
+# Turbo heredocs must forward --turbo into finish-branch so the chain stays
+# unattended end-to-end (finish-branch then forwards --turbo into /review-pr
+# per its own contract). Two turbo heredocs (trivial-turbo, small-turbo) → count=2.
+TURBO_FORWARD_COUNT=$(grep -cF 'uberdev:finish-branch --turbo' "$SOLVE_PIPELINE" 2>/dev/null || echo "0")
 if [[ "$TURBO_FORWARD_COUNT" -eq 2 ]]; then
-  echo "  PASS  both turbo heredocs (trivial-turbo, small-turbo) forward --turbo into /review-pr (count=2)"
+  echo "  PASS  both turbo heredocs (trivial-turbo, small-turbo) forward --turbo into finish-branch (count=2)"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  both turbo heredocs must invoke 'uberdev:review-pr --turbo' to keep the chain unattended"
+  echo "  FAIL  both turbo heredocs must hand off to 'uberdev:finish-branch --turbo' to keep the chain unattended"
   echo "        file: $SOLVE_PIPELINE"
   echo "        expected count: 2 (trivial-turbo, small-turbo)"
   echo "        actual count:   $TURBO_FORWARD_COUNT"
+  FAIL=$((FAIL + 1))
+fi
+# Negative lock — no inline `gh pr create` may appear inside the trivial/small
+# slice. After this design (#91) all four heredocs commit and hand off to
+# finish-branch; finish-branch owns the only `gh pr create` call. The awk
+# range starts at the **trivial:** header and stops at the **medium** header,
+# so finish-branch's own `gh pr create` reference (elsewhere in the repo) and
+# the medium dispatch are excluded. Anchor at 0 so a future regression that
+# reintroduces an inline `gh pr create` in any trivial/small heredoc is
+# caught immediately.
+TRIVIAL_SMALL_GHPR_COUNT=$(awk '/^\*\*trivial:\*\*/,/^\*\*medium\*\* \*\(and `--full`\)\*:/' "$SOLVE_PIPELINE" 2>/dev/null | grep -cF 'gh pr create')
+if [[ "$TRIVIAL_SMALL_GHPR_COUNT" -eq 0 ]]; then
+  echo "  PASS  no inline 'gh pr create' inside the trivial/small slice (count=0)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  inline 'gh pr create' must NOT appear inside the trivial/small slice — finish-branch owns PR creation"
+  echo "        file: $SOLVE_PIPELINE"
+  echo "        slice: **trivial:** through **medium**"
+  echo "        expected count: 0"
+  echo "        actual count:   $TRIVIAL_SMALL_GHPR_COUNT"
   FAIL=$((FAIL + 1))
 fi
 assert_grep "$REPO_ROOT/plugins/uberdev/commands/simplify.md" \
