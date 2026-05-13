@@ -41,7 +41,8 @@ An audit event `deprecated_flag_used` is recorded for each first-encounter emiss
 ## Steps
 
 ```bash
-export AUTO_MODE=1  # /turbo = unattended mode (post-impl-review omitted in trivial/small; orchestrator gets --turbo)
+export AUTO_MODE=1       # /turbo = unattended mode (post-impl-review omitted in trivial/small; orchestrator gets --turbo)
+export UBERDEV_TURBO=1   # NEW (#97): chain-wide unattended-mode signal — inherits via Skill() into solve-pipeline + via fork+exec into claude --bg child
 ```
 
 Now invoke the `uberdev:solve-pipeline` skill.
