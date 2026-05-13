@@ -4,6 +4,12 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.4] - 2026-05-13
+
+### Refactored
+
+- **Replace brittle 3-layer `--turbo` arg-forwarding chain with `UBERDEV_TURBO=1` env-var inheritance.** The chain `orchestrator → subagent-driven-dev → finish-branch → review-pr` previously forwarded `--turbo` as an LLM-interpreted argument across four prompts; a drop at any layer collapsed `/turbo` semantics silently (the chain fell back to interactive prompts inside a `claude --bg` session, which then deadlocked). Now the bit is set once at the pipeline entry point (`commands/turbo.md` `export UBERDEV_TURBO=1`) and propagates via two boundaries: (a) Skill() boundary (same agent process, in-process env table) into `solve-pipeline`; (b) OS process boundary (POSIX fork+exec) into `claude --bg` via inline-prefix exec `UBERDEV_TURBO=1 claude --bg …`. Each downstream consumer reads `[[ "${UBERDEV_TURBO:-0}" == "1" ]]`. `commands/solve.md` adds `unset UBERDEV_TURBO` to defend against shell-rc pollution. Mirrors `AUTO_MODE` (PR #19) and `UBERDEV_AUTO_REVIEW_ON_MERGE` (PR #90) precedents. **Hybrid arg-OR-env detector preserved on `orchestrator` and `commands/review-pr`** for legit standalone-invocation paths (`/uberdev:orchestrator --turbo …`, `merge-pipeline`'s separate `Skill("uberdev:review-pr", args: "${PR} --turbo")` dispatch). `subagent-driven-dev` and `finish-branch` are env-var-only (chain-internal). Test surface refactored: `tests/turbo-flow.test.sh` rewritten in dedicated commit `test(turbo-flow): assert UBERDEV_TURBO env-var propagation`. Closes #97.
+
 ## [0.23.3] - 2026-05-13
 
 ### Added
