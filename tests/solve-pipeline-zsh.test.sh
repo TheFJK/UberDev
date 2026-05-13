@@ -171,8 +171,92 @@ else
   fi
 fi
 
+echo
+echo '== R4: SKILL.md Phase B wave-batching iterates without zsh 0-index error =='
+# Regression for issue #100. The v0.22.x Phase B inner loop used
+# `for (( i = wave_start; i <= wave_end; i++ )); ISSUE_NUM="${ISSUE_NUMS[$i]}"`,
+# which aborts under `zsh -u` because zsh arrays are 1-indexed by default and
+# accessing `${ISSUE_NUMS[0]}` is an unset-parameter error. The fix replaces
+# the indexed form with a by-value subarray slice
+# (`for ISSUE_NUM in "${ISSUE_NUMS[@]:$wave_start:$wave_size}"; do`) which
+# uses `offset:length` semantics, not subscript indexing, and is shell-agnostic.
+#
+# This fixture replicates the SKILL.md Phase B wave-batching control flow
+# under a real `zsh -c` subshell with `set -u` and asserts:
+#   R4a: the loop runs to completion (no `parameter not set` abort)
+#   R4b: every ISSUE_NUMS element is dispatched exactly once across the waves
+#   R4c: wave-1 dispatches MAX_PARALLEL_BG_AGENTS issues; wave-2 dispatches the rest
+#
+# Failure-mode demo (AC4): revert SKILL.md inner loop to
+# `for (( i = wave_start; i <= wave_end; i++ ))` + `${ISSUE_NUMS[$i]}` and
+# re-run — R4a fires with the captured stderr containing `parameter not set`.
+
+CAPTURE_DIR_R4="$(mktemp -d)"
+ERR_LOG_R4="$(mktemp)"
+
+# Run the SKILL.md Phase B wave-batching control flow under `zsh -c` with
+# `set -u` so the unset-parameter abort surfaces as a non-zero exit.
+zsh -c '
+  set -u
+  export PATH="'"$STUB_DIR"'":$PATH
+  CAPTURE_DIR="'"$CAPTURE_DIR_R4"'"
+
+  ISSUE_NUMS=(91 94 95 97)
+  MAX_PARALLEL_BG_AGENTS=2
+  typeset -A TIERS
+  typeset -A TITLES
+  TIERS[91]=small;  TITLES[91]="issue 91"
+  TIERS[94]=small;  TITLES[94]="issue 94"
+  TIERS[95]=small;  TITLES[95]="issue 95"
+  TIERS[97]=small;  TITLES[97]="issue 97"
+
+  TOTAL_ISSUES="${#ISSUE_NUMS[@]}"
+  WAVE_COUNT=$(( (TOTAL_ISSUES + MAX_PARALLEL_BG_AGENTS - 1) / MAX_PARALLEL_BG_AGENTS ))
+  for (( wave_index = 1; wave_index <= WAVE_COUNT; wave_index++ )); do
+    wave_start=$(( (wave_index - 1) * MAX_PARALLEL_BG_AGENTS ))
+    wave_end=$(( wave_start + MAX_PARALLEL_BG_AGENTS - 1 ))
+    (( wave_end >= TOTAL_ISSUES )) && wave_end=$(( TOTAL_ISSUES - 1 ))
+    wave_size=$(( wave_end - wave_start + 1 ))
+    # POST-FIX FORM (what the SKILL.md edit in Task C will look like):
+    for ISSUE_NUM in "${ISSUE_NUMS[@]:$wave_start:$wave_size}"; do
+      TIER="${TIERS[$ISSUE_NUM]}"
+      TITLE="${TITLES[$ISSUE_NUM]}"
+      printf "%s\n" "$ISSUE_NUM" >> "$CAPTURE_DIR/wave-$wave_index.txt"
+    done
+  done
+' 2> "$ERR_LOG_R4"
+R4_RC=$?
+
+if [ "$R4_RC" -eq 0 ] && ! grep -q 'parameter not set' "$ERR_LOG_R4"; then
+  pass "R4a: Phase B wave-batching loop completed under zsh -u (no parameter-not-set abort)"
+else
+  fail "R4a: Phase B wave-batching loop aborted under zsh -u"
+  echo "        exit rc: $R4_RC"
+  echo "        stderr:"
+  sed 's/^/          /' "$ERR_LOG_R4"
+fi
+
+EXPECTED_NUMS="91 94 95 97"
+ALL_CAPTURED="$(cat "$CAPTURE_DIR_R4"/wave-*.txt 2>/dev/null | sort -n | tr '\n' ' ' | sed 's/ $//')"
+EXPECTED_SORTED="$(printf '%s\n' $EXPECTED_NUMS | sort -n | tr '\n' ' ' | sed 's/ $//')"
+if [ "$ALL_CAPTURED" = "$EXPECTED_SORTED" ]; then
+  pass "R4b: every ISSUE_NUMS element dispatched exactly once across waves (captured: $ALL_CAPTURED)"
+else
+  fail "R4b: dispatched-issue set does not match input"
+  echo "        expected: $EXPECTED_SORTED"
+  echo "        got:      $ALL_CAPTURED"
+fi
+
+WAVE1_COUNT=$(wc -l < "$CAPTURE_DIR_R4/wave-1.txt" 2>/dev/null | tr -d ' ')
+WAVE2_COUNT=$(wc -l < "$CAPTURE_DIR_R4/wave-2.txt" 2>/dev/null | tr -d ' ')
+if [ "${WAVE1_COUNT:-0}" -eq 2 ] && [ "${WAVE2_COUNT:-0}" -eq 2 ]; then
+  pass "R4c: wave-1 dispatched 2 issues, wave-2 dispatched 2 issues (matches MAX_PARALLEL_BG_AGENTS=2 for N=4)"
+else
+  fail "R4c: wave cardinality mismatch — wave1=${WAVE1_COUNT:-missing} wave2=${WAVE2_COUNT:-missing}, expected 2/2"
+fi
+
 # Cleanup
-rm -rf "$STUB_DIR" "$CAPTURE_FILE" "$CAPTURE_FILE_2"
+rm -rf "$STUB_DIR" "$CAPTURE_FILE" "$CAPTURE_FILE_2" "$CAPTURE_DIR_R4" "$ERR_LOG_R4"
 
 echo
 echo "== Summary =="
