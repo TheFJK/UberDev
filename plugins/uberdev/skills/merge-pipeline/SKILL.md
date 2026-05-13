@@ -50,6 +50,7 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `TEST_FAIL_DECISION_ENUM` | `re-resolve`, `strategy-switch`, `park` | Phase 3.3v (audit-log `data.choice` for `test_fail_agent_decision`) |
 | `DEPRECATED_FLAGS_NOTE` | `warning: --yes / -y / auto_confirm are deprecated; /merge is now fully unattended. The flag has no behavioural effect.` | Phase 1 (stderr emission), `commands/merge.md` (Deprecated Flags section), `using-uberdev/SKILL.md` |
 | `UBERDEV_APPROVED_LABEL` | `uberdev-approved` | Phase 1.4 (PATH_2 label presence check) |
+| `REVIEW_PR_PENDING_LABEL` | `"review-pr:pending"` | `finish-branch/SKILL.md` (add — C1), `commands/review-pr.md` (remove — C2), `merge-pipeline/SKILL.md` Step 1.4.5 probe (C3) |
 | `REVIEW_PR_TRAILER_PREFIX` | `Reviewed-by: uberdev/review-pr@` | Phase 1.4 (PATH_2 trailer extraction); regex form `^Reviewed-by: uberdev/review-pr@([a-f0-9]{40})$` |
 | `RUN_ID_REGEX` | `^[0-9]{8}-[0-9]{6}-[a-f0-9]+$` | Phase 1.4 (PATH_2 audit-JSON path validation); also enforced producer-side in `commands/review-pr.md` |
 | `TRUST_ANCHOR_ENUM` | `reviewDecision_approved`, `uberdev_review_trail`, `bypass_with_waiver` (deprecated; never emitted post-v0.17.0) | Phase 1.4 (audit-log `gate_pass.data.trust_anchor`) |
