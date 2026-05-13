@@ -404,7 +404,7 @@ fi
 # the medium dispatch are excluded. Anchor at 0 so a future regression that
 # reintroduces an inline `gh pr create` in any trivial/small heredoc is
 # caught immediately.
-TRIVIAL_SMALL_GHPR_COUNT=$(awk '/^\*\*trivial:\*\*/,/^\*\*medium\*\* \*\(and `--full`\)\*:/' "$SOLVE_PIPELINE" | grep -cF 'gh pr create' 2>/dev/null || echo "0")
+TRIVIAL_SMALL_GHPR_COUNT=$(awk '/^\*\*trivial:\*\*/,/^\*\*medium\*\* \*\(and `--full`\)\*:/' "$SOLVE_PIPELINE" 2>/dev/null | grep -cF 'gh pr create')
 if [[ "$TRIVIAL_SMALL_GHPR_COUNT" -eq 0 ]]; then
   echo "  PASS  no inline 'gh pr create' inside the trivial/small slice (count=0)"
   PASS=$((PASS + 1))
