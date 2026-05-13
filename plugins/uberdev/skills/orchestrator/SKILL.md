@@ -31,6 +31,32 @@ Parse args:
 ## Phase pipeline
 
 ### Phase 0: setup
+0. **bg-context gate (issue #93).** Refuse interactive /solve under `claude --bg` or any non-TTY launcher. Evaluated FIRST — before run-id generation, artifact-dir creation, and issue-body fetch — so a bg-session abort costs no fanout and leaves no orphan artifacts.
+
+```bash
+# Step 0: bg-context gate (issue #93).
+# Refuse interactive /solve under claude --bg or any non-TTY launcher.
+
+# Turbo exemption: any explicit turbo signal short-circuits the gate.
+if [[ "${ARGUMENTS:-}" == *"--turbo"* ]] || [[ "${UBERDEV_TURBO:-0}" == "1" ]]; then
+  :  # fall through to step 1
+elif [ -n "${CLAUDE_JOB_DIR:-}" ] || [ ! -t 0 ]; then
+  echo "error: interactive orchestrator (/solve or /uberdev:orchestrator without --turbo) cannot run in a claude --bg session." >&2
+  echo "  - re-run with /turbo <N> for unattended mode, or" >&2
+  echo "  - run /solve <N> from a foreground terminal, or" >&2
+  echo "  - re-invoke /uberdev:orchestrator --turbo … if you invoked it standalone." >&2
+  exit 2
+fi
+```
+
+This gate MUST abort fail-fast. Reaching Phase 2 in a non-TTY context produces one of three failure modes documented in #93: indefinite `AskUserQuestion` block, `InputValidationError` collapse if `ToolSearch` was not pre-loaded, or agent-initiated auto-pick that silently turns `/solve` into `/turbo`. The Phase 2 identity rule below (line 192) and the ToolSearch caveat (line 196) both forbid the auto-pick path; the gate enforces that contract structurally by removing the precondition.
+
+Two detection arms are both required. `${CLAUDE_JOB_DIR:-}` is the Claude-Code-native marker set by `claude --bg` infrastructure; the POSIX `[ ! -t 0 ]` arm catches non-Claude-Code non-interactive launchers (CI, `nohup`, daemonised wrappers, future bg variants that do not yet set `CLAUDE_JOB_DIR`). If upstream `claude-code` ever allocates a PTY for bg sessions, the `[ -t 0 ]` arm flips false but the `CLAUDE_JOB_DIR` arm continues to fire — that is the forward-compat hedge.
+
+The turbo exemption MUST evaluate BEFORE the bg-context test. Without it every `/turbo <N>` invocation (which is explicitly designed for bg dispatch, `commands/turbo.md:44-48` sets `UBERDEV_TURBO=1`) would abort. The exemption checks `$ARGUMENTS` for the standalone-invocation path (`/uberdev:orchestrator --turbo …`) AND the inherited `UBERDEV_TURBO=1` env var for the chain-dispatch path. Both use `${VAR:-default}` for nounset safety, mirroring the Phase 2 turbo detector at line 204.
+
+Exit code is `2`, which propagates through `solve-pipeline`'s `claude --bg` exec into `/tmp/solve-bg-stdout-<N>.log` so `claude agents` can surface the abort message to the user within seconds. The pipeline MUST NOT proceed to step 1 from a bg session: no run-id is generated, no `mkdir -p` runs, no issue body is fetched. The escape hatches are listed in the stderr message itself.
+
 1. Generate a run-id: `RUN_ID=$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD 2>/dev/null || echo nohead)` (the `|| echo nohead` is defensive — at very early worktree-init the HEAD ref may not yet resolve; the timestamp prefix alone keeps `RUN_ID` unique within a session).
 2. Resolve the **worktree-absolute** artifact root: `UBERDEV_RESEARCH_ROOT="$(git rev-parse --show-toplevel)/.uberdev/research"` (this is the worktree top, NOT the parent project root — under `claude --bg --worktree solve-issue-N` the CWD is the worktree subdir; `--show-toplevel` correctly returns the worktree top).
 3. Create research dir: `mkdir -p "$UBERDEV_RESEARCH_ROOT/$RUN_ID"`.
