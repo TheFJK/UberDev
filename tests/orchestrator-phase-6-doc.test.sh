@@ -39,6 +39,18 @@ assert_ge() {
 
 echo "[orchestrator-phase-6-doc] checking $SKILL"
 
+# Guard: source-of-truth files must exist. Without this, the AC3 negated-grep
+# below (and any future bare-grep tests) would silently treat a missing/unreadable
+# file as "string absent" and mark the assertion PASS. Fail fast instead.
+if [ ! -f "$SKILL" ]; then
+  echo "  FAIL precondition: SKILL file not found at $SKILL"
+  exit 1
+fi
+if [ ! -f "$CHANGELOG" ]; then
+  echo "  FAIL precondition: CHANGELOG not found at $CHANGELOG"
+  exit 1
+fi
+
 # AC1 — new heading present, exact form
 n=$(grep -cE '^### Phase 6: PR creation \+ review chain$' "$SKILL" || true)
 assert_eq "AC1 Phase 6 heading present"          "1" "$n"
@@ -65,9 +77,14 @@ order=$(awk '
 ' "$SKILL")
 assert_eq "AC4 Phase 5.5 -> Phase 6 -> Logging order" "ok" "$order"
 
-# AC5 — Phase 6 prose names the canonical skill ids
-n=$(grep -cE 'uberdev:subagent-driven-dev|uberdev:finish-branch|uberdev:review-pr' "$SKILL" || true)
-assert_ge "AC5 canonical skill ids appear >= 3 times" 3 "$n"
+# AC5 — Phase 6 prose names the canonical skill ids.
+# Scope the search to the Phase 6 section body (### Phase 6: ... up to the next
+# `## ` heading) so the assertion regresses if Phase 6 is deleted but ids remain
+# in earlier phases. Count individual matches (grep -o) rather than matching
+# lines (grep -c), so multi-mention lines aren't under-counted.
+phase6_body=$(awk '/^### Phase 6:/{f=1} f; /^## /{if(f && !/^### Phase 6:/) exit}' "$SKILL")
+n=$(printf '%s\n' "$phase6_body" | grep -oE 'uberdev:subagent-driven-dev|uberdev:finish-branch|uberdev:review-pr' | wc -l | tr -d ' ')
+assert_ge "AC5 canonical skill ids appear >= 3 times in Phase 6" 3 "$n"
 
 # AC6 — reviewer-count signals
 six=$(grep -cE '6 advisory reviewer agents' "$SKILL" || true)
