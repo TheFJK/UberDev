@@ -128,25 +128,41 @@ else
 fi
 ```
 
-**Dispatch (single Skill() call, phase1 path empty because /simplify runs standalone):**
+**Dispatch variable bindings.** Before the Task() dispatch, bind the three path/slug variables the agent expects:
+
+```bash
+WORKING_DIR_ABS="$(git rev-parse --show-toplevel)"
+REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
+RESEARCH_DIR_ABS="$WORKING_DIR_ABS/.uberdev/research/$RUN_ID"
+```
+
+**Dispatch (single `Task()` call, phase1 path empty because `/simplify` runs standalone). The agent lives under `plugins/uberdev/agents/` so it is invoked via the Task tool with `subagent_type`, NOT via Skill():**
 
 ```text
-Skill("uberdev:findings-to-issues", prompt: <<<EOF
-  run_id: $RUN_ID
-  working_dir: $WORKING_DIR_ABS
-  repo_slug: $REPO_SLUG
-  pr_commit_sha: $(git rev-parse HEAD)
-  max_new: 10
-  phase1_aggregate_path:
-  phase2_aggregate_path: $RESEARCH_DIR_ABS/simplify-final.md
-  phase1_disposition_yaml:
-  phase2_disposition_yaml: $RESEARCH_DIR_ABS/code-fixer.phase2.disposition.yaml
-EOF)
+Task(subagent_type: uberdev:findings-to-issues,
+  description: "Phase 3.5 — defer critical simplify findings to GH issues",
+  prompt: <<EOF
+    run_id: $RUN_ID
+    working_dir: $WORKING_DIR_ABS
+    repo_slug: $REPO_SLUG
+    pr_commit_sha: $(git rev-parse HEAD)
+    pr_number: $PR_NUMBER
+    max_new: 10
+    phase1_aggregate_path:
+    phase2_aggregate_path: $RESEARCH_DIR_ABS/simplify-final.md
+    phase1_disposition_yaml:
+    phase2_disposition_yaml: $RESEARCH_DIR_ABS/code-fixer.phase2.disposition.yaml
+  EOF
+)
 ```
 
 The agent's input contract supports an empty `phase1_aggregate_path` (it refuses only when BOTH are empty).
 
-**Final summary:** Append a "Issues filed" row to the run's closing summary listing URLs from `created_urls[]` + `commented_urls[]`. The skip-path shows `(skipped: --no-defer-issues)` or `(skipped: defer_issues_enabled=false)`.
+**Skip-path behaviour** (when `DEFER_ISSUES_EFFECTIVE=0`):
+- Do NOT call `Task(subagent_type: uberdev:findings-to-issues, …)`.
+- The closing summary "Issues filed" row shows `(skipped: --no-defer-issues)` when `DEFER_ISSUES_PHASE=0`, OR `(skipped: defer_issues_enabled=false)` when the config key is the cause. When both knobs disable, the message names both causes joined by " and " (e.g. `(skipped: --no-defer-issues and defer_issues_enabled=false)`).
+
+**Final summary:** Append a "Issues filed" row to the run's closing summary listing URLs from `created_urls[]` + `commented_urls[]`.
 
 ## When to run
 

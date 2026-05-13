@@ -188,29 +188,41 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
     fi
     ```
 
-    **Dispatch (single Skill() call, no fanout):**
+    **Dispatch variable bindings.** Before the Task() dispatch, bind the three path/slug variables the agent expects:
 
-    ```text
-    Skill("uberdev:findings-to-issues", prompt: <<<EOF
-      run_id: $RUN_ID
-      working_dir: $WORKING_DIR_ABS
-      repo_slug: $REPO_SLUG
-      pr_commit_sha: $(git rev-parse HEAD)
-      max_new: 10
-      phase1_aggregate_path: $RESEARCH_DIR_ABS/post-impl-review-final.md
-      phase2_aggregate_path: $RESEARCH_DIR_ABS/simplify-final.md
-      phase1_disposition_yaml: $RESEARCH_DIR_ABS/code-fixer.phase1.disposition.yaml
-      phase2_disposition_yaml: $RESEARCH_DIR_ABS/code-fixer.phase2.disposition.yaml
-    EOF)
+    ```bash
+    WORKING_DIR_ABS="$(git rev-parse --show-toplevel)"
+    REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
+    RESEARCH_DIR_ABS="$WORKING_DIR_ABS/.uberdev/research/$RUN_ID"
     ```
 
-    **Capture the return YAML** into shell variables `CREATED_URLS_JSON`, `COMMENTED_URLS_JSON`, `SKIPPED_CLOSED_JSON`, `BLOCKED_BY_DEDUPE_JSON`, `OVERFLOW_COUNT` for the Step 7 Final Aggregation table.
+    **Dispatch (single `Task()` call, no fanout — the agent lives under `plugins/uberdev/agents/` so it is invoked via the Task tool with `subagent_type`, NOT via Skill()):**
+
+    ```text
+    Task(subagent_type: uberdev:findings-to-issues,
+      description: "Phase 2.5 — defer critical findings to GH issues",
+      prompt: <<EOF
+        run_id: $RUN_ID
+        working_dir: $WORKING_DIR_ABS
+        repo_slug: $REPO_SLUG
+        pr_commit_sha: $(git rev-parse HEAD)
+        pr_number: $PR_NUMBER
+        max_new: 10
+        phase1_aggregate_path: $RESEARCH_DIR_ABS/post-impl-review-final.md
+        phase2_aggregate_path: $RESEARCH_DIR_ABS/simplify-final.md
+        phase1_disposition_yaml: $RESEARCH_DIR_ABS/code-fixer.phase1.disposition.yaml
+        phase2_disposition_yaml: $RESEARCH_DIR_ABS/code-fixer.phase2.disposition.yaml
+      EOF
+    )
+    ```
+
+    **Capture the return YAML** into shell variables `CREATED_URLS_JSON`, `COMMENTED_URLS_JSON`, `SKIPPED_CLOSED_JSON`, `BLOCKED_BY_DEDUPE_JSON`, `OVERFLOW_COUNT` for the Step 7 Final Aggregation table. Validate the YAML parses before treating the absence of arrays as "zero issues" — on parse failure or missing `status` key, log to stderr and treat the sub-phase as `BLOCKED` for aggregation purposes (the Phase 2.5 row in Step 7 records the parse failure rather than a misleading zero count).
 
     Exit-code discipline: regardless of agent `status` (`DONE`, `DONE_WITH_CONCERNS`, `REFUSED`), the parent `/review-pr` continues to Step 7. A `REFUSED` is information for the final summary, not a parent-process failure.
 
     **Skip-path behaviour** (when `DEFER_ISSUES_EFFECTIVE=0`):
-    - Do NOT call `Skill("uberdev:findings-to-issues", …)`.
-    - The Step 7 Final Aggregation "Issues filed" row shows `(skipped: --no-defer-issues)` when `DEFER_ISSUES_PHASE=0`, OR `(skipped: defer_issues_enabled=false)` when the config key is the cause.
+    - Do NOT call `Task(subagent_type: uberdev:findings-to-issues, …)`.
+    - The Step 7 Final Aggregation "Issues filed" row shows `(skipped: --no-defer-issues)` when `DEFER_ISSUES_PHASE=0`, OR `(skipped: defer_issues_enabled=false)` when the config key is the cause. When both knobs disable, the message names both causes joined by " and " (e.g. `(skipped: --no-defer-issues and defer_issues_enabled=false)`).
 
 6c. **Phase 3 — CI Health** (skip iff `CI_FIX_PHASE=0` is set AND mode is probe-only — see flag handling below)
 
