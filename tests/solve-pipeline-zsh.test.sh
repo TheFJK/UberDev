@@ -46,6 +46,10 @@ PASS=0
 FAIL=0
 pass() { echo "  PASS  $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL  $1"; FAIL=$((FAIL + 1)); }
+# Normalize a stream of numbers to a single space-separated, ascending-sorted
+# line (trailing-space stripped). Stdin → stdout. Byte-identical to the
+# inline `sort -n | tr '\n' ' ' | sed 's/ $//'` chain it replaces.
+_normalize_nums() { sort -n | tr '\n' ' ' | sed 's/ $//'; }
 
 echo "== R1: SKILL.md Phase A hoist defines PERM_FLAG/EFFORT_FLAG as arrays =="
 # Anchored grep on the SKILL.md hoist. If a future edit reverts to scalar
@@ -217,8 +221,6 @@ zsh -c '
     wave_end=$(( wave_start + MAX_PARALLEL_BG_AGENTS - 1 ))
     (( wave_end >= TOTAL_ISSUES )) && wave_end=$(( TOTAL_ISSUES - 1 ))
     wave_size=$(( wave_end - wave_start + 1 ))
-    # POST-FIX FORM (mirrors SKILL.md Phase B inner loop — `for ISSUE_NUM in
-    # "${ISSUE_NUMS[@]:$wave_start:$wave_size}"` — landed in PR #102):
     for ISSUE_NUM in "${ISSUE_NUMS[@]:$wave_start:$wave_size}"; do
       TIER="${TIERS[$ISSUE_NUM]}"
       TITLE="${TITLES[$ISSUE_NUM]}"
@@ -237,13 +239,9 @@ else
   sed 's/^/          /' "$ERR_LOG_R4"
 fi
 
-# EXPECTED_NUMS is an array, not a scalar: under zsh, `printf '%s\n' $scalar`
-# does NOT word-split (SH_WORD_SPLIT=off by default), so a scalar would
-# print as one line. The array form expands one slot per element under both
-# bash and zsh — the same lesson this file otherwise locks in for SKILL.md.
-EXPECTED_NUMS=(91 94 95 97)
-ALL_CAPTURED="$(cat "$CAPTURE_DIR_R4"/wave-*.txt 2>/dev/null | sort -n | tr '\n' ' ' | sed 's/ $//')"
-EXPECTED_SORTED="$(printf '%s\n' "${EXPECTED_NUMS[@]}" | sort -n | tr '\n' ' ' | sed 's/ $//')"
+EXPECTED_NUMS=(91 94 95 97)  # array form: zsh scalar would not word-split
+ALL_CAPTURED="$(cat "$CAPTURE_DIR_R4"/wave-*.txt 2>/dev/null | _normalize_nums)"
+EXPECTED_SORTED="$(printf '%s\n' "${EXPECTED_NUMS[@]}" | _normalize_nums)"
 if [ "$ALL_CAPTURED" = "$EXPECTED_SORTED" ]; then
   pass "R4b: every ISSUE_NUMS element dispatched exactly once across waves (captured: $ALL_CAPTURED)"
 else
@@ -299,21 +297,38 @@ zsh -c '
 R4D_RC=$?
 
 EXPECTED_NUMS_R4D=(101 102 103 104 105)
-ALL_CAPTURED_R4D="$(cat "$CAPTURE_DIR_R4D"/wave-*.txt 2>/dev/null | sort -n | tr '\n' ' ' | sed 's/ $//')"
-EXPECTED_SORTED_R4D="$(printf '%s\n' "${EXPECTED_NUMS_R4D[@]}" | sort -n | tr '\n' ' ' | sed 's/ $//')"
-W1_R4D=$(wc -l < "$CAPTURE_DIR_R4D/wave-1.txt" 2>/dev/null | tr -d ' ')
-W2_R4D=$(wc -l < "$CAPTURE_DIR_R4D/wave-2.txt" 2>/dev/null | tr -d ' ')
-W3_R4D=$(wc -l < "$CAPTURE_DIR_R4D/wave-3.txt" 2>/dev/null | tr -d ' ')
+ALL_CAPTURED_R4D="$(cat "$CAPTURE_DIR_R4D"/wave-*.txt 2>/dev/null | _normalize_nums)"
+EXPECTED_SORTED_R4D="$(printf '%s\n' "${EXPECTED_NUMS_R4D[@]}" | _normalize_nums)"
+WAVE1_COUNT_R4D=$(wc -l < "$CAPTURE_DIR_R4D/wave-1.txt" 2>/dev/null | tr -d ' ')
+WAVE2_COUNT_R4D=$(wc -l < "$CAPTURE_DIR_R4D/wave-2.txt" 2>/dev/null | tr -d ' ')
+WAVE3_COUNT_R4D=$(wc -l < "$CAPTURE_DIR_R4D/wave-3.txt" 2>/dev/null | tr -d ' ')
 
-if [ "$R4D_RC" -eq 0 ] && [ "$ALL_CAPTURED_R4D" = "$EXPECTED_SORTED_R4D" ] \
-   && [ "${W1_R4D:-0}" -eq 2 ] && [ "${W2_R4D:-0}" -eq 2 ] && [ "${W3_R4D:-0}" -eq 1 ]; then
-  pass "R4d: odd-N clamp exercised — N=5/cap=2 → 3 waves of 2/2/1 (final wave wave_size=1 via wave_end clamp)"
+# Split into three sub-assertions mirroring R4's R4a/R4b/R4c layout: this
+# attributes the failure mode (loop abort vs. set mismatch vs. wave cardinality)
+# instead of collapsing all three into one pass/fail line.
+if [ "$R4D_RC" -eq 0 ] && ! grep -q 'parameter not set' "$ERR_LOG_R4D"; then
+  pass "R4d-a: odd-N Phase B wave-batching loop completed under zsh -u (no parameter-not-set abort)"
 else
-  fail "R4d: odd-N clamp regression — rc=$R4D_RC waves=${W1_R4D:-?}/${W2_R4D:-?}/${W3_R4D:-?} (expected 2/2/1) captured=$ALL_CAPTURED_R4D expected=$EXPECTED_SORTED_R4D"
+  fail "R4d-a: odd-N Phase B wave-batching loop aborted under zsh -u"
+  echo "        exit rc: $R4D_RC"
   if [ -s "$ERR_LOG_R4D" ]; then
     echo "        stderr:"
     sed 's/^/          /' "$ERR_LOG_R4D"
   fi
+fi
+
+if [ "$ALL_CAPTURED_R4D" = "$EXPECTED_SORTED_R4D" ]; then
+  pass "R4d-b: every ISSUE_NUMS element dispatched exactly once across waves (captured: $ALL_CAPTURED_R4D)"
+else
+  fail "R4d-b: dispatched-issue set does not match input"
+  echo "        expected: $EXPECTED_SORTED_R4D"
+  echo "        got:      $ALL_CAPTURED_R4D"
+fi
+
+if [ "${WAVE1_COUNT_R4D:-0}" -eq 2 ] && [ "${WAVE2_COUNT_R4D:-0}" -eq 2 ] && [ "${WAVE3_COUNT_R4D:-0}" -eq 1 ]; then
+  pass "R4d-c: odd-N clamp exercised — N=5/cap=2 → 3 waves of 2/2/1 (final wave wave_size=1 via wave_end clamp)"
+else
+  fail "R4d-c: wave cardinality mismatch — waves=${WAVE1_COUNT_R4D:-?}/${WAVE2_COUNT_R4D:-?}/${WAVE3_COUNT_R4D:-?}, expected 2/2/1"
 fi
 
 # Cleanup
