@@ -317,7 +317,7 @@ The two `gh` calls above are intentionally fail-soft — the fire-and-surface co
 
 **Chain hand-off (always-PR path, default + turbo):**
 
-After the PR is created and `PR_URL` is validated, **invoke `uberdev:review-pr` via the `Skill` tool** with the captured `PR_URL` (no `--turbo` arg). Review-pr inherits the unattended-mode signal via the `UBERDEV_TURBO=1` env var inherited from the parent `claude --bg` process; review-pr also retains a hybrid arg-OR-env detector for compatibility with `merge-pipeline`'s separate dispatch (which still passes `--turbo` as an arg — out-of-scope for #97). The chain is **fire-and-surface, not fire-and-block**: review-pr's findings surface to the user via its own output, but `finish-branch` does NOT block on `REVISIONS_REQUIRED` (advisory only, per #11 Q1).
+After the PR is created and `PR_URL` is validated, **invoke `uberdev:review-pr` via the `Skill` tool** with the captured `PR_URL` (no `--turbo` arg). Review-pr inherits the unattended-mode signal via the `UBERDEV_TURBO=1` env var inherited from the parent `claude --bg` process; review-pr also retains a hybrid arg-OR-env detector for compatibility with the separate dispatch in `merge-pipeline` (which still passes `--turbo` as an arg — out-of-scope for #97). The chain is **fire-and-surface, not fire-and-block**: review-pr findings surface to the user via its own output, but `finish-branch` does NOT block on `REVISIONS_REQUIRED` (advisory only, per #11 Q1).
 
 > Invoke `uberdev:review-pr` via the Skill tool with the captured `PR_URL` (no flag args). Findings are ADVISORY — do NOT block on `REVISIONS_REQUIRED` at this layer (the auto-fix loop is deferred per #11 Q1).
 
