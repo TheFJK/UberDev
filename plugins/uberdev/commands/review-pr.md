@@ -25,7 +25,14 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    - Check git status to identify changed files
    - Parse arguments to see if user requested specific review aspects
    - Detect `--no-simplify` token in `$ARGUMENTS` and strip it from the aspect list — sets `SIMPLIFY_PHASE=0`, otherwise `SIMPLIFY_PHASE=1` (default).
-   - Detect `--turbo` token in `$ARGUMENTS` and strip it from the aspect list — acknowledged no-op (rationale above); it does NOT mutate `SIMPLIFY_PHASE` or any other phase variable.
+   - Detect `--turbo` token in `$ARGUMENTS` AND/OR inherited env var `${UBERDEV_TURBO:-0} == "1"` (#97 — hybrid OR detector). Strip the `--turbo` token from the aspect list. Set `TURBO=1` if either source signals turbo; else `TURBO=0`. The detection result feeds the Phase 3 halt-class carve-out (6c.6 HALT) — it does NOT mutate `SIMPLIFY_PHASE` or any other phase variable. Hybrid form (mirrors `orchestrator/SKILL.md`):
+     ```bash
+     TURBO=0
+     if [[ "$ARGUMENTS" == *"--turbo"* ]] || [[ "${UBERDEV_TURBO:-0}" == "1" ]]; then
+       TURBO=1
+     fi
+     ```
+     Rationale: `merge-pipeline` invokes `Skill("uberdev:review-pr", args: "${PR} --turbo")` (out-of-scope for #97) — arg form must remain accepted. `finish-branch` chains via `Skill("uberdev:review-pr")` with no flag (env-var inheritance, #97) — env form must also be accepted. The hybrid OR detector closes both call sites.
    - Detect `--no-ci-fix` token in `$ARGUMENTS` and strip it from the aspect list — sets `CI_FIX_PHASE=0` (probe-only mode), otherwise `CI_FIX_PHASE=1` (default). Mirrors `--no-simplify` shape. When `CI_FIX_PHASE=0`, Phase 3 6c.1 PROBE + 6c.2 MONITOR + 6c.3 CLASSIFY still run for audit telemetry; 6c.4 ROUTE / 6c.5 POST-FIX / 6c.6 HALT are skipped. Outcome is forced to `green` if probe was green; otherwise `halted` (still gates trust signal).
    - Default: Run all applicable reviews + Phase 2 simplify pass
    - **Capture aspect tokens.** Tokenise the remaining arguments (after the `--no-simplify` and `--turbo` flags are stripped) into `ASPECT_LIST` (an array). Example: `/uberdev:review-pr tests errors` → `ASPECT_LIST=("tests" "errors")`. Empty arguments → `ASPECT_LIST=()`. The `all` token is treated as "no emphasis" (i.e., default behavior — every reviewer's brief receives no emphasis section).
@@ -44,6 +51,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    | `SIMPLIFY_PHASE` | `--no-simplify` token | `1` | `0` skips Phase 2 |
    | `SEQUENTIAL` | `sequential` token | `0` | `1` exports `UBERDEV_FANOUT_POST_IMPL_REVIEW=1` (stderr notice emitted) |
    | `CI_FIX_PHASE` | `--no-ci-fix` token | `1` | `0` runs PROBE+MONITOR+CLASSIFY (audit-only) but skips ROUTE+POST-FIX+HALT — outcome forced to `green` if probe was green, otherwise `halted` (still gates trust signal). |
+   | `TURBO` | `--turbo` token OR `UBERDEV_TURBO=1` env (hybrid OR, #97) | `0` | `1` activates the Phase 3 halt-class carve-out (6c.6 HALT — no AskUserQuestion, exit 1, no trust signal). Phases 1+2 unchanged in either mode. |
    | `ASPECT_LIST` | remaining tokens | `()` | passed as `aspect_emphasis` input to `Skill(uberdev:post-impl-review)` Step 4 |
 
 2. **Available Review Aspects:**
