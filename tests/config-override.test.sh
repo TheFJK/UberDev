@@ -490,6 +490,84 @@ EOF
   || fail "I7c: coexistence with deprecated keys broken"
 
 echo
+echo "== U9: auto_review_on_merge config key (#89) =="
+
+# U9.1: default — neither env nor config sets the key -> 'false'
+_isolate '
+  out="$(uberdev_read_enum auto_review_on_merge UBERDEV_AUTO_REVIEW_ON_MERGE "true|false" "false")"
+  [ "$out" = "false" ] || exit 1
+'
+[ $? -eq 0 ] && pass "U9.1: default — unset env + no config -> 'false'" \
+  || fail "U9.1: default MUST be 'false' (spec '## Decisions' D7 + AC1 default-off bit-identity)"
+
+# U9.2: config file precedence — auto_review_on_merge: true in .claude/uberdev.local.md -> 'true'
+_isolate '
+  cat > .claude/uberdev.local.md <<EOF
+---
+auto_review_on_merge: true
+---
+EOF
+  out="$(uberdev_read_enum auto_review_on_merge UBERDEV_AUTO_REVIEW_ON_MERGE "true|false" "false")"
+  [ "$out" = "true" ] || exit 1
+'
+[ $? -eq 0 ] && pass "U9.2: config file -> 'true' wins over default" \
+  || fail "U9.2: config file 'auto_review_on_merge: true' MUST resolve to 'true' (spec C1 precedence)"
+
+# U9.3: env override — UBERDEV_AUTO_REVIEW_ON_MERGE=true overrides config-file false
+_isolate '
+  cat > .claude/uberdev.local.md <<EOF
+---
+auto_review_on_merge: false
+---
+EOF
+  export UBERDEV_AUTO_REVIEW_ON_MERGE=true
+  out="$(uberdev_read_enum auto_review_on_merge UBERDEV_AUTO_REVIEW_ON_MERGE "true|false" "false")"
+  [ "$out" = "true" ] || exit 1
+  unset UBERDEV_AUTO_REVIEW_ON_MERGE
+'
+[ $? -eq 0 ] && pass "U9.3: env override wins over config file" \
+  || fail "U9.3: env UBERDEV_AUTO_REVIEW_ON_MERGE=true MUST override config-file false (spec C1 precedence)"
+
+# U9.4: invalid config-file value -> default + uberdev_config_invalid audit event
+_isolate '
+  mkdir -p .uberdev
+  : > .uberdev/audit.jsonl
+  cat > .claude/uberdev.local.md <<EOF
+---
+auto_review_on_merge: maybe
+---
+EOF
+  out="$(uberdev_read_enum auto_review_on_merge UBERDEV_AUTO_REVIEW_ON_MERGE "true|false" "false")"
+  [ "$out" = "false" ] || exit 1
+  grep -q "\"event\":\"uberdev_config_invalid\"" .uberdev/audit.jsonl || exit 2
+  grep -q "\"key\":\"auto_review_on_merge\"" .uberdev/audit.jsonl || exit 3
+'
+rc=$?
+case $rc in
+  0) pass "U9.4: invalid config-file value 'maybe' -> default 'false' + uberdev_config_invalid emitted" ;;
+  1) fail "U9.4: invalid value MUST fall back to default 'false' (spec C1 invalid-value semantics)" ;;
+  2) fail "U9.4: uberdev_config_invalid audit event MUST emit for invalid auto_review_on_merge (spec C1 + existing helper machinery)" ;;
+  3) fail "U9.4: uberdev_config_invalid event MUST carry key=auto_review_on_merge" ;;
+esac
+
+# U9.5: invalid env-var value -> default + uberdev_config_invalid audit event
+_isolate '
+  mkdir -p .uberdev
+  : > .uberdev/audit.jsonl
+  export UBERDEV_AUTO_REVIEW_ON_MERGE=garbage
+  out="$(uberdev_read_enum auto_review_on_merge UBERDEV_AUTO_REVIEW_ON_MERGE "true|false" "false")"
+  [ "$out" = "false" ] || exit 1
+  grep -q "\"event\":\"uberdev_config_invalid\"" .uberdev/audit.jsonl || exit 2
+  unset UBERDEV_AUTO_REVIEW_ON_MERGE
+'
+rc=$?
+case $rc in
+  0) pass "U9.5: invalid env-var value 'garbage' -> default 'false' + uberdev_config_invalid emitted" ;;
+  1) fail "U9.5: invalid env value MUST fall back to default 'false'" ;;
+  2) fail "U9.5: uberdev_config_invalid audit event MUST emit for invalid env UBERDEV_AUTO_REVIEW_ON_MERGE" ;;
+esac
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
