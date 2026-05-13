@@ -68,7 +68,7 @@ digraph when_to_use {
    h. Dispatch code quality reviewers (parallel). Same fix-loop pattern.
    i. Mark every task in the wave complete in TodoWrite.
    j. **Mark wave complete.** No additional accumulation required at the SDD layer — `/uberdev:review-pr` Phase 1, chained post-push from `finish-branch`, computes its own `changed_paths` and `commit_range` against the pushed PR.
-5. Hand off to `uberdev:finish-branch`. **If `--turbo` was in `$ARGUMENTS`, propagate it** — invoke as `uberdev:finish-branch --turbo` so the branch close-out auto-selects "Push and Create PR" instead of prompting. For large tier, the orchestrator's Phase 5.5 (`pr-test-analyzer`) runs *after* this skill returns. Post-implementation reviewer fanout is hosted by `/uberdev:review-pr` Phase 1 (chained from `finish-branch` after PR push); no reviewer fanout is dispatched from `subagent-driven-dev` itself.
+5. Hand off to `uberdev:finish-branch` (no flag arg). The branch close-out detects unattended mode via the `UBERDEV_TURBO=1` environment variable inherited from the parent `claude --bg` process — under that signal, `finish-branch` auto-selects "Push and Create PR" without prompting (#97). For large tier, the orchestrator's Phase 5.5 (`pr-test-analyzer`) runs *after* this skill returns. Post-implementation reviewer fanout is hosted by `/uberdev:review-pr` Phase 1 (chained from `finish-branch` after PR push); no reviewer fanout is dispatched from `subagent-driven-dev` itself.
 
 ### Parallel Dispatch Pattern
 
