@@ -560,13 +560,23 @@ TITLE="${TITLES[$ISSUE_NUM]}"
 BG_DISPATCH_RC=0
 BG_SESSION_ID=""
 BG_STDOUT_LOG="/tmp/solve-bg-stdout-$ISSUE_NUM.log"
+# NEW (#97): UBERDEV_TURBO=1 chain-wide signal for /turbo (AUTO_MODE=1) only.
+# Inline-prefix exec is the canonical POSIX form for "set on this exec only" —
+# the bg child inherits via fork+exec, the parent shell's env is untouched.
+# AUTO_MODE=0 (/solve) skips the prefix so an interactive run never propagates
+# turbo into the bg child even if UBERDEV_TURBO leaked into the parent env.
+if [[ "$AUTO_MODE" == "1" ]]; then
+  BG_TURBO_ENV=( UBERDEV_TURBO=1 )
+else
+  BG_TURBO_ENV=()
+fi
 case "$BG_PROMPT_MODE" in
   file)
     # Trusted path arg; file contents never reach the shell as argv.
     # PERM_FLAG / EFFORT_FLAG are bash+zsh arrays — see Phase A hoist for the
     # zsh SH_WORD_SPLIT=off rationale; `"${ARRAY[@]}"` expands identically in
     # both shells (empty array → zero slots; populated → one slot per element).
-    "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" claude --bg \
+    "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" "${BG_TURBO_ENV[@]}" claude --bg \
       --prompt-file "/tmp/solve-prompt-$ISSUE_NUM.txt" \
       --worktree "solve-issue-$ISSUE_NUM" \
       --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" > "$BG_STDOUT_LOG" 2>&1
@@ -574,7 +584,7 @@ case "$BG_PROMPT_MODE" in
     ;;
   stdin)
     # File content streamed on FD 0; no argv quoting concern.
-    "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" claude --bg \
+    "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" "${BG_TURBO_ENV[@]}" claude --bg \
       --worktree "solve-issue-$ISSUE_NUM" \
       --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" \
       < "/tmp/solve-prompt-$ISSUE_NUM.txt" > "$BG_STDOUT_LOG" 2>&1
@@ -583,7 +593,7 @@ case "$BG_PROMPT_MODE" in
   argv)
     # Bash array form (spec-reviewer finding 1) — single argv slot, no eval.
     PROMPT_BODY="$(cat "/tmp/solve-prompt-$ISSUE_NUM.txt")"
-    cmd=( "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" claude --bg
+    cmd=( "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" "${BG_TURBO_ENV[@]}" claude --bg
           --worktree "solve-issue-$ISSUE_NUM"
           --model "$MODEL" )
     # PERM_FLAG / EFFORT_FLAG are arrays from Phase A
