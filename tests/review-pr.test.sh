@@ -527,6 +527,51 @@ assert_grep "$MERGE_SKILL" '\| `RERUN_FLAKY_CAP` \|' \
 assert_grep "$MERGE_SKILL" '`code_bug`.*`billing_quota`.*`platform_outage`.*`flaky`.*`env_drift`.*`stale_base`' \
   "R20.6 — CI_FAILURE_CLASS_ENUM lists all 6 classes in canonical order"
 
+echo "== R21: review-pr Trust-Signal Emission clears review-pr:pending label (#95) =="
+
+# R21.1 — gh pr edit --remove-label review-pr:pending is present somewhere in review-pr.md
+assert_grep "$REVIEW_PR" \
+  'gh pr edit .*--remove-label review-pr:pending' \
+  "R21.1 — gh pr edit --remove-label review-pr:pending present in review-pr.md (#95 spec C2)"
+
+# R21.2 — prose paragraph references the named constant REVIEW_PR_PENDING_LABEL
+assert_grep "$REVIEW_PR" \
+  'REVIEW_PR_PENDING_LABEL' \
+  "R21.2 — prose paragraph references REVIEW_PR_PENDING_LABEL constant by name (#95 spec C4)"
+
+# R21.3 — the new remove-label block is fail-soft (no exit-2 guard around it)
+# This is intentional per D4 — /uberdev:review-pr may be invoked directly outside
+# a finish-branch chain, in which case the pending label legitimately does not exist.
+# Negative shape-lock: extract the new bash block via line-range and assert no `exit 2`.
+REMOVE_START=$(grep -n 'New (#95): clear the review-pr:pending backstop label' "$REVIEW_PR" | head -1 | cut -d: -f1)
+REMOVE_END=$(awk -v s="$REMOVE_START" 'NR > s && /^[[:space:]]*fi$/ { print NR; exit }' "$REVIEW_PR")
+if [[ -n "$REMOVE_START" && -n "$REMOVE_END" ]]; then
+  EXIT2_COUNT=$(sed -n "${REMOVE_START},${REMOVE_END}p" "$REVIEW_PR" | grep -cE '^[[:space:]]*exit[[:space:]]+2')
+  if [[ "$EXIT2_COUNT" -eq 0 ]]; then
+    echo "  PASS  R21.3 — --remove-label block is fail-soft (no exit-2 guard; intentional per D4)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R21.3 — --remove-label block MUST NOT use exit 2; found $EXIT2_COUNT exit-2 statement(s)"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  echo "  FAIL  R21.3 — could not locate --remove-label block (REMOVE_START=$REMOVE_START REMOVE_END=$REMOVE_END)"
+  FAIL=$((FAIL + 1))
+fi
+
+# R21.4 — line order: the new --remove-label is in the Trust-Signal Emission section,
+# which is after line 525 (## Trust-Signal Emission) and before line ~621 (## Exit-Code Contract).
+L_REMOVE=$(grep -n -- '--remove-label review-pr:pending' "$REVIEW_PR" | head -1 | cut -d: -f1)
+L_TS_HEADING=$(grep -n -E '^## Trust-Signal Emission' "$REVIEW_PR" | head -1 | cut -d: -f1)
+L_EXIT_CODE_HEADING=$(grep -n -E '^## Exit-Code Contract' "$REVIEW_PR" | head -1 | cut -d: -f1)
+if [[ -n "$L_REMOVE" && -n "$L_TS_HEADING" && -n "$L_EXIT_CODE_HEADING" && "$L_REMOVE" -gt "$L_TS_HEADING" && "$L_REMOVE" -lt "$L_EXIT_CODE_HEADING" ]]; then
+  echo "  PASS  R21.4 — --remove-label is inside Trust-Signal Emission section (TS=$L_TS_HEADING < REMOVE=$L_REMOVE < ExitCode=$L_EXIT_CODE_HEADING)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R21.4 — --remove-label MUST be inside Trust-Signal Emission section (TS=$L_TS_HEADING REMOVE=$L_REMOVE ExitCode=$L_EXIT_CODE_HEADING)"
+  FAIL=$((FAIL + 1))
+fi
+
 echo
 echo "== Summary =="
 echo "  passed: $PASS"

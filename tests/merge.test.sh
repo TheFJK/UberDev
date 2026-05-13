@@ -1648,6 +1648,81 @@ for reason in trust_trail_stale_sha trust_trail_agent_invalid_input trust_trail_
   fi
 done
 
+echo "== M86: review-pr:pending label-present probe in Step 1.4.5 (#95) =="
+
+# M86.1 — Constants table declares REVIEW_PR_PENDING_LABEL (Task 1)
+assert_grep "$SKILL_FILE" \
+  '\| `REVIEW_PR_PENDING_LABEL` \| `review-pr:pending` \|' \
+  "M86.1 — Constants table declares REVIEW_PR_PENDING_LABEL = review-pr:pending (#95 spec C4 / T1, R8.6 simplify drops inner quotes for table parity)"
+
+# M86.2 — Step 1.4.5 contains the probe reusing cached $PR_JSON (Task 4)
+assert_grep "$SKILL_FILE" \
+  'jq -r .\.labels\[\]\.name. <<<"\$PR_JSON"' \
+  "M86.2 — probe reuses cached \$PR_JSON via jq -r .labels[].name in Step 1.4.5 (#95 spec C3 / T4, R8.6 simplify)"
+
+# M86.3 — probe assigns reason="trust_trail_label_missing" (reuses existing enum; no new member)
+PROBE_START=$(grep -n 'NEW (#95): label-present probe' "$SKILL_FILE" | head -1 | cut -d: -f1)
+PROBE_END=$(awk -v s="$PROBE_START" 'NR > s && /^fi$/ { print NR; exit }' "$SKILL_FILE")
+if [[ -n "$PROBE_START" && -n "$PROBE_END" ]]; then
+  PROBE_BLOCK=$(sed -n "${PROBE_START},${PROBE_END}p" "$SKILL_FILE")
+  if echo "$PROBE_BLOCK" | grep -qE 'reason="trust_trail_label_missing"'; then
+    pass "M86.3 — probe assigns reason=trust_trail_label_missing on label match (spec D1; no new AUDIT_EVENT_ENUM member)"
+  else
+    fail "M86.3 — probe MUST assign reason=\"trust_trail_label_missing\" on label match (spec D1)"
+  fi
+
+  # M86.4 — AUTO_REVIEW_ON_MERGE gate wraps the probe block
+  if echo "$PROBE_BLOCK" | grep -qE 'AUTO_REVIEW_ON_MERGE.*==.*"true"'; then
+    pass "M86.4 — probe gated by AUTO_REVIEW_ON_MERGE=true (spec C3; default-off bit-identity contract preserved)"
+  else
+    fail "M86.4 — probe MUST be gated by AUTO_REVIEW_ON_MERGE == \"true\" (spec C3)"
+  fi
+else
+  fail "M86.3 — could not locate probe block (PROBE_START=$PROBE_START PROBE_END=$PROBE_END)"
+  fail "M86.4 — could not locate probe block"
+fi
+
+# M86.5 — AUDIT_EVENT_ENUM declaration unchanged: only auto_review_dispatched and auto_review_returned
+# This is a set-equality check on the AUDIT_EVENT_ENUM table row at line ~30 specifically;
+# we extract only that row to avoid false matches from other lines that may legitimately
+# reference auto_review_on_merge (the config-key constant).
+AUDIT_ROW=$(grep -E '^\| `AUDIT_EVENT_ENUM`' "$SKILL_FILE")
+GOT=$(echo "$AUDIT_ROW" | grep -oE '`auto_review_[a-z_]+`' | sort -u | tr '\n' ' ')
+EXPECTED='`auto_review_dispatched` `auto_review_returned` '
+if [[ "$GOT" == "$EXPECTED" ]]; then
+  pass "M86.5 — AUDIT_EVENT_ENUM row unchanged (#95 Q5: no new audit events; D1 reuses trust_trail_label_missing)"
+else
+  fail "M86.5 — AUDIT_EVENT_ENUM row MUST contain ONLY auto_review_dispatched and auto_review_returned (got: $GOT)"
+fi
+
+# M86.6 — cap-ordering preserved: AUTO_REVIEW_DISPATCHED counter write still precedes
+# the Skill(uberdev:review-pr) dispatch in source order. The bash code dispatch is the
+# `Skill("uberdev:review-pr",` line inside the dispatch sequence (lines ~410), not the
+# AUDIT_EVENT_ENUM prose row.  We anchor on the bash code by requiring "args:" on the
+# same line.
+L_COUNTER=$(grep -n 'AUTO_REVIEW_DISPATCHED\["\${PR}:\${RUN_ID}"\]=1' "$SKILL_FILE" | head -1 | cut -d: -f1)
+L_DISPATCH=$(grep -n -E 'Skill\("uberdev:review-pr",[[:space:]]*args:' "$SKILL_FILE" | head -1 | cut -d: -f1)
+if [[ -n "$L_COUNTER" && -n "$L_DISPATCH" && "$L_COUNTER" -lt "$L_DISPATCH" ]]; then
+  pass "M86.6 — AUTO_REVIEW_DISPATCHED counter write precedes Skill() dispatch (#89 cap-ordering preserved after #95 probe insertion; L_COUNTER=$L_COUNTER < L_DISPATCH=$L_DISPATCH)"
+else
+  fail "M86.6 — AUTO_REVIEW_DISPATCHED counter MUST precede Skill() dispatch (L_COUNTER=$L_COUNTER L_DISPATCH=$L_DISPATCH)"
+fi
+
+# M86.7 — Common Mistakes section documents the #95 probe (defends against future
+# extensions that try to introduce review_pr_pending_label_present as a new enum value)
+CM_START=$(grep -n '^## Common Mistakes' "$SKILL_FILE" | head -1 | cut -d: -f1)
+CM_END=$(awk -v s="$CM_START" 'NR > s && /^## / { print NR; exit }' "$SKILL_FILE")
+if [[ -n "$CM_START" && -n "$CM_END" ]]; then
+  CM_BLOCK=$(sed -n "${CM_START},${CM_END}p" "$SKILL_FILE")
+  if echo "$CM_BLOCK" | grep -q '#95'; then
+    pass "M86.7 — Common Mistakes section documents the #95 probe (defends against review_pr_pending_label_present regression)"
+  else
+    fail "M86.7 — Common Mistakes section MUST mention #95 (spec C3 / T4 Edit B)"
+  fi
+else
+  fail "M86.7 — could not locate ## Common Mistakes section (CM_START=$CM_START CM_END=$CM_END)"
+fi
+
 echo
 echo "== Summary =="
 echo "  passed: $PASS"

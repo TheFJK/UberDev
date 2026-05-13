@@ -294,8 +294,26 @@ if [[ ! "$PR_URL" =~ $PR_URL_REGEX ]]; then
   exit 1
 fi
 echo "PR created: $PR_URL"
+# Extract PR number from PR_URL using a capture-group variant of PR_URL_REGEX
+# (the existing constant at line 289 has no capture group; this inline form
+# allows single-pass extraction via BASH_REMATCH). Both gh calls are fail-soft
+# per the fire-and-surface contract (issue #11 Q1): a transient gh failure
+# loud-logs to stderr but MUST NOT exit non-zero or roll back the PR.
+if [[ "$PR_URL" =~ ^https://github\.com/[^/]+/[^/]+/pull/([0-9]+)$ ]]; then
+  PR_NUM="${BASH_REMATCH[1]}"
+  if ! gh label create --force review-pr:pending \
+       --color FBCA04 \
+       --description "review-pr has not yet completed for this PR" 2>/dev/null; then
+    echo "warning: failed to create review-pr:pending label; backstop may not fire" >&2
+  fi
+  if ! gh pr edit "$PR_NUM" --add-label review-pr:pending 2>/dev/null; then
+    echo "warning: failed to add review-pr:pending label to PR #$PR_NUM; backstop will not fire if review-pr is missed" >&2
+  fi
+fi
 rm -f "$TITLE_FILE" "$PR_BODY_FILE"
 ```
+
+The two `gh` calls above are intentionally fail-soft — the fire-and-surface contract trumps backstop completeness, so a transient `gh` failure must not roll back PR creation. The literal label string `review-pr:pending` is declared as `REVIEW_PR_PENDING_LABEL` in `plugins/uberdev/skills/merge-pipeline/SKILL.md` Constants table; it is inlined here (mirroring how `UBERDEV_APPROVED_LABEL` is inlined in `commands/review-pr.md`) because bash does not dereference markdown constants — the literal string is the only available form in this position.
 
 **Chain hand-off (always-PR path, default + turbo):**
 

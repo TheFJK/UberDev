@@ -249,6 +249,48 @@ assert_not_grep "$FINISH_BRANCH" \
   '#.*`(if|then|else|elif|fi|while|for|until|do|done|case|esac|function|select|time)([[:space:]!]|`)' \
   "no shell-keyword backticks inside #-comments in bash blocks (Claude permission-evaluator parse-error bug, #42/#55 family)"
 
+echo "== Issue #95: review-pr:pending backstop in finish-branch =="
+
+assert_grep "$FINISH_BRANCH" \
+  'gh label create --force review-pr:pending' \
+  "#95.1 — idempotent gh label create call present (spec C1; gh --add-label cannot auto-create labels)"
+
+assert_grep "$FINISH_BRANCH" \
+  'gh pr edit .*--add-label review-pr:pending' \
+  "#95.2 — gh pr edit --add-label review-pr:pending present (spec C1)"
+
+assert_grep "$FINISH_BRANCH" \
+  'REVIEW_PR_PENDING_LABEL' \
+  "#95.3 — prose paragraph references REVIEW_PR_PENDING_LABEL constant by name (spec C4)"
+
+# Line-order: label-add MUST precede the Skill(uberdev:review-pr) dispatch prose
+L_ADD=$(grep -n -- '--add-label review-pr:pending' "$FINISH_BRANCH" | head -1 | cut -d: -f1)
+L_SKILL=$(grep -n -E 'Invoke `uberdev:review-pr` via the Skill tool' "$FINISH_BRANCH" | head -1 | cut -d: -f1)
+if [[ -n "$L_ADD" && -n "$L_SKILL" && "$L_ADD" -lt "$L_SKILL" ]]; then
+  echo "  PASS  #95.4 — label-add precedes Skill(uberdev:review-pr) dispatch in source order (L_ADD=$L_ADD < L_SKILL=$L_SKILL)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  #95.4 — label-add MUST appear before Skill(uberdev:review-pr) dispatch (L_ADD=$L_ADD L_SKILL=$L_SKILL)"
+  FAIL=$((FAIL + 1))
+fi
+
+# Fail-soft contract: no `exit` inside the new label-add block (sed-based; bounded range)
+LABEL_BLOCK_START=$(grep -n 'Extract PR number from PR_URL using a capture-group variant' "$FINISH_BRANCH" | head -1 | cut -d: -f1)
+LABEL_BLOCK_END=$(awk -v s="$LABEL_BLOCK_START" 'NR > s && /^fi$/ { print NR; exit }' "$FINISH_BRANCH")
+if [[ -n "$LABEL_BLOCK_START" && -n "$LABEL_BLOCK_END" ]]; then
+  EXIT_COUNT=$(sed -n "${LABEL_BLOCK_START},${LABEL_BLOCK_END}p" "$FINISH_BRANCH" | grep -cE '^[[:space:]]*exit')
+  if [[ "$EXIT_COUNT" -eq 0 ]]; then
+    echo "  PASS  #95.5 — label-add bash block is fail-soft (no exit inside; fire-and-surface contract)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  #95.5 — label-add bash block MUST be fail-soft; found $EXIT_COUNT exit statement(s)"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  echo "  FAIL  #95.5 — could not locate label-add block (LABEL_BLOCK_START=$LABEL_BLOCK_START LABEL_BLOCK_END=$LABEL_BLOCK_END)"
+  FAIL=$((FAIL + 1))
+fi
+
 echo
 echo "== Summary =="
 echo "  passed: $PASS"
