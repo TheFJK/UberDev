@@ -578,6 +578,18 @@ On GREEN, emit three SHA-bound durable artifacts in lockstep (all reference the 
    fi
    ```
 
+   ```bash
+   # New (#95): clear the review-pr:pending backstop label on green outcome.
+   # Fail-soft per spec D4 — /uberdev:review-pr may be invoked directly outside
+   # a finish-branch chain, so the label may legitimately be absent; an exit-2
+   # guard would falsely fail green direct-invocation runs.
+   if ! gh pr edit <N> --remove-label review-pr:pending 2>/dev/null; then
+     echo "note: review-pr:pending label not present (either never set or already cleared)" >&2
+   fi
+   ```
+
+   **Pending-label clearance** — the `gh pr edit <N> --remove-label review-pr:pending` call pairs with the `--add-label uberdev-approved` above; together they form the green-outcome trust-signal handoff. See `REVIEW_PR_PENDING_LABEL` in `skills/merge-pipeline/SKILL.md` Constants. The label is set by `finish-branch/SKILL.md` immediately before this Skill is dispatched (issue #95). It is intentionally preserved on REVISIONS_REQUIRED, agent crash, or non-green exit so `/merge` Step 1.4.5's label-present probe can backstop the missed review on the next integration run.
+
 3. **Audit JSON** — write to `.uberdev/runs/<run-id>/review-pr-verdict.json`. The `"sha"` field MUST be `${ANCHOR_SHA}` from artifact 1 (the post-emission `headRefOid`, equal to the anchor commit's own SHA). It is NOT `${PARENT_SHA}` — the trailer payload references the pre-anchor parent, but the JSON `"sha"` references the anchor itself, matching what `gh pr view --json headRefOid` returns immediately after the push:
 
 ```json
