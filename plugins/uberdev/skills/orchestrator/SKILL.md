@@ -284,6 +284,24 @@ Parse the analyzer's YAML return (`gaps[]`, `severity`, `confidence`). Append fi
 
 Why large-only: signal-to-noise on smaller changes is poor; medium tier may revisit after metrics. (Per spec Open question 2.)
 
+### Phase 6: PR creation + review chain
+
+The orchestrator's contract does NOT end at Phase 5 — it extends end-to-end through PR creation and review. Phase 6 is the final phase of every orchestrator run; agents reading this skill must treat the full cascade as the orchestrator's responsibility, not as optional downstream behaviour.
+
+After Phase 5 (`subagent-driven-dev`) returns control:
+
+1. **`uberdev:subagent-driven-dev`** hands off to `uberdev:finish-branch` (forwarding `--turbo` if the orchestrator was invoked with `--turbo`, per Phase 5 above).
+2. **`uberdev:finish-branch`** pushes the branch, creates the PR via `gh pr create`, then invokes `uberdev:review-pr` via the `Skill` tool with the captured PR URL. This is the "always-PR path" — default mode and `--turbo` both auto-select it; only the `--interactive` flag with Options 1/3/4 bypasses the chain.
+3. **`/uberdev:review-pr`** runs its two-phase pipeline:
+   - **Phase 1 — Review + Fix loop** (6 advisory reviewer agents dispatched in a single message via `uberdev:post-impl-review`, then `code-fixer` auto-apply loop on findings).
+   - **Phase 2 — Mandatory Simplify Pass** (3 `uberdev:code-simplifier` lenses — Reuse / Quality / Efficiency — dispatched in a single message, then `code-fixer` auto-apply on findings).
+
+   Findings are advisory at the `finish-branch` boundary — `finish-branch` does NOT block on `REVISIONS_REQUIRED`. `/uberdev:review-pr` writes the trust trail directly to the PR.
+
+**Large-tier note:** On large tier, `Phase 5.5` (`pr-test-analyzer`) runs after `subagent-driven-dev` returns and BEFORE `finish-branch` dispatches PR creation; the analyzer's findings flow into the PR body that `finish-branch` composes for `## Reviewer findings summary`. The small/medium cascade goes Phase 5 → finish-branch directly.
+
+This section names the chain explicitly so that a model reading only the orchestrator skill understands the full end-to-end pipeline. The orchestrator's job is complete when the trust trail from `/uberdev:review-pr` is written; not when Phase 5 returns.
+
 ## Tier profiles (summary)
 
 | Tier | Research fanout | Spec reviewer | Plan reviewer | Plan-writer internal research | Post-impl review | pr-test-analyzer |
@@ -313,10 +331,6 @@ For every phase, write a one-line log to `$RESEARCH_DIR_ABS/orchestrator.log`:
 ```
 
 This is the trail for the issue's "telemetry/measurement" acceptance criterion.
-
-## End-of-pipeline
-
-After Phase 5 completes (subagent-driven-dev returns control), the orchestrator's job is done. The downstream skill handles PR creation per its own flow.
 
 ## Standalone invocation (no /solve or /turbo)
 
