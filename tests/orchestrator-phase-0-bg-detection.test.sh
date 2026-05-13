@@ -5,9 +5,14 @@
 # introduced by issue #93. Mirrors the anchored-grep style of
 # tests/orchestrator-phase-6-doc.test.sh and tests/turbo-flow.test.sh.
 #
-# Assertions A1-A7 from the design spec
-# (docs/uberdev/specs/2026-05-13-orchestrator-bg-context-detection-design.md
-# Components §4).
+# Assertions A1-A7 are self-contained in this file. They lock down:
+# - A1a/A1b: both detection arms (CLAUDE_JOB_DIR, [ ! -t 0 ])
+# - A2/A2b-A2d: literal stderr abort message + all 3 escape-hatch bullets
+# - A3: exit 2 (non-zero abort)
+# - A4: turbo exemption precedes bg-context test
+# - A5: imperative MUST / MUST NOT wording
+# - A6: fail-fast position (bg-gate before RUN_ID)
+# - A7: Phase 2 hybrid turbo detector unchanged
 #
 # Each assertion echoes pass/fail and increments PASS / FAIL counters.
 
@@ -63,6 +68,16 @@ assert_ge "A1b Phase 0 names POSIX [ ! -t 0 ] arm"  1 "$n_tty"
 # standalone-invocation path per reviewer finding; either form is accepted).
 n=$(printf '%s\n' "$phase0_body" | grep -cE 'cannot run in a claude --bg session' || true)
 assert_ge "A2 Phase 0 contains stderr abort message" 1 "$n"
+
+# A2b — all three escape-hatch bullets present (regression guard:
+# if any one bullet is deleted, A2 still passes today, degrading user
+# guidance when the gate fires).
+n_turbo_hatch=$(printf '%s\n' "$phase0_body" | grep -cF -- '- re-run with /turbo' || true)
+n_fg_hatch=$(printf '%s\n' "$phase0_body" | grep -cF -- 'run /solve <N> from a foreground terminal' || true)
+n_standalone_hatch=$(printf '%s\n' "$phase0_body" | grep -cF -- 're-invoke /uberdev:orchestrator --turbo' || true)
+assert_ge "A2b /turbo escape-hatch bullet present"        1 "$n_turbo_hatch"
+assert_ge "A2c foreground /solve escape-hatch bullet"     1 "$n_fg_hatch"
+assert_ge "A2d standalone --turbo escape-hatch bullet"    1 "$n_standalone_hatch"
 
 # A3 — non-zero exit code in the Phase 0 gate
 n=$(printf '%s\n' "$phase0_body" | grep -cE 'exit 2' || true)
