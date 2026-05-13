@@ -49,4 +49,5 @@ jobs:
           zsh tests/solve-pipeline-zsh.test.sh && \
           bash tests/orchestrator-phase1-shortcircuit.test.sh && \
           bash tests/config-override.test.sh && \
-          bash tests/orchestrator-phase-6-doc.test.sh
+          bash tests/orchestrator-phase-6-doc.test.sh && \
+          bash tests/orchestrator-phase-0-bg-detection.test.sh
