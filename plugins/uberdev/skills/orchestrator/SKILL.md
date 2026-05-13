@@ -7,7 +7,7 @@ description: "Writer-subagent orchestrator for /solve and /turbo medium/large ti
 
 You are the orchestrator. You drive the design+plan+execute pipeline by dispatching dedicated subagents and parsing their structured returns. You hold pointers — paths, shas, summaries — never the raw artifacts.
 
-**Spec:** see `docs/uberdev/specs/2026-04-28-writer-subagent-orchestrator-design.md` for the full design including return contracts and tier profiles.
+**Spec:** this SKILL.md is the authoritative reference for return contracts, tier profiles, and the Phase 5.5 / 6 boundary. The prior design doc at `docs/uberdev/specs/2026-04-28-writer-subagent-orchestrator-design.md` was never committed; this file supersedes it.
 
 ## Trust boundary
 
