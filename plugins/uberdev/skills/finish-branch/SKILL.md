@@ -46,18 +46,18 @@ git merge-base HEAD main 2>/dev/null || git merge-base HEAD master 2>/dev/null
 
 Or ask: "This branch split from main - is that correct?"
 
-### Step 3: Mode selection (precedence: --turbo > --interactive > default)
+### Step 3: Mode selection (precedence: UBERDEV_TURBO=1 > --interactive > default)
 
-Detect flags from `$ARGUMENTS`:
+Detect mode from the inherited environment variable `UBERDEV_TURBO` (set by `commands/turbo.md` → `solve-pipeline` → `claude --bg` inline-prefix exec, per #97) AND from `$ARGUMENTS` (for the `--interactive` flag only — finish-branch no longer parses `--turbo` as an argument; turbo signal is env-var-only on the chain hot path):
 
-1. **Turbo mode** — if `--turbo` is in `$ARGUMENTS`:
-   Skip the prompt, auto-select **Option 2 (Push and create a Pull Request)**, and chain into `/uberdev:review-pr` (forwarding `--turbo`). Announce:
+1. **Turbo mode** — if `[[ "${UBERDEV_TURBO:-0}" == "1" ]]`:
+   Skip the prompt, auto-select **Option 2 (Push and create a Pull Request)**, and chain into `/uberdev:review-pr` (no `--turbo` arg — review-pr inherits the env var via Skill() invocation in the same agent process). Announce:
 
-   > "Implementation complete. Turbo mode — auto-selecting Option 2 (Push and create PR). Chaining into /uberdev:review-pr (--turbo)."
+   > "Implementation complete. Turbo mode (UBERDEV_TURBO=1) — auto-selecting Option 2 (Push and create PR). Chaining into /uberdev:review-pr."
 
    Proceed to Step 4 → Option 2.
 
-2. **Interactive mode** — if `--interactive` is in `$ARGUMENTS` (and `--turbo` is NOT):
+2. **Interactive mode** — if `--interactive` is in `$ARGUMENTS` AND `[[ "${UBERDEV_TURBO:-0}" != "1" ]]`:
    Present the legacy 4-option menu below. If the user picks Option 2, chain into `/uberdev:review-pr` (no `--turbo`). Other options behave as today.
 
    ```
@@ -71,18 +71,18 @@ Detect flags from `$ARGUMENTS`:
    Which option?
    ```
 
-   > **Caveat — Options 1, 3, 4 bypass post-impl review.** Options 1 (Merge back to base locally), 3 (Keep the branch as-is), and 4 (Discard this work) skip `gh pr create` entirely, and therefore skip the chain into `/uberdev:review-pr` whose Phase 1 hosts the 5-reviewer post-impl-review fanout (per `plugins/uberdev/skills/post-impl-review/SKILL.md` "When to invoke" — `/uberdev:review-pr` Phase 1 is the sole live caller). Users who pick Options 1, 3, or 4 explicitly opt out of automated post-impl review for that branch. Only Option 2 (Push and create a Pull Request) preserves the chain. The default mode (always-PR, no flags) and `--turbo` mode both auto-select Option 2 — neither is affected by this bypass.
+   > **Caveat — Options 1, 3, 4 bypass post-impl review.** Options 1 (Merge back to base locally), 3 (Keep the branch as-is), and 4 (Discard this work) skip `gh pr create` entirely, and therefore skip the chain into `/uberdev:review-pr` whose Phase 1 hosts the 5-reviewer post-impl-review fanout (per `plugins/uberdev/skills/post-impl-review/SKILL.md` "When to invoke" — `/uberdev:review-pr` Phase 1 is the sole live caller). Users who pick Options 1, 3, or 4 explicitly opt out of automated post-impl review for that branch. Only Option 2 (Push and create a Pull Request) preserves the chain. The default mode (always-PR, no flags) and Turbo mode (`UBERDEV_TURBO=1`) both auto-select Option 2 — neither is affected by this bypass.
 
    **Don't add explanation** — keep options concise.
 
-3. **Default mode** — neither flag set (the always-PR path):
+3. **Default mode** — neither `UBERDEV_TURBO=1` nor `--interactive` set (the always-PR path):
    Auto-select **Option 2 (Push and create a Pull Request)** and chain into `/uberdev:review-pr` (no `--turbo` forwarded). Announce:
 
    > "Implementation complete. Pushing branch and creating PR. Chaining into /uberdev:review-pr…"
 
    Proceed to Step 4 → Option 2.
 
-**Conflict resolution:** if both `--turbo` and `--interactive` are present, `--turbo` wins (turbo's contract is unattended end-to-end; interactive prompts are mutually exclusive).
+**Conflict resolution:** if both `--interactive` is in `$ARGUMENTS` AND `UBERDEV_TURBO=1` is set, env var wins (turbo's contract is unattended end-to-end; interactive prompts are mutually exclusive). The `UBERDEV_TURBO` env var is the canonical signal on the chain hot path; finish-branch no longer accepts a `--turbo` argument (#97 — env-var-only since the orchestrator → SDD → finish-branch chain is fully internal).
 
 **Discoverability:** the `--interactive` flag restores the legacy 4-option menu (Merge back to base / Push and create a Pull Request / Keep the branch as-is / Discard) for users who want it. The default is now always-PR; this fulfills the `~/.claude/CLAUDE.md` mandate "MANDATORY: run `/uberdev:review-pr` after pushing the PR. No exceptions, hotfixes included."
 
@@ -317,9 +317,9 @@ The two `gh` calls above are intentionally fail-soft — the fire-and-surface co
 
 **Chain hand-off (always-PR path, default + turbo):**
 
-After the PR is created and `PR_URL` is validated, **invoke `uberdev:review-pr` via the `Skill` tool** with the captured `PR_URL`. Forward `--turbo` if it was in `$ARGUMENTS`. The chain is **fire-and-surface, not fire-and-block**: review-pr's findings surface to the user via its own output, but `finish-branch` does NOT block on `REVISIONS_REQUIRED` (advisory only, per #11 Q1).
+After the PR is created and `PR_URL` is validated, **invoke `uberdev:review-pr` via the `Skill` tool** with the captured `PR_URL` (no `--turbo` arg). Review-pr inherits the unattended-mode signal via the `UBERDEV_TURBO=1` env var inherited from the parent `claude --bg` process; review-pr also retains a hybrid arg-OR-env detector for compatibility with `merge-pipeline`'s separate dispatch (which still passes `--turbo` as an arg — out-of-scope for #97). The chain is **fire-and-surface, not fire-and-block**: review-pr's findings surface to the user via its own output, but `finish-branch` does NOT block on `REVISIONS_REQUIRED` (advisory only, per #11 Q1).
 
-> Invoke `uberdev:review-pr` via the Skill tool with the captured `PR_URL`. Forward `--turbo` if present. Findings are ADVISORY — do NOT block on `REVISIONS_REQUIRED` at this layer (the auto-fix loop is deferred per #11 Q1).
+> Invoke `uberdev:review-pr` via the Skill tool with the captured `PR_URL` (no flag args). Findings are ADVISORY — do NOT block on `REVISIONS_REQUIRED` at this layer (the auto-fix loop is deferred per #11 Q1).
 
 Mirrors the canonical `subagent-driven-dev → post-impl-review` precedent (commit `73b2562`). `commands/review-pr.md` has no `disable-model-invocation` flag, so the `Skill` tool can invoke the slash command directly without promotion.
 
@@ -425,4 +425,4 @@ git worktree remove <worktree-path>
 - **`uberdev:merge`** — follows Option 2. `finish-branch` opens the PR; `/merge` lands it. Together they form the lifecycle `/issue → /solve → push → /review-pr → /merge`.
 
 **Chains into:**
-- **`uberdev:review-pr`** — invoked via the `Skill` tool after PR creation on the always-PR path (default mode + `--turbo`). Mirrors `subagent-driven-dev → post-impl-review` (commit `73b2562`). Advisory only — `finish-branch` does not block on reviewer verdict.
+- **`uberdev:review-pr`** — invoked via the `Skill` tool after PR creation on the always-PR path (default mode + Turbo mode under `UBERDEV_TURBO=1`). Mirrors `subagent-driven-dev → post-impl-review` (commit `73b2562`). Advisory only — `finish-branch` does not block on reviewer verdict.
