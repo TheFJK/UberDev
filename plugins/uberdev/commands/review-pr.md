@@ -192,7 +192,13 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
     ```bash
     WORKING_DIR_ABS="$(git rev-parse --show-toplevel)"
-    REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
+    # Local origin-URL parse — ~15ms vs `gh repo view` ~530ms (35x speedup);
+    # byte-identical output for the standard GitHub origin remote. Falls back
+    # to `gh repo view` only if origin URL is missing or non-GitHub.
+    REPO_SLUG="$(git remote get-url origin 2>/dev/null | sed -E 's@.*github\.com[:/]([^/]+/[^/.]+)(\.git)?$@\1@')"
+    if [ -z "$REPO_SLUG" ] || [ "$REPO_SLUG" = "$(git remote get-url origin 2>/dev/null)" ]; then
+      REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
+    fi
     RESEARCH_DIR_ABS="$WORKING_DIR_ABS/.uberdev/research/$RUN_ID"
     ```
 
@@ -566,7 +572,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    |---|---|---|---|---|
    | Phase 1 — Review + Fix | ran | APPROVE / REVISIONS_REQUIRED / REJECT | <commit shas> | <count> |
    | Phase 2 — Simplify     | ran / blocked / skipped | APPROVE / REVISIONS_REQUIRED / REJECT (omit if status≠ran) | <commit sha or ∅> | <count> |
-   | Issues filed (Phase 2.5) | `$CREATED_URLS_JSON` (created) + `$COMMENTED_URLS_JSON` (commented) — see below for full URL list. `$OVERFLOW_COUNT` additional findings exceeded MAX_NEW=10 cap. `$BLOCKED_BY_DEDUPE_JSON` blocked by dedupe-lookup failure. (Skip path: `(skipped: --no-defer-issues)` or `(skipped: defer_issues_enabled=false)`.) |
+   | Issues filed (Phase 2.5) | Rendered from the agent's return YAML: `len(created_urls)` created + `len(commented_urls)` commented — see the "Issues filed (links)" block below for the full URL list. `overflow_count` additional findings exceeded `MAX_NEW=10` cap. `len(blocked_by_dedupe)` blocked by dedupe-lookup failure or fail-CLOSED branch. Skip path: `(skipped: --no-defer-issues)` when `DEFER_ISSUES_PHASE=0`, OR `(skipped: defer_issues_enabled=false)` when the config disables, OR both joined by " and " when both knobs are off. |
 
    **Issues filed (links):**
 
