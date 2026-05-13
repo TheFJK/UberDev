@@ -11,9 +11,14 @@ set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FINISH_BRANCH="$REPO_ROOT/plugins/uberdev/skills/finish-branch/SKILL.md"
+SECRET_SCAN_LIB="$REPO_ROOT/plugins/uberdev/lib/secret-scan.sh"
 
 if [ ! -r "$FINISH_BRANCH" ]; then
   echo "FATAL: required file missing or unreadable: $FINISH_BRANCH" >&2
+  exit 2
+fi
+if [ ! -r "$SECRET_SCAN_LIB" ]; then
+  echo "FATAL: required file missing or unreadable: $SECRET_SCAN_LIB" >&2
   exit 2
 fi
 
@@ -126,17 +131,23 @@ assert_grep "$FINISH_BRANCH" \
   'PR_BODY_FILE|composed PR body|composed PR-body' \
   "secret scan target 2: composed PR body file"
 assert_grep "$FINISH_BRANCH" \
-  'gitleaks' \
-  "gitleaks named (primary scan tool)"
-assert_grep "$FINISH_BRANCH" \
+  'gitleaks|secret-scan\.sh' \
+  "gitleaks reachable from SKILL.md (inline name or sourced lib)"
+# Regex patterns and gitleaks-missing warning moved to lib/secret-scan.sh
+# (extracted by #111). Assert against the library file, since the content
+# location moved but the intent has not.
+assert_grep "$SECRET_SCAN_LIB" \
   'AKIA\[0-9A-Z\]\{16\}|gh\[ps\]_\[A-Za-z0-9\]|BEGIN .*PRIVATE KEY' \
-  "regex fallback patterns present (AWS, GH tokens, private keys)"
+  "regex fallback patterns present in lib/secret-scan.sh (AWS, GH tokens, private keys)"
+assert_grep "$FINISH_BRANCH" \
+  'source.*lib/secret-scan\.sh' \
+  "SKILL.md sources the secret-scan library"
 
 echo
 echo "== gitleaks-missing fail-open warning =="
-assert_grep "$FINISH_BRANCH" \
+assert_grep "$SECRET_SCAN_LIB" \
   'brew install gitleaks|gitleaks not installed|regex fallback only' \
-  "gitleaks-missing warning + bootstrap hint present"
+  "gitleaks-missing warning + bootstrap hint present in lib/secret-scan.sh"
 
 echo
 echo "== Worktree preservation for Options 2/3 unchanged (regression canary) =="
