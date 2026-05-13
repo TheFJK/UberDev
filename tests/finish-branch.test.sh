@@ -57,6 +57,38 @@ else
   echo "  FAIL  F5 lib/secret-scan.sh missing gitleaks primary or regex fallback patterns"; FAIL=$((FAIL+1))
 fi
 
+# F6: Runtime integration — pipe a known AKIA-bearing input through the lib
+# using the SKILL.md caller idiom (`SCAN_DIAG=$(... 2>&1 >/dev/null); SCAN_RC=$?`)
+# and assert the abort decision triggers. This is the regression that the
+# structural-only F1-F5 assertions missed before; F6 plugs that gap.
+F6_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+if ( CLAUDE_PLUGIN_ROOT="$F6_PLUGIN_ROOT" \
+     bash -c '
+       set -u
+       source "$CLAUDE_PLUGIN_ROOT/lib/secret-scan.sh" >/dev/null 2>&1 || exit 99
+       # Test 1: clean input -> rc=0, no abort
+       SCAN_DIAG=$(printf "%s" "clean code line" | uberdev_run_secret_scan_stdin 2>&1 >/dev/null)
+       SCAN_RC=$?
+       [ "$SCAN_RC" -eq 0 ] || exit 1
+       # Test 2: AKIA leak -> rc!=0, abort should trigger
+       SCAN_DIAG=$(printf "%s" "AKIAIOSFODNN7EXAMPLE" | uberdev_run_secret_scan_stdin 2>&1 >/dev/null)
+       SCAN_RC=$?
+       [ "$SCAN_RC" -ne 0 ] || exit 2
+       # Test 3: SKILL.md caller idiom verbatim — assert abort decision triggers on leak
+       SCAN_DIAG=$(printf "%s" "AKIAIOSFODNN7EXAMPLE" | uberdev_run_secret_scan_stdin 2>&1 >/dev/null)
+       SCAN_RC=$?
+       if [ "$SCAN_RC" -eq 0 ]; then exit 3; fi
+       # Test 4: diagnostic captures the matched line (anchors the abort message)
+       [ -n "$SCAN_DIAG" ] || exit 4
+       printf "%s" "$SCAN_DIAG" | grep -q AKIA || exit 5
+       exit 0
+     ' ); then
+  echo "  PASS  F6 runtime: lib aborts on AKIA leak via SKILL.md caller idiom"; PASS=$((PASS+1))
+else
+  rc=$?
+  echo "  FAIL  F6 runtime integration test failed (sub-rc=$rc)"; FAIL=$((FAIL+1))
+fi
+
 echo
 echo "## Summary"
 echo "  PASS=$PASS  FAIL=$FAIL"
