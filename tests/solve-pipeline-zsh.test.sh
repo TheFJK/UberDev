@@ -46,6 +46,10 @@ PASS=0
 FAIL=0
 pass() { echo "  PASS  $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL  $1"; FAIL=$((FAIL + 1)); }
+# Normalize a stream of numbers to a single space-separated, ascending-sorted
+# line (trailing-space stripped). Stdin → stdout. Byte-identical to the
+# inline `sort -n | tr '\n' ' ' | sed 's/ $//'` chain it replaces.
+_normalize_nums() { sort -n | tr '\n' ' ' | sed 's/ $//'; }
 
 echo "== R1: SKILL.md Phase A hoist defines PERM_FLAG/EFFORT_FLAG as arrays =="
 # Anchored grep on the SKILL.md hoist. If a future edit reverts to scalar
@@ -171,8 +175,164 @@ else
   fi
 fi
 
+echo
+echo '== R4: SKILL.md Phase B wave-batching iterates without zsh 0-index error =='
+# Regression for issue #100. The v0.22.x Phase B inner loop used
+# `for (( i = wave_start; i <= wave_end; i++ )); ISSUE_NUM="${ISSUE_NUMS[$i]}"`,
+# which aborts under `zsh -u` because zsh arrays are 1-indexed by default and
+# accessing `${ISSUE_NUMS[0]}` is an unset-parameter error. The fix replaces
+# the indexed form with a by-value subarray slice
+# (`for ISSUE_NUM in "${ISSUE_NUMS[@]:$wave_start:$wave_size}"; do`) which
+# uses `offset:length` semantics, not subscript indexing, and is shell-agnostic.
+#
+# This fixture replicates the SKILL.md Phase B wave-batching control flow
+# under a real `zsh -c` subshell with `set -u` and asserts:
+#   R4a: the loop runs to completion (no `parameter not set` abort)
+#   R4b: every ISSUE_NUMS element is dispatched exactly once across the waves
+#   R4c: wave-1 dispatches MAX_PARALLEL_BG_AGENTS issues; wave-2 dispatches the rest
+#
+# Regression-mode demo: revert SKILL.md inner loop to
+# `for (( i = wave_start; i <= wave_end; i++ ))` + `${ISSUE_NUMS[$i]}` and
+# re-run — R4a fires with the captured stderr containing `parameter not set`.
+
+CAPTURE_DIR_R4="$(mktemp -d)" || fail "R4 precondition: mktemp -d failed"
+ERR_LOG_R4="$(mktemp)" || fail "R4 precondition: mktemp failed"
+
+# Run the SKILL.md Phase B wave-batching control flow under `zsh -c` with
+# `set -u` so the unset-parameter abort surfaces as a non-zero exit.
+zsh -c '
+  set -u
+  export PATH="'"$STUB_DIR"'":$PATH
+  CAPTURE_DIR="'"$CAPTURE_DIR_R4"'"
+
+  ISSUE_NUMS=(91 94 95 97)
+  MAX_PARALLEL_BG_AGENTS=2
+  typeset -A TIERS
+  typeset -A TITLES
+  TIERS[91]=small;  TITLES[91]="issue 91"
+  TIERS[94]=small;  TITLES[94]="issue 94"
+  TIERS[95]=small;  TITLES[95]="issue 95"
+  TIERS[97]=small;  TITLES[97]="issue 97"
+
+  TOTAL_ISSUES="${#ISSUE_NUMS[@]}"
+  WAVE_COUNT=$(( (TOTAL_ISSUES + MAX_PARALLEL_BG_AGENTS - 1) / MAX_PARALLEL_BG_AGENTS ))
+  for (( wave_index = 1; wave_index <= WAVE_COUNT; wave_index++ )); do
+    wave_start=$(( (wave_index - 1) * MAX_PARALLEL_BG_AGENTS ))
+    wave_end=$(( wave_start + MAX_PARALLEL_BG_AGENTS - 1 ))
+    (( wave_end >= TOTAL_ISSUES )) && wave_end=$(( TOTAL_ISSUES - 1 ))
+    wave_size=$(( wave_end - wave_start + 1 ))
+    for ISSUE_NUM in "${ISSUE_NUMS[@]:$wave_start:$wave_size}"; do
+      TIER="${TIERS[$ISSUE_NUM]}"
+      TITLE="${TITLES[$ISSUE_NUM]}"
+      printf "%s\n" "$ISSUE_NUM" >> "$CAPTURE_DIR/wave-$wave_index.txt"
+    done
+  done
+' 2> "$ERR_LOG_R4"
+R4_RC=$?
+
+if [ "$R4_RC" -eq 0 ] && ! grep -q 'parameter not set' "$ERR_LOG_R4"; then
+  pass "R4a: Phase B wave-batching loop completed under zsh -u (no parameter-not-set abort)"
+else
+  fail "R4a: Phase B wave-batching loop aborted under zsh -u"
+  echo "        exit rc: $R4_RC"
+  echo "        stderr:"
+  sed 's/^/          /' "$ERR_LOG_R4"
+fi
+
+EXPECTED_NUMS=(91 94 95 97)  # array form: zsh scalar would not word-split
+ALL_CAPTURED="$(cat "$CAPTURE_DIR_R4"/wave-*.txt 2>/dev/null | _normalize_nums)"
+EXPECTED_SORTED="$(printf '%s\n' "${EXPECTED_NUMS[@]}" | _normalize_nums)"
+if [ "$ALL_CAPTURED" = "$EXPECTED_SORTED" ]; then
+  pass "R4b: every ISSUE_NUMS element dispatched exactly once across waves (captured: $ALL_CAPTURED)"
+else
+  fail "R4b: dispatched-issue set does not match input"
+  echo "        expected: $EXPECTED_SORTED"
+  echo "        got:      $ALL_CAPTURED"
+fi
+
+WAVE1_COUNT=$(wc -l < "$CAPTURE_DIR_R4/wave-1.txt" 2>/dev/null | tr -d ' ')
+WAVE2_COUNT=$(wc -l < "$CAPTURE_DIR_R4/wave-2.txt" 2>/dev/null | tr -d ' ')
+if [ "${WAVE1_COUNT:-0}" -eq 2 ] && [ "${WAVE2_COUNT:-0}" -eq 2 ]; then
+  pass "R4c: wave-1 dispatched 2 issues, wave-2 dispatched 2 issues (matches MAX_PARALLEL_BG_AGENTS=2 for N=4)"
+else
+  fail "R4c: wave cardinality mismatch — wave1=${WAVE1_COUNT:-missing} wave2=${WAVE2_COUNT:-missing}, expected 2/2"
+fi
+
+# R4d: odd-N coverage. N=5 with MAX_PARALLEL_BG_AGENTS=2 yields 3 waves of size
+# 2/2/1 and exercises the `(( wave_end >= TOTAL_ISSUES )) && wave_end=$(( TOTAL_ISSUES - 1 ))`
+# clamp branch in SKILL.md Phase B that R4 (N=4, perfectly even) never hits.
+# The bash arithmetic for the clamp lands `wave_size=1` on the final wave;
+# this assertion locks that branch against future off-by-one regressions.
+CAPTURE_DIR_R4D="$(mktemp -d)" || fail "R4d precondition: mktemp -d failed"
+ERR_LOG_R4D="$(mktemp)" || fail "R4d precondition: mktemp failed"
+
+zsh -c '
+  set -u
+  export PATH="'"$STUB_DIR"'":$PATH
+  CAPTURE_DIR="'"$CAPTURE_DIR_R4D"'"
+
+  ISSUE_NUMS=(101 102 103 104 105)
+  MAX_PARALLEL_BG_AGENTS=2
+  typeset -A TIERS
+  typeset -A TITLES
+  for n in "${ISSUE_NUMS[@]}"; do
+    TIERS[$n]=small
+    TITLES[$n]="issue $n"
+  done
+
+  TOTAL_ISSUES="${#ISSUE_NUMS[@]}"
+  WAVE_COUNT=$(( (TOTAL_ISSUES + MAX_PARALLEL_BG_AGENTS - 1) / MAX_PARALLEL_BG_AGENTS ))
+  for (( wave_index = 1; wave_index <= WAVE_COUNT; wave_index++ )); do
+    wave_start=$(( (wave_index - 1) * MAX_PARALLEL_BG_AGENTS ))
+    wave_end=$(( wave_start + MAX_PARALLEL_BG_AGENTS - 1 ))
+    (( wave_end >= TOTAL_ISSUES )) && wave_end=$(( TOTAL_ISSUES - 1 ))
+    wave_size=$(( wave_end - wave_start + 1 ))
+    for ISSUE_NUM in "${ISSUE_NUMS[@]:$wave_start:$wave_size}"; do
+      TIER="${TIERS[$ISSUE_NUM]}"
+      TITLE="${TITLES[$ISSUE_NUM]}"
+      printf "%s\n" "$ISSUE_NUM" >> "$CAPTURE_DIR/wave-$wave_index.txt"
+    done
+  done
+' 2> "$ERR_LOG_R4D"
+R4D_RC=$?
+
+EXPECTED_NUMS_R4D=(101 102 103 104 105)
+ALL_CAPTURED_R4D="$(cat "$CAPTURE_DIR_R4D"/wave-*.txt 2>/dev/null | _normalize_nums)"
+EXPECTED_SORTED_R4D="$(printf '%s\n' "${EXPECTED_NUMS_R4D[@]}" | _normalize_nums)"
+WAVE1_COUNT_R4D=$(wc -l < "$CAPTURE_DIR_R4D/wave-1.txt" 2>/dev/null | tr -d ' ')
+WAVE2_COUNT_R4D=$(wc -l < "$CAPTURE_DIR_R4D/wave-2.txt" 2>/dev/null | tr -d ' ')
+WAVE3_COUNT_R4D=$(wc -l < "$CAPTURE_DIR_R4D/wave-3.txt" 2>/dev/null | tr -d ' ')
+
+# Split into three sub-assertions mirroring R4's R4a/R4b/R4c layout: this
+# attributes the failure mode (loop abort vs. set mismatch vs. wave cardinality)
+# instead of collapsing all three into one pass/fail line.
+if [ "$R4D_RC" -eq 0 ] && ! grep -q 'parameter not set' "$ERR_LOG_R4D"; then
+  pass "R4d-a: odd-N Phase B wave-batching loop completed under zsh -u (no parameter-not-set abort)"
+else
+  fail "R4d-a: odd-N Phase B wave-batching loop aborted under zsh -u"
+  echo "        exit rc: $R4D_RC"
+  if [ -s "$ERR_LOG_R4D" ]; then
+    echo "        stderr:"
+    sed 's/^/          /' "$ERR_LOG_R4D"
+  fi
+fi
+
+if [ "$ALL_CAPTURED_R4D" = "$EXPECTED_SORTED_R4D" ]; then
+  pass "R4d-b: every ISSUE_NUMS element dispatched exactly once across waves (captured: $ALL_CAPTURED_R4D)"
+else
+  fail "R4d-b: dispatched-issue set does not match input"
+  echo "        expected: $EXPECTED_SORTED_R4D"
+  echo "        got:      $ALL_CAPTURED_R4D"
+fi
+
+if [ "${WAVE1_COUNT_R4D:-0}" -eq 2 ] && [ "${WAVE2_COUNT_R4D:-0}" -eq 2 ] && [ "${WAVE3_COUNT_R4D:-0}" -eq 1 ]; then
+  pass "R4d-c: odd-N clamp exercised — N=5/cap=2 → 3 waves of 2/2/1 (final wave wave_size=1 via wave_end clamp)"
+else
+  fail "R4d-c: wave cardinality mismatch — waves=${WAVE1_COUNT_R4D:-?}/${WAVE2_COUNT_R4D:-?}/${WAVE3_COUNT_R4D:-?}, expected 2/2/1"
+fi
+
 # Cleanup
-rm -rf "$STUB_DIR" "$CAPTURE_FILE" "$CAPTURE_FILE_2"
+rm -rf "$STUB_DIR" "$CAPTURE_FILE" "$CAPTURE_FILE_2" "$CAPTURE_DIR_R4" "$ERR_LOG_R4" "$CAPTURE_DIR_R4D" "$ERR_LOG_R4D"
 
 echo
 echo "== Summary =="

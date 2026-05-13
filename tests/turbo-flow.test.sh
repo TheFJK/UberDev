@@ -193,7 +193,7 @@ assert_grep "$SOLVE_PIPELINE" \
 # Phase A hoist check: the version gate + BG_PROMPT_MODE assignment must
 # precede the Phase B per-issue loop (resolved once; identical for every spawn).
 SP_PHASE_A_LINE=$(grep -n '^_uberdev_require_claude_version "2.1.139"\|^BG_PROMPT_MODE=argv' "$SOLVE_PIPELINE" | head -1 | cut -d: -f1)
-SP_PHASE_B_LINE=$(grep -nE 'for ISSUE_NUM in "\$\{ISSUE_NUMS\[@\]\}"|for \(\( i = wave_start' "$SOLVE_PIPELINE" | tail -1 | cut -d: -f1)
+SP_PHASE_B_LINE=$(grep -nE 'for ISSUE_NUM in "\$\{ISSUE_NUMS\[@\]\}"|for ISSUE_NUM in "\$\{ISSUE_NUMS\[@\]:' "$SOLVE_PIPELINE" | tail -1 | cut -d: -f1)
 if [[ -n "$SP_PHASE_A_LINE" && -n "$SP_PHASE_B_LINE" && "$SP_PHASE_A_LINE" -lt "$SP_PHASE_B_LINE" ]]; then
   echo "  PASS  Phase A hoisted before Phase B loop (line $SP_PHASE_A_LINE before $SP_PHASE_B_LINE)"
   PASS=$((PASS + 1))
