@@ -57,7 +57,7 @@ Detect mode from the inherited environment variable `UBERDEV_TURBO` (set by `com
 
    Proceed to Step 4 → Option 2.
 
-2. **Interactive mode** — if `--interactive` is in `$ARGUMENTS` AND `[[ "${UBERDEV_TURBO:-0}" != "1" ]]`:
+2. **Interactive mode** — if `--interactive` is in `$ARGUMENTS` (and `UBERDEV_TURBO` is not `1` — turbo wins per precedence above):
    Present the legacy 4-option menu below. If the user picks Option 2, chain into `/uberdev:review-pr` (no `--turbo`). Other options behave as today.
 
    ```
@@ -82,7 +82,7 @@ Detect mode from the inherited environment variable `UBERDEV_TURBO` (set by `com
 
    Proceed to Step 4 → Option 2.
 
-**Conflict resolution:** if both `--interactive` is in `$ARGUMENTS` AND `UBERDEV_TURBO=1` is set, env var wins (turbo's contract is unattended end-to-end; interactive prompts are mutually exclusive). The `UBERDEV_TURBO` env var is the canonical signal on the chain hot path; finish-branch no longer accepts a `--turbo` argument (#97 — env-var-only since the orchestrator → SDD → finish-branch chain is fully internal).
+**Conflict resolution:** if `--interactive` is in `$ARGUMENTS` AND `UBERDEV_TURBO=1` is also set, env var wins (turbo's contract is unattended end-to-end; interactive prompts are mutually exclusive). The `UBERDEV_TURBO` env var is the canonical signal on the chain hot path; finish-branch no longer accepts a `--turbo` argument (#97 — env-var-only since the orchestrator → SDD → finish-branch chain is fully internal).
 
 **Discoverability:** the `--interactive` flag restores the legacy 4-option menu (Merge back to base / Push and create a Pull Request / Keep the branch as-is / Discard) for users who want it. The default is now always-PR; this fulfills the `~/.claude/CLAUDE.md` mandate "MANDATORY: run `/uberdev:review-pr` after pushing the PR. No exceptions, hotfixes included."
 

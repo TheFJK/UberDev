@@ -95,6 +95,32 @@ assert_grep "$SOLVE_PIPELINE" \
   "solve-pipeline expands BG_TURBO_ENV[@] left of claude --bg via env(1)-mediated inline-prefix exec (#97 — timeout(1) eats raw KEY=value as argv, env(1) consumes them as env)"
 
 echo
+echo "== Anchor pre-check: solve-pipeline must contain exactly 2 'if AUTO_MODE==1' anchors (#97 simplify-lens E2 forward-guard) =="
+# The two differential-guard awk passes below key off the bare anchor
+# `^if \[\[ "\$AUTO_MODE" == "1" \]\]; then$` and rely on its state machine
+# (in_turbo → in_solve on the very next `^else$`). The skill's design contract
+# is two such blocks: line 285 (TURBO MODE banner gate, no else arm — but the
+# awk only enters in_turbo on a match and exits via the FIRST `^else$` it sees,
+# which today belongs to the line-505 medium dispatch block, not 285's banner)
+# and line 505 (medium-tier orchestrator dispatch, with else arm). A third
+# block was briefly introduced at line 575 by #97 Phase 1 (BG_TURBO_ENV
+# pre-declare in if/then/fi form) and immediately collapsed in #97 Phase 2 to
+# `[[ ... ]] && ...` form precisely because adding a third anchor would
+# silently corrupt this awk's region scan. Lock the count at 2 so any future
+# edit that reintroduces the pattern fails loudly here, BEFORE the differential
+# guards below produce confusing pass/fail behavior.
+ANCHOR_COUNT="$(grep -c '^if \[\[ "\$AUTO_MODE" == "1" \]\]; then$' "$SOLVE_PIPELINE")"
+if [[ "$ANCHOR_COUNT" -ne 2 ]]; then
+  echo "  FAIL  solve-pipeline anchor count expected 2, got $ANCHOR_COUNT — differential-guard awk relies on exactly two if/else/fi blocks"
+  echo "        file: $SOLVE_PIPELINE"
+  echo "        if a new AUTO_MODE-conditional block was added, prefer the [[ ... ]] && ... single-line form to avoid the anchor"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  solve-pipeline contains exactly 2 'if AUTO_MODE==1' anchors (differential-guard region-scan invariant holds)"
+  PASS=$((PASS + 1))
+fi
+
+echo
 echo "== Differential guard: AUTO_MODE!=1 medium dispatch dispatches WITHOUT --turbo (#15) =="
 # pr-test-analyzer Gap #2: the positive --turbo assertion above asserts --turbo
 # appears somewhere in the skill; this asserts the interactive (/solve) medium

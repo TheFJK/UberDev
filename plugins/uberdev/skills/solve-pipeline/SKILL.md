@@ -568,13 +568,15 @@ BG_STDOUT_LOG="/tmp/solve-bg-stdout-$ISSUE_NUM.log"
 # (not as env) and exit 127. `env "${BG_TURBO_ENV[@]}" claude --bg` consumes
 # the KEY=value tokens and execs claude --bg with those env vars set; under
 # AUTO_MODE=0 (empty array) it degrades to a no-op env passthrough.
-# Pre-declare BG_TURBO_ENV=() before the if/else to keep the array bound under
-# `set -u` (defense-in-depth — current Bash tool calls do NOT enable -u, but
-# both branches setting the same name is the safer invariant). #97 follow-up.
+# Pre-declare BG_TURBO_ENV=() so the array name is always bound before the
+# AUTO_MODE-conditional setter on the next line runs. The `[[ ... ]] && ...`
+# form (rather than a second `if/then/fi` block) keeps the file's anchor count
+# at exactly two `^if \[\[ "\$AUTO_MODE" == "1" \]\]; then$` matches (lines
+# 285 and 505) — the differential-guard awk in tests/turbo-flow.test.sh keys
+# off that anchor count and would scan an unbounded code region if a third
+# block were introduced (#97 simplify-lens E2 follow-up).
 BG_TURBO_ENV=()
-if [[ "$AUTO_MODE" == "1" ]]; then
-  BG_TURBO_ENV=( UBERDEV_TURBO=1 )
-fi
+[[ "$AUTO_MODE" == "1" ]] && BG_TURBO_ENV=( UBERDEV_TURBO=1 )
 case "$BG_PROMPT_MODE" in
   file)
     # Trusted path arg; file contents never reach the shell as argv.
