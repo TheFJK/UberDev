@@ -1652,13 +1652,13 @@ echo "== M86: review-pr:pending label-present probe in Step 1.4.5 (#95) =="
 
 # M86.1 — Constants table declares REVIEW_PR_PENDING_LABEL (Task 1)
 assert_grep "$SKILL_FILE" \
-  '\| `REVIEW_PR_PENDING_LABEL` \| `"review-pr:pending"` \|' \
-  "M86.1 — Constants table declares REVIEW_PR_PENDING_LABEL = \"review-pr:pending\" (#95 spec C4 / T1)"
+  '\| `REVIEW_PR_PENDING_LABEL` \| `review-pr:pending` \|' \
+  "M86.1 — Constants table declares REVIEW_PR_PENDING_LABEL = review-pr:pending (#95 spec C4 / T1, R8.6 simplify drops inner quotes for table parity)"
 
-# M86.2 — Step 1.4.5 contains the gh pr view --json labels probe (Task 4)
+# M86.2 — Step 1.4.5 contains the probe reusing cached $PR_JSON (Task 4)
 assert_grep "$SKILL_FILE" \
-  'gh pr view "\$PR" --json labels --jq' \
-  "M86.2 — gh pr view --json labels probe present in Step 1.4.5 (#95 spec C3 / T4)"
+  'jq -r .\.labels\[\]\.name. <<<"\$PR_JSON"' \
+  "M86.2 — probe reuses cached \$PR_JSON via jq -r .labels[].name in Step 1.4.5 (#95 spec C3 / T4, R8.6 simplify)"
 
 # M86.3 — probe assigns reason="trust_trail_label_missing" (reuses existing enum; no new member)
 PROBE_START=$(grep -n 'NEW (#95): label-present probe' "$SKILL_FILE" | head -1 | cut -d: -f1)

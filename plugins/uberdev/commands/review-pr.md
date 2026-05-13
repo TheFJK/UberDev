@@ -579,6 +579,10 @@ On GREEN, emit three SHA-bound durable artifacts in lockstep (all reference the 
    ```
 
    ```bash
+   # Note: kept as a SEPARATE gh pr edit call (not combined with the
+   # --add-label uberdev-approved call above) so that the differential
+   # error contract is preserved: --add-label is exit-2-on-failure
+   # (trust-signal artifact), while --remove-label is fail-soft per D4.
    # New (#95): clear the review-pr:pending backstop label on green outcome.
    # Fail-soft per spec D4 — /uberdev:review-pr may be invoked directly outside
    # a finish-branch chain, so the label may legitimately be absent; an exit-2
