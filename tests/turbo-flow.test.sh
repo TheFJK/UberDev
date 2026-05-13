@@ -91,8 +91,8 @@ assert_grep "$SOLVE_PIPELINE" \
   'BG_TURBO_ENV=\( UBERDEV_TURBO=1 \)' \
   "solve-pipeline declares BG_TURBO_ENV array under AUTO_MODE=1 (#97)"
 assert_grep "$SOLVE_PIPELINE" \
-  '"\$\{BG_TURBO_ENV\[@\]\}" claude --bg' \
-  "solve-pipeline expands BG_TURBO_ENV[@] left of claude --bg (POSIX inline-prefix exec)"
+  'env "\$\{BG_TURBO_ENV\[@\]\}" claude --bg' \
+  "solve-pipeline expands BG_TURBO_ENV[@] left of claude --bg via env(1)-mediated inline-prefix exec (#97 — timeout(1) eats raw KEY=value as argv, env(1) consumes them as env)"
 
 echo
 echo "== Differential guard: AUTO_MODE!=1 medium dispatch dispatches WITHOUT --turbo (#15) =="
