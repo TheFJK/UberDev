@@ -553,8 +553,7 @@ wave_end=$(( wave_start + MAX_PARALLEL_BG_AGENTS - 1 ))
 wave_size=$(( wave_end - wave_start + 1 ))
 _uberdev_audit_emit solve_bg_fanout_wave_started \
   "{\"wave_index\":$wave_index,\"wave_size\":$wave_size}"
-for (( i = wave_start; i <= wave_end; i++ )); do
-ISSUE_NUM="${ISSUE_NUMS[$i]}"
+for ISSUE_NUM in "${ISSUE_NUMS[@]:$wave_start:$wave_size}"; do
 TIER="${TIERS[$ISSUE_NUM]}"
 TITLE="${TITLES[$ISSUE_NUM]}"
 BG_DISPATCH_RC=0
