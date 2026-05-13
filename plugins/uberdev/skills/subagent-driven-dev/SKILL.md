@@ -15,6 +15,17 @@ Execute plan **wave-by-wave**. Within each wave, dispatch all implementer subage
 
 **Core principle:** Parallel-by-default within a wave + disjoint file sets + controller-only git = maximum throughput, zero races.
 
+## Inputs
+
+When invoked from `orchestrator/SKILL.md` Phase 5, this skill accepts:
+
+- `plan_path` (required, absolute) — the implementation plan to execute.
+- `spec_path` (optional, absolute) — the design spec the plan was derived from. Required to enable the Step 4.5 pre-merge `pr-test-analyzer` dispatch (the analyzer reads acceptance criteria verbatim from this file).
+- `summary_dir` (optional, absolute, trailing slash) — the orchestrator's `$RESEARCH_DIR_ABS/`. Required to enable the Step 4.5 pre-merge `pr-test-analyzer` dispatch.
+- `tier` (optional, one of `trivial`/`small`/`medium`/`large`) — used to gate Step 4.5. Only `large` runs the dispatch; all other tiers skip silently.
+
+Inputs other than `plan_path` are additive and backward-compatible: pre-#92 manual SDD invocations continue to work unchanged (Step 4.5 is a no-op when `spec_path`, `summary_dir`, or `tier` is absent).
+
 ## Isolation: Pattern B is the opt-out
 
 This skill's wave-based controller-only-git approach is intentionally **not** worktree-isolated — it relies on provable file-set partitioning per wave. For any *other* parallel-agent dispatch (review fanouts, ad-hoc multi-agent edits), default to `isolation: "worktree"` on the Agent tool calls — see the `uberdev:dispatching-parallel-agents` skill.
@@ -68,7 +79,15 @@ digraph when_to_use {
    h. Dispatch code quality reviewers (parallel). Same fix-loop pattern.
    i. Mark every task in the wave complete in TodoWrite.
    j. **Mark wave complete.** No additional accumulation required at the SDD layer — `/uberdev:review-pr` Phase 1, chained post-push from `finish-branch`, computes its own `changed_paths` and `commit_range` against the pushed PR.
-5. Hand off to `uberdev:finish-branch` (no flag arg). The branch close-out detects unattended mode via the `UBERDEV_TURBO=1` environment variable inherited from the parent `claude --bg` process — under that signal, `finish-branch` auto-selects "Push and Create PR" without prompting (#97). For large tier, the orchestrator's Phase 5.5 (`pr-test-analyzer`) runs *after* this skill returns. Post-implementation reviewer fanout is hosted by `/uberdev:review-pr` Phase 1 (chained from `finish-branch` after PR push); no reviewer fanout is dispatched from `subagent-driven-dev` itself.
+
+   **Step 4.5 — Pre-merge `pr-test-analyzer` dispatch (large-tier only, requires `spec_path` and `summary_dir`).** Runs once after all waves complete and before the Step 5 handoff. If `tier == "large"` AND `spec_path` is non-empty AND `summary_dir` is non-empty, dispatch a single `Task("pr-test-analyzer", { commit_range: HEAD~N..HEAD, spec_path: <input>, plan_path: <input>, acceptance_criteria: <verbatim copy of the spec's "## Acceptance-criteria mapping" or "## Acceptance criteria" section, whichever is present>, summary_dir: <input> })` (otherwise — including non-orchestrator callers that omit any input — skip Step 4.5 entirely). The dispatch prompt MUST instruct the agent to write its YAML findings to `<summary_dir>/pr-test-analyzer.md` as its final action, before emitting the return envelope. Wait for the `Task()` to return before proceeding to Step 5. Do NOT parse or transform the YAML — the artifact on disk IS the integration point; `finish-branch` reads it via its post-impl-review artifact-collection glob. This is a direct single-agent `Task()` — NOT a fanout — and is therefore NOT routed via `uberdev:post-impl-review` (which is reserved for the post-PR-push fanout owned by `/uberdev:review-pr` Phase 1).
+
+   All three return cases below end by proceeding to Step 5; `finish-branch`'s artifact-collection glob discovers whatever is on disk. Each case differs only in its log action:
+   1. `Task()` returns with verdict `APPROVE` — artifact is on disk; no log entry.
+   2. `Task()` returns with verdict `REJECT` — the agent completed analysis and found gaps; artifact IS on disk; log the `REJECT` verdict to `<summary_dir>/orchestrator.log` with a `REJECT` tag.
+   3. `Task()` failed to return an envelope (timeout / agent crash) — log the failure to `<summary_dir>/orchestrator.log` with a `FAILURE` tag and the cause (best-effort; the artifact may be absent or partial, and in that case the PR body will silently omit the `pr-test-analyzer` subsection — observable only via `orchestrator.log`).
+
+5. Hand off to `uberdev:finish-branch` (no flag arg). The branch close-out detects unattended mode via the `UBERDEV_TURBO=1` environment variable inherited from the parent `claude --bg` process — under that signal, `finish-branch` auto-selects "Push and Create PR" without prompting (#97). For large tier, `pr-test-analyzer` was dispatched in Step 4.5 (above) and its findings are now on disk at `<summary_dir>/pr-test-analyzer.md`. `finish-branch` will discover and include them in the PR body's `## Reviewer findings summary` section. Post-implementation reviewer fanout is hosted by `/uberdev:review-pr` Phase 1 (chained from `finish-branch` after PR push); no reviewer *fanout* is dispatched from `subagent-driven-dev` itself (see Step 4.5 for the carve-out vs the retired `uberdev:post-impl-review` fanout).
 
 ### Parallel Dispatch Pattern
 
@@ -260,7 +279,7 @@ Ownership map:
 
 === AFTER ALL WAVES ===
 
-[For large tier: orchestrator Phase 5.5 dispatches pr-test-analyzer pre-merge after the next handoff returns]
+[For large tier: SDD Step 4.5 dispatches pr-test-analyzer pre-merge before the finish-branch handoff]
 
 [Hand off to uberdev:finish-branch — which pushes the PR and chains into /uberdev:review-pr Phase 1 (5 reviewer agents, advisory)]
 ```

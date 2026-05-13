@@ -4,6 +4,13 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.5] - 2026-05-13
+
+### Fixed
+
+- **Move `pr-test-analyzer` dispatch from orchestrator Phase 5.5 into `subagent-driven-dev` Step 4.5.** The previous design described a logically impossible window: `subagent-driven-dev` invokes `finish-branch` inline, `finish-branch` globs `pr-test-analyzer.md` to compose the PR body, and by the time orchestrator Phase 5.5 could fire the PR had already been pushed without the analyzer's findings. Fix: relocate the dispatch into a new Step 4.5 inside `subagent-driven-dev` (between the post-wave full-test-suite and the `finish-branch` handoff), gated on `tier == "large"` AND `summary_dir` present. The orchestrator's Phase 5 dispatch now passes `summary_dir: $RESEARCH_DIR_ABS/` and `tier` to SDD as additive optional inputs (backward-compatible — non-orchestrator callers gracefully skip Step 4.5). `pr-test-analyzer` is intentionally dispatched twice on large tier — pre-merge (Step 4.5, single `Task()`, feeds the PR body) and post-PR-push (the `uberdev:post-impl-review` 6-agent fanout, feeds `/uberdev:review-pr`'s fix loop). The two dispatches serve different integration points and are not redundant. Closes #92.
+  - **Why patch only.** Skill-prose change with observable pipeline effect (dispatch site moves between skills) but no code-shape change and no breaking API — `summary_dir` and `tier` are additive optional inputs to SDD. Mirrors PR #103 convention.
+
 ## [0.23.4] - 2026-05-13
 
 ### Refactored
