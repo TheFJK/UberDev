@@ -40,13 +40,16 @@ assert_not_grep() {
   fi
 }
 
-echo "== Mode selection: --turbo auto-selects Option 2 + chains =="
+echo "== Mode selection: UBERDEV_TURBO=1 auto-selects Option 2 + chains (#97) =="
 assert_grep "$FINISH_BRANCH" \
-  '[Tt]urbo.*(Option 2|Push and [Cc]reate)|(Option 2|Push and [Cc]reate).*[Tt]urbo' \
-  "turbo auto-selects Option 2 (Push and Create PR)"
+  'UBERDEV_TURBO.*(Option 2|Push and [Cc]reate)|(Option 2|Push and [Cc]reate).*UBERDEV_TURBO' \
+  "UBERDEV_TURBO=1 auto-selects Option 2 (Push and Create PR)"
 assert_grep "$FINISH_BRANCH" \
-  '[Tt]urbo.*review-pr|review-pr.*[Tt]urbo|forward.*--turbo' \
-  "turbo forwards --turbo to review-pr"
+  'UBERDEV_TURBO.*review-pr|review-pr.*UBERDEV_TURBO|inherits.*UBERDEV_TURBO|UBERDEV_TURBO=1 env' \
+  "UBERDEV_TURBO env-var inherited by review-pr (no --turbo arg forwarding, #97)"
+assert_not_grep "$FINISH_BRANCH" \
+  'Forward `--turbo` if it was in `\$ARGUMENTS`' \
+  "finish-branch chain hand-off does NOT forward --turbo arg (#97 — env-var inheritance)"
 
 echo
 echo "== Mode selection: default (no flags) auto-selects Option 2 + chains =="

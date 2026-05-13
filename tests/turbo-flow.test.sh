@@ -62,16 +62,19 @@ assert_grep "$WRITE_PLAN" \
   "write-plan auto-dispatches subagent-driven-dev with --turbo (no user prompt)"
 
 echo
-echo "== subagent-driven-dev forwards --turbo to finish-branch =="
+echo "== subagent-driven-dev no longer arg-forwards --turbo to finish-branch (#97) =="
 assert_grep "$SUBAGENT_DRIVEN" \
+  'UBERDEV_TURBO' \
+  "subagent-driven-dev names UBERDEV_TURBO env var (chain-internal env-var-only signal)"
+assert_not_grep "$SUBAGENT_DRIVEN" \
   'finish-branch.*--turbo|--turbo.*finish-branch' \
-  "subagent-driven-dev names finish-branch and --turbo together"
+  "subagent-driven-dev does NOT arg-forward --turbo to finish-branch (#97)"
 
 echo
-echo "== finish-branch auto-selects PR option under --turbo =="
+echo "== finish-branch auto-selects PR option under UBERDEV_TURBO=1 (#97) =="
 assert_grep "$FINISH_BRANCH" \
-  '[Tt]urbo.*(Option 2|Push and [Cc]reate)|(Option 2|Push and [Cc]reate).*[Tt]urbo' \
-  "finish-branch auto-selects Push and Create PR under turbo"
+  'UBERDEV_TURBO.*(Option 2|Push and [Cc]reate)|(Option 2|Push and [Cc]reate).*UBERDEV_TURBO|UBERDEV_TURBO=1.*Push and create' \
+  "finish-branch auto-selects Push and Create PR under UBERDEV_TURBO=1"
 
 echo
 echo "== /turbo command entry point dispatches --turbo into the pipeline =="
@@ -81,6 +84,41 @@ echo "== /turbo command entry point dispatches --turbo into the pipeline =="
 assert_grep "$SOLVE_PIPELINE" \
   'orchestrator --turbo|brainstorm --turbo|--turbo.*orchestrator|--turbo.*brainstorm' \
   "solve-pipeline skill (medium tier) dispatches --turbo into the pipeline"
+
+echo
+echo "== solve-pipeline inline-prefix UBERDEV_TURBO=1 on claude --bg (AUTO_MODE=1 only, #97) =="
+assert_grep "$SOLVE_PIPELINE" \
+  'BG_TURBO_ENV=\( UBERDEV_TURBO=1 \)' \
+  "solve-pipeline declares BG_TURBO_ENV array under AUTO_MODE=1 (#97)"
+assert_grep "$SOLVE_PIPELINE" \
+  'env "\$\{BG_TURBO_ENV\[@\]\}" claude --bg' \
+  "solve-pipeline expands BG_TURBO_ENV[@] left of claude --bg via env(1)-mediated inline-prefix exec (#97 — timeout(1) eats raw KEY=value as argv, env(1) consumes them as env)"
+
+echo
+echo "== Anchor pre-check: solve-pipeline must contain exactly 2 'if AUTO_MODE==1' anchors (#97 simplify-lens E2 forward-guard) =="
+# The two differential-guard awk passes below key off the bare anchor
+# `^if \[\[ "\$AUTO_MODE" == "1" \]\]; then$` and rely on its state machine
+# (in_turbo → in_solve on the very next `^else$`). The skill's design contract
+# is two such blocks: line 285 (TURBO MODE banner gate, no else arm — but the
+# awk only enters in_turbo on a match and exits via the FIRST `^else$` it sees,
+# which today belongs to the line-505 medium dispatch block, not 285's banner)
+# and line 505 (medium-tier orchestrator dispatch, with else arm). A third
+# block was briefly introduced at line 575 by #97 Phase 1 (BG_TURBO_ENV
+# pre-declare in if/then/fi form) and immediately collapsed in #97 Phase 2 to
+# `[[ ... ]] && ...` form precisely because adding a third anchor would
+# silently corrupt this awk's region scan. Lock the count at 2 so any future
+# edit that reintroduces the pattern fails loudly here, BEFORE the differential
+# guards below produce confusing pass/fail behavior.
+ANCHOR_COUNT="$(grep -c '^if \[\[ "\$AUTO_MODE" == "1" \]\]; then$' "$SOLVE_PIPELINE")"
+if [[ "$ANCHOR_COUNT" -ne 2 ]]; then
+  echo "  FAIL  solve-pipeline anchor count expected 2, got $ANCHOR_COUNT — differential-guard awk relies on exactly two if/else/fi blocks"
+  echo "        file: $SOLVE_PIPELINE"
+  echo "        if a new AUTO_MODE-conditional block was added, prefer the [[ ... ]] && ... single-line form to avoid the anchor"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  solve-pipeline contains exactly 2 'if AUTO_MODE==1' anchors (differential-guard region-scan invariant holds)"
+  PASS=$((PASS + 1))
+fi
 
 echo
 echo "== Differential guard: AUTO_MODE!=1 medium dispatch dispatches WITHOUT --turbo (#15) =="
@@ -103,6 +141,30 @@ else
 fi
 
 echo
+echo "== Differential guard: AUTO_MODE!=1 medium dispatch must NOT contain UBERDEV_TURBO=1 (#97) =="
+# Companion to the --turbo differential guard above. Locks the env-var contract:
+# `UBERDEV_TURBO=1` is the inline-prefix exec env on the bg dispatch line, but
+# ONLY inside the AUTO_MODE=1 (turbo) branch. Leaking it into the AUTO_MODE!=1
+# (interactive /solve) else-branch would silently propagate turbo into every
+# /solve invocation — exactly the regression #97's symmetric inverse defends
+# against. Same awk anchor as above; inner pattern flipped from `--turbo` to
+# `UBERDEV_TURBO=1`.
+SOLVE_MEDIUM_NO_TURBO=$(awk '
+  /^if \[\[ "\$AUTO_MODE" == "1" \]\]; then$/ { in_turbo=1; next }
+  in_turbo && /^else$/ { in_turbo=0; in_solve=1; next }
+  in_solve && /^fi$/ { in_solve=0; next }
+  in_solve && /UBERDEV_TURBO=1/ { print }
+' "$SOLVE_PIPELINE")
+if [[ -n "$SOLVE_MEDIUM_NO_TURBO" ]]; then
+  echo "  FAIL  AUTO_MODE!=1 (interactive /solve) branch must NOT contain UBERDEV_TURBO=1"
+  echo "        offending lines: $SOLVE_MEDIUM_NO_TURBO"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  AUTO_MODE!=1 branch correctly omits UBERDEV_TURBO=1 (interactive /solve preserved)"
+  PASS=$((PASS + 1))
+fi
+
+echo
 echo "== thin /solve and /turbo wrappers invoke the solve-pipeline skill =="
 SOLVE_PIPELINE_REF='uberdev:solve-pipeline|solve-pipeline skill'
 assert_grep "$SOLVE_CMD" "$SOLVE_PIPELINE_REF" \
@@ -113,6 +175,10 @@ assert_grep "$SOLVE_CMD" 'export AUTO_MODE=0' \
   "/solve thin wrapper sets AUTO_MODE=0 (interactive)"
 assert_grep "$TURBO_CMD" 'export AUTO_MODE=1' \
   "/turbo thin wrapper sets AUTO_MODE=1 (unattended)"
+assert_grep "$TURBO_CMD" 'export UBERDEV_TURBO=1' \
+  "/turbo thin wrapper exports UBERDEV_TURBO=1 (#97 — chain-wide unattended-mode signal)"
+assert_grep "$SOLVE_CMD" 'unset UBERDEV_TURBO' \
+  "/solve thin wrapper unsets UBERDEV_TURBO (#97 — defends against shell-rc pollution)"
 assert_grep "$TURBO_CMD" \
   'argument-hint:.*<issue-number>.*\[<issue-number>' \
   "/turbo argument-hint documents multi-issue syntax"
@@ -217,12 +283,31 @@ assert_grep "$SOLVE_PIPELINE" \
   "Phase A version-gates claude --bg minimum (2.1.139)"
 
 echo
-echo "== orchestrator forwards --turbo into subagent-driven-dev =="
-# Orchestrator → subagent-driven-dev is the medium/large /turbo handoff site.
-# Without --turbo here, finish-branch still prompts at the end of the pipeline.
+echo "== orchestrator no longer arg-forwards --turbo to SDD (#97 — env-var inheritance) =="
+# Pre-#97 the orchestrator pasted --turbo into the SDD invocation. Post-#97
+# the chain-internal turbo signal is the inherited `UBERDEV_TURBO=1` env var
+# (set by commands/turbo.md → solve-pipeline → claude --bg inline-prefix exec)
+# and SDD/finish-branch detect it directly. Phase 5 prose must NOT instruct
+# the agent to pass --turbo to SDD anymore.
+#
+# IMPORTANT — the negative pattern is intentionally precise (anchored on the
+# imperative-form "pass --turbo to" / "with `--turbo` to" with the explicit
+# prepositional phrase). The broad `subagent-driven-dev.*--turbo` regex would
+# false-positive on the new prose's negation phrasing
+# ("no per-call `--turbo` arg-forwarding needed (#97)") which intentionally
+# names the old contract to make the change explicit to readers.
+assert_not_grep "$ORCHESTRATOR" \
+  'pass --turbo to .*subagent-driven-dev|with `--turbo` to .*subagent-driven-dev' \
+  "orchestrator Phase 5 does NOT arg-forward --turbo to subagent-driven-dev (chain inherits via UBERDEV_TURBO env)"
 assert_grep "$ORCHESTRATOR" \
-  '--turbo.*subagent-driven-dev|subagent-driven-dev.*--turbo|pass.*--turbo|with `--turbo`' \
-  "orchestrator Phase 5 forwards --turbo to subagent-driven-dev"
+  'UBERDEV_TURBO' \
+  "orchestrator Phase 5 names UBERDEV_TURBO as the chain unattended-mode signal"
+# Orchestrator turbo detector is hybrid per Decision Q3: ON when EITHER
+# $ARGUMENTS contains --turbo (standalone-invocation path) OR
+# UBERDEV_TURBO=1 (set by commands/turbo.md, propagated through claude --bg).
+assert_grep "$ORCHESTRATOR" \
+  '\$ARGUMENTS.*--turbo.*UBERDEV_TURBO|UBERDEV_TURBO.*\$ARGUMENTS.*--turbo' \
+  "orchestrator turbo detector is hybrid (\$ARGUMENTS OR UBERDEV_TURBO env, per Decision Q3)"
 
 echo
 echo "== Default-mode paths preserved (regression canaries) =="

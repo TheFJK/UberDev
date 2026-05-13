@@ -148,6 +148,12 @@ else
 fi
 
 echo
+echo "== S7.5 (#97): hybrid TURBO detector — env-var path documented =="
+assert_grep "$REVIEW_PR" \
+  'UBERDEV_TURBO' \
+  "S7.5 — review-pr documents UBERDEV_TURBO env-var as hybrid OR with --turbo arg"
+
+echo
 echo "== S8: gh outage carve-out — ci_probe_unreachable + Step 7 still runs =="
 assert_grep "$REVIEW_PR" 'ci_probe_unreachable' \
   "S8.1 — ci_probe_unreachable audit event documented"

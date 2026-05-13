@@ -365,8 +365,8 @@ assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
   'command -v gtimeout' \
   "I2c: launcher probes gtimeout fallback (Homebrew coreutils installs the macOS binary as gtimeout, not timeout)"
 assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
-  '"\$TIMEOUT_BIN" "\$SOLVE_TIMEOUT" claude --bg' \
-  "I2d: bg dispatch wraps claude --bg in timeout(1)/gtimeout (zsh-safe; no scalar prefix)"
+  '"\$TIMEOUT_BIN" "\$SOLVE_TIMEOUT" env "\${BG_TURBO_ENV\[@\]}" claude --bg' \
+  "I2d: bg dispatch wraps claude --bg in timeout(1)/gtimeout with env(1)-mediated zsh-safe BG_TURBO_ENV[@] inline-prefix (#97 — env(1) is required because timeout(1) sits between the shell and the env-prefix slot and would otherwise consume the KEY=value tokens as argv; array form preserves zsh SH_WORD_SPLIT=off compatibility)"
 assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
   'brew install coreutils' \
   "I2e: missing-timeout warning includes remediation pointer"

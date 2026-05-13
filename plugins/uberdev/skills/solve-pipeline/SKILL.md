@@ -560,13 +560,30 @@ TITLE="${TITLES[$ISSUE_NUM]}"
 BG_DISPATCH_RC=0
 BG_SESSION_ID=""
 BG_STDOUT_LOG="/tmp/solve-bg-stdout-$ISSUE_NUM.log"
+# NEW (#97): UBERDEV_TURBO=1 chain-wide signal for /turbo (AUTO_MODE=1) only.
+# env(1) mediates the inline-prefix because POSIX inline-prefix env-assignment
+# only takes effect at the START of a simple command. Here the dispatch is
+# `$TIMEOUT_BIN $SOLVE_TIMEOUT <env-tokens> claude --bg …` — `timeout(1)` is
+# already in front, so it would consume `UBERDEV_TURBO=1` as the COMMAND argv
+# (not as env) and exit 127. `env "${BG_TURBO_ENV[@]}" claude --bg` consumes
+# the KEY=value tokens and execs claude --bg with those env vars set; under
+# AUTO_MODE=0 (empty array) it degrades to a no-op env passthrough.
+# Pre-declare BG_TURBO_ENV=() so the array name is always bound before the
+# AUTO_MODE-conditional setter on the next line runs. The `[[ ... ]] && ...`
+# form (rather than a second `if/then/fi` block) keeps the file's anchor count
+# at exactly two `^if \[\[ "\$AUTO_MODE" == "1" \]\]; then$` matches (lines
+# 285 and 505) — the differential-guard awk in tests/turbo-flow.test.sh keys
+# off that anchor count and would scan an unbounded code region if a third
+# block were introduced (#97 simplify-lens E2 follow-up).
+BG_TURBO_ENV=()
+[[ "$AUTO_MODE" == "1" ]] && BG_TURBO_ENV=( UBERDEV_TURBO=1 )
 case "$BG_PROMPT_MODE" in
   file)
     # Trusted path arg; file contents never reach the shell as argv.
     # PERM_FLAG / EFFORT_FLAG are bash+zsh arrays — see Phase A hoist for the
     # zsh SH_WORD_SPLIT=off rationale; `"${ARRAY[@]}"` expands identically in
     # both shells (empty array → zero slots; populated → one slot per element).
-    "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" claude --bg \
+    "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" env "${BG_TURBO_ENV[@]}" claude --bg \
       --prompt-file "/tmp/solve-prompt-$ISSUE_NUM.txt" \
       --worktree "solve-issue-$ISSUE_NUM" \
       --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" > "$BG_STDOUT_LOG" 2>&1
@@ -574,7 +591,7 @@ case "$BG_PROMPT_MODE" in
     ;;
   stdin)
     # File content streamed on FD 0; no argv quoting concern.
-    "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" claude --bg \
+    "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" env "${BG_TURBO_ENV[@]}" claude --bg \
       --worktree "solve-issue-$ISSUE_NUM" \
       --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" \
       < "/tmp/solve-prompt-$ISSUE_NUM.txt" > "$BG_STDOUT_LOG" 2>&1
@@ -583,7 +600,7 @@ case "$BG_PROMPT_MODE" in
   argv)
     # Bash array form (spec-reviewer finding 1) — single argv slot, no eval.
     PROMPT_BODY="$(cat "/tmp/solve-prompt-$ISSUE_NUM.txt")"
-    cmd=( "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" claude --bg
+    cmd=( "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" env "${BG_TURBO_ENV[@]}" claude --bg
           --worktree "solve-issue-$ISSUE_NUM"
           --model "$MODEL" )
     # PERM_FLAG / EFFORT_FLAG are arrays from Phase A
