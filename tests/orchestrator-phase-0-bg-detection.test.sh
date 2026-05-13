@@ -89,8 +89,8 @@ assert_ge "A5 Phase 0 uses imperative MUST gate wording" 1 "$n"
 
 # A6 — fail-fast position: the bg-context gate (CLAUDE_JOB_DIR reference)
 # must appear in the SKILL.md BEFORE the first RUN_ID= assignment.
-bg_line=$(grep -nE 'CLAUDE_JOB_DIR' "$SKILL" | head -1 | cut -d: -f1)
-rid_line=$(grep -nE '^RUN_ID=|^\s*1\. Generate a run-id|RUN_ID=\$' "$SKILL" | head -1 | cut -d: -f1)
+bg_line=$(grep -nE 'CLAUDE_JOB_DIR' "$SKILL" | head -1 | cut -d: -f1 || true)
+rid_line=$(grep -nE '^RUN_ID=|^\s*1\. Generate a run-id|RUN_ID=\$' "$SKILL" | head -1 | cut -d: -f1 || true)
 if [ -n "${bg_line:-}" ] && [ -n "${rid_line:-}" ] && [ "$bg_line" -lt "$rid_line" ]; then
   echo "  PASS A6 bg-context gate precedes RUN_ID generation (bg=$bg_line rid=$rid_line)"
   PASS=$((PASS + 1))
