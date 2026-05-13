@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.5] - 2026-05-13
+
+### Fixed
+
+- **orchestrator: refuse interactive /solve in `claude --bg` context.** Added a Phase 0 bg-context gate to `plugins/uberdev/skills/orchestrator/SKILL.md` that evaluates BEFORE run-id generation, artifact-dir creation, and issue-body fetch. Layered detection: turbo exemption (`$ARGUMENTS contains --turbo` OR `${UBERDEV_TURBO:-0} == "1"`) short-circuits first; bg-context test (`[ -n "${CLAUDE_JOB_DIR:-}" ]` OR `[ ! -t 0 ]`) triggers abort with stderr message and `exit 2`. Removes three failure modes documented in #93: indefinite `AskUserQuestion` block, `InputValidationError` collapse when `ToolSearch` was not pre-loaded, and agent-initiated auto-pick that silently turned `/solve` into `/turbo`. The Phase 2 identity rule (line 192) and ToolSearch caveat (line 196) both already forbade the auto-pick path; this gate enforces that contract structurally by removing the precondition. Stderr message generalises to "interactive orchestrator (/solve or /uberdev:orchestrator without --turbo)" so the standalone-invocation path is named accurately. Tests added: `tests/orchestrator-phase-0-bg-detection.test.sh` (A1-A7 — both detection arms, literal stderr, exit 2, turbo-exemption ordering, MUST imperative wording, fail-fast position, Phase 2 detector unchanged). Closes #93.
+  - **Why patch only.** Single SKILL.md prose block, one new structural-grep test, additive only. No new env vars, no new CLI flags. `/turbo` users see no change (turbo exemption fires); interactive `/solve` users in a foreground terminal see no change (TTY arm is false); only the previously-hanging path (`/solve` under `claude --bg`) gets the new abort behaviour.
+
+
 ## [0.23.4] - 2026-05-13
 
 ### Refactored
