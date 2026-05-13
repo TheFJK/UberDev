@@ -1582,7 +1582,7 @@ else
 fi
 
 echo
-echo "== M81: Common Mistakes bullet enumerates 8 excluded gate-fail reasons (#89) =="
+echo "== M81: Common Mistakes bullet enumerates the excluded gate-fail reasons (#89) =="
 CM_BLOCK=$(awk '/^## Common Mistakes/,/^## Red Flags/' "$SKILL_FILE")
 if echo "$CM_BLOCK" | grep -qE "Don't trigger auto-review on .review_decision_not_approved. alone"; then
   pass "M81.bullet-present — Common Mistakes bullet present"
@@ -1632,7 +1632,7 @@ else
 fi
 
 echo
-echo "== M85: commands/merge.md documents auto_review_on_merge with 8 excluded reasons (#89) =="
+echo "== M85: commands/merge.md documents auto_review_on_merge with the excluded reasons (#89) =="
 if grep -nE 'auto_review_on_merge: true\|false' "$CMD_FILE" | head -1 | grep -q 'auto_review_on_merge'; then
   pass "M85.config-key — commands/merge.md documents auto_review_on_merge with true|false enum (spec C3.2)"
 else
