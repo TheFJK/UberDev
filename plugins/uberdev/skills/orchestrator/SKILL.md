@@ -201,10 +201,12 @@ If parse fails → re-dispatch the failed agent ONCE with the format example pin
 
 ```bash
 TURBO=0
-if [[ "$ARGUMENTS" == *"--turbo"* ]] || [[ "${UBERDEV_TURBO:-0}" == "1" ]]; then
+if [[ "${ARGUMENTS:-}" == *"--turbo"* ]] || [[ "${UBERDEV_TURBO:-0}" == "1" ]]; then
   TURBO=1
 fi
 ```
+
+The `${ARGUMENTS:-}` form is defense-in-depth against `set -u` (current Bash tool calls do not enable nounset, but symmetry with the `${UBERDEV_TURBO:-0}` half of the OR keeps the detector robust if the surrounding launcher ever does — #97 follow-up).
 
 All Phase-2/3.5/5 references to "if --turbo" in this skill resolve to `[[ "$TURBO" == "1" ]]` under this single detection contract.
 

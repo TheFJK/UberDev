@@ -28,10 +28,11 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    - Detect `--turbo` token in `$ARGUMENTS` AND/OR inherited env var `${UBERDEV_TURBO:-0} == "1"` (#97 — hybrid OR detector). Strip the `--turbo` token from the aspect list. Set `TURBO=1` if either source signals turbo; else `TURBO=0`. The detection result feeds the Phase 3 halt-class carve-out (6c.6 HALT) — it does NOT mutate `SIMPLIFY_PHASE` or any other phase variable. Hybrid form (mirrors `orchestrator/SKILL.md`):
      ```bash
      TURBO=0
-     if [[ "$ARGUMENTS" == *"--turbo"* ]] || [[ "${UBERDEV_TURBO:-0}" == "1" ]]; then
+     if [[ "${ARGUMENTS:-}" == *"--turbo"* ]] || [[ "${UBERDEV_TURBO:-0}" == "1" ]]; then
        TURBO=1
      fi
      ```
+     `${ARGUMENTS:-}` is defense-in-depth against `set -u` and mirrors the `${UBERDEV_TURBO:-0}` half of the OR for symmetry (#97 follow-up).
      Rationale: `merge-pipeline` invokes `Skill("uberdev:review-pr", args: "${PR} --turbo")` (out-of-scope for #97) — arg form must remain accepted. `finish-branch` chains via `Skill("uberdev:review-pr")` with no flag (env-var inheritance, #97) — env form must also be accepted. The hybrid OR detector closes both call sites.
    - Detect `--no-ci-fix` token in `$ARGUMENTS` and strip it from the aspect list — sets `CI_FIX_PHASE=0` (probe-only mode), otherwise `CI_FIX_PHASE=1` (default). Mirrors `--no-simplify` shape. When `CI_FIX_PHASE=0`, Phase 3 6c.1 PROBE + 6c.2 MONITOR + 6c.3 CLASSIFY still run for audit telemetry; 6c.4 ROUTE / 6c.5 POST-FIX / 6c.6 HALT are skipped. Outcome is forced to `green` if probe was green; otherwise `halted` (still gates trust signal).
    - Default: Run all applicable reviews + Phase 2 simplify pass
