@@ -202,34 +202,9 @@ IFS= read -r PR_TITLE_VAR < "$TITLE_FILE" || { echo "ERROR: failed to read title
 # hit aborts the push BEFORE any text reaches GitHub. Worktree is preserved for
 # investigation. The scan helper signals via output (non-empty = leak found)
 # rather than exit code so callers compose with `[[ -n $SCAN_OUT ]]`.
-run_secret_scan_stdin() {
-  # Primary: gitleaks (when installed). gitleaks exits 0 if no leaks found,
-  # non-zero (default 1) if leaks found via --exit-code, or >1 on actual
-  # errors. We use the exit code as the authoritative signal — output-text
-  # filtering is unreliable because info messages like "no leaks found"
-  # would false-positive a substring match. On non-zero exit, we surface
-  # the captured output so the caller error message has detail.
-  if command -v gitleaks >/dev/null 2>&1; then
-    local out rc
-    out=$(gitleaks stdin --no-banner --redact 2>&1) ; rc=$?
-    if [[ $rc -eq 0 ]]; then
-      return 0  # clean — no output, caller continues
-    fi
-    # Non-zero: leak found OR gitleaks crashed (fail-CLOSED on either).
-    # Emit captured output so the caller ERROR message names the offending rule.
-    printf '%s\n' "$out"
-    return 0  # signal via output, not exit code (caller checks [[ -n $SCAN_OUT ]])
-  fi
-  # Fallback: inline regex floor — high-true-positive patterns only.
-  grep -E -o '(AKIA[0-9A-Z]{16}|gh[ps]_[A-Za-z0-9]{36,255}|-----BEGIN [A-Z ]*PRIVATE KEY-----)' || true
-}
-
-# Emit gitleaks-missing warning ONCE in the parent shell (subshell exports do not
-# propagate, so the warning must live outside run_secret_scan_stdin to avoid
-# printing twice).
-if ! command -v gitleaks >/dev/null 2>&1; then
-  echo "WARNING: gitleaks not installed — using regex fallback only. Recommend: brew install gitleaks" >&2
-fi
+# Layered secret scan (gitleaks + regex fallback): sourced from shared library.
+# Source-time idempotency guard prevents double-load if any caller already sourced.
+source "${CLAUDE_PLUGIN_ROOT}/lib/secret-scan.sh"
 
 # Helper: abort if scan output is non-empty. Cleans up tmp files and preserves worktree.
 abort_if_secret() {
@@ -244,7 +219,7 @@ abort_if_secret() {
 # Scan target 1: the diff that will actually be pushed (commits ahead of upstream).
 # Falls back to staged diff for fresh branches that have no remote tracking yet.
 if PUSH_DIFF=$(git diff @{u}..HEAD 2>/dev/null) && [[ -n "$PUSH_DIFF" ]]; then
-  SCAN_OUT=$(printf '%s' "$PUSH_DIFF" | run_secret_scan_stdin)
+  SCAN_OUT=$(printf '%s' "$PUSH_DIFF" | uberdev_run_secret_scan_stdin)
 else
   # No upstream set or empty diff → scan from origin default branch. Falls
   # back to literal main/master, then to the branch root commit (catches
@@ -256,15 +231,15 @@ else
           || git rev-list --max-parents=0 HEAD 2>/dev/null \
           || echo "")
   if [[ -n "$BASE_REF" ]]; then
-    SCAN_OUT=$(git diff "$BASE_REF..HEAD" | run_secret_scan_stdin)
+    SCAN_OUT=$(git diff "$BASE_REF..HEAD" | uberdev_run_secret_scan_stdin)
   else
-    SCAN_OUT=$(git diff --staged | run_secret_scan_stdin)
+    SCAN_OUT=$(git diff --staged | uberdev_run_secret_scan_stdin)
   fi
 fi
 abort_if_secret "to-be-pushed diff" "$SCAN_OUT"
 
 # Scan target 2: composed PR body file
-SCAN_OUT=$(run_secret_scan_stdin < "$PR_BODY_FILE")
+SCAN_OUT=$(uberdev_run_secret_scan_stdin < "$PR_BODY_FILE")
 abort_if_secret "composed PR body" "$SCAN_OUT"
 
 # Both scans clean → push and create PR. Each step is exit-code-checked so a
