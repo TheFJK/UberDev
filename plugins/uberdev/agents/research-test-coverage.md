@@ -41,7 +41,44 @@ Read, Grep, Glob, Bash (for `find`, `wc`, content-hashing only)
    - Top uncovered files relevant to the issue topic.
    Then compute the content hash: `shasum -a 256 <summary_dir>/test-coverage.md | awk '{print substr($1,1,8)}'`.
 
+## Required artifact front-matter
+
+Your artifact MUST begin with this YAML front-matter (between two `---` fences):
+
+```yaml
+---
+topic: <name-of-this-research-topic>
+issue: <issue number>
+head_sha: <output of `git rev-parse HEAD` captured at write time>
+summary: <one-line summary>
+---
+```
+
+- Capture `head_sha` by running `git rev-parse HEAD` at the moment you write the artifact (NOT at dispatch time).
+- The `head_sha` value MUST match `^[0-9a-f]{7,40}$`. The orchestrator's reuse-time validator will reject any other format and force a fresh dispatch on the next run (`reason=missing-head-sha`).
+- Do NOT embed shell metacharacters in the `head_sha` value. The orchestrator treats malformed values as missing.
+
+## Required `## Files investigated` section
+
+Your artifact MUST include a `## Files investigated` section listing every path you read, grep'd, or otherwise consulted. Format:
+
+```markdown
+## Files investigated
+- path/to/file.ext — short description
+- path/to/file.ext:LINE-RANGE — short description
+- another/path.ext — short description
+```
+
+Rules:
+- One path per line.
+- Optional leading `- ` (Markdown list marker).
+- The first whitespace-separated token is the path. An optional `:LINE-RANGE` suffix is allowed and preserved verbatim in the artifact, but the orchestrator parser strips it before set-intersection.
+- Disallowed characters in the path token: `$`, `` ` ``, `;`, `\`, and embedded newlines. The orchestrator's parser rejects any line whose path token fails the regex `^[A-Za-z0-9_./-]+$` — failing lines are silently dropped from the set (artifact stays valid; only `head_sha` validation failure forces a fresh dispatch).
+- This section is REQUIRED. The orchestrator's freshness predicate intersects this set with `git diff --name-only <stored-sha>..HEAD`; if the intersection is non-empty, the artifact is invalidated and a fresh dispatch is forced (`reason=file-intersection`).
+
 ## Output (last lines of your reply)
+
+Your artifact at `artifact_path` MUST conform to the front-matter and `## Files investigated` contracts above before you emit the YAML below. The orchestrator's freshness predicate depends on both.
 
 ```yaml
 status: DONE | DONE_WITH_CONCERNS | BLOCKED
