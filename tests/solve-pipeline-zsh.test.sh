@@ -236,9 +236,13 @@ else
   sed 's/^/          /' "$ERR_LOG_R4"
 fi
 
-EXPECTED_NUMS="91 94 95 97"
+# EXPECTED_NUMS is an array, not a scalar: under zsh, `printf '%s\n' $scalar`
+# does NOT word-split (SH_WORD_SPLIT=off by default), so a scalar would
+# print as one line. The array form expands one slot per element under both
+# bash and zsh — the same lesson this file otherwise locks in for SKILL.md.
+EXPECTED_NUMS=(91 94 95 97)
 ALL_CAPTURED="$(cat "$CAPTURE_DIR_R4"/wave-*.txt 2>/dev/null | sort -n | tr '\n' ' ' | sed 's/ $//')"
-EXPECTED_SORTED="$(printf '%s\n' $EXPECTED_NUMS | sort -n | tr '\n' ' ' | sed 's/ $//')"
+EXPECTED_SORTED="$(printf '%s\n' "${EXPECTED_NUMS[@]}" | sort -n | tr '\n' ' ' | sed 's/ $//')"
 if [ "$ALL_CAPTURED" = "$EXPECTED_SORTED" ]; then
   pass "R4b: every ISSUE_NUMS element dispatched exactly once across waves (captured: $ALL_CAPTURED)"
 else
