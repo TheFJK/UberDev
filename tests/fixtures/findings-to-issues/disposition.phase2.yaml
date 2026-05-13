@@ -1,0 +1,2 @@
+findings_disposition:
+  - { file: "src/dup.ts", line: 3, disposition: APPLIED }

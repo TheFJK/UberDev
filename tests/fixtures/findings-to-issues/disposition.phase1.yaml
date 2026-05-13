@@ -1,0 +1,3 @@
+findings_disposition:
+  - { file: "src/auth.ts", line: 88, disposition: APPLIED }
+  - { file: "src/util.ts", line: 5, disposition: APPLIED }
