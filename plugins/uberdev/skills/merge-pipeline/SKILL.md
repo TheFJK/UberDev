@@ -27,7 +27,7 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `LOCK_FILE_PATH` | `.git/uberdev-merge.lock` | D14 |
 | `AUDIT_LOG_DIR_PATTERN` | `.uberdev/runs/<run-id>/` | D15 |
 | `AUDIT_LOG_FILENAME` | `audit.jsonl` | D15 |
-| `AUDIT_EVENT_ENUM` | `gate_pass`, `gate_fail`, `order_proposed`, `order_confirmed`, `strategy_chosen`, `probe_clean`, `probe_conflict`, `agent_dispatched`, `agent_returned`, `patch_applied`, `test_pass`, `test_fail`, `push_resolution`, `merge_executed`, `local_sync`, `branch_deleted`, `worktree_removed`, `admin_bypass`, `waiver_recorded`, `error`, `pr_parked`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision`, `trust_trail_agent_decision`, `merge_strategy_agent_decision`, `merge_strategy_fanout_wave_started`, `discovery_gh_failed`, `ci_probe_started`, `ci_probe_skipped_no_checks`, `ci_probe_unreachable`, `ci_monitor_green`, `ci_monitor_red`, `ci_monitor_timeout`, `ci_classify_dispatched`, `ci_classify_returned`, `ci_classify_ambiguous_routing_as_flaky`, `ci_fix_dispatched`, `ci_fix_dispatch_unknown_class`, `ci_fix_pushed`, `ci_flaky_rerun_queued`, `ci_flaky_rerun_failed`, `ci_loop_cap_reached`, `ci_phase_outcome` | D15. Field-level extensions: gate_pass.data.trust_anchor ∈ TRUST_ANCHOR_ENUM; gate_fail.data.reason ∈ GATE_FAIL_REASON_ENUM (see Phase 1.4); discovery_gh_failed.data.reason ∈ {`gh_failed`, `jq_failed`}, .data.step ∈ {`1.0.5`, `1.2.5`, `1.4`}, .data.exit_code (int), .data.gh_stderr (string, raw stderr ≤512 bytes pre-truncation; JSON-escaping may expand to ≤2048 bytes for adversarial backslash-heavy payloads), .data.pr_number (int, optional — only set when step="1.4"). **+12 new members for /review-pr Phase 3 (#76):** `ci_probe_started`, `ci_probe_skipped_no_checks`, `ci_probe_unreachable`, `ci_monitor_green`, `ci_monitor_red`, `ci_monitor_timeout`, `ci_classify_dispatched`, `ci_classify_returned`, `ci_fix_dispatched`, `ci_fix_pushed`, `ci_loop_cap_reached`, `ci_phase_outcome`. `ci_phase_outcome.data.outcome ∈ CI_OUTCOME_ENUM`; `ci_classify_returned.data.failure_class ∈ CI_FAILURE_CLASS_ENUM`; `ci_fix_dispatched.data.by_agent ∈ {ci-code-fixer, ci-rebase-handler}`; `ci_fix_pushed.data.commit_sha` is full 40-hex. **+4 hardening members (post-impl-review B6/B7/B9):** `ci_classify_ambiguous_routing_as_flaky` (AMBIGUOUS→flaky fallback fires; preserves origin in trail); `ci_flaky_rerun_queued` / `ci_flaky_rerun_failed` (flaky `gh run rerun` exit-code dichotomy; previously dropped silently); `ci_fix_dispatch_unknown_class` (ROUTE default-case guard; emitted when classifier returns a CI_FAILURE_CLASS_ENUM member with no case arm — defensive against future enum extension). **Deprecated (never emitted post-v0.17.0):** `admin_bypass`, `waiver_recorded` |
+| `AUDIT_EVENT_ENUM` | `gate_pass`, `gate_fail`, `order_proposed`, `order_confirmed`, `strategy_chosen`, `probe_clean`, `probe_conflict`, `agent_dispatched`, `agent_returned`, `patch_applied`, `test_pass`, `test_fail`, `push_resolution`, `merge_executed`, `local_sync`, `branch_deleted`, `worktree_removed`, `admin_bypass`, `waiver_recorded`, `error`, `pr_parked`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision`, `trust_trail_agent_decision`, `merge_strategy_agent_decision`, `merge_strategy_fanout_wave_started`, `discovery_gh_failed`, `ci_probe_started`, `ci_probe_skipped_no_checks`, `ci_probe_unreachable`, `ci_monitor_green`, `ci_monitor_red`, `ci_monitor_timeout`, `ci_classify_dispatched`, `ci_classify_returned`, `ci_classify_ambiguous_routing_as_flaky`, `ci_fix_dispatched`, `ci_fix_dispatch_unknown_class`, `ci_fix_pushed`, `ci_flaky_rerun_queued`, `ci_flaky_rerun_failed`, `ci_loop_cap_reached`, `ci_phase_outcome`, `auto_review_dispatched`, `auto_review_returned` | D15. Field-level extensions: gate_pass.data.trust_anchor ∈ TRUST_ANCHOR_ENUM; gate_fail.data.reason ∈ GATE_FAIL_REASON_ENUM (see Phase 1.4); discovery_gh_failed.data.reason ∈ {`gh_failed`, `jq_failed`}, .data.step ∈ {`1.0.5`, `1.2.5`, `1.4`}, .data.exit_code (int), .data.gh_stderr (string, raw stderr ≤512 bytes pre-truncation; JSON-escaping may expand to ≤2048 bytes for adversarial backslash-heavy payloads), .data.pr_number (int, optional — only set when step="1.4"). **+12 new members for /review-pr Phase 3 (#76):** `ci_probe_started`, `ci_probe_skipped_no_checks`, `ci_probe_unreachable`, `ci_monitor_green`, `ci_monitor_red`, `ci_monitor_timeout`, `ci_classify_dispatched`, `ci_classify_returned`, `ci_fix_dispatched`, `ci_fix_pushed`, `ci_loop_cap_reached`, `ci_phase_outcome`. `ci_phase_outcome.data.outcome ∈ CI_OUTCOME_ENUM`; `ci_classify_returned.data.failure_class ∈ CI_FAILURE_CLASS_ENUM`; `ci_fix_dispatched.data.by_agent ∈ {ci-code-fixer, ci-rebase-handler}`; `ci_fix_pushed.data.commit_sha` is full 40-hex. **+4 hardening members (post-impl-review B6/B7/B9):** `ci_classify_ambiguous_routing_as_flaky` (AMBIGUOUS→flaky fallback fires; preserves origin in trail); `ci_flaky_rerun_queued` / `ci_flaky_rerun_failed` (flaky `gh run rerun` exit-code dichotomy; previously dropped silently); `ci_fix_dispatch_unknown_class` (ROUTE default-case guard; emitted when classifier returns a CI_FAILURE_CLASS_ENUM member with no case arm — defensive against future enum extension). **Deprecated (never emitted post-v0.17.0):** `admin_bypass`, `waiver_recorded`. **+2 auto-review members (#89):** `auto_review_dispatched` (`data.pr: int`, `data.reason_triggering: string ∈ {trust_trail_label_missing, trust_trail_trailer_missing}`) — fires before the synchronous `Skill("uberdev:review-pr")` call; always paired with `auto_review_returned` (`data.pr: int`, `data.outcome: string ∈ {green, blocked, refused_non_green}`, `data.duration_ms: int`) — fires after `Skill()` returns or times out. Cap: 1 dispatch per `(pr_number, run_id)` per `/merge` run (`AUTO_REVIEW_DISPATCH_CAP`). |
 | `SCRATCH_WORKTREE_PATTERN` | `.claude/worktrees/merge-<run-id>/` | D10 |
 | `BRANCH_NAME_REGEX` | `^[A-Za-z0-9._/-]{1,255}$` | D8 (validation before shell argv use) |
 | `MERGE_STRATEGY_LABEL_PREFIX` | `merge-strategy:` | D-LABEL |
@@ -65,6 +65,8 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `CI_OUTCOME_ENUM` | `green`, `green_after_fix`, `skipped_no_checks`, `halted`, `loop_cap_exhausted` | `commands/review-pr.md` Phase 3 terminal audit + Step 7 trust-signal predicate |
 | `CI_FIX_LOOP_CAP` | `3` (prose constant, hard-coded) | `commands/review-pr.md` Phase 3 6c.7 LOOP GUARD |
 | `RERUN_FLAKY_CAP` | `1` (prose constant, hard-coded) | `commands/review-pr.md` Phase 3 6c.4 ROUTE flake re-run guard |
+| `AUTO_REVIEW_DISPATCH_CAP` | `1` (prose constant, hard-coded; named per D4 — no inline literal) | `plugins/uberdev/skills/merge-pipeline/SKILL.md` Step 1.4.5 auto-review intercept; absolute cap per `(pr_number, run_id)` composite key (D2). |
+| `AUTO_REVIEW_ON_MERGE_KEY` | config-key name `auto_review_on_merge`; env override `UBERDEV_AUTO_REVIEW_ON_MERGE`; default `false`. Modelled as a two-value enum via `uberdev_read_enum auto_review_on_merge UBERDEV_AUTO_REVIEW_ON_MERGE 'true\|false' 'false'` (no new `uberdev_read_bool` helper — see D7). | Phase 1 hoist read (Step 1.0a vicinity); Step 1.4.5 conditional gate. |
 | `CI_PROBE_RATE_LIMIT_FLOOR` | `200` (prose constant, hard-coded) | `commands/review-pr.md` Phase 3 6c.1 PROBE pre-flight rate-limit guard |
 | `CI_MONITOR_TIMEOUT_SEC` | `1200` (prose constant, hard-coded) | `commands/review-pr.md` Phase 3 6c.2 MONITOR wall-clock cap |
 | `CI_WATCH_INTERVAL_SEC` | `30` (prose constant, hard-coded) | `commands/review-pr.md` Phase 3 6c.2 MONITOR `gh pr checks --watch` interval |
@@ -128,6 +130,23 @@ if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
   fi
 fi
 ```
+
+```bash
+# Step 1.0a (cont.) — auto-review-on-merge config read (#89)
+# Reuses uberdev_read_enum (modeled as two-value enum per D7; no new uberdev_read_bool helper).
+# Default-off: when unset OR set to anything other than 'true', AUTO_REVIEW_ON_MERGE=false and
+# the Phase 1.4.5 intercept is short-circuited (bit-identical to pre-#89 behavior).
+if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
+  . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+  AUTO_REVIEW_ON_MERGE="$(uberdev_read_enum auto_review_on_merge UBERDEV_AUTO_REVIEW_ON_MERGE 'true|false' 'false')"
+else
+  AUTO_REVIEW_ON_MERGE=false
+fi
+# Run-scoped per-PR dispatch counter (lifetime = merge-pipeline subshell only; no cross-run state).
+declare -A AUTO_REVIEW_DISPATCHED=()
+```
+
+**Precedence (inherited from `uberdev_read_enum` generic semantics):** `UBERDEV_AUTO_REVIEW_ON_MERGE` env > `auto_review_on_merge:` in `.claude/uberdev.local.md` > default `false`. Invalid values (anything outside `true|false`) trigger the standard D7 warning format, emit a `uberdev_config_invalid` audit event via existing helper machinery, and fall back to default `false` non-fatally — no new event needed for invalid config. The `AUTO_REVIEW_DISPATCHED` associative array is declared empty at hoist time and indexed by the composite key `${PR}:${RUN_ID}` at intercept time (see Step 1.4.5).
 
 ### Step 1.0.5 — Bare-mode detection (mode-only, no dispatch)
 
@@ -342,17 +361,89 @@ Honest fast-forward fixup commits added between `/review-pr` and `/merge` (e.g.,
 
 **Otherwise:** neither of the two paths fired. Emit `gate_fail` with the most specific `data.reason` from `GATE_FAIL_REASON_ENUM` for the failing sub-condition (e.g. `review_decision_not_approved` if PATH_1 failed and PATH_2 had no label, vs `trust_trail_stale_sha` if PATH_2's trailer existed but the SHA was stale). General refusal diagnostic when no trust trail exists at all: `/review-pr hasn't run on commit <sha> — run /review-pr first to establish a trust trail; the next /merge invocation will pick this PR up automatically.`
 
+### Step 1.4.5 — Auto-review intercept (#89)
+
+**Default-off bit-identity contract.** When `AUTO_REVIEW_ON_MERGE` is `false` (the default), this step is a structural no-op: control falls through to the existing `gate_fail` emission described under the "Otherwise:" paragraph above. Zero new audit events fire. Zero new wall-clock is consumed. The `AUTO_REVIEW_DISPATCHED` associative array is declared but never written. This is the load-bearing safety contract (constraints.md §Summary #1).
+
+**Trigger guard (positive whitelist; D10).** The intercept fires if and only if ALL THREE conditions hold:
+
+1. `AUTO_REVIEW_ON_MERGE == true` (config-opt-in)
+2. The candidate `data.reason` produced by Step 1.4 PATH_2 evaluation is in the trigger set: `reason ∈ {trust_trail_label_missing, trust_trail_trailer_missing}`. All other `GATE_FAIL_REASON_ENUM` members — `review_decision_not_approved`, `trust_trail_stale_sha`, `trust_trail_agent_invalid_input`, `trust_trail_json_sha_mismatch`, `pr_state_not_open`, `is_draft`, `ci_red`, `merge_state_blocked`, `pr_view_unreachable` — explicitly DO NOT trigger (see `## Common Mistakes` for the exhaustive rationale).
+3. The counter for this PR + run composite key is unset: `[[ -z "${AUTO_REVIEW_DISPATCHED["${PR}:${RUN_ID}"]:-}" ]]`. This enforces the absolute cap `AUTO_REVIEW_DISPATCH_CAP = 1` per `(pr_number, run_id)`.
+
+**Dispatch sequence (cap-ordering invariant).** When all three conditions hold, execute in this exact order:
+
+```bash
+# 1. Mark counter BEFORE dispatch — prevents re-entry under any path
+AUTO_REVIEW_DISPATCHED["${PR}:${RUN_ID}"]=1
+
+# 2. Emit pre-dispatch audit event
+printf '{"event":"auto_review_dispatched","run_id":"%s","ts":"%s","data":{"pr":%d,"reason_triggering":"%s"}}\n' \
+  "$RUN_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PR" "$reason" >> ".uberdev/audit.jsonl"
+
+# 3. Start wall-clock timer (probe gdate on macOS-without-coreutils; fall back to second-resolution)
+if command -v gdate >/dev/null 2>&1; then
+  T_start=$(gdate +%s%3N)
+else
+  T_start=$(( $(date +%s) * 1000 ))   # BSD `date` lacks %3N; degrade to second granularity reported as ms
+fi
+
+# 4. Synchronous cross-skill dispatch (await outcome). --turbo suppresses interactive halts.
+Skill("uberdev:review-pr", args: "${PR} --turbo")
+rc=$?
+
+# 5. Stop wall-clock timer (same probe shape as start)
+if command -v gdate >/dev/null 2>&1; then
+  T_end=$(gdate +%s%3N)
+else
+  T_end=$(( $(date +%s) * 1000 ))
+fi
+duration_ms=$(( T_end - T_start ))
+
+# 6. Classify outcome by exit code
+case "$rc" in
+  0) outcome="green" ;;
+  1) outcome="blocked" ;;              # REVISIONS_REQUIRED / REJECT / Phase 3 halted past --turbo
+  2) outcome="refused_non_green" ;;    # Phase 2 fanout crash / artifact-emit fail
+  *) outcome="refused_non_green" ;;    # advisory-timeout kill or unknown exit
+esac
+
+# 7. Emit post-dispatch audit event
+printf '{"event":"auto_review_returned","run_id":"%s","ts":"%s","data":{"pr":%d,"outcome":"%s","duration_ms":%d}}\n' \
+  "$RUN_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PR" "$outcome" "$duration_ms" >> ".uberdev/audit.jsonl"
+```
+
+**Green-path re-eval (D3, D12).** When `outcome == "green"`:
+
+1. **Refresh inputs.** Re-run `pr_view_projection` for `${PR}` only (full `gh pr view ${PR} --json state,isDraft,reviewDecision,statusCheckRollup,headRepository,maintainerCanModify,isCrossRepository,headRefName,headRefOid,baseRefName,body,commits,labels,latestReviews,createdAt,author --jq '.'`). The returned projection REPLACES the cached `PR_JSON` for this PR in the per-PR loop iteration. Fields specifically refreshed: `headRefOid` (anchor commit advances by 1 after green `/review-pr`), `commits` (count and SHAs), `labels` (the `uberdev-approved` label appears post-emission), `latestReviews` (refreshed defensively — `/review-pr` does NOT call `gh pr review --approve`, so PATH_1 still cannot reach via auto-dispatch per security.md §2). `commit_count` and `divergence_commits` are derived from refreshed `commits`. This refresh closes the TOCTOU window flagged in R1 / security.md §4.
+2. **Re-evaluate Phase 1.4 for `${PR}` only (D12).** Single re-pass — no recursion. PATH_1 is checked again (defensive against any `/review-pr` side-effect on `reviewDecision`). PATH_2 sub-conditions (a)–(d) are re-checked against the refreshed projection. **Counter check prevents re-entry:** the very first guard condition of Step 1.4.5 (`AUTO_REVIEW_DISPATCHED["${PR}:${RUN_ID}"]` is unset) is now FALSE on re-entry, so the intercept skips and any new trigger reason falls through to the original manual-handoff diagnostic. Absolute cap honored.
+3. **On `gate_pass` after re-eval:** the PR proceeds into Phase 2 with refreshed inputs (Phase 2.2 strategy-decider consumes the refreshed `commit_count` and `divergence_commits`).
+4. **On `gate_fail` after re-eval:** the PR is excluded from the merge set with the NEW `data.reason` (e.g., a teammate push during the auto-review window may produce `trust_trail_stale_sha`); the queue continues.
+
+**Non-green path (`outcome ∈ {blocked, refused_non_green}`).** The PR is excluded from the merge set. A run-summary line is appended to the user-facing summary block:
+
+```
+PR #${PR}: auto-review returned ${outcome} (duration ${duration_ms}ms); see .uberdev/runs/<run-id>/review-pr-verdict.json
+```
+
+The queue continues with the next PR. No halt path is introduced — the autopilot contract from `## Common Mistakes` ("Halting the run") is preserved.
+
+**Else-branch (intercept does NOT fire).** When ANY of the three trigger conditions fails — `AUTO_REVIEW_ON_MERGE == false`, OR `reason` not in the trigger set, OR the counter is already set — control falls through to the existing "Otherwise:" paragraph above: `gate_fail` emits with the original diagnostic message (`/review-pr hasn't run on commit <sha> — run /review-pr first to establish a trust trail; the next /merge invocation will pick this PR up automatically.`), the PR is excluded, the queue continues. Bit-identical to pre-#89 behavior.
+
+**Dispatch failure handling (R7).** If `Skill("uberdev:review-pr", ...)` itself fails to dispatch (plugin disabled per the `enabledPlugins` bug pattern, missing command, etc.), the failure is caught at the call site; `auto_review_returned` is emitted with `outcome: refused_non_green` and the duration measured to the point of dispatch failure; the PR is excluded; the queue continues. Healthy installs are unaffected.
+
 **Stale-SHA verification primitive (D3, agent-delegated post-v0.17.0).** The PATH_2 (c) check is delegated to `trust-trail-evaluator`. The agent inspects three structural primitives — `git merge-base --is-ancestor <trailer-sha> <live-headRefOid>`, `git diff --shortstat <trailer-sha> <live-headRefOid>`, and `git log <trailer-sha>..<live-headRefOid> --oneline` — to distinguish `PASS` (honest fast-forward fixup with empty cumulative diff OR sibling commits via `commit --amend` with identical trees), `STALE` (ancestor relationship with non-empty diff between trailer and current head), `INVALID` (input-malformed or trailer SHA not in local clone), and `FORCE_PUSHED` (non-ancestor AND tree contents differ — real history rewriting). The ancestor relationship and the tree-diff are checked independently: non-ancestor with empty tree diff is a sibling-equivalent rewrite (PASS), not a force-push. The agent's `head_ref_oid` input is the live `gh pr view <N> --json headRefOid` value (never a local ref like `HEAD` or `origin/<branch>`); M38's live-headRefOid mandate is preserved as the agent's input contract. The single dispatch primitive covers all rewrite types with one return-contract YAML and one set of caller-side mappings.
 
 **Author identity is NOT a gate condition** in any path. Phase 1.4 trust resolution accepts EITHER `reviewDecision == "APPROVED"` (team / branch-protection path; PATH_1) OR a green `/review-pr` trail bound to current HEAD SHA (solo-dev / no-protection path; PATH_2) — author identity is not a gate in either path. The `bot_authors_allow_list` config key is deprecated; see `commands/merge.md` `## Deprecated Flags` and `using-uberdev/SKILL.md`.
 
-> **Note for editors:** the layered trust-anchor sentence above (PATH_1 platform anchor + PATH_2 uberdev trust trail) is intentionally repeated across **five mirror sites**, each serving a different reader audience. Do not consolidate to a single source of truth. If you change the contract here, update all five mirrors in the same change. Mirror sites are identified by section/heading (line numbers shift with prose edits — use the anchors below):
+> **Note for editors:** the layered trust-anchor sentence above (PATH_1 platform anchor + PATH_2 uberdev trust trail) is intentionally repeated across **five mirror sites** (plus a 6th carve-out for the #89 auto-review intercept), each serving a different reader audience. Do not consolidate to a single source of truth. If you change the contract here, update all five mirrors in the same change. Mirror sites are identified by section/heading (line numbers shift with prose edits — use the anchors below):
 >
 > 1. `plugins/uberdev/skills/merge-pipeline/SKILL.md` — `### Step 1.4 — Per-PR pre-flight gate (trust resolution)` body, the **"Author identity is NOT a gate condition"** paragraph (this section, the canonical wording).
 > 2. `plugins/uberdev/skills/merge-pipeline/SKILL.md` — `## Common Mistakes`, the **"Adding an author allow-list back as a gate"** bullet (Phase 1.4 regression guard).
 > 3. `plugins/uberdev/commands/merge.md` — the **Autopilot paragraph** (user-facing CLI documentation; the sentence beginning "Phase 1.4 trust resolution accepts EITHER…").
 > 4. `plugins/uberdev/commands/merge.md` — `## Deprecated Flags`, the **`bot_authors_allow_list` config-key bullet**.
 > 5. `plugins/uberdev/skills/using-uberdev/SKILL.md` — the **`bot_authors_allow_list` semantics paragraph**.
+> 6. **Auto-review carve-out (#89):** when `auto_review_on_merge: true`, the manual-handoff diagnostic at the "Otherwise:" block (the canonical wording in mirror site 1 of this list) is suppressed in favor of an auto-dispatch in Step 1.4.5 (preceding paragraph). The other four mirror sites are NOT affected — the auto-dispatch either re-enters Phase 1.4 with a refreshed projection (which may still emit the manual diagnostic on a non-trigger reason) or proceeds into Phase 2 on green re-eval. The auto-review carve-out lives in THIS skill only; do not propagate it to the other mirror sites. The carve-out is structurally a *replace-on-narrow-condition* of the manual diagnostic, not a contract change to the layered trust-anchor sentence (Q5).
 
 On any condition fail: list the specific failing condition for that PR. Exclude from merge set. **Never silently skip** — every fail emits a `gate_fail` event to `audit.jsonl` AND surfaces in the user-facing summary. Continue with passing PRs.
 
@@ -548,6 +639,8 @@ viii. **Tear down the scratch worktree** per `using-git-worktrees` protocol: `gi
 | `trust_trail_agent_decision` returns `INVALID / input_malformed` (Phase 1.4 PATH_2 (c)) | `gate_fail` with `data.reason="trust_trail_agent_invalid_input"`; PR excluded from merge set | continues |
 | `trust_trail_agent_decision` returns `INVALID / trailer_sha_not_in_local_clone` (Phase 1.4 PATH_2 (c)) | One bounded `git fetch --prune origin <branch>` + re-dispatch (max retry=1); persistent INVALID → `gate_fail` with `data.reason="trust_trail_agent_invalid_input"`; PR excluded from merge set | continues |
 | `pr_view_projection` lib call failure (Step 1.4 — gh-or-jq exit non-zero, e.g., network / auth / rate-limit) | emit `discovery_gh_failed` (step="1.4") + `gate_fail` with `data.reason="pr_view_unreachable"`; PR excluded from merge set | continues |
+| Auto-review returned `blocked` (Phase 1.4.5; `outcome="blocked"`) | `/review-pr` returned exit 1 (REVISIONS_REQUIRED / REJECT / Phase 3 stop-condition escaped past `--turbo`). Emit `auto_review_returned` with `outcome: blocked`; exclude PR; run-summary line: `"PR #${PR}: auto-review returned blocked; see .uberdev/runs/<run-id>/review-pr-verdict.json"`; queue continues | continues |
+| Auto-review returned `refused_non_green` (Phase 1.4.5; `outcome="refused_non_green"`) | `/review-pr` returned exit 2 (Phase 2 fanout crash / artifact-emission failure), OR /review-pr's own internal phase timeouts returning a non-zero exit, OR dispatch failure (plugin disabled). Emit `auto_review_returned` with `outcome: refused_non_green` and `duration_ms` = elapsed time at kill / dispatch failure; exclude PR; run-summary line; queue continues | continues |
 
 **No halt conditions remain.** Already-merged PRs stay merged. Every event hits `audit.jsonl`. Every parked PR appears in the run-summary block with its `PARK_REASON_ENUM` value and the structured handoff (where applicable).
 
@@ -672,6 +765,7 @@ For each stale branch, the agent decides (per-branch). Each decision emits one `
 - **Treating sub-condition (d) as a tamper detector, or globbing all JSONs without filtering by `.pr`.** The JSON is local debug telemetry per D1 — `.uberdev/` is gitignored, so its absence on a fresh clone is by design. Sub-condition (d) is corroborating-only post-#78: JSON present (after filtering `.uberdev/runs/*/review-pr-verdict.json` to those with `.pr == <N>`) → presence + shape check (`gate_fail` with `trust_trail_json_sha_mismatch` on shape-malformed only — narrow scope post-#78); JSON absent for this PR → advisory `error` audit event with `data.reason="trust_trail_json_absent"` + `gate_pass` (queue continues). Tamper detection is fully owned by sub-condition (c) — the trust-trail-evaluator agent's cumulative-diff heuristic. The retired `trust_trail_json_missing` reason is never emitted post-#52; the strict `"sha" == headRefOid` equality check is retired post-#78. Globbing JSONs without filtering by `.pr` (the pre-#78 bug) caused gate_fail when prior /review-pr runs from earlier states or other PRs left stale JSONs in `.uberdev/runs/`, even when the current-PR JSON had a valid SHA.
 - **Treating `--bypass-protections` as a live admin-bypass anchor.** It is deprecated as a no-op post-v0.17.0 — the trust-trail-evaluator agent subsumes its job; there is no PATH_3 admin-bypass anchor and no CI-red waiver. The flag is parsed without error indefinitely (Terraform / npm CLI deprecation precedent), emits `BYPASS_PROTECTIONS_DEPRECATED_NOTE` once per run on first encounter, and records a `deprecated_flag_used` audit event. `admin_bypass` and `waiver_recorded` events are declared in `AUDIT_EVENT_ENUM` for backward-compat with audit-log consumers but are NEVER emitted post-v0.17.0.
 - **Inlining strategy heuristics in Phase 2.2 instead of dispatching `merge-strategy-decider`.** The agent owns the decision; the skill normalises inputs (commit_count, conventional_commit_ratio, divergence_commits, wip_marker_present, label_hint, repo_convention) and surfaces the verdict to the audit log via `merge_strategy_agent_decision` and `strategy_chosen` (`data.reason="agent_decided"`). There is NO "Per-invocation flag always wins" clause — `--squash` / `--rebase` / `--merge` are no-ops post-v0.17.0.
+- **Don't trigger auto-review on `review_decision_not_approved` alone, on `trust_trail_stale_sha`, or on any other non-whitelisted gate-fail reason.** The Phase 1.4.5 auto-review intercept fires ONLY on the positive whitelist `reason ∈ {trust_trail_label_missing, trust_trail_trailer_missing}` (D10). The non-trigger `GATE_FAIL_REASON_ENUM` members are excluded as a defensive completeness measure (D11): `review_decision_not_approved` (auto-bypassing branch protection is a security regression — security.md §2), `trust_trail_stale_sha` (deferred to v2 — requires a pricier full re-anchor), `trust_trail_agent_invalid_input` (input-malformed agent input is a manual-investigation signal), `trust_trail_json_sha_mismatch` (indicates a corrupted run-local path post-#78 — manual investigation per Q6), `pr_state_not_open`, `is_draft`, `ci_red`, `merge_state_blocked` (pre-condition gates evaluated before trust resolution — not auto-recoverable), `pr_view_unreachable` (infrastructure failure — not auto-recoverable). The cap is `AUTO_REVIEW_DISPATCH_CAP = 1` per `(pr_number, run_id)`; the counter is set BEFORE the synchronous `Skill("uberdev:review-pr")` dispatch (Step 1.4.5 cap-ordering invariant) so re-entry cannot bypass the cap even on green re-eval.
 
 ## Red Flags
 

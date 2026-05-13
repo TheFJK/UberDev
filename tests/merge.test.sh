@@ -114,12 +114,15 @@ assert_grep "$CMD_FILE" '^argument-hint:' "M1.2 — has argument-hint key"
 assert_grep "$CMD_FILE" '^allowed-tools:' "M1.3 — has allowed-tools key"
 
 echo
-echo "== M2: commands/merge.md is a thin dispatcher (≤ 50 lines) =="
+echo "== M2: commands/merge.md is a thin dispatcher (≤ 75 lines) =="
+# Cap raised from 50 to 75 in #89 to absorb the documented Inputs section
+# (active config keys consumed by /merge — `auto_review_on_merge` and future
+# additions). Still a thin dispatcher: SKILL.md owns the implementation.
 LINE_COUNT=$(wc -l < "$CMD_FILE" | tr -d ' ')
-if [ "$LINE_COUNT" -le 50 ]; then
-  pass "M2 — $LINE_COUNT lines (≤ 50)"
+if [ "$LINE_COUNT" -le 75 ]; then
+  pass "M2 — $LINE_COUNT lines (≤ 75)"
 else
-  fail "M2 — $LINE_COUNT lines (> 50, dispatcher should stay thin)"
+  fail "M2 — $LINE_COUNT lines (> 75, dispatcher should stay thin)"
 fi
 
 echo
@@ -1494,6 +1497,156 @@ if echo "$PHASE_14_BLOCK" | grep -qE 'only one PR can|single PR only|exactly one
 else
   pass "M73.no-single-pr-hardcode — Phase 1.4 correctly avoids single-PR-only hard-coding"
 fi
+
+echo
+echo "== M74: AUDIT_EVENT_ENUM declares auto_review_dispatched (#89) =="
+if grep -E '^\| `AUDIT_EVENT_ENUM`' "$SKILL_FILE" | grep -q '`auto_review_dispatched`'; then
+  pass "M74 — AUDIT_EVENT_ENUM row contains auto_review_dispatched literal"
+else
+  fail "M74 — AUDIT_EVENT_ENUM MUST declare auto_review_dispatched (spec C2.1; D8 cites PR #77 bracketing precedent)"
+fi
+
+echo
+echo "== M75: AUDIT_EVENT_ENUM declares auto_review_returned (#89) =="
+if grep -E '^\| `AUDIT_EVENT_ENUM`' "$SKILL_FILE" | grep -q '`auto_review_returned`'; then
+  pass "M75 — AUDIT_EVENT_ENUM row contains auto_review_returned literal"
+else
+  fail "M75 — AUDIT_EVENT_ENUM MUST declare auto_review_returned (spec C2.1; bracketed pair with auto_review_dispatched)"
+fi
+
+echo
+echo "== M76: AUDIT_EVENT_ENUM prose names the data.outcome enum for auto_review_returned (#89) =="
+ENUM_ROW=$(grep -E '^\| `AUDIT_EVENT_ENUM`' "$SKILL_FILE")
+for token in 'green' 'blocked' 'refused_non_green' 'reason_triggering' 'duration_ms'; do
+  if echo "$ENUM_ROW" | grep -qE "$token"; then
+    pass "M76.$token — AUDIT_EVENT_ENUM prose names $token"
+  else
+    fail "M76.$token — AUDIT_EVENT_ENUM prose MUST name $token (spec '## Data flow & return contracts')"
+  fi
+done
+
+echo
+echo "== M77: Constants table declares AUTO_REVIEW_DISPATCH_CAP = 1 (#89) =="
+if grep -E '^\| `AUTO_REVIEW_DISPATCH_CAP` \| `1`' "$SKILL_FILE" | head -1 | grep -q '`1`'; then
+  pass "M77 — AUTO_REVIEW_DISPATCH_CAP = 1 declared in Constants table (spec D4; no inline literal)"
+else
+  fail "M77 — Constants table MUST declare AUTO_REVIEW_DISPATCH_CAP = 1 as a named constant (per CI_FIX_LOOP_CAP / RERUN_FLAKY_CAP pattern; constraints.md §Summary #4)"
+fi
+
+echo
+echo "== M78: Constants table declares AUTO_REVIEW_ON_MERGE_KEY (#89) =="
+KEY_ROW=$(grep -E '^\| `AUTO_REVIEW_ON_MERGE_KEY`' "$SKILL_FILE" | head -1)
+if [ -n "$KEY_ROW" ]; then
+  if echo "$KEY_ROW" | grep -q 'auto_review_on_merge' && \
+     echo "$KEY_ROW" | grep -q 'UBERDEV_AUTO_REVIEW_ON_MERGE'; then
+    pass "M78 — AUTO_REVIEW_ON_MERGE_KEY row cites config-key name + env-var (spec D7 reuses uberdev_read_enum)"
+  else
+    fail "M78 — AUTO_REVIEW_ON_MERGE_KEY row MUST cite both 'auto_review_on_merge' (config key) and 'UBERDEV_AUTO_REVIEW_ON_MERGE' (env override)"
+  fi
+else
+  fail "M78 — Constants table MUST declare AUTO_REVIEW_ON_MERGE_KEY row (spec C2.1)"
+fi
+
+echo
+echo "== M79: SKILL.md declares Step 1.4.5 auto-review intercept (#89) =="
+if grep -nE '^### Step 1\.4\.5' "$SKILL_FILE" | head -1 | grep -q '1\.4\.5'; then
+  pass "M79.heading — Step 1.4.5 sub-section heading present"
+else
+  fail "M79.heading — SKILL.md MUST declare ### Step 1.4.5 sub-section heading (spec C2.3)"
+fi
+STEP_145_BLOCK=$(awk '/^### Step 1\.4\.5/,/^### Step 1\.5/' "$SKILL_FILE")
+for token in 'AUTO_REVIEW_ON_MERGE' 'AUTO_REVIEW_DISPATCHED' 'AUTO_REVIEW_DISPATCH_CAP'; do
+  if echo "$STEP_145_BLOCK" | grep -q "$token"; then
+    pass "M79.$token — Step 1.4.5 references $token"
+  else
+    fail "M79.$token — Step 1.4.5 MUST reference $token (spec '## Architecture' counter lifecycle + trigger guard)"
+  fi
+done
+
+echo
+echo "== M80: Step 1.4.5 dispatches Skill(uberdev:review-pr) with --turbo (#89) =="
+STEP_145_BLOCK=$(awk '/^### Step 1\.4\.5/,/^### Step 1\.5/' "$SKILL_FILE")
+if echo "$STEP_145_BLOCK" | grep -qE 'Skill\("uberdev:review-pr".*--turbo'; then
+  pass "M80.dispatch — Step 1.4.5 invokes Skill(uberdev:review-pr) with --turbo flag (spec D1: --turbo unconditional)"
+else
+  fail "M80.dispatch — Step 1.4.5 MUST invoke Skill(uberdev:review-pr) with --turbo flag (spec D1)"
+fi
+L_COUNTER=$(grep -n 'AUTO_REVIEW_DISPATCHED\["\${PR}:\${RUN_ID}"\]=1' "$SKILL_FILE" | head -1 | cut -d: -f1)
+# Match the actual dispatch call (with `args:` keyword), not the `Skill("uberdev:review-pr")` mentions
+# in the AUDIT_EVENT_ENUM prose, R7 dispatch-failure paragraph, or Common Mistakes bullet.
+L_DISPATCH=$(grep -n 'Skill("uberdev:review-pr", args:' "$SKILL_FILE" | head -1 | cut -d: -f1)
+if [ -n "$L_COUNTER" ] && [ -n "$L_DISPATCH" ] && [ "$L_COUNTER" -lt "$L_DISPATCH" ]; then
+  pass "M80.cap-ordering — counter write precedes Skill() dispatch in source order (R6 invariant)"
+else
+  fail "M80.cap-ordering — AUTO_REVIEW_DISPATCHED write MUST precede Skill(uberdev:review-pr) dispatch in source order (R6 / spec)"
+fi
+
+echo
+echo "== M81: Common Mistakes bullet enumerates the excluded gate-fail reasons (#89) =="
+CM_BLOCK=$(awk '/^## Common Mistakes/,/^## Red Flags/' "$SKILL_FILE")
+if echo "$CM_BLOCK" | grep -qE "Don't trigger auto-review on .review_decision_not_approved. alone"; then
+  pass "M81.bullet-present — Common Mistakes bullet present"
+else
+  fail "M81.bullet-present — Common Mistakes MUST include 'Don't trigger auto-review on review_decision_not_approved alone' bullet (spec C2.6 / D11)"
+fi
+for reason in review_decision_not_approved trust_trail_stale_sha trust_trail_agent_invalid_input \
+              trust_trail_json_sha_mismatch pr_state_not_open is_draft ci_red merge_state_blocked \
+              pr_view_unreachable; do
+  if echo "$CM_BLOCK" | grep -qF "$reason"; then
+    pass "M81.excluded-$reason — bullet names $reason"
+  else
+    fail "M81.excluded-$reason — Common Mistakes bullet MUST name excluded reason $reason (spec D11 + Q6)"
+  fi
+done
+
+echo
+echo "== M82: Step 3.4 failure-mode table has auto-review blocked + refused_non_green rows (#89) =="
+STEP_34_BLOCK=$(awk '/^### Step 3\.4/,/^## Phase 4/' "$SKILL_FILE")
+if echo "$STEP_34_BLOCK" | grep -q 'Auto-review returned `blocked`'; then
+  pass "M82.blocked-row — Step 3.4 table has 'Auto-review returned blocked' row"
+else
+  fail "M82.blocked-row — Step 3.4 table MUST include 'Auto-review returned blocked' failure-mode row (spec C2.5)"
+fi
+if echo "$STEP_34_BLOCK" | grep -q 'Auto-review returned `refused_non_green`'; then
+  pass "M82.refused-row — Step 3.4 table has 'Auto-review returned refused_non_green' row"
+else
+  fail "M82.refused-row — Step 3.4 table MUST include 'Auto-review returned refused_non_green' failure-mode row (spec C2.5)"
+fi
+
+echo
+echo "== M83: editor's note adds 6th bullet about #89 auto-review carve-out =="
+EDITORS_NOTE=$(awk '/^> \*\*Note for editors:\*\*/,/^[^>]/' "$SKILL_FILE")
+if echo "$EDITORS_NOTE" | grep -qE '^> 6\..*auto_review_on_merge'; then
+  pass "M83.6th-bullet — editor's note has 6th bullet referencing auto_review_on_merge (spec C2.4 / Q5)"
+else
+  fail "M83.6th-bullet — editor's note MUST add a 6th bullet describing the #89 auto-review carve-out (spec C2.4 / Q5 mitigates R5 mirror-site drift)"
+fi
+
+echo
+echo "== M84: commands/merge.md Autopilot paragraph mentions auto_review_on_merge (#89) =="
+CMD_FILE="plugins/uberdev/commands/merge.md"
+if awk '/\*\*Autopilot:\*\*/,/^## /' "$CMD_FILE" | grep -q 'auto_review_on_merge'; then
+  pass "M84 — commands/merge.md Autopilot paragraph cites auto_review_on_merge (spec C3.1)"
+else
+  fail "M84 — commands/merge.md Autopilot paragraph MUST cite auto_review_on_merge as opt-in inner workflow (spec C3.1 / AC8)"
+fi
+
+echo
+echo "== M85: commands/merge.md documents auto_review_on_merge with the excluded reasons (#89) =="
+if grep -nE 'auto_review_on_merge: true\|false' "$CMD_FILE" | head -1 | grep -q 'auto_review_on_merge'; then
+  pass "M85.config-key — commands/merge.md documents auto_review_on_merge with true|false enum (spec C3.2)"
+else
+  fail "M85.config-key — commands/merge.md MUST document auto_review_on_merge with true|false enum (spec C3.2)"
+fi
+INPUTS_BLOCK=$(awk '/auto_review_on_merge: true\|false/,/^##|^---/' "$CMD_FILE")
+for reason in trust_trail_stale_sha trust_trail_agent_invalid_input trust_trail_json_sha_mismatch \
+              review_decision_not_approved; do
+  if echo "$INPUTS_BLOCK" | grep -qF "$reason"; then
+    pass "M85.excluded-$reason — Inputs section names excluded reason $reason"
+  else
+    fail "M85.excluded-$reason — Inputs section MUST name excluded reason $reason (spec C3.2)"
+  fi
+done
 
 echo
 echo "== Summary =="

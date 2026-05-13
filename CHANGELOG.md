@@ -4,6 +4,12 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0] - 2026-05-13
+
+### Added
+
+- **Opt-in `/merge` Phase 1.4 auto-dispatch of `/review-pr` when trust trail is missing.** Gated by per-repo config key `auto_review_on_merge: true|false` (default `false`) with env override `UBERDEV_AUTO_REVIEW_ON_MERGE`. Conservative trigger filter — fires ONLY on `trust_trail_label_missing` and `trust_trail_trailer_missing`. Bounded: 1 auto-review per PR per `/merge` run (named constant `AUTO_REVIEW_DISPATCH_CAP = 1`). Two new `AUDIT_EVENT_ENUM` members: `auto_review_dispatched`, `auto_review_returned`. Default-off path is bit-identical to current `/merge` (zero new audit events, zero new wall-clock). Static shape-checks ship now (M74–M85, U9.1–U9.5); runtime-emission tests deferred until the existing `tests/merge-discovery-resilience.test.sh` harness can stub the `Skill()` call (tracked as follow-up; see spec §Risks R3). Closes #89.
+
 ## [0.22.2] - 2026-05-12
 
 ### Fixed
