@@ -68,14 +68,18 @@ else
   PASS=$((PASS + 1))
 fi
 
-# AC4 — structural ordering: Phase 5.5 -> Phase 6 -> Logging
+# AC4 — Phase 5.5 must NOT exist (issue #92 — dispatch moved into SDD Step 4.5)
+n=$(grep -cE '^### Phase 5\.5:' "$SKILL" || true)
+assert_eq "AC4 Phase 5.5 section absent (#92)" "0" "$n"
+
+# AC4b — structural ordering: Phase 5 -> Phase 6 -> Logging (post-#92)
 order=$(awk '
-  /^### Phase 5\.5:/ { f = 1 }
+  /^### Phase 5: /   { f = 1 }
   /^### Phase 6:/    { if (f) p = 1 }
   /^## Logging/      { l = 1; exit }
   END                { print (p && l) ? "ok" : "fail" }
 ' "$SKILL")
-assert_eq "AC4 Phase 5.5 -> Phase 6 -> Logging order" "ok" "$order"
+assert_eq "AC4b Phase 5 -> Phase 6 -> Logging order" "ok" "$order"
 
 # Extract the Phase 6 section body (### Phase 6: ... up to the next `## ` heading)
 # once so AC5/AC6/AC7 can all scope their searches to it. Scoping is what makes
@@ -97,11 +101,14 @@ three=$(printf '%s\n' "$phase6_body" | grep -cE '3 .*code-simplifier.*lenses' ||
 assert_ge "AC6a 6 advisory reviewer agents mentioned"  1 "$six"
 assert_ge "AC6b 3 simplify lenses mentioned"           1 "$three"
 
-# AC7 — large-tier Phase 5.5 ordering acknowledged in Phase 6 prose (scoped;
-# the same phrasing exists in the Phase 5.5 section so an unscoped grep would
-# false-pass even after Phase 6 was deleted).
-n=$(printf '%s\n' "$phase6_body" | grep -ciE 'Phase 5\.5.*pr-test-analyzer.*before' || true)
-assert_ge "AC7 Phase 5.5 ordering note present"        1 "$n"
+# AC7 — Phase 6 large-tier note must NOT mention "Phase 5.5" (post-#92 the
+# dispatch is owned by SDD Step 4.5; Phase 6 references the new location).
+n=$(printf '%s\n' "$phase6_body" | grep -ciE 'Phase 5\.5' || true)
+assert_eq "AC7 Phase 6 body no longer mentions Phase 5.5 (#92)" "0" "$n"
+
+# AC7b — Phase 6 large-tier note must mention the new SDD Step 4.5 location
+n=$(printf '%s\n' "$phase6_body" | grep -ciE 'subagent-driven-dev.*Step 4\.5|SDD.*Step 4\.5' || true)
+assert_ge "AC7b Phase 6 names SDD Step 4.5 (#92)" 1 "$n"
 
 # AC8 — CHANGELOG entry naming the issue. Scope to the `## [0.23.1]` block via
 # the same awk pattern so an old "Closes #94" in an unrelated future release
@@ -109,6 +116,11 @@ assert_ge "AC7 Phase 5.5 ordering note present"        1 "$n"
 v0231_body=$(awk '/^## \[0\.23\.1\]/{f=1; next} /^## /{f=0} f' "$CHANGELOG")
 n=$(printf '%s\n' "$v0231_body" | grep -cF 'Closes #94' || true)
 assert_ge "AC8 CHANGELOG references #94 in 0.23.1"     1 "$n"
+
+# AC9 — CHANGELOG 0.23.5 entry references #92 (the issue this PR closes).
+v0235_body=$(awk '/^## \[0\.23\.5\]/{f=1; next} /^## /{f=0} f' "$CHANGELOG")
+n=$(printf '%s\n' "$v0235_body" | grep -cF 'Closes #92' || true)
+assert_ge "AC9 CHANGELOG references #92 in 0.23.5"     1 "$n"
 
 echo ""
 echo "[orchestrator-phase-6-doc] PASS=$PASS FAIL=$FAIL"
