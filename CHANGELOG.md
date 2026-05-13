@@ -4,6 +4,13 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.3] - 2026-05-13
+
+### Added
+
+- **`review-pr:pending` label backstop one layer upstream of `/merge`.** Mirrors the v0.23.0 `/merge` trust-trail backstop at the previous chain link. `plugins/uberdev/skills/finish-branch/SKILL.md` now adds the `review-pr:pending` GitHub PR label (via `gh label create --force` + `gh pr edit --add-label`, both fail-soft per the fire-and-surface contract) immediately before invoking `uberdev:review-pr` via the `Skill` tool. `plugins/uberdev/commands/review-pr.md` Trust-Signal Emission block clears the label on green outcome (fail-soft per spec D4 — the label may legitimately not exist when `/review-pr` is invoked directly). `plugins/uberdev/skills/merge-pipeline/SKILL.md` Step 1.4.5 gains a new positive-signal label-presence probe (gated by `AUTO_REVIEW_ON_MERGE`) that short-circuits trust-trail reason resolution by assigning `reason="trust_trail_label_missing"` directly. **No new `AUDIT_EVENT_ENUM` or `GATE_FAIL_REASON_ENUM` members** — D1 reuses the existing `trust_trail_label_missing` value. The label is the durable cross-process signal: it survives session boundaries and any tool with `gh` access can inspect it. New named constant `REVIEW_PR_PENDING_LABEL = "review-pr:pending"` in `merge-pipeline/SKILL.md` Constants table. The `AUTO_REVIEW_DISPATCH_CAP = 1` cap-ordering invariant from v0.23.0 is preserved (counter write still precedes `Skill()` dispatch). Tests added: `tests/finish-branch-auto-chain.test.sh` (#95.1–#95.5 — label-add presence, line-order guard, fail-soft contract), `tests/review-pr.test.sh` R21 (label-remove presence, prose-anchor, fail-soft tombstone, section-anchor), `tests/merge.test.sh` M86 (Constants row, probe presence, gate, reason-reuse, `AUDIT_EVENT_ENUM` set-equality, cap-ordering preservation, Common Mistakes anchor). Total 16 new assertions. Closes #95.
+  - **Why patch only.** Mirror of the v0.23.0 backstop one layer upstream; no new public CLI flags; default-off behaviour is bit-identical for users not opted into `AUTO_REVIEW_ON_MERGE`.
+
 ## [0.23.2] - 2026-05-13
 
 ### Fixed
