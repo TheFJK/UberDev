@@ -70,6 +70,18 @@ assert_grep "$SKILL" \
 assert_grep "$SKILL" \
   'invalid-timestamp' \
   'invalid-timestamp reason discriminator listed'
+assert_grep "$SKILL" \
+  'missing-head-sha' \
+  'missing-head-sha reason discriminator listed'
+assert_grep "$SKILL" \
+  'head-divergence' \
+  'head-divergence reason discriminator listed'
+assert_grep "$SKILL" \
+  'file-intersection' \
+  'file-intersection reason discriminator listed'
+assert_grep "$SKILL" \
+  'pr-closed' \
+  'pr-closed reason discriminator listed'
 
 echo
 echo "== All six topics enumerated =="
@@ -86,11 +98,32 @@ assert_grep "$SKILL" \
   'status=dispatched' \
   'status=dispatched log line present'
 assert_grep "$SKILL" \
-  'note=fresh-run,reason=<no-cache\|stale-mtime\|missing-summary\|invalid-timestamp>' \
-  'dispatched-line bullet enumerates all four reasons'
+  'note=fresh-run,reason=<no-cache\|stale-mtime\|missing-summary\|invalid-timestamp\|missing-head-sha\|head-divergence\|file-intersection\|pr-closed>' \
+  'dispatched-line bullet enumerates all eight reasons'
 assert_grep "$SKILL" \
   'note=cache-hit,mtime=' \
   'reused-line bullet present with mtime'
+
+echo
+echo "== New front-matter and env-var contract present =="
+assert_grep "$SKILL" \
+  'head_sha:' \
+  'head_sha front-matter field documented'
+assert_grep "$SKILL" \
+  'UBERDEV_CACHE_DIVERGENCE_THRESHOLD' \
+  'divergence threshold env var documented'
+assert_grep "$SKILL" \
+  'git cat-file -e' \
+  'git cat-file -e reachability probe documented'
+assert_grep "$SKILL" \
+  'git rev-list --count' \
+  'divergence count primitive documented'
+assert_grep "$SKILL" \
+  'gh pr list --state merged --search' \
+  'gh pr list closing-PR primitive documented'
+assert_grep "$SKILL" \
+  'Files investigated' \
+  'Files investigated section reference documented'
 
 echo
 echo "== Stale brainstorm cross-reference removed =="
