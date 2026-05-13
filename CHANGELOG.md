@@ -4,6 +4,13 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.5] - 2026-05-13
+
+### Fixed
+
+- **Move `pr-test-analyzer` dispatch from orchestrator Phase 5.5 into `subagent-driven-dev` Step 4.5.** The previous design described a logically impossible window: under the only consistent reading of the contract, `subagent-driven-dev` invokes `finish-branch` inline (Skill() call, not Task()), `finish-branch` globs `pr-test-analyzer.md` at line 139 to compose the PR body's `## Reviewer findings summary`, and by the time orchestrator Phase 5.5 could fire after SDD returns, the PR has already been pushed without the analyzer's findings. Fix: relocate the dispatch into a new Step 4.5 inside `subagent-driven-dev` (between the post-wave full-test-suite and the `finish-branch` handoff), gated on `tier == "large"` AND `summary_dir` present. The orchestrator's Phase 5 dispatch now passes `summary_dir: $RESEARCH_DIR_ABS/` and `tier` to SDD as additive optional inputs (backward-compatible — non-orchestrator callers gracefully skip Step 4.5). The orchestrator's Phase 5.5 section is deleted; its trust-boundary enumeration and Phase 6 large-tier note are updated to reference the new SDD location. `finish-branch` is unchanged — its line-139 glob already discovers the artifact wherever the dispatch lives. Test assertions in `tests/orchestrator-phase-6-doc.test.sh` and `tests/turbo-flow.test.sh` are updated in the same PR (negative-anchor for Phase 5.5 absence + positive assertions on SDD ownership), mirroring the PR #103 precedent. Restores the write-before-read invariant flagged in Anthropic's harness-design article: artifact-on-disk IS the integration point. Closes #92.
+  - **Why patch only.** Skill-prose change with observable pipeline effect (dispatch site moves between skills) but no code-shape change and no breaking API — `summary_dir` and `tier` are additive optional inputs to SDD. Mirrors PR #103 convention.
+
 ## [0.23.4] - 2026-05-13
 
 ### Refactored
