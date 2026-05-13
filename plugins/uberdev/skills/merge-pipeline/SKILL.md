@@ -366,6 +366,23 @@ Honest fast-forward fixup commits added between `/review-pr` and `/merge` (e.g.,
 
 **Default-off bit-identity contract.** When `AUTO_REVIEW_ON_MERGE` is `false` (the default), this step is a structural no-op: control falls through to the existing `gate_fail` emission described under the "Otherwise:" paragraph above. Zero new audit events fire. Zero new wall-clock is consumed. The `AUTO_REVIEW_DISPATCHED` associative array is declared but never written. This is the load-bearing safety contract (constraints.md §Summary #1).
 
+**Label-presence probe (#95).** Before evaluating the trigger guard, a positive-signal probe checks for the `review-pr:pending` label on the PR (set by `finish-branch/SKILL.md` immediately before its `Skill("uberdev:review-pr")` dispatch — see `REVIEW_PR_PENDING_LABEL` in the Constants table). When the label is present, the probe short-circuits trust-trail reason resolution by assigning `reason="trust_trail_label_missing"` directly. This reuses the existing `GATE_FAIL_REASON_ENUM` member (per D1 of `docs/uberdev/specs/2026-05-13-finish-branch-review-pr-pending-backstop-design.md`) and introduces NO new `AUDIT_EVENT_ENUM` value — the existing `auto_review_dispatched.data.reason_triggering` enum at line 30 is preserved. The probe is itself gated by `AUTO_REVIEW_ON_MERGE` so the default-off bit-identity contract above remains intact (the block is a structural no-op when the user has not opted in).
+
+```bash
+# NEW (#95): label-present probe -- short-circuits trust-trail reason resolution
+# when the review-pr:pending label is still present at integration time.
+# Reuses reason_triggering=trust_trail_label_missing per D1; NO new
+# AUDIT_EVENT_ENUM member is introduced (Q5).
+if [[ "$AUTO_REVIEW_ON_MERGE" == "true" ]]; then
+  if gh pr view "$PR" --json labels --jq '.labels[].name' 2>/dev/null \
+       | grep -qx review-pr:pending; then
+    reason="trust_trail_label_missing"
+  fi
+fi
+```
+
+The existing `AUTO_REVIEW_DISPATCH_CAP = 1` and `AUTO_REVIEW_DISPATCHED["${PR}:${RUN_ID}"]` counter (asserted in the dispatch sequence below) continue to enforce per-run de-dup downstream — re-entry via the new probe cannot bypass the cap because the counter is checked as the third trigger guard condition (line 373 in source order).
+
 **Trigger guard (positive whitelist; D10).** The intercept fires if and only if ALL THREE conditions hold:
 
 1. `AUTO_REVIEW_ON_MERGE == true` (config-opt-in)
@@ -767,6 +784,7 @@ For each stale branch, the agent decides (per-branch). Each decision emits one `
 - **Treating `--bypass-protections` as a live admin-bypass anchor.** It is deprecated as a no-op post-v0.17.0 — the trust-trail-evaluator agent subsumes its job; there is no PATH_3 admin-bypass anchor and no CI-red waiver. The flag is parsed without error indefinitely (Terraform / npm CLI deprecation precedent), emits `BYPASS_PROTECTIONS_DEPRECATED_NOTE` once per run on first encounter, and records a `deprecated_flag_used` audit event. `admin_bypass` and `waiver_recorded` events are declared in `AUDIT_EVENT_ENUM` for backward-compat with audit-log consumers but are NEVER emitted post-v0.17.0.
 - **Inlining strategy heuristics in Phase 2.2 instead of dispatching `merge-strategy-decider`.** The agent owns the decision; the skill normalises inputs (commit_count, conventional_commit_ratio, divergence_commits, wip_marker_present, label_hint, repo_convention) and surfaces the verdict to the audit log via `merge_strategy_agent_decision` and `strategy_chosen` (`data.reason="agent_decided"`). There is NO "Per-invocation flag always wins" clause — `--squash` / `--rebase` / `--merge` are no-ops post-v0.17.0.
 - **Don't trigger auto-review on `review_decision_not_approved` alone, on `trust_trail_stale_sha`, or on any other non-whitelisted gate-fail reason.** The Phase 1.4.5 auto-review intercept fires ONLY on the positive whitelist `reason ∈ {trust_trail_label_missing, trust_trail_trailer_missing}` (D10). The non-trigger `GATE_FAIL_REASON_ENUM` members are excluded as a defensive completeness measure (D11): `review_decision_not_approved` (auto-bypassing branch protection is a security regression — security.md §2), `trust_trail_stale_sha` (deferred to v2 — requires a pricier full re-anchor), `trust_trail_agent_invalid_input` (input-malformed agent input is a manual-investigation signal), `trust_trail_json_sha_mismatch` (indicates a corrupted run-local path post-#78 — manual investigation per Q6), `pr_state_not_open`, `is_draft`, `ci_red`, `merge_state_blocked` (pre-condition gates evaluated before trust resolution — not auto-recoverable), `pr_view_unreachable` (infrastructure failure — not auto-recoverable). The cap is `AUTO_REVIEW_DISPATCH_CAP = 1` per `(pr_number, run_id)`; the counter is set BEFORE the synchronous `Skill("uberdev:review-pr")` dispatch (Step 1.4.5 cap-ordering invariant) so re-entry cannot bypass the cap even on green re-eval.
+- **Extending the trigger set for #95.** The label-presence probe added in #95 (gated by `AUTO_REVIEW_ON_MERGE`) short-circuits reason resolution by setting `reason="trust_trail_label_missing"` directly. This reuses the existing whitelist member and does NOT extend the trigger set — `GATE_FAIL_REASON_ENUM` is unchanged, `AUDIT_EVENT_ENUM` is unchanged (Q5 / D1). Do not "fix" this by introducing a new `review_pr_pending_label_present` reason or audit event.
 
 ## Red Flags
 
