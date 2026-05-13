@@ -69,7 +69,7 @@ summary: <one-line summary>
 ---
 ```
 
-- Capture `head_sha` by running `git rev-parse HEAD` at the moment you write the artifact (NOT at dispatch time). The orchestrator may pass `head_sha_at_dispatch` as a hint, but your own `git rev-parse HEAD` is authoritative.
+- Capture `head_sha` by running `git rev-parse HEAD` at the moment you write the artifact (NOT at dispatch time).
 - The `head_sha` value MUST match `^[0-9a-f]{7,40}$`. The orchestrator's reuse-time validator will reject any other format and force a fresh dispatch on the next run (`reason=missing-head-sha`).
 - Do NOT embed shell metacharacters in the `head_sha` value. The orchestrator treats malformed values as missing.
 

@@ -154,7 +154,7 @@ else
         continue
       fi
 
-      # NEW: head_sha presence + reachability check.
+      # head_sha presence + reachability check.
       STORED_SHA="$(awk '/^head_sha:/{print $2; exit}' "$F" 2>/dev/null)"
       if [ -z "$STORED_SHA" ] || ! [[ "$STORED_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
         emit_topic_log "$TOPIC" dispatched "fresh-run,reason=missing-head-sha"
@@ -169,7 +169,7 @@ else
         continue
       fi
 
-      # NEW: divergence check.
+      # divergence check.
       # Fail-open: any git failure (corrupted repo, unreachable SHA somehow
       # slipping past the cat-file gate, OOM) treated as zero divergence so
       # the per-topic loop proceeds. Symmetric with the gh pr list fail-open
@@ -182,7 +182,7 @@ else
         continue
       fi
 
-      # NEW: file-intersection check.
+      # file-intersection check.
       FILES_INVESTIGATED="$(awk '
         /^## Files investigated/ { capture=1; next }
         /^## / { capture=0 }
@@ -240,7 +240,7 @@ fresh(F) :=
 Helper definitions (each replaceable by a single shell command):
 
 - **`head_sha_reachable(F)`** — `git cat-file -e $(awk '/^head_sha:/{print $2; exit}' F)^{commit} 2>/dev/null`. Exit-0 means reachable. The reachability probe runs FIRST, before any `git diff` invocation — an unreachable SHA never leaks into a `git diff` command line. Per security research: never let raw `git diff` exit code drive control flow.
-- **`divergence(F)`** — `git rev-list --count <stored>..HEAD`. Returns an integer. Compare against `$UBERDEV_CACHE_DIVERGENCE_THRESHOLD` (default 50; env > config > default; see "Cache divergence threshold" below) using `[ "$DIVERGENCE" -gt "$CAP" ]`.
+- **`divergence(F)`** — `git rev-list --count <stored>..HEAD`. Returns an integer. Compare against `$UBERDEV_CACHE_DIVERGENCE_THRESHOLD` (default 50; env > config > default; see "Cache divergence threshold" below) using `[ "$DIVERGENCE" -gt "$UBERDEV_CACHE_DIVERGENCE_THRESHOLD" ]`.
 - **`files_touched_since(F)`** — `git diff --name-only <stored>..HEAD`. Returns a set of paths.
 - **`files_investigated(F)`** — parse the lines after the `## Files investigated` heading until the next `^## ` heading, extract the first whitespace-separated token per line, strip any `:LINE-RANGE` suffix. Validator: `^[A-Za-z0-9_./-]+$` — reject any line containing `$`, `` ` ``, `;`, `\`, or embedded newlines. Lines that fail validation are silently dropped from the set (artifact stays valid); the artifact is rejected only on `head_sha` validation failure (`missing-head-sha`).
 - **`merged_pr_closing_issue(N)`** — `gh pr list --state merged --search "closes #N" --json number --jq '. | length > 0'`. **Fail-open** per Q4: any non-zero exit returns `false` (do NOT invalidate). Single call per orchestrator run, cached for the run. Defense-in-depth: `$ISSUE_NUM` is regex-validated `^[0-9]+$` before interpolation (`solve-pipeline` already validates upstream; this restatement is intentional).
