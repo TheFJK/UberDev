@@ -379,8 +379,26 @@ assert_grep "$ORCHESTRATOR" 'plan-reviewer' \
   "plan-reviewer wired in orchestrator (Phase 4.5)"
 assert_grep "$ORCHESTRATOR" 'post-impl-review' \
   "post-impl-review skill referenced from orchestrator"
-assert_grep "$ORCHESTRATOR" 'pr-test-analyzer' \
-  "pr-test-analyzer wired for large tier (Phase 5.5)"
+# Post-#92: pr-test-analyzer dispatch moved from orchestrator Phase 5.5
+# into subagent-driven-dev Step 4.5. Assert SDD owns the dispatch site.
+assert_grep "$SUBAGENT_DRIVEN" 'pr-test-analyzer' \
+  "pr-test-analyzer wired in subagent-driven-dev (Step 4.5, post-#92)"
+assert_grep "$SUBAGENT_DRIVEN" 'tier == .large' \
+  "Step 4.5 gated on large tier (post-#92 AC9)"
+assert_grep "$SUBAGENT_DRIVEN" 'summary_dir' \
+  "Step 4.5 takes summary_dir input (post-#92 AC8)"
+# Negative anchors: orchestrator must no longer carry Phase 5.5 nor own
+# the pr-test-analyzer Task() dispatch (this regression check fires if
+# someone re-adds the section to orchestrator/SKILL.md).
+assert_not_grep "$ORCHESTRATOR" '^### Phase 5\.5' \
+  "orchestrator no longer carries Phase 5.5 section (post-#92 AC2)"
+# Post-#92: orchestrator Phase 5 dispatch passes summary_dir to SDD so SDD's
+# Step 4.5 has the canonical $RESEARCH_DIR_ABS path. Asserts AC8 of the design
+# spec — explicit parameter pass (vs re-derivation in SDD).
+assert_grep "$ORCHESTRATOR" 'summary_dir.*RESEARCH_DIR_ABS|summary_dir: \$RESEARCH_DIR_ABS' \
+  "orchestrator Phase 5 dispatch passes summary_dir to SDD (post-#92 AC8)"
+assert_grep "$ORCHESTRATOR" 'subagent-driven-dev.*Step 4\.5|SDD Step 4\.5' \
+  "orchestrator Phase 6 large-tier note names SDD Step 4.5 (post-#92 AC7b)"
 
 echo
 echo "== subagent-driven-dev: post-impl-review hosted by /review-pr Phase 1 (#67) =="
