@@ -77,28 +77,38 @@ order=$(awk '
 ' "$SKILL")
 assert_eq "AC4 Phase 5.5 -> Phase 6 -> Logging order" "ok" "$order"
 
-# AC5 — Phase 6 prose names the canonical skill ids.
-# Scope the search to the Phase 6 section body (### Phase 6: ... up to the next
-# `## ` heading) so the assertion regresses if Phase 6 is deleted but ids remain
-# in earlier phases. Count individual matches (grep -o) rather than matching
-# lines (grep -c), so multi-mention lines aren't under-counted.
-phase6_body=$(awk '/^### Phase 6:/{f=1} f; /^## /{if(f && !/^### Phase 6:/) exit}' "$SKILL")
-n=$(printf '%s\n' "$phase6_body" | grep -oE 'uberdev:subagent-driven-dev|uberdev:finish-branch|uberdev:review-pr' | wc -l | tr -d ' ')
+# Extract the Phase 6 section body (### Phase 6: ... up to the next `## ` heading)
+# once so AC5/AC6/AC7 can all scope their searches to it. Scoping is what makes
+# these assertions regress when Phase 6 itself is deleted; otherwise bare-grep
+# matches in other phases would mask the regression.
+phase6_body=$(awk '/^### Phase 6:/{f=1; next} /^## /{f=0} f' "$SKILL")
+
+# AC5 — Phase 6 prose names the canonical skill ids. Count individual matches
+# (grep -o) rather than matching lines (grep -c), so multi-mention lines aren't
+# under-counted. The brace-grouped `|| true` keeps a zero-match grep from
+# aborting the script under `set -euo pipefail` (pipefail would otherwise
+# propagate grep's exit-1 through the command substitution).
+n=$(printf '%s\n' "$phase6_body" | { grep -oE 'uberdev:subagent-driven-dev|uberdev:finish-branch|uberdev:review-pr' || true; } | wc -l | tr -d ' ')
 assert_ge "AC5 canonical skill ids appear >= 3 times in Phase 6" 3 "$n"
 
-# AC6 — reviewer-count signals
-six=$(grep -cE '6 advisory reviewer agents' "$SKILL" || true)
-three=$(grep -cE '3 .*code-simplifier.*lenses' "$SKILL" || true)
+# AC6 — reviewer-count signals (scoped to Phase 6 body, see AC5 comment)
+six=$(printf '%s\n' "$phase6_body" | grep -cE '6 advisory reviewer agents' || true)
+three=$(printf '%s\n' "$phase6_body" | grep -cE '3 .*code-simplifier.*lenses' || true)
 assert_ge "AC6a 6 advisory reviewer agents mentioned"  1 "$six"
 assert_ge "AC6b 3 simplify lenses mentioned"           1 "$three"
 
-# AC7 — large-tier Phase 5.5 ordering acknowledged in Phase 6 prose
-n=$(grep -ciE 'Phase 5\.5.*pr-test-analyzer.*before' "$SKILL" || true)
+# AC7 — large-tier Phase 5.5 ordering acknowledged in Phase 6 prose (scoped;
+# the same phrasing exists in the Phase 5.5 section so an unscoped grep would
+# false-pass even after Phase 6 was deleted).
+n=$(printf '%s\n' "$phase6_body" | grep -ciE 'Phase 5\.5.*pr-test-analyzer.*before' || true)
 assert_ge "AC7 Phase 5.5 ordering note present"        1 "$n"
 
-# AC8 — CHANGELOG entry naming the issue
-n=$(grep -cF 'Closes #94' "$CHANGELOG" || true)
-assert_ge "AC8 CHANGELOG references #94"               1 "$n"
+# AC8 — CHANGELOG entry naming the issue. Scope to the `## [0.23.1]` block via
+# the same awk pattern so an old "Closes #94" in an unrelated future release
+# doesn't mask deletion of the 0.23.1 entry.
+v0231_body=$(awk '/^## \[0\.23\.1\]/{f=1; next} /^## /{f=0} f' "$CHANGELOG")
+n=$(printf '%s\n' "$v0231_body" | grep -cF 'Closes #94' || true)
+assert_ge "AC8 CHANGELOG references #94 in 0.23.1"     1 "$n"
 
 echo ""
 echo "[orchestrator-phase-6-doc] PASS=$PASS FAIL=$FAIL"
