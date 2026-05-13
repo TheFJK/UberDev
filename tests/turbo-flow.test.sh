@@ -379,8 +379,10 @@ assert_grep "$ORCHESTRATOR" 'plan-reviewer' \
   "plan-reviewer wired in orchestrator (Phase 4.5)"
 assert_grep "$ORCHESTRATOR" 'post-impl-review' \
   "post-impl-review skill referenced from orchestrator"
-# Post-#92: pr-test-analyzer dispatch moved from orchestrator Phase 5.5
-# into subagent-driven-dev Step 4.5. Assert SDD owns the dispatch site.
+# Post-#92 (issue #92): the assertions below verify pr-test-analyzer dispatch
+# moved from orchestrator Phase 5.5 into subagent-driven-dev Step 4.5. AC*
+# identifiers reference docs/uberdev/specs/2026-05-13-phase-5-5-vs-sdd-ordering-fix-design.md.
+# Assert SDD owns the dispatch site.
 assert_grep "$SUBAGENT_DRIVEN" 'pr-test-analyzer' \
   "pr-test-analyzer wired in subagent-driven-dev (Step 4.5, post-#92)"
 assert_grep "$SUBAGENT_DRIVEN" 'tier == .large' \
@@ -397,6 +399,25 @@ assert_not_grep "$ORCHESTRATOR" '^### Phase 5\.5' \
 # spec — explicit parameter pass (vs re-derivation in SDD).
 assert_grep "$ORCHESTRATOR" 'summary_dir.*RESEARCH_DIR_ABS|summary_dir: \$RESEARCH_DIR_ABS' \
   "orchestrator Phase 5 dispatch passes summary_dir to SDD (post-#92 AC8)"
+# Post-#92 AC8b: orchestrator Phase 5 dispatch must also pass tier so SDD's
+# Step 4.5 can gate the large-tier dispatch. A future refactor that dropped
+# this would silently skip Step 4.5 on large tier — same observable failure
+# mode as the original #92 bug.
+assert_grep "$ORCHESTRATOR" '\btier\b' \
+  "orchestrator Phase 5 dispatch passes tier to SDD (post-#92 AC8b)"
+# Post-#92 AC10 negative anchor: Step 4.5 is a direct single-agent Task(),
+# NOT routed via uberdev:post-impl-review (which is reserved for the
+# post-PR-push fanout owned by /uberdev:review-pr Phase 1). The pattern is
+# intentionally precise — it anchors on the imperative-form regression
+# ("Step 4.5 dispatches via uberdev:post-impl-review", "route Step 4.5
+# through uberdev:post-impl-review") rather than mere co-occurrence; the
+# negation prose elsewhere in SDD ("Step 4.5 … is therefore NOT routed via
+# uberdev:post-impl-review") and the orthogonal finish-branch glob mention
+# must not false-positive. Mirrors the orchestrator --turbo negative-pattern
+# precedent at lines 299-301 of this file.
+assert_not_grep "$SUBAGENT_DRIVEN" \
+  'Step 4\.5 (dispatch|dispatches|routes|invokes) (via|through) (`)?uberdev:post-impl-review|(dispatch|route|invoke) Step 4\.5 (via|through) (`)?uberdev:post-impl-review' \
+  "AC10: Step 4.5 is direct Task(), not routed via uberdev:post-impl-review (post-#92)"
 assert_grep "$ORCHESTRATOR" 'subagent-driven-dev.*Step 4\.5|SDD Step 4\.5' \
   "orchestrator Phase 6 large-tier note names SDD Step 4.5 (post-#92 AC7b)"
 
