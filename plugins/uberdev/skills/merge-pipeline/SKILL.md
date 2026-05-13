@@ -381,15 +381,23 @@ AUTO_REVIEW_DISPATCHED["${PR}:${RUN_ID}"]=1
 printf '{"event":"auto_review_dispatched","run_id":"%s","ts":"%s","data":{"pr":%d,"reason_triggering":"%s"}}\n' \
   "$RUN_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PR" "$reason" >> ".uberdev/audit.jsonl"
 
-# 3. Start wall-clock timer
-T_start=$(date +%s%3N)
+# 3. Start wall-clock timer (probe gdate on macOS-without-coreutils; fall back to second-resolution)
+if command -v gdate >/dev/null 2>&1; then
+  T_start=$(gdate +%s%3N)
+else
+  T_start=$(( $(date +%s) * 1000 ))   # BSD `date` lacks %3N; degrade to second granularity reported as ms
+fi
 
 # 4. Synchronous cross-skill dispatch (await outcome). --turbo suppresses interactive halts.
 Skill("uberdev:review-pr", args: "${PR} --turbo")
 rc=$?
 
-# 5. Stop wall-clock timer
-T_end=$(date +%s%3N)
+# 5. Stop wall-clock timer (same probe shape as start)
+if command -v gdate >/dev/null 2>&1; then
+  T_end=$(gdate +%s%3N)
+else
+  T_end=$(( $(date +%s) * 1000 ))
+fi
 duration_ms=$(( T_end - T_start ))
 
 # 6. Classify outcome by exit code
