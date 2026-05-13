@@ -197,6 +197,17 @@ If parse fails → re-dispatch the failed agent ONCE with the format example pin
 
 **Turbo (`--turbo` set — only path that auto-picks):** instead of skipping entirely, generate the same set of clarifying questions in-thread, auto-pick each answer using the spec-writer's `decisions`-block synthesis logic (best guess from research artifacts), and write to `$RESEARCH_DIR_ABS/questions.md` in the format below (Q-N heading, `**Auto-pick:**`, `**Rationale:**`, `**Confidence:** high|medium|low`). The `decisions` array fed to spec-writer has the same shape as a non-turbo run, just with `auto_pick: true` flagged.
 
+**Turbo detection (hybrid):** the orchestrator treats turbo mode as ON when EITHER `$ARGUMENTS` contains `--turbo` (standalone-invocation path, see "Standalone invocation" section below) OR the inherited environment variable `${UBERDEV_TURBO:-0} == "1"` (set by `commands/turbo.md` and propagated through `solve-pipeline`'s `claude --bg` inline-prefix exec, #97). Concretely:
+
+```bash
+TURBO=0
+if [[ "$ARGUMENTS" == *"--turbo"* ]] || [[ "${UBERDEV_TURBO:-0}" == "1" ]]; then
+  TURBO=1
+fi
+```
+
+All Phase-2/3.5/5 references to "if --turbo" in this skill resolve to `[[ "$TURBO" == "1" ]]` under this single detection contract.
+
 Format:
 ```markdown
 ## Q1: <verbatim question>
@@ -274,7 +285,7 @@ Trivial/small tier bypass orchestrator entirely; plan-reviewer is N/A there.
 
 ### Phase 5: subagent-driven-dev
 
-Invoke `uberdev:subagent-driven-dev` skill (NOT a Task() — actual skill invocation via Skill tool). Pass `plan_path`. **If the orchestrator was invoked with `--turbo`, also pass `--turbo`** so the downstream chain (`subagent-driven-dev → finish-branch`) stays unattended and `finish-branch` auto-selects "Push and Create PR" instead of prompting. The existing skill handles wave dispatch, review, and PR creation. `subagent-driven-dev` internally calls `uberdev:post-impl-review` once after all waves complete (consolidated end-of-issue invocation) — see `plugins/uberdev/skills/post-impl-review/SKILL.md`. Findings are advisory at this layer (non-blocking on `REVISIONS_REQUIRED`); the auto-fix loop is deferred per Q1 of the design spec.
+Invoke `uberdev:subagent-driven-dev` skill (NOT a Task() — actual skill invocation via Skill tool). Pass `plan_path`. The downstream chain (`subagent-driven-dev → finish-branch`) detects unattended mode via the `UBERDEV_TURBO=1` environment variable inherited from the parent `claude --bg` process — no per-call `--turbo` arg-forwarding needed (#97). The existing skill handles wave dispatch, review, and PR creation. `subagent-driven-dev` internally calls `uberdev:post-impl-review` once after all waves complete (consolidated end-of-issue invocation) — see `plugins/uberdev/skills/post-impl-review/SKILL.md`. Findings are advisory at this layer (non-blocking on `REVISIONS_REQUIRED`); the auto-fix loop is deferred per Q1 of the design spec.
 
 ### Phase 5.5: pr-test-analyzer (large tier only, pre-merge)
 
