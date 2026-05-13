@@ -287,7 +287,7 @@ Trivial/small tier bypass orchestrator entirely; plan-reviewer is N/A there.
 
 ### Phase 5: subagent-driven-dev
 
-Invoke `uberdev:subagent-driven-dev` skill (NOT a Task() — actual skill invocation via Skill tool). Pass `plan_path`, `spec_path` (the Phase 3 spec output — so SDD can hand it to `pr-test-analyzer` for verbatim acceptance-criteria extraction in Step 4.5), `summary_dir: $RESEARCH_DIR_ABS/` (so SDD can dispatch `pr-test-analyzer` pre-merge for large tier — see SDD Step 4.5), and `tier` (so SDD can gate the Step 4.5 dispatch). The downstream chain (`subagent-driven-dev → finish-branch`) detects unattended mode via the `UBERDEV_TURBO=1` environment variable inherited from the parent `claude --bg` process — no per-call `--turbo` arg-forwarding needed (#97). The existing skill handles wave dispatch, review, and PR creation. `subagent-driven-dev` internally calls `uberdev:post-impl-review` once after all waves complete (consolidated end-of-issue invocation) — see `plugins/uberdev/skills/post-impl-review/SKILL.md`. Findings are advisory at this layer (non-blocking on `REVISIONS_REQUIRED`); the auto-fix loop is deferred per Q1 of the design spec.
+Invoke `uberdev:subagent-driven-dev` skill (NOT a Task() — actual skill invocation via Skill tool). Pass `plan_path`, `spec_path`, `summary_dir: $RESEARCH_DIR_ABS/`, and `tier` — see subagent-driven-dev Inputs section for how each is used; large-tier Step 4.5 needs all four. The downstream chain (`subagent-driven-dev → finish-branch`) detects unattended mode via the `UBERDEV_TURBO=1` environment variable inherited from the parent `claude --bg` process — no per-call `--turbo` arg-forwarding needed (#97). The existing skill handles wave dispatch, review, and PR creation. `subagent-driven-dev` internally calls `uberdev:post-impl-review` once after all waves complete (consolidated end-of-issue invocation) — see `plugins/uberdev/skills/post-impl-review/SKILL.md`. Findings are advisory at this layer (non-blocking on `REVISIONS_REQUIRED`); the auto-fix loop is deferred per Q1 of the design spec.
 
 ### Phase 6: PR creation + review chain
 
@@ -303,7 +303,7 @@ After Phase 5 (`subagent-driven-dev`) returns control:
 
    Findings are advisory at the `finish-branch` boundary — `finish-branch` does NOT block on `REVISIONS_REQUIRED`. `/uberdev:review-pr` writes the trust trail directly to the PR.
 
-**Large-tier note:** On large tier, `pr-test-analyzer` is dispatched from inside `subagent-driven-dev` Step 4.5 — between the post-wave full-test-suite and the `finish-branch` handoff — so its findings on disk at `<summary_dir>/pr-test-analyzer.md` are available when `finish-branch` composes the PR body's `## Reviewer findings summary` section. The orchestrator no longer owns this dispatch. The small/medium cascade goes Phase 5 → finish-branch directly.
+**Large-tier note:** On large tier, the `pr-test-analyzer` pre-merge dispatch is owned by `subagent-driven-dev` Step 4.5 — see SDD for the gate, artifact path, and integration. The orchestrator no longer owns this dispatch. The small/medium cascade goes Phase 5 → finish-branch directly.
 
 This section names the chain explicitly so that a model reading only the orchestrator skill understands the full end-to-end pipeline. The orchestrator's job is complete when the trust trail from `/uberdev:review-pr` is written; not when Phase 5 returns.
 
