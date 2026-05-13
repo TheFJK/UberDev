@@ -1,6 +1,6 @@
 ---
 description: "Comprehensive PR review using specialized agents"
-argument-hint: "[review-aspects] [--no-simplify] [--no-ci-fix] [--turbo]"
+argument-hint: "[review-aspects] [--no-simplify] [--no-ci-fix] [--no-defer-issues] [--turbo]"
 allowed-tools: ["Bash(git*)", "Bash(gh*)", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", "Write"]
 ---
 
@@ -35,6 +35,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
      `${ARGUMENTS:-}` is defense-in-depth against `set -u` and mirrors the `${UBERDEV_TURBO:-0}` half of the OR for symmetry (#97 follow-up).
      Rationale: `merge-pipeline` invokes `Skill("uberdev:review-pr", args: "${PR} --turbo")` (out-of-scope for #97) — arg form must remain accepted. `finish-branch` chains via `Skill("uberdev:review-pr")` with no flag (env-var inheritance, #97) — env form must also be accepted. The hybrid OR detector closes both call sites.
    - Detect `--no-ci-fix` token in `$ARGUMENTS` and strip it from the aspect list — sets `CI_FIX_PHASE=0` (probe-only mode), otherwise `CI_FIX_PHASE=1` (default). Mirrors `--no-simplify` shape. When `CI_FIX_PHASE=0`, Phase 3 6c.1 PROBE + 6c.2 MONITOR + 6c.3 CLASSIFY still run for audit telemetry; 6c.4 ROUTE / 6c.5 POST-FIX / 6c.6 HALT are skipped. Outcome is forced to `green` if probe was green; otherwise `halted` (still gates trust signal).
+   - Detect `--no-defer-issues` token in `$ARGUMENTS` and strip it from the aspect list — sets `DEFER_ISSUES_PHASE=0` (skip findings-to-issues sub-phase), otherwise `DEFER_ISSUES_PHASE=1` (default). Mirrors `--no-ci-fix` / `--no-simplify` shape. When `DEFER_ISSUES_PHASE=0`, the Phase 2.5 dispatch is skipped entirely and the Step 7 Final Aggregation "Issues filed" row shows `(skipped: --no-defer-issues)`.
    - Default: Run all applicable reviews + Phase 2 simplify pass
    - **Capture aspect tokens.** Tokenise the remaining arguments (after the `--no-simplify` and `--turbo` flags are stripped) into `ASPECT_LIST` (an array). Example: `/uberdev:review-pr tests errors` → `ASPECT_LIST=("tests" "errors")`. Empty arguments → `ASPECT_LIST=()`. The `all` token is treated as "no emphasis" (i.e., default behavior — every reviewer's brief receives no emphasis section).
    - **Detect `sequential` token.** If `$ARGUMENTS` contains the bare token `sequential` (anywhere; case-sensitive), strip it from `ASPECT_LIST` and set `SEQUENTIAL=1`. Otherwise `SEQUENTIAL=0`.
@@ -54,6 +55,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    | `CI_FIX_PHASE` | `--no-ci-fix` token | `1` | `0` runs PROBE+MONITOR+CLASSIFY (audit-only) but skips ROUTE+POST-FIX+HALT — outcome forced to `green` if probe was green, otherwise `halted` (still gates trust signal). |
    | `TURBO` | `--turbo` token OR `UBERDEV_TURBO=1` env (hybrid OR, #97) | `0` | `1` activates the Phase 3 halt-class carve-out (6c.6 HALT — no AskUserQuestion, exit 1, no trust signal). Phases 1+2 unchanged in either mode. |
    | `ASPECT_LIST` | remaining tokens | `()` | passed as `aspect_emphasis` input to `Skill(uberdev:post-impl-review)` Step 4 |
+   | `DEFER_ISSUES_PHASE` | `--no-defer-issues` token | `1` | `0` skips Phase 2.5 (findings-to-issues sub-phase); the effective enable is AND-of-flag-and-config — `defer_issues_enabled=false` in `.claude/uberdev.local.md` short-circuits identically. |
 
 2. **Available Review Aspects:**
 
@@ -166,6 +168,49 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    - `blocked` (timeout, agent error, parse failure, aggregator crash) → exit 2. Phase 1 review-fix work is **not undone** — those commits land normally — but no trust-signal artifacts (label / trailer / JSON) are emitted, and the exit code surfaces the silent-failure mode that previously got swallowed. The Phase 2 row's Status is `blocked` (lowercase). Fix the aggregator before re-running.
 
    Phase 2 verdict ≠ Phase 2 status: an APPROVE verdict with `ran` status counts toward green; REVISIONS_REQUIRED or REJECT verdicts do NOT block trust-signal emission (they surface as advisory findings in the final aggregation table — see step 7). The trust-signal predicate is rooted in *status* (did the fanout complete cleanly?), not *verdict*.
+
+6b. **Phase 2.5 — Findings-to-Issues sub-phase** (skip iff `DEFER_ISSUES_PHASE=0` OR `defer_issues_enabled=false`)
+
+    Reads the run aggregate artifacts produced by Phase 1 (`post-impl-review-final.md`) and Phase 2 (`simplify-final.md`), filters to deferred-critical rows (`severity ∈ {blocker, critical} AND disposition != APPLIED`), and persists them as durable GitHub issues with HTML-comment fingerprint dedupe. Default-on. Never fails the parent run.
+
+    **Effective-enabled gate:** the sub-phase runs only when BOTH the CLI flag AND the config key are ON. Either knob disables (CLI flag `DEFER_ISSUES_PHASE=1` AND config `DEFER_ISSUES_CONFIG=true`).
+
+    ```bash
+    # Read the config-level enum (default: "true" — always-on per Q3).
+    source "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+    DEFER_ISSUES_CONFIG=$(uberdev_read_enum defer_issues_enabled UBERDEV_DEFER_ISSUES_ENABLED 'true|false' 'true')
+
+    # Effective-enabled: AND of CLI flag and config key. Either knob disables.
+    if [ "$DEFER_ISSUES_PHASE" = "1" ] && [ "$DEFER_ISSUES_CONFIG" = "true" ]; then
+      DEFER_ISSUES_EFFECTIVE=1
+    else
+      DEFER_ISSUES_EFFECTIVE=0
+    fi
+    ```
+
+    **Dispatch (single Skill() call, no fanout):**
+
+    ```text
+    Skill("uberdev:findings-to-issues", prompt: <<<EOF
+      run_id: $RUN_ID
+      working_dir: $WORKING_DIR_ABS
+      repo_slug: $REPO_SLUG
+      pr_commit_sha: $(git rev-parse HEAD)
+      max_new: 10
+      phase1_aggregate_path: $RESEARCH_DIR_ABS/post-impl-review-final.md
+      phase2_aggregate_path: $RESEARCH_DIR_ABS/simplify-final.md
+      phase1_disposition_yaml: $RESEARCH_DIR_ABS/code-fixer.phase1.disposition.yaml
+      phase2_disposition_yaml: $RESEARCH_DIR_ABS/code-fixer.phase2.disposition.yaml
+    EOF)
+    ```
+
+    **Capture the return YAML** into shell variables `CREATED_URLS_JSON`, `COMMENTED_URLS_JSON`, `SKIPPED_CLOSED_JSON`, `BLOCKED_BY_DEDUPE_JSON`, `OVERFLOW_COUNT` for the Step 7 Final Aggregation table.
+
+    Exit-code discipline: regardless of agent `status` (`DONE`, `DONE_WITH_CONCERNS`, `REFUSED`), the parent `/review-pr` continues to Step 7. A `REFUSED` is information for the final summary, not a parent-process failure.
+
+    **Skip-path behaviour** (when `DEFER_ISSUES_EFFECTIVE=0`):
+    - Do NOT call `Skill("uberdev:findings-to-issues", …)`.
+    - The Step 7 Final Aggregation "Issues filed" row shows `(skipped: --no-defer-issues)` when `DEFER_ISSUES_PHASE=0`, OR `(skipped: defer_issues_enabled=false)` when the config key is the cause.
 
 6c. **Phase 3 — CI Health** (skip iff `CI_FIX_PHASE=0` is set AND mode is probe-only — see flag handling below)
 
@@ -509,6 +554,11 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    |---|---|---|---|---|
    | Phase 1 — Review + Fix | ran | APPROVE / REVISIONS_REQUIRED / REJECT | <commit shas> | <count> |
    | Phase 2 — Simplify     | ran / blocked / skipped | APPROVE / REVISIONS_REQUIRED / REJECT (omit if status≠ran) | <commit sha or ∅> | <count> |
+   | Issues filed (Phase 2.5) | `$CREATED_URLS_JSON` (created) + `$COMMENTED_URLS_JSON` (commented) — see below for full URL list. `$OVERFLOW_COUNT` additional findings exceeded MAX_NEW=10 cap. `$BLOCKED_BY_DEDUPE_JSON` blocked by dedupe-lookup failure. (Skip path: `(skipped: --no-defer-issues)` or `(skipped: defer_issues_enabled=false)`.) |
+
+   **Issues filed (links):**
+
+   Rendered from `created_urls[]` + `commented_urls[]` of the findings-to-issues agent return. Each line: `- [` + `file:line` + `](`URL`)` — e.g., `- [src/auth.ts:42](https://github.com/owner/repo/issues/123)`.
 
    `Verdict` reuses the canonical `uberdev:post-impl-review` reviewer enum (APPROVE | REVISIONS_REQUIRED | REJECT). `Status` is orthogonal: `ran` (the fanout completed), `blocked` (fanout failure — see "Non-blocking" above), `skipped` (`--no-simplify` was set).
 
@@ -701,6 +751,10 @@ Phase 3 reuses exit `1` (no new exit code introduced — Q2 decision). The audit
 # Combinable with aspect args:
 /uberdev:review-pr tests errors --no-ci-fix
 ```
+
+**Skip Phase 2.5 findings-to-issues sub-phase** (suppress deferred-critical issue filing):
+- `/uberdev:review-pr --no-defer-issues` — runs the full review chain (Phase 1 + Phase 2 + Phase 3) but skips the Phase 2.5 findings-to-issues sub-phase. Final summary table shows `(skipped: --no-defer-issues)`.
+- `/uberdev:review-pr tests errors --no-defer-issues` — same as above with additional review aspects.
 
 ## Agent Descriptions:
 
