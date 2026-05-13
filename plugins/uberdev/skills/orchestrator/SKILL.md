@@ -88,11 +88,22 @@ fi
 # accepted fail-open here because cached artifacts remain untrusted
 # on reuse regardless. Single call per orchestrator run, cached for the run.
 if [ -z "$GLOBAL_FALLBACK_REASON" ]; then
-  PR_CLOSED_COUNT="$(gh pr list \
+  # Capture stderr alongside stdout so a non-zero exit surfaces an
+  # operator-triage warning (auth/rate-limit/network failure mode).
+  # Fail-open semantic preserved: on non-zero exit PR_CLOSED_COUNT
+  # defaults to 0 and the pr-closed gate does NOT fire — see Q4.
+  PR_CLOSED_RAW="$(gh pr list \
     --state merged \
     --search "closes #${ISSUE_NUM}" \
     --json number \
-    --jq '. | length' 2>/dev/null || echo 0)"
+    --jq '. | length' 2>&1)"
+  GH_RC=$?
+  if [ "$GH_RC" -eq 0 ]; then
+    PR_CLOSED_COUNT="$PR_CLOSED_RAW"
+  else
+    echo "warning: gh pr list failed (rc=$GH_RC) for issue #${ISSUE_NUM}; failing open (no pr-closed gate fired): $PR_CLOSED_RAW" >&2
+    PR_CLOSED_COUNT=0
+  fi
   if [ "${PR_CLOSED_COUNT:-0}" -gt 0 ]; then
     GLOBAL_FALLBACK_REASON="pr-closed"
   fi
@@ -159,6 +170,12 @@ else
       fi
 
       # NEW: divergence check.
+      # Fail-open: any git failure (corrupted repo, unreachable SHA somehow
+      # slipping past the cat-file gate, OOM) treated as zero divergence so
+      # the per-topic loop proceeds. Symmetric with the gh pr list fail-open
+      # above. Trade-off: silent on transient git errors; the trust-boundary
+      # contract makes this acceptable (cached artifacts remain
+      # <external-untrusted-input> wrapped regardless).
       DIVERGENCE="$(git rev-list --count "${STORED_SHA}..HEAD" 2>/dev/null || echo 0)"
       if [ "${DIVERGENCE:-0}" -gt "${CACHE_DIVERGENCE_THRESHOLD}" ]; then
         emit_topic_log "$TOPIC" dispatched "fresh-run,reason=head-divergence"
@@ -176,6 +193,12 @@ else
         }
       ' "$F")"
       if [ -n "$FILES_INVESTIGATED" ]; then
+        # Fail-open: empty $FILES_TOUCHED on git error short-circuits the
+        # intersection check to false → cache is reused. Symmetric with the
+        # divergence fail-open and the gh pr list fail-open. Trade-off:
+        # silent on transient git errors; the trust-boundary contract makes
+        # this acceptable (cached artifacts remain <external-untrusted-input>
+        # wrapped regardless).
         FILES_TOUCHED="$(git diff --name-only "${STORED_SHA}..HEAD" 2>/dev/null)"
         if [ -n "$FILES_TOUCHED" ] && \
            echo "$FILES_TOUCHED" | grep -Fxq -f <(echo "$FILES_INVESTIGATED"); then
