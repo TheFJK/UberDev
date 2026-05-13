@@ -4,6 +4,12 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.1] - 2026-05-13
+
+### Documentation
+
+- **`plugins/uberdev/skills/orchestrator/SKILL.md`**: Added `### Phase 6: PR creation + review chain` to make the `subagent-driven-dev → finish-branch → /uberdev:review-pr` cascade explicit inside the orchestrator skill. Deleted the misleading `## End-of-pipeline` section that previously read "the orchestrator's job is done" after Phase 5. Phase 6 names the two downstream `/uberdev:review-pr` phases (Phase 1: 6 advisory reviewers via `uberdev:post-impl-review`; Phase 2: 3 simplify lenses) and acknowledges the large-tier `Phase 5.5` ordering. Closes #94.
+
 ## [0.23.0] - 2026-05-13
 
 ### Added
