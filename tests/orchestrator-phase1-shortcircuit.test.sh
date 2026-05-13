@@ -85,9 +85,16 @@ assert_grep "$SKILL" \
 
 echo
 echo "== All six topics enumerated =="
+# Behavior assertion: the canonical six-topic list is declared exactly once
+# as a TOPICS array, and every Phase 1 loop iterates via "${TOPICS[@]}".
+# Pins the topic enumeration without pinning the literal `for TOPIC in ...; do`
+# string (which used to appear 4x and drifted easily).
 assert_grep "$SKILL" \
-  'for TOPIC in codebase patterns prior-art constraints security test-coverage' \
-  'six-topic loop literal preserved'
+  'TOPICS=\(codebase patterns prior-art constraints security test-coverage\)' \
+  'six-topic TOPICS array declaration present'
+assert_grep "$SKILL" \
+  'for TOPIC in "\$\{TOPICS\[@\]\}"; do' \
+  'Phase 1 loops iterate via "${TOPICS[@]}"'
 
 echo
 echo "== Per-topic log emission documented =="

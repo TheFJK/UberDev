@@ -54,6 +54,11 @@ SHORTCIRCUIT_CONSTRAINTS=0
 SHORTCIRCUIT_SECURITY=0
 SHORTCIRCUIT_TEST_COVERAGE=0
 
+# Canonical topic list — single source of truth for every Phase 1 loop
+# below. Iterate via "${TOPICS[@]}" so the six-topic enumeration cannot
+# drift between the four pre/per-topic loops.
+TOPICS=(codebase patterns prior-art constraints security test-coverage)
+
 # Helper: emit one per-topic observability line. Six lines per medium/large
 # run regardless of cache state — see "Per-topic observability" below for
 # the schema. `declare` is bash-only; LLM-as-executor accepts it.
@@ -81,136 +86,136 @@ else
   CACHE_DIVERGENCE_THRESHOLD=50
 fi
 
-# Global pre-gate: gh pr list. Fail-open per Q4 — non-zero exit means
-# we cannot determine closure, so we do NOT invalidate (treat as no
-# closing PR). Intentional security trade-off: this is a freshness
-# signal, not an authentication boundary; the security research
-# accepted fail-open here because cached artifacts remain untrusted
-# on reuse regardless. Single call per orchestrator run, cached for the run.
-if [ -z "$GLOBAL_FALLBACK_REASON" ]; then
-  # Capture stderr alongside stdout so a non-zero exit surfaces an
-  # operator-triage warning (auth/rate-limit/network failure mode).
-  # Fail-open semantic preserved: on non-zero exit PR_CLOSED_COUNT
-  # defaults to 0 and the pr-closed gate does NOT fire — see Q4.
-  PR_CLOSED_RAW="$(gh pr list \
-    --state merged \
-    --search "closes #${ISSUE_NUM}" \
-    --json number \
-    --jq '. | length' 2>&1)"
-  GH_RC=$?
-  if [ "$GH_RC" -eq 0 ]; then
-    PR_CLOSED_COUNT="$PR_CLOSED_RAW"
-  else
-    echo "warning: gh pr list failed (rc=$GH_RC) for issue #${ISSUE_NUM}; failing open (no pr-closed gate fired): $PR_CLOSED_RAW" >&2
-    PR_CLOSED_COUNT=0
-  fi
-  if [ "${PR_CLOSED_COUNT:-0}" -gt 0 ]; then
-    GLOBAL_FALLBACK_REASON="pr-closed"
-  fi
-fi
+# Fail-open policy: the gh pr list probe below and the two per-topic git
+# probes (git rev-list divergence, git diff file-intersection) ALL fail
+# open on non-zero exit — failures are treated as "no gate fired" so the
+# cache is reused. Trade-off per Q4 in the design spec: this is a freshness
+# signal, not a trust upgrade; cached artifacts remain
+# <external-untrusted-input> wrapped on reuse regardless. See
+# merged_pr_closing_issue / divergence / files_touched_since helpers in
+# the Freshness predicate section for the per-probe rationale.
 
+# Cheap short-circuit: if the cache directory is missing, every topic is
+# a fresh-run with reason=no-cache. Skip the gh pr list network call
+# (and the per-topic loop) entirely — first-run-per-issue would otherwise
+# pay a gh API round-trip just to discard the result.
 if [ ! -d "$RESEARCH_DIR" ]; then
-  for TOPIC in codebase patterns prior-art constraints security test-coverage; do
+  for TOPIC in "${TOPICS[@]}"; do
     emit_topic_log "$TOPIC" dispatched "fresh-run,reason=no-cache"
   done
-elif [ -n "$GLOBAL_FALLBACK_REASON" ]; then
-  for TOPIC in codebase patterns prior-art constraints security test-coverage; do
-    emit_topic_log "$TOPIC" dispatched "fresh-run,reason=${GLOBAL_FALLBACK_REASON}"
-  done
 else
-  ISSUE_UPDATED_ISO=$(gh issue view "$ISSUE_NUM" --json updatedAt --jq .updatedAt 2>/dev/null)
-  ISSUE_UPDATED_EPOCH=""
-  if [ -n "$ISSUE_UPDATED_ISO" ]; then
-    ISSUE_UPDATED_EPOCH=$(date -j -f '%Y-%m-%dT%H:%M:%SZ' "$ISSUE_UPDATED_ISO" +%s 2>/dev/null \
-                        || date -d "$ISSUE_UPDATED_ISO" +%s 2>/dev/null)
+  # Cache directory exists; the cache may be reusable. Probe gh pr list
+  # (global pre-gate — fail-open per policy above).
+  if [ -z "$GLOBAL_FALLBACK_REASON" ]; then
+    # Capture stderr alongside stdout so a non-zero exit surfaces an
+    # operator-triage warning (auth/rate-limit/network failure mode).
+    PR_CLOSED_RAW="$(gh pr list \
+      --state merged \
+      --search "closes #${ISSUE_NUM}" \
+      --json number \
+      --jq '. | length' 2>&1)"
+    GH_RC=$?
+    if [ "$GH_RC" -eq 0 ]; then
+      PR_CLOSED_COUNT="$PR_CLOSED_RAW"
+    else
+      echo "warning: gh pr list failed (rc=$GH_RC) for issue #${ISSUE_NUM}; failing open (no pr-closed gate fired): $PR_CLOSED_RAW" >&2
+      PR_CLOSED_COUNT=0
+    fi
+    if [ "${PR_CLOSED_COUNT:-0}" -gt 0 ]; then
+      GLOBAL_FALLBACK_REASON="pr-closed"
+    fi
   fi
-  if [ -z "$ISSUE_UPDATED_EPOCH" ]; then
-    echo "warning: failed to fetch or parse issue #$ISSUE_NUM updatedAt; using full parallel dispatch" >&2
-    for TOPIC in codebase patterns prior-art constraints security test-coverage; do
-      emit_topic_log "$TOPIC" dispatched "fresh-run,reason=invalid-timestamp"
+
+  if [ -n "$GLOBAL_FALLBACK_REASON" ]; then
+    for TOPIC in "${TOPICS[@]}"; do
+      emit_topic_log "$TOPIC" dispatched "fresh-run,reason=${GLOBAL_FALLBACK_REASON}"
     done
   else
-    # Per-topic loop: each topic is evaluated independently. Different topics
-    # in the same run may fall back for different reasons or be reused.
-    for TOPIC in codebase patterns prior-art constraints security test-coverage; do
-      F="$RESEARCH_DIR/${TOPIC}.md"
-      if [ ! -f "$F" ]; then
-        emit_topic_log "$TOPIC" dispatched "fresh-run,reason=no-cache"
-        continue
-      fi
-      if ! grep -q '^summary:' "$F"; then
-        echo "warning: $F missing 'summary:' field; using full parallel dispatch for $TOPIC" >&2
-        emit_topic_log "$TOPIC" dispatched "fresh-run,reason=missing-summary"
-        continue
-      fi
-      F_MTIME_EPOCH=$(stat -f %m "$F" 2>/dev/null || stat -c %Y "$F" 2>/dev/null)
-      if [ -z "$F_MTIME_EPOCH" ]; then
-        echo "warning: failed to read $F mtime; using full parallel dispatch for $TOPIC" >&2
+    ISSUE_UPDATED_ISO=$(gh issue view "$ISSUE_NUM" --json updatedAt --jq .updatedAt 2>/dev/null)
+    ISSUE_UPDATED_EPOCH=""
+    if [ -n "$ISSUE_UPDATED_ISO" ]; then
+      ISSUE_UPDATED_EPOCH=$(date -j -f '%Y-%m-%dT%H:%M:%SZ' "$ISSUE_UPDATED_ISO" +%s 2>/dev/null \
+                          || date -d "$ISSUE_UPDATED_ISO" +%s 2>/dev/null)
+    fi
+    if [ -z "$ISSUE_UPDATED_EPOCH" ]; then
+      echo "warning: failed to fetch or parse issue #$ISSUE_NUM updatedAt; using full parallel dispatch" >&2
+      for TOPIC in "${TOPICS[@]}"; do
         emit_topic_log "$TOPIC" dispatched "fresh-run,reason=invalid-timestamp"
-        continue
-      fi
-      if [ "$F_MTIME_EPOCH" -lt "$ISSUE_UPDATED_EPOCH" ]; then
-        emit_topic_log "$TOPIC" dispatched "fresh-run,reason=stale-mtime"
-        continue
-      fi
-
-      # head_sha presence + reachability check.
-      STORED_SHA="$(awk '/^head_sha:/{print $2; exit}' "$F" 2>/dev/null)"
-      if [ -z "$STORED_SHA" ] || ! [[ "$STORED_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
-        emit_topic_log "$TOPIC" dispatched "fresh-run,reason=missing-head-sha"
-        continue
-      fi
-      # Reachability probe MUST run before any git diff invocation so
-      # that an unreachable SHA never leaks into a git diff command line
-      # (per security research: never let raw git diff exit code drive
-      # control flow).
-      if ! git cat-file -e "${STORED_SHA}^{commit}" 2>/dev/null; then
-        emit_topic_log "$TOPIC" dispatched "fresh-run,reason=missing-head-sha"
-        continue
-      fi
-
-      # divergence check.
-      # Fail-open: any git failure (corrupted repo, unreachable SHA somehow
-      # slipping past the cat-file gate, OOM) treated as zero divergence so
-      # the per-topic loop proceeds. Symmetric with the gh pr list fail-open
-      # above. Trade-off: silent on transient git errors; the trust-boundary
-      # contract makes this acceptable (cached artifacts remain
-      # <external-untrusted-input> wrapped regardless).
-      DIVERGENCE="$(git rev-list --count "${STORED_SHA}..HEAD" 2>/dev/null || echo 0)"
-      if [ "${DIVERGENCE:-0}" -gt "${CACHE_DIVERGENCE_THRESHOLD}" ]; then
-        emit_topic_log "$TOPIC" dispatched "fresh-run,reason=head-divergence"
-        continue
-      fi
-
-      # file-intersection check.
-      FILES_INVESTIGATED="$(awk '
-        /^## Files investigated/ { capture=1; next }
-        /^## / { capture=0 }
-        capture && NF {
-          sub(/^- /, "")
-          split($1, p, ":")
-          if (p[1] ~ /^[A-Za-z0-9_.\/-]+$/) print p[1]
-        }
-      ' "$F")"
-      if [ -n "$FILES_INVESTIGATED" ]; then
-        # Fail-open: empty $FILES_TOUCHED on git error short-circuits the
-        # intersection check to false → cache is reused. Symmetric with the
-        # divergence fail-open and the gh pr list fail-open. Trade-off:
-        # silent on transient git errors; the trust-boundary contract makes
-        # this acceptable (cached artifacts remain <external-untrusted-input>
-        # wrapped regardless).
-        FILES_TOUCHED="$(git diff --name-only "${STORED_SHA}..HEAD" 2>/dev/null)"
-        if [ -n "$FILES_TOUCHED" ] && \
-           echo "$FILES_TOUCHED" | grep -Fxq -f <(echo "$FILES_INVESTIGATED"); then
-          emit_topic_log "$TOPIC" dispatched "fresh-run,reason=file-intersection"
+      done
+    else
+      # Per-topic loop: each topic is evaluated independently. Different topics
+      # in the same run may fall back for different reasons or be reused.
+      for TOPIC in "${TOPICS[@]}"; do
+        F="$RESEARCH_DIR/${TOPIC}.md"
+        if [ ! -f "$F" ]; then
+          emit_topic_log "$TOPIC" dispatched "fresh-run,reason=no-cache"
           continue
         fi
-      fi
+        if ! grep -q '^summary:' "$F"; then
+          echo "warning: $F missing 'summary:' field; using full parallel dispatch for $TOPIC" >&2
+          emit_topic_log "$TOPIC" dispatched "fresh-run,reason=missing-summary"
+          continue
+        fi
+        F_MTIME_EPOCH=$(stat -f %m "$F" 2>/dev/null || stat -c %Y "$F" 2>/dev/null)
+        if [ -z "$F_MTIME_EPOCH" ]; then
+          echo "warning: failed to read $F mtime; using full parallel dispatch for $TOPIC" >&2
+          emit_topic_log "$TOPIC" dispatched "fresh-run,reason=invalid-timestamp"
+          continue
+        fi
+        if [ "$F_MTIME_EPOCH" -lt "$ISSUE_UPDATED_EPOCH" ]; then
+          emit_topic_log "$TOPIC" dispatched "fresh-run,reason=stale-mtime"
+          continue
+        fi
 
-      VAR="SHORTCIRCUIT_$(echo "$TOPIC" | tr '[:lower:]-' '[:upper:]_')"
-      declare "$VAR=1"  # was: eval "$VAR=1" — safer indirection, no shell-injection risk if VAR ever becomes attacker-controlled
-      emit_topic_log "$TOPIC" reused "cache-hit,mtime=$F_MTIME_EPOCH,issue_updated_at=$ISSUE_UPDATED_EPOCH"
-    done
+        # head_sha presence + reachability check.
+        STORED_SHA="$(awk '/^head_sha:/{print $2; exit}' "$F" 2>/dev/null)"
+        if [ -z "$STORED_SHA" ] || ! [[ "$STORED_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
+          emit_topic_log "$TOPIC" dispatched "fresh-run,reason=missing-head-sha"
+          continue
+        fi
+        # Reachability probe MUST run before any git diff invocation so
+        # that an unreachable SHA never leaks into a git diff command line
+        # (per security research: never let raw git diff exit code drive
+        # control flow).
+        if ! git cat-file -e "${STORED_SHA}^{commit}" 2>/dev/null; then
+          emit_topic_log "$TOPIC" dispatched "fresh-run,reason=missing-head-sha"
+          continue
+        fi
+
+        # divergence check (fail-open per policy above).
+        DIVERGENCE="$(git rev-list --count "${STORED_SHA}..HEAD" 2>/dev/null || echo 0)"
+        if [ "${DIVERGENCE:-0}" -gt "${CACHE_DIVERGENCE_THRESHOLD}" ]; then
+          emit_topic_log "$TOPIC" dispatched "fresh-run,reason=head-divergence"
+          continue
+        fi
+
+        # file-intersection check (fail-open per policy above).
+        FILES_INVESTIGATED="$(awk '
+          /^## Files investigated/ { capture=1; next }
+          /^## / { capture=0 }
+          capture && NF {
+            sub(/^- /, "")
+            split($1, p, ":")
+            if (p[1] ~ /^[A-Za-z0-9_.\/-]+$/) print p[1]
+          }
+        ' "$F")"
+        if [ -n "$FILES_INVESTIGATED" ]; then
+          # When FILES_TOUCHED is empty (git error or no diff), the -n guard
+          # short-circuits BEFORE grep, so the cache is reused. The grep here
+          # is whole-line exact match (grep -Fxq), never substring.
+          FILES_TOUCHED="$(git diff --name-only "${STORED_SHA}..HEAD" 2>/dev/null)"
+          if [ -n "$FILES_TOUCHED" ] && \
+             echo "$FILES_TOUCHED" | grep -Fxq -f <(echo "$FILES_INVESTIGATED"); then
+            emit_topic_log "$TOPIC" dispatched "fresh-run,reason=file-intersection"
+            continue
+          fi
+        fi
+
+        VAR="SHORTCIRCUIT_$(echo "$TOPIC" | tr '[:lower:]-' '[:upper:]_')"
+        declare "$VAR=1"  # was: eval "$VAR=1" — safer indirection, no shell-injection risk if VAR ever becomes attacker-controlled
+        emit_topic_log "$TOPIC" reused "cache-hit,mtime=$F_MTIME_EPOCH,issue_updated_at=$ISSUE_UPDATED_EPOCH"
+      done
+    fi
   fi
 fi
 ```
@@ -256,18 +261,18 @@ Helper definitions (each replaceable by a single shell command):
 |----|-----------|------------------------------------------------------------------------------------------|---------------------|
 | 1  | global    | `$RESEARCH_DIR` missing entirely                                                         | `no-cache`          |
 | 2  | global    | `gh issue view --json updatedAt` failed OR `date -j` / `date -d` could not parse the ISO | `invalid-timestamp` |
-| 3  | per-topic | `$RESEARCH_DIR/<topic>.md` missing                                                       | `no-cache`          |
-| 4  | per-topic | File present but no `^summary:` front-matter field                                       | `missing-summary`   |
-| 5  | per-topic | `stat` for an existing file produced no epoch                                            | `invalid-timestamp` |
-| 6  | per-topic | `mtime(F) < updatedAt(issue)`                                                            | `stale-mtime`       |
-| 7  | per-topic | `head_sha:` field missing, invalid (`^[0-9a-f]{7,40}$` fails), or unreachable (`git cat-file -e <sha>^{commit}` non-zero) | `missing-head-sha`  |
-| 8  | per-topic | `git rev-list --count <stored>..HEAD` > `UBERDEV_CACHE_DIVERGENCE_THRESHOLD` (default 50) | `head-divergence`   |
-| 9  | per-topic | `git diff --name-only <stored>..HEAD` ∩ `files_investigated(F)` ≠ ∅                      | `file-intersection` |
-| 10 | global    | `gh pr list --state merged --search "closes #<N>"` returns ≥1 PR                         | `pr-closed`         |
+| 3  | global    | `gh pr list --state merged --search "closes #<N>"` returns ≥1 PR                         | `pr-closed`         |
+| 4  | per-topic | `$RESEARCH_DIR/<topic>.md` missing                                                       | `no-cache`          |
+| 5  | per-topic | File present but no `^summary:` front-matter field                                       | `missing-summary`   |
+| 6  | per-topic | `stat` for an existing file produced no epoch                                            | `invalid-timestamp` |
+| 7  | per-topic | `mtime(F) < updatedAt(issue)`                                                            | `stale-mtime`       |
+| 8  | per-topic | `head_sha:` field missing, invalid (`^[0-9a-f]{7,40}$` fails), or unreachable (`git cat-file -e <sha>^{commit}` non-zero) | `missing-head-sha`  |
+| 9  | per-topic | `git rev-list --count <stored>..HEAD` > `UBERDEV_CACHE_DIVERGENCE_THRESHOLD` (default 50) | `head-divergence`   |
+| 10 | per-topic | `git diff --name-only <stored>..HEAD` ∩ `files_investigated(F)` ≠ ∅                      | `file-intersection` |
 
-`invalid-timestamp` may surface globally (row 2) or per-topic (row 5) but never mixed in the same run — if a global pre-gate fires the per-topic loop is skipped entirely. Likewise `pr-closed` (row 10) fires globally — when set, all six topics fall back with `reason=pr-closed` and the per-topic loop is skipped.
+`invalid-timestamp` may surface globally (row 2) or per-topic (row 6) but never mixed in the same run — if a global pre-gate fires the per-topic loop is skipped entirely. Likewise `pr-closed` (row 3) fires globally — when set, all six topics fall back with `reason=pr-closed` and the per-topic loop is skipped.
 
-**Cache divergence threshold (`UBERDEV_CACHE_DIVERGENCE_THRESHOLD`).** The divergence cap for the `head-divergence` check (row 8 above).
+**Cache divergence threshold (`UBERDEV_CACHE_DIVERGENCE_THRESHOLD`).** The divergence cap for the `head-divergence` check (row 9 above).
 
 - **Name:** `UBERDEV_CACHE_DIVERGENCE_THRESHOLD`
 - **Range:** `[1, 100000]` (any positive integer; the 100000 upper bound is a sanity cap to keep `uberdev_read_int_in_range`'s validator happy and is effectively unbounded for the actual use case)
