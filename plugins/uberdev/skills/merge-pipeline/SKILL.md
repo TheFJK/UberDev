@@ -374,14 +374,17 @@ Honest fast-forward fixup commits added between `/review-pr` and `/merge` (e.g.,
 # Reuses reason_triggering=trust_trail_label_missing per D1; NO new
 # AUDIT_EVENT_ENUM member is introduced (Q5).
 if [[ "$AUTO_REVIEW_ON_MERGE" == "true" ]]; then
-  if gh pr view "$PR" --json labels --jq '.labels[].name' 2>/dev/null \
-       | grep -qx review-pr:pending; then
-    reason="trust_trail_label_missing"
+  if LABELS_OUT=$(gh pr view "$PR" --json labels --jq '.labels[].name' 2>&1); then
+    if echo "$LABELS_OUT" | grep -qx review-pr:pending; then
+      reason="trust_trail_label_missing"
+    fi
+  else
+    echo "warning: gh pr view --json labels failed for PR $PR ($LABELS_OUT); label-present probe skipped — existing trust-trail reason resolution stands" >&2
   fi
 fi
 ```
 
-The existing `AUTO_REVIEW_DISPATCH_CAP = 1` and `AUTO_REVIEW_DISPATCHED["${PR}:${RUN_ID}"]` counter (asserted in the dispatch sequence below) continue to enforce per-run de-dup downstream — re-entry via the new probe cannot bypass the cap because the counter is checked as the third trigger guard condition (line 373 in source order).
+The existing `AUTO_REVIEW_DISPATCH_CAP = 1` and `AUTO_REVIEW_DISPATCHED["${PR}:${RUN_ID}"]` counter (asserted in the dispatch sequence below) continue to enforce per-run de-dup downstream — re-entry via the new probe cannot bypass the cap because the counter is checked as the third trigger guard condition (the third condition in the Trigger guard section immediately below).
 
 **Trigger guard (positive whitelist; D10).** The intercept fires if and only if ALL THREE conditions hold:
 
