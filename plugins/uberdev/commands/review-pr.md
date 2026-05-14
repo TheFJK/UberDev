@@ -268,10 +268,10 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
     **ToolSearch fail-fast (concretized — O3 / #116).** When `ToolSearch` fails to load `AskUserQuestion`, `/review-pr` aborts with stderr error — **NEVER silently auto-pick** (mirrors `orchestrator/SKILL.md:190-193` and 6c.6 HALT). The deterministic shell:
 
-    ```bash
+    ```
     if ! ToolSearch("select:AskUserQuestion") >/dev/null 2>&1; then
       echo "error: AskUserQuestion tool unavailable — Phase 2.5 halt-choice cannot be presented; aborting" >&2
-      audit_event halt-tool-unavailable
+      _uberdev_audit_emit halt_tool_unavailable
       exit 1
     fi
     ```
