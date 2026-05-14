@@ -348,11 +348,31 @@ a. `"uberdev-approved" ∈ labels` (see `UBERDEV_APPROVED_LABEL` constant) — e
 b. The most-recent commit body contains a trailer matching `^Reviewed-by: uberdev/review-pr@([a-f0-9]{40})$` (extract via `git log -1 --format=%B | grep -E ...`; see `REVIEW_PR_TRAILER_PREFIX` constant) — else gate_fail with `data.reason="trust_trail_trailer_missing"`.
 c. The extracted `<trailer-sha>` is delegated to the `trust-trail-evaluator` agent for verdict resolution. Dispatch in a single-message `Task("trust-trail-evaluator")` with inputs `pr_number=<N>`, `head_ref_oid=<live gh pr view --json headRefOid>`, `trailer_sha=<extracted from trailer regex match>`, `working_dir=<cwd>`, and the optional `pr_body_excerpt` / `commit_messages_excerpt` wrapped in `<external-untrusted-input source="github-pr-body">…</external-untrusted-input>` and `<external-untrusted-input source="github-commits">…</external-untrusted-input>` envelopes respectively.
 
-   **Phase 2.5 inputs (RFC 0002 §3.6, added v0.26.0).** Before dispatch, parse the Phase 2.5 block from the same `.uberdev/runs/<run-id>/review-pr-verdict.json` audit file inspected by sub-condition (d). Concrete parsing (caller-side, NOT delegated to the agent):
+   **Phase 2.5 inputs (RFC 0002 §3.6, added v0.26.0).** Before dispatch, parse the Phase 2.5 block from the same `.uberdev/runs/<run-id>/review-pr-verdict.json` audit file inspected by sub-condition (d). First **discover the path** by mirroring sub-condition (d)'s glob (single source of truth — line 375 prose); then parse:
 
    ```bash
+   # Step (c.0) — discover $AUDIT_JSON_PATH (mirrors sub-condition (d) at line 375).
+   # Glob .uberdev/runs/*/review-pr-verdict.json, filter by .pr == $PR_NUMBER,
+   # validate <run-id> against RUN_ID_REGEX before any path concatenation
+   # (D4/F8 path-traversal hardening), pick the lex-greatest <run-id> on multi-match.
+   AUDIT_JSON_PATH=""
+   if compgen -G '.uberdev/runs/*/review-pr-verdict.json' >/dev/null 2>&1; then
+     AUDIT_JSON_PATH="$(
+       for f in .uberdev/runs/*/review-pr-verdict.json; do
+         [ -r "$f" ] || continue
+         pr_field="$(jq -r '.pr // empty' "$f" 2>/dev/null)" || continue
+         [ "$pr_field" = "$PR_NUMBER" ] || continue
+         run_id="$(basename "$(dirname "$f")")"
+         [[ "$run_id" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]] || continue
+         printf '%s\t%s\n' "$run_id" "$f"
+       done | sort -r | head -1 | cut -f2
+     )"
+   fi
+   # AUDIT_JSON_PATH is now the most-recent verdict JSON for this PR, or empty
+   # if none exists (fresh clone / pre-v0.26.0 / corroborator unavailable).
+
    PHASE2_5_PRESENT=false; PHASE2_5_HALTED=false; PHASE2_5_BLOCKER_COUNT=0; PHASE2_5_CRITICAL_COUNT=0; PHASE2_5_OVERRIDE_REASON=null
-   if [ -r "$AUDIT_JSON_PATH" ] && jq -e '.phases.phase2_5 // empty' "$AUDIT_JSON_PATH" >/dev/null 2>&1; then
+   if [ -n "$AUDIT_JSON_PATH" ] && [ -r "$AUDIT_JSON_PATH" ] && jq -e '.phases.phase2_5 // empty' "$AUDIT_JSON_PATH" >/dev/null 2>&1; then
      PHASE2_5_PRESENT=true
      PHASE2_5_HALTED=$(jq -r '.phases.phase2_5.halted // false' "$AUDIT_JSON_PATH")
      PHASE2_5_BLOCKER_COUNT=$(jq -r '.phases.phase2_5.by_severity.blocker // 0' "$AUDIT_JSON_PATH")

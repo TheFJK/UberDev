@@ -187,9 +187,12 @@ assert_grep "$REVIEW_PR" \
 
 # R2 — label-emit gh command literal (AC1). Lock the verbatim gh subcommand
 # so a future implementer can't quietly switch label-add to a different API.
+# RFC 0002 §3.4 introduced tier-aware labels via $TRUST_LABEL — the assertion
+# accepts EITHER the literal `uberdev-approved` form (legacy GREEN-only emission)
+# OR the variable `"$TRUST_LABEL"` form (tier-aware GREEN/YELLOW emission post-v0.26.0).
 assert_grep "$REVIEW_PR" \
-  'gh pr edit.*--add-label uberdev-approved' \
-  "R2 — label-emit gh command literal present"
+  'gh pr edit.*--add-label uberdev-approved|gh pr edit.*--add-label "\$TRUST_LABEL"' \
+  "R2 — label-emit gh command literal present (uberdev-approved OR \$TRUST_LABEL — RFC 0002 tier-aware)"
 
 # R3 — trailer-format prose with verbatim 40-char SHA (AC1, AC13). The
 # downstream parser greps this exact form; test pins the literal.
@@ -379,9 +382,13 @@ assert_no_grep "$REVIEW_PR" \
 # silently regress to a bare `gh pr edit` and re-create the F1 silent-failure
 # class. Two-of-two alternatives (`if !` or `|| exit 2`) so a reviewer can
 # choose either style without false-failing.
+# R9.14 — accepts either the legacy literal-label form OR the v0.26.0+
+# tier-aware `$TRUST_LABEL` form (RFC 0002 §3.4 introduced GREEN/YELLOW tier
+# labels via the same $TRUST_LABEL variable). Both forms must remain guarded
+# by `if ! ... ; then exit 2; fi` per the artifact-emission-failure prose.
 assert_grep "$REVIEW_PR" \
-  'if ! gh pr edit.*--add-label uberdev-approved|gh pr edit.*--add-label uberdev-approved \|\| .*exit 2' \
-  "R9.14 — gh pr edit --add-label uberdev-approved guarded with exit-code check (label-add symmetry to R9.12 push guard)"
+  'if ! gh pr edit.*--add-label uberdev-approved|gh pr edit.*--add-label uberdev-approved \|\| .*exit 2|if ! gh pr edit.*--add-label "\$TRUST_LABEL"|gh pr edit.*--add-label "\$TRUST_LABEL" \|\| .*exit 2' \
+  "R9.14 — gh pr edit --add-label (uberdev-approved OR \$TRUST_LABEL) guarded with exit-code check (label-add symmetry to R9.12 push guard)"
 
 # R9.15 (#79 simplify-pass follow-on) — negative regression guard: the bare
 # `gh pr edit <N> --add-label uberdev-approved` line (no guard, no `||`, no
