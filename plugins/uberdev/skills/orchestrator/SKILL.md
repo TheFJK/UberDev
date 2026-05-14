@@ -364,6 +364,69 @@ If parse fails → re-dispatch the failed agent ONCE with the format example pin
 
 > **Tooling caveat — AskUserQuestion is a deferred tool in current Claude Code harnesses.** Calling it without first loading its schema fails with `InputValidationError`. Before your first call, run `ToolSearch` with `query: "select:AskUserQuestion"` to load the schema. **Do NOT silently auto-pick on tool-load failure** — that turns `/solve` into `/turbo` invisibly. If `ToolSearch` itself fails (rare), abort Phase 2 with a clear stderr error and surface to the user; never fall through to auto-pick in non-turbo mode.
 
+**Visual companion (interactive only).** The brainstorm skill ships a browser-based visual companion (`skills/brainstorm/scripts/server.cjs` + `start-server.sh`, full protocol in `skills/brainstorm/visual-companion.md`). When `/solve` invokes the orchestrator instead of the brainstorm skill directly, Phase 2 inherits the same affordance — visual questions belong in the browser, conceptual questions in the terminal.
+
+**When to offer.** At Phase 2 start, BEFORE the first clarifying question, if any of these visual signals fire:
+
+- Research bundle (`research-codebase` / `research-patterns` summaries) mentions frontend/UI files: globs `*.tsx`, `*.jsx`, `*.vue`, `*.svelte`, `*.css`, `*.scss`, OR directory names `components/`, `ui/`, `design/`, `screens/`, `pages/`, `views/`.
+- Issue body contains visual keywords: `layout`, `design`, `mockup`, `screen`, `component`, `color`, `theme`, `look`, `feel`, `visual`, `wireframe`, `palette`, `typography`, `spacing`, `hierarchy`, `UI`, `UX`.
+
+If neither signal fires, skip the offer entirely — proceed text-only.
+
+**How to offer.** ONE message, on its own. Do NOT combine with a clarifying question. Verbatim text (mirrors `skills/brainstorm/SKILL.md:166`):
+
+> Some of what we're working on might be easier to explain if I can show it to you in a web browser. I can put together mockups, diagrams, comparisons, and other visuals as we go. This feature is still new and can be token-intensive. Want to try it? (Requires opening a local URL)
+
+Use `AskUserQuestion` with 2 options (`Yes` / `No`) so the consent is structurally captured. On `No`, proceed text-only — no further visual prompts in this Phase 2.
+
+**Per-question decision.** Even after consent, decide PER QUESTION whether browser or terminal fits — the test is *would the user understand this better by seeing it than reading it?* Visual: UI mockups, layout comparisons, color/theme choices, architecture diagrams, spatial relationships. Terminal: scope/requirements, A/B/C text choices, tradeoff lists, technical decisions. The 3-5 Phase 2 questions may mix freely.
+
+**Starting the server (first visual question only).** Resolve the plugin scripts dir via plugin-root env var with a `find` fallback, then invoke `start-server.sh`:
+
+```bash
+PLUGIN_SCRIPTS="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}/skills/brainstorm/scripts"
+if [[ ! -d "$PLUGIN_SCRIPTS" ]]; then
+  PLUGIN_SCRIPTS="$(find "${HOME}/.claude/plugins" "${HOME}/.cursor/plugins" -type d -path '*/uberdev/skills/brainstorm/scripts' 2>/dev/null | head -1)"
+fi
+if [[ ! -d "$PLUGIN_SCRIPTS" ]]; then
+  echo "uberdev brainstorm scripts not found — falling back to terminal-only Phase 2" >&2
+  # continue without visual companion; AskUserQuestion path still works
+else
+  if SERVER_INFO="$("$PLUGIN_SCRIPTS/start-server.sh" --project-dir "$(git rev-parse --show-toplevel)")" \
+     && URL="$(printf '%s' "$SERVER_INFO" | jq -er '.url')" \
+     && SCREEN_DIR="$(printf '%s' "$SERVER_INFO" | jq -er '.screen_dir')" \
+     && STATE_DIR="$(printf '%s' "$SERVER_INFO" | jq -er '.state_dir')"; then
+    : # server up; URL / SCREEN_DIR / STATE_DIR set
+  else
+    echo "uberdev visual companion failed to start — falling back to terminal-only Phase 2 (server_info: ${SERVER_INFO:-<empty>})" >&2
+    unset URL SCREEN_DIR STATE_DIR
+  fi
+fi
+```
+
+Tell the user the URL ONCE on first use. The server stays alive across turns — do NOT restart per question. Visual companion is enrichment, not a hard requirement: if resolution fails, log to stderr and degrade to terminal-only (do NOT abort Phase 2). If `URL` is unset after this block, the visual companion is unavailable for this Phase 2 run — skip all browser-path branches below and route every question through `AskUserQuestion`.
+
+**The loop (browser path).** For each visual question: `Write` a semantic-named HTML content fragment (e.g. `q1-layout.html`, `q2-theme.html`, never reuse filenames) to `$SCREEN_DIR`, give a 1-2 sentence text summary ("Showing 3 layout options for the dashboard"), tell the user to *click an option, press LOCK IN, then switch back here and hit enter — any input even `.` works*, and end your turn. The plugin's `inject-brainstorm-answers` hook auto-prepends `<uberdev-brainstorm-answers>` to their next prompt with the locked-in `type:"submit"` event. Treat that block as authoritative — do NOT ask the user to repeat their choice in chat. Full protocol (CSS classes, frame template, event format, content-fragment vs full-document rule, design tips) lives in `skills/brainstorm/visual-companion.md`.
+
+**Merging into `qa_answers`.** Whether the answer came from `AskUserQuestion` (terminal) or the `<uberdev-brainstorm-answers>` injection (browser), normalize into the same `qa_answers` shape that Phase 3 spec-writer consumes. Suggested fields: `{question, answer, source: "terminal" | "browser"}`. Browser-path authoritative answer is the `type:"submit"` event's `choice` (or full `selections[]` for multi-select); earlier `type:"click"` events are exploration signal only.
+
+**Dispatching to `spec-writer`.** The structured `qa_answers` shape is orchestrator-internal bookkeeping; when dispatched to `spec-writer`, serialise to markdown bullets matching `agents/spec-writer.md:30`'s input contract (the `source` field is advisory and not consumed by spec-writer today).
+
+**Unloading between visual and terminal questions.** When the next question is conceptual (terminal), `Write` a `waiting.html` (or `waiting-2.html`, etc.) fragment to `$SCREEN_DIR` BEFORE switching to `AskUserQuestion`, so the user does not stare at a stale resolved mockup. Verbatim fragment from `skills/brainstorm/visual-companion.md:118-127`:
+
+```html
+<!-- filename: waiting.html (or waiting-2.html, etc.) -->
+<div style="display:flex;align-items:center;justify-content:center;min-height:60vh">
+  <p class="subtitle">Continuing in terminal...</p>
+</div>
+```
+
+**Cleanup.** No explicit stop required — `server.cjs` auto-exits after 30 minutes of inactivity, and `--project-dir` mode persists mockups under `<repo>/.uberdev/brainstorm/<session-id>/` for later inspection. The `inject-brainstorm-answers` hook truncates `$STATE_DIR/events` after delivery, so answers are not replayed. If you want to free the port between Phase 2 and Phase 3, invoke `"$PLUGIN_SCRIPTS/stop-server.sh" "$(dirname "$STATE_DIR")"` — otherwise let it idle out.
+
+**Turbo skip.** Visual companion is interactive-only. The `if [[ "$TURBO" == "1" ]]` branch below bypasses the entire flow — turbo synthesises `questions.md` from research without `AskUserQuestion` AND without `start-server.sh`. Do NOT invoke `start-server.sh` from a turbo-mode orchestrator run, even speculatively.
+
+**Threat model.** Localhost-only bind, no auth, single-user assumption — see `skills/brainstorm/SKILL.md:206-214` for the full statement. Never override `--host` to a non-loopback interface (`0.0.0.0`, external IP) in CI/shared-host contexts. The orchestrator inherits the same trust model verbatim.
+
 **Turbo (`--turbo` set — only path that auto-picks):** instead of skipping entirely, generate the same set of clarifying questions in-thread, auto-pick each answer using the spec-writer's `decisions`-block synthesis logic (best guess from research artifacts), and write to `$RESEARCH_DIR_ABS/questions.md` in the format below (Q-N heading, `**Auto-pick:**`, `**Rationale:**`, `**Confidence:** high|medium|low`). The `decisions` array fed to spec-writer has the same shape as a non-turbo run, just with `auto_pick: true` flagged.
 
 **Turbo detection (hybrid):** the orchestrator treats turbo mode as ON when EITHER `$ARGUMENTS` contains `--turbo` (standalone-invocation path, see "Standalone invocation" section below) OR the inherited environment variable `${UBERDEV_TURBO:-0} == "1"` (set by `commands/turbo.md` and propagated through `solve-pipeline`'s `claude --bg` inline-prefix exec, #97). Concretely:

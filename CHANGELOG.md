@@ -4,6 +4,25 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0] - 2026-05-14
+
+### Added
+
+- **Visual companion in orchestrator Phase 2 (`/solve` and `/turbo` medium/large tier)** — `plugins/uberdev/skills/orchestrator/SKILL.md` Phase 2 (Q&A) now offers the browser-based visual companion already shipped with the brainstorm skill (`skills/brainstorm/scripts/server.cjs` + `start-server.sh`, full protocol in `skills/brainstorm/visual-companion.md`). Previously, `/solve` for medium/large issues went straight to text-only `AskUserQuestion` because the orchestrator was built as a separate Phase 2 path that bypassed the brainstorm skill (`skills/brainstorm/SKILL.md:16`); design questions that would benefit from mockups, layout comparisons, or architecture diagrams were forced into prose. The new sub-section adds:
+  - (a) **When to offer** — research-bundle / issue-body heuristic: frontend file globs (`*.tsx`/`*.jsx`/`*.vue`/`*.svelte`/`*.css`), directory hints (`components/`/`ui/`/`design/`/`screens/`/`pages/`), OR visual keywords (`layout`/`design`/`mockup`/`color`/`theme`/`wireframe`/`palette`/`typography`/`hierarchy`/`UI`/`UX`).
+  - (b) **Consent capture** — verbatim consent message mirroring `skills/brainstorm/SKILL.md:166`, captured via `AskUserQuestion` 2-option vote.
+  - (c) **Per-question decision protocol** — visual content (mockups, layout comparisons, architecture diagrams) routes to the browser; conceptual content (scope/requirements/A-B-C text/tradeoff lists) routes to the terminal. Mixing is allowed across the 3-5 Phase 2 questions.
+  - (d) **Plugin-root-anchored path resolution** — `${CLAUDE_PLUGIN_ROOT}/skills/brainstorm/scripts` with `find ~/.claude/plugins` fallback so the orchestrator can locate `start-server.sh` regardless of its own CWD.
+  - (e) **`qa_answers` normalization** — terminal and browser answers share `{question, answer, source: "terminal" | "browser"}` shape; the browser path's authoritative `type:"submit"` event maps to `choice` (or `selections[]` for multi-select).
+  - (f) **`waiting.html` unload pattern** — `skills/brainstorm/visual-companion.md:118-127` verbatim, for switching between visual and terminal questions so the user does not stare at a stale resolved mockup.
+  - (g) **Turbo skip** — visual companion is interactive-only; the existing `TURBO=1` gate (`skills/orchestrator/SKILL.md` "Turbo detection (hybrid)" section) bypasses the entire flow without invoking `start-server.sh`.
+  - (h) **Threat-model inheritance** — `skills/brainstorm/SKILL.md:206-214` (localhost-only bind, no auth, single-user assumption — never `--host 0.0.0.0` in CI/shared-host contexts).
+
+### Notes
+
+- **No new infrastructure.** The change is documentation/protocol only — `server.cjs`, `start-server.sh`, `stop-server.sh`, `helper.js`, `frame-template.html`, and the `inject-brainstorm-answers` plugin hook were already shipped with `41d072b feat(uberdev): full Superpowers parity port` (v0.3.0). The new sub-section teaches the orchestrator to reuse them; nothing in the brainstorm skill changes.
+- **Degradation is non-fatal.** If plugin-root resolution fails (custom install layout, missing `find` results), the orchestrator logs to stderr and falls back to terminal-only Phase 2 — visual companion is enrichment, not a hard requirement.
+
 ## [0.24.0] - 2026-05-14
 
 ### Added
