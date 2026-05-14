@@ -392,23 +392,28 @@ if [[ ! -d "$PLUGIN_SCRIPTS" ]]; then
   echo "uberdev brainstorm scripts not found — falling back to terminal-only Phase 2" >&2
   # continue without visual companion; AskUserQuestion path still works
 else
-  SERVER_INFO="$("$PLUGIN_SCRIPTS/start-server.sh" --project-dir "$(git rev-parse --show-toplevel)")"
-  URL="$(printf '%s' "$SERVER_INFO" | jq -r '.url')"
-  SCREEN_DIR="$(printf '%s' "$SERVER_INFO" | jq -r '.screen_dir')"
-  STATE_DIR="$(printf '%s' "$SERVER_INFO" | jq -r '.state_dir')"
+  if SERVER_INFO="$("$PLUGIN_SCRIPTS/start-server.sh" --project-dir "$(git rev-parse --show-toplevel)")" \
+     && URL="$(printf '%s' "$SERVER_INFO" | jq -er '.url')" \
+     && SCREEN_DIR="$(printf '%s' "$SERVER_INFO" | jq -er '.screen_dir')" \
+     && STATE_DIR="$(printf '%s' "$SERVER_INFO" | jq -er '.state_dir')"; then
+    : # server up; URL / SCREEN_DIR / STATE_DIR set
+  else
+    echo "uberdev visual companion failed to start — falling back to terminal-only Phase 2 (server_info: ${SERVER_INFO:-<empty>})" >&2
+    unset URL SCREEN_DIR STATE_DIR
+  fi
 fi
 ```
 
-Tell the user the URL ONCE on first use. The server stays alive across turns — do NOT restart per question. Visual companion is enrichment, not a hard requirement: if resolution fails, log to stderr and degrade to terminal-only (do NOT abort Phase 2).
+Tell the user the URL ONCE on first use. The server stays alive across turns — do NOT restart per question. Visual companion is enrichment, not a hard requirement: if resolution fails, log to stderr and degrade to terminal-only (do NOT abort Phase 2). If `URL` is unset after this block, the visual companion is unavailable for this Phase 2 run — skip all browser-path branches below and route every question through `AskUserQuestion`.
 
 **The loop (browser path).** For each visual question: `Write` a semantic-named HTML content fragment (e.g. `q1-layout.html`, `q2-theme.html`, never reuse filenames) to `$SCREEN_DIR`, give a 1-2 sentence text summary ("Showing 3 layout options for the dashboard"), tell the user to *click an option, press LOCK IN, then switch back here and hit enter — any input even `.` works*, and end your turn. The plugin's `inject-brainstorm-answers` hook auto-prepends `<uberdev-brainstorm-answers>` to their next prompt with the locked-in `type:"submit"` event. Treat that block as authoritative — do NOT ask the user to repeat their choice in chat. Full protocol (CSS classes, frame template, event format, content-fragment vs full-document rule, design tips) lives in `skills/brainstorm/visual-companion.md`.
 
-**Merging into `qa_answers`.** Whether the answer came from `AskUserQuestion` (terminal) or the `<uberdev-brainstorm-answers>` injection (browser), normalize into the same `qa_answers` shape that Phase 3 spec-writer consumes. Suggested fields: `{question, answer, source: "terminal" | "browser"}`. Browser-path authoritative answer is the `type:"submit"` event's `choice` (or full `selections[]` for multi-select); earlier `type:"click"` events are exploration signal only.
+**Merging into `qa_answers`.** Whether the answer came from `AskUserQuestion` (terminal) or the `<uberdev-brainstorm-answers>` injection (browser), normalize into the same `qa_answers` shape that Phase 3 spec-writer consumes. Suggested fields: `{question, answer, source: "terminal" | "browser"}`. Browser-path authoritative answer is the `type:"submit"` event's `choice` (or full `selections[]` for multi-select); earlier `type:"click"` events are exploration signal only. The structured shape is orchestrator-internal bookkeeping; when dispatched to `spec-writer`, serialise to markdown bullets matching `agents/spec-writer.md:30`'s input contract (the `source` field is advisory and not consumed by spec-writer today).
 
 **Unloading between visual and terminal questions.** When the next question is conceptual (terminal), `Write` a `waiting.html` (or `waiting-2.html`, etc.) fragment to `$SCREEN_DIR` BEFORE switching to `AskUserQuestion`, so the user does not stare at a stale resolved mockup. Verbatim fragment from `skills/brainstorm/visual-companion.md:118-127`:
 
 ```html
-<!-- filename: waiting.html -->
+<!-- filename: waiting.html (or waiting-2.html, etc.) -->
 <div style="display:flex;align-items:center;justify-content:center;min-height:60vh">
   <p class="subtitle">Continuing in terminal...</p>
 </div>
