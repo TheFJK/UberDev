@@ -11,6 +11,32 @@ SIMPLIFY_MD="$REPO_ROOT/plugins/uberdev/commands/simplify.md"
 
 PASS=0; FAIL=0
 source "$THIS_DIR/_lib_assert_structural.sh"
+
+# Local assert_no_grep — the shared helpers in _lib_assert_structural.sh do not
+# include this negation form; match the inline shape used by sibling tests
+# (tests/simplify.test.sh, tests/review-pr-phase3-ci.test.sh).
+assert_no_grep() {
+  local file="$1" pattern="$2" desc="$3"
+  if grep -qE -e "$pattern" "$file"; then
+    echo "  FAIL  $desc"; echo "        file: $file"; echo "        pattern (must NOT appear): $pattern"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
+  fi
+}
+
+# Local assert_grep — mirrors the inline form used by sibling tests
+# (tests/simplify.test.sh). Section-agnostic positive grep.
+assert_grep() {
+  local file="$1" pattern="$2" desc="$3"
+  if grep -qE -e "$pattern" "$file"; then
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"; echo "        file: $file"; echo "        pattern: $pattern"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
 echo "## findings-to-issues fixture suites"
 
 # ---------- gh-command mocks (inline functions) ----------
@@ -60,7 +86,7 @@ assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
   'disposition.*=.*APPLIED|APPLIED.*disposition' 'P3 helper excludes disposition==APPLIED (RFC 0002: `[ "$disposition" = "APPLIED" ] && return 1`)'
 # P4 (RFC 0002 §3.1) — three-tier output (BLOCKER/CRITICAL/MAJOR) replaces the
-# pre-RFC-0002 binary deferred-critical/no-issue split. Locks the tier enum
+# pre-v0.26.0 binary deferred-critical/no-issue split. Locks the tier enum
 # against future drift.
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
   'tier="BLOCKER"' 'P4 route_by_severity emits BLOCKER tier on severity=blocker'
@@ -185,6 +211,103 @@ if grep -qE 'finding-contains-fingerprint-marker' "$AGENT_MD"; then
 else
   echo "  FAIL  B7 finding containing the marker is refused"; FAIL=$((FAIL+1))
 fi
+
+### Suite 10: RFC 0002 return-contract + overflow guard locks ----------
+echo
+echo "### Suite 10: RFC 0002 return-contract + overflow guard locks (T3, T6)"
+
+# T3.1 — by_severity block in return contract
+assert_in_section "$AGENT_MD" '^## Return contract' '^## Refusal triggers' \
+  'by_severity' 'T3.1 — return contract documents by_severity block (RFC 0002 §3.3.3)'
+
+# T3.2 — halted field with true|false values
+assert_in_section "$AGENT_MD" '^## Return contract' '^## Refusal triggers' \
+  'halted:.*true|false|halted: bool|halted.*true.*false' \
+  'T3.2 — return contract documents halted: bool (RFC 0002 §3.3.5; load-bearing)'
+
+# T3.3 — halted_due_to_overflow field
+assert_in_section "$AGENT_MD" '^## Return contract' '^## Refusal triggers' \
+  'halted_due_to_overflow' 'T3.3 — return contract documents halted_due_to_overflow (RFC 0002 §3.3.4)'
+
+# T3.4 — halt semantic rule ("halted is set only when ... iff ...")
+assert_in_section "$AGENT_MD" '^## Return contract' '^## Refusal triggers' \
+  'halted.*set only when|halted.*iff|set only when.*halted' \
+  'T3.4 — halt semantic rule documented (RFC 0002 §3.3.5)'
+
+# T3.5 — per-URL tier field on created_urls / commented_urls / skipped_closed
+# (RFC 0002 §3.3.3 — tier annotation on every URL row).
+assert_in_section "$AGENT_MD" '^## Return contract' '^## Refusal triggers' \
+  'tier: "BLOCKER"|tier: "CRITICAL"|tier: "MAJOR"|tier:.*BLOCKER|CRITICAL|MAJOR' \
+  'T3.5 — per-URL tier annotation on created_urls / commented_urls / skipped_closed (RFC 0002 §3.3.3)'
+
+# T3-tombstone — the old "NEVER causes /review-pr or /simplify to exit
+# non-zero" clause MUST be ABSENT (constraints [hard]: RFC 0002 §3.3.5
+# intentionally inverts the pre-RFC contract).
+assert_no_grep "$AGENT_MD" \
+  'NEVER causes /review-pr or /simplify to exit non-zero' \
+  'T3-tombstone — pre-v0.26.0 NEVER-halts clause is removed (RFC 0002 §3.3.5)'
+
+# T6.1 — process step 6 documents the broken-feature overflow guard
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'Broken-feature overflow guard|broken-feature overflow|broken_feature_overflow' \
+  'T6.1 — Process step 6 documents the broken-feature overflow guard (RFC 0002 §3.3.4)'
+
+# T6.2 — guard fires when a truncated row is BLOCKER or CRITICAL tier
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'truncated.*row.*BLOCKER|truncated.*row.*CRITICAL|BLOCKER.*CRITICAL.*truncated' \
+  'T6.2 — overflow guard fires on truncated BLOCKER/CRITICAL tier rows (constraints [hard])'
+
+# T6.3 — halted_due_to_overflow == true implies halted == true
+assert_in_section "$AGENT_MD" '^## Return contract' '^## Refusal triggers' \
+  'halted_due_to_overflow.*true.*halted.*true|halted=true.*halted_due_to_overflow|halted_due_to_overflow == true' \
+  'T6.3 — halted_due_to_overflow == true implies halted == true (RFC 0002 §3.3.5)'
+
+### Suite 11: O2/O4 observability locks ----------
+echo
+echo "### Suite 11: O2 author_lookup_failed + O4 is_transient (RFC 0002 observability)"
+
+# O2.1 — return contract documents author_lookup_failed: bool
+assert_in_section "$AGENT_MD" '^## Return contract' '^## Refusal triggers' \
+  'author_lookup_failed' \
+  'O2.1 — return contract documents author_lookup_failed field (#116 O2)'
+
+# O2.2 — integer regex guard on $pr_number (defence-in-depth per security Note A)
+assert_grep "$AGENT_MD" \
+  'pr_number.*=~.*\^\[0-9\]\+\$|=~ \^\[0-9\]\+\$' \
+  'O2.2 — agent enforces integer regex guard on $pr_number before gh pr view (security Note A)'
+
+# O4.1 — return contract documents is_transient on blocked_by_dedupe[] entries
+assert_in_section "$AGENT_MD" '^## Return contract' '^## Refusal triggers' \
+  'is_transient' \
+  'O4.1 — return contract documents is_transient field on blocked_by_dedupe[] (#116 O4)'
+
+# O4.2 — 200-char truncation runs BEFORE is_transient classifier (security Note B)
+# Locate the truncation literal and the classifier grep; assert truncation precedes.
+# Alternation tolerates either ordering of TRUNCATED_OUTPUT and 'head -c 200' on a single line — but the truncate-precedes-classify invariant (L_TRUNC < L_CLASSIFY) is what we actually assert.
+L_TRUNC=$(grep -n 'TRUNCATED_OUTPUT.*head -c 200\|head -c 200.*TRUNCATED_OUTPUT' "$AGENT_MD" | head -n 1 | cut -d: -f1)
+L_CLASSIFY=$(grep -n 'is_transient=true\|HTTP 429.*rate limit' "$AGENT_MD" | head -n 1 | cut -d: -f1)
+if [[ -n "$L_TRUNC" && -n "$L_CLASSIFY" && "$L_TRUNC" -lt "$L_CLASSIFY" ]]; then
+  PASS=$((PASS+1)); echo "  PASS  O4.2 — 200-char truncation precedes is_transient classifier (security Note B; L_TRUNC=$L_TRUNC < L_CLASSIFY=$L_CLASSIFY)"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  O4.2 — truncation MUST precede classifier (L_TRUNC=$L_TRUNC L_CLASSIFY=$L_CLASSIFY)"
+fi
+
+# O4.3 — classifier transient-triggers documented (rc=429 OR stderr 5xx/rate-limit)
+assert_grep "$AGENT_MD" \
+  'rc.*-eq 429|HTTP 5\[0-9\]\[0-9\]|rate limit|secondary rate' \
+  'O4.3 — is_transient classifier triggers documented (design decision D9)'
+
+### Suite 12: Allow-list extension lock (S7 — #116 review-pr finding) ----------
+echo
+echo "### Suite 12: ci-refused-synthetic allow-list lock (#116 O5)"
+
+# O5.1 — Step 1 accepted-source allow-list extended with ci-refused-synthetic.
+# Locks the closed-set extension performed in #116 / O5 so future refactors do
+# not silently drop the synthetic-aggregate path that wires CI-REFUSED issue
+# creation through this agent.
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'ci-refused-synthetic' \
+  'O5.1 — Step 1 accepted-source allow-list includes ci-refused-synthetic (#116 O5)'
 
 echo
 echo "## Summary"

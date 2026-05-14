@@ -579,6 +579,109 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# T1 — GREEN/YELLOW/RED predicate prose (RFC 0002 — locks Trust-Signal Emission)
+# Anchor pair: ^## Trust-Signal Emission … ^## Exit-Code Contract (canonical
+# per spec-reviewer Minor #1; the file has no ^## Inputs heading so the
+# alternative anchor in the spec is unusable).
+#
+# Temporarily disable `pipefail` around T1/T2: the shared `assert_in_section`
+# helper pipes `awk` to `grep -qE`, and `grep -q` exits early on first match.
+# With pipefail on, awk receives SIGPIPE on its next write, the pipeline reports
+# 141, and the helper's `if … ; then PASS else FAIL` branch takes FAIL even when
+# the match was found. The Trust-Signal Emission section is ~239 lines (well
+# larger than other sections previously asserted), so awk's buffered output
+# almost always still has bytes to flush when grep exits — the race is
+# deterministic, not flaky. Disabling pipefail for this block restores the
+# helper's intended "did grep find it?" semantics without modifying the shared
+# helper (which is co-owned by other parallel-task test files).
+PIPEFAIL_PREV_T1T2=$(set -o | awk '/^pipefail/ {print $2}')
+set +o pipefail
+echo
+echo "== T1: GREEN/YELLOW/RED predicate prose locks =="
+
+# T1.1 — YELLOW predicate names by_severity.critical > 0 as the YELLOW signal
+assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contract' \
+  'YELLOW.*by_severity\.critical.*>.*0|by_severity\.critical.*>.*0.*YELLOW' \
+  "T1.1 — YELLOW predicate names by_severity.critical > 0"
+
+# T1.2 — RED predicate is "NOT GREEN AND NOT YELLOW"
+assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contract' \
+  'RED.*NOT GREEN.*NOT YELLOW|RED.*:=.*NOT GREEN' \
+  "T1.2 — RED predicate is NOT GREEN AND NOT YELLOW (RFC 0002 §3.4)"
+
+# T1.3 — OVERRIDE_GREEN predicate references PHASE2_5_HALT_CHOICE == "override"
+assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contract' \
+  'OVERRIDE_GREEN.*PHASE2_5_HALT_CHOICE.*override|PHASE2_5_HALT_CHOICE.*override.*OVERRIDE_GREEN' \
+  "T1.3 — OVERRIDE_GREEN predicate names PHASE2_5_HALT_CHOICE == \"override\" (RFC 0002 §3.5)"
+
+# T1.4 — sole-cause rationale: override only suppresses RED when phase2_5 is
+# the SOLE failing precondition.
+assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contract' \
+  'SOLE cause|sole cause|sole_cause|phase2_5_only|would_have_been_RED_due_to_phase2_5_only' \
+  "T1.4 — OVERRIDE_GREEN rationale documents sole-cause restriction (RFC 0002 §3.5)"
+
+# T1.5 — tombstone: GREEN predicate explicitly requires critical == 0
+# (constraints [hard] — GREEN requires critical == 0 to be syntactically
+# mutually exclusive with YELLOW). Pattern allows either form `by_severity.critical`
+# or the bare `critical` (the prose at the disambiguation paragraph uses the bare
+# form: "GREEN explicitly requires `critical == 0`").
+assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contract' \
+  'GREEN.*critical.*==.*0|critical.*==.*0.*GREEN' \
+  "T1.5 — GREEN predicate requires critical == 0 (constraints [hard]; tombstone)"
+
+echo
+echo "== T2: phases.phase2_5 audit JSON block schema lock =="
+
+# T2.1 — phases.phase2_5 named
+assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contract' \
+  'phases\.phase2_5' \
+  "T2.1 — phases.phase2_5 block is named in Trust-Signal prose"
+
+# T2.2 — by_severity sub-object enumerates blocker, critical, major. Split into
+# three separate assertions so the test actually enforces enumeration of all
+# three keys (the prior alternation pattern passed if ANY one was named).
+# Patterns accept either dot-form (`by_severity.<key>`) which appears in the
+# predicate prose, OR JSON-quoted form (`"<key>":`) which appears in the
+# audit-JSON block — both forms enumerate the key within the section.
+assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contract' \
+  'by_severity.*blocker|"blocker":' \
+  "T2.2a — phases.phase2_5.by_severity enumerates blocker"
+assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contract' \
+  'by_severity.*critical|"critical":' \
+  "T2.2b — phases.phase2_5.by_severity enumerates critical"
+assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contract' \
+  'by_severity.*major|"major":' \
+  "T2.2c — phases.phase2_5.by_severity enumerates major"
+
+# T2.3 — halted field is documented
+assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contract' \
+  'halted' \
+  "T2.3 — phases.phase2_5.halted field is documented"
+
+# T2.4 — override_reason field present with null baseline + user-selected value
+assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contract' \
+  'override_reason' \
+  "T2.4 — phases.phase2_5.override_reason field is documented"
+assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contract' \
+  'user-selected-emit-green-on-blocker-deferred' \
+  "T2.4b — override_reason value 'user-selected-emit-green-on-blocker-deferred' documented (RFC 0002 §3.5)"
+
+# T2.5 — staleness prose
+assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contract' \
+  'legacy audit JSON|pre-v0\.26\.0|STALE' \
+  "T2.5 — staleness prose names legacy audit JSON without phase2_5 block as STALE"
+
+# T2.6 — tombstone: phases.phase2_5 block must be present on every run where
+# Phase 2.5 was reachable (constraints [hard]).
+assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contract' \
+  'phase2_5.*reachable|Phase 2\.5 was reachable|phases\.phase2_5 block.*present' \
+  "T2.6 — phases.phase2_5 block MUST be present on every run where Phase 2.5 was reachable (constraints [hard]; tombstone)"
+
+# Restore pipefail to its pre-T1/T2 setting so a future appended block that
+# relies on the file-wide `set -o pipefail` (line 11) sees the same shell
+# options it expects.
+if [ "$PIPEFAIL_PREV_T1T2" = "on" ]; then set -o pipefail; fi
+
 echo
 echo "== Summary =="
 echo "  passed: $PASS"

@@ -260,6 +260,57 @@ assert_grep "$REVIEW_PR" 'by_agent="ci-rebase-handler\+conflict-resolver"' \
   "S13.17 — ci_fix_pushed audit event names both contributing agents on conflict-resolve push success"
 
 echo
+echo "== S14: ci-code-fixer REFUSED halt path (Phase 3 6c.5) — locks post-O5 findings-to-issues dispatch shape =="
+
+# S14.1 — Phase 3 6c.5 documents the REFUSED halt path with AskUserQuestion-less
+# deterministic exit (mirrors 6c.6 HALT shape per RFC 0002 §3.2). Uses
+# file-level assert_grep — patterns are sufficient to lock contract without
+# section anchoring (mawk's awk-range against indented headings is unreliable).
+assert_grep "$REVIEW_PR" \
+  'REFUSED.*halt|halt.*REFUSED|ci-code-fixer.*REFUSED' \
+  "S14.1 — Phase 3 6c.5 documents the ci-code-fixer REFUSED halt path"
+
+# S14.2 — REFUSED → three-action sequence: file issue, emit halt prose, audit+exit
+assert_grep "$REVIEW_PR" \
+  'Three actions in order|three-action ordering|three actions in order' \
+  "S14.2 — Phase 3 6c.5 documents three-action ordering on REFUSED (constraints [hard])"
+
+# S14.3 — Action 1 is filing a CRITICAL-tier GH issue (mirrors findings-to-issues
+# BLOCKER/CRITICAL shape per RFC 0002 §3.3.2).
+assert_grep "$REVIEW_PR" \
+  'CRITICAL-tier.*issue|File the failing test.*CRITICAL|CRITICAL.*GH issue' \
+  "S14.3 — Phase 3 6c.5 action 1 is filing a CRITICAL-tier GH issue (RFC 0002 §3.3.2)"
+
+# S14.4 (re-pinned post-O5) — Phase 3 6c.5 dispatches findings-to-issues
+# with a synthetic single-row aggregate wrapped in
+# <external-untrusted-input source="ci-refused-synthetic"> (RFC 0002 #116 O5).
+# Pre-O5 pattern (`gh issue create --label review-pr-finding`) was correct for
+# Wave 1 but is REPLACED here.
+assert_grep "$REVIEW_PR" \
+  'Task.*findings-to-issues.*ci-refused-synthetic|subagent_type.*findings-to-issues|<external-untrusted-input source="ci-refused-synthetic">' \
+  "S14.4 — Phase 3 6c.5 dispatches findings-to-issues with synthetic aggregate (post-O5 dispatch shape; #116 O5)"
+
+# S14.5 — tombstone: REFUSED branch MUST NOT retry (constraints [hard]:
+# "REFUSED is a deterministic decision, not flake; retrying consumes 3 iterations").
+# Negative: extract the REFUSED sub-block by line range and assert no retry-counter
+# increment in that sub-block.
+R_START=$(grep -n 'ci-code-fixer.*`status: REFUSED`' "$REVIEW_PR" | head -1 | cut -d: -f1)
+R_END=$(awk -v s="${R_START:-0}" 'NR > s && /ci-rebase-handler.*`status: REBASED|ci-rebase-handler.*`status: CONFLICT|^### 6c\.6/ { print NR; exit }' "$REVIEW_PR")
+if [[ -n "$R_START" && -n "$R_END" ]]; then
+  RETRY_COUNT=$(sed -n "${R_START},${R_END}p" "$REVIEW_PR" | grep -cE 'CI_FIX_LOOP_CAP|loop-counter \+\+|retry_count\+\+|iteration\+\+')
+  if [[ "$RETRY_COUNT" -eq 0 ]]; then
+    echo "  PASS  S14.5 — REFUSED sub-block does NOT increment retry counter (constraints [hard]; tombstone)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S14.5 — REFUSED sub-block MUST NOT retry; found $RETRY_COUNT retry-increment patterns"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  echo "  FAIL  S14.5 — could not locate REFUSED sub-block (R_START=$R_START R_END=$R_END)"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

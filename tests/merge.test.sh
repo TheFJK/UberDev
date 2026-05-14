@@ -1723,6 +1723,85 @@ else
   fail "M86.7 — could not locate ## Common Mistakes section (CM_START=$CM_START CM_END=$CM_END)"
 fi
 
+# M86.8 — AUDIT_EVENT_ENUM declares audit_json_phase2_5_parse_failure (#116 / O1)
+# Naming convention: snake_case matches the 50+ existing enum members (review-pr finding B4).
+if grep -qE '^\| `AUDIT_EVENT_ENUM`.*`audit_json_phase2_5_parse_failure`' "$SKILL_FILE"; then
+  pass "M86.8 — AUDIT_EVENT_ENUM row contains audit_json_phase2_5_parse_failure literal (#116 / RFC 0002 O1 + B4 snake_case rename)"
+else
+  fail "M86.8 — AUDIT_EVENT_ENUM MUST declare audit_json_phase2_5_parse_failure (#116 spec D8; constraints [hard]; B4 snake_case convention)"
+fi
+
+# M86.9 — AUDIT_EVENT_ENUM declares halt_tool_unavailable (#116 / O3 + B3)
+# The O3 ToolSearch fail-fast block in commands/review-pr.md emits this event
+# on AskUserQuestion load failure; it MUST be declared in the canonical enum.
+if grep -qE '^\| `AUDIT_EVENT_ENUM`.*`halt_tool_unavailable`' "$SKILL_FILE"; then
+  pass "M86.9 — AUDIT_EVENT_ENUM row contains halt_tool_unavailable literal (#116 / RFC 0002 O3; constraints [hard])"
+else
+  fail "M86.9 — AUDIT_EVENT_ENUM MUST declare halt_tool_unavailable (#116 O3; constraints [hard])"
+fi
+
+echo
+echo "== M87: Three /merge override flags declared in both commands/merge.md and merge-pipeline/SKILL.md =="
+
+# M87.1–M87.3 — argument-hint declarations in commands/merge.md frontmatter
+for FLAG in --accept-blocker-deferred --accept-critical-deferred --i-know-what-im-doing; do
+  if grep -E '^argument-hint:' "$CMD_FILE" | grep -q -- "$FLAG"; then
+    pass "M87.argv-$FLAG — commands/merge.md argument-hint declares $FLAG"
+  else
+    fail "M87.argv-$FLAG — commands/merge.md argument-hint MUST declare $FLAG"
+  fi
+done
+
+# M87.4–M87.6 — flag-purpose prose in commands/merge.md (bulleted-list entries
+# in the Usage section).
+assert_grep "$CMD_FILE" \
+  '`--accept-blocker-deferred`.*opt-in override' \
+  "M87.4 — commands/merge.md documents --accept-blocker-deferred purpose"
+assert_grep "$CMD_FILE" \
+  '`--accept-critical-deferred`.*opt-in override' \
+  "M87.5 — commands/merge.md documents --accept-critical-deferred purpose"
+assert_grep "$CMD_FILE" \
+  '`--i-know-what-im-doing`.*required.*override|required to land.*--i-know-what-im-doing' \
+  "M87.6 — commands/merge.md documents --i-know-what-im-doing purpose"
+
+# M87.7–M87.9 — Constants table entries OR Inputs prose in merge-pipeline/SKILL.md
+# (the spec records these under `## Inputs` not a literal `Constants` table row;
+# accept either anchor).
+assert_grep "$SKILL_FILE" \
+  '`--accept-blocker-deferred`.*RFC 0002.*added v0\.26\.0' \
+  "M87.7 — SKILL.md declares --accept-blocker-deferred (RFC 0002 §3.6)"
+assert_grep "$SKILL_FILE" \
+  '`--accept-critical-deferred`.*RFC 0002.*added v0\.26\.0' \
+  "M87.8 — SKILL.md declares --accept-critical-deferred (RFC 0002 §3.6)"
+assert_grep "$SKILL_FILE" \
+  '`--i-know-what-im-doing`.*RFC 0002.*added v0\.26\.0' \
+  "M87.9 — SKILL.md declares --i-know-what-im-doing (RFC 0002 §3.5)"
+
+# M87.10–M87.12 — Inputs prose body in merge-pipeline/SKILL.md mentions each flag
+# by exact string with RFC reference. (Same SKILL_FILE; different surface — the
+# full-sentence prose body that downstream agents read.)
+assert_grep "$SKILL_FILE" \
+  'accept_blocker_deferred_flag' \
+  "M87.10 — SKILL.md names accept_blocker_deferred_flag input variable"
+assert_grep "$SKILL_FILE" \
+  'accept_critical_deferred_flag' \
+  "M87.11 — SKILL.md names accept_critical_deferred_flag input variable"
+assert_grep "$SKILL_FILE" \
+  'i_know_what_im_doing_flag' \
+  "M87.12 — SKILL.md names i_know_what_im_doing_flag input variable"
+
+# M87.13 — tombstone: no env-var or config-key variant exists for these flags
+# (constraints [hard]: "all per-invocation only (no env-var, no config key)").
+# Check that the deprecated env-var pattern does NOT appear for these specific
+# tokens in either file (allow-list other AUTO_REVIEW / UBERDEV_ env-vars).
+for TOKEN in ACCEPT_BLOCKER_DEFERRED ACCEPT_CRITICAL_DEFERRED I_KNOW_WHAT_IM_DOING; do
+  if grep -qE "UBERDEV_${TOKEN}|env override.*${TOKEN}" "$CMD_FILE" "$SKILL_FILE"; then
+    fail "M87.13.$TOKEN — env-var ${TOKEN} MUST NOT exist (constraints [hard]: per-invocation only)"
+  else
+    pass "M87.13.$TOKEN — no env-var variant for ${TOKEN} (constraints [hard]; tombstone)"
+  fi
+done
+
 echo
 echo "== Summary =="
 echo "  passed: $PASS"

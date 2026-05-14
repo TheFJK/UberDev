@@ -22,7 +22,7 @@ You evaluate whether a PR's `/review-pr` trust trail remains valid against the l
 
 The caller (`/merge` Phase 1.4) parses these from the `.uberdev/runs/<run-id>/review-pr-verdict.json` audit JSON's `phases.phase2_5` block and passes them in the dispatch prompt. Treat as TRUSTED — they originate from a local-only audit file written by the same `/review-pr` run that emitted the trailer.
 
-- `phase2_5_present` — `"true"` if the audit JSON has a `phases.phase2_5` block (post-RFC-0002 emission); `"false"` if absent (legacy pre-v0.26.0 audit).
+- `phase2_5_present` — `"true"` if the audit JSON has a `phases.phase2_5` block (post-v0.26.0 emission); `"false"` if absent (legacy pre-v0.26.0 audit).
 - `phase2_5_halted` — `"true"` if `phases.phase2_5.halted == true` in the JSON; `"false"` otherwise. Caller passes `"false"` when `phase2_5_present == "false"`.
 - `phase2_5_blocker_count` — non-negative integer; `phases.phase2_5.by_severity.blocker`. Caller passes `0` when `phase2_5_present == "false"`.
 - `phase2_5_critical_count` — non-negative integer; `phases.phase2_5.by_severity.critical`. Caller passes `0` when `phase2_5_present == "false"`.
