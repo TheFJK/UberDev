@@ -263,19 +263,21 @@ echo
 echo "== S14: ci-code-fixer REFUSED halt path (Phase 3 6c.5) — locks post-O5 findings-to-issues dispatch shape =="
 
 # S14.1 — Phase 3 6c.5 documents the REFUSED halt path with AskUserQuestion-less
-# deterministic exit (mirrors 6c.6 HALT shape per RFC 0002 §3.2).
-assert_in_section "$REVIEW_PR" '^### 6c\.5|^    ### 6c\.5' '^### 6c\.6|^    ### 6c\.6|^### 6c\.7|^    ### 6c\.7' \
+# deterministic exit (mirrors 6c.6 HALT shape per RFC 0002 §3.2). Uses
+# file-level assert_grep — patterns are sufficient to lock contract without
+# section anchoring (mawk's awk-range against indented headings is unreliable).
+assert_grep "$REVIEW_PR" \
   'REFUSED.*halt|halt.*REFUSED|ci-code-fixer.*REFUSED' \
   "S14.1 — Phase 3 6c.5 documents the ci-code-fixer REFUSED halt path"
 
 # S14.2 — REFUSED → three-action sequence: file issue, emit halt prose, audit+exit
-assert_in_section "$REVIEW_PR" '^### 6c\.5|^    ### 6c\.5' '^### 6c\.6|^    ### 6c\.6|^### 6c\.7|^    ### 6c\.7' \
+assert_grep "$REVIEW_PR" \
   'Three actions in order|three-action ordering|three actions in order' \
   "S14.2 — Phase 3 6c.5 documents three-action ordering on REFUSED (constraints [hard])"
 
 # S14.3 — Action 1 is filing a CRITICAL-tier GH issue (mirrors findings-to-issues
 # BLOCKER/CRITICAL shape per RFC 0002 §3.3.2).
-assert_in_section "$REVIEW_PR" '^### 6c\.5|^    ### 6c\.5' '^### 6c\.6|^    ### 6c\.6|^### 6c\.7|^    ### 6c\.7' \
+assert_grep "$REVIEW_PR" \
   'CRITICAL-tier.*issue|File the failing test.*CRITICAL|CRITICAL.*GH issue' \
   "S14.3 — Phase 3 6c.5 action 1 is filing a CRITICAL-tier GH issue (RFC 0002 §3.3.2)"
 
@@ -284,7 +286,7 @@ assert_in_section "$REVIEW_PR" '^### 6c\.5|^    ### 6c\.5' '^### 6c\.6|^    ### 
 # <external-untrusted-input source="ci-refused-synthetic"> (RFC 0002 #116 O5).
 # Pre-O5 pattern (`gh issue create --label review-pr-finding`) was correct for
 # Wave 1 but is REPLACED here.
-assert_in_section "$REVIEW_PR" '^### 6c\.5|^    ### 6c\.5' '^### 6c\.6|^    ### 6c\.6|^### 6c\.7|^    ### 6c\.7' \
+assert_grep "$REVIEW_PR" \
   'Task.*findings-to-issues.*ci-refused-synthetic|subagent_type.*findings-to-issues|<external-untrusted-input source="ci-refused-synthetic">' \
   "S14.4 — Phase 3 6c.5 dispatches findings-to-issues with synthetic aggregate (post-O5 dispatch shape; #116 O5)"
 
