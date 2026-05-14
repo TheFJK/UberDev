@@ -296,6 +296,18 @@ assert_grep "$AGENT_MD" \
   'rc.*-eq 429|HTTP 5\[0-9\]\[0-9\]|rate limit|secondary rate' \
   'O4.3 — is_transient classifier triggers documented (design decision D9)'
 
+### Suite 12: Allow-list extension lock (S7 — #116 review-pr finding) ----------
+echo
+echo "### Suite 12: ci-refused-synthetic allow-list lock (#116 O5)"
+
+# O5.1 — Step 1 accepted-source allow-list extended with ci-refused-synthetic.
+# Locks the closed-set extension performed in #116 / O5 so future refactors do
+# not silently drop the synthetic-aggregate path that wires CI-REFUSED issue
+# creation through this agent.
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'ci-refused-synthetic' \
+  'O5.1 — Step 1 accepted-source allow-list includes ci-refused-synthetic (#116 O5)'
+
 echo
 echo "## Summary"
 echo "  PASS=$PASS  FAIL=$FAIL"
