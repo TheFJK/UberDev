@@ -301,7 +301,7 @@ Return `status: REFUSED` with the matching rationale string when:
 - Secret-scan hit on candidate body → append to `blocked_by_dedupe[]` with `reason: "secret-scan-hit"`, skip the row, set `DONE_WITH_CONCERNS`. Body is NEVER written even partially.
 - `MAX_NEW=10` exceeded → process first 10, set `overflow_count` to the remainder, set `DONE_WITH_CONCERNS`. **Broken-feature overflow guard (RFC 0002 §3.3.4):** if any truncated row is BLOCKER/CRITICAL tier, additionally set `halted_due_to_overflow=true` AND `halted=true` — the parent halts and surfaces the cliff to the user. Pure-MAJOR overflow does not halt (silent truncation as before).
 
-**Halt semantics (RFC 0002 §3.3.5 — supersedes the pre-RFC-0002 "NEVER halts" clause).** The sub-phase halts the parent run iff the return contract has `halted: true`. Otherwise `/review-pr` and `/simplify` proceed to trust-signal emission with no behaviour change from the pre-RFC contract. `halted` is set only when:
+**Halt semantics (RFC 0002 §3.3.5 — supersedes the pre-v0.26.0 "NEVER halts" clause).** The sub-phase halts the parent run iff the return contract has `halted: true`. Otherwise `/review-pr` and `/simplify` proceed to trust-signal emission with no behaviour change from the pre-v0.26.0 contract. `halted` is set only when:
 
 - a `BLOCKER`-tier row was filed or commented this run (`by_severity.blocker > 0`), OR
 - the broken-feature overflow guard fired (`halted_due_to_overflow == true` — `overflow_count > 0` AND at least one truncated row had tier BLOCKER or CRITICAL).

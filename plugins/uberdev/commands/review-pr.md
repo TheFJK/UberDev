@@ -451,10 +451,10 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
           )
           ```
 
-          where `<tmp-synthetic-aggregate.md>` is a freshly-created `mktemp` file whose first 128 bytes contain the literal envelope marker shown above (source attribute `ci-refused-synthetic`). After dispatch returns, `CI_REFUSED_ISSUE_URL` is set from the agent's YAML return's `created_urls[0].url` field (empty string if missing). If the agent's return YAML contains `status: REFUSED` (input-malformed), the caller emits one explicit stderr line and proceeds to actions 2 + 3 with `CI_REFUSED_ISSUE_URL=""` (the halt prose still emits; the audit record still fires; the issue URL slot is just empty). The literal `warning:` text is the contract — the operator searches their run logs for it:
+          where `<tmp-synthetic-aggregate.md>` is a freshly-created `mktemp` file whose first 128 bytes contain the literal envelope marker shown above (source attribute `ci-refused-synthetic`). After dispatch returns, the caller captures TWO fields from the agent's YAML return: `CI_REFUSED_ISSUE_URL` from `created_urls[0].url` (empty string if missing) AND `$rationale` from the top-level `rationale` field (empty string if missing). If the agent's return YAML contains `status: REFUSED`, the caller emits one explicit stderr line — parameterised on the agent's actual `rationale` so all four REFUSED classes (`input-malformed`, `rate-limit-budget-insufficient`, `secret-scan-lib-unavailable`, `aggregates-empty`) surface accurately — and proceeds to actions 2 + 3 with `CI_REFUSED_ISSUE_URL=""` (the halt prose still emits; the audit record still fires; the issue URL slot is just empty). The literal `warning:` text shape is the contract — the operator searches their run logs for the `warning: findings-to-issues dispatch REFUSED` prefix:
 
           ```
-          warning: findings-to-issues dispatch REFUSED — synthetic aggregate input-malformed; CI-REFUSED issue NOT filed (halt prose + audit will still emit)
+          warning: findings-to-issues dispatch REFUSED — rationale: $rationale; CI-REFUSED issue NOT filed (halt prose + audit will still emit)
           ```
 
        2. **Emit user-visible halt prose** (stderr, regardless of `TURBO` — mirrors the `billing_quota` / `platform_outage` 6c.6 HALT shape):
