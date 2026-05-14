@@ -1723,6 +1723,13 @@ else
   fail "M86.7 — could not locate ## Common Mistakes section (CM_START=$CM_START CM_END=$CM_END)"
 fi
 
+# M86.8 — AUDIT_EVENT_ENUM declares audit-json-phase2_5-parse-failure (#116 / O1)
+if grep -E '^\| `AUDIT_EVENT_ENUM`' "$SKILL_FILE" | grep -q '`audit-json-phase2_5-parse-failure`'; then
+  pass "M86.8 — AUDIT_EVENT_ENUM row contains audit-json-phase2_5-parse-failure literal (#116 / RFC 0002 O1)"
+else
+  fail "M86.8 — AUDIT_EVENT_ENUM MUST declare audit-json-phase2_5-parse-failure (#116 spec D8; constraints [hard])"
+fi
+
 echo
 echo "== M87: Three /merge override flags declared in both commands/merge.md and merge-pipeline/SKILL.md =="
 
