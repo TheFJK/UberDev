@@ -676,21 +676,34 @@ After the final aggregation table renders, evaluate the trust-trail predicate. R
 GREEN  := (Phase 1 verdict == "APPROVE")
         AND (Phase 2 status ∈ {"ran/APPROVE", "skipped"})
         AND (Phase 2.5 by_severity.blocker == 0)                    [RFC 0002 §3.4]
+        AND (Phase 2.5 by_severity.critical == 0)                   [RFC 0002 §3.4 — disambiguates against YELLOW]
         AND (Phase 2.5 halted == false)                             [RFC 0002 §3.4]
         AND (Phase 3 outcome ∈ {"green", "green_after_fix", "skipped_no_checks"})
 
-YELLOW := all GREEN preconditions satisfied
-        AND (Phase 2.5 by_severity.critical > 0)                    [RFC 0002 §3.4]
+YELLOW := (Phase 1 verdict == "APPROVE")
+        AND (Phase 2 status ∈ {"ran/APPROVE", "skipped"})
+        AND (Phase 2.5 by_severity.blocker == 0)                    [no blocker; non-zero critical is the YELLOW signal]
+        AND (Phase 2.5 halted == false)
+        AND (Phase 3 outcome ∈ {"green", "green_after_fix", "skipped_no_checks"})
+        AND (Phase 2.5 by_severity.critical > 0)                    [RFC 0002 §3.4 — required for YELLOW]
 
 RED    := NOT GREEN AND NOT YELLOW
 
 OVERRIDE_GREEN := PHASE2_5_HALT_CHOICE == "override"                [RFC 0002 §3.5 — interactive opt-in only]
-                AND would_have_been_RED_due_to_phase2_5_only        (rationale: the override flag is allowed
-                                                                     to suppress RED ONLY when phase2_5 is the
-                                                                     cause — never when Phase 1/2/3 also fail.
-                                                                     This is the "/merge will require
-                                                                     --i-know-what-im-doing" trail.)
+                AND would_have_been_RED_due_to_phase2_5_only
+
+# Concrete definition of `would_have_been_RED_due_to_phase2_5_only`:
+#   (Phase 1 verdict == "APPROVE")
+#   AND (Phase 2 status ∈ {"ran/APPROVE", "skipped"})
+#   AND (Phase 3 outcome ∈ {"green", "green_after_fix", "skipped_no_checks"})
+#   AND (Phase 2.5 halted == true OR Phase 2.5 by_severity.blocker > 0)
+#
+# Rationale: the override flag is allowed to suppress RED ONLY when phase2_5 is
+# the SOLE cause — never when Phase 1/2/3 also fail. This is the
+# "/merge will require --i-know-what-im-doing" trail.
 ```
+
+The GREEN and YELLOW predicates are now syntactically mutually exclusive (GREEN explicitly requires `critical == 0`; YELLOW explicitly requires `critical > 0`). A run cannot satisfy both. The `case "$TRUST_TRAIL_STATE"` block in the State Assignment step above (artifact 1) deterministically picks one based on the cardinality of `BY_SEVERITY_CRITICAL`.
 
 The Phase 2.5 conjuncts (`by_severity.blocker == 0` AND `halted == false`) are **predicate-level breaking** (CHANGELOG `### Changed` callout in v0.26.0). A previously-green `/review-pr` run that filed blocker issues via `findings-to-issues` (PR #112) now correctly gates the trust-trail anchor RED. The Phase 3 conjunct preserves the v0.21.0 break (red CI gates GREEN). The audit JSON gains `phases.phase2_5` (additive; legacy audit JSON without this block is treated as STALE by `trust-trail-evaluator` per RFC 0002 §3.6.4).
 
@@ -705,6 +718,44 @@ The Phase 2.5 conjuncts (`by_severity.blocker == 0` AND `halted == false`) are *
 The remainder of this section describes the GREEN/YELLOW emission shape (RED skips the entire artifact triplet — see exit-code contract):
 
 1. **Trust-trail-anchor commit** — emit ONE empty commit at HEAD whose body carries the trailer pointing at its parent. The parent SHA — captured **before** the anchor commit — is the load-bearing trust artifact for `/merge` Phase 1.4 trust resolution (see `skills/merge-pipeline/SKILL.md` Constants `REVIEW_PR_TRAILER_PREFIX`):
+
+   **State assignment (RFC 0002 §3.4 — must run BEFORE the three case statements below).** Compute `TRUST_TRAIL_STATE` from the predicate; the three downstream case statements in artifacts 1 and 2 read this single source-of-truth variable:
+
+   ```bash
+   # Evaluate the GREEN predicate first; YELLOW is a strict sub-case
+   # ("all GREEN preconditions met AND critical>0"); RED is everything else.
+   # OVERRIDE_GREEN flips RED→GREEN when PHASE2_5_HALT_CHOICE == "override"
+   # AND phase2_5 was the SOLE cause of the otherwise-GREEN-preconditions failing.
+   would_be_green_without_phase2_5=false
+   if [ "$PHASE1_VERDICT" = "APPROVE" ] \
+      && { [ "$PHASE2_STATUS" = "ran/APPROVE" ] || [ "$PHASE2_STATUS" = "skipped" ]; } \
+      && { [ "$PHASE3_OUTCOME" = "green" ] || [ "$PHASE3_OUTCOME" = "green_after_fix" ] || [ "$PHASE3_OUTCOME" = "skipped_no_checks" ]; }; then
+     would_be_green_without_phase2_5=true
+   fi
+
+   if   $would_be_green_without_phase2_5 \
+        && [ "${PHASE2_5_HALTED:-false}" = "false" ] \
+        && [ "${BY_SEVERITY_BLOCKER:-0}" = "0" ] \
+        && [ "${BY_SEVERITY_CRITICAL:-0}" = "0" ]; then
+     TRUST_TRAIL_STATE=GREEN
+   elif $would_be_green_without_phase2_5 \
+        && [ "${PHASE2_5_HALTED:-false}" = "false" ] \
+        && [ "${BY_SEVERITY_BLOCKER:-0}" = "0" ] \
+        && [ "${BY_SEVERITY_CRITICAL:-0}" -gt 0 ]; then
+     TRUST_TRAIL_STATE=YELLOW
+   elif $would_be_green_without_phase2_5 \
+        && [ "${PHASE2_5_HALT_CHOICE:-}" = "override" ]; then
+     # OVERRIDE_GREEN: operator selected emit-GREEN-on-blocker-deferred AND
+     # phase2_5 was the sole cause of RED (all other phases satisfy GREEN).
+     # `/merge` requires --i-know-what-im-doing to land this trail.
+     TRUST_TRAIL_STATE=GREEN
+     OVERRIDE_REASON="user-selected-emit-green-on-blocker-deferred"
+   else
+     TRUST_TRAIL_STATE=RED
+   fi
+   ```
+
+   Audit-trail invariant: `OVERRIDE_REASON` is set ONLY by the OVERRIDE_GREEN branch above; all other branches leave it as `null` (the audit JSON `phases.phase2_5.override_reason` field defaults to `null`). This makes the override discoverable downstream by `/merge`'s `trust-trail-evaluator` per RFC 0002 §3.6.
 
    **Trailer suffix selection (RFC 0002 §3.4):**
 
@@ -860,7 +911,7 @@ See `skills/merge-pipeline/SKILL.md` Constants `RUN_ID_REGEX`. If the regex matc
 | Exit code | Condition |
 |-----------|-----------|
 | `0` | GREEN OR YELLOW OR OVERRIDE_GREEN — Phase 1 verdict == `APPROVE` AND Phase 2 status ∈ {`ran/APPROVE`, `skipped`} AND Phase 3 outcome ∈ {`green`, `green_after_fix`, `skipped_no_checks`} AND (Phase 2.5 halted == false OR Phase 2.5 halt was overridden) |
-| `1` | Phase 1 verdict ∈ {`REJECT`, `REVISIONS_REQUIRED`} (regardless of Phase 2) OR **Phase 3 outcome ∈ {`halted`, `loop_cap_exhausted`}** OR **Phase 2.5 halted == true AND PHASE2_5_HALT_CHOICE ∈ {skip, spawn_solve}** (RFC 0002 §3.4) |
+| `1` | Phase 1 verdict ∈ {`REJECT`, `REVISIONS_REQUIRED`} (regardless of Phase 2) OR **Phase 3 outcome ∈ {`halted`, `loop_cap_exhausted`}** OR **Phase 2.5 halted == true AND PHASE2_5_HALT_CHOICE ∈ {solve_suggestion, skip}** (RFC 0002 §3.4 — `override` takes the OVERRIDE_GREEN path and exits 0) |
 | `2` | Phase 2 status == `blocked` (fanout crash, agent error, aggregator failure, artifact-emission failure) OR Phase 2.5 status == `blocked` (agent return YAML parse failure) |
 
 Exit code `2` is a **behavioral break** from the previous always-exit-0 contract. Callers that scripted `/review-pr` against the old "always exits successfully" prose must either ignore the exit code (preserve old behavior) or branch on it (use new behavior). The new contract surfaces silent reviewer-crash failures that the trust signal exists to eliminate. Documented in CHANGELOG.

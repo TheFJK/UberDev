@@ -54,11 +54,20 @@ echo "### Suite 1: Parser (deferred-critical extraction)"
 # assertion against the agent .md, NOT a runtime call — the agent runtime is
 # dispatched by /review-pr; here we assert that the parser logic is present.
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
-  'is_deferred_critical' 'P1 agent defines is_deferred_critical helper'
+  'route_by_severity' 'P1 agent defines route_by_severity helper (renamed from is_deferred_critical in RFC 0002 §3.3.1)'
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
   'blocker|critical' 'P2 helper enumerates blocker|critical severities'
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
-  'disposition.*!=.*APPLIED' 'P3 helper excludes disposition==APPLIED'
+  'disposition.*=.*APPLIED|APPLIED.*disposition' 'P3 helper excludes disposition==APPLIED (RFC 0002: `[ "$disposition" = "APPLIED" ] && return 1`)'
+# P4 (RFC 0002 §3.1) — three-tier output (BLOCKER/CRITICAL/MAJOR) replaces the
+# pre-RFC-0002 binary deferred-critical/no-issue split. Locks the tier enum
+# against future drift.
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'tier="BLOCKER"' 'P4 route_by_severity emits BLOCKER tier on severity=blocker'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'tier="CRITICAL"' 'P5 route_by_severity emits CRITICAL tier on severity=critical'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'tier="MAJOR"' 'P6 route_by_severity emits MAJOR tier on severity=important|major'
 
 ### Suite 2: Dedupe-fingerprint ----------
 echo
