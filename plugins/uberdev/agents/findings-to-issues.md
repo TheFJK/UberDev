@@ -109,27 +109,34 @@ Explicit forbidden patterns:
         BLOCKER|CRITICAL)
           # Resolve PR author once per run (cache the lookup outside the loop in
           # an enclosing variable PR_AUTHOR; this block reads the cached value).
-            if [ -z "${PR_AUTHOR:-}" ]; then
-              if [[ ! "$pr_number" =~ ^[0-9]+$ ]]; then
-                # O2 — argv-integer regex guard (security Note A). Empty pr_number
-                # OR non-numeric → skip the gh lookup; carry the failure into the
-                # return contract.
+          if [ -z "${PR_AUTHOR:-}" ]; then
+            if [[ ! "$pr_number" =~ ^[0-9]+$ ]]; then
+              # O2 — argv-integer regex guard (security Note A). Empty pr_number
+              # OR non-numeric → skip the gh lookup; carry the failure into the
+              # return contract.
+              PR_AUTHOR=""
+              author_lookup_failed=true
+            else
+              # Capture stderr alongside stdout; the diagnostic is part of the
+              # return contract when rc != 0.
+              PR_AUTHOR_OUT=$(gh pr view "$pr_number" --json author --jq .author.login 2>&1)
+              rc=$?
+              if [ "$rc" -ne 0 ]; then
+                # Truncate the diagnostic to 200 chars (security Note B parity
+                # with the Step 8f classifier) so a malicious / unbounded
+                # stderr cannot blow up the log line. Then surface to stderr
+                # so the operator sees WHY the author lookup failed (auth,
+                # network, rate-limit) instead of silently @mention-less file.
+                TRUNCATED_OUTPUT=$(printf '%s' "$PR_AUTHOR_OUT" | head -c 200)
+                log_stderr "gh pr view rc=$rc for PR #$pr_number: $TRUNCATED_OUTPUT"
                 PR_AUTHOR=""
                 author_lookup_failed=true
               else
-                # Capture stderr alongside stdout; the diagnostic is part of the
-                # return contract when rc != 0.
-                PR_AUTHOR_OUT=$(gh pr view "$pr_number" --json author --jq .author.login 2>&1)
-                rc=$?
-                if [ "$rc" -ne 0 ]; then
-                  PR_AUTHOR=""
-                  author_lookup_failed=true
-                else
-                  PR_AUTHOR="$PR_AUTHOR_OUT"
-                  author_lookup_failed=false
-                fi
+                PR_AUTHOR="$PR_AUTHOR_OUT"
+                author_lookup_failed=false
               fi
             fi
+          fi
           if [ -n "$PR_AUTHOR" ]; then
             mention_line="@${PR_AUTHOR} — review-pr Phase 2.5 flagged a ${row_tier,,} finding on PR #${pr_number}."
             assignee_args=(--assignee "@${PR_AUTHOR}")
@@ -159,10 +166,10 @@ Explicit forbidden patterns:
 
       The `assignee_args` array is passed to `gh issue create` as `"${assignee_args[@]}"` (empty array = no `--assignee` flag — `gh` does not error on omitted flags). Per-row tier carries through; never assume a run is single-tier.
 
-   d. **State branching:**
-      - `state == "open"`: build comment body (see Comment body shape below); pipe through `uberdev_run_secret_scan_stdin` — on non-zero exit append to `blocked_by_dedupe[]` with `reason: "secret-scan-hit"` and continue; otherwise `gh issue comment "$number" --body-file -` from the sanitised tempfile. Append `{url, file, fingerprint}` to `commented_urls[]`.
+   d. **State branching:** every `gh issue create` / `gh issue comment` invocation MUST capture combined stderr+stdout into `CREATE_OUTPUT` and the exit code into `rc`. Step 8f's classifier reads both as preconditions — without this capture the truncation + transient/permanent classification in 8f silently classifies every failure as permanent. Shape: `CREATE_OUTPUT=$(gh issue create ... 2>&1); rc=$?` (or the analogous form for `gh issue comment`).
+      - `state == "open"`: build comment body (see Comment body shape below); pipe through `uberdev_run_secret_scan_stdin` — on non-zero exit append to `blocked_by_dedupe[]` with `reason: "secret-scan-hit"` and continue; otherwise `CREATE_OUTPUT=$(gh issue comment "$number" --body-file - 2>&1); rc=$?` from the sanitised tempfile. Append `{url, file, fingerprint}` to `commented_urls[]`.
       - `state == "closed"`: skip (user resolved). Append `{url, file, fingerprint}` to `skipped_closed[]`.
-      - No match: build issue body (see Issue body shape below — tier-aware via `mention_line` / `backref_line` from c.5); secret-scan; `gh issue create --label review-pr-finding "${assignee_args[@]}" --title "$AUTO_TITLE" --body-file -` from the sanitised tempfile (title format: `[finding] $file_path:$line — $summary_first_60_chars`). Append `{url, file, fingerprint, tier: $row_tier}` to `created_urls[]`.
+      - No match: build issue body (see Issue body shape below — tier-aware via `mention_line` / `backref_line` from c.5); secret-scan; `CREATE_OUTPUT=$(gh issue create --label review-pr-finding "${assignee_args[@]}" --title "$AUTO_TITLE" --body-file - 2>&1); rc=$?` from the sanitised tempfile (title format: `[finding] $file_path:$line — $summary_first_60_chars`). Append `{url, file, fingerprint, tier: $row_tier}` to `created_urls[]`.
 
    e. Refusal carve-out: if the finding's `summary` (post-normalisation) contains the literal string `<!-- uberdev:review-pr-finding fingerprint=`, append `{file: $file_path:$line, reason: "finding-contains-fingerprint-marker"}` to `blocked_by_dedupe[]` and skip — prevents attacker-controlled finding text from collapsing into a fake existing-issue match.
 
@@ -180,7 +187,7 @@ Explicit forbidden patterns:
             is_transient=true
           fi
           blocked_by_dedupe+=("{file: \"$file_path:$line\", reason: \"gh issue write rc=$rc — $TRUNCATED_OUTPUT\", is_transient: $is_transient}")
-          log_stderr "gh issue write rc=$rc for fingerprint=$FP (is_transient=$is_transient)"
+          log_stderr "gh issue write rc=$rc for fingerprint=$FP (is_transient=$is_transient): $TRUNCATED_OUTPUT"
           continue
         fi
       ```
