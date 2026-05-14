@@ -451,7 +451,14 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
           )
           ```
 
-          where `<tmp-synthetic-aggregate.md>` is a freshly-created `mktemp` file whose first 128 bytes contain the literal envelope marker shown above (source attribute `ci-refused-synthetic`). After dispatch returns, `CI_REFUSED_ISSUE_URL="$(jq -r '.created_urls[0].url // empty' <(printf '%s' "$FINDINGS_TO_ISSUES_RETURN"))"`. If the dispatch returns `status: REFUSED` (input-malformed) the caller emits one stderr line and proceeds to actions 2 + 3 with `CI_REFUSED_ISSUE_URL=""` (the halt prose still emits; the audit record still fires; the issue URL slot is just empty).
+          where `<tmp-synthetic-aggregate.md>` is a freshly-created `mktemp` file whose first 128 bytes contain the literal envelope marker shown above (source attribute `ci-refused-synthetic`). After dispatch returns, `CI_REFUSED_ISSUE_URL="$(jq -r '.created_urls[0].url // empty' <(printf '%s' "$FINDINGS_TO_ISSUES_RETURN"))"`. If the dispatch returns `status: REFUSED` (input-malformed) the caller emits one explicit stderr line and proceeds to actions 2 + 3 with `CI_REFUSED_ISSUE_URL=""` (the halt prose still emits; the audit record still fires; the issue URL slot is just empty). The deterministic shell (the literal `warning:` text is the contract — the operator searches their run logs for it):
+
+          ```
+          if [[ "$FINDINGS_TO_ISSUES_STATUS" == "REFUSED" ]]; then
+            echo "warning: findings-to-issues dispatch REFUSED — synthetic aggregate input-malformed; CI-REFUSED issue NOT filed (halt prose + audit will still emit)" >&2
+            CI_REFUSED_ISSUE_URL=""
+          fi
+          ```
 
        2. **Emit user-visible halt prose** (stderr, regardless of `TURBO` — mirrors the `billing_quota` / `platform_outage` 6c.6 HALT shape):
 
