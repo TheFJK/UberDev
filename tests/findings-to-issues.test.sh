@@ -11,6 +11,20 @@ SIMPLIFY_MD="$REPO_ROOT/plugins/uberdev/commands/simplify.md"
 
 PASS=0; FAIL=0
 source "$THIS_DIR/_lib_assert_structural.sh"
+
+# Local assert_no_grep — the shared helpers in _lib_assert_structural.sh do not
+# include this negation form; match the inline shape used by sibling tests
+# (tests/simplify.test.sh, tests/review-pr-phase3-ci.test.sh).
+assert_no_grep() {
+  local file="$1" pattern="$2" desc="$3"
+  if grep -qE -e "$pattern" "$file"; then
+    echo "  FAIL  $desc"; echo "        file: $file"; echo "        pattern (must NOT appear): $pattern"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
+  fi
+}
+
 echo "## findings-to-issues fixture suites"
 
 # ---------- gh-command mocks (inline functions) ----------
@@ -185,6 +199,56 @@ if grep -qE 'finding-contains-fingerprint-marker' "$AGENT_MD"; then
 else
   echo "  FAIL  B7 finding containing the marker is refused"; FAIL=$((FAIL+1))
 fi
+
+### Suite 10: RFC 0002 return-contract + overflow guard locks ----------
+echo
+echo "### Suite 10: RFC 0002 return-contract + overflow guard locks (T3, T6)"
+
+# T3.1 — by_severity block in return contract
+assert_in_section "$AGENT_MD" '^## Return contract' '^## Refusal triggers' \
+  'by_severity' 'T3.1 — return contract documents by_severity block (RFC 0002 §3.3.3)'
+
+# T3.2 — halted field with true|false values
+assert_in_section "$AGENT_MD" '^## Return contract' '^## Refusal triggers' \
+  'halted:.*true|false|halted: bool|halted.*true.*false' \
+  'T3.2 — return contract documents halted: bool (RFC 0002 §3.3.5; load-bearing)'
+
+# T3.3 — halted_due_to_overflow field
+assert_in_section "$AGENT_MD" '^## Return contract' '^## Refusal triggers' \
+  'halted_due_to_overflow' 'T3.3 — return contract documents halted_due_to_overflow (RFC 0002 §3.3.4)'
+
+# T3.4 — halt semantic rule ("halted is set only when ... iff ...")
+assert_in_section "$AGENT_MD" '^## Return contract' '^## Refusal triggers' \
+  'halted.*set only when|halted.*iff|set only when.*halted' \
+  'T3.4 — halt semantic rule documented (RFC 0002 §3.3.5)'
+
+# T3.5 — per-URL tier field on created_urls / commented_urls / skipped_closed
+# (RFC 0002 §3.3.3 — tier annotation on every URL row).
+assert_in_section "$AGENT_MD" '^## Return contract' '^## Refusal triggers' \
+  'tier: "BLOCKER"|tier: "CRITICAL"|tier: "MAJOR"|tier:.*BLOCKER|CRITICAL|MAJOR' \
+  'T3.5 — per-URL tier annotation on created_urls / commented_urls / skipped_closed (RFC 0002 §3.3.3)'
+
+# T3-tombstone — the old "NEVER causes /review-pr or /simplify to exit
+# non-zero" clause MUST be ABSENT (constraints [hard]: RFC 0002 §3.3.5
+# intentionally inverts the pre-RFC contract).
+assert_no_grep "$AGENT_MD" \
+  'NEVER causes /review-pr or /simplify to exit non-zero' \
+  'T3-tombstone — pre-RFC-0002 NEVER-halts clause is removed (RFC 0002 §3.3.5)'
+
+# T6.1 — process step 6 documents the broken-feature overflow guard
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'Broken-feature overflow guard|broken-feature overflow|broken_feature_overflow' \
+  'T6.1 — Process step 6 documents the broken-feature overflow guard (RFC 0002 §3.3.4)'
+
+# T6.2 — guard fires when a truncated row is BLOCKER or CRITICAL tier
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'truncated.*row.*BLOCKER|truncated.*row.*CRITICAL|row_tier.*BLOCKER.*CRITICAL|BLOCKER.*CRITICAL.*truncated' \
+  'T6.2 — overflow guard fires on truncated BLOCKER/CRITICAL tier rows (constraints [hard])'
+
+# T6.3 — halted_due_to_overflow == true implies halted == true
+assert_in_section "$AGENT_MD" '^## Return contract' '^## Refusal triggers' \
+  'halted_due_to_overflow.*true.*halted.*true|halted=true.*halted_due_to_overflow|halted_due_to_overflow == true' \
+  'T6.3 — halted_due_to_overflow == true implies halted == true (RFC 0002 §3.3.5)'
 
 echo
 echo "## Summary"

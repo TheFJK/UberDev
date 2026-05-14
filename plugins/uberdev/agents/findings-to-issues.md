@@ -159,7 +159,7 @@ Explicit forbidden patterns:
    - `by_severity.blocker > 0` (any blocker-tier row was filed or commented this run), OR
    - `halted_due_to_overflow == true` (Step 6 broken-feature overflow guard fired — `overflow_count > 0` AND at least one truncated row was tier BLOCKER or CRITICAL).
 
-   Otherwise `halted: false`. The `halted` value is the load-bearing signal the parent `/uberdev:review-pr` (Step 7) and `/uberdev:simplify` (Phase 3.5) read to decide whether to emit the RED trust-trail outcome and trigger AskUserQuestion. **This intentionally inverts the pre-RFC-0002 contract** (`findings-to-issues.md:187` prior wording: "NEVER causes /review-pr or /simplify to exit non-zero"); see RFC 0002 §3.3.5 for the rationale.
+   Otherwise `halted: false`. The `halted` value is the load-bearing signal the parent `/uberdev:review-pr` (Step 7) and `/uberdev:simplify` (Phase 3.5) read to decide whether to emit the RED trust-trail outcome and trigger AskUserQuestion. **This intentionally inverts the pre-v0.26.0 non-blocking contract** (the prior never-halt rule that kept this sub-phase strictly advisory); see RFC 0002 §3.3.5 for the rationale.
 
 ## Issue body shape (sanitised)
 
@@ -238,6 +238,7 @@ Empty arrays are emitted as `[]`. `rationale` is empty string `""` on non-REFUSE
 - `by_severity.{blocker|critical|major}` — count of rows actually written this run (`len(created_urls) + len(commented_urls)` per tier; excludes `skipped_closed` and `blocked_by_dedupe`).
 - `halted_due_to_overflow` — true iff Step 6's broken-feature guard fired (some truncated row was BLOCKER or CRITICAL tier).
 - `halted` — load-bearing signal for the parent's GREEN/YELLOW/RED predicate; set per Step 9 rule.
+- **Implication**: `halted_due_to_overflow == true` implies `halted == true` — the overflow guard never fires in isolation; it always trips the higher-level halt. (RFC 0002 §3.3.5.)
 
 ## Refusal triggers
 
