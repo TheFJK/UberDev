@@ -266,7 +266,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
     })
     ```
 
-    **ToolSearch fail-fast (concretized — O3 / #116).** When `ToolSearch` fails to load `AskUserQuestion`, `/review-pr` aborts with stderr error — **NEVER silently auto-pick** (mirrors `orchestrator/SKILL.md:190-193` and 6c.6 HALT). The deterministic shell:
+    **ToolSearch fail-fast.** When `ToolSearch` fails to load `AskUserQuestion`, `/review-pr` aborts with stderr error — **NEVER silently auto-pick** (mirrors `orchestrator/SKILL.md:190-193` and 6c.6 HALT). The deterministic shell:
 
     ```
     if ! ToolSearch("select:AskUserQuestion") >/dev/null 2>&1; then
@@ -431,7 +431,9 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
        Three actions in order:
 
-       1. **File the failing test as a CRITICAL-tier GH issue via `findings-to-issues` dispatch.** (RFC 0002 follow-up #116 / O5 — replaces the previous inline `gh issue create` with a `Task(subagent_type: uberdev:findings-to-issues)` dispatch that funnels CI-REFUSED issue creation through the same agent that handles all other deferred-finding issue creation; eliminates the prose-drift risk between the two issue-creation sites.)
+       1. **File the failing test as a CRITICAL-tier GH issue via `findings-to-issues` dispatch.**
+
+          This replaces the previous inline `gh issue create` with a `Task(subagent_type: uberdev:findings-to-issues)` dispatch that funnels CI-REFUSED issue creation through the same agent that handles all other deferred-finding issue creation; eliminates the prose-drift risk between the two issue-creation sites.
 
           Construct a synthetic single-row aggregate wrapped in the `<external-untrusted-input source="ci-refused-synthetic">…</external-untrusted-input>` envelope (the receiving agent's Step 1 input validation recognises this source attribute — see `agents/findings-to-issues.md` Step 1 accepted-source allow-list). The aggregate carries one finding-row with `severity: critical`, `tier: CRITICAL`, `failure_class: <from-ci-code-fixer-return>`, `check_name: <from-ci-code-fixer-return>`, `signal_anchor: <from-ci-code-fixer-return>`, and `rationale: <from-ci-code-fixer-return>`. Title is built downstream by the agent using its existing CRITICAL-tier shape (`[finding] $file_path:$line — $summary`); labels and `--assignee` flag come from the agent's tier-aware bindings (`--label review-pr-finding`, `--assignee @<pr-author>`). The agent's return YAML's `created_urls[0].url` is captured into `CI_REFUSED_ISSUE_URL`.
 
@@ -451,7 +453,13 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
           )
           ```
 
-          where `<tmp-synthetic-aggregate.md>` is a freshly-created `mktemp` file whose first 128 bytes contain the literal envelope marker shown above (source attribute `ci-refused-synthetic`). After dispatch returns, the caller captures TWO fields from the agent's YAML return: `CI_REFUSED_ISSUE_URL` from `created_urls[0].url` (empty string if missing) AND `$rationale` from the top-level `rationale` field (empty string if missing). If the agent's return YAML contains `status: REFUSED`, the caller emits one explicit stderr line — parameterised on the agent's actual `rationale` so all four REFUSED classes (`input-malformed`, `rate-limit-budget-insufficient`, `secret-scan-lib-unavailable`, `aggregates-empty`) surface accurately — and proceeds to actions 2 + 3 with `CI_REFUSED_ISSUE_URL=""` (the halt prose still emits; the audit record still fires; the issue URL slot is just empty). The literal `warning:` text shape is the contract — the operator searches their run logs for the `warning: findings-to-issues dispatch REFUSED` prefix:
+          The `<tmp-synthetic-aggregate.md>` slot is a freshly-created `mktemp` file whose first 128 bytes contain the literal envelope marker shown above (source attribute `ci-refused-synthetic`).
+
+          After dispatch returns, the caller captures TWO fields from the agent's YAML return: `CI_REFUSED_ISSUE_URL` from `created_urls[0].url` (empty string if missing) AND `$rationale` from the top-level `rationale` field (empty string if missing).
+
+          If the agent's return YAML contains `status: REFUSED`, the caller emits one explicit stderr line — parameterised on the agent's actual `rationale` so all four REFUSED classes (`input-malformed`, `rate-limit-budget-insufficient`, `secret-scan-lib-unavailable`, `aggregates-empty`) surface accurately — and proceeds to actions 2 + 3 with `CI_REFUSED_ISSUE_URL=""` (the halt prose still emits; the audit record still fires; the issue URL slot is just empty).
+
+          The literal `warning:` text shape is the contract — the operator searches their run logs for the `warning: findings-to-issues dispatch REFUSED` prefix:
 
           ```
           warning: findings-to-issues dispatch REFUSED — rationale: $rationale; CI-REFUSED issue NOT filed (halt prose + audit will still emit)
@@ -915,7 +923,7 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
 }
 ```
 
-**`phases.phase2_5` block (RFC 0002 §3.4)** — present on every run where the Phase 2.5 sub-phase was reachable (i.e., Phase 1 + Phase 2 didn't crash before Step 6b). `status: "skipped"` when `DEFER_ISSUES_EFFECTIVE=0` (CLI flag or config disabled the sub-phase); `status: "blocked"` when the agent return YAML failed to parse; `status: "ran"` otherwise. The `halted`, `by_severity`, and `override_reason` fields are the load-bearing inputs for `/merge`'s `trust-trail-evaluator` per RFC 0002 §3.6. Legacy audit JSON (pre-RFC-0002) without this block → trust-trail-evaluator emits STALE, prompting `/review-pr` re-run.
+**`phases.phase2_5` block (RFC 0002 §3.4)** — present on every run where the Phase 2.5 sub-phase was reachable (i.e., Phase 1 + Phase 2 didn't crash before Step 6b). `status: "skipped"` when `DEFER_ISSUES_EFFECTIVE=0` (CLI flag or config disabled the sub-phase); `status: "blocked"` when the agent return YAML failed to parse; `status: "ran"` otherwise. The `halted`, `by_severity`, and `override_reason` fields are the load-bearing inputs for `/merge`'s `trust-trail-evaluator` per RFC 0002 §3.6. Legacy audit JSON (pre-v0.26.0) without this block → trust-trail-evaluator emits STALE, prompting `/review-pr` re-run.
 
 **`trust_trail_state` field (RFC 0002 §3.4)** — top-level GREEN/YELLOW/RED discriminator, redundant with the `phases.*` blocks but exposed at the JSON root for faster downstream gating (`/merge` can branch on a single string instead of recomputing the predicate from each phase block).
 

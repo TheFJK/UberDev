@@ -13,7 +13,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Added (observability)
 
-- **O1 — `audit_json_phase2_5_parse_failure` audit event.** Distinguishes "phase2_5 block absent in legacy audit" (no event, fail-open) from "phase2_5 block present but malformed" (emit new event with `data.jq_error` truncated to 200 chars and `data.audit_path`). Implementation uses a version-agnostic two-step probe (`jq empty` for parse detection, then `jq -e '.phases.phase2_5 // empty'` for absence detection) so behaviour does not depend on which jq release is installed (jq 1.6/1.7/1.8 exit codes differ for parse vs absent results). Extends `AUDIT_EVENT_ENUM` in `skills/merge-pipeline/SKILL.md` (+ M86.8 containment assertion in `tests/merge.test.sh`). Fail-open behaviour preserved — parse failure is auditable but does NOT halt the run.
+- **O1 — `audit_json_phase2_5_parse_failure` audit event.** Distinguishes legacy audit (no event, fail-open) from malformed audit JSON (emits `audit_json_phase2_5_parse_failure` with truncated `data.jq_error` and `data.audit_path`). Extends `AUDIT_EVENT_ENUM` in `skills/merge-pipeline/SKILL.md` (+ M86.8 containment assertion in `tests/merge.test.sh`). Fail-open preserved — parse failure is auditable but does NOT halt.
 - **O2 — `author_lookup_failed` return field on `findings-to-issues`.** Captures `gh pr view <N> --json author` exit-code failure into a typed boolean return field. Adds integer regex guard (`[[ "$pr_number" =~ ^[0-9]+$ ]]`) before the `gh` call (security defence-in-depth).
 - **O3 — Explicit-bash ToolSearch fail-fast in `review-pr.md` Step 6b.1.** Concretizes the prior prose contract ("If `ToolSearch` fails, `/review-pr` aborts — NEVER silently auto-pick") into deterministic shell that emits the audit event via the project's pseudo-shell form `audit halt_tool_unavailable data.tool="AskUserQuestion"` and exits 1. Mirrors the existing 6c.6 HALT pattern. The `halt_tool_unavailable` event joins `AUDIT_EVENT_ENUM` alongside `audit_json_phase2_5_parse_failure` (+ M86.9 grep assertion in `tests/merge.test.sh`).
 - **O4 — `is_transient` field on `blocked_by_dedupe[]` entries.** Splits `gh issue create` write failures into transient (rc=429, HTTP 5xx, rate limit, secondary rate) vs permanent (everything else; conservative default). 200-char stderr truncation preserved (security Note B).
@@ -22,8 +22,6 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 ### Notes
 
 - **T8 (synthetic-PR fixture-runner integration test) and T9 (AskUserQuestion halt-choice integration test) remain deferred to v0.27 per issue #116.** Both require a 350–560-line fixture-runner harness that does not yet exist; tracked in #116 surfacing in this release's PR description as a known gap.
-- **Scope.** Purely additive: no public-API removal, no enum-member removal, no breaking-change tag. The new `AUDIT_EVENT_ENUM` members (`audit_json_phase2_5_parse_failure`, `halt_tool_unavailable`) are additive observability and do not affect existing consumers. Naming follows the existing snake_case convention shared by all 50+ enum members.
-- **`ci-refused-synthetic` source attribute is new** in the `findings-to-issues` accepted-source allow-list (`agents/findings-to-issues.md` Step 1) alongside `post-impl-review-aggregate` and `simplify-aggregate`. The closed allow-list now has 3 members.
 
 ## [0.26.0] - 2026-05-14
 

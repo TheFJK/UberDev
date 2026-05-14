@@ -373,16 +373,9 @@ c. The extracted `<trailer-sha>` is delegated to the `trust-trail-evaluator` age
 
    PHASE2_5_PRESENT=false; PHASE2_5_HALTED=false; PHASE2_5_BLOCKER_COUNT=0; PHASE2_5_CRITICAL_COUNT=0; PHASE2_5_OVERRIDE_REASON=null
    if [ -n "$AUDIT_JSON_PATH" ] && [ -r "$AUDIT_JSON_PATH" ]; then
-     # Version-agnostic parse: jq exit-code semantics differ across releases
-     # (notably jq 1.8.x returns rc=5 for parse errors and rc=4 for absent
-     # results with `-e`, while earlier versions used rc=2 / rc=1). Use a
-     # two-step parse-then-extract approach so the audit emission does not
-     # depend on which jq version is installed.
-     #
-     # Step 1: detect malformed JSON via `jq empty` (rc != 0 → parse error).
-     # Step 2: detect phase2_5 presence vs absence via `jq -e ... // empty`
-     #         on JSON we already know is well-formed (rc=0 → present;
-     #         rc != 0 → absent / legacy audit).
+     # jq 1.8.x returns rc=5 for parse errors and rc=4 for absent results with
+     # `-e`, while earlier versions used rc=2 / rc=1 — use a two-step
+     # parse-then-extract so the audit emission does not depend on jq version.
      JQ_STDERR=$(jq empty "$AUDIT_JSON_PATH" 2>&1 >/dev/null)
      JQ_RC=$?
      if [ "$JQ_RC" -ne 0 ]; then
@@ -398,10 +391,10 @@ c. The extracted `<trailer-sha>` is delegated to the `trust-trail-evaluator` age
        # JSON parses. Now check phase2_5 presence on well-formed input.
        if jq -e '.phases.phase2_5 // empty' "$AUDIT_JSON_PATH" >/dev/null 2>&1; then
          PHASE2_5_PRESENT=true
-         PHASE2_5_HALTED=$(jq -r '.phases.phase2_5.halted // false' "$AUDIT_JSON_PATH")
-         PHASE2_5_BLOCKER_COUNT=$(jq -r '.phases.phase2_5.by_severity.blocker // 0' "$AUDIT_JSON_PATH")
-         PHASE2_5_CRITICAL_COUNT=$(jq -r '.phases.phase2_5.by_severity.critical // 0' "$AUDIT_JSON_PATH")
-         PHASE2_5_OVERRIDE_REASON=$(jq -r '.phases.phase2_5.override_reason // "null"' "$AUDIT_JSON_PATH")
+         # Single jq call emits all four fields tab-separated; defaults preserved
+         # per-field (// "false", // 0, // "null") so missing fields fall back
+         # identically to the prior 4× sequential probes.
+         read -r PHASE2_5_HALTED PHASE2_5_BLOCKER_COUNT PHASE2_5_CRITICAL_COUNT PHASE2_5_OVERRIDE_REASON <<< "$(jq -r '[.phases.phase2_5.halted // "false", .phases.phase2_5.by_severity.blocker // 0, .phases.phase2_5.by_severity.critical // 0, .phases.phase2_5.override_reason // "null"] | @tsv' "$AUDIT_JSON_PATH")"
        else
          # phase2_5 block absent — legacy / pre-v0.26.0 audit. No new audit
          # event (current behaviour preserved).

@@ -86,7 +86,7 @@ assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
   'disposition.*=.*APPLIED|APPLIED.*disposition' 'P3 helper excludes disposition==APPLIED (RFC 0002: `[ "$disposition" = "APPLIED" ] && return 1`)'
 # P4 (RFC 0002 §3.1) — three-tier output (BLOCKER/CRITICAL/MAJOR) replaces the
-# pre-RFC-0002 binary deferred-critical/no-issue split. Locks the tier enum
+# pre-v0.26.0 binary deferred-critical/no-issue split. Locks the tier enum
 # against future drift.
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
   'tier="BLOCKER"' 'P4 route_by_severity emits BLOCKER tier on severity=blocker'
@@ -245,7 +245,7 @@ assert_in_section "$AGENT_MD" '^## Return contract' '^## Refusal triggers' \
 # intentionally inverts the pre-RFC contract).
 assert_no_grep "$AGENT_MD" \
   'NEVER causes /review-pr or /simplify to exit non-zero' \
-  'T3-tombstone — pre-RFC-0002 NEVER-halts clause is removed (RFC 0002 §3.3.5)'
+  'T3-tombstone — pre-v0.26.0 NEVER-halts clause is removed (RFC 0002 §3.3.5)'
 
 # T6.1 — process step 6 documents the broken-feature overflow guard
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
@@ -283,6 +283,7 @@ assert_in_section "$AGENT_MD" '^## Return contract' '^## Refusal triggers' \
 
 # O4.2 — 200-char truncation runs BEFORE is_transient classifier (security Note B)
 # Locate the truncation literal and the classifier grep; assert truncation precedes.
+# Alternation tolerates either ordering of TRUNCATED_OUTPUT and 'head -c 200' on a single line — but the truncate-precedes-classify invariant (L_TRUNC < L_CLASSIFY) is what we actually assert.
 L_TRUNC=$(grep -n 'TRUNCATED_OUTPUT.*head -c 200\|head -c 200.*TRUNCATED_OUTPUT' "$AGENT_MD" | head -n 1 | cut -d: -f1)
 L_CLASSIFY=$(grep -n 'is_transient=true\|HTTP 429.*rate limit' "$AGENT_MD" | head -n 1 | cut -d: -f1)
 if [[ -n "$L_TRUNC" && -n "$L_CLASSIFY" && "$L_TRUNC" -lt "$L_CLASSIFY" ]]; then

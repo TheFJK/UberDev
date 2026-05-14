@@ -1725,7 +1725,7 @@ fi
 
 # M86.8 — AUDIT_EVENT_ENUM declares audit_json_phase2_5_parse_failure (#116 / O1)
 # Naming convention: snake_case matches the 50+ existing enum members (review-pr finding B4).
-if grep -E '^\| `AUDIT_EVENT_ENUM`' "$SKILL_FILE" | grep -q '`audit_json_phase2_5_parse_failure`'; then
+if grep -qE '^\| `AUDIT_EVENT_ENUM`.*`audit_json_phase2_5_parse_failure`' "$SKILL_FILE"; then
   pass "M86.8 — AUDIT_EVENT_ENUM row contains audit_json_phase2_5_parse_failure literal (#116 / RFC 0002 O1 + B4 snake_case rename)"
 else
   fail "M86.8 — AUDIT_EVENT_ENUM MUST declare audit_json_phase2_5_parse_failure (#116 spec D8; constraints [hard]; B4 snake_case convention)"
@@ -1734,7 +1734,7 @@ fi
 # M86.9 — AUDIT_EVENT_ENUM declares halt_tool_unavailable (#116 / O3 + B3)
 # The O3 ToolSearch fail-fast block in commands/review-pr.md emits this event
 # on AskUserQuestion load failure; it MUST be declared in the canonical enum.
-if grep -E '^\| `AUDIT_EVENT_ENUM`' "$SKILL_FILE" | grep -q '`halt_tool_unavailable`'; then
+if grep -qE '^\| `AUDIT_EVENT_ENUM`.*`halt_tool_unavailable`' "$SKILL_FILE"; then
   pass "M86.9 — AUDIT_EVENT_ENUM row contains halt_tool_unavailable literal (#116 / RFC 0002 O3; constraints [hard])"
 else
   fail "M86.9 — AUDIT_EVENT_ENUM MUST declare halt_tool_unavailable (#116 O3; constraints [hard])"

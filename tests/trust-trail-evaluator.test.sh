@@ -2,8 +2,9 @@
 # tests/trust-trail-evaluator.test.sh — structural-grep coverage for the
 # Phase 2.5 gate added in RFC 0002 (v0.26.0). First test file for the agent.
 #
-# Mirrors tests/findings-to-issues.test.sh skeleton: set -u, set -o pipefail,
-# _lib_assert_structural.sh, PASS=0; FAIL=0, [[ $FAIL -eq 0 ]] exit gate.
+# Based on tests/findings-to-issues.test.sh skeleton (set -u, _lib_assert_structural.sh,
+# PASS=0; FAIL=0, [[ $FAIL -eq 0 ]] exit gate); adds `set -o pipefail` and a
+# file-existence preflight that the mirror target lacks.
 set -u
 set -o pipefail
 

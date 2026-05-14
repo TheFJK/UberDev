@@ -109,11 +109,13 @@ Explicit forbidden patterns:
         BLOCKER|CRITICAL)
           # Resolve PR author once per run (cache the lookup outside the loop in
           # an enclosing variable PR_AUTHOR; this block reads the cached value).
-          if [ -z "${PR_AUTHOR:-}" ]; then
+          # PR_AUTHOR_RESOLVED is the sentinel: 0=not yet attempted, 1=attempted
+          # (success OR failure). Distinguishes unset-PR_AUTHOR from
+          # failed-lookup-PR_AUTHOR so flaky auth does not retrigger N gh calls
+          # across N BLOCKER findings.
+          if [ "${PR_AUTHOR_RESOLVED:-0}" -eq 0 ]; then
             if [[ ! "$pr_number" =~ ^[0-9]+$ ]]; then
-              # O2 — argv-integer regex guard (security Note A). Empty pr_number
-              # OR non-numeric → skip the gh lookup; carry the failure into the
-              # return contract.
+              # security Note A — see Refusal triggers below.
               PR_AUTHOR=""
               author_lookup_failed=true
             else
@@ -136,6 +138,10 @@ Explicit forbidden patterns:
                 author_lookup_failed=false
               fi
             fi
+            # Mark resolution attempted regardless of success/failure so the
+            # next loop iteration skips the gh call entirely (E1 — RFC 0002
+            # follow-up #116; failed-lookup is sticky for the run).
+            PR_AUTHOR_RESOLVED=1
           fi
           if [ -n "$PR_AUTHOR" ]; then
             mention_line="@${PR_AUTHOR} — review-pr Phase 2.5 flagged a ${row_tier,,} finding on PR #${pr_number}."
@@ -176,8 +182,6 @@ Explicit forbidden patterns:
    f. Write-failure handling with transient/permanent classifier (O4 — design decision D9): if `gh issue create` or `gh issue comment` returns non-zero, capture combined stderr+stdout into `CREATE_OUTPUT`, truncate to 200 chars BEFORE the regex classifier (security Note B — bounds attacker-influenced stderr substring), then classify the failure (see bash block below for the literal trigger regex). Append the typed entry to `blocked_by_dedupe[]`, set `status: DONE_WITH_CONCERNS`, and continue to next row — NEVER retry within the same run.
 
       ```bash
-        # Capture combined stderr+stdout. Step 8d's gh issue create call has
-        # already populated CREATE_OUTPUT; reuse it here.
         if [ "$rc" -ne 0 ]; then
           TRUNCATED_OUTPUT=$(printf '%s' "$CREATE_OUTPUT" | head -c 200)
           is_transient=false
