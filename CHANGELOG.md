@@ -31,7 +31,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - **Solo-dev workflow preservation.** For the personal-TODO-queue workflow ([[user_workflow_todo_queue]]), the design intentionally preserves the "land imperfect work + file TODOs" pattern for `important` / `major` findings (silent file, no halt). The halt path is reserved for `blocker` — by definition the findings the reviewer agents consider unshippable.
 - **Rollback procedure.** Pin the marketplace to `0.25.0` in `.claude-plugin/marketplace.json` via the user-side override path; no code rollback is required server-side.
 
-
+## [0.25.0] - 2026-05-14
 
 ### Added
 
