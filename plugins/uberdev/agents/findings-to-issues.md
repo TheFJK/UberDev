@@ -35,7 +35,7 @@ Explicit forbidden patterns:
 
 ## Process
 
-1. **Validate inputs.** Verify `working_dir` resolves to an absolute path inside the current git worktree (`git -C "$working_dir" rev-parse --is-inside-work-tree`). For each non-empty `phase*_aggregate_path`, verify the file exists and its first 128 bytes contain the literal string `<external-untrusted-input source="post-impl-review-aggregate">` (or `simplify-aggregate` for phase 2). If either check fails OR both paths are empty, return `status: REFUSED` with `rationale: "input-malformed"`. Source the secret-scan library: `source "${CLAUDE_PLUGIN_ROOT}/lib/secret-scan.sh"` — refuse with `rationale: "secret-scan-lib-unavailable"` if the source returns non-zero.
+1. **Validate inputs.** Verify `working_dir` resolves to an absolute path inside the current git worktree (`git -C "$working_dir" rev-parse --is-inside-work-tree`). For each non-empty `phase*_aggregate_path`, verify the file exists and its first 128 bytes contain the literal string `<external-untrusted-input source="post-impl-review-aggregate">` (or `simplify-aggregate` for phase 2, or `ci-refused-synthetic` for the CI-REFUSED single-row dispatch path added in #116 / O5 — see `commands/review-pr.md` Step 6c.5). The accepted-source allow-list is the closed set `{post-impl-review-aggregate, simplify-aggregate, ci-refused-synthetic}`. If either check fails OR both paths are empty, return `status: REFUSED` with `rationale: "input-malformed"`. Source the secret-scan library: `source "${CLAUDE_PLUGIN_ROOT}/lib/secret-scan.sh"` — refuse with `rationale: "secret-scan-lib-unavailable"` if the source returns non-zero.
 
 2. **Rate-limit pre-flight (two buckets).** Run BOTH probes:
    ```bash

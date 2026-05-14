@@ -260,7 +260,7 @@ assert_grep "$REVIEW_PR" 'by_agent="ci-rebase-handler\+conflict-resolver"' \
   "S13.17 — ci_fix_pushed audit event names both contributing agents on conflict-resolve push success"
 
 echo
-echo "== S14: ci-code-fixer REFUSED halt path (Phase 3 6c.5) — locks CURRENT inline shape (pre-O5) =="
+echo "== S14: ci-code-fixer REFUSED halt path (Phase 3 6c.5) — locks post-O5 findings-to-issues dispatch shape =="
 
 # S14.1 — Phase 3 6c.5 documents the REFUSED halt path with AskUserQuestion-less
 # deterministic exit (mirrors 6c.6 HALT shape per RFC 0002 §3.2).
@@ -279,13 +279,14 @@ assert_in_section "$REVIEW_PR" '^### 6c\.5|^    ### 6c\.5' '^### 6c\.6|^    ### 
   'CRITICAL-tier.*issue|File the failing test.*CRITICAL|CRITICAL.*GH issue' \
   "S14.3 — Phase 3 6c.5 action 1 is filing a CRITICAL-tier GH issue (RFC 0002 §3.3.2)"
 
-# S14.4 — CURRENT shape: inline `gh issue create --label review-pr-finding` invocation.
-# This assertion is REPLACED in Wave 4 (Task 9 — O5) with a Task() dispatch
-# assertion. Do NOT remove this assertion in Wave 1 — it locks the pre-O5
-# behaviour so the refactor is reviewable.
+# S14.4 (re-pinned post-O5) — Phase 3 6c.5 dispatches findings-to-issues
+# with a synthetic single-row aggregate wrapped in
+# <external-untrusted-input source="ci-refused-synthetic"> (RFC 0002 #116 O5).
+# Pre-O5 pattern (`gh issue create --label review-pr-finding`) was correct for
+# Wave 1 but is REPLACED here.
 assert_in_section "$REVIEW_PR" '^### 6c\.5|^    ### 6c\.5' '^### 6c\.6|^    ### 6c\.6|^### 6c\.7|^    ### 6c\.7' \
-  'gh issue create --label review-pr-finding|gh issue create.*--assignee @<pr-author>' \
-  "S14.4 — Phase 3 6c.5 uses inline gh issue create (CURRENT shape; re-pinned in Wave 4 / O5)"
+  'Task.*findings-to-issues.*ci-refused-synthetic|subagent_type.*findings-to-issues|<external-untrusted-input source="ci-refused-synthetic">' \
+  "S14.4 — Phase 3 6c.5 dispatches findings-to-issues with synthetic aggregate (post-O5 dispatch shape; #116 O5)"
 
 # S14.5 — tombstone: REFUSED branch MUST NOT retry (constraints [hard]:
 # "REFUSED is a deterministic decision, not flake; retrying consumes 3 iterations").

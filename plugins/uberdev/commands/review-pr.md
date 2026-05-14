@@ -431,7 +431,27 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
        Three actions in order:
 
-       1. **File the failing test as a CRITICAL-tier GH issue** (so the user can `/solve <issue>` after reviewing). Construct the issue body from `failure_class`, `signal_anchor` (file:line pointer), `check_name`, and the agent's `rationale`. Title: `[ci-refused] $signal_anchor — $rationale`. The issue is filed via `gh issue create --label review-pr-finding --assignee @<pr-author>` mirroring the `findings-to-issues` agent's BLOCKER/CRITICAL shape (RFC 0002 §3.3.2). Capture the URL into `CI_REFUSED_ISSUE_URL`.
+       1. **File the failing test as a CRITICAL-tier GH issue via `findings-to-issues` dispatch.** (RFC 0002 follow-up #116 / O5 — replaces the previous inline `gh issue create` with a `Task(subagent_type: uberdev:findings-to-issues)` dispatch that funnels CI-REFUSED issue creation through the same agent that handles all other deferred-finding issue creation; eliminates the prose-drift risk between the two issue-creation sites.)
+
+          Construct a synthetic single-row aggregate wrapped in the `<external-untrusted-input source="ci-refused-synthetic">…</external-untrusted-input>` envelope (the receiving agent's Step 1 input validation recognises this source attribute — see `agents/findings-to-issues.md` Step 1 accepted-source allow-list). The aggregate carries one finding-row with `severity: critical`, `tier: CRITICAL`, `failure_class: <from-ci-code-fixer-return>`, `check_name: <from-ci-code-fixer-return>`, `signal_anchor: <from-ci-code-fixer-return>`, and `rationale: <from-ci-code-fixer-return>`. Title is built downstream by the agent using its existing CRITICAL-tier shape (`[finding] $file_path:$line — $summary`); labels and `--assignee` flag come from the agent's tier-aware bindings (`--label review-pr-finding`, `--assignee @<pr-author>`). The agent's return YAML's `created_urls[0].url` is captured into `CI_REFUSED_ISSUE_URL`.
+
+          ```text
+          Task(
+            subagent_type: "uberdev:findings-to-issues",
+            input: {
+              run_id: "<current-run-id>",
+              working_dir: "<repo-root>",
+              repo_slug: "<owner>/<name>",
+              pr_commit_sha: "<head-sha>",
+              pr_number: "<PR-N>",
+              max_new: 1,
+              phase1_aggregate_path: "<tmp-synthetic-aggregate.md>",
+              phase2_aggregate_path: ""
+            }
+          )
+          ```
+
+          where `<tmp-synthetic-aggregate.md>` is a freshly-created `mktemp` file whose first 128 bytes contain the literal envelope marker shown above (source attribute `ci-refused-synthetic`). After dispatch returns, `CI_REFUSED_ISSUE_URL="$(jq -r '.created_urls[0].url // empty' <(printf '%s' "$FINDINGS_TO_ISSUES_RETURN"))"`. If the dispatch returns `status: REFUSED` (input-malformed) the caller emits one stderr line and proceeds to actions 2 + 3 with `CI_REFUSED_ISSUE_URL=""` (the halt prose still emits; the audit record still fires; the issue URL slot is just empty).
 
        2. **Emit user-visible halt prose** (stderr, regardless of `TURBO` — mirrors the `billing_quota` / `platform_outage` 6c.6 HALT shape):
 
