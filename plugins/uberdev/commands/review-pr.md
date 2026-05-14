@@ -271,7 +271,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
     ```
     if ! ToolSearch("select:AskUserQuestion") >/dev/null 2>&1; then
       echo "error: AskUserQuestion tool unavailable — Phase 2.5 halt-choice cannot be presented; aborting" >&2
-      _uberdev_audit_emit halt_tool_unavailable
+      audit halt_tool_unavailable data.tool="AskUserQuestion"
       exit 1
     fi
     ```
@@ -435,7 +435,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
           Construct a synthetic single-row aggregate wrapped in the `<external-untrusted-input source="ci-refused-synthetic">…</external-untrusted-input>` envelope (the receiving agent's Step 1 input validation recognises this source attribute — see `agents/findings-to-issues.md` Step 1 accepted-source allow-list). The aggregate carries one finding-row with `severity: critical`, `tier: CRITICAL`, `failure_class: <from-ci-code-fixer-return>`, `check_name: <from-ci-code-fixer-return>`, `signal_anchor: <from-ci-code-fixer-return>`, and `rationale: <from-ci-code-fixer-return>`. Title is built downstream by the agent using its existing CRITICAL-tier shape (`[finding] $file_path:$line — $summary`); labels and `--assignee` flag come from the agent's tier-aware bindings (`--label review-pr-finding`, `--assignee @<pr-author>`). The agent's return YAML's `created_urls[0].url` is captured into `CI_REFUSED_ISSUE_URL`.
 
-          ```text
+          ```
           Task(
             subagent_type: "uberdev:findings-to-issues",
             input: {
@@ -451,13 +451,10 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
           )
           ```
 
-          where `<tmp-synthetic-aggregate.md>` is a freshly-created `mktemp` file whose first 128 bytes contain the literal envelope marker shown above (source attribute `ci-refused-synthetic`). After dispatch returns, `CI_REFUSED_ISSUE_URL="$(jq -r '.created_urls[0].url // empty' <(printf '%s' "$FINDINGS_TO_ISSUES_RETURN"))"`. If the dispatch returns `status: REFUSED` (input-malformed) the caller emits one explicit stderr line and proceeds to actions 2 + 3 with `CI_REFUSED_ISSUE_URL=""` (the halt prose still emits; the audit record still fires; the issue URL slot is just empty). The deterministic shell (the literal `warning:` text is the contract — the operator searches their run logs for it):
+          where `<tmp-synthetic-aggregate.md>` is a freshly-created `mktemp` file whose first 128 bytes contain the literal envelope marker shown above (source attribute `ci-refused-synthetic`). After dispatch returns, `CI_REFUSED_ISSUE_URL` is set from the agent's YAML return's `created_urls[0].url` field (empty string if missing). If the agent's return YAML contains `status: REFUSED` (input-malformed), the caller emits one explicit stderr line and proceeds to actions 2 + 3 with `CI_REFUSED_ISSUE_URL=""` (the halt prose still emits; the audit record still fires; the issue URL slot is just empty). The literal `warning:` text is the contract — the operator searches their run logs for it:
 
           ```
-          if [[ "$FINDINGS_TO_ISSUES_STATUS" == "REFUSED" ]]; then
-            echo "warning: findings-to-issues dispatch REFUSED — synthetic aggregate input-malformed; CI-REFUSED issue NOT filed (halt prose + audit will still emit)" >&2
-            CI_REFUSED_ISSUE_URL=""
-          fi
+          warning: findings-to-issues dispatch REFUSED — synthetic aggregate input-malformed; CI-REFUSED issue NOT filed (halt prose + audit will still emit)
           ```
 
        2. **Emit user-visible halt prose** (stderr, regardless of `TURBO` — mirrors the `billing_quota` / `platform_outage` 6c.6 HALT shape):
@@ -485,8 +482,9 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
     **Variable bindings (caller binds before step 1).** The arm uses `$pr_head_branch`, `$base_branch`, and `$REPO_ROOT` in its bash recipes and Task() prompts. Bind them in the caller's main turn from the PR (mirrors `agents/ci-rebase-handler.md:19-21` Inputs). `$PR_NUMBER` was already bound at 6c.1 PROBE (line 195).
 
     ```bash
-    pr_head_branch="$(gh pr view "$PR_NUMBER" --json headRefName --jq .headRefName)"
-    base_branch="$(gh pr view "$PR_NUMBER" --json baseRefName --jq .baseRefName)"
+    # Single gh call returns both refs to avoid two API roundtrips (one core
+    # bucket request, not two — matters under tight rate-limit budgets).
+    read -r pr_head_branch base_branch <<< "$(gh pr view "$PR_NUMBER" --json headRefName,baseRefName --jq '"\(.headRefName) \(.baseRefName)"')"
     REPO_ROOT="$(git rev-parse --show-toplevel)"
     ```
 

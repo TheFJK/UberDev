@@ -1755,10 +1755,10 @@ done
 # M87.4–M87.6 — flag-purpose prose in commands/merge.md (bulleted-list entries
 # in the Usage section).
 assert_grep "$CMD_FILE" \
-  '\*\*`--accept-blocker-deferred`\*\*|`--accept-blocker-deferred`.*opt-in override' \
+  '`--accept-blocker-deferred`.*opt-in override' \
   "M87.4 — commands/merge.md documents --accept-blocker-deferred purpose"
 assert_grep "$CMD_FILE" \
-  '\*\*`--accept-critical-deferred`\*\*|`--accept-critical-deferred`.*opt-in override' \
+  '`--accept-critical-deferred`.*opt-in override' \
   "M87.5 — commands/merge.md documents --accept-critical-deferred purpose"
 assert_grep "$CMD_FILE" \
   '`--i-know-what-im-doing`.*required.*override|required to land.*--i-know-what-im-doing' \

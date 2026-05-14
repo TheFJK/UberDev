@@ -254,7 +254,7 @@ assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
 
 # T6.2 — guard fires when a truncated row is BLOCKER or CRITICAL tier
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
-  'truncated.*row.*BLOCKER|truncated.*row.*CRITICAL|row_tier.*BLOCKER.*CRITICAL|BLOCKER.*CRITICAL.*truncated' \
+  'truncated.*row.*BLOCKER|truncated.*row.*CRITICAL|BLOCKER.*CRITICAL.*truncated' \
   'T6.2 — overflow guard fires on truncated BLOCKER/CRITICAL tier rows (constraints [hard])'
 
 # T6.3 — halted_due_to_overflow == true implies halted == true

@@ -602,7 +602,7 @@ echo "== T1: GREEN/YELLOW/RED predicate prose locks =="
 # T1.1 — YELLOW predicate names by_severity.critical > 0 as the YELLOW signal
 assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contract' \
   'YELLOW.*by_severity\.critical.*>.*0|by_severity\.critical.*>.*0.*YELLOW' \
-  "T1.1 — YELLOW predicate names by_severity.critical > 0 (RFC 0002 §3.4)"
+  "T1.1 — YELLOW predicate names by_severity.critical > 0"
 
 # T1.2 — RED predicate is "NOT GREEN AND NOT YELLOW"
 assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contract' \
@@ -637,10 +637,21 @@ assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contra
   'phases\.phase2_5' \
   "T2.1 — phases.phase2_5 block is named in Trust-Signal prose"
 
-# T2.2 — by_severity sub-object enumerates blocker, critical, major
+# T2.2 — by_severity sub-object enumerates blocker, critical, major. Split into
+# three separate assertions so the test actually enforces enumeration of all
+# three keys (the prior alternation pattern passed if ANY one was named).
+# Patterns accept either dot-form (`by_severity.<key>`) which appears in the
+# predicate prose, OR JSON-quoted form (`"<key>":`) which appears in the
+# audit-JSON block — both forms enumerate the key within the section.
 assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contract' \
-  'by_severity.*blocker|by_severity.*critical|by_severity.*major' \
-  "T2.2 — phases.phase2_5.by_severity enumerates blocker|critical|major"
+  'by_severity.*blocker|"blocker":' \
+  "T2.2a — phases.phase2_5.by_severity enumerates blocker"
+assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contract' \
+  'by_severity.*critical|"critical":' \
+  "T2.2b — phases.phase2_5.by_severity enumerates critical"
+assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contract' \
+  'by_severity.*major|"major":' \
+  "T2.2c — phases.phase2_5.by_severity enumerates major"
 
 # T2.3 — halted field is documented
 assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contract' \

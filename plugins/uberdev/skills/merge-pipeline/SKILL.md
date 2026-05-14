@@ -390,7 +390,7 @@ c. The extracted `<trailer-sha>` is delegated to the `trust-trail-evaluator` age
        # (PHASE2_5_PRESENT=false → caller falls through to legacy-audit
        # STALE branch in trust-trail-evaluator Step 1.5).
        JQ_STDERR_TRUNC=$(printf '%s' "$JQ_STDERR" | head -c 200)
-       _uberdev_audit_emit audit_json_phase2_5_parse_failure \
+       audit audit_json_phase2_5_parse_failure \
          data.jq_error="$JQ_STDERR_TRUNC" \
          data.audit_path="$AUDIT_JSON_PATH"
        PHASE2_5_PRESENT=false
