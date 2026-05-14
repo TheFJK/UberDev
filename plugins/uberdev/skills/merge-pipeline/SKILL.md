@@ -27,7 +27,7 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `LOCK_FILE_PATH` | `.git/uberdev-merge.lock` | D14 |
 | `AUDIT_LOG_DIR_PATTERN` | `.uberdev/runs/<run-id>/` | D15 |
 | `AUDIT_LOG_FILENAME` | `audit.jsonl` | D15 |
-| `AUDIT_EVENT_ENUM` | `gate_pass`, `gate_fail`, `order_proposed`, `order_confirmed`, `strategy_chosen`, `probe_clean`, `probe_conflict`, `agent_dispatched`, `agent_returned`, `patch_applied`, `test_pass`, `test_fail`, `push_resolution`, `merge_executed`, `local_sync`, `branch_deleted`, `worktree_removed`, `admin_bypass`, `waiver_recorded`, `error`, `pr_parked`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision`, `trust_trail_agent_decision`, `merge_strategy_agent_decision`, `merge_strategy_fanout_wave_started`, `discovery_gh_failed`, `ci_probe_started`, `ci_probe_skipped_no_checks`, `ci_probe_unreachable`, `ci_monitor_green`, `ci_monitor_red`, `ci_monitor_timeout`, `ci_classify_dispatched`, `ci_classify_returned`, `ci_classify_ambiguous_routing_as_flaky`, `ci_fix_dispatched`, `ci_fix_dispatch_unknown_class`, `ci_fix_pushed`, `ci_flaky_rerun_queued`, `ci_flaky_rerun_failed`, `ci_loop_cap_reached`, `ci_phase_outcome`, `auto_review_dispatched`, `auto_review_returned`, `audit-json-phase2_5-parse-failure` | D15. Field-level extensions: gate_pass.data.trust_anchor ∈ TRUST_ANCHOR_ENUM; gate_fail.data.reason ∈ GATE_FAIL_REASON_ENUM (see Phase 1.4); discovery_gh_failed.data.reason ∈ {`gh_failed`, `jq_failed`}, .data.step ∈ {`1.0.5`, `1.2.5`, `1.4`}, .data.exit_code (int), .data.gh_stderr (string, raw stderr ≤512 bytes pre-truncation; JSON-escaping may expand to ≤2048 bytes for adversarial backslash-heavy payloads), .data.pr_number (int, optional — only set when step="1.4"). **+12 new members for /review-pr Phase 3 (#76):** `ci_probe_started`, `ci_probe_skipped_no_checks`, `ci_probe_unreachable`, `ci_monitor_green`, `ci_monitor_red`, `ci_monitor_timeout`, `ci_classify_dispatched`, `ci_classify_returned`, `ci_fix_dispatched`, `ci_fix_pushed`, `ci_loop_cap_reached`, `ci_phase_outcome`. `ci_phase_outcome.data.outcome ∈ CI_OUTCOME_ENUM`; `ci_classify_returned.data.failure_class ∈ CI_FAILURE_CLASS_ENUM`; `ci_fix_dispatched.data.by_agent ∈ {ci-code-fixer, ci-rebase-handler}`; `ci_fix_pushed.data.commit_sha` is full 40-hex. **+4 hardening members (post-impl-review B6/B7/B9):** `ci_classify_ambiguous_routing_as_flaky` (AMBIGUOUS→flaky fallback fires; preserves origin in trail); `ci_flaky_rerun_queued` / `ci_flaky_rerun_failed` (flaky `gh run rerun` exit-code dichotomy; previously dropped silently); `ci_fix_dispatch_unknown_class` (ROUTE default-case guard; emitted when classifier returns a CI_FAILURE_CLASS_ENUM member with no case arm — defensive against future enum extension). **Deprecated (never emitted post-v0.17.0):** `admin_bypass`, `waiver_recorded`. **+2 auto-review members (#89):** `auto_review_dispatched` (`data.pr: int`, `data.reason_triggering: string ∈ {trust_trail_label_missing, trust_trail_trailer_missing}`) — fires before the synchronous `Skill("uberdev:review-pr")` call; always paired with `auto_review_returned` (`data.pr: int`, `data.outcome: string ∈ {green, blocked, refused_non_green}`, `data.duration_ms: int`) — fires after `Skill()` returns or times out. Cap: 1 dispatch per `(pr_number, run_id)` per `/merge` run (`AUTO_REVIEW_DISPATCH_CAP`). Plus 1 phase2_5-parse-failure member (#116): `audit-json-phase2_5-parse-failure` (`data.jq_error: string` ≤200 chars; `data.audit_path: string` absolute path). Fires when `jq -e '.phases.phase2_5'` returns rc=2 (malformed JSON). Fail-open: PHASE2_5_PRESENT stays false, run continues — the event is auditable but not a halt. |
+| `AUDIT_EVENT_ENUM` | `gate_pass`, `gate_fail`, `order_proposed`, `order_confirmed`, `strategy_chosen`, `probe_clean`, `probe_conflict`, `agent_dispatched`, `agent_returned`, `patch_applied`, `test_pass`, `test_fail`, `push_resolution`, `merge_executed`, `local_sync`, `branch_deleted`, `worktree_removed`, `admin_bypass`, `waiver_recorded`, `error`, `pr_parked`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision`, `trust_trail_agent_decision`, `merge_strategy_agent_decision`, `merge_strategy_fanout_wave_started`, `discovery_gh_failed`, `ci_probe_started`, `ci_probe_skipped_no_checks`, `ci_probe_unreachable`, `ci_monitor_green`, `ci_monitor_red`, `ci_monitor_timeout`, `ci_classify_dispatched`, `ci_classify_returned`, `ci_classify_ambiguous_routing_as_flaky`, `ci_fix_dispatched`, `ci_fix_dispatch_unknown_class`, `ci_fix_pushed`, `ci_flaky_rerun_queued`, `ci_flaky_rerun_failed`, `ci_loop_cap_reached`, `ci_phase_outcome`, `auto_review_dispatched`, `auto_review_returned`, `audit_json_phase2_5_parse_failure`, `halt_tool_unavailable` | D15. Field-level extensions: gate_pass.data.trust_anchor ∈ TRUST_ANCHOR_ENUM; gate_fail.data.reason ∈ GATE_FAIL_REASON_ENUM (see Phase 1.4); discovery_gh_failed.data.reason ∈ {`gh_failed`, `jq_failed`}, .data.step ∈ {`1.0.5`, `1.2.5`, `1.4`}, .data.exit_code (int), .data.gh_stderr (string, raw stderr ≤512 bytes pre-truncation; JSON-escaping may expand to ≤2048 bytes for adversarial backslash-heavy payloads), .data.pr_number (int, optional — only set when step="1.4"). **+12 new members for /review-pr Phase 3 (#76):** `ci_probe_started`, `ci_probe_skipped_no_checks`, `ci_probe_unreachable`, `ci_monitor_green`, `ci_monitor_red`, `ci_monitor_timeout`, `ci_classify_dispatched`, `ci_classify_returned`, `ci_fix_dispatched`, `ci_fix_pushed`, `ci_loop_cap_reached`, `ci_phase_outcome`. `ci_phase_outcome.data.outcome ∈ CI_OUTCOME_ENUM`; `ci_classify_returned.data.failure_class ∈ CI_FAILURE_CLASS_ENUM`; `ci_fix_dispatched.data.by_agent ∈ {ci-code-fixer, ci-rebase-handler}`; `ci_fix_pushed.data.commit_sha` is full 40-hex. **+4 hardening members (post-impl-review B6/B7/B9):** `ci_classify_ambiguous_routing_as_flaky` (AMBIGUOUS→flaky fallback fires; preserves origin in trail); `ci_flaky_rerun_queued` / `ci_flaky_rerun_failed` (flaky `gh run rerun` exit-code dichotomy; previously dropped silently); `ci_fix_dispatch_unknown_class` (ROUTE default-case guard; emitted when classifier returns a CI_FAILURE_CLASS_ENUM member with no case arm — defensive against future enum extension). **Deprecated (never emitted post-v0.17.0):** `admin_bypass`, `waiver_recorded`. **+2 auto-review members (#89):** `auto_review_dispatched` (`data.pr: int`, `data.reason_triggering: string ∈ {trust_trail_label_missing, trust_trail_trailer_missing}`) — fires before the synchronous `Skill("uberdev:review-pr")` call; always paired with `auto_review_returned` (`data.pr: int`, `data.outcome: string ∈ {green, blocked, refused_non_green}`, `data.duration_ms: int`) — fires after `Skill()` returns or times out. Cap: 1 dispatch per `(pr_number, run_id)` per `/merge` run (`AUTO_REVIEW_DISPATCH_CAP`). Plus 2 phase2_5-observability members (#116): `audit_json_phase2_5_parse_failure` (`data.jq_error: string` ≤200 chars; `data.audit_path: string` absolute path). Fires when the audit JSON is malformed (detected via `jq empty` non-zero exit — version-agnostic across jq 1.6/1.7/1.8). Fail-open: PHASE2_5_PRESENT stays false, run continues — the event is auditable but not a halt. And `halt_tool_unavailable` (no data fields) — fires from `commands/review-pr.md` Step 6b.1 when `ToolSearch` fails to load `AskUserQuestion`; `/review-pr` aborts (exit 1) rather than silently auto-pick a Phase 2.5 halt-choice. |
 | `SCRATCH_WORKTREE_PATTERN` | `.claude/worktrees/merge-<run-id>/` | D10 |
 | `BRANCH_NAME_REGEX` | `^[A-Za-z0-9._/-]{1,255}$` | D8 (validation before shell argv use) |
 | `MERGE_STRATEGY_LABEL_PREFIX` | `merge-strategy:` | D-LABEL |
@@ -373,29 +373,40 @@ c. The extracted `<trailer-sha>` is delegated to the `trust-trail-evaluator` age
 
    PHASE2_5_PRESENT=false; PHASE2_5_HALTED=false; PHASE2_5_BLOCKER_COUNT=0; PHASE2_5_CRITICAL_COUNT=0; PHASE2_5_OVERRIDE_REASON=null
    if [ -n "$AUDIT_JSON_PATH" ] && [ -r "$AUDIT_JSON_PATH" ]; then
-     # Capture jq stderr (truncated 200 chars per security Note B precedent) so a
-     # parse-failure can be audit-recorded without leaking unbounded jq output.
-     JQ_STDERR=$(jq -e '.phases.phase2_5 // empty' "$AUDIT_JSON_PATH" 2>&1 >/dev/null)
+     # Version-agnostic parse: jq exit-code semantics differ across releases
+     # (notably jq 1.8.x returns rc=5 for parse errors and rc=4 for absent
+     # results with `-e`, while earlier versions used rc=2 / rc=1). Use a
+     # two-step parse-then-extract approach so the audit emission does not
+     # depend on which jq version is installed.
+     #
+     # Step 1: detect malformed JSON via `jq empty` (rc != 0 → parse error).
+     # Step 2: detect phase2_5 presence vs absence via `jq -e ... // empty`
+     #         on JSON we already know is well-formed (rc=0 → present;
+     #         rc != 0 → absent / legacy audit).
+     JQ_STDERR=$(jq empty "$AUDIT_JSON_PATH" 2>&1 >/dev/null)
      JQ_RC=$?
-     if [ "$JQ_RC" -eq 0 ]; then
-       PHASE2_5_PRESENT=true
-       PHASE2_5_HALTED=$(jq -r '.phases.phase2_5.halted // false' "$AUDIT_JSON_PATH")
-       PHASE2_5_BLOCKER_COUNT=$(jq -r '.phases.phase2_5.by_severity.blocker // 0' "$AUDIT_JSON_PATH")
-       PHASE2_5_CRITICAL_COUNT=$(jq -r '.phases.phase2_5.by_severity.critical // 0' "$AUDIT_JSON_PATH")
-       PHASE2_5_OVERRIDE_REASON=$(jq -r '.phases.phase2_5.override_reason // "null"' "$AUDIT_JSON_PATH")
-     elif [ "$JQ_RC" -eq 2 ]; then
-       # rc=2 == jq parse error (malformed JSON). Emit new audit event; stay
-       # fail-open (PHASE2_5_PRESENT=false → caller falls through to legacy-audit
+     if [ "$JQ_RC" -ne 0 ]; then
+       # Malformed JSON. Emit new audit event; stay fail-open
+       # (PHASE2_5_PRESENT=false → caller falls through to legacy-audit
        # STALE branch in trust-trail-evaluator Step 1.5).
        JQ_STDERR_TRUNC=$(printf '%s' "$JQ_STDERR" | head -c 200)
-       audit_event audit-json-phase2_5-parse-failure \
+       _uberdev_audit_emit audit_json_phase2_5_parse_failure \
          data.jq_error="$JQ_STDERR_TRUNC" \
          data.audit_path="$AUDIT_JSON_PATH"
        PHASE2_5_PRESENT=false
      else
-       # rc=1 == empty (absent or null) — legacy / pre-v0.26.0 audit. No new
-       # audit event (current behaviour preserved).
-       PHASE2_5_PRESENT=false
+       # JSON parses. Now check phase2_5 presence on well-formed input.
+       if jq -e '.phases.phase2_5 // empty' "$AUDIT_JSON_PATH" >/dev/null 2>&1; then
+         PHASE2_5_PRESENT=true
+         PHASE2_5_HALTED=$(jq -r '.phases.phase2_5.halted // false' "$AUDIT_JSON_PATH")
+         PHASE2_5_BLOCKER_COUNT=$(jq -r '.phases.phase2_5.by_severity.blocker // 0' "$AUDIT_JSON_PATH")
+         PHASE2_5_CRITICAL_COUNT=$(jq -r '.phases.phase2_5.by_severity.critical // 0' "$AUDIT_JSON_PATH")
+         PHASE2_5_OVERRIDE_REASON=$(jq -r '.phases.phase2_5.override_reason // "null"' "$AUDIT_JSON_PATH")
+       else
+         # phase2_5 block absent — legacy / pre-v0.26.0 audit. No new audit
+         # event (current behaviour preserved).
+         PHASE2_5_PRESENT=false
+       fi
      fi
    fi
    ```
