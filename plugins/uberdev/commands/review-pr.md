@@ -222,9 +222,59 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
     )
     ```
 
-    **Capture the return YAML** into shell variables `CREATED_URLS_JSON`, `COMMENTED_URLS_JSON`, `SKIPPED_CLOSED_JSON`, `BLOCKED_BY_DEDUPE_JSON`, `OVERFLOW_COUNT` for the Step 7 Final Aggregation table. Validate the YAML parses before treating the absence of arrays as "zero issues" — on parse failure or missing `status` key, log to stderr and treat the sub-phase as `BLOCKED` for aggregation purposes (the Phase 2.5 row in Step 7 records the parse failure rather than a misleading zero count).
+    **Capture the return YAML** into shell variables `CREATED_URLS_JSON`, `COMMENTED_URLS_JSON`, `SKIPPED_CLOSED_JSON`, `BLOCKED_BY_DEDUPE_JSON`, `OVERFLOW_COUNT`, `BY_SEVERITY_BLOCKER`, `BY_SEVERITY_CRITICAL`, `BY_SEVERITY_MAJOR`, `HALTED_DUE_TO_OVERFLOW`, `PHASE2_5_HALTED` for the Step 7 Final Aggregation table AND the new GREEN/YELLOW/RED predicate (Trust-Signal Emission section). Validate the YAML parses before treating the absence of arrays as "zero issues" — on parse failure or missing `status` key, log to stderr and treat the sub-phase as `BLOCKED` for aggregation purposes (the Phase 2.5 row in Step 7 records the parse failure rather than a misleading zero count) AND force `PHASE2_5_HALTED=false` so a malformed agent return cannot accidentally halt the run (fail-open on parse failure is intentional — the alternative silently fails GREEN, which is the bug Phase 2.5 exists to prevent; failing CLOSED on parse error would invert the design).
 
-    Exit-code discipline: regardless of agent `status` (`DONE`, `DONE_WITH_CONCERNS`, `REFUSED`), the parent `/review-pr` continues to Step 7. A `REFUSED` is information for the final summary, not a parent-process failure.
+    **Exit-code discipline (RFC 0002 §3.3.5 — supersedes prior "NEVER halts" contract).** Regardless of agent `status` (`DONE`, `DONE_WITH_CONCERNS`, `REFUSED`), the parent `/review-pr` continues to the post-dispatch halt-check below. A `REFUSED` is information for the final summary, not a parent-process halt. A `DONE_WITH_CONCERNS` return with `halted: false` is also non-halting (silent file path). Only `halted: true` in the agent's return contract triggers the halt-handling block.
+
+    ### 6b.1 Phase 2.5 halt handling (RFC 0002 §3.5)
+
+    Immediately after capturing the agent return YAML, branch on `PHASE2_5_HALTED`:
+
+    ```bash
+    if [ "${PHASE2_5_HALTED:-false}" = "true" ]; then
+      # Phase 2.5 filed at least one BLOCKER tier issue OR truncated a BLOCKER/CRITICAL.
+      # Surface a user-visible halt block; the RED trust-trail emission downstream
+      # will skip the label + trailer.
+      :
+    fi
+    ```
+
+    **User-visible halt prose** (rendered to stderr regardless of `TURBO`):
+
+    ```
+    /uberdev:review-pr — Phase 2.5 halt (RFC 0002)
+      blocker filings:   $BY_SEVERITY_BLOCKER
+      critical filings:  $BY_SEVERITY_CRITICAL
+      overflow halt:     $HALTED_DUE_TO_OVERFLOW (truncated count: $OVERFLOW_COUNT)
+      filed issues:      <render created_urls + commented_urls as bullet list with tier>
+      trust trail:       RED — no Reviewed-by trailer, no uberdev-approved label
+      /merge will:       INVALID until issues resolved OR --accept-blocker-deferred passed
+    ```
+
+    **Interactive (`TURBO=0` AND stdin is a TTY) — AskUserQuestion:**
+
+    ```
+    ToolSearch({ query: "select:AskUserQuestion" })   // mandatory deferred-tool load (same gate as 6c.6)
+    AskUserQuestion({
+      question: "Phase 2.5 filed $BY_SEVERITY_BLOCKER blocker issue(s). Trust trail will emit RED — /merge will block this PR until resolved. How to proceed?",
+      options: [
+        { label: "Print /solve suggestion + RED", description: "Render '/uberdev:solve <highest-priority issue URL>' suggestion to stderr; emit RED trail; exit 1. User runs /solve in a follow-up turn." },
+        { label: "Skip — RED trail",              description: "Issues stay open, RED trail emitted, /merge blocked until resolved. Exit 1." },
+        { label: "Override — emit GREEN",         description: "Log override_reason in audit JSON; /merge requires --i-know-what-im-doing flag to proceed" }
+      ],
+      multiSelect: false
+    })
+    ```
+
+    If `ToolSearch` fails, `/review-pr` aborts with stderr error — **NEVER silently auto-pick** (mirrors `orchestrator/SKILL.md:190-193` and 6c.6 HALT). Capture the choice into `PHASE2_5_HALT_CHOICE ∈ {solve_suggestion, skip, override}`.
+
+    **Non-interactive (`TURBO=1` OR no TTY):** default to `solve_suggestion` (it preserves actionable information for the operator who later reads the run log) with the prose summary above. `override` is interactive-only by design — an unattended override poisons the trust trail with no human review.
+
+    **`solve_suggestion` rendering** — emit one stderr line per filed BLOCKER URL: `next: /uberdev:solve <URL>`. The user runs the suggested command in a follow-up turn; `/review-pr` itself does not background-dispatch `/solve` (sub-process dispatch from inside a halted review run is out of scope per RFC 0002 §7.1 — defaults to hard-stop to avoid cascading agent loops).
+
+    **`override` audit field:** if `PHASE2_5_HALT_CHOICE == "override"`, set `OVERRIDE_REASON="user-selected-emit-green-on-blocker-deferred"` for the audit JSON. Otherwise `OVERRIDE_REASON=null`. The override only suppresses the RED downgrade in the trust-trail emission step; it does NOT close the filed issues — `/merge` reads the override flag on the audit JSON and requires `--i-know-what-im-doing` to merge anyway.
+
+    `PHASE2_5_HALTED=false` (the common path — no blocker, no critical/blocker overflow) skips this entire block; control falls through to Step 6c.
 
     **Skip-path behaviour** (when `DEFER_ISSUES_EFFECTIVE=0`):
     - Do NOT call `Task(subagent_type: uberdev:findings-to-issues, …)`.
@@ -367,7 +417,26 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
     **Branch on dispatched-fixer return status.** Before re-entry, condition on the dispatched fixer's return contract — only `ci-code-fixer` `status: APPLIED` and `ci-rebase-handler` `status: REBASED` produce a fix push that warrants Phase 1 re-entry. `ci-rebase-handler` `status: CONFLICT` triggers the CONFLICT-RESOLVE arm below; refusal statuses halt Phase 3:
 
     - `ci-code-fixer` `status: APPLIED` (commit SHA returned, no remote write per `agents/ci-code-fixer.md` Step 6) → caller pushes the agent's commit, treats it as a fix push, falls through to "Phase 1 re-entry" below.
-    - `ci-code-fixer` `status: REFUSED` → already handled inline at the dispatch site (see Phase 1 / Phase 2 fixer-refusal prose); for the Phase 3 dispatch, emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=ci_fixer_refused_<rationale>` (lowercase, dashes-to-underscores normalised, e.g. `forbidden-pattern-no-verify` → `ci_fixer_refused_forbidden_pattern_no_verify`); exit 1.
+    - `ci-code-fixer` `status: REFUSED` (RFC 0002 §3.2 — single-attempt halt; **do NOT retry**): the loop-counter cap from 6c.7 LOOP GUARD is bypassed for this terminal class because `REFUSED` is a deterministic decision (forbidden-pattern guard), not flake; retrying re-classifies the same red CI, re-dispatches the same fixer, and consumes 3 iterations of compute that the user could have spent reading the halt prose.
+
+       Three actions in order:
+
+       1. **File the failing test as a CRITICAL-tier GH issue** (so the user can `/solve <issue>` after reviewing). Construct the issue body from `failure_class`, `signal_anchor` (file:line pointer), `check_name`, and the agent's `rationale`. Title: `[ci-refused] $signal_anchor — $rationale`. The issue is filed via `gh issue create --label review-pr-finding --assignee @<pr-author>` mirroring the `findings-to-issues` agent's BLOCKER/CRITICAL shape (RFC 0002 §3.3.2). Capture the URL into `CI_REFUSED_ISSUE_URL`.
+
+       2. **Emit user-visible halt prose** (stderr, regardless of `TURBO` — mirrors the `billing_quota` / `platform_outage` 6c.6 HALT shape):
+
+          ```
+          /uberdev:review-pr — Phase 3 halt: ci-code-fixer REFUSED
+            failure class:   $failure_class
+            signal anchor:   $signal_anchor
+            rationale:       $rationale (e.g. forbidden-pattern-no-verify)
+            filed issue:     $CI_REFUSED_ISSUE_URL
+            next step:       /uberdev:solve $CI_REFUSED_ISSUE_URL  (or fix manually)
+          ```
+
+       3. **Audit + exit** — emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=ci_fixer_refused_<rationale>` (lowercase, dashes-to-underscores normalised, e.g. `forbidden-pattern-no-verify` → `ci_fixer_refused_forbidden_pattern_no_verify`); record `CI_REFUSED_ISSUE_URL` in the audit JSON under `phases.phase3.ci_refused_issue_url`; exit 1.
+
+       Under `TURBO=1`, the same three actions fire — the prose goes to stderr, the issue is still filed (no `AskUserQuestion` involved here; this is a deterministic halt, not a user-choice gate), and exit 1 surfaces to the orchestrator chain.
     - `ci-rebase-handler` `status: REBASED, new_head_sha: <40-hex>` → fall through to "Phase 1 re-entry" below (the agent already pushed; new HEAD is on remote).
     - `ci-rebase-handler` `status: CONFLICT, conflicted_files: [...]` → execute the **CONFLICT-RESOLVE arm** below BEFORE Phase 1 re-entry. Closes #80 — the arm was previously unwired in this command, defeating the autopilot for any `stale_base` PR with conflicts.
     - `ci-rebase-handler` `status: REFUSED, rationale: <reason>` (∈ {`pr-already-merged`, `head-moved-since-classify`, `lease-mismatch`}) → emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=ci_rebase_refused_<reason>` (lowercase, dashes-to-underscores normalised; e.g. `lease-mismatch` → `ci_rebase_refused_lease_mismatch`); exit 1.
@@ -572,7 +641,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    |---|---|---|---|---|
    | Phase 1 — Review + Fix | ran | APPROVE / REVISIONS_REQUIRED / REJECT | <commit shas> | <count> |
    | Phase 2 — Simplify     | ran / blocked / skipped | APPROVE / REVISIONS_REQUIRED / REJECT (omit if status≠ran) | <commit sha or ∅> | <count> |
-   | Issues filed (Phase 2.5) | Rendered from the agent's return YAML: `len(created_urls)` created + `len(commented_urls)` commented — see the "Issues filed (links)" block below for the full URL list. `overflow_count` additional findings exceeded `MAX_NEW=10` cap. `len(blocked_by_dedupe)` blocked by dedupe-lookup failure or fail-CLOSED branch. Skip path: `(skipped: --no-defer-issues)` when `DEFER_ISSUES_PHASE=0`, OR `(skipped: defer_issues_enabled=false)` when the config disables, OR both joined by " and " when both knobs are off. |
+   | Issues filed (Phase 2.5) | Rendered from the agent's return YAML, broken down by tier per RFC 0002 §3.4: `BLOCKER: <n>` / `CRITICAL: <n>` / `MAJOR: <n>` (each line omitted when count is 0). Sum line: `<total> created + <total> commented` followed by the trust-trail state implication — `(halt: trust trail RED)` when `halted=true`, `(critical-deferred: trust trail YELLOW)` when only `by_severity.critical > 0`, `(silent file: trust trail GREEN)` otherwise. `overflow_count` additional findings exceeded `MAX_NEW=10` cap; suffix `(BROKEN-FEATURE HALT)` when `halted_due_to_overflow=true`. `len(blocked_by_dedupe)` blocked by dedupe-lookup failure or fail-CLOSED branch. Full URL list with `(tier)` annotation in the "Issues filed (links)" block below. Skip path: `(skipped: --no-defer-issues)` when `DEFER_ISSUES_PHASE=0`, OR `(skipped: defer_issues_enabled=false)` when the config disables, OR both joined by " and " when both knobs are off. |
 
    **Issues filed (links):**
 
@@ -599,27 +668,63 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    4. Re-run review after fixes
    ```
 
-## Trust-Signal Emission (on green run)
+## Trust-Signal Emission (RFC 0002 — tiered GREEN / YELLOW / RED)
 
-After the final aggregation table renders, evaluate the green-run predicate:
+After the final aggregation table renders, evaluate the trust-trail predicate. RFC 0002 promotes the prior binary GREEN/non-GREEN model to a three-state model:
 
 ```
-GREEN := (Phase 1 verdict == "APPROVE")
-       AND (Phase 2 status ∈ {"ran/APPROVE", "skipped"})
-       AND (Phase 3 outcome ∈ {"green", "green_after_fix", "skipped_no_checks"})
+GREEN  := (Phase 1 verdict == "APPROVE")
+        AND (Phase 2 status ∈ {"ran/APPROVE", "skipped"})
+        AND (Phase 2.5 by_severity.blocker == 0)                    [RFC 0002 §3.4]
+        AND (Phase 2.5 halted == false)                             [RFC 0002 §3.4]
+        AND (Phase 3 outcome ∈ {"green", "green_after_fix", "skipped_no_checks"})
+
+YELLOW := all GREEN preconditions satisfied
+        AND (Phase 2.5 by_severity.critical > 0)                    [RFC 0002 §3.4]
+
+RED    := NOT GREEN AND NOT YELLOW
+
+OVERRIDE_GREEN := PHASE2_5_HALT_CHOICE == "override"                [RFC 0002 §3.5 — interactive opt-in only]
+                AND would_have_been_RED_due_to_phase2_5_only        (rationale: the override flag is allowed
+                                                                     to suppress RED ONLY when phase2_5 is the
+                                                                     cause — never when Phase 1/2/3 also fail.
+                                                                     This is the "/merge will require
+                                                                     --i-know-what-im-doing" trail.)
 ```
 
-The Phase 3 conjunct is **predicate-level breaking** (CHANGELOG `### Changed` callout in v0.21.0) — a previously-green `/review-pr` run with red CI now correctly gates the trust-trail anchor. The audit JSON gains `phases.phase3` (additive — backwards compatible for `/merge`'s `trust-trail-evaluator`).
+The Phase 2.5 conjuncts (`by_severity.blocker == 0` AND `halted == false`) are **predicate-level breaking** (CHANGELOG `### Changed` callout in v0.26.0). A previously-green `/review-pr` run that filed blocker issues via `findings-to-issues` (PR #112) now correctly gates the trust-trail anchor RED. The Phase 3 conjunct preserves the v0.21.0 break (red CI gates GREEN). The audit JSON gains `phases.phase2_5` (additive; legacy audit JSON without this block is treated as STALE by `trust-trail-evaluator` per RFC 0002 §3.6.4).
 
-On GREEN, emit three SHA-bound durable artifacts in lockstep (all reference the same post-emission `headRefOid`):
+**Three-way branch on the predicate**:
+
+- **GREEN (or OVERRIDE_GREEN)** → emit the GREEN artifact triplet (anchor commit with trailer + `uberdev-approved` label + audit JSON `verdict: "APPROVE"`). When OVERRIDE_GREEN was the cause, the audit JSON records `phases.phase2_5.override_reason="user-selected-emit-green-on-blocker-deferred"` so `/merge`'s trust-trail-evaluator can see the override and require `--i-know-what-im-doing` to proceed.
+
+- **YELLOW** → emit the YELLOW artifact triplet (anchor commit with `severity=critical-deferred count=N` suffix on the trailer + `uberdev-approved-with-concerns` label + audit JSON `verdict: "APPROVE"` with `phases.phase2_5.by_severity.critical > 0`). `/merge` requires `--accept-critical-deferred` to proceed past a YELLOW trail.
+
+- **RED** → emit no anchor commit, no label add, no `Reviewed-by:` trailer. Remove `uberdev-approved` and `uberdev-approved-with-concerns` labels from the PR if previously set (idempotent — `gh pr edit --remove-label` no-ops on absent labels). Write the audit JSON with `verdict` set to the failing verdict (Phase 1's verdict OR `"BLOCKED"` when Phase 2.5 is the cause); the JSON is still written so `/merge`'s trust-trail-evaluator has a fresh `phases.phase2_5` block to read. Exit 1.
+
+The remainder of this section describes the GREEN/YELLOW emission shape (RED skips the entire artifact triplet — see exit-code contract):
 
 1. **Trust-trail-anchor commit** — emit ONE empty commit at HEAD whose body carries the trailer pointing at its parent. The parent SHA — captured **before** the anchor commit — is the load-bearing trust artifact for `/merge` Phase 1.4 trust resolution (see `skills/merge-pipeline/SKILL.md` Constants `REVIEW_PR_TRAILER_PREFIX`):
+
+   **Trailer suffix selection (RFC 0002 §3.4):**
+
+   ```bash
+   case "$TRUST_TRAIL_STATE" in
+     GREEN)
+       TRAILER_SUFFIX=""
+       ;;
+     YELLOW)
+       TRAILER_SUFFIX=" severity=critical-deferred count=${BY_SEVERITY_CRITICAL}"
+       ;;
+     # RED skips this entire emission section — handled by the predicate branch above
+   esac
+   ```
 
    ```bash
    PARENT_SHA="$(git rev-parse HEAD)"   # full 40-char SHA — NOT --short; goes into the trailer payload
    git commit --allow-empty -m "chore(review-pr): trust trail anchor for #<PR>
 
-   Reviewed-by: uberdev/review-pr@${PARENT_SHA}"
+   Reviewed-by: uberdev/review-pr@${PARENT_SHA}${TRAILER_SUFFIX}"
    if ! git push origin HEAD; then
      # Push failed (network, auth, rate limit, hook rejection, non-fast-forward, …).
      # Without this guard, ANCHOR_SHA below would capture a local-only HEAD; the audit
@@ -641,7 +746,22 @@ On GREEN, emit three SHA-bound durable artifacts in lockstep (all reference the 
 
    The anchor commit goes through pre-commit hooks normally — never `--no-verify`. Author = current `git config user.email` / `user.name`; the trailer is procedural attribution to the `/review-pr` command. Per global CLAUDE.md, the anchor commit MUST NOT include a `Co-Authored-By: Claude` trailer or any `🤖 Generated with Claude Code` footer. The trailer payload (`Reviewed-by: uberdev/review-pr@<40-hex>`) is the only trailer in the body. Verify with `git log -1 --format=%B | grep -E '^Reviewed-by: uberdev/review-pr@[a-f0-9]{40}$'` before proceeding to artifact 2.
 
-2. **Label** — `gh pr edit <N> --add-label uberdev-approved` (idempotent — `gh` no-ops if the label is already present). The literal label string is `uberdev-approved` (see `skills/merge-pipeline/SKILL.md` Constants `UBERDEV_APPROVED_LABEL`).
+2. **Label** — tier-aware. GREEN runs add `uberdev-approved` (canonical literal — see `skills/merge-pipeline/SKILL.md` Constants `UBERDEV_APPROVED_LABEL`). YELLOW runs add `uberdev-approved-with-concerns` (RFC 0002 §3.4). Both forms are idempotent — `gh` no-ops if the label is already present.
+
+   ```bash
+   case "$TRUST_TRAIL_STATE" in
+     GREEN)  TRUST_LABEL="uberdev-approved" ;;
+     YELLOW) TRUST_LABEL="uberdev-approved-with-concerns" ;;
+   esac
+   # Belt-and-braces: clear the OPPOSITE-tier label if present, so a re-run that
+   # downgrades GREEN→YELLOW (or upgrades YELLOW→GREEN) doesn't leave a stale
+   # contradictory label on the PR. Failures here are fail-soft (the new label
+   # add below is the authoritative artifact).
+   case "$TRUST_TRAIL_STATE" in
+     GREEN)  gh pr edit <N> --remove-label uberdev-approved-with-concerns 2>/dev/null || true ;;
+     YELLOW) gh pr edit <N> --remove-label uberdev-approved 2>/dev/null || true ;;
+   esac
+   ```
 
    ```bash
    # Mirror artifact 1's push-failure guard: if `gh pr edit` exits non-zero
@@ -649,7 +769,7 @@ On GREEN, emit three SHA-bound durable artifacts in lockstep (all reference the 
    # and the audit JSON below gets written without the label being applied.
    # `/merge` Phase 1.4 PATH_2 sub-condition (a) then fails downstream with a cryptic
    # `trust_trail_label_missing`. Per artifact-emission-failure prose below, exit 2.
-   if ! gh pr edit <N> --add-label uberdev-approved; then
+   if ! gh pr edit <N> --add-label "$TRUST_LABEL"; then
      echo "error: trust-trail label add failed (gh pr edit ... exited non-zero). Re-run /review-pr after resolving." >&2
      exit 2
    fi
@@ -677,21 +797,43 @@ On GREEN, emit three SHA-bound durable artifacts in lockstep (all reference the 
 {
   "pr": <int>,
   "sha": "${ANCHOR_SHA}",
-  "verdict": "APPROVE",
+  "verdict": "APPROVE" | "REVISIONS_REQUIRED" | "REJECT" | "BLOCKED",
+  "trust_trail_state": "GREEN" | "YELLOW" | "RED",
   "phases": {
     "phase1": {"status": "ran", "verdict": "APPROVE"},
     "phase2": {"status": "ran/APPROVE" | "skipped", "verdict": "APPROVE" | null},
+    "phase2_5": {
+      "status": "ran" | "skipped" | "blocked",
+      "issues_filed": <int>,
+      "by_severity": {
+        "blocker":  <int>,
+        "critical": <int>,
+        "major":    <int>
+      },
+      "overflow_count": <int>,
+      "halted_due_to_overflow": <bool>,
+      "halted": <bool>,
+      "filed_issue_urls": ["https://github.com/<owner>/<repo>/issues/<N>", ...],
+      "override_reason": null | "user-selected-emit-green-on-blocker-deferred"
+    },
     "phase3": {
       "status": "ran" | "skipped_no_checks" | "unreachable",
-      "outcome": "green" | "green_after_fix" | "skipped_no_checks",
+      "outcome": "green" | "green_after_fix" | "skipped_no_checks" | "halted" | "loop_cap_exhausted",
       "iterations": <int>,
       "failure_classes_seen": [],
-      "fix_pushes": []
+      "fix_pushes": [],
+      "ci_refused_issue_url": null | "https://github.com/.../issues/<N>"
     }
   },
   "timestamp": "<ISO8601>"
 }
 ```
+
+**`phases.phase2_5` block (RFC 0002 §3.4)** — present on every run where the Phase 2.5 sub-phase was reachable (i.e., Phase 1 + Phase 2 didn't crash before Step 6b). `status: "skipped"` when `DEFER_ISSUES_EFFECTIVE=0` (CLI flag or config disabled the sub-phase); `status: "blocked"` when the agent return YAML failed to parse; `status: "ran"` otherwise. The `halted`, `by_severity`, and `override_reason` fields are the load-bearing inputs for `/merge`'s `trust-trail-evaluator` per RFC 0002 §3.6. Legacy audit JSON (pre-RFC-0002) without this block → trust-trail-evaluator emits STALE, prompting `/review-pr` re-run.
+
+**`trust_trail_state` field (RFC 0002 §3.4)** — top-level GREEN/YELLOW/RED discriminator, redundant with the `phases.*` blocks but exposed at the JSON root for faster downstream gating (`/merge` can branch on a single string instead of recomputing the predicate from each phase block).
+
+**`phases.phase3.ci_refused_issue_url` (RFC 0002 §3.2)** — populated when Phase 3 halted on `ci-code-fixer` `status: REFUSED` and the failing test was filed as a CRITICAL-tier issue. `null` on all other Phase 3 outcomes.
 
 The JSON is **local debug telemetry only** — `.uberdev/` is gitignored, so the JSON does NOT cross-clone. `/merge` consumes the trailer as the load-bearing trust artifact and treats the JSON as a corroborating presence check. See `skills/merge-pipeline/SKILL.md` Phase 1.4 Path 2 for the consumer side.
 
@@ -717,9 +859,9 @@ See `skills/merge-pipeline/SKILL.md` Constants `RUN_ID_REGEX`. If the regex matc
 
 | Exit code | Condition |
 |-----------|-----------|
-| `0` | GREEN — Phase 1 verdict == `APPROVE` AND Phase 2 status ∈ {`ran/APPROVE`, `skipped`} |
-| `1` | Phase 1 verdict ∈ {`REJECT`, `REVISIONS_REQUIRED`} (regardless of Phase 2) OR **Phase 3 outcome ∈ {`halted`, `loop_cap_exhausted`}** |
-| `2` | Phase 2 status == `blocked` (fanout crash, agent error, aggregator failure, artifact-emission failure) |
+| `0` | GREEN OR YELLOW OR OVERRIDE_GREEN — Phase 1 verdict == `APPROVE` AND Phase 2 status ∈ {`ran/APPROVE`, `skipped`} AND Phase 3 outcome ∈ {`green`, `green_after_fix`, `skipped_no_checks`} AND (Phase 2.5 halted == false OR Phase 2.5 halt was overridden) |
+| `1` | Phase 1 verdict ∈ {`REJECT`, `REVISIONS_REQUIRED`} (regardless of Phase 2) OR **Phase 3 outcome ∈ {`halted`, `loop_cap_exhausted`}** OR **Phase 2.5 halted == true AND PHASE2_5_HALT_CHOICE ∈ {skip, spawn_solve}** (RFC 0002 §3.4) |
+| `2` | Phase 2 status == `blocked` (fanout crash, agent error, aggregator failure, artifact-emission failure) OR Phase 2.5 status == `blocked` (agent return YAML parse failure) |
 
 Exit code `2` is a **behavioral break** from the previous always-exit-0 contract. Callers that scripted `/review-pr` against the old "always exits successfully" prose must either ignore the exit code (preserve old behavior) or branch on it (use new behavior). The new contract surfaces silent reviewer-crash failures that the trust signal exists to eliminate. Documented in CHANGELOG.
 

@@ -86,7 +86,9 @@ commit:
 risks: []
 ```
 
-The caller (`/review-pr`) captures `commit.sha` and (on `status: APPLIED`) handles the upload-to-remote step. On `status: REFUSED`, the caller surfaces the `rationale` to the audit log under `ci_fix_dispatched` with a refusal subreason.
+The caller (`/review-pr`) captures `commit.sha` and (on `status: APPLIED`) handles the upload-to-remote step.
+
+**On `status: REFUSED` (RFC 0002 §3.2 — single-attempt halt):** the caller surfaces the `rationale` to the audit log under `ci_fix_dispatched` with a refusal subreason, files the failing test/lockfile + classifier `signal_anchor` as a CRITICAL-tier GH issue (via the `findings-to-issues` agent's BLOCKER/CRITICAL shape), emits user-visible halt prose to stderr (failure class + signal anchor + rationale + filed-issue URL + suggested `/uberdev:solve <issue>`), and exits 1. **The caller does NOT retry** — `REFUSED` is a deterministic decision (forbidden-pattern guard hit, not flake), and retrying re-classifies the same red CI, re-dispatches the same fixer, and burns 3 iterations of `CI_FIX_LOOP_CAP` on the same halt. This is a deliberate carve-out from the loop counter: the 3-iteration cap remains in force for genuine flake / transient classes (`flaky_infra`, `env_drift`); `REFUSED` exits immediately. See `commands/review-pr.md` Phase 3 Step 6c.5 POST-FIX `ci-code-fixer status: REFUSED` arm for the full caller-side handling.
 
 ## Output Rules — secret-leak prevention
 

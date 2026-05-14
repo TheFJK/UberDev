@@ -4,7 +4,34 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.25.0] - 2026-05-14
+## [0.26.0] - 2026-05-14
+
+### Changed (BREAKING — trust-trail contract)
+
+- **`/uberdev:review-pr` Phase 2.5 promoted from advisory to severity-tiered gating (RFC 0002).** The findings-to-issues sub-phase (added in PR #112, v0.24.0) previously declared `the sub-phase NEVER causes /review-pr or /simplify to exit non-zero` (`agents/findings-to-issues.md:187`); audit of the post-PR-#112 flow surfaced three silent-drop paths where a green trust trail co-existed with unresolved blocker findings, dropped Phase 2 `important` / Phase 1 `major` findings, and silent CI fixer refusals. RFC 0002 fixes all three with a tiered model:
+  - **`blocker` deferred → RED trail** (no `Reviewed-by` trailer, no `uberdev-approved` label, exit 1). `/merge` requires `--accept-blocker-deferred` to land.
+  - **`critical` deferred → YELLOW trail** (trailer carries `severity=critical-deferred count=N`, label becomes `uberdev-approved-with-concerns`). `/merge` requires `--accept-critical-deferred` to land.
+  - **`important` / `major` deferred → GREEN unchanged** (file silently, no @mention, no halt).
+  - **CI `ci-code-fixer` `status: REFUSED` → user-visible halt prose** (mirrors `billing_quota` shape) + file the failing test as a CRITICAL-tier issue + drop the 3-iteration retry (REFUSED is deterministic, not flake).
+  - Operator can opt out per-run via interactive AskUserQuestion option 3 (`Override — emit GREEN`), which logs `override_reason: "user-selected-emit-green-on-blocker-deferred"` in the audit JSON and requires `/merge --i-know-what-im-doing` to land downstream.
+- **Audit JSON shape** (`.uberdev/runs/<run-id>/review-pr-verdict.json`) gains `phases.phase2_5` and a top-level `trust_trail_state ∈ {GREEN, YELLOW, RED}` field. Legacy audit JSON (pre-v0.26.0) without `phases.phase2_5` triggers `trust-trail-evaluator` to emit `STALE` with rationale `audit JSON predates phase2_5 schema; re-run /uberdev:review-pr to refresh trail` — one-time friction; scoped to open PRs only.
+- **`/uberdev:merge` accepts three new override flags**: `--accept-blocker-deferred`, `--accept-critical-deferred`, `--i-know-what-im-doing` — all per-invocation only (no env-var, no config key) so muscle-memory use is discouraged.
+- **`trust-trail-evaluator` agent gains Phase 2.5 gate** (Process Step 1.5 — runs before structural primitives). Two new `TRUST_TRAIL_VERDICT_INVALID_SUBREASON_ENUM` members: `phase2_5_blocker_deferred`, `phase2_5_override_unacknowledged`.
+- **`findings-to-issues` agent**: severity filter extended to `{blocker, critical, important, major}` (was `{blocker, critical}`); BLOCKER/CRITICAL-tier issues now carry `@<pr-author>` @mention + `Blocks: #PR` backref; agent gains `halted: <bool>` + `by_severity: {blocker, critical, major}` + `filed_issue_urls: [...]` + `override_reason: <string|null>` in its return YAML; broken-feature overflow guard fires `halted: true` when truncated rows include BLOCKER/CRITICAL tier.
+
+### Migration
+
+- Existing in-flight PRs see `STALE` trust trail after the version bump per `trust-trail-evaluator` Step 1.5 legacy-audit branch. Re-run `/uberdev:review-pr` once on each open PR to refresh the trail with the new `phases.phase2_5` schema.
+- No data migration needed — issues are durable in GitHub; audit JSON is ephemeral per-PR-head and refreshed on each `/review-pr` run.
+- No feature flag — plugin code updates atomically when the marketplace pulls the new manifest.
+
+### Notes
+
+- **Scope of the BREAKING tag.** API surface (CLI flags, skill names, agent dispatch shapes) is preserved; behavioral break is in the trust-trail predicate (PR with blocker findings that previously emitted GREEN now emits RED). Audit JSON gains a new block additively; legacy consumers that don't read `phases.phase2_5` see no change in the fields they do read.
+- **Solo-dev workflow preservation.** For the personal-TODO-queue workflow ([[user_workflow_todo_queue]]), the design intentionally preserves the "land imperfect work + file TODOs" pattern for `important` / `major` findings (silent file, no halt). The halt path is reserved for `blocker` — by definition the findings the reviewer agents consider unshippable.
+- **Rollback procedure.** Pin the marketplace to `0.25.0` in `.claude-plugin/marketplace.json` via the user-side override path; no code rollback is required server-side.
+
+
 
 ### Added
 

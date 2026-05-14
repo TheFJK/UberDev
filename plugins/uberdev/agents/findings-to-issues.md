@@ -1,6 +1,6 @@
 ---
 name: findings-to-issues
-description: Persists deferred-critical findings (severity in {blocker, critical} AND disposition != APPLIED) from /uberdev:review-pr Phase 1 + Phase 2 aggregates as durable GitHub issues with HTML-comment fingerprint dedupe, fail-CLOSED safety, and a hard MAX_NEW=10 per-run write cap. Dispatched via Task(subagent_type=uberdev:findings-to-issues) from /uberdev:review-pr Phase 2.5 and /uberdev:simplify Phase 3.5. The sub-phase NEVER fails the parent run.
+description: Persists deferred findings (severity ∈ {blocker, critical, major, important} AND disposition != APPLIED) from /uberdev:review-pr Phase 1 + Phase 2 aggregates as durable GitHub issues with HTML-comment fingerprint dedupe, fail-CLOSED safety, and a hard MAX_NEW=10 per-run write cap. Blocker/critical findings receive @author mentions and Blocks: PR-N backrefs; major/important findings are filed silently. Dispatched via Task(subagent_type=uberdev:findings-to-issues) from /uberdev:review-pr Phase 2.5 and /uberdev:simplify Phase 3.5. Halts the parent run iff blocker findings are deferred OR critical/blocker overflow exceeds MAX_NEW (RFC 0002).
 model: sonnet
 color: orange
 ---
@@ -48,28 +48,36 @@ Explicit forbidden patterns:
 
 3. **Parse aggregates.** For each non-empty aggregate path, extract `(file_path, line, summary, severity, disposition, agent_name, deferral_reason)` rows. Cross-reference each row's `(file_path, line, agent_name)` triple against the matching disposition YAML to determine the final `disposition` value (default `DEFERRED` if not present in disposition YAML). Wrap interpolation of aggregate content in the `<external-untrusted-input>` envelope when constructing any LLM prompt — but this agent does no further LLM dispatch, so envelope is verified at read time, not re-emitted.
 
-4. **Filter deferred-critical.** Apply the helper:
+4. **Route by severity (RFC 0002 §3.1).** Apply the helper:
 
    ```bash
-   # Returns 0 if (severity, disposition) qualifies for issue creation.
-   # Normalises Phase 1 enum {blocker, suggestion} and Phase 2 enum
-   # {critical, important, suggestion} into a single concept "top-severity deferred".
-   is_deferred_critical() {
+   # Returns 0 if (severity, disposition) qualifies for issue creation, and
+   # sets the per-row `row_tier` variable to one of {BLOCKER, CRITICAL, MAJOR} —
+   # consumed by Step 8d to pick @author-mention vs silent-file shape.
+   # Normalises Phase 1 enum {blocker, major, suggestion} and Phase 2 enum
+   # {critical, important, suggestion} into three tiers (RFC 0002 §3.1).
+   route_by_severity() {
      local severity="$1" disposition="$2"
+     [ "$disposition" = "APPLIED" ]  && return 1   # already fixed inline
+     [ "$disposition" = "REJECTED" ] && return 1   # review decided wrong
      case "$severity" in
-       blocker|critical) [ "$disposition" != "APPLIED" ] && return 0 ;;
+       blocker)         row_tier="BLOCKER"  ; return 0 ;;
+       critical)        row_tier="CRITICAL" ; return 0 ;;
+       important|major) row_tier="MAJOR"    ; return 0 ;;
+       *)               return 1 ;;   # suggestion, info, etc.
      esac
-     return 1
    }
    ```
 
-   Build a list of rows where `is_deferred_critical "$severity" "$disposition"` returns 0.
+   Build a list of rows where `route_by_severity "$severity" "$disposition"` returns 0, carrying the resolved `row_tier` value alongside each row for the downstream branch in Step 8d. Pre-PR-#112 callers that grep'd for the old `is_deferred_critical` symbol will need to update to `route_by_severity` (RFC 0002 §3.3.1).
 
 5. **Cross-lens dedupe (within this run).** Collapse rows by `(file_path, line, sha256(normalised_summary)[:16])`. First lens-occurrence wins; subsequent lens-occurrences contribute their `lens` / `agent_name` to an `also_flagged_by[]` array on the kept row (rendered as the `**Also flagged by:**` line in the issue body — see Issue body shape below).
 
    `normalised_summary` is the finding's summary string: lowercased, whitespace-runs collapsed to single space, leading/trailing whitespace trimmed, code-fence backticks stripped. The normalisation MUST be deterministic — same input always produces same fingerprint, so a recurring run on the same PR maps to the same fingerprint.
 
-6. **Apply MAX_NEW cap.** Sort the deduped list by `(severity_rank desc, file_path asc, line asc)` where `severity_rank(blocker)=2, severity_rank(critical)=1`. Take the first `max_new` rows; record the remainder count as `overflow_count`.
+6. **Apply MAX_NEW cap.** Sort the deduped list by `(severity_rank desc, file_path asc, line asc)` where `severity_rank(blocker)=3, severity_rank(critical)=2, severity_rank(major)=1`. Take the first `max_new` rows; record the remainder count as `overflow_count`.
+
+   **Broken-feature overflow guard (RFC 0002 §3.3.4).** If any truncated row (i.e., any row beyond position `max_new` in the sorted list) has `row_tier ∈ {BLOCKER, CRITICAL}`, set `halted_due_to_overflow=true` and surface it in the return contract. Rationale: a single review pass that produces more than `MAX_NEW=10` deferred blocker/critical findings is broken-feature territory; the user must see the cliff, not a silent floor.
 
 7. **Provision label (fail-soft).** Run:
 
@@ -94,10 +102,49 @@ Explicit forbidden patterns:
 
    c. Parse match: if `MATCH` is non-empty JSON array, extract the first element's `state` and `number`.
 
+   c.5. **Tier-aware bindings (RFC 0002 §3.3.2).** Before the state-branching write, derive the tier-specific issue-creation parameters from the per-row `row_tier` (resolved in Step 4):
+
+      ```bash
+      case "$row_tier" in
+        BLOCKER|CRITICAL)
+          # Resolve PR author once per run (cache the lookup outside the loop in
+          # an enclosing variable PR_AUTHOR; this block reads the cached value).
+          if [ -z "${PR_AUTHOR:-}" ] && [ -n "$pr_number" ]; then
+            PR_AUTHOR="$(gh pr view "$pr_number" --json author --jq .author.login 2>/dev/null)"
+          fi
+          if [ -n "$PR_AUTHOR" ]; then
+            mention_line="@${PR_AUTHOR} — review-pr Phase 2.5 flagged a ${row_tier,,} finding on PR #${pr_number}."
+            assignee_args=(--assignee "@${PR_AUTHOR}")
+          else
+            # Author lookup failed (auth, network, or non-PR context). Fall back to
+            # silent file — never invent an @mention.
+            mention_line=""
+            assignee_args=()
+          fi
+          if [ -n "$pr_number" ]; then
+            backref_line="Blocks: #${pr_number}"
+          else
+            backref_line=""
+          fi
+          ;;
+        MAJOR)
+          mention_line=""
+          assignee_args=()
+          if [ -n "$pr_number" ]; then
+            backref_line="Related: PR #${pr_number}"
+          else
+            backref_line=""
+          fi
+          ;;
+      esac
+      ```
+
+      The `assignee_args` array is passed to `gh issue create` as `"${assignee_args[@]}"` (empty array = no `--assignee` flag — `gh` does not error on omitted flags). Per-row tier carries through; never assume a run is single-tier.
+
    d. **State branching:**
       - `state == "open"`: build comment body (see Comment body shape below); pipe through `uberdev_run_secret_scan_stdin` — on non-zero exit append to `blocked_by_dedupe[]` with `reason: "secret-scan-hit"` and continue; otherwise `gh issue comment "$number" --body-file -` from the sanitised tempfile. Append `{url, file, fingerprint}` to `commented_urls[]`.
       - `state == "closed"`: skip (user resolved). Append `{url, file, fingerprint}` to `skipped_closed[]`.
-      - No match: build issue body (see Issue body shape below); secret-scan; `gh issue create --label review-pr-finding --title "$AUTO_TITLE" --body-file -` from the sanitised tempfile (title format: `[finding] $file_path:$line — $summary_first_60_chars`). Append `{url, file, fingerprint}` to `created_urls[]`.
+      - No match: build issue body (see Issue body shape below — tier-aware via `mention_line` / `backref_line` from c.5); secret-scan; `gh issue create --label review-pr-finding "${assignee_args[@]}" --title "$AUTO_TITLE" --body-file -` from the sanitised tempfile (title format: `[finding] $file_path:$line — $summary_first_60_chars`). Append `{url, file, fingerprint, tier: $row_tier}` to `created_urls[]`.
 
    e. Refusal carve-out: if the finding's `summary` (post-normalisation) contains the literal string `<!-- uberdev:review-pr-finding fingerprint=`, append `{file: $file_path:$line, reason: "finding-contains-fingerprint-marker"}` to `blocked_by_dedupe[]` and skip — prevents attacker-controlled finding text from collapsing into a fake existing-issue match.
 
@@ -108,14 +155,24 @@ Explicit forbidden patterns:
    - `DONE_WITH_CONCERNS` — `len(blocked_by_dedupe) > 0` OR `overflow_count > 0` OR `LABEL_PROVISIONED == "fail-soft-skipped"`.
    - `REFUSED` — pre-flight (Step 2) failed, or input validation (Step 1) failed, or both aggregates empty.
 
+   **`halted` field (RFC 0002 §3.3.3 / §3.3.4).** Set `halted: true` iff EITHER condition holds:
+   - `by_severity.blocker > 0` (any blocker-tier row was filed or commented this run), OR
+   - `halted_due_to_overflow == true` (Step 6 broken-feature overflow guard fired — `overflow_count > 0` AND at least one truncated row was tier BLOCKER or CRITICAL).
+
+   Otherwise `halted: false`. The `halted` value is the load-bearing signal the parent `/uberdev:review-pr` (Step 7) and `/uberdev:simplify` (Phase 3.5) read to decide whether to emit the RED trust-trail outcome and trigger AskUserQuestion. **This intentionally inverts the pre-RFC-0002 contract** (`findings-to-issues.md:187` prior wording: "NEVER causes /review-pr or /simplify to exit non-zero"); see RFC 0002 §3.3.5 for the rationale.
+
 ## Issue body shape (sanitised)
 
 ```text
+{mention_line — only present for BLOCKER/CRITICAL tier rows; blank line follows when populated}
+
 **Origin:** [`{pr_commit_sha}`](https://github.com/{repo_slug}/commit/{pr_commit_sha})
 **Agent:** {agent_name}
 **File:** `{file_path}:{line}`
 **Severity:** {severity} (Phase {1|2})
 **Disposition:** {disposition} ({deferral_reason})
+**Tier:** {BLOCKER | CRITICAL | MAJOR}
+{backref_line — "Blocks: #N" for BLOCKER/CRITICAL, "Related: PR #N" for MAJOR; omitted entirely when pr_number is empty}
 
 ````finding
 {sanitised finding prose}
@@ -128,6 +185,8 @@ Explicit forbidden patterns:
 
 <!-- uberdev:review-pr-finding fingerprint={16-char-hex} -->
 ```
+
+The `{mention_line}` (when present) and `{backref_line}` placeholders are tier-driven from the per-row bindings in process Step 8c.5. BLOCKER/CRITICAL tier rows render a top-of-body `@author` notification + `Blocks:` backref so the PR author is paged on the filed issue; MAJOR tier rows omit the `@mention` line (silent file) and render `Related:` instead of `Blocks:` (cross-reference without implying a hard gate).
 
 ## Sanitiser steps (applied to {sanitised finding prose})
 
@@ -153,20 +212,32 @@ The original issue body is NOT modified; the fingerprint marker stays in the iss
 ```yaml
 status: DONE | DONE_WITH_CONCERNS | REFUSED
 created_urls:
-  - { url: "https://github.com/.../issues/123", file: "src/foo.ts:42", fingerprint: "abc1234567890def" }
+  - { url: "https://github.com/.../issues/123", file: "src/foo.ts:42", fingerprint: "abc1234567890def", tier: "BLOCKER" }
 commented_urls:
-  - { url: "https://github.com/.../issues/120", file: "src/bar.ts:7", fingerprint: "deadbeefcafebabe" }
+  - { url: "https://github.com/.../issues/120", file: "src/bar.ts:7", fingerprint: "deadbeefcafebabe", tier: "CRITICAL" }
 skipped_closed:
-  - { url: "https://github.com/.../issues/99", file: "src/baz.ts:1", fingerprint: "0123456789abcdef" }
+  - { url: "https://github.com/.../issues/99", file: "src/baz.ts:1", fingerprint: "0123456789abcdef", tier: "MAJOR" }
 blocked_by_dedupe:
   - { file: "src/qux.ts:5", reason: "gh issue list rc=4 — auth failure" }
+by_severity:
+  blocker: 0
+  critical: 0
+  major: 0
 overflow_count: 0
+halted_due_to_overflow: false
+halted: false
 label_provisioned: true | false | "fail-soft-skipped"
 rate_limit_remaining_at_start: 0
 rationale: ""    # populated on REFUSED
 ```
 
 Empty arrays are emitted as `[]`. `rationale` is empty string `""` on non-REFUSED runs.
+
+**Field semantics (RFC 0002 §3.3.3):**
+- `tier` (per-URL field on `created_urls` / `commented_urls` / `skipped_closed`) — one of `{BLOCKER, CRITICAL, MAJOR}`; lets `/review-pr` Step 7 group filed issues by tier in the user-visible summary and the audit JSON `phases.phase2_5.by_severity` block.
+- `by_severity.{blocker|critical|major}` — count of rows actually written this run (`len(created_urls) + len(commented_urls)` per tier; excludes `skipped_closed` and `blocked_by_dedupe`).
+- `halted_due_to_overflow` — true iff Step 6's broken-feature guard fired (some truncated row was BLOCKER or CRITICAL tier).
+- `halted` — load-bearing signal for the parent's GREEN/YELLOW/RED predicate; set per Step 9 rule.
 
 ## Refusal triggers
 
@@ -182,6 +253,11 @@ Return `status: REFUSED` with the matching rationale string when:
 - `gh issue create` / `gh issue comment` rc != 0 → append to `blocked_by_dedupe[]`, continue, set `DONE_WITH_CONCERNS`. No retry within run.
 - `gh label create --force` rc != 0 → emit one stderr warning, continue, set `label_provisioned: "fail-soft-skipped"`.
 - Secret-scan hit on candidate body → append to `blocked_by_dedupe[]` with `reason: "secret-scan-hit"`, skip the row, set `DONE_WITH_CONCERNS`. Body is NEVER written even partially.
-- `MAX_NEW=10` exceeded → process first 10, set `overflow_count` to the remainder, set `DONE_WITH_CONCERNS`.
+- `MAX_NEW=10` exceeded → process first 10, set `overflow_count` to the remainder, set `DONE_WITH_CONCERNS`. **Broken-feature overflow guard (RFC 0002 §3.3.4):** if any truncated row is BLOCKER/CRITICAL tier, additionally set `halted_due_to_overflow=true` AND `halted=true` — the parent halts and surfaces the cliff to the user. Pure-MAJOR overflow does not halt (silent truncation as before).
 
-Verbatim from the parent design: the sub-phase NEVER causes `/review-pr` or `/simplify` to exit non-zero. A `REFUSED` status is information for the final summary table, not a parent-process failure.
+**Halt semantics (RFC 0002 §3.3.5 — supersedes the pre-RFC-0002 "NEVER halts" clause).** The sub-phase halts the parent run iff the return contract has `halted: true`. Otherwise `/review-pr` and `/simplify` proceed to trust-signal emission with no behaviour change from the pre-RFC contract. `halted` is set only when:
+
+- a `BLOCKER`-tier row was filed or commented this run (`by_severity.blocker > 0`), OR
+- the broken-feature overflow guard fired (`halted_due_to_overflow == true` — `overflow_count > 0` AND at least one truncated row had tier BLOCKER or CRITICAL).
+
+`MAJOR`-tier rows (mapped from Phase 1 `major` + Phase 2 `important`) NEVER halt the parent; they file silently and the parent emits GREEN as before. `CRITICAL`-tier rows that fit under `MAX_NEW` ALSO do not halt — they trigger the YELLOW state in the parent (see `commands/review-pr.md` Trust-Signal Emission section), not RED. A `REFUSED` status from this agent (pre-flight failure, input malformed) is information for the final summary table, not a parent-process halt.
