@@ -364,7 +364,7 @@ If parse fails → re-dispatch the failed agent ONCE with the format example pin
 
 > **Tooling caveat — AskUserQuestion is a deferred tool in current Claude Code harnesses.** Calling it without first loading its schema fails with `InputValidationError`. Before your first call, run `ToolSearch` with `query: "select:AskUserQuestion"` to load the schema. **Do NOT silently auto-pick on tool-load failure** — that turns `/solve` into `/turbo` invisibly. If `ToolSearch` itself fails (rare), abort Phase 2 with a clear stderr error and surface to the user; never fall through to auto-pick in non-turbo mode.
 
-**Visual companion (interactive only).** The brainstorm skill ships a browser-based visual companion (`skills/brainstorm/scripts/server.cjs` + `start-server.sh`, full protocol in `skills/brainstorm/visual-companion.md`). When `/solve` invokes the orchestrator instead of the brainstorm skill directly, Phase 2 inherits the same affordance — visual questions belong in the browser, conceptual questions in the terminal. The companion reuses the existing brainstorm scripts end-to-end; the orchestrator does NOT duplicate them.
+**Visual companion (interactive only).** The brainstorm skill ships a browser-based visual companion (`skills/brainstorm/scripts/server.cjs` + `start-server.sh`, full protocol in `skills/brainstorm/visual-companion.md`). When `/solve` invokes the orchestrator instead of the brainstorm skill directly, Phase 2 inherits the same affordance — visual questions belong in the browser, conceptual questions in the terminal.
 
 **When to offer.** At Phase 2 start, BEFORE the first clarifying question, if any of these visual signals fire:
 
@@ -384,9 +384,9 @@ Use `AskUserQuestion` with 2 options (`Yes` / `No`) so the consent is structural
 **Starting the server (first visual question only).** Resolve the plugin scripts dir via plugin-root env var with a `find` fallback, then invoke `start-server.sh`:
 
 ```bash
-PLUGIN_SCRIPTS="${CLAUDE_PLUGIN_ROOT:-}/skills/brainstorm/scripts"
+PLUGIN_SCRIPTS="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}/skills/brainstorm/scripts"
 if [[ ! -d "$PLUGIN_SCRIPTS" ]]; then
-  PLUGIN_SCRIPTS="$(find "${HOME}/.claude/plugins" -type d -path '*/uberdev/skills/brainstorm/scripts' 2>/dev/null | head -1)"
+  PLUGIN_SCRIPTS="$(find "${HOME}/.claude/plugins" "${HOME}/.cursor/plugins" -type d -path '*/uberdev/skills/brainstorm/scripts' 2>/dev/null | head -1)"
 fi
 if [[ ! -d "$PLUGIN_SCRIPTS" ]]; then
   echo "uberdev brainstorm scripts not found — falling back to terminal-only Phase 2" >&2
@@ -408,7 +408,9 @@ Tell the user the URL ONCE on first use. The server stays alive across turns —
 
 **The loop (browser path).** For each visual question: `Write` a semantic-named HTML content fragment (e.g. `q1-layout.html`, `q2-theme.html`, never reuse filenames) to `$SCREEN_DIR`, give a 1-2 sentence text summary ("Showing 3 layout options for the dashboard"), tell the user to *click an option, press LOCK IN, then switch back here and hit enter — any input even `.` works*, and end your turn. The plugin's `inject-brainstorm-answers` hook auto-prepends `<uberdev-brainstorm-answers>` to their next prompt with the locked-in `type:"submit"` event. Treat that block as authoritative — do NOT ask the user to repeat their choice in chat. Full protocol (CSS classes, frame template, event format, content-fragment vs full-document rule, design tips) lives in `skills/brainstorm/visual-companion.md`.
 
-**Merging into `qa_answers`.** Whether the answer came from `AskUserQuestion` (terminal) or the `<uberdev-brainstorm-answers>` injection (browser), normalize into the same `qa_answers` shape that Phase 3 spec-writer consumes. Suggested fields: `{question, answer, source: "terminal" | "browser"}`. Browser-path authoritative answer is the `type:"submit"` event's `choice` (or full `selections[]` for multi-select); earlier `type:"click"` events are exploration signal only. The structured shape is orchestrator-internal bookkeeping; when dispatched to `spec-writer`, serialise to markdown bullets matching `agents/spec-writer.md:30`'s input contract (the `source` field is advisory and not consumed by spec-writer today).
+**Merging into `qa_answers`.** Whether the answer came from `AskUserQuestion` (terminal) or the `<uberdev-brainstorm-answers>` injection (browser), normalize into the same `qa_answers` shape that Phase 3 spec-writer consumes. Suggested fields: `{question, answer, source: "terminal" | "browser"}`. Browser-path authoritative answer is the `type:"submit"` event's `choice` (or full `selections[]` for multi-select); earlier `type:"click"` events are exploration signal only.
+
+**Dispatching to `spec-writer`.** The structured `qa_answers` shape is orchestrator-internal bookkeeping; when dispatched to `spec-writer`, serialise to markdown bullets matching `agents/spec-writer.md:30`'s input contract (the `source` field is advisory and not consumed by spec-writer today).
 
 **Unloading between visual and terminal questions.** When the next question is conceptual (terminal), `Write` a `waiting.html` (or `waiting-2.html`, etc.) fragment to `$SCREEN_DIR` BEFORE switching to `AskUserQuestion`, so the user does not stare at a stale resolved mockup. Verbatim fragment from `skills/brainstorm/visual-companion.md:118-127`:
 
