@@ -266,7 +266,17 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
     })
     ```
 
-    If `ToolSearch` fails, `/review-pr` aborts with stderr error — **NEVER silently auto-pick** (mirrors `orchestrator/SKILL.md:190-193` and 6c.6 HALT). Capture the choice into `PHASE2_5_HALT_CHOICE ∈ {solve_suggestion, skip, override}`.
+    **ToolSearch fail-fast (concretized — O3 / #116).** When `ToolSearch` fails to load `AskUserQuestion`, `/review-pr` aborts with stderr error — **NEVER silently auto-pick** (mirrors `orchestrator/SKILL.md:190-193` and 6c.6 HALT). The deterministic shell:
+
+    ```bash
+    if ! ToolSearch("select:AskUserQuestion") >/dev/null 2>&1; then
+      echo "error: AskUserQuestion tool unavailable — Phase 2.5 halt-choice cannot be presented; aborting" >&2
+      audit_event halt-tool-unavailable
+      exit 1
+    fi
+    ```
+
+    Capture the choice into `PHASE2_5_HALT_CHOICE ∈ {solve_suggestion, skip, override}`.
 
     **Non-interactive (`TURBO=1` OR no TTY):** default to `solve_suggestion` (it preserves actionable information for the operator who later reads the run log) with the prose summary above. `override` is interactive-only by design — an unattended override poisons the trust trail with no human review.
 
