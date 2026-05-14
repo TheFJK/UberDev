@@ -10,7 +10,7 @@ Land approved PRs into the integration branch — ordering, strategy, conflict r
 
 **RULES:** Do NOT use the Task tool or internal subagents. The skill body owns all logic.
 
-**Usage:** `/merge [<PR#> | --all] [--integration-branch=<name>]`
+**Usage:** `/merge [<PR#> | --all] [--integration-branch=<name>] [--accept-blocker-deferred] [--accept-critical-deferred] [--i-know-what-im-doing]`
 
 - No args → context-aware: single PR if on a PR branch, else discover and land all eligible open PRs against integration_branch.
 - `<PR#>` → land a specific PR.
