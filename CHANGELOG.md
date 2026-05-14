@@ -4,6 +4,27 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.1] - 2026-05-14
+
+### Added (test coverage)
+
+- **T1–T7 — structural-grep tests for RFC 0002 surfaces.** Locks the GREEN/YELLOW/RED predicate prose and `phases.phase2_5` audit JSON schema in `commands/review-pr.md` (T1, T2); the `halted` + `by_severity` + per-URL `tier` return-contract fields in `agents/findings-to-issues.md` (T3, T6); the three new `/merge` override flags (`--accept-blocker-deferred`, `--accept-critical-deferred`, `--i-know-what-im-doing`) in both `commands/merge.md` and `skills/merge-pipeline/SKILL.md` (T4); the `ci-code-fixer` REFUSED halt path in `commands/review-pr.md` Phase 3 6c.5 (T5); the broken-feature overflow guard in `agents/findings-to-issues.md` Step 6 (T6); and the `trust-trail-evaluator` Phase 2.5 gate (Step 1.5) in a new `tests/trust-trail-evaluator.test.sh` file (T7).
+- **First structural-grep coverage for `agents/trust-trail-evaluator.md`.** The agent was previously uncovered; T7 introduces the dedicated test file mirroring the per-agent-file convention used elsewhere in `tests/`.
+
+### Added (observability)
+
+- **O1 — `audit-json-phase2_5-parse-failure` audit event.** Distinguishes "phase2_5 block absent in legacy audit" (jq exit 1 — fail-open, no event) from "phase2_5 block present but malformed" (jq exit 2 — emit new event with `data.jq_error` truncated to 200 chars). Extends `AUDIT_EVENT_ENUM` in `skills/merge-pipeline/SKILL.md` (+ M86.8 set-equality assertion in `tests/merge.test.sh`). Fail-open behaviour preserved — parse failure is auditable but does NOT halt the run.
+- **O2 — `author_lookup_failed` return field on `findings-to-issues`.** Captures `gh pr view <N> --json author` exit-code failure into a typed boolean return field. Adds integer regex guard (`[[ "$pr_number" =~ ^[0-9]+$ ]]`) before the `gh` call (security defence-in-depth).
+- **O3 — Explicit-bash ToolSearch fail-fast in `review-pr.md` Step 6b.1.** Concretizes the prior prose contract ("If `ToolSearch` fails, `/review-pr` aborts — NEVER silently auto-pick") into deterministic shell with `audit_event halt-tool-unavailable; exit 1`. Mirrors the existing 6c.6 HALT pattern.
+- **O4 — `is_transient` field on `blocked_by_dedupe[]` entries.** Splits `gh issue create` write failures into transient (rc=429, HTTP 5xx, rate limit, secondary rate) vs permanent (everything else; conservative default). 200-char stderr truncation preserved (security Note B).
+- **O5 — CI-REFUSED issue creation refactored to `findings-to-issues` dispatch.** Replaces the inline `gh issue create` shell in `commands/review-pr.md` Phase 3 6c.5 with a `Task(subagent_type: uberdev:findings-to-issues)` dispatch carrying a synthetic single-row aggregate wrapped in `<external-untrusted-input source="ci-refused-synthetic">`. Eliminates prose-drift risk between the two issue-creation sites. External effects of Phase 3 6c.5 (issue title, body, labels, `ci_refused_issue_url` audit field) unchanged.
+
+### Notes
+
+- **T8 (synthetic-PR fixture-runner integration test) and T9 (AskUserQuestion halt-choice integration test) remain deferred to v0.27 per issue #116.** Both require a 350–560-line fixture-runner harness that does not yet exist; tracked in #116 surfacing in this release's PR description as a known gap.
+- **Scope.** Purely additive: no public-API removal, no enum-member removal, no breaking-change tag. The new `AUDIT_EVENT_ENUM` member (`audit-json-phase2_5-parse-failure`) is additive observability and does not affect existing consumers.
+- **`ci-refused-synthetic` source attribute is new** in the `findings-to-issues` accepted-source allow-list (`agents/findings-to-issues.md` Step 1) alongside `post-impl-review-aggregate` and `simplify-aggregate`. The closed allow-list now has 3 members.
+
 ## [0.26.0] - 2026-05-14
 
 ### Changed (BREAKING — trust-trail contract)
