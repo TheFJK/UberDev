@@ -25,6 +25,18 @@ assert_no_grep() {
   fi
 }
 
+# Local assert_grep — mirrors the inline form used by sibling tests
+# (tests/simplify.test.sh). Section-agnostic positive grep.
+assert_grep() {
+  local file="$1" pattern="$2" desc="$3"
+  if grep -qE -e "$pattern" "$file"; then
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"; echo "        file: $file"; echo "        pattern: $pattern"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
 echo "## findings-to-issues fixture suites"
 
 # ---------- gh-command mocks (inline functions) ----------
@@ -249,6 +261,40 @@ assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
 assert_in_section "$AGENT_MD" '^## Return contract' '^## Refusal triggers' \
   'halted_due_to_overflow.*true.*halted.*true|halted=true.*halted_due_to_overflow|halted_due_to_overflow == true' \
   'T6.3 — halted_due_to_overflow == true implies halted == true (RFC 0002 §3.3.5)'
+
+### Suite 11: O2/O4 observability locks ----------
+echo
+echo "### Suite 11: O2 author_lookup_failed + O4 is_transient (RFC 0002 observability)"
+
+# O2.1 — return contract documents author_lookup_failed: bool
+assert_in_section "$AGENT_MD" '^## Return contract' '^## Refusal triggers' \
+  'author_lookup_failed' \
+  'O2.1 — return contract documents author_lookup_failed field (#116 O2)'
+
+# O2.2 — integer regex guard on $pr_number (defence-in-depth per security Note A)
+assert_grep "$AGENT_MD" \
+  'pr_number.*=~.*\^\[0-9\]\+\$|=~ \^\[0-9\]\+\$' \
+  'O2.2 — agent enforces integer regex guard on $pr_number before gh pr view (security Note A)'
+
+# O4.1 — return contract documents is_transient on blocked_by_dedupe[] entries
+assert_in_section "$AGENT_MD" '^## Return contract' '^## Refusal triggers' \
+  'is_transient' \
+  'O4.1 — return contract documents is_transient field on blocked_by_dedupe[] (#116 O4)'
+
+# O4.2 — 200-char truncation runs BEFORE is_transient classifier (security Note B)
+# Locate the truncation literal and the classifier grep; assert truncation precedes.
+L_TRUNC=$(grep -n 'TRUNCATED_OUTPUT.*head -c 200\|head -c 200.*TRUNCATED_OUTPUT' "$AGENT_MD" | head -n 1 | cut -d: -f1)
+L_CLASSIFY=$(grep -n 'is_transient=true\|HTTP 429.*rate limit' "$AGENT_MD" | head -n 1 | cut -d: -f1)
+if [[ -n "$L_TRUNC" && -n "$L_CLASSIFY" && "$L_TRUNC" -lt "$L_CLASSIFY" ]]; then
+  PASS=$((PASS+1)); echo "  PASS  O4.2 — 200-char truncation precedes is_transient classifier (security Note B; L_TRUNC=$L_TRUNC < L_CLASSIFY=$L_CLASSIFY)"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  O4.2 — truncation MUST precede classifier (L_TRUNC=$L_TRUNC L_CLASSIFY=$L_CLASSIFY)"
+fi
+
+# O4.3 — classifier transient-triggers documented (rc=429 OR stderr 5xx/rate-limit)
+assert_grep "$AGENT_MD" \
+  'rc.*-eq 429|HTTP 5\[0-9\]\[0-9\]|rate limit|secondary rate' \
+  'O4.3 — is_transient classifier triggers documented (design decision D9)'
 
 echo
 echo "## Summary"

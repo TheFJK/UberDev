@@ -109,9 +109,27 @@ Explicit forbidden patterns:
         BLOCKER|CRITICAL)
           # Resolve PR author once per run (cache the lookup outside the loop in
           # an enclosing variable PR_AUTHOR; this block reads the cached value).
-          if [ -z "${PR_AUTHOR:-}" ] && [ -n "$pr_number" ]; then
-            PR_AUTHOR="$(gh pr view "$pr_number" --json author --jq .author.login 2>/dev/null)"
-          fi
+            if [ -z "${PR_AUTHOR:-}" ]; then
+              if [[ ! "$pr_number" =~ ^[0-9]+$ ]]; then
+                # O2 — argv-integer regex guard (security Note A). Empty pr_number
+                # OR non-numeric → skip the gh lookup; carry the failure into the
+                # return contract.
+                PR_AUTHOR=""
+                author_lookup_failed=true
+              else
+                # Capture stderr alongside stdout; the diagnostic is part of the
+                # return contract when rc != 0.
+                PR_AUTHOR_OUT=$(gh pr view "$pr_number" --json author --jq .author.login 2>&1)
+                rc=$?
+                if [ "$rc" -ne 0 ]; then
+                  PR_AUTHOR=""
+                  author_lookup_failed=true
+                else
+                  PR_AUTHOR="$PR_AUTHOR_OUT"
+                  author_lookup_failed=false
+                fi
+              fi
+            fi
           if [ -n "$PR_AUTHOR" ]; then
             mention_line="@${PR_AUTHOR} — review-pr Phase 2.5 flagged a ${row_tier,,} finding on PR #${pr_number}."
             assignee_args=(--assignee "@${PR_AUTHOR}")
@@ -148,7 +166,24 @@ Explicit forbidden patterns:
 
    e. Refusal carve-out: if the finding's `summary` (post-normalisation) contains the literal string `<!-- uberdev:review-pr-finding fingerprint=`, append `{file: $file_path:$line, reason: "finding-contains-fingerprint-marker"}` to `blocked_by_dedupe[]` and skip — prevents attacker-controlled finding text from collapsing into a fake existing-issue match.
 
-   f. Write-failure handling: if `gh issue create` or `gh issue comment` returns non-zero, log to stderr `gh issue write rc=$rc for fingerprint=$FP`, append `{file, reason: "gh-write-rc=$rc"}` to `blocked_by_dedupe[]`, set `status: DONE_WITH_CONCERNS`, and continue to next row — NEVER retry within the same run.
+   f. Write-failure handling with transient/permanent classifier (O4 — design decision D9): if `gh issue create` or `gh issue comment` returns non-zero, capture combined stderr+stdout into `CREATE_OUTPUT`, truncate to 200 chars BEFORE the regex classifier (security Note B — bounds attacker-influenced stderr substring), then classify the failure (see bash block below for the literal trigger regex). Append the typed entry to `blocked_by_dedupe[]`, set `status: DONE_WITH_CONCERNS`, and continue to next row — NEVER retry within the same run.
+
+      ```bash
+        # Capture combined stderr+stdout. Step 8d's gh issue create call has
+        # already populated CREATE_OUTPUT; reuse it here.
+        if [ "$rc" -ne 0 ]; then
+          TRUNCATED_OUTPUT=$(printf '%s' "$CREATE_OUTPUT" | head -c 200)
+          is_transient=false
+          # rc=429 is the conventional GH API rate-limit; HTTP 5xx is transient.
+          # 4xx other than 429 is permanent (per Azure Architecture Center).
+          if [ "$rc" -eq 429 ] || printf '%s' "$TRUNCATED_OUTPUT" | grep -qE 'HTTP 429|rate limit|secondary rate|HTTP 5[0-9][0-9]'; then
+            is_transient=true
+          fi
+          blocked_by_dedupe+=("{file: \"$file_path:$line\", reason: \"gh issue write rc=$rc — $TRUNCATED_OUTPUT\", is_transient: $is_transient}")
+          log_stderr "gh issue write rc=$rc for fingerprint=$FP (is_transient=$is_transient)"
+          continue
+        fi
+      ```
 
 9. **Emit return YAML.** Format the return contract block (see Return Contract section below). Final `status` resolves as:
    - `DONE` — all rows processed cleanly; `len(blocked_by_dedupe) == 0` AND no rate-limit halt AND envelope OK.
@@ -218,7 +253,7 @@ commented_urls:
 skipped_closed:
   - { url: "https://github.com/.../issues/99", file: "src/baz.ts:1", fingerprint: "0123456789abcdef", tier: "MAJOR" }
 blocked_by_dedupe:
-  - { file: "src/qux.ts:5", reason: "gh issue list rc=4 — auth failure" }
+  - { file: "src/qux.ts:5", reason: "gh issue list rc=4 — auth failure", is_transient: false }
 by_severity:
   blocker: 0
   critical: 0
@@ -226,6 +261,7 @@ by_severity:
 overflow_count: 0
 halted_due_to_overflow: false
 halted: false
+author_lookup_failed: false
 label_provisioned: true | false | "fail-soft-skipped"
 rate_limit_remaining_at_start: 0
 rationale: ""    # populated on REFUSED
@@ -239,6 +275,8 @@ Empty arrays are emitted as `[]`. `rationale` is empty string `""` on non-REFUSE
 - `halted_due_to_overflow` — true iff Step 6's broken-feature guard fired (some truncated row was BLOCKER or CRITICAL tier).
 - `halted` — load-bearing signal for the parent's GREEN/YELLOW/RED predicate; set per Step 9 rule.
 - **Implication**: `halted_due_to_overflow == true` implies `halted == true` — the overflow guard never fires in isolation; it always trips the higher-level halt. (RFC 0002 §3.3.5.)
+- `author_lookup_failed` — true iff the `gh pr view <pr_number> --json author --jq .author.login` lookup at Step 8c.5 failed (non-zero rc, non-PR context, or argv-integer regex guard rejected). Downstream consumers see the same empty-string `PR_AUTHOR` fallback (mention_line=""; assignee_args=()) as before; the new field surfaces the typed cause so `/review-pr` Step 7 can render `[author-lookup failed — issues still filed silently]` when applicable.
+- `is_transient` (on each `blocked_by_dedupe[]` entry) — true iff `rc == 429` OR the truncated stderr matches `HTTP 429|rate limit|secondary rate|HTTP 5[0-9][0-9]`. Per design decision D9 the default is conservative (`false`) so unknown error shapes do not trigger spurious retries upstream.
 
 ## Refusal triggers
 
