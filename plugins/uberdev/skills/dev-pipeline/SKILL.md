@@ -261,10 +261,12 @@ title can cite `#N`; the PR body is then finalized once the issue number `#M` ex
    else
      gh pr create --title "<imperative summary>" --body-file -   # provisional body on stdin
    fi
+   # Capture the PR number uniformly — works for both the reuse and the create path:
+   N=$(gh pr view --json number --jq .number)
    ```
 
    The body is **provisional** at this point — the harden-issue reference is a
-   placeholder. Capture the PR number `#N`.
+   placeholder; `#N` is now captured for the label, harden-issue, and finalize steps.
 3. **Create the `prototype` label, fail-soft.** `gh label create --force` is
    idempotent; wrap it so a transient failure never aborts the pipeline:
 
@@ -398,7 +400,8 @@ trailing `-`.
 `git check-ref-format "refs/heads/proto/$slug"` and abort on a non-zero exit **before**
 `git checkout -b` — a second independent gate on top of the allow-list.
 
-Every heredoc in this skill (and in the bodies it pipes to `gh`) uses a
+Any heredoc you write while executing this skill — in particular the
+`gh ... --body-file -` bodies you pipe on stdin — MUST use a
 **single-quoted delimiter** (`<<'EOF'`) so `$()` and backtick expansion stays disabled
 inside the heredoc body — the quoted delimiter is what makes interpolating
 idea-derived text into a heredoc safe.

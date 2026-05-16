@@ -6,7 +6,7 @@ allowed-tools: ["Bash", "Read", "Edit", "Write", "Task"]
 
 # Dev — Prototype Fast Lane
 
-Build a minimal working prototype or small function from a free-text idea in **#$ARGUMENTS**. `/dev` decomposes the idea, builds it via parallel `Task()` subagents in the current session, runs one light review, opens a PR labelled `prototype`, and auto-files a harden issue. It **deliberately skips** the spec → plan → full `/review-pr` pipeline that `/solve` and `/turbo` run — its output is honestly labelled prototype-grade work with a tracked path to production.
+Build a minimal working prototype or small function from a free-text idea in **$ARGUMENTS**. `/dev` decomposes the idea, builds it via parallel `Task()` subagents in the current session, runs one light review, opens a PR labelled `prototype`, and auto-files a harden issue. It **deliberately skips** the spec → plan → full `/review-pr` pipeline that `/solve` and `/turbo` run — its output is honestly labelled prototype-grade work with a tracked path to production.
 
 **Usage:** `/dev <idea description> [--no-pr] [--no-issue]`
 
