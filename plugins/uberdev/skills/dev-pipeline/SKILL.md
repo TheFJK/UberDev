@@ -251,7 +251,12 @@ clear user-visible warning — the build result is never lost.
 Otherwise, run the sequence below. The PR is created **first** so the harden issue's
 title can cite `#N`; the PR body is then finalized once the issue number `#M` exists.
 
-1. **Push.** `git push -u origin proto/<slug>`.
+1. **Push.** `git push -u origin proto/<slug>`. If the push fails (network,
+   non-fast-forward, auth), **halt Phase 5** — the local commits remain on
+   `proto/<slug>`, the PR is **not** attempted, and Phase 6's report surfaces the
+   push failure honestly. A prototype is rough, never knowingly broken; a silent
+   push failure that masquerades as a successful pipeline would violate the
+   Hard-floors column.
 2. **Guard, then create the PR.** `gh pr create` is **not idempotent** — re-running it
    on a branch that already has a PR errors. Guard first:
 
@@ -366,7 +371,9 @@ Surface a concise summary to the user:
 | No test runner in repo | Manual sanity-check of the entry path; note it in the PR body. |
 | On default branch at start | `proto/<slug>` created before any commit (Phase 0). |
 | Dirty working tree | One-line notice printed; proceed. Explicit-path staging prevents pollution. |
+| `git add` / `git commit` fails (disk full, hook reject, permission) | Halt Phase 3 at that chunk; surface the error; preserve any earlier chunks' commits. |
 | `gh` missing / unauthenticated / not a git repo | Commits preserved locally; Phase 5 skipped with a warning. |
+| `git push` fails (network, non-fast-forward, auth) | Halt Phase 5; preserve local commits on `proto/<slug>`; surface the push failure in the Phase 6 report; do not attempt the PR. |
 | `gh label create` transient failure | Fail-soft: wrap in `if ! gh label create --force … ; then <warn> ; fi`, continue. |
 | `gh pr create` when a PR already exists | Guard with `gh pr view --json number 2>/dev/null` before creating. |
 
