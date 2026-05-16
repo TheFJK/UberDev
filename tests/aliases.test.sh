@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests for issue #16 — top-level aliases for the six most-used uberdev
-# commands (/issue, /solve, /turbo, /simplify, /review-pr, /merge).
+# Tests for issue #16 — top-level aliases for the seven most-used uberdev
+# commands (/issue, /solve, /turbo, /simplify, /review-pr, /merge, /dev).
 #
 # Plugin commands are addressed as `/uberdev:<command>` because Claude Code's
 # plugin manifest enforces the `<plugin-name>:` prefix on every plugin
@@ -284,7 +284,7 @@ if [ "$S2_PREFLIGHT_OK" != "1" ]; then
 else
   # Capture mtimes after first run. Bash 3.2 (the macOS /bin/bash) lacks
   # associative arrays, so write one mtime-per-line to a temp file keyed by
-  # short name, and grep them back for comparison. The five short names are
+  # short name, and grep them back for comparison. The seven short names are
   # fixed; review-pr would be illegal as a bash variable name.
   S2_MT_FILE="$(mktemp)"
   for short in issue solve turbo simplify review-pr merge dev; do
