@@ -245,7 +245,7 @@ Precedence: CLI flag > env var > `.claude/uberdev.local.md` > default. Missing f
 
 ## Short-form aliases
 
-Plugin commands are addressed as `/uberdev:<command>` by default — the `uberdev:` prefix is required by Claude Code's plugin manifest. Auto-install drops six forwarders into `~/.claude/commands/`:
+Plugin commands are addressed as `/uberdev:<command>` by default — the `uberdev:` prefix is required by Claude Code's plugin manifest. Auto-install drops seven forwarders into `~/.claude/commands/`:
 
 | Short form | Canonical |
 |---|---|
@@ -255,6 +255,7 @@ Plugin commands are addressed as `/uberdev:<command>` by default — the `uberde
 | `/simplify` | `/uberdev:simplify` |
 | `/review-pr` | `/uberdev:review-pr` |
 | `/merge` | `/uberdev:merge` |
+| `/dev` | `/uberdev:dev` |
 
 ```bash
 /uberdev:install-aliases             # install (skip-if-exists)
