@@ -4,6 +4,19 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.0] - 2026-05-16
+
+### Added
+
+- **`/uberdev:dev` — prototype fast-lane command (short alias `/dev`).** Builds a minimal working prototype or small function from a free-text idea via parallel `Task()` subagents in the current session, deliberately skipping the spec → plan → full `/review-pr` pipeline that `/solve` and `/turbo` run. The output is honestly labelled: a `prototype`-labelled PR plus an auto-filed harden issue with a tracked path back to production. Backed by a new single-file skill `uberdev:dev-pipeline` (a 7-phase Phase 0–6 in-session pipeline on a `proto/<slug>` branch). A two-column Quality Contract relaxes edge-case / TDD-depth / abstraction rigor for prototype code while holding hard floors on security, secret-handling, crash-hiding, and "the code must actually run". The `/dev` implementation itself meets the full AAA quality bar. Closes #120.
+- **`/dev` short-form alias.** Registered via the `ALIASES` SSOT in `lib/aliases-sync.sh`; auto-installed on first session and refreshed on plugin upgrade alongside the existing six aliases.
+- **`docs/rfc/0003-dev-command.md`.** The design RFC for the `/dev` fast-lane command.
+- **`tests/dev.test.sh` + `tests/dev-pipeline.test.sh`.** Structural-grep shape-check coverage for the command-file frontmatter contract and the skill's 7-phase structure, security regression locks (no `git add -A`, explicit-path staging), and the scope gate. Both wired into the CI `&&`-chain in `.github/workflows/test.yml`. `tests/aliases.test.sh` extended to exercise install/uninstall/collision for `/dev`.
+
+### Security
+
+- **Slug sanitization gate in `dev-pipeline`.** Free-text ideas are reduced to a kebab `<slug>` via a derive-then-validate allow-list (`^[a-z0-9]+(-[a-z0-9]+)*$`, 48-char cap) with a `git check-ref-format` belt-and-braces check before any `git checkout -b proto/<slug>` — closing shell-word-split and git-ref-injection surfaces. All `gh` bodies are delivered via `--body-file -` (never `--body "$VAR"`); the idea text is wrapped in `<external-untrusted-input source="dev-idea">` envelopes in every subagent prompt.
+
 ## [0.26.1] - 2026-05-14
 
 ### Added (test coverage)
