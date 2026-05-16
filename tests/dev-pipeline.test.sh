@@ -16,6 +16,7 @@
 #   DP7   — prototype label creation (gh label create --force prototype)
 #   DP8   — harden-issue creation (gh issue create)
 #   DP9   — scope-gate section
+#   DP10  — slug-sanitization security gate + heredoc safety + PROTOTYPE MODE banner
 set -u
 set -o pipefail
 
@@ -104,6 +105,38 @@ assert_grep "$SKILL_FILE" 'gh issue create' \
   "DP8: harden-issue creation present"
 assert_grep "$SKILL_FILE" 'scope gate|Scope gate|scope-gate' \
   "DP9: scope-gate section present"
+
+echo
+echo "== DP10: slug-sanitization security gate + heredoc safety + PROTOTYPE MODE =="
+# DP10.1-3 — The `## Security: slug sanitization` section is the injection
+# gate for `proto/<slug>` branch names: an attacker-crafted idea can carry
+# shell metacharacters and git-ref metas, and the allow-list regex plus the
+# `git check-ref-format` belt-and-braces step are what keep them out. A
+# future edit deleting or weakening that section would silently re-open the
+# vector; shape-check it so the regression is caught at CI time.
+assert_grep "$SKILL_FILE" '^## Security: slug sanitization' \
+  "DP10.1: ## Security: slug sanitization heading present"
+# The anchored allow-list regex is the load-bearing assertion. Escape the
+# regex metas (^, [, ], +, (, ), *, $) so grep -E matches the literal text.
+assert_grep "$SKILL_FILE" '\^\[a-z0-9\]\+\(-\[a-z0-9\]\+\)\*\$' \
+  "DP10.2: anchored allow-list regex ^[a-z0-9]+(-[a-z0-9]+)*$ present"
+assert_grep "$SKILL_FILE" 'git check-ref-format' \
+  "DP10.3: git check-ref-format belt-and-braces mention present"
+
+# DP10.4 — Single-quoted-heredoc safety rule. The skill mandates `<<'EOF'`
+# so untrusted idea text spliced into a `gh --body-file -` body cannot
+# trigger $()/backtick expansion. A future edit dropping that rule would
+# silently re-open a command-injection vector.
+assert_grep "$SKILL_FILE" "single-quoted delimiter|<<'EOF'" \
+  "DP10.4: single-quoted-heredoc safety rule present"
+
+# DP10.5 — PROTOTYPE MODE banner. The Phase 2 implementer-prompt template
+# opens with a `PROTOTYPE MODE` banner that signals the Quality Contract
+# overrides the global AAA bar. Removing the banner would silently let
+# implementer subagents fall back to production-grade rigor and defeat the
+# whole point of /dev.
+assert_grep "$SKILL_FILE" 'PROTOTYPE MODE' \
+  "DP10.5: PROTOTYPE MODE banner present in implementer-prompt template"
 
 echo
 echo "== Summary =="
