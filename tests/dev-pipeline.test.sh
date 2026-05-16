@@ -97,7 +97,7 @@ assert_grep "$SKILL_FILE" 'git add ' \
   "DP5.1: git add with explicit paths present"
 assert_no_grep "$SKILL_FILE" 'git add -A' \
   "DP5.2: skill does NOT use git add -A"
-assert_grep "$SKILL_FILE" 'sole git controller|controller owns git|lead is the .*git controller' \
+assert_grep "$SKILL_FILE" 'sole git controller|controller owns git' \
   "DP6: controller-only-git rule present"
 assert_grep "$SKILL_FILE" 'gh label create --force prototype' \
   "DP7.1: prototype label creation present"

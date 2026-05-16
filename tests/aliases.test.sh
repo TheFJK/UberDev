@@ -164,7 +164,7 @@ assert_grep "$UNINSTALL_CMD" \
 
 # Belt-and-braces: uninstall must NOT do an unguarded rm of all 7 paths.
 assert_grep_not "$UNINSTALL_CMD" \
-  'rm[[:space:]]+-f[[:space:]]+"?\$HOME/\.claude/commands/(issue|solve|turbo|simplify|review-pr)\.md"?[[:space:]]*$' \
+  'rm[[:space:]]+-f[[:space:]]+"?\$HOME/\.claude/commands/(issue|solve|turbo|simplify|review-pr|merge|dev)\.md"?[[:space:]]*$' \
   "uninstall-aliases does NOT unconditionally rm forwarder paths"
 
 echo
@@ -434,7 +434,7 @@ else
   echo "  FAIL  S5: hand-authored solve.md was overwritten"; FAIL=$((FAIL + 1))
 fi
 S5_INSTALLED=0
-for short in issue dev turbo simplify review-pr merge; do
+for short in issue turbo simplify review-pr merge dev; do
   if grep -q 'managed-by: uberdev-aliases' "$S5_HOME/.claude/commands/${short}.md" 2>/dev/null; then
     S5_INSTALLED=$((S5_INSTALLED + 1))
   fi

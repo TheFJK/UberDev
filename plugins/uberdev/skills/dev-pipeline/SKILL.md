@@ -295,7 +295,9 @@ title can cite `#N`; the PR body is then finalized once the issue number `#M` ex
 
 All `gh` bodies are delivered via `--body-file -` (read from stdin) — **never**
 `--body "$VAR"` and **never** `--body "$(cmd)"`. Untrusted idea text spliced into a
-shell string is an injection vector; stdin delivery keeps it as opaque data.
+shell string is an injection vector; stdin delivery keeps it as opaque data. See
+`## Security: slug sanitization` for the single-quoted-heredoc-delimiter contract
+that protects untrusted idea text inside the `gh ... --body-file -` heredocs.
 
 ### Artifact templates
 
