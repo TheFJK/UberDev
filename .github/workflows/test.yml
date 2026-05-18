@@ -52,4 +52,5 @@ jobs:
           bash tests/orchestrator-phase-6-doc.test.sh && \
           bash tests/orchestrator-phase-0-bg-detection.test.sh && \
           bash tests/dev.test.sh && \
-          bash tests/dev-pipeline.test.sh
+          bash tests/dev-pipeline.test.sh && \
+          bash tests/solve-claim.test.sh
