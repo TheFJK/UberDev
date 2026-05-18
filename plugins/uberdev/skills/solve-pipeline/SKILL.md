@@ -19,7 +19,11 @@ This skill is invoked inline by `commands/solve.md` and `commands/turbo.md`. The
 | `EFFORT_LEVEL_DEFAULT` | `max` | Phase A `EFFORT_LEVEL` resolution; rationale: `/turbo` is unattended, quality > cost. |
 | `EFFORT_LEVEL_ENUM` | `low \| medium \| high \| xhigh \| max` | Phase A `uberdev_read_enum` validation; matches `claude --effort <level>` accepted values in Claude Code 2.1.139. |
 | `EFFORT_SOURCE_ENUM` | `cli \| env \| config \| default` | Audit telemetry source tag set by the Phase A `--effort=<level>` parser; emitted in the `effort_resolved` audit event payload. |
-| `SOLVE_AUDIT_EVENT_ENUM` | `agent_dispatched`, `deprecated_flag_used`, `solve_bg_fanout_wave_started`, `effort_resolved`, `error` | Audit-log writers; consumers grep for `deprecated_flag_used` to identify migration laggards. `agent_returned` was removed in v0.22.0 — `claude --bg` does not synchronously report agent completion; use `claude agents` for status. |
+| `SOLVE_AUDIT_EVENT_ENUM` | `agent_dispatched`, `deprecated_flag_used`, `solve_bg_fanout_wave_started`, `effort_resolved`, `error`, `claim_acquired`, `claim_collision`, `claim_force_override`, `claim_write_failed`, `claim_released` | Audit-log writers; consumers grep for `deprecated_flag_used` to identify migration laggards. `agent_returned` was removed in v0.22.0 — `claude --bg` does not synchronously report agent completion; use `claude agents` for status. The five `claim_*` events were added in v0.28.0 for the small-team issue-claim protocol (Step 4.5); grep `claim_force_override` to surface stale-claim recoveries, `claim_write_failed` to surface gh permission gaps. |
+| `UBERDEV_ACTIVE_LABEL` | `uberdev:active` | Step 4.5 claim protocol — applied to OPEN issues by `/solve` / `/turbo` on dispatch; cleared by `/merge` post-merge (`merge-pipeline/SKILL.md` post-merge cleanup phase) or by the dispatch-failure rollback in Step 5b'. NEVER set or removed by hand — the audit comment marker is the only safe parser surface. |
+| `UBERDEV_ACTIVE_LABEL_COLOR` | `D93F0B` | Warning-orange; matches the GitHub default `bug` palette band so it reads as actionable. Created idempotently via `gh label create --force` in Step 4.5 on first encounter per repo, mirroring `finish-branch/SKILL.md:287` and `dev-pipeline/SKILL.md:279`. |
+| `UBERDEV_ACTIVE_LABEL_DESCRIPTION` | `Issue currently being worked on by a /solve or /turbo dispatcher. Auto-managed — do not add/remove by hand.` | Passed to `gh label create --description`. The "Auto-managed" framing is the primary defence against well-meaning manual edits that would desync the claim comment from the label state. |
+| `CLAIM_COMMENT_MARKER` | `<!-- uberdev-claim-comment v1 -->` | HTML-comment fingerprint at the top of every claim audit comment. Allows the validation loop to find the latest claim comment among arbitrary unrelated comments via a single `grep -F` pass. Schema versioning (`v1`) reserves headroom for future field additions without breaking the parser. |
 
 ## Triage heuristics (Phase A applies this table)
 
@@ -111,6 +115,33 @@ if [[ -n "${SOLVE_TERMINAL:-}" ]]; then
     "{\"env\":\"SOLVE_TERMINAL\",\"value\":$(printf %s "$SOLVE_TERMINAL" | jq -Rs .)}" || true
 fi
 AUTO_FLAG=$(echo "$ARGUMENTS" | grep -oE '\-\-auto' | head -1)
+# --- Phase A: --force flag parser (NEW v0.28.0 — claim override) ---
+# Accepts `--force` or `-f` as a stale-claim override for the per-issue claim
+# protocol (Step 4.5 below). When set, dispatch proceeds even if the issue
+# already carries the `uberdev:active` label from a prior /solve or /turbo
+# spawn (e.g. teammate's machine crashed, or any other stale claim). Records
+# `claim_force_override` audit event per issue overridden so post-hoc grep can
+# distinguish intentional overrides from regressions. Anchored `^--force$` /
+# `^-f$` token regex — flag fragments inside larger tokens (e.g. `--force-foo`)
+# do NOT match. Batch-wide like every other override flag — no per-issue form.
+FORCE_FLAG="$(echo "$ARGUMENTS" | tr ' ' '\n' | grep -E '^(--force|-f)$' | head -1)"
+if [[ -n "$FORCE_FLAG" ]]; then
+  FORCE_CLAIM=1
+else
+  FORCE_CLAIM=0
+fi
+# --- Phase A: claim-protocol shell constants (NEW v0.28.0) ---
+# Bind the Constants-table values shell-side. The Constants table is
+# documentation prose (Claude reads it as Markdown, not bash); these
+# assignments make the values available to the Step 4 collision check and
+# the Step 4.5 claim-write loop. Keep at column 0 — the test suite
+# (tests/solve-claim.test.sh) anchors on `^UBERDEV_ACTIVE_LABEL=` and
+# `^CLAIM_COMMENT_MARKER=` to verify drift between the Constants table
+# and the bound shell values.
+UBERDEV_ACTIVE_LABEL='uberdev:active'
+UBERDEV_ACTIVE_LABEL_COLOR='D93F0B'
+UBERDEV_ACTIVE_LABEL_DESCRIPTION='Issue currently being worked on by a /solve or /turbo dispatcher. Auto-managed — do not add/remove by hand.'
+CLAIM_COMMENT_MARKER='<!-- uberdev-claim-comment v1 -->'
 # --- Phase A: --effort=<level> parser (NEW v0.22.1) ---
 # `claude --bg` does NOT inherit the parent session's /effort setting in
 # Claude Code 2.1.139, so every background spawn must pass `--effort <level>`
@@ -226,7 +257,9 @@ for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
   # U+0000 through U+001F must be escaped" (exit 5). Stdout must stay pure
   # JSON; stderr only gets read on the failure path.
   GH_ERR=$(mktemp)
-  ISSUE_JSON=$(gh issue view "$ISSUE_NUM" --json number,title,state,body,labels 2>"$GH_ERR") || {
+  # JSON fields extended in v0.28.0 with `assignees,comments` to feed Step 4.5's
+  # claim-collision check below — keeps Phase A to a single round-trip per issue.
+  ISSUE_JSON=$(gh issue view "$ISSUE_NUM" --json number,title,state,body,labels,assignees,comments 2>"$GH_ERR") || {
     ERRORS+=("#$ISSUE_NUM: gh fetch failed: $(<"$GH_ERR")")
     rm -f "$GH_ERR"
     continue
@@ -236,6 +269,44 @@ for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
   if [[ "$STATE" != "OPEN" ]]; then
     ERRORS+=("#$ISSUE_NUM: state=$STATE (must be OPEN)")
     continue
+  fi
+  # --- Phase A: claim-collision check (NEW v0.28.0) ---
+  # Single-round-trip design: piggybacks on $ISSUE_JSON above. If the
+  # `uberdev:active` label is present, the issue is currently claimed by a
+  # prior /solve or /turbo dispatcher; extract the latest claim comment
+  # (fingerprinted with CLAIM_COMMENT_MARKER to disambiguate from any
+  # arbitrary user comment that happens to mention the label) and either
+  # refuse (default) or warn-and-proceed (when FORCE_CLAIM=1 from the
+  # `--force` / `-f` Phase A flag). The refusal path appends to ERRORS so
+  # the existing "no agents dispatched" gate at the end of Step 4 produces
+  # the unified abort message — partial dispatches remain forbidden.
+  # Latest claim parsing: jq filters .comments[] for bodies containing the
+  # marker, then takes `last` (GitHub returns .comments in chronological
+  # order — newest is .comments[-1]). The grep/sed extraction tolerates
+  # malformed fields by falling back to "?" so the error message never
+  # blanks out on a stale comment schema.
+  HAS_ACTIVE_LABEL=$(jq -r '[.labels[].name] | index("uberdev:active") // empty' <<<"$ISSUE_JSON")
+  if [[ -n "$HAS_ACTIVE_LABEL" ]]; then
+    LATEST_CLAIM_BODY=$(jq -r --arg marker "$CLAIM_COMMENT_MARKER" \
+      '[.comments[] | select(.body | contains($marker))] | last | .body // empty' \
+      <<<"$ISSUE_JSON")
+    CLAIM_USER="?"; CLAIM_HOST="?"; CLAIM_BRANCH="?"; CLAIM_TS="?"
+    if [[ -n "$LATEST_CLAIM_BODY" ]]; then
+      CLAIM_USER=$(printf '%s\n' "$LATEST_CLAIM_BODY"   | grep -m1 '^User: '   | sed 's/^User: //'    || echo "?")
+      CLAIM_HOST=$(printf '%s\n' "$LATEST_CLAIM_BODY"   | grep -m1 '^Host: '   | sed 's/^Host: //'    || echo "?")
+      CLAIM_BRANCH=$(printf '%s\n' "$LATEST_CLAIM_BODY" | grep -m1 '^Branch: ' | sed 's/^Branch: //'  || echo "?")
+      CLAIM_TS=$(printf '%s\n' "$LATEST_CLAIM_BODY"     | grep -m1 '^Started: '| sed 's/^Started: //' || echo "?")
+    fi
+    if [[ "$FORCE_CLAIM" == "1" ]]; then
+      echo "warning: #$ISSUE_NUM already claimed (user=$CLAIM_USER host=$CLAIM_HOST branch=$CLAIM_BRANCH at=$CLAIM_TS) — --force override in effect" >&2
+      _uberdev_audit_emit claim_force_override \
+        "{\"issue\":$ISSUE_NUM,\"prior_user\":\"$CLAIM_USER\",\"prior_host\":\"$CLAIM_HOST\",\"prior_branch\":\"$CLAIM_BRANCH\",\"prior_started\":\"$CLAIM_TS\"}" || true
+    else
+      ERRORS+=("#$ISSUE_NUM: already claimed by $CLAIM_USER on $CLAIM_HOST (branch $CLAIM_BRANCH, started $CLAIM_TS) — pass --force to override")
+      _uberdev_audit_emit claim_collision \
+        "{\"issue\":$ISSUE_NUM,\"prior_user\":\"$CLAIM_USER\",\"prior_host\":\"$CLAIM_HOST\",\"prior_branch\":\"$CLAIM_BRANCH\"}" || true
+      continue
+    fi
   fi
   # Title: jq the raw value, then truncate to 40 chars (with ellipsis) so the
   # tab/workspace name fits. Refine at the word boundary if you can — the
@@ -397,6 +468,103 @@ else
   echo "       install with: brew install coreutils  # provides gtimeout" >&2
   exit 1
 fi
+```
+
+### 4.5. Claim protocol — mark issue ACTIVE (NEW v0.28.0)
+
+For every validated issue, write a three-part claim atomically: the `uberdev:active` label (queryable for `gh issue list --label uberdev:active`), the `@me` assignee (native GitHub UI signal), and an audit comment fingerprinted with `CLAIM_COMMENT_MARKER` (the only safe parser surface for the Step 4 collision check above). All writes are **fail-loud** — any gh permission gap aborts the batch and rolls back prior claims in the same run. A silent partial claim acquisition would break the collision-prevention promise the protocol exists to enforce (a teammate running `/turbo` on an unclaimed-from-their-view issue would race the dispatcher who half-claimed it).
+
+The claim comment body lays the parser contract: each field is `^<Name>: <value>$` on its own line, prefixed by the `CLAIM_COMMENT_MARKER` HTML comment for filtering. The "Auto-clears on /merge or issue close" footer is documentation — the actual clear happens in `merge-pipeline/SKILL.md`'s post-merge cleanup phase (issue-close-by-merge) or by the Step 5b' dispatch-failure rollback (release on spawn failure).
+
+Per-issue claim metadata is also persisted to `/tmp/solve-claim-N.json` so the Phase B dispatch-failure rollback in Step 5b' below can release just the one failed claim without re-parsing the audit comment.
+
+```bash
+# --- Phase A: claim-write pass (NEW v0.28.0 — Step 4.5) ---
+# Runs AFTER the bg dispatch probes (claude version + timeout-binary
+# guard) above so probe failures abort BEFORE we mutate any GitHub state.
+# Order matters: label create → label add → assignee add → comment. If any
+# step fails, rollback all prior claims in the batch and exit 1.
+gh label create --force "$UBERDEV_ACTIVE_LABEL" \
+  --color "$UBERDEV_ACTIVE_LABEL_COLOR" \
+  --description "$UBERDEV_ACTIVE_LABEL_DESCRIPTION" >/dev/null 2>&1 || true
+
+# Dispatcher identity. `gh api user` returns the gh-CLI authenticated user's
+# login (matches what `--add-assignee @me` resolves to). `hostname -s` gives
+# the short hostname (macOS, Linux); fallback to `hostname` if the -s flag
+# is unrecognised. ISO-8601 UTC timestamp is the GitHub-comment convention.
+DISPATCHER_USER=$(gh api user --jq .login 2>/dev/null)
+if [[ -z "$DISPATCHER_USER" ]]; then
+  echo "error: gh api user returned empty login — run \`gh auth login\` first" >&2
+  exit 1
+fi
+DISPATCHER_HOST=$(hostname -s 2>/dev/null || hostname)
+DISPATCH_TS=$(date -u +%FT%TZ)
+
+CLAIMED=()
+_uberdev_rollback_claims() {
+  # Best-effort rollback — these calls are intentionally fail-soft (||true)
+  # because rollback runs in an already-failing path and we should never
+  # mask the original error with a secondary rollback failure.
+  local c
+  for c in "${CLAIMED[@]}"; do
+    gh issue edit "$c" --remove-label "$UBERDEV_ACTIVE_LABEL" >/dev/null 2>&1 || true
+    gh issue edit "$c" --remove-assignee "@me"                 >/dev/null 2>&1 || true
+    _uberdev_audit_emit claim_released "{\"issue\":$c,\"reason\":\"batch_rollback\"}" || true
+  done
+}
+
+for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
+  TIER="${TIERS[$ISSUE_NUM]}"
+  # CLAIM_BODY assembled via heredoc inside $(cat <<EOF…EOF) so $ISSUE_NUM,
+  # $TIER, $DISPATCHER_USER etc. expand normally. The marker line MUST be
+  # the first line — the collision-check jq filter searches via
+  # `.body | contains($marker)` and the field grep regex anchors on
+  # `^User: ` / `^Host: ` / `^Branch: ` / `^Started: `.
+  CLAIM_BODY="$(cat <<EOF
+$CLAIM_COMMENT_MARKER
+uberdev:active — claimed for /solve or /turbo dispatch
+
+User: @$DISPATCHER_USER
+Host: $DISPATCHER_HOST
+Branch: worktree-solve-issue-$ISSUE_NUM
+Tier: $TIER
+Started: $DISPATCH_TS
+
+Auto-clears on /merge or issue close. If this claim is stale, override with:
+  /turbo $ISSUE_NUM --force    (or /solve $ISSUE_NUM --force)
+EOF
+)"
+  if ! gh issue edit "$ISSUE_NUM" --add-label "$UBERDEV_ACTIVE_LABEL" >/dev/null 2>&1; then
+    echo "error: #$ISSUE_NUM: failed to add $UBERDEV_ACTIVE_LABEL label (check gh auth / repo permissions)" >&2
+    _uberdev_audit_emit claim_write_failed "{\"issue\":$ISSUE_NUM,\"step\":\"add_label\"}" || true
+    _uberdev_rollback_claims
+    exit 1
+  fi
+  if ! gh issue edit "$ISSUE_NUM" --add-assignee "@me" >/dev/null 2>&1; then
+    echo "error: #$ISSUE_NUM: failed to add @me assignee (check gh auth)" >&2
+    _uberdev_audit_emit claim_write_failed "{\"issue\":$ISSUE_NUM,\"step\":\"add_assignee\"}" || true
+    # Rollback this issue's partial claim (label was set above) before batch rollback.
+    gh issue edit "$ISSUE_NUM" --remove-label "$UBERDEV_ACTIVE_LABEL" >/dev/null 2>&1 || true
+    _uberdev_rollback_claims
+    exit 1
+  fi
+  if ! printf '%s' "$CLAIM_BODY" | gh issue comment "$ISSUE_NUM" --body-file - >/dev/null 2>&1; then
+    echo "error: #$ISSUE_NUM: failed to post claim audit comment" >&2
+    _uberdev_audit_emit claim_write_failed "{\"issue\":$ISSUE_NUM,\"step\":\"comment\"}" || true
+    gh issue edit "$ISSUE_NUM" --remove-label "$UBERDEV_ACTIVE_LABEL" >/dev/null 2>&1 || true
+    gh issue edit "$ISSUE_NUM" --remove-assignee "@me"                 >/dev/null 2>&1 || true
+    _uberdev_rollback_claims
+    exit 1
+  fi
+  # Per-issue claim metadata for the Phase B dispatch-failure rollback
+  # (Step 5b' below reads this on $BG_DISPATCH_RC != 0).
+  cat > "/tmp/solve-claim-$ISSUE_NUM.json" <<EOF2
+{"issue":$ISSUE_NUM,"user":"$DISPATCHER_USER","host":"$DISPATCHER_HOST","branch":"worktree-solve-issue-$ISSUE_NUM","tier":"$TIER","started":"$DISPATCH_TS","forced":$([[ "$FORCE_CLAIM" == "1" ]] && echo true || echo false)}
+EOF2
+  CLAIMED+=("$ISSUE_NUM")
+  _uberdev_audit_emit claim_acquired \
+    "{\"issue\":$ISSUE_NUM,\"user\":\"$DISPATCHER_USER\",\"host\":\"$DISPATCHER_HOST\",\"tier\":\"$TIER\",\"forced\":$([[ "$FORCE_CLAIM" == "1" ]] && echo true || echo false)}" || true
+done
 ```
 
 ### 5. Per-issue dispatch (Phase B — spawn one bg agent per issue)
@@ -641,6 +809,34 @@ else
   DISPATCH_FAILED+=("#$ISSUE_NUM: ${TAIL_OUTPUT:-(no output captured; check /tmp/solve-bg-stdout-$ISSUE_NUM.log)}")
   _uberdev_audit_emit error \
     "{\"issue\":$ISSUE_NUM,\"phase\":\"dispatch\",\"rc\":$BG_DISPATCH_RC}" || true
+  # --- Phase B: claim rollback on dispatch failure (NEW v0.28.0) ---
+  # Release the claim acquired in Step 4.5 so a retry (or a teammate) can
+  # pick up the issue without a --force override. Fail-soft on every gh
+  # call — rollback runs in an already-failing path and we should never
+  # mask the dispatch error with a secondary cleanup failure. The release
+  # comment uses the same CLAIM_COMMENT_MARKER fingerprint so future
+  # claim-collision checks treat the release as the latest claim event
+  # (the parser takes `last` of the marker-matching comments and the
+  # release body's missing User/Host/Branch/Started lines surface as "?"
+  # — semantically correct: the claim is no longer held).
+  gh issue edit "$ISSUE_NUM" --remove-label "$UBERDEV_ACTIVE_LABEL" >/dev/null 2>&1 || true
+  gh issue edit "$ISSUE_NUM" --remove-assignee "@me"                >/dev/null 2>&1 || true
+  RELEASE_BODY="$(cat <<EOF
+$CLAIM_COMMENT_MARKER
+uberdev:active claim released — dispatch failed (rc=$BG_DISPATCH_RC)
+
+User: @$DISPATCHER_USER
+Host: $DISPATCHER_HOST
+Branch: worktree-solve-issue-$ISSUE_NUM
+Released: $(date -u +%FT%TZ)
+
+The issue is unclaimed again — retry with /solve $ISSUE_NUM or /turbo $ISSUE_NUM.
+EOF
+)"
+  printf '%s' "$RELEASE_BODY" | gh issue comment "$ISSUE_NUM" --body-file - >/dev/null 2>&1 || true
+  _uberdev_audit_emit claim_released \
+    "{\"issue\":$ISSUE_NUM,\"reason\":\"dispatch_failure\",\"rc\":$BG_DISPATCH_RC}" || true
+  rm -f "/tmp/solve-claim-$ISSUE_NUM.json"
 fi
 done
 done
