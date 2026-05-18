@@ -1180,6 +1180,31 @@ else
   pass "M63.inequality-phrasing-absent — sub-condition (d) does not carry the retired strict-inequality phrasing (issue #78 regression guard)"
 fi
 
+# M63.worktree-glob — regression guard that asserts both the Step (c.0) bash
+# discovery code AND sub-condition (d) prose include the worktree-mirror glob
+# `.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json` alongside the
+# main `.uberdev/runs/*/review-pr-verdict.json`. Without the worktree mirror,
+# /merge cannot find audit JSONs written by /review-pr inside a /solve|/turbo
+# worktree (which is the default for medium+ tier per solve-pipeline/SKILL.md),
+# silently short-circuiting trust-trail-evaluator to STALE via
+# phase2_5_present=false and gating valid trust trails. The fix lives in two
+# co-located sites; this guard locks both.
+
+# (a) bash discovery code in Step (c.0)
+STEP_C0_BLOCK=$(awk '/Step \(c\.0\) — discover \$AUDIT_JSON_PATH/,/AUDIT_JSON_PATH is now the most-recent verdict JSON/' "$SKILL_FILE")
+if echo "$STEP_C0_BLOCK" | grep -qF '.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json'; then
+  pass "M63.worktree-glob.c0 — Step (c.0) bash discovery code globs the worktree-mirror path (.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json)"
+else
+  fail "M63.worktree-glob.c0 — Step (c.0) MUST glob .claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json alongside .uberdev/runs/*/review-pr-verdict.json — without it /merge cannot see audit JSONs written by /review-pr from inside a /solve|/turbo worktree (.claude/worktrees/solve-issue-N/)"
+fi
+
+# (b) sub-condition (d) prose at line ~418
+if echo "$PATH2_D_BODY" | grep -qF '.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json'; then
+  pass "M63.worktree-glob.d — sub-condition (d) prose names the worktree-mirror glob path (.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json) so the prose mirrors Step (c.0)'s bash"
+else
+  fail "M63.worktree-glob.d — sub-condition (d) prose MUST mention the worktree-mirror glob path .claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json (prose-bash drift between (c.0) and (d) is the regression class this guards against)"
+fi
+
 echo
 echo "== M64: SKILL.md run-summary per-PR conflict-files sub-block (issue #60) =="
 # SUMMARY_BLOCK is set at file scope by M27; reuse it. PHASE_33IV is M64-specific.

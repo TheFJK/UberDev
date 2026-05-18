@@ -4,6 +4,12 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.1] - 2026-05-18
+
+### Fixed
+
+- **`/merge` Phase 1.4 PATH_2 sub-condition (c.0) audit-JSON discovery now traverses worktree-local paths.** The bash discovery glob at `plugins/uberdev/skills/merge-pipeline/SKILL.md` Step (c.0) only searched `.uberdev/runs/*/review-pr-verdict.json` relative to `/merge`'s CWD. When `/merge` ran from the main checkout but the PR was produced by a worktree-based `/solve` or `/turbo` (the default for medium+ tier, per `solve-pipeline/SKILL.md` and `commands/turbo.md`: `.claude/worktrees/solve-issue-N/`), `/review-pr` wrote the audit JSON inside the worktree's gitignored `.uberdev/runs/` — invisible from the main-checkout glob. `trust-trail-evaluator` was then dispatched with `phase2_5_present=false`, which per its Step 1.5 short-circuits to `STALE`, gating otherwise-valid trust trails. Step (c.0) and sub-condition (d) now also glob `.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json`. The RUN_ID_REGEX basename-of-dirname projection (D4/F8 path-traversal hardening) works identically on both path layouts — no security regression. New `M63.worktree-glob.{c0,d}` structural-grep assertions in `tests/merge.test.sh` lock the fix in place. Observed twice in production (#126, #128); manual `cp` workaround retired.
+
 ## [0.27.0] - 2026-05-16
 
 ### Added
