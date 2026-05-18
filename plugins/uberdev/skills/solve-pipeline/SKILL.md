@@ -23,7 +23,7 @@ This skill is invoked inline by `commands/solve.md` and `commands/turbo.md`. The
 | `UBERDEV_ACTIVE_LABEL` | `uberdev:active` | Step 4.5 claim protocol — applied to OPEN issues by `/solve` / `/turbo` on dispatch; cleared by `/merge` post-merge (`merge-pipeline/SKILL.md` post-merge cleanup phase) or by the dispatch-failure rollback in Step 5b'. NEVER set or removed by hand — the audit comment marker is the only safe parser surface. |
 | `UBERDEV_ACTIVE_LABEL_COLOR` | `D93F0B` | Warning-orange; matches the GitHub default `bug` palette band so it reads as actionable. Created idempotently via `gh label create --force` in Step 4.5 on first encounter per repo, mirroring `finish-branch/SKILL.md:287` and `dev-pipeline/SKILL.md:279`. |
 | `UBERDEV_ACTIVE_LABEL_DESCRIPTION` | `Issue currently being worked on by a /solve or /turbo dispatcher. Auto-managed — do not add/remove by hand.` | Passed to `gh label create --description`. The "Auto-managed" framing is the primary defence against well-meaning manual edits that would desync the claim comment from the label state. |
-| `CLAIM_COMMENT_MARKER` | `<!-- uberdev-claim-comment v1 -->` | HTML-comment fingerprint at the top of every claim audit comment. Allows the validation loop to find the latest claim comment among arbitrary unrelated comments via a single `grep -F` pass. Schema versioning (`v1`) reserves headroom for future field additions without breaking the parser. |
+| `CLAIM_COMMENT_MARKER` | `<!-- uberdev-claim-comment v1 -->` | HTML-comment fingerprint at the top of every claim audit comment. Allows the validation loop to find the latest claim comment among arbitrary unrelated comments via a single `grep -F` pass. The collision check matches on the **version-stripped prefix** (`<!-- uberdev-claim-comment`) rather than the full v1-suffixed marker — without this, a rolling upgrade where teammate-A is on v1 and teammate-B is on v2 (`<!-- uberdev-claim-comment v2 -->`) would have each dispatcher see "no live claim" of the other's version, defeating the protocol (regression #123 B7). **Forward-compat policy:** **adding** new optional fields to the body schema is backward-compatible (the field-extraction grep tolerates missing fields via the `?` fallback) and does NOT require a marker version bump. **Removing or renaming** fields is a breaking change — it MUST bump the marker version AND ship a migration path (e.g. a parser arm that handles both v1 and v2 bodies during the rollout window). The version-stripped-prefix matcher means future v2/v3 dispatchers will be visible to v1 dispatchers' collision check; semantic compatibility of the body schema is the writer's responsibility, not the parser's. |
 
 ## Triage heuristics (Phase A applies this table)
 
@@ -266,7 +266,27 @@ for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
   }
   rm -f "$GH_ERR"
   STATE=$(jq -r .state <<<"$ISSUE_JSON")
+  # --- Phase A: stale-claim sweeper on closed issues (NEW v0.28.0; #123 B4) ---
+  # If a `/solve` or `/turbo` dispatcher crashed AFTER its claim-write but BEFORE
+  # PR open (or the PR was force-closed without merging), the `uberdev:active`
+  # label can outlive the issue itself. /merge only clears the label on
+  # successful merge of a PR carrying a closing keyword — there is no other
+  # auto-cleanup path. Without this sweeper, the issue would carry the label
+  # forever (cannot /solve a closed issue to trigger the dispatch-time check),
+  # and a re-open + retry would force every teammate into the --force override
+  # path. The sweep runs BEFORE the state-reject so closed issues with a stuck
+  # label get pruned even though the dispatch ultimately refuses them. The
+  # subsequent reject still fires — you cannot /solve a closed issue — but the
+  # GitHub state is left clean for a future re-open.
   if [[ "$STATE" != "OPEN" ]]; then
+    CLOSED_HAS_ACTIVE_LABEL=$(jq -r '[.labels[].name] | index("uberdev:active") // empty' <<<"$ISSUE_JSON")
+    if [[ -n "$CLOSED_HAS_ACTIVE_LABEL" ]]; then
+      if gh issue edit "$ISSUE_NUM" --remove-label "uberdev:active" >/dev/null 2>&1; then
+        echo "notice: #$ISSUE_NUM is $STATE but carried a stale uberdev:active label — auto-pruned" >&2
+        _uberdev_audit_emit claim_released \
+          "{\"issue\":$ISSUE_NUM,\"reason\":\"stale_on_closed\",\"state\":\"$STATE\"}" || true
+      fi
+    fi
     ERRORS+=("#$ISSUE_NUM: state=$STATE (must be OPEN)")
     continue
   fi
@@ -287,7 +307,20 @@ for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
   # blanks out on a stale comment schema.
   HAS_ACTIVE_LABEL=$(jq -r '[.labels[].name] | index("uberdev:active") // empty' <<<"$ISSUE_JSON")
   if [[ -n "$HAS_ACTIVE_LABEL" ]]; then
-    LATEST_CLAIM_BODY=$(jq -r --arg marker "$CLAIM_COMMENT_MARKER" \
+    # Version-agnostic prefix match (regression #123 B7): the literal
+    # CLAIM_COMMENT_MARKER carries a `v1` suffix, but during a rolling upgrade
+    # a v2 dispatcher's marker (`<!-- uberdev-claim-comment v2 -->`) would NOT
+    # contain the v1 string — both dispatchers would then see "no live claim"
+    # of the other's version, the exact failure mode the protocol exists to
+    # prevent. We pass the version-stripped prefix to jq instead so the parser
+    # is forward-compatible across schema bumps. The minor cost is that a
+    # stray comment body containing exactly that prefix could match —
+    # acceptable because the prefix is plugin-namespaced and the grep field
+    # extraction below tolerates malformed fields via the `?` fallback.
+    # CLAIM_COMMENT_MARKER_PREFIX strips the trailing ` vN -->` suffix; the
+    # bash parameter expansion is portable to zsh.
+    CLAIM_COMMENT_MARKER_PREFIX="${CLAIM_COMMENT_MARKER% v* -->}"
+    LATEST_CLAIM_BODY=$(jq -r --arg marker "$CLAIM_COMMENT_MARKER_PREFIX" \
       '[.comments[] | select(.body | contains($marker))] | last | .body // empty' \
       <<<"$ISSUE_JSON")
     CLAIM_USER="?"; CLAIM_HOST="?"; CLAIM_BRANCH="?"; CLAIM_TS="?"
@@ -297,12 +330,28 @@ for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
       CLAIM_BRANCH=$(printf '%s\n' "$LATEST_CLAIM_BODY" | grep -m1 '^Branch: ' | sed 's/^Branch: //'  || echo "?")
       CLAIM_TS=$(printf '%s\n' "$LATEST_CLAIM_BODY"     | grep -m1 '^Started: '| sed 's/^Started: //' || echo "?")
     fi
+    # F4: distinguish "no live claim comment found" (label set but body
+    # extraction yielded all ?s — likely a racing dispatcher whose claim
+    # comment has not yet posted, OR a stale label from a hand-edit) from
+    # "claim comment found with full metadata" (standard case). The all-?
+    # case gets a different message that points the operator at the likely
+    # cause and the right recovery path. The audit-event payload still
+    # carries the raw values so log consumers can join on prior_user.
+    if [[ "$CLAIM_USER" == "?" && "$CLAIM_HOST" == "?" && "$CLAIM_BRANCH" == "?" && "$CLAIM_TS" == "?" ]]; then
+      ALL_PLACEHOLDER=1
+    else
+      ALL_PLACEHOLDER=0
+    fi
     if [[ "$FORCE_CLAIM" == "1" ]]; then
       echo "warning: #$ISSUE_NUM already claimed (user=$CLAIM_USER host=$CLAIM_HOST branch=$CLAIM_BRANCH at=$CLAIM_TS) — --force override in effect" >&2
       _uberdev_audit_emit claim_force_override \
         "{\"issue\":$ISSUE_NUM,\"prior_user\":\"$CLAIM_USER\",\"prior_host\":\"$CLAIM_HOST\",\"prior_branch\":\"$CLAIM_BRANCH\",\"prior_started\":\"$CLAIM_TS\"}" || true
     else
-      ERRORS+=("#$ISSUE_NUM: already claimed by $CLAIM_USER on $CLAIM_HOST (branch $CLAIM_BRANCH, started $CLAIM_TS) — pass --force to override")
+      if [[ "$ALL_PLACEHOLDER" == "1" ]]; then
+        ERRORS+=("#$ISSUE_NUM: uberdev:active label is set but no matching claim comment was found (racing dispatcher whose comment has not posted yet, or hand-edited label) — wait a moment and retry, or pass --force to override")
+      else
+        ERRORS+=("#$ISSUE_NUM: already claimed by $CLAIM_USER on $CLAIM_HOST (branch $CLAIM_BRANCH, started $CLAIM_TS) — pass --force to override")
+      fi
       _uberdev_audit_emit claim_collision \
         "{\"issue\":$ISSUE_NUM,\"prior_user\":\"$CLAIM_USER\",\"prior_host\":\"$CLAIM_HOST\",\"prior_branch\":\"$CLAIM_BRANCH\"}" || true
       continue
@@ -472,7 +521,9 @@ fi
 
 ### 4.5. Claim protocol — mark issue ACTIVE (NEW v0.28.0)
 
-For every validated issue, write a three-part claim atomically: the `uberdev:active` label (queryable for `gh issue list --label uberdev:active`), the `@me` assignee (native GitHub UI signal), and an audit comment fingerprinted with `CLAIM_COMMENT_MARKER` (the only safe parser surface for the Step 4 collision check above). All writes are **fail-loud** — any gh permission gap aborts the batch and rolls back prior claims in the same run. A silent partial claim acquisition would break the collision-prevention promise the protocol exists to enforce (a teammate running `/turbo` on an unclaimed-from-their-view issue would race the dispatcher who half-claimed it).
+For every validated issue, write a three-part claim **in sequence with rollback on partial failure** (label → assignee → comment): the `uberdev:active` label (queryable for `gh issue list --label uberdev:active`), the `@me` assignee (native GitHub UI signal), and an audit comment fingerprinted with `CLAIM_COMMENT_MARKER` (the only safe parser surface for the Step 4 collision check above). All writes are **fail-loud** — any gh permission gap aborts the batch and rolls back prior claims in the same run. A silent partial claim acquisition would break the collision-prevention promise the protocol exists to enforce (a teammate running `/turbo` on an unclaimed-from-their-view issue would race the dispatcher who half-claimed it).
+
+**Known limitation — TOCTOU race window between Step 4 check and Step 4.5 write (#123 B2).** The Step 4 collision check reads the label and comments list once; the Step 4.5 write-pass then adds the label via `gh issue edit`, which is idempotent on the GitHub side. Two dispatchers running concurrently can both observe "no label present" in their separate Step 4 reads and both successfully add the label in Step 4.5 — the protocol is **best-effort, not atomic**. The race window is bounded by the gh round-trip latency between Step 4's read and Step 4.5's first write (typically tens to hundreds of milliseconds). In practice this is acceptable for the small-team usage the protocol targets (rare concurrent dispatches on the same issue), but operators on a larger team or with high-coordination workflows should NOT rely on the protocol as a strong distributed lock. A post-write verification step (re-fetch the latest claim comment, refuse if a different dispatcher's marker won) would close the window at the cost of one extra gh round-trip per issue — deferred until measured contention warrants it. See CHANGELOG `## [0.28.0]` Why for the design tradeoff.
 
 The claim comment body lays the parser contract: each field is `^<Name>: <value>$` on its own line, prefixed by the `CLAIM_COMMENT_MARKER` HTML comment for filtering. The "Auto-clears on /merge or issue close" footer is documentation — the actual clear happens in `merge-pipeline/SKILL.md`'s post-merge cleanup phase (issue-close-by-merge) or by the Step 5b' dispatch-failure rollback (release on spawn failure).
 
@@ -506,6 +557,17 @@ _uberdev_rollback_claims() {
   # because rollback runs in an already-failing path and we should never
   # mask the original error with a secondary rollback failure.
   local c
+  # B8: explicitly distinguish the no-op case from a successful rollback.
+  # If the first issue in a batch fails at the label-add step before any
+  # CLAIMED+=("…") runs, the for-loop below iterates zero times and prints
+  # nothing — the user sees "error: #N failed to add label" but nothing
+  # confirming that the rollback was a no-op (vs. silently succeeded with
+  # zero work). The info line makes the no-op auditable so a partial-state
+  # bug elsewhere cannot hide behind an empty CLAIMED array.
+  if [[ ${#CLAIMED[@]} -eq 0 ]]; then
+    echo "info: claim rollback: no prior claims to release (CLAIMED is empty — first-issue failure)" >&2
+    return 0
+  fi
   for c in "${CLAIMED[@]}"; do
     gh issue edit "$c" --remove-label "$UBERDEV_ACTIVE_LABEL" >/dev/null 2>&1 || true
     gh issue edit "$c" --remove-assignee "@me"                 >/dev/null 2>&1 || true
@@ -819,9 +881,36 @@ else
   # (the parser takes `last` of the marker-matching comments and the
   # release body's missing User/Host/Branch/Started lines surface as "?"
   # — semantically correct: the claim is no longer held).
-  gh issue edit "$ISSUE_NUM" --remove-label "$UBERDEV_ACTIVE_LABEL" >/dev/null 2>&1 || true
-  gh issue edit "$ISSUE_NUM" --remove-assignee "@me"                >/dev/null 2>&1 || true
-  RELEASE_BODY="$(cat <<EOF
+  #
+  # B3 ownership check: between our Step 4.5 claim-write and this rollback,
+  # a teammate could have raced in and won — most likely via --force after
+  # seeing a stuck label from a different bug. Unconditional rollback would
+  # strip THEIR claim. Re-fetch the latest marker-matched claim comment, parse
+  # its `User: ` line, and only roll back if it still names $DISPATCHER_USER.
+  # The check uses the version-stripped prefix matcher (mirrors the Step 4
+  # collision-check change for B7). When ownership cannot be confirmed (claim
+  # comment fetch failed, body parse returned "?"), conservative-skip with a
+  # warning — better to leave a stuck label for the next sweeper pass than to
+  # strip a teammate's live claim.
+  CLAIM_COMMENT_MARKER_PREFIX="${CLAIM_COMMENT_MARKER% v* -->}"
+  CURRENT_CLAIM_USER="?"
+  CURRENT_CLAIM_JSON=$(gh issue view "$ISSUE_NUM" --json comments 2>/dev/null) || CURRENT_CLAIM_JSON=""
+  if [[ -n "$CURRENT_CLAIM_JSON" ]]; then
+    CURRENT_CLAIM_BODY=$(jq -r --arg marker "$CLAIM_COMMENT_MARKER_PREFIX" \
+      '[.comments[] | select(.body | contains($marker))] | last | .body // empty' \
+      <<<"$CURRENT_CLAIM_JSON" 2>/dev/null)
+    if [[ -n "$CURRENT_CLAIM_BODY" ]]; then
+      CURRENT_CLAIM_USER=$(printf '%s\n' "$CURRENT_CLAIM_BODY" | grep -m1 '^User: ' | sed 's/^User: @//; s/^User: //' || echo "?")
+    fi
+  fi
+  if [[ "$CURRENT_CLAIM_USER" != "$DISPATCHER_USER" ]]; then
+    echo "warning: #$ISSUE_NUM: dispatch-failure rollback skipped — latest claim is owned by '$CURRENT_CLAIM_USER' (we are '$DISPATCHER_USER'); leaving label/assignee in place to avoid stripping a racing dispatcher's claim" >&2
+    _uberdev_audit_emit claim_released \
+      "{\"issue\":$ISSUE_NUM,\"reason\":\"dispatch_failure_rollback_skipped\",\"rc\":$BG_DISPATCH_RC,\"current_owner\":\"$CURRENT_CLAIM_USER\"}" || true
+  else
+    gh issue edit "$ISSUE_NUM" --remove-label "$UBERDEV_ACTIVE_LABEL" >/dev/null 2>&1 || true
+    gh issue edit "$ISSUE_NUM" --remove-assignee "@me"                >/dev/null 2>&1 || true
+    RELEASE_BODY="$(cat <<EOF
 $CLAIM_COMMENT_MARKER
 uberdev:active claim released — dispatch failed (rc=$BG_DISPATCH_RC)
 
@@ -833,9 +922,10 @@ Released: $(date -u +%FT%TZ)
 The issue is unclaimed again — retry with /solve $ISSUE_NUM or /turbo $ISSUE_NUM.
 EOF
 )"
-  printf '%s' "$RELEASE_BODY" | gh issue comment "$ISSUE_NUM" --body-file - >/dev/null 2>&1 || true
-  _uberdev_audit_emit claim_released \
-    "{\"issue\":$ISSUE_NUM,\"reason\":\"dispatch_failure\",\"rc\":$BG_DISPATCH_RC}" || true
+    printf '%s' "$RELEASE_BODY" | gh issue comment "$ISSUE_NUM" --body-file - >/dev/null 2>&1 || true
+    _uberdev_audit_emit claim_released \
+      "{\"issue\":$ISSUE_NUM,\"reason\":\"dispatch_failure\",\"rc\":$BG_DISPATCH_RC}" || true
+  fi
   rm -f "/tmp/solve-claim-$ISSUE_NUM.json"
 fi
 done
