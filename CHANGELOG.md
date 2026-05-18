@@ -4,6 +4,12 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.1] - 2026-05-18
+
+### Fixed
+
+- **`/merge` Phase 1.4 PATH_2 sub-condition (c.0) audit-JSON discovery now traverses ALL worktree-local mirror paths.** The bash discovery glob at `plugins/uberdev/skills/merge-pipeline/SKILL.md` Step (c.0) only searched `.uberdev/runs/*/review-pr-verdict.json` relative to `/merge`'s CWD. When `/merge` ran from the main checkout but the PR was produced by ANY worktree-based flow (`/solve` and `/turbo` per `solve-pipeline/SKILL.md`'s `.claude/worktrees/solve-issue-N/`, OR `subagent-driven-dev` / `executing-plans` / brainstorm-Phase-4 per the generic `using-git-worktrees/SKILL.md`'s `.worktrees/` preferred + `worktrees/` alternate conventions), `/review-pr` wrote the audit JSON inside that worktree's gitignored `.uberdev/runs/` — invisible from the main-checkout glob. `trust-trail-evaluator` was then dispatched with `phase2_5_present=false`, which per its Step 1.5 short-circuits to `STALE`, gating otherwise-valid trust trails. Step (c.0) bash and sub-condition (d) prose now glob the full four-layout enumeration: `.uberdev/runs/`, `.claude/worktrees/*/.uberdev/runs/`, `.worktrees/*/.uberdev/runs/`, `worktrees/*/.uberdev/runs/`. The `~/.config/uberdev/worktrees/<project>/<branch>/` global-fallback layout (also declared in `using-git-worktrees/SKILL.md`) is intentionally NOT globbed — it lives outside the project root and would require runtime `$HOME` resolution; deferred to the writer-side path-anchoring follow-up (anchor `/review-pr`'s artifact writer on `git rev-parse --show-toplevel`, mirroring the convention in `orchestrator/SKILL.md`). The RUN_ID_REGEX basename-of-dirname projection (D4/F8 path-traversal hardening) works identically on all four layouts because the prefix segments are never concatenated from untrusted input — no security regression. New `M63.worktree-glob.{c0.compgen,c0.forloop,c0.or-operator,d,cm}` structural-grep assertions in `tests/merge.test.sh` lock the fix in five places (compgen-OR chain + for-loop iteration + OR-operator semantics + sub-condition (d) prose + Common Mistakes bullet). Observed twice locally on worktree-produced PRs; manual `cp` workaround retired.
+
 ## [0.27.0] - 2026-05-16
 
 ### Added
