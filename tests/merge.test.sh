@@ -1198,22 +1198,33 @@ fi
 # global layout is intentionally NOT globbed (out of scope — runtime $HOME
 # resolution; tracked for the writer-side path-anchoring follow-up).
 
+# Single source of truth for the four canonical glob layouts. Iterated below
+# by the c0.compgen, c0.forloop, and d sub-assertion blocks. Adding a fifth
+# layout (e.g. a future worktree convention from using-git-worktrees) means
+# adding ONE entry here, not three. Mirrors the existing `for field in ...`
+# DRY pattern at line ~1198 (M64 conflict-files sub-block).
+WORKTREE_GLOBS=(
+  '.uberdev/runs/*/review-pr-verdict.json'
+  '.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json'
+  '.worktrees/*/.uberdev/runs/*/review-pr-verdict.json'
+  'worktrees/*/.uberdev/runs/*/review-pr-verdict.json'
+)
+
 # (a) bash discovery code in Step (c.0). Two independent sub-assertions —
 # c0.compgen for the OR'd existence-check chain, c0.forloop for the iteration
 # list — so a future refactor cannot remove a layout from one site while
 # leaving it in the other and have the guards still pass.
-STEP_C0_BLOCK=$(awk '/Step \(c\.0\) — discover \$AUDIT_JSON_PATH/,/AUDIT_JSON_PATH is now the most-recent verdict JSON/' "$SKILL_FILE")
+# Anchor on the load-bearing identifier `discover \$AUDIT_JSON_PATH` rather
+# than the en-dash punctuation, so a future ASCII-normalisation pass (em-dash
+# → `--`) on SKILL.md cannot silently empty STEP_C0_BLOCK.
+STEP_C0_BLOCK=$(awk '/Step \(c\.0\).*discover \$AUDIT_JSON_PATH/,/AUDIT_JSON_PATH is now the most-recent verdict JSON/' "$SKILL_FILE")
 
 # Extract just the `if compgen ...` OR-chain (from `if compgen` to `then`).
 COMPGEN_CHAIN=$(echo "$STEP_C0_BLOCK" | awk '/^[[:space:]]*if compgen/,/then$/')
 # Extract just the `for f in ... do` iteration list (from `for f in` to `do`).
 FORLOOP_LIST=$(echo "$STEP_C0_BLOCK" | awk '/^[[:space:]]*for f in/,/do$/')
 
-for glob in \
-  '.uberdev/runs/*/review-pr-verdict.json' \
-  '.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json' \
-  '.worktrees/*/.uberdev/runs/*/review-pr-verdict.json' \
-  'worktrees/*/.uberdev/runs/*/review-pr-verdict.json'; do
+for glob in "${WORKTREE_GLOBS[@]}"; do
   if echo "$COMPGEN_CHAIN" | grep -qF "$glob"; then
     pass "M63.worktree-glob.c0.compgen[$glob] — Step (c.0) compgen-OR existence-check chain includes $glob"
   else
@@ -1241,11 +1252,8 @@ fi
 # (b) sub-condition (d) prose at line ~418. Same four-glob enumeration must
 # appear in the prose so the prose mirror cannot silently drift from the
 # bash code (prose-bash drift is the regression class this guards against).
-for glob in \
-  '.uberdev/runs/*/review-pr-verdict.json' \
-  '.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json' \
-  '.worktrees/*/.uberdev/runs/*/review-pr-verdict.json' \
-  'worktrees/*/.uberdev/runs/*/review-pr-verdict.json'; do
+# Iterates the SAME WORKTREE_GLOBS array as (a) above — single source of truth.
+for glob in "${WORKTREE_GLOBS[@]}"; do
   if echo "$PATH2_D_BODY" | grep -qF "$glob"; then
     pass "M63.worktree-glob.d[$glob] — sub-condition (d) prose names glob $glob (prose mirrors Step (c.0)'s bash enumeration)"
   else
