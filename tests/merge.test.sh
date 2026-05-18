@@ -1180,29 +1180,88 @@ else
   pass "M63.inequality-phrasing-absent — sub-condition (d) does not carry the retired strict-inequality phrasing (issue #78 regression guard)"
 fi
 
-# M63.worktree-glob — regression guard that asserts both the Step (c.0) bash
-# discovery code AND sub-condition (d) prose include the worktree-mirror glob
-# `.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json` alongside the
-# main `.uberdev/runs/*/review-pr-verdict.json`. Without the worktree mirror,
-# /merge cannot find audit JSONs written by /review-pr inside a /solve|/turbo
-# worktree (which is the default for medium+ tier per solve-pipeline/SKILL.md),
-# silently short-circuiting trust-trail-evaluator to STALE via
-# phase2_5_present=false and gating valid trust trails. The fix lives in two
-# co-located sites; this guard locks both.
+# M63.worktree-glob — regression guard locking the FULL worktree-mirror glob
+# enumeration across all four 5-surface fan-out sites: (a) the compgen-OR
+# existence-check chain in Step (c.0) bash, (b) the for-loop iteration list
+# in Step (c.0) bash, (c) sub-condition (d) prose at line ~418, and (d) the
+# Common Mistakes bullet that documents the pitfall. /review-pr writes its
+# audit JSON relative to its CWD; /merge runs from the main checkout, so when
+# the PR was produced by ANY worktree-based flow (/solve, /turbo per
+# solve-pipeline/SKILL.md, OR subagent-driven-dev / executing-plans / brainstorm
+# Phase 4 per the generic using-git-worktrees/SKILL.md), /merge MUST glob the
+# matching worktree layout(s). Without these mirrors, trust-trail-evaluator
+# silently short-circuits to STALE via phase2_5_present=false and gates valid
+# trust trails on every worktree-produced PR. The three covered worktree
+# layouts mirror using-git-worktrees/SKILL.md's preferred (`.worktrees/`) and
+# alternate (`worktrees/`) conventions plus the /solve|/turbo
+# `.claude/worktrees/` convention. The `~/.config/uberdev/worktrees/<project>/`
+# global layout is intentionally NOT globbed (out of scope — runtime $HOME
+# resolution; tracked for the writer-side path-anchoring follow-up).
 
-# (a) bash discovery code in Step (c.0)
+# (a) bash discovery code in Step (c.0). Two independent sub-assertions —
+# c0.compgen for the OR'd existence-check chain, c0.forloop for the iteration
+# list — so a future refactor cannot remove a layout from one site while
+# leaving it in the other and have the guards still pass.
 STEP_C0_BLOCK=$(awk '/Step \(c\.0\) — discover \$AUDIT_JSON_PATH/,/AUDIT_JSON_PATH is now the most-recent verdict JSON/' "$SKILL_FILE")
-if echo "$STEP_C0_BLOCK" | grep -qF '.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json'; then
-  pass "M63.worktree-glob.c0 — Step (c.0) bash discovery code globs the worktree-mirror path (.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json)"
+
+# Extract just the `if compgen ...` OR-chain (from `if compgen` to `then`).
+COMPGEN_CHAIN=$(echo "$STEP_C0_BLOCK" | awk '/^[[:space:]]*if compgen/,/then$/')
+# Extract just the `for f in ... do` iteration list (from `for f in` to `do`).
+FORLOOP_LIST=$(echo "$STEP_C0_BLOCK" | awk '/^[[:space:]]*for f in/,/do$/')
+
+for glob in \
+  '.uberdev/runs/*/review-pr-verdict.json' \
+  '.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json' \
+  '.worktrees/*/.uberdev/runs/*/review-pr-verdict.json' \
+  'worktrees/*/.uberdev/runs/*/review-pr-verdict.json'; do
+  if echo "$COMPGEN_CHAIN" | grep -qF "$glob"; then
+    pass "M63.worktree-glob.c0.compgen[$glob] — Step (c.0) compgen-OR existence-check chain includes $glob"
+  else
+    fail "M63.worktree-glob.c0.compgen[$glob] — Step (c.0) compgen-OR existence-check chain MUST include $glob (a removal here makes the chain fall-through on layouts where ONLY that glob has matches, silently skipping discovery)"
+  fi
+  if echo "$FORLOOP_LIST" | grep -qF "$glob"; then
+    pass "M63.worktree-glob.c0.forloop[$glob] — Step (c.0) for-loop iteration list includes $glob"
+  else
+    fail "M63.worktree-glob.c0.forloop[$glob] — Step (c.0) for-loop iteration list MUST include $glob (a removal here makes the loop never visit that layout's matches even when compgen passed)"
+  fi
+done
+
+# (a.OR) — guard the OR-operator semantics. If a future edit replaces `||`
+# with `&&` between the compgen calls, discovery silently fails when only one
+# layout has matches (the normal case from a worktree-produced PR). The
+# assertion counts `|| compgen` occurrences — expect exactly 3 (the 4 globs
+# are joined by 3 `||` operators).
+OR_COUNT=$(echo "$COMPGEN_CHAIN" | grep -cE '\|\|[[:space:]]+compgen' || true)
+if [ "$OR_COUNT" = "3" ]; then
+  pass 'M63.worktree-glob.c0.or-operator — Step (c.0) compgen chain joins the 4 globs with exactly 3 "|| compgen" operators (OR-semantics locked)'
 else
-  fail "M63.worktree-glob.c0 — Step (c.0) MUST glob .claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json alongside .uberdev/runs/*/review-pr-verdict.json — without it /merge cannot see audit JSONs written by /review-pr from inside a /solve|/turbo worktree (.claude/worktrees/solve-issue-N/)"
+  fail "M63.worktree-glob.c0.or-operator — Step (c.0) compgen chain MUST use '|| compgen' between the 4 globs (got $OR_COUNT occurrences; expected 3). A regression to '&&' would silently break discovery when only one layout has matches."
 fi
 
-# (b) sub-condition (d) prose at line ~418
-if echo "$PATH2_D_BODY" | grep -qF '.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json'; then
-  pass "M63.worktree-glob.d — sub-condition (d) prose names the worktree-mirror glob path (.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json) so the prose mirrors Step (c.0)'s bash"
+# (b) sub-condition (d) prose at line ~418. Same four-glob enumeration must
+# appear in the prose so the prose mirror cannot silently drift from the
+# bash code (prose-bash drift is the regression class this guards against).
+for glob in \
+  '.uberdev/runs/*/review-pr-verdict.json' \
+  '.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json' \
+  '.worktrees/*/.uberdev/runs/*/review-pr-verdict.json' \
+  'worktrees/*/.uberdev/runs/*/review-pr-verdict.json'; do
+  if echo "$PATH2_D_BODY" | grep -qF "$glob"; then
+    pass "M63.worktree-glob.d[$glob] — sub-condition (d) prose names glob $glob (prose mirrors Step (c.0)'s bash enumeration)"
+  else
+    fail "M63.worktree-glob.d[$glob] — sub-condition (d) prose MUST name glob $glob (prose-bash drift between (c.0) and (d) is the regression class this guards against)"
+  fi
+done
+
+# (c) Common Mistakes bullet — locks the documented pitfall so a future
+# prose refactor cannot accidentally delete the bullet that calls out the
+# worktree-mirror requirement. Mirrors the M86.7 convention which locks the
+# #95 Common Mistakes bullet.
+CM_BULLET=$(awk '/^- \*\*Globbing only `\.uberdev\/runs\/\*\/review-pr-verdict\.json` for sub-condition \(c\.0\)/{flag=1} flag{print; if(/^- /){count++; if(count>1)exit}}' "$SKILL_FILE")
+if echo "$CM_BULLET" | grep -qF '.worktrees/*/.uberdev/runs/*/review-pr-verdict.json'; then
+  pass "M63.worktree-glob.cm — Common Mistakes bullet enumerates .worktrees/ and worktrees/ glob layouts (defends against documentation regression)"
 else
-  fail "M63.worktree-glob.d — sub-condition (d) prose MUST mention the worktree-mirror glob path .claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json (prose-bash drift between (c.0) and (d) is the regression class this guards against)"
+  fail "M63.worktree-glob.cm — Common Mistakes bullet MUST enumerate the worktree-mirror glob set including .worktrees/ and worktrees/ — without it, future maintainers reading the bullet for guidance receive an incomplete picture"
 fi
 
 echo
