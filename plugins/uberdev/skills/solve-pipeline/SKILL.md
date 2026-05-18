@@ -23,7 +23,7 @@ This skill is invoked inline by `commands/solve.md` and `commands/turbo.md`. The
 | `UBERDEV_ACTIVE_LABEL` | `uberdev:active` | Step 4.5 claim protocol — applied to OPEN issues by `/solve` / `/turbo` on dispatch; cleared by `/merge` post-merge (`merge-pipeline/SKILL.md` post-merge cleanup phase) or by the dispatch-failure rollback in Step 5b'. NEVER set or removed by hand — the audit comment marker is the only safe parser surface. |
 | `UBERDEV_ACTIVE_LABEL_COLOR` | `D93F0B` | Warning-orange; matches the GitHub default `bug` palette band so it reads as actionable. Created idempotently via `gh label create --force` in Step 4.5 on first encounter per repo, mirroring `finish-branch/SKILL.md:287` and `dev-pipeline/SKILL.md:279`. |
 | `UBERDEV_ACTIVE_LABEL_DESCRIPTION` | `Issue currently being worked on by a /solve or /turbo dispatcher. Auto-managed — do not add/remove by hand.` | Passed to `gh label create --description`. The "Auto-managed" framing is the primary defence against well-meaning manual edits that would desync the claim comment from the label state. |
-| `CLAIM_COMMENT_MARKER` | `<!-- uberdev-claim-comment v1 -->` | HTML-comment fingerprint at the top of every claim audit comment. Allows the validation loop to find the latest claim comment among arbitrary unrelated comments via a single `grep -F` pass. The collision check matches on the **version-stripped prefix** (`<!-- uberdev-claim-comment`) rather than the full v1-suffixed marker — without this, a rolling upgrade where teammate-A is on v1 and teammate-B is on v2 (`<!-- uberdev-claim-comment v2 -->`) would have each dispatcher see "no live claim" of the other's version, defeating the protocol (regression #123 B7). **Forward-compat policy:** **adding** new optional fields to the body schema is backward-compatible (the field-extraction grep tolerates missing fields via the `?` fallback) and does NOT require a marker version bump. **Removing or renaming** fields is a breaking change — it MUST bump the marker version AND ship a migration path (e.g. a parser arm that handles both v1 and v2 bodies during the rollout window). The version-stripped-prefix matcher means future v2/v3 dispatchers will be visible to v1 dispatchers' collision check; semantic compatibility of the body schema is the writer's responsibility, not the parser's. |
+| `CLAIM_COMMENT_MARKER` | `<!-- uberdev-claim-comment v1 -->` | HTML-comment fingerprint at the top of every claim audit comment. Allows the validation loop to find the latest claim comment among arbitrary unrelated comments via a single `grep -F` pass. The collision check matches on the **version-stripped prefix** (`<!-- uberdev-claim-comment`) rather than the full v1-suffixed marker — without this, a rolling upgrade where teammate-A is on v1 and teammate-B is on v2 (`<!-- uberdev-claim-comment v2 -->`) would have each dispatcher see "no live claim" of the other's version, defeating the protocol (regression #123 B7). **Forward-compat policy:** **adding** new optional fields to the body schema is backward-compatible (the field-extraction loop pre-inits each field to `"?"` and conditionally overwrites only when the grep|sed pipeline emits a non-empty value, so missing fields stay at `"?"` without breaking the parse) and does NOT require a marker version bump. **Removing or renaming** fields is a breaking change — it MUST bump the marker version AND ship a migration path (e.g. a parser arm that handles both v1 and v2 bodies during the rollout window). The version-stripped-prefix matcher means future v2/v3 dispatchers will be visible to v1 dispatchers' collision check; semantic compatibility of the body schema is the writer's responsibility, not the parser's. |
 
 ## Triage heuristics (Phase A applies this table)
 
@@ -325,10 +325,18 @@ for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
       <<<"$ISSUE_JSON")
     CLAIM_USER="?"; CLAIM_HOST="?"; CLAIM_BRANCH="?"; CLAIM_TS="?"
     if [[ -n "$LATEST_CLAIM_BODY" ]]; then
-      CLAIM_USER=$(printf '%s\n' "$LATEST_CLAIM_BODY"   | grep -m1 '^User: '   | sed 's/^User: //'    || echo "?")
-      CLAIM_HOST=$(printf '%s\n' "$LATEST_CLAIM_BODY"   | grep -m1 '^Host: '   | sed 's/^Host: //'    || echo "?")
-      CLAIM_BRANCH=$(printf '%s\n' "$LATEST_CLAIM_BODY" | grep -m1 '^Branch: ' | sed 's/^Branch: //'  || echo "?")
-      CLAIM_TS=$(printf '%s\n' "$LATEST_CLAIM_BODY"     | grep -m1 '^Started: '| sed 's/^Started: //' || echo "?")
+      # Field-extraction: capture grep|sed output to a temp scalar, then assign
+      # the field var ONLY when the temp is non-empty. The pre-init "?" defaults
+      # above stay in place when the field is missing. The naive form
+      #   FIELD=$(... | grep | sed || echo "?")
+      # is broken: when grep finds nothing, sed still exits 0, so `||` never
+      # short-circuits; FIELD comes out empty (NOT "?"), defeating the
+      # ALL_PLACEHOLDER branch below. Capture + test + conditional-assign is the
+      # portable fix (Q1; #123 Phase 2 simplify-lens blocker).
+      _v=$(printf '%s\n' "$LATEST_CLAIM_BODY" | grep -m1 '^User: '    | sed 's/^User: //');     [[ -n "$_v" ]] && CLAIM_USER="$_v"
+      _v=$(printf '%s\n' "$LATEST_CLAIM_BODY" | grep -m1 '^Host: '    | sed 's/^Host: //');     [[ -n "$_v" ]] && CLAIM_HOST="$_v"
+      _v=$(printf '%s\n' "$LATEST_CLAIM_BODY" | grep -m1 '^Branch: '  | sed 's/^Branch: //');   [[ -n "$_v" ]] && CLAIM_BRANCH="$_v"
+      _v=$(printf '%s\n' "$LATEST_CLAIM_BODY" | grep -m1 '^Started: ' | sed 's/^Started: //');  [[ -n "$_v" ]] && CLAIM_TS="$_v"
     fi
     # F4: distinguish "no live claim comment found" (label set but body
     # extraction yielded all ?s — likely a racing dispatcher whose claim
@@ -552,10 +560,42 @@ DISPATCHER_HOST=$(hostname -s 2>/dev/null || hostname)
 DISPATCH_TS=$(date -u +%FT%TZ)
 
 CLAIMED=()
+# _uberdev_release_claim ISSUE_NUM REASON [EXTRA_JSON]
+#   Releases one issue's claim atomically (single combined gh round-trip:
+#   --remove-label + --remove-assignee in one mutation) and emits a
+#   canonically-shaped `claim_released` audit event.
+#
+# Why one helper for all 4 release sites (batch rollback, comment-failure
+# rollback, Phase B dispatch-failure rollback, future sites): without it, a
+# new rollback path can silently forget one of the three operations
+# (label-remove, assignee-remove, audit-emit) — the exact shape of the
+# #123 B5 regression that the merge-pipeline cleanup needed an explicit
+# fix for. Routing every release through this helper forecloses that
+# regression by construction. Folds suggestion S1 (canonical
+# claim_released payload) and blocker E3 (combine paired gh calls) into
+# one site.
+#
+# Atomicity note: `gh issue edit --remove-label X --remove-assignee Y`
+# fails atomically on partial error (gh aborts on the first failing op
+# and propagates its exit). Pre-fold the code paired two separate gh
+# calls with a partial-rollback wedge between them — that wedge is no
+# longer needed.
+#
+# Fail-soft on the gh call (||true): every caller invokes release in an
+# already-failing path; masking the original error with a secondary
+# rollback failure is the wrong tradeoff. Audit-emit is similarly
+# fail-soft via `|| true` on the _uberdev_audit_emit return.
+_uberdev_release_claim() {
+  local issue="$1" reason="$2" extra="${3:-}"
+  gh issue edit "$issue" --remove-label "$UBERDEV_ACTIVE_LABEL" --remove-assignee "@me" >/dev/null 2>&1 || true
+  local payload="{\"issue\":$issue,\"reason\":\"$reason\""
+  [[ -n "$extra" ]] && payload="${payload},${extra}"
+  payload="${payload}}"
+  _uberdev_audit_emit claim_released "$payload" || true
+}
 _uberdev_rollback_claims() {
-  # Best-effort rollback — these calls are intentionally fail-soft (||true)
-  # because rollback runs in an already-failing path and we should never
-  # mask the original error with a secondary rollback failure.
+  # Best-effort rollback — delegates to _uberdev_release_claim (above) so
+  # the remove-label + remove-assignee + audit triplet is defined once.
   local c
   # B8: explicitly distinguish the no-op case from a successful rollback.
   # If the first issue in a batch fails at the label-add step before any
@@ -569,9 +609,7 @@ _uberdev_rollback_claims() {
     return 0
   fi
   for c in "${CLAIMED[@]}"; do
-    gh issue edit "$c" --remove-label "$UBERDEV_ACTIVE_LABEL" >/dev/null 2>&1 || true
-    gh issue edit "$c" --remove-assignee "@me"                 >/dev/null 2>&1 || true
-    _uberdev_audit_emit claim_released "{\"issue\":$c,\"reason\":\"batch_rollback\"}" || true
+    _uberdev_release_claim "$c" "batch_rollback"
   done
 }
 
@@ -596,25 +634,26 @@ Auto-clears on /merge or issue close. If this claim is stale, override with:
   /turbo $ISSUE_NUM --force    (or /solve $ISSUE_NUM --force)
 EOF
 )"
-  if ! gh issue edit "$ISSUE_NUM" --add-label "$UBERDEV_ACTIVE_LABEL" >/dev/null 2>&1; then
-    echo "error: #$ISSUE_NUM: failed to add $UBERDEV_ACTIVE_LABEL label (check gh auth / repo permissions)" >&2
-    _uberdev_audit_emit claim_write_failed "{\"issue\":$ISSUE_NUM,\"step\":\"add_label\"}" || true
-    _uberdev_rollback_claims
-    exit 1
-  fi
-  if ! gh issue edit "$ISSUE_NUM" --add-assignee "@me" >/dev/null 2>&1; then
-    echo "error: #$ISSUE_NUM: failed to add @me assignee (check gh auth)" >&2
-    _uberdev_audit_emit claim_write_failed "{\"issue\":$ISSUE_NUM,\"step\":\"add_assignee\"}" || true
-    # Rollback this issue's partial claim (label was set above) before batch rollback.
-    gh issue edit "$ISSUE_NUM" --remove-label "$UBERDEV_ACTIVE_LABEL" >/dev/null 2>&1 || true
+  # Combined claim write: label + assignee in one gh round-trip. gh fails
+  # atomically on partial error (the first failing op's exit propagates),
+  # so the inline partial-rollback wedge that used to live between paired
+  # add-label and add-assignee calls is no longer needed (E1, #123 Phase 2
+  # simplify-lens blocker — halves the gh round-trip count on the claim hot
+  # path and tightens atomicity).
+  if ! gh issue edit "$ISSUE_NUM" --add-label "$UBERDEV_ACTIVE_LABEL" --add-assignee "@me" >/dev/null 2>&1; then
+    echo "error: #$ISSUE_NUM: failed to write claim (label or assignee) — check gh auth / repo permissions" >&2
+    _uberdev_audit_emit claim_write_failed "{\"issue\":$ISSUE_NUM,\"step\":\"label_or_assignee\"}" || true
     _uberdev_rollback_claims
     exit 1
   fi
   if ! printf '%s' "$CLAIM_BODY" | gh issue comment "$ISSUE_NUM" --body-file - >/dev/null 2>&1; then
     echo "error: #$ISSUE_NUM: failed to post claim audit comment" >&2
     _uberdev_audit_emit claim_write_failed "{\"issue\":$ISSUE_NUM,\"step\":\"comment\"}" || true
-    gh issue edit "$ISSUE_NUM" --remove-label "$UBERDEV_ACTIVE_LABEL" >/dev/null 2>&1 || true
-    gh issue edit "$ISSUE_NUM" --remove-assignee "@me"                 >/dev/null 2>&1 || true
+    # Release this issue's partial claim (label+assignee were set above)
+    # before the batch rollback runs. Routes through the shared helper
+    # (E3+S1) so the remove-label + remove-assignee + audit triplet stays
+    # defined in one place.
+    _uberdev_release_claim "$ISSUE_NUM" "claim_write_failed"
     _uberdev_rollback_claims
     exit 1
   fi
@@ -908,8 +947,14 @@ else
     _uberdev_audit_emit claim_released \
       "{\"issue\":$ISSUE_NUM,\"reason\":\"dispatch_failure_rollback_skipped\",\"rc\":$BG_DISPATCH_RC,\"current_owner\":\"$CURRENT_CLAIM_USER\"}" || true
   else
-    gh issue edit "$ISSUE_NUM" --remove-label "$UBERDEV_ACTIVE_LABEL" >/dev/null 2>&1 || true
-    gh issue edit "$ISSUE_NUM" --remove-assignee "@me"                >/dev/null 2>&1 || true
+    # Combined cleanup + canonical claim_released emit via the shared helper
+    # (E3+S1 fold; #123 Phase 2 simplify-lens blocker). The helper bundles
+    # --remove-label + --remove-assignee into one gh round-trip and emits a
+    # claim_released event with the standard {issue, reason, ...extra} shape.
+    # The release-comment post still runs separately below — it carries the
+    # CLAIM_COMMENT_MARKER fingerprint so future claim-collision parsers see
+    # the release as the latest claim event.
+    _uberdev_release_claim "$ISSUE_NUM" "dispatch_failure" "\"rc\":$BG_DISPATCH_RC,\"user\":\"$DISPATCHER_USER\",\"host\":\"$DISPATCHER_HOST\""
     RELEASE_BODY="$(cat <<EOF
 $CLAIM_COMMENT_MARKER
 uberdev:active claim released — dispatch failed (rc=$BG_DISPATCH_RC)
@@ -923,8 +968,6 @@ The issue is unclaimed again — retry with /solve $ISSUE_NUM or /turbo $ISSUE_N
 EOF
 )"
     printf '%s' "$RELEASE_BODY" | gh issue comment "$ISSUE_NUM" --body-file - >/dev/null 2>&1 || true
-    _uberdev_audit_emit claim_released \
-      "{\"issue\":$ISSUE_NUM,\"reason\":\"dispatch_failure\",\"rc\":$BG_DISPATCH_RC}" || true
   fi
   rm -f "/tmp/solve-claim-$ISSUE_NUM.json"
 fi

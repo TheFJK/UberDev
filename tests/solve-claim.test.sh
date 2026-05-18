@@ -137,11 +137,11 @@ assert_grep "$SOLVE_PIPELINE" \
   '^_uberdev_rollback_claims\(\) \{' \
   "_uberdev_rollback_claims helper defined"
 assert_grep "$SOLVE_PIPELINE" \
-  'gh issue edit "\$ISSUE_NUM" --add-label "\$UBERDEV_ACTIVE_LABEL"' \
-  "Per-issue add-label call"
-assert_grep "$SOLVE_PIPELINE" \
-  'gh issue edit "\$ISSUE_NUM" --add-assignee "@me"' \
-  "Per-issue add-assignee @me call"
+  'gh issue edit "\$ISSUE_NUM" --add-label "\$UBERDEV_ACTIVE_LABEL" --add-assignee "@me"' \
+  "Per-issue claim write combines --add-label + --add-assignee into one gh round-trip (E1)"
+assert_grep_not "$SOLVE_PIPELINE" \
+  'gh issue edit "\$ISSUE_NUM" --add-assignee "@me" >/dev/null' \
+  "E1: split-call form (separate --add-assignee gh call) is gone"
 assert_grep "$SOLVE_PIPELINE" \
   'gh issue comment "\$ISSUE_NUM" --body-file -' \
   "Per-issue audit comment via --body-file -"
@@ -157,11 +157,8 @@ assert_grep "$SOLVE_PIPELINE" \
   "claim rollback on dispatch failure" \
   "Phase B rollback comment marker present"
 assert_grep "$SOLVE_PIPELINE" \
-  'gh issue edit "\$ISSUE_NUM" --remove-label "\$UBERDEV_ACTIVE_LABEL"' \
-  "Rollback removes uberdev:active label"
-assert_grep "$SOLVE_PIPELINE" \
-  'gh issue edit "\$ISSUE_NUM" --remove-assignee "@me"' \
-  "Rollback removes @me assignee"
+  '_uberdev_release_claim "\$ISSUE_NUM" "dispatch_failure"' \
+  "Phase B rollback delegates to _uberdev_release_claim helper (E3+S1 fold)"
 assert_grep "$SOLVE_PIPELINE" \
   "uberdev:active claim released .* dispatch failed" \
   "Rollback posts release-comment to issue"
@@ -338,10 +335,15 @@ assert_grep "$SOLVE_PIPELINE" \
 
 echo "== #123 B5: merge-pipeline cleanup clears @me assignee =="
 # Step 3.4 cleanup MUST clear both label AND assignee per linked issue —
-# symmetric with the Phase B dispatch-failure rollback.
+# symmetric with the Phase B dispatch-failure rollback. Combined form (E2)
+# bundles both removals into one gh round-trip; gh fails atomically on
+# partial error.
 assert_grep "$MERGE_PIPELINE" \
-  'gh issue edit "\$CLEAR_ISSUE_NUM" --remove-assignee "@me"' \
-  "B5: merge-pipeline Step 3.4 clears @me assignee on linked issues"
+  'gh issue edit "\$CLEAR_ISSUE_NUM" --remove-label "uberdev:active" --remove-assignee "@me"' \
+  "B5+E2: merge-pipeline Step 3.4 combines --remove-label + --remove-assignee in one gh call"
+assert_grep_not "$MERGE_PIPELINE" \
+  'gh issue edit "\$CLEAR_ISSUE_NUM" --remove-assignee "@me" >/dev/null 2>&1 \|\| true' \
+  "E2: split-call form (separate trailing --remove-assignee gh call) is gone"
 
 echo "== #123 B7: CLAIM_COMMENT_MARKER prefix-matcher is version-agnostic =="
 # The collision-check jq filter MUST NOT match the full versioned marker —
@@ -384,6 +386,79 @@ assert_grep "$SOLVE_PIPELINE" \
 assert_grep "$SOLVE_PIPELINE" \
   "no prior claims to release" \
   "B8: no-op rollback emits operator-visible info line on stderr"
+
+echo "== #123 Phase 2 simplify-lens: Q1 — field-extraction \"?\" fallback bug =="
+# Q1 BLOCKER: the naive `... | grep | sed || echo "?"` form is broken because
+# sed exits 0 even when grep finds nothing. CLAIM_USER (and friends) came out
+# EMPTY, not "?", so the ALL_PLACEHOLDER branch never fired on "body present
+# but fields malformed". Fix: capture grep|sed output into a temp, then
+# conditional-assign only when non-empty (pre-init "?" defaults stay in place).
+assert_grep_not "$SOLVE_PIPELINE" \
+  "CLAIM_USER=\\\$\\(printf '%s.n' \"\\\$LATEST_CLAIM_BODY\".* sed 's/\\^User: //'.*\\|\\| echo \"\\?\"" \
+  "Q1: broken `|| echo \"?\"` field-extraction form is gone"
+assert_grep "$SOLVE_PIPELINE" \
+  "_v=\\\$\\(printf .* \"\\\$LATEST_CLAIM_BODY\" \\| grep -m1 '\\^User: ' +\\| sed 's/\\^User: //'\\); +\\[\\[ -n \"\\\$_v\" \\]\\] && CLAIM_USER=\"\\\$_v\"" \
+  "Q1: capture-then-conditional-assign form for CLAIM_USER (pre-init \"?\" default preserved)"
+assert_grep "$SOLVE_PIPELINE" \
+  "_v=\\\$\\(printf .* \"\\\$LATEST_CLAIM_BODY\" \\| grep -m1 '\\^Host: ' +\\| sed 's/\\^Host: //'\\); +\\[\\[ -n \"\\\$_v\" \\]\\] && CLAIM_HOST=\"\\\$_v\"" \
+  "Q1: same fix applied to CLAIM_HOST"
+assert_grep "$SOLVE_PIPELINE" \
+  "_v=\\\$\\(printf .* \"\\\$LATEST_CLAIM_BODY\" \\| grep -m1 '\\^Branch: ' +\\| sed 's/\\^Branch: //'\\); +\\[\\[ -n \"\\\$_v\" \\]\\] && CLAIM_BRANCH=\"\\\$_v\"" \
+  "Q1: same fix applied to CLAIM_BRANCH"
+assert_grep "$SOLVE_PIPELINE" \
+  "_v=\\\$\\(printf .* \"\\\$LATEST_CLAIM_BODY\" \\| grep -m1 '\\^Started: ' +\\| sed 's/\\^Started: //'\\); +\\[\\[ -n \"\\\$_v\" \\]\\] && CLAIM_TS=\"\\\$_v\"" \
+  "Q1: same fix applied to CLAIM_TS"
+# Constants-table prose update: must NOT still claim the `?` fallback works.
+assert_grep_not "$SOLVE_PIPELINE" \
+  "the field-extraction grep tolerates missing fields via the .\\?. fallback" \
+  "Q1: false Constants-table claim about `?` fallback removed"
+# Behavioural test: simulate the bug shape on a real shell. With the
+# old form, an empty grep result leaves the variable EMPTY; with the
+# fix, the pre-init "?" stays in place.
+Q1_EMPTY_BODY=""
+CLAIM_USER_DEFAULT="?"
+# Old (broken) form: pipeline returns sed's exit (0), so || never fires.
+Q1_OLD_RESULT=$(printf '%s\n' "$Q1_EMPTY_BODY" | grep -m1 '^User: ' | sed 's/^User: //' || echo "?")
+# New (fixed) form: capture, test, conditional-assign.
+_v=$(printf '%s\n' "$Q1_EMPTY_BODY" | grep -m1 '^User: ' | sed 's/^User: //')
+Q1_NEW_RESULT="$CLAIM_USER_DEFAULT"; [[ -n "$_v" ]] && Q1_NEW_RESULT="$_v"
+if [[ -z "$Q1_OLD_RESULT" && "$Q1_NEW_RESULT" == "?" ]]; then
+  echo "  PASS  Q1: behavioural — old form leaves CLAIM_USER empty (regression smoking-gun), fix yields \"?\""
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  Q1: behavioural shape unexpected — old='$Q1_OLD_RESULT' new='$Q1_NEW_RESULT' (expected old=empty, new='?')"
+  FAIL=$((FAIL + 1))
+fi
+
+echo "== #123 Phase 2 simplify-lens: S1+E3 — _uberdev_release_claim helper extracted =="
+# S1+E3 fold: single helper releases one claim atomically (combined gh round-trip)
+# and emits a canonically-shaped claim_released audit event. Forecloses a #123 B5-
+# style regression where a new release path forgets one of the three operations.
+assert_grep "$SOLVE_PIPELINE" \
+  '^_uberdev_release_claim\(\) \{' \
+  "S1+E3: _uberdev_release_claim helper defined at column 0"
+assert_grep "$SOLVE_PIPELINE" \
+  'gh issue edit "\$issue" --remove-label "\$UBERDEV_ACTIVE_LABEL" --remove-assignee "@me"' \
+  "S1+E3: helper combines --remove-label + --remove-assignee into one gh round-trip"
+assert_grep "$SOLVE_PIPELINE" \
+  '_uberdev_audit_emit claim_released "\$payload"' \
+  "S1+E3: helper emits claim_released via canonical payload variable"
+# Batch rollback (CLAIMED loop) routes through helper.
+assert_grep "$SOLVE_PIPELINE" \
+  '_uberdev_release_claim "\$c" "batch_rollback"' \
+  "S1+E3: _uberdev_rollback_claims loop body delegates to helper (reason=batch_rollback)"
+# Comment-failure inline rollback routes through helper.
+assert_grep "$SOLVE_PIPELINE" \
+  '_uberdev_release_claim "\$ISSUE_NUM" "claim_write_failed"' \
+  "S1+E3: comment-failure inline rollback delegates to helper (reason=claim_write_failed)"
+# All four release-reason values are present somewhere in the file (either as a
+# literal payload field for sites still embedded inline, or as a $2 arg to the
+# helper). Lock the canonical set so future churn cannot silently drop one.
+for reason in batch_rollback claim_write_failed dispatch_failure stale_on_closed; do
+  assert_grep "$SOLVE_PIPELINE" \
+    "\\b$reason\\b" \
+    "S1+E3: claim_released reason='$reason' present in solve-pipeline (helper arg or inline payload)"
+done
 
 echo "== #123 B2: known-limitation (TOCTOU) honestly documented =="
 # B2 was deferred (real fix needs a design decision). The spec MUST be honest
