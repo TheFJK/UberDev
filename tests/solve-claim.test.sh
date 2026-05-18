@@ -178,11 +178,19 @@ for evt in claim_acquired claim_collision claim_force_override claim_write_faile
 done
 
 echo "== Constants table updates =="
+# Use single-quoted patterns + [|] character class for portability.
+# GNU grep -E (used on CI Linux runners) treats `\|` as literal `|` (fine) but
+# `\`` as `\` + literal backtick — looking for a literal backslash in the
+# file that isn't there, causing the assertion to FAIL on GNU grep even when
+# the table entry is correct. BSD/macOS grep variants are more lenient on
+# `\<non-meta>`. Single-quoting avoids the bash double-quote backtick-as-
+# command-substitution trap; `[|]` is a portable character-class alternative
+# to `\|` that behaves identically in BRE/ERE and across BSD/GNU implementations.
 assert_grep "$SOLVE_PIPELINE" \
-  "\\\`UBERDEV_ACTIVE_LABEL\\\` \\| \\\`uberdev:active\\\`" \
+  '`UBERDEV_ACTIVE_LABEL` [|] `uberdev:active`' \
   "UBERDEV_ACTIVE_LABEL entry in Constants table"
 assert_grep "$SOLVE_PIPELINE" \
-  "\\\`CLAIM_COMMENT_MARKER\\\` \\| \\\`<!-- uberdev-claim-comment v1 -->\\\`" \
+  '`CLAIM_COMMENT_MARKER` [|] `<!-- uberdev-claim-comment v1 -->`' \
   "CLAIM_COMMENT_MARKER entry in Constants table"
 
 echo "== Security: no Co-Authored-By in claim or release bodies =="
