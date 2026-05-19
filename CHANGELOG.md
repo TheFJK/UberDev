@@ -4,6 +4,18 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.30.0] - 2026-05-19
+
+### Added
+
+- **Cross-platform dispatch backends for `/solve` and `/turbo` (RFC 0004).** A `dispatch_backend` abstraction with three tested backends — `claude-bg` (today's default), `wezterm` (visible panes, opt-in), and `background` (dependency-free fallback) — selected by a platform-aware fallback chain (macOS → `[wezterm, claude-bg]`; native Windows → `[wezterm, background]`; WSL2 → `[claude-bg]`). New `--backend=` CLI flag and `dispatch_backend:` config key let users override the resolved backend per invocation or per repo.
+- **Native Windows hardening of the bash dispatch pipeline.** Coreutils-first `TIMEOUT_BIN` probe (no more accidentally invoking `System32\timeout.exe`), `MSYS_NO_PATHCONV` wrap around path arguments, a single `UBERDEV_TMPDIR` replacing every hardcoded `/tmp/`, a native-Windows-without-bash fast-fail, and a WSL2 `/mnt` slowness warning. New `windows-latest` shape-check CI job covers the regression surface.
+- **New `lib/dispatch.sh` module** sourcing `uberdev_dispatch_preflight` + `uberdev_dispatch_one` + three backend functions; `solve-pipeline/SKILL.md` Step 5b' rewired to call it.
+
+### Why
+
+`/solve` and `/turbo` were silently macOS-and-WSL2-only because the dispatch path hardcoded `claude --bg` and `/tmp/`. RFC 0004 introduces a platform-aware backend abstraction so the same commands work end-to-end on macOS, WSL2, and native Windows (Git Bash). See `docs/rfc/0004-cross-platform-dispatch-backends.md`. Known limitation: on hosts with a pre-existing `~/.wezterm.lua`, the appended Lua config is unreachable if the existing file contains its own `return config` (first-return-wins) — users with custom WezTerm configs must integrate the managed values by hand for now.
+
 ## [0.29.0] - 2026-05-19
 
 ### Fixed
