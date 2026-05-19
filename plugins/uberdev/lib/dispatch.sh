@@ -51,7 +51,13 @@ _uberdev_dispatch_os_class() {
 # Keeps lib/dispatch.sh independently sourceable in tests.
 _uberdev_dispatch_audit() {
   if command -v _uberdev_audit_emit >/dev/null 2>&1; then
-    _uberdev_audit_emit "$1" "$2" || true
+    # _uberdev_audit_emit is defined but failed: the dispatch must still
+    # proceed (audit is best-effort, not load-bearing), but a silently
+    # dropped audit event leaves the run trail incomplete with no trace.
+    # Emit a stderr warning so the gap is at least diagnosable. The
+    # not-defined branch stays a deliberate graceful no-op (tests source
+    # this file standalone without the SKILL.md audit harness).
+    _uberdev_audit_emit "$1" "$2" || echo "warning: audit failed for event $1" >&2
   fi
 }
 
@@ -146,10 +152,23 @@ uberdev_dispatch_one() {
     wezterm)     _uberdev_dispatch_wezterm    "$ISSUE_NUM" "$TIER" "$PROMPT_FILE" ;;
     background)  _uberdev_dispatch_background  "$ISSUE_NUM" "$TIER" "$PROMPT_FILE" ;;
     *)
+      # Unreachable by design — uberdev_dispatch_preflight only ever exports
+      # one of the three concrete backends (or returns non-zero, handled
+      # above). Still emit dispatch_setup_failed so an out-of-band mutation
+      # of UBERDEV_RESOLVED_BACKEND leaves an audit trace like every other
+      # failure arm in this file, rather than only an stderr line.
       echo "error: uberdev_dispatch_one: unresolved backend '${UBERDEV_RESOLVED_BACKEND:-}'" >&2
       DISPATCH_RC=1
+      _uberdev_dispatch_audit dispatch_setup_failed \
+        "{\"issue\":$ISSUE_NUM,\"phase\":\"unresolved_backend\",\"backend\":\"${UBERDEV_RESOLVED_BACKEND:-}\",\"rc\":1}"
       return 1 ;;
   esac
+  # Explicit return of the backend's rc. Each backend already returns its
+  # own DISPATCH_RC, so the case statement's exit status is well-defined
+  # today; this makes the function contract explicit and stops a future
+  # backend arm that forgets to `return` from silently leaking the rc of
+  # whatever ran last inside it.
+  return "$DISPATCH_RC"
 }
 
 # _uberdev_dispatch_claude_bg ISSUE_NUM TIER PROMPT_FILE
@@ -161,8 +180,8 @@ _uberdev_dispatch_claude_bg() {
   DISPATCH_ID=""
   local BG_STDOUT_LOG="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM.log"
   # UBERDEV_TURBO=1 chain-wide signal for /turbo (AUTO_MODE=1) only; env(1)
-  # mediates the inline-prefix because timeout(1) is argv[0] (see SKILL.md
-  # comment lifted verbatim). Empty array under AUTO_MODE=0 -> no-op passthrough.
+  # mediates the inline-prefix because timeout(1) is argv[0]. Empty array
+  # under AUTO_MODE=0 -> no-op passthrough.
   local BG_TURBO_ENV=()
   [[ "${AUTO_MODE:-0}" == "1" ]] && BG_TURBO_ENV=( UBERDEV_TURBO=1 )
   local BG_PROMPT_MODE="${BG_PROMPT_MODE:-argv}"
@@ -186,7 +205,18 @@ _uberdev_dispatch_claude_bg() {
     argv)
       # Bash array form (spec-reviewer finding 1) — single argv slot, no eval.
       local PROMPT_BODY
-      PROMPT_BODY="$(cat "$PROMPT_FILE")"
+      # B5 fix (prompt-read), mirrored from the `background` backend: an
+      # unreadable $PROMPT_FILE would otherwise leave PROMPT_BODY="" and
+      # dispatch `claude --bg … -- ""` (garbage agent), with the audit event
+      # happily reporting success. Guard the cat read and surface the failure
+      # as a dispatch_setup_failed audit + rc=1.
+      if ! PROMPT_BODY="$(cat "$PROMPT_FILE" 2>>"$BG_STDOUT_LOG")"; then
+        DISPATCH_RC=1
+        DISPATCH_LOG="$BG_STDOUT_LOG"
+        _uberdev_dispatch_audit dispatch_setup_failed \
+          "{\"issue\":$ISSUE_NUM,\"phase\":\"prompt_read\",\"backend\":\"claude-bg\",\"rc\":1}"
+        return 1
+      fi
       local cmd=( "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" env "${BG_TURBO_ENV[@]}" claude --bg
             --worktree "solve-issue-$ISSUE_NUM"
             --model "$MODEL" )
@@ -367,9 +397,8 @@ _uberdev_dispatch_wezterm() {
   # RFC §3.6: every `wezterm cli` call in this file passes
   # `--domain-name uberdev` (the probe in _uberdev_dispatch_wezterm_available
   # and the spawn below). That flag — not any env-var pin — is the actual
-  # mechanism that keeps fan-out on one mux. A prior socket-env-var export
-  # line (its right-hand side `${VAR:-}` was a tautology that defaulted to
-  # the var's own value or empty) was removed in the B1 fix.
+  # mechanism that keeps fan-out on one mux. No socket-env-var export is
+  # used or needed; the domain flag fully determines the target mux.
   local WORKTREE_DIR=".claude/worktrees/solve-issue-$ISSUE_NUM"
   local WORKTREE_BRANCH="worktree-solve-issue-$ISSUE_NUM"
   local LOG_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM.log"
@@ -386,7 +415,18 @@ _uberdev_dispatch_wezterm() {
   local WORKTREE_ABS
   WORKTREE_ABS="$(cd "$WORKTREE_DIR" && pwd)"
   local PROMPT_BODY
-  PROMPT_BODY="$(cat "$PROMPT_FILE")"
+  # B5 fix (prompt-read), mirrored from the `background` backend: an
+  # unreadable $PROMPT_FILE would otherwise leave PROMPT_BODY="" and spawn
+  # `claude -p ""` into the pane (garbage agent), with the audit event
+  # happily reporting success. Guard the cat read and surface the failure
+  # as a dispatch_setup_failed audit + rc=1.
+  if ! PROMPT_BODY="$(cat "$PROMPT_FILE" 2>>"$LOG_FILE")"; then
+    DISPATCH_RC=1
+    DISPATCH_LOG="$LOG_FILE"
+    _uberdev_dispatch_audit dispatch_setup_failed \
+      '{"issue":'"$ISSUE_NUM"',"phase":"prompt_read","backend":"wezterm","rc":1}'
+    return 1
+  fi
   # wezterm cli spawn into the pinned uberdev domain. Foreground claude -p
   # (headless print mode streaming into the pane) — detaching would empty the
   # pane. MSYS2_ARG_CONV_EXCL stops Git Bash mangling the --cwd path arg
