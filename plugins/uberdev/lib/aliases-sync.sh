@@ -139,7 +139,7 @@ aliases_sync_main() {
   # jq-free read of the plugin's own manifest version (RFC 0004) — alias
   # sync has no external dependency, so it works without jq on PATH.
   VERSION="$(_aliases_read_version "$PLUGIN_ROOT_LOCAL/.claude-plugin/plugin.json")"
-  [ -n "$VERSION" ] && [ "$VERSION" != "null" ] || return 0
+  [ -n "$VERSION" ] || return 0
 
   INSTALLED="$(cat "$MARKER" 2>/dev/null || true)"
 
