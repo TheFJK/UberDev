@@ -8,6 +8,9 @@
 #   BUILTINS                  — list of Claude Code built-in command names
 #                               that must never be overwritten.
 #   aliases_sync_main()       — top-level entry; idempotent; always returns 0.
+#   UBERDEV_ALIAS_NOTICE      — global set by aliases_sync_main(): a one-line
+#                               user-facing notice (or "") for the SessionStart
+#                               hook to inject into the session context.
 #   aliases_sync_remove()     — companion for /uberdev:uninstall-aliases.
 #
 # Sourced by:
@@ -87,12 +90,33 @@ _aliases_check_marker() {
   head -c 1024 "$TARGET" 2>/dev/null | grep -q 'managed-by: uberdev-aliases'
 }
 
+# _aliases_read_version PLUGIN_JSON
+# Prints the first "version" string found in a plugin.json — without jq.
+# The sed matches the first `"version"` key on any line, not specifically a
+# top-level one; this is safe because the manifest is the plugin's own
+# shipped, controlled file, where `"version": "x.y.z"` sits on a single
+# top-level line. Prints nothing on any failure; the caller treats an empty
+# result as "version undeterminable" and fails open (RFC 0004).
+_aliases_read_version() {
+  local file="$1"
+  [ -r "$file" ] || return 0
+  sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$file" \
+    2>/dev/null | head -n1
+}
+
 # aliases_sync_main
 # Idempotent. Always returns 0. Reads:
 #   - $PLUGIN_ROOT (must be set by caller)
 #   - $UBERDEV_NO_AUTO_ALIAS (env, optional)
 #   - $PWD/.claude/uberdev.local.md (file, optional)
+# Sets:
+#   - $UBERDEV_ALIAS_NOTICE (global) — a one-line user-facing notice for the
+#     SessionStart hook to inject, or "" when there is nothing to report.
 aliases_sync_main() {
+  # Always define the notice first so EVERY return path leaves it set (the
+  # hook runs under `set -u`). Empty string ⇒ the hook injects nothing.
+  UBERDEV_ALIAS_NOTICE=""
+
   # 1. Opt-out gates (env + file). Env wins (precedence: env > file > default).
   case "${UBERDEV_NO_AUTO_ALIAS:-}" in
     1|true|TRUE|yes|YES) return 0 ;;
@@ -102,10 +126,7 @@ aliases_sync_main() {
     return 0
   fi
 
-  # 2. Hard-dep check: jq required to read plugin.json version.
-  command -v jq >/dev/null 2>&1 || return 0  # fail-open
-
-  # 3. Plugin-root sanity.
+  # 2. Plugin-root sanity.
   local PLUGIN_ROOT_LOCAL="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
   [ -n "$PLUGIN_ROOT_LOCAL" ] || return 0
   [ -f "$PLUGIN_ROOT_LOCAL/.claude-plugin/plugin.json" ] || return 0
@@ -115,12 +136,14 @@ aliases_sync_main() {
   local DEST_DIR="$HOME/.claude/commands"
   local MARKER="$HOME/.claude/.uberdev-aliases-version"
   local VERSION INSTALLED FIRST_RUN
-  VERSION="$(jq -r .version "$PLUGIN_ROOT_LOCAL/.claude-plugin/plugin.json" 2>/dev/null)" || return 0
-  [ -n "$VERSION" ] && [ "$VERSION" != "null" ] || return 0
+  # jq-free read of the plugin's own manifest version (RFC 0004) — alias
+  # sync has no external dependency, so it works without jq on PATH.
+  VERSION="$(_aliases_read_version "$PLUGIN_ROOT_LOCAL/.claude-plugin/plugin.json")"
+  [ -n "$VERSION" ] || return 0
 
   INSTALLED="$(cat "$MARKER" 2>/dev/null || true)"
 
-  # 4. Idempotency check.
+  # 3. Idempotency check.
   if [ "$INSTALLED" = "$VERSION" ]; then
     return 0
   fi
@@ -131,14 +154,14 @@ aliases_sync_main() {
     FIRST_RUN=0
   fi
 
-  # 5. Realpath/symlink containment guard (security mitigation 3).
+  # 4. Realpath/symlink containment guard (security mitigation 3).
   if [ -L "$DEST_DIR" ]; then
     echo "uberdev: ~/.claude/commands is a symlink; refusing to sync" >&2
     return 0
   fi
   mkdir -p "$DEST_DIR" 2>/dev/null || return 0
 
-  # 6. Per-alias loop.
+  # 5. Per-alias loop.
   local INSTALLED_LIST=()
   local SKIPPED_LIST=()
   local FAILED_LIST=()
@@ -163,13 +186,15 @@ aliases_sync_main() {
     fi
   done <<< "$ALIASES"
 
-  # 7. Atomic version-marker write.
+  # 6. Atomic version-marker write.
   local MTMP
   MTMP="$(mktemp "$HOME/.claude/.uberdev-aliases-version.XXXXXX")" || return 0
   printf '%s\n' "$VERSION" > "$MTMP"
   mv -f "$MTMP" "$MARKER" || { rm -f "$MTMP"; return 0; }
 
-  # 8. First-run summary line (Q5: only on first install).
+  # 7. First-run summary line (Q5: only on first install) — stderr only,
+  # retained verbatim for backward compatibility (tests S1/S5 assert this
+  # exact wording).
   if [ "$FIRST_RUN" = "1" ]; then
     local skipped_str=""
     if [ "${#SKIPPED_LIST[@]}" -gt 0 ]; then
@@ -180,6 +205,24 @@ aliases_sync_main() {
       failed_str=", failed ${#FAILED_LIST[@]} (${FAILED_LIST[*]})"
     fi
     echo "first run: installed ${#INSTALLED_LIST[@]} aliases, skipped ${#SKIPPED_LIST[@]} conflicts (${skipped_str})${failed_str}; opt out with UBERDEV_NO_AUTO_ALIAS=1" >&2
+  fi
+
+  # 8. User-facing notice (RFC 0004) — consumed by the SessionStart hook and
+  # injected into the session context. Reached only when the per-alias loop
+  # ran (first install or a version refresh); the idempotency early-return at
+  # step 3 means a steady-state session never gets here, so the notice is
+  # naturally low-noise. Priority: failure > collision > first-run.
+  local sk
+  if [ "${#FAILED_LIST[@]}" -gt 0 ]; then
+    UBERDEV_ALIAS_NOTICE="uberdev: failed to install alias(es): ${FAILED_LIST[*]}. Re-run /uberdev:install-aliases."
+  elif [ "${#SKIPPED_LIST[@]}" -gt 0 ]; then
+    UBERDEV_ALIAS_NOTICE="uberdev: these short-form aliases were not installed because a non-uberdev file already exists at ~/.claude/commands/<name>.md:"
+    for sk in "${SKIPPED_LIST[@]}"; do
+      UBERDEV_ALIAS_NOTICE="${UBERDEV_ALIAS_NOTICE} /${sk}"
+    done
+    UBERDEV_ALIAS_NOTICE="${UBERDEV_ALIAS_NOTICE} — use /uberdev:<name>, or rename the existing file and run /uberdev:install-aliases."
+  elif [ "$FIRST_RUN" = "1" ]; then
+    UBERDEV_ALIAS_NOTICE="uberdev: installed ${#INSTALLED_LIST[@]} short-form aliases (/issue, /solve, /turbo, /simplify, /review-pr, /merge, /dev). Opt out with UBERDEV_NO_AUTO_ALIAS=1."
   fi
   return 0
 }

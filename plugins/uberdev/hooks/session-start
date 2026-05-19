@@ -7,17 +7,40 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Require jq for safe JSON encoding. The previous manual escape function
-# missed control bytes 0x00-0x1f and `%` (which printf would interpret as a
-# format specifier, corrupting output). If jq is missing, degrade gracefully:
-# emit an empty injection rather than risk producing malformed JSON.
+# ── auto-alias sync (issue #21; RFC 0004) ────────────────────────────
+# Install / refresh the seven top-level forwarders (/issue, /solve, /turbo,
+# /simplify, /review-pr, /merge, /dev) in ~/.claude/commands. This runs
+# BEFORE the jq guard below on purpose: alias sync has no jq dependency
+# (RFC 0004), so a machine without jq still gets its aliases. Idempotent:
+# if installed_version == plugin_version the helper returns immediately.
+# Opt out with UBERDEV_NO_AUTO_ALIAS=1 or `auto_install_aliases: false` in
+# .claude/uberdev.local.md. The helper handles all error paths internally
+# and returns 0; the `|| true` is defence-in-depth so set -e cannot abort
+# the hook if the helper ever does emit non-zero. aliases_sync_main sets
+# UBERDEV_ALIAS_NOTICE (a user-facing notice, or "" when there is nothing
+# to report); it is injected into the session context further down.
+UBERDEV_ALIAS_NOTICE=""
+if [ -f "${PLUGIN_ROOT}/lib/aliases-sync.sh" ]; then
+  # shellcheck source=../lib/aliases-sync.sh
+  . "${PLUGIN_ROOT}/lib/aliases-sync.sh"
+  aliases_sync_main || true
+fi
+
+# Require jq for safe JSON encoding of the rich context injection below. The
+# previous manual escape function missed control bytes 0x00-0x1f and `%`
+# (which printf would interpret as a format specifier, corrupting output).
+# If jq is missing, degrade gracefully: the alias sync above has already run
+# (it needs no jq), so emit a single FIXED notice — a constant string with
+# no interpolation, hence safe to hand-encode into JSON without jq — instead
+# of a silently-empty context.
 if ! command -v jq >/dev/null 2>&1; then
+    jqmsg="uberdev: jq not found — install jq (e.g. brew install jq) for the full session context."
     if [ -n "${CURSOR_PLUGIN_ROOT:-}" ]; then
-        printf '{"additional_context":""}\n'
+        printf '{"additional_context":"%s"}\n' "$jqmsg"
     elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -z "${COPILOT_CLI:-}" ]; then
-        printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":""}}\n'
+        printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' "$jqmsg"
     else
-        printf '{"additionalContext":""}\n'
+        printf '{"additionalContext":"%s"}\n' "$jqmsg"
     fi
     exit 0
 fi
@@ -41,18 +64,13 @@ if [ -d "$legacy_skills_dir" ]; then
     warning_message=$'\n\n<important-reminder>IN YOUR FIRST REPLY AFTER SEEING THIS MESSAGE YOU MUST TELL THE USER:⚠️ **WARNING:** UberDev now uses Claude Code\'s skills system. Custom skills in ~/.config/uberdev/skills will not be read. Move custom skills to ~/.claude/skills instead. To make this message go away, remove ~/.config/uberdev/skills</important-reminder>'
 fi
 
-# ── auto-alias sync (issue #21) ──────────────────────────────────────
-# Install / refresh top-level forwarders /issue, /solve, /turbo, /simplify,
-# /review-pr in ~/.claude/commands. Idempotent: if installed_version ==
-# plugin_version, the helper returns immediately. Opt out with
-# UBERDEV_NO_AUTO_ALIAS=1 or `auto_install_aliases: false` in
-# .claude/uberdev.local.md. The helper handles all error paths internally
-# and returns 0; the `|| true` is defence-in-depth so set -e cannot abort
-# the hook if the helper ever does emit non-zero.
-if [ -f "${PLUGIN_ROOT}/lib/aliases-sync.sh" ]; then
-  # shellcheck source=../lib/aliases-sync.sh
-  . "${PLUGIN_ROOT}/lib/aliases-sync.sh"
-  aliases_sync_main || true
+# Build the alias-sync notice set by aliases_sync_main above. Non-empty only
+# on first install or a refresh that skipped/failed an alias; a steady-state
+# session leaves it "". Wrapped as an <important-reminder> so Claude relays
+# it to the user, mirroring gh_warning / warning_message.
+alias_warning=""
+if [ -n "${UBERDEV_ALIAS_NOTICE:-}" ]; then
+    alias_warning=$'\n\n<important-reminder>'"${UBERDEV_ALIAS_NOTICE}"$'</important-reminder>'
 fi
 
 # Read using-uberdev content
@@ -60,7 +78,7 @@ using_uberdev_content=$(cat "${PLUGIN_ROOT}/skills/using-uberdev/SKILL.md" 2>/de
 
 # Build the full session context as a raw string, then let jq handle JSON
 # encoding in one shot — covers control bytes, quotes, backslashes, and `%`.
-session_context=$'<EXTREMELY_IMPORTANT>\nYou have uberdev superpowers.\n\n**Below is the full content of your \'uberdev:using-uberdev\' skill - your introduction to using skills. For all other skills, use the \'Skill\' tool:**\n\n'"${using_uberdev_content}"$'\n\n'"${warning_message}${gh_warning}"$'\n</EXTREMELY_IMPORTANT>'
+session_context=$'<EXTREMELY_IMPORTANT>\nYou have uberdev superpowers.\n\n**Below is the full content of your \'uberdev:using-uberdev\' skill - your introduction to using skills. For all other skills, use the \'Skill\' tool:**\n\n'"${using_uberdev_content}"$'\n\n'"${warning_message}${gh_warning}${alias_warning}"$'\n</EXTREMELY_IMPORTANT>'
 
 # Output context injection as JSON, built with jq so the string is encoded safely.
 # Cursor hooks expect additional_context (snake_case).

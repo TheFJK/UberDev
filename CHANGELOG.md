@@ -4,6 +4,22 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.0] - 2026-05-19
+
+### Fixed
+
+- **Alias auto-install no longer silently depends on `jq`.** The `SessionStart` hook (`plugins/uberdev/hooks/session-start`) hard-requires `jq` to JSON-encode its context injection and `exit 0`s early when `jq` is absent — previously *before* the auto-alias-sync block ever ran, so a new user on a machine without `jq` got zero short-form aliases (`/issue`, `/solve`, `/turbo`, …) and no warning. The alias-sync block now runs **before** the `jq` guard, and `lib/aliases-sync.sh` no longer calls `jq` at all: its one use (`jq -r .version` on `plugin.json`) is replaced by a jq-free `_aliases_read_version()` `sed` parse of the plugin's own manifest. Forwarders now install regardless of `jq`. See `docs/rfc/0004-alias-install-reliability.md`.
+
+### Added
+
+- **Alias-install outcomes are surfaced in the session context.** `aliases_sync_main` now composes a `UBERDEV_ALIAS_NOTICE` that the `SessionStart` hook injects as an `<important-reminder>`: a first-run summary, a collision notice naming any alias skipped because a non-uberdev file already occupies its short name (with the resolution steps), or a write-failure notice. Previously this went only to `stderr` and only on first run, so a skipped `/turbo` was invisible. The notice is conditional — empty in steady state, so post-first-run sessions stay silent.
+- **When `jq` is absent the hook now emits a fixed notice** (`uberdev: jq not found …`) instead of a silently-empty context, making the jq-missing degradation visible.
+- **`tests/aliases.test.sh` — new cases S10–S14:** `_aliases_read_version` parity with `jq -r .version`, `aliases_sync_main` notice composition, jq-masked install (all seven forwarders install with `jq` off `PATH`), and collision / first-run notices reaching the context injection.
+
+### Why
+
+`README.md` already promised the seven aliases are "auto-installed on first session" — but the auto-sync was fail-open and silent, so on a jq-less machine or a short-name collision the user got less than promised with no signal. This release closes that reliability gap against the stated contract: aliases install unconditionally, and any skip or failure is reported. Claude Code has no install-time plugin hook (feature request anthropics/claude-code#11240, closed unshipped), so the `SessionStart` hook remains the provisioning mechanism — it is hardened, not replaced. Deliberately out of scope and deferred: content-hash idempotency, retry of a previously-skipped alias, and `install.sh`-side provisioning.
+
 ## [0.28.0] - 2026-05-18
 
 ### Added
