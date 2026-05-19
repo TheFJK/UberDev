@@ -1,5 +1,5 @@
 ---
-description: "Unattended /solve — auto-accepts brainstorm recommendations for medium/large issues. Dispatches N parallel `claude --bg` background sessions (cap: 6 default, configurable via `fanout_concurrency.solve_bg`). Monitor with `claude agents`."
+description: "Unattended /solve — auto-accepts brainstorm recommendations for medium/large issues. Dispatches N parallel autonomous agents via a platform-aware dispatch backend (claude-bg / wezterm / background; auto-selected per OS — cross-platform on macOS, WSL2, native Windows; cap: 6 default, configurable via `fanout_concurrency.solve_bg`). Monitor with `claude agents` (claude-bg) or visible panes (wezterm). Override the backend with `--backend=<name>`."
 argument-hint: "<issue-number> [<issue-number>...] [--trivial|--small|--full] [--auto] [--effort=<level>] [--force] [--backend=<name>]"
 allowed-tools: ["Bash", "Read", "Task"]
 ---

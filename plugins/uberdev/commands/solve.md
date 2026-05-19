@@ -1,5 +1,5 @@
 ---
-description: "Spawn an autonomous Claude agent as a `claude --bg` background session per GitHub issue, with auto-triage and tier-appropriate workflow. Monitor via `claude agents`. Accepts multiple issue numbers; dispatches one bg session per issue."
+description: "Spawn an autonomous Claude agent per GitHub issue via a platform-aware dispatch backend (claude-bg / wezterm / background; auto-selected per OS — cross-platform on macOS, WSL2, native Windows), with auto-triage and tier-appropriate workflow. Monitor via `claude agents` (claude-bg) or visible panes (wezterm). Accepts multiple issue numbers; dispatches one agent per issue. Override the backend with `--backend=<name>`."
 argument-hint: "<issue-number> [<issue-number>...] [--trivial|--small|--full] [--auto] [--effort=<level>] [--force] [--backend=<name>]"
 allowed-tools: ["Bash", "Read", "Task"]
 ---
