@@ -146,8 +146,8 @@ assert_grep "$SOLVE_PIPELINE" \
   'gh issue comment "\$ISSUE_NUM" --body-file -' \
   "Per-issue audit comment via --body-file -"
 assert_grep "$SOLVE_PIPELINE" \
-  "/tmp/solve-claim-\\\$ISSUE_NUM.json" \
-  "Per-issue claim metadata persisted to /tmp"
+  "UBERDEV_TMPDIR/solve-claim-\\\$ISSUE_NUM.json" \
+  "Per-issue claim metadata persisted under UBERDEV_TMPDIR"
 assert_grep "$SOLVE_PIPELINE" \
   "exit 1" \
   "Claim-write failures exit 1 (fail-loud, not fail-soft)"

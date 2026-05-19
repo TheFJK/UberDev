@@ -364,7 +364,7 @@ assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
 assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
   'command -v gtimeout' \
   "I2c: launcher probes gtimeout fallback (Homebrew coreutils installs the macOS binary as gtimeout, not timeout)"
-assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
+assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" \
   '"\$TIMEOUT_BIN" "\$SOLVE_TIMEOUT" env "\${BG_TURBO_ENV\[@\]}" claude --bg' \
   "I2d: bg dispatch wraps claude --bg in timeout(1)/gtimeout with env(1)-mediated zsh-safe BG_TURBO_ENV[@] inline-prefix (#97 — env(1) is required because timeout(1) sits between the shell and the env-prefix slot and would otherwise consume the KEY=value tokens as argv; array form preserves zsh SH_WORD_SPLIT=off compatibility)"
 assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
@@ -373,7 +373,7 @@ assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
 assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
   'if \[\[ -n "\$TIMEOUT_BIN" \]\]; then' \
   "I2f: launcher guards wrap branch with -n TIMEOUT_BIN check (prevents silent regression on guard inversion/removal)"
-assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
+assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" \
   'case "\$BG_PROMPT_MODE" in' \
   "I2g: bg dispatch uses three-arm BG_PROMPT_MODE case-switch (file / stdin / argv)"
 
