@@ -760,7 +760,7 @@ The `if/else/fi` blocks below stay at column 0 (zsh and bash do not require phys
 ```bash
 if [[ "$AUTO_MODE" != "1" ]]; then
 # trivial heredoc — interactive (/solve): pre-collected-research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
-cat > $UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt << EOF
+cat > "$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt" << EOF
 Solve GH issue #$ISSUE_NUM directly. Triaged as TRIVIAL.
 
 Steps:
@@ -778,7 +778,7 @@ Skip /uberdev:brainstorm. Skip multi-step planning. Escalate to /uberdev:brainst
 EOF
 else
 # trivial heredoc — turbo (/turbo): no research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
-cat > $UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt << EOF
+cat > "$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt" << EOF
 Solve GH issue #$ISSUE_NUM directly. Triaged as TRIVIAL.
 
 Steps:
@@ -801,7 +801,7 @@ fi
 ```bash
 if [[ "$AUTO_MODE" != "1" ]]; then
 # small heredoc — interactive (/solve): pre-collected-research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
-cat > $UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt << EOF
+cat > "$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt" << EOF
 Solve GH issue #$ISSUE_NUM with a lightweight plan. Triaged as SMALL.
 
 Steps:
@@ -818,7 +818,7 @@ Escalate to /uberdev:brainstorm if the scope proves larger than triaged.
 EOF
 else
 # small heredoc — turbo (/turbo): no research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
-cat > $UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt << EOF
+cat > "$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt" << EOF
 Solve GH issue #$ISSUE_NUM with a lightweight plan. Triaged as SMALL.
 
 Steps:
@@ -839,9 +839,9 @@ fi
 
 ```bash
 if [[ "$AUTO_MODE" == "1" ]]; then
-echo "/uberdev:orchestrator --turbo solve GH issue #$ISSUE_NUM" > $UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt
+echo "/uberdev:orchestrator --turbo solve GH issue #$ISSUE_NUM" > "$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt"
 else
-echo "/uberdev:orchestrator solve GH issue #$ISSUE_NUM" > $UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt
+echo "/uberdev:orchestrator solve GH issue #$ISSUE_NUM" > "$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt"
 fi
 done
 ```
