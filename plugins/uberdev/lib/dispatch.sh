@@ -281,27 +281,33 @@ _uberdev_dispatch_wezterm_config() {
   local begin='-- BEGIN uberdev managed block (RFC 0004) -- do not edit'
   local end='-- END uberdev managed block'
   local tmp="${UBERDEV_TMPDIR:-/tmp}/.wezterm.uberdev.$$"
+  # KNOWN LIMITATION (RFC 0004 §3.6 — follow-up amendment): this helper appends a
+  # Lua `return { … }` block. If the user's existing `.wezterm.lua` already
+  # contains its own `return config`, Lua's first-return-wins semantics mean the
+  # managed block's `unix_domains` / `exit_behavior` are unreachable and the
+  # `wezterm` backend cannot reach the `uberdev` mux domain. Robust on fresh
+  # configs; users with an existing config must integrate the managed values by
+  # hand for now. Tracked as a follow-up RFC amendment.
   # Strip any prior managed block, preserving the user's surrounding config.
   if [ -f "$cfg" ]; then
     awk -v b="$begin" -v e="$end" '
       $0==b {skip=1} skip && $0==e {skip=0; next} !skip {print}
-    ' "$cfg" > "$tmp"
+    ' "$cfg" > "$tmp" || return 1
   else
-    : > "$tmp"
+    : > "$tmp" || return 1
   fi
   # Append a fresh managed block. exit_behavior=Hold keeps a finished or
   # crashed agent pane (and its transcript) visible — the default "Close"
   # makes the pane vanish on exit.
-  cat >> "$tmp" <<'LUA'
+  cat >> "$tmp" <<'LUA' || return 1
 -- BEGIN uberdev managed block (RFC 0004) -- do not edit
-local uberdev_wezterm = require('wezterm')
 return {
   unix_domains = { { name = 'uberdev' } },
   exit_behavior = 'Hold',
 }
 -- END uberdev managed block
 LUA
-  mv "$tmp" "$cfg"
+  mv "$tmp" "$cfg" || return 1
 }
 
 # _uberdev_dispatch_wezterm ISSUE_NUM TIER PROMPT_FILE
@@ -311,7 +317,12 @@ _uberdev_dispatch_wezterm() {
   local ISSUE_NUM="$1" TIER="$2" PROMPT_FILE="$3"
   DISPATCH_RC=0
   DISPATCH_ID=""
-  _uberdev_dispatch_wezterm_config
+  if ! _uberdev_dispatch_wezterm_config; then
+    DISPATCH_RC=1
+    _uberdev_dispatch_audit error \
+      '{"issue":'"$ISSUE_NUM"',"phase":"config","backend":"wezterm","rc":1}'
+    return 1
+  fi
   # Pin every wezterm cli call to the uberdev domain socket so fan-out does
   # not scatter across stray WezTerm instances (RFC §3.6).
   export WEZTERM_UNIX_SOCKET="${WEZTERM_UNIX_SOCKET:-}"
