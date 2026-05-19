@@ -2,7 +2,7 @@
 
 | Field          | Value |
 | -------------- | ----- |
-| **Status**     | Draft (2026-05-19 — awaiting implementation) |
+| **Status**     | Implemented — v0.30.0 (2026-05-19) |
 | **Author**     | TheFJK |
 | **Created**    | 2026-05-19 |
 | **Targets**    | NEW: `docs/rfc/0004-cross-platform-dispatch-backends.md`, `plugins/uberdev/lib/dispatch.sh`, `tests/dispatch-wezterm.test.sh`, `tests/dispatch-background.test.sh`, `tests/dispatch-fallback.test.sh`. MODIFIED: `plugins/uberdev/skills/solve-pipeline/SKILL.md`, `plugins/uberdev/commands/solve.md`, `plugins/uberdev/commands/turbo.md`, `plugins/uberdev/skills/using-uberdev/SKILL.md`, `tests/dispatch-claude-bg.test.sh`, `.github/workflows/test.yml`, `README.md`, `CHANGELOG.md`, `.claude-plugin/marketplace.json`, `plugins/uberdev/.claude-plugin/plugin.json` |
