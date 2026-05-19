@@ -212,7 +212,7 @@ _uberdev_dispatch_claude_bg() {
     if [ -z "$DISPATCH_ID" ]; then
       DISPATCH_RC=2
       DISPATCH_LOG="$BG_STDOUT_LOG"
-      _uberdev_dispatch_audit error \
+      _uberdev_dispatch_audit dispatch_setup_failed \
         "{\"issue\":$ISSUE_NUM,\"phase\":\"id_extract\",\"backend\":\"claude-bg\",\"rc\":2,\"mode\":\"$BG_PROMPT_MODE\"}"
       return 2
     fi
@@ -220,7 +220,7 @@ _uberdev_dispatch_claude_bg() {
       "{\"issue\":$ISSUE_NUM,\"tier\":\"$TIER\",\"backend\":\"claude-bg\",\"bg_session_id\":\"$DISPATCH_ID\",\"mode\":\"$BG_PROMPT_MODE\"}"
   else
     DISPATCH_LOG="$BG_STDOUT_LOG"
-    _uberdev_dispatch_audit error \
+    _uberdev_dispatch_audit dispatch_setup_failed \
       "{\"issue\":$ISSUE_NUM,\"phase\":\"dispatch\",\"backend\":\"claude-bg\",\"rc\":$DISPATCH_RC}"
   fi
   return "$DISPATCH_RC"
@@ -243,7 +243,7 @@ _uberdev_dispatch_background() {
   if ! MSYS_NO_PATHCONV=1 git worktree add "$WORKTREE_DIR" -b "$WORKTREE_BRANCH" >"$LOG_FILE" 2>&1; then
     DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit error \
+    _uberdev_dispatch_audit dispatch_setup_failed \
       "{\"issue\":$ISSUE_NUM,\"phase\":\"worktree\",\"backend\":\"background\",\"rc\":1}"
     return 1
   fi
@@ -307,7 +307,7 @@ EOF
   else
     DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit error \
+    _uberdev_dispatch_audit dispatch_setup_failed \
       "{\"issue\":$ISSUE_NUM,\"phase\":\"dispatch\",\"backend\":\"background\",\"rc\":$DISPATCH_RC}"
   fi
   return "$DISPATCH_RC"
@@ -360,7 +360,7 @@ _uberdev_dispatch_wezterm() {
   DISPATCH_ID=""
   if ! _uberdev_dispatch_wezterm_config; then
     DISPATCH_RC=1
-    _uberdev_dispatch_audit error \
+    _uberdev_dispatch_audit dispatch_setup_failed \
       '{"issue":'"$ISSUE_NUM"',"phase":"config","backend":"wezterm","rc":1}'
     return 1
   fi
@@ -379,7 +379,7 @@ _uberdev_dispatch_wezterm() {
   if ! MSYS_NO_PATHCONV=1 git worktree add "$WORKTREE_DIR" -b "$WORKTREE_BRANCH" >"$LOG_FILE" 2>&1; then
     DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit error \
+    _uberdev_dispatch_audit dispatch_setup_failed \
       '{"issue":'"$ISSUE_NUM"',"phase":"worktree","backend":"wezterm","rc":1}'
     return 1
   fi
@@ -414,7 +414,7 @@ _uberdev_dispatch_wezterm() {
       '{"issue":'"$ISSUE_NUM"',"tier":"'"$TIER"'","backend":"wezterm","pane_id":"'"$DISPATCH_ID"'"}'
   else
     DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit error \
+    _uberdev_dispatch_audit dispatch_setup_failed \
       '{"issue":'"$ISSUE_NUM"',"phase":"dispatch","backend":"wezterm","rc":'"$DISPATCH_RC"'}'
   fi
   return "$DISPATCH_RC"

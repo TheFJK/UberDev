@@ -7,7 +7,7 @@ description: "Shared launcher pipeline for /uberdev:solve and /uberdev:turbo. Pa
 
 This skill is invoked inline by `commands/solve.md` and `commands/turbo.md`. The caller exports `AUTO_MODE` (`0` for /solve interactive; `1` for /turbo unattended) before invocation; this skill reads `$AUTO_MODE` and `$ARGUMENTS` from the caller's shell scope.
 
-`$ARGUMENTS` may contain **one or more issue numbers** (e.g. `42` or `5 6 7`). The skill validates every issue up front (Phase A) and then dispatches one autonomous `claude --bg` background session per issue (Phase B). Per-issue artifacts (`$UBERDEV_TMPDIR/solve-prompt-N.txt`, `$UBERDEV_TMPDIR/solve-bg-stdout-N.log`, `.claude/worktrees/solve-issue-N/`, `worktree-solve-issue-N` branch) are namespaced by `$ISSUE_NUM`, so concurrent spawns are collision-free. Override flags (`--trivial|--small|--full`, `--auto`) apply batch-wide. Monitor via `claude agents`.
+`$ARGUMENTS` may contain **one or more issue numbers** (e.g. `42` or `5 6 7`). The skill validates every issue up front (Phase A) and then dispatches one autonomous Claude agent per issue (Phase B) via a platform-aware dispatch backend (`claude-bg` / `wezterm` / `background`; auto-selected per OS — cross-platform on macOS, WSL2, native Windows). Per-issue artifacts (`$UBERDEV_TMPDIR/solve-prompt-N.txt`, `$UBERDEV_TMPDIR/solve-bg-stdout-N.log`, `.claude/worktrees/solve-issue-N/`, `worktree-solve-issue-N` branch) are namespaced by `$ISSUE_NUM`, so concurrent spawns are collision-free. Override flags (`--trivial|--small|--full`, `--auto`, `--backend=<name>`) apply batch-wide. Monitor via `claude agents` (claude-bg) or visible panes (wezterm).
 
 ## Constants
 
@@ -21,7 +21,7 @@ This skill is invoked inline by `commands/solve.md` and `commands/turbo.md`. The
 | `EFFORT_LEVEL_DEFAULT` | `max` | Phase A `EFFORT_LEVEL` resolution; rationale: `/turbo` is unattended, quality > cost. |
 | `EFFORT_LEVEL_ENUM` | `low \| medium \| high \| xhigh \| max` | Phase A `uberdev_read_enum` validation; matches `claude --effort <level>` accepted values in Claude Code 2.1.139. |
 | `EFFORT_SOURCE_ENUM` | `cli \| env \| config \| default` | Audit telemetry source tag set by the Phase A `--effort=<level>` parser; emitted in the `effort_resolved` audit event payload. |
-| `SOLVE_AUDIT_EVENT_ENUM` | `agent_dispatched`, `deprecated_flag_used`, `solve_bg_fanout_wave_started`, `effort_resolved`, `error`, `claim_acquired`, `claim_collision`, `claim_force_override`, `claim_write_failed`, `claim_released`, `dispatch_backend_resolved` | Audit-log writers; consumers grep for `deprecated_flag_used` to identify migration laggards. `agent_returned` was removed in v0.22.0 — `claude --bg` does not synchronously report agent completion; use `claude agents` for status. The five `claim_*` events were added in v0.28.0 for the small-team issue-claim protocol (Step 4.5); grep `claim_force_override` to surface stale-claim recoveries, `claim_write_failed` to surface gh permission gaps. The `dispatch_backend_resolved` event was added in v0.29.0 (RFC 0004) — emitted once per invocation by `lib/dispatch.sh`'s preflight resolver with `{requested, resolved, os_class, reason}`. |
+| `SOLVE_AUDIT_EVENT_ENUM` | `agent_dispatched`, `deprecated_flag_used`, `solve_bg_fanout_wave_started`, `effort_resolved`, `error`, `claim_acquired`, `claim_collision`, `claim_force_override`, `claim_write_failed`, `claim_released`, `dispatch_backend_resolved`, `dispatch_setup_failed` | Audit-log writers; consumers grep for `deprecated_flag_used` to identify migration laggards. `agent_returned` was removed in v0.22.0 — `claude --bg` does not synchronously report agent completion; use `claude agents` for status. The five `claim_*` events were added in v0.28.0 for the small-team issue-claim protocol (Step 4.5); grep `claim_force_override` to surface stale-claim recoveries, `claim_write_failed` to surface gh permission gaps. The `dispatch_backend_resolved` event was added in v0.29.0 (RFC 0004) — emitted once per invocation by `lib/dispatch.sh`'s preflight resolver with `{requested, resolved, os_class, reason}`. The `dispatch_setup_failed` event was added in v0.29.0 — emitted by every dispatch backend (`claude-bg`, `wezterm`, `background`) when a setup-phase prerequisite fails BEFORE the agent process is launched (config, worktree, prompt_read, status_write, id_extract, dispatch). The `error` event remains valid for non-setup failures. Uniform taxonomy across all three backends; consumers grep `dispatch_setup_failed` to surface silent-failure classes that would otherwise mask as `error` and bypass audit-log filters. |
 | `UBERDEV_ACTIVE_LABEL` | `uberdev:active` | Step 4.5 claim protocol — applied to OPEN issues by `/solve` / `/turbo` on dispatch; cleared by `/merge` post-merge (`merge-pipeline/SKILL.md` post-merge cleanup phase) or by the dispatch-failure rollback in Step 5b'. NEVER set or removed by hand — the audit comment marker is the only safe parser surface. |
 | `UBERDEV_ACTIVE_LABEL_COLOR` | `D93F0B` | Warning-orange; matches the GitHub default `bug` palette band so it reads as actionable. Created idempotently via `gh label create --force` in Step 4.5 on first encounter per repo, mirroring `finish-branch/SKILL.md:287` and `dev-pipeline/SKILL.md:279`. |
 | `UBERDEV_ACTIVE_LABEL_DESCRIPTION` | `Issue currently being worked on by a /solve or /turbo dispatcher. Auto-managed — do not add/remove by hand.` | Passed to `gh label create --description`. The "Auto-managed" framing is the primary defence against well-meaning manual edits that would desync the claim comment from the label state. |
@@ -892,15 +892,16 @@ _uberdev_audit_emit solve_bg_fanout_wave_started \
 for ISSUE_NUM in "${ISSUE_NUMS[@]:$wave_start:$wave_size}"; do
 TIER="${TIERS[$ISSUE_NUM]}"
 TITLE="${TITLES[$ISSUE_NUM]}"
-BG_DISPATCH_RC=0
-BG_SESSION_ID=""
 # Dispatch one issue via the backend resolved by uberdev_dispatch_preflight
 # (Phase A). lib/dispatch.sh owns the per-backend mechanism; this loop just
 # routes. PROMPT_FILE is the per-issue prompt written in Step 5a.
+# DISPATCH_RC + DISPATCH_ID are reset by uberdev_dispatch_one's central SSOT
+# reset (lib/dispatch.sh:138-140); no pre-init needed at this call site.
+# DISPATCH_RC is documented as always-set after uberdev_dispatch_one returns
+# (lib/dispatch.sh:132 contract); no defensive ${:-1} default needed.
 PROMPT_FILE="$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt"
 uberdev_dispatch_one "$ISSUE_NUM" "$TIER" "$PROMPT_FILE"
-DISPATCH_RC=$?
-BG_DISPATCH_RC="${DISPATCH_RC:-1}"
+BG_DISPATCH_RC="$DISPATCH_RC"
 BG_SESSION_ID="${DISPATCH_ID:-}"
 
 if [[ "$BG_DISPATCH_RC" -eq 0 ]]; then
