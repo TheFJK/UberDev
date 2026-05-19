@@ -136,7 +136,7 @@ uberdev_dispatch_one() {
   DISPATCH_ID=""
   DISPATCH_LOG=""
   if [ -z "${UBERDEV_RESOLVED_BACKEND:-}" ]; then
-    uberdev_dispatch_preflight || return 1
+    uberdev_dispatch_preflight || { DISPATCH_RC=1; return 1; }
   fi
   case "${UBERDEV_RESOLVED_BACKEND:-}" in
     claude-bg)   _uberdev_dispatch_claude_bg  "$ISSUE_NUM" "$TIER" "$PROMPT_FILE" ;;
