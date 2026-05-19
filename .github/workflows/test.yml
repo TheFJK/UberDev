@@ -19,7 +19,7 @@ jobs:
     # the public-repo Actions allowance. Bump if the suite legitimately grows.
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install zsh
         # ubuntu-latest does not ship zsh by default. tests/solve-pipeline-zsh.test.sh
         # is a zsh-runtime fixture that locks the v0.22.2 regression
@@ -71,7 +71,7 @@ jobs:
         # Force every `run:` step into Git Bash, not PowerShell or cmd.
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Run shape-check tests
         # No zsh on windows-latest Git Bash; solve-pipeline-zsh.test.sh is a
         # Unix-runtime fixture and is intentionally skipped here. Every other
