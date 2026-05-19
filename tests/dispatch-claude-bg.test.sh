@@ -12,6 +12,7 @@ set -u
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
+DISPATCH_LIB="$REPO_ROOT/plugins/uberdev/lib/dispatch.sh"
 
 PASS=0
 FAIL=0
@@ -40,28 +41,28 @@ assert_grep_not() {
   fi
 }
 
-echo "== Positive: claude --bg three-arm dispatch case-switch =="
-assert_grep "$SOLVE_PIPELINE" \
+echo "== Positive: claude --bg three-arm dispatch case-switch (lib/dispatch.sh) =="
+assert_grep "$DISPATCH_LIB" \
   'case "\$BG_PROMPT_MODE" in' \
-  "solve-pipeline contains BG_PROMPT_MODE case-switch"
-assert_grep "$SOLVE_PIPELINE" \
+  "_uberdev_dispatch_claude_bg contains BG_PROMPT_MODE case-switch"
+assert_grep "$DISPATCH_LIB" \
   'claude --bg \\?$|claude --bg --prompt-file' \
-  "solve-pipeline contains claude --bg invocation (file arm)"
-assert_grep "$SOLVE_PIPELINE" \
-  '\-\-prompt-file "/tmp/solve-prompt-\$ISSUE_NUM\.txt"' \
-  "solve-pipeline file arm reads /tmp/solve-prompt-N.txt via --prompt-file"
-assert_grep "$SOLVE_PIPELINE" \
-  '< "/tmp/solve-prompt-\$ISSUE_NUM\.txt"' \
-  "solve-pipeline stdin arm streams /tmp/solve-prompt-N.txt on FD 0"
-assert_grep "$SOLVE_PIPELINE" \
+  "_uberdev_dispatch_claude_bg contains claude --bg invocation (file arm)"
+assert_grep "$DISPATCH_LIB" \
+  '\-\-prompt-file "\$PROMPT_FILE"' \
+  "claude-bg file arm reads \$PROMPT_FILE via --prompt-file"
+assert_grep "$DISPATCH_LIB" \
+  '< "\$PROMPT_FILE"' \
+  "claude-bg stdin arm streams \$PROMPT_FILE on FD 0"
+assert_grep "$DISPATCH_LIB" \
   'cmd=\( "\$TIMEOUT_BIN"' \
-  "solve-pipeline argv arm uses bash array (no eval; spec-reviewer finding 1)"
-assert_grep "$SOLVE_PIPELINE" \
+  "claude-bg argv arm uses bash array (no eval)"
+assert_grep "$DISPATCH_LIB" \
   '"\$\{cmd\[@\]\}"' \
-  "solve-pipeline argv arm expands the array via \"\${cmd[@]}\""
-assert_grep "$SOLVE_PIPELINE" \
+  "claude-bg argv arm expands the array via \"\${cmd[@]}\""
+assert_grep "$DISPATCH_LIB" \
   '\-\-worktree "solve-issue-\$ISSUE_NUM"' \
-  "every arm passes --worktree solve-issue-N for isolation"
+  "claude-bg arm passes --worktree solve-issue-N for isolation"
 
 echo "== Positive: --effort=<level> threaded into claude --bg (v0.22.1) =="
 # Regression: prior to v0.22.1, /turbo and /solve dispatched `claude --bg`
@@ -111,7 +112,7 @@ assert_grep "$SOLVE_PIPELINE" \
 # unquoted `$PERM_FLAG $EFFORT_FLAG` scalar form) is mandatory under zsh —
 # scalar word-split is OFF by default and would collapse `--effort max` into
 # one argv slot, which `claude --bg` rejects loudly.
-EFFORT_ARMS_COUNT=$(grep -cE '"\$\{PERM_FLAG\[@\]\}" "\$\{EFFORT_FLAG\[@\]\}"' "$SOLVE_PIPELINE" 2>/dev/null || echo "0")
+EFFORT_ARMS_COUNT=$(grep -cE '"\$\{PERM_FLAG\[@\]\}" "\$\{EFFORT_FLAG\[@\]\}"' "$DISPATCH_LIB" 2>/dev/null || echo "0")
 if [[ "$EFFORT_ARMS_COUNT" -ge 3 ]]; then
   echo "  PASS  all three dispatch arms thread \"\${EFFORT_FLAG[@]}\" after \"\${PERM_FLAG[@]}\" (count=$EFFORT_ARMS_COUNT)"
   PASS=$((PASS + 1))
@@ -134,7 +135,7 @@ fi
 # this suffix in a "simplification" pass would make the tombstone fire on
 # the correct array form and turn every run into a false FAIL — do not
 # delete without re-deriving an equivalent anchor.
-SCALAR_RELAPSE_COUNT="$(grep -cE '\$PERM_FLAG \$EFFORT_FLAG[^[]' "$SOLVE_PIPELINE" 2>/dev/null)" || GREP_RC=$?
+SCALAR_RELAPSE_COUNT="$(grep -cE '\$PERM_FLAG \$EFFORT_FLAG[^[]' "$DISPATCH_LIB" 2>/dev/null)" || GREP_RC=$?
 GREP_RC="${GREP_RC:-0}"
 if [[ "$GREP_RC" -ge 2 ]]; then
   echo "  FAIL  grep exited rc=$GREP_RC on $SOLVE_PIPELINE — test harness broken (regex error or file unreadable)"
@@ -147,6 +148,12 @@ else
   FAIL=$((FAIL + 1))
 fi
 unset GREP_RC
+assert_grep "$DISPATCH_LIB" \
+  'backgrounded · \[0-9a-f\]\{8\}' \
+  "claude-bg backend extracts the backgrounded · <id> bg session id"
+assert_grep "$DISPATCH_LIB" \
+  '_uberdev_dispatch_claude_bg\(\)' \
+  "lib/dispatch.sh defines the _uberdev_dispatch_claude_bg function"
 
 echo "== Positive: Phase A constants + hardcoded BG_PROMPT_MODE =="
 assert_grep "$SOLVE_PIPELINE" \
