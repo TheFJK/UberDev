@@ -620,16 +620,18 @@ for t in bash grep sed head cat mkdir mktemp mv rm dirname; do
   src="$(command -v "$t" 2>/dev/null)" && ln -s "$src" "$S12_BIN/$t"
 done
 # Precondition: on Git Bash (windows-latest CI) without admin / Developer
-# Mode, `ln -s` does not create a POSIX symlink — it either fails silently
-# or copies nothing usable, so `$S12_BIN` ends up with no executable tool
-# entries. The hook then cannot exec its required binaries under the masked
-# PATH, the forwarders never install, and the jq-missing notice never fires
-# — making both assertions below unsatisfiable for a reason that has nothing
-# to do with the product's jq-independence. Convert that into a SKIP rather
-# than a FAIL, mirroring the S5b precondition guard above: the test cannot
-# meaningfully run when the platform's `ln -s` cannot produce a usable
-# symlinked tool dir.
-if [ ! -x "$S12_BIN/bash" ]; then
+# Mode, `ln -s` does not create a POSIX symlink — it silently produces a
+# file COPY of the source binary instead. The copy IS executable, but it
+# is DLL-broken: Git Bash binaries (bash.exe, grep.exe, sed.exe, …) rely
+# on co-located runtime DLLs (msys-2.0.dll, …) that are NOT in $S12_BIN,
+# so the hook cannot exec them under the masked PATH, the forwarders
+# never install, and the jq-missing notice never fires — making both
+# assertions below unsatisfiable for a reason that has nothing to do
+# with the product's jq-independence. An `-x` check passes on the broken
+# copy and runs the test anyway (the prior fix's failure mode); the
+# correct discriminator is `-L`, which is true only when `ln -s` actually
+# produced a symbolic link. Mirrors the S5b precondition guard above.
+if [ ! -L "$S12_BIN/bash" ]; then
   echo "  SKIP  S12: ln -s did not produce usable symlinks on this platform (Git Bash without admin/Developer Mode?)"
 else
   S12_HOME="$(mktemp -d)"
