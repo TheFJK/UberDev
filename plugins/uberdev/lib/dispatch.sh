@@ -122,8 +122,60 @@ _uberdev_dispatch_claude_bg() {
   return "$DISPATCH_RC"
 }
 
-# _uberdev_dispatch_background ISSUE_NUM TIER PROMPT_FILE -> body filled by Task 7.
-_uberdev_dispatch_background() { return 0; }
+# _uberdev_dispatch_background ISSUE_NUM TIER PROMPT_FILE
+# Dependency-free fallback: explicit `git worktree add` + detached headless
+# `claude -p`. Sets DISPATCH_RC and DISPATCH_ID (the detached pid).
+_uberdev_dispatch_background() {
+  local ISSUE_NUM="$1" TIER="$2" PROMPT_FILE="$3"
+  DISPATCH_RC=0
+  DISPATCH_ID=""
+  local WORKTREE_DIR=".claude/worktrees/solve-issue-$ISSUE_NUM"
+  local WORKTREE_BRANCH="worktree-solve-issue-$ISSUE_NUM"
+  local LOG_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM.log"
+  local STATUS_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-bg-status-$ISSUE_NUM.json"
+  # Explicit dispatcher-controlled worktree — sidesteps the Windows
+  # worktree-isolation bug #40164 in the --bg backend's own --worktree path
+  # handling. MSYS_NO_PATHCONV stops Git Bash rewriting the POSIX path.
+  if ! MSYS_NO_PATHCONV=1 git worktree add "$WORKTREE_DIR" -b "$WORKTREE_BRANCH" >"$LOG_FILE" 2>&1; then
+    DISPATCH_RC=1
+    DISPATCH_LOG="$LOG_FILE"
+    _uberdev_dispatch_audit error \
+      "{\"issue\":$ISSUE_NUM,\"phase\":\"worktree\",\"backend\":\"background\",\"rc\":1}"
+    return 1
+  fi
+  local PROMPT_BODY
+  PROMPT_BODY="$(cat "$PROMPT_FILE")"
+  local BG_TURBO_ENV=()
+  [[ "${AUTO_MODE:-0}" == "1" ]] && BG_TURBO_ENV=( UBERDEV_TURBO=1 )
+  # Detached headless claude -p. cwd = the worktree. `claude -p` print mode
+  # is non-interactive and verified on native Windows -> logs cleanly.
+  # nohup + `&` + disown fully detach so the agent outlives this shell.
+  (
+    cd "$WORKTREE_DIR" || exit 127
+    nohup env "${BG_TURBO_ENV[@]}" claude -p "$PROMPT_BODY" \
+      --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" \
+      >"$LOG_FILE" 2>&1 &
+    printf '%s' "$!" > "$STATUS_FILE.pid"
+    disown 2>/dev/null || true
+  )
+  DISPATCH_RC=$?
+  DISPATCH_ID="$(cat "$STATUS_FILE.pid" 2>/dev/null || echo '')"
+  # Per-issue status file — the dispatcher tracks PID liveness + log tail
+  # against this; Step 6's summary prints its path.
+  cat > "$STATUS_FILE" <<EOF
+{"issue":$ISSUE_NUM,"tier":"$TIER","backend":"background","pid":"${DISPATCH_ID:-}","log":"$LOG_FILE","worktree":"$WORKTREE_DIR","branch":"$WORKTREE_BRANCH"}
+EOF
+  if [[ "$DISPATCH_RC" -eq 0 && -n "$DISPATCH_ID" ]]; then
+    _uberdev_dispatch_audit agent_dispatched \
+      "{\"issue\":$ISSUE_NUM,\"tier\":\"$TIER\",\"backend\":\"background\",\"pid\":\"$DISPATCH_ID\",\"log\":\"$LOG_FILE\"}"
+  else
+    DISPATCH_RC=1
+    DISPATCH_LOG="$LOG_FILE"
+    _uberdev_dispatch_audit error \
+      "{\"issue\":$ISSUE_NUM,\"phase\":\"dispatch\",\"backend\":\"background\",\"rc\":$DISPATCH_RC}"
+  fi
+  return "$DISPATCH_RC"
+}
 
 # _uberdev_dispatch_wezterm ISSUE_NUM TIER PROMPT_FILE -> body filled by Task 12.
 _uberdev_dispatch_wezterm() { return 0; }
