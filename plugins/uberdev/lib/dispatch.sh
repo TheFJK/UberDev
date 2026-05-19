@@ -203,8 +203,21 @@ _uberdev_dispatch_claude_bg() {
   esac
   if [[ "$DISPATCH_RC" -eq 0 ]]; then
     DISPATCH_ID="$(grep -oE 'backgrounded · [0-9a-f]{8}' "$BG_STDOUT_LOG" | awk '{print $NF}' | head -1)"
+    # B3 fix: `claude --bg` exited 0 but the `backgrounded · <id>` marker
+    # was absent from $BG_STDOUT_LOG — output-format drift, truncation, or
+    # version skew. Recording bg_session_id="" as a "successful dispatch"
+    # would let /solve drop the claim-label on the issue while the user has
+    # no way to `claude agents`-monitor or recover. Surface as a distinct
+    # rc=2 ("spawn succeeded, id extraction failed") instead of fake-success.
+    if [ -z "$DISPATCH_ID" ]; then
+      DISPATCH_RC=2
+      DISPATCH_LOG="$BG_STDOUT_LOG"
+      _uberdev_dispatch_audit error \
+        "{\"issue\":$ISSUE_NUM,\"phase\":\"id_extract\",\"backend\":\"claude-bg\",\"rc\":2,\"mode\":\"$BG_PROMPT_MODE\"}"
+      return 2
+    fi
     _uberdev_dispatch_audit agent_dispatched \
-      "{\"issue\":$ISSUE_NUM,\"tier\":\"$TIER\",\"backend\":\"claude-bg\",\"bg_session_id\":\"${DISPATCH_ID:-}\",\"mode\":\"$BG_PROMPT_MODE\"}"
+      "{\"issue\":$ISSUE_NUM,\"tier\":\"$TIER\",\"backend\":\"claude-bg\",\"bg_session_id\":\"$DISPATCH_ID\",\"mode\":\"$BG_PROMPT_MODE\"}"
   else
     DISPATCH_LOG="$BG_STDOUT_LOG"
     _uberdev_dispatch_audit error \
@@ -235,7 +248,17 @@ _uberdev_dispatch_background() {
     return 1
   fi
   local PROMPT_BODY
-  PROMPT_BODY="$(cat "$PROMPT_FILE")"
+  # B5 fix (prompt-read): an unreadable $PROMPT_FILE would otherwise leave
+  # PROMPT_BODY="" and dispatch `claude -p ""` (garbage agent), with the
+  # audit event happily reporting success. Guard the cat read and surface
+  # the failure as a dispatch_setup_failed audit + rc=1.
+  if ! PROMPT_BODY="$(cat "$PROMPT_FILE" 2>>"$LOG_FILE")"; then
+    DISPATCH_RC=1
+    DISPATCH_LOG="$LOG_FILE"
+    _uberdev_dispatch_audit dispatch_setup_failed \
+      "{\"issue\":$ISSUE_NUM,\"phase\":\"prompt_read\",\"backend\":\"background\",\"rc\":1}"
+    return 1
+  fi
   local BG_TURBO_ENV=()
   [[ "${AUTO_MODE:-0}" == "1" ]] && BG_TURBO_ENV=( UBERDEV_TURBO=1 )
   # Detached headless claude -p. cwd = the worktree. `claude -p` print mode
@@ -251,6 +274,11 @@ _uberdev_dispatch_background() {
   )
   DISPATCH_RC=$?
   DISPATCH_ID="$(cat "$STATUS_FILE.pid" 2>/dev/null || echo '')"
+  # S10 cleanup: $STATUS_FILE.pid is a one-shot inter-subshell side file
+  # whose only purpose is bridging the pid back from the subshell above.
+  # Delete it now so a subsequent rerun for the same issue cannot read a
+  # stale pid (the canonical record lives in $STATUS_FILE below).
+  rm -f "$STATUS_FILE.pid" 2>/dev/null || true
   # Liveness gate: `nohup … &` makes `DISPATCH_RC=$?` report the fork, not the
   # exec — a `claude -p` that failed to launch (binary missing, etc.) still
   # leaves DISPATCH_RC=0. Confirm the captured pid is a live process; if not,
@@ -259,10 +287,20 @@ _uberdev_dispatch_background() {
     DISPATCH_ID=""
   fi
   # Per-issue status file — the dispatcher tracks PID liveness + log tail
-  # against this; Step 6's summary prints its path.
-  cat > "$STATUS_FILE" <<EOF
+  # against this; Step 6's summary prints its path. B6 fix: guard the
+  # heredoc write so a failed write ($UBERDEV_TMPDIR unwritable, disk full,
+  # etc.) surfaces as dispatch_setup_failed instead of a fake-success audit
+  # with no status file for Step 6 to read.
+  if ! cat > "$STATUS_FILE" <<EOF
 {"issue":$ISSUE_NUM,"tier":"$TIER","backend":"background","pid":"${DISPATCH_ID:-}","log":"$LOG_FILE","worktree":"$WORKTREE_DIR","branch":"$WORKTREE_BRANCH"}
 EOF
+  then
+    DISPATCH_RC=1
+    DISPATCH_LOG="$LOG_FILE"
+    _uberdev_dispatch_audit dispatch_setup_failed \
+      "{\"issue\":$ISSUE_NUM,\"phase\":\"status_write\",\"backend\":\"background\",\"rc\":1}"
+    return 1
+  fi
   if [[ "$DISPATCH_RC" -eq 0 && -n "$DISPATCH_ID" ]]; then
     _uberdev_dispatch_audit agent_dispatched \
       "{\"issue\":$ISSUE_NUM,\"tier\":\"$TIER\",\"backend\":\"background\",\"pid\":\"$DISPATCH_ID\",\"log\":\"$LOG_FILE\"}"
@@ -353,12 +391,23 @@ _uberdev_dispatch_wezterm() {
   # (headless print mode streaming into the pane) — detaching would empty the
   # pane. MSYS2_ARG_CONV_EXCL stops Git Bash mangling the --cwd path arg
   # before it reaches wezterm.
+  #
+  # B4 fix: capture the spawn rc IMMEDIATELY after the `$(...)` close. Before
+  # this change the only gate was `[ -z "$DISPATCH_ID" ]`, which missed the
+  # case where `wezterm cli spawn` exits non-zero AND prints a partial token
+  # to stdout — the partial string was then treated as a valid pane id. AND-
+  # gating SPAWN_RC=0 with the non-empty check covers both failure shapes.
+  local SPAWN_RC
   DISPATCH_ID="$(MSYS2_ARG_CONV_EXCL='*' wezterm cli spawn \
     --domain-name uberdev --cwd "$WORKTREE_ABS" -- \
     claude -p "$PROMPT_BODY" --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" \
     2> >(tee -a "$LOG_FILE" >&2))"
-  if [ -z "$DISPATCH_ID" ]; then
+  SPAWN_RC=$?
+  if [[ "$SPAWN_RC" -ne 0 || -z "$DISPATCH_ID" ]]; then
     DISPATCH_RC=1
+    # Stamp DISPATCH_ID empty so the success arm below cannot fire on a
+    # partial-stdout token from a failed spawn.
+    DISPATCH_ID=""
   fi
   if [[ "$DISPATCH_RC" -eq 0 ]]; then
     _uberdev_dispatch_audit agent_dispatched \
