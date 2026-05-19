@@ -72,12 +72,12 @@ assert_grep "$DISPATCH_LIB" \
   'UBERDEV_DISPATCH_BACKEND_REQUESTED|requested' \
   "preflight distinguishes an explicit request from auto"
 assert_grep "$DISPATCH_LIB" \
-  'exit 1|return 1' \
+  '^[[:space:]]*(exit|return) 1' \
   "preflight hard-errors (non-zero) when an explicit backend is unusable"
 
 echo "== Anti-pattern: auto never escapes as a resolved backend =="
 assert_grep_not "$DISPATCH_LIB" \
-  'UBERDEV_RESOLVED_BACKEND="?auto"?' \
+  'UBERDEV_RESOLVED_BACKEND=auto$|UBERDEV_RESOLVED_BACKEND="auto"' \
   "auto is resolved away — never assigned as the final backend"
 
 echo

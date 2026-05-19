@@ -29,7 +29,9 @@ _UBERDEV_DISPATCH_BACKEND_ENUM='auto|claude-bg|wezterm|background'
 # WSL2 is detected via /proc/version containing "microsoft" (case-insensitive);
 # native Windows via $OS=Windows_NT with no WSL marker; macOS via uname.
 _uberdev_dispatch_os_class() {
-  case "$(uname -s 2>/dev/null)" in
+  local _uname
+  _uname="$(uname -s 2>/dev/null)"
+  case "$_uname" in
     Darwin) printf 'macos'; return 0 ;;
   esac
   if [ -r /proc/version ] && grep -qi microsoft /proc/version 2>/dev/null; then
@@ -38,7 +40,7 @@ _uberdev_dispatch_os_class() {
   case "${OS:-}" in
     Windows_NT) printf 'windows-native'; return 0 ;;
   esac
-  case "$(uname -s 2>/dev/null)" in
+  case "$_uname" in
     MINGW*|MSYS*|CYGWIN*) printf 'windows-native'; return 0 ;;
   esac
   printf 'linux'
