@@ -132,7 +132,14 @@ aliases_sync_main() {
   fi
 
   # 5. Realpath/symlink containment guard (security mitigation 3).
-  if [ -L "$DEST_DIR" ]; then
+  # `[ -L ]` catches POSIX symlinks on Linux/macOS. On Windows with Git Bash
+  # in admin/Developer Mode, `ln -s` against a directory may produce an
+  # NTFS junction (a reparse point that POSIX `[ -L ]` does NOT recognise
+  # as a symlink). `readlink` resolves both: it returns the target for
+  # POSIX symlinks and reparse points, and empty for regular files/dirs.
+  # Belt-and-braces: keep `[ -L ]` for correctness on POSIX where it is
+  # authoritative, and add `readlink` as the Windows-junction net. (#126.)
+  if [ -L "$DEST_DIR" ] || [ -n "$(readlink "$DEST_DIR" 2>/dev/null)" ]; then
     echo "uberdev: ~/.claude/commands is a symlink; refusing to sync" >&2
     return 0
   fi

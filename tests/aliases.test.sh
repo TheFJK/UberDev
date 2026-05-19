@@ -457,20 +457,53 @@ S5B_HOME="$(mktemp -d)"
 S5B_DECOY="$(mktemp -d)"
 mkdir -p "$S5B_HOME/.claude"
 ln -s "$S5B_DECOY" "$S5B_HOME/.claude/commands"
-S5B_STDERR="$(mktemp)"
-HOME="$S5B_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
-  bash "$HOOK" >/dev/null 2>"$S5B_STDERR" || true
-if grep -q "refusing to sync" "$S5B_STDERR"; then
-  echo "  PASS  S5b: symlinked commands dir refused"; PASS=$((PASS + 1))
+# Precondition: on Git Bash (windows-latest CI) without admin / Developer
+# Mode, `ln -s` does not create a POSIX symlink — it either fails silently
+# or copies the target directory. `[ -L ]` then returns false and there is
+# no symlink-shaped thing for the hook to refuse, so the refusal assertion
+# below cannot be satisfied. Convert that into a SKIP rather than a FAIL:
+# the test cannot meaningfully run when the platform's `ln -s` cannot
+# produce a real symlink. (Issue #126.)
+if [ ! -L "$S5B_HOME/.claude/commands" ]; then
+  echo "  SKIP  S5b: ln -s did not produce a symlink on this platform (Git Bash without admin/Developer Mode?)"
 else
-  echo "  FAIL  S5b: symlink refusal stderr line missing"; FAIL=$((FAIL + 1))
+  S5B_STDERR="$(mktemp)"
+  HOME="$S5B_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+    bash "$HOOK" >/dev/null 2>"$S5B_STDERR" || true
+  if grep -q "refusing to sync" "$S5B_STDERR"; then
+    echo "  PASS  S5b: symlinked commands dir refused"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S5b: symlink refusal stderr line missing"; FAIL=$((FAIL + 1))
+  fi
+  if [ -z "$(ls -A "$S5B_DECOY")" ]; then
+    echo "  PASS  S5b: no writes into symlink target"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S5b: files written into symlinked dir"; FAIL=$((FAIL + 1))
+  fi
+  rm -f "$S5B_STDERR"
 fi
-if [ -z "$(ls -A "$S5B_DECOY")" ]; then
-  echo "  PASS  S5b: no writes into symlink target"; PASS=$((PASS + 1))
+rm -rf "$S5B_HOME" "$S5B_DECOY"
+
+echo
+echo "== S5b-guard: hook does not refuse a regular (non-symlinked) commands dir =="
+# Complement to S5b — pins down the false-positive direction: a regular
+# pre-existing ~/.claude/commands directory must NOT trigger the symlink
+# refusal. Catches regressions if the symlink detection is ever tightened
+# to also flag non-symlinks (e.g. accidentally refusing every existing dir).
+# This test runs on every platform; on Windows it doubles as the live
+# coverage for the precondition-skip path in S5b (since `mkdir -p` is the
+# same shape as the directory-copy fallback `ln -s` produces there).
+S5B_GUARD_HOME="$(mktemp -d)"
+mkdir -p "$S5B_GUARD_HOME/.claude/commands"
+S5B_GUARD_STDERR="$(mktemp)"
+HOME="$S5B_GUARD_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  bash "$HOOK" >/dev/null 2>"$S5B_GUARD_STDERR" || true
+if grep -q "refusing to sync" "$S5B_GUARD_STDERR"; then
+  echo "  FAIL  S5b-guard: hook emitted refusal for a regular (non-symlink) dir"; FAIL=$((FAIL + 1))
 else
-  echo "  FAIL  S5b: files written into symlinked dir"; FAIL=$((FAIL + 1))
+  echo "  PASS  S5b-guard: hook does not refuse a regular (non-symlink) commands dir"; PASS=$((PASS + 1))
 fi
-rm -rf "$S5B_HOME" "$S5B_DECOY" "$S5B_STDERR"
+rm -rf "$S5B_GUARD_HOME" "$S5B_GUARD_STDERR"
 
 echo
 echo "== S6: uninstall-aliases removes version-marker =="
