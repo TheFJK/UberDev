@@ -272,5 +272,84 @@ EOF
   return "$DISPATCH_RC"
 }
 
-# _uberdev_dispatch_wezterm ISSUE_NUM TIER PROMPT_FILE -> body filled by Task 12.
-_uberdev_dispatch_wezterm() { return 0; }
+# _uberdev_dispatch_wezterm_config
+# Idempotently merge the uberdev managed block into ~/.wezterm.lua. The block
+# is fenced by BEGIN/END markers; on a re-run the old block is stripped and
+# re-appended. The user's own config outside the markers is never touched.
+_uberdev_dispatch_wezterm_config() {
+  local cfg="${HOME}/.wezterm.lua"
+  local begin='-- BEGIN uberdev managed block (RFC 0004) -- do not edit'
+  local end='-- END uberdev managed block'
+  local tmp="${UBERDEV_TMPDIR:-/tmp}/.wezterm.uberdev.$$"
+  # Strip any prior managed block, preserving the user's surrounding config.
+  if [ -f "$cfg" ]; then
+    awk -v b="$begin" -v e="$end" '
+      $0==b {skip=1} skip && $0==e {skip=0; next} !skip {print}
+    ' "$cfg" > "$tmp"
+  else
+    : > "$tmp"
+  fi
+  # Append a fresh managed block. exit_behavior=Hold keeps a finished or
+  # crashed agent pane (and its transcript) visible — the default "Close"
+  # makes the pane vanish on exit.
+  cat >> "$tmp" <<'LUA'
+-- BEGIN uberdev managed block (RFC 0004) -- do not edit
+local uberdev_wezterm = require('wezterm')
+return {
+  unix_domains = { { name = 'uberdev' } },
+  exit_behavior = 'Hold',
+}
+-- END uberdev managed block
+LUA
+  mv "$tmp" "$cfg"
+}
+
+# _uberdev_dispatch_wezterm ISSUE_NUM TIER PROMPT_FILE
+# Spawns each agent as a foreground headless `claude -p` in a visible WezTerm
+# pane. Sets DISPATCH_RC and DISPATCH_ID (the spawned pane id).
+_uberdev_dispatch_wezterm() {
+  local ISSUE_NUM="$1" TIER="$2" PROMPT_FILE="$3"
+  DISPATCH_RC=0
+  DISPATCH_ID=""
+  _uberdev_dispatch_wezterm_config
+  # Pin every wezterm cli call to the uberdev domain socket so fan-out does
+  # not scatter across stray WezTerm instances (RFC §3.6).
+  export WEZTERM_UNIX_SOCKET="${WEZTERM_UNIX_SOCKET:-}"
+  local WORKTREE_DIR=".claude/worktrees/solve-issue-$ISSUE_NUM"
+  local WORKTREE_BRANCH="worktree-solve-issue-$ISSUE_NUM"
+  local LOG_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM.log"
+  # The backend runs its own worktree add — a pane's `claude -p` does not get
+  # native --worktree. Absolute path, quoted (repo path may contain spaces).
+  # MSYS_NO_PATHCONV stops Git Bash rewriting the path.
+  if ! MSYS_NO_PATHCONV=1 git worktree add "$WORKTREE_DIR" -b "$WORKTREE_BRANCH" >"$LOG_FILE" 2>&1; then
+    DISPATCH_RC=1
+    DISPATCH_LOG="$LOG_FILE"
+    _uberdev_dispatch_audit error \
+      '{"issue":'"$ISSUE_NUM"',"phase":"worktree","backend":"wezterm","rc":1}'
+    return 1
+  fi
+  local WORKTREE_ABS
+  WORKTREE_ABS="$(cd "$WORKTREE_DIR" && pwd)"
+  local PROMPT_BODY
+  PROMPT_BODY="$(cat "$PROMPT_FILE")"
+  # wezterm cli spawn into the pinned uberdev domain. Foreground claude -p
+  # (headless print mode streaming into the pane) — detaching would empty the
+  # pane. MSYS2_ARG_CONV_EXCL stops Git Bash mangling the --cwd path arg
+  # before it reaches wezterm.
+  DISPATCH_ID="$(MSYS2_ARG_CONV_EXCL='*' wezterm cli spawn \
+    --domain-name uberdev --cwd "$WORKTREE_ABS" -- \
+    claude -p "$PROMPT_BODY" --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" \
+    2> >(tee -a "$LOG_FILE" >&2))"
+  if [ -z "$DISPATCH_ID" ]; then
+    DISPATCH_RC=1
+  fi
+  if [[ "$DISPATCH_RC" -eq 0 ]]; then
+    _uberdev_dispatch_audit agent_dispatched \
+      '{"issue":'"$ISSUE_NUM"',"tier":"'"$TIER"'","backend":"wezterm","pane_id":"'"$DISPATCH_ID"'"}'
+  else
+    DISPATCH_LOG="$LOG_FILE"
+    _uberdev_dispatch_audit error \
+      '{"issue":'"$ISSUE_NUM"',"phase":"dispatch","backend":"wezterm","rc":'"$DISPATCH_RC"'}'
+  fi
+  return "$DISPATCH_RC"
+}
