@@ -1,6 +1,6 @@
 {
   "name": "uberdev",
-  "version": "0.28.0",
+  "version": "0.29.0",
   "description": "Production-grade Claude Code plugin: parallel-fanout PR review, autonomous GitHub issue triage and resolution via claude --bg background sessions (Agent View), brainstorm/plan/execute workflows with wave-based subagent dispatch.",
   "author": {
     "name": "TheFJK",

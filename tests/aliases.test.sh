@@ -575,6 +575,123 @@ else
 fi
 
 echo
+echo "== S10: _aliases_read_version matches jq -r .version =="
+# RFC 0004: the jq-free version reader must return the byte-identical string
+# that `jq -r .version` returns on the plugin's own manifest. Sourcing the
+# library in a command-substitution subshell keeps its functions scoped.
+S10_GOT="$(
+  . "$REPO_ROOT/plugins/uberdev/lib/aliases-sync.sh"
+  _aliases_read_version "$PLUGIN_JSON"
+)"
+if [ "$S10_GOT" = "$PLUGIN_VERSION" ]; then
+  echo "  PASS  S10: _aliases_read_version → $S10_GOT"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10: got '$S10_GOT', expected '$PLUGIN_VERSION'"; FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== S11: aliases_sync_main sets UBERDEV_ALIAS_NOTICE on first run =="
+# RFC 0004: on a fresh install aliases_sync_main must compose a first-run
+# notice into the UBERDEV_ALIAS_NOTICE global for the hook to inject.
+S11_HOME="$(mktemp -d)"
+S11_GOT="$(
+  HOME="$S11_HOME"
+  PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+  . "$REPO_ROOT/plugins/uberdev/lib/aliases-sync.sh"
+  aliases_sync_main >/dev/null 2>&1
+  printf '%s' "${UBERDEV_ALIAS_NOTICE:-}"
+)"
+case "$S11_GOT" in
+  *"installed 7 short-form aliases"*)
+    echo "  PASS  S11: first-run notice composed"; PASS=$((PASS + 1)) ;;
+  *)
+    echo "  FAIL  S11: UBERDEV_ALIAS_NOTICE='$S11_GOT'"; FAIL=$((FAIL + 1)) ;;
+esac
+rm -rf "$S11_HOME"
+
+echo
+echo "== S12: aliases install with jq absent (RFC 0004) =="
+# Mask jq: build a bin dir holding symlinks to every tool the hook needs
+# EXCEPT jq, then run the hook with PATH pointed only at it. With the
+# RFC-0004 reorder, alias sync runs before the jq guard, so the seven
+# forwarders must still install, and a fixed jq-missing notice must surface.
+S12_BIN="$(mktemp -d)"
+for t in bash grep sed head cat mkdir mktemp mv rm dirname; do
+  src="$(command -v "$t" 2>/dev/null)" && ln -s "$src" "$S12_BIN/$t"
+done
+S12_HOME="$(mktemp -d)"
+S12_STDOUT="$(mktemp)"
+PATH="$S12_BIN" HOME="$S12_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  bash "$HOOK" >"$S12_STDOUT" 2>/dev/null || true
+S12_OK=1
+for short in issue solve turbo simplify review-pr merge dev; do
+  if [ ! -f "$S12_HOME/.claude/commands/${short}.md" ] \
+     || ! grep -q 'managed-by: uberdev-aliases' "$S12_HOME/.claude/commands/${short}.md"; then
+    S12_OK=0; break
+  fi
+done
+if [ "$S12_OK" = "1" ]; then
+  echo "  PASS  S12: all 7 forwarders installed with jq masked"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S12: forwarders missing when jq absent"; FAIL=$((FAIL + 1))
+fi
+if grep -q 'jq not found' "$S12_STDOUT"; then
+  echo "  PASS  S12: jq-missing notice surfaced in context"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S12: jq-missing notice not surfaced"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$S12_BIN" "$S12_HOME" "$S12_STDOUT"
+
+echo
+echo "== S13: a collision is surfaced in the session context =="
+# A hand-authored forwarder collides; the skipped alias must be named in the
+# hook's stdout context injection, not just on stderr (RFC 0004).
+S13_HOME="$(mktemp -d)"
+mkdir -p "$S13_HOME/.claude/commands"
+printf '# my custom turbo\n' > "$S13_HOME/.claude/commands/turbo.md"
+S13_STDOUT="$(mktemp)"
+HOME="$S13_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  bash "$HOOK" >"$S13_STDOUT" 2>/dev/null || true
+if grep -q 'turbo' "$S13_STDOUT" && grep -qE 'not installed|already exists' "$S13_STDOUT"; then
+  echo "  PASS  S13: collision notice present in context injection"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S13: collision notice missing from context"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$S13_HOME" "$S13_STDOUT"
+
+echo
+echo "== S14: the first-run notice is surfaced in the session context =="
+S14_HOME="$(mktemp -d)"
+S14_STDOUT="$(mktemp)"
+HOME="$S14_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  bash "$HOOK" >"$S14_STDOUT" 2>/dev/null || true
+if grep -q 'installed 7 short-form aliases' "$S14_STDOUT"; then
+  echo "  PASS  S14: first-run notice present in context injection"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S14: first-run notice missing from context"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$S14_HOME" "$S14_STDOUT"
+
+echo
+echo "== S15: a write failure surfaces a failure notice (RFC 0004) =="
+# Force _aliases_write_forwarder to fail by making ~/.claude/commands
+# read-only after creating it; the per-alias loop then populates FAILED_LIST
+# and the hook must inject the "failed to install alias(es)" notice.
+S15_HOME="$(mktemp -d)"
+mkdir -p "$S15_HOME/.claude/commands"
+chmod 555 "$S15_HOME/.claude/commands"
+S15_STDOUT="$(mktemp)"
+HOME="$S15_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  bash "$HOOK" >"$S15_STDOUT" 2>/dev/null || true
+chmod 755 "$S15_HOME/.claude/commands" 2>/dev/null || true
+if grep -qE 'failed to install alias' "$S15_STDOUT"; then
+  echo "  PASS  S15: write-failure notice surfaced in context"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S15: write-failure notice missing from context"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$S15_HOME" "$S15_STDOUT"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
