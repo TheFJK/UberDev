@@ -61,8 +61,66 @@ uberdev_dispatch_preflight() { return 0; }
 # uberdev_dispatch_one ISSUE_NUM TIER PROMPT_FILE -> body filled by Task 8.
 uberdev_dispatch_one() { return 0; }
 
-# _uberdev_dispatch_claude_bg ISSUE_NUM TIER PROMPT_FILE -> body filled by Task 6.
-_uberdev_dispatch_claude_bg() { return 0; }
+# _uberdev_dispatch_claude_bg ISSUE_NUM TIER PROMPT_FILE
+# Extract of the v0.22.0 inline `claude --bg` dispatch. Sets DISPATCH_RC and
+# DISPATCH_ID (the bg session id) for the caller. No behaviour change.
+_uberdev_dispatch_claude_bg() {
+  local ISSUE_NUM="$1" TIER="$2" PROMPT_FILE="$3"
+  DISPATCH_RC=0
+  DISPATCH_ID=""
+  local BG_STDOUT_LOG="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM.log"
+  # UBERDEV_TURBO=1 chain-wide signal for /turbo (AUTO_MODE=1) only; env(1)
+  # mediates the inline-prefix because timeout(1) is argv[0] (see SKILL.md
+  # comment lifted verbatim). Empty array under AUTO_MODE=0 -> no-op passthrough.
+  local BG_TURBO_ENV=()
+  [[ "${AUTO_MODE:-0}" == "1" ]] && BG_TURBO_ENV=( UBERDEV_TURBO=1 )
+  local BG_PROMPT_MODE="${BG_PROMPT_MODE:-argv}"
+  case "$BG_PROMPT_MODE" in
+    file)
+      # Trusted path arg; file contents never reach the shell as argv.
+      "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" env "${BG_TURBO_ENV[@]}" claude --bg \
+        --prompt-file "$PROMPT_FILE" \
+        --worktree "solve-issue-$ISSUE_NUM" \
+        --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" > "$BG_STDOUT_LOG" 2>&1
+      DISPATCH_RC=$?
+      ;;
+    stdin)
+      # File content streamed on FD 0; no argv quoting concern.
+      "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" env "${BG_TURBO_ENV[@]}" claude --bg \
+        --worktree "solve-issue-$ISSUE_NUM" \
+        --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" \
+        < "$PROMPT_FILE" > "$BG_STDOUT_LOG" 2>&1
+      DISPATCH_RC=$?
+      ;;
+    argv)
+      # Bash array form (spec-reviewer finding 1) — single argv slot, no eval.
+      local PROMPT_BODY
+      PROMPT_BODY="$(cat "$PROMPT_FILE")"
+      local cmd=( "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" env "${BG_TURBO_ENV[@]}" claude --bg
+            --worktree "solve-issue-$ISSUE_NUM"
+            --model "$MODEL" )
+      cmd+=( "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" -- "$PROMPT_BODY" )
+      "${cmd[@]}" > "$BG_STDOUT_LOG" 2>&1
+      DISPATCH_RC=$?
+      ;;
+    *)
+      # Defensive default arm (silent-failure-hunter finding B2) — rc=127
+      # instead of a silent no-op that would report DISPATCH_RC=0.
+      echo "error: BG_PROMPT_MODE='$BG_PROMPT_MODE' is not one of {file, stdin, argv}" > "$BG_STDOUT_LOG"
+      DISPATCH_RC=127
+      ;;
+  esac
+  if [[ "$DISPATCH_RC" -eq 0 ]]; then
+    DISPATCH_ID="$(grep -oE 'backgrounded · [0-9a-f]{8}' "$BG_STDOUT_LOG" | awk '{print $NF}' | head -1)"
+    _uberdev_dispatch_audit agent_dispatched \
+      "{\"issue\":$ISSUE_NUM,\"tier\":\"$TIER\",\"backend\":\"claude-bg\",\"bg_session_id\":\"${DISPATCH_ID:-}\",\"mode\":\"$BG_PROMPT_MODE\"}"
+  else
+    DISPATCH_LOG="$BG_STDOUT_LOG"
+    _uberdev_dispatch_audit error \
+      "{\"issue\":$ISSUE_NUM,\"phase\":\"dispatch\",\"backend\":\"claude-bg\",\"rc\":$DISPATCH_RC}"
+  fi
+  return "$DISPATCH_RC"
+}
 
 # _uberdev_dispatch_background ISSUE_NUM TIER PROMPT_FILE -> body filled by Task 7.
 _uberdev_dispatch_background() { return 0; }
