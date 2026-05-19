@@ -894,23 +894,6 @@ TIER="${TIERS[$ISSUE_NUM]}"
 TITLE="${TITLES[$ISSUE_NUM]}"
 BG_DISPATCH_RC=0
 BG_SESSION_ID=""
-# NEW (#97): UBERDEV_TURBO=1 chain-wide signal for /turbo (AUTO_MODE=1) only.
-# env(1) mediates the inline-prefix because POSIX inline-prefix env-assignment
-# only takes effect at the START of a simple command. Here the dispatch is
-# `$TIMEOUT_BIN $SOLVE_TIMEOUT <env-tokens> claude --bg …` — `timeout(1)` is
-# already in front, so it would consume `UBERDEV_TURBO=1` as the COMMAND argv
-# (not as env) and exit 127. `env "${BG_TURBO_ENV[@]}" claude --bg` consumes
-# the KEY=value tokens and execs claude --bg with those env vars set; under
-# AUTO_MODE=0 (empty array) it degrades to a no-op env passthrough.
-# Pre-declare BG_TURBO_ENV=() so the array name is always bound before the
-# AUTO_MODE-conditional setter on the next line runs. The `[[ ... ]] && ...`
-# form (rather than a second `if/then/fi` block) keeps the file's anchor count
-# at exactly two `^if \[\[ "\$AUTO_MODE" == "1" \]\]; then$` matches (lines
-# 285 and 505) — the differential-guard awk in tests/turbo-flow.test.sh keys
-# off that anchor count and would scan an unbounded code region if a third
-# block were introduced (#97 simplify-lens E2 follow-up).
-BG_TURBO_ENV=()
-[[ "$AUTO_MODE" == "1" ]] && BG_TURBO_ENV=( UBERDEV_TURBO=1 )
 # Dispatch one issue via the backend resolved by uberdev_dispatch_preflight
 # (Phase A). lib/dispatch.sh owns the per-backend mechanism; this loop just
 # routes. PROMPT_FILE is the per-issue prompt written in Step 5a.
@@ -1036,13 +1019,13 @@ fi
 # Step 6: backend-aware monitoring pointer (RFC 0004 §3.10).
 case "${UBERDEV_RESOLVED_BACKEND:-claude-bg}" in
   claude-bg)
-    echo "Monitor the dispatched agents with:  claude agents" ;;
+    echo "Monitor the dispatched agents with:  claude agents" >&2 ;;
   wezterm)
-    echo "The dispatched agents are running in WezTerm panes — switch to the WezTerm window to watch them live." ;;
+    echo "The dispatched agents are running in WezTerm panes — switch to the WezTerm window to watch them live." >&2 ;;
   background)
-    echo "The dispatched agents are detached background processes. Per-issue logs + status files:"
+    echo "The dispatched agents are detached background processes. Per-issue logs + status files:" >&2
     for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
-      echo "  #$ISSUE_NUM: tail -f $UBERDEV_TMPDIR/solve-bg-stdout-$ISSUE_NUM.log   (exit code in $UBERDEV_TMPDIR/solve-bg-status-$ISSUE_NUM.json)"
+      echo "  #$ISSUE_NUM: tail -f $UBERDEV_TMPDIR/solve-bg-stdout-$ISSUE_NUM.log   (exit code in $UBERDEV_TMPDIR/solve-bg-status-$ISSUE_NUM.json)" >&2
     done ;;
 esac
 ```

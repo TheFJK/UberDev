@@ -20,6 +20,7 @@ ORCHESTRATOR="$REPO_ROOT/plugins/uberdev/skills/orchestrator/SKILL.md"
 TURBO_CMD="$REPO_ROOT/plugins/uberdev/commands/turbo.md"
 SOLVE_CMD="$REPO_ROOT/plugins/uberdev/commands/solve.md"
 SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
+DISPATCH_LIB="$REPO_ROOT/plugins/uberdev/lib/dispatch.sh"
 
 PASS=0
 FAIL=0
@@ -86,13 +87,13 @@ assert_grep "$SOLVE_PIPELINE" \
   "solve-pipeline skill (medium tier) dispatches --turbo into the pipeline"
 
 echo
-echo "== solve-pipeline inline-prefix UBERDEV_TURBO=1 on claude --bg (AUTO_MODE=1 only, #97) =="
-assert_grep "$SOLVE_PIPELINE" \
+echo "== lib/dispatch.sh inline-prefix UBERDEV_TURBO=1 on claude --bg (AUTO_MODE=1 only, #97) =="
+assert_grep "$DISPATCH_LIB" \
   'BG_TURBO_ENV=\( UBERDEV_TURBO=1 \)' \
-  "solve-pipeline declares BG_TURBO_ENV array under AUTO_MODE=1 (#97)"
-assert_grep "$SOLVE_PIPELINE" \
+  "lib/dispatch.sh declares BG_TURBO_ENV array under AUTO_MODE=1 (#97)"
+assert_grep "$DISPATCH_LIB" \
   'env "\$\{BG_TURBO_ENV\[@\]\}" claude --bg' \
-  "solve-pipeline expands BG_TURBO_ENV[@] left of claude --bg via env(1)-mediated inline-prefix exec (#97 — timeout(1) eats raw KEY=value as argv, env(1) consumes them as env)"
+  "lib/dispatch.sh expands BG_TURBO_ENV[@] left of claude --bg via env(1)-mediated inline-prefix exec (#97 — timeout(1) eats raw KEY=value as argv, env(1) consumes them as env)"
 
 echo
 echo "== Anchor pre-check: solve-pipeline must contain exactly 2 'if AUTO_MODE==1' anchors (#97 simplify-lens E2 forward-guard) =="
