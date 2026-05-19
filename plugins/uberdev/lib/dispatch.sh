@@ -55,11 +55,99 @@ _uberdev_dispatch_audit() {
   fi
 }
 
-# uberdev_dispatch_preflight -> body filled by Task 8.
-uberdev_dispatch_preflight() { return 0; }
+# _uberdev_dispatch_wezterm_available -> exit 0 if wezterm usable, 1 otherwise.
+# Usable = binary on PATH AND the mux answers list-clients within the poll
+# budget (cold-start race guard, RFC §3.6). Starts wezterm-mux-server if the
+# mux is not already up.
+_uberdev_dispatch_wezterm_available() {
+  command -v wezterm >/dev/null 2>&1 || return 1
+  local i
+  for i in 1 2 3 4 5; do
+    if wezterm cli list-clients >/dev/null 2>&1; then
+      return 0
+    fi
+    wezterm-mux-server --daemonize >/dev/null 2>&1 || true
+    sleep 1
+  done
+  wezterm cli list-clients >/dev/null 2>&1
+}
 
-# uberdev_dispatch_one ISSUE_NUM TIER PROMPT_FILE -> body filled by Task 8.
-uberdev_dispatch_one() { return 0; }
+# uberdev_dispatch_preflight
+# Resolves UBERDEV_DISPATCH_BACKEND_REQUESTED (auto|claude-bg|wezterm|background)
+# to a concrete UBERDEV_RESOLVED_BACKEND, ONCE per invocation, committed for
+# the whole batch (no mid-fanout switch). Hard-errors (return 1) when an
+# explicit backend is unusable on this host. Emits dispatch_backend_resolved.
+uberdev_dispatch_preflight() {
+  local requested="${UBERDEV_DISPATCH_BACKEND_REQUESTED:-auto}"
+  local os_class reason resolved
+  os_class="$(_uberdev_dispatch_os_class)"
+  case "$requested" in
+    claude-bg|background)
+      # claude-bg / background depend only on git + claude + shell — usable
+      # on every OS class. No capability gate.
+      resolved="$requested"; reason="explicit" ;;
+    wezterm)
+      # Explicit wezterm: validate mux usability AND the same-OS constraint.
+      if [ "$os_class" = "wsl2" ]; then
+        echo "error: --backend=wezterm from WSL2 cannot drive a native-Windows WezTerm" >&2
+        echo "       (WSL2 dropped AF_UNIX mux interop; WSLg is GUI-only). Run /solve" >&2
+        echo "       from the same OS side as WezTerm, or use --backend=background." >&2
+        return 1
+      fi
+      if ! _uberdev_dispatch_wezterm_available; then
+        echo "error: --backend=wezterm requested but WezTerm is unavailable" >&2
+        echo "       (binary missing, or the mux failed to come up). Install WezTerm" >&2
+        echo "       or use --backend=background. See RFC 0004 §3.6." >&2
+        return 1
+      fi
+      resolved="wezterm"; reason="explicit" ;;
+    auto)
+      case "$os_class" in
+        macos)
+          if _uberdev_dispatch_wezterm_available; then resolved="wezterm"; reason="auto-macos-wezterm"
+          else resolved="claude-bg"; reason="auto-macos-fallback"; fi ;;
+        windows-native)
+          if _uberdev_dispatch_wezterm_available; then resolved="wezterm"; reason="auto-windows-wezterm"
+          else resolved="background"; reason="auto-windows-fallback"; fi ;;
+        wsl2)
+          resolved="claude-bg"; reason="auto-wsl2" ;;
+        *)
+          resolved="claude-bg"; reason="auto-linux" ;;
+      esac ;;
+    *)
+      echo "error: dispatch backend '$requested' not in {$_UBERDEV_DISPATCH_BACKEND_ENUM}" >&2
+      return 1 ;;
+  esac
+  export UBERDEV_RESOLVED_BACKEND="$resolved"
+  _uberdev_dispatch_audit dispatch_backend_resolved \
+    "{\"requested\":\"$requested\",\"resolved\":\"$resolved\",\"os_class\":\"$os_class\",\"reason\":\"$reason\"}"
+  return 0
+}
+
+# uberdev_dispatch_one ISSUE_NUM TIER PROMPT_FILE
+# Routes one issue to the backend resolved by uberdev_dispatch_preflight.
+# Sets DISPATCH_RC + DISPATCH_ID (+ DISPATCH_LOG on failure); returns the backend's rc.
+uberdev_dispatch_one() {
+  local ISSUE_NUM="$1" TIER="$2" PROMPT_FILE="$3"
+  # Reset the caller-visible out-params so a prior iteration's values — esp.
+  # DISPATCH_LOG, which a backend sets only on its error path — never leak
+  # into a subsequent success (T6/T7 code-review finding; central SSOT reset).
+  DISPATCH_RC=0
+  DISPATCH_ID=""
+  DISPATCH_LOG=""
+  if [ -z "${UBERDEV_RESOLVED_BACKEND:-}" ]; then
+    uberdev_dispatch_preflight || return 1
+  fi
+  case "${UBERDEV_RESOLVED_BACKEND:-}" in
+    claude-bg)   _uberdev_dispatch_claude_bg  "$ISSUE_NUM" "$TIER" "$PROMPT_FILE" ;;
+    wezterm)     _uberdev_dispatch_wezterm    "$ISSUE_NUM" "$TIER" "$PROMPT_FILE" ;;
+    background)  _uberdev_dispatch_background  "$ISSUE_NUM" "$TIER" "$PROMPT_FILE" ;;
+    *)
+      echo "error: uberdev_dispatch_one: unresolved backend '${UBERDEV_RESOLVED_BACKEND:-}'" >&2
+      DISPATCH_RC=1
+      return 1 ;;
+  esac
+}
 
 # _uberdev_dispatch_claude_bg ISSUE_NUM TIER PROMPT_FILE
 # Extract of the v0.22.0 inline `claude --bg` dispatch. Sets DISPATCH_RC and
