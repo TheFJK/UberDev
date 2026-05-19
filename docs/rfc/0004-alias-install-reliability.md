@@ -74,7 +74,7 @@ The `stderr` summary is retained for backward compatibility (the `/uberdev:insta
 | State                       | Notice text                                                                                                                                              |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | First run, all installed    | `uberdev: installed N short-form aliases (/issue, /solve, …). Opt out with UBERDEV_NO_AUTO_ALIAS=1.`                                                      |
-| Collision skip              | `uberdev: /turbo not installed — ~/.claude/commands/turbo.md exists and isn't uberdev-managed. Use /uberdev:turbo, or rename that file and run /uberdev:install-aliases.` |
+| Collision skip              | One aggregated line naming every skipped alias: `uberdev: these short-form aliases were not installed because a non-uberdev file already exists at ~/.claude/commands/<name>.md: /turbo /merge — use /uberdev:<name>, or rename the existing file and run /uberdev:install-aliases.` |
 | Write failure               | `uberdev: failed to install alias(es): <names>. Re-run /uberdev:install-aliases.`                                                                        |
 | Steady state (all in sync)  | *(empty — nothing is injected)*                                                                                                                          |
 

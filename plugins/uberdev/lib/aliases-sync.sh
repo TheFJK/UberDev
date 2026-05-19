@@ -91,10 +91,12 @@ _aliases_check_marker() {
 }
 
 # _aliases_read_version PLUGIN_JSON
-# Prints the top-level "version" string from a plugin.json — without jq.
-# The manifest is the plugin's own shipped file, where `"version": "x.y.z"`
-# sits on a single line. Prints nothing on any failure; the caller treats an
-# empty result as "version undeterminable" and fails open (RFC 0004).
+# Prints the first "version" string found in a plugin.json — without jq.
+# The sed matches the first `"version"` key on any line, not specifically a
+# top-level one; this is safe because the manifest is the plugin's own
+# shipped, controlled file, where `"version": "x.y.z"` sits on a single
+# top-level line. Prints nothing on any failure; the caller treats an empty
+# result as "version undeterminable" and fails open (RFC 0004).
 _aliases_read_version() {
   local file="$1"
   [ -r "$file" ] || return 0

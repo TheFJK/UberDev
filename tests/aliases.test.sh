@@ -639,6 +639,25 @@ fi
 rm -rf "$S14_HOME" "$S14_STDOUT"
 
 echo
+echo "== S15: a write failure surfaces a failure notice (RFC 0004) =="
+# Force _aliases_write_forwarder to fail by making ~/.claude/commands
+# read-only after creating it; the per-alias loop then populates FAILED_LIST
+# and the hook must inject the "failed to install alias(es)" notice.
+S15_HOME="$(mktemp -d)"
+mkdir -p "$S15_HOME/.claude/commands"
+chmod 555 "$S15_HOME/.claude/commands"
+S15_STDOUT="$(mktemp)"
+HOME="$S15_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  bash "$HOOK" >"$S15_STDOUT" 2>/dev/null || true
+chmod 755 "$S15_HOME/.claude/commands" 2>/dev/null || true
+if grep -qE 'failed to install alias' "$S15_STDOUT"; then
+  echo "  PASS  S15: write-failure notice surfaced in context"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S15: write-failure notice missing from context"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$S15_HOME" "$S15_STDOUT"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
