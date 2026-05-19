@@ -78,8 +78,8 @@ jobs:
         # test is a portable grep-and-assert shape-check.
         #
         # SYNC: this list MUST match the ubuntu-latest job above, minus the
-        # zsh fixture. When a test file is added or removed, update BOTH jobs;
-        # Task 11 Step 3's parity check fails the build on drift.
+        # zsh fixture. When a test file is added or removed, update BOTH jobs
+        # by hand — there is no automated drift guard between the two lists.
         run: |
           bash tests/turbo-flow.test.sh && \
           bash tests/issue-causal-fanout.test.sh && \
