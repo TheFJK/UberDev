@@ -256,7 +256,7 @@ assert_grep "$SOLVE_PIPELINE" \
   "Phase B tracks per-issue dispatch failures (no silent partial-batch failures)"
 assert_grep "$SOLVE_PIPELINE" \
   'BG_DISPATCH_RC="\$DISPATCH_RC"' \
-  "Phase B reads DISPATCH_RC post-condition from lib/dispatch.sh (uberdev_dispatch_one sets DISPATCH_RC + DISPATCH_ID as a documented SSOT contract — lib/dispatch.sh:132,138)"
+  "Phase B reads DISPATCH_RC post-condition from lib/dispatch.sh (uberdev_dispatch_one sets DISPATCH_RC + DISPATCH_ID as a documented SSOT contract — see uberdev_dispatch_one's header contract and its central SSOT reset in lib/dispatch.sh)"
 # Phase A hoist check: the version gate + BG_PROMPT_MODE assignment must
 # precede the Phase B per-issue loop (resolved once; identical for every spawn).
 SP_PHASE_A_LINE=$(grep -n '^_uberdev_require_claude_version "2.1.139"\|^BG_PROMPT_MODE=argv' "$SOLVE_PIPELINE" | head -1 | cut -d: -f1)

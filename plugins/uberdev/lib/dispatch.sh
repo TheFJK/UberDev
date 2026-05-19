@@ -70,15 +70,21 @@ _uberdev_dispatch_audit() {
 # would defeat the fan-out-isolation guarantee (RFC §3.6, B1 fix).
 _uberdev_dispatch_wezterm_available() {
   command -v wezterm >/dev/null 2>&1 || return 1
+  # S9: the list-clients probe is needed twice (each poll iteration and the
+  # final post-loop attempt). Defining it once structurally enforces the
+  # `--domain-name uberdev` mux-pin invariant so the probe cannot drift to
+  # the default (stray) WezTerm instance at one site but not the other. Pure
+  # extraction — byte-identical command + redirections, same exit status.
+  _wt_probe() { wezterm cli --domain-name uberdev list-clients >/dev/null 2>&1; }
   local i
   for i in 1 2 3 4 5; do
-    if wezterm cli --domain-name uberdev list-clients >/dev/null 2>&1; then
+    if _wt_probe; then
       return 0
     fi
     wezterm-mux-server --daemonize >/dev/null 2>&1 || true
     sleep 1
   done
-  wezterm cli --domain-name uberdev list-clients >/dev/null 2>&1
+  _wt_probe
 }
 
 # uberdev_dispatch_preflight

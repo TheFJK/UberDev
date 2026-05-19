@@ -895,10 +895,11 @@ TITLE="${TITLES[$ISSUE_NUM]}"
 # Dispatch one issue via the backend resolved by uberdev_dispatch_preflight
 # (Phase A). lib/dispatch.sh owns the per-backend mechanism; this loop just
 # routes. PROMPT_FILE is the per-issue prompt written in Step 5a.
-# DISPATCH_RC + DISPATCH_ID are reset by uberdev_dispatch_one's central SSOT
-# reset (lib/dispatch.sh:138-140); no pre-init needed at this call site.
+# DISPATCH_RC + DISPATCH_ID are reset at the top of uberdev_dispatch_one
+# (lib/dispatch.sh, central SSOT reset); no pre-init needed at this call site.
 # DISPATCH_RC is documented as always-set after uberdev_dispatch_one returns
-# (lib/dispatch.sh:132 contract); no defensive ${:-1} default needed.
+# (uberdev_dispatch_one's header contract in lib/dispatch.sh); no defensive
+# ${:-1} default needed.
 PROMPT_FILE="$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt"
 uberdev_dispatch_one "$ISSUE_NUM" "$TIER" "$PROMPT_FILE"
 BG_DISPATCH_RC="$DISPATCH_RC"
