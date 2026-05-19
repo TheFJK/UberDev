@@ -7,7 +7,7 @@ description: "Shared launcher pipeline for /uberdev:solve and /uberdev:turbo. Pa
 
 This skill is invoked inline by `commands/solve.md` and `commands/turbo.md`. The caller exports `AUTO_MODE` (`0` for /solve interactive; `1` for /turbo unattended) before invocation; this skill reads `$AUTO_MODE` and `$ARGUMENTS` from the caller's shell scope.
 
-`$ARGUMENTS` may contain **one or more issue numbers** (e.g. `42` or `5 6 7`). The skill validates every issue up front (Phase A) and then dispatches one autonomous `claude --bg` background session per issue (Phase B). Per-issue artifacts (`/tmp/solve-prompt-N.txt`, `/tmp/solve-bg-stdout-N.log`, `.claude/worktrees/solve-issue-N/`, `worktree-solve-issue-N` branch) are namespaced by `$ISSUE_NUM`, so concurrent spawns are collision-free. Override flags (`--trivial|--small|--full`, `--auto`) apply batch-wide. Monitor via `claude agents`.
+`$ARGUMENTS` may contain **one or more issue numbers** (e.g. `42` or `5 6 7`). The skill validates every issue up front (Phase A) and then dispatches one autonomous Claude agent per issue (Phase B) via a platform-aware dispatch backend (`claude-bg` / `wezterm` / `background`; auto-selected per OS — cross-platform on macOS, WSL2, native Windows). Per-issue artifacts (`$UBERDEV_TMPDIR/solve-prompt-N.txt`, `$UBERDEV_TMPDIR/solve-bg-stdout-N.log`, `.claude/worktrees/solve-issue-N/`, `worktree-solve-issue-N` branch) are namespaced by `$ISSUE_NUM`, so concurrent spawns are collision-free. Override flags (`--trivial|--small|--full`, `--auto`, `--backend=<name>`) apply batch-wide. Monitor via `claude agents` (claude-bg) or visible panes (wezterm).
 
 ## Constants
 
@@ -15,11 +15,13 @@ This skill is invoked inline by `commands/solve.md` and `commands/turbo.md`. The
 |---|---|---|
 | `TERMINAL_FLAG_DEPRECATED_NOTE` | `warning: --terminal=cmux\|ghostty\|iterm\|terminal\|nohup is deprecated in v0.22.0; /solve and /turbo now dispatch claude --bg background sessions visible in claude agents. The flag is parsed without effect and will be removed in v1.0.0.` | Phase A stderr emission on first encounter; `commands/solve.md` / `commands/turbo.md` `## Deprecated Flags`. |
 | `MIN_CLAUDE_VERSION` | `2.1.139` | Phase A `_uberdev_require_claude_version` hard gate. |
+| `DISPATCH_BACKEND_DEFAULT` | `auto` | Phase A `--backend=` parser default; `auto` defers to `lib/dispatch.sh` preflight. |
+| `DISPATCH_BACKEND_ENUM` | `auto \| claude-bg \| wezterm \| background` | Phase A `uberdev_read_enum dispatch_backend` validation; also the `--backend=` flag's accepted set. |
 | `FANOUT_CONCURRENCY_SOLVE_BG_DEFAULT` | `6` | Phase A `MAX_PARALLEL_BG_AGENTS` resolution default. |
 | `EFFORT_LEVEL_DEFAULT` | `max` | Phase A `EFFORT_LEVEL` resolution; rationale: `/turbo` is unattended, quality > cost. |
 | `EFFORT_LEVEL_ENUM` | `low \| medium \| high \| xhigh \| max` | Phase A `uberdev_read_enum` validation; matches `claude --effort <level>` accepted values in Claude Code 2.1.139. |
 | `EFFORT_SOURCE_ENUM` | `cli \| env \| config \| default` | Audit telemetry source tag set by the Phase A `--effort=<level>` parser; emitted in the `effort_resolved` audit event payload. |
-| `SOLVE_AUDIT_EVENT_ENUM` | `agent_dispatched`, `deprecated_flag_used`, `solve_bg_fanout_wave_started`, `effort_resolved`, `error`, `claim_acquired`, `claim_collision`, `claim_force_override`, `claim_write_failed`, `claim_released` | Audit-log writers; consumers grep for `deprecated_flag_used` to identify migration laggards. `agent_returned` was removed in v0.22.0 — `claude --bg` does not synchronously report agent completion; use `claude agents` for status. The five `claim_*` events were added in v0.28.0 for the small-team issue-claim protocol (Step 4.5); grep `claim_force_override` to surface stale-claim recoveries, `claim_write_failed` to surface gh permission gaps. |
+| `SOLVE_AUDIT_EVENT_ENUM` | `agent_dispatched`, `deprecated_flag_used`, `solve_bg_fanout_wave_started`, `effort_resolved`, `error`, `claim_acquired`, `claim_collision`, `claim_force_override`, `claim_write_failed`, `claim_released`, `dispatch_backend_resolved`, `dispatch_setup_failed` | Audit-log writers; consumers grep for `deprecated_flag_used` to identify migration laggards. `agent_returned` was removed in v0.22.0 — `claude --bg` does not synchronously report agent completion; use `claude agents` for status. The five `claim_*` events were added in v0.28.0 for the small-team issue-claim protocol (Step 4.5); grep `claim_force_override` to surface stale-claim recoveries, `claim_write_failed` to surface gh permission gaps. The `dispatch_backend_resolved` event was added in v0.29.0 (RFC 0004) — emitted once per invocation by `lib/dispatch.sh`'s preflight resolver with `{requested, resolved, os_class, reason}`. The `dispatch_setup_failed` event was added in v0.29.0 — emitted by every dispatch backend (`claude-bg`, `wezterm`, `background`) when a setup-phase prerequisite fails BEFORE the agent process is launched (config, worktree, prompt_read, status_write, id_extract, dispatch). The `error` event remains valid for non-setup failures. Uniform taxonomy across all three backends; consumers grep `dispatch_setup_failed` to surface silent-failure classes that would otherwise mask as `error` and bypass audit-log filters. |
 | `UBERDEV_ACTIVE_LABEL` | `uberdev:active` | Step 4.5 claim protocol — applied to OPEN issues by `/solve` / `/turbo` on dispatch; cleared by `/merge` post-merge (`merge-pipeline/SKILL.md` post-merge cleanup phase) or by the dispatch-failure rollback in Step 5b'. NEVER set or removed by hand — the audit comment marker is the only safe parser surface. |
 | `UBERDEV_ACTIVE_LABEL_COLOR` | `D93F0B` | Warning-orange; matches the GitHub default `bug` palette band so it reads as actionable. Created idempotently via `gh label create --force` in Step 4.5 on first encounter per repo, mirroring `finish-branch/SKILL.md:287` and `dev-pipeline/SKILL.md:279`. |
 | `UBERDEV_ACTIVE_LABEL_DESCRIPTION` | `Issue currently being worked on by a /solve or /turbo dispatcher. Auto-managed — do not add/remove by hand.` | Passed to `gh label create --description`. The "Auto-managed" framing is the primary defence against well-meaning manual edits that would desync the claim comment from the label state. |
@@ -190,6 +192,36 @@ case "$EFFORT_LEVEL" in
   low|medium|high|xhigh|max) ;;
   *) echo "error: --effort='$EFFORT_LEVEL' not in {low,medium,high,xhigh,max}" >&2; exit 1 ;;
 esac
+# --- Phase A: --backend=<name> parser (NEW v0.29.0 — RFC 0004) ---
+# Selects the dispatch backend. Precedence (the established config-read.sh
+# order): --backend= CLI flag > UBERDEV_DISPATCH_BACKEND env > dispatch_backend:
+# in .claude/uberdev.local.md > default `auto`. `auto` defers to the
+# platform-aware fallback chain in lib/dispatch.sh (uberdev_dispatch_preflight).
+BACKEND_FLAG_VALUE="$(echo "$ARGUMENTS" | grep -oE '\-\-backend=[a-z-]+' | head -1 | sed 's/--backend=//')"
+if [[ -n "$BACKEND_FLAG_VALUE" ]]; then
+  DISPATCH_BACKEND="$BACKEND_FLAG_VALUE"
+elif [[ -n "${UBERDEV_DISPATCH_BACKEND:-}" ]]; then
+  DISPATCH_BACKEND="$UBERDEV_DISPATCH_BACKEND"
+else
+  if [ -r "${CLAUDE_PLUGIN_ROOT:-}/lib/config-read.sh" ]; then
+    # shellcheck source=/dev/null
+    . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+  fi
+  if command -v uberdev_read_enum >/dev/null 2>&1; then
+    DISPATCH_BACKEND="$(uberdev_read_enum dispatch_backend UBERDEV_DISPATCH_BACKEND \
+      'auto|claude-bg|wezterm|background' 'auto')"
+  else
+    DISPATCH_BACKEND=auto
+  fi
+fi
+# Explicit validation when the value came from CLI or env (uberdev_read_enum
+# validates only the value it reads itself) — reject loudly, mirroring the
+# --effort parser's post-validation case.
+case "$DISPATCH_BACKEND" in
+  auto|claude-bg|wezterm|background) ;;
+  *) echo "error: --backend='$DISPATCH_BACKEND' not in {auto,claude-bg,wezterm,background}" >&2; exit 1 ;;
+esac
+export UBERDEV_DISPATCH_BACKEND_REQUESTED="$DISPATCH_BACKEND"
 if [[ ${#ISSUE_NUMS[@]} -eq 0 ]]; then
   echo "Usage: /uberdev:solve|/uberdev:turbo <issue-number> [<issue-number>...] [--trivial|--small|--full] [--auto]"
   exit 1
@@ -425,6 +457,11 @@ fi
 # of the Phase B per-issue loop because the resolved values are the same for
 # every spawn.
 _uberdev_require_claude_version "2.1.139"
+# --- Phase A: portable temp dir (NEW v0.29.0 — RFC 0004 §3.8) ---
+# One temp root resolved once; every per-issue artifact (prompt, stdout log,
+# claim json, status file) lives under it. Git Bash on native Windows sets
+# TMPDIR; fall back to /tmp on Unix. Exported so lib/dispatch.sh inherits it.
+export UBERDEV_TMPDIR="${TMPDIR:-/tmp}"
 # BG_PROMPT_MODE: hardcoded `argv` because claude --bg 2.1.139 has no documented
 # --prompt-file or stdin-passthrough form (prior-art research). T6 implements the
 # bash-array argv form (spec-reviewer finding #1). A runtime probe is deferred until
@@ -508,9 +545,15 @@ fi
 # default SH_WORD_SPLIT=off would treat a scalar `$PREFIX="timeout 3600"` at
 # command position as ONE token and abort with "command not found: timeout 3600"
 # under set -e. Quoting "$TIMEOUT_BIN" keeps it as a single argv[0] token.
+# Probe order (RFC 0004 §3.8): the explicit MSYS coreutils path FIRST, so on
+# native Windows Git Bash we get coreutils `timeout` and never resolve a bare
+# `timeout` to C:\Windows\System32\timeout.exe (an incompatible command that
+# takes /T /NOBREAK, not a duration+command). Then the Unix `timeout`, then
+# macOS's Homebrew `gtimeout`.
 TIMEOUT_BIN=""
-if   command -v timeout  >/dev/null 2>&1; then TIMEOUT_BIN=timeout
-elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT_BIN=gtimeout
+if   [ -x /usr/bin/timeout ];                 then TIMEOUT_BIN=/usr/bin/timeout
+elif command -v timeout  >/dev/null 2>&1;     then TIMEOUT_BIN=timeout
+elif command -v gtimeout >/dev/null 2>&1;     then TIMEOUT_BIN=gtimeout
 fi
 
 # Runtime guard: if neither timeout(1) nor gtimeout(1) is on PATH, the
@@ -525,6 +568,30 @@ else
   echo "       install with: brew install coreutils  # provides gtimeout" >&2
   exit 1
 fi
+# --- Phase A: dispatch preflight + Windows guards (NEW v0.29.0 — RFC 0004) ---
+# Native-Windows-no-bash fast-fail: this pipeline is bash; under the
+# PowerShell tool it cannot parse. If we are on Windows and $BASH is unset,
+# fail with an actionable pointer instead of a parse error downstream.
+if [ -z "${BASH:-}" ] && { [ "${OS:-}" = "Windows_NT" ] || case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) true ;; *) false ;; esac; }; then
+  echo "error: /solve and /turbo need a bash shell. On native Windows install" >&2
+  echo "       Git for Windows (provides Git Bash), or use WSL2 (recommended)." >&2
+  exit 1
+fi
+# WSL2 9P-slowness warning: a repo under /mnt/c is 10-50x slower (DrvFs).
+if [ -r /proc/version ] && grep -qi microsoft /proc/version 2>/dev/null; then
+  case "$PWD" in
+    /mnt/*) echo "warning: repo is under /mnt/ in WSL2 — 9P/DrvFs is 10-50x slower than ext4; move it under ~/ for best /solve performance." >&2 ;;
+  esac
+fi
+# Source lib/dispatch.sh and resolve the backend ONCE for the whole batch.
+if [ -r "${CLAUDE_PLUGIN_ROOT:-}/lib/dispatch.sh" ]; then
+  # shellcheck source=/dev/null
+  . "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh"
+  uberdev_dispatch_preflight || exit 1
+else
+  echo "error: lib/dispatch.sh not found at ${CLAUDE_PLUGIN_ROOT:-}/lib/" >&2
+  exit 1
+fi
 ```
 
 ### 4.5. Claim protocol — mark issue ACTIVE (NEW v0.28.0)
@@ -535,7 +602,7 @@ For every validated issue, write a three-part claim **in sequence with rollback 
 
 The claim comment body lays the parser contract: each field is `^<Name>: <value>$` on its own line, prefixed by the `CLAIM_COMMENT_MARKER` HTML comment for filtering. The "Auto-clears on /merge or issue close" footer is documentation — the actual clear happens in `merge-pipeline/SKILL.md`'s post-merge cleanup phase (issue-close-by-merge) or by the Step 5b' dispatch-failure rollback (release on spawn failure).
 
-Per-issue claim metadata is also persisted to `/tmp/solve-claim-N.json` so the Phase B dispatch-failure rollback in Step 5b' below can release just the one failed claim without re-parsing the audit comment.
+Per-issue claim metadata is also persisted to `$UBERDEV_TMPDIR/solve-claim-N.json` so the Phase B dispatch-failure rollback in Step 5b' below can release just the one failed claim without re-parsing the audit comment.
 
 ```bash
 # --- Phase A: claim-write pass (NEW v0.28.0 — Step 4.5) ---
@@ -659,7 +726,7 @@ EOF
   fi
   # Per-issue claim metadata for the Phase B dispatch-failure rollback
   # (Step 5b' below reads this on $BG_DISPATCH_RC != 0).
-  cat > "/tmp/solve-claim-$ISSUE_NUM.json" <<EOF2
+  cat > "$UBERDEV_TMPDIR/solve-claim-$ISSUE_NUM.json" <<EOF2
 {"issue":$ISSUE_NUM,"user":"$DISPATCHER_USER","host":"$DISPATCHER_HOST","branch":"worktree-solve-issue-$ISSUE_NUM","tier":"$TIER","started":"$DISPATCH_TS","forced":$([[ "$FORCE_CLAIM" == "1" ]] && echo true || echo false)}
 EOF2
   CLAIMED+=("$ISSUE_NUM")
@@ -693,7 +760,7 @@ The `if/else/fi` blocks below stay at column 0 (zsh and bash do not require phys
 ```bash
 if [[ "$AUTO_MODE" != "1" ]]; then
 # trivial heredoc — interactive (/solve): pre-collected-research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
-cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
+cat > "$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt" << EOF
 Solve GH issue #$ISSUE_NUM directly. Triaged as TRIVIAL.
 
 Steps:
@@ -711,7 +778,7 @@ Skip /uberdev:brainstorm. Skip multi-step planning. Escalate to /uberdev:brainst
 EOF
 else
 # trivial heredoc — turbo (/turbo): no research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
-cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
+cat > "$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt" << EOF
 Solve GH issue #$ISSUE_NUM directly. Triaged as TRIVIAL.
 
 Steps:
@@ -734,7 +801,7 @@ fi
 ```bash
 if [[ "$AUTO_MODE" != "1" ]]; then
 # small heredoc — interactive (/solve): pre-collected-research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
-cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
+cat > "$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt" << EOF
 Solve GH issue #$ISSUE_NUM with a lightweight plan. Triaged as SMALL.
 
 Steps:
@@ -751,7 +818,7 @@ Escalate to /uberdev:brainstorm if the scope proves larger than triaged.
 EOF
 else
 # small heredoc — turbo (/turbo): no research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
-cat > /tmp/solve-prompt-$ISSUE_NUM.txt << EOF
+cat > "$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt" << EOF
 Solve GH issue #$ISSUE_NUM with a lightweight plan. Triaged as SMALL.
 
 Steps:
@@ -772,9 +839,9 @@ fi
 
 ```bash
 if [[ "$AUTO_MODE" == "1" ]]; then
-echo "/uberdev:orchestrator --turbo solve GH issue #$ISSUE_NUM" > /tmp/solve-prompt-$ISSUE_NUM.txt
+echo "/uberdev:orchestrator --turbo solve GH issue #$ISSUE_NUM" > "$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt"
 else
-echo "/uberdev:orchestrator solve GH issue #$ISSUE_NUM" > /tmp/solve-prompt-$ISSUE_NUM.txt
+echo "/uberdev:orchestrator solve GH issue #$ISSUE_NUM" > "$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt"
 fi
 done
 ```
@@ -810,9 +877,8 @@ The per-issue dispatch is wrapped in a wave-batching outer loop. Mirrors `merge-
 ```bash
 # --- Phase B: wave-batching outer loop (NEW v0.22.0) ---
 # The inner loop body stays at column 0 (bash and zsh do not require physical
-# indentation inside `for ((…)); do … done`); the verifier in tests/turbo-flow.test.sh
-# anchors on `^case "\$BG_PROMPT_MODE" in$` and tests/dispatch-claude-bg.test.sh
-# regex-matches the inner-body invariants.
+# indentation inside `for ((…)); do … done`); tests/dispatch-claude-bg.test.sh
+# regex-matches the inner-body invariants in lib/dispatch.sh (re-anchored T2).
 TOTAL_ISSUES="${#ISSUE_NUMS[@]}"
 WAVE_COUNT=$(( (TOTAL_ISSUES + MAX_PARALLEL_BG_AGENTS - 1) / MAX_PARALLEL_BG_AGENTS ))
 for (( wave_index = 1; wave_index <= WAVE_COUNT; wave_index++ )); do
@@ -826,90 +892,26 @@ _uberdev_audit_emit solve_bg_fanout_wave_started \
 for ISSUE_NUM in "${ISSUE_NUMS[@]:$wave_start:$wave_size}"; do
 TIER="${TIERS[$ISSUE_NUM]}"
 TITLE="${TITLES[$ISSUE_NUM]}"
-BG_DISPATCH_RC=0
-BG_SESSION_ID=""
-BG_STDOUT_LOG="/tmp/solve-bg-stdout-$ISSUE_NUM.log"
-# NEW (#97): UBERDEV_TURBO=1 chain-wide signal for /turbo (AUTO_MODE=1) only.
-# env(1) mediates the inline-prefix because POSIX inline-prefix env-assignment
-# only takes effect at the START of a simple command. Here the dispatch is
-# `$TIMEOUT_BIN $SOLVE_TIMEOUT <env-tokens> claude --bg …` — `timeout(1)` is
-# already in front, so it would consume `UBERDEV_TURBO=1` as the COMMAND argv
-# (not as env) and exit 127. `env "${BG_TURBO_ENV[@]}" claude --bg` consumes
-# the KEY=value tokens and execs claude --bg with those env vars set; under
-# AUTO_MODE=0 (empty array) it degrades to a no-op env passthrough.
-# Pre-declare BG_TURBO_ENV=() so the array name is always bound before the
-# AUTO_MODE-conditional setter on the next line runs. The `[[ ... ]] && ...`
-# form (rather than a second `if/then/fi` block) keeps the file's anchor count
-# at exactly two `^if \[\[ "\$AUTO_MODE" == "1" \]\]; then$` matches (lines
-# 285 and 505) — the differential-guard awk in tests/turbo-flow.test.sh keys
-# off that anchor count and would scan an unbounded code region if a third
-# block were introduced (#97 simplify-lens E2 follow-up).
-BG_TURBO_ENV=()
-[[ "$AUTO_MODE" == "1" ]] && BG_TURBO_ENV=( UBERDEV_TURBO=1 )
-case "$BG_PROMPT_MODE" in
-  file)
-    # Trusted path arg; file contents never reach the shell as argv.
-    # PERM_FLAG / EFFORT_FLAG are bash+zsh arrays — see Phase A hoist for the
-    # zsh SH_WORD_SPLIT=off rationale; `"${ARRAY[@]}"` expands identically in
-    # both shells (empty array → zero slots; populated → one slot per element).
-    "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" env "${BG_TURBO_ENV[@]}" claude --bg \
-      --prompt-file "/tmp/solve-prompt-$ISSUE_NUM.txt" \
-      --worktree "solve-issue-$ISSUE_NUM" \
-      --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" > "$BG_STDOUT_LOG" 2>&1
-    BG_DISPATCH_RC=$?
-    ;;
-  stdin)
-    # File content streamed on FD 0; no argv quoting concern.
-    "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" env "${BG_TURBO_ENV[@]}" claude --bg \
-      --worktree "solve-issue-$ISSUE_NUM" \
-      --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" \
-      < "/tmp/solve-prompt-$ISSUE_NUM.txt" > "$BG_STDOUT_LOG" 2>&1
-    BG_DISPATCH_RC=$?
-    ;;
-  argv)
-    # Bash array form (spec-reviewer finding 1) — single argv slot, no eval.
-    PROMPT_BODY="$(cat "/tmp/solve-prompt-$ISSUE_NUM.txt")"
-    cmd=( "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" env "${BG_TURBO_ENV[@]}" claude --bg
-          --worktree "solve-issue-$ISSUE_NUM"
-          --model "$MODEL" )
-    # PERM_FLAG / EFFORT_FLAG are arrays from Phase A
-    # (PERM_FLAG=() or ( --permission-mode auto ); EFFORT_FLAG=( --effort <level> )).
-    # `"${ARRAY[@]}"` preserves each element as its own argv slot in both bash
-    # AND zsh — no reliance on SH_WORD_SPLIT, which is OFF by default in zsh
-    # and would otherwise collapse a scalar `--effort max` into one argv slot
-    # that `claude` rejects with `error: unknown option '--effort max'`.
-    cmd+=( "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" -- "$PROMPT_BODY" )
-    "${cmd[@]}" > "$BG_STDOUT_LOG" 2>&1
-    BG_DISPATCH_RC=$?
-    ;;
-  *)
-    # Defensive default arm: BG_PROMPT_MODE is hardcoded `argv` in Phase A
-    # today, so this is unreachable in normal control flow. If a future
-    # patch parameterises it (e.g. wires the upstream Claude Code
-    # --prompt-file RFE) and a typo or stale config slips through without
-    # enum validation, fall through here with rc=127 instead of silently
-    # no-op'ing through the case-switch and reporting `BG_DISPATCH_RC=0`
-    # for a dispatch that never happened — silent-failure-hunter finding B2.
-    echo "error: BG_PROMPT_MODE='$BG_PROMPT_MODE' is not one of {file, stdin, argv}" > "$BG_STDOUT_LOG"
-    BG_DISPATCH_RC=127
-    ;;
-esac
+# Dispatch one issue via the backend resolved by uberdev_dispatch_preflight
+# (Phase A). lib/dispatch.sh owns the per-backend mechanism; this loop just
+# routes. PROMPT_FILE is the per-issue prompt written in Step 5a.
+# DISPATCH_RC + DISPATCH_ID are reset at the top of uberdev_dispatch_one
+# (lib/dispatch.sh, central SSOT reset); no pre-init needed at this call site.
+# DISPATCH_RC is documented as always-set after uberdev_dispatch_one returns
+# (uberdev_dispatch_one's header contract in lib/dispatch.sh); no defensive
+# ${:-1} default needed.
+PROMPT_FILE="$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt"
+uberdev_dispatch_one "$ISSUE_NUM" "$TIER" "$PROMPT_FILE"
+BG_DISPATCH_RC="$DISPATCH_RC"
+BG_SESSION_ID="${DISPATCH_ID:-}"
 
 if [[ "$BG_DISPATCH_RC" -eq 0 ]]; then
-  BG_SESSION_ID="$(grep -oE 'backgrounded · [0-9a-f]{8}' "$BG_STDOUT_LOG" | awk '{print $NF}' | head -1)"
-  SPAWNED+=("#$ISSUE_NUM ($TIER, bg ${BG_SESSION_ID:-?})")
-  _uberdev_audit_emit agent_dispatched \
-    "{\"issue\":$ISSUE_NUM,\"tier\":\"$TIER\",\"bg_session_id\":\"${BG_SESSION_ID:-}\",\"mode\":\"$BG_PROMPT_MODE\"}" || true
+  # lib/dispatch.sh emitted agent_dispatched with the backend-specific id.
+  SPAWNED+=("#$ISSUE_NUM ($TIER, ${UBERDEV_RESOLVED_BACKEND} ${BG_SESSION_ID:-?})")
 else
-  # Capture the last three log lines; if the log is empty (claude --bg
-  # crashed before writing anything to its FD 1/2, e.g. exec-failure on
-  # macOS where gtimeout exits before flushing), the user gets a pointer
-  # to the log path instead of an empty failure entry that reads like a
-  # silent success — silent-failure-hunter finding B3.
-  TAIL_OUTPUT="$(tail -3 "$BG_STDOUT_LOG" | tr '\n' ' ')"
-  DISPATCH_FAILED+=("#$ISSUE_NUM: ${TAIL_OUTPUT:-(no output captured; check /tmp/solve-bg-stdout-$ISSUE_NUM.log)}")
-  _uberdev_audit_emit error \
-    "{\"issue\":$ISSUE_NUM,\"phase\":\"dispatch\",\"rc\":$BG_DISPATCH_RC}" || true
+  # lib/dispatch.sh exports DISPATCH_LOG on failure; tail it for the report.
+  TAIL_OUTPUT="$(tail -3 "${DISPATCH_LOG:-/dev/null}" 2>/dev/null | tr '\n' ' ')"
+  DISPATCH_FAILED+=("#$ISSUE_NUM: ${TAIL_OUTPUT:-(no output captured; check ${DISPATCH_LOG:-the dispatch log})}")
   # --- Phase B: claim rollback on dispatch failure (NEW v0.28.0) ---
   # Release the claim acquired in Step 4.5 so a retry (or a teammate) can
   # pick up the issue without a --force override. Fail-soft on every gh
@@ -969,7 +971,7 @@ EOF
 )"
     printf '%s' "$RELEASE_BODY" | gh issue comment "$ISSUE_NUM" --body-file - >/dev/null 2>&1 || true
   fi
-  rm -f "/tmp/solve-claim-$ISSUE_NUM.json"
+  rm -f "$UBERDEV_TMPDIR/solve-claim-$ISSUE_NUM.json"
 fi
 done
 done
@@ -1012,10 +1014,22 @@ fi
 ### 6. Final summary (replaces notification chain — v0.22.0)
 
 ```bash
-echo "dispatched ${#SPAWNED[@]} background session(s) — run \`claude agents\` to monitor" >&2
+echo "dispatched ${#SPAWNED[@]} background session(s)" >&2
 if [[ ${#SPAWNED[@]} -gt 0 ]]; then
   printf '  %s\n' "${SPAWNED[@]}" >&2
 fi
+# Step 6: backend-aware monitoring pointer (RFC 0004 §3.10).
+case "${UBERDEV_RESOLVED_BACKEND:-claude-bg}" in
+  claude-bg)
+    echo "Monitor the dispatched agents with:  claude agents" >&2 ;;
+  wezterm)
+    echo "The dispatched agents are running in WezTerm panes — switch to the WezTerm window to watch them live." >&2 ;;
+  background)
+    echo "The dispatched agents are detached background processes. Per-issue logs + status files:" >&2
+    for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
+      echo "  #$ISSUE_NUM: tail -f $UBERDEV_TMPDIR/solve-bg-stdout-$ISSUE_NUM.log   (exit code in $UBERDEV_TMPDIR/solve-bg-status-$ISSUE_NUM.json)" >&2
+    done ;;
+esac
 ```
 
 The single stderr emission replaces the cmux-notify / terminal-notifier /

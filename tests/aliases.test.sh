@@ -619,28 +619,46 @@ S12_BIN="$(mktemp -d)"
 for t in bash grep sed head cat mkdir mktemp mv rm dirname; do
   src="$(command -v "$t" 2>/dev/null)" && ln -s "$src" "$S12_BIN/$t"
 done
-S12_HOME="$(mktemp -d)"
-S12_STDOUT="$(mktemp)"
-PATH="$S12_BIN" HOME="$S12_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
-  bash "$HOOK" >"$S12_STDOUT" 2>/dev/null || true
-S12_OK=1
-for short in issue solve turbo simplify review-pr merge dev; do
-  if [ ! -f "$S12_HOME/.claude/commands/${short}.md" ] \
-     || ! grep -q 'managed-by: uberdev-aliases' "$S12_HOME/.claude/commands/${short}.md"; then
-    S12_OK=0; break
+# Precondition: on Git Bash (windows-latest CI) without admin / Developer
+# Mode, `ln -s` does not create a POSIX symlink — it silently produces a
+# file COPY of the source binary instead. The copy IS executable, but it
+# is DLL-broken: Git Bash binaries (bash.exe, grep.exe, sed.exe, …) rely
+# on co-located runtime DLLs (msys-2.0.dll, …) that are NOT in $S12_BIN,
+# so the hook cannot exec them under the masked PATH, the forwarders
+# never install, and the jq-missing notice never fires — making both
+# assertions below unsatisfiable for a reason that has nothing to do
+# with the product's jq-independence. An `-x` check passes on the broken
+# copy and runs the test anyway (the prior fix's failure mode); the
+# correct discriminator is `-L`, which is true only when `ln -s` actually
+# produced a symbolic link. Mirrors the S5b precondition guard above.
+if [ ! -L "$S12_BIN/bash" ]; then
+  echo "  SKIP  S12: ln -s did not produce usable symlinks on this platform (Git Bash without admin/Developer Mode?)"
+else
+  S12_HOME="$(mktemp -d)"
+  S12_STDOUT="$(mktemp)"
+  PATH="$S12_BIN" HOME="$S12_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+    bash "$HOOK" >"$S12_STDOUT" 2>/dev/null || true
+  S12_OK=1
+  for short in issue solve turbo simplify review-pr merge dev; do
+    if [ ! -f "$S12_HOME/.claude/commands/${short}.md" ] \
+       || ! grep -q 'managed-by: uberdev-aliases' "$S12_HOME/.claude/commands/${short}.md"; then
+      S12_OK=0; break
+    fi
+  done
+  if [ "$S12_OK" = "1" ]; then
+    echo "  PASS  S12: all 7 forwarders installed with jq masked"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S12: forwarders missing when jq absent"; FAIL=$((FAIL + 1))
   fi
-done
-if [ "$S12_OK" = "1" ]; then
-  echo "  PASS  S12: all 7 forwarders installed with jq masked"; PASS=$((PASS + 1))
-else
-  echo "  FAIL  S12: forwarders missing when jq absent"; FAIL=$((FAIL + 1))
+  if grep -q 'jq not found' "$S12_STDOUT"; then
+    echo "  PASS  S12: jq-missing notice surfaced in context"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S12: jq-missing notice not surfaced"; FAIL=$((FAIL + 1))
+  fi
+  rm -f "$S12_STDOUT"
+  rm -rf "$S12_HOME"
 fi
-if grep -q 'jq not found' "$S12_STDOUT"; then
-  echo "  PASS  S12: jq-missing notice surfaced in context"; PASS=$((PASS + 1))
-else
-  echo "  FAIL  S12: jq-missing notice not surfaced"; FAIL=$((FAIL + 1))
-fi
-rm -rf "$S12_BIN" "$S12_HOME" "$S12_STDOUT"
+rm -rf "$S12_BIN"
 
 echo
 echo "== S13: a collision is surfaced in the session context =="
@@ -680,16 +698,32 @@ echo "== S15: a write failure surfaces a failure notice (RFC 0004) =="
 S15_HOME="$(mktemp -d)"
 mkdir -p "$S15_HOME/.claude/commands"
 chmod 555 "$S15_HOME/.claude/commands"
-S15_STDOUT="$(mktemp)"
-HOME="$S15_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
-  bash "$HOOK" >"$S15_STDOUT" 2>/dev/null || true
-chmod 755 "$S15_HOME/.claude/commands" 2>/dev/null || true
-if grep -qE 'failed to install alias' "$S15_STDOUT"; then
-  echo "  PASS  S15: write-failure notice surfaced in context"; PASS=$((PASS + 1))
+# Precondition: on Git Bash (windows-latest CI), Windows ACLs ignore POSIX
+# mode bits, so `chmod 555` does NOT make the directory non-writable for its
+# owner. The forced write then succeeds, _aliases_write_forwarder never
+# fails, FAILED_LIST stays empty, and the "failed to install alias" notice
+# never fires — making the assertion below unsatisfiable for a reason that
+# has nothing to do with the product's write-failure handling. Probe the
+# directory directly: if a test write succeeds, the read-only injection was
+# a no-op on this platform — convert that into a SKIP rather than a FAIL,
+# mirroring the S5b precondition guard above.
+if : > "$S15_HOME/.claude/commands/.wtest" 2>/dev/null; then
+  rm -f "$S15_HOME/.claude/commands/.wtest"
+  chmod 755 "$S15_HOME/.claude/commands" 2>/dev/null || true
+  echo "  SKIP  S15: chmod could not make the dir read-only on this platform (Windows ACLs?)"
 else
-  echo "  FAIL  S15: write-failure notice missing from context"; FAIL=$((FAIL + 1))
+  S15_STDOUT="$(mktemp)"
+  HOME="$S15_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+    bash "$HOOK" >"$S15_STDOUT" 2>/dev/null || true
+  chmod 755 "$S15_HOME/.claude/commands" 2>/dev/null || true
+  if grep -qE 'failed to install alias' "$S15_STDOUT"; then
+    echo "  PASS  S15: write-failure notice surfaced in context"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S15: write-failure notice missing from context"; FAIL=$((FAIL + 1))
+  fi
+  rm -f "$S15_STDOUT"
 fi
-rm -rf "$S15_HOME" "$S15_STDOUT"
+rm -rf "$S15_HOME"
 
 echo
 echo "== Summary =="

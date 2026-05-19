@@ -127,6 +127,7 @@ review_depth: full               # one of: quick, full
 parallel_solve: true
 auto_install_aliases: true       # boolean — auto-install /issue, /solve, /turbo, /simplify, /review-pr, /merge at SessionStart (default: true; env override: UBERDEV_NO_AUTO_ALIAS=1)
 integration_branch: main         # branch /merge lands PRs into; default = repo default branch
+dispatch_backend: auto           # one of: auto, claude-bg, wezterm, background — how /solve & /turbo dispatch per-issue agents (RFC 0004); default auto (platform-aware); env override: UBERDEV_DISPATCH_BACKEND
 auto_review_on_merge: false      # boolean — when true, /merge Phase 1.4 auto-dispatches /review-pr <N> --turbo once per PR with missing trust trail (whitelisted reasons only); default false; env override: UBERDEV_AUTO_REVIEW_ON_MERGE (#89)
 auto_confirm: false              # DEPRECATED — no behavioural effect. /merge is fully unattended (autopilot). Key parses for backward compat; first encounter emits a stderr deprecation notice.
 bot_authors_allow_list:          # DEPRECATED — no behavioural effect. /merge no longer gates on PR-author identity (any APPROVED + CI-green PR is eligible). Key parses for backward compat.
@@ -189,6 +190,8 @@ introduces a NEW default cap of 10 in Phase 3.3 of `/merge`, where the
 fanout was previously uncapped — queues of 11+ conflicted files in a
 single PR now chunk into multiple waves (intentional behavioural
 change; matches the `merge_strategy` chunking precedent).
+
+**`dispatch_backend` precedence (RFC 0004):** CLI flag `--backend=<name>` > env var `UBERDEV_DISPATCH_BACKEND` > config file (this YAML) > default `auto`. Accepts `auto | claude-bg | wezterm | background`. `auto` resolves once per `/solve` or `/turbo` invocation via `lib/dispatch.sh`'s preflight: macOS → `wezterm` (if its mux comes up) else `claude-bg`; native Windows → `wezterm` (if available) else `background`; WSL2 → `claude-bg`. The resolved backend is committed for the whole batch — a fan-out is never split across backends. An explicit `--backend=X` hard-errors before any dispatch if `X` is unusable on the host (e.g. `--backend=wezterm` from WSL2 targeting a native-Windows WezTerm). Invalid values fall back to `auto` non-fatally and emit a `uberdev_config_invalid` audit event via the existing `uberdev_read_enum` machinery.
 
 **`command_timeouts.{solve, review_pr, merge}`:** per-command
 wall-clock timeout in seconds, range `[60, 86400]` (1m–24h).

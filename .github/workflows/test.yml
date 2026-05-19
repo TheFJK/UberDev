@@ -19,7 +19,7 @@ jobs:
     # the public-repo Actions allowance. Bump if the suite legitimately grows.
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install zsh
         # ubuntu-latest does not ship zsh by default. tests/solve-pipeline-zsh.test.sh
         # is a zsh-runtime fixture that locks the v0.22.2 regression
@@ -53,4 +53,54 @@ jobs:
           bash tests/orchestrator-phase-0-bg-detection.test.sh && \
           bash tests/dev.test.sh && \
           bash tests/dev-pipeline.test.sh && \
-          bash tests/solve-claim.test.sh
+          bash tests/solve-claim.test.sh && \
+          bash tests/dispatch-fallback.test.sh && \
+          bash tests/dispatch-background.test.sh && \
+          bash tests/dispatch-wezterm.test.sh
+
+  shape-checks-windows:
+    name: shape-checks-windows
+    runs-on: windows-latest
+    # Proves the shape-check harness is Git-Bash-portable on native Windows
+    # (RFC 0004 §3.8 / D10). windows-latest ships Git for Windows -> Git Bash
+    # is on PATH. Runtime dispatch validation stays out of scope: the suite
+    # is grep-and-assert throughout.
+    timeout-minutes: 5
+    defaults:
+      run:
+        # Force every `run:` step into Git Bash, not PowerShell or cmd.
+        shell: bash
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Run shape-check tests
+        # No zsh on windows-latest Git Bash; solve-pipeline-zsh.test.sh is a
+        # Unix-runtime fixture and is intentionally skipped here. Every other
+        # test is a portable grep-and-assert shape-check.
+        #
+        # SYNC: this list MUST match the ubuntu-latest job above, minus the
+        # zsh fixture. When a test file is added or removed, update BOTH jobs
+        # by hand — there is no automated drift guard between the two lists.
+        run: |
+          bash tests/turbo-flow.test.sh && \
+          bash tests/issue-causal-fanout.test.sh && \
+          bash tests/post-impl-review.test.sh && \
+          bash tests/spec-reviewer-plan-aware.test.sh && \
+          bash tests/audit-fixups.test.sh && \
+          bash tests/review-pr.test.sh && \
+          bash tests/review-pr-phase3-ci.test.sh && \
+          bash tests/finish-branch-auto-chain.test.sh && \
+          bash tests/aliases.test.sh && \
+          bash tests/merge.test.sh && \
+          bash tests/ghostty-dispatch-no-instance-leak.test.sh && \
+          bash tests/dispatch-claude-bg.test.sh && \
+          bash tests/solve-effort-flag.test.sh && \
+          bash tests/orchestrator-phase1-shortcircuit.test.sh && \
+          bash tests/config-override.test.sh && \
+          bash tests/orchestrator-phase-6-doc.test.sh && \
+          bash tests/orchestrator-phase-0-bg-detection.test.sh && \
+          bash tests/dev.test.sh && \
+          bash tests/dev-pipeline.test.sh && \
+          bash tests/solve-claim.test.sh && \
+          bash tests/dispatch-fallback.test.sh && \
+          bash tests/dispatch-background.test.sh && \
+          bash tests/dispatch-wezterm.test.sh

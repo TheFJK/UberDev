@@ -146,8 +146,8 @@ assert_grep "$SOLVE_PIPELINE" \
   'gh issue comment "\$ISSUE_NUM" --body-file -' \
   "Per-issue audit comment via --body-file -"
 assert_grep "$SOLVE_PIPELINE" \
-  "/tmp/solve-claim-\\\$ISSUE_NUM.json" \
-  "Per-issue claim metadata persisted to /tmp"
+  "UBERDEV_TMPDIR/solve-claim-\\\$ISSUE_NUM.json" \
+  "Per-issue claim metadata persisted under UBERDEV_TMPDIR"
 assert_grep "$SOLVE_PIPELINE" \
   "exit 1" \
   "Claim-write failures exit 1 (fail-loud, not fail-soft)"
@@ -253,19 +253,19 @@ assert_grep "$SOLVE_CMD" \
   "small-team issue-claim protocol" \
   "solve.md mentions small-team claim protocol"
 
-echo "== Version bump 0.28.0 -> 0.29.0 propagated =="
+echo "== Version bump 0.28.0 -> 0.30.0 propagated =="
 assert_grep "$PLUGIN_JSON" \
-  '"version": "0.29.0"' \
-  "plugin.json bumped to 0.29.0"
+  '"version": "0.30.0"' \
+  "plugin.json bumped to 0.30.0"
 assert_grep "$MARKETPLACE_JSON" \
-  '"version": "0.29.0"' \
-  "marketplace.json bumped to 0.29.0"
+  '"version": "0.30.0"' \
+  "marketplace.json bumped to 0.30.0"
 assert_grep "$README" \
-  "version-0\\.29\\.0-blue" \
-  "README version badge bumped to 0.29.0"
+  "version-0\\.30\\.0-blue" \
+  "README version badge bumped to 0.30.0"
 assert_grep "$CHANGELOG" \
-  '^## \[0\.29\.0\]' \
-  "CHANGELOG has [0.29.0] section header"
+  '^## \[0\.30\.0\]' \
+  "CHANGELOG has [0.30.0] section header"
 
 echo "== #123 B1: closing-keyword regex left-anchor (rejects preclose/postfix/unresolve) =="
 # The closing-keyword regex in merge-pipeline Step 3.4 MUST require either start-of-input
