@@ -15,11 +15,13 @@ This skill is invoked inline by `commands/solve.md` and `commands/turbo.md`. The
 |---|---|---|
 | `TERMINAL_FLAG_DEPRECATED_NOTE` | `warning: --terminal=cmux\|ghostty\|iterm\|terminal\|nohup is deprecated in v0.22.0; /solve and /turbo now dispatch claude --bg background sessions visible in claude agents. The flag is parsed without effect and will be removed in v1.0.0.` | Phase A stderr emission on first encounter; `commands/solve.md` / `commands/turbo.md` `## Deprecated Flags`. |
 | `MIN_CLAUDE_VERSION` | `2.1.139` | Phase A `_uberdev_require_claude_version` hard gate. |
+| `DISPATCH_BACKEND_DEFAULT` | `auto` | Phase A `--backend=` parser default; `auto` defers to `lib/dispatch.sh` preflight. |
+| `DISPATCH_BACKEND_ENUM` | `auto \| claude-bg \| wezterm \| background` | Phase A `uberdev_read_enum dispatch_backend` validation; also the `--backend=` flag's accepted set. |
 | `FANOUT_CONCURRENCY_SOLVE_BG_DEFAULT` | `6` | Phase A `MAX_PARALLEL_BG_AGENTS` resolution default. |
 | `EFFORT_LEVEL_DEFAULT` | `max` | Phase A `EFFORT_LEVEL` resolution; rationale: `/turbo` is unattended, quality > cost. |
 | `EFFORT_LEVEL_ENUM` | `low \| medium \| high \| xhigh \| max` | Phase A `uberdev_read_enum` validation; matches `claude --effort <level>` accepted values in Claude Code 2.1.139. |
 | `EFFORT_SOURCE_ENUM` | `cli \| env \| config \| default` | Audit telemetry source tag set by the Phase A `--effort=<level>` parser; emitted in the `effort_resolved` audit event payload. |
-| `SOLVE_AUDIT_EVENT_ENUM` | `agent_dispatched`, `deprecated_flag_used`, `solve_bg_fanout_wave_started`, `effort_resolved`, `error`, `claim_acquired`, `claim_collision`, `claim_force_override`, `claim_write_failed`, `claim_released` | Audit-log writers; consumers grep for `deprecated_flag_used` to identify migration laggards. `agent_returned` was removed in v0.22.0 — `claude --bg` does not synchronously report agent completion; use `claude agents` for status. The five `claim_*` events were added in v0.28.0 for the small-team issue-claim protocol (Step 4.5); grep `claim_force_override` to surface stale-claim recoveries, `claim_write_failed` to surface gh permission gaps. |
+| `SOLVE_AUDIT_EVENT_ENUM` | `agent_dispatched`, `deprecated_flag_used`, `solve_bg_fanout_wave_started`, `effort_resolved`, `error`, `claim_acquired`, `claim_collision`, `claim_force_override`, `claim_write_failed`, `claim_released`, `dispatch_backend_resolved` | Audit-log writers; consumers grep for `deprecated_flag_used` to identify migration laggards. `agent_returned` was removed in v0.22.0 — `claude --bg` does not synchronously report agent completion; use `claude agents` for status. The five `claim_*` events were added in v0.28.0 for the small-team issue-claim protocol (Step 4.5); grep `claim_force_override` to surface stale-claim recoveries, `claim_write_failed` to surface gh permission gaps. The `dispatch_backend_resolved` event was added in v0.29.0 (RFC 0004) — emitted once per invocation by `lib/dispatch.sh`'s preflight resolver with `{requested, resolved, os_class, reason}`. |
 | `UBERDEV_ACTIVE_LABEL` | `uberdev:active` | Step 4.5 claim protocol — applied to OPEN issues by `/solve` / `/turbo` on dispatch; cleared by `/merge` post-merge (`merge-pipeline/SKILL.md` post-merge cleanup phase) or by the dispatch-failure rollback in Step 5b'. NEVER set or removed by hand — the audit comment marker is the only safe parser surface. |
 | `UBERDEV_ACTIVE_LABEL_COLOR` | `D93F0B` | Warning-orange; matches the GitHub default `bug` palette band so it reads as actionable. Created idempotently via `gh label create --force` in Step 4.5 on first encounter per repo, mirroring `finish-branch/SKILL.md:287` and `dev-pipeline/SKILL.md:279`. |
 | `UBERDEV_ACTIVE_LABEL_DESCRIPTION` | `Issue currently being worked on by a /solve or /turbo dispatcher. Auto-managed — do not add/remove by hand.` | Passed to `gh label create --description`. The "Auto-managed" framing is the primary defence against well-meaning manual edits that would desync the claim comment from the label state. |
@@ -190,6 +192,36 @@ case "$EFFORT_LEVEL" in
   low|medium|high|xhigh|max) ;;
   *) echo "error: --effort='$EFFORT_LEVEL' not in {low,medium,high,xhigh,max}" >&2; exit 1 ;;
 esac
+# --- Phase A: --backend=<name> parser (NEW v0.29.0 — RFC 0004) ---
+# Selects the dispatch backend. Precedence (the established config-read.sh
+# order): --backend= CLI flag > UBERDEV_DISPATCH_BACKEND env > dispatch_backend:
+# in .claude/uberdev.local.md > default `auto`. `auto` defers to the
+# platform-aware fallback chain in lib/dispatch.sh (uberdev_dispatch_preflight).
+BACKEND_FLAG_VALUE="$(echo "$ARGUMENTS" | grep -oE '\-\-backend=[a-z-]+' | head -1 | sed 's/--backend=//')"
+if [[ -n "$BACKEND_FLAG_VALUE" ]]; then
+  DISPATCH_BACKEND="$BACKEND_FLAG_VALUE"
+elif [[ -n "${UBERDEV_DISPATCH_BACKEND:-}" ]]; then
+  DISPATCH_BACKEND="$UBERDEV_DISPATCH_BACKEND"
+else
+  if [ -r "${CLAUDE_PLUGIN_ROOT:-}/lib/config-read.sh" ]; then
+    # shellcheck source=/dev/null
+    . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+  fi
+  if command -v uberdev_read_enum >/dev/null 2>&1; then
+    DISPATCH_BACKEND="$(uberdev_read_enum dispatch_backend UBERDEV_DISPATCH_BACKEND \
+      'auto|claude-bg|wezterm|background' 'auto')"
+  else
+    DISPATCH_BACKEND=auto
+  fi
+fi
+# Explicit validation when the value came from CLI or env (uberdev_read_enum
+# validates only the value it reads itself) — reject loudly, mirroring the
+# --effort parser's post-validation case.
+case "$DISPATCH_BACKEND" in
+  auto|claude-bg|wezterm|background) ;;
+  *) echo "error: --backend='$DISPATCH_BACKEND' not in {auto,claude-bg,wezterm,background}" >&2; exit 1 ;;
+esac
+export UBERDEV_DISPATCH_BACKEND_REQUESTED="$DISPATCH_BACKEND"
 if [[ ${#ISSUE_NUMS[@]} -eq 0 ]]; then
   echo "Usage: /uberdev:solve|/uberdev:turbo <issue-number> [<issue-number>...] [--trivial|--small|--full] [--auto]"
   exit 1
@@ -425,6 +457,11 @@ fi
 # of the Phase B per-issue loop because the resolved values are the same for
 # every spawn.
 _uberdev_require_claude_version "2.1.139"
+# --- Phase A: portable temp dir (NEW v0.29.0 — RFC 0004 §3.8) ---
+# One temp root resolved once; every per-issue artifact (prompt, stdout log,
+# claim json, status file) lives under it. Git Bash on native Windows sets
+# TMPDIR; fall back to /tmp on Unix. Exported so lib/dispatch.sh inherits it.
+export UBERDEV_TMPDIR="${TMPDIR:-/tmp}"
 # BG_PROMPT_MODE: hardcoded `argv` because claude --bg 2.1.139 has no documented
 # --prompt-file or stdin-passthrough form (prior-art research). T6 implements the
 # bash-array argv form (spec-reviewer finding #1). A runtime probe is deferred until
@@ -508,9 +545,15 @@ fi
 # default SH_WORD_SPLIT=off would treat a scalar `$PREFIX="timeout 3600"` at
 # command position as ONE token and abort with "command not found: timeout 3600"
 # under set -e. Quoting "$TIMEOUT_BIN" keeps it as a single argv[0] token.
+# Probe order (RFC 0004 §3.8): the explicit MSYS coreutils path FIRST, so on
+# native Windows Git Bash we get coreutils `timeout` and never resolve a bare
+# `timeout` to C:\Windows\System32\timeout.exe (an incompatible command that
+# takes /T /NOBREAK, not a duration+command). Then the Unix `timeout`, then
+# macOS's Homebrew `gtimeout`.
 TIMEOUT_BIN=""
-if   command -v timeout  >/dev/null 2>&1; then TIMEOUT_BIN=timeout
-elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT_BIN=gtimeout
+if   [ -x /usr/bin/timeout ];                 then TIMEOUT_BIN=/usr/bin/timeout
+elif command -v timeout  >/dev/null 2>&1;     then TIMEOUT_BIN=timeout
+elif command -v gtimeout >/dev/null 2>&1;     then TIMEOUT_BIN=gtimeout
 fi
 
 # Runtime guard: if neither timeout(1) nor gtimeout(1) is on PATH, the
@@ -523,6 +566,30 @@ if [[ -n "$TIMEOUT_BIN" ]]; then
 else
   echo "error: neither timeout(1) nor gtimeout(1) found on PATH" >&2
   echo "       install with: brew install coreutils  # provides gtimeout" >&2
+  exit 1
+fi
+# --- Phase A: dispatch preflight + Windows guards (NEW v0.29.0 — RFC 0004) ---
+# Native-Windows-no-bash fast-fail: this pipeline is bash; under the
+# PowerShell tool it cannot parse. If we are on Windows and $BASH is unset,
+# fail with an actionable pointer instead of a parse error downstream.
+if [ -z "${BASH:-}" ] && { [ "${OS:-}" = "Windows_NT" ] || case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) true ;; *) false ;; esac; }; then
+  echo "error: /solve and /turbo need a bash shell. On native Windows install" >&2
+  echo "       Git for Windows (provides Git Bash), or use WSL2 (recommended)." >&2
+  exit 1
+fi
+# WSL2 9P-slowness warning: a repo under /mnt/c is 10-50x slower (DrvFs).
+if [ -r /proc/version ] && grep -qi microsoft /proc/version 2>/dev/null; then
+  case "$PWD" in
+    /mnt/*) echo "warning: repo is under /mnt/ in WSL2 — 9P/DrvFs is 10-50x slower than ext4; move it under ~/ for best /solve performance." >&2 ;;
+  esac
+fi
+# Source lib/dispatch.sh and resolve the backend ONCE for the whole batch.
+if [ -r "${CLAUDE_PLUGIN_ROOT:-}/lib/dispatch.sh" ]; then
+  # shellcheck source=/dev/null
+  . "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh"
+  uberdev_dispatch_preflight || exit 1
+else
+  echo "error: lib/dispatch.sh not found at ${CLAUDE_PLUGIN_ROOT:-}/lib/" >&2
   exit 1
 fi
 ```
