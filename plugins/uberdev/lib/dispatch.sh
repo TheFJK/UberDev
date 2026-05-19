@@ -160,6 +160,13 @@ _uberdev_dispatch_background() {
   )
   DISPATCH_RC=$?
   DISPATCH_ID="$(cat "$STATUS_FILE.pid" 2>/dev/null || echo '')"
+  # Liveness gate: `nohup … &` makes `DISPATCH_RC=$?` report the fork, not the
+  # exec — a `claude -p` that failed to launch (binary missing, etc.) still
+  # leaves DISPATCH_RC=0. Confirm the captured pid is a live process; if not,
+  # clear DISPATCH_ID so the success guard below falls through to the error path.
+  if [[ -n "$DISPATCH_ID" ]] && ! kill -0 "$DISPATCH_ID" 2>/dev/null; then
+    DISPATCH_ID=""
+  fi
   # Per-issue status file — the dispatcher tracks PID liveness + log tail
   # against this; Step 6's summary prints its path.
   cat > "$STATUS_FILE" <<EOF
