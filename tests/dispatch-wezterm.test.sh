@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Shape-check for the `wezterm` dispatch backend in lib/dispatch.sh
 # (_uberdev_dispatch_wezterm). Verifies `wezterm cli spawn` with
-# --domain-name, the mux-preflight list-clients poll, the .wezterm.lua
-# managed-block with exit_behavior Hold, the pinned socket, and the
-# ABSENCE of `claude --bg` from the wezterm arm. RFC 0004 §3.6 / §4.
+# --domain-name, the mux-preflight list-clients poll (ALSO pinned to the
+# `uberdev` domain — B1 fix), the .wezterm.lua managed-block with
+# exit_behavior Hold, and the ABSENCE of `claude --bg` from the wezterm
+# arm. RFC 0004 §3.6 / §4.
 
 set -u
 
@@ -53,9 +54,29 @@ assert_grep "$DISPATCH_LIB" \
 assert_grep "$DISPATCH_LIB" \
   'claude -p' \
   "wezterm backend runs foreground headless claude -p in the pane"
-assert_grep "$DISPATCH_LIB" \
-  'WEZTERM_UNIX_SOCKET' \
-  "wezterm backend pins \$WEZTERM_UNIX_SOCKET so fan-out stays on one mux"
+# B1 fix: the mux-pinning mechanism is `--domain-name uberdev` on every
+# `wezterm cli` call (the probe arm + the retry list-clients call inside
+# _uberdev_dispatch_wezterm_available + the wezterm cli spawn). Require
+# >= 3 `--domain-name uberdev` occurrences to lock in all three call sites;
+# a regression that drops the flag from any one of them would re-introduce
+# the scatter-across-stray-WezTerm bug. Counting bare `--domain-name uberdev`
+# (rather than `wezterm cli --domain-name uberdev`) is robust to the spawn
+# call's multi-line backslash continuation that puts the flag on its own line.
+DOMAIN_NAME_COUNT="$(grep -cE -- '--domain-name uberdev' "$DISPATCH_LIB" 2>/dev/null || echo "0")"
+if [[ "$DOMAIN_NAME_COUNT" -ge 3 ]]; then
+  echo "  PASS  every wezterm cli call pins --domain-name uberdev (count=$DOMAIN_NAME_COUNT, expected >= 3)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  expected >= 3 \`--domain-name uberdev\` occurrences (probe + retry list-clients + spawn); count=$DOMAIN_NAME_COUNT"
+  FAIL=$((FAIL + 1))
+fi
+# Tombstone: the v0.29.0 no-op `export WEZTERM_UNIX_SOCKET=…` form must NOT
+# reappear. The mux pin is `--domain-name uberdev`; the export was a
+# tautology (`${WEZTERM_UNIX_SOCKET:-}` → its current value or empty) that
+# misled readers into thinking the socket env var was load-bearing.
+assert_grep_not "$DISPATCH_LIB" \
+  'export WEZTERM_UNIX_SOCKET' \
+  "no tautological export WEZTERM_UNIX_SOCKET=… (B1 regression guard — real pin is --domain-name uberdev)"
 assert_grep "$DISPATCH_LIB" \
   'git worktree add' \
   "wezterm backend runs git worktree add itself (no native --worktree)"

@@ -56,20 +56,23 @@ _uberdev_dispatch_audit() {
 }
 
 # _uberdev_dispatch_wezterm_available -> exit 0 if wezterm usable, 1 otherwise.
-# Usable = binary on PATH AND the mux answers list-clients within the poll
-# budget (cold-start race guard, RFC §3.6). Starts wezterm-mux-server if the
-# mux is not already up.
+# Usable = binary on PATH AND the `uberdev` mux domain answers list-clients
+# within the poll budget (cold-start race guard, RFC §3.6). Starts
+# wezterm-mux-server if the mux is not already up. EVERY `wezterm cli` call
+# below MUST pass `--domain-name uberdev` so the probe targets the same mux
+# domain the spawn step uses; querying the default (stray) WezTerm instance
+# would defeat the fan-out-isolation guarantee (RFC §3.6, B1 fix).
 _uberdev_dispatch_wezterm_available() {
   command -v wezterm >/dev/null 2>&1 || return 1
   local i
   for i in 1 2 3 4 5; do
-    if wezterm cli list-clients >/dev/null 2>&1; then
+    if wezterm cli --domain-name uberdev list-clients >/dev/null 2>&1; then
       return 0
     fi
     wezterm-mux-server --daemonize >/dev/null 2>&1 || true
     sleep 1
   done
-  wezterm cli list-clients >/dev/null 2>&1
+  wezterm cli --domain-name uberdev list-clients >/dev/null 2>&1
 }
 
 # uberdev_dispatch_preflight
@@ -323,9 +326,12 @@ _uberdev_dispatch_wezterm() {
       '{"issue":'"$ISSUE_NUM"',"phase":"config","backend":"wezterm","rc":1}'
     return 1
   fi
-  # Pin every wezterm cli call to the uberdev domain socket so fan-out does
-  # not scatter across stray WezTerm instances (RFC §3.6).
-  export WEZTERM_UNIX_SOCKET="${WEZTERM_UNIX_SOCKET:-}"
+  # RFC §3.6: every `wezterm cli` call in this file passes
+  # `--domain-name uberdev` (the probe in _uberdev_dispatch_wezterm_available
+  # and the spawn below). That flag — not any env-var pin — is the actual
+  # mechanism that keeps fan-out on one mux. A prior socket-env-var export
+  # line (its right-hand side `${VAR:-}` was a tautology that defaulted to
+  # the var's own value or empty) was removed in the B1 fix.
   local WORKTREE_DIR=".claude/worktrees/solve-issue-$ISSUE_NUM"
   local WORKTREE_BRANCH="worktree-solve-issue-$ISSUE_NUM"
   local LOG_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM.log"
