@@ -541,6 +541,41 @@ else
 fi
 
 echo
+echo "== S10: _aliases_read_version matches jq -r .version =="
+# RFC 0004: the jq-free version reader must return the byte-identical string
+# that `jq -r .version` returns on the plugin's own manifest. Sourcing the
+# library in a command-substitution subshell keeps its functions scoped.
+S10_GOT="$(
+  . "$REPO_ROOT/plugins/uberdev/lib/aliases-sync.sh"
+  _aliases_read_version "$PLUGIN_JSON"
+)"
+if [ "$S10_GOT" = "$PLUGIN_VERSION" ]; then
+  echo "  PASS  S10: _aliases_read_version → $S10_GOT"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10: got '$S10_GOT', expected '$PLUGIN_VERSION'"; FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== S11: aliases_sync_main sets UBERDEV_ALIAS_NOTICE on first run =="
+# RFC 0004: on a fresh install aliases_sync_main must compose a first-run
+# notice into the UBERDEV_ALIAS_NOTICE global for the hook to inject.
+S11_HOME="$(mktemp -d)"
+S11_GOT="$(
+  HOME="$S11_HOME"
+  PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+  . "$REPO_ROOT/plugins/uberdev/lib/aliases-sync.sh"
+  aliases_sync_main >/dev/null 2>&1
+  printf '%s' "${UBERDEV_ALIAS_NOTICE:-}"
+)"
+case "$S11_GOT" in
+  *"installed 7 short-form aliases"*)
+    echo "  PASS  S11: first-run notice composed"; PASS=$((PASS + 1)) ;;
+  *)
+    echo "  FAIL  S11: UBERDEV_ALIAS_NOTICE='$S11_GOT'"; FAIL=$((FAIL + 1)) ;;
+esac
+rm -rf "$S11_HOME"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
