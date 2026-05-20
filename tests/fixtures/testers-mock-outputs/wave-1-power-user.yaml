@@ -1,0 +1,20 @@
+verdict: AUDITED
+findings:
+  - severity: critical
+    persona: power_user
+    location: /checkout
+    invariant_violated: idempotent_submit
+    summary: paste-storm creates 5 orders
+    detail: 10k-char paste then Enter created 5 order records.
+    evidence:
+      network_request:
+        method: POST
+        url: /api/checkout
+        status: 200
+      repro_steps:
+        - paste 10000 chars into email
+        - press Enter 5 times within 200ms
+      observed: 5 orders created
+      expected: idempotent — only 1 order
+    confidence: high
+confidence: high
