@@ -4,6 +4,25 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.0] - 2026-05-21
+
+### Added
+- `/uberdev:goal` — autonomous convergence orchestrator (RFC 0005). Chains `/turbo` → `/review-pr` (auto) → `/merge` if GREEN; recurses on BLOCKER/CRITICAL `review-pr-finding` issues until convergence or one of four circuit breakers fires.
+- Four circuit breakers: `max_cycles` (default 5, range 1–20 via `UBERDEV_GOAL_MAX_CYCLES`), `nonconvergence` (fingerprint repeat from prior cycle), `stuck_loop` (4h wall-clock per watch pass), `merge_failed` (conflict or hook failure).
+- `/ubergoal` short-form alias for `/uberdev:goal` (installed by `/uberdev:install-aliases`).
+- `lib/goal-state.sh` — PR + issue state machines, per-goal audit-sink JSONL at `$UBERDEV_TMPDIR/goal-<id>.jsonl`.
+- `skills/goal-pipeline/SKILL.md` — 5-phase pipeline (Preflight → Dispatch → Watch → Collect-Next → Converge/Halt).
+- `tests/goal.test.sh` — 20-section shape-check harness (G1–G20).
+
+### Changed
+- Plugin version bumped from `v0.30.0` to `v0.31.0`.
+- `tests/solve-claim.test.sh:258-265` version-drift assertions updated to `0.31.0`.
+
+### Security
+- `Blocks: #` parser is ReDoS-safe (anchored bash regex + 64 KiB body cap).
+- `/merge` auto-chain is scoped to `/goal` only via `UBERDEV_GOAL_ID` env-var provenance check (T5).
+- Per-PR `automerge_attempt_count > 3` halts the goal with `goal_circuit_breaker reason=merge_failed`.
+
 ## [0.30.0] - 2026-05-19
 
 ### Added
