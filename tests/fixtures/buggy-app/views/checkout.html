@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Checkout</title></head>
+<body>
+  <h1>Checkout</h1>
+  <form id="f">
+    <label>Email <input name="email" tabindex="1"/></label>
+    <button type="submit" tabindex="2" id="pay">Pay</button>
+    <button type="button" id="cancel">Cancel</button>
+    <span id="status"></span>
+  </form>
+  <script>
+    document.getElementById('f').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      document.getElementById('status').textContent = 'Loading...';
+      const fd = new FormData(e.target);
+      const r = await fetch('/api/checkout', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: fd.get('email') })
+      });
+      const j = await r.json();
+      document.getElementById('status').textContent = 'Order #' + j.order_id;
+    });
+  </script>
+</body>
+</html>
