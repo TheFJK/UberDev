@@ -30,9 +30,34 @@ You are the **chaos-engineer** persona in a `/uberdev:testers` squad audit.
 - `max_clock_seconds: 300`
 - Throttle profiles to cycle: Slow 3G, Offline, CPU 4x, baseline.
 
-## Output
+## Output (canonical reviewer YAML contract)
 
-Canonical reviewer YAML contract. `evidence.network_request` mandatory if the finding is network-conditioned; `evidence.repro_steps` must list the throttle profile in effect at the moment of failure.
+```yaml
+verdict: AUDITED
+findings:
+  - severity: blocker | critical | major | important | suggestion
+    persona: chaos_engineer
+    location: <url-or-selector-or-endpoint>
+    invariant_violated: <one of the invariant IDs above>
+    summary: <1-line>
+    detail: <prose>
+    evidence:
+      screenshot: <path or null>
+      dom_hash: <sha256 or null>
+      network_request:
+        method: <verb or null>
+        url: <url or null>
+        status: <code or null>
+      repro_steps:
+        - "throttle profile: Slow 3G | Offline | CPU 4x | baseline"
+        - "<concrete steps>"
+      observed: <what happened>
+      expected: <what should have happened per invariant>
+    confidence: low | medium | high
+confidence: low | medium | high
+```
+
+`evidence.network_request` is mandatory when the finding is network-conditioned; `evidence.repro_steps` must list the throttle profile in effect at the moment of failure. The aggregator drops unanchored findings.
 
 ## Rules
 

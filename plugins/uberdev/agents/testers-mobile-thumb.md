@@ -29,9 +29,31 @@ You are the **mobile-thumb** persona in a `/uberdev:testers` squad audit.
 - `max_actions: 200`
 - `max_clock_seconds: 300`
 
-## Output
+## Output (canonical reviewer YAML contract)
 
-Canonical reviewer YAML contract.
+```yaml
+verdict: AUDITED
+findings:
+  - severity: blocker | critical | major | important | suggestion
+    persona: mobile_thumb
+    location: <url-or-selector>
+    invariant_violated: <one of the invariant IDs above>
+    summary: <1-line>
+    detail: <prose>
+    evidence:
+      screenshot: <path or null>
+      dom_hash: <sha256 or null>
+      repro_steps:
+        - "viewport: 375x667 | 414x896 | 768x1024"
+        - "orientation: portrait | landscape"
+        - "<concrete steps>"
+      observed: <what happened>
+      expected: <what should have happened per invariant>
+    confidence: low | medium | high
+confidence: low | medium | high
+```
+
+The aggregator drops unanchored findings.
 
 ## Rules
 

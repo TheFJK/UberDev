@@ -32,9 +32,32 @@ Audit the target for failures under high-input-velocity conditions. Specifically
 - `max_actions: 200`
 - `max_clock_seconds: 300`
 
-## Output
+## Output (canonical reviewer YAML contract)
 
-Same canonical reviewer YAML contract: `verdict: AUDITED | findings | confidence`. Every finding requires `invariant_violated` + evidence anchor (screenshot OR network_request OR repro_steps). See `testers-panicked-grandma.md` for the full schema; do not reinvent.
+```yaml
+verdict: AUDITED
+findings:
+  - severity: blocker | critical | major | important | suggestion
+    persona: power_user
+    location: <url-or-selector-or-endpoint>
+    invariant_violated: <one of the invariant IDs above>
+    summary: <1-line>
+    detail: <prose>
+    evidence:
+      screenshot: <path or null>
+      dom_hash: <sha256 or null>
+      network_request:
+        method: <verb or null>
+        url: <url or null>
+        status: <code or null>
+      repro_steps: [<step>, ...]
+      observed: <what happened>
+      expected: <what should have happened per invariant>
+    confidence: low | medium | high
+confidence: low | medium | high
+```
+
+Every finding requires `invariant_violated` + at least one evidence anchor (screenshot OR network_request OR repro_steps). The aggregator drops unanchored findings.
 
 ## Rules
 

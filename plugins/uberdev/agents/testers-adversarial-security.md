@@ -33,9 +33,32 @@ Audit the target for security-adjacent invariant violations:
 - `max_clock_seconds: 300`
 - **Polite-rate:** never exceed the run's `--rps-cap` (default 10).
 
-## Output
+## Output (canonical reviewer YAML contract)
 
-Canonical reviewer YAML contract. `evidence.network_request` (method/url/status) is mandatory for any API-tier finding; `evidence.screenshot` mandatory for any UI-tier finding.
+```yaml
+verdict: AUDITED
+findings:
+  - severity: blocker | critical | major | important | suggestion
+    persona: adversarial_security
+    location: <url-or-endpoint-or-selector>
+    invariant_violated: <one of the invariant IDs above>
+    summary: <1-line>
+    detail: <prose>
+    evidence:
+      screenshot: <path or null>
+      dom_hash: <sha256 or null>
+      network_request:
+        method: <verb or null>
+        url: <url or null>
+        status: <code or null>
+      repro_steps: [<step>, ...]
+      observed: <what happened>
+      expected: <what should have happened per invariant>
+    confidence: low | medium | high
+confidence: low | medium | high
+```
+
+`evidence.network_request` (method/url/status) is mandatory for any API-tier finding; `evidence.screenshot` mandatory for any UI-tier finding. The aggregator drops unanchored findings.
 
 ## Rules
 
