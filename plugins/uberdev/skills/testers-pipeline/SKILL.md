@@ -206,5 +206,51 @@ The skill ships `aggregate.py` alongside SKILL.md — a tiny script (~50 lines) 
 5. Merges all findings into one wave-N.yaml
 6. Runs monitor-primary's cross_refs logic IF the monitor agents' outputs are in scratch (else passes them through verbatim)
 
-<!-- Phase 5 (findings-to-issues + report.md synthesis) lands via T17. -->
+
+## Phase 5 — Synthesize report.md and persist findings
+
+```bash
+# Generate the human-readable report
+python3 plugins/uberdev/skills/testers-pipeline/report.py \
+  --run-id "$RUN_ID" \
+  --waves-dir "$RUN_DIR" \
+  --invariants plugins/uberdev/skills/testers-pipeline/invariants.yaml \
+  --out "$RUN_DIR/report.md"
+
+echo "[testers] report written: $RUN_DIR/report.md"
+
+# Dispatch findings-to-issues unless --no-issues
+if [ "$NO_ISSUES" != "1" ]; then
+  # Build a findings-to-issues-compatible aggregate from the final wave file.
+  # Only verified: true findings with severity blocker|critical|major are filed.
+  python3 plugins/uberdev/skills/testers-pipeline/report.py \
+    --run-id "$RUN_ID" \
+    --waves-dir "$RUN_DIR" \
+    --invariants plugins/uberdev/skills/testers-pipeline/invariants.yaml \
+    --emit-findings-to-issues-aggregate "$RUN_DIR/findings-to-issues-aggregate.md"
+
+  # The Task() dispatch happens in the orchestrating session, not in this skill.
+  echo "DISPATCH: findings-to-issues with $RUN_DIR/findings-to-issues-aggregate.md (max_new=$MAX_ISSUES)"
+fi
+```
+
+The findings-to-issues aggregate is shaped to match the existing post-impl-review-final.md schema (see `agents/findings-to-issues.md`). The orchestrator session reads the `DISPATCH:` line and fires `Task(subagent_type: uberdev:findings-to-issues)` in the standard idiom.
+
+## Phase 6 — Summary + exit
+
+```bash
+TOTAL="$(python3 -c "import yaml; f=yaml.safe_load(open('$RUN_DIR/wave-$ROUNDS.yaml')); print(len(f['findings']))")"
+VERIFIED="$(python3 -c "import yaml; f=yaml.safe_load(open('$RUN_DIR/wave-$ROUNDS.yaml')); print(sum(1 for cr in (f.get('cross_refs') or []) if cr.get('verified')))")"
+
+echo
+echo "[testers] === DONE ==="
+echo "  run_id:        $RUN_ID"
+echo "  surface:       $SURFACE"
+echo "  target:        ${TARGET:-(auto)}"
+echo "  rounds:        $ROUNDS"
+echo "  total findings:    $TOTAL"
+echo "  verified findings: $VERIFIED"
+echo "  report:        $RUN_DIR/report.md"
+[ "$NO_ISSUES" != "1" ] && echo "  issues:        see findings-to-issues output above"
+```
 <!-- Phase logic implementations land via T15 (waves 2-4) and T17 (Phase 5). -->
