@@ -2,7 +2,7 @@
 
 | Field            | Value                                                                |
 | ---------------- | -------------------------------------------------------------------- |
-| **Status**       | Draft                                                                |
+| **Status**       | Accepted (2026-05-21)                                                |
 | **Author**       | TheFJK                                                               |
 | **Created**      | 2026-05-21                                                           |
 | **Targets**      | new `plugins/uberdev/commands/goal.md`, new `plugins/uberdev/skills/goal-pipeline/SKILL.md`, new `plugins/uberdev/lib/goal-state.sh` |
