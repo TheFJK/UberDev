@@ -155,6 +155,135 @@ assert_grep "$DISPATCH_LIB" \
   '_uberdev_dispatch_claude_bg\(\)' \
   "lib/dispatch.sh defines the _uberdev_dispatch_claude_bg function"
 
+echo "== Functional: id_extract rc capture + subphase discriminator (#154) =="
+# These cases SOURCE lib/dispatch.sh and drive _uberdev_dispatch_claude_bg with
+# stubs, asserting on the captured dispatch_setup_failed / agent_dispatched
+# audit payloads. Distinct from the assert_grep shape-checks above; both styles
+# coexist. Each case runs in a SUBSHELL so stub funcs and the _UBERDEV_DISPATCH_LOADED
+# source-guard never leak between cases.
+TALLY_FILE="$(mktemp)"   # subshell PASS/FAIL hand-off (see read-back idiom per case)
+
+assert_contains() {
+  # assert_contains "<haystack>" "<needle>" "<desc>"
+  local hay="$1" needle="$2" desc="$3"
+  if [[ "$hay" == *"$needle"* ]]; then
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"; echo "        wanted substring: $needle"; echo "        in: $hay"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+assert_not_contains() {
+  # assert_not_contains "<haystack>" "<needle>" "<desc>"
+  local hay="$1" needle="$2" desc="$3"
+  if [[ "$hay" != *"$needle"* ]]; then
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"; echo "        must NOT contain: $needle"; echo "        in: $hay"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+(
+  set +u   # bash 3.2 (macOS system bash) treats empty-array expansions as unbound under set -u
+  UBERDEV_TMPDIR="$(mktemp -d)"
+  # Fixture-seed: the function computes BG_STDOUT_LOG="${UBERDEV_TMPDIR}/solve-bg-stdout-<issue>.log"
+  # internally (dispatch.sh:187), so we pre-seed exactly that path. No production change.
+  printf 'Agent starting...\nbackgrounded · abc12345\n' > "$UBERDEV_TMPDIR/solve-bg-stdout-7.log"
+  declare -a AUDIT_EVENTS=()
+  _uberdev_audit_emit() { AUDIT_EVENTS+=( "$1 $2" ); }   # "<event> <json>"
+  timeout() { shift; "$@"; }          # drop the duration arg, exec the rest
+  env() { while [[ "$1" == *=* ]]; do shift; done; "$@"; }  # strip VAR=val prefixes
+  claude() { printf 'backgrounded · abc12345\n'; return 0; }
+  TIMEOUT_BIN="timeout"; SOLVE_TIMEOUT=1; MODEL="sonnet"
+  PERM_FLAG=(); EFFORT_FLAG=(); BG_PROMPT_MODE="file"
+  PROMPT_FILE="$UBERDEV_TMPDIR/prompt.txt"; printf 'do the thing\n' > "$PROMPT_FILE"
+  DISPATCH_RC=0; DISPATCH_ID=""; DISPATCH_LOG=""
+  # shellcheck disable=SC1090
+  . "$DISPATCH_LIB"
+  _uberdev_dispatch_claude_bg 7 medium "$PROMPT_FILE"
+  rc=$?
+  joined="${AUDIT_EVENTS[*]}"
+  [[ "$rc" -eq 0 ]] && echo "  PASS  happy path returns 0" && PASS=$((PASS + 1)) || { echo "  FAIL  happy path returns 0 (got $rc)"; FAIL=$((FAIL + 1)); }
+  [[ "$DISPATCH_ID" == "abc12345" ]] && echo "  PASS  happy path extracts DISPATCH_ID=abc12345" && PASS=$((PASS + 1)) || { echo "  FAIL  happy path DISPATCH_ID (got '$DISPATCH_ID')"; FAIL=$((FAIL + 1)); }
+  assert_contains "$joined" "agent_dispatched" "happy path emits agent_dispatched"
+  assert_not_contains "$joined" "dispatch_setup_failed" "happy path does NOT emit dispatch_setup_failed"
+  rm -rf "$UBERDEV_TMPDIR"
+  printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
+) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
+
+(
+  set +u   # bash 3.2 (macOS system bash) treats empty-array expansions as unbound under set -u
+  UBERDEV_TMPDIR="$(mktemp -d)"
+  printf 'Agent starting...\nrunning...\n' > "$UBERDEV_TMPDIR/solve-bg-stdout-8.log"
+  declare -a AUDIT_EVENTS=()
+  _uberdev_audit_emit() { AUDIT_EVENTS+=( "$1 $2" ); }
+  timeout() { shift; "$@"; }
+  env() { while [[ "$1" == *=* ]]; do shift; done; "$@"; }
+  claude() { printf 'Agent starting...\nrunning...\n'; return 0; }   # no marker
+  TIMEOUT_BIN="timeout"; SOLVE_TIMEOUT=1; MODEL="sonnet"
+  PERM_FLAG=(); EFFORT_FLAG=(); BG_PROMPT_MODE="file"
+  PROMPT_FILE="$UBERDEV_TMPDIR/prompt.txt"; printf 'x\n' > "$PROMPT_FILE"
+  DISPATCH_RC=0; DISPATCH_ID=""; DISPATCH_LOG=""
+  # shellcheck disable=SC1090
+  . "$DISPATCH_LIB"
+  _uberdev_dispatch_claude_bg 8 medium "$PROMPT_FILE"
+  rc=$?
+  joined="${AUDIT_EVENTS[*]}"
+  [[ "$rc" -eq 2 ]] && echo "  PASS  marker_absent returns 2" && PASS=$((PASS + 1)) || { echo "  FAIL  marker_absent returns 2 (got $rc)"; FAIL=$((FAIL + 1)); }
+  [[ -z "$DISPATCH_ID" ]] && echo "  PASS  marker_absent stamps DISPATCH_ID empty" && PASS=$((PASS + 1)) || { echo "  FAIL  marker_absent DISPATCH_ID not empty (got '$DISPATCH_ID')"; FAIL=$((FAIL + 1)); }
+  assert_contains "$joined" "dispatch_setup_failed" "marker_absent emits dispatch_setup_failed"
+  assert_contains "$joined" '"phase":"id_extract"' "marker_absent keeps phase=id_extract"
+  assert_contains "$joined" '"subphase":"marker_absent"' "marker_absent payload carries subphase=marker_absent"
+  assert_contains "$joined" '"rc":2' "marker_absent keeps rc:2 contract"
+  rm -rf "$UBERDEV_TMPDIR"
+  printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
+) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
+
+(
+  set +u   # bash 3.2 (macOS system bash) treats empty-array expansions as unbound under set -u
+  UBERDEV_TMPDIR="$(mktemp -d)"
+  SEED_LOG="$UBERDEV_TMPDIR/solve-bg-stdout-9.log"
+  printf 'backgrounded · dead0000\n' > "$SEED_LOG"   # content present but read must fail
+  chmod 000 "$SEED_LOG" 2>/dev/null || true
+  declare -a AUDIT_EVENTS=()
+  _uberdev_audit_emit() { AUDIT_EVENTS+=( "$1 $2" ); }
+  timeout() { shift; "$@"; }
+  env() { while [[ "$1" == *=* ]]; do shift; done; "$@"; }
+  claude() { return 0; }   # spawn succeeds; the LOG read is what fails
+  TIMEOUT_BIN="timeout"; SOLVE_TIMEOUT=1; MODEL="sonnet"
+  PERM_FLAG=(); EFFORT_FLAG=(); BG_PROMPT_MODE="file"
+  PROMPT_FILE="$UBERDEV_TMPDIR/prompt.txt"; printf 'x\n' > "$PROMPT_FILE"
+  DISPATCH_RC=0; DISPATCH_ID=""; DISPATCH_LOG=""
+  # Root-safe fallback: if chmod 000 won't block the read (root / odd FS),
+  # shadow grep to return 2 so the pipeline_error branch is still exercised.
+  # On macOS (non-root), chmod 000 blocks both read AND write, so the file-arm
+  # redirect to the pre-seeded log fails before grep is even called — the
+  # dispatch path is "phase:dispatch rc:1" not "phase:id_extract". We restore
+  # the log to 644 so the redirect can succeed, then use grep-shadow to
+  # inject rc=2 at grep time, exercising the id_extract/pipeline_error path.
+  chmod 644 "$SEED_LOG" 2>/dev/null || true
+  grep() { return 2; }
+  echo "  NOTE  pipeline_error: using grep-shadow to simulate rc>=2 (chmod-000 blocks redirect on macOS; restored to 644 + grep stub)"
+  # shellcheck disable=SC1090
+  . "$DISPATCH_LIB"
+  _uberdev_dispatch_claude_bg 9 medium "$PROMPT_FILE"
+  rc=$?
+  joined="${AUDIT_EVENTS[*]}"
+  [[ "$rc" -eq 2 ]] && echo "  PASS  pipeline_error returns 2" && PASS=$((PASS + 1)) || { echo "  FAIL  pipeline_error returns 2 (got $rc)"; FAIL=$((FAIL + 1)); }
+  [[ -z "$DISPATCH_ID" ]] && echo "  PASS  pipeline_error stamps DISPATCH_ID empty" && PASS=$((PASS + 1)) || { echo "  FAIL  pipeline_error DISPATCH_ID not empty (got '$DISPATCH_ID')"; FAIL=$((FAIL + 1)); }
+  assert_contains "$joined" "dispatch_setup_failed" "pipeline_error emits dispatch_setup_failed"
+  assert_contains "$joined" '"phase":"id_extract"' "pipeline_error keeps phase=id_extract"
+  assert_contains "$joined" '"subphase":"pipeline_error"' "pipeline_error payload carries subphase=pipeline_error"
+  assert_contains "$joined" '"rc":2' "pipeline_error keeps rc:2 contract"
+  assert_not_contains "$joined" '"subphase":"marker_absent"' "pipeline_error must NOT mislabel as marker_absent (discriminator differs)"
+  rm -rf "$UBERDEV_TMPDIR"
+  printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
+) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
+
+rm -f "$TALLY_FILE"
+
 echo "== Positive: Phase A constants + hardcoded BG_PROMPT_MODE =="
 assert_grep "$SOLVE_PIPELINE" \
   '_uberdev_require_claude_version "2.1.139"' \
