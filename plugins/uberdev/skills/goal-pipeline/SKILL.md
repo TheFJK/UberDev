@@ -257,13 +257,24 @@ while true; do
           # site previously held this block but those variables don't exist
           # there, so the check silently no-op'd). Setting overflow_detected
           # here gates the Phase 3 first-10 truncation below.
-          halted_overflow="$(gh_jq_or_jq "$audit_json" '.phases.phase2_5.halted_due_to_overflow // false')"
-          if [ "$halted_overflow" = "true" ]; then
-            overflow_detected=1
-            # Q4 — accumulate per-cycle PR-overflow count for the
-            # goal_cycle_completed audit payload (the prose at line ~381
-            # promises {overflow_count: N} in the summary).
-            overflow_count=$(( ${overflow_count:-0} + 1 ))
+          #
+          # M14 — explicit branch on gh_jq_or_jq rc. If the audit JSON is
+          # corrupted, the old `halted_overflow="$(gh_jq_or_jq …)"` swallowed
+          # jq's rc and left $halted_overflow empty — `[ "" = "true" ]` is
+          # false so the overflow check silently skipped. Surface to stderr;
+          # default to "no overflow" (safer than spuriously truncating the
+          # next cycle's candidate queue on an unreadable audit).
+          if halted_overflow="$(gh_jq_or_jq "$audit_json" '.phases.phase2_5.halted_due_to_overflow // false')"; then
+            if [ "$halted_overflow" = "true" ]; then
+              overflow_detected=1
+              # Q4 — accumulate per-cycle PR-overflow count for the
+              # goal_cycle_completed audit payload (the prose at line ~381
+              # promises {overflow_count: N} in the summary).
+              overflow_count=$(( ${overflow_count:-0} + 1 ))
+            fi
+          else
+            printf 'goal-pipeline: overflow check failed to read audit %s for PR %s; treating as no overflow this cycle\n' \
+              "$audit_json" "$pr_num" >&2
           fi
           ;;
         stale|missing)
@@ -277,10 +288,23 @@ while true; do
   done
 
   # 2b. Dispatch /merge for any new GREEN PRs
+  # B2 — Only transition to `merging` on dispatch rc=0 (mirrors Phase 1's
+  # `if uberdev_dispatch_one …` branching at lines ~166-189). Failed dispatch
+  # (mktemp fails, prompt write fails, claude-bg session refuse, etc.) used
+  # to transition the PR to `merging` anyway, then the watch loop would
+  # poll for a backgrounded · marker that would never appear, stalling
+  # until the 4h stuck_loop circuit breaker fired. Now: rc!=0 logs to
+  # stderr and leaves the PR in `green` so the next watch iteration
+  # retries; the per-PR attempt counter (cap 3) bounds runaway retries.
   for pr in $(uberdev_goal_list_prs_in_state "$GOAL_ID" green); do
     if uberdev_goal_should_automerge "$GOAL_ID" "$pr"; then
-      _uberdev_goal_dispatch_merge "$pr"
-      uberdev_goal_pr_state_transition "$GOAL_ID" "$pr" green merging
+      if _uberdev_goal_dispatch_merge "$pr"; then
+        uberdev_goal_pr_state_transition "$GOAL_ID" "$pr" green merging
+      else
+        printf 'goal-pipeline: _uberdev_goal_dispatch_merge failed for PR %s; staying in green for next-cycle retry\n' \
+          "$pr" >&2
+        any_active=1
+      fi
     fi
   done
 
@@ -369,6 +393,15 @@ while true; do
       green)
         uberdev_goal_pr_state_transition "$GOAL_ID" "$held_pr" "$held_current" green
         uberdev_goal_record_held_audit "$GOAL_ID" "$held_pr" "$new_audit"
+        # B1 — keep the watch loop alive for one more iteration so step 2b
+        # (which runs ABOVE step 2e in cycle order) has a chance to pick this
+        # freshly-green PR up on the next pass and dispatch /merge. Without
+        # this, the held→green transition is invisible to step 2d's
+        # termination check on the SAME iteration: `any_active` could already
+        # be 0 from the active-issues walk, the merging set is empty, and the
+        # loop breaks with a near-merged PR that Phase 3 then mis-classifies
+        # as queue_empty_not_converged.
+        any_active=1
         ;;
       yellow)
         if [ "$held_current" = "red-held" ]; then
@@ -428,7 +461,26 @@ findings_err="$(mktemp)"
 # row (newline-separated raw integers) so the downstream mapfile no longer
 # needs a redundant `jq -r '.[]'` pass to flatten a `map(.number)` JSON array.
 if [ "$only_mine" = "1" ]; then
-  GH_USER="$(gh api user --jq '.login')"
+  # B6 — surface gh api user failures instead of silently dropping into an
+  # empty $GH_USER. Previously `GH_USER="$(gh api user --jq '.login')"` would
+  # let a 401/403/network-flake produce `GH_USER=""`, the jq filter then
+  # `select(.author.login == env.GH_USER)` matched zero issues (no author has
+  # an empty login), candidates_json was empty, and Phase 3's terminal check
+  # emitted goal_converged falsely. Now: capture stderr + rc; if gh failed,
+  # halt with goal_circuit_breaker reason=gh_api_failed (same shape as the
+  # gh issue list rc-check below at lines ~451-456) so the operator can
+  # re-run /goal once the underlying auth/network issue clears.
+  GH_USER_ERR="$(mktemp)"
+  GH_USER="$(gh api user --jq '.login' 2>"$GH_USER_ERR")"
+  GH_USER_RC=$?
+  [ -s "$GH_USER_ERR" ] && cat "$GH_USER_ERR" >&2
+  rm -f "$GH_USER_ERR"
+  if [ "$GH_USER_RC" -ne 0 ] || [ -z "$GH_USER" ]; then
+    uberdev_goal_audit goal_circuit_breaker \
+      "{\"reason\":\"gh_api_failed\",\"step\":\"phase3_gh_api_user\",\"exit_code\":$GH_USER_RC}"
+    print_summary "$cycle"
+    exit 1
+  fi
   export GH_USER
   jq_filter='.[] | select(.body | test("\\*\\*Tier:\\*\\* (BLOCKER|CRITICAL)")) | select(.createdAt > $start) | select(.author.login == env.GH_USER) | .number'
 else

@@ -80,8 +80,20 @@ fi
 gh_jq_or_jq() {
   local file="$1" filter="$2"
   [ -n "$file" ] && [ -f "$file" ] || return 1
-  local jq_err
-  jq_err="$(mktemp 2>/dev/null)" || { jq -r "$filter" "$file" 2>/dev/null; return; }
+  local jq_err jq_rc
+  # B4 — fallback arm: if mktemp fails (read-only /tmp, exhausted inode
+  # table, etc.) we cannot capture stderr to a file, so run jq with stderr
+  # discarded BUT explicitly capture its rc and return it. Previously the
+  # fallback `return` echoed the implicit rc of the prior command, which
+  # happened to be jq's own rc, but only because no intervening commands
+  # mutated $?. Making the capture explicit is defence in depth — and it
+  # preserves the audit-contract guarantee (callers branch on rc) even
+  # when the warning-line breadcrumb is unavailable.
+  jq_err="$(mktemp 2>/dev/null)" || {
+    jq -r "$filter" "$file" 2>/dev/null
+    jq_rc=$?
+    return "$jq_rc"
+  }
   if ! jq -r "$filter" "$file" 2>"$jq_err"; then
     local first_line
     first_line="$(head -n 1 "$jq_err" 2>/dev/null)"
@@ -196,7 +208,15 @@ uberdev_goal_state_init() {
       printf 'goal-state: refusing unsafe UBERDEV_TMPDIR: %s\n' "$tmpdir" >&2
       return 1 ;;
   esac
-  mkdir -p "$tmpdir" 2>/dev/null || true
+  # M13 — drop the `|| true` mask. If mkdir -p genuinely fails (read-only
+  # filesystem, permissions, exhausted inode table) the subsequent `:> "$f"`
+  # truncate-creates below would fail anyway, but silently — and the goal
+  # would race on missing state files. Surface the rc here so the operator
+  # sees the underlying cause (mkdir's own stderr) and the goal halts early.
+  if ! mkdir -p "$tmpdir" 2>/dev/null; then
+    printf 'goal-state: mkdir -p %s failed; refusing to init state\n' "$tmpdir" >&2
+    return 1
+  fi
   : > "$tmpdir/goal-$goal_id.jsonl"
   : > "$tmpdir/goal-$goal_id-pr-states.tsv"
   : > "$tmpdir/goal-$goal_id-issue-states.tsv"
@@ -517,7 +537,16 @@ _uberdev_goal_dispatch_review_pr() {
   local pr="$1"
   _uberdev_goal_validate_int "$pr" || return 1
   local prompt_file
-  prompt_file="$(mktemp)"
+  # B5 — mktemp failure (read-only /tmp, exhausted inode table) used to fall
+  # through silently: $prompt_file ended up empty, the printf to "" was a
+  # no-op, and uberdev_dispatch_one received an invalid path. The goal then
+  # appeared to dispatch but no agent actually spawned, blocking convergence
+  # until 4h stuck_loop fired. Now: rc-check on mktemp and surface the
+  # failure to stderr + return non-zero so the caller can fall back.
+  if ! prompt_file="$(mktemp 2>/dev/null)"; then
+    printf 'goal-state: mktemp failed in _uberdev_goal_dispatch_review_pr (PR %s)\n' "$pr" >&2
+    return 1
+  fi
   printf '/uberdev:review-pr %s\n' "$pr" > "$prompt_file"
   UBERDEV_GOAL_ID="${UBERDEV_GOAL_ID:-unknown}" \
     uberdev_dispatch_one "$pr" "small" "$prompt_file"
@@ -530,7 +559,17 @@ _uberdev_goal_dispatch_merge() {
   local pr="$1"
   _uberdev_goal_validate_int "$pr" || return 1
   local prompt_file
-  prompt_file="$(mktemp)"
+  # B5 — same rc-check pattern as _uberdev_goal_dispatch_review_pr above.
+  # Without this, a silent mktemp failure (read-only /tmp, exhausted inode
+  # table) propagates an empty prompt_file path into uberdev_dispatch_one
+  # and the merge agent never spawns. Phase 2b's caller (SKILL.md step 2b)
+  # was already updated post-B2 to branch on this function's rc; surface a
+  # non-zero return on dispatch-helper failure so it stays in `green` for
+  # the next cycle's retry (bounded by the per-PR attempt counter cap).
+  if ! prompt_file="$(mktemp 2>/dev/null)"; then
+    printf 'goal-state: mktemp failed in _uberdev_goal_dispatch_merge (PR %s)\n' "$pr" >&2
+    return 1
+  fi
   printf '/uberdev:merge %s\n' "$pr" > "$prompt_file"
   # Increment per-PR attempt counter.
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
