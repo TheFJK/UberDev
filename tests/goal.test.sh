@@ -475,6 +475,19 @@ fi
 # is authoritative.
 _bt16_lines="$(wc -l < "$_bt15_tsv" 2>/dev/null | tr -d ' ')"
 assert_eq "$_bt16_lines" "5" "BT16.transitions-accumulate-5-rows"
+# Pin per-issue accumulation, not just the aggregate count: BT12 wrote three
+# rows for issue 100 (input->solving->pr-pushed->resolved), one for 101
+# (solving->failed), one for 102 (pr-pushed->failed). Asserting only the total
+# (==5 above) would pass even if rows landed under the wrong issue or a row
+# duplicated/corrupted; per-issue counts catch that. The grep is tab-anchored
+# (`^100\t`) so issue 100 cannot match a hypothetical 1000 row — the issue is
+# the first tab-delimited column (goal-state.sh:244 `%s\t%s\t%s`).
+_bt16_i100="$(grep -cE -e $'^100\t' "$_bt15_tsv" 2>/dev/null | tr -d ' ')"
+_bt16_i101="$(grep -cE -e $'^101\t' "$_bt15_tsv" 2>/dev/null | tr -d ' ')"
+_bt16_i102="$(grep -cE -e $'^102\t' "$_bt15_tsv" 2>/dev/null | tr -d ' ')"
+assert_eq "$_bt16_i100" "3" "BT16.issue-100-three-rows"
+assert_eq "$_bt16_i101" "1" "BT16.issue-101-one-row"
+assert_eq "$_bt16_i102" "1" "BT16.issue-102-one-row"
 
 # BT17 — goal_id isolation: separate goals write to separate TSVs.
 uberdev_goal_issue_state_transition test-bt17-alpha 300 input solving 2>/dev/null
