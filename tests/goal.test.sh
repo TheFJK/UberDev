@@ -387,8 +387,8 @@ fi
 # presence/absence of the dispatch side effect.
 #
 # Per-test reset block (copy-pasted before every BTn) sets all six MOCK_*
-# vars, DISPATCH_LOG, and MOCK_ISSUE_STATES to known-empty defaults to
-# prevent cross-test contamination.
+# vars (incl. MOCK_ISSUE_STATES) and DISPATCH_LOG to known-empty defaults
+# to prevent cross-test contamination.
 
 # Cache the two-blocks PR body for reuse in BT8 + BT11 (E-2).
 _two_blocks_body="$(printf 'Blocks: #99\nBlocks: #100\n')"
@@ -471,7 +471,7 @@ assert_rc "$_bt5_rc" "0" "BT5.empty-body-returns-zero"
 assert_eq "$DISPATCH_LOG" "" "BT5.empty-body-no-dispatch"
 
 # BT6 — R2: gh issue view rate-limit -> rc=0 (skip cycle), no dispatch.
-# Issue #140 risk 2; spec line 199-214; function lines 502-505.
+# Issue #140 risk 2; spec line 199-214; function lines 502-506.
 MOCK_PR_BODY="Blocks: #99"; MOCK_PR_RC=0
 MOCK_ISSUE_STATE=""; MOCK_ISSUE_RC=1
 MOCK_ISSUE_STDERR="API rate limit exceeded"
@@ -548,7 +548,7 @@ esac
 
 # BT11 — R5b: full happy-path multi-CLOSED -> dispatch + audit event.
 # Issue #140 risk 5 full; spec line 293-317; function lines 512-520.
-# uberdev_goal_state_init keeps parity with BT3 (line 340) — currently
+# uberdev_goal_state_init keeps parity with BT3 (line 360) — currently
 # redundant for the >>-append audit write, but defends against future
 # changes to uberdev_goal_audit's file-creation semantics.
 MOCK_PR_BODY="$_two_blocks_body"; MOCK_PR_RC=0
