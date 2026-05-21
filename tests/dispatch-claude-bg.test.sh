@@ -45,22 +45,25 @@ assert_grep_not() {
 # (the success arm of _uberdev_dispatch_claude_bg, post-#143 fix).
 # Reads $1 as the path to a fixture file simulating $BG_STDOUT_LOG and
 # echoes the post-scrub $DISPATCH_ID (either empty or exactly 8 hex).
-# Drift between this helper and the _uberdev_dispatch_claude_bg id-extraction
-# block (ID_CLEAN/ID_RAW/ID_GREP_RC, post-#143 fix) is caught by the
-# shape-check assertions above — the regexes here MUST stay in lockstep.
+# This helper now structurally mirrors the _uberdev_dispatch_claude_bg
+# id-extraction block (ID_CLEAN/ID_RAW, post-#143 fix): ANSI-strip via sed,
+# `printf '%s\n' | grep -m1 -aoE` the marker, `${raw##* }` for the word, then
+# hex-scrub + the {8} length sentinel. Keeping the same five steps (rather than
+# an awk|head shortcut) means no part of the pipeline escapes the shape-check
+# assertions above — the regexes here MUST stay in lockstep with production.
 _extract_id() {
   local fixture="$1"
-  local id
-  id="$(sed -E $'s/\x1B\\[[0-9;]*[a-zA-Z]//g' "$fixture" \
-        | grep -aoE '^backgrounded · [0-9a-f]{8}$' \
-        | awk '{print $NF}' \
-        | head -1)"
+  local clean raw id
+  clean="$(sed -E $'s/\x1B\\[[0-9;]*[a-zA-Z]//g' "$fixture")"
+  raw="$(printf '%s\n' "$clean" | grep -m1 -aoE '^backgrounded · [0-9a-f]{8}$')"
+  id="${raw##* }"
   id="${id//[^0-9a-f]/}"
   [[ ${#id} -eq 8 ]] || id=""
   printf '%s' "$id"
 }
 
-# tmp fixture cleanup (per-test scope). Also reaps TALLY_FILE (created ~L201)
+# tmp fixture cleanup (per-test scope). Also reaps TALLY_FILE (created in the
+# functional-subshell section below)
 # so an abnormal exit between its mktemp and the manual rm doesn't leak it;
 # guarded by -n because it's bound later. The manual rm stays (rm -f is idempotent).
 _TMPFIX=""
@@ -473,7 +476,7 @@ _assert_extract_empty '' \
 
 echo "== Runtime: B3 fail-CLOSED guard regression (#143 / RFC 0004 §3.5) =="
 _assert_extract_empty 'some unrelated noise\nbackground started but not the marker\nspawn attempted\n' \
-                      'missing-marker stdout yields empty (B3 fail-CLOSED guard `if [[ "$ID_GREP_RC" -ge 2 ... ]]` still fires rc=2)'
+                      'missing-marker stdout yields empty (B3 fail-CLOSED guard fires via the empty -z "$DISPATCH_ID" arm; grep rc=1 here, not >=2)'
 
 echo
 echo "== Summary =="
