@@ -231,7 +231,7 @@ aliases_sync_main() {
     done
     UBERDEV_ALIAS_NOTICE="${UBERDEV_ALIAS_NOTICE} — use /uberdev:<name>, or rename the existing file and run /uberdev:install-aliases."
   elif [ "$FIRST_RUN" = "1" ]; then
-    UBERDEV_ALIAS_NOTICE="uberdev: installed ${#INSTALLED_LIST[@]} short-form aliases (/issue, /solve, /turbo, /simplify, /review-pr, /merge, /dev). Opt out with UBERDEV_NO_AUTO_ALIAS=1."
+    UBERDEV_ALIAS_NOTICE="uberdev: installed ${#INSTALLED_LIST[@]} short-form aliases (/issue, /solve, /turbo, /simplify, /review-pr, /merge, /dev, /ubergoal). Opt out with UBERDEV_NO_AUTO_ALIAS=1."
   fi
   return 0
 }

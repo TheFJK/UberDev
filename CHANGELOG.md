@@ -21,7 +21,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 ### Security
 - `Blocks: #` parser is ReDoS-safe (anchored bash regex + 64 KiB body cap).
 - `/merge` auto-chain is scoped to `/goal` only via `UBERDEV_GOAL_ID` env-var provenance check (T5).
-- Per-PR `automerge_attempt_count > 3` halts the goal with `goal_circuit_breaker reason=merge_failed`.
+- Per-PR `automerge_attempt_count >= 3` short-circuits `uberdev_goal_should_automerge` so the goal stops re-dispatching `/merge` for that PR (the runaway-loop containment, R5). The PR sits in `green` until `max_cycles` fires or the operator intervenes; no `merge_failed` halt is emitted.
 
 ## [0.30.0] - 2026-05-19
 

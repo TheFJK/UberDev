@@ -242,10 +242,9 @@ for fn in uberdev_goal_state_init uberdev_goal_pr_state_transition uberdev_goal_
           uberdev_goal_extract_pr_num_from_log uberdev_goal_list_prs_in_state uberdev_goal_read_merge_result; do
   assert_grep "$GOAL_LIB" "^${fn}\\(\\)" "G19.public.${fn}"
 done
-# Internal function names (9 + 1 alias forwarder _persist_fp; the alias is
-# co-defined alongside _uberdev_goal_persist_fp and not listed separately
-# per the plan — the 10 names asserted here are the 9 underscore-prefixed
-# helpers plus _uberdev_goal_persist_fp itself).
+# Internal function names (10 underscore-prefixed helpers — the prior
+# `_persist_fp` short-alias forwarder was dropped post-impl-review S4 in
+# favor of calling the canonical `_uberdev_goal_persist_fp` directly).
 for fn in _uberdev_goal_validate_int _uberdev_goal_extract_fingerprint _uberdev_goal_parse_blocks_line \
           _uberdev_goal_count_merge_attempts _uberdev_goal_pr_state_machine_valid _uberdev_goal_now_secs \
           _uberdev_goal_persist_fp _uberdev_goal_dispatch_review_pr _uberdev_goal_dispatch_merge \
