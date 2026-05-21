@@ -318,6 +318,19 @@ assert_rc() {
   fi
 }
 
+assert_grep_file() {
+  local file="$1" pattern="$2" label="$3"
+  if [ -f "$file" ] && grep -qE -e "$pattern" "$file"; then
+    PASS=$((PASS + 1))
+    printf '  PASS  %s\n' "$label"
+  else
+    FAIL=$((FAIL + 1))
+    printf '  FAIL  %s\n' "$label" >&2
+    printf '        file:    %s (exists=%s)\n' "$file" "$([ -f "$file" ] && echo yes || echo no)" >&2
+    printf '        pattern: %s\n' "$pattern" >&2
+  fi
+}
+
 # BT1 — PR state machine: D17 forbidden transitions return non-zero;
 # a documented legal transition returns zero.
 _uberdev_goal_pr_state_machine_valid yellow-held merging
@@ -371,19 +384,7 @@ fi
 # No mocks required: pure function with TSV side-effect into $UBERDEV_TMPDIR
 # (which BT1-BT4 already set to $_b12_tmpdir). Each test uses a unique
 # goal_id so per-test TSVs do not collide.
-
-assert_grep_file() {
-  local file="$1" pattern="$2" label="$3"
-  if [ -f "$file" ] && grep -qE -e "$pattern" "$file"; then
-    PASS=$((PASS + 1))
-    printf '  PASS  %s\n' "$label"
-  else
-    FAIL=$((FAIL + 1))
-    printf '  FAIL  %s\n' "$label" >&2
-    printf '        file:    %s (exists=%s)\n' "$file" "$([ -f "$file" ] && echo yes || echo no)" >&2
-    printf '        pattern: %s\n' "$pattern" >&2
-  fi
-}
+# (assert_grep_file helper is defined alongside assert_eq/assert_rc above.)
 
 # BT12 — all 5 valid transitions return rc=0.
 # Same goal_id across the 5 sub-cases since the function does NOT enforce
@@ -444,7 +445,7 @@ fi
 # Row shape: <issue>\t<to>\t<epoch>. Anchor on issue=100, state=solving
 # (the very first BT12 row), epoch as a non-empty digit run. The leading
 # `^` anchors the issue column; trailing `$` anchors the epoch column.
-assert_grep_file "$_bt15_tsv" '^100	solving	[0-9]+$' "BT15.b-row-shape-issue-tab-state-tab-epoch"
+assert_grep_file "$_bt15_tsv" $'^100\tsolving\t[0-9]{10}$' "BT15.b-row-shape-issue-tab-state-tab-epoch"
 # Invalid transitions wrote NO row: the BT13.a goal_id produces no TSV.
 _bt15c_tsv="$_b12_tmpdir/goal-test-bt13a-issue-states.tsv"
 if [ ! -f "$_bt15c_tsv" ]; then
@@ -468,21 +469,26 @@ uberdev_goal_issue_state_transition test-bt17-alpha 300 input solving 2>/dev/nul
 uberdev_goal_issue_state_transition test-bt17-beta  300 input solving 2>/dev/null
 _bt17_alpha="$_b12_tmpdir/goal-test-bt17-alpha-issue-states.tsv"
 _bt17_beta="$_b12_tmpdir/goal-test-bt17-beta-issue-states.tsv"
-if [ -f "$_bt17_alpha" ] && [ -f "$_bt17_beta" ]; then
+_bt17_alpha_rows="$(wc -l < "$_bt17_alpha" 2>/dev/null | tr -d ' ')"
+_bt17_beta_rows="$(wc -l < "$_bt17_beta" 2>/dev/null | tr -d ' ')"
+if [ -f "$_bt17_alpha" ] && [ -f "$_bt17_beta" ] \
+   && [ "${_bt17_alpha_rows:-0}" -gt 0 ] && [ "${_bt17_beta_rows:-0}" -gt 0 ]; then
   PASS=$((PASS + 1))
   printf '  PASS  %s\n' "BT17.distinct-goal-ids-distinct-tsvs"
 else
   FAIL=$((FAIL + 1))
   printf '  FAIL  %s\n' "BT17.distinct-goal-ids-distinct-tsvs" >&2
-  printf '        alpha exists=%s, beta exists=%s\n' \
-    "$([ -f "$_bt17_alpha" ] && echo yes || echo no)" \
-    "$([ -f "$_bt17_beta" ] && echo yes || echo no)" >&2
+  printf '        alpha exists=%s rows=%s\n' \
+    "$([ -f "$_bt17_alpha" ] && echo yes || echo no)" "${_bt17_alpha_rows:-0}" >&2
+  printf '        beta exists=%s rows=%s\n' \
+    "$([ -f "$_bt17_beta" ] && echo yes || echo no)" "${_bt17_beta_rows:-0}" >&2
 fi
 
 # BT18 — invalid transition emits the documented stderr message. The
 # function's printf format is `goal-state: invalid issue transition %s->%s\n`;
 # we capture stderr to a tmpfile and grep for the substring.
 _bt18_err="$_b12_tmpdir/bt18-stderr"
+: > "$_bt18_err"  # truncate so any prior content cannot false-positive the grep
 uberdev_goal_issue_state_transition test-bt18 400 input resolved 2>"$_bt18_err" >/dev/null
 assert_grep_file "$_bt18_err" 'invalid issue transition input->resolved' "BT18.stderr-message-on-invalid-transition"
 
