@@ -39,6 +39,11 @@ uberdev_rate_limit_curl() {
   local HOST
   HOST="$(printf '%s' "$URL" | sed -nE 's#^[a-zA-Z][a-zA-Z0-9+.-]*://([^/?#]+).*$#\1#p')"
   [ -n "$HOST" ] || { echo "rate-limit-curl: cannot parse host from URL: $URL" >&2; return 2; }
+  # Reject hosts that could escape per-host scoping via path traversal or
+  # slash injection (the regex above filters `/?#` but allows `..`).
+  case "$HOST" in
+    *..* | */*) echo "rate-limit-curl: host contains path-escape characters: $HOST" >&2; return 2 ;;
+  esac
 
   local HOST_DIR="$RATE_STATE_DIR/$HOST"
   mkdir -p "$HOST_DIR"

@@ -34,12 +34,13 @@ for f in findings:
             ts_ms = int(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000)
     except Exception:
         continue
-    # Extract host
     import re
     m = re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://([^/?#]+)", url)
     if not m:
         continue
     host = m.group(1)
+    if ".." in host or "/" in host:
+        continue
     by_host[host].append((ts_ms, f.get("persona") or "unknown", url))
 # For each host, compute the max rolling 1-second window count
 breaches = []
