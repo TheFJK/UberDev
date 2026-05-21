@@ -63,10 +63,26 @@ fi
 # Named for the spec/plan's reference to a discover.sh helper that was never
 # added; the audit/trust-signal/merge-result call sites take local file paths
 # (not gh API output), so plain `jq` is the correct underlying tool.
+#
+# Failure mode: jq errors (malformed JSON, missing filter target) are
+# surfaced to stderr as a single audit-friendly warning line, then the
+# function still returns empty so callers see the same "empty string"
+# behavior they relied on (B9). Without this, a corrupted audit JSON
+# would silently swallow the error and Phase 2/3 would re-dispatch on
+# the missing signal indefinitely (infinite re-dispatch loop).
 gh_jq_or_jq() {
   local file="$1" filter="$2"
   [ -n "$file" ] && [ -f "$file" ] || return 1
-  jq -r "$filter" "$file" 2>/dev/null
+  local jq_err
+  jq_err="$(mktemp 2>/dev/null)" || { jq -r "$filter" "$file" 2>/dev/null; return; }
+  if ! jq -r "$filter" "$file" 2>"$jq_err"; then
+    local first_line
+    first_line="$(head -n 1 "$jq_err" 2>/dev/null)"
+    printf 'goal-state: jq failed on %s: %s\n' "$file" "${first_line:-unknown error}" >&2
+    rm -f "$jq_err"
+    return 0   # preserve empty-return contract for callers
+  fi
+  rm -f "$jq_err"
 }
 
 # ---------------------------------------------------------------------------
@@ -363,6 +379,15 @@ _uberdev_goal_check_unblock() {
   _uberdev_goal_validate_int "$held_pr" || return 1
   local body
   body="$(gh pr view "$held_pr" --json body --jq '.body' 2>/dev/null | head -c "${_UBERDEV_GOAL_BODY_CAP:-65536}")"
+  # B10 — Surface gh pr view failures (rate-limited, transient network,
+  # PR deleted upstream) instead of silently treating empty body as "no
+  # Blocks: lines" — that would let a held PR sit forever waiting for an
+  # unblock check that will never succeed. Skip this iteration; the
+  # next merged-PR transition will re-run the check.
+  [ -n "$body" ] || {
+    printf 'goal-state: gh pr view %s returned empty body; skipping unblock check this cycle\n' "$held_pr" >&2
+    return 0
+  }
   local blocking=()
   while IFS= read -r line; do
     local n; n="$(_uberdev_goal_parse_blocks_line "$line")"
@@ -371,8 +396,27 @@ _uberdev_goal_check_unblock() {
   [ "${#blocking[@]}" -gt 0 ] || return 0
   local all_closed=1
   for i in "${blocking[@]}"; do
-    local state
-    state="$(gh issue view "$i" --json state --jq '.state' 2>/dev/null || echo OPEN)"
+    # B11 — Distinguish "issue 404 (deleted upstream)" from other gh
+    # failures. The old `… || echo OPEN` fallback treated every error
+    # (rate-limit, network, 404) as OPEN, so a deleted blocking issue
+    # would permanently hold the PR. Now: 404 -> CLOSED (the only
+    # interpretation that makes the unblock proceed); other errors ->
+    # skip the unblock check and retry next cycle (do NOT assume any
+    # state).
+    local state issue_raw issue_rc
+    issue_raw="$(gh issue view "$i" --json state --jq '.state' 2>&1)"
+    issue_rc=$?
+    if [ "$issue_rc" -ne 0 ]; then
+      if printf '%s' "$issue_raw" | grep -q 'Could not resolve to an Issue'; then
+        state="CLOSED"
+      else
+        printf 'goal-state: gh issue view %s failed (rc=%s): %s\n' \
+          "$i" "$issue_rc" "$issue_raw" >&2
+        return 0
+      fi
+    else
+      state="$issue_raw"
+    fi
     [ "$state" = "CLOSED" ] || { all_closed=0; break; }
   done
   if [ "$all_closed" = "1" ]; then
