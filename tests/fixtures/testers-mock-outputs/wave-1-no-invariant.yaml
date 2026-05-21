@@ -1,0 +1,14 @@
+verdict: AUDITED
+findings:
+  - severity: suggestion
+    persona: a11y_critic
+    location: /checkout
+    invariant_violated: imaginary_invariant
+    summary: invariant doesn't exist
+    detail: This invariant ID isn't in invariants.yaml.
+    evidence:
+      repro_steps: [step1]
+      observed: x
+      expected: y
+    confidence: low
+confidence: low

@@ -1,0 +1,20 @@
+verdict: AUDITED
+findings:
+  - severity: blocker
+    persona: adversarial_security
+    location: /admin
+    invariant_violated: auth_isolation
+    summary: /admin reachable when logged-out
+    detail: Direct GET /admin without auth header returned 200 + admin panel HTML.
+    evidence:
+      network_request:
+        method: GET
+        url: /admin
+        status: 200
+      repro_steps:
+        - logout
+        - curl http://localhost:3457/admin
+      observed: 200 OK with admin panel
+      expected: 401 / redirect
+    confidence: high
+confidence: high

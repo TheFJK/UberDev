@@ -1,0 +1,18 @@
+verdict: AUDITED
+findings:
+  - severity: critical
+    persona: panicked_grandma
+    location: /checkout
+    invariant_violated: no_5xx
+    summary: 500 on double-click of Pay
+    detail: After two quick clicks I saw a 500 page.
+    evidence:
+      screenshot: scratch/panicked-grandma/shot-1.png
+      dom_hash: deadbeef
+      repro_steps:
+        - navigate to /checkout
+        - double-click Pay button
+      observed: "500 Internal Server Error"
+      expected: "single 200 or visible error"
+    confidence: high
+confidence: high

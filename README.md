@@ -43,6 +43,7 @@ UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-Sonn
 | **`/review-pr [<PR#>]`** | Comprehensive PR review using specialized agents fanned out in parallel — code review, simplifier, silent-failure hunter, type-design analyzer, comment analyzer, test analyzer. |
 | **`/merge [<PR#> \| --all]`** | Lands an approved PR into the integration branch — autopilot. Bare invocation auto-discovers scope: single PR for the current branch, or all eligible open PRs against `integration_branch`. Ordering, per-PR strategy, conflict resolution (one parallel agent per conflicted file), and local sync, all unattended. |
 | **`/dev <idea>`** | Prototype fast lane. Decomposes a free-text idea, builds it via parallel `Task()` subagents in-session, runs one light review, opens a PR labelled `prototype`, and auto-files a harden issue. Deliberately skips spec/plan and full `/review-pr`. Honors `--no-pr` / `--no-issue`. |
+| **`/testers`** | Read-only adversarial QA audit squad — 6 personas + 2 monitors over 3 waves; auto-detects web/api/native target; files verified findings as GitHub issues. |
 
 Every command is **repo-agnostic** — they auto-detect via `gh repo view`. No per-repo config required.
 
