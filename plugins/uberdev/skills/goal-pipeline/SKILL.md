@@ -17,10 +17,11 @@ All audit-event names, state-machine enums, regex shapes, and tunable thresholds
 
 ```
 GOAL_AUDIT_EVENT_ENUM='goal_dispatched|goal_pr_transition|goal_unblock_triggered|goal_cycle_completed|goal_converged|goal_circuit_breaker'
-GOAL_CIRCUIT_BREAKER_REASONS='max_cycles|nonconvergence|stuck_loop|merge_failed'
+GOAL_CIRCUIT_BREAKER_REASONS='max_cycles|nonconvergence|stuck_loop|merge_failed|gh_api_failed|unknown_merge_result'
 GOAL_PR_STATE_ENUM='dispatched|pushed-reviewing|green|yellow-held|red-held|merging|merged|merge-failed'
 GOAL_ISSUE_STATE_ENUM='input|solving|pr-pushed|resolved|failed'
 TRUST_SIGNAL_ENUM='green|yellow|red|stale|missing'
+GOAL_MERGE_RESULT_ENUM='success|conflict|hook_failed|missing'
 _UBERDEV_GOAL_DEFAULT_MAX_CYCLES=5
 _UBERDEV_GOAL_POLL_SECS=60
 _UBERDEV_GOAL_STUCK_SECS=14400         # 4h
@@ -34,10 +35,11 @@ BLOCKS_LINE_REGEX='^Blocks: #([0-9]+)$'
 Notes on the enums:
 
 - **`GOAL_AUDIT_EVENT_ENUM`** — the 6 events `lib/goal-state.sh::uberdev_goal_audit` accepts. Any other event name returns non-zero from the helper and is dropped on the floor; consumers grep these literals.
-- **`GOAL_CIRCUIT_BREAKER_REASONS`** — the 4 halt reasons emitted by Phase 2/3/4 inside the `goal_circuit_breaker` payload's `.reason` field. The set is closed; new reasons require an RFC amendment.
+- **`GOAL_CIRCUIT_BREAKER_REASONS`** — the 6 halt reasons emitted by Phase 2/3/4 inside the `goal_circuit_breaker` payload's `.reason` field. The four original reasons (`max_cycles`, `nonconvergence`, `stuck_loop`, `merge_failed`) plus two surfaced-failure reasons added during post-impl-review (`gh_api_failed` — Phase 3 `gh issue list` rc!=0 instead of falsely treating an empty candidates list as convergence; `unknown_merge_result` — Phase 2c case default arm for a `uberdev_goal_read_merge_result` value outside the documented `success|conflict|hook_failed|missing` set). The set is closed; new reasons require an RFC amendment.
 - **`GOAL_PR_STATE_ENUM`** — the 8 states the PR machine in `_uberdev_goal_pr_state_machine_valid` recognises; `merged` and `merge-failed` are terminal. `yellow-held → merging` and `red-held → merging` are forbidden (D17).
 - **`GOAL_ISSUE_STATE_ENUM`** — the 5 states the issue machine recognises; `pr-pushed → resolved` and the two `→ failed` transitions are the only sinks.
 - **`TRUST_SIGNAL_ENUM`** — the 5 values `uberdev_goal_read_trust_signal` returns. `stale` (phase2_5 missing in audit JSON) and `missing` (audit JSON absent) both trigger `_uberdev_goal_dispatch_review_pr` rather than an assumed GREEN (D17).
+- **`GOAL_MERGE_RESULT_ENUM`** — the 4 values `uberdev_goal_read_merge_result` returns. Maps the merge-pipeline's audit-row events (`merge_executed` for `success`, `pr_parked` with `data.reason ∈ {refused, ambiguous, push-non-ff}` for `conflict`, `pr_parked` with `data.reason == test-fail-exhausted` for `hook_failed`) plus a sentinel `missing` for "no audit row appended yet". Phase 2c's case statement handles each value explicitly; the `*)` default arm emits `goal_circuit_breaker reason=unknown_merge_result` (B7 — defensive guard against future enum drift).
 - **`BLOCKS_LINE_REGEX`** is the anchored ReDoS-safe shape (D9 + T1) used by `_uberdev_goal_parse_blocks_line` in `lib/goal-state.sh`. The Phase 3 prose and the Unblock rule both reference this constant by name; the literal `^Blocks: #([0-9]+)$` appears here once.
 - **`FINDING_FINGERPRINT_REGEX`** is the marker shape `agents/findings-to-issues.md` injects into every BLOCKER/CRITICAL `review-pr-finding` issue body; Phase 3 extracts it via `_uberdev_goal_extract_fingerprint` to drive the repeat-cycle detector.
 
@@ -235,7 +237,7 @@ while true; do
           # site previously held this block but those variables don't exist
           # there, so the check silently no-op'd). Setting overflow_detected
           # here gates the Phase 3 first-10 truncation below.
-          halted_overflow="$(gh_jq_or_jq "$audit_json" '.halted_due_to_overflow // false')"
+          halted_overflow="$(gh_jq_or_jq "$audit_json" '.phases.phase2_5.halted_due_to_overflow // false')"
           if [ "$halted_overflow" = "true" ]; then
             overflow_detected=1
             # Q4 — accumulate per-cycle PR-overflow count for the
@@ -270,13 +272,35 @@ while true; do
     case "$result" in
       success)
         uberdev_goal_pr_state_transition "$GOAL_ID" "$pr" merging merged
-        for held_pr in $(uberdev_goal_list_prs_in_state "$GOAL_ID" yellow-held red-held); do
+        # B4 — uberdev_goal_list_prs_in_state takes ONE state ($2); passing
+        # `yellow-held red-held` made `red-held` a positional no-op and the
+        # red-held PRs silently never got the unblock check. Call twice and
+        # concatenate, mirroring print_summary's pattern below.
+        for held_pr in $(uberdev_goal_list_prs_in_state "$GOAL_ID" yellow-held; \
+                         uberdev_goal_list_prs_in_state "$GOAL_ID" red-held); do
           _uberdev_goal_check_unblock "$held_pr"
         done
         ;;
       conflict|hook_failed)
         uberdev_goal_audit goal_circuit_breaker \
           "{\"reason\":\"merge_failed\",\"pr\":$pr,\"result\":\"$result\"}"
+        print_summary "$cycle"
+        exit 1
+        ;;
+      missing)
+        # /merge hasn't appended an audit row for this PR yet (in-flight or
+        # the merge-bg-stdout marker fired before the audit write hit the
+        # disk). Defer to the next watch iteration — re-poll happens on the
+        # next sleep cycle. Do NOT halt.
+        ;;
+      *)
+        # B7 — defensive default-case guard. uberdev_goal_read_merge_result
+        # is contracted to return `success|conflict|hook_failed|missing`; any
+        # other value indicates a contract drift (e.g., a future enum member
+        # not threaded through here). Halt loudly rather than fall through
+        # silently, which would leave the PR stuck in `merging` forever.
+        uberdev_goal_audit goal_circuit_breaker \
+          "{\"reason\":\"unknown_merge_result\",\"pr\":$pr,\"result\":\"$result\"}"
         print_summary "$cycle"
         exit 1
         ;;
@@ -326,7 +350,22 @@ fi
 candidates_json="$(gh issue list --label "$FINDING_LABEL" --state open \
   --json number,body,createdAt,author --limit 100 \
   --jq "$jq_filter" --arg start "$goal_start_iso" 2>"$findings_err")"
+gh_rc=$?
 [ -s "$findings_err" ] && cat "$findings_err" >&2
+
+# B6 — Surface gh failures instead of treating empty output as convergence.
+# Previously `$gh_rc` was discarded, so a rate-limit 403 or transient network
+# error returned empty candidates_json → the Phase 3 terminal check then saw
+# "new_candidates empty AND all PRs terminal" and emitted goal_converged
+# falsely. Now: non-zero rc emits a goal_circuit_breaker with reason=gh_api_failed
+# and exits 1 so the operator can re-run /goal after the underlying issue
+# clears. The findings_err contents already went to stderr above.
+if [ "$gh_rc" -ne 0 ]; then
+  uberdev_goal_audit goal_circuit_breaker \
+    "{\"reason\":\"gh_api_failed\",\"step\":\"phase3_issue_list\",\"exit_code\":$gh_rc}"
+  print_summary "$cycle"
+  exit 1
+fi
 
 # Convert JSON array to bash array of issue numbers.
 mapfile -t new_candidates < <(printf '%s' "$candidates_json" | jq -r '.[]')
@@ -430,24 +469,29 @@ The held-PR list (each row `pr=<num> state=<yellow-held|red-held> blocks=#<i1>,#
 
 ```bash
 print_summary() {
-  local cycles="$1" prs_merged prs_held issues_resolved wall_secs
+  local cycles="$1" prs_merged prs_held_lines prs_held_count issues_resolved wall_secs
   prs_merged="$(uberdev_goal_list_prs_in_state "$GOAL_ID" merged | grep -c . || true)"
-  prs_held="$(uberdev_goal_list_prs_in_state "$GOAL_ID" yellow-held; \
-              uberdev_goal_list_prs_in_state "$GOAL_ID" red-held)"
-  prs_held_count="$(printf '%s\n' "$prs_held" | grep -c . || true)"
+  # Build a `<state>\t<pr>` stream so the per-row printf below can emit the
+  # `state=` field promised at line ~466 ("each row pr=<num> state=<yellow-held
+  # |red-held> blocks=…"). The prior implementation merged the two lists into
+  # bare PR numbers and the `state=` field was silently dropped (S6).
+  prs_held_lines="$( \
+    uberdev_goal_list_prs_in_state "$GOAL_ID" yellow-held | sed 's/^/yellow-held\t/'; \
+    uberdev_goal_list_prs_in_state "$GOAL_ID" red-held    | sed 's/^/red-held\t/' )"
+  prs_held_count="$(printf '%s\n' "$prs_held_lines" | grep -c . || true)"
   issues_resolved="$(awk '$2=="resolved" {print $1}' \
     "$UBERDEV_TMPDIR/goal-$GOAL_ID-issue-states.tsv" | grep -c . || true)"
   wall_secs="$(( $(date +%s) - watch_start ))"
   printf 'goal %s: cycles=%s/%s prs_merged=%s prs_held=%s issues_resolved=%s wall_secs=%s\n' \
     "$GOAL_ID" "$cycles" "$MAX_CYCLES" "$prs_merged" "$prs_held_count" \
     "$issues_resolved" "$wall_secs"
-  printf '%s\n' "$prs_held" | while read -r p; do
+  printf '%s\n' "$prs_held_lines" | while IFS=$'\t' read -r state p; do
     [ -z "$p" ] && continue
     body="$(gh pr view "$p" --json body --jq '.body' 2>/dev/null \
       | head -c "$_UBERDEV_GOAL_BODY_CAP")"
     blocks="$(printf '%s\n' "$body" | grep -E '^Blocks: #[0-9]+$' \
       | sed -E 's/^Blocks: #([0-9]+)$/#\1/' | paste -sd, -)"
-    printf '  pr=%s blocks=%s\n' "$p" "${blocks:-none}"
+    printf '  pr=%s state=%s blocks=%s\n' "$p" "$state" "${blocks:-none}"
   done
 }
 ```

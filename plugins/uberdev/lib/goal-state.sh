@@ -22,7 +22,7 @@
 #   _uberdev_goal_count_merge_attempts     GOAL_ID PR
 #   _uberdev_goal_pr_state_machine_valid   FROM TO
 #   _uberdev_goal_now_secs
-#   _uberdev_goal_persist_fp               GOAL_ID CYCLE FP   (alias: _persist_fp)
+#   _uberdev_goal_persist_fp               GOAL_ID CYCLE FP
 #   _uberdev_goal_dispatch_review_pr       PR_NUM
 #   _uberdev_goal_dispatch_merge           PR_NUM
 #   _uberdev_goal_check_unblock            HELD_PR_NUM
@@ -61,15 +61,17 @@ fi
 # gh_jq_or_jq LOCAL_FILE JQ_FILTER
 # Local-file jq wrapper. Reads a JSON file from disk and applies a jq filter.
 # Named for the spec/plan's reference to a discover.sh helper that was never
-# added; the audit/trust-signal/merge-result call sites take local file paths
-# (not gh API output), so plain `jq` is the correct underlying tool.
+# added; the audit/trust-signal call sites take local file paths (not gh API
+# output), so plain `jq` is the correct underlying tool.
 #
 # Failure mode: jq errors (malformed JSON, missing filter target) are
 # surfaced to stderr as a single audit-friendly warning line, then the
-# function still returns empty so callers see the same "empty string"
-# behavior they relied on (B9). Without this, a corrupted audit JSON
-# would silently swallow the error and Phase 2/3 would re-dispatch on
-# the missing signal indefinitely (infinite re-dispatch loop).
+# function returns rc=1 (B5). Callers MUST branch on exit code rather than
+# treating empty-stdout as success — masking jq failure as rc=0 let a
+# corrupted audit JSON fall through to the "phase2_5 missing" path and
+# silently misclassified the trust signal. Stdout stays empty on failure
+# so the legacy `[ -n "$out" ]` predicates also still fail closed; the
+# exit-code change is additive.
 gh_jq_or_jq() {
   local file="$1" filter="$2"
   [ -n "$file" ] && [ -f "$file" ] || return 1
@@ -80,7 +82,7 @@ gh_jq_or_jq() {
     first_line="$(head -n 1 "$jq_err" 2>/dev/null)"
     printf 'goal-state: jq failed on %s: %s\n' "$file" "${first_line:-unknown error}" >&2
     rm -f "$jq_err"
-    return 0   # preserve empty-return contract for callers
+    return 1
   fi
   rm -f "$jq_err"
 }
@@ -161,15 +163,17 @@ _uberdev_goal_count_merge_attempts() {
 }
 
 # _uberdev_goal_persist_fp GOAL_ID CYCLE FP
-# Append CYCLE\tFINGERPRINT to fingerprints TSV. _persist_fp is a one-line
-# forwarder so inline pseudocode call sites remain terse.
+# Append CYCLE\tFINGERPRINT to fingerprints TSV. The single canonical name
+# is used at the one call site below; the prior short-alias forwarder
+# `_persist_fp` was dropped (S4) because the project naming convention is
+# `_uberdev_goal_*` for every internal helper and the call site easily
+# accommodates the longer name without losing readability.
 _uberdev_goal_persist_fp() {
   local goal_id="$1" cycle="$2" fp="$3"
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
   printf '%s\t%s\n' "$cycle" "$fp" \
     >> "$tmpdir/goal-$goal_id-fingerprints.tsv"
 }
-_persist_fp() { _uberdev_goal_persist_fp "$@"; }
 
 # ---------------------------------------------------------------------------
 # Public functions
@@ -243,11 +247,19 @@ uberdev_goal_issue_state_transition() {
 
 # uberdev_goal_read_trust_signal AUDIT_JSON_PATH
 # D17 — GREEN/YELLOW/RED/STALE/MISSING from /review-pr Phase 2.5 audit.
+# B5 — explicit branch on gh_jq_or_jq exit code: jq-failure (rc!=0) means
+# the audit JSON is unreadable (malformed / not JSON); treat as `missing`
+# so the caller re-dispatches /review-pr (the only safe action — never
+# assume GREEN on an unreadable trust artifact, per D17). Empty stdout
+# with rc=0 means jq ran but returned empty (phase2_5 absent) — that's
+# the legacy/pre-v0.26.0 audit shape, treated as `stale`.
 uberdev_goal_read_trust_signal() {
   local audit_path="$1"
   [ -f "$audit_path" ] || { printf 'missing\n'; return 0; }
   local p25
-  p25="$(gh_jq_or_jq "$audit_path" '.phases.phase2_5 // empty')"
+  if ! p25="$(gh_jq_or_jq "$audit_path" '.phases.phase2_5 // empty')"; then
+    printf 'missing\n'; return 0
+  fi
   [ -n "$p25" ] || { printf 'stale\n'; return 0; }
   local blocker critical halted
   blocker="$(printf '%s' "$p25" | jq -r '.by_severity.blocker // 0')"
@@ -266,7 +278,7 @@ uberdev_goal_check_fingerprint_repeat() {
   _uberdev_goal_validate_int "$cycle" || return 2
   [ -n "$fp" ] || return 0
   local prev_cycle=$(( cycle - 1 ))
-  [ "$prev_cycle" -lt 1 ] && { _persist_fp "$goal_id" "$cycle" "$fp"; return 0; }
+  [ "$prev_cycle" -lt 1 ] && { _uberdev_goal_persist_fp "$goal_id" "$cycle" "$fp"; return 0; }
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
   if awk -v c="$prev_cycle" -v f="$fp" '$1==c && $2==f {found=1} END {exit !found}' \
        "$tmpdir/goal-$goal_id-fingerprints.tsv"; then
@@ -289,8 +301,21 @@ uberdev_goal_should_automerge() {
 }
 
 # uberdev_goal_locate_review_pr_audit ISSUE_NUM
-# Locate newest .claude/audit/review-pr-<PR>-<run>.json for the issue's PR.
-# Returns empty string if none.
+# Locate newest .uberdev/runs/<run-id>/review-pr-verdict.json (canonical) or
+# worktree-mirror equivalent for the issue's PR. Mirrors merge-pipeline/SKILL.md
+# Phase 1.4 PATH_2 sub-condition (c.0): globs the canonical path plus three
+# worktree-mirror layouts (/solve and /turbo write `.claude/worktrees/*/.uberdev/`
+# per solve-pipeline/SKILL.md; using-git-worktrees emits hidden `.worktrees/*`
+# and visible `worktrees/*` layouts). Filters by top-level `.pr == $pr_num`,
+# validates each `<run-id>` against RUN_ID_REGEX before any path concatenation
+# (D4/F8 path-traversal hardening — basename-of-dirname projection is path-
+# layout-agnostic because prefix segments are never concatenated from untrusted
+# input), and picks the lex-greatest `<run-id>` (chronologically newest;
+# `YYYYMMDD-HHMMSS-<short-sha>` lex-sorts identically). Returns empty string
+# when no match. The legacy `.claude/audit/review-pr-<PR>-<run>.json` path is
+# never written by /review-pr — reading it (the pre-B1 behavior) silently
+# returned "missing" forever, blocking the goal-pipeline from ever picking up
+# the trust signal.
 uberdev_goal_locate_review_pr_audit() {
   local issue="$1"
   _uberdev_goal_validate_int "$issue" || return 1
@@ -298,7 +323,19 @@ uberdev_goal_locate_review_pr_audit() {
   local pr
   pr="$(uberdev_goal_extract_pr_num_from_log "${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$issue.log")"
   [ -n "$pr" ] || return 0
-  ls -t .claude/audit/review-pr-"$pr"-*.json 2>/dev/null | head -n 1
+  _uberdev_goal_validate_int "$pr" || return 0
+  local f run_id pr_field
+  for f in .uberdev/runs/*/review-pr-verdict.json \
+           .claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json \
+           .worktrees/*/.uberdev/runs/*/review-pr-verdict.json \
+           worktrees/*/.uberdev/runs/*/review-pr-verdict.json; do
+    [ -r "$f" ] || continue
+    pr_field="$(jq -r '.pr // empty' "$f" 2>/dev/null)" || continue
+    [ "$pr_field" = "$pr" ] || continue
+    run_id="$(basename "$(dirname "$f")")"
+    [[ "$run_id" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]] || continue
+    printf '%s\t%s\n' "$run_id" "$f"
+  done | sort -r | head -n 1 | cut -f2
 }
 
 # uberdev_goal_extract_pr_num_from_log STDOUT_LOG_PATH
@@ -321,15 +358,49 @@ uberdev_goal_list_prs_in_state() {
 }
 
 # uberdev_goal_read_merge_result PR_NUM
-# Reads .claude/audit/merge-<PR>-<run>.json; echoes one of
-# success | conflict | hook_failed.
+# Reads the canonical `.uberdev/audit.jsonl` JSONL stream written by every
+# merge-pipeline phase (see merge-pipeline/SKILL.md §"Audit log JSONL schema"
+# (D15) — `AUDIT_LOG_FILENAME='audit.jsonl'`). Filters rows by
+# `.event ∈ {merge_executed, pr_parked}` AND `.data.pr == $pr`, takes the
+# most recent (last appended line). Maps the merge-pipeline's PARK_REASON_ENUM
+# + merge_executed semantics onto goal-pipeline's tri-state result:
+#   - `merge_executed`                                    -> success
+#   - `pr_parked` with data.reason ∈ {refused, ambiguous, push-non-ff}
+#                                                         -> conflict
+#   - `pr_parked` with data.reason == test-fail-exhausted -> hook_failed
+#   - no matching row                                     -> missing
+# The legacy `.claude/audit/merge-<PR>-<run>.json` path is never written by
+# /merge — reading it (the pre-B2 behavior) silently returned "missing"
+# forever, which then fell through to no PR transition in Phase 2c and the
+# goal would never converge.
 uberdev_goal_read_merge_result() {
   local pr="$1"
   _uberdev_goal_validate_int "$pr" || return 1
-  local audit
-  audit="$(ls -t .claude/audit/merge-"$pr"-*.json 2>/dev/null | head -n 1)"
-  [ -n "$audit" ] && [ -f "$audit" ] || { printf 'missing\n'; return 0; }
-  gh_jq_or_jq "$audit" '.result // "missing"' | head -n 1
+  local audit=".uberdev/audit.jsonl"
+  [ -f "$audit" ] || { printf 'missing\n'; return 0; }
+  # Pick the LAST matching JSONL line (most recent). Use a single jq pass
+  # to project `event\treason` for the final matching row; gh_jq_or_jq's
+  # `-r` mode + file argument is the wrong tool here (audit.jsonl is JSONL,
+  # not a single JSON document), so call jq directly with `--slurp` to
+  # treat the stream as an array.
+  local row
+  row="$(jq -r --argjson pr "$pr" \
+    '[.[] | select(.event=="merge_executed" or .event=="pr_parked") | select(.data.pr == $pr) | {event,reason:(.data.reason // "")}] | last | if . == null then "" else "\(.event)\t\(.reason)" end' \
+    --slurp "$audit" 2>/dev/null)"
+  [ -n "$row" ] || { printf 'missing\n'; return 0; }
+  local event="${row%%	*}" reason="${row#*	}"
+  case "$event" in
+    merge_executed)
+      printf 'success\n' ;;
+    pr_parked)
+      case "$reason" in
+        refused|ambiguous|push-non-ff) printf 'conflict\n' ;;
+        test-fail-exhausted)           printf 'hook_failed\n' ;;
+        *)                             printf 'missing\n' ;;
+      esac ;;
+    *)
+      printf 'missing\n' ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
