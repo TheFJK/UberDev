@@ -328,8 +328,8 @@ Codes are grouped by prefix: **D** (design decisions), **T** (trust/threat bound
 | D2  | Issue state machine: five states `input → solving → pr-pushed → resolved`; `solving → failed` and `pr-pushed → failed` allowed; no audit event on issue transitions (derived state only). | §3.2.2 |
 | D3  | Audit helper contract: `uberdev_goal_audit` accepts only enum-validated event names and uses manual-escape JSON framing (mirrors `discover.sh:39-53`); unknown events return rc=1. | §3.6 |
 | D4  | GOAL_ID and TMPDIR path-safety rules: `GOAL_ID` is generated with a random suffix, never derived from user-controlled input (attacker could collide TMPDIR paths); `UBERDEV_TMPDIR` is validated against a safe-character allowlist before any file creation. | §3.3 |
-| D8  | Auto-merge eligibility gate: `/goal` only auto-merges a PR when (a) `UBERDEV_GOAL_ID` env is set (provenance check — proves the call is inside a `/goal` run) and (b) per-PR merge attempt count is below `_UBERDEV_GOAL_MAX_MERGE_ATTEMPTS` (default 3). | §3.2.3 |
-| D9  | All regex patterns over PR/issue body text must use anchored bash `[[ =~ ]]` patterns with no quantifiers under user control; this is the ReDoS safety rule for body-parsing loops. | — |
+| D8  | Auto-merge eligibility gate: `/goal` only auto-merges a PR when (a) `UBERDEV_GOAL_ID` env is set (provenance check — proves the call is inside a `/goal` run) and (b) per-PR merge attempt count is below `_UBERDEV_GOAL_MAX_MERGE_ATTEMPTS` (default 3). | §3.2.3, T5, R5 |
+| D9  | All regex patterns over PR/issue body text must use anchored bash `[[ =~ ]]` patterns with no quantifiers under user control; this is the ReDoS safety rule for body-parsing loops. | T1, R1 |
 | D12 | `claim_collision` soft-fail semantics: when `solve-pipeline` refuses to dispatch an issue because another agent holds the `uberdev:active` label, `/goal` skips that issue for the cycle (does not retry, does not halt the goal). | §4.1 |
 | D13 | Blocker-overflow handler: when `/review-pr` audit JSON contains `halted_due_to_overflow: true`, the PR is treated as RED (same transition), `overflow_detected` is set in Phase 2a (where `$audit_json` and `$pr_num` are in scope), and Phase 3 truncates the next-queue to the first 10 candidates; the goal does NOT halt. | §4.4 |
 | D15 | Backend resolution is performed exactly once per `/goal` run (Phase 0 `uberdev_dispatch_preflight`) and the result is forwarded to every child dispatch; per-cycle re-resolution is forbidden because the stdout-log polling contract depends on a stable, backend-specific path convention. Also: the merge-pipeline audit log filename is canonically `audit.jsonl` per `merge-pipeline/SKILL.md §"Audit log JSONL schema"`. | §3.5 |
@@ -342,10 +342,10 @@ Codes are grouped by prefix: **D** (design decisions), **T** (trust/threat bound
 
 | Code | One-sentence definition | See also |
 |------|-------------------------|----------|
-| T1 | ReDoS threat boundary: user-controlled input (PR body, issue body) reaching a regex match must be capped at 64 KiB before the parse loop AND the regex itself must be anchored with no user-controlled quantifiers. Both controls together bound parse cost to O(1) on hostile input. | — |
+| T1 | ReDoS threat boundary: user-controlled input (PR body, issue body) reaching a regex match must be capped at 64 KiB before the parse loop AND the regex itself must be anchored with no user-controlled quantifiers. Both controls together bound parse cost to O(1) on hostile input. | D9, R1 |
 | T3 | `gh` argument injection threat: every value that will be passed to a `gh` CLI call (PR numbers, issue numbers) must pass `_uberdev_goal_validate_int` before the `gh` call executes. | — |
 | T4 | TMPDIR path injection threat: `$UBERDEV_TMPDIR` may be set by an attacker-controlled environment; reject it if it contains any character outside `[A-Za-z0-9_./-]` before creating any file under it. | — |
-| T5 | Context provenance threat: auto-merge (and by extension, the per-PR attempt counter that contains it) must only fire when `UBERDEV_GOAL_ID` is set in the environment, ensuring the merge path cannot be triggered from outside a `/goal` run. | §3.2.3 |
+| T5 | Context provenance threat: auto-merge (and by extension, the per-PR attempt counter that contains it) must only fire when `UBERDEV_GOAL_ID` is set in the environment, ensuring the merge path cannot be triggered from outside a `/goal` run. | §3.2.3, D8 |
 
 ### 9.3 Q — Open questions resolved into implementation
 
@@ -361,9 +361,9 @@ Codes are grouped by prefix: **D** (design decisions), **T** (trust/threat bound
 
 | Code | One-sentence definition | See also |
 |------|-------------------------|----------|
-| R1 | 64 KiB body cap (`head -c 65536`) on any PR or issue body fetched from `gh` before regex processing; this is the load-bearing ReDoS defence (see T1); without the cap a 10 MB body could exhaust memory or cause catastrophic backtracking. | — |
+| R1 | 64 KiB body cap (`head -c 65536`) on any PR or issue body fetched from `gh` before regex processing; this is the load-bearing ReDoS defence (see T1); without the cap a 10 MB body could exhaust memory or cause catastrophic backtracking. | D9, T1 |
 | R3 | `gh` argument-injection robustness: call `_uberdev_goal_validate_int` on every PR/issue number before passing it to any `gh` call; this is the first-line defence against shell-injection via attacker-controlled issue numbers. (See also T3 — R3 is the robustness rule; T3 is the threat it mitigates.) | — |
-| R5 | Runaway-loop containment: the per-PR merge-attempt counter cap (`_UBERDEV_GOAL_MAX_MERGE_ATTEMPTS=3`) MUST be enforced via `UBERDEV_GOAL_ID` env forwarding to child dispatches; without env forwarding the cap cannot be queried and the loop will attempt unlimited merges. | — |
+| R5 | Runaway-loop containment: the per-PR merge-attempt counter cap (`_UBERDEV_GOAL_MAX_MERGE_ATTEMPTS=3`) MUST be enforced via `UBERDEV_GOAL_ID` env forwarding to child dispatches; without env forwarding the cap cannot be queried and the loop will attempt unlimited merges. | D8 |
 | R6 | Dispatch completion detection: agent completion is determined by the `backgrounded · ` marker in the stdout log (not the non-existent `claude agents status <id>` API); this marker is a stable, asserted contract across all `lib/dispatch.sh` backends and is the only authoritative completion signal in v1. | §3.5 |
 
 ### 9.5 B — Bug fix / Behaviour contracts
