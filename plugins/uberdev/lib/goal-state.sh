@@ -265,9 +265,22 @@ uberdev_goal_read_trust_signal() {
   # into three locals in one syscall (3 jq forks -> 1; F1 simplify-lens). The
   # `// 0` and `// false` defaults preserve the prior shape-tolerance for
   # audit JSONs missing either by_severity counter or the halted field.
+  #
+  # B5 defense-in-depth: capture the jq pipeline's rc into a separate
+  # assignment so a structural type error (e.g. by_severity is a string
+  # instead of an object — the `// 0` default cannot rescue indexing into
+  # a string) is treated as "missing" rather than silently fall through.
+  # Inlining the substitution into `read -r <<<"$(...)"` would discard
+  # the rc; without this branch, malformed phase2_5 → empty TSV → empty
+  # blocker/critical/halted vars → fall-through to "green" (the exact
+  # YELLOW->GREEN misclassification path issue #137 was filed against).
+  local tsv jq_rc
+  tsv="$(printf '%s' "$p25" \
+    | jq -r '[.by_severity.blocker // 0, .by_severity.critical // 0, (.halted // false | tostring)] | @tsv' 2>/dev/null)"
+  jq_rc=$?
+  [ "$jq_rc" -eq 0 ] || { printf 'missing\n'; return 0; }
   local blocker critical halted
-  read -r blocker critical halted <<<"$(printf '%s' "$p25" \
-    | jq -r '[.by_severity.blocker // 0, .by_severity.critical // 0, (.halted // false | tostring)] | @tsv')"
+  read -r blocker critical halted <<<"$tsv"
   if [ "$halted" = "true" ] || [ "$blocker" -gt 0 ]; then printf 'red\n'; return 0; fi
   if [ "$critical" -gt 0 ]; then printf 'yellow\n'; return 0; fi
   printf 'green\n'

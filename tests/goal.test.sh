@@ -280,9 +280,10 @@ echo "== Behavioral tests (B12 — sourced-function exercises) =="
 #   BT2      Blocks: parser ReDoS-safe anchoring
 #   BT3      fingerprint repeat detector
 #   BT4      gh_jq_or_jq jq shim file-not-found path
-#   BT12-BT19 uberdev_goal_read_trust_signal enum mapping
+#   BT12-BT20 uberdev_goal_read_trust_signal enum mapping
 #            (green/yellow/red-via-blocker/red-via-halted/stale/missing/
-#             missing-via-malformed-json/shape-tolerance — see #137)
+#             missing-via-malformed-json/shape-tolerance/missing-via-
+#             second-jq-failure — see #137)
 #
 # Isolation: mktemp $UBERDEV_TMPDIR for this section so writes do not
 # collide with production state nor with each other.
@@ -433,10 +434,15 @@ EOF
 assert_eq "$(uberdev_goal_read_trust_signal "$_bt14_audit_red_blocker")" "red" \
   "BT14.blocker-emits-red"
 
-# BT15 — RED via halted: halted=true forces RED even when both severity
-# counters are 0. This is the "halted_due_to_overflow" path from RFC
-# 0002 §3.4: Phase 2.5 truncated findings beyond MAX_NEW=10 so the
-# severity counters are unreliable; the only safe action is red-held.
+# BT15 — RED via halted: halted=true is one of two OR-equal conditions
+# that triggers RED (blocker>0 is the other; both share the same
+# `red` branch in goal-state.sh:271 via a single `||`). This test
+# isolates the halted-only path with blocker=critical=0 so a regression
+# that drops the halted check (or reorders the OR) would surface here
+# without being masked by a non-zero blocker. RFC 0002 §3.4 calls this
+# the "halted_due_to_overflow" signal: Phase 2.5 truncated findings
+# beyond MAX_NEW=10 so the severity counters are unreliable; the only
+# safe action is red-held.
 _bt15_audit_red_halted="$_b12_tmpdir/audit-red-halted.json"
 cat > "$_bt15_audit_red_halted" <<'EOF'
 {
@@ -491,6 +497,24 @@ cat > "$_bt19_audit_minimal" <<'EOF'
 EOF
 assert_eq "$(uberdev_goal_read_trust_signal "$_bt19_audit_minimal")" "green" \
   "BT19.empty-phase2_5-defaults-to-green"
+
+# BT20 — MISSING via second-jq failure (B5 defense-in-depth). The first
+# jq call (.phases.phase2_5 // empty) succeeds because phase2_5 IS
+# present, so p25 is non-empty and we fall past the 'stale' branch.
+# The SECOND jq call then errors because by_severity is a string rather
+# than an object — `.by_severity.blocker` cannot index a string and jq
+# exits non-zero. Without the explicit rc check at goal-state.sh:268-271,
+# `read -r blocker critical halted <<<""` would leave all three vars
+# empty, the `[ $blocker -gt 0 ]` arithmetic would silently evaluate to
+# false, and the function would fall through to printf 'green'. That is
+# the YELLOW->GREEN misclassification path the original #137 finding
+# was filed against — this test locks the defense-in-depth fix.
+_bt20_audit_malformed_severity="$_b12_tmpdir/audit-malformed-severity.json"
+cat > "$_bt20_audit_malformed_severity" <<'EOF'
+{"phases":{"phase2_5":{"by_severity":"not_an_object","halted":false}}}
+EOF
+assert_eq "$(uberdev_goal_read_trust_signal "$_bt20_audit_malformed_severity" 2>/dev/null)" "missing" \
+  "BT20.malformed-by_severity-emits-missing"
 
 # Cleanup: remove the isolated tmpdir contents (we created the whole
 # directory via mktemp -d, so we can rm -rf safely — it's our own).
