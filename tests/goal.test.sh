@@ -441,6 +441,12 @@ gh() {
   return 0
 }
 
+# Belt-and-braces forward-defense: the BT5-BT11 path overrides
+# _uberdev_goal_dispatch_review_pr directly, so the real impl that would
+# chain into uberdev_dispatch_one never runs and this stub is currently
+# unreachable. It is kept (and given the same DISPATCHED:$pr body) so a
+# future direct uberdev_dispatch_one call site is also neutralised and
+# cannot fire the real dispatcher / leak tmpfiles from a passing suite.
 uberdev_dispatch_one() {
   DISPATCH_LOG="${DISPATCH_LOG}DISPATCHED:$1 "
 }
