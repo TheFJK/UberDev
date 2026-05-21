@@ -1131,6 +1131,294 @@ if _bt5_seed bt5-7 203 3; then
   assert_rc "$?" "0" "BT5.B7-env-knob-override-allowed"
 fi
 
+# ----- BT24-BT47 — uberdev_goal_{extract_pr_num_from_log,list_prs_in_state,
+#       locate_review_pr_audit,read_merge_result} behavioural coverage -----
+# Closes issue #161: the four critical-path lib fns on /uberdev:goal's PR
+# state-transition path previously had ZERO behavioural tests — only the
+# G19.public.* function-existence shape-checks above (lines 241-242). The
+# 170/170 passing suite provided false confidence: a regression in any of
+# these four would not be caught. Per the issue's Suggested fix scope, each
+# fn gets coverage for happy path, empty input, malformed input, plus one
+# function-specific edge case (multi-entry log, multi-PR-in-state, multi-
+# run-id lex-sort, last-matching-row-wins).
+#
+# CWD handling: uberdev_goal_read_merge_result reads ".uberdev/audit.jsonl"
+# and uberdev_goal_locate_review_pr_audit globs ".uberdev/runs/*/...",
+# both relative to CWD. Tests use a subshell `(cd "$dir" && fn)` to
+# control CWD without leaking the change to subsequent tests. Each fixture
+# directory under $_b12_tmpdir is unique to its test so per-test state
+# cannot cross-contaminate. UBERDEV_TMPDIR is still pinned to $_b12_tmpdir
+# from line 294-295, so solve-bg-stdout-<issue>.log fixtures land where
+# the function-under-test (locate_review_pr_audit) reads them.
+
+# ===== uberdev_goal_extract_pr_num_from_log (lines 377-381) =====
+
+# BT24 — happy: `pushed PR #N` marker present -> outputs N.
+_bt24_log="$_b12_tmpdir/bt24.log"
+cat > "$_bt24_log" <<'EOF'
+[solve-bg] dispatched /solve 100
+[solve-bg] pushed PR #123 (issue #100)
+[solve-bg] done
+EOF
+assert_eq "$(uberdev_goal_extract_pr_num_from_log "$_bt24_log")" "123" \
+  "BT24.extract-pr-happy-path"
+
+# BT25 — missing file: `[ -f "$log" ] || return 0` short-circuits. Capture
+# the rc separately because the `$(...)` swallows it; assert both that the
+# function exited 0 (not an error) AND that stdout is empty (no garbage
+# output before the early return).
+_bt25_rc=0
+_bt25_out="$(uberdev_goal_extract_pr_num_from_log /nonexistent/path)" \
+  || _bt25_rc=$?
+assert_eq "$_bt25_out" "" "BT25.extract-missing-file-empty"
+assert_rc "$_bt25_rc" "0"  "BT25.extract-missing-file-rc-zero"
+
+# BT26 — empty file: file exists but no marker -> empty output. Distinct
+# from BT25 because the [ -f ] guard passes here; the grep pipe is what
+# yields empty.
+_bt26_log="$_b12_tmpdir/bt26.log"
+: > "$_bt26_log"
+assert_eq "$(uberdev_goal_extract_pr_num_from_log "$_bt26_log")" "" \
+  "BT26.extract-empty-file-empty"
+
+# BT27 — multi-entry: multiple `pushed PR #N` markers -> first wins
+# (the `head -n 1` between the two greps locks "first match" semantics).
+# A regression that dropped `head -n 1` would emit all PR numbers and
+# this assertion (exact match against "5") would fail loudly.
+_bt27_log="$_b12_tmpdir/bt27.log"
+cat > "$_bt27_log" <<'EOF'
+[solve-bg] pushed PR #5
+[solve-bg] dispatched
+[solve-bg] pushed PR #99
+EOF
+assert_eq "$(uberdev_goal_extract_pr_num_from_log "$_bt27_log")" "5" \
+  "BT27.extract-multi-entry-first-wins"
+
+# BT28 — malformed input: no `pushed PR #N` marker -> empty (the trailing
+# `|| true` ensures rc=0 even when grep finds nothing; without it the
+# pipeline rc would be 1 and break callers).
+_bt28_log="$_b12_tmpdir/bt28.log"
+cat > "$_bt28_log" <<'EOF'
+[solve-bg] dispatched /solve 100
+[solve-bg] PR push failed: ENOSPC
+EOF
+assert_eq "$(uberdev_goal_extract_pr_num_from_log "$_bt28_log")" "" \
+  "BT28.extract-no-marker-empty"
+
+# ===== uberdev_goal_list_prs_in_state (lines 386-392) =====
+
+# BT29 — missing TSV: `[ -f "$f" ] || return 0` short-circuits (state_init
+# not called for test-bt29). Empty stdout + rc=0 expected.
+_bt29_rc=0
+_bt29_out="$(uberdev_goal_list_prs_in_state test-bt29 green)" || _bt29_rc=$?
+assert_eq "$_bt29_out" "" "BT29.list-missing-tsv-empty"
+assert_rc "$_bt29_rc" "0" "BT29.list-missing-tsv-rc-zero"
+
+# BT30 — empty TSV (state_init truncates): file exists but no rows -> empty.
+uberdev_goal_state_init test-bt30
+assert_eq "$(uberdev_goal_list_prs_in_state test-bt30 green)" "" \
+  "BT30.list-empty-tsv-empty"
+
+# BT31 — happy: one PR transitioned into `green` -> outputs PR number.
+# Exercises the full write-then-read round-trip through
+# uberdev_goal_pr_state_transition, which is the only sanctioned way to
+# populate the TSV (raw printfs would bypass the D17 state-machine guard).
+uberdev_goal_state_init test-bt31
+uberdev_goal_pr_state_transition test-bt31 100 dispatched pushed-reviewing
+uberdev_goal_pr_state_transition test-bt31 100 pushed-reviewing green
+assert_eq "$(uberdev_goal_list_prs_in_state test-bt31 green)" "100" \
+  "BT31.list-single-pr-in-state"
+
+# BT32 — multi-PR-in-state: three PRs all reach `green` -> all returned.
+# awk's hash-iteration order over the `state[]` associative array is
+# undefined (depends on libawk hash function), so the test sorts the
+# output before comparing. A regression that emitted only the FIRST or
+# LAST PR (instead of iterating the whole hash) would surface here.
+uberdev_goal_state_init test-bt32
+for _pr in 201 202 203; do
+  uberdev_goal_pr_state_transition test-bt32 "$_pr" dispatched pushed-reviewing
+  uberdev_goal_pr_state_transition test-bt32 "$_pr" pushed-reviewing green
+done
+_bt32_sorted="$(uberdev_goal_list_prs_in_state test-bt32 green | sort | tr '\n' ' ' | sed 's/ $//')"
+assert_eq "$_bt32_sorted" "201 202 203" "BT32.list-multi-pr-in-state"
+
+# BT33 — latest-transition-wins (edge case the issue calls out): awk's
+# `state[$1]=$2` accumulates rows IN ORDER, so the LAST row for each PR
+# overwrites prior rows. PR 300 transitions through three states ending
+# in `merging`; a query for `green` MUST NOT include 300, and a query for
+# `merging` MUST. A regression that built a union across all rows would
+# surface here (300 would appear under BOTH state queries).
+uberdev_goal_state_init test-bt33
+uberdev_goal_pr_state_transition test-bt33 300 dispatched pushed-reviewing
+uberdev_goal_pr_state_transition test-bt33 300 pushed-reviewing green
+uberdev_goal_pr_state_transition test-bt33 300 green merging
+assert_eq "$(uberdev_goal_list_prs_in_state test-bt33 green)"   "" \
+  "BT33.list-latest-wins-green-excludes"
+assert_eq "$(uberdev_goal_list_prs_in_state test-bt33 merging)" "300" \
+  "BT33.list-latest-wins-merging-includes"
+
+# BT34 — no PR in requested state: rows exist but none match. Positive
+# control for the awk `if (state[pr]==s)` filter; complements BT30 (empty
+# TSV) by proving the filter ALSO rejects non-matching rows, not just
+# the empty case.
+uberdev_goal_state_init test-bt34
+uberdev_goal_pr_state_transition test-bt34 400 dispatched pushed-reviewing
+assert_eq "$(uberdev_goal_list_prs_in_state test-bt34 merging)" "" \
+  "BT34.list-no-pr-in-requested-state"
+
+# ===== uberdev_goal_locate_review_pr_audit (lines 353-373) =====
+
+# BT35 — non-numeric issue: validate_int rejects -> rc=1. Stderr suppressed
+# because validate_int prints nothing, but mirrored on other BT*-rc-1
+# tests in this file for consistency.
+uberdev_goal_locate_review_pr_audit abc 2>/dev/null
+assert_rc "$?" "1" "BT35.locate-non-numeric-issue-rc-1"
+
+# BT36 — missing log: extract_pr_num_from_log returns "" for issue 9999
+# (no solve-bg-stdout-9999.log in $UBERDEV_TMPDIR), so the `[ -n "$pr" ]
+# || return 0` branch fires and the function emits nothing. Confirms the
+# function does NOT halt the goal-pipeline when a solve-bg log is missing.
+_bt36_out="$(uberdev_goal_locate_review_pr_audit 9999)"
+assert_eq "$_bt36_out" "" "BT36.locate-missing-log-empty"
+
+# BT37 — happy: log resolves PR=500, .uberdev/runs/<run>/review-pr-verdict.json
+# carries matching .pr, run_id matches RUN_ID_REGEX. Function returns
+# the relative canonical path. The verdict.json uses `"pr": "500"`
+# (string form) because /review-pr writes the field as a string and
+# `jq -r '.pr'` prints it as "500" either way.
+_bt37_dir="$_b12_tmpdir/bt37-cwd"
+mkdir -p "$_bt37_dir/.uberdev/runs/20260521-120000-aaaa1111"
+printf '[solve-bg] pushed PR #500\n' > "$_b12_tmpdir/solve-bg-stdout-37.log"
+cat > "$_bt37_dir/.uberdev/runs/20260521-120000-aaaa1111/review-pr-verdict.json" <<'EOF'
+{"pr": "500"}
+EOF
+_bt37_out="$(cd "$_bt37_dir" && uberdev_goal_locate_review_pr_audit 37)"
+assert_eq "$_bt37_out" \
+  ".uberdev/runs/20260521-120000-aaaa1111/review-pr-verdict.json" \
+  "BT37.locate-happy-path"
+
+# BT38 — multi-run edge case: two runs both match .pr=600; `sort -r |
+# head -n 1` picks the lex-greatest run_id. The YYYYMMDD-HHMMSS-<sha>
+# format lex-sorts identically to chronological order, so the 200000
+# run wins over the 100000 run. A regression that picked oldest, or
+# reordered the sort, would surface here.
+_bt38_dir="$_b12_tmpdir/bt38-cwd"
+mkdir -p "$_bt38_dir/.uberdev/runs/20260521-100000-aaaa1111" \
+         "$_bt38_dir/.uberdev/runs/20260521-200000-bbbb2222"
+printf '[solve-bg] pushed PR #600\n' > "$_b12_tmpdir/solve-bg-stdout-38.log"
+for _d in 20260521-100000-aaaa1111 20260521-200000-bbbb2222; do
+  printf '%s\n' '{"pr": "600"}' \
+    > "$_bt38_dir/.uberdev/runs/$_d/review-pr-verdict.json"
+done
+_bt38_out="$(cd "$_bt38_dir" && uberdev_goal_locate_review_pr_audit 38)"
+assert_eq "$_bt38_out" \
+  ".uberdev/runs/20260521-200000-bbbb2222/review-pr-verdict.json" \
+  "BT38.locate-multi-run-newest-wins"
+
+# BT39 — PR mismatch: verdict.json's .pr is 999 but the solve-bg log says
+# PR=700. The `[ "$pr_field" = "$pr" ] || continue` filter rejects the
+# candidate; final output empty. Without this filter, the function would
+# return a path pointing to an UNRELATED PR's review-pr verdict, which
+# would silently misclassify the trust signal.
+_bt39_dir="$_b12_tmpdir/bt39-cwd"
+mkdir -p "$_bt39_dir/.uberdev/runs/20260521-130000-cccc3333"
+printf '[solve-bg] pushed PR #700\n' > "$_b12_tmpdir/solve-bg-stdout-39.log"
+printf '%s\n' '{"pr": "999"}' \
+  > "$_bt39_dir/.uberdev/runs/20260521-130000-cccc3333/review-pr-verdict.json"
+_bt39_out="$(cd "$_bt39_dir" && uberdev_goal_locate_review_pr_audit 39)"
+assert_eq "$_bt39_out" "" "BT39.locate-pr-mismatch-empty"
+
+# BT40 — malformed input: run dir name "not-a-run-id" does not match
+# RUN_ID_REGEX (`^[0-9]{8}-[0-9]{6}-[a-f0-9]+$`); the regex check rejects
+# the candidate -> empty output. Defense against a fabricated or typo'd
+# run_id (e.g., from a partial-write of a fresh run dir) leaking through
+# the sort.
+_bt40_dir="$_b12_tmpdir/bt40-cwd"
+mkdir -p "$_bt40_dir/.uberdev/runs/not-a-run-id"
+printf '[solve-bg] pushed PR #800\n' > "$_b12_tmpdir/solve-bg-stdout-40.log"
+printf '%s\n' '{"pr": "800"}' \
+  > "$_bt40_dir/.uberdev/runs/not-a-run-id/review-pr-verdict.json"
+_bt40_out="$(cd "$_bt40_dir" && uberdev_goal_locate_review_pr_audit 40)"
+assert_eq "$_bt40_out" "" "BT40.locate-malformed-run-id-empty"
+
+# ===== uberdev_goal_read_merge_result (lines 410-438) =====
+
+# BT41 — non-numeric PR: validate_int rejects -> rc=1.
+uberdev_goal_read_merge_result abc 2>/dev/null
+assert_rc "$?" "1" "BT41.read-merge-non-numeric-pr-rc-1"
+
+# BT42 — missing audit file: `[ -f "$audit" ] || { printf 'missing'; ... }`
+# short-circuits when .uberdev/audit.jsonl is absent. Empty CWD subdir
+# (no .uberdev/ created) guarantees the file-existence guard fires.
+_bt42_dir="$_b12_tmpdir/bt42-cwd"
+mkdir -p "$_bt42_dir"
+_bt42_out="$(cd "$_bt42_dir" && uberdev_goal_read_merge_result 123)"
+assert_eq "$_bt42_out" "missing" "BT42.read-merge-missing-audit-emits-missing"
+
+# BT43 — happy: merge_executed row for PR=900 -> 'success'. .data.pr uses
+# integer form (no quotes) because the jq filter uses `--argjson pr "$pr"`
+# which parses "900" as the JSON integer 900; matching against a string
+# "900" in the fixture would fail the equality check.
+_bt43_dir="$_b12_tmpdir/bt43-cwd"
+mkdir -p "$_bt43_dir/.uberdev"
+printf '%s\n' '{"event":"merge_executed","data":{"pr":900}}' \
+  > "$_bt43_dir/.uberdev/audit.jsonl"
+_bt43_out="$(cd "$_bt43_dir" && uberdev_goal_read_merge_result 900)"
+assert_eq "$_bt43_out" "success" "BT43.read-merge-executed-emits-success"
+
+# BT44 — pr_parked with conflict-class reason (refused) -> 'conflict'.
+# The case-block bundles three reasons (refused, ambiguous, push-non-ff)
+# into the same `conflict` arm; testing one locks that arm. A regression
+# that broke the case-block's `|` separators would still pass this
+# single-reason test if `refused` was kept first, but would fail BT43
+# (success) or BT45 (hook_failed) — those guard the other arms.
+_bt44_dir="$_b12_tmpdir/bt44-cwd"
+mkdir -p "$_bt44_dir/.uberdev"
+printf '%s\n' '{"event":"pr_parked","data":{"pr":901,"reason":"refused"}}' \
+  > "$_bt44_dir/.uberdev/audit.jsonl"
+_bt44_out="$(cd "$_bt44_dir" && uberdev_goal_read_merge_result 901)"
+assert_eq "$_bt44_out" "conflict" \
+  "BT44.read-merge-parked-refused-emits-conflict"
+
+# BT45 — pr_parked test-fail-exhausted -> 'hook_failed'. Distinct from
+# 'conflict' because /merge ran the test hook N times and they all
+# failed (PARK_REASON_ENUM); the goal-pipeline circuit-breaker maps
+# this onto a different retry policy than conflict-class reasons.
+_bt45_dir="$_b12_tmpdir/bt45-cwd"
+mkdir -p "$_bt45_dir/.uberdev"
+printf '%s\n' '{"event":"pr_parked","data":{"pr":902,"reason":"test-fail-exhausted"}}' \
+  > "$_bt45_dir/.uberdev/audit.jsonl"
+_bt45_out="$(cd "$_bt45_dir" && uberdev_goal_read_merge_result 902)"
+assert_eq "$_bt45_out" "hook_failed" \
+  "BT45.read-merge-parked-test-fail-emits-hook_failed"
+
+# BT46 — multi-entry edge case (the issue calls this out): latest matching
+# row wins. PR=903 was parked, then later merged. The jq pipeline's
+# `last` MUST report the most recent matching row -> 'success'. A
+# regression that broke --slurp or used `first` would falsely report
+# 'conflict' here, keeping the PR in a held state forever.
+_bt46_dir="$_b12_tmpdir/bt46-cwd"
+mkdir -p "$_bt46_dir/.uberdev"
+cat > "$_bt46_dir/.uberdev/audit.jsonl" <<'EOF'
+{"event":"pr_parked","data":{"pr":903,"reason":"refused"}}
+{"event":"merge_executed","data":{"pr":903}}
+EOF
+_bt46_out="$(cd "$_bt46_dir" && uberdev_goal_read_merge_result 903)"
+assert_eq "$_bt46_out" "success" "BT46.read-merge-multi-entry-last-wins"
+
+# BT47 — malformed JSON: jq fails on the --slurp pipe; stderr is dropped
+# by the `2>/dev/null` inside the function; `row` is empty; falls into
+# the `[ -n "$row" ] || { printf 'missing'; ... }` branch. Locks the
+# "fail closed → missing" contract — a regression that masked jq failure
+# as success would let a corrupted audit.jsonl falsely advance the PR
+# state machine.
+_bt47_dir="$_b12_tmpdir/bt47-cwd"
+mkdir -p "$_bt47_dir/.uberdev"
+printf 'not valid json {{{\n' > "$_bt47_dir/.uberdev/audit.jsonl"
+_bt47_out="$(cd "$_bt47_dir" && uberdev_goal_read_merge_result 904 2>/dev/null)"
+assert_eq "$_bt47_out" "missing" \
+  "BT47.read-merge-malformed-json-emits-missing"
+
 # Cleanup: remove the isolated tmpdir contents (we created the whole
 # directory via mktemp -d, so we can rm -rf safely — it's our own).
 rm -rf "$_b12_tmpdir/goal-test-bt3"* 2>/dev/null || true
