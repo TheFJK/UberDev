@@ -45,8 +45,9 @@ assert_grep_not() {
 # (the success arm of _uberdev_dispatch_claude_bg, post-#143 fix).
 # Reads $1 as the path to a fixture file simulating $BG_STDOUT_LOG and
 # echoes the post-scrub $DISPATCH_ID (either empty or exactly 8 hex).
-# Drift between this helper and dispatch.sh:241 is caught by the
-# shape-check assertions above — the regexes here MUST stay in lockstep.
+# Drift between this helper and dispatch.sh:241-243 (post-#143 fix) is
+# caught by the shape-check assertions above — the regexes here MUST stay
+# in lockstep.
 _extract_id() {
   local fixture="$1"
   local id
@@ -353,6 +354,19 @@ else
 fi
 rm -f "$_TMPFIX"; _TMPFIX=""
 
+# Case #11: uppercase-hex id (8 upper) → [0-9a-f] is lowercase-only
+_new_fixture
+printf 'backgrounded \xc2\xb7 B88389FF\n' > "$_TMPFIX"
+GOT="$(_extract_id "$_TMPFIX")"
+if [[ -z "$GOT" ]]; then
+  echo "  PASS  uppercase-hex id yields empty (lowercase-only [0-9a-f] class)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  uppercase-hex id extracted as '$GOT' (expected empty)"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$_TMPFIX"; _TMPFIX=""
+
 # Case #7: zero-byte stdout
 _new_fixture
 : > "$_TMPFIX"
@@ -371,7 +385,7 @@ _new_fixture
 printf 'some unrelated noise\nbackground started but not the marker\nspawn attempted\n' > "$_TMPFIX"
 GOT="$(_extract_id "$_TMPFIX")"
 if [[ -z "$GOT" ]]; then
-  echo "  PASS  missing-marker stdout yields empty (B3 guard at dispatch.sh:248 still fires rc=2)"
+  echo "  PASS  missing-marker stdout yields empty (B3 guard at dispatch.sh:250 still fires rc=2)"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  missing-marker stdout extracted as '$GOT' — B3 fail-CLOSED contract BROKEN"
