@@ -280,10 +280,10 @@ echo "== Behavioral tests (B12 — sourced-function exercises) =="
 #   BT2      Blocks: parser ReDoS-safe anchoring
 #   BT3      fingerprint repeat detector
 #   BT4      gh_jq_or_jq jq shim file-not-found path
-#   BT12-BT20 uberdev_goal_read_trust_signal enum mapping
+#   BT12-BT23 uberdev_goal_read_trust_signal enum mapping
 #            (green/yellow/red-via-blocker/red-via-halted/stale/missing/
 #             missing-via-malformed-json/shape-tolerance/missing-via-
-#             second-jq-failure — see #137)
+#             second-jq-failure/combined-red-triggers — see #137)
 #
 # Isolation: mktemp $UBERDEV_TMPDIR for this section so writes do not
 # collide with production state nor with each other.
@@ -364,7 +364,7 @@ else
   printf '        expected non-zero, got %s\n' "$_bt4_rc" >&2
 fi
 
-# BT12-BT20 — uberdev_goal_read_trust_signal: trust-signal enum coverage
+# BT12-BT23 — uberdev_goal_read_trust_signal: trust-signal enum coverage
 # (issue #137; finding fingerprint d599c295ba4d2846 from /review-pr Phase
 # 2.5 on PR #129). Each test stages a synthetic audit JSON under
 # $_b12_tmpdir, invokes the function, and asserts the printed enum
@@ -376,6 +376,8 @@ fi
 #   - halted_due_to_overflow flag                  (BT15)
 #   - 'stale' vs 'missing' distinction             (BT16, BT17, BT18)
 #   - malformed-by_severity second-jq failure      (BT20)
+#   - combined red-triggers (blocker+critical,      (BT21, BT22, BT23)
+#     halted+blocker, halted+critical)
 #
 # Misclassification risk these guard: YELLOW silently treated as GREEN
 # (PR auto-merged despite CRITICAL findings); STALE silently treated as

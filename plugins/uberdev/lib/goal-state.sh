@@ -277,28 +277,26 @@ uberdev_goal_read_trust_signal() {
   #
   # Audit parity (S4): this second pass operates on the in-memory $p25
   # string, so it cannot route through the gh_jq_or_jq shim (which takes a
-  # FILE path). Instead, mirror that shim's breadcrumb directly — capture
-  # jq stderr and emit one audit-friendly warning line before failing
-  # closed to `missing`, so a structural type error leaves an operator
-  # trail rather than vanishing. Behaviour is unchanged: rc!=0 still maps
-  # to `missing` (BT20-locked); the warning is stderr-only and additive.
-  local tsv jq_rc jq_err
-  jq_err="$(mktemp 2>/dev/null)"
-  if [ -n "$jq_err" ]; then
-    tsv="$(jq -r '[.by_severity.blocker // 0, .by_severity.critical // 0, (.halted // false | tostring)] | @tsv' <<<"$p25" 2>"$jq_err")"
-    jq_rc=$?
-    if [ "$jq_rc" -ne 0 ]; then
-      local first_line
-      first_line="$(head -n 1 "$jq_err" 2>/dev/null)"
-      printf 'goal-state: jq failed on phase2_5 by_severity projection: %s\n' \
-        "${first_line:-unknown error}" >&2
-    fi
-    rm -f "$jq_err"
-  else
-    tsv="$(jq -r '[.by_severity.blocker // 0, .by_severity.critical // 0, (.halted // false | tostring)] | @tsv' <<<"$p25" 2>/dev/null)"
-    jq_rc=$?
+  # FILE path). Instead, mirror that shim's breadcrumb directly — but the
+  # success path stays a clean in-memory capture (no temp file): run jq with
+  # stderr discarded and read its rc. ONLY on the failure path (about to
+  # return `missing` anyway) re-run jq capturing stderr in-memory and emit
+  # one audit-friendly warning line, so a structural type error leaves an
+  # operator trail rather than vanishing. Behaviour is unchanged: rc!=0
+  # still maps to `missing` (BT20-locked); the warning is stderr-only and
+  # additive.
+  local jq_filter='[.by_severity.blocker // 0, .by_severity.critical // 0, (.halted // false | tostring)] | @tsv'
+  local tsv jq_rc
+  tsv="$(jq -r "$jq_filter" <<<"$p25" 2>/dev/null)"
+  jq_rc=$?
+  if [ "$jq_rc" -ne 0 ]; then
+    local jq_err first_line
+    jq_err="$(jq -r "$jq_filter" <<<"$p25" 2>&1 1>/dev/null)"
+    first_line="${jq_err%%$'\n'*}"
+    printf 'goal-state: jq failed on phase2_5 by_severity projection: %s\n' \
+      "${first_line:-unknown error}" >&2
+    printf 'missing\n'; return 0
   fi
-  [ "$jq_rc" -eq 0 ] || { printf 'missing\n'; return 0; }
   local blocker critical halted
   read -r blocker critical halted <<<"$tsv"
   if [ "$halted" = "true" ] || [ "$blocker" -gt 0 ]; then printf 'red\n'; return 0; fi
