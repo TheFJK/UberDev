@@ -342,6 +342,76 @@ _uberdev_goal_persist_fp test-bt3 1 abcd1234abcd1234
 UBERDEV_GOAL_ID=test-bt3 uberdev_goal_check_fingerprint_repeat test-bt3 2 abcd1234abcd1234
 assert_rc "$?" "1" "BT3.fingerprint-repeat-detected"
 
+# BT3a — cycle 1 no-repeat: at cycle 1 there is no prev cycle to compare,
+# so the function MUST take the [-lt 1] short-circuit branch, persist the
+# fingerprint at cycle 1, and return 0 (NOT 1) — otherwise a fresh /goal
+# run would falsely halt with reason=nonconvergence on its very first
+# candidate. Issue #139 risk 1; function lines 282-284.
+uberdev_goal_state_init test-bt3a
+UBERDEV_GOAL_ID=test-bt3a uberdev_goal_check_fingerprint_repeat test-bt3a 1 deadbeefdeadbeef
+assert_rc "$?" "0" "BT3a.cycle-1-no-repeat-returns-zero"
+# The cycle-1 branch persists via _uberdev_goal_persist_fp; verify the TSV
+# now carries the cycle-1 fingerprint (covers the "TSV write success" half
+# of issue #139's risk 3 — the >> redirection in _uberdev_goal_persist_fp
+# actually produced a file with the expected line).
+if grep -qE $'^1\tdeadbeefdeadbeef$' "$UBERDEV_TMPDIR/goal-test-bt3a-fingerprints.tsv" 2>/dev/null; then
+  PASS=$((PASS + 1))
+  printf '  PASS  %s\n' "BT3a.cycle-1-persists-to-tsv"
+else
+  FAIL=$((FAIL + 1))
+  printf '  FAIL  %s\n' "BT3a.cycle-1-persists-to-tsv" >&2
+  printf '        expected line "1\\tdeadbeefdeadbeef" in %s\n' \
+    "$UBERDEV_TMPDIR/goal-test-bt3a-fingerprints.tsv" >&2
+fi
+
+# BT3b — empty fingerprint: with fp="" the function MUST take the
+# [ -n "$fp" ] || return 0 short-circuit and return 0 WITHOUT any TSV
+# write. The pr-test-analyzer concern was that the caller could loop
+# forever invoking check_fingerprint_repeat with an empty fp drawn from a
+# failed _uberdev_goal_extract_fingerprint; locking the early return here
+# means the caller's loop logic can rely on rc=0 + no side effects.
+# Issue #139 risk 2; function line 282.
+uberdev_goal_state_init test-bt3b
+UBERDEV_GOAL_ID=test-bt3b uberdev_goal_check_fingerprint_repeat test-bt3b 5 ""
+assert_rc "$?" "0" "BT3b.empty-fingerprint-returns-zero"
+# Empty fp must NOT touch the TSV (the file was truncated by state_init);
+# if a future edit moves the [ -n ] check below the persist call, this
+# fails immediately.
+if [ ! -s "$UBERDEV_TMPDIR/goal-test-bt3b-fingerprints.tsv" ]; then
+  PASS=$((PASS + 1))
+  printf '  PASS  %s\n' "BT3b.empty-fingerprint-no-tsv-write"
+else
+  FAIL=$((FAIL + 1))
+  printf '  FAIL  %s\n' "BT3b.empty-fingerprint-no-tsv-write" >&2
+  printf '        TSV non-empty after empty-fp call: %s\n' \
+    "$(cat "$UBERDEV_TMPDIR/goal-test-bt3b-fingerprints.tsv" 2>/dev/null)" >&2
+fi
+
+# BT3c — cycle 2 with non-matching fp: prev cycle 1 has fp A, current
+# cycle 2 has fp B, awk match fails, function falls through to the printf
+# >> append (the "TSV write success" full path). Asserts rc=0 (no repeat)
+# AND that the TSV now carries BOTH cycle entries — locks the append
+# semantics so a future edit replacing >> with > does not silently lose
+# the cycle-1 entry. Issue #139 risk 3; function lines 286-290.
+uberdev_goal_state_init test-bt3c
+_uberdev_goal_persist_fp test-bt3c 1 aaaaaaaaaaaaaaaa
+UBERDEV_GOAL_ID=test-bt3c uberdev_goal_check_fingerprint_repeat test-bt3c 2 bbbbbbbbbbbbbbbb
+assert_rc "$?" "0" "BT3c.cycle-2-new-fp-returns-zero"
+# Both lines must be present, in order, after the append.
+_bt3c_tsv="$UBERDEV_TMPDIR/goal-test-bt3c-fingerprints.tsv"
+_bt3c_lines="$(wc -l < "$_bt3c_tsv" 2>/dev/null | tr -d ' ')"
+assert_eq "$_bt3c_lines" "2" "BT3c.cycle-2-appends-not-overwrites"
+if grep -qE $'^1\taaaaaaaaaaaaaaaa$' "$_bt3c_tsv" 2>/dev/null \
+   && grep -qE $'^2\tbbbbbbbbbbbbbbbb$' "$_bt3c_tsv" 2>/dev/null; then
+  PASS=$((PASS + 1))
+  printf '  PASS  %s\n' "BT3c.cycle-2-both-entries-present"
+else
+  FAIL=$((FAIL + 1))
+  printf '  FAIL  %s\n' "BT3c.cycle-2-both-entries-present" >&2
+  printf '        TSV contents:\n' >&2
+  sed 's/^/          /' "$_bt3c_tsv" >&2
+fi
+
 # BT4 — gh_jq_or_jq with non-existent file -> returns non-zero (file
 # does not exist), produces empty output. Behavioral check that the
 # shim's file-existence guard fires.
