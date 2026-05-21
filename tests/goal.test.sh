@@ -278,7 +278,9 @@ echo "== Behavioral tests (B12 — sourced-function exercises) =="
 # /review-pr Phase 2.5 on PR #129:
 #   BT1      state-machine forbidden transitions (D17)
 #   BT2      Blocks: parser ReDoS-safe anchoring
-#   BT3      fingerprint repeat detector
+#   BT3      fingerprint repeat detector, with sub-cases:
+#            BT3a (cycle-1 short-circuit), BT3b (empty-fp guard),
+#            BT3c (append semantics), BT3d (invalid-cycle validation)
 #   BT4      gh_jq_or_jq jq shim file-not-found path
 #   BT12-BT23 uberdev_goal_read_trust_signal enum mapping
 #            (green/yellow/red-via-blocker/red-via-halted/stale/missing/
@@ -357,6 +359,31 @@ assert_grep_file() {
   fi
 }
 
+assert_file_empty() {
+  local file="$1" label="$2"
+  # Guard with existence: `[ ! -s ]` alone is true for a NON-EXISTENT file as
+  # well as a zero-byte one, so a future refactor that drops the
+  # uberdev_goal_state_init fixture would yield a misleading PASS. Requiring
+  # `[ -f ]` first makes a missing fixture fail loudly. Behavior-preserving for
+  # all current callers (BT3b/BT3d state_init first → file exists, zero bytes).
+  if [ -f "$file" ] && [ ! -s "$file" ]; then
+    PASS=$((PASS + 1))
+    printf '  PASS  %s\n' "$label"
+  else
+    FAIL=$((FAIL + 1))
+    printf '  FAIL  %s\n' "$label" >&2
+    # else-branch reaches here for TWO causes: the file is MISSING (the case
+    # the `[ -f ]` guard added to catch) or it EXISTS but is non-empty.
+    # Branch the diagnostic so the message names the actual cause instead of
+    # cat-ing a missing path (which would leak "No such file or directory").
+    if [ -f "$file" ]; then
+      printf '        non-empty: %s\n' "$(cat "$file")" >&2
+    else
+      printf '        file missing (expected existing + empty): %s\n' "$file" >&2
+    fi
+  fi
+}
+
 # BT1 — PR state machine: D17 forbidden transitions return non-zero;
 # a documented legal transition returns zero.
 _uberdev_goal_pr_state_machine_valid yellow-held merging
@@ -380,6 +407,71 @@ uberdev_goal_state_init test-bt3
 _uberdev_goal_persist_fp test-bt3 1 abcd1234abcd1234
 UBERDEV_GOAL_ID=test-bt3 uberdev_goal_check_fingerprint_repeat test-bt3 2 abcd1234abcd1234
 assert_rc "$?" "1" "BT3.fingerprint-repeat-detected"
+
+# BT3a — cycle 1 no-repeat: at cycle 1 there is no prev cycle to compare,
+# so the function MUST take the [-lt 1] short-circuit branch, persist the
+# fingerprint at cycle 1, and return 0 (NOT 1) — otherwise a fresh /goal
+# run would falsely halt with reason=nonconvergence on its very first
+# candidate. Issue #139 risk 1; function line 284 (cycle-1 short-circuit).
+uberdev_goal_state_init test-bt3a
+UBERDEV_GOAL_ID=test-bt3a uberdev_goal_check_fingerprint_repeat test-bt3a 1 deadbeefdeadbeef
+assert_rc "$?" "0" "BT3a.cycle-1-no-repeat-returns-zero"
+# The cycle-1 branch persists via _uberdev_goal_persist_fp; verify the TSV
+# now carries the cycle-1 fingerprint (covers the "TSV write success" half
+# of issue #139's risk 3 — the >> redirection in _uberdev_goal_persist_fp
+# actually produced a file with the expected line).
+assert_grep "$UBERDEV_TMPDIR/goal-test-bt3a-fingerprints.tsv" $'^1\tdeadbeefdeadbeef$' \
+  "BT3a.cycle-1-persists-to-tsv"
+
+# BT3b — empty fingerprint: with fp="" the function MUST take the
+# [ -n "$fp" ] || return 0 short-circuit and return 0 WITHOUT any TSV
+# write. The pr-test-analyzer concern was that the caller could loop
+# forever invoking check_fingerprint_repeat with an empty fp drawn from a
+# failed _uberdev_goal_extract_fingerprint; locking the early return here
+# means the caller's loop logic can rely on rc=0 + no side effects.
+# Issue #139 risk 2; function line 282.
+uberdev_goal_state_init test-bt3b
+UBERDEV_GOAL_ID=test-bt3b uberdev_goal_check_fingerprint_repeat test-bt3b 5 ""
+assert_rc "$?" "0" "BT3b.empty-fingerprint-returns-zero"
+# Empty fp must NOT touch the TSV (the file was truncated by state_init);
+# if a future edit moves the [ -n ] check below the persist call, this
+# fails immediately.
+assert_file_empty "$UBERDEV_TMPDIR/goal-test-bt3b-fingerprints.tsv" \
+  "BT3b.empty-fingerprint-no-tsv-write"
+
+# BT3c — cycle 2 with non-matching fp: prev cycle 1 has fp A, current
+# cycle 2 has fp B, awk match fails, function falls through to the printf
+# >> append (the "TSV write success" full path). Asserts rc=0 (no repeat)
+# AND that the TSV now carries BOTH cycle entries — locks the append
+# semantics so a future edit replacing >> with > does not silently lose
+# the cycle-1 entry. Issue #139 risk 3; function lines 286-290.
+uberdev_goal_state_init test-bt3c
+_uberdev_goal_persist_fp test-bt3c 1 aaaaaaaaaaaaaaaa
+UBERDEV_GOAL_ID=test-bt3c uberdev_goal_check_fingerprint_repeat test-bt3c 2 bbbbbbbbbbbbbbbb
+assert_rc "$?" "0" "BT3c.cycle-2-new-fp-returns-zero"
+# Both lines must be present after the append; check each entry separately
+# so a failure pinpoints WHICH cycle entry is missing instead of just
+# "one of two patterns didn't match".
+_bt3c_tsv="$UBERDEV_TMPDIR/goal-test-bt3c-fingerprints.tsv"
+_bt3c_lines="$(wc -l < "$_bt3c_tsv" 2>/dev/null | tr -d ' ')"
+assert_eq "$_bt3c_lines" "2" "BT3c.cycle-2-appends-not-overwrites"
+assert_grep "$_bt3c_tsv" $'^1\taaaaaaaaaaaaaaaa$' "BT3c.cycle-1-entry-present"
+assert_grep "$_bt3c_tsv" $'^2\tbbbbbbbbbbbbbbbb$' "BT3c.cycle-2-entry-present"
+
+# BT3d — invalid cycle: passing a non-integer cycle (e.g. "abc") MUST take
+# the _uberdev_goal_validate_int "$cycle" || return 2 short-circuit and
+# return rc=2 with NO TSV side-effects. Locks the function's input
+# validation contract; an edit that weakens _uberdev_goal_validate_int
+# (e.g. accepts non-numeric strings) would otherwise allow a corrupt
+# cycle field into the TSV. Issue #139 risk 1b (pre-existing untested
+# branch surfaced during review); function line 281.
+uberdev_goal_state_init test-bt3d
+UBERDEV_GOAL_ID=test-bt3d uberdev_goal_check_fingerprint_repeat test-bt3d abc deadbeefdeadbeef 2>/dev/null
+assert_rc "$?" "2" "BT3d.invalid-cycle-returns-two"
+# rc=2 must short-circuit before any TSV write; the file was truncated by
+# state_init and must remain empty.
+assert_file_empty "$UBERDEV_TMPDIR/goal-test-bt3d-fingerprints.tsv" \
+  "BT3d.invalid-cycle-no-tsv-write"
 
 # BT4 — gh_jq_or_jq with non-existent file -> returns non-zero (file
 # does not exist), produces empty output. Behavioral check that the
