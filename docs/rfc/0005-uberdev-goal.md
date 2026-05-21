@@ -220,7 +220,7 @@ Watcher reads:
 
 - `claude agents` for backend-agnostic status (claude-bg + background)
 - `$UBERDEV_TMPDIR/solve-bg-stdout-<issue>.log` per `/turbo` dispatch (already namespaced by issue#)
-- Per-PR `/review-pr` audit JSON — path scheme to be specified in `skills/goal-pipeline/SKILL.md`; likely `.claude/audit/review-pr-<PR#>-<run-id>.json`
+- Per-PR `/review-pr` audit JSON — path scheme to be specified in `skills/goal-pipeline/SKILL.md`; likely `.claude/audit/review-pr-<PR#>-<run-id>.json` (note: see §9.5 B1/B2 for the canonical path actually written — `.uberdev/runs/<run-id>/review-pr-verdict.json`)
 - Per-PR `/merge` audit JSON
 
 ### 3.6 Telemetry
@@ -312,3 +312,77 @@ When this RFC moves from Draft → Accepted:
 
 - Update `feedback_merge_independent.md` with the `/goal` carve-out (auto-merge scoping-relaxed inside `/goal`; rule unchanged outside).
 - New memory note: `project_uberdev_goal_state_machine.md` — references this RFC, summarises PR/issue state transitions and the dependency-graph unblock rule, so future-Claude can answer "how does /goal decide when to merge a held PR?" without re-reading the RFC.
+
+## 9. Design Decisions
+
+This section catalogues the inline-code shorthands (e.g. `// D4 — TMPDIR validation`, `# B1 — correct audit path`) that annotate rationale in `plugins/uberdev/lib/goal-state.sh` and `plugins/uberdev/skills/goal-pipeline/SKILL.md`. Each code is a permanent pointer to its row below; comments stay terse, definitions live here.
+
+Codes are grouped by prefix: **D** (design decisions), **T** (trust/threat boundaries), **Q** (open questions resolved into implementation), **R** (robustness rules), **B** (bug fix / behaviour contracts), **S** (simplify/style rules). Within each table, rows are sorted ascending by numeric suffix. The `See also` column points to existing RFC sections (`§N.M.K` style) when the concept is covered elsewhere in this document; codes with `—` (em-dash) have no other RFC coverage and the row here is the canonical definition. Gaps in numbering (e.g. no `B3`, no `D1`) reflect codes that do not appear in source and are intentionally undefined — defining them would be dead documentation.
+
+> **Namespace note (important):** the `Q*` codes in §9.3 are a different namespace from RFC §5 "Open questions". §5 tracks UNRESOLVED design questions; §9.3 tracks questions that were resolved into implementation decisions during PR #129 development. **`Q1` in §9.3 ≠ `Q1` in §5** — same letter, different table. Future work to rename one of the two namespaces is out of scope for this PR (touches code in PR #129; deferred to a follow-up).
+
+### 9.1 D — Design decisions
+
+| Code | One-sentence definition | See also |
+|------|-------------------------|----------|
+| D2  | Issue state machine: five states `input → solving → pr-pushed → resolved`; `solving → failed` and `pr-pushed → failed` allowed; no audit event on issue transitions (derived state only). | §3.2.2 |
+| D3  | Audit helper contract: `uberdev_goal_audit` accepts only enum-validated event names and uses manual-escape JSON framing (mirrors `discover.sh:39-53`); unknown events return rc=1. | §3.6 |
+| D4  | GOAL_ID and TMPDIR path-safety rules: `GOAL_ID` is generated with a random suffix, never derived from user-controlled input (attacker could collide TMPDIR paths); `UBERDEV_TMPDIR` is validated against a safe-character allowlist before any file creation. | §3.3 |
+| D8  | Auto-merge eligibility gate: `/goal` only auto-merges a PR when (a) `UBERDEV_GOAL_ID` env is set (provenance check — proves the call is inside a `/goal` run) and (b) per-PR merge attempt count is below `_UBERDEV_GOAL_MAX_MERGE_ATTEMPTS` (default 3). | §3.2.3, T5, R5 |
+| D9  | All regex patterns over PR/issue body text must use anchored bash `[[ =~ ]]` patterns with no quantifiers under user control; this is the ReDoS safety rule for body-parsing loops. | T1, R1 |
+| D12 | `claim_collision` soft-fail semantics: when `solve-pipeline` refuses to dispatch an issue because another agent holds the `uberdev:active` label, `/goal` skips that issue for the cycle (does not retry, does not halt the goal). | §4.1 |
+| D13 | Blocker-overflow handler: when `/review-pr` audit JSON contains `halted_due_to_overflow: true`, the PR is treated as RED (same transition), `overflow_detected` is set in Phase 2a (where `$audit_json` and `$pr_num` are in scope), and Phase 3 truncates the next-queue to the first 10 candidates; the goal does NOT halt. | §4.4 |
+| D15 | Backend resolution is performed exactly once per `/goal` run (Phase 0 `uberdev_dispatch_preflight`) and the result is forwarded to every child dispatch; per-cycle re-resolution is forbidden because the stdout-log polling contract depends on a stable, backend-specific path convention. Also: the merge-pipeline audit log filename is canonically `audit.jsonl` per `merge-pipeline/SKILL.md §"Audit log JSONL schema"`. | §3.5 |
+| D16 | `--dry-run` mode exits before any `gh` call, any agent spawn, and any audit event; specifically `goal_dispatched` must NOT fire on dry-run so the audit log only carries real runs. | §3.1 |
+| D17 | YELLOW/RED PRs are never merged inside `/goal`; `yellow-held → merging` and `red-held → merging` are forbidden transitions in the PR state machine. `stale` and `missing` trust signals also never imply GREEN — they trigger a re-dispatch of `/review-pr`. Terminal states `merged` and `merge-failed` are irreversible. | §3.2.1, §2.3 |
+| D18 | Every re-review dispatch (unblock rule, stale/missing trust signal) uses full `/uberdev:review-pr` with no incremental shortcut, because the upstream merge that triggered unblock may have changed CI dependencies. | §5 |
+| D19 | Crash-restart contract: `_UBERDEV_GOAL_STATE_LOADED` guard prevents double-sourcing within a single process; resume-after-SIGKILL is explicitly out of scope for v1. | — |
+
+### 9.2 T — Trust / Threat boundaries
+
+| Code | One-sentence definition | See also |
+|------|-------------------------|----------|
+| T1 | ReDoS threat boundary: user-controlled input (PR body, issue body) reaching a regex match must be capped at 64 KiB before the parse loop AND the regex itself must be anchored with no user-controlled quantifiers. Both controls together bound parse cost to O(1) on hostile input. | D9, R1 |
+| T3 | `gh` argument injection threat: every value that will be passed to a `gh` CLI call (PR numbers, issue numbers) must pass `_uberdev_goal_validate_int` before the `gh` call executes. | — |
+| T4 | TMPDIR path injection threat: `$UBERDEV_TMPDIR` may be set by an attacker-controlled environment; reject it if it contains any character outside `[A-Za-z0-9_./-]` before creating any file under it. | — |
+| T5 | Context provenance threat: auto-merge (and by extension, the per-PR attempt counter that contains it) must only fire when `UBERDEV_GOAL_ID` is set in the environment, ensuring the merge path cannot be triggered from outside a `/goal` run. | §3.2.3, D8 |
+
+### 9.3 Q — Open questions resolved into implementation
+
+> **Namespace note (repeated):** the Q-codes in this table are a different namespace from RFC §5 "Open questions". §5 tracks UNRESOLVED design questions; §9.3 tracks questions that have already been resolved into implementation decisions in PR #129. **`Q1` in §9.3 ≠ `Q1` in §5.**
+
+| Code | One-sentence definition | See also |
+|------|-------------------------|----------|
+| Q1 | Bash EXIT trap singleton: bash only supports one `EXIT` trap per shell; the combined cleanup for `$gh_err` and `$findings_err` temporaries must be registered once in Phase 2 (not overwritten in Phase 3). | — |
+| Q4 | Per-cycle overflow accumulator reset: `overflow_count` and `overflow_detected` are per-cycle counters that must be reset to 0 after `goal_cycle_completed` is emitted and before looping back to Phase 1, so the next cycle's summary does not double-count previous-cycle overflow PRs. | §4.4 |
+| Q5 | Rate-limit pre-flight: a soft `gh api rate_limit` check at Phase 0 step 10 warns when remaining calls < 1000 (never halts), because rate exhaustion is the most likely non-bug cause of stuck-loop; the threshold is a tertiary warning only. | — |
+
+### 9.4 R — Robustness rules
+
+| Code | One-sentence definition | See also |
+|------|-------------------------|----------|
+| R1 | 64 KiB body cap (`head -c 65536`) on any PR or issue body fetched from `gh` before regex processing; this is the load-bearing ReDoS defence (see T1); without the cap a 10 MB body could exhaust memory or cause catastrophic backtracking. | D9, T1 |
+| R3 | `gh` argument-injection robustness: call `_uberdev_goal_validate_int` on every PR/issue number before passing it to any `gh` call; this is the first-line defence against shell-injection via attacker-controlled issue numbers. (See also T3 — R3 is the robustness rule; T3 is the threat it mitigates.) | — |
+| R5 | Runaway-loop containment: the per-PR merge-attempt counter cap (`_UBERDEV_GOAL_MAX_MERGE_ATTEMPTS=3`) MUST be enforced via `UBERDEV_GOAL_ID` env forwarding to child dispatches; without env forwarding the cap cannot be queried and the loop will attempt unlimited merges. | D8 |
+| R6 | Dispatch completion detection: agent completion is determined by the `backgrounded · ` marker in the stdout log (not the non-existent `claude agents status <id>` API); this marker is a stable, asserted contract across all `lib/dispatch.sh` backends and is the only authoritative completion signal in v1. | §3.5 |
+
+### 9.5 B — Bug fix / Behaviour contracts
+
+| Code | One-sentence definition | See also |
+|------|-------------------------|----------|
+| B1  | Correct audit path for `/review-pr` results: the canonical path is `.uberdev/runs/<run-id>/review-pr-verdict.json`; the legacy `.claude/audit/review-pr-<PR>-<run>.json` path was never written by `/review-pr` and silently returned "missing" for every lookup, blocking trust-signal reads forever. | §3.5 |
+| B2  | Correct audit path for `/merge` results: the canonical path is `.uberdev/audit.jsonl`; the legacy `.claude/audit/merge-<PR>-<run>.json` path was never written by `/merge` and silently returned "missing", causing Phase 2c to never drive PR transitions. | §3.5 |
+| B4  | `uberdev_goal_list_prs_in_state` takes exactly one state argument; calling it with a space-separated string `"yellow-held red-held"` makes the second token a positional no-op — `red-held` PRs are silently excluded from the unblock check. Call the function twice and concatenate results. | — |
+| B5  | `gh_jq_or_jq` exit-code contract: callers MUST branch on the return code; rc≠0 means jq failed (malformed JSON or missing filter target) and the result is not a valid trust signal; treating empty stdout as equivalent to rc=0 caused a corrupted audit JSON to fall through to the "phase2_5 missing" path and misclassify the trust signal as `stale`. | — |
+| B6  | Two separate bugs share this code: (a) Phase 2a overflow detection must run in the `red` signal case where `$audit_json` and `$pr_num` are in scope (not Phase 3 where they don't exist); (b) Phase 3 must check `gh_rc` for the `gh issue list` call — discarding rc meant a 403 rate-limit appeared as empty candidates, falsely triggering `goal_converged`. | — |
+| B7  | Defensive default-case guard in Phase 2c's merge-result `case` statement: any value outside `success|conflict|hook_failed|missing` is a contract drift (e.g., a future enum member not yet handled here) and must halt with `goal_circuit_breaker reason=unknown_merge_result` rather than silently leaving the PR stuck in `merging` forever. | §3.4 |
+| B10 | `_uberdev_goal_check_unblock` must surface `gh pr view` failures (rate-limited, transient network, PR deleted upstream) instead of treating empty body as "no Blocks: lines" — silent empty-body would leave a held PR waiting for an unblock check that never succeeds; correct behaviour is to skip the iteration and retry next cycle. | §3.2.3 |
+| B11 | In the unblock blocking-issue check, a 404 "Could not resolve to an Issue" `gh` error means the issue was deleted upstream and should be treated as CLOSED (unblock proceeds); all other `gh` errors should skip the unblock check this iteration (NOT treat the issue as OPEN, which would permanently hold the PR). | §3.2.3 |
+
+### 9.6 S — Simplify / Style rules
+
+| Code | One-sentence definition | See also |
+|------|-------------------------|----------|
+| S4 | Helper naming convention: all internal helpers in `lib/goal-state.sh` must use the `_uberdev_goal_*` prefix; a short alias `_persist_fp` was dropped in favour of the canonical long name `_uberdev_goal_persist_fp` because the call site is not harmed by the longer name and consistency beats brevity for private helpers. | — |
+| S6 | `print_summary` held-PR rows must include the `state=` field (`yellow-held` or `red-held`); the prior implementation merged both lists into bare PR numbers, silently dropping the state field that the prose (RFC §3.2.3) promises. | §3.2.3 |
+| S9 | Dry-run mode must suppress ALL side effects including audit events; specifically `goal_dispatched` must not be emitted during `--dry-run` so the audit log remains a record of real runs only. (Paired with D16 which defines the dry-run feature; S9 is the audit-purity constraint.) | §3.1 |

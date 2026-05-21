@@ -253,16 +253,16 @@ assert_grep "$SOLVE_CMD" \
   "small-team issue-claim protocol" \
   "solve.md mentions small-team claim protocol"
 
-echo "== Version bump 0.28.0 -> 0.30.2 propagated =="
+echo "== Version bump 0.28.0 -> 0.30.3 propagated =="
 assert_grep "$PLUGIN_JSON" \
-  '"version": "0.30.2"' \
-  "plugin.json bumped to 0.30.2"
+  '"version": "0.30.3"' \
+  "plugin.json bumped to 0.30.3"
 assert_grep "$MARKETPLACE_JSON" \
-  '"version": "0.30.2"' \
-  "marketplace.json bumped to 0.30.2"
+  '"version": "0.30.3"' \
+  "marketplace.json bumped to 0.30.3"
 assert_grep "$README" \
-  "version-0\\.30\\.2-blue" \
-  "README version badge bumped to 0.30.2"
+  "version-0\\.30\\.3-blue" \
+  "README version badge bumped to 0.30.3"
 assert_grep "$CHANGELOG" \
   '^## \[0\.30\.0\]' \
   "CHANGELOG has [0.30.0] section header (history retained)"
