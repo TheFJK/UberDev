@@ -41,6 +41,29 @@ assert_grep_not() {
   fi
 }
 
+# Mirror of the extraction pipeline in plugins/uberdev/lib/dispatch.sh
+# (the success arm of _uberdev_dispatch_claude_bg, post-#143 fix).
+# Reads $1 as the path to a fixture file simulating $BG_STDOUT_LOG and
+# echoes the post-scrub $DISPATCH_ID (either empty or exactly 8 hex).
+# Drift between this helper and dispatch.sh:241 is caught by the
+# shape-check assertions above — the regexes here MUST stay in lockstep.
+_extract_id() {
+  local fixture="$1"
+  local id
+  id="$(sed -E $'s/\x1B\\[[0-9;]*[a-zA-Z]//g' "$fixture" \
+        | grep -aoE '^backgrounded · [0-9a-f]{8}$' \
+        | awk '{print $NF}' \
+        | head -1)"
+  id="${id//[^0-9a-f]/}"
+  [ "${#id}" -eq 8 ] || id=""
+  printf '%s' "$id"
+}
+
+# tmp fixture cleanup (per-test scope)
+_TMPFIX=""
+_cleanup_tmpfix() { [ -n "$_TMPFIX" ] && rm -f "$_TMPFIX" || :; }
+trap _cleanup_tmpfix EXIT
+
 echo "== Positive: claude --bg three-arm dispatch case-switch (lib/dispatch.sh) =="
 assert_grep "$DISPATCH_LIB" \
   'case "\$BG_PROMPT_MODE" in' \
@@ -149,8 +172,17 @@ else
 fi
 unset GREP_RC
 assert_grep "$DISPATCH_LIB" \
-  'backgrounded · \[0-9a-f\]\{8\}' \
-  "claude-bg backend extracts the backgrounded · <id> bg session id"
+  "sed -E \\\$'s/" \
+  "claude-bg backend pre-strips ANSI CSI escapes from \$BG_STDOUT_LOG (#143 fix)"
+assert_grep "$DISPATCH_LIB" \
+  '\^backgrounded · \[0-9a-f\]\{8\}\$' \
+  "claude-bg backend uses line-anchored marker grep (#143 OSC/DCS defense-in-depth)"
+assert_grep "$DISPATCH_LIB" \
+  'DISPATCH_ID="\$\{DISPATCH_ID//\[\^0-9a-f\]/\}"' \
+  "claude-bg backend hex-only scrub locks \$DISPATCH_ID to /^[0-9a-f]{8}\$/ contract"
+assert_grep "$DISPATCH_LIB" \
+  '\[ "\$\{#DISPATCH_ID\}" -eq 8 \]' \
+  "claude-bg backend length check enforces exactly-8-hex id post-scrub"
 assert_grep "$DISPATCH_LIB" \
   '_uberdev_dispatch_claude_bg\(\)' \
   "lib/dispatch.sh defines the _uberdev_dispatch_claude_bg function"
@@ -219,6 +251,122 @@ assert_grep_not "$SOLVE_PIPELINE" \
 assert_grep_not "$SOLVE_PIPELINE" \
   'REAL_CLAUDE=\$\(' \
   "REAL_CLAUDE PATH walk retired (Step 3 deletion)"
+
+echo "== Runtime: ANSI-positive extraction (#143) =="
+_TMPFIX="$(mktemp "${TMPDIR:-/tmp}/uberdev-143-XXXXXX.log")"
+printf 'backgrounded \xc2\xb7 \x1b[36mb88389ff\x1b[39m\n' > "$_TMPFIX"
+GOT="$(_extract_id "$_TMPFIX")"
+if [[ "$GOT" == "b88389ff" ]]; then
+  echo "  PASS  ANSI-decorated marker (\\x1B[36m<id>\\x1B[39m) extracts to bare 8-hex"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  ANSI-decorated marker extracted as '$GOT' (expected 'b88389ff')"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$_TMPFIX"; _TMPFIX=""
+
+_TMPFIX="$(mktemp "${TMPDIR:-/tmp}/uberdev-143-XXXXXX.log")"
+printf 'backgrounded \xc2\xb7 b88389ff\n' > "$_TMPFIX"
+GOT="$(_extract_id "$_TMPFIX")"
+if [[ "$GOT" == "b88389ff" ]]; then
+  echo "  PASS  bare marker (back-compat with Claude Code 2.1.139) extracts to 8-hex"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  bare marker extracted as '$GOT' (expected 'b88389ff') — back-compat broken"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$_TMPFIX"; _TMPFIX=""
+
+# Case #5: noise + ANSI marker + noise → first match wins
+_TMPFIX="$(mktemp "${TMPDIR:-/tmp}/uberdev-143-XXXXXX.log")"
+printf 'some preamble\nbackgrounded \xc2\xb7 \x1b[36mb88389ff\x1b[39m\ntrailing noise\n' > "$_TMPFIX"
+GOT="$(_extract_id "$_TMPFIX")"
+if [[ "$GOT" == "b88389ff" ]]; then
+  echo "  PASS  mixed-line stdout extracts the first matching marker"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  mixed-line stdout extracted as '$GOT' (expected 'b88389ff')"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$_TMPFIX"; _TMPFIX=""
+
+# Case #8: two valid markers → head -1 takes the first
+_TMPFIX="$(mktemp "${TMPDIR:-/tmp}/uberdev-143-XXXXXX.log")"
+printf 'backgrounded \xc2\xb7 aaaaaaaa\nbackgrounded \xc2\xb7 bbbbbbbb\n' > "$_TMPFIX"
+GOT="$(_extract_id "$_TMPFIX")"
+if [[ "$GOT" == "aaaaaaaa" ]]; then
+  echo "  PASS  multiple markers → head -1 takes the first id"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  multiple markers extracted as '$GOT' (expected 'aaaaaaaa')"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$_TMPFIX"; _TMPFIX=""
+
+# Case #6: OSC-decorated marker (hyperlink wrap) — line-anchor rejects
+_TMPFIX="$(mktemp "${TMPDIR:-/tmp}/uberdev-143-XXXXXX.log")"
+printf '\x1b]8;;http://x\x07backgrounded \xc2\xb7 b88389ff\x1b]8;;\x07\n' > "$_TMPFIX"
+GOT="$(_extract_id "$_TMPFIX")"
+if [[ -z "$GOT" ]]; then
+  echo "  PASS  OSC-decorated marker is rejected (line-anchor + CSI-only strip)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  OSC-decorated marker extracted as '$GOT' (expected empty — line-anchor must reject)"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$_TMPFIX"; _TMPFIX=""
+
+# Case #9: truncated id (5 hex) → does not match {8}
+_TMPFIX="$(mktemp "${TMPDIR:-/tmp}/uberdev-143-XXXXXX.log")"
+printf 'backgrounded \xc2\xb7 b8838\n' > "$_TMPFIX"
+GOT="$(_extract_id "$_TMPFIX")"
+if [[ -z "$GOT" ]]; then
+  echo "  PASS  truncated-id (5 hex) yields empty (matches B3 fail-CLOSED path)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  truncated-id extracted as '$GOT' (expected empty)"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$_TMPFIX"; _TMPFIX=""
+
+# Case #10: over-length id (14 hex) → line-anchor $ requires exactly 8
+_TMPFIX="$(mktemp "${TMPDIR:-/tmp}/uberdev-143-XXXXXX.log")"
+printf 'backgrounded \xc2\xb7 b88389ffaabbcc\n' > "$_TMPFIX"
+GOT="$(_extract_id "$_TMPFIX")"
+if [[ -z "$GOT" ]]; then
+  echo "  PASS  over-length-id (14 hex) yields empty (locks {8} format contract)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  over-length-id extracted as '$GOT' (expected empty)"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$_TMPFIX"; _TMPFIX=""
+
+# Case #7: zero-byte stdout
+_TMPFIX="$(mktemp "${TMPDIR:-/tmp}/uberdev-143-XXXXXX.log")"
+: > "$_TMPFIX"
+GOT="$(_extract_id "$_TMPFIX")"
+if [[ -z "$GOT" ]]; then
+  echo "  PASS  empty stdout yields empty (B3 fail-CLOSED path triggers)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  empty stdout extracted as '$GOT' (expected empty)"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$_TMPFIX"; _TMPFIX=""
+
+echo "== Runtime: B3 fail-CLOSED guard regression (#143 / RFC 0004 §3.5) =="
+_TMPFIX="$(mktemp "${TMPDIR:-/tmp}/uberdev-143-XXXXXX.log")"
+printf 'some unrelated noise\nbackground started but not the marker\nspawn attempted\n' > "$_TMPFIX"
+GOT="$(_extract_id "$_TMPFIX")"
+if [[ -z "$GOT" ]]; then
+  echo "  PASS  missing-marker stdout yields empty (B3 guard at dispatch.sh:248 still fires rc=2)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  missing-marker stdout extracted as '$GOT' — B3 fail-CLOSED contract BROKEN"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$_TMPFIX"; _TMPFIX=""
 
 echo
 echo "== Summary =="
