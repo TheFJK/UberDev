@@ -185,4 +185,54 @@ test_defensive_revalidation() {
 }
 test_defensive_revalidation
 
+# Case 13: curl `--` separator and URL-as-last-arg (security boundary)
+test_curl_dash_dash_separator() {
+  # Verifies wrapper passes URL after `--` so flag-smuggling stays neutralised.
+  export RATE_STATE_DIR="$TEST_TMPDIR/sep-$RANDOM"
+  mkdir -p "$RATE_STATE_DIR"
+  export RPS_CAP=10
+  SHIM="$TEST_TMPDIR/spy-shim"; mkdir -p "$SHIM"
+  ARGFILE="$TEST_TMPDIR/spy-args"
+  cat > "$SHIM/curl" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$ARGFILE"
+exit 0
+EOF
+  chmod +x "$SHIM/curl"
+  OLD_PATH="$PATH"; export PATH="$SHIM:$PATH"
+  . "$REPO_ROOT/plugins/uberdev/lib/rate-limit-curl.sh"
+  uberdev_rate_limit_curl "http://example.test/probe" >/dev/null
+  export PATH="$OLD_PATH"
+  # Assert `--` appears in captured args before the URL
+  grep -q '^--$' "$ARGFILE" || { fail "$FUNCNAME" "missing '--' separator in curl args: $(cat "$ARGFILE" | tr '\n' ' ')"; return; }
+  # Assert URL is the LAST arg (right after `--`)
+  tail -1 "$ARGFILE" | grep -q '^http://example.test/probe$' || { fail "$FUNCNAME" "URL not last arg: $(tail -1 "$ARGFILE")"; return; }
+  pass "$FUNCNAME"
+}
+test_curl_dash_dash_separator
+
+# Case 14: trap RETURN releases mutex even on curl failure
+test_trap_release_on_curl_failure() {
+  # Verifies trap RETURN releases the mutex even when curl exits non-zero.
+  export RATE_STATE_DIR="$TEST_TMPDIR/trap-$RANDOM"
+  mkdir -p "$RATE_STATE_DIR"
+  export RPS_CAP=10
+  SHIM="$TEST_TMPDIR/fail-shim"; mkdir -p "$SHIM"
+  cat > "$SHIM/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 22
+EOF
+  chmod +x "$SHIM/curl"
+  OLD_PATH="$PATH"; export PATH="$SHIM:$PATH"
+  . "$REPO_ROOT/plugins/uberdev/lib/rate-limit-curl.sh"
+  uberdev_rate_limit_curl "http://example.test/path" >/dev/null 2>&1 || true
+  export PATH="$OLD_PATH"
+  # Lock directory MUST be released after function returns, even on curl failure
+  if [ -d "$RATE_STATE_DIR/example.test/.lock" ]; then
+    fail "$FUNCNAME" "lock directory persisted after curl failure"; return
+  fi
+  pass "$FUNCNAME"
+}
+test_trap_release_on_curl_failure
+
 exit "$FAILS"
