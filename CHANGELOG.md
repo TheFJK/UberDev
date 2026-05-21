@@ -15,10 +15,14 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 ### Fixed (#133)
 
 - **`/uberdev:testers` `--rps-cap` is now actually enforced.** Previously parsed and serialised but no layer enforced it; a run with `--rps-cap=5` could let any persona fire 50+ req/sec at the target. Now:
-  - Hard pre-emptive enforcement via `plugins/uberdev/lib/rate-limit-curl.sh` (token-bucket, per-host, `mkdir`-as-mutex) for `Bash(curl*)` traffic.
+  - Pre-emptive (hard cap) via `plugins/uberdev/lib/rate-limit-curl.sh` (token-bucket, per-host, `mkdir`-as-mutex) for `Bash(curl*)` traffic.
   - Post-hoc audit via `plugins/uberdev/lib/rate-cap-audit.sh` for Playwright / browser-MCP traffic that cannot be HTTP-wrapped; a breach synthesises a `critical` `polite_rate_cap` finding and the run exits 1.
   - Parse-site input validation: anchored regex `^[1-9][0-9]*$`, range `[1, 1000]`, `exit 2` on bad input. Closes a MAJOR-severity argv-injection surface.
   - URL flag-smuggling neutralised: wrapper invokes `command curl <args> -- "$URL"`.
+
+### Breaking (internal CLI)
+
+- `aggregate.py --rps-cap=N` is now a **required** flag. Direct callers outside SKILL.md must pass it explicitly. SKILL.md's invocation has been updated. The previous default (no flag) silently disabled the audit; making it required ensures the audit always runs.
 
 ### Documentation (#133)
 
