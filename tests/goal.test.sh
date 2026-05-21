@@ -271,6 +271,100 @@ assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.31\
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
 
 echo
+echo "== Behavioral tests (B12 — sourced-function exercises) =="
+# These tests SOURCE plugins/uberdev/lib/goal-state.sh and exercise the
+# real bash functions, not just grep their shape. They cover the four
+# silently-shape-checked-only contracts called out in post-impl review B12:
+#   BT1 — state-machine forbidden transitions (D17)
+#   BT2 — Blocks: parser ReDoS-safe anchoring
+#   BT3 — fingerprint repeat detector
+#   BT4 — gh_jq_or_jq jq shim file-not-found path
+#
+# Isolation: mktemp $UBERDEV_TMPDIR for this section so writes do not
+# collide with production state nor with each other.
+_b12_tmpdir="$(mktemp -d 2>/dev/null || printf '/tmp/goal-b12-%s' "$$")"
+mkdir -p "$_b12_tmpdir"
+UBERDEV_TMPDIR="$_b12_tmpdir"
+export UBERDEV_TMPDIR
+
+# Source the lib under test. Idempotency guard means re-sourcing is a no-op.
+# shellcheck source=/dev/null
+. "$GOAL_LIB" || {
+  printf '  FAIL  B12.source-lib (could not source %s)\n' "$GOAL_LIB" >&2
+  FAIL=$((FAIL + 1))
+}
+
+assert_eq() {
+  local got="$1" want="$2" label="$3"
+  if [ "$got" = "$want" ]; then
+    PASS=$((PASS + 1))
+    printf '  PASS  %s\n' "$label"
+  else
+    FAIL=$((FAIL + 1))
+    printf '  FAIL  %s\n' "$label" >&2
+    printf '        got:  %s\n' "$got" >&2
+    printf '        want: %s\n' "$want" >&2
+  fi
+}
+
+assert_rc() {
+  local rc="$1" want="$2" label="$3"
+  if [ "$rc" = "$want" ]; then
+    PASS=$((PASS + 1))
+    printf '  PASS  %s\n' "$label"
+  else
+    FAIL=$((FAIL + 1))
+    printf '  FAIL  %s\n' "$label" >&2
+    printf '        rc=%s, expected %s\n' "$rc" "$want" >&2
+  fi
+}
+
+# BT1 — PR state machine: D17 forbidden transitions return non-zero;
+# a documented legal transition returns zero.
+_uberdev_goal_pr_state_machine_valid yellow-held merging
+assert_rc "$?" "1" "BT1.yellow-held->merging-forbidden"
+_uberdev_goal_pr_state_machine_valid red-held merging
+assert_rc "$?" "1" "BT1.red-held->merging-forbidden"
+_uberdev_goal_pr_state_machine_valid dispatched pushed-reviewing
+assert_rc "$?" "0" "BT1.dispatched->pushed-reviewing-allowed"
+
+# BT2 — Blocks: parser: anchored shape accepts exact form, rejects
+# missing-hash / non-digit / leading-space / empty.
+assert_eq "$(_uberdev_goal_parse_blocks_line 'Blocks: #123')" "123" "BT2.exact-match"
+assert_eq "$(_uberdev_goal_parse_blocks_line 'Blocks: 123')"  ""    "BT2.no-hash-rejected"
+assert_eq "$(_uberdev_goal_parse_blocks_line 'Blocks: #abc')" ""    "BT2.non-digit-rejected"
+assert_eq "$(_uberdev_goal_parse_blocks_line ' Blocks: #123')" ""   "BT2.leading-space-rejected"
+assert_eq "$(_uberdev_goal_parse_blocks_line '')"              ""   "BT2.empty-rejected"
+
+# BT3 — fingerprint repeat: persist fp at cycle 1, query at cycle 2 with
+# same fp -> returns 1 (repeat detected; caller halts non-convergence).
+uberdev_goal_state_init test-bt3
+_uberdev_goal_persist_fp test-bt3 1 abcd1234abcd1234
+UBERDEV_GOAL_ID=test-bt3 uberdev_goal_check_fingerprint_repeat test-bt3 2 abcd1234abcd1234
+assert_rc "$?" "1" "BT3.fingerprint-repeat-detected"
+
+# BT4 — gh_jq_or_jq with non-existent file -> returns non-zero (file
+# does not exist), produces empty output. Behavioral check that the
+# shim's file-existence guard fires.
+_bt4_out="$(gh_jq_or_jq /nonexistent/path/that/should/not/exist '.foo' 2>/dev/null)"
+_bt4_rc=$?
+assert_eq "$_bt4_out" "" "BT4.file-not-found-empty-output"
+# rc=1 from the `[ -f ]` guard (file not found is a failure for the shim).
+if [ "$_bt4_rc" -ne 0 ]; then
+  PASS=$((PASS + 1))
+  printf '  PASS  %s\n' "BT4.file-not-found-nonzero-rc"
+else
+  FAIL=$((FAIL + 1))
+  printf '  FAIL  %s\n' "BT4.file-not-found-nonzero-rc" >&2
+  printf '        expected non-zero, got %s\n' "$_bt4_rc" >&2
+fi
+
+# Cleanup: remove the isolated tmpdir contents (we created the whole
+# directory via mktemp -d, so we can rm -rf safely — it's our own).
+rm -rf "$_b12_tmpdir/goal-test-bt3"* 2>/dev/null || true
+rm -rf "$_b12_tmpdir" 2>/dev/null || true
+
+echo
 echo "== Summary =="
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 
