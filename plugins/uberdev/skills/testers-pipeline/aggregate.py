@@ -89,7 +89,8 @@ def main() -> int:
 
     for path in sorted(glob.glob(os.path.join(args.scratch_dir, "*/*.yaml"))):
         try:
-            doc = yaml.safe_load(open(path)) or {}
+            with open(path) as fh:
+                doc = yaml.safe_load(fh) or {}
         except yaml.YAMLError as e:
             print(f"warning: skipping malformed {path}: {e}", file=sys.stderr)
             continue
@@ -119,7 +120,8 @@ def main() -> int:
         "follow_ups_for_next_wave": follow_ups,
         "dispositions": dispositions,
     }
-    yaml.safe_dump(out, open(args.out, "w"), default_flow_style=False, sort_keys=False)
+    with open(args.out, "w") as fh:
+        yaml.safe_dump(out, fh, default_flow_style=False, sort_keys=False)
     print(f"aggregated {len(findings)} findings into {args.out}", file=sys.stderr)
     return 0
 

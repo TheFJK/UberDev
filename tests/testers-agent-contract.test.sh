@@ -60,19 +60,34 @@ for a in "${EXPECTED_AGENTS[@]}"; do
 done
 pass "C4: all 8 agent files exist with canonical frontmatter"
 
-# C5: no agent has Edit or bare Write in allowed-tools (read-only contract)
+# C5: no agent has Edit or bare Write in allowed-tools (read-only contract).
+# Bare `Write` is forbidden; `Write(<scope>)` is OK. POSIX ERE has no
+# lookarounds, so we detect bare Write via a 3-line python YAML parser
+# (load the frontmatter, scan allowed-tools tokens). Python YAML is already
+# a hard dep of this repo (aggregate.py + report.py); cost is one extra
+# subprocess per agent file.
 for a in "${EXPECTED_AGENTS[@]}"; do
   F="$AGENT_DIR/$a.md"
-  # allowed-tools may be a list or a YAML flow array; check both shapes
   if grep -E "^allowed-tools:.*\\bEdit\\b" "$F" > /dev/null; then
     fail "C5 $a: forbidden 'Edit' in allowed-tools"
   fi
-  if grep -E "^allowed-tools:.*\\bWrite\\b(?!\\()" "$F" > /dev/null 2>&1; then
-    # bare Write is forbidden; Write(<scope>) is OK
-    if ! grep -E "Write\\(" "$F" > /dev/null; then
-      fail "C5 $a: bare 'Write' in allowed-tools (must be scoped Write(<dir>))"
-    fi
-  fi
+  python3 - "$F" "$a" <<'PY' || exit $?
+import sys, re
+path, agent = sys.argv[1], sys.argv[2]
+with open(path) as fh:
+    text = fh.read()
+# Extract allowed-tools line(s) from frontmatter — accept YAML list or flow array.
+# We don't need a full YAML parser; the contract is "no bare Write token", so
+# tokenize on commas / brackets and check each entry literally.
+m = re.search(r'(?m)^allowed-tools:\s*(.+)$', text)
+if not m:
+    sys.exit(0)  # no allowed-tools line → nothing forbidden
+tokens = re.findall(r'[A-Za-z_]+(?:\([^)]*\))?', m.group(1))
+for tok in tokens:
+    if tok == 'Write':
+        print(f"FAIL  C5 {agent}: bare 'Write' in allowed-tools (must be scoped Write(<dir>))", file=sys.stderr)
+        sys.exit(1)
+PY
 done
 pass "C5: no agent has unrestricted Edit / Write"
 

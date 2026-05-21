@@ -153,6 +153,24 @@ fi
 Wave loop. For each round in `1..ROUNDS`:
 
 ```bash
+# Wave-file stat helper. Reads a wave-N.yaml and prints the requested count.
+# Centralises the python3-yaml invocation so per-wave summary lines and
+# Phase 6 share one parser instead of three inlined snippets.
+_wave_count() {
+  # _wave_count <path> <kind>  where kind ∈ {findings, verified}
+  python3 - "$1" "$2" <<'PY'
+import sys, yaml
+path, kind = sys.argv[1], sys.argv[2]
+doc = yaml.safe_load(open(path)) or {}
+if kind == "findings":
+    print(len(doc.get("findings") or []))
+elif kind == "verified":
+    print(sum(1 for cr in (doc.get("cross_refs") or []) if cr.get("verified")))
+else:
+    sys.exit(f"unknown kind: {kind}")
+PY
+}
+
 PERSONAS="${PERSONA_LIST:-panicked_grandma,power_user,adversarial_security,chaos_engineer,a11y_critic,mobile_thumb}"
 PREV_FINDINGS="null"
 
@@ -209,7 +227,7 @@ EOF
     --out "$WAVE_FILE"
 
   PREV_FINDINGS="$WAVE_FILE"
-  echo "[testers] wave $WAVE complete: $(python3 -c "import sys,yaml; print(len((yaml.safe_load(open(sys.argv[1])) or {}).get('findings') or []))" "$WAVE_FILE") findings"
+  echo "[testers] wave $WAVE complete: $(_wave_count "$WAVE_FILE" findings) findings"
 done
 ```
 
@@ -255,8 +273,8 @@ The findings-to-issues aggregate is shaped to match the existing post-impl-revie
 ## Phase 6 — Summary + exit
 
 ```bash
-TOTAL="$(python3 -c "import yaml; f=yaml.safe_load(open('$RUN_DIR/wave-$ROUNDS.yaml')); print(len(f['findings']))")"
-VERIFIED="$(python3 -c "import yaml; f=yaml.safe_load(open('$RUN_DIR/wave-$ROUNDS.yaml')); print(sum(1 for cr in (f.get('cross_refs') or []) if cr.get('verified')))")"
+TOTAL="$(_wave_count "$RUN_DIR/wave-$ROUNDS.yaml" findings)"
+VERIFIED="$(_wave_count "$RUN_DIR/wave-$ROUNDS.yaml" verified)"
 
 echo
 echo "[testers] === DONE ==="

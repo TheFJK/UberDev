@@ -64,8 +64,11 @@ def merge_findings(waves: list) -> dict:
     """
     merged: dict = {}
     persona_per_finding: dict = {}
-    # Walk cross_refs first so we can honor monitor-primary's verified flag.
     cross_ref_verified: dict = {}
+    # Single fused pass over waves: accumulate cross_ref verified flags AND
+    # findings (highest-severity wins, persona attribution union) in one
+    # iteration. The cross_ref_verified map is consulted in the post-pass
+    # below (over merged.items()), so build order within a wave is irrelevant.
     for w in waves:
         for cr in w.get("cross_refs") or []:
             fid = cr.get("finding_id")
@@ -76,7 +79,6 @@ def merge_findings(waves: list) -> dict:
             cross_ref_verified[fid] = cross_ref_verified.get(fid, False) or bool(
                 cr.get("verified")
             )
-    for w in waves:
         for f in w.get("findings") or []:
             fid = f["id"]
             prior = merged.get(fid)
@@ -108,7 +110,7 @@ def render_report(merged: dict[str, dict], run_id: str) -> str:
             continue
         lines.append(f"## {sev.upper()}")
         for f in items:
-            v = "✓" if f.get("verified") else "?"
+            v = "verified" if f.get("verified") else "unverified"
             lines.append(f"### [{v}] {f.get('summary', '(no summary)')}")
             lines.append(f"- **persona(s):** {', '.join(f.get('reproduced_by', []))}")
             lines.append(f"- **location:** `{f.get('location', '')}`")
