@@ -5,7 +5,7 @@ _UBERDEV_RATE_LIMIT_LOADED=1
 
 # uberdev_rate_limit_curl URL [curl-args...]
 #
-# Enforces $RPS_CAP (already validated at SKILL.md:104) for the host extracted
+# Enforces $RPS_CAP (already validated by the caller in SKILL.md before export) for the host extracted
 # from URL. State and lock live under $RATE_STATE_DIR/<host>/ (per-run, per-host).
 #
 # Algorithm: serial gate with per-host bucket (mutex held during sleep — trades
@@ -35,7 +35,7 @@ uberdev_rate_limit_curl() {
   [ -n "${RATE_STATE_DIR:-}" ] || { echo "rate-limit-curl: RATE_STATE_DIR unset" >&2; return 2; }
   [ -d "$RATE_STATE_DIR" ] || { echo "rate-limit-curl: $RATE_STATE_DIR missing" >&2; return 2; }
   [[ "${RPS_CAP:-}" =~ ^[1-9][0-9]*$ ]] || { echo "rate-limit-curl: RPS_CAP malformed" >&2; return 2; }
-  [ "$RPS_CAP" -ge 1 ] && [ "$RPS_CAP" -le 1000 ] || { echo "rate-limit-curl: RPS_CAP out of range" >&2; return 2; }
+  [ "$RPS_CAP" -le 1000 ] || { echo "rate-limit-curl: RPS_CAP out of range" >&2; return 2; }
 
   # Extract host (scheme://host[:port]/path -> host[:port]).
   local HOST

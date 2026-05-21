@@ -10,7 +10,7 @@ set -eu
 uberdev_rate_cap_audit() {
   local WAVE_YAML="$1" CAP="$2" OUT_YAML="$3"
   python3 - "$WAVE_YAML" "$CAP" "$OUT_YAML" <<'PY'
-import sys, yaml, hashlib
+import sys, yaml, hashlib, re
 from collections import defaultdict
 wave_path, cap_str, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
 cap = int(cap_str)
@@ -35,7 +35,6 @@ for f in findings:
     except Exception as e:
         print(f"warning: rate-cap-audit skipping finding {f.get('id', '?')!r} with unparseable timestamp {ts!r}: {e}", file=sys.stderr)
         continue
-    import re
     m = re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://([^/?#]+)", url)
     if not m:
         continue

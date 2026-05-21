@@ -91,9 +91,6 @@ fi
 RUN_ID="$(date +%Y%m%d-%H%M%S)-$(printf '%04x' $RANDOM)"
 RUN_DIR=".uberdev/research/$RUN_ID/testers"
 mkdir -p "$RUN_DIR/scratch" "$RUN_DIR/screenshots" "$RUN_DIR/traces"
-mkdir -p "$RUN_DIR/.rate-state"
-export RATE_STATE_DIR="$RUN_DIR/.rate-state"
-export RPS_CAP
 
 # Parse flags
 TARGET=""; SURFACE="auto"; WATCH=0; ROUNDS=3; MAX_ISSUES=10; PERSONA_LIST=""; NO_ISSUES=0; RPS_CAP=10
@@ -120,6 +117,10 @@ for arg in $ARGUMENTS; do
     *) TARGET="$arg" ;;
   esac
 done
+
+mkdir -p "$RUN_DIR/.rate-state"
+export RATE_STATE_DIR="$RUN_DIR/.rate-state"
+export RPS_CAP
 
 # Auto-detect surface if needed
 if [ "$SURFACE" = "auto" ]; then
