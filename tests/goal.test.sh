@@ -1278,14 +1278,22 @@ assert_rc "$?" "1" "BT35.locate-non-numeric-issue-rc-1"
 # (no solve-bg-stdout-9999.log in $UBERDEV_TMPDIR), so the `[ -n "$pr" ]
 # || return 0` branch fires and the function emits nothing. Confirms the
 # function does NOT halt the goal-pipeline when a solve-bg log is missing.
-_bt36_out="$(uberdev_goal_locate_review_pr_audit 9999)"
+# Capture rc separately (mirrors BT25/BT29) — `$(...)` swallows it, and
+# a regression that turned the empty-pr short-circuit into rc=1 would
+# pass the empty-stdout check but fail the rc-zero check.
+_bt36_rc=0
+_bt36_out="$(uberdev_goal_locate_review_pr_audit 9999)" || _bt36_rc=$?
 assert_eq "$_bt36_out" "" "BT36.locate-missing-log-empty"
+assert_rc "$_bt36_rc" "0" "BT36.locate-missing-log-rc-zero"
 
 # BT37 — happy: log resolves PR=500, .uberdev/runs/<run>/review-pr-verdict.json
 # carries matching .pr, run_id matches RUN_ID_REGEX. Function returns
 # the relative canonical path. The verdict.json uses `"pr": "500"`
-# (string form) because /review-pr writes the field as a string and
-# `jq -r '.pr'` prints it as "500" either way.
+# (string form) because locate_review_pr_audit reads .pr via `jq -r`
+# (NOT `jq --argjson`) and then string-compares against $pr, so either
+# `{"pr": "500"}` or `{"pr": 500}` works identically here. BT43's
+# read_merge_result counterpart MUST use integer form (see comment
+# below) — the asymmetry is intentional and reflects each fn's filter.
 _bt37_dir="$_b12_tmpdir/bt37-cwd"
 mkdir -p "$_bt37_dir/.uberdev/runs/20260521-120000-aaaa1111"
 printf '[solve-bg] pushed PR #500\n' > "$_b12_tmpdir/solve-bg-stdout-37.log"
@@ -1301,18 +1309,23 @@ assert_eq "$_bt37_out" \
 # head -n 1` picks the lex-greatest run_id. The YYYYMMDD-HHMMSS-<sha>
 # format lex-sorts identically to chronological order, so the 200000
 # run wins over the 100000 run. A regression that picked oldest, or
-# reordered the sort, would surface here.
+# reordered the sort, would surface here. Sha values are intentionally
+# CROSSED against timestamps (200000-aaaa vs 100000-bbbb) so a hypo-
+# thetical regression that keyed off the sha suffix instead of the
+# timestamp prefix would still pick 100000-bbbb (sha "bbbb" > "aaaa"),
+# making the assertion fail. The lex-aligned fixture (200000-bbbb vs
+# 100000-aaaa) would have hidden such a regression.
 _bt38_dir="$_b12_tmpdir/bt38-cwd"
-mkdir -p "$_bt38_dir/.uberdev/runs/20260521-100000-aaaa1111" \
-         "$_bt38_dir/.uberdev/runs/20260521-200000-bbbb2222"
+mkdir -p "$_bt38_dir/.uberdev/runs/20260521-100000-bbbb2222" \
+         "$_bt38_dir/.uberdev/runs/20260521-200000-aaaa1111"
 printf '[solve-bg] pushed PR #600\n' > "$_b12_tmpdir/solve-bg-stdout-38.log"
-for _d in 20260521-100000-aaaa1111 20260521-200000-bbbb2222; do
+for _d in 20260521-100000-bbbb2222 20260521-200000-aaaa1111; do
   printf '%s\n' '{"pr": "600"}' \
     > "$_bt38_dir/.uberdev/runs/$_d/review-pr-verdict.json"
 done
 _bt38_out="$(cd "$_bt38_dir" && uberdev_goal_locate_review_pr_audit 38)"
 assert_eq "$_bt38_out" \
-  ".uberdev/runs/20260521-200000-bbbb2222/review-pr-verdict.json" \
+  ".uberdev/runs/20260521-200000-aaaa1111/review-pr-verdict.json" \
   "BT38.locate-multi-run-newest-wins"
 
 # BT39 — PR mismatch: verdict.json's .pr is 999 but the solve-bg log says
