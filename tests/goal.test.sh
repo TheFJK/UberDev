@@ -358,70 +358,58 @@ else
   printf '        expected non-zero, got %s\n' "$_bt4_rc" >&2
 fi
 
-# BT5 — uberdev_goal_should_automerge behavioral coverage (#141).
-# Closes the blocker finding from /uberdev:review-pr Phase 2.5 on PR #129:
-# the predicate's three gates (provenance / attempt cap / PR int) were
-# previously only shape-checked via G16 grep. These cases exercise the
-# real sourced function with seeded TSV state and controlled env.
-#
-# Reuses the B12 _b12_tmpdir (already wired into UBERDEV_TMPDIR + exported
-# at line ~287) so the lib's _uberdev_goal_count_merge_attempts reads
-# from our scratch. Each case picks a distinct goal_id so the per-id
-# TSVs don't cross-contaminate.
-_bt5_seed() {  # GOAL_ID PR COUNT
-  printf '%s\t%s\n' "$2" "$3" > "$_b12_tmpdir/goal-$1-merge-attempts.tsv"
+# BT5 — uberdev_goal_should_automerge behavioral coverage.
+# Reuses the B12 _b12_tmpdir + sourced lib. Distinct goal_id per case
+# so per-id TSVs cannot cross-contaminate.
+_bt5_seed() {
+  printf '%s\t%s\n' "$2" "$3" > "$_b12_tmpdir/goal-$1-merge-attempts.tsv" || {
+    FAIL=$((FAIL + 1))
+    printf '  FAIL  BT5._bt5_seed (could not write %s)\n' \
+        "$_b12_tmpdir/goal-$1-merge-attempts.tsv" >&2
+    return 1
+  }
 }
 
-# B1 — provenance check: UBERDEV_GOAL_ID unset must refuse, even with a
-# valid PR and zero attempts. Without this, a stray /merge outside a
-# /goal context could auto-merge.
+# B1 — provenance: stray /merge outside /goal context must not auto-merge.
 ( unset UBERDEV_GOAL_ID; uberdev_goal_should_automerge bt5-1 123 )
 assert_rc "$?" "1" "BT5.B1-provenance-unset-refused"
 
-# B2 — provenance check: UBERDEV_GOAL_ID set to empty string is treated
-# the same as unset by the ${VAR:-} guard. Covers the "exported but
-# cleared" attack surface separately from B1's truly-unset case.
+# B2 — exported-but-empty UBERDEV_GOAL_ID treated identically to unset.
 ( UBERDEV_GOAL_ID=""; uberdev_goal_should_automerge bt5-2 123 )
 assert_rc "$?" "1" "BT5.B2-provenance-empty-refused"
 
-# B3a — PR integer validation: non-numeric PR must refuse before the
-# attempt-count lookup runs. Guards _uberdev_goal_count_merge_attempts
-# from reading attacker-controlled goal IDs through tainted PR strings.
+# B3a — non-numeric PR refused.
 UBERDEV_GOAL_ID=bt5-valid uberdev_goal_should_automerge bt5-3a abc
 assert_rc "$?" "1" "BT5.B3a-pr-non-numeric-refused"
 
-# B3b — PR integer validation: empty PR string must also refuse
-# (POSIX validator handles '' branch identically to *[!0-9]*).
+# B3b — empty PR refused.
 UBERDEV_GOAL_ID=bt5-valid uberdev_goal_should_automerge bt5-3b ""
 assert_rc "$?" "1" "BT5.B3b-pr-empty-refused"
 
-# B4 — attempt cap boundary: predicate uses strict `-lt`, so attempts
-# equal to the cap (default 3) must refuse. Off-by-one regression
-# detector — flipping `-lt` to `-le` would silently allow a 4th try.
-_bt5_seed bt5-4 200 3
-UBERDEV_GOAL_ID=bt5-valid uberdev_goal_should_automerge bt5-4 200
-assert_rc "$?" "1" "BT5.B4-attempts-at-cap-refused"
+# B4 — boundary: predicate uses strict `-lt`, so attempts == cap must refuse.
+# Regression detector for an accidental `-le` flip.
+if _bt5_seed bt5-4 200 3; then
+  UBERDEV_GOAL_ID=bt5-valid uberdev_goal_should_automerge bt5-4 200
+  assert_rc "$?" "1" "BT5.B4-attempts-at-cap-refused"
+fi
 
-# B5 — happy path under cap: attempts at cap-1 (2) with all other gates
-# passing must allow. Pairs with B4 to pin the boundary on both sides.
-_bt5_seed bt5-5 201 2
-UBERDEV_GOAL_ID=bt5-valid uberdev_goal_should_automerge bt5-5 201
-assert_rc "$?" "0" "BT5.B5-attempts-under-cap-allowed"
+# B5 — pairs with B4: attempts == cap-1 must allow (boundary pinned both sides).
+if _bt5_seed bt5-5 201 2; then
+  UBERDEV_GOAL_ID=bt5-valid uberdev_goal_should_automerge bt5-5 201
+  assert_rc "$?" "0" "BT5.B5-attempts-under-cap-allowed"
+fi
 
-# B6 — happy path with no attempts file at all: the lib falls back to
-# count=0 via _uberdev_goal_count_merge_attempts's printf '0\n' branch.
-# No _bt5_seed call; the TSV path for bt5-6 simply doesn't exist.
+# B6 — no TSV: count defaults to 0; predicate allows.
 UBERDEV_GOAL_ID=bt5-valid uberdev_goal_should_automerge bt5-6 202
 assert_rc "$?" "0" "BT5.B6-no-attempts-file-allowed"
 
-# B7 — env knob: _UBERDEV_GOAL_MAX_MERGE_ATTEMPTS=5 raises the cap so
-# attempts=3 (which would refuse under the default of 3) is now allowed.
-# Pins the env var name; renaming it would silently break callers that
-# rely on the override and is caught here.
-_bt5_seed bt5-7 203 3
-_UBERDEV_GOAL_MAX_MERGE_ATTEMPTS=5 UBERDEV_GOAL_ID=bt5-valid \
-    uberdev_goal_should_automerge bt5-7 203
-assert_rc "$?" "0" "BT5.B7-env-knob-override-allowed"
+# B7 — env knob: renaming _UBERDEV_GOAL_MAX_MERGE_ATTEMPTS silently breaks
+# the override; this case fails if the var name drifts.
+if _bt5_seed bt5-7 203 3; then
+  _UBERDEV_GOAL_MAX_MERGE_ATTEMPTS=5 UBERDEV_GOAL_ID=bt5-valid \
+      uberdev_goal_should_automerge bt5-7 203
+  assert_rc "$?" "0" "BT5.B7-env-knob-override-allowed"
+fi
 
 # Cleanup: remove the isolated tmpdir contents (we created the whole
 # directory via mktemp -d, so we can rm -rf safely — it's our own).
