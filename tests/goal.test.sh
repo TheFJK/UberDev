@@ -276,7 +276,9 @@ echo "== Behavioral tests (B12 — sourced-function exercises) =="
 # silently-shape-checked-only contracts called out in post-impl review B12:
 #   BT1 — state-machine forbidden transitions (D17)
 #   BT2 — Blocks: parser ReDoS-safe anchoring
-#   BT3 — fingerprint repeat detector
+#   BT3 — fingerprint repeat detector, with sub-cases:
+#         BT3a (cycle-1 short-circuit), BT3b (empty-fp guard),
+#         BT3c (append semantics), BT3d (invalid-cycle validation)
 #   BT4 — gh_jq_or_jq jq shim file-not-found path
 #
 # Isolation: mktemp $UBERDEV_TMPDIR for this section so writes do not
@@ -320,13 +322,19 @@ assert_rc() {
 
 assert_file_empty() {
   local file="$1" label="$2"
-  if [ ! -s "$file" ]; then
+  # Guard with existence: `[ ! -s ]` alone is true for a NON-EXISTENT file as
+  # well as a zero-byte one, so a future refactor that drops the
+  # uberdev_goal_state_init fixture would yield a misleading PASS. Requiring
+  # `[ -f ]` first makes a missing fixture fail loudly. Behavior-preserving for
+  # all current callers (BT3b/BT3d state_init first → file exists, zero bytes).
+  if [ -f "$file" ] && [ ! -s "$file" ]; then
     PASS=$((PASS + 1))
     printf '  PASS  %s\n' "$label"
   else
     FAIL=$((FAIL + 1))
     printf '  FAIL  %s\n' "$label" >&2
-    printf '        non-empty: %s\n' "$(cat "$file" 2>/dev/null)" >&2
+    # else-branch only: file is known to exist and be non-empty here.
+    printf '        non-empty: %s\n' "$(cat "$file")" >&2
   fi
 }
 
