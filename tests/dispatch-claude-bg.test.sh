@@ -41,6 +41,43 @@ assert_grep_not() {
   fi
 }
 
+# Mirror of the extraction pipeline in plugins/uberdev/lib/dispatch.sh
+# (the success arm of _uberdev_dispatch_claude_bg, post-#143 fix).
+# Reads $1 as the path to a fixture file simulating $BG_STDOUT_LOG and
+# echoes the post-scrub $DISPATCH_ID (either empty or exactly 8 hex).
+# This helper now structurally mirrors the _uberdev_dispatch_claude_bg
+# id-extraction block (ID_CLEAN/ID_RAW, post-#143 fix): ANSI-strip via sed,
+# `printf '%s\n' | grep -m1 -aoE` the marker, `${raw##* }` for the word, then
+# hex-scrub + the {8} length sentinel. Keeping the same five steps (rather than
+# an awk|head shortcut) means no part of the pipeline escapes the shape-check
+# assertions above — the regexes here MUST stay in lockstep with production.
+_extract_id() {
+  local fixture="$1"
+  local clean raw id
+  clean="$(sed -E $'s/\x1B\\[[0-9;]*[a-zA-Z]//g' "$fixture")"
+  raw="$(printf '%s\n' "$clean" | grep -m1 -aoE '^backgrounded · [0-9a-f]{8}$')"
+  id="${raw##* }"
+  id="${id//[^0-9a-f]/}"
+  [[ ${#id} -eq 8 ]] || id=""
+  printf '%s' "$id"
+}
+
+# tmp fixture cleanup (per-test scope). Also reaps TALLY_FILE (created in the
+# functional-subshell section below)
+# so an abnormal exit between its mktemp and the manual rm doesn't leak it;
+# guarded by -n because it's bound later. The manual rm stays (rm -f is idempotent).
+_TMPFIX=""
+TALLY_FILE=""
+_cleanup_tmpfix() {
+  if [ -n "$_TMPFIX" ]; then
+    rm -f "$_TMPFIX"
+  fi
+  if [ -n "$TALLY_FILE" ]; then
+    rm -f "$TALLY_FILE"
+  fi
+}
+trap _cleanup_tmpfix EXIT
+
 echo "== Positive: claude --bg three-arm dispatch case-switch (lib/dispatch.sh) =="
 assert_grep "$DISPATCH_LIB" \
   'case "\$BG_PROMPT_MODE" in' \
@@ -149,11 +186,153 @@ else
 fi
 unset GREP_RC
 assert_grep "$DISPATCH_LIB" \
-  'backgrounded · \[0-9a-f\]\{8\}' \
-  "claude-bg backend extracts the backgrounded · <id> bg session id"
+  "sed -E \\\$'s/" \
+  "claude-bg backend pre-strips ANSI CSI escapes from \$BG_STDOUT_LOG (#143 fix)"
+assert_grep "$DISPATCH_LIB" \
+  '\^backgrounded · \[0-9a-f\]\{8\}\$' \
+  "claude-bg backend uses line-anchored marker grep (#143 OSC/DCS defense-in-depth)"
+assert_grep "$DISPATCH_LIB" \
+  'DISPATCH_ID="\$\{DISPATCH_ID//\[\^0-9a-f\]/\}"' \
+  "claude-bg backend hex-only scrub locks \$DISPATCH_ID to /^[0-9a-f]{8}\$/ contract"
+assert_grep "$DISPATCH_LIB" \
+  '\[ "\$\{#DISPATCH_ID\}" -eq 8 \]' \
+  "claude-bg backend length check enforces exactly-8-hex id post-scrub"
 assert_grep "$DISPATCH_LIB" \
   '_uberdev_dispatch_claude_bg\(\)' \
   "lib/dispatch.sh defines the _uberdev_dispatch_claude_bg function"
+
+echo "== Functional: id_extract rc capture + subphase discriminator (#154) =="
+# These cases SOURCE lib/dispatch.sh and drive _uberdev_dispatch_claude_bg with
+# stubs, asserting on the captured dispatch_setup_failed / agent_dispatched
+# audit payloads. Distinct from the assert_grep shape-checks above; both styles
+# coexist. Each case runs in a SUBSHELL so stub funcs and the _UBERDEV_DISPATCH_LOADED
+# source-guard never leak between cases.
+TALLY_FILE="$(mktemp)"   # subshell PASS/FAIL hand-off (see read-back idiom per case)
+
+assert_contains() {
+  # assert_contains "<haystack>" "<needle>" "<desc>"
+  local hay="$1" needle="$2" desc="$3"
+  if [[ "$hay" == *"$needle"* ]]; then
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"; echo "        wanted substring: $needle"; echo "        in: $hay"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+assert_not_contains() {
+  # assert_not_contains "<haystack>" "<needle>" "<desc>"
+  local hay="$1" needle="$2" desc="$3"
+  if [[ "$hay" != *"$needle"* ]]; then
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"; echo "        must NOT contain: $needle"; echo "        in: $hay"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+(
+  set +u   # bash 3.2 (macOS system bash) treats empty-array expansions as unbound under set -u
+  UBERDEV_TMPDIR="$(mktemp -d)"
+  # Fixture-seed: the function computes BG_STDOUT_LOG="${UBERDEV_TMPDIR}/solve-bg-stdout-<issue>.log"
+  # internally (dispatch.sh:187), so we pre-seed exactly that path. No production change.
+  printf 'Agent starting...\nbackgrounded · abc12345\n' > "$UBERDEV_TMPDIR/solve-bg-stdout-7.log"
+  declare -a AUDIT_EVENTS=()
+  _uberdev_audit_emit() { AUDIT_EVENTS+=( "$1 $2" ); }   # "<event> <json>"
+  timeout() { shift; "$@"; }          # drop the duration arg, exec the rest
+  env() { while [[ "$1" == *=* ]]; do shift; done; "$@"; }  # strip VAR=val prefixes
+  claude() { printf 'backgrounded · abc12345\n'; return 0; }
+  TIMEOUT_BIN="timeout"; SOLVE_TIMEOUT=1; MODEL="sonnet"
+  PERM_FLAG=(); EFFORT_FLAG=(); BG_PROMPT_MODE="file"
+  PROMPT_FILE="$UBERDEV_TMPDIR/prompt.txt"; printf 'do the thing\n' > "$PROMPT_FILE"
+  DISPATCH_RC=0; DISPATCH_ID=""; DISPATCH_LOG=""
+  # shellcheck disable=SC1090
+  . "$DISPATCH_LIB"
+  _uberdev_dispatch_claude_bg 7 medium "$PROMPT_FILE"
+  rc=$?
+  joined="${AUDIT_EVENTS[*]}"
+  [[ "$rc" -eq 0 ]] && echo "  PASS  happy path returns 0" && PASS=$((PASS + 1)) || { echo "  FAIL  happy path returns 0 (got $rc)"; FAIL=$((FAIL + 1)); }
+  [[ "$DISPATCH_ID" == "abc12345" ]] && echo "  PASS  happy path extracts DISPATCH_ID=abc12345" && PASS=$((PASS + 1)) || { echo "  FAIL  happy path DISPATCH_ID (got '$DISPATCH_ID')"; FAIL=$((FAIL + 1)); }
+  assert_contains "$joined" "agent_dispatched" "happy path emits agent_dispatched"
+  assert_not_contains "$joined" "dispatch_setup_failed" "happy path does NOT emit dispatch_setup_failed"
+  assert_contains "$joined" '"tier":"medium"' "happy path agent_dispatched carries tier=medium"
+  assert_contains "$joined" '"backend":"claude-bg"' "happy path agent_dispatched carries backend=claude-bg"
+  rm -rf "$UBERDEV_TMPDIR"
+  printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
+) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
+
+(
+  set +u   # bash 3.2 (macOS system bash) treats empty-array expansions as unbound under set -u
+  UBERDEV_TMPDIR="$(mktemp -d)"
+  printf 'Agent starting...\nrunning...\n' > "$UBERDEV_TMPDIR/solve-bg-stdout-8.log"
+  declare -a AUDIT_EVENTS=()
+  _uberdev_audit_emit() { AUDIT_EVENTS+=( "$1 $2" ); }
+  timeout() { shift; "$@"; }
+  env() { while [[ "$1" == *=* ]]; do shift; done; "$@"; }
+  claude() { printf 'Agent starting...\nrunning...\n'; return 0; }   # no marker
+  TIMEOUT_BIN="timeout"; SOLVE_TIMEOUT=1; MODEL="sonnet"
+  PERM_FLAG=(); EFFORT_FLAG=(); BG_PROMPT_MODE="file"
+  PROMPT_FILE="$UBERDEV_TMPDIR/prompt.txt"; printf 'x\n' > "$PROMPT_FILE"
+  DISPATCH_RC=0; DISPATCH_ID=""; DISPATCH_LOG=""
+  # shellcheck disable=SC1090
+  . "$DISPATCH_LIB"
+  _uberdev_dispatch_claude_bg 8 medium "$PROMPT_FILE"
+  rc=$?
+  joined="${AUDIT_EVENTS[*]}"
+  [[ "$rc" -eq 2 ]] && echo "  PASS  marker_absent returns 2" && PASS=$((PASS + 1)) || { echo "  FAIL  marker_absent returns 2 (got $rc)"; FAIL=$((FAIL + 1)); }
+  [[ -z "$DISPATCH_ID" ]] && echo "  PASS  marker_absent stamps DISPATCH_ID empty" && PASS=$((PASS + 1)) || { echo "  FAIL  marker_absent DISPATCH_ID not empty (got '$DISPATCH_ID')"; FAIL=$((FAIL + 1)); }
+  assert_contains "$joined" "dispatch_setup_failed" "marker_absent emits dispatch_setup_failed"
+  assert_contains "$joined" '"phase":"id_extract"' "marker_absent keeps phase=id_extract"
+  assert_contains "$joined" '"subphase":"marker_absent"' "marker_absent payload carries subphase=marker_absent"
+  assert_contains "$joined" '"rc":2' "marker_absent keeps rc:2 contract"
+  assert_contains "$joined" '"mode":"file"' "marker_absent payload carries mode=file"
+  rm -rf "$UBERDEV_TMPDIR"
+  printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
+) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
+
+(
+  set +u   # bash 3.2 (macOS system bash) treats empty-array expansions as unbound under set -u
+  UBERDEV_TMPDIR="$(mktemp -d)"
+  SEED_LOG="$UBERDEV_TMPDIR/solve-bg-stdout-9.log"
+  printf 'backgrounded · dead0000\n' > "$SEED_LOG"   # content present but read must fail
+  chmod 000 "$SEED_LOG" 2>/dev/null || true
+  declare -a AUDIT_EVENTS=()
+  _uberdev_audit_emit() { AUDIT_EVENTS+=( "$1 $2" ); }
+  timeout() { shift; "$@"; }
+  env() { while [[ "$1" == *=* ]]; do shift; done; "$@"; }
+  claude() { return 0; }   # spawn succeeds; the LOG read is what fails
+  TIMEOUT_BIN="timeout"; SOLVE_TIMEOUT=1; MODEL="sonnet"
+  PERM_FLAG=(); EFFORT_FLAG=(); BG_PROMPT_MODE="file"
+  PROMPT_FILE="$UBERDEV_TMPDIR/prompt.txt"; printf 'x\n' > "$PROMPT_FILE"
+  DISPATCH_RC=0; DISPATCH_ID=""; DISPATCH_LOG=""
+  # Root-safe fallback: if chmod 000 won't block the read (root / odd FS),
+  # shadow grep to return 2 so the pipeline_error branch is still exercised.
+  # On macOS (non-root), chmod 000 blocks both read AND write, so the file-arm
+  # redirect to the pre-seeded log fails before grep is even called — the
+  # dispatch path is "phase:dispatch rc:1" not "phase:id_extract". We restore
+  # the log to 644 so the redirect can succeed, then use grep-shadow to
+  # inject rc=2 at grep time, exercising the id_extract/pipeline_error path.
+  chmod 644 "$SEED_LOG" 2>/dev/null || true
+  grep() { return 2; }
+  echo "  NOTE  pipeline_error: using grep-shadow to simulate rc>=2 (chmod-000 blocks redirect on macOS; restored to 644 + grep stub)"
+  # shellcheck disable=SC1090
+  . "$DISPATCH_LIB"
+  _uberdev_dispatch_claude_bg 9 medium "$PROMPT_FILE"
+  rc=$?
+  joined="${AUDIT_EVENTS[*]}"
+  [[ "$rc" -eq 2 ]] && echo "  PASS  pipeline_error returns 2" && PASS=$((PASS + 1)) || { echo "  FAIL  pipeline_error returns 2 (got $rc)"; FAIL=$((FAIL + 1)); }
+  [[ -z "$DISPATCH_ID" ]] && echo "  PASS  pipeline_error stamps DISPATCH_ID empty" && PASS=$((PASS + 1)) || { echo "  FAIL  pipeline_error DISPATCH_ID not empty (got '$DISPATCH_ID')"; FAIL=$((FAIL + 1)); }
+  assert_contains "$joined" "dispatch_setup_failed" "pipeline_error emits dispatch_setup_failed"
+  assert_contains "$joined" '"phase":"id_extract"' "pipeline_error keeps phase=id_extract"
+  assert_contains "$joined" '"subphase":"pipeline_error"' "pipeline_error payload carries subphase=pipeline_error"
+  assert_contains "$joined" '"rc":2' "pipeline_error keeps rc:2 contract"
+  assert_contains "$joined" '"mode":"file"' "pipeline_error payload carries mode=file"
+  assert_not_contains "$joined" '"subphase":"marker_absent"' "pipeline_error must NOT mislabel as marker_absent (discriminator differs)"
+  rm -rf "$UBERDEV_TMPDIR"
+  printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
+) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
+
+rm -f "$TALLY_FILE"
 
 echo "== Positive: Phase A constants + hardcoded BG_PROMPT_MODE =="
 assert_grep "$SOLVE_PIPELINE" \
@@ -219,6 +398,85 @@ assert_grep_not "$SOLVE_PIPELINE" \
 assert_grep_not "$SOLVE_PIPELINE" \
   'REAL_CLAUDE=\$\(' \
   "REAL_CLAUDE PATH walk retired (Step 3 deletion)"
+
+# Fail-loud mktemp wrapper — without this, an mktemp failure leaves _TMPFIX
+# empty and the subsequent `printf > ""` silently errors to stderr while
+# the test reports a misleading FAIL or false-positive PASS. (#143 review.)
+_new_fixture() {
+  _TMPFIX="$(mktemp "${TMPDIR:-/tmp}/uberdev-143-XXXXXX")" || {
+    echo "  FAIL  mktemp failed (env / disk?) — aborting test" >&2
+    FAIL=$((FAIL+1))
+    exit 1
+  }
+}
+
+# Helpers: collapse the 10 runtime fixture blocks into a single-line call.
+# Each helper owns the full per-call lifecycle: _new_fixture → write fixture
+# bytes → _extract_id → assert → PASS/FAIL bookkeeping → cleanup. The first
+# argument is the raw byte sequence passed to `printf '%b'`; the third is
+# the human-readable `desc` echoed alongside PASS/FAIL.
+_assert_extract_eq() {
+  local bytes="$1" expected="$2" desc="$3"
+  local got
+  _new_fixture
+  printf '%b' "$bytes" > "$_TMPFIX"
+  got="$(_extract_id "$_TMPFIX")"
+  if [[ "$got" == "$expected" ]]; then
+    echo "  PASS  $desc"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc (got '$got', expected '$expected')"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -f "$_TMPFIX"; _TMPFIX=""
+}
+
+_assert_extract_empty() {
+  local bytes="$1" desc="$2"
+  local got
+  _new_fixture
+  printf '%b' "$bytes" > "$_TMPFIX"
+  got="$(_extract_id "$_TMPFIX")"
+  if [[ -z "$got" ]]; then
+    echo "  PASS  $desc"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc (got '$got', expected empty)"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -f "$_TMPFIX"; _TMPFIX=""
+}
+
+echo "== Runtime: ANSI-positive extraction (#143) =="
+_assert_extract_eq 'backgrounded \xc2\xb7 \x1b[36mb88389ff\x1b[39m\n' \
+                   'b88389ff' \
+                   'ANSI-decorated marker (\x1B[36m<id>\x1B[39m) extracts to bare 8-hex'
+_assert_extract_eq 'backgrounded \xc2\xb7 \x1b[1;36mb88389ff\x1b[0m\n' \
+                   'b88389ff' \
+                   'compound CSI (\x1B[1;36m<id>\x1B[0m) extracts to bare 8-hex (multi-param strip)'
+_assert_extract_eq 'backgrounded \xc2\xb7 b88389ff\n' \
+                   'b88389ff' \
+                   'bare marker (back-compat with Claude Code 2.1.139) extracts to 8-hex'
+_assert_extract_eq 'some preamble\nbackgrounded \xc2\xb7 \x1b[36mb88389ff\x1b[39m\ntrailing noise\n' \
+                   'b88389ff' \
+                   'mixed-line stdout extracts the first matching marker'
+_assert_extract_eq 'backgrounded \xc2\xb7 aaaaaaaa\nbackgrounded \xc2\xb7 bbbbbbbb\n' \
+                   'aaaaaaaa' \
+                   'multiple markers → head -1 takes the first id'
+_assert_extract_empty '\x1b]8;;http://x\x07backgrounded \xc2\xb7 b88389ff\x1b]8;;\x07\n' \
+                      'OSC-decorated marker is rejected (line-anchor + CSI-only strip)'
+_assert_extract_empty 'backgrounded \xc2\xb7 b8838\n' \
+                      'truncated-id (5 hex) yields empty (matches B3 fail-CLOSED path)'
+_assert_extract_empty 'backgrounded \xc2\xb7 b88389ffaabbcc\n' \
+                      'over-length-id (14 hex) yields empty (locks {8} format contract)'
+_assert_extract_empty 'backgrounded \xc2\xb7 B88389FF\n' \
+                      'uppercase-hex id yields empty (lowercase-only [0-9a-f] class)'
+_assert_extract_empty '' \
+                      'empty stdout yields empty (B3 fail-CLOSED path triggers)'
+
+echo "== Runtime: B3 fail-CLOSED guard regression (#143 / RFC 0004 §3.5) =="
+_assert_extract_empty 'some unrelated noise\nbackground started but not the marker\nspawn attempted\n' \
+                      'missing-marker stdout yields empty (B3 fail-CLOSED guard fires via the empty -z "$DISPATCH_ID" arm; grep rc=1 here, not >=2)'
 
 echo
 echo "== Summary =="

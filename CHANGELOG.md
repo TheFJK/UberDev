@@ -16,13 +16,39 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - **`/uberdev:testers`** — adversarial multi-persona QA audit squad. 6 distinct-persona testers (`panicked_grandma`, `power_user`, `adversarial_security`, `chaos_engineer`, `a11y_critic`, `mobile_thumb`) + 2 monitors (`monitor_primary`, `monitor_devils_advocate`) over 3 coordinated waves. Auto-detects target surface (web/api/native/all). Findings are evidence-anchored against a 10-invariant oracle library and filed as GitHub issues via the existing `findings-to-issues` pipeline. Read-only — the squad never writes app code. Alias: `/testers`. See `docs/rfc/0006-testers-command.md`.
 
 ### Changed
-- Plugin version bumped from `v0.30.1` to `v0.31.0`.
+- Plugin version bumped from `v0.30.4` to `v0.31.0`.
 - `tests/solve-claim.test.sh:258-265` version-drift assertions updated to `0.31.0`.
 
 ### Security
 - `Blocks: #` parser is ReDoS-safe (anchored bash regex + 64 KiB body cap).
 - `/merge` auto-chain is scoped to `/goal` only via `UBERDEV_GOAL_ID` env-var provenance check (T5).
 - Per-PR `automerge_attempt_count >= 3` short-circuits `uberdev_goal_should_automerge` so the goal stops re-dispatching `/merge` for that PR (the runaway-loop containment, R5). The PR sits in `green` until `max_cycles` fires or the operator intervenes; no `merge_failed` halt is emitted.
+
+## [0.30.4] - 2026-05-21
+
+### Documentation
+
+- **README install paragraph: align alias count with reality.** The auto-install paragraph said "seven short-form aliases" and only listed `/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`, `/dev` — `/testers` (auto-installed since v0.30.0 via `aliases-sync.sh`) was missing. Now lists all eight (`/testers` added) and the count matches `UBERDEV_ALIAS_NOTICE` runtime emit ("installed 8 short-form aliases").
+
+## [0.30.3] - 2026-05-21
+
+### Fixed (#143)
+
+- **dispatch:** `claude --bg` id extraction now strips ANSI CSI escapes before
+  the marker grep, fixing false-positive `DISPATCH_RC=2`
+  (`dispatch_setup_failed phase=id_extract`) on Claude Code 2.1.146+ where
+  the bg session id is wrapped in cyan SGR codes (`\x1B[36m<id>\x1B[39m`).
+  Defense-in-depth: line-anchored marker re-grep + hex-only scrub on the
+  extracted id closes OSC/DCS injection surfaces. B3 fail-CLOSED guard
+  preserved — genuinely missing markers still surface as rc=2. Combined with
+  the #154 rc-capture fix (grep-own-rc + subphase discriminator) from v0.30.2.
+  Closes #143.
+
+## [0.30.2] - 2026-05-21
+
+### Fixed (#154)
+
+- **`claude --bg` dispatch id-extraction no longer silently masks pipeline failures.** `lib/dispatch.sh`'s `DISPATCH_ID` extraction (`grep -oE 'backgrounded · <id>' | awk | head`) swallowed pipeline-level errors (sed/grep failure ≠ "no match") into an empty `DISPATCH_ID`, so the B3 guard surfaced `rc=2 phase=id_extract` identically for transient infra failure and persistent format drift. Now captures grep's own rc and adds a distinct subphase discriminator to the `dispatch_setup_failed` audit JSON so incident responders can tell a retryable transient failure from a non-retryable `claude --bg` output-format change. (PR #158)
 
 ## v0.30.1 — 2026-05-21
 
