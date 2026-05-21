@@ -76,6 +76,12 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install PyYAML
+        # windows-latest ships Python on PATH but not PyYAML; tests/testers-pipeline.test.sh
+        # (via plugins/uberdev/skills/testers-pipeline/aggregate.py) imports yaml.
+        # ubuntu-latest's base image already includes PyYAML so the parallel job is
+        # silent — install here to keep Windows hermetic.
+        run: python -m pip install --disable-pip-version-check pyyaml
       - name: Run shape-check tests
         # No zsh on windows-latest Git Bash; solve-pipeline-zsh.test.sh is a
         # Unix-runtime fixture and is intentionally skipped here. Every other
