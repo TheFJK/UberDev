@@ -223,6 +223,15 @@ while true; do
           ;;
         red)
           uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" pushed-reviewing red-held
+          # B6 — Blocker-overflow handler (D13). Reads the per-PR audit JSON
+          # while $audit_json and $pr_num are still in scope (the Phase 3
+          # site previously held this block but those variables don't exist
+          # there, so the check silently no-op'd). Setting overflow_detected
+          # here gates the Phase 3 first-10 truncation below.
+          halted_overflow="$(gh_jq_or_jq "$audit_json" '.halted_due_to_overflow // false')"
+          if [ "$halted_overflow" = "true" ]; then
+            overflow_detected=1
+          fi
           ;;
         stale|missing)
           # D17: never assume GREEN on missing phase2_5 — re-dispatch /review-pr
@@ -365,17 +374,18 @@ cycle=$(( cycle + 1 ))
 # loop back to Phase 1
 ```
 
-**Blocker-overflow handler (D13).** When the upstream `/review-pr` run halted with too many BLOCKER findings (more than the file-issues cap), its audit JSON carries `halted_due_to_overflow: true` at the top level. Phase 3 detects this when reading the `/review-pr` audit JSON for any PR currently in `pushed-reviewing` (Phase 2a flow path) and:
+**Blocker-overflow handler (D13).** When the upstream `/review-pr` run halted with too many BLOCKER findings (more than the file-issues cap), its audit JSON carries `halted_due_to_overflow: true` at the top level. **Detection lives in Phase 2a** (red signal case) where `$audit_json` and `$pr_num` are in scope; it sets `overflow_detected=1`. Phase 3's truncation step then:
 
-- transitions the PR straight to `red-held` (BLOCKER overflow is functionally identical to RED — too many issues to merge through);
+- (Phase 2a already transitioned the PR to `red-held` for the red trust signal — overflow is functionally identical to RED, so the transition is shared);
 - queues only the first 10 candidate issues for the next cycle (the upstream agent already truncated the issue-file list at the cap; the queue cap mirrors that ceiling);
 - surfaces the overflow count in the `goal_cycle_completed` summary `{overflow_count: N}`;
 - **does NOT halt the entire goal** — `halted_due_to_overflow` is a per-PR cycle-management signal, not a goal-level circuit breaker. The goal continues to its next cycle and may converge once the overflow PR's issues are resolved.
 
 ```bash
-halted_overflow="$(gh_jq_or_jq "$audit_json" '.halted_due_to_overflow // false')"
-if [ "$halted_overflow" = "true" ]; then
-  uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" pushed-reviewing red-held
+# overflow_detected is set in Phase 2a's red case when any PR's /review-pr
+# audit JSON carried halted_due_to_overflow:true. Here in Phase 3 we apply
+# the first-10 truncation (no PR transition — Phase 2a already did that).
+if [ "${overflow_detected:-0}" = "1" ]; then
   new_candidates=("${new_candidates[@]:0:10}")
   # surfaced in cycle summary; goal continues — do NOT halt.
 fi
