@@ -10,6 +10,12 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 - **`/uberdev:testers`** — adversarial multi-persona QA audit squad. 6 distinct-persona testers (`panicked_grandma`, `power_user`, `adversarial_security`, `chaos_engineer`, `a11y_critic`, `mobile_thumb`) + 2 monitors (`monitor_primary`, `monitor_devils_advocate`) over 3 coordinated waves. Auto-detects target surface (web/api/native/all). Findings are evidence-anchored against a 10-invariant oracle library and filed as GitHub issues via the existing `findings-to-issues` pipeline. Read-only — the squad never writes app code. Alias: `/testers`. See `docs/rfc/0006-testers-command.md`.
 
+## [0.30.2] - 2026-05-21
+
+### Fixed (#154)
+
+- **`claude --bg` dispatch id-extraction no longer silently masks pipeline failures.** `lib/dispatch.sh`'s `DISPATCH_ID` extraction (`grep -oE 'backgrounded · <id>' | awk | head`) swallowed pipeline-level errors (sed/grep failure ≠ "no match") into an empty `DISPATCH_ID`, so the B3 guard surfaced `rc=2 phase=id_extract` identically for transient infra failure and persistent format drift. Now captures grep's own rc and adds a distinct subphase discriminator to the `dispatch_setup_failed` audit JSON so incident responders can tell a retryable transient failure from a non-retryable `claude --bg` output-format change. (PR #158)
+
 ## v0.30.1 — 2026-05-21
 
 ### Fixed (#133)
