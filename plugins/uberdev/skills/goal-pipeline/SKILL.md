@@ -217,12 +217,26 @@ while true; do
   any_active=0
 
   # 2a. Poll each dispatched /turbo agent's stdout log
+  # F13 simplify-lens — the `backgrounded · ` marker is terminal (emitted once
+  # at session end by every dispatch.sh backend), so `tail -c 65536` bounds
+  # per-poll grep cost to O(1) regardless of uncapped log growth. Identical
+  # semantics for a contract that promises a terminal-marker; cheaper polling.
   for issue in "${active_issues[@]}"; do
     log="$UBERDEV_TMPDIR/solve-bg-stdout-$issue.log"
-    if [ -f "$log" ] && grep -q 'backgrounded · ' "$log" 2>/dev/null; then
+    if [ -f "$log" ] && tail -c 65536 "$log" 2>/dev/null | grep -q 'backgrounded · '; then
       audit_json="$(uberdev_goal_locate_review_pr_audit "$issue")"
       signal="$(uberdev_goal_read_trust_signal "$audit_json")"
       pr_num="$(uberdev_goal_extract_pr_num_from_log "$log")"
+      # F11 simplify-lens — surface the missing-marker case (no `pushed PR #N`
+      # line in the solve-bg stdout transcript yet) instead of letting it fall
+      # through to a silent `uberdev_goal_pr_state_transition` validate-fail.
+      # Treat as in-flight: keep the issue active so the next poll retries.
+      if [ -z "$pr_num" ]; then
+        printf 'goal-pipeline: issue %s: no `pushed PR #N` marker in stdout yet; deferring to next poll\n' \
+          "$issue" >&2
+        any_active=1
+        continue
+      fi
       case "$signal" in
         green)
           uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" pushed-reviewing green
@@ -267,7 +281,9 @@ while true; do
   # 2c. Drive /merge transitions
   for pr in $(uberdev_goal_list_prs_in_state "$GOAL_ID" merging); do
     merge_log="$UBERDEV_TMPDIR/merge-bg-stdout-$pr.log"
-    [ -f "$merge_log" ] && grep -q 'backgrounded · ' "$merge_log" 2>/dev/null || continue
+    # F13 simplify-lens — `tail -c 65536` bounds per-poll grep cost; the
+    # `backgrounded · ` marker is terminal so tail-of-file is equivalent.
+    [ -f "$merge_log" ] && tail -c 65536 "$merge_log" 2>/dev/null | grep -q 'backgrounded · ' || continue
     result="$(uberdev_goal_read_merge_result "$pr")"
     case "$result" in
       success)
@@ -339,12 +355,15 @@ findings_err="$(mktemp)"
 
 # Build the optional --only-mine filter via env-injected GH_USER (gh resolves
 # .author.login via env passthrough; --jq receives `env.GH_USER` literal).
+# F14 simplify-lens — the filter projects directly to `.number` per matching
+# row (newline-separated raw integers) so the downstream mapfile no longer
+# needs a redundant `jq -r '.[]'` pass to flatten a `map(.number)` JSON array.
 if [ "$only_mine" = "1" ]; then
   GH_USER="$(gh api user --jq '.login')"
   export GH_USER
-  jq_filter='[.[] | select(.body | test("\\*\\*Tier:\\*\\* (BLOCKER|CRITICAL)")) | select(.createdAt > $start) | select(.author.login == env.GH_USER)] | map(.number)'
+  jq_filter='.[] | select(.body | test("\\*\\*Tier:\\*\\* (BLOCKER|CRITICAL)")) | select(.createdAt > $start) | select(.author.login == env.GH_USER) | .number'
 else
-  jq_filter='[.[] | select(.body | test("\\*\\*Tier:\\*\\* (BLOCKER|CRITICAL)")) | select(.createdAt > $start)] | map(.number)'
+  jq_filter='.[] | select(.body | test("\\*\\*Tier:\\*\\* (BLOCKER|CRITICAL)")) | select(.createdAt > $start) | .number'
 fi
 
 candidates_json="$(gh issue list --label "$FINDING_LABEL" --state open \
@@ -367,14 +386,20 @@ if [ "$gh_rc" -ne 0 ]; then
   exit 1
 fi
 
-# Convert JSON array to bash array of issue numbers.
-mapfile -t new_candidates < <(printf '%s' "$candidates_json" | jq -r '.[]')
+# `candidates_json` is already newline-separated raw integers (one number per
+# line) from the F14 filter shape above. Bash mapfile reads each line into the
+# array; empty input yields a 0-element array (the `${#new_candidates[@]}`
+# checks downstream behave identically to the prior map(.number)+jq -r path).
+mapfile -t new_candidates < <(printf '%s' "$candidates_json")
 ```
 
 For each candidate, extract the fingerprint and check for repeat:
 
 ```bash
 for issue in "${new_candidates[@]}"; do
+  # Issues don't go through _uberdev_goal_fetch_pr_body (PR-specific helper);
+  # keep the inline gh issue view + 64KiB cap here. The cap shape is shared
+  # with the helper (load-bearing ReDoS defence; R1 / T1).
   body="$(gh issue view "$issue" --json body --jq '.body' 2>/dev/null \
     | head -c "$_UBERDEV_GOAL_BODY_CAP")"
   fp="$(_uberdev_goal_extract_fingerprint "$body")"
@@ -487,8 +512,7 @@ print_summary() {
     "$issues_resolved" "$wall_secs"
   printf '%s\n' "$prs_held_lines" | while IFS=$'\t' read -r state p; do
     [ -z "$p" ] && continue
-    body="$(gh pr view "$p" --json body --jq '.body' 2>/dev/null \
-      | head -c "$_UBERDEV_GOAL_BODY_CAP")"
+    body="$(_uberdev_goal_fetch_pr_body "$p")"
     blocks="$(printf '%s\n' "$body" | grep -E '^Blocks: #[0-9]+$' \
       | sed -E 's/^Blocks: #([0-9]+)$/#\1/' | paste -sd, -)"
     printf '  pr=%s state=%s blocks=%s\n' "$p" "$state" "${blocks:-none}"

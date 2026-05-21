@@ -23,6 +23,7 @@
 #   _uberdev_goal_pr_state_machine_valid   FROM TO
 #   _uberdev_goal_now_secs
 #   _uberdev_goal_persist_fp               GOAL_ID CYCLE FP
+#   _uberdev_goal_fetch_pr_body            PR_NUM
 #   _uberdev_goal_dispatch_review_pr       PR_NUM
 #   _uberdev_goal_dispatch_merge           PR_NUM
 #   _uberdev_goal_check_unblock            HELD_PR_NUM
@@ -101,8 +102,7 @@ _uberdev_goal_validate_int() {
   esac
 }
 
-# _uberdev_goal_now_secs
-# Epoch seconds (date +%s is POSIX).
+# _uberdev_goal_now_secs (POSIX)
 _uberdev_goal_now_secs() { date +%s; }
 
 # _uberdev_goal_parse_blocks_line LINE
@@ -261,10 +261,13 @@ uberdev_goal_read_trust_signal() {
     printf 'missing\n'; return 0
   fi
   [ -n "$p25" ] || { printf 'stale\n'; return 0; }
+  # Single jq pass emits blocker\tcritical\thalted as TSV; bash `read` splits
+  # into three locals in one syscall (3 jq forks -> 1; F1 simplify-lens). The
+  # `// 0` and `// false` defaults preserve the prior shape-tolerance for
+  # audit JSONs missing either by_severity counter or the halted field.
   local blocker critical halted
-  blocker="$(printf '%s' "$p25" | jq -r '.by_severity.blocker // 0')"
-  critical="$(printf '%s' "$p25" | jq -r '.by_severity.critical // 0')"
-  halted="$(printf '%s' "$p25" | jq -r '.halted // false')"
+  read -r blocker critical halted <<<"$(printf '%s' "$p25" \
+    | jq -r '[.by_severity.blocker // 0, .by_severity.critical // 0, (.halted // false | tostring)] | @tsv')"
   if [ "$halted" = "true" ] || [ "$blocker" -gt 0 ]; then printf 'red\n'; return 0; fi
   if [ "$critical" -gt 0 ]; then printf 'yellow\n'; return 0; fi
   printf 'green\n'
@@ -324,17 +327,17 @@ uberdev_goal_locate_review_pr_audit() {
   pr="$(uberdev_goal_extract_pr_num_from_log "${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$issue.log")"
   [ -n "$pr" ] || return 0
   _uberdev_goal_validate_int "$pr" || return 0
-  local f run_id pr_field
-  for f in .uberdev/runs/*/review-pr-verdict.json \
+  local candidate_file run_id pr_field
+  for candidate_file in .uberdev/runs/*/review-pr-verdict.json \
            .claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json \
            .worktrees/*/.uberdev/runs/*/review-pr-verdict.json \
            worktrees/*/.uberdev/runs/*/review-pr-verdict.json; do
-    [ -r "$f" ] || continue
-    pr_field="$(jq -r '.pr // empty' "$f" 2>/dev/null)" || continue
+    [ -r "$candidate_file" ] || continue
+    pr_field="$(jq -r '.pr // empty' "$candidate_file" 2>/dev/null)" || continue
     [ "$pr_field" = "$pr" ] || continue
-    run_id="$(basename "$(dirname "$f")")"
+    run_id="$(basename "$(dirname "$candidate_file")")"
     [[ "$run_id" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]] || continue
-    printf '%s\t%s\n' "$run_id" "$f"
+    printf '%s\t%s\n' "$run_id" "$candidate_file"
   done | sort -r | head -n 1 | cut -f2
 }
 
@@ -442,6 +445,22 @@ _uberdev_goal_dispatch_merge() {
     uberdev_dispatch_one "$pr" "small" "$prompt_file"
 }
 
+# _uberdev_goal_fetch_pr_body PR_NUM
+# Centralized PR-body fetch + 64KiB cap (F17 simplify-lens). The cap is the
+# load-bearing ReDoS defence (R1 / T1) — capping the gh-returned body before
+# any regex-parse loop bounds parse cost on a hostile PR description. Three
+# call sites previously duplicated this gh + head pipeline; this helper is
+# the single source of truth.
+#
+# Returns the (possibly capped) body on stdout; empty string when gh fails
+# or the PR has no body. Callers branch on `[ -n "$body" ]`.
+_uberdev_goal_fetch_pr_body() {
+  local pr="$1"
+  _uberdev_goal_validate_int "$pr" || return 1
+  gh pr view "$pr" --json body --jq '.body' 2>/dev/null \
+    | head -c "${_UBERDEV_GOAL_BODY_CAP:-65536}"
+}
+
 # _uberdev_goal_check_unblock HELD_PR_NUM
 # RFC §3.2.3 unblock rule body: if every `Blocks: #N` issue is CLOSED, kick
 # off a full /review-pr re-review for the held PR.
@@ -449,7 +468,7 @@ _uberdev_goal_check_unblock() {
   local held_pr="$1"
   _uberdev_goal_validate_int "$held_pr" || return 1
   local body
-  body="$(gh pr view "$held_pr" --json body --jq '.body' 2>/dev/null | head -c "${_UBERDEV_GOAL_BODY_CAP:-65536}")"
+  body="$(_uberdev_goal_fetch_pr_body "$held_pr")"
   # B10 — Surface gh pr view failures (rate-limited, transient network,
   # PR deleted upstream) instead of silently treating empty body as "no
   # Blocks: lines" — that would let a held PR sit forever waiting for an
