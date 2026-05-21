@@ -238,18 +238,38 @@ _uberdev_dispatch_claude_bg() {
       ;;
   esac
   if [[ "$DISPATCH_RC" -eq 0 ]]; then
-    DISPATCH_ID="$(grep -oE 'backgrounded · [0-9a-f]{8}' "$BG_STDOUT_LOG" | awk '{print $NF}' | head -1)"
-    # B3 fix: `claude --bg` exited 0 but the `backgrounded · <id>` marker
-    # was absent from $BG_STDOUT_LOG — output-format drift, truncation, or
-    # version skew. Recording bg_session_id="" as a "successful dispatch"
-    # would let /solve drop the claim-label on the issue while the user has
-    # no way to `claude agents`-monitor or recover. Surface as a distinct
-    # rc=2 ("spawn succeeded, id extraction failed") instead of fake-success.
-    if [ -z "$DISPATCH_ID" ]; then
+    # Issue #154: capture grep's OWN rc so a transient pipeline error
+    # (rc>=2, retryable infra) is distinguishable from marker drift
+    # (rc=1, NOT retryable). The command-substitution subshell destroys
+    # PIPESTATUS, so the old `grep|awk|head -1` form discarded the rc and
+    # collapsed both causes into one audit event. `grep -m1` drops the
+    # `head` pipe (no SIGPIPE/141 footgun) and yields grep's 0/1/>=2 rc;
+    # `${ID_RAW##* }` reproduces `awk '{print $NF}'` for the single-space
+    # marker. Mirrors the wezterm B4 SPAWN_RC=$? precedent.
+    local ID_RAW ID_GREP_RC ID_SUBPHASE
+    ID_RAW="$(grep -m1 -oE 'backgrounded · [0-9a-f]{8}' "$BG_STDOUT_LOG")"
+    ID_GREP_RC=$?
+    DISPATCH_ID="${ID_RAW##* }"
+    # B3 fix (preserved): `claude --bg` exited 0 but the marker was absent
+    # or the extraction pipeline errored. Recording bg_session_id="" as a
+    # "successful dispatch" would let /solve drop the claim-label while the
+    # user has no way to `claude agents`-monitor or recover. Surface rc=2
+    # ("spawn succeeded, id extraction failed") with a subphase discriminator
+    # so incident responders can tell drift (marker_absent) from infra
+    # (pipeline_error).
+    if [[ "$ID_GREP_RC" -ge 2 || -z "$DISPATCH_ID" ]]; then
+      # subphase from a TWO-ELEMENT LITERAL SET only (D7 injection guard):
+      # never derived from $ID_RAW or $BG_STDOUT_LOG content, which is
+      # untrusted and would forge/break the unescaped audit JSONL.
+      ID_SUBPHASE="marker_absent"
+      [[ "$ID_GREP_RC" -ge 2 ]] && ID_SUBPHASE="pipeline_error"
       DISPATCH_RC=2
       DISPATCH_LOG="$BG_STDOUT_LOG"
+      # Defense-in-depth (wezterm B4): stamp empty so the success arm can
+      # never fire on a partial token from a failed extraction.
+      DISPATCH_ID=""
       _uberdev_dispatch_audit dispatch_setup_failed \
-        "{\"issue\":$ISSUE_NUM,\"phase\":\"id_extract\",\"backend\":\"claude-bg\",\"rc\":2,\"mode\":\"$BG_PROMPT_MODE\"}"
+        "{\"issue\":$ISSUE_NUM,\"phase\":\"id_extract\",\"subphase\":\"$ID_SUBPHASE\",\"backend\":\"claude-bg\",\"rc\":2,\"mode\":\"$BG_PROMPT_MODE\"}"
       return 2
     fi
     _uberdev_dispatch_audit agent_dispatched \
