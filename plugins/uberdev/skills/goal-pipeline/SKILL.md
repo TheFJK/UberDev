@@ -167,9 +167,14 @@ for ISSUE_NUM in "${queue[@]}"; do
     # D12 — claim_collision is a soft fail: another dispatcher (a teammate's
     # /solve, or a parallel /goal run) already holds the uberdev:active label
     # on this issue. Skip for the cycle; do NOT retry; do NOT halt the goal.
-    # The collision is surfaced in the cycle summary (Phase 4) and the audit
-    # event from solve-pipeline (claim_collision) is the durable record.
-    if [ "$rc" = "42" ]; then  # claim_collision exit code per solve-pipeline
+    # Detection: solve-pipeline writes `{"event":"claim_collision","data":{"issue":N,...}}`
+    # to $SOLVE_AUDIT_LOG (default ${UBERDEV_TMPDIR:-/tmp}/solve-audit.jsonl)
+    # when it refuses to dispatch a claimed issue. uberdev_dispatch_one does
+    # NOT propagate rc=42 — the contract is "any non-zero rc is a dispatch
+    # failure"; the audit JSONL is the canonical claim_collision signal.
+    solve_audit="${SOLVE_AUDIT_LOG:-${UBERDEV_TMPDIR:-/tmp}/solve-audit.jsonl}"
+    if [ -f "$solve_audit" ] && \
+       grep -q "\"event\":\"claim_collision\".*\"issue\":$ISSUE_NUM" "$solve_audit" 2>/dev/null; then
       printf 'goal: issue %s skipped this cycle (claim_collision)\n' "$ISSUE_NUM" >&2
       continue
     fi
