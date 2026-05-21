@@ -238,25 +238,30 @@ _uberdev_dispatch_claude_bg() {
       ;;
   esac
   if [[ "$DISPATCH_RC" -eq 0 ]]; then
-    # Issue #154: capture grep's OWN rc so a transient pipeline error
-    # (rc>=2, retryable infra) is distinguishable from marker drift
-    # (rc=1, NOT retryable). The command-substitution subshell destroys
-    # PIPESTATUS, so the old `grep|awk|head -1` form discarded the rc and
-    # collapsed both causes into one audit event. `grep -m1` drops the
-    # `head` pipe (no SIGPIPE/141 footgun) and yields grep's 0/1/>=2 rc;
-    # `${ID_RAW##* }` reproduces `awk '{print $NF}'` for the single-space
-    # marker. Mirrors the wezterm B4 SPAWN_RC=$? precedent.
-    local ID_RAW ID_GREP_RC ID_SUBPHASE
-    ID_RAW="$(grep -m1 -oE 'backgrounded · [0-9a-f]{8}' "$BG_STDOUT_LOG")"
+    # Combined #143 (ANSI-strip + line-anchor + hex-validate) + #154 (capture
+    # grep's OWN rc to tell a retryable pipeline error from non-retryable marker
+    # drift). ANSI-strip first — `claude --bg` may wrap the `backgrounded · <id>`
+    # marker in CSI color codes; the line-anchor `^...$` additionally rejects
+    # OSC/DCS-wrapped markers (defense-in-depth). The cleaned stream is piped to
+    # `grep -m1` so `$?` is grep's rc: grep is the LAST command in the
+    # `printf|grep` pipeline, so the subshell exits with grep's rc and `$()`
+    # propagates it as `$?`. (The subshell's PIPESTATUS is just not visible to
+    # the outer scope — a scoping fact, not destruction.)
+    # `${ID_RAW##* }` reproduces `awk '{print $NF}'`; the hex-validate sentinel
+    # rejects any partial/garbage token. Mirrors the wezterm B4 SPAWN_RC=$? precedent.
+    local ID_CLEAN ID_RAW ID_GREP_RC ID_SUBPHASE
+    ID_CLEAN="$(sed -E $'s/\x1B\\[[0-9;]*[a-zA-Z]//g' "$BG_STDOUT_LOG")"
+    ID_RAW="$(printf '%s\n' "$ID_CLEAN" | grep -m1 -aoE '^backgrounded · [0-9a-f]{8}$')"
     ID_GREP_RC=$?
     DISPATCH_ID="${ID_RAW##* }"
-    # B3 fix (preserved): `claude --bg` exited 0 but the marker was absent
-    # or the extraction pipeline errored. Recording bg_session_id="" as a
-    # "successful dispatch" would let /solve drop the claim-label while the
-    # user has no way to `claude agents`-monitor or recover. Surface rc=2
-    # ("spawn succeeded, id extraction failed") with a subphase discriminator
-    # so incident responders can tell drift (marker_absent) from infra
-    # (pipeline_error).
+    DISPATCH_ID="${DISPATCH_ID//[^0-9a-f]/}"
+    [[ "${#DISPATCH_ID}" -eq 8 ]] || DISPATCH_ID=""  # sentinel: empty == validation failed (B3 guard below)
+    # B3 fix (preserved): `claude --bg` exited 0 but the marker was absent or
+    # the extraction pipeline errored. Recording bg_session_id="" as a
+    # "successful dispatch" would let /solve drop the claim-label while the user
+    # has no way to `claude agents`-monitor or recover. Surface rc=2 with a
+    # subphase discriminator so incident responders can tell drift
+    # (marker_absent) from infra (pipeline_error).
     if [[ "$ID_GREP_RC" -ge 2 || -z "$DISPATCH_ID" ]]; then
       # subphase from a TWO-ELEMENT LITERAL SET only (D7 injection guard):
       # never derived from $ID_RAW or $BG_STDOUT_LOG content, which is

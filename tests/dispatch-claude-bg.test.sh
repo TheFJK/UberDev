@@ -41,6 +41,43 @@ assert_grep_not() {
   fi
 }
 
+# Mirror of the extraction pipeline in plugins/uberdev/lib/dispatch.sh
+# (the success arm of _uberdev_dispatch_claude_bg, post-#143 fix).
+# Reads $1 as the path to a fixture file simulating $BG_STDOUT_LOG and
+# echoes the post-scrub $DISPATCH_ID (either empty or exactly 8 hex).
+# This helper now structurally mirrors the _uberdev_dispatch_claude_bg
+# id-extraction block (ID_CLEAN/ID_RAW, post-#143 fix): ANSI-strip via sed,
+# `printf '%s\n' | grep -m1 -aoE` the marker, `${raw##* }` for the word, then
+# hex-scrub + the {8} length sentinel. Keeping the same five steps (rather than
+# an awk|head shortcut) means no part of the pipeline escapes the shape-check
+# assertions above — the regexes here MUST stay in lockstep with production.
+_extract_id() {
+  local fixture="$1"
+  local clean raw id
+  clean="$(sed -E $'s/\x1B\\[[0-9;]*[a-zA-Z]//g' "$fixture")"
+  raw="$(printf '%s\n' "$clean" | grep -m1 -aoE '^backgrounded · [0-9a-f]{8}$')"
+  id="${raw##* }"
+  id="${id//[^0-9a-f]/}"
+  [[ ${#id} -eq 8 ]] || id=""
+  printf '%s' "$id"
+}
+
+# tmp fixture cleanup (per-test scope). Also reaps TALLY_FILE (created in the
+# functional-subshell section below)
+# so an abnormal exit between its mktemp and the manual rm doesn't leak it;
+# guarded by -n because it's bound later. The manual rm stays (rm -f is idempotent).
+_TMPFIX=""
+TALLY_FILE=""
+_cleanup_tmpfix() {
+  if [ -n "$_TMPFIX" ]; then
+    rm -f "$_TMPFIX"
+  fi
+  if [ -n "$TALLY_FILE" ]; then
+    rm -f "$TALLY_FILE"
+  fi
+}
+trap _cleanup_tmpfix EXIT
+
 echo "== Positive: claude --bg three-arm dispatch case-switch (lib/dispatch.sh) =="
 assert_grep "$DISPATCH_LIB" \
   'case "\$BG_PROMPT_MODE" in' \
@@ -149,8 +186,17 @@ else
 fi
 unset GREP_RC
 assert_grep "$DISPATCH_LIB" \
-  'backgrounded · \[0-9a-f\]\{8\}' \
-  "claude-bg backend extracts the backgrounded · <id> bg session id"
+  "sed -E \\\$'s/" \
+  "claude-bg backend pre-strips ANSI CSI escapes from \$BG_STDOUT_LOG (#143 fix)"
+assert_grep "$DISPATCH_LIB" \
+  '\^backgrounded · \[0-9a-f\]\{8\}\$' \
+  "claude-bg backend uses line-anchored marker grep (#143 OSC/DCS defense-in-depth)"
+assert_grep "$DISPATCH_LIB" \
+  'DISPATCH_ID="\$\{DISPATCH_ID//\[\^0-9a-f\]/\}"' \
+  "claude-bg backend hex-only scrub locks \$DISPATCH_ID to /^[0-9a-f]{8}\$/ contract"
+assert_grep "$DISPATCH_LIB" \
+  '\[ "\$\{#DISPATCH_ID\}" -eq 8 \]' \
+  "claude-bg backend length check enforces exactly-8-hex id post-scrub"
 assert_grep "$DISPATCH_LIB" \
   '_uberdev_dispatch_claude_bg\(\)' \
   "lib/dispatch.sh defines the _uberdev_dispatch_claude_bg function"
@@ -352,6 +398,85 @@ assert_grep_not "$SOLVE_PIPELINE" \
 assert_grep_not "$SOLVE_PIPELINE" \
   'REAL_CLAUDE=\$\(' \
   "REAL_CLAUDE PATH walk retired (Step 3 deletion)"
+
+# Fail-loud mktemp wrapper — without this, an mktemp failure leaves _TMPFIX
+# empty and the subsequent `printf > ""` silently errors to stderr while
+# the test reports a misleading FAIL or false-positive PASS. (#143 review.)
+_new_fixture() {
+  _TMPFIX="$(mktemp "${TMPDIR:-/tmp}/uberdev-143-XXXXXX")" || {
+    echo "  FAIL  mktemp failed (env / disk?) — aborting test" >&2
+    FAIL=$((FAIL+1))
+    exit 1
+  }
+}
+
+# Helpers: collapse the 10 runtime fixture blocks into a single-line call.
+# Each helper owns the full per-call lifecycle: _new_fixture → write fixture
+# bytes → _extract_id → assert → PASS/FAIL bookkeeping → cleanup. The first
+# argument is the raw byte sequence passed to `printf '%b'`; the third is
+# the human-readable `desc` echoed alongside PASS/FAIL.
+_assert_extract_eq() {
+  local bytes="$1" expected="$2" desc="$3"
+  local got
+  _new_fixture
+  printf '%b' "$bytes" > "$_TMPFIX"
+  got="$(_extract_id "$_TMPFIX")"
+  if [[ "$got" == "$expected" ]]; then
+    echo "  PASS  $desc"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc (got '$got', expected '$expected')"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -f "$_TMPFIX"; _TMPFIX=""
+}
+
+_assert_extract_empty() {
+  local bytes="$1" desc="$2"
+  local got
+  _new_fixture
+  printf '%b' "$bytes" > "$_TMPFIX"
+  got="$(_extract_id "$_TMPFIX")"
+  if [[ -z "$got" ]]; then
+    echo "  PASS  $desc"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc (got '$got', expected empty)"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -f "$_TMPFIX"; _TMPFIX=""
+}
+
+echo "== Runtime: ANSI-positive extraction (#143) =="
+_assert_extract_eq 'backgrounded \xc2\xb7 \x1b[36mb88389ff\x1b[39m\n' \
+                   'b88389ff' \
+                   'ANSI-decorated marker (\x1B[36m<id>\x1B[39m) extracts to bare 8-hex'
+_assert_extract_eq 'backgrounded \xc2\xb7 \x1b[1;36mb88389ff\x1b[0m\n' \
+                   'b88389ff' \
+                   'compound CSI (\x1B[1;36m<id>\x1B[0m) extracts to bare 8-hex (multi-param strip)'
+_assert_extract_eq 'backgrounded \xc2\xb7 b88389ff\n' \
+                   'b88389ff' \
+                   'bare marker (back-compat with Claude Code 2.1.139) extracts to 8-hex'
+_assert_extract_eq 'some preamble\nbackgrounded \xc2\xb7 \x1b[36mb88389ff\x1b[39m\ntrailing noise\n' \
+                   'b88389ff' \
+                   'mixed-line stdout extracts the first matching marker'
+_assert_extract_eq 'backgrounded \xc2\xb7 aaaaaaaa\nbackgrounded \xc2\xb7 bbbbbbbb\n' \
+                   'aaaaaaaa' \
+                   'multiple markers → head -1 takes the first id'
+_assert_extract_empty '\x1b]8;;http://x\x07backgrounded \xc2\xb7 b88389ff\x1b]8;;\x07\n' \
+                      'OSC-decorated marker is rejected (line-anchor + CSI-only strip)'
+_assert_extract_empty 'backgrounded \xc2\xb7 b8838\n' \
+                      'truncated-id (5 hex) yields empty (matches B3 fail-CLOSED path)'
+_assert_extract_empty 'backgrounded \xc2\xb7 b88389ffaabbcc\n' \
+                      'over-length-id (14 hex) yields empty (locks {8} format contract)'
+_assert_extract_empty 'backgrounded \xc2\xb7 B88389FF\n' \
+                      'uppercase-hex id yields empty (lowercase-only [0-9a-f] class)'
+_assert_extract_empty '' \
+                      'empty stdout yields empty (B3 fail-CLOSED path triggers)'
+
+echo "== Runtime: B3 fail-CLOSED guard regression (#143 / RFC 0004 §3.5) =="
+_assert_extract_empty 'some unrelated noise\nbackground started but not the marker\nspawn attempted\n' \
+                      'missing-marker stdout yields empty (B3 fail-CLOSED guard fires via the empty -z "$DISPATCH_ID" arm; grep rc=1 here, not >=2)'
 
 echo
 echo "== Summary =="
