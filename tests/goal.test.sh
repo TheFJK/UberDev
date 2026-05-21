@@ -386,6 +386,14 @@ fi
 # goal_id so per-test TSVs do not collide.
 # (assert_grep_file helper is defined alongside assert_eq/assert_rc above.)
 
+# Stderr is suppressed (`2>/dev/null`) on every uberdev_goal_issue_state_transition
+# call in BT12-BT14: invalid transitions print `goal-state: invalid issue
+# transition <from>-><to>` to stderr by design, and BT14's non-digit inputs
+# (BT14.a/c) similarly traverse the `_uberdev_goal_validate_int` rc=1 path
+# without stderr emission. BT18 captures and asserts the stderr message for
+# one representative rc=2 case; the redirections in BT12-BT14 keep test
+# output clean. Do NOT remove the `2>/dev/null` — it is load-bearing.
+
 # BT12 — all 5 valid transitions return rc=0.
 # Same goal_id across the 5 sub-cases since the function does NOT enforce
 # state continuity between calls (it validates the from->to pair only,
@@ -443,8 +451,12 @@ else
   printf '        expected file: %s\n' "$_bt15_tsv" >&2
 fi
 # Row shape: <issue>\t<to>\t<epoch>. Anchor on issue=100, state=solving
-# (the very first BT12 row), epoch as a non-empty digit run. The leading
-# `^` anchors the issue column; trailing `$` anchors the epoch column.
+# (the very first BT12 row), epoch as a 10-digit Unix timestamp. The
+# `{10}` quantifier (not `+`) blocks a regression where someone replaces
+# `$(_uberdev_goal_now_secs)` with a short literal like `0` — that would
+# pass `[0-9]+` but fail `[0-9]{10}` (covers `date +%s` for ~2001–2286).
+# The leading `^` anchors the issue column; trailing `$` anchors the
+# epoch column.
 assert_grep_file "$_bt15_tsv" $'^100\tsolving\t[0-9]{10}$' "BT15.b-row-shape-issue-tab-state-tab-epoch"
 # Invalid transitions wrote NO row: the BT13.a goal_id produces no TSV.
 _bt15c_tsv="$_b12_tmpdir/goal-test-bt13a-issue-states.tsv"
