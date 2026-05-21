@@ -17,7 +17,7 @@ Spawn an 8-agent read-only QA audit squad against the target in **$ARGUMENTS** (
 - `--max-issues=N` — cap for `findings-to-issues` (default 10).
 - `--persona=name,...` — override default roster (drop a custom persona at `plugins/uberdev/agents/testers-<name>.md`).
 - `--no-issues` — skip `findings-to-issues`; report only.
-- `--rps-cap=N` — API stress ceiling (default 10).
+- `--rps-cap=N` — per-host RPS ceiling, [1, 1000], default 10. Enforced for curl traffic at lib/rate-limit-curl.sh; audited for Playwright/MCP traffic at Phase 5 (fail-the-run on breach).
 
 **Read-only contract:** the squad has no `Edit` or general `Write` on app code; agent `allowed-tools` whitelists enforce it at the tool boundary.
 

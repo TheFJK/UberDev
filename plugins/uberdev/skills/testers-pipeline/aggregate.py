@@ -11,6 +11,7 @@ import argparse
 import glob
 import hashlib
 import os
+import subprocess
 import sys
 import yaml
 
@@ -78,6 +79,7 @@ def main() -> int:
     p.add_argument("--scratch-dir", required=True)
     p.add_argument("--invariants", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument("--rps-cap", required=True, type=int)
     args = p.parse_args()
 
     invariants = load_invariants(args.invariants)
@@ -123,7 +125,38 @@ def main() -> int:
     with open(args.out, "w") as fh:
         yaml.safe_dump(out, fh, default_flow_style=False, sort_keys=False)
     print(f"aggregated {len(findings)} findings into {args.out}", file=sys.stderr)
-    return 0
+
+    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
+    if not plugin_root:
+        print("error: CLAUDE_PLUGIN_ROOT unset; cannot source lib/rate-cap-audit.sh", file=sys.stderr)
+        return 2
+    audited_path = f"{args.out}.audited"
+    audit_proc = subprocess.run(
+        ["bash", "-c",
+         f". \"{plugin_root}/lib/rate-cap-audit.sh\" && "
+         f"uberdev_rate_cap_audit \"{args.out}\" \"{args.rps_cap}\" \"{audited_path}\""],
+        capture_output=True, text=True,
+    )
+    if audit_proc.returncode == 1:
+        # breach: replace wave file with audited version. The audit script always writes
+        # before exiting 1 (see lib/rate-cap-audit.sh), so a missing .audited here means
+        # the subprocess died before the write — surface that as exit 2 rather than crash.
+        if not os.path.exists(audited_path):
+            print(f"error: rate-cap-audit exited 1 but {audited_path} was not written; "
+                  f"stderr: {audit_proc.stderr}", file=sys.stderr)
+            return 2
+        os.replace(audited_path, args.out)
+        print(f"warning: --rps-cap={args.rps_cap} exceeded; polite_rate_cap finding added to {args.out}",
+              file=sys.stderr)
+        return 1
+    elif audit_proc.returncode == 0:
+        # no breach; cleanup the audited tmpfile if it was written
+        if os.path.exists(audited_path):
+            os.remove(audited_path)
+        return 0
+    else:
+        print(f"error: rate-cap-audit failed: {audit_proc.stderr}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

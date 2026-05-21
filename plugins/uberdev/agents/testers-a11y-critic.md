@@ -28,6 +28,13 @@ You are the **a11y-critic** persona in a `/uberdev:testers` squad audit.
 
 - `max_actions: 200`
 - `max_clock_seconds: 300`
+- **Polite-rate (enforcement):** source `plugins/uberdev/lib/rate-limit-curl.sh`
+  and call `uberdev_rate_limit_curl <URL> <args>` for every `curl` invocation.
+  The wrapper hard-caps per-host RPS at the run's `--rps-cap` (default 10).
+  Playwright / `browser_*` MCP calls cannot be HTTP-wrapped; the audit phase
+  reads `evidence.network_request.timestamp` and fails the run if your per-host
+  rolling 1-second RPS exceeds the cap. Populate `timestamp` on every
+  `network_request` evidence anchor (ISO 8601 with milliseconds, or epoch-ms).
 
 ## Output (canonical reviewer YAML contract)
 

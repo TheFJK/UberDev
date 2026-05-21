@@ -104,6 +104,20 @@ for a in "${PERSONA_AGENTS[@]}"; do
 done
 pass "C6: every persona references at least one invariant"
 
+# C6b: every persona references the polite-rate-cap enforcement helper
+# (uberdev_rate_limit_curl) AND uses audit-consequence framing.
+# This is the structural counterpart to T2.3 (which edited the 6 persona files).
+PERSONA_LIST=( adversarial-security a11y-critic chaos-engineer mobile-thumb panicked-grandma power-user )
+c6b_count=0
+for f in "${PERSONA_LIST[@]}"; do
+  PFILE="$AGENT_DIR/testers-${f}.md"
+  grep -q "uberdev_rate_limit_curl" "$PFILE" || fail "C6b: missing uberdev_rate_limit_curl ref in $f"
+  grep -qE "polite_rate_cap|audit phase|rolling 1-second RPS" "$PFILE" || fail "C6b: missing audit-consequence ref in $f"
+  c6b_count=$((c6b_count + 1))
+done
+[ "$c6b_count" -eq 6 ] || fail "C6b: expected 6 personas, got $c6b_count"
+pass "C6b: polite-rate clause present in all 6 persona files"
+
 # C7: each agent emits the reviewer YAML contract markers
 for a in "${EXPECTED_AGENTS[@]}"; do
   F="$AGENT_DIR/$a.md"
