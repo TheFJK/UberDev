@@ -90,7 +90,7 @@ SKIPPED=0
 
 # Canonical-name reference list (kept in sync with the ALIASES SSOT in
 # lib/aliases-sync.sh — verified by tests/aliases.test.sh A1/A6):
-#   for canonical in issue solve turbo simplify review-pr merge dev goal; do …
+#   for canonical in issue solve turbo simplify review-pr merge dev testers goal; do …
 
 while IFS='|' read -r SHORT CANON TOOLS; do
   [ -n "$SHORT" ] || continue

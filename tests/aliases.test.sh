@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Tests for issue #16 — top-level aliases for the eight most-used uberdev
-# commands (/issue, /solve, /turbo, /simplify, /review-pr, /merge, /dev, /ubergoal).
+# Tests for issue #16 — top-level aliases for the nine most-used uberdev
+# commands (/issue, /solve, /turbo, /simplify, /review-pr, /merge, /dev,
+# /testers, /ubergoal).
 #
 # Plugin commands are addressed as `/uberdev:<command>` because Claude Code's
 # plugin manifest enforces the `<plugin-name>:` prefix on every plugin
@@ -16,7 +17,7 @@
 # in CI before merge without an interactive harness.
 #
 # Sections:
-#   A1 — install-aliases.md exists, references all 8 aliases, has marker
+#   A1 — install-aliases.md exists, references all 9 aliases, has marker
 #   A2 — install-aliases.md performs collision detection (skip-if-exists)
 #   A3 — install-aliases.md generates ONE-WAY forwarders, not duplicates
 #   A4 — uninstall-aliases.md exists and only removes marker-tagged files
@@ -82,7 +83,7 @@ HOOK="$REPO_ROOT/plugins/uberdev/hooks/session-start"
 PLUGIN_JSON="$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json"
 PLUGIN_VERSION="$(jq -r .version "$PLUGIN_JSON")"
 
-echo "== A1: install-aliases command exists and registers all 8 aliases =="
+echo "== A1: install-aliases command exists and registers all 9 aliases =="
 # Each canonical /uberdev:<name> must be wired up. We grep for the literal
 # canonical command names since those are the targets the forwarders must
 # point at; if any is missing, the user-visible alias for that command
@@ -163,7 +164,7 @@ assert_grep "$UNINSTALL_CMD" \
   'grep|-q|managed-by' \
   "uninstall-aliases checks for the marker before removing files"
 
-# Belt-and-braces: uninstall must NOT do an unguarded rm of all 8 paths.
+# Belt-and-braces: uninstall must NOT do an unguarded rm of all 9 paths.
 assert_grep_not "$UNINSTALL_CMD" \
   'rm[[:space:]]+-f[[:space:]]+"?\$HOME/\.claude/commands/(issue|solve|turbo|simplify|review-pr|merge|dev|testers|goal)\.md"?[[:space:]]*$' \
   "uninstall-aliases does NOT unconditionally rm forwarder paths"
@@ -232,7 +233,7 @@ for canonical in issue solve turbo simplify review-pr merge dev testers goal; do
 done
 
 echo
-echo "== S1: fresh install — first session installs all 8 aliases =="
+echo "== S1: fresh install — first session installs all 9 aliases =="
 S1_HOME="$(mktemp -d)"
 S1_STDERR="$(mktemp)"
 HOME="$S1_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
@@ -275,7 +276,7 @@ S2_STDERR="$(mktemp)"
 HOME="$S2_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
   bash "$HOOK" >/dev/null 2>/dev/null || true
 
-# Precondition: first run must have produced the 8 forwarders. Without this
+# Precondition: first run must have produced the 9 forwarders. Without this
 # guard, the mtime capture below silently picks up empty strings for absent
 # files, the post-run lookup also returns "", and `[ "" = "" ]` makes the
 # section spuriously PASS — masking the very TDD red signal we want.
@@ -330,7 +331,7 @@ S3_STDERR="$(mktemp)"
 HOME="$S3_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
   bash "$HOOK" >/dev/null 2>/dev/null || true
 
-# Precondition: first run must have produced the 8 forwarders before we can
+# Precondition: first run must have produced the 9 forwarders before we can
 # meaningfully test that a stale-marker rewrite changes their mtimes. Same
 # spurious-PASS trap as S2 if absent.
 S3_PREFLIGHT_OK=1

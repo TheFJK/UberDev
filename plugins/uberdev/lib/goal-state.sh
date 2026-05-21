@@ -181,11 +181,12 @@ _uberdev_goal_count_merge_attempts() {
 }
 
 # _uberdev_goal_persist_fp GOAL_ID CYCLE FP
-# Append CYCLE\tFINGERPRINT to fingerprints TSV. The single canonical name
-# is used at the one call site below; the prior short-alias forwarder
-# `_persist_fp` was dropped (S4) because the project naming convention is
-# `_uberdev_goal_*` for every internal helper and the call site easily
-# accommodates the longer name without losing readability.
+# Persist a (cycle, fingerprint) pair to the fingerprints TSV — the
+# repeat-cycle detector reads this stream to decide non-convergence.
+# M17 — intent-first framing. Naming history (the dropped short alias
+# `_persist_fp` from post-impl-review S4) was removed; the project
+# convention `_uberdev_goal_*` is documented at the top-level surface
+# section, not here.
 _uberdev_goal_persist_fp() {
   local goal_id="$1" cycle="$2" fp="$3"
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
@@ -315,6 +316,12 @@ uberdev_goal_read_trust_signal() {
   # operator trail rather than vanishing. Behaviour is unchanged: rc!=0
   # still maps to `missing` (BT20-locked); the warning is stderr-only and
   # additive.
+  #
+  # M16 — jq filter projects three fields as a single tab-separated row so
+  # the downstream bash `read -r blocker critical halted` consumes them in
+  # one syscall instead of three separate jq forks. The `// 0` and
+  # `// false` defaults preserve shape-tolerance on audit JSON that omits
+  # either `by_severity` counters or the `halted` field.
   local jq_filter='[.by_severity.blocker // 0, .by_severity.critical // 0, (.halted // false | tostring)] | @tsv'
   local tsv jq_rc
   tsv="$(jq -r "$jq_filter" <<<"$p25" 2>/dev/null)"
@@ -348,7 +355,11 @@ uberdev_goal_check_fingerprint_repeat() {
        "$tmpdir/goal-$goal_id-fingerprints.tsv"; then
     return 1
   fi
-  printf '%s\t%s\n' "$cycle" "$fp" >> "$tmpdir/goal-$goal_id-fingerprints.tsv"
+  # M8 — DRY: use the canonical helper instead of inlining the printf. The
+  # cycle-1 branch at line 325 already calls _uberdev_goal_persist_fp; this
+  # branch did the same write inline. Single source of truth means a future
+  # change to the TSV row shape only needs to land in the helper.
+  _uberdev_goal_persist_fp "$goal_id" "$cycle" "$fp"
 }
 
 # uberdev_goal_should_automerge GOAL_ID PR
@@ -367,9 +378,10 @@ uberdev_goal_should_automerge() {
 # uberdev_goal_locate_review_pr_audit ISSUE_NUM
 # Locate newest .uberdev/runs/<run-id>/review-pr-verdict.json (canonical) or
 # worktree-mirror equivalent for the issue's PR. Mirrors merge-pipeline/SKILL.md
-# Phase 1.4 PATH_2 sub-condition (c.0): globs the canonical path plus three
-# worktree-mirror layouts (/solve and /turbo write `.claude/worktrees/*/.uberdev/`
-# per solve-pipeline/SKILL.md; using-git-worktrees emits hidden `.worktrees/*`
+# Phase 1.4 PATH_2 sub-condition (c.0): four glob patterns total — the
+# canonical `.uberdev/runs/*` path plus three additional worktree-mirror
+# layouts (/solve and /turbo write `.claude/worktrees/*/.uberdev/` per
+# solve-pipeline/SKILL.md; using-git-worktrees emits hidden `.worktrees/*`
 # and visible `worktrees/*` layouts). Filters by top-level `.pr == $pr_num`,
 # validates each `<run-id>` against RUN_ID_REGEX before any path concatenation
 # (D4/F8 path-traversal hardening — basename-of-dirname projection is path-

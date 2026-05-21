@@ -253,7 +253,7 @@ assert_grep "$SOLVE_CMD" \
   "small-team issue-claim protocol" \
   "solve.md mentions small-team claim protocol"
 
-echo "== Version bump 0.28.0 -> 0.31.0 propagated =="
+echo "== Version bump 0.30.4 -> 0.31.0 propagated =="
 assert_grep "$PLUGIN_JSON" \
   '"version": "0.31.0"' \
   "plugin.json bumped to 0.31.0"

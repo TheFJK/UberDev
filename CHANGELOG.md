@@ -7,8 +7,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 ## [0.31.0] - 2026-05-21
 
 ### Added
-- `/uberdev:goal` — autonomous convergence orchestrator (RFC 0005). Chains `/turbo` → `/review-pr` (auto) → `/merge` if GREEN; recurses on BLOCKER/CRITICAL `review-pr-finding` issues until convergence or one of four circuit breakers fires.
-- Four circuit breakers: `max_cycles` (default 5, range 1–20 via `UBERDEV_GOAL_MAX_CYCLES`), `nonconvergence` (fingerprint repeat from prior cycle), `stuck_loop` (4h wall-clock per watch pass), `merge_failed` (conflict or hook failure).
+- `/uberdev:goal` — autonomous convergence orchestrator (RFC 0005). Chains `/turbo` → `/review-pr` (auto) → `/merge` if GREEN; recurses on BLOCKER/CRITICAL `review-pr-finding` issues until convergence or one of seven circuit breakers fires.
+- Seven circuit breakers: `max_cycles` (default 5, range 1–20 via `UBERDEV_GOAL_MAX_CYCLES`), `nonconvergence` (fingerprint repeat from prior cycle), `stuck_loop` (4h goal-level wall-clock), `merge_failed` (conflict or hook failure), `gh_api_failed` (Phase 3 `gh issue list` or `gh api user` rc!=0 — surfaces transient rate-limit / network errors instead of falsely emitting `goal_converged`), `unknown_merge_result` (Phase 2c default-arm guard against `uberdev_goal_read_merge_result` returning a value outside the documented `success|conflict|hook_failed|missing` set — contract-drift halt), `queue_empty_not_converged` (deterministic Phase 3 halt when the candidate queue is empty but at least one PR remains in a non-terminal in-flight state — alternative to spinning until the 4h `stuck_loop` fallback).
 - `/ubergoal` short-form alias for `/uberdev:goal` (installed by `/uberdev:install-aliases`).
 - `lib/goal-state.sh` — PR + issue state machines, per-goal audit-sink JSONL at `$UBERDEV_TMPDIR/goal-<id>.jsonl`.
 - `skills/goal-pipeline/SKILL.md` — 5-phase pipeline (Preflight → Dispatch → Watch → Collect-Next → Converge/Halt).

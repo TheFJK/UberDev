@@ -240,7 +240,7 @@ goal:
 |---|---|---|
 | `UBERDEV_FANOUT_SOLVE_BG` | `fanout_concurrency.solve_bg` | Cap on parallel `claude --bg` sessions dispatched by `/turbo`; int [1, 50], default 6 |
 | `SOLVE_AUTO` | `solve_auto` | When `1`/`true`, spawned agent runs with `--permission-mode auto` |
-| `UBERDEV_NO_AUTO_ALIAS` | `auto_install_aliases` | When `1`/`true` (env) or `false` (file), suppresses session-start auto-install of `/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`, `/dev`, `/ubergoal` forwarders |
+| `UBERDEV_NO_AUTO_ALIAS` | `auto_install_aliases` | When `1`/`true` (env) or `false` (file), suppresses session-start auto-install of `/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`, `/dev`, `/testers`, `/ubergoal` forwarders |
 | `UBERDEV_INTEGRATION_BRANCH` | `integration_branch` | `/merge` target branch |
 | `UBERDEV_GOAL_MAX_CYCLES` | `goal.max_cycles` | `/uberdev:goal` hard cycle ceiling; int [1, 20], default 5 |
 
@@ -250,7 +250,7 @@ Precedence: CLI flag > env var > `.claude/uberdev.local.md` > default. Missing f
 
 ## Short-form aliases
 
-Plugin commands are addressed as `/uberdev:<command>` by default — the `uberdev:` prefix is required by Claude Code's plugin manifest. Auto-install drops eight forwarders into `~/.claude/commands/`:
+Plugin commands are addressed as `/uberdev:<command>` by default — the `uberdev:` prefix is required by Claude Code's plugin manifest. Auto-install drops nine forwarders into `~/.claude/commands/`:
 
 | Short form | Canonical |
 |---|---|
@@ -261,6 +261,7 @@ Plugin commands are addressed as `/uberdev:<command>` by default — the `uberde
 | `/review-pr` | `/uberdev:review-pr` |
 | `/merge` | `/uberdev:merge` |
 | `/dev` | `/uberdev:dev` |
+| `/testers` | `/uberdev:testers` |
 | `/ubergoal` | `/uberdev:goal` |
 
 ```bash
