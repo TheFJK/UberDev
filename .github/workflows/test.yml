@@ -32,10 +32,16 @@ jobs:
         # needs the zsh binary, not the recommends graph).
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
       - name: Run shape-check tests
+        # SYNC: this list MUST match the windows-latest job below, plus the
+        # zsh fixture and testers-pipeline (both Unix-runtime fixtures the
+        # Windows job intentionally skips). When a test file is added or
+        # removed, update BOTH jobs by hand — there is no automated drift
+        # guard between the two lists.
         run: |
           bash tests/turbo-flow.test.sh && \
           bash tests/issue-causal-fanout.test.sh && \
           bash tests/post-impl-review.test.sh && \
+          bash tests/testers-pipeline.test.sh && \
           bash tests/spec-reviewer-plan-aware.test.sh && \
           bash tests/audit-fixups.test.sh && \
           bash tests/review-pr.test.sh && \
@@ -77,9 +83,17 @@ jobs:
         # Unix-runtime fixture and is intentionally skipped here. Every other
         # test is a portable grep-and-assert shape-check.
         #
+        # testers-pipeline.test.sh is ALSO a Unix-runtime fixture — it shells
+        # out to python3 with `$SCRATCH/...` paths assembled by mktemp -d,
+        # which on Git Bash for Windows resolve to /tmp/... strings that
+        # python.exe can't translate when they're embedded inside `python3 -c`
+        # source code. The aggregator itself is portable, but the per-assertion
+        # python3 -c invocations are not — skipped here, runs on Linux.
+        #
         # SYNC: this list MUST match the ubuntu-latest job above, minus the
-        # zsh fixture. When a test file is added or removed, update BOTH jobs
-        # by hand — there is no automated drift guard between the two lists.
+        # zsh fixture and testers-pipeline. When a test file is added or
+        # removed, update BOTH jobs by hand — there is no automated drift
+        # guard between the two lists.
         run: |
           bash tests/turbo-flow.test.sh && \
           bash tests/issue-causal-fanout.test.sh && \

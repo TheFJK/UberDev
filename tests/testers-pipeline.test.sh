@@ -58,4 +58,108 @@ DIFF="$(python3 -c "import yaml; a=yaml.safe_load(open('$SCRATCH/wave-1.yaml'))[
 [ "$DIFF" = "True" ] || { echo "P4: stable-id determinism broken"; exit 1; }
 echo "PASS P4: finding IDs are deterministic"
 
+# ----------------------------------------------------------------------
+# P5: malformed YAML in scratch dir
+#   aggregate.py wraps each per-agent load in try/except yaml.YAMLError;
+#   a broken file is logged to stderr and the run continues with N-1.
+#   Regression guard: aggregator must skip malformed YAML (issue #132,
+#   PR #130 fix in aggregate.py main loop).
+# ----------------------------------------------------------------------
+P5="$SCRATCH/p5"
+mkdir -p "$P5/scratch/panicked-grandma" \
+         "$P5/scratch/power-user" \
+         "$P5/scratch/adversarial-security" \
+         "$P5/scratch/chaos-engineer"
+cp "$FIX/wave-1-grandma.yaml"    "$P5/scratch/panicked-grandma/out.yaml"
+cp "$FIX/wave-1-power-user.yaml" "$P5/scratch/power-user/out.yaml"
+cp "$FIX/wave-1-security.yaml"   "$P5/scratch/adversarial-security/out.yaml"
+cp "$FIX/wave-1-malformed.yaml"  "$P5/scratch/chaos-engineer/out.yaml"
+
+P5_ERR="$P5/stderr.log"
+python3 "$AGG" --run-id smoke --wave 1 --scratch-dir "$P5/scratch" \
+  --invariants "$INV" --out "$P5/wave-1.yaml" 2> "$P5_ERR"
+
+[ -f "$P5/wave-1.yaml" ] || { echo "P5: aggregator produced no output"; exit 1; }
+python3 -c "import yaml; yaml.safe_load(open('$P5/wave-1.yaml'))" \
+  || { echo "P5: aggregator output is itself malformed"; exit 1; }
+
+COUNT_P5="$(python3 -c "import yaml; print(len(yaml.safe_load(open('$P5/wave-1.yaml'))['findings']))")"
+[ "$COUNT_P5" = "3" ] || {
+  echo "P5: expected 3 findings after malformed-skip (grandma + power-user + security), got $COUNT_P5"
+  echo "P5:   personas in output: $(python3 -c "import yaml; print([f.get('persona') for f in yaml.safe_load(open('$P5/wave-1.yaml'))['findings']])")"
+  exit 1
+}
+
+grep -q "warning: skipping malformed" "$P5_ERR" || {
+  echo "P5: expected 'warning: skipping malformed' on stderr; got:"; cat "$P5_ERR"; exit 1;
+}
+echo "PASS P5: malformed YAML skipped with stderr warning, aggregator continues"
+
+# ----------------------------------------------------------------------
+# P6: partial / null evidence shapes are dropped
+#   evidence: {screenshot: null, dom_hash: null, repro_steps: []} carries
+#   no anchor; has_evidence() must return False and the finding must not
+#   appear in the aggregate.
+#   Regression guard: aggregator must reject null/empty evidence (issue
+#   #132, PR #130 fix in aggregate.py has_evidence()).
+# ----------------------------------------------------------------------
+P6="$SCRATCH/p6"
+mkdir -p "$P6/scratch/panicked-grandma" \
+         "$P6/scratch/power-user" \
+         "$P6/scratch/chaos-engineer"
+cp "$FIX/wave-1-grandma.yaml"        "$P6/scratch/panicked-grandma/out.yaml"
+cp "$FIX/wave-1-power-user.yaml"     "$P6/scratch/power-user/out.yaml"
+cp "$FIX/wave-1-null-evidence.yaml"  "$P6/scratch/chaos-engineer/out.yaml"
+
+python3 "$AGG" --run-id smoke --wave 1 --scratch-dir "$P6/scratch" \
+  --invariants "$INV" --out "$P6/wave-1.yaml"
+
+COUNT_P6="$(python3 -c "import yaml; print(len(yaml.safe_load(open('$P6/wave-1.yaml'))['findings']))")"
+[ "$COUNT_P6" = "2" ] || { echo "P6: expected 2 findings (null-evidence dropped), got $COUNT_P6"; exit 1; }
+
+LEAKED="$(python3 -c "import yaml; ff=yaml.safe_load(open('$P6/wave-1.yaml'))['findings']; print(any(f.get('persona')=='chaos_engineer' for f in ff))")"
+[ "$LEAKED" = "False" ] || { echo "P6: null-evidence finding leaked into output"; exit 1; }
+echo "PASS P6: partial/null evidence dropped via has_evidence()"
+
+# ----------------------------------------------------------------------
+# P7: finding-ID collisions across waves keep the highest-severity record
+#   stable_id(persona, invariant, location) collides for two waves; wave-2
+#   carries a stronger severity. report.py:merge_findings must keep the
+#   wave-2 record, not the wave-1 one.
+#   Regression guard: collision must keep highest-severity, not first-seen
+#   (issue #132, PR #130 fix in report.py merge_findings — setdefault to
+#   severity-rank).
+# ----------------------------------------------------------------------
+P7="$SCRATCH/p7"
+mkdir -p "$P7/w1/scratch/panicked-grandma" \
+         "$P7/w2/scratch/panicked-grandma" \
+         "$P7/waves"
+cp "$FIX/wave-1-grandma.yaml"           "$P7/w1/scratch/panicked-grandma/out.yaml"
+cp "$FIX/wave-2-grandma-collision.yaml" "$P7/w2/scratch/panicked-grandma/out.yaml"
+
+python3 "$AGG" --run-id smoke --wave 1 --scratch-dir "$P7/w1/scratch" \
+  --invariants "$INV" --out "$P7/waves/wave-1.yaml"
+python3 "$AGG" --run-id smoke --wave 2 --scratch-dir "$P7/w2/scratch" \
+  --invariants "$INV" --out "$P7/waves/wave-2.yaml"
+
+SAME_ID="$(python3 -c "
+import yaml
+a = yaml.safe_load(open('$P7/waves/wave-1.yaml'))['findings'][0]['id']
+b = yaml.safe_load(open('$P7/waves/wave-2.yaml'))['findings'][0]['id']
+print(a == b)
+")"
+[ "$SAME_ID" = "True" ] || { echo "P7: fixtures must collide on stable_id; check persona/invariant/location"; exit 1; }
+
+MERGED_SEV="$(python3 -c "
+import sys, yaml
+sys.path.insert(0, 'plugins/uberdev/skills/testers-pipeline')
+from report import load_waves, merge_findings
+merged = merge_findings(load_waves('$P7/waves'))
+assert len(merged) == 1, f'expected 1 merged finding after collision, got {len(merged)}'
+print(next(iter(merged.values()))['severity'])
+")"
+[ "$MERGED_SEV" = "blocker" ] || \
+  { echo "P7: collision should keep highest-severity (blocker); got $MERGED_SEV"; exit 1; }
+echo "PASS P7: finding-ID collision keeps highest-severity record across waves"
+
 echo "ALL TESTS PASS"
