@@ -220,7 +220,7 @@ Watcher reads:
 
 - `claude agents` for backend-agnostic status (claude-bg + background)
 - `$UBERDEV_TMPDIR/solve-bg-stdout-<issue>.log` per `/turbo` dispatch (already namespaced by issue#)
-- Per-PR `/review-pr` audit JSON — path scheme to be specified in `skills/goal-pipeline/SKILL.md`; likely `.claude/audit/review-pr-<PR#>-<run-id>.json`
+- Per-PR `/review-pr` audit JSON — path scheme to be specified in `skills/goal-pipeline/SKILL.md`; likely `.claude/audit/review-pr-<PR#>-<run-id>.json` (note: see §9.5 B1/B2 for the canonical path actually written — `.uberdev/runs/<run-id>/review-pr-verdict.json`)
 - Per-PR `/merge` audit JSON
 
 ### 3.6 Telemetry
@@ -335,7 +335,7 @@ Codes are grouped by prefix: **D** (design decisions), **T** (trust/threat bound
 | D15 | Backend resolution is performed exactly once per `/goal` run (Phase 0 `uberdev_dispatch_preflight`) and the result is forwarded to every child dispatch; per-cycle re-resolution is forbidden because the stdout-log polling contract depends on a stable, backend-specific path convention. Also: the merge-pipeline audit log filename is canonically `audit.jsonl` per `merge-pipeline/SKILL.md §"Audit log JSONL schema"`. | §3.5 |
 | D16 | `--dry-run` mode exits before any `gh` call, any agent spawn, and any audit event; specifically `goal_dispatched` must NOT fire on dry-run so the audit log only carries real runs. | §3.1 |
 | D17 | YELLOW/RED PRs are never merged inside `/goal`; `yellow-held → merging` and `red-held → merging` are forbidden transitions in the PR state machine. `stale` and `missing` trust signals also never imply GREEN — they trigger a re-dispatch of `/review-pr`. Terminal states `merged` and `merge-failed` are irreversible. | §3.2.1, §2.3 |
-| D18 | Every re-review dispatch (unblock rule, stale/missing trust signal) uses full `/uberdev:review-pr` with no incremental shortcut, because the upstream merge that triggered unblock may have changed CI dependencies. | §5 (Q4) |
+| D18 | Every re-review dispatch (unblock rule, stale/missing trust signal) uses full `/uberdev:review-pr` with no incremental shortcut, because the upstream merge that triggered unblock may have changed CI dependencies. | §5 |
 | D19 | Crash-restart contract: `_UBERDEV_GOAL_STATE_LOADED` guard prevents double-sourcing within a single process; resume-after-SIGKILL is explicitly out of scope for v1. | — |
 
 ### 9.2 T — Trust / Threat boundaries
