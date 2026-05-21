@@ -243,8 +243,10 @@ _uberdev_dispatch_claude_bg() {
     # drift). ANSI-strip first — `claude --bg` may wrap the `backgrounded · <id>`
     # marker in CSI color codes; the line-anchor `^...$` additionally rejects
     # OSC/DCS-wrapped markers (defense-in-depth). The cleaned stream is piped to
-    # `grep -m1` so `$?` is grep's rc (the subshell holds only `printf|grep` and
-    # grep is last — PIPESTATUS would otherwise be destroyed by the outer `$()`).
+    # `grep -m1` so `$?` is grep's rc: grep is the LAST command in the
+    # `printf|grep` pipeline, so the subshell exits with grep's rc and `$()`
+    # propagates it as `$?`. (The subshell's PIPESTATUS is just not visible to
+    # the outer scope — a scoping fact, not destruction.)
     # `${ID_RAW##* }` reproduces `awk '{print $NF}'`; the hex-validate sentinel
     # rejects any partial/garbage token. Mirrors the wezterm B4 SPAWN_RC=$? precedent.
     local ID_CLEAN ID_RAW ID_GREP_RC ID_SUBPHASE

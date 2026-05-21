@@ -45,9 +45,9 @@ assert_grep_not() {
 # (the success arm of _uberdev_dispatch_claude_bg, post-#143 fix).
 # Reads $1 as the path to a fixture file simulating $BG_STDOUT_LOG and
 # echoes the post-scrub $DISPATCH_ID (either empty or exactly 8 hex).
-# Drift between this helper and dispatch.sh:241-243 (post-#143 fix) is
-# caught by the shape-check assertions above — the regexes here MUST stay
-# in lockstep.
+# Drift between this helper and the _uberdev_dispatch_claude_bg id-extraction
+# block (ID_CLEAN/ID_RAW/ID_GREP_RC, post-#143 fix) is caught by the
+# shape-check assertions above — the regexes here MUST stay in lockstep.
 _extract_id() {
   local fixture="$1"
   local id
@@ -60,11 +60,17 @@ _extract_id() {
   printf '%s' "$id"
 }
 
-# tmp fixture cleanup (per-test scope)
+# tmp fixture cleanup (per-test scope). Also reaps TALLY_FILE (created ~L201)
+# so an abnormal exit between its mktemp and the manual rm doesn't leak it;
+# guarded by -n because it's bound later. The manual rm stays (rm -f is idempotent).
 _TMPFIX=""
+TALLY_FILE=""
 _cleanup_tmpfix() {
   if [ -n "$_TMPFIX" ]; then
     rm -f "$_TMPFIX"
+  fi
+  if [ -n "$TALLY_FILE" ]; then
+    rm -f "$TALLY_FILE"
   fi
 }
 trap _cleanup_tmpfix EXIT
@@ -442,6 +448,9 @@ echo "== Runtime: ANSI-positive extraction (#143) =="
 _assert_extract_eq 'backgrounded \xc2\xb7 \x1b[36mb88389ff\x1b[39m\n' \
                    'b88389ff' \
                    'ANSI-decorated marker (\x1B[36m<id>\x1B[39m) extracts to bare 8-hex'
+_assert_extract_eq 'backgrounded \xc2\xb7 \x1b[1;36mb88389ff\x1b[0m\n' \
+                   'b88389ff' \
+                   'compound CSI (\x1B[1;36m<id>\x1B[0m) extracts to bare 8-hex (multi-param strip)'
 _assert_extract_eq 'backgrounded \xc2\xb7 b88389ff\n' \
                    'b88389ff' \
                    'bare marker (back-compat with Claude Code 2.1.139) extracts to 8-hex'
@@ -464,7 +473,7 @@ _assert_extract_empty '' \
 
 echo "== Runtime: B3 fail-CLOSED guard regression (#143 / RFC 0004 §3.5) =="
 _assert_extract_empty 'some unrelated noise\nbackground started but not the marker\nspawn attempted\n' \
-                      'missing-marker stdout yields empty (B3 guard at dispatch.sh:250 still fires rc=2)'
+                      'missing-marker stdout yields empty (B3 fail-CLOSED guard `if [[ "$ID_GREP_RC" -ge 2 ... ]]` still fires rc=2)'
 
 echo
 echo "== Summary =="
