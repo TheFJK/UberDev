@@ -424,7 +424,7 @@ uberdev_dispatch_one() {
 
 # BT5 — R1: gh pr view returns empty body -> rc=0, no dispatch.
 # Issue #140 risk 1; spec line 180-197; function lines 477-480.
-MOCK_PR_BODY=""; MOCK_PR_RC=1
+MOCK_PR_BODY=""; MOCK_PR_RC=0
 MOCK_ISSUE_STATE=""; MOCK_ISSUE_RC=0; MOCK_ISSUE_STDERR=""
 MOCK_ISSUE_STATES=(); DISPATCH_LOG=""
 UBERDEV_GOAL_ID=test-bt5
@@ -548,7 +548,6 @@ unset -f uberdev_dispatch_one
 
 # Cleanup: remove the isolated tmpdir contents (we created the whole
 # directory via mktemp -d, so we can rm -rf safely — it's our own).
-rm -rf "$_b12_tmpdir/goal-test-bt3"* 2>/dev/null || true
 rm -rf "$_b12_tmpdir" 2>/dev/null || true
 
 echo
