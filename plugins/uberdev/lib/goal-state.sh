@@ -247,7 +247,7 @@ uberdev_goal_read_trust_signal() {
   local audit_path="$1"
   [ -f "$audit_path" ] || { printf 'missing\n'; return 0; }
   local p25
-  p25="$(gh_jq_or_jq "$audit_path" '.phases.phase2_5 // empty' 2>/dev/null)"
+  p25="$(gh_jq_or_jq "$audit_path" '.phases.phase2_5 // empty')"
   [ -n "$p25" ] || { printf 'stale\n'; return 0; }
   local blocker critical halted
   blocker="$(printf '%s' "$p25" | jq -r '.by_severity.blocker // 0')"
@@ -329,7 +329,7 @@ uberdev_goal_read_merge_result() {
   local audit
   audit="$(ls -t .claude/audit/merge-"$pr"-*.json 2>/dev/null | head -n 1)"
   [ -n "$audit" ] && [ -f "$audit" ] || { printf 'missing\n'; return 0; }
-  gh_jq_or_jq "$audit" '.result // "missing"' 2>/dev/null | head -n 1
+  gh_jq_or_jq "$audit" '.result // "missing"' | head -n 1
 }
 
 # ---------------------------------------------------------------------------

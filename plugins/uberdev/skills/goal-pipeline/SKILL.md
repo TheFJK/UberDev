@@ -102,7 +102,18 @@ Notes on the enums:
    uberdev_goal_state_init "$GOAL_ID" || exit 1
    ```
 
-7. **Emit `goal_dispatched` event** with `{goal_id, cycle: 0, issues, dry_run, backend}` payload. This is the audit anchor — `cycle: 0` distinguishes the initial dispatch from the Phase 1 per-cycle dispatch:
+7. **Initialize cycle counter + goal-level wall-clock anchor.** `cycle` is the per-cycle counter referenced by Phase 2/3/4 (audit payloads, MAX_CYCLES check, fingerprint repeat detector). `watch_start` is the **goal-level** wall-clock anchor — it must persist across cycle iterations so the 4h stuck-loop circuit breaker (`_UBERDEV_GOAL_STUCK_SECS`) measures total goal wall-clock, not per-cycle wall-clock (RFC §3.3 intent: the 4h cap is the goal-level safety net). `overflow_count` and `overflow_detected` are **per-cycle** accumulators set in Phase 2a and reset at the end of Phase 3 (so the `goal_cycle_completed` payload only reports overflows from the current cycle).
+
+   ```bash
+   cycle=1
+   watch_start="$(date +%s)"
+   overflow_count=0
+   overflow_detected=0
+   ```
+
+8. **If `--dry-run`: print planned cycle-1 dispatch list + watch-loop outline, exit 0** (D16, S9). The dry-run path is the audit/preview surface — no `gh` calls, no agent spawns, no merges, **no audit events emitted** (S9 — `goal_dispatched` must NOT fire on dry-run so the audit log only carries real runs). Emit the resolved `MAX_CYCLES`, the resolved `UBERDEV_RESOLVED_BACKEND`, the issue queue, and the planned audit events ("would emit goal_dispatched", "would dispatch /turbo for issues …", "would poll solve-bg-stdout-N.log per issue"), then exit 0 cleanly. This step runs BEFORE the real `goal_dispatched` emit in step 9 — order matters.
+
+9. **Emit `goal_dispatched` event** with `{goal_id, cycle: 0, issues, dry_run, backend}` payload (real runs only — dry-run exits in step 8 before reaching here). This is the audit anchor — `cycle: 0` distinguishes the initial dispatch from the Phase 1 per-cycle dispatch:
 
    ```bash
    issues_json="$(printf '%s\n' "${queue[@]}" | jq -R . | jq -sc .)"
@@ -110,16 +121,7 @@ Notes on the enums:
      "{\"goal_id\":\"$GOAL_ID\",\"cycle\":0,\"issues\":$issues_json,\"dry_run\":$dry_run,\"backend\":\"$UBERDEV_RESOLVED_BACKEND\"}"
    ```
 
-7a. **Initialize cycle counter + goal-level wall-clock anchor.** `cycle` is the per-cycle counter referenced by Phase 2/3/4 (audit payloads, MAX_CYCLES check, fingerprint repeat detector). `watch_start` is the **goal-level** wall-clock anchor — it must persist across cycle iterations so the 4h stuck-loop circuit breaker (`_UBERDEV_GOAL_STUCK_SECS`) measures total goal wall-clock, not per-cycle wall-clock (RFC §3.3 intent: the 4h cap is the goal-level safety net).
-
-   ```bash
-   cycle=1
-   watch_start="$(date +%s)"
-   ```
-
-8. **If `--dry-run`: print planned cycle-1 dispatch list + watch-loop outline, exit 0** (D16). The dry-run path is the audit/preview surface — no `gh` calls, no agent spawns, no merges. Emit the resolved `MAX_CYCLES`, the resolved `UBERDEV_RESOLVED_BACKEND`, the issue queue, and the planned audit events ("would emit goal_dispatched", "would dispatch /turbo for issues …", "would poll solve-bg-stdout-N.log per issue"), then exit 0 cleanly.
-
-9. **`gh api rate_limit` soft pre-flight (Q5 tertiary).** Warn-only — never halt. Per cycle the watcher generates roughly `5 × N × 60` `gh` calls; rate-limit exhaustion mid-run is the highest-likelihood "stuck loop" cause that's NOT a real bug, so surface it up-front:
+10. **`gh api rate_limit` soft pre-flight (Q5 tertiary).** Warn-only — never halt. Per cycle the watcher generates roughly `5 × N × 60` `gh` calls; rate-limit exhaustion mid-run is the highest-likelihood "stuck loop" cause that's NOT a real bug, so surface it up-front:
 
    ```bash
    remaining="$(gh api rate_limit --jq '.resources.core.remaining // 0' 2>/dev/null || echo 0)"
@@ -193,8 +195,13 @@ done
 ```bash
 # watch_start is set in Phase 0 (step 7a) — goal-level wall-clock anchor.
 # The 4h stuck-loop check below measures total goal wall-clock, not per-cycle.
+# Q1 — bash supports ONE EXIT trap per shell; register the combined cleanup
+# for $gh_err + $findings_err here (Phase 3 mktemps $findings_err later).
+# Initialize $findings_err empty so `rm -f ""` is harmless if Phase 3 isn't
+# reached, and so a later `trap '…' EXIT` doesn't overwrite this one.
 gh_err="$(mktemp)"
-trap 'rm -f "$gh_err"' EXIT
+findings_err=""
+trap 'rm -f "$gh_err" "$findings_err"' EXIT
 
 while true; do
   now="$(date +%s)"
@@ -231,6 +238,10 @@ while true; do
           halted_overflow="$(gh_jq_or_jq "$audit_json" '.halted_due_to_overflow // false')"
           if [ "$halted_overflow" = "true" ]; then
             overflow_detected=1
+            # Q4 — accumulate per-cycle PR-overflow count for the
+            # goal_cycle_completed audit payload (the prose at line ~381
+            # promises {overflow_count: N} in the summary).
+            overflow_count=$(( ${overflow_count:-0} + 1 ))
           fi
           ;;
         stale|missing)
@@ -297,10 +308,10 @@ goal_start_iso="$(date -u -r "$watch_start" +%FT%TZ 2>/dev/null \
 
 # In-process gh query — mirror discover.sh:152-183 mktemp/EXIT-trap stderr
 # isolation pattern (no shell-piped --template, never an external jq pipe).
-# Top-level `trap … RETURN` would never fire (RETURN fires inside functions);
-# EXIT is the correct script-level cleanup hook.
+# The EXIT trap for $findings_err is registered up in Phase 2 alongside the
+# $gh_err cleanup (bash only honors ONE EXIT trap per shell; a second trap
+# here would silently overwrite the first and leak $gh_err).
 findings_err="$(mktemp)"
-trap 'rm -f "$findings_err"' EXIT
 
 # Build the optional --only-mine filter via env-injected GH_USER (gh resolves
 # .author.login via env passthrough; --jq receives `env.GH_USER` literal).
@@ -368,9 +379,13 @@ if [ "${#new_candidates[@]}" = "0" ] && [ "$terminal_count" = "$all_pr_count" ];
 fi
 
 uberdev_goal_audit goal_cycle_completed \
-  "{\"cycle\":$cycle,\"new_candidates\":${#new_candidates[@]}}"
+  "{\"cycle\":$cycle,\"new_candidates\":${#new_candidates[@]},\"overflow_count\":${overflow_count:-0}}"
 queue=("${new_candidates[@]}")
 cycle=$(( cycle + 1 ))
+# Q4 — reset per-cycle accumulators before looping to Phase 1 (overflow_count
+# is per-cycle; overflow_detected gates the per-cycle truncation above).
+overflow_count=0
+overflow_detected=0
 # loop back to Phase 1
 ```
 
