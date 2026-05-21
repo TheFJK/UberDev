@@ -5,8 +5,10 @@ from per-wave aggregates in <waves-dir>/wave-*.yaml.
 Filing rules:
 - Only findings with severity in {blocker, critical, major} are emitted into
   the findings-to-issues aggregate.
-- Verified flag is derived from cross_refs across waves: a finding is verified
-  if >=2 distinct personas reported it across the wave history.
+- Verified flag is sourced from monitor-primary's cross_refs entries (the
+  SKILL.md schema contract). The aggregator falls back to >=2-distinct-persona
+  cross-wave evidence when no cross_refs entry exists for a finding, so a
+  monitor outage does not silently drop verification.
 
 The aggregate is shaped to match the existing post-impl-review-final.md
 contract that findings-to-issues consumes.
@@ -20,25 +22,73 @@ import yaml
 
 FILEABLE = {"blocker", "critical", "major"}
 
+# Severity rank used to keep the strongest evidence when the same stable-id
+# appears in multiple waves. blocker > critical > major > important > suggestion.
+_SEV_RANK = {"blocker": 4, "critical": 3, "major": 2, "important": 1, "suggestion": 0}
 
-def load_waves(waves_dir: str) -> list[dict]:
+
+def _sev_rank(f: dict) -> int:
+    return _SEV_RANK.get(f.get("severity"), -1)
+
+
+def load_waves(waves_dir: str) -> list:
+    """Load wave-*.yaml files in lexical order. Bad I/O on any wave file
+    aborts (callers can't render a useful report without a complete set);
+    parse errors on a single wave are logged but do not abort."""
     out = []
     for p in sorted(glob.glob(os.path.join(waves_dir, "wave-*.yaml"))):
-        out.append(yaml.safe_load(open(p)))
+        try:
+            with open(p) as fh:
+                doc = yaml.safe_load(fh)
+        except (FileNotFoundError, PermissionError) as e:
+            print(f"error: cannot read wave file {p}: {e}", file=sys.stderr)
+            sys.exit(2)
+        except yaml.YAMLError as e:
+            print(f"warning: skipping malformed wave file {p}: {e}", file=sys.stderr)
+            continue
+        if doc is None:
+            print(f"warning: empty wave file {p}, skipping", file=sys.stderr)
+            continue
+        out.append(doc)
     return out
 
 
-def merge_findings(waves: list[dict]) -> dict[str, dict]:
-    merged: dict[str, dict] = {}
-    persona_per_finding: dict[str, set[str]] = {}
+def merge_findings(waves: list) -> dict:
+    """Merge findings from all waves keyed by stable-id.
+
+    When the same id appears in multiple waves we keep the highest-severity
+    record (cross-wave divergence is information gain, not a duplicate to
+    drop). `verified` is sourced from monitor-primary's cross_refs entries
+    when present; otherwise it falls back to >=2-distinct-persona evidence
+    across the wave history.
+    """
+    merged: dict = {}
+    persona_per_finding: dict = {}
+    # Walk cross_refs first so we can honor monitor-primary's verified flag.
+    cross_ref_verified: dict = {}
+    for w in waves:
+        for cr in w.get("cross_refs") or []:
+            fid = cr.get("finding_id")
+            if not fid:
+                continue
+            # Sticky-true: once a monitor marks a finding verified in any wave,
+            # later waves can confirm but not silently unverify.
+            cross_ref_verified[fid] = cross_ref_verified.get(fid, False) or bool(
+                cr.get("verified")
+            )
     for w in waves:
         for f in w.get("findings") or []:
             fid = f["id"]
-            merged.setdefault(fid, f)
+            prior = merged.get(fid)
+            if prior is None or _sev_rank(f) > _sev_rank(prior):
+                merged[fid] = f
             persona_per_finding.setdefault(fid, set()).add(f.get("persona", "unknown"))
     for fid, f in merged.items():
         f["reproduced_by"] = sorted(persona_per_finding[fid])
-        f["verified"] = len(persona_per_finding[fid]) >= 2
+        if fid in cross_ref_verified:
+            f["verified"] = cross_ref_verified[fid]
+        else:
+            f["verified"] = len(persona_per_finding[fid]) >= 2
     return merged
 
 

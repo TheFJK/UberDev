@@ -19,9 +19,17 @@ def stable_id(persona: str, invariant: str, location: str) -> str:
     return hashlib.sha256(f"{persona}::{invariant}::{location}".encode()).hexdigest()[:16]
 
 
-def has_evidence(ev: dict) -> bool:
-    if not isinstance(ev, dict):
+def has_evidence(ev) -> bool:
+    # Explicit type guard: a persona returning evidence as a string or list
+    # (instead of the documented dict shape) is a schema violation, not a
+    # silent miss. Raise so the aggregator surfaces the bad input rather
+    # than dropping the finding without a trace.
+    if ev is None:
         return False
+    if not isinstance(ev, dict):
+        raise ValueError(
+            f"evidence must be a dict per SKILL.md schema; got {type(ev).__name__}"
+        )
     if ev.get("screenshot") or ev.get("dom_hash"):
         return True
     nr = ev.get("network_request") or {}
@@ -29,6 +37,38 @@ def has_evidence(ev: dict) -> bool:
         return True
     rs = ev.get("repro_steps") or []
     return isinstance(rs, list) and len(rs) > 0
+
+
+def load_invariants(path: str) -> set:
+    """Load the invariant-ID set from an invariants.yaml. Fails loud on any
+    I/O, parse, or schema problem so a misconfigured run does not silently
+    drop every finding."""
+    try:
+        with open(path) as fh:
+            doc = yaml.safe_load(fh)
+    except FileNotFoundError:
+        print(f"error: invariants file not found: {path}", file=sys.stderr)
+        sys.exit(2)
+    except PermissionError as e:
+        print(f"error: cannot read invariants file {path}: {e}", file=sys.stderr)
+        sys.exit(2)
+    except yaml.YAMLError as e:
+        print(f"error: malformed invariants YAML {path}: {e}", file=sys.stderr)
+        sys.exit(2)
+    if not isinstance(doc, dict) or not isinstance(doc.get("invariants"), list):
+        print(
+            f"error: invariants file {path} missing top-level 'invariants:' list",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    try:
+        return {i["id"] for i in doc["invariants"]}
+    except (KeyError, TypeError) as e:
+        print(
+            f"error: invariants file {path} has entries without an 'id' field: {e}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
 
 def main() -> int:
@@ -40,7 +80,7 @@ def main() -> int:
     p.add_argument("--out", required=True)
     args = p.parse_args()
 
-    invariants = {i["id"] for i in yaml.safe_load(open(args.invariants))["invariants"]}
+    invariants = load_invariants(args.invariants)
 
     findings = []
     cross_refs_in = []
