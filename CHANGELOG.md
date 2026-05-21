@@ -10,6 +10,25 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 - **`/uberdev:testers`** — adversarial multi-persona QA audit squad. 6 distinct-persona testers (`panicked_grandma`, `power_user`, `adversarial_security`, `chaos_engineer`, `a11y_critic`, `mobile_thumb`) + 2 monitors (`monitor_primary`, `monitor_devils_advocate`) over 3 coordinated waves. Auto-detects target surface (web/api/native/all). Findings are evidence-anchored against a 10-invariant oracle library and filed as GitHub issues via the existing `findings-to-issues` pipeline. Read-only — the squad never writes app code. Alias: `/testers`. See `docs/rfc/0006-testers-command.md`.
 
+## v0.30.1 — 2026-05-21
+
+### Fixed (#133)
+
+- **`/uberdev:testers` `--rps-cap` is now actually enforced.** Previously parsed and serialised but no layer enforced it; a run with `--rps-cap=5` could let any persona fire 50+ req/sec at the target. Now:
+  - Pre-emptive (hard cap) via `plugins/uberdev/lib/rate-limit-curl.sh` (token-bucket, per-host, `mkdir`-as-mutex) for `Bash(curl*)` traffic.
+  - Post-hoc audit via `plugins/uberdev/lib/rate-cap-audit.sh` for Playwright / browser-MCP traffic that cannot be HTTP-wrapped; a breach synthesises a `critical` `polite_rate_cap` finding and the run exits 1.
+  - Parse-site input validation: anchored regex `^[1-9][0-9]*$`, range `[1, 1000]`, `exit 2` on bad input. Closes a MAJOR-severity argv-injection surface.
+  - URL flag-smuggling neutralised: wrapper invokes `command curl <args> -- "$URL"`.
+
+### Breaking (internal CLI)
+
+- `aggregate.py --rps-cap=N` is now a **required** flag. Direct callers outside SKILL.md must pass it explicitly. SKILL.md's invocation has been updated. The previous default (no flag) silently disabled the audit; making it required ensures the audit always runs.
+
+### Documentation (#133)
+
+- RFC 0006 §Risks rewritten to match the implementation: hard cap for curl, post-hoc audit fail-the-run for MCP, with the single-wave detection-latency caveat made explicit. Removes the misleading "limit the exfil bandwidth" framing.
+- All 6 testers persona agent files (`testers-adversarial-security`, `testers-a11y-critic`, `testers-chaos-engineer`, `testers-mobile-thumb`, `testers-panicked-grandma`, `testers-power-user`) carry a uniform Polite-rate clause naming the wrapper, the audit, and the populate-`timestamp` directive.
+
 ## [0.30.0] - 2026-05-19
 
 ### Added

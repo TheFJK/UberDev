@@ -47,6 +47,7 @@ findings:
         method: <verb-or-null>
         url: <url-or-null>
         status: <code-or-null>
+        timestamp: <iso8601-or-epoch-ms-or-null>   # NEW: required for rate-cap audit
       repro_steps: [<step>, ...]
       observed: <text>
       expected: <text>
@@ -101,11 +102,25 @@ for arg in $ARGUMENTS; do
     --rounds=*) ROUNDS="${arg#--rounds=}" ;;
     --max-issues=*) MAX_ISSUES="${arg#--max-issues=}" ;;
     --persona=*) PERSONA_LIST="${arg#--persona=}" ;;
-    --rps-cap=*) RPS_CAP="${arg#--rps-cap=}" ;;
+    --rps-cap=*)
+      RPS_CAP="${arg#--rps-cap=}"
+      if ! [[ "$RPS_CAP" =~ ^[1-9][0-9]*$ ]]; then
+        echo "error: --rps-cap RPS_CAP must be a positive integer (no leading zero, no sign); got '$RPS_CAP'" >&2
+        exit 2
+      fi
+      if [ "$RPS_CAP" -lt 1 ] || [ "$RPS_CAP" -gt 1000 ]; then
+        echo "error: --rps-cap RPS_CAP must be an integer in [1, 1000]; got '$RPS_CAP'" >&2
+        exit 2
+      fi
+      ;;
     --*) echo "warning: unknown flag $arg" >&2 ;;
     *) TARGET="$arg" ;;
   esac
 done
+
+mkdir -p "$RUN_DIR/.rate-state"
+export RATE_STATE_DIR="$RUN_DIR/.rate-state"
+export RPS_CAP
 
 # Auto-detect surface if needed
 if [ "$SURFACE" = "auto" ]; then
@@ -216,15 +231,42 @@ EOF
   #   - monitor-primary's follow_ups for this persona (from prev wave; empty on wave 1)
   #   - scratch dir scoped to .uberdev/research/$RUN_ID/testers/scratch/<agent>/
   # Each Task returns the canonical reviewer YAML on stdout.
+  #
+  # Per-persona prompts MUST embed the following Polite-rate directive verbatim
+  # so every dispatched persona enforces and audits the per-host RPS ceiling:
+  #
+  # ## Polite-rate (enforcement)
+  #
+  # Source plugins/uberdev/lib/rate-limit-curl.sh in your bash environment.
+  # Call `uberdev_rate_limit_curl <URL> <curl-args>` for EVERY HTTP request you
+  # make via curl. The wrapper hard-caps per-host RPS at $RPS_CAP (default 10).
+  #
+  # Playwright / browser_* MCP calls cannot be HTTP-wrapped. The audit phase
+  # reads your findings[].evidence.network_request.timestamp and fails the run
+  # if your per-host rolling 1-second RPS exceeds $RPS_CAP. Populate
+  # `timestamp` (ISO 8601 with milliseconds, or epoch-ms integer) on every
+  # network_request evidence anchor.
   # ============================================================================
 
-  # After all Task() returns, aggregate to wave-N.yaml:
-  python3 plugins/uberdev/skills/testers-pipeline/aggregate.py \
+  # aggregate.py runs the polite-rate audit internally and exits 1 on breach,
+  # 0 on clean, 2 on error. Capture the exit code and set POLITE_BREACH for
+  # Phase 6 fail-the-run. (Single audit invocation: aggregate.py is the source
+  # of truth; the audit script only runs from there.)
+  if python3 plugins/uberdev/skills/testers-pipeline/aggregate.py \
     --run-id "$RUN_ID" \
     --wave "$WAVE" \
     --scratch-dir "$RUN_DIR/scratch" \
     --invariants plugins/uberdev/skills/testers-pipeline/invariants.yaml \
-    --out "$WAVE_FILE"
+    --rps-cap "$RPS_CAP" \
+    --out "$WAVE_FILE"; then
+    :
+  else
+    rc=$?
+    case "$rc" in
+      1) POLITE_BREACH=1 ;;
+      *) echo "[testers] aggregate.py failed (exit $rc); aborting wave $WAVE" >&2; exit "$rc" ;;
+    esac
+  fi
 
   PREV_FINDINGS="$WAVE_FILE"
   echo "[testers] wave $WAVE complete: $(_wave_count "$WAVE_FILE" findings) findings"
@@ -286,5 +328,14 @@ echo "  total findings:    $TOTAL"
 echo "  verified findings: $VERIFIED"
 echo "  report:        $RUN_DIR/report.md"
 [ "$NO_ISSUES" != "1" ] && echo "  issues:        see findings-to-issues output above"
+
+# Fail-the-run on Polite-rate breach. The audit step in the wave loop sets
+# POLITE_BREACH=1 if any persona's per-host rolling 1-second RPS exceeded
+# $RPS_CAP; polite_rate_cap findings are already appended to wave-N.yaml and
+# rolled into report.md.
+if [ "${POLITE_BREACH:-0}" = "1" ]; then
+  echo "[testers] --rps-cap=$RPS_CAP was exceeded during the run; see polite_rate_cap findings in report.md" >&2
+  exit 1
+fi
 ```
 <!-- Phase logic implementations land via T15 (waves 2-4) and T17 (Phase 5). -->
