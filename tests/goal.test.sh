@@ -232,13 +232,16 @@ assert_grep "$GOAL_LIB" '_UBERDEV_GOAL_BODY_CAP|head -c 65536'           "G18.bo
 
 echo
 echo "== G19: lib/goal-state.sh shape =="
-# Public function names (11 — uberdev_goal_build_unblock_graph removed
-# in the post-impl-review B5 cleanup; it was dead code, never called from
-# SKILL.md or anywhere else, and the per-PR unblock decision is made
-# in-line by _uberdev_goal_check_unblock without a pre-built graph).
+# Public function names (15 — uberdev_goal_build_unblock_graph removed
+# in the post-impl-review B5 cleanup; the four `*_held_audit` /
+# `_by_pr` / `_get_pr_state` helpers added by the issue #159 + #160
+# convergence-loop fix supply the held-PR re-review poll loop's
+# bookkeeping surface).
 for fn in uberdev_goal_state_init uberdev_goal_pr_state_transition uberdev_goal_issue_state_transition \
           uberdev_goal_read_trust_signal uberdev_goal_check_fingerprint_repeat uberdev_goal_should_automerge \
           uberdev_goal_audit uberdev_goal_locate_review_pr_audit \
+          uberdev_goal_locate_review_pr_audit_by_pr \
+          uberdev_goal_get_pr_state uberdev_goal_record_held_audit uberdev_goal_get_last_held_audit \
           uberdev_goal_extract_pr_num_from_log uberdev_goal_list_prs_in_state uberdev_goal_read_merge_result; do
   assert_grep "$GOAL_LIB" "^${fn}\\(\\)" "G19.public.${fn}"
 done
@@ -268,6 +271,35 @@ assert_grep "$REPO_ROOT/.claude-plugin/marketplace.json"            '"version": 
 assert_grep "$REPO_ROOT/README.md"                                  'version-0\.31\.0-blue'  "G20.readme-badge"
 assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.31\.0\]'        "G20.changelog"
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
+
+echo
+echo "== G21: held-PR re-review poll loop (issue #159) =="
+# Phase 2 step 2e MUST exist and call the new PR-keyed locator + last-seen
+# bookkeeping helpers. The poll loop is what lets a held PR exit the held
+# state once /review-pr (re-)runs — without it the unblock rule's dispatch
+# is fire-and-forget and held PRs sit forever.
+assert_grep "$GOAL_SKILL" 'uberdev_goal_locate_review_pr_audit_by_pr'             "G21.locate-by-pr-in-skill"
+assert_grep "$GOAL_SKILL" 'uberdev_goal_get_last_held_audit|last_held_audit'      "G21.last-held-audit-in-skill"
+assert_grep "$GOAL_SKILL" 'uberdev_goal_record_held_audit|record_held_audit'      "G21.record-held-audit-in-skill"
+assert_grep "$GOAL_SKILL" 'uberdev_goal_get_pr_state'                             "G21.get-pr-state-in-skill"
+# Cross-held downgrade/upgrade arcs (yellow-held<->red-held) are valid in
+# the PR state machine so a re-review can re-classify the held PR.
+assert_grep "$GOAL_LIB" 'yellow-held->red-held'                                   "G21.yellow-to-red-transition"
+assert_grep "$GOAL_LIB" 'red-held->yellow-held'                                   "G21.red-to-yellow-transition"
+# Forbidden transitions still forbidden post-change (defensive regression guard):
+# both held -> merging arcs remain blocked even with the new poll loop.
+assert_grep "$GOAL_LIB" 'yellow-held->merging.*return 1'                          "G21.yellow-merging-still-forbidden"
+assert_grep "$GOAL_LIB" 'red-held->merging.*return 1'                             "G21.red-merging-still-forbidden"
+
+echo
+echo "== G22: queue_empty_not_converged + held-as-terminal (issue #160) =="
+# Reason added to the enum AND the deterministic halt is emitted from Phase 3.
+assert_grep "$GOAL_SKILL" 'GOAL_CIRCUIT_BREAKER_REASONS=.*queue_empty_not_converged' "G22.reason-in-enum"
+assert_grep "$GOAL_SKILL" 'goal_circuit_breaker.*queue_empty_not_converged'         "G22.halt-emit"
+# Phase 3 terminal_prs MUST include held states so a goal with only held PRs
+# left can converge cleanly instead of spinning until stuck_loop.
+assert_grep "$GOAL_SKILL" 'list_prs_in_state.*yellow-held'                         "G22.terminal-includes-yellow-held"
+assert_grep "$GOAL_SKILL" 'list_prs_in_state.*red-held'                            "G22.terminal-includes-red-held"
 
 echo
 echo "== Behavioral tests (B12 — sourced-function exercises) =="
@@ -1432,10 +1464,369 @@ _bt47_out="$(cd "$_bt47_dir" && uberdev_goal_read_merge_result 904 2>/dev/null)"
 assert_eq "$_bt47_out" "missing" \
   "BT47.read-merge-malformed-json-emits-missing"
 
+# ----- BT48-BT58 — held-PR re-review poll loop + convergence terminal
+# behavioural coverage (issues #159 + #160). Functions under test:
+#   - uberdev_goal_get_pr_state         (latest-state lookup)
+#   - uberdev_goal_record_held_audit    (TSV row append)
+#   - uberdev_goal_get_last_held_audit  (latest row per PR)
+#   - uberdev_goal_locate_review_pr_audit_by_pr (PR-keyed glob locator)
+#   - new state-machine arcs yellow-held<->red-held (cross-held re-classification)
+#
+# Strategy: per-test isolated $UBERDEV_TMPDIR (mktemp -d sub-dir of $_b12_tmpdir)
+# and a per-test goal_id. The locator tests `cd` into a scratch dir so the
+# relative-glob path (`.uberdev/runs/*/review-pr-verdict.json`) resolves
+# against test-controlled fixtures rather than the user's repo state.
+
+# BT48 — uberdev_goal_get_pr_state: latest transition wins per PR.
+uberdev_goal_state_init test-bt48
+UBERDEV_GOAL_ID=test-bt48 uberdev_goal_pr_state_transition test-bt48 500 pushed-reviewing yellow-held >/dev/null 2>&1
+UBERDEV_GOAL_ID=test-bt48 uberdev_goal_pr_state_transition test-bt48 500 yellow-held red-held >/dev/null 2>&1
+assert_eq "$(uberdev_goal_get_pr_state test-bt48 500)" "red-held" "BT48.latest-transition-wins"
+# Empty when PR has no recorded state.
+assert_eq "$(uberdev_goal_get_pr_state test-bt48 999)" "" "BT48.unknown-pr-empty"
+# Empty (rc 0) when goal_id TSV does not exist yet.
+_bt48_out="$(uberdev_goal_get_pr_state test-bt48-missing 500 2>/dev/null)"
+assert_eq "$_bt48_out" "" "BT48.missing-tsv-empty"
+
+# BT49 — uberdev_goal_record_held_audit + uberdev_goal_get_last_held_audit
+# round-trip. First record establishes the baseline; second record overrides
+# for the same PR; reads return the latest path.
+uberdev_goal_state_init test-bt49
+uberdev_goal_record_held_audit test-bt49 600 /tmp/audit-first.json
+assert_eq "$(uberdev_goal_get_last_held_audit test-bt49 600)" "/tmp/audit-first.json" \
+  "BT49.first-record-returned"
+uberdev_goal_record_held_audit test-bt49 600 /tmp/audit-second.json
+assert_eq "$(uberdev_goal_get_last_held_audit test-bt49 600)" "/tmp/audit-second.json" \
+  "BT49.second-record-overrides"
+# Different PR in the same goal: independent rows.
+uberdev_goal_record_held_audit test-bt49 601 /tmp/audit-other.json
+assert_eq "$(uberdev_goal_get_last_held_audit test-bt49 600)" "/tmp/audit-second.json" \
+  "BT49.pr-600-isolated"
+assert_eq "$(uberdev_goal_get_last_held_audit test-bt49 601)" "/tmp/audit-other.json" \
+  "BT49.pr-601-isolated"
+# Empty when PR has no recorded held audit.
+assert_eq "$(uberdev_goal_get_last_held_audit test-bt49 999)" "" \
+  "BT49.unknown-pr-empty"
+
+# BT50 — uberdev_goal_locate_review_pr_audit_by_pr: globs `.uberdev/runs/*`
+# in CWD and picks the lex-greatest run_id whose `.pr` matches. Lex-greatest
+# = chronologically newest given the YYYYMMDD-HHMMSS-<sha> shape.
+_bt50_scratch="$(mktemp -d 2>/dev/null || printf '/tmp/bt50-%s' "$$")"
+mkdir -p "$_bt50_scratch"
+(
+  cd "$_bt50_scratch" || exit 1
+  mkdir -p .uberdev/runs/20260101-100000-aaaaaaaa
+  mkdir -p .uberdev/runs/20260102-120000-bbbbbbbb
+  mkdir -p .uberdev/runs/20260103-110000-cccccccc
+  printf '{"pr":700}\n' > .uberdev/runs/20260101-100000-aaaaaaaa/review-pr-verdict.json
+  printf '{"pr":700}\n' > .uberdev/runs/20260102-120000-bbbbbbbb/review-pr-verdict.json
+  printf '{"pr":701}\n' > .uberdev/runs/20260103-110000-cccccccc/review-pr-verdict.json
+)
+_bt50_pr700="$(cd "$_bt50_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 700)"
+_bt50_pr701="$(cd "$_bt50_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 701)"
+_bt50_pr999="$(cd "$_bt50_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 999)"
+assert_eq "$_bt50_pr700" ".uberdev/runs/20260102-120000-bbbbbbbb/review-pr-verdict.json" \
+  "BT50.newest-audit-for-pr700"
+assert_eq "$_bt50_pr701" ".uberdev/runs/20260103-110000-cccccccc/review-pr-verdict.json" \
+  "BT50.single-audit-for-pr701"
+assert_eq "$_bt50_pr999" "" "BT50.no-audit-for-pr999"
+# Non-numeric PR rejected.
+uberdev_goal_locate_review_pr_audit_by_pr abc >/dev/null 2>&1
+assert_rc "$?" "1" "BT50.non-numeric-pr-rejected"
+rm -rf "$_bt50_scratch" 2>/dev/null || true
+
+# BT51 — new state machine arcs (yellow-held<->red-held). The poll loop in
+# Phase 2 step 2e uses these to re-classify a held PR when the re-review
+# trust signal flips severity (e.g., earlier RED resolves down to YELLOW
+# after fixes land in a dependency, or earlier YELLOW escalates to RED
+# after a new finding surfaces).
+_uberdev_goal_pr_state_machine_valid yellow-held red-held
+assert_rc "$?" "0" "BT51.yellow-to-red-allowed"
+_uberdev_goal_pr_state_machine_valid red-held yellow-held
+assert_rc "$?" "0" "BT51.red-to-yellow-allowed"
+# Held arcs remain forbidden -> merging (D17 regression guard).
+_uberdev_goal_pr_state_machine_valid yellow-held merging
+assert_rc "$?" "1" "BT51.yellow-merging-still-forbidden"
+_uberdev_goal_pr_state_machine_valid red-held merging
+assert_rc "$?" "1" "BT51.red-merging-still-forbidden"
+
+# BT52 — End-to-end held-PR poll: simulate the Phase 2 step 2e logic against
+# the real helper functions. Sequence:
+#   1. PR enters yellow-held; record_held_audit stores the initial audit path
+#   2. Re-review fires, writes a NEW audit JSON under .uberdev/runs/
+#   3. Poll: locate_by_pr returns new audit; get_last_held_audit differs;
+#      read_trust_signal on the new audit returns green; transition fires
+#   4. Second poll: locate_by_pr returns same audit; get_last_held_audit
+#      now matches; no transition (skip)
+#
+# This is the integration shape the SKILL.md step 2e code-block implements.
+_bt52_scratch="$(mktemp -d 2>/dev/null || printf '/tmp/bt52-%s' "$$")"
+mkdir -p "$_bt52_scratch"
+uberdev_goal_state_init test-bt52
+# Step 1: initial held transition + audit baseline.
+UBERDEV_GOAL_ID=test-bt52 uberdev_goal_pr_state_transition test-bt52 800 pushed-reviewing yellow-held >/dev/null 2>&1
+(
+  cd "$_bt52_scratch" || exit 1
+  mkdir -p .uberdev/runs/20260201-100000-aaaaaaaa
+  cat > .uberdev/runs/20260201-100000-aaaaaaaa/review-pr-verdict.json <<'EOF'
+{"pr":800,"phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":1},"halted":false}}}
+EOF
+)
+_bt52_initial="$(cd "$_bt52_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 800)"
+uberdev_goal_record_held_audit test-bt52 800 "$_bt52_initial"
+assert_eq "$(uberdev_goal_get_pr_state test-bt52 800)" "yellow-held" "BT52.initial-state-yellow-held"
+
+# Step 2: re-review writes a NEW audit (green this time).
+(
+  cd "$_bt52_scratch" || exit 1
+  mkdir -p .uberdev/runs/20260202-110000-bbbbbbbb
+  cat > .uberdev/runs/20260202-110000-bbbbbbbb/review-pr-verdict.json <<'EOF'
+{"pr":800,"phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":0},"halted":false}}}
+EOF
+)
+# Step 3: poll detects new audit, signal green, transitions to green.
+_bt52_latest="$(cd "$_bt52_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 800)"
+assert_eq "$_bt52_latest" \
+  ".uberdev/runs/20260202-110000-bbbbbbbb/review-pr-verdict.json" \
+  "BT52.poll-finds-new-audit"
+_bt52_last_seen="$(uberdev_goal_get_last_held_audit test-bt52 800)"
+if [ "$_bt52_latest" != "$_bt52_last_seen" ]; then
+  PASS=$((PASS + 1))
+  printf '  PASS  %s\n' "BT52.new-audit-differs-from-last-seen"
+else
+  FAIL=$((FAIL + 1))
+  printf '  FAIL  %s\n' "BT52.new-audit-differs-from-last-seen" >&2
+fi
+_bt52_signal="$(cd "$_bt52_scratch" && uberdev_goal_read_trust_signal "$_bt52_latest")"
+assert_eq "$_bt52_signal" "green" "BT52.new-audit-green-signal"
+_bt52_current_state="$(uberdev_goal_get_pr_state test-bt52 800)"
+UBERDEV_GOAL_ID=test-bt52 uberdev_goal_pr_state_transition test-bt52 800 "$_bt52_current_state" green >/dev/null 2>&1
+assert_rc "$?" "0" "BT52.held-to-green-transition-allowed"
+assert_eq "$(uberdev_goal_get_pr_state test-bt52 800)" "green" "BT52.final-state-green"
+uberdev_goal_record_held_audit test-bt52 800 "$_bt52_latest"
+
+# Step 4: second poll — same audit, last_seen now matches → skip transition.
+_bt52_latest2="$(cd "$_bt52_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 800)"
+_bt52_last_seen2="$(uberdev_goal_get_last_held_audit test-bt52 800)"
+assert_eq "$_bt52_latest2" "$_bt52_last_seen2" "BT52.second-poll-same-audit-skips"
+rm -rf "$_bt52_scratch" 2>/dev/null || true
+
+# BT53 — Held-PR poll detects re-review STILL RED → optional downgrade arc.
+# Scenario: PR was yellow-held; re-review found new blockers; signal=red.
+# State machine allows yellow-held → red-held re-classification (BT51).
+uberdev_goal_state_init test-bt53
+UBERDEV_GOAL_ID=test-bt53 uberdev_goal_pr_state_transition test-bt53 900 pushed-reviewing yellow-held >/dev/null 2>&1
+UBERDEV_GOAL_ID=test-bt53 uberdev_goal_pr_state_transition test-bt53 900 yellow-held red-held >/dev/null 2>&1
+assert_rc "$?" "0" "BT53.yellow-to-red-downgrade-applied"
+assert_eq "$(uberdev_goal_get_pr_state test-bt53 900)" "red-held" "BT53.final-state-red-held"
+# Audit event for the downgrade is emitted via goal_pr_transition.
+assert_grep "$UBERDEV_TMPDIR/goal-test-bt53.jsonl" '"event":"goal_pr_transition"' \
+  "BT53.transition-audit-event-emitted"
+assert_grep "$UBERDEV_TMPDIR/goal-test-bt53.jsonl" '"from":"yellow-held","to":"red-held"' \
+  "BT53.transition-audit-payload-shape"
+
+# BT54 — Reverse: red-held → yellow-held upgrade.
+uberdev_goal_state_init test-bt54
+UBERDEV_GOAL_ID=test-bt54 uberdev_goal_pr_state_transition test-bt54 901 pushed-reviewing red-held >/dev/null 2>&1
+UBERDEV_GOAL_ID=test-bt54 uberdev_goal_pr_state_transition test-bt54 901 red-held yellow-held >/dev/null 2>&1
+assert_rc "$?" "0" "BT54.red-to-yellow-upgrade-applied"
+assert_eq "$(uberdev_goal_get_pr_state test-bt54 901)" "yellow-held" "BT54.final-state-yellow-held"
+
+# BT55 — state_init creates the held-audits TSV (new file added by this fix).
+# Locks the contract that uberdev_goal_get_last_held_audit can be called on a
+# fresh goal without first having to record anything (returns empty cleanly).
+uberdev_goal_state_init test-bt55
+_bt55_tsv="$UBERDEV_TMPDIR/goal-test-bt55-held-audits.tsv"
+if [ -f "$_bt55_tsv" ]; then
+  PASS=$((PASS + 1))
+  printf '  PASS  %s\n' "BT55.held-audits-tsv-created-on-init"
+else
+  FAIL=$((FAIL + 1))
+  printf '  FAIL  %s\n' "BT55.held-audits-tsv-created-on-init" >&2
+  printf '        expected file: %s\n' "$_bt55_tsv" >&2
+fi
+assert_eq "$(uberdev_goal_get_last_held_audit test-bt55 1)" "" \
+  "BT55.fresh-goal-empty-held-audit-read"
+
+# BT56 — uberdev_goal_locate_review_pr_audit (issue-keyed) still works after
+# refactor (delegates to _by_pr). Regression guard: refactor must preserve
+# the existing issue → PR → audit chain used by Phase 2 step 2a.
+_bt56_scratch="$(mktemp -d 2>/dev/null || printf '/tmp/bt56-%s' "$$")"
+mkdir -p "$_bt56_scratch"
+(
+  cd "$_bt56_scratch" || exit 1
+  mkdir -p .uberdev/runs/20260301-100000-deadbeef
+  printf '{"pr":1234}\n' > .uberdev/runs/20260301-100000-deadbeef/review-pr-verdict.json
+)
+# Seed the solve-bg stdout log so extract_pr_num_from_log resolves issue→PR.
+printf 'some preamble\npushed PR #1234\nmore lines\n' > "$UBERDEV_TMPDIR/solve-bg-stdout-555.log"
+_bt56_audit="$(cd "$_bt56_scratch" && uberdev_goal_locate_review_pr_audit 555)"
+assert_eq "$_bt56_audit" ".uberdev/runs/20260301-100000-deadbeef/review-pr-verdict.json" \
+  "BT56.issue-keyed-locator-still-works"
+rm -rf "$_bt56_scratch" 2>/dev/null || true
+
+# BT57 — stale|missing arm of the step 2e poll loop MUST be a no-op: held
+# state unchanged AND the new audit path NOT consumed. Locks the B1 fix
+# from #159 post-impl-review (the previous SKILL.md ordering had an
+# unconditional record_held_audit AFTER the case statement, so a transient
+# undecidable audit overwrote the baseline and the next poll's
+# `[ "$new_audit" = "$last_audit" ] && continue` short-circuited forever).
+#
+# Setup uses a `stale`-shaped new audit (well-formed JSON with .pr present
+# so the by_pr locator selects it, but .phases.phase2_5 absent so
+# read_trust_signal returns `stale`). This is the realistic transient
+# shape — a /review-pr run that wrote the top-level JSON envelope but
+# hadn't yet flushed the phase2_5 sub-tree, or a legacy pre-v0.26.0 audit
+# that predates the trust-signal contract. The case statement folds
+# `stale|missing` into a single arm, so this covers both.
+_bt57_scratch="$(mktemp -d 2>/dev/null || printf '/tmp/bt57-%s' "$$")"
+mkdir -p "$_bt57_scratch"
+uberdev_goal_state_init test-bt57
+UBERDEV_GOAL_ID=test-bt57 uberdev_goal_pr_state_transition test-bt57 802 pushed-reviewing yellow-held >/dev/null 2>&1
+# Baseline: the audit recorded when the PR first entered held state.
+(
+  cd "$_bt57_scratch" || exit 1
+  mkdir -p .uberdev/runs/20260203-120000-cccccccc
+  cat > .uberdev/runs/20260203-120000-cccccccc/review-pr-verdict.json <<'EOF'
+{"pr":802,"phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":1},"halted":false}}}
+EOF
+)
+_bt57_baseline="$(cd "$_bt57_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 802)"
+uberdev_goal_record_held_audit test-bt57 802 "$_bt57_baseline"
+assert_eq "$(uberdev_goal_get_last_held_audit test-bt57 802)" "$_bt57_baseline" \
+  "BT57.baseline-audit-recorded"
+
+# A NEWER audit appears that is locatable (well-formed JSON with .pr field)
+# but undecidable (no phase2_5 sub-tree yet — partial flush / legacy shape).
+# read_trust_signal MUST return `stale` for this payload.
+(
+  cd "$_bt57_scratch" || exit 1
+  mkdir -p .uberdev/runs/20260204-130000-dddddddd
+  cat > .uberdev/runs/20260204-130000-dddddddd/review-pr-verdict.json <<'EOF'
+{"pr":802,"phases":{}}
+EOF
+)
+_bt57_new_audit="$(cd "$_bt57_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 802)"
+assert_eq "$_bt57_new_audit" \
+  ".uberdev/runs/20260204-130000-dddddddd/review-pr-verdict.json" \
+  "BT57.new-audit-locatable"
+_bt57_signal="$(cd "$_bt57_scratch" && uberdev_goal_read_trust_signal "$_bt57_new_audit" 2>/dev/null)"
+assert_eq "$_bt57_signal" "stale" "BT57.undecidable-audit-emits-stale"
+
+# Simulate the step 2e logic: new_audit != last_audit (so the early
+# `continue` guard does not fire), signal is `missing`, so the case
+# falls into the stale|missing arm — which MUST NOT record the audit
+# and MUST NOT transition state.
+_bt57_last_seen_before="$(uberdev_goal_get_last_held_audit test-bt57 802)"
+_bt57_state_before="$(uberdev_goal_get_pr_state test-bt57 802)"
+case "$_bt57_signal" in
+  green|yellow|red)
+    # Would record + transition — BT57 must not reach this arm.
+    uberdev_goal_record_held_audit test-bt57 802 "$_bt57_new_audit"
+    ;;
+  stale|missing)
+    : # no-op (the fix from B1)
+    ;;
+esac
+assert_eq "$(uberdev_goal_get_pr_state test-bt57 802)" "$_bt57_state_before" \
+  "BT57.held-state-unchanged-on-missing"
+assert_eq "$(uberdev_goal_get_last_held_audit test-bt57 802)" "$_bt57_last_seen_before" \
+  "BT57.last-held-audit-preserved-on-missing"
+assert_eq "$(uberdev_goal_get_last_held_audit test-bt57 802)" "$_bt57_baseline" \
+  "BT57.baseline-still-points-at-original-audit"
+rm -rf "$_bt57_scratch" 2>/dev/null || true
+
+# BT58 — same-severity re-review MUST be a no-op: held state unchanged AND
+# no goal_pr_transition event appended to the goal jsonl for this PR. Locks
+# the `if [ "$held_current" = ... ]` guards inside the yellow and red arms
+# of step 2e (a future refactor that drops those guards would silently
+# apply a duplicate yellow-held→yellow-held transition).
+_bt58_scratch="$(mktemp -d 2>/dev/null || printf '/tmp/bt58-%s' "$$")"
+mkdir -p "$_bt58_scratch"
+uberdev_goal_state_init test-bt58
+UBERDEV_GOAL_ID=test-bt58 uberdev_goal_pr_state_transition test-bt58 803 pushed-reviewing yellow-held >/dev/null 2>&1
+# Baseline: the audit that put PR 803 into yellow-held.
+(
+  cd "$_bt58_scratch" || exit 1
+  mkdir -p .uberdev/runs/20260205-140000-eeeeeeee
+  cat > .uberdev/runs/20260205-140000-eeeeeeee/review-pr-verdict.json <<'EOF'
+{"pr":803,"phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":1},"halted":false}}}
+EOF
+)
+_bt58_baseline="$(cd "$_bt58_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 803)"
+uberdev_goal_record_held_audit test-bt58 803 "$_bt58_baseline"
+
+# Snapshot the goal jsonl line count BEFORE the same-severity poll so we
+# can assert NO new goal_pr_transition was appended for PR 803.
+_bt58_jsonl="$UBERDEV_TMPDIR/goal-test-bt58.jsonl"
+_bt58_transitions_before=$(grep -c '"event":"goal_pr_transition".*"pr":803' "$_bt58_jsonl" 2>/dev/null || printf '0')
+
+# A NEWER audit appears, signal STILL yellow (same severity as held).
+(
+  cd "$_bt58_scratch" || exit 1
+  mkdir -p .uberdev/runs/20260206-150000-ffffffff
+  cat > .uberdev/runs/20260206-150000-ffffffff/review-pr-verdict.json <<'EOF'
+{"pr":803,"phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":2},"halted":false}}}
+EOF
+)
+_bt58_new_audit="$(cd "$_bt58_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 803)"
+_bt58_signal="$(cd "$_bt58_scratch" && uberdev_goal_read_trust_signal "$_bt58_new_audit")"
+assert_eq "$_bt58_signal" "yellow" "BT58.new-audit-still-yellow"
+
+# Simulate the step 2e logic: signal is yellow, held_current is yellow-held,
+# so the `if [ "$held_current" = "red-held" ]` guard inside the yellow arm
+# is FALSE → no transition. The record_held_audit IS called (the audit was
+# readable + decided) — that's the same-audit-skips-next-poll lock from BT52.
+_bt58_held_current="$(uberdev_goal_get_pr_state test-bt58 803)"
+case "$_bt58_signal" in
+  green)
+    UBERDEV_GOAL_ID=test-bt58 uberdev_goal_pr_state_transition test-bt58 803 "$_bt58_held_current" green >/dev/null 2>&1
+    uberdev_goal_record_held_audit test-bt58 803 "$_bt58_new_audit"
+    ;;
+  yellow)
+    if [ "$_bt58_held_current" = "red-held" ]; then
+      UBERDEV_GOAL_ID=test-bt58 uberdev_goal_pr_state_transition test-bt58 803 red-held yellow-held >/dev/null 2>&1
+    fi
+    uberdev_goal_record_held_audit test-bt58 803 "$_bt58_new_audit"
+    ;;
+  red)
+    if [ "$_bt58_held_current" = "yellow-held" ]; then
+      UBERDEV_GOAL_ID=test-bt58 uberdev_goal_pr_state_transition test-bt58 803 yellow-held red-held >/dev/null 2>&1
+    fi
+    uberdev_goal_record_held_audit test-bt58 803 "$_bt58_new_audit"
+    ;;
+esac
+
+assert_eq "$(uberdev_goal_get_pr_state test-bt58 803)" "yellow-held" \
+  "BT58.held-state-unchanged-on-same-severity"
+_bt58_transitions_after=$(grep -c '"event":"goal_pr_transition".*"pr":803' "$_bt58_jsonl" 2>/dev/null || printf '0')
+# Initial pushed-reviewing→yellow-held transition counts as 1; the same-
+# severity poll must NOT emit a second one.
+if [ "$_bt58_transitions_after" = "$_bt58_transitions_before" ]; then
+  PASS=$((PASS + 1))
+  printf '  PASS  %s\n' "BT58.no-transition-event-on-same-severity"
+else
+  FAIL=$((FAIL + 1))
+  printf '  FAIL  %s\n' "BT58.no-transition-event-on-same-severity" >&2
+  printf '        transitions before: %s\n' "$_bt58_transitions_before" >&2
+  printf '        transitions after:  %s\n' "$_bt58_transitions_after" >&2
+fi
+rm -rf "$_bt58_scratch" 2>/dev/null || true
+
 # Cleanup: remove the isolated tmpdir contents (we created the whole
 # directory via mktemp -d, so we can rm -rf safely — it's our own).
 # The single blanket rm subsumes every per-BT artifact (TSVs, audit
 # JSONs, run dirs) because they all live INSIDE $_b12_tmpdir.
+rm -rf "$_b12_tmpdir/goal-test-bt3"* 2>/dev/null || true
+rm -rf "$_b12_tmpdir/goal-test-bt48"* 2>/dev/null || true
+rm -rf "$_b12_tmpdir/goal-test-bt49"* 2>/dev/null || true
+rm -rf "$_b12_tmpdir/goal-test-bt52"* 2>/dev/null || true
+rm -rf "$_b12_tmpdir/goal-test-bt53"* 2>/dev/null || true
+rm -rf "$_b12_tmpdir/goal-test-bt54"* 2>/dev/null || true
+rm -rf "$_b12_tmpdir/goal-test-bt55"* 2>/dev/null || true
+rm -rf "$_b12_tmpdir/goal-test-bt57"* 2>/dev/null || true
+rm -rf "$_b12_tmpdir/goal-test-bt58"* 2>/dev/null || true
+rm -f "$_b12_tmpdir"/goal-bt5-*-merge-attempts.tsv 2>/dev/null || true
 rm -rf "$_b12_tmpdir" 2>/dev/null || true
 
 echo

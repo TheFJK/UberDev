@@ -4,17 +4,21 @@
 # SOURCED, never executed. No shebang (sourced only); .sh extension (convention).
 #
 # Public surface (functions):
-#   uberdev_goal_state_init               GOAL_ID
-#   uberdev_goal_pr_state_transition      GOAL_ID PR FROM TO
-#   uberdev_goal_issue_state_transition   GOAL_ID ISSUE FROM TO
-#   uberdev_goal_read_trust_signal        AUDIT_JSON_PATH
-#   uberdev_goal_check_fingerprint_repeat GOAL_ID CYCLE FINGERPRINT
-#   uberdev_goal_should_automerge         GOAL_ID PR
-#   uberdev_goal_audit                    EVENT PAYLOAD_JSON
-#   uberdev_goal_locate_review_pr_audit   ISSUE_NUM
-#   uberdev_goal_extract_pr_num_from_log  STDOUT_LOG_PATH
-#   uberdev_goal_list_prs_in_state        GOAL_ID STATE
-#   uberdev_goal_read_merge_result        PR_NUM
+#   uberdev_goal_state_init                    GOAL_ID
+#   uberdev_goal_pr_state_transition           GOAL_ID PR FROM TO
+#   uberdev_goal_issue_state_transition        GOAL_ID ISSUE FROM TO
+#   uberdev_goal_read_trust_signal             AUDIT_JSON_PATH
+#   uberdev_goal_check_fingerprint_repeat      GOAL_ID CYCLE FINGERPRINT
+#   uberdev_goal_should_automerge              GOAL_ID PR
+#   uberdev_goal_audit                         EVENT PAYLOAD_JSON
+#   uberdev_goal_locate_review_pr_audit        ISSUE_NUM
+#   uberdev_goal_locate_review_pr_audit_by_pr  PR_NUM
+#   uberdev_goal_get_pr_state                  GOAL_ID PR
+#   uberdev_goal_record_held_audit             GOAL_ID PR AUDIT_PATH
+#   uberdev_goal_get_last_held_audit           GOAL_ID PR
+#   uberdev_goal_extract_pr_num_from_log       STDOUT_LOG_PATH
+#   uberdev_goal_list_prs_in_state             GOAL_ID STATE
+#   uberdev_goal_read_merge_result             PR_NUM
 # Internal:
 #   _uberdev_goal_validate_int             N
 #   _uberdev_goal_extract_fingerprint      BODY_TEXT
@@ -142,6 +146,8 @@ _uberdev_goal_pr_state_machine_valid() {
     "pushed-reviewing->red-held") return 0 ;;
     "yellow-held->green") return 0 ;;   # after successful re-review
     "red-held->green") return 0 ;;
+    "yellow-held->red-held") return 0 ;; # re-review escalates severity (#159)
+    "red-held->yellow-held") return 0 ;; # re-review downgrades severity (#159)
     "green->merging") return 0 ;;
     "merging->merged") return 0 ;;
     "merging->merge-failed") return 0 ;;
@@ -196,6 +202,10 @@ uberdev_goal_state_init() {
   : > "$tmpdir/goal-$goal_id-issue-states.tsv"
   : > "$tmpdir/goal-$goal_id-fingerprints.tsv"
   : > "$tmpdir/goal-$goal_id-merge-attempts.tsv"
+  # held-audits.tsv: pr\taudit_path rows, appended each time the held-PR
+  # poll loop (Phase 2 step 2e) records a re-review audit it has consumed.
+  # Latest row per pr wins (uberdev_goal_get_last_held_audit picks the tail).
+  : > "$tmpdir/goal-$goal_id-held-audits.tsv"
 }
 
 # uberdev_goal_audit EVENT PAYLOAD_JSON
@@ -353,11 +363,27 @@ uberdev_goal_should_automerge() {
 uberdev_goal_locate_review_pr_audit() {
   local issue="$1"
   _uberdev_goal_validate_int "$issue" || return 1
-  # Resolve PR number from solve-bg stdout marker.
+  # Resolve PR number from solve-bg stdout marker, then delegate to the
+  # PR-keyed locator. The same `.pr == $pr` filter + lex-greatest-run_id
+  # tiebreak lives in one place now (was duplicated before the held-PR
+  # poll loop landed — see uberdev_goal_locate_review_pr_audit_by_pr).
   local pr
   pr="$(uberdev_goal_extract_pr_num_from_log "${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$issue.log")"
   [ -n "$pr" ] || return 0
   _uberdev_goal_validate_int "$pr" || return 0
+  uberdev_goal_locate_review_pr_audit_by_pr "$pr"
+}
+
+# uberdev_goal_locate_review_pr_audit_by_pr PR_NUM
+# PR-keyed companion to uberdev_goal_locate_review_pr_audit. Used by the
+# held-PR re-review poll loop (Phase 2 step 2e) which already has the PR
+# number in hand and bypasses the issue→PR resolution. Same glob set, same
+# filter (`.pr == $pr`), same lex-greatest run_id tiebreak (newest wins
+# because YYYYMMDD-HHMMSS-<sha> sorts identically to chronological order).
+# Returns the relative path to the audit JSON or empty when no match.
+uberdev_goal_locate_review_pr_audit_by_pr() {
+  local pr="$1"
+  _uberdev_goal_validate_int "$pr" || return 1
   local candidate_file run_id pr_field
   for candidate_file in .uberdev/runs/*/review-pr-verdict.json \
            .claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json \
@@ -370,6 +396,48 @@ uberdev_goal_locate_review_pr_audit() {
     [[ "$run_id" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]] || continue
     printf '%s\t%s\n' "$run_id" "$candidate_file"
   done | sort -r | head -n 1 | cut -f2
+}
+
+# uberdev_goal_get_pr_state GOAL_ID PR
+# Latest-transition lookup: read goal-<id>-pr-states.tsv, return the most
+# recent state recorded for PR. Empty string when no row exists (PR has
+# never been transitioned). Used by Phase 2 step 2e to determine the
+# `from` arg for state transitions on held PRs whose re-review trust
+# signal changed.
+uberdev_goal_get_pr_state() {
+  local goal_id="$1" pr="$2"
+  _uberdev_goal_validate_int "$pr" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  local f="$tmpdir/goal-$goal_id-pr-states.tsv"
+  [ -f "$f" ] || return 0
+  awk -v p="$pr" '$1==p {state=$2} END {print state}' "$f"
+}
+
+# uberdev_goal_record_held_audit GOAL_ID PR AUDIT_PATH
+# Append-only TSV write recording the audit path the held-PR poll loop
+# has consumed for PR. Subsequent reads via uberdev_goal_get_last_held_audit
+# pick the tail entry per PR; a different path on the next poll means a
+# new re-review fired and the poll loop should act on it.
+uberdev_goal_record_held_audit() {
+  local goal_id="$1" pr="$2" audit_path="$3"
+  _uberdev_goal_validate_int "$pr" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  printf '%s\t%s\n' "$pr" "$audit_path" \
+    >> "$tmpdir/goal-$goal_id-held-audits.tsv"
+}
+
+# uberdev_goal_get_last_held_audit GOAL_ID PR
+# Latest-row lookup in goal-<id>-held-audits.tsv per PR. Returns empty
+# string when no row exists (the held PR has not been polled yet, or the
+# TSV does not exist). Caller compares against the live locate result to
+# decide whether a re-review has fired since the last poll.
+uberdev_goal_get_last_held_audit() {
+  local goal_id="$1" pr="$2"
+  _uberdev_goal_validate_int "$pr" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  local f="$tmpdir/goal-$goal_id-held-audits.tsv"
+  [ -f "$f" ] || return 0
+  awk -v p="$pr" '$1==p {path=$2} END {print path}' "$f"
 }
 
 # uberdev_goal_extract_pr_num_from_log STDOUT_LOG_PATH
