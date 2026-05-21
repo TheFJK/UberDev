@@ -42,6 +42,15 @@ plugins/uberdev/docs/windows/
 # Node / package manager
 node_modules/
 
+# Fixture-app noise — buggy-app is the testers-squad target, package-lock
+# regenerates per install host and isn't part of the harness contract.
+tests/fixtures/buggy-app/package-lock.json
+
+# Python cache (from plugins/uberdev/skills/testers-pipeline/*.py)
+__pycache__/
+*.pyc
+*.pyo
+
 # Logs
 *.log
 

@@ -1,0 +1,11 @@
+verdict: AUDITED
+findings:
+  - severity: major
+    persona: chaos_engineer
+    location: /checkout
+    invariant_violated: no_5xx
+    summary: vibes-based finding
+    detail: I think there's a problem.
+    evidence: {}
+    confidence: low
+confidence: low

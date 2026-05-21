@@ -13,15 +13,35 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - `lib/goal-state.sh` — PR + issue state machines, per-goal audit-sink JSONL at `$UBERDEV_TMPDIR/goal-<id>.jsonl`.
 - `skills/goal-pipeline/SKILL.md` — 5-phase pipeline (Preflight → Dispatch → Watch → Collect-Next → Converge/Halt).
 - `tests/goal.test.sh` — 20-section shape-check harness (G1–G20).
+- **`/uberdev:testers`** — adversarial multi-persona QA audit squad. 6 distinct-persona testers (`panicked_grandma`, `power_user`, `adversarial_security`, `chaos_engineer`, `a11y_critic`, `mobile_thumb`) + 2 monitors (`monitor_primary`, `monitor_devils_advocate`) over 3 coordinated waves. Auto-detects target surface (web/api/native/all). Findings are evidence-anchored against a 10-invariant oracle library and filed as GitHub issues via the existing `findings-to-issues` pipeline. Read-only — the squad never writes app code. Alias: `/testers`. See `docs/rfc/0006-testers-command.md`.
 
 ### Changed
-- Plugin version bumped from `v0.30.0` to `v0.31.0`.
+- Plugin version bumped from `v0.30.1` to `v0.31.0`.
 - `tests/solve-claim.test.sh:258-265` version-drift assertions updated to `0.31.0`.
 
 ### Security
 - `Blocks: #` parser is ReDoS-safe (anchored bash regex + 64 KiB body cap).
 - `/merge` auto-chain is scoped to `/goal` only via `UBERDEV_GOAL_ID` env-var provenance check (T5).
 - Per-PR `automerge_attempt_count >= 3` short-circuits `uberdev_goal_should_automerge` so the goal stops re-dispatching `/merge` for that PR (the runaway-loop containment, R5). The PR sits in `green` until `max_cycles` fires or the operator intervenes; no `merge_failed` halt is emitted.
+
+## v0.30.1 — 2026-05-21
+
+### Fixed (#133)
+
+- **`/uberdev:testers` `--rps-cap` is now actually enforced.** Previously parsed and serialised but no layer enforced it; a run with `--rps-cap=5` could let any persona fire 50+ req/sec at the target. Now:
+  - Pre-emptive (hard cap) via `plugins/uberdev/lib/rate-limit-curl.sh` (token-bucket, per-host, `mkdir`-as-mutex) for `Bash(curl*)` traffic.
+  - Post-hoc audit via `plugins/uberdev/lib/rate-cap-audit.sh` for Playwright / browser-MCP traffic that cannot be HTTP-wrapped; a breach synthesises a `critical` `polite_rate_cap` finding and the run exits 1.
+  - Parse-site input validation: anchored regex `^[1-9][0-9]*$`, range `[1, 1000]`, `exit 2` on bad input. Closes a MAJOR-severity argv-injection surface.
+  - URL flag-smuggling neutralised: wrapper invokes `command curl <args> -- "$URL"`.
+
+### Breaking (internal CLI)
+
+- `aggregate.py --rps-cap=N` is now a **required** flag. Direct callers outside SKILL.md must pass it explicitly. SKILL.md's invocation has been updated. The previous default (no flag) silently disabled the audit; making it required ensures the audit always runs.
+
+### Documentation (#133)
+
+- RFC 0006 §Risks rewritten to match the implementation: hard cap for curl, post-hoc audit fail-the-run for MCP, with the single-wave detection-latency caveat made explicit. Removes the misleading "limit the exfil bandwidth" framing.
+- All 6 testers persona agent files (`testers-adversarial-security`, `testers-a11y-critic`, `testers-chaos-engineer`, `testers-mobile-thumb`, `testers-panicked-grandma`, `testers-power-user`) carry a uniform Polite-rate clause naming the wrapper, the audit, and the populate-`timestamp` directive.
 
 ## [0.30.0] - 2026-05-19
 
