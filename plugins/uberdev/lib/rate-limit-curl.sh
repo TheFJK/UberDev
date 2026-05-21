@@ -8,7 +8,9 @@ _UBERDEV_RATE_LIMIT_LOADED=1
 # Enforces $RPS_CAP (already validated at SKILL.md:104) for the host extracted
 # from URL. State and lock live under $RATE_STATE_DIR/<host>/ (per-run, per-host).
 #
-# Algorithm: leaky-bucket with one bucket per host. Each call:
+# Algorithm: serial gate with per-host bucket (mutex held during sleep — trades
+# concurrency for simplicity; under N-agent contention real RPS is bounded but
+# tail latency rises). Each call:
 #   1. Extracts <host> from URL (scheme://host[:port]/path).
 #   2. Acquires mkdir-mutex on $RATE_STATE_DIR/<host>/.lock (trap on RETURN releases).
 #   3. Reads $RATE_STATE_DIR/<host>/last_release (epoch-ms, default 0).
