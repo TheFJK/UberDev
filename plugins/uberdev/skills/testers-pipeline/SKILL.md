@@ -80,6 +80,13 @@ None. This skill is fully self-contained.
 The skill is invoked with `$ARGUMENTS` in scope from `commands/testers.md`. Parse the following flags (Bash substring matching is fine; this isn't getopt-grade):
 
 ```bash
+# Phase 0 precheck — PyYAML is the only runtime dep beyond python3 + bash.
+# aggregate.py and report.py both import yaml; fail fast if it's missing.
+if ! python3 -c "import yaml" 2>/dev/null; then
+  echo "error: PyYAML required (pip install pyyaml or python3 -m pip install pyyaml)" >&2
+  exit 2
+fi
+
 RUN_ID="$(date +%Y%m%d-%H%M%S)-$(printf '%04x' $RANDOM)"
 RUN_DIR=".uberdev/research/$RUN_ID/testers"
 mkdir -p "$RUN_DIR/scratch" "$RUN_DIR/screenshots" "$RUN_DIR/traces"
