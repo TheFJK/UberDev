@@ -5,7 +5,7 @@ findings:
     location: /checkout
     invariant_violated: no_5xx
     summary: vague concerns with no anchor
-    detail: All evidence fields explicitly null or empty — has_evidence() must reject.
+    detail: "All evidence fields explicitly null or empty — has_evidence() must reject. Used by P6 in tests/testers-pipeline.test.sh."
     evidence:
       screenshot: null
       dom_hash: null

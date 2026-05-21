@@ -5,7 +5,7 @@ findings:
     invariant_violated: no_5xx
     location: /checkout
     summary: malformed YAML fixture for P5
-    detail: an unclosed flow mapping is unambiguously broken
+    detail: "Intentionally malformed: the unclosed `{` on line 9 is required — P5 in tests/testers-pipeline.test.sh asserts the aggregator skips this file with a stderr warning. Do NOT fix the syntax."
     evidence: { screenshot: scratch/x.png, dom_hash: deadbeef
     confidence: high
 confidence: high

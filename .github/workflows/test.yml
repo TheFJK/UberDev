@@ -32,6 +32,9 @@ jobs:
         # needs the zsh binary, not the recommends graph).
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
       - name: Run shape-check tests
+        # SYNC: this list MUST match the windows-latest job below, plus the
+        # zsh fixture. When a test file is added or removed, update BOTH jobs
+        # by hand — there is no automated drift guard between the two lists.
         run: |
           bash tests/turbo-flow.test.sh && \
           bash tests/issue-causal-fanout.test.sh && \

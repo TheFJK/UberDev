@@ -62,7 +62,8 @@ echo "PASS P4: finding IDs are deterministic"
 # P5: malformed YAML in scratch dir
 #   aggregate.py wraps each per-agent load in try/except yaml.YAMLError;
 #   a broken file is logged to stderr and the run continues with N-1.
-#   Regression guard for the silent-failure fix in commit f58c11c.
+#   Regression guard: aggregator must skip malformed YAML (issue #132,
+#   PR #130 fix in aggregate.py main loop).
 # ----------------------------------------------------------------------
 P5="$SCRATCH/p5"
 mkdir -p "$P5/scratch/panicked-grandma" \
@@ -83,7 +84,11 @@ python3 -c "import yaml; yaml.safe_load(open('$P5/wave-1.yaml'))" \
   || { echo "P5: aggregator output is itself malformed"; exit 1; }
 
 COUNT_P5="$(python3 -c "import yaml; print(len(yaml.safe_load(open('$P5/wave-1.yaml'))['findings']))")"
-[ "$COUNT_P5" = "3" ] || { echo "P5: expected 3 findings after malformed-skip, got $COUNT_P5"; exit 1; }
+[ "$COUNT_P5" = "3" ] || {
+  echo "P5: expected 3 findings after malformed-skip (grandma + power-user + security), got $COUNT_P5"
+  echo "P5:   personas in output: $(python3 -c "import yaml; print([f.get('persona') for f in yaml.safe_load(open('$P5/wave-1.yaml'))['findings']])")"
+  exit 1
+}
 
 grep -q "warning: skipping malformed" "$P5_ERR" || {
   echo "P5: expected 'warning: skipping malformed' on stderr; got:"; cat "$P5_ERR"; exit 1;
@@ -94,8 +99,9 @@ echo "PASS P5: malformed YAML skipped with stderr warning, aggregator continues"
 # P6: partial / null evidence shapes are dropped
 #   evidence: {screenshot: null, dom_hash: null, repro_steps: []} carries
 #   no anchor; has_evidence() must return False and the finding must not
-#   appear in the aggregate. Regression guard for the evidence-presence
-#   contract in aggregate.py (commit f58c11c).
+#   appear in the aggregate.
+#   Regression guard: aggregator must reject null/empty evidence (issue
+#   #132, PR #130 fix in aggregate.py has_evidence()).
 # ----------------------------------------------------------------------
 P6="$SCRATCH/p6"
 mkdir -p "$P6/scratch/panicked-grandma" \
@@ -118,9 +124,11 @@ echo "PASS P6: partial/null evidence dropped via has_evidence()"
 # ----------------------------------------------------------------------
 # P7: finding-ID collisions across waves keep the highest-severity record
 #   stable_id(persona, invariant, location) collides for two waves; wave-2
-#   carries a stronger severity. report.py:merge_findings (post-Phase-1)
-#   must keep the wave-2 record, not the wave-1 one. Regression guard for
-#   the setdefault → severity-rank fix in commit f58c11c.
+#   carries a stronger severity. report.py:merge_findings must keep the
+#   wave-2 record, not the wave-1 one.
+#   Regression guard: collision must keep highest-severity, not first-seen
+#   (issue #132, PR #130 fix in report.py merge_findings — setdefault to
+#   severity-rank).
 # ----------------------------------------------------------------------
 P7="$SCRATCH/p7"
 mkdir -p "$P7/w1/scratch/panicked-grandma" \
