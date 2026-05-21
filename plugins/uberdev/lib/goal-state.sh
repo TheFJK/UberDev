@@ -265,9 +265,40 @@ uberdev_goal_read_trust_signal() {
   # into three locals in one syscall (3 jq forks -> 1; F1 simplify-lens). The
   # `// 0` and `// false` defaults preserve the prior shape-tolerance for
   # audit JSONs missing either by_severity counter or the halted field.
+  #
+  # B5 defense-in-depth: capture the jq pipeline's rc into a separate
+  # assignment so a structural type error (e.g. by_severity is a string
+  # instead of an object — the `// 0` default cannot rescue indexing into
+  # a string) is treated as "missing" rather than silently fall through.
+  # Inlining the substitution into `read -r <<<"$(...)"` would discard
+  # the rc; without this branch, malformed phase2_5 → empty TSV → empty
+  # blocker/critical/halted vars → fall-through to "green" (the exact
+  # YELLOW->GREEN misclassification path issue #137 was filed against).
+  #
+  # Audit parity (S4): this second pass operates on the in-memory $p25
+  # string, so it cannot route through the gh_jq_or_jq shim (which takes a
+  # FILE path). Instead, mirror that shim's breadcrumb directly — but the
+  # success path stays a clean in-memory capture (no temp file): run jq with
+  # stderr discarded and read its rc. ONLY on the failure path (about to
+  # return `missing` anyway) re-run jq capturing stderr in-memory and emit
+  # one audit-friendly warning line, so a structural type error leaves an
+  # operator trail rather than vanishing. Behaviour is unchanged: rc!=0
+  # still maps to `missing` (BT20-locked); the warning is stderr-only and
+  # additive.
+  local jq_filter='[.by_severity.blocker // 0, .by_severity.critical // 0, (.halted // false | tostring)] | @tsv'
+  local tsv jq_rc
+  tsv="$(jq -r "$jq_filter" <<<"$p25" 2>/dev/null)"
+  jq_rc=$?
+  if [ "$jq_rc" -ne 0 ]; then
+    local jq_err first_line
+    jq_err="$(jq -r "$jq_filter" <<<"$p25" 2>&1 1>/dev/null)"
+    first_line="${jq_err%%$'\n'*}"
+    printf 'goal-state: jq failed on phase2_5 by_severity projection: %s\n' \
+      "${first_line:-unknown error}" >&2
+    printf 'missing\n'; return 0
+  fi
   local blocker critical halted
-  read -r blocker critical halted <<<"$(printf '%s' "$p25" \
-    | jq -r '[.by_severity.blocker // 0, .by_severity.critical // 0, (.halted // false | tostring)] | @tsv')"
+  read -r blocker critical halted <<<"$tsv"
   if [ "$halted" = "true" ] || [ "$blocker" -gt 0 ]; then printf 'red\n'; return 0; fi
   if [ "$critical" -gt 0 ]; then printf 'yellow\n'; return 0; fi
   printf 'green\n'

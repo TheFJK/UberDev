@@ -273,11 +273,17 @@ echo
 echo "== Behavioral tests (B12 — sourced-function exercises) =="
 # These tests SOURCE plugins/uberdev/lib/goal-state.sh and exercise the
 # real bash functions, not just grep their shape. They cover the four
-# silently-shape-checked-only contracts called out in post-impl review B12:
-#   BT1 — state-machine forbidden transitions (D17)
-#   BT2 — Blocks: parser ReDoS-safe anchoring
-#   BT3 — fingerprint repeat detector
-#   BT4 — gh_jq_or_jq jq shim file-not-found path
+# silently-shape-checked-only contracts called out in post-impl review
+# B12, plus the trust-signal coverage gap (issue #137) flagged by
+# /review-pr Phase 2.5 on PR #129:
+#   BT1      state-machine forbidden transitions (D17)
+#   BT2      Blocks: parser ReDoS-safe anchoring
+#   BT3      fingerprint repeat detector
+#   BT4      gh_jq_or_jq jq shim file-not-found path
+#   BT12-BT23 uberdev_goal_read_trust_signal enum mapping
+#            (green/yellow/red-via-blocker/red-via-halted/stale/missing/
+#             missing-via-malformed-json/shape-tolerance/missing-via-
+#             second-jq-failure/combined-red-triggers — see #137)
 #
 # Isolation: mktemp $UBERDEV_TMPDIR for this section so writes do not
 # collide with production state nor with each other.
@@ -737,8 +743,232 @@ _bt18_err="$_b12_tmpdir/bt18-stderr"
 uberdev_goal_issue_state_transition test-bt18 400 input resolved 2>"$_bt18_err" >/dev/null
 assert_grep_file "$_bt18_err" 'invalid issue transition input->resolved' "BT18.stderr-message-on-invalid-transition"
 
-# Cleanup: remove the isolated tmpdir contents (we created the whole
-# directory via mktemp -d, so we can rm -rf safely — it's our own).
+# ----- BT12-BT23 — uberdev_goal_read_trust_signal: trust-signal enum coverage -----
+# (issue #137; finding fingerprint d599c295ba4d2846 from /review-pr Phase
+# 2.5 on PR #129). Each test stages a synthetic audit JSON under
+# $_b12_tmpdir, invokes the function, and asserts the printed enum
+# (green/yellow/red/stale/missing) matches the D17 spec mapping.
+#
+# Covers the uncovered branches called out by pr-test-analyzer:
+#   - actual JSON parsing of .phases.phase2_5      (BT12, BT13, BT14, BT19)
+#   - blocker / critical threshold logic           (BT12, BT13, BT14)
+#   - halted_due_to_overflow flag                  (BT15)
+#   - 'stale' vs 'missing' distinction             (BT16, BT17, BT18)
+#   - malformed-by_severity second-jq failure      (BT20)
+#   - combined red-triggers (blocker+critical,      (BT21, BT22, BT23)
+#     halted+blocker, halted+critical)
+#
+# Misclassification risk these guard: YELLOW silently treated as GREEN
+# (PR auto-merged despite CRITICAL findings); STALE silently treated as
+# GREEN (PR auto-merged on legacy/pre-v0.26.0 audit shape that has no
+# phase2_5 block); malformed-JSON silently treated as STALE instead of
+# MISSING (the B5 hardening would regress).
+#
+# Note: the BT12-BT18 labels in this block refer to uberdev_goal_read_trust_signal
+# test cases and are distinct from the BT12-BT18 labels above which test
+# uberdev_goal_issue_state_transition — different functions, both sets kept.
+
+# BT12 — GREEN: by_severity zeros + halted=false -> "green". The clean
+# trust-signal path; required precondition for /goal to auto-dispatch
+# /merge per goal-pipeline §D17.
+_bt12_audit_green="$_b12_tmpdir/audit-green.json"
+cat > "$_bt12_audit_green" <<'EOF'
+{
+  "phases": {
+    "phase2_5": {
+      "by_severity": {"blocker": 0, "critical": 0},
+      "halted": false
+    }
+  }
+}
+EOF
+assert_eq "$(uberdev_goal_read_trust_signal "$_bt12_audit_green")" "green" \
+  "BT12.clean-phase2_5-emits-green"
+
+# BT13 — YELLOW: critical>0, blocker=0, halted=false. /goal must hold
+# YELLOW PRs; a green misclassification here is the "auto-merged despite
+# CRITICAL findings" regression the post-impl finding explicitly flags.
+_bt13_audit_yellow="$_b12_tmpdir/audit-yellow.json"
+cat > "$_bt13_audit_yellow" <<'EOF'
+{
+  "phases": {
+    "phase2_5": {
+      "by_severity": {"blocker": 0, "critical": 1},
+      "halted": false
+    }
+  }
+}
+EOF
+assert_eq "$(uberdev_goal_read_trust_signal "$_bt13_audit_yellow")" "yellow" \
+  "BT13.critical-only-emits-yellow"
+
+# BT14 — RED via blocker>0. Blocker count dominates: even with zero
+# critical findings the PR must enter red-held. D17 forbids
+# yellow-held->merging and red-held->merging transitions (BT1 covers
+# that arc; BT14 covers the signal that drives the state transition).
+_bt14_audit_red_blocker="$_b12_tmpdir/audit-red-blocker.json"
+cat > "$_bt14_audit_red_blocker" <<'EOF'
+{
+  "phases": {
+    "phase2_5": {
+      "by_severity": {"blocker": 2, "critical": 0},
+      "halted": false
+    }
+  }
+}
+EOF
+assert_eq "$(uberdev_goal_read_trust_signal "$_bt14_audit_red_blocker")" "red" \
+  "BT14.blocker-emits-red"
+
+# BT15 — RED via halted: halted=true is one of two OR-equal conditions
+# that triggers RED (blocker>0 is the other; both share the same
+# `red` branch in goal-state.sh:271 via a single `||`). This test
+# isolates the halted-only path with blocker=critical=0 so a regression
+# that drops the halted check (or reorders the OR) would surface here
+# without being masked by a non-zero blocker. RFC 0002 §3.4 calls this
+# the "halted_due_to_overflow" signal: Phase 2.5 truncated findings
+# beyond MAX_NEW=10 so the severity counters are unreliable; the only
+# safe action is red-held.
+_bt15_audit_red_halted="$_b12_tmpdir/audit-red-halted.json"
+cat > "$_bt15_audit_red_halted" <<'EOF'
+{
+  "phases": {
+    "phase2_5": {
+      "by_severity": {"blocker": 0, "critical": 0},
+      "halted": true
+    }
+  }
+}
+EOF
+assert_eq "$(uberdev_goal_read_trust_signal "$_bt15_audit_red_halted")" "red" \
+  "BT15.halted-overrides-clean-counters-emits-red"
+
+# BT16 — STALE: phase2_5 key absent (legacy/pre-v0.26.0 audit shape).
+# Distinct from 'missing': the audit ran but predates the Phase 2.5
+# trust-signal contract. Caller must re-dispatch /review-pr (never
+# silently assume GREEN on a stale artifact per D17).
+_bt16_audit_stale="$_b12_tmpdir/audit-stale.json"
+cat > "$_bt16_audit_stale" <<'EOF'
+{"phases": {}}
+EOF
+assert_eq "$(uberdev_goal_read_trust_signal "$_bt16_audit_stale")" "stale" \
+  "BT16.phase2_5-absent-emits-stale"
+
+# BT17 — MISSING: audit file does not exist. Distinct from 'stale':
+# /review-pr has not yet produced an artifact for this PR. State
+# machine treats both as "re-dispatch /review-pr" today but the
+# distinction is load-bearing for goal-pipeline telemetry (stale
+# means we already ran once; missing means we haven't).
+assert_eq "$(uberdev_goal_read_trust_signal /nonexistent/audit.json)" "missing" \
+  "BT17.file-not-found-emits-missing"
+
+# BT18 — MISSING via jq failure (malformed JSON). B5 hardening: the
+# jq exit code drives control flow; empty-stdout-as-success would let
+# corrupted audit JSON silently misclassify as 'stale' (and thence
+# YELLOW->GREEN if a later run produced a halted-but-empty payload).
+# stderr suppressed because gh_jq_or_jq emits a warning by design.
+_bt18_audit_malformed="$_b12_tmpdir/audit-malformed.json"
+printf 'not valid json {{\n' > "$_bt18_audit_malformed"
+assert_eq "$(uberdev_goal_read_trust_signal "$_bt18_audit_malformed" 2>/dev/null)" "missing" \
+  "BT18.malformed-json-emits-missing"
+
+# BT19 — Shape-tolerance: empty phase2_5 object. The `// 0` and
+# `// false` jq defaults preserve GREEN when by_severity counters and
+# halted are all absent; the F1 simplify-lens refactor (goal-state.sh
+# :265-267) is contracted to keep this invariant. Regressing this
+# would surface as false-RED across every pre-counters audit payload.
+_bt19_audit_minimal="$_b12_tmpdir/audit-minimal.json"
+cat > "$_bt19_audit_minimal" <<'EOF'
+{"phases": {"phase2_5": {}}}
+EOF
+assert_eq "$(uberdev_goal_read_trust_signal "$_bt19_audit_minimal")" "green" \
+  "BT19.empty-phase2_5-defaults-to-green"
+
+# BT20 — MISSING via second-jq failure (B5 defense-in-depth). The first
+# jq call (.phases.phase2_5 // empty) succeeds because phase2_5 IS
+# present, so p25 is non-empty and we fall past the 'stale' branch.
+# The SECOND jq call then errors because by_severity is a string rather
+# than an object — `.by_severity.blocker` cannot index a string and jq
+# exits non-zero. Without the explicit rc check at goal-state.sh:301
+# (`[ "$jq_rc" -eq 0 ] || { printf 'missing\n'; return 0; }`),
+# `read -r blocker critical halted <<<""` would leave all three vars
+# empty, the `[ $blocker -gt 0 ]` arithmetic would silently evaluate to
+# false, and the function would fall through to printf 'green'. That is
+# the YELLOW->GREEN misclassification path the original #137 finding
+# was filed against — this test locks the defense-in-depth fix.
+_bt20_audit_malformed_severity="$_b12_tmpdir/audit-malformed-severity.json"
+cat > "$_bt20_audit_malformed_severity" <<'EOF'
+{"phases":{"phase2_5":{"by_severity":"not_an_object","halted":false}}}
+EOF
+assert_eq "$(uberdev_goal_read_trust_signal "$_bt20_audit_malformed_severity" 2>/dev/null)" "missing" \
+  "BT20.malformed-by_severity-emits-missing"
+
+# BT21 — RED via blocker>0 AND critical>0 simultaneously. BT14 isolates
+# blocker-only and BT13 isolates critical-only; this fixture exercises
+# both >0 at once to lock the red branch
+# (`[ "$halted" = "true" ] || [ "$blocker" -gt 0 ]`) against an accidental
+# `&&` / short-circuit regression. blocker dominates: the function returns
+# red before ever reaching the `[ "$critical" -gt 0 ]` yellow branch, so a
+# regression that ANDed the conditions (or swapped the branch order) would
+# surface here as yellow instead of red.
+_bt21_audit_red_both="$_b12_tmpdir/audit-red-both.json"
+cat > "$_bt21_audit_red_both" <<'EOF'
+{
+  "phases": {
+    "phase2_5": {
+      "by_severity": {"blocker": 1, "critical": 1},
+      "halted": false
+    }
+  }
+}
+EOF
+assert_eq "$(uberdev_goal_read_trust_signal "$_bt21_audit_red_both")" "red" \
+  "BT21.blocker-and-critical-both-emits-red"
+
+# BT22 — RED via halted=true AND blocker>0. BT15 isolates halted-only with
+# clean counters; this variant adds blocker>0 to verify halted's red
+# precedence is not masked (and that the OR short-circuit still resolves to
+# red) when both red-triggering conditions hold. A regression that dropped
+# or reordered the halted check would still surface red here via blocker,
+# so this is the companion to BT23 (halted+critical) which has no
+# blocker fallback.
+_bt22_audit_red_halted_blocker="$_b12_tmpdir/audit-red-halted-blocker.json"
+cat > "$_bt22_audit_red_halted_blocker" <<'EOF'
+{
+  "phases": {
+    "phase2_5": {
+      "by_severity": {"blocker": 1, "critical": 0},
+      "halted": true
+    }
+  }
+}
+EOF
+assert_eq "$(uberdev_goal_read_trust_signal "$_bt22_audit_red_halted_blocker")" "red" \
+  "BT22.halted-and-blocker-emits-red"
+
+# BT23 — RED via halted=true AND critical>0 (blocker=0). The load-bearing
+# variant: with blocker=0, the ONLY thing that produces red is the halted
+# check. If halted were reordered after / masked by the critical>0 yellow
+# branch, this fixture would regress to yellow. Locks halted's red
+# precedence over a non-zero critical count.
+_bt23_audit_red_halted_critical="$_b12_tmpdir/audit-red-halted-critical.json"
+cat > "$_bt23_audit_red_halted_critical" <<'EOF'
+{
+  "phases": {
+    "phase2_5": {
+      "by_severity": {"blocker": 0, "critical": 1},
+      "halted": true
+    }
+  }
+}
+EOF
+assert_eq "$(uberdev_goal_read_trust_signal "$_bt23_audit_red_halted_critical")" "red" \
+  "BT23.halted-and-critical-emits-red"
+
+# Cleanup: remove the isolated tmpdir we created via mktemp -d above.
+# The single `rm -rf "$_b12_tmpdir"` subsumes any per-BT artifacts
+# (goal-test-bt3-fingerprints.tsv, audit-*.json, etc.) because they
+# all live INSIDE the tmpdir under the section-local UBERDEV_TMPDIR.
 rm -rf "$_b12_tmpdir" 2>/dev/null || true
 
 echo
