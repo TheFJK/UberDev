@@ -359,8 +359,12 @@ else
 fi
 
 # BT5 — uberdev_goal_should_automerge behavioral coverage.
-# Reuses the B12 _b12_tmpdir + sourced lib. Distinct goal_id per case
-# so per-id TSVs cannot cross-contaminate.
+# Reuses the B12 _b12_tmpdir + sourced lib. Each case MUST use a distinct
+# goal_id so its per-id TSV (goal-<id>-merge-attempts.tsv) cannot
+# cross-contaminate another case.
+# _bt5_seed writes one TSV row in the lib's column order: <pr>\t<attempts>
+# (PR\tCOUNT), matching the reader's awk `$1==p {c=$2}` in goal-state.sh.
+# Returns 1 on write-failure so dependent cases guard with `if _bt5_seed ...`.
 _bt5_seed() {
   printf '%s\t%s\n' "$2" "$3" > "$_b12_tmpdir/goal-$1-merge-attempts.tsv" || {
     FAIL=$((FAIL + 1))
@@ -390,7 +394,8 @@ UBERDEV_GOAL_ID="$_bt5_goal_id" uberdev_goal_should_automerge bt5-3b ""
 assert_rc "$?" "1" "BT5.B3b-pr-empty-refused"
 
 # B4 — boundary: predicate uses strict `-lt`, so attempts == cap must refuse.
-# Regression detector for an accidental `-le` flip.
+# Regression detector: an accidental `-le` flip would let attempts == cap
+# pass, making this case's expected rc 1 turn into 0 (test goes red).
 if _bt5_seed bt5-4 200 3; then
   UBERDEV_GOAL_ID="$_bt5_goal_id" uberdev_goal_should_automerge bt5-4 200
   assert_rc "$?" "1" "BT5.B4-attempts-at-cap-refused"
@@ -406,8 +411,9 @@ fi
 UBERDEV_GOAL_ID="$_bt5_goal_id" uberdev_goal_should_automerge bt5-6 202
 assert_rc "$?" "0" "BT5.B6-no-attempts-file-allowed"
 
-# B7 — env knob: renaming _UBERDEV_GOAL_MAX_MERGE_ATTEMPTS silently breaks
-# the override; this case fails if the var name drifts.
+# B7 — env knob: renaming _UBERDEV_GOAL_MAX_MERGE_ATTEMPTS breaks the
+# override; this case then fails visibly (assert_rc expects 0, gets 1)
+# if the var name drifts.
 if _bt5_seed bt5-7 203 3; then
   _UBERDEV_GOAL_MAX_MERGE_ATTEMPTS=5 UBERDEV_GOAL_ID="$_bt5_goal_id" \
       uberdev_goal_should_automerge bt5-7 203
@@ -417,6 +423,7 @@ fi
 # Cleanup: remove the isolated tmpdir contents (we created the whole
 # directory via mktemp -d, so we can rm -rf safely — it's our own).
 rm -rf "$_b12_tmpdir/goal-test-bt3"* 2>/dev/null || true
+rm -f "$_b12_tmpdir"/goal-bt5-*-merge-attempts.tsv 2>/dev/null || true
 rm -rf "$_b12_tmpdir" 2>/dev/null || true
 
 echo
