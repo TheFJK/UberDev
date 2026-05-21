@@ -318,6 +318,18 @@ assert_rc() {
   fi
 }
 
+assert_file_empty() {
+  local file="$1" label="$2"
+  if [ ! -s "$file" ]; then
+    PASS=$((PASS + 1))
+    printf '  PASS  %s\n' "$label"
+  else
+    FAIL=$((FAIL + 1))
+    printf '  FAIL  %s\n' "$label" >&2
+    printf '        non-empty: %s\n' "$(cat "$file" 2>/dev/null)" >&2
+  fi
+}
+
 # BT1 — PR state machine: D17 forbidden transitions return non-zero;
 # a documented legal transition returns zero.
 _uberdev_goal_pr_state_machine_valid yellow-held merging
@@ -354,15 +366,8 @@ assert_rc "$?" "0" "BT3a.cycle-1-no-repeat-returns-zero"
 # now carries the cycle-1 fingerprint (covers the "TSV write success" half
 # of issue #139's risk 3 — the >> redirection in _uberdev_goal_persist_fp
 # actually produced a file with the expected line).
-if grep -qE $'^1\tdeadbeefdeadbeef$' "$UBERDEV_TMPDIR/goal-test-bt3a-fingerprints.tsv" 2>/dev/null; then
-  PASS=$((PASS + 1))
-  printf '  PASS  %s\n' "BT3a.cycle-1-persists-to-tsv"
-else
-  FAIL=$((FAIL + 1))
-  printf '  FAIL  %s\n' "BT3a.cycle-1-persists-to-tsv" >&2
-  printf '        expected line "1\\tdeadbeefdeadbeef" in %s\n' \
-    "$UBERDEV_TMPDIR/goal-test-bt3a-fingerprints.tsv" >&2
-fi
+assert_grep "$UBERDEV_TMPDIR/goal-test-bt3a-fingerprints.tsv" $'^1\tdeadbeefdeadbeef$' \
+  "BT3a.cycle-1-persists-to-tsv"
 
 # BT3b — empty fingerprint: with fp="" the function MUST take the
 # [ -n "$fp" ] || return 0 short-circuit and return 0 WITHOUT any TSV
@@ -377,15 +382,8 @@ assert_rc "$?" "0" "BT3b.empty-fingerprint-returns-zero"
 # Empty fp must NOT touch the TSV (the file was truncated by state_init);
 # if a future edit moves the [ -n ] check below the persist call, this
 # fails immediately.
-if [ ! -s "$UBERDEV_TMPDIR/goal-test-bt3b-fingerprints.tsv" ]; then
-  PASS=$((PASS + 1))
-  printf '  PASS  %s\n' "BT3b.empty-fingerprint-no-tsv-write"
-else
-  FAIL=$((FAIL + 1))
-  printf '  FAIL  %s\n' "BT3b.empty-fingerprint-no-tsv-write" >&2
-  printf '        TSV non-empty after empty-fp call: %s\n' \
-    "$(cat "$UBERDEV_TMPDIR/goal-test-bt3b-fingerprints.tsv" 2>/dev/null)" >&2
-fi
+assert_file_empty "$UBERDEV_TMPDIR/goal-test-bt3b-fingerprints.tsv" \
+  "BT3b.empty-fingerprint-no-tsv-write"
 
 # BT3c — cycle 2 with non-matching fp: prev cycle 1 has fp A, current
 # cycle 2 has fp B, awk match fails, function falls through to the printf
@@ -397,20 +395,14 @@ uberdev_goal_state_init test-bt3c
 _uberdev_goal_persist_fp test-bt3c 1 aaaaaaaaaaaaaaaa
 UBERDEV_GOAL_ID=test-bt3c uberdev_goal_check_fingerprint_repeat test-bt3c 2 bbbbbbbbbbbbbbbb
 assert_rc "$?" "0" "BT3c.cycle-2-new-fp-returns-zero"
-# Both lines must be present, in order, after the append.
+# Both lines must be present after the append; check each entry separately
+# so a failure pinpoints WHICH cycle entry is missing instead of just
+# "one of two patterns didn't match".
 _bt3c_tsv="$UBERDEV_TMPDIR/goal-test-bt3c-fingerprints.tsv"
 _bt3c_lines="$(wc -l < "$_bt3c_tsv" 2>/dev/null | tr -d ' ')"
 assert_eq "$_bt3c_lines" "2" "BT3c.cycle-2-appends-not-overwrites"
-if grep -qE $'^1\taaaaaaaaaaaaaaaa$' "$_bt3c_tsv" 2>/dev/null \
-   && grep -qE $'^2\tbbbbbbbbbbbbbbbb$' "$_bt3c_tsv" 2>/dev/null; then
-  PASS=$((PASS + 1))
-  printf '  PASS  %s\n' "BT3c.cycle-2-both-entries-present"
-else
-  FAIL=$((FAIL + 1))
-  printf '  FAIL  %s\n' "BT3c.cycle-2-both-entries-present" >&2
-  printf '        TSV contents:\n' >&2
-  sed 's/^/          /' "$_bt3c_tsv" >&2
-fi
+assert_grep "$_bt3c_tsv" $'^1\taaaaaaaaaaaaaaaa$' "BT3c.cycle-1-entry-present"
+assert_grep "$_bt3c_tsv" $'^2\tbbbbbbbbbbbbbbbb$' "BT3c.cycle-2-entry-present"
 
 # BT3d — invalid cycle: passing a non-integer cycle (e.g. "abc") MUST take
 # the _uberdev_goal_validate_int "$cycle" || return 2 short-circuit and
@@ -424,15 +416,8 @@ UBERDEV_GOAL_ID=test-bt3d uberdev_goal_check_fingerprint_repeat test-bt3d abc de
 assert_rc "$?" "2" "BT3d.invalid-cycle-returns-two"
 # rc=2 must short-circuit before any TSV write; the file was truncated by
 # state_init and must remain empty.
-if [ ! -s "$UBERDEV_TMPDIR/goal-test-bt3d-fingerprints.tsv" ]; then
-  PASS=$((PASS + 1))
-  printf '  PASS  %s\n' "BT3d.invalid-cycle-no-tsv-write"
-else
-  FAIL=$((FAIL + 1))
-  printf '  FAIL  %s\n' "BT3d.invalid-cycle-no-tsv-write" >&2
-  printf '        TSV non-empty after invalid-cycle call: %s\n' \
-    "$(cat "$UBERDEV_TMPDIR/goal-test-bt3d-fingerprints.tsv" 2>/dev/null)" >&2
-fi
+assert_file_empty "$UBERDEV_TMPDIR/goal-test-bt3d-fingerprints.tsv" \
+  "BT3d.invalid-cycle-no-tsv-write"
 
 # BT4 — gh_jq_or_jq with non-existent file -> returns non-zero (file
 # does not exist), produces empty output. Behavioral check that the
