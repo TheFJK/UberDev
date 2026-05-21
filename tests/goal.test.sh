@@ -338,6 +338,19 @@ assert_contains() {
   esac
 }
 
+assert_grep_file() {
+  local file="$1" pattern="$2" label="$3"
+  if [ -f "$file" ] && grep -qE -e "$pattern" "$file"; then
+    PASS=$((PASS + 1))
+    printf '  PASS  %s\n' "$label"
+  else
+    FAIL=$((FAIL + 1))
+    printf '  FAIL  %s\n' "$label" >&2
+    printf '        file:    %s (exists=%s)\n' "$file" "$([ -f "$file" ] && echo yes || echo no)" >&2
+    printf '        pattern: %s\n' "$pattern" >&2
+  fi
+}
+
 # BT1 — PR state machine: D17 forbidden transitions return non-zero;
 # a documented legal transition returns zero.
 _uberdev_goal_pr_state_machine_valid yellow-held merging
@@ -577,6 +590,152 @@ assert_grep "$UBERDEV_TMPDIR/goal-test-bt11.jsonl" '"blocking_issues":\[99,100\]
 unset -f gh
 unset -f uberdev_dispatch_one
 unset -f _uberdev_goal_dispatch_review_pr
+
+# ----- BT12-BT18 — uberdev_goal_issue_state_transition behavioural coverage -----
+# Function under test: plugins/uberdev/lib/goal-state.sh:232-246. Closes the
+# review-pr Phase 2.5 blocker finding (issue #138): the 5-state issue
+# machine (input -> solving -> pr-pushed -> resolved; solving/pr-pushed -> failed)
+# previously had zero behavioural tests — invalid transitions, TSV write
+# failures, and timestamp omission could all go undetected. Numbered BT12+
+# to leave room for BT5-BT11 (PR #142) to land without collision; both PRs
+# branch off worktree-solve-issue-128 and the second to merge resolves with
+# a trivial rebase since BT11 < BT12.
+#
+# No mocks required: pure function with TSV side-effect into $UBERDEV_TMPDIR
+# (which BT1-BT4 already set to $_b12_tmpdir). Each test uses a unique
+# goal_id so per-test TSVs do not collide.
+# (assert_grep_file helper is defined alongside assert_eq/assert_rc above.)
+
+# Stderr is suppressed (`2>/dev/null`) on every uberdev_goal_issue_state_transition
+# call in BT12-BT14: invalid transitions print `goal-state: invalid issue
+# transition <from>-><to>` to stderr by design, and BT14's non-digit inputs
+# (BT14.a/c) similarly traverse the `_uberdev_goal_validate_int` rc=1 path
+# without stderr emission. BT18 captures and asserts the stderr message for
+# one representative rc=2 case; the redirections in BT12-BT14 keep test
+# output clean. Do NOT remove the `2>/dev/null` — it is load-bearing.
+
+# BT12 — all 5 valid transitions return rc=0.
+# Same goal_id across the 5 sub-cases since the function does NOT enforce
+# state continuity between calls (it validates the from->to pair only,
+# not the persisted history); using one TSV lets BT16 verify accumulation
+# below.
+uberdev_goal_issue_state_transition test-bt12 100 input solving       2>/dev/null
+assert_rc "$?" "0" "BT12.a-input-to-solving"
+uberdev_goal_issue_state_transition test-bt12 100 solving pr-pushed   2>/dev/null
+assert_rc "$?" "0" "BT12.b-solving-to-pr-pushed"
+uberdev_goal_issue_state_transition test-bt12 100 pr-pushed resolved  2>/dev/null
+assert_rc "$?" "0" "BT12.c-pr-pushed-to-resolved"
+uberdev_goal_issue_state_transition test-bt12 101 solving failed      2>/dev/null
+assert_rc "$?" "0" "BT12.d-solving-to-failed"
+uberdev_goal_issue_state_transition test-bt12 102 pr-pushed failed    2>/dev/null
+assert_rc "$?" "0" "BT12.e-pr-pushed-to-failed"
+
+# BT13 — invalid transitions return rc=2.
+# Covers the seven shapes the case-block rejects: skip-states, backwards,
+# terminal-exits, nonsense. Stderr-message assertion is on BT18 below
+# (single representative case — the printf is shared across all rc=2 paths).
+uberdev_goal_issue_state_transition test-bt13a 200 input resolved    2>/dev/null
+assert_rc "$?" "2" "BT13.a-skip-input-to-resolved"
+uberdev_goal_issue_state_transition test-bt13b 200 input failed      2>/dev/null
+assert_rc "$?" "2" "BT13.b-input-to-failed-skip-solving"
+uberdev_goal_issue_state_transition test-bt13c 200 solving input     2>/dev/null
+assert_rc "$?" "2" "BT13.c-solving-to-input-backwards"
+uberdev_goal_issue_state_transition test-bt13d 200 solving resolved  2>/dev/null
+assert_rc "$?" "2" "BT13.d-solving-to-resolved-skip-pr-pushed"
+uberdev_goal_issue_state_transition test-bt13e 200 resolved solving  2>/dev/null
+assert_rc "$?" "2" "BT13.e-resolved-terminal-exit-rejected"
+uberdev_goal_issue_state_transition test-bt13f 200 failed solving    2>/dev/null
+assert_rc "$?" "2" "BT13.f-failed-terminal-exit-rejected"
+uberdev_goal_issue_state_transition test-bt13g 200 nonsense more     2>/dev/null
+assert_rc "$?" "2" "BT13.g-nonsense-states-rejected"
+
+# BT14 — issue arg must be a non-empty digit-only string (rc=1, BEFORE the
+# transition check fires — _uberdev_goal_validate_int runs first).
+uberdev_goal_issue_state_transition test-bt14 abc input solving      2>/dev/null
+assert_rc "$?" "1" "BT14.a-non-digit-issue-rejected"
+uberdev_goal_issue_state_transition test-bt14 ""  input solving      2>/dev/null
+assert_rc "$?" "1" "BT14.b-empty-issue-rejected"
+uberdev_goal_issue_state_transition test-bt14 -5  input solving      2>/dev/null
+assert_rc "$?" "1" "BT14.c-negative-issue-rejected"
+
+# BT15 — TSV persistence: valid transitions write a row; invalid ones do not.
+# BT12 wrote 5 rows under goal_id=test-bt12; BT13.* wrote ZERO rows under
+# their respective goal_ids (rc=2 returns BEFORE the TSV append).
+_bt15_tsv="$_b12_tmpdir/goal-test-bt12-issue-states.tsv"
+if [ -f "$_bt15_tsv" ]; then
+  PASS=$((PASS + 1))
+  printf '  PASS  %s\n' "BT15.a-tsv-created-on-valid-transition"
+else
+  FAIL=$((FAIL + 1))
+  printf '  FAIL  %s\n' "BT15.a-tsv-created-on-valid-transition" >&2
+  printf '        expected file: %s\n' "$_bt15_tsv" >&2
+fi
+# Row shape: <issue>\t<to>\t<epoch>. Anchor on issue=100, state=solving
+# (the very first BT12 row), epoch as a 10-digit Unix timestamp. The
+# `{10}` quantifier (not `+`) blocks a regression where someone replaces
+# `$(_uberdev_goal_now_secs)` with a short literal like `0` — that would
+# pass `[0-9]+` but fail `[0-9]{10}` (covers `date +%s` for ~2001–2286).
+# The leading `^` anchors the issue column; trailing `$` anchors the
+# epoch column.
+assert_grep_file "$_bt15_tsv" $'^100\tsolving\t[0-9]{10}$' "BT15.b-row-shape-issue-tab-state-tab-epoch"
+# Invalid transitions wrote NO row: the BT13.a goal_id produces no TSV.
+_bt15c_tsv="$_b12_tmpdir/goal-test-bt13a-issue-states.tsv"
+if [ ! -f "$_bt15c_tsv" ]; then
+  PASS=$((PASS + 1))
+  printf '  PASS  %s\n' "BT15.c-invalid-transition-no-tsv-write"
+else
+  FAIL=$((FAIL + 1))
+  printf '  FAIL  %s\n' "BT15.c-invalid-transition-no-tsv-write" >&2
+  printf '        unexpected file present: %s\n' "$_bt15c_tsv" >&2
+fi
+
+# BT16 — multiple valid transitions accumulate. BT12 wrote 5 lines under
+# goal_id=test-bt12 (input->solving, solving->pr-pushed, pr-pushed->resolved,
+# solving->failed, pr-pushed->failed). The TSV is line-oriented so `wc -l`
+# is authoritative.
+_bt16_lines="$(wc -l < "$_bt15_tsv" 2>/dev/null | tr -d ' ')"
+assert_eq "$_bt16_lines" "5" "BT16.transitions-accumulate-5-rows"
+# Pin per-issue accumulation, not just the aggregate count: BT12 wrote three
+# rows for issue 100 (input->solving->pr-pushed->resolved), one for 101
+# (solving->failed), one for 102 (pr-pushed->failed). Asserting only the total
+# (==5 above) would pass even if rows landed under the wrong issue or a row
+# duplicated/corrupted; per-issue counts catch that. The grep is tab-anchored
+# (`^100\t`) so issue 100 cannot match a hypothetical 1000 row — the issue is
+# the first tab-delimited column (goal-state.sh:244 `%s\t%s\t%s`).
+_bt16_i100="$(grep -cE -e $'^100\t' "$_bt15_tsv" 2>/dev/null | tr -d ' ')"
+_bt16_i101="$(grep -cE -e $'^101\t' "$_bt15_tsv" 2>/dev/null | tr -d ' ')"
+_bt16_i102="$(grep -cE -e $'^102\t' "$_bt15_tsv" 2>/dev/null | tr -d ' ')"
+assert_eq "$_bt16_i100" "3" "BT16.issue-100-three-rows"
+assert_eq "$_bt16_i101" "1" "BT16.issue-101-one-row"
+assert_eq "$_bt16_i102" "1" "BT16.issue-102-one-row"
+
+# BT17 — goal_id isolation: separate goals write to separate TSVs.
+uberdev_goal_issue_state_transition test-bt17-alpha 300 input solving 2>/dev/null
+uberdev_goal_issue_state_transition test-bt17-beta  300 input solving 2>/dev/null
+_bt17_alpha="$_b12_tmpdir/goal-test-bt17-alpha-issue-states.tsv"
+_bt17_beta="$_b12_tmpdir/goal-test-bt17-beta-issue-states.tsv"
+_bt17_alpha_rows="$(wc -l < "$_bt17_alpha" 2>/dev/null | tr -d ' ')"
+_bt17_beta_rows="$(wc -l < "$_bt17_beta" 2>/dev/null | tr -d ' ')"
+if [ -f "$_bt17_alpha" ] && [ -f "$_bt17_beta" ] \
+   && [ "${_bt17_alpha_rows:-0}" -gt 0 ] && [ "${_bt17_beta_rows:-0}" -gt 0 ]; then
+  PASS=$((PASS + 1))
+  printf '  PASS  %s\n' "BT17.distinct-goal-ids-distinct-tsvs"
+else
+  FAIL=$((FAIL + 1))
+  printf '  FAIL  %s\n' "BT17.distinct-goal-ids-distinct-tsvs" >&2
+  printf '        alpha exists=%s rows=%s\n' \
+    "$([ -f "$_bt17_alpha" ] && echo yes || echo no)" "${_bt17_alpha_rows:-0}" >&2
+  printf '        beta exists=%s rows=%s\n' \
+    "$([ -f "$_bt17_beta" ] && echo yes || echo no)" "${_bt17_beta_rows:-0}" >&2
+fi
+
+# BT18 — invalid transition emits the documented stderr message. The
+# function's printf format is `goal-state: invalid issue transition %s->%s\n`;
+# we capture stderr to a tmpfile and grep for the substring.
+_bt18_err="$_b12_tmpdir/bt18-stderr"
+: > "$_bt18_err"  # truncate so any prior content cannot false-positive the grep
+uberdev_goal_issue_state_transition test-bt18 400 input resolved 2>"$_bt18_err" >/dev/null
+assert_grep_file "$_bt18_err" 'invalid issue transition input->resolved' "BT18.stderr-message-on-invalid-transition"
 
 # Cleanup: remove the isolated tmpdir contents (we created the whole
 # directory via mktemp -d, so we can rm -rf safely — it's our own).
