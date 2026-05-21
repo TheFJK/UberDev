@@ -1278,9 +1278,9 @@ assert_rc "$?" "1" "BT35.locate-non-numeric-issue-rc-1"
 # (no solve-bg-stdout-9999.log in $UBERDEV_TMPDIR), so the `[ -n "$pr" ]
 # || return 0` branch fires and the function emits nothing. Confirms the
 # function does NOT halt the goal-pipeline when a solve-bg log is missing.
-# Capture rc separately (mirrors BT25/BT29) — `$(...)` swallows it, and
-# a regression that turned the empty-pr short-circuit into rc=1 would
-# pass the empty-stdout check but fail the rc-zero check.
+# Capture rc separately (mirrors BT25/BT29) — `$(...)` swallows it, so
+# we assert both the empty-stdout invariant AND that the function
+# returned 0 (the missing-log short-circuit must NOT raise an error).
 _bt36_rc=0
 _bt36_out="$(uberdev_goal_locate_review_pr_audit 9999)" || _bt36_rc=$?
 assert_eq "$_bt36_out" "" "BT36.locate-missing-log-empty"
@@ -1292,8 +1292,8 @@ assert_rc "$_bt36_rc" "0" "BT36.locate-missing-log-rc-zero"
 # (string form) because locate_review_pr_audit reads .pr via `jq -r`
 # (NOT `jq --argjson`) and then string-compares against $pr, so either
 # `{"pr": "500"}` or `{"pr": 500}` works identically here. BT43's
-# read_merge_result counterpart MUST use integer form (see comment
-# below) — the asymmetry is intentional and reflects each fn's filter.
+# read_merge_result counterpart MUST use integer form (see BT43) — the
+# asymmetry is intentional and reflects each fn's filter.
 _bt37_dir="$_b12_tmpdir/bt37-cwd"
 mkdir -p "$_bt37_dir/.uberdev/runs/20260521-120000-aaaa1111"
 printf '[solve-bg] pushed PR #500\n' > "$_b12_tmpdir/solve-bg-stdout-37.log"
@@ -1434,8 +1434,8 @@ assert_eq "$_bt47_out" "missing" \
 
 # Cleanup: remove the isolated tmpdir contents (we created the whole
 # directory via mktemp -d, so we can rm -rf safely — it's our own).
-rm -rf "$_b12_tmpdir/goal-test-bt3"* 2>/dev/null || true
-rm -f "$_b12_tmpdir"/goal-bt5-*-merge-attempts.tsv 2>/dev/null || true
+# The single blanket rm subsumes every per-BT artifact (TSVs, audit
+# JSONs, run dirs) because they all live INSIDE $_b12_tmpdir.
 rm -rf "$_b12_tmpdir" 2>/dev/null || true
 
 echo
