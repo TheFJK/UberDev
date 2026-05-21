@@ -62,7 +62,7 @@ echo "PASS P4: finding IDs are deterministic"
 # P5: malformed YAML in scratch dir
 #   aggregate.py wraps each per-agent load in try/except yaml.YAMLError;
 #   a broken file is logged to stderr and the run continues with N-1.
-#   Regression guard for the silent-failure fix in commit 1182dbe.
+#   Regression guard for the silent-failure fix in commit f58c11c.
 # ----------------------------------------------------------------------
 P5="$SCRATCH/p5"
 mkdir -p "$P5/scratch/panicked-grandma" \
