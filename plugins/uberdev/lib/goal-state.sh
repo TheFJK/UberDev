@@ -10,7 +10,6 @@
 #   uberdev_goal_read_trust_signal        AUDIT_JSON_PATH
 #   uberdev_goal_check_fingerprint_repeat GOAL_ID CYCLE FINGERPRINT
 #   uberdev_goal_should_automerge         GOAL_ID PR
-#   uberdev_goal_build_unblock_graph      GOAL_ID
 #   uberdev_goal_audit                    EVENT PAYLOAD_JSON
 #   uberdev_goal_locate_review_pr_audit   ISSUE_NUM
 #   uberdev_goal_extract_pr_num_from_log  STDOUT_LOG_PATH
@@ -271,31 +270,6 @@ uberdev_goal_should_automerge() {
   # Provenance: caller must be inside /goal context (UBERDEV_GOAL_ID env set).
   [ -n "${UBERDEV_GOAL_ID:-}" ] || return 1
   return 0
-}
-
-# uberdev_goal_build_unblock_graph GOAL_ID
-# Emit JSONL of {pr, blocking_issues[]} rows by listing all held PRs and
-# parsing their `Blocks: #` lines via the anchored helper. Defers
-# per-issue status query to _uberdev_goal_check_unblock.
-uberdev_goal_build_unblock_graph() {
-  local goal_id="$1"
-  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
-  local pr_states="$tmpdir/goal-$goal_id-pr-states.tsv"
-  [ -f "$pr_states" ] || return 0
-  # Latest transition wins per PR.
-  awk '{state[$1]=$2} END {for (pr in state) if (state[pr]=="yellow-held" || state[pr]=="red-held") print pr}' "$pr_states" \
-    | while read -r pr; do
-        local body
-        body="$(gh pr view "$pr" --json body --jq '.body' 2>/dev/null | head -c "${_UBERDEV_GOAL_BODY_CAP:-65536}")"
-        local issues=()
-        while IFS= read -r line; do
-          local n; n="$(_uberdev_goal_parse_blocks_line "$line")"
-          [ -n "$n" ] && issues+=("$n")
-        done <<< "$body"
-        local issues_json
-        issues_json="$(printf '%s\n' "${issues[@]:-}" | jq -R . | jq -s .)"
-        printf '{"pr":%s,"blocking_issues":%s}\n' "$pr" "$issues_json"
-      done
 }
 
 # uberdev_goal_locate_review_pr_audit ISSUE_NUM

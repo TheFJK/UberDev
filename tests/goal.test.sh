@@ -232,10 +232,13 @@ assert_grep "$GOAL_LIB" '_UBERDEV_GOAL_BODY_CAP|head -c 65536'           "G18.bo
 
 echo
 echo "== G19: lib/goal-state.sh shape =="
-# Public function names (12)
+# Public function names (11 — uberdev_goal_build_unblock_graph removed
+# in the post-impl-review B5 cleanup; it was dead code, never called from
+# SKILL.md or anywhere else, and the per-PR unblock decision is made
+# in-line by _uberdev_goal_check_unblock without a pre-built graph).
 for fn in uberdev_goal_state_init uberdev_goal_pr_state_transition uberdev_goal_issue_state_transition \
           uberdev_goal_read_trust_signal uberdev_goal_check_fingerprint_repeat uberdev_goal_should_automerge \
-          uberdev_goal_build_unblock_graph uberdev_goal_audit uberdev_goal_locate_review_pr_audit \
+          uberdev_goal_audit uberdev_goal_locate_review_pr_audit \
           uberdev_goal_extract_pr_num_from_log uberdev_goal_list_prs_in_state uberdev_goal_read_merge_result; do
   assert_grep "$GOAL_LIB" "^${fn}\\(\\)" "G19.public.${fn}"
 done
