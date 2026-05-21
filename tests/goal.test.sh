@@ -516,9 +516,10 @@ EOF
 assert_eq "$(uberdev_goal_read_trust_signal "$_bt20_audit_malformed_severity" 2>/dev/null)" "missing" \
   "BT20.malformed-by_severity-emits-missing"
 
-# Cleanup: remove the isolated tmpdir contents (we created the whole
-# directory via mktemp -d, so we can rm -rf safely — it's our own).
-rm -rf "$_b12_tmpdir/goal-test-bt3"* 2>/dev/null || true
+# Cleanup: remove the isolated tmpdir we created via mktemp -d above.
+# The single `rm -rf "$_b12_tmpdir"` subsumes any per-BT artifacts
+# (goal-test-bt3-fingerprints.tsv, audit-*.json, etc.) because they
+# all live INSIDE the tmpdir under the section-local UBERDEV_TMPDIR.
 rm -rf "$_b12_tmpdir" 2>/dev/null || true
 
 echo

@@ -275,8 +275,7 @@ uberdev_goal_read_trust_signal() {
   # blocker/critical/halted vars → fall-through to "green" (the exact
   # YELLOW->GREEN misclassification path issue #137 was filed against).
   local tsv jq_rc
-  tsv="$(printf '%s' "$p25" \
-    | jq -r '[.by_severity.blocker // 0, .by_severity.critical // 0, (.halted // false | tostring)] | @tsv' 2>/dev/null)"
+  tsv="$(jq -r '[.by_severity.blocker // 0, .by_severity.critical // 0, (.halted // false | tostring)] | @tsv' <<<"$p25" 2>/dev/null)"
   jq_rc=$?
   [ "$jq_rc" -eq 0 ] || { printf 'missing\n'; return 0; }
   local blocker critical halted
