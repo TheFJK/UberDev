@@ -373,10 +373,15 @@ _bt5_seed() {
     return 1
   }
 }
-# Sentinel: any non-empty UBERDEV_GOAL_ID value isolates non-provenance cases.
-_bt5_goal_id=bt5-valid
+# Sentinel: a non-empty UBERDEV_GOAL_ID *provenance* value. Supplying it isolates
+# the int-validation / attempts-cap branches (B3a-B7) from the provenance branch
+# (B1/B2), so those refusals/allows are attributable to the predicate under test
+# and never to missing provenance. Named for the env it stands in for, not for a
+# per-case goal_id arg (cases pass their own literals bt5-3a..bt5-7).
+_bt5_provenance_env=bt5-valid
 
-# B1 — provenance: stray /merge outside /goal context must not auto-merge.
+# B1 — provenance branch: with UBERDEV_GOAL_ID unset, a stray /merge fired
+# outside /goal context must not auto-merge.
 # Subshell required because `unset` cannot be expressed via prefix-assignment.
 ( unset UBERDEV_GOAL_ID; uberdev_goal_should_automerge bt5-1 123 )
 assert_rc "$?" "1" "BT5.B1-provenance-unset-refused"
@@ -385,37 +390,39 @@ assert_rc "$?" "1" "BT5.B1-provenance-unset-refused"
 UBERDEV_GOAL_ID="" uberdev_goal_should_automerge bt5-2 123
 assert_rc "$?" "1" "BT5.B2-provenance-empty-refused"
 
-# B3a — non-numeric PR refused.
-UBERDEV_GOAL_ID="$_bt5_goal_id" uberdev_goal_should_automerge bt5-3a abc
+# B3a — non-numeric PR refused. Valid provenance env is set deliberately so the
+# refusal is attributable to int-validation, not to missing provenance (B1/B2).
+UBERDEV_GOAL_ID="$_bt5_provenance_env" uberdev_goal_should_automerge bt5-3a abc
 assert_rc "$?" "1" "BT5.B3a-pr-non-numeric-refused"
 
-# B3b — empty PR refused.
-UBERDEV_GOAL_ID="$_bt5_goal_id" uberdev_goal_should_automerge bt5-3b ""
+# B3b — empty PR refused. Provenance env set on purpose (same rationale as B3a):
+# isolates the int-validation branch so the refusal is not a provenance miss.
+UBERDEV_GOAL_ID="$_bt5_provenance_env" uberdev_goal_should_automerge bt5-3b ""
 assert_rc "$?" "1" "BT5.B3b-pr-empty-refused"
 
 # B4 — boundary: predicate uses strict `-lt`, so attempts == cap must refuse.
 # Regression detector: an accidental `-le` flip would let attempts == cap
 # pass, making this case's expected rc 1 turn into 0 (test goes red).
 if _bt5_seed bt5-4 200 3; then
-  UBERDEV_GOAL_ID="$_bt5_goal_id" uberdev_goal_should_automerge bt5-4 200
+  UBERDEV_GOAL_ID="$_bt5_provenance_env" uberdev_goal_should_automerge bt5-4 200
   assert_rc "$?" "1" "BT5.B4-attempts-at-cap-refused"
 fi
 
 # B5 — pairs with B4: attempts == cap-1 must allow (boundary pinned both sides).
 if _bt5_seed bt5-5 201 2; then
-  UBERDEV_GOAL_ID="$_bt5_goal_id" uberdev_goal_should_automerge bt5-5 201
+  UBERDEV_GOAL_ID="$_bt5_provenance_env" uberdev_goal_should_automerge bt5-5 201
   assert_rc "$?" "0" "BT5.B5-attempts-under-cap-allowed"
 fi
 
 # B6 — no TSV: count defaults to 0; predicate allows.
-UBERDEV_GOAL_ID="$_bt5_goal_id" uberdev_goal_should_automerge bt5-6 202
+UBERDEV_GOAL_ID="$_bt5_provenance_env" uberdev_goal_should_automerge bt5-6 202
 assert_rc "$?" "0" "BT5.B6-no-attempts-file-allowed"
 
 # B7 — env knob: renaming _UBERDEV_GOAL_MAX_MERGE_ATTEMPTS breaks the
 # override; this case then fails visibly (assert_rc expects 0, gets 1)
 # if the var name drifts.
 if _bt5_seed bt5-7 203 3; then
-  _UBERDEV_GOAL_MAX_MERGE_ATTEMPTS=5 UBERDEV_GOAL_ID="$_bt5_goal_id" \
+  _UBERDEV_GOAL_MAX_MERGE_ATTEMPTS=5 UBERDEV_GOAL_ID="$_bt5_provenance_env" \
       uberdev_goal_should_automerge bt5-7 203
   assert_rc "$?" "0" "BT5.B7-env-knob-override-allowed"
 fi
