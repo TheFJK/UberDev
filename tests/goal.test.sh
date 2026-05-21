@@ -1364,6 +1364,154 @@ assert_eq "$_bt32_audit" ".uberdev/runs/20260301-100000-deadbeef/review-pr-verdi
   "BT32.issue-keyed-locator-still-works"
 rm -rf "$_bt32_scratch" 2>/dev/null || true
 
+# BT33 — stale|missing arm of the step 2e poll loop MUST be a no-op: held
+# state unchanged AND the new audit path NOT consumed. Locks the B1 fix
+# from #159 post-impl-review (the previous SKILL.md ordering had an
+# unconditional record_held_audit AFTER the case statement, so a transient
+# undecidable audit overwrote the baseline and the next poll's
+# `[ "$new_audit" = "$last_audit" ] && continue` short-circuited forever).
+#
+# Setup uses a `stale`-shaped new audit (well-formed JSON with .pr present
+# so the by_pr locator selects it, but .phases.phase2_5 absent so
+# read_trust_signal returns `stale`). This is the realistic transient
+# shape — a /review-pr run that wrote the top-level JSON envelope but
+# hadn't yet flushed the phase2_5 sub-tree, or a legacy pre-v0.26.0 audit
+# that predates the trust-signal contract. The case statement folds
+# `stale|missing` into a single arm, so this covers both.
+_bt33_scratch="$(mktemp -d 2>/dev/null || printf '/tmp/bt33-%s' "$$")"
+mkdir -p "$_bt33_scratch"
+uberdev_goal_state_init test-bt33
+UBERDEV_GOAL_ID=test-bt33 uberdev_goal_pr_state_transition test-bt33 802 pushed-reviewing yellow-held >/dev/null 2>&1
+# Baseline: the audit recorded when the PR first entered held state.
+(
+  cd "$_bt33_scratch" || exit 1
+  mkdir -p .uberdev/runs/20260203-120000-cccccccc
+  cat > .uberdev/runs/20260203-120000-cccccccc/review-pr-verdict.json <<'EOF'
+{"pr":802,"phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":1},"halted":false}}}
+EOF
+)
+_bt33_baseline="$(cd "$_bt33_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 802)"
+uberdev_goal_record_held_audit test-bt33 802 "$_bt33_baseline"
+assert_eq "$(uberdev_goal_get_last_held_audit test-bt33 802)" "$_bt33_baseline" \
+  "BT33.baseline-audit-recorded"
+
+# A NEWER audit appears that is locatable (well-formed JSON with .pr field)
+# but undecidable (no phase2_5 sub-tree yet — partial flush / legacy shape).
+# read_trust_signal MUST return `stale` for this payload.
+(
+  cd "$_bt33_scratch" || exit 1
+  mkdir -p .uberdev/runs/20260204-130000-dddddddd
+  cat > .uberdev/runs/20260204-130000-dddddddd/review-pr-verdict.json <<'EOF'
+{"pr":802,"phases":{}}
+EOF
+)
+_bt33_new_audit="$(cd "$_bt33_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 802)"
+assert_eq "$_bt33_new_audit" \
+  ".uberdev/runs/20260204-130000-dddddddd/review-pr-verdict.json" \
+  "BT33.new-audit-locatable"
+_bt33_signal="$(cd "$_bt33_scratch" && uberdev_goal_read_trust_signal "$_bt33_new_audit" 2>/dev/null)"
+assert_eq "$_bt33_signal" "stale" "BT33.undecidable-audit-emits-stale"
+
+# Simulate the step 2e logic: new_audit != last_audit (so the early
+# `continue` guard does not fire), signal is `missing`, so the case
+# falls into the stale|missing arm — which MUST NOT record the audit
+# and MUST NOT transition state.
+_bt33_last_seen_before="$(uberdev_goal_get_last_held_audit test-bt33 802)"
+_bt33_state_before="$(uberdev_goal_get_pr_state test-bt33 802)"
+case "$_bt33_signal" in
+  green|yellow|red)
+    # Would record + transition — BT33 must not reach this arm.
+    uberdev_goal_record_held_audit test-bt33 802 "$_bt33_new_audit"
+    ;;
+  stale|missing)
+    : # no-op (the fix from B1)
+    ;;
+esac
+assert_eq "$(uberdev_goal_get_pr_state test-bt33 802)" "$_bt33_state_before" \
+  "BT33.held-state-unchanged-on-missing"
+assert_eq "$(uberdev_goal_get_last_held_audit test-bt33 802)" "$_bt33_last_seen_before" \
+  "BT33.last-held-audit-preserved-on-missing"
+assert_eq "$(uberdev_goal_get_last_held_audit test-bt33 802)" "$_bt33_baseline" \
+  "BT33.baseline-still-points-at-original-audit"
+rm -rf "$_bt33_scratch" 2>/dev/null || true
+
+# BT34 — same-severity re-review MUST be a no-op: held state unchanged AND
+# no goal_pr_transition event appended to the goal jsonl for this PR. Locks
+# the `if [ "$held_current" = ... ]` guards inside the yellow and red arms
+# of step 2e (a future refactor that drops those guards would silently
+# apply a duplicate yellow-held→yellow-held transition).
+_bt34_scratch="$(mktemp -d 2>/dev/null || printf '/tmp/bt34-%s' "$$")"
+mkdir -p "$_bt34_scratch"
+uberdev_goal_state_init test-bt34
+UBERDEV_GOAL_ID=test-bt34 uberdev_goal_pr_state_transition test-bt34 803 pushed-reviewing yellow-held >/dev/null 2>&1
+# Baseline: the audit that put PR 803 into yellow-held.
+(
+  cd "$_bt34_scratch" || exit 1
+  mkdir -p .uberdev/runs/20260205-140000-eeeeeeee
+  cat > .uberdev/runs/20260205-140000-eeeeeeee/review-pr-verdict.json <<'EOF'
+{"pr":803,"phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":1},"halted":false}}}
+EOF
+)
+_bt34_baseline="$(cd "$_bt34_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 803)"
+uberdev_goal_record_held_audit test-bt34 803 "$_bt34_baseline"
+
+# Snapshot the goal jsonl line count BEFORE the same-severity poll so we
+# can assert NO new goal_pr_transition was appended for PR 803.
+_bt34_jsonl="$UBERDEV_TMPDIR/goal-test-bt34.jsonl"
+_bt34_transitions_before=$(grep -c '"event":"goal_pr_transition".*"pr":803' "$_bt34_jsonl" 2>/dev/null || printf '0')
+
+# A NEWER audit appears, signal STILL yellow (same severity as held).
+(
+  cd "$_bt34_scratch" || exit 1
+  mkdir -p .uberdev/runs/20260206-150000-ffffffff
+  cat > .uberdev/runs/20260206-150000-ffffffff/review-pr-verdict.json <<'EOF'
+{"pr":803,"phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":2},"halted":false}}}
+EOF
+)
+_bt34_new_audit="$(cd "$_bt34_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 803)"
+_bt34_signal="$(cd "$_bt34_scratch" && uberdev_goal_read_trust_signal "$_bt34_new_audit")"
+assert_eq "$_bt34_signal" "yellow" "BT34.new-audit-still-yellow"
+
+# Simulate the step 2e logic: signal is yellow, held_current is yellow-held,
+# so the `if [ "$held_current" = "red-held" ]` guard inside the yellow arm
+# is FALSE → no transition. The record_held_audit IS called (the audit was
+# readable + decided) — that's the same-audit-skips-next-poll lock from BT28.
+_bt34_held_current="$(uberdev_goal_get_pr_state test-bt34 803)"
+case "$_bt34_signal" in
+  green)
+    UBERDEV_GOAL_ID=test-bt34 uberdev_goal_pr_state_transition test-bt34 803 "$_bt34_held_current" green >/dev/null 2>&1
+    uberdev_goal_record_held_audit test-bt34 803 "$_bt34_new_audit"
+    ;;
+  yellow)
+    if [ "$_bt34_held_current" = "red-held" ]; then
+      UBERDEV_GOAL_ID=test-bt34 uberdev_goal_pr_state_transition test-bt34 803 red-held yellow-held >/dev/null 2>&1
+    fi
+    uberdev_goal_record_held_audit test-bt34 803 "$_bt34_new_audit"
+    ;;
+  red)
+    if [ "$_bt34_held_current" = "yellow-held" ]; then
+      UBERDEV_GOAL_ID=test-bt34 uberdev_goal_pr_state_transition test-bt34 803 yellow-held red-held >/dev/null 2>&1
+    fi
+    uberdev_goal_record_held_audit test-bt34 803 "$_bt34_new_audit"
+    ;;
+esac
+
+assert_eq "$(uberdev_goal_get_pr_state test-bt34 803)" "yellow-held" \
+  "BT34.held-state-unchanged-on-same-severity"
+_bt34_transitions_after=$(grep -c '"event":"goal_pr_transition".*"pr":803' "$_bt34_jsonl" 2>/dev/null || printf '0')
+# Initial pushed-reviewing→yellow-held transition counts as 1; the same-
+# severity poll must NOT emit a second one.
+if [ "$_bt34_transitions_after" = "$_bt34_transitions_before" ]; then
+  PASS=$((PASS + 1))
+  printf '  PASS  %s\n' "BT34.no-transition-event-on-same-severity"
+else
+  FAIL=$((FAIL + 1))
+  printf '  FAIL  %s\n' "BT34.no-transition-event-on-same-severity" >&2
+  printf '        transitions before: %s\n' "$_bt34_transitions_before" >&2
+  printf '        transitions after:  %s\n' "$_bt34_transitions_after" >&2
+fi
+rm -rf "$_bt34_scratch" 2>/dev/null || true
+
 # Cleanup: remove the isolated tmpdir contents (we created the whole
 # directory via mktemp -d, so we can rm -rf safely — it's our own).
 rm -rf "$_b12_tmpdir/goal-test-bt3"* 2>/dev/null || true
@@ -1373,6 +1521,8 @@ rm -rf "$_b12_tmpdir/goal-test-bt28"* 2>/dev/null || true
 rm -rf "$_b12_tmpdir/goal-test-bt29"* 2>/dev/null || true
 rm -rf "$_b12_tmpdir/goal-test-bt30"* 2>/dev/null || true
 rm -rf "$_b12_tmpdir/goal-test-bt31"* 2>/dev/null || true
+rm -rf "$_b12_tmpdir/goal-test-bt33"* 2>/dev/null || true
+rm -rf "$_b12_tmpdir/goal-test-bt34"* 2>/dev/null || true
 rm -f "$_b12_tmpdir"/goal-bt5-*-merge-attempts.tsv 2>/dev/null || true
 rm -rf "$_b12_tmpdir" 2>/dev/null || true
 

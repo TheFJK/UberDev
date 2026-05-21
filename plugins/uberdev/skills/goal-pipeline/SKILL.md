@@ -195,7 +195,7 @@ done
 **Concurrency model.** Phase 2 runs as a **single-threaded watcher** per iteration: each `sleep $_UBERDEV_GOAL_POLL_SECS` cycle walks the active-issues list once (step 2a), the green-PR list once (step 2b), and the merging-PR list once (step 2c) in deterministic order — a serial poll of every PR, never a fan-out. There is **no per-PR poll parallelism in v1** — the audit timeline (`goal_pr_transition` events in `goal-<id>.jsonl`) must remain a serial, replay-deterministic sequence for post-mortems and for the fingerprint-repeat detector in Phase 3. Per-PR poll parallelism is deferred to a future RFC (it would require an event-bus partition by PR number and a multi-writer audit framing that preserves a total order; neither lands in v1).
 
 ```bash
-# watch_start is set in Phase 0 (step 7a) — goal-level wall-clock anchor.
+# watch_start is set in Phase 0 (step 7) — goal-level wall-clock anchor.
 # The 4h stuck-loop check below measures total goal wall-clock, not per-cycle.
 # Q1 — bash supports ONE EXIT trap per shell; register the combined cleanup
 # for $gh_err + $findings_err here (Phase 3 mktemps $findings_err later).
@@ -359,30 +359,37 @@ while true; do
 
     held_signal="$(uberdev_goal_read_trust_signal "$new_audit")"
     held_current="$(uberdev_goal_get_pr_state "$GOAL_ID" "$held_pr")"
+    # Record the audit ONLY when the signal is readable and produced a
+    # decision (green/yellow/red). On stale|missing the audit is transiently
+    # unreadable — recording it here would mark it "consumed" so the next
+    # poll's `[ "$new_audit" = "$last_audit" ] && continue` guard would
+    # short-circuit forever, defeating the explicit defer-to-next-poll
+    # contract on the stale|missing arm (#159 post-impl-review B1).
     case "$held_signal" in
       green)
         uberdev_goal_pr_state_transition "$GOAL_ID" "$held_pr" "$held_current" green
+        uberdev_goal_record_held_audit "$GOAL_ID" "$held_pr" "$new_audit"
         ;;
       yellow)
         if [ "$held_current" = "red-held" ]; then
           uberdev_goal_pr_state_transition "$GOAL_ID" "$held_pr" red-held yellow-held
         fi
+        uberdev_goal_record_held_audit "$GOAL_ID" "$held_pr" "$new_audit"
         ;;
       red)
         if [ "$held_current" = "yellow-held" ]; then
           uberdev_goal_pr_state_transition "$GOAL_ID" "$held_pr" yellow-held red-held
         fi
+        uberdev_goal_record_held_audit "$GOAL_ID" "$held_pr" "$new_audit"
         ;;
       stale|missing)
         # Re-review audit not yet readable (mid-write, or jq parse failed).
         # Do NOT re-dispatch a fresh /review-pr here — the unblock rule
         # already dispatched one; another dispatch would race against it.
-        # Defer to the next poll cycle.
+        # Defer to the next poll cycle — explicit no-op, no record call
+        # (see comment above the case statement).
         ;;
     esac
-    # Record the audit we just consumed so the next poll skips it (unless a
-    # newer re-review fires, in which case `new_audit` will differ again).
-    uberdev_goal_record_held_audit "$GOAL_ID" "$held_pr" "$new_audit"
   done
 
   # 2d. Termination check (intra-cycle)
@@ -513,8 +520,8 @@ if [ "${#new_candidates[@]}" = "0" ] && [ "$terminal_count" = "$all_pr_count" ];
 fi
 
 # Deterministic queue-empty-not-converged halt (#160). Without this, a PR
-# stuck in pushed-reviewing/green/merging with nothing left to file as a
-# finding would spin the Phase1→2→3 loop until stuck_loop fires (4h).
+# stuck in dispatched/pushed-reviewing/green/merging with nothing left to
+# file as a finding would spin the Phase1→2→3 loop until stuck_loop fires (4h).
 # Surface the stuck state immediately so the operator can act.
 if [ "${#new_candidates[@]}" = "0" ] && [ "$terminal_count" != "$all_pr_count" ]; then
   uberdev_goal_audit goal_circuit_breaker \
