@@ -369,44 +369,47 @@ _bt5_seed() {
     return 1
   }
 }
+# Sentinel: any non-empty UBERDEV_GOAL_ID value isolates non-provenance cases.
+_bt5_goal_id=bt5-valid
 
 # B1 — provenance: stray /merge outside /goal context must not auto-merge.
+# Subshell required because `unset` cannot be expressed via prefix-assignment.
 ( unset UBERDEV_GOAL_ID; uberdev_goal_should_automerge bt5-1 123 )
 assert_rc "$?" "1" "BT5.B1-provenance-unset-refused"
 
 # B2 — exported-but-empty UBERDEV_GOAL_ID treated identically to unset.
-( UBERDEV_GOAL_ID=""; uberdev_goal_should_automerge bt5-2 123 )
+UBERDEV_GOAL_ID="" uberdev_goal_should_automerge bt5-2 123
 assert_rc "$?" "1" "BT5.B2-provenance-empty-refused"
 
 # B3a — non-numeric PR refused.
-UBERDEV_GOAL_ID=bt5-valid uberdev_goal_should_automerge bt5-3a abc
+UBERDEV_GOAL_ID="$_bt5_goal_id" uberdev_goal_should_automerge bt5-3a abc
 assert_rc "$?" "1" "BT5.B3a-pr-non-numeric-refused"
 
 # B3b — empty PR refused.
-UBERDEV_GOAL_ID=bt5-valid uberdev_goal_should_automerge bt5-3b ""
+UBERDEV_GOAL_ID="$_bt5_goal_id" uberdev_goal_should_automerge bt5-3b ""
 assert_rc "$?" "1" "BT5.B3b-pr-empty-refused"
 
 # B4 — boundary: predicate uses strict `-lt`, so attempts == cap must refuse.
 # Regression detector for an accidental `-le` flip.
 if _bt5_seed bt5-4 200 3; then
-  UBERDEV_GOAL_ID=bt5-valid uberdev_goal_should_automerge bt5-4 200
+  UBERDEV_GOAL_ID="$_bt5_goal_id" uberdev_goal_should_automerge bt5-4 200
   assert_rc "$?" "1" "BT5.B4-attempts-at-cap-refused"
 fi
 
 # B5 — pairs with B4: attempts == cap-1 must allow (boundary pinned both sides).
 if _bt5_seed bt5-5 201 2; then
-  UBERDEV_GOAL_ID=bt5-valid uberdev_goal_should_automerge bt5-5 201
+  UBERDEV_GOAL_ID="$_bt5_goal_id" uberdev_goal_should_automerge bt5-5 201
   assert_rc "$?" "0" "BT5.B5-attempts-under-cap-allowed"
 fi
 
 # B6 — no TSV: count defaults to 0; predicate allows.
-UBERDEV_GOAL_ID=bt5-valid uberdev_goal_should_automerge bt5-6 202
+UBERDEV_GOAL_ID="$_bt5_goal_id" uberdev_goal_should_automerge bt5-6 202
 assert_rc "$?" "0" "BT5.B6-no-attempts-file-allowed"
 
 # B7 — env knob: renaming _UBERDEV_GOAL_MAX_MERGE_ATTEMPTS silently breaks
 # the override; this case fails if the var name drifts.
 if _bt5_seed bt5-7 203 3; then
-  _UBERDEV_GOAL_MAX_MERGE_ATTEMPTS=5 UBERDEV_GOAL_ID=bt5-valid \
+  _UBERDEV_GOAL_MAX_MERGE_ATTEMPTS=5 UBERDEV_GOAL_ID="$_bt5_goal_id" \
       uberdev_goal_should_automerge bt5-7 203
   assert_rc "$?" "0" "BT5.B7-env-knob-override-allowed"
 fi
@@ -414,7 +417,6 @@ fi
 # Cleanup: remove the isolated tmpdir contents (we created the whole
 # directory via mktemp -d, so we can rm -rf safely — it's our own).
 rm -rf "$_b12_tmpdir/goal-test-bt3"* 2>/dev/null || true
-rm -rf "$_b12_tmpdir/goal-bt5-"* 2>/dev/null || true
 rm -rf "$_b12_tmpdir" 2>/dev/null || true
 
 echo
