@@ -46,6 +46,8 @@ breaches = []
 for host, events in by_host.items():
     events.sort(key=lambda x: x[0])
     max_in_window = 0
+    breach_start = 0
+    breach_end = 0
     window_start = 0
     for i, (ts, _, _) in enumerate(events):
         # Advance window_start while events[window_start] < ts - 1000
@@ -54,12 +56,15 @@ for host, events in by_host.items():
         count = i - window_start + 1
         if count > max_in_window:
             max_in_window = count
+            breach_start = window_start
+            breach_end = i
     if max_in_window > cap:
-        # Find the persona breakdown in the offending window
-        offenders = [e[1] for e in events[-max_in_window:]]
-        breaches.append((host, max_in_window, offenders))
-# Synthesise critical findings for each breach
-for host, observed, offenders in breaches:
+        # Slice the actual breach window — events[-max_in_window:] is wrong
+        # when the breach is not at the tail of the events list.
+        window_events = events[breach_start:breach_end + 1]
+        offenders = [e[1] for e in window_events]
+        breaches.append((host, max_in_window, offenders, window_events))
+for host, observed, offenders, window_events in breaches:
     fid_seed = f"polite_rate_cap::{host}::{observed}"
     fid = hashlib.sha256(fid_seed.encode()).hexdigest()[:16]
     findings.append({
@@ -76,7 +81,7 @@ for host, observed, offenders in breaches:
         ),
         "evidence": {
             "repro_steps": [
-                f"{e[0]} ms: {e[1]} -> {e[2]}" for e in events[-observed:]
+                f"{e[0]} ms: {e[1]} -> {e[2]}" for e in window_events
             ],
             "observed": f"{observed} req/s for host {host}",
             "expected": f"≤ {cap} req/s per host",

@@ -247,22 +247,25 @@ EOF
   # network_request evidence anchor.
   # ============================================================================
 
-  # After all Task() returns, aggregate to wave-N.yaml:
-  python3 plugins/uberdev/skills/testers-pipeline/aggregate.py \
+  # aggregate.py runs the polite-rate audit internally and exits 1 on breach,
+  # 0 on clean, 2 on error. Capture the exit code and set POLITE_BREACH for
+  # Phase 6 fail-the-run. (Single audit invocation: aggregate.py is the source
+  # of truth; the audit script only runs from there.)
+  if python3 plugins/uberdev/skills/testers-pipeline/aggregate.py \
     --run-id "$RUN_ID" \
     --wave "$WAVE" \
     --scratch-dir "$RUN_DIR/scratch" \
     --invariants plugins/uberdev/skills/testers-pipeline/invariants.yaml \
-    --out "$WAVE_FILE"
-
-  # Polite-rate audit: rewrites wave-N.yaml in place with polite_rate_cap
-  # findings appended if any persona's per-host rolling 1-second RPS
-  # exceeded $RPS_CAP. Sets POLITE_BREACH=1 on breach for Phase 6.
-  . "${CLAUDE_PLUGIN_ROOT}/lib/rate-cap-audit.sh"
-  if ! uberdev_rate_cap_audit "$WAVE_FILE" "$RPS_CAP" "$WAVE_FILE.audited"; then
-    POLITE_BREACH=1
+    --rps-cap "$RPS_CAP" \
+    --out "$WAVE_FILE"; then
+    :
+  else
+    rc=$?
+    case "$rc" in
+      1) POLITE_BREACH=1 ;;
+      *) echo "[testers] aggregate.py failed (exit $rc); aborting wave $WAVE" >&2; exit "$rc" ;;
+    esac
   fi
-  mv "$WAVE_FILE.audited" "$WAVE_FILE"
 
   PREV_FINDINGS="$WAVE_FILE"
   echo "[testers] wave $WAVE complete: $(_wave_count "$WAVE_FILE" findings) findings"
