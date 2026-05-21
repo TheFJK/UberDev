@@ -75,7 +75,7 @@ Notes on the enums:
 3. **Read `--max-cycles` via the config-read range helper.** Resolves `--max-cycles=N` CLI flag → `UBERDEV_GOAL_MAX_CYCLES` env → `goal.max_cycles` config key → default `_UBERDEV_GOAL_DEFAULT_MAX_CYCLES`; range `[1, 20]`:
 
    ```bash
-   . "$_UBERDEV_PLUGIN_LIB/config-read.sh"
+   [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ] && . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
    MAX_CYCLES="$(UBERDEV_GOAL_MAX_CYCLES="${max_cycles_cli:-${UBERDEV_GOAL_MAX_CYCLES:-}}" \
      uberdev_read_int_in_range goal.max_cycles UBERDEV_GOAL_MAX_CYCLES 1 20 "$_UBERDEV_GOAL_DEFAULT_MAX_CYCLES")"
    ```
@@ -83,7 +83,7 @@ Notes on the enums:
 4. **Source `lib/dispatch.sh`; call `uberdev_dispatch_preflight`** → sets `UBERDEV_RESOLVED_BACKEND` once for the whole run (D15). The resolved backend is forwarded to every `/turbo`, `/merge`, and `/review-pr` child dispatch in this run; it is NEVER re-resolved per cycle.
 
    ```bash
-   . "$_UBERDEV_PLUGIN_LIB/dispatch.sh"
+   [ -r "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh" ] && . "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh"
    uberdev_dispatch_preflight "${backend_cli:-auto}"
    # UBERDEV_RESOLVED_BACKEND is now exported.
    ```
@@ -98,7 +98,7 @@ Notes on the enums:
 6. **Source `lib/goal-state.sh`; call `uberdev_goal_state_init "$GOAL_ID"`.** This truncate-creates the per-goal state files (`goal-<id>.jsonl`, `goal-<id>-pr-states.tsv`, `goal-<id>-issue-states.tsv`, `goal-<id>-fingerprints.tsv`, `goal-<id>-merge-attempts.tsv`) under `$UBERDEV_TMPDIR` and refuses unsafe path characters (T4):
 
    ```bash
-   . "$_UBERDEV_PLUGIN_LIB/goal-state.sh"
+   [ -r "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh" ] && . "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh"
    uberdev_goal_state_init "$GOAL_ID" || exit 1
    ```
 
@@ -108,6 +108,13 @@ Notes on the enums:
    issues_json="$(printf '%s\n' "${queue[@]}" | jq -R . | jq -sc .)"
    uberdev_goal_audit goal_dispatched \
      "{\"goal_id\":\"$GOAL_ID\",\"cycle\":0,\"issues\":$issues_json,\"dry_run\":$dry_run,\"backend\":\"$UBERDEV_RESOLVED_BACKEND\"}"
+   ```
+
+7a. **Initialize cycle counter + goal-level wall-clock anchor.** `cycle` is the per-cycle counter referenced by Phase 2/3/4 (audit payloads, MAX_CYCLES check, fingerprint repeat detector). `watch_start` is the **goal-level** wall-clock anchor — it must persist across cycle iterations so the 4h stuck-loop circuit breaker (`_UBERDEV_GOAL_STUCK_SECS`) measures total goal wall-clock, not per-cycle wall-clock (RFC §3.3 intent: the 4h cap is the goal-level safety net).
+
+   ```bash
+   cycle=1
+   watch_start="$(date +%s)"
    ```
 
 8. **If `--dry-run`: print planned cycle-1 dispatch list + watch-loop outline, exit 0** (D16). The dry-run path is the audit/preview surface — no `gh` calls, no agent spawns, no merges. Emit the resolved `MAX_CYCLES`, the resolved `UBERDEV_RESOLVED_BACKEND`, the issue queue, and the planned audit events ("would emit goal_dispatched", "would dispatch /turbo for issues …", "would poll solve-bg-stdout-N.log per issue"), then exit 0 cleanly.
@@ -168,6 +175,7 @@ for ISSUE_NUM in "${queue[@]}"; do
     fi
     # Any other dispatch failure is a hard error — fail loud, never silent.
     printf 'goal: dispatch failed for issue %s (rc=%s)\n' "$ISSUE_NUM" "$rc" >&2
+    print_summary "$cycle"
     exit 1
   fi
 done
@@ -178,15 +186,17 @@ done
 **Concurrency model.** Phase 2 runs as a **single-threaded watcher** per iteration: each `sleep $_UBERDEV_GOAL_POLL_SECS` cycle walks the active-issues list once (step 2a), the green-PR list once (step 2b), and the merging-PR list once (step 2c) in deterministic order — a serial poll of every PR, never a fan-out. There is **no per-PR poll parallelism in v1** — the audit timeline (`goal_pr_transition` events in `goal-<id>.jsonl`) must remain a serial, replay-deterministic sequence for post-mortems and for the fingerprint-repeat detector in Phase 3. Per-PR poll parallelism is deferred to a future RFC (it would require an event-bus partition by PR number and a multi-writer audit framing that preserves a total order; neither lands in v1).
 
 ```bash
-watch_start="$(date +%s)"
+# watch_start is set in Phase 0 (step 7a) — goal-level wall-clock anchor.
+# The 4h stuck-loop check below measures total goal wall-clock, not per-cycle.
 gh_err="$(mktemp)"
-trap 'rm -f "$gh_err"' RETURN
+trap 'rm -f "$gh_err"' EXIT
 
 while true; do
   now="$(date +%s)"
   if (( now - watch_start >= _UBERDEV_GOAL_STUCK_SECS )); then
     uberdev_goal_audit goal_circuit_breaker \
       "{\"reason\":\"stuck_loop\",\"watch_secs\":$((now-watch_start))}"
+    print_summary "$cycle"
     exit 1
   fi
 
@@ -242,6 +252,7 @@ while true; do
       conflict|hook_failed)
         uberdev_goal_audit goal_circuit_breaker \
           "{\"reason\":\"merge_failed\",\"pr\":$pr,\"result\":\"$result\"}"
+        print_summary "$cycle"
         exit 1
         ;;
     esac
@@ -270,10 +281,12 @@ After Phase 2 drains (no active agents, no merging PRs), enumerate the new BLOCK
 goal_start_iso="$(date -u -r "$watch_start" +%FT%TZ 2>/dev/null \
   || date -u -d "@$watch_start" +%FT%TZ)"
 
-# In-process gh query — mirror discover.sh:152-183 mktemp/RETURN-trap stderr
+# In-process gh query — mirror discover.sh:152-183 mktemp/EXIT-trap stderr
 # isolation pattern (no shell-piped --template, never an external jq pipe).
+# Top-level `trap … RETURN` would never fire (RETURN fires inside functions);
+# EXIT is the correct script-level cleanup hook.
 findings_err="$(mktemp)"
-trap 'rm -f "$findings_err"' RETURN
+trap 'rm -f "$findings_err"' EXIT
 
 # Build the optional --only-mine filter via env-injected GH_USER (gh resolves
 # .author.login via env passthrough; --jq receives `env.GH_USER` literal).
@@ -306,6 +319,7 @@ for issue in "${new_candidates[@]}"; do
     # finding again. Halt non-convergence: re-running won't make it go away.
     uberdev_goal_audit goal_circuit_breaker \
       "{\"reason\":\"nonconvergence\",\"issue\":$issue,\"fingerprint\":\"$fp\"}"
+    print_summary "$cycle"
     exit 1
   fi
 done
@@ -323,6 +337,7 @@ done
 if [ "$cycle" -ge "$MAX_CYCLES" ] && [ "${#new_candidates[@]}" -gt 0 ]; then
   uberdev_goal_audit goal_circuit_breaker \
     "{\"reason\":\"max_cycles\",\"cycle\":$cycle,\"max\":$MAX_CYCLES,\"queued\":${#new_candidates[@]}}"
+  print_summary "$cycle"
   exit 1
 fi
 
@@ -334,6 +349,7 @@ terminal_count="$(printf '%s\n' "$terminal_prs" | grep -c . || true)"
 if [ "${#new_candidates[@]}" = "0" ] && [ "$terminal_count" = "$all_pr_count" ]; then
   uberdev_goal_audit goal_converged \
     "{\"cycle\":$cycle,\"prs\":$all_pr_count}"
+  print_summary "$cycle"
   exit 0
 fi
 
