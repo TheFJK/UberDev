@@ -64,6 +64,8 @@ uberdev_rate_limit_curl() {
     NOW_MS="$(python3 -c 'import time; print(int(time.time()*1000))')"
   fi
   LAST_MS="$(cat "$STATE" 2>/dev/null || echo 0)"
+  # Defensive: corruption in state file -> re-pace from zero rather than crash on arithmetic.
+  [[ "$LAST_MS" =~ ^[0-9]+$ ]] || LAST_MS=0
   DELAY_MS=$(( (1000 / RPS_CAP) - (NOW_MS - LAST_MS) ))
   if [ "$DELAY_MS" -gt 0 ]; then
     DELAY_S="$(awk -v ms="$DELAY_MS" 'BEGIN{ printf "%.3f", ms/1000 }')"

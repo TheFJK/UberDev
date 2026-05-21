@@ -32,7 +32,8 @@ for f in findings:
         else:
             from datetime import datetime
             ts_ms = int(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000)
-    except Exception:
+    except Exception as e:
+        print(f"warning: rate-cap-audit skipping finding {f.get('id', '?')!r} with unparseable timestamp {ts!r}: {e}", file=sys.stderr)
         continue
     import re
     m = re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://([^/?#]+)", url)
