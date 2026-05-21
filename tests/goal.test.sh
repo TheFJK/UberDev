@@ -346,7 +346,7 @@ assert_rc "$?" "1" "BT3.fingerprint-repeat-detected"
 # so the function MUST take the [-lt 1] short-circuit branch, persist the
 # fingerprint at cycle 1, and return 0 (NOT 1) — otherwise a fresh /goal
 # run would falsely halt with reason=nonconvergence on its very first
-# candidate. Issue #139 risk 1; function lines 282-284.
+# candidate. Issue #139 risk 1; function line 284 (cycle-1 short-circuit).
 uberdev_goal_state_init test-bt3a
 UBERDEV_GOAL_ID=test-bt3a uberdev_goal_check_fingerprint_repeat test-bt3a 1 deadbeefdeadbeef
 assert_rc "$?" "0" "BT3a.cycle-1-no-repeat-returns-zero"
@@ -410,6 +410,28 @@ else
   printf '  FAIL  %s\n' "BT3c.cycle-2-both-entries-present" >&2
   printf '        TSV contents:\n' >&2
   sed 's/^/          /' "$_bt3c_tsv" >&2
+fi
+
+# BT3d — invalid cycle: passing a non-integer cycle (e.g. "abc") MUST take
+# the _uberdev_goal_validate_int "$cycle" || return 2 short-circuit and
+# return rc=2 with NO TSV side-effects. Locks the function's input
+# validation contract; an edit that weakens _uberdev_goal_validate_int
+# (e.g. accepts non-numeric strings) would otherwise allow a corrupt
+# cycle field into the TSV. Issue #139 risk 1b (pre-existing untested
+# branch surfaced during review); function line 281.
+uberdev_goal_state_init test-bt3d
+UBERDEV_GOAL_ID=test-bt3d uberdev_goal_check_fingerprint_repeat test-bt3d abc deadbeefdeadbeef 2>/dev/null
+assert_rc "$?" "2" "BT3d.invalid-cycle-returns-two"
+# rc=2 must short-circuit before any TSV write; the file was truncated by
+# state_init and must remain empty.
+if [ ! -s "$UBERDEV_TMPDIR/goal-test-bt3d-fingerprints.tsv" ]; then
+  PASS=$((PASS + 1))
+  printf '  PASS  %s\n' "BT3d.invalid-cycle-no-tsv-write"
+else
+  FAIL=$((FAIL + 1))
+  printf '  FAIL  %s\n' "BT3d.invalid-cycle-no-tsv-write" >&2
+  printf '        TSV non-empty after invalid-cycle call: %s\n' \
+    "$(cat "$UBERDEV_TMPDIR/goal-test-bt3d-fingerprints.tsv" 2>/dev/null)" >&2
 fi
 
 # BT4 — gh_jq_or_jq with non-existent file -> returns non-zero (file
