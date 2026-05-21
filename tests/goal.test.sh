@@ -245,11 +245,14 @@ for fn in uberdev_goal_state_init uberdev_goal_pr_state_transition uberdev_goal_
           uberdev_goal_extract_pr_num_from_log uberdev_goal_list_prs_in_state uberdev_goal_read_merge_result; do
   assert_grep "$GOAL_LIB" "^${fn}\\(\\)" "G19.public.${fn}"
 done
-# Internal function names (10 underscore-prefixed helpers — the prior
+# Internal function names (11 underscore-prefixed helpers — the prior
 # `_persist_fp` short-alias forwarder was dropped post-impl-review S4 in
-# favor of calling the canonical `_uberdev_goal_persist_fp` directly).
+# favor of calling the canonical `_uberdev_goal_persist_fp` directly;
+# `_uberdev_goal_count_review_pr_attempts` added by the B3 bound on
+# Phase 2a's stale|missing re-dispatch loop, mirrors merge-attempts).
 for fn in _uberdev_goal_validate_int _uberdev_goal_extract_fingerprint _uberdev_goal_parse_blocks_line \
-          _uberdev_goal_count_merge_attempts _uberdev_goal_pr_state_machine_valid _uberdev_goal_now_secs \
+          _uberdev_goal_count_merge_attempts _uberdev_goal_count_review_pr_attempts \
+          _uberdev_goal_pr_state_machine_valid _uberdev_goal_now_secs \
           _uberdev_goal_persist_fp _uberdev_goal_dispatch_review_pr _uberdev_goal_dispatch_merge \
           _uberdev_goal_check_unblock; do
   assert_grep "$GOAL_LIB" "^${fn}\\(\\)" "G19.internal.${fn}"

@@ -97,7 +97,7 @@ Notes on the enums:
    export UBERDEV_GOAL_ID="$GOAL_ID"
    ```
 
-6. **Source `lib/goal-state.sh`; call `uberdev_goal_state_init "$GOAL_ID"`.** This truncate-creates the per-goal state files (`goal-<id>.jsonl`, `goal-<id>-pr-states.tsv`, `goal-<id>-issue-states.tsv`, `goal-<id>-fingerprints.tsv`, `goal-<id>-merge-attempts.tsv`) under `$UBERDEV_TMPDIR` and refuses unsafe path characters (T4):
+6. **Source `lib/goal-state.sh`; call `uberdev_goal_state_init "$GOAL_ID"`.** This truncate-creates the per-goal state files (`goal-<id>.jsonl`, `goal-<id>-pr-states.tsv`, `goal-<id>-issue-states.tsv`, `goal-<id>-fingerprints.tsv`, `goal-<id>-merge-attempts.tsv`, `goal-<id>-review-pr-attempts.tsv`, `goal-<id>-held-audits.tsv`) under `$UBERDEV_TMPDIR` and refuses unsafe path characters (T4):
 
    ```bash
    [ -r "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh" ] && . "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh"
@@ -278,7 +278,15 @@ while true; do
           fi
           ;;
         stale|missing)
-          # D17: never assume GREEN on missing phase2_5 — re-dispatch /review-pr
+          # D17: never assume GREEN on missing phase2_5 — re-dispatch /review-pr.
+          # B3 bound — _uberdev_goal_dispatch_review_pr enforces a per-PR cap
+          # at ${_UBERDEV_GOAL_MAX_REVIEW_PR_ATTEMPTS:-3} dispatches across the
+          # entire goal run (TSV at goal-<id>-review-pr-attempts.tsv mirrors
+          # the merge-attempts pattern). The cap returns rc=0 with a stderr
+          # warning when exceeded — the watch loop's 60s cadence cannot fire
+          # >3 /review-pr dispatches per PR over the 4h stuck_loop window
+          # (was unbounded at 240/PR). NOT a circuit breaker: the goal does
+          # not halt; subsequent cycles skip re-dispatch in-place.
           _uberdev_goal_dispatch_review_pr "$pr_num"
           ;;
       esac

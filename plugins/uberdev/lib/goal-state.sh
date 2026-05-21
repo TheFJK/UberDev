@@ -24,6 +24,7 @@
 #   _uberdev_goal_extract_fingerprint      BODY_TEXT
 #   _uberdev_goal_parse_blocks_line        LINE
 #   _uberdev_goal_count_merge_attempts     GOAL_ID PR
+#   _uberdev_goal_count_review_pr_attempts GOAL_ID PR
 #   _uberdev_goal_pr_state_machine_valid   FROM TO
 #   _uberdev_goal_now_secs
 #   _uberdev_goal_persist_fp               GOAL_ID CYCLE FP
@@ -180,6 +181,23 @@ _uberdev_goal_count_merge_attempts() {
   awk -v p="$pr" '$1==p {c=$2} END {print c+0}' "$f"
 }
 
+# _uberdev_goal_count_review_pr_attempts GOAL_ID PR
+# B3 bound — sibling of _uberdev_goal_count_merge_attempts; reads
+# goal-<id>-review-pr-attempts.tsv (TSV row PR_NUM\tCOUNT) and echoes the
+# latest integer count for given PR (0 if absent). Append-only writes from
+# _uberdev_goal_dispatch_review_pr below; cap enforced by the same helper
+# at ${_UBERDEV_GOAL_MAX_REVIEW_PR_ATTEMPTS:-3}. The cap bounds the Phase
+# 2a stale|missing re-dispatch loop (SKILL.md line 280-283) so the watch
+# loop's 60s cadence cannot fire >3 /review-pr dispatches per PR over the
+# 4h stuck_loop window (was unbounded at 240/PR).
+_uberdev_goal_count_review_pr_attempts() {
+  local goal_id="$1" pr="$2"
+  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  local f="$tmpdir/goal-$goal_id-review-pr-attempts.tsv"
+  [ -f "$f" ] || { printf '0\n'; return 0; }
+  awk -v p="$pr" '$1==p {c=$2} END {print c+0}' "$f"
+}
+
 # _uberdev_goal_persist_fp GOAL_ID CYCLE FP
 # Persist a (cycle, fingerprint) pair to the fingerprints TSV — the
 # repeat-cycle detector reads this stream to decide non-convergence.
@@ -223,6 +241,11 @@ uberdev_goal_state_init() {
   : > "$tmpdir/goal-$goal_id-issue-states.tsv"
   : > "$tmpdir/goal-$goal_id-fingerprints.tsv"
   : > "$tmpdir/goal-$goal_id-merge-attempts.tsv"
+  # review-pr-attempts.tsv: pr\tcount rows, append-only from
+  # _uberdev_goal_dispatch_review_pr. Bounds Phase 2a's stale|missing
+  # re-dispatch loop at ${_UBERDEV_GOAL_MAX_REVIEW_PR_ATTEMPTS:-3}/PR
+  # over the entire goal run; replaces the unbounded 240/PR worst case.
+  : > "$tmpdir/goal-$goal_id-review-pr-attempts.tsv"
   # held-audits.tsv: pr\taudit_path rows, appended each time the held-PR
   # poll loop (Phase 2 step 2e) records a re-review audit it has consumed.
   # Latest row per pr wins (uberdev_goal_get_last_held_audit picks the tail).
@@ -545,9 +568,32 @@ uberdev_goal_read_merge_result() {
 # _uberdev_goal_dispatch_review_pr PR_NUM
 # D18 — full re-review (no incremental mode); writes a one-line prompt file
 # and dispatches via the standard small-tier path.
+#
+# B3 bound — per-PR attempt cap at ${_UBERDEV_GOAL_MAX_REVIEW_PR_ATTEMPTS:-3}.
+# Step 2a's stale|missing arm (SKILL.md line 280-283) calls this every 60s
+# while a PR sits in pushed-reviewing with a missing/stale audit; the cap
+# bounds total dispatches per PR across the entire goal run (worst case
+# was 240/PR over the 4h stuck_loop window — now 3/PR). On cap-exceeded:
+# print a stderr warning and return rc=0 so the step 2a loop continues
+# normally (the PR stays in its current state; subsequent watch iterations
+# skip re-dispatch via the same cap check). Intentionally NOT a circuit
+# breaker — the goal continues toward convergence and the cap does NOT
+# halt the goal. The merge-attempts pattern (uberdev_goal_should_automerge
+# at line 367) inspires the helper structure but the semantics differ:
+# merge-attempts gates a transition to `merging`; review-pr-attempts skips
+# a dispatch in-place.
 _uberdev_goal_dispatch_review_pr() {
   local pr="$1"
   _uberdev_goal_validate_int "$pr" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  local goal_id="${UBERDEV_GOAL_ID:-unknown}"
+  local current; current="$(_uberdev_goal_count_review_pr_attempts "$goal_id" "$pr")"
+  local cap="${_UBERDEV_GOAL_MAX_REVIEW_PR_ATTEMPTS:-3}"
+  if [ "$current" -ge "$cap" ]; then
+    printf 'goal-pipeline: review-pr dispatch cap reached for PR #%s (cap=%s); skipping re-dispatch this cycle\n' \
+      "$pr" "$cap" >&2
+    return 0
+  fi
   local prompt_file
   # B5 — mktemp failure (read-only /tmp, exhausted inode table) used to fall
   # through silently: $prompt_file ended up empty, the printf to "" was a
@@ -560,7 +606,12 @@ _uberdev_goal_dispatch_review_pr() {
     return 1
   fi
   printf '/uberdev:review-pr %s\n' "$pr" > "$prompt_file"
-  UBERDEV_GOAL_ID="${UBERDEV_GOAL_ID:-unknown}" \
+  # Increment per-PR attempt counter (append-only TSV mirrors the
+  # merge-attempts pattern at _uberdev_goal_dispatch_merge below).
+  local next=$(( current + 1 ))
+  printf '%s\t%s\n' "$pr" "$next" \
+    >> "$tmpdir/goal-$goal_id-review-pr-attempts.tsv"
+  UBERDEV_GOAL_ID="$goal_id" \
     uberdev_dispatch_one "$pr" "small" "$prompt_file"
 }
 
