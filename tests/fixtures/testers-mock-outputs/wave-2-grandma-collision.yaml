@@ -1,0 +1,19 @@
+verdict: AUDITED
+findings:
+  - severity: blocker
+    persona: panicked_grandma
+    location: /checkout
+    invariant_violated: no_5xx
+    summary: wave-2 escalation of the wave-1 500 — full outage on retry
+    detail: Same persona/invariant/location as wave-1; wave-2 reproduces the 500 and observes site-wide 503 for 30s, which is stronger evidence and bumps severity to blocker.
+    evidence:
+      screenshot: scratch/panicked-grandma/shot-2.png
+      dom_hash: feedface
+      repro_steps:
+        - navigate to /checkout
+        - double-click Pay button
+        - retry once — entire site returns 503 for 30s
+      observed: "500 then site-wide 503 for 30s"
+      expected: "single 200 or visible error"
+    confidence: high
+confidence: high

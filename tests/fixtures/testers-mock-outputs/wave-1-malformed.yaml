@@ -1,0 +1,11 @@
+verdict: AUDITED
+findings:
+  - severity: critical
+    persona: chaos_engineer
+    invariant_violated: no_5xx
+    location: /checkout
+    summary: malformed YAML fixture for P5
+    detail: an unclosed flow mapping is unambiguously broken
+    evidence: { screenshot: scratch/x.png, dom_hash: deadbeef
+    confidence: high
+confidence: high
