@@ -333,8 +333,15 @@ assert_file_empty() {
   else
     FAIL=$((FAIL + 1))
     printf '  FAIL  %s\n' "$label" >&2
-    # else-branch only: file is known to exist and be non-empty here.
-    printf '        non-empty: %s\n' "$(cat "$file")" >&2
+    # else-branch reaches here for TWO causes: the file is MISSING (the case
+    # the `[ -f ]` guard added to catch) or it EXISTS but is non-empty.
+    # Branch the diagnostic so the message names the actual cause instead of
+    # cat-ing a missing path (which would leak "No such file or directory").
+    if [ -f "$file" ]; then
+      printf '        non-empty: %s\n' "$(cat "$file")" >&2
+    else
+      printf '        file missing (expected existing + empty): %s\n' "$file" >&2
+    fi
   fi
 }
 
