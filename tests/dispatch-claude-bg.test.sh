@@ -252,8 +252,19 @@ assert_grep_not "$SOLVE_PIPELINE" \
   'REAL_CLAUDE=\$\(' \
   "REAL_CLAUDE PATH walk retired (Step 3 deletion)"
 
+# Fail-loud mktemp wrapper — without this, an mktemp failure leaves _TMPFIX
+# empty and the subsequent `printf > ""` silently errors to stderr while
+# the test reports a misleading FAIL or false-positive PASS. (#143 review.)
+_new_fixture() {
+  _TMPFIX="$(mktemp "${TMPDIR:-/tmp}/uberdev-143-XXXXXX")" || {
+    echo "  FAIL  mktemp failed (env / disk?) — aborting test" >&2
+    FAIL=$((FAIL+1))
+    exit 1
+  }
+}
+
 echo "== Runtime: ANSI-positive extraction (#143) =="
-_TMPFIX="$(mktemp "${TMPDIR:-/tmp}/uberdev-143-XXXXXX.log")"
+_new_fixture
 printf 'backgrounded \xc2\xb7 \x1b[36mb88389ff\x1b[39m\n' > "$_TMPFIX"
 GOT="$(_extract_id "$_TMPFIX")"
 if [[ "$GOT" == "b88389ff" ]]; then
@@ -265,7 +276,7 @@ else
 fi
 rm -f "$_TMPFIX"; _TMPFIX=""
 
-_TMPFIX="$(mktemp "${TMPDIR:-/tmp}/uberdev-143-XXXXXX.log")"
+_new_fixture
 printf 'backgrounded \xc2\xb7 b88389ff\n' > "$_TMPFIX"
 GOT="$(_extract_id "$_TMPFIX")"
 if [[ "$GOT" == "b88389ff" ]]; then
@@ -278,7 +289,7 @@ fi
 rm -f "$_TMPFIX"; _TMPFIX=""
 
 # Case #5: noise + ANSI marker + noise → first match wins
-_TMPFIX="$(mktemp "${TMPDIR:-/tmp}/uberdev-143-XXXXXX.log")"
+_new_fixture
 printf 'some preamble\nbackgrounded \xc2\xb7 \x1b[36mb88389ff\x1b[39m\ntrailing noise\n' > "$_TMPFIX"
 GOT="$(_extract_id "$_TMPFIX")"
 if [[ "$GOT" == "b88389ff" ]]; then
@@ -291,7 +302,7 @@ fi
 rm -f "$_TMPFIX"; _TMPFIX=""
 
 # Case #8: two valid markers → head -1 takes the first
-_TMPFIX="$(mktemp "${TMPDIR:-/tmp}/uberdev-143-XXXXXX.log")"
+_new_fixture
 printf 'backgrounded \xc2\xb7 aaaaaaaa\nbackgrounded \xc2\xb7 bbbbbbbb\n' > "$_TMPFIX"
 GOT="$(_extract_id "$_TMPFIX")"
 if [[ "$GOT" == "aaaaaaaa" ]]; then
@@ -304,7 +315,7 @@ fi
 rm -f "$_TMPFIX"; _TMPFIX=""
 
 # Case #6: OSC-decorated marker (hyperlink wrap) — line-anchor rejects
-_TMPFIX="$(mktemp "${TMPDIR:-/tmp}/uberdev-143-XXXXXX.log")"
+_new_fixture
 printf '\x1b]8;;http://x\x07backgrounded \xc2\xb7 b88389ff\x1b]8;;\x07\n' > "$_TMPFIX"
 GOT="$(_extract_id "$_TMPFIX")"
 if [[ -z "$GOT" ]]; then
@@ -317,7 +328,7 @@ fi
 rm -f "$_TMPFIX"; _TMPFIX=""
 
 # Case #9: truncated id (5 hex) → does not match {8}
-_TMPFIX="$(mktemp "${TMPDIR:-/tmp}/uberdev-143-XXXXXX.log")"
+_new_fixture
 printf 'backgrounded \xc2\xb7 b8838\n' > "$_TMPFIX"
 GOT="$(_extract_id "$_TMPFIX")"
 if [[ -z "$GOT" ]]; then
@@ -330,7 +341,7 @@ fi
 rm -f "$_TMPFIX"; _TMPFIX=""
 
 # Case #10: over-length id (14 hex) → line-anchor $ requires exactly 8
-_TMPFIX="$(mktemp "${TMPDIR:-/tmp}/uberdev-143-XXXXXX.log")"
+_new_fixture
 printf 'backgrounded \xc2\xb7 b88389ffaabbcc\n' > "$_TMPFIX"
 GOT="$(_extract_id "$_TMPFIX")"
 if [[ -z "$GOT" ]]; then
@@ -343,7 +354,7 @@ fi
 rm -f "$_TMPFIX"; _TMPFIX=""
 
 # Case #7: zero-byte stdout
-_TMPFIX="$(mktemp "${TMPDIR:-/tmp}/uberdev-143-XXXXXX.log")"
+_new_fixture
 : > "$_TMPFIX"
 GOT="$(_extract_id "$_TMPFIX")"
 if [[ -z "$GOT" ]]; then
@@ -356,7 +367,7 @@ fi
 rm -f "$_TMPFIX"; _TMPFIX=""
 
 echo "== Runtime: B3 fail-CLOSED guard regression (#143 / RFC 0004 §3.5) =="
-_TMPFIX="$(mktemp "${TMPDIR:-/tmp}/uberdev-143-XXXXXX.log")"
+_new_fixture
 printf 'some unrelated noise\nbackground started but not the marker\nspawn attempted\n' > "$_TMPFIX"
 GOT="$(_extract_id "$_TMPFIX")"
 if [[ -z "$GOT" ]]; then
