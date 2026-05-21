@@ -146,8 +146,17 @@ fi
 Wave loop. For each round in `1..ROUNDS`:
 
 ```bash
-PERSONAS="${PERSONA_LIST:-panicked-grandma,power-user,adversarial-security,chaos-engineer,a11y-critic,mobile-thumb}"
+PERSONAS="${PERSONA_LIST:-panicked_grandma,power_user,adversarial_security,chaos_engineer,a11y_critic,mobile_thumb}"
 PREV_FINDINGS="null"
+
+# Per-wave fan-out cap (RFC 0006 §Risks). Default 8 matches wave size.
+# Precedence env > config > default; range [1, 16].
+if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
+  . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+  TESTERS_FANOUT="$(uberdev_read_int_in_range fanout_concurrency.testers UBERDEV_TESTERS_FANOUT 1 16 8)"
+else
+  TESTERS_FANOUT=8
+fi
 
 for WAVE in $(seq 1 "$ROUNDS"); do
   WAVE_FILE="$RUN_DIR/wave-$WAVE.yaml"
@@ -170,7 +179,7 @@ budget:
   rps_cap: $RPS_CAP
 agents_to_dispatch:
   personas: [$PERSONAS]
-  monitors: [monitor-primary, monitor-devils-advocate]
+  monitors: [monitor_primary, monitor_devils_advocate]
 EOF
 
   # ============================================================================
@@ -193,7 +202,7 @@ EOF
     --out "$WAVE_FILE"
 
   PREV_FINDINGS="$WAVE_FILE"
-  echo "[testers] wave $WAVE complete: $(yq '.findings | length' "$WAVE_FILE") findings"
+  echo "[testers] wave $WAVE complete: $(python3 -c "import sys,yaml; print(len((yaml.safe_load(open(sys.argv[1])) or {}).get('findings') or []))" "$WAVE_FILE") findings"
 done
 ```
 
