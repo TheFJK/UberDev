@@ -358,6 +358,194 @@ else
   printf '        expected non-zero, got %s\n' "$_bt4_rc" >&2
 fi
 
+# ----- BT5-BT11 — _uberdev_goal_check_unblock behavioural coverage -----
+# Function under test: plugins/uberdev/lib/goal-state.sh:467-521.
+# Mocks `gh pr view` / `gh issue view` via a per-process function-override
+# (Q1 in 2026-05-21 spec; idiom borrowed from tests/findings-to-issues.test.sh:51-73).
+# `uberdev_dispatch_one` is NOT defined by goal-state.sh (D8 in spec) — we
+# stub it to log dispatches into $DISPATCH_LOG so assertions can verify
+# presence/absence of the dispatch side effect.
+#
+# Per-test reset block (copy-pasted before every BTn) sets all six MOCK_*
+# vars, DISPATCH_LOG, and MOCK_ISSUE_STATES to known-empty defaults to
+# prevent cross-test contamination.
+MOCK_PR_BODY=""
+MOCK_PR_RC=0
+MOCK_ISSUE_STATE=""
+MOCK_ISSUE_RC=0
+MOCK_ISSUE_STDERR=""
+MOCK_ISSUE_STATES=()
+DISPATCH_LOG=""
+
+gh() {
+  local sub="$1"; shift
+  case "$sub" in
+    pr)
+      local sub2="$1"; shift
+      case "$sub2" in
+        view) printf '%s' "$MOCK_PR_BODY"; return "$MOCK_PR_RC" ;;
+      esac
+      ;;
+    issue)
+      local sub2="$1"; shift
+      case "$sub2" in
+        view)
+          local issue_n="$1"
+          local found=""
+          for entry in "${MOCK_ISSUE_STATES[@]+"${MOCK_ISSUE_STATES[@]}"}"; do
+            case "$entry" in
+              "${issue_n}="*) found="${entry#*=}"; break ;;
+            esac
+          done
+          if [ -n "$found" ]; then
+            printf '%s' "$found"
+            return 0
+          fi
+          # Non-success: function-under-test captures `gh ... 2>&1`, so
+          # write the error stream to stdout (mirrors how gh's stderr
+          # arrives at issue_raw via 2>&1 in goal-state.sh:497).
+          if [ "$MOCK_ISSUE_RC" -ne 0 ]; then
+            printf '%s' "$MOCK_ISSUE_STDERR"
+          else
+            printf '%s' "$MOCK_ISSUE_STATE"
+          fi
+          return "$MOCK_ISSUE_RC"
+          ;;
+      esac
+      ;;
+  esac
+  return 0
+}
+export -f gh
+
+uberdev_dispatch_one() {
+  DISPATCH_LOG="${DISPATCH_LOG}DISPATCHED:$1 "
+}
+
+# BT5 — R1: gh pr view returns empty body -> rc=0, no dispatch.
+# Issue #140 risk 1; spec line 180-197; function lines 477-480.
+MOCK_PR_BODY=""; MOCK_PR_RC=1
+MOCK_ISSUE_STATE=""; MOCK_ISSUE_RC=0; MOCK_ISSUE_STDERR=""
+MOCK_ISSUE_STATES=(); DISPATCH_LOG=""
+UBERDEV_GOAL_ID=test-bt5
+_uberdev_goal_check_unblock 99 2>/dev/null
+_bt5_rc=$?
+assert_rc "$_bt5_rc" "0" "BT5.empty-body-returns-zero"
+assert_eq "$DISPATCH_LOG" "" "BT5.empty-body-no-dispatch"
+
+# BT6 — R2: gh issue view rate-limit -> rc=0 (skip cycle), no dispatch.
+# Issue #140 risk 2; spec line 199-214; function lines 502-505.
+MOCK_PR_BODY="Blocks: #99"; MOCK_PR_RC=0
+MOCK_ISSUE_STATE=""; MOCK_ISSUE_RC=1
+MOCK_ISSUE_STDERR="API rate limit exceeded"
+MOCK_ISSUE_STATES=(); DISPATCH_LOG=""
+UBERDEV_GOAL_ID=test-bt6
+_uberdev_goal_check_unblock 99 2>/dev/null
+_bt6_rc=$?
+assert_rc "$_bt6_rc" "0" "BT6.rate-limit-returns-zero"
+assert_eq "$DISPATCH_LOG" "" "BT6.rate-limit-no-dispatch"
+
+# BT7 — R1b: gh issue view 404 (issue deleted upstream) -> CLOSED -> dispatch.
+# Issue #140 risk 1 sub-path; spec line 216-233; function line 500.
+MOCK_PR_BODY="Blocks: #99"; MOCK_PR_RC=0
+MOCK_ISSUE_STATE=""; MOCK_ISSUE_RC=1
+MOCK_ISSUE_STDERR="Could not resolve to an Issue with the number '99'"
+MOCK_ISSUE_STATES=(); DISPATCH_LOG=""
+UBERDEV_GOAL_ID=test-bt7
+_uberdev_goal_check_unblock 99 2>/dev/null
+_bt7_rc=$?
+assert_rc "$_bt7_rc" "0" "BT7.404-returns-zero"
+case "$DISPATCH_LOG" in
+  *"DISPATCHED:99"*)
+    PASS=$((PASS + 1)); printf '  PASS  %s\n' "BT7.404-dispatch-fires" ;;
+  *)
+    FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "BT7.404-dispatch-fires" >&2
+    printf '        DISPATCH_LOG=%s\n' "$DISPATCH_LOG" >&2 ;;
+esac
+
+# BT8 — R3: mixed CLOSED/OPEN blocking issues -> all_closed=0 -> no dispatch.
+# Issue #140 risk 3; spec line 235-252; function lines 488-510.
+MOCK_PR_BODY="$(printf 'Blocks: #99\nBlocks: #100\n')"; MOCK_PR_RC=0
+MOCK_ISSUE_STATE=""; MOCK_ISSUE_RC=0; MOCK_ISSUE_STDERR=""
+MOCK_ISSUE_STATES=("99=CLOSED" "100=OPEN")
+DISPATCH_LOG=""
+UBERDEV_GOAL_ID=test-bt8
+_uberdev_goal_check_unblock 1 2>/dev/null
+_bt8_rc=$?
+assert_rc "$_bt8_rc" "0" "BT8.mixed-states-returns-zero"
+assert_eq "$DISPATCH_LOG" "" "BT8.mixed-states-no-dispatch"
+
+# BT9 — R5a: happy-path single-CLOSED -> dispatch fires.
+# Issue #140 risk 5 (inverse); spec line 254-267; function lines 512-513.
+MOCK_PR_BODY="Blocks: #99"; MOCK_PR_RC=0
+MOCK_ISSUE_STATE=""; MOCK_ISSUE_RC=0; MOCK_ISSUE_STDERR=""
+MOCK_ISSUE_STATES=("99=CLOSED")
+DISPATCH_LOG=""
+UBERDEV_GOAL_ID=test-bt9
+_uberdev_goal_check_unblock 1 2>/dev/null
+_bt9_rc=$?
+assert_rc "$_bt9_rc" "0" "BT9.happy-path-returns-zero"
+case "$DISPATCH_LOG" in
+  *"DISPATCHED:1"*)
+    PASS=$((PASS + 1)); printf '  PASS  %s\n' "BT9.happy-path-dispatch-fires" ;;
+  *)
+    FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "BT9.happy-path-dispatch-fires" >&2
+    printf '        DISPATCH_LOG=%s\n' "$DISPATCH_LOG" >&2 ;;
+esac
+
+# BT10 — R4: CRLF-terminated Blocks: line silently drops -> no dispatch.
+# Locks current LF-only behaviour (Q5 auto-pick; spec line 269-291).
+# If a future PR adds \r-stripping, this test fails and forces a doc update.
+MOCK_PR_BODY="$(printf 'Blocks: #99\r\n')"; MOCK_PR_RC=0
+MOCK_ISSUE_STATE=""; MOCK_ISSUE_RC=0; MOCK_ISSUE_STDERR=""
+MOCK_ISSUE_STATES=("99=CLOSED")
+DISPATCH_LOG=""
+UBERDEV_GOAL_ID=test-bt10
+_uberdev_goal_check_unblock 1 2>/dev/null
+_bt10_rc=$?
+assert_rc "$_bt10_rc" "0" "BT10.crlf-body-returns-zero"
+assert_eq "$DISPATCH_LOG" "" "BT10.crlf-body-no-dispatch"
+
+# BT11 — R5b: full happy-path multi-CLOSED -> dispatch + audit event.
+# Issue #140 risk 5 full; spec line 293-317; function lines 512-520.
+# uberdev_goal_state_init keeps parity with BT3 (line 340) — currently
+# redundant for the >>-append audit write, but defends against future
+# changes to uberdev_goal_audit's file-creation semantics.
+MOCK_PR_BODY="$(printf 'Blocks: #99\nBlocks: #100\n')"; MOCK_PR_RC=0
+MOCK_ISSUE_STATE=""; MOCK_ISSUE_RC=0; MOCK_ISSUE_STDERR=""
+MOCK_ISSUE_STATES=("99=CLOSED" "100=CLOSED")
+DISPATCH_LOG=""
+UBERDEV_GOAL_ID=test-bt11
+uberdev_goal_state_init test-bt11
+_uberdev_goal_check_unblock 7 2>/dev/null
+_bt11_rc=$?
+assert_rc "$_bt11_rc" "0" "BT11.audit-happy-path-returns-zero"
+case "$DISPATCH_LOG" in
+  *"DISPATCHED:7"*)
+    PASS=$((PASS + 1)); printf '  PASS  %s\n' "BT11.audit-happy-path-dispatch-fires" ;;
+  *)
+    FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "BT11.audit-happy-path-dispatch-fires" >&2
+    printf '        DISPATCH_LOG=%s\n' "$DISPATCH_LOG" >&2 ;;
+esac
+if grep -q '"event":"goal_unblock_triggered"' "$UBERDEV_TMPDIR/goal-test-bt11.jsonl" 2>/dev/null; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "BT11.audit-event-emitted"
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "BT11.audit-event-emitted" >&2
+  printf '        expected event in %s\n' "$UBERDEV_TMPDIR/goal-test-bt11.jsonl" >&2
+fi
+if grep -q '"blocking_issues":\[99,100\]' "$UBERDEV_TMPDIR/goal-test-bt11.jsonl" 2>/dev/null; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "BT11.audit-payload-csv-shape"
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "BT11.audit-payload-csv-shape" >&2
+fi
+
+# Hygiene: drop the function-override + dispatch stub before B12 ends
+# (spec Error handling section). No subsequent tests, so blast radius is
+# zero, but explicit unset documents intent and prevents a future BT12
+# appended below from silently inheriting either shadow.
+unset -f gh
+unset -f uberdev_dispatch_one
+
 # Cleanup: remove the isolated tmpdir contents (we created the whole
 # directory via mktemp -d, so we can rm -rf safely — it's our own).
 rm -rf "$_b12_tmpdir/goal-test-bt3"* 2>/dev/null || true
