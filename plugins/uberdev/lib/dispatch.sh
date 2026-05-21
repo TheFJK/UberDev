@@ -241,7 +241,7 @@ _uberdev_dispatch_claude_bg() {
     # CSI-only strip; line-anchor (^...$) below rejects OSC/DCS-wrapped markers (defense-in-depth)
     DISPATCH_ID="$(sed -E $'s/\x1B\\[[0-9;]*[a-zA-Z]//g' "$BG_STDOUT_LOG" | grep -aoE '^backgrounded · [0-9a-f]{8}$' | awk '{print $NF}' | head -1)"
     DISPATCH_ID="${DISPATCH_ID//[^0-9a-f]/}"
-    [ "${#DISPATCH_ID}" -eq 8 ] || DISPATCH_ID=""  # sentinel: empty == validation failed (B3 guard below)
+    [[ "${#DISPATCH_ID}" -eq 8 ]] || DISPATCH_ID=""  # sentinel: empty == validation failed (B3 guard below)
     # B3 fix: `claude --bg` exited 0 but the `backgrounded · <id>` marker
     # was absent from $BG_STDOUT_LOG — output-format drift, truncation, or
     # version skew. Recording bg_session_id="" as a "successful dispatch"

@@ -56,13 +56,17 @@ _extract_id() {
         | awk '{print $NF}' \
         | head -1)"
   id="${id//[^0-9a-f]/}"
-  [ "${#id}" -eq 8 ] || id=""
+  [[ ${#id} -eq 8 ]] || id=""
   printf '%s' "$id"
 }
 
 # tmp fixture cleanup (per-test scope)
 _TMPFIX=""
-_cleanup_tmpfix() { [ -n "$_TMPFIX" ] && rm -f "$_TMPFIX" || :; }
+_cleanup_tmpfix() {
+  if [ -n "$_TMPFIX" ]; then
+    rm -f "$_TMPFIX"
+  fi
+}
 trap _cleanup_tmpfix EXIT
 
 echo "== Positive: claude --bg three-arm dispatch case-switch (lib/dispatch.sh) =="
@@ -264,134 +268,70 @@ _new_fixture() {
   }
 }
 
+# Helpers: collapse the 10 runtime fixture blocks into a single-line call.
+# Each helper owns the full per-call lifecycle: _new_fixture → write fixture
+# bytes → _extract_id → assert → PASS/FAIL bookkeeping → cleanup. The first
+# argument is the raw byte sequence passed to `printf '%b'`; the third is
+# the human-readable `desc` echoed alongside PASS/FAIL.
+_assert_extract_eq() {
+  local bytes="$1" expected="$2" desc="$3"
+  local got
+  _new_fixture
+  printf '%b' "$bytes" > "$_TMPFIX"
+  got="$(_extract_id "$_TMPFIX")"
+  if [[ "$got" == "$expected" ]]; then
+    echo "  PASS  $desc"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc (got '$got', expected '$expected')"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -f "$_TMPFIX"; _TMPFIX=""
+}
+
+_assert_extract_empty() {
+  local bytes="$1" desc="$2"
+  local got
+  _new_fixture
+  printf '%b' "$bytes" > "$_TMPFIX"
+  got="$(_extract_id "$_TMPFIX")"
+  if [[ -z "$got" ]]; then
+    echo "  PASS  $desc"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc (got '$got', expected empty)"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -f "$_TMPFIX"; _TMPFIX=""
+}
+
 echo "== Runtime: ANSI-positive extraction (#143) =="
-_new_fixture
-printf 'backgrounded \xc2\xb7 \x1b[36mb88389ff\x1b[39m\n' > "$_TMPFIX"
-GOT="$(_extract_id "$_TMPFIX")"
-if [[ "$GOT" == "b88389ff" ]]; then
-  echo "  PASS  ANSI-decorated marker (\\x1B[36m<id>\\x1B[39m) extracts to bare 8-hex"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL  ANSI-decorated marker extracted as '$GOT' (expected 'b88389ff')"
-  FAIL=$((FAIL + 1))
-fi
-rm -f "$_TMPFIX"; _TMPFIX=""
-
-_new_fixture
-printf 'backgrounded \xc2\xb7 b88389ff\n' > "$_TMPFIX"
-GOT="$(_extract_id "$_TMPFIX")"
-if [[ "$GOT" == "b88389ff" ]]; then
-  echo "  PASS  bare marker (back-compat with Claude Code 2.1.139) extracts to 8-hex"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL  bare marker extracted as '$GOT' (expected 'b88389ff') — back-compat broken"
-  FAIL=$((FAIL + 1))
-fi
-rm -f "$_TMPFIX"; _TMPFIX=""
-
-# Case #5: noise + ANSI marker + noise → first match wins
-_new_fixture
-printf 'some preamble\nbackgrounded \xc2\xb7 \x1b[36mb88389ff\x1b[39m\ntrailing noise\n' > "$_TMPFIX"
-GOT="$(_extract_id "$_TMPFIX")"
-if [[ "$GOT" == "b88389ff" ]]; then
-  echo "  PASS  mixed-line stdout extracts the first matching marker"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL  mixed-line stdout extracted as '$GOT' (expected 'b88389ff')"
-  FAIL=$((FAIL + 1))
-fi
-rm -f "$_TMPFIX"; _TMPFIX=""
-
-# Case #8: two valid markers → head -1 takes the first
-_new_fixture
-printf 'backgrounded \xc2\xb7 aaaaaaaa\nbackgrounded \xc2\xb7 bbbbbbbb\n' > "$_TMPFIX"
-GOT="$(_extract_id "$_TMPFIX")"
-if [[ "$GOT" == "aaaaaaaa" ]]; then
-  echo "  PASS  multiple markers → head -1 takes the first id"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL  multiple markers extracted as '$GOT' (expected 'aaaaaaaa')"
-  FAIL=$((FAIL + 1))
-fi
-rm -f "$_TMPFIX"; _TMPFIX=""
-
-# Case #6: OSC-decorated marker (hyperlink wrap) — line-anchor rejects
-_new_fixture
-printf '\x1b]8;;http://x\x07backgrounded \xc2\xb7 b88389ff\x1b]8;;\x07\n' > "$_TMPFIX"
-GOT="$(_extract_id "$_TMPFIX")"
-if [[ -z "$GOT" ]]; then
-  echo "  PASS  OSC-decorated marker is rejected (line-anchor + CSI-only strip)"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL  OSC-decorated marker extracted as '$GOT' (expected empty — line-anchor must reject)"
-  FAIL=$((FAIL + 1))
-fi
-rm -f "$_TMPFIX"; _TMPFIX=""
-
-# Case #9: truncated id (5 hex) → does not match {8}
-_new_fixture
-printf 'backgrounded \xc2\xb7 b8838\n' > "$_TMPFIX"
-GOT="$(_extract_id "$_TMPFIX")"
-if [[ -z "$GOT" ]]; then
-  echo "  PASS  truncated-id (5 hex) yields empty (matches B3 fail-CLOSED path)"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL  truncated-id extracted as '$GOT' (expected empty)"
-  FAIL=$((FAIL + 1))
-fi
-rm -f "$_TMPFIX"; _TMPFIX=""
-
-# Case #10: over-length id (14 hex) → line-anchor $ requires exactly 8
-_new_fixture
-printf 'backgrounded \xc2\xb7 b88389ffaabbcc\n' > "$_TMPFIX"
-GOT="$(_extract_id "$_TMPFIX")"
-if [[ -z "$GOT" ]]; then
-  echo "  PASS  over-length-id (14 hex) yields empty (locks {8} format contract)"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL  over-length-id extracted as '$GOT' (expected empty)"
-  FAIL=$((FAIL + 1))
-fi
-rm -f "$_TMPFIX"; _TMPFIX=""
-
-# Case #11: uppercase-hex id (8 upper) → [0-9a-f] is lowercase-only
-_new_fixture
-printf 'backgrounded \xc2\xb7 B88389FF\n' > "$_TMPFIX"
-GOT="$(_extract_id "$_TMPFIX")"
-if [[ -z "$GOT" ]]; then
-  echo "  PASS  uppercase-hex id yields empty (lowercase-only [0-9a-f] class)"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL  uppercase-hex id extracted as '$GOT' (expected empty)"
-  FAIL=$((FAIL + 1))
-fi
-rm -f "$_TMPFIX"; _TMPFIX=""
-
-# Case #7: zero-byte stdout
-_new_fixture
-: > "$_TMPFIX"
-GOT="$(_extract_id "$_TMPFIX")"
-if [[ -z "$GOT" ]]; then
-  echo "  PASS  empty stdout yields empty (B3 fail-CLOSED path triggers)"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL  empty stdout extracted as '$GOT' (expected empty)"
-  FAIL=$((FAIL + 1))
-fi
-rm -f "$_TMPFIX"; _TMPFIX=""
+_assert_extract_eq 'backgrounded \xc2\xb7 \x1b[36mb88389ff\x1b[39m\n' \
+                   'b88389ff' \
+                   'ANSI-decorated marker (\x1B[36m<id>\x1B[39m) extracts to bare 8-hex'
+_assert_extract_eq 'backgrounded \xc2\xb7 b88389ff\n' \
+                   'b88389ff' \
+                   'bare marker (back-compat with Claude Code 2.1.139) extracts to 8-hex'
+_assert_extract_eq 'some preamble\nbackgrounded \xc2\xb7 \x1b[36mb88389ff\x1b[39m\ntrailing noise\n' \
+                   'b88389ff' \
+                   'mixed-line stdout extracts the first matching marker'
+_assert_extract_eq 'backgrounded \xc2\xb7 aaaaaaaa\nbackgrounded \xc2\xb7 bbbbbbbb\n' \
+                   'aaaaaaaa' \
+                   'multiple markers → head -1 takes the first id'
+_assert_extract_empty '\x1b]8;;http://x\x07backgrounded \xc2\xb7 b88389ff\x1b]8;;\x07\n' \
+                      'OSC-decorated marker is rejected (line-anchor + CSI-only strip)'
+_assert_extract_empty 'backgrounded \xc2\xb7 b8838\n' \
+                      'truncated-id (5 hex) yields empty (matches B3 fail-CLOSED path)'
+_assert_extract_empty 'backgrounded \xc2\xb7 b88389ffaabbcc\n' \
+                      'over-length-id (14 hex) yields empty (locks {8} format contract)'
+_assert_extract_empty 'backgrounded \xc2\xb7 B88389FF\n' \
+                      'uppercase-hex id yields empty (lowercase-only [0-9a-f] class)'
+_assert_extract_empty '' \
+                      'empty stdout yields empty (B3 fail-CLOSED path triggers)'
 
 echo "== Runtime: B3 fail-CLOSED guard regression (#143 / RFC 0004 §3.5) =="
-_new_fixture
-printf 'some unrelated noise\nbackground started but not the marker\nspawn attempted\n' > "$_TMPFIX"
-GOT="$(_extract_id "$_TMPFIX")"
-if [[ -z "$GOT" ]]; then
-  echo "  PASS  missing-marker stdout yields empty (B3 guard at dispatch.sh:250 still fires rc=2)"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL  missing-marker stdout extracted as '$GOT' — B3 fail-CLOSED contract BROKEN"
-  FAIL=$((FAIL + 1))
-fi
-rm -f "$_TMPFIX"; _TMPFIX=""
+_assert_extract_empty 'some unrelated noise\nbackground started but not the marker\nspawn attempted\n' \
+                      'missing-marker stdout yields empty (B3 guard at dispatch.sh:250 still fires rc=2)'
 
 echo
 echo "== Summary =="
