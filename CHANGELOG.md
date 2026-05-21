@@ -10,6 +10,12 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 - **`/uberdev:testers`** — adversarial multi-persona QA audit squad. 6 distinct-persona testers (`panicked_grandma`, `power_user`, `adversarial_security`, `chaos_engineer`, `a11y_critic`, `mobile_thumb`) + 2 monitors (`monitor_primary`, `monitor_devils_advocate`) over 3 coordinated waves. Auto-detects target surface (web/api/native/all). Findings are evidence-anchored against a 10-invariant oracle library and filed as GitHub issues via the existing `findings-to-issues` pipeline. Read-only — the squad never writes app code. Alias: `/testers`. See `docs/rfc/0006-testers-command.md`.
 
+## [0.30.4] - 2026-05-21
+
+### Documentation
+
+- **README install paragraph: align alias count with reality.** The auto-install paragraph said "seven short-form aliases" and only listed `/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`, `/dev` — `/testers` (auto-installed since v0.30.0 via `aliases-sync.sh`) was missing. Now lists all eight (`/testers` added) and the count matches `UBERDEV_ALIAS_NOTICE` runtime emit ("installed 8 short-form aliases").
+
 ## [0.30.3] - 2026-05-21
 
 ### Fixed (#143)
