@@ -364,17 +364,18 @@ else
   printf '        expected non-zero, got %s\n' "$_bt4_rc" >&2
 fi
 
-# BT12-BT19 — uberdev_goal_read_trust_signal: trust-signal enum coverage
+# BT12-BT20 — uberdev_goal_read_trust_signal: trust-signal enum coverage
 # (issue #137; finding fingerprint d599c295ba4d2846 from /review-pr Phase
 # 2.5 on PR #129). Each test stages a synthetic audit JSON under
 # $_b12_tmpdir, invokes the function, and asserts the printed enum
 # (green/yellow/red/stale/missing) matches the D17 spec mapping.
 #
-# Covers the four uncovered branches called out by pr-test-analyzer:
+# Covers the uncovered branches called out by pr-test-analyzer:
 #   - actual JSON parsing of .phases.phase2_5      (BT12, BT13, BT14, BT19)
 #   - blocker / critical threshold logic           (BT12, BT13, BT14)
 #   - halted_due_to_overflow flag                  (BT15)
 #   - 'stale' vs 'missing' distinction             (BT16, BT17, BT18)
+#   - malformed-by_severity second-jq failure      (BT20)
 #
 # Misclassification risk these guard: YELLOW silently treated as GREEN
 # (PR auto-merged despite CRITICAL findings); STALE silently treated as
@@ -503,7 +504,8 @@ assert_eq "$(uberdev_goal_read_trust_signal "$_bt19_audit_minimal")" "green" \
 # present, so p25 is non-empty and we fall past the 'stale' branch.
 # The SECOND jq call then errors because by_severity is a string rather
 # than an object — `.by_severity.blocker` cannot index a string and jq
-# exits non-zero. Without the explicit rc check at goal-state.sh:268-271,
+# exits non-zero. Without the explicit rc check at goal-state.sh:301
+# (`[ "$jq_rc" -eq 0 ] || { printf 'missing\n'; return 0; }`),
 # `read -r blocker critical halted <<<""` would leave all three vars
 # empty, the `[ $blocker -gt 0 ]` arithmetic would silently evaluate to
 # false, and the function would fall through to printf 'green'. That is
@@ -515,6 +517,68 @@ cat > "$_bt20_audit_malformed_severity" <<'EOF'
 EOF
 assert_eq "$(uberdev_goal_read_trust_signal "$_bt20_audit_malformed_severity" 2>/dev/null)" "missing" \
   "BT20.malformed-by_severity-emits-missing"
+
+# BT21 — RED via blocker>0 AND critical>0 simultaneously. BT14 isolates
+# blocker-only and BT13 isolates critical-only; this fixture exercises
+# both >0 at once to lock the red branch
+# (`[ "$halted" = "true" ] || [ "$blocker" -gt 0 ]`) against an accidental
+# `&&` / short-circuit regression. blocker dominates: the function returns
+# red before ever reaching the `[ "$critical" -gt 0 ]` yellow branch, so a
+# regression that ANDed the conditions (or swapped the branch order) would
+# surface here as yellow instead of red.
+_bt21_audit_red_both="$_b12_tmpdir/audit-red-both.json"
+cat > "$_bt21_audit_red_both" <<'EOF'
+{
+  "phases": {
+    "phase2_5": {
+      "by_severity": {"blocker": 1, "critical": 1},
+      "halted": false
+    }
+  }
+}
+EOF
+assert_eq "$(uberdev_goal_read_trust_signal "$_bt21_audit_red_both")" "red" \
+  "BT21.blocker-and-critical-both-emits-red"
+
+# BT22 — RED via halted=true AND blocker>0. BT15 isolates halted-only with
+# clean counters; this variant adds blocker>0 to verify halted's red
+# precedence is not masked (and that the OR short-circuit still resolves to
+# red) when both red-triggering conditions hold. A regression that dropped
+# or reordered the halted check would still surface red here via blocker,
+# so this is the companion to BT23 (halted+critical) which has no
+# blocker fallback.
+_bt22_audit_red_halted_blocker="$_b12_tmpdir/audit-red-halted-blocker.json"
+cat > "$_bt22_audit_red_halted_blocker" <<'EOF'
+{
+  "phases": {
+    "phase2_5": {
+      "by_severity": {"blocker": 1, "critical": 0},
+      "halted": true
+    }
+  }
+}
+EOF
+assert_eq "$(uberdev_goal_read_trust_signal "$_bt22_audit_red_halted_blocker")" "red" \
+  "BT22.halted-and-blocker-emits-red"
+
+# BT23 — RED via halted=true AND critical>0 (blocker=0). The load-bearing
+# variant: with blocker=0, the ONLY thing that produces red is the halted
+# check. If halted were reordered after / masked by the critical>0 yellow
+# branch, this fixture would regress to yellow. Locks halted's red
+# precedence over a non-zero critical count.
+_bt23_audit_red_halted_critical="$_b12_tmpdir/audit-red-halted-critical.json"
+cat > "$_bt23_audit_red_halted_critical" <<'EOF'
+{
+  "phases": {
+    "phase2_5": {
+      "by_severity": {"blocker": 0, "critical": 1},
+      "halted": true
+    }
+  }
+}
+EOF
+assert_eq "$(uberdev_goal_read_trust_signal "$_bt23_audit_red_halted_critical")" "red" \
+  "BT23.halted-and-critical-emits-red"
 
 # Cleanup: remove the isolated tmpdir we created via mktemp -d above.
 # The single `rm -rf "$_b12_tmpdir"` subsumes any per-BT artifacts
