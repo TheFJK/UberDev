@@ -30,7 +30,8 @@ turbo|turbo|["Bash", "Read", "Task"]
 simplify|simplify|["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", "Write"]
 review-pr|review-pr|["Bash(git*)", "Bash(gh*)", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", "Write"]
 merge|merge|["Bash", "Glob", "Grep", "Read", "Task"]
-dev|dev|["Bash", "Read", "Edit", "Write", "Task"]'
+dev|dev|["Bash", "Read", "Edit", "Write", "Task"]
+ubergoal|goal|["Bash", "Read", "Task"]'
 
 # Built-in Claude Code commands; never overwrite these.
 BUILTINS='init review security-review statusline-setup help clear plugin'
