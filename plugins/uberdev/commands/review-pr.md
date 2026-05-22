@@ -840,12 +840,16 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
 
    The anchor commit goes through pre-commit hooks normally — never `--no-verify`. Author = current `git config user.email` / `user.name`; the trailer is procedural attribution to the `/review-pr` command. Per global CLAUDE.md, the anchor commit MUST NOT include a `Co-Authored-By: Claude` trailer or any `🤖 Generated with Claude Code` footer. The trailer payload (`Reviewed-by: uberdev/review-pr@<40-hex>`) is the only trailer in the body. Verify with `git log -1 --format=%B | grep -E '^Reviewed-by: uberdev/review-pr@[a-f0-9]{40}$'` before proceeding to artifact 2.
 
-2. **Label** — tier-aware. GREEN runs add `uberdev-approved` (canonical literal — see `skills/merge-pipeline/SKILL.md` Constants `UBERDEV_APPROVED_LABEL`). YELLOW runs add `uberdev-approved-with-concerns` (RFC 0002 §3.4). Both forms are idempotent — `gh` no-ops if the label is already present.
+2. **Label** — tier-aware. GREEN runs add `uberdev-approved` (canonical literal — see `skills/merge-pipeline/SKILL.md` Constants `UBERDEV_APPROVED_LABEL`). YELLOW runs add `uberdev-approved-with-concerns` (RFC 0002 §3.4). Each label is **provisioned fail-loud via `gh label create --force` immediately before the add** (issue #170 — `gh pr edit --add-label` CANNOT auto-create a repo label and exits non-zero when the label is missing, which on a fresh repo aborts the whole trust-signal emission; same assume-label-exists class as #168). `--force` is idempotent: it updates an existing label's colour/description and never errors on "already exists", so a non-zero `gh label create` exit is always a genuine failure (auth / repo write-or-triage scope / API). Adding the label to the PR is itself idempotent — `gh` no-ops if the label is already on the PR.
 
    ```bash
    case "$TRUST_TRAIL_STATE" in
-     GREEN)  TRUST_LABEL="uberdev-approved" ;;
-     YELLOW) TRUST_LABEL="uberdev-approved-with-concerns" ;;
+     GREEN)  TRUST_LABEL="uberdev-approved"
+             TRUST_LABEL_COLOR="0E8A16"
+             TRUST_LABEL_DESC="Trust trail: /uberdev:review-pr verified GREEN. Auto-managed — set by /review-pr, read by /merge." ;;
+     YELLOW) TRUST_LABEL="uberdev-approved-with-concerns"
+             TRUST_LABEL_COLOR="FBCA04"
+             TRUST_LABEL_DESC="Trust trail: /uberdev:review-pr verified with deferred CRITICAL findings (YELLOW). Auto-managed — /merge requires --accept-critical-deferred." ;;
    esac
    # Belt-and-braces: clear the OPPOSITE-tier label if present, so a re-run that
    # downgrades GREEN→YELLOW (or upgrades YELLOW→GREEN) doesn't leave a stale
@@ -858,6 +862,20 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
    ```
 
    ```bash
+   # Provision the trust label BEFORE adding it (#170). `gh pr edit --add-label`
+   # CANNOT auto-create a repo label and exits non-zero when it is missing — on a
+   # fresh repo (or any repo where the trust labels were never created) this
+   # aborts the whole trust-signal emission. `--force` makes this idempotent (it
+   # updates an existing label's colour/description, never errors on "already
+   # exists"), so a non-zero exit here is a genuine failure (auth / missing repo
+   # write-or-triage scope / API error). Fail-loud + exit 2 mirrors the --add-label
+   # guard below: the label is the load-bearing trust artifact /merge reads, so
+   # emission cannot proceed without it. (Same assume-label-exists class as #168,
+   # but fail-loud rather than swallowed.)
+   if ! gh label create --force "$TRUST_LABEL" --color "$TRUST_LABEL_COLOR" --description "$TRUST_LABEL_DESC"; then
+     echo "error: failed to provision the '$TRUST_LABEL' trust label (gh pr edit --add-label cannot auto-create it). Check gh auth and repo write/triage permission." >&2
+     exit 2
+   fi
    # Mirror artifact 1's push-failure guard: if `gh pr edit` exits non-zero
    # (network, auth, rate limit, label-permission denial), bash continues silently
    # and the audit JSON below gets written without the label being applied.

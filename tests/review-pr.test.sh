@@ -403,6 +403,19 @@ assert_no_grep "$REVIEW_PR" \
   '^[[:space:]]*gh pr edit <N> --add-label uberdev-approved[[:space:]]*$' \
   "R9.15 — bare 'gh pr edit <N> --add-label uberdev-approved' (unguarded, EOL-anchored, recipe form) is not present"
 
+# R9.16 (#170) — trust-label provisioning. `gh pr edit --add-label` CANNOT
+# auto-create a repo label and exits non-zero when it is missing, so on a fresh
+# repo the GREEN/YELLOW trust-signal emission aborts at the --add-label (exit 2).
+# The fix provisions $TRUST_LABEL via a fail-loud `gh label create --force`
+# immediately before the add (same assume-label-exists class as #168). Assert
+# the fail-loud provisioning is present AND the per-tier colour is set.
+assert_grep "$REVIEW_PR" \
+  'if ! gh label create --force "\$TRUST_LABEL" --color "\$TRUST_LABEL_COLOR"' \
+  "R9.16 (#170) — trust label provisioned fail-loud via gh label create --force before --add-label"
+assert_grep "$REVIEW_PR" \
+  'TRUST_LABEL_COLOR="0E8A16"' \
+  "R9.16b (#170) — per-tier TRUST_LABEL_COLOR set in the TRUST_LABEL case (GREEN=0E8A16)"
+
 echo
 echo "== R10 (#73): Sequential argument honored — env-var export + stderr notice =="
 
