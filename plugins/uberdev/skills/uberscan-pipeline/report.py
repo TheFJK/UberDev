@@ -67,14 +67,12 @@ def dedupe(rows):
 
 
 def read_global(chunks_dir, name):
-    """Return the contents of a Phase-1b repo-global pass artifact, or None."""
-    path = os.path.join(chunks_dir, name)
-    if os.path.isfile(path):
-        try:
-            return open(path).read().strip()
-        except OSError:
-            return None
-    return None
+    """Return the contents of a Phase-1b repo-global pass artifact, or None if absent/unreadable."""
+    try:
+        with open(os.path.join(chunks_dir, name)) as fh:
+            return fh.read().strip()
+    except OSError:
+        return None
 
 
 def severities_at_or_above(floor):
@@ -108,11 +106,12 @@ def main():
         sys.exit(2)
 
     rows = dedupe(load_findings(args.chunks_dir))
-    totals = {}
-    for f in rows:
-        totals[f.get("severity", "?")] = totals.get(f.get("severity", "?"), 0) + 1
 
     if args.out:
+        totals = {}
+        for f in rows:
+            sev = f.get("severity", "?")
+            totals[sev] = totals.get(sev, 0) + 1
         hotspots = {}
         for f in rows:
             fpath = f.get("location", "?").split(":")[0]

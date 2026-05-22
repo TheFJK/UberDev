@@ -18,41 +18,33 @@ def tracked_files(scope):
     return [p for p in out.stdout.splitlines() if p]
 
 
-def safe_size(path):
-    """Stat a file; return None (not a crash) if it vanished or is unreadable."""
-    try:
-        return os.path.getsize(path)
-    except OSError:
-        return None
-
-
-def keep(path):
+def keep_size(path):
+    """Return the file's byte size if it should be audited, else None
+    (ignored dir/name/suffix, oversized, or unreadable). Stats the file at most
+    once — the returned size is reused by chunk_files (no second stat)."""
     parts = set(path.split("/"))
     if parts & IGNORE_DIRS:
-        return False
+        return None
     if os.path.basename(path) in IGNORE_NAMES:
-        return False
+        return None
     if path.endswith(IGNORE_SUFFIXES):
-        return False
-    sz = safe_size(path)
-    if sz is None or sz > MAX_FILE_BYTES:
-        return False
-    return True
+        return None
+    try:
+        sz = os.path.getsize(path)
+    except OSError:
+        return None
+    return None if sz > MAX_FILE_BYTES else sz
 
 
-def chunk_files(paths, budget):
-    """Group by directory for cohesion, then pack into budget-bounded chunks."""
+def chunk_files(sized_paths, budget):
+    """Group (path, size) pairs by directory for cohesion, then pack into
+    budget-bounded chunks. Sizes are precomputed by keep_size — no re-stat."""
     by_dir = {}
-    for p in sorted(paths):
-        by_dir.setdefault(os.path.dirname(p), []).append(p)
+    for p, sz in sorted(sized_paths):
+        by_dir.setdefault(os.path.dirname(p), []).append((p, sz))
     chunks, cur, cur_bytes = [], [], 0
     for _dir in sorted(by_dir):
-        for p in by_dir[_dir]:
-            sz = safe_size(p)
-            if sz is None:
-                # TOCTOU: file vanished between keep() and here — skip, don't crash.
-                print(f"warning: skipping {p} (no longer stat-able)", file=sys.stderr)
-                continue
+        for p, sz in by_dir[_dir]:
             if cur and cur_bytes + sz > budget:
                 chunks.append((cur, cur_bytes))
                 cur, cur_bytes = [], 0
@@ -79,7 +71,11 @@ def main():
         sys.exit(2)
 
     all_tracked = tracked_files(args.scope)
-    kept = [p for p in all_tracked if keep(p)]
+    kept = []
+    for p in all_tracked:
+        sz = keep_size(p)
+        if sz is not None:
+            kept.append((p, sz))
     skipped = len(all_tracked) - len(kept)
     chunks = chunk_files(kept, args.budget_bytes)
     overflow = len(chunks) > args.max_chunks

@@ -229,8 +229,8 @@ while [ "$IDX" -lt "${#CHUNK_ARRAY[@]}" ]; do
   for (( CI=IDX; CI<WAVE_END_IDX; CI++ )); do
     CHUNK_ID="${CHUNK_ARRAY[$CI]}"
     CHUNK_NUM="$(printf '%03d' "$CHUNK_ID")"
-    CHUNK_FILES="$(jq -r --argjson id "$CHUNK_ID" '.chunks[] | select(.id==$id) | .files[]' "$RUN_DIR/manifest.json")"
     CHUNK_FILES_JSON="$(jq --argjson id "$CHUNK_ID" '.chunks[] | select(.id==$id) | .files' "$RUN_DIR/manifest.json")"
+    CHUNK_FILES="$(printf '%s' "$CHUNK_FILES_JSON" | jq -r '.[]')"
     CHUNK_OUT="$RUN_DIR/chunk-${CHUNK_NUM}-findings.yaml"
 
     # Write the dispatch directive for this chunk
@@ -304,7 +304,6 @@ EOF
     #   chunk_bc=$(python3 -c "
     #     import yaml, sys
     #     doc = yaml.safe_load(open('$CHUNK_OUT')) or {}
-    #     sev = {f.get('severity','') for f in (doc.get('findings') or [])}
     #     print(sum(1 for f in (doc.get('findings') or []) if f.get('severity') in {'blocker','critical'}))
     #   " 2>/dev/null || echo 0)
     #   CUMULATIVE_BLOCKERS_CRITICALS=$(( CUMULATIVE_BLOCKERS_CRITICALS + chunk_bc ))
@@ -431,8 +430,9 @@ if [ "$NO_ISSUES" != "1" ]; then
     # worktree); repo_slug + pr_commit_sha back the issue-body **Origin** link.
     # Local origin-URL parse first (fast); fall back to `gh repo view`.
     WORKING_DIR_ABS="$(git rev-parse --show-toplevel 2>/dev/null)"
-    REPO_SLUG="$(git remote get-url origin 2>/dev/null | sed -E 's@.*github\.com[:/]([^/]+/[^/.]+)(\.git)?$@\1@')"
-    if [ -z "$REPO_SLUG" ] || [ "$REPO_SLUG" = "$(git remote get-url origin 2>/dev/null)" ]; then
+    ORIGIN_URL="$(git remote get-url origin 2>/dev/null)"
+    REPO_SLUG="$(printf '%s' "$ORIGIN_URL" | sed -E 's@.*github\.com[:/]([^/]+/[^/.]+)(\.git)?$@\1@')"
+    if [ -z "$REPO_SLUG" ] || [ "$REPO_SLUG" = "$ORIGIN_URL" ]; then
       REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)"
     fi
     HEAD_SHA="$(git rev-parse HEAD 2>/dev/null)"
