@@ -128,22 +128,22 @@ Written to `.uberdev/scan/<RUN_ID>/manifest.json` by `chunk.py` after Phase 0.
 {
   "run_id": "<RUN_ID>",
   "scope": "<whole-repo | path>",
-  "total_files": 142,
-  "total_bytes": 983041,
+  "chunk_budget_bytes": 49152,
+  "total_files": 123,
+  "skipped_files": 45,
+  "total_chunks": 7,
+  "overflow": false,
   "chunks": [
     {
-      "chunk_id": "chunk-00",
+      "id": 1,
       "files": ["src/auth/index.ts", "src/auth/guards.ts"],
-      "byte_count": 47821,
-      "priority": 1
+      "bytes": 47821
     }
-  ],
-  "overflow_chunks": [],
-  "circuit_breakers_tripped": []
+  ]
 }
 ```
 
-Fields: `run_id` (string), `scope` (string), `total_files` (int), `total_bytes` (int), `chunks[]` (array of `{chunk_id, files[], byte_count, priority}`), `overflow_chunks[]` (array of `chunk_id` strings capped due to CB1/CB7), `circuit_breakers_tripped[]` (list of breaker IDs tripped during this phase).
+Fields: `run_id` (string), `scope` (string), `chunk_budget_bytes` (int — the per-chunk byte budget used), `total_files` (int — kept after filtering), `skipped_files` (int — ignored/filtered/oversized), `total_chunks` (int — chunks produced before the `MAX_CHUNKS` cap), `overflow` (bool — true iff `total_chunks` exceeded `MAX_CHUNKS`, in which case `chunks[]` holds only the first `MAX_CHUNKS` entries), `chunks[]` (array of `{id, files[], bytes}` where `id` is a 1-based integer). CB1/CB7 overflow handling and tripped-breaker state are tracked by the orchestrator in `run-state.txt`, not in the manifest.
 
 ### C2 — Per-chunk findings (YAML)
 
