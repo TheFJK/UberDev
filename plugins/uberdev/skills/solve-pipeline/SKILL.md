@@ -610,9 +610,33 @@ Per-issue claim metadata is also persisted to `$UBERDEV_TMPDIR/solve-claim-N.jso
 # guard) above so probe failures abort BEFORE we mutate any GitHub state.
 # Order matters: label create → label add → assignee add → comment. If any
 # step fails, rollback all prior claims in the batch and exit 1.
-gh label create --force "$UBERDEV_ACTIVE_LABEL" \
-  --color "$UBERDEV_ACTIVE_LABEL_COLOR" \
-  --description "$UBERDEV_ACTIVE_LABEL_DESCRIPTION" >/dev/null 2>&1 || true
+#
+# FAIL-LOUD label provisioning (regression fix). The label MUST exist before
+# the per-issue `gh issue edit --add-label … --add-assignee …` below: gh
+# cannot auto-create a label from --add-label and fails that combined
+# mutation ATOMICALLY when the label is missing — taking the --add-assignee
+# half down with it. `--force` already makes this call idempotent (it updates
+# an existing label's colour/description, never errors on "already exists"),
+# so a non-zero exit here is ALWAYS a genuine failure — gh-auth gap, missing
+# repo write/triage scope, or an API/network error — never the benign
+# already-exists case. A prior `|| true` swallowed exactly that failure,
+# which then resurfaced downstream as a misleading "failed to write claim
+# (label or assignee) — check gh auth" abort pointing at the wrong cause.
+# Unlike the fail-soft `gh label create --force` in finish-branch /
+# dev-pipeline / findings-to-issues (where the dependent --add-label is ALSO
+# fail-soft and the label is a nice-to-have signal), here the label is the
+# canonical claim signal gating a fail-loud write, so its provisioning must
+# be fail-loud too. Runs once, before any claim is written (CLAIMED is still
+# empty), so a clean exit 1 needs no rollback. We capture gh's stderr so the
+# operator sees the real cause instead of the generic downstream message.
+if ! LABEL_PROVISION_ERR=$(gh label create --force "$UBERDEV_ACTIVE_LABEL" \
+    --color "$UBERDEV_ACTIVE_LABEL_COLOR" \
+    --description "$UBERDEV_ACTIVE_LABEL_DESCRIPTION" 2>&1); then
+  echo "error: failed to provision the '$UBERDEV_ACTIVE_LABEL' label that the claim protocol requires (gh issue edit --add-label cannot auto-create it). Check gh auth and repo write/triage permission." >&2
+  echo "  gh label create said: ${LABEL_PROVISION_ERR:-<no output>}" >&2
+  _uberdev_audit_emit claim_write_failed "{\"step\":\"label_create\"}" || true
+  exit 1
+fi
 
 # Dispatcher identity. `gh api user` returns the gh-CLI authenticated user's
 # login (matches what `--add-assignee @me` resolves to). `hostname -s` gives

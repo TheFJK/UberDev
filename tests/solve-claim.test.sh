@@ -122,8 +122,17 @@ assert_grep "$SOLVE_PIPELINE" \
   '^### 4\.5\. Claim protocol' \
   "Step 4.5 sub-section header present"
 assert_grep "$SOLVE_PIPELINE" \
-  'gh label create --force "\$UBERDEV_ACTIVE_LABEL"' \
-  "Idempotent gh label create (matches finish-branch/dev-pipeline pattern)"
+  'if ! LABEL_PROVISION_ERR=\$\(gh label create --force "\$UBERDEV_ACTIVE_LABEL"' \
+  "Step 4.5 label-create is FAIL-LOUD (if !-guarded, captures gh stderr) — the label gates a fail-loud combined claim write, so it cannot be fail-soft like finish-branch/dev-pipeline"
+assert_grep_not "$SOLVE_PIPELINE" \
+  'UBERDEV_ACTIVE_LABEL_DESCRIPTION" >/dev/null 2>&1 \|\| true' \
+  "Regression guard: the swallowing 'gh label create … || true' form is gone (a silent create-failure resurfaced downstream as a misleading 'failed to write claim' abort)"
+assert_grep "$SOLVE_PIPELINE" \
+  'UBERDEV_ACTIVE_LABEL_DESCRIPTION" 2>&1\); then' \
+  "Step 4.5 label-create captures gh stderr (2>&1) and opens the fail-loud if-branch ('); then') — locks the NEW form's tail, symmetric to the removed '|| true' tail"
+assert_grep "$SOLVE_PIPELINE" \
+  'claim_write_failed "\{.*step.*label_create' \
+  "Step 4.5 label-create failure emits claim_write_failed with a JSON {step:label_create} payload (locks object shape, not just substring) before exit 1"
 assert_grep "$SOLVE_PIPELINE" \
   'DISPATCHER_USER=\$\(gh api user --jq \.login' \
   "DISPATCHER_USER from gh api user (matches @me assignee)"
@@ -253,19 +262,19 @@ assert_grep "$SOLVE_CMD" \
   "small-team issue-claim protocol" \
   "solve.md mentions small-team claim protocol"
 
-echo "== Version bump 0.32.0 -> 0.33.0 propagated =="
+echo "== Version bump 0.33.0 -> 0.33.1 propagated =="
 assert_grep "$PLUGIN_JSON" \
-  '"version": "0.33.0"' \
-  "plugin.json bumped to 0.33.0"
+  '"version": "0.33.1"' \
+  "plugin.json bumped to 0.33.1"
 assert_grep "$MARKETPLACE_JSON" \
-  '"version": "0.33.0"' \
-  "marketplace.json bumped to 0.33.0"
+  '"version": "0.33.1"' \
+  "marketplace.json bumped to 0.33.1"
 assert_grep "$README" \
-  "version-0\\.33\\.0-blue" \
-  "README version badge bumped to 0.33.0"
+  "version-0\\.33\\.1-blue" \
+  "README version badge bumped to 0.33.1"
 assert_grep "$CHANGELOG" \
-  '^## \[0\.33\.0\]' \
-  "CHANGELOG has [0.33.0] section header"
+  '^## \[0\.33\.1\]' \
+  "CHANGELOG has [0.33.1] section header"
 
 echo "== #123 B1: closing-keyword regex left-anchor (rejects preclose/postfix/unresolve) =="
 # The closing-keyword regex in merge-pipeline Step 3.4 MUST require either start-of-input
