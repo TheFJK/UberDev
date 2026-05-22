@@ -243,7 +243,9 @@ _uberdev_goal_persist_fp() {
   local goal_id="$1" cycle="$2" fp="$3"
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
   local row; printf -v row '%s\t%s' "$cycle" "$fp"
-  _uberdev_goal_append "$tmpdir/goal-$goal_id-fingerprints.tsv" "$row"
+  # Source-of-truth write for the non-convergence fingerprint stream — propagate
+  # append failure explicitly (uniform with the two state-transition writers).
+  _uberdev_goal_append "$tmpdir/goal-$goal_id-fingerprints.tsv" "$row" || return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -323,6 +325,10 @@ uberdev_goal_audit() {
   }
   local ts; ts="$(date -u +%FT%TZ 2>/dev/null || date +%s)"
   local line; printf -v line '{"ts":"%s","event":"%s","payload":%s}' "$ts" "$event" "$payload"
+  # Best-effort telemetry sink: the append's rc propagates (last statement) and
+  # any write failure is surfaced to stderr by _uberdev_goal_append, but callers
+  # intentionally do NOT gate the state machine on audit durability — see
+  # uberdev_goal_pr_state_transition's `|| true`.
   _uberdev_goal_append "$tmpdir/goal-$goal_id.jsonl" "$line"
 }
 
@@ -341,8 +347,13 @@ uberdev_goal_pr_state_transition() {
   # audit call's rc mask it (this row is the PR machine's source of truth).
   local row; printf -v row '%s\t%s\t%s' "$pr" "$to" "$(_uberdev_goal_now_secs)"
   _uberdev_goal_append "$tmpdir/goal-$goal_id-pr-states.tsv" "$row" || return 1
+  # The state-row above is the PR machine's source of truth; the audit jsonl is
+  # best-effort telemetry. uberdev_goal_audit surfaces its own write failures to
+  # stderr, but a telemetry-write failure must NOT report a transition whose
+  # state-row already persisted as failed — so swallow audit's rc here and let
+  # this function's rc reflect the source-of-truth write.
   uberdev_goal_audit goal_pr_transition \
-    "{\"goal_id\":\"$goal_id\",\"pr\":$pr,\"from\":\"$from\",\"to\":\"$to\"}"
+    "{\"goal_id\":\"$goal_id\",\"pr\":$pr,\"from\":\"$from\",\"to\":\"$to\"}" || true
 }
 
 # uberdev_goal_issue_state_transition GOAL_ID ISSUE FROM TO
@@ -359,7 +370,12 @@ uberdev_goal_issue_state_transition() {
   esac
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
   local row; printf -v row '%s\t%s\t%s' "$issue" "$to" "$(_uberdev_goal_now_secs)"
-  _uberdev_goal_append "$tmpdir/goal-$goal_id-issue-states.tsv" "$row"   # #157
+  # Source-of-truth write for the issue machine. The append's rc already
+  # propagates (it is the last statement), but the explicit `|| return 1`
+  # documents that contract and future-proofs against a later trailing
+  # statement silently masking the failure — the exact class
+  # uberdev_goal_pr_state_transition hit before #157. (#157)
+  _uberdev_goal_append "$tmpdir/goal-$goal_id-issue-states.tsv" "$row" || return 1
 }
 
 # uberdev_goal_read_trust_signal AUDIT_JSON_PATH
@@ -443,8 +459,8 @@ uberdev_goal_check_fingerprint_repeat() {
     return 1
   fi
   # M8 — DRY: use the canonical helper instead of inlining the printf. The
-  # cycle-1 branch at line 325 already calls _uberdev_goal_persist_fp; this
-  # branch did the same write inline. Single source of truth means a future
+  # cycle-1 short-circuit branch above already calls _uberdev_goal_persist_fp;
+  # this branch did the same write inline. Single source of truth means a future
   # change to the TSV row shape only needs to land in the helper.
   _uberdev_goal_persist_fp "$goal_id" "$cycle" "$fp"
 }

@@ -221,7 +221,7 @@ assert_no_grep "$GOAL_SKILL" 'dry_run=1.*uberdev_dispatch_one|uberdev_dispatch_o
 
 echo
 echo "== G18: ReDoS-safe Blocks: parser =="
-# The bash-regex literal in lib/goal-state.sh line 95 is
+# The bash-regex literal in lib/goal-state.sh's _uberdev_goal_parse_blocks_line is
 # `^Blocks:\ \#([0-9]+)$` (escaped space, escaped hash). The plan's pattern
 # `\^Blocks: #\(\[0-9\]\+\)\$` omits the in-source backslashes; widen to
 # match either form so any future stylistic edit (e.g., dropping the
@@ -724,7 +724,7 @@ esac
 
 # BT11 — R5b: full happy-path multi-CLOSED -> dispatch + audit event.
 # Issue #140 risk 5 full; spec line 293-317; function lines 512-520.
-# uberdev_goal_state_init keeps parity with BT3 (line 360) — currently
+# uberdev_goal_state_init keeps parity with the BT3 block above — currently
 # redundant for the >>-append audit write, but defends against future
 # changes to uberdev_goal_audit's file-creation semantics.
 MOCK_PR_BODY="$_two_blocks_body"; MOCK_PR_RC=0
@@ -1961,6 +1961,40 @@ else
     FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "H6.tsv-write-failure-is-terminal" >&2
     printf '        expected non-zero rc when pr-states.tsv unwritable, got %s\n' "$_h6_rc" >&2
   fi
+fi
+
+# H7 — correctness flip-side of #157 (surfaced by post-impl-review): a
+# transition's rc must reflect the SOURCE-OF-TRUTH state-row write, not the
+# trailing best-effort audit. When pr-states.tsv persists but ONLY the audit
+# jsonl is unwritable, the transition DID happen → rc 0 (the audit failure is
+# still surfaced to stderr by _uberdev_goal_append, but must not report a
+# persisted transition as failed). Skipped where chmod can't deny writes.
+if _h_skip_perms; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "H7.skipped-no-reliable-chmod-deny"
+else
+  uberdev_goal_state_init test-h7
+  chmod 0444 "$_b12_tmpdir/goal-test-h7.jsonl"
+  UBERDEV_GOAL_ID=test-h7 uberdev_goal_pr_state_transition test-h7 5 dispatched pushed-reviewing 2>/dev/null
+  _h7_rc=$?
+  chmod 0644 "$_b12_tmpdir/goal-test-h7.jsonl" 2>/dev/null || true
+  assert_rc "$_h7_rc" "0" "H7.transition-rc-reflects-state-row-not-audit"
+  assert_grep_file "$_b12_tmpdir/goal-test-h7-pr-states.tsv" $'^5\tpushed-reviewing\t[0-9]{10}$' \
+    "H7.state-row-persisted-despite-audit-failure"
+fi
+
+# H8 — #156 audit degrade-path coverage (surfaced by post-impl-review): a forged
+# UBERDEV_GOAL_ID must NOT path the audit jsonl outside tmpdir. uberdev_goal_audit
+# validates the env-derived id and degrades to the safe goal-unknown.jsonl sink
+# with a stderr breadcrumb (audit must never abort the state machine). Portable.
+_h8_err="$_b12_tmpdir/h8-stderr"; : > "$_h8_err"
+( UBERDEV_TMPDIR="$_b12_tmpdir" UBERDEV_GOAL_ID="../pwned" uberdev_goal_audit goal_dispatched '{}' ) 2>"$_h8_err"
+assert_rc "$?" "0" "H8.audit-degrades-not-aborts"
+assert_grep_file "$_b12_tmpdir/goal-unknown.jsonl" '"event":"goal_dispatched"' "H8.audit-degrades-to-unknown-sink"
+assert_grep_file "$_h8_err" 'unsafe UBERDEV_GOAL_ID' "H8.audit-degrade-surfaces-breadcrumb"
+if ls "$_b12_tmpdir"/../*pwned* >/dev/null 2>&1; then
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "H8.no-escaped-audit-artifact" >&2
+else
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "H8.no-escaped-audit-artifact"
 fi
 
 # Cleanup: remove the isolated tmpdir contents (we created the whole
