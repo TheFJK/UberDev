@@ -1,5 +1,5 @@
 ---
-description: "Install short-form aliases (/issue, /solve, /turbo, /simplify, /review-pr, /merge, /dev, /testers, /ubergoal, /uberscan) as one-way forwarders to /uberdev:<command>"
+description: "Install short-form aliases (/issue, /solve, /turbo, /simplify, /review-pr, /merge, /dev, /testers, /ubergoal, /uberscan, /ubersimplify) as one-way forwarders to /uberdev:<command>"
 argument-hint: "[--force] [--dry-run]"
 allowed-tools: ["Bash", "Read"]
 ---
@@ -14,7 +14,7 @@ field for top-level aliases, so the only mechanism is shipping forwarder
 files into the user's standalone `~/.claude/commands/` directory (where
 filename = command name, no plugin prefix). See issue #16.
 
-This command installs 10 aliases — one per row in the ALIASES table below.
+This command installs 11 aliases — one per row in the ALIASES table below.
 Each is **one-way** — it points at the canonical `/uberdev:<command>`
 rather than duplicating its body. Existing `/uberdev:<command>`
 invocations are unaffected; this is purely additive ergonomics.
@@ -33,6 +33,7 @@ invocations are unaffected; this is purely additive ergonomics.
 | `/testers`   | `/uberdev:testers` |
 | `/ubergoal`  | `/uberdev:goal` |
 | `/uberscan`  | `/uberdev:uberscan` |
+| `/ubersimplify` | `/uberdev:ubersimplify` |
 
 Note `/review-pr` rather than `/review`: `/review` is a built-in
 Claude Code command, and the issue's collision rule is "plugin namespacing
@@ -91,7 +92,7 @@ SKIPPED=0
 
 # Canonical-name reference list (kept in sync with the ALIASES SSOT in
 # lib/aliases-sync.sh — verified by tests/aliases.test.sh A1/A6):
-#   for canonical in issue solve turbo simplify review-pr merge dev testers goal uberscan; do …
+#   for canonical in issue solve turbo simplify review-pr merge dev testers goal uberscan ubersimplify; do …
 
 while IFS='|' read -r SHORT CANON TOOLS; do
   [ -n "$SHORT" ] || continue

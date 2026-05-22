@@ -4,6 +4,16 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.0] - 2026-05-22
+
+### Added
+- `/uberdev:ubersimplify` — whole-codebase 3-lens simplification (Reuse/Quality/Efficiency). Chunks the repo (shared `lib/chunk.py`), audits each chunk with the `code-simplifier` lenses in concurrent waves, applies preserve-behavior fixes via `code-fixer` as one `refactor:` commit per chunk on a new branch, opens ONE PR, and files leftover blocker findings as GitHub issues (`ubersimplify-finding` label). `--audit-only` for a read-only scan. Seven circuit breakers bound cost (RFC 0008).
+- `/ubersimplify` short-form alias for `/uberdev:ubersimplify` (alias count 10 → 11).
+- `findings-to-issues`: `ubersimplify-aggregate` accepted source.
+
+### Changed
+- `chunk.py` moved from `skills/uberscan-pipeline/` to `lib/chunk.py` (shared by `/uberscan` and `/ubersimplify`; path-only, behavior unchanged).
+
 ## [0.32.0] - 2026-05-22
 
 ### Added
