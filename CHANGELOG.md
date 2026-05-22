@@ -4,6 +4,11 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.3] - 2026-05-22
+
+### Security
+- **Hardened the predictable `$UBERDEV_TMPDIR` dispatch paths against TOCTOU symlink-swap / pre-creation (#155).** `lib/dispatch.sh` writes `solve-bg-stdout-<issue>.log` and `solve-bg-status-<issue>.json[.pid]` to a world-writable tmpdir at intentionally predictable paths (the `/goal` watcher polls them by name, so `mktemp`-randomisation isn't an option). An attacker could pre-create a symlink there to clobber a victim file or feed attacker-chosen bytes into the `DISPATCH_ID` extraction. New `_uberdev_dispatch_tmp_target_safe` guard rejects a symlink, a foreign-owned entry, or a non-regular file at the predicted path; `_uberdev_dispatch_prepare_tmp_target` then re-creates the file `0600` under `set -C` (noclobber) so the sticky-bit dir protects it from a later swap (and the guard fails CLOSED when ownership is undeterminable — e.g. a minimal `stat` lacking both `-f` and `-c`). **All three** dispatch backends (`claude-bg`, `background`, `wezterm`) fail-CLOSED (rc=3 + `dispatch_setup_failed` audit with `phase ∈ {tmp_target_unsafe, tmp_target_create, pid_target_unsafe}`) instead of writing through. Success path unchanged. Regression fixture in `tests/dispatch-claude-bg.test.sh` (symlink pre-creation → fail-closed). Closes #155.
+
 ## [0.33.2] - 2026-05-22
 
 ### Fixed

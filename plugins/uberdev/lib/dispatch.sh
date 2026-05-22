@@ -180,11 +180,90 @@ uberdev_dispatch_one() {
 # _uberdev_dispatch_claude_bg ISSUE_NUM TIER PROMPT_FILE
 # Extract of the v0.22.0 inline `claude --bg` dispatch. Sets DISPATCH_RC and
 # DISPATCH_ID (the bg session id) for the caller. No behaviour change.
+# --- TOCTOU symlink-swap / pre-creation guard for predictable tmp paths (#155) ---
+# $UBERDEV_TMPDIR is world-writable (default /tmp) and the bg-stdout / status
+# paths are intentionally PREDICTABLE so the /goal watcher can poll them by name
+# — mktemp-randomisation would break that discovery contract. Instead, guard
+# every predictable redirect target before writing: reject a symlink (an
+# attacker can point it at a victim file so our `>` clobbers it, or so the
+# DISPATCH_ID extraction reads attacker-chosen bytes) and reject an entry NOT
+# owned by the current EUID (pre-creation in a non-sticky dir) or one that is
+# not a regular file. A same-EUID regular file is allowed (legitimate
+# re-dispatch — `>` truncates it). Returns non-zero on reject.
+_uberdev_dispatch_tmp_target_safe() {
+  local target="$1" owner_uid
+  if [ -L "$target" ]; then
+    echo "error: refusing to write through a symlink at the predicted path: $target (possible TOCTOU symlink-swap)" >&2
+    return 1
+  fi
+  if [ -e "$target" ]; then
+    # Probe GNU `stat -c` FIRST, then BSD `stat -f`. Ordering is load-bearing:
+    # GNU stat treats `-f` as --file-system, so `stat -f '%u' FILE` on Linux
+    # prints filesystem info (non-empty, with a non-zero rc from the bogus '%u'
+    # operand) instead of failing cleanly — probing `-f` first there yields a
+    # garbage owner_uid that never equals `id -u` and spuriously fail-closes
+    # the happy path. The integer-validation below is the backstop: any
+    # garbage / empty result → undeterminable → fail CLOSED.
+    owner_uid="$(stat -c '%u' "$target" 2>/dev/null || stat -f '%u' "$target" 2>/dev/null || true)"
+    case "$owner_uid" in ''|*[!0-9]*) owner_uid="" ;; esac
+    if [ -z "$owner_uid" ]; then
+      # stat unavailable / unparseable in BOTH GNU (-c) and BSD (-f) forms
+      # (e.g. busybox / minimal image). We cannot prove the entry is ours, so
+      # fail CLOSED — an empty owner_uid must NOT skip the ownership gate (that
+      # would let an attacker-owned pre-created file through). The symlink +
+      # regular-file checks do NOT backstop ownership, so this is load-bearing.
+      echo "error: cannot determine owner of predicted path (stat -c/-f both failed): $target — failing closed" >&2
+      return 1
+    fi
+    if [ "$owner_uid" != "$(id -u)" ]; then
+      echo "error: refusing predicted path owned by uid=$owner_uid (expected $(id -u)): $target (possible pre-creation attack)" >&2
+      return 1
+    fi
+    if [ ! -f "$target" ]; then
+      echo "error: predicted path exists and is not a regular file: $target" >&2
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# _uberdev_dispatch_prepare_tmp_target PATH ISSUE_NUM BACKEND
+#   Guard PATH (above), then (re)create it 0600-owned-by-us under `set -C`
+#   (noclobber) so the create fails if anything races into the path after the
+#   guard, and the sticky bit on $UBERDEV_TMPDIR then protects the file we own
+#   from a later swap. Emits a dispatch_setup_failed audit + returns 3 on any
+#   failure (fail-CLOSED). This is the spec-accepted mitigation (#155): it
+#   decisively raises the bar without a C-level O_NOFOLLOW open, which bash
+#   redirects cannot express; the residual guard→create window is closed by
+#   `set -C`, and the create→use window by the sticky-dir ownership invariant.
+_uberdev_dispatch_prepare_tmp_target() {
+  local target="$1" issue="$2" backend="$3"
+  if ! _uberdev_dispatch_tmp_target_safe "$target"; then
+    _uberdev_dispatch_audit dispatch_setup_failed \
+      "{\"issue\":$issue,\"phase\":\"tmp_target_unsafe\",\"backend\":\"$backend\",\"rc\":3}"
+    return 3
+  fi
+  rm -f -- "$target" 2>/dev/null
+  if ! ( umask 077; set -C; : > "$target" ) 2>/dev/null; then
+    _uberdev_dispatch_audit dispatch_setup_failed \
+      "{\"issue\":$issue,\"phase\":\"tmp_target_create\",\"backend\":\"$backend\",\"rc\":3}"
+    return 3
+  fi
+  return 0
+}
+
 _uberdev_dispatch_claude_bg() {
   local ISSUE_NUM="$1" TIER="$2" PROMPT_FILE="$3"
   DISPATCH_RC=0
   DISPATCH_ID=""
   local BG_STDOUT_LOG="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM.log"
+  # TOCTOU hardening (#155): guard + 0600-create the predictable bg-stdout path
+  # before any case arm redirects to it (3 redirect sites below).
+  if ! _uberdev_dispatch_prepare_tmp_target "$BG_STDOUT_LOG" "$ISSUE_NUM" "claude-bg"; then
+    DISPATCH_RC=3
+    DISPATCH_LOG="$BG_STDOUT_LOG"
+    return 3
+  fi
   # UBERDEV_TURBO=1 chain-wide signal for /turbo (AUTO_MODE=1) only; env(1)
   # mediates the inline-prefix because timeout(1) is argv[0]. Empty array
   # under AUTO_MODE=0 -> no-op passthrough.
@@ -298,6 +377,14 @@ _uberdev_dispatch_background() {
   local WORKTREE_BRANCH="worktree-solve-issue-$ISSUE_NUM"
   local LOG_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM.log"
   local STATUS_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-bg-status-$ISSUE_NUM.json"
+  # TOCTOU hardening (#155): guard + 0600-create the predictable log + pid
+  # paths before any redirect writes to them (world-writable $UBERDEV_TMPDIR).
+  if ! _uberdev_dispatch_prepare_tmp_target "$LOG_FILE" "$ISSUE_NUM" "background"; then
+    DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
+  fi
+  if ! _uberdev_dispatch_prepare_tmp_target "$STATUS_FILE.pid" "$ISSUE_NUM" "background"; then
+    DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
+  fi
   # Explicit dispatcher-controlled worktree — sidesteps the Windows
   # worktree-isolation bug #40164 in the --bg backend's own --worktree path
   # handling. MSYS_NO_PATHCONV stops Git Bash rewriting the POSIX path.
@@ -334,6 +421,15 @@ _uberdev_dispatch_background() {
     disown 2>/dev/null || true
   )
   DISPATCH_RC=$?
+  # #155: re-verify the .pid side-file is ours and not a symlink before parsing
+  # (defence-in-depth across the subshell-write → parent-read window — a swap
+  # here could feed an attacker-chosen pid into DISPATCH_ID).
+  if ! _uberdev_dispatch_tmp_target_safe "$STATUS_FILE.pid"; then
+    DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"
+    _uberdev_dispatch_audit dispatch_setup_failed \
+      "{\"issue\":$ISSUE_NUM,\"phase\":\"pid_target_unsafe\",\"backend\":\"background\",\"rc\":3}"
+    return 3
+  fi
   DISPATCH_ID="$(cat "$STATUS_FILE.pid" 2>/dev/null || echo '')"
   # S10 cleanup: $STATUS_FILE.pid is a one-shot inter-subshell side file
   # whose only purpose is bridging the pid back from the subshell above.
@@ -352,6 +448,9 @@ _uberdev_dispatch_background() {
   # heredoc write so a failed write ($UBERDEV_TMPDIR unwritable, disk full,
   # etc.) surfaces as dispatch_setup_failed instead of a fake-success audit
   # with no status file for Step 6 to read.
+  if ! _uberdev_dispatch_prepare_tmp_target "$STATUS_FILE" "$ISSUE_NUM" "background"; then
+    DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
+  fi
   if ! cat > "$STATUS_FILE" <<EOF
 {"issue":$ISSUE_NUM,"tier":"$TIER","backend":"background","pid":"${DISPATCH_ID:-}","log":"$LOG_FILE","worktree":"$WORKTREE_DIR","branch":"$WORKTREE_BRANCH"}
 EOF
@@ -433,6 +532,13 @@ _uberdev_dispatch_wezterm() {
   local WORKTREE_DIR=".claude/worktrees/solve-issue-$ISSUE_NUM"
   local WORKTREE_BRANCH="worktree-solve-issue-$ISSUE_NUM"
   local LOG_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM.log"
+  # TOCTOU hardening (#155): guard + 0600-create the predictable log path
+  # before the worktree-add redirect below — the wezterm backend writes the
+  # SAME world-writable path the claude-bg / background backends harden, so it
+  # must fail-CLOSED on a symlink/foreign-owned target too.
+  if ! _uberdev_dispatch_prepare_tmp_target "$LOG_FILE" "$ISSUE_NUM" "wezterm"; then
+    DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
+  fi
   # The backend runs its own worktree add — a pane's `claude -p` does not get
   # native --worktree. Absolute path, quoted (repo path may contain spaces).
   # MSYS_NO_PATHCONV stops Git Bash rewriting the path.

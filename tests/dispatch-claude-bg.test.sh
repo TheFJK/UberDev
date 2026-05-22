@@ -479,6 +479,68 @@ _assert_extract_empty 'some unrelated noise\nbackground started but not the mark
                       'missing-marker stdout yields empty (B3 fail-CLOSED guard fires via the empty -z "$DISPATCH_ID" arm; grep rc=1 here, not >=2)'
 
 echo
+echo "== #155: TOCTOU symlink-swap / pre-creation hardening (structural) =="
+assert_grep "$DISPATCH_LIB" \
+  '_uberdev_dispatch_tmp_target_safe\(\) \{' \
+  "#155 — _uberdev_dispatch_tmp_target_safe guard helper defined"
+assert_grep "$DISPATCH_LIB" \
+  'if \[ -L "\$target" \]; then' \
+  "#155 — guard rejects a symlink at the predicted path"
+assert_grep "$DISPATCH_LIB" \
+  '_uberdev_dispatch_prepare_tmp_target "\$BG_STDOUT_LOG" "\$ISSUE_NUM" "claude-bg"' \
+  "#155 — claude-bg backend guards BG_STDOUT_LOG before the redirect sites"
+assert_grep "$DISPATCH_LIB" \
+  'umask 077; set -C; : > "\$target"' \
+  "#155 — prepare creates target 0600 under noclobber (closes the guard->create race)"
+assert_grep "$DISPATCH_LIB" \
+  'pid_target_unsafe' \
+  "#155 — background backend re-verifies \$STATUS_FILE.pid ownership before parsing"
+assert_grep "$DISPATCH_LIB" \
+  '_uberdev_dispatch_prepare_tmp_target "\$LOG_FILE" "\$ISSUE_NUM" "wezterm"' \
+  "#155 (review) — wezterm backend also guards its identical predictable LOG_FILE path"
+assert_grep "$DISPATCH_LIB" \
+  'if \[ -z "\$owner_uid" \]; then' \
+  "#155 (review) — guard fails CLOSED when ownership is undeterminable (empty owner_uid, e.g. minimal stat)"
+
+echo
+echo "== #155: fail-CLOSED behaviour (runtime regression fixture) =="
+# Spec-acceptance fixture: pre-creating a symlink at the predicted path MUST
+# cause the guard to fail-CLOSED (non-zero) rather than write through it; a
+# clean path passes; prepare creates 0600 and fail-closes (rc=3) on a symlink.
+# `set +eu`: CI runs test scripts under `bash -e -o pipefail`, so a bare
+# command returning non-zero (the prepare-on-symlink call legitimately returns
+# 3) would otherwise abort the subshell before we can assert on it. The
+# symlink + perm sub-checks are gated on real-symlink support so the fixture
+# stays robust on platforms where `ln -s` is a copy (Windows Git Bash without
+# developer mode) — the structural assertions above still lock the guard code.
+(
+  set +eu
+  . "$DISPATCH_LIB" >/dev/null 2>&1
+  _t="$(mktemp -d)" || exit 20
+  _uberdev_dispatch_tmp_target_safe "$_t/clean.log" || exit 12                  # clean path MUST pass (all platforms)
+  _uberdev_dispatch_prepare_tmp_target "$_t/p.log" 99 claude-bg >/dev/null 2>&1 || exit 13
+  [ -f "$_t/p.log" ] || exit 14                                                 # prepare created the file (all platforms)
+  ln -s /etc/passwd "$_t/evil.log" 2>/dev/null
+  if [ -L "$_t/evil.log" ]; then                                               # real-symlink platform (Linux/macOS)
+    _uberdev_dispatch_tmp_target_safe "$_t/evil.log" >/dev/null 2>&1; [ "$?" -ne 0 ] || exit 11   # symlink MUST be rejected
+    ln -s /etc/passwd "$_t/p2.log" 2>/dev/null
+    _uberdev_dispatch_prepare_tmp_target "$_t/p2.log" 99 claude-bg >/dev/null 2>&1; [ "$?" -eq 3 ] || exit 15  # prepare on symlink -> rc 3
+    _perm="$(stat -c '%a' "$_t/p.log" 2>/dev/null || stat -f '%Lp' "$_t/p.log" 2>/dev/null)"
+    [ "$_perm" = "600" ] || exit 16                                            # created 0600 (perms meaningful on this platform)
+  fi
+  rm -rf "$_t"
+  exit 0
+)
+_rc155=$?
+if [ "$_rc155" -eq 0 ]; then
+  echo "  PASS  #155 runtime — symlink fail-CLOSED, clean pass, 0600 create, prepare-symlink rc=3"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  #155 runtime — guard behaviour (subshell exit $_rc155)"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
