@@ -122,8 +122,14 @@ assert_grep "$SOLVE_PIPELINE" \
   '^### 4\.5\. Claim protocol' \
   "Step 4.5 sub-section header present"
 assert_grep "$SOLVE_PIPELINE" \
-  'gh label create --force "\$UBERDEV_ACTIVE_LABEL"' \
-  "Idempotent gh label create (matches finish-branch/dev-pipeline pattern)"
+  'if ! LABEL_PROVISION_ERR=\$\(gh label create --force "\$UBERDEV_ACTIVE_LABEL"' \
+  "Step 4.5 label-create is FAIL-LOUD (if !-guarded, captures gh stderr) — the label gates a fail-loud combined claim write, so it cannot be fail-soft like finish-branch/dev-pipeline"
+assert_grep_not "$SOLVE_PIPELINE" \
+  'UBERDEV_ACTIVE_LABEL_DESCRIPTION" >/dev/null 2>&1 \|\| true' \
+  "Regression guard: the swallowing 'gh label create … || true' form is gone (a silent create-failure resurfaced downstream as a misleading 'failed to write claim' abort)"
+assert_grep "$SOLVE_PIPELINE" \
+  'claim_write_failed.*label_create' \
+  "Step 4.5 label-create failure emits claim_write_failed{step:label_create} before exit 1"
 assert_grep "$SOLVE_PIPELINE" \
   'DISPATCHER_USER=\$\(gh api user --jq \.login' \
   "DISPATCHER_USER from gh api user (matches @me assignee)"
