@@ -462,16 +462,6 @@ _uberdev_require_claude_version "2.1.139"
 # claim json, status file) lives under it. Git Bash on native Windows sets
 # TMPDIR; fall back to /tmp on Unix. Exported so lib/dispatch.sh inherits it.
 export UBERDEV_TMPDIR="${TMPDIR:-/tmp}"
-# BG_PROMPT_MODE: hardcoded `argv` because claude --bg 2.1.139 has no documented
-# --prompt-file or stdin-passthrough form (prior-art research). T6 implements the
-# bash-array argv form (spec-reviewer finding #1). A runtime probe is deferred until
-# upstream documents a passthrough flag — `claude --bg --help` is NOT introspective
-# in 2.1.139 (it spawns a real session).
-# TODO(upstream-claude-code-rfe): switch to file or stdin mode once a documented
-# --prompt-file / stdin-passthrough form ships in Claude Code (tracking the RFE
-# for safer prompt-passthrough). The file/stdin arms below remain in place as a
-# pre-wired migration target; today only the argv arm is exercised at runtime.
-BG_PROMPT_MODE=argv
 if [ -r "${CLAUDE_PLUGIN_ROOT:-}/lib/config-read.sh" ]; then
   # shellcheck source=/dev/null
   . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
@@ -480,94 +470,11 @@ else
   MAX_PARALLEL_BG_AGENTS=6
 fi
 
-# --- Phase A: hoisted from retired launcher heredoc (#85 / v0.22.0) ---
-# These four variables formerly lived inside the per-issue launcher shell
-# script that Step 5b previously wrote (the per-N temp-file form is now
-# retired). The launcher is retired in v0.22.0; the values are
-# batch-invariant, so resolve them once at Phase A entry and let the
-# inline Step 5b' dispatch (Phase B) consume them.
-
-# MODEL: single-quoted to keep zsh from glob-evaluating [1m] under NOMATCH.
-MODEL='claude-opus-4-7[1m]'
-
-# PERM_FLAG: issue bodies are remote-fetched (untrusted). Default mode gates
-# every tool use. PERM_FLAG=( --permission-mode auto ) enables Claude Code's
-# AI classifier — auto-approves safe ops (read, in-scope edits, tests, push
-# to feature branch) and soft-denies dangerous ones (force push, rm -rf on
-# pre-existing files, exfil, self-modification). Strictly safer than
-# --dangerously-skip-permissions for autonomous /solve runs.
-#
-# Array form (not scalar): zsh's default SH_WORD_SPLIT=off would treat a
-# scalar `PERM_FLAG="--permission-mode auto"` passed as unquoted `$PERM_FLAG`
-# at command position as ONE argv slot, and `claude` would reject it with
-# `error: unknown option '--permission-mode auto'`. Same zsh trap as the
-# TIMEOUT_BIN block below — but the fix shape differs by token count:
-# TIMEOUT_BIN holds a single argv[0] token and uses quoted-scalar form
-# (`"$TIMEOUT_BIN"`); PERM_FLAG/EFFORT_FLAG hold multi-token sequences and
-# need array expansion. `"${PERM_FLAG[@]}"` at the call site expands an
-# empty array to zero slots and a populated one to its elements verbatim
-# — identical behaviour in bash and zsh.
-PERM_FLAG=()
-[[ "$AUTO_PERMISSIONS" == "1" ]] && PERM_FLAG=( --permission-mode auto )
-
-# EFFORT_FLAG is the threaded form of EFFORT_LEVEL (resolved by the Phase A
-# --effort parser block above). Bash+zsh array, expanded as
-# `"${EFFORT_FLAG[@]}"` at each dispatch arm — see PERM_FLAG above for the
-# zsh-word-split rationale. Regression guard: tests/dispatch-claude-bg.test.sh
-# anchors on `^EFFORT_FLAG=\( --effort `; tests/solve-pipeline-zsh.test.sh
-# captures the dispatched argv under a real zsh subshell.
-EFFORT_FLAG=( --effort "$EFFORT_LEVEL" )
 # See `_uberdev_audit_emit` definition near the top of Phase A (anchor:
 # `^_uberdev_audit_emit\(\)`); no-op when $SOLVE_AUDIT_LOG is unset.
 _uberdev_audit_emit effort_resolved \
   "{\"source\":\"$EFFORT_SOURCE\",\"level\":\"$EFFORT_LEVEL\"}" || true
 
-# Wall-clock timeout: read command_timeouts.solve from .claude/uberdev.local.md
-# (env override: UBERDEV_SOLVE_TIMEOUT; default 3600s; range [60, 86400]).
-# config-read.sh is already sourced by the MAX_PARALLEL_BG_AGENTS block above
-# when readable, so `uberdev_read_int_in_range` is in scope here; guard with
-# `command -v` so this block is independently sourceable.
-if command -v uberdev_read_int_in_range >/dev/null 2>&1; then
-  SOLVE_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.solve UBERDEV_SOLVE_TIMEOUT 60 86400 3600)"
-elif [ -r "${CLAUDE_PLUGIN_ROOT:-}/lib/config-read.sh" ]; then
-  # shellcheck source=/dev/null
-  . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
-  SOLVE_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.solve UBERDEV_SOLVE_TIMEOUT 60 86400 3600)"
-else
-  echo "warning: config-read.sh not found at ${CLAUDE_PLUGIN_ROOT:-}/lib/; uberdev.local.md timeout settings ignored" >&2
-  SOLVE_TIMEOUT=3600
-fi
-
-# Wrap claude in timeout(1)/gtimeout when one is on PATH; fail-open otherwise
-# (graceful degradation when required tooling is unavailable). macOS does NOT
-# ship GNU timeout; `brew install coreutils` installs it as `gtimeout` (Homebrew
-# `g`-prefix), so we probe both. The if/elif/else form is mandatory: zsh's
-# default SH_WORD_SPLIT=off would treat a scalar `$PREFIX="timeout 3600"` at
-# command position as ONE token and abort with "command not found: timeout 3600"
-# under set -e. Quoting "$TIMEOUT_BIN" keeps it as a single argv[0] token.
-# Probe order (RFC 0004 §3.8): the explicit MSYS coreutils path FIRST, so on
-# native Windows Git Bash we get coreutils `timeout` and never resolve a bare
-# `timeout` to C:\Windows\System32\timeout.exe (an incompatible command that
-# takes /T /NOBREAK, not a duration+command). Then the Unix `timeout`, then
-# macOS's Homebrew `gtimeout`.
-TIMEOUT_BIN=""
-if   [ -x /usr/bin/timeout ];                 then TIMEOUT_BIN=/usr/bin/timeout
-elif command -v timeout  >/dev/null 2>&1;     then TIMEOUT_BIN=timeout
-elif command -v gtimeout >/dev/null 2>&1;     then TIMEOUT_BIN=gtimeout
-fi
-
-# Runtime guard: if neither timeout(1) nor gtimeout(1) is on PATH, the
-# bg dispatch below will pass empty wrap args to claude --bg, failing
-# silently. Detect and abort with an actionable install pointer.
-# Regression guard: tests/config-override.test.sh I2f anchors on this
-# `if [[ -n "$TIMEOUT_BIN" ]]; then` pattern; do not collapse to `[[ … ]] ||`.
-if [[ -n "$TIMEOUT_BIN" ]]; then
-  : # timeout(1) or gtimeout(1) available; bg dispatch arms wrap correctly
-else
-  echo "error: neither timeout(1) nor gtimeout(1) found on PATH" >&2
-  echo "       install with: brew install coreutils  # provides gtimeout" >&2
-  exit 1
-fi
 # --- Phase A: dispatch preflight + Windows guards (NEW v0.29.0 — RFC 0004) ---
 # Native-Windows-no-bash fast-fail: this pipeline is bash; under the
 # PowerShell tool it cannot parse. If we are on Windows and $BASH is unset,
@@ -588,6 +495,7 @@ if [ -r "${CLAUDE_PLUGIN_ROOT:-}/lib/dispatch.sh" ]; then
   # shellcheck source=/dev/null
   . "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh"
   uberdev_dispatch_preflight || exit 1
+  uberdev_dispatch_resolve_env || exit 1
 else
   echo "error: lib/dispatch.sh not found at ${CLAUDE_PLUGIN_ROOT:-}/lib/" >&2
   exit 1
