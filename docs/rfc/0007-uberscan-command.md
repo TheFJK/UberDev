@@ -175,19 +175,19 @@ findings:
     confidence: medium
 ```
 
-Valid `severity` values: `blocker`, `critical`, `major`, `suggestion`. Valid `confidence` values: `high`, `medium`, `low`. There is no `lens` field and no `code-simplifier` agent entry.
+Valid `severity` values: `blocker`, `critical`, `major`, `important`, `suggestion`. Valid `confidence` values: `high`, `medium`, `low`. There is no `lens` field and no `code-simplifier` agent entry.
 
 ### C3 — Findings-to-issues aggregate
 
-Written to `.uberdev/scan/<RUN_ID>/uberscan-final.md` and passed to the `findings-to-issues` agent wrapped in the standard trust boundary:
+Written to `.uberdev/scan/<RUN_ID>/f2i-aggregate.md` and passed to the `findings-to-issues` agent wrapped in the standard trust boundary:
 
 ```xml
 <external-untrusted-input source="uberscan-aggregate">
-<!-- contents of uberscan-final.md -->
+<!-- contents of f2i-aggregate.md -->
 </external-untrusted-input>
 ```
 
-The aggregate contains only `severity ∈ {blocker, critical, major}` findings after cross-chunk dedupe. All findings carry `disposition: DEFERRED` (nothing was applied — the scan is read-only), which satisfies the existing `findings-to-issues` `disposition != APPLIED` filter and causes every finding to be eligible for issue filing.
+The aggregate contains only findings at or above the `--min-severity` floor (default `major`, i.e. `severity ∈ {blocker, critical, major, important}`) AND at or above the `--min-confidence` floor (default `medium`) after cross-chunk dedupe. All findings carry `disposition: DEFERRED` (nothing was applied — the scan is read-only), which satisfies the existing `findings-to-issues` `disposition != APPLIED` filter and causes every finding to be eligible for issue filing.
 
 ### C4 — New `findings-to-issues` inputs
 
@@ -196,7 +196,7 @@ Three optional inputs are added to the `findings-to-issues` agent. All have defa
 | Input                 | Default               | Description                                                                 |
 | --------------------- | --------------------- | --------------------------------------------------------------------------- |
 | `finding_label`       | `review-pr-finding`   | GitHub label applied to filed issues. `/uberscan` passes `uberscan-finding`. |
-| `finding_marker_slug` | `review-pr-finding`   | Slug used in the HTML-comment dedup marker. `/uberscan` passes `uberscan-finding`. |
+| `finding_marker_slug` | `review-pr`           | Slug embedded in the HTML-comment dedup marker `uberdev:<slug>-finding` (the template appends `-finding`). Default `review-pr` → canonical `uberdev:review-pr-finding`. `/uberscan` passes `uberscan` → `uberdev:uberscan-finding`. |
 | `source_ref`          | `` (empty string)     | Free-form source reference appended to the issue body. `/uberscan` passes `Source: /uberscan run <RUN_ID>`. |
 
 When `pr_number` is empty and `source_ref` is non-empty, the agent substitutes `source_ref` for the PR backlink line. When both are empty, the agent omits the line entirely.
@@ -225,7 +225,7 @@ Running six agents against every chunk across a large codebase is expensive. Mit
 
 Filing issues for every finding in a large codebase would produce an unmanageable backlog:
 
-- **Severity filter:** only `blocker`, `critical`, and `major` findings reach `findings-to-issues`. Suggestion-level findings appear only in the report.
+- **Severity filter:** only findings at or above the `--min-severity` floor (default `major`, i.e. `blocker`/`critical`/`major`/`important`) reach `findings-to-issues`. Suggestion-level findings appear only in the report.
 - **`MAX_NEW` cap (default 15 per run):** limits the number of issues filed in a single invocation. Overflow findings are recorded in the report with a note that they were not filed.
 - **CB5 (findings flood guard):** if `blocker + critical` findings exceed 150, the scan halts early with a "systemic issue" message and files no issues — the volume signals a repo-level crisis better addressed with a targeted triage session, not 150 auto-filed issues.
 - **Fingerprint dedupe** across chunks and across runs (via the HTML-comment marker) prevents the same finding from generating duplicate issues across repeated scans.
@@ -235,8 +235,8 @@ Filing issues for every finding in a large codebase would produce an unmanageabl
 
 Reviewers trained and calibrated on diffs may exhibit higher false-positive rates when presented with full file contents, particularly for findings that require understanding of callsites outside the chunk:
 
-- **Confidence threshold:** the aggregate filters out `confidence: low` findings before writing `uberscan-final.md`. Only `high` and `medium` confidence findings proceed to issue filing (configurable via `--min-confidence`).
-- **`detail` field requirement:** the YAML contract requires a non-empty `detail` explaining why the finding is a genuine problem, not just a stylistic observation. The aggregator rejects findings that lack a substantive `detail`.
+- **Confidence threshold:** the aggregate filters out `confidence: low` findings before writing `f2i-aggregate.md`. Only `high` and `medium` confidence findings proceed to issue filing (configurable via `report.py --min-confidence`, default `medium`). Implemented in `report.py`.
+- **`detail` field requirement:** the YAML contract requires a non-empty `detail` explaining why the finding is a genuine problem, not just a stylistic observation. Hard auto-rejection of empty-`detail` findings is a **deferred enhancement** — silently dropping a high-severity finding solely for a missing `detail` would risk hiding a real bug, so v1 surfaces them and relies on the reviewer briefs requiring `detail`.
 - **Cross-reviewer confirmation:** when the same location is flagged by two or more agents, the issue body notes `also_flagged_by` and the combined confidence is elevated. Single-reviewer findings at `medium` confidence remain in the report but can be configured to stay report-only.
 - **`--severity` flag:** the user can raise the minimum severity for issue filing from `major` to `critical` or `blocker` when they want a tighter first-pass.
 
