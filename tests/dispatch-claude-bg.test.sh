@@ -127,10 +127,10 @@ assert_grep "$SOLVE_PIPELINE" \
   'uberdev_read_enum solve_effort UBERDEV_SOLVE_EFFORT' \
   "Phase A reads solve_effort from .claude/uberdev.local.md via uberdev_read_enum"
 assert_grep "$DISPATCH_LIB" \
-  '^EFFORT_FLAG=\( --effort "\$EFFORT_LEVEL" \)$' \
+  '^[[:space:]]*EFFORT_FLAG=\( --effort "\$EFFORT_LEVEL" \)$' \
   "Phase A hoist binds EFFORT_FLAG as a bash+zsh array — scalar form regresses to a one-slot \`--effort max\` argv element under zsh SH_WORD_SPLIT=off (v0.22.2 fix)"
 assert_grep "$DISPATCH_LIB" \
-  '^PERM_FLAG=\(\)$' \
+  '^[[:space:]]*PERM_FLAG=\(\)$' \
   "Phase A hoist binds PERM_FLAG as an empty bash+zsh array — same zsh-word-split rationale as EFFORT_FLAG (v0.22.2 fix)"
 assert_grep "$DISPATCH_LIB" \
   'PERM_FLAG=\( --permission-mode auto \)' \
