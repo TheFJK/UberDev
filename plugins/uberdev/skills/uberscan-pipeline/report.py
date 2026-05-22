@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Aggregate per-chunk findings + global passes; render report.md and the findings-to-issues aggregate."""
+"""Aggregate per-chunk findings + repo-global passes; render report.md and the findings-to-issues aggregate."""
 import argparse, glob, hashlib, os, re, sys, yaml
 
 SEV_RANK = {"blocker": 4, "critical": 3, "major": 2, "important": 2, "suggestion": 1}
-ISSUE_SEVERITIES = {"blocker", "critical", "major", "important"}  # suggestion is report-only
+# Severities eligible for issue filing (suggestion is always report-only).
+# Narrowed further at emit time by --min-severity.
+ISSUE_SEVERITIES = {"blocker", "critical", "major", "important"}
+CONF_RANK = {"low": 1, "medium": 2, "high": 3}  # findings below the floor stay report-only
 
 
 def norm(s):
@@ -12,6 +15,13 @@ def norm(s):
 
 def fingerprint(loc, summary):
     return hashlib.sha256(f"{loc}:{norm(summary)}".encode()).hexdigest()[:16]
+
+
+def cell(s):
+    """Escape a value for a markdown table cell: collapse newlines (so one
+    finding stays one row) and neutralize the `|` column delimiter. Mirrors the
+    sibling testers-pipeline/report.py escaping convention."""
+    return re.sub(r"\s*\n\s*", " ", str("" if s is None else s)).replace("|", "\\|")
 
 
 def load_findings(chunks_dir):
@@ -36,12 +46,35 @@ def dedupe(rows):
     return kept
 
 
+def read_global(chunks_dir, name):
+    """Return the contents of a Phase-1b repo-global pass artifact, or None."""
+    path = os.path.join(chunks_dir, name)
+    if os.path.isfile(path):
+        try:
+            return open(path).read().strip()
+        except OSError:
+            return None
+    return None
+
+
+def severities_at_or_above(floor):
+    """Issue-filing severities whose rank is >= the floor severity (--min-severity)."""
+    floor_rank = SEV_RANK.get(floor, SEV_RANK["major"])
+    return {s for s in ISSUE_SEVERITIES if SEV_RANK.get(s, 0) >= floor_rank}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-id", required=True)
     ap.add_argument("--chunks-dir", required=True)
     ap.add_argument("--out")
     ap.add_argument("--emit-findings-to-issues-aggregate")
+    ap.add_argument("--min-severity", default="suggestion",
+                    help="Minimum severity filed as issues (blocker|critical|major|important). "
+                         "The report always shows every severity; this only gates the issue aggregate.")
+    ap.add_argument("--min-confidence", default="medium",
+                    help="Minimum reviewer confidence filed as issues (low|medium|high). "
+                         "Below-floor findings stay report-only — the false-positive guard for full-file review.")
     args = ap.parse_args()
 
     rows = dedupe(load_findings(args.chunks_dir))
@@ -61,18 +94,31 @@ def main():
             fh.write("\n## Hotspots\n")
             for path, n in sorted(hotspots.items(), key=lambda kv: -kv[1])[:15]:
                 fh.write(f"- {path} — {n}\n")
+            # Phase 1b repo-global passes (Semgrep SAST + test-coverage), if produced.
+            sec = read_global(args.chunks_dir, "global-security.md")
+            cov = read_global(args.chunks_dir, "global-coverage.md")
+            if sec or cov:
+                fh.write("\n## Global passes\n")
+                fh.write(f"\n### Security (Semgrep SAST)\n\n{sec or '_(no security artifact produced)_'}\n")
+                fh.write(f"\n### Test coverage\n\n{cov or '_(no coverage artifact produced)_'}\n")
             fh.write("\n## Findings\n| severity | location | agent | summary |\n|---|---|---|---|\n")
             for f in sorted(rows, key=lambda r: -SEV_RANK.get(r.get("severity", "?"), 0)):
-                fh.write(f"| {f.get('severity')} | {f.get('location')} | {f.get('agent')} | {f.get('summary')} |\n")
+                fh.write(f"| {cell(f.get('severity'))} | {cell(f.get('location'))} | {cell(f.get('agent'))} | {cell(f.get('summary'))} |\n")
 
     if args.emit_findings_to_issues_aggregate:
-        issue_rows = [f for f in rows if f.get("severity") in ISSUE_SEVERITIES]
+        allowed = severities_at_or_above(args.min_severity)
+        conf_floor = CONF_RANK.get(args.min_confidence, CONF_RANK["medium"])
+        issue_rows = [
+            f for f in rows
+            if f.get("severity") in allowed
+            and CONF_RANK.get(f.get("confidence", "medium"), CONF_RANK["medium"]) >= conf_floor
+        ]
         with open(args.emit_findings_to_issues_aggregate, "w") as fh:
             fh.write('<external-untrusted-input source="uberscan-aggregate">\n')
             fh.write("| severity | location | agent | disposition | summary | detail |\n")
             fh.write("|---|---|---|---|---|---|\n")
             for f in issue_rows:
-                fh.write(f"| {f.get('severity')} | {f.get('location')} | {f.get('agent')} | DEFERRED | {f.get('summary')} | {f.get('detail','')} |\n")
+                fh.write(f"| {cell(f.get('severity'))} | {cell(f.get('location'))} | {cell(f.get('agent'))} | DEFERRED | {cell(f.get('summary'))} | {cell(f.get('detail', ''))} |\n")
             fh.write("</external-untrusted-input>\n")
 
 
