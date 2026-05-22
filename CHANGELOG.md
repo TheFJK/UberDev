@@ -4,6 +4,11 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.1] - 2026-05-22
+
+### Fixed
+- **`/solve` `/turbo` claim protocol (Step 4.5): `gh label create --force` for the `uberdev:active` label is now fail-loud.** It previously swallowed failures with `|| true`, but the per-issue combined `gh issue edit --add-label --add-assignee` write hard-depends on the label existing — gh cannot auto-create a label from `--add-label` and fails the combined mutation *atomically* when it is missing. A transient or permission-related create failure was therefore silenced, then resurfaced downstream as a misleading `failed to write claim (label or assignee) — check gh auth` abort that pointed the operator at the wrong cause. `--force` already guarantees idempotency (it updates colour/description on "already exists", never errors), so a non-zero exit is *always* a genuine failure (auth gap, missing repo write/triage scope, API/network error). It now captures gh's stderr, emits `claim_write_failed{step:label_create}`, and exits 1 before any claim is written (so no rollback is needed). The combined claim write (E1) is unchanged. Unlike the fail-soft `gh label create` in `finish-branch` / `dev-pipeline` / `findings-to-issues` (where the dependent `--add-label` is also fail-soft and the label is a nice-to-have), here the label is the canonical claim signal gating a fail-loud write. Regression-tested in `tests/solve-claim.test.sh` (3 new assertions). Closes #168.
+
 ## [0.33.0] - 2026-05-22
 
 ### Added

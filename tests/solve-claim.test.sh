@@ -259,19 +259,19 @@ assert_grep "$SOLVE_CMD" \
   "small-team issue-claim protocol" \
   "solve.md mentions small-team claim protocol"
 
-echo "== Version bump 0.32.0 -> 0.33.0 propagated =="
+echo "== Version bump 0.33.0 -> 0.33.1 propagated =="
 assert_grep "$PLUGIN_JSON" \
-  '"version": "0.33.0"' \
-  "plugin.json bumped to 0.33.0"
+  '"version": "0.33.1"' \
+  "plugin.json bumped to 0.33.1"
 assert_grep "$MARKETPLACE_JSON" \
-  '"version": "0.33.0"' \
-  "marketplace.json bumped to 0.33.0"
+  '"version": "0.33.1"' \
+  "marketplace.json bumped to 0.33.1"
 assert_grep "$README" \
-  "version-0\\.33\\.0-blue" \
-  "README version badge bumped to 0.33.0"
+  "version-0\\.33\\.1-blue" \
+  "README version badge bumped to 0.33.1"
 assert_grep "$CHANGELOG" \
-  '^## \[0\.33\.0\]' \
-  "CHANGELOG has [0.33.0] section header"
+  '^## \[0\.33\.1\]' \
+  "CHANGELOG has [0.33.1] section header"
 
 echo "== #123 B1: closing-keyword regex left-anchor (rejects preclose/postfix/unresolve) =="
 # The closing-keyword regex in merge-pipeline Step 3.4 MUST require either start-of-input
