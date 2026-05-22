@@ -4,6 +4,11 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.7] - 2026-05-22
+
+### Fixed
+- **Pipeline run-state evaporated across fresh-shell Bash calls (`/goal` silent state-machine no-op).** Each Bash tool call is a fresh shell, and the goal-pipeline watch loop structurally forces call boundaries, so the Phase-0 `GOAL_ID` pointer, loop accumulators (`cycle`/`watch_start`/`overflow_count`/`overflow_detected`), and sourced `uberdev_goal_*` definitions evaporated before Phases 1–4 — `$GOAL_ID` resolved empty (per-goal TSV paths degraded to `goal--*.tsv`) and `uberdev_goal_*` calls hit "command not found", silently no-op'ing state-machine transitions and circuit-breaker accounting. Added `uberdev_goal_write_run_state` / `uberdev_goal_read_run_state` / `uberdev_goal_cleanup_run_state` to `lib/goal-state.sh` — a hardened `KEY=value` sidecar under `$UBERDEV_TMPDIR`, written atomically via the #155 TOCTOU-safe `_uberdev_dispatch_prepare_tmp_target` and read back with per-field-validating loops (never `source`/`eval`, never `mapfile`; bash-3.2/zsh portable). goal-pipeline now re-sources the three libs and re-reads run-state at the top of every later phase block; sibling pipelines get the lighter re-source-per-block treatment. The TSV-keyed-by-`GOAL_ID` model (PR #129) is unchanged. (#171)
+
 ## [0.33.6] - 2026-05-22
 
 ### Fixed
