@@ -355,22 +355,22 @@ assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
 
 echo
 echo "== I2: solve-pipeline claude --bg dispatch timeout-wrap (v0.22.0) =="
-assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
+assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" \
   'uberdev_read_int_in_range command_timeouts.solve[[:space:]]+UBERDEV_SOLVE_TIMEOUT[[:space:]]+60[[:space:]]+86400[[:space:]]+3600' \
   "I2a: launcher reads command_timeouts.solve with bounds [60,86400] default 3600"
-assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
+assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" \
   'command -v timeout' \
   "I2b: launcher checks timeout(1) availability"
-assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
+assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" \
   'command -v gtimeout' \
   "I2c: launcher probes gtimeout fallback (Homebrew coreutils installs the macOS binary as gtimeout, not timeout)"
 assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" \
   '"\$TIMEOUT_BIN" "\$SOLVE_TIMEOUT" env "\${BG_TURBO_ENV\[@\]}" claude --bg' \
   "I2d: bg dispatch wraps claude --bg in timeout(1)/gtimeout with env(1)-mediated zsh-safe BG_TURBO_ENV[@] inline-prefix (#97 — env(1) is required because timeout(1) sits between the shell and the env-prefix slot and would otherwise consume the KEY=value tokens as argv; array form preserves zsh SH_WORD_SPLIT=off compatibility)"
-assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
+assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" \
   'brew install coreutils' \
   "I2e: missing-timeout warning includes remediation pointer"
-assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
+assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" \
   'if \[\[ -n "\$TIMEOUT_BIN" \]\]; then' \
   "I2f: launcher guards wrap branch with -n TIMEOUT_BIN check (prevents silent regression on guard inversion/removal)"
 assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" \
