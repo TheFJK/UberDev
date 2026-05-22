@@ -41,7 +41,7 @@ findings:
 ## Reuses
 
 - `lib/config-read.sh` — `uberdev_read_int_in_range` for MAX_CHUNKS and CONCURRENCY
-- `skills/uberscan-pipeline/chunk.py` — scope enumeration and budget-bounded chunking
+- `lib/chunk.py` — scope enumeration and budget-bounded chunking (shared with /ubersimplify)
 - `skills/uberscan-pipeline/report.py` — deduplication, markdown report, findings-to-issues aggregate
 - `agents/findings-to-issues.md` — durable GitHub issue persistence with fingerprint dedupe
 
@@ -101,7 +101,7 @@ else
 fi
 
 # Chunk the scope
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/uberscan-pipeline/chunk.py" \
+python3 "${CLAUDE_PLUGIN_ROOT}/lib/chunk.py" \
   --scope "$SCOPE" \
   --budget-bytes "$CHUNK_BUDGET" \
   --max-chunks "$MAX_CHUNKS" \

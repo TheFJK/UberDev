@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -u; set -o pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CHUNK="$REPO_ROOT/plugins/uberdev/skills/uberscan-pipeline/chunk.py"
+CHUNK="$REPO_ROOT/plugins/uberdev/lib/chunk.py"
 PASS=0; FAIL=0
 check() { if eval "$2"; then echo "  PASS  $1"; PASS=$((PASS+1)); else echo "  FAIL  $1"; FAIL=$((FAIL+1)); fi; }
 
