@@ -113,7 +113,7 @@ echo
 echo "### Suite 3: Label-provision idempotency"
 
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
-  'gh label create --force review-pr-finding' 'L1 agent uses gh label create --force'
+  'gh label create --force.*review-pr-finding' 'L1 agent uses gh label create --force'
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
   'fail-soft|fail soft|fail_soft' 'L2 label provisioning is fail-soft'
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
