@@ -125,7 +125,7 @@ UberDev reads optional config from `.claude/uberdev.local.md` in your project ro
 solve_tier_default: small        # one of: small, medium, large
 review_depth: full               # one of: quick, full
 parallel_solve: true
-auto_install_aliases: true       # boolean — auto-install /issue, /solve, /turbo, /simplify, /review-pr, /merge at SessionStart (default: true; env override: UBERDEV_NO_AUTO_ALIAS=1)
+auto_install_aliases: true       # boolean — auto-install the short-form aliases (see aliases-sync.sh for the canonical set) at SessionStart (default: true; env override: UBERDEV_NO_AUTO_ALIAS=1)
 integration_branch: main         # branch /merge lands PRs into; default = repo default branch
 dispatch_backend: auto           # one of: auto, claude-bg, wezterm, background — how /solve & /turbo dispatch per-issue agents (RFC 0004); default auto (platform-aware); env override: UBERDEV_DISPATCH_BACKEND
 auto_review_on_merge: false      # boolean — when true, /merge Phase 1.4 auto-dispatches /review-pr <N> --turbo once per PR with missing trust trail (whitelisted reasons only); default false; env override: UBERDEV_AUTO_REVIEW_ON_MERGE (#89)
@@ -160,7 +160,7 @@ command_timeouts:
 
 Settings take effect on next SessionStart. Environment variables (`UBERDEV_FANOUT_SOLVE_BG`, `SOLVE_AUTO`, etc.) override file settings — use whichever is more convenient for your workflow.
 
-**Auto-installed aliases:** UberDev's SessionStart hook installs six top-level forwarder commands (`/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`) into `~/.claude/commands/` on first session and refreshes them on plugin upgrade. Hand-authored files at any of those paths are preserved (the hook detects them via a `managed-by: uberdev-aliases` marker and skips). Disable per-project with `auto_install_aliases: false` or globally with `UBERDEV_NO_AUTO_ALIAS=1`. Remove already-installed forwarders with `/uberdev:uninstall-aliases`.
+**Auto-installed aliases:** UberDev's SessionStart hook installs eleven top-level forwarder commands (`/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`, `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify`) into `~/.claude/commands/` on first session and refreshes them on plugin upgrade. Hand-authored files at any of those paths are preserved (the hook detects them via a `managed-by: uberdev-aliases` marker and skips). Disable per-project with `auto_install_aliases: false` or globally with `UBERDEV_NO_AUTO_ALIAS=1`. Remove already-installed forwarders with `/uberdev:uninstall-aliases`.
 
 **`integration_branch` precedence:** CLI flag `--integration-branch=<name>` > env var `UBERDEV_INTEGRATION_BRANCH` > config file (this YAML) > `gh repo view --json defaultBranchRef`. If all four tiers are empty, `/merge` falls back to the literal `main` and emits a one-line stderr warning — it does NOT prompt (autopilot is unconditional).
 
