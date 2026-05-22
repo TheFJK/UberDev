@@ -80,6 +80,13 @@ so no prototype commit ever lands on the default branch. If the working tree is 
 (unrelated uncommitted changes), print a one-line notice and proceed; Phase 3 stages
 explicit paths only, so pollution is structurally prevented.
 
+<!-- #171 audit: /dev is in-session (parallel subagents dispatched in one
+     message, integrated by the sole git controller). It sources no libs and
+     holds no $UBERDEV_TMPDIR run-state pointer; the only cross-phase state is
+     the git branch, which persists in the worktree (re-derivable via
+     `git rev-parse --abbrev-ref HEAD`), not in evaporating shell state.
+     No re-source/sidecar treatment is required. -->
+
 ## Phase 1 — Inline decomposition
 
 Split the idea into **1–4 chunks**. Each chunk is `{ id, goal, owns: [file allowlist] }`:
