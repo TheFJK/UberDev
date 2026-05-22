@@ -4,11 +4,25 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.31.0] - 2026-05-21
 
 ### Added
-
+- `/uberdev:goal` — autonomous convergence orchestrator (RFC 0005). Chains `/turbo` → `/review-pr` (auto) → `/merge` if GREEN; recurses on BLOCKER/CRITICAL `review-pr-finding` issues until convergence or one of seven circuit breakers fires.
+- Seven circuit breakers: `max_cycles` (default 5, range 1–20 via `UBERDEV_GOAL_MAX_CYCLES`), `nonconvergence` (fingerprint repeat from prior cycle), `stuck_loop` (4h goal-level wall-clock), `merge_failed` (conflict or hook failure), `gh_api_failed` (Phase 3 `gh issue list` or `gh api user` rc!=0 — surfaces transient rate-limit / network errors instead of falsely emitting `goal_converged`), `unknown_merge_result` (Phase 2c default-arm guard against `uberdev_goal_read_merge_result` returning a value outside the documented `success|conflict|hook_failed|missing` set — contract-drift halt), `queue_empty_not_converged` (deterministic Phase 3 halt when the candidate queue is empty but at least one PR remains in a non-terminal in-flight state — alternative to spinning until the 4h `stuck_loop` fallback).
+- `/ubergoal` short-form alias for `/uberdev:goal` (installed by `/uberdev:install-aliases`).
+- `lib/goal-state.sh` — PR + issue state machines, per-goal audit-sink JSONL at `$UBERDEV_TMPDIR/goal-<id>.jsonl`.
+- `skills/goal-pipeline/SKILL.md` — 5-phase pipeline (Preflight → Dispatch → Watch → Collect-Next → Converge/Halt).
+- `tests/goal.test.sh` — 20-section shape-check harness (G1–G20).
 - **`/uberdev:testers`** — adversarial multi-persona QA audit squad. 6 distinct-persona testers (`panicked_grandma`, `power_user`, `adversarial_security`, `chaos_engineer`, `a11y_critic`, `mobile_thumb`) + 2 monitors (`monitor_primary`, `monitor_devils_advocate`) over 3 coordinated waves. Auto-detects target surface (web/api/native/all). Findings are evidence-anchored against a 10-invariant oracle library and filed as GitHub issues via the existing `findings-to-issues` pipeline. Read-only — the squad never writes app code. Alias: `/testers`. See `docs/rfc/0006-testers-command.md`.
+
+### Changed
+- Plugin version bumped from `v0.30.4` to `v0.31.0`.
+- `tests/solve-claim.test.sh:258-265` version-drift assertions updated to `0.31.0`.
+
+### Security
+- `Blocks: #` parser is ReDoS-safe (anchored bash regex + 64 KiB body cap).
+- `/merge` auto-chain is scoped to `/goal` only via `UBERDEV_GOAL_ID` env-var provenance check (T5).
+- Per-PR `automerge_attempt_count >= 3` short-circuits `uberdev_goal_should_automerge` so the goal stops re-dispatching `/merge` for that PR (the runaway-loop containment, R5). The PR sits in `green` until `max_cycles` fires or the operator intervenes; no `merge_failed` halt is emitted.
 
 ## [0.30.4] - 2026-05-21
 

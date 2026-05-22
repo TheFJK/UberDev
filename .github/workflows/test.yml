@@ -62,7 +62,8 @@ jobs:
           bash tests/solve-claim.test.sh && \
           bash tests/dispatch-fallback.test.sh && \
           bash tests/dispatch-background.test.sh && \
-          bash tests/dispatch-wezterm.test.sh
+          bash tests/dispatch-wezterm.test.sh && \
+          bash tests/goal.test.sh
 
   shape-checks-windows:
     name: shape-checks-windows
@@ -117,4 +118,5 @@ jobs:
           bash tests/solve-claim.test.sh && \
           bash tests/dispatch-fallback.test.sh && \
           bash tests/dispatch-background.test.sh && \
-          bash tests/dispatch-wezterm.test.sh
+          bash tests/dispatch-wezterm.test.sh && \
+          bash tests/goal.test.sh
