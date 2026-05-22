@@ -611,6 +611,8 @@ echo "== #175 D-regression: goal-pipeline preflight->resolve_env->dispatch is NO
   DISPATCH_RC=0; DISPATCH_ID=""; DISPATCH_LOG=""
   # shellcheck disable=SC1090
   . "$DISPATCH_LIB"
+  # First call exercises auto backend-resolution; second forces claude-bg so the
+  # dispatch stub below routes deterministically on any host.
   uberdev_dispatch_preflight
   UBERDEV_DISPATCH_BACKEND_REQUESTED=claude-bg uberdev_dispatch_preflight
   uberdev_dispatch_resolve_env
@@ -632,6 +634,9 @@ echo "== #175 D-regression: goal-pipeline preflight->resolve_env->dispatch is NO
 
 echo
 echo "== #175 D-failloud: no timeout/gtimeout on PATH -> return 1 + brew pointer =="
+# Unlike the other #175 cases, this block captures via $(...) rather than the
+# subshell+TALLY_FILE idiom: it must run the PATH-sandboxed probe inline and grab
+# stderr+rc together, which the subshell-then-tally hand-off pattern can't express.
 _ff_out="$(
   set +eu
   CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"

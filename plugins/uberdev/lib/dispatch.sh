@@ -4,7 +4,7 @@
 # SOURCED, never executed. No shebang (sourced only); .sh extension (convention).
 #
 # Public surface (functions):
-#   uberdev_dispatch_preflight                       -> resolves auto -> concrete backend
+#   uberdev_dispatch_preflight                        -> resolves auto -> concrete backend
 #   uberdev_dispatch_resolve_env                      -> sets the 6 dispatch-env vars; call after preflight
 #   uberdev_dispatch_one  ISSUE_NUM TIER PROMPT_FILE  -> dispatch one issue
 # Internal:
@@ -181,6 +181,9 @@ uberdev_dispatch_resolve_env() {
   if command -v uberdev_read_int_in_range >/dev/null 2>&1; then
     SOLVE_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.solve UBERDEV_SOLVE_TIMEOUT 60 86400 3600)"
   elif [ -r "${CLAUDE_PLUGIN_ROOT:-}/lib/config-read.sh" ]; then
+    # Re-sourcing is safe even if config-read.sh was already loaded: it carries
+    # its own idempotency guard (_UBERDEV_CONFIG_READ_LOADED), so no explicit
+    # already-sourced check is needed here.
     # shellcheck source=/dev/null
     . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
     SOLVE_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.solve UBERDEV_SOLVE_TIMEOUT 60 86400 3600)"
