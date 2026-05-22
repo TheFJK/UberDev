@@ -128,8 +128,11 @@ assert_grep_not "$SOLVE_PIPELINE" \
   'UBERDEV_ACTIVE_LABEL_DESCRIPTION" >/dev/null 2>&1 \|\| true' \
   "Regression guard: the swallowing 'gh label create … || true' form is gone (a silent create-failure resurfaced downstream as a misleading 'failed to write claim' abort)"
 assert_grep "$SOLVE_PIPELINE" \
-  'claim_write_failed.*label_create' \
-  "Step 4.5 label-create failure emits claim_write_failed{step:label_create} before exit 1"
+  'UBERDEV_ACTIVE_LABEL_DESCRIPTION" 2>&1\); then' \
+  "Step 4.5 label-create captures gh stderr (2>&1) and opens the fail-loud if-branch ('); then') — locks the NEW form's tail, symmetric to the removed '|| true' tail"
+assert_grep "$SOLVE_PIPELINE" \
+  'claim_write_failed "\{.*step.*label_create' \
+  "Step 4.5 label-create failure emits claim_write_failed with a JSON {step:label_create} payload (locks object shape, not just substring) before exit 1"
 assert_grep "$SOLVE_PIPELINE" \
   'DISPATCHER_USER=\$\(gh api user --jq \.login' \
   "DISPATCHER_USER from gh api user (matches @me assignee)"
