@@ -4,6 +4,11 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.2] - 2026-05-22
+
+### Fixed
+- **`/uberdev:review-pr` now provisions the trust label before adding it (#170).** GREEN/YELLOW runs add `uberdev-approved` / `uberdev-approved-with-concerns` via `gh pr edit --add-label`, which CANNOT auto-create a repo label and exits non-zero when it is missing — so on a fresh repo (or any repo where the trust labels were never created) the first GREEN/YELLOW run aborted the entire trust-signal emission with `exit 2`. Each label is now provisioned fail-loud via `gh label create --force` (idempotent — updates colour/description, never errors on "already exists") with a per-tier colour/description immediately before the add. Same assume-label-exists class as #168; surfaced by PR #169. Regression-tested in `tests/review-pr.test.sh` (R9.16/R9.16b). Closes #170.
+
 ## [0.33.1] - 2026-05-22
 
 ### Fixed
