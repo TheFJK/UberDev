@@ -63,6 +63,8 @@ jobs:
           bash tests/dispatch-fallback.test.sh && \
           bash tests/dispatch-background.test.sh && \
           bash tests/dispatch-wezterm.test.sh && \
+          bash tests/ubersimplify.test.sh && \
+          bash tests/ubersimplify-aggregate.test.sh && \
           bash tests/goal.test.sh
 
   shape-checks-windows:
@@ -119,4 +121,6 @@ jobs:
           bash tests/dispatch-fallback.test.sh && \
           bash tests/dispatch-background.test.sh && \
           bash tests/dispatch-wezterm.test.sh && \
+          bash tests/ubersimplify.test.sh && \
+          bash tests/ubersimplify-aggregate.test.sh && \
           bash tests/goal.test.sh

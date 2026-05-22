@@ -68,3 +68,6 @@ id_rsa.*
 
 # Local-only Claude project instructions (personal, not for the published plugin)
 CLAUDE.md
+
+# Local implementation worktrees (write-plan / subagent-driven-dev)
+.worktrees/
