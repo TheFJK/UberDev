@@ -19,6 +19,9 @@
 #   uberdev_goal_extract_pr_num_from_log       STDOUT_LOG_PATH
 #   uberdev_goal_list_prs_in_state             GOAL_ID STATE
 #   uberdev_goal_read_merge_result             PR_NUM
+#   uberdev_goal_write_run_state               (env-driven)
+#   uberdev_goal_read_run_state                (env-driven)
+#   uberdev_goal_cleanup_run_state             (env-driven)
 # Internal:
 #   _uberdev_goal_validate_int             N
 #   _uberdev_goal_validate_id              GOAL_ID
@@ -820,4 +823,111 @@ _uberdev_goal_check_unblock() {
     uberdev_goal_audit goal_unblock_triggered \
       "{\"pr\":$held_pr,\"blocking_issues\":[$blocking_csv]}"
   fi
+}
+
+# ---------------------------------------------------------------------------
+# Run-state sidecar (issue #171): persist the GOAL_ID pointer + loop
+# accumulators so they survive fresh-shell Bash boundaries. KEY=value text,
+# written atomically via the #155 TOCTOU-safe helper. The reader parses +
+# per-field-validates the sidecar — it is never sourced or executed as code;
+# NEVER mapfile (bash-3.2/zsh portability).
+# ---------------------------------------------------------------------------
+
+# uberdev_goal_write_run_state
+#   Reads GOAL_ID, cycle, watch_start, overflow_count, overflow_detected,
+#   MAX_CYCLES, UBERDEV_RESOLVED_BACKEND, and the queue/active_issues arrays
+#   from the caller's shell; persists them to predictable, GOAL_ID-keyed
+#   sidecars under $UBERDEV_TMPDIR. Returns 0 on success, 3 (fail-CLOSED) if
+#   _uberdev_dispatch_prepare_tmp_target rejects any target.
+uberdev_goal_write_run_state() {
+  _uberdev_goal_validate_id "${GOAL_ID:-}" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  local sc="$tmpdir/goal-$GOAL_ID-runstate"   # NO .env extension
+
+  # Scalar sidecar: prepare predictable target (symlink-reject + EUID-owner
+  # check + 0600-create under set -C), write temp sibling, atomic mv.
+  _uberdev_dispatch_prepare_tmp_target "$sc" 0 "goal" || return 3
+  local tmp
+  tmp="$(mktemp "${sc}.XXXXXXXX")" || return 3
+  printf 'GOAL_ID=%s\ncycle=%s\nwatch_start=%s\noverflow_count=%s\noverflow_detected=%s\nMAX_CYCLES=%s\nUBERDEV_RESOLVED_BACKEND=%s\n' \
+    "$GOAL_ID" "${cycle:-0}" "${watch_start:-0}" "${overflow_count:-0}" \
+    "${overflow_detected:-0}" "${MAX_CYCLES:-0}" "${UBERDEV_RESOLVED_BACKEND:-}" > "$tmp"
+  mv -f "$tmp" "$sc" || { rm -f "$tmp"; return 3; }
+
+  # Array sidecars: one int per line, no IFS-mutating joins.
+  _uberdev_dispatch_prepare_tmp_target "${sc}.queue" 0 "goal" || return 3
+  tmp="$(mktemp "${sc}.queue.XXXXXXXX")" || return 3
+  printf '%s\n' "${queue[@]:-}" | grep -E '^[0-9]+$' > "$tmp" || true
+  mv -f "$tmp" "${sc}.queue" || { rm -f "$tmp"; return 3; }
+
+  _uberdev_dispatch_prepare_tmp_target "${sc}.active" 0 "goal" || return 3
+  tmp="$(mktemp "${sc}.active.XXXXXXXX")" || return 3
+  printf '%s\n' "${active_issues[@]:-}" | grep -E '^[0-9]+$' > "$tmp" || true
+  mv -f "$tmp" "${sc}.active" || { rm -f "$tmp"; return 3; }
+  return 0
+}
+
+# uberdev_goal_read_run_state
+#   Reads + per-field-validates the sidecar; never sources or executes it. Caller must
+#   already hold the GOAL_ID pointer (it keys the sidecar path). On success
+#   exports/sets GOAL_ID, cycle, watch_start, overflow_count,
+#   overflow_detected, MAX_CYCLES, UBERDEV_RESOLVED_BACKEND, and rehydrates
+#   the queue/active_issues arrays. Returns 0 on success; 1 if missing/
+#   unreadable. Invalid fields are skipped (not assigned a garbage value);
+#   a forged GOAL_ID is rejected and never interpolated into a path.
+uberdev_goal_read_run_state() {
+  local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  _uberdev_goal_validate_id "${GOAL_ID:-}" || { echo "goal: invalid GOAL_ID pointer" >&2; return 1; }
+  local sc="$tmpdir/goal-$GOAL_ID-runstate"
+  [ -r "$sc" ] || { echo "goal: missing run-state sidecar ($sc)" >&2; return 1; }
+
+  local k v
+  while IFS='=' read -r k v; do
+    case "$k" in
+      GOAL_ID)
+        # Load-bearing: a substituted sidecar GOAL_ID with / or .. is a
+        # path-traversal vector. Gate BEFORE any later path interpolation.
+        _uberdev_goal_validate_id "$v" && GOAL_ID="$v" ;;
+      cycle)             _uberdev_goal_validate_int "$v" && cycle="$v" ;;
+      watch_start)       _uberdev_goal_validate_int "$v" && watch_start="$v" ;;
+      overflow_count)    _uberdev_goal_validate_int "$v" && overflow_count="$v" ;;
+      overflow_detected) _uberdev_goal_validate_int "$v" && overflow_detected="$v" ;;
+      MAX_CYCLES)        _uberdev_goal_validate_int "$v" && MAX_CYCLES="$v" ;;
+      UBERDEV_RESOLVED_BACKEND)
+        case "$v" in claude-bg|wezterm|background) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;
+      *) : ;;   # reject unknown keys (allowlist only)
+    esac
+  done < "$sc"
+
+  # Rehydrate arrays with the portable read loop (NOT mapfile); each element
+  # int-gated so a newline/extra-field injection cannot survive.
+  queue=()
+  if [ -r "${sc}.queue" ]; then
+    local line
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      _uberdev_goal_validate_int "$line" && queue+=("$line")
+    done < "${sc}.queue"
+  fi
+  active_issues=()
+  if [ -r "${sc}.active" ]; then
+    local line2
+    while IFS= read -r line2; do
+      [ -n "$line2" ] || continue
+      _uberdev_goal_validate_int "$line2" && active_issues+=("$line2")
+    done < "${sc}.active"
+  fi
+  return 0
+}
+
+# uberdev_goal_cleanup_run_state
+#   Best-effort removal of the three known predictable sidecar paths on goal
+#   completion / circuit-breaker halt. Never fatal; no globbing of attacker-
+#   influenceable patterns (each path is GOAL_ID-keyed and validated).
+uberdev_goal_cleanup_run_state() {
+  local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  _uberdev_goal_validate_id "${GOAL_ID:-}" || return 0
+  local sc="$tmpdir/goal-$GOAL_ID-runstate"
+  rm -f "$sc" "${sc}.queue" "${sc}.active" 2>/dev/null
+  return 0
 }
