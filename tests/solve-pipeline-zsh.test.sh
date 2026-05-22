@@ -26,9 +26,14 @@ set -u
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
+# #175: the PERM_FLAG/EFFORT_FLAG array hoist moved from solve-pipeline Phase A
+# into uberdev_dispatch_resolve_env() in lib/dispatch.sh (shared SSOT helper).
+# R1a/R1b now anchor on dispatch.sh; the runtime word-split fixtures (R2-R4)
+# below are unaffected (they bind the arrays inline in their own subshells).
+DISPATCH_LIB="$REPO_ROOT/plugins/uberdev/lib/dispatch.sh"
 
-if [ ! -r "$SOLVE_PIPELINE" ]; then
-  echo "FATAL: required file missing or unreadable: $SOLVE_PIPELINE" >&2
+if [ ! -r "$SOLVE_PIPELINE" ] || [ ! -r "$DISPATCH_LIB" ]; then
+  echo "FATAL: required file missing or unreadable: $SOLVE_PIPELINE or $DISPATCH_LIB" >&2
   exit 2
 fi
 
@@ -51,16 +56,18 @@ fail() { echo "  FAIL  $1"; FAIL=$((FAIL + 1)); }
 # inline `sort -n | tr '\n' ' ' | sed 's/ $//'` chain it replaces.
 _normalize_nums() { sort -n | tr '\n' ' ' | sed 's/ $//'; }
 
-echo "== R1: SKILL.md Phase A hoist defines PERM_FLAG/EFFORT_FLAG as arrays =="
-# Anchored grep on the SKILL.md hoist. If a future edit reverts to scalar
-# form, this assertion fires before R2/R3 even execute the dispatch.
-if grep -qE '^EFFORT_FLAG=\( --effort "\$EFFORT_LEVEL" \)$' "$SOLVE_PIPELINE"; then
+echo "== R1: lib/dispatch.sh resolve_env defines PERM_FLAG/EFFORT_FLAG as arrays =="
+# Anchored grep on the resolve_env hoist (moved from solve-pipeline Phase A into
+# lib/dispatch.sh in #175). If a future edit reverts to scalar form, this
+# assertion fires before R2/R3 even execute the dispatch. The ^[[:space:]]*
+# prefix tolerates the function-body indentation in dispatch.sh.
+if grep -qE '^[[:space:]]*EFFORT_FLAG=\( --effort "\$EFFORT_LEVEL" \)$' "$DISPATCH_LIB"; then
   pass "R1a: EFFORT_FLAG hoist binds an array — \`EFFORT_FLAG=( --effort \"\$EFFORT_LEVEL\" )\`"
 else
   fail "R1a: EFFORT_FLAG hoist no longer matches the array form"
-  echo "        searched: ^EFFORT_FLAG=\\( --effort \"\\\$EFFORT_LEVEL\" \\)\$ in $SOLVE_PIPELINE"
+  echo "        searched: ^[[:space:]]*EFFORT_FLAG=\\( --effort \"\\\$EFFORT_LEVEL\" \\)\$ in $DISPATCH_LIB"
 fi
-if grep -qE '^PERM_FLAG=\(\)$' "$SOLVE_PIPELINE"; then
+if grep -qE '^[[:space:]]*PERM_FLAG=\(\)$' "$DISPATCH_LIB"; then
   pass "R1b: PERM_FLAG hoist binds an empty array — \`PERM_FLAG=()\`"
 else
   fail "R1b: PERM_FLAG hoist no longer matches the empty-array form"
