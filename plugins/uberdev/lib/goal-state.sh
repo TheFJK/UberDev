@@ -900,12 +900,14 @@ uberdev_goal_write_run_state() {
 #   caller's GOAL_ID is empty/invalid (a fresh shell — env + scalars evaporate
 #   across Bash calls, issue #171), it is bootstrapped from the fixed-path
 #   goal-active-id.txt pointer (content gated through _uberdev_goal_validate_id).
-#   On success
-#   exports/sets GOAL_ID, cycle, watch_start, overflow_count,
-#   overflow_detected, MAX_CYCLES, UBERDEV_RESOLVED_BACKEND, and rehydrates
-#   the queue/active_issues arrays. Returns 0 on success; 1 if missing/
-#   unreadable. Invalid fields are skipped (not assigned a garbage value);
-#   a forged GOAL_ID is rejected and never interpolated into a path.
+#   On success: sets the GOAL_ID, cycle, watch_start, overflow_count,
+#   overflow_detected, MAX_CYCLES, UBERDEV_RESOLVED_BACKEND scalars, rehydrates
+#   the queue/active_issues arrays, and EXPORTS UBERDEV_GOAL_ID + UBERDEV_TMPDIR
+#   (the env vars the uberdev_goal_* helpers + bare $UBERDEV_TMPDIR/... paths in
+#   the pipeline body depend on — see the export block at the function's end).
+#   Returns 0 on success; 1 if missing/unreadable. Invalid fields are skipped
+#   (not assigned a garbage value); a forged GOAL_ID is rejected and never
+#   interpolated into a path.
 uberdev_goal_read_run_state() {
   local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
   local _aid=""
@@ -958,6 +960,20 @@ uberdev_goal_read_run_state() {
       _uberdev_goal_validate_int "$line2" && active_issues+=("$line2")
     done < "${sc}.active"
   fi
+
+  # #178 — re-export the env vars a fresh shell's downstream consumers need.
+  # Four uberdev_goal_* helpers gate on the UBERDEV_GOAL_ID *env var*, NOT the
+  # bare GOAL_ID scalar this function sets: uberdev_goal_audit (the goal_id sink —
+  # empty env => mis-sinks to goal-unknown.jsonl), uberdev_goal_should_automerge
+  # (provenance gate `[ -n "${UBERDEV_GOAL_ID:-}" ]` — empty env => refuses a GREEN
+  # PR, so /goal never converges), and the review-pr/merge dispatch helpers. The
+  # goal-pipeline body also interpolates bare $UBERDEV_TMPDIR/... paths and the
+  # PR #129 TSV/audit helpers fall back to $UBERDEV_TMPDIR; an unset value resolves
+  # them under / or /tmp instead of the dir Phase 0 wrote. Exporting both here —
+  # the single rehydration SSOT every fence calls — restores a complete, consistent
+  # environment and is what makes the #171 fix actually hold across fresh shells.
+  export UBERDEV_GOAL_ID="$GOAL_ID"
+  export UBERDEV_TMPDIR="$tmpdir"
   return 0
 }
 

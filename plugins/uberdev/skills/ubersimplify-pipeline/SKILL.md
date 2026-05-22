@@ -85,7 +85,12 @@ if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh" ]; then
   UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
   _simp_ptr="$UBERDEV_TMPDIR/ubersimplify-active-id.txt"
   if _uberdev_dispatch_prepare_tmp_target "$_simp_ptr" 0 "ubersimplify"; then
-    printf '%s\n' "$RUN_ID" > "$_simp_ptr"
+    # Warn (not silent) if the write fails — the pointer is best-effort
+    # (a missing one degrades to in-session RUN_ID), but a silent failure here
+    # was the gap a fresh-shell block can't diagnose. A partial/corrupt write is
+    # caught fail-closed by the re-read's `case` validator downstream.
+    printf '%s\n' "$RUN_ID" > "$_simp_ptr" \
+      || echo "ubersimplify: warning: failed to persist RUN_ID pointer; cross-shell RUN_DIR recovery may fail" >&2
   fi
 fi
 

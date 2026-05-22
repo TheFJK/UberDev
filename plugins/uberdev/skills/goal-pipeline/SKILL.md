@@ -713,8 +713,11 @@ The held-PR list (each row `pr=<num> state=<yellow-held|red-held> blocks=#<i1>,#
 
 ```bash
 # #171 — print_summary reads GOAL_ID/MAX_CYCLES/watch_start from the calling
-# shell; every caller (Phase 2/3 fences) rehydrates them via
-# uberdev_goal_read_run_state at fence top. Do NOT call from a non-rehydrated block.
+# shell and calls uberdev_goal_* helpers that gate on the UBERDEV_GOAL_ID env.
+# Every caller (the Phase 1/2/3 fences) rehydrates that state via
+# uberdev_goal_read_run_state at fence top (which also re-exports UBERDEV_GOAL_ID
+# + UBERDEV_TMPDIR). Do NOT call print_summary from a block that has not run that
+# rehydration — it is never called from Phase 0.
 print_summary() {
   local cycles="$1" prs_merged prs_held_lines prs_held_count issues_resolved wall_secs
   prs_merged="$(uberdev_goal_list_prs_in_state "$GOAL_ID" merged | grep -c . || true)"

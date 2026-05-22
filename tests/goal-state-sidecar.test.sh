@@ -221,6 +221,34 @@ handoff_out="$(UBERDEV_TMPDIR="$UBERDEV_TMPDIR" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUG
   ')"
 assert_eq "$handoff_out" "201|1" "Phase 1 active_issues mutation survives to Phase 2 fresh shell"
 
+echo "== read_run_state re-exports UBERDEV_GOAL_ID + UBERDEV_TMPDIR for fresh-shell helpers (#178 review blockers) =="
+# Four uberdev_goal_* helpers gate on the UBERDEV_GOAL_ID *env var* (audit sink,
+# should_automerge provenance, review-pr/merge dispatch); the goal-pipeline body
+# interpolates bare $UBERDEV_TMPDIR/... paths and PR #129 helpers fall back to it.
+# read_run_state MUST export BOTH so a rehydrated fresh shell doesn't mis-sink
+# audit to goal-unknown.jsonl, refuse a GREEN PR auto-merge, or resolve state
+# files under / or /tmp instead of the dir Phase 0 wrote.
+GOAL_ID="goal-test-export01"; cycle=1; watch_start=1; overflow_count=0
+overflow_detected=0; MAX_CYCLES=5; UBERDEV_RESOLVED_BACKEND="claude-bg"
+queue=(); active_issues=()
+uberdev_goal_write_run_state
+# Fresh shell: TMPDIR set (so the helper fallback locates the sidecar) but BOTH
+# UBERDEV_GOAL_ID and UBERDEV_TMPDIR unset — the two vars read_run_state must
+# export. `env` lists only EXPORTED vars, so it distinguishes export from a bare
+# scalar assignment (the exact bug: read_run_state set GOAL_ID but exported nothing).
+export_out="$(TMPDIR="$UBERDEV_TMPDIR" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" \
+  GOAL_ID="goal-test-export01" bash -c '
+    unset UBERDEV_GOAL_ID UBERDEV_TMPDIR
+    . "$CLAUDE_PLUGIN_ROOT/lib/dispatch.sh"
+    . "$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh"
+    uberdev_goal_read_run_state || exit 9
+    g=FAIL; t=FAIL
+    env | grep -q "^UBERDEV_GOAL_ID=goal-test-export01$" && g=OK
+    env | grep -q "^UBERDEV_TMPDIR=." && t=OK
+    printf "%s|%s" "$g" "$t"
+  ')"
+assert_eq "$export_out" "OK|OK" "read_run_state exports UBERDEV_GOAL_ID + UBERDEV_TMPDIR to the rehydrated shell env"
+
 echo "== cleanup removes all three sidecars + the active-id pointer =="
 GOAL_ID="goal-test-clean001"; cycle=1; watch_start=1; overflow_count=0
 overflow_detected=0; MAX_CYCLES=5; UBERDEV_RESOLVED_BACKEND="claude-bg"
