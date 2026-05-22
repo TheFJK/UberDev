@@ -837,8 +837,9 @@ _uberdev_goal_check_unblock() {
 #   Reads GOAL_ID, cycle, watch_start, overflow_count, overflow_detected,
 #   MAX_CYCLES, UBERDEV_RESOLVED_BACKEND, and the queue/active_issues arrays
 #   from the caller's shell; persists them to predictable, GOAL_ID-keyed
-#   sidecars under $UBERDEV_TMPDIR. Returns 0 on success, 3 (fail-CLOSED) if
-#   _uberdev_dispatch_prepare_tmp_target rejects any target.
+#   sidecars under $UBERDEV_TMPDIR. Returns 0 on success, 1 if GOAL_ID is
+#   invalid, 3 (fail-CLOSED) if _uberdev_dispatch_prepare_tmp_target rejects a
+#   target or a sidecar write fails.
 uberdev_goal_write_run_state() {
   _uberdev_goal_validate_id "${GOAL_ID:-}" || return 1
   local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
@@ -847,22 +848,37 @@ uberdev_goal_write_run_state() {
   # Scalar sidecar: prepare predictable target (symlink-reject + EUID-owner
   # check + 0600-create under set -C), write temp sibling, atomic mv.
   _uberdev_dispatch_prepare_tmp_target "$sc" 0 "goal" || return 3
-  local tmp
+  local tmp _filtered
   tmp="$(mktemp "${sc}.XXXXXXXX")" || return 3
   printf 'GOAL_ID=%s\ncycle=%s\nwatch_start=%s\noverflow_count=%s\noverflow_detected=%s\nMAX_CYCLES=%s\nUBERDEV_RESOLVED_BACKEND=%s\n' \
     "$GOAL_ID" "${cycle:-0}" "${watch_start:-0}" "${overflow_count:-0}" \
     "${overflow_detected:-0}" "${MAX_CYCLES:-0}" "${UBERDEV_RESOLVED_BACKEND:-}" > "$tmp"
   mv -f "$tmp" "$sc" || { rm -f "$tmp"; return 3; }
 
-  # Array sidecars: one int per line, no IFS-mutating joins.
+  # Array sidecars: one int per line, no IFS-mutating joins. Capture first
+  # (command substitution strips trailing newlines, and `grep || true` absorbs
+  # rc=1 on an empty array — a no-match, not an error), then write fail-CLOSED
+  # so a real redirect failure (e.g. ENOSPC) cannot silently truncate the file.
+  # `printf '%s\n'` re-adds the trailing newline so the final element survives
+  # the read-back loop.
   _uberdev_dispatch_prepare_tmp_target "${sc}.queue" 0 "goal" || return 3
   tmp="$(mktemp "${sc}.queue.XXXXXXXX")" || return 3
-  printf '%s\n' "${queue[@]:-}" | grep -E '^[0-9]+$' > "$tmp" || true
+  _filtered="$(printf '%s\n' "${queue[@]:-}" | grep -E '^[0-9]+$' || true)"
+  if [ -n "$_filtered" ]; then
+    printf '%s\n' "$_filtered" > "$tmp" || { rm -f "$tmp"; return 3; }
+  else
+    : > "$tmp" || { rm -f "$tmp"; return 3; }
+  fi
   mv -f "$tmp" "${sc}.queue" || { rm -f "$tmp"; return 3; }
 
   _uberdev_dispatch_prepare_tmp_target "${sc}.active" 0 "goal" || return 3
   tmp="$(mktemp "${sc}.active.XXXXXXXX")" || return 3
-  printf '%s\n' "${active_issues[@]:-}" | grep -E '^[0-9]+$' > "$tmp" || true
+  _filtered="$(printf '%s\n' "${active_issues[@]:-}" | grep -E '^[0-9]+$' || true)"
+  if [ -n "$_filtered" ]; then
+    printf '%s\n' "$_filtered" > "$tmp" || { rm -f "$tmp"; return 3; }
+  else
+    : > "$tmp" || { rm -f "$tmp"; return 3; }
+  fi
   mv -f "$tmp" "${sc}.active" || { rm -f "$tmp"; return 3; }
   return 0
 }
