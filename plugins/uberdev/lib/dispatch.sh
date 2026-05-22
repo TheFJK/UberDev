@@ -198,7 +198,16 @@ _uberdev_dispatch_tmp_target_safe() {
   fi
   if [ -e "$target" ]; then
     owner_uid="$(stat -f '%u' "$target" 2>/dev/null || stat -c '%u' "$target" 2>/dev/null || echo '')"
-    if [ -n "$owner_uid" ] && [ "$owner_uid" != "$(id -u)" ]; then
+    if [ -z "$owner_uid" ]; then
+      # stat unavailable in BOTH BSD (-f) and GNU (-c) forms (e.g. busybox /
+      # minimal image). We cannot prove the entry is ours, so fail CLOSED —
+      # an empty owner_uid must NOT skip the ownership gate (that would let an
+      # attacker-owned pre-created file through). The symlink + regular-file
+      # checks do NOT backstop ownership, so this guard is load-bearing.
+      echo "error: cannot determine owner of predicted path (stat -f/-c both failed): $target — failing closed" >&2
+      return 1
+    fi
+    if [ "$owner_uid" != "$(id -u)" ]; then
       echo "error: refusing predicted path owned by uid=$owner_uid (expected $(id -u)): $target (possible pre-creation attack)" >&2
       return 1
     fi
@@ -515,6 +524,13 @@ _uberdev_dispatch_wezterm() {
   local WORKTREE_DIR=".claude/worktrees/solve-issue-$ISSUE_NUM"
   local WORKTREE_BRANCH="worktree-solve-issue-$ISSUE_NUM"
   local LOG_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM.log"
+  # TOCTOU hardening (#155): guard + 0600-create the predictable log path
+  # before the worktree-add redirect below — the wezterm backend writes the
+  # SAME world-writable path the claude-bg / background backends harden, so it
+  # must fail-CLOSED on a symlink/foreign-owned target too.
+  if ! _uberdev_dispatch_prepare_tmp_target "$LOG_FILE" "$ISSUE_NUM" "wezterm"; then
+    DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
+  fi
   # The backend runs its own worktree add — a pane's `claude -p` does not get
   # native --worktree. Absolute path, quoted (repo path may contain spaces).
   # MSYS_NO_PATHCONV stops Git Bash rewriting the path.

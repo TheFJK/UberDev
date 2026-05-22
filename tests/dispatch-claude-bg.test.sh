@@ -495,6 +495,12 @@ assert_grep "$DISPATCH_LIB" \
 assert_grep "$DISPATCH_LIB" \
   'pid_target_unsafe' \
   "#155 — background backend re-verifies \$STATUS_FILE.pid ownership before parsing"
+assert_grep "$DISPATCH_LIB" \
+  '_uberdev_dispatch_prepare_tmp_target "\$LOG_FILE" "\$ISSUE_NUM" "wezterm"' \
+  "#155 (review) — wezterm backend also guards its identical predictable LOG_FILE path"
+assert_grep "$DISPATCH_LIB" \
+  'if \[ -z "\$owner_uid" \]; then' \
+  "#155 (review) — guard fails CLOSED when ownership is undeterminable (empty owner_uid, e.g. minimal stat)"
 
 echo
 echo "== #155: fail-CLOSED behaviour (runtime regression fixture) =="
