@@ -155,7 +155,8 @@ if [ "$WATCH" = "1" ]; then
 else
   # Build the master prompt that re-enters this skill with the same args plus --watch
   MASTER_PROMPT="/uberdev:testers $ARGUMENTS --watch"
-  source plugins/uberdev/lib/dispatch.sh
+  # #171 — canonical CLAUDE_PLUGIN_ROOT-relative source (robust across cwd changes)
+  [ -r "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh" ] && . "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh"
   dispatch_master "$MASTER_PROMPT" "$RUN_DIR/master.log"
   echo "[testers] dispatched master. Watch progress: $RUN_DIR/master.log"
   echo "[testers] run_id=$RUN_ID surface=$SURFACE target=$TARGET"
