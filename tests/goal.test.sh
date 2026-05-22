@@ -271,11 +271,11 @@ assert_no_grep "$GOAL_LIB" '\bbash -c'                                   "G19.no
 assert_grep "$GOAL_CMD" '--i-know-what-im-doing'                         "G19.r12-mentioned-once"
 
 echo
-echo "== G20: version bump locked (0.33.3) =="
-assert_grep "$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json" '"version": "0\.33\.3"'  "G20.plugin-json"
-assert_grep "$REPO_ROOT/.claude-plugin/marketplace.json"            '"version": "0\.33\.3"'  "G20.marketplace-json"
-assert_grep "$REPO_ROOT/README.md"                                  'version-0\.33\.3-blue'  "G20.readme-badge"
-assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.33\.3\]'        "G20.changelog"
+echo "== G20: version bump locked (0.33.4) =="
+assert_grep "$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json" '"version": "0\.33\.4"'  "G20.plugin-json"
+assert_grep "$REPO_ROOT/.claude-plugin/marketplace.json"            '"version": "0\.33\.4"'  "G20.marketplace-json"
+assert_grep "$REPO_ROOT/README.md"                                  'version-0\.33\.4-blue'  "G20.readme-badge"
+assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.33\.4\]'        "G20.changelog"
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
 
 echo

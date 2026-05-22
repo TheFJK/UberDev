@@ -4,6 +4,11 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.4] - 2026-05-22
+
+### Fixed
+- **Aligned the stale alias enumerations in `skills/using-uberdev/SKILL.md` with the installed set (#162).** The "Auto-installed aliases" line said "**six** … (`/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`)" — missing `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify` (the set has grown to **eleven**); now lists all eleven. The `auto_install_aliases` config-example comment was de-enumerated (points at `aliases-sync.sh` as the canonical set) to stop it drifting again. `aliases-sync.sh` and the README already listed eleven. Docs-only; no behaviour change. Closes #162.
+
 ## [0.33.3] - 2026-05-22
 
 ### Security
