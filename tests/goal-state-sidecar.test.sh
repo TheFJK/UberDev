@@ -192,6 +192,35 @@ case "$ptrav_out" in
   *)            assert_eq "rejected" "rejected" "active-id pointer traversal rejected" ;;
 esac
 
+echo "== Phase0->1->2 hand-off: active_issues populated in Phase 1 survives to Phase 2 (separate fresh shells; #171 review gap) =="
+# This is the end-to-end regression guard for the wave-2-review CRITICAL: Phase 0
+# flushes run-state BEFORE active_issues exists (empty .active sidecar); Phase 1
+# (a fresh shell) rehydrates, appends the dispatched issue, and MUST flush; Phase 2
+# (another fresh shell) rehydrates and must see the Phase 1 mutation. Without the
+# Phase 1 flush, Phase 2 reads an empty active_issues and false-converges on cycle 1.
+GOAL_ID="goal-test-handoff01"; cycle=1; watch_start="$(date +%s)"
+overflow_count=0; overflow_detected=0; MAX_CYCLES=5; UBERDEV_RESOLVED_BACKEND="claude-bg"
+queue=(123); active_issues=()
+uberdev_goal_write_run_state                      # Phase 0 flush (active_issues still empty)
+# Phase 1 (fresh shell): rehydrate, simulate a dispatch populating active_issues, flush.
+UBERDEV_TMPDIR="$UBERDEV_TMPDIR" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" \
+  GOAL_ID="goal-test-handoff01" bash -c '
+    . "$CLAUDE_PLUGIN_ROOT/lib/dispatch.sh"
+    . "$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh"
+    uberdev_goal_read_run_state || exit 9
+    active_issues+=("201")          # simulate Phase 1 dispatch adding an active issue
+    uberdev_goal_write_run_state || exit 8   # the flush the wave-2 review found missing
+  ' || { FAIL=$((FAIL + 1)); printf "  FAIL  phase-1 hand-off sim errored\n" >&2; }
+# Phase 2 (fresh shell): rehydrate, assert the Phase 1 active_issues mutation survived.
+handoff_out="$(UBERDEV_TMPDIR="$UBERDEV_TMPDIR" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" \
+  GOAL_ID="goal-test-handoff01" bash -c '
+    . "$CLAUDE_PLUGIN_ROOT/lib/dispatch.sh"
+    . "$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh"
+    uberdev_goal_read_run_state || exit 9
+    printf "%s|%s" "${active_issues[*]}" "${#active_issues[@]}"
+  ')"
+assert_eq "$handoff_out" "201|1" "Phase 1 active_issues mutation survives to Phase 2 fresh shell"
+
 echo "== cleanup removes all three sidecars + the active-id pointer =="
 GOAL_ID="goal-test-clean001"; cycle=1; watch_start=1; overflow_count=0
 overflow_detected=0; MAX_CYCLES=5; UBERDEV_RESOLVED_BACKEND="claude-bg"
