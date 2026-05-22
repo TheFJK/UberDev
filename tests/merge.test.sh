@@ -1608,7 +1608,11 @@ fi
 
 echo
 echo "== M76: AUDIT_EVENT_ENUM prose names the data.outcome enum for auto_review_returned (#89) =="
-ENUM_ROW=$(grep -E '^\| `AUDIT_EVENT_ENUM`' "$SKILL_FILE")
+# #119: the field-level prose moved out of the AUDIT_EVENT_ENUM table cell into a
+# dedicated "### AUDIT_EVENT_ENUM — event semantics" subsection (scannability
+# refactor; the canonical comma-list of event literals stays in the cell). Extract
+# that subsection (heading → next heading) so the prose-token greps below resolve.
+ENUM_ROW=$(awk '/^### .AUDIT_EVENT_ENUM. .*event semantics/{f=1; next} f && /^#{2,3} /{exit} f' "$SKILL_FILE")
 for token in 'green' 'blocked' 'refused_non_green' 'reason_triggering' 'duration_ms'; do
   if echo "$ENUM_ROW" | grep -qE "$token"; then
     pass "M76.$token — AUDIT_EVENT_ENUM prose names $token"
@@ -1893,6 +1897,28 @@ for TOKEN in ACCEPT_BLOCKER_DEFERRED ACCEPT_CRITICAL_DEFERRED I_KNOW_WHAT_IM_DOI
     pass "M87.13.$TOKEN — no env-var variant for ${TOKEN} (constraints [hard]; tombstone)"
   fi
 done
+
+echo
+echo "== M88 (#119): AUDIT_EVENT_ENUM cell de-monolithed — field-level prose extracted to a subsection =="
+# The row keeps the canonical comma-list of event literals (so the M23/M52/M74/
+# M75/M76-class greps still resolve), but its ~3500-char field-level prose moved
+# to the "### AUDIT_EVENT_ENUM — event semantics" subsection. Lock all three so a
+# future edit can't re-monolith the row.
+if grep -qE '^### .AUDIT_EVENT_ENUM. .*event semantics' "$SKILL_FILE"; then
+  pass "M88.subsection — AUDIT_EVENT_ENUM event-semantics subsection exists"
+else
+  fail "M88.subsection — AUDIT_EVENT_ENUM event-semantics subsection MUST exist (#119)"
+fi
+if grep -E '^\| `AUDIT_EVENT_ENUM`' "$SKILL_FILE" | grep -q 'event semantics subsection'; then
+  pass "M88.pointer — AUDIT_EVENT_ENUM row points at the subsection"
+else
+  fail "M88.pointer — AUDIT_EVENT_ENUM row MUST point at the event-semantics subsection (#119)"
+fi
+if grep -E '^\| `AUDIT_EVENT_ENUM`' "$SKILL_FILE" | grep -q 'Field-level extensions'; then
+  fail "M88.extracted — 'Field-level extensions' prose MUST NOT be back on the AUDIT_EVENT_ENUM row (#119 regression)"
+else
+  pass "M88.extracted — field-level prose no longer monolithic on the row"
+fi
 
 echo
 echo "== Summary =="

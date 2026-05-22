@@ -4,6 +4,11 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.5] - 2026-05-22
+
+### Changed
+- **De-monolithed the `AUDIT_EVENT_ENUM` Constants cell in `skills/merge-pipeline/SKILL.md` (#119).** The cell was a single ~5131-char line (enum literals + ~3500 chars of field-level prose + member-addition history) — unscannable, and every new audit event made it worse. The ~3500 chars of prose moved into a dedicated `### AUDIT_EVENT_ENUM — event semantics & member history` subsection (with paragraph breaks per member cohort); the **canonical comma-separated list of event literals stays in the table cell** (now ~1274 chars) so the M-row grep-the-row tests (`merge.test.sh` M23/M52/M74/M75/M76 across 6 test files) keep resolving unchanged. `merge.test.sh` M76 was repointed at the relocated subsection; new M88 locks the refactor (row points at the subsection; prose no longer monolithic). No behaviour change. Closes #119.
+
 ## [0.33.4] - 2026-05-22
 
 ### Fixed
