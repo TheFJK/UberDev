@@ -1,0 +1,52 @@
+---
+description: "Whole-codebase 3-lens simplification (Reuse/Quality/Efficiency). Chunks the repo, audits each chunk with the code-simplifier lenses, applies preserve-behavior fixes via code-fixer as one refactor: commit per chunk on a new branch, opens ONE PR for review, and files leftover blocker findings as GitHub issues. Whole-repo by default; pass a path/glob to narrow. --audit-only for a read-only scan."
+argument-hint: "[path-or-glob] [--audit-only] [--all] [--no-issues] [--no-report] [--lens=Reuse,Quality,Efficiency] [--max-chunks=N] [--concurrency=N] [--severity=blocker] [--turbo]"
+allowed-tools: ["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", "Write"]
+---
+
+# /ubersimplify — whole-codebase 3-lens simplification
+
+Runs the `/uberdev:simplify` lenses (**Reuse, Quality, Efficiency**) across the **entire
+codebase** (or a path-scoped subtree), then applies preserve-behavior refactors via
+`code-fixer` — one `refactor:` commit per chunk — on a **new branch behind a single PR**
+for review. Leftover findings the iron rule blocked are filed as GitHub issues. This is
+the *writing* sibling of the read-only `/uberscan`. Design: `docs/rfc/0008-ubersimplify-command.md`.
+
+## Usage
+`/ubersimplify [path-or-glob] [flags]` — no path = whole repo.
+
+| Flag | Meaning |
+|------|---------|
+| `--audit-only` | Read-only: scan + report + issues, no branch/fix/PR. |
+| `--all` | Override the `MAX_CHUNKS` circuit breaker. |
+| `--no-issues` | Skip leftover-issue filing. |
+| `--no-report` | Skip the markdown report. |
+| `--lens=…` | Subset the lenses (default all three). |
+| `--max-chunks=N` | Override the chunk-count cap (default from config, 25). |
+| `--concurrency=N` | Chunks audited per wave (default from config, 3). |
+| `--severity=LEVEL` | Minimum severity filed as issues (default blocker). |
+| `--turbo` | Non-interactive: circuit breakers cap-and-continue instead of prompting. |
+
+## Implementation
+
+Invoke the `uberdev:ubersimplify-pipeline` skill with `$ARGUMENTS` in scope. The skill owns
+all phases (scope+chunk, per-chunk lens waves, aggregate, branch+apply, push+PR, issue
+filing). This command performs only preflight validation, then hands off:
+
+```bash
+# Preflight
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "error: /ubersimplify must run inside a git repository" >&2; exit 2
+fi
+# A dirty tree would let `git checkout -b` + per-chunk commits sweep the user's
+# uncommitted work into refactor commits. Refuse unless --audit-only (read-only).
+if ! printf '%s' "$ARGUMENTS" | grep -q -- '--audit-only' \
+   && [ -n "$(git status --porcelain)" ]; then
+  echo "error: working tree is dirty — commit or stash first (or use --audit-only)" >&2; exit 2
+fi
+if printf '%s' "$ARGUMENTS" | grep -q -- '--no-issues' && printf '%s' "$ARGUMENTS" | grep -q -- '--no-report'; then
+  echo "error: --no-issues and --no-report together leave no output sink" >&2; exit 2
+fi
+```
+
+Then invoke `Skill(uberdev:ubersimplify-pipeline)` with the same `$ARGUMENTS`.
