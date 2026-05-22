@@ -98,6 +98,7 @@ Notes on the enums:
 5. **Generate `GOAL_ID`.** Random suffix per D4 — NEVER derived from `$@` or issue numbers (those are attacker-controlled; using them would let a caller collide TMPDIR paths):
 
    ```bash
+   export UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"   # D7 — stable sidecar dir for the watcher
    GOAL_ID="goal-$(date +%s)-$(mktemp -u XXXXXXXX | tr -d '/' | head -c 8)"
    export UBERDEV_GOAL_ID="$GOAL_ID"
    ```
@@ -116,6 +117,12 @@ Notes on the enums:
    watch_start="$(date +%s)"
    overflow_count=0
    overflow_detected=0
+   ```
+
+   ```bash
+   # #171 — persist the run-state pointer + loop accumulators so Phases 1-4
+   # (fresh shells) can rehydrate GOAL_ID + counters. cycle is initialized above.
+   uberdev_goal_write_run_state || { echo "goal: failed to persist run-state" >&2; exit 3; }
    ```
 
 8. **If `--dry-run`: print planned cycle-1 dispatch list + watch-loop outline, exit 0** (D16, S9). The dry-run path is the audit/preview surface — no `gh` calls, no agent spawns, no merges, **no audit events emitted** (S9 — `goal_dispatched` must NOT fire on dry-run so the audit log only carries real runs). Emit the resolved `MAX_CYCLES`, the resolved `UBERDEV_RESOLVED_BACKEND`, the issue queue, and the planned audit events ("would emit goal_dispatched", "would dispatch /turbo for issues …", "would poll solve-bg-stdout-N.log per issue"), then exit 0 cleanly. This step runs BEFORE the real `goal_dispatched` emit in step 9 — order matters.
@@ -143,6 +150,14 @@ Notes on the enums:
 Per cycle, walk the current `queue` and dispatch one `/turbo` agent per eligible issue. Skip issues already in `solving` or `pr-pushed` (resume safety — if Phase 0 was re-entered after a partial run within the same `$UBERDEV_TMPDIR`, in-flight issues must not be re-dispatched).
 
 ```bash
+# #171 fresh-shell rehydration — re-source libs (idempotent via _UBERDEV_*_LOADED
+# guards) and re-read run-state. Safe under set -u (${VAR:-} expansions).
+[ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ] && . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+[ -r "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh" ]    && . "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh"
+[ -r "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh" ]  && . "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh"
+GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
+uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 1" >&2; exit 3; }
+uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 declare -a active_issues=()
 for ISSUE_NUM in "${queue[@]}"; do
   current_state="$(awk -v i="$ISSUE_NUM" '{state[$1]=$2} END {print state[i]}' \
@@ -200,6 +215,14 @@ done
 **Concurrency model.** Phase 2 runs as a **single-threaded watcher** per iteration: each `sleep $_UBERDEV_GOAL_POLL_SECS` cycle walks the active-issues list once (step 2a), the green-PR list once (step 2b), and the merging-PR list once (step 2c) in deterministic order — a serial poll of every PR, never a fan-out. There is **no per-PR poll parallelism in v1** — the audit timeline (`goal_pr_transition` events in `goal-<id>.jsonl`) must remain a serial, replay-deterministic sequence for post-mortems and for the fingerprint-repeat detector in Phase 3. Per-PR poll parallelism is deferred to a future RFC (it would require an event-bus partition by PR number and a multi-writer audit framing that preserves a total order; neither lands in v1).
 
 ```bash
+# #171 fresh-shell rehydration — re-source libs (idempotent via _UBERDEV_*_LOADED
+# guards) and re-read run-state. Safe under set -u (${VAR:-} expansions).
+[ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ] && . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+[ -r "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh" ]    && . "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh"
+[ -r "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh" ]  && . "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh"
+GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
+uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 2" >&2; exit 3; }
+uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 # watch_start is set in Phase 0 (step 7) — goal-level wall-clock anchor.
 # The 4h stuck-loop check below measures total goal wall-clock, not per-cycle.
 # Q1 — bash supports ONE EXIT trap per shell; register the combined cleanup
@@ -276,6 +299,7 @@ while true; do
               # goal_cycle_completed audit payload (the prose at line ~381
               # promises {overflow_count: N} in the summary).
               overflow_count=$(( ${overflow_count:-0} + 1 ))
+              uberdev_goal_write_run_state || echo "goal: warning: run-state flush failed in Phase 2a" >&2
             fi
           else
             printf 'goal-pipeline: overflow check failed to read audit %s for PR %s; treating as no overflow this cycle\n' \
@@ -455,6 +479,14 @@ Why polling stdout transcripts instead of the (non-existent) `claude agents stat
 After Phase 2 drains (no active agents, no merging PRs), enumerate the new BLOCKER/CRITICAL `review-pr-finding` issues filed during the cycle, repeat-detect them, and decide whether to loop, converge, or halt.
 
 ```bash
+# #171 fresh-shell rehydration — re-source libs (idempotent via _UBERDEV_*_LOADED
+# guards) and re-read run-state. Safe under set -u (${VAR:-} expansions).
+[ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ] && . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+[ -r "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh" ]    && . "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh"
+[ -r "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh" ]  && . "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh"
+GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
+uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 3" >&2; exit 3; }
+uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 # Snapshot goal start for the createdAt filter — only consider findings filed
 # during THIS goal run, not pre-existing review-pr-finding issues that pre-date
 # the cycle. The TZ-Z timestamp lines up with gh's ISO-8601 createdAt format.
@@ -530,6 +562,14 @@ mapfile -t new_candidates < <(printf '%s' "$candidates_json")
 For each candidate, extract the fingerprint and check for repeat:
 
 ```bash
+# #171 fresh-shell rehydration — re-source libs (idempotent via _UBERDEV_*_LOADED
+# guards) and re-read run-state. Safe under set -u (${VAR:-} expansions).
+[ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ] && . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+[ -r "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh" ]    && . "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh"
+[ -r "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh" ]  && . "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh"
+GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
+uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 3 (fingerprint loop)" >&2; exit 3; }
+uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 for issue in "${new_candidates[@]}"; do
   # Issues don't go through _uberdev_goal_fetch_pr_body (PR-specific helper);
   # keep the inline gh issue view + 64KiB cap here. The cap shape is shared
@@ -558,6 +598,14 @@ done
 - Otherwise: emit `goal_cycle_completed` with the cycle summary `{cycle, prs_merged, prs_held, issues_resolved, new_candidates}`, set `queue ← new_candidates`, increment `cycle`, and loop back to Phase 1.
 
 ```bash
+# #171 fresh-shell rehydration — re-source libs (idempotent via _UBERDEV_*_LOADED
+# guards) and re-read run-state. Safe under set -u (${VAR:-} expansions).
+[ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ] && . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+[ -r "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh" ]    && . "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh"
+[ -r "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh" ]  && . "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh"
+GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
+uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 3 (terminal check)" >&2; exit 3; }
+uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 if [ "$cycle" -ge "$MAX_CYCLES" ] && [ "${#new_candidates[@]}" -gt 0 ]; then
   uberdev_goal_audit goal_circuit_breaker \
     "{\"reason\":\"max_cycles\",\"cycle\":$cycle,\"max\":$MAX_CYCLES,\"queued\":${#new_candidates[@]}}"
@@ -581,6 +629,7 @@ if [ "${#new_candidates[@]}" = "0" ] && [ "$terminal_count" = "$all_pr_count" ];
   uberdev_goal_audit goal_converged \
     "{\"cycle\":$cycle,\"prs\":$all_pr_count}"
   print_summary "$cycle"
+  uberdev_goal_cleanup_run_state || true   # #171 — reap run-state sidecars on terminal exit
   exit 0
 fi
 
@@ -603,6 +652,7 @@ cycle=$(( cycle + 1 ))
 # is per-cycle; overflow_detected gates the per-cycle truncation above).
 overflow_count=0
 overflow_detected=0
+uberdev_goal_write_run_state || { echo "goal: failed to persist run-state before loop-back" >&2; exit 3; }
 # loop back to Phase 1
 ```
 
@@ -614,6 +664,14 @@ overflow_detected=0
 - **does NOT halt the entire goal** — `halted_due_to_overflow` is a per-PR cycle-management signal, not a goal-level circuit breaker. The goal continues to its next cycle and may converge once the overflow PR's issues are resolved.
 
 ```bash
+# #171 fresh-shell rehydration — re-source libs (idempotent via _UBERDEV_*_LOADED
+# guards) and re-read run-state. Safe under set -u (${VAR:-} expansions).
+[ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ] && . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+[ -r "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh" ]    && . "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh"
+[ -r "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh" ]  && . "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh"
+GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
+uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 3 (overflow check)" >&2; exit 3; }
+uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 # overflow_detected is set in Phase 2a's red case when any PR's /review-pr
 # audit JSON carried halted_due_to_overflow:true. Here in Phase 3 we apply
 # the first-10 truncation (no PR transition — Phase 2a already did that).
@@ -647,6 +705,9 @@ goal <GOAL_ID>: cycles=<N>/<MAX> prs_merged=<M> prs_held=<H> issues_resolved=<R>
 The held-PR list (each row `pr=<num> state=<yellow-held|red-held> blocks=#<i1>,#<i2>,…`) is the **post-mortem surface** — it tells the operator which PRs need human attention. It is printed after the summary line, one row per held PR.
 
 ```bash
+# #171 — print_summary reads GOAL_ID/MAX_CYCLES/watch_start from the calling
+# shell; every caller (Phase 2/3 fences) rehydrates them via
+# uberdev_goal_read_run_state at fence top. Do NOT call from a non-rehydrated block.
 print_summary() {
   local cycles="$1" prs_merged prs_held_lines prs_held_count issues_resolved wall_secs
   prs_merged="$(uberdev_goal_list_prs_in_state "$GOAL_ID" merged | grep -c . || true)"
