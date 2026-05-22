@@ -199,7 +199,7 @@ Each chunk receives a **file-set audit brief**: the agents audit EXISTING files 
 UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
 if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/ubersimplify-active-id.txt" ]; then
   RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/ubersimplify-active-id.txt")"
-  case "$RUN_ID" in *[!0-9A-Za-z._-]*|*..*) echo "ubersimplify: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "ubersimplify: invalid RUN_ID pointer" >&2; exit 2 ;; esac
   RUN_DIR=".uberdev/simplify/$RUN_ID"
 fi
 
@@ -374,7 +374,7 @@ For each `chunk-NNN-lens.yaml`, produce the per-chunk `code-fixer` input by dedu
 UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
 if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/ubersimplify-active-id.txt" ]; then
   RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/ubersimplify-active-id.txt")"
-  case "$RUN_ID" in *[!0-9A-Za-z._-]*|*..*) echo "ubersimplify: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "ubersimplify: invalid RUN_ID pointer" >&2; exit 2 ;; esac
   RUN_DIR=".uberdev/simplify/$RUN_ID"
 fi
 
@@ -435,7 +435,7 @@ Skipped entirely under `--audit-only` (read-only mode). Otherwise a new branch i
 UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
 if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/ubersimplify-active-id.txt" ]; then
   RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/ubersimplify-active-id.txt")"
-  case "$RUN_ID" in *[!0-9A-Za-z._-]*|*..*) echo "ubersimplify: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "ubersimplify: invalid RUN_ID pointer" >&2; exit 2 ;; esac
   RUN_DIR=".uberdev/simplify/$RUN_ID"
 fi
 
@@ -487,7 +487,7 @@ fi
 UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
 if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/ubersimplify-active-id.txt" ]; then
   RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/ubersimplify-active-id.txt")"
-  case "$RUN_ID" in *[!0-9A-Za-z._-]*|*..*) echo "ubersimplify: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "ubersimplify: invalid RUN_ID pointer" >&2; exit 2 ;; esac
   RUN_DIR=".uberdev/simplify/$RUN_ID"
 fi
 
@@ -552,7 +552,7 @@ Collect the fileable (`blocker`-tier) lens findings that `code-fixer` did NOT ap
 UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
 if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/ubersimplify-active-id.txt" ]; then
   RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/ubersimplify-active-id.txt")"
-  case "$RUN_ID" in *[!0-9A-Za-z._-]*|*..*) echo "ubersimplify: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "ubersimplify: invalid RUN_ID pointer" >&2; exit 2 ;; esac
   RUN_DIR=".uberdev/simplify/$RUN_ID"
 fi
 
@@ -647,7 +647,7 @@ fi
 UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
 if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/ubersimplify-active-id.txt" ]; then
   RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/ubersimplify-active-id.txt")"
-  case "$RUN_ID" in *[!0-9A-Za-z._-]*|*..*) echo "ubersimplify: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "ubersimplify: invalid RUN_ID pointer" >&2; exit 2 ;; esac
   RUN_DIR=".uberdev/simplify/$RUN_ID"
 fi
 

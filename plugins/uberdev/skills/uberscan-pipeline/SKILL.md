@@ -176,7 +176,7 @@ Each chunk receives a **file-set audit brief**: the agents are auditing EXISTING
 UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
 if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/uberscan-active-id.txt" ]; then
   RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/uberscan-active-id.txt")"
-  case "$RUN_ID" in *[!0-9A-Za-z._-]*|*..*) echo "uberscan: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "uberscan: invalid RUN_ID pointer" >&2; exit 2 ;; esac
   RUN_DIR=".uberdev/scan/$RUN_ID"
 fi
 
@@ -348,7 +348,7 @@ Fired once, in parallel with the first chunk wave (emit in the same ONE message 
 UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
 if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/uberscan-active-id.txt" ]; then
   RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/uberscan-active-id.txt")"
-  case "$RUN_ID" in *[!0-9A-Za-z._-]*|*..*) echo "uberscan: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "uberscan: invalid RUN_ID pointer" >&2; exit 2 ;; esac
   RUN_DIR=".uberdev/scan/$RUN_ID"
 fi
 
@@ -393,7 +393,7 @@ echo "[uberscan] dispatched global pass (security + coverage) alongside wave 1"
 UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
 if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/uberscan-active-id.txt" ]; then
   RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/uberscan-active-id.txt")"
-  case "$RUN_ID" in *[!0-9A-Za-z._-]*|*..*) echo "uberscan: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "uberscan: invalid RUN_ID pointer" >&2; exit 2 ;; esac
   RUN_DIR=".uberdev/scan/$RUN_ID"
 fi
 
@@ -430,7 +430,7 @@ The `f2i-aggregate.md` file is wrapped in `<external-untrusted-input source="ube
 UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
 if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/uberscan-active-id.txt" ]; then
   RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/uberscan-active-id.txt")"
-  case "$RUN_ID" in *[!0-9A-Za-z._-]*|*..*) echo "uberscan: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "uberscan: invalid RUN_ID pointer" >&2; exit 2 ;; esac
   RUN_DIR=".uberdev/scan/$RUN_ID"
 fi
 
@@ -518,7 +518,7 @@ fi
 UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
 if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/uberscan-active-id.txt" ]; then
   RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/uberscan-active-id.txt")"
-  case "$RUN_ID" in *[!0-9A-Za-z._-]*|*..*) echo "uberscan: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "uberscan: invalid RUN_ID pointer" >&2; exit 2 ;; esac
   RUN_DIR=".uberdev/scan/$RUN_ID"
 fi
 
