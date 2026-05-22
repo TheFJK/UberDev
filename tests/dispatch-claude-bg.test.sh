@@ -126,13 +126,13 @@ assert_grep "$SOLVE_PIPELINE" \
 assert_grep "$SOLVE_PIPELINE" \
   'uberdev_read_enum solve_effort UBERDEV_SOLVE_EFFORT' \
   "Phase A reads solve_effort from .claude/uberdev.local.md via uberdev_read_enum"
-assert_grep "$SOLVE_PIPELINE" \
+assert_grep "$DISPATCH_LIB" \
   '^EFFORT_FLAG=\( --effort "\$EFFORT_LEVEL" \)$' \
   "Phase A hoist binds EFFORT_FLAG as a bash+zsh array — scalar form regresses to a one-slot \`--effort max\` argv element under zsh SH_WORD_SPLIT=off (v0.22.2 fix)"
-assert_grep "$SOLVE_PIPELINE" \
+assert_grep "$DISPATCH_LIB" \
   '^PERM_FLAG=\(\)$' \
   "Phase A hoist binds PERM_FLAG as an empty bash+zsh array — same zsh-word-split rationale as EFFORT_FLAG (v0.22.2 fix)"
-assert_grep "$SOLVE_PIPELINE" \
+assert_grep "$DISPATCH_LIB" \
   'PERM_FLAG=\( --permission-mode auto \)' \
   "Phase A AUTO_PERMISSIONS branch populates PERM_FLAG as an array, not a scalar"
 assert_grep "$SOLVE_PIPELINE" \
@@ -200,6 +200,28 @@ assert_grep "$DISPATCH_LIB" \
 assert_grep "$DISPATCH_LIB" \
   '_uberdev_dispatch_claude_bg\(\)' \
   "lib/dispatch.sh defines the _uberdev_dispatch_claude_bg function"
+
+echo
+echo "== #175: uberdev_dispatch_resolve_env SSOT helper (structural) =="
+assert_grep "$DISPATCH_LIB" \
+  '^uberdev_dispatch_resolve_env\(\)' \
+  "#175 — uberdev_dispatch_resolve_env function is defined in lib/dispatch.sh"
+assert_grep "$DISPATCH_LIB" \
+  "MODEL='claude-opus-4-7\[1m\]'" \
+  "#175 — helper sets MODEL single-quoted (blocks zsh [1m] glob)"
+assert_grep "$DISPATCH_LIB" \
+  'if \[\[ -n "\$TIMEOUT_BIN" \]\]; then' \
+  "#175 — helper carries the verbatim fail-loud TIMEOUT_BIN guard (config-override I2f shape)"
+assert_grep "$DISPATCH_LIB" \
+  'brew install coreutils' \
+  "#175 — helper carries the brew install coreutils remediation pointer"
+# AC3: the env resolver must never read or write the backend var (that is preflight's).
+RESOLVE_BODY="$(awk '/^uberdev_dispatch_resolve_env\(\)/{f=1} f{print} f&&/^}/{exit}' "$DISPATCH_LIB")"
+if printf '%s' "$RESOLVE_BODY" | grep -q 'UBERDEV_RESOLVED_BACKEND'; then
+  echo "  FAIL  #175 — resolve_env must NOT reference UBERDEV_RESOLVED_BACKEND (D15)"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  #175 — resolve_env does not reference UBERDEV_RESOLVED_BACKEND (D15)"; PASS=$((PASS + 1))
+fi
 
 echo "== Functional: id_extract rc capture + subphase discriminator (#154) =="
 # These cases SOURCE lib/dispatch.sh and drive _uberdev_dispatch_claude_bg with
@@ -539,6 +561,90 @@ else
   echo "  FAIL  #155 runtime — guard behaviour (subshell exit $_rc155)"
   FAIL=$((FAIL + 1))
 fi
+
+TALLY_FILE="$(mktemp)"   # subshell PASS/FAIL hand-off for #175 cases
+
+echo
+echo "== #175 D-iso: uberdev_dispatch_resolve_env populates env from a clean shell =="
+(
+  set +u
+  unset TIMEOUT_BIN SOLVE_TIMEOUT MODEL BG_PROMPT_MODE PERM_FLAG EFFORT_FLAG AUTO_PERMISSIONS EFFORT_LEVEL
+  CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+  # shellcheck disable=SC1090
+  . "$DISPATCH_LIB"
+  uberdev_dispatch_resolve_env; rc=$?
+  [[ "$rc" -eq 0 ]] && { echo "  PASS  D-iso resolve_env returns 0"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-iso resolve_env rc=$rc"; FAIL=$((FAIL + 1)); }
+  [[ -n "$TIMEOUT_BIN" ]] && { echo "  PASS  D-iso TIMEOUT_BIN non-empty"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-iso TIMEOUT_BIN empty"; FAIL=$((FAIL + 1)); }
+  if [ -x "$TIMEOUT_BIN" ] || command -v "$TIMEOUT_BIN" >/dev/null 2>&1; then echo "  PASS  D-iso TIMEOUT_BIN executable/resolvable"; PASS=$((PASS + 1)); else echo "  FAIL  D-iso TIMEOUT_BIN not executable ($TIMEOUT_BIN)"; FAIL=$((FAIL + 1)); fi
+  [[ "$MODEL" == 'claude-opus-4-7[1m]' ]] && { echo "  PASS  D-iso MODEL correct"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-iso MODEL='$MODEL'"; FAIL=$((FAIL + 1)); }
+  case "$SOLVE_TIMEOUT" in (''|*[!0-9]*) echo "  FAIL  D-iso SOLVE_TIMEOUT not numeric ('$SOLVE_TIMEOUT')"; FAIL=$((FAIL + 1));; (*) echo "  PASS  D-iso SOLVE_TIMEOUT numeric"; PASS=$((PASS + 1));; esac
+  [[ "$BG_PROMPT_MODE" == "argv" ]] && { echo "  PASS  D-iso BG_PROMPT_MODE=argv"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-iso BG_PROMPT_MODE='$BG_PROMPT_MODE'"; FAIL=$((FAIL + 1)); }
+  [[ "${EFFORT_FLAG[*]}" == "--effort max" ]] && { echo "  PASS  D-iso EFFORT_FLAG=( --effort max )"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-iso EFFORT_FLAG=( ${EFFORT_FLAG[*]} )"; FAIL=$((FAIL + 1)); }
+  [[ "${#PERM_FLAG[@]}" -eq 0 ]] && { echo "  PASS  D-iso PERM_FLAG empty (default AUTO_PERMISSIONS=0)"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-iso PERM_FLAG=( ${PERM_FLAG[*]} )"; FAIL=$((FAIL + 1)); }
+  printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
+) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
+
+echo
+echo "== #175 D-perm: AUTO_PERMISSIONS=1 yields --permission-mode auto =="
+(
+  set +u
+  unset TIMEOUT_BIN SOLVE_TIMEOUT MODEL BG_PROMPT_MODE PERM_FLAG EFFORT_FLAG EFFORT_LEVEL
+  CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"; AUTO_PERMISSIONS=1
+  # shellcheck disable=SC1090
+  . "$DISPATCH_LIB"
+  uberdev_dispatch_resolve_env
+  [[ "${PERM_FLAG[*]}" == "--permission-mode auto" ]] && { echo "  PASS  D-perm PERM_FLAG=( --permission-mode auto )"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-perm PERM_FLAG=( ${PERM_FLAG[*]} )"; FAIL=$((FAIL + 1)); }
+  printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
+) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
+
+echo
+echo "== #175 D-regression: goal-pipeline preflight->resolve_env->dispatch is NOT rc=126 =="
+(
+  set +u
+  UBERDEV_TMPDIR="$(mktemp -d)"
+  printf 'Agent starting...\nbackgrounded · def67890\n' > "$UBERDEV_TMPDIR/solve-bg-stdout-42.log"
+  CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+  declare -a AUDIT_EVENTS=(); _uberdev_audit_emit() { AUDIT_EVENTS+=( "$1 $2" ); }
+  timeout() { shift; "$@"; }
+  env() { while [[ "$1" == *=* ]]; do shift; done; "$@"; }
+  claude() { printf 'backgrounded · def67890\n'; return 0; }
+  DISPATCH_RC=0; DISPATCH_ID=""; DISPATCH_LOG=""
+  # shellcheck disable=SC1090
+  . "$DISPATCH_LIB"
+  uberdev_dispatch_preflight
+  UBERDEV_DISPATCH_BACKEND_REQUESTED=claude-bg uberdev_dispatch_preflight
+  uberdev_dispatch_resolve_env
+  TIMEOUT_BIN="timeout"
+  PROMPT_FILE="$UBERDEV_TMPDIR/solve-prompt-42.txt"; printf '/uberdev:orchestrator --turbo solve GH issue #42\n' > "$PROMPT_FILE"
+  uberdev_dispatch_one 42 small "$PROMPT_FILE"; rc=$?
+  [[ "$rc" -ne 126 ]] && { echo "  PASS  D-regression dispatch rc != 126 (got $rc) — #175 fixed"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-regression dispatch rc=126 — #175 NOT fixed"; FAIL=$((FAIL + 1)); }
+  [[ "$rc" -eq 0 ]] && { echo "  PASS  D-regression happy-path rc=0"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-regression happy-path rc=$rc"; FAIL=$((FAIL + 1)); }
+  rm -rf "$UBERDEV_TMPDIR"
+  printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
+) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
+
+echo
+echo "== #175 D-failloud: no timeout/gtimeout on PATH -> return 1 + brew pointer =="
+_ff_out="$(
+  set +eu
+  CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+  # shellcheck disable=SC1090
+  . "$DISPATCH_LIB" >/dev/null 2>&1
+  _sandbox="$(mktemp -d)"
+  PATH="$_sandbox" uberdev_dispatch_resolve_env 2>&1
+  echo "RC=$?"
+  rm -rf "$_sandbox"
+)"
+if [ -x /usr/bin/timeout ]; then
+  case "$_ff_out" in (*RC=0*) echo "  PASS  D-failloud (/usr/bin/timeout present) resolve_env rc=0"; PASS=$((PASS + 1));; (*) echo "  FAIL  D-failloud expected rc=0 with /usr/bin/timeout present: $_ff_out"; FAIL=$((FAIL + 1));; esac
+else
+  case "$_ff_out" in
+    (*"brew install coreutils"*RC=1*|*RC=1*"brew install coreutils"*) echo "  PASS  D-failloud rc=1 + brew pointer"; PASS=$((PASS + 1));;
+    (*) echo "  FAIL  D-failloud expected rc=1 + brew pointer: $_ff_out"; FAIL=$((FAIL + 1));;
+  esac
+fi
+
+rm -f "$TALLY_FILE"
 
 echo
 echo "== Summary =="
