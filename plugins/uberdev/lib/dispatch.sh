@@ -4,13 +4,15 @@
 # SOURCED, never executed. No shebang (sourced only); .sh extension (convention).
 #
 # Public surface (functions):
-#   uberdev_dispatch_preflight                       -> resolves auto -> concrete backend
+#   uberdev_dispatch_preflight                        -> resolves auto -> concrete backend
+#   uberdev_dispatch_resolve_env                      -> sets the 6 dispatch-env vars; call after preflight
 #   uberdev_dispatch_one  ISSUE_NUM TIER PROMPT_FILE  -> dispatch one issue
 # Internal:
 #   _uberdev_dispatch_claude_bg / _uberdev_dispatch_wezterm / _uberdev_dispatch_background
 #
 # Sourced by:
 #   - skills/solve-pipeline/SKILL.md Step 5b'
+#   - skills/goal-pipeline/SKILL.md Phase 0
 #   - tests/dispatch-claude-bg.test.sh, dispatch-fallback.test.sh,
 #     dispatch-background.test.sh, dispatch-wezterm.test.sh
 #
@@ -136,6 +138,79 @@ uberdev_dispatch_preflight() {
   export UBERDEV_RESOLVED_BACKEND="$resolved"
   _uberdev_dispatch_audit dispatch_backend_resolved \
     "{\"requested\":\"$requested\",\"resolved\":\"$resolved\",\"os_class\":\"$os_class\",\"reason\":\"$reason\"}"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# uberdev_dispatch_resolve_env
+# Resolves the six deterministic dispatch-env vars consumed by every backend:
+#   BG_PROMPT_MODE, MODEL, PERM_FLAG[], EFFORT_FLAG[], SOLVE_TIMEOUT, TIMEOUT_BIN.
+# SSOT for both solve-pipeline (replaces its inline Phase A block) and
+# goal-pipeline (Phase 0). Sourced, NEVER exec'd — PERM_FLAG/EFFORT_FLAG are
+# bash arrays that cannot survive an env(1)/fork+exec boundary, so they must be
+# set in the caller's shell scope. Idempotent: deterministic scalars, arrays
+# rebuilt each call. Returns 1 (fail-loud) when no timeout(1)/gtimeout(1) is on
+# PATH. Does NOT read or write UBERDEV_RESOLVED_BACKEND (that is preflight's;
+# RFC 0005 D15 constrains backend resolution only — env resolution is exempt).
+# Inputs (read with safe defaults so goal-pipeline, which has no arg-parser,
+# can call it): AUTO_PERMISSIONS (default 0), EFFORT_LEVEL (default max).
+uberdev_dispatch_resolve_env() {
+  # BG_PROMPT_MODE: hardcoded `argv` (claude --bg 2.1.139 has no documented
+  # --prompt-file / stdin form; the file/stdin arms in _uberdev_dispatch_claude_bg
+  # remain a pre-wired migration target, unexercised at runtime).
+  BG_PROMPT_MODE=argv
+
+  # MODEL: single-quoted to keep zsh from glob-evaluating [1m] under NOMATCH.
+  MODEL='claude-opus-4-7[1m]'
+
+  # PERM_FLAG: array form (zsh SH_WORD_SPLIT=off would treat a scalar at command
+  # position as one argv slot). Empty by default; populated only when the caller
+  # opted into --permission-mode auto via AUTO_PERMISSIONS=1.
+  AUTO_PERMISSIONS="${AUTO_PERMISSIONS:-0}"
+  PERM_FLAG=()
+  [[ "$AUTO_PERMISSIONS" == "1" ]] && PERM_FLAG=( --permission-mode auto )
+
+  # EFFORT_FLAG: threaded form of EFFORT_LEVEL (default max for callers without
+  # an --effort parser, e.g. goal-pipeline). Bash+zsh array.
+  EFFORT_LEVEL="${EFFORT_LEVEL:-max}"
+  EFFORT_FLAG=( --effort "$EFFORT_LEVEL" )
+
+  # Wall-clock timeout: read command_timeouts.solve (env override
+  # UBERDEV_SOLVE_TIMEOUT; default 3600s; range [60, 86400]). Guard with
+  # `command -v` so this block is independently sourceable.
+  if command -v uberdev_read_int_in_range >/dev/null 2>&1; then
+    SOLVE_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.solve UBERDEV_SOLVE_TIMEOUT 60 86400 3600)"
+  elif [ -r "${CLAUDE_PLUGIN_ROOT:-}/lib/config-read.sh" ]; then
+    # Re-sourcing is safe even if config-read.sh was already loaded: it carries
+    # its own idempotency guard (_UBERDEV_CONFIG_READ_LOADED), so no explicit
+    # already-sourced check is needed here.
+    # shellcheck source=/dev/null
+    . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+    SOLVE_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.solve UBERDEV_SOLVE_TIMEOUT 60 86400 3600)"
+  else
+    echo "warning: config-read.sh not found at ${CLAUDE_PLUGIN_ROOT:-}/lib/; uberdev.local.md timeout settings ignored" >&2
+    SOLVE_TIMEOUT=3600
+  fi
+
+  # TIMEOUT_BIN probe (RFC 0004 §3.8 order — absolute /usr/bin/timeout FIRST
+  # (MSYS coreutils on Windows, and Linux distros that ship it there),
+  # then Unix `timeout` on PATH, then macOS Homebrew `gtimeout`).
+  TIMEOUT_BIN=""
+  if   [ -x /usr/bin/timeout ];                 then TIMEOUT_BIN=/usr/bin/timeout
+  elif command -v timeout  >/dev/null 2>&1;     then TIMEOUT_BIN=timeout
+  elif command -v gtimeout >/dev/null 2>&1;     then TIMEOUT_BIN=gtimeout
+  fi
+
+  # Runtime guard: fail-loud if neither timeout(1) nor gtimeout(1) is on PATH.
+  # Regression guard: tests/config-override.test.sh I2f anchors on this
+  # `if [[ -n "$TIMEOUT_BIN" ]]; then` pattern; do not collapse to `[[ … ]] ||`.
+  if [[ -n "$TIMEOUT_BIN" ]]; then
+    : # timeout(1) or gtimeout(1) available; bg dispatch arms wrap correctly
+  else
+    echo "error: neither timeout(1) nor gtimeout(1) found on PATH" >&2
+    echo "       install with: brew install coreutils  # provides gtimeout" >&2
+    return 1
+  fi
   return 0
 }
 

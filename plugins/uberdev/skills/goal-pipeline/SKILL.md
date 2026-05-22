@@ -87,7 +87,12 @@ Notes on the enums:
    ```bash
    [ -r "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh" ] && . "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh"
    uberdev_dispatch_preflight "${backend_cli:-auto}"
-   # UBERDEV_RESOLVED_BACKEND is now exported.
+   # UBERDEV_RESOLVED_BACKEND is now exported (D15: resolved once, frozen for the run).
+   # /goal dispatches /turbo per issue, so mirror /turbo's unattended dispatch env.
+   export AUTO_MODE=1            # matches commands/turbo.md (enables UBERDEV_TURBO=1 in the bg env)
+   # AUTO_PERMISSIONS and EFFORT_LEVEL are intentionally left unset -> helper applies
+   # :-0 / :-max defaults (turbo-parity: empty PERM_FLAG, EFFORT_FLAG=( --effort max )).
+   uberdev_dispatch_resolve_env || exit 1   # establishes TIMEOUT_BIN/SOLVE_TIMEOUT/MODEL/PERM_FLAG/EFFORT_FLAG/BG_PROMPT_MODE once
    ```
 
 5. **Generate `GOAL_ID`.** Random suffix per D4 — NEVER derived from `$@` or issue numbers (those are attacker-controlled; using them would let a caller collide TMPDIR paths):

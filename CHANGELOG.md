@@ -4,6 +4,11 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.6] - 2026-05-22
+
+### Fixed
+- **`/goal` first-dispatch crash (rc=126).** Extracted the six dispatch-env vars (`TIMEOUT_BIN`, `SOLVE_TIMEOUT`, `MODEL`, `PERM_FLAG`, `EFFORT_FLAG`, `BG_PROMPT_MODE`) from solve-pipeline Phase A into a shared sourced helper `uberdev_dispatch_resolve_env()` in `lib/dispatch.sh`, now called by both solve-pipeline and goal-pipeline. goal-pipeline previously sourced `lib/dispatch.sh` and called `uberdev_dispatch_preflight` (backend only) but never established the env vars, so its first `uberdev_dispatch_one` exec'd an empty `$TIMEOUT_BIN` and failed with `permission denied` (rc=126). The helper mirrors `/turbo`'s unattended dispatch env (`AUTO_MODE=1`, `AUTO_PERMISSIONS=0`, `EFFORT_LEVEL=max`) and preserves the verbatim fail-loud `timeout(1)`/`gtimeout(1)` probe guard. Backend resolution (`UBERDEV_RESOLVED_BACKEND`) is unchanged (RFC 0005 D15). (#175)
+
 ## [0.33.5] - 2026-05-22
 
 ### Changed
