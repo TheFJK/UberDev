@@ -32,7 +32,8 @@ review-pr|review-pr|["Bash(git*)", "Bash(gh*)", "Edit", "Glob", "Grep", "MultiEd
 merge|merge|["Bash", "Glob", "Grep", "Read", "Task"]
 dev|dev|["Bash", "Read", "Edit", "Write", "Task"]
 testers|testers|["Bash", "Read", "Write", "Task"]
-ubergoal|goal|["Bash", "Read", "Task"]'
+ubergoal|goal|["Bash", "Read", "Task"]
+uberscan|uberscan|["Bash(git*)", "Bash(gh*)", "Glob", "Grep", "Read", "Task", "Write"]'
 
 # Built-in Claude Code commands; never overwrite these.
 BUILTINS='init review security-review statusline-setup help clear plugin'
@@ -232,7 +233,7 @@ aliases_sync_main() {
     done
     UBERDEV_ALIAS_NOTICE="${UBERDEV_ALIAS_NOTICE} — use /uberdev:<name>, or rename the existing file and run /uberdev:install-aliases."
   elif [ "$FIRST_RUN" = "1" ]; then
-    UBERDEV_ALIAS_NOTICE="uberdev: installed ${#INSTALLED_LIST[@]} short-form aliases (/issue, /solve, /turbo, /simplify, /review-pr, /merge, /dev, /testers, /ubergoal). Opt out with UBERDEV_NO_AUTO_ALIAS=1."
+    UBERDEV_ALIAS_NOTICE="uberdev: installed ${#INSTALLED_LIST[@]} short-form aliases (/issue, /solve, /turbo, /simplify, /review-pr, /merge, /dev, /testers, /ubergoal, /uberscan). Opt out with UBERDEV_NO_AUTO_ALIAS=1."
   fi
   return 0
 }
