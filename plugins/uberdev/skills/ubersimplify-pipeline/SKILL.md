@@ -90,7 +90,7 @@ fi
 
 # Parse flags from $ARGUMENTS
 SCOPE="."; ALL=0; AUDIT_ONLY=0; NO_ISSUES=0; NO_REPORT=0
-MAX_CHUNKS_ARG=""; CONCURRENCY_ARG=""; SEVERITY="blocker"; TURBO=0; LENS_SUBSET=""
+MAX_CHUNKS_ARG=""; CONCURRENCY_ARG=""; TURBO=0; LENS_SUBSET=""
 for arg in $ARGUMENTS; do
   case "$arg" in
     --audit-only)     AUDIT_ONLY=1 ;;
@@ -101,7 +101,6 @@ for arg in $ARGUMENTS; do
     --lens=*)         LENS_SUBSET="${arg#--lens=}" ;;
     --max-chunks=*)   MAX_CHUNKS_ARG="${arg#--max-chunks=}" ;;
     --concurrency=*)  CONCURRENCY_ARG="${arg#--concurrency=}" ;;
-    --severity=*)     SEVERITY="${arg#--severity=}" ;;
     --*)              echo "warning: unknown flag $arg" >&2 ;;
     *)                SCOPE="$arg" ;;
   esac

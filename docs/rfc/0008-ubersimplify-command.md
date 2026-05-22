@@ -134,7 +134,7 @@ This reuses the exact source string `/simplify` already uses for its `code-fixer
 ```
 /ubersimplify [path-or-glob] [--audit-only] [--all] [--no-issues] [--no-report]
               [--lens=Reuse,Quality,Efficiency] [--max-chunks=N] [--concurrency=N]
-              [--severity=LEVEL] [--turbo]
+              [--turbo]
 ```
 
 | Flag | Meaning |
@@ -144,7 +144,7 @@ This reuses the exact source string `/simplify` already uses for its `code-fixer
 | `--no-issues` | Skip leftover-issue filing. |
 | `--no-report` | Skip the markdown report. |
 | `--lens=…` | Subset the lenses (default all three). |
-| `--max-chunks=N` / `--concurrency=N` / `--severity=LEVEL` / `--turbo` | As in `/uberscan`. |
+| `--max-chunks=N` / `--concurrency=N` / `--turbo` | As in `/uberscan`. |
 
 Config namespace (via `config-read.sh`, defaults mirror `/uberscan`): `ubersimplify.max_chunks` (25), `fanout_concurrency.ubersimplify` (3), `ubersimplify.chunk_budget_bytes` (49152), `ubersimplify.max_agents` (250), `ubersimplify.max_new` (10).
 

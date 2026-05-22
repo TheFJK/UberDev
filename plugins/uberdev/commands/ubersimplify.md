@@ -1,6 +1,6 @@
 ---
 description: "Whole-codebase 3-lens simplification (Reuse/Quality/Efficiency). Chunks the repo, audits each chunk with the code-simplifier lenses, applies preserve-behavior fixes via code-fixer as one refactor: commit per chunk on a new branch, opens ONE PR for review, and files leftover blocker findings as GitHub issues. Whole-repo by default; pass a path/glob to narrow. --audit-only for a read-only scan."
-argument-hint: "[path-or-glob] [--audit-only] [--all] [--no-issues] [--no-report] [--lens=Reuse,Quality,Efficiency] [--max-chunks=N] [--concurrency=N] [--severity=blocker] [--turbo]"
+argument-hint: "[path-or-glob] [--audit-only] [--all] [--no-issues] [--no-report] [--lens=Reuse,Quality,Efficiency] [--max-chunks=N] [--concurrency=N] [--turbo]"
 allowed-tools: ["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", "Write"]
 ---
 
@@ -24,7 +24,6 @@ the *writing* sibling of the read-only `/uberscan`. Design: `docs/rfc/0008-ubers
 | `--lens=…` | Subset the lenses (default all three). |
 | `--max-chunks=N` | Override the chunk-count cap (default from config, 25). |
 | `--concurrency=N` | Chunks audited per wave (default from config, 3). |
-| `--severity=LEVEL` | Minimum severity filed as issues (default blocker). |
 | `--turbo` | Non-interactive: circuit breakers cap-and-continue instead of prompting. |
 
 ## Implementation
@@ -43,6 +42,12 @@ fi
 if ! printf '%s' "$ARGUMENTS" | grep -q -- '--audit-only' \
    && [ -n "$(git status --porcelain)" ]; then
   echo "error: working tree is dirty — commit or stash first (or use --audit-only)" >&2; exit 2
+fi
+# A detached HEAD has no branch to base the PR on, and the zero-commit teardown
+# would `git checkout ""`. Refuse unless --audit-only (which never branches).
+if ! printf '%s' "$ARGUMENTS" | grep -q -- '--audit-only' \
+   && ! git symbolic-ref -q HEAD >/dev/null 2>&1; then
+  echo "error: /ubersimplify requires a branch checkout, not a detached HEAD (or use --audit-only)" >&2; exit 2
 fi
 if printf '%s' "$ARGUMENTS" | grep -q -- '--no-issues' && printf '%s' "$ARGUMENTS" | grep -q -- '--no-report'; then
   echo "error: --no-issues and --no-report together leave no output sink" >&2; exit 2
