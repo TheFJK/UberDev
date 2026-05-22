@@ -4,6 +4,13 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.32.0] - 2026-05-22
+
+### Added
+- `/uberdev:uberscan` — whole-codebase read-only audit. Chunks the repo, runs the `/review-pr` Phase-1 reviewer fleet (6 reviewers) per chunk + a repo-global Semgrep/test-coverage pass, aggregates into a markdown report, and files deduped GitHub issues (`uberscan-finding` label). Never writes code. Whole-repo by default, path-scopable; seven circuit breakers bound cost (RFC 0007). Simplify lenses intentionally excluded (separate command).
+- `/uberscan` short-form alias for `/uberdev:uberscan`.
+- `findings-to-issues`: `finding_label` / `finding_marker_slug` / `source_ref` inputs + `uberscan-aggregate` source (back-compatible defaults preserve `/review-pr` behavior).
+
 ## [0.31.0] - 2026-05-21
 
 ### Added
