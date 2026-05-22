@@ -5,12 +5,14 @@
 #
 # Public surface (functions):
 #   uberdev_dispatch_preflight                       -> resolves auto -> concrete backend
+#   uberdev_dispatch_resolve_env                      -> sets the 6 dispatch-env vars; call after preflight
 #   uberdev_dispatch_one  ISSUE_NUM TIER PROMPT_FILE  -> dispatch one issue
 # Internal:
 #   _uberdev_dispatch_claude_bg / _uberdev_dispatch_wezterm / _uberdev_dispatch_background
 #
 # Sourced by:
 #   - skills/solve-pipeline/SKILL.md Step 5b'
+#   - skills/goal-pipeline/SKILL.md Phase 0
 #   - tests/dispatch-claude-bg.test.sh, dispatch-fallback.test.sh,
 #     dispatch-background.test.sh, dispatch-wezterm.test.sh
 #
@@ -187,8 +189,9 @@ uberdev_dispatch_resolve_env() {
     SOLVE_TIMEOUT=3600
   fi
 
-  # TIMEOUT_BIN probe (RFC 0004 §3.8 order — MSYS coreutils absolute path FIRST,
-  # then Unix `timeout`, then macOS Homebrew `gtimeout`). MOVED VERBATIM.
+  # TIMEOUT_BIN probe (RFC 0004 §3.8 order — absolute /usr/bin/timeout FIRST
+  # (MSYS coreutils on Windows, and Linux distros that ship it there),
+  # then Unix `timeout` on PATH, then macOS Homebrew `gtimeout`).
   TIMEOUT_BIN=""
   if   [ -x /usr/bin/timeout ];                 then TIMEOUT_BIN=/usr/bin/timeout
   elif command -v timeout  >/dev/null 2>&1;     then TIMEOUT_BIN=timeout

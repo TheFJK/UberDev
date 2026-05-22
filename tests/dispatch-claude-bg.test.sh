@@ -128,13 +128,13 @@ assert_grep "$SOLVE_PIPELINE" \
   "Phase A reads solve_effort from .claude/uberdev.local.md via uberdev_read_enum"
 assert_grep "$DISPATCH_LIB" \
   '^[[:space:]]*EFFORT_FLAG=\( --effort "\$EFFORT_LEVEL" \)$' \
-  "Phase A hoist binds EFFORT_FLAG as a bash+zsh array — scalar form regresses to a one-slot \`--effort max\` argv element under zsh SH_WORD_SPLIT=off (v0.22.2 fix)"
+  "uberdev_dispatch_resolve_env binds EFFORT_FLAG as a bash+zsh array — scalar form regresses to a one-slot \`--effort max\` argv element under zsh SH_WORD_SPLIT=off (v0.22.2 fix)"
 assert_grep "$DISPATCH_LIB" \
   '^[[:space:]]*PERM_FLAG=\(\)$' \
-  "Phase A hoist binds PERM_FLAG as an empty bash+zsh array — same zsh-word-split rationale as EFFORT_FLAG (v0.22.2 fix)"
+  "uberdev_dispatch_resolve_env binds PERM_FLAG as an empty bash+zsh array — same zsh-word-split rationale as EFFORT_FLAG (v0.22.2 fix)"
 assert_grep "$DISPATCH_LIB" \
   'PERM_FLAG=\( --permission-mode auto \)' \
-  "Phase A AUTO_PERMISSIONS branch populates PERM_FLAG as an array, not a scalar"
+  "uberdev_dispatch_resolve_env AUTO_PERMISSIONS branch populates PERM_FLAG as an array, not a scalar"
 assert_grep "$SOLVE_PIPELINE" \
   '_uberdev_audit_emit effort_resolved' \
   "Phase A emits effort_resolved audit event with {source, level}"
@@ -614,6 +614,13 @@ echo "== #175 D-regression: goal-pipeline preflight->resolve_env->dispatch is NO
   uberdev_dispatch_preflight
   UBERDEV_DISPATCH_BACKEND_REQUESTED=claude-bg uberdev_dispatch_preflight
   uberdev_dispatch_resolve_env
+  # Prove the #175 root cause (empty TIMEOUT_BIN) is fixed HERE too, not only in
+  # D-iso: resolve_env must populate TIMEOUT_BIN before any override below.
+  [[ -n "$TIMEOUT_BIN" ]] && { echo "  PASS  D-regression resolve_env set TIMEOUT_BIN non-empty before override"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-regression resolve_env left TIMEOUT_BIN empty"; FAIL=$((FAIL + 1)); }
+  # Override swaps in an equivalent valid binary for the bare-word `timeout()`
+  # mock above; absolute /usr/bin/timeout (resolve_env's first choice on this
+  # host) would bypass the function mock. The empty-TIMEOUT_BIN root cause of
+  # #175 is asserted just above — this line is mock plumbing, not the guard.
   TIMEOUT_BIN="timeout"
   PROMPT_FILE="$UBERDEV_TMPDIR/solve-prompt-42.txt"; printf '/uberdev:orchestrator --turbo solve GH issue #42\n' > "$PROMPT_FILE"
   uberdev_dispatch_one 42 small "$PROMPT_FILE"; rc=$?

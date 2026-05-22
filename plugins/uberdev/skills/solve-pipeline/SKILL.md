@@ -267,9 +267,11 @@ gh repo view --json nameWithOwner --jq .nameWithOwner
 ### 3. (RETIRED v0.22.0 — terminal detection removed for #85)
 
 The Phase A bg-dispatch probes (added near the top of the SKILL.md Phase A
-block by the v0.22.0 refactor: the claude-version gate at 2.1.139, the
-hardcoded prompt-mode (`argv`), and the `MAX_PARALLEL_BG_AGENTS`
-resolution) replace the entire former Step 3 terminal-detection cascade.
+block by the v0.22.0 refactor: the claude-version gate at 2.1.139 and the
+`MAX_PARALLEL_BG_AGENTS` resolution, both still in SKILL.md Phase A) replace
+the entire former Step 3 terminal-detection cascade. The hardcoded
+prompt-mode (`BG_PROMPT_MODE=argv`) is now set by
+`uberdev_dispatch_resolve_env` in `lib/dispatch.sh`, not inline here.
 The terminal, real-claude-path, and permission-description variables no
 longer exist; see `## Deprecated Flags` in `commands/solve.md` /
 `commands/turbo.md` for the `--terminal=` migration pointer.
@@ -787,8 +789,8 @@ invocation, and the BSD/GNU-`sed` placeholder substitution have all been
 replaced by the inline `claude --bg` dispatch in Step 5b' below.
 `claude --bg --worktree solve-issue-N` handles the worktree-cleanup and
 supervised-daemon spawn natively. `MODEL`, `PERM_FLAG`, `SOLVE_TIMEOUT`,
-and `TIMEOUT_BIN` have been hoisted from the launcher into Phase A
-(immediately after the bg-dispatch probes block) — see the Phase A region.
+and `TIMEOUT_BIN` are resolved by `uberdev_dispatch_resolve_env()` in
+`lib/dispatch.sh` (sourced + called at the end of Phase A).
 
 #### 5b'. Dispatch via `claude --bg` (NEW v0.22.0)
 
@@ -802,7 +804,7 @@ SAFE prompt-passthrough forms — Q1 decision per `docs/uberdev/specs/2026-05-12
 - Re-evaluation forms (any `eval`-driven dispatch using `printf %q` to quote the prompt body) → re-evaluation of attacker-influenced text; security research §Findings classified this ERROR-class.
 - `bash -c` wrapper with `$PROMPT` interpolated inside the inner double-quoted command string → double-quote-inside-double-quote interpolation hazard.
 
-`MODEL`, `PERM_FLAG`, `SOLVE_TIMEOUT`, and `TIMEOUT_BIN` are resolved in Phase A (immediately after the bg-dispatch probes block). They're batch-invariant — resolved once per `/solve` or `/turbo` invocation, then consumed by the wave-batching dispatch below.
+`MODEL`, `PERM_FLAG`, `SOLVE_TIMEOUT`, and `TIMEOUT_BIN` are resolved by `uberdev_dispatch_resolve_env()` in `lib/dispatch.sh` (sourced + called at the end of Phase A). They're batch-invariant — resolved once per `/solve` or `/turbo` invocation, then consumed by the wave-batching dispatch below.
 
 The per-issue dispatch is wrapped in a wave-batching outer loop. Mirrors `merge-pipeline/SKILL.md:421`'s idiom: `ceil(N / cap)` sequential single-message waves, one `solve_bg_fanout_wave_started` audit event per wave.
 
