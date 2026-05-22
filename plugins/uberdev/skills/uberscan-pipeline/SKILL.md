@@ -93,14 +93,17 @@ if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
   else
     CONCURRENCY="$(uberdev_read_int_in_range fanout_concurrency.uberscan UBERDEV_UBERSCAN_FANOUT 1 16 3)"
   fi
+  CHUNK_BUDGET="$(uberdev_read_int_in_range uberscan.chunk_budget_bytes UBERDEV_UBERSCAN_CHUNK_BUDGET 4096 1048576 49152)"
 else
   MAX_CHUNKS="${MAX_CHUNKS_ARG:-25}"
   CONCURRENCY="${CONCURRENCY_ARG:-3}"
+  CHUNK_BUDGET=49152
 fi
 
 # Chunk the scope
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/uberscan-pipeline/chunk.py" \
   --scope "$SCOPE" \
+  --budget-bytes "$CHUNK_BUDGET" \
   --max-chunks "$MAX_CHUNKS" \
   --run-id "$RUN_ID" \
   > "$RUN_DIR/manifest.json"
@@ -122,7 +125,29 @@ if [ "$OVERFLOW" = "true" ] && [ "$ALL" != "1" ]; then
 fi
 
 EMITTED_CHUNKS="$(jq '.chunks | length' "$RUN_DIR/manifest.json")"
-echo "[uberscan] run_id=$RUN_ID scope=$SCOPE chunks=$EMITTED_CHUNKS concurrency=$CONCURRENCY"
+
+# CB7 projected-agent ceiling: EMITTED_CHUNKS × 6 reviewers + 2 repo-global agents.
+# Independent backstop on top of CB1's chunk-count cap (a low MAX_CHUNKS with a
+# high per-chunk fleet could still blow the agent budget).
+if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
+  . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+  MAX_AGENTS="$(uberdev_read_int_in_range uberscan.max_agents UBERDEV_UBERSCAN_MAX_AGENTS 1 2000 250)"
+else
+  MAX_AGENTS=250
+fi
+PROJECTED_AGENTS=$(( EMITTED_CHUNKS * 6 + 2 ))
+if [ "$PROJECTED_AGENTS" -gt "$MAX_AGENTS" ] && [ "$ALL" != "1" ]; then
+  if [ "$TURBO" = "1" ]; then
+    echo "[uberscan] CB7: projected $PROJECTED_AGENTS agents exceeds MAX_AGENTS=$MAX_AGENTS (--turbo cap-and-continue)" >&2
+    echo "OVERFLOW=true" >> "$RUN_DIR/run-state.txt"
+  else
+    echo "error: projected agent count ($PROJECTED_AGENTS = ${EMITTED_CHUNKS}×6 + 2) exceeds MAX_AGENTS=$MAX_AGENTS." >&2
+    echo "  Narrow with a path arg, pass --all to override, or raise uberscan.max_agents." >&2
+    exit 1
+  fi
+fi
+
+echo "[uberscan] run_id=$RUN_ID scope=$SCOPE chunks=$EMITTED_CHUNKS concurrency=$CONCURRENCY projected_agents=$PROJECTED_AGENTS"
 ```
 
 
@@ -135,9 +160,15 @@ Each chunk receives a **file-set audit brief**: the agents are auditing EXISTING
 CHUNK_IDS="$(jq -r '.chunks[].id' "$RUN_DIR/manifest.json")"
 TOTAL_EMITTED="$(jq '.chunks | length' "$RUN_DIR/manifest.json")"
 
-# CB4 overall wall-clock budget (90 minutes)
+# CB4 overall wall-clock budget (60 minutes). The circuit breakers below are
+# enforced by the ORCHESTRATING session between waves: this bash loop only emits
+# dispatch directives, so it returns in milliseconds — the real wall-clock is
+# spent firing the Task() calls. The orchestrator updates the state the breakers
+# read (PREV_WAVE_ELAPSED, CUMULATIVE_BLOCKERS_CRITICALS) after each wave returns.
 WALL_START="$(date +%s)"
-WALL_BUDGET_SECONDS=5400
+WALL_BUDGET_SECONDS=3600
+CIRCUIT_BREAKER_HALT=0
+PREV_WAVE_ELAPSED=0
 
 # CB5 findings-flood guard
 CUMULATIVE_BLOCKERS_CRITICALS=0
@@ -153,27 +184,31 @@ _uberscan_elapsed() { echo $(( $(date +%s) - WALL_START )); }
 IDX=0
 while [ "$IDX" -lt "${#CHUNK_ARRAY[@]}" ]; do
   WAVE_NUM=$(( WAVE_NUM + 1 ))
-  WAVE_START="$(date +%s)"
 
-  # CB3 per-wave timeout guard (15 minutes per wave)
-  if [ $(( $(date +%s) - WAVE_START )) -gt 900 ]; then
-    echo "[uberscan] CB3: wave $WAVE_NUM exceeded 900s timeout; stopping early" >&2
-    break
+  # Breakers are checked at the TOP of each wave against state the orchestrator
+  # maintains across waves (see the post-wave step after this loop). Tripping any
+  # breaker sets CIRCUIT_BREAKER_HALT=1 so Phase 4 exits 1.
+
+  # CB3 per-wave timeout (15 min): the PREVIOUS wave's measured duration.
+  if [ "${PREV_WAVE_ELAPSED:-0}" -gt 900 ]; then
+    echo "[uberscan] CB3: previous wave exceeded 900s; halting before wave $WAVE_NUM" >&2
+    CIRCUIT_BREAKER_HALT=1; break
   fi
 
-  # CB4 overall wall-clock budget check
+  # CB4 overall wall-clock budget check.
   if [ "$(_uberscan_elapsed)" -gt "$WALL_BUDGET_SECONDS" ]; then
-    echo "[uberscan] CB4: overall budget of ${WALL_BUDGET_SECONDS}s exceeded after wave $(( WAVE_NUM - 1 )); stopping early" >&2
-    break
+    echo "[uberscan] CB4: overall budget of ${WALL_BUDGET_SECONDS}s exceeded after wave $(( WAVE_NUM - 1 )); halting" >&2
+    CIRCUIT_BREAKER_HALT=1; break
   fi
 
-  # CB5 findings-flood guard
+  # CB5 findings-flood guard.
   if [ "$CUMULATIVE_BLOCKERS_CRITICALS" -gt 150 ]; then
-    echo "[uberscan] CB5: cumulative blocker+critical findings ($CUMULATIVE_BLOCKERS_CRITICALS) exceeded 150; marking report partial and stopping early" >&2
+    echo "[uberscan] CB5: cumulative blocker+critical findings ($CUMULATIVE_BLOCKERS_CRITICALS) exceeded 150; marking report partial and halting" >&2
     echo "PARTIAL=true" >> "$RUN_DIR/run-state.txt"
-    FINDINGS_FLOOD=1
-    break
+    FINDINGS_FLOOD=1; CIRCUIT_BREAKER_HALT=1; break
   fi
+
+  WAVE_START="$(date +%s)"
 
   # Build the wave's chunk slice
   WAVE_END_IDX=$(( IDX + CONCURRENCY ))
@@ -277,7 +312,8 @@ done
 After each wave completes (all chunk Tasks have returned), the orchestrating session:
 1. Writes each chunk's normalized findings to `$RUN_DIR/chunk-NNN-findings.yaml` (C2 schema).
 2. Updates `CUMULATIVE_BLOCKERS_CRITICALS` from the new chunk files.
-3. Checks CB3 (per-wave timeout), CB4 (wall-clock budget), and CB5 (findings flood) before starting the next wave.
+3. Records the wave's actual elapsed seconds into `PREV_WAVE_ELAPSED` (from when this wave's Task() calls were fired to when they returned) — this is what CB3 reads on the next iteration.
+4. Re-evaluates CB3 (per-wave timeout), CB4 (wall-clock budget), and CB5 (findings flood); if any trips, sets `CIRCUIT_BREAKER_HALT=1` and stops dispatching further waves.
 
 
 ## Phase 1b — Repo-global pass
@@ -337,10 +373,13 @@ else
   echo "[uberscan] --no-report: skipped report file"
 fi
 
-# Always emit the findings-to-issues aggregate (used by Phase 3)
+# Always emit the findings-to-issues aggregate (used by Phase 3).
+# --min-severity "$SEVERITY" enforces the documented issue-filing floor: only
+# findings ranked at or above $SEVERITY (default major) reach the aggregate.
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/uberscan-pipeline/report.py" \
   --run-id "$RUN_ID" \
   --chunks-dir "$RUN_DIR" \
+  --min-severity "$SEVERITY" \
   --emit-findings-to-issues-aggregate "$RUN_DIR/f2i-aggregate.md"
 
 echo "[uberscan] findings-to-issues aggregate written: $RUN_DIR/f2i-aggregate.md"
@@ -385,10 +424,24 @@ if [ "$NO_ISSUES" != "1" ]; then
   fi
 
   if [ "$RATE_OK" = "1" ]; then
+    # findings-to-issues REQUIRES working_dir (its Step 1 refuses with
+    # 'input-malformed' if working_dir is not an absolute path inside the
+    # worktree); repo_slug + pr_commit_sha back the issue-body **Origin** link.
+    # Local origin-URL parse first (fast); fall back to `gh repo view`.
+    WORKING_DIR_ABS="$(git rev-parse --show-toplevel)"
+    REPO_SLUG="$(git remote get-url origin 2>/dev/null | sed -E 's@.*github\.com[:/]([^/]+/[^/.]+)(\.git)?$@\1@')"
+    if [ -z "$REPO_SLUG" ] || [ "$REPO_SLUG" = "$(git remote get-url origin 2>/dev/null)" ]; then
+      REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)"
+    fi
+    HEAD_SHA="$(git rev-parse HEAD)"
     # ===========================================================================
     # DISPATCH POINT — the orchestrating session fires ONE Task() call:
     #
     # DISPATCH: findings-to-issues
+    #   run_id=$RUN_ID
+    #   working_dir=$WORKING_DIR_ABS        (REQUIRED — agent refuses without it)
+    #   repo_slug=$REPO_SLUG
+    #   pr_commit_sha=$HEAD_SHA             (HEAD of the scanned working tree)
     #   phase1_aggregate_path=$RUN_DIR/f2i-aggregate.md
     #   phase2_aggregate_path=      (empty — no simplify phase in uberscan)
     #   finding_label=uberscan-finding
@@ -397,7 +450,7 @@ if [ "$NO_ISSUES" != "1" ]; then
     #   pr_number=              (empty — this is a whole-codebase audit, not a PR)
     #   max_new=$MAX_NEW
     # ===========================================================================
-    echo "DISPATCH: findings-to-issues with phase1_aggregate_path=$RUN_DIR/f2i-aggregate.md, finding_label=uberscan-finding, finding_marker_slug=uberscan, source_ref=/uberscan run $RUN_ID, pr_number= (empty), max_new=$MAX_NEW"
+    echo "DISPATCH: findings-to-issues with run_id=$RUN_ID, working_dir=$WORKING_DIR_ABS, repo_slug=$REPO_SLUG, pr_commit_sha=$HEAD_SHA, phase1_aggregate_path=$RUN_DIR/f2i-aggregate.md, finding_label=uberscan-finding, finding_marker_slug=uberscan, source_ref=/uberscan run $RUN_ID, pr_number= (empty), max_new=$MAX_NEW"
   else
     echo "[uberscan] issue filing skipped (rate-limit floor not met)"
   fi
@@ -467,7 +520,7 @@ exit 0
 |---|---|---|---|---|
 | **CB1** | `overflow=true` AND `--all` not passed | Halt with guidance | Cap-and-continue | `1` (non-turbo) / `0` (turbo) |
 | **CB3** | Per-wave timeout > 900s | Stop early, partial | Stop early, partial | `1` |
-| **CB4** | Wall-clock > 5400s | Stop early, partial | Stop early, partial | `1` |
+| **CB4** | Wall-clock > 3600s (60 min) | Stop early, partial | Stop early, partial | `1` |
 | **CB5** | Cumulative blocker+critical > 150 | Stop early, mark partial | Stop early, mark partial | `1` |
 | **CB6** | gh rate-limit floor not met | Skip issue filing, continue | Skip issue filing, continue | `0` |
-| **CB7** | Same as CB1 (turbo overflow cap) | — | Cap-and-continue | `0` (turbo) |
+| **CB7** | Projected agents (chunks×6+2) > MAX_AGENTS (250) | Halt with guidance | Cap-and-continue | `1` (non-turbo) / `0` (turbo) |
