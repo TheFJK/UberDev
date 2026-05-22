@@ -507,20 +507,29 @@ echo "== #155: fail-CLOSED behaviour (runtime regression fixture) =="
 # Spec-acceptance fixture: pre-creating a symlink at the predicted path MUST
 # cause the guard to fail-CLOSED (non-zero) rather than write through it; a
 # clean path passes; prepare creates 0600 and fail-closes (rc=3) on a symlink.
+# `set +eu`: CI runs test scripts under `bash -e -o pipefail`, so a bare
+# command returning non-zero (the prepare-on-symlink call legitimately returns
+# 3) would otherwise abort the subshell before we can assert on it. The
+# symlink + perm sub-checks are gated on real-symlink support so the fixture
+# stays robust on platforms where `ln -s` is a copy (Windows Git Bash without
+# developer mode) — the structural assertions above still lock the guard code.
 (
-  set +u
+  set +eu
   . "$DISPATCH_LIB" >/dev/null 2>&1
-  _t="$(mktemp -d)"
-  ln -s /etc/passwd "$_t/evil.log"
-  _uberdev_dispatch_tmp_target_safe "$_t/evil.log" >/dev/null 2>&1 && exit 11   # symlink MUST be rejected
-  _uberdev_dispatch_tmp_target_safe "$_t/clean.log" || exit 12                  # clean MUST pass
+  _t="$(mktemp -d)" || exit 20
+  _uberdev_dispatch_tmp_target_safe "$_t/clean.log" || exit 12                  # clean path MUST pass (all platforms)
   _uberdev_dispatch_prepare_tmp_target "$_t/p.log" 99 claude-bg >/dev/null 2>&1 || exit 13
-  _perm="$(stat -f '%Lp' "$_t/p.log" 2>/dev/null || stat -c '%a' "$_t/p.log" 2>/dev/null)"
-  [ "$_perm" = "600" ] || exit 14                                              # created 0600
-  ln -s /etc/passwd "$_t/p2.log"
-  _uberdev_dispatch_prepare_tmp_target "$_t/p2.log" 99 claude-bg >/dev/null 2>&1
-  [ "$?" -eq 3 ] || exit 15                                                    # prepare on symlink -> rc 3
+  [ -f "$_t/p.log" ] || exit 14                                                 # prepare created the file (all platforms)
+  ln -s /etc/passwd "$_t/evil.log" 2>/dev/null
+  if [ -L "$_t/evil.log" ]; then                                               # real-symlink platform (Linux/macOS)
+    _uberdev_dispatch_tmp_target_safe "$_t/evil.log" >/dev/null 2>&1; [ "$?" -ne 0 ] || exit 11   # symlink MUST be rejected
+    ln -s /etc/passwd "$_t/p2.log" 2>/dev/null
+    _uberdev_dispatch_prepare_tmp_target "$_t/p2.log" 99 claude-bg >/dev/null 2>&1; [ "$?" -eq 3 ] || exit 15  # prepare on symlink -> rc 3
+    _perm="$(stat -c '%a' "$_t/p.log" 2>/dev/null || stat -f '%Lp' "$_t/p.log" 2>/dev/null)"
+    [ "$_perm" = "600" ] || exit 16                                            # created 0600 (perms meaningful on this platform)
+  fi
   rm -rf "$_t"
+  exit 0
 )
 _rc155=$?
 if [ "$_rc155" -eq 0 ]; then

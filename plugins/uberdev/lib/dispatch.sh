@@ -197,14 +197,22 @@ _uberdev_dispatch_tmp_target_safe() {
     return 1
   fi
   if [ -e "$target" ]; then
-    owner_uid="$(stat -f '%u' "$target" 2>/dev/null || stat -c '%u' "$target" 2>/dev/null || echo '')"
+    # Probe GNU `stat -c` FIRST, then BSD `stat -f`. Ordering is load-bearing:
+    # GNU stat treats `-f` as --file-system, so `stat -f '%u' FILE` on Linux
+    # prints filesystem info (non-empty, with a non-zero rc from the bogus '%u'
+    # operand) instead of failing cleanly — probing `-f` first there yields a
+    # garbage owner_uid that never equals `id -u` and spuriously fail-closes
+    # the happy path. The integer-validation below is the backstop: any
+    # garbage / empty result → undeterminable → fail CLOSED.
+    owner_uid="$(stat -c '%u' "$target" 2>/dev/null || stat -f '%u' "$target" 2>/dev/null || true)"
+    case "$owner_uid" in ''|*[!0-9]*) owner_uid="" ;; esac
     if [ -z "$owner_uid" ]; then
-      # stat unavailable in BOTH BSD (-f) and GNU (-c) forms (e.g. busybox /
-      # minimal image). We cannot prove the entry is ours, so fail CLOSED —
-      # an empty owner_uid must NOT skip the ownership gate (that would let an
-      # attacker-owned pre-created file through). The symlink + regular-file
-      # checks do NOT backstop ownership, so this guard is load-bearing.
-      echo "error: cannot determine owner of predicted path (stat -f/-c both failed): $target — failing closed" >&2
+      # stat unavailable / unparseable in BOTH GNU (-c) and BSD (-f) forms
+      # (e.g. busybox / minimal image). We cannot prove the entry is ours, so
+      # fail CLOSED — an empty owner_uid must NOT skip the ownership gate (that
+      # would let an attacker-owned pre-created file through). The symlink +
+      # regular-file checks do NOT backstop ownership, so this is load-bearing.
+      echo "error: cannot determine owner of predicted path (stat -c/-f both failed): $target — failing closed" >&2
       return 1
     fi
     if [ "$owner_uid" != "$(id -u)" ]; then
