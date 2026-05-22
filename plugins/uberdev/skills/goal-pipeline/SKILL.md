@@ -208,6 +208,13 @@ for ISSUE_NUM in "${queue[@]}"; do
     exit 1
   fi
 done
+
+# #171 — flush the populated active_issues (+ rehydrated queue/scalars) so the
+# Phase 2 watch loop (a fresh shell) rehydrates the dispatched set. Without this,
+# active_issues evaporates with this shell and Phase 2 polls nothing, emitting a
+# false goal_converged on cycle 1. Loud-exit: this is a phase-boundary persist
+# Phase 2 depends on (mirrors the Phase 0 init + Phase 3 loop-back flushes).
+uberdev_goal_write_run_state || { echo "goal: failed to persist run-state after dispatch" >&2; exit 3; }
 ```
 
 ## Phase 2 — Watch (per cycle, hard cap 4h wall-clock)
