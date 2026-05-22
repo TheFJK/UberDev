@@ -23,7 +23,7 @@
 #   G16  Provenance check (UBERDEV_GOAL_ID + automerge predicate + attempts)
 #   G17  --dry-run semantics (exits 0, does NOT actually dispatch)
 #   G18  ReDoS-safe Blocks: parser (anchored regex + body cap)
-#   G19  lib/goal-state.sh shape (12 public + 10 internal fns +
+#   G19  lib/goal-state.sh shape (15 public + 13 internal fns +
 #        idempotency guard + no eval / no bash -c + R12 negative)
 #   G20  Version bump locked (plugin.json, marketplace.json,
 #        README badge, CHANGELOG, no 0.30.0 leak in solve-claim.test.sh)
@@ -245,12 +245,15 @@ for fn in uberdev_goal_state_init uberdev_goal_pr_state_transition uberdev_goal_
           uberdev_goal_extract_pr_num_from_log uberdev_goal_list_prs_in_state uberdev_goal_read_merge_result; do
   assert_grep "$GOAL_LIB" "^${fn}\\(\\)" "G19.public.${fn}"
 done
-# Internal function names (11 underscore-prefixed helpers — the prior
-# `_persist_fp` short-alias forwarder was dropped post-impl-review S4 in
-# favor of calling the canonical `_uberdev_goal_persist_fp` directly;
-# `_uberdev_goal_count_review_pr_attempts` added by the B3 bound on
-# Phase 2a's stale|missing re-dispatch loop, mirrors merge-attempts).
-for fn in _uberdev_goal_validate_int _uberdev_goal_extract_fingerprint _uberdev_goal_parse_blocks_line \
+# Internal function names (13 underscore-prefixed helpers — `_uberdev_goal_validate_id`
+# (#156 goal_id path-traversal guard) and `_uberdev_goal_append` (#157
+# unwritable-tmpdir checked-append) add the slug-validation + write-surfacing
+# primitives; the prior `_persist_fp` short-alias forwarder was dropped
+# post-impl-review S4 in favor of calling the canonical
+# `_uberdev_goal_persist_fp` directly; `_uberdev_goal_count_review_pr_attempts`
+# added by the B3 bound on Phase 2a's stale|missing re-dispatch loop).
+for fn in _uberdev_goal_validate_int _uberdev_goal_validate_id _uberdev_goal_append \
+          _uberdev_goal_extract_fingerprint _uberdev_goal_parse_blocks_line \
           _uberdev_goal_count_merge_attempts _uberdev_goal_count_review_pr_attempts \
           _uberdev_goal_pr_state_machine_valid _uberdev_goal_now_secs \
           _uberdev_goal_persist_fp _uberdev_goal_dispatch_review_pr _uberdev_goal_dispatch_merge \
@@ -488,7 +491,12 @@ assert_rc "$?" "0" "BT3c.cycle-2-new-fp-returns-zero"
 # so a failure pinpoints WHICH cycle entry is missing instead of just
 # "one of two patterns didn't match".
 _bt3c_tsv="$UBERDEV_TMPDIR/goal-test-bt3c-fingerprints.tsv"
-_bt3c_lines="$(wc -l < "$_bt3c_tsv" 2>/dev/null | tr -d ' ')"
+# #152 (silent-failure-hunter F1) — do NOT mask wc's stderr with 2>/dev/null.
+# If a regression makes the append silently fail the TSV is missing; surfacing
+# wc's diagnostic (plus the explicit existence assert) names the cause instead
+# of a bare "got: , want: 2".
+assert_grep_file "$_bt3c_tsv" '.' "BT3c.fingerprints-tsv-exists"
+_bt3c_lines="$(wc -l < "$_bt3c_tsv" | tr -d ' ')"
 assert_eq "$_bt3c_lines" "2" "BT3c.cycle-2-appends-not-overwrites"
 assert_grep "$_bt3c_tsv" $'^1\taaaaaaaaaaaaaaaa$' "BT3c.cycle-1-entry-present"
 assert_grep "$_bt3c_tsv" $'^2\tbbbbbbbbbbbbbbbb$' "BT3c.cycle-2-entry-present"
@@ -613,26 +621,42 @@ _uberdev_goal_dispatch_review_pr() {
 
 # BT5 — R1: gh pr view returns empty body -> rc=0, no dispatch.
 # Issue #140 risk 1; spec line 180-197; function lines 477-480.
+# #148 — capture stderr to a file (do NOT blackhole with 2>/dev/null) and
+# assert the empty-body diagnostic IS emitted. Blanket suppression let a
+# DIFFERENT rc=0/no-dispatch path (e.g. a future early-return that skips the
+# fetch) masquerade as this one; pinning the diagnostic locks the exact code
+# path under test. Mirrors BT18's stderr-capture idiom.
 MOCK_PR_BODY=""; MOCK_PR_RC=0
 MOCK_ISSUE_STATE=""; MOCK_ISSUE_RC=0; MOCK_ISSUE_STDERR=""
 MOCK_ISSUE_STATES=(); DISPATCH_LOG=""
 UBERDEV_GOAL_ID=test-bt5
-_uberdev_goal_check_unblock 99 2>/dev/null
+_bt5_err="$_b12_tmpdir/bt5-stderr"; : > "$_bt5_err"
+_uberdev_goal_check_unblock 99 2>"$_bt5_err"
 _bt5_rc=$?
 assert_rc "$_bt5_rc" "0" "BT5.empty-body-returns-zero"
 assert_eq "$DISPATCH_LOG" "" "BT5.empty-body-no-dispatch"
+assert_grep_file "$_bt5_err" 'returned empty body; skipping unblock check' \
+  "BT5.empty-body-diagnostic-surfaced"
 
 # BT6 — R2: gh issue view rate-limit -> rc=0 (skip cycle), no dispatch.
 # Issue #140 risk 2; spec line 199-214; function lines 502-506.
+# #149 — capture stderr and assert the rate-limit failure diagnostic IS
+# surfaced (was blackholed by 2>/dev/null). The bare suppression hid the
+# difference between "gh failed, we skipped" (correct) and "we never reached
+# the gh call" (a silent regression); asserting the diagnostic distinguishes
+# them.
 MOCK_PR_BODY="Blocks: #99"; MOCK_PR_RC=0
 MOCK_ISSUE_STATE=""; MOCK_ISSUE_RC=1
 MOCK_ISSUE_STDERR="API rate limit exceeded"
 MOCK_ISSUE_STATES=(); DISPATCH_LOG=""
 UBERDEV_GOAL_ID=test-bt6
-_uberdev_goal_check_unblock 99 2>/dev/null
+_bt6_err="$_b12_tmpdir/bt6-stderr"; : > "$_bt6_err"
+_uberdev_goal_check_unblock 99 2>"$_bt6_err"
 _bt6_rc=$?
 assert_rc "$_bt6_rc" "0" "BT6.rate-limit-returns-zero"
 assert_eq "$DISPATCH_LOG" "" "BT6.rate-limit-no-dispatch"
+assert_grep_file "$_bt6_err" 'gh issue view 99 failed \(rc=1\):.*API rate limit exceeded' \
+  "BT6.rate-limit-diagnostic-surfaced"
 
 # BT7 — R1b: gh issue view 404 (issue deleted upstream) -> CLOSED -> dispatch.
 # Issue #140 risk 1 sub-path; spec line 216-233; function line 500.
@@ -715,6 +739,41 @@ assert_rc "$_bt11_rc" "0" "BT11.audit-happy-path-returns-zero"
 assert_contains "$DISPATCH_LOG" "DISPATCHED:7" "BT11.audit-happy-path-dispatch-fires"
 assert_grep "$UBERDEV_TMPDIR/goal-test-bt11.jsonl" '"event":"goal_unblock_triggered"' "BT11.audit-event-emitted"
 assert_grep "$UBERDEV_TMPDIR/goal-test-bt11.jsonl" '"blocking_issues":\[99,100\]'     "BT11.audit-payload-csv-shape"
+
+# BT11b/BT11c — #150: N=3 blocking-issues coverage. BT8 (mixed) and BT11
+# (happy) only exercised N=2; _uberdev_goal_check_unblock's for-loop over
+# "${blocking[@]}" is element-count agnostic today, but an untested N>=3
+# cardinality meant a future index-based rewrite could regress undetected.
+# These lock the loop at N=3 for both the all-closed (dispatch + CSV join)
+# and the middle-OPEN (short-circuit, no dispatch) paths.
+_three_blocks_body="$(printf 'Blocks: #99\nBlocks: #100\nBlocks: #101\n')"
+
+# BT11b — N=3 all CLOSED -> dispatch fires AND the audit CSV joins all three.
+MOCK_PR_BODY="$_three_blocks_body"; MOCK_PR_RC=0
+MOCK_ISSUE_STATE=""; MOCK_ISSUE_RC=0; MOCK_ISSUE_STDERR=""
+MOCK_ISSUE_STATES=("99=CLOSED" "100=CLOSED" "101=CLOSED")
+DISPATCH_LOG=""
+UBERDEV_GOAL_ID=test-bt11b
+uberdev_goal_state_init test-bt11b
+_uberdev_goal_check_unblock 8 2>/dev/null
+_bt11b_rc=$?
+assert_rc "$_bt11b_rc" "0" "BT11b.n3-all-closed-returns-zero"
+assert_contains "$DISPATCH_LOG" "DISPATCHED:8" "BT11b.n3-all-closed-dispatch-fires"
+assert_grep "$UBERDEV_TMPDIR/goal-test-bt11b.jsonl" '"blocking_issues":\[99,100,101\]' \
+  "BT11b.n3-audit-csv-joins-three"
+
+# BT11c — N=3 with the MIDDLE issue OPEN -> all_closed=0 via the loop break at
+# element 2 -> no dispatch. Proves the short-circuit visits past element 1 (an
+# off-by-one stopping at N=2 would never observe issue 100's OPEN state).
+MOCK_PR_BODY="$_three_blocks_body"; MOCK_PR_RC=0
+MOCK_ISSUE_STATE=""; MOCK_ISSUE_RC=0; MOCK_ISSUE_STDERR=""
+MOCK_ISSUE_STATES=("99=CLOSED" "100=OPEN" "101=CLOSED")
+DISPATCH_LOG=""
+UBERDEV_GOAL_ID=test-bt11c
+_uberdev_goal_check_unblock 9 2>/dev/null
+_bt11c_rc=$?
+assert_rc "$_bt11c_rc" "0" "BT11c.n3-middle-open-returns-zero"
+assert_eq "$DISPATCH_LOG" "" "BT11c.n3-middle-open-no-dispatch"
 
 # Hygiene: drop the function-override + dispatch stubs before B12 ends
 # (spec Error handling section). No subsequent tests, so blast radius is
@@ -1815,6 +1874,94 @@ else
   printf '        transitions after:  %s\n' "$_bt58_transitions_after" >&2
 fi
 rm -rf "$_bt58_scratch" 2>/dev/null || true
+
+# ----- H1-H6 — #156 goal_id path-traversal guard + #157 unwritable-tmpdir surfacing -----
+# Both findings target plugins/uberdev/lib/goal-state.sh. #156: goal_id was
+# interpolated into per-goal state filenames without the slug validation that
+# pr/issue/cycle already get via _uberdev_goal_validate_int (path-traversal
+# defense-in-depth). #157: the `: >` truncate-creates and `>>` appends were not
+# rc-checked, so a read-only-but-existing $UBERDEV_TMPDIR (which slips past
+# state_init's `mkdir -p` success check) silently dropped state rows at rc=0.
+
+# H1 — _uberdev_goal_validate_id: accepts a real generated slug; rejects empty,
+# path-separator, `..` traversal, and whitespace.
+_uberdev_goal_validate_id "20260521-153359-abc1234"; assert_rc "$?" "0" "H1.accepts-real-goal-id-slug"
+_uberdev_goal_validate_id "test-bt_alpha.1";          assert_rc "$?" "0" "H1.accepts-hyphen-dot-underscore"
+_uberdev_goal_validate_id "";                          assert_rc "$?" "1" "H1.rejects-empty"
+_uberdev_goal_validate_id "../escape";                 assert_rc "$?" "1" "H1.rejects-parent-traversal"
+_uberdev_goal_validate_id "a/b";                       assert_rc "$?" "1" "H1.rejects-slash"
+_uberdev_goal_validate_id "..";                        assert_rc "$?" "1" "H1.rejects-dotdot"
+_uberdev_goal_validate_id "a b";                       assert_rc "$?" "1" "H1.rejects-space"
+
+# H2 — state_init refuses an unsafe goal_id with rc=1 AND surfaces the clean
+# refusal diagnostic (before the fix it emitted raw "Permission denied" / "No
+# such file" from the doomed `: >` writes into the traversed path).
+_h2_err="$_b12_tmpdir/h2-stderr"; : > "$_h2_err"
+uberdev_goal_state_init "../pwned" 2>"$_h2_err"
+assert_rc "$?" "1" "H2.state-init-refuses-traversal-id"
+assert_grep_file "$_h2_err" 'refusing unsafe goal_id' "H2.state-init-clean-diagnostic"
+
+# H3 — a reader function (get_pr_state) rejects an unsafe goal_id with rc=1.
+# Before the fix the `[ -f "$f" ] || return 0` file-missing early-return
+# swallowed the traversal id and reported success (rc=0).
+uberdev_goal_get_pr_state "../pwned" 5 >/dev/null 2>&1
+assert_rc "$?" "1" "H3.get-pr-state-rejects-traversal-id"
+
+# H4 — _uberdev_goal_append: success appends the row + returns 0; an unwritable
+# target (parent dir absent) returns NON-zero with a diagnostic rather than the
+# old silent rc=0.
+_h4_ok="$_b12_tmpdir/h4-ok.tsv"; : > "$_h4_ok"
+_uberdev_goal_append "$_h4_ok" "row-one"; assert_rc "$?" "0" "H4.append-success-returns-zero"
+assert_grep "$_h4_ok" '^row-one$' "H4.append-success-writes-row"
+_h4_err="$_b12_tmpdir/h4-stderr"; : > "$_h4_err"
+_uberdev_goal_append "$_b12_tmpdir/h4-absent-dir/sub/file.tsv" "row" 2>"$_h4_err"
+assert_rc "$?" "1" "H4.append-unwritable-returns-nonzero"
+assert_grep_file "$_h4_err" 'append to .* failed' "H4.append-unwritable-surfaces-diagnostic"
+
+# DAC write-permission tests (H5/H6) are meaningless where chmod can't deny the
+# owner a write: as root (perms ignored) and on Windows Git Bash (msys chmod
+# does not map to an NTFS deny-ACL, so a "0500"/"0444" target stays writable).
+# Mirrors BT10's OSTYPE skip for the same platform reason.
+_h_skip_perms() {
+  [ "$(id -u 2>/dev/null || echo 0)" = "0" ] && return 0
+  case "${OSTYPE:-}" in msys*|cygwin*|win32*) return 0 ;; esac
+  return 1
+}
+
+# H5 — read-only-but-EXISTING $UBERDEV_TMPDIR: state_init's `mkdir -p` succeeds
+# (dir exists) but the truncate-creates must fail loud (rc=1 + clean diagnostic).
+if _h_skip_perms; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "H5.skipped-no-reliable-chmod-deny"
+else
+  _h5_ro="$_b12_tmpdir/h5-readonly"; mkdir -p "$_h5_ro"; chmod 0500 "$_h5_ro"
+  _h5_err="$_b12_tmpdir/h5-stderr"; : > "$_h5_err"
+  ( UBERDEV_TMPDIR="$_h5_ro" UBERDEV_GOAL_ID=h5 uberdev_goal_state_init h5 ) 2>"$_h5_err"
+  assert_rc "$?" "1" "H5.state-init-rc1-on-readonly-tmpdir"
+  assert_grep_file "$_h5_err" 'cannot create state file' "H5.state-init-clean-diagnostic"
+  chmod 0700 "$_h5_ro" 2>/dev/null || true
+  rm -rf "$_h5_ro" 2>/dev/null || true
+fi
+
+# H6 — genuine #157 silent-failure: when ONLY pr-states.tsv is unwritable (dir +
+# jsonl still writable), the bare `printf >> tsv` failure used to be masked by
+# the subsequent uberdev_goal_audit (writable jsonl) returning 0 —
+# pr_state_transition reported success while the state row was lost. The fix's
+# `_uberdev_goal_append ... || return 1` makes the tsv-write failure terminal.
+if _h_skip_perms; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "H6.skipped-no-reliable-chmod-deny"
+else
+  uberdev_goal_state_init test-h6
+  chmod 0444 "$_b12_tmpdir/goal-test-h6-pr-states.tsv"
+  UBERDEV_GOAL_ID=test-h6 uberdev_goal_pr_state_transition test-h6 5 dispatched pushed-reviewing 2>/dev/null
+  _h6_rc=$?
+  chmod 0644 "$_b12_tmpdir/goal-test-h6-pr-states.tsv" 2>/dev/null || true
+  if [ "$_h6_rc" -ne 0 ]; then
+    PASS=$((PASS + 1)); printf '  PASS  %s\n' "H6.tsv-write-failure-is-terminal"
+  else
+    FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "H6.tsv-write-failure-is-terminal" >&2
+    printf '        expected non-zero rc when pr-states.tsv unwritable, got %s\n' "$_h6_rc" >&2
+  fi
+fi
 
 # Cleanup: remove the isolated tmpdir contents (we created the whole
 # directory via mktemp -d, so we can rm -rf safely — it's our own).

@@ -21,6 +21,8 @@
 #   uberdev_goal_read_merge_result             PR_NUM
 # Internal:
 #   _uberdev_goal_validate_int             N
+#   _uberdev_goal_validate_id              GOAL_ID
+#   _uberdev_goal_append                   FILE LINE
 #   _uberdev_goal_extract_fingerprint      BODY_TEXT
 #   _uberdev_goal_parse_blocks_line        LINE
 #   _uberdev_goal_count_merge_attempts     GOAL_ID PR
@@ -119,8 +121,40 @@ _uberdev_goal_validate_int() {
   esac
 }
 
+# _uberdev_goal_validate_id GOAL_ID
+# #156 — path-traversal defense-in-depth. goal_id is interpolated into the
+# per-goal state filenames ($tmpdir/goal-<id>-*.tsv|jsonl); an id containing a
+# path separator or `..` could escape $UBERDEV_TMPDIR. Constrain to a safe slug
+# (mirrors the _uberdev_goal_validate_int guard pr/issue/cycle already use).
+# goal_id is internally generated (D4) so a real id is never rejected — this
+# closes the theoretical traversal vector a forged/compromised id would open.
+_uberdev_goal_validate_id() {
+  local id="$1"
+  case "$id" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;  # empty or any non-slug char (incl. `/`)
+    *..*) return 1 ;;                  # belt-and-braces: reject `..` sequence
+    *) return 0 ;;
+  esac
+}
+
 # _uberdev_goal_now_secs (POSIX)
 _uberdev_goal_now_secs() { date +%s; }
+
+# _uberdev_goal_append FILE LINE
+# #157 — surface unwritable-$UBERDEV_TMPDIR failures. The bare `>> "$f"`
+# appends below returned the rc of the *next* statement (or rc=0 when the
+# append was a function's last line), so a read-only-but-existing tmpdir —
+# which slips past uberdev_goal_state_init's `mkdir -p` success check —
+# silently dropped state rows while the writer reported success. Centralise
+# the append + rc-check + diagnostic so every state-stream writer fails loud;
+# callers propagate the failure with `|| return`.
+_uberdev_goal_append() {
+  local file="$1" line="$2"
+  if ! printf '%s\n' "$line" >> "$file"; then
+    printf 'goal-state: append to %s failed (unwritable UBERDEV_TMPDIR?)\n' "$file" >&2
+    return 1
+  fi
+}
 
 # _uberdev_goal_parse_blocks_line LINE
 # ReDoS-safe (D9 + T1): anchored bash regex; numeric re-validation defense-in-depth.
@@ -208,8 +242,8 @@ _uberdev_goal_count_review_pr_attempts() {
 _uberdev_goal_persist_fp() {
   local goal_id="$1" cycle="$2" fp="$3"
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
-  printf '%s\t%s\n' "$cycle" "$fp" \
-    >> "$tmpdir/goal-$goal_id-fingerprints.tsv"
+  local row; printf -v row '%s\t%s' "$cycle" "$fp"
+  _uberdev_goal_append "$tmpdir/goal-$goal_id-fingerprints.tsv" "$row"
 }
 
 # ---------------------------------------------------------------------------
@@ -221,6 +255,11 @@ _uberdev_goal_persist_fp() {
 # state files (jsonl + 4 TSVs).
 uberdev_goal_state_init() {
   local goal_id="$1"
+  # #156 — refuse an unsafe goal_id before it reaches any path interpolation.
+  _uberdev_goal_validate_id "$goal_id" || {
+    printf 'goal-state: refusing unsafe goal_id: %s\n' "$goal_id" >&2
+    return 1
+  }
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
   case "$tmpdir" in
     *[!A-Za-z0-9_./-]*)
@@ -228,28 +267,40 @@ uberdev_goal_state_init() {
       return 1 ;;
   esac
   # M13 — drop the `|| true` mask. If mkdir -p genuinely fails (read-only
-  # filesystem, permissions, exhausted inode table) the subsequent `:> "$f"`
-  # truncate-creates below would fail anyway, but silently — and the goal
-  # would race on missing state files. Surface the rc here so the operator
-  # sees the underlying cause (mkdir's own stderr) and the goal halts early.
+  # filesystem, permissions, exhausted inode table) surface the rc here so the
+  # operator sees the underlying cause (mkdir's own stderr) and the goal halts
+  # early. The truncate-creates below are individually rc-checked (#157).
   if ! mkdir -p "$tmpdir" 2>/dev/null; then
     printf 'goal-state: mkdir -p %s failed; refusing to init state\n' "$tmpdir" >&2
     return 1
   fi
-  : > "$tmpdir/goal-$goal_id.jsonl"
-  : > "$tmpdir/goal-$goal_id-pr-states.tsv"
-  : > "$tmpdir/goal-$goal_id-issue-states.tsv"
-  : > "$tmpdir/goal-$goal_id-fingerprints.tsv"
-  : > "$tmpdir/goal-$goal_id-merge-attempts.tsv"
-  # review-pr-attempts.tsv: pr\tcount rows, append-only from
-  # _uberdev_goal_dispatch_review_pr. Bounds Phase 2a's stale|missing
-  # re-dispatch loop at ${_UBERDEV_GOAL_MAX_REVIEW_PR_ATTEMPTS:-3}/PR
-  # over the entire goal run; replaces the unbounded 240/PR worst case.
-  : > "$tmpdir/goal-$goal_id-review-pr-attempts.tsv"
-  # held-audits.tsv: pr\taudit_path rows, appended each time the held-PR
-  # poll loop (Phase 2 step 2e) records a re-review audit it has consumed.
-  # Latest row per pr wins (uberdev_goal_get_last_held_audit picks the tail).
-  : > "$tmpdir/goal-$goal_id-held-audits.tsv"
+  # #157 — rc-check every truncate-create. A read-only-but-existing $tmpdir
+  # passes the mkdir -p above (the dir already exists) yet cannot accept new
+  # files; the bare `: > "$f"` writes used to fail one-by-one with raw
+  # "Permission denied" noise and a confusing partial-state. Fail fast on the
+  # first unwritable file with a clean diagnostic. The 7 state files:
+  #   jsonl                  — per-goal audit stream
+  #   pr-states.tsv          — PR state-machine transitions
+  #   issue-states.tsv       — issue state-machine transitions
+  #   fingerprints.tsv       — non-convergence fingerprint stream
+  #   merge-attempts.tsv     — per-PR /merge attempt counter
+  #   review-pr-attempts.tsv — per-PR /review-pr re-dispatch counter (B3 bound,
+  #                            bounds Phase 2a's stale|missing re-dispatch loop)
+  #   held-audits.tsv        — last re-review audit consumed per held PR (2e);
+  #                            latest row per pr wins (get_last_held_audit tail)
+  local f
+  for f in "$tmpdir/goal-$goal_id.jsonl" \
+           "$tmpdir/goal-$goal_id-pr-states.tsv" \
+           "$tmpdir/goal-$goal_id-issue-states.tsv" \
+           "$tmpdir/goal-$goal_id-fingerprints.tsv" \
+           "$tmpdir/goal-$goal_id-merge-attempts.tsv" \
+           "$tmpdir/goal-$goal_id-review-pr-attempts.tsv" \
+           "$tmpdir/goal-$goal_id-held-audits.tsv"; do
+    if ! : > "$f"; then
+      printf 'goal-state: cannot create state file %s (unwritable UBERDEV_TMPDIR?)\n' "$f" >&2
+      return 1
+    fi
+  done
 }
 
 # uberdev_goal_audit EVENT PAYLOAD_JSON
@@ -262,23 +313,34 @@ uberdev_goal_audit() {
     *) printf 'goal-state: unknown event %s\n' "$event" >&2; return 1 ;;
   esac
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  # #156 — validate the env-derived goal_id before pathing the jsonl. A forged
+  # UBERDEV_GOAL_ID degrades to the safe `unknown` sink (with a breadcrumb)
+  # rather than escaping tmpdir; audit must not abort the state machine.
+  local goal_id="${UBERDEV_GOAL_ID:-unknown}"
+  _uberdev_goal_validate_id "$goal_id" || {
+    printf 'goal-state: unsafe UBERDEV_GOAL_ID %s; auditing to goal-unknown.jsonl\n' "$goal_id" >&2
+    goal_id="unknown"
+  }
   local ts; ts="$(date -u +%FT%TZ 2>/dev/null || date +%s)"
-  printf '{"ts":"%s","event":"%s","payload":%s}\n' "$ts" "$event" "$payload" \
-    >> "$tmpdir/goal-${UBERDEV_GOAL_ID:-unknown}.jsonl"
+  local line; printf -v line '{"ts":"%s","event":"%s","payload":%s}' "$ts" "$event" "$payload"
+  _uberdev_goal_append "$tmpdir/goal-$goal_id.jsonl" "$line"
 }
 
 # uberdev_goal_pr_state_transition GOAL_ID PR FROM TO
 # Validate + append + audit.
 uberdev_goal_pr_state_transition() {
   local goal_id="$1" pr="$2" from="$3" to="$4"
+  _uberdev_goal_validate_id "$goal_id" || return 1   # #156
   _uberdev_goal_validate_int "$pr" || return 1
   _uberdev_goal_pr_state_machine_valid "$from" "$to" || {
     printf 'goal-state: invalid PR transition %s->%s\n' "$from" "$to" >&2
     return 2
   }
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
-  printf '%s\t%s\t%s\n' "$pr" "$to" "$(_uberdev_goal_now_secs)" \
-    >> "$tmpdir/goal-$goal_id-pr-states.tsv"
+  # #157 — propagate a failed state-row write instead of letting the trailing
+  # audit call's rc mask it (this row is the PR machine's source of truth).
+  local row; printf -v row '%s\t%s\t%s' "$pr" "$to" "$(_uberdev_goal_now_secs)"
+  _uberdev_goal_append "$tmpdir/goal-$goal_id-pr-states.tsv" "$row" || return 1
   uberdev_goal_audit goal_pr_transition \
     "{\"goal_id\":\"$goal_id\",\"pr\":$pr,\"from\":\"$from\",\"to\":\"$to\"}"
 }
@@ -289,14 +351,15 @@ uberdev_goal_pr_state_transition() {
 # derived state; audit covers PR transitions + cycle boundaries).
 uberdev_goal_issue_state_transition() {
   local goal_id="$1" issue="$2" from="$3" to="$4"
+  _uberdev_goal_validate_id "$goal_id" || return 1   # #156
   _uberdev_goal_validate_int "$issue" || return 1
   case "$from->$to" in
     "input->solving"|"solving->pr-pushed"|"pr-pushed->resolved"|"solving->failed"|"pr-pushed->failed") ;;
     *) printf 'goal-state: invalid issue transition %s->%s\n' "$from" "$to" >&2; return 2 ;;
   esac
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
-  printf '%s\t%s\t%s\n' "$issue" "$to" "$(_uberdev_goal_now_secs)" \
-    >> "$tmpdir/goal-$goal_id-issue-states.tsv"
+  local row; printf -v row '%s\t%s\t%s' "$issue" "$to" "$(_uberdev_goal_now_secs)"
+  _uberdev_goal_append "$tmpdir/goal-$goal_id-issue-states.tsv" "$row"   # #157
 }
 
 # uberdev_goal_read_trust_signal AUDIT_JSON_PATH
@@ -369,6 +432,7 @@ uberdev_goal_read_trust_signal() {
 # (return 1 → caller halts with goal_circuit_breaker reason=nonconvergence).
 uberdev_goal_check_fingerprint_repeat() {
   local goal_id="$1" cycle="$2" fp="$3"
+  _uberdev_goal_validate_id "$goal_id" || return 1   # #156
   _uberdev_goal_validate_int "$cycle" || return 2
   [ -n "$fp" ] || return 0
   local prev_cycle=$(( cycle - 1 ))
@@ -389,6 +453,7 @@ uberdev_goal_check_fingerprint_repeat() {
 # D8 + T5 — provenance check (UBERDEV_GOAL_ID env present) + attempt-count cap.
 uberdev_goal_should_automerge() {
   local goal_id="$1" pr="$2"
+  _uberdev_goal_validate_id "$goal_id" || return 1   # #156
   _uberdev_goal_validate_int "$pr" || return 1
   local attempts
   attempts="$(_uberdev_goal_count_merge_attempts "$goal_id" "$pr")"
@@ -461,6 +526,7 @@ uberdev_goal_locate_review_pr_audit_by_pr() {
 # signal changed.
 uberdev_goal_get_pr_state() {
   local goal_id="$1" pr="$2"
+  _uberdev_goal_validate_id "$goal_id" || return 1   # #156
   _uberdev_goal_validate_int "$pr" || return 1
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
   local f="$tmpdir/goal-$goal_id-pr-states.tsv"
@@ -475,10 +541,11 @@ uberdev_goal_get_pr_state() {
 # new re-review fired and the poll loop should act on it.
 uberdev_goal_record_held_audit() {
   local goal_id="$1" pr="$2" audit_path="$3"
+  _uberdev_goal_validate_id "$goal_id" || return 1   # #156
   _uberdev_goal_validate_int "$pr" || return 1
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
-  printf '%s\t%s\n' "$pr" "$audit_path" \
-    >> "$tmpdir/goal-$goal_id-held-audits.tsv"
+  local row; printf -v row '%s\t%s' "$pr" "$audit_path"
+  _uberdev_goal_append "$tmpdir/goal-$goal_id-held-audits.tsv" "$row"   # #157
 }
 
 # uberdev_goal_get_last_held_audit GOAL_ID PR
@@ -488,6 +555,7 @@ uberdev_goal_record_held_audit() {
 # decide whether a re-review has fired since the last poll.
 uberdev_goal_get_last_held_audit() {
   local goal_id="$1" pr="$2"
+  _uberdev_goal_validate_id "$goal_id" || return 1   # #156
   _uberdev_goal_validate_int "$pr" || return 1
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
   local f="$tmpdir/goal-$goal_id-held-audits.tsv"
@@ -508,6 +576,7 @@ uberdev_goal_extract_pr_num_from_log() {
 # newline-separated PR numbers matching STATE.
 uberdev_goal_list_prs_in_state() {
   local goal_id="$1" want_state="$2"
+  _uberdev_goal_validate_id "$goal_id" || return 1   # #156
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
   local f="$tmpdir/goal-$goal_id-pr-states.tsv"
   [ -f "$f" ] || return 0
@@ -587,6 +656,11 @@ _uberdev_goal_dispatch_review_pr() {
   _uberdev_goal_validate_int "$pr" || return 1
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
   local goal_id="${UBERDEV_GOAL_ID:-unknown}"
+  # #156 — refuse a forged provenance id rather than pathing a counter TSV with it.
+  _uberdev_goal_validate_id "$goal_id" || {
+    printf 'goal-state: unsafe UBERDEV_GOAL_ID %s; refusing review-pr dispatch for PR #%s\n' "$goal_id" "$pr" >&2
+    return 1
+  }
   local current; current="$(_uberdev_goal_count_review_pr_attempts "$goal_id" "$pr")"
   local cap="${_UBERDEV_GOAL_MAX_REVIEW_PR_ATTEMPTS:-3}"
   if [ "$current" -ge "$cap" ]; then
@@ -609,8 +683,11 @@ _uberdev_goal_dispatch_review_pr() {
   # Increment per-PR attempt counter (append-only TSV mirrors the
   # merge-attempts pattern at _uberdev_goal_dispatch_merge below).
   local next=$(( current + 1 ))
-  printf '%s\t%s\n' "$pr" "$next" \
-    >> "$tmpdir/goal-$goal_id-review-pr-attempts.tsv"
+  # #157 — fail closed: if the attempt-counter write fails, do NOT dispatch (an
+  # unrecorded attempt would defeat the per-PR cap and risk a re-dispatch
+  # storm). Surface + return non-zero so the caller retries next cycle.
+  local row; printf -v row '%s\t%s' "$pr" "$next"
+  _uberdev_goal_append "$tmpdir/goal-$goal_id-review-pr-attempts.tsv" "$row" || return 1
   UBERDEV_GOAL_ID="$goal_id" \
     uberdev_dispatch_one "$pr" "small" "$prompt_file"
 }
@@ -637,11 +714,19 @@ _uberdev_goal_dispatch_merge() {
   # Increment per-PR attempt counter.
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
   local goal_id="${UBERDEV_GOAL_ID:-unknown}"
+  # #156 — refuse a forged provenance id rather than pathing a counter TSV with it.
+  _uberdev_goal_validate_id "$goal_id" || {
+    printf 'goal-state: unsafe UBERDEV_GOAL_ID %s; refusing merge dispatch for PR #%s\n' "$goal_id" "$pr" >&2
+    return 1
+  }
   local current; current="$(_uberdev_goal_count_merge_attempts "$goal_id" "$pr")"
   local next=$(( current + 1 ))
-  # Append-only TSV; count helper picks the latest row.
-  printf '%s\t%s\n' "$pr" "$next" \
-    >> "$tmpdir/goal-$goal_id-merge-attempts.tsv"
+  # #157 — fail closed: an unrecorded merge attempt would defeat the per-PR
+  # attempt cap; surface + return non-zero (caller retries next cycle) rather
+  # than dispatching with a lost counter row. Append-only TSV; count helper
+  # picks the latest row.
+  local row; printf -v row '%s\t%s' "$pr" "$next"
+  _uberdev_goal_append "$tmpdir/goal-$goal_id-merge-attempts.tsv" "$row" || return 1
   UBERDEV_GOAL_ID="$goal_id" \
     uberdev_dispatch_one "$pr" "small" "$prompt_file"
 }
