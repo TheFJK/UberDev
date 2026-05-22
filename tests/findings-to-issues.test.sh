@@ -309,6 +309,13 @@ assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
   'ci-refused-synthetic' \
   'O5.1 — Step 1 accepted-source allow-list includes ci-refused-synthetic (#116 O5)'
 
+### Suite 13: ubersimplify-aggregate source accepted ----------
+echo
+echo "### Suite 13: ubersimplify-aggregate accepted-source lock"
+F2I="$REPO_ROOT/plugins/uberdev/agents/findings-to-issues.md"
+assert_grep "$F2I" 'ubersimplify-aggregate' 'closed-set lists ubersimplify-aggregate'
+assert_grep "$F2I" 'uberscan-aggregate' 'closed-set still lists uberscan-aggregate'
+
 echo
 echo "## Summary"
 echo "  PASS=$PASS  FAIL=$FAIL"
