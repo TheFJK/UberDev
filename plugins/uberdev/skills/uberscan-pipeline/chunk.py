@@ -11,7 +11,19 @@ MAX_FILE_BYTES = 256 * 1024  # per-file hard cap; oversized files are skipped
 
 def tracked_files(scope):
     out = subprocess.run(["git", "ls-files", "--", scope], capture_output=True, text=True)
+    if out.returncode != 0:
+        # Fail loud — a git failure must NOT masquerade as an empty (clean) scope.
+        print(f"error: git ls-files failed (rc={out.returncode}): {out.stderr.strip()}", file=sys.stderr)
+        sys.exit(2)
     return [p for p in out.stdout.splitlines() if p]
+
+
+def safe_size(path):
+    """Stat a file; return None (not a crash) if it vanished or is unreadable."""
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return None
 
 
 def keep(path):
@@ -22,10 +34,8 @@ def keep(path):
         return False
     if path.endswith(IGNORE_SUFFIXES):
         return False
-    try:
-        if os.path.getsize(path) > MAX_FILE_BYTES:
-            return False
-    except OSError:
+    sz = safe_size(path)
+    if sz is None or sz > MAX_FILE_BYTES:
         return False
     return True
 
@@ -38,7 +48,11 @@ def chunk_files(paths, budget):
     chunks, cur, cur_bytes = [], [], 0
     for _dir in sorted(by_dir):
         for p in by_dir[_dir]:
-            sz = os.path.getsize(p)
+            sz = safe_size(p)
+            if sz is None:
+                # TOCTOU: file vanished between keep() and here — skip, don't crash.
+                print(f"warning: skipping {p} (no longer stat-able)", file=sys.stderr)
+                continue
             if cur and cur_bytes + sz > budget:
                 chunks.append((cur, cur_bytes))
                 cur, cur_bytes = [], 0
@@ -56,6 +70,13 @@ def main():
     ap.add_argument("--max-chunks", type=int, default=25)
     ap.add_argument("--run-id", default="")
     args = ap.parse_args()
+
+    if args.budget_bytes <= 0:
+        print(f"error: --budget-bytes must be positive, got {args.budget_bytes}", file=sys.stderr)
+        sys.exit(2)
+    if args.max_chunks <= 0:
+        print(f"error: --max-chunks must be positive, got {args.max_chunks}", file=sys.stderr)
+        sys.exit(2)
 
     all_tracked = tracked_files(args.scope)
     kept = [p for p in all_tracked if keep(p)]

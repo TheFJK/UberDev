@@ -56,5 +56,23 @@ python3 "$REPORT" --run-id test --chunks-dir "$TMP/chunks" --min-severity critic
 check "min-severity=critical drops major finding" "! grep -q 'src/c.ts:5' \"$TMP/agg-crit.md\""
 check "min-severity=critical keeps blocker finding" "grep -q 'src/a.ts:42' \"$TMP/agg-crit.md\""
 
+# Cross-reviewer confirmation: src/a.ts:42 was flagged by code-reviewer AND silent-failure-hunter
+check "aggregate notes cross-reviewer confirmation (also_flagged_by)" "grep -q '+silent-failure-hunter' \"$TMP/agg.md\""
+
+# Fail-loud on malformed chunk YAML — must NOT silently produce a false-clean report
+BADTMP="$(mktemp -d)"; mkdir -p "$BADTMP/chunks"
+printf 'findings: [a, b\n' > "$BADTMP/chunks/chunk-01-findings.yaml"
+check "malformed chunk YAML fails loud (non-zero exit)" "! python3 \"$REPORT\" --run-id t --chunks-dir \"$BADTMP/chunks\" --out \"$BADTMP/r.md\" >/dev/null 2>&1"
+rm -rf "$BADTMP"
+
+# Unknown severity warns to stderr (but does not crash)
+WARNTMP="$(mktemp -d)"; mkdir -p "$WARNTMP/chunks"
+printf 'findings:\n  - {severity: bogus, location: "x:1", agent: code-reviewer, summary: s, detail: d, confidence: high}\n' > "$WARNTMP/chunks/chunk-01-findings.yaml"
+check "unknown severity warns to stderr" "python3 \"$REPORT\" --run-id t --chunks-dir \"$WARNTMP/chunks\" --out \"$WARNTMP/r.md\" 2>&1 >/dev/null | grep -q 'unknown severity'"
+rm -rf "$WARNTMP"
+
+# Arg validation: invalid --min-severity is rejected fail-loud
+check "rejects invalid --min-severity (fail-loud)" "! python3 \"$REPORT\" --run-id t --chunks-dir \"$TMP/chunks\" --min-severity bogus --emit-findings-to-issues-aggregate \"$TMP/x.md\" >/dev/null 2>&1"
+
 echo "Results: $PASS passed, $FAIL failed"
 [ $FAIL -eq 0 ] && exit 0 || exit 1

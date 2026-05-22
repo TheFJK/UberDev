@@ -24,11 +24,31 @@ def cell(s):
     return re.sub(r"\s*\n\s*", " ", str("" if s is None else s)).replace("|", "\\|")
 
 
+def agent_label(f):
+    """Agent column annotated with cross-reviewer confirmations (also_flagged_by),
+    so a finding flagged by multiple reviewers carries that signal into the report
+    AND the issue aggregate (RFC 0007 §5 cross-reviewer confirmation)."""
+    base = f.get("agent", "")
+    also = f.get("also_flagged_by") or []
+    return f"{base} (+{', '.join(str(a) for a in also)})" if also else base
+
+
 def load_findings(chunks_dir):
     rows = []
     for path in sorted(glob.glob(os.path.join(chunks_dir, "chunk-*-findings.yaml"))):
-        doc = yaml.safe_load(open(path)) or {}
+        try:
+            with open(path) as fh:
+                doc = yaml.safe_load(fh) or {}
+        except (OSError, yaml.YAMLError) as e:
+            # Fail loud — a malformed/unreadable chunk file must NOT silently shrink
+            # the audit into a false-clean result.
+            print(f"error: failed to load findings from {path}: {e}", file=sys.stderr)
+            sys.exit(2)
         for f in doc.get("findings") or []:
+            if f.get("severity", "?") not in SEV_RANK:
+                print(f"warning: unknown severity {f.get('severity')!r} in {path} — ranked lowest, excluded from issue filing", file=sys.stderr)
+            if f.get("confidence", "medium") not in CONF_RANK:
+                print(f"warning: unknown confidence {f.get('confidence')!r} in {path} — treated as medium", file=sys.stderr)
             rows.append(f)
     return rows
 
@@ -77,6 +97,16 @@ def main():
                          "Below-floor findings stay report-only — the false-positive guard for full-file review.")
     args = ap.parse_args()
 
+    if not os.path.isdir(args.chunks_dir):
+        print(f"error: --chunks-dir is not a directory: {args.chunks_dir}", file=sys.stderr)
+        sys.exit(2)
+    if args.min_severity not in SEV_RANK:
+        print(f"error: --min-severity must be one of {sorted(SEV_RANK)}, got {args.min_severity!r}", file=sys.stderr)
+        sys.exit(2)
+    if args.min_confidence not in CONF_RANK:
+        print(f"error: --min-confidence must be one of {sorted(CONF_RANK)}, got {args.min_confidence!r}", file=sys.stderr)
+        sys.exit(2)
+
     rows = dedupe(load_findings(args.chunks_dir))
     totals = {}
     for f in rows:
@@ -103,7 +133,7 @@ def main():
                 fh.write(f"\n### Test coverage\n\n{cov or '_(no coverage artifact produced)_'}\n")
             fh.write("\n## Findings\n| severity | location | agent | summary |\n|---|---|---|---|\n")
             for f in sorted(rows, key=lambda r: -SEV_RANK.get(r.get("severity", "?"), 0)):
-                fh.write(f"| {cell(f.get('severity'))} | {cell(f.get('location'))} | {cell(f.get('agent'))} | {cell(f.get('summary'))} |\n")
+                fh.write(f"| {cell(f.get('severity'))} | {cell(f.get('location'))} | {cell(agent_label(f))} | {cell(f.get('summary'))} |\n")
 
     if args.emit_findings_to_issues_aggregate:
         allowed = severities_at_or_above(args.min_severity)
@@ -118,7 +148,7 @@ def main():
             fh.write("| severity | location | agent | disposition | summary | detail |\n")
             fh.write("|---|---|---|---|---|---|\n")
             for f in issue_rows:
-                fh.write(f"| {cell(f.get('severity'))} | {cell(f.get('location'))} | {cell(f.get('agent'))} | DEFERRED | {cell(f.get('summary'))} | {cell(f.get('detail', ''))} |\n")
+                fh.write(f"| {cell(f.get('severity'))} | {cell(f.get('location'))} | {cell(agent_label(f))} | DEFERRED | {cell(f.get('summary'))} | {cell(f.get('detail', ''))} |\n")
             fh.write("</external-untrusted-input>\n")
 
 

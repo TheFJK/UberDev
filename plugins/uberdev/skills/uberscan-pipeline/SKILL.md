@@ -106,7 +106,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/uberscan-pipeline/chunk.py" \
   --budget-bytes "$CHUNK_BUDGET" \
   --max-chunks "$MAX_CHUNKS" \
   --run-id "$RUN_ID" \
-  > "$RUN_DIR/manifest.json"
+  > "$RUN_DIR/manifest.json" || { echo "error: chunk.py failed (rc=$?); aborting" >&2; exit 2; }
+
+# Fail loud on a corrupt manifest — it must NOT silently proceed to a
+# false-clean "0 chunks" run (which would skip every breaker and find nothing).
+if ! jq -e '.' "$RUN_DIR/manifest.json" >/dev/null 2>&1; then
+  echo "error: manifest.json is not valid JSON; aborting" >&2; exit 2
+fi
 
 # CB1/CB7 circuit breaker: overflow guard
 OVERFLOW="$(jq -r '.overflow' "$RUN_DIR/manifest.json")"
@@ -363,14 +369,10 @@ if [ "$NO_REPORT" != "1" ]; then
   python3 "${CLAUDE_PLUGIN_ROOT}/skills/uberscan-pipeline/report.py" \
     --run-id "$RUN_ID" \
     --chunks-dir "$RUN_DIR" \
-    --out "$RUN_DIR/uberscan-report.md"
+    --out "$RUN_DIR/uberscan-report.md" || { echo "error: report.py (--out) failed (rc=$?); aborting" >&2; exit 2; }
   echo "[uberscan] report written: $RUN_DIR/uberscan-report.md"
 else
-  # Still aggregate for issue filing; just skip writing the report file
-  python3 "${CLAUDE_PLUGIN_ROOT}/skills/uberscan-pipeline/report.py" \
-    --run-id "$RUN_ID" \
-    --chunks-dir "$RUN_DIR"
-  echo "[uberscan] --no-report: skipped report file"
+  echo "[uberscan] --no-report: skipping report file (the issue aggregate is still emitted below)"
 fi
 
 # Always emit the findings-to-issues aggregate (used by Phase 3).
@@ -380,7 +382,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/uberscan-pipeline/report.py" \
   --run-id "$RUN_ID" \
   --chunks-dir "$RUN_DIR" \
   --min-severity "$SEVERITY" \
-  --emit-findings-to-issues-aggregate "$RUN_DIR/f2i-aggregate.md"
+  --emit-findings-to-issues-aggregate "$RUN_DIR/f2i-aggregate.md" || { echo "error: report.py (--emit-findings-to-issues-aggregate) failed (rc=$?); aborting" >&2; exit 2; }
 
 echo "[uberscan] findings-to-issues aggregate written: $RUN_DIR/f2i-aggregate.md"
 ```
@@ -428,12 +430,19 @@ if [ "$NO_ISSUES" != "1" ]; then
     # 'input-malformed' if working_dir is not an absolute path inside the
     # worktree); repo_slug + pr_commit_sha back the issue-body **Origin** link.
     # Local origin-URL parse first (fast); fall back to `gh repo view`.
-    WORKING_DIR_ABS="$(git rev-parse --show-toplevel)"
+    WORKING_DIR_ABS="$(git rev-parse --show-toplevel 2>/dev/null)"
     REPO_SLUG="$(git remote get-url origin 2>/dev/null | sed -E 's@.*github\.com[:/]([^/]+/[^/.]+)(\.git)?$@\1@')"
     if [ -z "$REPO_SLUG" ] || [ "$REPO_SLUG" = "$(git remote get-url origin 2>/dev/null)" ]; then
       REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)"
     fi
-    HEAD_SHA="$(git rev-parse HEAD)"
+    HEAD_SHA="$(git rev-parse HEAD 2>/dev/null)"
+    # findings-to-issues hard-refuses without an absolute working_dir; if git/gh
+    # resolution failed, skip filing rather than dispatch a doomed Task.
+    DISPATCH_OK=1
+    if [ -z "$WORKING_DIR_ABS" ] || [ -z "$HEAD_SHA" ] || [ -z "$REPO_SLUG" ]; then
+      echo "[uberscan] error: could not resolve working_dir/HEAD/repo_slug (git/gh failed); skipping issue filing" >&2
+      DISPATCH_OK=0
+    fi
     # ===========================================================================
     # DISPATCH POINT — the orchestrating session fires ONE Task() call:
     #
@@ -450,7 +459,9 @@ if [ "$NO_ISSUES" != "1" ]; then
     #   pr_number=              (empty — this is a whole-codebase audit, not a PR)
     #   max_new=$MAX_NEW
     # ===========================================================================
-    echo "DISPATCH: findings-to-issues with run_id=$RUN_ID, working_dir=$WORKING_DIR_ABS, repo_slug=$REPO_SLUG, pr_commit_sha=$HEAD_SHA, phase1_aggregate_path=$RUN_DIR/f2i-aggregate.md, finding_label=uberscan-finding, finding_marker_slug=uberscan, source_ref=/uberscan run $RUN_ID, pr_number= (empty), max_new=$MAX_NEW"
+    if [ "$DISPATCH_OK" = "1" ]; then
+      echo "DISPATCH: findings-to-issues with run_id=$RUN_ID, working_dir=$WORKING_DIR_ABS, repo_slug=$REPO_SLUG, pr_commit_sha=$HEAD_SHA, phase1_aggregate_path=$RUN_DIR/f2i-aggregate.md, finding_label=uberscan-finding, finding_marker_slug=uberscan, source_ref=/uberscan run $RUN_ID, pr_number= (empty), max_new=$MAX_NEW"
+    fi
   else
     echo "[uberscan] issue filing skipped (rate-limit floor not met)"
   fi
@@ -473,7 +484,12 @@ import sys, glob, yaml
 chunks_dir, sev = sys.argv[1], sys.argv[2]
 total = 0
 for path in glob.glob(f"{chunks_dir}/chunk-*-findings.yaml"):
-    doc = yaml.safe_load(open(path)) or {}
+    try:
+        with open(path) as fh:
+            doc = yaml.safe_load(fh) or {}
+    except (OSError, yaml.YAMLError) as e:
+        print(f"error: failed to parse {path}: {e}", file=sys.stderr)
+        sys.exit(1)
     total += sum(1 for f in (doc.get("findings") or []) if f.get("severity") == sev)
 print(total)
 PY
