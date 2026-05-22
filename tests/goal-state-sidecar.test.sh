@@ -159,7 +159,40 @@ UBERDEV_TMPDIR="$UBERDEV_TMPDIR" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" \
   ' >/dev/null 2>&1 || true
 assert_absent "$marker" "metacharacter payload did not execute (no source/eval)"
 
-echo "== cleanup removes all three sidecars =="
+echo "== fixed-path active-id bootstrap: fresh shell with NO GOAL_ID recovers from pointer (#171 AC2) =="
+GOAL_ID="goal-test-boot00001"; cycle=3; watch_start=1716400000
+overflow_count=0; overflow_detected=0; MAX_CYCLES=7; UBERDEV_RESOLVED_BACKEND="claude-bg"
+queue=(501 601); active_issues=()
+uberdev_goal_write_run_state
+# Fresh shell: explicitly unset GOAL_ID + UBERDEV_GOAL_ID (mirrors a real
+# Phase-1 Bash call where env + scalars evaporated). Must recover from the
+# fixed-path pointer — this is the actual cross-call fix, not the env fallback.
+boot_out="$(UBERDEV_TMPDIR="$UBERDEV_TMPDIR" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" bash -c '
+    . "$CLAUDE_PLUGIN_ROOT/lib/dispatch.sh"
+    . "$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh"
+    unset GOAL_ID UBERDEV_GOAL_ID
+    uberdev_goal_read_run_state || exit 9
+    printf "%s|%s|%s" "$GOAL_ID" "$cycle" "${queue[*]}"
+  ')"
+assert_eq "$boot_out" "goal-test-boot00001|3|501 601" "fresh shell with no env recovers GOAL_ID+state from active-id pointer"
+
+echo "== active-id pointer path-traversal rejected (security) =="
+# Forge the fixed-path pointer with a traversal payload; the bootstrap must
+# reject it (validate_id gate) and NOT adopt it as GOAL_ID.
+printf '../pwned\n' > "$UBERDEV_TMPDIR/goal-active-id.txt"
+ptrav_out="$(UBERDEV_TMPDIR="$UBERDEV_TMPDIR" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" bash -c '
+    . "$CLAUDE_PLUGIN_ROOT/lib/dispatch.sh"
+    . "$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh"
+    unset GOAL_ID UBERDEV_GOAL_ID
+    uberdev_goal_read_run_state 2>/dev/null
+    printf "id=[%s]" "${GOAL_ID:-}"
+  ')"
+case "$ptrav_out" in
+  *pwned*|*../*) assert_eq "rejected" "accepted" "active-id pointer traversal rejected" ;;
+  *)            assert_eq "rejected" "rejected" "active-id pointer traversal rejected" ;;
+esac
+
+echo "== cleanup removes all three sidecars + the active-id pointer =="
 GOAL_ID="goal-test-clean001"; cycle=1; watch_start=1; overflow_count=0
 overflow_detected=0; MAX_CYCLES=5; UBERDEV_RESOLVED_BACKEND="claude-bg"
 queue=(1 2); active_issues=(3)
@@ -170,6 +203,7 @@ assert_eq "$?" "0" "cleanup returns 0"
 assert_absent "$sc"          "runstate sidecar removed"
 assert_absent "${sc}.queue"  "queue sidecar removed"
 assert_absent "${sc}.active" "active sidecar removed"
+assert_absent "$UBERDEV_TMPDIR/goal-active-id.txt" "active-id pointer removed (names this goal)"
 uberdev_goal_cleanup_run_state   # second call on already-gone files
 assert_eq "$?" "0" "cleanup idempotent (non-fatal when absent)"
 
