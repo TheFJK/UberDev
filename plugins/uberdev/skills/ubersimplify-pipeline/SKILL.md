@@ -455,8 +455,8 @@ elif [ "${COMMIT_COUNT:-0}" -eq 0 ]; then
   # No fixes landed — the codebase was already clean for these lenses. Tear down
   # the empty temp branch and return to the base branch so the tree is untouched.
   echo "[ubersimplify] no fixes applied — already clean; removing temp branch"
-  git checkout "$BASE_BRANCH"
-  git branch -D "$BRANCH"
+  git checkout "$BASE_BRANCH" || { echo "error: could not return to $BASE_BRANCH (rc=$?); temp branch $BRANCH left for inspection" >&2; exit 2; }
+  git branch -D "$BRANCH" || echo "warning: could not delete empty temp branch $BRANCH (rc=$?)" >&2
   BRANCH=""
 else
   # Build the PR body FIRST (via --body-file; never inline $VAR — second-order
@@ -489,6 +489,13 @@ else
     --title "refactor: /ubersimplify whole-codebase simplification ($RUN_ID)" \
     --body-file "$RUN_DIR/pr-body.md")" || { echo "error: gh pr create failed (rc=$?); aborting" >&2; exit 2; }
   PR_NUMBER="$(printf '%s' "$PR_URL" | sed -E 's@.*/pull/([0-9]+).*@\1@')"
+  if ! printf '%s' "$PR_NUMBER" | grep -qE '^[0-9]+$'; then
+    # PR was created but its URL did not parse — surface it rather than dispatch
+    # findings-to-issues with a silently-empty pr_number. Phase 5 then files
+    # issues without the PR backref (degraded, not broken).
+    echo "warning: could not parse PR number from '$PR_URL'; issues will file without a PR backref" >&2
+    PR_NUMBER=""
+  fi
   echo "[ubersimplify] opened PR #$PR_NUMBER: $PR_URL"
 fi
 ```
