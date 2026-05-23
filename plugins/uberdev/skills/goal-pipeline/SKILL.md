@@ -9,7 +9,7 @@ This skill is invoked inline by `commands/goal.md`. It reads `$ARGUMENTS` from t
 
 `/goal` is the autonomous convergence orchestrator from RFC 0005: it loops `/turbo` → auto `/review-pr` → `/merge` if GREEN, recursing on BLOCKER/CRITICAL `review-pr-finding` issues filed by `/review-pr` Phase 2.5 until the queue is empty AND every PR landed in `{merged, merge-failed}`. YELLOW PRs are NEVER merged inside `/goal` — they are held for re-review. RED PRs are held with a `Blocks: #N` body annotation that wires unblock back into the cycle once the blocking issues close.
 
-> **You are an orchestrator, not an implementer.** You preflight, dispatch `/turbo` agents one per issue, watch their stdout transcripts for the `backgrounded · ` marker, drive PR state transitions from the `/review-pr` Phase 2.5 audit JSON, dispatch `/merge` for GREEN PRs, drive unblock checks on every successful merge, collect the next queue from `review-pr-finding` issues filed during the cycle, and halt deterministically via one of the five exit paths. You never write feature code yourself.
+> **You are an orchestrator, not an implementer.** You preflight, dispatch `/turbo` agents one per issue, detect each solver's pushed PR via GitHub (`gh pr list` `closingIssuesReferences` / `feat/N-` head — CLI-version-independent, issue #180), drive PR state transitions from the file-based `/review-pr` Phase 2.5 verdict JSON, dispatch `/merge` for GREEN PRs, confirm merge via `gh pr view <pr> --json state == MERGED`, drive unblock checks on every successful merge, collect the next queue from `review-pr-finding` issues filed during the cycle, and halt deterministically via one of the exit paths. You never write feature code yourself.
 
 ## Constants
 
@@ -26,6 +26,9 @@ _UBERDEV_GOAL_DEFAULT_MAX_CYCLES=5
 _UBERDEV_GOAL_POLL_SECS=60
 _UBERDEV_GOAL_STUCK_SECS=14400         # 4h
 _UBERDEV_GOAL_MAX_MERGE_ATTEMPTS=3
+_UBERDEV_GOAL_SOLVE_TIMEOUT=9000       # 150m — no PR AND no live agent => issue failed (issue #180)
+_UBERDEV_GOAL_REVIEW_GRACE=1800        # 30m — wait for the leaf solver's OWN /review-pr verdict before dispatching ours (issue #180)
+_UBERDEV_GOAL_MERGE_TIMEOUT=3600       # 60m — merging w/o MERGED AND agent idle => back to green for retry (issue #180)
 _UBERDEV_GOAL_BODY_CAP=65536           # 64 KiB
 FINDING_LABEL='review-pr-finding'
 FINDING_FINGERPRINT_REGEX='<!-- uberdev:review-pr-finding fingerprint=([a-f0-9]{16}) -->'
@@ -44,6 +47,20 @@ Notes on the enums:
 - **`FINDING_FINGERPRINT_REGEX`** is the marker shape `agents/findings-to-issues.md` injects into every BLOCKER/CRITICAL `review-pr-finding` issue body; Phase 3 extracts it via `_uberdev_goal_extract_fingerprint` to drive the repeat-cycle detector.
 
 ## Phase 0 — Preflight
+
+0. **bash ≥ 4 preflight guard (issue #180, defect #8).** Evaluated FIRST — before arg parsing, backend resolution, or any `gh` call. The watch loop's verdict locator (`uberdev_goal_locate_review_pr_audit_by_pr`) iterates unquoted globs that rely on bash's "unmatched glob → literal" semantics (zsh fatals with `no matches found`), and macOS's default `/bin/bash` is 3.2 (no `declare -A`, no `mapfile`). Refuse anything below bash 4 with a clear, actionable error rather than letting the loop misbehave silently.
+
+   ```bash
+   # Two-arm detection: the first arm catches non-bash shells (zsh, the Bash-tool
+   # default, leaves BASH_VERSINFO unset); the second catches bash 3.2. Either way
+   # the watch loop's glob + array semantics are unsafe — fail fast.
+   if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
+     echo "goal: requires bash >= 4 (macOS default /bin/bash is 3.2, and zsh fatals on the watch loop's unmatched-glob verdict locator)." >&2
+     echo "  - install a modern bash:  brew install bash      # -> /opt/homebrew/bin/bash 5.x" >&2
+     echo "  - then re-run /uberdev:goal under bash >= 4." >&2
+     exit 2
+   fi
+   ```
 
 1. **Parse positional issue numbers + flags.** The parser scans `$ARGUMENTS` and collects every token matching `^[0-9]+$` into the input queue; recognised flag tokens are `--max-cycles=N`, `--only-mine`, `--dry-run`, `--backend=<name>`. Empty input prints the usage line and exits.
 
@@ -125,7 +142,7 @@ Notes on the enums:
    uberdev_goal_write_run_state || { echo "goal: failed to persist run-state" >&2; exit 3; }
    ```
 
-8. **If `--dry-run`: print planned cycle-1 dispatch list + watch-loop outline, exit 0** (D16, S9). The dry-run path is the audit/preview surface — no `gh` calls, no agent spawns, no merges, **no audit events emitted** (S9 — `goal_dispatched` must NOT fire on dry-run so the audit log only carries real runs). Emit the resolved `MAX_CYCLES`, the resolved `UBERDEV_RESOLVED_BACKEND`, the issue queue, and the planned audit events ("would emit goal_dispatched", "would dispatch /turbo for issues …", "would poll solve-bg-stdout-N.log per issue"), then exit 0 cleanly. This step runs BEFORE the real `goal_dispatched` emit in step 9 — order matters.
+8. **If `--dry-run`: print planned cycle-1 dispatch list + watch-loop outline, exit 0** (D16, S9). The dry-run path is the audit/preview surface — no `gh` calls, no agent spawns, no merges, **no audit events emitted** (S9 — `goal_dispatched` must NOT fire on dry-run so the audit log only carries real runs). Emit the resolved `MAX_CYCLES`, the resolved `UBERDEV_RESOLVED_BACKEND`, the issue queue, and the planned audit events ("would emit goal_dispatched", "would dispatch /turbo for issues …", "would poll GitHub (gh pr list) for each issue's PR"), then exit 0 cleanly. This step runs BEFORE the real `goal_dispatched` emit in step 9 — order matters.
 
 9. **Emit `goal_dispatched` event** with `{goal_id, cycle: 0, issues, dry_run, backend}` payload (real runs only — dry-run exits in step 8 before reaching here). This is the audit anchor — `cycle: 0` distinguishes the initial dispatch from the Phase 1 per-cycle dispatch:
 
@@ -251,96 +268,121 @@ while true; do
 
   any_active=0
 
-  # 2a. Poll each dispatched /turbo agent's stdout log
-  # F13 simplify-lens — the `backgrounded · ` marker is terminal (emitted once
-  # at session end by every dispatch.sh backend), so `tail -c 65536` bounds
-  # per-poll grep cost to O(1) regardless of uncapped log growth. Identical
-  # semantics for a contract that promises a terminal-marker; cheaper polling.
+  # 2a. Detect each solver's pushed PR via GitHub (issue #180 — CLI-version-
+  # independent). The pre-2.1.150 stdout-marker probe (`backgrounded ·` +
+  # `pushed PR #N`) is retired: on CLI 2.1.150 `claude --bg` detaches with a
+  # banner-only stdout and `pushed PR #N` has zero producers, so the loop keying
+  # on it never advanced. Authoritative completion signal = a PR that closes
+  # issue N exists on GitHub (`closingIssuesReferences` / `feat/N-` head). When
+  # no PR exists yet, `uberdev_goal_agent_busy_for_issue` disambiguates "solver
+  # still working" from "solver died", bounded by _UBERDEV_GOAL_SOLVE_TIMEOUT.
   for issue in "${active_issues[@]}"; do
-    log="$UBERDEV_TMPDIR/solve-bg-stdout-$issue.log"
-    if [ -f "$log" ] && tail -c 65536 "$log" 2>/dev/null | grep -q 'backgrounded · '; then
-      audit_json="$(uberdev_goal_locate_review_pr_audit "$issue")"
-      signal="$(uberdev_goal_read_trust_signal "$audit_json")"
-      pr_num="$(uberdev_goal_extract_pr_num_from_log "$log")"
-      # F11 simplify-lens — surface the missing-marker case (no `pushed PR #N`
-      # line in the solve-bg stdout transcript yet) instead of letting it fall
-      # through to a silent `uberdev_goal_pr_state_transition` validate-fail.
-      # Treat as in-flight: keep the issue active so the next poll retries.
-      if [ -z "$pr_num" ]; then
-        printf 'goal-pipeline: issue %s: no `pushed PR #N` marker in stdout yet; deferring to next poll\n' \
-          "$issue" >&2
-        any_active=1
-        continue
+    istate="$(awk -v i="$issue" '{s[$1]=$2} END{print s[i]}' \
+      "$UBERDEV_TMPDIR/goal-$GOAL_ID-issue-states.tsv" 2>/dev/null)"
+    case "$istate" in pr-pushed|resolved|failed) continue ;; esac
+    pr_num="$(uberdev_goal_find_pr_for_issue "$issue")"
+    if [ -n "$pr_num" ]; then
+      uberdev_goal_issue_state_transition "$GOAL_ID" "$issue" solving pr-pushed
+      uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" dispatched pushed-reviewing
+      if uberdev_goal_pr_is_merged "$pr_num"; then
+        # Resume / human-merged: the PR already landed. Pre-stage it through the
+        # valid path so step 2d finalizes it to `merged` next pass — no wasteful
+        # /review-pr or /merge dispatch against an already-merged PR.
+        uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" pushed-reviewing green
+        uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" green merging
       fi
-      case "$signal" in
-        green)
-          uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" pushed-reviewing green
-          ;;
-        yellow)
-          uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" pushed-reviewing yellow-held
-          # Record the audit that put this PR in held so step 2e's poll loop
-          # has a baseline — when a NEWER audit appears (re-review fired),
-          # the poll loop applies the next state transition (#159).
-          uberdev_goal_record_held_audit "$GOAL_ID" "$pr_num" "$audit_json"
-          ;;
-        red)
-          uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" pushed-reviewing red-held
-          # Record audit baseline for the step 2e poll loop (mirrors yellow case).
-          uberdev_goal_record_held_audit "$GOAL_ID" "$pr_num" "$audit_json"
-          # B6 — Blocker-overflow handler (D13). Reads the per-PR audit JSON
-          # while $audit_json and $pr_num are still in scope (the Phase 3
-          # site previously held this block but those variables don't exist
-          # there, so the check silently no-op'd). Setting overflow_detected
-          # here gates the Phase 3 first-10 truncation below.
-          #
-          # M14 — explicit branch on gh_jq_or_jq rc. If the audit JSON is
-          # corrupted, the old `halted_overflow="$(gh_jq_or_jq …)"` swallowed
-          # jq's rc and left $halted_overflow empty — `[ "" = "true" ]` is
-          # false so the overflow check silently skipped. Surface to stderr;
-          # default to "no overflow" (safer than spuriously truncating the
-          # next cycle's candidate queue on an unreadable audit).
-          if halted_overflow="$(gh_jq_or_jq "$audit_json" '.phases.phase2_5.halted_due_to_overflow // false')"; then
-            if [ "$halted_overflow" = "true" ]; then
-              overflow_detected=1
-              # Q4 — accumulate per-cycle PR-overflow count for the
-              # goal_cycle_completed audit payload (the prose at line ~381
-              # promises {overflow_count: N} in the summary).
-              overflow_count=$(( ${overflow_count:-0} + 1 ))
-              uberdev_goal_write_run_state || echo "goal: warning: run-state flush failed in Phase 2a" >&2
-            fi
-          else
-            printf 'goal-pipeline: overflow check failed to read audit %s for PR %s; treating as no overflow this cycle\n' \
-              "$audit_json" "$pr_num" >&2
-          fi
-          ;;
-        stale|missing)
-          # D17: never assume GREEN on missing phase2_5 — re-dispatch /review-pr.
-          # B3 bound — _uberdev_goal_dispatch_review_pr enforces a per-PR cap
-          # at ${_UBERDEV_GOAL_MAX_REVIEW_PR_ATTEMPTS:-3} dispatches across the
-          # entire goal run (TSV at goal-<id>-review-pr-attempts.tsv mirrors
-          # the merge-attempts pattern). The cap returns rc=0 with a stderr
-          # warning when exceeded — the watch loop's 60s cadence cannot fire
-          # >3 /review-pr dispatches per PR over the 4h stuck_loop window
-          # (was unbounded at 240/PR). NOT a circuit breaker: the goal does
-          # not halt; subsequent cycles skip re-dispatch in-place.
-          _uberdev_goal_dispatch_review_pr "$pr_num"
-          ;;
-      esac
-    else
       any_active=1
+      continue
+    fi
+    # No PR yet — is the solver still alive, or did it die?
+    if uberdev_goal_agent_busy_for_issue "$issue"; then
+      any_active=1
+    else
+      dispatch_ts="$(awk -v i="$issue" '$1==i && $2=="solving"{t=$3} END{print t+0}' \
+        "$UBERDEV_TMPDIR/goal-$GOAL_ID-issue-states.tsv" 2>/dev/null)"
+      if [ "$(( now - dispatch_ts ))" -lt "$_UBERDEV_GOAL_SOLVE_TIMEOUT" ]; then
+        any_active=1
+      else
+        printf 'goal-pipeline: issue %s FAILED (no PR, agent idle, %ss elapsed)\n' \
+          "$issue" "$(( now - dispatch_ts ))" >&2
+        uberdev_goal_issue_state_transition "$GOAL_ID" "$issue" solving failed
+      fi
     fi
   done
 
-  # 2b. Dispatch /merge for any new GREEN PRs
-  # B2 — Only transition to `merging` on dispatch rc=0 (mirrors Phase 1's
-  # `if uberdev_dispatch_one …` branching at lines ~166-189). Failed dispatch
-  # (mktemp fails, prompt write fails, claude-bg session refuse, etc.) used
-  # to transition the PR to `merging` anyway, then the watch loop would
-  # poll for a backgrounded · marker that would never appear, stalling
-  # until the 4h stuck_loop circuit breaker fired. Now: rc!=0 logs to
-  # stderr and leaves the PR in `green` so the next watch iteration
-  # retries; the per-PR attempt counter (cap 3) bounds runaway retries.
+  # 2b. Read the leaf /review-pr verdict for PRs in pushed-reviewing (file-based
+  # verdict locator + trust signal — the unchanged, version-independent contract).
+  # TIME-GRACED (issue #180): the leaf solver runs its OWN /review-pr ~20m after
+  # pushing and frequently goes idle in that window, so "agent idle ⇒ review
+  # done" is false (keying re-review on liveness fired 3 redundant reviews in
+  # 4 min and prematurely red-held a PR whose GREEN verdict had not landed).
+  # Instead wait _UBERDEV_GOAL_REVIEW_GRACE for the leaf's verdict, re-reading
+  # the verdict JSON every poll — it advances the instant the verdict lands,
+  # with zero redundant reviews on the happy path; only after the grace lapses
+  # do we dispatch our own /review-pr (bounded ×3).
+  for pr_num in $(uberdev_goal_list_prs_in_state "$GOAL_ID" pushed-reviewing); do
+    audit_json="$(uberdev_goal_locate_review_pr_audit_by_pr "$pr_num")"
+    signal="$(uberdev_goal_read_trust_signal "$audit_json")"
+    case "$signal" in
+      green)
+        uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" pushed-reviewing green
+        ;;
+      yellow)
+        uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" pushed-reviewing yellow-held
+        # Baseline audit for step 2e's poll loop — a NEWER audit means a
+        # re-review fired, so the poll loop applies the next transition (#159).
+        uberdev_goal_record_held_audit "$GOAL_ID" "$pr_num" "$audit_json"
+        ;;
+      red)
+        uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" pushed-reviewing red-held
+        uberdev_goal_record_held_audit "$GOAL_ID" "$pr_num" "$audit_json"
+        # B6/M14 — blocker-overflow handler (D13). Explicit branch on
+        # gh_jq_or_jq rc so a corrupted audit defaults to "no overflow" rather
+        # than silently skipping; sets overflow_detected (gates the Phase 3
+        # first-10 truncation) and accumulates the per-cycle count.
+        if halted_overflow="$(gh_jq_or_jq "$audit_json" '.phases.phase2_5.halted_due_to_overflow // false')"; then
+          if [ "$halted_overflow" = "true" ]; then
+            overflow_detected=1
+            overflow_count=$(( ${overflow_count:-0} + 1 ))
+            uberdev_goal_write_run_state || echo "goal: warning: run-state flush failed in Phase 2b" >&2
+          fi
+        else
+          printf 'goal-pipeline: overflow check failed to read audit %s for PR %s; treating as no overflow this cycle\n' \
+            "$audit_json" "$pr_num" >&2
+        fi
+        ;;
+      stale|missing)
+        # No verdict yet. Wait REVIEW_GRACE for the leaf's OWN /review-pr before
+        # dispatching ours. seen_ts = the FIRST pushed-reviewing transition for
+        # this PR (durable in the pr-states TSV). D17: never assume GREEN.
+        seen_ts="$(awk -v p="$pr_num" '$1==p && $2=="pushed-reviewing" && !t{t=$3} END{print t+0}' \
+          "$UBERDEV_TMPDIR/goal-$GOAL_ID-pr-states.tsv" 2>/dev/null)"
+        if [ "$(( now - seen_ts ))" -lt "$_UBERDEV_GOAL_REVIEW_GRACE" ]; then
+          any_active=1   # still waiting for the leaf's own review verdict
+        else
+          # Grace lapsed — dispatch our own /review-pr. B3 bound:
+          # _uberdev_goal_dispatch_review_pr caps at
+          # ${_UBERDEV_GOAL_MAX_REVIEW_PR_ATTEMPTS:-3} dispatches per PR across
+          # the whole run (rc=0 + stderr warning when exceeded; NOT a breaker).
+          _uberdev_goal_dispatch_review_pr "$pr_num"
+          any_active=1
+        fi
+        ;;
+    esac
+  done
+
+  # 2c. Dispatch /merge for any new GREEN PRs.
+  # B2 — only transition to `merging` on dispatch rc=0; a failed dispatch
+  # (mktemp/prompt-write/session-refuse) leaves the PR in `green` for a
+  # next-cycle retry (per-PR attempt counter, cap 3, bounds runaway retries).
   for pr in $(uberdev_goal_list_prs_in_state "$GOAL_ID" green); do
+    if uberdev_goal_pr_is_merged "$pr"; then
+      # Already merged (resume / human-merged) — finalize via step 2d without
+      # re-dispatching /merge against an already-landed PR.
+      uberdev_goal_pr_state_transition "$GOAL_ID" "$pr" green merging
+      any_active=1
+      continue
+    fi
     if uberdev_goal_should_automerge "$GOAL_ID" "$pr"; then
       if _uberdev_goal_dispatch_merge "$pr"; then
         uberdev_goal_pr_state_transition "$GOAL_ID" "$pr" green merging
@@ -352,24 +394,38 @@ while true; do
     fi
   done
 
-  # 2c. Drive /merge transitions
+  # 2d. Drive merging → merged. Completion is authoritative via GitHub
+  # (`gh pr view <pr> --json state == MERGED`, issue #180 — the
+  # merge-bg-stdout-<pr>.log marker this step used to poll was NEVER written by
+  # any dispatch backend, so the gate could not fire). For PRs that did NOT
+  # merge, read_merge_result (gh-state-first, then the local audit) classifies
+  # the failure: conflict / hook_failed halt the goal; CLOSED-without-merge is
+  # a hard merge_failed; `missing` defers (re-poll) with a MERGE_TIMEOUT
+  # fallback to `green` when the merge agent stalled.
   for pr in $(uberdev_goal_list_prs_in_state "$GOAL_ID" merging); do
-    merge_log="$UBERDEV_TMPDIR/merge-bg-stdout-$pr.log"
-    # F13 simplify-lens — `tail -c 65536` bounds per-poll grep cost; the
-    # `backgrounded · ` marker is terminal so tail-of-file is equivalent.
-    [ -f "$merge_log" ] && tail -c 65536 "$merge_log" 2>/dev/null | grep -q 'backgrounded · ' || continue
+    if uberdev_goal_pr_is_merged "$pr"; then
+      uberdev_goal_pr_state_transition "$GOAL_ID" "$pr" merging merged
+      # B4 — uberdev_goal_list_prs_in_state takes ONE state ($2); call twice
+      # and concatenate so BOTH held sets get the unblock check.
+      for held_pr in $(uberdev_goal_list_prs_in_state "$GOAL_ID" yellow-held; \
+                       uberdev_goal_list_prs_in_state "$GOAL_ID" red-held); do
+        _uberdev_goal_check_unblock "$held_pr"
+      done
+      continue
+    fi
+    # Not merged — a CLOSED-without-merge PR is a hard merge failure.
+    if [ "$(uberdev_goal_pr_state_gh "$pr")" = "CLOSED" ]; then
+      uberdev_goal_audit goal_circuit_breaker \
+        "{\"reason\":\"merge_failed\",\"pr\":$pr,\"detail\":\"closed\"}"
+      print_summary "$cycle"
+      exit 1
+    fi
     result="$(uberdev_goal_read_merge_result "$pr")"
     case "$result" in
       success)
-        uberdev_goal_pr_state_transition "$GOAL_ID" "$pr" merging merged
-        # B4 — uberdev_goal_list_prs_in_state takes ONE state ($2); passing
-        # `yellow-held red-held` made `red-held` a positional no-op and the
-        # red-held PRs silently never got the unblock check. Call twice and
-        # concatenate, mirroring print_summary's pattern below.
-        for held_pr in $(uberdev_goal_list_prs_in_state "$GOAL_ID" yellow-held; \
-                         uberdev_goal_list_prs_in_state "$GOAL_ID" red-held); do
-          _uberdev_goal_check_unblock "$held_pr"
-        done
+        # Audit says success but gh has not flipped to MERGED yet — a brief
+        # write/state race; re-poll next iteration (pr_is_merged is the SSOT).
+        any_active=1
         ;;
       conflict|hook_failed)
         uberdev_goal_audit goal_circuit_breaker \
@@ -378,17 +434,23 @@ while true; do
         exit 1
         ;;
       missing)
-        # /merge hasn't appended an audit row for this PR yet (in-flight or
-        # the merge-bg-stdout marker fired before the audit write hit the
-        # disk). Defer to the next watch iteration — re-poll happens on the
-        # next sleep cycle. Do NOT halt.
+        # /merge agent still in flight, OR stalled. If past MERGE_TIMEOUT with
+        # no live agent, fall back to `green` so step 2c retries (bounded by the
+        # per-PR merge-attempt cap). Otherwise keep waiting.
+        merge_ts="$(awk -v p="$pr" '$1==p && $2=="merging"{t=$3} END{print t+0}' \
+          "$UBERDEV_TMPDIR/goal-$GOAL_ID-pr-states.tsv" 2>/dev/null)"
+        if [ "$(( now - merge_ts ))" -ge "$_UBERDEV_GOAL_MERGE_TIMEOUT" ] \
+           && ! uberdev_goal_agent_busy_for_issue "$pr"; then
+          printf 'goal-pipeline: PR %s merge stalled (%ss, agent idle) -> back to green for retry\n' \
+            "$pr" "$(( now - merge_ts ))" >&2
+          uberdev_goal_pr_state_transition "$GOAL_ID" "$pr" merging green
+        fi
+        any_active=1
         ;;
       *)
-        # B7 — defensive default-case guard. uberdev_goal_read_merge_result
-        # is contracted to return `success|conflict|hook_failed|missing`; any
-        # other value indicates a contract drift (e.g., a future enum member
-        # not threaded through here). Halt loudly rather than fall through
-        # silently, which would leave the PR stuck in `merging` forever.
+        # B7 — defensive default. read_merge_result is contracted to return
+        # success|conflict|hook_failed|missing; any other value is contract
+        # drift — halt loudly rather than leave the PR stuck in `merging`.
         uberdev_goal_audit goal_circuit_breaker \
           "{\"reason\":\"unknown_merge_result\",\"pr\":$pr,\"result\":\"$result\"}"
         print_summary "$cycle"
@@ -398,7 +460,7 @@ while true; do
   done
 
   # 2e. Poll held PRs for re-review completion (RFC 0005 §3.2.3 hold-and-
-  # unblock completion-half; #159). When the unblock rule (step 2c) dispatches
+  # unblock completion-half; #159). When the unblock rule (step 2d) dispatches
   # a `/uberdev:review-pr` for a newly-unblocked PR, that re-review writes a
   # NEW audit JSON under `.uberdev/runs/<new-run-id>/`. Without this poll,
   # the dispatch is fire-and-forget — the held PR never exits the held state
@@ -437,10 +499,10 @@ while true; do
       green)
         uberdev_goal_pr_state_transition "$GOAL_ID" "$held_pr" "$held_current" green
         uberdev_goal_record_held_audit "$GOAL_ID" "$held_pr" "$new_audit"
-        # B1 — keep the watch loop alive for one more iteration so step 2b
+        # B1 — keep the watch loop alive for one more iteration so step 2c
         # (which runs ABOVE step 2e in cycle order) has a chance to pick this
         # freshly-green PR up on the next pass and dispatch /merge. Without
-        # this, the held→green transition is invisible to step 2d's
+        # this, the held→green transition is invisible to step 2f's
         # termination check on the SAME iteration: `any_active` could already
         # be 0 from the active-issues walk, the merging set is empty, and the
         # loop breaks with a near-merged PR that Phase 3 then mis-classifies
@@ -469,7 +531,7 @@ while true; do
     esac
   done
 
-  # 2d. Termination check (intra-cycle)
+  # 2f. Termination check (intra-cycle)
   if [ "$any_active" = "0" ] && \
      [ -z "$(uberdev_goal_list_prs_in_state "$GOAL_ID" merging)" ]; then
     break
@@ -479,7 +541,7 @@ while true; do
 done
 ```
 
-Why polling stdout transcripts instead of the (non-existent) `claude agents status <id>` API: R6 in the implementation plan — the dispatch-backend agent-status API is a known gap, and the `backgrounded · ` marker emitted by every `lib/dispatch.sh` backend's stdout transcript is the only authoritative completion signal. The marker is a stable contract (asserted by the shared test surface), so this is not a fragile screen-scrape — it is the documented backend completion signal.
+Why GitHub + the file-based verdict instead of agent stdout (issue #180): on Claude Code CLI 2.1.150 `claude --bg` detaches in ~4s and writes only a launch banner (`backgrounded · <id>`) to the captured `solve-bg-stdout-N.log` — the agent's real transcript goes to the detached session (`claude logs <id>`). So the old completion probes (`backgrounded · ` as a "terminal" marker; `pushed PR #N`, which has zero producers; `merge-bg-stdout-<pr>.log`, which is never written) could never reflect real state. The version-independent signals are: PR existence/number via `gh pr list --json number,closingIssuesReferences,headRefName` (every solver PR carries a `Closes #N` link and a `feat/N-` head), merge completion via `gh pr view <pr> --json state == MERGED`, and the trust verdict via the existing file-based locator (`uberdev_goal_locate_review_pr_audit_by_pr`) + `uberdev_goal_read_trust_signal`. Solver liveness, used only to distinguish "still working" from "died" (never to gate review-readiness), is `claude agents --json` filtered by cwd + status.
 
 ## Phase 3 — Collect Next Queue
 
@@ -560,10 +622,19 @@ if [ "$gh_rc" -ne 0 ]; then
 fi
 
 # `candidates_json` is already newline-separated raw integers (one number per
-# line) from the F14 filter shape above. Bash mapfile reads each line into the
-# array; empty input yields a 0-element array (the `${#new_candidates[@]}`
-# checks downstream behave identically to the prior map(.number)+jq -r path).
-mapfile -t new_candidates < <(printf '%s' "$candidates_json")
+# line) from the F14 filter shape above. Read each line into the array with a
+# portable while-read loop — NOT `mapfile`, which is bash-4-only and aborts on
+# macOS's default /bin/bash 3.2 (issue #180 defect #8); this mirrors the
+# run-state rehydration loop in lib/goal-state.sh. Empty input yields a
+# 0-element array, so the `${#new_candidates[@]}` checks downstream behave
+# identically. Each line is numeric-gated (the candidates are raw integers from
+# --jq; the gate drops any stray blank or non-integer line defensively).
+new_candidates=()
+while IFS= read -r _cand_line; do
+  [ -n "$_cand_line" ] || continue
+  case "$_cand_line" in ''|*[!0-9]*) continue ;; esac
+  new_candidates+=("$_cand_line")
+done < <(printf '%s' "$candidates_json")
 ```
 
 For each candidate, extract the fingerprint and check for repeat:
@@ -770,4 +841,4 @@ Called from Phase 2 step 2c on every `merging → merged` PR transition, for eac
 
 3. **YELLOW handling: YELLOW PRs are NEVER merged — they are held for re-review.** Standalone `/merge` (with `--accept-critical-deferred`) can land a YELLOW PR; inside `/goal` this is forbidden. The PR-state-machine valid-transitions table in `_uberdev_goal_pr_state_machine_valid` returns non-zero for `yellow-held → merging` (D17); the only way out of `yellow-held` is `→ green` (after a successful `/review-pr` re-review that resolves the CRITICAL findings).
 
-**Backend inheritance (D15).** Backend resolution is performed **once** by Phase 0 via `uberdev_dispatch_preflight`, which sets `UBERDEV_RESOLVED_BACKEND` for the whole run. The Phase 1 `/turbo` dispatch forwards `--backend=$UBERDEV_RESOLVED_BACKEND` explicitly (see the printf at line ~154); the Phase 2 `/merge` and `/review-pr` dispatches in `lib/goal-state.sh::_uberdev_goal_dispatch_{merge,review_pr}` do NOT thread the flag because the child commands do not accept `--backend` — those children re-resolve the backend in their own preflight from the same `UBERDEV_RESOLVED_BACKEND` env var that is exported by Phase 0 and inherited into every spawned shell. Per-cycle re-resolution at the orchestrator level is forbidden — it would let a transient `claude --version` flake mid-run silently swap backends and corrupt the agent-stdout polling contract (every backend emits the `backgrounded · ` marker, but the path conventions for `solve-bg-stdout-N.log` and `merge-bg-stdout-N.log` are backend-specific in a way that must remain stable across cycles). Wiring `--backend` through both downstream commands so the whole pipeline carries the flag explicitly is tracked as a follow-up (out of scope for v1).
+**Backend inheritance (D15).** Backend resolution is performed **once** by Phase 0 via `uberdev_dispatch_preflight`, which sets `UBERDEV_RESOLVED_BACKEND` for the whole run. The Phase 1 `/turbo` dispatch forwards `--backend=$UBERDEV_RESOLVED_BACKEND` explicitly (see the printf at line ~154); the Phase 2 `/merge` and `/review-pr` dispatches in `lib/goal-state.sh::_uberdev_goal_dispatch_{merge,review_pr}` do NOT thread the flag because the child commands do not accept `--backend` — those children re-resolve the backend in their own preflight from the same `UBERDEV_RESOLVED_BACKEND` env var that is exported by Phase 0 and inherited into every spawned shell. Per-cycle re-resolution at the orchestrator level is forbidden — it would let a transient `claude --version` flake mid-run silently swap backends, splitting a single goal's solvers across incompatible dispatch mechanisms. Each backend (`claude-bg` / `wezterm` / `background`) has its own session-management and worktree conventions that must stay stable across cycles so the gh + file detection signals (PR discovery via `closingIssuesReferences`, liveness via `claude agents --json` cwd matching, verdict via the file-based locator — issue #180) resolve consistently for every solver in the run. Wiring `--backend` through both downstream commands so the whole pipeline carries the flag explicitly is tracked as a follow-up (out of scope for v1).
