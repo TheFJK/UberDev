@@ -5,10 +5,13 @@ import argparse, glob, hashlib, json, os, re, sys, yaml
 # Shared report primitives (issue #166, D1): cell()/envelope()/sort_by_rank are
 # the schema-agnostic mechanism, anchored on this file's location (NOT cwd) so
 # the import resolves regardless of where the pipeline is invoked from.
+# sort_by_rank is currently uberscan-only; available for future report consumers.
 # skills/uberscan-pipeline/report.py -> ../../lib/report_primitives.py
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "lib"))
 from report_primitives import cell, envelope, sort_by_rank  # noqa: E402
 
+# Cap on per-file hotspot rows shown in the report and totals.json sidecar.
+HOTSPOT_TOP_N = 15
 SEV_RANK = {"blocker": 4, "critical": 3, "major": 2, "important": 2, "suggestion": 1}
 # Severities eligible for issue filing (suggestion is always report-only).
 # Narrowed further at emit time by --min-severity.
@@ -82,13 +85,21 @@ def severities_at_or_above(floor):
     return {s for s in ISSUE_SEVERITIES if SEV_RANK.get(s, 0) >= floor_rank}
 
 
+def _top_hotspots(hotspots, limit=HOTSPOT_TOP_N):
+    """Deterministic per-file hotspot ordering shared by the report Hotspots
+    section and the totals.json sidecar: count desc, then path asc, capped at
+    `limit` (Item 4 / AC4). Both consumers MUST use this so the report and
+    totals.json never disagree."""
+    return sorted(hotspots.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
+
+
 def _write_totals_sidecar(sidecar_path, run_id, totals, hotspots):
     """Write the machine-readable totals.json sidecar (D6) — the SSOT consumed by
     SKILL.md Phase 4 (incl. the --no-report path). `sidecar_path` is the explicit
     destination; callers pass the path next to --out, or the --emit-totals-json
     value. Hotspots use the same deterministic (count desc, path asc) order and
-    15-entry cap as the report Hotspots section (Item 4 / AC4)."""
-    top = sorted(hotspots.items(), key=lambda kv: (-kv[1], kv[0]))[:15]
+    cap as the report Hotspots section (Item 4 / AC4)."""
+    top = _top_hotspots(hotspots)
     try:
         with open(sidecar_path, "w") as fh:
             json.dump({
@@ -116,17 +127,19 @@ def _global_rows(allowed, sec, cov):
     once by the caller — D6 read-once consistency). The raw artifact text rides in
     `detail` and is neutralized by cell() at render time (D7 — multi-line collapse
     + close-tag neutralization)."""
+    # Ordered (text, agent, summary) table — security row MUST stay before the
+    # coverage row (golden aggregate order). Each row is emitted only when its
+    # artifact text is non-empty AND `important` is in the allowed set.
+    specs = (
+        (sec, "research-security", "Semgrep SAST findings (see report Global passes)"),
+        (cov, "research-test-coverage", "Test-coverage gaps (see report Global passes)"),
+    )
     rows = []
-    if sec and "important" in allowed:
-        rows.append({"severity": "important", "location": "repo:global",
-                     "agent": "research-security",
-                     "summary": "Semgrep SAST findings (see report Global passes)",
-                     "detail": sec})
-    if cov and "important" in allowed:
-        rows.append({"severity": "important", "location": "repo:global",
-                     "agent": "research-test-coverage",
-                     "summary": "Test-coverage gaps (see report Global passes)",
-                     "detail": cov})
+    if "important" in allowed:
+        for text, agent, summary in specs:
+            if text:
+                rows.append({"severity": "important", "location": "repo:global",
+                             "agent": agent, "summary": summary, "detail": text})
     return rows
 
 
@@ -183,7 +196,7 @@ def main():
                 fh.write(f"- {sev}: {totals[sev]}\n")
             fh.write("\n## Hotspots\n")
             # deterministic hotspot order: count desc, then path asc (Item 4 / AC4)
-            for path, n in sorted(hotspots.items(), key=lambda kv: (-kv[1], kv[0]))[:15]:
+            for path, n in _top_hotspots(hotspots):
                 fh.write(f"- {path} — {n}\n")
             # Phase 1b repo-global passes (Semgrep SAST + test-coverage), if produced.
             if global_sec or global_cov:

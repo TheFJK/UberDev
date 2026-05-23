@@ -73,6 +73,8 @@ def sort_by_rank(
 ) -> list[dict]:
     """Sort rows by descending rank, then by the given tiebreaker fields ascending.
 
+    Note: currently uberscan-only; available for future report consumers.
+
     rank_map: caller-owned severity->int map (uberscan and testers differ — D2;
               the policy stays pipeline-local, only the mechanism is shared).
     rank_key: callable(row) -> the key looked up in rank_map (e.g. row severity).
