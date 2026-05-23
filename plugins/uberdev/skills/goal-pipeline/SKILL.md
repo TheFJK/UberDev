@@ -38,11 +38,11 @@ BLOCKS_LINE_REGEX='^Blocks: #([0-9]+)$'
 Notes on the enums:
 
 - **`GOAL_AUDIT_EVENT_ENUM`** — the 6 events `lib/goal-state.sh::uberdev_goal_audit` accepts. Any other event name returns non-zero from the helper and is dropped on the floor; consumers grep these literals.
-- **`GOAL_CIRCUIT_BREAKER_REASONS`** — the 7 halt reasons emitted by Phase 2/3/4 inside the `goal_circuit_breaker` payload's `.reason` field. The four original reasons (`max_cycles`, `nonconvergence`, `stuck_loop`, `merge_failed`); two surfaced-failure reasons added during post-impl-review (`gh_api_failed` — Phase 3 `gh issue list` rc!=0 instead of falsely treating an empty candidates list as convergence; `unknown_merge_result` — Phase 2c case default arm for a `uberdev_goal_read_merge_result` value outside the documented `success|conflict|hook_failed|missing` set); and `queue_empty_not_converged` — Phase 3 deterministic halt when the candidate queue is empty but at least one PR is still in a non-terminal state (issue #160; deterministic alternative to the 4h `stuck_loop` wall-clock fallback). The set is closed; new reasons require an RFC amendment.
+- **`GOAL_CIRCUIT_BREAKER_REASONS`** — the 7 halt reasons emitted by Phase 2/3/4 inside the `goal_circuit_breaker` payload's `.reason` field. The four original reasons (`max_cycles`, `nonconvergence`, `stuck_loop`, `merge_failed`); two surfaced-failure reasons added during post-impl-review (`gh_api_failed` — Phase 3 `gh issue list` rc!=0 instead of falsely treating an empty candidates list as convergence; `unknown_merge_result` — Phase 2d case default arm for a `uberdev_goal_read_merge_result` value outside the documented `success|conflict|hook_failed|missing` set); and `queue_empty_not_converged` — Phase 3 deterministic halt when the candidate queue is empty but at least one PR is still in a non-terminal state (issue #160; deterministic alternative to the 4h `stuck_loop` wall-clock fallback). The set is closed; new reasons require an RFC amendment.
 - **`GOAL_PR_STATE_ENUM`** — the 8 states the PR machine in `_uberdev_goal_pr_state_machine_valid` recognises. `merged` and `merge-failed` are hard terminal (no further transitions); `yellow-held` and `red-held` are pseudo-terminal for convergence (Phase 3 counts them as terminal so the goal can converge cleanly with held PRs remaining, but the held-PR re-review poll loop in Phase 2 step 2e can still arc them to `green` once a re-review clears the findings, or cross-classify between `yellow-held`/`red-held` if a re-review's trust signal severity changed). `yellow-held → merging` and `red-held → merging` are hard-forbidden (D17 — never merge YELLOW/RED inside `/goal`).
 - **`GOAL_ISSUE_STATE_ENUM`** — the 5 states the issue machine recognises; `pr-pushed → resolved` and the two `→ failed` transitions are the only sinks.
 - **`TRUST_SIGNAL_ENUM`** — the 5 values `uberdev_goal_read_trust_signal` returns. `stale` (phase2_5 missing in audit JSON) and `missing` (audit JSON absent) both trigger `_uberdev_goal_dispatch_review_pr` rather than an assumed GREEN (D17).
-- **`GOAL_MERGE_RESULT_ENUM`** — the 4 values `uberdev_goal_read_merge_result` returns. Maps the merge-pipeline's audit-row events (`merge_executed` for `success`, `pr_parked` with `data.reason ∈ {refused, ambiguous, push-non-ff}` for `conflict`, `pr_parked` with `data.reason == test-fail-exhausted` for `hook_failed`) plus a sentinel `missing` for "no audit row appended yet". Phase 2c's case statement handles each value explicitly; the `*)` default arm emits `goal_circuit_breaker reason=unknown_merge_result` (B7 — defensive guard against future enum drift).
+- **`GOAL_MERGE_RESULT_ENUM`** — the 4 values `uberdev_goal_read_merge_result` returns. Maps the merge-pipeline's audit-row events (`merge_executed` for `success`, `pr_parked` with `data.reason ∈ {refused, ambiguous, push-non-ff}` for `conflict`, `pr_parked` with `data.reason == test-fail-exhausted` for `hook_failed`) plus a sentinel `missing` for "no audit row appended yet". Phase 2d's case statement handles each value explicitly; the `*)` default arm emits `goal_circuit_breaker reason=unknown_merge_result` (B7 — defensive guard against future enum drift).
 - **`BLOCKS_LINE_REGEX`** is the anchored ReDoS-safe shape (D9 + T1) used by `_uberdev_goal_parse_blocks_line` in `lib/goal-state.sh`. The Phase 3 prose and the Unblock rule both reference this constant by name; the literal `^Blocks: #([0-9]+)$` appears here once.
 - **`FINDING_FINGERPRINT_REGEX`** is the marker shape `agents/findings-to-issues.md` injects into every BLOCKER/CRITICAL `review-pr-finding` issue body; Phase 3 extracts it via `_uberdev_goal_extract_fingerprint` to drive the repeat-cycle detector.
 
@@ -127,7 +127,7 @@ Notes on the enums:
    uberdev_goal_state_init "$GOAL_ID" || exit 1
    ```
 
-7. **Initialize cycle counter + goal-level wall-clock anchor.** `cycle` is the per-cycle counter referenced by Phase 2/3/4 (audit payloads, MAX_CYCLES check, fingerprint repeat detector). `watch_start` is the **goal-level** wall-clock anchor — it must persist across cycle iterations so the 4h stuck-loop circuit breaker (`_UBERDEV_GOAL_STUCK_SECS`) measures total goal wall-clock, not per-cycle wall-clock (RFC §3.3 intent: the 4h cap is the goal-level safety net). `overflow_count` and `overflow_detected` are **per-cycle** accumulators set in Phase 2a and reset at the end of Phase 3 (so the `goal_cycle_completed` payload only reports overflows from the current cycle).
+7. **Initialize cycle counter + goal-level wall-clock anchor.** `cycle` is the per-cycle counter referenced by Phase 2/3/4 (audit payloads, MAX_CYCLES check, fingerprint repeat detector). `watch_start` is the **goal-level** wall-clock anchor — it must persist across cycle iterations so the 4h stuck-loop circuit breaker (`_UBERDEV_GOAL_STUCK_SECS`) measures total goal wall-clock, not per-cycle wall-clock (RFC §3.3 intent: the 4h cap is the goal-level safety net). `overflow_count` and `overflow_detected` are **per-cycle** accumulators set in Phase 2b (the red trust-signal case) and reset at the end of Phase 3 (so the `goal_cycle_completed` payload only reports overflows from the current cycle).
 
    ```bash
    cycle=1
@@ -236,7 +236,7 @@ uberdev_goal_write_run_state || { echo "goal: failed to persist run-state after 
 
 ## Phase 2 — Watch (per cycle, hard cap 4h wall-clock)
 
-**Concurrency model.** Phase 2 runs as a **single-threaded watcher** per iteration: each `sleep $_UBERDEV_GOAL_POLL_SECS` cycle walks the active-issues list once (step 2a), the green-PR list once (step 2b), and the merging-PR list once (step 2c) in deterministic order — a serial poll of every PR, never a fan-out. There is **no per-PR poll parallelism in v1** — the audit timeline (`goal_pr_transition` events in `goal-<id>.jsonl`) must remain a serial, replay-deterministic sequence for post-mortems and for the fingerprint-repeat detector in Phase 3. Per-PR poll parallelism is deferred to a future RFC (it would require an event-bus partition by PR number and a multi-writer audit framing that preserves a total order; neither lands in v1).
+**Concurrency model.** Phase 2 runs as a **single-threaded watcher** per iteration: each `sleep $_UBERDEV_GOAL_POLL_SECS` cycle walks the active-issues list once (step 2a — gh PR detection), the pushed-reviewing PR list once (step 2b — graced verdict read), the green-PR list once (step 2c — /merge dispatch), the merging-PR list once (step 2d — gh merge completion), and the held-PR list once (step 2e — re-review poll) in deterministic order — a serial poll of every PR, never a fan-out. There is **no per-PR poll parallelism in v1** — the audit timeline (`goal_pr_transition` events in `goal-<id>.jsonl`) must remain a serial, replay-deterministic sequence for post-mortems and for the fingerprint-repeat detector in Phase 3. Per-PR poll parallelism is deferred to a future RFC (it would require an event-bus partition by PR number and a multi-writer audit framing that preserves a total order; neither lands in v1).
 
 ```bash
 # #171 fresh-shell rehydration — re-source libs (idempotent via _UBERDEV_*_LOADED
@@ -403,7 +403,15 @@ while true; do
   # a hard merge_failed; `missing` defers (re-poll) with a MERGE_TIMEOUT
   # fallback to `green` when the merge agent stalled.
   for pr in $(uberdev_goal_list_prs_in_state "$GOAL_ID" merging); do
-    if uberdev_goal_pr_is_merged "$pr"; then
+    # Read gh state ONCE per PR per poll and branch on it locally — the MERGED
+    # gate and the CLOSED gate previously called uberdev_goal_pr_state_gh twice
+    # (once via pr_is_merged), a redundant `gh pr view` round-trip every poll
+    # while a /merge agent runs. Folding to one read cuts the steady-state merge
+    # poll cost and the gh-failure breadcrumb noise in half (the rate-limit
+    # exhaustion this loop is sensitive to). Behavior is identical: same MERGED /
+    # CLOSED / else branch decisions.
+    pr_state="$(uberdev_goal_pr_state_gh "$pr")"
+    if [ "$pr_state" = "MERGED" ]; then
       uberdev_goal_pr_state_transition "$GOAL_ID" "$pr" merging merged
       # B4 — uberdev_goal_list_prs_in_state takes ONE state ($2); call twice
       # and concatenate so BOTH held sets get the unblock check.
@@ -414,7 +422,7 @@ while true; do
       continue
     fi
     # Not merged — a CLOSED-without-merge PR is a hard merge failure.
-    if [ "$(uberdev_goal_pr_state_gh "$pr")" = "CLOSED" ]; then
+    if [ "$pr_state" = "CLOSED" ]; then
       uberdev_goal_audit goal_circuit_breaker \
         "{\"reason\":\"merge_failed\",\"pr\":$pr,\"detail\":\"closed\"}"
       print_summary "$cycle"
@@ -741,9 +749,9 @@ uberdev_goal_write_run_state || { echo "goal: failed to persist run-state before
 # loop back to Phase 1
 ```
 
-**Blocker-overflow handler (D13).** When the upstream `/review-pr` run halted with too many BLOCKER findings (more than the file-issues cap), its audit JSON carries `halted_due_to_overflow: true` at the top level. **Detection lives in Phase 2a** (red signal case) where `$audit_json` and `$pr_num` are in scope; it sets `overflow_detected=1`. Phase 3's truncation step then:
+**Blocker-overflow handler (D13).** When the upstream `/review-pr` run halted with too many BLOCKER findings (more than the file-issues cap), its audit JSON carries `halted_due_to_overflow: true` at the top level. **Detection lives in Phase 2b** (red signal case) where `$audit_json` and `$pr_num` are in scope; it sets `overflow_detected=1`. Phase 3's truncation step then:
 
-- (Phase 2a already transitioned the PR to `red-held` for the red trust signal — overflow is functionally identical to RED, so the transition is shared);
+- (Phase 2b already transitioned the PR to `red-held` for the red trust signal — overflow is functionally identical to RED, so the transition is shared);
 - queues only the first 10 candidate issues for the next cycle (the upstream agent already truncated the issue-file list at the cap; the queue cap mirrors that ceiling);
 - surfaces the overflow count in the `goal_cycle_completed` summary `{overflow_count: N}`;
 - **does NOT halt the entire goal** — `halted_due_to_overflow` is a per-PR cycle-management signal, not a goal-level circuit breaker. The goal continues to its next cycle and may converge once the overflow PR's issues are resolved.
@@ -757,9 +765,9 @@ uberdev_goal_write_run_state || { echo "goal: failed to persist run-state before
 GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
 uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 3 (overflow check)" >&2; exit 3; }
 uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
-# overflow_detected is set in Phase 2a's red case when any PR's /review-pr
+# overflow_detected is set in Phase 2b's red case when any PR's /review-pr
 # audit JSON carried halted_due_to_overflow:true. Here in Phase 3 we apply
-# the first-10 truncation (no PR transition — Phase 2a already did that).
+# the first-10 truncation (no PR transition — Phase 2b already did that).
 if [ "${overflow_detected:-0}" = "1" ]; then
   new_candidates=("${new_candidates[@]:0:10}")
   # surfaced in cycle summary; goal continues — do NOT halt.
@@ -779,7 +787,7 @@ Every exit path from this skill emits exactly one terminal audit event AND print
 | Non-convergence | `goal_circuit_breaker` with `reason=nonconvergence` | 1 | Fingerprint repeat detected by `uberdev_goal_check_fingerprint_repeat` (Phase 3 per-candidate loop). |
 | Queue-empty-not-converged | `goal_circuit_breaker` with `reason=queue_empty_not_converged` | 1 | `new_candidates` empty AND at least one PR still in a non-terminal in-flight state (`dispatched`, `pushed-reviewing`, `green`, `merging`) — deterministic Phase 3 halt that pre-empts the 4h `stuck_loop` fallback (#160). |
 | Stuck-loop | `goal_circuit_breaker` with `reason=stuck_loop` | 1 | `watch_secs >= _UBERDEV_GOAL_STUCK_SECS` (4h) at top of Phase 2 iteration. |
-| Merge-failed | `goal_circuit_breaker` with `reason=merge_failed` | 1 | `/merge` returned `conflict` or `hook_failed` (Phase 2 step 2c). |
+| Merge-failed | `goal_circuit_breaker` with `reason=merge_failed` | 1 | `/merge` returned `conflict` or `hook_failed`, or the PR was CLOSED without merging (Phase 2 step 2d). |
 
 **Human-readable summary line.** Print to stdout (NOT stderr — this is the operator's success-or-failure narrative) before exit:
 
@@ -825,7 +833,7 @@ print_summary() {
 
 ## Unblock rule
 
-Called from Phase 2 step 2c on every `merging → merged` PR transition, for each PR currently in `yellow-held` or `red-held`. The body of the rule is implemented by `lib/goal-state.sh::_uberdev_goal_check_unblock`; the 5-step contract:
+Called from Phase 2 step 2d on every `merging → merged` PR transition, for each PR currently in `yellow-held` or `red-held`. The body of the rule is implemented by `lib/goal-state.sh::_uberdev_goal_check_unblock`; the 5-step contract:
 
 1. **Fetch held PR body.** `gh pr view $held_pr --json body --jq '.body'`, capped at `_UBERDEV_GOAL_BODY_CAP` (64 KiB) via `head -c` to bound the regex-parse cost (R1 / T1 — without the cap, a 10 MB PR body could ReDoS the parse loop or starve memory).
 2. **Line-split and match against `BLOCKS_LINE_REGEX`.** Each line is fed to bash `[[ =~ ]]` against the anchored shape `^Blocks: #([0-9]+)$` — anchored, no quantifiers under user control, ReDoS-safe (D9 + T1). Non-matching lines are skipped silently (a held PR body need not contain a Blocks line — in which case nothing is unblocked).
@@ -833,13 +841,13 @@ Called from Phase 2 step 2c on every `merging → merged` PR transition, for eac
 4. **If all blocking issues are CLOSED, re-dispatch `/uberdev:review-pr $held_pr`** via `_uberdev_goal_dispatch_review_pr` (D18 full re-review — including Phase 3 CI Health re-evaluation; the no-shortcut path is mandatory because the upstream merge that triggered this unblock may have changed CI dependencies). If any blocking issue is still OPEN, do nothing this iteration; the unblock check will re-run on the next merged-PR transition.
 5. **Emit `goal_unblock_triggered` event** with payload `{pr, blocking_issues: […]}`. This event is the durable record that the unblock fired; consumers can replay it from `goal-<id>.jsonl` to reconstruct the held-PR DAG.
 
-**Completion half (Phase 2 step 2e — #159).** The unblock rule's `/review-pr` dispatch in step 4 is fire-and-forget; it is **Phase 2 step 2e**, the held-PR re-review poll, that closes the loop. On every Phase 2 iteration, step 2e walks every PR currently in `yellow-held` / `red-held`, compares the live latest audit (`uberdev_goal_locate_review_pr_audit_by_pr`) against the previously-consumed audit (`uberdev_goal_get_last_held_audit`), and — when they differ — applies the next state transition based on the new audit's trust signal: `green → green` (eligible for merge in next cycle's step 2b), severity-flip → `{yellow,red}-held → {red,yellow}-held` re-classification, or same-severity → no transition. Without step 2e, the dispatch in step 4 had no consumer, and the held PR was permanently orphaned (the bug issue #159 captured).
+**Completion half (Phase 2 step 2e — #159).** The unblock rule's `/review-pr` dispatch in step 4 is fire-and-forget; it is **Phase 2 step 2e**, the held-PR re-review poll, that closes the loop. On every Phase 2 iteration, step 2e walks every PR currently in `yellow-held` / `red-held`, compares the live latest audit (`uberdev_goal_locate_review_pr_audit_by_pr`) against the previously-consumed audit (`uberdev_goal_get_last_held_audit`), and — when they differ — applies the next state transition based on the new audit's trust signal: `green → green` (eligible for merge in next cycle's step 2c), severity-flip → `{yellow,red}-held → {red,yellow}-held` re-classification, or same-severity → no transition. Without step 2e, the dispatch in step 4 had no consumer, and the held PR was permanently orphaned (the bug issue #159 captured).
 
 ## Scoped relaxations
 
 `/goal` is the one place in UberDev where three otherwise-strict /uberdev conventions are deliberately relaxed (RFC §2.3). Every relaxation is scoped to `/goal` only — the relaxed behaviour does NOT leak to standalone `/turbo`, `/merge`, or `/review-pr` invocations.
 
-1. **`feedback_merge_independent`: `/merge` auto-chain allowed inside `/goal`.** The global rule "merge is a deliberate user-invoked command" still holds for standalone use. Inside `/goal`, Phase 2 step 2b auto-dispatches `/merge` for any PR that transitions to `green`, subject to:
+1. **`feedback_merge_independent`: `/merge` auto-chain allowed inside `/goal`.** The global rule "merge is a deliberate user-invoked command" still holds for standalone use. Inside `/goal`, Phase 2 step 2c auto-dispatches `/merge` for any PR that transitions to `green`, subject to:
    - `uberdev_goal_should_automerge` provenance check (UBERDEV_GOAL_ID env-var must be set — outside `/goal` it isn't, so the auto-merge refuses);
    - per-PR attempt counter cap (`_UBERDEV_GOAL_MAX_MERGE_ATTEMPTS=3` — after 3 attempts the same PR is held for human inspection);
    - YELLOW/RED PRs are NEVER auto-merged (D17 forbidden transitions).
