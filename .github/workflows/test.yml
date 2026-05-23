@@ -65,6 +65,7 @@ jobs:
           bash tests/dispatch-wezterm.test.sh && \
           bash tests/ubersimplify.test.sh && \
           bash tests/ubersimplify-aggregate.test.sh && \
+          bash tests/goal-state-sidecar.test.sh && \
           bash tests/goal.test.sh
 
   shape-checks-windows:
@@ -123,4 +124,5 @@ jobs:
           bash tests/dispatch-wezterm.test.sh && \
           bash tests/ubersimplify.test.sh && \
           bash tests/ubersimplify-aggregate.test.sh && \
+          bash tests/goal-state-sidecar.test.sh && \
           bash tests/goal.test.sh

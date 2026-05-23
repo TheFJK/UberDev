@@ -79,6 +79,21 @@ RUN_ID="$(date +%Y%m%d-%H%M%S)-$(printf '%04x' $RANDOM)"
 RUN_DIR=".uberdev/simplify/$RUN_ID"
 mkdir -p "$RUN_DIR"
 
+# #171 — persist RUN_ID pointer for fresh-shell RUN_DIR reconstruction.
+if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh" ]; then
+  . "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh"
+  UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  _simp_ptr="$UBERDEV_TMPDIR/ubersimplify-active-id.txt"
+  if _uberdev_dispatch_prepare_tmp_target "$_simp_ptr" 0 "ubersimplify"; then
+    # Warn (not silent) if the write fails — the pointer is best-effort
+    # (a missing one degrades to in-session RUN_ID), but a silent failure here
+    # was the gap a fresh-shell block can't diagnose. A partial/corrupt write is
+    # caught fail-closed by the re-read's `case` validator downstream.
+    printf '%s\n' "$RUN_ID" > "$_simp_ptr" \
+      || echo "ubersimplify: warning: failed to persist RUN_ID pointer; cross-shell RUN_DIR recovery may fail" >&2
+  fi
+fi
+
 # Anchor an absolute working dir up front: code-fixer and findings-to-issues both
 # REQUIRE an absolute working_dir inside the worktree (they refuse with
 # input-malformed otherwise). Resolve once and reuse everywhere.
@@ -185,6 +200,14 @@ echo "[ubersimplify] run_id=$RUN_ID scope=$SCOPE chunks=$EMITTED_CHUNKS concurre
 Each chunk receives a **file-set audit brief**: the agents audit EXISTING files as they stand in the repo (not a diff). Per chunk the orchestrating session fires **3** `Task()` calls IN ONE MESSAGE — one per lens (`Reuse`, `Quality`, `Efficiency`), each `subagent_type: uberdev:code-simplifier`. If `LENS_SUBSET` is set, dispatch only the named lenses for every chunk (e.g. `--lens=Reuse,Quality` → 2 Tasks/chunk; recompute the per-chunk fleet size accordingly).
 
 ```bash
+# #171 — rehydrate RUN_ID/RUN_DIR in a fresh shell.
+UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/ubersimplify-active-id.txt" ]; then
+  RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/ubersimplify-active-id.txt")"
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "ubersimplify: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  RUN_DIR=".uberdev/simplify/$RUN_ID"
+fi
+
 # Read chunk list from manifest
 CHUNK_IDS="$(jq -r '.chunks[].id' "$RUN_DIR/manifest.json")"
 TOTAL_EMITTED="$(jq '.chunks | length' "$RUN_DIR/manifest.json")"
@@ -352,6 +375,14 @@ After each wave completes (all lens Tasks for the wave's chunks have returned), 
 For each `chunk-NNN-lens.yaml`, produce the per-chunk `code-fixer` input by deduping the lens findings across lenses by `file:line` (merged `lens` becomes `Reuse+Quality`, severity = max, summary/detail lens-prefixed). The output is wrapped in the `post-impl-review-aggregate` envelope `code-fixer` validates.
 
 ```bash
+# #171 — rehydrate RUN_ID/RUN_DIR in a fresh shell.
+UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/ubersimplify-active-id.txt" ]; then
+  RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/ubersimplify-active-id.txt")"
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "ubersimplify: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  RUN_DIR=".uberdev/simplify/$RUN_ID"
+fi
+
 # Per-chunk fixer aggregate (the code-fixer input for Phase 3).
 for LENS_FILE in "$RUN_DIR"/chunk-*-lens.yaml; do
   [ -e "$LENS_FILE" ] || continue
@@ -405,6 +436,14 @@ fi
 Skipped entirely under `--audit-only` (read-only mode). Otherwise a new branch is cut from the current branch, then a `code-fixer` Task is dispatched **one chunk at a time** — concurrent apply Tasks would race the git index (two `git add`/`git commit` in flight corrupt the staging area). Each `code-fixer` produces exactly one `refactor:` commit (Phase 2 single-commit invariant, R8.6).
 
 ```bash
+# #171 — rehydrate RUN_ID/RUN_DIR in a fresh shell.
+UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/ubersimplify-active-id.txt" ]; then
+  RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/ubersimplify-active-id.txt")"
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "ubersimplify: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  RUN_DIR=".uberdev/simplify/$RUN_ID"
+fi
+
 if [ "$AUDIT_ONLY" = "1" ]; then
   echo "[ubersimplify] --audit-only: skipping branch + apply (Phases 3-4)"
   BRANCH=""
@@ -449,6 +488,14 @@ fi
 ## Phase 4 — Push + ONE gh pr create (skip iff --audit-only or 0 commits)
 
 ```bash
+# #171 — rehydrate RUN_ID/RUN_DIR in a fresh shell.
+UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/ubersimplify-active-id.txt" ]; then
+  RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/ubersimplify-active-id.txt")"
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "ubersimplify: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  RUN_DIR=".uberdev/simplify/$RUN_ID"
+fi
+
 if [ "$AUDIT_ONLY" = "1" ]; then
   echo "[ubersimplify] --audit-only: no push/PR"
 elif [ "${COMMIT_COUNT:-0}" -eq 0 ]; then
@@ -506,6 +553,14 @@ fi
 Collect the fileable (`blocker`-tier) lens findings that `code-fixer` did NOT apply, wrap them in the `ubersimplify-aggregate` envelope, and hand them to `findings-to-issues`. Under `--audit-only` no apply phase ran, so every fileable finding is treated as deferred.
 
 ```bash
+# #171 — rehydrate RUN_ID/RUN_DIR in a fresh shell.
+UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/ubersimplify-active-id.txt" ]; then
+  RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/ubersimplify-active-id.txt")"
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "ubersimplify: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  RUN_DIR=".uberdev/simplify/$RUN_ID"
+fi
+
 if [ "$NO_ISSUES" != "1" ]; then
   # Build the leftover-issues aggregate. --audit-only -> every fileable finding is
   # deferred (no disposition files exist); otherwise APPLIED locations are subtracted.
@@ -593,6 +648,14 @@ fi
 ## Phase 6 — Summary + exit
 
 ```bash
+# #171 — rehydrate RUN_ID/RUN_DIR in a fresh shell.
+UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/ubersimplify-active-id.txt" ]; then
+  RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/ubersimplify-active-id.txt")"
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "ubersimplify: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  RUN_DIR=".uberdev/simplify/$RUN_ID"
+fi
+
 # Severity totals across all chunk lens files.
 _ubersimplify_sev_total() {
   local sev="$1"

@@ -19,6 +19,9 @@
 #   uberdev_goal_extract_pr_num_from_log       STDOUT_LOG_PATH
 #   uberdev_goal_list_prs_in_state             GOAL_ID STATE
 #   uberdev_goal_read_merge_result             PR_NUM
+#   uberdev_goal_write_run_state               (env-driven)
+#   uberdev_goal_read_run_state                (env-driven)
+#   uberdev_goal_cleanup_run_state             (env-driven)
 # Internal:
 #   _uberdev_goal_validate_int             N
 #   _uberdev_goal_validate_id              GOAL_ID
@@ -820,4 +823,175 @@ _uberdev_goal_check_unblock() {
     uberdev_goal_audit goal_unblock_triggered \
       "{\"pr\":$held_pr,\"blocking_issues\":[$blocking_csv]}"
   fi
+}
+
+# ---------------------------------------------------------------------------
+# Run-state sidecar (issue #171): persist the GOAL_ID pointer + loop
+# accumulators so they survive fresh-shell Bash boundaries. KEY=value text,
+# written atomically via the #155 TOCTOU-safe helper. The reader parses +
+# per-field-validates the sidecar — it is never sourced or executed as code;
+# NEVER mapfile (bash-3.2/zsh portability).
+# ---------------------------------------------------------------------------
+
+# uberdev_goal_write_run_state
+#   Reads GOAL_ID, cycle, watch_start, overflow_count, overflow_detected,
+#   MAX_CYCLES, UBERDEV_RESOLVED_BACKEND, and the queue/active_issues arrays
+#   from the caller's shell; persists them to predictable, GOAL_ID-keyed
+#   sidecars under $UBERDEV_TMPDIR, plus a fixed-path goal-active-id.txt pointer
+#   so a fresh shell (no GOAL_ID in env/scalar) can discover the active GOAL_ID.
+#   Returns 0 on success, 1 if GOAL_ID is invalid, 3 (fail-CLOSED) if
+#   _uberdev_dispatch_prepare_tmp_target rejects a target or a sidecar write fails.
+uberdev_goal_write_run_state() {
+  _uberdev_goal_validate_id "${GOAL_ID:-}" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  local sc="$tmpdir/goal-$GOAL_ID-runstate"   # NO .env extension
+
+  # Scalar sidecar: prepare predictable target (symlink-reject + EUID-owner
+  # check + 0600-create under set -C), write temp sibling, atomic mv.
+  _uberdev_dispatch_prepare_tmp_target "$sc" 0 "goal" || return 3
+  local tmp _filtered aid
+  tmp="$(mktemp "${sc}.XXXXXXXX")" || return 3
+  printf 'GOAL_ID=%s\ncycle=%s\nwatch_start=%s\noverflow_count=%s\noverflow_detected=%s\nMAX_CYCLES=%s\nUBERDEV_RESOLVED_BACKEND=%s\n' \
+    "$GOAL_ID" "${cycle:-0}" "${watch_start:-0}" "${overflow_count:-0}" \
+    "${overflow_detected:-0}" "${MAX_CYCLES:-0}" "${UBERDEV_RESOLVED_BACKEND:-}" > "$tmp"
+  mv -f "$tmp" "$sc" || { rm -f "$tmp"; return 3; }
+
+  # Array sidecars: one int per line, no IFS-mutating joins. Capture first
+  # (command substitution strips trailing newlines, and `grep || true` absorbs
+  # rc=1 on an empty array — a no-match, not an error), then write fail-CLOSED
+  # so a real redirect failure (e.g. ENOSPC) cannot silently truncate the file.
+  # `printf '%s\n'` re-adds the trailing newline so the final element survives
+  # the read-back loop.
+  _uberdev_dispatch_prepare_tmp_target "${sc}.queue" 0 "goal" || return 3
+  tmp="$(mktemp "${sc}.queue.XXXXXXXX")" || return 3
+  _filtered="$(printf '%s\n' "${queue[@]:-}" | grep -E '^[0-9]+$' || true)"
+  if [ -n "$_filtered" ]; then
+    printf '%s\n' "$_filtered" > "$tmp" || { rm -f "$tmp"; return 3; }
+  else
+    : > "$tmp" || { rm -f "$tmp"; return 3; }
+  fi
+  mv -f "$tmp" "${sc}.queue" || { rm -f "$tmp"; return 3; }
+
+  _uberdev_dispatch_prepare_tmp_target "${sc}.active" 0 "goal" || return 3
+  tmp="$(mktemp "${sc}.active.XXXXXXXX")" || return 3
+  _filtered="$(printf '%s\n' "${active_issues[@]:-}" | grep -E '^[0-9]+$' || true)"
+  if [ -n "$_filtered" ]; then
+    printf '%s\n' "$_filtered" > "$tmp" || { rm -f "$tmp"; return 3; }
+  else
+    : > "$tmp" || { rm -f "$tmp"; return 3; }
+  fi
+  mv -f "$tmp" "${sc}.active" || { rm -f "$tmp"; return 3; }
+
+  # Fixed-path pointer (issue #171 bootstrap): a fresh shell has no GOAL_ID in
+  # env/scalar, so it cannot name the keyed sidecar above. Publish the active
+  # GOAL_ID to a well-known path LAST — after the keyed data exists — so a
+  # reader that discovers the pointer always finds complete keyed state. One
+  # active /goal per $UBERDEV_TMPDIR is assumed (matches the run-state model).
+  aid="$tmpdir/goal-active-id.txt"
+  _uberdev_dispatch_prepare_tmp_target "$aid" 0 "goal" || return 3
+  tmp="$(mktemp "${aid}.XXXXXXXX")" || return 3
+  printf '%s\n' "$GOAL_ID" > "$tmp" || { rm -f "$tmp"; return 3; }
+  mv -f "$tmp" "$aid" || { rm -f "$tmp"; return 3; }
+  return 0
+}
+
+# uberdev_goal_read_run_state
+#   Reads + per-field-validates the sidecar; never sources or executes it. If the
+#   caller's GOAL_ID is empty/invalid (a fresh shell — env + scalars evaporate
+#   across Bash calls, issue #171), it is bootstrapped from the fixed-path
+#   goal-active-id.txt pointer (content gated through _uberdev_goal_validate_id).
+#   On success: sets the GOAL_ID, cycle, watch_start, overflow_count,
+#   overflow_detected, MAX_CYCLES, UBERDEV_RESOLVED_BACKEND scalars, rehydrates
+#   the queue/active_issues arrays, and EXPORTS UBERDEV_GOAL_ID + UBERDEV_TMPDIR
+#   (the env vars the uberdev_goal_* helpers + bare $UBERDEV_TMPDIR/... paths in
+#   the pipeline body depend on — see the export block at the function's end).
+#   Returns 0 on success; 1 if missing/unreadable. Invalid fields are skipped
+#   (not assigned a garbage value); a forged GOAL_ID is rejected and never
+#   interpolated into a path.
+uberdev_goal_read_run_state() {
+  local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  local _aid=""
+  # Bootstrap (issue #171): a fresh shell has no GOAL_ID — env vars and shell
+  # scalars do not survive across Bash calls. Recover it from the fixed-path
+  # active-id pointer so the keyed sidecar can be located. The pointer's content
+  # is untrusted: gate it through _uberdev_goal_validate_id (path-traversal)
+  # before assigning, exactly as for the sidecar's stored GOAL_ID.
+  if ! _uberdev_goal_validate_id "${GOAL_ID:-}"; then
+    [ -r "$tmpdir/goal-active-id.txt" ] && _aid="$(head -n1 "$tmpdir/goal-active-id.txt" 2>/dev/null)"
+    _uberdev_goal_validate_id "${_aid:-}" && GOAL_ID="$_aid"
+  fi
+  _uberdev_goal_validate_id "${GOAL_ID:-}" || { echo "goal: no valid GOAL_ID (env/scalar empty; active-id pointer missing or invalid)" >&2; return 1; }
+  local sc="$tmpdir/goal-$GOAL_ID-runstate"
+  [ -r "$sc" ] || { echo "goal: missing run-state sidecar ($sc)" >&2; return 1; }
+
+  local k v
+  while IFS='=' read -r k v; do
+    case "$k" in
+      GOAL_ID)
+        # Load-bearing: a substituted sidecar GOAL_ID with / or .. is a
+        # path-traversal vector. Gate BEFORE any later path interpolation.
+        _uberdev_goal_validate_id "$v" && GOAL_ID="$v" ;;
+      cycle)             _uberdev_goal_validate_int "$v" && cycle="$v" ;;
+      watch_start)       _uberdev_goal_validate_int "$v" && watch_start="$v" ;;
+      overflow_count)    _uberdev_goal_validate_int "$v" && overflow_count="$v" ;;
+      overflow_detected) _uberdev_goal_validate_int "$v" && overflow_detected="$v" ;;
+      MAX_CYCLES)        _uberdev_goal_validate_int "$v" && MAX_CYCLES="$v" ;;
+      UBERDEV_RESOLVED_BACKEND)
+        case "$v" in claude-bg|wezterm|background) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;
+      *) : ;;   # reject unknown keys (allowlist only)
+    esac
+  done < "$sc"
+
+  # Rehydrate arrays with the portable read loop (NOT mapfile); each element
+  # int-gated so a newline/extra-field injection cannot survive.
+  queue=()
+  if [ -r "${sc}.queue" ]; then
+    local line
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      _uberdev_goal_validate_int "$line" && queue+=("$line")
+    done < "${sc}.queue"
+  fi
+  active_issues=()
+  if [ -r "${sc}.active" ]; then
+    local line2
+    while IFS= read -r line2; do
+      [ -n "$line2" ] || continue
+      _uberdev_goal_validate_int "$line2" && active_issues+=("$line2")
+    done < "${sc}.active"
+  fi
+
+  # #178 — re-export the env vars a fresh shell's downstream consumers need.
+  # Four uberdev_goal_* helpers gate on the UBERDEV_GOAL_ID *env var*, NOT the
+  # bare GOAL_ID scalar this function sets: uberdev_goal_audit (the goal_id sink —
+  # empty env => mis-sinks to goal-unknown.jsonl), uberdev_goal_should_automerge
+  # (provenance gate `[ -n "${UBERDEV_GOAL_ID:-}" ]` — empty env => refuses a GREEN
+  # PR, so /goal never converges), and the review-pr/merge dispatch helpers. The
+  # goal-pipeline body also interpolates bare $UBERDEV_TMPDIR/... paths and the
+  # PR #129 TSV/audit helpers fall back to $UBERDEV_TMPDIR; an unset value resolves
+  # them under / or /tmp instead of the dir Phase 0 wrote. Exporting both here —
+  # the single rehydration SSOT every fence calls — restores a complete, consistent
+  # environment and is what makes the #171 fix actually hold across fresh shells.
+  export UBERDEV_GOAL_ID="$GOAL_ID"
+  export UBERDEV_TMPDIR="$tmpdir"
+  return 0
+}
+
+# uberdev_goal_cleanup_run_state
+#   Best-effort removal of the run-state sidecars + the fixed-path active-id
+#   pointer on goal completion / circuit-breaker halt. Never fatal; no globbing
+#   of attacker-influenceable patterns (each keyed path is GOAL_ID-keyed and
+#   validated). The shared pointer is removed only if it still names THIS goal.
+uberdev_goal_cleanup_run_state() {
+  local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  _uberdev_goal_validate_id "${GOAL_ID:-}" || return 0
+  local sc="$tmpdir/goal-$GOAL_ID-runstate"
+  rm -f "$sc" "${sc}.queue" "${sc}.active" 2>/dev/null
+  # Remove the fixed-path pointer only if it still names THIS goal, so a
+  # concurrent goal's pointer is never clobbered.
+  local aid="$tmpdir/goal-active-id.txt"
+  if [ -r "$aid" ] && [ "$(head -n1 "$aid" 2>/dev/null)" = "$GOAL_ID" ]; then
+    rm -f "$aid" 2>/dev/null
+  fi
+  return 0
 }

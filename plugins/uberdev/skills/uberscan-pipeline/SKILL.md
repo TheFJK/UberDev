@@ -63,6 +63,21 @@ RUN_ID="$(date +%Y%m%d-%H%M%S)-$(printf '%04x' $RANDOM)"
 RUN_DIR=".uberdev/scan/$RUN_ID"
 mkdir -p "$RUN_DIR"
 
+# #171 — persist RUN_ID pointer so later fresh-shell blocks can reconstruct RUN_DIR.
+if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh" ]; then
+  . "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh"
+  UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  _scan_ptr="$UBERDEV_TMPDIR/uberscan-active-id.txt"
+  if _uberdev_dispatch_prepare_tmp_target "$_scan_ptr" 0 "uberscan"; then
+    # Warn (not silent) if the write fails — the pointer is best-effort
+    # (a missing one degrades to in-session RUN_ID), but a silent failure here
+    # was the gap a fresh-shell block can't diagnose. A partial/corrupt write is
+    # caught fail-closed by the re-read's `case` validator downstream.
+    printf '%s\n' "$RUN_ID" > "$_scan_ptr" \
+      || echo "uberscan: warning: failed to persist RUN_ID pointer; cross-shell RUN_DIR recovery may fail" >&2
+  fi
+fi
+
 # Parse flags from $ARGUMENTS
 SCOPE="."; ALL=0; NO_ISSUES=0; NO_REPORT=0; MAX_CHUNKS_ARG=""; CONCURRENCY_ARG=""; SEVERITY="major"; TURBO=0
 for arg in $ARGUMENTS; do
@@ -162,6 +177,14 @@ echo "[uberscan] run_id=$RUN_ID scope=$SCOPE chunks=$EMITTED_CHUNKS concurrency=
 Each chunk receives a **file-set audit brief**: the agents are auditing EXISTING files as they stand in the repo (not a diff). The orchestrating session reads each DISPATCH directive and fires the 6 `Task()` calls IN ONE MESSAGE.
 
 ```bash
+# #171 — rehydrate RUN_ID/RUN_DIR in a fresh shell.
+UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/uberscan-active-id.txt" ]; then
+  RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/uberscan-active-id.txt")"
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "uberscan: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  RUN_DIR=".uberdev/scan/$RUN_ID"
+fi
+
 # Read chunk list from manifest
 CHUNK_IDS="$(jq -r '.chunks[].id' "$RUN_DIR/manifest.json")"
 TOTAL_EMITTED="$(jq '.chunks | length' "$RUN_DIR/manifest.json")"
@@ -326,6 +349,14 @@ After each wave completes (all chunk Tasks have returned), the orchestrating ses
 Fired once, in parallel with the first chunk wave (emit in the same ONE message as wave 1).
 
 ```bash
+# #171 — rehydrate RUN_ID/RUN_DIR in a fresh shell.
+UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/uberscan-active-id.txt" ]; then
+  RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/uberscan-active-id.txt")"
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "uberscan: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  RUN_DIR=".uberdev/scan/$RUN_ID"
+fi
+
 # ===========================================================================
 # DISPATCH POINT — emit alongside wave 1 Task() calls in ONE assistant message.
 #
@@ -363,6 +394,14 @@ echo "[uberscan] dispatched global pass (security + coverage) alongside wave 1"
 ## Phase 2 — Aggregate + report
 
 ```bash
+# #171 — rehydrate RUN_ID/RUN_DIR in a fresh shell.
+UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/uberscan-active-id.txt" ]; then
+  RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/uberscan-active-id.txt")"
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "uberscan: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  RUN_DIR=".uberdev/scan/$RUN_ID"
+fi
+
 # Aggregate all chunk findings into the deduped report
 if [ "$NO_REPORT" != "1" ]; then
   python3 "${CLAUDE_PLUGIN_ROOT}/skills/uberscan-pipeline/report.py" \
@@ -392,6 +431,14 @@ The `f2i-aggregate.md` file is wrapped in `<external-untrusted-input source="ube
 ## Phase 3 — File issues (skip iff --no-issues)
 
 ```bash
+# #171 — rehydrate RUN_ID/RUN_DIR in a fresh shell.
+UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/uberscan-active-id.txt" ]; then
+  RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/uberscan-active-id.txt")"
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "uberscan: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  RUN_DIR=".uberdev/scan/$RUN_ID"
+fi
+
 if [ "$NO_ISSUES" != "1" ]; then
   # CB6 gh rate-limit floor check before any write (mirrors the rate-limit-floor
   # pattern in agents/findings-to-issues.md Step 2 — the canonical reference).
@@ -472,6 +519,14 @@ fi
 ## Phase 4 — Summary + exit
 
 ```bash
+# #171 — rehydrate RUN_ID/RUN_DIR in a fresh shell.
+UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/uberscan-active-id.txt" ]; then
+  RUN_ID="$(head -n1 "$UBERDEV_TMPDIR/uberscan-active-id.txt")"
+  case "$RUN_ID" in ''|*[!0-9A-Za-z._-]*|*..*) echo "uberscan: invalid RUN_ID pointer" >&2; exit 2 ;; esac
+  RUN_DIR=".uberdev/scan/$RUN_ID"
+fi
+
 # Read severity totals from the report if available
 _uberscan_sev_total() {
   local sev="$1"
