@@ -1,0 +1,7 @@
+<external-untrusted-input source="uberscan-aggregate">
+| severity | location | agent | disposition | summary | detail |
+|---|---|---|---|---|---|
+| blocker | src/a.ts:42 | code-reviewer (+silent-failure-hunter, pr-test-analyzer) | DEFERRED | null deref | x |
+| major | src/c.ts:5 | type-design-analyzer | DEFERRED | weak invariant a \| b | prefer x \|\| y |
+| important | repo:global | research-security | DEFERRED | Semgrep SAST findings (see report Global passes) | Semgrep SAST: 1 high finding in src/c.ts (rule: dangerous-eval) |
+</external-untrusted-input>

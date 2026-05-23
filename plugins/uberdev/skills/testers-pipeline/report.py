@@ -19,6 +19,9 @@ import os
 import sys
 import yaml
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "lib"))
+from report_primitives import cell, envelope  # noqa: E402
+
 
 FILEABLE = {"blocker", "critical", "major"}
 
@@ -134,10 +137,13 @@ def render_report(merged: dict[str, dict], run_id: str) -> str:
 
 def render_findings_to_issues_aggregate(merged: dict[str, dict]) -> str:
     """Emit a markdown aggregate matching the post-impl-review-final.md shape
-    that findings-to-issues consumes. Only fileable + verified findings."""
+    that findings-to-issues consumes. Only fileable + verified findings.
+
+    Returns the inner table body WITHOUT a leading H1 header — the caller
+    wraps this in the spotlighting envelope, and the envelope must be the
+    leading bytes of the file (findings-to-issues 128-byte rule).
+    """
     out = [
-        "# Testers Aggregate (for findings-to-issues)",
-        "",
         "| persona | severity | location | invariant | summary |",
         "|---|---|---|---|---|",
     ]
@@ -146,11 +152,10 @@ def render_findings_to_issues_aggregate(merged: dict[str, dict]) -> str:
             continue
         if not f.get("verified"):
             continue
-        summary = (f.get("summary", "") or "").replace("|", "\\|")
         out.append(
-            f"| {f.get('persona', '?')} | {f.get('severity', '?')} | "
-            f"`{f.get('location', '')}` | {f.get('invariant_violated', '')} | "
-            f"{summary} |"
+            f"| {cell(f.get('persona', '?'))} | {cell(f.get('severity', '?'))} | "
+            f"`{cell(f.get('location', ''))}` | {cell(f.get('invariant_violated', ''))} | "
+            f"{cell(f.get('summary', ''))} |"
         )
     return "\n".join(out) + "\n"
 
@@ -171,8 +176,9 @@ def main() -> int:
         with open(args.out, "w") as fh:
             fh.write(render_report(merged, args.run_id))
     if args.emit_findings_to_issues_aggregate:
+        body = render_findings_to_issues_aggregate(merged)
         with open(args.emit_findings_to_issues_aggregate, "w") as fh:
-            fh.write(render_findings_to_issues_aggregate(merged))
+            envelope(fh, "testers-aggregate", body)
     return 0
 
 

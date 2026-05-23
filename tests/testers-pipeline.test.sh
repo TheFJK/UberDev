@@ -198,4 +198,26 @@ if grep -q "limit the exfil bandwidth" "$RFC"; then
 fi
 echo "PASS P9: RFC 0006 risk section aligned with post-hoc audit model"
 
+# ----------------------------------------------------------------------
+# P10 (issue #166): render_findings_to_issues_aggregate now emits the
+#   <external-untrusted-input> spotlighting envelope (it previously lacked
+#   it — security.md #8) and routes cells through the shared hardened cell()
+#   (report_primitives, D7). Assert: opening marker in first 128 bytes,
+#   single structural close marker, and close marker is the trailer.
+# ----------------------------------------------------------------------
+P10="$SCRATCH/p10"; mkdir -p "$P10/waves/scratch/power-user"
+cp "$FIX/wave-1-power-user.yaml" "$P10/waves/scratch/power-user/out.yaml"
+python3 "$AGG" --run-id smoke --wave 1 --scratch-dir "$P10/waves/scratch" \
+  --invariants "$INV" --rps-cap 10 --out "$P10/waves/wave-1.yaml"
+python3 plugins/uberdev/skills/testers-pipeline/report.py \
+  --run-id smoke --waves-dir "$P10/waves" --invariants "$INV" \
+  --emit-findings-to-issues-aggregate "$P10/agg.md"
+head -c 128 "$P10/agg.md" | grep -q '<external-untrusted-input source="testers-aggregate">' \
+  || { echo "P10: opening envelope marker not in first 128 bytes"; exit 1; }
+[ "$(grep -cF '</external-untrusted-input>' "$P10/agg.md")" = "1" ] \
+  || { echo "P10: expected exactly one structural close marker"; exit 1; }
+[ "$(grep -vE '^[[:space:]]*$' "$P10/agg.md" | tail -1)" = '</external-untrusted-input>' ] \
+  || { echo "P10: close marker is not the trailer"; exit 1; }
+echo "PASS P10: testers aggregate carries spotlighting envelope + hardened cell()"
+
 echo "ALL TESTS PASS"

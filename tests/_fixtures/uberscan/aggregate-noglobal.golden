@@ -1,0 +1,6 @@
+<external-untrusted-input source="uberscan-aggregate">
+| severity | location | agent | disposition | summary | detail |
+|---|---|---|---|---|---|
+| blocker | src/a.ts:42 | code-reviewer (+silent-failure-hunter, pr-test-analyzer) | DEFERRED | null deref | x |
+| major | src/c.ts:5 | type-design-analyzer | DEFERRED | weak invariant a \| b | prefer x \|\| y |
+</external-untrusted-input>

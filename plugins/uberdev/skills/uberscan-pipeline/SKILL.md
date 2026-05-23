@@ -130,9 +130,11 @@ if ! jq -e '.' "$RUN_DIR/manifest.json" >/dev/null 2>&1; then
 fi
 
 # CB1/CB7 circuit breaker: overflow guard
-OVERFLOW="$(jq -r '.overflow' "$RUN_DIR/manifest.json")"
+# Read all scalar fields from manifest in one @tsv pass (portable, no repeated jq forks).
+IFS=$'\t' read -r OVERFLOW TOTAL_CHUNKS EMITTED_CHUNKS < <(
+  jq -r '[.overflow, .total_chunks, (.chunks|length)] | @tsv' "$RUN_DIR/manifest.json"
+)
 if [ "$OVERFLOW" = "true" ] && [ "$ALL" != "1" ]; then
-  TOTAL_CHUNKS="$(jq -r '.total_chunks' "$RUN_DIR/manifest.json")"
   if [ "$TURBO" = "1" ]; then
     # Cap-and-continue: manifest is already capped at MAX_CHUNKS; record overflow
     echo "[uberscan] overflow: repo has $TOTAL_CHUNKS chunks; capped at MAX_CHUNKS=$MAX_CHUNKS (--turbo cap-and-continue)" >&2
@@ -145,13 +147,15 @@ if [ "$OVERFLOW" = "true" ] && [ "$ALL" != "1" ]; then
   fi
 fi
 
-EMITTED_CHUNKS="$(jq '.chunks | length' "$RUN_DIR/manifest.json")"
-
 # CB7 projected-agent ceiling: EMITTED_CHUNKS × 6 reviewers + 2 repo-global agents.
 # Independent backstop on top of CB1's chunk-count cap (a low MAX_CHUNKS with a
 # high per-chunk fleet could still blow the agent budget).
-if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
-  . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+# config-read.sh is conditionally sourced above (line ~84, if readable); use
+# command -v to detect whether the function is in scope — portable across bash
+# AND zsh. (type -t is a bash-only builtin flag: in zsh it exits non-zero with
+# empty output, which would silently default MAX_AGENTS to 250 and ignore a
+# configured uberscan.max_agents cap.)
+if command -v uberdev_read_int_in_range >/dev/null 2>&1; then
   MAX_AGENTS="$(uberdev_read_int_in_range uberscan.max_agents UBERDEV_UBERSCAN_MAX_AGENTS 1 2000 250)"
 else
   MAX_AGENTS=250
@@ -416,10 +420,13 @@ fi
 # Always emit the findings-to-issues aggregate (used by Phase 3).
 # --min-severity "$SEVERITY" enforces the documented issue-filing floor: only
 # findings ranked at or above $SEVERITY (default major) reach the aggregate.
+# --emit-totals-json guarantees $RUN_DIR/totals.json exists for Phase 4 even when
+# --no-report was passed (the --out path already writes it as a sidecar).
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/uberscan-pipeline/report.py" \
   --run-id "$RUN_ID" \
   --chunks-dir "$RUN_DIR" \
   --min-severity "$SEVERITY" \
+  --emit-totals-json "$RUN_DIR/totals.json" \
   --emit-findings-to-issues-aggregate "$RUN_DIR/f2i-aggregate.md" || { echo "error: report.py (--emit-findings-to-issues-aggregate) failed (rc=$?); aborting" >&2; exit 2; }
 
 echo "[uberscan] findings-to-issues aggregate written: $RUN_DIR/f2i-aggregate.md"
@@ -527,35 +534,18 @@ if [ -z "${RUN_ID:-}" ] && [ -r "$UBERDEV_TMPDIR/uberscan-active-id.txt" ]; then
   RUN_DIR=".uberdev/scan/$RUN_ID"
 fi
 
-# Read severity totals from the report if available
-_uberscan_sev_total() {
-  local sev="$1"
-  if [ -f "$RUN_DIR/uberscan-report.md" ]; then
-    grep -oE "^- ${sev}: [0-9]+" "$RUN_DIR/uberscan-report.md" | grep -oE '[0-9]+' || echo 0
-  else
-    # Count directly from chunk files
-    python3 - "$RUN_DIR" "$sev" <<'PY'
-import sys, glob, yaml
-chunks_dir, sev = sys.argv[1], sys.argv[2]
-total = 0
-for path in glob.glob(f"{chunks_dir}/chunk-*-findings.yaml"):
-    try:
-        with open(path) as fh:
-            doc = yaml.safe_load(fh) or {}
-    except (OSError, yaml.YAMLError) as e:
-        print(f"error: failed to parse {path}: {e}", file=sys.stderr)
-        sys.exit(1)
-    total += sum(1 for f in (doc.get("findings") or []) if f.get("severity") == sev)
-print(total)
-PY
-  fi
-}
-
-BLOCKER_COUNT="$(_uberscan_sev_total blocker)"
-CRITICAL_COUNT="$(_uberscan_sev_total critical)"
-MAJOR_COUNT="$(_uberscan_sev_total major)"
-IMPORTANT_COUNT="$(_uberscan_sev_total important)"
-SUGGESTION_COUNT="$(_uberscan_sev_total suggestion)"
+# Read severity totals from the machine-readable sidecar (SSOT — report.py
+# emits totals.json under $RUN_DIR, incl. --no-report mode). Single jq read
+# replaces the former grep-the-rendered-report + python-recount paths.
+TOTALS_JSON="$RUN_DIR/totals.json"
+if [ -r "$TOTALS_JSON" ]; then
+  IFS=$'\t' read -r BLOCKER_COUNT CRITICAL_COUNT MAJOR_COUNT IMPORTANT_COUNT SUGGESTION_COUNT < <(
+    jq -r '[(.severities.blocker // 0), (.severities.critical // 0), (.severities.major // 0), (.severities.important // 0), (.severities.suggestion // 0)] | @tsv' "$TOTALS_JSON"
+  )
+else
+  echo "[uberscan] warning: totals.json missing or unreadable at $TOTALS_JSON; severity totals shown as 0 (report.py may have failed to emit the sidecar)" >&2
+  BLOCKER_COUNT=0; CRITICAL_COUNT=0; MAJOR_COUNT=0; IMPORTANT_COUNT=0; SUGGESTION_COUNT=0
+fi
 
 echo
 echo "[uberscan] === DONE ==="
