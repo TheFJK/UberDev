@@ -33,8 +33,8 @@ def agent_label(f):
     return f"{base} (+{', '.join(str(a) for a in also)})" if also else base
 
 
-def load_findings(chunks_dir):
-    rows = []
+def load_findings(chunks_dir: str) -> list[dict]:
+    rows: list[dict] = []
     for path in sorted(glob.glob(os.path.join(chunks_dir, "chunk-*-findings.yaml"))):
         try:
             with open(path) as fh:
@@ -53,9 +53,10 @@ def load_findings(chunks_dir):
     return rows
 
 
-def dedupe(rows):
+def dedupe(rows: list[dict]) -> list[dict]:
     """Collapse identical (location, summary) findings flagged by multiple reviewers."""
-    seen, kept = {}, []
+    seen: dict[str, int] = {}
+    kept: list[dict] = []
     for f in rows:
         fp = fingerprint(f.get("location", ""), f.get("summary", ""))
         if fp in seen:

@@ -11,6 +11,7 @@ Deliberately NOT here (pipeline-local): SEV_RANK maps, norm()/fingerprint()/
 dedupe(), load_findings()/read_global(), per-pipeline main()/column schemas.
 """
 import re
+from typing import Callable, Sequence, TextIO
 
 # The findings-to-issues envelope close marker. A finding whose text contains
 # this literal would otherwise close the envelope early and promote
@@ -18,10 +19,15 @@ import re
 # neutralize it by splitting the closing `</...>` so the literal tag never
 # appears verbatim in output, while staying human-readable.
 _ENVELOPE_CLOSE = "</external-untrusted-input>"
+# The neutralized form inserts a U+200B ZERO WIDTH SPACE immediately after the
+# '<'. ZWSP is chosen because it is invisible when rendered yet breaks the exact
+# byte sequence `</external-untrusted-input>` the downstream parser scans for, so
+# a maintainer grepping the literal close-tag still finds this line. (The visible
+# difference between the two string literals above/below is exactly that one ZWSP.)
 _ENVELOPE_CLOSE_NEUTRALIZED = "<​/external-untrusted-input>"  # ZWSP after '<'
 
 
-def cell(s):
+def cell(s: object) -> str:
     """Escape a value for a markdown table cell, shared by both report.py files.
 
     - None -> "" (never the literal string "None"); applied first so the
@@ -34,11 +40,14 @@ def cell(s):
     """
     text = str("" if s is None else s)
     text = re.sub(r"\s*\n\s*", " ", text)
+    # Only the EXACT verbatim close-tag can terminate the downstream envelope;
+    # the parser matches that byte sequence literally, so spaced/cased/split
+    # variants are already inert and neutralizing the verbatim form suffices.
     text = text.replace(_ENVELOPE_CLOSE, _ENVELOPE_CLOSE_NEUTRALIZED)
     return text.replace("|", "\\|")
 
 
-def envelope(fh, source, body):
+def envelope(fh: TextIO, source: str, body: str) -> None:
     """Write `body` wrapped in the findings-to-issues spotlighting envelope.
 
     The opening marker is written as the LEADING bytes of the file (no header,
@@ -55,7 +64,13 @@ def envelope(fh, source, body):
     fh.write("</external-untrusted-input>\n")
 
 
-def sort_by_rank(rows, rank_map, rank_key, *, tiebreakers=("location", "summary")):
+def sort_by_rank(
+    rows: list[dict],
+    rank_map: dict[str, int],
+    rank_key: Callable[[dict], str],
+    *,
+    tiebreakers: Sequence[str] = ("location", "summary"),
+) -> list[dict]:
     """Sort rows by descending rank, then by the given tiebreaker fields ascending.
 
     rank_map: caller-owned severity->int map (uberscan and testers differ — D2;

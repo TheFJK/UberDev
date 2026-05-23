@@ -150,7 +150,7 @@ fi
 # CB7 projected-agent ceiling: EMITTED_CHUNKS × 6 reviewers + 2 repo-global agents.
 # Independent backstop on top of CB1's chunk-count cap (a low MAX_CHUNKS with a
 # high per-chunk fleet could still blow the agent budget).
-# config-read.sh is conditionally sourced above (line ~84, if readable); use
+# config-read.sh is conditionally sourced above (line ~100, if readable); use
 # command -v to detect whether the function is in scope — portable across bash
 # AND zsh. (type -t is a bash-only builtin flag: in zsh it exits non-zero with
 # empty output, which would silently default MAX_AGENTS to 250 and ignore a

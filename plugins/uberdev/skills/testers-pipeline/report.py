@@ -83,7 +83,12 @@ def merge_findings(waves: list) -> dict:
                 cr.get("verified")
             )
         for f in w.get("findings") or []:
-            fid = f["id"]
+            fid = f.get("id")
+            if not fid:
+                # A finding with no stable id can't be merged/deduped across
+                # waves; skip it (loud) rather than KeyError on malformed YAML.
+                print(f"warning: skipping finding with no id: {f.get('summary', '(no summary)')!r}", file=sys.stderr)
+                continue
             prior = merged.get(fid)
             if prior is None or _sev_rank(f) > _sev_rank(prior):
                 merged[fid] = f
