@@ -204,6 +204,7 @@ _uberdev_goal_pr_state_machine_valid() {
     "green->merging") return 0 ;;
     "merging->merged") return 0 ;;
     "merging->merge-failed") return 0 ;;
+    "merging->green") return 0 ;;       # #180 — merge-stall recovery: re-queue a stalled /merge agent (Phase 2d) back to green; bounded by the per-PR merge-attempt cap so it cannot loop
     "yellow-held->merging") return 1 ;; # D17 forbidden
     "red-held->merging")    return 1 ;; # D17 forbidden
     *) return 1 ;;
@@ -227,9 +228,10 @@ _uberdev_goal_count_merge_attempts() {
 # latest integer count for given PR (0 if absent). Append-only writes from
 # _uberdev_goal_dispatch_review_pr below; cap enforced by the same helper
 # at ${_UBERDEV_GOAL_MAX_REVIEW_PR_ATTEMPTS:-3}. The cap bounds the Phase
-# 2a stale|missing re-dispatch loop (SKILL.md line 280-283) so the watch
-# loop's 60s cadence cannot fire >3 /review-pr dispatches per PR over the
-# 4h stuck_loop window (was unbounded at 240/PR).
+# 2b stale|missing graced re-dispatch arm (issue #180 split the old monolithic
+# 2a into 2a PR-detect + 2b verdict-read) so the watch loop's 60s cadence
+# cannot fire >3 /review-pr dispatches per PR over the 4h stuck_loop window
+# (was unbounded at 240/PR).
 _uberdev_goal_count_review_pr_attempts() {
   local goal_id="$1" pr="$2"
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
@@ -293,7 +295,7 @@ uberdev_goal_state_init() {
   #   fingerprints.tsv       — non-convergence fingerprint stream
   #   merge-attempts.tsv     — per-PR /merge attempt counter
   #   review-pr-attempts.tsv — per-PR /review-pr re-dispatch counter (B3 bound,
-  #                            bounds Phase 2a's stale|missing re-dispatch loop)
+  #                            bounds Phase 2b's stale|missing graced re-dispatch arm)
   #   held-audits.tsv        — last re-review audit consumed per held PR (2e);
   #                            latest row per pr wins (get_last_held_audit tail)
   local f
@@ -611,20 +613,45 @@ uberdev_goal_find_pr_for_issue() {
   # collapses to empty in jq — silently discarding a row that the `feat/N-`
   # head-ref arm would have matched. `any/2` returns a concrete `false` on an
   # empty generator, so the `or` stays boolean and the head-ref fallback works.
-  gh pr list --state all --limit 200 \
+  #
+  # Capture gh's rc so a gh FAILURE (auth expiry, rate-limit 403, network) is
+  # surfaced as a one-line breadcrumb rather than masquerading as "no PR yet"
+  # (rc 0 + empty) — without it a transient gh outage stalls the goal until the
+  # 150m solve-timeout with a MISattributed "agent idle" diagnostic. Still
+  # fail-open (return empty, rc 0) so the caller keeps waiting/re-polls; the
+  # breadcrumb only distinguishes the two empty cases in the operator's log.
+  local out rc
+  out="$(gh pr list --state all --limit 200 \
     --json number,closingIssuesReferences,headRefName \
     --jq "[.[] | select(any(.closingIssuesReferences[]?; .number == ${n}) or (.headRefName | test(\"^feat/${n}-\"))) | .number] | max // empty" \
-    2>/dev/null
+    2>/dev/null)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'goal-state: gh pr list failed (rc=%s) resolving PR for issue %s; treating as no-PR-yet (will re-poll)\n' "$rc" "$n" >&2
+    return 0
+  fi
+  printf '%s' "$out"
 }
 
 # uberdev_goal_pr_state_gh PR_NUM   (issue #180)
 # Echo the GitHub PR state (OPEN|CLOSED|MERGED) for PR_NUM — the authoritative,
 # CLI-version-independent merge signal (replaces the never-written
-# merge-bg-stdout-<pr>.log marker probe). Empty string on gh failure.
+# merge-bg-stdout-<pr>.log marker probe). On gh failure: emit a one-line
+# breadcrumb to stderr and echo empty — so the Phase 2d CLOSED gate and
+# read_merge_result's gh-first arm see "" (treated as "not CLOSED / not MERGED"
+# → defer + re-poll) but the operator's log shows WHY, instead of a silent
+# gh-outage being indistinguishable from a genuinely-OPEN PR.
 uberdev_goal_pr_state_gh() {
   local pr="$1"
   _uberdev_goal_validate_int "$pr" || return 1
-  gh pr view "$pr" --json state --jq '.state' 2>/dev/null
+  local out rc
+  out="$(gh pr view "$pr" --json state --jq '.state' 2>/dev/null)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'goal-state: gh pr view failed (rc=%s) reading state for PR %s; treating as not-merged/not-closed (will re-poll)\n' "$rc" "$pr" >&2
+    return 0
+  fi
+  printf '%s' "$out"
 }
 
 # uberdev_goal_pr_is_merged PR_NUM   (issue #180)
@@ -648,15 +675,21 @@ uberdev_goal_pr_is_merged() {
 # whose GREEN verdict simply has not landed (Phase 2b uses a time-grace +
 # verdict-poll model instead). jq parses the agent list (codebase-standard;
 # avoids a python3 runtime dependency); a parse failure or empty list yields
-# rc!=0 ("not busy"), the fail-safe default.
+# "not busy", the fail-safe default. The rc is normalised to exactly 0 (busy)
+# or 1 (not busy) — `jq -e` returns 1 on a `false` result but 2/5 on a parse
+# error, so the explicit if/return collapses every "not busy" cause (no match,
+# malformed JSON, claude failure) to a single rc 1 for a crisp caller contract.
 uberdev_goal_agent_busy_for_issue() {
   local n="$1"
   _uberdev_goal_validate_int "$n" || return 1
-  claude agents --json 2>/dev/null | jq -e --arg n "$n" '
+  if claude agents --json 2>/dev/null | jq -e --arg n "$n" '
     any(.[]?;
         (((.cwd // "") | rtrimstr("/")) | endswith("solve-issue-" + $n))
         and ((.status // "") | test("^(busy|running|starting|working)$")))' \
-    >/dev/null 2>&1
+    >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
 }
 
 # uberdev_goal_list_prs_in_state GOAL_ID STATE
@@ -692,8 +725,11 @@ uberdev_goal_list_prs_in_state() {
 uberdev_goal_read_merge_result() {
   local pr="$1"
   _uberdev_goal_validate_int "$pr" || return 1
-  # Tier 1 — gh state is authoritative for the success path.
-  if [ "$(uberdev_goal_pr_state_gh "$pr" 2>/dev/null)" = "MERGED" ]; then
+  # Tier 1 — gh state is authoritative for the success path. No inline
+  # 2>/dev/null: uberdev_goal_pr_state_gh already suppresses gh's own stderr and
+  # emits its own breadcrumb on failure, so letting its stderr through surfaces a
+  # gh outage here instead of silently falling through to the audit tier.
+  if [ "$(uberdev_goal_pr_state_gh "$pr")" = "MERGED" ]; then
     printf 'success\n'; return 0
   fi
   # Tier 2 — local audit classifies failures for PRs that did not merge.
@@ -734,8 +770,9 @@ uberdev_goal_read_merge_result() {
 # and dispatches via the standard small-tier path.
 #
 # B3 bound — per-PR attempt cap at ${_UBERDEV_GOAL_MAX_REVIEW_PR_ATTEMPTS:-3}.
-# Step 2a's stale|missing arm (SKILL.md line 280-283) calls this every 60s
-# while a PR sits in pushed-reviewing with a missing/stale audit; the cap
+# Phase 2b's stale|missing graced arm (issue #180) calls this after the
+# REVIEW_GRACE window lapses while a PR sits in pushed-reviewing with a
+# missing/stale audit; the cap
 # bounds total dispatches per PR across the entire goal run (worst case
 # was 240/PR over the 4h stuck_loop window — now 3/PR). On cap-exceeded:
 # print a stderr warning and return rc=0 so the step 2a loop continues

@@ -2013,6 +2013,82 @@ uberdev_goal_agent_busy_for_issue abc 2>/dev/null
 assert_rc "$?" "1" "BT68.agent-busy-non-numeric-rc-1"
 MOCK_CLAUDE_AGENTS_JSON='[]'   # reset to inert
 
+# ----- BT69-BT75 — issue #180 /review-pr fix-loop coverage -----
+# Closes the gaps surfaced by the post-impl review fanout: the merge-stall
+# state-machine arm (the one real correctness bug), gh-failure fail-open + the
+# new breadcrumbs, CLOSED-without-merge, and filter/cwd prefix isolation.
+
+# BT69 — state machine: merging->green is VALID (Phase 2d merge-stall recovery).
+# Regression guard for the review blocker — WITHOUT this arm the stall recovery
+# calls an invalid transition (rc=2), the PR is stranded in `merging`, and the
+# goal spins to the 4h stuck_loop: the exact failure mode #180 fixes.
+_uberdev_goal_pr_state_machine_valid merging green
+assert_rc "$?" "0" "BT69.state-machine-merging-to-green-valid"
+_uberdev_goal_pr_state_machine_valid merging merged
+assert_rc "$?" "0" "BT69.state-machine-merging-to-merged-still-valid"
+_uberdev_goal_pr_state_machine_valid merging yellow-held
+assert_rc "$?" "1" "BT69.state-machine-merging-to-yellow-still-invalid"
+
+# BT70 — find_pr_for_issue: a gh FAILURE (rc!=0) is fail-open (empty + rc 0 so
+# the caller keeps re-polling) BUT emits a stderr breadcrumb — it must NOT
+# masquerade silently as "no PR yet".
+MOCK_PR_LIST_JSON='[]'; MOCK_PR_LIST_RC=1
+_bt70_err="$_b12_tmpdir/bt70-stderr"; : > "$_bt70_err"
+_bt70_rc=0
+_bt70_out="$(uberdev_goal_find_pr_for_issue 100 2>"$_bt70_err")" || _bt70_rc=$?
+assert_eq "$_bt70_out" "" "BT70.find-pr-gh-failure-empty"
+assert_rc "$_bt70_rc" "0" "BT70.find-pr-gh-failure-rc-zero-failopen"
+if grep -q 'gh pr list failed' "$_bt70_err"; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "BT70.find-pr-gh-failure-breadcrumb"
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "BT70.find-pr-gh-failure-breadcrumb" >&2
+fi
+MOCK_PR_LIST_RC=0; MOCK_PR_LIST_JSON='[]'
+
+# BT71 — pr_state_gh: gh FAILURE (rc!=0) -> empty + breadcrumb; pr_is_merged false.
+MOCK_PR_STATE="OPEN"; MOCK_PR_STATE_RC=1
+_bt71_err="$_b12_tmpdir/bt71-stderr"; : > "$_bt71_err"
+_bt71_out="$(uberdev_goal_pr_state_gh 42 2>"$_bt71_err")"
+assert_eq "$_bt71_out" "" "BT71.pr-state-gh-failure-empty"
+if grep -q 'gh pr view failed' "$_bt71_err"; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "BT71.pr-state-gh-failure-breadcrumb"
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "BT71.pr-state-gh-failure-breadcrumb" >&2
+fi
+uberdev_goal_pr_is_merged 42 2>/dev/null
+assert_rc "$?" "1" "BT71.pr-is-merged-false-on-gh-failure"
+MOCK_PR_STATE_RC=0; MOCK_PR_STATE=""
+
+# BT72 — pr_state_gh CLOSED-without-merge -> "CLOSED"; pr_is_merged false. Phase
+# 2d's hard merge_failed gate depends on this (a force-closed PR must surface
+# immediately, not loop until MERGE_TIMEOUT).
+MOCK_PR_STATE="CLOSED"
+assert_eq "$(uberdev_goal_pr_state_gh 42)" "CLOSED" "BT72.pr-state-gh-closed"
+uberdev_goal_pr_is_merged 42
+assert_rc "$?" "1" "BT72.pr-is-merged-false-on-closed"
+MOCK_PR_STATE=""
+
+# BT73 — find_pr_for_issue head-ref PREFIX ISOLATION: a PR whose head is
+# `feat/30-x` (issue 30) closing issue 999 must NOT match issue 300 (neither the
+# `^feat/300-` head arm nor the closingRefs arm) — guards feat/30 vs feat/300.
+MOCK_PR_LIST_JSON='[{"number":4242,"closingIssuesReferences":[{"number":999}],"headRefName":"feat/30-x"}]'
+assert_eq "$(uberdev_goal_find_pr_for_issue 300)" "" "BT73.find-pr-head-prefix-300-no-match"
+assert_eq "$(uberdev_goal_find_pr_for_issue 30)" "4242" "BT73.find-pr-head-prefix-30-matches"
+MOCK_PR_LIST_JSON='[]'
+
+# BT74 — agent_busy_for_issue: malformed claude JSON -> rc 1 (fail-safe "not busy").
+MOCK_CLAUDE_AGENTS_JSON='not valid json {{{'
+uberdev_goal_agent_busy_for_issue 77 2>/dev/null
+assert_rc "$?" "1" "BT74.agent-busy-malformed-json-not-busy"
+MOCK_CLAUDE_AGENTS_JSON='[]'
+
+# BT75 — agent_busy_for_issue cwd PREFIX ISOLATION: cwd `solve-issue-7` must NOT
+# satisfy a check for issue 77 (endswith isolation; inverse of BT67).
+MOCK_CLAUDE_AGENTS_JSON='[{"cwd":"/x/solve-issue-7","status":"busy"}]'
+uberdev_goal_agent_busy_for_issue 77
+assert_rc "$?" "1" "BT75.agent-busy-prefix-isolation-7-not-77"
+MOCK_CLAUDE_AGENTS_JSON='[]'
+
 # ----- H1-H6 — #156 goal_id path-traversal guard + #157 unwritable-tmpdir surfacing -----
 # Both findings target plugins/uberdev/lib/goal-state.sh. #156: goal_id was
 # interpolated into per-goal state filenames without the slug validation that

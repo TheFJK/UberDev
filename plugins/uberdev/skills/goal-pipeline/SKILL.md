@@ -437,6 +437,13 @@ while true; do
         # /merge agent still in flight, OR stalled. If past MERGE_TIMEOUT with
         # no live agent, fall back to `green` so step 2c retries (bounded by the
         # per-PR merge-attempt cap). Otherwise keep waiting.
+        # NOTE the liveness probe is keyed on $pr (the PR number), not an issue
+        # number: _uberdev_goal_dispatch_merge dispatches via
+        # `uberdev_dispatch_one "$pr" …`, and uberdev_dispatch_one names every
+        # worktree `solve-issue-<key>` (lib/dispatch.sh) — so a merge agent's cwd
+        # is `solve-issue-<pr>` and `agent_busy_for_issue "$pr"` matches it
+        # correctly. (The function name says "for_issue" because the SHARED
+        # naming convention is solve-issue-<key>; the key here is a PR.)
         merge_ts="$(awk -v p="$pr" '$1==p && $2=="merging"{t=$3} END{print t+0}' \
           "$UBERDEV_TMPDIR/goal-$GOAL_ID-pr-states.tsv" 2>/dev/null)"
         if [ "$(( now - merge_ts ))" -ge "$_UBERDEV_GOAL_MERGE_TIMEOUT" ] \
