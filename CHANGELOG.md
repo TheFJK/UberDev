@@ -4,6 +4,17 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.8] - 2026-05-23
+
+### Added
+- **`/uberscan` hardening (#166).** Extracted schema-agnostic report primitives into `plugins/uberdev/lib/report_primitives.py` (hardened `cell()` escaper, parameterized `<external-untrusted-input>` envelope emitter, rank-parameterized deterministic sort helper); both `report.py` files now import it in-process (`sys.path.insert` from `__file__`). `SEV_RANK` stays pipeline-local (uberscan `important=2`, testers `important=1`) — NOT unified. Added a `totals.json` sidecar (emitted under `$RUN_DIR`, incl. `--no-report` mode) that Phase 4 reads via a single `jq`, replacing the grep-the-rendered-report + python-recount paths. Surfaced repo-global Semgrep (`research-security`) + coverage (`research-test-coverage`) findings into the findings-to-issues aggregate (enveloped + escaped, `disposition: DEFERRED`).
+
+### Fixed
+- **Envelope close-tag breakout (security, MEDIUM, D7).** The shared `cell()` now neutralizes a literal `</external-untrusted-input>` so an injected finding cannot close the spotlighting envelope early and promote attacker-derived rows to trusted prose. `testers-pipeline/report.py`'s aggregate now carries the spotlighting envelope it previously lacked (security.md #8).
+
+### Changed
+- **Closed five `/uberscan` test-coverage gaps** (dedupe 3+ reviewers, `norm()` unicode/emoji/tab, `cell()` newline/None, hotspot >15 deterministic truncation, chunk directory-grouping contents) and **registered the previously-orphaned `uberscan.test.sh` / `uberscan-report.test.sh` / `uberscan-chunk.test.sh` in CI** (ubuntu-latest only; Windows-skip documented). Collapsed Phase 0/1 manifest `jq` reads into one `@tsv` read and de-duplicated the `config-read.sh` sourcing. Closes #166.
+
 ## [0.33.7] - 2026-05-22
 
 ### Fixed

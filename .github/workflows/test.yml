@@ -33,10 +33,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
       - name: Run shape-check tests
         # SYNC: this list MUST match the windows-latest job below, plus the
-        # zsh fixture and testers-pipeline (both Unix-runtime fixtures the
-        # Windows job intentionally skips). When a test file is added or
-        # removed, update BOTH jobs by hand — there is no automated drift
-        # guard between the two lists.
+        # zsh fixture, testers-pipeline, AND the uberscan trio
+        # (uberscan.test.sh / uberscan-report.test.sh / uberscan-chunk.test.sh)
+        # — all Unix-runtime fixtures the Windows job intentionally skips
+        # (they shell out to python3 -c with mktemp -d paths Git Bash on
+        # Windows mistranslates). When a test file is added or removed, update
+        # BOTH jobs by hand — there is no automated drift guard between the
+        # two lists.
         run: |
           bash tests/turbo-flow.test.sh && \
           bash tests/issue-causal-fanout.test.sh && \
@@ -65,6 +68,9 @@ jobs:
           bash tests/dispatch-wezterm.test.sh && \
           bash tests/ubersimplify.test.sh && \
           bash tests/ubersimplify-aggregate.test.sh && \
+          bash tests/uberscan.test.sh && \
+          bash tests/uberscan-report.test.sh && \
+          bash tests/uberscan-chunk.test.sh && \
           bash tests/goal-state-sidecar.test.sh && \
           bash tests/goal.test.sh
 
@@ -95,9 +101,11 @@ jobs:
         # python3 -c invocations are not — skipped here, runs on Linux.
         #
         # SYNC: this list MUST match the ubuntu-latest job above, minus the
-        # zsh fixture and testers-pipeline. When a test file is added or
-        # removed, update BOTH jobs by hand — there is no automated drift
-        # guard between the two lists.
+        # zsh fixture, testers-pipeline, AND the uberscan trio
+        # (uberscan.test.sh / uberscan-report.test.sh / uberscan-chunk.test.sh)
+        # — all Unix-runtime fixtures intentionally skipped here. When a test
+        # file is added or removed, update BOTH jobs by hand — there is no
+        # automated drift guard between the two lists.
         run: |
           bash tests/turbo-flow.test.sh && \
           bash tests/issue-causal-fanout.test.sh && \
