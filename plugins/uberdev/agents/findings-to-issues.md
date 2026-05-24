@@ -87,7 +87,7 @@ Explicit forbidden patterns:
    ```bash
    if ! gh label create --force "${finding_label:-review-pr-finding}" \
        --color d93f0b \
-       --description "Auto-filed by /uberdev:${finding_marker_slug:-review-pr} from deferred findings (blocker / critical / major / important tiers — RFC 0002)" 2>&1; then
+       --description "Auto-filed by /uberdev:${finding_marker_slug:-review-pr} from deferred findings (RFC 0002)" 2>&1; then
      echo "WARNING: gh label create --force failed; continuing fail-soft" >&2
      LABEL_PROVISIONED="fail-soft-skipped"
    else

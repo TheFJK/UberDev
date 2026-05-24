@@ -849,7 +849,7 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
              TRUST_LABEL_DESC="Trust trail: /uberdev:review-pr verified GREEN. Auto-managed — set by /review-pr, read by /merge." ;;
      YELLOW) TRUST_LABEL="uberdev-approved-with-concerns"
              TRUST_LABEL_COLOR="FBCA04"
-             TRUST_LABEL_DESC="Trust trail: /uberdev:review-pr verified with deferred CRITICAL findings (YELLOW). Auto-managed — /merge requires --accept-critical-deferred." ;;
+             TRUST_LABEL_DESC="Trust trail: /review-pr YELLOW: deferred CRITICAL; /merge needs --accept-critical-deferred." ;;
    esac
    # Belt-and-braces: clear the OPPOSITE-tier label if present, so a re-run that
    # downgrades GREEN→YELLOW (or upgrades YELLOW→GREEN) doesn't leave a stale
