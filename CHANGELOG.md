@@ -4,6 +4,21 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.9] - 2026-05-23
+
+### Fixed
+- **`/goal` Phase-2 watch loop never advanced on Claude Code CLI 2.1.150 — auto-merged nothing (#180).** The loop keyed solver-completion, PR discovery, and merge detection on stdout markers grepped from the captured `solve-bg-stdout-<N>.log`. On CLI 2.1.150 `claude --bg` detaches in ~4s writing only a launch banner there, so `backgrounded · ` (a *startup* banner, not a terminal marker), `pushed PR #N` (which has **zero** producers — `finish-branch` prints `PR created:`), and the merge gate's read of `merge-bg-stdout-<pr>.log` (a file that is **never written**) could not reflect real state; the loop spun to the 4h `stuck_loop` breaker. Detection is now CLI-version-independent and GitHub-native:
+  - PR discovery / solve completion → `gh pr list --json number,closingIssuesReferences,headRefName` (a PR closing issue N, or whose head is `feat/N-…`), via new `uberdev_goal_find_pr_for_issue`.
+  - merge completion → `gh pr view <pr> --json state == MERGED`, via new `uberdev_goal_pr_is_merged` / `uberdev_goal_pr_state_gh`. `uberdev_goal_read_merge_result` now consults gh state first, decoupling convergence from the (formerly agent-improvised) `merge_executed` audit-row shape.
+  - solver liveness → `claude agents --json` (cwd `solve-issue-N` + busy status), via new `uberdev_goal_agent_busy_for_issue`, used only to tell "still working" from "died".
+  - the already-correct file-based contracts are unchanged: the review-pr verdict JSON locator (`uberdev_goal_locate_review_pr_audit_by_pr`), `uberdev_goal_read_trust_signal`, and the flat `.uberdev/audit.jsonl` merge audit. The retired `uberdev_goal_extract_pr_num_from_log` (`pushed PR #N` parser) is removed.
+- **`/goal` review timing (#180).** The leaf solver runs its OWN `/review-pr` ~20 min after pushing and frequently goes idle in that window, so "agent idle ⇒ review done" is false. Phase 2 now waits `_UBERDEV_GOAL_REVIEW_GRACE` (30 min, re-read every poll) for the leaf's verdict before dispatching its own `/review-pr` — eliminating redundant reviews and premature red-holds of a PR whose GREEN verdict simply has not landed.
+- **`/goal` requires bash ≥ 4 with a clear preflight error (#180).** macOS's default `/bin/bash` is 3.2 (no `mapfile`/`declare -A`) and zsh fatals on the verdict locator's unmatched-glob iteration. Phase 0 now refuses anything below bash 4 (`brew install bash`); Phase 3 replaced `mapfile` with a portable `while read` loop.
+- **`/merge` `merge_executed` audit row now has a concrete printf template (#180).** Previously agent-improvised with no guaranteed `data.pr`; now emitted success-only (a failed merge emits `error`, never `merge_executed`, so it can never falsely advance `/goal`).
+
+### Changed
+- Version bumped to 0.33.9 across `plugin.json`, `marketplace.json`, the README badge, and the test version ratchets (`goal.test.sh` G20, `solve-claim.test.sh`).
+
 ## [0.33.8] - 2026-05-23
 
 ### Added

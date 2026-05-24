@@ -242,7 +242,9 @@ for fn in uberdev_goal_state_init uberdev_goal_pr_state_transition uberdev_goal_
           uberdev_goal_audit uberdev_goal_locate_review_pr_audit \
           uberdev_goal_locate_review_pr_audit_by_pr \
           uberdev_goal_get_pr_state uberdev_goal_record_held_audit uberdev_goal_get_last_held_audit \
-          uberdev_goal_extract_pr_num_from_log uberdev_goal_list_prs_in_state uberdev_goal_read_merge_result; do
+          uberdev_goal_find_pr_for_issue uberdev_goal_pr_state_gh uberdev_goal_pr_is_merged \
+          uberdev_goal_agent_busy_for_issue \
+          uberdev_goal_list_prs_in_state uberdev_goal_read_merge_result; do
   assert_grep "$GOAL_LIB" "^${fn}\\(\\)" "G19.public.${fn}"
 done
 # Internal function names (13 underscore-prefixed helpers — `_uberdev_goal_validate_id`
@@ -271,15 +273,43 @@ assert_no_grep "$GOAL_LIB" '\bbash -c'                                   "G19.no
 assert_grep "$GOAL_CMD" '--i-know-what-im-doing'                         "G19.r12-mentioned-once"
 
 echo
-echo "== G20: version bump locked (0.33.8) =="
-assert_grep "$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json" '"version": "0\.33\.8"'  "G20.plugin-json"
-assert_grep "$REPO_ROOT/.claude-plugin/marketplace.json"            '"version": "0\.33\.8"'  "G20.marketplace-json"
-assert_grep "$REPO_ROOT/README.md"                                  'version-0\.33\.8-blue'  "G20.readme-badge"
-assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.33\.8\]'        "G20.changelog"
+echo "== G20: version bump locked (0.33.9) =="
+assert_grep "$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json" '"version": "0\.33\.9"'  "G20.plugin-json"
+assert_grep "$REPO_ROOT/.claude-plugin/marketplace.json"            '"version": "0\.33\.9"'  "G20.marketplace-json"
+assert_grep "$REPO_ROOT/README.md"                                  'version-0\.33\.9-blue'  "G20.readme-badge"
+assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.33\.9\]'        "G20.changelog"
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
 
 assert_grep "$GOAL_SKILL" 'uberdev_dispatch_resolve_env'  "G20b.phase0-wires-resolve-env (#175 SSOT anchor)"
 assert_grep "$GOAL_SKILL" 'export AUTO_MODE=1'            "G20b.phase0-sets-AUTO_MODE (#175 turbo-parity)"
+
+echo
+echo "== G23: CLI-version-independent gh+file detection (issue #180) =="
+# The watch loop must key completion/PR/merge off gh + the file-based verdict,
+# NOT the captured claude --bg stdout (which on CLI 2.1.150 is a detached
+# banner only). These gates lock the fix in place against regression.
+# Positive: the gh signals are wired into the skill + lib.
+assert_grep "$GOAL_SKILL" 'uberdev_goal_find_pr_for_issue'  "G23.find-pr-in-skill"
+assert_grep "$GOAL_SKILL" 'uberdev_goal_pr_is_merged'       "G23.pr-is-merged-in-skill"
+assert_grep "$GOAL_LIB"   '^uberdev_goal_find_pr_for_issue\(\)'    "G23.lib-find-pr"
+assert_grep "$GOAL_LIB"   '^uberdev_goal_pr_state_gh\(\)'          "G23.lib-pr-state-gh"
+assert_grep "$GOAL_LIB"   '^uberdev_goal_pr_is_merged\(\)'         "G23.lib-pr-is-merged"
+assert_grep "$GOAL_LIB"   '^uberdev_goal_agent_busy_for_issue\(\)' "G23.lib-agent-busy"
+assert_grep "$GOAL_LIB"   'closingIssuesReferences'               "G23.lib-uses-closing-refs"
+# Phase 0 bash>=4 preflight guard (defect #8 — macOS /bin/bash is 3.2, and the
+# Bash-tool default zsh chokes on the unmatched-glob verdict locator).
+assert_grep "$GOAL_SKILL" 'BASH_VERSINFO'                  "G23.phase0-bash4-guard"
+# Anti-regression: the broken stdout-marker COMPLETION PROBES are gone from the
+# watch loop. These target the actual CODE constructs, not token mentions — the
+# explanatory prose legitimately NAMES the retired markers to document the fix.
+assert_no_grep "$GOAL_SKILL" "grep -q 'backgrounded"      "G23.no-backgrounded-completion-probe"
+assert_no_grep "$GOAL_SKILL" 'merge_log='                 "G23.no-merge-bg-stdout-read"
+assert_no_grep "$GOAL_SKILL" 'uberdev_goal_extract_pr_num_from_log' "G23.skill-no-extract-call"
+assert_no_grep "$GOAL_SKILL" 'mapfile -t'                 "G23.no-mapfile-bash4ism"
+# Anti-regression: the false-premise log parser is removed from the lib, and
+# the `pushed PR #N` grep it relied on is gone.
+assert_no_grep "$GOAL_LIB" '^uberdev_goal_extract_pr_num_from_log' "G23.lib-no-extract-pr-num"
+assert_no_grep "$GOAL_LIB" "grep -oE 'pushed PR"          "G23.lib-no-pushed-pr-grep"
 
 echo
 echo "== G21: held-PR re-review poll loop (issue #159) =="
@@ -557,6 +587,20 @@ MOCK_ISSUE_RC=0
 MOCK_ISSUE_STDERR=""
 MOCK_ISSUE_STATES=()
 DISPATCH_LOG=""
+# #180 — gh+file detection mocks. MOCK_PR_LIST_JSON is the raw JSON array a
+# `gh pr list --json ...` call would return; the mock applies the call's own
+# `--jq` filter to it (faithfully mirroring gh's in-process jq) so the filter
+# logic in uberdev_goal_find_pr_for_issue is exercised, not stubbed. MOCK_PR_STATE
+# is what `gh pr view <pr> --json state` returns (used by pr_state_gh / pr_is_merged
+# / read_merge_result's gh-first arm). MOCK_CLAUDE_AGENTS_JSON drives the claude()
+# mock for agent_busy_for_issue. All default to the inert "no PR / not merged /
+# no live agent" shape so pre-#180 behavioural tests (BT41-47 etc.) fall through
+# to their original file-based code paths unchanged.
+MOCK_PR_LIST_JSON="[]"
+MOCK_PR_LIST_RC=0
+MOCK_PR_STATE=""
+MOCK_PR_STATE_RC=0
+MOCK_CLAUDE_AGENTS_JSON="[]"
 
 gh() {
   local sub="$1"; shift
@@ -564,7 +608,31 @@ gh() {
     pr)
       local sub2="$1"; shift
       case "$sub2" in
-        view) printf '%s' "$MOCK_PR_BODY"; return "$MOCK_PR_RC" ;;
+        list)
+          # Apply the call's own --jq filter to MOCK_PR_LIST_JSON, mirroring
+          # gh's internal jq (raw output). uberdev_goal_find_pr_for_issue passes
+          # the closingIssuesReferences/headRefName filter; running it here means
+          # the test exercises the real filter, not a hand-computed answer.
+          local _filter='.'
+          while [ "$#" -gt 0 ]; do
+            case "$1" in
+              --jq) _filter="$2"; shift 2 ;;
+              *) shift ;;
+            esac
+          done
+          printf '%s' "$MOCK_PR_LIST_JSON" | jq -r "$_filter"
+          return "$MOCK_PR_LIST_RC"
+          ;;
+        view)
+          # Distinguish a state projection (`--json state`, used by pr_state_gh)
+          # from a body projection (`--json body`, used by unblock/fetch_pr_body).
+          local _want_state=0 _a
+          for _a in "$@"; do [ "$_a" = "state" ] && _want_state=1; done
+          if [ "$_want_state" = "1" ]; then
+            printf '%s' "$MOCK_PR_STATE"; return "$MOCK_PR_STATE_RC"
+          fi
+          printf '%s' "$MOCK_PR_BODY"; return "$MOCK_PR_RC"
+          ;;
       esac
       ;;
     issue)
@@ -595,6 +663,15 @@ gh() {
       esac
       ;;
   esac
+  return 0
+}
+
+# #180 — claude() mock for uberdev_goal_agent_busy_for_issue, which pipes
+# `claude agents --json` into jq. Returns MOCK_CLAUDE_AGENTS_JSON for the
+# `agents` subcommand; any other invocation is an inert no-op so a stray
+# `claude` call in a future test never spawns a real session.
+claude() {
+  if [ "$1" = "agents" ]; then printf '%s' "$MOCK_CLAUDE_AGENTS_JSON"; return 0; fi
   return 0
 }
 
@@ -778,11 +855,14 @@ _bt11c_rc=$?
 assert_rc "$_bt11c_rc" "0" "BT11c.n3-middle-open-returns-zero"
 assert_eq "$DISPATCH_LOG" "" "BT11c.n3-middle-open-no-dispatch"
 
-# Hygiene: drop the function-override + dispatch stubs before B12 ends
-# (spec Error handling section). No subsequent tests, so blast radius is
-# zero, but explicit unset documents intent and prevents a future BT12
-# appended below from silently inheriting any of these shadows.
-unset -f gh
+# Hygiene: drop the dispatch stubs before BT12 (spec Error handling section) so
+# a stray dispatch in a later test fails loudly instead of silently logging.
+# The gh() + claude() mocks are NOT unset — issue #180's gh+file detection tests
+# (BT24-28 find_pr, BT37-40/BT56 locate-via-find_pr, BT59-68 gh-state helpers,
+# and read_merge_result's gh-first arm at BT41-47/BT63-64) all route through gh,
+# so the override must persist. It stays inert for the file-only tests (BT12-23,
+# BT29-34) because their functions never call gh, and MOCK_PR_STATE/MOCK_PR_LIST_JSON
+# default to the "not merged / no PR" shape so BT41-47 fall through to the audit path.
 unset -f uberdev_dispatch_one
 unset -f _uberdev_goal_dispatch_review_pr
 
@@ -1248,59 +1328,46 @@ fi
 # from line 294-295, so solve-bg-stdout-<issue>.log fixtures land where
 # the function-under-test (locate_review_pr_audit) reads them.
 
-# ===== uberdev_goal_extract_pr_num_from_log (lines 377-381) =====
+# ===== uberdev_goal_find_pr_for_issue (issue #180 — gh closingIssuesReferences) =====
+# Replaces the retired uberdev_goal_extract_pr_num_from_log `pushed PR #N` log
+# parser: that marker has zero producers and `claude --bg` stdout is a detached
+# banner on CLI 2.1.150. Issue->PR resolution is now GitHub-native — a PR that
+# closes issue N (closingIssuesReferences) or whose head is `feat/N-…`.
 
-# BT24 — happy: `pushed PR #N` marker present -> outputs N.
-_bt24_log="$_b12_tmpdir/bt24.log"
-cat > "$_bt24_log" <<'EOF'
-[solve-bg] dispatched /solve 100
-[solve-bg] pushed PR #123 (issue #100)
-[solve-bg] done
-EOF
-assert_eq "$(uberdev_goal_extract_pr_num_from_log "$_bt24_log")" "123" \
-  "BT24.extract-pr-happy-path"
+# BT24 — happy: closingIssuesReferences match -> PR number.
+MOCK_PR_LIST_JSON='[{"number":123,"closingIssuesReferences":[{"number":100}],"headRefName":"feat/100-fix"}]'
+assert_eq "$(uberdev_goal_find_pr_for_issue 100)" "123" \
+  "BT24.find-pr-closes-match"
 
-# BT25 — missing file: `[ -f "$log" ] || return 0` short-circuits. Capture
-# the rc separately because the `$(...)` swallows it; assert both that the
-# function exited 0 (not an error) AND that stdout is empty (no garbage
-# output before the early return).
-_bt25_rc=0
-_bt25_out="$(uberdev_goal_extract_pr_num_from_log /nonexistent/path)" \
-  || _bt25_rc=$?
-assert_eq "$_bt25_out" "" "BT25.extract-missing-file-empty"
-assert_rc "$_bt25_rc" "0"  "BT25.extract-missing-file-rc-zero"
+# BT25 — non-numeric issue: validate_int rejects BEFORE any gh call -> rc=1
+# (the R3 gh-argument-injection guard; mirrors BT35/BT41).
+uberdev_goal_find_pr_for_issue abc 2>/dev/null
+assert_rc "$?" "1" "BT25.find-pr-non-numeric-rc-1"
 
-# BT26 — empty file: file exists but no marker -> empty output. Distinct
-# from BT25 because the [ -f ] guard passes here; the grep pipe is what
-# yields empty.
-_bt26_log="$_b12_tmpdir/bt26.log"
-: > "$_bt26_log"
-assert_eq "$(uberdev_goal_extract_pr_num_from_log "$_bt26_log")" "" \
-  "BT26.extract-empty-file-empty"
+# BT26 — no match: empty PR list -> empty output, rc=0 (a not-yet-pushed
+# solver must NOT be misread as an error).
+MOCK_PR_LIST_JSON='[]'
+_bt26_rc=0
+_bt26_out="$(uberdev_goal_find_pr_for_issue 9999)" || _bt26_rc=$?
+assert_eq "$_bt26_out" "" "BT26.find-pr-no-match-empty"
+assert_rc "$_bt26_rc" "0" "BT26.find-pr-no-match-rc-zero"
 
-# BT27 — multi-entry: multiple `pushed PR #N` markers -> first wins
-# (the `head -n 1` between the two greps locks "first match" semantics).
-# A regression that dropped `head -n 1` would emit all PR numbers and
-# this assertion (exact match against "5") would fail loudly.
-_bt27_log="$_b12_tmpdir/bt27.log"
-cat > "$_bt27_log" <<'EOF'
-[solve-bg] pushed PR #5
-[solve-bg] dispatched
-[solve-bg] pushed PR #99
-EOF
-assert_eq "$(uberdev_goal_extract_pr_num_from_log "$_bt27_log")" "5" \
-  "BT27.extract-multi-entry-first-wins"
+# BT27 — head-ref fallback: closingIssuesReferences empty, head `feat/N-` matches.
+# Covers the historical-PR shape where the Closes link was dropped but the
+# branch name still carries the issue number.
+MOCK_PR_LIST_JSON='[{"number":321,"closingIssuesReferences":[],"headRefName":"feat/200-thing"}]'
+assert_eq "$(uberdev_goal_find_pr_for_issue 200)" "321" \
+  "BT27.find-pr-head-ref-fallback"
 
-# BT28 — malformed input: no `pushed PR #N` marker -> empty (the trailing
-# `|| true` ensures rc=0 even when grep finds nothing; without it the
-# pipeline rc would be 1 and break callers).
-_bt28_log="$_b12_tmpdir/bt28.log"
-cat > "$_bt28_log" <<'EOF'
-[solve-bg] dispatched /solve 100
-[solve-bg] PR push failed: ENOSPC
-EOF
-assert_eq "$(uberdev_goal_extract_pr_num_from_log "$_bt28_log")" "" \
-  "BT28.extract-no-marker-empty"
+# BT28 — multiple matches + a distractor: highest PR wins (max), and a PR
+# closing a DIFFERENT issue is excluded. A regression that dropped the
+# `| max` or the `select(... == N)` filter would surface here.
+MOCK_PR_LIST_JSON='[{"number":5,"closingIssuesReferences":[{"number":300}],"headRefName":"feat/300-a"},{"number":99,"closingIssuesReferences":[{"number":300}],"headRefName":"feat/300-b"},{"number":1000,"closingIssuesReferences":[{"number":999}],"headRefName":"feat/999-z"}]'
+assert_eq "$(uberdev_goal_find_pr_for_issue 300)" "99" \
+  "BT28.find-pr-highest-wins-excludes-other-issue"
+
+# Reset the PR-list mock to inert before the file-based BTs below.
+MOCK_PR_LIST_JSON='[]'
 
 # ===== uberdev_goal_list_prs_in_state (lines 386-392) =====
 
@@ -1371,29 +1438,29 @@ assert_eq "$(uberdev_goal_list_prs_in_state test-bt34 merging)" "" \
 uberdev_goal_locate_review_pr_audit abc 2>/dev/null
 assert_rc "$?" "1" "BT35.locate-non-numeric-issue-rc-1"
 
-# BT36 — missing log: extract_pr_num_from_log returns "" for issue 9999
-# (no solve-bg-stdout-9999.log in $UBERDEV_TMPDIR), so the `[ -n "$pr" ]
-# || return 0` branch fires and the function emits nothing. Confirms the
-# function does NOT halt the goal-pipeline when a solve-bg log is missing.
-# Capture rc separately (mirrors BT25/BT29) — `$(...)` swallows it, so
-# we assert both the empty-stdout invariant AND that the function
-# returned 0 (the missing-log short-circuit must NOT raise an error).
+# BT36 — no PR for issue: find_pr_for_issue returns "" for issue 9999 (empty
+# gh PR list), so the `[ -n "$pr" ] || return 0` branch fires and the function
+# emits nothing. Confirms the function does NOT halt the goal-pipeline when a
+# solver has not yet pushed a PR. Capture rc separately (mirrors BT25/BT29) —
+# `$(...)` swallows it, so we assert both the empty-stdout invariant AND that
+# the function returned 0 (the no-PR short-circuit must NOT raise an error).
+MOCK_PR_LIST_JSON='[]'
 _bt36_rc=0
 _bt36_out="$(uberdev_goal_locate_review_pr_audit 9999)" || _bt36_rc=$?
-assert_eq "$_bt36_out" "" "BT36.locate-missing-log-empty"
-assert_rc "$_bt36_rc" "0" "BT36.locate-missing-log-rc-zero"
+assert_eq "$_bt36_out" "" "BT36.locate-no-pr-empty"
+assert_rc "$_bt36_rc" "0" "BT36.locate-no-pr-rc-zero"
 
-# BT37 — happy: log resolves PR=500, .uberdev/runs/<run>/review-pr-verdict.json
+# BT37 — happy: gh resolves issue 37 -> PR=500, .uberdev/runs/<run>/review-pr-verdict.json
 # carries matching .pr, run_id matches RUN_ID_REGEX. Function returns
 # the relative canonical path. The verdict.json uses `"pr": "500"`
-# (string form) because locate_review_pr_audit reads .pr via `jq -r`
+# (string form) because locate_review_pr_audit_by_pr reads .pr via `jq -r`
 # (NOT `jq --argjson`) and then string-compares against $pr, so either
 # `{"pr": "500"}` or `{"pr": 500}` works identically here. BT43's
 # read_merge_result counterpart MUST use integer form (see BT43) — the
 # asymmetry is intentional and reflects each fn's filter.
 _bt37_dir="$_b12_tmpdir/bt37-cwd"
 mkdir -p "$_bt37_dir/.uberdev/runs/20260521-120000-aaaa1111"
-printf '[solve-bg] pushed PR #500\n' > "$_b12_tmpdir/solve-bg-stdout-37.log"
+MOCK_PR_LIST_JSON='[{"number":500,"closingIssuesReferences":[{"number":37}],"headRefName":"feat/37-x"}]'
 cat > "$_bt37_dir/.uberdev/runs/20260521-120000-aaaa1111/review-pr-verdict.json" <<'EOF'
 {"pr": "500"}
 EOF
@@ -1415,7 +1482,7 @@ assert_eq "$_bt37_out" \
 _bt38_dir="$_b12_tmpdir/bt38-cwd"
 mkdir -p "$_bt38_dir/.uberdev/runs/20260521-100000-bbbb2222" \
          "$_bt38_dir/.uberdev/runs/20260521-200000-aaaa1111"
-printf '[solve-bg] pushed PR #600\n' > "$_b12_tmpdir/solve-bg-stdout-38.log"
+MOCK_PR_LIST_JSON='[{"number":600,"closingIssuesReferences":[{"number":38}],"headRefName":"feat/38-x"}]'
 for _d in 20260521-100000-bbbb2222 20260521-200000-aaaa1111; do
   printf '%s\n' '{"pr": "600"}' \
     > "$_bt38_dir/.uberdev/runs/$_d/review-pr-verdict.json"
@@ -1425,14 +1492,14 @@ assert_eq "$_bt38_out" \
   ".uberdev/runs/20260521-200000-aaaa1111/review-pr-verdict.json" \
   "BT38.locate-multi-run-newest-wins"
 
-# BT39 — PR mismatch: verdict.json's .pr is 999 but the solve-bg log says
+# BT39 — PR mismatch: verdict.json's .pr is 999 but gh resolves issue 39 to
 # PR=700. The `[ "$pr_field" = "$pr" ] || continue` filter rejects the
 # candidate; final output empty. Without this filter, the function would
 # return a path pointing to an UNRELATED PR's review-pr verdict, which
 # would silently misclassify the trust signal.
 _bt39_dir="$_b12_tmpdir/bt39-cwd"
 mkdir -p "$_bt39_dir/.uberdev/runs/20260521-130000-cccc3333"
-printf '[solve-bg] pushed PR #700\n' > "$_b12_tmpdir/solve-bg-stdout-39.log"
+MOCK_PR_LIST_JSON='[{"number":700,"closingIssuesReferences":[{"number":39}],"headRefName":"feat/39-x"}]'
 printf '%s\n' '{"pr": "999"}' \
   > "$_bt39_dir/.uberdev/runs/20260521-130000-cccc3333/review-pr-verdict.json"
 _bt39_out="$(cd "$_bt39_dir" && uberdev_goal_locate_review_pr_audit 39)"
@@ -1445,11 +1512,13 @@ assert_eq "$_bt39_out" "" "BT39.locate-pr-mismatch-empty"
 # the sort.
 _bt40_dir="$_b12_tmpdir/bt40-cwd"
 mkdir -p "$_bt40_dir/.uberdev/runs/not-a-run-id"
-printf '[solve-bg] pushed PR #800\n' > "$_b12_tmpdir/solve-bg-stdout-40.log"
+MOCK_PR_LIST_JSON='[{"number":800,"closingIssuesReferences":[{"number":40}],"headRefName":"feat/40-x"}]'
 printf '%s\n' '{"pr": "800"}' \
   > "$_bt40_dir/.uberdev/runs/not-a-run-id/review-pr-verdict.json"
 _bt40_out="$(cd "$_bt40_dir" && uberdev_goal_locate_review_pr_audit 40)"
 assert_eq "$_bt40_out" "" "BT40.locate-malformed-run-id-empty"
+# Reset the PR-list mock to inert before the read_merge_result BTs below.
+MOCK_PR_LIST_JSON='[]'
 
 # ===== uberdev_goal_read_merge_result (lines 410-438) =====
 
@@ -1723,11 +1792,12 @@ mkdir -p "$_bt56_scratch"
   mkdir -p .uberdev/runs/20260301-100000-deadbeef
   printf '{"pr":1234}\n' > .uberdev/runs/20260301-100000-deadbeef/review-pr-verdict.json
 )
-# Seed the solve-bg stdout log so extract_pr_num_from_log resolves issue→PR.
-printf 'some preamble\npushed PR #1234\nmore lines\n' > "$UBERDEV_TMPDIR/solve-bg-stdout-555.log"
+# gh resolves issue 555 -> PR 1234 (closingIssuesReferences), then _by_pr globs.
+MOCK_PR_LIST_JSON='[{"number":1234,"closingIssuesReferences":[{"number":555}],"headRefName":"feat/555-x"}]'
 _bt56_audit="$(cd "$_bt56_scratch" && uberdev_goal_locate_review_pr_audit 555)"
 assert_eq "$_bt56_audit" ".uberdev/runs/20260301-100000-deadbeef/review-pr-verdict.json" \
   "BT56.issue-keyed-locator-still-works"
+MOCK_PR_LIST_JSON='[]'
 rm -rf "$_bt56_scratch" 2>/dev/null || true
 
 # BT57 — stale|missing arm of the step 2e poll loop MUST be a no-op: held
@@ -1877,6 +1947,147 @@ else
   printf '        transitions after:  %s\n' "$_bt58_transitions_after" >&2
 fi
 rm -rf "$_bt58_scratch" 2>/dev/null || true
+
+# ----- BT59-BT68 — gh+file detection helpers (issue #180) -----
+# Functions under test: uberdev_goal_pr_state_gh, uberdev_goal_pr_is_merged,
+# uberdev_goal_read_merge_result (gh-first arm), uberdev_goal_agent_busy_for_issue.
+# These replace the CLI-version-dependent stdout-marker probes (`backgrounded ·`
+# + `merge-bg-stdout`) with GitHub-native / file-based signals.
+
+# BT59 — pr_state_gh returns the gh state verbatim.
+MOCK_PR_STATE="MERGED"
+assert_eq "$(uberdev_goal_pr_state_gh 42)" "MERGED" "BT59.pr-state-gh-returns-state"
+
+# BT60 — pr_state_gh non-numeric PR -> rc=1 BEFORE any gh call (R3 guard).
+uberdev_goal_pr_state_gh abc 2>/dev/null
+assert_rc "$?" "1" "BT60.pr-state-gh-non-numeric-rc-1"
+
+# BT61 — pr_is_merged: rc=0 when gh state == MERGED (authoritative completion).
+MOCK_PR_STATE="MERGED"
+uberdev_goal_pr_is_merged 42
+assert_rc "$?" "0" "BT61.pr-is-merged-true-on-merged"
+
+# BT62 — pr_is_merged: rc=1 when gh state == OPEN (NOT merged — must not finalize).
+MOCK_PR_STATE="OPEN"
+uberdev_goal_pr_is_merged 42
+assert_rc "$?" "1" "BT62.pr-is-merged-false-on-open"
+
+# BT63 — read_merge_result gh-first: gh MERGED -> 'success' even with NO audit row.
+# This is the defect-#5 robustness fix: the goal no longer depends on the
+# agent-improvised merge_executed audit shape — gh state is authoritative.
+MOCK_PR_STATE="MERGED"
+_bt63_dir="$_b12_tmpdir/bt63-cwd"; mkdir -p "$_bt63_dir"
+_bt63_out="$(cd "$_bt63_dir" && uberdev_goal_read_merge_result 905)"
+assert_eq "$_bt63_out" "success" "BT63.read-merge-gh-merged-no-audit-row"
+
+# BT64 — read_merge_result gh-first: gh MERGED OVERRIDES a stale conflict row.
+# A pr_parked(refused) row would map to 'conflict' on the audit path, but gh
+# says the PR actually merged afterward — gh wins.
+MOCK_PR_STATE="MERGED"
+_bt64_dir="$_b12_tmpdir/bt64-cwd"; mkdir -p "$_bt64_dir/.uberdev"
+printf '%s\n' '{"event":"pr_parked","data":{"pr":906,"reason":"refused"}}' \
+  > "$_bt64_dir/.uberdev/audit.jsonl"
+_bt64_out="$(cd "$_bt64_dir" && uberdev_goal_read_merge_result 906)"
+assert_eq "$_bt64_out" "success" "BT64.read-merge-gh-merged-overrides-conflict-row"
+MOCK_PR_STATE=""   # reset: subsequent tests must fall through to the audit path
+
+# BT65 — agent_busy_for_issue: rc=0 when a session cwd ends in solve-issue-N
+# AND status is busy. Disambiguates "solver still working" from "solver died".
+MOCK_CLAUDE_AGENTS_JSON='[{"cwd":"/x/.claude/worktrees/solve-issue-77","status":"busy"}]'
+uberdev_goal_agent_busy_for_issue 77
+assert_rc "$?" "0" "BT65.agent-busy-true-on-busy-matching-cwd"
+
+# BT66 — agent_busy_for_issue: rc=1 when the matching session is idle.
+MOCK_CLAUDE_AGENTS_JSON='[{"cwd":"/x/solve-issue-77","status":"idle"}]'
+uberdev_goal_agent_busy_for_issue 77
+assert_rc "$?" "1" "BT66.agent-busy-false-on-idle"
+
+# BT67 — agent_busy_for_issue: rc=1 when a busy session belongs to a DIFFERENT
+# issue (no solve-issue-7 / solve-issue-77 prefix confusion).
+MOCK_CLAUDE_AGENTS_JSON='[{"cwd":"/x/solve-issue-88","status":"busy"}]'
+uberdev_goal_agent_busy_for_issue 77
+assert_rc "$?" "1" "BT67.agent-busy-false-on-other-issue"
+
+# BT68 — agent_busy_for_issue: non-numeric issue -> rc=1 BEFORE any claude call.
+uberdev_goal_agent_busy_for_issue abc 2>/dev/null
+assert_rc "$?" "1" "BT68.agent-busy-non-numeric-rc-1"
+MOCK_CLAUDE_AGENTS_JSON='[]'   # reset to inert
+
+# ----- BT69-BT75 — issue #180 /review-pr fix-loop coverage -----
+# Closes the gaps surfaced by the post-impl review fanout: the merge-stall
+# state-machine arm (the one real correctness bug), gh-failure fail-open + the
+# new breadcrumbs, CLOSED-without-merge, and filter/cwd prefix isolation.
+
+# BT69 — state machine: merging->green is VALID (Phase 2d merge-stall recovery).
+# Regression guard for the review blocker — WITHOUT this arm the stall recovery
+# calls an invalid transition (rc=2), the PR is stranded in `merging`, and the
+# goal spins to the 4h stuck_loop: the exact failure mode #180 fixes.
+_uberdev_goal_pr_state_machine_valid merging green
+assert_rc "$?" "0" "BT69.state-machine-merging-to-green-valid"
+_uberdev_goal_pr_state_machine_valid merging merged
+assert_rc "$?" "0" "BT69.state-machine-merging-to-merged-still-valid"
+_uberdev_goal_pr_state_machine_valid merging yellow-held
+assert_rc "$?" "1" "BT69.state-machine-merging-to-yellow-still-invalid"
+
+# BT70 — find_pr_for_issue: a gh FAILURE (rc!=0) is fail-open (empty + rc 0 so
+# the caller keeps re-polling) BUT emits a stderr breadcrumb — it must NOT
+# masquerade silently as "no PR yet".
+MOCK_PR_LIST_JSON='[]'; MOCK_PR_LIST_RC=1
+_bt70_err="$_b12_tmpdir/bt70-stderr"; : > "$_bt70_err"
+_bt70_rc=0
+_bt70_out="$(uberdev_goal_find_pr_for_issue 100 2>"$_bt70_err")" || _bt70_rc=$?
+assert_eq "$_bt70_out" "" "BT70.find-pr-gh-failure-empty"
+assert_rc "$_bt70_rc" "0" "BT70.find-pr-gh-failure-rc-zero-failopen"
+if grep -q 'gh pr list failed' "$_bt70_err"; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "BT70.find-pr-gh-failure-breadcrumb"
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "BT70.find-pr-gh-failure-breadcrumb" >&2
+fi
+MOCK_PR_LIST_RC=0; MOCK_PR_LIST_JSON='[]'
+
+# BT71 — pr_state_gh: gh FAILURE (rc!=0) -> empty + breadcrumb; pr_is_merged false.
+MOCK_PR_STATE="OPEN"; MOCK_PR_STATE_RC=1
+_bt71_err="$_b12_tmpdir/bt71-stderr"; : > "$_bt71_err"
+_bt71_out="$(uberdev_goal_pr_state_gh 42 2>"$_bt71_err")"
+assert_eq "$_bt71_out" "" "BT71.pr-state-gh-failure-empty"
+if grep -q 'gh pr view failed' "$_bt71_err"; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "BT71.pr-state-gh-failure-breadcrumb"
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "BT71.pr-state-gh-failure-breadcrumb" >&2
+fi
+uberdev_goal_pr_is_merged 42 2>/dev/null
+assert_rc "$?" "1" "BT71.pr-is-merged-false-on-gh-failure"
+MOCK_PR_STATE_RC=0; MOCK_PR_STATE=""
+
+# BT72 — pr_state_gh CLOSED-without-merge -> "CLOSED"; pr_is_merged false. Phase
+# 2d's hard merge_failed gate depends on this (a force-closed PR must surface
+# immediately, not loop until MERGE_TIMEOUT).
+MOCK_PR_STATE="CLOSED"
+assert_eq "$(uberdev_goal_pr_state_gh 42)" "CLOSED" "BT72.pr-state-gh-closed"
+uberdev_goal_pr_is_merged 42
+assert_rc "$?" "1" "BT72.pr-is-merged-false-on-closed"
+MOCK_PR_STATE=""
+
+# BT73 — find_pr_for_issue head-ref PREFIX ISOLATION: a PR whose head is
+# `feat/30-x` (issue 30) closing issue 999 must NOT match issue 300 (neither the
+# `^feat/300-` head arm nor the closingRefs arm) — guards feat/30 vs feat/300.
+MOCK_PR_LIST_JSON='[{"number":4242,"closingIssuesReferences":[{"number":999}],"headRefName":"feat/30-x"}]'
+assert_eq "$(uberdev_goal_find_pr_for_issue 300)" "" "BT73.find-pr-head-prefix-300-no-match"
+assert_eq "$(uberdev_goal_find_pr_for_issue 30)" "4242" "BT73.find-pr-head-prefix-30-matches"
+MOCK_PR_LIST_JSON='[]'
+
+# BT74 — agent_busy_for_issue: malformed claude JSON -> rc 1 (fail-safe "not busy").
+MOCK_CLAUDE_AGENTS_JSON='not valid json {{{'
+uberdev_goal_agent_busy_for_issue 77 2>/dev/null
+assert_rc "$?" "1" "BT74.agent-busy-malformed-json-not-busy"
+MOCK_CLAUDE_AGENTS_JSON='[]'
+
+# BT75 — agent_busy_for_issue cwd PREFIX ISOLATION: cwd `solve-issue-7` must NOT
+# satisfy a check for issue 77 (endswith isolation; inverse of BT67).
+MOCK_CLAUDE_AGENTS_JSON='[{"cwd":"/x/solve-issue-7","status":"busy"}]'
+uberdev_goal_agent_busy_for_issue 77
+assert_rc "$?" "1" "BT75.agent-busy-prefix-isolation-7-not-77"
+MOCK_CLAUDE_AGENTS_JSON='[]'
 
 # ----- H1-H6 — #156 goal_id path-traversal guard + #157 unwritable-tmpdir surfacing -----
 # Both findings target plugins/uberdev/lib/goal-state.sh. #156: goal_id was

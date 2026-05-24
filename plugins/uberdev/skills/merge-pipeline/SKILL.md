@@ -693,7 +693,16 @@ Run `git merge-tree --write-tree <integration_branch> <headRefOid>`. Exit 0 = cl
 
 ### Step 3.2 — Clean-merge path
 
-If probe was clean: run `gh pr merge <N> --<strategy> --match-head-commit <headRefOid>`. The `--match-head-commit` flag is mandatory — it is the TOCTOU guard that fails fast if the PR HEAD moved between probe and merge. On `gh pr merge` failure: abort that PR, emit `merge_executed`+`error` events, continue with rest of queue.
+If probe was clean: run `gh pr merge <N> --<strategy> --match-head-commit <headRefOid>`. The `--match-head-commit` flag is mandatory — it is the TOCTOU guard that fails fast if the PR HEAD moved between probe and merge.
+
+**On success, emit a concrete `merge_executed` audit row** — this is the canonical shape downstream consumers depend on (notably `/goal`'s `uberdev_goal_read_merge_result`, which selects `.event=="merge_executed" | .data.pr`). Do NOT hand-improvise the JSON; emit exactly this template (the same one the Step 3.3vii conflict-resolve path uses after its successful `gh pr merge`):
+
+```bash
+printf '{"event":"merge_executed","run_id":"%s","ts":"%s","data":{"pr":%d,"strategy":"%s"}}\n' \
+  "$RUN_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PR" "$strategy" >> ".uberdev/audit.jsonl"
+```
+
+`merge_executed` is emitted ONLY on a successful merge — it is the success contract. On `gh pr merge` **failure**: abort that PR, emit an `error` event (NOT `merge_executed` — a `merge_executed` row on a failed merge would falsely advance `/goal`'s state machine), and continue with the rest of the queue. (Belt-and-braces: `/goal` reads `gh pr view --json state == MERGED` first, so a stray failure-row is also caught there — but the producer must not emit it.)
 
 ### Step 3.3 — Conflict-resolve path
 
@@ -756,7 +765,7 @@ Commit message format: `chore(merge): resolve conflicts in <comma-separated-file
 
 Push: `git push origin HEAD:<headRefName>`. **Never `--force`. Never `--force-with-lease`** against a PR head ref **for `/merge`'s own writes**. Resolution is a NEW commit on top of existing head. **Sanctioned exception:** `/uberdev:review-pr` Phase 3's `ci-rebase-handler` agent is the **single sanctioned exception** — see `plugins/uberdev/agents/ci-rebase-handler.md` for the bounded exception (worktree lock + explicit-old-SHA lease form + `--force-if-includes`). The exception applies only inside Phase 3 stale_base remediation, not to `/merge`'s own conflict-resolution pushes. If push fails non-FF (the PR head moved during conflict-resolve — someone else pushed in between): emit `push_resolution`+`error` to audit log, **park THIS PR via `drop` strategy** with `PARK_REASON_ENUM` value `push-non-ff`, and **continue with the next PR**. The queue does NOT halt — the parked PR is dropped from THIS run; a future `/merge` invocation will re-evaluate it against the Phase 1.4 gate (`APPROVED` + CI-green) and pick it up if it still qualifies.
 
-vii. **Retry `gh pr merge`** with the new head SHA (re-fetch `headRefOid` after push).
+vii. **Retry `gh pr merge`** with the new head SHA (re-fetch `headRefOid` after push). On success, emit the canonical `merge_executed` audit row (the Step 3.2 template — success-only, `data.pr` integer); on failure emit `error` (never `merge_executed`).
 
 viii. **Tear down the scratch worktree** per `using-git-worktrees` protocol: `git worktree remove --force <path>`. On failure: `git worktree prune` retry. If still failing: surface manual cleanup instructions; **never `rm -rf`**.
 
@@ -821,7 +830,7 @@ done
 |---|---|---|
 | `test_fail` after exhausting (a)/(b)/(c) in Step 3.3v | park via `drop` (`data.reason="test-fail-exhausted"`) | continues |
 | `push_resolution` non-FF (Step 3.3vi) | park via `drop` (`data.reason="push-non-ff"`) | continues |
-| `gh pr merge` failure (Step 3.2 / 3.3vii) | abort that PR; emit `merge_executed`+`error` | continues |
+| `gh pr merge` failure (Step 3.2 / 3.3vii) | abort that PR; emit `error` (NOT `merge_executed` — success-only) | continues |
 | conflict-resolver `AMBIGUOUS` | park via `drop` (`data.reason="ambiguous"`) | continues |
 | conflict-resolver `REFUSED` | park via `drop` (`data.reason="refused"`) | continues |
 | dependency cycle (Phase 2.1) | break edges, fall back to createdAt order; emit cycle path to stderr | continues |
