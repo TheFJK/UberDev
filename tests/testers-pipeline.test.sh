@@ -266,4 +266,31 @@ WARN_P11="$(grep -c "warning: skipping finding with non-dict evidence" "$P11_ERR
 }
 echo "PASS P11: non-dict evidence skipped per-finding; valid findings in the wave survive"
 
+# ----------------------------------------------------------------------
+# P12 (issue #191, edge): the most dangerous regression — a wave whose
+#   ONLY finding(s) carry non-dict evidence. The aggregator must still exit
+#   0 and emit a valid (empty-findings) wave file, NOT crash. P11 mixes
+#   good + bad personas; P12 isolates the all-bad case and asserts the exit
+#   code explicitly (not just via `set -e`).
+# ----------------------------------------------------------------------
+P12="$SCRATCH/p12"
+mkdir -p "$P12/scratch/chaos-engineer"
+cp "$FIX/wave-1-bad-evidence-shape.yaml" "$P12/scratch/chaos-engineer/out.yaml"
+
+P12_ERR="$P12/stderr.log"
+# Capture the exit code WITHOUT letting `set -e` abort: the explicit rc==0
+# assertion below is the point (addresses the "exit code only implicit" gap).
+P12_RC=0
+python3 "$AGG" --run-id smoke --wave 1 --scratch-dir "$P12/scratch" \
+  --invariants "$INV" --rps-cap 10 --out "$P12/wave-1.yaml" 2> "$P12_ERR" || P12_RC=$?
+
+[ "$P12_RC" = "0" ] || { echo "P12: aggregator exited $P12_RC (expected 0) on all-bad wave"; cat "$P12_ERR"; exit 1; }
+[ -f "$P12/wave-1.yaml" ] || { echo "P12: no output file for all-bad wave (whole wave lost)"; exit 1; }
+COUNT_P12="$(python3 -c "import yaml; print(len(yaml.safe_load(open('$P12/wave-1.yaml'))['findings']))")"
+[ "$COUNT_P12" = "0" ] || { echo "P12: expected 0 findings (all bad-shape dropped), got $COUNT_P12"; exit 1; }
+grep -q "warning: skipping finding with non-dict evidence" "$P12_ERR" || {
+  echo "P12: expected stderr warning for the dropped finding(s); got:"; cat "$P12_ERR"; exit 1;
+}
+echo "PASS P12: all-bad-evidence wave still exits 0 with valid (empty) output"
+
 echo "ALL TESTS PASS"

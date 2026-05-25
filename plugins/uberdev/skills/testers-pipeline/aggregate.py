@@ -110,7 +110,8 @@ def main() -> int:
                 # and drop it (per SKILL.md's drop-contract for evidence-less
                 # findings) so a single bad agent can't crash the aggregation
                 # and discard the valid findings from the rest of the wave.
-                print(f"warning: skipping finding with non-dict evidence in {path}: {e}",
+                print(f"warning: skipping finding with non-dict evidence in {path} "
+                      f"(location={f.get('location') or '?'}, invariant={inv}): {e}",
                       file=sys.stderr)
                 continue
             if not keep:
