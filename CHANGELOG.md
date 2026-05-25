@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.13] - 2026-05-25
+
+### Fixed
+- **`lib/secret-scan.sh` regex fallback could not distinguish a broken scanner from a real match — grep rc≥2 was mis-handled (#189, uberscan MAJOR).** The fallback used `if printf … | grep …; then return 1; fi; return 0`, collapsing grep's tri-state exit (`0`=match, `1`=no-match, `≥2`=regex/I-O error) into a binary. A grep **error** (rc≥2 — e.g. a malformed future pattern making grep exit `2` on every call) fell through to `return 0`, so a broken scanner reported every input as **clean** with no diagnostic (fail-OPEN), and in no case was a scanner error distinguishable from a real secret match. The fallback now captures grep's rc explicitly via `… >&2 || grep_rc=$?` (errexit-safe) and branches: `0`→`return 1` (secret found, fail-CLOSED), `1`→`return 0` (clean), `≥2`→emit a distinct stderr diagnostic naming the scanner failure (never "secret found") and `return` grep's own rc — fail-CLOSED on a code distinct from the match code `1`, so a broken scanner is loud and unmistakable. The gitleaks primary path is unchanged. Regression-locked by new `tests/secret-scan.test.sh` (S1 clean→0, S2 match→1, S3 grep rc≥2→distinct diagnostic + fail-CLOSED), registered in both CI jobs.
+
+### Changed
+- Version bumped to 0.33.13 across `plugin.json`, `marketplace.json`, the README badge, and the test version ratchets (`goal.test.sh` G20, `solve-claim.test.sh`).
+
 ## [0.33.12] - 2026-05-25
 
 ### Fixed
