@@ -7,7 +7,7 @@
 # Tilde does NOT expand inside double quotes nor on the RHS of a quoted
 # assignment (verified bash AND zsh), so `git worktree add "$path"` created a
 # directory literally named "~" under the cwd instead of under $HOME. The case
-# pattern on the same arm had the identical hazard. Fix: expand explicitly with
+# pattern on the same arm was also tilde-fragile. Fix: expand explicitly with
 # ${HOME} and match LOCATION in both its literal-"~/" and expanded-"$HOME/"
 # forms. These assertions lock that in.
 
@@ -68,6 +68,10 @@ assert_grep "$SKILL" '"\$HOME"/\.config/uberdev/worktrees/' \
 # the global branch is still selected when LOCATION arrives unexpanded.
 assert_grep "$SKILL" '"~/\.config/uberdev/worktrees/"' \
   "W4.case-matches-literal-tilde-form"
+# Defensive (surfaced in #205 review): the case block must fail loudly on an
+# unrecognized LOCATION rather than silently leave $path unset for git worktree.
+assert_grep "$SKILL" 'unrecognized worktree LOCATION' \
+  "W5.case-has-loud-default-arm"
 
 echo
 echo "== Summary =="

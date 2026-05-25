@@ -94,6 +94,12 @@ case $LOCATION in
   "$HOME"/.config/uberdev/worktrees/*|"~/.config/uberdev/worktrees/"*)
     path="${HOME}/.config/uberdev/worktrees/$project/$BRANCH_NAME"
     ;;
+  *)
+    # No silent fall-through: an unrecognized LOCATION must fail loudly rather
+    # than leave $path unset for the `git worktree add "$path"` below.
+    echo "ERROR: unrecognized worktree LOCATION '$LOCATION' — expected '.worktrees', 'worktrees', or a '~/.config/uberdev/worktrees/...' path." >&2
+    exit 1
+    ;;
 esac
 
 # Create worktree with new branch
