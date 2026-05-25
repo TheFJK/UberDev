@@ -21,8 +21,11 @@ _UBERDEV_SECRET_SCAN_LOADED=1
 
 # uberdev_run_secret_scan_stdin
 #   Reads candidate text from stdin. Returns:
-#     0 — clean (no secret detected)
-#     non-zero — secret detected OR gitleaks crashed (fail-CLOSED on both)
+#     0    — clean (no secret detected)
+#     1    — secret detected (fail-CLOSED)
+#     >=2  — scanner itself failed: gitleaks crashed OR the regex-fallback grep
+#            errored (fail-CLOSED on a code distinct from the match code 1, so a
+#            broken scanner is never silently clean nor mistaken for a real leak)
 #   Layered scan: gitleaks primary (when installed), regex fallback always.
 uberdev_run_secret_scan_stdin() {
   # Primary: gitleaks (when installed). gitleaks exits 0 if no leaks found,

@@ -39,12 +39,13 @@ else
   rc=$?; echo "  FAIL  S1 clean input must return 0 (sub-rc=$rc)"; FAIL=$((FAIL+1))
 fi
 
-# S2 — genuine match (canonical AWS example key, grep rc=0 / gitleaks rc=1) ->
-# return EXACTLY 1, and the diagnostic is a real match, NOT a scanner-failure
-# message. The key is assembled at runtime ("AKIA" + the rest) so this fixture
-# file does not itself trip the secret scanner — the flaggable token never
-# appears contiguously in the source, yet the full key still reaches the
-# function at runtime.
+# S2 — genuine match (canonical AWS example key) -> return EXACTLY 1 via whichever
+# layer fires first: gitleaks (rc=1, when installed) takes precedence, else the
+# regex fallback (grep rc=0 -> return 1). Either way the result is 1 and the
+# diagnostic is a real match, NOT a scanner-failure message. The key is assembled
+# at runtime ("AKIA" + the rest) so this fixture file does not itself trip the
+# secret scanner — the flaggable token never appears contiguously in the source,
+# yet the full key still reaches the function at runtime.
 if ( CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" bash -c '
       set -u
       source "$CLAUDE_PLUGIN_ROOT/lib/secret-scan.sh" >/dev/null 2>&1 || exit 99
