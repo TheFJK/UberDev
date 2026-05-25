@@ -70,7 +70,7 @@ uberdev_rate_limit_curl() {
   until mkdir "$LOCK" 2>/dev/null; do sleep 0.01; done
   trap 'rmdir "$LOCK" 2>/dev/null || true' RETURN
 
-  local NOW_MS LAST_MS DELAY_S
+  local NOW_MS LAST_MS DELAY_S RELEASE_MS SLEPT
   # GNU date supports %3N (ms); BSD date (macOS) silently emits literal "3N".
   # Fall back to python3 when output is not purely numeric (handles both EXIT-fail and quiet-misformat).
   NOW_MS="$(date +%s%3N 2>/dev/null || true)"
@@ -80,22 +80,25 @@ uberdev_rate_limit_curl() {
   LAST_MS="$(cat "$STATE" 2>/dev/null || echo 0)"
   # Defensive: corruption in state file -> re-pace from zero rather than crash on arithmetic.
   [[ "$LAST_MS" =~ ^[0-9]+$ ]] || LAST_MS=0
-  # Per-call interval is 1000/RPS_CAP ms. Compute the delay in FLOAT (fold the division
-  # into the awk math) so a non-integral 1000/RPS_CAP is not truncated before subtracting
-  # the elapsed time. Integer truncation under-delays and exceeds the cap (#185, e.g.
-  # cap=600 -> 1.667ms, not 1ms ~= 67% over). Sleep only when the float delay is > 0.
-  DELAY_S="$(awk -v cap="$RPS_CAP" -v now="$NOW_MS" -v last="$LAST_MS" \
-    'BEGIN{ d = (1000.0 / cap) - (now - last); if (d < 0) d = 0; printf "%.6f", d / 1000.0 }')"
-  if awk -v s="$DELAY_S" 'BEGIN{ exit !(s > 0) }'; then
+  # Per-call interval is 1000/RPS_CAP ms. ONE awk pass computes everything in FLOAT (the division
+  # folded in) so a non-integral 1000/RPS_CAP is not truncated before subtracting the elapsed time —
+  # integer truncation under-delays and exceeds the cap (#185, e.g. cap=600 -> 1.667ms not 1ms,
+  # ~67% over). It emits three fields: sleep seconds, the rounded release timestamp, and a 0/1 sleep
+  # flag (awk owns the float `> 0` test, so the shell never mis-reads "0.000000" as truthy).
+  # release = max(now, last + interval) keeps cumulative pacing exact under back-to-back calls; %.0f
+  # is round-half-to-even (can land ~0.5ms either side) but the max(now, ...) re-syncs to the real
+  # clock next call, so sub-ms rounding never accumulates into a cap violation.
+  read -r DELAY_S RELEASE_MS SLEPT <<EOF
+$(awk -v cap="$RPS_CAP" -v now="$NOW_MS" -v last="$LAST_MS" 'BEGIN{
+  interval = 1000.0 / cap
+  d = interval - (now - last); if (d < 0) d = 0
+  rel = last + interval; if (now > rel) rel = now
+  printf "%.6f %.0f %d", d / 1000.0, rel, (d > 0)
+}')
+EOF
+  if [ "$SLEPT" -eq 1 ]; then
     sleep "$DELAY_S"
-    # Advance the virtual release clock by the (float) interval so cumulative pacing stays
-    # exact under back-to-back calls: release = max(now, last + interval). Round to integer ms
-    # for the state file. awk's %.0f is round-half-to-even, so the stored release can land at
-    # most ~0.5ms either side of the true value; the max(now, last + interval) above re-syncs
-    # to the real clock on the next call, so this sub-ms rounding never accumulates into a cap
-    # violation.
-    NOW_MS="$(awk -v cap="$RPS_CAP" -v now="$NOW_MS" -v last="$LAST_MS" \
-      'BEGIN{ rel = last + (1000.0 / cap); if (now > rel) rel = now; printf "%.0f", rel }')"
+    NOW_MS="$RELEASE_MS"
   fi
   # Persist the release timestamp atomically. Check the write rc and fail LOUD: a swallowed
   # failure (full disk / RO fs / lost permission) leaves a stale timestamp that the next call

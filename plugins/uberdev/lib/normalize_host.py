@@ -50,7 +50,7 @@ def normalize_host(url: str) -> str | None:
         # Drop the FQDN root label so "host." and "host" share one bucket.
         host = host[:-1]
     if not host:
-        return None
+        return None  # host was a bare "." (root) — no usable bucket key
     return host
 
 
