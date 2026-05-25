@@ -1,0 +1,28 @@
+# Schema-deviating persona output (issue #191): a persona emitting `evidence`
+# as a truthy non-dict (a bare string or a list) instead of the documented dict
+# shape. has_evidence() raises ValueError on these; the per-finding loop must
+# catch+skip them, NOT crash the whole wave. Both findings carry a VALID
+# invariant (no_5xx) so they pass the invariant gate and reach the evidence
+# guard — the exact path that triggered the wave-killer.
+verdict: AUDITED
+findings:
+  - severity: major
+    persona: chaos_engineer
+    location: /checkout
+    invariant_violated: no_5xx
+    summary: evidence emitted as a bare string
+    detail: Persona returned evidence as free text instead of the dict shape.
+    evidence: "I saw a 500 error on /checkout after clicking Pay twice"
+    confidence: low
+  - severity: critical
+    persona: chaos_engineer
+    location: /login
+    invariant_violated: no_5xx
+    summary: evidence emitted as a list
+    detail: Persona returned evidence as a list of strings instead of a dict.
+    evidence:
+      - navigate to /login
+      - submit empty form
+      - observe 503
+    confidence: medium
+confidence: low

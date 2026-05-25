@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.15] - 2026-05-25
+
+### Fixed
+- **`testers-pipeline/aggregate.py` crashed the entire wave when one persona emitted `evidence` as a truthy non-dict (#191, uberscan MAJOR).** `has_evidence()` deliberately raises `ValueError` on a string/list `evidence` (the schema deviation its own comment anticipates), but the per-finding loop in `main()` had no `try/except` — so a single malformed persona output (`evidence: "free text"` or `evidence: [..]`, which survives `f.get("evidence") or {}` as a truthy value and reaches the type guard) propagated an uncaught `ValueError`. The aggregator aborted at the first offending finding **before `wave-N.yaml` was ever written**, discarding the valid findings from all 8 agents in that wave (and, because the uncaught exception exits 1, the wave loop additionally mis-read it as a polite-rate breach). Persona output is untrusted free-form agent YAML, so a schema deviation is *expected*, not exceptional — the guard meant to surface bad input instead weaponized one bad agent into a wave-killer. Fix: wrap the per-finding `has_evidence` call in `try/except ValueError`, mirroring the file's existing malformed-YAML skip-and-continue — log a one-line `warning: skipping finding with non-dict evidence in <path>: <err>` to stderr and `continue` to the next finding. `has_evidence`'s raise-on-bad-shape contract is preserved (the deviation is still surfaced, now as a logged warning rather than a crash), and the documented drop-contract holds (evidence-less findings are dropped, not fatal). Regression-guarded by `tests/testers-pipeline.test.sh` P11 (string + list evidence across one persona; the two well-formed personas' findings survive, both offenders dropped with one stderr warning each).
+
+### Changed
+- Version bumped to 0.33.15 across `plugin.json`, `marketplace.json`, the README badge, and the test version ratchets (`goal.test.sh` G20, `solve-claim.test.sh`).
+
 ## [0.33.14] - 2026-05-25
 
 ### Fixed

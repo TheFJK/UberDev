@@ -100,7 +100,21 @@ def main() -> int:
             inv = f.get("invariant_violated")
             if inv not in invariants:
                 continue
-            if not has_evidence(f.get("evidence") or {}):
+            try:
+                keep = has_evidence(f.get("evidence") or {})
+            except ValueError as e:
+                # Persona output is untrusted free-form agent YAML; a finding
+                # emitting evidence as a truthy non-dict (string/list) is an
+                # expected schema deviation, not a fatal condition. Mirror the
+                # malformed-YAML skip-and-continue above: log this one offender
+                # and drop it (per SKILL.md's drop-contract for evidence-less
+                # findings) so a single bad agent can't crash the aggregation
+                # and discard the valid findings from the rest of the wave.
+                print(f"warning: skipping finding with non-dict evidence in {path} "
+                      f"(location={f.get('location') or '?'}, invariant={inv}): {e}",
+                      file=sys.stderr)
+                continue
+            if not keep:
                 continue
             persona = f.get("persona") or "unknown"
             location = f.get("location") or ""
