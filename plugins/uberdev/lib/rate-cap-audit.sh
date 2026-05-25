@@ -12,6 +12,13 @@ uberdev_rate_cap_audit() {
   # Absolute dir of this lib so the embedded python can import the shared host normalizer
   # (normalize_host.py — the same single source of truth the runtime wrapper uses).
   local LIBDIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+  # Fail loud if the shared normalizer can't be located — an empty LIBDIR would otherwise
+  # `sys.path.insert(0, "")` (cwd) and silently import the wrong module or raise a cryptic
+  # ImportError inside the heredoc.
+  if [ -z "$LIBDIR" ] || [ ! -f "$LIBDIR/normalize_host.py" ]; then
+    echo "error: rate-cap-audit: normalize_host.py not found (lib dir: ${LIBDIR:-unset})" >&2
+    return 2
+  fi
   python3 - "$WAVE_YAML" "$CAP" "$OUT_YAML" "$LIBDIR" <<'PY'
 import sys, yaml, hashlib
 from collections import defaultdict

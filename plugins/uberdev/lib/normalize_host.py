@@ -23,10 +23,12 @@ CLI contract: ``normalize_host.py URL``
   * prints nothing and exits 3 when it cannot (no host, or scope-escape), so a shell
     caller can branch on the non-zero return code
 """
+from __future__ import annotations  # lazy annotations so `str | None` is safe on py3.8/3.9
+
 from urllib.parse import urlsplit
 
 
-def normalize_host(url):
+def normalize_host(url: str) -> str | None:
     """Return the canonical bare host for ``url`` to use as a per-host bucket key,
     or ``None`` if the URL has no parseable host or the host could escape per-host
     scoping (contains ``..`` or ``/``)."""

@@ -373,4 +373,34 @@ EOF
 }
 test_state_write_failure_surfaces
 
+# Case 20: a normalizer TOOL failure (python3 absent / crashes, rc not in {0,3}) surfaces a
+# DISTINCT loud error, not the generic "cannot parse host" — so an env failure is never
+# silently mistaken for a bad URL (post-impl-review hardening; mirrors #188 fail-loud).
+test_normalizer_tool_failure_surfaces() {
+  export RATE_STATE_DIR="$TEST_TMPDIR/toolfail-$RANDOM"
+  mkdir -p "$RATE_STATE_DIR"
+  export RPS_CAP=10
+  SHIM="$TEST_TMPDIR/toolfail-shim"; mkdir -p "$SHIM"
+  # python3 stub that fails like a missing/broken interpreter (rc 1, NOT the normalizer's reject rc 3)
+  cat > "$SHIM/python3" <<'EOF'
+#!/usr/bin/env bash
+echo "simulated python3 failure" >&2
+exit 1
+EOF
+  cat > "$SHIM/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$SHIM/python3" "$SHIM/curl"
+  OLD_PATH="$PATH"; export PATH="$SHIM:$PATH"
+  . "$REPO_ROOT/plugins/uberdev/lib/rate-limit-curl.sh"
+  out=$(uberdev_rate_limit_curl "http://toolfail.test/x" 2>&1) && { export PATH="$OLD_PATH"; fail "$FUNCNAME" "expected non-zero exit when normalizer tool fails"; return; }
+  rc=$?
+  export PATH="$OLD_PATH"
+  [ "$rc" -ne 0 ] || { fail "$FUNCNAME" "expected non-zero exit, got $rc"; return; }
+  echo "$out" | grep -qi "normalizer failed" || { fail "$FUNCNAME" "stderr lacks distinct tool-failure message (got: $out)"; return; }
+  pass "$FUNCNAME"
+}
+test_normalizer_tool_failure_surfaces
+
 exit "$FAILS"

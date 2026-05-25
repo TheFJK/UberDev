@@ -48,13 +48,18 @@ uberdev_rate_limit_curl() {
   # normalize_host.py, also imported by rate-cap-audit.sh). It lowercases, strips
   # userinfo + :port, drops a trailing dot, and rejects scope-escape hosts (`..`/`/`) —
   # so a@host / Host / host:443 / host. all map to ONE bucket and the cap can't be
-  # bypassed by varying the authority (#184). A non-zero rc (incl. python3 absent) or an
-  # empty host means the URL has no usable host.
-  local HOST
-  if ! HOST="$(python3 "$_UBERDEV_RATE_LIMIT_LIBDIR/normalize_host.py" "$URL" 2>/dev/null)" || [ -z "$HOST" ]; then
-    echo "rate-limit-curl: cannot parse host from URL: $URL" >&2
-    return 2
+  # bypassed by varying the authority (#184).
+  [ -n "$_UBERDEV_RATE_LIMIT_LIBDIR" ] && [ -f "$_UBERDEV_RATE_LIMIT_LIBDIR/normalize_host.py" ] || {
+    echo "rate-limit-curl: normalize_host.py not found (lib dir: ${_UBERDEV_RATE_LIMIT_LIBDIR:-unset})" >&2; return 2; }
+  local HOST HOST_RC=0
+  HOST="$(python3 "$_UBERDEV_RATE_LIMIT_LIBDIR/normalize_host.py" "$URL" 2>/dev/null)" || HOST_RC=$?
+  # normalize_host.py contract: rc 0 + nonempty host = ok; rc 3 = URL has no usable host.
+  # Any OTHER rc (python3 absent, import/runtime error) is a TOOL failure — surface it
+  # distinctly so it is never silently mistaken for a bad URL (fail loud, mirrors #188).
+  if [ "$HOST_RC" -ne 0 ] && [ "$HOST_RC" -ne 3 ]; then
+    echo "rate-limit-curl: host normalizer failed (python3 rc=$HOST_RC) for URL: $URL" >&2; return 2
   fi
+  [ "$HOST_RC" -eq 0 ] && [ -n "$HOST" ] || { echo "rate-limit-curl: cannot parse host from URL: $URL" >&2; return 2; }
 
   local HOST_DIR="$RATE_STATE_DIR/$HOST"
   mkdir -p "$HOST_DIR"
@@ -84,9 +89,11 @@ uberdev_rate_limit_curl() {
   if awk -v s="$DELAY_S" 'BEGIN{ exit !(s > 0) }'; then
     sleep "$DELAY_S"
     # Advance the virtual release clock by the (float) interval so cumulative pacing stays
-    # exact under back-to-back calls: release = max(now, last + interval). Round to integer
-    # ms for the state file (a half-ms-conservative round only ever over-delays, staying
-    # under the cap — the safe direction for a rate gate).
+    # exact under back-to-back calls: release = max(now, last + interval). Round to integer ms
+    # for the state file. awk's %.0f is round-half-to-even, so the stored release can land at
+    # most ~0.5ms either side of the true value; the max(now, last + interval) above re-syncs
+    # to the real clock on the next call, so this sub-ms rounding never accumulates into a cap
+    # violation.
     NOW_MS="$(awk -v cap="$RPS_CAP" -v now="$NOW_MS" -v last="$LAST_MS" \
       'BEGIN{ rel = last + (1000.0 / cap); if (now > rel) rel = now; printf "%.0f", rel }')"
   fi
