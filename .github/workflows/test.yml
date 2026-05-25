@@ -14,7 +14,7 @@ jobs:
   shape-checks:
     name: shape-checks
     runs-on: ubuntu-latest
-    # 5 minutes is generous for ~70 grep-and-assert checks on the small repo.
+    # 5 minutes is generous for the ~330 grep-and-assert checks (44 test files).
     # Caps the default 360-min budget so a hung test from a fork PR can't burn
     # the public-repo Actions allowance. Bump if the suite legitimately grows.
     timeout-minutes: 5
@@ -32,14 +32,24 @@ jobs:
         # needs the zsh binary, not the recommends graph).
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
       - name: Run shape-check tests
-        # SYNC: this list MUST match the windows-latest job below, plus the
-        # zsh fixture, testers-pipeline, AND the uberscan trio
-        # (uberscan.test.sh / uberscan-report.test.sh / uberscan-chunk.test.sh)
-        # — all Unix-runtime fixtures the Windows job intentionally skips
-        # (they shell out to python3 -c with mktemp -d paths Git Bash on
-        # Windows mistranslates). When a test file is added or removed, update
-        # BOTH jobs by hand — there is no automated drift guard between the
-        # two lists.
+        # SYNC: this list MUST match the windows-latest job below, PLUS the
+        # ubuntu-only Unix-runtime fixtures the Windows job intentionally skips:
+        #   - solve-pipeline-zsh.test.sh         (needs zsh on PATH)
+        #   - testers-pipeline.test.sh           (python3 -c with mktemp -d paths
+        #                                         Git Bash on Windows mistranslates)
+        #   - uberscan.test.sh / uberscan-report.test.sh / uberscan-chunk.test.sh
+        #                                         (same python3 -c + path reason)
+        #   - merge-discovery-resilience.test.sh (executes the executable fake-gh
+        #                                         fixture via PATH + sources
+        #                                         lib/discover.sh — neither proven
+        #                                         on Git Bash; the fixture's +x bit
+        #                                         is not reliably preserved on a
+        #                                         Windows checkout) [#196]
+        #   - testers-agent-contract.test.sh / testers-rate-limit-audit.test.sh /
+        #     testers-rate-limit-wrapper.test.sh (python3 + PyYAML, same reason as
+        #                                         testers-pipeline) [#196]
+        # When a test file is added or removed, update BOTH jobs by hand — there
+        # is no automated drift guard between the two lists.
         run: |
           bash tests/turbo-flow.test.sh && \
           bash tests/issue-causal-fanout.test.sh && \
@@ -49,9 +59,14 @@ jobs:
           bash tests/audit-fixups.test.sh && \
           bash tests/review-pr.test.sh && \
           bash tests/review-pr-phase3-ci.test.sh && \
+          bash tests/code-fixer-dispatch.test.sh && \
+          bash tests/findings-to-issues.test.sh && \
+          bash tests/trust-trail-evaluator.test.sh && \
           bash tests/finish-branch-auto-chain.test.sh && \
+          bash tests/finish-branch.test.sh && \
           bash tests/secret-scan.test.sh && \
           bash tests/aliases.test.sh && \
+          bash tests/install.test.sh && \
           bash tests/merge.test.sh && \
           bash tests/ghostty-dispatch-no-instance-leak.test.sh && \
           bash tests/dispatch-claude-bg.test.sh && \
@@ -69,9 +84,14 @@ jobs:
           bash tests/dispatch-wezterm.test.sh && \
           bash tests/ubersimplify.test.sh && \
           bash tests/ubersimplify-aggregate.test.sh && \
+          bash tests/simplify.test.sh && \
           bash tests/uberscan.test.sh && \
           bash tests/uberscan-report.test.sh && \
           bash tests/uberscan-chunk.test.sh && \
+          bash tests/merge-discovery-resilience.test.sh && \
+          bash tests/testers-agent-contract.test.sh && \
+          bash tests/testers-rate-limit-audit.test.sh && \
+          bash tests/testers-rate-limit-wrapper.test.sh && \
           bash tests/goal-state-sidecar.test.sh && \
           bash tests/using-git-worktrees.test.sh && \
           bash tests/goal.test.sh
@@ -91,23 +111,33 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Run shape-check tests
-        # No zsh on windows-latest Git Bash; solve-pipeline-zsh.test.sh is a
-        # Unix-runtime fixture and is intentionally skipped here. Every other
-        # test is a portable grep-and-assert shape-check.
+        # This list MUST match the ubuntu-latest job above MINUS the ubuntu-only
+        # Unix-runtime fixtures, which are intentionally skipped here because Git
+        # Bash on Windows can't run them reliably:
+        #   - solve-pipeline-zsh.test.sh         (no zsh on windows-latest)
+        #   - testers-pipeline.test.sh + testers-agent-contract.test.sh +
+        #     testers-rate-limit-audit.test.sh + testers-rate-limit-wrapper.test.sh
+        #                                         (python3 + PyYAML; the python3 -c
+        #                                         invocations embed mktemp -d paths
+        #                                         that resolve to /tmp/... strings
+        #                                         python.exe can't translate)
+        #   - uberscan.test.sh / uberscan-report.test.sh / uberscan-chunk.test.sh
+        #                                         (same python3 -c + path reason)
+        #   - merge-discovery-resilience.test.sh (executes the executable fake-gh
+        #                                         fixture via PATH + sources
+        #                                         lib/discover.sh — neither proven
+        #                                         on Git Bash) [#196]
         #
-        # testers-pipeline.test.sh is ALSO a Unix-runtime fixture — it shells
-        # out to python3 with `$SCRATCH/...` paths assembled by mktemp -d,
-        # which on Git Bash for Windows resolve to /tmp/... strings that
-        # python.exe can't translate when they're embedded inside `python3 -c`
-        # source code. The aggregator itself is portable, but the per-assertion
-        # python3 -c invocations are not — skipped here, runs on Linux.
-        #
-        # SYNC: this list MUST match the ubuntu-latest job above, minus the
-        # zsh fixture, testers-pipeline, AND the uberscan trio
-        # (uberscan.test.sh / uberscan-report.test.sh / uberscan-chunk.test.sh)
-        # — all Unix-runtime fixtures intentionally skipped here. When a test
-        # file is added or removed, update BOTH jobs by hand — there is no
-        # automated drift guard between the two lists.
+        # Every test below is a portable grep-and-assert shape-check OR a runtime
+        # fixture whose mechanism already runs green on this job. The #196
+        # additions reuse: the _lib_assert_structural.sh awk-range lib
+        # (code-fixer-dispatch / findings-to-issues / finish-branch / simplify /
+        # trust-trail-evaluator); the `bash -c … uberdev_run_secret_scan_stdin`
+        # pattern (finish-branch, mirroring secret-scan.test.sh); lib/config-read.sh
+        # runtime (findings-to-issues, mirroring config-override.test.sh); and
+        # chmod+x-stub execution (install, mirroring solve-effort-flag.test.sh).
+        # When a test file is added or removed, update BOTH jobs by hand — there
+        # is no automated drift guard between the lists.
         run: |
           bash tests/turbo-flow.test.sh && \
           bash tests/issue-causal-fanout.test.sh && \
@@ -116,9 +146,14 @@ jobs:
           bash tests/audit-fixups.test.sh && \
           bash tests/review-pr.test.sh && \
           bash tests/review-pr-phase3-ci.test.sh && \
+          bash tests/code-fixer-dispatch.test.sh && \
+          bash tests/findings-to-issues.test.sh && \
+          bash tests/trust-trail-evaluator.test.sh && \
           bash tests/finish-branch-auto-chain.test.sh && \
+          bash tests/finish-branch.test.sh && \
           bash tests/secret-scan.test.sh && \
           bash tests/aliases.test.sh && \
+          bash tests/install.test.sh && \
           bash tests/merge.test.sh && \
           bash tests/ghostty-dispatch-no-instance-leak.test.sh && \
           bash tests/dispatch-claude-bg.test.sh && \
@@ -135,6 +170,7 @@ jobs:
           bash tests/dispatch-wezterm.test.sh && \
           bash tests/ubersimplify.test.sh && \
           bash tests/ubersimplify-aggregate.test.sh && \
+          bash tests/simplify.test.sh && \
           bash tests/goal-state-sidecar.test.sh && \
           bash tests/using-git-worktrees.test.sh && \
           bash tests/goal.test.sh
