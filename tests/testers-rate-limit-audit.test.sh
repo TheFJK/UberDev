@@ -104,4 +104,81 @@ EOF
 }
 test_audit_per_host_scoping_no_breach
 
+# Same host split across userinfo/case/port/trailing-dot must group into ONE host (#186).
+# 18 requests in a 1s window, cap=10: correct normalization -> 18 > 10 -> breach; the pre-fix
+# full-authority grouping splits them into 6 groups of 3 (<= cap) -> no breach. Fails on the bug.
+test_audit_groups_authority_variants_as_one_host() {
+  WAVE="$TEST_TMPDIR/wave-variants.yaml"
+  python3 - "$WAVE" <<'EOF'
+import yaml, sys
+base = 1763729400000
+variants = [
+    "https://api.example.test/p",
+    "https://a@api.example.test/p",
+    "https://b@api.example.test/p",
+    "https://API.EXAMPLE.TEST/p",
+    "https://api.example.test:443/p",
+    "https://api.example.test./p",
+]
+findings = []
+for i in range(18):
+    findings.append({
+        "id": f"f{i}", "severity": "high", "persona": "adversarial_security",
+        "evidence": {"network_request": {
+            "url": variants[i % len(variants)], "method": "GET", "status": 200,
+            "timestamp": base + i * 50}}})
+with open(sys.argv[1], "w") as fh:
+    yaml.safe_dump({"findings": findings}, fh)
+EOF
+  OUT="$TEST_TMPDIR/wave-variants.audited.yaml"
+  . "$REPO_ROOT/plugins/uberdev/lib/rate-cap-audit.sh"
+  uberdev_rate_cap_audit "$WAVE" 10 "$OUT" && { fail "$FUNCNAME" "expected exit 1 (breach across normalized host)"; return; }
+  rc=$?
+  [ "$rc" -eq 1 ] || { fail "$FUNCNAME" "expected exit 1, got $rc"; return; }
+  grep -q "invariant_violated: polite_rate_cap" "$OUT" || { fail "$FUNCNAME" "variants not grouped -> no breach (#186 not fixed)"; return; }
+  grep -q "location: api.example.test" "$OUT" || { fail "$FUNCNAME" "breach not keyed on normalized host 'api.example.test'"; return; }
+  pass "$FUNCNAME"
+}
+test_audit_groups_authority_variants_as_one_host
+
+# cap=0 must be rejected with a clear range error, not silently flag every request (#187).
+test_audit_rejects_cap_zero() {
+  WAVE="$TEST_TMPDIR/wave-cap0.yaml"; printf 'findings: []\n' > "$WAVE"
+  OUT="$TEST_TMPDIR/wave-cap0.audited.yaml"
+  . "$REPO_ROOT/plugins/uberdev/lib/rate-cap-audit.sh"
+  out=$(uberdev_rate_cap_audit "$WAVE" 0 "$OUT" 2>&1) && { fail "$FUNCNAME" "expected non-zero exit for cap=0"; return; }
+  rc=$?
+  [ "$rc" -ne 0 ] || { fail "$FUNCNAME" "cap=0 must be rejected, got rc $rc"; return; }
+  echo "$out" | grep -q "\[1, 1000\]" || { fail "$FUNCNAME" "stderr lacks range message: $out"; return; }
+  pass "$FUNCNAME"
+}
+test_audit_rejects_cap_zero
+
+# cap=-5 must be rejected (negative cap would flag everything) (#187).
+test_audit_rejects_cap_negative() {
+  WAVE="$TEST_TMPDIR/wave-capneg.yaml"; printf 'findings: []\n' > "$WAVE"
+  OUT="$TEST_TMPDIR/wave-capneg.audited.yaml"
+  . "$REPO_ROOT/plugins/uberdev/lib/rate-cap-audit.sh"
+  out=$(uberdev_rate_cap_audit "$WAVE" -5 "$OUT" 2>&1) && { fail "$FUNCNAME" "expected non-zero exit for cap=-5"; return; }
+  rc=$?
+  [ "$rc" -ne 0 ] || { fail "$FUNCNAME" "cap=-5 must be rejected, got rc $rc"; return; }
+  echo "$out" | grep -q "\[1, 1000\]" || { fail "$FUNCNAME" "stderr lacks range message: $out"; return; }
+  pass "$FUNCNAME"
+}
+test_audit_rejects_cap_negative
+
+# Non-numeric cap must fail with a clear message, not an uncaught ValueError traceback (#187).
+test_audit_rejects_cap_non_numeric() {
+  WAVE="$TEST_TMPDIR/wave-capnan.yaml"; printf 'findings: []\n' > "$WAVE"
+  OUT="$TEST_TMPDIR/wave-capnan.audited.yaml"
+  . "$REPO_ROOT/plugins/uberdev/lib/rate-cap-audit.sh"
+  out=$(uberdev_rate_cap_audit "$WAVE" abc "$OUT" 2>&1) && { fail "$FUNCNAME" "expected non-zero exit for cap=abc"; return; }
+  rc=$?
+  [ "$rc" -ne 0 ] || { fail "$FUNCNAME" "cap=abc must be rejected, got rc $rc"; return; }
+  echo "$out" | grep -qi "integer" || { fail "$FUNCNAME" "stderr lacks a clear integer error: $out"; return; }
+  echo "$out" | grep -q "Traceback" && { fail "$FUNCNAME" "raw Python traceback leaked: $out"; return; }
+  pass "$FUNCNAME"
+}
+test_audit_rejects_cap_non_numeric
+
 exit "$FAILS"

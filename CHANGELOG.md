@@ -4,6 +4,19 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.12] - 2026-05-25
+
+### Fixed
+- **`/uberdev:testers` per-host RPS cap was bypassable and its audit blind to the bypass — rate-limit cluster (#184, #185, #186, #187, #188; uberscan MAJOR ×5).** The runtime wrapper (`lib/rate-limit-curl.sh`) and the post-hoc auditor (`lib/rate-cap-audit.sh`) both keyed per-host buckets/groups on a naive `scheme://([^/?#]+)` authority capture, so `a@host` / `b@host` / `Host` / `host:443` / `host.` each got a DISTINCT bucket — defeating the cap (#184) and letting the same variants evade the audit meant to detect the bypass (#186). Five coherent fixes:
+  - **#184 + #186 (shared root cause).** Introduced one canonical host normalizer, `lib/normalize_host.py`, built on `urllib.parse.urlsplit().hostname` (the hardened stdlib URL parser — lowercases, strips userinfo + `:port`, de-brackets IPv6) plus a trailing-dot drop and the historic `..`/`/` scope-escape reject. Both files now key on it (the wrapper calls it as a subprocess; the audit imports it), so all authority variants of one host collapse to a single bucket/group. No more duplicated, drift-prone host parsing.
+  - **#185.** `DELAY_MS=$(( (1000 / RPS_CAP) - … ))` truncated `1000/RPS_CAP` to an integer before subtracting elapsed time, under-delaying for any non-integral interval (cap=600 → 1ms instead of 1.667ms, ~67% over cap). The interval is now computed in float (folded into the awk math) and gated on `> 0`.
+  - **#187.** The auditor did `cap = int(cap_str)` with no range check (cap=0 flagged every request; a negative cap flagged everything) and raised an uncaught `ValueError` (cryptic traceback) on non-numeric input. It now validates to `[1, 1000]` like the runtime wrapper and exits non-zero with a clear stderr message — no traceback.
+  - **#188.** `printf … > "$STATE.tmp" && mv -f …` ignored the `printf` return code; on a failed write the `&&` short-circuited, the state file kept a stale timestamp, and the next call silently re-paced from it. The write rc is now checked and the wrapper fails loud (exit 2) rather than corrupting the rate gate silently.
+  - Regression-locked by new assertions in `tests/testers-rate-limit-wrapper.test.sh` (normalizer collapses `a@host`/`Host`/`host:443` identically; wrapper buckets variants into one state dir; cap=600 yields the float delay; a state-write failure surfaces) and `tests/testers-rate-limit-audit.test.sh` (variants group as one host → breach; cap=0/-5/non-numeric rejected). These two suites remain orphaned from CI (tracked separately by #196).
+
+### Changed
+- Version bumped to 0.33.12 across `plugin.json`, `marketplace.json`, the README badge, and the test version ratchets (`goal.test.sh` G20, `solve-claim.test.sh`).
+
 ## [0.33.11] - 2026-05-25
 
 ### Fixed
