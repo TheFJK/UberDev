@@ -4,6 +4,15 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.19] - 2026-05-26
+
+### Added
+- **Wired the 10 orphaned `tests/*.test.sh` files into the CI matrix (`.github/workflows/test.yml`), so important surfaces that previously never ran in CI are now covered (#196, uberscan MAJOR).** A `/uberscan` whole-codebase pass found 10 test files present on disk but absent from both CI jobs — `code-fixer-dispatch`, `findings-to-issues`, `finish-branch`, `install`, `merge-discovery-resilience`, `simplify`, `testers-agent-contract`, `testers-rate-limit-audit`, `testers-rate-limit-wrapper`, `trust-trail-evaluator` — covering rate-limit enforcement, merge-discovery resilience, the code-fixer dispatch contract, findings→issues, trust-trail evaluation, and the installer bootstrap, none of which were regression-guarded by CI. Each test was **run locally and confirmed passing before wiring** (the PR's own CI then executes them). Job placement was decided by Git-Bash portability, mirroring the existing `solve-pipeline-zsh` / `testers-pipeline` / `uberscan`-trio precedent: 6 pure shape-check / proven-portable-runtime tests (`code-fixer-dispatch`, `findings-to-issues`, `finish-branch`, `install`, `simplify`, `trust-trail-evaluator`) run on **both** the ubuntu and windows shape-check jobs; 4 Unix-runtime tests run **ubuntu-only** — `merge-discovery-resilience` (executes an executable `fake-gh` fixture via PATH + sources `lib/discover.sh`, neither proven on Git Bash) and the three `testers-*` tests (`python3` + PyYAML, the same reason `testers-pipeline` is ubuntu-only). The `both`-job placements are each backed by an existing Windows-green precedent: `_lib_assert_structural.sh` (used by `review-pr.test.sh` et al.), `lib/config-read.sh` runtime (via `config-override.test.sh`), the `bash -c … uberdev_run_secret_scan_stdin` pattern (via `secret-scan.test.sh`), and chmod+x-stub execution (via `solve-effort-flag.test.sh`).
+- **Investigated and dismissed the issue's "orphaned test of a nonexistent `agents/code-fixer.md`" concern.** The uberscan finding flagged `code-fixer-dispatch.test.sh` as referencing a missing agent file; the test actually references `plugins/uberdev/agents/code-fixer.md` (present, 7979 bytes) and passes — the agent exists, so the test was wired normally with no fabricated file.
+
+### Changed
+- Version bumped to 0.33.19 across `plugin.json`, `marketplace.json`, the README badge, and the test version ratchets (`goal.test.sh` G20, `solve-claim.test.sh`).
+
 ## [0.33.18] - 2026-05-26
 
 ### Fixed
