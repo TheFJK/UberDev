@@ -1720,7 +1720,6 @@ fi
 
 echo
 echo "== M84: commands/merge.md Autopilot paragraph mentions auto_review_on_merge (#89) =="
-CMD_FILE="plugins/uberdev/commands/merge.md"
 if awk '/\*\*Autopilot:\*\*/,/^## /' "$CMD_FILE" | grep -q 'auto_review_on_merge'; then
   pass "M84 — commands/merge.md Autopilot paragraph cites auto_review_on_merge (spec C3.1)"
 else

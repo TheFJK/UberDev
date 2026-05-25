@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.14] - 2026-05-25
+
+### Fixed
+- **`tests/merge.test.sh` reassigned `CMD_FILE` to a relative path mid-suite — cwd-dependent FAILs + a structural false-green in the M87.13 env-var tombstone (#190, uberscan MAJOR).** Line 60 sets `CMD_FILE` to the absolute `$REPO_ROOT/plugins/uberdev/commands/merge.md` and the rest of the 1929-line suite is cwd-independent, but line 1723 silently overwrote it with the relative literal `plugins/uberdev/commands/merge.md` (the only relative path in the file). Run from any dir other than the repo root, M84/M85 emitted spurious FAILs, and — worse — M87.13's negative guard `grep -qE "UBERDEV_${TOKEN}|…" "$CMD_FILE" "$SKILL_FILE"` could not open the unresolved relative `CMD_FILE`, so the tombstone asserting "no env-var variant exists for the deferral flags" PASSED without ever scanning `merge.md`: a future edit reintroducing an env-var variant would slip past the guard whenever the suite ran from a non-root cwd (e.g. a CI scratch dir). The suite passed before only because it happened to be launched from the repo root. Fix: delete line 1723 — the absolute `CMD_FILE` from line 60 is already in scope and correct, so M84/M85/M87.13 now scan `merge.md` regardless of cwd. Regression-proven by running the suite from a non-root cwd (`cd /tmp && bash …/tests/merge.test.sh`) with M84/M85/M87.13 green, then re-running from the repo root.
+
+### Changed
+- Version bumped to 0.33.14 across `plugin.json`, `marketplace.json`, the README badge, and the test version ratchets (`goal.test.sh` G20, `solve-claim.test.sh`).
+
 ## [0.33.13] - 2026-05-25
 
 ### Fixed
