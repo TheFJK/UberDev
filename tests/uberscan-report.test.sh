@@ -63,6 +63,39 @@ python3 "$REPORT" --run-id test --chunks-dir "$TMP/chunks" --min-severity critic
 check "min-severity=critical drops major finding" "! grep -q 'src/c.ts:5' \"$TMP/agg-crit.md\""
 check "min-severity=critical keeps blocker finding" "grep -q 'src/a.ts:42' \"$TMP/agg-crit.md\""
 
+# === #193: 'important' demoted below 'major' so --min-severity is a true total order ===
+# SEV_RANK previously tied major+important at 2, so --min-severity=major silently
+# filed important-tier findings. A fixture with BOTH a major and an important chunk
+# finding plus the two repo-global artifacts, in a SEPARATE dir so the golden $TMP
+# snapshots above stay byte-identical.
+SEVTMP="$(mktemp -d)"; mkdir -p "$SEVTMP/chunks"
+cat > "$SEVTMP/chunks/chunk-01-findings.yaml" <<'YAML'
+findings:
+  - {severity: major, location: "maj.ts:1", agent: code-reviewer, summary: "a major chunk finding", detail: d, confidence: high}
+  - {severity: important, location: "imp.ts:1", agent: code-reviewer, summary: "an important chunk finding", detail: d, confidence: high}
+YAML
+printf 'Semgrep SAST: 1 finding in maj.ts (rule: x)\n' > "$SEVTMP/chunks/global-security.md"
+printf 'Coverage: imp.ts has no test\n' > "$SEVTMP/chunks/global-coverage.md"
+
+# (1) --min-severity=major MUST now EXCLUDE the important chunk finding (the fix).
+python3 "$REPORT" --run-id t --chunks-dir "$SEVTMP/chunks" --min-severity major --emit-findings-to-issues-aggregate "$SEVTMP/agg-major.md"
+check "#193: --min-severity major keeps the major chunk finding" "grep -q 'maj.ts:1' \"$SEVTMP/agg-major.md\""
+check "#193: --min-severity major EXCLUDES the important chunk finding" "! grep -q 'imp.ts:1' \"$SEVTMP/agg-major.md\""
+# major and important must now produce DIFFERENT aggregates (no longer the same floor).
+python3 "$REPORT" --run-id t --chunks-dir "$SEVTMP/chunks" --min-severity important --emit-findings-to-issues-aggregate "$SEVTMP/agg-imp.md"
+check "#193: --min-severity important keeps the important chunk finding" "grep -q 'imp.ts:1' \"$SEVTMP/agg-imp.md\""
+check "#193: major and important are no longer the SAME floor" "! diff -q \"$SEVTMP/agg-major.md\" \"$SEVTMP/agg-imp.md\" >/dev/null"
+
+# (2) COUPLED HAZARD (do not regress): the curated repo-global Semgrep + coverage
+# rows MUST still be filed at the default floor (major) — and even at a floor ABOVE
+# important (critical) — now that 'important' no longer rides the major tie.
+check "#193: global security row STILL filed at --min-severity major" "grep -q 'research-security' \"$SEVTMP/agg-major.md\""
+check "#193: global coverage row STILL filed at --min-severity major" "grep -q 'research-test-coverage' \"$SEVTMP/agg-major.md\""
+check "#193: global rows are repo:global scoped at the major floor" "grep -q 'repo:global' \"$SEVTMP/agg-major.md\""
+python3 "$REPORT" --run-id t --chunks-dir "$SEVTMP/chunks" --min-severity critical --emit-findings-to-issues-aggregate "$SEVTMP/agg-crit2.md"
+check "#193: curated global rows survive --min-severity critical too" "grep -q 'research-security' \"$SEVTMP/agg-crit2.md\""
+rm -rf "$SEVTMP"
+
 # Cross-reviewer confirmation: src/a.ts:42 was flagged by code-reviewer AND silent-failure-hunter
 check "aggregate notes cross-reviewer confirmation (also_flagged_by)" "grep -q '+silent-failure-hunter' \"$TMP/agg.md\""
 

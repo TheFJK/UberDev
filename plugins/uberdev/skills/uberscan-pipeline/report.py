@@ -12,7 +12,11 @@ from report_primitives import cell, envelope, sort_by_rank  # noqa: E402
 
 # Cap on per-file hotspot rows shown in the report and totals.json sidecar.
 HOTSPOT_TOP_N = 15
-SEV_RANK = {"blocker": 4, "critical": 3, "major": 2, "important": 2, "suggestion": 1}
+# Strict total order (#193): `important` MUST rank below `major` so the
+# --min-severity floor can distinguish them. A prior major==important tie made
+# severities_at_or_above("major") == severities_at_or_above("important"), so
+# --min-severity=major silently filed every important-tier finding.
+SEV_RANK = {"blocker": 5, "critical": 4, "major": 3, "important": 2, "suggestion": 1}
 # Severities eligible for issue filing (suggestion is always report-only).
 # Narrowed further at emit time by --min-severity.
 ISSUE_SEVERITIES = {"blocker", "critical", "major", "important"}
@@ -117,29 +121,35 @@ def _write_totals_sidecar(sidecar_path, run_id, totals, hotspots):
         sys.exit(2)
 
 
-def _global_rows(allowed, sec, cov):
+def _global_rows(sec, cov):
     """Synthetic aggregate rows for the repo-global Phase-1b passes (Item 9 / D5):
     surface Semgrep SAST + test-coverage findings into the findings-to-issues
-    aggregate so they get filed as issues, not just shown in the report. Each
-    row is `important` severity at `repo:global`; emitted only when the artifact
-    is non-empty AND `important` is in the allowed (--min-severity) set. `sec`/`cov`
-    are the already-read global-security.md / global-coverage.md contents (read
-    once by the caller — D6 read-once consistency). The raw artifact text rides in
-    `detail` and is neutralized by cell() at render time (D7 — multi-line collapse
-    + close-tag neutralization)."""
+    aggregate so they get filed as issues, not just shown in the report.
+
+    These are CURATED pass-summary pointers (not raw reviewer findings), so they
+    are filed UNCONDITIONALLY whenever the artifact is non-empty — gated on
+    artifact presence, NOT on the chunk --min-severity floor (#193). They formerly
+    rode the major==important rank tie via `if "important" in allowed`; once that
+    tie was removed (so the floor became a true total order) that gate would have
+    silently dropped the SAST/coverage signal at the default --severity=major,
+    defeating the security/coverage pass /uberscan exists to surface.
+
+    `sec`/`cov` are the already-read global-security.md / global-coverage.md
+    contents (read once by the caller — D6 read-once consistency). The raw artifact
+    text rides in `detail` and is neutralized by cell() at render time (D7 —
+    multi-line collapse + close-tag neutralization)."""
     # Ordered (text, agent, summary) table — security row MUST stay before the
     # coverage row (golden aggregate order). Each row is emitted only when its
-    # artifact text is non-empty AND `important` is in the allowed set.
+    # artifact text is non-empty.
     specs = (
         (sec, "research-security", "Semgrep SAST findings (see report Global passes)"),
         (cov, "research-test-coverage", "Test-coverage gaps (see report Global passes)"),
     )
     rows = []
-    if "important" in allowed:
-        for text, agent, summary in specs:
-            if text:
-                rows.append({"severity": "important", "location": "repo:global",
-                             "agent": agent, "summary": summary, "detail": text})
+    for text, agent, summary in specs:
+        if text:
+            rows.append({"severity": "important", "location": "repo:global",
+                         "agent": agent, "summary": summary, "detail": text})
     return rows
 
 
@@ -225,7 +235,7 @@ def main():
         ]
         # Surface repo-global Semgrep + coverage findings into the aggregate so
         # SAST/coverage gaps get filed as issues, not just reported (Item 9 / D5).
-        aggregate_rows = issue_rows + _global_rows(allowed, global_sec, global_cov)
+        aggregate_rows = issue_rows + _global_rows(global_sec, global_cov)
         body = "| severity | location | agent | disposition | summary | detail |\n"
         body += "|---|---|---|---|---|---|\n"
         for f in aggregate_rows:

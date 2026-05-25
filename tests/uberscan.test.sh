@@ -64,6 +64,23 @@ ck "no standalone .overflow scalar jq read remains" "[ \$(grep -cE \"jq -r '\.ov
 # optional whitespace then '. ' (dot-space = shell source command).
 ck "config-read.sh sourced at most twice (actual . source ops; was 3x)" "[ \$(grep -cE '^[[:space:]]*\. .*lib/config-read\.sh' '$SKILL') -le 2 ]"
 
+echo "== #192: circuit-breaker halt + flood persisted to run-state.txt, reconstructed in Phase 4 =="
+# Every bash fence runs in a FRESH shell (each phase re-derives RUN_ID/RUN_DIR via
+# the #171 rehydration stanza), so a CB3/CB4/CB5 trip set only in memory in the
+# Phase-1 loop is invisible to Phase 4. It MUST be persisted to run-state.txt and
+# reconstructed there — exactly as OVERFLOW already is.
+ck "Phase 1 persists CB3 halt reason to run-state.txt" "grep -q 'CIRCUIT_BREAKER_HALT=CB3' '$SKILL'"
+ck "Phase 1 persists CB4 halt reason to run-state.txt" "grep -q 'CIRCUIT_BREAKER_HALT=CB4' '$SKILL'"
+ck "Phase 1 persists CB5 halt reason to run-state.txt" "grep -q 'CIRCUIT_BREAKER_HALT=CB5' '$SKILL'"
+ck "Phase 1 persists FINDINGS_FLOOD=true to run-state.txt" "grep -q 'FINDINGS_FLOOD=true' '$SKILL'"
+# Phase 4 reconstructs the halt decision + flood banner by reading run-state.txt.
+ck "Phase 4 reconstructs halt by grepping CIRCUIT_BREAKER_HALT from run-state.txt" "grep -qE 'grep .*CIRCUIT_BREAKER_HALT' '$SKILL'"
+ck "Phase 4 reconstructs flood by grepping FINDINGS_FLOOD from run-state.txt" "grep -qE 'grep .*FINDINGS_FLOOD' '$SKILL'"
+ck "Phase 4 exit gate keys off reconstructed HALT_REASON" "grep -q 'HALT_REASON' '$SKILL'"
+# The brittle in-memory-only exit gate is gone: '\${CIRCUIT_BREAKER_HALT:-0}' = 1
+# defaulted to 0 in Phase 4's fresh shell — the exact #192 false-clean exit-0 bug.
+ck "old in-memory-only exit gate removed (CIRCUIT_BREAKER_HALT:-0 default)" "[ \$(grep -c 'CIRCUIT_BREAKER_HALT:-0' '$SKILL') -eq 0 ]"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [ $FAIL -eq 0 ] && exit 0 || exit 1
