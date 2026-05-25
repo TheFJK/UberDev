@@ -220,4 +220,50 @@ head -c 128 "$P10/agg.md" | grep -q '<external-untrusted-input source="testers-a
   || { echo "P10: close marker is not the trailer"; exit 1; }
 echo "PASS P10: testers aggregate carries spotlighting envelope + hardened cell()"
 
+# ----------------------------------------------------------------------
+# P11 (issue #191): a persona emitting `evidence` as a truthy non-dict
+#   (a bare string or a list) is a schema deviation has_evidence() flags
+#   with ValueError. The per-finding loop must catch+skip the offender and
+#   keep aggregating — one bad agent must NOT become a wave-killer that
+#   discards the valid findings from the other agents in the wave.
+#   Regression guard: try/except ValueError around the has_evidence call in
+#   aggregate.py main loop (mirrors the malformed-YAML skip-and-continue).
+# ----------------------------------------------------------------------
+P11="$SCRATCH/p11"
+mkdir -p "$P11/scratch/panicked-grandma" \
+         "$P11/scratch/power-user" \
+         "$P11/scratch/chaos-engineer"
+cp "$FIX/wave-1-grandma.yaml"            "$P11/scratch/panicked-grandma/out.yaml"
+cp "$FIX/wave-1-power-user.yaml"         "$P11/scratch/power-user/out.yaml"
+cp "$FIX/wave-1-bad-evidence-shape.yaml" "$P11/scratch/chaos-engineer/out.yaml"
+
+P11_ERR="$P11/stderr.log"
+# Running to completion under `set -e` is itself the core assertion: pre-fix,
+# the uncaught ValueError aborted aggregate.py before wave-1.yaml was written.
+python3 "$AGG" --run-id smoke --wave 1 --scratch-dir "$P11/scratch" \
+  --invariants "$INV" --rps-cap 10 --out "$P11/wave-1.yaml" 2> "$P11_ERR"
+
+[ -f "$P11/wave-1.yaml" ] || { echo "P11: aggregator produced no output (whole wave lost)"; exit 1; }
+python3 -c "import yaml; yaml.safe_load(open('$P11/wave-1.yaml'))" \
+  || { echo "P11: aggregator output is itself malformed"; exit 1; }
+
+# The two well-formed findings (grandma + power-user) survive; both bad-shape
+# chaos_engineer findings are dropped.
+COUNT_P11="$(python3 -c "import yaml; print(len(yaml.safe_load(open('$P11/wave-1.yaml'))['findings']))")"
+[ "$COUNT_P11" = "2" ] || {
+  echo "P11: expected 2 surviving findings (grandma + power-user), got $COUNT_P11"
+  echo "P11:   personas in output: $(python3 -c "import yaml; print([f.get('persona') for f in yaml.safe_load(open('$P11/wave-1.yaml'))['findings']])")"
+  exit 1
+}
+
+LEAKED_P11="$(python3 -c "import yaml; ff=yaml.safe_load(open('$P11/wave-1.yaml'))['findings']; print(any(f.get('persona')=='chaos_engineer' for f in ff))")"
+[ "$LEAKED_P11" = "False" ] || { echo "P11: bad-evidence finding leaked into output"; exit 1; }
+
+# Each dropped offender is logged once (string + list = 2 warnings).
+WARN_P11="$(grep -c "warning: skipping finding with non-dict evidence" "$P11_ERR" || true)"
+[ "$WARN_P11" = "2" ] || {
+  echo "P11: expected 2 'skipping finding with non-dict evidence' warnings, got $WARN_P11; stderr:"; cat "$P11_ERR"; exit 1;
+}
+echo "PASS P11: non-dict evidence skipped per-finding; valid findings in the wave survive"
+
 echo "ALL TESTS PASS"
