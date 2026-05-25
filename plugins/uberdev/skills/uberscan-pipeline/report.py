@@ -121,7 +121,7 @@ def _write_totals_sidecar(sidecar_path, run_id, totals, hotspots):
         sys.exit(2)
 
 
-def _global_rows(sec, cov):
+def _global_rows(sec, cov) -> list[dict]:
     """Synthetic aggregate rows for the repo-global Phase-1b passes (Item 9 / D5):
     surface Semgrep SAST + test-coverage findings into the findings-to-issues
     aggregate so they get filed as issues, not just shown in the report.

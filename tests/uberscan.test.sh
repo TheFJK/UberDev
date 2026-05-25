@@ -81,6 +81,55 @@ ck "Phase 4 exit gate keys off reconstructed HALT_REASON" "grep -q 'HALT_REASON'
 # defaulted to 0 in Phase 4's fresh shell — the exact #192 false-clean exit-0 bug.
 ck "old in-memory-only exit gate removed (CIRCUIT_BREAKER_HALT:-0 default)" "[ \$(grep -c 'CIRCUIT_BREAKER_HALT:-0' '$SKILL') -eq 0 ]"
 
+echo "== #192 behavioral: Phase-4 reconstruction honors the persisted halt =="
+# The shape assertions above prove the persistence/reconstruction code EXISTS; this
+# block proves it BEHAVES (a refactor that kept the grep tokens but broke the exit
+# gate would slip past shape-only checks). The SKILL.md Phase-4 bash is a
+# directive-emitter that can't run standalone, so `_recon` is a faithful replica of
+# the SKILL.md "## Phase 4" reconstruction + banner + exit gate — KEEP IT IN SYNC
+# if that fence changes (the shape greps above guard the SKILL.md side of the pair).
+_recon() { # $1 = RUN_DIR ; prints banners to stdout ; returns 1 on halt, else 0
+  local RUN_DIR="$1" MAX_CHUNKS=25 RUN_STATE HALT_REASON FINDINGS_FLOOD
+  RUN_STATE="$RUN_DIR/run-state.txt"
+  HALT_REASON=""
+  FINDINGS_FLOOD=0
+  if [ -r "$RUN_STATE" ]; then
+    HALT_REASON="$(grep -E '^CIRCUIT_BREAKER_HALT=' "$RUN_STATE" | tail -n1 | cut -d= -f2)"
+    grep -q '^FINDINGS_FLOOD=true' "$RUN_STATE" && FINDINGS_FLOOD=1
+  fi
+  [ -n "$HALT_REASON" ] && echo "  halted:          yes (circuit breaker $HALT_REASON tripped — results are INCOMPLETE, exit 1)"
+  [ "$FINDINGS_FLOOD" = "1" ] && echo "  partial:         yes (findings-flood CB5 triggered)"
+  grep -q '^OVERFLOW=true' "$RUN_STATE" 2>/dev/null && echo "  overflow:        yes (capped at MAX_CHUNKS=$MAX_CHUNKS; use --all to override)"
+  [ -n "$HALT_REASON" ] && return 1
+  return 0
+}
+_RS="$(mktemp -d)"; trap 'rm -rf "$_RS"' EXIT
+# CB5 flood: exit 1 + halted banner + findings-flood partial banner
+printf 'PARTIAL=true\nFINDINGS_FLOOD=true\nCIRCUIT_BREAKER_HALT=CB5\n' > "$_RS/run-state.txt"
+OUT="$(_recon "$_RS")"; RC=$?
+ck "#192 behavioral: CB5 flood exits 1" "[ $RC -eq 1 ]"
+ck "#192 behavioral: CB5 prints halted banner" "printf '%s' \"\$OUT\" | grep -q 'CB5 tripped'"
+ck "#192 behavioral: CB5 prints findings-flood partial banner" "printf '%s' \"\$OUT\" | grep -q 'findings-flood CB5 triggered'"
+# CB3 wave-timeout: exit 1 + halted banner, NO findings-flood banner
+printf 'CIRCUIT_BREAKER_HALT=CB3\n' > "$_RS/run-state.txt"
+OUT="$(_recon "$_RS")"; RC=$?
+ck "#192 behavioral: CB3 wave-timeout exits 1" "[ $RC -eq 1 ]"
+ck "#192 behavioral: CB3 prints halted banner" "printf '%s' \"\$OUT\" | grep -q 'CB3 tripped'"
+ck "#192 behavioral: CB3 has NO findings-flood banner" "! printf '%s' \"\$OUT\" | grep -q 'findings-flood'"
+# Clean run: run-state.txt is created on-demand only by a breaker, so it is ABSENT
+# on a clean run -> exit 0, no banners (the documented clean-completion mapping).
+rm -f "$_RS/run-state.txt"
+OUT="$(_recon "$_RS")"; RC=$?
+ck "#192 behavioral: clean run (no run-state.txt) exits 0" "[ $RC -eq 0 ]"
+ck "#192 behavioral: clean run prints no banners" "[ -z \"\$OUT\" ]"
+# Overflow-only (turbo cap-and-continue): NOT a halt -> exit 0, overflow banner only.
+# Also exercises the OVERFLOW grep -q rewrite (no spurious 'integer expected' / no halt).
+printf 'OVERFLOW=true\n' > "$_RS/run-state.txt"
+OUT="$(_recon "$_RS")"; RC=$?
+ck "#192 behavioral: overflow-only is not a halt (exits 0)" "[ $RC -eq 0 ]"
+ck "#192 behavioral: overflow-only prints overflow banner" "printf '%s' \"\$OUT\" | grep -q 'overflow:'"
+ck "#192 behavioral: overflow-only has NO halted banner" "! printf '%s' \"\$OUT\" | grep -q 'halted:'"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [ $FAIL -eq 0 ] && exit 0 || exit 1
