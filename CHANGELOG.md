@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.11] - 2026-05-25
+
+### Fixed
+- **`/uberdev:ubersimplify` aggregate could be broken out of its spotlighting envelope — prompt-injection into `findings-to-issues` AND `code-fixer` (#183, uberscan CRITICAL).** `skills/ubersimplify-pipeline/aggregate.py` defined its own hand-rolled `_cell()` (and wrote the `<external-untrusted-input>` open/close markers inline) that only collapsed newlines and escaped the `|` delimiter — it did NOT neutralize a literal `</external-untrusted-input>` close-tag. Because `code-simplifier` finding `summary`/`detail` is prose generated over ARBITRARY repo files (attacker-influenceable), a finding whose text contained the literal close-tag terminated the envelope early and promoted the following attacker-derived rows to TRUSTED text — an envelope breakout into both `findings-to-issues` (the `issues` / `ubersimplify-aggregate` path) and `code-fixer` (the `fixer` / `post-impl-review-aggregate` path). Deleted the hand-rolled `_cell()` and the inline envelope writes; `aggregate.py` now imports the hardened shared `cell()` (inserts a U+200B ZWSP after `<`, breaking the verbatim byte sequence the downstream parser scans for) and `envelope()` from `lib/report_primitives.py` — EXACTLY as the sibling reporters (`skills/uberscan-pipeline/report.py`, `skills/testers-pipeline/report.py`) already do. Both aggregate modes now route every field through `cell()` and wrap via `envelope()`. Regression-locked by new D7 tests in `tests/ubersimplify-aggregate.test.sh` mirroring `uberscan-report.test.sh` AC-D7.
+
+### Changed
+- Version bumped to 0.33.11 across `plugin.json`, `marketplace.json`, the README badge, and the test version ratchets (`goal.test.sh` G20, `solve-claim.test.sh`).
+
 ## [0.33.10] - 2026-05-25
 
 ### Fixed

@@ -12,6 +12,19 @@ Two modes:
 """
 import argparse, glob, os, re, sys, yaml
 
+# Shared report primitives (issue #183): cell() neutralizes the
+# </external-untrusted-input> close-tag with a ZWSP so attacker-influenceable
+# code-simplifier prose (rendered over ARBITRARY repo files) cannot break out of
+# the spotlighting envelope; envelope() writes the wrapper with the opening marker
+# as the leading bytes. Imported in-process EXACTLY like the sibling reporters
+# (skills/uberscan-pipeline/report.py, skills/testers-pipeline/report.py), anchored
+# on THIS file's location (NOT cwd) so the import resolves regardless of where the
+# pipeline is invoked from. A hand-rolled cell() that skipped the close-tag was the
+# breakout this issue fixes — reuse the hardened shared primitive (no custom copy).
+# skills/ubersimplify-pipeline/aggregate.py -> ../../lib/report_primitives.py
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "lib"))
+from report_primitives import cell, envelope  # noqa: E402
+
 SEV_RANK = {"blocker": 2, "suggestion": 1}
 LENS_ORDER = {"Reuse": 0, "Quality": 1, "Efficiency": 2}
 FILEABLE = {"blocker"}  # only blocker-tier lens findings are filed as issues
@@ -19,11 +32,6 @@ FILEABLE = {"blocker"}  # only blocker-tier lens findings are filed as issues
 
 def _norm(s):
     return re.sub(r"\s+", " ", (s or "")).strip()
-
-
-def _cell(s):
-    """Escape a markdown table cell: collapse newlines, neutralize the | delimiter."""
-    return re.sub(r"\s*\n\s*", " ", str("" if s is None else s)).replace("|", "\\|")
 
 
 def _max_sev(a, b):
@@ -83,15 +91,19 @@ def dedupe_by_location(rows):
 
 def emit_fixer(lens_file, out):
     merged = dedupe_by_location(load_lens_findings(lens_file))
+    # Build the YAML-list body, then wrap via the shared envelope(). Every field
+    # passes through cell() so an injected </external-untrusted-input> in the
+    # (attacker-influenceable) summary/detail prose cannot terminate the
+    # post-impl-review-aggregate envelope early and inject into code-fixer.
+    body = ""
+    for f in merged:
+        body += f"- location: {cell(f['location'])}\n"
+        body += f"  severity: {cell(f['severity'])}\n"
+        body += f"  lens: {cell(f['lens'])}\n"
+        body += f"  summary: {cell(f['summary'])}\n"
+        body += f"  detail: {cell(f['detail'])}\n"
     with open(out, "w") as fh:
-        fh.write('<external-untrusted-input source="post-impl-review-aggregate">\n')
-        for f in merged:
-            fh.write(f"- location: {f['location']}\n")
-            fh.write(f"  severity: {f['severity']}\n")
-            fh.write(f"  lens: {f['lens']}\n")
-            fh.write(f"  summary: {f['summary']}\n")
-            fh.write(f"  detail: {f['detail']}\n")
-        fh.write('</external-untrusted-input>\n')
+        envelope(fh, "post-impl-review-aggregate", body)
     return len(merged)
 
 
@@ -116,14 +128,17 @@ def emit_issues(chunks_dir, out, audit_only):
         rows.extend(dedupe_by_location(load_lens_findings(lens_file)))
     applied = set() if audit_only else _applied_locations(chunks_dir)
     issue_rows = [f for f in rows if f.get("severity") in FILEABLE and f.get("location") not in applied]
+    # Build the markdown table body, then wrap via the shared envelope() so the
+    # opening marker stays the leading bytes (findings-to-issues first-128-byte
+    # invariant) and every cell passes through the hardened cell() (close-tag
+    # neutralization + pipe escaping). Mirrors skills/uberscan-pipeline/report.py.
+    body = "| severity | location | agent | disposition | summary | detail |\n"
+    body += "|---|---|---|---|---|---|\n"
+    for f in issue_rows:
+        agent = f"code-simplifier ({f.get('lens', '')})"
+        body += f"| {cell(f['severity'])} | {cell(f['location'])} | {cell(agent)} | DEFERRED | {cell(f['summary'])} | {cell(f['detail'])} |\n"
     with open(out, "w") as fh:
-        fh.write('<external-untrusted-input source="ubersimplify-aggregate">\n')
-        fh.write("| severity | location | agent | disposition | summary | detail |\n")
-        fh.write("|---|---|---|---|---|---|\n")
-        for f in issue_rows:
-            agent = f"code-simplifier ({f.get('lens', '')})"
-            fh.write(f"| {_cell(f['severity'])} | {_cell(f['location'])} | {_cell(agent)} | DEFERRED | {_cell(f['summary'])} | {_cell(f['detail'])} |\n")
-        fh.write('</external-untrusted-input>\n')
+        envelope(fh, "ubersimplify-aggregate", body)
     return len(issue_rows)
 
 
