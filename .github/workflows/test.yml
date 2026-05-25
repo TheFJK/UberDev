@@ -14,7 +14,7 @@ jobs:
   shape-checks:
     name: shape-checks
     runs-on: ubuntu-latest
-    # 5 minutes is generous for ~70 grep-and-assert checks on the small repo.
+    # 5 minutes is generous for the ~330 grep-and-assert checks (44 test files).
     # Caps the default 360-min budget so a hung test from a fork PR can't burn
     # the public-repo Actions allowance. Bump if the suite legitimately grows.
     timeout-minutes: 5
@@ -129,11 +129,15 @@ jobs:
         #                                         on Git Bash) [#196]
         #
         # Every test below is a portable grep-and-assert shape-check OR a runtime
-        # fixture with an existing Windows-green precedent (the #196 additions
-        # code-fixer-dispatch / findings-to-issues / finish-branch / install /
-        # simplify / trust-trail-evaluator each mirror a lib/helper already
-        # exercised on this job). When a test file is added or removed, update
-        # BOTH jobs by hand — there is no automated drift guard between the lists.
+        # fixture whose mechanism already runs green on this job. The #196
+        # additions reuse: the _lib_assert_structural.sh awk-range lib
+        # (code-fixer-dispatch / findings-to-issues / finish-branch / simplify /
+        # trust-trail-evaluator); the `bash -c … uberdev_run_secret_scan_stdin`
+        # pattern (finish-branch, mirroring secret-scan.test.sh); lib/config-read.sh
+        # runtime (findings-to-issues, mirroring config-override.test.sh); and
+        # chmod+x-stub execution (install, mirroring solve-effort-flag.test.sh).
+        # When a test file is added or removed, update BOTH jobs by hand — there
+        # is no automated drift guard between the lists.
         run: |
           bash tests/turbo-flow.test.sh && \
           bash tests/issue-causal-fanout.test.sh && \
