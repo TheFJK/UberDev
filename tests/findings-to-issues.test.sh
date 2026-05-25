@@ -316,6 +316,16 @@ F2I="$REPO_ROOT/plugins/uberdev/agents/findings-to-issues.md"
 assert_grep "$F2I" 'ubersimplify-aggregate' 'closed-set lists ubersimplify-aggregate'
 assert_grep "$F2I" 'uberscan-aggregate' 'closed-set still lists uberscan-aggregate'
 
+### Suite 14: testers-aggregate source accepted (#182) ----------
+echo
+echo "### Suite 14: testers-aggregate accepted-source lock"
+# /uberdev:testers' Phase-5 report.py wraps its findings-to-issues aggregate in
+# the envelope source "testers-aggregate" (skills/testers-pipeline/report.py:186).
+# Lock that source into the closed allow-list so the command never again refuses
+# every dispatch (input-malformed) and silently files ZERO issues (#182 — uberscan
+# blocker finding). Sibling sources are locked the same way in Suites 12 & 13.
+assert_grep "$F2I" 'testers-aggregate' 'closed-set lists testers-aggregate (#182)'
+
 echo
 echo "## Summary"
 echo "  PASS=$PASS  FAIL=$FAIL"
