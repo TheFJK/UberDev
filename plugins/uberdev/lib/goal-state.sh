@@ -41,13 +41,23 @@
 #   _uberdev_goal_dispatch_merge           PR_NUM
 #   _uberdev_goal_check_unblock            HELD_PR_NUM
 # External imports:
-#   (none — discover.sh is sourced opportunistically for stderr-isolation helpers
-#   but no function names are required from it. The `gh_jq_or_jq` shim below
-#   is a local-file jq wrapper; the spec/plan named it after a discover.sh
-#   helper that was planned but never landed. Trust-signal + merge-result
-#   audit reads target LOCAL files written by /review-pr and /merge, so plain
-#   `jq <file> <filter>` is the correct primitive — `gh ... --jq` only works
-#   on gh API output and would mis-serve these call sites.)
+#   - lib/dispatch.sh :: _uberdev_dispatch_prepare_tmp_target — REQUIRED by
+#     uberdev_goal_write_run_state, which reuses this #155 TOCTOU-safe target-prep
+#     helper for every run-state sidecar it writes (issue #195). goal-state.sh
+#     does NOT source dispatch.sh itself (no stable relative path from a sourced
+#     lib + avoids a load-order cycle); the CALLER must source lib/dispatch.sh
+#     BEFORE invoking the writer. A `command -v` preflight at the top of
+#     uberdev_goal_write_run_state enforces the contract — it fails loud (rc=4,
+#     `goal-state:` diagnostic) rather than crashing mid-write on a `command not
+#     found`. The goal-pipeline fences already source dispatch.sh first; any
+#     standalone caller (and the tests) must do the same.
+#   - discover.sh is sourced opportunistically (below) for stderr-isolation
+#     helpers, but no function names are required from it. The `gh_jq_or_jq` shim
+#     below is a local-file jq wrapper; the spec/plan named it after a discover.sh
+#     helper that was planned but never landed. Trust-signal + merge-result audit
+#     reads target LOCAL files written by /review-pr and /merge, so plain
+#     `jq <file> <filter>` is the correct primitive — `gh ... --jq` only works on
+#     gh API output and would mis-serve these call sites.
 #
 # Sourced by:
 #   - skills/goal-pipeline/SKILL.md (every phase)
@@ -952,9 +962,22 @@ _uberdev_goal_check_unblock() {
 #   from the caller's shell; persists them to predictable, GOAL_ID-keyed
 #   sidecars under $UBERDEV_TMPDIR, plus a fixed-path goal-active-id.txt pointer
 #   so a fresh shell (no GOAL_ID in env/scalar) can discover the active GOAL_ID.
-#   Returns 0 on success, 1 if GOAL_ID is invalid, 3 (fail-CLOSED) if
-#   _uberdev_dispatch_prepare_tmp_target rejects a target or a sidecar write fails.
+#   Returns 0 on success; 4 (fail-CLOSED) if its required lib/dispatch.sh helper
+#   _uberdev_dispatch_prepare_tmp_target is not sourced (see "External imports");
+#   1 if GOAL_ID is invalid; 3 (fail-CLOSED) if _uberdev_dispatch_prepare_tmp_target
+#   rejects a target or a sidecar write fails.
 uberdev_goal_write_run_state() {
+  # Preflight (issue #195): this writer hard-depends on lib/dispatch.sh's
+  # _uberdev_dispatch_prepare_tmp_target, which goal-state.sh does not source. A
+  # caller that skipped dispatch.sh would otherwise hit a bare `command not
+  # found` at the first call site below and return the MISLEADING write-failure
+  # rc=3. Fail loud with a distinct rc instead, BEFORE any mktemp (so no temp
+  # sibling can leak). `command -v` is the cross-shell (bash + zsh) probe — NOT
+  # `type -t`, a bashism that misreports under the zsh-backed runner.
+  if ! command -v _uberdev_dispatch_prepare_tmp_target >/dev/null 2>&1; then
+    printf 'goal-state: run-state writer requires lib/dispatch.sh sourced first (missing _uberdev_dispatch_prepare_tmp_target)\n' >&2
+    return 4
+  fi
   _uberdev_goal_validate_id "${GOAL_ID:-}" || return 1
   local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
   local sc="$tmpdir/goal-$GOAL_ID-runstate"   # NO .env extension
