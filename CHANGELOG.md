@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.18] - 2026-05-26
+
+### Fixed
+- **`plugins/uberdev/lib/goal-state.sh`'s run-state writer hard-depended on `lib/dispatch.sh`'s `_uberdev_dispatch_prepare_tmp_target` without declaring or guarding the dependency, so sourcing `goal-state.sh` standalone crashed the writer with a cryptic `command not found` and a misdiagnosed return code (#195, uberscan MAJOR).** `uberdev_goal_write_run_state` calls `_uberdev_dispatch_prepare_tmp_target` (the #155 TOCTOU-safe target-prep helper) at four sidecar-write sites, but that function lives in `lib/dispatch.sh`, not `goal-state.sh` — and the file header's "External imports" note explicitly (and now-falsely) claimed the module required NO function from another lib. With no `command -v` preflight, a caller that sourced `goal-state.sh` without first sourcing `dispatch.sh` hit a bare `command not found` at the first call site; because that site is `… || return 3`, the writer then returned **rc=3 — the code documented for a genuine TOCTOU target rejection / disk write failure** — so the real cause (a missing `source`) was both unlogged and actively misdiagnosed. It worked in production only because the goal-pipeline fences happen to source `dispatch.sh` first; the contract was implicit and the header contradicted it. Fix: (1) correct the header to declare `lib/dispatch.sh :: _uberdev_dispatch_prepare_tmp_target` as REQUIRED and document that the caller must source it first (goal-state.sh deliberately does not self-source dispatch.sh — no stable relative path from a sourced lib + avoids a load-order cycle); (2) add a `command -v` preflight at the top of `uberdev_goal_write_run_state`, BEFORE any `mktemp` (so no temp sibling can leak), that fails loud with a distinct **rc=4** and a `goal-state: run-state writer requires lib/dispatch.sh sourced first …` diagnostic. `command -v` (not the `type -t` bashism, which misreports under the zsh-backed runner) keeps the probe correct in both bash and zsh. Regression-guarded by `tests/goal-state-sidecar.test.sh` (5 assertions: distinct rc=4, clear diagnostic, no `command not found` leakage, no stray temp file, and the happy path still returns 0 with `dispatch.sh` sourced).
+
+### Changed
+- Version bumped to 0.33.18 across `plugin.json`, `marketplace.json`, the README badge, and the test version ratchets (`goal.test.sh` G20, `solve-claim.test.sh`).
+
 ## [0.33.17] - 2026-05-26
 
 ### Fixed

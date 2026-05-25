@@ -84,6 +84,54 @@ repro="$(UBERDEV_TMPDIR="$UBERDEV_TMPDIR" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROO
   ')"
 assert_eq "$repro" "ok" "fresh shell: non-empty GOAL_ID + defined uberdev_goal_* fn"
 
+echo "== #195: run-state writer preflight-guards its lib/dispatch.sh dependency =="
+# uberdev_goal_write_run_state hard-depends on _uberdev_dispatch_prepare_tmp_target,
+# which lives in lib/dispatch.sh — NOT in goal-state.sh. Before the #195 fix the
+# header claimed NO external function was required and there was no guard, so a
+# caller that sourced goal-state.sh WITHOUT dispatch.sh got a cryptic `command
+# not found` plus a MISLEADING rc=3 (the documented write-failure code), instead
+# of a loud contract diagnostic. The writer must now fail with a DISTINCT rc and
+# a message naming the missing lib, and must never emit `command not found`.
+#
+# NEGATIVE: a fresh shell sources ONLY goal-state.sh (dispatch.sh withheld). A
+# VALID GOAL_ID is used so validation passes and the dependency call is reached —
+# the dependency guard, not id-validation, must be what trips.
+g195_dir="$(mktemp -d 2>/dev/null || printf '/tmp/goal-195-%s' "$$")"
+g195_rc="$(UBERDEV_TMPDIR="$g195_dir" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" \
+  GOAL_ID="goal-test-no195deps" bash -c '
+    . "$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh"   # dispatch.sh deliberately NOT sourced
+    uberdev_goal_write_run_state 2>"$UBERDEV_TMPDIR/g195-err.txt"
+    printf "%s" "$?"
+  ')"
+assert_eq "$g195_rc" "4" "#195 missing-dispatch: writer returns the distinct dependency rc (4), not the conflated write-fail rc (3)"
+if grep -q 'requires lib/dispatch.sh' "$g195_dir/g195-err.txt" 2>/dev/null; then
+  assert_eq "diag" "diag"    "#195 missing-dispatch: emits clear diagnostic naming lib/dispatch.sh"
+else
+  assert_eq "diag" "MISSING" "#195 missing-dispatch: emits clear diagnostic naming lib/dispatch.sh"
+fi
+if grep -qi 'command not found' "$g195_dir/g195-err.txt" 2>/dev/null; then
+  assert_eq "no-cnf" "command-not-found-leaked" "#195 missing-dispatch: NO raw 'command not found' crash noise"
+else
+  assert_eq "no-cnf" "no-cnf"                   "#195 missing-dispatch: NO raw 'command not found' crash noise"
+fi
+# Guard must trip BEFORE mktemp, so no stray run-state temp sibling is leaked.
+g195_stray="$(find "$g195_dir" -name 'goal-*runstate*' 2>/dev/null | head -1)"
+assert_eq "${g195_stray:-none}" "none" "#195 missing-dispatch: no stray run-state temp file leaked"
+#
+# POSITIVE: with dispatch.sh sourced first the writer still succeeds (rc=0) — the
+# guard is a precondition check, not a behavior change on the happy path.
+g195_ok="$(UBERDEV_TMPDIR="$g195_dir" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" \
+  GOAL_ID="goal-test-with195dep" bash -c '
+    . "$CLAUDE_PLUGIN_ROOT/lib/dispatch.sh"
+    . "$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh"
+    cycle=1; watch_start=1; overflow_count=0; overflow_detected=0; MAX_CYCLES=5
+    UBERDEV_RESOLVED_BACKEND=claude-bg; queue=(); active_issues=()
+    uberdev_goal_write_run_state
+    printf "%s" "$?"
+  ')"
+assert_eq "$g195_ok" "0" "#195 with dispatch.sh sourced: writer still returns 0 (guard is preflight-only)"
+rm -rf "$g195_dir"
+
 echo "== array round-trip (queue/active_issues) + empty-array =="
 GOAL_ID="goal-test-arr00001"; cycle=1; watch_start=1716400000
 overflow_count=0; overflow_detected=0; MAX_CYCLES=5; UBERDEV_RESOLVED_BACKEND="background"
