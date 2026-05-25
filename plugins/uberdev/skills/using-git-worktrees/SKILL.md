@@ -88,8 +88,11 @@ case $LOCATION in
   .worktrees|worktrees)
     path="$LOCATION/$BRANCH_NAME"
     ;;
-  ~/.config/uberdev/worktrees/*)
-    path="~/.config/uberdev/worktrees/$project/$BRANCH_NAME"
+  # Tilde does NOT expand inside double quotes or a quoted RHS (verified bash &
+  # zsh) — build the path with ${HOME}, and match LOCATION whether it arrives as
+  # the literal "~/..." the menu shows or an already-expanded "$HOME/..." form.
+  "$HOME"/.config/uberdev/worktrees/*|"~/.config/uberdev/worktrees/"*)
+    path="${HOME}/.config/uberdev/worktrees/$project/$BRANCH_NAME"
     ;;
 esac
 

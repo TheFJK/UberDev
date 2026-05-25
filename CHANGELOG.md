@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.17] - 2026-05-26
+
+### Fixed
+- **`skills/using-git-worktrees/SKILL.md` built the global-directory worktree path with a literal tilde inside double quotes, so `git worktree add "$path"` created a directory literally named `~` under the current working directory instead of placing the worktree under `$HOME` (#194, uberscan MAJOR).** The global-dir case arm set `path="~/.config/uberdev/worktrees/$project/$BRANCH_NAME"` (and the matching case pattern was `~/.config/uberdev/worktrees/*`). Tilde expansion does NOT occur inside double quotes nor on the RHS of a quoted assignment — verified in both bash and zsh, where the value stays the literal string `~/.config/...` — so the subsequent `git worktree add "$path"` / `cd "$path"` polluted the repo with a stray `~` directory and put the worktree in the wrong place, the exact opposite of the intended global, outside-project location. (The common project-local `.worktrees/` branch was unaffected — only the global-config branch was broken.) Fix: expand explicitly with `path="${HOME}/.config/uberdev/worktrees/$project/$BRANCH_NAME"`, and widen the case pattern to `"$HOME"/.config/uberdev/worktrees/*|"~/.config/uberdev/worktrees/"*` so the global branch is selected whether `$LOCATION` arrives as the literal `~/...` the menu displays or an already-expanded `$HOME/...` form. Regression-guarded by the new `tests/using-git-worktrees.test.sh` (4 assertions: `${HOME}` expansion present, no quoted-literal-tilde path assignment, and both case-pattern forms matched), wired into both the ubuntu and windows CI shape-check jobs.
+
+### Changed
+- Version bumped to 0.33.17 across `plugin.json`, `marketplace.json`, the README badge, and the test version ratchets (`goal.test.sh` G20, `solve-claim.test.sh`).
+
 ## [0.33.16] - 2026-05-25
 
 ### Fixed
