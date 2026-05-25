@@ -9,11 +9,37 @@ set -eu
 
 uberdev_rate_cap_audit() {
   local WAVE_YAML="$1" CAP="$2" OUT_YAML="$3"
-  python3 - "$WAVE_YAML" "$CAP" "$OUT_YAML" <<'PY'
-import sys, yaml, hashlib, re
+  # Absolute dir of this lib so the embedded python can import the shared host normalizer
+  # (normalize_host.py — the same single source of truth the runtime wrapper uses).
+  local LIBDIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+  # Fail loud if the shared normalizer can't be located — an empty LIBDIR would otherwise
+  # `sys.path.insert(0, "")` (cwd) and silently import the wrong module or raise a cryptic
+  # ImportError inside the heredoc.
+  if [ -z "$LIBDIR" ] || [ ! -f "$LIBDIR/normalize_host.py" ]; then
+    echo "error: rate-cap-audit: normalize_host.py not found (lib dir: ${LIBDIR:-unset})" >&2
+    return 2
+  fi
+  python3 - "$WAVE_YAML" "$CAP" "$OUT_YAML" "$LIBDIR" <<'PY'
+import sys, yaml, hashlib
 from collections import defaultdict
-wave_path, cap_str, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
-cap = int(cap_str)
+wave_path, cap_str, out_path, libdir = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+# Import the canonical host normalizer (the same one lib/rate-limit-curl.sh calls) so the
+# audit groups observed requests by the SAME bare host the runtime cap buckets on — else a
+# host split across userinfo/case/port/trailing-dot variants evades the audit too (#186).
+sys.path.insert(0, libdir)
+from normalize_host import normalize_host
+# Validate the cap to [1, 1000] like the runtime wrapper (rate-limit-curl.sh:44-45). The
+# caller (aggregate.py) only enforces type=int, so cap<=0 would flag every request (1 > 0)
+# and a non-numeric cap would raise an uncaught ValueError -> cryptic traceback (#187).
+# Fail loud with a clear message and a non-zero exit instead.
+try:
+    cap = int(cap_str)
+except (TypeError, ValueError):
+    print(f"error: rate-cap-audit: --rps-cap must be an integer; got {cap_str!r}", file=sys.stderr)
+    sys.exit(2)
+if cap < 1 or cap > 1000:
+    print(f"error: rate-cap-audit: --rps-cap must be in [1, 1000]; got {cap}", file=sys.stderr)
+    sys.exit(2)
 with open(wave_path) as fh:
     doc = yaml.safe_load(fh) or {}
 findings = doc.get("findings") or []
@@ -35,11 +61,8 @@ for f in findings:
     except Exception as e:
         print(f"warning: rate-cap-audit skipping finding {f.get('id', '?')!r} with unparseable timestamp {ts!r}: {e}", file=sys.stderr)
         continue
-    m = re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://([^/?#]+)", url)
-    if not m:
-        continue
-    host = m.group(1)
-    if ".." in host or "/" in host:
+    host = normalize_host(url)  # shared canonical normalizer (see import above) — #186
+    if host is None:
         continue
     by_host[host].append((ts_ms, f.get("persona") or "unknown", url))
 # For each host, compute the max rolling 1-second window count
