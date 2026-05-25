@@ -220,24 +220,34 @@ while [ "$IDX" -lt "${#CHUNK_ARRAY[@]}" ]; do
 
   # Breakers are checked at the TOP of each wave against state the orchestrator
   # maintains across waves (see the post-wave step after this loop). Tripping any
-  # breaker sets CIRCUIT_BREAKER_HALT=1 so Phase 4 exits 1.
+  # breaker PERSISTS its reason to $RUN_DIR/run-state.txt (#192) — Phase 4 runs in
+  # a FRESH shell, so the in-memory CIRCUIT_BREAKER_HALT below does not survive the
+  # phase boundary; the persisted file is the source of truth Phase 4 reads back.
 
   # CB3 per-wave timeout (15 min): the PREVIOUS wave's measured duration.
   if [ "${PREV_WAVE_ELAPSED:-0}" -gt 900 ]; then
     echo "[uberscan] CB3: previous wave exceeded 900s; halting before wave $WAVE_NUM" >&2
+    echo "CIRCUIT_BREAKER_HALT=CB3" >> "$RUN_DIR/run-state.txt"
     CIRCUIT_BREAKER_HALT=1; break
   fi
 
   # CB4 overall wall-clock budget check.
   if [ "$(_uberscan_elapsed)" -gt "$WALL_BUDGET_SECONDS" ]; then
     echo "[uberscan] CB4: overall budget of ${WALL_BUDGET_SECONDS}s exceeded after wave $(( WAVE_NUM - 1 )); halting" >&2
+    echo "CIRCUIT_BREAKER_HALT=CB4" >> "$RUN_DIR/run-state.txt"
     CIRCUIT_BREAKER_HALT=1; break
   fi
 
   # CB5 findings-flood guard.
   if [ "$CUMULATIVE_BLOCKERS_CRITICALS" -gt 150 ]; then
     echo "[uberscan] CB5: cumulative blocker+critical findings ($CUMULATIVE_BLOCKERS_CRITICALS) exceeded 150; marking report partial and halting" >&2
-    echo "PARTIAL=true" >> "$RUN_DIR/run-state.txt"
+    # Persist all three flags together: PARTIAL (report banner), FINDINGS_FLOOD
+    # (flood banner) and CIRCUIT_BREAKER_HALT=CB5 (exit-1 gate) — Phase 4 reads them back.
+    {
+      echo "PARTIAL=true"
+      echo "FINDINGS_FLOOD=true"
+      echo "CIRCUIT_BREAKER_HALT=CB5"
+    } >> "$RUN_DIR/run-state.txt"
     FINDINGS_FLOOD=1; CIRCUIT_BREAKER_HALT=1; break
   fi
 
@@ -345,7 +355,7 @@ After each wave completes (all chunk Tasks have returned), the orchestrating ses
 1. Writes each chunk's normalized findings to `$RUN_DIR/chunk-NNN-findings.yaml` (C2 schema).
 2. Updates `CUMULATIVE_BLOCKERS_CRITICALS` from the new chunk files.
 3. Records the wave's actual elapsed seconds into `PREV_WAVE_ELAPSED` (from when this wave's Task() calls were fired to when they returned) — this is what CB3 reads on the next iteration.
-4. Re-evaluates CB3 (per-wave timeout), CB4 (wall-clock budget), and CB5 (findings flood); if any trips, sets `CIRCUIT_BREAKER_HALT=1` and stops dispatching further waves.
+4. Re-evaluates CB3 (per-wave timeout), CB4 (wall-clock budget), and CB5 (findings flood). If any trips, it **appends the trip reason to `$RUN_DIR/run-state.txt`** (`CIRCUIT_BREAKER_HALT=CB3|CB4|CB5`, plus `FINDINGS_FLOOD=true` and `PARTIAL=true` for CB5) and stops dispatching further waves. The persisted `run-state.txt` is the **source of truth** (#192): this bash loop only emits dispatch directives — it returns in milliseconds, so its in-loop counters (`PREV_WAVE_ELAPSED`, `CUMULATIVE_BLOCKERS_CRITICALS`) never accumulate across waves on their own, and Phase 4 runs in a fresh shell. Phase 4 reconstructs the exit code and the partial/flood banner from `run-state.txt`, never from the in-memory `CIRCUIT_BREAKER_HALT`.
 
 
 ## Phase 1b — Repo-global pass
@@ -547,6 +557,20 @@ else
   BLOCKER_COUNT=0; CRITICAL_COUNT=0; MAJOR_COUNT=0; IMPORTANT_COUNT=0; SUGGESTION_COUNT=0
 fi
 
+# Reconstruct circuit-breaker state from run-state.txt (#192). The Phase-1 loop
+# runs in a SEPARATE shell, so the CIRCUIT_BREAKER_HALT / FINDINGS_FLOOD it set in
+# memory are GONE here — defaulting the unset flag to 0 would exit a CB3/CB4/CB5
+# halt as a false-clean 0 with no partial banner. Each Phase-1 break (and the
+# orchestrator, between waves) appends its trip reason to run-state.txt; Phase 4 is
+# the single source of truth that reads it back, exactly as it does for OVERFLOW.
+RUN_STATE="$RUN_DIR/run-state.txt"
+HALT_REASON=""
+FINDINGS_FLOOD=0
+if [ -r "$RUN_STATE" ]; then
+  HALT_REASON="$(grep -E '^CIRCUIT_BREAKER_HALT=' "$RUN_STATE" | tail -n1 | cut -d= -f2)"
+  grep -q '^FINDINGS_FLOOD=true' "$RUN_STATE" && FINDINGS_FLOOD=1
+fi
+
 echo
 echo "[uberscan] === DONE ==="
 echo "  run_id:          $RUN_ID"
@@ -554,8 +578,9 @@ echo "  scope:           $SCOPE"
 echo "  total_chunks:    $TOTAL_EMITTED"
 echo "  chunks_audited:  $TOTAL_CHUNKS_PROCESSED"
 echo "  agents_per_chunk: 6"
+[ -n "$HALT_REASON" ] && echo "  halted:          yes (circuit breaker $HALT_REASON tripped — results are INCOMPLETE, exit 1)"
 [ "$FINDINGS_FLOOD" = "1" ] && echo "  partial:         yes (findings-flood CB5 triggered)"
-[ "$(grep -c OVERFLOW=true "$RUN_DIR/run-state.txt" 2>/dev/null || echo 0)" -gt 0 ] && echo "  overflow:        yes (capped at MAX_CHUNKS=$MAX_CHUNKS; use --all to override)"
+grep -q '^OVERFLOW=true' "$RUN_STATE" 2>/dev/null && echo "  overflow:        yes (capped at MAX_CHUNKS=$MAX_CHUNKS; use --all to override)"
 echo "  severity totals:"
 echo "    blocker:       $BLOCKER_COUNT"
 echo "    critical:      $CRITICAL_COUNT"
@@ -569,7 +594,10 @@ echo "    suggestion:    $SUGGESTION_COUNT"
 #   0 = clean completion
 #   1 = circuit-breaker halt (CB1 overflow non-turbo, CB3 wave timeout, CB4 wall-clock, CB5 flood)
 #   2 = fatal preflight failure
-if [ "${CIRCUIT_BREAKER_HALT:-0}" = "1" ]; then
+# HALT_REASON is reconstructed from run-state.txt above (#192): the in-memory
+# CIRCUIT_BREAKER_HALT set in the Phase-1 loop does NOT survive into this fresh shell,
+# so the exit decision keys off the persisted reason, not an unset in-memory flag.
+if [ -n "$HALT_REASON" ]; then
   exit 1
 fi
 exit 0
