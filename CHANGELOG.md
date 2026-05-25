@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.10] - 2026-05-25
+
+### Fixed
+- **`/uberdev:testers` filed ZERO issues — its Phase-5 envelope source `testers-aggregate` was missing from the `findings-to-issues` closed allow-list (#182).** `skills/testers-pipeline/report.py` wraps the findings-to-issues aggregate as `<external-untrusted-input source="testers-aggregate">`, but `agents/findings-to-issues.md` Step 1 enforces a CLOSED accepted-source set `{post-impl-review-aggregate, simplify-aggregate, ci-refused-synthetic, uberscan-aggregate, ubersimplify-aggregate}` (the pre-fix set) and refuses (`rationale: "input-malformed"`) any aggregate whose leading marker is absent. `testers-aggregate` was not in the set, so every `/uberdev:testers` run's findings-to-issues dispatch was refused and no issues were ever filed — the squad's headline deliverable was silently broken (`/uberscan` and `/ubersimplify` had added their sources; testers was missed). Added `testers-aggregate` to the closed allow-list.
+
+### Changed
+- Version bumped to 0.33.10 across `plugin.json`, `marketplace.json`, the README badge, and the test version ratchets (`goal.test.sh` G20, `solve-claim.test.sh`).
+
 ## [0.33.9] - 2026-05-23
 
 ### Fixed
