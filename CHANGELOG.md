@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.2] — 2026-05-26
+
+### Fixed
+- **`lib/goal-state.sh` `_uberdev_goal_dispatch_review_pr` + `_uberdev_goal_dispatch_merge`: guard the `uberdev_dispatch_one` lib/dispatch.sh dependency (#207, same latent-crash class as #195).** Both helpers now run a `command -v uberdev_dispatch_one` preflight after argument validation and BEFORE any counter-write or `mktemp`; on a missing dep they fail loud with the distinct dep-missing rc=4 and a `goal-state:` diagnostic naming the symbol, instead of crashing mid-dispatch on a bare `command not found` after the per-PR attempt counter had already been incremented (phantom attempt with no actual dispatch). The "External imports" header at the top of `goal-state.sh` consolidates both dispatch-lib symbols (`_uberdev_dispatch_prepare_tmp_target`, `uberdev_dispatch_one`) under one paragraph; `_uberdev_goal_dispatch_merge` also reorders `_uberdev_goal_validate_id` above the `mktemp` so the id-validate failure path no longer leaks a stray prompt file. New `tests/goal-dispatch-helpers.test.sh` covers the rc=4 + diagnostic + no-CNF-leak + no-stray-file negative cases (fresh `bash -c` without dispatch.sh) plus a stub-based positive case proving both helpers reach `uberdev_dispatch_one` with the `(pr, "small", prompt_file)` shape when the dep is present. Wired into both ubuntu + windows CI matrices.
+
+### Changed
+- Version bumped to 0.34.2 across `plugin.json`, `marketplace.json`, the README badge, and the test version ratchets (`goal.test.sh` G20, `solve-claim.test.sh`). Re-numbered from #217's original 0.34.1 to avoid collision with #216 (PR landing order: #216 → 0.34.1, #217 → 0.34.2, #218 → 0.34.3).
+
 ## [0.34.1] — 2026-05-26
 
 ### Added
