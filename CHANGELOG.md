@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.3] — 2026-05-26
+
+### Fixed
+- **`tests/*.test.sh` source sites of `_lib_assert_structural.sh` were unguarded, so a missing or unreadable helper could yield a vacuous-green run (#209).** The suite uses the deliberate `set -u; set -o pipefail` + manual PASS/FAIL-counter convention (NOT `set -e` — see `install.test.sh:26-29` for the rationale): when `source` of the shared helper failed, the subsequent `assert_in_section` / `assert_subagent_type` / `assert_count` calls then exited 127, but execution continued and the test could still `exit 0` if its locally-defined `assert_grep` checks all passed. Only latent today because the helper is a committed file (always present after `actions/checkout`); became slightly more consequential once PR #208 wired the structural tests into CI. Fix: append the existing FATAL-preflight convention (`|| { echo "FATAL: _lib_assert_structural.sh missing/unreadable" >&2; exit 2; }`) to every `source` / `.` of the helper across the 9 affected files (`code-fixer-dispatch`, `findings-to-issues`, `finish-branch`, `goal-batch-barrier`, `post-impl-review`, `review-pr-phase3-ci`, `review-pr`, `simplify`, `trust-trail-evaluator`). New structural drift-guard `tests/test-harness-source-guards.test.sh` (9 assertions; auto-discovers any current or future sourcing file via the shell glob and enforces the literal FATAL message contract). Wired into both ubuntu + windows CI matrices. Behavioral verification: rename the helper aside, run each guarded test, observe rc=2 with the FATAL message on stderr — confirmed across all 9 files.
+
+### Changed
+- Version bumped to 0.34.3 across `plugin.json`, `marketplace.json`, the README badge, and the test version ratchets (`goal.test.sh` G20, `solve-claim.test.sh`). Re-numbered from #218's original 0.34.1 to avoid collision with #216 + #217 (PR landing order: #216 → 0.34.1, #217 → 0.34.2, #218 → 0.34.3).
+
 ## [0.34.2] — 2026-05-26
 
 ### Fixed

@@ -12,7 +12,7 @@ LIB="$REPO_ROOT/plugins/uberdev/lib/secret-scan.sh"
 
 PASS=0; FAIL=0
 # shellcheck source=tests/_lib_assert_structural.sh
-source "$THIS_DIR/_lib_assert_structural.sh"
+source "$THIS_DIR/_lib_assert_structural.sh" || { echo "FATAL: _lib_assert_structural.sh missing/unreadable" >&2; exit 2; }
 
 echo "## finish-branch lib/secret-scan extraction regression suite"
 

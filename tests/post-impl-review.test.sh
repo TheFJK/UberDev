@@ -44,7 +44,7 @@ assert_no_grep() {
 }
 
 # Structural-assertion helpers (assert_count / assert_subagent_type / assert_in_section)
-. "$REPO_ROOT/tests/_lib_assert_structural.sh"
+. "$REPO_ROOT/tests/_lib_assert_structural.sh" || { echo "FATAL: _lib_assert_structural.sh missing/unreadable" >&2; exit 2; }
 
 echo "== post-impl-review skill exists with frontmatter =="
 assert_grep "$POST_IMPL" '^name: post-impl-review' "frontmatter has name: post-impl-review"

@@ -10,7 +10,7 @@ REVIEW_PR_MD="$REPO_ROOT/plugins/uberdev/commands/review-pr.md"
 SIMPLIFY_MD="$REPO_ROOT/plugins/uberdev/commands/simplify.md"
 
 PASS=0; FAIL=0
-source "$THIS_DIR/_lib_assert_structural.sh"
+source "$THIS_DIR/_lib_assert_structural.sh" || { echo "FATAL: _lib_assert_structural.sh missing/unreadable" >&2; exit 2; }
 
 # Local assert_no_grep — the shared helpers in _lib_assert_structural.sh do not
 # include this negation form; match the inline shape used by sibling tests
