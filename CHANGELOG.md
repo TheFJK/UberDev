@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.1] — 2026-05-26
+
+### Added
+- **`tests/ci-wiring.test.sh` — drift-guard for `.github/workflows/test.yml` (#210; prevents #196 recurrence).** Converts the existing SYNC convention between the `shape-checks` (ubuntu) and `shape-checks-windows` jobs into an enforced invariant. Asserts five locks: W1 every `tests/*.test.sh` on disk is wired into the ubuntu job; W1b ubuntu has no references to nonexistent test files; W2 windows is a (non-strict) subset of ubuntu; W3 windows has no phantom references; W4 (ubuntu − windows) equals the canonical `# === BEGIN ci-wiring windows-skip-list ===` marker block now embedded in the windows job's comment header. A new `tests/*.test.sh` committed without being wired into the ubuntu job — or a Unix-only fixture added without an entry in the marker block — now reds CI immediately. Portable: bash + awk + grep + sed + sort + comm, runs in both shape-checks jobs (ubuntu-latest native bash + windows-latest Git Bash). Wired as the FIRST entry in each job's `run:` block so a wiring drift fails fast.
+
+### Changed
+- Version bumped to 0.34.1 across `plugin.json`, `marketplace.json`, the README badge, and the test version ratchets (`goal.test.sh` G20, `solve-claim.test.sh`).
+
 ## [0.34.0] — 2026-05-26
 
 ### Added

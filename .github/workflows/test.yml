@@ -51,9 +51,14 @@ jobs:
         #   - uberthink.test.sh / uberthink-report.test.sh
         #                                         (python3 -c + mktemp -d paths,
         #                                         same reason as uberscan-report)
-        # When a test file is added or removed, update BOTH jobs by hand — there
-        # is no automated drift guard between the two lists.
+        # When a test file is added or removed, update BOTH jobs by hand.
+        # tests/ci-wiring.test.sh (#210) enforces this convention as an
+        # invariant: it asserts every tests/*.test.sh on disk is wired into
+        # the ubuntu run: block AND that (ubuntu − windows) matches the
+        # `ci-wiring windows-skip-list` marker block in the windows job
+        # below. Ran first in both jobs so a wiring drift reds CI fast.
         run: |
+          bash tests/ci-wiring.test.sh && \
           bash tests/turbo-flow.test.sh && \
           bash tests/issue-causal-fanout.test.sh && \
           bash tests/post-impl-review.test.sh && \
@@ -145,9 +150,31 @@ jobs:
         # pattern (finish-branch, mirroring secret-scan.test.sh); lib/config-read.sh
         # runtime (findings-to-issues, mirroring config-override.test.sh); and
         # chmod+x-stub execution (install, mirroring solve-effort-flag.test.sh).
-        # When a test file is added or removed, update BOTH jobs by hand — there
-        # is no automated drift guard between the lists.
+        # When a test file is added or removed, update BOTH jobs by hand.
+        # tests/ci-wiring.test.sh (#210) enforces the convention as a hard
+        # invariant; the canonical Unix-only skip set is the marker block
+        # below — a runtime drift fails CI immediately.
+        #
+        # === BEGIN ci-wiring windows-skip-list ===
+        # Canonical SSOT of Unix-only fixtures intentionally skipped on
+        # windows-latest. ci-wiring.test.sh W4 asserts
+        # (ubuntu − windows) == this list. Update this block AND the run:
+        # block below in lockstep; a new Unix-only fixture needs an entry
+        # here AND its `bash tests/...` line in the ubuntu job above.
+        #   - solve-pipeline-zsh.test.sh
+        #   - testers-pipeline.test.sh
+        #   - testers-agent-contract.test.sh
+        #   - testers-rate-limit-audit.test.sh
+        #   - testers-rate-limit-wrapper.test.sh
+        #   - uberscan.test.sh
+        #   - uberscan-report.test.sh
+        #   - uberscan-chunk.test.sh
+        #   - uberthink.test.sh
+        #   - uberthink-report.test.sh
+        #   - merge-discovery-resilience.test.sh
+        # === END ci-wiring windows-skip-list ===
         run: |
+          bash tests/ci-wiring.test.sh && \
           bash tests/turbo-flow.test.sh && \
           bash tests/issue-causal-fanout.test.sh && \
           bash tests/post-impl-review.test.sh && \
