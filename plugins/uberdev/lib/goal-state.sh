@@ -26,6 +26,7 @@
 #   uberdev_goal_read_run_state                (env-driven)
 #   uberdev_goal_cleanup_run_state             (env-driven)
 #   uberdev_goal_register_batch_pr             GOAL_ID PR ISSUE   (issue #211)
+#   uberdev_goal_barrier_breaker_check         GOAL_ID BARRIER_TIMEOUT_S   (issue #214)
 #   uberdev_goal_batch_all_terminal            GOAL_ID            (issue #211)
 #   uberdev_goal_batch_unblock_wait_clear      GOAL_ID            (issue #211)
 # Internal:
@@ -869,6 +870,45 @@ uberdev_goal_register_batch_pr() {
     fi
   fi
   return 0
+}
+
+# uberdev_goal_barrier_breaker_check GOAL_ID BARRIER_TIMEOUT_S
+#
+# Returns 0 iff the wall-clock merge-barrier breaker should fire — i.e.
+# the run-state sidecar's `barrier_start_ts` is a positive integer AND
+# `_uberdev_goal_now_secs() - barrier_start_ts >= timeout_s`. On fire,
+# emits a single `goal_circuit_breaker` audit event with payload
+# `{"reason":"stuck_loop","phase":"merge_barrier","elapsed_s":N,"pending_prs":"..."}`
+# — payload shape verbatim-equivalent to the inline math previously in
+# SKILL.md Phase 2c. `pending_prs` is the comma-joined PR list with
+# state==PENDING from `goal-<id>-batch-prs.tsv` (best-effort, empty on
+# missing TSV). Returns 1 if barrier_start_ts is unset/zero or elapsed
+# is under threshold. Issue #214.
+uberdev_goal_barrier_breaker_check() {
+  local goal_id="${1:?goal_id required}"
+  local timeout_s="${2:?timeout_s required}"
+  local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  local sc="$tmpdir/goal-$goal_id-runstate"
+  [ -r "$sc" ] || return 1
+  local barrier_start
+  barrier_start="$(grep '^barrier_start_ts=' "$sc" | tail -1 | cut -d= -f2)"
+  case "$barrier_start" in
+    ''|0|*[!0-9]*) return 1 ;;
+  esac
+  local now elapsed
+  now="$(_uberdev_goal_now_secs)"
+  elapsed=$(( now - barrier_start ))
+  if [ "$elapsed" -ge "$timeout_s" ]; then
+    local pending
+    pending="$(awk -F'\t' '$4=="PENDING"{printf "%s,", $1}' \
+      "$tmpdir/goal-${goal_id}-batch-prs.tsv" 2>/dev/null \
+      | sed 's/,$//')"
+    uberdev_goal_audit goal_circuit_breaker \
+      "$(printf '{"reason":"stuck_loop","phase":"merge_barrier","elapsed_s":%s,"pending_prs":"%s"}' \
+         "$elapsed" "$pending")"
+    return 0
+  fi
+  return 1
 }
 
 # uberdev_goal_batch_all_terminal GOAL_ID
