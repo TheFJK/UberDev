@@ -881,9 +881,10 @@ uberdev_goal_register_batch_pr() {
 # `{"reason":"stuck_loop","phase":"merge_barrier","elapsed_s":N,"pending_prs":"..."}`
 # — payload shape verbatim-equivalent to the inline math previously in
 # SKILL.md Phase 2c. `pending_prs` is the comma-joined PR list with
-# state==PENDING from `goal-<id>-batch-prs.tsv` (best-effort, empty on
-# missing TSV). Returns 1 if barrier_start_ts is unset/zero or elapsed
-# is under threshold. Issue #214.
+# state==PENDING from `goal-<id>-batch-prs.tsv` (best-effort; empty
+# string on missing/unreadable TSV — the awk `2>/dev/null` swallows
+# read errors too). Returns 1 if barrier_start_ts is unset/zero or
+# elapsed is under threshold. Issue #214.
 uberdev_goal_barrier_breaker_check() {
   local goal_id="${1:?goal_id required}"
   local timeout_s="${2:?timeout_s required}"
@@ -892,6 +893,7 @@ uberdev_goal_barrier_breaker_check() {
   [ -r "$sc" ] || return 1
   local barrier_start
   barrier_start="$(grep '^barrier_start_ts=' "$sc" | tail -1 | cut -d= -f2)"
+  # treat 0 as unseeded placeholder; positive epoch only
   case "$barrier_start" in
     ''|0|*[!0-9]*) return 1 ;;
   esac

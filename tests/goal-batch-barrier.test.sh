@@ -239,7 +239,7 @@ echo "== B7: barrier_start_ts seed survives write_run_state pre-population =="
 # ---------------------------------------------------------------------------
 # B8 — cap-rollover behavioral: with MAX_PARALLEL=3 and a 5-issue queue,
 # exactly 3 entries land in the DISPATCH_LOG and 2 stay in the rollover
-# queue. Mirrors SKILL.md Phase 1 step 2a cap-slice loop inline (SKILL.md
+# queue. Mirrors SKILL.md Phase 1 dispatch-loop cap-slice inline (SKILL.md
 # bash is LLM-directive text, not sourceable; this matches the BT5-BT11
 # idiom in tests/goal.test.sh). Issue #214 AC1.
 # ---------------------------------------------------------------------------
@@ -259,7 +259,7 @@ echo "== B8: cap-rollover behavioral — MAX_PARALLEL=3 vs 5-issue queue =="
   # Stub uberdev_dispatch_one — appends DISPATCHED:<issue> to the log.
   uberdev_dispatch_one() { printf 'DISPATCHED:%s\n' "$1" >> "$DISPATCH_LOG"; }
 
-  # Phase 1 cap-slice loop (verbatim mirror of SKILL.md Phase 2 step 2a).
+  # Phase 1 cap-slice loop (verbatim mirror of SKILL.md Phase 1 dispatch loop).
   MAX_PARALLEL=3
   queue=(101 102 103 104 105)
   dispatched_this_cycle=0
