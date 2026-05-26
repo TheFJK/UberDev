@@ -35,6 +35,7 @@ testers|testers|["Bash", "Read", "Write", "Task"]
 ubergoal|goal|["Bash", "Read", "Task"]
 uberscan|uberscan|["Bash(git*)", "Bash(gh*)", "Glob", "Grep", "Read", "Task", "Write"]
 ubersimplify|ubersimplify|["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", "Write"]
+uberthink|uberthink|["Bash(git*)", "Bash(gh*)", "Glob", "Grep", "Read", "Task", "Write", "WebSearch", "WebFetch"]
 '
 
 # Built-in Claude Code commands; never overwrite these.
@@ -235,7 +236,7 @@ aliases_sync_main() {
     done
     UBERDEV_ALIAS_NOTICE="${UBERDEV_ALIAS_NOTICE} — use /uberdev:<name>, or rename the existing file and run /uberdev:install-aliases."
   elif [ "$FIRST_RUN" = "1" ]; then
-    UBERDEV_ALIAS_NOTICE="uberdev: installed ${#INSTALLED_LIST[@]} short-form aliases (/issue, /solve, /turbo, /simplify, /review-pr, /merge, /dev, /testers, /ubergoal, /uberscan, /ubersimplify). Opt out with UBERDEV_NO_AUTO_ALIAS=1."
+    UBERDEV_ALIAS_NOTICE="uberdev: installed ${#INSTALLED_LIST[@]} short-form aliases (/issue, /solve, /turbo, /simplify, /review-pr, /merge, /dev, /testers, /ubergoal, /uberscan, /ubersimplify, /uberthink). Opt out with UBERDEV_NO_AUTO_ALIAS=1."
   fi
   return 0
 }

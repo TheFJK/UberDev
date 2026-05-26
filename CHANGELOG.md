@@ -4,6 +4,15 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.0] — 2026-05-26
+
+### Added
+- **`/uberthink` — read-only cross-domain ideation engine.** Spawns an agent fleet (frame → generator × personas → moderator → synthesizer × {weave/crossover/mutate} → falsifier × {steelman/premortem/redteam/physics} → arbiter) across parallel evolutionary "islands" with a genetic loop-back (cap 3) for fixable kills. Emits a 4-axis ranked dossier with a 🌙 Moonshot lane (Novelty × Impact Pareto) + files top ideas as GitHub issues. Flags: `--islands N` (default 2), `--handoff` (auto-invoke `/uberdev:brainstorm` on the #1 design), `--no-issues`, `--max-new N` (default 3). Cost: ~K × 15× a normal chat. RFC: `docs/rfc/0009-uberthink-ideation-engine.md`.
+
+### Changed
+- Version bumped to 0.34.0 across `plugin.json`, `marketplace.json`, the README badge, and the test version ratchets (`goal.test.sh` G20, `solve-claim.test.sh`).
+- `tests/uberthink.test.sh` and `tests/uberthink-report.test.sh` wired into the CI matrix (ubuntu-only, alongside the other python3-dependent fixtures).
+
 ## [0.33.20] - 2026-05-26
 
 ### Added
