@@ -525,19 +525,14 @@ while true; do
     # field reuses the existing stuck_loop enum — D5 keeps GOAL_CIRCUIT_
     # BREAKER_REASONS closed; the phase=merge_barrier subfield distinguishes
     # this from the goal-level 4h watch-loop stuck_loop.
-    if [ -n "${barrier_start_ts:-}" ] && [ "${barrier_start_ts:-0}" != "0" ]; then
-      now_secs="$(_uberdev_goal_now_secs)"
-      elapsed=$(( now_secs - barrier_start_ts ))
-      if (( elapsed >= BARRIER_TIMEOUT_S )); then
-        pending="$(awk -F'\t' '$4=="PENDING"{printf "%s,", $1}' \
-          "${UBERDEV_TMPDIR:-/tmp}/goal-${GOAL_ID}-batch-prs.tsv" 2>/dev/null \
-          | sed 's/,$//')"
-        uberdev_goal_audit goal_circuit_breaker \
-          "$(printf '{"reason":"stuck_loop","phase":"merge_barrier","elapsed_s":%s,"pending_prs":"%s"}' \
-             "$elapsed" "$pending")"
-        print_summary "$cycle"
-        exit 1
-      fi
+    # Wall-clock merge-barrier breaker: helper reads sidecar barrier_start_ts,
+    # computes elapsed, fires goal_circuit_breaker on threshold breach.
+    # Helper-extracted from inline math (issue #214). Payload + side-effects
+    # verbatim-equivalent — `pending_prs` lookup against batch-prs.tsv is
+    # internal to the helper.
+    if uberdev_goal_barrier_breaker_check "$GOAL_ID" "$BARRIER_TIMEOUT_S"; then
+      print_summary "$cycle"
+      exit 1
     fi
     any_active=1
   fi
