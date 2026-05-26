@@ -25,6 +25,10 @@
 #   uberdev_goal_write_run_state               (env-driven)
 #   uberdev_goal_read_run_state                (env-driven)
 #   uberdev_goal_cleanup_run_state             (env-driven)
+#   uberdev_goal_register_batch_pr             GOAL_ID PR ISSUE   (issue #211)
+#   uberdev_goal_barrier_breaker_check         GOAL_ID BARRIER_TIMEOUT_S   (issue #214)
+#   uberdev_goal_batch_all_terminal            GOAL_ID            (issue #211)
+#   uberdev_goal_batch_unblock_wait_clear      GOAL_ID            (issue #211)
 # Internal:
 #   _uberdev_goal_validate_int             N
 #   _uberdev_goal_validate_id              GOAL_ID
@@ -40,6 +44,9 @@
 #   _uberdev_goal_dispatch_review_pr       PR_NUM
 #   _uberdev_goal_dispatch_merge           PR_NUM
 #   _uberdev_goal_check_unblock            HELD_PR_NUM
+#   _uberdev_goal_set_batch_terminal_state GOAL_ID PR STATE       (issue #211)
+#   _uberdev_goal_batch_green_prs_ordered  GOAL_ID                (issue #211)
+#   _uberdev_goal_rebase_collision_chain   GOAL_ID JUST_MERGED_PR (issue #211)
 # External imports:
 #   - lib/dispatch.sh :: _uberdev_dispatch_prepare_tmp_target — REQUIRED by
 #     uberdev_goal_write_run_state, which reuses this #155 TOCTOU-safe target-prep
@@ -271,8 +278,8 @@ _uberdev_goal_persist_fp() {
 # ---------------------------------------------------------------------------
 
 # uberdev_goal_state_init GOAL_ID
-# D4 + T4 — Refuse unsafe $UBERDEV_TMPDIR; truncate-create the 5 per-goal
-# state files (jsonl + 4 TSVs).
+# D4 + T4 — Refuse unsafe $UBERDEV_TMPDIR; truncate-create the 8 per-goal
+# state files (jsonl + 7 TSVs) — enumerated in the inline comment below.
 uberdev_goal_state_init() {
   local goal_id="$1"
   # #156 — refuse an unsafe goal_id before it reaches any path interpolation.
@@ -298,7 +305,7 @@ uberdev_goal_state_init() {
   # passes the mkdir -p above (the dir already exists) yet cannot accept new
   # files; the bare `: > "$f"` writes used to fail one-by-one with raw
   # "Permission denied" noise and a confusing partial-state. Fail fast on the
-  # first unwritable file with a clean diagnostic. The 7 state files:
+  # first unwritable file with a clean diagnostic. The 8 state files:
   #   jsonl                  — per-goal audit stream
   #   pr-states.tsv          — PR state-machine transitions
   #   issue-states.tsv       — issue state-machine transitions
@@ -308,6 +315,8 @@ uberdev_goal_state_init() {
   #                            bounds Phase 2b's stale|missing graced re-dispatch arm)
   #   held-audits.tsv        — last re-review audit consumed per held PR (2e);
   #                            latest row per pr wins (get_last_held_audit tail)
+  #   batch-prs.tsv          — issue #211 batch registry (one row per dispatched
+  #                            PR; cols: pr<TAB>issue<TAB>dispatch_ts<TAB>terminal_state)
   local f
   for f in "$tmpdir/goal-$goal_id.jsonl" \
            "$tmpdir/goal-$goal_id-pr-states.tsv" \
@@ -315,7 +324,8 @@ uberdev_goal_state_init() {
            "$tmpdir/goal-$goal_id-fingerprints.tsv" \
            "$tmpdir/goal-$goal_id-merge-attempts.tsv" \
            "$tmpdir/goal-$goal_id-review-pr-attempts.tsv" \
-           "$tmpdir/goal-$goal_id-held-audits.tsv"; do
+           "$tmpdir/goal-$goal_id-held-audits.tsv" \
+           "$tmpdir/goal-$goal_id-batch-prs.tsv"; do
     if ! : > "$f"; then
       printf 'goal-state: cannot create state file %s (unwritable UBERDEV_TMPDIR?)\n' "$f" >&2
       return 1
@@ -771,6 +781,213 @@ uberdev_goal_read_merge_result() {
 }
 
 # ---------------------------------------------------------------------------
+# Batch registry + barrier helpers (issue #211).
+# The batch registry tracks every PR /goal dispatches inside a single cycle so
+# Phase 2c can decide when to enter the merge barrier (all_terminal predicate)
+# and when to exit it (unblock_wait_clear predicate). Three public helpers +
+# three internal helpers + run-state SSOT updates form the SSOT for Phase 1
+# (register on dispatch) and Phase 2c (poll predicates, sequential merge).
+# Atomic writes via the #155 TOCTOU-safe target-prep helper (same primitive
+# uberdev_goal_write_run_state uses); the lib hard-depends on dispatch.sh
+# being sourced first by the goal-pipeline body (a `command -v` preflight
+# in register_batch_pr fails loud with rc=4 if the dep is missing).
+# ---------------------------------------------------------------------------
+
+# uberdev_goal_register_batch_pr GOAL_ID PR ISSUE
+# Append a row to goal-<id>-batch-prs.tsv with terminal_state=PENDING.
+# On the first registration of the cycle, also seed barrier_start_ts into
+# the run-state sidecar (best-effort; the next uberdev_goal_write_run_state
+# call atomically rewrites it).
+# rc 0 on success; rc 1 validation; rc 3 atomic-write; rc 4 missing dispatch lib.
+uberdev_goal_register_batch_pr() {
+  local goal_id="$1" pr="$2" issue="$3"
+  _uberdev_goal_validate_id  "$goal_id" || return 1
+  _uberdev_goal_validate_int "$pr"      || return 1
+  _uberdev_goal_validate_int "$issue"   || return 1
+  if ! command -v _uberdev_dispatch_prepare_tmp_target >/dev/null 2>&1; then
+    printf 'goal-state: uberdev_goal_register_batch_pr requires lib/dispatch.sh sourced first\n' >&2
+    return 4
+  fi
+  local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  local tsv="$tmpdir/goal-$goal_id-batch-prs.tsv"
+  local ts; ts="$(_uberdev_goal_now_secs)"
+  # First-registration seed: if registry is empty, seed barrier_start_ts.
+  local first=0
+  if [ ! -s "$tsv" ]; then first=1; fi
+  # Atomic append: read existing FIRST (the #155 prepare_tmp_target call below
+  # rm+truncates its target, so reading after prepare returns an empty file),
+  # write merged content into a fresh sibling, then atomic mv onto the prepared
+  # 0600-owned target. The prepare call still provides the TOCTOU-safe target
+  # guard (symlink reject + EUID-owner check + 0600 noclobber-create) — the
+  # mv -f then replaces the prepared empty target with the merged content in
+  # one filesystem syscall.
+  local tmp existing
+  existing=""
+  # Bash builtin `$(< file)` avoids a `cat` fork; library is bash-only (header).
+  [ -r "$tsv" ] && existing="$(<"$tsv")"
+  _uberdev_dispatch_prepare_tmp_target "$tsv" 0 "goal" || return 3
+  tmp="$(mktemp "${tsv}.XXXXXXXX")" || return 3
+  if [ -n "$existing" ]; then
+    printf '%s\n%s\t%s\t%s\tPENDING\n' "$existing" "$pr" "$issue" "$ts" > "$tmp" || { rm -f "$tmp"; return 3; }
+  else
+    printf '%s\t%s\t%s\tPENDING\n' "$pr" "$issue" "$ts" > "$tmp" || { rm -f "$tmp"; return 3; }
+  fi
+  mv -f "$tmp" "$tsv" || { rm -f "$tmp"; return 3; }
+  # Best-effort seed barrier_start_ts on first registration.
+  #
+  # Background — the previous implementation used the predicate
+  # `! grep -q '^barrier_start_ts='` + `>>` append. That bare-prefix pattern
+  # is wrong when Phase 0 step 7 has already called uberdev_goal_write_run_state,
+  # because the writer ALWAYS emits a `barrier_start_ts=${barrier_start_ts:-0}`
+  # line — so the placeholder `barrier_start_ts=0` line exists on disk, the
+  # bare-prefix `grep -q` matches it, the `!` negation is FALSE, and the seed
+  # never fires. The wall-clock merge-barrier breaker (AC6 / D-211e) then never
+  # trips because the Phase 2c guard reads `0` forever.
+  #
+  # Fix (current predicate, line below): tighten the regex to
+  # `^barrier_start_ts=[1-9][0-9]*$` so the placeholder `barrier_start_ts=0`
+  # line does NOT match, `! grep -q` is therefore TRUE, and the seed DOES fire.
+  # Use an awk rewrite (drop every existing barrier_start_ts= line, append the
+  # seeded value at end) → mktemp → mv -f so the placeholder line is REPLACED
+  # rather than duplicated. Best-effort: failure leaves the file untouched (the
+  # next uberdev_goal_write_run_state rewrites the sidecar atomically from the
+  # in-memory scalar anyway).
+  if [ "$first" = "1" ]; then
+    local sc="$tmpdir/goal-$goal_id-runstate"
+    if [ -r "$sc" ] && ! grep -qE '^barrier_start_ts=[1-9][0-9]*$' "$sc"; then
+      # Note: dispatch-lib presence already preflighted at line 807 (return 4
+      # path), so the symbol is guaranteed present here — no inner command -v.
+      local sc_tmp
+      sc_tmp="$(mktemp "${sc}.XXXXXXXX")" 2>/dev/null || sc_tmp=""
+      if [ -n "$sc_tmp" ]; then
+        if awk -v ts="$ts" '
+          /^barrier_start_ts=/ { next }
+          { print }
+          END { printf "barrier_start_ts=%s\n", ts }
+        ' "$sc" > "$sc_tmp" 2>/dev/null; then
+          mv -f "$sc_tmp" "$sc" 2>/dev/null || rm -f "$sc_tmp" 2>/dev/null
+        else
+          rm -f "$sc_tmp" 2>/dev/null
+        fi
+      fi
+    fi
+  fi
+  return 0
+}
+
+# uberdev_goal_barrier_breaker_check GOAL_ID BARRIER_TIMEOUT_S
+#
+# Returns 0 iff the wall-clock merge-barrier breaker should fire — i.e.
+# the run-state sidecar's `barrier_start_ts` is a positive integer AND
+# `_uberdev_goal_now_secs() - barrier_start_ts >= timeout_s`. On fire,
+# emits a single `goal_circuit_breaker` audit event with payload
+# `{"reason":"stuck_loop","phase":"merge_barrier","elapsed_s":N,"pending_prs":"..."}`
+# — payload shape verbatim-equivalent to the inline math previously in
+# SKILL.md Phase 2c. `pending_prs` is the comma-joined PR list with
+# state==PENDING from `goal-<id>-batch-prs.tsv` (best-effort; empty
+# string on missing/unreadable TSV — the awk `2>/dev/null` swallows
+# read errors too). Returns 1 if barrier_start_ts is unset/zero or
+# elapsed is under threshold. Issue #214.
+uberdev_goal_barrier_breaker_check() {
+  local goal_id="${1:?goal_id required}"
+  local timeout_s="${2:?timeout_s required}"
+  local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  local sc="$tmpdir/goal-$goal_id-runstate"
+  [ -r "$sc" ] || return 1
+  local barrier_start
+  # Single-fork awk: last barrier_start_ts= line wins; numeric coerce inline so
+  # empty/non-numeric values fall through to the case-guard below as "0".
+  barrier_start="$(awk -F= '$1=="barrier_start_ts"{v=$2} END{print v+0}' "$sc")"
+  # treat 0 as unseeded placeholder; positive epoch only
+  case "$barrier_start" in
+    ''|0|*[!0-9]*) return 1 ;;
+  esac
+  local now elapsed
+  now="$(_uberdev_goal_now_secs)"
+  elapsed=$(( now - barrier_start ))
+  if [ "$elapsed" -ge "$timeout_s" ]; then
+    local pending
+    pending="$(awk -F'\t' '$4=="PENDING"{printf "%s,", $1}' \
+      "$tmpdir/goal-$goal_id-batch-prs.tsv" 2>/dev/null \
+      | sed 's/,$//')"
+    uberdev_goal_audit goal_circuit_breaker \
+      "$(printf '{"reason":"stuck_loop","phase":"merge_barrier","elapsed_s":%s,"pending_prs":"%s"}' \
+         "$elapsed" "$pending")"
+    return 0
+  fi
+  return 1
+}
+
+# uberdev_goal_batch_all_terminal GOAL_ID
+# rc 0 iff registry is non-empty and every row's terminal_state ∈
+# {GREEN,HELD,MERGE_FAILED,MERGED}. Empty registry returns rc 1. PENDING
+# anywhere returns rc 1. Pure read; no gh calls.
+uberdev_goal_batch_all_terminal() {
+  local goal_id="$1"
+  _uberdev_goal_validate_id "$goal_id" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  local tsv="$tmpdir/goal-$goal_id-batch-prs.tsv"
+  [ -r "$tsv" ] && [ -s "$tsv" ] || return 1
+  local _pr _issue _ts state
+  while IFS=$'\t' read -r _pr _issue _ts state; do
+    [ -n "$state" ] || continue
+    case "$state" in
+      GREEN|HELD|MERGE_FAILED|MERGED) : ;;
+      *) return 1 ;;
+    esac
+  done < "$tsv"
+  return 0
+}
+
+# uberdev_goal_batch_unblock_wait_clear GOAL_ID
+# rc 0 iff every HELD row has either NO unblock-issue OR (unblock-issue closed
+# AND PR-trust-label review-pr:green present). The unblock-issue id is inferred
+# from the PR body's `Blocks: #N` line (body capped at 64 KiB per R1/T1).
+# Pure read of label/issue state. Stale or 404 label/issue data is treated as
+# "still waiting" (rc 1) per spec B11 — never assume CLOSED on a gh failure.
+uberdev_goal_batch_unblock_wait_clear() {
+  local goal_id="$1"
+  _uberdev_goal_validate_id "$goal_id" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  local tsv="$tmpdir/goal-$goal_id-batch-prs.tsv"
+  [ -r "$tsv" ] && [ -s "$tsv" ] || return 0   # empty registry → trivially clear
+  local pr issue _ts state line
+  while IFS=$'\t' read -r pr issue _ts state; do
+    [ -n "$state" ] || continue
+    [ "$state" = "HELD" ] || continue
+    # Fetch PR body (capped at 64 KiB) and look for Blocks: #N.
+    # F17 simplify-lens: reuse the centralized helpers
+    # _uberdev_goal_fetch_pr_body + _uberdev_goal_parse_blocks_line (same
+    # primitives used by sibling _uberdev_goal_check_unblock); the cap +
+    # ReDoS-safe anchored regex + numeric re-validation now flow from a
+    # single source of truth.
+    local body blocking_issue n
+    body="$(_uberdev_goal_fetch_pr_body "$pr")"
+    blocking_issue=""
+    while IFS= read -r line; do
+      n="$(_uberdev_goal_parse_blocks_line "$line")"
+      if [ -n "$n" ]; then
+        blocking_issue="$n"
+        break
+      fi
+    done <<< "$body"
+    # No unblock-issue → this HELD PR doesn't gate the barrier.
+    [ -n "$blocking_issue" ] || continue
+    # Verify issue is CLOSED.
+    local issue_state
+    issue_state="$(gh issue view "$blocking_issue" --json state --jq .state 2>/dev/null)" || return 1
+    [ "$issue_state" = "CLOSED" ] || return 1
+    # Verify trust label review-pr:green is present. In-process jq filter
+    # (length on a select-filtered array) avoids the post-jq `grep -c` fork
+    # and eliminates the pipeline-pollution surface (per /merge memory).
+    local has_green
+    has_green="$(gh pr view "$pr" --json labels --jq '[.labels[].name | select(. == "review-pr:green")] | length' 2>/dev/null || true)"
+    [ "${has_green:-0}" -ge 1 ] || return 1
+  done < "$tsv"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Internal dispatch + unblock helpers (depend on lib/dispatch.sh's
 # uberdev_dispatch_one — sourced by the goal-pipeline SKILL.md, not here).
 # ---------------------------------------------------------------------------
@@ -948,6 +1165,122 @@ _uberdev_goal_check_unblock() {
   fi
 }
 
+# _uberdev_goal_set_batch_terminal_state GOAL_ID PR STATE
+# Rewrite the PR's row in goal-<id>-batch-prs.tsv with the new terminal_state.
+# Atomic-write via _uberdev_dispatch_prepare_tmp_target + mktemp + mv -f
+# (preserves all other rows). Refuses to silently insert a new row for an
+# unknown PR — that would let a typo masquerade as a state change.
+# rc 0 on success; rc 1 validation / PR-not-in-registry; rc 3 atomic-write;
+# rc 4 missing dispatch lib.
+_uberdev_goal_set_batch_terminal_state() {
+  local goal_id="$1" pr="$2" state="$3"
+  _uberdev_goal_validate_id  "$goal_id" || return 1
+  _uberdev_goal_validate_int "$pr"      || return 1
+  case "$state" in
+    GREEN|HELD|MERGE_FAILED|MERGED|PENDING) : ;;
+    *) printf 'goal-state: invalid batch terminal state: %s\n' "$state" >&2; return 1 ;;
+  esac
+  if ! command -v _uberdev_dispatch_prepare_tmp_target >/dev/null 2>&1; then
+    return 4
+  fi
+  local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  local tsv="$tmpdir/goal-$goal_id-batch-prs.tsv"
+  [ -r "$tsv" ] || return 1
+  # Read existing TSV into memory BEFORE preparing the target (the #155 prepare
+  # helper rm+truncates its target, so a read after prepare would yield empty —
+  # see register_batch_pr for the same ordering rationale). The mv -f below
+  # replaces the prepared empty target with the rewritten content atomically.
+  local existing
+  existing="$(<"$tsv")"
+  _uberdev_dispatch_prepare_tmp_target "$tsv" 0 "goal" || return 3
+  local tmp
+  tmp="$(mktemp "${tsv}.XXXXXXXX")" || return 3
+  # Rewrite the row whose first column == $pr, preserving all other rows.
+  local row_pr row_issue row_ts row_state found=0
+  while IFS=$'\t' read -r row_pr row_issue row_ts row_state; do
+    [ -n "$row_pr" ] || continue
+    if [ "$row_pr" = "$pr" ]; then
+      printf '%s\t%s\t%s\t%s\n' "$row_pr" "$row_issue" "$row_ts" "$state" >> "$tmp"
+      found=1
+    else
+      printf '%s\t%s\t%s\t%s\n' "$row_pr" "$row_issue" "$row_ts" "$row_state" >> "$tmp"
+    fi
+  done <<< "$existing"
+  if [ "$found" = "0" ]; then
+    rm -f "$tmp"
+    # Restore the original content since we refused the insert.
+    printf '%s' "$existing" > "$tsv" 2>/dev/null || true
+    return 1   # PR not in registry; refuse silent insert
+  fi
+  mv -f "$tmp" "$tsv" || { rm -f "$tmp"; return 3; }
+  return 0
+}
+
+# _uberdev_goal_batch_green_prs_ordered GOAL_ID
+# Emit PR numbers (one per line) whose terminal_state=GREEN, sorted numerically
+# ascending (`sort -n`). Phase 2c sequential-merge feeds this ordered list into
+# /merge so the lowest-numbered green PR lands first and downstream PRs rebase
+# onto its fresh main. rc 0 with empty stdout when no GREEN rows exist.
+_uberdev_goal_batch_green_prs_ordered() {
+  local goal_id="$1"
+  _uberdev_goal_validate_id "$goal_id" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  local tsv="$tmpdir/goal-$goal_id-batch-prs.tsv"
+  [ -r "$tsv" ] && [ -s "$tsv" ] || return 0
+  local pr _issue _ts state
+  while IFS=$'\t' read -r pr _issue _ts state; do
+    [ "$state" = "GREEN" ] && printf '%s\n' "$pr"
+  done < "$tsv" | sort -n
+}
+
+# _uberdev_goal_rebase_collision_chain GOAL_ID JUST_MERGED_PR
+# For each remaining GREEN PR in the batch, intersect its file-diff with the
+# just-merged PR's file-diff; on non-empty intersection, fetch fresh
+# origin/main and emit a goal_pr_transition audit event tagged
+# collision_files=<csv>. The actual rebase is delegated to the existing
+# /merge rebase handler on the next iteration — this helper's job is to
+# pre-fetch main and surface the collision in the audit stream so the next
+# /merge dispatch picks up the fresh base. rc 0 always (best-effort —
+# collision detection must never halt the goal).
+_uberdev_goal_rebase_collision_chain() {
+  local goal_id="$1" merged_pr="$2"
+  _uberdev_goal_validate_id  "$goal_id"   || return 0
+  _uberdev_goal_validate_int "$merged_pr" || return 0
+  # Use `gh pr diff --name-only` rather than `git diff --name-only origin/main..pr-N`:
+  # the `pr-N` refs do not exist in the local clone, so the prior `git diff`
+  # call failed silently (|| true) and the helper was a permanent no-op.
+  # `gh pr diff` resolves the PR via the GitHub API and prints the same
+  # path-set; failures still degrade gracefully (intersection stays empty,
+  # no audit, rc 0 — matches the spec's "best-effort, never halt the goal"
+  # contract).
+  local merged_diff
+  merged_diff="$(gh pr diff "$merged_pr" --name-only 2>/dev/null || true)"
+  [ -n "$merged_diff" ] || return 0
+  # F17 simplify-lens: hoist the sort of $merged_diff above the inner loop;
+  # comm -12 cares only about set contents, not iteration count, so this
+  # saves one `sort -u` per remaining-PR iteration.
+  local merged_sorted
+  merged_sorted="$(printf '%s\n' "$merged_diff" | sort -u)"
+  local pr
+  while IFS= read -r pr; do
+    [ -n "$pr" ] || continue
+    [ "$pr" = "$merged_pr" ] && continue
+    local pr_diff intersection
+    pr_diff="$(gh pr diff "$pr" --name-only 2>/dev/null || true)"
+    intersection="$(comm -12 <(printf '%s\n' "$merged_sorted") <(printf '%s\n' "$pr_diff" | sort -u))"
+    if [ -n "$intersection" ]; then
+      # Collision detected — refresh main and audit the transition.
+      git fetch origin main 2>/dev/null || true
+      uberdev_goal_audit goal_pr_transition \
+        "$(printf '{"pr":%s,"from":"green","collision_files":"%s"}' \
+            "$pr" "$(printf '%s' "$intersection" | tr '\n' ',' | sed 's/,$//')")" 2>/dev/null || true
+      # The actual rebase is delegated to the existing /merge rebase handler
+      # on the next iteration; the audit + pre-fetched main is the contract.
+    fi
+  done < <(_uberdev_goal_batch_green_prs_ordered "$goal_id")
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Run-state sidecar (issue #171): persist the GOAL_ID pointer + loop
 # accumulators so they survive fresh-shell Bash boundaries. KEY=value text,
@@ -958,10 +1291,11 @@ _uberdev_goal_check_unblock() {
 
 # uberdev_goal_write_run_state
 #   Reads GOAL_ID, cycle, watch_start, overflow_count, overflow_detected,
-#   MAX_CYCLES, UBERDEV_RESOLVED_BACKEND, and the queue/active_issues arrays
-#   from the caller's shell; persists them to predictable, GOAL_ID-keyed
-#   sidecars under $UBERDEV_TMPDIR, plus a fixed-path goal-active-id.txt pointer
-#   so a fresh shell (no GOAL_ID in env/scalar) can discover the active GOAL_ID.
+#   MAX_CYCLES, UBERDEV_RESOLVED_BACKEND, MAX_PARALLEL, BARRIER_TIMEOUT_S,
+#   barrier_start_ts, and the queue/active_issues arrays from the caller's
+#   shell; persists them to predictable, GOAL_ID-keyed sidecars under
+#   $UBERDEV_TMPDIR, plus a fixed-path goal-active-id.txt pointer so a fresh
+#   shell (no GOAL_ID in env/scalar) can discover the active GOAL_ID.
 #   Returns 0 on success; 4 (fail-CLOSED) if its required lib/dispatch.sh helper
 #   _uberdev_dispatch_prepare_tmp_target is not sourced (see "External imports");
 #   1 if GOAL_ID is invalid; 3 (fail-CLOSED) if _uberdev_dispatch_prepare_tmp_target
@@ -987,9 +1321,10 @@ uberdev_goal_write_run_state() {
   _uberdev_dispatch_prepare_tmp_target "$sc" 0 "goal" || return 3
   local tmp _filtered aid
   tmp="$(mktemp "${sc}.XXXXXXXX")" || return 3
-  printf 'GOAL_ID=%s\ncycle=%s\nwatch_start=%s\noverflow_count=%s\noverflow_detected=%s\nMAX_CYCLES=%s\nUBERDEV_RESOLVED_BACKEND=%s\n' \
+  printf 'GOAL_ID=%s\ncycle=%s\nwatch_start=%s\noverflow_count=%s\noverflow_detected=%s\nMAX_CYCLES=%s\nUBERDEV_RESOLVED_BACKEND=%s\nMAX_PARALLEL=%s\nBARRIER_TIMEOUT_S=%s\nbarrier_start_ts=%s\n' \
     "$GOAL_ID" "${cycle:-0}" "${watch_start:-0}" "${overflow_count:-0}" \
-    "${overflow_detected:-0}" "${MAX_CYCLES:-0}" "${UBERDEV_RESOLVED_BACKEND:-}" > "$tmp"
+    "${overflow_detected:-0}" "${MAX_CYCLES:-0}" "${UBERDEV_RESOLVED_BACKEND:-}" \
+    "${MAX_PARALLEL:-0}" "${BARRIER_TIMEOUT_S:-0}" "${barrier_start_ts:-0}" > "$tmp"
   mv -f "$tmp" "$sc" || { rm -f "$tmp"; return 3; }
 
   # Array sidecars: one int per line, no IFS-mutating joins. Capture first
@@ -1037,8 +1372,9 @@ uberdev_goal_write_run_state() {
 #   across Bash calls, issue #171), it is bootstrapped from the fixed-path
 #   goal-active-id.txt pointer (content gated through _uberdev_goal_validate_id).
 #   On success: sets the GOAL_ID, cycle, watch_start, overflow_count,
-#   overflow_detected, MAX_CYCLES, UBERDEV_RESOLVED_BACKEND scalars, rehydrates
-#   the queue/active_issues arrays, and EXPORTS UBERDEV_GOAL_ID + UBERDEV_TMPDIR
+#   overflow_detected, MAX_CYCLES, UBERDEV_RESOLVED_BACKEND, MAX_PARALLEL,
+#   BARRIER_TIMEOUT_S, barrier_start_ts scalars, rehydrates the
+#   queue/active_issues arrays, and EXPORTS UBERDEV_GOAL_ID + UBERDEV_TMPDIR
 #   (the env vars the uberdev_goal_* helpers + bare $UBERDEV_TMPDIR/... paths in
 #   the pipeline body depend on — see the export block at the function's end).
 #   Returns 0 on success; 1 if missing/unreadable. Invalid fields are skipped
@@ -1072,6 +1408,9 @@ uberdev_goal_read_run_state() {
       overflow_count)    _uberdev_goal_validate_int "$v" && overflow_count="$v" ;;
       overflow_detected) _uberdev_goal_validate_int "$v" && overflow_detected="$v" ;;
       MAX_CYCLES)        _uberdev_goal_validate_int "$v" && MAX_CYCLES="$v" ;;
+      MAX_PARALLEL)      _uberdev_goal_validate_int "$v" && MAX_PARALLEL="$v" ;;
+      BARRIER_TIMEOUT_S) _uberdev_goal_validate_int "$v" && BARRIER_TIMEOUT_S="$v" ;;
+      barrier_start_ts)  _uberdev_goal_validate_int "$v" && barrier_start_ts="$v" ;;
       UBERDEV_RESOLVED_BACKEND)
         case "$v" in claude-bg|wezterm|background) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;
       *) : ;;   # reject unknown keys (allowlist only)
@@ -1122,7 +1461,7 @@ uberdev_goal_cleanup_run_state() {
   local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
   _uberdev_goal_validate_id "${GOAL_ID:-}" || return 0
   local sc="$tmpdir/goal-$GOAL_ID-runstate"
-  rm -f "$sc" "${sc}.queue" "${sc}.active" 2>/dev/null
+  rm -f "$sc" "${sc}.queue" "${sc}.active" "$tmpdir/goal-$GOAL_ID-batch-prs.tsv" 2>/dev/null
   # Remove the fixed-path pointer only if it still names THIS goal, so a
   # concurrent goal's pointer is never clobbered.
   local aid="$tmpdir/goal-active-id.txt"

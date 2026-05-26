@@ -280,7 +280,7 @@ Per `findings-to-issues` agent: if a single `/review-pr` run has >10 deferred bl
 
 | #   | Question                                                                                                          | Recommendation |
 | --- | ----------------------------------------------------------------------------------------------------------------- | -------------- |
-| Q1  | Should `/goal` cap parallel `/turbo` dispatches per cycle? Today `/turbo` uses `fanout_concurrency.solve_bg` (default 6). | Inherit `solve_bg` for v1; revisit if real cycles produce too-wide fanouts. |
+| Q1  | Should `/goal` cap parallel `/turbo` dispatches per cycle? Today `/turbo` uses `fanout_concurrency.solve_bg` (default 6). | RESOLVED (issue #211, v0.33.20): default fan-out cap = 3, configurable 1–10 via `goal.max_parallel` / `UBERDEV_GOAL_MAX_PARALLEL` / `--max-parallel=N`. Out-of-range values fall back to the default via `uberdev_read_int_in_range` (stderr warning + audit event). The cap applies to Phase 1 dispatch only; Phase 2 watcher remains single-threaded per RFC 0005 §3.3. |
 | Q2  | Does `/goal` need its own claim type (`goal_claim`) so two concurrent `/goal` runs don't collide on issue-set overlap? | Defer — single-user repos don't need it; document the gap in README. |
 | Q3  | Per-goal audit sink — separate file or append to `solve-audit.jsonl`?                                              | Separate `goal-<id>.jsonl` for clean post-mortem; cross-reference by `goal_id`. |
 | Q4  | When `/review-pr` is re-run in §3.2.3, do we wait for CI again (`/review-pr` Phase 3 — RFC 0001)?                  | Yes — re-review is full `/review-pr`, including Phase 3 CI Health. No shortcut. |
@@ -337,6 +337,13 @@ Codes are grouped by prefix: **D** (design decisions), **T** (trust/threat bound
 | D17 | YELLOW/RED PRs are never merged inside `/goal`; `yellow-held → merging` and `red-held → merging` are forbidden transitions in the PR state machine. `stale` and `missing` trust signals also never imply GREEN — they trigger a re-dispatch of `/review-pr`. Terminal states `merged` and `merge-failed` are irreversible. | §3.2.1, §2.3 |
 | D18 | Every re-review dispatch (unblock rule, stale/missing trust signal) uses full `/uberdev:review-pr` with no incremental shortcut, because the upstream merge that triggered unblock may have changed CI dependencies. | §5 |
 | D19 | Crash-restart contract: `_UBERDEV_GOAL_STATE_LOADED` guard prevents double-sourcing within a single process; resume-after-SIGKILL is explicitly out of scope for v1. | — |
+| D-211a | `uberdev_goal_register_batch_pr` | Per-PR append to `goal-<id>-batch-prs.tsv` registry with atomic write; seeds `barrier_start_ts` on first registration of the cycle. | — |
+| D-211b | `uberdev_goal_batch_all_terminal` | Pure-read predicate over the batch registry; rc 0 iff every row's `terminal_state` ∈ {GREEN, HELD, MERGE_FAILED, MERGED}. Empty registry returns rc 1. | — |
+| D-211c | `uberdev_goal_batch_unblock_wait_clear` | Pure-read predicate over the batch registry; rc 0 iff every HELD row's unblock-issue is closed AND its PR carries `review-pr:green`. | — |
+| D-211d | `_UBERDEV_GOAL_DEFAULT_MAX_PARALLEL` | Phase 1 dispatch cap default (`3`); range `[1, 10]` via `uberdev_read_int_in_range`. | — |
+| D-211e | `_UBERDEV_GOAL_DEFAULT_BARRIER_TIMEOUT_S` | Phase 2 step 2c wall-clock cap default (`14400` = 4h); range `[60, 86400]`. Timeout escalates to `stuck_loop` (no new circuit-breaker reason). | — |
+
+> The three barrier-internal helpers (`_uberdev_goal_set_batch_terminal_state`, `_uberdev_goal_batch_green_prs_ordered`, `_uberdev_goal_rebase_collision_chain`) are underscore-prefixed private primitives and intentionally do not receive §9 D-code rows, matching the convention from D-codes for existing private helpers.
 
 ### 9.2 T — Trust / Threat boundaries
 

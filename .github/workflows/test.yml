@@ -94,7 +94,8 @@ jobs:
           bash tests/testers-rate-limit-wrapper.test.sh && \
           bash tests/goal-state-sidecar.test.sh && \
           bash tests/using-git-worktrees.test.sh && \
-          bash tests/goal.test.sh
+          bash tests/goal.test.sh && \
+          bash tests/goal-batch-barrier.test.sh
 
   shape-checks-windows:
     name: shape-checks-windows
@@ -173,4 +174,5 @@ jobs:
           bash tests/simplify.test.sh && \
           bash tests/goal-state-sidecar.test.sh && \
           bash tests/using-git-worktrees.test.sh && \
-          bash tests/goal.test.sh
+          bash tests/goal.test.sh && \
+          bash tests/goal-batch-barrier.test.sh

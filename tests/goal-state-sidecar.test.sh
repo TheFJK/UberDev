@@ -312,6 +312,40 @@ assert_absent "$UBERDEV_TMPDIR/goal-active-id.txt" "active-id pointer removed (n
 uberdev_goal_cleanup_run_state   # second call on already-gone files
 assert_eq "$?" "0" "cleanup idempotent (non-fatal when absent)"
 
+echo "== S-barrier-1: MAX_PARALLEL / BARRIER_TIMEOUT_S / barrier_start_ts survive cross-shell rehydrate (#211 wave-1) =="
+# The batch-barrier scalars (MAX_PARALLEL, BARRIER_TIMEOUT_S, barrier_start_ts)
+# must persist across the same fresh-shell boundary the existing watch_start
+# round-trip exercises — otherwise Phase 1 sees an empty barrier_start_ts on
+# rehydrate and the barrier-timeout circuit-breaker fires immediately (or
+# never, depending on which side wins the empty-string comparison).
+#
+# Write the three barrier scalars alongside the required existing scalars,
+# then re-enter a fresh `bash --noprofile --norc -c` with env CLEARED except
+# UBERDEV_TMPDIR (the bootstrap pointer recovers GOAL_ID from the fixed-path
+# active-id file; do NOT re-export GOAL_ID — that defeats the bootstrap test).
+GOAL_ID="goal-test-barrier01"; cycle=1; watch_start=1700000000
+overflow_count=0; overflow_detected=0; MAX_CYCLES=5
+UBERDEV_RESOLVED_BACKEND="claude-bg"
+queue=(); active_issues=()
+MAX_PARALLEL=3
+BARRIER_TIMEOUT_S=14400
+barrier_start_ts=1700009999
+uberdev_goal_write_run_state
+barrier_out="$(UBERDEV_TMPDIR="$UBERDEV_TMPDIR" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" \
+  bash --noprofile --norc -c '
+    . "$CLAUDE_PLUGIN_ROOT/lib/dispatch.sh"
+    . "$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh"
+    uberdev_goal_read_run_state || exit 9
+    printf "MAX_PARALLEL=%s\nBARRIER_TIMEOUT_S=%s\nbarrier_start_ts=%s\n" \
+      "${MAX_PARALLEL:-}" "${BARRIER_TIMEOUT_S:-}" "${barrier_start_ts:-}"
+  ')"
+mp_got="$(printf '%s\n' "$barrier_out" | grep '^MAX_PARALLEL=' | head -1 | cut -d= -f2-)"
+bt_got="$(printf '%s\n' "$barrier_out" | grep '^BARRIER_TIMEOUT_S=' | head -1 | cut -d= -f2-)"
+bs_got="$(printf '%s\n' "$barrier_out" | grep '^barrier_start_ts=' | head -1 | cut -d= -f2-)"
+assert_eq "$mp_got" "3"          "S-barrier-1: MAX_PARALLEL survives fresh-shell rehydrate"
+assert_eq "$bt_got" "14400"      "S-barrier-1: BARRIER_TIMEOUT_S survives fresh-shell rehydrate"
+assert_eq "$bs_got" "1700009999" "S-barrier-1: barrier_start_ts survives fresh-shell rehydrate"
+
 echo
 printf 'goal-state-sidecar: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
