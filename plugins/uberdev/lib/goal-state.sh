@@ -776,21 +776,23 @@ uberdev_goal_agent_stuck_on_dialog() {
   fi
   _uberdev_goal_validate_int "$row_count" || row_count="0"
   now="$(date +%s)"
-  eval "prior=\${PRIOR_LAST_ACTIVITY_${pid}:-}"
-  eval "first_seen=\${FIRST_DIALOG_TS_${pid}:-}"
+  local _prior_key="PRIOR_LAST_ACTIVITY_${pid}"
+  local _first_key="FIRST_DIALOG_TS_${pid}"
+  prior="${!_prior_key:-}"
+  first_seen="${!_first_key:-}"
   if [ -z "$prior" ]; then
-    eval "PRIOR_LAST_ACTIVITY_${pid}='$row_count'"
-    eval "FIRST_DIALOG_TS_${pid}='$now'"
-    export "PRIOR_LAST_ACTIVITY_${pid}" "FIRST_DIALOG_TS_${pid}"
+    printf -v "$_prior_key" '%s' "$row_count"
+    printf -v "$_first_key" '%s' "$now"
+    export "$_prior_key" "$_first_key"
     return 1
   fi
   if [ "$row_count" = "$prior" ] && [ -n "$first_seen" ] && [ "$(( now - first_seen ))" -ge 60 ]; then
     return 0
   fi
   if [ "$row_count" != "$prior" ]; then
-    eval "PRIOR_LAST_ACTIVITY_${pid}='$row_count'"
-    eval "FIRST_DIALOG_TS_${pid}='$now'"
-    export "PRIOR_LAST_ACTIVITY_${pid}" "FIRST_DIALOG_TS_${pid}"
+    printf -v "$_prior_key" '%s' "$row_count"
+    printf -v "$_first_key" '%s' "$now"
+    export "$_prior_key" "$_first_key"
   fi
   return 1
 }
@@ -1484,13 +1486,13 @@ uberdev_goal_write_run_state() {
   for _pid_var in $(compgen -v 'PRIOR_LAST_ACTIVITY_' 2>/dev/null); do
     _pid_suffix="${_pid_var#PRIOR_LAST_ACTIVITY_}"
     _uberdev_goal_validate_int "$_pid_suffix" || continue
-    eval "_pid_val=\"\${$_pid_var}\""
+    _pid_val="${!_pid_var}"
     printf '%s=%s\n' "$_pid_var" "$_pid_val" >> "$tmp"
   done
   for _pid_var in $(compgen -v 'FIRST_DIALOG_TS_' 2>/dev/null); do
     _pid_suffix="${_pid_var#FIRST_DIALOG_TS_}"
     _uberdev_goal_validate_int "$_pid_suffix" || continue
-    eval "_pid_val=\"\${$_pid_var}\""
+    _pid_val="${!_pid_var}"
     printf '%s=%s\n' "$_pid_var" "$_pid_val" >> "$tmp"
   done
   mv -f "$tmp" "$sc" || { rm -f "$tmp"; return 3; }
@@ -1589,14 +1591,14 @@ uberdev_goal_read_run_state() {
         local _suffix="${k#PRIOR_LAST_ACTIVITY_}"
         _uberdev_goal_validate_int "$_suffix" || continue
         [ "${#v}" -le 64 ] || continue
-        eval "PRIOR_LAST_ACTIVITY_${_suffix}=\"\$v\""
-        eval "export PRIOR_LAST_ACTIVITY_${_suffix}" ;;
+        printf -v "PRIOR_LAST_ACTIVITY_${_suffix}" '%s' "$v"
+        export "PRIOR_LAST_ACTIVITY_${_suffix}" ;;
       FIRST_DIALOG_TS_*)
         local _suffix2="${k#FIRST_DIALOG_TS_}"
         _uberdev_goal_validate_int "$_suffix2" || continue
         _uberdev_goal_validate_int "$v" || continue
-        eval "FIRST_DIALOG_TS_${_suffix2}=\"\$v\""
-        eval "export FIRST_DIALOG_TS_${_suffix2}" ;;
+        printf -v "FIRST_DIALOG_TS_${_suffix2}" '%s' "$v"
+        export "FIRST_DIALOG_TS_${_suffix2}" ;;
       UBERDEV_RESOLVED_BACKEND)
         case "$v" in claude-bg|wezterm|background) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;
       *) : ;;   # reject unknown keys (allowlist only)
