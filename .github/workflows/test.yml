@@ -48,6 +48,9 @@ jobs:
         #   - testers-agent-contract.test.sh / testers-rate-limit-audit.test.sh /
         #     testers-rate-limit-wrapper.test.sh (python3 + PyYAML, same reason as
         #                                         testers-pipeline) [#196]
+        #   - uberthink.test.sh / uberthink-report.test.sh
+        #                                         (python3 -c + mktemp -d paths,
+        #                                         same reason as uberscan-report)
         # When a test file is added or removed, update BOTH jobs by hand — there
         # is no automated drift guard between the two lists.
         run: |
@@ -92,6 +95,8 @@ jobs:
           bash tests/testers-agent-contract.test.sh && \
           bash tests/testers-rate-limit-audit.test.sh && \
           bash tests/testers-rate-limit-wrapper.test.sh && \
+          bash tests/uberthink.test.sh && \
+          bash tests/uberthink-report.test.sh && \
           bash tests/goal-state-sidecar.test.sh && \
           bash tests/using-git-worktrees.test.sh && \
           bash tests/goal.test.sh
@@ -123,6 +128,9 @@ jobs:
         #                                         python.exe can't translate)
         #   - uberscan.test.sh / uberscan-report.test.sh / uberscan-chunk.test.sh
         #                                         (same python3 -c + path reason)
+        #   - uberthink.test.sh / uberthink-report.test.sh
+        #                                         (same python3 -c + mktemp -d
+        #                                         reason as uberscan-report)
         #   - merge-discovery-resilience.test.sh (executes the executable fake-gh
         #                                         fixture via PATH + sources
         #                                         lib/discover.sh — neither proven
