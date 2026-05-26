@@ -479,11 +479,10 @@ while true; do
           if [ -f "$_batch_tsv" ]; then
             while IFS=$'\t' read -r _row_pr _issue _ts _state; do
               [ "$_row_pr" = "$pr_num" ] || continue
-              _uberdev_goal_validate_int "$_issue" || continue
-              _status_file="$UBERDEV_TMPDIR/solve-bg-status-$_issue.json"
-              _uberdev_dispatch_tmp_target_safe "$_status_file" || continue
-              _stuck_pid="$(jq -r '.pid // empty' < "$_status_file" 2>/dev/null)" || continue
-              _uberdev_goal_validate_int "$_stuck_pid" && break
+              # R1 SSOT (issue #220 simplify pass): PID extraction via shared helper.
+              # Helper returns rc=0 with PID on stdout iff every gate passes, else
+              # rc=1 with empty stdout — `&& break` exits the loop on first valid PID.
+              _stuck_pid="$(_uberdev_goal_pid_for_issue "$_issue")" && break
             done < "$_batch_tsv"
           fi
           if [ -n "$_stuck_pid" ]; then
