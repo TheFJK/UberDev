@@ -1242,7 +1242,8 @@ _uberdev_goal_rebase_collision_chain() {
 
 # uberdev_goal_write_run_state
 #   Reads GOAL_ID, cycle, watch_start, overflow_count, overflow_detected,
-#   MAX_CYCLES, UBERDEV_RESOLVED_BACKEND, and the queue/active_issues arrays
+#   MAX_CYCLES, MAX_PARALLEL, BARRIER_TIMEOUT_S, barrier_start_ts,
+#   UBERDEV_RESOLVED_BACKEND, and the queue/active_issues arrays
 #   from the caller's shell; persists them to predictable, GOAL_ID-keyed
 #   sidecars under $UBERDEV_TMPDIR, plus a fixed-path goal-active-id.txt pointer
 #   so a fresh shell (no GOAL_ID in env/scalar) can discover the active GOAL_ID.
@@ -1322,7 +1323,8 @@ uberdev_goal_write_run_state() {
 #   across Bash calls, issue #171), it is bootstrapped from the fixed-path
 #   goal-active-id.txt pointer (content gated through _uberdev_goal_validate_id).
 #   On success: sets the GOAL_ID, cycle, watch_start, overflow_count,
-#   overflow_detected, MAX_CYCLES, UBERDEV_RESOLVED_BACKEND scalars, rehydrates
+#   overflow_detected, MAX_CYCLES, MAX_PARALLEL, BARRIER_TIMEOUT_S,
+#   barrier_start_ts, UBERDEV_RESOLVED_BACKEND scalars, rehydrates
 #   the queue/active_issues arrays, and EXPORTS UBERDEV_GOAL_ID + UBERDEV_TMPDIR
 #   (the env vars the uberdev_goal_* helpers + bare $UBERDEV_TMPDIR/... paths in
 #   the pipeline body depend on — see the export block at the function's end).

@@ -233,6 +233,8 @@ auto_install_aliases: true    # install short-form forwarders at SessionStart
 integration_branch: main      # /merge target branch (overrides gh repo view default)
 goal:
   max_cycles: 5               # /uberdev:goal hard cycle ceiling (default 5, range [1, 20])
+  max_parallel: 3             # /uberdev:goal concurrent-in-flight cap (default 3, range [1, 10])
+  barrier_timeout_s: 14400    # /uberdev:goal per-wave barrier wall-clock ceiling, in seconds (default 14400, range [60, 86400])
 ---
 ```
 
@@ -243,6 +245,8 @@ goal:
 | `UBERDEV_NO_AUTO_ALIAS` | `auto_install_aliases` | When `1`/`true` (env) or `false` (file), suppresses session-start auto-install of `/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`, `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify` forwarders |
 | `UBERDEV_INTEGRATION_BRANCH` | `integration_branch` | `/merge` target branch |
 | `UBERDEV_GOAL_MAX_CYCLES` | `goal.max_cycles` | `/uberdev:goal` hard cycle ceiling; int [1, 20], default 5 |
+| `UBERDEV_GOAL_MAX_PARALLEL` | `goal.max_parallel` | `/uberdev:goal` concurrent-in-flight cap (PRs+issues in active set); int [1, 10], default 3 |
+| `UBERDEV_GOAL_BARRIER_TIMEOUT_S` | `goal.barrier_timeout_s` | `/uberdev:goal` per-wave barrier wall-clock ceiling, in seconds; int [60, 86400], default 14400 |
 
 Precedence: CLI flag > env var > `.claude/uberdev.local.md` > default. Missing file → defaults apply silently.
 
