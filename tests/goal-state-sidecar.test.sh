@@ -346,6 +346,86 @@ assert_eq "$mp_got" "3"          "S-barrier-1: MAX_PARALLEL survives fresh-shell
 assert_eq "$bt_got" "14400"      "S-barrier-1: BARRIER_TIMEOUT_S survives fresh-shell rehydrate"
 assert_eq "$bs_got" "1700009999" "S-barrier-1: barrier_start_ts survives fresh-shell rehydrate"
 
+echo "== S4: REVIEW_GRACE_SECS round-trip + EXPORT survives fresh-bash (issue #220, AC ❶) =="
+GOAL_ID=goal-test-s4abc1234; cycle=1; watch_start=$(date +%s)
+overflow_count=0; overflow_detected=0; MAX_CYCLES=5
+MAX_PARALLEL=3; BARRIER_TIMEOUT_S=14400; barrier_start_ts=$(date +%s)
+UBERDEV_RESOLVED_BACKEND=background
+REVIEW_GRACE_SECS=900
+queue=(207 210); active_issues=()
+uberdev_goal_write_run_state || { FAIL=$((FAIL+1)); echo "  FAIL  S4.write" >&2; }
+s4_got="$(env -i UBERDEV_TMPDIR="$UBERDEV_TMPDIR" PATH="$PATH" bash -c '
+  . "'"$DISPATCH_LIB"'"
+  . "'"$GOAL_LIB"'"
+  uberdev_goal_read_run_state >/dev/null
+  printf "REVIEW_GRACE_SECS=%s exported=%s\n" "${REVIEW_GRACE_SECS:-UNSET}" "$(env | grep -c "^REVIEW_GRACE_SECS=")"
+')"
+case "$s4_got" in
+  "REVIEW_GRACE_SECS=900 exported=1")
+    PASS=$((PASS+1)); echo "  PASS  S4.round-trip-and-exported" ;;
+  *)
+    FAIL=$((FAIL+1)); echo "  FAIL  S4.round-trip-and-exported (got [$s4_got])" >&2 ;;
+esac
+
+echo "== S5: PRIOR_LAST_ACTIVITY_<pid> per-pid sidecar key round-trip (issue #220, AC ❸) =="
+PRIOR_LAST_ACTIVITY_12345="2026-05-26T12:00:00Z"; export PRIOR_LAST_ACTIVITY_12345
+FIRST_DIALOG_TS_12345=1729000000; export FIRST_DIALOG_TS_12345
+uberdev_goal_write_run_state || { FAIL=$((FAIL+1)); echo "  FAIL  S5.write" >&2; }
+s5_got="$(env -i UBERDEV_TMPDIR="$UBERDEV_TMPDIR" PATH="$PATH" bash -c '
+  . "'"$DISPATCH_LIB"'"
+  . "'"$GOAL_LIB"'"
+  uberdev_goal_read_run_state >/dev/null
+  printf "PRIOR_LAST_ACTIVITY_12345=%s FIRST_DIALOG_TS_12345=%s\n" \
+    "${PRIOR_LAST_ACTIVITY_12345:-UNSET}" "${FIRST_DIALOG_TS_12345:-UNSET}"
+')"
+case "$s5_got" in
+  "PRIOR_LAST_ACTIVITY_12345=2026-05-26T12:00:00Z FIRST_DIALOG_TS_12345=1729000000")
+    PASS=$((PASS+1)); echo "  PASS  S5.per-pid-keys-round-trip" ;;
+  *)
+    FAIL=$((FAIL+1)); echo "  FAIL  S5.per-pid-keys-round-trip (got [$s5_got])" >&2 ;;
+esac
+printf 'PRIOR_LAST_ACTIVITY_../../etc/passwd=evil\n' >> "$UBERDEV_TMPDIR/goal-$GOAL_ID-runstate"
+s5neg="$(env -i UBERDEV_TMPDIR="$UBERDEV_TMPDIR" PATH="$PATH" bash -c '
+  . "'"$DISPATCH_LIB"'"
+  . "'"$GOAL_LIB"'"
+  uberdev_goal_read_run_state >/dev/null
+  env | grep -c "^PRIOR_LAST_ACTIVITY_\\.\\." || echo 0
+')"
+if [ "$s5neg" = "0" ]; then
+  PASS=$((PASS+1)); echo "  PASS  S5.forged-suffix-refused"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  S5.forged-suffix-refused (got [$s5neg])" >&2
+fi
+
+echo "== S6: CIRCUIT_BREAKER_HALT allowlist + EXPORT round-trip (issue #220, AC ❸) =="
+CIRCUIT_BREAKER_HALT=agent_stuck_on_dialog
+uberdev_goal_write_run_state || { FAIL=$((FAIL+1)); echo "  FAIL  S6.write" >&2; }
+s6_got="$(env -i UBERDEV_TMPDIR="$UBERDEV_TMPDIR" PATH="$PATH" bash -c '
+  . "'"$DISPATCH_LIB"'"
+  . "'"$GOAL_LIB"'"
+  uberdev_goal_read_run_state >/dev/null
+  printf "CIRCUIT_BREAKER_HALT=%s exported=%s\n" "${CIRCUIT_BREAKER_HALT:-UNSET}" "$(env | grep -c "^CIRCUIT_BREAKER_HALT=")"
+')"
+case "$s6_got" in
+  "CIRCUIT_BREAKER_HALT=agent_stuck_on_dialog exported=1")
+    PASS=$((PASS+1)); echo "  PASS  S6.round-trip-and-exported" ;;
+  *)
+    FAIL=$((FAIL+1)); echo "  FAIL  S6.round-trip-and-exported (got [$s6_got])" >&2 ;;
+esac
+sed -i.bak 's/^CIRCUIT_BREAKER_HALT=.*/CIRCUIT_BREAKER_HALT=evil_breaker/' "$UBERDEV_TMPDIR/goal-$GOAL_ID-runstate"
+s6neg="$(env -i UBERDEV_TMPDIR="$UBERDEV_TMPDIR" PATH="$PATH" bash -c '
+  . "'"$DISPATCH_LIB"'"
+  . "'"$GOAL_LIB"'"
+  unset CIRCUIT_BREAKER_HALT
+  uberdev_goal_read_run_state >/dev/null
+  printf "%s\n" "${CIRCUIT_BREAKER_HALT:-REFUSED}"
+')"
+if [ "$s6neg" = "REFUSED" ]; then
+  PASS=$((PASS+1)); echo "  PASS  S6.forged-value-refused"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  S6.forged-value-refused (got [$s6neg])" >&2
+fi
+
 echo
 printf 'goal-state-sidecar: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
