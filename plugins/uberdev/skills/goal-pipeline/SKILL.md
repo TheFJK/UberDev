@@ -23,6 +23,8 @@ GOAL_ISSUE_STATE_ENUM='input|solving|pr-pushed|resolved|failed'
 TRUST_SIGNAL_ENUM='green|yellow|red|stale|missing'
 GOAL_MERGE_RESULT_ENUM='success|conflict|hook_failed|missing'
 _UBERDEV_GOAL_DEFAULT_MAX_CYCLES=5
+_UBERDEV_GOAL_DEFAULT_MAX_PARALLEL=3
+_UBERDEV_GOAL_DEFAULT_BARRIER_TIMEOUT_S=14400
 _UBERDEV_GOAL_POLL_SECS=60
 _UBERDEV_GOAL_STUCK_SECS=14400         # 4h
 _UBERDEV_GOAL_MAX_MERGE_ATTEMPTS=3
@@ -67,15 +69,19 @@ Notes on the enums:
    ```bash
    queue=()
    max_cycles_cli=""
+   max_parallel_cli=""
+   barrier_timeout_cli=""
    only_mine=0
    dry_run=0
    backend_cli=""
    for tok in $ARGUMENTS; do
      case "$tok" in
-       --max-cycles=*) max_cycles_cli="${tok#--max-cycles=}" ;;
-       --only-mine)    only_mine=1 ;;
-       --dry-run)      dry_run=1 ;;
-       --backend=*)    backend_cli="${tok#--backend=}" ;;
+       --max-cycles=*)      max_cycles_cli="${tok#--max-cycles=}" ;;
+       --max-parallel=*)    max_parallel_cli="${tok#--max-parallel=}" ;;
+       --barrier-timeout=*) barrier_timeout_cli="${tok#--barrier-timeout=}" ;;
+       --only-mine)         only_mine=1 ;;
+       --dry-run)           dry_run=1 ;;
+       --backend=*)         backend_cli="${tok#--backend=}" ;;
        *) [[ "$tok" =~ ^[0-9]+$ ]] && queue+=("$tok") ;;
      esac
    done
@@ -97,6 +103,14 @@ Notes on the enums:
    [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ] && . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
    MAX_CYCLES="$(UBERDEV_GOAL_MAX_CYCLES="${max_cycles_cli:-${UBERDEV_GOAL_MAX_CYCLES:-}}" \
      uberdev_read_int_in_range goal.max_cycles UBERDEV_GOAL_MAX_CYCLES 1 20 "$_UBERDEV_GOAL_DEFAULT_MAX_CYCLES")"
+
+   MAX_PARALLEL="$(UBERDEV_GOAL_MAX_PARALLEL="${max_parallel_cli:-${UBERDEV_GOAL_MAX_PARALLEL:-}}" \
+     uberdev_read_int_in_range goal.max_parallel UBERDEV_GOAL_MAX_PARALLEL 1 10 \
+     "$_UBERDEV_GOAL_DEFAULT_MAX_PARALLEL")"
+
+   BARRIER_TIMEOUT_S="$(UBERDEV_GOAL_BARRIER_TIMEOUT_S="${barrier_timeout_cli:-${UBERDEV_GOAL_BARRIER_TIMEOUT_S:-}}" \
+     uberdev_read_int_in_range goal.barrier_timeout_s UBERDEV_GOAL_BARRIER_TIMEOUT_S 60 86400 \
+     "$_UBERDEV_GOAL_DEFAULT_BARRIER_TIMEOUT_S")"
    ```
 
 4. **Source `lib/dispatch.sh`; call `uberdev_dispatch_preflight`** → sets `UBERDEV_RESOLVED_BACKEND` once for the whole run (D15). The resolved backend is forwarded to every `/turbo`, `/merge`, and `/review-pr` child dispatch in this run; it is NEVER re-resolved per cycle.
@@ -142,7 +156,23 @@ Notes on the enums:
    uberdev_goal_write_run_state || { echo "goal: failed to persist run-state" >&2; exit 3; }
    ```
 
-8. **If `--dry-run`: print planned cycle-1 dispatch list + watch-loop outline, exit 0** (D16, S9). The dry-run path is the audit/preview surface — no `gh` calls, no agent spawns, no merges, **no audit events emitted** (S9 — `goal_dispatched` must NOT fire on dry-run so the audit log only carries real runs). Emit the resolved `MAX_CYCLES`, the resolved `UBERDEV_RESOLVED_BACKEND`, the issue queue, and the planned audit events ("would emit goal_dispatched", "would dispatch /turbo for issues …", "would poll GitHub (gh pr list) for each issue's PR"), then exit 0 cleanly. This step runs BEFORE the real `goal_dispatched` emit in step 9 — order matters.
+8. **If `--dry-run`: print planned cycle-1 dispatch list + watch-loop outline, exit 0** (D16, S9). The dry-run path is the audit/preview surface — no `gh` calls, no agent spawns, no merges, **no audit events emitted** (S9 — `goal_dispatched` must NOT fire on dry-run so the audit log only carries real runs). Emit the resolved `MAX_CYCLES`, `MAX_PARALLEL`, `BARRIER_TIMEOUT_S`, the resolved `UBERDEV_RESOLVED_BACKEND`, the issue queue, and the planned audit events ("would emit goal_dispatched", "would dispatch /turbo for issues …", "would poll GitHub (gh pr list) for each issue's PR"), then exit 0 cleanly. This step runs BEFORE the real `goal_dispatched` emit in step 9 — order matters.
+
+   ```bash
+   if [ "$dry_run" = "1" ]; then
+     printf 'goal: dry-run preview (no agent spawn, no audit emit)\n'
+     printf '  MAX_CYCLES=%s\n' "$MAX_CYCLES"
+     printf '  MAX_PARALLEL=%s\n' "$MAX_PARALLEL"
+     printf '  BARRIER_TIMEOUT_S=%s\n' "$BARRIER_TIMEOUT_S"
+     printf '  backend=%s\n' "$UBERDEV_RESOLVED_BACKEND"
+     printf '  issues=%s\n' "${queue[*]}"
+     printf '  would emit goal_dispatched\n'
+     printf '  would dispatch /turbo for issues %s (cap=%s per cycle)\n' \
+       "${queue[*]}" "$MAX_PARALLEL"
+     printf '  would poll GitHub (gh pr list) for each issues PR\n'
+     exit 0
+   fi
+   ```
 
 9. **Emit `goal_dispatched` event** with `{goal_id, cycle: 0, issues, dry_run, backend}` payload (real runs only — dry-run exits in step 8 before reaching here). This is the audit anchor — `cycle: 0` distinguishes the initial dispatch from the Phase 1 per-cycle dispatch:
 
@@ -176,12 +206,26 @@ GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
 uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 1" >&2; exit 3; }
 uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 declare -a active_issues=()
+# #211 — per-cycle parallel dispatch cap. Issues beyond MAX_PARALLEL roll over
+# into remaining_queue, which becomes the next cycle's queue (flushed via
+# uberdev_goal_write_run_state at the end of this fence).
+dispatched_this_cycle=0
+remaining_queue=()
 for ISSUE_NUM in "${queue[@]}"; do
   current_state="$(awk -v i="$ISSUE_NUM" '{state[$1]=$2} END {print state[i]}' \
     "$UBERDEV_TMPDIR/goal-$GOAL_ID-issue-states.tsv" 2>/dev/null)"
   case "$current_state" in
     solving|pr-pushed) continue ;;
   esac
+
+  # #211 — once the per-cycle cap is hit, defer every remaining eligible issue
+  # to the next cycle by appending to remaining_queue. This MUST come AFTER the
+  # already-dispatched skip-check above so re-entered/in-flight issues don't get
+  # spuriously rolled over.
+  if (( dispatched_this_cycle >= MAX_PARALLEL )); then
+    remaining_queue+=("$ISSUE_NUM")
+    continue
+  fi
 
   # Build the per-issue prompt via mktemp. The body is a single /uberdev:turbo
   # line; --turbo runs non-interactive (no gates — scoped relaxation §3 below)
@@ -203,6 +247,19 @@ for ISSUE_NUM in "${queue[@]}"; do
   if uberdev_dispatch_one "$ISSUE_NUM" "small" "$PROMPT_FILE"; then
     uberdev_goal_issue_state_transition "$GOAL_ID" "$ISSUE_NUM" input solving
     active_issues+=("$ISSUE_NUM")
+    dispatched_this_cycle=$(( dispatched_this_cycle + 1 ))
+    # #211 — register this issue in the batch-PR registry so Phase 2's
+    # barrier (uberdev_goal_batch_all_terminal) accounts for it. The PR
+    # number is NOT yet known at dispatch-time (the solver pushes the PR
+    # later); pr_number resolves at the first Phase 2 step 2c snapshot via
+    # uberdev_goal_find_pr_for_issue. Pass the empty pr_number here so the
+    # registry row exists keyed on issue; Phase 2 step 2c re-registers with
+    # the PR number on first visibility. Best-effort: warn-and-continue on
+    # rc != 0 so a transient registry write doesn't fail the whole cycle.
+    pr_number=""
+    uberdev_goal_register_batch_pr "$GOAL_ID" "$pr_number" "$ISSUE_NUM" \
+      || printf 'goal: register_batch_pr failed for PR=%s issue=%s (rc=%s); barrier may be incomplete this cycle\n' \
+         "$pr_number" "$ISSUE_NUM" "$?" >&2
   else
     rc=$?
     # D12 — claim_collision is a soft fail: another dispatcher (a teammate's
@@ -225,6 +282,12 @@ for ISSUE_NUM in "${queue[@]}"; do
     exit 1
   fi
 done
+
+# #211 — flush the rollover queue back into `queue` so the next cycle picks up
+# the issues that exceeded MAX_PARALLEL. Empty remaining_queue is the happy path
+# (queue fully drained this cycle); a non-empty rollover is the cap-saturation
+# case and is the SSOT for "more issues to dispatch next cycle".
+queue=("${remaining_queue[@]}")
 
 # #171 — flush the populated active_issues (+ rehydrated queue/scalars) so the
 # Phase 2 watch loop (a fresh shell) rehydrates the dispatched set. Without this,
@@ -371,28 +434,104 @@ while true; do
     esac
   done
 
-  # 2c. Dispatch /merge for any new GREEN PRs.
+  # 2c. Barrier-gated merge dispatch (issue #211).
+  # The previous per-PR `if green; then /merge` body is replaced by a two-
+  # predicate gate: ONLY dispatch /merge once (a) every PR in the batch is in
+  # a terminal state (GREEN | HELD | MERGE_FAILED | MERGED — barrier-terminal,
+  # NOT to be confused with the convergence-terminal set) AND (b) the unblock
+  # wait is clear (every blocking issue closed AND every blocked PR carries a
+  # `review-pr:green` trust label). Until both predicates hold the per-cycle
+  # batch sits at the merge barrier — preventing the multi-PR version-bump
+  # collision (the user_workflow_todo_queue memory + project_uberdev_goal_
+  # version_bump_collision capture). Sequential, PR-asc merge plus a
+  # collision-chain rebase keeps the manifest-touching PRs serialized.
+  #
   # B2 — only transition to `merging` on dispatch rc=0; a failed dispatch
   # (mktemp/prompt-write/session-refuse) leaves the PR in `green` for a
   # next-cycle retry (per-PR attempt counter, cap 3, bounds runaway retries).
+
+  # Snapshot every barrier-relevant PR's state into the batch registry. This
+  # is what feeds uberdev_goal_batch_all_terminal: rows tagged PENDING block
+  # the barrier; rows tagged GREEN/HELD/MERGE_FAILED/MERGED clear it. Call
+  # uberdev_goal_list_prs_in_state once per state (it takes a single state
+  # argument) and tag with the matching terminal enum.
   for pr in $(uberdev_goal_list_prs_in_state "$GOAL_ID" green); do
-    if uberdev_goal_pr_is_merged "$pr"; then
-      # Already merged (resume / human-merged) — finalize via step 2d without
-      # re-dispatching /merge against an already-landed PR.
-      uberdev_goal_pr_state_transition "$GOAL_ID" "$pr" green merging
-      any_active=1
-      continue
-    fi
-    if uberdev_goal_should_automerge "$GOAL_ID" "$pr"; then
-      if _uberdev_goal_dispatch_merge "$pr"; then
+    _uberdev_goal_set_batch_terminal_state "$GOAL_ID" "$pr" GREEN \
+      || printf 'goal: set_batch_terminal_state(GREEN) failed for PR=%s (rc=%s); barrier may stall\n' "$pr" "$?" >&2
+  done
+  for pr in $(uberdev_goal_list_prs_in_state "$GOAL_ID" yellow-held; \
+              uberdev_goal_list_prs_in_state "$GOAL_ID" red-held); do
+    _uberdev_goal_set_batch_terminal_state "$GOAL_ID" "$pr" HELD \
+      || printf 'goal: set_batch_terminal_state(HELD) failed for PR=%s (rc=%s); barrier may stall\n' "$pr" "$?" >&2
+  done
+  for pr in $(uberdev_goal_list_prs_in_state "$GOAL_ID" merge-failed); do
+    _uberdev_goal_set_batch_terminal_state "$GOAL_ID" "$pr" MERGE_FAILED \
+      || printf 'goal: set_batch_terminal_state(MERGE_FAILED) failed for PR=%s (rc=%s); barrier may stall\n' "$pr" "$?" >&2
+  done
+  for pr in $(uberdev_goal_list_prs_in_state "$GOAL_ID" merged); do
+    _uberdev_goal_set_batch_terminal_state "$GOAL_ID" "$pr" MERGED \
+      || printf 'goal: set_batch_terminal_state(MERGED) failed for PR=%s (rc=%s); barrier may stall\n' "$pr" "$?" >&2
+  done
+
+  if uberdev_goal_batch_all_terminal "$GOAL_ID" && \
+     uberdev_goal_batch_unblock_wait_clear "$GOAL_ID"; then
+    # Both predicates clear — dispatch /merge for GREEN PRs in PR-number-
+    # ascending order. The collision-chain rebase forces a fresh main pull
+    # after each successful merge so the next PR in the chain rebases onto
+    # the just-landed commit before its own merge attempt. This is what
+    # serializes manifest-touching PRs (CHANGELOG.md, plugin.json,
+    # marketplace.json, README.md) — without it, parallel version-bump PRs
+    # silently auto-merge to the SAME vN+1 and the second PR's bump is
+    # eaten by git's identical-change auto-resolution (the
+    # project_uberdev_merge_version_collision memory).
+    for pr in $(_uberdev_goal_batch_green_prs_ordered "$GOAL_ID"); do
+      if uberdev_goal_pr_is_merged "$pr"; then
+        # Resume / human-merged — finalize via step 2d without re-dispatching
+        # /merge against an already-landed PR.
         uberdev_goal_pr_state_transition "$GOAL_ID" "$pr" green merging
-      else
-        printf 'goal-pipeline: _uberdev_goal_dispatch_merge failed for PR %s; staying in green for next-cycle retry\n' \
-          "$pr" >&2
         any_active=1
+        continue
+      fi
+      if uberdev_goal_should_automerge "$GOAL_ID" "$pr"; then
+        if _uberdev_goal_dispatch_merge "$pr"; then
+          uberdev_goal_pr_state_transition "$GOAL_ID" "$pr" green merging
+          # Force-refresh main + rebase any remaining batch PRs that share
+          # manifest paths so the next iteration's merge sees the just-landed
+          # commit (collision-chain serialization, R5).
+          _uberdev_goal_rebase_collision_chain "$GOAL_ID" "$pr" \
+            || printf 'goal-pipeline: rebase_collision_chain failed for PR %s (rc=%s); continuing\n' \
+               "$pr" "$?" >&2
+        else
+          printf 'goal-pipeline: _uberdev_goal_dispatch_merge failed for PR %s; staying in green for next-cycle retry\n' \
+            "$pr" >&2
+          any_active=1
+        fi
+      fi
+    done
+  else
+    # Barrier NOT clear yet — at least one PR is PENDING or the unblock-wait
+    # has unresolved blockers. Check the wall-clock circuit breaker against
+    # BARRIER_TIMEOUT_S (default 4h, configurable via --barrier-timeout=N /
+    # UBERDEV_GOAL_BARRIER_TIMEOUT_S / goal.barrier_timeout_s). The reason
+    # field reuses the existing stuck_loop enum — D5 keeps GOAL_CIRCUIT_
+    # BREAKER_REASONS closed; the phase=merge_barrier subfield distinguishes
+    # this from the goal-level 4h watch-loop stuck_loop.
+    if [ -n "${barrier_start_ts:-}" ] && [ "${barrier_start_ts:-0}" != "0" ]; then
+      now_secs="$(_uberdev_goal_now_secs)"
+      elapsed=$(( now_secs - barrier_start_ts ))
+      if (( elapsed >= BARRIER_TIMEOUT_S )); then
+        pending="$(awk -F'\t' '$4=="PENDING"{printf "%s,", $1}' \
+          "${UBERDEV_TMPDIR:-/tmp}/goal-${GOAL_ID}-batch-prs.tsv" 2>/dev/null \
+          | sed 's/,$//')"
+        uberdev_goal_audit goal_circuit_breaker \
+          "$(printf '{"reason":"stuck_loop","phase":"merge_barrier","elapsed_s":%s,"pending_prs":"%s"}' \
+             "$elapsed" "$pending")"
+        print_summary "$cycle"
+        exit 1
       fi
     fi
-  done
+    any_active=1
+  fi
 
   # 2d. Drive merging → merged. Completion is authoritative via GitHub
   # (`gh pr view <pr> --json state == MERGED`, issue #180 — the
@@ -514,6 +653,14 @@ while true; do
       green)
         uberdev_goal_pr_state_transition "$GOAL_ID" "$held_pr" "$held_current" green
         uberdev_goal_record_held_audit "$GOAL_ID" "$held_pr" "$new_audit"
+        # #211 — update the batch registry so the next pass's step 2c
+        # barrier sees this PR as GREEN (terminal-for-barrier) instead of
+        # PENDING/HELD. Without this, a held→green transition is invisible
+        # to uberdev_goal_batch_all_terminal and the barrier stalls until
+        # the wall-clock breaker fires.
+        _uberdev_goal_set_batch_terminal_state "$GOAL_ID" "$held_pr" GREEN \
+          || printf 'goal: set_batch_terminal_state(GREEN) failed for PR=%s (rc=%s); barrier may stall\n' \
+             "$held_pr" "$?" >&2
         # B1 — keep the watch loop alive for one more iteration so step 2c
         # (which runs ABOVE step 2e in cycle order) has a chance to pick this
         # freshly-green PR up on the next pass and dispatch /merge. Without
