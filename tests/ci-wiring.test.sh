@@ -2,8 +2,10 @@
 # tests/ci-wiring.test.sh — drift-guard for .github/workflows/test.yml.
 # Issue #210: locks the SYNC convention between the shape-checks ubuntu and
 # shape-checks-windows jobs into an enforced invariant so a new
-# tests/*.test.sh that is committed on disk but NOT wired into both jobs
-# reds CI immediately (closes the silent-orphan failure mode of #196).
+# tests/*.test.sh that is committed on disk but NOT wired into the ubuntu
+# shape-checks job reds CI immediately (closes the silent-orphan failure
+# mode of #196). Ubuntu is the completeness oracle; windows is the subset
+# (Unix-only fixtures are declared in the marker block — see W4).
 #
 # Invariants:
 #   W1  — every tests/*.test.sh on disk is wired into the ubuntu
@@ -129,6 +131,9 @@ else
   echo "         actual (ubuntu − windows):"
   printf '           %s\n' $actual_skipped
   echo "         Either wire the missing tests into windows OR update the marker block to match."
+  echo "         Marker block lives in .github/workflows/test.yml between"
+  echo "           # === BEGIN ci-wiring windows-skip-list ==="
+  echo "           # === END ci-wiring windows-skip-list ==="
   FAIL=$((FAIL+1))
 fi
 
