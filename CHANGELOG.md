@@ -4,6 +4,18 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.20] - 2026-05-26
+
+### Added
+- `/goal` config keys `goal.max_parallel` (`UBERDEV_GOAL_MAX_PARALLEL`, `--max-parallel=N`, default 3, range 1–10) and `goal.barrier_timeout_s` (`UBERDEV_GOAL_BARRIER_TIMEOUT_S`, `--barrier-timeout=N`, default 14400 s = 4h, range 60..86400).
+- Three new public helpers in `lib/goal-state.sh`: `uberdev_goal_register_batch_pr`, `uberdev_goal_batch_all_terminal`, `uberdev_goal_batch_unblock_wait_clear`. RFC 0005 §9 D-211a/b/c.
+- New batch-registry sidecar `goal-<id>-batch-prs.tsv` (per-PR rows with `pr<TAB>issue<TAB>dispatch_ts<TAB>terminal_state`); cleaned up by `uberdev_goal_cleanup_run_state`.
+
+### Changed
+- `/goal` per-cycle `/turbo` dispatch is now capped at 3 by default (previously uncapped); queue overflow rolls to the next cycle without re-claim collisions.
+- `/merge` no longer fires per-PR the instant a PR turns GREEN; `/goal` holds until every PR in the cycle's batch is in a terminal state. Manifest-collision PRs (e.g. version-bump triplet) merge sequentially in PR-number-ascending order with `git fetch origin main` + rebase between each.
+- Wall-clock breaker on the new merge barrier (4h default) escalates to the existing `stuck_loop` circuit-breaker reason — no new reason added, no `GOAL_CIRCUIT_BREAKER_REASONS` enum mutation.
+
 ## [0.33.19] - 2026-05-26
 
 ### Added
