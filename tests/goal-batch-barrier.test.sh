@@ -146,7 +146,10 @@ bash --noprofile --norc -c '
 # ---------------------------------------------------------------------------
 echo "== B4: manifest-collision rebase helper exists =="
 assert_grep "$GOAL_LIB"   '^_uberdev_goal_rebase_collision_chain\(\)' "B4.helper-defined"
-assert_grep "$GOAL_LIB"   'git diff --name-only'                     "B4.path-set-intersection"
+# `gh pr diff` (NOT `git diff --name-only origin/main..pr-N` — local `pr-N`
+# refs don't exist in the clone, so the original `git diff` form was a silent
+# no-op).
+assert_grep "$GOAL_LIB"   'gh pr diff'                               "B4.path-set-intersection"
 assert_grep "$GOAL_LIB"   'git fetch origin main'                    "B4.fresh-main-fetch"
 
 # ---------------------------------------------------------------------------
@@ -179,6 +182,59 @@ echo "== B6: lib uses atomic writes for batch-prs.tsv (no >> appends) =="
 assert_no_grep "$GOAL_LIB" '>>[[:space:]]*[^[:space:]]*batch-prs\.tsv'   "B6.no-append-redirect-to-tsv"
 # Positive: the standard atomic-write triad is used (mktemp + mv -f).
 assert_grep "$GOAL_LIB" '_uberdev_dispatch_prepare_tmp_target'           "B6.uses-prepare-tmp-target-helper"
+
+# ---------------------------------------------------------------------------
+# B7 — barrier_start_ts seed survives write_run_state pre-population.
+# ---------------------------------------------------------------------------
+# Regression guard for the seed predicate: the previous `! grep -q
+# '^barrier_start_ts='` arm was FALSE whenever Phase 0 had already written
+# the run-state sidecar (the writer emits `barrier_start_ts=0` as a
+# placeholder), so the seed never fired and the wall-clock barrier breaker
+# (AC6 / D-211e) became dead code. Exercise the actual Phase 0 → register
+# ordering and assert the in-file value is non-zero and within seconds of
+# wall clock.
+echo "== B7: barrier_start_ts seed survives write_run_state pre-population =="
+(
+  . "$DISPATCH_LIB"
+  . "$GOAL_LIB"
+  uberdev_goal_state_init "$GOAL_ID-b7"   || { echo "B7.state-init FAIL"; exit 1; }
+  # Phase 0 step 7 ordering: write_run_state runs BEFORE any register_batch_pr.
+  GOAL_ID="$GOAL_ID-b7"
+  cycle=0
+  watch_start=$(_uberdev_goal_now_secs)
+  MAX_CYCLES=5
+  MAX_PARALLEL=3
+  BARRIER_TIMEOUT_S=14400
+  queue=()
+  active_issues=()
+  # barrier_start_ts intentionally UNSET — the writer's default arm
+  # (`${barrier_start_ts:-0}`) will pre-populate `barrier_start_ts=0`.
+  uberdev_goal_write_run_state || { echo "B7.write_run_state-pre-register FAIL"; exit 1; }
+  sc="${UBERDEV_TMPDIR}/goal-${GOAL_ID}-runstate"
+  pre_seed_line="$(grep '^barrier_start_ts=' "$sc" || true)"
+  [ "$pre_seed_line" = "barrier_start_ts=0" ] || {
+    echo "B7.precondition-placeholder-zero FAIL got '$pre_seed_line'"; exit 1;
+  }
+  # First registration — must promote the placeholder to a real epoch.
+  pre_ts=$(_uberdev_goal_now_secs)
+  uberdev_goal_register_batch_pr "$GOAL_ID" 700 90 || { echo "B7.register FAIL"; exit 1; }
+  post_ts=$(_uberdev_goal_now_secs)
+  seeded_line="$(grep '^barrier_start_ts=' "$sc" || true)"
+  seeded_value="${seeded_line#barrier_start_ts=}"
+  case "$seeded_value" in
+    ''|*[!0-9]*) echo "B7.seeded-non-integer FAIL got '$seeded_value'"; exit 1 ;;
+  esac
+  [ "$seeded_value" -gt 0 ] || { echo "B7.seeded-must-be-positive FAIL got '$seeded_value'"; exit 1; }
+  # Must be at most one barrier_start_ts= line (the awk rewrite drops the
+  # placeholder rather than duplicating it).
+  occurrences="$(grep -c '^barrier_start_ts=' "$sc" || true)"
+  [ "$occurrences" = "1" ] || { echo "B7.exactly-one-barrier-line FAIL got $occurrences" ; exit 1; }
+  # Within ±5s of wall clock (allow for slow CI hosts).
+  if [ "$seeded_value" -lt "$pre_ts" ] || [ "$seeded_value" -gt "$((post_ts + 5))" ]; then
+    echo "B7.seeded-not-near-now FAIL value=$seeded_value pre=$pre_ts post=$post_ts"; exit 1
+  fi
+  echo "B7 PASS"
+) || { FAIL=$((FAIL + 1)); echo "  FAIL  B7 block exited non-zero"; }
 
 # ---------------------------------------------------------------------------
 # Summary

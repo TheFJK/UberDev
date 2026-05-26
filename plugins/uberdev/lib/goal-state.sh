@@ -831,15 +831,41 @@ uberdev_goal_register_batch_pr() {
     printf '%s\t%s\t%s\tPENDING\n' "$pr" "$issue" "$ts" > "$tmp" || { rm -f "$tmp"; return 3; }
   fi
   mv -f "$tmp" "$tsv" || { rm -f "$tmp"; return 3; }
-  # Best-effort seed barrier_start_ts on first registration. The `>>` append
-  # below is intentionally non-atomic — the next uberdev_goal_write_run_state
-  # call atomically rewrites the sidecar from the in-memory scalar. Per the
-  # spec's "best effort; never blocks registration" contract, registration
-  # rc=0 even if the sidecar seed write fails.
+  # Best-effort seed barrier_start_ts on first registration.
+  #
+  # The previous implementation used `! grep -q '^barrier_start_ts='` + `>>` append.
+  # That predicate is wrong when Phase 0 step 7 has already called
+  # uberdev_goal_write_run_state, because the writer ALWAYS emits a
+  # `barrier_start_ts=${barrier_start_ts:-0}` line — so the placeholder
+  # `barrier_start_ts=0` line exists on disk, the `! grep -q` predicate is
+  # FALSE, and the seed never fires. The wall-clock merge-barrier breaker
+  # (AC6 / D-211e) then never trips because the Phase 2c guard reads `0`
+  # forever.
+  #
+  # Fix: treat any `barrier_start_ts=0` (or missing line) as unseeded. Use
+  # an awk rewrite (drop every existing barrier_start_ts= line, append the
+  # seeded value at end) → mktemp → mv -f so the placeholder line is
+  # REPLACED rather than duplicated. Best-effort: failure leaves the file
+  # untouched (the next uberdev_goal_write_run_state rewrites the sidecar
+  # atomically from the in-memory scalar anyway).
   if [ "$first" = "1" ]; then
     local sc="$tmpdir/goal-$goal_id-runstate"
-    if [ -r "$sc" ] && ! grep -q '^barrier_start_ts=' "$sc"; then
-      printf 'barrier_start_ts=%s\n' "$ts" >> "$sc" 2>/dev/null || true
+    if [ -r "$sc" ] && ! grep -qE '^barrier_start_ts=[1-9][0-9]*$' "$sc"; then
+      if command -v _uberdev_dispatch_prepare_tmp_target >/dev/null 2>&1; then
+        local sc_tmp
+        sc_tmp="$(mktemp "${sc}.XXXXXXXX")" 2>/dev/null || sc_tmp=""
+        if [ -n "$sc_tmp" ]; then
+          if awk -v ts="$ts" '
+            /^barrier_start_ts=/ { next }
+            { print }
+            END { printf "barrier_start_ts=%s\n", ts }
+          ' "$sc" > "$sc_tmp" 2>/dev/null; then
+            mv -f "$sc_tmp" "$sc" 2>/dev/null || rm -f "$sc_tmp" 2>/dev/null
+          else
+            rm -f "$sc_tmp" 2>/dev/null
+          fi
+        fi
+      fi
     fi
   fi
   return 0
@@ -1165,15 +1191,22 @@ _uberdev_goal_rebase_collision_chain() {
   local goal_id="$1" merged_pr="$2"
   _uberdev_goal_validate_id  "$goal_id"   || return 0
   _uberdev_goal_validate_int "$merged_pr" || return 0
+  # Use `gh pr diff --name-only` rather than `git diff --name-only origin/main..pr-N`:
+  # the `pr-N` refs do not exist in the local clone, so the prior `git diff`
+  # call failed silently (|| true) and the helper was a permanent no-op.
+  # `gh pr diff` resolves the PR via the GitHub API and prints the same
+  # path-set; failures still degrade gracefully (intersection stays empty,
+  # no audit, rc 0 — matches the spec's "best-effort, never halt the goal"
+  # contract).
   local merged_diff
-  merged_diff="$(git diff --name-only "origin/main..pr-$merged_pr" 2>/dev/null || true)"
+  merged_diff="$(gh pr diff "$merged_pr" --name-only 2>/dev/null || true)"
   [ -n "$merged_diff" ] || return 0
   local pr
   while IFS= read -r pr; do
     [ -n "$pr" ] || continue
     [ "$pr" = "$merged_pr" ] && continue
     local pr_diff intersection
-    pr_diff="$(git diff --name-only "origin/main..pr-$pr" 2>/dev/null || true)"
+    pr_diff="$(gh pr diff "$pr" --name-only 2>/dev/null || true)"
     intersection="$(comm -12 <(printf '%s\n' "$merged_diff" | sort -u) <(printf '%s\n' "$pr_diff" | sort -u))"
     if [ -n "$intersection" ]; then
       # Collision detected — refresh main and audit the transition.

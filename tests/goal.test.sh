@@ -403,8 +403,10 @@ assert_no_grep "$GOAL_SKILL" 'merge_barrier_timeout'                      "G28.n
 
 echo
 echo "== G29: Manifest-collision sequential merge (#211 AC4) =="
-# The collision-chain helper uses `git diff --name-only` for path-set intersection.
-assert_grep "$GOAL_LIB" 'git diff --name-only'                            "G29.git-diff-name-only-in-lib"
+# The collision-chain helper uses `gh pr diff --name-only` for path-set
+# intersection (NOT `git diff --name-only origin/main..pr-N` — those local
+# `pr-N` refs do not exist in the worktree, so the lookup is a silent no-op).
+assert_grep "$GOAL_LIB" 'gh pr diff'                                      "G29.gh-pr-diff-in-lib"
 # PR-number-ascending ordering: the green-PRs-ordered helper must sort numerically.
 assert_grep "$GOAL_LIB" 'sort -n'                                         "G29.sort-numeric-pr-ordering"
 
