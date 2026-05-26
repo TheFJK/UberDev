@@ -58,7 +58,7 @@ assert_no_grep() {
 }
 
 # Structural-assertion helpers (assert_count / assert_subagent_type / assert_in_section)
-. "$REPO_ROOT/tests/_lib_assert_structural.sh"
+. "$REPO_ROOT/tests/_lib_assert_structural.sh" || { echo "FATAL: _lib_assert_structural.sh missing/unreadable" >&2; exit 2; }
 
 echo "== /uberdev:review-pr command file present with frontmatter =="
 assert_grep "$REVIEW_PR" '^description:' "frontmatter has description"

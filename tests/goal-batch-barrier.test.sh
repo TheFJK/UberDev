@@ -14,7 +14,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Source the shared structural-assertion helpers (assert_count / assert_subagent_type / assert_in_section).
 # assert_grep / assert_no_grep are defined inline below — they are local helpers in every test file
 # that uses them (see merge-discovery-resilience.test.sh:75 for the canonical shape).
-source "$REPO_ROOT/tests/_lib_assert_structural.sh"
+source "$REPO_ROOT/tests/_lib_assert_structural.sh" || { echo "FATAL: _lib_assert_structural.sh missing/unreadable" >&2; exit 2; }
 GOAL_LIB="$REPO_ROOT/plugins/uberdev/lib/goal-state.sh"
 DISPATCH_LIB="$REPO_ROOT/plugins/uberdev/lib/dispatch.sh"
 

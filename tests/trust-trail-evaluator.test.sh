@@ -20,7 +20,7 @@ for f in "$AGENT_MD"; do
 done
 
 PASS=0; FAIL=0
-source "$THIS_DIR/_lib_assert_structural.sh"
+source "$THIS_DIR/_lib_assert_structural.sh" || { echo "FATAL: _lib_assert_structural.sh missing/unreadable" >&2; exit 2; }
 
 echo "## trust-trail-evaluator structural coverage (RFC 0002 §3.6 Phase 2.5 gate)"
 
