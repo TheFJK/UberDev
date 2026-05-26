@@ -396,7 +396,7 @@ assert_grep "$GOAL_SKILL" '_UBERDEV_GOAL_DEFAULT_BARRIER_TIMEOUT_S=14400' "G28.b
 assert_grep "$GOAL_SKILL" 'BARRIER_TIMEOUT_S'                             "G28.barrier-var-referenced"
 assert_grep "$GOAL_SKILL" 'barrier_start_ts'                              "G28.barrier-start-ts-referenced"
 # The audit event reuses stuck_loop verbatim (closed enum).
-assert_grep "$GOAL_SKILL" 'reason.*stuck_loop\|stuck_loop.*reason\|"stuck_loop"' \
+assert_grep "$GOAL_SKILL" 'reason.*stuck_loop|stuck_loop.*reason|"stuck_loop"' \
                                                                          "G28.reuses-stuck-loop-reason"
 # And GOAL_CIRCUIT_BREAKER_REASONS still does NOT contain merge_barrier_timeout.
 assert_no_grep "$GOAL_SKILL" 'merge_barrier_timeout'                      "G28.no-new-reason-merge-barrier-timeout"
