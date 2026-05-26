@@ -4,6 +4,23 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.4] — 2026-05-27
+
+### Fixed
+- fix(goal): bump review-grace default to 60m + add `goal.review_grace_secs` config key (Closes #220, AC ❶)
+- fix(goal): in-flight `/review-pr` gate before `/merge` and stale-arm re-dispatch — emits `goal_merge_deferred` (Phase 2c gate) and `goal_review_pr_deferred` (Phase 2b gate) (Closes #220, AC ❷)
+- fix(goal): stuck-on-dialog detector + `agent_stuck_on_dialog` circuit-breaker (Closes #220, AC ❸)
+- fix(goal): Phase 3 rollover preservation — merges Phase-1 carry-over instead of overwriting; adds `rolled_over` to `goal_cycle_completed` audit (Closes #220, AC ❹)
+
+### Added
+- feat(goal): zombie reaper on Ctrl-C / SIGTERM / circuit-breaker — emits `goal_reaper_kill` / `goal_reaper_skipped` (Closes #220)
+
+### Notes
+- Version bumped to 0.34.4 across `plugin.json`, `marketplace.json`, the README badge, `CHANGELOG.md`, `tests/goal.test.sh` G20, and `tests/solve-claim.test.sh`. Atomic version-lock surfaces — partial bump is a red CI invariant.
+- RFC 0005 §9 D-code addendum block D220a–D220h documents all enum amendments. No new RFC required (bug-fix scope under §2.3 carve-out).
+
+---
+
 ## [0.34.3] — 2026-05-26
 
 ### Fixed

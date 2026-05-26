@@ -85,6 +85,21 @@ if [ "${_UBERDEV_GOAL_STATE_LOADED:-0}" = "1" ]; then
 fi
 _UBERDEV_GOAL_STATE_LOADED=1
 
+# Worktree-mirror prefixes for .uberdev/runs discovery (issue #220 simplify
+# pass — R2 SSOT). Used by helpers that scan for /review-pr artifacts (verdicts,
+# locked markers). The empty prefix covers the main checkout; the three worktree
+# variants cover the using-git-worktrees skill's documented layouts. Mirrored
+# previously by uberdev_goal_locate_review_pr_audit_by_pr and
+# _uberdev_goal_locked_marker_for_pr_fresh — now read from this array.
+_UBERDEV_GOAL_WORKTREE_PREFIXES=("" ".claude/worktrees/*/" ".worktrees/*/" "worktrees/*/")
+
+# Stuck-on-dialog detector window (issue #220 simplify pass — Q1). Promoted
+# from the inline magic literal `60` in uberdev_goal_agent_stuck_on_dialog so
+# the threshold is a named tunable. Comparison preserved as `-ge 60` semantics
+# via the default; BT79 fixture exercises the 65s threshold so this MUST
+# default to 60 to keep behaviour identical.
+: "${_UBERDEV_GOAL_STUCK_DIALOG_SECS:=60}"   # ge 60 (preserved threshold)
+
 # Source discover.sh opportunistically for its stderr-isolation helpers;
 # tolerated absent (the goal-state.sh functions below do not hard-require
 # any discover.sh symbol).
@@ -148,6 +163,24 @@ _uberdev_goal_validate_int() {
     ''|*[!0-9]*) return 1 ;;
     *) return 0 ;;
   esac
+}
+
+# _uberdev_goal_pid_for_issue ISSUE_NUM   (issue #220 simplify pass — R1 SSOT)
+# Returns the validated PID stored in solve-bg-status-<ISSUE>.json on stdout
+# with rc=0, or empty on stdout + rc=1 if the file is missing, the security
+# guard fails, jq extraction fails, or the value is not a positive integer.
+# Replaces three near-identical 4-line blocks: _uberdev_goal_any_attempt_stuck,
+# _uberdev_goal_reap_zombies, and the SKILL.md Phase 2b stuck-on-dialog audit
+# payload extraction.
+_uberdev_goal_pid_for_issue() {
+  local issue="$1"
+  _uberdev_goal_validate_int "$issue" || return 1
+  local status_file="$UBERDEV_TMPDIR/solve-bg-status-$issue.json"
+  _uberdev_dispatch_tmp_target_safe "$status_file" || return 1
+  local pid
+  pid="$(jq -r '.pid // empty' < "$status_file" 2>/dev/null)" || return 1
+  _uberdev_goal_validate_int "$pid" || return 1
+  printf '%s' "$pid"
 }
 
 # _uberdev_goal_validate_id GOAL_ID
@@ -345,7 +378,7 @@ uberdev_goal_state_init() {
 uberdev_goal_audit() {
   local event="$1" payload="$2"
   case "$event" in
-    goal_dispatched|goal_pr_transition|goal_unblock_triggered|goal_cycle_completed|goal_converged|goal_circuit_breaker) ;;
+    goal_dispatched|goal_pr_transition|goal_unblock_triggered|goal_cycle_completed|goal_converged|goal_circuit_breaker|goal_merge_deferred|goal_review_pr_deferred|goal_review_grace|goal_reaper_kill|goal_reaper_skipped) ;;
     *) printf 'goal-state: unknown event %s\n' "$event" >&2; return 1 ;;
   esac
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
@@ -556,17 +589,20 @@ uberdev_goal_locate_review_pr_audit() {
 uberdev_goal_locate_review_pr_audit_by_pr() {
   local pr="$1"
   _uberdev_goal_validate_int "$pr" || return 1
-  local candidate_file run_id pr_field
-  for candidate_file in .uberdev/runs/*/review-pr-verdict.json \
-           .claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json \
-           .worktrees/*/.uberdev/runs/*/review-pr-verdict.json \
-           worktrees/*/.uberdev/runs/*/review-pr-verdict.json; do
-    [ -r "$candidate_file" ] || continue
-    pr_field="$(jq -r '.pr // empty' "$candidate_file" 2>/dev/null)" || continue
-    [ "$pr_field" = "$pr" ] || continue
-    run_id="$(basename "$(dirname "$candidate_file")")"
-    [[ "$run_id" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]] || continue
-    printf '%s\t%s\n' "$run_id" "$candidate_file"
+  local prefix candidate_file run_id pr_field
+  # R2 SSOT (issue #220 simplify pass): glob set read from
+  # _UBERDEV_GOAL_WORKTREE_PREFIXES so this and _uberdev_goal_locked_marker_for_pr_fresh
+  # cannot drift. Empty prefix = main checkout; three worktree prefixes mirror
+  # the using-git-worktrees skill's documented layouts.
+  for prefix in "${_UBERDEV_GOAL_WORKTREE_PREFIXES[@]}"; do
+    for candidate_file in ${prefix}.uberdev/runs/*/review-pr-verdict.json; do
+      [ -r "$candidate_file" ] || continue
+      pr_field="$(jq -r '.pr // empty' "$candidate_file" 2>/dev/null)" || continue
+      [ "$pr_field" = "$pr" ] || continue
+      run_id="$(basename "$(dirname "$candidate_file")")"
+      [[ "$run_id" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]] || continue
+      printf '%s\t%s\n' "$run_id" "$candidate_file"
+    done
   done | sort -r | head -n 1 | cut -f2
 }
 
@@ -716,6 +752,184 @@ uberdev_goal_agent_busy_for_issue() {
     return 0
   fi
   return 1
+}
+
+# uberdev_goal_review_pr_in_flight PR_NUM   (issue #220, AC ❷)
+# rc 0 iff `claude agents --json` shows a live /uberdev:review-pr <pr> agent
+# (status ∈ busy|running|starting|working). Used by Phase 2c (pre-/merge gate)
+# and Phase 2b stale|missing arm (pre-/review-pr-re-dispatch gate) to defer
+# rather than dispatch when the leaf is still working. --argjson safely passes
+# the validated PR int as a JSON number; the regex is anchored with
+# ($|[^0-9]) so 21 does not match 218. (.name // "") + (.status // "")
+# are null-safe (security.md).
+uberdev_goal_review_pr_in_flight() {
+  local pr="$1"
+  _uberdev_goal_validate_int "$pr" || return 1
+  if claude agents --json 2>/dev/null | jq -e --argjson pr "$pr" '
+    [ .[]?
+      | select(
+          ((.name // "") | test("^/uberdev:review-pr " + ($pr|tostring) + "($|[^0-9])"))
+          and ((.status // "") | test("^(busy|running|starting|working)$"))
+        )
+    ] | length > 0' >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+# Field probe: lastActivityAt absent (claude agents --json on CLI 2.1.150 exposes
+# only pid/cwd/kind/startedAt/sessionId/name/status — startedAt is start-time,
+# not last-activity; no near-equivalent timestamp). Activity proxy:
+# 1) PER-AGENT stdout-log mtime (preferred — multi-parallel-safe, see B10)
+# 2) goal-global audit-log row-count (fallback — degraded under N > 1 agents)
+#
+# B10 (post-impl-review): the previous audit-log row-count proxy was
+# goal-global — one shared file across all parallel agents. Under multi-
+# parallel /turbo, any agent's row append refreshed the counter, suppressing
+# the stuck-on-dialog signal for every OTHER agent. Switch the primary
+# proxy to mtime of the per-issue stdout file
+# (`$UBERDEV_TMPDIR/solve-bg-stdout-<ISSUE>.log` — canonical name per
+# lib/dispatch.sh lines 334/453/609), which is genuinely per-agent. When the
+# caller has the issue number in scope (the common path via
+# _uberdev_goal_any_attempt_stuck, which iterates batch-prs.tsv), pass it as
+# arg 2 so the helper reads stdout mtime. When the issue is absent (legacy
+# single-arg call sites + BT79 fixture), fall back to the audit-log row-
+# count proxy with a comment explaining the degradation.
+#
+# uberdev_goal_agent_stuck_on_dialog PID [ISSUE]   (issue #220, AC ❸)
+# rc 0 iff the agent's activity proxy is unchanged over a 60s window AND
+# its status is busy/running/starting/working. Writes prior-sample state to
+# the run-state sidecar (PRIOR_LAST_ACTIVITY_<pid>, FIRST_DIALOG_TS_<pid>)
+# so the detector survives the directive-emitter constraint (in-loop timers
+# are dead across fresh-shell phase fences — see memory
+# project_uberdev_pipeline_directive_emitter). First sample writes sidecar
+# and returns 1 (not-yet-stuck); subsequent samples compare against the
+# persisted prior sample.
+uberdev_goal_agent_stuck_on_dialog() {
+  local pid="$1" issue="${2:-}"
+  _uberdev_goal_validate_int "$pid" || return 1
+  local status now first_seen prior tmpdir goal_id audit row_count
+  status="$(claude agents --json 2>/dev/null | jq -r --argjson pid "$pid" '
+    .[]? | select(.pid? == $pid) | .status // ""' 2>/dev/null)"
+  [ -n "$status" ] || return 1
+  case "$status" in
+    busy|running|starting|working) : ;;
+    *) return 1 ;;
+  esac
+  tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  goal_id="${UBERDEV_GOAL_ID:-}"
+  _uberdev_goal_validate_id "$goal_id" || return 1
+  # B10: primary proxy — per-issue stdout-log mtime (multi-parallel-safe).
+  # Fallback: goal-global audit-log row-count (degraded under N>1 agents
+  # because any agent's row append refreshes the counter for ALL agents).
+  row_count=""
+  if [ -n "$issue" ] && _uberdev_goal_validate_int "$issue"; then
+    local stdout_log="$tmpdir/solve-bg-stdout-$issue.log"
+    if [ -r "$stdout_log" ]; then
+      row_count="$(stat -c %Y "$stdout_log" 2>/dev/null || stat -f %m "$stdout_log" 2>/dev/null)"
+    fi
+  fi
+  if [ -z "$row_count" ]; then
+    audit="$tmpdir/goal-$goal_id.jsonl"
+    if [ -r "$audit" ]; then
+      row_count="$(wc -l < "$audit" 2>/dev/null | tr -d ' ')"
+    else
+      row_count="0"
+    fi
+  fi
+  _uberdev_goal_validate_int "$row_count" || row_count="0"
+  now="$(date +%s)"
+  local _prior_key="PRIOR_LAST_ACTIVITY_${pid}"
+  local _first_key="FIRST_DIALOG_TS_${pid}"
+  prior="${!_prior_key:-}"
+  first_seen="${!_first_key:-}"
+  if [ -z "$prior" ]; then
+    printf -v "$_prior_key" '%s' "$row_count"
+    printf -v "$_first_key" '%s' "$now"
+    export "$_prior_key" "$_first_key"
+    return 1
+  fi
+  if [ "$row_count" = "$prior" ] && [ -n "$first_seen" ] && [ "$(( now - first_seen ))" -ge "$_UBERDEV_GOAL_STUCK_DIALOG_SECS" ]; then
+    return 0
+  fi
+  if [ "$row_count" != "$prior" ]; then
+    printf -v "$_prior_key" '%s' "$row_count"
+    printf -v "$_first_key" '%s' "$now"
+    export "$_prior_key" "$_first_key"
+  fi
+  return 1
+}
+
+# _uberdev_goal_any_attempt_stuck PR_NUM   (issue #220, AC ❸)
+# Iterates prior /review-pr attempts for this PR from the per-goal attempts
+# TSV; resolves each to a PID via solve-bg-status-<ISSUE>.json; calls
+# uberdev_goal_agent_stuck_on_dialog for each; returns 0 if ANY prior attempt
+# is stuck.
+_uberdev_goal_any_attempt_stuck() {
+  local pr="$1"
+  _uberdev_goal_validate_int "$pr" || return 1
+  local goal_id="${UBERDEV_GOAL_ID:-}"
+  [ -n "$goal_id" ] || return 1
+  # Source: batch-prs.tsv (4 cols: pr<TAB>issue<TAB>ts<TAB>state). Matches
+  # the PID-stash targeting model (spec §3.6 F5) — single-slot PID per issue;
+  # review-pr-attempts.tsv is a 2-col attempt counter (pr<TAB>count) and is
+  # NOT the right source for the PR→issue lookup (issue #220 fix-up).
+  local batch_tsv="$UBERDEV_TMPDIR/goal-$goal_id-batch-prs.tsv"
+  [ -f "$batch_tsv" ] || return 1
+  local row_pr issue _ts _state pid
+  while IFS=$'\t' read -r row_pr issue _ts _state; do
+    [ "$row_pr" = "$pr" ] || continue
+    # R1 SSOT (issue #220 simplify pass): PID extraction via shared helper.
+    pid="$(_uberdev_goal_pid_for_issue "$issue")" || continue
+    # B10 (post-impl-review): pass $issue so the detector uses per-issue
+    # stdout mtime instead of the goal-global audit-log row-count proxy.
+    # Under multi-parallel /turbo, the row-count proxy would be refreshed
+    # by ANY agent's audit append — masking a real per-agent stall.
+    if uberdev_goal_agent_stuck_on_dialog "$pid" "$issue"; then
+      return 0
+    fi
+  done < "$batch_tsv"
+  return 1
+}
+
+# _uberdev_goal_locked_marker_for_pr_fresh PR_NUM GRACE_SECS   (issue #220, AC ❶)
+# rc 0 iff a `.uberdev/runs/*/locked` marker with sibling pr-context.json
+# matching this PR exists AND its mtime is within GRACE_SECS. Each candidate
+# is guarded through _uberdev_dispatch_tmp_target_safe (security.md
+# precedent). --argjson passes the digits-only validated PR as a JSON number.
+#
+# B1 (post-impl-review): mirror the 4-glob candidate set from
+# uberdev_goal_locate_review_pr_audit_by_pr so worktree-mirror markers
+# (.claude/worktrees/*/.uberdev/runs/..., .worktrees/*/..., worktrees/*/...)
+# are discovered alongside the project-root path. Without this, a /review-pr
+# running inside the standard worktree never registers as "in-flight" for the
+# /goal poll loop in the project-root checkout, defeating AC ❶.
+_uberdev_goal_locked_marker_for_pr_fresh() {
+  local pr="$1" grace="$2"
+  _uberdev_goal_validate_int "$pr" || return 1
+  _uberdev_goal_validate_int "$grace" || return 1
+  local now matched_mtime prefix marker_dir ctx mtime
+  now="$(date +%s)"
+  matched_mtime=0
+  # R2 SSOT (issue #220 simplify pass): glob set read from
+  # _UBERDEV_GOAL_WORKTREE_PREFIXES so this and uberdev_goal_locate_review_pr_audit_by_pr
+  # cannot drift.
+  for prefix in "${_UBERDEV_GOAL_WORKTREE_PREFIXES[@]}"; do
+    for marker_dir in ${prefix}.uberdev/runs/*/; do
+      [ -d "$marker_dir" ] || continue
+      ctx="${marker_dir}pr-context.json"
+      [ -r "${marker_dir}locked" ] && [ -r "$ctx" ] || continue
+      _uberdev_dispatch_tmp_target_safe "$ctx" || continue
+      local pr_match
+      pr_match="$(jq -r --argjson pr "$pr" 'select(.pr == $pr) | .pr // empty' < "$ctx" 2>/dev/null)" || continue
+      [ "$pr_match" = "$pr" ] || continue
+      mtime="$(stat -c %Y "${marker_dir}locked" 2>/dev/null || stat -f %m "${marker_dir}locked" 2>/dev/null || echo 0)"
+      _uberdev_goal_validate_int "$mtime" || continue
+      [ "$mtime" -gt "$matched_mtime" ] && matched_mtime="$mtime"
+    done
+  done
+  [ "$matched_mtime" -gt 0 ] || return 1
+  [ "$(( now - matched_mtime ))" -lt "$grace" ]
 }
 
 # uberdev_goal_list_prs_in_state GOAL_ID STATE
@@ -1338,10 +1552,25 @@ uberdev_goal_write_run_state() {
   _uberdev_dispatch_prepare_tmp_target "$sc" 0 "goal" || return 3
   local tmp _filtered aid
   tmp="$(mktemp "${sc}.XXXXXXXX")" || return 3
-  printf 'GOAL_ID=%s\ncycle=%s\nwatch_start=%s\noverflow_count=%s\noverflow_detected=%s\nMAX_CYCLES=%s\nUBERDEV_RESOLVED_BACKEND=%s\nMAX_PARALLEL=%s\nBARRIER_TIMEOUT_S=%s\nbarrier_start_ts=%s\n' \
+  printf 'GOAL_ID=%s\ncycle=%s\nwatch_start=%s\noverflow_count=%s\noverflow_detected=%s\nMAX_CYCLES=%s\nUBERDEV_RESOLVED_BACKEND=%s\nMAX_PARALLEL=%s\nBARRIER_TIMEOUT_S=%s\nbarrier_start_ts=%s\nREVIEW_GRACE_SECS=%s\nCIRCUIT_BREAKER_HALT=%s\n' \
     "$GOAL_ID" "${cycle:-0}" "${watch_start:-0}" "${overflow_count:-0}" \
     "${overflow_detected:-0}" "${MAX_CYCLES:-0}" "${UBERDEV_RESOLVED_BACKEND:-}" \
-    "${MAX_PARALLEL:-0}" "${BARRIER_TIMEOUT_S:-0}" "${barrier_start_ts:-0}" > "$tmp"
+    "${MAX_PARALLEL:-0}" "${BARRIER_TIMEOUT_S:-0}" "${barrier_start_ts:-0}" \
+    "${REVIEW_GRACE_SECS:-0}" "${CIRCUIT_BREAKER_HALT:-}" > "$tmp"
+  # Append per-PID dialog-stuck samples (issue #220, AC ❸).
+  # R3 SSOT (issue #220 simplify pass): single iterator over both prefixes —
+  # was two near-identical compgen loops; PRIOR_LAST_ACTIVITY_<pid> and
+  # FIRST_DIALOG_TS_<pid> share identical persistence shape, so the prefix
+  # is the only variant.
+  local _prefix _pid_var _pid_suffix _pid_val
+  for _prefix in PRIOR_LAST_ACTIVITY_ FIRST_DIALOG_TS_; do
+    for _pid_var in $(compgen -v "$_prefix" 2>/dev/null); do
+      _pid_suffix="${_pid_var#$_prefix}"
+      _uberdev_goal_validate_int "$_pid_suffix" || continue
+      _pid_val="${!_pid_var}"
+      printf '%s=%s\n' "$_pid_var" "$_pid_val" >> "$tmp"
+    done
+  done
   mv -f "$tmp" "$sc" || { rm -f "$tmp"; return 3; }
 
   # Array sidecars: one int per line, no IFS-mutating joins. Capture first
@@ -1428,6 +1657,34 @@ uberdev_goal_read_run_state() {
       MAX_PARALLEL)      _uberdev_goal_validate_int "$v" && MAX_PARALLEL="$v" ;;
       BARRIER_TIMEOUT_S) _uberdev_goal_validate_int "$v" && BARRIER_TIMEOUT_S="$v" ;;
       barrier_start_ts)  _uberdev_goal_validate_int "$v" && barrier_start_ts="$v" ;;
+      REVIEW_GRACE_SECS)  _uberdev_goal_validate_int "$v" && REVIEW_GRACE_SECS="$v" ;;
+      CIRCUIT_BREAKER_HALT)
+        case "$v" in
+          max_cycles|nonconvergence|stuck_loop|merge_failed|gh_api_failed|unknown_merge_result|queue_empty_not_converged|agent_stuck_on_dialog)
+            CIRCUIT_BREAKER_HALT="$v" ;;
+        esac ;;
+      PRIOR_LAST_ACTIVITY_*|FIRST_DIALOG_TS_*)
+        # R3 SSOT (issue #220 simplify pass): collapsed two near-identical
+        # case arms into one — both keys are PID-suffixed int values with
+        # identical validation needs. Q3 fix folded in: uniform 64-char cap
+        # on both prefixes (prior arms diverged — PRIOR_LAST_ACTIVITY_ had
+        # the cap, FIRST_DIALOG_TS_ did not; behaviour now uniform).
+        # B4 (post-impl-review): int-validate the value too — the stuck-on-
+        # dialog detector stores row_count (int) here; without int-gating, a
+        # non-integer value could round-trip via the sidecar and silently
+        # break the string-equality progress comparison in
+        # uberdev_goal_agent_stuck_on_dialog.
+        local _suffix
+        if [[ "$k" == PRIOR_LAST_ACTIVITY_* ]]; then
+          _suffix="${k#PRIOR_LAST_ACTIVITY_}"
+        else
+          _suffix="${k#FIRST_DIALOG_TS_}"
+        fi
+        _uberdev_goal_validate_int "$_suffix" || continue
+        _uberdev_goal_validate_int "$v" || continue
+        [ "${#v}" -le 64 ] || continue
+        printf -v "$k" '%s' "$v"
+        export "$k" ;;
       UBERDEV_RESOLVED_BACKEND)
         case "$v" in claude-bg|wezterm|background) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;
       *) : ;;   # reject unknown keys (allowlist only)
@@ -1466,6 +1723,77 @@ uberdev_goal_read_run_state() {
   # environment and is what makes the #171 fix actually hold across fresh shells.
   export UBERDEV_GOAL_ID="$GOAL_ID"
   export UBERDEV_TMPDIR="$tmpdir"
+  export REVIEW_GRACE_SECS
+  export CIRCUIT_BREAKER_HALT
+  return 0
+}
+
+# _uberdev_goal_reap_zombies   (issue #220, AC reaper)
+# Best-effort kill of every PID stashed in solve-bg-status-<ISSUE>.json for
+# every issue in this goal's batch-prs.tsv. Per-backend short-circuit:
+# claude-bg / wezterm cannot be reaped (no PID visibility — security.md);
+# background backend gets full TERM->sleep 2->KILL with owner-gate. Emits
+# goal_reaper_kill per kill + goal_reaper_skipped once per skip-backend.
+# Never aborts the caller: || true on every step.
+_uberdev_goal_reap_zombies() {
+  local goal_id="${UBERDEV_GOAL_ID:-}"
+  [ -n "$goal_id" ] || return 0
+  local batch_tsv="$UBERDEV_TMPDIR/goal-$goal_id-batch-prs.tsv"
+  [ -f "$batch_tsv" ] || return 0
+
+  case "${UBERDEV_RESOLVED_BACKEND:-}" in
+    claude-bg|wezterm)
+      uberdev_goal_audit goal_reaper_skipped \
+        "{\"goal_id\":\"$goal_id\",\"backend\":\"${UBERDEV_RESOLVED_BACKEND}\",\"reason\":\"no_pid_visibility\"}" || true
+      return 0
+      ;;
+  esac
+
+  local issue pid result owner_me pr _ts _state
+  owner_me="$(id -un 2>/dev/null)" || return 0
+
+  while IFS=$'\t' read -r pr issue _ts _state; do
+    # R1 SSOT (issue #220 simplify pass): PID extraction via shared helper.
+    pid="$(_uberdev_goal_pid_for_issue "$issue")" || continue
+    kill -0 "$pid" 2>/dev/null || continue
+    local pid_owner
+    pid_owner="$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ')" || true
+    if [ -z "$pid_owner" ] || [ "$pid_owner" != "$owner_me" ]; then
+      uberdev_goal_audit goal_reaper_kill \
+        "{\"goal_id\":\"$goal_id\",\"pr\":$pr,\"pid\":$pid,\"signal\":\"TERM\",\"result\":\"owner_mismatch\"}" || true
+      continue
+    fi
+    # B11 (post-impl-review): pre-probe with kill -0 so non-zero kill -TERM
+    # rc can be classified correctly — `already_dead` (ESRCH: process gone)
+    # vs `signal_rejected` (EPERM: process alive but kernel refused TERM,
+    # e.g., wrong-uid race even after the earlier owner check). Without
+    # this, a permission-denied SIGTERM is silently logged as `already_dead`
+    # and the reaper's audit trail misclassifies a live-but-unkillable PID.
+    if kill -TERM "$pid" 2>/dev/null; then
+      result="killed"
+    elif kill -0 "$pid" 2>/dev/null; then
+      result="signal_rejected"
+    else
+      result="already_dead"
+    fi
+    uberdev_goal_audit goal_reaper_kill \
+      "{\"goal_id\":\"$goal_id\",\"pr\":$pr,\"pid\":$pid,\"signal\":\"TERM\",\"result\":\"$result\"}" || true
+    sleep 2
+    if kill -0 "$pid" 2>/dev/null; then
+      # B9 (post-impl-review): capture kill -KILL rc and record `kill_failed`
+      # distinctly. The prior code emitted `result: killed` unconditionally,
+      # even when the SIGKILL itself returned non-zero (EPERM / ESRCH on a
+      # process gone in the 2s window). Surfacing kill_failed is a critical
+      # operational signal — the reaper claims a kill it never landed.
+      if kill -KILL "$pid" 2>/dev/null; then
+        result="killed"
+      else
+        result="kill_failed"
+      fi
+      uberdev_goal_audit goal_reaper_kill \
+        "{\"goal_id\":\"$goal_id\",\"pr\":$pr,\"pid\":$pid,\"signal\":\"KILL\",\"result\":\"$result\"}" || true
+    fi
+  done < "$batch_tsv"
   return 0
 }
 
