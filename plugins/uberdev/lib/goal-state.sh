@@ -822,7 +822,7 @@ uberdev_goal_register_batch_pr() {
   # one filesystem syscall.
   local tmp existing
   existing=""
-  [ -r "$tsv" ] && existing="$(cat "$tsv")"
+  [ -r "$tsv" ] && existing="$(<"$tsv")"
   _uberdev_dispatch_prepare_tmp_target "$tsv" 0 "goal" || return 3
   tmp="$(mktemp "${tsv}.XXXXXXXX")" || return 3
   if [ -n "$existing" ]; then
@@ -851,19 +851,17 @@ uberdev_goal_register_batch_pr() {
   if [ "$first" = "1" ]; then
     local sc="$tmpdir/goal-$goal_id-runstate"
     if [ -r "$sc" ] && ! grep -qE '^barrier_start_ts=[1-9][0-9]*$' "$sc"; then
-      if command -v _uberdev_dispatch_prepare_tmp_target >/dev/null 2>&1; then
-        local sc_tmp
-        sc_tmp="$(mktemp "${sc}.XXXXXXXX")" 2>/dev/null || sc_tmp=""
-        if [ -n "$sc_tmp" ]; then
-          if awk -v ts="$ts" '
-            /^barrier_start_ts=/ { next }
-            { print }
-            END { printf "barrier_start_ts=%s\n", ts }
-          ' "$sc" > "$sc_tmp" 2>/dev/null; then
-            mv -f "$sc_tmp" "$sc" 2>/dev/null || rm -f "$sc_tmp" 2>/dev/null
-          else
-            rm -f "$sc_tmp" 2>/dev/null
-          fi
+      local sc_tmp
+      sc_tmp="$(mktemp "${sc}.XXXXXXXX")" 2>/dev/null || sc_tmp=""
+      if [ -n "$sc_tmp" ]; then
+        if awk -v ts="$ts" '
+          /^barrier_start_ts=/ { next }
+          { print }
+          END { printf "barrier_start_ts=%s\n", ts }
+        ' "$sc" > "$sc_tmp" 2>/dev/null; then
+          mv -f "$sc_tmp" "$sc" 2>/dev/null || rm -f "$sc_tmp" 2>/dev/null
+        else
+          rm -f "$sc_tmp" 2>/dev/null
         fi
       fi
     fi
@@ -932,8 +930,8 @@ uberdev_goal_batch_unblock_wait_clear() {
     [ "$issue_state" = "CLOSED" ] || return 1
     # Verify trust label review-pr:green is present.
     local has_green
-    has_green="$(gh pr view "$pr" --json labels --jq '.labels[].name' 2>/dev/null | grep -c '^review-pr:green$' || true)"
-    [ "$has_green" -ge 1 ] || return 1
+    has_green="$(gh pr view "$pr" --json labels --jq '[.labels[].name | select(. == "review-pr:green")] | length' 2>/dev/null)"
+    [ "${has_green:-0}" -ge 1 ] || return 1
   done < "$tsv"
   return 0
 }
@@ -1142,7 +1140,7 @@ _uberdev_goal_set_batch_terminal_state() {
   # see register_batch_pr for the same ordering rationale). The mv -f below
   # replaces the prepared empty target with the rewritten content atomically.
   local existing
-  existing="$(cat "$tsv")"
+  existing="$(<"$tsv")"
   _uberdev_dispatch_prepare_tmp_target "$tsv" 0 "goal" || return 3
   local tmp
   tmp="$(mktemp "${tsv}.XXXXXXXX")" || return 3

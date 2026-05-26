@@ -507,9 +507,7 @@ while true; do
           # Force-refresh main + rebase any remaining batch PRs that share
           # manifest paths so the next iteration's merge sees the just-landed
           # commit (collision-chain serialization, R5).
-          _uberdev_goal_rebase_collision_chain "$GOAL_ID" "$pr" \
-            || printf 'goal-pipeline: rebase_collision_chain failed for PR %s (rc=%s); continuing\n' \
-               "$pr" "$?" >&2
+          _uberdev_goal_rebase_collision_chain "$GOAL_ID" "$pr"
         else
           printf 'goal-pipeline: _uberdev_goal_dispatch_merge failed for PR %s; staying in green for next-cycle retry\n' \
             "$pr" >&2
