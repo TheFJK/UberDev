@@ -237,6 +237,126 @@ echo "== B7: barrier_start_ts seed survives write_run_state pre-population =="
 ) || { FAIL=$((FAIL + 1)); echo "  FAIL  B7 block exited non-zero"; }
 
 # ---------------------------------------------------------------------------
+# B8 — cap-rollover behavioral: with MAX_PARALLEL=3 and a 5-issue queue,
+# exactly 3 entries land in the DISPATCH_LOG and 2 stay in the rollover
+# queue. Mirrors SKILL.md Phase 1 step 2a cap-slice loop inline (SKILL.md
+# bash is LLM-directive text, not sourceable; this matches the BT5-BT11
+# idiom in tests/goal.test.sh). Issue #214 AC1.
+# ---------------------------------------------------------------------------
+echo "== B8: cap-rollover behavioral — MAX_PARALLEL=3 vs 5-issue queue =="
+(
+  set -u
+  SCRATCH_B8="$(mktemp -d -t uberdev-goal-b8.XXXXXX)"
+  trap 'rm -rf "$SCRATCH_B8"' EXIT
+  export UBERDEV_TMPDIR="$SCRATCH_B8"
+  export UBERDEV_GOAL_ID="b8-cap-rollover"
+  DISPATCH_LOG="$SCRATCH_B8/dispatch.log"
+  : > "$DISPATCH_LOG"
+
+  . "$DISPATCH_LIB"
+  . "$GOAL_LIB"
+
+  # Stub uberdev_dispatch_one — appends DISPATCHED:<issue> to the log.
+  uberdev_dispatch_one() { printf 'DISPATCHED:%s\n' "$1" >> "$DISPATCH_LOG"; }
+
+  # Phase 1 cap-slice loop (verbatim mirror of SKILL.md Phase 2 step 2a).
+  MAX_PARALLEL=3
+  queue=(101 102 103 104 105)
+  dispatched_this_cycle=0
+  remaining_queue=()
+  for n in "${queue[@]}"; do
+    if [ "$dispatched_this_cycle" -lt "$MAX_PARALLEL" ]; then
+      uberdev_dispatch_one "$n"
+      dispatched_this_cycle=$((dispatched_this_cycle + 1))
+    else
+      remaining_queue+=("$n")
+    fi
+  done
+
+  # Assertions.
+  [ "$dispatched_this_cycle" = "3" ] || { echo "B8.dispatched-count FAIL got $dispatched_this_cycle"; exit 1; }
+  [ "${#remaining_queue[@]}" = "2" ] || { echo "B8.remaining-count FAIL got ${#remaining_queue[@]}"; exit 1; }
+  log_lines="$(wc -l < "$DISPATCH_LOG" | tr -d ' ')"
+  [ "$log_lines" = "3" ] || { echo "B8.log-lines FAIL got $log_lines"; exit 1; }
+  grep -qx 'DISPATCHED:101' "$DISPATCH_LOG" || { echo "B8.first-dispatched FAIL"; exit 1; }
+  grep -qx 'DISPATCHED:103' "$DISPATCH_LOG" || { echo "B8.third-dispatched FAIL"; exit 1; }
+  grep -qx 'DISPATCHED:104' "$DISPATCH_LOG" && { echo "B8.fourth-not-dispatched FAIL — 104 leaked through cap"; exit 1; }
+  [ "${remaining_queue[0]}" = "104" ] || { echo "B8.rollover-first FAIL got '${remaining_queue[0]}'"; exit 1; }
+  [ "${remaining_queue[1]}" = "105" ] || { echo "B8.rollover-second FAIL got '${remaining_queue[1]}'"; exit 1; }
+  echo "B8 PASS"
+) || { FAIL=$((FAIL + 1)); echo "  FAIL  B8 block exited non-zero"; }
+
+# ---------------------------------------------------------------------------
+# B9 — wall-clock barrier-breaker behavioral. uberdev_goal_barrier_breaker_check
+# fires (rc=0, emits audit) iff barrier_start_ts > 0 AND elapsed >= timeout.
+# Mocks _uberdev_goal_now_secs by shell-function override (scopes to the
+# subshell; no export -f needed). Asserts positive (fire), negative
+# (under-threshold), and zero-start (no fire) cases. Issue #214 AC2 / AC3.
+# ---------------------------------------------------------------------------
+echo "== B9: wall-clock barrier-breaker behavioral — positive/negative/zero-start =="
+(
+  set -u
+  SCRATCH_B9="$(mktemp -d -t uberdev-goal-b9.XXXXXX)"
+  trap 'rm -rf "$SCRATCH_B9"' EXIT
+  export UBERDEV_TMPDIR="$SCRATCH_B9"
+  export UBERDEV_GOAL_ID="b9-barrier-breaker"
+  GOAL_ID="$UBERDEV_GOAL_ID"
+
+  . "$DISPATCH_LIB"
+  . "$GOAL_LIB"
+
+  # Seed sidecar manually (deterministic — avoids real wall-clock noise).
+  sc="$UBERDEV_TMPDIR/goal-$GOAL_ID-runstate"
+  cat > "$sc" <<EOF
+GOAL_ID=$GOAL_ID
+cycle=1
+watch_start=1000
+overflow_count=0
+overflow_detected=0
+MAX_CYCLES=10
+UBERDEV_RESOLVED_BACKEND=claude-bg
+MAX_PARALLEL=3
+BARRIER_TIMEOUT_S=60
+barrier_start_ts=1000
+EOF
+
+  # uberdev_goal_audit writes JSONL to $tmpdir/goal-<id>.jsonl (see
+  # goal-state.sh:360). NOT a separate -audit.jsonl file.
+  audit_log="$UBERDEV_TMPDIR/goal-$GOAL_ID.jsonl"
+
+  # ---- POSITIVE case: elapsed = 65 ≥ 60 → fire (rc=0, audit emitted) ----
+  _uberdev_goal_now_secs() { echo 1065; }
+  uberdev_goal_barrier_breaker_check "$GOAL_ID" 60
+  rc_fire=$?
+  [ "$rc_fire" = "0" ] || { echo "B9.fire-rc FAIL got rc=$rc_fire (expected 0)"; exit 1; }
+  [ -r "$audit_log" ] || { echo "B9.fire-audit-log-missing FAIL"; exit 1; }
+  grep -q '"reason":"stuck_loop"'           "$audit_log" || { echo "B9.fire-reason FAIL"; exit 1; }
+  grep -q '"phase":"merge_barrier"'         "$audit_log" || { echo "B9.fire-phase FAIL"; exit 1; }
+  grep -q '"elapsed_s":65'                  "$audit_log" || { echo "B9.fire-elapsed FAIL"; exit 1; }
+  grep -q '"event":"goal_circuit_breaker"'  "$audit_log" || { echo "B9.fire-event FAIL"; exit 1; }
+  pre_neg_audit_lines="$(wc -l < "$audit_log" | tr -d ' ')"
+
+  # ---- NEGATIVE case: elapsed = 30 < 60 → no fire (rc=1, no new audit) ----
+  _uberdev_goal_now_secs() { echo 1030; }
+  uberdev_goal_barrier_breaker_check "$GOAL_ID" 60
+  rc_nofire=$?
+  [ "$rc_nofire" = "1" ] || { echo "B9.nofire-rc FAIL got rc=$rc_nofire (expected 1)"; exit 1; }
+  post_neg_audit_lines="$(wc -l < "$audit_log" | tr -d ' ')"
+  [ "$pre_neg_audit_lines" = "$post_neg_audit_lines" ] || {
+    echo "B9.nofire-no-new-audit FAIL pre=$pre_neg_audit_lines post=$post_neg_audit_lines"; exit 1;
+  }
+
+  # ---- ZERO-start case: barrier_start_ts=0 → no fire (rc=1) ----
+  # Use awk (portable across BSD/GNU sed — macOS local + linux + windows git-bash)
+  awk '/^barrier_start_ts=1000$/{print "barrier_start_ts=0"; next}1' "$sc" > "$sc.tmp" && mv "$sc.tmp" "$sc"
+  uberdev_goal_barrier_breaker_check "$GOAL_ID" 60
+  rc_zero=$?
+  [ "$rc_zero" = "1" ] || { echo "B9.zerostart-rc FAIL got rc=$rc_zero (expected 1)"; exit 1; }
+
+  echo "B9 PASS"
+) || { FAIL=$((FAIL + 1)); echo "  FAIL  B9 block exited non-zero"; }
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo
