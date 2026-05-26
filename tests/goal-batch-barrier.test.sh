@@ -259,7 +259,9 @@ echo "== B8: cap-rollover behavioral — MAX_PARALLEL=3 vs 5-issue queue =="
   # Stub uberdev_dispatch_one — appends DISPATCHED:<issue> to the log.
   uberdev_dispatch_one() { printf 'DISPATCHED:%s\n' "$1" >> "$DISPATCH_LOG"; }
 
-  # Phase 1 cap-slice loop (verbatim mirror of SKILL.md Phase 1 dispatch loop).
+  # Phase 1 cap-slice loop (behavioral equivalent of SKILL.md Phase 1 dispatch
+  # loop — same cap semantics, rephrased to an if/else for in-test readability;
+  # SKILL.md uses `(( dispatched_this_cycle >= MAX_PARALLEL ))` + `continue`).
   MAX_PARALLEL=3
   queue=(101 102 103 104 105)
   dispatched_this_cycle=0

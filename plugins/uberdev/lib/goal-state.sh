@@ -278,8 +278,8 @@ _uberdev_goal_persist_fp() {
 # ---------------------------------------------------------------------------
 
 # uberdev_goal_state_init GOAL_ID
-# D4 + T4 — Refuse unsafe $UBERDEV_TMPDIR; truncate-create the 5 per-goal
-# state files (jsonl + 4 TSVs).
+# D4 + T4 — Refuse unsafe $UBERDEV_TMPDIR; truncate-create the 8 per-goal
+# state files (jsonl + 7 TSVs) — enumerated in the inline comment below.
 uberdev_goal_state_init() {
   local goal_id="$1"
   # #156 — refuse an unsafe goal_id before it reaches any path interpolation.
@@ -834,21 +834,23 @@ uberdev_goal_register_batch_pr() {
   mv -f "$tmp" "$tsv" || { rm -f "$tmp"; return 3; }
   # Best-effort seed barrier_start_ts on first registration.
   #
-  # The previous implementation used `! grep -q '^barrier_start_ts='` + `>>` append.
-  # That predicate is wrong when Phase 0 step 7 has already called
-  # uberdev_goal_write_run_state, because the writer ALWAYS emits a
-  # `barrier_start_ts=${barrier_start_ts:-0}` line — so the placeholder
-  # `barrier_start_ts=0` line exists on disk, the `! grep -q` predicate is
-  # FALSE, and the seed never fires. The wall-clock merge-barrier breaker
-  # (AC6 / D-211e) then never trips because the Phase 2c guard reads `0`
-  # forever.
+  # Background — the previous implementation used the predicate
+  # `! grep -q '^barrier_start_ts='` + `>>` append. That bare-prefix pattern
+  # is wrong when Phase 0 step 7 has already called uberdev_goal_write_run_state,
+  # because the writer ALWAYS emits a `barrier_start_ts=${barrier_start_ts:-0}`
+  # line — so the placeholder `barrier_start_ts=0` line exists on disk, the
+  # bare-prefix `grep -q` matches it, the `!` negation is FALSE, and the seed
+  # never fires. The wall-clock merge-barrier breaker (AC6 / D-211e) then never
+  # trips because the Phase 2c guard reads `0` forever.
   #
-  # Fix: treat any `barrier_start_ts=0` (or missing line) as unseeded. Use
-  # an awk rewrite (drop every existing barrier_start_ts= line, append the
-  # seeded value at end) → mktemp → mv -f so the placeholder line is
-  # REPLACED rather than duplicated. Best-effort: failure leaves the file
-  # untouched (the next uberdev_goal_write_run_state rewrites the sidecar
-  # atomically from the in-memory scalar anyway).
+  # Fix (current predicate, line below): tighten the regex to
+  # `^barrier_start_ts=[1-9][0-9]*$` so the placeholder `barrier_start_ts=0`
+  # line does NOT match, `! grep -q` is therefore TRUE, and the seed DOES fire.
+  # Use an awk rewrite (drop every existing barrier_start_ts= line, append the
+  # seeded value at end) → mktemp → mv -f so the placeholder line is REPLACED
+  # rather than duplicated. Best-effort: failure leaves the file untouched (the
+  # next uberdev_goal_write_run_state rewrites the sidecar atomically from the
+  # in-memory scalar anyway).
   if [ "$first" = "1" ]; then
     local sc="$tmpdir/goal-$goal_id-runstate"
     if [ -r "$sc" ] && ! grep -qE '^barrier_start_ts=[1-9][0-9]*$' "$sc"; then
@@ -1284,10 +1286,11 @@ _uberdev_goal_rebase_collision_chain() {
 
 # uberdev_goal_write_run_state
 #   Reads GOAL_ID, cycle, watch_start, overflow_count, overflow_detected,
-#   MAX_CYCLES, UBERDEV_RESOLVED_BACKEND, and the queue/active_issues arrays
-#   from the caller's shell; persists them to predictable, GOAL_ID-keyed
-#   sidecars under $UBERDEV_TMPDIR, plus a fixed-path goal-active-id.txt pointer
-#   so a fresh shell (no GOAL_ID in env/scalar) can discover the active GOAL_ID.
+#   MAX_CYCLES, UBERDEV_RESOLVED_BACKEND, MAX_PARALLEL, BARRIER_TIMEOUT_S,
+#   barrier_start_ts, and the queue/active_issues arrays from the caller's
+#   shell; persists them to predictable, GOAL_ID-keyed sidecars under
+#   $UBERDEV_TMPDIR, plus a fixed-path goal-active-id.txt pointer so a fresh
+#   shell (no GOAL_ID in env/scalar) can discover the active GOAL_ID.
 #   Returns 0 on success; 4 (fail-CLOSED) if its required lib/dispatch.sh helper
 #   _uberdev_dispatch_prepare_tmp_target is not sourced (see "External imports");
 #   1 if GOAL_ID is invalid; 3 (fail-CLOSED) if _uberdev_dispatch_prepare_tmp_target
@@ -1364,8 +1367,9 @@ uberdev_goal_write_run_state() {
 #   across Bash calls, issue #171), it is bootstrapped from the fixed-path
 #   goal-active-id.txt pointer (content gated through _uberdev_goal_validate_id).
 #   On success: sets the GOAL_ID, cycle, watch_start, overflow_count,
-#   overflow_detected, MAX_CYCLES, UBERDEV_RESOLVED_BACKEND scalars, rehydrates
-#   the queue/active_issues arrays, and EXPORTS UBERDEV_GOAL_ID + UBERDEV_TMPDIR
+#   overflow_detected, MAX_CYCLES, UBERDEV_RESOLVED_BACKEND, MAX_PARALLEL,
+#   BARRIER_TIMEOUT_S, barrier_start_ts scalars, rehydrates the
+#   queue/active_issues arrays, and EXPORTS UBERDEV_GOAL_ID + UBERDEV_TMPDIR
 #   (the env vars the uberdev_goal_* helpers + bare $UBERDEV_TMPDIR/... paths in
 #   the pipeline body depend on — see the export block at the function's end).
 #   Returns 0 on success; 1 if missing/unreadable. Invalid fields are skipped

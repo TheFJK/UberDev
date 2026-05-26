@@ -134,7 +134,7 @@ Notes on the enums:
    export UBERDEV_GOAL_ID="$GOAL_ID"
    ```
 
-6. **Source `lib/goal-state.sh`; call `uberdev_goal_state_init "$GOAL_ID"`.** This truncate-creates the per-goal state files (`goal-<id>.jsonl`, `goal-<id>-pr-states.tsv`, `goal-<id>-issue-states.tsv`, `goal-<id>-fingerprints.tsv`, `goal-<id>-merge-attempts.tsv`, `goal-<id>-review-pr-attempts.tsv`, `goal-<id>-held-audits.tsv`) under `$UBERDEV_TMPDIR` and refuses unsafe path characters (T4):
+6. **Source `lib/goal-state.sh`; call `uberdev_goal_state_init "$GOAL_ID"`.** This truncate-creates the 8 per-goal state files (jsonl + 7 TSVs) — `goal-<id>.jsonl`, `goal-<id>-pr-states.tsv`, `goal-<id>-issue-states.tsv`, `goal-<id>-fingerprints.tsv`, `goal-<id>-merge-attempts.tsv`, `goal-<id>-review-pr-attempts.tsv`, `goal-<id>-held-audits.tsv`, `goal-<id>-batch-prs.tsv` — under `$UBERDEV_TMPDIR` and refuses unsafe path characters (T4):
 
    ```bash
    [ -r "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh" ] && . "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh"
@@ -169,7 +169,7 @@ Notes on the enums:
      printf '  would emit goal_dispatched\n'
      printf '  would dispatch /turbo for issues %s (cap=%s per cycle)\n' \
        "${queue[*]}" "$MAX_PARALLEL"
-     printf '  would poll GitHub (gh pr list) for each issues PR\n'
+     printf '  would poll GitHub (gh pr list) for each issue'\''s PR\n'
      exit 0
    fi
    ```
@@ -937,7 +937,8 @@ Every exit path from this skill emits exactly one terminal audit event AND print
 | Max-cycles cap | `goal_circuit_breaker` with `reason=max_cycles` | 1 | `cycle >= MAX_CYCLES` AND `new_candidates` non-empty (Phase 3). |
 | Non-convergence | `goal_circuit_breaker` with `reason=nonconvergence` | 1 | Fingerprint repeat detected by `uberdev_goal_check_fingerprint_repeat` (Phase 3 per-candidate loop). |
 | Queue-empty-not-converged | `goal_circuit_breaker` with `reason=queue_empty_not_converged` | 1 | `new_candidates` empty AND at least one PR still in a non-terminal in-flight state (`dispatched`, `pushed-reviewing`, `green`, `merging`) — deterministic Phase 3 halt that pre-empts the 4h `stuck_loop` fallback (#160). |
-| Stuck-loop | `goal_circuit_breaker` with `reason=stuck_loop` | 1 | `watch_secs >= _UBERDEV_GOAL_STUCK_SECS` (4h) at top of Phase 2 iteration. |
+| Stuck-loop (goal-level) | `goal_circuit_breaker` with `reason=stuck_loop` | 1 | `watch_secs >= _UBERDEV_GOAL_STUCK_SECS` (4h) at top of Phase 2 iteration. |
+| Stuck-loop (merge_barrier) | `goal_circuit_breaker` with `reason=stuck_loop` + `phase=merge_barrier` | 1 | `uberdev_goal_barrier_breaker_check` fires when `now - barrier_start_ts >= BARRIER_TIMEOUT_S` (issue #211, Phase 2c). The `phase=merge_barrier` field distinguishes this from the goal-level emitter above; payload also carries `elapsed_s` and `pending_prs`. |
 | Merge-failed | `goal_circuit_breaker` with `reason=merge_failed` | 1 | `/merge` returned `conflict` or `hook_failed`, or the PR was CLOSED without merging (Phase 2 step 2d). |
 
 **Human-readable summary line.** Print to stdout (NOT stderr — this is the operator's success-or-failure narrative) before exit:
