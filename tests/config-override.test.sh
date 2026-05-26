@@ -519,7 +519,6 @@ assert_grep_in "$GOAL_SKILL_PATH" \
   'UBERDEV_GOAL_BARRIER_TIMEOUT_S="\$\{barrier_timeout_cli:-\$\{UBERDEV_GOAL_BARRIER_TIMEOUT_S:-\}\}"' \
   "I8.barrier-timeout-cli-env-precedence"
 
-
 echo
 echo "== U9: auto_review_on_merge config key (#89) =="
 
