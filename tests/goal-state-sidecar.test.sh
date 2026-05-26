@@ -389,7 +389,9 @@ s5neg="$(env -i UBERDEV_TMPDIR="$UBERDEV_TMPDIR" PATH="$PATH" bash -c '
   . "'"$DISPATCH_LIB"'"
   . "'"$GOAL_LIB"'"
   uberdev_goal_read_run_state >/dev/null
-  env | grep -c "^PRIOR_LAST_ACTIVITY_\\.\\." || echo 0
+  # grep -c always prints the count (incl. 0) — no || echo 0 fallback needed.
+  env | grep -c "^PRIOR_LAST_ACTIVITY_\\.\\." 2>/dev/null
+  exit 0
 ')"
 if [ "$s5neg" = "0" ]; then
   PASS=$((PASS+1)); echo "  PASS  S5.forged-suffix-refused"
