@@ -42,6 +42,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 GOAL_CMD="$REPO_ROOT/plugins/uberdev/commands/goal.md"
 GOAL_SKILL="$REPO_ROOT/plugins/uberdev/skills/goal-pipeline/SKILL.md"
 GOAL_LIB="$REPO_ROOT/plugins/uberdev/lib/goal-state.sh"
+DISPATCH_LIB="$REPO_ROOT/plugins/uberdev/lib/dispatch.sh"
 
 # Pre-flight: refuse to run if any asserted-against file is missing.
 for f in "$GOAL_CMD" "$GOAL_SKILL" "$GOAL_LIB"; do
@@ -158,7 +159,9 @@ assert_grep "$GOAL_SKILL" 'exit 0'                        "G10.zero-exit"
 echo
 echo "== G11: all 6 audit events present =="
 for e in goal_dispatched goal_pr_transition goal_unblock_triggered \
-         goal_cycle_completed goal_converged goal_circuit_breaker; do
+         goal_cycle_completed goal_converged goal_circuit_breaker \
+         goal_merge_deferred goal_review_pr_deferred goal_review_grace \
+         goal_reaper_kill goal_reaper_skipped; do
   assert_grep "$GOAL_SKILL" "$e" "G11.${e}"
 done
 
@@ -232,9 +235,12 @@ assert_grep "$GOAL_LIB" '_UBERDEV_GOAL_BODY_CAP|head -c 65536'           "G18.bo
 
 echo
 echo "== G19: lib/goal-state.sh shape =="
-# Public function names (21 — 18 prior + 3 new barrier helpers added by issue #211:
+# Public function names (23 — 18 prior + 3 new barrier helpers added by issue #211:
 # uberdev_goal_register_batch_pr, uberdev_goal_batch_all_terminal,
-# uberdev_goal_batch_unblock_wait_clear).
+# uberdev_goal_batch_unblock_wait_clear; issue #220 adds two helpers —
+# uberdev_goal_review_pr_in_flight (in-flight gate for Phase 2b + 2c) and
+# uberdev_goal_agent_stuck_on_dialog (60s activity-window detector via
+# audit-log row-count proxy)).
 for fn in uberdev_goal_state_init uberdev_goal_pr_state_transition uberdev_goal_issue_state_transition \
           uberdev_goal_read_trust_signal uberdev_goal_check_fingerprint_repeat uberdev_goal_should_automerge \
           uberdev_goal_audit uberdev_goal_locate_review_pr_audit \
@@ -242,13 +248,15 @@ for fn in uberdev_goal_state_init uberdev_goal_pr_state_transition uberdev_goal_
           uberdev_goal_get_pr_state uberdev_goal_record_held_audit uberdev_goal_get_last_held_audit \
           uberdev_goal_find_pr_for_issue uberdev_goal_pr_state_gh uberdev_goal_pr_is_merged \
           uberdev_goal_agent_busy_for_issue \
+          uberdev_goal_review_pr_in_flight \
+          uberdev_goal_agent_stuck_on_dialog \
           uberdev_goal_list_prs_in_state uberdev_goal_read_merge_result \
           uberdev_goal_register_batch_pr \
           uberdev_goal_batch_all_terminal \
           uberdev_goal_batch_unblock_wait_clear; do
   assert_grep "$GOAL_LIB" "^${fn}\\(\\)" "G19.public.${fn}"
 done
-# Internal function names (16 underscore-prefixed helpers — `_uberdev_goal_validate_id`
+# Internal function names (19 underscore-prefixed helpers — `_uberdev_goal_validate_id`
 # (#156 goal_id path-traversal guard) and `_uberdev_goal_append` (#157
 # unwritable-tmpdir checked-append) add the slug-validation + write-surfacing
 # primitives; the prior `_persist_fp` short-alias forwarder was dropped
@@ -263,7 +271,10 @@ for fn in _uberdev_goal_validate_int _uberdev_goal_validate_id _uberdev_goal_app
           _uberdev_goal_check_unblock \
           _uberdev_goal_set_batch_terminal_state \
           _uberdev_goal_batch_green_prs_ordered \
-          _uberdev_goal_rebase_collision_chain; do
+          _uberdev_goal_rebase_collision_chain \
+          _uberdev_goal_any_attempt_stuck \
+          _uberdev_goal_locked_marker_for_pr_fresh \
+          _uberdev_goal_reap_zombies; do
   assert_grep "$GOAL_LIB" "^${fn}\\(\\)" "G19.internal.${fn}"
 done
 # Idempotency guard against double-sourcing.
@@ -277,11 +288,11 @@ assert_no_grep "$GOAL_LIB" '\bbash -c'                                   "G19.no
 assert_grep "$GOAL_CMD" '--i-know-what-im-doing'                         "G19.r12-mentioned-once"
 
 echo
-echo "== G20: version bump locked (0.34.3) =="
-assert_grep "$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json" '"version": "0\.34\.3"'  "G20.plugin-json"
-assert_grep "$REPO_ROOT/.claude-plugin/marketplace.json"            '"version": "0\.34\.3"'  "G20.marketplace-json"
-assert_grep "$REPO_ROOT/README.md"                                  'version-0\.34\.3-blue'  "G20.readme-badge"
-assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.34\.3\]'        "G20.changelog"
+echo "== G20: version bump locked (0.34.4) =="
+assert_grep "$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json" '"version": "0\.34\.4"'  "G20.plugin-json"
+assert_grep "$REPO_ROOT/.claude-plugin/marketplace.json"            '"version": "0\.34\.4"'  "G20.marketplace-json"
+assert_grep "$REPO_ROOT/README.md"                                  'version-0\.34\.4-blue'  "G20.readme-badge"
+assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.34\.4\]'        "G20.changelog"
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
 
 assert_grep "$GOAL_SKILL" 'uberdev_dispatch_resolve_env'  "G20b.phase0-wires-resolve-env (#175 SSOT anchor)"
@@ -339,6 +350,8 @@ echo "== G22: queue_empty_not_converged + held-as-terminal (issue #160) =="
 # Reason added to the enum AND the deterministic halt is emitted from Phase 3.
 assert_grep "$GOAL_SKILL" 'GOAL_CIRCUIT_BREAKER_REASONS=.*queue_empty_not_converged' "G22.reason-in-enum"
 assert_grep "$GOAL_SKILL" 'goal_circuit_breaker.*queue_empty_not_converged'         "G22.halt-emit"
+assert_grep "$GOAL_SKILL" 'GOAL_CIRCUIT_BREAKER_REASONS=.*agent_stuck_on_dialog' "G22.reason-agent-stuck-in-enum"
+assert_grep "$GOAL_SKILL" 'goal_circuit_breaker.*agent_stuck_on_dialog'           "G22.halt-emit-agent-stuck"
 # Phase 3 terminal_prs MUST include held states so a goal with only held PRs
 # left can converge cleanly instead of spinning until stuck_loop.
 assert_grep "$GOAL_SKILL" 'list_prs_in_state.*yellow-held'                         "G22.terminal-includes-yellow-held"
@@ -425,6 +438,60 @@ echo "== G31: Phase 2 step 2e updates batch registry on held → green transitio
 assert_grep "$GOAL_SKILL" '_uberdev_goal_set_batch_terminal_state'        "G31.set-terminal-state-call"
 # The rebase helper is called per just-merged PR in the green-set.
 assert_grep "$GOAL_SKILL" '_uberdev_goal_rebase_collision_chain'          "G31.rebase-chain-in-phase2c"
+
+echo
+echo "== G32: uberdev_goal_review_pr_in_flight in-flight gate shape (issue #220, AC ❷) =="
+assert_grep "$GOAL_LIB" '^uberdev_goal_review_pr_in_flight\(\)'                    "G32.fn-defined"
+assert_grep "$GOAL_LIB" 'jq -e --argjson pr'                                       "G32.argjson-pr"
+assert_grep "$GOAL_LIB" '\^/uberdev:review-pr '                                    "G32.anchored-name-regex"
+assert_grep "$GOAL_LIB" '(\$\|\[\^0-9\])'                                          "G32.regex-trailing-boundary"
+assert_grep "$GOAL_LIB" 'busy\|running\|starting\|working'                         "G32.status-whitelist"
+assert_grep "$GOAL_SKILL" 'uberdev_goal_review_pr_in_flight'                       "G32.called-from-skill"
+
+echo
+echo "== G33: Phase 3 rollover preservation + rolled_over audit field (issue #220, AC ❹) =="
+assert_grep "$GOAL_SKILL" 'queue=\("\$\{queue\[@\]\}" "\$\{new_candidates\[@\]\}"\)' "G33.merge-not-overwrite"
+assert_grep "$GOAL_SKILL" '_rolled_over=\$\{#queue\[@\]\}'                         "G33.capture-before-merge"
+assert_grep "$GOAL_SKILL" '\\"rolled_over\\":\$_rolled_over'                       "G33.payload-field"
+assert_no_grep "$GOAL_SKILL" 'local _rolled_over'                                  "G33.no-local-keyword (script-scope)"
+
+echo
+echo "== G34: goal.review_grace_secs config plumbing (issue #220, AC ❶) =="
+assert_grep "$GOAL_SKILL" '_UBERDEV_GOAL_DEFAULT_REVIEW_GRACE_SECS=3600'                                "G34.default-3600"
+assert_grep "$GOAL_SKILL" 'uberdev_read_int_in_range goal.review_grace_secs UBERDEV_GOAL_REVIEW_GRACE_SECS 60 86400' "G34.range-helper"
+assert_grep "$GOAL_SKILL" 'review_grace_cli'                                                            "G34.cli-arg-var"
+assert_grep "$GOAL_SKILL" -- '--review-grace-secs=\*)'                                                  "G34.cli-arg-case-arm"
+assert_no_grep "$GOAL_SKILL" '_UBERDEV_GOAL_REVIEW_GRACE\b'                                             "G34.old-symbol-removed"
+
+echo
+echo "== G35: _uberdev_goal_reap_zombies precedes every goal_circuit_breaker exit 1 (issue #220, AC reaper) =="
+reaper_count="$(grep -cF '_uberdev_goal_reap_zombies || true' "$GOAL_SKILL")"
+if [ "$reaper_count" -ge 9 ]; then
+  PASS=$((PASS+1)); echo "  PASS  G35.reaper-call-sites (count=$reaper_count, ge 9)"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  G35.reaper-call-sites (count=$reaper_count, want ge 9)" >&2
+fi
+assert_grep "$GOAL_LIB"   '^_uberdev_goal_reap_zombies\(\)'                       "G35.helper-defined"
+assert_grep "$GOAL_LIB"   'goal_reaper_skipped'                                    "G35.skip-event-name"
+assert_grep "$GOAL_LIB"   'no_pid_visibility'                                     "G35.skip-event-reason"
+assert_grep "$GOAL_LIB"   'goal_reaper_kill'                                      "G35.kill-event-name"
+assert_grep "$GOAL_LIB"   '\\"signal\\":\\"TERM\\"'                               "G35.kill-event-signal-term"
+assert_grep "$GOAL_LIB"   'kill -KILL'                                            "G35.kill-9-escalation"
+
+echo
+echo "== G36: INT/TERM traps installed, existing EXIT trap unchanged (issue #220, AC reaper) =="
+assert_grep "$GOAL_SKILL" "trap '_uberdev_goal_reap_zombies; exit 130' INT"       "G36.int-trap"
+assert_grep "$GOAL_SKILL" "trap '_uberdev_goal_reap_zombies; exit 143' TERM"      "G36.term-trap"
+assert_grep "$GOAL_SKILL" "trap 'rm -f \"\\\$gh_err\" \"\\\$findings_err\"' EXIT" "G36.exit-trap-unchanged"
+
+echo
+echo "== G37: uberdev_goal_agent_stuck_on_dialog 60s window helper shape (issue #220, AC ❸) =="
+assert_grep "$GOAL_LIB" '^uberdev_goal_agent_stuck_on_dialog\(\)'                 "G37.fn-defined"
+assert_grep "$GOAL_LIB" 'PRIOR_LAST_ACTIVITY_'                                    "G37.sidecar-prior-key"
+assert_grep "$GOAL_LIB" 'FIRST_DIALOG_TS_'                                        "G37.sidecar-first-seen-key"
+assert_grep "$GOAL_LIB" '\-ge 60'                                                 "G37.60s-window"
+assert_grep "$GOAL_LIB" '^_uberdev_goal_any_attempt_stuck\(\)'                    "G37.wrapper-defined"
+assert_grep "$GOAL_SKILL" '_uberdev_goal_any_attempt_stuck'                       "G37.wrapper-called-from-skill"
 
 echo
 echo "== Behavioral tests (B12 — sourced-function exercises) =="
@@ -2296,6 +2363,159 @@ if ls "$_b12_tmpdir"/../*pwned* >/dev/null 2>&1; then
 else
   PASS=$((PASS + 1)); printf '  PASS  %s\n' "H8.no-escaped-audit-artifact"
 fi
+
+# ----- BT76-BT79 — issue #220 wave-3 wiring behavioural coverage -----
+# Functions under test:
+#   - uberdev_goal_review_pr_in_flight (rc 0/1 by anchored-regex match)
+#   - Phase 2c emits goal_merge_deferred (skill-level event-emission contract)
+#   - Phase 2b emits goal_review_pr_deferred (symmetric contract)
+#   - Phase 3 rollover merge-not-overwrite (cycle queue preservation)
+#   - uberdev_goal_agent_stuck_on_dialog (60s-window detector via audit-log
+#     row-count proxy — lastActivityAt is absent in claude agents JSON per field
+#     probe; the helper persists baseline state in sidecar keys and re-evaluates
+#     across successive samples)
+# Each test uses `bash -c` to keep the parent suite's mocks/state pristine.
+
+echo "== BT76: uberdev_goal_review_pr_in_flight returns 0/1 by anchored-regex match =="
+_bt76() {
+  local pr="$1" expected_rc="$2" label="$3"
+  bash -c '
+    claude() { printf "%s\n" "[{\"name\":\"/uberdev:review-pr 42\",\"status\":\"busy\"}]"; }
+    export -f claude
+    . "'"$DISPATCH_LIB"'"
+    . "'"$GOAL_LIB"'"
+    uberdev_goal_review_pr_in_flight '"$pr"'
+  '
+  local got=$?
+  if [ "$got" -eq "$expected_rc" ]; then
+    PASS=$((PASS+1)); echo "  PASS  $label (rc=$got)"
+  else
+    FAIL=$((FAIL+1)); echo "  FAIL  $label (rc=$got want=$expected_rc)" >&2
+  fi
+}
+_bt76 42  0 "BT76.match-42"
+_bt76 43  1 "BT76.no-match-43"
+_bt76 421 1 "BT76.no-match-421-anchor (regression: 42 must not match 421)"
+
+echo "== BT77: Phase 2c emits goal_merge_deferred with mock in-flight /review-pr (issue #220 AC ❷) =="
+bt77_capture="$(mktemp)"
+bash -c '
+  claude() { printf "%s\n" "[{\"name\":\"/uberdev:review-pr 42\",\"status\":\"busy\"}]"; }
+  export -f claude
+  . "'"$DISPATCH_LIB"'"
+  . "'"$GOAL_LIB"'"
+  uberdev_goal_audit() {
+    printf "EVENT=%s PAYLOAD=%s\n" "$1" "$2"
+  }
+  export -f uberdev_goal_audit
+  pr=42
+  GOAL_ID=goal-test-bt77abc1
+  if uberdev_goal_review_pr_in_flight "$pr"; then
+    uberdev_goal_audit goal_merge_deferred "{\"goal_id\":\"$GOAL_ID\",\"pr\":$pr,\"reason\":\"review_in_flight\",\"in_flight_count\":1}"
+  else
+    echo "BUG: in-flight gate said clear when mock said busy" >&2
+  fi
+' > "$bt77_capture" 2>&1
+if grep -qF 'EVENT=goal_merge_deferred PAYLOAD={"goal_id":"goal-test-bt77abc1","pr":42,"reason":"review_in_flight","in_flight_count":1}' "$bt77_capture"; then
+  PASS=$((PASS+1)); echo "  PASS  BT77.event-emitted"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  BT77.event-emitted (got: $(cat "$bt77_capture"))" >&2
+fi
+if ! grep -qF 'EVENT=goal_review_pr_deferred' "$bt77_capture"; then
+  PASS=$((PASS+1)); echo "  PASS  BT77.no-review-pr-deferred-event (Phase 2c does not emit Phase 2b event)"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  BT77.no-review-pr-deferred-event (got Phase 2b event in Phase 2c scenario)" >&2
+fi
+rm -f "$bt77_capture"
+
+echo "== BT77b: Phase 2b emits goal_review_pr_deferred with mock in-flight /review-pr (issue #220 AC ❷') =="
+bt77b_capture="$(mktemp)"
+bash -c '
+  claude() { printf "%s\n" "[{\"name\":\"/uberdev:review-pr 42\",\"status\":\"busy\"}]"; }
+  export -f claude
+  . "'"$DISPATCH_LIB"'"
+  . "'"$GOAL_LIB"'"
+  uberdev_goal_audit() { printf "EVENT=%s PAYLOAD=%s\n" "$1" "$2"; }
+  export -f uberdev_goal_audit
+  pr=42
+  GOAL_ID=goal-test-bt77babc1
+  if uberdev_goal_review_pr_in_flight "$pr"; then
+    uberdev_goal_audit goal_review_pr_deferred "{\"goal_id\":\"$GOAL_ID\",\"pr\":$pr,\"reason\":\"in_flight\",\"in_flight_count\":1}"
+  fi
+' > "$bt77b_capture" 2>&1
+if grep -qF 'EVENT=goal_review_pr_deferred PAYLOAD={"goal_id":"goal-test-bt77babc1","pr":42,"reason":"in_flight","in_flight_count":1}' "$bt77b_capture"; then
+  PASS=$((PASS+1)); echo "  PASS  BT77b.event-emitted"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  BT77b.event-emitted (got: $(cat "$bt77b_capture"))" >&2
+fi
+if ! grep -qF 'EVENT=goal_merge_deferred' "$bt77b_capture"; then
+  PASS=$((PASS+1)); echo "  PASS  BT77b.no-merge-deferred-event (Phase 2b does not emit Phase 2c event)"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  BT77b.no-merge-deferred-event" >&2
+fi
+rm -f "$bt77b_capture"
+
+echo "== BT78: Phase 3 rollover merges Phase-1 carry-over instead of overwriting (issue #220 AC ❹) =="
+bt78_out="$(bash -c '
+  queue=(207 210 198)
+  active=("${queue[@]:0:2}")
+  queue=("${queue[@]:2}")
+  new_candidates=()
+  _rolled_over=${#queue[@]}
+  queue=("${queue[@]}" "${new_candidates[@]}")
+  printf "queue_after=%s rolled_over=%s\n" "${queue[*]}" "$_rolled_over"
+')"
+case "$bt78_out" in
+  "queue_after=198 rolled_over=1")
+    PASS=$((PASS+1)); echo "  PASS  BT78.cycle-2-queue-preserves-198"
+    ;;
+  *)
+    FAIL=$((FAIL+1)); echo "  FAIL  BT78.cycle-2-queue-preserves-198 (got [$bt78_out])" >&2
+    ;;
+esac
+if [ "$bt78_out" != "queue_after= rolled_over=1" ]; then
+  PASS=$((PASS+1)); echo "  PASS  BT78.no-silent-strand (bug regression guard)"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  BT78.no-silent-strand (queue empty AFTER rollover — wipe regression)" >&2
+fi
+
+echo "== BT79: uberdev_goal_agent_stuck_on_dialog 60s-window detector via audit-log row-count proxy (issue #220 AC ❸) =="
+bt79_capture="$(mktemp)"
+bt79_audit_jsonl="$(mktemp)"
+echo '{"event":"goal_dispatched"}' > "$bt79_audit_jsonl"
+bash -c '
+  GOAL_ID=goal-test-bt79abc1
+  export GOAL_ID UBERDEV_GOAL_ID="$GOAL_ID"
+  # Place a stub goal-<id>.jsonl into UBERDEV_TMPDIR so the helper finds it via the standard path.
+  UBERDEV_TMPDIR="$(mktemp -d)"
+  export UBERDEV_TMPDIR
+  cp "'"$bt79_audit_jsonl"'" "$UBERDEV_TMPDIR/goal-$GOAL_ID.jsonl"
+  claude() {
+    printf "%s\n" "[{\"pid\":12345,\"status\":\"busy\"}]"
+  }
+  export -f claude
+  _ts_now=1729000000
+  date() {
+    case "$1" in
+      +%s)  printf "%s\n" "${MOCK_NOW:-$_ts_now}" ;;
+      *)    command date "$@" ;;
+    esac
+  }
+  export -f date
+  . "'"$DISPATCH_LIB"'"
+  . "'"$GOAL_LIB"'"
+  # First sample — should return rc=1 (not yet stuck) and persist baseline.
+  MOCK_NOW=1729000000 uberdev_goal_agent_stuck_on_dialog 12345 && rc1=0 || rc1=$?
+  # Second sample — 65s later, same audit row-count, status still busy => stuck.
+  MOCK_NOW=1729000065 uberdev_goal_agent_stuck_on_dialog 12345 && rc2=0 || rc2=$?
+  printf "rc1=%s rc2=%s\n" "$rc1" "$rc2"
+' > "$bt79_capture" 2>&1
+if grep -qF 'rc1=1 rc2=0' "$bt79_capture"; then
+  PASS=$((PASS+1)); echo "  PASS  BT79.first-sample-not-stuck-second-sample-stuck"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  BT79.detector-state-machine (got: $(cat "$bt79_capture"))" >&2
+fi
+rm -f "$bt79_capture" "$bt79_audit_jsonl"
 
 # Cleanup: remove the isolated tmpdir contents (we created the whole
 # directory via mktemp -d, so we can rm -rf safely — it's our own).
