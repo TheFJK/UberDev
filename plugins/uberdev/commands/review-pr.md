@@ -82,6 +82,27 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    ```
    Validate against the regex `^[0-9]{8}-[0-9]{6}-[a-f0-9]+$` (see "Run-ID format" subsection below); on validation failure, exit 2 and surface the bug. Note: this `RUN_ID` is **decoupled** from any earlier `subagent-driven-dev` `RUN_ID` — `/review-pr` mints its own.
 
+   **Locked-marker write (issue #220, AC ❶):** Before invoking the post-impl-review skill, write a sibling `.uberdev/runs/<RUN_ID>/locked` zero-byte marker + `pr-context.json` so a concurrent `/uberdev:goal` Phase 2b knows this PR's `/review-pr` is in-flight (avoids re-dispatching ours while the leaf solver's own is still running):
+
+   ```bash
+   PR_NUM="$(gh pr view --json number -q .number 2>/dev/null)"
+   ISSUE_NUM="$(gh pr view --json body -q .body 2>/dev/null | grep -oE 'Closes #[0-9]+' | head -n1 | grep -oE '[0-9]+')"
+   if [ -n "$PR_NUM" ] && [ "$PR_NUM" -gt 0 ] 2>/dev/null; then
+     MARKER_DIR="$(git rev-parse --show-toplevel)/.uberdev/runs/$RUN_ID"
+     mkdir -p "$MARKER_DIR"
+     : > "$MARKER_DIR/locked"  # creates .uberdev/runs/$RUN_ID/locked zero-byte sentinel
+     jq -n --argjson pr "$PR_NUM" --arg issue "${ISSUE_NUM:-0}" --arg ts "$(date -u +%FT%TZ)" \
+       '{pr: $pr, issue: ($issue|tonumber? // 0), started_at: $ts}' > "$MARKER_DIR/pr-context.json"
+   fi
+   ```
+
+   ```bash
+   # Trap-slot audit: no pre-existing EXIT trap found (issue #220 §3.2)
+   trap 'rm -f "$MARKER_DIR/locked" "$MARKER_DIR/pr-context.json" 2>/dev/null; rmdir "$MARKER_DIR" 2>/dev/null || true' EXIT
+   ```
+
+   The locked marker is read by `/uberdev:goal` Phase 2b via `_uberdev_goal_locked_marker_for_pr_fresh "$pr_num" "$REVIEW_GRACE_SECS"` (lib/goal-state.sh). The contract is additive — `/review-pr` runs identically whether `/goal` is the caller or a human is. The trap fires on every exit path (success, failure, signal) so an orphaned marker is bounded by the natural EXIT signal — and even on SIGKILL the `/goal` reader's grace-window check (REVIEW_GRACE_SECS, default 3600s) bounds staleness without operator intervention. See RFC 0005 §9 D220b for the cross-component design rationale.
+
    Compute Phase 1 inputs from the PR:
    - `changed_paths` — `gh pr diff <N> --name-only` (or `git diff <base>..HEAD --name-only` if invoked outside a PR context).
    - `commit_range` — `<base>..HEAD` where `<base>` is the PR base ref.
