@@ -133,10 +133,10 @@ You have no Bash. You do not generate new mechanisms. You score and rank.
 
 6. **Moonshot flag.** For each floor-survivor, decide whether it looks likely to land on the Novelty × Impact Pareto frontier — i.e. there is no other survivor with both higher Novelty AND higher Impact. This is a hint, not a gate; `report.py`'s `moonshot_frontier()` does the deterministic membership check. Set `moonshot_candidate: true` for the designs you think will make the frontier (typically the top 2–4 on Novelty × Impact), `false` otherwise. Bias toward marking a design moonshot if its Novelty AND Impact are both ≥ 7 — these are the dossier headline candidates.
 
-7. **Write `<summary_dir>/ranked.yaml`** using exactly this shape:
+7. **Write `<summary_dir>/ranked.yaml`** using exactly this shape (flat keys; matches the `report.py` reader and the falsifier dossier conventions — do NOT nest under `scores:` / `sub_scores:`, do NOT use `designs:` as the top-level key, do NOT use prose `kill_causes_and_mitigations`):
 
 ```yaml
-designs:
+ranked:
   - id: comp-NNN
     title: <short title — 6–10 words>
     pitch: <one-line — the elevator pitch>
@@ -144,33 +144,40 @@ designs:
     donor_domains:
       - "<donor slug (tier tag), e.g. distributed-systems (T1)>"
       - "<donor slug (tier tag), e.g. evolution (T5)>"
-    combination_story: <how the parts fuse + the synergy claim — 2–4 sentences>
-    scores:
-      novelty: 0-10            # weighted axis aggregate; report.py recomputes deterministically — yours is a sanity pre-compute
-      feasibility: 0-10
-      combination: 0-10
-      impact: 0-10
-    sub_scores:
-      novelty:
-        prior_art_distance: 0-10
-        cross_domain_reach: 0-10
-        non_obviousness: 0-10
-        mechanism_originality: 0-10
-      feasibility:
-        hard_constraint: 0-10
-        survives_adversary: 0-10
-        buildability: 0-10
-        premortem_resilience: 0-10
-        deployment_reality: 0-10
-      combination:
-        cross_consistency: 0-10
-        synergy: 0-10
-        coverage: 0-10
-      impact:
-        transformative: 0-10
-        generality: 0-10
-        defensibility: 0-10
-    kill_causes_and_mitigations: <prose from falsifier dossiers — surface the STRONGEST remaining risk + how to mitigate; 2–4 sentences>
+    # Flat axis aggregates — 0-10 floats; report.py recomputes deterministically from the sub-key blocks below.
+    novelty: 0-10
+    feasibility: 0-10
+    combination: 0-10
+    impact: 0-10
+    # Flat per-axis sub-criterion blocks. Keys exactly as listed.
+    novelty_subs:
+      prior_art_distance: 0-10
+      cross_domain_reach: 0-10
+      non_obviousness: 0-10
+      mechanism_originality: 0-10
+    feas_subs:
+      hard_constraint: 0-10
+      survives_adversary: 0-10
+      buildability: 0-10
+      premortem_resilience: 0-10
+      deployment_reality: 0-10
+    comb_subs:
+      cross_consistency: 0-10
+      synergy: 0-10
+      coverage: 0-10
+    impact_subs:
+      transformative: 0-10
+      generality: 0-10
+      defensibility: 0-10
+    combination_narrative: |
+      <prose explaining how the donor domains combine + the synergy claim — 2-4 sentences>
+    kill_causes:
+      - cause: <one-line description of the strongest remaining risk per the falsifier dossiers>
+        fatal: true | false
+        mitigation: <one-line fix, or "N/A" if no mitigation is known>
+      - cause: <next risk if any>
+        fatal: true | false
+        mitigation: <one-line fix or "N/A">
     first_experiment: <the CHEAPEST test that would falsify or confirm — concrete, <=2 sentences>
     elo_rank: <int 1-5 for top-5 contestants; null otherwise>
     moonshot_candidate: true | false
@@ -179,20 +186,31 @@ designs:
       overlap_found: true | false
       citations:
         - "<url — only if overlap_found: true; cite the published-work source>"
+culled:
+  - id: comp-NNN
+    title: <title>
+    floor_cut_reason: "feasibility-axis-below-4" | "feasibility-subcriterion-zero"
+    novelty: 0-10
+    feasibility: 0-10
+    combination: 0-10
+    impact: 0-10
 refused_urls: []
 ```
 
    Rules:
+   - Top-level key is `ranked:` (not `designs:`). A separate `culled:` block lists floor-cut designs with their cut reason; you populate `culled:` only as a sanity-check echo of `floor_survivors.yaml` — you do NOT score culled designs.
    - `id` matches the composite ID from `composites_paths` (e.g. `comp-001`, `global-comp-003`).
-   - All sub-score integers MUST be 0–10 inclusive. The axis-level `scores.*` may be float (your weighted pre-compute) or integer (rounded); `report.py` recomputes from sub-scores so this is illustrative.
+   - Axis aggregates (`novelty` / `feasibility` / `combination` / `impact`) are flat top-level keys per design — NOT nested under `scores:`. Floats 0-10; `report.py` recomputes from the sub-key blocks below.
+   - Sub-criterion blocks use the flat keys `novelty_subs` / `feas_subs` / `comb_subs` / `impact_subs` — NOT nested under `sub_scores:`. All sub-score values MUST be 0-10 inclusive (integer or float).
+   - `combination_narrative` (NOT `combination_story`) is a `|` literal-block scalar — 2-4 sentences explaining how the donor mechanisms fuse + the synergy claim.
+   - `kill_causes` is a LIST of dicts, each with `cause` (one-line description) + `fatal` (boolean) + `mitigation` (one-line fix or `"N/A"`). NOT a prose `kill_causes_and_mitigations` paragraph. Surface the strongest remaining risks per the falsifier dossiers; if all dossiers say "no remaining risk above floor" emit a single entry with `cause: "no residual risk above floor"`, `fatal: false`, `mitigation: "N/A"`.
    - `donor_domains` MUST include tier tags `(T1) … (T5)` so downstream dossier rendering can highlight far-field imports.
-   - `kill_causes_and_mitigations` MUST cite the strongest remaining risk per the falsifier dossiers; if all dossiers say "no remaining risk above floor" then state that explicitly.
    - `first_experiment` MUST be a concrete falsifiable test — "a cheap measurement that would confirm or kill the design." Not "more research"; an actual experiment.
    - `elo_rank` is `null` (literal YAML null) for designs not in the top-5 Elo debate.
    - `novelty_recheck.searched: false` is valid for designs outside the top-5 novelty recheck. `citations` may be empty (`citations: []`) when none cited.
    - `refused_urls` MUST be present (use `refused_urls: []` when nothing was refused) so the orchestrator can audit allow-list enforcement.
 
-   If after analysis there are zero floor-survivors, write `designs: []` with `refused_urls: []`. This is a valid CB-CONVERGE result (no design cleared the floor); `report.py` will render a "useful negative result" report.
+   If after analysis there are zero floor-survivors, write `ranked: []` with `culled: []` and `refused_urls: []`. This is a valid CB-CONVERGE result (no design cleared the floor); `report.py` will render a "useful negative result" report.
 
 ## Output (last lines of your reply)
 

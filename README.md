@@ -240,7 +240,7 @@ Read-only, **always-deep**, whole-fleet ideation engine. Takes a hard technical 
 
 **Composes with `/brainstorm`:** `/uberthink` invents the approach (ranked dossier); `/brainstorm` designs the implementation. `--handoff` auto-chains the #1 design into `/uberdev:brainstorm` seeded with its dossier section — moonshot → real design in one shot.
 
-Design rationale and full topology in [`docs/rfc/0002-uberthink-ideation-engine.md`](./docs/rfc/0002-uberthink-ideation-engine.md).
+Design rationale and full topology in [`docs/rfc/0009-uberthink-ideation-engine.md`](./docs/rfc/0009-uberthink-ideation-engine.md).
 
 ---
 

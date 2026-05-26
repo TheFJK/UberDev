@@ -13,7 +13,7 @@ via genetic-algorithm-style crossover across parallel **islands**, and stress-te
 them through a falsification fleet so crackpot ideas die before they reach you. Output
 is a dossier with a dedicated **moonshot lane** plus the top idea(s) auto-filed as
 GitHub issues. **Never writes application code** — the absence of `Edit`/`MultiEdit`
-above is the enforced read-only invariant. (Design: `docs/rfc/0002-uberthink-ideation-engine.md`.)
+above is the enforced read-only invariant. (Design: `docs/rfc/0009-uberthink-ideation-engine.md`.)
 
 > **Warning:** `/uberthink` is **always-deep**. One island already costs roughly **15× a
 > normal chat** in tokens (the Anthropic multi-agent research economics); `--islands N`
