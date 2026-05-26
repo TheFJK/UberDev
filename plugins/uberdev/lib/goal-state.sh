@@ -48,16 +48,22 @@
 #   _uberdev_goal_batch_green_prs_ordered  GOAL_ID                (issue #211)
 #   _uberdev_goal_rebase_collision_chain   GOAL_ID JUST_MERGED_PR (issue #211)
 # External imports:
-#   - lib/dispatch.sh :: _uberdev_dispatch_prepare_tmp_target — REQUIRED by
-#     uberdev_goal_write_run_state, which reuses this #155 TOCTOU-safe target-prep
-#     helper for every run-state sidecar it writes (issue #195). goal-state.sh
-#     does NOT source dispatch.sh itself (no stable relative path from a sourced
-#     lib + avoids a load-order cycle); the CALLER must source lib/dispatch.sh
-#     BEFORE invoking the writer. A `command -v` preflight at the top of
-#     uberdev_goal_write_run_state enforces the contract — it fails loud (rc=4,
-#     `goal-state:` diagnostic) rather than crashing mid-write on a `command not
-#     found`. The goal-pipeline fences already source dispatch.sh first; any
-#     standalone caller (and the tests) must do the same.
+#   - lib/dispatch.sh :: _uberdev_dispatch_prepare_tmp_target, uberdev_dispatch_one
+#     — both REQUIRED, both live in lib/dispatch.sh (NOT in this file).
+#       _uberdev_dispatch_prepare_tmp_target backs uberdev_goal_write_run_state +
+#         uberdev_goal_register_batch_pr (#155 TOCTOU-safe target-prep helper —
+#         #195 added the writer guard).
+#       uberdev_dispatch_one is the dispatch entry-point reached by the two
+#         internal dispatch helpers (_uberdev_goal_dispatch_review_pr +
+#         _uberdev_goal_dispatch_merge — #207 added the matching guards;
+#         same latent-crash class as #195).
+#     goal-state.sh does NOT source dispatch.sh itself (no stable relative path
+#     from a sourced lib + avoids a load-order cycle); the CALLER must source
+#     lib/dispatch.sh BEFORE invoking any of these functions. A `command -v`
+#     preflight at the top of each consumer enforces the contract — they fail
+#     loud (rc=4, `goal-state:` diagnostic) rather than crashing mid-call on a
+#     `command not found`. The goal-pipeline fences already source dispatch.sh
+#     first; any standalone caller (and the tests) must do the same.
 #   - discover.sh is sourced opportunistically (below) for stderr-isolation
 #     helpers, but no function names are required from it. The `gh_jq_or_jq` shim
 #     below is a local-file jq wrapper; the spec/plan named it after a discover.sh
@@ -1020,6 +1026,12 @@ _uberdev_goal_dispatch_review_pr() {
     printf 'goal-state: unsafe UBERDEV_GOAL_ID %s; refusing review-pr dispatch for PR #%s\n' "$goal_id" "$pr" >&2
     return 1
   }
+  # #207 — preflight lib/dispatch.sh; without it, a CNF leaks a phantom attempt
+  # to the counter TSV. rc=4 mirrors the writer + register_batch_pr precedent.
+  if ! command -v uberdev_dispatch_one >/dev/null 2>&1; then
+    printf 'goal-state: _uberdev_goal_dispatch_review_pr requires lib/dispatch.sh sourced first (missing uberdev_dispatch_one)\n' >&2
+    return 4
+  fi
   local current; current="$(_uberdev_goal_count_review_pr_attempts "$goal_id" "$pr")"
   local cap="${_UBERDEV_GOAL_MAX_REVIEW_PR_ATTEMPTS:-3}"
   if [ "$current" -ge "$cap" ]; then
@@ -1057,6 +1069,19 @@ _uberdev_goal_dispatch_review_pr() {
 _uberdev_goal_dispatch_merge() {
   local pr="$1"
   _uberdev_goal_validate_int "$pr" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  local goal_id="${UBERDEV_GOAL_ID:-unknown}"
+  # #156 — refuse a forged provenance id rather than pathing a counter TSV with it.
+  _uberdev_goal_validate_id "$goal_id" || {
+    printf 'goal-state: unsafe UBERDEV_GOAL_ID %s; refusing merge dispatch for PR #%s\n' "$goal_id" "$pr" >&2
+    return 1
+  }
+  # #207 — same dispatch.sh preflight as _uberdev_goal_dispatch_review_pr: a
+  # missing uberdev_dispatch_one would otherwise CNF after a phantom counter row.
+  if ! command -v uberdev_dispatch_one >/dev/null 2>&1; then
+    printf 'goal-state: _uberdev_goal_dispatch_merge requires lib/dispatch.sh sourced first (missing uberdev_dispatch_one)\n' >&2
+    return 4
+  fi
   local prompt_file
   # B5 — same rc-check pattern as _uberdev_goal_dispatch_review_pr above.
   # Without this, a silent mktemp failure (read-only /tmp, exhausted inode
@@ -1070,14 +1095,6 @@ _uberdev_goal_dispatch_merge() {
     return 1
   fi
   printf '/uberdev:merge %s\n' "$pr" > "$prompt_file"
-  # Increment per-PR attempt counter.
-  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
-  local goal_id="${UBERDEV_GOAL_ID:-unknown}"
-  # #156 — refuse a forged provenance id rather than pathing a counter TSV with it.
-  _uberdev_goal_validate_id "$goal_id" || {
-    printf 'goal-state: unsafe UBERDEV_GOAL_ID %s; refusing merge dispatch for PR #%s\n' "$goal_id" "$pr" >&2
-    return 1
-  }
   local current; current="$(_uberdev_goal_count_merge_attempts "$goal_id" "$pr")"
   local next=$(( current + 1 ))
   # #157 — fail closed: an unrecorded merge attempt would defeat the per-PR
