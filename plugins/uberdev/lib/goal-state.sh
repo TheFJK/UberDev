@@ -909,12 +909,18 @@ uberdev_goal_batch_unblock_wait_clear() {
     [ -n "$state" ] || continue
     [ "$state" = "HELD" ] || continue
     # Fetch PR body (capped at 64 KiB) and look for Blocks: #N.
-    local body blocking_issue
-    body="$(gh pr view "$pr" --json body --jq .body 2>/dev/null | head -c "${_UBERDEV_GOAL_BODY_CAP:-65536}")" || return 1
+    # F17 simplify-lens: reuse the centralized helpers
+    # _uberdev_goal_fetch_pr_body + _uberdev_goal_parse_blocks_line (same
+    # primitives used by sibling _uberdev_goal_check_unblock); the cap +
+    # ReDoS-safe anchored regex + numeric re-validation now flow from a
+    # single source of truth.
+    local body blocking_issue n
+    body="$(_uberdev_goal_fetch_pr_body "$pr")"
     blocking_issue=""
     while IFS= read -r line; do
-      if [[ "$line" =~ ^Blocks:\ \#([0-9]+)$ ]]; then
-        blocking_issue="${BASH_REMATCH[1]}"
+      n="$(_uberdev_goal_parse_blocks_line "$line")"
+      if [ -n "$n" ]; then
+        blocking_issue="$n"
         break
       fi
     done <<< "$body"
@@ -1201,13 +1207,18 @@ _uberdev_goal_rebase_collision_chain() {
   local merged_diff
   merged_diff="$(gh pr diff "$merged_pr" --name-only 2>/dev/null || true)"
   [ -n "$merged_diff" ] || return 0
+  # F17 simplify-lens: hoist the sort of $merged_diff above the inner loop;
+  # comm -12 cares only about set contents, not iteration count, so this
+  # saves one `sort -u` per remaining-PR iteration.
+  local merged_sorted
+  merged_sorted="$(printf '%s\n' "$merged_diff" | sort -u)"
   local pr
   while IFS= read -r pr; do
     [ -n "$pr" ] || continue
     [ "$pr" = "$merged_pr" ] && continue
     local pr_diff intersection
     pr_diff="$(gh pr diff "$pr" --name-only 2>/dev/null || true)"
-    intersection="$(comm -12 <(printf '%s\n' "$merged_diff" | sort -u) <(printf '%s\n' "$pr_diff" | sort -u))"
+    intersection="$(comm -12 <(printf '%s\n' "$merged_sorted") <(printf '%s\n' "$pr_diff" | sort -u))"
     if [ -n "$intersection" ]; then
       # Collision detected — refresh main and audit the transition.
       git fetch origin main 2>/dev/null || true
