@@ -325,6 +325,7 @@ EOF
   audit_log="$UBERDEV_TMPDIR/goal-$GOAL_ID.jsonl"
 
   # ---- POSITIVE case: elapsed = 65 ≥ 60 → fire (rc=0, audit emitted) ----
+  # Mock now = barrier_start_ts(1000) + 65 → elapsed=65, threshold=60 → FIRE
   _uberdev_goal_now_secs() { echo 1065; }
   uberdev_goal_barrier_breaker_check "$GOAL_ID" 60
   rc_fire=$?
@@ -337,6 +338,7 @@ EOF
   pre_neg_audit_lines="$(wc -l < "$audit_log" | tr -d ' ')"
 
   # ---- NEGATIVE case: elapsed = 30 < 60 → no fire (rc=1, no new audit) ----
+  # Mock now = barrier_start_ts(1000) + 30 → elapsed=30, threshold=60 → NO FIRE
   _uberdev_goal_now_secs() { echo 1030; }
   uberdev_goal_barrier_breaker_check "$GOAL_ID" 60
   rc_nofire=$?

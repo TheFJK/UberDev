@@ -903,7 +903,7 @@ uberdev_goal_barrier_breaker_check() {
   if [ "$elapsed" -ge "$timeout_s" ]; then
     local pending
     pending="$(awk -F'\t' '$4=="PENDING"{printf "%s,", $1}' \
-      "$tmpdir/goal-${goal_id}-batch-prs.tsv" 2>/dev/null \
+      "$tmpdir/goal-$goal_id-batch-prs.tsv" 2>/dev/null \
       | sed 's/,$//')"
     uberdev_goal_audit goal_circuit_breaker \
       "$(printf '{"reason":"stuck_loop","phase":"merge_barrier","elapsed_s":%s,"pending_prs":"%s"}' \
