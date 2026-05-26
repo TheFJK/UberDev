@@ -67,7 +67,6 @@ for f in "$TESTS_DIR"/*.test.sh; do
   # test fixtures (rare today, but the guard must be present on every
   # source line, not just one).
   while IFS=: read -r lineno line; do
-    [ -z "$lineno" ] && continue
     if printf '%s' "$line" | grep -qF -- "$GUARD_FRAGMENT"; then
       echo "  PASS  $(basename "$f"):$lineno carries the fail-loud guard"
       PASS=$((PASS + 1))
@@ -83,32 +82,6 @@ done
 
 if [ "$SAW_ANY_SOURCING_FILE" -eq 0 ]; then
   echo "  FAIL  no tests/*.test.sh files source _lib_assert_structural.sh — this drift guard would not detect a regression"
-  FAIL=$((FAIL + 1))
-fi
-
-echo
-echo "== A2: the literal FATAL message is uniform across all source sites =="
-# Cross-site consistency check. Even if every site has SOME exit-2 guard,
-# the message string must be the literal contract phrase so log-greppers
-# can pinpoint the failure mode without per-file dialects. Walks the same
-# glob to stay aligned with A1's discovery surface.
-NON_LITERAL_LINES=()
-for f in "$TESTS_DIR"/*.test.sh; do
-  while IFS= read -r srcline; do
-    [ -z "$srcline" ] && continue
-    if ! printf '%s' "$srcline" | grep -qF -- "$GUARD_FRAGMENT"; then
-      NON_LITERAL_LINES+=("$(basename "$f"): $srcline")
-    fi
-  done < <(grep -E -e "$SOURCE_RE" "$f" 2>/dev/null)
-done
-if [ "${#NON_LITERAL_LINES[@]}" -eq 0 ]; then
-  echo "  PASS  all source sites use the literal FATAL message"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL  one or more source sites diverge from the literal FATAL message:"
-  for nl in "${NON_LITERAL_LINES[@]}"; do
-    echo "        $nl"
-  done
   FAIL=$((FAIL + 1))
 fi
 
