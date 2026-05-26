@@ -1026,13 +1026,8 @@ _uberdev_goal_dispatch_review_pr() {
     printf 'goal-state: unsafe UBERDEV_GOAL_ID %s; refusing review-pr dispatch for PR #%s\n' "$goal_id" "$pr" >&2
     return 1
   }
-  # #207 — preflight the lib/dispatch.sh dependency. The dispatch entry-point
-  # uberdev_dispatch_one is sourced from lib/dispatch.sh; a caller that skipped
-  # that source would otherwise hit a bare `command not found` AFTER the counter
-  # TSV had already been appended (leaking a phantom attempt with no actual
-  # dispatch). Fail loud with the distinct dep-missing rc (matches the writer +
-  # register_batch_pr precedent at #195), BEFORE any counter read/write or
-  # mktemp, so no side effects or temp siblings leak on the missing-dep path.
+  # #207 — preflight lib/dispatch.sh; without it, a CNF leaks a phantom attempt
+  # to the counter TSV. rc=4 mirrors the writer + register_batch_pr precedent.
   if ! command -v uberdev_dispatch_one >/dev/null 2>&1; then
     printf 'goal-state: _uberdev_goal_dispatch_review_pr requires lib/dispatch.sh sourced first (missing uberdev_dispatch_one)\n' >&2
     return 4
@@ -1077,18 +1072,12 @@ _uberdev_goal_dispatch_merge() {
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
   local goal_id="${UBERDEV_GOAL_ID:-unknown}"
   # #156 — refuse a forged provenance id rather than pathing a counter TSV with it.
-  # Moved above the mktemp + prompt_file write (formerly below) so the id-validate
-  # rc=1 path no longer leaks a stray prompt file; #207's dispatch-dep preflight
-  # then slots in here too — uniform layout with _uberdev_goal_dispatch_review_pr.
   _uberdev_goal_validate_id "$goal_id" || {
     printf 'goal-state: unsafe UBERDEV_GOAL_ID %s; refusing merge dispatch for PR #%s\n' "$goal_id" "$pr" >&2
     return 1
   }
-  # #207 — preflight the lib/dispatch.sh dependency. Same rationale as the
-  # sibling helper _uberdev_goal_dispatch_review_pr: a missing uberdev_dispatch_one
-  # would otherwise CNF AFTER the per-PR counter TSV had already been appended
-  # (phantom attempt with no actual dispatch). Fail loud with rc=4 BEFORE any
-  # mktemp or counter write, so no side effects leak on the missing-dep path.
+  # #207 — same dispatch.sh preflight as _uberdev_goal_dispatch_review_pr: a
+  # missing uberdev_dispatch_one would otherwise CNF after a phantom counter row.
   if ! command -v uberdev_dispatch_one >/dev/null 2>&1; then
     printf 'goal-state: _uberdev_goal_dispatch_merge requires lib/dispatch.sh sourced first (missing uberdev_dispatch_one)\n' >&2
     return 4

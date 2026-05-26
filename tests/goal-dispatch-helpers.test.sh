@@ -2,19 +2,7 @@
 # tests/goal-dispatch-helpers.test.sh
 #
 # Behavioral coverage for the lib/dispatch.sh dependency guards in
-# lib/goal-state.sh's two dispatch helpers (issue #207):
-#   _uberdev_goal_dispatch_review_pr
-#   _uberdev_goal_dispatch_merge
-#
-# Both helpers call uberdev_dispatch_one — which lives in lib/dispatch.sh,
-# NOT in goal-state.sh — without any preflight. A caller that sources
-# goal-state.sh without dispatch.sh would otherwise hit a bare `command
-# not found` mid-dispatch. The guards must:
-#   - fail loud with rc=4 (matching the writer + register_batch_pr convention)
-#   - emit a diagnostic naming lib/dispatch.sh + the missing symbol
-#   - never let `command not found` leak through
-#   - run AFTER cheap arg validation (so bad-arg rcs stay at 1) but BEFORE
-#     mktemp (so no temp sibling leaks on the missing-dep path)
+# lib/goal-state.sh's two dispatch helpers (issue #207).
 #
 # Mirrors the #195 fresh-`bash -c` pattern in tests/goal-state-sidecar.test.sh.
 set -u
@@ -43,18 +31,10 @@ assert_eq() {
   fi
 }
 
-_t_tmpdir="$(mktemp -d 2>/dev/null || printf '/tmp/goal-disp-%s' "$$")"
-mkdir -p "$_t_tmpdir"
-UBERDEV_TMPDIR="$_t_tmpdir"
-export UBERDEV_TMPDIR
-trap 'rm -rf "$_t_tmpdir"' EXIT
-
-# ---------------------------------------------------------------------------
 # NEGATIVE: dispatch.sh withheld → both helpers must trip the preflight.
 # Valid pr + valid UBERDEV_GOAL_ID so the int + id validates pass and the
 # guard, not validation, is what trips. Counter-attempts TSV pre-seeded
 # empty so `_uberdev_goal_count_review_pr_attempts` returns 0 < cap.
-# ---------------------------------------------------------------------------
 
 echo "== #207: _uberdev_goal_dispatch_review_pr preflights its lib/dispatch.sh dependency =="
 g_dir_rpr="$(mktemp -d 2>/dev/null || printf '/tmp/goal-207-rpr-%s' "$$")"
@@ -116,13 +96,11 @@ mrg_stray="$(find "$g_dir_mrg" -maxdepth 1 -type f ! -name 'mrg-err.txt' 2>/dev/
 assert_eq "${mrg_stray:-none}" "none" "#207 mrg missing-dispatch: no stray prompt-file/temp sibling leaked"
 rm -rf "$g_dir_mrg"
 
-# ---------------------------------------------------------------------------
 # POSITIVE: with dispatch.sh sourced (so the symbol exists) AND a same-
 # session stub of uberdev_dispatch_one, both helpers must proceed past the
 # guard, run their counter-write + mktemp, and reach the dispatch call.
 # The stub records the call and returns 0 — we then assert the helper
 # itself returns 0 and the stub got the expected (pr, "small", file) shape.
-# ---------------------------------------------------------------------------
 
 echo "== #207: dispatch.sh sourced + uberdev_dispatch_one stub → both helpers reach the dispatch =="
 g_dir_pos="$(mktemp -d 2>/dev/null || printf '/tmp/goal-207-pos-%s' "$$")"
@@ -158,9 +136,7 @@ case "$pos_out" in
 esac
 rm -rf "$g_dir_pos"
 
-# ---------------------------------------------------------------------------
 # Summary
-# ---------------------------------------------------------------------------
 echo
 echo "== Summary =="
 printf 'PASS=%d FAIL=%d\n' "$PASS" "$FAIL"
