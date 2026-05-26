@@ -1179,7 +1179,7 @@ _uberdev_goal_rebase_collision_chain() {
       # Collision detected — refresh main and audit the transition.
       git fetch origin main 2>/dev/null || true
       uberdev_goal_audit goal_pr_transition \
-        "$(printf '{"pr":%s,"from":"green","to":"rebasing_for_collision","collision_files":"%s"}' \
+        "$(printf '{"pr":%s,"from":"green","collision_files":"%s"}' \
             "$pr" "$(printf '%s' "$intersection" | tr '\n' ',' | sed 's/,$//')")" 2>/dev/null || true
       # The actual rebase is delegated to the existing /merge rebase handler
       # on the next iteration; the audit + pre-fetched main is the contract.

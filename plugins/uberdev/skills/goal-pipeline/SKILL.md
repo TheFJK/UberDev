@@ -248,18 +248,14 @@ for ISSUE_NUM in "${queue[@]}"; do
     uberdev_goal_issue_state_transition "$GOAL_ID" "$ISSUE_NUM" input solving
     active_issues+=("$ISSUE_NUM")
     dispatched_this_cycle=$(( dispatched_this_cycle + 1 ))
-    # #211 — register this issue in the batch-PR registry so Phase 2's
-    # barrier (uberdev_goal_batch_all_terminal) accounts for it. The PR
-    # number is NOT yet known at dispatch-time (the solver pushes the PR
-    # later); pr_number resolves at the first Phase 2 step 2c snapshot via
-    # uberdev_goal_find_pr_for_issue. Pass the empty pr_number here so the
-    # registry row exists keyed on issue; Phase 2 step 2c re-registers with
-    # the PR number on first visibility. Best-effort: warn-and-continue on
-    # rc != 0 so a transient registry write doesn't fail the whole cycle.
-    pr_number=""
-    uberdev_goal_register_batch_pr "$GOAL_ID" "$pr_number" "$ISSUE_NUM" \
-      || printf 'goal: register_batch_pr failed for PR=%s issue=%s (rc=%s); barrier may be incomplete this cycle\n' \
-         "$pr_number" "$ISSUE_NUM" "$?" >&2
+    # #211 — Note: registration is deferred to Phase 2 step 2a once the PR
+    # number resolves. uberdev_goal_register_batch_pr requires a valid
+    # integer PR number (its _uberdev_goal_validate_int gate rejects empty
+    # strings), and the PR doesn't exist yet at dispatch-time (the solver
+    # pushes the PR later). Phase 2 step 2a calls
+    # uberdev_goal_find_pr_for_issue and, on first non-empty resolution,
+    # registers the PR into the batch-PR registry behind an idempotent
+    # TSV-lookup guard so the barrier accounts for it.
   else
     rc=$?
     # D12 — claim_collision is a soft fail: another dispatcher (a teammate's
@@ -345,6 +341,19 @@ while true; do
     case "$istate" in pr-pushed|resolved|failed) continue ;; esac
     pr_num="$(uberdev_goal_find_pr_for_issue "$issue")"
     if [ -n "$pr_num" ]; then
+      # #211 — register the PR into the batch-PR registry once it's resolved.
+      # Registration is deferred from Phase 1 (no PR number at dispatch-time)
+      # to here, the first point at which uberdev_goal_find_pr_for_issue
+      # returns a non-empty value. Idempotent guard: skip if a row for this
+      # PR already exists in the TSV, so subsequent passes (and repeat 2a
+      # resolutions in the same cycle) don't double-write. Best-effort:
+      # warn-and-continue on rc != 0 — a transient registry write must not
+      # fail the watch loop.
+      batch_tsv="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}/goal-${GOAL_ID}-batch-prs.tsv"
+      if [ ! -f "$batch_tsv" ] || ! awk -F'\t' -v p="$pr_num" '$1==p{found=1; exit} END{exit !found}' "$batch_tsv"; then
+        uberdev_goal_register_batch_pr "$GOAL_ID" "$pr_num" "$issue" \
+          || printf 'goal: register_batch_pr deferred-call failed for PR=%s issue=%s (rc=%s)\n' "$pr_num" "$issue" "$?" >&2
+      fi
       uberdev_goal_issue_state_transition "$GOAL_ID" "$issue" solving pr-pushed
       uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" dispatched pushed-reviewing
       if uberdev_goal_pr_is_merged "$pr_num"; then
