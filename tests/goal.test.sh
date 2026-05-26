@@ -232,11 +232,9 @@ assert_grep "$GOAL_LIB" '_UBERDEV_GOAL_BODY_CAP|head -c 65536'           "G18.bo
 
 echo
 echo "== G19: lib/goal-state.sh shape =="
-# Public function names (15 — uberdev_goal_build_unblock_graph removed
-# in the post-impl-review B5 cleanup; the four `*_held_audit` /
-# `_by_pr` / `_get_pr_state` helpers added by the issue #159 + #160
-# convergence-loop fix supply the held-PR re-review poll loop's
-# bookkeeping surface).
+# Public function names (21 — 18 prior + 3 new barrier helpers added by issue #211:
+# uberdev_goal_register_batch_pr, uberdev_goal_batch_all_terminal,
+# uberdev_goal_batch_unblock_wait_clear).
 for fn in uberdev_goal_state_init uberdev_goal_pr_state_transition uberdev_goal_issue_state_transition \
           uberdev_goal_read_trust_signal uberdev_goal_check_fingerprint_repeat uberdev_goal_should_automerge \
           uberdev_goal_audit uberdev_goal_locate_review_pr_audit \
@@ -244,10 +242,13 @@ for fn in uberdev_goal_state_init uberdev_goal_pr_state_transition uberdev_goal_
           uberdev_goal_get_pr_state uberdev_goal_record_held_audit uberdev_goal_get_last_held_audit \
           uberdev_goal_find_pr_for_issue uberdev_goal_pr_state_gh uberdev_goal_pr_is_merged \
           uberdev_goal_agent_busy_for_issue \
-          uberdev_goal_list_prs_in_state uberdev_goal_read_merge_result; do
+          uberdev_goal_list_prs_in_state uberdev_goal_read_merge_result \
+          uberdev_goal_register_batch_pr \
+          uberdev_goal_batch_all_terminal \
+          uberdev_goal_batch_unblock_wait_clear; do
   assert_grep "$GOAL_LIB" "^${fn}\\(\\)" "G19.public.${fn}"
 done
-# Internal function names (13 underscore-prefixed helpers — `_uberdev_goal_validate_id`
+# Internal function names (16 underscore-prefixed helpers — `_uberdev_goal_validate_id`
 # (#156 goal_id path-traversal guard) and `_uberdev_goal_append` (#157
 # unwritable-tmpdir checked-append) add the slug-validation + write-surfacing
 # primitives; the prior `_persist_fp` short-alias forwarder was dropped
@@ -259,7 +260,10 @@ for fn in _uberdev_goal_validate_int _uberdev_goal_validate_id _uberdev_goal_app
           _uberdev_goal_count_merge_attempts _uberdev_goal_count_review_pr_attempts \
           _uberdev_goal_pr_state_machine_valid _uberdev_goal_now_secs \
           _uberdev_goal_persist_fp _uberdev_goal_dispatch_review_pr _uberdev_goal_dispatch_merge \
-          _uberdev_goal_check_unblock; do
+          _uberdev_goal_check_unblock \
+          _uberdev_goal_set_batch_terminal_state \
+          _uberdev_goal_batch_green_prs_ordered \
+          _uberdev_goal_rebase_collision_chain; do
   assert_grep "$GOAL_LIB" "^${fn}\\(\\)" "G19.internal.${fn}"
 done
 # Idempotency guard against double-sourcing.
@@ -339,6 +343,86 @@ assert_grep "$GOAL_SKILL" 'goal_circuit_breaker.*queue_empty_not_converged'     
 # left can converge cleanly instead of spinning until stuck_loop.
 assert_grep "$GOAL_SKILL" 'list_prs_in_state.*yellow-held'                         "G22.terminal-includes-yellow-held"
 assert_grep "$GOAL_SKILL" 'list_prs_in_state.*red-held'                            "G22.terminal-includes-red-held"
+
+echo
+echo "== G24: --max-parallel cap config-read + dry-run surface (#211 AC1) =="
+# Phase 0 step 3 MUST read goal.max_parallel via uberdev_read_int_in_range
+# with the verbatim default + range from the spec (default 3, [1,10]).
+assert_grep "$GOAL_SKILL" 'uberdev_read_int_in_range goal\.max_parallel UBERDEV_GOAL_MAX_PARALLEL 1 10' \
+                                                                         "G24.config-read-call-shape"
+# Default constant lives in the Constants block.
+assert_grep "$GOAL_SKILL" '_UBERDEV_GOAL_DEFAULT_MAX_PARALLEL=3'         "G24.default-constant"
+# Dry-run preview surfaces MAX_PARALLEL.
+assert_grep "$GOAL_SKILL" 'MAX_PARALLEL'                                  "G24.dry-run-mentions-cap"
+
+echo
+echo "== G25: Phase 1 dispatch loop honours MAX_PARALLEL cap (#211 AC2) =="
+# The cap counter and rollover array MUST appear inside the Phase 1 dispatch.
+assert_grep "$GOAL_SKILL" 'dispatched_this_cycle'                         "G25.cap-counter-var"
+assert_grep "$GOAL_SKILL" 'remaining_queue'                               "G25.rollover-array-var"
+assert_grep "$GOAL_SKILL" '>= MAX_PARALLEL'                               "G25.cap-comparison"
+# The register-batch-pr call is the SSOT side-effect tying dispatch to the registry.
+assert_grep "$GOAL_SKILL" 'uberdev_goal_register_batch_pr'                "G25.register-batch-pr-call"
+
+echo
+echo "== G26: Phase 2 step 2c uses batch-all-terminal + unblock-wait predicates (#211 AC3, AC5) =="
+assert_grep "$GOAL_SKILL" 'uberdev_goal_batch_all_terminal'               "G26.all-terminal-predicate"
+assert_grep "$GOAL_SKILL" 'uberdev_goal_batch_unblock_wait_clear'         "G26.unblock-wait-predicate"
+# Sequential green-PR iteration ordering helper.
+assert_grep "$GOAL_SKILL" '_uberdev_goal_batch_green_prs_ordered'         "G26.green-prs-ordered"
+# Collision-chain rebase helper.
+assert_grep "$GOAL_SKILL" '_uberdev_goal_rebase_collision_chain'          "G26.collision-chain"
+
+echo
+echo "== G27: --max-parallel range [1,10] enforced via uberdev_read_int_in_range (#211 AC1 boundary) =="
+# The range arguments 1 10 appear verbatim in the config-read call (G24 covers shape;
+# G27 doubles-down by asserting the literal min/max so an editor can't silently widen).
+assert_grep "$GOAL_SKILL" 'goal\.max_parallel UBERDEV_GOAL_MAX_PARALLEL 1 10' \
+                                                                         "G27.literal-range-1-10"
+# And the symmetric flag-parse line for --max-parallel=N. assert_grep already
+# uses `grep -qE -e "$pattern"`, so the leading dashes in the pattern are safe
+# to pass directly without a `--` separator (which would otherwise be consumed
+# as the positional pattern arg).
+assert_grep "$GOAL_SKILL" '\-\-max-parallel=\*'                           "G27.flag-parse-pattern"
+
+echo
+echo "== G28: Barrier wall-clock breaker maps to stuck_loop (#211 AC6) =="
+# Barrier-timeout config-read call shape (default 14400 = 4h; range [60, 86400]).
+assert_grep "$GOAL_SKILL" 'uberdev_read_int_in_range goal\.barrier_timeout_s UBERDEV_GOAL_BARRIER_TIMEOUT_S 60 86400' \
+                                                                         "G28.barrier-config-read-call-shape"
+assert_grep "$GOAL_SKILL" '_UBERDEV_GOAL_DEFAULT_BARRIER_TIMEOUT_S=14400' "G28.barrier-default-constant"
+# Phase 2 step 2c iteration computes elapsed against barrier_start_ts and
+# escalates to the closed-enum reason stuck_loop — no new reason added.
+assert_grep "$GOAL_SKILL" 'BARRIER_TIMEOUT_S'                             "G28.barrier-var-referenced"
+assert_grep "$GOAL_SKILL" 'barrier_start_ts'                              "G28.barrier-start-ts-referenced"
+# The audit event reuses stuck_loop verbatim (closed enum).
+assert_grep "$GOAL_SKILL" 'reason.*stuck_loop\|stuck_loop.*reason\|"stuck_loop"' \
+                                                                         "G28.reuses-stuck-loop-reason"
+# And GOAL_CIRCUIT_BREAKER_REASONS still does NOT contain merge_barrier_timeout.
+assert_no_grep "$GOAL_SKILL" 'merge_barrier_timeout'                      "G28.no-new-reason-merge-barrier-timeout"
+
+echo
+echo "== G29: Manifest-collision sequential merge (#211 AC4) =="
+# The collision-chain helper uses `git diff --name-only` for path-set intersection.
+assert_grep "$GOAL_LIB" 'git diff --name-only'                            "G29.git-diff-name-only-in-lib"
+# PR-number-ascending ordering: the green-PRs-ordered helper must sort numerically.
+assert_grep "$GOAL_LIB" 'sort -n'                                         "G29.sort-numeric-pr-ordering"
+
+echo
+echo "== G30: Unblock-wait dual condition (issue closed + review-pr:green label) (#211 AC5) =="
+# The unblock-wait predicate in lib/goal-state.sh must reference BOTH conditions.
+assert_grep "$GOAL_LIB" '^uberdev_goal_batch_unblock_wait_clear\(\)'      "G30.predicate-defined"
+assert_grep "$GOAL_LIB" 'review-pr:green'                                 "G30.green-trust-label"
+# Stale/missing label data treated as "still waiting" (rc 1) — defensive default arm.
+assert_grep "$GOAL_LIB" 'closed'                                          "G30.closed-issue-check"
+
+echo
+echo "== G31: Phase 2 step 2e updates batch registry on held → green transitions (#211 AC3/AC5 wiring) =="
+# Phase 2e MUST call _uberdev_goal_set_batch_terminal_state after recording a
+# held-PR's green transition — otherwise the barrier never sees the update.
+assert_grep "$GOAL_SKILL" '_uberdev_goal_set_batch_terminal_state'        "G31.set-terminal-state-call"
+# The rebase helper is called per just-merged PR in the green-set.
+assert_grep "$GOAL_SKILL" '_uberdev_goal_rebase_collision_chain'          "G31.rebase-chain-in-phase2c"
 
 echo
 echo "== Behavioral tests (B12 — sourced-function exercises) =="
