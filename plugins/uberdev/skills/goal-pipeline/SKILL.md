@@ -29,7 +29,7 @@ _UBERDEV_GOAL_POLL_SECS=60
 _UBERDEV_GOAL_STUCK_SECS=14400         # 4h
 _UBERDEV_GOAL_MAX_MERGE_ATTEMPTS=3
 _UBERDEV_GOAL_SOLVE_TIMEOUT=9000       # 150m — no PR AND no live agent => issue failed (issue #180)
-_UBERDEV_GOAL_REVIEW_GRACE=1800        # 30m — wait for the leaf solver's OWN /review-pr verdict before dispatching ours (issue #180)
+_UBERDEV_GOAL_DEFAULT_REVIEW_GRACE_SECS=3600   # 60m default — overridable via goal.review_grace_secs / UBERDEV_GOAL_REVIEW_GRACE_SECS / --review-grace-secs (issue #220, AC ❶)
 _UBERDEV_GOAL_MERGE_TIMEOUT=3600       # 60m — merging w/o MERGED AND agent idle => back to green for retry (issue #180)
 _UBERDEV_GOAL_BODY_CAP=65536           # 64 KiB
 FINDING_LABEL='review-pr-finding'
@@ -71,17 +71,19 @@ Notes on the enums:
    max_cycles_cli=""
    max_parallel_cli=""
    barrier_timeout_cli=""
+   review_grace_cli=""
    only_mine=0
    dry_run=0
    backend_cli=""
    for tok in $ARGUMENTS; do
      case "$tok" in
-       --max-cycles=*)      max_cycles_cli="${tok#--max-cycles=}" ;;
-       --max-parallel=*)    max_parallel_cli="${tok#--max-parallel=}" ;;
-       --barrier-timeout=*) barrier_timeout_cli="${tok#--barrier-timeout=}" ;;
-       --only-mine)         only_mine=1 ;;
-       --dry-run)           dry_run=1 ;;
-       --backend=*)         backend_cli="${tok#--backend=}" ;;
+       --max-cycles=*)         max_cycles_cli="${tok#--max-cycles=}" ;;
+       --max-parallel=*)       max_parallel_cli="${tok#--max-parallel=}" ;;
+       --barrier-timeout=*)    barrier_timeout_cli="${tok#--barrier-timeout=}" ;;
+       --review-grace-secs=*)  review_grace_cli="${tok#--review-grace-secs=}" ;;
+       --only-mine)            only_mine=1 ;;
+       --dry-run)              dry_run=1 ;;
+       --backend=*)            backend_cli="${tok#--backend=}" ;;
        *) [[ "$tok" =~ ^[0-9]+$ ]] && queue+=("$tok") ;;
      esac
    done
@@ -111,6 +113,10 @@ Notes on the enums:
    BARRIER_TIMEOUT_S="$(UBERDEV_GOAL_BARRIER_TIMEOUT_S="${barrier_timeout_cli:-${UBERDEV_GOAL_BARRIER_TIMEOUT_S:-}}" \
      uberdev_read_int_in_range goal.barrier_timeout_s UBERDEV_GOAL_BARRIER_TIMEOUT_S 60 86400 \
      "$_UBERDEV_GOAL_DEFAULT_BARRIER_TIMEOUT_S")"
+
+   REVIEW_GRACE_SECS="$(UBERDEV_GOAL_REVIEW_GRACE_SECS="${review_grace_cli:-${UBERDEV_GOAL_REVIEW_GRACE_SECS:-}}" \
+     uberdev_read_int_in_range goal.review_grace_secs UBERDEV_GOAL_REVIEW_GRACE_SECS 60 86400 \
+     "$_UBERDEV_GOAL_DEFAULT_REVIEW_GRACE_SECS")"
    ```
 
 4. **Source `lib/dispatch.sh`; call `uberdev_dispatch_preflight`** → sets `UBERDEV_RESOLVED_BACKEND` once for the whole run (D15). The resolved backend is forwarded to every `/turbo`, `/merge`, and `/review-pr` child dispatch in this run; it is NEVER re-resolved per cycle.
@@ -315,12 +321,20 @@ uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8
 gh_err="$(mktemp)"
 findings_err=""
 trap 'rm -f "$gh_err" "$findings_err"' EXIT
+# Issue #220 — INT/TERM are SEPARATE signal slots from EXIT. The existing EXIT
+# trap above is NOT overwritten; bash supports one handler per signal slot.
+# Reaper runs on Ctrl-C (130) and external kill -TERM (143). EXIT keeps tempfile
+# cleanup running on every other exit path. NEVER chain reaper into EXIT — that
+# would force the reaper on graceful convergence (slow, wasteful).
+trap '_uberdev_goal_reap_zombies; exit 130' INT
+trap '_uberdev_goal_reap_zombies; exit 143' TERM
 
 while true; do
   now="$(date +%s)"
   if (( now - watch_start >= _UBERDEV_GOAL_STUCK_SECS )); then
     uberdev_goal_audit goal_circuit_breaker \
       "{\"reason\":\"stuck_loop\",\"watch_secs\":$((now-watch_start))}"
+    _uberdev_goal_reap_zombies || true
     print_summary "$cycle"
     exit 1
   fi
@@ -388,7 +402,7 @@ while true; do
   # pushing and frequently goes idle in that window, so "agent idle ⇒ review
   # done" is false (keying re-review on liveness fired 3 redundant reviews in
   # 4 min and prematurely red-held a PR whose GREEN verdict had not landed).
-  # Instead wait _UBERDEV_GOAL_REVIEW_GRACE for the leaf's verdict, re-reading
+  # Instead wait REVIEW_GRACE_SECS for the leaf's verdict, re-reading
   # the verdict JSON every poll — it advances the instant the verdict lands,
   # with zero redundant reviews on the happy path; only after the grace lapses
   # do we dispatch our own /review-pr (bounded ×3).
@@ -424,18 +438,57 @@ while true; do
         fi
         ;;
       stale|missing)
-        # No verdict yet. Wait REVIEW_GRACE for the leaf's OWN /review-pr before
-        # dispatching ours. seen_ts = the FIRST pushed-reviewing transition for
-        # this PR (durable in the pr-states TSV). D17: never assume GREEN.
-        seen_ts="$(awk -v p="$pr_num" '$1==p && $2=="pushed-reviewing" && !t{t=$3} END{print t+0}' \
-          "$UBERDEV_TMPDIR/goal-$GOAL_ID-pr-states.tsv" 2>/dev/null)"
-        if [ "$(( now - seen_ts ))" -lt "$_UBERDEV_GOAL_REVIEW_GRACE" ]; then
-          any_active=1   # still waiting for the leaf's own review verdict
+        # No verdict yet. Cascade — marker → grace → in-flight → stuck → dispatch
+        # (issue #220, Components 3.2-3.4). Order is load-bearing: each probe
+        # short-circuits before the next, so the stuck-on-dialog circuit breaker
+        # only fires when every benign explanation (marker present, grace not
+        # lapsed, /review-pr legitimately in flight) is ruled out. seen_ts comes
+        # from the pr-states TSV (FIRST pushed-reviewing transition for this PR).
+        # D17: never assume GREEN.
+        seen_ts=$(awk -F'\t' -v p="$pr_num" '$1==p{print $3}' \
+          "$UBERDEV_TMPDIR/goal-$GOAL_ID-pr-states.tsv" 2>/dev/null)
+        # Marker probe (Component 3.2)
+        if _uberdev_goal_locked_marker_for_pr_fresh "$pr_num" "$REVIEW_GRACE_SECS"; then
+          any_active=1
+          uberdev_goal_audit goal_review_grace \
+            "{\"goal_id\":\"$GOAL_ID\",\"pr\":$pr_num,\"note\":\"marker_present\"}"
+        elif [ "$(( now - seen_ts ))" -lt "$REVIEW_GRACE_SECS" ]; then
+          any_active=1
+        # In-flight probe (Component 3.3)
+        elif uberdev_goal_review_pr_in_flight "$pr_num"; then
+          any_active=1
+          uberdev_goal_audit goal_review_pr_deferred \
+            "{\"goal_id\":\"$GOAL_ID\",\"pr\":$pr_num,\"reason\":\"in_flight\",\"in_flight_count\":1}"
+        # Stuck-on-dialog probe (Component 3.4) — circuit-breaker fires HERE
+        elif _uberdev_goal_any_attempt_stuck "$pr_num"; then
+          _stuck_pid=""
+          _stuck_status=""
+          _stuck_last_activity=""
+          _batch_tsv="$UBERDEV_TMPDIR/goal-$GOAL_ID-batch-prs.tsv"
+          if [ -f "$_batch_tsv" ]; then
+            while IFS=$'\t' read -r _row_pr _issue _ts _state; do
+              [ "$_row_pr" = "$pr_num" ] || continue
+              _uberdev_goal_validate_int "$_issue" || continue
+              _status_file="$UBERDEV_TMPDIR/solve-bg-status-$_issue.json"
+              _uberdev_dispatch_tmp_target_safe "$_status_file" || continue
+              _stuck_pid="$(jq -r '.pid // empty' < "$_status_file" 2>/dev/null)" || continue
+              _uberdev_goal_validate_int "$_stuck_pid" && break
+            done < "$_batch_tsv"
+          fi
+          if [ -n "$_stuck_pid" ]; then
+            _sample="$(claude agents --json 2>/dev/null | jq -r --argjson pid "$_stuck_pid" \
+              '.[]? | select(.pid? == $pid) | "\(.status // "")\t\(.lastActivityAt // "")"' 2>/dev/null || echo $'\t')"
+            _stuck_status="${_sample%%$'\t'*}"
+            _stuck_last_activity="${_sample##*$'\t'}"
+          fi
+          uberdev_goal_audit goal_circuit_breaker \
+            "{\"reason\":\"agent_stuck_on_dialog\",\"pid\":${_stuck_pid:-0},\"pr\":$pr_num,\"status\":\"$_stuck_status\",\"lastActivityAt\":\"$_stuck_last_activity\"}"
+          CIRCUIT_BREAKER_HALT="agent_stuck_on_dialog"
+          uberdev_goal_write_run_state || true
+          _uberdev_goal_reap_zombies || true
+          print_summary "$cycle"
+          exit 1
         else
-          # Grace lapsed — dispatch our own /review-pr. B3 bound:
-          # _uberdev_goal_dispatch_review_pr caps at
-          # ${_UBERDEV_GOAL_MAX_REVIEW_PR_ATTEMPTS:-3} dispatches per PR across
-          # the whole run (rc=0 + stderr warning when exceeded; NOT a breaker).
           _uberdev_goal_dispatch_review_pr "$pr_num"
           any_active=1
         fi
@@ -500,6 +553,14 @@ while true; do
         uberdev_goal_pr_state_transition "$GOAL_ID" "$pr" green merging
         any_active=1
         continue
+      fi
+      # Phase 2c in-flight gate (issue #220, Component 3.3) — never dispatch
+      # /merge while the same PR has a /review-pr still in flight; defer one
+      # poll tick. Emits goal_merge_deferred so the audit reflects the back-off.
+      if uberdev_goal_review_pr_in_flight "$pr"; then
+        uberdev_goal_audit goal_merge_deferred \
+          "{\"goal_id\":\"$GOAL_ID\",\"pr\":$pr,\"reason\":\"review_in_flight\",\"in_flight_count\":1}"
+        continue   # next poll tick re-checks
       fi
       if uberdev_goal_should_automerge "$GOAL_ID" "$pr"; then
         if _uberdev_goal_dispatch_merge "$pr"; then
@@ -568,6 +629,7 @@ while true; do
     if [ "$pr_state" = "CLOSED" ]; then
       uberdev_goal_audit goal_circuit_breaker \
         "{\"reason\":\"merge_failed\",\"pr\":$pr,\"detail\":\"closed\"}"
+      _uberdev_goal_reap_zombies || true
       print_summary "$cycle"
       exit 1
     fi
@@ -581,6 +643,7 @@ while true; do
       conflict|hook_failed)
         uberdev_goal_audit goal_circuit_breaker \
           "{\"reason\":\"merge_failed\",\"pr\":$pr,\"result\":\"$result\"}"
+        _uberdev_goal_reap_zombies || true
         print_summary "$cycle"
         exit 1
         ;;
@@ -611,6 +674,7 @@ while true; do
         # drift — halt loudly rather than leave the PR stuck in `merging`.
         uberdev_goal_audit goal_circuit_breaker \
           "{\"reason\":\"unknown_merge_result\",\"pr\":$pr,\"result\":\"$result\"}"
+        _uberdev_goal_reap_zombies || true
         print_summary "$cycle"
         exit 1
         ;;
@@ -707,6 +771,8 @@ while true; do
 done
 ```
 
+> **PID-stash targeting model (issue #220).** `$UBERDEV_TMPDIR/solve-bg-status-<ISSUE>.json` is a single-slot PID stash per issue — it holds the PID of the most-recently-dispatched agent for that issue, and successive dispatches overwrite the prior PID. The stash is populated by `_uberdev_goal_dispatch_*` helpers (dispatch.sh:529-531) at every dispatch, so the slot holds: during Phase 1, the `/turbo` solver PID; during Phase 2b stale|missing re-dispatch, the `/review-pr` PID (overwrites the solver PID — the prior `/turbo` solver should have exited by the time Phase 2 starts polling); during Phase 2c, the `/merge` PID. The reaper therefore kills whichever spawn is currently in flight for that issue, which is the intended behaviour — only ONE spawn per issue is alive at any instant (the single-slot constraint is enforced by Component 3.3's in-flight gate). The stuck-on-dialog detector reads from the same slot for the same reason.
+
 Why GitHub + the file-based verdict instead of agent stdout (issue #180): on Claude Code CLI 2.1.150 `claude --bg` detaches in ~4s and writes only a launch banner (`backgrounded · <id>`) to the captured `solve-bg-stdout-N.log` — the agent's real transcript goes to the detached session (`claude logs <id>`). So the old completion probes (`backgrounded · ` as a "terminal" marker; `pushed PR #N`, which has zero producers; `merge-bg-stdout-<pr>.log`, which is never written) could never reflect real state. The version-independent signals are: PR existence/number via `gh pr list --json number,closingIssuesReferences,headRefName` (every solver PR carries a `Closes #N` link and a `feat/N-` head), merge completion via `gh pr view <pr> --json state == MERGED`, and the trust verdict via the existing file-based locator (`uberdev_goal_locate_review_pr_audit_by_pr`) + `uberdev_goal_read_trust_signal`. Solver liveness, used only to distinguish "still working" from "died" (never to gate review-readiness), is `claude agents --json` filtered by cwd + status.
 
 ## Phase 3 — Collect Next Queue
@@ -758,6 +824,7 @@ if [ "$only_mine" = "1" ]; then
   if [ "$GH_USER_RC" -ne 0 ] || [ -z "$GH_USER" ]; then
     uberdev_goal_audit goal_circuit_breaker \
       "{\"reason\":\"gh_api_failed\",\"step\":\"phase3_gh_api_user\",\"exit_code\":$GH_USER_RC}"
+    _uberdev_goal_reap_zombies || true
     print_summary "$cycle"
     exit 1
   fi
@@ -783,6 +850,7 @@ gh_rc=$?
 if [ "$gh_rc" -ne 0 ]; then
   uberdev_goal_audit goal_circuit_breaker \
     "{\"reason\":\"gh_api_failed\",\"step\":\"phase3_issue_list\",\"exit_code\":$gh_rc}"
+  _uberdev_goal_reap_zombies || true
   print_summary "$cycle"
   exit 1
 fi
@@ -826,6 +894,7 @@ for issue in "${new_candidates[@]}"; do
     # finding again. Halt non-convergence: re-running won't make it go away.
     uberdev_goal_audit goal_circuit_breaker \
       "{\"reason\":\"nonconvergence\",\"issue\":$issue,\"fingerprint\":\"$fp\"}"
+    _uberdev_goal_reap_zombies || true
     print_summary "$cycle"
     exit 1
   fi
@@ -853,6 +922,7 @@ uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8
 if [ "$cycle" -ge "$MAX_CYCLES" ] && [ "${#new_candidates[@]}" -gt 0 ]; then
   uberdev_goal_audit goal_circuit_breaker \
     "{\"reason\":\"max_cycles\",\"cycle\":$cycle,\"max\":$MAX_CYCLES,\"queued\":${#new_candidates[@]}}"
+  _uberdev_goal_reap_zombies || true
   print_summary "$cycle"
   exit 1
 fi
@@ -884,13 +954,15 @@ fi
 if [ "${#new_candidates[@]}" = "0" ] && [ "$terminal_count" != "$all_pr_count" ]; then
   uberdev_goal_audit goal_circuit_breaker \
     "{\"reason\":\"queue_empty_not_converged\",\"cycle\":$cycle,\"all_prs\":$all_pr_count,\"terminal\":$terminal_count}"
+  _uberdev_goal_reap_zombies || true
   print_summary "$cycle"
   exit 1
 fi
 
+_rolled_over=${#queue[@]}             # Phase-1 carry-over count BEFORE merge (issue #220, AC ❹)
 uberdev_goal_audit goal_cycle_completed \
-  "{\"cycle\":$cycle,\"new_candidates\":${#new_candidates[@]},\"overflow_count\":${overflow_count:-0}}"
-queue=("${new_candidates[@]}")
+  "{\"cycle\":$cycle,\"new_candidates\":${#new_candidates[@]},\"overflow_count\":${overflow_count:-0},\"rolled_over\":$_rolled_over}"
+queue=("${queue[@]}" "${new_candidates[@]}")
 cycle=$(( cycle + 1 ))
 # Q4 — reset per-cycle accumulators before looping to Phase 1 (overflow_count
 # is per-cycle; overflow_detected gates the per-cycle truncation above).
