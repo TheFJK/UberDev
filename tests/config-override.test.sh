@@ -490,6 +490,37 @@ EOF
   || fail "I7c: coexistence with deprecated keys broken"
 
 echo
+echo "== I8: goal-pipeline reads goal.max_parallel + goal.barrier_timeout_s via uberdev_read_int_in_range (#211 AC1) =="
+# The verbatim call shape is the test surface: an editor cannot widen the
+# range or drop the default without tripping these greps.
+GOAL_SKILL_PATH="$REPO_ROOT/plugins/uberdev/skills/goal-pipeline/SKILL.md"
+
+assert_grep_in "$GOAL_SKILL_PATH" \
+  'uberdev_read_int_in_range goal\.max_parallel UBERDEV_GOAL_MAX_PARALLEL 1 10' \
+  "I8.max-parallel-call-shape"
+assert_grep_in "$GOAL_SKILL_PATH" \
+  '_UBERDEV_GOAL_DEFAULT_MAX_PARALLEL=3' \
+  "I8.max-parallel-default-constant"
+
+assert_grep_in "$GOAL_SKILL_PATH" \
+  'uberdev_read_int_in_range goal\.barrier_timeout_s UBERDEV_GOAL_BARRIER_TIMEOUT_S 60 86400' \
+  "I8.barrier-timeout-call-shape"
+assert_grep_in "$GOAL_SKILL_PATH" \
+  '_UBERDEV_GOAL_DEFAULT_BARRIER_TIMEOUT_S=14400' \
+  "I8.barrier-timeout-default-constant"
+
+# Env-precedence pattern: the verbatim UBERDEV_GOAL_*=${*_cli:-${UBERDEV_GOAL_*:-}} guard
+# is the same shape Phase 0 uses for goal.max_cycles (line ~98) — a regression that
+# silently drops the CLI flag in favor of the env var would break /goal --max-parallel=N.
+assert_grep_in "$GOAL_SKILL_PATH" \
+  'UBERDEV_GOAL_MAX_PARALLEL="\$\{max_parallel_cli:-\$\{UBERDEV_GOAL_MAX_PARALLEL:-\}\}"' \
+  "I8.max-parallel-cli-env-precedence"
+assert_grep_in "$GOAL_SKILL_PATH" \
+  'UBERDEV_GOAL_BARRIER_TIMEOUT_S="\$\{barrier_timeout_cli:-\$\{UBERDEV_GOAL_BARRIER_TIMEOUT_S:-\}\}"' \
+  "I8.barrier-timeout-cli-env-precedence"
+
+
+echo
 echo "== U9: auto_review_on_merge config key (#89) =="
 
 # U9.1: default — neither env nor config sets the key -> 'false'
