@@ -743,19 +743,34 @@ uberdev_goal_review_pr_in_flight() {
 
 # Field probe: lastActivityAt absent (claude agents --json on CLI 2.1.150 exposes
 # only pid/cwd/kind/startedAt/sessionId/name/status — startedAt is start-time,
-# not last-activity; no near-equivalent timestamp). Fallback: audit-log
-# row-count over the goal's jsonl stream.
-# uberdev_goal_agent_stuck_on_dialog PID   (issue #220, AC ❸)
-# rc 0 iff the agent's audit-stream row-count is unchanged over a 60s window
-# AND its status is busy/running/starting/working. Writes prior-sample state
-# to the run-state sidecar (PRIOR_LAST_ACTIVITY_<pid>, FIRST_DIALOG_TS_<pid>)
+# not last-activity; no near-equivalent timestamp). Activity proxy:
+# 1) PER-AGENT stdout-log mtime (preferred — multi-parallel-safe, see B10)
+# 2) goal-global audit-log row-count (fallback — degraded under N > 1 agents)
+#
+# B10 (post-impl-review): the previous audit-log row-count proxy was
+# goal-global — one shared file across all parallel agents. Under multi-
+# parallel /turbo, any agent's row append refreshed the counter, suppressing
+# the stuck-on-dialog signal for every OTHER agent. Switch the primary
+# proxy to mtime of the per-issue stdout file
+# (`$UBERDEV_TMPDIR/solve-bg-stdout-<ISSUE>.log` — canonical name per
+# lib/dispatch.sh lines 334/453/609), which is genuinely per-agent. When the
+# caller has the issue number in scope (the common path via
+# _uberdev_goal_any_attempt_stuck, which iterates batch-prs.tsv), pass it as
+# arg 2 so the helper reads stdout mtime. When the issue is absent (legacy
+# single-arg call sites + BT79 fixture), fall back to the audit-log row-
+# count proxy with a comment explaining the degradation.
+#
+# uberdev_goal_agent_stuck_on_dialog PID [ISSUE]   (issue #220, AC ❸)
+# rc 0 iff the agent's activity proxy is unchanged over a 60s window AND
+# its status is busy/running/starting/working. Writes prior-sample state to
+# the run-state sidecar (PRIOR_LAST_ACTIVITY_<pid>, FIRST_DIALOG_TS_<pid>)
 # so the detector survives the directive-emitter constraint (in-loop timers
 # are dead across fresh-shell phase fences — see memory
 # project_uberdev_pipeline_directive_emitter). First sample writes sidecar
 # and returns 1 (not-yet-stuck); subsequent samples compare against the
 # persisted prior sample.
 uberdev_goal_agent_stuck_on_dialog() {
-  local pid="$1"
+  local pid="$1" issue="${2:-}"
   _uberdev_goal_validate_int "$pid" || return 1
   local status now first_seen prior tmpdir goal_id audit row_count
   status="$(claude agents --json 2>/dev/null | jq -r --argjson pid "$pid" '
@@ -768,11 +783,23 @@ uberdev_goal_agent_stuck_on_dialog() {
   tmpdir="${UBERDEV_TMPDIR:-/tmp}"
   goal_id="${UBERDEV_GOAL_ID:-}"
   _uberdev_goal_validate_id "$goal_id" || return 1
-  audit="$tmpdir/goal-$goal_id.jsonl"
-  if [ -r "$audit" ]; then
-    row_count="$(wc -l < "$audit" 2>/dev/null | tr -d ' ')"
-  else
-    row_count="0"
+  # B10: primary proxy — per-issue stdout-log mtime (multi-parallel-safe).
+  # Fallback: goal-global audit-log row-count (degraded under N>1 agents
+  # because any agent's row append refreshes the counter for ALL agents).
+  row_count=""
+  if [ -n "$issue" ] && _uberdev_goal_validate_int "$issue"; then
+    local stdout_log="$tmpdir/solve-bg-stdout-$issue.log"
+    if [ -r "$stdout_log" ]; then
+      row_count="$(stat -c %Y "$stdout_log" 2>/dev/null || stat -f %m "$stdout_log" 2>/dev/null)"
+    fi
+  fi
+  if [ -z "$row_count" ]; then
+    audit="$tmpdir/goal-$goal_id.jsonl"
+    if [ -r "$audit" ]; then
+      row_count="$(wc -l < "$audit" 2>/dev/null | tr -d ' ')"
+    else
+      row_count="0"
+    fi
   fi
   _uberdev_goal_validate_int "$row_count" || row_count="0"
   now="$(date +%s)"
@@ -821,7 +848,11 @@ _uberdev_goal_any_attempt_stuck() {
     _uberdev_dispatch_tmp_target_safe "$status_file" || continue
     pid="$(jq -r '.pid // empty' < "$status_file" 2>/dev/null)" || continue
     _uberdev_goal_validate_int "$pid" || continue
-    if uberdev_goal_agent_stuck_on_dialog "$pid"; then
+    # B10 (post-impl-review): pass $issue so the detector uses per-issue
+    # stdout mtime instead of the goal-global audit-log row-count proxy.
+    # Under multi-parallel /turbo, the row-count proxy would be refreshed
+    # by ANY agent's audit append — masking a real per-agent stall.
+    if uberdev_goal_agent_stuck_on_dialog "$pid" "$issue"; then
       return 0
     fi
   done < "$batch_tsv"
@@ -833,6 +864,13 @@ _uberdev_goal_any_attempt_stuck() {
 # matching this PR exists AND its mtime is within GRACE_SECS. Each candidate
 # is guarded through _uberdev_dispatch_tmp_target_safe (security.md
 # precedent). --argjson passes the digits-only validated PR as a JSON number.
+#
+# B1 (post-impl-review): mirror the 4-glob candidate set from
+# uberdev_goal_locate_review_pr_audit_by_pr so worktree-mirror markers
+# (.claude/worktrees/*/.uberdev/runs/..., .worktrees/*/..., worktrees/*/...)
+# are discovered alongside the project-root path. Without this, a /review-pr
+# running inside the standard worktree never registers as "in-flight" for the
+# /goal poll loop in the project-root checkout, defeating AC ❶.
 _uberdev_goal_locked_marker_for_pr_fresh() {
   local pr="$1" grace="$2"
   _uberdev_goal_validate_int "$pr" || return 1
@@ -840,7 +878,10 @@ _uberdev_goal_locked_marker_for_pr_fresh() {
   local now matched_mtime marker_dir ctx mtime
   now="$(date +%s)"
   matched_mtime=0
-  for marker_dir in .uberdev/runs/*/; do
+  for marker_dir in .uberdev/runs/*/ \
+                    .claude/worktrees/*/.uberdev/runs/*/ \
+                    .worktrees/*/.uberdev/runs/*/ \
+                    worktrees/*/.uberdev/runs/*/; do
     [ -d "$marker_dir" ] || continue
     ctx="${marker_dir}pr-context.json"
     [ -r "${marker_dir}locked" ] && [ -r "$ctx" ] || continue
@@ -1588,8 +1629,14 @@ uberdev_goal_read_run_state() {
             CIRCUIT_BREAKER_HALT="$v" ;;
         esac ;;
       PRIOR_LAST_ACTIVITY_*)
+        # B4 (post-impl-review): int-validate the value too, mirroring the
+        # FIRST_DIALOG_TS_* arm directly below. The stuck-on-dialog detector
+        # stores row_count (int) here; without int-gating, a non-integer value
+        # could round-trip via the sidecar and silently break the string-
+        # equality progress comparison in uberdev_goal_agent_stuck_on_dialog.
         local _suffix="${k#PRIOR_LAST_ACTIVITY_}"
         _uberdev_goal_validate_int "$_suffix" || continue
+        _uberdev_goal_validate_int "$v" || continue
         [ "${#v}" -le 64 ] || continue
         printf -v "PRIOR_LAST_ACTIVITY_${_suffix}" '%s' "$v"
         export "PRIOR_LAST_ACTIVITY_${_suffix}" ;;
@@ -1680,8 +1727,16 @@ _uberdev_goal_reap_zombies() {
         "{\"goal_id\":\"$goal_id\",\"pr\":$pr,\"pid\":$pid,\"signal\":\"TERM\",\"result\":\"owner_mismatch\"}" || true
       continue
     fi
+    # B11 (post-impl-review): pre-probe with kill -0 so non-zero kill -TERM
+    # rc can be classified correctly — `already_dead` (ESRCH: process gone)
+    # vs `signal_rejected` (EPERM: process alive but kernel refused TERM,
+    # e.g., wrong-uid race even after the earlier owner check). Without
+    # this, a permission-denied SIGTERM is silently logged as `already_dead`
+    # and the reaper's audit trail misclassifies a live-but-unkillable PID.
     if kill -TERM "$pid" 2>/dev/null; then
       result="killed"
+    elif kill -0 "$pid" 2>/dev/null; then
+      result="signal_rejected"
     else
       result="already_dead"
     fi
@@ -1689,9 +1744,18 @@ _uberdev_goal_reap_zombies() {
       "{\"goal_id\":\"$goal_id\",\"pr\":$pr,\"pid\":$pid,\"signal\":\"TERM\",\"result\":\"$result\"}" || true
     sleep 2
     if kill -0 "$pid" 2>/dev/null; then
-      kill -KILL "$pid" 2>/dev/null
+      # B9 (post-impl-review): capture kill -KILL rc and record `kill_failed`
+      # distinctly. The prior code emitted `result: killed` unconditionally,
+      # even when the SIGKILL itself returned non-zero (EPERM / ESRCH on a
+      # process gone in the 2s window). Surfacing kill_failed is a critical
+      # operational signal — the reaper claims a kill it never landed.
+      if kill -KILL "$pid" 2>/dev/null; then
+        result="killed"
+      else
+        result="kill_failed"
+      fi
       uberdev_goal_audit goal_reaper_kill \
-        "{\"goal_id\":\"$goal_id\",\"pr\":$pr,\"pid\":$pid,\"signal\":\"KILL\",\"result\":\"killed\"}" || true
+        "{\"goal_id\":\"$goal_id\",\"pr\":$pr,\"pid\":$pid,\"signal\":\"KILL\",\"result\":\"$result\"}" || true
     fi
   done < "$batch_tsv"
   return 0

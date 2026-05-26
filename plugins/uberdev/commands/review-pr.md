@@ -85,6 +85,13 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    **Locked-marker write (issue #220, AC ❶):** Before invoking the post-impl-review skill, write a sibling `.uberdev/runs/<RUN_ID>/locked` zero-byte marker + `pr-context.json` so a concurrent `/uberdev:goal` Phase 2b knows this PR's `/review-pr` is in-flight (avoids re-dispatching ours while the leaf solver's own is still running):
 
    ```bash
+   # B3 (post-impl-review): the marker-write + EXIT-trap MUST live in ONE bash
+   # fence. When split across fences each fence is its own subshell — MARKER_DIR
+   # never propagates to the trap-install fence, the trap expands to literal
+   # empty paths (`rm -f "/locked" "/pr-context.json"; rmdir ""`), and it fires
+   # at the END of the trap-installer fence rather than at /review-pr exit. The
+   # latent bug meant the marker was never cleaned up; B1's worktree-glob mirror
+   # would then surface stale markers indefinitely.
    PR_NUM="$(gh pr view --json number -q .number 2>/dev/null)"
    ISSUE_NUM="$(gh pr view --json body -q .body 2>/dev/null | grep -oE 'Closes #[0-9]+' | head -n1 | grep -oE '[0-9]+')"
    if [ -n "$PR_NUM" ] && [ "$PR_NUM" -gt 0 ] 2>/dev/null; then
@@ -93,12 +100,10 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
      : > "$MARKER_DIR/locked"  # creates .uberdev/runs/$RUN_ID/locked zero-byte sentinel
      jq -n --argjson pr "$PR_NUM" --arg issue "${ISSUE_NUM:-0}" --arg ts "$(date -u +%FT%TZ)" \
        '{pr: $pr, issue: ($issue|tonumber? // 0), started_at: $ts}' > "$MARKER_DIR/pr-context.json"
+     # Trap-slot audit: no pre-existing EXIT trap found (issue #220 §3.2).
+     # Install in the SAME fence so MARKER_DIR is in scope when the trap expands.
+     trap 'rm -f "$MARKER_DIR/locked" "$MARKER_DIR/pr-context.json" 2>/dev/null; rmdir "$MARKER_DIR" 2>/dev/null || true' EXIT
    fi
-   ```
-
-   ```bash
-   # Trap-slot audit: no pre-existing EXIT trap found (issue #220 §3.2)
-   trap 'rm -f "$MARKER_DIR/locked" "$MARKER_DIR/pr-context.json" 2>/dev/null; rmdir "$MARKER_DIR" 2>/dev/null || true' EXIT
    ```
 
    The locked marker is read by `/uberdev:goal` Phase 2b via `_uberdev_goal_locked_marker_for_pr_fresh "$pr_num" "$REVIEW_GRACE_SECS"` (lib/goal-state.sh). The contract is additive — `/review-pr` runs identically whether `/goal` is the caller or a human is. The trap fires on every exit path (success, failure, signal) so an orphaned marker is bounded by the natural EXIT signal — and even on SIGKILL the `/goal` reader's grace-window check (REVIEW_GRACE_SECS, default 3600s) bounds staleness without operator intervention. See RFC 0005 §9 D220b for the cross-component design rationale.

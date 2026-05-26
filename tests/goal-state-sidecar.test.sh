@@ -368,7 +368,11 @@ case "$s4_got" in
 esac
 
 echo "== S5: PRIOR_LAST_ACTIVITY_<pid> per-pid sidecar key round-trip (issue #220, AC ❸) =="
-PRIOR_LAST_ACTIVITY_12345="2026-05-26T12:00:00Z"; export PRIOR_LAST_ACTIVITY_12345
+# B4 (post-impl-review): the detector stores row_count (int) here; the
+# fixture must use an int so the post-fix int-validate gate accepts the
+# value on read-back. The earlier ISO-8601 fixture (timestamp string) would
+# now be silently dropped by the gate, breaking the round-trip assertion.
+PRIOR_LAST_ACTIVITY_12345="1234"; export PRIOR_LAST_ACTIVITY_12345
 FIRST_DIALOG_TS_12345=1729000000; export FIRST_DIALOG_TS_12345
 uberdev_goal_write_run_state || { FAIL=$((FAIL+1)); echo "  FAIL  S5.write" >&2; }
 s5_got="$(env -i UBERDEV_TMPDIR="$UBERDEV_TMPDIR" PATH="$PATH" bash -c '
@@ -379,7 +383,7 @@ s5_got="$(env -i UBERDEV_TMPDIR="$UBERDEV_TMPDIR" PATH="$PATH" bash -c '
     "${PRIOR_LAST_ACTIVITY_12345:-UNSET}" "${FIRST_DIALOG_TS_12345:-UNSET}"
 ')"
 case "$s5_got" in
-  "PRIOR_LAST_ACTIVITY_12345=2026-05-26T12:00:00Z FIRST_DIALOG_TS_12345=1729000000")
+  "PRIOR_LAST_ACTIVITY_12345=1234 FIRST_DIALOG_TS_12345=1729000000")
     PASS=$((PASS+1)); echo "  PASS  S5.per-pid-keys-round-trip" ;;
   *)
     FAIL=$((FAIL+1)); echo "  FAIL  S5.per-pid-keys-round-trip (got [$s5_got])" >&2 ;;

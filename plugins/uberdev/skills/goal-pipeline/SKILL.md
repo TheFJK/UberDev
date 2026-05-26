@@ -445,7 +445,18 @@ while true; do
         # lapsed, /review-pr legitimately in flight) is ruled out. seen_ts comes
         # from the pr-states TSV (FIRST pushed-reviewing transition for this PR).
         # D17: never assume GREEN.
-        seen_ts=$(awk -F'\t' -v p="$pr_num" '$1==p{print $3}' \
+        #
+        # B8 (post-impl-review): the awk filter MUST require state == "pushed-
+        # reviewing" AND take the FIRST occurrence — without state filtering,
+        # later transitions (e.g., dispatched→pushed-reviewing→green→...)
+        # leak into seen_ts and the grace-window arithmetic compares "now"
+        # against a much-newer transition timestamp, never crossing the
+        # threshold. The original awk printed every row's ts for the PR and
+        # the shell captured only the LAST line, masking the bug except
+        # under specific transition orderings. `!t{t=$3}` guards FIRST-seen;
+        # `t+0` coerces empty → 0 so the downstream `$((now - seen_ts))` is
+        # arithmetic-safe even when no row exists.
+        seen_ts=$(awk -F'\t' -v p="$pr_num" '$1==p && $2=="pushed-reviewing" && !t{t=$3} END{print t+0}' \
           "$UBERDEV_TMPDIR/goal-$GOAL_ID-pr-states.tsv" 2>/dev/null)
         # Marker probe (Component 3.2)
         if _uberdev_goal_locked_marker_for_pr_fresh "$pr_num" "$REVIEW_GRACE_SECS"; then
@@ -557,7 +568,14 @@ while true; do
       # Phase 2c in-flight gate (issue #220, Component 3.3) — never dispatch
       # /merge while the same PR has a /review-pr still in flight; defer one
       # poll tick. Emits goal_merge_deferred so the audit reflects the back-off.
+      #
+      # B2 (post-impl-review): set any_active=1 BEFORE continue (mirrors the
+      # symmetric Phase 2b in-flight branch which sets it before emitting
+      # goal_review_pr_deferred). Without this, an entire batch deferred by
+      # in-flight /review-pr leaves any_active=0 and the watch loop terminates
+      # with a spurious queue_empty_not_converged breaker fire.
       if uberdev_goal_review_pr_in_flight "$pr"; then
+        any_active=1
         uberdev_goal_audit goal_merge_deferred \
           "{\"goal_id\":\"$GOAL_ID\",\"pr\":$pr,\"reason\":\"review_in_flight\",\"in_flight_count\":1}"
         continue   # next poll tick re-checks

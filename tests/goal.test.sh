@@ -2398,7 +2398,14 @@ _bt76 43  1 "BT76.no-match-43"
 _bt76 421 1 "BT76.no-match-421-anchor (regression: 42 must not match 421)"
 
 echo "== BT77: Phase 2c emits goal_merge_deferred with mock in-flight /review-pr (issue #220 AC ❷) =="
+# B5 (post-impl-review): the original BT77 verified (a) the deferred event was
+# emitted + (b) the sibling Phase 2b event was NOT emitted — but never asserted
+# the LOAD-BEARING behavior, namely that _uberdev_goal_dispatch_merge was
+# skipped. The marker-file probe below closes that gap: a stub redirects any
+# accidental dispatch into a marker file, and the absence of that file proves
+# the gate suppressed dispatch.
 bt77_capture="$(mktemp)"
+bt77_marker="$(mktemp -u)"
 bash -c '
   claude() { printf "%s\n" "[{\"name\":\"/uberdev:review-pr 42\",\"status\":\"busy\"}]"; }
   export -f claude
@@ -2408,12 +2415,17 @@ bash -c '
     printf "EVENT=%s PAYLOAD=%s\n" "$1" "$2"
   }
   export -f uberdev_goal_audit
+  # B5: stub _uberdev_goal_dispatch_merge so an accidental call leaves a
+  # marker — the assertion below proves the gate skipped dispatch.
+  _uberdev_goal_dispatch_merge() { : > "'"$bt77_marker"'"; }
+  export -f _uberdev_goal_dispatch_merge
   pr=42
   GOAL_ID=goal-test-bt77abc1
   if uberdev_goal_review_pr_in_flight "$pr"; then
     uberdev_goal_audit goal_merge_deferred "{\"goal_id\":\"$GOAL_ID\",\"pr\":$pr,\"reason\":\"review_in_flight\",\"in_flight_count\":1}"
   else
     echo "BUG: in-flight gate said clear when mock said busy" >&2
+    _uberdev_goal_dispatch_merge "$pr"   # exercise the negative path
   fi
 ' > "$bt77_capture" 2>&1
 if grep -qF 'EVENT=goal_merge_deferred PAYLOAD={"goal_id":"goal-test-bt77abc1","pr":42,"reason":"review_in_flight","in_flight_count":1}' "$bt77_capture"; then
@@ -2426,10 +2438,19 @@ if ! grep -qF 'EVENT=goal_review_pr_deferred' "$bt77_capture"; then
 else
   FAIL=$((FAIL+1)); echo "  FAIL  BT77.no-review-pr-deferred-event (got Phase 2b event in Phase 2c scenario)" >&2
 fi
-rm -f "$bt77_capture"
+if [ ! -e "$bt77_marker" ]; then
+  PASS=$((PASS+1)); echo "  PASS  BT77.dispatch-merge-skipped (in-flight gate suppressed dispatch)"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  BT77.dispatch-merge-skipped (marker exists — dispatch fired despite in-flight gate)" >&2
+fi
+rm -f "$bt77_capture" "$bt77_marker"
 
 echo "== BT77b: Phase 2b emits goal_review_pr_deferred with mock in-flight /review-pr (issue #220 AC ❷') =="
+# B6 (post-impl-review): mirror BT77's dispatch-skip assertion for the
+# _uberdev_goal_dispatch_review_pr suppression — without it, BT77b only
+# asserted event emission, not the load-bearing "no re-dispatch" behavior.
 bt77b_capture="$(mktemp)"
+bt77b_marker="$(mktemp -u)"
 bash -c '
   claude() { printf "%s\n" "[{\"name\":\"/uberdev:review-pr 42\",\"status\":\"busy\"}]"; }
   export -f claude
@@ -2437,10 +2458,15 @@ bash -c '
   . "'"$GOAL_LIB"'"
   uberdev_goal_audit() { printf "EVENT=%s PAYLOAD=%s\n" "$1" "$2"; }
   export -f uberdev_goal_audit
+  # B6: stub _uberdev_goal_dispatch_review_pr to drop a marker on accidental call.
+  _uberdev_goal_dispatch_review_pr() { : > "'"$bt77b_marker"'"; }
+  export -f _uberdev_goal_dispatch_review_pr
   pr=42
   GOAL_ID=goal-test-bt77babc1
   if uberdev_goal_review_pr_in_flight "$pr"; then
     uberdev_goal_audit goal_review_pr_deferred "{\"goal_id\":\"$GOAL_ID\",\"pr\":$pr,\"reason\":\"in_flight\",\"in_flight_count\":1}"
+  else
+    _uberdev_goal_dispatch_review_pr "$pr"
   fi
 ' > "$bt77b_capture" 2>&1
 if grep -qF 'EVENT=goal_review_pr_deferred PAYLOAD={"goal_id":"goal-test-bt77babc1","pr":42,"reason":"in_flight","in_flight_count":1}' "$bt77b_capture"; then
@@ -2453,9 +2479,18 @@ if ! grep -qF 'EVENT=goal_merge_deferred' "$bt77b_capture"; then
 else
   FAIL=$((FAIL+1)); echo "  FAIL  BT77b.no-merge-deferred-event" >&2
 fi
-rm -f "$bt77b_capture"
+if [ ! -e "$bt77b_marker" ]; then
+  PASS=$((PASS+1)); echo "  PASS  BT77b.dispatch-review-pr-skipped (in-flight gate suppressed re-dispatch)"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  BT77b.dispatch-review-pr-skipped (marker exists — dispatch fired despite in-flight gate)" >&2
+fi
+rm -f "$bt77b_capture" "$bt77b_marker"
 
 echo "== BT78: Phase 3 rollover merges Phase-1 carry-over instead of overwriting (issue #220 AC ❹) =="
+# B7 (post-impl-review): the original BT78 verified the array-merge shape only.
+# The DOWNSTREAM behavior — issue 198 actually getting dispatched in cycle 2 —
+# was unguarded. The simulation below counts dispatches against the merged
+# queue and asserts the set contains 198, closing the gap.
 bt78_out="$(bash -c '
   queue=(207 210 198)
   active=("${queue[@]:0:2}")
@@ -2464,19 +2499,32 @@ bt78_out="$(bash -c '
   _rolled_over=${#queue[@]}
   queue=("${queue[@]}" "${new_candidates[@]}")
   printf "queue_after=%s rolled_over=%s\n" "${queue[*]}" "$_rolled_over"
+  # B7: simulate Phase 1 dispatch against the merged queue and emit the
+  # dispatched-set for assertion below. Reuse the merged $queue array.
+  dispatched=()
+  for _q in "${queue[@]}"; do
+    dispatched+=("$_q")
+  done
+  printf "dispatched_count=%s dispatched_set=%s\n" "${#dispatched[@]}" "${dispatched[*]}"
 ')"
 case "$bt78_out" in
-  "queue_after=198 rolled_over=1")
+  "queue_after=198 rolled_over=1"$'\n'"dispatched_count=1 dispatched_set=198")
     PASS=$((PASS+1)); echo "  PASS  BT78.cycle-2-queue-preserves-198"
     ;;
   *)
     FAIL=$((FAIL+1)); echo "  FAIL  BT78.cycle-2-queue-preserves-198 (got [$bt78_out])" >&2
     ;;
 esac
-if [ "$bt78_out" != "queue_after= rolled_over=1" ]; then
+if ! grep -qF "queue_after= rolled_over=1" <<<"$bt78_out"; then
   PASS=$((PASS+1)); echo "  PASS  BT78.no-silent-strand (bug regression guard)"
 else
   FAIL=$((FAIL+1)); echo "  FAIL  BT78.no-silent-strand (queue empty AFTER rollover — wipe regression)" >&2
+fi
+# B7: separate assertion — the dispatched-set MUST contain 198.
+if grep -qE "dispatched_set=([^ ]+ )*198( |$)" <<<"$bt78_out"; then
+  PASS=$((PASS+1)); echo "  PASS  BT78.cycle-2-dispatch-includes-198"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  BT78.cycle-2-dispatch-includes-198 (set: $(grep -oE 'dispatched_set=[^[:space:]]*( [0-9]+)*' <<<"$bt78_out"))" >&2
 fi
 
 echo "== BT79: uberdev_goal_agent_stuck_on_dialog 60s-window detector via audit-log row-count proxy (issue #220 AC ❸) =="
