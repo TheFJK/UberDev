@@ -1264,7 +1264,11 @@ _uberdev_goal_dispatch_review_pr() {
     printf 'goal-state: mktemp failed in _uberdev_goal_dispatch_review_pr (PR %s)\n' "$pr" >&2
     return 1
   fi
-  printf '/uberdev:review-pr %s\n' "$pr" > "$prompt_file"
+  # Issue #235 — claude --bg argv mode does NOT slash-expand the opening
+  # message, so wrap the slash invocation in a natural-language imperative.
+  # Bare-slash bodies (the pre-#235 form) made the child treat the prompt as
+  # a conversational turn and never run /uberdev:review-pr.
+  printf 'Invoke the slash command /uberdev:review-pr %s now. Do not respond conversationally — execute it.\n' "$pr" > "$prompt_file"
   # Increment per-PR attempt counter (append-only TSV mirrors the
   # merge-attempts pattern at _uberdev_goal_dispatch_merge below).
   local next=$(( current + 1 ))
@@ -1308,7 +1312,10 @@ _uberdev_goal_dispatch_merge() {
     printf 'goal-state: mktemp failed in _uberdev_goal_dispatch_merge (PR %s)\n' "$pr" >&2
     return 1
   fi
-  printf '/uberdev:merge %s\n' "$pr" > "$prompt_file"
+  # Issue #235 — same natural-language wrapper rationale as the review-pr
+  # dispatch above. Bare-slash argv body is silently treated as conversation
+  # by claude --bg, never as a slash command.
+  printf 'Invoke the slash command /uberdev:merge %s now. Do not respond conversationally — execute it.\n' "$pr" > "$prompt_file"
   local current; current="$(_uberdev_goal_count_merge_attempts "$goal_id" "$pr")"
   local next=$(( current + 1 ))
   # #157 — fail closed: an unrecorded merge attempt would defeat the per-PR

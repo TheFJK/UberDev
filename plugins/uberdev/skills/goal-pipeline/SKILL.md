@@ -233,12 +233,17 @@ for ISSUE_NUM in "${queue[@]}"; do
     continue
   fi
 
-  # Build the per-issue prompt via mktemp. The body is a single /uberdev:turbo
-  # line; --turbo runs non-interactive (no gates — scoped relaxation §3 below)
-  # and --backend forwards the Phase 0 resolved backend so every cycle uses the
-  # same backend.
+  # Build the per-issue prompt via mktemp. The body wraps a /uberdev:turbo
+  # invocation in a natural-language imperative (issue #235): claude --bg
+  # 2.1.139+ does NOT slash-expand argv-supplied opening messages, so a body
+  # opening with `/uberdev:turbo …` is silently treated as natural language
+  # and the child agent never runs /turbo. The "Invoke the slash command …"
+  # prefix forces the child to read the rest as an instruction it must act on.
+  # --turbo keeps the child non-interactive (no gates — scoped relaxation §3
+  # below); --backend forwards the Phase 0 resolved backend so every cycle
+  # uses the same backend.
   PROMPT_FILE="$(mktemp)"
-  printf '/uberdev:turbo %s --turbo --backend=%s\n' \
+  printf 'Invoke the slash command /uberdev:turbo %s --turbo --backend=%s now. Do not respond conversationally — execute it.\n' \
     "$ISSUE_NUM" "$UBERDEV_RESOLVED_BACKEND" > "$PROMPT_FILE"
 
   # T5 provenance — the child /turbo agent (and its downstream /merge dispatch,

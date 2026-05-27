@@ -4,6 +4,24 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.6] — 2026-05-27
+
+### Fixed
+- **`claude --bg` argv-mode slash-command never expanded — `/goal` → `/turbo` leaf silently died (Closes #235).** `claude --bg ... -- "<prompt>"` passes the prompt as the first user message of the spawned agent. Since CLI 2.1.139 (the version `--bg` first shipped) argv-supplied opening messages have NOT been slash-expanded by the child, so a prompt body opening with `/uberdev:turbo …` was silently treated as natural language and the child agent answered conversationally instead of running the command. Every medium-tier `/goal` → `/turbo` → `/orchestrator` chain died at the prompt-delivery boundary; the resulting silent-leaf failure cascaded into double worktrees / double reviews when goal-pipeline's Phase-1 skip-check saw no `solving` row and re-dispatched on the next cycle. Five prompt-build callsites are rewritten to wrap the slash invocation in a natural-language imperative (`Invoke the slash command /uberdev:… now. Do not respond conversationally — execute it.`) so the child reads the body as an instruction it must act on, not a question to discuss:
+  - `plugins/uberdev/skills/goal-pipeline/SKILL.md:240-242` — `/uberdev:turbo` dispatch.
+  - `plugins/uberdev/skills/solve-pipeline/SKILL.md:776,778` — medium-tier `/uberdev:orchestrator` dispatch (both turbo and interactive arms).
+  - `plugins/uberdev/lib/goal-state.sh:1267` — `_uberdev_goal_dispatch_review_pr`.
+  - `plugins/uberdev/lib/goal-state.sh:1311` — `_uberdev_goal_dispatch_merge`.
+
+### Added
+- `tests/dispatch-prompt-no-bare-slash.test.sh` — drift-guard scanning the three prompt-build callsite files (`goal-pipeline/SKILL.md`, `solve-pipeline/SKILL.md`, `lib/goal-state.sh`) for any `printf` / `echo` writing a body that opens with `/uberdev:`. R2 fixture proves the regex flags vulnerable shapes; R3 inverse fixture proves the natural-language imperative shape is NOT false-positived. Wired into both ubuntu and windows CI matrices.
+
+### Notes
+- Version bumped to 0.34.6 across `plugin.json`, `marketplace.json`, the README badge, `CHANGELOG.md`, `tests/goal.test.sh` G20, and `tests/solve-claim.test.sh`. Atomic version-lock surfaces — partial bump is a red CI invariant.
+- Scope strictly option 3b from the issue (lowest-blast-radius rewrite). Switching `BG_PROMPT_MODE` to `--prompt-file` (option 3a) requires verifying the file-mode arm re-evaluates the body through the interactive parser on 2.1.152 and is deferred. Symptom B hardening (state-transition-on-dispatch, label-probe skip-check) per issue §5 is independently scoped.
+
+---
+
 ## [0.34.5] — 2026-05-27
 
 ### Fixed
