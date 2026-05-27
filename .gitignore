@@ -39,6 +39,9 @@ plugins/uberdev/docs/windows/
 # UberDev runtime state (e.g. brainstorm visual companion sessions)
 .uberdev/
 
+# Dev scratch — investigation folders, not shipped via the marketplace
+goal-cli-2.1.150-fix/
+
 # Node / package manager
 node_modules/
 
