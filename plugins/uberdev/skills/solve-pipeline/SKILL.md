@@ -255,7 +255,7 @@ fi
 # lib/dispatch.sh:uberdev_dispatch_resolve_env (skip wins over auto when
 # both are set; same lexical if/elif ordering).
 if [[ "${SKIP_PERMISSIONS:-0}" == "1" ]]; then
-  PERM_DESC="bypass (--dangerously-skip-permissions; /goal autonomous loop)"
+  PERM_DESC="bypass (--dangerously-skip-permissions)"
 elif [[ "$AUTO_PERMISSIONS" == "1" ]]; then
   PERM_DESC="auto (Claude Code AI classifier)"
 else

@@ -132,7 +132,7 @@ Notes on the enums:
    # stall first-tool-use. The autonomous-loop contract requires it; standalone
    # /turbo + /solve defensively unset this var (see commands/turbo.md and
    # commands/solve.md). EFFORT_LEVEL stays unset -> helper applies :-max.
-   export SKIP_PERMISSIONS=1     # autonomous-convergence loop contract (#241); BG_TURBO_ENV propagates this var across the env(1) boundary into the claude --bg child, after which /turbo+/orchestrator+SDD inherit it via ordinary process-env from that child (not via repeated env(1) wraps).
+   export SKIP_PERMISSIONS=1     # (#241) /goal autonomous-loop opt-in; propagation via BG_TURBO_ENV — see lib/dispatch.sh BG_TURBO_ENV blocks
    uberdev_dispatch_resolve_env || exit 1   # establishes TIMEOUT_BIN/SOLVE_TIMEOUT/MODEL/PERM_FLAG/EFFORT_FLAG/BG_PROMPT_MODE once
    ```
 

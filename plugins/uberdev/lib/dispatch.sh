@@ -174,10 +174,7 @@ uberdev_dispatch_resolve_env() {
   # AUTO_PERMISSIONS=1 are set, the skip tier takes precedence (enforced by the
   # if/elif ordering below — not a deliberate priority engine, just lexical
   # control flow). /goal opts into the strict bypass so cmux PermissionRequest
-  # hooks cannot stall the autonomous loop on first-tool-use (#241). Both
-  # literal lines PERM_FLAG=() and PERM_FLAG=( --permission-mode auto )
-  # preserved verbatim for the structural-shape tests in
-  # tests/dispatch-claude-bg.test.sh.
+  # hooks cannot stall the autonomous loop on first-tool-use (#241).
   SKIP_PERMISSIONS="${SKIP_PERMISSIONS:-0}"
   AUTO_PERMISSIONS="${AUTO_PERMISSIONS:-0}"
   PERM_FLAG=()
@@ -508,6 +505,7 @@ _uberdev_dispatch_background() {
       "{\"issue\":$ISSUE_NUM,\"phase\":\"prompt_read\",\"backend\":\"background\",\"rc\":1}"
     return 1
   fi
+  # BG_TURBO_ENV: same propagation contract as the claude-bg arm — see lines ~359-369 for the rationale (UBERDEV_TURBO + SKIP_PERMISSIONS, RFC 0005 §2.3 scoped-relaxation contract).
   local BG_TURBO_ENV=()
   [[ "${AUTO_MODE:-0}" == "1" ]] && BG_TURBO_ENV=( UBERDEV_TURBO=1 )
   [[ "${SKIP_PERMISSIONS:-0}" == "1" ]] && BG_TURBO_ENV+=( SKIP_PERMISSIONS=1 )
@@ -619,8 +617,7 @@ LUA
 #
 # Intentional asymmetry vs. claude-bg / background backends: this backend does
 # NOT env(1)-wrap the spawn with BG_TURBO_ENV (no UBERDEV_TURBO / SKIP_PERMISSIONS
-# propagation). Per design Q4 (docs/uberdev/specs/2026-05-27-goal-skip-permissions-
-# propagation-design.md), wezterm is the attended-mode backend — visible panes,
+# propagation). Per design Q4 (see `docs/uberdev/specs/...-goal-skip-permissions-propagation-design.md` §Q4 / Non-goals), wezterm is the attended-mode backend — visible panes,
 # operator can approve permission prompts manually — so the cmux PermissionRequest
 # stall does not apply. PERM_FLAG argv-threading to the directly-dispatched
 # claude -p (line 673) carries `--dangerously-skip-permissions` to the
