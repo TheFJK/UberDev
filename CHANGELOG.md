@@ -4,6 +4,16 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.5] — 2026-05-27
+
+### Fixed
+- **`plugins/uberdev/skills/goal-pipeline/SKILL.md`: Skill loader text-substitutes positional non-flag args of `$ARGUMENTS` into the rendered SKILL.md body, ignoring single-quote boundaries — every awk one-liner using `$1`/`$2`/`$3` as field references was corrupted at runtime (#222).** Effects: Phase 1/2 state-skip gates always fell through, Phase 2 `dispatch_ts`/`seen_ts`/`merge_ts` reads always returned 0 (driving false `FAILED` transitions + premature `/review-pr` re-dispatch + premature `merging→green` retry), and Phase 3 `all_pr_count` always equalled 1 (driving false `goal_converged`). Option-1 fix: parameterise each awk field ref via `-v c1=1 -v c2=2 -v c3=3` and reference `$c1`/`$c2`/`$c3` — the renderer leaves `$cN` untouched. All 8 affected sites (lines 222, 358, 371, 391, 463, 682, 960, 1063) fixed in goal-pipeline; the other 5 pipeline SKILL.md files (uberscan, ubersimplify, merge, solve, testers) audited and confirmed clean. New static drift-guard `tests/goal-pipeline-awk-positional.test.sh` walks every `awk ` line in all 6 pipeline SKILL.md files via a single-quote-aware state machine and asserts no `$[1-9]` literal appears inside a single-quoted region — defense-in-depth lock against regression in any pipeline. Wired into both ubuntu + windows CI matrices.
+
+### Notes
+- Version bumped to 0.34.5 across `plugin.json`, `marketplace.json`, the README badge, `CHANGELOG.md`, `tests/goal.test.sh` G20, and `tests/solve-claim.test.sh`. Atomic version-lock surfaces — partial bump is a red CI invariant.
+
+---
+
 ## [0.34.4] — 2026-05-27
 
 ### Fixed

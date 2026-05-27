@@ -107,6 +107,7 @@ jobs:
           bash tests/using-git-worktrees.test.sh && \
           bash tests/goal.test.sh && \
           bash tests/goal-batch-barrier.test.sh && \
+          bash tests/goal-pipeline-awk-positional.test.sh && \
           bash tests/test-harness-source-guards.test.sh
 
   shape-checks-windows:
@@ -214,4 +215,5 @@ jobs:
           bash tests/using-git-worktrees.test.sh && \
           bash tests/goal.test.sh && \
           bash tests/goal-batch-barrier.test.sh && \
+          bash tests/goal-pipeline-awk-positional.test.sh && \
           bash tests/test-harness-source-guards.test.sh
