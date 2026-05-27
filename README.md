@@ -4,7 +4,7 @@
 
 **Personal Claude Code marketplace — opinionated GitHub-workflow slash commands.**
 
-[![Version](https://img.shields.io/badge/version-0.34.8-blue)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.34.9-blue)](./CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8B5CF6)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Repo Agnostic](https://img.shields.io/badge/repo--agnostic-yes-success)](#configuration)
@@ -137,7 +137,7 @@ Auto-classifies a GitHub issue into a tier, then spawns an agent with a tier-app
 /solve 123 --trivial                  # force trivial tier
 /solve 123 --small                    # force small tier
 /solve 123 --full                     # force medium/large
-/solve 123 --auto                     # enable --permission-mode auto (AI tool gating)
+/solve 123 --auto                     # enable --dangerously-skip-permissions (bypass all permission gates)
 claude agents                          # monitor active /solve and /turbo background sessions
 ```
 
@@ -163,11 +163,11 @@ Identical to `/solve` for trivial / small. For medium / large, the brainstorm ph
 | Combo | Brainstorm Q&A | Tool gating |
 |---|---|---|
 | `/solve 42` | interactive | manual per-tool |
-| `/solve 42 --auto` | interactive | AI classifier |
+| `/solve 42 --auto` | interactive | skip-permissions bypass |
 | `/turbo 42` | auto-accept | manual per-tool |
-| `/turbo 42 --auto` | auto-accept | AI classifier — **max autonomy** |
+| `/turbo 42 --auto` | auto-accept | skip-permissions bypass — **max autonomy** |
 
-`/turbo` and `--auto` are orthogonal: `/turbo` governs brainstorm interactivity; `--auto` governs Claude Code's per-tool permission mode.
+`/turbo` and `--auto` are orthogonal: `/turbo` governs brainstorm interactivity; `--auto` bypasses Claude Code's permission system entirely (post-#241 follow-up: `--permission-mode auto` was silently refusing some agent tools — notably Search — so the middle tier was dead weight; `--auto` now resolves to `--dangerously-skip-permissions`, the same strict bypass as `SKIP_PERMISSIONS=1`).
 
 **Multi-issue dispatch.** `/turbo 5 6 7` validates all three issues up front (open + classifiable) and spawns three independent `claude --bg` sessions — each in its own `.claude/worktrees/solve-issue-N/` worktree, all running in parallel. Override flags (`--trivial|--small|--full`, `--auto`) apply batch-wide. Larger queues split into `ceil(N / cap)` sequential single-message waves (default cap 6 via `fanout_concurrency.solve_bg`). If any issue is closed, missing, or fails `gh` fetch, the run aborts before spawning anything (`no agents dispatched`). `/solve` accepts the same syntax.
 
@@ -263,7 +263,7 @@ goal:
 | Env var | File key | Purpose |
 |---|---|---|
 | `UBERDEV_FANOUT_SOLVE_BG` | `fanout_concurrency.solve_bg` | Cap on parallel `claude --bg` sessions dispatched by `/turbo`; int [1, 50], default 6 |
-| `SOLVE_AUTO` | `solve_auto` | When `1`/`true`, spawned agent runs with `--permission-mode auto` |
+| `SOLVE_AUTO` | `solve_auto` | When `1`/`true`, spawned agent runs with `--dangerously-skip-permissions` (post-#241 follow-up: AUTO tier collapsed into bypass) |
 | `UBERDEV_NO_AUTO_ALIAS` | `auto_install_aliases` | When `1`/`true` (env) or `false` (file), suppresses session-start auto-install of `/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`, `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify`, `/uberthink` forwarders |
 | `UBERDEV_INTEGRATION_BRANCH` | `integration_branch` | `/merge` target branch |
 | `UBERDEV_GOAL_MAX_CYCLES` | `goal.max_cycles` | `/uberdev:goal` hard cycle ceiling; int [1, 20], default 5 |

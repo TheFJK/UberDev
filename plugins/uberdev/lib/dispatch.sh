@@ -157,7 +157,15 @@ uberdev_dispatch_preflight() {
 # Phase A and goal-pipeline Phase 0 callers; any new opt-in env var must be
 # added here AND threaded through both call sites:
 #   SKIP_PERMISSIONS (default 0)  — bypass tier; /goal opts in (#241)
-#   AUTO_PERMISSIONS (default 0)  — auto tier; /turbo/--auto opts in
+#   AUTO_PERMISSIONS (default 0)  — bypass tier (aliased to SKIP semantics post-#241
+#                                   follow-up): /turbo/--auto and /solve/--auto opt
+#                                   in. Historically mapped to `--permission-mode auto`,
+#                                   but auto-mode is silently broken in cmux and refuses
+#                                   some agent tools (e.g., Search) outside cmux too —
+#                                   the middle tier was dead weight, so AUTO now resolves
+#                                   to the same `--dangerously-skip-permissions` flag as
+#                                   SKIP. Env-var name preserved for backward compat with
+#                                   /turbo --auto / /solve --auto and any external callers.
 #   EFFORT_LEVEL     (default max)
 uberdev_dispatch_resolve_env() {
   # BG_PROMPT_MODE: hardcoded `argv` (claude --bg 2.1.139 has no documented
@@ -170,18 +178,24 @@ uberdev_dispatch_resolve_env() {
 
   # PERM_FLAG: array form (zsh SH_WORD_SPLIT=off would treat a scalar at command
   # position as one argv slot). Empty by default; populated only when the caller
-  # opted into a permission tier. When both SKIP_PERMISSIONS=1 and
-  # AUTO_PERMISSIONS=1 are set, the skip tier takes precedence (enforced by the
-  # if/elif ordering below — not a deliberate priority engine, just lexical
-  # control flow). /goal opts into the strict bypass so cmux PermissionRequest
-  # hooks cannot stall the autonomous loop on first-tool-use (#241).
+  # opted into a permission tier. Post-#241 follow-up: both SKIP_PERMISSIONS=1 and
+  # AUTO_PERMISSIONS=1 resolve to `--dangerously-skip-permissions` — the historical
+  # `--permission-mode auto` middle tier is removed because Claude Code's auto-mode
+  # silently refuses some agent tools (notably Search) even when the operator opted
+  # in, and cmux's PermissionRequest hook intercepts auto-mode too. The if/elif
+  # ordering is preserved for audit-log clarity (which env var the caller set), but
+  # both branches now emit the same flag. /goal opts into the strict bypass so cmux
+  # PermissionRequest hooks cannot stall the autonomous loop on first-tool-use (#241);
+  # /turbo --auto and /solve --auto opt operators into the same flag for the same
+  # reason (auto-mode is dead in practice).
   SKIP_PERMISSIONS="${SKIP_PERMISSIONS:-0}"
   AUTO_PERMISSIONS="${AUTO_PERMISSIONS:-0}"
   PERM_FLAG=()
   if [[ "$SKIP_PERMISSIONS" == "1" ]]; then
     PERM_FLAG=( --dangerously-skip-permissions )
+  # Same flag as SKIP branch — kept distinct for caller-attribution observability via PERM_DESC; see header doc block.
   elif [[ "$AUTO_PERMISSIONS" == "1" ]]; then
-    PERM_FLAG=( --permission-mode auto )
+    PERM_FLAG=( --dangerously-skip-permissions )
   fi
 
   # EFFORT_FLAG: threaded form of EFFORT_LEVEL (default max for callers without

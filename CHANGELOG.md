@@ -4,6 +4,21 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.9] — 2026-05-27
+
+### Changed
+- **Collapsed the `AUTO_PERMISSIONS` middle tier into `--dangerously-skip-permissions` (post-#241 follow-up).** `--permission-mode auto` is silently broken in practice — Claude Code's auto-mode classifier refuses some agent tools (notably Search) both inside and outside cmux, leaving operators in a half-broken state that defeated the whole point of `/turbo --auto` / `/solve --auto`. The middle tier was dead weight, so `AUTO_PERMISSIONS=1` now resolves to the same `--dangerously-skip-permissions` flag as `SKIP_PERMISSIONS=1`. The env-var name is preserved for backward compat with `/turbo --auto`, `/solve --auto`, and any external callers.
+  - `lib/dispatch.sh:uberdev_dispatch_resolve_env` — the `elif [[ "$AUTO_PERMISSIONS" == "1" ]]` branch now sets `PERM_FLAG=( --dangerously-skip-permissions )` instead of `PERM_FLAG=( --permission-mode auto )`. The if/elif ordering is preserved for audit-log clarity (which env var the caller set), but both branches now emit the same flag.
+  - `solve-pipeline/SKILL.md` — the `PERM_DESC` strings updated to `bypass (--dangerously-skip-permissions; <TIER>_PERMISSIONS tier ...)`; the tier-name suffix lets post-hoc grep attribute the bypass to `/goal` (SKIP) vs `/turbo --auto` / `/solve --auto` (AUTO). The flat-var if/else form is preserved (zsh-NOMATCH regression guard, audit-fixups.test.sh C8).
+  - `commands/solve.md` — the `--auto` flag description updated to reflect the remap; documents that the trade-off is broad (dangerous tools no longer prompt) and recommends use only when the issue is unattended-friendly.
+  - Tests: `dispatch-claude-bg.test.sh` D-perm + D-precedence assertions updated to expect `--dangerously-skip-permissions` from `AUTO_PERMISSIONS=1`; new structural assertion that exactly 2 `PERM_FLAG=( --dangerously-skip-permissions )` sites exist in `dispatch.sh` (SKIP + AUTO branches, both bypass); new regression guard that `PERM_FLAG=( --permission-mode auto )` does NOT re-appear at runtime. `solve-pipeline-zsh.test.sh` R3 fixture rewritten to test the single-token `--dangerously-skip-permissions` argv form + auto-mode-collapse regression guard (the two-token zsh-array-word-split coverage now lives in R2's `--effort max` path). `audit-fixups.test.sh` PERM_DESC asserts updated to the new bypass strings.
+  - Trust-boundary unchanged — the orchestrator's `<external-untrusted-input>` trust-wrap is unaffected by the `--permission-mode` argv flag remap. Residual security risk is explicitly accepted (continuation of #241 stance): the alternative (broken agents under `--permission-mode auto`) is worse.
+
+### Notes
+- Version bumped to 0.34.9 across `plugin.json`, `marketplace.json`, the README badge, `CHANGELOG.md`, `tests/goal.test.sh` G20, and `tests/solve-claim.test.sh`. Atomic version-lock surfaces — partial bump is a red CI invariant.
+
+---
+
 ## [0.34.8] — 2026-05-27
 
 ### Fixed
