@@ -227,13 +227,15 @@ done
 echo
 echo "== C8: solve-pipeline 'Permission mode' line must use flat-var form (zsh-NOMATCH guard) =="
 # Regression guard for the v0.21.1 fix. The one-liner of the form
-#   echo "Permission mode: $([[ "$AUTO_PERMISSIONS" == "1" ]] && echo 'auto (...)' || echo 'default (...)')"
+#   echo "Permission mode: $([[ "$AUTO_PERMISSIONS" == "1" ]] && echo 'bypass (...)' || echo 'default (...)')"
 # is valid bash/zsh in isolation but trips zsh's NOMATCH when an agent re-emits
 # this SKILL block into a generated launcher .sh and the inner single-quote
 # pair around the `default '...'` echo argument drops on transcription —
 # leaving the literal `(manual per-tool gating)` unquoted before the closing
 # `"`. Observed in the wild against TheFJK/WAGYPROD#35. Pattern only matches
 # the resurrected one-liner, never the new flat-var if/else form.
+# (Inner labels updated from `auto (...)` to `bypass (...)` post-AUTO-collapse —
+# the example one-liner content shifts but the structural NOMATCH bug is unchanged.)
 if grep -qE '^echo "Permission mode: \$\(\[\[' "$SOLVE_PIPELINE"; then
   echo "  FAIL  solve-pipeline 'Permission mode' echo collapsed back to one-liner — zsh-NOMATCH regression"
   echo "        file:    $SOLVE_PIPELINE"
@@ -247,8 +249,15 @@ fi
 # scenario where someone deletes the line entirely instead of regressing it).
 assert_grep "$SOLVE_PIPELINE" '^[[:space:]]*PERM_DESC="default \(manual per-tool gating\)"' \
   "solve-pipeline assigns PERM_DESC=\"default (manual per-tool gating)\" in the else branch"
-assert_grep "$SOLVE_PIPELINE" '^[[:space:]]*PERM_DESC="auto \(Claude Code AI classifier\)"' \
-  "solve-pipeline assigns PERM_DESC=\"auto (Claude Code AI classifier)\" in the if branch"
+# Post-#241 follow-up: AUTO_PERMISSIONS=1 now resolves to --dangerously-skip-permissions
+# (auto-mode-collapse). PERM_DESC reflects the new bypass tier; the SKIP and AUTO
+# branches BOTH emit a `bypass (--dangerously-skip-permissions; <TIER>_PERMISSIONS tier...)`
+# string — the tier-name suffix lets post-hoc grep attribute the bypass to /goal
+# (SKIP) vs /turbo --auto / /solve --auto (AUTO).
+assert_grep "$SOLVE_PIPELINE" '^[[:space:]]*PERM_DESC="bypass \(--dangerously-skip-permissions; SKIP_PERMISSIONS tier' \
+  "solve-pipeline assigns PERM_DESC=\"bypass (--dangerously-skip-permissions; SKIP_PERMISSIONS tier ...)\" in the SKIP branch"
+assert_grep "$SOLVE_PIPELINE" '^[[:space:]]*PERM_DESC="bypass \(--dangerously-skip-permissions; AUTO_PERMISSIONS tier' \
+  "solve-pipeline assigns PERM_DESC=\"bypass (--dangerously-skip-permissions; AUTO_PERMISSIONS tier ...)\" in the AUTO branch"
 assert_grep "$SOLVE_PIPELINE" '^echo "Permission mode: \$PERM_DESC"' \
   "solve-pipeline echoes 'Permission mode: \$PERM_DESC' (single-var interpolation, no nested substitution)"
 

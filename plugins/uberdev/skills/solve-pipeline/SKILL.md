@@ -229,7 +229,10 @@ fi
 # --full is an alias for medium/large (keeps current behavior)
 [[ "$OVERRIDE" == "full" ]] && OVERRIDE="medium"
 
-# AUTO_PERMISSIONS precedence (controls --permission-mode auto on the spawned agent):
+# AUTO_PERMISSIONS precedence (controls --dangerously-skip-permissions on the
+# spawned agent — see lib/dispatch.sh:uberdev_dispatch_resolve_env for the
+# remap rationale: auto-mode is dead in practice, so AUTO now resolves to the
+# same skip-permissions flag as SKIP_PERMISSIONS):
 #   CLI flag > env var > per-repo config > default off.
 # NOTE: AUTO_PERMISSIONS is distinct from AUTO_MODE. AUTO_MODE is set by the
 # caller (solve.md=0, turbo.md=1) to gate turbo-vs-interactive behavior in
@@ -248,16 +251,16 @@ fi
 # form (NOT the v0.21.0 one-liner `echo "Permission mode: $([[…]] && echo
 # … || echo …)"` which trips zsh NOMATCH when re-emitted into a generated
 # .sh — regression guard tests/audit-fixups.test.sh C8).
-# SKIP_PERMISSIONS branch first: observability only — bg-child stdout
-# previously printed "default (manual per-tool gating)" under SKIP_PERMISSIONS=1
-# (#241), which contradicted the actual --dangerously-skip-permissions tier
-# (general-lens finding 3). Matches the PERM_FLAG precedence in
-# lib/dispatch.sh:uberdev_dispatch_resolve_env (skip wins over auto when
-# both are set; same lexical if/elif ordering).
+# Both SKIP_PERMISSIONS and AUTO_PERMISSIONS branches now resolve to the
+# bypass tier (post-#241 follow-up — auto-mode is dead in practice; see
+# lib/dispatch.sh:uberdev_dispatch_resolve_env doc block). The if/elif
+# ordering is preserved for observability — the PERM_DESC string distinguishes
+# which env var the caller set so post-hoc grep can attribute the bypass to
+# /goal (SKIP) vs /turbo --auto / /solve --auto (AUTO).
 if [[ "${SKIP_PERMISSIONS:-0}" == "1" ]]; then
-  PERM_DESC="bypass (--dangerously-skip-permissions)"
+  PERM_DESC="bypass (--dangerously-skip-permissions; SKIP_PERMISSIONS tier — /goal autonomous loop)"
 elif [[ "$AUTO_PERMISSIONS" == "1" ]]; then
-  PERM_DESC="auto (Claude Code AI classifier)"
+  PERM_DESC="bypass (--dangerously-skip-permissions; AUTO_PERMISSIONS tier — /turbo --auto / /solve --auto)"
 else
   PERM_DESC="default (manual per-tool gating)"
 fi

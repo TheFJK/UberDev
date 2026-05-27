@@ -143,15 +143,18 @@ else
 fi
 
 echo
-echo '== R3: PERM_FLAG array form preserves AUTO_PERMISSIONS-mode word-split =='
-# Same composition but with PERM_FLAG populated. AUTO_PERMISSIONS=1 is the
-# /solve --auto path; pre-PR-#88 this also broke under zsh, but the bug
-# slept because most invocations leave AUTO_PERMISSIONS unset.
+echo '== R3: PERM_FLAG array form survives zsh expansion under AUTO_PERMISSIONS / SKIP_PERMISSIONS path =='
+# Post-#241 follow-up: AUTO_PERMISSIONS and SKIP_PERMISSIONS both resolve to
+# `PERM_FLAG=( --dangerously-skip-permissions )` (single-token flag). R3 verifies
+# the single-token form does not get mangled by zsh expansion when re-emitted into
+# a generated launcher .sh. The two-token zsh-array-word-split regression guard
+# (the historical R3 concern when PERM_FLAG was --permission-mode auto) now lives
+# in R2's --effort max path — multi-token coverage is preserved there.
 CAPTURE_FILE_2="$(mktemp)"
 (
   export CLAUDE_ARGV_CAPTURE="$CAPTURE_FILE_2"
   EFFORT_LEVEL=max
-  PERM_FLAG=( --permission-mode auto )
+  PERM_FLAG=( --dangerously-skip-permissions )
   EFFORT_FLAG=( --effort "$EFFORT_LEVEL" )
   TIMEOUT_BIN=""
   SOLVE_TIMEOUT=10
@@ -168,17 +171,19 @@ CAPTURE_FILE_2="$(mktemp)"
 if [ ! -s "$CAPTURE_FILE_2" ]; then
   fail "R3 precondition: claude stub did not execute or wrote nothing"
 else
-  if grep -qx -- '--permission-mode' "$CAPTURE_FILE_2" && grep -qx 'auto' "$CAPTURE_FILE_2"; then
-    pass "R3a: '--permission-mode' and 'auto' captured as separate argv slots under zsh"
+  if grep -qx -- '--dangerously-skip-permissions' "$CAPTURE_FILE_2"; then
+    pass "R3a: '--dangerously-skip-permissions' captured as a single argv slot under zsh"
   else
-    fail "R3a: AUTO_PERMISSIONS path collapsed under zsh"
+    fail "R3a: AUTO_PERMISSIONS/SKIP_PERMISSIONS path failed to emit --dangerously-skip-permissions"
     echo "        argv dump (one slot per line):"
     printf '          %s\n' "${(@f)$(cat "$CAPTURE_FILE_2")}"
   fi
+  # Regression guard: --permission-mode auto MUST NOT appear in the spawned argv
+  # (auto-mode-collapse regression — see lib/dispatch.sh and tests/dispatch-claude-bg.test.sh).
   if grep -qx -- '--permission-mode auto' "$CAPTURE_FILE_2"; then
-    fail "R3b: scalar-form relapse — '--permission-mode auto' appeared as a single argv slot"
+    fail "R3b: auto-mode-collapse regression — '--permission-mode auto' re-appeared in spawned argv after post-#241 collapse"
   else
-    pass "R3b: no '--permission-mode auto' collapsed-slot relapse"
+    pass "R3b: '--permission-mode auto' does NOT appear in spawned argv (auto-mode-collapse regression guard intact)"
   fi
 fi
 
