@@ -38,4 +38,12 @@ A wall-clock cap (default 4h, see `--barrier-timeout=N`) escalates a stuck barri
 - `feedback_brainstorm_no_gates.md`: `/turbo` runs non-interactive (no human gates) because `/goal` dispatches `/turbo --turbo`; parallel research + always-on agent reviewers still run.
 - **RED-override NEVER inherited:** `--i-know-what-im-doing` is NOT threaded through any `/goal` logic — RED PRs (BLOCKER findings or `halted_due_to_overflow`) cannot be merged inside `/goal` even if the operator passes the override to a downstream `/merge` (D14). The flag is mentioned here exactly once, in this negative call-out, by design.
 
+## Permission requirements (cmux/hooks caveat)
+
+`/goal` runs each dispatched bg `/turbo` agent in `bypassPermissions` mode (the `--dangerously-skip-permissions` argv flag) so the autonomous loop does not stall on cmux's `PermissionRequest` hook (or any other `--settings`-injected `PreToolUse` hook). This is set by `goal-pipeline/SKILL.md` Phase 0 via `export SKIP_PERMISSIONS=1` and propagated through `BG_TURBO_ENV` in `lib/dispatch.sh` to every nested child dispatch (`/turbo` → `/orchestrator` → `subagent-driven-dev`).
+
+**Important:** settings like `"skipDangerousModePermissionPrompt": true` in your own `~/.claude/settings.json` are **NOT** sufficient when cmux (or another daemon manager) injects its own `--settings <blob>` into the bg session's `respawnFlags`. The user-settings path is shadowed at bg-dispatch time. The env-var path (`SKIP_PERMISSIONS=1` → `--dangerously-skip-permissions` in argv) is what actually unblocks the loop.
+
+Standalone `/uberdev:turbo` and `/uberdev:solve` defensively `unset SKIP_PERMISSIONS` so a stale shell export from an earlier `/goal` run cannot silently elevate them. Outside `/goal`, operator-gated permissions are preserved by design (RFC 0005 §2.3 scoped-relaxation contract).
+
 Now invoke the `uberdev:goal-pipeline` skill — it owns the 5-phase pipeline (preflight, dispatch, watch, collect-next, converge/halt). The skill renders inline, so `$ARGUMENTS` remains in scope for its logic.
