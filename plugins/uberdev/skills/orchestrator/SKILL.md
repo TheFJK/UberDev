@@ -217,11 +217,10 @@ else
           continue
         fi
 
-        # file-intersection check (fail-open per policy above). The `-v c1=1`
-        # parameterisation prevents the Skill renderer from substituting positional
-        # args of $ARGUMENTS into the awk field ref — same defence as the single-
-        # line awks above; multi-line awk bodies are equally vulnerable because
-        # the renderer scans the SKILL.md body text-blind (issue #222).
+        # file-intersection check (fail-open per policy above). Same #222
+        # defence as the line-199 awk above; multi-line awk bodies are
+        # equally vulnerable because the renderer scans the SKILL.md body
+        # text-blind, not single-quote-aware.
         FILES_INVESTIGATED="$(awk -v c1=1 '
           /^## Files investigated/ { capture=1; next }
           /^## / { capture=0 }
