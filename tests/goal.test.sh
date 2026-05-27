@@ -288,11 +288,11 @@ assert_no_grep "$GOAL_LIB" '\bbash -c'                                   "G19.no
 assert_grep "$GOAL_CMD" '--i-know-what-im-doing'                         "G19.r12-mentioned-once"
 
 echo
-echo "== G20: version bump locked (0.34.5) =="
-assert_grep "$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json" '"version": "0\.34\.5"'  "G20.plugin-json"
-assert_grep "$REPO_ROOT/.claude-plugin/marketplace.json"            '"version": "0\.34\.5"'  "G20.marketplace-json"
-assert_grep "$REPO_ROOT/README.md"                                  'version-0\.34\.5-blue'  "G20.readme-badge"
-assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.34\.5\]'        "G20.changelog"
+echo "== G20: version bump locked (0.34.6) =="
+assert_grep "$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json" '"version": "0\.34\.6"'  "G20.plugin-json"
+assert_grep "$REPO_ROOT/.claude-plugin/marketplace.json"            '"version": "0\.34\.6"'  "G20.marketplace-json"
+assert_grep "$REPO_ROOT/README.md"                                  'version-0\.34\.6-blue'  "G20.readme-badge"
+assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.34\.6\]'        "G20.changelog"
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
 
 assert_grep "$GOAL_SKILL" 'uberdev_dispatch_resolve_env'  "G20b.phase0-wires-resolve-env (#175 SSOT anchor)"
@@ -443,7 +443,7 @@ echo
 echo "== G32: uberdev_goal_review_pr_in_flight in-flight gate shape (issue #220, AC ❷) =="
 assert_grep "$GOAL_LIB" '^uberdev_goal_review_pr_in_flight\(\)'                    "G32.fn-defined"
 assert_grep "$GOAL_LIB" 'jq -e --argjson pr'                                       "G32.argjson-pr"
-assert_grep "$GOAL_LIB" '\^/uberdev:review-pr '                                    "G32.anchored-name-regex"
+assert_grep "$GOAL_LIB" '/uberdev:review-pr '                                      "G32.substring-name-regex"
 assert_grep "$GOAL_LIB" '(\$\|\[\^0-9\])'                                          "G32.regex-trailing-boundary"
 assert_grep "$GOAL_LIB" 'busy\|running\|starting\|working'                         "G32.status-whitelist"
 assert_grep "$GOAL_SKILL" 'uberdev_goal_review_pr_in_flight'                       "G32.called-from-skill"
@@ -2376,7 +2376,7 @@ fi
 #     across successive samples)
 # Each test uses `bash -c` to keep the parent suite's mocks/state pristine.
 
-echo "== BT76: uberdev_goal_review_pr_in_flight returns 0/1 by anchored-regex match =="
+echo "== BT76: uberdev_goal_review_pr_in_flight returns 0/1 by substring-regex match =="
 _bt76() {
   local pr="$1" expected_rc="$2" label="$3"
   bash -c '
@@ -2393,9 +2393,26 @@ _bt76() {
     FAIL=$((FAIL+1)); echo "  FAIL  $label (rc=$got want=$expected_rc)" >&2
   fi
 }
+_bt76_nl() {
+  local pr="$1" expected_rc="$2" label="$3"
+  bash -c '
+    claude() { printf "%s\n" "[{\"name\":\"Invoke the slash command /uberdev:review-pr 42 now. Do not respond conversationally — execute it.\",\"status\":\"busy\"}]"; }
+    export -f claude
+    . "'"$DISPATCH_LIB"'"
+    . "'"$GOAL_LIB"'"
+    uberdev_goal_review_pr_in_flight '"$pr"'
+  '
+  local got=$?
+  if [ "$got" -eq "$expected_rc" ]; then
+    PASS=$((PASS+1)); echo "  PASS  $label (rc=$got)"
+  else
+    FAIL=$((FAIL+1)); echo "  FAIL  $label (rc=$got want=$expected_rc)" >&2
+  fi
+}
 _bt76 42  0 "BT76.match-42"
 _bt76 43  1 "BT76.no-match-43"
-_bt76 421 1 "BT76.no-match-421-anchor (regression: 42 must not match 421)"
+_bt76 421 1 "BT76.no-match-421-boundary (regression: 42 must not match 421)"
+_bt76_nl 42  0 "BT76.match-nl-wrapper (post-#235 prompt body shape matches probe regex)"
 
 echo "== BT77: Phase 2c emits goal_merge_deferred with mock in-flight /review-pr (issue #220 AC ❷) =="
 # B5 (post-impl-review): the original BT77 verified (a) the deferred event was

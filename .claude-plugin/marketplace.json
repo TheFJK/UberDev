@@ -9,7 +9,7 @@
       "name": "uberdev",
       "source": "./plugins/uberdev",
       "description": "GitHub workflow commands + full Superpowers skill suite (brainstorm with visual companion, write-plan, execute-plan, subagent-driven-dev wave-based parallel execution, finish-branch, systematic-debugging, TDD, worktrees, parallel-agents, verification, code-review pair, writing-skills, using-uberdev primer) and PR review agents. /solve and /turbo dispatch autonomous agents via a platform-aware dispatch backend (claude-bg / wezterm / background; auto-selected per OS — cross-platform on macOS, WSL2, native Windows); /issue creates well-investigated, deduped issues.",
-      "version": "0.34.5",
+      "version": "0.34.6",
       "category": "workflow",
       "tags": [
         "github",
