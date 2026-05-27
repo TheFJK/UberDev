@@ -5,7 +5,7 @@
 # (docs/uberdev/plans/2026-05-21-uberdev-goal.md §Task 4):
 #   G1   commands/goal.md + skills/goal-pipeline/SKILL.md frontmatter
 #   G2   PR state machine enum (8 states)
-#   G3   Issue state machine enum (5 states)
+#   G3   Issue state machine enum (6 states — `dispatched` pre-spawn guard added in #236)
 #   G4   Trust-signal handling (GREEN dispatches merge, YELLOW=critical,
 #        RED=blocker, stale via phase2_5)
 #   G5   Blocker-unblock chain (Blocks: #N regex, held states,
@@ -93,9 +93,12 @@ echo "== G2 + G3: state machine enums =="
 assert_grep "$GOAL_SKILL" \
   'dispatched\|pushed-reviewing\|green\|yellow-held\|red-held\|merging\|merged\|merge-failed' \
   "G2.pr-state-machine"
-# 5-state issue machine: all 5 names appear in the enum constant on a single line.
+# 6-state issue machine: all 6 names appear in the enum constant on a single line.
+# `dispatched` is the pre-spawn guard state added in #236 to close the
+# leaf-crash-pre-state-write double-spawn surface (see G24b for the Phase-1
+# integration and BT80-BT82 for the behavioural coverage).
 assert_grep "$GOAL_SKILL" \
-  'input\|solving\|pr-pushed\|resolved\|failed' \
+  'input\|dispatched\|solving\|pr-pushed\|resolved\|failed' \
   "G3.issue-state-machine"
 
 echo
@@ -288,11 +291,11 @@ assert_no_grep "$GOAL_LIB" '\bbash -c'                                   "G19.no
 assert_grep "$GOAL_CMD" '--i-know-what-im-doing'                         "G19.r12-mentioned-once"
 
 echo
-echo "== G20: version bump locked (0.34.6) =="
-assert_grep "$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json" '"version": "0\.34\.6"'  "G20.plugin-json"
-assert_grep "$REPO_ROOT/.claude-plugin/marketplace.json"            '"version": "0\.34\.6"'  "G20.marketplace-json"
-assert_grep "$REPO_ROOT/README.md"                                  'version-0\.34\.6-blue'  "G20.readme-badge"
-assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.34\.6\]'        "G20.changelog"
+echo "== G20: version bump locked (0.34.7) =="
+assert_grep "$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json" '"version": "0\.34\.7"'  "G20.plugin-json"
+assert_grep "$REPO_ROOT/.claude-plugin/marketplace.json"            '"version": "0\.34\.7"'  "G20.marketplace-json"
+assert_grep "$REPO_ROOT/README.md"                                  'version-0\.34\.7-blue'  "G20.readme-badge"
+assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.34\.7\]'        "G20.changelog"
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
 
 assert_grep "$GOAL_SKILL" 'uberdev_dispatch_resolve_env'  "G20b.phase0-wires-resolve-env (#175 SSOT anchor)"
@@ -367,6 +370,40 @@ assert_grep "$GOAL_SKILL" 'uberdev_read_int_in_range goal\.max_parallel UBERDEV_
 assert_grep "$GOAL_SKILL" '_UBERDEV_GOAL_DEFAULT_MAX_PARALLEL=3'         "G24.default-constant"
 # Dry-run preview surfaces MAX_PARALLEL.
 assert_grep "$GOAL_SKILL" 'MAX_PARALLEL'                                  "G24.dry-run-mentions-cap"
+
+echo
+echo "== G24b: Phase 1 writes 'dispatched' PRE-spawn + extended skip-check (issue #236) =="
+# Issue #236: parent must transition input->dispatched BEFORE uberdev_dispatch_one
+# so a leaf crash between spawn and the post-spawn solving write cannot produce
+# a double-spawn on the next cycle. Skip-check must include `dispatched`.
+# Enum constant must include `dispatched` (grep -F literal — `|` is grep alternation under -E).
+if grep -qF "GOAL_ISSUE_STATE_ENUM='input|dispatched|solving|pr-pushed|resolved|failed'" "$GOAL_SKILL"; then
+  PASS=$((PASS+1)); echo "  PASS  G24b.enum-includes-dispatched"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  G24b.enum-includes-dispatched (literal enum string not found in SKILL.md)" >&2
+fi
+# Skip-check matches all three pre-resolved in-flight states (literal alternation in case-arm).
+if grep -qF 'dispatched|solving|pr-pushed) continue' "$GOAL_SKILL"; then
+  PASS=$((PASS+1)); echo "  PASS  G24b.skip-check-extended-to-dispatched"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  G24b.skip-check-extended-to-dispatched (literal case-arm not found)" >&2
+fi
+# Pre-spawn transition (input->dispatched) appears BEFORE uberdev_dispatch_one.
+# An awk one-shot keeps the line-order check unambiguous: the input->dispatched
+# transition must precede the uberdev_dispatch_one call inside Phase 1.
+_g24b_pre_spawn_line="$(grep -nF 'input dispatched' "$GOAL_SKILL" | head -1 | cut -d: -f1)"
+_g24b_dispatch_call_line="$(grep -nE 'uberdev_dispatch_one "\$ISSUE_NUM"' "$GOAL_SKILL" | head -1 | cut -d: -f1)"
+if [ -n "$_g24b_pre_spawn_line" ] && [ -n "$_g24b_dispatch_call_line" ] \
+   && [ "$_g24b_pre_spawn_line" -lt "$_g24b_dispatch_call_line" ]; then
+  PASS=$((PASS+1)); echo "  PASS  G24b.input-to-dispatched-precedes-dispatch_one"
+else
+  FAIL=$((FAIL+1))
+  echo "  FAIL  G24b.input-to-dispatched-precedes-dispatch_one (pre-spawn line=$_g24b_pre_spawn_line, dispatch line=$_g24b_dispatch_call_line)" >&2
+fi
+# Post-spawn solving transition: dispatched->solving on success path.
+assert_grep "$GOAL_SKILL" 'dispatched solving' "G24b.dispatched-to-solving-post-spawn"
+# Dispatch-failure path transitions dispatched->failed (no leaf, no PR; explicit cleanup).
+assert_grep "$GOAL_SKILL" 'dispatched failed' "G24b.dispatched-to-failed-on-dispatch-failure"
 
 echo
 echo "== G25: Phase 1 dispatch loop honours MAX_PARALLEL cap (#211 AC2) =="
@@ -2582,6 +2619,72 @@ else
 fi
 rm -f "$bt79_capture" "$bt79_audit_jsonl"
 
+# ----- BT80-BT82 — `dispatched` issue-state pre-spawn guard (issue #236) -----
+# Closes the leaf-crash-pre-state-write double-spawn surface. The parent now
+# transitions input->dispatched BEFORE uberdev_dispatch_one and dispatched->
+# solving (or dispatched->failed) AFTER. The Phase-1 skip-check in SKILL.md
+# matches `dispatched|solving|pr-pushed`, so a leaf crash between dispatch
+# and the post-spawn solving write never produces a double-spawn on the next
+# cycle. BT80 covers the new valid transitions; BT81 covers the invalid ones
+# the case-block must still reject; BT82 simulates the leaf-crash scenario
+# and asserts the skip-check matches on cycle 2.
+
+echo "== BT80: new 'dispatched' valid transitions (issue #236) =="
+uberdev_goal_issue_state_transition test-bt80 600 input dispatched      2>/dev/null
+assert_rc "$?" "0" "BT80.a-input-to-dispatched"
+uberdev_goal_issue_state_transition test-bt80 600 dispatched solving    2>/dev/null
+assert_rc "$?" "0" "BT80.b-dispatched-to-solving"
+uberdev_goal_issue_state_transition test-bt80 601 input dispatched      2>/dev/null
+assert_rc "$?" "0" "BT80.c-input-to-dispatched-second-issue"
+uberdev_goal_issue_state_transition test-bt80 601 dispatched failed     2>/dev/null
+assert_rc "$?" "0" "BT80.d-dispatched-to-failed-on-dispatch-rc-nonzero"
+
+echo "== BT81: invalid 'dispatched' transitions still rejected (issue #236) =="
+# Backwards / terminal-exit / skip-state guards remain for the new state.
+uberdev_goal_issue_state_transition test-bt81 700 dispatched input      2>/dev/null
+assert_rc "$?" "2" "BT81.a-dispatched-to-input-backwards"
+uberdev_goal_issue_state_transition test-bt81 700 dispatched pr-pushed  2>/dev/null
+assert_rc "$?" "2" "BT81.b-dispatched-to-pr-pushed-skip-solving"
+uberdev_goal_issue_state_transition test-bt81 700 dispatched resolved   2>/dev/null
+assert_rc "$?" "2" "BT81.c-dispatched-to-resolved-skip-states"
+uberdev_goal_issue_state_transition test-bt81 700 resolved dispatched   2>/dev/null
+assert_rc "$?" "2" "BT81.d-resolved-terminal-cannot-go-to-dispatched"
+uberdev_goal_issue_state_transition test-bt81 700 failed dispatched     2>/dev/null
+assert_rc "$?" "2" "BT81.e-failed-terminal-cannot-go-to-dispatched"
+
+echo "== BT82: leaf-crash-pre-state-write skip-check guards re-dispatch (issue #236) =="
+# Simulates the exact failure mode #236 describes: cycle 1 writes `dispatched`
+# pre-spawn, the leaf crashes before parent writes `solving`, cycle 2's
+# Phase-1 skip-check reads the TSV and MUST NOT re-dispatch. Mirrors the
+# Phase-1 skip-check shape (case "$current_state" in dispatched|solving|pr-pushed)
+# without sourcing SKILL.md (the loop is markdown-embedded).
+_bt82_tsv="$_b12_tmpdir/goal-test-bt82-issue-states.tsv"
+uberdev_goal_issue_state_transition test-bt82 800 input dispatched 2>/dev/null
+# Read the LATEST state for issue 800 (mirrors SKILL.md:221 awk pattern).
+_bt82_state="$(awk -v i=800 -v c1=1 -v c2=2 '{state[$c1]=$c2} END {print state[i]}' "$_bt82_tsv" 2>/dev/null)"
+assert_eq "$_bt82_state" "dispatched" "BT82.a-tsv-state-is-dispatched-after-pre-spawn-write"
+# Simulate cycle 2 Phase-1 skip-check.
+_bt82_skipped=0
+case "$_bt82_state" in
+  dispatched|solving|pr-pushed) _bt82_skipped=1 ;;
+esac
+assert_eq "$_bt82_skipped" "1" "BT82.b-skip-check-matches-dispatched-prevents-double-spawn"
+# Negative control — the pre-fix surface. Cycle 1 never wrote any pre-spawn
+# state, so cycle 2's awk read the TSV and got EMPTY (no row exists for an
+# issue that was never transitioned). The empty awk output is what fell
+# through the old `solving|pr-pushed` skip-check and triggered the silent
+# re-dispatch. Read an issue that was never transitioned to surface the
+# actual pre-fix awk output (NOT a hardcoded "input" string — that string is
+# never written to the TSV; no `*->input` transition exists per
+# uberdev_goal_issue_state_transition's case-arm).
+_bt82_pre_fix_state="$(awk -v i=801 -v c1=1 -v c2=2 '{state[$c1]=$c2} END {print state[i]}' "$_bt82_tsv" 2>/dev/null)"
+assert_eq "$_bt82_pre_fix_state" "" "BT82.c-pre-fix-awk-output-is-empty-not-input"
+_bt82_skipped_pre_fix=0
+case "$_bt82_pre_fix_state" in
+  dispatched|solving|pr-pushed) _bt82_skipped_pre_fix=1 ;;
+esac
+assert_eq "$_bt82_skipped_pre_fix" "0" "BT82.d-skip-check-NOT-match-empty-pre-fix-regression-guard"
+
 # Cleanup: remove the isolated tmpdir contents (we created the whole
 # directory via mktemp -d, so we can rm -rf safely — it's our own).
 # The single blanket rm subsumes every per-BT artifact (TSVs, audit
@@ -2595,6 +2698,9 @@ rm -rf "$_b12_tmpdir/goal-test-bt54"* 2>/dev/null || true
 rm -rf "$_b12_tmpdir/goal-test-bt55"* 2>/dev/null || true
 rm -rf "$_b12_tmpdir/goal-test-bt57"* 2>/dev/null || true
 rm -rf "$_b12_tmpdir/goal-test-bt58"* 2>/dev/null || true
+rm -rf "$_b12_tmpdir/goal-test-bt80"* 2>/dev/null || true
+rm -rf "$_b12_tmpdir/goal-test-bt81"* 2>/dev/null || true
+rm -rf "$_b12_tmpdir/goal-test-bt82"* 2>/dev/null || true
 rm -f "$_b12_tmpdir"/goal-bt5-*-merge-attempts.tsv 2>/dev/null || true
 rm -rf "$_b12_tmpdir" 2>/dev/null || true
 

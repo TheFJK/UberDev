@@ -4,6 +4,21 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.7] — 2026-05-27
+
+### Fixed
+- **`/uberdev:goal` Phase-1 skip-check re-dispatched issues on leaf-side pre-state-write crashes (Closes #236).** The Phase-1 skip-check at `goal-pipeline/SKILL.md:223-225` only matched `solving|pr-pushed` — states the parent wrote AFTER `uberdev_dispatch_one` returned. Any leaf-side failure between the spawn returning success and the post-spawn `solving` write (network blip mid-init, OOM, agent timeout before first state write, the argv-slash bug from #235, any future CLI regression) left the TSV row in its pre-dispatch `input` default, indistinguishable from "never attempted". The next cycle re-read the TSV, fell through the skip-check, and dispatched the issue a second time — producing TWO `solve-issue-N/` worktrees, two zombie `claude agents` sessions, and two `/review-pr` runs against (eventually) two duplicate PRs. Closed by adding a `dispatched` pre-spawn guard state: the parent now writes `input → dispatched` BEFORE calling `uberdev_dispatch_one` and the skip-check matches `dispatched|solving|pr-pushed`, so a leaf failure between spawn and the post-spawn `solving` refinement still leaves a row the next cycle's skip-check sees. The post-spawn `dispatched → solving` transition is now a refinement rather than the load-bearing in-flight signal. On `uberdev_dispatch_one` rc!=0 (hard error, not `claim_collision`), the parent transitions `dispatched → failed` before exiting so the TSV reflects the true terminal state.
+  - State machine extended (`lib/goal-state.sh:430` + RFC 0005 §3.2.2 D2): 6 states (`input → dispatched → solving → pr-pushed → resolved`) with `dispatched → failed`, `solving → failed`, `pr-pushed → failed` sinks. `input → solving` retained for the legacy single-write path; `input → dispatched` and `dispatched → solving|failed` added.
+  - Enum constant (`GOAL_ISSUE_STATE_ENUM`) and Phase-1 prose updated.
+  - BT80-BT82 (goal.test.sh) cover the 3 new valid transitions, 5 new invalid-transition guards, and the leaf-crash-pre-state-write simulation (TSV row written `dispatched`, skip-check matches, no re-dispatch on cycle 2). G24b grep-tests the SKILL.md shape (enum + skip-check + pre-spawn write line-order vs `uberdev_dispatch_one` call + dispatch-failure cleanup).
+  - Companion #235 (argv-slash non-expansion) is one trigger of this surface and is resolved CLI-side; this fix closes the structural weakness so future leaf failures cannot reproduce the double-spawn.
+
+### Notes
+- Version bumped to 0.34.7 across `plugin.json`, `marketplace.json`, the README badge, `CHANGELOG.md`, `tests/goal.test.sh` G20, and `tests/solve-claim.test.sh`. Atomic version-lock surfaces — partial bump is a red CI invariant.
+- Landed via rebase+renumber after 0.34.6 (PR #238, dispatch-argv natural-language fix) collided on the same version slot — `/merge` autopilot caught the collision before publication.
+
+---
+
 ## [0.34.6] — 2026-05-27
 
 ### Fixed
