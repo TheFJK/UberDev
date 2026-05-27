@@ -58,6 +58,9 @@ assert_grep "$DISPATCH_LIB" \
 assert_grep "$DISPATCH_LIB" \
   '"\$\{PERM_FLAG\[@\]\}"' \
   "background backend threads \"\${PERM_FLAG[@]}\" into claude -p"
+assert_grep "$DISPATCH_LIB" \
+  'BG_TURBO_ENV\+=\( SKIP_PERMISSIONS=1 \)' \
+  "BG_TURBO_ENV propagates SKIP_PERMISSIONS to background dispatch arm (#241)"
 
 echo "== Positive: status-file writes + audit payload =="
 assert_grep "$DISPATCH_LIB" \

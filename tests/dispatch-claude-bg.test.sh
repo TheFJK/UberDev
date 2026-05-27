@@ -135,6 +135,16 @@ assert_grep "$DISPATCH_LIB" \
 assert_grep "$DISPATCH_LIB" \
   'PERM_FLAG=\( --permission-mode auto \)' \
   "uberdev_dispatch_resolve_env AUTO_PERMISSIONS branch populates PERM_FLAG as an array, not a scalar"
+assert_grep "$DISPATCH_LIB" \
+  'PERM_FLAG=\( --dangerously-skip-permissions \)' \
+  "uberdev_dispatch_resolve_env SKIP_PERMISSIONS branch populates PERM_FLAG with the bypass flag (#241)"
+assert_grep "$DISPATCH_LIB" \
+  'BG_TURBO_ENV\+=\( SKIP_PERMISSIONS=1 \)' \
+  "BG_TURBO_ENV propagates SKIP_PERMISSIONS to nested child dispatches (#241)"
+assert_grep "$REPO_ROOT/plugins/uberdev/commands/turbo.md" 'unset SKIP_PERMISSIONS' \
+  "T-no-skip-turbo (#241 pollution defence — turbo defends against stale /goal export)"
+assert_grep "$REPO_ROOT/plugins/uberdev/commands/solve.md" 'unset SKIP_PERMISSIONS' \
+  "T-no-skip-solve (#241 pollution defence — solve is interactive, never auto-elevates)"
 assert_grep "$SOLVE_PIPELINE" \
   '_uberdev_audit_emit effort_resolved' \
   "Phase A emits effort_resolved audit event with {source, level}"
@@ -568,7 +578,7 @@ echo
 echo "== #175 D-iso: uberdev_dispatch_resolve_env populates env from a clean shell =="
 (
   set +u
-  unset TIMEOUT_BIN SOLVE_TIMEOUT MODEL BG_PROMPT_MODE PERM_FLAG EFFORT_FLAG AUTO_PERMISSIONS EFFORT_LEVEL
+  unset TIMEOUT_BIN SOLVE_TIMEOUT MODEL BG_PROMPT_MODE PERM_FLAG EFFORT_FLAG AUTO_PERMISSIONS SKIP_PERMISSIONS EFFORT_LEVEL
   CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
   # shellcheck disable=SC1090
   . "$DISPATCH_LIB"
@@ -594,6 +604,36 @@ echo "== #175 D-perm: AUTO_PERMISSIONS=1 yields --permission-mode auto =="
   . "$DISPATCH_LIB"
   uberdev_dispatch_resolve_env
   [[ "${PERM_FLAG[*]}" == "--permission-mode auto" ]] && { echo "  PASS  D-perm PERM_FLAG=( --permission-mode auto )"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-perm PERM_FLAG=( ${PERM_FLAG[*]} )"; FAIL=$((FAIL + 1)); }
+  printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
+) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
+
+echo
+echo "== #241 D-skip: SKIP_PERMISSIONS=1 yields --dangerously-skip-permissions =="
+(
+  set +u
+  unset TIMEOUT_BIN SOLVE_TIMEOUT MODEL BG_PROMPT_MODE PERM_FLAG EFFORT_FLAG AUTO_PERMISSIONS EFFORT_LEVEL
+  CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"; SKIP_PERMISSIONS=1
+  # shellcheck disable=SC1090
+  . "$DISPATCH_LIB"
+  uberdev_dispatch_resolve_env
+  [[ "${PERM_FLAG[*]}" == "--dangerously-skip-permissions" ]] \
+    && { echo "  PASS  D-skip PERM_FLAG=( --dangerously-skip-permissions )"; PASS=$((PASS + 1)); } \
+    || { echo "  FAIL  D-skip PERM_FLAG=( ${PERM_FLAG[*]} )"; FAIL=$((FAIL + 1)); }
+  printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
+) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
+
+echo
+echo "== #241 D-precedence: SKIP_PERMISSIONS=1 + AUTO_PERMISSIONS=1 -> skip wins =="
+(
+  set +u
+  unset TIMEOUT_BIN SOLVE_TIMEOUT MODEL BG_PROMPT_MODE PERM_FLAG EFFORT_FLAG EFFORT_LEVEL
+  CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"; SKIP_PERMISSIONS=1; AUTO_PERMISSIONS=1
+  # shellcheck disable=SC1090
+  . "$DISPATCH_LIB"
+  uberdev_dispatch_resolve_env
+  [[ "${PERM_FLAG[*]}" == "--dangerously-skip-permissions" ]] \
+    && { echo "  PASS  D-precedence skip wins over auto"; PASS=$((PASS + 1)); } \
+    || { echo "  FAIL  D-precedence PERM_FLAG=( ${PERM_FLAG[*]} )"; FAIL=$((FAIL + 1)); }
   printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
 ) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
 
