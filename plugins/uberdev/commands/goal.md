@@ -42,7 +42,7 @@ A wall-clock cap (default 4h, see `--barrier-timeout=N`) escalates a stuck barri
 
 `/goal` runs each dispatched bg `/turbo` agent in `bypassPermissions` mode (the `--dangerously-skip-permissions` argv flag) so the autonomous loop does not stall on cmux's `PermissionRequest` hook (or any other `--settings`-injected `PreToolUse` hook). This is set by `goal-pipeline/SKILL.md` Phase 0 via `export SKIP_PERMISSIONS=1` and propagated through `BG_TURBO_ENV` in `lib/dispatch.sh` to every nested child dispatch (`/turbo` → `/orchestrator` → `subagent-driven-dev`).
 
-**Important:** settings like `"skipDangerousModePermissionPrompt": true` in your own `~/.claude/settings.json` are **NOT** sufficient when cmux (or another daemon manager) injects its own `--settings <blob>` into the bg session's `respawnFlags`. The user-settings path is shadowed at bg-dispatch time. The env-var path (`SKIP_PERMISSIONS=1` → `--dangerously-skip-permissions` in argv) is what actually unblocks the loop.
+**Important:** settings like `"skipDangerousModePermissionPrompt": true` in your own `~/.claude/settings.json` are **NOT** sufficient when cmux (or another daemon manager) injects its own `--settings <blob>` into the bg session's `respawnFlags` via the parent process — the user-settings file is shadowed at bg-dispatch time, not modified on disk. The env-var path (`SKIP_PERMISSIONS=1` → `--dangerously-skip-permissions` in argv) is what actually unblocks the loop.
 
 Standalone `/uberdev:turbo` and `/uberdev:solve` defensively `unset SKIP_PERMISSIONS` so a stale shell export from an earlier `/goal` run cannot silently elevate them. Outside `/goal`, operator-gated permissions are preserved by design (RFC 0005 §2.3 scoped-relaxation contract).
 
