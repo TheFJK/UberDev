@@ -424,15 +424,22 @@ uberdev_goal_pr_state_transition() {
 }
 
 # uberdev_goal_issue_state_transition GOAL_ID ISSUE FROM TO
-# D2 issue machine: input → solving → pr-pushed → resolved; solving → failed
-# and pr-pushed → failed allowed. No audit event (issue transitions are
-# derived state; audit covers PR transitions + cycle boundaries).
+# D2 issue machine: input → dispatched → solving → pr-pushed → resolved;
+# dispatched → failed and solving → failed and pr-pushed → failed allowed.
+# `input → solving` is retained for the legacy single-write path (callers that
+# do not need the pre-spawn guard). The `dispatched` state (issue #236) closes
+# the leaf-crash-pre-state-write double-spawn surface: the parent writes
+# `dispatched` BEFORE uberdev_dispatch_one, so any leaf failure between spawn
+# and the post-spawn `solving` write still leaves a TSV row the Phase-1
+# skip-check (`dispatched|solving|pr-pushed`) can match on the next cycle.
+# No audit event (issue transitions are derived state; audit covers PR
+# transitions + cycle boundaries).
 uberdev_goal_issue_state_transition() {
   local goal_id="$1" issue="$2" from="$3" to="$4"
   _uberdev_goal_validate_id "$goal_id" || return 1   # #156
   _uberdev_goal_validate_int "$issue" || return 1
   case "$from->$to" in
-    "input->solving"|"solving->pr-pushed"|"pr-pushed->resolved"|"solving->failed"|"pr-pushed->failed") ;;
+    "input->dispatched"|"input->solving"|"dispatched->solving"|"dispatched->failed"|"solving->pr-pushed"|"pr-pushed->resolved"|"solving->failed"|"pr-pushed->failed") ;;
     *) printf 'goal-state: invalid issue transition %s->%s\n' "$from" "$to" >&2; return 2 ;;
   esac
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"

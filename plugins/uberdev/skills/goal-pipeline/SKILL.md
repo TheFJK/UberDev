@@ -19,7 +19,7 @@ All audit-event names, state-machine enums, regex shapes, and tunable thresholds
 GOAL_AUDIT_EVENT_ENUM='goal_dispatched|goal_pr_transition|goal_unblock_triggered|goal_cycle_completed|goal_converged|goal_circuit_breaker|goal_merge_deferred|goal_review_pr_deferred|goal_review_grace|goal_reaper_kill|goal_reaper_skipped'
 GOAL_CIRCUIT_BREAKER_REASONS='max_cycles|nonconvergence|stuck_loop|merge_failed|gh_api_failed|unknown_merge_result|queue_empty_not_converged|agent_stuck_on_dialog'
 GOAL_PR_STATE_ENUM='dispatched|pushed-reviewing|green|yellow-held|red-held|merging|merged|merge-failed'
-GOAL_ISSUE_STATE_ENUM='input|solving|pr-pushed|resolved|failed'
+GOAL_ISSUE_STATE_ENUM='input|dispatched|solving|pr-pushed|resolved|failed'
 TRUST_SIGNAL_ENUM='green|yellow|red|stale|missing'
 GOAL_MERGE_RESULT_ENUM='success|conflict|hook_failed|missing'
 _UBERDEV_GOAL_DEFAULT_MAX_CYCLES=5
@@ -42,7 +42,7 @@ Notes on the enums:
 - **`GOAL_AUDIT_EVENT_ENUM`** — the 11 events `lib/goal-state.sh::uberdev_goal_audit` accepts. Any other event name returns non-zero from the helper and is dropped on the floor; consumers grep these literals.
 - **`GOAL_CIRCUIT_BREAKER_REASONS`** — the 8 halt reasons emitted by Phase 2/3/4 inside the `goal_circuit_breaker` payload's `.reason` field. The four original reasons (`max_cycles`, `nonconvergence`, `stuck_loop`, `merge_failed`); two surfaced-failure reasons added during post-impl-review (`gh_api_failed` — Phase 3 `gh issue list` rc!=0 instead of falsely treating an empty candidates list as convergence; `unknown_merge_result` — Phase 2d case default arm for a `uberdev_goal_read_merge_result` value outside the documented `success|conflict|hook_failed|missing` set); and `queue_empty_not_converged` — Phase 3 deterministic halt when the candidate queue is empty but at least one PR is still in a non-terminal state (issue #160; deterministic alternative to the 4h `stuck_loop` wall-clock fallback); and `agent_stuck_on_dialog` (issue #220 — Phase 2 stuck-on-dialog detector, see Component 3.4). The set is closed; new reasons require an RFC amendment.
 - **`GOAL_PR_STATE_ENUM`** — the 8 states the PR machine in `_uberdev_goal_pr_state_machine_valid` recognises. `merged` and `merge-failed` are hard terminal (no further transitions); `yellow-held` and `red-held` are pseudo-terminal for convergence (Phase 3 counts them as terminal so the goal can converge cleanly with held PRs remaining, but the held-PR re-review poll loop in Phase 2 step 2e can still arc them to `green` once a re-review clears the findings, or cross-classify between `yellow-held`/`red-held` if a re-review's trust signal severity changed). `yellow-held → merging` and `red-held → merging` are hard-forbidden (D17 — never merge YELLOW/RED inside `/goal`).
-- **`GOAL_ISSUE_STATE_ENUM`** — the 5 states the issue machine recognises; `pr-pushed → resolved` and the two `→ failed` transitions are the only sinks.
+- **`GOAL_ISSUE_STATE_ENUM`** — the 6 states the issue machine recognises. Happy path: `input → dispatched → solving → pr-pushed → resolved`. `dispatched` (issue #236) is written by the parent BEFORE `uberdev_dispatch_one` so any leaf-side crash between spawn and the post-spawn `solving` write still leaves a TSV row the Phase-1 skip-check (`dispatched|solving|pr-pushed`) matches on the next cycle — closes the silent double-spawn surface where a pre-state-write leaf failure looked identical to "never attempted". `pr-pushed → resolved` and the three `→ failed` sinks (`dispatched`, `solving`, `pr-pushed`) are terminal.
 - **`TRUST_SIGNAL_ENUM`** — the 5 values `uberdev_goal_read_trust_signal` returns. `stale` (phase2_5 missing in audit JSON) and `missing` (audit JSON absent) both trigger `_uberdev_goal_dispatch_review_pr` rather than an assumed GREEN (D17).
 - **`GOAL_MERGE_RESULT_ENUM`** — the 4 values `uberdev_goal_read_merge_result` returns. Maps the merge-pipeline's audit-row events (`merge_executed` for `success`, `pr_parked` with `data.reason ∈ {refused, ambiguous, push-non-ff}` for `conflict`, `pr_parked` with `data.reason == test-fail-exhausted` for `hook_failed`) plus a sentinel `missing` for "no audit row appended yet". Phase 2d's case statement handles each value explicitly; the `*)` default arm emits `goal_circuit_breaker reason=unknown_merge_result` (B7 — defensive guard against future enum drift).
 - **`BLOCKS_LINE_REGEX`** is the anchored ReDoS-safe shape (D9 + T1) used by `_uberdev_goal_parse_blocks_line` in `lib/goal-state.sh`. The Phase 3 prose and the Unblock rule both reference this constant by name; the literal `^Blocks: #([0-9]+)$` appears here once.
@@ -200,7 +200,7 @@ Notes on the enums:
 
 ## Phase 1 — Dispatch (per cycle)
 
-Per cycle, walk the current `queue` and dispatch one `/turbo` agent per eligible issue. Skip issues already in `solving` or `pr-pushed` (resume safety — if Phase 0 was re-entered after a partial run within the same `$UBERDEV_TMPDIR`, in-flight issues must not be re-dispatched).
+Per cycle, walk the current `queue` and dispatch one `/turbo` agent per eligible issue. Skip issues already in `dispatched`, `solving`, or `pr-pushed`. The `dispatched` row is written by the parent BEFORE `uberdev_dispatch_one` (issue #236) so a leaf-side crash between spawn and the post-spawn `solving` write still leaves a row the next cycle's skip-check can match — closing the silent double-spawn surface where a pre-state-write leaf failure (OOM, agent timeout before first state write, future CLI regression) was indistinguishable from "never attempted".
 
 ```bash
 # #171 fresh-shell rehydration — re-source libs (idempotent via _UBERDEV_*_LOADED
@@ -220,8 +220,13 @@ remaining_queue=()
 for ISSUE_NUM in "${queue[@]}"; do
   current_state="$(awk -v i="$ISSUE_NUM" -v c1=1 -v c2=2 '{state[$c1]=$c2} END {print state[i]}' \
     "$UBERDEV_TMPDIR/goal-$GOAL_ID-issue-states.tsv" 2>/dev/null)"
+  # Issue #236 — `dispatched` is the pre-spawn guard state written below before
+  # uberdev_dispatch_one. Adding it to the skip-check closes the leaf-crash-
+  # pre-state-write double-spawn surface: a leaf that crashes between spawn
+  # and the post-spawn `solving` write still leaves a `dispatched` row, so the
+  # next cycle's skip-check matches and never silently re-dispatches.
   case "$current_state" in
-    solving|pr-pushed) continue ;;
+    dispatched|solving|pr-pushed) continue ;;
   esac
 
   # #211 — once the per-cycle cap is hit, defer every remaining eligible issue
@@ -253,10 +258,36 @@ for ISSUE_NUM in "${queue[@]}"; do
   # attempt and the runaway-loop containment (R5) would silently fail open.
   export UBERDEV_GOAL_ID="$GOAL_ID"
 
+  # Issue #236 — pre-spawn state write. input -> dispatched MUST precede
+  # uberdev_dispatch_one so any leaf-side crash (OOM, network blip mid-init,
+  # agent timeout before first state write, future CLI regression) cannot
+  # leave the TSV in `input` state and trigger a silent re-dispatch on cycle
+  # N+1. The Phase-1 skip-check above matches `dispatched` so this row alone
+  # is sufficient — the post-spawn `solving` transition below is a refinement,
+  # not a load-bearing skip-check signal. A transition-validator failure here
+  # is a hard error: the TSV is the SSOT for in-flight tracking and a missed
+  # pre-spawn write would re-open the double-spawn surface.
+  if ! uberdev_goal_issue_state_transition "$GOAL_ID" "$ISSUE_NUM" input dispatched; then
+    printf 'goal: pre-spawn state write failed for issue %s\n' "$ISSUE_NUM" >&2
+    print_summary "$cycle"
+    exit 1
+  fi
+
   # Dispatch via the same lib/dispatch.sh path /solve and /turbo use. Tier is
   # "small" (the prompt is one line; the child does its own triage).
   if uberdev_dispatch_one "$ISSUE_NUM" "small" "$PROMPT_FILE"; then
-    uberdev_goal_issue_state_transition "$GOAL_ID" "$ISSUE_NUM" input solving
+    # Issue #236 post-impl-review (silent-failure-hunter) — the post-spawn
+    # transition is the SSOT for in-flight tracking. Without a fail-loud
+    # guard, a transient TSV append failure here would leave the TSV at
+    # `dispatched` while in-memory state (active_issues, dispatched_this_cycle)
+    # advanced — Phase 2's awk reads `$c2=="solving"` so dispatch_ts is empty
+    # and the timeout logic misfires, or Phase 2 never sees the issue progress.
+    # Mirror the pre-spawn guard above: hard-exit on write failure.
+    if ! uberdev_goal_issue_state_transition "$GOAL_ID" "$ISSUE_NUM" dispatched solving; then
+      printf 'goal: post-spawn state write failed for issue %s (dispatch succeeded, TSV-memory divergence)\n' "$ISSUE_NUM" >&2
+      print_summary "$cycle"
+      exit 1
+    fi
     active_issues+=("$ISSUE_NUM")
     dispatched_this_cycle=$(( dispatched_this_cycle + 1 ))
     # #211 — Note: registration is deferred to Phase 2 step 2a once the PR
@@ -277,6 +308,27 @@ for ISSUE_NUM in "${queue[@]}"; do
     # when it refuses to dispatch a claimed issue. uberdev_dispatch_one does
     # NOT propagate rc=42 — the contract is "any non-zero rc is a dispatch
     # failure"; the audit JSONL is the canonical claim_collision signal.
+    # Issue #236 — `dispatched` row cleanup. The parent wrote `dispatched`
+    # above (line 270), and dispatch_one returned non-zero. Both downstream
+    # branches (claim_collision soft-skip + hard-error fall-through) need to
+    # transition `dispatched -> failed` so the TSV (the audit-trail SSOT) does
+    # not leave a stranded `dispatched` row that the Phase-1 skip-check would
+    # match on a future cycle — tightening "skip THIS cycle" silently to
+    # "skip for goal-lifetime". Hoisted out of both branches per Phase-2
+    # simplify-lens (Quality.3) to eliminate a maintenance-divergence vector
+    # where a future cleanup-contract change would need to be applied in two
+    # places. The cleanup MUST run before the downstream `continue`/`exit 1`
+    # so the TSV reflects the true terminal state — but a cleanup write
+    # failure must not mask the original skip/exit cause, so we warn-and-go
+    # rather than propagate rc. Without the warning the previous `|| true`
+    # form silently orphaned `dispatched` rows on the claim_collision arm
+    # (subsequent cycles match `dispatched|solving|pr-pushed` and skip the
+    # issue forever — silent zombie that blocks /goal convergence). Emit to
+    # stderr so operators see TSV corruption when it happens; the cycle
+    # still proceeds to the skip/exit-causing branch below.
+    if ! uberdev_goal_issue_state_transition "$GOAL_ID" "$ISSUE_NUM" dispatched failed; then
+      printf 'goal: WARN cleanup transition dispatched->failed FAILED for issue %s (TSV-state corruption — manual recovery may be needed)\n' "$ISSUE_NUM" >&2
+    fi
     solve_audit="${SOLVE_AUDIT_LOG:-${UBERDEV_TMPDIR:-/tmp}/solve-audit.jsonl}"
     if [ -f "$solve_audit" ] && \
        grep -q "\"event\":\"claim_collision\".*\"issue\":$ISSUE_NUM" "$solve_audit" 2>/dev/null; then

@@ -94,10 +94,11 @@ Three project-level rules are scoped-relaxed **inside** `/goal` only — the use
 | State        | Meaning                                                              |
 | ------------ | -------------------------------------------------------------------- |
 | `input`      | Initial issue from `$ARGUMENTS` or from a previous cycle's recursion |
+| `dispatched` | Pre-spawn guard (#236) — parent has written this row but not yet called `uberdev_dispatch_one`; matched by the Phase-1 skip-check so a leaf-side crash between spawn and the post-spawn `solving` write cannot trigger a silent re-dispatch on the next cycle |
 | `solving`    | Dispatched to `/turbo`, no PR yet                                    |
 | `pr-pushed`  | Solving PR is in the PR-state machine above                          |
 | `resolved`   | Solving PR transitioned to `merged`                                  |
-| `failed`     | Solving PR transitioned to `merge-failed` OR `/turbo` returned failure |
+| `failed`     | Solving PR transitioned to `merge-failed`, `/turbo` returned failure, or pre-spawn `dispatched` row aborted on dispatch_one rc!=0 |
 
 #### 3.2.3 Dependency graph
 
@@ -325,7 +326,7 @@ Codes are grouped by prefix: **D** (design decisions), **T** (trust/threat bound
 
 | Code | One-sentence definition | See also |
 |------|-------------------------|----------|
-| D2  | Issue state machine: five states `input → solving → pr-pushed → resolved`; `solving → failed` and `pr-pushed → failed` allowed; no audit event on issue transitions (derived state only). | §3.2.2 |
+| D2  | Issue state machine: six states `input → dispatched → solving → pr-pushed → resolved`; `dispatched → failed`, `solving → failed`, and `pr-pushed → failed` allowed; no audit event on issue transitions (derived state only). `dispatched` (issue #236) is the pre-spawn guard the parent writes BEFORE `uberdev_dispatch_one` so any leaf-side failure between spawn and the post-spawn `solving` write still leaves a TSV row the Phase-1 skip-check (`dispatched\|solving\|pr-pushed`) can match — closing the silent double-spawn surface where a pre-state-write leaf crash looked identical to "never attempted". | §3.2.2 |
 | D3  | Audit helper contract: `uberdev_goal_audit` accepts only enum-validated event names and uses manual-escape JSON framing (mirrors `discover.sh:39-53`); unknown events return rc=1. | §3.6 |
 | D4  | GOAL_ID and TMPDIR path-safety rules: `GOAL_ID` is generated with a random suffix, never derived from user-controlled input (attacker could collide TMPDIR paths); `UBERDEV_TMPDIR` is validated against a safe-character allowlist before any file creation. | §3.3 |
 | D8  | Auto-merge eligibility gate: `/goal` only auto-merges a PR when (a) `UBERDEV_GOAL_ID` env is set (provenance check — proves the call is inside a `/goal` run) and (b) per-PR merge attempt count is below `_UBERDEV_GOAL_MAX_MERGE_ATTEMPTS` (default 3). | §3.2.3, T5, R5 |
