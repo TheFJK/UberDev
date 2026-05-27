@@ -16,8 +16,9 @@
 #
 # This static test walks every awk one-liner in the pipeline SKILL.md bodies
 # and asserts no `$1`..`$9` literal field-ref appears inside a single-quoted
-# region. Defense-in-depth: covers all 5 *-pipeline files so a future
-# regression in any of them is caught.
+# region. Defense-in-depth: dynamically discovers every *-pipeline SKILL.md
+# under plugins/uberdev/skills so the guard self-extends as new pipelines
+# are added — a future regression in any of them is caught immediately.
 #
 # Detection algorithm: state-machine walk over each line containing `awk `.
 # Track an in_quote toggle as we encounter `'`; accumulate the bytes seen
@@ -34,16 +35,17 @@ PASS=0; FAIL=0
 echo "## goal-pipeline awk positional-arg-substitution guard (#222)"
 
 # Subjects: every *-pipeline SKILL.md that runs through the args-substituting
-# Skill loader. goal-pipeline was the trigger; the others get the same
+# Skill loader. Dynamic glob so the guard self-extends as new pipelines are
+# added. goal-pipeline was the trigger; every other *-pipeline gets the same
 # defense-in-depth lock so a future regression is caught immediately.
-SUBJECTS=(
-  "$PIPELINE_DIR/goal-pipeline/SKILL.md"
-  "$PIPELINE_DIR/uberscan-pipeline/SKILL.md"
-  "$PIPELINE_DIR/ubersimplify-pipeline/SKILL.md"
-  "$PIPELINE_DIR/merge-pipeline/SKILL.md"
-  "$PIPELINE_DIR/solve-pipeline/SKILL.md"
-  "$PIPELINE_DIR/testers-pipeline/SKILL.md"
-)
+SUBJECTS=()
+for f in "$PIPELINE_DIR"/*-pipeline/SKILL.md; do
+  [ -e "$f" ] && SUBJECTS+=("$f")
+done
+if [ "${#SUBJECTS[@]}" -eq 0 ]; then
+  echo "  FAIL  no *-pipeline/SKILL.md subjects discovered under $PIPELINE_DIR"
+  exit 1
+fi
 
 for SUBJECT in "${SUBJECTS[@]}"; do
   rel="${SUBJECT#"$REPO_ROOT/"}"
