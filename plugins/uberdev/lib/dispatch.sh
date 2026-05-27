@@ -153,7 +153,8 @@ uberdev_dispatch_preflight() {
 # PATH. Does NOT read or write UBERDEV_RESOLVED_BACKEND (that is preflight's;
 # RFC 0005 D15 constrains backend resolution only — env resolution is exempt).
 # Inputs (read with safe defaults so goal-pipeline, which has no arg-parser,
-# can call it): AUTO_PERMISSIONS (default 0), EFFORT_LEVEL (default max).
+# can call it): SKIP_PERMISSIONS (default 0), AUTO_PERMISSIONS (default 0),
+# EFFORT_LEVEL (default max).
 uberdev_dispatch_resolve_env() {
   # BG_PROMPT_MODE: hardcoded `argv` (claude --bg 2.1.139 has no documented
   # --prompt-file / stdin form; the file/stdin arms in _uberdev_dispatch_claude_bg
@@ -165,10 +166,20 @@ uberdev_dispatch_resolve_env() {
 
   # PERM_FLAG: array form (zsh SH_WORD_SPLIT=off would treat a scalar at command
   # position as one argv slot). Empty by default; populated only when the caller
-  # opted into --permission-mode auto via AUTO_PERMISSIONS=1.
+  # opted into a permission tier. SKIP_PERMISSIONS=1 (--dangerously-skip-permissions)
+  # wins over AUTO_PERMISSIONS=1 (--permission-mode auto) when both are set —
+  # /goal opts into the strict bypass so cmux PermissionRequest hooks cannot
+  # stall the autonomous loop on first-tool-use (#241). Both literal lines
+  # PERM_FLAG=() and PERM_FLAG=( --permission-mode auto ) preserved verbatim
+  # for the structural-shape tests in tests/dispatch-claude-bg.test.sh.
+  SKIP_PERMISSIONS="${SKIP_PERMISSIONS:-0}"
   AUTO_PERMISSIONS="${AUTO_PERMISSIONS:-0}"
   PERM_FLAG=()
-  [[ "$AUTO_PERMISSIONS" == "1" ]] && PERM_FLAG=( --permission-mode auto )
+  if [[ "$SKIP_PERMISSIONS" == "1" ]]; then
+    PERM_FLAG=( --dangerously-skip-permissions )
+  elif [[ "$AUTO_PERMISSIONS" == "1" ]]; then
+    PERM_FLAG=( --permission-mode auto )
+  fi
 
   # EFFORT_FLAG: threaded form of EFFORT_LEVEL (default max for callers without
   # an --effort parser, e.g. goal-pipeline). Bash+zsh array.
@@ -342,8 +353,14 @@ _uberdev_dispatch_claude_bg() {
   # UBERDEV_TURBO=1 chain-wide signal for /turbo (AUTO_MODE=1) only; env(1)
   # mediates the inline-prefix because timeout(1) is argv[0]. Empty array
   # under AUTO_MODE=0 -> no-op passthrough.
+  # SKIP_PERMISSIONS=1 is /goal's autonomous-loop opt-in (#241); propagated
+  # to the bg child so its own uberdev_dispatch_resolve_env call sees the
+  # bypass tier. Gates on SKIP_PERMISSIONS directly, NOT on AUTO_MODE — the
+  # defensive `unset` in commands/turbo.md + commands/solve.md is the
+  # pollution gate. `+=` (append) preserves any UBERDEV_TURBO=1 set above.
   local BG_TURBO_ENV=()
   [[ "${AUTO_MODE:-0}" == "1" ]] && BG_TURBO_ENV=( UBERDEV_TURBO=1 )
+  [[ "${SKIP_PERMISSIONS:-0}" == "1" ]] && BG_TURBO_ENV+=( SKIP_PERMISSIONS=1 )
   local BG_PROMPT_MODE="${BG_PROMPT_MODE:-argv}"
   case "$BG_PROMPT_MODE" in
     file)
@@ -484,6 +501,7 @@ _uberdev_dispatch_background() {
   fi
   local BG_TURBO_ENV=()
   [[ "${AUTO_MODE:-0}" == "1" ]] && BG_TURBO_ENV=( UBERDEV_TURBO=1 )
+  [[ "${SKIP_PERMISSIONS:-0}" == "1" ]] && BG_TURBO_ENV+=( SKIP_PERMISSIONS=1 )
   # Detached headless claude -p. cwd = the worktree. `claude -p` print mode
   # is non-interactive and verified on native Windows -> logs cleanly.
   # nohup + `&` + disown fully detach so the agent outlives this shell.
