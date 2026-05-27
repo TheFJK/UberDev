@@ -1,19 +1,35 @@
 #!/usr/bin/env bash
-# tests/skill-renderer-awk-collision.test.sh — drift-guard for issue #222.
+# tests/skill-renderer-awk-collision.test.sh — drift-guard for issue #222
+# (R1/R2/R3, awk surface) and issue #225 (R4/R5, bash surface).
 #
 # The Claude Code Skill loader substitutes positional non-flag args of
 # $ARGUMENTS into the entire SKILL.md body, INCLUDING inside single-quoted
-# awk one-liners. So `awk '$1==p && $2=="x"{t=$3}'` rendered against args
+# awk one-liners AND inside bash function bodies. Two surfaces of the same
+# bug class:
+#
+# awk (#222): `awk '$1==p && $2=="x"{t=$3}'` rendered against args
 # `--max-parallel=1 219 198` becomes `awk '219==p && 198=="x"{t=}'` —
-# corrupting every column ref. The fix is to parameterise the field refs:
+# corrupting every column ref. Fix: parameterise via -v field refs:
 #   awk -v c1=1 -v c2=2 -v c3=3 '$c1==p && $c2=="x"{t=$c3}'
 # The renderer doesn't recognise `$c1` / `$c2` / `$c3` as positional (the
 # char immediately after `$` is `c`, not a digit), so the awk script body
 # is preserved verbatim.
 #
-# This guard scans every plugins/uberdev/skills/*/SKILL.md and fails CI when
-# it finds an awk command whose script body contains a bare `$N` field ref
-# (0-9). Adopt the `-v cN=N` + `$cN` form instead.
+# bash (#225): `emit_topic_log() { echo "x=$1 y=$2"; }` rendered against
+# args `--turbo solve GH issue #225` becomes `echo "x=solve y=GH"` —
+# hardcoding every call site to the same render-time substitution instead
+# of binding at call time. Fix: use bash array-slice positional access:
+#   emit_topic_log() { local x="${@:1:1}"; local y="${@:2:1}"; ... }
+# The `${@:N:1}` form has no dollar-immediately-followed-by-digit substring
+# (the digit follows `:`), so the renderer leaves it verbatim and bash
+# evaluates the slice at call time.
+#
+# R1-R3 scan every plugins/uberdev/skills/*/SKILL.md for the awk shape and
+# fail CI when it finds a bare `$N` field ref inside a single-quoted awk
+# script body. R4 scans orchestrator/SKILL.md for any bare `$N` anywhere
+# (issue #225's stated scope); the broader bash-positional sweep across
+# other pipeline SKILL.md files (7+ known sites in solve/goal/finish/
+# testers/ubersimplify) is a documented follow-up (NOT enforced here).
 #
 # Portable: bash + grep + find + sort + tr. Runs on ubuntu-latest (native
 # bash) and windows-latest (Git Bash) without any extra deps.
@@ -66,7 +82,7 @@ SKILLS_DIR="$REPO_ROOT/plugins/uberdev/skills"
 GUARD_REGEX="awk[^']*'[^']*\\\$[0-9]"
 
 PASS=0; FAIL=0
-echo "## skill-renderer awk-collision drift guard (#222)"
+echo "## skill-renderer collision drift guard (#222 awk + #225 bash)"
 
 if [ ! -d "$SKILLS_DIR" ]; then
   echo "  ABORT — skills directory missing: $SKILLS_DIR"; exit 99
@@ -165,6 +181,76 @@ if grep -qE "$GUARD_REGEX" "$fixture_safe"; then
   FAIL=$((FAIL+1))
 else
   echo "  PASS  R3 the guard regex does NOT false-positive on the safe parameterised shape"
+  PASS=$((PASS+1))
+fi
+
+# R4 — issue #225 follow-up: orchestrator/SKILL.md must contain NO bare `$N`
+# anywhere (any surface, awk OR bash). The orchestrator skill is loaded by
+# both /uberdev:orchestrator (interactive) and the chain-dispatch from
+# /uberdev:solve / /uberdev:turbo, so every $N in its body is at risk.
+# Scope is intentionally narrow to issue #225's stated surface; the broader
+# bash-positional sweep across other pipeline SKILL.md files is documented
+# in the header comment as a follow-up and NOT enforced here (would red CI
+# on 7+ known sites in solve/goal/finish/testers/ubersimplify pipelines).
+ORCH_SKILL="$SKILLS_DIR/orchestrator/SKILL.md"
+if [ ! -r "$ORCH_SKILL" ]; then
+  echo "  FAIL  R4 orchestrator/SKILL.md unreadable: $ORCH_SKILL"
+  FAIL=$((FAIL+1))
+elif grep -qE '\$[0-9]' "$ORCH_SKILL"; then
+  echo "  FAIL  R4 orchestrator/SKILL.md contains bare \$N positional refs:"
+  grep -nE '\$[0-9]' "$ORCH_SKILL" | sed 's/^/          /'
+  echo "         Fix: replace bare \`\$N\` with \`\${@:N:1}\` in bash function bodies"
+  echo "         (or \`-v cN=N\` + \`\$cN\` if inside an awk script body)."
+  FAIL=$((FAIL+1))
+else
+  echo "  PASS  R4 orchestrator/SKILL.md contains no bare \$N positional refs"
+  PASS=$((PASS+1))
+fi
+
+# R5 — fixture proof for the bash surface, mirroring R2/R3 for the awk surface.
+# Two sub-fixtures: (R5.bad) the naïve `local foo="$1"` shape MUST be detected
+# by the R4 regex, and (R5.safe) the recommended `${@:1:1}` shape MUST NOT be
+# detected. Same inside-out check as R2/R3 — if a future refactor narrows the
+# R4 regex (e.g. someone adds an awk-only anchor) and a new bash $N site slips
+# through, R5.bad catches it; if the regex becomes over-broad and false-flags
+# the safe form, R5.safe catches it.
+fixture_bash_bad="$(mktemp)"
+fixture_bash_safe="$(mktemp)"
+trap 'rm -f "$fixture_simple" "$fixture_multi" "$fixture_safe" "$fixture_bash_bad" "$fixture_bash_safe"' EXIT
+
+cat > "$fixture_bash_bad" <<'EOF_BASH_BAD'
+# naive bash positional refs — the renderer would corrupt these at load time
+emit_topic_log() {
+  local topic="$1"
+  local status="$2"
+  local note="$3"
+  echo "research-$topic $status $note"
+}
+EOF_BASH_BAD
+if grep -qE '\$[0-9]' "$fixture_bash_bad"; then
+  echo "  PASS  R5.bad the bare-\$N regex flags a vulnerable bash function body"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  R5.bad the bare-\$N regex no longer flags a vulnerable bash function body"
+  echo "         The R4 check above will silently pass on regressed orchestrator/SKILL.md."
+  FAIL=$((FAIL+1))
+fi
+
+cat > "$fixture_bash_safe" <<'EOF_BASH_SAFE'
+# renderer-safe bash positional refs via array-slice — must NOT be flagged
+emit_topic_log() {
+  local topic="${@:1:1}"
+  local status="${@:2:1}"
+  local note="${@:3:1}"
+  echo "research-$topic $status $note"
+}
+EOF_BASH_SAFE
+if grep -qE '\$[0-9]' "$fixture_bash_safe"; then
+  echo "  FAIL  R5.safe the bare-\$N regex false-positives on \`\${@:N:1}\` array-slice form"
+  echo "         R4 will now red CI on the recommended fix shape."
+  FAIL=$((FAIL+1))
+else
+  echo "  PASS  R5.safe the bare-\$N regex does NOT false-positive on the safe \`\${@:N:1}\` shape"
   PASS=$((PASS+1))
 fi
 
