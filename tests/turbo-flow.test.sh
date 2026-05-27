@@ -180,6 +180,10 @@ assert_grep "$TURBO_CMD" 'export UBERDEV_TURBO=1' \
   "/turbo thin wrapper exports UBERDEV_TURBO=1 (#97 — chain-wide unattended-mode signal)"
 assert_grep "$SOLVE_CMD" 'unset UBERDEV_TURBO' \
   "/solve thin wrapper unsets UBERDEV_TURBO (#97 — defends against shell-rc pollution)"
+assert_grep "$TURBO_CMD" 'unset SKIP_PERMISSIONS' \
+  "T-no-skip-turbo (#241 — /turbo defends against shell-rc pollution from prior /goal SKIP_PERMISSIONS=1 export)"
+assert_grep "$SOLVE_CMD" 'unset SKIP_PERMISSIONS' \
+  "T-no-skip-solve (#241 — /solve is interactive, never auto-elevates regardless of stale /goal export)"
 assert_grep "$TURBO_CMD" \
   'argument-hint:.*<issue-number>.*\[<issue-number>' \
   "/turbo argument-hint documents multi-issue syntax"

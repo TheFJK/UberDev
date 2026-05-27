@@ -127,8 +127,12 @@ Notes on the enums:
    # UBERDEV_RESOLVED_BACKEND is now exported (D15: resolved once, frozen for the run).
    # /goal dispatches /turbo per issue, so mirror /turbo's unattended dispatch env.
    export AUTO_MODE=1            # matches commands/turbo.md (enables UBERDEV_TURBO=1 in the bg env)
-   # AUTO_PERMISSIONS and EFFORT_LEVEL are intentionally left unset -> helper applies
-   # :-0 / :-max defaults (turbo-parity: empty PERM_FLAG, EFFORT_FLAG=( --effort max )).
+   # /goal opts every dispatched bg agent into bypassPermissions so the cmux
+   # PermissionRequest hook (or any --settings-shadowing daemon hook) does not
+   # stall first-tool-use. The autonomous-loop contract requires it; standalone
+   # /turbo + /solve defensively unset this var (see commands/turbo.md and
+   # commands/solve.md). EFFORT_LEVEL stays unset -> helper applies :-max.
+   export SKIP_PERMISSIONS=1     # (#241) /goal autonomous-loop opt-in; propagation via BG_TURBO_ENV — see lib/dispatch.sh BG_TURBO_ENV blocks
    uberdev_dispatch_resolve_env || exit 1   # establishes TIMEOUT_BIN/SOLVE_TIMEOUT/MODEL/PERM_FLAG/EFFORT_FLAG/BG_PROMPT_MODE once
    ```
 

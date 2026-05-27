@@ -4,6 +4,23 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.8] — 2026-05-27
+
+### Fixed
+- **`/uberdev:goal` stalls on cmux-mediated environments — bg agents flap busy/idle without producing PRs (Closes #241).** On macOS + cmux, dispatched bg `/turbo` agents stall on the first `Bash` tool call ("The user doesn't want to proceed with this tool use") because cmux's `PermissionRequest` hook (injected via `--settings <blob>` into the bg session's `respawnFlags`) shadows the user's own `~/.claude/settings.json` and refuses the prompt after a 125 s timeout. The contrast run with a manual `claude --bg --dangerously-skip-permissions` ran cleanly with zero rejections — confirming the strict bypass is the unblocking flag.
+  - Added a third `SKIP_PERMISSIONS` env-var tier to `uberdev_dispatch_resolve_env` (`lib/dispatch.sh`) with strict precedence over `AUTO_PERMISSIONS`. Maps to `PERM_FLAG=( --dangerously-skip-permissions )` when `${SKIP_PERMISSIONS:-0} == 1`. Literal `PERM_FLAG=()` and `PERM_FLAG=( --permission-mode auto )` lines preserved verbatim for structural-shape tests.
+  - `goal-pipeline/SKILL.md` Phase 0 step 4 exports `SKIP_PERMISSIONS=1` unconditionally — the operator's `/uberdev:goal` invocation IS the opt-in to autonomous-convergence; no per-run flag.
+  - Both `BG_TURBO_ENV` blocks (`_uberdev_dispatch_claude_bg` and `_uberdev_dispatch_background`) append `SKIP_PERMISSIONS=1` when set, propagating the env-var across the `env(1)` boundary so nested child dispatches also resolve to the bypass flag. Gates on `${SKIP_PERMISSIONS:-0}` directly (NOT on `AUTO_MODE`) — the semantics are independent of turbo-mode and the defensive `unset` in `/turbo`/`/solve` is the pollution gate.
+  - Defensive `unset SKIP_PERMISSIONS` in `commands/turbo.md` and `commands/solve.md` mirrors the #97 `UBERDEV_TURBO` hardening pattern — prevents shell-rc / stale-session pollution from silently elevating bare invocations.
+  - New "## Permission requirements (cmux/hooks caveat)" section in `commands/goal.md` documents the `--settings`-shadowing failure mode and the env-var path that actually unblocks the loop.
+  - Tests: D-skip + D-precedence behavioural tests (mirror D-perm template); structural greps for `PERM_FLAG=( --dangerously-skip-permissions )` and `BG_TURBO_ENV+=( SKIP_PERMISSIONS=1 )` in both dispatch arms; G20c assertion for `export SKIP_PERMISSIONS=1`; T-no-skip-turbo / T-no-skip-solve negative-test assertions; D-iso unset list updated to include `SKIP_PERMISSIONS`.
+  - Trust-boundary unchanged. The orchestrator's `<external-untrusted-input>` trust-wrap (emitted at prompt-construction time, unaffected by the `--permission-mode` argv flag) remains the defence against prompt-injection. Residual security risk is explicitly accepted as the cost of autonomous-convergence; the alternative (perpetually stalled `/goal`) is worse.
+
+### Notes
+- Version bumped to 0.34.8 across `plugin.json`, `marketplace.json`, the README badge, `CHANGELOG.md`, `tests/goal.test.sh` G20, and `tests/solve-claim.test.sh`. Atomic version-lock surfaces — partial bump is a red CI invariant.
+
+---
+
 ## [0.34.7] — 2026-05-27
 
 ### Fixed
