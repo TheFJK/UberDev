@@ -81,6 +81,16 @@ SKILLS_DIR="$REPO_ROOT/plugins/uberdev/skills"
 # file; the operator greps for the site).
 GUARD_REGEX="awk[^']*'[^']*\\\$[0-9]"
 
+# Bash-surface regex (#225). Bare `$N` anywhere in a bash script context —
+# function body, command substitution, here-doc — gets substituted by the
+# Skill renderer just as awk script bodies do. Used by R4 (scans
+# orchestrator/SKILL.md) and the R5 inverse fixtures. SSOT'd here for the
+# same reason GUARD_REGEX is SSOT'd above — if a future contributor narrows
+# the pattern (e.g. `\$[1-9]` to skip `$0`), the inverse-fixture proofs
+# (R5.bad / R5.safe) re-evaluate against the SAME pattern, not an
+# independent literal that silently diverges.
+BASH_GUARD_REGEX='\$[0-9]'
+
 PASS=0; FAIL=0
 echo "## skill-renderer collision drift guard (#222 awk + #225 bash)"
 
@@ -110,14 +120,20 @@ else
   FAIL=$((FAIL+1))
 fi
 
-# R2 + R3 fixture setup — single trap install up front covers every mktemp.
-# Bash supports ONE EXIT trap per shell; declaring all three fixtures + one
-# trap before any cat-into-fixture avoids the prior two-trap shape where the
-# second silently superseded the first (Phase 2 simplify Quality + Efficiency).
+# Fixture setup — single trap install up front covers every mktemp. Bash
+# supports ONE EXIT trap per shell; declaring ALL fixtures + ONE trap before
+# any cat-into-fixture avoids the prior two-trap shape where the second
+# silently superseded the first (Phase 2 simplify Quality + Efficiency
+# convergence). When R6 / R7+ add their own fixture in a future iteration,
+# add the mktemp here and the rm path to the single trap below — never
+# install a second trap. Original simplify-lens convergence: see PR #224.
 fixture_simple="$(mktemp)"
 fixture_multi="$(mktemp)"
 fixture_safe="$(mktemp)"
-trap 'rm -f "$fixture_simple" "$fixture_multi" "$fixture_safe"' EXIT
+fixture_bash_bad="$(mktemp)"
+fixture_bash_safe="$(mktemp)"
+fixture_emit_topic_log_src="$(mktemp)"
+trap 'rm -f "$fixture_simple" "$fixture_multi" "$fixture_safe" "$fixture_bash_bad" "$fixture_bash_safe" "$fixture_emit_topic_log_src"' EXIT
 
 # R2 — fixture proof: a synthetic SKILL.md fragment containing the bad shape
 # MUST be detected by the same regex. This is an inside-out check that the
@@ -196,9 +212,9 @@ ORCH_SKILL="$SKILLS_DIR/orchestrator/SKILL.md"
 if [ ! -r "$ORCH_SKILL" ]; then
   echo "  FAIL  R4 orchestrator/SKILL.md unreadable: $ORCH_SKILL"
   FAIL=$((FAIL+1))
-elif grep -qE '\$[0-9]' "$ORCH_SKILL"; then
+elif grep -qE "$BASH_GUARD_REGEX" "$ORCH_SKILL"; then
   echo "  FAIL  R4 orchestrator/SKILL.md contains bare \$N positional refs:"
-  grep -nE '\$[0-9]' "$ORCH_SKILL" | sed 's/^/          /'
+  grep -nE "$BASH_GUARD_REGEX" "$ORCH_SKILL" | sed 's/^/          /'
   echo "         Fix: replace bare \`\$N\` with \`\${@:N:1}\` in bash function bodies"
   echo "         (or \`-v cN=N\` + \`\$cN\` if inside an awk script body)."
   FAIL=$((FAIL+1))
@@ -210,13 +226,14 @@ fi
 # R5 — fixture proof for the bash surface, mirroring R2/R3 for the awk surface.
 # Two sub-fixtures: (R5.bad) the naïve `local foo="$1"` shape MUST be detected
 # by the R4 regex, and (R5.safe) the recommended `${@:1:1}` shape MUST NOT be
-# detected. Same inside-out check as R2/R3 — if a future refactor narrows the
-# R4 regex (e.g. someone adds an awk-only anchor) and a new bash $N site slips
-# through, R5.bad catches it; if the regex becomes over-broad and false-flags
-# the safe form, R5.safe catches it.
-fixture_bash_bad="$(mktemp)"
-fixture_bash_safe="$(mktemp)"
-trap 'rm -f "$fixture_simple" "$fixture_multi" "$fixture_safe" "$fixture_bash_bad" "$fixture_bash_safe"' EXIT
+# detected. Same inside-out check as R2/R3 — if a future refactor narrows
+# BASH_GUARD_REGEX (e.g. someone adds an awk-only anchor) and a new bash $N
+# site slips through, R5.bad catches it; if the regex becomes over-broad and
+# false-flags the safe form, R5.safe catches it. R5.bad and R5.safe BOTH
+# re-evaluate against the same BASH_GUARD_REGEX SSOT — not an independent
+# inline literal that could silently diverge from R4's regex.
+# (Fixtures mktemp'd at the top with the other fixtures; single EXIT trap
+# covers them all.)
 
 cat > "$fixture_bash_bad" <<'EOF_BASH_BAD'
 # naive bash positional refs — the renderer would corrupt these at load time
@@ -227,7 +244,7 @@ emit_topic_log() {
   echo "research-$topic $status $note"
 }
 EOF_BASH_BAD
-if grep -qE '\$[0-9]' "$fixture_bash_bad"; then
+if grep -qE "$BASH_GUARD_REGEX" "$fixture_bash_bad"; then
   echo "  PASS  R5.bad the bare-\$N regex flags a vulnerable bash function body"
   PASS=$((PASS+1))
 else
@@ -237,21 +254,75 @@ else
 fi
 
 cat > "$fixture_bash_safe" <<'EOF_BASH_SAFE'
-# renderer-safe bash positional refs via array-slice — must NOT be flagged
+# renderer-safe bash positional refs via array-slice — must NOT be flagged.
+# Local-var name `topic_status` (not `status`) — `status` is read-only in zsh,
+# and the Bash-tool default shell on macOS is /bin/zsh, so `local status=…`
+# aborts the function. See orchestrator/SKILL.md emit_topic_log comment.
 emit_topic_log() {
   local topic="${@:1:1}"
-  local status="${@:2:1}"
+  local topic_status="${@:2:1}"
   local note="${@:3:1}"
-  echo "research-$topic $status $note"
+  echo "research-$topic $topic_status $note"
 }
 EOF_BASH_SAFE
-if grep -qE '\$[0-9]' "$fixture_bash_safe"; then
+if grep -qE "$BASH_GUARD_REGEX" "$fixture_bash_safe"; then
   echo "  FAIL  R5.safe the bare-\$N regex false-positives on \`\${@:N:1}\` array-slice form"
   echo "         R4 will now red CI on the recommended fix shape."
   FAIL=$((FAIL+1))
 else
   echo "  PASS  R5.safe the bare-\$N regex does NOT false-positive on the safe \`\${@:N:1}\` shape"
   PASS=$((PASS+1))
+fi
+
+# R6 — behavioral execution test. The R4/R5 assertions above are static grep
+# scans; they prove the regex correctly classifies syntactic forms but never
+# RUN the fixed emit_topic_log to verify it actually works. The pre-#225-fix
+# review missed a cross-shell regression (`local status="${@:2:1}"` aborts in
+# zsh — `status` is read-only there). R6 sources the live function definition
+# out of orchestrator/SKILL.md, calls it with known args, and asserts the
+# emitted log line under BOTH /bin/bash AND /bin/zsh — the two shells the
+# Skill tool may exec under across macOS / Linux / CI matrices. Without this,
+# a future refactor that re-introduces a zsh-reserved local var name slides
+# past R4 (file scans clean) AND R5 (fixtures pass) but breaks at runtime.
+ORCH_SKILL="$SKILLS_DIR/orchestrator/SKILL.md"
+
+# Extract the emit_topic_log() definition block from the rendered SKILL.md.
+# `awk` slice from the function-open line to the matching `^}` close — same
+# brace-counting idiom as awk-line-bounded parses elsewhere in the suite.
+# Note on awk script: `${@:1:1}` etc. inside the awk body would be substituted
+# by the Skill renderer when THIS test file is loaded as a skill, but tests/*
+# is NEVER rendered as a skill — it's run directly via `bash tests/...sh` and
+# `bash` has no Skill-renderer semantics, so the `${@:N:1}` in the matched
+# function body survives verbatim into the sourced shell.
+# (fixture_emit_topic_log_src mktemp'd at the top; single EXIT trap covers it.)
+
+awk '/^emit_topic_log\(\) \{/,/^\}/' "$ORCH_SKILL" > "$fixture_emit_topic_log_src"
+if [ ! -s "$fixture_emit_topic_log_src" ]; then
+  echo "  FAIL  R6 could not extract emit_topic_log() definition from $ORCH_SKILL"
+  FAIL=$((FAIL+1))
+else
+  # Run under both shells. The harness pipes a LOG file path + the function
+  # body + a single call into the shell, then reads the log line back.
+  for shell_bin in /bin/bash /bin/zsh; do
+    [ -x "$shell_bin" ] || { echo "  PASS  R6.$(basename "$shell_bin") shell not available on this host (skipped, not failed)"; PASS=$((PASS+1)); continue; }
+    log_tmp="$(mktemp)"
+    "$shell_bin" -c "LOG=\"$log_tmp\"; $(cat "$fixture_emit_topic_log_src"); emit_topic_log codebase reused 'cache-hit,mtime=1'" 2>/dev/null
+    actual="$(cat "$log_tmp" 2>/dev/null)"
+    rm -f "$log_tmp"
+    case "$actual" in
+      *"phase=phase1-fanout agent=research-codebase status=reused note=cache-hit,mtime=1"*)
+        echo "  PASS  R6.$(basename "$shell_bin") emit_topic_log emits the expected log line"
+        PASS=$((PASS+1))
+        ;;
+      *)
+        echo "  FAIL  R6.$(basename "$shell_bin") emit_topic_log produced unexpected output:"
+        echo "          actual: $actual"
+        echo "          expected substring: 'agent=research-codebase status=reused note=cache-hit,mtime=1'"
+        echo "         Hint: zsh aborts \`local status=…\` (read-only special parameter) — rename the local."
+        FAIL=$((FAIL+1))
+        ;;
+    esac
+  done
 fi
 
 echo "  Result: $PASS passed, $FAIL failed"
