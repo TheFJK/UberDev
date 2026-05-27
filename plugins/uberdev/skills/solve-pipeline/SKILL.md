@@ -248,7 +248,15 @@ fi
 # form (NOT the v0.21.0 one-liner `echo "Permission mode: $([[…]] && echo
 # … || echo …)"` which trips zsh NOMATCH when re-emitted into a generated
 # .sh — regression guard tests/audit-fixups.test.sh C8).
-if [[ "$AUTO_PERMISSIONS" == "1" ]]; then
+# SKIP_PERMISSIONS branch first: observability only — bg-child stdout
+# previously printed "default (manual per-tool gating)" under SKIP_PERMISSIONS=1
+# (#241), which contradicted the actual --dangerously-skip-permissions tier
+# (general-lens finding 3). Matches the PERM_FLAG precedence in
+# lib/dispatch.sh:uberdev_dispatch_resolve_env (skip wins over auto when
+# both are set; same lexical if/elif ordering).
+if [[ "${SKIP_PERMISSIONS:-0}" == "1" ]]; then
+  PERM_DESC="bypass (--dangerously-skip-permissions; /goal autonomous loop)"
+elif [[ "$AUTO_PERMISSIONS" == "1" ]]; then
   PERM_DESC="auto (Claude Code AI classifier)"
 else
   PERM_DESC="default (manual per-tool gating)"
