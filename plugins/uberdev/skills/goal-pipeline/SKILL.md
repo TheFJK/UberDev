@@ -317,9 +317,18 @@ for ISSUE_NUM in "${queue[@]}"; do
     # "skip for goal-lifetime". Hoisted out of both branches per Phase-2
     # simplify-lens (Quality.3) to eliminate a maintenance-divergence vector
     # where a future cleanup-contract change would need to be applied in two
-    # places. `|| true`: the cycle is about to skip-or-exit anyway and a
-    # failed cleanup write must not mask the original skip/exit cause.
-    uberdev_goal_issue_state_transition "$GOAL_ID" "$ISSUE_NUM" dispatched failed || true
+    # places. The cleanup MUST run before the downstream `continue`/`exit 1`
+    # so the TSV reflects the true terminal state — but a cleanup write
+    # failure must not mask the original skip/exit cause, so we warn-and-go
+    # rather than propagate rc. Without the warning the previous `|| true`
+    # form silently orphaned `dispatched` rows on the claim_collision arm
+    # (subsequent cycles match `dispatched|solving|pr-pushed` and skip the
+    # issue forever — silent zombie that blocks /goal convergence). Emit to
+    # stderr so operators see TSV corruption when it happens; the cycle
+    # still proceeds to the skip/exit-causing branch below.
+    if ! uberdev_goal_issue_state_transition "$GOAL_ID" "$ISSUE_NUM" dispatched failed; then
+      printf 'goal: WARN cleanup transition dispatched->failed FAILED for issue %s (TSV-state corruption — manual recovery may be needed)\n' "$ISSUE_NUM" >&2
+    fi
     solve_audit="${SOLVE_AUDIT_LOG:-${UBERDEV_TMPDIR:-/tmp}/solve-audit.jsonl}"
     if [ -f "$solve_audit" ] && \
        grep -q "\"event\":\"claim_collision\".*\"issue\":$ISSUE_NUM" "$solve_audit" 2>/dev/null; then
