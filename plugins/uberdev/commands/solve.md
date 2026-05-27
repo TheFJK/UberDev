@@ -42,6 +42,7 @@ An audit event `deprecated_flag_used` is recorded for each first-encounter emiss
 ```bash
 export AUTO_MODE=0       # /solve = interactive mode (post-impl-review wired in trivial/small; orchestrator + review-pr hybrid OR detector returns TURBO=0 when neither UBERDEV_TURBO=1 nor --turbo is present, #97)
 unset UBERDEV_TURBO      # NEW (#97): defend against shell-rc pollution from prior /turbo or .zshrc export of UBERDEV_TURBO=1 — MUST run BEFORE Skill('uberdev:solve-pipeline') below so the launcher inherits a clean env
+unset SKIP_PERMISSIONS   # (#241): mirror #97 hardening; /solve is interactive — never auto-elevates regardless of a stale SKIP_PERMISSIONS=1 left over from a prior /goal in the same shell
 ```
 
 Now invoke the `uberdev:solve-pipeline` skill — it owns the bash launcher (arg parsing, repo detection, tier classification, prompt heredoc, terminal spawn, notify, retitle). The skill renders inline, so `$AUTO_MODE` and `$ARGUMENTS` remain in scope for its bash blocks.
