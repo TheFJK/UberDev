@@ -193,8 +193,10 @@ else
           continue
         fi
 
-        # head_sha presence + reachability check.
-        STORED_SHA="$(awk '/^head_sha:/{print $2; exit}' "$F" 2>/dev/null)"
+        # head_sha presence + reachability check. The `-v c2=2` parameterisation
+        # prevents the Skill renderer from substituting positional args of
+        # $ARGUMENTS into the awk field ref (issue #222).
+        STORED_SHA="$(awk -v c2=2 '/^head_sha:/{print $c2; exit}' "$F" 2>/dev/null)"
         if [ -z "$STORED_SHA" ] || ! [[ "$STORED_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
           emit_topic_log "$TOPIC" dispatched "fresh-run,reason=missing-head-sha"
           continue
@@ -215,13 +217,16 @@ else
           continue
         fi
 
-        # file-intersection check (fail-open per policy above).
-        FILES_INVESTIGATED="$(awk '
+        # file-intersection check (fail-open per policy above). Same #222
+        # defence as the line-199 awk above; multi-line awk bodies are
+        # equally vulnerable because the renderer scans the SKILL.md body
+        # text-blind, not single-quote-aware.
+        FILES_INVESTIGATED="$(awk -v c1=1 '
           /^## Files investigated/ { capture=1; next }
           /^## / { capture=0 }
           capture && NF {
             sub(/^- /, "")
-            split($1, p, ":")
+            split($c1, p, ":")
             if (p[1] ~ /^[A-Za-z0-9_.\/-]+$/) print p[1]
           }
         ' "$F")"
@@ -270,7 +275,7 @@ fresh(F) :=
 
 Helper definitions (each replaceable by a single shell command):
 
-- **`head_sha_reachable(F)`** — `git cat-file -e $(awk '/^head_sha:/{print $2; exit}' F)^{commit} 2>/dev/null`. Exit-0 means reachable. The reachability probe runs FIRST, before any `git diff` invocation — an unreachable SHA never leaks into a `git diff` command line. Per security research: never let raw `git diff` exit code drive control flow.
+- **`head_sha_reachable(F)`** — `git cat-file -e $(awk -v c2=2 '/^head_sha:/{print $c2; exit}' F)^{commit} 2>/dev/null`. Exit-0 means reachable. The reachability probe runs FIRST, before any `git diff` invocation — an unreachable SHA never leaks into a `git diff` command line. Per security research: never let raw `git diff` exit code drive control flow. The `-v c2=2` parameterisation defends against the Skill renderer substituting positional args of `$ARGUMENTS` into the field ref (issue #222).
 - **`divergence(F)`** — `git rev-list --count <stored>..HEAD`. Returns an integer. Compare against `$UBERDEV_CACHE_DIVERGENCE_THRESHOLD` (default 50; env > config > default; see "Cache divergence threshold" below) using `[ "$DIVERGENCE" -gt "$UBERDEV_CACHE_DIVERGENCE_THRESHOLD" ]`.
 - **`files_touched_since(F)`** — `git diff --name-only <stored>..HEAD`. Returns a set of paths.
 - **`files_investigated(F)`** — parse the lines after the `## Files investigated` heading until the next `^## ` heading, extract the first whitespace-separated token per line, strip any `:LINE-RANGE` suffix. Validator: `^[A-Za-z0-9_./-]+$` — reject any line containing `$`, `` ` ``, `;`, `\`, or embedded newlines. Lines that fail validation are silently dropped from the set (artifact stays valid); the artifact is rejected only on `head_sha` validation failure (`missing-head-sha`).

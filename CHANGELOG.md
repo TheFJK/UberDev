@@ -4,6 +4,26 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.5] — 2026-05-27
+
+### Fixed
+- **Skill renderer corrupted awk `$0`-`$9` field refs across 6 SKILL.md files (Closes #222).** The Claude Code Skill loader substitutes positional non-flag args of `$ARGUMENTS` into the entire SKILL.md body, **including inside single-quoted awk one-liners AND multi-line awk script bodies**. `/ubergoal all gh issues` rendered `awk '$1==p && $2=="x"{t=$3}'` as `awk 'gh==p && issues=="x"{t=}'` (or `'219==p && 198=="x"{t=}'` for numeric args), producing false convergence (`all_pr_count=1` regardless of real PR set), bogus `FAILED` transitions (every `dispatch_ts` returned 0), and broken state-skip gates. The same class also bit `$0` (the renderer substitutes the first positional non-flag into `$0`), which silently broke `/turbo 5 6 7` multi-issue dedupe (`awk '!seen[$0]++'` rendered as `!seen[5]++`, dropping every issue past the first). 14 awk sites total across 6 SKILL.md files were rewritten to use parameterised field refs (`-v cN=N` + `$cN`) so the renderer cannot touch them — the `$cN` form is not a positional shell reference and the renderer leaves it untouched:
+  - `plugins/uberdev/skills/goal-pipeline/SKILL.md` — 8 sites (lines 221, 353, 367, 387, 461, 680, 958, 1061) on `$1`/`$2`/`$3`.
+  - `plugins/uberdev/skills/orchestrator/SKILL.md` — 2 sites (line 199 single-line `$2`, line 225 multi-line `$1`) plus matching doc at line 279.
+  - `plugins/uberdev/skills/requesting-code-review/SKILL.md` — 1 site (line 56) on `$1`.
+  - `plugins/uberdev/skills/solve-pipeline/SKILL.md` — 1 site (line 93) on `$0`.
+  - `plugins/uberdev/skills/merge-pipeline/SKILL.md` — 1 site (line 809) on `$0`.
+  - `plugins/uberdev/skills/finish-branch/SKILL.md` — 1 site (line 162) on `$0` (3 references in one awk).
+
+### Added
+- `tests/skill-renderer-awk-collision.test.sh` — drift-guard scanning every `plugins/uberdev/skills/*/SKILL.md` for awk script bodies containing bare `$N` field refs (0-9). Uses a flattened-file scan (`tr '\n' ' '`) to catch multi-line awks (orchestrator/SKILL.md:225-class regressions that line-anchored greps silently pass), with regex constrained to `awk[^']*'[^']*\$[0-9][^c]` so it matches only inside the FIRST single-quoted body after `awk` (prevents greedy `.*` from spanning across the whole flattened file). R2 fixture proofs cover both single-line AND multi-line vulnerable shapes; R3 inverse fixture covers the full `$c0`/`$c1`/`$c2`/`$c3` safe set. Wired into both ubuntu and windows CI matrices.
+
+### Notes
+- Version bumped to 0.34.5 across `plugin.json`, `marketplace.json`, the README badge, `CHANGELOG.md`, `tests/goal.test.sh` G20, and `tests/solve-claim.test.sh`. Atomic version-lock surfaces — partial bump is a red CI invariant.
+- Scope expanded mid-review (from `$1`-`$3` to `$0`-`$9`) after the `/review-pr` Phase 1 general-lens reviewer surfaced the orchestrator multi-line awk site missed by the original line-anchored regex; same root cause, so the three additional `$0` sites are folded into this PR rather than deferred.
+
+---
+
 ## [0.34.4] — 2026-05-27
 
 ### Fixed

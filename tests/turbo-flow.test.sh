@@ -191,7 +191,7 @@ echo
 echo "== solve-pipeline accepts multiple issue numbers (multi-issue dispatch) =="
 # /turbo 5 6 7 must spawn one agent per issue in parallel. The skill tokenizes
 # $ARGUMENTS via a portable bash-and-zsh-safe pipeline (`tr ' ' '\n' | grep -E
-# '^[0-9]+$' | awk '!seen[$0]++'`), validates every issue up front (Phase A),
+# '^[0-9]+$' | awk -v c0=0 '!seen[$c0]++'`), validates every issue up front (Phase A),
 # and only then spawns (Phase B). If any issue fails validation, the entire
 # batch aborts with no agents dispatched.
 #
@@ -215,8 +215,8 @@ assert_grep "$SOLVE_PIPELINE" \
   'echo "\$TERMINAL_FLAG_DEPRECATED_NOTE" >&2' \
   "Phase A emits TERMINAL_FLAG_DEPRECATED_NOTE to stderr on --terminal= encounter"
 assert_grep "$SOLVE_PIPELINE" \
-  "awk '!seen\[\\\$0\]\+\+'" \
-  "solve-pipeline dedupes via awk !seen[\$0]++ (preserves first-seen order, prevents same-issue worktree race)"
+  "awk -v c0=0 '!seen\[\\\$c0\]\+\+'" \
+  "solve-pipeline dedupes via awk -v c0=0 !seen[\$c0]++ (preserves first-seen order, prevents same-issue worktree race; #222 parameterised against renderer collision)"
 assert_grep "$SOLVE_PIPELINE" \
   'SH_WORD_SPLIT|word-split|word split' \
   "solve-pipeline comment explains the zsh word-split footgun (regression-prevention)"
