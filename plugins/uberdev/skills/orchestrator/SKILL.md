@@ -87,7 +87,7 @@ TOPICS=(codebase patterns prior-art constraints security test-coverage)
 
 # Helper: emit one per-topic observability line. Six lines per medium/large
 # run regardless of cache state — see "Per-topic observability" below for
-# the schema. `declare` is bash-only; LLM-as-executor accepts it.
+# the schema.
 #
 # Renderer-safe positional access via `${@:N:1}` array-slice (issue #225):
 # the Skill loader text-substitutes positional non-flag args of $ARGUMENTS

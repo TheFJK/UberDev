@@ -133,7 +133,8 @@ fixture_safe="$(mktemp)"
 fixture_bash_bad="$(mktemp)"
 fixture_bash_safe="$(mktemp)"
 fixture_emit_topic_log_src="$(mktemp)"
-trap 'rm -f "$fixture_simple" "$fixture_multi" "$fixture_safe" "$fixture_bash_bad" "$fixture_bash_safe" "$fixture_emit_topic_log_src"' EXIT
+r6_log_tmp="$(mktemp)"
+trap 'rm -f "$fixture_simple" "$fixture_multi" "$fixture_safe" "$fixture_bash_bad" "$fixture_bash_safe" "$fixture_emit_topic_log_src" "$r6_log_tmp"' EXIT
 
 # R2 — fixture proof: a synthetic SKILL.md fragment containing the bad shape
 # MUST be detected by the same regex. This is an inside-out check that the
@@ -236,7 +237,14 @@ fi
 # covers them all.)
 
 cat > "$fixture_bash_bad" <<'EOF_BASH_BAD'
-# naive bash positional refs — the renderer would corrupt these at load time
+# naive bash positional refs — the renderer would corrupt these at load time.
+# Uses BOTH the raw `$N` form (the #225 bug shape) AND the zsh-reserved `status`
+# local-var name (the bug that surfaced in the /review-pr review of #225's
+# initial fix). Both are intentional in this fixture: R5 regex-scans only,
+# never executes the function, so the zsh-abort issue is irrelevant — and the
+# diff against R5.safe (which uses `topic_status`) preserves the contrast.
+# Do NOT "consistency-fix" this to `topic_status`; that would weaken the
+# inverse proof.
 emit_topic_log() {
   local topic="$1"
   local status="$2"
@@ -284,7 +292,9 @@ fi
 # Skill tool may exec under across macOS / Linux / CI matrices. Without this,
 # a future refactor that re-introduces a zsh-reserved local var name slides
 # past R4 (file scans clean) AND R5 (fixtures pass) but breaks at runtime.
-ORCH_SKILL="$SKILLS_DIR/orchestrator/SKILL.md"
+# (ORCH_SKILL set in R4 block above; reused here. Same shell scope, no
+# intervening unset — re-declaring would be dead work and a stale "these
+# blocks are independent" signal.)
 
 # Extract the emit_topic_log() definition block from the rendered SKILL.md.
 # `awk` slice from the function-open line to the matching `^}` close — same
@@ -294,21 +304,33 @@ ORCH_SKILL="$SKILLS_DIR/orchestrator/SKILL.md"
 # is NEVER rendered as a skill — it's run directly via `bash tests/...sh` and
 # `bash` has no Skill-renderer semantics, so the `${@:N:1}` in the matched
 # function body survives verbatim into the sourced shell.
-# (fixture_emit_topic_log_src mktemp'd at the top; single EXIT trap covers it.)
+# (fixture_emit_topic_log_src + r6_log_tmp mktemp'd at the top; single EXIT
+# trap covers them.)
 
 awk '/^emit_topic_log\(\) \{/,/^\}/' "$ORCH_SKILL" > "$fixture_emit_topic_log_src"
 if [ ! -s "$fixture_emit_topic_log_src" ]; then
   echo "  FAIL  R6 could not extract emit_topic_log() definition from $ORCH_SKILL"
   FAIL=$((FAIL+1))
 else
+  # Hoist the function-body read out of the per-shell loop — the file content
+  # is invariant across iterations, so one cat instead of N.
+  emit_topic_log_body="$(cat "$fixture_emit_topic_log_src")"
   # Run under both shells. The harness pipes a LOG file path + the function
   # body + a single call into the shell, then reads the log line back.
+  # Single log fixture, truncated per iteration (`: > "$LOG"`) — matches the
+  # "all fixtures + one trap" convention this file standardised post-#224.
   for shell_bin in /bin/bash /bin/zsh; do
-    [ -x "$shell_bin" ] || { echo "  PASS  R6.$(basename "$shell_bin") shell not available on this host (skipped, not failed)"; PASS=$((PASS+1)); continue; }
-    log_tmp="$(mktemp)"
-    "$shell_bin" -c "LOG=\"$log_tmp\"; $(cat "$fixture_emit_topic_log_src"); emit_topic_log codebase reused 'cache-hit,mtime=1'" 2>/dev/null
-    actual="$(cat "$log_tmp" 2>/dev/null)"
-    rm -f "$log_tmp"
+    if [ ! -x "$shell_bin" ]; then
+      echo "  PASS  R6.$(basename "$shell_bin") shell not available on this host (skipped, not failed)"
+      PASS=$((PASS+1))
+      continue
+    fi
+    : > "$r6_log_tmp"
+    # Stderr deliberately NOT redirected — when R6 fails because a zsh-reserved
+    # local var slips back in, the shell's "read-only variable: X" diagnostic
+    # IS the smoking gun and surfaces directly in test output.
+    "$shell_bin" -c "LOG=\"$r6_log_tmp\"; $emit_topic_log_body; emit_topic_log codebase reused 'cache-hit,mtime=1'"
+    actual="$(cat "$r6_log_tmp" 2>/dev/null)"
     case "$actual" in
       *"phase=phase1-fanout agent=research-codebase status=reused note=cache-hit,mtime=1"*)
         echo "  PASS  R6.$(basename "$shell_bin") emit_topic_log emits the expected log line"
