@@ -759,16 +759,20 @@ uberdev_goal_agent_busy_for_issue() {
 # (status ∈ busy|running|starting|working). Used by Phase 2c (pre-/merge gate)
 # and Phase 2b stale|missing arm (pre-/review-pr-re-dispatch gate) to defer
 # rather than dispatch when the leaf is still working. --argjson safely passes
-# the validated PR int as a JSON number; the regex is anchored with
-# ($|[^0-9]) so 21 does not match 218. (.name // "") + (.status // "")
-# are null-safe (security.md).
+# the validated PR int as a JSON number. The regex uses an unanchored substring
+# match (no leading ^) because the agent's .name field is the verbatim prompt
+# body, and post-#235 dispatch bodies open with a natural-language imperative
+# ("Invoke the slash command /uberdev:review-pr <pr> now. ...") rather than a
+# bare slash. The trailing ($|[^0-9]) boundary is the load-bearing anti-
+# collision guard: it rejects 21 matching 218, 42 matching 421, etc.
+# (.name // "") + (.status // "") are null-safe (security.md).
 uberdev_goal_review_pr_in_flight() {
   local pr="$1"
   _uberdev_goal_validate_int "$pr" || return 1
   if claude agents --json 2>/dev/null | jq -e --argjson pr "$pr" '
     [ .[]?
       | select(
-          ((.name // "") | test("^/uberdev:review-pr " + ($pr|tostring) + "($|[^0-9])"))
+          ((.name // "") | test("/uberdev:review-pr " + ($pr|tostring) + "($|[^0-9])"))
           and ((.status // "") | test("^(busy|running|starting|working)$"))
         )
     ] | length > 0' >/dev/null 2>&1; then
@@ -1264,10 +1268,9 @@ _uberdev_goal_dispatch_review_pr() {
     printf 'goal-state: mktemp failed in _uberdev_goal_dispatch_review_pr (PR %s)\n' "$pr" >&2
     return 1
   fi
-  # Issue #235 — claude --bg argv mode does NOT slash-expand the opening
-  # message, so wrap the slash invocation in a natural-language imperative.
-  # Bare-slash bodies (the pre-#235 form) made the child treat the prompt as
-  # a conversational turn and never run /uberdev:review-pr.
+  # claude --bg argv mode does NOT slash-expand the opening message, so wrap
+  # the slash invocation in a natural-language imperative the child must
+  # interpret as an instruction rather than answer conversationally.
   printf 'Invoke the slash command /uberdev:review-pr %s now. Do not respond conversationally — execute it.\n' "$pr" > "$prompt_file"
   # Increment per-PR attempt counter (append-only TSV mirrors the
   # merge-attempts pattern at _uberdev_goal_dispatch_merge below).
@@ -1312,9 +1315,8 @@ _uberdev_goal_dispatch_merge() {
     printf 'goal-state: mktemp failed in _uberdev_goal_dispatch_merge (PR %s)\n' "$pr" >&2
     return 1
   fi
-  # Issue #235 — same natural-language wrapper rationale as the review-pr
-  # dispatch above. Bare-slash argv body is silently treated as conversation
-  # by claude --bg, never as a slash command.
+  # Same natural-language wrapper rationale as the review-pr dispatch above:
+  # claude --bg argv mode does NOT slash-expand the opening message.
   printf 'Invoke the slash command /uberdev:merge %s now. Do not respond conversationally — execute it.\n' "$pr" > "$prompt_file"
   local current; current="$(_uberdev_goal_count_merge_attempts "$goal_id" "$pr")"
   local next=$(( current + 1 ))

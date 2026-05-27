@@ -773,7 +773,7 @@ fi
 
 ```bash
 if [[ "$AUTO_MODE" == "1" ]]; then
-# Issue #235 — claude --bg 2.1.139+ does NOT slash-expand argv-supplied opening
+# claude --bg 2.1.139+ does NOT slash-expand argv-supplied opening
 # messages, so wrap the slash invocation in a natural-language imperative the
 # child must interpret as an instruction rather than answer conversationally.
 echo "Invoke the slash command /uberdev:orchestrator --turbo solve GH issue #$ISSUE_NUM now. Do not respond conversationally — execute it." > "$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt"

@@ -234,7 +234,7 @@ for ISSUE_NUM in "${queue[@]}"; do
   fi
 
   # Build the per-issue prompt via mktemp. The body wraps a /uberdev:turbo
-  # invocation in a natural-language imperative (issue #235): claude --bg
+  # invocation in a natural-language imperative: claude --bg
   # 2.1.139+ does NOT slash-expand argv-supplied opening messages, so a body
   # opening with `/uberdev:turbo …` is silently treated as natural language
   # and the child agent never runs /turbo. The "Invoke the slash command …"

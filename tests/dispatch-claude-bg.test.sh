@@ -624,6 +624,7 @@ echo "== #175 D-regression: goal-pipeline preflight->resolve_env->dispatch is NO
   # host) would bypass the function mock. The empty-TIMEOUT_BIN root cause of
   # #175 is asserted just above — this line is mock plumbing, not the guard.
   TIMEOUT_BIN="timeout"
+  # Fixture: synthetic dispatch-plumbing input. claude() is mocked above; the prompt body never reaches a real agent. Pre-#235 bare-slash shape preserved here intentionally (this fixture exercises TIMEOUT_BIN, NOT the canonical prompt shape — see plugins/uberdev/lib/goal-state.sh and the goal-pipeline SKILL for the canonical post-#235 wrapper).
   PROMPT_FILE="$UBERDEV_TMPDIR/solve-prompt-42.txt"; printf '/uberdev:orchestrator --turbo solve GH issue #42\n' > "$PROMPT_FILE"
   uberdev_dispatch_one 42 small "$PROMPT_FILE"; rc=$?
   [[ "$rc" -ne 126 ]] && { echo "  PASS  D-regression dispatch rc != 126 (got $rc) — #175 fixed"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-regression dispatch rc=126 — #175 NOT fixed"; FAIL=$((FAIL + 1)); }
