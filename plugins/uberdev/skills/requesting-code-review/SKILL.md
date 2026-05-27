@@ -53,7 +53,7 @@ Use Task tool with uberdev:code-reviewer type, fill template at `code-reviewer.m
 
 You: Let me request code review before proceeding.
 
-BASE_SHA=$(git log --oneline | grep "Task 1" | head -1 | awk '{print $1}')
+BASE_SHA=$(git log --oneline | grep "Task 1" | head -1 | awk -v c1=1 '{print $c1}')
 HEAD_SHA=$(git rev-parse HEAD)
 
 [Dispatch uberdev:code-reviewer subagent]

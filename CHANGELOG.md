@@ -4,6 +4,19 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.5] — 2026-05-27
+
+### Fixed
+- **Skill renderer corrupted awk `$1`/`$2`/`$3` field refs inside `goal-pipeline/SKILL.md` (Closes #222).** The Claude Code Skill loader substitutes positional non-flag args of `$ARGUMENTS` into the entire SKILL.md body, including inside single-quoted awk one-liners. `/ubergoal all gh issues` rendered `awk '$1==p && $2=="x"{t=$3}'` as `awk 'gh==p && issues=="x"{t=}'` (or `'219==p && 198=="x"{t=}'` for numeric args), producing false convergence (`all_pr_count=1` regardless of real PR set), bogus `FAILED` transitions (every `dispatch_ts` returned 0), and broken state-skip gates. 8 awk one-liners in `goal-pipeline/SKILL.md` (lines 221, 353, 367, 387, 459, 678, 956, 1059) plus 1 in `orchestrator/SKILL.md` (line 197) and 1 in `requesting-code-review/SKILL.md` (line 56) were all rewritten to use parameterised field refs (`-v c1=1 -v c2=2 -v c3=3` + `$c1`/`$c2`/`$c3`) so the renderer cannot touch them. The `$cN` form is not a positional shell reference and the renderer leaves it untouched.
+
+### Added
+- `tests/skill-renderer-awk-collision.test.sh` — drift-guard scanning every `plugins/uberdev/skills/*/SKILL.md` for awk script bodies containing bare `$N` field refs (with inverse fixture proof that the regex still flags the bad shape and does not false-positive on the safe parameterised form). Wired into both ubuntu and windows CI matrices.
+
+### Notes
+- Version bumped to 0.34.5 across `plugin.json`, `marketplace.json`, the README badge, `CHANGELOG.md`, `tests/goal.test.sh` G20, and `tests/solve-claim.test.sh`. Atomic version-lock surfaces — partial bump is a red CI invariant.
+
+---
+
 ## [0.34.4] — 2026-05-27
 
 ### Fixed
