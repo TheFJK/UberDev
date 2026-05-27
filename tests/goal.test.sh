@@ -443,7 +443,7 @@ echo
 echo "== G32: uberdev_goal_review_pr_in_flight in-flight gate shape (issue #220, AC ❷) =="
 assert_grep "$GOAL_LIB" '^uberdev_goal_review_pr_in_flight\(\)'                    "G32.fn-defined"
 assert_grep "$GOAL_LIB" 'jq -e --argjson pr'                                       "G32.argjson-pr"
-assert_grep "$GOAL_LIB" '/uberdev:review-pr '                                      "G32.name-regex"
+assert_grep "$GOAL_LIB" '/uberdev:review-pr '                                      "G32.substring-name-regex"
 assert_grep "$GOAL_LIB" '(\$\|\[\^0-9\])'                                          "G32.regex-trailing-boundary"
 assert_grep "$GOAL_LIB" 'busy\|running\|starting\|working'                         "G32.status-whitelist"
 assert_grep "$GOAL_SKILL" 'uberdev_goal_review_pr_in_flight'                       "G32.called-from-skill"
@@ -2411,7 +2411,7 @@ _bt76_nl() {
 }
 _bt76 42  0 "BT76.match-42"
 _bt76 43  1 "BT76.no-match-43"
-_bt76 421 1 "BT76.no-match-421-anchor (regression: 42 must not match 421)"
+_bt76 421 1 "BT76.no-match-421-boundary (regression: 42 must not match 421)"
 _bt76_nl 42  0 "BT76.match-nl-wrapper (post-#235 prompt body shape matches probe regex)"
 
 echo "== BT77: Phase 2c emits goal_merge_deferred with mock in-flight /review-pr (issue #220 AC ❷) =="
