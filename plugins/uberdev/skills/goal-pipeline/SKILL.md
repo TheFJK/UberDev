@@ -309,7 +309,7 @@ for ISSUE_NUM in "${queue[@]}"; do
     # NOT propagate rc=42 — the contract is "any non-zero rc is a dispatch
     # failure"; the audit JSONL is the canonical claim_collision signal.
     # Issue #236 — `dispatched` row cleanup. The parent wrote `dispatched`
-    # above (line 265), and dispatch_one returned non-zero. Both downstream
+    # above (line 270), and dispatch_one returned non-zero. Both downstream
     # branches (claim_collision soft-skip + hard-error fall-through) need to
     # transition `dispatched -> failed` so the TSV (the audit-trail SSOT) does
     # not leave a stranded `dispatched` row that the Phase-1 skip-check would
