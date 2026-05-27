@@ -132,9 +132,11 @@ assert_grep "$DISPATCH_LIB" \
 assert_grep "$DISPATCH_LIB" \
   '^[[:space:]]*PERM_FLAG=\(\)$' \
   "uberdev_dispatch_resolve_env binds PERM_FLAG as an empty bash+zsh array — same zsh-word-split rationale as EFFORT_FLAG (v0.22.2 fix)"
-assert_grep "$DISPATCH_LIB" \
-  'PERM_FLAG=\( --dangerously-skip-permissions \)' \
-  "uberdev_dispatch_resolve_env populates PERM_FLAG with --dangerously-skip-permissions when an opt-in tier is set (post-#241 follow-up: AUTO and SKIP both resolve to the bypass flag because --permission-mode auto is dead in practice)"
+# Structural floor for the PERM_FLAG resolver: the count==2 assertion below is the
+# canonical "both opt-in tiers populate the bypass flag" check (strictly dominates
+# the ≥1 single-match form — a redundant assert_grep was dropped post-#243 simplify
+# pass). Pair it with the negative regression guard ("--permission-mode auto MUST
+# NOT appear at runtime") to catch both regression directions.
 # Count: 2 occurrences expected — the SKIP branch (line ~196) and the AUTO branch
 # (line ~198) of uberdev_dispatch_resolve_env. Asserts that AUTO did not regress
 # back to --permission-mode auto and that the if/elif structure is preserved for

@@ -193,6 +193,7 @@ uberdev_dispatch_resolve_env() {
   PERM_FLAG=()
   if [[ "$SKIP_PERMISSIONS" == "1" ]]; then
     PERM_FLAG=( --dangerously-skip-permissions )
+  # Same flag as SKIP branch — kept distinct for caller-attribution observability via PERM_DESC; see header doc block.
   elif [[ "$AUTO_PERMISSIONS" == "1" ]]; then
     PERM_FLAG=( --dangerously-skip-permissions )
   fi
