@@ -457,7 +457,7 @@ while true; do
         # against a much-newer transition timestamp, never crossing the
         # threshold. The original awk printed every row's ts for the PR and
         # the shell captured only the LAST line, masking the bug except
-        # under specific transition orderings. `!t{t=$3}` guards FIRST-seen;
+        # under specific transition orderings. `!t{t=$c3}` guards FIRST-seen;
         # `t+0` coerces empty → 0 so the downstream `$((now - seen_ts))` is
         # arithmetic-safe even when no row exists.
         seen_ts=$(awk -F'\t' -v p="$pr_num" -v c1=1 -v c2=2 -v c3=3 '$c1==p && $c2=="pushed-reviewing" && !t{t=$c3} END{print t+0}' \
