@@ -90,7 +90,7 @@ _uberdev_audit_emit() {
 # worktree path `.claude/worktrees/solve-issue-N/` — the second spawn's
 # `git worktree remove --force` would nuke the first's checkout mid-run).
 # Array assignment `arr=($(...))` word-splits on $IFS in BOTH bash and zsh.
-ISSUE_NUMS=($(echo "$ARGUMENTS" | tr ' ' '\n' | grep -E '^[0-9]+$' | awk '!seen[$0]++'))
+ISSUE_NUMS=($(echo "$ARGUMENTS" | tr ' ' '\n' | grep -E '^[0-9]+$' | awk -v c0=0 '!seen[$c0]++'))
 
 OVERRIDE=$(echo "$ARGUMENTS" | grep -oE '\-\-(trivial|small|full)' | head -1 | sed 's/--//')
 # --- Phase A: --terminal= deprecation shim (NEW v0.22.0) ---

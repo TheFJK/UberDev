@@ -806,7 +806,7 @@ CLOSED_ISSUES=($(printf '%s' "$PR_BODY_FOR_CLEANUP" \
   | grep -oiE '(^|[^[:alnum:]_-])(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+' \
   | grep -oE '#[0-9]+' \
   | tr -d '#' \
-  | awk '!seen[$0]++'))
+  | awk -v c0=0 '!seen[$c0]++'))
 for CLEAR_ISSUE_NUM in "${CLOSED_ISSUES[@]}"; do
   # Combined cleanup: label + assignee in one gh round-trip. gh fails atomically
   # on partial error so the previous split-call form (with assignee removal as

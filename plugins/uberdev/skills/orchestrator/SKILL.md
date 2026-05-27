@@ -217,13 +217,17 @@ else
           continue
         fi
 
-        # file-intersection check (fail-open per policy above).
-        FILES_INVESTIGATED="$(awk '
+        # file-intersection check (fail-open per policy above). The `-v c1=1`
+        # parameterisation prevents the Skill renderer from substituting positional
+        # args of $ARGUMENTS into the awk field ref — same defence as the single-
+        # line awks above; multi-line awk bodies are equally vulnerable because
+        # the renderer scans the SKILL.md body text-blind (issue #222).
+        FILES_INVESTIGATED="$(awk -v c1=1 '
           /^## Files investigated/ { capture=1; next }
           /^## / { capture=0 }
           capture && NF {
             sub(/^- /, "")
-            split($1, p, ":")
+            split($c1, p, ":")
             if (p[1] ~ /^[A-Za-z0-9_.\/-]+$/) print p[1]
           }
         ' "$F")"
