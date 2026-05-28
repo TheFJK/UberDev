@@ -616,15 +616,17 @@ fi
 
 # ============================================================================
 # P13 — Phase 3.5 SKIPS cross-chunk meta-pass when TOTAL_ISSUES < 2*CHUNK_SIZE.
-# P14 — Phase 3.5 EXECUTES cross-chunk meta-pass when TOTAL_ISSUES >= 2*CHUNK_SIZE.
+# P14 — Phase 3.5 EXECUTES cross-chunk meta-pass when TOTAL_ISSUES > 2*CHUNK_SIZE.
+# P15 — Phase 3.5 EXECUTES at the exact boundary TOTAL_ISSUES == 2*CHUNK_SIZE
+#       (catches `-lt` → `-le` mutation that P13 at 10 and P14 at 25 miss).
 # ============================================================================
 #
 # Resolves issue #258: pr-test-analyzer (PR #255) flagged that no gate
 # validated the Phase 3.5 skip condition. A regression in `lt $((2 * CHUNK_SIZE))`
 # would silently run the cross-chunk meta-pass on single-chunk runs (or never
 # at all), producing incorrect cross-chunk analysis without detection. The
-# brief named these gates P14/P15; numbered P13/P14 here for natural
-# continuity after P12.
+# brief named these gates P14/P15; numbered P13/P14/P15 here for natural
+# continuity after P12 (P15 added in #262 post-impl review).
 #
 # Approach: extract the Phase 3.5 bash fence verbatim from SKILL.md (python
 # regex — sed range with nested fence is brittle because the body contains a
@@ -636,8 +638,8 @@ fi
 # both absent; execute path produces both non-empty.
 
 # Extract Phase 3.5 fence body once for both gates.
-P13_FENCE_SH="$STAGE/phase35.sh"
-python3 - "$SKILL_MD" > "$P13_FENCE_SH" 2>"$STAGE/p13-extract.err" <<'PY'
+PHASE35_FENCE_SH="$STAGE/phase35.sh"
+python3 - "$SKILL_MD" > "$PHASE35_FENCE_SH" 2>"$STAGE/p13-extract.err" <<'PY'
 import re, sys
 src = open(sys.argv[1]).read()
 m = re.search(
@@ -650,22 +652,25 @@ if not m:
     sys.exit(2)
 sys.stdout.write(m.group(1) + "\n")
 PY
-P13_FENCE_OK=1
-if [ ! -s "$P13_FENCE_SH" ]; then
-  P13_FENCE_OK=0
+PHASE35_FENCE_OK=1
+if [ ! -s "$PHASE35_FENCE_SH" ]; then
+  PHASE35_FENCE_OK=0
 fi
 
 echo "== P13 Phase 3.5 SKIP path (TOTAL_ISSUES=10 < 2*CHUNK_SIZE)"
 
 # Shape check: lock the skip-condition expression in SKILL.md against silent
-# drift. The behavioural assertion alone only covers TOTAL_ISSUES=10; a drift
-# that also moves the threshold (e.g. 1*CHUNK_SIZE) would behave identically.
+# drift. The behavioural gates (P13/P14/P15) cover TOTAL_ISSUES=10, 20, 25;
+# this shape lock is defence-in-depth against operator/threshold drifts that
+# the three sample points might not distinguish under future refactors (e.g.
+# a swap of the `2 * CHUNK_SIZE` operand order, or insertion of an off-by-one
+# constant adjustment that compensates at the sampled points only).
 P13_SHAPE_OK=1
 if ! grep -qE 'TOTAL_ISSUES.*-lt.*2 \* CHUNK_SIZE' "$SKILL_MD"; then
   echo "  FAIL  P13 SKILL.md Phase 3.5 skip condition (TOTAL_ISSUES -lt 2 * CHUNK_SIZE) drifted"
   P13_SHAPE_OK=0
 fi
-if [ "$P13_FENCE_OK" = "0" ]; then
+if [ "$PHASE35_FENCE_OK" = "0" ]; then
   echo "  FAIL  P13 Phase 3.5 fence extraction failed: $(cat "$STAGE/p13-extract.err" 2>/dev/null)"
 fi
 
@@ -685,11 +690,11 @@ EOF
 P13_OUT="$STAGE/p13.out"
 P13_ERR="$STAGE/p13.err"
 P13_RC=0
-if [ "$P13_FENCE_OK" = "1" ]; then
+if [ "$PHASE35_FENCE_OK" = "1" ]; then
   (
     UBERDEV_TMPDIR="$P13_TMPDIR" \
     CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
-    bash "$P13_FENCE_SH"
+    bash "$PHASE35_FENCE_SH"
   ) > "$P13_OUT" 2> "$P13_ERR"
   P13_RC=$?
 else
@@ -703,13 +708,13 @@ P13_META_EXISTS=0
 P13_ANALYSES_EXISTS=0
 [ -e "$P13_RUN_DIR/all-analyses.json" ] && P13_ANALYSES_EXISTS=1
 
-if [ "$P13_SHAPE_OK" = "1" ] && [ "$P13_FENCE_OK" = "1" ] && [ "$P13_RC" = "0" ] && \
+if [ "$P13_SHAPE_OK" = "1" ] && [ "$PHASE35_FENCE_OK" = "1" ] && [ "$P13_RC" = "0" ] && \
    [ "${P13_SKIP_LINES:-0}" -ge "1" ] && [ "${P13_PROMPT_LINES:-0}" = "0" ] && \
    [ "$P13_META_EXISTS" = "0" ] && [ "$P13_ANALYSES_EXISTS" = "0" ]; then
   echo "  PASS  P13 skip path rc=0 SKIPPED-logged no-meta-prompt no-all-analyses"
   PASS=$((PASS+1))
 else
-  echo "  FAIL  P13 shape=$P13_SHAPE_OK fence=$P13_FENCE_OK rc=$P13_RC skip=$P13_SKIP_LINES prompt=$P13_PROMPT_LINES meta=$P13_META_EXISTS analyses=$P13_ANALYSES_EXISTS"
+  echo "  FAIL  P13 shape=$P13_SHAPE_OK fence=$PHASE35_FENCE_OK rc=$P13_RC skip=$P13_SKIP_LINES prompt=$P13_PROMPT_LINES meta=$P13_META_EXISTS analyses=$P13_ANALYSES_EXISTS"
   [ -s "$P13_OUT" ] && { echo "  -- stdout:"; sed 's/^/     /' "$P13_OUT"; }
   [ -s "$P13_ERR" ] && { echo "  -- stderr:"; sed 's/^/     /' "$P13_ERR"; }
   FAIL=$((FAIL+1))
@@ -750,11 +755,11 @@ YAML
 P14_OUT="$STAGE/p14.out"
 P14_ERR="$STAGE/p14.err"
 P14_RC=0
-if [ "$P13_FENCE_OK" = "1" ]; then
+if [ "$PHASE35_FENCE_OK" = "1" ]; then
   (
     UBERDEV_TMPDIR="$P14_TMPDIR" \
     CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
-    bash "$P13_FENCE_SH"
+    bash "$PHASE35_FENCE_SH"
   ) > "$P14_OUT" 2> "$P14_ERR"
   P14_RC=$?
 else
@@ -776,16 +781,92 @@ if [ -e "$P14_RUN_DIR/all-analyses.json" ]; then
   P14_ANALYSES_SIZE=$(wc -c < "$P14_RUN_DIR/all-analyses.json" 2>/dev/null | tr -d '[:space:]')
 fi
 
-if [ "$P13_FENCE_OK" = "1" ] && [ "$P14_RC" = "0" ] && \
+if [ "$PHASE35_FENCE_OK" = "1" ] && [ "$P14_RC" = "0" ] && \
    [ "${P14_SKIP_LINES:-0}" = "0" ] && [ "${P14_PROMPT_LINES:-0}" -ge "1" ] && \
    [ "$P14_META_EXISTS" = "1" ] && [ "${P14_META_SIZE:-0}" -gt 0 ] && \
    [ "$P14_ANALYSES_EXISTS" = "1" ] && [ "${P14_ANALYSES_SIZE:-0}" -gt 0 ]; then
   echo "  PASS  P14 execute path rc=0 prompt-logged meta-prompt=${P14_META_SIZE}B all-analyses=${P14_ANALYSES_SIZE}B"
   PASS=$((PASS+1))
 else
-  echo "  FAIL  P14 fence=$P13_FENCE_OK rc=$P14_RC skip=$P14_SKIP_LINES prompt=$P14_PROMPT_LINES meta=$P14_META_EXISTS meta_size=$P14_META_SIZE analyses=$P14_ANALYSES_EXISTS analyses_size=$P14_ANALYSES_SIZE"
+  echo "  FAIL  P14 fence=$PHASE35_FENCE_OK rc=$P14_RC skip=$P14_SKIP_LINES prompt=$P14_PROMPT_LINES meta=$P14_META_EXISTS meta_size=$P14_META_SIZE analyses=$P14_ANALYSES_EXISTS analyses_size=$P14_ANALYSES_SIZE"
   [ -s "$P14_OUT" ] && { echo "  -- stdout:"; sed 's/^/     /' "$P14_OUT"; }
   [ -s "$P14_ERR" ] && { echo "  -- stderr:"; sed 's/^/     /' "$P14_ERR"; }
+  FAIL=$((FAIL+1))
+fi
+
+echo "== P15 Phase 3.5 EXECUTE path at exact boundary (TOTAL_ISSUES=20 == 2*CHUNK_SIZE)"
+
+# Boundary gate — defends against `-lt` → `-le` mutation. With strict `-lt`,
+# `20 -lt 20` = false → EXECUTE path (this gate passes). Under a `-le`
+# mutation, `20 -le 20` = true → SKIP path → no DISPATCH prompt line, no
+# meta-prompt.md, no all-analyses.json → this gate fails (correctly catching
+# the mutation that P13 at 10 and P14 at 25 both miss).
+P15_TMPDIR="$STAGE/p15-tmp"
+P15_RUN_ID="p15-boundary-test"
+P15_RUN_DIR="$P15_TMPDIR/.uberdev/cluster/$P15_RUN_ID"
+mkdir -p "$P15_RUN_DIR/dispatches" "$P15_RUN_DIR/analyses"
+printf '%s\n' "$P15_RUN_ID" > "$P15_TMPDIR/cluster-active-id.txt"
+cat > "$P15_RUN_DIR/run-state.txt" <<EOF
+RUN_ID=$P15_RUN_ID
+RUN_DIR=$P15_RUN_DIR
+MODE=dryrun
+TOTAL_ISSUES=20
+CHUNK_COUNT=2
+EOF
+
+# 20 issues at CHUNK_SIZE=10 → 2 chunks (10/10). Emit minimal valid per-chunk
+# YAMLs for the aggregator. One non-trivial entry ensures all-analyses.json
+# is non-empty.
+cat > "$P15_RUN_DIR/analyses/chunk-01-clusters.yaml" <<'YAML'
+clusters:
+  - lead: 1
+    members: [1, 2]
+    rationale: "stub"
+    confidence: 0.9
+YAML
+cat > "$P15_RUN_DIR/analyses/chunk-02-clusters.yaml" <<'YAML'
+clusters: []
+YAML
+
+P15_OUT="$STAGE/p15.out"
+P15_ERR="$STAGE/p15.err"
+P15_RC=0
+if [ "$PHASE35_FENCE_OK" = "1" ]; then
+  (
+    UBERDEV_TMPDIR="$P15_TMPDIR" \
+    CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+    bash "$PHASE35_FENCE_SH"
+  ) > "$P15_OUT" 2> "$P15_ERR"
+  P15_RC=$?
+else
+  P15_RC=99
+fi
+
+P15_SKIP_LINES=$(grep -c 'phase=meta SKIPPED' "$P15_OUT" 2>/dev/null | tr -d '[:space:]')
+P15_PROMPT_LINES=$(grep -c 'phase=meta prompt=' "$P15_OUT" 2>/dev/null | tr -d '[:space:]')
+P15_META_EXISTS=0
+P15_META_SIZE=0
+if [ -e "$P15_RUN_DIR/dispatches/meta-prompt.md" ]; then
+  P15_META_EXISTS=1
+  P15_META_SIZE=$(wc -c < "$P15_RUN_DIR/dispatches/meta-prompt.md" 2>/dev/null | tr -d '[:space:]')
+fi
+P15_ANALYSES_EXISTS=0
+P15_ANALYSES_SIZE=0
+if [ -e "$P15_RUN_DIR/all-analyses.json" ]; then
+  P15_ANALYSES_EXISTS=1
+  P15_ANALYSES_SIZE=$(wc -c < "$P15_RUN_DIR/all-analyses.json" 2>/dev/null | tr -d '[:space:]')
+fi
+
+if [ "$PHASE35_FENCE_OK" = "1" ] && [ "$P15_RC" = "0" ] && \
+   [ "${P15_SKIP_LINES:-0}" = "0" ] && [ "${P15_PROMPT_LINES:-0}" -ge "1" ] && \
+   [ "$P15_META_EXISTS" = "1" ] && [ "${P15_META_SIZE:-0}" -gt 0 ] && \
+   [ "$P15_ANALYSES_EXISTS" = "1" ] && [ "${P15_ANALYSES_SIZE:-0}" -gt 0 ]; then
+  echo "  PASS  P15 boundary execute path rc=0 prompt-logged meta-prompt=${P15_META_SIZE}B all-analyses=${P15_ANALYSES_SIZE}B"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  P15 fence=$PHASE35_FENCE_OK rc=$P15_RC skip=$P15_SKIP_LINES prompt=$P15_PROMPT_LINES meta=$P15_META_EXISTS meta_size=$P15_META_SIZE analyses=$P15_ANALYSES_EXISTS analyses_size=$P15_ANALYSES_SIZE"
+  [ -s "$P15_OUT" ] && { echo "  -- stdout:"; sed 's/^/     /' "$P15_OUT"; }
+  [ -s "$P15_ERR" ] && { echo "  -- stderr:"; sed 's/^/     /' "$P15_ERR"; }
   FAIL=$((FAIL+1))
 fi
 
