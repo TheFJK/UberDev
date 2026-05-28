@@ -15,10 +15,11 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
   `agents/issue-similarity-analyzer.md` (read-only, `model: inherit`). Hard `--min-confidence 0.85`
   floor under `--execute`; idempotent via HTML-comment marker + `folded` label
   + per-run JSONL ledger. RFC 0010. Closes #247.
-- Consolidated `/uberdev:cluster` behavioral test coverage — gates P13–P18:
+- Consolidated `/uberdev:cluster` behavioral test coverage — gates P13–P19:
   Phase 4 proposal generation + dry-run exit, Phase 5 lead-body fold-append,
-  Phase 3.5 cross-chunk meta-pass skip/execute/boundary, and the Phase 4
-  dispatch hard-fail gate. Closes #257, #258, #259.
+  Phase 3.5 cross-chunk meta-pass skip/execute/boundary, the Phase 4 dispatch
+  hard-fail gate, and the cluster-render schema-validation gate. Closes #257,
+  #258, #259.
 
 ### Fixed
 - **Phase 4 dispatch hard-fails on unreadable `clusters-filtered.json` (Closes #263).**
@@ -27,6 +28,13 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
   legitimate empty run. Now requires a non-empty valid JSON array (`[ -s ]` +
   `type=="array"`) and hard-fails (`exit 2`) otherwise; a genuinely empty run
   still writes `[]` → `CLUSTERS=0` and dispatches normally.
+- **`cluster_propose.py` validates every cluster's schema before rendering (gate P19).**
+  `render_cluster()` coerces `lead`/`members`/`confidence` via `int()`/`float()`;
+  a malformed analyzer cluster previously crashed the render loop *after* the
+  report header was printed, leaving a partial `proposals.md` indistinguishable
+  from a complete one. `main()` now validates all clusters up front and aborts
+  (`exit 2`, no partial stdout) on any schema violation — all-or-nothing.
+  Surfaced by `/uberdev:review-pr` (type-design lens).
 
 ## [0.35.2] — 2026-05-28
 
