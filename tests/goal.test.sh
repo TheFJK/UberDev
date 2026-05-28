@@ -196,10 +196,11 @@ assert_grep "$GOAL_SKILL" 'does NOT halt the entire goal|do NOT halt entire goal
 echo
 echo "== G15: backend inheritance =="
 assert_grep "$GOAL_SKILL" 'UBERDEV_RESOLVED_BACKEND'                        "G15.resolved-backend-env"
-# The forwarded backend appears as --backend=$UBERDEV_RESOLVED_BACKEND on
-# the /turbo dispatch line; allow either the env-var form or a literal
-# backend name in the same line.
-assert_grep "$GOAL_SKILL" '--backend=\$?UBERDEV_RESOLVED_BACKEND|--backend=[^[:space:]]+.*uberdev:turbo|uberdev:turbo.*--backend' \
+# Issue #248 — Phase 1 no longer passes --backend= as an arg flag; backend
+# now forwards purely via the UBERDEV_RESOLVED_BACKEND env-var that Phase 0
+# exports (claude --bg inherits the parent shell's env table by default).
+# Anchor on the Phase 1 comment that documents the env-var path.
+assert_grep "$GOAL_SKILL" 'Backend forwards via UBERDEV_RESOLVED_BACKEND' \
                                                                             "G15.backend-forwarding"
 
 echo
@@ -291,11 +292,11 @@ assert_no_grep "$GOAL_LIB" '\bbash -c'                                   "G19.no
 assert_grep "$GOAL_CMD" '--i-know-what-im-doing'                         "G19.r12-mentioned-once"
 
 echo
-echo "== G20: version bump locked (0.34.10) =="
-assert_grep "$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json" '"version": "0\.34\.10"'  "G20.plugin-json"
-assert_grep "$REPO_ROOT/.claude-plugin/marketplace.json"            '"version": "0\.34\.10"'  "G20.marketplace-json"
-assert_grep "$REPO_ROOT/README.md"                                  'version-0\.34\.10-blue'  "G20.readme-badge"
-assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.34\.10\]'        "G20.changelog"
+echo "== G20: version bump locked (0.34.11) =="
+assert_grep "$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json" '"version": "0\.34\.11"'  "G20.plugin-json"
+assert_grep "$REPO_ROOT/.claude-plugin/marketplace.json"            '"version": "0\.34\.11"'  "G20.marketplace-json"
+assert_grep "$REPO_ROOT/README.md"                                  'version-0\.34\.11-blue'  "G20.readme-badge"
+assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.34\.11\]'        "G20.changelog"
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
 
 assert_grep "$GOAL_SKILL" 'uberdev_dispatch_resolve_env'  "G20b.phase0-wires-resolve-env (#175 SSOT anchor)"
@@ -530,6 +531,19 @@ assert_grep "$GOAL_LIB" 'FIRST_DIALOG_TS_'                                      
 assert_grep "$GOAL_LIB" '\-ge 60'                                                 "G37.60s-window"
 assert_grep "$GOAL_LIB" '^_uberdev_goal_any_attempt_stuck\(\)'                    "G37.wrapper-defined"
 assert_grep "$GOAL_SKILL" '_uberdev_goal_any_attempt_stuck'                       "G37.wrapper-called-from-skill"
+
+echo
+echo "== G38: Phase 1 dispatches /uberdev:orchestrator directly (issue #248) =="
+# Issue #248 — confirm Phase 1 dispatch prompt invokes /uberdev:orchestrator
+# (NOT /uberdev:turbo), preventing regression back to the double-bg-spawn
+# anti-pattern (goal → bg(turbo) → bg(orchestrator)). Mirrors the G24b
+# structural-grep convention from PR #239.
+assert_grep "$GOAL_SKILL" \
+  'Invoke the slash command /uberdev:orchestrator --turbo solve GH issue' \
+  "G38.goal-phase-1-orchestrator-dispatch"
+assert_no_grep "$GOAL_SKILL" \
+  'printf .*Invoke the slash command /uberdev:turbo' \
+  "G38.goal-phase-1-no-turbo-wrapper-dispatch"
 
 echo
 echo "== Behavioral tests (B12 — sourced-function exercises) =="

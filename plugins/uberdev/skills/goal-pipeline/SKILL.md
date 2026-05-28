@@ -9,7 +9,7 @@ This skill is invoked inline by `commands/goal.md`. It reads `$ARGUMENTS` from t
 
 `/goal` is the autonomous convergence orchestrator from RFC 0005: it loops `/turbo` → auto `/review-pr` → `/merge` if GREEN, recursing on BLOCKER/CRITICAL `review-pr-finding` issues filed by `/review-pr` Phase 2.5 until the queue is empty AND every PR landed in `{merged, merge-failed}`. YELLOW PRs are NEVER merged inside `/goal` — they are held for re-review. RED PRs are held with a `Blocks: #N` body annotation that wires unblock back into the cycle once the blocking issues close.
 
-> **You are an orchestrator, not an implementer.** You preflight, dispatch `/turbo` agents one per issue, detect each solver's pushed PR via GitHub (`gh pr list` `closingIssuesReferences` / `feat/N-` head — CLI-version-independent, issue #180), drive PR state transitions from the file-based `/review-pr` Phase 2.5 verdict JSON, dispatch `/merge` for GREEN PRs, confirm merge via `gh pr view <pr> --json state == MERGED`, drive unblock checks on every successful merge, collect the next queue from `review-pr-finding` issues filed during the cycle, and halt deterministically via one of the exit paths. You never write feature code yourself.
+> **You are an orchestrator, not an implementer.** You preflight, dispatch `/uberdev:orchestrator` agents one per issue (issue #248 — direct dispatch, the legacy `/turbo` wrapper layer is bypassed), detect each solver's pushed PR via GitHub (`gh pr list` `closingIssuesReferences` / `feat/N-` head — CLI-version-independent, issue #180), drive PR state transitions from the file-based `/review-pr` Phase 2.5 verdict JSON, dispatch `/merge` for GREEN PRs, confirm merge via `gh pr view <pr> --json state == MERGED`, drive unblock checks on every successful merge, collect the next queue from `review-pr-finding` issues filed during the cycle, and halt deterministically via one of the exit paths. You never write feature code yourself.
 
 ## Constants
 
@@ -119,13 +119,13 @@ Notes on the enums:
      "$_UBERDEV_GOAL_DEFAULT_REVIEW_GRACE_SECS")"
    ```
 
-4. **Source `lib/dispatch.sh`; call `uberdev_dispatch_preflight`** → sets `UBERDEV_RESOLVED_BACKEND` once for the whole run (D15). The resolved backend is forwarded to every `/turbo`, `/merge`, and `/review-pr` child dispatch in this run; it is NEVER re-resolved per cycle.
+4. **Source `lib/dispatch.sh`; call `uberdev_dispatch_preflight`** → sets `UBERDEV_RESOLVED_BACKEND` once for the whole run (D15). The resolved backend is forwarded to every `/uberdev:orchestrator` (Phase 1), `/merge`, and `/review-pr` (Phase 2) child dispatch in this run; it is NEVER re-resolved per cycle.
 
    ```bash
    [ -r "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh" ] && . "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh"
    uberdev_dispatch_preflight "${backend_cli:-auto}"
    # UBERDEV_RESOLVED_BACKEND is now exported (D15: resolved once, frozen for the run).
-   # /goal dispatches /turbo per issue, so mirror /turbo's unattended dispatch env.
+   # /goal dispatches /uberdev:orchestrator per issue; mirror /turbo's unattended dispatch env so the orchestrator child inherits the same flags /turbo would have set.
    export AUTO_MODE=1            # matches commands/turbo.md (enables UBERDEV_TURBO=1 in the bg env)
    # /goal opts every dispatched bg agent into bypassPermissions so the cmux
    # PermissionRequest hook (or any --settings-shadowing daemon hook) does not
@@ -177,7 +177,7 @@ Notes on the enums:
      printf '  backend=%s\n' "$UBERDEV_RESOLVED_BACKEND"
      printf '  issues=%s\n' "${queue[*]}"
      printf '  would emit goal_dispatched\n'
-     printf '  would dispatch /turbo for issues %s (cap=%s per cycle)\n' \
+     printf '  would dispatch /uberdev:orchestrator for issues %s (cap=%s per cycle)\n' \
        "${queue[*]}" "$MAX_PARALLEL"
      printf '  would poll GitHub (gh pr list) for each issue'\''s PR\n'
      exit 0
@@ -204,7 +204,7 @@ Notes on the enums:
 
 ## Phase 1 — Dispatch (per cycle)
 
-Per cycle, walk the current `queue` and dispatch one `/turbo` agent per eligible issue. Skip issues already in `dispatched`, `solving`, or `pr-pushed`. The `dispatched` row is written by the parent BEFORE `uberdev_dispatch_one` (issue #236) so a leaf-side crash between spawn and the post-spawn `solving` write still leaves a row the next cycle's skip-check can match — closing the silent double-spawn surface where a pre-state-write leaf failure (OOM, agent timeout before first state write, future CLI regression) was indistinguishable from "never attempted".
+Per cycle, walk the current `queue` and dispatch one `/uberdev:orchestrator` agent per eligible issue. Skip issues already in `dispatched`, `solving`, or `pr-pushed`. The `dispatched` row is written by the parent BEFORE `uberdev_dispatch_one` (issue #236) so a leaf-side crash between spawn and the post-spawn `solving` write still leaves a row the next cycle's skip-check can match — closing the silent double-spawn surface where a pre-state-write leaf failure (OOM, agent timeout before first state write, future CLI regression) was indistinguishable from "never attempted".
 
 ```bash
 # #171 fresh-shell rehydration — re-source libs (idempotent via _UBERDEV_*_LOADED
@@ -242,24 +242,35 @@ for ISSUE_NUM in "${queue[@]}"; do
     continue
   fi
 
-  # Build the per-issue prompt via mktemp. The body wraps a /uberdev:turbo
-  # invocation in a natural-language imperative: claude --bg
-  # 2.1.139+ does NOT slash-expand argv-supplied opening messages, so a body
-  # opening with `/uberdev:turbo …` is silently treated as natural language
-  # and the child agent never runs /turbo. The "Invoke the slash command …"
-  # prefix forces the child to read the rest as an instruction it must act on.
-  # --turbo keeps the child non-interactive (no gates — scoped relaxation §3
-  # below); --backend forwards the Phase 0 resolved backend so every cycle
-  # uses the same backend.
+  # Build the per-issue prompt via mktemp. The body wraps a
+  # /uberdev:orchestrator invocation in a natural-language imperative:
+  # claude --bg 2.1.139+ does NOT slash-expand argv-supplied opening
+  # messages, so a body opening with `/uberdev:orchestrator …` is silently
+  # treated as natural language and the child agent never runs the
+  # orchestrator. The "Invoke the slash command …" prefix forces the child
+  # to read the rest as an instruction it must act on. --turbo keeps the
+  # child non-interactive (no gates — scoped relaxation §3 below).
+  #
+  # Issue #248 — dispatch /uberdev:orchestrator DIRECTLY (skipping /turbo)
+  # to eliminate the double bg-session per issue.
+  # Backend forwards via UBERDEV_RESOLVED_BACKEND inherited from Phase 0 —
+  # /orchestrator does NOT accept a --backend= CLI flag, and claude --bg
+  # inherits the parent shell's full env table by default, so the env-var
+  # path is the canonical mechanism. Phase 0 also exports AUTO_MODE=1,
+  # SKIP_PERMISSIONS=1, and UBERDEV_GOAL_ID — all five envs
+  # (UBERDEV_RESOLVED_BACKEND, AUTO_MODE, SKIP_PERMISSIONS, UBERDEV_GOAL_ID,
+  # plus UBERDEV_TURBO=1 injected by lib/dispatch.sh's BG_TURBO_ENV) reach
+  # the orchestrator child unchanged.
   PROMPT_FILE="$(mktemp)"
-  printf 'Invoke the slash command /uberdev:turbo %s --turbo --backend=%s now. Do not respond conversationally — execute it.\n' \
-    "$ISSUE_NUM" "$UBERDEV_RESOLVED_BACKEND" > "$PROMPT_FILE"
+  printf 'Invoke the slash command /uberdev:orchestrator --turbo solve GH issue #%s now. Do not respond conversationally — execute it.\n' \
+    "$ISSUE_NUM" > "$PROMPT_FILE"
 
-  # T5 provenance — the child /turbo agent (and its downstream /merge dispatch,
-  # if any) MUST inherit UBERDEV_GOAL_ID so uberdev_goal_should_automerge can
-  # verify the merge is coming from inside this /goal run. Without this env
-  # forwarding, the per-PR attempt-counter cap would not gate a stray merge
-  # attempt and the runaway-loop containment (R5) would silently fail open.
+  # T5 provenance — the child /uberdev:orchestrator agent (and its downstream
+  # /merge dispatch via finish-branch -> /review-pr, if any) MUST inherit
+  # UBERDEV_GOAL_ID so uberdev_goal_should_automerge can verify the merge is
+  # coming from inside this /goal run. Without this env forwarding, the per-PR
+  # attempt-counter cap would not gate a stray merge attempt and the
+  # runaway-loop containment (R5) would silently fail open.
   export UBERDEV_GOAL_ID="$GOAL_ID"
 
   # Issue #236 — pre-spawn state write. input -> dispatched MUST precede
@@ -1156,8 +1167,8 @@ Called from Phase 2 step 2d on every `merging → merged` PR transition, for eac
    - per-PR attempt counter cap (`_UBERDEV_GOAL_MAX_MERGE_ATTEMPTS=3` — after 3 attempts the same PR is held for human inspection);
    - YELLOW/RED PRs are NEVER auto-merged (D17 forbidden transitions).
 
-2. **`feedback_brainstorm_no_gates`: `/turbo` runs non-interactive (no gates).** Phase 1 forwards `--turbo` to every child dispatch, which sets `AUTO_MODE=1` in solve-pipeline. Brainstorm / Q&A approval gates are skipped; the medium/large tier orchestrator runs with its always-on agent reviewer pair instead of human checkpoints. This is consistent with the global memory `feedback_brainstorm_no_gates` and `feedback_quality_over_speed` — quality comes from parallel research + always-on reviewers, not approval prompts.
+2. **`feedback_brainstorm_no_gates`: `/uberdev:orchestrator` runs non-interactive (no gates).** Phase 1 dispatches `/uberdev:orchestrator --turbo` directly (issue #248), and Phase 0 exports `AUTO_MODE=1` plus `UBERDEV_TURBO=1` (via `BG_TURBO_ENV` in `lib/dispatch.sh`) so the orchestrator child runs in unattended mode. Brainstorm / Q&A approval gates are skipped; the medium/large tier orchestrator runs with its always-on agent reviewer pair instead of human checkpoints. This is consistent with the global memory `feedback_brainstorm_no_gates` and `feedback_quality_over_speed` — quality comes from parallel research + always-on reviewers, not approval prompts.
 
 3. **YELLOW handling: YELLOW PRs are NEVER merged — they are held for re-review.** Standalone `/merge` (with `--accept-critical-deferred`) can land a YELLOW PR; inside `/goal` this is forbidden. The PR-state-machine valid-transitions table in `_uberdev_goal_pr_state_machine_valid` returns non-zero for `yellow-held → merging` (D17); the only way out of `yellow-held` is `→ green` (after a successful `/review-pr` re-review that resolves the CRITICAL findings).
 
-**Backend inheritance (D15).** Backend resolution is performed **once** by Phase 0 via `uberdev_dispatch_preflight`, which sets `UBERDEV_RESOLVED_BACKEND` for the whole run. The Phase 1 `/turbo` dispatch forwards `--backend=$UBERDEV_RESOLVED_BACKEND` explicitly (see the printf at line ~154); the Phase 2 `/merge` and `/review-pr` dispatches in `lib/goal-state.sh::_uberdev_goal_dispatch_{merge,review_pr}` do NOT thread the flag because the child commands do not accept `--backend` — those children re-resolve the backend in their own preflight from the same `UBERDEV_RESOLVED_BACKEND` env var that is exported by Phase 0 and inherited into every spawned shell. Per-cycle re-resolution at the orchestrator level is forbidden — it would let a transient `claude --version` flake mid-run silently swap backends, splitting a single goal's solvers across incompatible dispatch mechanisms. Each backend (`claude-bg` / `wezterm` / `background`) has its own session-management and worktree conventions that must stay stable across cycles so the gh + file detection signals (PR discovery via `closingIssuesReferences`, liveness via `claude agents --json` cwd matching, verdict via the file-based locator — issue #180) resolve consistently for every solver in the run. Wiring `--backend` through both downstream commands so the whole pipeline carries the flag explicitly is tracked as a follow-up (out of scope for v1).
+**Backend inheritance (D15).** Backend resolution is performed **once** by Phase 0 via `uberdev_dispatch_preflight`, which sets `UBERDEV_RESOLVED_BACKEND` for the whole run. After issue #248, the Phase 1 `/uberdev:orchestrator` dispatch no longer forwards `--backend=` explicitly (the orchestrator does not accept a `--backend=` CLI flag); backend now forwards purely via the `UBERDEV_RESOLVED_BACKEND` env var that Phase 0 exports — `claude --bg` inherits the parent shell's full env table by default, so every child (the orchestrator, plus the Phase 2 `/merge` and `/review-pr` dispatches in `lib/goal-state.sh::_uberdev_goal_dispatch_{merge,review_pr}`) re-resolves the backend in its own preflight from the same env var. Per-cycle re-resolution at the orchestrator level is forbidden — it would let a transient `claude --version` flake mid-run silently swap backends, splitting a single goal's solvers across incompatible dispatch mechanisms. Each backend (`claude-bg` / `wezterm` / `background`) has its own session-management and worktree conventions that must stay stable across cycles so the gh + file detection signals (PR discovery via `closingIssuesReferences`, liveness via `claude agents --json` cwd matching, verdict via the file-based locator — issue #180) resolve consistently for every solver in the run.
