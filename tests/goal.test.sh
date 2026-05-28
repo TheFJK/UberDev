@@ -296,11 +296,11 @@ assert_no_grep "$GOAL_LIB" '\bbash -c'                                   "G19.no
 assert_grep "$GOAL_CMD" '--i-know-what-im-doing'                         "G19.r12-mentioned-once"
 
 echo
-echo "== G20: version bump locked (0.35.0) =="
-assert_grep "$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json" '"version": "0\.35\.0"'  "G20.plugin-json"
-assert_grep "$REPO_ROOT/.claude-plugin/marketplace.json"            '"version": "0\.35\.0"'  "G20.marketplace-json"
-assert_grep "$REPO_ROOT/README.md"                                  'version-0\.35\.0-blue'  "G20.readme-badge"
-assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.35\.0\]'        "G20.changelog"
+echo "== G20: version bump locked (0.35.1) =="
+assert_grep "$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json" '"version": "0\.35\.1"'  "G20.plugin-json"
+assert_grep "$REPO_ROOT/.claude-plugin/marketplace.json"            '"version": "0\.35\.1"'  "G20.marketplace-json"
+assert_grep "$REPO_ROOT/README.md"                                  'version-0\.35\.1-blue'  "G20.readme-badge"
+assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.35\.1\]'        "G20.changelog"
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
 
 assert_grep "$GOAL_SKILL" 'uberdev_dispatch_resolve_env'  "G20b.phase0-wires-resolve-env (#175 SSOT anchor)"
@@ -2907,6 +2907,28 @@ rm -rf "$_b12_tmpdir/goal-test-bt84"* 2>/dev/null || true
 rm -rf "$_b12_tmpdir/goal-test-bt85"* 2>/dev/null || true
 rm -f "$_b12_tmpdir"/goal-bt5-*-merge-attempts.tsv 2>/dev/null || true
 rm -rf "$_b12_tmpdir" 2>/dev/null || true
+
+echo
+echo "== G40: fresh-shell lib re-source rehydrates STUCK_SECS (#245) =="
+# Reproduces the exact stuck_loop misfire from issue #245 (run id
+# goal-1779914294-PyIwDEMz, cycle 1): a fresh `bash -c` shell sources only
+# lib/goal-state.sh — NOT the SKILL.md Phase 0 Constants block. Before the
+# fix, $_UBERDEV_GOAL_STUCK_SECS was unset → bash arithmetic coerced to 0 →
+# `(( now - watch_start >= 0 ))` fired stuck_loop on iteration 1.
+# After the fix, the lib's `: "${_UBERDEV_GOAL_STUCK_SECS:=14400}"` sets the
+# canonical default during the fresh-shell source, so the assertion below
+# must report the literal 14400.
+if [ -x /opt/homebrew/bin/bash ]; then
+  _g40_bash=/opt/homebrew/bin/bash
+else
+  _g40_bash=bash
+fi
+_g40_out="$("$_g40_bash" -c '. "'"$REPO_ROOT"'/plugins/uberdev/lib/goal-state.sh"; echo "$_UBERDEV_GOAL_STUCK_SECS"' 2>&1)"
+if [ "$_g40_out" = "14400" ]; then
+  PASS=$((PASS+1)); echo "  PASS  G40.stuck-secs-rehydrated-on-fresh-shell"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  G40.stuck-secs-rehydrated-on-fresh-shell (expected 14400, got: $_g40_out)" >&2
+fi
 
 echo
 echo "== Summary =="

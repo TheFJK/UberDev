@@ -100,6 +100,39 @@ _UBERDEV_GOAL_WORKTREE_PREFIXES=("" ".claude/worktrees/*/" ".worktrees/*/" "work
 # default to 60 to keep behaviour identical.
 : "${_UBERDEV_GOAL_STUCK_DIALOG_SECS:=60}"   # ge 60 (preserved threshold)
 
+# Mirrored from skills/goal-pipeline/SKILL.md Phase 0 Constants block (issue #245).
+# This is the runtime SSOT — fresh-shell rehydration fences (SKILL.md ~210, 382,
+# 909, 1003, 1040, 1109) source ONLY this lib, never re-execute the Phase 0
+# block. Defaulted-assignment ( := ) is order-safe: if the Phase 0 block ran
+# first (cycle 1 happy path), these are no-ops; if the lib was sourced fresh
+# (every Phase 2 poll iteration), these set the canonical defaults so the
+# arithmetic comparisons in the watch loop don't coerce unset -> 0 and fire
+# stuck_loop on iteration 1.
+: "${_UBERDEV_GOAL_DEFAULT_MAX_CYCLES:=5}"
+: "${_UBERDEV_GOAL_DEFAULT_MAX_PARALLEL:=3}"
+: "${_UBERDEV_GOAL_DEFAULT_BARRIER_TIMEOUT_S:=14400}"     # 4h
+: "${_UBERDEV_GOAL_POLL_SECS:=60}"
+: "${_UBERDEV_GOAL_STUCK_SECS:=14400}"                    # 4h
+: "${_UBERDEV_GOAL_MAX_MERGE_ATTEMPTS:=3}"
+: "${_UBERDEV_GOAL_MAX_REVIEW_PR_ATTEMPTS:=3}"            # latent — used by _uberdev_goal_dispatch_review_pr via :-3 fallback, never declared until now
+: "${_UBERDEV_GOAL_SOLVE_TIMEOUT:=9000}"                  # 150m — no PR AND no live agent => issue failed (#180)
+: "${_UBERDEV_GOAL_DEFAULT_REVIEW_GRACE_SECS:=3600}"      # 60m default — overridable via goal.review_grace_secs / UBERDEV_GOAL_REVIEW_GRACE_SECS / --review-grace-secs (#220 AC ❶)
+: "${_UBERDEV_GOAL_MERGE_TIMEOUT:=3600}"                  # 60m — merging w/o MERGED AND agent idle => back to green for retry (#180)
+: "${_UBERDEV_GOAL_BODY_CAP:=65536}"                      # 64 KiB
+: "${FINDING_LABEL:=review-pr-finding}"
+
+# Regex constants — PLAIN assignment, NOT := (Q2 security advisory: := would
+# let a hostile env override the regex shape and widen the ReDoS attack
+# surface without a validator). FINDING_LABEL above intentionally uses :=
+# because gh CLI argv quoting + the 100-char label cap bound the override
+# surface; regex shape has no such bound. Consumer-call-site SSOT migration
+# is deferred (R2 in spec); _uberdev_goal_parse_blocks_line and
+# _uberdev_goal_extract_fingerprint still hardcode the literal.
+# SECURITY: do NOT change to ':=' — see Q2 advisory above
+BLOCKS_LINE_REGEX='^Blocks: #([0-9]+)$'
+# SECURITY: do NOT change to ':=' — see Q2 advisory above
+FINDING_FINGERPRINT_REGEX='<!-- uberdev:review-pr-finding fingerprint=([a-f0-9]{16}) -->'
+
 # Source discover.sh opportunistically for its stderr-isolation helpers;
 # tolerated absent (the goal-state.sh functions below do not hard-require
 # any discover.sh symbol).
