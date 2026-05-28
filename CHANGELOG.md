@@ -4,6 +4,18 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.1] — 2026-05-28
+
+### Fixed
+- **`/uberdev:goal` fresh-shell `stuck_loop` misfire on cycle 1 (Closes #245).** The goal-pipeline SKILL.md Phase 0 Constants block declared 13 scalar tunables (e.g. `_UBERDEV_GOAL_STUCK_SECS=14400`, `_UBERDEV_GOAL_POLL_SECS=60`, `_UBERDEV_GOAL_SOLVE_TIMEOUT=9000`, `_UBERDEV_GOAL_BODY_CAP=65536`, `FINDING_LABEL='review-pr-finding'`) and 2 regex constants — but every fresh-shell rehydration fence in Phases 1/2/3/4 sources ONLY `lib/goal-state.sh`, never re-executing the Phase 0 block. The first watch-loop check at SKILL.md:411 — `(( now - watch_start >= _UBERDEV_GOAL_STUCK_SECS ))` — saw an unset variable, bash arithmetic coerced to 0 (POSIX.1-2017 §2.6.4), the comparison reduced to `(( elapsed > 0 ))`, and `stuck_loop` fired on iteration 1 (live repro: `/ubergoal 225 226 227` cycle 1 printed `STUCK_LOOP (4h cap)` with elapsed=0 and all 3 issues still in `solving`).
+  - `plugins/uberdev/lib/goal-state.sh` — added 12 defaulted-assignment declarations (`: "${VAR:=default}"`, the same idiom proven on `_UBERDEV_GOAL_STUCK_DIALOG_SECS:=60` from PR #221) for the 10 SKILL.md-declared integer scalars + `FINDING_LABEL` + the latent `_UBERDEV_GOAL_MAX_REVIEW_PR_ATTEMPTS:=3` (used by `_uberdev_goal_dispatch_review_pr` via `:-3` fallback but never declared until now). Added 2 plain-assignment regex declarations (`BLOCKS_LINE_REGEX`, `FINDING_FINGERPRINT_REGEX`) — `:=` is intentionally NOT used on the regexes (Q2 security advisory: defaulted-assignment would let a hostile env override regex shape and widen the ReDoS attack surface without a validator). All 14 new declarations live after the `_UBERDEV_GOAL_STATE_LOADED=1` marker (within the guarded first-source-per-process region per RFC 0005 D19; relies on each fresh-shell rehydration fence being a new process), immediately after the line-101 precedent.
+  - `plugins/uberdev/skills/goal-pipeline/SKILL.md` — Constants block kept byte-identical (tests G24/G28/G34 grep the literals verbatim — partial change would red CI); added a one-line prose pointer above the block declaring `lib/goal-state.sh` as the runtime SSOT and the SKILL.md block as the documentation SSOT.
+  - Tests: `tests/goal.test.sh` G20 ratcheted to 0.35.1; new G40 regression test sources ONLY `lib/goal-state.sh` in a fresh `bash -c` and asserts `_UBERDEV_GOAL_STUCK_SECS == 14400` — proves the fix on the exact path that fails today. `tests/solve-claim.test.sh` version block ratcheted 0.35.0 → 0.35.1.
+
+### Notes
+- Version bumped to 0.35.1 across `plugin.json`, `marketplace.json`, the README badge, `CHANGELOG.md`, `tests/goal.test.sh` G20, and `tests/solve-claim.test.sh`. Atomic version-lock surfaces — partial bump is a red CI invariant (memory `project_uberdev_version_lock_tests`).
+- Out of scope: consumer-call-site SSOT migration for the two regex constants (`_uberdev_goal_parse_blocks_line` and `_uberdev_goal_extract_fingerprint` still hardcode the literal — deferred per Q2); `_uberdev_goal_validate_int` hardening for arithmetic uses of the integer constants (latent env-injection surface, pre-existing); a fuller Phase-1→2→3→4 fresh-shell-fence integration test (G40 covers the primary scalar; deeper test logged as a follow-up).
+
 ## [0.35.0] — 2026-05-28
 
 ### Changed
