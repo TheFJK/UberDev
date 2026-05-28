@@ -172,9 +172,20 @@ uberdev_dispatch_preflight() {
 #                                   why pairing is required — bg-session UI cycle ring).
 #   EFFORT_LEVEL     (default max)
 uberdev_dispatch_resolve_env() {
-  # BG_PROMPT_MODE: hardcoded `argv` (claude --bg 2.1.139 has no documented
-  # --prompt-file / stdin form; the file/stdin arms in _uberdev_dispatch_claude_bg
-  # remain a pre-wired migration target, unexercised at runtime).
+  # BG_PROMPT_MODE: hardcoded `argv`. Verified 2026-05-28 against claude-code
+  # 2.1.153 via tests/manual/probe-prompt-file-slash-expansion.sh — probe verdict
+  # was `INDETERMINATE`: --prompt-file is accepted as a flag (session backgrounds
+  # successfully), but the file body is not promoted to the session-name surface
+  # — the spawned session's name remained the short id rather than the opening
+  # prompt body, unlike argv-mode where name = the opening message verbatim. The
+  # session went idle within the probe's 30s window without the name field ever
+  # diverging. Slash-expansion firing is therefore unobservable from outside the
+  # session, but the name-surface divergence suggests the body is processed
+  # through a different parser path (or not at all) — either way, the natural-
+  # language wrapper at the 5 prompt-build callsites (issue #235 / PR #238)
+  # remains canonical. The `file`/`stdin` arms in _uberdev_dispatch_claude_bg
+  # remain pre-wired migration targets for a future CLI revision per RFC 0004
+  # §3.4. Closes #240 (won't-fix).
   BG_PROMPT_MODE=argv
 
   # MODEL: single-quoted to keep zsh from glob-evaluating [1m] under NOMATCH.
