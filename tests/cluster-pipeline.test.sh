@@ -647,9 +647,8 @@ fi
 # A broken append would silently omit the marker/section, breaking idempotency
 # layer (b) on re-runs (re-folds the same cluster). Issue #259.
 echo "== P13 Phase 5 fold-append: marker + Folded children written via --body-file"
-P13_RUN_DIR="$STAGE/p13-run"
 P13_BODIES_DIR="$STAGE/p13-body-files"
-mkdir -p "$P13_RUN_DIR" "$P13_BODIES_DIR"
+mkdir -p "$P13_BODIES_DIR"
 
 reset_mock_log
 export MOCK_GH_MODE=default
@@ -671,9 +670,11 @@ P13_LEAD_BODY="Original lead body content."
 P13_CLUSTER="$(jq -nc --arg lead "$P13_LEAD" --argjson members "[225,226]" --arg r "$P13_RATIONALE" --argjson c "$P13_CONF" \
   '{lead:($lead|tonumber), members:$members, rationale:$r, confidence:$c}')"
 
-# Verbatim append block from SKILL.md (Phase 5 lines 764-799). We elide the
-# LEAD_BODY_SAFE secret-scan branch — P12 already covers the secret-scan
-# integration on a different call path; this gate locks the body-shape contract.
+# Verbatim append block from SKILL.md (Phase 5 "Append marker + Folded
+# children" block; the (h) drift-detection snippets below are the load-bearing
+# pin). We elide the LEAD_BODY_SAFE secret-scan branch — P12 already covers the
+# secret-scan integration on a different call path; this gate locks the
+# body-shape contract.
 P13_LEAD_NEW_FILE="$(mktemp)"
 {
   printf '%s\n\n' "$P13_LEAD_BODY"
