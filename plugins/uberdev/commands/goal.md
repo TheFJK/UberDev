@@ -40,7 +40,12 @@ A wall-clock cap (default 4h, see `--barrier-timeout=N`) escalates a stuck barri
 
 ## Permission requirements (cmux/hooks caveat)
 
-`/goal` runs each dispatched bg `/uberdev:orchestrator` agent in `bypassPermissions` mode (the `--dangerously-skip-permissions` argv flag) so the autonomous loop does not stall on cmux's `PermissionRequest` hook (or any other `--settings`-injected `PreToolUse` hook). This is set by `goal-pipeline/SKILL.md` Phase 0 via `export SKIP_PERMISSIONS=1` and propagated through `BG_TURBO_ENV` in `lib/dispatch.sh` to every nested child dispatch (`/uberdev:orchestrator` → `subagent-driven-dev`).
+`/goal` runs each dispatched bg `/uberdev:orchestrator` agent in `bypassPermissions` mode via a **pair** of argv flags — `--dangerously-skip-permissions` AND `--permission-mode bypassPermissions` — so the autonomous loop does not stall on cmux's `PermissionRequest` hook (or any other `--settings`-injected `PreToolUse` hook). The two flags target **different mechanisms** and both are needed (belt-and-suspenders, per #246):
+
+- `--dangerously-skip-permissions` short-circuits the runtime permission-check codepath (the historical bypass).
+- `--permission-mode bypassPermissions` pins the bg session UI cycle ring; without an explicit setting it defaults to `auto`, which is exactly the mode that silently breaks Search and other agent tools that the loop relies on.
+
+See `plugins/uberdev/lib/dispatch.sh:192-198` for the full rationale. This is set by `goal-pipeline/SKILL.md` Phase 0 via `export SKIP_PERMISSIONS=1` and propagated through `BG_TURBO_ENV` in `lib/dispatch.sh` to every nested child dispatch (`/uberdev:orchestrator` → `subagent-driven-dev`); the SKIP_PERMISSIONS env-var resolves to the paired flags inside `uberdev_dispatch_resolve_env`.
 
 **Important:** settings like `"skipDangerousModePermissionPrompt": true` in your own `~/.claude/settings.json` are **NOT** sufficient when cmux (or another daemon manager) injects its own `--settings <blob>` into the bg session's `respawnFlags` via the parent process — the user-settings file is shadowed at bg-dispatch time, not modified on disk. The env-var path (`SKIP_PERMISSIONS=1` → `--dangerously-skip-permissions` in argv) is what actually unblocks the loop.
 
