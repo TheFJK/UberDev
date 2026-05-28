@@ -657,6 +657,16 @@ if [ ! -s "$PHASE35_FENCE_SH" ]; then
   PHASE35_FENCE_OK=0
 fi
 
+# Shared chunk-YAML fixtures emitted by P14 (3 chunks) and P15 (2 chunks).
+# Hoisted to vars so the aggregator-input shape is defined exactly once;
+# `printf '%s\n' "$VAR" > FILE` emits byte-identical YAML to the prior heredoc.
+PHASE35_NONTRIVIAL_CHUNK_YAML='clusters:
+  - lead: 1
+    members: [1, 2]
+    rationale: "stub"
+    confidence: 0.9'
+PHASE35_EMPTY_CHUNK_YAML='clusters: []'
+
 echo "== P13 Phase 3.5 SKIP path (TOTAL_ISSUES=10 < 2*CHUNK_SIZE)"
 
 # Shape check: lock the skip-condition expression in SKILL.md against silent
@@ -677,7 +687,10 @@ fi
 P13_TMPDIR="$STAGE/p13-tmp"
 P13_RUN_ID="p13-skip-test"
 P13_RUN_DIR="$P13_TMPDIR/.uberdev/cluster/$P13_RUN_ID"
-mkdir -p "$P13_RUN_DIR/dispatches" "$P13_RUN_DIR/analyses"
+# P13 exercises the SKIP path — Phase 3.5 fence returns before any `analyses/`
+# read, so we don't materialise that subdirectory. `dispatches/` is kept for
+# symmetry with P14/P15 (cheap and documents the run-dir contract).
+mkdir -p "$P13_RUN_DIR/dispatches"
 printf '%s\n' "$P13_RUN_ID" > "$P13_TMPDIR/cluster-active-id.txt"
 cat > "$P13_RUN_DIR/run-state.txt" <<EOF
 RUN_ID=$P13_RUN_ID
@@ -722,6 +735,11 @@ fi
 
 echo "== P14 Phase 3.5 EXECUTE path (TOTAL_ISSUES=25 >= 2*CHUNK_SIZE)"
 
+# Canonical multi-chunk EXECUTE sample. TOTAL_ISSUES=25 at CHUNK_SIZE=10 yields
+# 3 full chunks (10/10/5), exercising both per-chunk slicing and the
+# cross-chunk meta-pass aggregation that P13's single-chunk SKIP path bypasses.
+# Paired with P15 (boundary TOTAL_ISSUES=20) so the EXECUTE path is verified
+# at the strict-`-gt` interior (25) and at the `-lt` boundary (20).
 P14_TMPDIR="$STAGE/p14-tmp"
 P14_RUN_ID="p14-execute-test"
 P14_RUN_DIR="$P14_TMPDIR/.uberdev/cluster/$P14_RUN_ID"
@@ -738,19 +756,9 @@ EOF
 # 25 issues at CHUNK_SIZE=10 → 3 chunks (10/10/5). Emit minimal valid per-chunk
 # YAMLs — the aggregator reads `analyses/*.yaml` and embeds each as a meta-pass
 # envelope. One non-trivial entry ensures all-analyses.json is non-empty.
-cat > "$P14_RUN_DIR/analyses/chunk-01-clusters.yaml" <<'YAML'
-clusters:
-  - lead: 1
-    members: [1, 2]
-    rationale: "stub"
-    confidence: 0.9
-YAML
-cat > "$P14_RUN_DIR/analyses/chunk-02-clusters.yaml" <<'YAML'
-clusters: []
-YAML
-cat > "$P14_RUN_DIR/analyses/chunk-03-clusters.yaml" <<'YAML'
-clusters: []
-YAML
+printf '%s\n' "$PHASE35_NONTRIVIAL_CHUNK_YAML" > "$P14_RUN_DIR/analyses/chunk-01-clusters.yaml"
+printf '%s\n' "$PHASE35_EMPTY_CHUNK_YAML" > "$P14_RUN_DIR/analyses/chunk-02-clusters.yaml"
+printf '%s\n' "$PHASE35_EMPTY_CHUNK_YAML" > "$P14_RUN_DIR/analyses/chunk-03-clusters.yaml"
 
 P14_OUT="$STAGE/p14.out"
 P14_ERR="$STAGE/p14.err"
@@ -817,16 +825,8 @@ EOF
 # 20 issues at CHUNK_SIZE=10 → 2 chunks (10/10). Emit minimal valid per-chunk
 # YAMLs for the aggregator. One non-trivial entry ensures all-analyses.json
 # is non-empty.
-cat > "$P15_RUN_DIR/analyses/chunk-01-clusters.yaml" <<'YAML'
-clusters:
-  - lead: 1
-    members: [1, 2]
-    rationale: "stub"
-    confidence: 0.9
-YAML
-cat > "$P15_RUN_DIR/analyses/chunk-02-clusters.yaml" <<'YAML'
-clusters: []
-YAML
+printf '%s\n' "$PHASE35_NONTRIVIAL_CHUNK_YAML" > "$P15_RUN_DIR/analyses/chunk-01-clusters.yaml"
+printf '%s\n' "$PHASE35_EMPTY_CHUNK_YAML" > "$P15_RUN_DIR/analyses/chunk-02-clusters.yaml"
 
 P15_OUT="$STAGE/p15.out"
 P15_ERR="$STAGE/p15.err"
