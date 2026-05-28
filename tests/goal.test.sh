@@ -301,7 +301,7 @@ assert_grep "$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json" '"version": 
 assert_grep "$REPO_ROOT/.claude-plugin/marketplace.json"            '"version": "0\.35\.0"'  "G20.marketplace-json"
 assert_grep "$REPO_ROOT/README.md"                                  'version-0\.35\.0-blue'  "G20.readme-badge"
 assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.35\.0\]'        "G20.changelog"
-assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.34\.13'               "G20.solve-claim-no-old-version"
+assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.34\.12'               "G20.solve-claim-no-old-version"
 
 assert_grep "$GOAL_SKILL" 'uberdev_dispatch_resolve_env'  "G20b.phase0-wires-resolve-env (#175 SSOT anchor)"
 assert_grep "$GOAL_SKILL" 'export AUTO_MODE=1'            "G20b.phase0-sets-AUTO_MODE (#175 turbo-parity)"
