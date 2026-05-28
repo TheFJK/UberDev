@@ -571,7 +571,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
            # `git rebase --continue` exited non-zero. Two sub-cases:
            #   (a) Multi-stage rebase: continuation surfaced a NEW conflict set.
            #       Re-bind `conflicted_files` from the live rebase state via
-           #       `git status --porcelain | awk '/^UU / {print $2}'` and re-enter
+           #       `git status --porcelain | awk -v c2=2 '/^UU / {print $c2}'` and re-enter
            #       step 3 against the NEW list (NOT the agent's original list —
            #       conflict-resolver REFUSES paths outside its pre-computed set per
            #       `agents/conflict-resolver.md` Refusal triggers + Inputs). Bounded
@@ -581,7 +581,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
            #   (b) Non-conflict failure (pre-commit hook rejection, GPG signing
            #       failure, etc): no UU entries → halt.
            # Use mapfile -t (NOT unquoted expansion) so paths with spaces survive.
-           mapfile -t conflicted_files < <(git status --porcelain | awk '/^UU / {print $2}')
+           mapfile -t conflicted_files < <(git status --porcelain | awk -v c2=2 '/^UU / {print $c2}')
            if [ "${#conflicted_files[@]}" -gt 0 ]; then
              # Re-enter step 3 with the new list (single-shot per CI_FIX_LOOP_CAP).
              :

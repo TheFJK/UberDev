@@ -224,8 +224,7 @@ declare -a active_issues=()
 dispatched_this_cycle=0
 remaining_queue=()
 for ISSUE_NUM in "${queue[@]}"; do
-  current_state="$(awk -v i="$ISSUE_NUM" -v c1=1 -v c2=2 '{state[$c1]=$c2} END {print state[i]}' \
-    "$UBERDEV_TMPDIR/goal-$GOAL_ID-issue-states.tsv" 2>/dev/null)"
+  current_state="$(uberdev_goal_get_issue_state "$GOAL_ID" "$ISSUE_NUM" 2>/dev/null)"
   # Issue #236 — `dispatched` is the pre-spawn guard state written below before
   # uberdev_dispatch_one. Adding it to the skip-check closes the leaf-crash-
   # pre-state-write double-spawn surface: a leaf that crashes between spawn
@@ -427,8 +426,7 @@ while true; do
   # no PR exists yet, `uberdev_goal_agent_busy_for_issue` disambiguates "solver
   # still working" from "solver died", bounded by _UBERDEV_GOAL_SOLVE_TIMEOUT.
   for issue in "${active_issues[@]}"; do
-    istate="$(awk -v i="$issue" -v c1=1 -v c2=2 '{s[$c1]=$c2} END{print s[i]}' \
-      "$UBERDEV_TMPDIR/goal-$GOAL_ID-issue-states.tsv" 2>/dev/null)"
+    istate="$(uberdev_goal_get_issue_state "$GOAL_ID" "$issue" 2>/dev/null)"
     case "$istate" in pr-pushed|resolved|resolved-by-no-action|failed) continue ;; esac
     pr_num="$(uberdev_goal_find_pr_for_issue "$issue")"
     if [ -n "$pr_num" ]; then
@@ -440,8 +438,7 @@ while true; do
       # resolutions in the same cycle) don't double-write. Best-effort:
       # warn-and-continue on rc != 0 — a transient registry write must not
       # fail the watch loop.
-      batch_tsv="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}/goal-${GOAL_ID}-batch-prs.tsv"
-      if [ ! -f "$batch_tsv" ] || ! awk -F'\t' -v p="$pr_num" -v c1=1 '$c1==p{found=1; exit} END{exit !found}' "$batch_tsv"; then
+      if ! uberdev_goal_batch_has_pr "$GOAL_ID" "$pr_num"; then
         uberdev_goal_register_batch_pr "$GOAL_ID" "$pr_num" "$issue" \
           || printf 'goal: register_batch_pr deferred-call failed for PR=%s issue=%s (rc=%s)\n' "$pr_num" "$issue" "$?" >&2
       fi
@@ -493,8 +490,7 @@ while true; do
         printf 'goal-pipeline: gh issue view %s failed rc=%d — falling through to timeout backstop\n' \
           "$issue" "$gh_rc" >&2
       fi
-      dispatch_ts="$(awk -v i="$issue" -v c1=1 -v c2=2 -v c3=3 '$c1==i && $c2=="solving"{t=$c3} END{print t+0}' \
-        "$UBERDEV_TMPDIR/goal-$GOAL_ID-issue-states.tsv" 2>/dev/null)"
+      dispatch_ts="$(uberdev_goal_issue_ts_in_state "$GOAL_ID" "$issue" solving 2>/dev/null)"
       if [ "$(( now - dispatch_ts ))" -lt "$_UBERDEV_GOAL_SOLVE_TIMEOUT" ]; then
         any_active=1
       else
@@ -555,20 +551,11 @@ while true; do
         # from the pr-states TSV (FIRST pushed-reviewing transition for this PR).
         # D17: never assume GREEN.
         #
-        # B8 (post-impl-review): the awk filter MUST require state == "pushed-
-        # reviewing" AND take the FIRST occurrence — without state filtering,
-        # later transitions (e.g., dispatched→pushed-reviewing→green→...)
-        # leak into seen_ts and the grace-window arithmetic compares "now"
-        # against a much-newer transition timestamp, never crossing the
-        # threshold. The original awk printed every row's ts for the PR and
-        # the shell captured only the LAST line, masking the bug except
-        # under specific transition orderings. `!t{t=$c3}` guards FIRST-seen;
-        # `t+0` coerces empty → 0 so the downstream `$((now - seen_ts))` is
-        # arithmetic-safe even when no row exists. The `-v c1=1 -v c2=2 -v c3=3`
-        # parameterisation (issue #222) prevents the Skill renderer from
-        # substituting positional args of `$ARGUMENTS` into the awk field refs.
-        seen_ts=$(awk -F'\t' -v p="$pr_num" -v c1=1 -v c2=2 -v c3=3 '$c1==p && $c2=="pushed-reviewing" && !t{t=$c3} END{print t+0}' \
-          "$UBERDEV_TMPDIR/goal-$GOAL_ID-pr-states.tsv" 2>/dev/null)
+        # seen_ts = FIRST pushed-reviewing transition for this PR (first-wins is
+        # load-bearing for the grace window — see uberdev_goal_pr_first_ts_in_state
+        # doc + issue #222 B8). t+0 coerces absent → 0 so `$((now - seen_ts))` is
+        # arithmetic-safe.
+        seen_ts=$(uberdev_goal_pr_first_ts_in_state "$GOAL_ID" "$pr_num" pushed-reviewing 2>/dev/null)
         # Marker probe (Component 3.2)
         if _uberdev_goal_locked_marker_for_pr_fresh "$pr_num" "$REVIEW_GRACE_SECS"; then
           any_active=1
@@ -610,7 +597,13 @@ while true; do
           print_summary "$cycle"
           exit 1
         else
-          _uberdev_goal_dispatch_review_pr "$pr_num"
+          # #219 — surface a re-dispatch failure as a breadcrumb (mirrors the
+          # register_batch_pr best-effort pattern above). The watch loop re-polls,
+          # so a failed re-dispatch is retried next iteration rather than halting.
+          # Note: the helper returns rc 0 on the intentional cap-reached skip, so
+          # this only warns on a genuine dispatch failure.
+          _uberdev_goal_dispatch_review_pr "$pr_num" \
+            || printf 'goal-pipeline: review-pr re-dispatch for PR %s failed (rc=%s) — will retry next poll\n' "$pr_num" "$?" >&2
           any_active=1
         fi
         ;;
@@ -786,8 +779,7 @@ while true; do
         # is `solve-issue-<pr>` and `agent_busy_for_issue "$pr"` matches it
         # correctly. (The function name says "for_issue" because the SHARED
         # naming convention is solve-issue-<key>; the key here is a PR.)
-        merge_ts="$(awk -v p="$pr" -v c1=1 -v c2=2 -v c3=3 '$c1==p && $c2=="merging"{t=$c3} END{print t+0}' \
-          "$UBERDEV_TMPDIR/goal-$GOAL_ID-pr-states.tsv" 2>/dev/null)"
+        merge_ts="$(uberdev_goal_pr_ts_in_state "$GOAL_ID" "$pr" merging 2>/dev/null)"
         if [ "$(( now - merge_ts ))" -ge "$_UBERDEV_GOAL_MERGE_TIMEOUT" ] \
            && ! uberdev_goal_agent_busy_for_issue "$pr"; then
           printf 'goal-pipeline: PR %s merge stalled (%ss, agent idle) -> back to green for retry\n' \
@@ -1064,8 +1056,7 @@ terminal_prs="$(uberdev_goal_list_prs_in_state "$GOAL_ID" merged \
   ; uberdev_goal_list_prs_in_state "$GOAL_ID" merge-failed \
   ; uberdev_goal_list_prs_in_state "$GOAL_ID" yellow-held \
   ; uberdev_goal_list_prs_in_state "$GOAL_ID" red-held)"
-all_pr_count="$(awk -v c1=1 '{print $c1}' "$UBERDEV_TMPDIR/goal-$GOAL_ID-pr-states.tsv" \
-  | sort -u | wc -l)"
+all_pr_count="$(uberdev_goal_count_distinct_prs "$GOAL_ID")"
 terminal_count="$(printf '%s\n' "$terminal_prs" | grep -c . || true)"
 if [ "${#new_candidates[@]}" = "0" ] && [ "$terminal_count" = "$all_pr_count" ]; then
   uberdev_goal_audit goal_converged \
@@ -1167,8 +1158,7 @@ print_summary() {
     uberdev_goal_list_prs_in_state "$GOAL_ID" yellow-held | sed 's/^/yellow-held\t/'; \
     uberdev_goal_list_prs_in_state "$GOAL_ID" red-held    | sed 's/^/red-held\t/' )"
   prs_held_count="$(printf '%s\n' "$prs_held_lines" | grep -c . || true)"
-  issues_resolved="$(awk -v c1=1 -v c2=2 '$c2=="resolved" || $c2=="resolved-by-no-action" {print $c1}' \
-    "$UBERDEV_TMPDIR/goal-$GOAL_ID-issue-states.tsv" | grep -c . || true)"
+  issues_resolved="$(uberdev_goal_count_resolved_issues "$GOAL_ID")"
   wall_secs="$(( $(date +%s) - watch_start ))"
   printf 'goal %s: cycles=%s/%s prs_merged=%s prs_held=%s issues_resolved=%s wall_secs=%s\n' \
     "$GOAL_ID" "$cycles" "$MAX_CYCLES" "$prs_merged" "$prs_held_count" \

@@ -120,6 +120,34 @@ else
   FAIL=$((FAIL+1))
 fi
 
+# R1b — issue #237 audit: command files (plugins/uberdev/commands/*.md) are
+# slash-arg-substituted by the Skill loader exactly like SKILL.md, so an awk
+# script body with a bare `$N` inside an EXECUTED block is the same #222 bug
+# class (concrete prior site: review-pr.md's conflict-file mapfile extraction,
+# `awk '/^UU / {print $2}'`, where `$2` is clobbered by the PR-number argv).
+# agents/*.md are intentionally NOT scanned: agent system prompts receive a
+# task prompt, never positional slash args, so their `awk '{print $1}'` field
+# refs are legitimate and would false-positive here.
+COMMANDS_DIR="$REPO_ROOT/plugins/uberdev/commands"
+cmd_hits=""
+if [ -d "$COMMANDS_DIR" ]; then
+  while IFS= read -r -d '' cmd_file; do
+    flattened="$(tr '\n' ' ' < "$cmd_file")"
+    if printf '%s' "$flattened" | grep -qE "$GUARD_REGEX"; then
+      cmd_hits="$cmd_hits$cmd_file"$'\n'
+    fi
+  done < <(find "$COMMANDS_DIR" -name "*.md" -print0)
+fi
+if [ -z "$cmd_hits" ]; then
+  echo "  PASS  R1b no plugins/uberdev/commands/*.md awk script body contains a bare \$N field ref"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  R1b these command files use bare \$N field refs vulnerable to the renderer:"
+  printf '          %s\n' "$cmd_hits" | sed 's/^/  /'
+  echo "         Fix: add \`-v cN=N\` to the awk invocation and use \`\$cN\` in place of \`\$N\`."
+  FAIL=$((FAIL+1))
+fi
+
 # Fixture setup — single trap install up front covers every mktemp. Bash
 # supports ONE EXIT trap per shell; declaring ALL fixtures + ONE trap before
 # any cat-into-fixture avoids the prior two-trap shape where the second
@@ -134,7 +162,9 @@ fixture_bash_bad="$(mktemp)"
 fixture_bash_safe="$(mktemp)"
 fixture_emit_topic_log_src="$(mktemp)"
 r6_log_tmp="$(mktemp)"
-trap 'rm -f "$fixture_simple" "$fixture_multi" "$fixture_safe" "$fixture_bash_bad" "$fixture_bash_safe" "$fixture_emit_topic_log_src" "$r6_log_tmp"' EXIT
+fixture_cmd_bad="$(mktemp)"
+fixture_cmd_safe="$(mktemp)"
+trap 'rm -f "$fixture_simple" "$fixture_multi" "$fixture_safe" "$fixture_bash_bad" "$fixture_bash_safe" "$fixture_emit_topic_log_src" "$r6_log_tmp" "$fixture_cmd_bad" "$fixture_cmd_safe"' EXIT
 
 # R2 — fixture proof: a synthetic SKILL.md fragment containing the bad shape
 # MUST be detected by the same regex. This is an inside-out check that the
@@ -198,6 +228,39 @@ if grep -qE "$GUARD_REGEX" "$fixture_safe"; then
   FAIL=$((FAIL+1))
 else
   echo "  PASS  R3 the guard regex does NOT false-positive on the safe parameterised shape"
+  PASS=$((PASS+1))
+fi
+
+# R1b.fixture — inverse proof for the R1b command-surface scan (mirrors R2/R3
+# for the SKILL surface). The live R1b above reuses GUARD_REGEX (proven by
+# R2/R3) but its find+flatten loop over commands/*.md is otherwise unexercised;
+# these two fixtures prove the command-surface scan path flags the vulnerable
+# shape and spares the safe parameterised form. Closes the R1b coverage gap
+# (#266 review — pr-test-analyzer).
+cat > "$fixture_cmd_bad" <<'EOF_CMD_BAD'
+# fake command-file awk site — R1b's scan MUST flag this
+mapfile -t conflicted_files < <(git status --porcelain | awk '/^UU / {print $2}')
+EOF_CMD_BAD
+cmd_bad_flat="$(tr '\n' ' ' < "$fixture_cmd_bad")"
+if printf '%s' "$cmd_bad_flat" | grep -qE "$GUARD_REGEX"; then
+  echo "  PASS  R1b.bad the command-surface scan flags a vulnerable awk shape in a command file"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  R1b.bad the command-surface scan no longer flags a vulnerable awk shape"
+  echo "         R1b will silently pass on a regressed commands/*.md."
+  FAIL=$((FAIL+1))
+fi
+cat > "$fixture_cmd_safe" <<'EOF_CMD_SAFE'
+# renderer-safe parameterised command-file awk — R1b's scan must NOT flag this
+mapfile -t conflicted_files < <(git status --porcelain | awk -v c2=2 '/^UU / {print $c2}')
+EOF_CMD_SAFE
+cmd_safe_flat="$(tr '\n' ' ' < "$fixture_cmd_safe")"
+if printf '%s' "$cmd_safe_flat" | grep -qE "$GUARD_REGEX"; then
+  echo "  FAIL  R1b.safe the command-surface scan false-positives on the parameterised \`-v c2=2\` + \$c2 shape"
+  echo "         R1b will red CI on the recommended command-file fix."
+  FAIL=$((FAIL+1))
+else
+  echo "  PASS  R1b.safe the command-surface scan does NOT false-positive on the safe parameterised shape"
   PASS=$((PASS+1))
 fi
 
