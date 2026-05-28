@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/cluster-pipeline.test.sh — behavioral gates for /uberdev:cluster (issue #247).
 #
-# 12 gates P1-P12 that exercise the actual SKILL.md bash bodies +
+# 13 gates P1-P13 that exercise the actual SKILL.md bash bodies +
 # cluster_propose.py runtime behavior. Uses mock-gh (PATH override pattern
 # borrowed from tests/findings-to-issues.test.sh:51-72) + python3 + mktemp + jq.
 #
@@ -72,6 +72,26 @@ case "$sub" in
         ;;
       close|edit|comment|reopen)
         # No stdout. Exit code controlled by MOCK_ISSUE_WRITE_RC.
+        # When MOCK_BODY_FILES_DIR is set, copy any --body-file argument's
+        # content into $MOCK_BODY_FILES_DIR/${subsub}-${issue}.txt so the test
+        # can assert on what would have been POSTed to the gh API. Opt-in only;
+        # existing gates that do not set MOCK_BODY_FILES_DIR see no behavior
+        # change.
+        if [ -n "${MOCK_BODY_FILES_DIR:-}" ]; then
+          mock_issue_num="${1:-}"
+          shift || true
+          mock_body_file=""
+          while [ "$#" -gt 0 ]; do
+            if [ "$1" = "--body-file" ]; then
+              mock_body_file="${2:-}"
+              break
+            fi
+            shift
+          done
+          if [ -n "$mock_body_file" ] && [ -r "$mock_body_file" ] && [ -n "$mock_issue_num" ]; then
+            cat "$mock_body_file" > "$MOCK_BODY_FILES_DIR/${subsub}-${mock_issue_num}.txt" 2>/dev/null || true
+          fi
+        fi
         exit "${MOCK_ISSUE_WRITE_RC:-0}"
         ;;
       *) ;;
@@ -611,6 +631,139 @@ if ( CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" SECRET="$P12_SECRET" bash -c '
 else
   rc=$?
   echo "  FAIL  P12 secret-scan did not fail-CLOSED (sub-rc=$rc)"
+  FAIL=$((FAIL+1))
+fi
+
+# ============================================================================
+# P13 — Phase 5 lead-body fold-append: HTML marker + "Folded children" section.
+# ============================================================================
+#
+# Exercises the actual mutation path that turns a clean lead body into a
+# fold-marked one. P10 covers marker-forgery detection (read side of the
+# marker); this gate covers the WRITE side — `gh issue edit --body-file` is
+# called with body content that contains BOTH the HTML-comment marker AND the
+# "## Folded children" section listing the expected member numbers.
+#
+# A broken append would silently omit the marker/section, breaking idempotency
+# layer (b) on re-runs (re-folds the same cluster). Issue #259.
+echo "== P13 Phase 5 fold-append: marker + Folded children written via --body-file"
+P13_RUN_DIR="$STAGE/p13-run"
+P13_BODIES_DIR="$STAGE/p13-body-files"
+mkdir -p "$P13_RUN_DIR" "$P13_BODIES_DIR"
+
+reset_mock_log
+export MOCK_GH_MODE=default
+export MOCK_ISSUE_WRITE_RC=0
+export MOCK_BODY_FILES_DIR="$P13_BODIES_DIR"
+
+# Inputs the outer Phase-5 loop would have set on entry to the append block.
+P13_LEAD=225
+P13_MEMBERS_CSV="225,226"
+P13_RATIONALE="r"
+# Fingerprint matches SKILL.md Phase 5 (sha256 first 16 hex chars).
+P13_FP="$(printf '%s:%s:%s' "$P13_LEAD" "$P13_MEMBERS_CSV" "$P13_RATIONALE" | shasum -a 256 | cut -c1-16)"
+P13_CONF=0.92
+P13_REPO_SLUG="OWNER/REPO"
+P13_LEAD_BODY="Original lead body content."
+
+# Per-cluster JSON, matching the shape `jq -c '.[]' clusters-filtered.json`
+# emits inside the Phase 5 loop.
+P13_CLUSTER="$(jq -nc --arg lead "$P13_LEAD" --argjson members "[225,226]" --arg r "$P13_RATIONALE" --argjson c "$P13_CONF" \
+  '{lead:($lead|tonumber), members:$members, rationale:$r, confidence:$c}')"
+
+# Verbatim append block from SKILL.md (Phase 5 lines 764-799). We elide the
+# LEAD_BODY_SAFE secret-scan branch — P12 already covers the secret-scan
+# integration on a different call path; this gate locks the body-shape contract.
+P13_LEAD_NEW_FILE="$(mktemp)"
+{
+  printf '%s\n\n' "$P13_LEAD_BODY"
+  printf '<!-- uberdev:cluster-fold lead=%s members=%s fingerprint=%s -->\n' \
+    "$P13_LEAD" "$P13_MEMBERS_CSV" "$P13_FP"
+  printf '## Folded children\n\n'
+  printf '%s' "$P13_CLUSTER" | jq -r '.members[] | "- #\(.)"'
+} > "$P13_LEAD_NEW_FILE"
+
+# Snapshot the body content before the gh call (the production code rm -f's
+# the file immediately after gh returns; mock-gh's body-file capture is a
+# belt-and-braces second channel). The file snapshot preserves trailing
+# newlines; P13_NEW_BODY (via $(cat …)) does not — used only for grep checks.
+P13_SNAPSHOT="$STAGE/p13-snapshot.txt"
+cp "$P13_LEAD_NEW_FILE" "$P13_SNAPSHOT"
+P13_NEW_BODY="$(cat "$P13_LEAD_NEW_FILE")"
+
+if gh issue edit "$P13_LEAD" --repo "$P13_REPO_SLUG" --body-file "$P13_LEAD_NEW_FILE"; then
+  P13_GH_RC=0
+else
+  P13_GH_RC=$?
+fi
+rm -f "$P13_LEAD_NEW_FILE"
+
+P13_OK=1
+
+# (a) gh issue edit was invoked for the lead with --body-file.
+if ! grep -qE "^gh issue edit ${P13_LEAD} --repo ${P13_REPO_SLUG} --body-file " "$MOCK_CALLS_LOG"; then
+  echo "  FAIL  P13 (a) gh issue edit --body-file for #${P13_LEAD} not invoked"
+  P13_OK=0
+fi
+# (b) HTML-comment marker present with our fingerprint.
+if ! printf '%s' "$P13_NEW_BODY" | grep -qF "<!-- uberdev:cluster-fold lead=${P13_LEAD} members=${P13_MEMBERS_CSV} fingerprint=${P13_FP} -->"; then
+  echo "  FAIL  P13 (b) body missing HTML-comment fold marker"
+  P13_OK=0
+fi
+# (c) "## Folded children" section heading present.
+if ! printf '%s' "$P13_NEW_BODY" | grep -qF '## Folded children'; then
+  echo "  FAIL  P13 (c) body missing '## Folded children' section heading"
+  P13_OK=0
+fi
+# (d) each member listed as `- #N`.
+for M in 225 226; do
+  if ! printf '%s' "$P13_NEW_BODY" | grep -qE "^- #${M}$"; then
+    echo "  FAIL  P13 (d) body missing member listing '- #${M}'"
+    P13_OK=0
+  fi
+done
+# (e) original lead body preserved at the top.
+if ! printf '%s' "$P13_NEW_BODY" | grep -qF 'Original lead body content.'; then
+  echo "  FAIL  P13 (e) original lead body content was clobbered"
+  P13_OK=0
+fi
+# (f) mock gh issue edit returned success.
+if [ "$P13_GH_RC" != "0" ]; then
+  echo "  FAIL  P13 (f) mock gh issue edit returned rc=$P13_GH_RC (expected 0)"
+  P13_OK=0
+fi
+# (g) mock-gh side-channel capture matches the on-disk body we snapshotted.
+P13_CAPTURED="$P13_BODIES_DIR/edit-${P13_LEAD}.txt"
+if [ ! -r "$P13_CAPTURED" ]; then
+  echo "  FAIL  P13 (g) mock-gh did not capture --body-file content to $P13_CAPTURED"
+  P13_OK=0
+elif ! diff -q "$P13_SNAPSHOT" "$P13_CAPTURED" >/dev/null 2>&1; then
+  echo "  FAIL  P13 (g) mock-gh body-file capture differs from on-disk content"
+  P13_OK=0
+fi
+
+# (h) Drift-detection: SKILL.md Phase 5 must still contain the load-bearing
+# append-block lines. Without this, a refactor that deletes the append could
+# pass this gate (since the gate runs an inline copy of the snippet).
+for snippet in \
+  "printf '<!-- uberdev:cluster-fold lead=%s members=%s fingerprint=%s -->" \
+  "printf '## Folded children" \
+  '.members[] | "- #\(.)"' \
+  'gh issue edit "$LEAD" --repo "$REPO_SLUG" --body-file'; do
+  if ! grep -qF "$snippet" "$SKILL_MD" 2>/dev/null; then
+    echo "  FAIL  P13 (h) SKILL.md Phase 5 append-block missing snippet: $snippet"
+    P13_OK=0
+  fi
+done
+
+# Clean up the opt-in capture flag so a hypothetical future gate after P13
+# does not inherit it.
+unset MOCK_BODY_FILES_DIR
+
+if [ "$P13_OK" = "1" ]; then
+  echo "  PASS  P13 fold-append wrote marker + Folded children + member list"
+  PASS=$((PASS+1))
+else
   FAIL=$((FAIL+1))
 fi
 
