@@ -475,8 +475,15 @@ while true; do
         # audit row. The issue stays in `solving` (failed transition didn't
         # persist) and lands as `failed` after the 150-min timeout.
         if uberdev_goal_issue_state_transition "$GOAL_ID" "$issue" solving resolved-by-no-action; then
+          # Audit emission is best-effort telemetry; a write failure (tmpdir
+          # unwritable, disk full) MUST NOT halt the surrounding loop, but the
+          # operator needs to see why the audit row is missing if it ever
+          # happens — emit a stderr breadcrumb so post-mortem isn't a guessing
+          # game (per /review-pr 251 finding SF-001).
           uberdev_goal_audit goal_issue_closed_without_pr \
-            "{\"goal_id\":\"$GOAL_ID\",\"issue\":$issue,\"detected_at\":$now}"
+            "{\"goal_id\":\"$GOAL_ID\",\"issue\":$issue,\"detected_at\":$now}" || \
+            printf 'goal-pipeline: WARN audit goal_issue_closed_without_pr failed for issue %s (rc=%d) — close-without-PR row may be missing from audit log\n' \
+              "$issue" "$?" >&2
           continue
         fi
       fi

@@ -5,7 +5,7 @@
 # (docs/uberdev/plans/2026-05-21-uberdev-goal.md §Task 4):
 #   G1   commands/goal.md + skills/goal-pipeline/SKILL.md frontmatter
 #   G2   PR state machine enum (8 states)
-#   G3   Issue state machine enum (6 states — `dispatched` pre-spawn guard added in #236)
+#   G3   Issue state machine enum (7 states — `dispatched` pre-spawn guard #236; `resolved-by-no-action` close-without-PR #249)
 #   G4   Trust-signal handling (GREEN dispatches merge, YELLOW=critical,
 #        RED=blocker, stale via phase2_5)
 #   G5   Blocker-unblock chain (Blocks: #N regex, held states,
@@ -2814,30 +2814,42 @@ echo "== BT84: new 'solving->resolved-by-no-action' valid arc (issue #249) =="
 # Negative control: the previously-rejected `solving->resolved` direct arc
 # must STILL return rc=2 (regression guard against silent broadening of the
 # case-arm pattern).
-(
+# IMPORTANT: this block must NOT be wrapped in a (...) subshell — assert_rc/eq
+# modify the parent's PASS/FAIL counters; a subshell would isolate those
+# increments and the final `[[ $FAIL -eq 0 ]]` gate would not catch BT84
+# regressions. See /review-pr 251 finding SF-007 + 251-G-03 for the empirical
+# 460-vs-455 PASS-line delta that confirmed the lost counter increments.
+_bt84_tmpdir="$_b12_tmpdir/goal-test-bt84"
+mkdir -p "$_bt84_tmpdir"
+UBERDEV_TMPDIR="$_bt84_tmpdir" bash -c '
   set +e
-  _bt84_tmpdir="$_b12_tmpdir/goal-test-bt84"
-  mkdir -p "$_bt84_tmpdir"
-  export UBERDEV_TMPDIR="$_bt84_tmpdir"
-  . "$REPO_ROOT/plugins/uberdev/lib/goal-state.sh"
+  . "'"$REPO_ROOT"'/plugins/uberdev/lib/goal-state.sh"
   uberdev_goal_state_init "bt84" >/dev/null
   uberdev_goal_issue_state_transition "bt84" 900 input dispatched >/dev/null
-  assert_rc "$?" "0" "BT84.a-input-to-dispatched-setup"
+  echo "rc_a=$?"
   uberdev_goal_issue_state_transition "bt84" 900 dispatched solving >/dev/null
-  assert_rc "$?" "0" "BT84.b-dispatched-to-solving-setup"
+  echo "rc_b=$?"
   uberdev_goal_issue_state_transition "bt84" 900 solving resolved-by-no-action >/dev/null
-  assert_rc "$?" "0" "BT84.c-solving-to-resolved-by-no-action"
-  _bt84_state="$(awk -v i=900 -v c1=1 -v c2=2 '$c1==i{s=$c2} END{print s}' \
-    "$_bt84_tmpdir/goal-bt84-issue-states.tsv" 2>/dev/null)"
-  assert_eq "$_bt84_state" "resolved-by-no-action" "BT84.d-tsv-state-is-resolved-by-no-action"
-  # Negative control — the direct solving->resolved arc must STILL be rejected
-  # (resolved is reached via pr-pushed; resolved-by-no-action is the alternative).
+  echo "rc_c=$?"
+  # Negative control on a fresh issue 901 — the direct solving->resolved arc
+  # must STILL be rejected (resolved is reached via pr-pushed; resolved-by-no-action
+  # is the alternative).
   uberdev_goal_issue_state_transition "bt84" 901 input dispatched >/dev/null
   uberdev_goal_issue_state_transition "bt84" 901 dispatched solving >/dev/null
   uberdev_goal_issue_state_transition "bt84" 901 solving resolved 2>/dev/null
-  assert_rc "$?" "2" "BT84.e-existing-solving-to-resolved-still-rejected"
-)
-unset UBERDEV_TMPDIR
+  echo "rc_e=$?"
+' > "$_bt84_tmpdir/bt84-out.txt" 2>&1
+_bt84_rc_a="$(grep -oE 'rc_a=[0-9]+' "$_bt84_tmpdir/bt84-out.txt" | head -1 | cut -d= -f2)"
+_bt84_rc_b="$(grep -oE 'rc_b=[0-9]+' "$_bt84_tmpdir/bt84-out.txt" | head -1 | cut -d= -f2)"
+_bt84_rc_c="$(grep -oE 'rc_c=[0-9]+' "$_bt84_tmpdir/bt84-out.txt" | head -1 | cut -d= -f2)"
+_bt84_rc_e="$(grep -oE 'rc_e=[0-9]+' "$_bt84_tmpdir/bt84-out.txt" | head -1 | cut -d= -f2)"
+_bt84_state="$(awk -v i=900 -v c1=1 -v c2=2 '$c1==i{s=$c2} END{print s}' \
+  "$_bt84_tmpdir/goal-bt84-issue-states.tsv" 2>/dev/null)"
+assert_rc "$_bt84_rc_a" "0" "BT84.a-input-to-dispatched-setup"
+assert_rc "$_bt84_rc_b" "0" "BT84.b-dispatched-to-solving-setup"
+assert_rc "$_bt84_rc_c" "0" "BT84.c-solving-to-resolved-by-no-action"
+assert_eq "$_bt84_state" "resolved-by-no-action" "BT84.d-tsv-state-is-resolved-by-no-action"
+assert_rc "$_bt84_rc_e" "2" "BT84.e-existing-solving-to-resolved-still-rejected"
 
 echo "== BT85: uberdev_goal_audit emits goal_issue_closed_without_pr JSONL row (issue #249) =="
 # Issue #249 — the new audit event must be accepted by uberdev_goal_audit's
