@@ -66,7 +66,7 @@ assert_no_grep "$ISSUE_CMD" \
   "Phase 1.5 mkdir removed"
 
 echo
-echo "== Phase 2 dispatches the two Sonnet scouts =="
+echo "== Phase 2 dispatches the two scouts =="
 assert_grep "$ISSUE_CMD" \
   'two Task agents|2 Task agents' \
   "/issue prose mentions 2-agent count"
@@ -183,19 +183,19 @@ assert_no_grep "$BRAINSTORM" \
   "brainstorm no longer documents per-topic skip"
 
 echo
-echo "== Scout agents pinned to Sonnet (defence-in-depth) =="
+echo "== Scout agents run on inherit — the session model =="
 assert_grep "$CODEBASE_SCOUT" \
-  '^model: sonnet$' \
-  "codebase-scout YAML frontmatter pins model: sonnet"
+  '^model: inherit$' \
+  "codebase-scout YAML frontmatter pins model: inherit"
 assert_grep "$CODEBASE_SCOUT" \
-  'runs on Sonnet|Sonnet)' \
-  "codebase-scout description names Sonnet (audit trail)"
+  'runs on inherit' \
+  "codebase-scout description names inherit (audit trail)"
 assert_grep "$TRIAGE_SCOUT" \
-  '^model: sonnet$' \
-  "triage-scout YAML frontmatter pins model: sonnet"
+  '^model: inherit$' \
+  "triage-scout YAML frontmatter pins model: inherit"
 assert_grep "$TRIAGE_SCOUT" \
-  'runs on Sonnet|Sonnet)' \
-  "triage-scout description names Sonnet (audit trail)"
+  'runs on inherit' \
+  "triage-scout description names inherit (audit trail)"
 assert_grep "$ISSUE_CMD" \
   'CLAUDE_CODE_SUBAGENT_MODEL' \
   "/issue documents CLAUDE_CODE_SUBAGENT_MODEL escape hatch"

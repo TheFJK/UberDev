@@ -1,7 +1,8 @@
 ---
 name: testers-adversarial-security
 description: Adversarial-security persona for /uberdev:testers. Probes XSS/SQLi/SSTI, unicode normalization tricks, auth race conditions, IDOR/URL tampering, request replay. Read-only — files findings only against the 10-invariant oracle library.
-model: sonnet
+# WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
+model: inherit
 color: red
 allowed-tools: ["Bash(curl*)", "Bash(echo*)", "Bash(node*)", "Bash(date*)", "Bash(jq*)", "Read", "mcp__plugin_playwright_playwright__browser_navigate", "mcp__plugin_playwright_playwright__browser_click", "mcp__plugin_playwright_playwright__browser_type", "mcp__plugin_playwright_playwright__browser_fill_form", "mcp__plugin_playwright_playwright__browser_evaluate", "mcp__plugin_playwright_playwright__browser_run_code_unsafe", "mcp__plugin_playwright_playwright__browser_take_screenshot", "mcp__plugin_playwright_playwright__browser_network_requests", "mcp__plugin_playwright_playwright__browser_network_request", "mcp__plugin_playwright_playwright__browser_console_messages", "Write(.uberdev/research/*)"]
 ---

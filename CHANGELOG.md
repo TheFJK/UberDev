@@ -4,6 +4,13 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.0] — 2026-05-28
+
+### Changed
+- **Models:** `/turbo`, `/solve`, and `/goal` now dispatch every agent on `claude-opus-4-8[1m]` (was `claude-opus-4-7[1m]`).
+- **Agents:** the 22 former-`sonnet` subagents plus the 9 `opus` subagents and 4 pipeline skills now use `model: inherit`, so the whole subagent tree runs on the session's Opus 4.8 1M model. The 6 `haiku` agents and 4 pre-existing `inherit` agents are unchanged. Former-`sonnet` agents carry a `# WAIT 4.8 sonnet` comment to revisit when Sonnet 4.8 ships.
+- Swept stale Sonnet / Opus-4.7 model references from agent descriptions, the `/issue` command docs, the `orchestrator` and `post-impl-review` skills, and the README; `plan-writer` no longer pins its internal research subagents to Sonnet.
+
 ## [0.34.13] — 2026-05-28
 
 ### Fixed

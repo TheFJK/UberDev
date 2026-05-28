@@ -1,7 +1,7 @@
 ---
 name: uberthink-synthesizer
 description: dispatched by /uberthink — Wave-3 per-island + Wave-6 global combine (lens ∈ weave | crossover | mutate)
-model: opus
+model: inherit
 color: magenta
 ---
 

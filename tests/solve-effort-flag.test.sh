@@ -280,7 +280,7 @@ echo "fake prompt body" > "$SANDBOX/prompt.txt"
   # Stand-ins for the other Phase A variables consumed by the argv arm.
   TIMEOUT_BIN=""
   SOLVE_TIMEOUT=10
-  MODEL='claude-opus-4-7[1m]'
+  MODEL='claude-opus-4-8[1m]'
   PERM_FLAG=()
   ISSUE_NUM=128
   PROMPT_BODY="$(cat "$SANDBOX/prompt.txt")"

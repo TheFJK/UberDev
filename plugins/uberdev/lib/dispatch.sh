@@ -178,7 +178,7 @@ uberdev_dispatch_resolve_env() {
   BG_PROMPT_MODE=argv
 
   # MODEL: single-quoted to keep zsh from glob-evaluating [1m] under NOMATCH.
-  MODEL='claude-opus-4-7[1m]'
+  MODEL='claude-opus-4-8[1m]'
 
   # PERM_FLAG: array form (zsh SH_WORD_SPLIT=off would treat a scalar at command
   # position as one argv slot). Empty by default; populated only when the caller

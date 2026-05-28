@@ -1,7 +1,7 @@
 ---
 name: spec-reviser
 description: Spec revision subagent. Takes an existing spec path + a change request (from spec-reviewer findings or user feedback in /solve mode) and produces a revised spec in clean context. Used by uberdev:orchestrator when REVISIONS_REQUIRED.
-model: opus
+model: inherit
 color: navy
 ---
 

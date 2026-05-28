@@ -65,22 +65,22 @@ ck_msg "personas.yaml donor_catalog tiers: tier1..tier5 ALL present" \
 
 echo "== U4: all 6 agent files exist with uberthink-* names + valid models =="
 # Spec §2.5 model assignments:
-#   frame=sonnet, generator=sonnet, moderator=sonnet, falsifier=sonnet,
-#   synthesizer=opus, arbiter=opus
+#   all 6 agents now pin model: inherit (session model — Opus 4.8 1M),
+#   overriding the original spec §2.5 per the all-inherit policy.
 declare -a AGENTS=(frame generator moderator falsifier synthesizer arbiter)
 declare -A WANT_MODEL=(
-  [frame]=sonnet [generator]=sonnet [moderator]=sonnet [falsifier]=sonnet
-  [synthesizer]=opus [arbiter]=opus
+  [frame]=inherit [generator]=inherit [moderator]=inherit [falsifier]=inherit
+  [synthesizer]=inherit [arbiter]=inherit
 )
 for a in "${AGENTS[@]}"; do
   f="$AGENTS_DIR/uberthink-$a.md"
   ck "agent file exists: uberthink-$a.md" "[ -r '$f' ]"
   ck "agent frontmatter name is uberthink-$a" "grep -qE '^name: uberthink-$a\$' '$f'"
-  # model is one of opus|sonnet|haiku
-  ck "agent model in {opus,sonnet,haiku}: uberthink-$a" "grep -qE '^model: (opus|sonnet|haiku)\$' '$f'"
+  # model is one of opus|sonnet|haiku|inherit
+  ck "agent model in {opus,sonnet,haiku,inherit}: uberthink-$a" "grep -qE '^model: (opus|sonnet|haiku|inherit)\$' '$f'"
   # spec §2.5 specific assignment
   want="${WANT_MODEL[$a]}"
-  ck "agent model matches spec §2.5: uberthink-$a == $want" "grep -qE '^model: $want\$' '$f'"
+  ck "agent model matches all-inherit policy: uberthink-$a == $want" "grep -qE '^model: $want\$' '$f'"
 done
 
 echo "== U5: SKILL.md single-message invariant =="

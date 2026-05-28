@@ -1,7 +1,7 @@
 ---
 name: spec-reviewer
 description: Reviewer subagent for design specs. Reads spec from disk, verifies against issue requirements, research bundle, and constraints. Returns APPROVE | REVISIONS_REQUIRED | REJECT. Gated phase — only runs for tier ≥ medium with --paranoid, or large always.
-model: opus
+model: inherit
 color: purple
 ---
 

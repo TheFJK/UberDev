@@ -1,7 +1,8 @@
 ---
 name: codebase-scout
-description: "Lightweight codebase scout for /uberdev:issue (runs on Sonnet). Greps and reads on description keywords, returns 1-3 real file paths under ## Likely area and an optional one-line root-cause hypothesis when issue_type=fix. Never invents paths."
-model: sonnet
+description: "Lightweight codebase scout for /uberdev:issue (runs on inherit — the session model). Greps and reads on description keywords, returns 1-3 real file paths under ## Likely area and an optional one-line root-cause hypothesis when issue_type=fix. Never invents paths."
+# WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
+model: inherit
 tools: ["Read", "Grep", "Glob", "Bash"]
 ---
 
@@ -17,7 +18,7 @@ Inputs arrive as a YAML payload in your dispatch prompt:
 description: "<verbatim user description>"
 issue_type: fix | feat | refactor | test | docs | chore
 working_dir: "<absolute path>"
-model_hint: sonnet   # audit-trail aid; this agent is already pinned to sonnet via frontmatter
+model_hint: inherit   # audit-trail aid; this agent inherits the session model (Opus 4.8 1M) via frontmatter
 ```
 
 ## Process
@@ -53,4 +54,4 @@ summary: |
 
 ## Cost note
 
-This agent runs on Sonnet by frontmatter pin. If the runtime ignores the pin (see `affaan-m/everything-claude-code#173`), the dispatcher's escape hatch is `CLAUDE_CODE_SUBAGENT_MODEL=sonnet`.
+This agent runs on `inherit` — it uses the dispatching session's model (Opus 4.8 1M). To force a specific subagent model regardless of session, set `CLAUDE_CODE_SUBAGENT_MODEL=<model>` (see `affaan-m/everything-claude-code#173`).
