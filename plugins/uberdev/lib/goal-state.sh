@@ -14,6 +14,13 @@
 #   uberdev_goal_locate_review_pr_audit        ISSUE_NUM
 #   uberdev_goal_locate_review_pr_audit_by_pr  PR_NUM
 #   uberdev_goal_get_pr_state                  GOAL_ID PR
+#   uberdev_goal_get_issue_state               GOAL_ID ISSUE
+#   uberdev_goal_issue_ts_in_state             GOAL_ID ISSUE STATE
+#   uberdev_goal_pr_ts_in_state                GOAL_ID PR STATE
+#   uberdev_goal_pr_first_ts_in_state          GOAL_ID PR STATE
+#   uberdev_goal_batch_has_pr                  GOAL_ID PR
+#   uberdev_goal_count_distinct_prs            GOAL_ID
+#   uberdev_goal_count_resolved_issues         GOAL_ID
 #   uberdev_goal_record_held_audit             GOAL_ID PR AUDIT_PATH
 #   uberdev_goal_get_last_held_audit           GOAL_ID PR
 #   uberdev_goal_find_pr_for_issue             ISSUE_NUM   (gh; issue #180)
@@ -30,6 +37,7 @@
 #   uberdev_goal_batch_all_terminal            GOAL_ID            (issue #211)
 #   uberdev_goal_batch_unblock_wait_clear      GOAL_ID            (issue #211)
 # Internal:
+#   _uberdev_goal_ts_in_state              FILE KEY STATE [FIRST_WINS]
 #   _uberdev_goal_validate_int             N
 #   _uberdev_goal_validate_id              GOAL_ID
 #   _uberdev_goal_append                   FILE LINE
@@ -660,6 +668,127 @@ uberdev_goal_get_pr_state() {
   local f="$tmpdir/goal-$goal_id-pr-states.tsv"
   [ -f "$f" ] || return 0
   awk -v p="$pr" '$1==p {state=$2} END {print state}' "$f"
+}
+
+# ---------------------------------------------------------------------------
+# TSV state-read helpers (issues #229/#230/#234/#237 — renderer-collision hoist)
+#
+# These wrap the inline awk state-reads that previously lived in
+# skills/goal-pipeline/SKILL.md. SKILL.md is Skill-RENDERED: the loader
+# substitutes positional args of $ARGUMENTS into bare `$1`/`$2`/`$3` inside awk
+# single-quoted script bodies (issue #222), which corrupts every field ref.
+# This file is SOURCED, never rendered, so the awk bodies below use clean,
+# SEMANTIC field refs documented by the column contract. Hoisting every awk
+# state-read here is the permanent fix: the SKILL.md call sites become helper
+# calls with ZERO awk, so the renderer has nothing to corrupt and the
+# `-v c1=1 -v c2=2 -v c3=3` workaround is retired.
+#
+# TSV column contract (goal-<id>-pr-states.tsv AND goal-<id>-issue-states.tsv):
+#   $1 = key   — PR number (pr-states) or issue number (issue-states)
+#   $2 = state — state-machine label (e.g. pushed-reviewing / merging / solving)
+#   $3 = ts    — epoch seconds of the transition
+# Tab-separated; `-F'\t'` is the correct parse (a state label never holds a tab).
+
+# _uberdev_goal_ts_in_state FILE KEY STATE [FIRST_WINS]
+# Internal: echo the transition ts (epoch int) for rows matching KEY+STATE,
+# coerced to 0 when absent/empty. FIRST_WINS=1 takes the EARLIEST matching ts
+# (the review-grace contract — issue #222 B8: the grace clock must run from the
+# FIRST pushed-reviewing transition, never a later re-entry, or `now - seen_ts`
+# never crosses the threshold); the default (last-wins) takes the most recent.
+_uberdev_goal_ts_in_state() {
+  local file="$1" key="$2" state="$3" first="${4:-0}"
+  [ -f "$file" ] || { printf '0\n'; return 0; }
+  awk -F'\t' -v k="$key" -v s="$state" -v first="$first" \
+    '$1==k && $2==s { if (first!="1" || t=="") t=$3 } END { print t+0 }' "$file"
+}
+
+# uberdev_goal_get_issue_state GOAL_ID ISSUE
+# Latest issue-machine state for ISSUE (empty when never transitioned). The
+# issue-states mirror of uberdev_goal_get_pr_state.
+uberdev_goal_get_issue_state() {
+  local goal_id="$1" issue="$2"
+  _uberdev_goal_validate_id "$goal_id" || return 1   # #156
+  _uberdev_goal_validate_int "$issue" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  local f="$tmpdir/goal-$goal_id-issue-states.tsv"
+  [ -f "$f" ] || return 0
+  awk -F'\t' -v i="$issue" '$1==i {state=$2} END {print state}' "$f"
+}
+
+# uberdev_goal_issue_ts_in_state GOAL_ID ISSUE STATE
+# Latest ts (epoch int, 0 when absent) for ISSUE in STATE on issue-states.tsv.
+uberdev_goal_issue_ts_in_state() {
+  local goal_id="$1" issue="$2" state="$3"
+  _uberdev_goal_validate_id "$goal_id" || return 1   # #156
+  _uberdev_goal_validate_int "$issue" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  _uberdev_goal_ts_in_state "$tmpdir/goal-$goal_id-issue-states.tsv" "$issue" "$state" 0
+}
+
+# uberdev_goal_pr_ts_in_state GOAL_ID PR STATE
+# Latest ts (epoch int, 0 when absent) for PR in STATE on pr-states.tsv.
+uberdev_goal_pr_ts_in_state() {
+  local goal_id="$1" pr="$2" state="$3"
+  _uberdev_goal_validate_id "$goal_id" || return 1   # #156
+  _uberdev_goal_validate_int "$pr" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  _uberdev_goal_ts_in_state "$tmpdir/goal-$goal_id-pr-states.tsv" "$pr" "$state" 0
+}
+
+# uberdev_goal_pr_first_ts_in_state GOAL_ID PR STATE
+# EARLIEST ts (epoch int, 0 when absent) for PR in STATE on pr-states.tsv.
+# First-wins is load-bearing for the review-grace window (issue #222 B8).
+uberdev_goal_pr_first_ts_in_state() {
+  local goal_id="$1" pr="$2" state="$3"
+  _uberdev_goal_validate_id "$goal_id" || return 1   # #156
+  _uberdev_goal_validate_int "$pr" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  _uberdev_goal_ts_in_state "$tmpdir/goal-$goal_id-pr-states.tsv" "$pr" "$state" 1
+}
+
+# uberdev_goal_batch_has_pr GOAL_ID PR
+# rc 0 iff a row keyed on PR exists in goal-<id>-batch-prs.tsv; rc 1 when PR is
+# absent OR the registry file does not exist yet. Replaces the inline
+# `[ ! -f tsv ] || awk ... exit !found` idempotent-registration guard.
+uberdev_goal_batch_has_pr() {
+  local goal_id="$1" pr="$2"
+  _uberdev_goal_validate_id "$goal_id" || return 1   # #156
+  _uberdev_goal_validate_int "$pr" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  local f="$tmpdir/goal-$goal_id-batch-prs.tsv"
+  [ -f "$f" ] || return 1
+  awk -F'\t' -v p="$pr" '$1==p {found=1; exit} END {exit !found}' "$f"
+}
+
+# uberdev_goal_count_distinct_prs GOAL_ID
+# Count of DISTINCT PR numbers recorded in goal-<id>-pr-states.tsv (0 when the
+# file is absent/empty). Returns a CLEAN integer — the prior
+# `awk '{print $1}' | sort -u | wc -l` form padded with leading spaces on
+# macOS/BSD `wc -l`, and the convergence check at SKILL.md compares this with
+# `=` (string equality) against a grep-based terminal count, so the padding
+# could falsely fail convergence on macOS. The dedup-and-count awk avoids both
+# the padding and the extra sort+wc subprocesses.
+uberdev_goal_count_distinct_prs() {
+  local goal_id="$1"
+  _uberdev_goal_validate_id "$goal_id" || return 1   # #156
+  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  local f="$tmpdir/goal-$goal_id-pr-states.tsv"
+  [ -f "$f" ] || { printf '0\n'; return 0; }
+  awk -F'\t' '$1 != "" && !seen[$1]++ {n++} END {print n+0}' "$f"
+}
+
+# uberdev_goal_count_resolved_issues GOAL_ID
+# Count of issue-states.tsv rows in a resolved terminal state (resolved or
+# resolved-by-no-action) — a print_summary stat. Row-count semantics preserved
+# from the prior `awk ... {print $1} | grep -c .` form (each issue resolves
+# once). 0 when the file is absent.
+uberdev_goal_count_resolved_issues() {
+  local goal_id="$1"
+  _uberdev_goal_validate_id "$goal_id" || return 1   # #156
+  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  local f="$tmpdir/goal-$goal_id-issue-states.tsv"
+  [ -f "$f" ] || { printf '0\n'; return 0; }
+  awk -F'\t' '$2=="resolved" || $2=="resolved-by-no-action" {n++} END {print n+0}' "$f"
 }
 
 # uberdev_goal_record_held_audit GOAL_ID PR AUDIT_PATH

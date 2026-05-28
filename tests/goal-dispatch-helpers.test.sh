@@ -136,6 +136,77 @@ case "$pos_out" in
 esac
 rm -rf "$g_dir_pos"
 
+# ---------------------------------------------------------------------------
+# TSV state-read helpers (issues #229/#230/#234/#237 — renderer-collision hoist).
+# These pure readers source ONLY lib/goal-state.sh (dispatch.sh is not needed —
+# no dispatch path is reached). Each helper runs in a fresh `bash -c` with
+# UBERDEV_TMPDIR pointing at a seeded mktemp -d, mirroring the #195 fresh-shell
+# pattern above. Rows are TAB-separated `key<TAB>state<TAB>ts`.
+# ---------------------------------------------------------------------------
+echo "== #229/#230/#234/#237: TSV state-read helpers (hoisted from SKILL.md) =="
+HOIST_GOAL_ID="goaltesthoist"
+hoist_dir="$(mktemp -d 2>/dev/null || printf '/tmp/goal-hoist-%s' "$$")"
+
+# Seed issue-states.tsv: issue 7 transitions solving@100 then pr-pushed@200
+# (last-wins state = pr-pushed); resolved + resolved-by-no-action rows for the
+# resolved-count assertion (issues 11 and 12).
+issue_tsv="$hoist_dir/goal-$HOIST_GOAL_ID-issue-states.tsv"
+printf '7\tsolving\t100\n7\tpr-pushed\t200\n11\tresolved\t300\n12\tresolved-by-no-action\t400\n' > "$issue_tsv"
+
+# Seed pr-states.tsv: pr 42 merging@300 then merging@500 (last-wins ts = 500),
+# pushed-reviewing@10 then @20 (first-wins ts = 10); distinct PRs = {42, 99} = 2.
+pr_tsv="$hoist_dir/goal-$HOIST_GOAL_ID-pr-states.tsv"
+printf '42\tpushed-reviewing\t10\n42\tpushed-reviewing\t20\n42\tmerging\t300\n42\tmerging\t500\n99\tdispatched\t50\n' > "$pr_tsv"
+
+# Seed batch-prs.tsv: pr 42 present, pr 99 absent.
+batch_tsv="$hoist_dir/goal-$HOIST_GOAL_ID-batch-prs.tsv"
+printf '42\t7\t600\tpushed-reviewing\n' > "$batch_tsv"
+
+# Helper to run one reader in a fresh shell sourcing only goal-state.sh.
+_hoist_run() {
+  UBERDEV_TMPDIR="$hoist_dir" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" \
+    bash -c '. "$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh"; '"$1"
+}
+
+# uberdev_goal_get_issue_state — last-wins + absent.
+got="$(_hoist_run 'uberdev_goal_get_issue_state '"$HOIST_GOAL_ID"' 7')"
+assert_eq "$got" "pr-pushed" "#229 get_issue_state: last-wins (issue 7 → pr-pushed)"
+got="$(_hoist_run 'uberdev_goal_get_issue_state '"$HOIST_GOAL_ID"' 55')"
+assert_eq "$got" "" "#229 get_issue_state: absent issue → empty"
+
+# uberdev_goal_issue_ts_in_state — present state ts + absent → 0.
+got="$(_hoist_run 'uberdev_goal_issue_ts_in_state '"$HOIST_GOAL_ID"' 7 solving')"
+assert_eq "$got" "100" "#230 issue_ts_in_state: issue 7 solving → 100"
+got="$(_hoist_run 'uberdev_goal_issue_ts_in_state '"$HOIST_GOAL_ID"' 7 merging')"
+assert_eq "$got" "0" "#230 issue_ts_in_state: issue 7 absent state → 0"
+
+# uberdev_goal_pr_ts_in_state — LAST-wins (merging@500).
+got="$(_hoist_run 'uberdev_goal_pr_ts_in_state '"$HOIST_GOAL_ID"' 42 merging')"
+assert_eq "$got" "500" "#234 pr_ts_in_state: pr 42 merging LAST-wins → 500"
+
+# uberdev_goal_pr_first_ts_in_state — FIRST-wins (pushed-reviewing@10).
+got="$(_hoist_run 'uberdev_goal_pr_first_ts_in_state '"$HOIST_GOAL_ID"' 42 pushed-reviewing')"
+assert_eq "$got" "10" "#234 pr_first_ts_in_state: pr 42 pushed-reviewing FIRST-wins → 10"
+
+# uberdev_goal_batch_has_pr — present rc 0, absent rc 1, missing file rc 1.
+_hoist_run 'uberdev_goal_batch_has_pr '"$HOIST_GOAL_ID"' 42' ; rc=$?
+assert_eq "$rc" "0" "#237 batch_has_pr: present pr 42 → rc 0"
+_hoist_run 'uberdev_goal_batch_has_pr '"$HOIST_GOAL_ID"' 99' ; rc=$?
+assert_eq "$rc" "1" "#237 batch_has_pr: absent pr 99 → rc 1"
+UBERDEV_TMPDIR="$hoist_dir" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" \
+  bash -c '. "$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh"; uberdev_goal_batch_has_pr nofilegoal 42' ; rc=$?
+assert_eq "$rc" "1" "#237 batch_has_pr: missing registry file → rc 1"
+
+# uberdev_goal_count_distinct_prs — {42, 99} → exact clean string "2" (no pad).
+got="$(_hoist_run 'uberdev_goal_count_distinct_prs '"$HOIST_GOAL_ID")"
+assert_eq "$got" "2" "#234 count_distinct_prs: distinct PRs = 2 (clean int, no leading space)"
+
+# uberdev_goal_count_resolved_issues — resolved + resolved-by-no-action = 2.
+got="$(_hoist_run 'uberdev_goal_count_resolved_issues '"$HOIST_GOAL_ID")"
+assert_eq "$got" "2" "#234 count_resolved_issues: resolved + resolved-by-no-action → 2"
+
+rm -rf "$hoist_dir"
+
 # Summary
 echo
 echo "== Summary =="

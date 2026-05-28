@@ -120,6 +120,34 @@ else
   FAIL=$((FAIL+1))
 fi
 
+# R1b — issue #237 audit: command files (plugins/uberdev/commands/*.md) are
+# slash-arg-substituted by the Skill loader exactly like SKILL.md, so an awk
+# script body with a bare `$N` inside an EXECUTED block is the same #222 bug
+# class (concrete prior site: review-pr.md's conflict-file mapfile extraction,
+# `awk '/^UU / {print $2}'`, where `$2` is clobbered by the PR-number argv).
+# agents/*.md are intentionally NOT scanned: agent system prompts receive a
+# task prompt, never positional slash args, so their `awk '{print $1}'` field
+# refs are legitimate and would false-positive here.
+COMMANDS_DIR="$REPO_ROOT/plugins/uberdev/commands"
+cmd_hits=""
+if [ -d "$COMMANDS_DIR" ]; then
+  while IFS= read -r -d '' cmd_file; do
+    flattened="$(tr '\n' ' ' < "$cmd_file")"
+    if printf '%s' "$flattened" | grep -qE "$GUARD_REGEX"; then
+      cmd_hits="$cmd_hits$cmd_file"$'\n'
+    fi
+  done < <(find "$COMMANDS_DIR" -name "*.md" -print0)
+fi
+if [ -z "$cmd_hits" ]; then
+  echo "  PASS  R1b no plugins/uberdev/commands/*.md awk script body contains a bare \$N field ref"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  R1b these command files use bare \$N field refs vulnerable to the renderer:"
+  printf '          %s\n' "$cmd_hits" | sed 's/^/  /'
+  echo "         Fix: add \`-v cN=N\` to the awk invocation and use \`\$cN\` in place of \`\$N\`."
+  FAIL=$((FAIL+1))
+fi
+
 # Fixture setup — single trap install up front covers every mktemp. Bash
 # supports ONE EXIT trap per shell; declaring ALL fixtures + ONE trap before
 # any cat-into-fixture avoids the prior two-trap shape where the second
