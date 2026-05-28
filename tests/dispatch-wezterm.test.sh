@@ -107,6 +107,53 @@ assert_grep "$DISPATCH_LIB" \
   '"pane_id":' \
   "agent_dispatched payload carries the spawned pane_id"
 
+echo "== #246 D-perm/D-skip: wezterm backend inherits paired PERM_FLAG from shared resolver =="
+# The PR body and CHANGELOG claim "all three dispatch backends inherit the change
+# because they all expand \"\${PERM_FLAG[@]}\" from the same resolver." That is
+# structurally true, but the only functional coverage lives in
+# tests/dispatch-claude-bg.test.sh (lines 633-674). A future regression where
+# someone hand-edits `_uberdev_dispatch_wezterm` to strip / hard-code PERM_FLAG
+# would only red-CI the claude-bg test file. Mirror the claude-bg D-perm / D-skip
+# subshell cases here to lock the "wezterm backend inherits" claim against that
+# regression class. The assertion shape is IDENTICAL across backends because
+# PERM_FLAG is set by the SHARED `uberdev_dispatch_resolve_env` (not by per-backend
+# code); this test verifies that resolver is reachable from the wezterm backend's
+# code path.
+TALLY_FILE="$(mktemp)"
+
+echo
+echo "== #246 D-perm: AUTO_PERMISSIONS=1 yields --dangerously-skip-permissions --permission-mode bypassPermissions (wezterm backend inherits from shared resolver) =="
+(
+  set +u
+  unset TIMEOUT_BIN SOLVE_TIMEOUT MODEL BG_PROMPT_MODE PERM_FLAG EFFORT_FLAG SKIP_PERMISSIONS EFFORT_LEVEL
+  CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"; AUTO_PERMISSIONS=1
+  # shellcheck disable=SC1090
+  . "$DISPATCH_LIB"
+  uberdev_dispatch_resolve_env
+  [[ "${PERM_FLAG[*]}" == "--dangerously-skip-permissions --permission-mode bypassPermissions" ]] \
+    && { echo "  PASS  D-perm (wezterm) AUTO_PERMISSIONS=1 -> PERM_FLAG=( --dangerously-skip-permissions --permission-mode bypassPermissions )"; PASS=$((PASS + 1)); } \
+    || { echo "  FAIL  D-perm (wezterm) PERM_FLAG=( ${PERM_FLAG[*]} ) — expected --dangerously-skip-permissions --permission-mode bypassPermissions (#246)"; FAIL=$((FAIL + 1)); }
+  printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
+) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
+
+echo
+echo "== #246 D-skip: SKIP_PERMISSIONS=1 yields --dangerously-skip-permissions --permission-mode bypassPermissions (wezterm backend inherits from shared resolver) =="
+(
+  set +u
+  unset TIMEOUT_BIN SOLVE_TIMEOUT MODEL BG_PROMPT_MODE PERM_FLAG EFFORT_FLAG AUTO_PERMISSIONS EFFORT_LEVEL
+  CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"; SKIP_PERMISSIONS=1
+  # shellcheck disable=SC1090
+  . "$DISPATCH_LIB"
+  uberdev_dispatch_resolve_env
+  [[ "${PERM_FLAG[*]}" == "--dangerously-skip-permissions --permission-mode bypassPermissions" ]] \
+    && { echo "  PASS  D-skip (wezterm) SKIP_PERMISSIONS=1 -> PERM_FLAG=( --dangerously-skip-permissions --permission-mode bypassPermissions )"; PASS=$((PASS + 1)); } \
+    || { echo "  FAIL  D-skip (wezterm) PERM_FLAG=( ${PERM_FLAG[*]} ) — expected --dangerously-skip-permissions --permission-mode bypassPermissions (#246)"; FAIL=$((FAIL + 1)); }
+  printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
+) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
+
+rm -f "$TALLY_FILE"
+
+echo
 echo "== Anti-pattern: wezterm backend never uses claude --bg =="
 # Scope the check to the _uberdev_dispatch_wezterm function body — sibling
 # backends in the same file legitimately use `claude --bg`.
