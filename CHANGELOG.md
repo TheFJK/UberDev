@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
   by collapsing semantically duplicate finding-issues before /turbo dispatch.
   Three-layer decomposition: `commands/cluster.md` (thin) →
   `skills/cluster-pipeline/SKILL.md` (6-phase directive-emitter) →
-  `agents/issue-similarity-analyzer.md` (Sonnet, read-only). Hard `--min-confidence 0.85`
+  `agents/issue-similarity-analyzer.md` (read-only, `model: inherit`). Hard `--min-confidence 0.85`
   floor under `--execute`; idempotent via HTML-comment marker + `folded` label
   + per-run JSONL ledger. RFC 0010. Closes #247.
 - Consolidated `/uberdev:cluster` behavioral test coverage — gates P13–P18:

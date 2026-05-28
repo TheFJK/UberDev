@@ -60,7 +60,7 @@ CLUSTER_VIEWER_PERMISSION_ALLOWLIST="ADMIN MAINTAIN WRITE TRIAGE"
 - `lib/dispatch.sh` — UBERDEV_TMPDIR resolution + pointer hygiene (optional)
 - `lib/report_primitives.py` — `cell()`, `envelope()`, `fingerprint16()` shared helpers
 - `skills/cluster-pipeline/cluster_propose.py` — proposal renderer + per-chunk prompt builder
-- `agents/issue-similarity-analyzer.md` — read-only Sonnet agent dispatched per chunk
+- `agents/issue-similarity-analyzer.md` — read-only `inherit`-model agent dispatched per chunk
 
 ## Phase 0 — Preflight
 

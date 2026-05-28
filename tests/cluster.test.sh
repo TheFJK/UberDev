@@ -141,7 +141,7 @@ fi
 echo "== C3: agents/issue-similarity-analyzer.md frontmatter =="
 assert_grep "$AGENT" '^name: issue-similarity-analyzer' "C3.name"
 assert_grep "$AGENT" '^description:'                    "C3.description"
-assert_grep "$AGENT" '^model: sonnet'                   "C3.model-sonnet"
+assert_grep "$AGENT" '^model: inherit'                  "C3.model-inherit"
 assert_grep "$AGENT" '^tools:'                          "C3.tools"
 
 echo "== C3.b: agent tools whitelist omits Edit / MultiEdit / Write =="
