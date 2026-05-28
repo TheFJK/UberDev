@@ -378,6 +378,32 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    # Validate EVERY cluster's schema before rendering anything. render_cluster()
+    # coerces lead/members/confidence via int()/float() (raising on a malformed
+    # value from a misbehaving analyzer), so an unguarded render loop would crash
+    # AFTER "# Cluster proposals" was already printed — leaving a half-written
+    # proposals.md that downstream Phase 4/5 cannot distinguish from a complete
+    # one. Fail-CLOSED here instead, mirroring the #263 Phase-4 "abort rather than
+    # emit garbage" contract: any schema violation aborts the whole render with a
+    # FATAL diagnostic and exit 2, so the report is all-or-nothing.
+    for i, c in enumerate(data):
+        try:
+            if not isinstance(c, dict):
+                raise TypeError("cluster is not a mapping")
+            int(c["lead"])
+            [int(m) for m in c["members"]]
+            str(c["rationale"])
+            conf = float(c["confidence"])
+            if not (0.0 <= conf <= 1.0):
+                raise ValueError("confidence %r out of [0.0, 1.0]" % (conf,))
+        except (KeyError, TypeError, ValueError) as exc:
+            print(
+                "error: cluster #%d fails the {lead:int, members:int[], "
+                "rationale:str, confidence:float in [0,1]} schema (%s); aborting "
+                "render instead of emitting a partial proposals.md" % (i, exc),
+                file=sys.stderr,
+            )
+            return 2
     print("# Cluster proposals\n")
     for c in data:
         print(render_cluster(c))

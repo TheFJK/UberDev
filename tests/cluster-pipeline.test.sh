@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/cluster-pipeline.test.sh — behavioral gates for /uberdev:cluster (issue #247).
 #
-# 18 gates P1-P18 that exercise the actual SKILL.md bash bodies +
+# 19 gates P1-P19 that exercise the actual SKILL.md bash bodies +
 # cluster_propose.py runtime behavior. Uses mock-gh (PATH override pattern
 # borrowed from tests/findings-to-issues.test.sh:51-72) + python3 + mktemp + jq.
 #
@@ -1255,6 +1255,52 @@ if [ "$p18_ok" = "1" ]; then
   PASS=$((PASS+1))
 else
   echo "  FAIL  P18 Phase 4 dispatch hard-fail contract violated"
+  FAIL=$((FAIL+1))
+fi
+
+# ============================================================================
+# P19 — cluster_propose.py default-mode render fail-CLOSED on a malformed cluster.
+# ============================================================================
+#
+# render_cluster() coerces lead/members/confidence via int()/float(); a
+# misbehaving analyzer emitting a non-int lead, a non-array members, an
+# out-of-[0,1] confidence, or a non-mapping cluster would otherwise crash the
+# render loop AFTER "# Cluster proposals" was printed, leaving a half-written
+# proposals.md indistinguishable from a complete one. main() now validates every
+# cluster's schema BEFORE rendering and aborts (exit 2, FATAL on stderr, NO
+# stdout) on any violation — all-or-nothing. A well-formed run still renders +
+# exits 0; an empty [] still renders just the header + exits 0. (type-design
+# /review-pr finding for #255; mirrors the #263 Phase-4 hard-fail contract.)
+echo "== P19 cluster_propose.py render fail-CLOSED on malformed cluster"
+p19_ok=1
+P19_DIR="$STAGE/p19"
+mkdir -p "$P19_DIR"
+
+# (a) malformed lead (non-int) -> exit 2, FATAL on stderr, NO partial stdout.
+p19_out="$(printf '%s' '[{"lead":"x","members":[1],"rationale":"r","confidence":0.9}]' | python3 "$CLUSTER_PROPOSE_PY" 2>"$P19_DIR/a.err")"; p19_rc=$?
+[ "$p19_rc" = "2" ]                  || { echo "  .. (a) malformed lead: expected rc=2, got $p19_rc"; p19_ok=0; }
+[ -z "$p19_out" ]                    || { echo "  .. (a) malformed lead leaked stdout"; p19_ok=0; }
+grep -qF 'aborting' "$P19_DIR/a.err" || { echo "  .. (a) no abort diagnostic on stderr"; p19_ok=0; }
+printf '%s' "$p19_out" | grep -qF '# Cluster proposals' && { echo "  .. (a) leaked partial proposals.md header"; p19_ok=0; }
+
+# (b) confidence out of [0,1] -> exit 2.
+printf '%s' '[{"lead":1,"members":[1],"rationale":"r","confidence":1.5}]' | python3 "$CLUSTER_PROPOSE_PY" >/dev/null 2>&1
+[ "$?" = "2" ]                       || { echo "  .. (b) out-of-bounds confidence: expected rc=2"; p19_ok=0; }
+
+# (c) well-formed cluster -> renders + exit 0.
+p19_good="$(printf '%s' '[{"lead":225,"members":[225,226],"rationale":"r","confidence":0.92}]' | python3 "$CLUSTER_PROPOSE_PY" 2>/dev/null)"; p19_grc=$?
+[ "$p19_grc" = "0" ]                 || { echo "  .. (c) valid cluster: expected rc=0, got $p19_grc"; p19_ok=0; }
+printf '%s' "$p19_good" | grep -qF '### Cluster lead=#225' || { echo "  .. (c) valid cluster did not render"; p19_ok=0; }
+
+# (d) empty array -> exit 0 (header only, normal empty run).
+printf '%s' '[]' | python3 "$CLUSTER_PROPOSE_PY" >/dev/null 2>&1
+[ "$?" = "0" ]                       || { echo "  .. (d) empty array: expected rc=0"; p19_ok=0; }
+
+if [ "$p19_ok" = "1" ]; then
+  echo "  PASS  P19 render fail-CLOSED on malformed (lead/confidence); renders valid + empty"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  P19 cluster_propose.py render-validation contract violated"
   FAIL=$((FAIL+1))
 fi
 
