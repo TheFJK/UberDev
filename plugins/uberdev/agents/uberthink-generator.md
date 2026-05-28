@@ -1,7 +1,8 @@
 ---
 name: uberthink-generator
 description: dispatched by /uberthink — persona-parameterized divergence (field-scout for a donor domain | triz | morphological | provocateur | bridge)
-model: sonnet
+# WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
+model: inherit
 color: green
 ---
 

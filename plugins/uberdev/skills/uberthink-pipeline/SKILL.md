@@ -1,7 +1,7 @@
 ---
 name: uberthink-pipeline
 description: 7-wave island-aware directive-emitter for /uberthink — frames the goal, runs N parallel evolutionary islands (diverge → gap-gate → combine → converge → falsify → genetic-loop-back ≤3) → cross-pollinate → rank → deliver dossier + file top ideas
-model: opus
+model: inherit
 ---
 
 # Uberthink Pipeline

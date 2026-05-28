@@ -4,7 +4,7 @@
 
 **Personal Claude Code marketplace — opinionated GitHub-workflow slash commands.**
 
-[![Version](https://img.shields.io/badge/version-0.35.0-blue)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.35.3-blue)](./CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8B5CF6)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Repo Agnostic](https://img.shields.io/badge/repo--agnostic-yes-success)](#configuration)
@@ -25,7 +25,7 @@
 
 ## Heads up — this plugin burns tokens fast
 
-UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-Sonnet-scout fanout, `/uberdev:review-pr` and `/uberdev:simplify` fan out 3–5 reviewers concurrently, `/solve` waves dispatch every task in parallel, `/merge` spawns one conflict-resolver per conflicted file. That's where the speed and quality come from — and that's where the cost comes from.
+UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-scout fanout, `/uberdev:review-pr` and `/uberdev:simplify` fan out 3–5 reviewers concurrently, `/solve` waves dispatch every task in parallel, `/merge` spawns one conflict-resolver per conflicted file. That's where the speed and quality come from — and that's where the cost comes from.
 
 **Recommended setup: 2× Claude Max ×20 subscriptions.** A single Pro or single Max usage window genuinely is not enough headroom for a normal day of `/turbo` + `/review-pr` + `/merge` cycles. Expect to hit the limit mid-task on a single seat.
 
@@ -39,7 +39,7 @@ UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-Sonn
 |---|---|
 | **`/solve <issue#>`** | Spawns an autonomous Claude agent as a `claude --bg` background session (visible in `claude agents`). Tier-aware: trivial issues skip brainstorm; large ones get the full orchestrator → spec → plan → wave-dispatch → review pipeline. |
 | **`/turbo <issue#>`** | Unattended `/solve`. Same pipeline, but the brainstorm phase auto-accepts the lead agent's recommendation and Q&A is resolved against the research bundle. Use when you trust the recommendation and want issue → PR with no babysitting. |
-| **`/issue <description>`** | Creates a well-investigated, deduped, label-validated GitHub issue from a one-line ask. 2-Sonnet-scout fanout (codebase + triage) runs in <30 s, with conventional-commit titling and template-by-type. |
+| **`/issue <description>`** | Creates a well-investigated, deduped, label-validated GitHub issue from a one-line ask. 2-scout fanout (codebase + triage) runs in <30 s, with conventional-commit titling and template-by-type. |
 | **`/review-pr [<PR#>]`** | Comprehensive PR review using specialized agents fanned out in parallel — code review, simplifier, silent-failure hunter, type-design analyzer, comment analyzer, test analyzer. |
 | **`/merge [<PR#> \| --all]`** | Lands an approved PR into the integration branch — autopilot. Bare invocation auto-discovers scope: single PR for the current branch, or all eligible open PRs against `integration_branch`. Ordering, per-PR strategy, conflict resolution (one parallel agent per conflicted file), and local sync, all unattended. |
 | **`/dev <idea>`** | Prototype fast lane. Decomposes a free-text idea, builds it via parallel `Task()` subagents in-session, runs one light review, opens a PR labelled `prototype`, and auto-files a harden issue. Deliberately skips spec/plan and full `/review-pr`. Honors `--no-pr` / `--no-issue`. |
@@ -148,7 +148,7 @@ claude agents                          # monitor active /solve and /turbo backgr
 claude --bg \
   --prompt-file /tmp/solve-prompt-123.txt \
   --worktree solve-issue-123 \
-  --model 'claude-opus-4-7[1m]'
+  --model 'claude-opus-4-8[1m]'
 ```
 
 Monitor with `claude agents` (the Agent View peek panel handles `AskUserQuestion` prompts inline — type the response and press Enter). Session names display natively from the `--worktree solve-issue-N` flag; no OSC tab-rename or `cmux workspace-action` is needed.
@@ -208,7 +208,7 @@ Or per-invocation: `--integration-branch=develop`.
 
 ## `/issue` — investigation-first issue creation
 
-Pipeline: classify → 2-Sonnet-scout fanout (`codebase-scout` + `triage-scout`, parallel in one turn — dedup against closed issues, label/scope validation against `gh label list` and commitlint) → draft → user-confirm → create → print `Next step: /solve N`. Median wall-clock under 30 seconds.
+Pipeline: classify → 2-scout fanout (`codebase-scout` + `triage-scout`, parallel in one turn — dedup against closed issues, label/scope validation against `gh label list` and commitlint) → draft → user-confirm → create → print `Next step: /solve N`. Median wall-clock under 30 seconds.
 
 Templates by type — bug (`fix`), feature (`feat`), or chore/refactor — each producing conventional-commit-style titles and a body footed with `**Triage hint:** <trivial|small|medium>` that `/solve` reads later to pick the workflow without reclassifying.
 
@@ -327,7 +327,7 @@ Bundled upstream license texts in `plugins/uberdev/licenses/`.
 |---|---|
 | **Repo-agnostic by default** | Commands derive `$REPO` from `gh repo view` at runtime. No hardcoded org/project IDs. |
 | **No GitHub Project board auto-add** | Portability over board affordance. May return via opt-in `.claude/board.json`. |
-| **Model pin baked in** *(in `solve.md`)* | Spawned agents run on `claude-opus-4-7[1m]` for reproducibility. Forks should adjust. |
+| **Model pin baked in** *(in `lib/dispatch.sh`)* | Spawned agents run on `claude-opus-4-8[1m]` for reproducibility. Forks should adjust. |
 | **Background sessions via `claude --bg`** | `/solve` and `/turbo` dispatch into Agent View — supervised by Claude Code's daemon, isolated per-worktree, platform-agnostic. No terminal emulator required. |
 | **Triage hint in every issue body** | `/solve` skips re-classification and picks the right workflow without re-reading the body. |
 | **Conventional commits enforced** | `feat(scope):` / `fix(scope):` / `chore(scope):` / `refactor(scope):`. `enhancement` is a label, never a type. |

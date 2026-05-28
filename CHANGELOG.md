@@ -4,7 +4,7 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.35.0] — 2026-05-28
+## [0.35.3] — 2026-05-29
 
 ### Added
 - `/uberdev:cluster` (short alias `/ubercluster`) — repo-wide issue similarity
@@ -15,7 +15,51 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
   `agents/issue-similarity-analyzer.md` (Sonnet, read-only). Hard `--min-confidence 0.85`
   floor under `--execute`; idempotent via HTML-comment marker + `folded` label
   + per-run JSONL ledger. RFC 0010. Closes #247.
+- Consolidated `/uberdev:cluster` behavioral test coverage — gates P13–P18:
+  Phase 4 proposal generation + dry-run exit, Phase 5 lead-body fold-append,
+  Phase 3.5 cross-chunk meta-pass skip/execute/boundary, and the Phase 4
+  dispatch hard-fail gate. Closes #257, #258, #259.
 
+### Fixed
+- **Phase 4 dispatch hard-fails on unreadable `clusters-filtered.json` (Closes #263).**
+  The old `jq 'length' … || echo 0` masked a crashed / zero-byte / malformed /
+  non-array Phase-4 aggregation as `CLUSTERS=0`, indistinguishable from a
+  legitimate empty run. Now requires a non-empty valid JSON array (`[ -s ]` +
+  `type=="array"`) and hard-fails (`exit 2`) otherwise; a genuinely empty run
+  still writes `[]` → `CLUSTERS=0` and dispatches normally.
+
+## [0.35.2] — 2026-05-28
+
+### Changed
+- **Recorded won't-fix verdict for #240 dispatch `--prompt-file` probe.** The empirical probe at `tests/manual/probe-prompt-file-slash-expansion.sh` was run 2026-05-28 against claude-code 2.1.153.
+  - Probe verdict: `INDETERMINATE`. `--prompt-file` is accepted (session backgrounds successfully), but the file body is not promoted to the session-name surface (unlike argv-mode, where the session name = opening message verbatim). The session went idle without the name field diverging.
+  - Decision: the natural-language wrapper introduced by PR #238 at the 5 prompt-build callsites (`skills/goal-pipeline/SKILL.md`, `skills/solve-pipeline/SKILL.md` × 2, `lib/goal-state.sh` × 2) remains canonical. `BG_PROMPT_MODE=argv` stays at `lib/dispatch.sh`.
+  - Migration targets: the `file`/`stdin` arms in `_uberdev_dispatch_claude_bg` remain pre-wired for a future CLI revision per RFC 0004 §3.4.
+
+### Added
+- `tests/manual/probe-prompt-file-slash-expansion.sh` — manual reproducer for the AC1 empirical probe (writes verdict to `${UBERDEV_TMPDIR:-/tmp}/issue-240-probe-verdict.txt`; not wired into CI).
+
+### Notes
+- Version bumped to 0.35.2 across `plugin.json`, `marketplace.json`, the README badge, `CHANGELOG.md`, `tests/goal.test.sh` G20, and `tests/solve-claim.test.sh`. Atomic version-lock surfaces — partial bump is a red CI invariant.
+
+## [0.35.1] — 2026-05-28
+
+### Fixed
+- **`/uberdev:goal` fresh-shell `stuck_loop` misfire on cycle 1 (Closes #245).** The goal-pipeline SKILL.md Phase 0 Constants block declared 13 scalar tunables (e.g. `_UBERDEV_GOAL_STUCK_SECS=14400`, `_UBERDEV_GOAL_POLL_SECS=60`, `_UBERDEV_GOAL_SOLVE_TIMEOUT=9000`, `_UBERDEV_GOAL_BODY_CAP=65536`, `FINDING_LABEL='review-pr-finding'`) and 2 regex constants — but every fresh-shell rehydration fence in Phases 1/2/3/4 sources ONLY `lib/goal-state.sh`, never re-executing the Phase 0 block. The first watch-loop check at SKILL.md:411 — `(( now - watch_start >= _UBERDEV_GOAL_STUCK_SECS ))` — saw an unset variable, bash arithmetic coerced to 0 (POSIX.1-2017 §2.6.4), the comparison reduced to `(( elapsed > 0 ))`, and `stuck_loop` fired on iteration 1 (live repro: `/ubergoal 225 226 227` cycle 1 printed `STUCK_LOOP (4h cap)` with elapsed=0 and all 3 issues still in `solving`).
+  - `plugins/uberdev/lib/goal-state.sh` — added 12 defaulted-assignment declarations (`: "${VAR:=default}"`, the same idiom proven on `_UBERDEV_GOAL_STUCK_DIALOG_SECS:=60` from PR #221) for the 10 SKILL.md-declared integer scalars + `FINDING_LABEL` + the latent `_UBERDEV_GOAL_MAX_REVIEW_PR_ATTEMPTS:=3` (used by `_uberdev_goal_dispatch_review_pr` via `:-3` fallback but never declared until now). Added 2 plain-assignment regex declarations (`BLOCKS_LINE_REGEX`, `FINDING_FINGERPRINT_REGEX`) — `:=` is intentionally NOT used on the regexes (Q2 security advisory: defaulted-assignment would let a hostile env override regex shape and widen the ReDoS attack surface without a validator). All 14 new declarations live after the `_UBERDEV_GOAL_STATE_LOADED=1` marker (within the guarded first-source-per-process region per RFC 0005 D19; relies on each fresh-shell rehydration fence being a new process), immediately after the line-101 precedent.
+  - `plugins/uberdev/skills/goal-pipeline/SKILL.md` — Constants block kept byte-identical (tests G24/G28/G34 grep the literals verbatim — partial change would red CI); added a one-line prose pointer above the block declaring `lib/goal-state.sh` as the runtime SSOT and the SKILL.md block as the documentation SSOT.
+  - Tests: `tests/goal.test.sh` G20 ratcheted to 0.35.1; new G40 regression test sources ONLY `lib/goal-state.sh` in a fresh `bash -c` and asserts `_UBERDEV_GOAL_STUCK_SECS == 14400` — proves the fix on the exact path that fails today. `tests/solve-claim.test.sh` version block ratcheted 0.35.0 → 0.35.1.
+
+### Notes
+- Version bumped to 0.35.1 across `plugin.json`, `marketplace.json`, the README badge, `CHANGELOG.md`, `tests/goal.test.sh` G20, and `tests/solve-claim.test.sh`. Atomic version-lock surfaces — partial bump is a red CI invariant (memory `project_uberdev_version_lock_tests`).
+- Out of scope: consumer-call-site SSOT migration for the two regex constants (`_uberdev_goal_parse_blocks_line` and `_uberdev_goal_extract_fingerprint` still hardcode the literal — deferred per Q2); `_uberdev_goal_validate_int` hardening for arithmetic uses of the integer constants (latent env-injection surface, pre-existing); a fuller Phase-1→2→3→4 fresh-shell-fence integration test (G40 covers the primary scalar; deeper test logged as a follow-up).
+
+## [0.35.0] — 2026-05-28
+
+### Changed
+- **Models:** `/turbo`, `/solve`, and `/goal` now dispatch every agent on `claude-opus-4-8[1m]` (was `claude-opus-4-7[1m]`).
+- **Agents:** the 22 former-`sonnet` subagents plus the 9 `opus` subagents and 4 pipeline skills now use `model: inherit`, so the whole subagent tree runs on the session's Opus 4.8 1M model. The 6 `haiku` agents and 4 pre-existing `inherit` agents are unchanged. Former-`sonnet` agents carry a `# WAIT 4.8 sonnet` comment to revisit when Sonnet 4.8 ships.
+- Swept stale Sonnet / Opus-4.7 model references from agent descriptions, the `/issue` command docs, the `orchestrator` and `post-impl-review` skills, and the README; `plan-writer` no longer pins its internal research subagents to Sonnet.
 
 ## [0.34.13] — 2026-05-28
 
@@ -62,7 +106,6 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Version bumped to 0.34.11 across `plugin.json`, `marketplace.json`, the README badge, `CHANGELOG.md`, `tests/goal.test.sh` G20, and `tests/solve-claim.test.sh`. Atomic version-lock surfaces — partial bump is a red CI invariant.
 
 ---
-
 
 ## [0.34.10] — 2026-05-28
 
@@ -503,8 +546,6 @@ UberDev was originally built for a solo developer for whom GitHub issues functio
 The refusal fires on ANY claim collision — including same-machine re-runs. This is deliberate: accidentally re-dispatching `/turbo 42` from the same laptop while the first run is still going would race two bg sessions into the same worktree, which is the same failure mode as the cross-teammate collision the protocol exists to prevent. After a manual `claude agents stop`, the operator passes `--force` as the deliberate "yes I really want to re-dispatch" gesture; the override is auditable so post-hoc review can spot patterns (recovery from real failures vs. accidental retries that should have used a different approach).
 
 **Known limitation — TOCTOU race window (#123 B2).** The Step 4 collision-check read and Step 4.5 claim-write happen in separate gh round-trips. Two dispatchers running concurrently against the same issue can both observe "no label present" in their Step 4 reads and both write the label in Step 4.5 — `gh issue edit --add-label` is idempotent on the GitHub side. The protocol is **best-effort, not atomic**; the race window is bounded by gh round-trip latency (tens to hundreds of ms). For the small-team usage this targets, that's acceptable. Larger-team operators or workflows that need a strong distributed lock should NOT rely on this protocol — a post-write verification step (re-fetch latest claim comment, refuse if a different dispatcher's marker won) would close the window at the cost of one extra round-trip per issue and is deferred until measured contention warrants it.
-
-
 
 ### Fixed
 

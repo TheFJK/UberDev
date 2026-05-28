@@ -1,7 +1,7 @@
 ---
 name: spec-writer
 description: Writer subagent that synthesises a research bundle + answers into a design spec. Returns structured handle; orchestrator never reads the spec body. Used by uberdev:orchestrator phase 3.
-model: opus
+model: inherit
 color: blue
 ---
 

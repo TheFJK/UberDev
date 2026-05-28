@@ -99,7 +99,7 @@ chmod +x "$STUB_DIR/claude"
   EFFORT_FLAG=( --effort "$EFFORT_LEVEL" )
   TIMEOUT_BIN=""
   SOLVE_TIMEOUT=10
-  MODEL='claude-opus-4-7[1m]'
+  MODEL='claude-opus-4-8[1m]'
   ISSUE_NUM=128
   PROMPT_BODY="fake prompt body"
   cmd=( "$STUB_DIR/claude" --bg
@@ -158,7 +158,7 @@ CAPTURE_FILE_2="$(mktemp)"
   EFFORT_FLAG=( --effort "$EFFORT_LEVEL" )
   TIMEOUT_BIN=""
   SOLVE_TIMEOUT=10
-  MODEL='claude-opus-4-7[1m]'
+  MODEL='claude-opus-4-8[1m]'
   ISSUE_NUM=128
   PROMPT_BODY="fake prompt body"
   cmd=( "$STUB_DIR/claude" --bg

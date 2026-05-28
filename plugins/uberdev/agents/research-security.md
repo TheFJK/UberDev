@@ -1,7 +1,7 @@
 ---
 name: research-security
 description: Security research subagent for the orchestrator and /issue. Runs Semgrep SAST, cross-references awesome-secure-defaults by detected stack, summarises severity findings. Returns the universal research YAML contract; orchestrator never reads raw findings into its context.
-model: opus
+model: inherit
 color: red
 ---
 

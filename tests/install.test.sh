@@ -153,11 +153,11 @@ echo
 echo "== I3: existing unrelated settings keys are preserved =="
 SANDBOX="$(make_sandbox)"
 seed_settings "$SANDBOX" \
-  '{"theme":"dark","model":"claude-opus-4-7","permissions":{"allow":["Bash"]}}'
+  '{"theme":"dark","model":"claude-opus-4-8","permissions":{"allow":["Bash"]}}'
 if run_install "$SANDBOX"; then
   if jq -e '
       .theme == "dark"
-      and .model == "claude-opus-4-7"
+      and .model == "claude-opus-4-8"
       and .permissions.allow == ["Bash"]
       and .enabledPlugins["uberdev@uberdev"] == true
     ' "$SANDBOX/.claude/settings.json" >/dev/null 2>&1; then

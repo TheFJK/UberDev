@@ -1,7 +1,8 @@
 ---
 name: triage-scout
-description: "Lightweight triage scout for /uberdev:issue (runs on Sonnet). Runs gh search issues (open + closed), gh label list, and reads commitlint config if present. Returns duplicate matches, validated label set, and validated commit scope. Never invents labels."
-model: sonnet
+description: "Lightweight triage scout for /uberdev:issue (runs on inherit — the session model). Runs gh search issues (open + closed), gh label list, and reads commitlint config if present. Returns duplicate matches, validated label set, and validated commit scope. Never invents labels."
+# WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
+model: inherit
 tools: ["Bash", "Read"]
 ---
 
@@ -16,7 +17,7 @@ description: "<verbatim user description>"
 issue_type: fix | feat | refactor | test | docs | chore
 working_dir: "<absolute path>"
 repo_slug: "<owner>/<repo>"
-model_hint: sonnet   # audit-trail aid
+model_hint: inherit   # audit-trail aid
 ```
 
 ## Process
@@ -50,4 +51,4 @@ summary: |
 
 ## Cost note
 
-Pinned to Sonnet by frontmatter. Escape hatch: `CLAUDE_CODE_SUBAGENT_MODEL=sonnet` (see `affaan-m/everything-claude-code#173`).
+Runs on `inherit` — the session model (Opus 4.8 1M). To force a specific subagent model, set `CLAUDE_CODE_SUBAGENT_MODEL=<model>` (see `affaan-m/everything-claude-code#173`).

@@ -522,7 +522,7 @@ If `verdict: REJECT` → abort with diagnostic.
 
 ### Phase 4: plan-writer
 
-Dispatch `plan-writer` with `spec_path`, `tier`, `topic_slug`. The plan-writer internally dispatches its own Sonnet research subagents — orchestrator just waits for the final return.
+Dispatch `plan-writer` with `spec_path`, `tier`, `topic_slug`. The plan-writer internally dispatches its own research subagents (session model — Opus 4.8 1M) — orchestrator just waits for the final return.
 
 Verification: `[ -f $artifact_path ]`, `[ $(wc -c < $artifact_path) -gt 500 ]`, `grep -E "^## Execution Waves" $artifact_path` succeeds, content sha matches.
 

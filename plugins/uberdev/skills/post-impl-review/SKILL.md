@@ -38,7 +38,7 @@ If a reviewer agent surfaces a finding that "we should re-plan", record it as a 
 
 - `changed_paths` — list of files modified by the implementation (e.g. `gh pr diff <N> --name-only` output from `/uberdev:review-pr` Phase 1).
 - `commit_range` — git rev range for diff context, e.g. `<base>..HEAD` where `<base>` is the PR base ref.
-- `tier` — one of `trivial` / `small` / `medium` / `large`. Used only for reviewer model selection (Haiku for trivial/small, Sonnet for medium/large) per each agent's frontmatter.
+- `tier` — one of `trivial` / `small` / `medium` / `large`. Used only for reviewer model selection per each agent's frontmatter (the lightweight lenses pin Haiku; the code-reviewer lens inherits the session model — Opus 4.8 1M).
 - `aspect_emphasis` — optional list of aspect-token strings (e.g. `["tests", "errors"]`) forwarded from `/uberdev:review-pr` Step 1's `ASPECT_LIST`. Default: empty list. When non-empty, Step 1 below appends a `## Emphasis` subsection to the shared brief listing each token. The emphasis section is identical across all 6 reviewers — emphasis is uniform, never per-reviewer.
 
 ## Process
@@ -92,12 +92,12 @@ In ONE assistant turn, fire 6 Task() calls in parallel. Each receives the same b
 
 | Reviewer | Agent file | Lens |
 |---|---|---|
-| `code-reviewer` (correctness lens) | `agents/code-reviewer.md` (sonnet) | Correctness, design, CLAUDE.md compliance |
+| `code-reviewer` (correctness lens) | `agents/code-reviewer.md` (inherit) | Correctness, design, CLAUDE.md compliance |
 | `silent-failure-hunter` | `agents/silent-failure-hunter.md` | Swallowed errors, ignored returns, silent fallbacks |
 | `type-design-analyzer` | `agents/type-design-analyzer.md` | `any`/`unknown` misuse, type safety holes |
 | `comment-analyzer` | `agents/comment-analyzer.md` | Stale, redundant, or load-bearing comments |
 | `pr-test-analyzer` | `agents/pr-test-analyzer.md` (haiku) | Behavioral test coverage, critical gaps, test quality |
-| `code-reviewer` (general lens) | `agents/code-reviewer.md` (sonnet) | Catch-all for issues that fall outside the other 5 lenses (the brief flags this lens via the dispatcher's prompt) |
+| `code-reviewer` (general lens) | `agents/code-reviewer.md` (inherit) | Catch-all for issues that fall outside the other 5 lenses (the brief flags this lens via the dispatcher's prompt) |
 
 **Net change vs. pre-#73 fanout:** −`code-simplifier` (moved to Phase 2 of `/uberdev:review-pr` as the named lens dispatcher), +`pr-test-analyzer` (was documented in `/review-pr` `## Agent Descriptions` but never actually fanned out from this skill). 5 → 6 reviewers; composition changed.
 
