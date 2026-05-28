@@ -265,9 +265,9 @@ fi
 # which env var the caller set so post-hoc grep can attribute the bypass to
 # /goal (SKIP) vs /turbo --auto / /solve --auto (AUTO).
 if [[ "${SKIP_PERMISSIONS:-0}" == "1" ]]; then
-  PERM_DESC="bypass (--dangerously-skip-permissions; SKIP_PERMISSIONS tier — /goal autonomous loop)"
+  PERM_DESC="bypass (--dangerously-skip-permissions --permission-mode bypassPermissions; SKIP_PERMISSIONS tier — /goal autonomous loop)"
 elif [[ "$AUTO_PERMISSIONS" == "1" ]]; then
-  PERM_DESC="bypass (--dangerously-skip-permissions; AUTO_PERMISSIONS tier — /turbo --auto / /solve --auto)"
+  PERM_DESC="bypass (--dangerously-skip-permissions --permission-mode bypassPermissions; AUTO_PERMISSIONS tier — /turbo --auto / /solve --auto)"
 else
   PERM_DESC="default (manual per-tool gating)"
 fi
