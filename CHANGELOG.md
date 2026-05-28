@@ -4,6 +4,20 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.2] — 2026-05-28
+
+### Changed
+- **Recorded won't-fix verdict for #240 dispatch `--prompt-file` probe.** The empirical probe at `tests/manual/probe-prompt-file-slash-expansion.sh` was run 2026-05-28 against claude-code 2.1.153.
+  - Probe verdict: `INDETERMINATE`. `--prompt-file` is accepted (session backgrounds successfully), but the file body is not promoted to the session-name surface (unlike argv-mode, where the session name = opening message verbatim). The session went idle without the name field diverging.
+  - Decision: the natural-language wrapper introduced by PR #238 at the 5 prompt-build callsites (`skills/goal-pipeline/SKILL.md`, `skills/solve-pipeline/SKILL.md` × 2, `lib/goal-state.sh` × 2) remains canonical. `BG_PROMPT_MODE=argv` stays at `lib/dispatch.sh`.
+  - Migration targets: the `file`/`stdin` arms in `_uberdev_dispatch_claude_bg` remain pre-wired for a future CLI revision per RFC 0004 §3.4.
+
+### Added
+- `tests/manual/probe-prompt-file-slash-expansion.sh` — manual reproducer for the AC1 empirical probe (writes verdict to `${UBERDEV_TMPDIR:-/tmp}/issue-240-probe-verdict.txt`; not wired into CI).
+
+### Notes
+- Version bumped to 0.35.2 across `plugin.json`, `marketplace.json`, the README badge, `CHANGELOG.md`, `tests/goal.test.sh` G20, and `tests/solve-claim.test.sh`. Atomic version-lock surfaces — partial bump is a red CI invariant.
+
 ## [0.35.1] — 2026-05-28
 
 ### Fixed
@@ -68,7 +82,6 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Version bumped to 0.34.11 across `plugin.json`, `marketplace.json`, the README badge, `CHANGELOG.md`, `tests/goal.test.sh` G20, and `tests/solve-claim.test.sh`. Atomic version-lock surfaces — partial bump is a red CI invariant.
 
 ---
-
 
 ## [0.34.10] — 2026-05-28
 
@@ -509,8 +522,6 @@ UberDev was originally built for a solo developer for whom GitHub issues functio
 The refusal fires on ANY claim collision — including same-machine re-runs. This is deliberate: accidentally re-dispatching `/turbo 42` from the same laptop while the first run is still going would race two bg sessions into the same worktree, which is the same failure mode as the cross-teammate collision the protocol exists to prevent. After a manual `claude agents stop`, the operator passes `--force` as the deliberate "yes I really want to re-dispatch" gesture; the override is auditable so post-hoc review can spot patterns (recovery from real failures vs. accidental retries that should have used a different approach).
 
 **Known limitation — TOCTOU race window (#123 B2).** The Step 4 collision-check read and Step 4.5 claim-write happen in separate gh round-trips. Two dispatchers running concurrently against the same issue can both observe "no label present" in their Step 4 reads and both write the label in Step 4.5 — `gh issue edit --add-label` is idempotent on the GitHub side. The protocol is **best-effort, not atomic**; the race window is bounded by gh round-trip latency (tens to hundreds of ms). For the small-team usage this targets, that's acceptable. Larger-team operators or workflows that need a strong distributed lock should NOT rely on this protocol — a post-write verification step (re-fetch latest claim comment, refuse if a different dispatcher's marker won) would close the window at the cost of one extra round-trip per issue and is deferred until measured contention warrants it.
-
-
 
 ### Fixed
 

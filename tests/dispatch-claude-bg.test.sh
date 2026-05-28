@@ -411,7 +411,7 @@ assert_grep "$SOLVE_PIPELINE" \
   "version-gate error includes actionable npm install pointer"
 assert_grep "$DISPATCH_LIB" \
   '^[[:space:]]*BG_PROMPT_MODE=argv' \
-  "uberdev_dispatch_resolve_env hardcodes BG_PROMPT_MODE=argv (probe deferred per fix(solve) commit 0c17169 — claude --bg --help is not introspective in v2.1.139; moved to lib/dispatch.sh in #175)"
+  "uberdev_dispatch_resolve_env hardcodes BG_PROMPT_MODE=argv (probe completed 2026-05-28 against claude-code 2.1.153 via tests/manual/probe-prompt-file-slash-expansion.sh — INDETERMINATE; argv stays canonical per #240 won't-fix)"
 assert_grep "$SOLVE_PIPELINE" \
   'TERMINAL_FLAG_DEPRECATED_NOTE' \
   "Constants table defines TERMINAL_FLAG_DEPRECATED_NOTE"
