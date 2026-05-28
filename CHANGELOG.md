@@ -4,6 +4,18 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.10] — 2026-05-28
+
+### Fixed
+- **Skill-loader $N substitution corrupts `emit_topic_log()` in orchestrator (#225).** Same bug class as #222 (awk one-liners), different surface — the Claude Code Skill renderer text-substitutes positional non-flag args of `$ARGUMENTS` into the entire rendered SKILL.md body, including inside bash function bodies. The Phase 1 fanout's `emit_topic_log()` helper used bash positional refs, so all 12 call sites were silently emitting the same render-time substitution (e.g. `agent=research-solve status=GH note=issue` on `/uberdev:orchestrator --turbo solve GH issue #225`) instead of binding at call time. The per-topic observability log was effectively useless: every line emitted the same agent/status/note triple regardless of which topic was being dispatched or whether it was cache-reused vs fresh-dispatched.
+  - `plugins/uberdev/skills/orchestrator/SKILL.md` — `emit_topic_log()` now reads positional args via the `${@:N:1}` array-slice form. The slice has no dollar-immediately-followed-by-digit substring (the digit follows `:`, not the dollar), so the renderer leaves it verbatim and bash evaluates the slice at call time. The local variable holding the `status` arg is named `topic_status` rather than `status` because `status` is a read-only special parameter in zsh (the Bash-tool default shell on macOS) — `local status="…"` aborts the function with `read-only variable: status`. Added a comment header naming the renderer-substitution mechanic, the symptom, and the safe form, plus the zsh-special-parameter caveat. The two awk-surface sites in `emit_topic_log`'s neighbourhood (the cached-research staleness check and the multi-line files-investigated parse) were already fixed in PR #224 (the `-v cN=N` + `$cN` form) — this PR's fix is the third surface from issue #225's deferred finding.
+  - `tests/skill-renderer-awk-collision.test.sh` — extended from 4 to 9 assertions. R4 scans `orchestrator/SKILL.md` for any bare `$N` and red-CIs on a regression, sharing `BASH_GUARD_REGEX` as SSOT with the R5 inverse fixtures. R5.bad + R5.safe are the inverse fixture proofs (a naïve bash function body MUST be flagged; the recommended `${@:N:1}` form MUST NOT be flagged), mirroring the R2/R3 pattern from the awk surface. R6.bash + R6.zsh execute the live `emit_topic_log` definition extracted from `orchestrator/SKILL.md` under both shells and assert the emitted log line matches the schema — this catches cross-shell regressions (such as the zsh-reserved `status` local-var bug that surfaced in /review-pr review of this PR) that static regex scans miss. The test now covers both #222 (awk) and #225 (bash) bug classes in a single drift guard. Scope is intentionally narrow to `orchestrator/SKILL.md` — the broader bash-positional sweep across other pipeline SKILL.md files (7+ known sites in solve/goal/finish/testers/ubersimplify) is documented in the test header comment as a follow-up and NOT enforced here (would red CI on those known-vulnerable sites until they too are fixed).
+
+### Notes
+- Version bumped to 0.34.10 across `plugin.json`, `marketplace.json`, the README badge, `CHANGELOG.md`, `tests/goal.test.sh` G20, and `tests/solve-claim.test.sh`. Atomic version-lock surfaces — partial bump is a red CI invariant.
+
+---
+
 ## [0.34.9] — 2026-05-27
 
 ### Changed

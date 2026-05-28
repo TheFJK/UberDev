@@ -87,9 +87,32 @@ TOPICS=(codebase patterns prior-art constraints security test-coverage)
 
 # Helper: emit one per-topic observability line. Six lines per medium/large
 # run regardless of cache state — see "Per-topic observability" below for
-# the schema. `declare` is bash-only; LLM-as-executor accepts it.
+# the schema.
+#
+# Renderer-safe positional access via `${@:N:1}` array-slice (issue #225):
+# the Skill loader text-substitutes positional non-flag args of $ARGUMENTS
+# wherever a dollar-sign is immediately followed by a single digit, anywhere
+# in the rendered SKILL.md body — including inside bash function bodies. The
+# naïve dollar-digit form would be rewritten at render time, hardcoding all
+# 12 call sites to whichever args the user passed on the invoking slash
+# command. The `${@:N:1}` form has no dollar-immediately-followed-by-digit
+# substring (the digit follows `:`, not the dollar), so the renderer leaves
+# it verbatim and bash evaluates the slice at call time. Same renderer-
+# substitution risk class as #222 (awk one-liners), but triggered here by
+# bash positional refs instead of awk field refs.
+#
+# Local variable naming: the output field is `status=…` (matching the log
+# schema callers `grep` for) but the LOCAL holding that value is named
+# `topic_status` — `status` is a read-only special parameter in zsh
+# (alias for the last-pipeline exit status; see [project_uberdev_type_t_
+# bashism_zsh] in CLAUDE.md memory). `local status="…"` aborts with
+# "read-only variable: status" under /bin/zsh, which is the Bash-tool
+# default shell on macOS. `topic`, `note` are unrestricted.
 emit_topic_log() {  # args: <topic> <status> <note>
-  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] phase=phase1-fanout agent=research-$1 status=$2 note=$3" >> "$LOG"
+  local topic="${@:1:1}"
+  local topic_status="${@:2:1}"
+  local note="${@:3:1}"
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] phase=phase1-fanout agent=research-${topic} status=${topic_status} note=${note}" >> "$LOG"
 }
 
 # Global pre-gate: evaluated once before the per-topic loop. If it fires,
