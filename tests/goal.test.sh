@@ -196,10 +196,11 @@ assert_grep "$GOAL_SKILL" 'does NOT halt the entire goal|do NOT halt entire goal
 echo
 echo "== G15: backend inheritance =="
 assert_grep "$GOAL_SKILL" 'UBERDEV_RESOLVED_BACKEND'                        "G15.resolved-backend-env"
-# The forwarded backend appears as --backend=$UBERDEV_RESOLVED_BACKEND on
-# the /turbo dispatch line; allow either the env-var form or a literal
-# backend name in the same line.
-assert_grep "$GOAL_SKILL" '--backend=\$?UBERDEV_RESOLVED_BACKEND|--backend=[^[:space:]]+.*uberdev:turbo|uberdev:turbo.*--backend' \
+# Issue #248 — Phase 1 no longer passes --backend= as an arg flag; backend
+# now forwards purely via the UBERDEV_RESOLVED_BACKEND env-var that Phase 0
+# exports (claude --bg inherits the parent shell's env table by default).
+# Anchor on the Phase 1 comment that documents the env-var path.
+assert_grep "$GOAL_SKILL" 'Backend forwards via UBERDEV_RESOLVED_BACKEND' \
                                                                             "G15.backend-forwarding"
 
 echo
@@ -212,16 +213,18 @@ echo
 echo "== G17: --dry-run semantics =="
 assert_grep "$GOAL_SKILL" '--dry-run|dry_run'                            "G17.dry-run-flag"
 assert_grep "$GOAL_SKILL" 'exit 0'                                       "G17.dry-run-exit"
-# Negative — must NOT actually dispatch /turbo inside the dry-run code path.
-# The prose ("would dispatch /turbo") is descriptive narration, not real
-# dispatch. Anchor on the imperative call-site shape rather than the prose:
-# a real dispatch invokes uberdev_dispatch_one (or `/uberdev:turbo` inside a
-# child-process prompt heredoc) — both forbidden inside the dry-run branch.
+# Negative — must NOT actually dispatch /uberdev:orchestrator inside the
+# dry-run code path. The prose ("would dispatch /uberdev:orchestrator") is
+# descriptive narration, not real dispatch. Anchor on the imperative
+# call-site shape rather than the prose: a real dispatch invokes
+# uberdev_dispatch_one (or a slash-command inside a child-process prompt
+# heredoc) — both forbidden inside the dry-run branch.
 # Plan-literal `dry.run.*dispatch.*turbo` false-positives on Step 8's
-# explanatory bullet at line 113 ("planned cycle-1 dispatch list … would
-# dispatch /turbo for issues …"); the contract this assertion locks is "no
-# actual gh/dispatch call in the dry-run branch", which is shape-checked by
-# requiring the dry-run branch to exit before reaching uberdev_dispatch_one.
+# explanatory bullet (around SKILL.md ~line 169 — "planned cycle-1 dispatch
+# list … would dispatch /uberdev:orchestrator for issues …"); the contract
+# this assertion locks is "no actual gh/dispatch call in the dry-run branch",
+# which is shape-checked by requiring the dry-run branch to exit before
+# reaching uberdev_dispatch_one.
 assert_no_grep "$GOAL_SKILL" 'dry_run=1.*uberdev_dispatch_one|uberdev_dispatch_one.*dry_run=1' \
                                                                          "G17.dry-run-no-dispatch"
 
@@ -291,11 +294,11 @@ assert_no_grep "$GOAL_LIB" '\bbash -c'                                   "G19.no
 assert_grep "$GOAL_CMD" '--i-know-what-im-doing'                         "G19.r12-mentioned-once"
 
 echo
-echo "== G20: version bump locked (0.34.10) =="
-assert_grep "$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json" '"version": "0\.34\.10"'  "G20.plugin-json"
-assert_grep "$REPO_ROOT/.claude-plugin/marketplace.json"            '"version": "0\.34\.10"'  "G20.marketplace-json"
-assert_grep "$REPO_ROOT/README.md"                                  'version-0\.34\.10-blue'  "G20.readme-badge"
-assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.34\.10\]'        "G20.changelog"
+echo "== G20: version bump locked (0.34.11) =="
+assert_grep "$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json" '"version": "0\.34\.11"'  "G20.plugin-json"
+assert_grep "$REPO_ROOT/.claude-plugin/marketplace.json"            '"version": "0\.34\.11"'  "G20.marketplace-json"
+assert_grep "$REPO_ROOT/README.md"                                  'version-0\.34\.11-blue'  "G20.readme-badge"
+assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.34\.11\]'        "G20.changelog"
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
 
 assert_grep "$GOAL_SKILL" 'uberdev_dispatch_resolve_env'  "G20b.phase0-wires-resolve-env (#175 SSOT anchor)"
@@ -532,6 +535,21 @@ assert_grep "$GOAL_LIB" '^_uberdev_goal_any_attempt_stuck\(\)'                  
 assert_grep "$GOAL_SKILL" '_uberdev_goal_any_attempt_stuck'                       "G37.wrapper-called-from-skill"
 
 echo
+echo "== G38: Phase 1 dispatches /uberdev:orchestrator directly (issue #248) =="
+# Issue #248 — confirm Phase 1 dispatch prompt invokes /uberdev:orchestrator
+# (NOT /uberdev:turbo), preventing regression back to the double-bg-spawn
+# anti-pattern (goal → bg(turbo) → bg(orchestrator)). Mirrors the G24b
+# structural-grep convention from PR #239.
+# See BT83 below for the behavioural complement; if you change the printf
+# shape, update BT83's awk anchor too.
+assert_grep "$GOAL_SKILL" \
+  'printf.*Invoke the slash command /uberdev:orchestrator --turbo solve GH issue' \
+  "G38.goal-phase-1-orchestrator-dispatch"
+assert_no_grep "$GOAL_SKILL" \
+  'printf.*Invoke the slash command /uberdev:turbo' \
+  "G38.goal-phase-1-no-turbo-wrapper-dispatch"
+
+echo
 echo "== Behavioral tests (B12 — sourced-function exercises) =="
 # These tests SOURCE plugins/uberdev/lib/goal-state.sh and exercise the
 # real bash functions, not just grep their shape. They cover the four
@@ -618,6 +636,19 @@ assert_grep_file() {
     printf '  FAIL  %s\n' "$label" >&2
     printf '        file:    %s (exists=%s)\n' "$file" "$([ -f "$file" ] && echo yes || echo no)" >&2
     printf '        pattern: %s\n' "$pattern" >&2
+  fi
+}
+
+assert_no_grep_file() {
+  local file="$1" pattern="$2" label="$3"
+  if [ -f "$file" ] && ! grep -qE -e "$pattern" "$file"; then
+    PASS=$((PASS + 1))
+    printf '  PASS  %s\n' "$label"
+  else
+    FAIL=$((FAIL + 1))
+    printf '  FAIL  %s\n' "$label" >&2
+    printf '        file:    %s (exists=%s)\n' "$file" "$([ -f "$file" ] && echo yes || echo no)" >&2
+    printf '        pattern: %s (expected ABSENT but matched)\n' "$pattern" >&2
   fi
 }
 
@@ -2686,6 +2717,77 @@ case "$_bt82_pre_fix_state" in
 esac
 assert_eq "$_bt82_skipped_pre_fix" "0" "BT82.d-skip-check-NOT-match-empty-pre-fix-regression-guard"
 
+echo
+echo "== BT83: Phase 1 prompt construction emits /uberdev:orchestrator (issue #248 behavioural) =="
+# #250 post-impl-review blocker — G38's structural grep on the SKILL.md source
+# would also pass on the previously-buggy /turbo wrapper if a future refactor
+# swapped `printf` for a heredoc or variable-extracted form while keeping
+# the literal token, AND would FALSELY pass on a printf that constructed
+# the line for the wrong target. BT83 extracts the Phase-1 PROMPT_FILE
+# construction lines from SKILL.md (the `printf 'Invoke the slash command
+# /uberdev:orchestrator…' "$ISSUE_NUM" > "$PROMPT_FILE"` block), executes
+# them with a controlled $ISSUE_NUM into an isolated tmpdir, and asserts
+# the resulting file contents contain /uberdev:orchestrator and NOT
+# /uberdev:turbo. This is the behavioural complement to G38's source-shape
+# grep: only this test catches a regression where the literal token in the
+# source survives but the run-time output is wrong.
+#
+# Mechanism (BT82 idiom): no source-extract of Phase 1's outer loop (it is
+# markdown-embedded); instead grep the printf line by literal anchor
+# ("printf 'Invoke the slash command /uberdev:orchestrator"), pair it with
+# the immediately-following continuation line (the `"$ISSUE_NUM" >`
+# argument), and pass the two-line snippet through `eval` under a
+# controlled ISSUE_NUM + PROMPT_FILE.
+_bt83_prompt_file="$_b12_tmpdir/bt83-prompt-out.txt"
+ISSUE_NUM=999
+PROMPT_FILE="$_bt83_prompt_file"
+# Expected dispatch-prompt prefix. Keep in sync with G38 (the printf-anchor
+# grep above) and SKILL.md Phase 1's printf line; if you change any of the
+# three, change all three together.
+_bt83_expected_prefix='Invoke the slash command /uberdev:orchestrator --turbo solve GH issue'
+# Extract the two printf lines verbatim from SKILL.md. The first line
+# carries the format string + escape; the second carries the $ISSUE_NUM
+# substitution + redirect. awk reads from the `printf 'Invoke the slash
+# command /uberdev:orchestrator` anchor to the first `> "$PROMPT_FILE"`
+# (inclusive). The extracted snippet is then eval'd in this shell so the
+# real format string + redirect run against our controlled vars.
+#
+# Trust boundary: the snippet is read from a repo-controlled source file
+# (SKILL.md) bounded by the awk anchors — no external/untrusted input
+# reaches eval. The trust check lives at the extraction site, not at the
+# eval call.
+_bt83_snippet="$(awk '
+  /printf .Invoke the slash command \/uberdev:orchestrator/ { capture=1 }
+  capture { print }
+  capture && /> "\$PROMPT_FILE"/ { exit }
+' "$GOAL_SKILL")"
+# Sanity guard — if extraction yields nothing the printf line moved or the
+# anchor drifted; surface that as a discrete failure rather than letting
+# the eval silently no-op.
+if [ -z "$_bt83_snippet" ]; then
+  FAIL=$((FAIL+1))
+  echo "  FAIL  BT83.a-snippet-extracted-from-skill (extraction returned empty — printf anchor moved?)" >&2
+else
+  PASS=$((PASS+1))
+  echo "  PASS  BT83.a-snippet-extracted-from-skill"
+  # Execute the extracted snippet. Trust boundary documented at the awk
+  # extraction site above; the awk-anchored exit-on-`> "$PROMPT_FILE"` also
+  # bounds the snippet so it cannot pull in arbitrary bash below the printf.
+  eval "$_bt83_snippet"
+  # Assert the constructed prompt contains /uberdev:orchestrator and NOT
+  # /uberdev:turbo. Both directions are checked so a future regression
+  # (literal source token swap) flips one assertion clearly.
+  assert_grep_file "$_bt83_prompt_file" \
+    "${_bt83_expected_prefix} #999" \
+    "BT83.b-runtime-prompt-contains-orchestrator-token"
+  # Negative: the runtime prompt MUST NOT contain `/uberdev:turbo` (the
+  # double-bg-spawn anti-pattern).
+  assert_no_grep_file "$_bt83_prompt_file" \
+    '/uberdev:turbo' \
+    "BT83.c-runtime-prompt-omits-turbo-token"
+fi
+unset ISSUE_NUM PROMPT_FILE
+
 # Cleanup: remove the isolated tmpdir contents (we created the whole
 # directory via mktemp -d, so we can rm -rf safely — it's our own).
 # The single blanket rm subsumes every per-BT artifact (TSVs, audit
@@ -2702,6 +2804,7 @@ rm -rf "$_b12_tmpdir/goal-test-bt58"* 2>/dev/null || true
 rm -rf "$_b12_tmpdir/goal-test-bt80"* 2>/dev/null || true
 rm -rf "$_b12_tmpdir/goal-test-bt81"* 2>/dev/null || true
 rm -rf "$_b12_tmpdir/goal-test-bt82"* 2>/dev/null || true
+rm -f "$_b12_tmpdir"/bt83-prompt-out.txt 2>/dev/null || true
 rm -f "$_b12_tmpdir"/goal-bt5-*-merge-attempts.tsv 2>/dev/null || true
 rm -rf "$_b12_tmpdir" 2>/dev/null || true
 
