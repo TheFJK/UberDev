@@ -28,7 +28,7 @@ set -u
 
 PASS=0; FAIL=0
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-. "$REPO_ROOT/tests/_lib_assert_structural.sh"
+. "$REPO_ROOT/tests/_lib_assert_structural.sh" || { echo "FATAL: _lib_assert_structural.sh missing/unreadable" >&2; exit 2; }
 
 CMD="$REPO_ROOT/plugins/uberdev/commands/cluster.md"
 SKILL="$REPO_ROOT/plugins/uberdev/skills/cluster-pipeline/SKILL.md"
