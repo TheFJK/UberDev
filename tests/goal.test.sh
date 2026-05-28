@@ -213,16 +213,18 @@ echo
 echo "== G17: --dry-run semantics =="
 assert_grep "$GOAL_SKILL" '--dry-run|dry_run'                            "G17.dry-run-flag"
 assert_grep "$GOAL_SKILL" 'exit 0'                                       "G17.dry-run-exit"
-# Negative — must NOT actually dispatch /turbo inside the dry-run code path.
-# The prose ("would dispatch /turbo") is descriptive narration, not real
-# dispatch. Anchor on the imperative call-site shape rather than the prose:
-# a real dispatch invokes uberdev_dispatch_one (or `/uberdev:turbo` inside a
-# child-process prompt heredoc) — both forbidden inside the dry-run branch.
+# Negative — must NOT actually dispatch /uberdev:orchestrator inside the
+# dry-run code path. The prose ("would dispatch /uberdev:orchestrator") is
+# descriptive narration, not real dispatch. Anchor on the imperative
+# call-site shape rather than the prose: a real dispatch invokes
+# uberdev_dispatch_one (or a slash-command inside a child-process prompt
+# heredoc) — both forbidden inside the dry-run branch.
 # Plan-literal `dry.run.*dispatch.*turbo` false-positives on Step 8's
-# explanatory bullet at line 113 ("planned cycle-1 dispatch list … would
-# dispatch /turbo for issues …"); the contract this assertion locks is "no
-# actual gh/dispatch call in the dry-run branch", which is shape-checked by
-# requiring the dry-run branch to exit before reaching uberdev_dispatch_one.
+# explanatory bullet (around SKILL.md ~line 169 — "planned cycle-1 dispatch
+# list … would dispatch /uberdev:orchestrator for issues …"); the contract
+# this assertion locks is "no actual gh/dispatch call in the dry-run branch",
+# which is shape-checked by requiring the dry-run branch to exit before
+# reaching uberdev_dispatch_one.
 assert_no_grep "$GOAL_SKILL" 'dry_run=1.*uberdev_dispatch_one|uberdev_dispatch_one.*dry_run=1' \
                                                                          "G17.dry-run-no-dispatch"
 
