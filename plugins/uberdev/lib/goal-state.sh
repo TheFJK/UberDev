@@ -688,6 +688,9 @@ uberdev_goal_get_pr_state() {
 #   $2 = state — state-machine label (e.g. pushed-reviewing / merging / solving)
 #   $3 = ts    — epoch seconds of the transition
 # Tab-separated; `-F'\t'` is the correct parse (a state label never holds a tab).
+# NOTE: goal-<id>-batch-prs.tsv is a DIFFERENT 4-col layout (pr<TAB>issue<TAB>ts<TAB>state —
+# written by uberdev_goal_register_batch_pr); uberdev_goal_batch_has_pr keys on $1
+# (pr is genuinely col 1 there) so the $1==key contract still holds for it.
 
 # _uberdev_goal_ts_in_state FILE KEY STATE [FIRST_WINS]
 # Internal: echo the transition ts (epoch int) for rows matching KEY+STATE,
@@ -695,6 +698,9 @@ uberdev_goal_get_pr_state() {
 # (the review-grace contract — issue #222 B8: the grace clock must run from the
 # FIRST pushed-reviewing transition, never a later re-entry, or `now - seen_ts`
 # never crosses the threshold); the default (last-wins) takes the most recent.
+# Path contract: callers pass a fully-constructed FILE path
+# ($tmpdir/goal-<id>-{pr,issue}-states.tsv) — mirrored by the three public
+# wrappers uberdev_goal_{issue,pr,pr_first}_ts_in_state below.
 _uberdev_goal_ts_in_state() {
   local file="$1" key="$2" state="$3" first="${4:-0}"
   [ -f "$file" ] || { printf '0\n'; return 0; }

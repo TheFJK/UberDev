@@ -162,7 +162,9 @@ fixture_bash_bad="$(mktemp)"
 fixture_bash_safe="$(mktemp)"
 fixture_emit_topic_log_src="$(mktemp)"
 r6_log_tmp="$(mktemp)"
-trap 'rm -f "$fixture_simple" "$fixture_multi" "$fixture_safe" "$fixture_bash_bad" "$fixture_bash_safe" "$fixture_emit_topic_log_src" "$r6_log_tmp"' EXIT
+fixture_cmd_bad="$(mktemp)"
+fixture_cmd_safe="$(mktemp)"
+trap 'rm -f "$fixture_simple" "$fixture_multi" "$fixture_safe" "$fixture_bash_bad" "$fixture_bash_safe" "$fixture_emit_topic_log_src" "$r6_log_tmp" "$fixture_cmd_bad" "$fixture_cmd_safe"' EXIT
 
 # R2 — fixture proof: a synthetic SKILL.md fragment containing the bad shape
 # MUST be detected by the same regex. This is an inside-out check that the
@@ -226,6 +228,39 @@ if grep -qE "$GUARD_REGEX" "$fixture_safe"; then
   FAIL=$((FAIL+1))
 else
   echo "  PASS  R3 the guard regex does NOT false-positive on the safe parameterised shape"
+  PASS=$((PASS+1))
+fi
+
+# R1b.fixture — inverse proof for the R1b command-surface scan (mirrors R2/R3
+# for the SKILL surface). The live R1b above reuses GUARD_REGEX (proven by
+# R2/R3) but its find+flatten loop over commands/*.md is otherwise unexercised;
+# these two fixtures prove the command-surface scan path flags the vulnerable
+# shape and spares the safe parameterised form. Closes the R1b coverage gap
+# (#266 review — pr-test-analyzer).
+cat > "$fixture_cmd_bad" <<'EOF_CMD_BAD'
+# fake command-file awk site — R1b's scan MUST flag this
+mapfile -t conflicted_files < <(git status --porcelain | awk '/^UU / {print $2}')
+EOF_CMD_BAD
+cmd_bad_flat="$(tr '\n' ' ' < "$fixture_cmd_bad")"
+if printf '%s' "$cmd_bad_flat" | grep -qE "$GUARD_REGEX"; then
+  echo "  PASS  R1b.bad the command-surface scan flags a vulnerable awk shape in a command file"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  R1b.bad the command-surface scan no longer flags a vulnerable awk shape"
+  echo "         R1b will silently pass on a regressed commands/*.md."
+  FAIL=$((FAIL+1))
+fi
+cat > "$fixture_cmd_safe" <<'EOF_CMD_SAFE'
+# renderer-safe parameterised command-file awk — R1b's scan must NOT flag this
+mapfile -t conflicted_files < <(git status --porcelain | awk -v c2=2 '/^UU / {print $c2}')
+EOF_CMD_SAFE
+cmd_safe_flat="$(tr '\n' ' ' < "$fixture_cmd_safe")"
+if printf '%s' "$cmd_safe_flat" | grep -qE "$GUARD_REGEX"; then
+  echo "  FAIL  R1b.safe the command-surface scan false-positives on the parameterised \`-v c2=2\` + \$c2 shape"
+  echo "         R1b will red CI on the recommended command-file fix."
+  FAIL=$((FAIL+1))
+else
+  echo "  PASS  R1b.safe the command-surface scan does NOT false-positive on the safe parameterised shape"
   PASS=$((PASS+1))
 fi
 
