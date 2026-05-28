@@ -113,7 +113,7 @@ Single PR titled `feat(cluster): /uberdev:cluster — repo-wide issue similarity
 3. Skill: `plugins/uberdev/skills/cluster-pipeline/SKILL.md` + `cluster_propose.py`
 4. Agent: `plugins/uberdev/agents/issue-similarity-analyzer.md`
 5. Alias registration (5 surfaces): `aliases-sync.sh`, `install-aliases.md`, `uninstall-aliases.md`, `README.md` (alias table + count prose), `tests/aliases.test.sh`
-6. Version bump (8 surfaces): `plugin.json`, `marketplace.json`, `README.md` badge, `CHANGELOG.md` `[0.35.0]` section, `tests/goal.test.sh` G20, `tests/solve-claim.test.sh`, git tag `v0.35.0`, GitHub Release `v0.35.0`
+6. Version bump (8 surfaces): `plugin.json`, `marketplace.json`, `README.md` badge, `CHANGELOG.md` `[0.35.3]` section, `tests/goal.test.sh` G20, `tests/solve-claim.test.sh`, git tag `v0.35.3`, GitHub Release `v0.35.3` (renumbered from 0.35.0 → 0.35.3 at consolidation — collided with main's 0.35.2)
 7. Tests: `tests/cluster.test.sh` + `tests/cluster-pipeline.test.sh`
 8. CI wiring: `.github/workflows/test.yml` registers both test files on ubuntu + windows + (optionally) macos
 
@@ -135,7 +135,7 @@ Single PR titled `feat(cluster): /uberdev:cluster — repo-wide issue similarity
 **Post-push (mandatory):**
 
 - [ ] `/uberdev:review-pr` triggered after push (global CLAUDE.md: "MANDATORY: run `/uberdev:review-pr` after pushing the PR. No exceptions.")
-- [ ] On GREEN trust signal: tag `v0.35.0`, `gh release create v0.35.0` with CHANGELOG excerpt
+- [ ] On GREEN trust signal: tag `v0.35.3`, `gh release create v0.35.3` with CHANGELOG excerpt
 - [ ] `/merge` invocation remains independent — NOT auto-chained from `/cluster` (memory `feedback_merge_independent`)
 
 **Manual verification post-merge:**
