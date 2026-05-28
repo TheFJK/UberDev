@@ -585,12 +585,19 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/cluster-pipeline/cluster_propose.py" \
   < "$RUN_DIR/clusters-filtered.json" > "$RUN_DIR/proposals.md"
 
 # CLUSTERS drives the DISPATCH contract the orchestrator reads. A crashed or
-# partial Phase-4 aggregation (above) leaves clusters-filtered.json missing or
-# malformed; the old `2>/dev/null || echo 0` masked that as CLUSTERS=0, which the
-# orchestrator cannot tell apart from a legitimate empty run. Hard-fail instead.
-# (A genuinely empty run still emits valid `[]`, so jq succeeds with CLUSTERS=0.)
-if ! CLUSTERS_N="$(jq 'length' "$RUN_DIR/clusters-filtered.json")"; then
-  echo "cluster: FATAL - cannot read cluster count from $RUN_DIR/clusters-filtered.json (Phase 4 aggregation produced no valid JSON); aborting instead of dispatching CLUSTERS=0" >&2
+# partial Phase-4 aggregation (above) leaves clusters-filtered.json missing,
+# zero-byte (the `>` redirect truncates it to 0 bytes BEFORE python3 writes, so
+# any crash before the final print leaves exactly an empty file), malformed, or
+# a non-array JSON value. The old `2>/dev/null || echo 0` masked every one of
+# these as CLUSTERS=0, which the orchestrator cannot tell apart from a
+# legitimate empty run. Require a non-empty, valid JSON *array* and hard-fail
+# otherwise. Note `jq 'length'` on a 0-byte file exits 0 with empty output, so
+# the `-s` guard (not jq's rc) is what distinguishes "crashed to 0 bytes" from a
+# genuine empty run — which still writes valid `[]`, yielding CLUSTERS=0 and a
+# normal dispatch.
+if [ ! -s "$RUN_DIR/clusters-filtered.json" ] \
+   || ! CLUSTERS_N="$(jq 'if type == "array" then length else error("clusters-filtered.json is not a JSON array") end' "$RUN_DIR/clusters-filtered.json")"; then
+  echo "cluster: FATAL - cannot read a cluster count (non-empty JSON array) from $RUN_DIR/clusters-filtered.json (Phase 4 aggregation crashed or produced no valid JSON array); aborting instead of dispatching CLUSTERS=0" >&2
   exit 2
 fi
 echo "DISPATCH: phase=propose PROPOSALS=$RUN_DIR/proposals.md CLUSTERS=$CLUSTERS_N"

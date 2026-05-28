@@ -618,62 +618,77 @@ fi
 # P16 — Phase 4 dispatch hard-fails on unreadable clusters-filtered.json (#263).
 # ============================================================================
 #
-# (Numbering note: P13/P14/P15 arrive on feat/247 via the sibling test PRs
-# #260/#261/#262; this gate takes P16 so those in-flight PRs need not renumber.)
+# Numbering: P13-P15 are added by separate cluster test work on feat/247 (the
+# Phase 4/5 + Phase 3.5 gates, originally PRs #260/#261/#262); this discrete fix
+# for #263 takes P16 to avoid colliding with them. If those gates are absent,
+# P16 simply follows P12 with a numbering gap — harmless.
 #
-# Mirrors the CLUSTERS_N gate at SKILL.md:592-596 VERBATIM (keep in lockstep).
-# A crashed or partial Phase-4 aggregation (the python3 at SKILL.md:559) leaves
-# clusters-filtered.json missing or malformed. The fence MUST abort — rc!=0,
-# FATAL on stderr, NO DISPATCH line — rather than mask the breakage as
-# CLUSTERS=0, which the orchestrator cannot tell apart from a legitimate empty
-# run. Conversely a genuinely empty run still emits valid `[]`, so the fence
-# proceeds with CLUSTERS=0. This gate locks all four cases. Run in a subshell
-# so the production `exit 2` is catchable as the function's return code.
-echo "== P16 Phase 4 hard-fails on unreadable clusters JSON; proceeds on valid/empty"
+# Mirrors the CLUSTERS_N gate at SKILL.md:598-603 VERBATIM (modulo the 4-space
+# subshell indent; the BEGIN/END markers below delimit the byte-identical copy —
+# keep in lockstep). A crashed or partial Phase-4 aggregation (the python3 at
+# SKILL.md:559, whose `>` redirect truncates clusters-filtered.json to 0 bytes
+# BEFORE python writes) can leave the file missing, zero-byte, malformed, or a
+# non-array value. The fence MUST abort — rc!=0, FATAL on stderr, NO DISPATCH
+# line — rather than mask the breakage as CLUSTERS=0, which the orchestrator
+# cannot tell apart from a legitimate empty run. A genuinely empty run still
+# writes valid `[]`, so the fence proceeds with CLUSTERS=0. This gate locks all
+# six cases. Run in a subshell so the production `exit 2` is catchable as the
+# function's return code.
+echo "== P16 Phase 4 hard-fails on unreadable/zero-byte/non-array clusters JSON; proceeds on valid/empty"
 P16_DIR="$STAGE/p16"
 
 p16_fence() {
   ( set -u
     RUN_DIR="$1"
-    # --- BEGIN verbatim SKILL.md:592-596 ---
-    if ! CLUSTERS_N="$(jq 'length' "$RUN_DIR/clusters-filtered.json")"; then
-      echo "cluster: FATAL - cannot read cluster count from $RUN_DIR/clusters-filtered.json (Phase 4 aggregation produced no valid JSON); aborting instead of dispatching CLUSTERS=0" >&2
+    # --- BEGIN verbatim SKILL.md:598-603 ---
+    if [ ! -s "$RUN_DIR/clusters-filtered.json" ] \
+       || ! CLUSTERS_N="$(jq 'if type == "array" then length else error("clusters-filtered.json is not a JSON array") end' "$RUN_DIR/clusters-filtered.json")"; then
+      echo "cluster: FATAL - cannot read a cluster count (non-empty JSON array) from $RUN_DIR/clusters-filtered.json (Phase 4 aggregation crashed or produced no valid JSON array); aborting instead of dispatching CLUSTERS=0" >&2
       exit 2
     fi
     echo "DISPATCH: phase=propose PROPOSALS=$RUN_DIR/proposals.md CLUSTERS=$CLUSTERS_N"
-    # --- END verbatim SKILL.md:592-596 ---
+    # --- END verbatim SKILL.md:598-603 ---
   )
 }
 
 p16_ok=1
 
-# (a) missing file -> hard-fail (rc!=0), no DISPATCH leak, FATAL on stderr
-mkdir -p "$P16_DIR/missing"
-p16_out="$(p16_fence "$P16_DIR/missing" 2>"$P16_DIR/missing.err")"; p16_rc=$?
-[ "$p16_rc" -ne 0 ]                       || { echo "  .. missing: expected rc!=0, got 0"; p16_ok=0; }
-[ -z "$p16_out" ]                         || { echo "  .. missing: leaked DISPATCH '$p16_out'"; p16_ok=0; }
-grep -qF 'FATAL' "$P16_DIR/missing.err"   || { echo "  .. missing: no FATAL on stderr"; p16_ok=0; }
+# Hard-fail cases: each must abort (rc!=0), leak NO DISPATCH line, and emit FATAL.
+p16_assert_hardfail() {  # $1=label  $2=run_dir
+  local out rc
+  out="$(p16_fence "$2" 2>"$P16_DIR/$1.err")"; rc=$?
+  [ "$rc" -ne 0 ]                    || { echo "  .. $1: expected rc!=0, got 0"; p16_ok=0; }
+  [ -z "$out" ]                      || { echo "  .. $1: leaked DISPATCH '$out'"; p16_ok=0; }
+  grep -qF 'FATAL' "$P16_DIR/$1.err" || { echo "  .. $1: no FATAL on stderr"; p16_ok=0; }
+}
+# Proceed cases: rc=0 and CLUSTERS=<expected> ($-anchored so CLUSTERS=2 != CLUSTERS=20).
+p16_assert_proceed() {   # $1=label  $2=run_dir  $3=expected_count
+  local out rc
+  out="$(p16_fence "$2" 2>/dev/null)"; rc=$?
+  [ "$rc" -eq 0 ]                              || { echo "  .. $1: expected rc=0, got $rc"; p16_ok=0; }
+  printf '%s' "$out" | grep -qE "CLUSTERS=$3\$" || { echo "  .. $1: missing CLUSTERS=$3 ('$out')"; p16_ok=0; }
+}
 
-# (b) malformed JSON (partial/crashed aggregation) -> hard-fail, no DISPATCH leak
-mkdir -p "$P16_DIR/bad"; printf '{ not json' > "$P16_DIR/bad/clusters-filtered.json"
-p16_out="$(p16_fence "$P16_DIR/bad" 2>/dev/null)"; p16_rc=$?
-[ "$p16_rc" -ne 0 ]                       || { echo "  .. malformed: expected rc!=0, got 0"; p16_ok=0; }
-[ -z "$p16_out" ]                         || { echo "  .. malformed: leaked DISPATCH '$p16_out'"; p16_ok=0; }
-
-# (c) valid JSON (2 clusters) -> proceed, CLUSTERS=2, rc=0
-mkdir -p "$P16_DIR/ok"; printf '[{"lead":225,"members":[225,226]},{"lead":300,"members":[300]}]' > "$P16_DIR/ok/clusters-filtered.json"
-p16_out="$(p16_fence "$P16_DIR/ok" 2>/dev/null)"; p16_rc=$?
-[ "$p16_rc" -eq 0 ]                                  || { echo "  .. valid: expected rc=0, got $p16_rc"; p16_ok=0; }
-printf '%s' "$p16_out" | grep -qF 'CLUSTERS=2'       || { echo "  .. valid: missing CLUSTERS=2 ('$p16_out')"; p16_ok=0; }
-
-# (d) legitimate empty run ([]) -> proceed, CLUSTERS=0 NOT masked, rc=0
-mkdir -p "$P16_DIR/empty"; printf '[]' > "$P16_DIR/empty/clusters-filtered.json"
-p16_out="$(p16_fence "$P16_DIR/empty" 2>/dev/null)"; p16_rc=$?
-[ "$p16_rc" -eq 0 ]                                  || { echo "  .. empty: expected rc=0, got $p16_rc"; p16_ok=0; }
-printf '%s' "$p16_out" | grep -qF 'CLUSTERS=0'       || { echo "  .. empty: missing CLUSTERS=0 ('$p16_out')"; p16_ok=0; }
+# (a) missing file             -> hard-fail
+mkdir -p "$P16_DIR/missing";                                                       p16_assert_hardfail missing "$P16_DIR/missing"
+# (b) zero-byte file           -> hard-fail (#264 review: `jq length` on 0 bytes exits 0 with empty
+#                                 output, so the `-s` guard — not jq's rc — must catch it; this is the
+#                                 likeliest crash artifact since `>` truncates before python writes)
+mkdir -p "$P16_DIR/zero";    : > "$P16_DIR/zero/clusters-filtered.json";           p16_assert_hardfail zero "$P16_DIR/zero"
+# (c) malformed JSON           -> hard-fail (jq parse error)
+mkdir -p "$P16_DIR/bad";     printf '{ not json' > "$P16_DIR/bad/clusters-filtered.json";   p16_assert_hardfail bad "$P16_DIR/bad"
+# (d) valid JSON, non-array {} -> hard-fail (#264 review: `jq length` on an object returns a bogus
+#                                 key-count rc=0; the type=="array" guard rejects it)
+mkdir -p "$P16_DIR/obj";     printf '{}'         > "$P16_DIR/obj/clusters-filtered.json";    p16_assert_hardfail obj "$P16_DIR/obj"
+# (e) valid array (2 clusters) -> proceed, CLUSTERS=2
+mkdir -p "$P16_DIR/two";     printf '[{"lead":225,"members":[225,226]},{"lead":300,"members":[300]}]' > "$P16_DIR/two/clusters-filtered.json"
+p16_assert_proceed two "$P16_DIR/two" 2
+# (f) legitimate empty run [] -> proceed, CLUSTERS=0 (NOT masked)
+mkdir -p "$P16_DIR/empty";   printf '[]'         > "$P16_DIR/empty/clusters-filtered.json"
+p16_assert_proceed empty "$P16_DIR/empty" 0
 
 if [ "$p16_ok" = "1" ]; then
-  echo "  PASS  P16 hard-fail on missing/malformed; proceed on valid([2])/empty([])"
+  echo "  PASS  P16 hard-fail on missing/zero-byte/malformed/non-array; proceed on valid([2])/empty([])"
   PASS=$((PASS+1))
 else
   echo "  FAIL  P16 Phase 4 dispatch hard-fail contract violated"
