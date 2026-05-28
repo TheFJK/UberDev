@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/cluster-pipeline.test.sh — behavioral gates for /uberdev:cluster (issue #247).
 #
-# 14 gates P1-P14 that exercise the actual SKILL.md bash bodies +
+# 17 gates P1-P17 that exercise the actual SKILL.md bash bodies +
 # cluster_propose.py runtime behavior. Uses mock-gh (PATH override pattern
 # borrowed from tests/findings-to-issues.test.sh:51-72) + python3 + mktemp + jq.
 #
@@ -918,6 +918,262 @@ if [ "$P14_OK" = "1" ]; then
   echo "  PASS  P14 fold-append wrote marker + Folded children + member list"
   PASS=$((PASS+1))
 else
+  FAIL=$((FAIL+1))
+fi
+
+# ============================================================================
+# P15 — Phase 3.5 SKIPS cross-chunk meta-pass when TOTAL_ISSUES < 2*CHUNK_SIZE.
+# P16 — Phase 3.5 EXECUTES cross-chunk meta-pass when TOTAL_ISSUES > 2*CHUNK_SIZE.
+# P17 — Phase 3.5 EXECUTES at the exact boundary TOTAL_ISSUES == 2*CHUNK_SIZE
+#       (catches `-lt` → `-le` mutation that P15 at 10 and P16 at 25 miss).
+# ============================================================================
+#
+# Resolves issue #258: pr-test-analyzer (PR #255) flagged that no gate
+# validated the Phase 3.5 skip condition. A regression in `lt $((2 * CHUNK_SIZE))`
+# would silently run the cross-chunk meta-pass on single-chunk runs (or never
+# at all), producing incorrect cross-chunk analysis without detection. The
+# brief named these gates P16/P17; numbered P15/P16/P17 here for natural
+# continuity after P12 (P17 added in #262 post-impl review).
+#
+# Approach: extract the Phase 3.5 bash fence verbatim from SKILL.md (python
+# regex — sed range with nested fence is brittle because the body contains a
+# python heredoc) into a temp .sh, then drive it with TOTAL_ISSUES=10 and 25
+# in run-state.txt. Observable signal for "meta-pass invocation" is the
+# orchestrator-visible DISPATCH log line plus the artefacts the next stage
+# reads: `$RUN_DIR/all-analyses.json` (the aggregator output) and
+# `$RUN_DIR/dispatches/meta-prompt.md` (the agent-prompt). Skip path leaves
+# both absent; execute path produces both non-empty.
+
+# Extract Phase 3.5 fence body once for both gates.
+PHASE35_FENCE_SH="$STAGE/phase35.sh"
+python3 - "$SKILL_MD" > "$PHASE35_FENCE_SH" 2>"$STAGE/p15-extract.err" <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+m = re.search(
+    r'^## Phase 3\.5 .*?\n```bash\n(.*?)\n```',
+    src,
+    re.DOTALL | re.MULTILINE,
+)
+if not m:
+    print("error: Phase 3.5 bash fence not found in SKILL.md", file=sys.stderr)
+    sys.exit(2)
+sys.stdout.write(m.group(1) + "\n")
+PY
+PHASE35_FENCE_OK=1
+if [ ! -s "$PHASE35_FENCE_SH" ]; then
+  PHASE35_FENCE_OK=0
+fi
+
+# Shared chunk-YAML fixtures emitted by P16 (3 chunks) and P17 (2 chunks).
+# Hoisted to vars so the aggregator-input shape is defined exactly once;
+# `printf '%s\n' "$VAR" > FILE` emits byte-identical YAML to the prior heredoc.
+PHASE35_NONTRIVIAL_CHUNK_YAML='clusters:
+  - lead: 1
+    members: [1, 2]
+    rationale: "stub"
+    confidence: 0.9'
+PHASE35_EMPTY_CHUNK_YAML='clusters: []'
+
+echo "== P15 Phase 3.5 SKIP path (TOTAL_ISSUES=10 < 2*CHUNK_SIZE)"
+
+# Shape check: lock the skip-condition expression in SKILL.md against silent
+# drift. The behavioural gates (P15/P16/P17) cover TOTAL_ISSUES=10, 20, 25;
+# this shape lock is defence-in-depth against operator/threshold drifts that
+# the three sample points might not distinguish under future refactors (e.g.
+# a swap of the `2 * CHUNK_SIZE` operand order, or insertion of an off-by-one
+# constant adjustment that compensates at the sampled points only).
+P15_SHAPE_OK=1
+if ! grep -qE 'TOTAL_ISSUES.*-lt.*2 \* CHUNK_SIZE' "$SKILL_MD"; then
+  echo "  FAIL  P15 SKILL.md Phase 3.5 skip condition (TOTAL_ISSUES -lt 2 * CHUNK_SIZE) drifted"
+  P15_SHAPE_OK=0
+fi
+if [ "$PHASE35_FENCE_OK" = "0" ]; then
+  echo "  FAIL  P15 Phase 3.5 fence extraction failed: $(cat "$STAGE/p15-extract.err" 2>/dev/null)"
+fi
+
+P15_TMPDIR="$STAGE/p15-tmp"
+P15_RUN_ID="p15-skip-test"
+P15_RUN_DIR="$P15_TMPDIR/.uberdev/cluster/$P15_RUN_ID"
+# P15 exercises the SKIP path — Phase 3.5 fence returns before any `analyses/`
+# read, so we don't materialise that subdirectory. `dispatches/` is kept for
+# symmetry with P16/P17 (cheap and documents the run-dir contract).
+mkdir -p "$P15_RUN_DIR/dispatches"
+printf '%s\n' "$P15_RUN_ID" > "$P15_TMPDIR/cluster-active-id.txt"
+cat > "$P15_RUN_DIR/run-state.txt" <<EOF
+RUN_ID=$P15_RUN_ID
+RUN_DIR=$P15_RUN_DIR
+MODE=dryrun
+TOTAL_ISSUES=10
+CHUNK_COUNT=1
+EOF
+
+P15_OUT="$STAGE/p15.out"
+P15_ERR="$STAGE/p15.err"
+P15_RC=0
+if [ "$PHASE35_FENCE_OK" = "1" ]; then
+  (
+    UBERDEV_TMPDIR="$P15_TMPDIR" \
+    CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+    bash "$PHASE35_FENCE_SH"
+  ) > "$P15_OUT" 2> "$P15_ERR"
+  P15_RC=$?
+else
+  P15_RC=99  # fence extraction failed → propagate as failure
+fi
+
+P15_SKIP_LINES=$(grep -c 'phase=meta SKIPPED' "$P15_OUT" 2>/dev/null | tr -d '[:space:]')
+P15_PROMPT_LINES=$(grep -c 'phase=meta prompt=' "$P15_OUT" 2>/dev/null | tr -d '[:space:]')
+P15_META_EXISTS=0
+[ -e "$P15_RUN_DIR/dispatches/meta-prompt.md" ] && P15_META_EXISTS=1
+P15_ANALYSES_EXISTS=0
+[ -e "$P15_RUN_DIR/all-analyses.json" ] && P15_ANALYSES_EXISTS=1
+
+if [ "$P15_SHAPE_OK" = "1" ] && [ "$PHASE35_FENCE_OK" = "1" ] && [ "$P15_RC" = "0" ] && \
+   [ "${P15_SKIP_LINES:-0}" -ge "1" ] && [ "${P15_PROMPT_LINES:-0}" = "0" ] && \
+   [ "$P15_META_EXISTS" = "0" ] && [ "$P15_ANALYSES_EXISTS" = "0" ]; then
+  echo "  PASS  P15 skip path rc=0 SKIPPED-logged no-meta-prompt no-all-analyses"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  P15 shape=$P15_SHAPE_OK fence=$PHASE35_FENCE_OK rc=$P15_RC skip=$P15_SKIP_LINES prompt=$P15_PROMPT_LINES meta=$P15_META_EXISTS analyses=$P15_ANALYSES_EXISTS"
+  [ -s "$P15_OUT" ] && { echo "  -- stdout:"; sed 's/^/     /' "$P15_OUT"; }
+  [ -s "$P15_ERR" ] && { echo "  -- stderr:"; sed 's/^/     /' "$P15_ERR"; }
+  FAIL=$((FAIL+1))
+fi
+
+echo "== P16 Phase 3.5 EXECUTE path (TOTAL_ISSUES=25 >= 2*CHUNK_SIZE)"
+
+# Canonical multi-chunk EXECUTE sample. TOTAL_ISSUES=25 at CHUNK_SIZE=10 yields
+# 3 full chunks (10/10/5), exercising both per-chunk slicing and the
+# cross-chunk meta-pass aggregation that P15's single-chunk SKIP path bypasses.
+# Paired with P17 (boundary TOTAL_ISSUES=20) so the EXECUTE path is verified
+# at the strict-`-gt` interior (25) and at the `-lt` boundary (20).
+P16_TMPDIR="$STAGE/p16-tmp"
+P16_RUN_ID="p16-execute-test"
+P16_RUN_DIR="$P16_TMPDIR/.uberdev/cluster/$P16_RUN_ID"
+mkdir -p "$P16_RUN_DIR/dispatches" "$P16_RUN_DIR/analyses"
+printf '%s\n' "$P16_RUN_ID" > "$P16_TMPDIR/cluster-active-id.txt"
+cat > "$P16_RUN_DIR/run-state.txt" <<EOF
+RUN_ID=$P16_RUN_ID
+RUN_DIR=$P16_RUN_DIR
+MODE=dryrun
+TOTAL_ISSUES=25
+CHUNK_COUNT=3
+EOF
+
+# 25 issues at CHUNK_SIZE=10 → 3 chunks (10/10/5). Emit minimal valid per-chunk
+# YAMLs — the aggregator reads `analyses/*.yaml` and embeds each as a meta-pass
+# envelope. One non-trivial entry ensures all-analyses.json is non-empty.
+printf '%s\n' "$PHASE35_NONTRIVIAL_CHUNK_YAML" > "$P16_RUN_DIR/analyses/chunk-01-clusters.yaml"
+printf '%s\n' "$PHASE35_EMPTY_CHUNK_YAML" > "$P16_RUN_DIR/analyses/chunk-02-clusters.yaml"
+printf '%s\n' "$PHASE35_EMPTY_CHUNK_YAML" > "$P16_RUN_DIR/analyses/chunk-03-clusters.yaml"
+
+P16_OUT="$STAGE/p16.out"
+P16_ERR="$STAGE/p16.err"
+P16_RC=0
+if [ "$PHASE35_FENCE_OK" = "1" ]; then
+  (
+    UBERDEV_TMPDIR="$P16_TMPDIR" \
+    CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+    bash "$PHASE35_FENCE_SH"
+  ) > "$P16_OUT" 2> "$P16_ERR"
+  P16_RC=$?
+else
+  P16_RC=99
+fi
+
+P16_SKIP_LINES=$(grep -c 'phase=meta SKIPPED' "$P16_OUT" 2>/dev/null | tr -d '[:space:]')
+P16_PROMPT_LINES=$(grep -c 'phase=meta prompt=' "$P16_OUT" 2>/dev/null | tr -d '[:space:]')
+P16_META_EXISTS=0
+P16_META_SIZE=0
+if [ -e "$P16_RUN_DIR/dispatches/meta-prompt.md" ]; then
+  P16_META_EXISTS=1
+  P16_META_SIZE=$(wc -c < "$P16_RUN_DIR/dispatches/meta-prompt.md" 2>/dev/null | tr -d '[:space:]')
+fi
+P16_ANALYSES_EXISTS=0
+P16_ANALYSES_SIZE=0
+if [ -e "$P16_RUN_DIR/all-analyses.json" ]; then
+  P16_ANALYSES_EXISTS=1
+  P16_ANALYSES_SIZE=$(wc -c < "$P16_RUN_DIR/all-analyses.json" 2>/dev/null | tr -d '[:space:]')
+fi
+
+if [ "$PHASE35_FENCE_OK" = "1" ] && [ "$P16_RC" = "0" ] && \
+   [ "${P16_SKIP_LINES:-0}" = "0" ] && [ "${P16_PROMPT_LINES:-0}" -ge "1" ] && \
+   [ "$P16_META_EXISTS" = "1" ] && [ "${P16_META_SIZE:-0}" -gt 0 ] && \
+   [ "$P16_ANALYSES_EXISTS" = "1" ] && [ "${P16_ANALYSES_SIZE:-0}" -gt 0 ]; then
+  echo "  PASS  P16 execute path rc=0 prompt-logged meta-prompt=${P16_META_SIZE}B all-analyses=${P16_ANALYSES_SIZE}B"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  P16 fence=$PHASE35_FENCE_OK rc=$P16_RC skip=$P16_SKIP_LINES prompt=$P16_PROMPT_LINES meta=$P16_META_EXISTS meta_size=$P16_META_SIZE analyses=$P16_ANALYSES_EXISTS analyses_size=$P16_ANALYSES_SIZE"
+  [ -s "$P16_OUT" ] && { echo "  -- stdout:"; sed 's/^/     /' "$P16_OUT"; }
+  [ -s "$P16_ERR" ] && { echo "  -- stderr:"; sed 's/^/     /' "$P16_ERR"; }
+  FAIL=$((FAIL+1))
+fi
+
+echo "== P17 Phase 3.5 EXECUTE path at exact boundary (TOTAL_ISSUES=20 == 2*CHUNK_SIZE)"
+
+# Boundary gate — defends against `-lt` → `-le` mutation. With strict `-lt`,
+# `20 -lt 20` = false → EXECUTE path (this gate passes). Under a `-le`
+# mutation, `20 -le 20` = true → SKIP path → no DISPATCH prompt line, no
+# meta-prompt.md, no all-analyses.json → this gate fails (correctly catching
+# the mutation that P15 at 10 and P16 at 25 both miss).
+P17_TMPDIR="$STAGE/p17-tmp"
+P17_RUN_ID="p17-boundary-test"
+P17_RUN_DIR="$P17_TMPDIR/.uberdev/cluster/$P17_RUN_ID"
+mkdir -p "$P17_RUN_DIR/dispatches" "$P17_RUN_DIR/analyses"
+printf '%s\n' "$P17_RUN_ID" > "$P17_TMPDIR/cluster-active-id.txt"
+cat > "$P17_RUN_DIR/run-state.txt" <<EOF
+RUN_ID=$P17_RUN_ID
+RUN_DIR=$P17_RUN_DIR
+MODE=dryrun
+TOTAL_ISSUES=20
+CHUNK_COUNT=2
+EOF
+
+# 20 issues at CHUNK_SIZE=10 → 2 chunks (10/10). Emit minimal valid per-chunk
+# YAMLs for the aggregator. One non-trivial entry ensures all-analyses.json
+# is non-empty.
+printf '%s\n' "$PHASE35_NONTRIVIAL_CHUNK_YAML" > "$P17_RUN_DIR/analyses/chunk-01-clusters.yaml"
+printf '%s\n' "$PHASE35_EMPTY_CHUNK_YAML" > "$P17_RUN_DIR/analyses/chunk-02-clusters.yaml"
+
+P17_OUT="$STAGE/p17.out"
+P17_ERR="$STAGE/p17.err"
+P17_RC=0
+if [ "$PHASE35_FENCE_OK" = "1" ]; then
+  (
+    UBERDEV_TMPDIR="$P17_TMPDIR" \
+    CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+    bash "$PHASE35_FENCE_SH"
+  ) > "$P17_OUT" 2> "$P17_ERR"
+  P17_RC=$?
+else
+  P17_RC=99
+fi
+
+P17_SKIP_LINES=$(grep -c 'phase=meta SKIPPED' "$P17_OUT" 2>/dev/null | tr -d '[:space:]')
+P17_PROMPT_LINES=$(grep -c 'phase=meta prompt=' "$P17_OUT" 2>/dev/null | tr -d '[:space:]')
+P17_META_EXISTS=0
+P17_META_SIZE=0
+if [ -e "$P17_RUN_DIR/dispatches/meta-prompt.md" ]; then
+  P17_META_EXISTS=1
+  P17_META_SIZE=$(wc -c < "$P17_RUN_DIR/dispatches/meta-prompt.md" 2>/dev/null | tr -d '[:space:]')
+fi
+P17_ANALYSES_EXISTS=0
+P17_ANALYSES_SIZE=0
+if [ -e "$P17_RUN_DIR/all-analyses.json" ]; then
+  P17_ANALYSES_EXISTS=1
+  P17_ANALYSES_SIZE=$(wc -c < "$P17_RUN_DIR/all-analyses.json" 2>/dev/null | tr -d '[:space:]')
+fi
+
+if [ "$PHASE35_FENCE_OK" = "1" ] && [ "$P17_RC" = "0" ] && \
+   [ "${P17_SKIP_LINES:-0}" = "0" ] && [ "${P17_PROMPT_LINES:-0}" -ge "1" ] && \
+   [ "$P17_META_EXISTS" = "1" ] && [ "${P17_META_SIZE:-0}" -gt 0 ] && \
+   [ "$P17_ANALYSES_EXISTS" = "1" ] && [ "${P17_ANALYSES_SIZE:-0}" -gt 0 ]; then
+  echo "  PASS  P17 boundary execute path rc=0 prompt-logged meta-prompt=${P17_META_SIZE}B all-analyses=${P17_ANALYSES_SIZE}B"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  P17 fence=$PHASE35_FENCE_OK rc=$P17_RC skip=$P17_SKIP_LINES prompt=$P17_PROMPT_LINES meta=$P17_META_EXISTS meta_size=$P17_META_SIZE analyses=$P17_ANALYSES_EXISTS analyses_size=$P17_ANALYSES_SIZE"
+  [ -s "$P17_OUT" ] && { echo "  -- stdout:"; sed 's/^/     /' "$P17_OUT"; }
+  [ -s "$P17_ERR" ] && { echo "  -- stderr:"; sed 's/^/     /' "$P17_ERR"; }
   FAIL=$((FAIL+1))
 fi
 
