@@ -72,11 +72,8 @@ case "$sub" in
         ;;
       close|edit|comment|reopen)
         # No stdout. Exit code controlled by MOCK_ISSUE_WRITE_RC.
-        # When MOCK_BODY_FILES_DIR is set, copy any --body-file argument's
-        # content into $MOCK_BODY_FILES_DIR/${subsub}-${issue}.txt so the test
-        # can assert on what would have been POSTed to the gh API. Opt-in only;
-        # existing gates that do not set MOCK_BODY_FILES_DIR see no behavior
-        # change.
+        # Opt-in body-file capture: when MOCK_BODY_FILES_DIR is set, write the
+        # --body-file content to $MOCK_BODY_FILES_DIR/${subsub}-${issue}.txt.
         if [ -n "${MOCK_BODY_FILES_DIR:-}" ]; then
           mock_issue_num="${1:-}"
           shift || true
@@ -686,11 +683,9 @@ P13_LEAD_NEW_FILE="$(mktemp)"
 
 # Snapshot the body content before the gh call (the production code rm -f's
 # the file immediately after gh returns; mock-gh's body-file capture is a
-# belt-and-braces second channel). The file snapshot preserves trailing
-# newlines; P13_NEW_BODY (via $(cat …)) does not — used only for grep checks.
+# belt-and-braces second channel).
 P13_SNAPSHOT="$STAGE/p13-snapshot.txt"
 cp "$P13_LEAD_NEW_FILE" "$P13_SNAPSHOT"
-P13_NEW_BODY="$(cat "$P13_LEAD_NEW_FILE")"
 
 if gh issue edit "$P13_LEAD" --repo "$P13_REPO_SLUG" --body-file "$P13_LEAD_NEW_FILE"; then
   P13_GH_RC=0
@@ -707,24 +702,24 @@ if ! grep -qE "^gh issue edit ${P13_LEAD} --repo ${P13_REPO_SLUG} --body-file " 
   P13_OK=0
 fi
 # (b) HTML-comment marker present with our fingerprint.
-if ! printf '%s' "$P13_NEW_BODY" | grep -qF "<!-- uberdev:cluster-fold lead=${P13_LEAD} members=${P13_MEMBERS_CSV} fingerprint=${P13_FP} -->"; then
+if ! grep -qF -- "<!-- uberdev:cluster-fold lead=${P13_LEAD} members=${P13_MEMBERS_CSV} fingerprint=${P13_FP} -->" "$P13_SNAPSHOT"; then
   echo "  FAIL  P13 (b) body missing HTML-comment fold marker"
   P13_OK=0
 fi
 # (c) "## Folded children" section heading present.
-if ! printf '%s' "$P13_NEW_BODY" | grep -qF '## Folded children'; then
+if ! grep -qF -- '## Folded children' "$P13_SNAPSHOT"; then
   echo "  FAIL  P13 (c) body missing '## Folded children' section heading"
   P13_OK=0
 fi
 # (d) each member listed as `- #N`.
 for M in 225 226; do
-  if ! printf '%s' "$P13_NEW_BODY" | grep -qE "^- #${M}$"; then
+  if ! grep -qE -- "^- #${M}$" "$P13_SNAPSHOT"; then
     echo "  FAIL  P13 (d) body missing member listing '- #${M}'"
     P13_OK=0
   fi
 done
 # (e) original lead body preserved at the top.
-if ! printf '%s' "$P13_NEW_BODY" | grep -qF 'Original lead body content.'; then
+if ! grep -qF -- 'Original lead body content.' "$P13_SNAPSHOT"; then
   echo "  FAIL  P13 (e) original lead body content was clobbered"
   P13_OK=0
 fi
@@ -738,7 +733,7 @@ P13_CAPTURED="$P13_BODIES_DIR/edit-${P13_LEAD}.txt"
 if [ ! -r "$P13_CAPTURED" ]; then
   echo "  FAIL  P13 (g) mock-gh did not capture --body-file content to $P13_CAPTURED"
   P13_OK=0
-elif ! diff -q "$P13_SNAPSHOT" "$P13_CAPTURED" >/dev/null 2>&1; then
+elif ! cmp -s "$P13_SNAPSHOT" "$P13_CAPTURED"; then
   echo "  FAIL  P13 (g) mock-gh body-file capture differs from on-disk content"
   P13_OK=0
 fi
