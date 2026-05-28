@@ -4,6 +4,19 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.0] — 2026-05-28
+
+### Added
+- `/uberdev:cluster` (short alias `/ubercluster`) — repo-wide issue similarity
+  analyzer and fold-into-lead consolidator. Reduces /goal multi-issue run cost
+  by collapsing semantically duplicate finding-issues before /turbo dispatch.
+  Three-layer decomposition: `commands/cluster.md` (thin) →
+  `skills/cluster-pipeline/SKILL.md` (6-phase directive-emitter) →
+  `agents/issue-similarity-analyzer.md` (Sonnet, read-only). Hard `--min-confidence 0.85`
+  floor under `--execute`; idempotent via HTML-comment marker + `folded` label
+  + per-run JSONL ledger. RFC 0010. Closes #247.
+
+
 ## [0.34.13] — 2026-05-28
 
 ### Fixed
