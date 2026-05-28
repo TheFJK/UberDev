@@ -5,7 +5,7 @@
 # (docs/uberdev/plans/2026-05-21-uberdev-goal.md §Task 4):
 #   G1   commands/goal.md + skills/goal-pipeline/SKILL.md frontmatter
 #   G2   PR state machine enum (8 states)
-#   G3   Issue state machine enum (6 states — `dispatched` pre-spawn guard added in #236)
+#   G3   Issue state machine enum (7 states — `dispatched` pre-spawn guard #236; `resolved-by-no-action` close-without-PR #249)
 #   G4   Trust-signal handling (GREEN dispatches merge, YELLOW=critical,
 #        RED=blocker, stale via phase2_5)
 #   G5   Blocker-unblock chain (Blocks: #N regex, held states,
@@ -15,7 +15,7 @@
 #   G8   Circuit breaker: stuck_loop (4h wall-clock)
 #   G9   Circuit breaker: merge_failed
 #   G10  Convergence happy-path (goal_converged + exit 0)
-#   G11  All 6 audit events present
+#   G11  All 12 audit events present
 #   G12  Alias provisioning across 5 surfaces (T5 — see notes)
 #   G13  claim_collision soft-fail
 #   G14  Blocker overflow (red-held + first-10 truncation, no goal halt)
@@ -93,12 +93,14 @@ echo "== G2 + G3: state machine enums =="
 assert_grep "$GOAL_SKILL" \
   'dispatched\|pushed-reviewing\|green\|yellow-held\|red-held\|merging\|merged\|merge-failed' \
   "G2.pr-state-machine"
-# 6-state issue machine: all 6 names appear in the enum constant on a single line.
+# 7-state issue machine: all 7 names appear in the enum constant on a single line.
 # `dispatched` is the pre-spawn guard state added in #236 to close the
 # leaf-crash-pre-state-write double-spawn surface (see G24b for the Phase-1
 # integration and BT80-BT82 for the behavioural coverage).
+# `resolved-by-no-action` is the orchestrator-closed-without-PR state added in
+# #249 (see BT84/BT85 for the behavioural coverage).
 assert_grep "$GOAL_SKILL" \
-  'input\|dispatched\|solving\|pr-pushed\|resolved\|failed' \
+  'input\|dispatched\|solving\|pr-pushed\|resolved\|resolved-by-no-action\|failed' \
   "G3.issue-state-machine"
 
 echo
@@ -160,11 +162,11 @@ assert_grep "$GOAL_SKILL" 'queue.*empty|new_candidates'   "G10.empty-queue-predi
 assert_grep "$GOAL_SKILL" 'exit 0'                        "G10.zero-exit"
 
 echo
-echo "== G11: all 6 audit events present =="
+echo "== G11: all 12 audit events present =="
 for e in goal_dispatched goal_pr_transition goal_unblock_triggered \
          goal_cycle_completed goal_converged goal_circuit_breaker \
          goal_merge_deferred goal_review_pr_deferred goal_review_grace \
-         goal_reaper_kill goal_reaper_skipped; do
+         goal_reaper_kill goal_reaper_skipped goal_issue_closed_without_pr; do
   assert_grep "$GOAL_SKILL" "$e" "G11.${e}"
 done
 
@@ -294,11 +296,11 @@ assert_no_grep "$GOAL_LIB" '\bbash -c'                                   "G19.no
 assert_grep "$GOAL_CMD" '--i-know-what-im-doing'                         "G19.r12-mentioned-once"
 
 echo
-echo "== G20: version bump locked (0.34.11) =="
-assert_grep "$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json" '"version": "0\.34\.11"'  "G20.plugin-json"
-assert_grep "$REPO_ROOT/.claude-plugin/marketplace.json"            '"version": "0\.34\.11"'  "G20.marketplace-json"
-assert_grep "$REPO_ROOT/README.md"                                  'version-0\.34\.11-blue'  "G20.readme-badge"
-assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.34\.11\]'        "G20.changelog"
+echo "== G20: version bump locked (0.34.12) =="
+assert_grep "$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json" '"version": "0\.34\.12"'  "G20.plugin-json"
+assert_grep "$REPO_ROOT/.claude-plugin/marketplace.json"            '"version": "0\.34\.12"'  "G20.marketplace-json"
+assert_grep "$REPO_ROOT/README.md"                                  'version-0\.34\.12-blue'  "G20.readme-badge"
+assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.34\.12\]'        "G20.changelog"
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
 
 assert_grep "$GOAL_SKILL" 'uberdev_dispatch_resolve_env'  "G20b.phase0-wires-resolve-env (#175 SSOT anchor)"
@@ -381,10 +383,10 @@ echo "== G24b: Phase 1 writes 'dispatched' PRE-spawn + extended skip-check (issu
 # so a leaf crash between spawn and the post-spawn solving write cannot produce
 # a double-spawn on the next cycle. Skip-check must include `dispatched`.
 # Enum constant must include `dispatched` (grep -F literal — `|` is grep alternation under -E).
-if grep -qF "GOAL_ISSUE_STATE_ENUM='input|dispatched|solving|pr-pushed|resolved|failed'" "$GOAL_SKILL"; then
-  PASS=$((PASS+1)); echo "  PASS  G24b.enum-includes-dispatched"
+if grep -qF "GOAL_ISSUE_STATE_ENUM='input|dispatched|solving|pr-pushed|resolved|resolved-by-no-action|failed'" "$GOAL_SKILL"; then
+  PASS=$((PASS+1)); echo "  PASS  G24b.enum-includes-dispatched-and-resolved-by-no-action"
 else
-  FAIL=$((FAIL+1)); echo "  FAIL  G24b.enum-includes-dispatched (literal enum string not found in SKILL.md)" >&2
+  FAIL=$((FAIL+1)); echo "  FAIL  G24b.enum-includes-dispatched-and-resolved-by-no-action (literal enum string not found in SKILL.md)" >&2
 fi
 # Skip-check matches all three pre-resolved in-flight states (literal alternation in case-arm).
 if grep -qF 'dispatched|solving|pr-pushed) continue' "$GOAL_SKILL"; then
@@ -548,6 +550,22 @@ assert_grep "$GOAL_SKILL" \
 assert_no_grep "$GOAL_SKILL" \
   'printf.*Invoke the slash command /uberdev:turbo' \
   "G38.goal-phase-1-no-turbo-wrapper-dispatch"
+
+echo
+echo "== G39: Phase 2 step 2a probes gh issue state inside else-no-agent branch (issue #249) =="
+# Issue #249 — lock the probe SHAPE in the right control-flow position.
+# Both BT84/BT85 cover the helpers in isolation; G39 covers the SKILL.md probe
+# call-site, so a future refactor that removes the probe block entirely would
+# trip this grep guard (BT84/BT85 would still pass — they test the helpers).
+assert_grep "$GOAL_SKILL" 'gh issue view "\$issue" --json state --jq' \
+  "G39.probe-line-present"
+assert_grep "$GOAL_SKILL" '\[ "\$issue_state" = "CLOSED" \]' \
+  "G39.uppercase-CLOSED-check"
+assert_grep "$GOAL_SKILL" 'uberdev_goal_issue_state_transition "\$GOAL_ID" "\$issue" solving resolved-by-no-action' \
+  "G39.transition-arc-call-site"
+assert_grep "$GOAL_SKILL" 'uberdev_goal_audit goal_issue_closed_without_pr' \
+  "G39.audit-event-emitted"
+# See BT84/BT85 below for the behavioural complement.
 
 echo
 echo "== Behavioral tests (B12 — sourced-function exercises) =="
@@ -2788,6 +2806,86 @@ else
 fi
 unset ISSUE_NUM PROMPT_FILE
 
+echo "== BT84: new 'solving->resolved-by-no-action' valid arc (issue #249) =="
+# Issue #249 — orchestrator can legitimately close an issue without producing
+# a PR. The new `solving->resolved-by-no-action` arc is the terminal state for
+# that path. Test the full setup chain (input->dispatched->solving) then verify
+# the new arc returns rc=0 and the TSV row reflects the new state.
+# Negative control: the previously-rejected `solving->resolved` direct arc
+# must STILL return rc=2 (regression guard against silent broadening of the
+# case-arm pattern).
+# IMPORTANT: this block must NOT be wrapped in a (...) subshell — assert_rc/eq
+# modify the parent's PASS/FAIL counters; a subshell would isolate those
+# increments and the final `[[ $FAIL -eq 0 ]]` gate would not catch BT84
+# regressions. See /review-pr 251 finding SF-007 + 251-G-03 for the empirical
+# 460-vs-455 PASS-line delta that confirmed the lost counter increments.
+_bt84_tmpdir="$_b12_tmpdir/goal-test-bt84"
+mkdir -p "$_bt84_tmpdir"
+UBERDEV_TMPDIR="$_bt84_tmpdir" bash -c '
+  set +e
+  . "'"$REPO_ROOT"'/plugins/uberdev/lib/goal-state.sh"
+  uberdev_goal_state_init "bt84" >/dev/null
+  uberdev_goal_issue_state_transition "bt84" 900 input dispatched >/dev/null
+  echo "rc_a=$?"
+  uberdev_goal_issue_state_transition "bt84" 900 dispatched solving >/dev/null
+  echo "rc_b=$?"
+  uberdev_goal_issue_state_transition "bt84" 900 solving resolved-by-no-action >/dev/null
+  echo "rc_c=$?"
+  # Negative control on a fresh issue 901 — the direct solving->resolved arc
+  # must STILL be rejected (resolved is reached via pr-pushed; resolved-by-no-action
+  # is the alternative).
+  uberdev_goal_issue_state_transition "bt84" 901 input dispatched >/dev/null
+  uberdev_goal_issue_state_transition "bt84" 901 dispatched solving >/dev/null
+  uberdev_goal_issue_state_transition "bt84" 901 solving resolved 2>/dev/null
+  echo "rc_e=$?"
+' > "$_bt84_tmpdir/bt84-out.txt" 2>&1
+_bt84_rc_a="$(grep -oE 'rc_a=[0-9]+' "$_bt84_tmpdir/bt84-out.txt" | head -1 | cut -d= -f2)"
+_bt84_rc_b="$(grep -oE 'rc_b=[0-9]+' "$_bt84_tmpdir/bt84-out.txt" | head -1 | cut -d= -f2)"
+_bt84_rc_c="$(grep -oE 'rc_c=[0-9]+' "$_bt84_tmpdir/bt84-out.txt" | head -1 | cut -d= -f2)"
+_bt84_rc_e="$(grep -oE 'rc_e=[0-9]+' "$_bt84_tmpdir/bt84-out.txt" | head -1 | cut -d= -f2)"
+_bt84_state="$(awk -v i=900 -v c1=1 -v c2=2 '$c1==i{s=$c2} END{print s}' \
+  "$_bt84_tmpdir/goal-bt84-issue-states.tsv" 2>/dev/null)"
+assert_rc "$_bt84_rc_a" "0" "BT84.a-input-to-dispatched-setup"
+assert_rc "$_bt84_rc_b" "0" "BT84.b-dispatched-to-solving-setup"
+assert_rc "$_bt84_rc_c" "0" "BT84.c-solving-to-resolved-by-no-action"
+assert_eq "$_bt84_state" "resolved-by-no-action" "BT84.d-tsv-state-is-resolved-by-no-action"
+assert_rc "$_bt84_rc_e" "2" "BT84.e-existing-solving-to-resolved-still-rejected"
+
+echo "== BT85: uberdev_goal_audit emits goal_issue_closed_without_pr JSONL row (issue #249) =="
+# Issue #249 — the new audit event must be accepted by uberdev_goal_audit's
+# enum case-arm and produce a JSONL row with a numeric `issue` field. A future
+# rename / typo in the case-arm would silently rc=1 and the event would be
+# dropped on the floor (helper returns non-zero, payload not persisted).
+# NOTE: uberdev_goal_audit reads goal_id from UBERDEV_GOAL_ID env (not arg) and
+# writes to "$UBERDEV_TMPDIR/goal-$UBERDEV_GOAL_ID.jsonl" — so both must be set.
+_bt85_tmpdir="$_b12_tmpdir/goal-test-bt85"
+mkdir -p "$_bt85_tmpdir"
+UBERDEV_TMPDIR="$_bt85_tmpdir" UBERDEV_GOAL_ID="bt85" bash -c '
+  set +e
+  . "'"$REPO_ROOT"'/plugins/uberdev/lib/goal-state.sh"
+  uberdev_goal_state_init "$UBERDEV_GOAL_ID" >/dev/null
+  uberdev_goal_audit goal_issue_closed_without_pr \
+    "{\"goal_id\":\"bt85\",\"issue\":1000,\"detected_at\":1234567890}" >/dev/null
+  echo "audit_rc=$?"
+  uberdev_goal_audit goal_does_not_exist "{}" 2>/dev/null
+  echo "neg_rc=$?"
+' > "$_bt85_tmpdir/bt85-out.txt" 2>&1
+_bt85_audit_rc="$(grep -oE 'audit_rc=[0-9]+' "$_bt85_tmpdir/bt85-out.txt" | head -1 | cut -d= -f2)"
+_bt85_neg_rc="$(grep -oE 'neg_rc=[0-9]+' "$_bt85_tmpdir/bt85-out.txt" | head -1 | cut -d= -f2)"
+assert_rc "$_bt85_audit_rc" "0" "BT85.a-uberdev_goal_audit-returns-zero"
+_bt85_audit="$_bt85_tmpdir/goal-bt85.jsonl"
+if grep -q '"event":"goal_issue_closed_without_pr"' "$_bt85_audit" 2>/dev/null; then
+  PASS=$((PASS+1)); echo "  PASS  BT85.b-jsonl-row-written-with-event-name"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  BT85.b-jsonl-row-written-with-event-name (event row not found in $_bt85_audit)" >&2
+fi
+if grep -qE '"issue":1000([,}]|$)' "$_bt85_audit" 2>/dev/null; then
+  PASS=$((PASS+1)); echo "  PASS  BT85.c-issue-field-is-numeric-not-quoted"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  BT85.c-issue-field-is-numeric-not-quoted (issue not numeric or row missing)" >&2
+fi
+assert_rc "$_bt85_neg_rc" "1" "BT85.d-unknown-event-still-rejected"
+
 # Cleanup: remove the isolated tmpdir contents (we created the whole
 # directory via mktemp -d, so we can rm -rf safely — it's our own).
 # The single blanket rm subsumes every per-BT artifact (TSVs, audit
@@ -2805,6 +2903,8 @@ rm -rf "$_b12_tmpdir/goal-test-bt80"* 2>/dev/null || true
 rm -rf "$_b12_tmpdir/goal-test-bt81"* 2>/dev/null || true
 rm -rf "$_b12_tmpdir/goal-test-bt82"* 2>/dev/null || true
 rm -f "$_b12_tmpdir"/bt83-prompt-out.txt 2>/dev/null || true
+rm -rf "$_b12_tmpdir/goal-test-bt84"* 2>/dev/null || true
+rm -rf "$_b12_tmpdir/goal-test-bt85"* 2>/dev/null || true
 rm -f "$_b12_tmpdir"/goal-bt5-*-merge-attempts.tsv 2>/dev/null || true
 rm -rf "$_b12_tmpdir" 2>/dev/null || true
 

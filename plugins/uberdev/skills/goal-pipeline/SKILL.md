@@ -16,10 +16,10 @@ This skill is invoked inline by `commands/goal.md`. It reads `$ARGUMENTS` from t
 All audit-event names, state-machine enums, regex shapes, and tunable thresholds are declared here once. Later phases reference these names by symbol; values are NOT re-inlined.
 
 ```
-GOAL_AUDIT_EVENT_ENUM='goal_dispatched|goal_pr_transition|goal_unblock_triggered|goal_cycle_completed|goal_converged|goal_circuit_breaker|goal_merge_deferred|goal_review_pr_deferred|goal_review_grace|goal_reaper_kill|goal_reaper_skipped'
+GOAL_AUDIT_EVENT_ENUM='goal_dispatched|goal_pr_transition|goal_unblock_triggered|goal_cycle_completed|goal_converged|goal_circuit_breaker|goal_merge_deferred|goal_review_pr_deferred|goal_review_grace|goal_reaper_kill|goal_reaper_skipped|goal_issue_closed_without_pr'
 GOAL_CIRCUIT_BREAKER_REASONS='max_cycles|nonconvergence|stuck_loop|merge_failed|gh_api_failed|unknown_merge_result|queue_empty_not_converged|agent_stuck_on_dialog'
 GOAL_PR_STATE_ENUM='dispatched|pushed-reviewing|green|yellow-held|red-held|merging|merged|merge-failed'
-GOAL_ISSUE_STATE_ENUM='input|dispatched|solving|pr-pushed|resolved|failed'
+GOAL_ISSUE_STATE_ENUM='input|dispatched|solving|pr-pushed|resolved|resolved-by-no-action|failed'
 TRUST_SIGNAL_ENUM='green|yellow|red|stale|missing'
 GOAL_MERGE_RESULT_ENUM='success|conflict|hook_failed|missing'
 _UBERDEV_GOAL_DEFAULT_MAX_CYCLES=5
@@ -39,10 +39,10 @@ BLOCKS_LINE_REGEX='^Blocks: #([0-9]+)$'
 
 Notes on the enums:
 
-- **`GOAL_AUDIT_EVENT_ENUM`** — the 11 events `lib/goal-state.sh::uberdev_goal_audit` accepts. Any other event name returns non-zero from the helper and is dropped on the floor; consumers grep these literals.
+- **`GOAL_AUDIT_EVENT_ENUM`** — the 12 events `lib/goal-state.sh::uberdev_goal_audit` accepts. Any other event name returns non-zero from the helper and is dropped on the floor; consumers grep these literals.
 - **`GOAL_CIRCUIT_BREAKER_REASONS`** — the 8 halt reasons emitted by Phase 2/3/4 inside the `goal_circuit_breaker` payload's `.reason` field. The four original reasons (`max_cycles`, `nonconvergence`, `stuck_loop`, `merge_failed`); two surfaced-failure reasons added during post-impl-review (`gh_api_failed` — Phase 3 `gh issue list` rc!=0 instead of falsely treating an empty candidates list as convergence; `unknown_merge_result` — Phase 2d case default arm for a `uberdev_goal_read_merge_result` value outside the documented `success|conflict|hook_failed|missing` set); and `queue_empty_not_converged` — Phase 3 deterministic halt when the candidate queue is empty but at least one PR is still in a non-terminal state (issue #160; deterministic alternative to the 4h `stuck_loop` wall-clock fallback); and `agent_stuck_on_dialog` (issue #220 — Phase 2 stuck-on-dialog detector, see Component 3.4). The set is closed; new reasons require an RFC amendment.
 - **`GOAL_PR_STATE_ENUM`** — the 8 states the PR machine in `_uberdev_goal_pr_state_machine_valid` recognises. `merged` and `merge-failed` are hard terminal (no further transitions); `yellow-held` and `red-held` are pseudo-terminal for convergence (Phase 3 counts them as terminal so the goal can converge cleanly with held PRs remaining, but the held-PR re-review poll loop in Phase 2 step 2e can still arc them to `green` once a re-review clears the findings, or cross-classify between `yellow-held`/`red-held` if a re-review's trust signal severity changed). `yellow-held → merging` and `red-held → merging` are hard-forbidden (D17 — never merge YELLOW/RED inside `/goal`).
-- **`GOAL_ISSUE_STATE_ENUM`** — the 6 states the issue machine recognises. Happy path: `input → dispatched → solving → pr-pushed → resolved`. `dispatched` (issue #236) is written by the parent BEFORE `uberdev_dispatch_one` so any leaf-side crash between spawn and the post-spawn `solving` write still leaves a TSV row the Phase-1 skip-check (`dispatched|solving|pr-pushed`) matches on the next cycle — closes the silent double-spawn surface where a pre-state-write leaf failure looked identical to "never attempted". `pr-pushed → resolved` and the three `→ failed` sinks (`dispatched`, `solving`, `pr-pushed`) are terminal.
+- **`GOAL_ISSUE_STATE_ENUM`** — the 7 states the issue machine recognises. Happy path: `input → dispatched → solving → pr-pushed → resolved`. Close-without-PR path (issue #249): `input → dispatched → solving → resolved-by-no-action` — distinct from `resolved` (which means "PR landed and the issue auto-closed via `Closes #N`"); `resolved-by-no-action` means `/uberdev:orchestrator` legitimately closed the GitHub issue without producing a PR (e.g. stale finding, already-resolved). `dispatched` (issue #236) is written by the parent BEFORE `uberdev_dispatch_one` so any leaf-side crash between spawn and the post-spawn `solving` write still leaves a TSV row the Phase-1 skip-check (`dispatched|solving|pr-pushed`) matches on the next cycle — closes the silent double-spawn surface where a pre-state-write leaf failure looked identical to "never attempted". `pr-pushed → resolved` and the three `→ failed` sinks (`dispatched`, `solving`, `pr-pushed`) are terminal.
 - **`TRUST_SIGNAL_ENUM`** — the 5 values `uberdev_goal_read_trust_signal` returns. `stale` (phase2_5 missing in audit JSON) and `missing` (audit JSON absent) both trigger `_uberdev_goal_dispatch_review_pr` rather than an assumed GREEN (D17).
 - **`GOAL_MERGE_RESULT_ENUM`** — the 4 values `uberdev_goal_read_merge_result` returns. Maps the merge-pipeline's audit-row events (`merge_executed` for `success`, `pr_parked` with `data.reason ∈ {refused, ambiguous, push-non-ff}` for `conflict`, `pr_parked` with `data.reason == test-fail-exhausted` for `hook_failed`) plus a sentinel `missing` for "no audit row appended yet". Phase 2d's case statement handles each value explicitly; the `*)` default arm emits `goal_circuit_breaker reason=unknown_merge_result` (B7 — defensive guard against future enum drift).
 - **`BLOCKS_LINE_REGEX`** is the anchored ReDoS-safe shape (D9 + T1) used by `_uberdev_goal_parse_blocks_line` in `lib/goal-state.sh`. The Phase 3 prose and the Unblock rule both reference this constant by name; the literal `^Blocks: #([0-9]+)$` appears here once.
@@ -427,7 +427,7 @@ while true; do
   for issue in "${active_issues[@]}"; do
     istate="$(awk -v i="$issue" -v c1=1 -v c2=2 '{s[$c1]=$c2} END{print s[i]}' \
       "$UBERDEV_TMPDIR/goal-$GOAL_ID-issue-states.tsv" 2>/dev/null)"
-    case "$istate" in pr-pushed|resolved|failed) continue ;; esac
+    case "$istate" in pr-pushed|resolved|resolved-by-no-action|failed) continue ;; esac
     pr_num="$(uberdev_goal_find_pr_for_issue "$issue")"
     if [ -n "$pr_num" ]; then
       # #211 — register the PR into the batch-PR registry once it's resolved.
@@ -459,6 +459,38 @@ while true; do
     if uberdev_goal_agent_busy_for_issue "$issue"; then
       any_active=1
     else
+      # Issue #249 — issue may have been legitimately closed without a PR
+      # (orchestrator marked it stale / already-resolved / non-actionable —
+      # concrete prior cases: #226 / #227). Probe GitHub state before falling
+      # through to the SOLVE_TIMEOUT path. Non-zero rc is treated as no-signal
+      # (RFC 0005 B6 — transient gh failures must not cascade into false
+      # terminal transitions); the 150-min SOLVE_TIMEOUT remains the backstop.
+      _uberdev_goal_validate_int "$issue" || continue          # defence in depth (T3)
+      issue_state="$(gh issue view "$issue" --json state --jq '.state' 2>/dev/null)"
+      gh_rc=$?
+      if [ "$gh_rc" -eq 0 ] && [ "$issue_state" = "CLOSED" ]; then
+        # Guard the audit emission + continue on the transition's rc. If the
+        # transition fails (rc=1 unwritable tmpdir, rc=2 invalid arc), fall
+        # through to the SOLVE_TIMEOUT backstop rather than emit a false-signal
+        # audit row. The issue stays in `solving` (failed transition didn't
+        # persist) and lands as `failed` after the 150-min timeout.
+        if uberdev_goal_issue_state_transition "$GOAL_ID" "$issue" solving resolved-by-no-action; then
+          # Audit emission is best-effort telemetry; a write failure (tmpdir
+          # unwritable, disk full) MUST NOT halt the surrounding loop, but the
+          # operator needs to see why the audit row is missing if it ever
+          # happens — emit a stderr breadcrumb so post-mortem isn't a guessing
+          # game (per /review-pr 251 finding SF-001).
+          uberdev_goal_audit goal_issue_closed_without_pr \
+            "{\"goal_id\":\"$GOAL_ID\",\"issue\":$issue,\"detected_at\":$now}" || \
+            printf 'goal-pipeline: WARN audit goal_issue_closed_without_pr failed for issue %s (rc=%d) — close-without-PR row may be missing from audit log\n' \
+              "$issue" "$?" >&2
+          continue
+        fi
+      fi
+      if [ "$gh_rc" -ne 0 ]; then
+        printf 'goal-pipeline: gh issue view %s failed rc=%d — falling through to timeout backstop\n' \
+          "$issue" "$gh_rc" >&2
+      fi
       dispatch_ts="$(awk -v i="$issue" -v c1=1 -v c2=2 -v c3=3 '$c1==i && $c2=="solving"{t=$c3} END{print t+0}' \
         "$UBERDEV_TMPDIR/goal-$GOAL_ID-issue-states.tsv" 2>/dev/null)"
       if [ "$(( now - dispatch_ts ))" -lt "$_UBERDEV_GOAL_SOLVE_TIMEOUT" ]; then
@@ -1133,7 +1165,7 @@ print_summary() {
     uberdev_goal_list_prs_in_state "$GOAL_ID" yellow-held | sed 's/^/yellow-held\t/'; \
     uberdev_goal_list_prs_in_state "$GOAL_ID" red-held    | sed 's/^/red-held\t/' )"
   prs_held_count="$(printf '%s\n' "$prs_held_lines" | grep -c . || true)"
-  issues_resolved="$(awk -v c1=1 -v c2=2 '$c2=="resolved" {print $c1}' \
+  issues_resolved="$(awk -v c1=1 -v c2=2 '$c2=="resolved" || $c2=="resolved-by-no-action" {print $c1}' \
     "$UBERDEV_TMPDIR/goal-$GOAL_ID-issue-states.tsv" | grep -c . || true)"
   wall_secs="$(( $(date +%s) - watch_start ))"
   printf 'goal %s: cycles=%s/%s prs_merged=%s prs_held=%s issues_resolved=%s wall_secs=%s\n' \
