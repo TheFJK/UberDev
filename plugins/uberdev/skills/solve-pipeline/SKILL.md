@@ -14,7 +14,7 @@ This skill is invoked inline by `commands/solve.md` and `commands/turbo.md`. The
 | Name | Value (verbatim) | Where used |
 |---|---|---|
 | `TERMINAL_FLAG_DEPRECATED_NOTE` | `warning: --terminal=cmux\|ghostty\|iterm\|terminal\|nohup is deprecated in v0.22.0; /solve and /turbo now dispatch claude --bg background sessions visible in claude agents. The flag is parsed without effect and will be removed in v1.0.0.` | Phase A stderr emission on first encounter; `commands/solve.md` / `commands/turbo.md` `## Deprecated Flags`. |
-| `MIN_CLAUDE_VERSION` | `2.1.139` | Phase A `_uberdev_require_claude_version` hard gate. |
+| `MIN_CLAUDE_VERSION` | `2.1.152` | Phase A `_uberdev_require_claude_version` hard gate. Bumped from `2.1.139` for #246: `--permission-mode bypassPermissions` requires Claude Code 2.1.152+; older versions hit `claude --bg ... --permission-mode bypassPermissions` → exit-2 unknown-flag, surfacing as `dispatch_setup_failed phase:dispatch rc:2` with the root cause buried in BG_STDOUT_LOG. The `claude --bg` minimum itself remains 2.1.139 (see line ~54 / ~149 / ~281 / ~787 — those references intentionally pin the old `--bg` floor because they describe `--bg`-flag availability or `--effort`-flag availability, not the new `--permission-mode bypassPermissions` requirement). |
 | `DISPATCH_BACKEND_DEFAULT` | `auto` | Phase A `--backend=` parser default; `auto` defers to `lib/dispatch.sh` preflight. |
 | `DISPATCH_BACKEND_ENUM` | `auto \| claude-bg \| wezterm \| background` | Phase A `uberdev_read_enum dispatch_backend` validation; also the `--backend=` flag's accepted set. |
 | `FANOUT_CONCURRENCY_SOLVE_BG_DEFAULT` | `6` | Phase A `MAX_PARALLEL_BG_AGENTS` resolution default. |
@@ -50,11 +50,18 @@ This skill is invoked inline by `commands/solve.md` and `commands/turbo.md`. The
 Extract one or more issue numbers + optional override flags. The parser scans every space-separated token in `$ARGUMENTS` and collects only those that are **purely numeric** (anchored regex `^[0-9]+$`); deduplicates so `/turbo 5 5 6` doesn't race two agents into the same worktree path; and rejects empty input.
 
 ```bash
-# --- Phase A: claude version gate (NEW v0.22.0) ---
-# Hard-require Claude Code >= 2.1.139 (the `claude --bg` minimum). Older
-# versions cannot dispatch background sessions and the entire /solve and /turbo
-# contract is voided. Fail loudly with an actionable npm install pointer; do
-# not silently degrade.
+# --- Phase A: claude version gate (NEW v0.22.0; floor raised to 2.1.152 for #246) ---
+# Hard-require Claude Code >= 2.1.152. Two reasons stacked:
+#   (1) `claude --bg` requires 2.1.139+ (the original v0.22.0 floor). Older
+#       versions cannot dispatch background sessions and the entire /solve and
+#       /turbo contract is voided.
+#   (2) `--permission-mode bypassPermissions` (paired with `--dangerously-skip-permissions`
+#       per #246 — see lib/dispatch.sh:192-198) requires 2.1.152+. On
+#       2.1.139–2.1.151 the bg dispatch would hit `claude --bg ... --permission-mode
+#       bypassPermissions` → exit-2 unknown-flag, surfacing as
+#       `dispatch_setup_failed phase:dispatch rc:2` with the root-cause attribution
+#       (your claude is too old) buried in BG_STDOUT_LOG.
+# Fail loudly with an actionable npm install pointer; do not silently degrade.
 _uberdev_require_claude_version() {
   local min="$1"
   local cur
@@ -278,7 +285,8 @@ gh repo view --json nameWithOwner --jq .nameWithOwner
 ### 3. (RETIRED v0.22.0 — terminal detection removed for #85)
 
 The Phase A bg-dispatch probes (added near the top of the SKILL.md Phase A
-block by the v0.22.0 refactor: the claude-version gate at 2.1.139 and the
+block by the v0.22.0 refactor: the claude-version gate — originally 2.1.139,
+raised to 2.1.152 for #246 to cover `--permission-mode bypassPermissions` — and the
 `MAX_PARALLEL_BG_AGENTS` resolution, both still in SKILL.md Phase A) replace
 the entire former Step 3 terminal-detection cascade. The hardcoded
 prompt-mode (`BG_PROMPT_MODE=argv`) is now set by
@@ -469,7 +477,7 @@ fi
 # All probes run ONCE per /solve or /turbo invocation. They are hoisted out
 # of the Phase B per-issue loop because the resolved values are the same for
 # every spawn.
-_uberdev_require_claude_version "2.1.139"
+_uberdev_require_claude_version "2.1.152"
 # --- Phase A: portable temp dir (NEW v0.29.0 — RFC 0004 §3.8) ---
 # One temp root resolved once; every per-issue artifact (prompt, stdout log,
 # claim json, status file) lives under it. Git Bash on native Windows sets

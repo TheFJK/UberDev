@@ -404,8 +404,8 @@ rm -f "$TALLY_FILE"
 
 echo "== Positive: Phase A constants + hardcoded BG_PROMPT_MODE =="
 assert_grep "$SOLVE_PIPELINE" \
-  '_uberdev_require_claude_version "2.1.139"' \
-  "Phase A enforces claude --version >= 2.1.139 (hard gate)"
+  '_uberdev_require_claude_version "2.1.152"' \
+  "Phase A enforces claude --version >= 2.1.152 (hard gate; bumped from 2.1.139 for #246 — --permission-mode bypassPermissions requires 2.1.152+)"
 assert_grep "$SOLVE_PIPELINE" \
   'npm i -g @anthropic-ai/claude-code' \
   "version-gate error includes actionable npm install pointer"
