@@ -184,18 +184,26 @@ uberdev_dispatch_resolve_env() {
   # silently refuses some agent tools (notably Search) even when the operator opted
   # in, and cmux's PermissionRequest hook intercepts auto-mode too. The if/elif
   # ordering is preserved for audit-log clarity (which env var the caller set), but
-  # both branches now emit the same flag. /goal opts into the strict bypass so cmux
+  # both branches now emit the same pair. /goal opts into the strict bypass so cmux
   # PermissionRequest hooks cannot stall the autonomous loop on first-tool-use (#241);
-  # /turbo --auto and /solve --auto opt operators into the same flag for the same
+  # /turbo --auto and /solve --auto opt operators into the same pair for the same
   # reason (auto-mode is dead in practice).
+  #
+  # #246 follow-up: `--dangerously-skip-permissions` bypasses permission *checks*
+  # but does NOT set `--permission-mode`. In Claude Code 2.1.152+, the bg session UI
+  # cycle ring is driven by --permission-mode; without an explicit setting it lands
+  # on `auto`, which is exactly the mode that silently breaks Search/etc. that we are
+  # trying to avoid. Pair the two flags so the cycle-ring lands on bypassPermissions
+  # AND the runtime checks are short-circuited — they target different mechanisms,
+  # so both are needed (belt-and-suspenders).
   SKIP_PERMISSIONS="${SKIP_PERMISSIONS:-0}"
   AUTO_PERMISSIONS="${AUTO_PERMISSIONS:-0}"
   PERM_FLAG=()
   if [[ "$SKIP_PERMISSIONS" == "1" ]]; then
-    PERM_FLAG=( --dangerously-skip-permissions )
-  # Same flag as SKIP branch — kept distinct for caller-attribution observability via PERM_DESC; see header doc block.
+    PERM_FLAG=( --dangerously-skip-permissions --permission-mode bypassPermissions )
+  # Same pair as SKIP branch — kept distinct for caller-attribution observability via PERM_DESC; see header doc block.
   elif [[ "$AUTO_PERMISSIONS" == "1" ]]; then
-    PERM_FLAG=( --dangerously-skip-permissions )
+    PERM_FLAG=( --dangerously-skip-permissions --permission-mode bypassPermissions )
   fi
 
   # EFFORT_FLAG: threaded form of EFFORT_LEVEL (default max for callers without
