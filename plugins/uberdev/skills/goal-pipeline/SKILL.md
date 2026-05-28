@@ -257,10 +257,13 @@ for ISSUE_NUM in "${queue[@]}"; do
   # /orchestrator does NOT accept a --backend= CLI flag, and claude --bg
   # inherits the parent shell's full env table by default, so the env-var
   # path is the canonical mechanism. Phase 0 also exports AUTO_MODE=1,
-  # SKIP_PERMISSIONS=1, and UBERDEV_GOAL_ID — all five envs
-  # (UBERDEV_RESOLVED_BACKEND, AUTO_MODE, SKIP_PERMISSIONS, UBERDEV_GOAL_ID,
-  # plus UBERDEV_TURBO=1 injected by lib/dispatch.sh's BG_TURBO_ENV) reach
-  # the orchestrator child unchanged.
+  # SKIP_PERMISSIONS=1, and UBERDEV_GOAL_ID. AUTO_MODE itself does NOT
+  # propagate to the child — it is a parent-side conditional that gates
+  # whether lib/dispatch.sh's BG_TURBO_ENV injects UBERDEV_TURBO=1 (see
+  # dispatch.sh:382-383). The four envs that actually reach the orchestrator
+  # child unchanged are: UBERDEV_RESOLVED_BACKEND, SKIP_PERMISSIONS,
+  # UBERDEV_GOAL_ID, and UBERDEV_TURBO=1 (the latter conditionally injected
+  # by BG_TURBO_ENV when AUTO_MODE=1 is set in the parent).
   PROMPT_FILE="$(mktemp)"
   printf 'Invoke the slash command /uberdev:orchestrator --turbo solve GH issue #%s now. Do not respond conversationally — execute it.\n' \
     "$ISSUE_NUM" > "$PROMPT_FILE"
@@ -1171,4 +1174,4 @@ Called from Phase 2 step 2d on every `merging → merged` PR transition, for eac
 
 3. **YELLOW handling: YELLOW PRs are NEVER merged — they are held for re-review.** Standalone `/merge` (with `--accept-critical-deferred`) can land a YELLOW PR; inside `/goal` this is forbidden. The PR-state-machine valid-transitions table in `_uberdev_goal_pr_state_machine_valid` returns non-zero for `yellow-held → merging` (D17); the only way out of `yellow-held` is `→ green` (after a successful `/review-pr` re-review that resolves the CRITICAL findings).
 
-**Backend inheritance (D15).** Backend resolution is performed **once** by Phase 0 via `uberdev_dispatch_preflight`, which sets `UBERDEV_RESOLVED_BACKEND` for the whole run. After issue #248, the Phase 1 `/uberdev:orchestrator` dispatch no longer forwards `--backend=` explicitly (the orchestrator does not accept a `--backend=` CLI flag); backend now forwards purely via the `UBERDEV_RESOLVED_BACKEND` env var that Phase 0 exports — `claude --bg` inherits the parent shell's full env table by default, so every child (the orchestrator, plus the Phase 2 `/merge` and `/review-pr` dispatches in `lib/goal-state.sh::_uberdev_goal_dispatch_{merge,review_pr}`) re-resolves the backend in its own preflight from the same env var. Per-cycle re-resolution at the orchestrator level is forbidden — it would let a transient `claude --version` flake mid-run silently swap backends, splitting a single goal's solvers across incompatible dispatch mechanisms. Each backend (`claude-bg` / `wezterm` / `background`) has its own session-management and worktree conventions that must stay stable across cycles so the gh + file detection signals (PR discovery via `closingIssuesReferences`, liveness via `claude agents --json` cwd matching, verdict via the file-based locator — issue #180) resolve consistently for every solver in the run.
+**Backend inheritance (D15).** Backend resolution is performed **once** by Phase 0 via `uberdev_dispatch_preflight`, which sets `UBERDEV_RESOLVED_BACKEND` for the whole run. After issue #248, the Phase 1 `/uberdev:orchestrator` dispatch no longer forwards `--backend=` explicitly (the orchestrator does not accept a `--backend=` CLI flag); backend now forwards purely via the `UBERDEV_RESOLVED_BACKEND` env var that Phase 0 exports — `claude --bg` inherits the parent shell's full env table by default, so every child (the orchestrator, plus the Phase 2 `/merge` and `/review-pr` dispatches in `lib/goal-state.sh::_uberdev_goal_dispatch_{merge,review_pr}`) re-resolves the backend in its own preflight from the same env var. `UBERDEV_RESOLVED_BACKEND` inheritance is orthogonal to `BG_TURBO_ENV` (which carries only `UBERDEV_TURBO` + `SKIP_PERMISSIONS`): both reach the child, but through independent mechanisms — the env table for backend, the BG_TURBO_ENV array-wrap for the permission/turbo flags. Per-cycle re-resolution at the orchestrator level is forbidden — it would let a transient `claude --version` flake mid-run silently swap backends, splitting a single goal's solvers across incompatible dispatch mechanisms. Each backend (`claude-bg` / `wezterm` / `background`) has its own session-management and worktree conventions that must stay stable across cycles so the gh + file detection signals (PR discovery via `closingIssuesReferences`, liveness via `claude agents --json` cwd matching, verdict via the file-based locator — issue #180) resolve consistently for every solver in the run.
