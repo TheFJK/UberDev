@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/cluster-pipeline.test.sh — behavioral gates for /uberdev:cluster (issue #247).
 #
-# 12 gates P1-P12 that exercise the actual SKILL.md bash bodies +
+# 13 gates P1-P13 that exercise the actual SKILL.md bash bodies +
 # cluster_propose.py runtime behavior. Uses mock-gh (PATH override pattern
 # borrowed from tests/findings-to-issues.test.sh:51-72) + python3 + mktemp + jq.
 #
@@ -611,6 +611,123 @@ if ( CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" SECRET="$P12_SECRET" bash -c '
 else
   rc=$?
   echo "  FAIL  P12 secret-scan did not fail-CLOSED (sub-rc=$rc)"
+  FAIL=$((FAIL+1))
+fi
+
+# ============================================================================
+# P13 — Phase 4 proposal generation + dry-run exit (#257).
+# ============================================================================
+#
+# Mocks the Phase 4 input (clusters-filtered.json), runs cluster_propose.py
+# verbatim from SKILL.md:584-585, then exercises the dryrun-exit fence
+# verbatim from SKILL.md:587-595. Asserts:
+#
+#   - proposals.md exists, is non-empty, and carries the documented shape:
+#     * `# Cluster proposals` top-level header
+#     * one `### Cluster lead=#N, members=…, confidence=N.NN` heading per
+#       cluster (line shape that Phase 5 idempotency-layer-(b) parses, and
+#       that the finding explicitly names)
+#     * the `<!-- uberdev:cluster-fold lead=… fingerprint=… -->` marker
+#       (renderer-side half of the cross-layer idempotency contract)
+#   - the dryrun-exit fence emits `DISPATCH: phase=propose ...`, prints the
+#     `DRY-RUN complete.` line, writes `OK` to trust-signal.txt, and exits 0.
+#
+# The full Phase 4 fence is not run hermetically — it sources run-state.txt
+# from $UBERDEV_TMPDIR and rehydrates env vars from KEY=val lines, matching
+# the pragmatic-substitution idiom P1 / P5 / P8 already use. The behavioural
+# invariant locked here is the input→output contract: filtered clusters in,
+# a proposals.md report with the documented shape out + dryrun trust signal.
+echo "== P13 Phase 4 proposal generation + dry-run exit"
+P13_RUN_DIR="$STAGE/p13-run"
+mkdir -p "$P13_RUN_DIR"
+P13_CLUSTERS="$P13_RUN_DIR/clusters-filtered.json"
+P13_PROPOSALS="$P13_RUN_DIR/proposals.md"
+P13_TRUST="$P13_RUN_DIR/trust-signal.txt"
+P13_STDOUT="$STAGE/p13.out"
+P13_STDERR="$STAGE/p13.err"
+: > "$P13_STDERR"
+
+cat > "$P13_CLUSTERS" <<'EOF'
+[
+  {"lead": 225, "members": [225, 226, 227], "rationale": "same shape", "confidence": 0.92},
+  {"lead": 300, "members": [300, 301], "rationale": "near-duplicate", "confidence": 0.88}
+]
+EOF
+
+# Verbatim renderer call from SKILL.md Phase 4 (line 584-585).
+python3 "$CLUSTER_PROPOSE_PY" < "$P13_CLUSTERS" > "$P13_PROPOSALS" 2>>"$P13_STDERR"
+P13_RC=$?
+
+# Verbatim dryrun-exit fence from SKILL.md Phase 4 (line 587-595). RUN_DIR is
+# substituted in; the rest of the body is identical so future drift in the
+# DISPATCH / DRY-RUN strings or the trust-signal write reds this gate.
+P13_DRY_RC=0
+if [ "$P13_RC" = "0" ]; then
+  (
+    set -u
+    RUN_DIR="$P13_RUN_DIR"
+    CLUSTERS_N="$(jq 'length' "$RUN_DIR/clusters-filtered.json" 2>/dev/null || echo 0)"
+    echo "DISPATCH: phase=propose PROPOSALS=$RUN_DIR/proposals.md CLUSTERS=$CLUSTERS_N"
+    MODE="dryrun"
+    if [ "${MODE:-dryrun}" = "dryrun" ]; then
+      echo
+      echo "DRY-RUN complete. See $RUN_DIR/proposals.md"
+      printf 'OK\n' > "$RUN_DIR/trust-signal.txt"
+      exit 0
+    fi
+  ) > "$P13_STDOUT" 2>>"$P13_STDERR"
+  P13_DRY_RC=$?
+fi
+
+P13_HAS_HEADER=0
+P13_HAS_CLUSTER_LEAD=0
+P13_HAS_SECOND_LEAD=0
+P13_HAS_MARKER=0
+P13_HAS_DISPATCH=0
+P13_HAS_DRYRUN=0
+P13_TRUST_OK=0
+P13_CLUSTERS_N=""
+if [ -s "$P13_PROPOSALS" ]; then
+  grep -qF '# Cluster proposals' "$P13_PROPOSALS" && P13_HAS_HEADER=1
+  grep -qE '^### Cluster lead=#225, members=225,226,227, confidence=0\.92$' "$P13_PROPOSALS" \
+    && P13_HAS_CLUSTER_LEAD=1
+  grep -qE '^### Cluster lead=#300, members=300,301, confidence=0\.88$' "$P13_PROPOSALS" \
+    && P13_HAS_SECOND_LEAD=1
+  grep -qE '<!-- uberdev:cluster-fold lead=225 members=225,226,227 fingerprint=[0-9a-f]{16} -->' "$P13_PROPOSALS" \
+    && P13_HAS_MARKER=1
+fi
+if [ -s "$P13_STDOUT" ]; then
+  grep -qF 'DISPATCH: phase=propose' "$P13_STDOUT" && P13_HAS_DISPATCH=1
+  grep -qF 'DRY-RUN complete.' "$P13_STDOUT" && P13_HAS_DRYRUN=1
+  P13_CLUSTERS_N="$(grep -oE 'CLUSTERS=[0-9]+' "$P13_STDOUT" | head -1 | cut -d= -f2)"
+fi
+if [ -s "$P13_TRUST" ] && [ "$(cat "$P13_TRUST")" = "OK" ]; then
+  P13_TRUST_OK=1
+fi
+
+if [ "$P13_RC" = "0" ] && [ "$P13_DRY_RC" = "0" ] \
+   && [ "$P13_HAS_HEADER" = "1" ] && [ "$P13_HAS_CLUSTER_LEAD" = "1" ] \
+   && [ "$P13_HAS_SECOND_LEAD" = "1" ] && [ "$P13_HAS_MARKER" = "1" ] \
+   && [ "$P13_HAS_DISPATCH" = "1" ] && [ "$P13_HAS_DRYRUN" = "1" ] \
+   && [ "$P13_TRUST_OK" = "1" ] && [ "$P13_CLUSTERS_N" = "2" ]; then
+  echo "  PASS  P13 proposals.md rendered (2 clusters) + dry-run trust signal OK"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  P13 rc=$P13_RC dry_rc=$P13_DRY_RC header=$P13_HAS_HEADER lead225=$P13_HAS_CLUSTER_LEAD lead300=$P13_HAS_SECOND_LEAD marker=$P13_HAS_MARKER dispatch=$P13_HAS_DISPATCH dryrun=$P13_HAS_DRYRUN trust=$P13_TRUST_OK clusters_n='$P13_CLUSTERS_N'"
+  if [ -f "$P13_PROPOSALS" ]; then
+    echo "    proposals.md:"
+    sed 's/^/      /' "$P13_PROPOSALS"
+  else
+    echo "    proposals.md MISSING"
+  fi
+  if [ -s "$P13_STDOUT" ]; then
+    echo "    dryrun stdout:"
+    sed 's/^/      /' "$P13_STDOUT"
+  fi
+  if [ -s "$P13_STDERR" ]; then
+    echo "    stderr:"
+    sed 's/^/      /' "$P13_STDERR"
+  fi
   FAIL=$((FAIL+1))
 fi
 
