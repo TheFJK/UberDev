@@ -4,7 +4,7 @@
 
 **Personal Claude Code marketplace — opinionated GitHub-workflow slash commands.**
 
-[![Version](https://img.shields.io/badge/version-0.35.2-blue)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.35.3-blue)](./CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8B5CF6)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Repo Agnostic](https://img.shields.io/badge/repo--agnostic-yes-success)](#configuration)
@@ -44,6 +44,7 @@ UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-scou
 | **`/merge [<PR#> \| --all]`** | Lands an approved PR into the integration branch — autopilot. Bare invocation auto-discovers scope: single PR for the current branch, or all eligible open PRs against `integration_branch`. Ordering, per-PR strategy, conflict resolution (one parallel agent per conflicted file), and local sync, all unattended. |
 | **`/dev <idea>`** | Prototype fast lane. Decomposes a free-text idea, builds it via parallel `Task()` subagents in-session, runs one light review, opens a PR labelled `prototype`, and auto-files a harden issue. Deliberately skips spec/plan and full `/review-pr`. Honors `--no-pr` / `--no-issue`. |
 | **`/testers`** | Read-only adversarial QA audit squad — 6 personas + 2 monitors over 3 waves; auto-detects web/api/native target; files verified findings as GitHub issues. |
+| **`/uberdev:cluster`** | Repo-wide issue similarity analyzer + fold-into-lead consolidator (RFC 0010). |
 | **`/uberdev:goal <issue#>`** | Autonomous loop that chains `/turbo` → `/review-pr` (auto) → `/merge` if GREEN, recursing on BLOCKER/CRITICAL `review-pr-finding` issues until convergence or circuit-breaker halt. Inherits the dispatch backend resolver from `/solve` and `/turbo`. |
 | **`/uberthink <goal>`** | Read-only cross-domain ideation engine. Fleet fanout across N evolutionary "islands" (frame → diverge → gap-gate → combine → converge → falsify → genetic loop-back → cross-pollinate → rank) producing a ranked dossier with a 🌙 moonshot lane. Top idea(s) filed as GitHub issues; `--handoff` chains the winner into `/brainstorm`. Always-deep × `--islands K` ≈ K×15× a normal chat. |
 
@@ -66,7 +67,7 @@ Then in Claude Code:
 /uberdev:issue trivial typo in README install step   # smoke-test
 ```
 
-The twelve short-form aliases (`/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`, `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify`, `/uberthink`) are auto-installed on first session and refreshed on plugin upgrade — `jq` is not required, and if a short name collides with an existing file the session context reports which alias was skipped. The first-run notice confirms "installs 12 aliases". Opt out with `auto_install_aliases: false` in `.claude/uberdev.local.md` or `UBERDEV_NO_AUTO_ALIAS=1`.
+The thirteen short-form aliases (`/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`, `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify`, `/uberthink`, `/ubercluster`) are auto-installed on first session and refreshed on plugin upgrade — `jq` is not required, and if a short name collides with an existing file the session context reports which alias was skipped. The first-run notice confirms "installs 13 aliases". Opt out with `auto_install_aliases: false` in `.claude/uberdev.local.md` or `UBERDEV_NO_AUTO_ALIAS=1`.
 
 > **Why a bootstrap script?** Upstream Claude Code has a bug ([anthropics/claude-code#20661](https://github.com/anthropics/claude-code/issues/20661)) where `/plugin install` populates the cache but does not write `enabledPlugins` in `~/.claude/settings.json` — so `/uberdev:*` commands silently 404. `install.sh` does the install **and** jq-patches `enabledPlugins`. Idempotent. Requires `jq`.
 
@@ -264,7 +265,7 @@ goal:
 |---|---|---|
 | `UBERDEV_FANOUT_SOLVE_BG` | `fanout_concurrency.solve_bg` | Cap on parallel `claude --bg` sessions dispatched by `/turbo`; int [1, 50], default 6 |
 | `SOLVE_AUTO` | `solve_auto` | When `1`/`true`, spawned agent runs with `--dangerously-skip-permissions` (post-#241 follow-up: AUTO tier collapsed into bypass) |
-| `UBERDEV_NO_AUTO_ALIAS` | `auto_install_aliases` | When `1`/`true` (env) or `false` (file), suppresses session-start auto-install of `/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`, `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify`, `/uberthink` forwarders |
+| `UBERDEV_NO_AUTO_ALIAS` | `auto_install_aliases` | When `1`/`true` (env) or `false` (file), suppresses session-start auto-install of `/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`, `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify`, `/uberthink`, `/ubercluster` forwarders |
 | `UBERDEV_INTEGRATION_BRANCH` | `integration_branch` | `/merge` target branch |
 | `UBERDEV_GOAL_MAX_CYCLES` | `goal.max_cycles` | `/uberdev:goal` hard cycle ceiling; int [1, 20], default 5 |
 
@@ -274,7 +275,7 @@ Precedence: CLI flag > env var > `.claude/uberdev.local.md` > default. Missing f
 
 ## Short-form aliases
 
-Plugin commands are addressed as `/uberdev:<command>` by default — the `uberdev:` prefix is required by Claude Code's plugin manifest. Auto-install drops twelve forwarders into `~/.claude/commands/`:
+Plugin commands are addressed as `/uberdev:<command>` by default — the `uberdev:` prefix is required by Claude Code's plugin manifest. Auto-install drops thirteen forwarders into `~/.claude/commands/`:
 
 | Short form | Canonical |
 |---|---|
@@ -290,6 +291,7 @@ Plugin commands are addressed as `/uberdev:<command>` by default — the `uberde
 | `/uberscan` | `/uberdev:uberscan` |
 | `/ubersimplify` | `/uberdev:ubersimplify` |
 | `/uberthink` | `/uberdev:uberthink` |
+| `/ubercluster` | `/uberdev:cluster` |
 
 ```bash
 /uberdev:install-aliases             # install (skip-if-exists)

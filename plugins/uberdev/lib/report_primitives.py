@@ -88,3 +88,14 @@ def sort_by_rank(
         tb = tuple(str("" if row.get(t) is None else row.get(t)) for t in tiebreakers)
         return (-rank, *tb)
     return sorted(rows, key=_key)
+
+
+def fingerprint16(s: str) -> str:
+    """Return the lower-cased 16-hex prefix of sha256(s.encode()).
+
+    Shared with cluster-pipeline/cluster_propose.py and reserved for a future
+    findings-to-issues-aggregate helper (spec D7/Q11). Pinning the format here
+    prevents divergent reimplementations of the same 16-hex prefix idiom.
+    """
+    import hashlib
+    return hashlib.sha256(s.encode()).hexdigest()[:16].lower()
