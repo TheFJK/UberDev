@@ -67,6 +67,8 @@ jobs:
           bash tests/audit-fixups.test.sh && \
           bash tests/review-pr.test.sh && \
           bash tests/review-pr-phase3-ci.test.sh && \
+          bash tests/cluster.test.sh && \
+          bash tests/cluster-pipeline.test.sh && \
           bash tests/code-fixer-dispatch.test.sh && \
           bash tests/findings-to-issues.test.sh && \
           bash tests/trust-trail-evaluator.test.sh && \
@@ -165,6 +167,7 @@ jobs:
         # (ubuntu − windows) == this list. Update this block AND the run:
         # block below in lockstep; a new Unix-only fixture needs an entry
         # here AND its `bash tests/...` line in the ubuntu job above.
+        #   - cluster-pipeline.test.sh
         #   - solve-pipeline-zsh.test.sh
         #   - testers-pipeline.test.sh
         #   - testers-agent-contract.test.sh
@@ -186,6 +189,7 @@ jobs:
           bash tests/audit-fixups.test.sh && \
           bash tests/review-pr.test.sh && \
           bash tests/review-pr-phase3-ci.test.sh && \
+          bash tests/cluster.test.sh && \
           bash tests/code-fixer-dispatch.test.sh && \
           bash tests/findings-to-issues.test.sh && \
           bash tests/trust-trail-evaluator.test.sh && \
