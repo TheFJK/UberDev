@@ -638,7 +638,6 @@ fi
 
 WRITES=0
 : > "$RUN_DIR/ledger.jsonl"
-touch "$RUN_DIR/ledger.jsonl"
 
 # Per-cluster loop — break on MAX_FOLD_PER_RUN cap.
 # Process substitution `done < <(jq ...)` keeps the loop body in the parent
@@ -660,17 +659,17 @@ while IFS= read -r cluster; do
 
   # Integer-validate the lead (constraints.md T3 — every gh-bound number is gated)
   case "$LEAD" in
-    *[!0-9]*|"") echo "skip: invalid lead '$LEAD'"; continue ;;
+    *[!0-9]*|"") echo "skip: invalid lead '$LEAD'" >&2; continue ;;
   esac
 
   # Per-cluster size enforcement (security.md §Q3 — trust nothing the analyzer returned)
   MEM_COUNT="$(printf '%s' "$cluster" | jq '.members | length')"
   if [ "$MEM_COUNT" -gt "${MAX_CLUSTER_SIZE:-8}" ]; then
-    echo "skip: cluster $LEAD exceeds --max-cluster-size ($MEM_COUNT > ${MAX_CLUSTER_SIZE:-8})"
+    echo "skip: cluster $LEAD exceeds --max-cluster-size ($MEM_COUNT > ${MAX_CLUSTER_SIZE:-8})" >&2
     continue
   fi
   if [ "$MEM_COUNT" -gt 25 ]; then
-    echo "REFUSE: hallucinated mega-cluster $LEAD ($MEM_COUNT members > 25 hard ceiling)"
+    echo "REFUSE: hallucinated mega-cluster $LEAD ($MEM_COUNT members > 25 hard ceiling)" >&2
     continue
   fi
 
@@ -679,7 +678,7 @@ while IFS= read -r cluster; do
 
   # Idempotency layer (a) — JSONL ledger
   if grep -qF "\"fingerprint\":\"$FP\"" "$RUN_DIR/ledger.jsonl" 2>/dev/null; then
-    echo "SKIP: cluster $LEAD already in ledger (fp=$FP)"
+    echo "SKIP: cluster $LEAD already in ledger (fp=$FP)" >&2
     continue
   fi
 
@@ -687,7 +686,7 @@ while IFS= read -r cluster; do
   LEAD_BODY="$(gh issue view "$LEAD" --repo "$REPO_SLUG" --json body --jq .body 2>/dev/null)"
   if printf '%s' "$LEAD_BODY" | grep -qF "<!-- uberdev:cluster-fold lead=$LEAD"; then
     if printf '%s' "$LEAD_BODY" | grep -qF "fingerprint=$FP"; then
-      echo "SKIP: cluster $LEAD already folded (body marker fp=$FP)"
+      echo "SKIP: cluster $LEAD already folded (body marker fp=$FP)" >&2
       continue
     fi
   fi
@@ -708,17 +707,18 @@ while IFS= read -r cluster; do
     M_STATE="$(printf '%s' "$M_INFO" | jq -r '.state')"
     M_LABELS="$(printf '%s' "$M_INFO" | jq -r '[.labels[].name] | join(",")')"
     M_LINKED_PRS="$(printf '%s' "$M_INFO" | jq -r '.closingIssuesReferences | length')"
+    case "$M_LINKED_PRS" in ''|*[!0-9]*) M_LINKED_PRS=0 ;; esac
     if [ "$M_STATE" != "OPEN" ]; then
-      echo "SKIP: #$M state=$M_STATE"
+      echo "SKIP: #$M state=$M_STATE" >&2
       continue
     fi
     case ",$M_LABELS," in
       *,uberdev:active,*|*,review-pr:pending,*|*,folded,*)
-        echo "SKIP: #$M has refuse-list label"
+        echo "SKIP: #$M has refuse-list label" >&2
         continue ;;
     esac
     if [ "${M_LINKED_PRS:-0}" -gt 0 ]; then
-      echo "SKIP: #$M gained a linked PR mid-run (closingIssuesReferences=$M_LINKED_PRS)"
+      echo "SKIP: #$M gained a linked PR mid-run (closingIssuesReferences=$M_LINKED_PRS)" >&2
       continue
     fi
 
@@ -735,7 +735,7 @@ while IFS= read -r cluster; do
 
     if command -v uberdev_run_secret_scan_stdin >/dev/null 2>&1; then
       if ! uberdev_run_secret_scan_stdin < "$COMMENT_FILE" >/dev/null 2>&1; then
-        echo "REFUSE: comment for #$M contains secret-shape; skipping fold"
+        echo "REFUSE: comment for #$M contains secret-shape; skipping fold" >&2
         rm -f "$COMMENT_FILE"
         continue
       fi
@@ -779,7 +779,7 @@ while IFS= read -r cluster; do
   LEAD_BODY_SAFE=1
   if command -v uberdev_run_secret_scan_stdin >/dev/null 2>&1; then
     if ! uberdev_run_secret_scan_stdin < "$LEAD_NEW_FILE" >/dev/null 2>&1; then
-      echo "REFUSE: lead-body for #$LEAD contains secret-shape; skipping body update"
+      echo "REFUSE: lead-body for #$LEAD contains secret-shape; skipping body update" >&2
       LEAD_BODY_SAFE=0
     fi
   fi

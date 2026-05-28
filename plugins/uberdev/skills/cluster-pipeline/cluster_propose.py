@@ -41,7 +41,7 @@ Security:
   ReDoS body-cap floor; spec §Pipeline phases · Phase 1 Fetch).
 
 Reuses `lib/report_primitives.py` (sibling Q11 helper `fingerprint16` added
-in the same wave): `cell`, `envelope`, `fingerprint16`.
+in the same wave): `cell`, `fingerprint16`.
 """
 import argparse
 import json
@@ -58,7 +58,7 @@ import sys
 # plugins/ and miss lib/ entirely; the plan corrects this.)
 plugin_root = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(plugin_root / "lib"))
-from report_primitives import cell, envelope, fingerprint16  # noqa: E402
+from report_primitives import cell, fingerprint16  # noqa: E402
 
 # Per-issue body cap mirrors the Phase 1 Fetch cap (constraints.md T1 — ReDoS
 # threat boundary). Phase 1 jq already truncates bodies in issues.json before
@@ -266,9 +266,30 @@ def build_meta_prompt(chunk_yamls: list[dict]) -> str:
     distinct `source="chunk-NN-clusters"` attribute so a forged marker in
     one chunk's YAML cannot contaminate the others.
 
+    Validates the input shape at the boundary so missing/wrong-typed
+    elements raise a clear contract violation rather than a deep
+    AttributeError from inside cell(). Schema:
+    `[{"chunk": str, "yaml": str}, ...]` — matches the build_prompt /
+    render_cluster boundary-guard pattern.
+
     Input element schema:
         {"chunk": "chunk-01-clusters", "yaml": "<verbatim yaml string>"}
     """
+    if not isinstance(chunk_yamls, list):
+        raise TypeError(
+            f"build_meta_prompt: expected list, got {type(chunk_yamls).__name__}"
+        )
+    for i, entry in enumerate(chunk_yamls):
+        if not isinstance(entry, dict):
+            raise TypeError(
+                f"build_meta_prompt: chunk_yamls[{i}] expected dict, got "
+                f"{type(entry).__name__}"
+            )
+        for k in ("chunk", "yaml"):
+            if k not in entry:
+                raise KeyError(
+                    f"build_meta_prompt: chunk_yamls[{i}] missing required key '{k}'"
+                )
     n_chunks = len(chunk_yamls)
     parts = [
         (
@@ -365,12 +386,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
-
-# `envelope` is re-exported from report_primitives so a future caller (e.g. an
-# auxiliary report renderer) can reuse the shared envelope writer without
-# re-importing report_primitives directly. The current build_prompt /
-# build_meta_prompt builders compose envelope strings inline so they can stay
-# in-memory (no file-handle plumbing); `envelope()` remains available for
-# file-handle callers.
-_ = envelope
