@@ -35,6 +35,18 @@ for f in "$SKILL_MD" "$CLUSTER_PROPOSE_PY" "$PLUGIN_ROOT/lib/secret-scan.sh"; do
   fi
 done
 
+# Pre-flight — refuse to run if hard-dependency commands are missing. P13
+# Phase 4 fence body invokes `jq` and `python3` verbatim (per SKILL.md mirror
+# contract); surfacing missing-binary at FATAL pre-flight prevents the
+# in-fence `jq ... 2>/dev/null || echo 0` fallback from masking the cause
+# downstream with an opaque `CLUSTERS=0` line.
+for cmd in jq python3; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "FATAL: required command missing on PATH: $cmd" >&2
+    exit 2
+  fi
+done
+
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT INT TERM
 
@@ -620,7 +632,8 @@ fi
 #
 # Mocks the Phase 4 input (clusters-filtered.json), runs cluster_propose.py
 # verbatim from SKILL.md:584-585, then exercises the dryrun-exit fence
-# verbatim from SKILL.md:587-595. Asserts:
+# verbatim from SKILL.md:590-595 (preceded by CLUSTERS_N + DISPATCH setup
+# at SKILL.md:587-589 which is also mirrored here). Asserts:
 #
 #   - proposals.md exists, is non-empty, and carries the documented shape:
 #     * `# Cluster proposals` top-level header
@@ -658,9 +671,10 @@ EOF
 python3 "$CLUSTER_PROPOSE_PY" < "$P13_CLUSTERS" > "$P13_PROPOSALS" 2>>"$P13_STDERR"
 P13_RC=$?
 
-# Verbatim dryrun-exit fence from SKILL.md Phase 4 (line 587-595). RUN_DIR is
-# substituted in; the rest of the body is identical so future drift in the
-# DISPATCH / DRY-RUN strings or the trust-signal write reds this gate.
+# Verbatim dryrun-exit fence from SKILL.md Phase 4 (line 590-595, preceded
+# by CLUSTERS_N + DISPATCH setup at SKILL.md:587-589). RUN_DIR is substituted
+# in; the rest of the body is identical so future drift in the DISPATCH /
+# DRY-RUN strings or the trust-signal write reds this gate.
 P13_DRY_RC=0
 if [ "$P13_RC" = "0" ]; then
   (
@@ -683,6 +697,7 @@ P13_HAS_HEADER=0
 P13_HAS_CLUSTER_LEAD=0
 P13_HAS_SECOND_LEAD=0
 P13_HAS_MARKER=0
+P13_HAS_SECOND_MARKER=0
 P13_HAS_DISPATCH=0
 P13_HAS_DRYRUN=0
 P13_TRUST_OK=0
@@ -695,6 +710,8 @@ if [ -s "$P13_PROPOSALS" ]; then
     && P13_HAS_SECOND_LEAD=1
   grep -qE '<!-- uberdev:cluster-fold lead=225 members=225,226,227 fingerprint=[0-9a-f]{16} -->' "$P13_PROPOSALS" \
     && P13_HAS_MARKER=1
+  grep -qE '<!-- uberdev:cluster-fold lead=300 members=300,301 fingerprint=[0-9a-f]{16} -->' "$P13_PROPOSALS" \
+    && P13_HAS_SECOND_MARKER=1
 fi
 if [ -s "$P13_STDOUT" ]; then
   grep -qF 'DISPATCH: phase=propose' "$P13_STDOUT" && P13_HAS_DISPATCH=1
@@ -708,12 +725,13 @@ fi
 if [ "$P13_RC" = "0" ] && [ "$P13_DRY_RC" = "0" ] \
    && [ "$P13_HAS_HEADER" = "1" ] && [ "$P13_HAS_CLUSTER_LEAD" = "1" ] \
    && [ "$P13_HAS_SECOND_LEAD" = "1" ] && [ "$P13_HAS_MARKER" = "1" ] \
+   && [ "$P13_HAS_SECOND_MARKER" = "1" ] \
    && [ "$P13_HAS_DISPATCH" = "1" ] && [ "$P13_HAS_DRYRUN" = "1" ] \
    && [ "$P13_TRUST_OK" = "1" ] && [ "$P13_CLUSTERS_N" = "2" ]; then
   echo "  PASS  P13 proposals.md rendered (2 clusters) + dry-run trust signal OK"
   PASS=$((PASS+1))
 else
-  echo "  FAIL  P13 rc=$P13_RC dry_rc=$P13_DRY_RC header=$P13_HAS_HEADER lead225=$P13_HAS_CLUSTER_LEAD lead300=$P13_HAS_SECOND_LEAD marker=$P13_HAS_MARKER dispatch=$P13_HAS_DISPATCH dryrun=$P13_HAS_DRYRUN trust=$P13_TRUST_OK clusters_n='$P13_CLUSTERS_N'"
+  echo "  FAIL  P13 rc=$P13_RC dry_rc=$P13_DRY_RC header=$P13_HAS_HEADER lead225=$P13_HAS_CLUSTER_LEAD lead300=$P13_HAS_SECOND_LEAD marker225=$P13_HAS_MARKER marker300=$P13_HAS_SECOND_MARKER dispatch=$P13_HAS_DISPATCH dryrun=$P13_HAS_DRYRUN trust=$P13_TRUST_OK clusters_n='$P13_CLUSTERS_N'"
   if [ -f "$P13_PROPOSALS" ]; then
     echo "    proposals.md:"
     sed 's/^/      /' "$P13_PROPOSALS"
