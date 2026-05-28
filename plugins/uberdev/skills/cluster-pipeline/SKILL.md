@@ -95,27 +95,55 @@ RUN_ID="$(date -u +%Y%m%d-%H%M%S)-$(printf '%04x' "${RANDOM:-0}")"
 RUN_DIR=".uberdev/cluster/${RUN_ID}"
 mkdir -p "$RUN_DIR/chunks" "$RUN_DIR/dispatches" "$RUN_DIR/analyses"
 
-# Parse flags — long-form --flag=value only (zsh-safe; no positional args here)
+# Parse flags — accepts both `--flag=value` and `--flag value` (space) forms.
+# State machine: when EXPECT_VALUE_FOR is non-empty, the next non-flag arg is
+# consumed as the value for the named flag. cluster.md (argument-hint + help
+# table + preflight) advertises space-form; we accept both to avoid the
+# documented form silently failing (memory project_uberdev_skill_renderer_dollar_arg_collision
+# trap-class: documented behaviour must match runtime).
 MODE="dryrun"
 REPO_SLUG=""
 LABEL=""
 SINCE=""
 ONLY_MINE=0
 MIN_CONF=""
+EXPECT_VALUE_FOR=""
 for arg in $ARGUMENTS; do
+  if [ -n "$EXPECT_VALUE_FOR" ]; then
+    case "$EXPECT_VALUE_FOR" in
+      repo)              REPO_SLUG="$arg" ;;
+      label)             LABEL="$arg" ;;
+      since)             SINCE="$arg" ;;
+      min-confidence)    MIN_CONF="$arg" ;;
+      max-cluster-size)  MAX_CLUSTER_SIZE="$arg" ;;
+      concurrency)       CONCURRENCY="$arg" ;;
+    esac
+    EXPECT_VALUE_FOR=""
+    continue
+  fi
   case "$arg" in
     --dry-run)             MODE="dryrun" ;;
     --execute)             MODE="execute" ;;
     --only-mine)           ONLY_MINE=1 ;;
+    --repo)                EXPECT_VALUE_FOR=repo ;;
     --repo=*)              REPO_SLUG="${arg#--repo=}" ;;
+    --label)               EXPECT_VALUE_FOR=label ;;
     --label=*)             LABEL="${arg#--label=}" ;;
+    --since)               EXPECT_VALUE_FOR=since ;;
     --since=*)             SINCE="${arg#--since=}" ;;
+    --min-confidence)      EXPECT_VALUE_FOR=min-confidence ;;
     --min-confidence=*)    MIN_CONF="${arg#--min-confidence=}" ;;
+    --max-cluster-size)    EXPECT_VALUE_FOR=max-cluster-size ;;
     --max-cluster-size=*)  MAX_CLUSTER_SIZE="${arg#--max-cluster-size=}" ;;
+    --concurrency)         EXPECT_VALUE_FOR=concurrency ;;
     --concurrency=*)       CONCURRENCY="${arg#--concurrency=}" ;;
     --*)                   echo "warning: unknown flag $arg" >&2 ;;
   esac
 done
+if [ -n "$EXPECT_VALUE_FOR" ]; then
+  echo "error: --$EXPECT_VALUE_FOR requires a value" >&2
+  exit 2
+fi
 
 # Default --min-confidence by mode
 if [ -z "$MIN_CONF" ]; then
@@ -140,14 +168,16 @@ if [ "$MODE" = "execute" ]; then
   fi
 fi
 
-# --repo validation (case glob — zsh-safe; avoids [[ =~ ]] regex matching which is bashism-only)
+# --repo validation — anchored grep ensures every character is in the safe
+# class. The earlier case glob `[A-Za-z0-9._-]*/[A-Za-z0-9._-]*` is permissive:
+# in shell glob `*` matches ZERO OR MORE of ANY character, not "more chars from
+# the preceding class". `printf | grep -Eq '^...$'` is zsh-safe (no bashism)
+# and rejects shell-metachar contamination at the boundary.
 if [ -n "$REPO_SLUG" ]; then
-  case "$REPO_SLUG" in
-    [A-Za-z0-9._-]*/[A-Za-z0-9._-]*) : ;;
-    *)
-      echo "error: --repo must match OWNER/NAME (alphanumerics, dots, dashes, underscores only)" >&2
-      exit 2 ;;
-  esac
+  if ! printf '%s\n' "$REPO_SLUG" | grep -Eq '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
+    echo "error: --repo must match OWNER/NAME (alphanumerics, dots, dashes, underscores only)" >&2
+    exit 2
+  fi
   # viewerPermission pre-flight (--execute only — TRIAGE is min to close issues)
   if [ "$MODE" = "execute" ]; then
     PERM="$(gh repo view "$REPO_SLUG" --json viewerPermission --jq .viewerPermission 2>/dev/null)"
@@ -242,7 +272,13 @@ if [ -n "${SCOPE_LABEL:-}" ]; then GH_ARGS=( "${GH_ARGS[@]}" "--label" "$SCOPE_L
 if [ -n "${SCOPE_SINCE:-}" ]; then GH_ARGS=( "${GH_ARGS[@]}" "--search" "created:>=$SCOPE_SINCE" ); fi
 if [ "${ONLY_MINE:-0}" = "1" ]; then GH_ARGS=( "${GH_ARGS[@]}" "--author" "@me" ); fi
 
-gh issue list "${GH_ARGS[@]}" > "$RUN_DIR/issues.json"
+# Fail-CLOSED on gh issue list failure: a silently-empty issues.json would
+# fool every downstream phase into thinking the repo has zero open issues,
+# which masks API/network breakage as a "nothing to cluster" no-op.
+if ! gh issue list "${GH_ARGS[@]}" > "$RUN_DIR/issues.json"; then
+  echo "error: gh issue list failed (rc=$?); cannot proceed without issue pool" >&2
+  exit 2
+fi
 
 # Body-cap each issue body at 64 KiB (constraints.md T1 — ReDoS threat boundary)
 jq -c 'map(.body |= (.[0:65536]))' "$RUN_DIR/issues.json" > "$RUN_DIR/issues.json.tmp" \
@@ -252,13 +288,23 @@ jq -c 'map(.body |= (.[0:65536]))' "$RUN_DIR/issues.json" > "$RUN_DIR/issues.jso
 : > "$RUN_DIR/refuse-list.txt"
 
 # Secret-scan each body (security.md §Q5) — fail-CLOSED on rc>=2 means add to refuse-list
+# Bodies are base64-encoded in jq so embedded newlines do not break the TSV
+# read loop. The earlier `\(.body)` form leaked raw multi-line bodies into the
+# `while IFS=$'\t' read -r N BODY` loop, where only the first body line landed
+# in BODY and subsequent body lines re-fed into the loop where the
+# `case "$N" in *[!0-9]*) continue ;;` arm silently dropped them — secrets on
+# body lines 2+ passed through the fail-CLOSED scanner.
 if command -v uberdev_run_secret_scan_stdin >/dev/null 2>&1; then
-  # Emit one TSV line per issue: number<TAB>body, then read into N + BODY variables
-  jq -r '.[] | "\(.number)\t\(.body)"' "$RUN_DIR/issues.json" \
-    | while IFS=$'\t' read -r N BODY; do
+  jq -r '.[] | "\(.number)\t\(.body | @base64)"' "$RUN_DIR/issues.json" \
+    | while IFS=$'\t' read -r N BODY_B64; do
         case "$N" in
           ''|*[!0-9]*) continue ;;
         esac
+        BODY="$(printf '%s' "$BODY_B64" | base64 -d 2>/dev/null)" || {
+          echo "warning: issue #$N base64 decode failed; redacting to refuse-list" >&2
+          printf '%s\n' "$N" >> "$RUN_DIR/refuse-list.txt"
+          continue
+        }
         printf '%s' "$BODY" | uberdev_run_secret_scan_stdin >/dev/null 2>&1
         rc=$?
         if [ "$rc" -ge 2 ]; then
@@ -291,9 +337,11 @@ if [ -s "$RUN_DIR/refuse-list.txt" ]; then
   sort -u -n "$RUN_DIR/refuse-list.txt" -o "$RUN_DIR/refuse-list.txt" 2>/dev/null || :
 fi
 
-# Update TOTAL_ISSUES in run-state.txt — rewrite-from-template (safest cross-platform)
+# Update TOTAL_ISSUES in run-state.txt — rewrite-from-template (safest cross-platform).
+# mktemp failure is fail-CLOSED: run-state.txt is the cross-phase rendezvous
+# point. Without TOTAL_ISSUES every subsequent phase reads zero.
 TOTAL="$(jq 'length' "$RUN_DIR/issues.json" 2>/dev/null || echo 0)"
-RS_TMP="$(mktemp)"
+RS_TMP="$(mktemp)" || { echo "error: mktemp failed for run-state rewrite (rc=$?)" >&2; exit 2; }
 while IFS='=' read -r k v; do
   case "$k" in
     TOTAL_ISSUES) printf 'TOTAL_ISSUES=%s\n' "$TOTAL" ;;
@@ -364,8 +412,10 @@ while [ "$i" -lt "$CHUNK_COUNT" ]; do
   i=$(( i + 1 ))
 done
 
-# Update CHUNK_COUNT in run-state.txt (rewrite-from-template)
-RS_TMP="$(mktemp)"
+# Update CHUNK_COUNT in run-state.txt (rewrite-from-template).
+# mktemp failure fail-CLOSED — same rationale as Phase 1: run-state.txt is
+# the cross-phase contract.
+RS_TMP="$(mktemp)" || { echo "error: mktemp failed for run-state rewrite (rc=$?)" >&2; exit 2; }
 while IFS='=' read -r k v; do
   case "$k" in
     CHUNK_COUNT) printf 'CHUNK_COUNT=%s\n' "$CHUNK_COUNT" ;;
@@ -453,24 +503,19 @@ if [ "${TOTAL_ISSUES:-0}" -lt $((2 * CHUNK_SIZE)) ]; then
   exit 0
 fi
 
-# Aggregate all chunk YAMLs into a single JSON array for the meta-prompt
+# Aggregate per-chunk YAMLs as `{"chunk": <stem>, "yaml": <raw text>}` records
+# — the schema build_meta_prompt() expects (cluster_propose.py:227-259). The
+# earlier flat-clusters array left every envelope sourcing `chunk-unknown` and
+# every yaml body empty, silently turning the cross-chunk meta-pass into a no-op.
 python3 - "$RUN_DIR" > "$RUN_DIR/all-analyses.json" <<'PY'
-import json, sys, pathlib
-try:
-    import yaml
-except ImportError:
-    print('[]')
-    sys.exit(0)
+import json
+import pathlib
+import sys
 run_dir = pathlib.Path(sys.argv[1])
-clusters = []
+records = []
 for yf in sorted((run_dir / "analyses").glob("*.yaml")):
-    try:
-        data = yaml.safe_load(yf.read_text()) or {}
-    except Exception:
-        continue
-    for c in data.get("clusters", []) or []:
-        clusters.append(c)
-print(json.dumps(clusters))
+    records.append({"chunk": yf.stem, "yaml": yf.read_text()})
+print(json.dumps(records))
 PY
 
 # Build the meta-pass prompt
@@ -579,19 +624,30 @@ if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/secret-scan.sh" ]; then
   . "${CLAUDE_PLUGIN_ROOT}/lib/secret-scan.sh"
 fi
 
-# Provision the folded label (fail-soft; description <=100 chars per memory project_uberdev_label_desc_100char_limit)
+# Provision the folded label — fail-CLOSED: if the label cannot be created or
+# updated, every subsequent `gh issue edit --add-label "folded"` would silently
+# omit the label and break Phase 5's idempotency contract. Description ≤100
+# chars per memory project_uberdev_label_desc_100char_limit.
 LABEL_DESC="Closed as semantic duplicate by /uberdev:cluster; reversible via gh issue reopen."
-gh label create --force "folded" \
+if ! gh label create --force "folded" \
   --color "C5DEF5" \
-  --description "$LABEL_DESC" 2>&1 \
-  || echo "warning: gh label create failed; continuing fail-soft" >&2
+  --description "$LABEL_DESC" >/dev/null 2>&1; then
+  echo "error: gh label create 'folded' failed; Phase 5 cannot label folded duplicates correctly" >&2
+  exit 2
+fi
 
 WRITES=0
 : > "$RUN_DIR/ledger.jsonl"
 touch "$RUN_DIR/ledger.jsonl"
 
-# Per-cluster loop — break on MAX_FOLD_PER_RUN cap
-jq -c '.[]' "$RUN_DIR/clusters-filtered.json" | while read -r cluster; do
+# Per-cluster loop — break on MAX_FOLD_PER_RUN cap.
+# Process substitution `done < <(jq ...)` keeps the loop body in the parent
+# shell so WRITES accumulates across iterations. The earlier `jq | while`
+# pipeline ran the loop body in a subshell, so every `WRITES=$(( WRITES + 1 ))`
+# died at end-of-subshell and the cap check `[ "$WRITES" -ge "$MAX_FOLD_PER_RUN" ]`
+# always read the initialised 0 — silently breaking the cap and reporting
+# `WRITES=0` in the final DISPATCH line.
+while IFS= read -r cluster; do
   if [ "$WRITES" -ge "${MAX_FOLD_PER_RUN:-30}" ]; then
     echo "CB: MAX_FOLD_PER_RUN tripped at $WRITES"
     break
@@ -636,8 +692,10 @@ jq -c '.[]' "$RUN_DIR/clusters-filtered.json" | while read -r cluster; do
     fi
   fi
 
-  # Per-member TOCTOU re-check (security.md §Q4) + close
-  printf '%s' "$cluster" | jq -r '.members[]' | while read -r M; do
+  # Per-member TOCTOU re-check (security.md §Q4) + close.
+  # Inner process substitution `done < <(printf | jq)` keeps WRITES in the
+  # outer loop body's shell — same trap as the outer pipe-into-while.
+  while IFS= read -r M; do
     case "$M" in
       *[!0-9]*|"") continue ;;
     esac
@@ -664,8 +722,14 @@ jq -c '.[]' "$RUN_DIR/clusters-filtered.json" | while read -r cluster; do
       continue
     fi
 
-    # Build the close-comment via mktemp + secret-scan before posting
-    COMMENT_FILE="$(mktemp)"
+    # Build the close-comment via mktemp + secret-scan before posting.
+    # mktemp failure is fail-CLOSED at the per-iteration boundary — we cannot
+    # safely write a comment without a temp file (security.md §Q2 forbids
+    # `gh issue close --comment "$VAR"`).
+    COMMENT_FILE="$(mktemp)" || {
+      echo "warning: mktemp failed for #$M comment; skipping fold (rc=$?)" >&2
+      continue
+    }
     printf 'Folded into #%s by /uberdev:cluster.\n\nRationale (confidence %.2f): %s\n' \
       "$LEAD" "$CONF" "$RATIONALE" > "$COMMENT_FILE"
 
@@ -677,18 +741,33 @@ jq -c '.[]' "$RUN_DIR/clusters-filtered.json" | while read -r cluster; do
       fi
     fi
 
-    # Close with comment from file — NEVER --body "$VAR"
-    gh issue close "$M" --repo "$REPO_SLUG" --reason "not planned" \
-      --comment "$(cat "$COMMENT_FILE")" || true
-    gh issue edit "$M" --repo "$REPO_SLUG" --add-label "folded" || true
-    rm -f "$COMMENT_FILE"
+    # Close with comment from file — NEVER --body "$VAR".
+    # Capture rc so a failed close does NOT count as a successful fold and we
+    # do not race ahead to label / ledger. Failed-close branch logs and
+    # continues to the next member — close is per-issue and recoverable.
+    if gh issue close "$M" --repo "$REPO_SLUG" --reason "not planned" \
+         --comment "$(cat "$COMMENT_FILE")"; then
+      if ! gh issue edit "$M" --repo "$REPO_SLUG" --add-label "folded"; then
+        echo "warning: gh issue edit --add-label folded for #$M failed; close succeeded — manual relabel required" >&2
+      fi
+      rm -f "$COMMENT_FILE"
+      WRITES=$(( WRITES + 1 ))
+      sleep 1
+    else
+      rc=$?
+      echo "warning: gh issue close #$M failed (rc=$rc); skipping label + ledger for this member" >&2
+      rm -f "$COMMENT_FILE"
+      continue
+    fi
+  done < <(printf '%s' "$cluster" | jq -r '.members[]')
 
-    WRITES=$(( WRITES + 1 ))
-    sleep 1
-  done
-
-  # Append "Folded children" section + HTML-comment marker on the lead body
-  LEAD_NEW_FILE="$(mktemp)"
+  # Append "Folded children" section + HTML-comment marker on the lead body.
+  # mktemp failure here is fail-CLOSED at the cluster boundary — without the
+  # marker we cannot satisfy idempotency layer (b) on the next run.
+  LEAD_NEW_FILE="$(mktemp)" || {
+    echo "warning: mktemp failed for lead #$LEAD body update; skipping lead-body marker (rc=$?)" >&2
+    continue
+  }
   {
     printf '%s\n\n' "$LEAD_BODY"
     printf '<!-- uberdev:cluster-fold lead=%s members=%s fingerprint=%s -->\n' \
@@ -705,21 +784,36 @@ jq -c '.[]' "$RUN_DIR/clusters-filtered.json" | while read -r cluster; do
     fi
   fi
   if [ "$LEAD_BODY_SAFE" = "1" ]; then
-    # Use --body-file for the lead-body edit (security.md §Q2 forbids the unsafe variable form)
-    gh issue edit "$LEAD" --repo "$REPO_SLUG" --body-file "$LEAD_NEW_FILE" || true
+    # Use --body-file for the lead-body edit (security.md §Q2 forbids the unsafe variable form).
+    # A failed lead-body update is a hard idempotency break: without the
+    # HTML-comment marker, a re-run will re-fold the same members. Log + skip
+    # the ledger append for THIS cluster (the per-member closes already
+    # landed; the cluster is partially complete and a re-run must re-attempt
+    # the body marker).
+    if ! gh issue edit "$LEAD" --repo "$REPO_SLUG" --body-file "$LEAD_NEW_FILE"; then
+      echo "warning: gh issue edit --body-file for lead #$LEAD failed (rc=$?); skipping ledger append" >&2
+      rm -f "$LEAD_NEW_FILE"
+      continue
+    fi
   fi
   rm -f "$LEAD_NEW_FILE"
   WRITES=$(( WRITES + 1 ))
 
-  # Append to ledger.jsonl — JSON-encode the members list
+  # Append to ledger.jsonl — JSON-encode the members list. Ledger append
+  # failure is fail-CLOSED: a missing ledger row means a re-run will re-fold
+  # the same cluster (idempotency layer (a) breaks); abort the whole Phase 5
+  # so the operator can investigate FS state before any more writes land.
   MEMBERS_JSON="$(printf '%s' "$cluster" | jq -c '.members')"
   TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  printf '{"run_id":"%s","lead":%s,"members":%s,"fingerprint":"%s","confidence":%s,"timestamp":"%s"}\n' \
-    "$RUN_ID" "$LEAD" "$MEMBERS_JSON" "$FP" "$CONF" "$TS" \
-    >> "$RUN_DIR/ledger.jsonl"
+  if ! printf '{"run_id":"%s","lead":%s,"members":%s,"fingerprint":"%s","confidence":%s,"timestamp":"%s"}\n' \
+       "$RUN_ID" "$LEAD" "$MEMBERS_JSON" "$FP" "$CONF" "$TS" \
+       >> "$RUN_DIR/ledger.jsonl"; then
+    echo "error: ledger append failed for cluster $LEAD (rc=$?); aborting Phase 5 to avoid double-folds on re-run" >&2
+    exit 2
+  fi
 
   sleep 1
-done
+done < <(jq -c '.[]' "$RUN_DIR/clusters-filtered.json")
 
 printf 'OK\n' > "$RUN_DIR/trust-signal.txt"
 echo "DISPATCH: phase=execute WRITES=$WRITES LEDGER=$RUN_DIR/ledger.jsonl"

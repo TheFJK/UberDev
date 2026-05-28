@@ -162,7 +162,24 @@ def render_cluster(cluster: dict) -> str:
 
     Returns the block including the trailing blank line so consecutive blocks
     in `main()` are visually separated in proposals.md.
+
+    Validates the cluster shape at the boundary so missing/wrong-typed keys
+    raise a clear contract violation rather than a deep KeyError/ValueError
+    from inside cell()/fingerprint16()/int()/float() helpers. Schema:
+    `{lead: int, members: list[int], rationale: str, confidence: float}`.
     """
+    if not isinstance(cluster, dict):
+        raise TypeError(
+            f"render_cluster: expected dict, got {type(cluster).__name__}"
+        )
+    for key in ("lead", "members", "rationale", "confidence"):
+        if key not in cluster:
+            raise KeyError(f"render_cluster: cluster missing required key '{key}'")
+    if not isinstance(cluster["members"], list):
+        raise TypeError(
+            "render_cluster: 'members' expected list, got "
+            f"{type(cluster['members']).__name__}"
+        )
     lead = int(cluster["lead"])
     members = [int(m) for m in cluster["members"]]
     confidence = float(cluster["confidence"])
@@ -193,7 +210,24 @@ def build_prompt(chunk: list[dict]) -> str:
     `source="github-issue-<N>"` attribute. A shared bulk envelope is a
     regression — security.md §Q1 mandates per-body envelopes so a single
     malicious body cannot contaminate the whole prompt.
+
+    Validates the chunk shape at the boundary so missing/wrong-typed
+    elements raise a clear contract violation rather than a deep KeyError
+    from inside int()/cell(). Schema:
+    `[{number: int, title: str, body: str}, ...]`.
     """
+    if not isinstance(chunk, list):
+        raise TypeError(
+            f"build_prompt: expected list, got {type(chunk).__name__}"
+        )
+    for i, issue in enumerate(chunk):
+        if not isinstance(issue, dict):
+            raise TypeError(
+                f"build_prompt: chunk[{i}] expected dict, got "
+                f"{type(issue).__name__}"
+            )
+        if "number" not in issue:
+            raise KeyError(f"build_prompt: chunk[{i}] missing required key 'number'")
     n_issues = len(chunk)
     parts = [
         f"You are analyzing {n_issues} GitHub issues for semantic clustering.",
