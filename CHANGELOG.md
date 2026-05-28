@@ -4,6 +4,17 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.4] — 2026-05-29
+
+### Changed
+- **goal-pipeline — hoisted all 8 inline `awk` state-reads into `lib/goal-state.sh` helpers** (#229, #237, #230, #234). The awk one-liners in `skills/goal-pipeline/SKILL.md` previously relied on the `-v c1=1 -v c2=2 -v c3=3` renderer-collision workaround (#222); they are now seven sourced helpers — `uberdev_goal_get_issue_state`, `uberdev_goal_issue_ts_in_state`, `uberdev_goal_pr_ts_in_state`, `uberdev_goal_pr_first_ts_in_state`, `uberdev_goal_batch_has_pr`, `uberdev_goal_count_distinct_prs`, `uberdev_goal_count_resolved_issues` — backed by an internal `_uberdev_goal_ts_in_state`. Because `lib/goal-state.sh` is **sourced, never Skill-rendered**, the helpers use clean, semantic `$1`/`$2`/`$3` field refs the renderer cannot corrupt, and the SKILL.md call sites now carry zero awk. The per-site `$ARGUMENTS`-collision rationale collapses to a single anchor on the first-wins helper.
+
+### Fixed
+- **goal-pipeline convergence no longer false-fails on macOS** (#229). `uberdev_goal_count_distinct_prs` returns a clean integer; the prior `… | sort -u | wc -l` form padded with leading spaces under macOS/BSD `wc -l`, and the convergence check compares it with `=` (string equality) against a grep-based terminal count — so the padding could falsely block convergence.
+- **goal-pipeline surfaces a failed `/review-pr` re-dispatch** (#219). The `_uberdev_goal_dispatch_review_pr` call site in the held-PR poll loop now emits an rc breadcrumb on a genuine dispatch failure (the intentional cap-reached skip stays silent) instead of swallowing the return code.
+- **`/review-pr` conflict-file extraction is renderer-safe** (#237). The executed `awk '/^UU / {print $2}'` in `commands/review-pr.md`'s multi-stage-rebase recovery used a bare `$2` the slash-arg renderer would overwrite with the PR-number argv; parameterised to `-v c2=2 … $c2`. A new `R1b` drift-guard in `tests/skill-renderer-awk-collision.test.sh` scans `commands/*.md` so the shape cannot regress (agent system prompts are excluded — they are not positionally substituted).
+- **`requesting-code-review` doc example is renderer-safe** (#232). The illustrative SHA-extraction `awk '{print $1}'` in an Example block is now `cut -d' ' -f1` — no `$N`, reads cleanly, immune to the renderer.
+
 ## [0.35.3] — 2026-05-29
 
 ### Added
