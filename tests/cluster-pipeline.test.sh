@@ -667,14 +667,11 @@ cat > "$P13_CLUSTERS" <<'EOF'
 ]
 EOF
 
-# Verbatim renderer call from SKILL.md Phase 4 (line 584-585).
-python3 "$CLUSTER_PROPOSE_PY" < "$P13_CLUSTERS" > "$P13_PROPOSALS" 2>>"$P13_STDERR"
+# SKILL.md:584-585
+python3 "$CLUSTER_PROPOSE_PY" < "$P13_CLUSTERS" > "$P13_PROPOSALS" 2>"$P13_STDERR"
 P13_RC=$?
 
-# Verbatim dryrun-exit fence from SKILL.md Phase 4 (line 590-595, preceded
-# by CLUSTERS_N + DISPATCH setup at SKILL.md:587-589). RUN_DIR is substituted
-# in; the rest of the body is identical so future drift in the DISPATCH /
-# DRY-RUN strings or the trust-signal write reds this gate.
+# SKILL.md:587-595
 P13_DRY_RC=0
 if [ "$P13_RC" = "0" ]; then
   (
@@ -693,45 +690,71 @@ if [ "$P13_RC" = "0" ]; then
   P13_DRY_RC=$?
 fi
 
+# proposals.md flags
 P13_HAS_HEADER=0
-P13_HAS_CLUSTER_LEAD=0
-P13_HAS_SECOND_LEAD=0
-P13_HAS_MARKER=0
-P13_HAS_SECOND_MARKER=0
+P13_HAS_LEAD_225=0
+P13_HAS_LEAD_300=0
+P13_HAS_MARKER_225=0
+P13_HAS_MARKER_300=0
+
+# stdout flags
 P13_HAS_DISPATCH=0
 P13_HAS_DRYRUN=0
-P13_TRUST_OK=0
 P13_CLUSTERS_N=""
+
+# trust-signal flag
+P13_TRUST_OK=0
+
 if [ -s "$P13_PROPOSALS" ]; then
   grep -qF '# Cluster proposals' "$P13_PROPOSALS" && P13_HAS_HEADER=1
   grep -qE '^### Cluster lead=#225, members=225,226,227, confidence=0\.92$' "$P13_PROPOSALS" \
-    && P13_HAS_CLUSTER_LEAD=1
+    && P13_HAS_LEAD_225=1
   grep -qE '^### Cluster lead=#300, members=300,301, confidence=0\.88$' "$P13_PROPOSALS" \
-    && P13_HAS_SECOND_LEAD=1
+    && P13_HAS_LEAD_300=1
   grep -qE '<!-- uberdev:cluster-fold lead=225 members=225,226,227 fingerprint=[0-9a-f]{16} -->' "$P13_PROPOSALS" \
-    && P13_HAS_MARKER=1
+    && P13_HAS_MARKER_225=1
   grep -qE '<!-- uberdev:cluster-fold lead=300 members=300,301 fingerprint=[0-9a-f]{16} -->' "$P13_PROPOSALS" \
-    && P13_HAS_SECOND_MARKER=1
+    && P13_HAS_MARKER_300=1
 fi
 if [ -s "$P13_STDOUT" ]; then
   grep -qF 'DISPATCH: phase=propose' "$P13_STDOUT" && P13_HAS_DISPATCH=1
   grep -qF 'DRY-RUN complete.' "$P13_STDOUT" && P13_HAS_DRYRUN=1
-  P13_CLUSTERS_N="$(grep -oE 'CLUSTERS=[0-9]+' "$P13_STDOUT" | head -1 | cut -d= -f2)"
+  P13_CLUSTERS_N="$(awk 'match($0,/CLUSTERS=[0-9]+/){print substr($0,RSTART+9,RLENGTH-9); exit}' "$P13_STDOUT")"
 fi
-if [ -s "$P13_TRUST" ] && [ "$(cat "$P13_TRUST")" = "OK" ]; then
+if [ -s "$P13_TRUST" ] && IFS= read -r p13_trust_line < "$P13_TRUST" && [ "$p13_trust_line" = "OK" ]; then
   P13_TRUST_OK=1
 fi
 
-if [ "$P13_RC" = "0" ] && [ "$P13_DRY_RC" = "0" ] \
-   && [ "$P13_HAS_HEADER" = "1" ] && [ "$P13_HAS_CLUSTER_LEAD" = "1" ] \
-   && [ "$P13_HAS_SECOND_LEAD" = "1" ] && [ "$P13_HAS_MARKER" = "1" ] \
-   && [ "$P13_HAS_SECOND_MARKER" = "1" ] \
-   && [ "$P13_HAS_DISPATCH" = "1" ] && [ "$P13_HAS_DRYRUN" = "1" ] \
-   && [ "$P13_TRUST_OK" = "1" ] && [ "$P13_CLUSTERS_N" = "2" ]; then
+p13_ok=1
+[ "$P13_RC"            = "0" ] || p13_ok=0
+[ "$P13_DRY_RC"        = "0" ] || p13_ok=0
+[ "$P13_HAS_HEADER"    = "1" ] || p13_ok=0
+[ "$P13_HAS_LEAD_225"  = "1" ] || p13_ok=0
+[ "$P13_HAS_LEAD_300"  = "1" ] || p13_ok=0
+[ "$P13_HAS_MARKER_225" = "1" ] || p13_ok=0
+[ "$P13_HAS_MARKER_300" = "1" ] || p13_ok=0
+[ "$P13_HAS_DISPATCH"  = "1" ] || p13_ok=0
+[ "$P13_HAS_DRYRUN"    = "1" ] || p13_ok=0
+[ "$P13_TRUST_OK"      = "1" ] || p13_ok=0
+[ "$P13_CLUSTERS_N"    = "2" ] || p13_ok=0
+
+if [ "$p13_ok" = "1" ]; then
   echo "  PASS  P13 proposals.md rendered (2 clusters) + dry-run trust signal OK"
   PASS=$((PASS+1))
 else
-  echo "  FAIL  P13 rc=$P13_RC dry_rc=$P13_DRY_RC header=$P13_HAS_HEADER lead225=$P13_HAS_CLUSTER_LEAD lead300=$P13_HAS_SECOND_LEAD marker225=$P13_HAS_MARKER marker300=$P13_HAS_SECOND_MARKER dispatch=$P13_HAS_DISPATCH dryrun=$P13_HAS_DRYRUN trust=$P13_TRUST_OK clusters_n='$P13_CLUSTERS_N'"
+  echo "  FAIL  P13 proposals.md / dry-run gate"
+  printf '    %s\n' \
+    "rc=$P13_RC" \
+    "dry_rc=$P13_DRY_RC" \
+    "header=$P13_HAS_HEADER" \
+    "lead225=$P13_HAS_LEAD_225" \
+    "lead300=$P13_HAS_LEAD_300" \
+    "marker225=$P13_HAS_MARKER_225" \
+    "marker300=$P13_HAS_MARKER_300" \
+    "dispatch=$P13_HAS_DISPATCH" \
+    "dryrun=$P13_HAS_DRYRUN" \
+    "trust=$P13_TRUST_OK" \
+    "clusters_n='$P13_CLUSTERS_N'"
   if [ -f "$P13_PROPOSALS" ]; then
     echo "    proposals.md:"
     sed 's/^/      /' "$P13_PROPOSALS"
