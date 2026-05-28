@@ -584,7 +584,15 @@ PY
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/cluster-pipeline/cluster_propose.py" \
   < "$RUN_DIR/clusters-filtered.json" > "$RUN_DIR/proposals.md"
 
-CLUSTERS_N="$(jq 'length' "$RUN_DIR/clusters-filtered.json" 2>/dev/null || echo 0)"
+# CLUSTERS drives the DISPATCH contract the orchestrator reads. A crashed or
+# partial Phase-4 aggregation (above) leaves clusters-filtered.json missing or
+# malformed; the old `2>/dev/null || echo 0` masked that as CLUSTERS=0, which the
+# orchestrator cannot tell apart from a legitimate empty run. Hard-fail instead.
+# (A genuinely empty run still emits valid `[]`, so jq succeeds with CLUSTERS=0.)
+if ! CLUSTERS_N="$(jq 'length' "$RUN_DIR/clusters-filtered.json")"; then
+  echo "cluster: FATAL - cannot read cluster count from $RUN_DIR/clusters-filtered.json (Phase 4 aggregation produced no valid JSON); aborting instead of dispatching CLUSTERS=0" >&2
+  exit 2
+fi
 echo "DISPATCH: phase=propose PROPOSALS=$RUN_DIR/proposals.md CLUSTERS=$CLUSTERS_N"
 
 if [ "${MODE:-dryrun}" = "dryrun" ]; then
