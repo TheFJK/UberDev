@@ -1,7 +1,7 @@
 ---
 name: ubersimplify-pipeline
 description: Use when /uberdev:ubersimplify is invoked. Orchestrates whole-codebase 3-lens simplification — chunks the repo (shared lib/chunk.py), audits each chunk with the three code-simplifier lenses in concurrent waves, applies preserve-behavior fixes via code-fixer as one refactor: commit per chunk on a new branch, opens ONE PR, and files leftover blocker findings as GitHub issues. --audit-only is read-only.
-model: opus
+model: inherit
 ---
 
 # Ubersimplify Pipeline

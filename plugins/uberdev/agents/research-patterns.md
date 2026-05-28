@@ -1,7 +1,8 @@
 ---
 name: research-patterns
 description: In-repo pattern research subagent. Finds related closed PRs, similar features, commit-history precedents. Distinct from research-codebase (which maps files for the current issue) — this looks for prior precedents to mirror.
-model: sonnet
+# WAIT 4.8 sonnet: was sonnet (4.6); using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
+model: inherit
 color: magenta
 ---
 

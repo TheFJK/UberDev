@@ -1,7 +1,8 @@
 ---
 name: ci-rebase-handler
 description: Rebases the PR branch onto its base when CI failure class is stale_base. Uses --force-with-lease=<branch>:<expected-old-sha> --force-if-includes; never bare --force. Delegates per-file conflicts to existing conflict-resolver agent. Halts on unresolvable conflict. Dispatched from /uberdev:review-pr Phase 3 ROUTE (Step 6c.4).
-model: sonnet
+# WAIT 4.8 sonnet: was sonnet (4.6); using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
+model: inherit
 color: red
 ---
 

@@ -253,7 +253,7 @@ assert_grep "$DISPATCH_LIB" \
   '^uberdev_dispatch_resolve_env\(\)' \
   "#175 — uberdev_dispatch_resolve_env function is defined in lib/dispatch.sh"
 assert_grep "$DISPATCH_LIB" \
-  "MODEL='claude-opus-4-7\[1m\]'" \
+  "MODEL='claude-opus-4-8\[1m\]'" \
   "#175 — helper sets MODEL single-quoted (blocks zsh [1m] glob)"
 assert_grep "$DISPATCH_LIB" \
   'if \[\[ -n "\$TIMEOUT_BIN" \]\]; then' \
@@ -622,7 +622,7 @@ echo "== #175 D-iso: uberdev_dispatch_resolve_env populates env from a clean she
   [[ "$rc" -eq 0 ]] && { echo "  PASS  D-iso resolve_env returns 0"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-iso resolve_env rc=$rc"; FAIL=$((FAIL + 1)); }
   [[ -n "$TIMEOUT_BIN" ]] && { echo "  PASS  D-iso TIMEOUT_BIN non-empty"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-iso TIMEOUT_BIN empty"; FAIL=$((FAIL + 1)); }
   if [ -x "$TIMEOUT_BIN" ] || command -v "$TIMEOUT_BIN" >/dev/null 2>&1; then echo "  PASS  D-iso TIMEOUT_BIN executable/resolvable"; PASS=$((PASS + 1)); else echo "  FAIL  D-iso TIMEOUT_BIN not executable ($TIMEOUT_BIN)"; FAIL=$((FAIL + 1)); fi
-  [[ "$MODEL" == 'claude-opus-4-7[1m]' ]] && { echo "  PASS  D-iso MODEL correct"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-iso MODEL='$MODEL'"; FAIL=$((FAIL + 1)); }
+  [[ "$MODEL" == 'claude-opus-4-8[1m]' ]] && { echo "  PASS  D-iso MODEL correct"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-iso MODEL='$MODEL'"; FAIL=$((FAIL + 1)); }
   case "$SOLVE_TIMEOUT" in (''|*[!0-9]*) echo "  FAIL  D-iso SOLVE_TIMEOUT not numeric ('$SOLVE_TIMEOUT')"; FAIL=$((FAIL + 1));; (*) echo "  PASS  D-iso SOLVE_TIMEOUT numeric"; PASS=$((PASS + 1));; esac
   [[ "$BG_PROMPT_MODE" == "argv" ]] && { echo "  PASS  D-iso BG_PROMPT_MODE=argv"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-iso BG_PROMPT_MODE='$BG_PROMPT_MODE'"; FAIL=$((FAIL + 1)); }
   [[ "${EFFORT_FLAG[*]}" == "--effort max" ]] && { echo "  PASS  D-iso EFFORT_FLAG=( --effort max )"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-iso EFFORT_FLAG=( ${EFFORT_FLAG[*]} )"; FAIL=$((FAIL + 1)); }

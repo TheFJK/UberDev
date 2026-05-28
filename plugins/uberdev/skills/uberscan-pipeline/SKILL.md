@@ -1,7 +1,7 @@
 ---
 name: uberscan-pipeline
 description: Use when /uberdev:uberscan is invoked. Orchestrates a read-only whole-codebase audit by chunking the repo, running the review-pr Phase-1 reviewer fleet (6 agents) per chunk in concurrent waves, executing a repo-global Semgrep SAST + test-coverage pass, aggregating findings into a markdown report, and filing deduped GitHub issues. Never writes code.
-model: opus
+model: inherit
 ---
 
 # Uberscan Pipeline

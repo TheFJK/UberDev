@@ -1,7 +1,7 @@
 ---
 name: testers-monitor-primary
 description: Primary monitor for /uberdev:testers. Reads all 6 personas' findings from the previous wave, generates per-persona follow-up prompts for the next wave, promotes findings to verified:true when reproduced by ≥2 independent personas against the same invariant. Read-only.
-model: opus
+model: inherit
 color: blue
 allowed-tools: ["Bash(date*)", "Bash(jq*)", "Bash(sha256sum*)", "Read", "Write(.uberdev/research/*)"]
 ---

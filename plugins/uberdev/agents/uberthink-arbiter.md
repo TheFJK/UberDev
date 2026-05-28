@@ -1,7 +1,7 @@
 ---
 name: uberthink-arbiter
 description: dispatched by /uberthink — Wave-7 rank & deliver (pairwise Elo over floor-survivors + 4-axis sub-criteria scoring + novelty recheck + moonshot flagging); emits ranked.yaml
-model: opus
+model: inherit
 color: orange
 ---
 

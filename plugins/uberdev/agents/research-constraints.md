@@ -1,7 +1,8 @@
 ---
 name: research-constraints
 description: Hard-constraints research subagent. Reads CLAUDE.md (global + project), docs/rfc/*, docs/adr/* to surface architectural mandates and existing decisions that constrain the design space.
-model: sonnet
+# WAIT 4.8 sonnet: was sonnet (4.6); using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
+model: inherit
 color: red
 ---
 

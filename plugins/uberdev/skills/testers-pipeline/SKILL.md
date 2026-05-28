@@ -1,7 +1,7 @@
 ---
 name: testers-pipeline
 description: Use when /uberdev:testers is invoked. Orchestrates a read-only 8-agent adversarial QA audit squad (6 personas + 2 monitors) across 3 coordinated waves against a web/api/native target; routes findings into findings-to-issues.
-model: opus
+model: inherit
 ---
 
 # Testers Pipeline

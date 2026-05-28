@@ -802,7 +802,7 @@ if [ ! -r "$TTE_FILE" ]; then
   FAIL=$((FAIL + 1))
 else
   assert_grep "$TTE_FILE" '^name: trust-trail-evaluator'           "M47.1 — agent name frontmatter"
-  assert_grep "$TTE_FILE" '^model: sonnet'                          "M47.2 — agent model frontmatter"
+  assert_grep "$TTE_FILE" '^model: inherit'                          "M47.2 — agent model frontmatter"
   assert_grep "$TTE_FILE" '^description: '                           "M47.3 — agent description frontmatter non-empty"
   assert_grep "$TTE_FILE" '^## Inputs'                              "M47.4 — Inputs section present"
   assert_grep "$TTE_FILE" '^## Tools authorised'                    "M47.5 — Tools authorised section present"
@@ -820,7 +820,7 @@ if [ ! -r "$MSD_FILE" ]; then
   FAIL=$((FAIL + 1))
 else
   assert_grep "$MSD_FILE" '^name: merge-strategy-decider'           "M48.1 — agent name frontmatter"
-  assert_grep "$MSD_FILE" '^model: sonnet'                          "M48.2 — agent model frontmatter"
+  assert_grep "$MSD_FILE" '^model: inherit'                          "M48.2 — agent model frontmatter"
   assert_grep "$MSD_FILE" '^description: '                          "M48.3 — agent description frontmatter non-empty"
   assert_grep "$MSD_FILE" '^## Inputs'                              "M48.4 — Inputs section present"
   assert_grep "$MSD_FILE" '^## Tools authorised'                    "M48.5 — Tools authorised section present"

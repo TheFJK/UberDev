@@ -10,7 +10,7 @@ User's description: $ARGUMENTS
 
 **Usage:** `/issue <description> [--no-explore]`
 
-Auto-classifies → dispatches **two Task agents** in a single assistant turn (`uberdev:codebase-scout` + `uberdev:triage-scout`, both running on Sonnet) → drafts the body inline from their YAML returns → confirms with the user → creates → offers `/solve` as follow-up. Median wall-clock under 30s.
+Auto-classifies → dispatches **two Task agents** in a single assistant turn (`uberdev:codebase-scout` + `uberdev:triage-scout`, both running on inherit — the session model) → drafts the body inline from their YAML returns → confirms with the user → creates → offers `/solve` as follow-up. Median wall-clock under 30s.
 
 ## Phase 0: Detect repo + parse flags
 
@@ -25,7 +25,7 @@ REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 NO_EXPLORE=$(echo "$ARGUMENTS" | grep -qE '\-\-no-explore' && echo 1 || echo 0)
 DESC=$(echo "$ARGUMENTS" | sed -E 's/ *--no-explore//g')
 if [ "$NO_EXPLORE" = "1" ]; then
-  echo "notice: --no-explore is deprecated; the default fanout is now 2 Sonnet scouts. Removal target: v1.0.0" >&2
+  echo "notice: --no-explore is deprecated; the default fanout is now 2 scouts. Removal target: v1.0.0" >&2
 fi
 ```
 
@@ -42,16 +42,16 @@ Parse `$DESC`. Determine:
 
 > `enhancement` is a **label**, never a commit type. Titles always use `feat(scope):` / `fix(scope):` / `chore(scope):` / `refactor(scope):`.
 
-## Phase 2: Dispatch the two Sonnet scouts (single assistant turn)
+## Phase 2: Dispatch the two scouts (single assistant turn)
 
-Phase 2 dispatches **two Task agents** in a single assistant turn (one message, two `Task` tool_use blocks): `uberdev:codebase-scout` and `uberdev:triage-scout`. Both pin `model: sonnet` in their frontmatter and re-name Sonnet in their description string for audit-trail visibility. Their returns are inline YAML; nothing is persisted to disk.
+Phase 2 dispatches **two Task agents** in a single assistant turn (one message, two `Task` tool_use blocks): `uberdev:codebase-scout` and `uberdev:triage-scout`. Both pin `model: inherit` in their frontmatter, so they run on the session model (Opus 4.8 1M). Their returns are inline YAML; nothing is persisted to disk.
 
-> **Model-pinning escape hatch.** If you observe the scouts running on Opus despite their frontmatter, set `CLAUDE_CODE_SUBAGENT_MODEL=sonnet` as a global override (tracked at `affaan-m/everything-claude-code#173`).
+> **Model override.** To force a specific subagent model regardless of the session, set `CLAUDE_CODE_SUBAGENT_MODEL=<model>` as a global override (tracked at `affaan-m/everything-claude-code#173`).
 
 Each brief carries the literal resolved values for `description` (the user's `$DESC` from Phase 0), `issue_type` (from Phase 1 classification), `working_dir` (the absolute repo root), and `repo_slug` (the resolved `$REPO`).
 
-- **`uberdev:codebase-scout`** — receives `{description, issue_type, working_dir, model_hint: sonnet}` and returns YAML with `likely_area: [paths]` and (if `issue_type=fix`) `likely_root_cause: "one-line hypothesis"`. Drives the bug template's `## Likely area` and `## Likely root cause` sections.
-- **`uberdev:triage-scout`** — receives `{description, issue_type, working_dir, repo_slug, model_hint: sonnet}` and returns YAML with `duplicates: [{number, title, state}]`, `valid_labels: [...]`, `valid_scope: "..."`, `commitlint_present: true|false`. Drives the duplicate section, the `--label` flags, and the title scope. (`issue_type` is required so the scout picks the base label — `bug` for `fix`, `enhancement` for `feat` — without re-classifying.)
+- **`uberdev:codebase-scout`** — receives `{description, issue_type, working_dir, model_hint: inherit}` and returns YAML with `likely_area: [paths]` and (if `issue_type=fix`) `likely_root_cause: "one-line hypothesis"`. Drives the bug template's `## Likely area` and `## Likely root cause` sections.
+- **`uberdev:triage-scout`** — receives `{description, issue_type, working_dir, repo_slug, model_hint: inherit}` and returns YAML with `duplicates: [{number, title, state}]`, `valid_labels: [...]`, `valid_scope: "..."`, `commitlint_present: true|false`. Drives the duplicate section, the `--label` flags, and the title scope. (`issue_type` is required so the scout picks the base label — `bug` for `fix`, `enhancement` for `feat` — without re-classifying.)
 
 If the codebase scout returns `status: BLOCKED` (no real paths grounded), the main thread substitutes `"No clear area identified — defer to /brainstorm"` in the `## Likely area` section. **Never invent paths.**
 
@@ -220,4 +220,4 @@ Next step: /solve $ISSUE_NUM
 - **Always confirm** — show the full draft, wait for explicit approval before `gh issue create`.
 - **No screenshots section** — user adds those manually after creation if needed.
 - **WHAT/HOW boundary enforced** — issue body never contains an implementation checklist or fix design; that work belongs in `/uberdev:brainstorm`. Bug template's `## Likely root cause` is a causal triple (symptom/mechanism/owning code), not a file list. Feat template's `## What changes` describes externally visible result, not implementation strategy.
-- **Model-pinning escape hatch** — if you observe the scouts running on Opus despite frontmatter `model: sonnet`, set `CLAUDE_CODE_SUBAGENT_MODEL=sonnet` as a global override. Tracked at `affaan-m/everything-claude-code#173`.
+- **Model override** — to force a specific subagent model regardless of the session, set `CLAUDE_CODE_SUBAGENT_MODEL=<model>` as a global override. Tracked at `affaan-m/everything-claude-code#173`.

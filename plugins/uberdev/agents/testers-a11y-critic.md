@@ -1,7 +1,8 @@
 ---
 name: testers-a11y-critic
 description: Accessibility-critic persona for /uberdev:testers. Audits keyboard-only nav, screen-reader semantics, focus traps, color contrast, prefers-reduced-motion. Cross-references web.dev a11y guidelines. Read-only.
-model: sonnet
+# WAIT 4.8 sonnet: was sonnet (4.6); using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
+model: inherit
 color: cyan
 allowed-tools: ["Bash(curl*)", "Bash(echo*)", "Bash(date*)", "Read", "mcp__plugin_playwright_playwright__browser_navigate", "mcp__plugin_playwright_playwright__browser_press_key", "mcp__plugin_playwright_playwright__browser_take_screenshot", "mcp__plugin_playwright_playwright__browser_snapshot", "mcp__plugin_playwright_playwright__browser_evaluate", "Write(.uberdev/research/*)"]
 ---

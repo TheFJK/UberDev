@@ -1,7 +1,8 @@
 ---
 name: conflict-resolver
 description: Resolves a single conflicted file from a PR merge in a scratch worktree. Reads <ours> and <theirs> hunks; returns a textually-justified resolution or a clean refusal. One agent per conflicted file; dispatched in a SINGLE assistant turn from skills/merge-pipeline/SKILL.md Phase 3.
-model: sonnet
+# WAIT 4.8 sonnet: was sonnet (4.6); using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
+model: inherit
 color: orange
 ---
 

@@ -1,7 +1,8 @@
 ---
 name: testers-chaos-engineer
 description: Chaos-engineering persona for /uberdev:testers. Runs flows under Slow 3G, Offline, CPU 4x throttle, simulated 5xx, connection drops. Uses Chrome DevTools MCP throttling primitives. Read-only.
-model: sonnet
+# WAIT 4.8 sonnet: was sonnet (4.6); using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
+model: inherit
 color: purple
 allowed-tools: ["Bash(curl*)", "Bash(echo*)", "Bash(date*)", "Read", "mcp__plugin_playwright_playwright__browser_navigate", "mcp__plugin_playwright_playwright__browser_click", "mcp__plugin_playwright_playwright__browser_type", "mcp__plugin_playwright_playwright__browser_take_screenshot", "mcp__plugin_playwright_playwright__browser_network_requests", "mcp__plugin_playwright_playwright__browser_console_messages", "Write(.uberdev/research/*)"]
 ---
