@@ -4,6 +4,20 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.13] — 2026-05-28
+
+### Fixed
+- **`/uberdev` dispatch pairs `--dangerously-skip-permissions` with `--permission-mode bypassPermissions` so the bg UI cycle ring no longer lands on `auto` (Closes #246).** The PR #243 collapse populated `PERM_FLAG` with `--dangerously-skip-permissions` alone. In Claude Code 2.1.152+, `--dangerously-skip-permissions` bypasses permission *checks* but does NOT set `--permission-mode`; the bg session's UI cycle ring is driven by `--permission-mode`, and without an explicit setting it defaults to `auto` — exactly the mode that silently breaks Search and other agent tools (see memory `feedback_permission_tier_bypass_default`). Caught while reviewing `/ubergoal 225 226 227` cycle 1 — the bg session status bar showed `↗ auto mode on` even though argv passed `--dangerously-skip-permissions`. This is the missing other half of PR #243.
+  - `plugins/uberdev/lib/dispatch.sh` `uberdev_dispatch_resolve_env` — both `PERM_FLAG=( --dangerously-skip-permissions )` sites (the `SKIP_PERMISSIONS=1` branch and the `AUTO_PERMISSIONS=1` branch) now resolve to `PERM_FLAG=( --dangerously-skip-permissions --permission-mode bypassPermissions )`. Belt-and-suspenders: `bypassPermissions` pins the cycle-ring position so the UI doesn't default to `auto`; `--dangerously-skip-permissions` short-circuits the actual permission-check codepath. The two flags target different mechanisms and are not redundant. Affects all three dispatch backends (`_uberdev_dispatch_claude_bg`, `_uberdev_dispatch_background`, `_uberdev_dispatch_wezterm`) because they all expand `"${PERM_FLAG[@]}"` from the same resolver.
+  - Tests: `tests/dispatch-claude-bg.test.sh` — three behavioural cases ratcheted (D-perm / D-skip / D-precedence) from the bare-skip literal to the new paired literal; structural-grep `perm_flag_count` and the negative auto-mode guard updated; new bare-skip regression guard (`bare_skip_count == 0`) locks the pairing so the bare form cannot silently reappear.
+  - `tests/goal.test.sh` G20 + `tests/solve-claim.test.sh` version-bump block ratcheted to `0.34.13`.
+
+### Notes
+- Version bumped to 0.34.13 across `plugin.json`, `marketplace.json`, the README badge, `CHANGELOG.md`, `tests/goal.test.sh` G20, and `tests/solve-claim.test.sh`. Atomic version-lock surfaces — partial bump is a red CI invariant.
+- Pairs with the v0.34.9 cut that shipped PR #243 (the AUTO_PERMISSIONS collapse). Together, both halves of the bypass-tier contract are restored: argv flag AND cycle-ring position.
+
+---
+
 ## [0.34.12] — 2026-05-28
 
 ### Fixed

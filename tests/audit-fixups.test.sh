@@ -249,15 +249,31 @@ fi
 # scenario where someone deletes the line entirely instead of regressing it).
 assert_grep "$SOLVE_PIPELINE" '^[[:space:]]*PERM_DESC="default \(manual per-tool gating\)"' \
   "solve-pipeline assigns PERM_DESC=\"default (manual per-tool gating)\" in the else branch"
-# Post-#241 follow-up: AUTO_PERMISSIONS=1 now resolves to --dangerously-skip-permissions
-# (auto-mode-collapse). PERM_DESC reflects the new bypass tier; the SKIP and AUTO
-# branches BOTH emit a `bypass (--dangerously-skip-permissions; <TIER>_PERMISSIONS tier...)`
-# string — the tier-name suffix lets post-hoc grep attribute the bypass to /goal
-# (SKIP) vs /turbo --auto / /solve --auto (AUTO).
-assert_grep "$SOLVE_PIPELINE" '^[[:space:]]*PERM_DESC="bypass \(--dangerously-skip-permissions; SKIP_PERMISSIONS tier' \
-  "solve-pipeline assigns PERM_DESC=\"bypass (--dangerously-skip-permissions; SKIP_PERMISSIONS tier ...)\" in the SKIP branch"
-assert_grep "$SOLVE_PIPELINE" '^[[:space:]]*PERM_DESC="bypass \(--dangerously-skip-permissions; AUTO_PERMISSIONS tier' \
-  "solve-pipeline assigns PERM_DESC=\"bypass (--dangerously-skip-permissions; AUTO_PERMISSIONS tier ...)\" in the AUTO branch"
+# Post-#241 follow-up: AUTO_PERMISSIONS=1 now resolves to the same bypass
+# pair as SKIP_PERMISSIONS=1 (auto-mode-collapse). Post-#246 follow-up: the
+# pair is `--dangerously-skip-permissions --permission-mode bypassPermissions`
+# (the two flags target different mechanisms — runtime-check short-circuit
+# + bg UI cycle-ring pin — see plugins/uberdev/lib/dispatch.sh:192-198).
+# PERM_DESC names BOTH flags so operators reading the `Permission mode:`
+# print at dispatch time see the full bypass-pair surface. The tier-name
+# suffix (SKIP_PERMISSIONS / AUTO_PERMISSIONS) still lets post-hoc grep
+# attribute the bypass to /goal (SKIP) vs /turbo --auto / /solve --auto (AUTO).
+assert_grep "$SOLVE_PIPELINE" '^[[:space:]]*PERM_DESC="bypass \(--dangerously-skip-permissions --permission-mode bypassPermissions; SKIP_PERMISSIONS tier' \
+  "solve-pipeline assigns PERM_DESC=\"bypass (--dangerously-skip-permissions --permission-mode bypassPermissions; SKIP_PERMISSIONS tier ...)\" in the SKIP branch (#246 — names both flags)"
+assert_grep "$SOLVE_PIPELINE" '^[[:space:]]*PERM_DESC="bypass \(--dangerously-skip-permissions --permission-mode bypassPermissions; AUTO_PERMISSIONS tier' \
+  "solve-pipeline assigns PERM_DESC=\"bypass (--dangerously-skip-permissions --permission-mode bypassPermissions; AUTO_PERMISSIONS tier ...)\" in the AUTO branch (#246 — names both flags)"
+# Negative drift guard: the bare-form `--dangerously-skip-permissions;` (single
+# flag named in the parenthetical) must NOT reappear in PERM_DESC — that was
+# exactly the #246 misconception that masked the paired-flag contract from
+# operators reading the dispatch-time print. Anchor on the trailing `;` so the
+# new paired form (` --permission-mode bypassPermissions; `) does not red-flag.
+if grep -qE '^[[:space:]]*PERM_DESC="bypass \(--dangerously-skip-permissions;' "$SOLVE_PIPELINE"; then
+  echo "  FAIL  PERM_DESC contains a bare \"--dangerously-skip-permissions;\" form — names only one flag, hides the paired --permission-mode bypassPermissions from operators (#246 regression)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  PERM_DESC has no bare \"--dangerously-skip-permissions;\" form (paired flags surfaced to operators per #246)"
+  PASS=$((PASS + 1))
+fi
 assert_grep "$SOLVE_PIPELINE" '^echo "Permission mode: \$PERM_DESC"' \
   "solve-pipeline echoes 'Permission mode: \$PERM_DESC' (single-var interpolation, no nested substitution)"
 

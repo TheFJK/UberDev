@@ -133,27 +133,42 @@ assert_grep "$DISPATCH_LIB" \
   '^[[:space:]]*PERM_FLAG=\(\)$' \
   "uberdev_dispatch_resolve_env binds PERM_FLAG as an empty bash+zsh array — same zsh-word-split rationale as EFFORT_FLAG (v0.22.2 fix)"
 # Structural floor for the PERM_FLAG resolver: the count==2 assertion below is the
-# canonical "both opt-in tiers populate the bypass flag" check (strictly dominates
-# the ≥1 single-match form — a redundant assert_grep was dropped post-#243 simplify
-# pass). Pair it with the negative regression guard ("--permission-mode auto MUST
-# NOT appear at runtime") to catch both regression directions.
+# canonical "both opt-in tiers populate the bypass-pair literal" check. Pair it with
+# the negative regression guard ("--permission-mode auto MUST NOT appear at runtime")
+# to catch both regression directions.
 # Count: 2 occurrences expected — the SKIP branch (line ~196) and the AUTO branch
 # (line ~198) of uberdev_dispatch_resolve_env. Asserts that AUTO did not regress
 # back to --permission-mode auto and that the if/elif structure is preserved for
 # audit-log observability.
-perm_flag_count=$(grep -c 'PERM_FLAG=( --dangerously-skip-permissions )' "$DISPATCH_LIB")
+# #246 (post-#243 follow-up): --dangerously-skip-permissions bypasses permission *checks*
+# but does NOT set --permission-mode; without an explicit --permission-mode the bg session
+# UI cycle defaults to `auto`, which silently breaks Search and other agent tools. Pair the
+# two flags so the cycle-ring lands on bypassPermissions AND the checks are short-circuited.
+perm_flag_count=$(grep -c 'PERM_FLAG=( --dangerously-skip-permissions --permission-mode bypassPermissions )' "$DISPATCH_LIB")
 if [ "$perm_flag_count" -eq 2 ]; then
-  echo "  PASS  dispatch.sh has 2 PERM_FLAG=( --dangerously-skip-permissions ) sites (SKIP + AUTO branches, both bypass)"
+  echo "  PASS  dispatch.sh has 2 PERM_FLAG=( --dangerously-skip-permissions --permission-mode bypassPermissions ) sites (SKIP + AUTO branches, both pair the danger-skip + bypass-mode)"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  dispatch.sh has $perm_flag_count PERM_FLAG=( --dangerously-skip-permissions ) sites (expected exactly 2 — SKIP + AUTO branches)"
+  echo "  FAIL  dispatch.sh has $perm_flag_count PERM_FLAG=( --dangerously-skip-permissions --permission-mode bypassPermissions ) sites (expected exactly 2 — SKIP + AUTO branches; #246 fix)"
+  FAIL=$((FAIL + 1))
+fi
+# Regression guard #246: the bare `--dangerously-skip-permissions` form (without the
+# `--permission-mode bypassPermissions` companion) must NOT appear as a PERM_FLAG
+# assignment at runtime. The bg-session UI cycle defaults to `auto` when no
+# --permission-mode is set, which silently breaks Search/etc. — see issue #246.
+bare_skip_count=$(grep -cE '^[[:space:]]*PERM_FLAG=\( --dangerously-skip-permissions \)[[:space:]]*$' "$DISPATCH_LIB")
+if [ "$bare_skip_count" -eq 0 ]; then
+  echo "  PASS  dispatch.sh has no bare PERM_FLAG=( --dangerously-skip-permissions ) assignments — #246 pair-with-bypass regression guard intact"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  dispatch.sh has $bare_skip_count bare PERM_FLAG=( --dangerously-skip-permissions ) assignments — must be paired with --permission-mode bypassPermissions (#246)"
   FAIL=$((FAIL + 1))
 fi
 # Regression guard: --permission-mode auto MUST NOT appear in the runtime resolver
 # (doc comments mentioning the historical mapping are fine; the executable PERM_FLAG=
 # assignment regressed in the past and the test catches a re-introduction).
 if grep -qE '^[[:space:]]*PERM_FLAG=\( --permission-mode auto \)' "$DISPATCH_LIB"; then
-  echo "  FAIL  dispatch.sh re-introduced PERM_FLAG=( --permission-mode auto ) — auto-mode is dead in practice (post-#241 follow-up); both branches must yield --dangerously-skip-permissions"
+  echo "  FAIL  dispatch.sh re-introduced PERM_FLAG=( --permission-mode auto ) — auto-mode is dead in practice (post-#241 follow-up); both branches must yield --dangerously-skip-permissions --permission-mode bypassPermissions"
   FAIL=$((FAIL + 1))
 else
   echo "  PASS  dispatch.sh does NOT assign PERM_FLAG=( --permission-mode auto ) at runtime (auto-mode-collapse regression guard intact)"
@@ -389,8 +404,8 @@ rm -f "$TALLY_FILE"
 
 echo "== Positive: Phase A constants + hardcoded BG_PROMPT_MODE =="
 assert_grep "$SOLVE_PIPELINE" \
-  '_uberdev_require_claude_version "2.1.139"' \
-  "Phase A enforces claude --version >= 2.1.139 (hard gate)"
+  '_uberdev_require_claude_version "2.1.152"' \
+  "Phase A enforces claude --version >= 2.1.152 (hard gate; bumped from 2.1.139 for #246 — --permission-mode bypassPermissions requires 2.1.152+)"
 assert_grep "$SOLVE_PIPELINE" \
   'npm i -g @anthropic-ai/claude-code' \
   "version-gate error includes actionable npm install pointer"
@@ -616,7 +631,7 @@ echo "== #175 D-iso: uberdev_dispatch_resolve_env populates env from a clean she
 ) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
 
 echo
-echo "== #175 D-perm: AUTO_PERMISSIONS=1 yields --dangerously-skip-permissions (post-#241 follow-up: AUTO remapped from --permission-mode auto to bypass) =="
+echo "== #246 D-perm: AUTO_PERMISSIONS=1 yields --dangerously-skip-permissions --permission-mode bypassPermissions (#243 + #246 pairing — bypass-mode pins the bg UI cycle ring; danger-skip short-circuits the checks) =="
 (
   set +u
   unset TIMEOUT_BIN SOLVE_TIMEOUT MODEL BG_PROMPT_MODE PERM_FLAG EFFORT_FLAG EFFORT_LEVEL
@@ -624,12 +639,12 @@ echo "== #175 D-perm: AUTO_PERMISSIONS=1 yields --dangerously-skip-permissions (
   # shellcheck disable=SC1090
   . "$DISPATCH_LIB"
   uberdev_dispatch_resolve_env
-  [[ "${PERM_FLAG[*]}" == "--dangerously-skip-permissions" ]] && { echo "  PASS  D-perm AUTO_PERMISSIONS=1 -> PERM_FLAG=( --dangerously-skip-permissions )"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-perm PERM_FLAG=( ${PERM_FLAG[*]} ) — expected --dangerously-skip-permissions"; FAIL=$((FAIL + 1)); }
+  [[ "${PERM_FLAG[*]}" == "--dangerously-skip-permissions --permission-mode bypassPermissions" ]] && { echo "  PASS  D-perm AUTO_PERMISSIONS=1 -> PERM_FLAG=( --dangerously-skip-permissions --permission-mode bypassPermissions )"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-perm PERM_FLAG=( ${PERM_FLAG[*]} ) — expected --dangerously-skip-permissions --permission-mode bypassPermissions (#246)"; FAIL=$((FAIL + 1)); }
   printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
 ) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
 
 echo
-echo "== #241 D-skip: SKIP_PERMISSIONS=1 yields --dangerously-skip-permissions =="
+echo "== #246 D-skip: SKIP_PERMISSIONS=1 yields --dangerously-skip-permissions --permission-mode bypassPermissions =="
 (
   set +u
   unset TIMEOUT_BIN SOLVE_TIMEOUT MODEL BG_PROMPT_MODE PERM_FLAG EFFORT_FLAG AUTO_PERMISSIONS EFFORT_LEVEL
@@ -637,14 +652,14 @@ echo "== #241 D-skip: SKIP_PERMISSIONS=1 yields --dangerously-skip-permissions =
   # shellcheck disable=SC1090
   . "$DISPATCH_LIB"
   uberdev_dispatch_resolve_env
-  [[ "${PERM_FLAG[*]}" == "--dangerously-skip-permissions" ]] \
-    && { echo "  PASS  D-skip PERM_FLAG=( --dangerously-skip-permissions )"; PASS=$((PASS + 1)); } \
-    || { echo "  FAIL  D-skip PERM_FLAG=( ${PERM_FLAG[*]} )"; FAIL=$((FAIL + 1)); }
+  [[ "${PERM_FLAG[*]}" == "--dangerously-skip-permissions --permission-mode bypassPermissions" ]] \
+    && { echo "  PASS  D-skip PERM_FLAG=( --dangerously-skip-permissions --permission-mode bypassPermissions )"; PASS=$((PASS + 1)); } \
+    || { echo "  FAIL  D-skip PERM_FLAG=( ${PERM_FLAG[*]} ) — expected --dangerously-skip-permissions --permission-mode bypassPermissions (#246)"; FAIL=$((FAIL + 1)); }
   printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
 ) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
 
 echo
-echo "== #241 D-precedence: SKIP_PERMISSIONS=1 + AUTO_PERMISSIONS=1 -> both yield --dangerously-skip-permissions (post-follow-up: collapsed tier; precedence ordering preserved for observability only) =="
+echo "== #246 D-precedence: SKIP_PERMISSIONS=1 + AUTO_PERMISSIONS=1 -> both yield --dangerously-skip-permissions --permission-mode bypassPermissions (collapsed tier; precedence ordering preserved for observability only) =="
 (
   set +u
   unset TIMEOUT_BIN SOLVE_TIMEOUT MODEL BG_PROMPT_MODE PERM_FLAG EFFORT_FLAG EFFORT_LEVEL
@@ -652,9 +667,9 @@ echo "== #241 D-precedence: SKIP_PERMISSIONS=1 + AUTO_PERMISSIONS=1 -> both yiel
   # shellcheck disable=SC1090
   . "$DISPATCH_LIB"
   uberdev_dispatch_resolve_env
-  [[ "${PERM_FLAG[*]}" == "--dangerously-skip-permissions" ]] \
-    && { echo "  PASS  D-precedence both tiers yield --dangerously-skip-permissions"; PASS=$((PASS + 1)); } \
-    || { echo "  FAIL  D-precedence PERM_FLAG=( ${PERM_FLAG[*]} )"; FAIL=$((FAIL + 1)); }
+  [[ "${PERM_FLAG[*]}" == "--dangerously-skip-permissions --permission-mode bypassPermissions" ]] \
+    && { echo "  PASS  D-precedence both tiers yield --dangerously-skip-permissions --permission-mode bypassPermissions"; PASS=$((PASS + 1)); } \
+    || { echo "  FAIL  D-precedence PERM_FLAG=( ${PERM_FLAG[*]} ) — expected --dangerously-skip-permissions --permission-mode bypassPermissions (#246)"; FAIL=$((FAIL + 1)); }
   printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
 ) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
 
