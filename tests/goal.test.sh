@@ -15,7 +15,7 @@
 #   G8   Circuit breaker: stuck_loop (4h wall-clock)
 #   G9   Circuit breaker: merge_failed
 #   G10  Convergence happy-path (goal_converged + exit 0)
-#   G11  All 6 audit events present
+#   G11  All 12 audit events present
 #   G12  Alias provisioning across 5 surfaces (T5 — see notes)
 #   G13  claim_collision soft-fail
 #   G14  Blocker overflow (red-held + first-10 truncation, no goal halt)
