@@ -378,7 +378,7 @@ uberdev_goal_state_init() {
 uberdev_goal_audit() {
   local event="$1" payload="$2"
   case "$event" in
-    goal_dispatched|goal_pr_transition|goal_unblock_triggered|goal_cycle_completed|goal_converged|goal_circuit_breaker|goal_merge_deferred|goal_review_pr_deferred|goal_review_grace|goal_reaper_kill|goal_reaper_skipped) ;;
+    goal_dispatched|goal_pr_transition|goal_unblock_triggered|goal_cycle_completed|goal_converged|goal_circuit_breaker|goal_merge_deferred|goal_review_pr_deferred|goal_review_grace|goal_reaper_kill|goal_reaper_skipped|goal_issue_closed_without_pr) ;;
     *) printf 'goal-state: unknown event %s\n' "$event" >&2; return 1 ;;
   esac
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
@@ -439,7 +439,7 @@ uberdev_goal_issue_state_transition() {
   _uberdev_goal_validate_id "$goal_id" || return 1   # #156
   _uberdev_goal_validate_int "$issue" || return 1
   case "$from->$to" in
-    "input->dispatched"|"input->solving"|"dispatched->solving"|"dispatched->failed"|"solving->pr-pushed"|"pr-pushed->resolved"|"solving->failed"|"pr-pushed->failed") ;;
+    "input->dispatched"|"input->solving"|"dispatched->solving"|"dispatched->failed"|"solving->pr-pushed"|"pr-pushed->resolved"|"solving->failed"|"pr-pushed->failed"|"solving->resolved-by-no-action") ;;
     *) printf 'goal-state: invalid issue transition %s->%s\n' "$from" "$to" >&2; return 2 ;;
   esac
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"

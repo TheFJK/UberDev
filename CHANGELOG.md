@@ -4,6 +4,24 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.12] — 2026-05-28
+
+### Fixed
+- **`/uberdev:goal` mis-classifies orchestrator-driven close-without-PR as `failed` (Closes #249).** `/uberdev:orchestrator` (dispatched by `/goal` Phase 1 via `claude --bg`) can legitimately close a GitHub issue without producing a PR when the finding is stale, already-resolved, or non-actionable (concrete prior cases: #226 closed as "verified already resolved by PR #224", #227 closed as "stale finding on closed PR #223"). Phase 2 step 2a was checking only (a) does a PR exist, (b) is the solver still busy, (c) elapsed vs `_UBERDEV_GOAL_SOLVE_TIMEOUT` — it never probed the issue's GitHub `state`. A legitimately closed-without-PR issue spun in `solving` for ~150 minutes and was misleadingly marked `failed` rather than terminated cleanly.
+  - `plugins/uberdev/skills/goal-pipeline/SKILL.md` Phase 2 step 2a — inside the `else` branch (no PR yet, agent idle), inserted a `gh issue view --json state` probe. When `state == "CLOSED"` (uppercase, gh GraphQL semantics), transitions `solving → resolved-by-no-action` and emits the new `goal_issue_closed_without_pr` audit event. Non-zero `gh` rc falls through to the existing 150-min `SOLVE_TIMEOUT` backstop (RFC 0005 B6 — surface gh failures, never cascade into false terminal transitions). Stderr breadcrumb on failure.
+  - `GOAL_ISSUE_STATE_ENUM` extended from 6 to 7 states (`+resolved-by-no-action`). Phase-2a skip-check widened to `pr-pushed|resolved|resolved-by-no-action|failed` — required for correctness; without it, an issue already in the new state would be re-probed every poll tick.
+  - `GOAL_AUDIT_EVENT_ENUM` extended from 11 to 12 events (`+goal_issue_closed_without_pr`). Audit-event payload: `{goal_id, issue, detected_at}` — all three values upstream-validated, defence-in-depth `_uberdev_goal_validate_int "$issue"` before the `gh` call (T3 mitigation).
+  - `plugins/uberdev/lib/goal-state.sh` — new arc `solving → resolved-by-no-action` in `uberdev_goal_issue_state_transition` case; new event case-arm `goal_issue_closed_without_pr)` in `uberdev_goal_audit` case. Both omissions would silently strand (rc=2 or rc=1) without the explicit arms — BT84 / BT85 are the only protection against silent strand.
+  - `print_summary` `issues_resolved` awk filter broadened to count both `resolved` and `resolved-by-no-action`. Phase 3 terminal-set logic is PR-count driven and stays unchanged — an issue with zero PRs contributes zero to `all_pr_count`, so `0 == 0` already converges cleanly when the active-count drains.
+  - Tests: `tests/goal.test.sh` G3 (issue-state enum), G11 (audit-event presence list — extended from 11 to 12), G24b (literal enum string), G20 (release-ratchet) updated to the new strings; new G39 structural-grep locks the SKILL.md probe call-site (4 sub-asserts: probe line, uppercase CLOSED check, transition arc call-site, audit event emission); new behavioural tests BT84 (`solving → resolved-by-no-action` arc returns rc=0 + TSV state assertion + negative regression guard on the previously-rejected `solving → resolved` direct arc) and BT85 (`uberdev_goal_audit goal_issue_closed_without_pr '...'` writes a JSONL line, rc=0, numeric `issue` field + negative regression guard on unknown events) added post-BT83. `tests/solve-claim.test.sh` version-bump block ratcheted to `0.34.12`.
+  - RFC `docs/rfc/0005-uberdev-goal.md` §9 — new D249a addendum row documents the new event, the new state, the skip-check widening, and the `gh` rc no-signal contract. Bug-fix scope under §2.3 (the auto-merge carve-out): no new RFC.
+
+### Notes
+- Version bumped to 0.34.12 across `plugin.json`, `marketplace.json`, the README badge, `CHANGELOG.md`, `tests/goal.test.sh` G20, and `tests/solve-claim.test.sh`. Atomic version-lock surfaces — partial bump is a red CI invariant.
+- Renumbered from the original PR target (0.34.10) to 0.34.12 after rebase onto main absorbed v0.34.10 (#244) and v0.34.11 (#250). PR #250's `/uberdev:orchestrator` direct-dispatch change is preserved intact (G38 + BT83 ratchets unchanged); this PR's #249 fix is strictly additive on top.
+
+---
+
 ## [0.34.11] — 2026-05-28
 
 ### Fixed
