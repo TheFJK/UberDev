@@ -1,7 +1,7 @@
 ---
 name: codebase-scout
 description: "Lightweight codebase scout for /uberdev:issue (runs on inherit — the session model). Greps and reads on description keywords, returns 1-3 real file paths under ## Likely area and an optional one-line root-cause hypothesis when issue_type=fix. Never invents paths."
-# WAIT 4.8 sonnet: was sonnet (4.6); using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
+# WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
 model: inherit
 tools: ["Read", "Grep", "Glob", "Bash"]
 ---

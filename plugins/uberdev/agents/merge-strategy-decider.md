@@ -1,7 +1,7 @@
 ---
 name: merge-strategy-decider
 description: Picks per-PR merge strategy in {squash, rebase, merge} from PR shape (commit count, conventional-commit ratio, divergence, WIP markers, repo convention) plus an advisory merge-strategy:<name> PR label hint. Emits a strategy plus rationale. One agent per PR; dispatched in a SINGLE assistant turn from skills/merge-pipeline/SKILL.md Phase 2.2.
-# WAIT 4.8 sonnet: was sonnet (4.6); using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
+# WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
 model: inherit
 color: yellow
 ---
