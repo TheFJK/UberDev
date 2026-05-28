@@ -264,6 +264,12 @@ fi
 # ordering is preserved for observability — the PERM_DESC string distinguishes
 # which env var the caller set so post-hoc grep can attribute the bypass to
 # /goal (SKIP) vs /turbo --auto / /solve --auto (AUTO).
+# Post-#246: each PERM_DESC string names both flags of the resolved pair
+# (`--dangerously-skip-permissions --permission-mode bypassPermissions`) so
+# the dispatch-time print surfaces the full bypass-pair to operators (the
+# bare `--dangerously-skip-permissions` form was insufficient — bg UI cycle
+# ring needs the explicit --permission-mode pin; see audit-fixups.test.sh
+# regression guard at the bare-skip regex check).
 if [[ "${SKIP_PERMISSIONS:-0}" == "1" ]]; then
   PERM_DESC="bypass (--dangerously-skip-permissions --permission-mode bypassPermissions; SKIP_PERMISSIONS tier — /goal autonomous loop)"
 elif [[ "$AUTO_PERMISSIONS" == "1" ]]; then

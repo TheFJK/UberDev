@@ -163,9 +163,13 @@ uberdev_dispatch_preflight() {
 #                                   but auto-mode is silently broken in cmux and refuses
 #                                   some agent tools (e.g., Search) outside cmux too —
 #                                   the middle tier was dead weight, so AUTO now resolves
-#                                   to the same `--dangerously-skip-permissions` flag as
-#                                   SKIP. Env-var name preserved for backward compat with
-#                                   /turbo --auto / /solve --auto and any external callers.
+#                                   to the same flag pair as SKIP. Env-var name preserved
+#                                   for backward compat with /turbo --auto / /solve --auto
+#                                   and any external callers. Post-#246 follow-up: both
+#                                   tiers now resolve to the paired form
+#                                   `--dangerously-skip-permissions --permission-mode
+#                                   bypassPermissions` (see in-body PERM_FLAG block for
+#                                   why pairing is required — bg-session UI cycle ring).
 #   EFFORT_LEVEL     (default max)
 uberdev_dispatch_resolve_env() {
   # BG_PROMPT_MODE: hardcoded `argv` (claude --bg 2.1.139 has no documented
@@ -178,30 +182,39 @@ uberdev_dispatch_resolve_env() {
 
   # PERM_FLAG: array form (zsh SH_WORD_SPLIT=off would treat a scalar at command
   # position as one argv slot). Empty by default; populated only when the caller
-  # opted into a permission tier. Post-#241 follow-up: both SKIP_PERMISSIONS=1 and
-  # AUTO_PERMISSIONS=1 resolve to `--dangerously-skip-permissions` — the historical
-  # `--permission-mode auto` middle tier is removed because Claude Code's auto-mode
-  # silently refuses some agent tools (notably Search) even when the operator opted
-  # in, and cmux's PermissionRequest hook intercepts auto-mode too. The if/elif
-  # ordering is preserved for audit-log clarity (which env var the caller set), but
-  # both branches now emit the same pair. /goal opts into the strict bypass so cmux
-  # PermissionRequest hooks cannot stall the autonomous loop on first-tool-use (#241);
-  # /turbo --auto and /solve --auto opt operators into the same pair for the same
-  # reason (auto-mode is dead in practice).
+  # opted into a permission tier.
   #
-  # #246 follow-up: `--dangerously-skip-permissions` bypasses permission *checks*
-  # but does NOT set `--permission-mode`. In Claude Code 2.1.152+, the bg session UI
-  # cycle ring is driven by --permission-mode; without an explicit setting it lands
-  # on `auto`, which is exactly the mode that silently breaks Search/etc. that we are
-  # trying to avoid. Pair the two flags so the cycle-ring lands on bypassPermissions
-  # AND the runtime checks are short-circuited — they target different mechanisms,
-  # so both are needed (belt-and-suspenders).
+  # (a) Why both env vars resolve to the same pair:
+  #     SKIP_PERMISSIONS and AUTO_PERMISSIONS both populate
+  #     `--dangerously-skip-permissions --permission-mode bypassPermissions`. The
+  #     historical `--permission-mode auto` middle tier was removed post-#241 because
+  #     Claude Code's auto-mode silently refuses some agent tools (notably Search)
+  #     even when the operator opted in, and cmux's PermissionRequest hook intercepts
+  #     auto-mode too — auto is dead in practice. /goal opts into the strict bypass
+  #     so cmux PermissionRequest hooks cannot stall the autonomous loop on
+  #     first-tool-use (#241); /turbo --auto and /solve --auto opt operators into the
+  #     same pair for the same reason.
+  #
+  # (b) Why the if/elif shape is preserved:
+  #     The two branches emit the same pair, but the if/elif structure is kept so
+  #     PERM_DESC (see solve-pipeline/SKILL.md) can attribute the bypass to which
+  #     env var the caller set — post-hoc grep can distinguish /goal (SKIP) vs
+  #     /turbo --auto / /solve --auto (AUTO) in audit logs.
+  #
+  # (c) Why both flags in the pair are needed (#246):
+  #     `--dangerously-skip-permissions` short-circuits the runtime permission
+  #     *checks* but does NOT set `--permission-mode`. In Claude Code 2.1.152+, the
+  #     bg session UI cycle ring is driven by --permission-mode; without an explicit
+  #     setting it lands on `auto`, which is exactly the mode that silently breaks
+  #     Search/etc. that we are trying to avoid. The two flags target different
+  #     mechanisms (runtime-check short-circuit vs bg UI cycle-ring pin), so both
+  #     are needed (belt-and-suspenders).
   SKIP_PERMISSIONS="${SKIP_PERMISSIONS:-0}"
   AUTO_PERMISSIONS="${AUTO_PERMISSIONS:-0}"
   PERM_FLAG=()
   if [[ "$SKIP_PERMISSIONS" == "1" ]]; then
     PERM_FLAG=( --dangerously-skip-permissions --permission-mode bypassPermissions )
-  # Same pair as SKIP branch — kept distinct for caller-attribution observability via PERM_DESC; see header doc block.
+  # Same pair as SKIP branch — kept distinct for caller-attribution observability via PERM_DESC; see (b) in the PERM_FLAG rationale block above.
   elif [[ "$AUTO_PERMISSIONS" == "1" ]]; then
     PERM_FLAG=( --dangerously-skip-permissions --permission-mode bypassPermissions )
   fi
