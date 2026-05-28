@@ -540,11 +540,19 @@ echo "== G38: Phase 1 dispatches /uberdev:orchestrator directly (issue #248) =="
 # (NOT /uberdev:turbo), preventing regression back to the double-bg-spawn
 # anti-pattern (goal → bg(turbo) → bg(orchestrator)). Mirrors the G24b
 # structural-grep convention from PR #239.
+#
+# Symmetry note (#250 review hardening): BOTH the positive and the negative
+# regex are anchored on the `printf.*` prefix so a refactor that swaps the
+# printf for a heredoc / variable-extracted form (e.g.
+# `cat > "$PROMPT_FILE" << 'PROMPT'`) trips BOTH assertions instead of
+# silently evading them. If you intentionally change the dispatch
+# construction shape, update BOTH lines together AND re-anchor BT83's
+# extracted-line probe (the behavioural complement below this block).
 assert_grep "$GOAL_SKILL" \
-  'Invoke the slash command /uberdev:orchestrator --turbo solve GH issue' \
+  'printf.*Invoke the slash command /uberdev:orchestrator --turbo solve GH issue' \
   "G38.goal-phase-1-orchestrator-dispatch"
 assert_no_grep "$GOAL_SKILL" \
-  'printf .*Invoke the slash command /uberdev:turbo' \
+  'printf.*Invoke the slash command /uberdev:turbo' \
   "G38.goal-phase-1-no-turbo-wrapper-dispatch"
 
 echo
@@ -2702,6 +2710,76 @@ case "$_bt82_pre_fix_state" in
 esac
 assert_eq "$_bt82_skipped_pre_fix" "0" "BT82.d-skip-check-NOT-match-empty-pre-fix-regression-guard"
 
+echo
+echo "== BT83: Phase 1 prompt construction emits /uberdev:orchestrator (issue #248 behavioural) =="
+# #250 post-impl-review blocker — G38's structural grep on the SKILL.md source
+# would also pass on the previously-buggy /turbo wrapper if a future refactor
+# swapped `printf` for a heredoc or variable-extracted form while keeping
+# the literal token, AND would FALSELY pass on a printf that constructed
+# the line for the wrong target. BT83 extracts the Phase-1 PROMPT_FILE
+# construction lines from SKILL.md (the `printf 'Invoke the slash command
+# /uberdev:orchestrator…' "$ISSUE_NUM" > "$PROMPT_FILE"` block), executes
+# them with a controlled $ISSUE_NUM into an isolated tmpdir, and asserts
+# the resulting file contents contain /uberdev:orchestrator and NOT
+# /uberdev:turbo. This is the behavioural complement to G38's source-shape
+# grep: only this test catches a regression where the literal token in the
+# source survives but the run-time output is wrong.
+#
+# Mechanism (BT82 idiom): no source-extract of Phase 1's outer loop (it is
+# markdown-embedded); instead grep the printf line by literal anchor
+# ("printf 'Invoke the slash command /uberdev:orchestrator"), pair it with
+# the immediately-following continuation line (the `"$ISSUE_NUM" >`
+# argument), and pass the two-line snippet through `eval` under a
+# controlled ISSUE_NUM + PROMPT_FILE.
+_bt83_prompt_file="$_b12_tmpdir/bt83-prompt-out.txt"
+ISSUE_NUM=999
+PROMPT_FILE="$_bt83_prompt_file"
+# Extract the two printf lines verbatim from SKILL.md. The first line
+# carries the format string + escape; the second carries the $ISSUE_NUM
+# substitution + redirect. awk reads from the `printf 'Invoke the slash
+# command /uberdev:orchestrator` anchor to the first `> "$PROMPT_FILE"`
+# (inclusive). The extracted snippet is then eval'd in this shell so the
+# real format string + redirect run against our controlled vars.
+_bt83_snippet="$(awk '
+  /printf .Invoke the slash command \/uberdev:orchestrator/ { capture=1 }
+  capture { print }
+  capture && /> "\$PROMPT_FILE"/ { exit }
+' "$GOAL_SKILL")"
+# Sanity guard — if extraction yields nothing the printf line moved or the
+# anchor drifted; surface that as a discrete failure rather than letting
+# the eval silently no-op.
+if [ -z "$_bt83_snippet" ]; then
+  FAIL=$((FAIL+1))
+  echo "  FAIL  BT83.a-snippet-extracted-from-skill (extraction returned empty — printf anchor moved?)" >&2
+else
+  PASS=$((PASS+1))
+  echo "  PASS  BT83.a-snippet-extracted-from-skill"
+  # Execute the extracted snippet. The snippet is single-quoted inside
+  # SKILL.md (the printf format string uses single quotes); eval is safe
+  # here because the snippet is read from a repo-controlled source file
+  # (no external/untrusted input). Belt-and-braces: the snippet is bounded
+  # by the awk-anchored exit-on-`> "$PROMPT_FILE"` so it cannot pull in
+  # arbitrary bash below the printf.
+  eval "$_bt83_snippet"
+  # Assert the constructed prompt contains /uberdev:orchestrator and NOT
+  # /uberdev:turbo. Both directions are checked so a future regression
+  # (literal source token swap) flips one assertion clearly.
+  assert_grep_file "$_bt83_prompt_file" \
+    'Invoke the slash command /uberdev:orchestrator --turbo solve GH issue #999' \
+    "BT83.b-runtime-prompt-contains-orchestrator-token"
+  # Negative: the runtime prompt MUST NOT contain `/uberdev:turbo` (the
+  # double-bg-spawn anti-pattern). assert_grep_file lacks a no-grep
+  # variant; spell the check out inline.
+  if [ -f "$_bt83_prompt_file" ] && grep -qE -e '/uberdev:turbo' "$_bt83_prompt_file"; then
+    FAIL=$((FAIL+1))
+    echo "  FAIL  BT83.c-runtime-prompt-omits-turbo-token (file contains /uberdev:turbo — regression)" >&2
+  else
+    PASS=$((PASS+1))
+    echo "  PASS  BT83.c-runtime-prompt-omits-turbo-token"
+  fi
+fi
+unset ISSUE_NUM PROMPT_FILE
+
 # Cleanup: remove the isolated tmpdir contents (we created the whole
 # directory via mktemp -d, so we can rm -rf safely — it's our own).
 # The single blanket rm subsumes every per-BT artifact (TSVs, audit
@@ -2718,6 +2796,7 @@ rm -rf "$_b12_tmpdir/goal-test-bt58"* 2>/dev/null || true
 rm -rf "$_b12_tmpdir/goal-test-bt80"* 2>/dev/null || true
 rm -rf "$_b12_tmpdir/goal-test-bt81"* 2>/dev/null || true
 rm -rf "$_b12_tmpdir/goal-test-bt82"* 2>/dev/null || true
+rm -f "$_b12_tmpdir"/bt83-prompt-out.txt 2>/dev/null || true
 rm -f "$_b12_tmpdir"/goal-bt5-*-merge-attempts.tsv 2>/dev/null || true
 rm -rf "$_b12_tmpdir" 2>/dev/null || true
 
