@@ -468,12 +468,19 @@ assert_grep "$GOAL_LIB" 'gh pr diff'                                      "G29.g
 assert_grep "$GOAL_LIB" 'sort -n'                                         "G29.sort-numeric-pr-ordering"
 
 echo
-echo "== G30: Unblock-wait dual condition (issue closed + review-pr:green label) (#211 AC5) =="
-# The unblock-wait predicate in lib/goal-state.sh must reference BOTH conditions.
+echo "== G30: Unblock-wait condition (issue closed + uberdev-approved label) (#211 AC5 / #289.1) =="
+# The unblock-wait predicate in lib/goal-state.sh must reference the closed-issue
+# condition and the CORRECT trust label. #289.1: the gate now reads the label
+# /review-pr actually writes (`uberdev-approved`) — the prior `review-pr:green`
+# had ZERO producers, so a held batch row whose blocker closed returned rc 1
+# forever and blocked every co-batched GREEN PR until the 4h stuck_loop.
 assert_grep "$GOAL_LIB" '^uberdev_goal_batch_unblock_wait_clear\(\)'      "G30.predicate-defined"
-assert_grep "$GOAL_LIB" 'review-pr:green'                                 "G30.green-trust-label"
-# Stale/missing label data treated as "still waiting" (rc 1) — defensive default arm.
-assert_grep "$GOAL_LIB" 'closed'                                          "G30.closed-issue-check"
+assert_grep "$GOAL_LIB" 'select\(\. == "uberdev-approved"\)'             "G30.approved-trust-label"
+# Negative regression guard: no LIVE jq gate on the phantom review-pr:green
+# label remains (a comment naming the old label is acceptable).
+assert_no_grep "$GOAL_LIB" 'select\(\. == "review-pr:green"\)'           "G30.no-phantom-green-label-gate"
+# Stale/missing issue data treated as "still waiting" (rc 1) — defensive default arm.
+assert_grep "$GOAL_LIB" 'CLOSED'                                          "G30.closed-issue-check"
 
 echo
 echo "== G31: Phase 2 step 2e updates batch registry on held → green transitions (#211 AC3/AC5 wiring) =="
@@ -1474,6 +1481,65 @@ cat > "$_bt23_audit_red_halted_critical" <<'EOF'
 EOF
 assert_eq "$(uberdev_goal_read_trust_signal "$_bt23_audit_red_halted_critical")" "red" \
   "BT23.halted-and-critical-emits-red"
+
+# ----- BT23a-BT23e — uberdev_goal_read_trust_signal SHA-binding (#290.1) -----
+# The verdict JSON carries `.pr` + `.sha` (the post-emission anchor headRefOid).
+# read_trust_signal must compare that `.sha` against the LIVE
+# `gh pr view <pr> --json headRefOid` and return `stale` on mismatch — a commit
+# pushed after a GREEN verdict must NOT drive pushed-reviewing→green on the
+# stale review. Each case overrides `gh` locally (the section-global gh() mock
+# is for state/body/list, not headRefOid).
+
+# BT23a — GREEN verdict, HEAD == verdict.sha → green (binding holds, no churn).
+_bt23a_v="$_b12_tmpdir/v-sha-match.json"
+cat > "$_bt23a_v" <<'EOF'
+{"pr":42,"sha":"abc123","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":0},"halted":false}}}
+EOF
+_bt23a_out="$(
+  gh() { case "$1 $2" in "pr view") printf 'abc123' ;; esac; }
+  uberdev_goal_read_trust_signal "$_bt23a_v" 2>/dev/null
+)"
+assert_eq "$_bt23a_out" "green" "BT23a.sha-match-green"
+
+# BT23b — GREEN verdict, HEAD advanced (!= verdict.sha) → stale (the #290.1 bug).
+_bt23b_out="$(
+  gh() { case "$1 $2" in "pr view") printf 'def456' ;; esac; }
+  uberdev_goal_read_trust_signal "$_bt23a_v" 2>/dev/null
+)"
+assert_eq "$_bt23b_out" "stale" "BT23b.sha-mismatch-stale"
+
+# BT23c — RED verdict + HEAD advanced → STILL stale (a new push invalidates the
+# whole review regardless of colour; re-review is the only safe action).
+_bt23c_v="$_b12_tmpdir/v-sha-red.json"
+cat > "$_bt23c_v" <<'EOF'
+{"pr":42,"sha":"abc123","phases":{"phase2_5":{"by_severity":{"blocker":1,"critical":0},"halted":false}}}
+EOF
+_bt23c_out="$(
+  gh() { case "$1 $2" in "pr view") printf 'def456' ;; esac; }
+  uberdev_goal_read_trust_signal "$_bt23c_v" 2>/dev/null
+)"
+assert_eq "$_bt23c_out" "stale" "BT23c.sha-mismatch-overrides-red-to-stale"
+
+# BT23d — gh outage reading headRefOid (rc!=0 / empty) → fail-SAFE: fall through
+# to the colour decision (green here), NOT a false stale (which would churn).
+_bt23d_out="$(
+  gh() { return 1; }
+  uberdev_goal_read_trust_signal "$_bt23a_v" 2>/dev/null
+)"
+assert_eq "$_bt23d_out" "green" "BT23d.gh-outage-failsafe-no-false-stale"
+
+# BT23e — legacy verdict WITHOUT a `.sha` field → no binding (backward compat);
+# the colour decision stands even if HEAD differs. Guards the audit-path-only
+# fixtures (BT12-BT23) that carry neither `.pr` nor `.sha`.
+_bt23e_v="$_b12_tmpdir/v-no-sha.json"
+cat > "$_bt23e_v" <<'EOF'
+{"pr":42,"phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":0},"halted":false}}}
+EOF
+_bt23e_out="$(
+  gh() { case "$1 $2" in "pr view") printf 'zzz999' ;; esac; }
+  uberdev_goal_read_trust_signal "$_bt23e_v" 2>/dev/null
+)"
+assert_eq "$_bt23e_out" "green" "BT23e.legacy-no-sha-skips-binding"
 
 # Cleanup: remove the isolated tmpdir we created via mktemp -d above.
 # The single `rm -rf "$_b12_tmpdir"` subsumes any per-BT artifacts
