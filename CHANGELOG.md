@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.13] — 2026-05-29
+
+### Fixed
+- **Test count idioms no longer mask a missing file / tool crash as a passing `0`** (#275). The repo-blacklisted `… | grep -cE … || true` / `… 2>/dev/null || echo 0` idiom collapses three outcomes into one passing `0` — a legitimate zero-count, a missing/unreadable file, and a tool crash. `tests/_lib_assert_structural.sh` `assert_count` (the SSOT helper sourced by 14 test files) now fail-loud-preflights `[ -r "$file" ]` and captures `awk`'s exit status on a separate statement (an `awk` crash FAILs; only `grep` rc ≥ 2 is treated as an error, so a legitimate zero-match on a present file still PASSES). `tests/uberthink.test.sh` (U11) drops the `2>/dev/null || echo 0` mask and adds an explicit `[ -r "$F2I" ]` preflight, restoring the diagnostic that distinguishes a real allow-list regression from brittle-anchor drift.
+
+### Tests
+- New `tests/lib-assert-count.test.sh` (5 assertions): present-file count, legitimate zero-count on a present file (over-correction guard), and the bug — a missing file (AC3) + an unreadable file (AC4) with `expected==0` must FAIL loud, not pass vacuously. Reds against the pre-fix helper (2/5), greens after (5/5). Wired **ubuntu-only** (AC4's `chmod 000` is a no-op under Windows Git Bash) and declared in the windows-skip-list marker.
+
 ## [0.35.12] — 2026-05-29
 
 ### Fixed

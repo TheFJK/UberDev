@@ -31,8 +31,34 @@
 
 assert_count() {
   local file="$1" section_start="$2" section_end="$3" pattern="$4" expected="$5" desc="$6"
-  local actual
-  actual=$(awk "/$section_start/,/$section_end/" "$file" | grep -cE -e "$pattern" || true)
+  # Fail-loud preflight: a missing/unreadable $file used to make awk emit
+  # nothing, grep -c print "0", and `|| true` swallow the failure — so any
+  # caller with expected==0 (an absence assertion) PASSED vacuously even though
+  # the file it claims to inspect does not exist (#275). Refuse here instead.
+  if [[ ! -r "$file" ]]; then
+    echo "  FAIL  $desc (file missing/unreadable — cannot count, refusing vacuous PASS)"
+    echo "        file: $file  section: $section_start..$section_end  pattern: $pattern"
+    FAIL=$((FAIL + 1)); return
+  fi
+  # Capture awk's exit status SEPARATELY from grep's so an awk crash (bad
+  # range, mid-stream failure) is surfaced as a FAIL rather than masked into a
+  # 0-count by the old `… | grep -c … || true` pipe. grep -c's own exit-1 on a
+  # legitimate 0 match is expected here — we read its stdout for the count, not
+  # its rc — so a genuine absence assertion (present file, 0 matches) still
+  # PASSES. Only a grep *error* (rc>=2) is treated as a failure.
+  local section awk_rc actual grep_rc
+  section=$(awk "/$section_start/,/$section_end/" "$file"); awk_rc=$?
+  if [[ "$awk_rc" -ne 0 ]]; then
+    echo "  FAIL  $desc (awk failed rc=$awk_rc — cannot count, refusing vacuous PASS)"
+    echo "        file: $file  section: $section_start..$section_end  pattern: $pattern"
+    FAIL=$((FAIL + 1)); return
+  fi
+  actual=$(printf '%s\n' "$section" | grep -cE -e "$pattern"); grep_rc=$?
+  if [[ "$grep_rc" -ge 2 ]]; then
+    echo "  FAIL  $desc (grep failed rc=$grep_rc — cannot count, refusing vacuous PASS)"
+    echo "        file: $file  section: $section_start..$section_end  pattern: $pattern"
+    FAIL=$((FAIL + 1)); return
+  fi
   if [[ "$actual" -eq "$expected" ]]; then
     echo "  PASS  $desc (got $actual)"; PASS=$((PASS + 1))
   else

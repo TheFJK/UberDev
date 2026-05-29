@@ -83,6 +83,7 @@ jobs:
           bash tests/solve-effort-flag.test.sh && \
           zsh tests/solve-pipeline-zsh.test.sh && \
           zsh tests/goal-state-zsh.test.sh && \
+          bash tests/lib-assert-count.test.sh && \
           bash tests/crossplatform-shell-wrappers.test.sh && \
           bash tests/docs-accuracy.test.sh && \
           bash tests/orchestrator-phase1-shortcircuit.test.sh && \
@@ -184,6 +185,7 @@ jobs:
         #   - uberthink-report.test.sh
         #   - merge-discovery-resilience.test.sh
         #   - review-pr-phase3-ci.test.sh
+        #   - lib-assert-count.test.sh
         # === END ci-wiring windows-skip-list ===
         run: |
           bash tests/ci-wiring.test.sh && \

@@ -151,7 +151,17 @@ echo "== U11: findings-to-issues accepts uberthink-aggregate source =="
 # membership is what makes findings-to-issues ACCEPT the source. (Suite 15 in
 # tests/findings-to-issues.test.sh cross-checks the full closed-set ==
 # report_primitives.ACCEPTED_SOURCES frozenset.)
-F2I_IN_CLOSED_SET=$(grep -oE 'closed set `\{[^}]*\}`' "$F2I" | grep -c 'uberthink-aggregate' 2>/dev/null || echo 0)
+# Fail-loud preflight: gate the count on a readable $F2I so a missing/renamed
+# findings-to-issues.md surfaces as its own FAIL with the right message instead
+# of being swallowed into a vacuous "uberthink-aggregate not in the allow-list"
+# (which the old `… 2>/dev/null || echo 0` masked) (#275).
+ck "findings-to-issues.md exists (closed-set source)" "[ -r '$F2I' ]"
+# Drop the `2>/dev/null || echo 0` count-masking idiom: grep -c already prints
+# its natural `0` (and exits 1) when 'uberthink-aggregate' is absent, so the
+# assert still fails CLOSED — but a genuine grep error (e.g. unreadable $F2I)
+# is no longer hidden, restoring the diagnostic that distinguishes a real
+# allow-list regression from brittle-anchor drift (#275).
+F2I_IN_CLOSED_SET=$(grep -oE 'closed set `\{[^}]*\}`' "$F2I" | grep -c 'uberthink-aggregate')
 ck_msg "findings-to-issues.md Step-1 closed set includes uberthink-aggregate" \
   "[ '$F2I_IN_CLOSED_SET' -ge 1 ]" \
   "uberthink-aggregate not in the Step-1 closed-set allow-list of $F2I"
