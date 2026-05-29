@@ -144,14 +144,17 @@ else
 fi
 
 echo "== U11: findings-to-issues accepts uberthink-aggregate source =="
-# T10 added uberthink-aggregate to BOTH the envelope-source list AND the
-# closed-set allow-list inside findings-to-issues.md — so we expect >= 2 hits
-# (mirrors what uberscan-aggregate / ubersimplify-aggregate / testers-aggregate
-# do today).
-F2I_HITS=$(grep -c 'uberthink-aggregate' "$F2I" 2>/dev/null || echo 0)
-ck_msg "findings-to-issues.md mentions uberthink-aggregate >= 2 times" \
-  "[ '$F2I_HITS' -ge 2 ]" \
-  "found $F2I_HITS hits in $F2I — expected envelope-source + closed-set allow-list"
+# Post-#198 the accepted-source allow-list is a SINGLE closed set in Step 1 (the
+# SSOT); the redundant prose enumeration was collapsed to a pointer, so the old
+# "expect >= 2 line-hits" no longer holds (uberthink-aggregate now lives on the
+# one closed-set line). Assert MEMBERSHIP in the Step-1 closed set instead — that
+# membership is what makes findings-to-issues ACCEPT the source. (Suite 15 in
+# tests/findings-to-issues.test.sh cross-checks the full closed-set ==
+# report_primitives.ACCEPTED_SOURCES frozenset.)
+F2I_IN_CLOSED_SET=$(grep -oE 'closed set `\{[^}]*\}`' "$F2I" | grep -c 'uberthink-aggregate' 2>/dev/null || echo 0)
+ck_msg "findings-to-issues.md Step-1 closed set includes uberthink-aggregate" \
+  "[ '$F2I_IN_CLOSED_SET' -ge 1 ]" \
+  "uberthink-aggregate not in the Step-1 closed-set allow-list of $F2I"
 
 echo "== U12: report.py tests pass (source tests/uberthink-report.test.sh) =="
 # T1 owns report.py and its own unit tests in tests/uberthink-report.test.sh.
