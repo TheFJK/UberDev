@@ -4,6 +4,11 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.7] — 2026-05-29
+
+### Changed
+- **tests — DRY the version-lock assertion block into a shared `assert_version_bump` helper** (#231). The identical four-surface version-propagation asserts duplicated across `tests/goal.test.sh` (G20) and `tests/solve-claim.test.sh` are now a single `assert_version_bump <repo_root> <version>` helper in `tests/_lib_assert_structural.sh`. A release bump is now one `<version>`-arg change per call site instead of lockstep multi-form-regex edits across two files — removing the release footgun that previously required hand-editing plain, single-escaped, and double-escaped regex variants in lockstep.
+
 ## [0.35.6] — 2026-05-29
 
 ### Changed
