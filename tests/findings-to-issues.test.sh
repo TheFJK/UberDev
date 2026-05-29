@@ -329,6 +329,84 @@ assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
   'testers-aggregate' \
   'S14 — Step 1 accepted-source allow-list includes testers-aggregate (#182)'
 
+### Suite 15: ACCEPTED_SOURCES SSOT (#198) ----------
+echo
+echo "### Suite 15: ACCEPTED_SOURCES SSOT (#198)"
+# Make the findings-to-issues accepted-source allow-list a single source of truth
+# (lib/report_primitives.py:ACCEPTED_SOURCES) with an emit-time assert in
+# envelope(), preventing the #182-class drift where a pipeline emits a source not
+# in the allow-list → findings-to-issues silently files ZERO issues.
+
+LIB_DIR="$REPO_ROOT/plugins/uberdev/lib"
+# The canonical 7-set, sorted (used as the byte-equality oracle for checks 1+2).
+EXPECTED_SOURCES_SORTED=$(printf '%s\n' \
+  post-impl-review-aggregate simplify-aggregate ci-refused-synthetic \
+  uberscan-aggregate ubersimplify-aggregate testers-aggregate uberthink-aggregate \
+  | LC_ALL=C sort)
+
+# S15.1 — Python frozenset is importable + has exactly the 7 members.
+PY_SOURCES_SORTED=$(python3 -c "import sys; sys.path.insert(0,'$LIB_DIR'); from report_primitives import ACCEPTED_SOURCES; print('\n'.join(sorted(ACCEPTED_SOURCES)))" 2>/dev/null)
+if [[ "$PY_SOURCES_SORTED" == "$EXPECTED_SOURCES_SORTED" ]]; then
+  echo "  PASS  S15.1 ACCEPTED_SOURCES frozenset imports with the 7 expected members"; PASS=$((PASS+1))
+else
+  echo "  FAIL  S15.1 ACCEPTED_SOURCES frozenset mismatch"
+  echo "        expected: $(echo "$EXPECTED_SOURCES_SORTED" | tr '\n' ' ')"
+  echo "        got:      $(echo "$PY_SOURCES_SORTED" | tr '\n' ' ')"
+  FAIL=$((FAIL+1))
+fi
+
+# S15.2 — Spec closed-set (agents/findings-to-issues.md Step 1) == ACCEPTED_SOURCES.
+# Extract the {...} closed set, split on `,`, trim whitespace/backticks, sort.
+# Anchor on the literal phrase `closed set` immediately before the `{...}` so the
+# greedy `.*{` does not run past it to a later same-line `${CLAUDE_PLUGIN_ROOT}`
+# interpolation (which would capture the wrong braces).
+SPEC_SOURCES_SORTED=$(grep -E 'closed set' "$AGENT_MD" | grep -F '{' \
+  | grep -oE 'closed set `\{[^}]*\}`' \
+  | sed -E 's/.*\{([^}]*)\}.*/\1/' \
+  | tr ',' '\n' \
+  | sed -E 's/[`[:space:]]//g' \
+  | grep -v '^$' \
+  | LC_ALL=C sort)
+if [[ "$SPEC_SOURCES_SORTED" == "$PY_SOURCES_SORTED" ]]; then
+  echo "  PASS  S15.2 agents/findings-to-issues.md Step-1 closed set == ACCEPTED_SOURCES"; PASS=$((PASS+1))
+else
+  echo "  FAIL  S15.2 spec closed-set diverges from ACCEPTED_SOURCES"
+  echo "        spec: $(echo "$SPEC_SOURCES_SORTED" | tr '\n' ' ')"
+  echo "        py:   $(echo "$PY_SOURCES_SORTED" | tr '\n' ' ')"
+  FAIL=$((FAIL+1))
+fi
+
+# S15.3 — Every emitter envelope() source literal ∈ ACCEPTED_SOURCES.
+# Grep the 2nd positional string arg of envelope(fh, "X", ...) across the
+# emitter .py files, then assert each is a member of the python frozenset.
+EMITTER_SOURCES=$(grep -rhoE 'envelope\([^,]+,[[:space:]]*"[^"]+"' "$REPO_ROOT"/plugins/uberdev/skills/*/*.py \
+  | sed -E 's/.*"([^"]+)".*/\1/' | LC_ALL=C sort -u)
+S15_3_OK=1
+while IFS= read -r src; do
+  [[ -z "$src" ]] && continue
+  if ! python3 -c "import sys; sys.path.insert(0,'$LIB_DIR'); from report_primitives import ACCEPTED_SOURCES; sys.exit(0 if '$src' in ACCEPTED_SOURCES else 1)" 2>/dev/null; then
+    echo "        emitter source NOT in ACCEPTED_SOURCES: $src"
+    S15_3_OK=0
+  fi
+done <<< "$EMITTER_SOURCES"
+if [[ "$S15_3_OK" -eq 1 && -n "$EMITTER_SOURCES" ]]; then
+  echo "  PASS  S15.3 every skills/*/*.py envelope() source literal ∈ ACCEPTED_SOURCES ($(echo "$EMITTER_SOURCES" | tr '\n' ' '))"; PASS=$((PASS+1))
+else
+  echo "  FAIL  S15.3 an emitter envelope() source is not in ACCEPTED_SOURCES (or none found)"; FAIL=$((FAIL+1))
+fi
+
+# S15.4 — Behavioral: envelope() RAISES on a bad source, ACCEPTS a good one.
+if python3 -c "import sys; sys.path.insert(0,'$LIB_DIR'); from report_primitives import envelope; import io; envelope(io.StringIO(), 'not-a-real-source', 'x')" 2>/dev/null; then
+  echo "  FAIL  S15.4a envelope() accepted an un-accepted source (must raise)"; FAIL=$((FAIL+1))
+else
+  echo "  PASS  S15.4a envelope() raises on an un-accepted source"; PASS=$((PASS+1))
+fi
+if python3 -c "import sys; sys.path.insert(0,'$LIB_DIR'); from report_primitives import envelope; import io; envelope(io.StringIO(), 'testers-aggregate', 'x')" 2>/dev/null; then
+  echo "  PASS  S15.4b envelope() accepts a valid source (testers-aggregate)"; PASS=$((PASS+1))
+else
+  echo "  FAIL  S15.4b envelope() rejected a valid source (testers-aggregate)"; FAIL=$((FAIL+1))
+fi
+
 echo
 echo "## Summary"
 echo "  PASS=$PASS  FAIL=$FAIL"
