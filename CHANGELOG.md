@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.8] — 2026-05-29
+
+### Fixed
+- **goal-pipeline / finish-branch — five zsh-runtime bugs under the `/bin/zsh`-backed Bash tool** (#270). The `/goal` and `finish-branch` SKILL.md bash fences execute under zsh on macOS, where bash-only syntax misfires; CI only ran the suite under bash, so the breakage escaped. Fixed in `lib/goal-state.sh`: (1) `_uberdev_goal_parse_blocks_line` now reads `${match[1]:-${BASH_REMATCH[1]}}` (the only `Blocks: #N` parser — held-PR unblock was dead under zsh, so the `/goal` merge barrier could clear prematurely); (2) `uberdev_goal_agent_stuck_on_dialog` renames `local status` (zsh's read-only special parameter, which hard-aborted the function on its first line) and routes `${!var}` indirection through a new `_uberdev_goal_indirect_get` helper branching on the live shell (`${(P)name}` / `${!name}`) using only native parameter expansion — no `eval`/`bash -c` (respecting the file's T3 no-shell-eval rule); (3) `write_run_state` replaces `compgen -v` with `env | grep` enumeration so per-PID stuck-dialog samples persist across fences; (4) a `${BASH_SOURCE[0]:-}` guard for `set -u` zsh callers. In `skills/goal-pipeline/SKILL.md`, `print_summary()` is hoisted out of the Phase-4 fence into `lib/goal-state.sh` — it was called from the Phase-1/2/3 fences but a shell function cannot cross a fence boundary, so every circuit-breaker and the convergence exit hit `command not found` (rc 127) and silently dropped the operator summary line + held-PR post-mortem rows. In `skills/finish-branch/SKILL.md`, the PR number is now `${PR_URL##*/}` on the already-`PR_URL_REGEX`-validated URL (sidesteps the `BASH_REMATCH` capture), restoring the #95 `review-pr:pending` backstop label on finish-branch PRs created on macOS.
+
+### Tests
+- New `tests/goal-state-zsh.test.sh` (modeled on `solve-pipeline-zsh.test.sh`) sources `goal-state.sh` under the live shell and asserts the five #270 behaviours plus the two structural must-dos (print_summary hoist; `agent_stuck_on_dialog` free of `read-only`/`bad substitution`); green under both bash and zsh (13/13 each). Wired into the ubuntu CI job under `zsh` (windows-skip — `windows-latest` ships no zsh).
+
 ## [0.35.7] — 2026-05-29
 
 ### Changed
