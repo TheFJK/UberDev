@@ -1,303 +1,114 @@
-# Testing Superpowers Skills
+# Testing UberDev
 
-This document describes how to test Superpowers skills, particularly the integration tests for complex skills like `subagent-driven-development`.
+UberDev's product is **markdown prompt files, shell libraries, and a little Python** — there is no application server and no build step. The test suite reflects that: it is a set of **shape-check scripts** (`tests/*.test.sh`) that grep the shipped command / agent / skill / lib files for the exact tokens, contracts, and invariants each change is supposed to preserve. A few fixtures additionally *execute* a sourced `lib/` helper to lock a runtime behaviour, but the suite is grep-and-assert throughout — it never spins up a real Claude Code session.
 
-## Overview
+## The harness at a glance
 
-Testing skills that involve subagents, workflows, and complex interactions requires running actual Claude Code sessions in headless mode and verifying their behavior through session transcripts.
+- **Where:** every test lives in `tests/` and is named `<name>.test.sh`.
+- **Runner:** there is no separate runner binary — each file is self-contained and run directly with `bash tests/<name>.test.sh` (one fixture, `solve-pipeline-zsh.test.sh`, runs under `zsh` — see below).
+- **What CI runs:** `.github/workflows/test.yml` is the **single source of truth** for the active test set. Do not maintain a second hand-curated list anywhere — read `test.yml`.
+- **Shared assertion library:** `tests/_lib_assert_structural.sh` provides the section-scoped `assert_in_section` / structural helpers that many tests `source`.
 
-## Test Structure
+## Running tests locally
 
-```
-tests/
-├── claude-code/
-│   ├── test-helpers.sh                    # Shared test utilities
-│   ├── test-subagent-driven-development-integration.sh
-│   ├── analyze-token-usage.py             # Token analysis tool
-│   └── run-skill-tests.sh                 # Test runner (if exists)
-```
-
-## Running Tests
-
-### Integration Tests
-
-Integration tests execute real Claude Code sessions with actual skills:
+The canonical list of tests is whatever `.github/workflows/test.yml` runs. To run the whole suite locally the way CI does, drive it from that file rather than copying file names by hand:
 
 ```bash
-# Run the subagent-driven-development integration test
-cd tests/claude-code
-./test-subagent-driven-development-integration.sh
+# Run every tests/*.test.sh on disk (mirrors what CI gates on; needs zsh for
+# the one zsh-runtime fixture — see below).
+for t in tests/*.test.sh; do
+  echo "== $t =="
+  if [ "$t" = "tests/solve-pipeline-zsh.test.sh" ]; then
+    zsh "$t" || exit 1          # zsh-runtime fixture
+  else
+    bash "$t" || exit 1
+  fi
+done
 ```
 
-**Note:** Integration tests can take 10-30 minutes as they execute real implementation plans with multiple subagents.
-
-### Requirements
-
-- Must run from the **superpowers plugin directory** (not from temp directories)
-- Claude Code must be installed and available as `claude` command
-- Local dev marketplace must be enabled: `"superpowers@superpowers-dev": true` in `~/.claude/settings.json`
-
-## Integration Test: subagent-driven-development
-
-### What It Tests
-
-The integration test verifies the `subagent-driven-development` skill correctly:
-
-1. **Plan Loading**: Reads the plan once at the beginning
-2. **Full Task Text**: Provides complete task descriptions to subagents (doesn't make them read files)
-3. **Self-Review**: Ensures subagents perform self-review before reporting
-4. **Review Order**: Runs spec compliance review before code quality review
-5. **Review Loops**: Uses review loops when issues are found
-6. **Independent Verification**: Spec reviewer reads code independently, doesn't trust implementer reports
-
-### How It Works
-
-1. **Setup**: Creates a temporary Node.js project with a minimal implementation plan
-2. **Execution**: Runs Claude Code in headless mode with the skill
-3. **Verification**: Parses the session transcript (`.jsonl` file) to verify:
-   - Skill tool was invoked
-   - Subagents were dispatched (Task tool)
-   - TodoWrite was used for tracking
-   - Implementation files were created
-   - Tests pass
-   - Git commits show proper workflow
-4. **Token Analysis**: Shows token usage breakdown by subagent
-
-### Test Output
-
-```
-========================================
- Integration Test: subagent-driven-development
-========================================
-
-Test project: /tmp/tmp.xyz123
-
-=== Verification Tests ===
-
-Test 1: Skill tool invoked...
-  [PASS] subagent-driven-development skill was invoked
-
-Test 2: Subagents dispatched...
-  [PASS] 7 subagents dispatched
-
-Test 3: Task tracking...
-  [PASS] TodoWrite used 5 time(s)
-
-Test 6: Implementation verification...
-  [PASS] src/math.js created
-  [PASS] add function exists
-  [PASS] multiply function exists
-  [PASS] test/math.test.js created
-  [PASS] Tests pass
-
-Test 7: Git commit history...
-  [PASS] Multiple commits created (3 total)
-
-Test 8: No extra features added...
-  [PASS] No extra features added
-
-=========================================
- Token Usage Analysis
-=========================================
-
-Usage Breakdown:
-----------------------------------------------------------------------------------------------------
-Agent           Description                          Msgs      Input     Output      Cache     Cost
-----------------------------------------------------------------------------------------------------
-main            Main session (coordinator)             34         27      3,996  1,213,703 $   4.09
-3380c209        implementing Task 1: Create Add Function     1          2        787     24,989 $   0.09
-34b00fde        implementing Task 2: Create Multiply Function     1          4        644     25,114 $   0.09
-3801a732        reviewing whether an implementation matches...   1          5        703     25,742 $   0.09
-4c142934        doing a final code review...                    1          6        854     25,319 $   0.09
-5f017a42        a code reviewer. Review Task 2...               1          6        504     22,949 $   0.08
-a6b7fbe4        a code reviewer. Review Task 1...               1          6        515     22,534 $   0.08
-f15837c0        reviewing whether an implementation matches...   1          6        416     22,485 $   0.07
-----------------------------------------------------------------------------------------------------
-
-TOTALS:
-  Total messages:         41
-  Input tokens:           62
-  Output tokens:          8,419
-  Cache creation tokens:  132,742
-  Cache read tokens:      1,382,835
-
-  Total input (incl cache): 1,515,639
-  Total tokens:             1,524,058
-
-  Estimated cost: $4.67
-  (at $3/$15 per M tokens for input/output)
-
-========================================
- Test Summary
-========================================
-
-STATUS: PASSED
-```
-
-## Token Analysis Tool
-
-### Usage
-
-Analyze token usage from any Claude Code session:
+To run a single test (the normal inner-loop while editing one command or skill):
 
 ```bash
-python3 tests/claude-code/analyze-token-usage.py ~/.claude/projects/<project-dir>/<session-id>.jsonl
+bash tests/review-pr.test.sh
 ```
 
-### Finding Session Files
+The shape-checks read the files in your checkout directly, so they need no plugin install. To additionally smoke-test that an edited command or skill still *loads* in Claude Code, reinstall the local plugin (the marketplace key is `uberdev@uberdev`): `/plugin install uberdev@uberdev`, then confirm `/plugin` → Installed → `uberdev` reports no errors.
 
-Session transcripts are stored in `~/.claude/projects/` with the working directory path encoded:
+Each test prints a `PASS` / `FAIL` line per assertion and a `== Summary ==` block, and **exits non-zero if any assertion failed** — so `&&`-chaining them (as `test.yml` does) stops at the first red file.
 
-```bash
-# Example for /Users/jesse/Documents/GitHub/superpowers/superpowers
-SESSION_DIR="$HOME/.claude/projects/-Users-jesse-Documents-GitHub-superpowers-superpowers"
+### The zsh-runtime fixture
 
-# Find recent sessions
-ls -lt "$SESSION_DIR"/*.jsonl | head -5
-```
+`tests/solve-pipeline-zsh.test.sh` is run with **`zsh`**, not `bash`. SKILL.md `bash` fences execute under Claude Code's Bash tool, which is `/bin/zsh` at runtime, so this fixture locks behaviour that only manifests under zsh's word-splitting and array semantics (e.g. the v0.22.2 regression where a scalar `EFFORT_FLAG="--effort max"` broke under `SH_WORD_SPLIT=off`). `ubuntu-latest` does not ship `zsh` by default, so the CI job installs it before running the suite. Run it locally with `zsh tests/solve-pipeline-zsh.test.sh`.
 
-### What It Shows
+## What the tests check (and what they don't)
 
-- **Main session usage**: Token usage by the coordinator (you or main Claude instance)
-- **Per-subagent breakdown**: Each Task invocation with:
-  - Agent ID
-  - Description (extracted from prompt)
-  - Message count
-  - Input/output tokens
-  - Cache usage
-  - Estimated cost
-- **Totals**: Overall token usage and cost estimate
+These are **structural / contract** checks, not end-to-end behavioural tests of a running agent:
 
-### Understanding the Output
+- **Prompt-file contracts** — that a command or agent file still names every dispatch slot, every required flag, every documented argument, and every guard rail it is supposed to (e.g. `review-pr.test.sh` asserts all six Phase-1 reviewer slots are dispatched in a single message).
+- **Runtime behavioural fixtures** — a subset `source` a real `lib/` helper and assert its output. Examples: `solve-pipeline-zsh.test.sh` (zsh word-splitting), `goal.test.sh` BT84 / BT85 (goal-pipeline behaviour), `config-override.test.sh` (config precedence), `secret-scan.test.sh` (the pre-push scanner). So the suite is **not** purely static — the claim "no behavioural tests" is false.
+- **Release-ratchet version locks** — `goal.test.sh` (the `G20: version bump locked` block) and `solve-claim.test.sh` (the `Version bump A.B.C -> X.Y.Z propagated` block) hardcode the current version and **turn CI red on a missed bump**. They are part of the mandatory bump-everywhere ritual (see the project `CLAUDE.md`). A contributor who skips the full suite skips exactly the tests that catch a forgotten version bump.
+- **CI-wiring invariant** — `tests/ci-wiring.test.sh` asserts that *every* `tests/*.test.sh` on disk is wired into the workflow, so a new test that is forgotten in `test.yml` fails CI rather than silently never running.
 
-- **High cache reads**: Good - means prompt caching is working
-- **High input tokens on main**: Expected - coordinator has full context
-- **Similar costs per subagent**: Expected - each gets similar task complexity
-- **Cost per task**: Typical range is $0.05-$0.15 per subagent depending on task
+They deliberately do **not** launch real `claude` sessions, parse session transcripts, or measure token usage. UberDev ships no headless-integration runner and no token-analysis script — the suite is the `tests/*.test.sh` shape-checks and nothing else.
 
-## Troubleshooting
+## The two-job CI matrix
 
-### Skills Not Loading
+`.github/workflows/test.yml` runs on every push and pull request, with **two jobs**:
 
-**Problem**: Skill not found when running headless tests
+| Job | Runner | Shell | Scope |
+| --- | --- | --- | --- |
+| `shape-checks` | `ubuntu-latest` | `bash` (+ `zsh` installed for the one zsh fixture) | The **full** suite — every `tests/*.test.sh`. |
+| `shape-checks-windows` | `windows-latest` | Git Bash (`shell: bash`) | The full suite **minus** the Unix-only runtime fixtures Git Bash can't run reliably. |
 
-**Solutions**:
-1. Ensure you're running FROM the superpowers directory: `cd /path/to/superpowers && tests/...`
-2. Check `~/.claude/settings.json` has `"superpowers@superpowers-dev": true` in `enabledPlugins`
-3. Verify skill exists in `skills/` directory
+The Windows job exists to prove the shape-check harness is Git-Bash-portable (RFC 0004 §3.8). The Unix-only fixtures it skips (zsh, and the `python3 -c` + `mktemp -d` path-translation cases) are enumerated in the canonical **`ci-wiring windows-skip-list`** marker block inside `test.yml`. `tests/ci-wiring.test.sh` enforces that `(ubuntu − windows)` equals exactly that list — so the two jobs cannot drift.
 
-### Permission Errors
+> **When you add or remove a test file:** wire it into **both** jobs in `test.yml` by hand (and add it to the Windows skip-list block if it is a Unix-only runtime fixture). `ci-wiring.test.sh` runs first in both jobs and fails fast on any wiring drift.
 
-**Problem**: Claude blocked from writing files or accessing directories
+## Writing a new test
 
-**Solutions**:
-1. Use `--permission-mode bypassPermissions` flag
-2. Use `--add-dir /path/to/temp/dir` to grant access to test directories
-3. Check file permissions on test directories
-
-### Test Timeouts
-
-**Problem**: Test takes too long and times out
-
-**Solutions**:
-1. Increase timeout: `timeout 1800 claude ...` (30 minutes)
-2. Check for infinite loops in skill logic
-3. Review subagent task complexity
-
-### Session File Not Found
-
-**Problem**: Can't find session transcript after test run
-
-**Solutions**:
-1. Check the correct project directory in `~/.claude/projects/`
-2. Use `find ~/.claude/projects -name "*.jsonl" -mmin -60` to find recent sessions
-3. Verify test actually ran (check for errors in test output)
-
-## Writing New Integration Tests
-
-### Template
+Copy the shape of an existing test (e.g. `tests/review-pr.test.sh`). The conventions reviewers expect:
 
 ```bash
 #!/usr/bin/env bash
-set -euo pipefail
+set -u
+set -o pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$SCRIPT_DIR/test-helpers.sh"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TARGET="$REPO_ROOT/plugins/uberdev/commands/your-command.md"
 
-# Create test project
-TEST_PROJECT=$(create_test_project)
-trap "cleanup_test_project $TEST_PROJECT" EXIT
+# Hard-fail (exit 2) if a required input file is missing — a moved/renamed
+# target should be an explicit failure, not silently zero assertions.
+for f in "$TARGET"; do
+  [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
+done
 
-# Set up test files...
-cd "$TEST_PROJECT"
-
-# Run Claude with skill
-PROMPT="Your test prompt here"
-cd "$SCRIPT_DIR/../.." && timeout 1800 claude -p "$PROMPT" \
-  --allowed-tools=all \
-  --add-dir "$TEST_PROJECT" \
-  --permission-mode bypassPermissions \
-  2>&1 | tee output.txt
-
-# Find and analyze session
-WORKING_DIR_ESCAPED=$(echo "$SCRIPT_DIR/../.." | sed 's/\\//-/g' | sed 's/^-//')
-SESSION_DIR="$HOME/.claude/projects/$WORKING_DIR_ESCAPED"
-SESSION_FILE=$(find "$SESSION_DIR" -name "*.jsonl" -type f -mmin -60 | sort -r | head -1)
-
-# Verify behavior by parsing session transcript
-if grep -q '"name":"Skill".*"skill":"your-skill-name"' "$SESSION_FILE"; then
-    echo "[PASS] Skill was invoked"
-fi
-
-# Show token analysis
-python3 "$SCRIPT_DIR/analyze-token-usage.py" "$SESSION_FILE"
-```
-
-### Best Practices
-
-1. **Always cleanup**: Use trap to cleanup temp directories
-2. **Parse transcripts**: Don't grep user-facing output - parse the `.jsonl` session file
-3. **Grant permissions**: Use `--permission-mode bypassPermissions` and `--add-dir`
-4. **Run from plugin dir**: Skills only load when running from the superpowers directory
-5. **Show token usage**: Always include token analysis for cost visibility
-6. **Test real behavior**: Verify actual files created, tests passing, commits made
-
-## Session Transcript Format
-
-Session transcripts are JSONL (JSON Lines) files where each line is a JSON object representing a message or tool result.
-
-### Key Fields
-
-```json
-{
-  "type": "assistant",
-  "message": {
-    "content": [...],
-    "usage": {
-      "input_tokens": 27,
-      "output_tokens": 3996,
-      "cache_read_input_tokens": 1213703
-    }
-  }
+PASS=0; FAIL=0
+assert_grep() {           # or: source "$REPO_ROOT/tests/_lib_assert_structural.sh"
+  local file="$1" pattern="$2" desc="$3"
+  if grep -qE -e "$pattern" "$file"; then
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"; echo "        file: $file"; echo "        pattern: $pattern"
+    FAIL=$((FAIL + 1))
+  fi
 }
+
+assert_grep "$TARGET" 'some-required-token' "names the required token"
+
+echo; echo "== Summary =="; echo "  passed: $PASS"; echo "  failed: $FAIL"
+[ "$FAIL" -eq 0 ]          # non-zero exit on any failure
 ```
 
-### Tool Results
+Conventions worth honouring:
 
-```json
-{
-  "type": "user",
-  "toolUseResult": {
-    "agentId": "3380c209",
-    "usage": {
-      "input_tokens": 2,
-      "output_tokens": 787,
-      "cache_read_input_tokens": 24989
-    },
-    "prompt": "You are implementing Task 1...",
-    "content": [{"type": "text", "text": "..."}]
-  }
-}
-```
+1. **Fail loud on missing inputs.** Guard required files with an `exit 2` FATAL — a count-based test that finds zero assertions because the file moved must not report PASS.
+2. **Anchor on the real token.** If you assert on a literal string the source ships, and you later rename that token, update the test in the same change. Relax start-anchored patterns (`^foo`) to tolerate leading whitespace (`^[[:space:]]*foo`) when the matched line may be indented.
+3. **Mind the runtime shell.** SKILL.md `bash` fences run under **zsh** in production. If you are locking a runtime behaviour of a fence, prefer a `zsh`-run fixture (and add it to the zsh path in `test.yml`), because bashisms (`BASH_REMATCH`, `${!var}` indirection, `compgen`, `type -t`) misfire under zsh.
+4. **Wire it into CI.** Add the new file to **both** jobs in `.github/workflows/test.yml`; `ci-wiring.test.sh` will otherwise fail.
 
-The `agentId` field links to subagent sessions, and the `usage` field contains token usage for that specific subagent invocation.
+## See also
+
+- `.github/workflows/test.yml` — the authoritative test set and the two-job matrix.
+- `tests/ci-wiring.test.sh` — the wiring invariant that keeps the workflow and the on-disk test set in sync.
+- `tests/_lib_assert_structural.sh` — shared section-scoped assertion helpers.
+- The project `CLAUDE.md` — the bump-version-everywhere ritual the version-lock tests enforce.

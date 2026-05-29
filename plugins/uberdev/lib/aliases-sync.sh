@@ -103,7 +103,7 @@ _aliases_check_marker() {
 # top-level one; this is safe because the manifest is the plugin's own
 # shipped, controlled file, where `"version": "x.y.z"` sits on a single
 # top-level line. Prints nothing on any failure; the caller treats an empty
-# result as "version undeterminable" and fails open (RFC 0004).
+# result as "version undeterminable" and fails open (RFC 0011).
 _aliases_read_version() {
   local file="$1"
   [ -r "$file" ] || return 0
@@ -143,7 +143,7 @@ aliases_sync_main() {
   local DEST_DIR="$HOME/.claude/commands"
   local MARKER="$HOME/.claude/.uberdev-aliases-version"
   local VERSION INSTALLED FIRST_RUN
-  # jq-free read of the plugin's own manifest version (RFC 0004) — alias
+  # jq-free read of the plugin's own manifest version (RFC 0011) — alias
   # sync has no external dependency, so it works without jq on PATH.
   VERSION="$(_aliases_read_version "$PLUGIN_ROOT_LOCAL/.claude-plugin/plugin.json")"
   [ -n "$VERSION" ] || return 0
@@ -222,7 +222,7 @@ aliases_sync_main() {
     echo "first run: installed ${#INSTALLED_LIST[@]} aliases, skipped ${#SKIPPED_LIST[@]} conflicts (${skipped_str})${failed_str}; opt out with UBERDEV_NO_AUTO_ALIAS=1" >&2
   fi
 
-  # 8. User-facing notice (RFC 0004) — consumed by the SessionStart hook and
+  # 8. User-facing notice (RFC 0011) — consumed by the SessionStart hook and
   # injected into the session context. Reached only when the per-alias loop
   # ran (first install or a version refresh); the idempotency early-return at
   # step 3 means a steady-state session never gets here, so the notice is

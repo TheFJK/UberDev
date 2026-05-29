@@ -14,12 +14,17 @@ When you change a plugin file, re-run `/plugin install uberdev@uberdev` to pick 
 
 ## Repo layout
 
-See [Repo layout](README.md#repo-layout) in the README. Contributor-only additions:
+The marketplace manifest is `.claude-plugin/marketplace.json` (top-level); the single bundled plugin lives under `plugins/uberdev/`, with the canonical version in `plugins/uberdev/.claude-plugin/plugin.json`. The directories a contributor touches:
 
+- `plugins/uberdev/commands/` — slash-command prompt files (`/uberdev:<command>`); frontmatter declares argument hints + allowed tools, the body is the prompt.
 - `plugins/uberdev/agents/` — reusable subagent prompts that orchestrator commands compose.
 - `plugins/uberdev/skills/` — discoverable workflow skills (each is a folder with `SKILL.md` + optional supporting files).
 - `plugins/uberdev/hooks/` — `SessionStart` / `PreToolUse` / `SessionEnd` / `PreCompact` event handlers, wired in `hooks.json`.
+- `plugins/uberdev/lib/` — sourced shell helpers shared across pipelines (e.g. `dispatch.sh`, `config-read.sh`, `aliases-sync.sh`).
+- `plugins/uberdev/docs/` — plugin-internal docs, including this `testing.md`.
 - `plugins/uberdev/licenses/` — bundled upstream license texts (Anthropic, Jesse Vincent) for the verbatim/adapted components listed in the README's "Bundled" section.
+- `tests/` — the `*.test.sh` shape-check suite (see _Local testing_).
+- `docs/rfc/` — published design RFCs (everything else under `docs/` is local-only per `.gitignore`).
 
 ---
 
@@ -61,22 +66,28 @@ CI is light by design (this plugin is markdown + shell scripts, not a build pipe
 
 ## Local testing
 
-`plugins/uberdev/docs/testing.md` documents the smoke-test matrix — run it after non-trivial changes to `/solve`, `/issue`, or any skill that the spawned agents invoke.
+`plugins/uberdev/docs/testing.md` documents the `tests/*.test.sh` shape-check harness and the two-job CI matrix — read it before adding or changing a test, and run the affected tests after non-trivial changes to `/solve`, `/issue`, or any skill that the spawned agents invoke.
 
 For pure markdown / docs edits, install the plugin locally and confirm the affected command or skill loads without warning (`/plugin` → Installed → `uberdev` shows no errors).
 
 ### Running tests locally
 
-Run all shape-check tests with:
+`.github/workflows/test.yml` is the **single source of truth** for the active test set — do not maintain a hand-curated list here that can drift from it. Run the affected test directly:
 
 ```bash
-bash tests/turbo-flow.test.sh
-bash tests/issue-causal-fanout.test.sh
-bash tests/post-impl-review.test.sh
-bash tests/spec-reviewer-plan-aware.test.sh
+bash tests/<name>.test.sh
 ```
 
-These also run in CI on every push and PR (`.github/workflows/test.yml`). All four are shape-checks against prompt files — no runtime behavioral tests yet.
+…or run the whole suite the way CI does (one fixture, `solve-pipeline-zsh.test.sh`, runs under `zsh` — `tests/ci-wiring.test.sh` asserts every file on disk is wired into both CI jobs):
+
+```bash
+for t in tests/*.test.sh; do
+  echo "== $t =="
+  if [ "$t" = "tests/solve-pipeline-zsh.test.sh" ]; then zsh "$t" || exit 1; else bash "$t" || exit 1; fi
+done
+```
+
+These run in CI on every push and PR via the two-job matrix in `.github/workflows/test.yml` (`shape-checks` on `ubuntu-latest` runs the full suite; `shape-checks-windows` on `windows-latest` / Git Bash runs it minus the Unix-only runtime fixtures). Most checks are structural greps against prompt and lib files, but the suite **does** include runtime behavioral fixtures (`solve-pipeline-zsh.test.sh`, `goal.test.sh` BT84/BT85, `config-override.test.sh`) and the release-ratchet version-lock tests (`goal.test.sh` G20, `solve-claim.test.sh`) that turn CI red on a missed version bump — so don't skip the full run before a release.
 
 ---
 
