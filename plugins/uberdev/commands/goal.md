@@ -18,7 +18,7 @@ Autonomous convergence orchestrator that drives one or more GitHub issues to mer
 - `--barrier-timeout=N` — wall-clock cap (seconds) on the wait-for-all merge barrier in Phase 2 step 2c
   (default 14400 = 4h, range 60..86400). Timeout escalates to the existing `stuck_loop` circuit-breaker
   reason; no new breaker enum is added. Resolved via the same precedence as `--max-cycles`.
-- `--only-mine` — only enqueue `review-pr-finding` issues authored by `$GH_USER`.
+- `--only-mine` — only enqueue `review-pr-finding` issues authored by `$GH_USER`. **Requires a single `gh` identity (issue #291):** it filters on `.author.login`, so it assumes the detached bg `/review-pr` agent that files the findings runs under the same `gh` identity as the watcher. On a CI-token / multi-identity setup the bg-filed findings carry a different author and would be silently dropped (false convergence with open blockers) — OMIT `--only-mine` there. Opt-in, OFF by default.
 - `--dry-run` — print planned cycle 1 dispatch + watch-loop preview, exit 0. No `/uberdev:orchestrator`, no `/merge`, no `/review-pr` is invoked.
 - `--backend=<name>` — pin a dispatch backend (`claude-bg` | `wezterm` | `background`); otherwise auto-resolved once by Phase 0 preflight and frozen for the run.
 
@@ -50,5 +50,17 @@ See `plugins/uberdev/lib/dispatch.sh:192-198` for the full rationale. This is se
 **Important:** settings like `"skipDangerousModePermissionPrompt": true` in your own `~/.claude/settings.json` are **NOT** sufficient when cmux (or another daemon manager) injects its own `--settings <blob>` into the bg session's `respawnFlags` via the parent process — the user-settings file is shadowed at bg-dispatch time, not modified on disk. The env-var path (`SKIP_PERMISSIONS=1` → `--dangerously-skip-permissions` in argv) is what actually unblocks the loop.
 
 Standalone `/uberdev:turbo` and `/uberdev:solve` defensively `unset SKIP_PERMISSIONS` so a stale shell export from an earlier `/goal` run cannot silently elevate them. Outside `/goal`, operator-gated permissions are preserved by design (RFC 0005 §2.3 scoped-relaxation contract).
+
+## Execution contract — bash ≥ 4 required (issue #294)
+
+`/goal`'s watch loop locates each PR's `/review-pr` verdict by iterating unquoted globs (`uberdev_goal_locate_review_pr_audit_by_pr` in `lib/goal-state.sh`). That relies on bash's **"unmatched glob → expands to nothing / literal"** semantics. **zsh instead fatals with `no matches found`**, and macOS's stock `/bin/bash` is 3.2 (no `declare -A`, no `mapfile`). So **the whole `/goal` run requires bash ≥ 4.**
+
+The Claude-Code Bash tool runs every SKILL.md fence under `/bin/zsh` (where `BASH_VERSINFO` is unset). To keep `/goal` runnable, Phase 0 step 0 resolves the interpreter instead of dead-ending:
+
+- **Already under bash ≥ 4** (e.g. CI, or an explicit `bash`-invoked fence): proceed.
+- **Not bash ≥ 4, but a bash ≥ 4 binary is discoverable** (checked in order: `/opt/homebrew/bin/bash`, `/usr/local/bin/bash`, `command -v bash` — each version-verified ≥ 4): Phase 0 publishes it as the exported `UBERDEV_GOAL_BASH`. If the fence was invoked as a real shebang **script file** it `exec`s that script under `UBERDEV_GOAL_BASH`; for an **inline** `zsh -c` body (no script path to re-feed) it proceeds and prints the resolved path. **Run `/goal`'s subsequent SKILL.md fences under `$UBERDEV_GOAL_BASH`** — e.g. by invoking each fence as `"$UBERDEV_GOAL_BASH" -c '<fence body>'`, or by ensuring the Bash tool's shell is bash ≥ 4 for the duration of the run. The bash-requiring glob lives in the Phase 2 watch loop; Phase 0/1's own steps are bash-safe under zsh, but the watch loop is NOT.
+- **No bash ≥ 4 anywhere**: Phase 0 exits 2 with `brew install bash`. This is the only case where `/goal` genuinely cannot run.
+
+> **TL;DR for operators:** on stock macOS run `brew install bash` once (gives `/opt/homebrew/bin/bash` 5.x). `/goal` then auto-discovers it. The old behavior — a hard `exit 2` on the first fence even with bash 5 installed — is fixed.
 
 Now invoke the `uberdev:goal-pipeline` skill — it owns the 5-phase pipeline (preflight, dispatch, watch, collect-next, converge/halt). The skill renders inline, so `$ARGUMENTS` remains in scope for its logic.
