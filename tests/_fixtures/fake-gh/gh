@@ -31,16 +31,22 @@
 #   ci-checks-no-checks  : gh pr checks output simulating "no checks reported on the
 #                          'main' branch" — Phase 3 PROBE → skipped_no_checks fast path.
 #                          stderr: 'no checks reported on the ...'; stdout empty array.
-#   ci-checks-pending    : gh pr checks --json output where every entry has
-#                          status: in_progress (drives Phase 3 PROBE → MONITOR transition).
-#   ci-checks-green      : all entries conclusion ∈ {success}; PROBE fast-path → green.
-#   ci-checks-red        : at least one entry conclusion: failure; drives PROBE → MONITOR
+#   ci-checks-pending    : gh pr checks --json name,state,bucket output where every entry
+#                          has bucket: pending (drives Phase 3 PROBE → MONITOR transition).
+#   ci-checks-green      : all entries bucket ∈ {pass, skipping}; PROBE fast-path → green.
+#   ci-checks-red        : at least one entry bucket: fail; drives PROBE → MONITOR
 #                          → CLASSIFY transition.
-#   ci-checks-mixed      : pending + red mix — exercises MONITOR settling-then-classify.
+#   ci-checks-mixed      : pending + fail mix — exercises MONITOR settling-then-classify
+#                          and the red-outranks-pending verdict precedence.
 #   gh-unreachable       : gh exits non-zero with no usable JSON (carve-out test).
 #                          stderr token: 'gh: connection refused'.
 #   ci-rate-limit-low    : gh api rate_limit response with .resources.core.remaining=42
 #                          (below the 200 floor — exercises pre-flight skip).
+#
+# gh field contract (gh >= 2.83.1): `gh pr checks --json` exposes name,state,bucket —
+# NOT status/conclusion (removed upstream). `bucket` is gh's own state→category fold:
+# SUCCESS→pass; SKIPPED|NEUTRAL→skipping; ERROR|FAILURE|TIMED_OUT|ACTION_REQUIRED→fail;
+# CANCELLED→cancel; everything still running (QUEUED|IN_PROGRESS|PENDING|...)→pending.
 #
 # A side-effect log of the call (argv) is written to $FAKE_GH_CALL_LOG when
 # that variable is set; tests can inspect it to verify call shape (e.g. that
@@ -173,10 +179,11 @@ JSON
 
   ci-checks-pending)
     # Phase 3 6c.1 PROBE -> 6c.2 MONITOR transition.
+    # gh >= 2.83.1 shape: {name,state,bucket}. IN_PROGRESS folds to bucket=pending.
     cat <<'JSON'
 [
-  {"name": "build", "status": "in_progress", "conclusion": null},
-  {"name": "test",  "status": "in_progress", "conclusion": null}
+  {"name": "build", "state": "IN_PROGRESS", "bucket": "pending"},
+  {"name": "test",  "state": "QUEUED",      "bucket": "pending"}
 ]
 JSON
     exit 0
@@ -184,11 +191,12 @@ JSON
 
   ci-checks-green)
     # Phase 3 6c.1 PROBE green fast-path.
+    # SUCCESS -> bucket=pass; SKIPPED -> bucket=skipping (both green-eligible).
     cat <<'JSON'
 [
-  {"name": "build", "status": "completed", "conclusion": "success"},
-  {"name": "test",  "status": "completed", "conclusion": "success"},
-  {"name": "lint",  "status": "completed", "conclusion": "skipped"}
+  {"name": "build", "state": "SUCCESS", "bucket": "pass"},
+  {"name": "test",  "state": "SUCCESS", "bucket": "pass"},
+  {"name": "lint",  "state": "SKIPPED", "bucket": "skipping"}
 ]
 JSON
     exit 0
@@ -196,10 +204,11 @@ JSON
 
   ci-checks-red)
     # Phase 3 6c.1 PROBE -> CLASSIFY (one failed check).
+    # FAILURE -> bucket=fail.
     cat <<'JSON'
 [
-  {"name": "build", "status": "completed", "conclusion": "success"},
-  {"name": "test",  "status": "completed", "conclusion": "failure"}
+  {"name": "build", "state": "SUCCESS", "bucket": "pass"},
+  {"name": "test",  "state": "FAILURE", "bucket": "fail"}
 ]
 JSON
     exit 0
@@ -207,11 +216,12 @@ JSON
 
   ci-checks-mixed)
     # Phase 3 6c.2 MONITOR settles -> 6c.3 CLASSIFY (mixed pending + red).
+    # red (fail bucket) MUST outrank pending in the PROBE verdict.
     cat <<'JSON'
 [
-  {"name": "build", "status": "completed",  "conclusion": "success"},
-  {"name": "test",  "status": "completed",  "conclusion": "failure"},
-  {"name": "lint",  "status": "in_progress","conclusion": null}
+  {"name": "build", "state": "SUCCESS",     "bucket": "pass"},
+  {"name": "test",  "state": "FAILURE",     "bucket": "fail"},
+  {"name": "lint",  "state": "IN_PROGRESS", "bucket": "pending"}
 ]
 JSON
     exit 0

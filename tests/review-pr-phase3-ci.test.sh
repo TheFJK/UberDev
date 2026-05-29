@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
-# Functional integration tests for /uberdev:review-pr Phase 3 (CI Health).
-# Scenarios 1-9 from spec Test Plan. Each scenario seeds FAKE_GH_MODE,
-# invokes the structural-assert helpers against the prose contract, and
-# asserts (a) which Task() subagent_type was dispatched and (b) which
-# AUDIT_EVENT_ENUM members landed in the audit log.
+# Tests for /uberdev:review-pr Phase 3 (CI Health). Two layers:
 #
-# Note: this suite asserts STRUCTURAL contract presence in the prose
-# (commands/review-pr.md + agent files), not runtime behaviour — the
-# plugin runtime is the LLM, not bash. The assertions are aggressive
-# grep/regex checks that lock every Phase 3 contract surface.
+#   STRUCTURAL (S1-S14): aggressive grep/regex checks that lock every Phase 3
+#     contract surface in the prose (commands/review-pr.md + agent files). The
+#     plugin "runtime" is the LLM reading that prose, so these assert that the
+#     load-bearing tokens, audit-event names, and dispatch shapes are present.
+#
+#   RUNTIME (S15): exercises the Phase-3 6c.1 PROBE bucket-classification
+#     contract for real. It prepends tests/_fixtures/fake-gh to PATH, sets
+#     FAKE_GH_MODE per scenario, runs `gh pr checks ... --json name,state,bucket`
+#     exactly as review-pr.md specifies, then applies the *prose's own* jq
+#     verdict expression (extracted live from review-pr.md, so the test can
+#     never drift from the documented logic) and asserts the resulting verdict.
+#     It also locks the gh >= 2.83.1 field contract: probe output carries
+#     name/state/bucket and NEVER the removed status/conclusion fields.
+#
+# The fake `gh` is required because the real one is unavailable in CI sandboxes
+# (and we never make network calls in unit tests).
 
 set -u
 set -o pipefail
@@ -308,6 +316,124 @@ if [[ -n "$R_START" && -n "$R_END" ]]; then
 else
   echo "  FAIL  S14.5 — could not locate REFUSED sub-block (R_START=$R_START R_END=$R_END)"
   FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== S15: field-contract structural guard — probe reads name,state,bucket (NOT status,conclusion) =="
+# Lock the gh >= 2.83.1 field contract in the prose so a future edit can't
+# silently regress the probe back to the removed status,conclusion fields.
+assert_grep "$REVIEW_PR" 'gh pr checks "\$PR_NUMBER" --json name,state,bucket' \
+  "S15.1 — PROBE call reads --json name,state,bucket"
+assert_grep "$REVIEW_PR" 'gh pr checks "\$PR_NUMBER" --watch --interval 30$' \
+  "S15.2 — MONITOR --watch call takes NO --json (gh forbids --watch with --json)"
+# S15.2b — gh 2.83.1 rejects `--watch` together with `--json`
+# ("cannot use --watch with --json flag", verified live). Scope this guard to
+# actual `gh pr checks ... --watch` *command invocations* (not the prose that
+# explains the constraint) by flagging only invocation lines that also carry
+# --json. An invocation line is one where gh pr checks + --watch are not inside
+# backtick-quoted prose: we approximate by requiring the line to NOT contain a
+# backtick (command fences here are plain, prose references are backticked).
+S15_2B_VIOLATIONS="$(awk '
+  /gh pr checks/ && /--watch/ && /--json/ && $0 !~ /`/ { print FILENAME ":" NR ": " $0 }
+' "$REVIEW_PR")"
+if [ -z "$S15_2B_VIOLATIONS" ]; then
+  echo "  PASS  S15.2b — no gh pr checks --watch invocation is combined with --json"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S15.2b — a gh pr checks --watch invocation is combined with --json (gh rejects this)"
+  printf '%s\n' "$S15_2B_VIOLATIONS" | sed 's/^/          /'
+  FAIL=$((FAIL + 1))
+fi
+assert_no_grep "$REVIEW_PR" '\-\-json name,status,conclusion' \
+  "S15.3 — no probe reads the removed --json name,status,conclusion field set"
+assert_grep "$REVIEW_PR" 'bucket .* \{pass, skipping\}|bucket ∈ \{pass, skipping\}' \
+  "S15.4 — green predicate keyed off bucket ∈ {pass, skipping}"
+assert_grep "$REVIEW_PR" 'bucket ∈ \{fail, cancel\}|bucket .* \{fail, cancel\}' \
+  "S15.5 — red predicate keyed off bucket ∈ {fail, cancel}"
+
+echo
+echo "== S15-RUNTIME: PROBE bucket-classification exercised against fake-gh =="
+# Extract the PROBE verdict jq program *from review-pr.md itself* so this test
+# exercises the documented contract, not a parallel re-implementation. If the
+# prose jq changes, this re-extracts it and re-verifies behaviour.
+JQ_VERDICT_PROG="$(awk '
+  /PROBE_VERDICT="\$\(jq -r .$/ { capture=1; next }
+  capture && /^[[:space:]]*.[[:space:]]*<<<"\$PROBE_JSON"/ { capture=0; exit }
+  capture { print }
+' "$REVIEW_PR")"
+
+if [ -z "$JQ_VERDICT_PROG" ]; then
+  echo "  FAIL  S15-RT.0 — could not extract PROBE_VERDICT jq program from review-pr.md"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S15-RT.0 — extracted PROBE_VERDICT jq program from review-pr.md prose"
+  PASS=$((PASS + 1))
+fi
+
+FAKE_GH_DIR="$REPO_ROOT/tests/_fixtures/fake-gh"
+if [ ! -x "$FAKE_GH_DIR/gh" ]; then
+  echo "  FAIL  S15-RT.0b — fake-gh stub missing/not executable at $FAKE_GH_DIR/gh"
+  FAIL=$((FAIL + 1))
+fi
+
+# Run the PROBE exactly as Phase 3 6c.1 specifies: fake gh on PATH, FAKE_GH_MODE
+# set, `gh pr checks <n> --json name,state,bucket`. Echo the raw probe JSON on
+# stdout so callers capture it in their own scope (a global set inside the $(...)
+# command-substitution subshell would NOT propagate back to the caller).
+_run_probe() {
+  local mode="$1"
+  PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_MODE="$mode" \
+    gh pr checks 999 --json name,state,bucket 2>/dev/null
+}
+
+assert_verdict() {
+  local mode="$1" expected="$2" desc="$3"
+  local probe got bucket_ok="no"
+  probe="$(_run_probe "$mode")"
+  got="$(jq -r "$JQ_VERDICT_PROG" <<<"$probe" 2>/dev/null)"
+  # Guard against the silent-degradation class the issue pins: a probe whose
+  # entries lack the `bucket` key would fall through the verdict jq's any()
+  # tests to "green" — masking a broken field contract as a passing CI. So a
+  # non-empty verdict is only trusted when every entry actually carries bucket.
+  if printf '%s' "$probe" | jq -e 'type=="array" and length>0 and all(.[]; has("bucket"))' >/dev/null 2>&1; then
+    bucket_ok="yes"
+  fi
+  if [ "$got" = "$expected" ] && [ "$bucket_ok" = "yes" ]; then
+    echo "  PASS  $desc (mode=$mode → $got)"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"; echo "        mode: $mode"; echo "        expected verdict: $expected (bucket-on-every-entry: yes)"; echo "        actual verdict:   $got (bucket-on-every-entry: $bucket_ok)"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+# S15-RT.1..4 — bucket classification, driven by the now-live ci-checks-* modes.
+assert_verdict ci-checks-green   green   "S15-RT.1 — all bucket ∈ {pass,skipping} → green fast-path"
+assert_verdict ci-checks-pending pending "S15-RT.2 — all bucket pending → MONITOR transition"
+assert_verdict ci-checks-red     red     "S15-RT.3 — any bucket fail → red (CLASSIFY)"
+assert_verdict ci-checks-mixed   red     "S15-RT.4 — fail+pending mix → red (red outranks pending)"
+
+# S15-RT.5 — gh >= 2.83.1 field contract: the probe JSON the stub emits MUST
+# carry name/state/bucket on every entry and NEVER the removed status/conclusion
+# fields. This is the regression that the issue's "verified live" diagnosis pins.
+GREEN_PROBE="$(_run_probe ci-checks-green)"
+if printf '%s' "$GREEN_PROBE" | jq -e 'type=="array" and length>0 and all(.[]; has("name") and has("state") and has("bucket"))' >/dev/null 2>&1; then
+  echo "  PASS  S15-RT.5a — stub probe entries carry name/state/bucket"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S15-RT.5a — stub probe entries missing name/state/bucket: $GREEN_PROBE"; FAIL=$((FAIL + 1))
+fi
+if printf '%s' "$GREEN_PROBE" | jq -e 'all(.[]; (has("status")|not) and (has("conclusion")|not))' >/dev/null 2>&1; then
+  echo "  PASS  S15-RT.5b — stub probe entries carry NO removed status/conclusion fields"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S15-RT.5b — stub probe entries still carry removed status/conclusion: $GREEN_PROBE"; FAIL=$((FAIL + 1))
+fi
+
+# S15-RT.6 — no-checks fast path: empty array (and non-zero gh exit + 'no checks
+# reported on the' stderr) maps to the `empty` verdict → skipped_no_checks.
+EMPTY_PROBE="$(_run_probe ci-checks-no-checks)"
+EMPTY_VERDICT="$(jq -r "$JQ_VERDICT_PROG" <<<"$EMPTY_PROBE" 2>/dev/null)"
+if [ "$EMPTY_VERDICT" = "empty" ]; then
+  echo "  PASS  S15-RT.6 — ci-checks-no-checks empty array → empty verdict (skipped_no_checks)"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S15-RT.6 — expected empty verdict, got '$EMPTY_VERDICT' (probe='$EMPTY_PROBE')"; FAIL=$((FAIL + 1))
 fi
 
 echo

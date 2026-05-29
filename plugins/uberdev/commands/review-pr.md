@@ -349,8 +349,18 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
     **Probe call:**
 
+    **Field contract (gh ≥ 2.83.1):** `gh pr checks --json` exposes `name`, `state`, and `bucket` — there is **no** `status` and **no** `conclusion` field (those were removed upstream; reading them errors `unknown JSON field`). `bucket` is gh's own canonical categorization of `state` and is the field this probe keys off:
+
+    | `bucket` | `state` values folded into it (gh `aggregateChecks`) | meaning here |
+    |---|---|---|
+    | `pass` | `SUCCESS` | green |
+    | `skipping` | `SKIPPED`, `NEUTRAL` | green-eligible (skipped/neutral never block) |
+    | `pending` | `EXPECTED`, `REQUESTED`, `WAITING`, `QUEUED`, `PENDING`, `IN_PROGRESS`, `STALE` | still running → MONITOR |
+    | `fail` | `ERROR`, `FAILURE`, `TIMED_OUT`, `ACTION_REQUIRED` | red |
+    | `cancel` | `CANCELLED` | red |
+
     ```bash
-    PROBE_JSON="$(gh pr checks "$PR_NUMBER" --json name,status,conclusion 2>&1)" || PROBE_RC=$?
+    PROBE_JSON="$(gh pr checks "$PR_NUMBER" --json name,state,bucket 2>&1)" || PROBE_RC=$?
     # Validate PROBE_JSON is parseable JSON BEFORE the terminal-mapping
     # branches below try to interpret it. On gh failure (non-zero exit),
     # PROBE_JSON contains stderr text; jq parsing would silently produce
@@ -360,17 +370,27 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
       audit ci_probe_unreachable subreason=gh_failed_${PROBE_RC}
       # phases.phase3 block omitted entirely; skip to Step 7
     fi
+    # Classify off bucket (gh's canonical state→bucket fold). A single jq pass
+    # collapses the array to one of: empty / green / pending / red. Never
+    # line-grep the buckets — parse as JSON. `red` outranks `pending` so a mix
+    # of failed + still-running checks still routes through MONITOR→CLASSIFY.
+    PROBE_VERDICT="$(jq -r '
+      if (type != "array") or (length == 0) then "empty"
+      elif any(.[].bucket; . == "fail" or . == "cancel") then "red"
+      elif any(.[].bucket; . == "pending") then "pending"
+      else "green" end
+    ' <<<"$PROBE_JSON" 2>/dev/null)"
     ```
 
     Terminal mappings (parsed as JSON; never line-grepped):
 
-    | `PROBE_JSON` content | OUTCOME | Audit event |
-    |---|---|---|
-    | stderr matches `no checks reported on the` (or empty `[]`) | `skipped_no_checks` | `ci_probe_skipped_no_checks` |
-    | all entries `conclusion ∈ {success, neutral, skipped}` | `green` | `ci_phase_outcome` (terminal, payload `outcome=green` — fast-path skip past MONITOR/CLASSIFY) |
-    | any entry `status == in_progress` or `pending` | (proceed to MONITOR) | `ci_probe_started` |
-    | any entry `conclusion ∈ {failure, cancelled, timed_out, action_required}` | (proceed to MONITOR + classify if all settled) | `ci_probe_started` |
-    | `gh` exit non-zero AND no usable JSON | (carve-out — `phases.phase3` block omitted from audit JSON; Step 7 proceeds as if `OUTCOME=skipped_no_checks`) | `ci_probe_unreachable` |
+    | `PROBE_JSON` content | `PROBE_VERDICT` | OUTCOME | Audit event |
+    |---|---|---|---|
+    | stderr matches `no checks reported on the` (or empty `[]`) | `empty` | `skipped_no_checks` | `ci_probe_skipped_no_checks` |
+    | all entries `bucket ∈ {pass, skipping}` | `green` | `green` | `ci_phase_outcome` (terminal, payload `outcome=green` — fast-path skip past MONITOR/CLASSIFY) |
+    | any entry `bucket == pending` (and none `fail`/`cancel`) | `pending` | (proceed to MONITOR) | `ci_probe_started` |
+    | any entry `bucket ∈ {fail, cancel}` | `red` | (proceed to MONITOR + classify if all settled) | `ci_probe_started` |
+    | `gh` exit non-zero AND no usable JSON | — | (carve-out — `phases.phase3` block omitted from audit JSON; Step 7 proceeds as if `OUTCOME=skipped_no_checks`) | `ci_probe_unreachable` |
 
     The `gh pr checks` output MUST be parsed as JSON, never line-grepped.
 
@@ -379,10 +399,10 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
     The literals `1200` and `30` below are `CI_MONITOR_TIMEOUT_SEC` and `CI_WATCH_INTERVAL_SEC` respectively (declared in `merge-pipeline/SKILL.md` Constants — kept numeric inline because bash does not dereference markdown constants).
 
     ```bash
-    timeout 1200 gh pr checks "$PR_NUMBER" --watch --interval 30 --json name,status,conclusion
+    timeout 1200 gh pr checks "$PR_NUMBER" --watch --interval 30
     ```
 
-    Wall-clock cap: **20 minutes** (`timeout 1200` = `CI_MONITOR_TIMEOUT_SEC`). On exit code 0 → all green → `OUTCOME=green` → audit `ci_monitor_green`. Exit 8 (still pending after watch terminates — underdocumented gh exit code) → `ci_monitor_timeout` audit; halt loop iteration with `OUTCOME=halted` (carry differentiation in audit `data.subreason=monitor_timeout`; `halted` is the canonical CI_OUTCOME_ENUM member, not a `halted_timeout` synthetic). Non-zero non-8 → at least one check failed → audit `ci_monitor_red`; proceed to CLASSIFY.
+    **`--watch` takes NO `--json`:** gh refuses `--watch` together with `--json` (`cannot use --watch with --json flag`, verified live on gh 2.83.1) — that is why the field list is absent here even though 6c.1 PROBE reads `--json name,state,bucket`. MONITOR keys off the **exit code** (gh's documented `gh pr checks` contract), not parsed JSON, so it needs no field projection. Wall-clock cap: **20 minutes** (`timeout 1200` = `CI_MONITOR_TIMEOUT_SEC`). The watch terminates on its own once every check leaves the `pending` bucket. On exit code 0 → all green → `OUTCOME=green` → audit `ci_monitor_green`. Exit 8 (still pending after watch terminates — `gh pr checks` exit code 8 = "Checks pending", per `gh pr checks --help`) → `ci_monitor_timeout` audit; halt loop iteration with `OUTCOME=halted` (carry differentiation in audit `data.subreason=monitor_timeout`; `halted` is the canonical CI_OUTCOME_ENUM member, not a `halted_timeout` synthetic). Non-zero non-8 → at least one check failed → audit `ci_monitor_red`; proceed to CLASSIFY.
 
     `--fail-fast` is **NOT** used (the classifier needs the complete failure picture). The 30-second `--interval` floor (`CI_WATCH_INTERVAL_SEC`) is intentional (rate-limit guard).
 
