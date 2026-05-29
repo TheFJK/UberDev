@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.6] — 2026-05-29
+
+### Changed
+- **findings-to-issues — accepted-source allow-list is now a single source of truth** (#198; prevents #182-class drift). Extracted `ACCEPTED_SOURCES` as a `frozenset` in `lib/report_primitives.py`; `envelope()` now asserts `source in ACCEPTED_SOURCES` and raises `ValueError` at emit time, so a typo or a new pipeline shipping an un-accepted source fails loudly **where it is emitted** instead of silently filing ZERO issues (the #182 bug: `testers-aggregate` was emitted by `report.py` but missing from the allow-list, so every `/uberdev:testers` run filed nothing). The agent spec's partial source re-enumeration in `agents/findings-to-issues.md` was collapsed to a pointer at the Step-1 closed set, so the 7 sources are enumerated in exactly one place.
+
+### Tests
+- New `tests/findings-to-issues.test.sh` Suite 15 cross-consistency gate: asserts the python `ACCEPTED_SOURCES` frozenset equals the agent-spec closed set, every emitter `envelope()` source literal is a member, and `envelope()` raises on a non-accepted source while accepting a member — so the allow-list and the emitters can no longer silently drift.
+
 ## [0.35.5] — 2026-05-29
 
 ### Fixed

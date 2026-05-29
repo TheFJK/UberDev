@@ -329,6 +329,118 @@ assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
   'testers-aggregate' \
   'S14 — Step 1 accepted-source allow-list includes testers-aggregate (#182)'
 
+### Suite 15: ACCEPTED_SOURCES SSOT (#198) ----------
+echo
+echo "### Suite 15: ACCEPTED_SOURCES SSOT (#198)"
+# Make the findings-to-issues accepted-source allow-list a single source of truth
+# (lib/report_primitives.py:ACCEPTED_SOURCES) with an emit-time assert in
+# envelope(), preventing the #182-class drift where a pipeline emits a source not
+# in the allow-list → findings-to-issues silently files ZERO issues.
+
+LIB_DIR="$REPO_ROOT/plugins/uberdev/lib"
+# The canonical 7-set, sorted (used as the byte-equality oracle for checks 1+2).
+EXPECTED_SOURCES_SORTED=$(printf '%s\n' \
+  post-impl-review-aggregate simplify-aggregate ci-refused-synthetic \
+  uberscan-aggregate ubersimplify-aggregate testers-aggregate uberthink-aggregate \
+  | LC_ALL=C sort)
+
+# S15.1 — Python frozenset is importable + has exactly the 7 members.
+# Capture stderr (NOT 2>/dev/null) so an import/syntax error in report_primitives.py
+# surfaces in the FAIL message instead of being swallowed — fitting for the very
+# anti-silent-failure fix this suite guards.
+S15_PY_ERR="$(mktemp)"
+# Cross-platform import (#268 CI): `cd` into the lib dir (bash resolves the
+# absolute path on Git Bash/Windows too) and let `python3 -c` find the module
+# via cwd — passing an absolute BASH path to native-Windows python's sys.path
+# (e.g. /d/a/...) raises ModuleNotFoundError. No path argument reaches python.
+# `tr -d '\r'`: native-Windows python writes CRLF to stdout, so the multi-line
+# join carries \r that breaks the LF-based string compare below (the \r is a
+# no-op on Linux/macOS where output is already LF) — #268 CI.
+PY_SOURCES_SORTED=$( (cd "$LIB_DIR" && python3 -c "from report_primitives import ACCEPTED_SOURCES; print('\n'.join(sorted(ACCEPTED_SOURCES)))") 2>"$S15_PY_ERR" | tr -d '\r')
+if [[ "$PY_SOURCES_SORTED" == "$EXPECTED_SOURCES_SORTED" ]]; then
+  echo "  PASS  S15.1 ACCEPTED_SOURCES frozenset imports with the 7 expected members"; PASS=$((PASS+1))
+else
+  echo "  FAIL  S15.1 ACCEPTED_SOURCES frozenset mismatch"
+  echo "        expected: $(echo "$EXPECTED_SOURCES_SORTED" | tr '\n' ' ')"
+  echo "        got:      $(echo "$PY_SOURCES_SORTED" | tr '\n' ' ')"
+  [[ -s "$S15_PY_ERR" ]] && echo "        python stderr: $(tr '\n' ' ' < "$S15_PY_ERR")"
+  FAIL=$((FAIL+1))
+fi
+rm -f "$S15_PY_ERR"
+
+# S15.2 — Spec closed-set (agents/findings-to-issues.md Step 1) == ACCEPTED_SOURCES.
+# Extract the {...} closed set, split on `,`, trim whitespace/backticks, sort.
+# Anchor on the literal phrase `closed set` immediately before the `{...}` so the
+# greedy `.*{` does not run past it to a later same-line `${CLAUDE_PLUGIN_ROOT}`
+# interpolation (which would capture the wrong braces).
+SPEC_SOURCES_SORTED=$(grep -E 'closed set' "$AGENT_MD" | grep -F '{' \
+  | grep -oE 'closed set `\{[^}]*\}`' \
+  | sed -E 's/.*\{([^}]*)\}.*/\1/' \
+  | tr ',' '\n' \
+  | sed -E 's/[`[:space:]]//g' \
+  | grep -v '^$' \
+  | LC_ALL=C sort)
+if [[ "$SPEC_SOURCES_SORTED" == "$PY_SOURCES_SORTED" ]]; then
+  echo "  PASS  S15.2 agents/findings-to-issues.md Step-1 closed set == ACCEPTED_SOURCES"; PASS=$((PASS+1))
+else
+  echo "  FAIL  S15.2 spec closed-set diverges from ACCEPTED_SOURCES"
+  echo "        spec: $(echo "$SPEC_SOURCES_SORTED" | tr '\n' ' ')"
+  echo "        py:   $(echo "$PY_SOURCES_SORTED" | tr '\n' ' ')"
+  FAIL=$((FAIL+1))
+fi
+
+# S15.3 — Every emitter envelope() source literal ∈ ACCEPTED_SOURCES.
+# Grep the 2nd positional string arg of envelope(fh, "X", ...) across the
+# emitter .py files, then assert each is a member of the python frozenset.
+EMITTER_SOURCES=$(grep -rhoE 'envelope\([^,]+,[[:space:]]*"[^"]+"' "$REPO_ROOT"/plugins/uberdev/skills/*/*.py \
+  | sed -E 's/.*"([^"]+)".*/\1/' | LC_ALL=C sort -u)
+S15_3_OK=1
+while IFS= read -r src; do
+  [[ -z "$src" ]] && continue
+  if ! ( cd "$LIB_DIR" && python3 -c "import sys; from report_primitives import ACCEPTED_SOURCES; sys.exit(0 if '$src' in ACCEPTED_SOURCES else 1)" ) 2>/dev/null; then
+    echo "        emitter source NOT in ACCEPTED_SOURCES: $src"
+    S15_3_OK=0
+  fi
+done <<< "$EMITTER_SOURCES"
+if [[ "$S15_3_OK" -eq 1 && -n "$EMITTER_SOURCES" ]]; then
+  echo "  PASS  S15.3 every skills/*/*.py envelope() source literal ∈ ACCEPTED_SOURCES ($(echo "$EMITTER_SOURCES" | tr '\n' ' '))"; PASS=$((PASS+1))
+else
+  echo "  FAIL  S15.3 an emitter envelope() source is not in ACCEPTED_SOURCES (or none found)"; FAIL=$((FAIL+1))
+fi
+
+# S15.4 — Behavioral: envelope() RAISES ValueError on a bad source, ACCEPTS a good one.
+# Use an explicit stdout marker (RAISED/OK) rather than relying on the process exit
+# code alone: a bare `2>/dev/null` + rc check would conflate "envelope raised
+# ValueError" (the contract) with "python errored for another reason" (e.g. a broken
+# import), which would FALSELY pass S15.4a. The marker only prints on the intended
+# control path, so an import/syntax error yields neither marker → both checks FAIL.
+S15_4A_OUT=$( (cd "$LIB_DIR" && python3 -c "
+import sys
+from report_primitives import envelope
+import io
+try:
+    envelope(io.StringIO(), 'not-a-real-source', 'x')
+except ValueError:
+    print('RAISED'); sys.exit(0)
+sys.exit(1)
+") 2>/dev/null | tr -d '\r')
+if [[ "$S15_4A_OUT" == "RAISED" ]]; then
+  echo "  PASS  S15.4a envelope() raises ValueError on an un-accepted source"; PASS=$((PASS+1))
+else
+  echo "  FAIL  S15.4a envelope() did not raise ValueError on an un-accepted source (marker='$S15_4A_OUT')"; FAIL=$((FAIL+1))
+fi
+S15_4B_OUT=$( (cd "$LIB_DIR" && python3 -c "
+from report_primitives import envelope
+import io
+envelope(io.StringIO(), 'testers-aggregate', 'x')
+print('OK')
+") 2>/dev/null | tr -d '\r')
+if [[ "$S15_4B_OUT" == "OK" ]]; then
+  echo "  PASS  S15.4b envelope() accepts a valid source (testers-aggregate)"; PASS=$((PASS+1))
+else
+  echo "  FAIL  S15.4b envelope() rejected a valid source or errored (marker='$S15_4B_OUT')"; FAIL=$((FAIL+1))
+fi
+
 echo
 echo "## Summary"
 echo "  PASS=$PASS  FAIL=$FAIL"

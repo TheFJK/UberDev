@@ -26,6 +26,23 @@ _ENVELOPE_CLOSE = "</external-untrusted-input>"
 # difference between the two string literals above/below is exactly that one ZWSP.)
 _ENVELOPE_CLOSE_NEUTRALIZED = "<​/external-untrusted-input>"  # ZWSP after '<'
 
+# The findings-to-issues accepted-source allow-list — the SINGLE source of truth
+# (issue #198). Any value passed as `envelope(..., source, ...)` MUST be a member;
+# envelope() asserts this at emit time so a typo or a new pipeline that ships an
+# un-accepted source fails LOUDLY here instead of silently filing zero issues
+# (the #182-class bug). When you add a pipeline/source, add it here AND to the
+# closed set in agents/findings-to-issues.md Step 1 (a cross-consistency test in
+# tests/findings-to-issues.test.sh asserts the two agree).
+ACCEPTED_SOURCES = frozenset({
+    "post-impl-review-aggregate",
+    "simplify-aggregate",
+    "ci-refused-synthetic",
+    "uberscan-aggregate",
+    "ubersimplify-aggregate",
+    "testers-aggregate",
+    "uberthink-aggregate",
+})
+
 
 def cell(s: object) -> str:
     """Escape a value for a markdown table cell, shared by both report.py files.
@@ -52,11 +69,19 @@ def envelope(fh: TextIO, source: str, body: str) -> None:
 
     The opening marker is written as the LEADING bytes of the file (no header,
     BOM, or blank line may precede it — findings-to-issues refuses if the
-    marker is not within the first 128 bytes; agents/findings-to-issues.md:41).
+    marker is not within the first 128 bytes; agents/findings-to-issues.md:42).
     `source` MUST be a value in the findings-to-issues closed allow-list when
-    the output is consumed by that agent. `body` is the already-rendered table
-    (each cell already passed through cell()).
+    the output is consumed by that agent; this is now asserted at emit time
+    against ACCEPTED_SOURCES (issue #198) so an un-accepted source raises here
+    instead of silently filing zero issues downstream. `body` is the
+    already-rendered table (each cell already passed through cell()).
     """
+    if source not in ACCEPTED_SOURCES:
+        raise ValueError(
+            f"envelope(): source {source!r} is not in the findings-to-issues "
+            f"ACCEPTED_SOURCES allow-list {sorted(ACCEPTED_SOURCES)} — add it here "
+            f"and to agents/findings-to-issues.md Step 1 (issue #198/#182)."
+        )
     fh.write(f'<external-untrusted-input source="{source}">\n')
     fh.write(body)
     if body and not body.endswith("\n"):
