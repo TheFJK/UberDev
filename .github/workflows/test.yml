@@ -181,6 +181,7 @@ jobs:
         #   - uberthink.test.sh
         #   - uberthink-report.test.sh
         #   - merge-discovery-resilience.test.sh
+        #   - review-pr-phase3-ci.test.sh
         # === END ci-wiring windows-skip-list ===
         run: |
           bash tests/ci-wiring.test.sh && \
@@ -190,7 +191,6 @@ jobs:
           bash tests/spec-reviewer-plan-aware.test.sh && \
           bash tests/audit-fixups.test.sh && \
           bash tests/review-pr.test.sh && \
-          bash tests/review-pr-phase3-ci.test.sh && \
           bash tests/cluster.test.sh && \
           bash tests/code-fixer-dispatch.test.sh && \
           bash tests/findings-to-issues.test.sh && \

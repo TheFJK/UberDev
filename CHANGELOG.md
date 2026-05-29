@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.10] — 2026-05-29
+
+### Fixed
+- **`/review-pr` Phase-3 CI probe — align to the real `gh pr checks` field contract** (#272). `commands/review-pr.md` probed `gh pr checks --json name,status,conclusion`, but `gh` 2.83.1 exposes only `name,state,bucket` (no `status`/`conclusion`) — so against real `gh` the probe errored on unknown fields and Phase-3 silently degraded to the `ci_probe_unreachable` carve-out on every run, never gating real red CI on a to-`main` PR. The probe now reads `--json name,state,bucket` and maps terminal/non-terminal off `state` + `bucket` (red outranks pending). The `tests/_fixtures/fake-gh/gh` stub emits `state`/`bucket` to match.
+
+### Tests
+- `tests/review-pr-phase3-ci.test.sh` gains genuine RUNTIME coverage (S15-RUNTIME): prepends the `fake-gh` stub to `PATH`, sets `FAKE_GH_MODE`, runs the real probe, and applies the jq verdict program extracted live from `review-pr.md` (so it cannot drift); a mutation back to the old `status`/`conclusion` shape reds it. Because it now executes the `fake-gh` fixture via `PATH` (committed-`+x` dependency, like `merge-discovery-resilience.test.sh`), it moves to the ubuntu-only CI job and is added to the windows-skip-list marker.
+
 ## [0.35.9] — 2026-05-29
 
 ### Fixed
