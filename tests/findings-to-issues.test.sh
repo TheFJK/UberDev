@@ -353,7 +353,10 @@ S15_PY_ERR="$(mktemp)"
 # absolute path on Git Bash/Windows too) and let `python3 -c` find the module
 # via cwd — passing an absolute BASH path to native-Windows python's sys.path
 # (e.g. /d/a/...) raises ModuleNotFoundError. No path argument reaches python.
-PY_SOURCES_SORTED=$( (cd "$LIB_DIR" && python3 -c "from report_primitives import ACCEPTED_SOURCES; print('\n'.join(sorted(ACCEPTED_SOURCES)))") 2>"$S15_PY_ERR")
+# `tr -d '\r'`: native-Windows python writes CRLF to stdout, so the multi-line
+# join carries \r that breaks the LF-based string compare below (the \r is a
+# no-op on Linux/macOS where output is already LF) — #268 CI.
+PY_SOURCES_SORTED=$( (cd "$LIB_DIR" && python3 -c "from report_primitives import ACCEPTED_SOURCES; print('\n'.join(sorted(ACCEPTED_SOURCES)))") 2>"$S15_PY_ERR" | tr -d '\r')
 if [[ "$PY_SOURCES_SORTED" == "$EXPECTED_SOURCES_SORTED" ]]; then
   echo "  PASS  S15.1 ACCEPTED_SOURCES frozenset imports with the 7 expected members"; PASS=$((PASS+1))
 else
@@ -420,7 +423,7 @@ try:
 except ValueError:
     print('RAISED'); sys.exit(0)
 sys.exit(1)
-") 2>/dev/null)
+") 2>/dev/null | tr -d '\r')
 if [[ "$S15_4A_OUT" == "RAISED" ]]; then
   echo "  PASS  S15.4a envelope() raises ValueError on an un-accepted source"; PASS=$((PASS+1))
 else
@@ -431,7 +434,7 @@ from report_primitives import envelope
 import io
 envelope(io.StringIO(), 'testers-aggregate', 'x')
 print('OK')
-") 2>/dev/null)
+") 2>/dev/null | tr -d '\r')
 if [[ "$S15_4B_OUT" == "OK" ]]; then
   echo "  PASS  S15.4b envelope() accepts a valid source (testers-aggregate)"; PASS=$((PASS+1))
 else
