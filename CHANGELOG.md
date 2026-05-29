@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.14] — 2026-05-29
+
+### Fixed
+- **`findings-to-issues` — document the SEARCH-bucket rate-limit guard + drop a tautological test** (#276). The agent's "Refusal triggers" section documented only the **core**-bucket rate-limit guard (`CORE_REMAINING < (2*max_new+50)`) under a stale single `REMAINING` var name, omitting the **SEARCH**-bucket fail-CLOSED condition (`SEARCH_REMAINING < (max_new+5)`) that Process Step 2 mandates (the load-bearing guard against silently mapping dedupe lookups into `blocked_by_dedupe[]` with no issues filed). The section now enumerates BOTH bucket conditions verbatim against Step 2. The Suite-3 "L4 runtime assertion" in `tests/findings-to-issues.test.sh` exercised only the test's own mock `gh()` (a near-tautology); it and its now-orphaned mock scaffolding are removed — the real label-idempotency contract stays locked by the structural L1 assert.
+
+### Tests
+- `tests/findings-to-issues.test.sh` Suite 16 (3 section-bounded asserts) locks both bucket conditions in the Refusal-triggers block and asserts the stale bare-`REMAINING` single-bucket form is gone; mutation-tested (each flips to FAIL when the threshold or section is broken). 53/0.
+
 ## [0.35.13] — 2026-05-29
 
 ### Fixed

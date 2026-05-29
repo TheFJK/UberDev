@@ -39,38 +39,14 @@ assert_grep() {
 
 echo "## findings-to-issues fixture suites"
 
-# ---------- gh-command mocks (inline functions) ----------
-# All mocks capture argv into MOCK_LOG and return canned JSON when needed.
-MOCK_LOG=$(mktemp -t fti-mock-XXXX)
-trap 'rm -f "$MOCK_LOG"' EXIT INT TERM
-
-MOCK_DEDUPE_HITS=""    # JSON array of pre-existing matches — set per-suite
-MOCK_RATE_LIMIT=5000   # rate_limit core.remaining — set per-suite
-MOCK_LABEL_RC=0        # gh label create rc — set per-suite
-
-gh() {
-  local sub="$1"; shift
-  case "$sub" in
-    issue)
-      local subsub="$1"; shift
-      printf 'gh issue %s %s\n' "$subsub" "$*" >> "$MOCK_LOG"
-      case "$subsub" in
-        list) printf '%s' "${MOCK_DEDUPE_HITS:-[]}"; return 0 ;;
-        create) printf 'https://github.com/owner/repo/issues/%d\n' "$(( $(wc -l <"$MOCK_LOG") + 100 ))"; return 0 ;;
-        comment) return 0 ;;
-      esac
-      ;;
-    label)
-      printf 'gh label %s\n' "$*" >> "$MOCK_LOG"
-      return "$MOCK_LABEL_RC"
-      ;;
-    api)
-      if [[ "$*" == *rate_limit* ]]; then printf '%d\n' "$MOCK_RATE_LIMIT"; return 0; fi
-      ;;
-  esac
-  return 0
-}
-export -f gh
+# NOTE: this suite is intentionally mock-free. The findings-to-issues runtime is
+# the agent .md interpreted by a dispatched Claude agent (no extracted shell
+# helper to source), so every behavioural contract here is locked structurally
+# against the agent .md / command .md prose. An earlier `gh()` argv-capture mock
+# fed a single L4 "two --force calls" assertion that exercised only the stub and
+# never production — a tautology (issue #276). It was removed along with the mock
+# scaffolding it solely existed to serve; the real label-idempotency contract
+# stays locked by the structural L1 assert (Suite 3).
 
 ### Suite 1: Parser ----------
 echo
@@ -119,17 +95,11 @@ assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
   'd93f0b' 'L3 label uses red color d93f0b'
 
-# Runtime assertion via mocks: two consecutive gh label create calls both use --force.
-MOCK_LOG_BEFORE=$(wc -l < "$MOCK_LOG")
-gh label create --force review-pr-finding --color d93f0b --description "x" >/dev/null
-gh label create --force review-pr-finding --color d93f0b --description "x" >/dev/null
-MOCK_LOG_AFTER=$(wc -l < "$MOCK_LOG")
-CALLS=$((MOCK_LOG_AFTER - MOCK_LOG_BEFORE))
-if [[ "$CALLS" -eq 2 ]] && [[ "$(grep -c -- '--force' "$MOCK_LOG")" -ge 2 ]]; then
-  echo "  PASS  L4 two consecutive label-create calls both use --force"; PASS=$((PASS+1))
-else
-  echo "  FAIL  L4 expected 2 --force calls, got $CALLS"; FAIL=$((FAIL+1))
-fi
+# (L4 removed — issue #276. It re-invoked the test's own gh() mock and asserted the
+# mock logged two --force tokens: a tautology that exercised the stub, never
+# production code. The idempotency contract is locked by the structural L1 assert
+# above; the agent .md prose at Step 7 documents `gh label create --force` is
+# idempotent.)
 
 ### Suite 4: Opt-out flag ----------
 echo
@@ -440,6 +410,34 @@ if [[ "$S15_4B_OUT" == "OK" ]]; then
 else
   echo "  FAIL  S15.4b envelope() rejected a valid source or errored (marker='$S15_4B_OUT')"; FAIL=$((FAIL+1))
 fi
+
+### Suite 16: Refusal-triggers documents BOTH rate-limit buckets (#276) ----------
+echo
+echo "### Suite 16: rate-limit-budget-insufficient enumerates both buckets (#276)"
+# Process Step 2 probes TWO rate-limit buckets and fails CLOSED on EITHER:
+#   CORE_REMAINING  < (2 * max_new + 50)   — funds gh issue create/comment/label/api
+#   SEARCH_REMAINING < (max_new + 5)        — funds the gh issue list --search dedupe
+# The canonical "Refusal triggers" section MUST enumerate BOTH conditions (and use
+# the Step-2 variable NAMES), else an implementer reading only the refusal list
+# re-introduces the silent-skip hole where Search exhaustion maps every dedupe
+# lookup into blocked_by_dedupe[] with no issues filed. Lock both, plus the
+# absence of the pre-#276 bare-`REMAINING` single-bucket form.
+
+# S16.1 — core-bucket guard present with its real Step-2 variable name + threshold.
+assert_in_section "$AGENT_MD" '^## Refusal triggers' '^## Failure-mode summary' \
+  'CORE_REMAINING < \(2 \* max_new \+ 50\)' \
+  'S16.1 — Refusal-triggers names the CORE_REMAINING < (2*max_new+50) guard (Step 2)'
+
+# S16.2 — search-bucket guard present (the condition #276 found missing).
+assert_in_section "$AGENT_MD" '^## Refusal triggers' '^## Failure-mode summary' \
+  'SEARCH_REMAINING < \(max_new \+ 5\)' \
+  'S16.2 — Refusal-triggers names the SEARCH_REMAINING < (max_new+5) guard (Step 2)'
+
+# S16.3 — the stale single bare-`REMAINING` threshold form (no CORE_/SEARCH_
+# prefix) MUST be gone, so the refusal list cannot drift back to one bucket.
+assert_no_grep "$AGENT_MD" \
+  '`REMAINING < \(2 \* max_new \+ 50\)`' \
+  'S16.3 — stale bare-REMAINING single-bucket threshold removed (#276)'
 
 echo
 echo "## Summary"
