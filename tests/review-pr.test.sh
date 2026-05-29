@@ -696,6 +696,52 @@ assert_in_section "$REVIEW_PR" '^## Trust-Signal Emission' '^## Exit-Code Contra
 if [ "$PIPEFAIL_PREV_T1T2" = "on" ]; then set -o pipefail; fi
 
 echo
+echo "== R23 (#286): Phase 2 (Step 6) lens dispatch wraps the diff in a pr-diff envelope (#271 follow-up) =="
+# The Phase 2 lens dispatch passes the post-Phase-1 diff (`<<base_brief>>`) to
+# all three uberdev:code-simplifier lenses inline. The diff is attacker-controllable
+# (issue author → PR author) so it MUST be wrapped in
+# <external-untrusted-input source="pr-diff">…</external-untrusted-input> per the
+# orchestrator trust-boundary convention — mirroring the Phase-1 reviewer wrap in
+# skills/post-impl-review/SKILL.md Step 1 (#271). Scope the open+close asserts to
+# the lens-dispatch region (Phase 2 heading → the Step-6b "Auto-apply" marker) via
+# awk range so they cannot be satisfied by the OTHER untrusted-input close tags in
+# this file (the Step-6b `source="post-impl-review-aggregate"` aggregate→fixer wrap
+# below, or the Phase-1 / Phase-3 envelopes) — which would make the close-tag assert
+# a false PASS even if the lens-dispatch wrap were reverted. The trusted
+# `## Lens emphasis:` directive stays OUTSIDE the envelope (only the diff is untrusted).
+if ! grep -qE '^6\. \*\*Phase 2 — Mandatory Simplify Pass\*\*' "$REVIEW_PR" \
+   || ! grep -qF 'Auto-apply simplify edits — Step 6b' "$REVIEW_PR"; then
+  echo "  FAIL  setup error: Phase 2 heading / Step-6b 'Auto-apply' anchors not found in $REVIEW_PR — section renamed? Update the awk range in tests/review-pr.test.sh."
+  FAIL=$((FAIL + 1))
+else
+  PHASE2_LENS_REGION=$(awk '/^6\. \*\*Phase 2 — Mandatory Simplify Pass\*\*/{f=1} f; /Auto-apply simplify edits — Step 6b/{f=0}' "$REVIEW_PR")
+  if grep -qF '<external-untrusted-input source="pr-diff">' <<<"$PHASE2_LENS_REGION"; then
+    echo "  PASS  R23.1 — Phase 2 lens dispatch opens an <external-untrusted-input source=\"pr-diff\"> envelope around the diff"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R23.1 — Phase 2 lens dispatch must wrap <<base_brief>> in an <external-untrusted-input source=\"pr-diff\"> envelope (#286)"
+    FAIL=$((FAIL + 1))
+  fi
+  if grep -qF '</external-untrusted-input>' <<<"$PHASE2_LENS_REGION"; then
+    echo "  PASS  R23.2 — Phase 2 lens dispatch closes the <external-untrusted-input> envelope (inside the lens-dispatch region)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R23.2 — Phase 2 lens dispatch must close the pr-diff <external-untrusted-input> envelope inside the lens-dispatch region (#286)"
+    FAIL=$((FAIL + 1))
+  fi
+  # R23.3 — pin the load-bearing DISPATCH-LINE form (`prompt: <external-untrusted-input
+  # source="pr-diff">…<<base_brief>>`) so a prose-only mention that left the actual
+  # Task() prompt unwrapped cannot false-PASS the region asserts above.
+  if grep -qF 'prompt: <external-untrusted-input source="pr-diff">' <<<"$PHASE2_LENS_REGION"; then
+    echo "  PASS  R23.3 — the Task() prompt line itself opens the pr-diff envelope before <<base_brief>>"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R23.3 — the Task() 'prompt:' line must open <external-untrusted-input source=\"pr-diff\"> before <<base_brief>> (not prose-only) (#286)"
+    FAIL=$((FAIL + 1))
+  fi
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
