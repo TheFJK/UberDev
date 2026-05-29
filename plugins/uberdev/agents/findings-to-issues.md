@@ -299,7 +299,7 @@ Empty arrays are emitted as `[]`. `rationale` is empty string `""` on non-REFUSE
 Return `status: REFUSED` with the matching rationale string when:
 
 - `input-malformed` — `working_dir` not a git worktree, OR both aggregate paths empty, OR envelope marker missing in aggregate file leading bytes.
-- `rate-limit-budget-insufficient` — `REMAINING < (2 * max_new + 50)` OR non-numeric.
+- `rate-limit-budget-insufficient` — fail CLOSED if EITHER bucket probe (Step 2) is empty/non-numeric OR under floor: `CORE_REMAINING < (2 * max_new + 50)` (funds `gh issue create`/`comment`/`label`/`api`) OR `SEARCH_REMAINING < (max_new + 5)` (funds the `gh issue list --search` dedupe in Step 8b). Checking only the core bucket is insufficient — Search exhaustion silently maps every dedupe lookup into `blocked_by_dedupe[]` with no issues filed (`:49`).
 - `secret-scan-lib-unavailable` — `source "${CLAUDE_PLUGIN_ROOT}/lib/secret-scan.sh"` returns non-zero.
 
 ## Failure-mode summary (NOT REFUSAL)
