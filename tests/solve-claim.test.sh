@@ -22,9 +22,10 @@ MERGE_PIPELINE="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/SKILL.md"
 TURBO_CMD="$REPO_ROOT/plugins/uberdev/commands/turbo.md"
 SOLVE_CMD="$REPO_ROOT/plugins/uberdev/commands/solve.md"
 CHANGELOG="$REPO_ROOT/CHANGELOG.md"
-PLUGIN_JSON="$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json"
-MARKETPLACE_JSON="$REPO_ROOT/.claude-plugin/marketplace.json"
-README="$REPO_ROOT/README.md"
+# (PLUGIN_JSON / MARKETPLACE_JSON / README path vars removed in #231 — the
+# version-lock block that used them now delegates to assert_version_bump, which
+# derives those paths internally from $REPO_ROOT. $CHANGELOG is retained: still
+# used by the B2 TOCTOU assertion below.)
 
 PASS=0
 FAIL=0
