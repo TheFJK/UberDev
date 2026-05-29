@@ -233,6 +233,134 @@ else
   pass "Z5c: no \${BASH_REMATCH[1]} PR-number extraction remains in finish-branch"
 fi
 
+echo
+echo "== Z6: batch_unblock_wait_clear — ALL Blocks closed + uberdev-approved gate (#289.1/#289.3) =="
+# Runs the barrier unblock-wait predicate UNDER THE LIVE SHELL. The lib uses
+# indexed arrays + a per-blocker loop internally; this proves the #289 fix holds
+# in BOTH bash and zsh (the rc1-forever phantom-label deadlock + the
+# break-after-first-Blocks bug both surfaced from cross-shell-fragile code).
+Z6_TMP="$(mktemp -d)"
+Z6_OUT="$(
+  GOAL_ID="goal-z6abcd01"
+  export GOAL_ID UBERDEV_GOAL_ID="$GOAL_ID" UBERDEV_TMPDIR="$Z6_TMP"
+  uberdev_goal_state_init "$GOAL_ID" >/dev/null 2>&1
+  uberdev_goal_register_batch_pr "$GOAL_ID" 100 200 >/dev/null 2>&1
+  _uberdev_goal_set_batch_terminal_state "$GOAL_ID" 100 HELD >/dev/null 2>&1
+  # Two Blocks; only one closed → must GATE (rc1).
+  gh() {
+    case "$1 $2" in
+      "pr view") case "$*" in (*body*) printf 'Blocks: #201\nBlocks: #202';; (*labels*) printf '0';; esac ;;
+      "issue view") case "$3" in (201) printf 'CLOSED';; (202) printf 'OPEN';; esac ;;
+    esac
+  }
+  uberdev_goal_batch_unblock_wait_clear "$GOAL_ID" >/dev/null 2>&1 && r_partial=0 || r_partial=1
+  # Both closed, no uberdev-approved → pseudo-terminal, must CLEAR (rc0).
+  gh() {
+    case "$1 $2" in
+      "pr view") case "$*" in (*body*) printf 'Blocks: #201\nBlocks: #202';; (*labels*) printf '0';; esac ;;
+      "issue view") printf 'CLOSED' ;;
+    esac
+  }
+  uberdev_goal_batch_unblock_wait_clear "$GOAL_ID" >/dev/null 2>&1 && r_allclosed=0 || r_allclosed=1
+  printf 'partial=%s allclosed=%s\n' "$r_partial" "$r_allclosed"
+)"
+case "$Z6_OUT" in
+  *"partial=1 allclosed=0"*)
+    pass "Z6a: unblock-wait gates on one-of-two-open, clears (pseudo-terminal) on all-closed under $RUN_SHELL" ;;
+  *)
+    fail "Z6a: unblock-wait wrong (#289 — got: [$Z6_OUT]; expect partial=1 allclosed=0)" ;;
+esac
+# Structural: the live label gate reads uberdev-approved, NOT review-pr:green.
+if grep -qE 'select\(\. == "uberdev-approved"\)' "$GOAL_LIB"; then
+  pass "Z6b: unblock-wait label gate reads uberdev-approved (the producer label)"
+else
+  fail "Z6b: unblock-wait must read uberdev-approved (review-pr writes that, not review-pr:green)"
+fi
+if grep -qE 'select\(\. == "review-pr:green"\)' "$GOAL_LIB"; then
+  fail "Z6c: a LIVE jq gate on the phantom review-pr:green label still remains (rc1-forever bug)"
+else
+  pass "Z6c: no live jq gate on the phantom review-pr:green label remains"
+fi
+rm -rf "$Z6_TMP" 2>/dev/null || true
+
+echo
+echo "== Z7: read_trust_signal SHA-binding under the live shell (#290.1) =="
+Z7_TMP="$(mktemp -d)"
+Z7_OUT="$(
+  export UBERDEV_TMPDIR="$Z7_TMP"
+  vf="$Z7_TMP/verdict.json"
+  printf '%s\n' '{"pr":42,"sha":"abc123","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":0},"halted":false}}}' > "$vf"
+  gh() { case "$1 $2" in ("pr view") printf 'abc123';; esac; }
+  m="$(uberdev_goal_read_trust_signal "$vf" 2>/dev/null)"
+  gh() { case "$1 $2" in ("pr view") printf 'def456';; esac; }
+  s="$(uberdev_goal_read_trust_signal "$vf" 2>/dev/null)"
+  gh() { return 1; }
+  f="$(uberdev_goal_read_trust_signal "$vf" 2>/dev/null)"
+  printf 'match=%s mismatch=%s failsafe=%s\n' "$m" "$s" "$f"
+)"
+case "$Z7_OUT" in
+  *"match=green mismatch=stale failsafe=green"*)
+    pass "Z7a: SHA-binding green/stale/fail-safe correct under $RUN_SHELL" ;;
+  *)
+    fail "Z7a: SHA-binding wrong (#290.1 — got: [$Z7_OUT]; expect match=green mismatch=stale failsafe=green)" ;;
+esac
+rm -rf "$Z7_TMP" 2>/dev/null || true
+
+echo
+echo "== Z8: detect_blocks_cycle finds a mutual Blocks cycle under the live shell (#292.1) =="
+# The SCC detector uses indexed arrays + a reachability-closure fixpoint (NO
+# associative arrays — those diverge between bash and zsh). This proves it works
+# in both shells.
+Z8_TMP="$(mktemp -d)"
+Z8_OUT="$(
+  GOAL_ID="goal-z8abcd01"
+  export GOAL_ID UBERDEV_GOAL_ID="$GOAL_ID" UBERDEV_TMPDIR="$Z8_TMP"
+  uberdev_goal_state_init "$GOAL_ID" >/dev/null 2>&1
+  uberdev_goal_register_batch_pr "$GOAL_ID" 100 200 >/dev/null 2>&1
+  uberdev_goal_register_batch_pr "$GOAL_ID" 101 201 >/dev/null 2>&1
+  _uberdev_goal_set_batch_terminal_state "$GOAL_ID" 100 HELD >/dev/null 2>&1
+  _uberdev_goal_set_batch_terminal_state "$GOAL_ID" 101 HELD >/dev/null 2>&1
+  gh() {
+    case "$1 $2" in
+      "pr view") case "$*" in (*body*) case "$3" in (100) printf 'Blocks: #201';; (101) printf 'Blocks: #200';; esac ;; esac ;;
+      "pr list")
+        jqf='.'; while [ $# -gt 0 ]; do [ "$1" = "--jq" ] && jqf="$2"; shift; done
+        printf '%s' '[{"number":100,"closingIssuesReferences":[{"number":200}],"headRefName":"feat/200-a"},{"number":101,"closingIssuesReferences":[{"number":201}],"headRefName":"feat/201-b"}]' | jq -r "$jqf" ;;
+    esac
+  }
+  cyc="$(uberdev_goal_detect_blocks_cycle "$GOAL_ID" 2>/dev/null)" && rc=0 || rc=1
+  printf 'rc=%s cyc=[%s]\n' "$rc" "$cyc"
+)"
+case "$Z8_OUT" in
+  *"rc=0"*100*101*|*"rc=0"*101*100*)
+    pass "Z8a: detect_blocks_cycle fires on the mutual A↔B cycle under $RUN_SHELL (got: $Z8_OUT)" ;;
+  *)
+    fail "Z8a: detect_blocks_cycle missed the mutual cycle (#292.1 — got: [$Z8_OUT])" ;;
+esac
+rm -rf "$Z8_TMP" 2>/dev/null || true
+
+echo
+echo "== Z9: reset_merge_attempts re-allows should_automerge under the live shell (#292.2) =="
+Z9_TMP="$(mktemp -d)"
+Z9_OUT="$(
+  GOAL_ID="goal-z9abcd01"
+  export GOAL_ID UBERDEV_GOAL_ID="$GOAL_ID" UBERDEV_TMPDIR="$Z9_TMP"
+  uberdev_goal_state_init "$GOAL_ID" >/dev/null 2>&1
+  printf '%s\t%s\n' 100 3 > "$Z9_TMP/goal-$GOAL_ID-merge-attempts.tsv"
+  uberdev_goal_should_automerge "$GOAL_ID" 100 && pre=allow || pre=refuse
+  uberdev_goal_reset_merge_attempts "$GOAL_ID" 100 >/dev/null 2>&1
+  cnt="$(_uberdev_goal_count_merge_attempts "$GOAL_ID" 100)"
+  uberdev_goal_should_automerge "$GOAL_ID" 100 && post=allow || post=refuse
+  printf 'pre=%s cnt=%s post=%s\n' "$pre" "$cnt" "$post"
+)"
+case "$Z9_OUT" in
+  *"pre=refuse cnt=0 post=allow"*)
+    pass "Z9a: merge-attempt cap resets on recovery (refuse@cap → reset → allow) under $RUN_SHELL" ;;
+  *)
+    fail "Z9a: reset_merge_attempts wrong (#292.2 — got: [$Z9_OUT]; expect pre=refuse cnt=0 post=allow)" ;;
+esac
+rm -rf "$Z9_TMP" 2>/dev/null || true
+
 # Cleanup
 rm -rf "$Z2_TMP" "$Z3_TMP" "$Z4_TMP" 2>/dev/null || true
 

@@ -102,9 +102,16 @@ echo "== B1: batch registry CRUD =="
 # ---------------------------------------------------------------------------
 echo "== B2: unblock_wait predicate exists in lib =="
 assert_grep "$GOAL_LIB" "^uberdev_goal_batch_unblock_wait_clear\(\)" "B2.predicate-defined"
-# Verify lib references both gating conditions (issue CLOSED + trust label review-pr:green).
+# Verify lib references the gating condition (issue CLOSED) + the CORRECT trust
+# label. #289.1: the gate must read `uberdev-approved` (the label /review-pr
+# actually writes), NOT the zero-producer `review-pr:green`. Assert the active
+# jq label-select uses uberdev-approved; assert no LIVE gate reads review-pr:green.
 assert_grep "$GOAL_LIB" 'CLOSED'                                    "B2.closed-issue-check"
-assert_grep "$GOAL_LIB" 'review-pr:green'                           "B2.green-trust-label"
+assert_grep "$GOAL_LIB" 'select\(\. == "uberdev-approved"\)'        "B2.approved-trust-label"
+# Negative: no executable `gh pr view ... select(. == "review-pr:green")` gate
+# remains (the phantom-label bug). A comment mentioning the old name is fine;
+# a live jq select on it is the regression.
+assert_no_grep "$GOAL_LIB" 'select\(\. == "review-pr:green"\)'      "B2.no-phantom-green-label-gate"
 
 # ---------------------------------------------------------------------------
 # B3 — barrier_start_ts persist/rehydrate under fresh-shell-with-cleared-env.
@@ -359,6 +366,285 @@ EOF
 
   echo "B9 PASS"
 ) || { FAIL=$((FAIL + 1)); echo "  FAIL  B9 block exited non-zero"; }
+
+# ---------------------------------------------------------------------------
+# B10 — #289.3 (MAJOR) — batch_unblock_wait_clear requires ALL Blocks: issues
+# CLOSED (the prior loop break-ed after the FIRST match). A held PR with two
+# Blocks lines, only one closed, MUST keep gating the barrier (rc 1).
+# ---------------------------------------------------------------------------
+echo "== B10: unblock-wait requires ALL Blocks closed (#289.3) =="
+(
+  set -u
+  SCRATCH="$(mktemp -d)"; trap 'rm -rf "$SCRATCH"' EXIT
+  export UBERDEV_TMPDIR="$SCRATCH"; export UBERDEV_GOAL_ID="b10"
+  GOAL_ID="$UBERDEV_GOAL_ID"
+  . "$DISPATCH_LIB"; . "$GOAL_LIB"
+  uberdev_goal_state_init "$GOAL_ID" >/dev/null
+  uberdev_goal_register_batch_pr "$GOAL_ID" 100 200 >/dev/null
+  _uberdev_goal_set_batch_terminal_state "$GOAL_ID" 100 HELD
+  # PR body carries TWO Blocks lines; issue 201 CLOSED, issue 202 OPEN.
+  gh() {
+    case "$1 $2" in
+      "pr view") case "$*" in *body*) printf 'Blocks: #201\nBlocks: #202';; *labels*) printf '0';; esac ;;
+      "issue view") case "$3" in 201) printf 'CLOSED';; 202) printf 'OPEN';; esac ;;
+    esac
+  }
+  if uberdev_goal_batch_unblock_wait_clear "$GOAL_ID"; then
+    echo "B10.one-of-two-open-must-gate FAIL (returned rc0/clear)"; exit 1
+  fi
+  # Now BOTH closed → pseudo-terminal, no longer gates (rc0).
+  gh() {
+    case "$1 $2" in
+      "pr view") case "$*" in *body*) printf 'Blocks: #201\nBlocks: #202';; *labels*) printf '0';; esac ;;
+      "issue view") printf 'CLOSED' ;;
+    esac
+  }
+  if ! uberdev_goal_batch_unblock_wait_clear "$GOAL_ID" 2>/dev/null; then
+    echo "B10.all-closed-must-clear FAIL (returned rc1/wait)"; exit 1
+  fi
+  echo "B10 PASS"
+) || { FAIL=$((FAIL + 1)); echo "  FAIL  B10 block exited non-zero"; }
+
+# ---------------------------------------------------------------------------
+# B11 — #289.1 (BLOCKER) — the rc-1-FOREVER phantom-label bug. A held PR whose
+# (single) Blocks issue is CLOSED but which stays held (no uberdev-approved
+# label) MUST be pseudo-terminal (rc 0 — does NOT gate co-batched GREEN PRs).
+# The OLD code gated on the zero-producer `review-pr:green` and returned rc 1
+# forever, blocking every co-batched GREEN PR until the 4h stuck_loop.
+# ---------------------------------------------------------------------------
+echo "== B11: held+blocker-closed+no-green-label is pseudo-terminal, not rc1-forever (#289.1) =="
+(
+  set -u
+  SCRATCH="$(mktemp -d)"; trap 'rm -rf "$SCRATCH"' EXIT
+  export UBERDEV_TMPDIR="$SCRATCH"; export UBERDEV_GOAL_ID="b11"
+  GOAL_ID="$UBERDEV_GOAL_ID"
+  . "$DISPATCH_LIB"; . "$GOAL_LIB"
+  uberdev_goal_state_init "$GOAL_ID" >/dev/null
+  uberdev_goal_register_batch_pr "$GOAL_ID" 100 200 >/dev/null
+  _uberdev_goal_set_batch_terminal_state "$GOAL_ID" 100 HELD
+  # Blocker CLOSED, but NO uberdev-approved label (length 0). Stays held.
+  gh() {
+    case "$1 $2" in
+      "pr view") case "$*" in *body*) printf 'Blocks: #201';; *labels*) printf '0';; esac ;;
+      "issue view") printf 'CLOSED' ;;
+    esac
+  }
+  if ! uberdev_goal_batch_unblock_wait_clear "$GOAL_ID" 2>/dev/null; then
+    echo "B11.pseudo-terminal-must-clear FAIL (rc1 — the phantom-label deadlock)"; exit 1
+  fi
+  # While the blocker is still OPEN, it MUST gate (legitimate hold-and-unblock).
+  gh() {
+    case "$1 $2" in
+      "pr view") case "$*" in *body*) printf 'Blocks: #201';; *labels*) printf '0';; esac ;;
+      "issue view") printf 'OPEN' ;;
+    esac
+  }
+  if uberdev_goal_batch_unblock_wait_clear "$GOAL_ID"; then
+    echo "B11.blocker-open-must-gate FAIL (rc0 while blocker open)"; exit 1
+  fi
+  echo "B11 PASS"
+) || { FAIL=$((FAIL + 1)); echo "  FAIL  B11 block exited non-zero"; }
+
+# ---------------------------------------------------------------------------
+# B12 — #292.1 (MAJOR) — mutual Blocks cycle detection. PR100 blocks on issue
+# 201 (closed by held PR101); PR101 blocks on issue 200 (closed by held PR100).
+# detect_blocks_cycle MUST return rc 0 + both PRs. An acyclic graph returns rc 1.
+# ---------------------------------------------------------------------------
+echo "== B12: mutual-Blocks cycle detection (#292.1) =="
+(
+  set -u
+  SCRATCH="$(mktemp -d)"; trap 'rm -rf "$SCRATCH"' EXIT
+  export UBERDEV_TMPDIR="$SCRATCH"; export UBERDEV_GOAL_ID="b12"
+  GOAL_ID="$UBERDEV_GOAL_ID"
+  . "$DISPATCH_LIB"; . "$GOAL_LIB"
+  uberdev_goal_state_init "$GOAL_ID" >/dev/null
+  uberdev_goal_register_batch_pr "$GOAL_ID" 100 200 >/dev/null
+  uberdev_goal_register_batch_pr "$GOAL_ID" 101 201 >/dev/null
+  _uberdev_goal_set_batch_terminal_state "$GOAL_ID" 100 HELD
+  _uberdev_goal_set_batch_terminal_state "$GOAL_ID" 101 HELD
+  # PR100 body Blocks #201; PR101 body Blocks #200. find_pr: issue 200->PR100, 201->PR101.
+  gh() {
+    case "$1 $2" in
+      "pr view") case "$*" in *body*) case "$3" in 100) printf 'Blocks: #201';; 101) printf 'Blocks: #200';; esac ;; esac ;;
+      "pr list")
+        local jqf='.'; while [ $# -gt 0 ]; do [ "$1" = "--jq" ] && jqf="$2"; shift; done
+        printf '%s' '[{"number":100,"closingIssuesReferences":[{"number":200}],"headRefName":"feat/200-a"},{"number":101,"closingIssuesReferences":[{"number":201}],"headRefName":"feat/201-b"}]' | jq -r "$jqf" ;;
+    esac
+  }
+  cyc="$(uberdev_goal_detect_blocks_cycle "$GOAL_ID")"; rc=$?
+  [ "$rc" = "0" ] || { echo "B12.cycle-must-fire FAIL (rc=$rc)"; exit 1; }
+  case "$cyc" in *100*) : ;; *) echo "B12.cycle-missing-100 FAIL got [$cyc]"; exit 1 ;; esac
+  case "$cyc" in *101*) : ;; *) echo "B12.cycle-missing-101 FAIL got [$cyc]"; exit 1 ;; esac
+  # Acyclic: PR100 held, blocks issue 999 which NO held PR closes.
+  uberdev_goal_state_init "$GOAL_ID-acyc" >/dev/null
+  export UBERDEV_GOAL_ID="$GOAL_ID-acyc"; GOAL_ID="$GOAL_ID-acyc"
+  uberdev_goal_register_batch_pr "$GOAL_ID" 100 200 >/dev/null
+  _uberdev_goal_set_batch_terminal_state "$GOAL_ID" 100 HELD
+  gh() {
+    case "$1 $2" in
+      "pr view") case "$*" in *body*) printf 'Blocks: #999';; esac ;;
+      "pr list") local jqf='.'; while [ $# -gt 0 ]; do [ "$1" = "--jq" ] && jqf="$2"; shift; done; printf '[]' | jq -r "$jqf" ;;
+    esac
+  }
+  if uberdev_goal_detect_blocks_cycle "$GOAL_ID" >/dev/null; then
+    echo "B12.acyclic-must-not-fire FAIL"; exit 1
+  fi
+  echo "B12 PASS"
+) || { FAIL=$((FAIL + 1)); echo "  FAIL  B12 block exited non-zero"; }
+
+# ---------------------------------------------------------------------------
+# B13 — #292.2 (MAJOR) — per-PR merge-attempt counter reset. After 3 cumulative
+# attempts should_automerge refuses; reset_merge_attempts re-allows it (held→
+# green recovery). The counter must read 0 after the reset (last-write-wins).
+# ---------------------------------------------------------------------------
+echo "== B13: merge-attempt counter reset on held→green recovery (#292.2) =="
+(
+  set -u
+  SCRATCH="$(mktemp -d)"; trap 'rm -rf "$SCRATCH"' EXIT
+  export UBERDEV_TMPDIR="$SCRATCH"; export UBERDEV_GOAL_ID="b13"
+  GOAL_ID="$UBERDEV_GOAL_ID"
+  . "$DISPATCH_LIB"; . "$GOAL_LIB"
+  uberdev_goal_state_init "$GOAL_ID" >/dev/null
+  # Simulate 3 accumulated merge attempts → at the cap.
+  printf '%s\t%s\n' 100 3 > "$SCRATCH/goal-$GOAL_ID-merge-attempts.tsv"
+  if uberdev_goal_should_automerge "$GOAL_ID" 100; then
+    echo "B13.at-cap-must-refuse FAIL (should_automerge allowed at cap)"; exit 1
+  fi
+  uberdev_goal_reset_merge_attempts "$GOAL_ID" 100 || { echo "B13.reset-rc FAIL"; exit 1; }
+  cnt="$(_uberdev_goal_count_merge_attempts "$GOAL_ID" 100)"
+  [ "$cnt" = "0" ] || { echo "B13.count-after-reset FAIL got '$cnt' want 0"; exit 1; }
+  if ! uberdev_goal_should_automerge "$GOAL_ID" 100; then
+    echo "B13.after-reset-must-allow FAIL (still refusing post-reset)"; exit 1
+  fi
+  echo "B13 PASS"
+) || { FAIL=$((FAIL + 1)); echo "  FAIL  B13 block exited non-zero"; }
+
+# ---------------------------------------------------------------------------
+# B14 — #290.3 (MAJOR) — consecutive-gh-failure breaker. record bumps, reset
+# clears, breaker fires only at/above threshold and emits gh_api_failed.
+# ---------------------------------------------------------------------------
+echo "== B14: consecutive gh-failure breaker (#290.3) =="
+(
+  set -u
+  SCRATCH="$(mktemp -d)"; trap 'rm -rf "$SCRATCH"' EXIT
+  export UBERDEV_TMPDIR="$SCRATCH"; export UBERDEV_GOAL_ID="b14"
+  GOAL_ID="$UBERDEV_GOAL_ID"
+  . "$DISPATCH_LIB"; . "$GOAL_LIB"
+  uberdev_goal_state_init "$GOAL_ID" >/dev/null
+  # No failures yet → breaker does not fire.
+  if uberdev_goal_gh_failure_breaker_check "$GOAL_ID" 3; then echo "B14.fresh-must-not-fire FAIL"; exit 1; fi
+  _uberdev_goal_record_gh_failure; _uberdev_goal_record_gh_failure
+  if uberdev_goal_gh_failure_breaker_check "$GOAL_ID" 3; then echo "B14.under-threshold-must-not-fire FAIL"; exit 1; fi
+  _uberdev_goal_record_gh_failure   # now 3
+  if ! uberdev_goal_gh_failure_breaker_check "$GOAL_ID" 3 >/dev/null; then echo "B14.at-threshold-must-fire FAIL"; exit 1; fi
+  # The fire emits a gh_api_failed circuit-breaker audit row.
+  audit="$SCRATCH/goal-$GOAL_ID.jsonl"
+  grep -q '"reason":"gh_api_failed"' "$audit" || { echo "B14.audit-reason FAIL"; exit 1; }
+  grep -q '"phase":"poll"'           "$audit" || { echo "B14.audit-phase FAIL"; exit 1; }
+  # A success resets the counter → breaker no longer fires.
+  _uberdev_goal_reset_gh_failure
+  if uberdev_goal_gh_failure_breaker_check "$GOAL_ID" 3; then echo "B14.after-reset-must-not-fire FAIL"; exit 1; fi
+  echo "B14 PASS"
+) || { FAIL=$((FAIL + 1)); echo "  FAIL  B14 block exited non-zero"; }
+
+# ---------------------------------------------------------------------------
+# B15 — #290.4 (MAJOR) — find_pr_for_issue prefers the closingIssuesReferences
+# match over the feat/N- head-ref heuristic, and scans --state open. The lib
+# must use `--state open` (not `--state all`).
+# ---------------------------------------------------------------------------
+echo "== B15: find_pr prefers closes-match + scans open (#290.4) =="
+assert_grep "$GOAL_LIB" 'gh pr list --state open'   "B15.scans-state-open"
+assert_no_grep "$GOAL_LIB" 'gh pr list --state all' "B15.no-state-all"
+(
+  set -u
+  SCRATCH="$(mktemp -d)"; trap 'rm -rf "$SCRATCH"' EXIT
+  export UBERDEV_TMPDIR="$SCRATCH"; export UBERDEV_GOAL_ID="b15"
+  . "$DISPATCH_LIB"; . "$GOAL_LIB"
+  # PR5 CLOSES issue 77; PR9 merely has a re-used feat/77- branch but closes 88.
+  # The closes-match (5) must win over the head-ref distractor (9).
+  gh() {
+    local jqf='.'; while [ $# -gt 0 ]; do [ "$1" = "--jq" ] && jqf="$2"; shift; done
+    printf '%s' '[{"number":5,"closingIssuesReferences":[{"number":77}],"headRefName":"feat/77-real"},{"number":9,"closingIssuesReferences":[{"number":88}],"headRefName":"feat/77-reused"}]' | jq -r "$jqf"
+  }
+  got="$(uberdev_goal_find_pr_for_issue 77)"
+  [ "$got" = "5" ] || { echo "B15.closes-preference FAIL got '$got' want 5"; exit 1; }
+  # Head-ref fallback only when NO closes-match exists.
+  gh() {
+    local jqf='.'; while [ $# -gt 0 ]; do [ "$1" = "--jq" ] && jqf="$2"; shift; done
+    printf '%s' '[{"number":12,"closingIssuesReferences":[],"headRefName":"feat/77-x"}]' | jq -r "$jqf"
+  }
+  got2="$(uberdev_goal_find_pr_for_issue 77)"
+  [ "$got2" = "12" ] || { echo "B15.head-ref-fallback FAIL got '$got2' want 12"; exit 1; }
+  echo "B15 PASS"
+) || { FAIL=$((FAIL + 1)); echo "  FAIL  B15 block exited non-zero"; }
+
+# ---------------------------------------------------------------------------
+# B16 — #290.2 (CRITICAL) — read_merge_result reads the merge agent WORKTREE
+# mirror (.claude/worktrees/*/.uberdev/audit.jsonl), not just the cwd-relative
+# file. A pr_parked row written only in the worktree mirror must classify
+# (conflict), where the OLD cwd-only read returned `missing`.
+# ---------------------------------------------------------------------------
+echo "== B16: read_merge_result anchors to merge worktree audit (#290.2) =="
+(
+  set -u
+  WT="$(mktemp -d)"; trap 'rm -rf "$WT"' EXIT
+  export UBERDEV_TMPDIR="$WT"   # (read_merge_result uses cwd-relative globs, not tmpdir)
+  . "$DISPATCH_LIB"; . "$GOAL_LIB"
+  mkdir -p "$WT/.claude/worktrees/merge-run/.uberdev"
+  printf '%s\n' '{"event":"pr_parked","data":{"pr":777,"reason":"refused"}}' \
+    > "$WT/.claude/worktrees/merge-run/.uberdev/audit.jsonl"
+  gh() { case "$1 $2" in "pr view") printf 'OPEN';; esac; }   # not merged
+  out="$(cd "$WT" && uberdev_goal_read_merge_result 777)"
+  [ "$out" = "conflict" ] || { echo "B16.worktree-audit FAIL got '$out' want conflict"; exit 1; }
+  # Cross-file: cwd has a stale parked row, worktree has the real merge_executed.
+  # The worktree row (slurped LAST in glob order) wins → success.
+  mkdir -p "$WT/.uberdev"
+  printf '%s\n' '{"event":"pr_parked","data":{"pr":888,"reason":"refused"}}' > "$WT/.uberdev/audit.jsonl"
+  printf '%s\n' '{"event":"merge_executed","data":{"pr":888}}' > "$WT/.claude/worktrees/merge-run/.uberdev/audit.jsonl"
+  out2="$(cd "$WT" && uberdev_goal_read_merge_result 888)"
+  [ "$out2" = "success" ] || { echo "B16.cross-file-worktree-wins FAIL got '$out2' want success"; exit 1; }
+  echo "B16 PASS"
+) || { FAIL=$((FAIL + 1)); echo "  FAIL  B16 block exited non-zero"; }
+
+# ---------------------------------------------------------------------------
+# B17 — #289.2 (BLOCKER) — MERGING is a valid NON-terminal batch sentinel that
+# excludes the PR from the green-ordered list and forces batch_all_terminal to
+# rc 1 (the cross-pass serialization interlock). SKILL.md Phase 2c must use it.
+# ---------------------------------------------------------------------------
+echo "== B17: MERGING sentinel serializes merge dispatch (#289.2) =="
+(
+  set -u
+  SCRATCH="$(mktemp -d)"; trap 'rm -rf "$SCRATCH"' EXIT
+  export UBERDEV_TMPDIR="$SCRATCH"; export UBERDEV_GOAL_ID="b17"
+  GOAL_ID="$UBERDEV_GOAL_ID"
+  . "$DISPATCH_LIB"; . "$GOAL_LIB"
+  uberdev_goal_state_init "$GOAL_ID" >/dev/null
+  uberdev_goal_register_batch_pr "$GOAL_ID" 100 200 >/dev/null
+  uberdev_goal_register_batch_pr "$GOAL_ID" 101 201 >/dev/null
+  _uberdev_goal_set_batch_terminal_state "$GOAL_ID" 100 GREEN
+  _uberdev_goal_set_batch_terminal_state "$GOAL_ID" 101 GREEN
+  uberdev_goal_batch_all_terminal "$GOAL_ID" || { echo "B17.precondition-all-green-terminal FAIL"; exit 1; }
+  # Dispatch lowest (100) → MERGING.
+  _uberdev_goal_set_batch_terminal_state "$GOAL_ID" 100 MERGING || { echo "B17.set-merging-rc FAIL"; exit 1; }
+  if uberdev_goal_batch_all_terminal "$GOAL_ID"; then
+    echo "B17.merging-must-block-all-terminal FAIL (barrier did not interlock)"; exit 1
+  fi
+  ordered="$(_uberdev_goal_batch_green_prs_ordered "$GOAL_ID" | tr '\n' ' ' | sed 's/  *$//')"
+  [ "$ordered" = "101" ] || { echo "B17.merging-dropped-from-green FAIL got '$ordered' want 101"; exit 1; }
+  echo "B17 PASS"
+) || { FAIL=$((FAIL + 1)); echo "  FAIL  B17 block exited non-zero"; }
+
+# ---------------------------------------------------------------------------
+# B18 — #289.2 SKILL.md Phase-2c structural: the green-PR merge loop must take
+# the LOWEST green PR (head -n 1) and flip it to the MERGING sentinel, NOT loop
+# over all green PRs dispatching /merge in one async pass.
+# ---------------------------------------------------------------------------
+echo "== B18: Phase 2c dispatches lowest green PR + MERGING sentinel (#289.2 structural) =="
+GOAL_SKILL="$REPO_ROOT/plugins/uberdev/skills/goal-pipeline/SKILL.md"
+assert_grep "$GOAL_SKILL" '_uberdev_goal_batch_green_prs_ordered "\$GOAL_ID" \| head -n 1' "B18.lowest-green-head1"
+assert_grep "$GOAL_SKILL" '_uberdev_goal_set_batch_terminal_state "\$GOAL_ID" "\$pr" MERGING' "B18.flips-to-merging"
+# The phantom-label gate must NOT appear as a live jq select in the lib.
+assert_no_grep "$GOAL_LIB"  'select\(\. == "review-pr:green"\)'                              "B18.no-phantom-green-gate-in-lib"
 
 # ---------------------------------------------------------------------------
 # Summary

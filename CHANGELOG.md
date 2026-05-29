@@ -4,6 +4,23 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.18] — 2026-05-29
+
+### Fixed
+- **`/goal` advanced PRs on stale reviews (#290.1)** — `uberdev_goal_read_trust_signal` now binds the `/review-pr` verdict to the PR's live `headRefOid` and returns `stale` when a commit landed after the GREEN verdict (fail-safe on a gh outage; backward-compatible when the verdict predates the `.sha` field), instead of driving `pushed-reviewing→green→merging` off a stale review.
+- **`/goal` merge-result audit read missed the merge worktree (#290.2)** — `read_merge_result` now scans the worktree-mirror audit set (the same prefix glob the verdict locator uses) instead of cwd-only `.uberdev/audit.jsonl`, so the `merge_failed` breaker fires on the conflict/hook-failed path instead of looping the 60 m timeout.
+- **`/goal` rode out sustained gh outages silently (#290.3)** — a consecutive-gh-failure breaker now records failures in `find_pr_for_issue` / `pr_state_gh` and fires `gh_api_failed` via `uberdev_goal_gh_failure_breaker_check`, rather than abandoning a solved-and-pushed issue to the solve-timeout.
+- **`/goal` could bind the wrong PR (#290.4)** — `find_pr_for_issue` now scans `--state open` and prefers the `closingIssuesReferences` match over the `feat/N-` head-ref heuristic, so a stale closed branch can't corrupt batch-registry accounting.
+- **`/goal` mutual-`Blocks:` deadlock (#292.1)** — new `uberdev_goal_detect_blocks_cycle` SCC detector surfaces `stuck_loop phase=blocks_cycle` instead of spinning two mutually-blocking held PRs to the 4 h cap.
+- **`/goal` merge-attempt cap was per-PR-lifetime (#292.2)** — the per-PR cap now resets on a held→green recovery (`uberdev_goal_reset_merge_attempts`), so a PR legitimately blocked for cycles isn't permanently locked out of auto-merge by transient stalls.
+- **`/goal` merge barrier deadlocked on a phantom label (#289.1)** — `batch_unblock_wait_clear` now gates on the `uberdev-approved` label `/review-pr` actually emits (the old `review-pr:green` had zero producers, so a held batch row returned rc 1 forever and blocked every co-batched GREEN PR until the 4 h `stuck_loop`); a blocker-closed-but-still-held PR is now pseudo-terminal so it stops gating others.
+- **`/goal` didn't serialize version-bump merges (#289.2)** — the green-PR loop now dispatches the lowest green PR and waits (a non-terminal `MERGING` batch-sentinel interlock) for it to land on fresh main before the next `/merge`, so two version-bump PRs can't both land `vN+1` and silently eat the second bump.
+- **`/goal` multi-blocker unblock inconsistency (#289.3)** — `batch_unblock_wait_clear` now requires ALL `Blocks:` issues closed (was break-after-first), matching `check_unblock`.
+- **Cross-shell worktree-glob hardening (#270 class)** — the `_UBERDEV_GOAL_WORKTREE_PREFIXES` globs never expanded under the zsh Bash tool; all three consumers now route through `_uberdev_goal_glob_worktree` (zsh `${~pat}` + `nonomatch` / bash bare), and loop-body `local` decls are hoisted to function scope.
+
+### Tests
+- `tests/goal-batch-barrier.test.sh` (B10–B18), `tests/goal.test.sh` (BT23a–e + repoints), and `tests/goal-state-zsh.test.sh` (Z6–Z9, dual-shell) cover each fix; every fix red-checked via revert. Full `tests/*.test.sh` suite 58/0 under bash and zsh.
+
 ## [0.35.17] — 2026-05-29
 
 ### Fixed

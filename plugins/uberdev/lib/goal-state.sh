@@ -10,6 +10,7 @@
 #   uberdev_goal_read_trust_signal             AUDIT_JSON_PATH
 #   uberdev_goal_check_fingerprint_repeat      GOAL_ID CYCLE FINGERPRINT
 #   uberdev_goal_should_automerge              GOAL_ID PR
+#   uberdev_goal_reset_merge_attempts          GOAL_ID PR            (issue #292.2)
 #   uberdev_goal_audit                         EVENT PAYLOAD_JSON
 #   uberdev_goal_locate_review_pr_audit        ISSUE_NUM
 #   uberdev_goal_locate_review_pr_audit_by_pr  PR_NUM
@@ -23,9 +24,10 @@
 #   uberdev_goal_count_resolved_issues         GOAL_ID
 #   uberdev_goal_record_held_audit             GOAL_ID PR AUDIT_PATH
 #   uberdev_goal_get_last_held_audit           GOAL_ID PR
-#   uberdev_goal_find_pr_for_issue             ISSUE_NUM   (gh; issue #180)
+#   uberdev_goal_find_pr_for_issue             ISSUE_NUM   (gh; issue #180/#290.4)
 #   uberdev_goal_pr_state_gh                   PR_NUM      (gh; issue #180)
 #   uberdev_goal_pr_is_merged                  PR_NUM      (gh; issue #180)
+#   uberdev_goal_gh_failure_breaker_check      GOAL_ID [THRESHOLD]   (issue #290.3)
 #   uberdev_goal_agent_busy_for_issue          ISSUE_NUM   (claude agents; issue #180)
 #   uberdev_goal_list_prs_in_state             GOAL_ID STATE
 #   uberdev_goal_read_merge_result             PR_NUM
@@ -35,7 +37,8 @@
 #   uberdev_goal_register_batch_pr             GOAL_ID PR ISSUE   (issue #211)
 #   uberdev_goal_barrier_breaker_check         GOAL_ID BARRIER_TIMEOUT_S   (issue #214)
 #   uberdev_goal_batch_all_terminal            GOAL_ID            (issue #211)
-#   uberdev_goal_batch_unblock_wait_clear      GOAL_ID            (issue #211)
+#   uberdev_goal_batch_unblock_wait_clear      GOAL_ID            (issue #211/#289)
+#   uberdev_goal_detect_blocks_cycle           GOAL_ID            (issue #292.1)
 #   print_summary                              CYCLES             (issue #270; hoisted from goal-pipeline SKILL.md Phase 4 so the per-fence re-source brings it into scope in every phase)
 # Internal:
 #   _uberdev_goal_ts_in_state              FILE KEY STATE [FIRST_WINS]
@@ -57,6 +60,10 @@
 #   _uberdev_goal_set_batch_terminal_state GOAL_ID PR STATE       (issue #211)
 #   _uberdev_goal_batch_green_prs_ordered  GOAL_ID                (issue #211)
 #   _uberdev_goal_rebase_collision_chain   GOAL_ID JUST_MERGED_PR (issue #211)
+#   _uberdev_goal_gh_failure_counter_path                         (issue #290.3)
+#   _uberdev_goal_record_gh_failure                              (issue #290.3)
+#   _uberdev_goal_reset_gh_failure                               (issue #290.3)
+#   _uberdev_goal_glob_worktree            SUFFIX                 (issue #290.2; cross-shell glob)
 # External imports:
 #   - lib/dispatch.sh :: _uberdev_dispatch_prepare_tmp_target, uberdev_dispatch_one
 #     — both REQUIRED, both live in lib/dispatch.sh (NOT in this file).
@@ -95,12 +102,14 @@ if [ "${_UBERDEV_GOAL_STATE_LOADED:-0}" = "1" ]; then
 fi
 _UBERDEV_GOAL_STATE_LOADED=1
 
-# Worktree-mirror prefixes for .uberdev/runs discovery (issue #220 simplify
-# pass — R2 SSOT). Used by helpers that scan for /review-pr artifacts (verdicts,
-# locked markers). The empty prefix covers the main checkout; the three worktree
-# variants cover the using-git-worktrees skill's documented layouts. Mirrored
-# previously by uberdev_goal_locate_review_pr_audit_by_pr and
-# _uberdev_goal_locked_marker_for_pr_fresh — now read from this array.
+# Worktree-mirror prefixes for .uberdev discovery (issue #220 simplify pass —
+# R2 SSOT). Used by helpers that scan for /review-pr + /merge artifacts (verdicts,
+# locked markers, merge-result audit). The empty prefix covers the main checkout;
+# the three worktree variants cover the using-git-worktrees skill's documented
+# layouts. Consumed ONLY via _uberdev_goal_glob_worktree (issue #290.2), which
+# does the cross-shell glob expansion — the bare `${prefix}` form does NOT
+# glob-expand a variable-derived `*` under the zsh Bash tool, so the worktree
+# mirrors were silently invisible there before the helper.
 _UBERDEV_GOAL_WORKTREE_PREFIXES=("" ".claude/worktrees/*/" ".worktrees/*/" "worktrees/*/")
 
 # Stuck-on-dialog detector window (issue #220 simplify pass — Q1). Promoted
@@ -130,6 +139,13 @@ _UBERDEV_GOAL_WORKTREE_PREFIXES=("" ".claude/worktrees/*/" ".worktrees/*/" "work
 : "${_UBERDEV_GOAL_MERGE_TIMEOUT:=3600}"                  # 60m — merging w/o MERGED AND agent idle => back to green for retry (#180)
 : "${_UBERDEV_GOAL_BODY_CAP:=65536}"                      # 64 KiB
 : "${FINDING_LABEL:=review-pr-finding}"
+# #290.3 — consecutive gh-failure breaker threshold. The Phase-2a/2d polling
+# helpers (find_pr_for_issue / pr_state_gh) fail OPEN (empty+rc0) on a gh
+# outage so a transient blip just re-polls; a SUSTAINED outage, however, must
+# not ride the 150m solve-timeout / 60m merge-timeout to a false `failed`.
+# After this many CONSECUTIVE failures (any success resets the counter), the
+# breaker fires gh_api_failed. Default 5 ≈ 5 min at the 60s poll cadence.
+: "${_UBERDEV_GOAL_MAX_GH_FAILURES:=5}"
 
 # Regex constants — PLAIN assignment, NOT := (Q2 security advisory: := would
 # let a hostile env override the regex shape and widen the ReDoS attack
@@ -229,6 +245,45 @@ _uberdev_goal_pid_for_issue() {
   pid="$(jq -r '.pid // empty' < "$status_file" 2>/dev/null)" || return 1
   _uberdev_goal_validate_int "$pid" || return 1
   printf '%s' "$pid"
+}
+
+# _uberdev_goal_glob_worktree SUFFIX
+# Emit (one per line, on stdout) every READABLE path matching
+# `<prefix><SUFFIX>` for each prefix in _UBERDEV_GOAL_WORKTREE_PREFIXES, in
+# array order (empty/project-root prefix first, worktree mirrors after).
+#
+# #270/#290.2 cross-shell glob: the prefixes carry a `*` worktree wildcard and
+# come from a VARIABLE. bash glob-expands `${prefix}${SUFFIX}` after
+# substitution, but zsh does NOT expand `*` that arrives via a parameter unless
+# the expansion is flagged `${~var}` (GLOB_SUBST). Since this lib is re-sourced
+# inside the goal-pipeline SKILL.md bash fences that run under /bin/zsh on
+# macOS, the bare-`${prefix}` form silently matched NOTHING for the three
+# worktree-mirror prefixes under zsh — so worktree verdict/audit/lock discovery
+# never fired there (only the empty cwd prefix worked). Branch on the live shell
+# and use `${~pat}` under zsh / bare `$pat` under bash (bash hard-errors on
+# `${~pat}`: `bad substitution`). Unmatched globs leave the literal pattern,
+# which the `[ -r ]` guard rejects (no nullglob assumed) — identical to the
+# inline call sites' prior behaviour.
+_uberdev_goal_glob_worktree() {
+  local suffix="$1" prefix pat c
+  if [ -n "${ZSH_VERSION:-}" ]; then
+    # zsh: `${~pat}` re-enables glob on the variable-derived pattern;
+    # `localoptions nonomatch` makes an UNMATCHED glob yield the literal
+    # (function-scoped — does not leak to the caller) instead of zsh's default
+    # NOMATCH hard-error, matching bash's no-nullglob behaviour so the `[ -r ]`
+    # guard can reject the un-expanded literal uniformly in both shells.
+    setopt localoptions nonomatch 2>/dev/null || true
+    for prefix in "${_UBERDEV_GOAL_WORKTREE_PREFIXES[@]}"; do
+      pat="${prefix}${suffix}"
+      for c in ${~pat}; do [ -r "$c" ] && printf '%s\n' "$c"; done
+    done
+  else
+    for prefix in "${_UBERDEV_GOAL_WORKTREE_PREFIXES[@]}"; do
+      pat="${prefix}${suffix}"
+      for c in $pat; do [ -r "$c" ] && printf '%s\n' "$c"; done
+    done
+  fi
+  return 0
 }
 
 # _uberdev_goal_validate_id GOAL_ID
@@ -349,6 +404,28 @@ _uberdev_goal_count_merge_attempts() {
   local f="$tmpdir/goal-$goal_id-merge-attempts.tsv"
   [ -f "$f" ] || { printf '0\n'; return 0; }
   awk -v p="$pr" '$1==p {c=$2} END {print c+0}' "$f"
+}
+
+# uberdev_goal_reset_merge_attempts GOAL_ID PR   (issue #292.2)
+# Zero the per-PR merge-attempt counter by appending a `PR<TAB>0` row — the
+# count reader above is last-write-wins (`$1==p {c=$2}`), so the appended 0
+# supersedes all prior ticks for this PR. Called when a PR transitions back to
+# `green` from a HELD state (Phase 2e held→green): the merge-attempt cap
+# (uberdev_goal_should_automerge, default 3) is otherwise per-PR-LIFETIME and
+# never reset, so a PR legitimately blocked for 2 cycles — then unblocked and
+# cleanly GREEN — could hit the cap from transient merge stalls accumulated
+# across its hold and never auto-merge again, stalling convergence into
+# queue_empty_not_converged with a GREEN-but-unmergeable PR. Resetting on the
+# held→green recovery scopes the cap to the PR's CURRENT green lifetime.
+# rc 0 on success; rc 1 on validation; propagates the append's rc on a write
+# failure (fail-loud, uniform with the state-transition writers — #157).
+uberdev_goal_reset_merge_attempts() {
+  local goal_id="$1" pr="$2"
+  _uberdev_goal_validate_id "$goal_id" || return 1
+  _uberdev_goal_validate_int "$pr"     || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  local row; printf -v row '%s\t%s' "$pr" 0
+  _uberdev_goal_append "$tmpdir/goal-$goal_id-merge-attempts.tsv" "$row"
 }
 
 # _uberdev_goal_count_review_pr_attempts GOAL_ID PR
@@ -533,9 +610,53 @@ uberdev_goal_issue_state_transition() {
 # assume GREEN on an unreadable trust artifact, per D17). Empty stdout
 # with rc=0 means jq ran but returned empty (phase2_5 absent) — that's
 # the legacy/pre-v0.26.0 audit shape, treated as `stale`.
+#
+# #290.1 (CRITICAL) — HEAD-SHA binding. The verdict JSON carries both `.pr`
+# and `.sha` (the post-emission anchor `headRefOid` written at
+# commands/review-pr.md:954). A commit pushed AFTER a GREEN verdict leaves a
+# stale-but-green verdict on disk; without binding, /goal advanced
+# pushed-reviewing→green→merging on that stale review and churned the PR into
+# the retry / queue_empty_not_converged path (/merge's trust-trail-evaluator
+# DOES re-validate the SHA, so the merge itself is safe — but /goal
+# mis-classifies). Self-contained fix: read `.pr` + `.sha` from the SAME file,
+# fetch the live `gh pr view <pr> --json headRefOid`, and on mismatch return
+# `stale` (the whole review is invalidated by a new push, regardless of colour)
+# so the caller re-dispatches /review-pr instead of advancing to green.
+# Fail-SAFE on a gh outage reading headRefOid: a rate-limit / network error
+# must NOT masquerade as a SHA mismatch (that would churn the PR), so skip the
+# binding and fall through to the colour decision with a one-line breadcrumb —
+# identical to the pre-#290 behaviour for that transient window. The check is
+# also skipped when the verdict has no `.sha` (legacy/pre-anchor JSON) or no
+# `.pr`, preserving backward compatibility (and the audit-path-only test
+# fixtures that never set a PR).
 uberdev_goal_read_trust_signal() {
   local audit_path="$1"
   [ -f "$audit_path" ] || { printf 'missing\n'; return 0; }
+  # #290.1 — bind the verdict to the live PR HEAD before trusting its colour.
+  # Both reads come from the same verdict file (no extra disk I/O beyond two
+  # jq passes). A jq failure here is non-fatal: it degrades to "no binding"
+  # rather than "missing", because the by_severity projection below has its
+  # own fail-closed `missing` arm and is the authoritative readability gate.
+  local verdict_pr verdict_sha
+  verdict_pr="$(jq -r '.pr // empty' "$audit_path" 2>/dev/null)"
+  verdict_sha="$(jq -r '.sha // empty' "$audit_path" 2>/dev/null)"
+  if [ -n "$verdict_pr" ] && [ -n "$verdict_sha" ] \
+     && _uberdev_goal_validate_int "$verdict_pr"; then
+    local head_oid head_rc
+    head_oid="$(gh pr view "$verdict_pr" --json headRefOid --jq '.headRefOid' 2>/dev/null)"
+    head_rc=$?
+    if [ "$head_rc" -ne 0 ] || [ -z "$head_oid" ]; then
+      # gh outage / empty — fail-SAFE: do NOT declare stale on a transient
+      # failure (would churn the PR); fall through to the colour decision.
+      printf 'goal-state: gh pr view %s headRefOid unreadable (rc=%s); skipping SHA-binding for this read\n' \
+        "$verdict_pr" "$head_rc" >&2
+    elif [ "$head_oid" != "$verdict_sha" ]; then
+      # A commit landed after this verdict — the whole review is stale.
+      printf 'goal-state: trust verdict for PR %s is bound to %s but HEAD is %s; treating as stale (re-review needed)\n' \
+        "$verdict_pr" "$verdict_sha" "$head_oid" >&2
+      printf 'stale\n'; return 0
+    fi
+  fi
   local p25
   if ! p25="$(gh_jq_or_jq "$audit_path" '.phases.phase2_5 // empty')"; then
     printf 'missing\n'; return 0
@@ -669,21 +790,23 @@ uberdev_goal_locate_review_pr_audit() {
 uberdev_goal_locate_review_pr_audit_by_pr() {
   local pr="$1"
   _uberdev_goal_validate_int "$pr" || return 1
-  local prefix candidate_file run_id pr_field
+  local candidate_file run_id pr_field
   # R2 SSOT (issue #220 simplify pass): glob set read from
-  # _UBERDEV_GOAL_WORKTREE_PREFIXES so this and _uberdev_goal_locked_marker_for_pr_fresh
-  # cannot drift. Empty prefix = main checkout; three worktree prefixes mirror
-  # the using-git-worktrees skill's documented layouts.
-  for prefix in "${_UBERDEV_GOAL_WORKTREE_PREFIXES[@]}"; do
-    for candidate_file in ${prefix}.uberdev/runs/*/review-pr-verdict.json; do
-      [ -r "$candidate_file" ] || continue
-      pr_field="$(jq -r '.pr // empty' "$candidate_file" 2>/dev/null)" || continue
-      [ "$pr_field" = "$pr" ] || continue
-      run_id="$(basename "$(dirname "$candidate_file")")"
-      [[ "$run_id" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]] || continue
-      printf '%s\t%s\n' "$run_id" "$candidate_file"
-    done
-  done | sort -r | head -n 1 | cut -f2
+  # _UBERDEV_GOAL_WORKTREE_PREFIXES. #270/#290.2 cross-shell: route the
+  # prefix-glob through _uberdev_goal_glob_worktree — the bare `${prefix}` glob
+  # silently matched no worktree mirror under the zsh Bash tool (a variable-
+  # derived `*` is not glob-expanded by zsh), so worktree-mirror verdict
+  # discovery never fired there. Empty prefix = main checkout; three worktree
+  # prefixes mirror the using-git-worktrees skill's documented layouts.
+  while IFS= read -r candidate_file; do
+    [ -r "$candidate_file" ] || continue
+    pr_field="$(jq -r '.pr // empty' "$candidate_file" 2>/dev/null)" || continue
+    [ "$pr_field" = "$pr" ] || continue
+    run_id="$(basename "$(dirname "$candidate_file")")"
+    [[ "$run_id" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]] || continue
+    printf '%s\t%s\n' "$run_id" "$candidate_file"
+  done < <(_uberdev_goal_glob_worktree ".uberdev/runs/*/review-pr-verdict.json") \
+    | sort -r | head -n 1 | cut -f2
 }
 
 # uberdev_goal_get_pr_state GOAL_ID PR
@@ -859,12 +982,26 @@ uberdev_goal_get_last_held_audit() {
 }
 
 # uberdev_goal_find_pr_for_issue ISSUE_NUM   (issue #180)
-# GitHub-native issue->PR resolver. Echoes the highest PR number whose
-# `closingIssuesReferences` includes issue N (the `Closes #N` link every solver
-# PR carries) OR whose head branch is `feat/N-…`. Replaces the retired
-# solve-bg `pushed PR #N` log parser: that marker has ZERO producers and
-# `claude --bg` stdout is a detached banner on CLI 2.1.150, so the loop keying
-# on it never advanced (issue #180).
+# GitHub-native issue->PR resolver. Echoes the highest OPEN PR number that
+# closes issue N (its `closingIssuesReferences` carries the `Closes #N` link
+# every solver PR adds); if no closes-match exists it FALLS BACK to the highest
+# OPEN PR whose head branch is `feat/N-…`. Replaces the retired solve-bg
+# `pushed PR #N` log parser: that marker has ZERO producers and `claude --bg`
+# stdout is a detached banner on CLI 2.1.150, so the loop keying on it never
+# advanced (issue #180).
+#
+# #290.4 (MAJOR) — bind to the LIVE PR, prefer the authoritative link:
+#   (a) `--state open` (was `--state all`): a stale CLOSED `feat/N-` branch from
+#       a prior failed attempt, or a re-dispatched issue's abandoned PR, could
+#       otherwise win the `max` and corrupt batch-registry accounting / verdict
+#       location (the locator keys on this result). Merge-completion detection
+#       is unaffected — uberdev_goal_pr_state_gh / pr_is_merged issue their own
+#       `gh pr view <pr>` against the known PR number, never this finder.
+#   (b) prefer the `closingIssuesReferences` match over the `feat/N-` head-ref
+#       heuristic: the head-ref arm is a best-effort fallback for PRs whose
+#       Closes-link was dropped, but a branch *named* feat/N- that does NOT
+#       close N (a re-used branch) must never outrank a real closes-match. The
+#       jq below computes both maxes and takes `$byclose // $byhead`.
 #
 # ISSUE_NUM is digits-only validated BEFORE interpolation into the gh --jq
 # filter (R3 gh-argument-injection guard — the same int gate Phase 0 applies
@@ -872,33 +1009,41 @@ uberdev_goal_get_last_held_audit() {
 # so gh progress bytes cannot pollute the result. Empty stdout + rc 0 when no
 # PR exists yet — a not-yet-pushed solver must NOT read as an error. A gh
 # failure also yields empty (fail-open; the caller treats "no PR" as "keep
-# waiting", bounded by the per-issue solve-timeout).
+# waiting", bounded by the per-issue solve-timeout) BUT now ALSO records a
+# consecutive-failure tick (#290.3) so uberdev_goal_gh_failure_breaker_check
+# can fire gh_api_failed before the solve-timeout misattributes the outage as
+# "agent idle / no PR".
 uberdev_goal_find_pr_for_issue() {
   local n="$1"
   _uberdev_goal_validate_int "$n" || return 1
   # `any(.closingIssuesReferences[]?; .number == N)` is deliberate: a bare
   # `.closingIssuesReferences[]?.number == N` yields an EMPTY stream when the
-  # array is empty (a PR whose Closes-link was dropped), and `empty or X`
-  # collapses to empty in jq — silently discarding a row that the `feat/N-`
-  # head-ref arm would have matched. `any/2` returns a concrete `false` on an
-  # empty generator, so the `or` stays boolean and the head-ref fallback works.
+  # array is empty (a PR whose Closes-link was dropped). `any/2` returns a
+  # concrete `false` on an empty generator, so the select stays boolean. The
+  # input array is bound to `$prs` so both the closes-match and head-ref maxes
+  # read the SAME list (jq cannot reference the original input after the first
+  # `[...]` reduction).
   #
   # Capture gh's rc so a gh FAILURE (auth expiry, rate-limit 403, network) is
   # surfaced as a one-line breadcrumb rather than masquerading as "no PR yet"
   # (rc 0 + empty) — without it a transient gh outage stalls the goal until the
   # 150m solve-timeout with a MISattributed "agent idle" diagnostic. Still
-  # fail-open (return empty, rc 0) so the caller keeps waiting/re-polls; the
-  # breadcrumb only distinguishes the two empty cases in the operator's log.
+  # fail-open (return empty, rc 0) so the caller keeps waiting/re-polls.
   local out rc
-  out="$(gh pr list --state all --limit 200 \
+  out="$(gh pr list --state open --limit 200 \
     --json number,closingIssuesReferences,headRefName \
-    --jq "[.[] | select(any(.closingIssuesReferences[]?; .number == ${n}) or (.headRefName | test(\"^feat/${n}-\"))) | .number] | max // empty" \
+    --jq ". as \$prs
+          | ([\$prs[] | select(any(.closingIssuesReferences[]?; .number == ${n})) | .number] | max) as \$byclose
+          | ([\$prs[] | select(.headRefName | test(\"^feat/${n}-\")) | .number] | max) as \$byhead
+          | (\$byclose // \$byhead // empty)" \
     2>/dev/null)"
   rc=$?
   if [ "$rc" -ne 0 ]; then
     printf 'goal-state: gh pr list failed (rc=%s) resolving PR for issue %s; treating as no-PR-yet (will re-poll)\n' "$rc" "$n" >&2
+    _uberdev_goal_record_gh_failure                                # #290.3
     return 0
   fi
+  _uberdev_goal_reset_gh_failure                                   # #290.3 — gh healthy
   printf '%s' "$out"
 }
 
@@ -918,8 +1063,10 @@ uberdev_goal_pr_state_gh() {
   rc=$?
   if [ "$rc" -ne 0 ]; then
     printf 'goal-state: gh pr view failed (rc=%s) reading state for PR %s; treating as not-merged/not-closed (will re-poll)\n' "$rc" "$pr" >&2
+    _uberdev_goal_record_gh_failure                                # #290.3
     return 0
   fi
+  _uberdev_goal_reset_gh_failure                                   # #290.3 — gh healthy
   printf '%s' "$out"
 }
 
@@ -931,6 +1078,79 @@ uberdev_goal_pr_is_merged() {
   local pr="$1"
   _uberdev_goal_validate_int "$pr" || return 1
   [ "$(uberdev_goal_pr_state_gh "$pr")" = "MERGED" ]
+}
+
+# ---------------------------------------------------------------------------
+# Consecutive gh-failure breaker (#290.3 MAJOR).
+# The Phase-2a/2d polling helpers (find_pr_for_issue / pr_state_gh) fail OPEN
+# on a gh outage — the right call for a transient blip (just re-poll). But a
+# SUSTAINED outage left a solved-and-pushed issue to be abandoned to `failed`
+# after the 150m solve-timeout, or churned a merged PR, because gh_api_failed
+# only guarded the Phase-3 `gh issue list`. These helpers maintain a tiny
+# single-int counter keyed on UBERDEV_GOAL_ID: every helper failure bumps it,
+# every helper success resets it, and the breaker-check fires gh_api_failed
+# once the count crosses the threshold. The counter file lives alongside the
+# other per-goal state under $UBERDEV_TMPDIR and is best-effort (a write
+# failure must never crash the fail-open helper that called it — the goal still
+# rides the timeout as before, just without the early breaker).
+# ---------------------------------------------------------------------------
+
+# _uberdev_goal_gh_failure_counter_path  — internal path resolver. Empty
+# stdout (rc 1) when no valid UBERDEV_GOAL_ID is in scope (so callers no-op).
+_uberdev_goal_gh_failure_counter_path() {
+  local goal_id="${UBERDEV_GOAL_ID:-}"
+  _uberdev_goal_validate_id "$goal_id" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  printf '%s' "$tmpdir/goal-$goal_id-gh-failures.txt"
+}
+
+# _uberdev_goal_record_gh_failure  — bump the consecutive-failure counter.
+# Best-effort: never returns non-zero in a way that disturbs the fail-open
+# caller (a counter-write failure is logged once, the goal still re-polls).
+_uberdev_goal_record_gh_failure() {
+  local f; f="$(_uberdev_goal_gh_failure_counter_path)" || return 0
+  local cur=0
+  [ -r "$f" ] && cur="$(cat "$f" 2>/dev/null)"
+  _uberdev_goal_validate_int "$cur" || cur=0
+  printf '%s\n' "$(( cur + 1 ))" > "$f" 2>/dev/null || \
+    printf 'goal-state: could not record gh-failure tick (unwritable UBERDEV_TMPDIR?)\n' >&2
+  return 0
+}
+
+# _uberdev_goal_reset_gh_failure  — clear the counter after a healthy gh call.
+_uberdev_goal_reset_gh_failure() {
+  local f; f="$(_uberdev_goal_gh_failure_counter_path)" || return 0
+  # Only rewrite when a non-zero count is on disk — avoids a needless write
+  # (and its potential ENOSPC noise) on every healthy poll once the file is 0.
+  [ -r "$f" ] || return 0
+  local cur; cur="$(cat "$f" 2>/dev/null)"
+  [ "$cur" = "0" ] && return 0
+  printf '0\n' > "$f" 2>/dev/null || true
+  return 0
+}
+
+# uberdev_goal_gh_failure_breaker_check GOAL_ID [THRESHOLD]
+# rc 0 (FIRE) iff the consecutive gh-failure counter for GOAL_ID is >= THRESHOLD
+# (default _UBERDEV_GOAL_MAX_GH_FAILURES). On fire, emits ONE goal_circuit_breaker
+# audit event {"reason":"gh_api_failed","phase":"poll","consecutive_failures":N}
+# — mirrors uberdev_goal_barrier_breaker_check's shape so the watch loop can
+# treat both identically (print_summary + exit). rc 1 when under threshold or
+# the counter file is absent (no failures recorded yet). Pure read of the
+# counter file + one audit append; no gh calls.
+uberdev_goal_gh_failure_breaker_check() {
+  local goal_id="${1:?goal_id required}"
+  local threshold="${2:-${_UBERDEV_GOAL_MAX_GH_FAILURES:-5}}"
+  _uberdev_goal_validate_id "$goal_id" || return 1
+  _uberdev_goal_validate_int "$threshold" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  local f="$tmpdir/goal-$goal_id-gh-failures.txt"
+  [ -r "$f" ] || return 1
+  local count; count="$(cat "$f" 2>/dev/null)"
+  _uberdev_goal_validate_int "$count" || return 1
+  [ "$count" -ge "$threshold" ] || return 1
+  uberdev_goal_audit goal_circuit_breaker \
+    "$(printf '{"reason":"gh_api_failed","phase":"poll","consecutive_failures":%s}' "$count")"
+  return 0
 }
 
 # uberdev_goal_agent_busy_for_issue ISSUE_NUM   (issue #180)
@@ -1134,26 +1354,26 @@ _uberdev_goal_locked_marker_for_pr_fresh() {
   local pr="$1" grace="$2"
   _uberdev_goal_validate_int "$pr" || return 1
   _uberdev_goal_validate_int "$grace" || return 1
-  local now matched_mtime prefix marker_dir ctx mtime
+  local now matched_mtime marker_dir ctx mtime pr_match
   now="$(date +%s)"
   matched_mtime=0
   # R2 SSOT (issue #220 simplify pass): glob set read from
-  # _UBERDEV_GOAL_WORKTREE_PREFIXES so this and uberdev_goal_locate_review_pr_audit_by_pr
-  # cannot drift.
-  for prefix in "${_UBERDEV_GOAL_WORKTREE_PREFIXES[@]}"; do
-    for marker_dir in ${prefix}.uberdev/runs/*/; do
-      [ -d "$marker_dir" ] || continue
-      ctx="${marker_dir}pr-context.json"
-      [ -r "${marker_dir}locked" ] && [ -r "$ctx" ] || continue
-      _uberdev_dispatch_tmp_target_safe "$ctx" || continue
-      local pr_match
-      pr_match="$(jq -r --argjson pr "$pr" 'select(.pr == $pr) | .pr // empty' < "$ctx" 2>/dev/null)" || continue
-      [ "$pr_match" = "$pr" ] || continue
-      mtime="$(stat -c %Y "${marker_dir}locked" 2>/dev/null || stat -f %m "${marker_dir}locked" 2>/dev/null || echo 0)"
-      _uberdev_goal_validate_int "$mtime" || continue
-      [ "$mtime" -gt "$matched_mtime" ] && matched_mtime="$mtime"
-    done
-  done
+  # _UBERDEV_GOAL_WORKTREE_PREFIXES. #270/#290.2 cross-shell: route the dir-glob
+  # through _uberdev_goal_glob_worktree — the bare `${prefix}` glob silently
+  # matched no worktree mirror under the zsh Bash tool, so a /review-pr running
+  # in a worktree never registered as in-flight for the project-root poll loop
+  # (the exact gap AC ❶ was filed to close, latent under zsh until now).
+  while IFS= read -r marker_dir; do
+    [ -d "$marker_dir" ] || continue
+    ctx="${marker_dir}pr-context.json"
+    [ -r "${marker_dir}locked" ] && [ -r "$ctx" ] || continue
+    _uberdev_dispatch_tmp_target_safe "$ctx" || continue
+    pr_match="$(jq -r --argjson pr "$pr" 'select(.pr == $pr) | .pr // empty' < "$ctx" 2>/dev/null)" || continue
+    [ "$pr_match" = "$pr" ] || continue
+    mtime="$(stat -c %Y "${marker_dir}locked" 2>/dev/null || stat -f %m "${marker_dir}locked" 2>/dev/null || echo 0)"
+    _uberdev_goal_validate_int "$mtime" || continue
+    [ "$mtime" -gt "$matched_mtime" ] && matched_mtime="$mtime"
+  done < <(_uberdev_goal_glob_worktree ".uberdev/runs/*/")
   [ "$matched_mtime" -gt 0 ] || return 1
   [ "$(( now - matched_mtime ))" -lt "$grace" ]
 }
@@ -1188,6 +1408,22 @@ uberdev_goal_list_prs_in_state() {
 #        - `pr_parked` reason ∈ {refused, ambiguous, push-non-ff} -> conflict
 #        - `pr_parked` reason == test-fail-exhausted             -> hook_failed
 #        - no matching row                                       -> missing
+#
+# #290.2 (CRITICAL) — worktree-anchored audit read. /merge runs in its OWN
+# dispatched worktree (cwd = the merge agent's `solve-issue-<pr>` worktree per
+# lib/dispatch.sh), so it writes the `merge_executed` / `pr_parked` rows to
+# THAT worktree's relative `.uberdev/audit.jsonl`. The /goal watcher polls from
+# the project-root checkout, where the bare relative `.uberdev/audit.jsonl`
+# resolved to a DIFFERENT (often absent / stale) file. The gh-MERGED happy path
+# (tier 1) masks this, but on the conflict / hook-failed path tier 2 read the
+# wrong file → returned `missing` forever → the merge_failed breaker never fired
+# and the PR looped the 60m merge-timeout. Fix: scan the SAME worktree-mirror
+# glob set the verdict locator uses (_UBERDEV_GOAL_WORKTREE_PREFIXES), passing
+# every readable candidate to one `jq --slurp` in glob order — the empty
+# (cwd / project-root) prefix FIRST, the worktree mirrors AFTER, so the merge
+# agent worktree's row lands LAST and `last` (the existing, BT46-locked
+# line-order tiebreak) picks it over any stale project-root row. No `.ts`
+# dependency (BT46 fixtures carry none) — within-file selection stays line-order.
 uberdev_goal_read_merge_result() {
   local pr="$1"
   _uberdev_goal_validate_int "$pr" || return 1
@@ -1199,17 +1435,25 @@ uberdev_goal_read_merge_result() {
     printf 'success\n'; return 0
   fi
   # Tier 2 — local audit classifies failures for PRs that did not merge.
-  local audit=".uberdev/audit.jsonl"
-  [ -f "$audit" ] || { printf 'missing\n'; return 0; }
-  # Pick the LAST matching JSONL line (most recent). Use a single jq pass
-  # to project `event\treason` for the final matching row; gh_jq_or_jq's
-  # `-r` mode + file argument is the wrong tool here (audit.jsonl is JSONL,
-  # not a single JSON document), so call jq directly with `--slurp` to
-  # treat the stream as an array.
+  # #290.2 — collect every readable .uberdev/audit.jsonl across the worktree-
+  # mirror prefixes (empty prefix = project root, first; worktree mirrors after)
+  # via the cross-shell glob helper (the bare `${prefix}` glob does NOT expand
+  # under the zsh Bash tool — see _uberdev_goal_glob_worktree).
+  local candidate audit_files=()
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] && audit_files+=("$candidate")
+  done < <(_uberdev_goal_glob_worktree ".uberdev/audit.jsonl")
+  [ "${#audit_files[@]}" -gt 0 ] || { printf 'missing\n'; return 0; }
+  # Pick the LAST matching JSONL line (most recent) across all candidate files.
+  # jq --slurp concatenates the files into ONE array in argument order, so the
+  # cross-file ordering is glob order (cwd first, worktrees after) and `last`
+  # picks the merge agent worktree's row over a stale project-root row.
+  # gh_jq_or_jq's `-r` mode + single-file arg is the wrong tool here (audit.jsonl
+  # is JSONL, not one JSON document), so call jq directly with --slurp.
   local row
   row="$(jq -r --argjson pr "$pr" \
     '[.[] | select(.event=="merge_executed" or .event=="pr_parked") | select(.data.pr == $pr) | {event,reason:(.data.reason // "")}] | last | if . == null then "" else "\(.event)\t\(.reason)" end' \
-    --slurp "$audit" 2>/dev/null)"
+    --slurp "${audit_files[@]}" 2>/dev/null)"
   [ -n "$row" ] || { printf 'missing\n'; return 0; }
   local event="${row%%	*}" reason="${row#*	}"
   case "$event" in
@@ -1386,49 +1630,101 @@ uberdev_goal_batch_all_terminal() {
 }
 
 # uberdev_goal_batch_unblock_wait_clear GOAL_ID
-# rc 0 iff every HELD row has either NO unblock-issue OR (unblock-issue closed
-# AND PR-trust-label review-pr:green present). The unblock-issue id is inferred
-# from the PR body's `Blocks: #N` line (body capped at 64 KiB per R1/T1).
-# Pure read of label/issue state. Stale or 404 label/issue data is treated as
-# "still waiting" (rc 1) per spec B11 — never assume CLOSED on a gh failure.
+# rc 0 (barrier MAY proceed) iff NO HELD row is still actively waiting on an
+# OPEN blocking issue. A HELD row gates the barrier (rc 1, "keep waiting") ONLY
+# while at least one of its `Blocks: #N` issues is still OPEN — the legitimate
+# hold-and-unblock window (RFC 0005 §3.2.3), bounded by the 4h barrier breaker.
+# All other HELD rows are PSEUDO-TERMINAL and do NOT gate co-batched GREEN PRs:
+#   - NO Blocks: line                                  → permanent hold
+#   - ALL Blocks issues CLOSED + `uberdev-approved`    → re-review cleared it green
+#   - ALL Blocks issues CLOSED + no `uberdev-approved` → re-review fired but did
+#     not produce GREEN (PR stays held) → permanent hold
+# The unblock-issue ids come from the PR body's `Blocks: #N` lines (body capped
+# at 64 KiB per R1/T1). Pure read of label/issue state.
+#
+# #289.1 (BLOCKER) — the gate previously required the label `review-pr:green`,
+# which has ZERO producers (/review-pr emits `uberdev-approved` /
+# `uberdev-approved-with-concerns`, never `review-pr:green` — see
+# commands/review-pr.md:895). So a HELD row whose blocker CLOSED but which stayed
+# held returned rc 1 FOREVER, blocking every co-batched GREEN PR until the 4h
+# stuck_loop and defeating the core hold-and-unblock feature. Fix: gate on the
+# label /review-pr actually writes (`uberdev-approved`), and treat a held PR
+# whose blockers all closed as pseudo-terminal (it no longer gates) regardless
+# of whether the re-review went green — consistent with the Phase-3 convergence
+# calculus where both held states are terminal.
+#
+# #289.3 (MAJOR) — collect and require ALL `Blocks:` issues (the prior loop
+# `break`-ed after the FIRST match while _uberdev_goal_check_unblock requires
+# ALL closed; a >1-blocker held PR could unblock the barrier prematurely or
+# wedge). Mirror check_unblock's all-closed loop, including its 404→CLOSED /
+# other-gh-error→wait classification (spec B11: never assume CLOSED on a gh
+# failure).
 uberdev_goal_batch_unblock_wait_clear() {
   local goal_id="$1"
   _uberdev_goal_validate_id "$goal_id" || return 1
   local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
   local tsv="$tmpdir/goal-$goal_id-batch-prs.tsv"
   [ -r "$tsv" ] && [ -s "$tsv" ] || return 0   # empty registry → trivially clear
-  local pr issue _ts state line
+  # #270 cross-shell: ALL locals declared ONCE at function scope. Re-running
+  # `local var` (no value) inside the per-row loop ECHOES `var=<value>` to
+  # stdout under zsh (= `typeset var` on an existing var), which polluted this
+  # function's stdout from the 2nd HELD row onward. Declaring up front + bare
+  # assignment inside the loop keeps stdout clean in bash AND zsh.
+  local pr issue _ts state line body n any_open i issue_state issue_raw issue_rc has_approved
+  local blocking=()
   while IFS=$'\t' read -r pr issue _ts state; do
     [ -n "$state" ] || continue
     [ "$state" = "HELD" ] || continue
-    # Fetch PR body (capped at 64 KiB) and look for Blocks: #N.
+    # Fetch PR body (capped at 64 KiB) and collect ALL Blocks: #N issues.
     # F17 simplify-lens: reuse the centralized helpers
     # _uberdev_goal_fetch_pr_body + _uberdev_goal_parse_blocks_line (same
     # primitives used by sibling _uberdev_goal_check_unblock); the cap +
-    # ReDoS-safe anchored regex + numeric re-validation now flow from a
-    # single source of truth.
-    local body blocking_issue n
+    # ReDoS-safe anchored regex + numeric re-validation flow from one source.
+    blocking=()                              # reset per HELD row
     body="$(_uberdev_goal_fetch_pr_body "$pr")"
-    blocking_issue=""
     while IFS= read -r line; do
       n="$(_uberdev_goal_parse_blocks_line "$line")"
-      if [ -n "$n" ]; then
-        blocking_issue="$n"
-        break
-      fi
+      [ -n "$n" ] && blocking+=("$n")
     done <<< "$body"
-    # No unblock-issue → this HELD PR doesn't gate the barrier.
-    [ -n "$blocking_issue" ] || continue
-    # Verify issue is CLOSED.
-    local issue_state
-    issue_state="$(gh issue view "$blocking_issue" --json state --jq .state 2>/dev/null)" || return 1
-    [ "$issue_state" = "CLOSED" ] || return 1
-    # Verify trust label review-pr:green is present. In-process jq filter
-    # (length on a select-filtered array) avoids the post-jq `grep -c` fork
-    # and eliminates the pipeline-pollution surface (per /merge memory).
-    local has_green
-    has_green="$(gh pr view "$pr" --json labels --jq '[.labels[].name | select(. == "review-pr:green")] | length' 2>/dev/null || true)"
-    [ "${has_green:-0}" -ge 1 ] || return 1
+    # No unblock-issue → permanent hold → pseudo-terminal (doesn't gate).
+    [ "${#blocking[@]}" -gt 0 ] || continue
+    # Are ALL blocking issues CLOSED? (mirror _uberdev_goal_check_unblock — #289.3)
+    # any_open=1 means at least one blocker is still OPEN → genuine wait window.
+    # A gh failure other than 404 → wait (rc 1; B11 — never assume CLOSED).
+    any_open=0
+    for i in "${blocking[@]}"; do
+      issue_raw="$(gh issue view "$i" --json state --jq '.state' 2>&1)"
+      issue_rc=$?
+      if [ "$issue_rc" -ne 0 ]; then
+        if printf '%s' "$issue_raw" | grep -q 'Could not resolve to an Issue'; then
+          issue_state="CLOSED"   # 404 → deleted upstream → treat as closed
+        else
+          return 1               # transient gh error → keep waiting (B11)
+        fi
+      else
+        issue_state="$issue_raw"
+      fi
+      if [ "$issue_state" != "CLOSED" ]; then any_open=1; break; fi
+    done
+    # At least one blocker still OPEN → this held PR is in its legitimate
+    # hold-and-unblock wait window → gate the barrier.
+    [ "$any_open" = "0" ] || return 1
+    # All blockers CLOSED → pseudo-terminal regardless of re-review outcome
+    # (#289.1). Read the trust label /review-pr actually writes
+    # (`uberdev-approved` — NOT the zero-producer `review-pr:green`) purely to
+    # classify the breadcrumb: present ⇒ the re-review cleared it green; absent
+    # ⇒ the re-review fired but did not produce green and the PR stays held. In
+    # BOTH cases the row is pseudo-terminal and `continue`s — it does NOT gate
+    # co-batched GREEN PRs (the #289.1 anti-deadlock fix; #289.2's sequential
+    # green-PR merge loop serializes any version bumps so an early-merging
+    # GREEN PR cannot collide with a freshly-cleared held PR).
+    has_approved="$(gh pr view "$pr" --json labels \
+      --jq '[.labels[].name | select(. == "uberdev-approved")] | length' 2>/dev/null || true)"
+    if [ "${has_approved:-0}" -ge 1 ]; then
+      : # cleared green via re-review — no longer gates
+    else
+      printf 'goal-state: held PR %s has all Blocks closed but no uberdev-approved label (stays held, pseudo-terminal — not gating barrier)\n' "$pr" >&2
+    fi
   done < "$tsv"
   return 0
 }
@@ -1673,6 +1969,103 @@ _uberdev_goal_check_unblock() {
   fi
 }
 
+# uberdev_goal_detect_blocks_cycle GOAL_ID   (issue #292.1)
+# rc 0 (CYCLE FOUND) + echo the cycle's PR numbers CSV on stdout iff the
+# Blocks: dependency graph over the batch's HELD PRs contains a cycle (an SCC of
+# size ≥1 including a self-loop); rc 1 + empty stdout when the graph is acyclic.
+#
+# WHY: _uberdev_goal_check_unblock re-reviews a held PR only when ALL its
+# `Blocks: #N` issues are CLOSED, with NO cycle guard. A-blocks-B + B-blocks-A
+# (A held on an issue that only B's merge closes, and vice-versa) → neither
+# issue ever closes → both held PRs spin to the 4h stuck_loop with no diagnostic
+# naming the deadlock. RFC §4.3 claims "arbitrary depth" but only handles
+# ACYCLIC chains (the dependency graph had no SCC guard). This detector lets the
+# watch loop surface a distinct halt + print_summary row instead of riding the
+# wall-clock cap.
+#
+# Graph: nodes = HELD PRs. Edge P→Q iff P's body carries `Blocks: #N` and issue
+# N is closed by Q (Q's merge closes N — resolved via uberdev_goal_find_pr_for_issue,
+# i.e. the OPEN PR whose closingIssuesReferences include N) AND Q is itself a
+# HELD PR in this batch. A cycle over these edges is a merge deadlock.
+#
+# Cross-shell (#270): indexed arrays + newline-delimited string sets only — NO
+# associative arrays (bash `declare -A` / zsh `typeset -A` diverge in key
+# enumeration and would reintroduce the dual-shell fragility class). Reachability
+# is computed by fixpoint closure; the held-PR set is batch-bounded (small), so
+# the O(V·E) closure is cheap. Best-effort on gh failure: an unresolved edge is
+# simply omitted (a transient gh outage must not fabricate or hide a cycle — the
+# next poll re-evaluates).
+uberdev_goal_detect_blocks_cycle() {
+  local goal_id="$1"
+  _uberdev_goal_validate_id "$goal_id" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  local tsv="$tmpdir/goal-$goal_id-batch-prs.tsv"
+  [ -r "$tsv" ] && [ -s "$tsv" ] || return 1
+  # 1) Collect HELD PRs.
+  local held=() _pr _issue _ts state
+  while IFS=$'\t' read -r _pr _issue _ts state; do
+    [ "$state" = "HELD" ] || continue
+    _uberdev_goal_validate_int "$_pr" || continue
+    held+=("$_pr")
+  done < "$tsv"
+  [ "${#held[@]}" -gt 0 ] || return 1
+  # Held-set membership probe (newline-delimited; grep -xF exact-line match).
+  local held_set; held_set="$(printf '%s\n' "${held[@]}")"
+  # 2) Build edges P<TAB>Q into a newline-delimited string set.
+  local edges="" p body line n q
+  for p in "${held[@]}"; do
+    body="$(_uberdev_goal_fetch_pr_body "$p")"
+    [ -n "$body" ] || continue
+    while IFS= read -r line; do
+      n="$(_uberdev_goal_parse_blocks_line "$line")"
+      [ -n "$n" ] || continue
+      q="$(uberdev_goal_find_pr_for_issue "$n" 2>/dev/null)"
+      [ -n "$q" ] || continue
+      _uberdev_goal_validate_int "$q" || continue
+      # Q must be a HELD PR in this batch for the edge to matter.
+      printf '%s\n' "$held_set" | grep -qxF "$q" || continue
+      edges="${edges}${p}	${q}
+"
+    done <<< "$body"
+  done
+  [ -n "$edges" ] || return 1
+  # 3) Reachability closure via fixpoint. `reach` holds "FROM<TAB>TO" pairs.
+  # Seed with the direct edges, then repeatedly compose reach∘edges until no
+  # new pair is added. A self-pair "X<TAB>X" anywhere means X lies on a cycle.
+  # #270 cross-shell: declare `pair` ONCE at function scope, never re-`local`
+  # inside the loop — under zsh, `local var` (= `typeset var`) on an
+  # already-declared var ECHOES `var=<value>` to stdout, which polluted the
+  # function's stdout (the cycle CSV) when run under the zsh Bash tool. Hoisting
+  # the declaration and assigning with a bare `printf -v` keeps stdout clean in
+  # both shells.
+  local reach="$edges" changed=1 a b c re_from re_to pair
+  while [ "$changed" = "1" ]; do
+    changed=0
+    # For each reachable pair (a,b) and each edge (b,c), try to add (a,c).
+    while IFS=$'\t' read -r a b; do
+      [ -n "$a" ] && [ -n "$b" ] || continue
+      while IFS=$'\t' read -r re_from re_to; do
+        [ "$re_from" = "$b" ] || continue
+        c="$re_to"
+        printf -v pair '%s\t%s' "$a" "$c"
+        if ! printf '%s' "$reach" | grep -qxF "$pair"; then
+          reach="${reach}${pair}
+"
+          changed=1
+        fi
+      done <<< "$edges"
+    done <<< "$reach"
+  done
+  # 4) Any self-pair X<TAB>X ⇒ X is on a cycle. Collect distinct such PRs.
+  local cycle_prs
+  cycle_prs="$(printf '%s' "$reach" \
+    | awk -F'\t' '$1!="" && $1==$2 && !seen[$1]++ {print $1}' \
+    | sort -n | paste -sd, -)"
+  [ -n "$cycle_prs" ] || return 1
+  printf '%s\n' "$cycle_prs"
+  return 0
+}
+
 # _uberdev_goal_set_batch_terminal_state GOAL_ID PR STATE
 # Rewrite the PR's row in goal-<id>-batch-prs.tsv with the new terminal_state.
 # Atomic-write via _uberdev_dispatch_prepare_tmp_target + mktemp + mv -f
@@ -1680,12 +2073,22 @@ _uberdev_goal_check_unblock() {
 # unknown PR — that would let a typo masquerade as a state change.
 # rc 0 on success; rc 1 validation / PR-not-in-registry; rc 3 atomic-write;
 # rc 4 missing dispatch lib.
+#
+# #289.2 — MERGING is a NON-terminal sentinel (NOT in uberdev_goal_batch_all_terminal's
+# terminal set, NOT in _uberdev_goal_batch_green_prs_ordered's GREEN filter). Phase 2c
+# sets it on the lowest green PR the instant /merge is dispatched, so (a) that PR drops
+# out of the green-ordered list and (b) batch_all_terminal goes rc 1 — which makes the
+# Phase-2c barrier gate FALSE and blocks any further /merge dispatch until Phase 2d
+# drives the in-flight PR to MERGED. That cross-pass interlock (paired with the in-pass
+# `break`) is what serializes version-bump merges: a second manifest-touching PR can
+# never be dispatched while the first is still landing, so two PRs can no longer both
+# land vN+1 and have git silently eat the second bump (project_uberdev_merge_version_collision).
 _uberdev_goal_set_batch_terminal_state() {
   local goal_id="$1" pr="$2" state="$3"
   _uberdev_goal_validate_id  "$goal_id" || return 1
   _uberdev_goal_validate_int "$pr"      || return 1
   case "$state" in
-    GREEN|HELD|MERGE_FAILED|MERGED|PENDING) : ;;
+    GREEN|HELD|MERGE_FAILED|MERGED|PENDING|MERGING) : ;;
     *) printf 'goal-state: invalid batch terminal state: %s\n' "$state" >&2; return 1 ;;
   esac
   if ! command -v _uberdev_dispatch_prepare_tmp_target >/dev/null 2>&1; then

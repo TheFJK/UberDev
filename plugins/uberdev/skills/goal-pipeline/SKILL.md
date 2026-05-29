@@ -672,6 +672,21 @@ while true; do
     fi
   done
 
+  # #290.3 — sustained-gh-outage breaker. find_pr_for_issue / pr_state_gh fail
+  # OPEN on a gh error (so a transient blip just re-polls), but each failure now
+  # ticks a consecutive-failure counter that any success resets. After
+  # _UBERDEV_GOAL_MAX_GH_FAILURES consecutive failures the breaker fires
+  # gh_api_failed — so a rate-limit / auth / network window that would otherwise
+  # ride the 150m solve-timeout to a FALSE `failed` (or churn a merged PR) halts
+  # the goal loudly instead. (gh_api_failed previously guarded only Phase 3's
+  # `gh issue list`.) print_summary + exit on fire, mirroring the wall-clock
+  # barrier breaker.
+  if uberdev_goal_gh_failure_breaker_check "$GOAL_ID"; then
+    _uberdev_goal_reap_zombies || true
+    print_summary "$cycle"
+    exit 1
+  fi
+
   # 2b. Read the leaf /review-pr verdict for PRs in pushed-reviewing (file-based
   # verdict locator + trust signal — the unchanged, version-independent contract).
   # TIME-GRACED (issue #180): the leaf solver runs its OWN /review-pr ~20m after
@@ -781,17 +796,23 @@ while true; do
     esac
   done
 
-  # 2c. Barrier-gated merge dispatch (issue #211).
+  # 2c. Barrier-gated merge dispatch (issue #211; barrier semantics #289).
   # The previous per-PR `if green; then /merge` body is replaced by a two-
   # predicate gate: ONLY dispatch /merge once (a) every PR in the batch is in
   # a terminal state (GREEN | HELD | MERGE_FAILED | MERGED — barrier-terminal,
-  # NOT to be confused with the convergence-terminal set) AND (b) the unblock
-  # wait is clear (every blocking issue closed AND every blocked PR carries a
-  # `review-pr:green` trust label). Until both predicates hold the per-cycle
-  # batch sits at the merge barrier — preventing the multi-PR version-bump
-  # collision (the user_workflow_todo_queue memory + project_uberdev_goal_
-  # version_bump_collision capture). Sequential, PR-asc merge plus a
-  # collision-chain rebase keeps the manifest-touching PRs serialized.
+  # NOT to be confused with the convergence-terminal set; MERGING is the
+  # NON-terminal in-flight sentinel from #289.2) AND (b) the unblock wait is
+  # clear. #289.1/#289.3: a HELD row gates the barrier ONLY while at least one
+  # of its `Blocks: #N` issues is still OPEN (the legitimate hold-and-unblock
+  # window); once ALL its blockers close it is PSEUDO-TERMINAL and no longer
+  # gates co-batched GREEN PRs — whether or not the re-review cleared it green
+  # (detected via the `uberdev-approved` label /review-pr actually writes, NOT
+  # the zero-producer `review-pr:green`). Until both predicates hold the
+  # per-cycle batch sits at the merge barrier — preventing the multi-PR
+  # version-bump collision (the user_workflow_todo_queue memory +
+  # project_uberdev_goal_version_bump_collision capture). #289.2: STRICT
+  # lowest-first single-dispatch + the MERGING interlock keep the
+  # manifest-touching PRs serialized (at most one merge in flight).
   #
   # B2 — only transition to `merging` on dispatch rc=0; a failed dispatch
   # (mktemp/prompt-write/session-refuse) leaves the PR in `green` for a
@@ -822,57 +843,91 @@ while true; do
 
   if uberdev_goal_batch_all_terminal "$GOAL_ID" && \
      uberdev_goal_batch_unblock_wait_clear "$GOAL_ID"; then
-    # Both predicates clear — dispatch /merge for GREEN PRs in PR-number-
-    # ascending order. The collision-chain rebase forces a fresh main pull
-    # after each successful merge so the next PR in the chain rebases onto
-    # the just-landed commit before its own merge attempt. This is what
-    # serializes manifest-touching PRs (CHANGELOG.md, plugin.json,
-    # marketplace.json, README.md) — without it, parallel version-bump PRs
-    # silently auto-merge to the SAME vN+1 and the second PR's bump is
-    # eaten by git's identical-change auto-resolution (the
-    # project_uberdev_merge_version_collision memory).
-    for pr in $(_uberdev_goal_batch_green_prs_ordered "$GOAL_ID"); do
+    # #289.2 (BLOCKER) — STRICTLY SERIALIZE version-bump merges. The prior loop
+    # dispatched /merge for ALL green PRs in one async pass (each
+    # _uberdev_goal_dispatch_merge → claude --bg returns immediately); the
+    # collision-chain ran between dispatches but only fetched main + audited —
+    # it never WAITED for the prior merge to land and never renumbered. So two
+    # version-bump PRs both landed vN+1 and git silently ate the second bump
+    # (project_uberdev_merge_version_collision).
+    #
+    # Fix: handle ONLY the lowest green PR per pass, then `break`. The instant
+    # we dispatch its /merge we flip its batch row to MERGING (a non-terminal
+    # sentinel — #289.2 in goal-state.sh). That makes uberdev_goal_batch_all_terminal
+    # rc 1 on every subsequent pass, so the Phase-2c gate above stays FALSE and
+    # NO further /merge can be dispatched until Phase 2d drives this PR to
+    # MERGED. Only then does batch_all_terminal clear again and the NEXT-lowest
+    # green PR — now rebased onto the just-landed vN+1 main, re-reviewed, and
+    # renumbered to vN+2 by its own /merge — become eligible. The in-pass
+    # `break` + the cross-pass MERGING interlock together guarantee at most one
+    # manifest-touching merge is ever in flight.
+    pr="$(_uberdev_goal_batch_green_prs_ordered "$GOAL_ID" | head -n 1)"
+    if [ -n "$pr" ]; then
       if uberdev_goal_pr_is_merged "$pr"; then
         # Resume / human-merged — finalize via step 2d without re-dispatching
-        # /merge against an already-landed PR.
+        # /merge against an already-landed PR. Flip the batch row to MERGING so
+        # the barrier stays closed until 2d records MERGED.
         uberdev_goal_pr_state_transition "$GOAL_ID" "$pr" green merging
+        _uberdev_goal_set_batch_terminal_state "$GOAL_ID" "$pr" MERGING \
+          || printf 'goal: set_batch_terminal_state(MERGING) failed for PR=%s (rc=%s); barrier may not serialize\n' "$pr" "$?" >&2
         any_active=1
-        continue
-      fi
       # Phase 2c in-flight gate (issue #220, Component 3.3) — never dispatch
-      # /merge while the same PR has a /review-pr still in flight; defer one
-      # poll tick. Emits goal_merge_deferred so the audit reflects the back-off.
-      #
-      # B2 (post-impl-review): set any_active=1 BEFORE continue (mirrors the
-      # symmetric Phase 2b in-flight branch which sets it before emitting
-      # goal_review_pr_deferred). Without this, an entire batch deferred by
-      # in-flight /review-pr leaves any_active=0 and the watch loop terminates
-      # with a spurious queue_empty_not_converged breaker fire.
-      if uberdev_goal_review_pr_in_flight "$pr"; then
+      # /merge while the lowest green PR still has a /review-pr in flight. Defer
+      # the WHOLE merge step one poll tick (do NOT skip ahead to a higher PR —
+      # that would let a higher-numbered version bump land before the lower one,
+      # reintroducing the collision). Emits goal_merge_deferred for the audit.
+      elif uberdev_goal_review_pr_in_flight "$pr"; then
         any_active=1
         uberdev_goal_audit goal_merge_deferred \
           "{\"goal_id\":\"$GOAL_ID\",\"pr\":$pr,\"reason\":\"review_in_flight\",\"in_flight_count\":1}"
-        continue   # next poll tick re-checks
-      fi
-      if uberdev_goal_should_automerge "$GOAL_ID" "$pr"; then
+      elif uberdev_goal_should_automerge "$GOAL_ID" "$pr"; then
         if _uberdev_goal_dispatch_merge "$pr"; then
           uberdev_goal_pr_state_transition "$GOAL_ID" "$pr" green merging
-          # Force-refresh main + rebase any remaining batch PRs that share
-          # manifest paths so the next iteration's merge sees the just-landed
-          # commit (collision-chain serialization, R5).
-          # Helper contract is "rc 0 always" (see docstring at goal-state.sh:1238);
-          # no `||` fallback needed — best-effort collision detection never halts.
+          # Flip to the MERGING sentinel BEFORE the collision-chain so the very
+          # next batch_all_terminal read (this PR no longer GREEN/terminal)
+          # blocks re-entry — the cross-pass half of the serialization.
+          _uberdev_goal_set_batch_terminal_state "$GOAL_ID" "$pr" MERGING \
+            || printf 'goal: set_batch_terminal_state(MERGING) failed for PR=%s (rc=%s); barrier may not serialize\n' "$pr" "$?" >&2
+          # Force-refresh main + flag any remaining green batch PRs that share
+          # manifest paths so the NEXT pass's /merge dispatch rebases onto the
+          # just-landed commit and renumbers its bump (collision-chain, R5).
+          # Helper contract is "rc 0 always"; no `||` fallback needed.
           _uberdev_goal_rebase_collision_chain "$GOAL_ID" "$pr"
+          any_active=1
         else
           printf 'goal-pipeline: _uberdev_goal_dispatch_merge failed for PR %s; staying in green for next-cycle retry\n' \
             "$pr" >&2
           any_active=1
         fi
       fi
-    done
+      # No loop: exactly one green PR is acted on per pass (strict
+      # lowest-first serialization, #289.2). The rest wait behind the MERGING
+      # interlock until this one reaches MERGED in step 2d.
+    fi
   else
     # Barrier NOT clear yet — at least one PR is PENDING or the unblock-wait
-    # has unresolved blockers. Check the wall-clock circuit breaker against
+    # has unresolved blockers.
+    #
+    # #292.1 — mutual-Blocks DEADLOCK guard, checked BEFORE the wall-clock
+    # cap. _uberdev_goal_check_unblock only re-reviews a held PR when ALL its
+    # Blocks: issues close, with no cycle detection: A-blocks-B + B-blocks-A
+    # would otherwise spin both held PRs to the 4h stuck_loop with no
+    # diagnostic naming the cycle. uberdev_goal_detect_blocks_cycle finds an
+    # SCC over the Blocks: edges across the batch's held PRs; on a hit, halt
+    # NOW with a distinct stuck_loop/phase=blocks_cycle row + the cycle PR set
+    # (D5 keeps GOAL_CIRCUIT_BREAKER_REASONS closed — the phase subfield
+    # distinguishes this, mirroring phase=merge_barrier).
+    cycle_prs="$(uberdev_goal_detect_blocks_cycle "$GOAL_ID")"
+    if [ -n "$cycle_prs" ]; then
+      uberdev_goal_audit goal_circuit_breaker \
+        "$(printf '{"reason":"stuck_loop","phase":"blocks_cycle","cycle_prs":"%s"}' "$cycle_prs")"
+      printf 'goal-pipeline: HALT — mutual Blocks: dependency cycle among held PRs (%s); no PR in the cycle can ever unblock\n' \
+        "$cycle_prs" >&2
+      _uberdev_goal_reap_zombies || true
+      print_summary "$cycle"
+      exit 1
+    fi
+    # Check the wall-clock circuit breaker against
     # BARRIER_TIMEOUT_S (default 4h, configurable via --barrier-timeout=N /
     # UBERDEV_GOAL_BARRIER_TIMEOUT_S / goal.barrier_timeout_s). The reason
     # field reuses the existing stuck_loop enum — D5 keeps GOAL_CIRCUIT_
@@ -1012,6 +1067,17 @@ while true; do
       green)
         uberdev_goal_pr_state_transition "$GOAL_ID" "$held_pr" "$held_current" green
         uberdev_goal_record_held_audit "$GOAL_ID" "$held_pr" "$new_audit"
+        # #292.2 — reset the per-PR merge-attempt counter on this held→green
+        # recovery. The cap (uberdev_goal_should_automerge, default 3) is
+        # otherwise per-PR-LIFETIME and never reset, so a PR blocked for ≥2
+        # cycles can hit the cap from transient merge stalls accumulated across
+        # its hold and never auto-merge again (stalling into
+        # queue_empty_not_converged with a GREEN-but-unmergeable PR). Scoping
+        # the cap to the PR's CURRENT green lifetime fixes that. Best-effort:
+        # a counter-reset write failure must not block the recovery transition.
+        uberdev_goal_reset_merge_attempts "$GOAL_ID" "$held_pr" \
+          || printf 'goal: reset_merge_attempts failed for PR=%s (rc=%s); merge cap may not reset\n' \
+             "$held_pr" "$?" >&2
         # #211 — update the batch registry so the next pass's step 2c
         # barrier sees this PR as GREEN (terminal-for-barrier) instead of
         # PENDING/HELD. Without this, a held→green transition is invisible

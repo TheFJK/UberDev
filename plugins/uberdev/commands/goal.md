@@ -26,9 +26,12 @@ Autonomous convergence orchestrator that drives one or more GitHub issues to mer
 Instead, `/goal` holds until every PR in the cycle's batch is in a terminal state
 (`merged`, `merge-failed`, `yellow-held`, `red-held`, or `green`). PRs touching shared
 mutable manifests (e.g. the uberdev version-bump triplet) merge sequentially in
-PR-number-ascending order, with `git fetch origin main` + rebase between each. When a
-held PR's `review-pr-finding` unblock-issue is in flight, the barrier holds until the
-unblock-issue closes AND the held PR's trust-trail label transitions to `review-pr:green`.
+PR-number-ascending order: exactly ONE merge is dispatched at a time and the next
+green PR becomes eligible only after the prior one lands (a `git fetch origin main`
++ rebase happens between each). A held PR holds the barrier only while one of its
+`Blocks: #N` unblock-issues is still open; once all its blockers close it becomes
+pseudo-terminal and stops gating the other PRs (its re-review either cleared it
+green — detected via the `uberdev-approved` trust-trail label — or it stays held).
 A wall-clock cap (default 4h, see `--barrier-timeout=N`) escalates a stuck barrier to
 `stuck_loop` halt.
 
