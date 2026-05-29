@@ -177,13 +177,13 @@ Backend-independent — the pipeline is bash and must run under Git Bash on nati
 | `plugins/uberdev/skills/using-uberdev/SKILL.md` | MOD — document the `dispatch_backend:` config key. |
 | `tests/dispatch-claude-bg.test.sh` | MOD — re-anchor for the extract-to-`lib/dispatch.sh` move. |
 | `.github/workflows/test.yml` | MOD — add a `windows-latest` job running the suite under Git Bash. |
-| `README.md` / `CHANGELOG.md` / `.claude-plugin/marketplace.json` / `plugins/uberdev/.claude-plugin/plugin.json` | MOD — version bump `0.28.0 → 0.29.0`. |
+| `README.md` / `CHANGELOG.md` / `.claude-plugin/marketplace.json` / `plugins/uberdev/.claude-plugin/plugin.json` | MOD — version bump `0.29.0 → 0.30.0`. |
 
 **Testing strategy.** Shape-check bash tests mirroring `dispatch-claude-bg.test.sh`'s `assert_grep`/`assert_grep_not` style. `dispatch-wezterm.test.sh`: `wezterm cli spawn` + `--domain-name` present, the mux-preflight `list-clients` poll present, `.wezterm.lua` managed-block + `exit_behavior` Hold present, `claude --bg` **absent** from the wezterm arm. `dispatch-background.test.sh`: `git worktree add` + detached `claude -p` + `nohup`/`disown` + status-file writes present, `claude --bg` **absent**. `dispatch-fallback.test.sh`: the per-OS preference order, the WSL2 same-OS guard, and single-resolution (no mid-fanout switch). `.github/workflows/test.yml` gains a `windows-latest` job (`shell: bash`) — proving the shape-check harness is Git-Bash-portable; runtime dispatch validation stays out of scope (the suite is grep-and-assert throughout).
 
 ## 5. Migration / rollout
 
-Per the project `CLAUDE.md` "bump version EVERYWHERE" mandate, this is a user-facing feature → a **minor** bump `0.28.0 → 0.29.0` across all six locations: `plugin.json`, `marketplace.json`, the `README.md` badge, a `CHANGELOG.md` `## [0.29.0]` section, the git tag `v0.29.0`, and the GitHub Release.
+Per the project `CLAUDE.md` "bump version EVERYWHERE" mandate, this is a user-facing feature → a **minor** bump `0.29.0 → 0.30.0` across all six locations: `plugin.json`, `marketplace.json`, the `README.md` badge, a `CHANGELOG.md` `## [0.30.0]` section, the git tag `v0.30.0`, and the GitHub Release.
 
 **Additive and backward-compatible.** `auto` resolves to `claude-bg` on macOS, so existing macOS users see **no behaviour change**. Windows users gain working `/solve` and `/turbo`. Implementation may split into two PRs — PR1: pipeline hardening + `lib/dispatch.sh` scaffold + `claude-bg` extract + `background` backend + Windows CI; PR2: the `wezterm` backend — `write-plan` will wave-decompose.
 
@@ -218,7 +218,7 @@ None. The Windows-support strategy, the three-backend set, the fallback chain, a
 - **Risk: WezTerm cold-start race.** *Mitigation:* §3.6 mandates the `list-clients` poll before the first spawn.
 - **Risk: `background` agents are unmonitorable if PID/log files are lost.** *Mitigation:* per-issue namespaced status files; the Step 6 summary prints their paths; the worktree + branch persist regardless.
 - **Risk: Windows `claude --bg` regresses again.** *Mitigation:* it is not in the Windows `auto` chain — `background` is; `claude-bg` on Windows is opt-in only (D8).
-- **Rollback:** additive. Reverting `lib/dispatch.sh` + the SKILL.md Step 5b' hunk + the new flag restores the v0.28.0 inline `claude --bg` dispatch with zero data migration.
+- **Rollback:** additive. Reverting `lib/dispatch.sh` + the SKILL.md Step 5b' hunk + the new flag restores the v0.29.0 inline `claude --bg` dispatch with zero data migration.
 
 ## 9. Decision log
 

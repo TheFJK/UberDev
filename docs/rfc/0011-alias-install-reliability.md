@@ -1,11 +1,11 @@
-# RFC 0004 — Alias-Install Reliability
+# RFC 0011 — Alias-Install Reliability
 
 | Field          | Value                                                                                                                                                                                                                                       |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Status**     | Draft (2026-05-19 — awaiting implementation)                                                                                                                                                                                                 |
 | **Author**     | TheFJK                                                                                                                                                                                                                                       |
 | **Created**    | 2026-05-19                                                                                                                                                                                                                                   |
-| **Targets**    | NEW: `docs/rfc/0004-alias-install-reliability.md`. MODIFIED: `plugins/uberdev/lib/aliases-sync.sh`, `plugins/uberdev/hooks/session-start`, `tests/aliases.test.sh`, `tests/solve-claim.test.sh`, `README.md`, `CHANGELOG.md`, `.claude-plugin/marketplace.json`, `plugins/uberdev/.claude-plugin/plugin.json` |
+| **Targets**    | NEW: `docs/rfc/0011-alias-install-reliability.md`. MODIFIED: `plugins/uberdev/lib/aliases-sync.sh`, `plugins/uberdev/hooks/session-start`, `tests/aliases.test.sh`, `tests/solve-claim.test.sh`, `README.md`, `CHANGELOG.md`, `.claude-plugin/marketplace.json`, `plugins/uberdev/.claude-plugin/plugin.json` |
 | **Supersedes** | —                                                                                                                                                                                                                                            |
 | **Builds on**  | Issue #21 (auto-alias sync via the `SessionStart` hook) — this RFC hardens that mechanism, it does not replace it.                                                                                                                            |
 | **Tracking**   | none — ad-hoc design (reliability hardening, not an issue resolution)                                                                                                                                                                        |
@@ -92,7 +92,7 @@ The comment at `session-start:45-46` still enumerates only five of the seven ali
 
 | File                                          | Change                                                                                                                |
 | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `docs/rfc/0004-alias-install-reliability.md`  | NEW — this RFC.                                                                                                       |
+| `docs/rfc/0011-alias-install-reliability.md`  | NEW — this RFC.                                                                                                       |
 | `plugins/uberdev/lib/aliases-sync.sh`         | MOD — add `_aliases_read_version()`; remove the `jq` gate; build and export `UBERDEV_ALIAS_NOTICE`.                   |
 | `plugins/uberdev/hooks/session-start`         | MOD — move alias-sync above the `jq` guard; inject the notice (jq-present path); emit the constant jq-missing notice; fix the stale five-of-seven comment. |
 | `tests/aliases.test.sh`                       | MOD — new cases: version-read parity, notice composition, jq-masked install, notice surfaced on collision and on first run. |

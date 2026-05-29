@@ -7,11 +7,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# ── auto-alias sync (issue #21; RFC 0004) ────────────────────────────
+# ── auto-alias sync (issue #21; RFC 0011) ────────────────────────────
 # Install / refresh the seven top-level forwarders (/issue, /solve, /turbo,
 # /simplify, /review-pr, /merge, /dev) in ~/.claude/commands. This runs
 # BEFORE the jq guard below on purpose: alias sync has no jq dependency
-# (RFC 0004), so a machine without jq still gets its aliases. Idempotent:
+# (RFC 0011), so a machine without jq still gets its aliases. Idempotent:
 # if installed_version == plugin_version the helper returns immediately.
 # Opt out with UBERDEV_NO_AUTO_ALIAS=1 or `auto_install_aliases: false` in
 # .claude/uberdev.local.md. The helper handles all error paths internally
