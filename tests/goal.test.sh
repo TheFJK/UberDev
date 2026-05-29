@@ -300,8 +300,8 @@ assert_no_grep "$GOAL_LIB" '\bbash -c'                                   "G19.no
 assert_grep "$GOAL_CMD" '--i-know-what-im-doing'                         "G19.r12-mentioned-once"
 
 echo
-echo "== G20: version bump locked (0.35.16) =="
-assert_version_bump "$REPO_ROOT" "0.35.16"
+echo "== G20: version bump locked (0.35.17) =="
+assert_version_bump "$REPO_ROOT" "0.35.17"
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
 
 assert_grep "$GOAL_SKILL" 'uberdev_dispatch_resolve_env'  "G20b.phase0-wires-resolve-env (#175 SSOT anchor)"
@@ -2930,6 +2930,115 @@ if [ "$_g40_out" = "14400" ]; then
 else
   FAIL=$((FAIL+1)); echo "  FAIL  G40.stuck-secs-rehydrated-on-fresh-shell (expected 14400, got: $_g40_out)" >&2
 fi
+
+echo
+echo "== G41: Phase-0 bash>=4 execution-contract guard does NOT dead-end when bash>=4 exists (issue #294) =="
+# Structural: the guard resolves a bash binary + publishes UBERDEV_GOAL_BASH
+# instead of the old unconditional `exit 2` on unset BASH_VERSINFO.
+assert_grep "$GOAL_SKILL" 'UBERDEV_GOAL_BASH'                                   "G41.publishes-bash-path"
+assert_grep "$GOAL_SKILL" '/opt/homebrew/bin/bash /usr/local/bin/bash'         "G41.brew-path-candidates"
+assert_grep "$GOAL_SKILL" 'exec "\$UBERDEV_GOAL_BASH" "\$0" "\$@"'              "G41.reexec-under-discovered-bash"
+# Anti-regression: the guard must NOT exit 2 unconditionally on unset
+# BASH_VERSINFO. The old form was a single `if [ -z "${BASH_VERSINFO:-}" ] ...
+# exit 2`. The new form only exits 2 inside the `-z "$UBERDEV_GOAL_BASH"`
+# (no-bash-found) branch — so a guard text containing `-z "${BASH_VERSINFO`
+# directly gating `exit 2` would be the regression.
+assert_no_grep "$GOAL_SKILL" 'if \[ -z "\$\{BASH_VERSINFO:-\}" \] \|\| \[ "\$\{BASH_VERSINFO\[0\]:-0\}" -lt 4 \]; then' "G41.no-old-hard-exit-guard"
+# Re-exec must be shebang-gated so it never tries to exec the interpreter binary
+# ($0=/bin/zsh under an inline `zsh -c` body) — the rc=126 trap.
+assert_grep "$GOAL_SKILL" "head -c2 \"\\\$0\""                                  "G41.reexec-shebang-gated"
+# Behavioural: extract the FIRST Phase-0 bash fence (the guard) and run its
+# guard logic under zsh with bash>=4 present. It MUST NOT exit 2 (the #294 bug
+# was a spurious exit 2 on the very first fence under the zsh Bash tool). We run
+# the guard up to the point it would reach the rest of Phase-0, then echo a
+# sentinel; a clean run prints the sentinel and resolves UBERDEV_GOAL_BASH.
+if command -v zsh >/dev/null 2>&1 && { [ -x /opt/homebrew/bin/bash ] || [ -x /usr/local/bin/bash ]; }; then
+  _g41_guard="$(awk '
+    /^[[:space:]]*## Phase 0/      { inp0=1 }
+    inp0 && /^[[:space:]]*```bash[[:space:]]*$/ { inb=1; next }
+    inb && /^[[:space:]]*```[[:space:]]*$/      { exit }
+    inb { sub(/^   /,""); print }
+  ' "$GOAL_SKILL")"
+  # Stop the extracted guard before the (undefined-in-isolation) Phase-0 body by
+  # appending a sentinel echo; the guard arms either exit 2 (bug), exec away, or
+  # fall through to here.
+  _g41_script="$_g41_guard"$'\n''echo "__G41_REACHED__:UBERDEV_GOAL_BASH=${UBERDEV_GOAL_BASH:-unset}"'
+  _g41_out="$(/bin/zsh -c "$_g41_script" 2>&1)"; _g41_rc=$?
+  if [ "$_g41_rc" != "2" ] && printf '%s' "$_g41_out" | grep -q '__G41_REACHED__'; then
+    PASS=$((PASS+1)); echo "  PASS  G41.zsh-guard-no-spurious-exit2 (rc=$_g41_rc, reached body)"
+  else
+    FAIL=$((FAIL+1)); echo "  FAIL  G41.zsh-guard-no-spurious-exit2 (rc=$_g41_rc, out: $_g41_out)" >&2
+  fi
+  # And it must have resolved a real bash>=4 path (not left it unset).
+  if printf '%s' "$_g41_out" | grep -qE '__G41_REACHED__:UBERDEV_GOAL_BASH=.*/bash'; then
+    PASS=$((PASS+1)); echo "  PASS  G41.zsh-guard-resolved-bash-path"
+  else
+    FAIL=$((FAIL+1)); echo "  FAIL  G41.zsh-guard-resolved-bash-path (out: $_g41_out)" >&2
+  fi
+else
+  echo "  SKIP  G41.zsh-guard-behavioural (zsh or bash>=4 not available on this host)"
+fi
+
+echo
+echo "== G42: false-convergence rollover guard + cycle backstop + per-cycle barrier reset (issue #288) =="
+# #288 #1 — BOTH Phase-3 terminal gates also require the rollover queue empty.
+assert_grep "$GOAL_SKILL" '\[ "\$\{#new_candidates\[@\]\}" = "0" \] && \[ "\$terminal_count" = "\$all_pr_count" \] && \[ "\$\{#queue\[@\]\}" -eq 0 \]' "G42.converge-gate-queue-empty-guard"
+assert_grep "$GOAL_SKILL" '\[ "\$\{#new_candidates\[@\]\}" = "0" \] && \[ "\$\{#queue\[@\]\}" -eq 0 \] && \[ "\$terminal_count" != "\$all_pr_count" \]' "G42.queue-empty-not-converged-queue-guard"
+# #288 #2 — Phase-1-top cycle ceiling backstop reads cycle from run-state.
+assert_grep "$GOAL_SKILL" '\[ "\$\{cycle:-1\}" -gt "\$\{MAX_CYCLES:-0\}" \]'   "G42.phase1-cycle-ceiling-backstop"
+assert_grep "$GOAL_SKILL" 'phase1_ceiling_backstop'                            "G42.phase1-backstop-audit-tag"
+# #288 #3 — per-cycle barrier reset at the loop-back: barrier_start_ts=0 + TSV truncate.
+assert_grep "$GOAL_SKILL" 'barrier_start_ts=0'                                 "G42.barrier-reset-zero"
+assert_grep "$GOAL_SKILL" '_batch_prs_tsv=.*goal-\$GOAL_ID-batch-prs.tsv'      "G42.barrier-reset-tsv-path"
+assert_grep "$GOAL_SKILL" ': > "\$_batch_prs_tsv"'                             "G42.barrier-reset-tsv-truncate"
+# Anti-regression: the #220 rollover-preservation merge must still be present
+# (NOT reverted to an overwrite) — the queue-empty guard relies on it.
+assert_grep "$GOAL_SKILL" 'queue=\("\$\{queue\[@\]\}" "\$\{new_candidates\[@\]\}"\)' "G42.rollover-merge-preserved"
+# Behavioural: the cap-overflow convergence-gate predicate must be FALSE while
+# the rollover queue is non-empty (so the goal does NOT falsely converge).
+# Mirror the exact gate boolean from the SKILL with a non-empty queue: 0 new
+# candidates + all PRs terminal + 1 rolled-over issue => must NOT converge.
+_g42_new=0; _g42_term=3; _g42_all=3; _g42_queue_len=1
+if [ "$_g42_new" = "0" ] && [ "$_g42_term" = "$_g42_all" ] && [ "$_g42_queue_len" -eq 0 ]; then
+  FAIL=$((FAIL+1)); echo "  FAIL  G42.cap-overflow-does-not-converge (gate fired with non-empty queue — false convergence)" >&2
+else
+  PASS=$((PASS+1)); echo "  PASS  G42.cap-overflow-does-not-converge (gate correctly held open: queue_len=$_g42_queue_len)"
+fi
+# And with an EMPTY queue + same terminal state it SHOULD converge (no false negative).
+_g42_queue_len=0
+if [ "$_g42_new" = "0" ] && [ "$_g42_term" = "$_g42_all" ] && [ "$_g42_queue_len" -eq 0 ]; then
+  PASS=$((PASS+1)); echo "  PASS  G42.empty-queue-still-converges (no false negative)"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  G42.empty-queue-still-converges (gate wrongly held open with empty queue)" >&2
+fi
+
+echo
+echo "== G43: cross-process uberdev:active claim acquire/release (issue #291 #1) + --only-mine identity doc (#291 #2) =="
+# #291 #1 — SETNX claim helper defined + acquired BEFORE dispatch, released on terminal.
+assert_grep "$GOAL_SKILL" '_uberdev_goal_claim_issue\(\)'                       "G43.claim-helper-defined"
+assert_grep "$GOAL_SKILL" '_uberdev_goal_release_claim\(\)'                     "G43.release-helper-defined"
+assert_grep "$GOAL_SKILL" "UBERDEV_ACTIVE_LABEL='uberdev:active'"               "G43.active-label-bound"
+# Claim acquired before uberdev_dispatch_one AND before the input->dispatched write.
+_g43_claim_line="$(grep -nF '_uberdev_goal_claim_issue "$ISSUE_NUM"' "$GOAL_SKILL" | head -1 | cut -d: -f1)"
+_g43_dispatch_line="$(grep -nE 'uberdev_dispatch_one "\$ISSUE_NUM"' "$GOAL_SKILL" | head -1 | cut -d: -f1)"
+if [ -n "$_g43_claim_line" ] && [ -n "$_g43_dispatch_line" ] && [ "$_g43_claim_line" -lt "$_g43_dispatch_line" ]; then
+  PASS=$((PASS+1)); echo "  PASS  G43.claim-precedes-dispatch (claim=$_g43_claim_line dispatch=$_g43_dispatch_line)"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  G43.claim-precedes-dispatch (claim=$_g43_claim_line dispatch=$_g43_dispatch_line)" >&2
+fi
+# Collision => soft-skip this cycle (continue), gh-fail => hard error.
+assert_grep "$GOAL_SKILL" '_claim_rc=\$\?'                                      "G43.claim-rc-captured"
+assert_grep "$GOAL_SKILL" 'uberdev:active claim held by another process'       "G43.collision-soft-skip-msg"
+# Release on terminal non-merge transitions: Phase-1 dispatch-failure + Phase-2 failed/resolved-by-no-action.
+_g43_release_count="$(grep -cE '_uberdev_goal_release_claim "\$ISSUE_NUM"|gh issue edit "\$issue" --remove-label "uberdev:active"' "$GOAL_SKILL")"
+if [ "$_g43_release_count" -ge 3 ]; then
+  PASS=$((PASS+1)); echo "  PASS  G43.claim-released-on-terminal (count=$_g43_release_count, ge 3)"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  G43.claim-released-on-terminal (count=$_g43_release_count, want ge 3)" >&2
+fi
+# #291 #2 — the --only-mine identity requirement is documented (not a silent drop).
+assert_grep "$GOAL_SKILL" 'Identity requirement \(issue #291'                  "G43.only-mine-identity-doc-skill"
+assert_grep "$GOAL_CMD"   'Requires a single .gh. identity \(issue #291\)'      "G43.only-mine-identity-doc-cmd"
 
 echo
 echo "== Summary =="

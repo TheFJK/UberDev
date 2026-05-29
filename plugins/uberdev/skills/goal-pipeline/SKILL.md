@@ -52,17 +52,73 @@ Notes on the enums:
 
 ## Phase 0 — Preflight
 
-0. **bash ≥ 4 preflight guard (issue #180, defect #8).** Evaluated FIRST — before arg parsing, backend resolution, or any `gh` call. The watch loop's verdict locator (`uberdev_goal_locate_review_pr_audit_by_pr`) iterates unquoted globs that rely on bash's "unmatched glob → literal" semantics (zsh fatals with `no matches found`), and macOS's default `/bin/bash` is 3.2 (no `declare -A`, no `mapfile`). Refuse anything below bash 4 with a clear, actionable error rather than letting the loop misbehave silently.
+0. **bash ≥ 4 execution-contract guard (issue #180 defect #8; issue #294).** Evaluated FIRST — before arg parsing, backend resolution, or any `gh` call. The watch loop's verdict locator (`uberdev_goal_locate_review_pr_audit_by_pr`, in `lib/goal-state.sh`) iterates unquoted globs that rely on bash's "unmatched glob → literal" semantics — **zsh fatals with `no matches found`** — and macOS's default `/bin/bash` is 3.2 (no `declare -A`, no `mapfile`). So `/goal` requires bash ≥ 4 *for the run as a whole*.
+
+   The prior guard hard-`exit 2`ed whenever `BASH_VERSINFO` was unset. **But the Claude-Code Bash tool runs every SKILL.md fence under `/bin/zsh`** (where `BASH_VERSINFO` is always unset), so that guard tripped on the very first fence and `/goal` was **unrunnable out-of-box even on a machine with bash 5.x installed** (issue #294). The fix: do NOT dead-end when a usable bash ≥ 4 exists. Instead **discover** it, **re-exec the current fence under it** when possible, and otherwise **proceed while publishing the resolved interpreter** so the orchestrator runs the remaining fences under it (the execution contract, documented in `commands/goal.md` + README). Hard-`exit 2` ONLY when no bash ≥ 4 is reachable anywhere — the one case where `/goal` genuinely cannot run.
 
    ```bash
-   # Two-arm detection: the first arm catches non-bash shells (zsh, the Bash-tool
-   # default, leaves BASH_VERSINFO unset); the second catches bash 3.2. Either way
-   # the watch loop's glob + array semantics are unsafe — fail fast.
-   if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
-     echo "goal: requires bash >= 4 (macOS default /bin/bash is 3.2, and zsh fatals on the watch loop's unmatched-glob verdict locator)." >&2
-     echo "  - install a modern bash:  brew install bash      # -> /opt/homebrew/bin/bash 5.x" >&2
-     echo "  - then re-run /uberdev:goal under bash >= 4." >&2
-     exit 2
+   # Execution-contract resolver (issue #294). Three outcomes:
+   #   (a) already running under bash >= 4  -> proceed (CI / explicit `bash` run).
+   #   (b) NOT bash >= 4, but a bash >= 4 binary is discoverable -> resolve it,
+   #       publish it as UBERDEV_GOAL_BASH, and re-exec THIS fence under it so the
+   #       glob/array semantics are correct from here on. The re-exec is the
+   #       issue-#294 `exec "$(command -v bash)" …` fix. When the fence has no
+   #       script path to re-feed (inline `zsh -c` bodies expose $0 as the
+   #       interpreter, not a file), the exec is skipped and we fall through to
+   #       (b'): proceed under the published contract — every downstream fence
+   #       re-runs this same resolver, and commands/goal.md mandates running the
+   #       fences under UBERDEV_GOAL_BASH. NEVER a silent dead-end while bash>=4
+   #       exists (issue #294 acceptance criterion).
+   #   (c) no bash >= 4 anywhere -> exit 2 with the brew-install directive.
+   #
+   # `command -v` (NOT `type -t`, a bashism that misreports under the zsh-backed
+   # runner — project memory project_uberdev_type_t_bashism_zsh) + the explicit
+   # brew paths mirror lib/dispatch.sh's TIMEOUT_BIN resolver and tests/goal.test.sh
+   # G40's `[ -x /opt/homebrew/bin/bash ]` fallback. Each candidate's MAJOR
+   # version is verified >= 4 via `--version` (a `bash` on PATH could itself be
+   # 3.2 on stock macOS), so we never publish a too-old interpreter.
+   if [ -n "${BASH_VERSINFO:-}" ] && [ "${BASH_VERSINFO[0]:-0}" -ge 4 ]; then
+     : # (a) already bash >= 4 — nothing to do.
+   else
+     UBERDEV_GOAL_BASH=""
+     for _cand in /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash 2>/dev/null)"; do
+       [ -n "$_cand" ] && [ -x "$_cand" ] || continue
+       _cand_major="$("$_cand" -c 'echo "${BASH_VERSINFO[0]:-0}"' 2>/dev/null)"
+       case "$_cand_major" in ''|*[!0-9]*) continue ;; esac
+       if [ "$_cand_major" -ge 4 ]; then UBERDEV_GOAL_BASH="$_cand"; break; fi
+     done
+     if [ -z "$UBERDEV_GOAL_BASH" ]; then
+       # (c) genuinely unrunnable — no bash >= 4 on this host.
+       echo "goal: requires bash >= 4 (the watch loop's unmatched-glob verdict locator fatals under zsh, and macOS's default /bin/bash is 3.2). No bash >= 4 found." >&2
+       echo "  - install a modern bash:  brew install bash      # -> /opt/homebrew/bin/bash 5.x" >&2
+       echo "  - then re-run /uberdev:goal (its fences will run under that bash)." >&2
+       exit 2
+     fi
+     export UBERDEV_GOAL_BASH
+     # (b) re-exec THIS fence under the discovered bash ONLY when $0 is a real
+     # shebang SCRIPT FILE — never the bare interpreter binary. Under an inline
+     # `zsh -c '<body>'` (the Bash-tool runtime) $0 is `/bin/zsh`, which IS a
+     # readable regular file, so a naive `[ -f "$0" ]` test wrongly matches and
+     # `exec bash /bin/zsh` dies with "cannot execute binary file" (rc 126).
+     # Gate on a `#!` shebang in the first two bytes: that is true for a text
+     # script and false for the ELF/Mach-O interpreter binary, so the re-exec
+     # fires for `bash goal.sh`/`zsh goal.sh`-style invocations and is correctly
+     # skipped for the scriptless inline body. The UBERDEV_GOAL_BASH_REEXEC
+     # sentinel prevents an exec loop (the re-exec'd bash re-enters with
+     # BASH_VERSINFO set, so arm (a) short-circuits — belt-and-braces).
+     _is_script=0
+     if [ "${UBERDEV_GOAL_BASH_REEXEC:-0}" != "1" ] && [ -f "${0:-}" ] && [ -r "${0:-}" ]; then
+       case "$(head -c2 "$0" 2>/dev/null)" in '#!') _is_script=1 ;; esac
+     fi
+     if [ "$_is_script" = "1" ]; then
+       export UBERDEV_GOAL_BASH_REEXEC=1
+       exec "$UBERDEV_GOAL_BASH" "$0" "$@"
+     fi
+     # (b') inline-fence fall-through: cannot re-exec a scriptless body, so
+     # proceed under the published contract. Phase-0's own steps are bash-safe
+     # under zsh; the bash-requiring watch-loop glob runs in Phase 2, which
+     # commands/goal.md directs the orchestrator to run under $UBERDEV_GOAL_BASH.
+     echo "goal: not running under bash >= 4 (BASH_VERSINFO unset/old); resolved UBERDEV_GOAL_BASH=$UBERDEV_GOAL_BASH — run /goal's fences under it (see commands/goal.md execution contract)." >&2
    fi
    ```
 
@@ -217,6 +273,82 @@ Per cycle, walk the current `queue` and dispatch one `/uberdev:orchestrator` age
 GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
 uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 1" >&2; exit 3; }
 uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
+
+# Issue #288 #2 (CRITICAL) — cycle-ceiling backstop at the TOP of Phase 1.
+# `cycle` is incremented + checked against MAX_CYCLES only inside the Phase-3
+# fence (cycle++ then `cycle >= MAX_CYCLES && candidates`), so the ceiling held
+# ONLY if the orchestrating LLM re-ran Phase 3 between cycles. A mis-sequenced
+# re-entry that lands back on Phase 1 with an over-incremented `cycle` would
+# otherwise run unbounded (the sole remaining bound being the 4h watch-loop
+# stuck_loop). Re-evaluate the ceiling here, reading the freshly-rehydrated
+# `cycle` from run-state, so it holds regardless of which fence is re-entered.
+# Strict `>`: entering Phase 1 with cycle==MAX_CYCLES is the LEGITIMATE final
+# cycle (it must still dispatch + let Phase 3 decide convergence vs max_cycles
+# halt); cycle>MAX_CYCLES is a genuine over-run with no path to a valid Phase-3
+# gate, so halt deterministically here. The fingerprint-repeat nonconvergence
+# check stays in the Phase-3 per-candidate loop — it needs each candidate's
+# issue body, which is not in scope until after the cycle's review pass.
+if [ "${cycle:-1}" -gt "${MAX_CYCLES:-0}" ]; then
+  uberdev_goal_audit goal_circuit_breaker \
+    "{\"reason\":\"max_cycles\",\"cycle\":$cycle,\"max\":$MAX_CYCLES,\"phase\":\"phase1_ceiling_backstop\"}"
+  _uberdev_goal_reap_zombies || true
+  print_summary "$cycle"
+  exit 1
+fi
+
+# Issue #291 #1 (CRITICAL) — cross-process issue claim (real SETNX), mirroring
+# the canonical `uberdev:active` protocol in skills/solve-pipeline/SKILL.md
+# Step 4/4.5. /goal dispatches /uberdev:orchestrator DIRECTLY via
+# uberdev_dispatch_one (issue #248), which BYPASSES solve-pipeline's claim — so
+# the only dedup was the per-goal in-memory TSV skip-check (keyed on this run's
+# GOAL_ID). Two concurrent /goal runs, or /goal + a manual /solve, on the same
+# issue would both spawn solvers (duplicate PRs + duplicate version bumps that
+# feed the version-collision class). The label is a GitHub-side cross-process
+# lock; the TSV is only in-process. `_uberdev_goal_claim_issue` is the
+# label-absent-guarded add (read labels → if absent, --add-label): rc 0 =
+# claim acquired (or already ours), rc 2 = collision (claimed by another
+# process — soft-skip this cycle), rc 1 = gh/permission failure (hard error).
+# `_uberdev_goal_release_claim` clears the label+assignee on a terminal NON-merge
+# transition (failed / resolved-by-no-action). The merge path is released by
+# merge-pipeline Step 3.4's post-merge cleanup (symmetric with /solve+/turbo).
+UBERDEV_ACTIVE_LABEL='uberdev:active'
+UBERDEV_ACTIVE_LABEL_COLOR='D93F0B'
+UBERDEV_ACTIVE_LABEL_DESCRIPTION='Issue currently being worked on by a /solve or /turbo dispatcher. Auto-managed; do not edit.'
+# Provision the label once per Phase-1 fence (idempotent --force; gh cannot
+# auto-create a label from --add-label and fails that mutation atomically).
+# Fail-soft: a provisioning failure is surfaced but the per-issue --add-label
+# below is the load-bearing fail-loud gate, so we do not abort the whole fence
+# here (mirrors finish-branch / findings-to-issues fail-soft provisioning).
+gh label create --force "$UBERDEV_ACTIVE_LABEL" \
+  --color "$UBERDEV_ACTIVE_LABEL_COLOR" \
+  --description "$UBERDEV_ACTIVE_LABEL_DESCRIPTION" >/dev/null 2>&1 \
+  || printf 'goal: WARN could not provision %s label (claim --add-label may fail) — check gh auth/scope\n' "$UBERDEV_ACTIVE_LABEL" >&2
+
+_uberdev_goal_claim_issue() {
+  # SETNX: rc 0 acquired/already-ours, rc 2 collision (held by another process),
+  # rc 1 gh failure. Single read of labels (--json labels), then a guarded add.
+  local issue="$1"
+  _uberdev_goal_validate_int "$issue" || return 1
+  local labels_json present
+  labels_json="$(gh issue view "$issue" --json labels --jq '[.labels[].name]' 2>/dev/null)" || return 1
+  present="$(printf '%s' "$labels_json" | jq -r --arg l "$UBERDEV_ACTIVE_LABEL" 'index($l) // empty' 2>/dev/null)"
+  if [ -n "$present" ]; then
+    return 2   # already claimed by another process (or a prior, not-yet-released run)
+  fi
+  # Absent → acquire. --add-label + --add-assignee in one round-trip (gh fails
+  # atomically on partial error), matching solve-pipeline Step 4.5.
+  gh issue edit "$issue" --add-label "$UBERDEV_ACTIVE_LABEL" --add-assignee "@me" >/dev/null 2>&1 || return 1
+  return 0
+}
+_uberdev_goal_release_claim() {
+  # Best-effort release on terminal non-merge transition. Combined
+  # remove-label + remove-assignee (gh fails atomically); fail-soft because the
+  # issue may already be closed / the label hand-removed (mirrors merge Step 3.4).
+  local issue="$1"
+  _uberdev_goal_validate_int "$issue" || return 0
+  gh issue edit "$issue" --remove-label "$UBERDEV_ACTIVE_LABEL" --remove-assignee "@me" >/dev/null 2>&1 || true
+}
+
 declare -a active_issues=()
 # #211 — per-cycle parallel dispatch cap. Issues beyond MAX_PARALLEL roll over
 # into remaining_queue, which becomes the next cycle's queue (flushed via
@@ -277,6 +409,24 @@ for ISSUE_NUM in "${queue[@]}"; do
   # runaway-loop containment (R5) would silently fail open.
   export UBERDEV_GOAL_ID="$GOAL_ID"
 
+  # Issue #291 #1 — acquire the cross-process `uberdev:active` claim BEFORE the
+  # pre-spawn TSV write and BEFORE uberdev_dispatch_one. This is the outermost
+  # guard: a collision skips the issue THIS cycle WITHOUT writing `dispatched`
+  # (so a later cycle can retry once the other process releases), and never
+  # spawns a second solver. rc 2 = collision (soft-skip, mirrors D12); rc 1 =
+  # gh/permission failure (hard error — the claim is the cross-process lock the
+  # whole dedup rests on, so a silent failure would re-open the double-solve
+  # surface the way the dead D12 path did).
+  _uberdev_goal_claim_issue "$ISSUE_NUM"; _claim_rc=$?
+  if [ "$_claim_rc" = "2" ]; then
+    printf 'goal: issue %s skipped this cycle (uberdev:active claim held by another process)\n' "$ISSUE_NUM" >&2
+    continue
+  elif [ "$_claim_rc" != "0" ]; then
+    printf 'goal: failed to acquire uberdev:active claim for issue %s (gh rc=%s) — check gh auth/scope\n' "$ISSUE_NUM" "$_claim_rc" >&2
+    print_summary "$cycle"
+    exit 1
+  fi
+
   # Issue #236 — pre-spawn state write. input -> dispatched MUST precede
   # uberdev_dispatch_one so any leaf-side crash (OOM, network blip mid-init,
   # agent timeout before first state write, future CLI regression) cannot
@@ -285,9 +435,12 @@ for ISSUE_NUM in "${queue[@]}"; do
   # is sufficient — the post-spawn `solving` transition below is a refinement,
   # not a load-bearing skip-check signal. A transition-validator failure here
   # is a hard error: the TSV is the SSOT for in-flight tracking and a missed
-  # pre-spawn write would re-open the double-spawn surface.
+  # pre-spawn write would re-open the double-spawn surface. On failure also
+  # RELEASE the claim acquired just above so a TSV-write error does not strand
+  # the cross-process lock (which would block every future cycle + manual /solve).
   if ! uberdev_goal_issue_state_transition "$GOAL_ID" "$ISSUE_NUM" input dispatched; then
     printf 'goal: pre-spawn state write failed for issue %s\n' "$ISSUE_NUM" >&2
+    _uberdev_goal_release_claim "$ISSUE_NUM"
     print_summary "$cycle"
     exit 1
   fi
@@ -348,6 +501,13 @@ for ISSUE_NUM in "${queue[@]}"; do
     if ! uberdev_goal_issue_state_transition "$GOAL_ID" "$ISSUE_NUM" dispatched failed; then
       printf 'goal: WARN cleanup transition dispatched->failed FAILED for issue %s (TSV-state corruption — manual recovery may be needed)\n' "$ISSUE_NUM" >&2
     fi
+    # Issue #291 #1 — dispatch failed, the issue is now terminal (`failed`), so
+    # RELEASE the cross-process claim we acquired before dispatch. Hoisted out of
+    # both downstream branches (claim_collision soft-skip + hard-error exit) for
+    # the same maintenance-divergence reason as the dispatched->failed cleanup
+    # above: a stranded claim would block every future cycle AND any manual
+    # /solve on this issue. Best-effort (the helper is fail-soft).
+    _uberdev_goal_release_claim "$ISSUE_NUM"
     solve_audit="${SOLVE_AUDIT_LOG:-${UBERDEV_TMPDIR:-/tmp}/solve-audit.jsonl}"
     if [ -f "$solve_audit" ] && \
        grep -q "\"event\":\"claim_collision\".*\"issue\":$ISSUE_NUM" "$solve_audit" 2>/dev/null; then
@@ -483,6 +643,12 @@ while true; do
             "{\"goal_id\":\"$GOAL_ID\",\"issue\":$issue,\"detected_at\":$now}" || \
             printf 'goal-pipeline: WARN audit goal_issue_closed_without_pr failed for issue %s (rc=%d) — close-without-PR row may be missing from audit log\n' \
               "$issue" "$?" >&2
+          # Issue #291 #1 — terminal non-merge transition: release the
+          # cross-process `uberdev:active` claim. Inlined here (Phase 2 is a
+          # fresh shell; the Phase-1 _uberdev_goal_release_claim helper is not in
+          # scope) — combined remove-label + remove-assignee, fail-soft (the
+          # issue is already CLOSED, so the label is stale; mirrors merge Step 3.4).
+          gh issue edit "$issue" --remove-label "uberdev:active" --remove-assignee "@me" >/dev/null 2>&1 || true
           continue
         fi
       fi
@@ -497,6 +663,11 @@ while true; do
         printf 'goal-pipeline: issue %s FAILED (no PR, agent idle, %ss elapsed)\n' \
           "$issue" "$(( now - dispatch_ts ))" >&2
         uberdev_goal_issue_state_transition "$GOAL_ID" "$issue" solving failed
+        # Issue #291 #1 — terminal non-merge transition (SOLVE_TIMEOUT, no PR):
+        # the GitHub issue is still OPEN, so a stranded `uberdev:active` claim
+        # would block every future /goal cycle AND any manual /solve retry on
+        # this issue. Release it (inlined — fresh-shell Phase 2; fail-soft).
+        gh issue edit "$issue" --remove-label "uberdev:active" --remove-assignee "@me" >/dev/null 2>&1 || true
       fi
     fi
   done
@@ -1023,12 +1194,16 @@ done
 
 **`--only-mine` filter behaviour.** When set, the `select(.author.login == env.GH_USER)` clause inside `--jq` restricts the candidate set to issues authored by the current `gh api user --jq '.login'` identity. This is the small-team / shared-repo escape hatch: a teammate's `/review-pr` run on an unrelated PR may have filed its own `review-pr-finding` issues, and the operator running `/goal` doesn't want to inherit those into their convergence loop. The label `FINDING_LABEL='review-pr-finding'` is the coarse filter; `--only-mine` is the optional fine filter.
 
+> **Identity requirement (issue #291 #2).** `--only-mine` filters strictly on `.author.login`, so it assumes the **detached bg `/review-pr` agent that FILES the `review-pr-finding` issues runs under the SAME `gh` identity as the interactive `/goal` watcher** (`gh api user`). On a solo, single-identity setup (the default, and the only setup `--only-mine` was designed for) this holds — `--only-mine` is unaffected. But if the bg agent authenticates with a DIFFERENT identity (e.g. a CI service token while the watcher runs as a human login), the findings it files carry that other `author.login`; `--only-mine` then drops them, `new_candidates` comes back empty, and the goal can converge with open BLOCKER/CRITICAL findings still pending (no breaker fires — the empty set is "correct" per the author filter). **`--only-mine` is therefore safe ONLY when the bg dispatch and the watcher share one `gh` identity.** Multi-identity / CI-token setups must OMIT `--only-mine` (rely on the `review-pr-finding` label as the coarse filter) so no self-filed finding is silently dropped. `--only-mine` is opt-in and OFF by default, so the default convergence loop is never exposed to this drop.
+
 **Cycle terminal conditions (evaluated AFTER the per-candidate fingerprint check):**
 
-- If `cycle >= MAX_CYCLES` AND `new_candidates` is non-empty: halt with `goal_circuit_breaker reason=max_cycles`, exit 1. The operator has explicitly capped iteration count via `--max-cycles=N` or the `goal.max_cycles` config key; we respect the cap rather than spinning forever.
-- If `new_candidates` is empty AND every PR in this run is in `{merged, merge-failed, yellow-held, red-held}`: convergence reached, emit `goal_converged`, exit 0. Held states are **pseudo-terminal for convergence** (#160) — they are surfaced to the operator via `print_summary` (each held PR's `Blocks: #N` list is printed) and are addressed out-of-band; counting them as terminal here is what lets the goal converge cleanly instead of spinning until the 4h `stuck_loop` fires. `merge-failed` PRs are counted as terminal-converged because the merge-failed circuit breaker would have already fired upstream — reaching this state means every PR has been driven to a stable resting state.
-- If `new_candidates` is empty AND at least one PR is still in a non-terminal in-flight state (`dispatched`, `pushed-reviewing`, `green` not yet merged, `merging`): emit `goal_circuit_breaker reason=queue_empty_not_converged`, exit 1 (#160). This is the deterministic alternative to the 4h `stuck_loop` wall-clock fallback — the queue is drained but PRs are stuck, so surface immediately instead of spinning against the GitHub API.
-- Otherwise: emit `goal_cycle_completed` with the cycle summary `{cycle, prs_merged, prs_held, issues_resolved, new_candidates}`, set `queue ← new_candidates`, increment `cycle`, and loop back to Phase 1.
+Every "converge / halt" gate below is additionally guarded on the rollover `queue` being EMPTY (`${#queue[@]} -eq 0`, issue #288 #1). When more issues than `--max-parallel` were queued, Phase 1 defers the overflow into `queue`; those issues have not been dispatched and have no PR, so they are invisible to the PR-state terminal calculus. A non-empty `queue` therefore falls THROUGH every terminal gate to the loop-back, which re-enters Phase 1 to drain it — the goal can never declare convergence (or a queue-empty halt) while rolled-over issues are still pending dispatch.
+
+- If `cycle >= MAX_CYCLES` AND `new_candidates` is non-empty: halt with `goal_circuit_breaker reason=max_cycles`, exit 1. The operator has explicitly capped iteration count via `--max-cycles=N` or the `goal.max_cycles` config key; we respect the cap rather than spinning forever. (A `cycle > MAX_CYCLES` over-run is ALSO caught at the top of Phase 1 — issue #288 #2 — so the ceiling holds regardless of which fence the orchestrator re-enters.)
+- If `new_candidates` is empty AND every PR in this run is in `{merged, merge-failed, yellow-held, red-held}` AND `queue` is empty: convergence reached, emit `goal_converged`, exit 0. Held states are **pseudo-terminal for convergence** (#160) — they are surfaced to the operator via `print_summary` (each held PR's `Blocks: #N` list is printed) and are addressed out-of-band; counting them as terminal here is what lets the goal converge cleanly instead of spinning until the 4h `stuck_loop` fires. `merge-failed` PRs are counted as terminal-converged because the merge-failed circuit breaker would have already fired upstream — reaching this state means every PR has been driven to a stable resting state.
+- If `new_candidates` is empty AND `queue` is empty AND at least one PR is still in a non-terminal in-flight state (`dispatched`, `pushed-reviewing`, `green` not yet merged, `merging`): emit `goal_circuit_breaker reason=queue_empty_not_converged`, exit 1 (#160). This is the deterministic alternative to the 4h `stuck_loop` wall-clock fallback — the queue is drained but PRs are stuck, so surface immediately instead of spinning against the GitHub API.
+- Otherwise: emit `goal_cycle_completed` with the cycle summary `{cycle, prs_merged, prs_held, issues_resolved, new_candidates}`, MERGE `new_candidates` into the surviving rollover `queue` (`queue ← queue + new_candidates`, preserving any #288 #1 overflow), increment `cycle`, **reset the merge-barrier clock for the next cycle** (`barrier_start_ts=0` + truncate `goal-<id>-batch-prs.tsv`, issue #288 #3), and loop back to Phase 1.
 
 ```bash
 # #171 fresh-shell rehydration — re-source libs (idempotent via _UBERDEV_*_LOADED
@@ -1058,7 +1233,19 @@ terminal_prs="$(uberdev_goal_list_prs_in_state "$GOAL_ID" merged \
   ; uberdev_goal_list_prs_in_state "$GOAL_ID" red-held)"
 all_pr_count="$(uberdev_goal_count_distinct_prs "$GOAL_ID")"
 terminal_count="$(printf '%s\n' "$terminal_prs" | grep -c . || true)"
-if [ "${#new_candidates[@]}" = "0" ] && [ "$terminal_count" = "$all_pr_count" ]; then
+# Issue #288 #1 (BLOCKER) — BOTH terminal gates below also require the rollover
+# `queue` to be EMPTY. With more issues than --max-parallel, Phase 1 defers the
+# overflow into `queue` (the remaining_queue flush at the top of this file).
+# Those rolled-over issues have NOT been dispatched, have NO PR, and so do NOT
+# appear in all_pr_count — so on a clean cycle `new_candidates` is empty AND
+# terminal_count==all_pr_count even though work remains. Without the
+# `${#queue[@]} -eq 0` clause the goal emits goal_converged (or halts
+# queue_empty_not_converged) while the overflow stays OPEN and never dispatched.
+# A non-empty queue must instead fall THROUGH both gates to the loop-back below,
+# which re-enters Phase 1 and drains the remaining queue. (Distinct survivor of
+# the v0.34.0 rollover-WIPE fix — the wipe was fixed; convergence-evaluates-
+# first-and-ignores-the-queue was not.)
+if [ "${#new_candidates[@]}" = "0" ] && [ "$terminal_count" = "$all_pr_count" ] && [ "${#queue[@]}" -eq 0 ]; then
   uberdev_goal_audit goal_converged \
     "{\"cycle\":$cycle,\"prs\":$all_pr_count}"
   print_summary "$cycle"
@@ -1069,8 +1256,11 @@ fi
 # Deterministic queue-empty-not-converged halt (#160). Without this, a PR
 # stuck in dispatched/pushed-reviewing/green/merging with nothing left to
 # file as a finding would spin the Phase1→2→3 loop until stuck_loop fires (4h).
-# Surface the stuck state immediately so the operator can act.
-if [ "${#new_candidates[@]}" = "0" ] && [ "$terminal_count" != "$all_pr_count" ]; then
+# Surface the stuck state immediately so the operator can act. The
+# `${#queue[@]} -eq 0` clause (issue #288 #1) keeps a non-empty rollover queue
+# from being mis-read as "drained but stuck" — overflow issues still pending
+# dispatch are NOT a stuck PR; they must loop back into Phase 1, not halt here.
+if [ "${#new_candidates[@]}" = "0" ] && [ "${#queue[@]}" -eq 0 ] && [ "$terminal_count" != "$all_pr_count" ]; then
   uberdev_goal_audit goal_circuit_breaker \
     "{\"reason\":\"queue_empty_not_converged\",\"cycle\":$cycle,\"all_prs\":$all_pr_count,\"terminal\":$terminal_count}"
   _uberdev_goal_reap_zombies || true
@@ -1087,6 +1277,25 @@ cycle=$(( cycle + 1 ))
 # is per-cycle; overflow_detected gates the per-cycle truncation above).
 overflow_count=0
 overflow_detected=0
+# Issue #288 #3 (MAJOR) — re-seed the merge-barrier clock PER CYCLE. barrier_start_ts
+# is seeded once by uberdev_goal_register_batch_pr on the FIRST batch registration
+# (gated on an empty batch-prs.tsv) and is otherwise never reset; the TSV is only
+# truncated at Phase-0 state_init. So without this reset cycle N's barrier budget
+# would be `BARRIER_TIMEOUT_S − Σ(prior cycle durations)` → a spurious
+# `stuck_loop phase=merge_barrier` on a healthy late cycle. Reset BOTH:
+#   (1) barrier_start_ts=0 — the next write_run_state below flushes the `=0`
+#       placeholder, which does NOT match register_batch_pr's
+#       `^barrier_start_ts=[1-9][0-9]*$` re-seed guard, so next cycle's first
+#       registration re-seeds it to a fresh epoch; and
+#   (2) truncate goal-<id>-batch-prs.tsv — so register_batch_pr's `[ ! -s "$tsv" ]`
+#       first-registration check is TRUE again next cycle (the seed only fires on
+#       first registration). Truncate is best-effort: a write failure must not
+#       abort the loop-back, but emit a breadcrumb so a stale registry is visible.
+barrier_start_ts=0
+_batch_prs_tsv="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}/goal-$GOAL_ID-batch-prs.tsv"
+if ! : > "$_batch_prs_tsv"; then
+  printf 'goal: WARN could not truncate batch-prs.tsv (%s) at cycle loop-back — barrier clock may not re-seed\n' "$_batch_prs_tsv" >&2
+fi
 uberdev_goal_write_run_state || { echo "goal: failed to persist run-state before loop-back" >&2; exit 3; }
 # loop back to Phase 1
 ```

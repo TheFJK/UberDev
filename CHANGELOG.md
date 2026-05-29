@@ -4,6 +4,16 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.17] — 2026-05-29
+
+### Fixed
+- **`/goal` was unrunnable out-of-box under the zsh Bash tool (#294)** — the Phase-0 `bash>=4` guard hard-`exit 2`ed whenever `BASH_VERSINFO` was unset, which is *always* the case under the `/bin/zsh` Bash-tool runtime, so `/goal` tripped on its very first fence even on hosts with bash 5.x installed. Phase 0 now **resolves** bash≥4 instead of dead-ending: proceed if already ≥4; else discover a ≥4 binary (`/opt/homebrew/bin/bash`, `/usr/local/bin/bash`, `command -v bash` — each version-verified), publish `UBERDEV_GOAL_BASH`, and shebang-gated re-exec the fence under it; only `exit 2` when no bash≥4 exists anywhere. Execution contract documented in `commands/goal.md` + a README Prerequisites row.
+- **`/goal` false convergence stranded rollover issues (#288)** — both Phase-3 terminal gates (`goal_converged`, `queue_empty_not_converged`) now also require an empty `queue`, so issues rolled past `--max-parallel` can no longer be reported converged while still OPEN and never dispatched. Adds a cycle-ceiling backstop at the top of Phase 1 (halts `max_cycles` regardless of which fence the orchestrator re-enters) and a per-cycle merge-barrier reset (`barrier_start_ts=0` + batch-PR TSV truncate) so a healthy late cycle no longer spuriously trips `stuck_loop phase=merge_barrier`.
+- **`/goal` concurrent double-solve (#291)** — Phase 1 now acquires the cross-process `uberdev:active` claim (label-absent-guarded SETNX, mirroring solve-pipeline) **before** dispatch and releases it on every terminal non-merge transition, closing the gap where `/goal` dispatched `/uberdev:orchestrator` directly and bypassed the claim. The `--only-mine` multi-identity caveat is documented (opt-in, OFF by default; single-identity setups unaffected).
+
+### Tests
+- `tests/goal.test.sh` gains G41/G42/G43 (structural + behavioural; the #294 group runs the Phase-0 guard under zsh and asserts no spurious `exit 2`). Verified red-on-old-code; full goal suite green under both bash and zsh.
+
 ## [0.35.16] — 2026-05-29
 
 ### Fixed

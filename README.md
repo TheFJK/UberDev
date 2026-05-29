@@ -4,7 +4,7 @@
 
 **Personal Claude Code marketplace — opinionated GitHub-workflow slash commands.**
 
-[![Version](https://img.shields.io/badge/version-0.35.16-blue)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.35.17-blue)](./CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8B5CF6)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Repo Agnostic](https://img.shields.io/badge/repo--agnostic-yes-success)](#configuration)
@@ -117,6 +117,7 @@ Disable Claude Code's auto-updater globally with `DISABLE_AUTOUPDATER=1` in your
 | **`gh` CLI** authenticated against your target repos | Repo detection, label/scope validation, dedup search, issue & PR ops |
 | **`jq`** | Used by `install.sh` and `/merge` |
 | **Claude Code >= 2.1.139** with plugin support | Required for `/plugin marketplace add` AND for `claude --bg` (Agent View). `/solve` and `/turbo` hard-fail on older versions with an actionable `npm i -g @anthropic-ai/claude-code@latest` pointer. |
+| **`bash` >= 4 — `/ubergoal` (`/uberdev:goal`) only** | The `/goal` watch loop's verdict locator relies on bash's unmatched-glob semantics (zsh fatals with `no matches found`; stock macOS `/bin/bash` is 3.2). On macOS run `brew install bash` once (→ `/opt/homebrew/bin/bash` 5.x); `/goal` auto-discovers it (Phase 0 publishes `UBERDEV_GOAL_BASH` and runs the fences under it — see `commands/goal.md` "Execution contract"). Other commands run fine under the default zsh. |
 
 ---
 
