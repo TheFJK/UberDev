@@ -4,6 +4,15 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.5] — 2026-05-29
+
+### Fixed
+- **cluster-pipeline — hard-fail (not silent-zero) on a crashed Phase-1/2 producer** (#265). `TOTAL` (issues.json) and `POOL_SIZE` (cluster-pool.json) previously used the `jq 'length' … 2>/dev/null || echo 0` idiom, which maps a crashed/partial/0-byte producer to `0` — indistinguishable from a legitimately-empty run (the same masking class fixed for the Phase-4 dispatch count in #263). Both now use the `[ -s ]` + `type=="array"` fail-closed shape (mirroring the Phase-4 `CLUSTERS_N` gate), aborting with a FATAL diagnostic instead of flooring to 0. A legitimately-empty pool still writes valid `[]` and proceeds normally.
+- **cluster-pipeline — Phase-4 YAML aggregation emits stderr diagnostics on silent skips** (#265). The python3 aggregation's `except ImportError` (PyYAML missing → empty set), per-file `except Exception` (unparseable `analyses/*.yaml`), and per-cluster `except (TypeError, ValueError)` (non-numeric confidence) blocks each now write a `cluster: WARN …` line to stderr, so an operator can distinguish "0 clusters" from "PyYAML missing / N files unparseable" — without changing the yaml-optional design intent.
+
+### Tests
+- New `tests/cluster-pipeline.test.sh` gates **P20** (issues.json) + **P21** (cluster-pool.json), mirroring the P18 verbatim-fence pattern — each asserts hard-fail (rc≠0 + FATAL on stderr + no DISPATCH/output leak) on missing / 0-byte / non-array inputs and correct counts on valid / empty arrays.
+
 ## [0.35.4] — 2026-05-29
 
 ### Changed

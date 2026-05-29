@@ -337,10 +337,19 @@ if [ -s "$RUN_DIR/refuse-list.txt" ]; then
   sort -u -n "$RUN_DIR/refuse-list.txt" -o "$RUN_DIR/refuse-list.txt" 2>/dev/null || :
 fi
 
+# issues.json drives TOTAL_ISSUES — the cross-phase rendezvous count every later
+# phase reads. A crashed/partial/0-byte producer must FATAL, not silently floor
+# TOTAL to 0 (#265 — same masking class as #263). `jq 'length'` on a 0-byte file
+# exits 0 with empty output, so the `-s` guard AND the `type=="array"` check are
+# both load-bearing (mirrors the Phase-4 CLUSTERS_N gate later in this file).
+if [ ! -s "$RUN_DIR/issues.json" ] \
+   || ! TOTAL="$(jq 'if type == "array" then length else error("issues.json is not a JSON array") end' "$RUN_DIR/issues.json")"; then
+  echo "cluster: FATAL - cannot read issue count (non-empty JSON array) from $RUN_DIR/issues.json (upstream gh/jq producer crashed or partial-wrote); aborting" >&2
+  exit 2
+fi
 # Update TOTAL_ISSUES in run-state.txt — rewrite-from-template (safest cross-platform).
 # mktemp failure is fail-CLOSED: run-state.txt is the cross-phase rendezvous
 # point. Without TOTAL_ISSUES every subsequent phase reads zero.
-TOTAL="$(jq 'length' "$RUN_DIR/issues.json" 2>/dev/null || echo 0)"
 RS_TMP="$(mktemp)" || { echo "error: mktemp failed for run-state rewrite (rc=$?)" >&2; exit 2; }
 while IFS='=' read -r k v; do
   case "$k" in
@@ -394,8 +403,15 @@ else
      "$RUN_DIR/issues.json" > "$RUN_DIR/cluster-pool.json"
 fi
 
-# Compute chunk count
-POOL_SIZE="$(jq 'length' "$RUN_DIR/cluster-pool.json" 2>/dev/null || echo 0)"
+# Compute chunk count. cluster-pool.json is always written just above (cp OR jq),
+# so a missing/0-byte/non-array value here means that producer crashed — FATAL
+# rather than silently floor POOL_SIZE to 0 (#265). A legitimately-empty pool
+# still writes valid `[]` (POOL_SIZE=0 → CHUNK_COUNT floored to 1 below).
+if [ ! -s "$RUN_DIR/cluster-pool.json" ] \
+   || ! POOL_SIZE="$(jq 'if type == "array" then length else error("cluster-pool.json is not a JSON array") end' "$RUN_DIR/cluster-pool.json")"; then
+  echo "cluster: FATAL - cannot read pool size (non-empty JSON array) from $RUN_DIR/cluster-pool.json (refuse-list filter producer crashed or wrote a non-array); aborting" >&2
+  exit 2
+fi
 CHUNK_COUNT=$(( (POOL_SIZE + CHUNK_SIZE - 1) / CHUNK_SIZE ))
 if [ "$CHUNK_COUNT" -lt 1 ]; then
   CHUNK_COUNT=1
@@ -561,6 +577,7 @@ import json, sys, pathlib
 try:
     import yaml
 except ImportError:
+    sys.stderr.write("cluster: WARN PyYAML not importable; emitting empty cluster set (0 clusters). Install pyyaml to enable clustering.\n")
     print('[]')
     sys.exit(0)
 run_dir = pathlib.Path(sys.argv[1])
@@ -569,13 +586,15 @@ clusters = []
 for yf in sorted((run_dir / "analyses").glob("*.yaml")):
     try:
         data = yaml.safe_load(yf.read_text()) or {}
-    except Exception:
+    except Exception as e:
+        sys.stderr.write(f"cluster: WARN skipping unparseable analyses YAML {yf}: {e}\n")
         continue
     for c in data.get("clusters", []) or []:
         try:
             if float(c.get("confidence", 0)) >= min_conf:
                 clusters.append(c)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as e:
+            sys.stderr.write(f"cluster: WARN skipping cluster with non-numeric confidence in {yf}: {e}\n")
             continue
 print(json.dumps(clusters))
 PY
