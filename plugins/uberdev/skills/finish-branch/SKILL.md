@@ -277,21 +277,26 @@ if [[ ! "$PR_URL" =~ $PR_URL_REGEX ]]; then
   exit 1
 fi
 echo "PR created: $PR_URL"
-# Extract PR number from PR_URL using a capture-group variant of PR_URL_REGEX
-# (the existing constant at line 289 has no capture group; this inline form
-# allows single-pass extraction via BASH_REMATCH). Both gh calls are fail-soft
-# per the fire-and-surface contract (issue #11 Q1): a transient gh failure
-# loud-logs to stderr but MUST NOT exit non-zero or roll back the PR.
-if [[ "$PR_URL" =~ ^https://github\.com/[^/]+/[^/]+/pull/([0-9]+)$ ]]; then
-  PR_NUM="${BASH_REMATCH[1]}"
-  if ! gh label create --force review-pr:pending \
-       --color FBCA04 \
-       --description "review-pr has not yet completed for this PR" 2>/dev/null; then
-    echo "warning: failed to create review-pr:pending label; backstop may not fire" >&2
-  fi
-  if ! gh pr edit "$PR_NUM" --add-label review-pr:pending 2>/dev/null; then
-    echo "warning: failed to add review-pr:pending label to PR #$PR_NUM; backstop will not fire if review-pr is missed" >&2
-  fi
+# Extract the PR number from PR_URL by stripping everything up to the final
+# slash. PR_URL already passed PR_URL_REGEX immediately above (it ends in
+# /pull/ then digits), so ${PR_URL##*/} yields exactly those digits with no
+# further parse. This deliberately AVOIDS a capture-group [[ =~ ]] match
+# (#270): finish-branch SKILL.md bash fences run under /bin/zsh on macOS, where
+# the capture lands in the match array, not BASH_REMATCH; the bash-only form left
+# PR_NUM empty, so gh pr edit with an empty arg failed (swallowed by the
+# fail-soft guard) and the #95 review-pr:pending backstop label was never set on
+# any PR created via finish-branch on macOS, defeating the /merge label-present
+# probe. Both gh calls remain fail-soft per the fire-and-surface contract (issue
+# #11 Q1): a transient gh failure loud-logs to stderr but MUST NOT exit non-zero
+# or roll back the PR.
+PR_NUM="${PR_URL##*/}"
+if ! gh label create --force review-pr:pending \
+     --color FBCA04 \
+     --description "review-pr has not yet completed for this PR" 2>/dev/null; then
+  echo "warning: failed to create review-pr:pending label; backstop may not fire" >&2
+fi
+if ! gh pr edit "$PR_NUM" --add-label review-pr:pending 2>/dev/null; then
+  echo "warning: failed to add review-pr:pending label to PR #$PR_NUM; backstop will not fire if review-pr is missed" >&2
 fi
 rm -f "$TITLE_FILE" "$PR_BODY_FILE"
 ```

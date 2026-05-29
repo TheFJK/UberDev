@@ -82,6 +82,7 @@ jobs:
           bash tests/dispatch-claude-bg.test.sh && \
           bash tests/solve-effort-flag.test.sh && \
           zsh tests/solve-pipeline-zsh.test.sh && \
+          zsh tests/goal-state-zsh.test.sh && \
           bash tests/orchestrator-phase1-shortcircuit.test.sh && \
           bash tests/config-override.test.sh && \
           bash tests/orchestrator-phase-6-doc.test.sh && \
@@ -168,6 +169,7 @@ jobs:
         # block below in lockstep; a new Unix-only fixture needs an entry
         # here AND its `bash tests/...` line in the ubuntu job above.
         #   - cluster-pipeline.test.sh
+        #   - goal-state-zsh.test.sh
         #   - solve-pipeline-zsh.test.sh
         #   - testers-pipeline.test.sh
         #   - testers-agent-contract.test.sh

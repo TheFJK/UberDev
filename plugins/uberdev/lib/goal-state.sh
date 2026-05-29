@@ -36,11 +36,13 @@
 #   uberdev_goal_barrier_breaker_check         GOAL_ID BARRIER_TIMEOUT_S   (issue #214)
 #   uberdev_goal_batch_all_terminal            GOAL_ID            (issue #211)
 #   uberdev_goal_batch_unblock_wait_clear      GOAL_ID            (issue #211)
+#   print_summary                              CYCLES             (issue #270; hoisted from goal-pipeline SKILL.md Phase 4 so the per-fence re-source brings it into scope in every phase)
 # Internal:
 #   _uberdev_goal_ts_in_state              FILE KEY STATE [FIRST_WINS]
 #   _uberdev_goal_validate_int             N
 #   _uberdev_goal_validate_id              GOAL_ID
 #   _uberdev_goal_append                   FILE LINE
+#   _uberdev_goal_indirect_get             VARNAME            (issue #270; dual-shell indirect read, no eval)
 #   _uberdev_goal_extract_fingerprint      BODY_TEXT
 #   _uberdev_goal_parse_blocks_line        LINE
 #   _uberdev_goal_count_merge_attempts     GOAL_ID PR
@@ -144,7 +146,12 @@ FINDING_FINGERPRINT_REGEX='<!-- uberdev:review-pr-finding fingerprint=([a-f0-9]{
 # Source discover.sh opportunistically for its stderr-isolation helpers;
 # tolerated absent (the goal-state.sh functions below do not hard-require
 # any discover.sh symbol).
-_UBERDEV_GOAL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# #270: default ${BASH_SOURCE[0]:-} — under zsh (which runs the goal-pipeline
+# SKILL.md bash fences that source this lib) BASH_SOURCE is unset when a caller
+# has `set -u`/NO_UNSET active, and the bare reference would abort the source
+# with `BASH_SOURCE[0]: parameter not set`. The `:-` default keeps the source
+# robust regardless of the caller's nounset state in BOTH shells.
+_UBERDEV_GOAL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
 if [ -z "${_UBERDEV_MERGE_DISCOVER_LOADED:-}" ] && \
    [ -f "$_UBERDEV_GOAL_LIB_DIR/../skills/merge-pipeline/lib/discover.sh" ]; then
   # shellcheck source=/dev/null
@@ -259,12 +266,37 @@ _uberdev_goal_append() {
   fi
 }
 
+# _uberdev_goal_indirect_get VARNAME
+# Dual-shell indirect-variable read (#270). bash `${!name}` indirect expansion is
+# a hard `bad substitution` error under zsh, and this lib is re-sourced inside the
+# goal-pipeline SKILL.md bash fences which run under /bin/zsh on macOS. zsh reads
+# an indirect via `${(P)name}`; bash via `${!name}`. Branch on the live shell so
+# the SAME source works in both, using only native parameter expansion — never a
+# shell-evaluation primitive, which the T3 hard rule (goal.test.sh assertion
+# G19.no-eval) forbids in this file. bash never parse-errors on the un-taken zsh
+# `${(P)...}` arm (the expansion is resolved lazily, only when run), so leaving
+# both arms in one file is safe. Prints the value (empty if unset).
+_uberdev_goal_indirect_get() {
+  local _name="$1"
+  if [ -n "${ZSH_VERSION:-}" ]; then
+    printf '%s' "${(P)_name:-}"
+  else
+    printf '%s' "${!_name:-}"
+  fi
+}
+
 # _uberdev_goal_parse_blocks_line LINE
-# ReDoS-safe (D9 + T1): anchored bash regex; numeric re-validation defense-in-depth.
+# ReDoS-safe (D9 + T1): anchored regex; numeric re-validation defense-in-depth.
+# Dual-shell capture (#270): this file is also re-sourced inside the goal-pipeline
+# SKILL.md bash fences, which run under /bin/zsh on macOS. zsh populates the
+# capture array as `$match`, not `$BASH_REMATCH`, so the bash-only form silently
+# yielded an empty PR number under zsh — the only `Blocks: #N` parser, so held-PR
+# unblock never fired. `${match[1]:-${BASH_REMATCH[1]}}` reads whichever the live
+# shell populated (zsh -> match[1]; bash -> BASH_REMATCH[1]).
 _uberdev_goal_parse_blocks_line() {
   local line="$1"
   if [[ "$line" =~ ^Blocks:\ \#([0-9]+)$ ]]; then
-    local pr_num="${BASH_REMATCH[1]}"
+    local pr_num="${match[1]:-${BASH_REMATCH[1]}}"
     _uberdev_goal_validate_int "$pr_num" || return 1
     printf '%s\n' "$pr_num"
   fi
@@ -987,11 +1019,18 @@ uberdev_goal_review_pr_in_flight() {
 uberdev_goal_agent_stuck_on_dialog() {
   local pid="$1" issue="${2:-}"
   _uberdev_goal_validate_int "$pid" || return 1
-  local status now first_seen prior tmpdir goal_id audit row_count
-  status="$(claude agents --json 2>/dev/null | jq -r --argjson pid "$pid" '
+  # #270: NOT named `status` — under /bin/zsh (which runs the goal-pipeline
+  # SKILL.md bash fences that source this lib) `status` is a special read-only
+  # parameter (an alias for `$?`), so `local status` hard-errors `read-only
+  # variable: status` and aborts the function non-zero on its FIRST statement,
+  # before the body runs. That alone kept the agent_stuck_on_dialog circuit
+  # breaker from ever firing under zsh. `agent_status` is an ordinary name in
+  # both shells.
+  local agent_status now first_seen prior tmpdir goal_id audit row_count
+  agent_status="$(claude agents --json 2>/dev/null | jq -r --argjson pid "$pid" '
     .[]? | select(.pid? == $pid) | .status // ""' 2>/dev/null)"
-  [ -n "$status" ] || return 1
-  case "$status" in
+  [ -n "$agent_status" ] || return 1
+  case "$agent_status" in
     busy|running|starting|working) : ;;
     *) return 1 ;;
   esac
@@ -1020,8 +1059,16 @@ uberdev_goal_agent_stuck_on_dialog() {
   now="$(date +%s)"
   local _prior_key="PRIOR_LAST_ACTIVITY_${pid}"
   local _first_key="FIRST_DIALOG_TS_${pid}"
-  prior="${!_prior_key:-}"
-  first_seen="${!_first_key:-}"
+  # Dual-shell indirect read (#270): bash `${!var}` indirect expansion is a hard
+  # `bad substitution` error under zsh — and this helper is re-sourced inside the
+  # goal-pipeline SKILL.md bash fences, which run under /bin/zsh on macOS. The
+  # parse error aborted uberdev_goal_agent_stuck_on_dialog non-zero every poll, so
+  # the agent_stuck_on_dialog circuit breaker could never fire.
+  # _uberdev_goal_indirect_get branches on the live shell (zsh `${(P)name}` / bash
+  # `${!name}`) using only native parameter expansion — see its header for why no
+  # shell-evaluation primitive is used (the T3 hard rule, goal.test.sh G19).
+  prior="$(_uberdev_goal_indirect_get "$_prior_key")"
+  first_seen="$(_uberdev_goal_indirect_get "$_first_key")"
   if [ -z "$prior" ]; then
     printf -v "$_prior_key" '%s' "$row_count"
     printf -v "$_first_key" '%s' "$now"
@@ -1521,6 +1568,52 @@ _uberdev_goal_fetch_pr_body() {
     | head -c "${_UBERDEV_GOAL_BODY_CAP:-65536}"
 }
 
+# print_summary CYCLES
+# Emits the mandated single operator summary line + one post-mortem row per
+# held PR (each row `pr=<num> state=<yellow-held|red-held> blocks=#<i1>,#<i2>,…`).
+#
+# #270 — HOISTED here from the goal-pipeline SKILL.md Phase-4 bash fence. It is
+# CALLED from the Phase-1/2/3 fences on every /goal exit path (every circuit
+# breaker AND the convergence path), but a shell function does NOT survive a
+# fence boundary: each phase is a fresh shell that re-sources only
+# config-read.sh / dispatch.sh / goal-state.sh. With the def stranded in Phase 4,
+# every non-Phase-4 exit hit `command not found` (rc 127) — the operator summary
+# line + held-PR Blocks post-mortem rows were silently dropped and only the
+# trailing `exit N` ran. Defining it HERE means the per-fence re-source of
+# goal-state.sh brings it into scope in every phase; its only dep,
+# _uberdev_goal_fetch_pr_body, already lives in this file.
+#
+# #171 — print_summary reads GOAL_ID / MAX_CYCLES / watch_start from the calling
+# shell and calls uberdev_goal_* helpers that gate on the UBERDEV_GOAL_ID env.
+# Every caller (the Phase 1/2/3 fences) rehydrates that state via
+# uberdev_goal_read_run_state at fence top (which also re-exports UBERDEV_GOAL_ID
+# + UBERDEV_TMPDIR). Do NOT call print_summary from a block that has not run that
+# rehydration — it is never called from Phase 0.
+print_summary() {
+  local cycles="$1" prs_merged prs_held_lines prs_held_count issues_resolved wall_secs
+  prs_merged="$(uberdev_goal_list_prs_in_state "$GOAL_ID" merged | grep -c . || true)"
+  # Build a `<state>\t<pr>` stream so the per-row printf below can emit the
+  # `state=` field promised at line ~466 ("each row pr=<num> state=<yellow-held
+  # |red-held> blocks=…"). The prior implementation merged the two lists into
+  # bare PR numbers and the `state=` field was silently dropped (S6).
+  prs_held_lines="$( \
+    uberdev_goal_list_prs_in_state "$GOAL_ID" yellow-held | sed 's/^/yellow-held\t/'; \
+    uberdev_goal_list_prs_in_state "$GOAL_ID" red-held    | sed 's/^/red-held\t/' )"
+  prs_held_count="$(printf '%s\n' "$prs_held_lines" | grep -c . || true)"
+  issues_resolved="$(uberdev_goal_count_resolved_issues "$GOAL_ID")"
+  wall_secs="$(( $(date +%s) - watch_start ))"
+  printf 'goal %s: cycles=%s/%s prs_merged=%s prs_held=%s issues_resolved=%s wall_secs=%s\n' \
+    "$GOAL_ID" "$cycles" "$MAX_CYCLES" "$prs_merged" "$prs_held_count" \
+    "$issues_resolved" "$wall_secs"
+  printf '%s\n' "$prs_held_lines" | while IFS=$'\t' read -r state p; do
+    [ -z "$p" ] && continue
+    body="$(_uberdev_goal_fetch_pr_body "$p")"
+    blocks="$(printf '%s\n' "$body" | grep -E '^Blocks: #[0-9]+$' \
+      | sed -E 's/^Blocks: #([0-9]+)$/#\1/' | paste -sd, -)"
+    printf '  pr=%s state=%s blocks=%s\n' "$p" "$state" "${blocks:-none}"
+  done
+}
+
 # _uberdev_goal_check_unblock HELD_PR_NUM
 # RFC §3.2.3 unblock rule body: if every `Blocks: #N` issue is CLOSED, kick
 # off a full /review-pr re-review for the held PR.
@@ -1743,15 +1836,24 @@ uberdev_goal_write_run_state() {
     "${REVIEW_GRACE_SECS:-0}" "${CIRCUIT_BREAKER_HALT:-}" > "$tmp"
   # Append per-PID dialog-stuck samples (issue #220, AC ❸).
   # R3 SSOT (issue #220 simplify pass): single iterator over both prefixes —
-  # was two near-identical compgen loops; PRIOR_LAST_ACTIVITY_<pid> and
-  # FIRST_DIALOG_TS_<pid> share identical persistence shape, so the prefix
-  # is the only variant.
+  # PRIOR_LAST_ACTIVITY_<pid> and FIRST_DIALOG_TS_<pid> share identical
+  # persistence shape, so the prefix is the only variant.
+  # Dual-shell enumeration (#270): `compgen -v PREFIX` is a bash builtin that
+  # returns NOTHING under zsh — and write_run_state is re-sourced inside the
+  # goal-pipeline SKILL.md bash fences, which run under /bin/zsh on macOS. The
+  # per-PID stuck-dialog samples were therefore never persisted across fences,
+  # compounding the dead detector. Enumerate via `env` instead: both sample
+  # writers (uberdev_goal_agent_stuck_on_dialog) and the rehydration arm in
+  # read_run_state `export` these keys, so they live in the process environment
+  # in BOTH shells. `${var#$prefix}` strips the prefix; the int-validate on the
+  # suffix rejects any forged/non-PID key; _uberdev_goal_indirect_get does the
+  # dual-shell indirect read with native parameter expansion (T3 hard rule, G19).
   local _prefix _pid_var _pid_suffix _pid_val
   for _prefix in PRIOR_LAST_ACTIVITY_ FIRST_DIALOG_TS_; do
-    for _pid_var in $(compgen -v "$_prefix" 2>/dev/null); do
+    for _pid_var in $(env | grep -oE "^${_prefix}[0-9]+=" | sed 's/=$//'); do
       _pid_suffix="${_pid_var#$_prefix}"
       _uberdev_goal_validate_int "$_pid_suffix" || continue
-      _pid_val="${!_pid_var}"
+      _pid_val="$(_uberdev_goal_indirect_get "$_pid_var")"
       printf '%s=%s\n' "$_pid_var" "$_pid_val" >> "$tmp"
     done
   done

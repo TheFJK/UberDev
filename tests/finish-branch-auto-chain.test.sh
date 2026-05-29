@@ -288,9 +288,14 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# Fail-soft contract: no `exit` inside the new label-add block (sed-based; bounded range)
-LABEL_BLOCK_START=$(grep -n 'Extract PR number from PR_URL using a capture-group variant' "$FINISH_BRANCH" | head -1 | cut -d: -f1)
-LABEL_BLOCK_END=$(awk -v s="$LABEL_BLOCK_START" 'NR > s && /^fi$/ { print NR; exit }' "$FINISH_BRANCH")
+# Fail-soft contract: no `exit` inside the label-add block (sed-based; bounded range).
+# #270: the block no longer extracts PR_NUM via a capture-group `[[ =~ ]]` (BASH_REMATCH
+# is empty under the zsh-backed Bash tool); it now uses `PR_NUM="${PR_URL##*/}"`. The
+# range anchors on the new comment lead-in and ends at the `rm -f "$TITLE_FILE" ...`
+# cleanup line, which bounds the full label-add region (both gh guards) — the prior
+# first-`^fi$` end truncated before the second gh guard.
+LABEL_BLOCK_START=$(grep -n 'Extract the PR number from PR_URL by stripping' "$FINISH_BRANCH" | head -1 | cut -d: -f1)
+LABEL_BLOCK_END=$(awk -v s="$LABEL_BLOCK_START" 'NR > s && /^rm -f "\$TITLE_FILE"/ { print NR; exit }' "$FINISH_BRANCH")
 if [[ -n "$LABEL_BLOCK_START" && -n "$LABEL_BLOCK_END" ]]; then
   EXIT_COUNT=$(sed -n "${LABEL_BLOCK_START},${LABEL_BLOCK_END}p" "$FINISH_BRANCH" | grep -cE '^[[:space:]]*exit')
   if [[ "$EXIT_COUNT" -eq 0 ]]; then
