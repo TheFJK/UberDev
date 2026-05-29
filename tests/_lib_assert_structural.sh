@@ -69,12 +69,13 @@ assert_in_section() {
 # README badge, CHANGELOG header). Self-contained (own grep + $PASS/$FAIL bump,
 # same caller-counter contract as assert_count). A release bump is now ONE
 # <version>-arg change per call site instead of lockstep multi-line regex edits
-# across two files (#231; the exact footgun memory project_uberdev_version_lock_tests tracks).
+# across two files (#231).
 _assert_version_bump_one() {  # <abs_file> <grep_pattern> <desc>
-  if grep -qE -e "$2" "$1"; then
-    echo "  PASS  $3"; PASS=$((PASS + 1))
+  local file="$1" pattern="$2" desc="$3"
+  if grep -qE -e "$pattern" "$file"; then
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
   else
-    echo "  FAIL  $3"; echo "        file: $1"; echo "        pattern: $2"; FAIL=$((FAIL + 1))
+    echo "  FAIL  $desc"; echo "        file: $file"; echo "        pattern: $pattern"; FAIL=$((FAIL + 1))
   fi
 }
 assert_version_bump() {
