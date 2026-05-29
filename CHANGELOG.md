@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.15] — 2026-05-29
+
+### Fixed
+- **`uberthink` report.py — clamp `ambition_score` axes to avoid a complex-number dossier-sort crash** (#277). `ambition_score` applied fractional exponents (`BETA/GAMMA/DELTA = 1.2/1.3/1.2`) to axes that can be negative; in Python a negative base with a fractional exponent returns a `complex` rather than raising, so `round(complex)` raised `TypeError` and `rank()`'s `sorted(key=ambition)` raised `'<' not supported between instances of 'complex' and 'complex'`, aborting the Wave-7 dossier render with no cause-specific message (`feasibility_floor_fails()` cuts only `feas < 4.0`, so a negative `novelty`/`combination`/`impact` from the Arbiter's `ranked.yaml` survived to the exponent). Each axis is now clamped with `max(0.0, float(x))` before the power — a negative axis fails closed to `0` (worse than zero → product `0` → ambition tanks → still a real, sortable float), matching the existing zero-floor semantics; the clamp is identity for in-domain `[0,10]` values.
+
+### Tests
+- `tests/uberthink-report.test.sh` gains a negative-axis regression block: asserts `ambition_score` returns a real float (`== 0.0`) for a negative on every axis, that in-domain scores are unchanged, and that `rank()` does not raise on a `ranked.yaml` whose negative axes survive the feasibility floor. Reds pre-fix (`-771.29…`), greens after. 13/0.
+
 ## [0.35.14] — 2026-05-29
 
 ### Fixed
