@@ -345,15 +345,21 @@ EXPECTED_SOURCES_SORTED=$(printf '%s\n' \
   | LC_ALL=C sort)
 
 # S15.1 — Python frozenset is importable + has exactly the 7 members.
-PY_SOURCES_SORTED=$(python3 -c "import sys; sys.path.insert(0,'$LIB_DIR'); from report_primitives import ACCEPTED_SOURCES; print('\n'.join(sorted(ACCEPTED_SOURCES)))" 2>/dev/null)
+# Capture stderr (NOT 2>/dev/null) so an import/syntax error in report_primitives.py
+# surfaces in the FAIL message instead of being swallowed — fitting for the very
+# anti-silent-failure fix this suite guards.
+S15_PY_ERR="$(mktemp)"
+PY_SOURCES_SORTED=$(python3 -c "import sys; sys.path.insert(0,'$LIB_DIR'); from report_primitives import ACCEPTED_SOURCES; print('\n'.join(sorted(ACCEPTED_SOURCES)))" 2>"$S15_PY_ERR")
 if [[ "$PY_SOURCES_SORTED" == "$EXPECTED_SOURCES_SORTED" ]]; then
   echo "  PASS  S15.1 ACCEPTED_SOURCES frozenset imports with the 7 expected members"; PASS=$((PASS+1))
 else
   echo "  FAIL  S15.1 ACCEPTED_SOURCES frozenset mismatch"
   echo "        expected: $(echo "$EXPECTED_SOURCES_SORTED" | tr '\n' ' ')"
   echo "        got:      $(echo "$PY_SOURCES_SORTED" | tr '\n' ' ')"
+  [[ -s "$S15_PY_ERR" ]] && echo "        python stderr: $(tr '\n' ' ' < "$S15_PY_ERR")"
   FAIL=$((FAIL+1))
 fi
+rm -f "$S15_PY_ERR"
 
 # S15.2 — Spec closed-set (agents/findings-to-issues.md Step 1) == ACCEPTED_SOURCES.
 # Extract the {...} closed set, split on `,`, trim whitespace/backticks, sort.
@@ -395,16 +401,38 @@ else
   echo "  FAIL  S15.3 an emitter envelope() source is not in ACCEPTED_SOURCES (or none found)"; FAIL=$((FAIL+1))
 fi
 
-# S15.4 — Behavioral: envelope() RAISES on a bad source, ACCEPTS a good one.
-if python3 -c "import sys; sys.path.insert(0,'$LIB_DIR'); from report_primitives import envelope; import io; envelope(io.StringIO(), 'not-a-real-source', 'x')" 2>/dev/null; then
-  echo "  FAIL  S15.4a envelope() accepted an un-accepted source (must raise)"; FAIL=$((FAIL+1))
+# S15.4 — Behavioral: envelope() RAISES ValueError on a bad source, ACCEPTS a good one.
+# Use an explicit stdout marker (RAISED/OK) rather than relying on the process exit
+# code alone: a bare `2>/dev/null` + rc check would conflate "envelope raised
+# ValueError" (the contract) with "python errored for another reason" (e.g. a broken
+# import), which would FALSELY pass S15.4a. The marker only prints on the intended
+# control path, so an import/syntax error yields neither marker → both checks FAIL.
+S15_4A_OUT=$(python3 -c "
+import sys; sys.path.insert(0, '$LIB_DIR')
+from report_primitives import envelope
+import io
+try:
+    envelope(io.StringIO(), 'not-a-real-source', 'x')
+except ValueError:
+    print('RAISED'); sys.exit(0)
+sys.exit(1)
+" 2>/dev/null)
+if [[ "$S15_4A_OUT" == "RAISED" ]]; then
+  echo "  PASS  S15.4a envelope() raises ValueError on an un-accepted source"; PASS=$((PASS+1))
 else
-  echo "  PASS  S15.4a envelope() raises on an un-accepted source"; PASS=$((PASS+1))
+  echo "  FAIL  S15.4a envelope() did not raise ValueError on an un-accepted source (marker='$S15_4A_OUT')"; FAIL=$((FAIL+1))
 fi
-if python3 -c "import sys; sys.path.insert(0,'$LIB_DIR'); from report_primitives import envelope; import io; envelope(io.StringIO(), 'testers-aggregate', 'x')" 2>/dev/null; then
+S15_4B_OUT=$(python3 -c "
+import sys; sys.path.insert(0, '$LIB_DIR')
+from report_primitives import envelope
+import io
+envelope(io.StringIO(), 'testers-aggregate', 'x')
+print('OK')
+" 2>/dev/null)
+if [[ "$S15_4B_OUT" == "OK" ]]; then
   echo "  PASS  S15.4b envelope() accepts a valid source (testers-aggregate)"; PASS=$((PASS+1))
 else
-  echo "  FAIL  S15.4b envelope() rejected a valid source (testers-aggregate)"; FAIL=$((FAIL+1))
+  echo "  FAIL  S15.4b envelope() rejected a valid source or errored (marker='$S15_4B_OUT')"; FAIL=$((FAIL+1))
 fi
 
 echo

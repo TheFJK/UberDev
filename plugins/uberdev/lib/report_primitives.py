@@ -69,7 +69,7 @@ def envelope(fh: TextIO, source: str, body: str) -> None:
 
     The opening marker is written as the LEADING bytes of the file (no header,
     BOM, or blank line may precede it — findings-to-issues refuses if the
-    marker is not within the first 128 bytes; agents/findings-to-issues.md:41).
+    marker is not within the first 128 bytes; agents/findings-to-issues.md:42).
     `source` MUST be a value in the findings-to-issues closed allow-list when
     the output is consumed by that agent; this is now asserted at emit time
     against ACCEPTED_SOURCES (issue #198) so an un-accepted source raises here
