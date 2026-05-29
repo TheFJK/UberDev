@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/cluster-pipeline.test.sh — behavioral gates for /uberdev:cluster (issue #247).
 #
-# 21 gates P1-P21 that exercise the actual SKILL.md bash bodies +
+# 22 gates P1-P22 that exercise the actual SKILL.md bash bodies +
 # cluster_propose.py runtime behavior. Uses mock-gh (PATH override pattern
 # borrowed from tests/findings-to-issues.test.sh:51-72) + python3 + mktemp + jq.
 #
@@ -1439,6 +1439,98 @@ if [ "$p21_ok" = "1" ]; then
   PASS=$((PASS+1))
 else
   echo "  FAIL  P21 Phase 2 POOL_SIZE read hard-fail contract violated"
+  FAIL=$((FAIL+1))
+fi
+
+# ============================================================================
+# P22 — Phase 4 python aggregation emits a `cluster: WARN` stderr diagnostic
+#       WITHOUT corrupting the JSON-array stdout (#265 Part 2).
+# ============================================================================
+#
+# PR #267 added three `sys.stderr.write("cluster: WARN …")` diagnostics to the
+# Phase-4 python3 aggregation heredoc (SKILL.md "## Phase 4 — Propose"):
+#   1. PyYAML-not-importable  -> WARN + print('[]') + exit 0 (degrade, not crash)
+#   2. per-file YAML parse error -> WARN + `continue` (skip the bad file)
+#   3. per-cluster non-numeric confidence -> WARN + `continue`
+# Without a gate, a regression that strips a `sys.stderr.write` (turning a
+# loud-skip back into a silent one — the exact #265 masking class) would pass
+# CI. This gate extracts the python body VERBATIM from SKILL.md and runs it
+# against a mock RUN_DIR, asserting a `cluster: WARN` line reaches stderr while
+# stdout stays a valid JSON array (the WARN must NOT pollute the stdout the
+# `>` redirect captures into clusters-filtered.json).
+#
+# Robust to PyYAML being absent on the CI runner (it may or may not be
+# installed): the import-present path seeds a valid + a deliberately-unparseable
+# analyses YAML and asserts the parse-error WARN; the import-absent path runs
+# against an empty analyses/ and asserts the not-importable WARN + exact `[]`.
+echo "== P22 Phase 4 python aggregation WARN reaches stderr without corrupting JSON-array stdout"
+P22_DIR="$STAGE/p22"
+mkdir -p "$P22_DIR/analyses"
+
+# Extract the Phase-4 python heredoc body verbatim. The opener line begins
+# `python3 - "$RUN_DIR" "$MIN_CONFIDENCE"` (unique — the Phase 3.5 aggregator
+# opener at SKILL.md "## Phase 3.5" is `python3 - "$RUN_DIR"` with NO
+# `"$MIN_CONFIDENCE"`, so it does not match); the heredoc closes with a line
+# that is exactly `PY`. awk captures the lines strictly BETWEEN the two markers.
+P22_PY="$(awk '/^python3 - "\$RUN_DIR" "\$MIN_CONFIDENCE"/{f=1;next} f&&/^PY$/{exit} f' "$SKILL_MD")"
+
+P22_OUT="$P22_DIR/out.txt"
+P22_ERR="$P22_DIR/err.txt"
+p22_ok=1
+
+if [ -z "$P22_PY" ]; then
+  echo "  FAIL  P22 could not extract Phase-4 python heredoc body from SKILL.md"
+  p22_ok=0
+fi
+
+if [ "$p22_ok" = "1" ]; then
+  if python3 -c 'import yaml' >/dev/null 2>&1; then
+    # PyYAML PRESENT: seed a valid cluster + a deliberately-unparseable YAML
+    # (unterminated flow sequence reliably raises a yaml parse error). The
+    # python reads argv[1]=run_dir, argv[2]=min_conf, and the SCRIPT from stdin
+    # (the `-`); invoke verbatim with that contract.
+    printf 'clusters:\n  - lead: 1\n    members: [1, 2]\n    confidence: 0.9\n' \
+      > "$P22_DIR/analyses/good.yaml"
+    printf 'clusters: [1, 2\n' > "$P22_DIR/analyses/broken.yaml"
+    printf '%s' "$P22_PY" | python3 - "$P22_DIR" "0.5" > "$P22_OUT" 2>"$P22_ERR"
+    P22_RC=$?
+
+    # (1) stdout must parse as a JSON array — proves the WARN did NOT corrupt it.
+    if ! jq -e 'type=="array"' "$P22_OUT" >/dev/null 2>&1; then
+      echo "  FAIL  P22 (PyYAML present) stdout is not a JSON array (rc=$P22_RC)"
+      p22_ok=0
+    fi
+    # (2) stderr must carry the literal unparseable-YAML WARN diagnostic.
+    if ! grep -qF 'cluster: WARN skipping unparseable analyses YAML' "$P22_ERR"; then
+      echo "  FAIL  P22 (PyYAML present) stderr missing 'cluster: WARN skipping unparseable analyses YAML'"
+      p22_ok=0
+    fi
+  else
+    # PyYAML ABSENT: run against an empty analyses/ — the import guard fires,
+    # WARNs, prints '[]', and exits 0 (degrade, not crash).
+    printf '%s' "$P22_PY" | python3 - "$P22_DIR" "0.5" > "$P22_OUT" 2>"$P22_ERR"
+    P22_RC=$?
+
+    # (1) stdout must be exactly `[]` (the import-guard's degraded output).
+    if [ "$(cat "$P22_OUT")" != "[]" ]; then
+      echo "  FAIL  P22 (PyYAML absent) stdout not exactly '[]' (rc=$P22_RC, got '$(cat "$P22_OUT")')"
+      p22_ok=0
+    fi
+    # (2) stderr must carry the literal not-importable WARN diagnostic.
+    if ! grep -qF 'cluster: WARN PyYAML not importable' "$P22_ERR"; then
+      echo "  FAIL  P22 (PyYAML absent) stderr missing 'cluster: WARN PyYAML not importable'"
+      p22_ok=0
+    fi
+  fi
+fi
+
+if [ "$p22_ok" = "1" ]; then
+  echo "  PASS  P22 Phase-4 aggregation emits cluster: WARN to stderr; JSON-array stdout uncorrupted"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  P22 Phase-4 python WARN-diagnostic contract violated"
+  [ -s "$P22_OUT" ] && { echo "  -- stdout:"; sed 's/^/     /' "$P22_OUT"; }
+  [ -s "$P22_ERR" ] && { echo "  -- stderr:"; sed 's/^/     /' "$P22_ERR"; }
   FAIL=$((FAIL+1))
 fi
 

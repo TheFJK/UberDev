@@ -337,9 +337,6 @@ if [ -s "$RUN_DIR/refuse-list.txt" ]; then
   sort -u -n "$RUN_DIR/refuse-list.txt" -o "$RUN_DIR/refuse-list.txt" 2>/dev/null || :
 fi
 
-# Update TOTAL_ISSUES in run-state.txt — rewrite-from-template (safest cross-platform).
-# mktemp failure is fail-CLOSED: run-state.txt is the cross-phase rendezvous
-# point. Without TOTAL_ISSUES every subsequent phase reads zero.
 # issues.json drives TOTAL_ISSUES — the cross-phase rendezvous count every later
 # phase reads. A crashed/partial/0-byte producer must FATAL, not silently floor
 # TOTAL to 0 (#265 — same masking class as #263). `jq 'length'` on a 0-byte file
@@ -350,6 +347,9 @@ if [ ! -s "$RUN_DIR/issues.json" ] \
   echo "cluster: FATAL - cannot read issue count (non-empty JSON array) from $RUN_DIR/issues.json (upstream gh/jq producer crashed or partial-wrote); aborting" >&2
   exit 2
 fi
+# Update TOTAL_ISSUES in run-state.txt — rewrite-from-template (safest cross-platform).
+# mktemp failure is fail-CLOSED: run-state.txt is the cross-phase rendezvous
+# point. Without TOTAL_ISSUES every subsequent phase reads zero.
 RS_TMP="$(mktemp)" || { echo "error: mktemp failed for run-state rewrite (rc=$?)" >&2; exit 2; }
 while IFS='=' read -r k v; do
   case "$k" in
