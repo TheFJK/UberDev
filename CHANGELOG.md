@@ -4,6 +4,11 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.19] — 2026-05-29
+
+### Tests
+- **`/goal` orchestration layer gains runtime coverage (#293)** — the `lib/goal-state.sh` layer was densely unit-tested, but **no test executed the `skills/goal-pipeline/SKILL.md` bash fences** (CI only sourced the lib and grepped the markdown), so every orchestration-wiring regression — including the defects fixed in #288/#289/#290/#291/#292/#294 — could ship green. Adds CI-wired `tests/goal-pipeline-zsh.test.sh`, which extracts the SKILL.md `bash` fences and runs the key ones under the real **zsh** Bash-tool shell with `gh` / `claude` / `uberdev_dispatch_one` mocked: Phase-0 arg-parse + the bash≥4 resolver (asserts no spurious `exit 2` under zsh when bash≥4 is present, and `exit 2` when none — the #294 regression guard), the Phase-3 queue-empty convergence calc (#288), and one watch-loop iteration. Replaces the single-line negative-grep `--dry-run` assertion (G17) with a behavioural mocked-dispatch run asserting zero dispatch calls + `exit 0` + no `goal_dispatched` audit row. Wired into `.github/workflows/test.yml` per the `ci-wiring.test.sh` invariant.
+
 ## [0.35.18] — 2026-05-29
 
 ### Fixed

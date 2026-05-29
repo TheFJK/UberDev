@@ -85,6 +85,48 @@ assert_no_grep() {
 # guard per #209: a missing/unreadable helper aborts rc=2, not vacuous-green.
 source "$REPO_ROOT/tests/_lib_assert_structural.sh" || { echo "FATAL: _lib_assert_structural.sh missing/unreadable" >&2; exit 2; }
 
+# assert_eq GOT WANT LABEL — scalar equality (used by the behavioural G17 run).
+assert_eq() {
+  local got="$1" want="$2" label="$3"
+  if [ "$got" = "$want" ]; then
+    PASS=$((PASS + 1)); printf '  PASS  %s\n' "$label"
+  else
+    FAIL=$((FAIL + 1))
+    printf '  FAIL  %s\n' "$label" >&2
+    printf '        got:  [%s]\n' "$got" >&2
+    printf '        want: [%s]\n' "$want" >&2
+  fi
+}
+
+# extract_fence ANCHOR FILE — print the body of the ```bash fence containing
+# ANCHOR (handles the 3-space-indented Phase-0 fences). Content-anchored so it
+# survives line drift. Exit 3 (caller fails loud) when the anchor is not found.
+# Lets G17 RUN the real dry-run fences instead of grepping the markdown.
+_GOAL_EXTRACT_AWK="$(mktemp)"
+cat > "$_GOAL_EXTRACT_AWK" <<'AWK'
+BEGIN { infence=0; curbash=0; found=0; buf="" }
+{
+  line=$0
+  if (line ~ /^[[:space:]]*```/) {
+    if (infence==0) {
+      stripped=line; sub(/^[[:space:]]*```/, "", stripped)
+      curbash = (stripped ~ /^bash[[:space:]]*$/) ? 1 : 0
+      infence=1; buf=""; hasanchor=0; next
+    } else {
+      if (curbash==1 && hasanchor==1) { printf "%s", buf; found=1; exit }
+      infence=0; curbash=0; next
+    }
+  }
+  if (infence==1 && curbash==1) {
+    buf = buf line "\n"
+    if (index(line, ANCHOR) > 0) hasanchor=1
+  }
+}
+END { if (found==0) exit 3 }
+AWK
+extract_fence() { awk -v ANCHOR="$1" -f "$_GOAL_EXTRACT_AWK" "$2"; }
+trap 'rm -f "$_GOAL_EXTRACT_AWK"' EXIT
+
 echo "== G1: frontmatter (skill + command) =="
 assert_grep "$GOAL_SKILL" '^name: goal-pipeline$'        "G1.skill-name"
 assert_grep "$GOAL_CMD"   '^description: '               "G1.cmd-description"
@@ -216,23 +258,101 @@ assert_grep "$GOAL_SKILL" 'uberdev_goal_should_automerge'                "G16.au
 assert_grep "$GOAL_SKILL" 'automerge_attempt|merge.*attempt|MERGE_ATTEMPTS'  "G16.attempt-counter"
 
 echo
-echo "== G17: --dry-run semantics =="
+echo "== G17: --dry-run semantics (BEHAVIOURAL — #293) =="
 assert_grep "$GOAL_SKILL" '--dry-run|dry_run'                            "G17.dry-run-flag"
 assert_grep "$GOAL_SKILL" 'exit 0'                                       "G17.dry-run-exit"
-# Negative — must NOT actually dispatch /uberdev:orchestrator inside the
-# dry-run code path. The prose ("would dispatch /uberdev:orchestrator") is
-# descriptive narration, not real dispatch. Anchor on the imperative
-# call-site shape rather than the prose: a real dispatch invokes
-# uberdev_dispatch_one (or a slash-command inside a child-process prompt
-# heredoc) — both forbidden inside the dry-run branch.
-# Plan-literal `dry.run.*dispatch.*turbo` false-positives on Step 8's
-# explanatory bullet (around SKILL.md ~line 169 — "planned cycle-1 dispatch
-# list … would dispatch /uberdev:orchestrator for issues …"); the contract
-# this assertion locks is "no actual gh/dispatch call in the dry-run branch",
-# which is shape-checked by requiring the dry-run branch to exit before
-# reaching uberdev_dispatch_one.
+# #293 — the old G17 was a single-line negative grep
+# (`dry_run=1.*uberdev_dispatch_one`) that CANNOT catch a real dispatch leak:
+# the guard is an early `exit 0` hundreds of lines away from any dispatch call,
+# so the two literals never share a line regardless of whether the gate works.
+# Replace it with a BEHAVIOURAL run: extract the real Phase-0 fences (arg-parse
+# -> dry-run gate -> the step-9 `goal_dispatched` emit) from SKILL.md, run them
+# under bash with `uberdev_dispatch_one` + `uberdev_goal_audit` MOCKED as
+# call-recorders, and assert the dry-run contract (S9 + D16):
+#   (1) exit 0, (2) ZERO dispatch calls, (3) NO goal_dispatched audit row.
+# A negative control (same fences, NO --dry-run) proves the assertion is not
+# vacuous: it MUST reach the emit and record goal_dispatched.
+g17_dir="$(mktemp -d)"
+g17_argparse="$g17_dir/argparse.sh"
+g17_dryrun="$g17_dir/dryrun.sh"
+g17_emit="$g17_dir/emit.sh"
+# CI runs goal.test.sh under bash (ubuntu bash 5.x / windows Git Bash 4.x+) —
+# both are bash>=4, so the dry-run fences (which use bash arrays) run under the
+# launching interpreter. $BASH is the absolute path to the running bash.
+g17_bash="${BASH:-bash}"
+if extract_fence 'for tok in $ARGUMENTS' "$GOAL_SKILL" > "$g17_argparse" && [ -s "$g17_argparse" ] \
+   && extract_fence 'dry-run preview (no agent spawn' "$GOAL_SKILL" > "$g17_dryrun" && [ -s "$g17_dryrun" ] \
+   && extract_fence 'issues_json=' "$GOAL_SKILL" > "$g17_emit" && [ -s "$g17_emit" ]; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "G17.extract: arg-parse + dry-run gate + goal_dispatched emit fences located in SKILL.md"
+
+  # Build the dry-run driver. Mocks record into files; we pre-seed the resolved
+  # Phase-0 scalars the dry-run gate prints, then run the three fences in order.
+  cat > "$g17_dir/dry_driver.sh" <<DRV
+set -u
+export UBERDEV_TMPDIR="$g17_dir/state"; mkdir -p "\$UBERDEV_TMPDIR"
+. "$GOAL_LIB"
+uberdev_dispatch_one() { printf 'DISPATCH %s\n' "\$*" >> "$g17_dir/dispatch.log"; return 0; }
+uberdev_goal_audit()  { printf 'AUDIT %s\n'    "\$1" >> "$g17_dir/audit.log"; return 0; }
+MAX_CYCLES=5; MAX_PARALLEL=3; BARRIER_TIMEOUT_S=14400
+UBERDEV_RESOLVED_BACKEND=claude-bg
+GOAL_ID="goal-g17dryrun01"
+ARGUMENTS="101 202 --dry-run"
+source "$g17_argparse"
+source "$g17_dryrun"
+source "$g17_emit"
+printf 'REACHED-EMIT rc=%s\n' "\$?"
+DRV
+  g17_out="$("$g17_bash" "$g17_dir/dry_driver.sh" 2>&1)"
+  g17_rc=$?
+  assert_eq "$g17_rc" "0" "G17.behavioral.exit0: --dry-run run exits 0"
+  g17_dispatched="$([ -s "$g17_dir/dispatch.log" ] && echo LEAKED || echo none)"
+  assert_eq "$g17_dispatched" "none" "G17.behavioral.no-dispatch: --dry-run made ZERO uberdev_dispatch_one calls"
+  if [ -s "$g17_dir/audit.log" ] && grep -q 'goal_dispatched' "$g17_dir/audit.log"; then
+    assert_eq "goal_dispatched-emitted" "absent" "G17.behavioral.no-audit: --dry-run emitted NO goal_dispatched row (S9)"
+  else
+    assert_eq "absent" "absent" "G17.behavioral.no-audit: --dry-run emitted NO goal_dispatched row (S9)"
+  fi
+  # The dry-run `exit 0` must short-circuit BEFORE the step-9 emit fence runs.
+  if printf '%s' "$g17_out" | grep -q 'REACHED-EMIT'; then
+    assert_eq "reached-emit" "short-circuited" "G17.behavioral.short-circuit: dry-run exits before the goal_dispatched emit fence"
+  else
+    assert_eq "short-circuited" "short-circuited" "G17.behavioral.short-circuit: dry-run exits before the goal_dispatched emit fence"
+  fi
+
+  # Negative control — WITHOUT --dry-run the SAME fences MUST reach the emit and
+  # record goal_dispatched. Proves the dry-run assertions above are non-vacuous
+  # (a broken/removed dry-run gate would let the dry-run run fall through to the
+  # emit, flipping G17.behavioral.no-audit RED).
+  cat > "$g17_dir/real_driver.sh" <<DRV
+set -u
+export UBERDEV_TMPDIR="$g17_dir/state2"; mkdir -p "\$UBERDEV_TMPDIR"
+. "$GOAL_LIB"
+uberdev_dispatch_one() { printf 'DISPATCH %s\n' "\$*" >> "$g17_dir/dispatch2.log"; return 0; }
+uberdev_goal_audit()  { printf 'AUDIT %s\n'    "\$1" >> "$g17_dir/audit2.log"; return 0; }
+MAX_CYCLES=5; MAX_PARALLEL=3; BARRIER_TIMEOUT_S=14400
+UBERDEV_RESOLVED_BACKEND=claude-bg
+GOAL_ID="goal-g17real01"
+ARGUMENTS="101 202"
+source "$g17_argparse"
+source "$g17_dryrun"
+source "$g17_emit"
+printf 'REACHED-EMIT rc=%s\n' "\$?"
+DRV
+  "$g17_bash" "$g17_dir/real_driver.sh" >/dev/null 2>&1
+  if [ -s "$g17_dir/audit2.log" ] && grep -q 'goal_dispatched' "$g17_dir/audit2.log"; then
+    assert_eq "emitted" "emitted" "G17.behavioral.control: WITHOUT --dry-run the emit fence IS reached + records goal_dispatched (non-vacuous proof)"
+  else
+    assert_eq "absent" "emitted" "G17.behavioral.control: WITHOUT --dry-run the emit fence IS reached + records goal_dispatched (non-vacuous proof)"
+  fi
+else
+  FAIL=$((FAIL + 1))
+  printf '  FAIL  %s\n' "G17.extract: could NOT extract the Phase-0 dry-run fences from SKILL.md (anchors moved?)" >&2
+fi
+# Structural backstop (kept from the original G17): no literal dispatch call on
+# a `dry_run=1` line. Cheap and complementary to the behavioural run above.
 assert_no_grep "$GOAL_SKILL" 'dry_run=1.*uberdev_dispatch_one|uberdev_dispatch_one.*dry_run=1' \
                                                                          "G17.dry-run-no-dispatch"
+rm -rf "$g17_dir"
 
 echo
 echo "== G18: ReDoS-safe Blocks: parser =="
@@ -300,8 +420,8 @@ assert_no_grep "$GOAL_LIB" '\bbash -c'                                   "G19.no
 assert_grep "$GOAL_CMD" '--i-know-what-im-doing'                         "G19.r12-mentioned-once"
 
 echo
-echo "== G20: version bump locked (0.35.18) =="
-assert_version_bump "$REPO_ROOT" "0.35.18"
+echo "== G20: version bump locked (0.35.19) =="
+assert_version_bump "$REPO_ROOT" "0.35.19"
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
 
 assert_grep "$GOAL_SKILL" 'uberdev_dispatch_resolve_env'  "G20b.phase0-wires-resolve-env (#175 SSOT anchor)"
