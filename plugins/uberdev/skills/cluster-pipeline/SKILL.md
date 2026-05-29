@@ -409,7 +409,7 @@ fi
 # still writes valid `[]` (POOL_SIZE=0 → CHUNK_COUNT floored to 1 below).
 if [ ! -s "$RUN_DIR/cluster-pool.json" ] \
    || ! POOL_SIZE="$(jq 'if type == "array" then length else error("cluster-pool.json is not a JSON array") end' "$RUN_DIR/cluster-pool.json")"; then
-  echo "cluster: FATAL - cannot read pool size (non-empty JSON array) from $RUN_DIR/cluster-pool.json (refuse-list filter producer crashed); aborting" >&2
+  echo "cluster: FATAL - cannot read pool size (non-empty JSON array) from $RUN_DIR/cluster-pool.json (refuse-list filter producer crashed or wrote a non-array); aborting" >&2
   exit 2
 fi
 CHUNK_COUNT=$(( (POOL_SIZE + CHUNK_SIZE - 1) / CHUNK_SIZE ))

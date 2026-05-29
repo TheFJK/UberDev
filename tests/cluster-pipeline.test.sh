@@ -1395,7 +1395,7 @@ p21_fence() {
     # --- BEGIN verbatim SKILL.md:410-414 ---
     if [ ! -s "$RUN_DIR/cluster-pool.json" ] \
        || ! POOL_SIZE="$(jq 'if type == "array" then length else error("cluster-pool.json is not a JSON array") end' "$RUN_DIR/cluster-pool.json")"; then
-      echo "cluster: FATAL - cannot read pool size (non-empty JSON array) from $RUN_DIR/cluster-pool.json (refuse-list filter producer crashed); aborting" >&2
+      echo "cluster: FATAL - cannot read pool size (non-empty JSON array) from $RUN_DIR/cluster-pool.json (refuse-list filter producer crashed or wrote a non-array); aborting" >&2
       exit 2
     fi
     # --- END verbatim SKILL.md:410-414 ---
