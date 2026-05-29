@@ -1140,38 +1140,10 @@ goal <GOAL_ID>: cycles=<N>/<MAX> prs_merged=<M> prs_held=<H> issues_resolved=<R>
 
 The held-PR list (each row `pr=<num> state=<yellow-held|red-held> blocks=#<i1>,#<i2>,…`) is the **post-mortem surface** — it tells the operator which PRs need human attention. It is printed after the summary line, one row per held PR.
 
-```bash
-# #171 — print_summary reads GOAL_ID/MAX_CYCLES/watch_start from the calling
-# shell and calls uberdev_goal_* helpers that gate on the UBERDEV_GOAL_ID env.
-# Every caller (the Phase 1/2/3 fences) rehydrates that state via
-# uberdev_goal_read_run_state at fence top (which also re-exports UBERDEV_GOAL_ID
-# + UBERDEV_TMPDIR). Do NOT call print_summary from a block that has not run that
-# rehydration — it is never called from Phase 0.
-print_summary() {
-  local cycles="$1" prs_merged prs_held_lines prs_held_count issues_resolved wall_secs
-  prs_merged="$(uberdev_goal_list_prs_in_state "$GOAL_ID" merged | grep -c . || true)"
-  # Build a `<state>\t<pr>` stream so the per-row printf below can emit the
-  # `state=` field promised at line ~466 ("each row pr=<num> state=<yellow-held
-  # |red-held> blocks=…"). The prior implementation merged the two lists into
-  # bare PR numbers and the `state=` field was silently dropped (S6).
-  prs_held_lines="$( \
-    uberdev_goal_list_prs_in_state "$GOAL_ID" yellow-held | sed 's/^/yellow-held\t/'; \
-    uberdev_goal_list_prs_in_state "$GOAL_ID" red-held    | sed 's/^/red-held\t/' )"
-  prs_held_count="$(printf '%s\n' "$prs_held_lines" | grep -c . || true)"
-  issues_resolved="$(uberdev_goal_count_resolved_issues "$GOAL_ID")"
-  wall_secs="$(( $(date +%s) - watch_start ))"
-  printf 'goal %s: cycles=%s/%s prs_merged=%s prs_held=%s issues_resolved=%s wall_secs=%s\n' \
-    "$GOAL_ID" "$cycles" "$MAX_CYCLES" "$prs_merged" "$prs_held_count" \
-    "$issues_resolved" "$wall_secs"
-  printf '%s\n' "$prs_held_lines" | while IFS=$'\t' read -r state p; do
-    [ -z "$p" ] && continue
-    body="$(_uberdev_goal_fetch_pr_body "$p")"
-    blocks="$(printf '%s\n' "$body" | grep -E '^Blocks: #[0-9]+$' \
-      | sed -E 's/^Blocks: #([0-9]+)$/#\1/' | paste -sd, -)"
-    printf '  pr=%s state=%s blocks=%s\n' "$p" "$state" "${blocks:-none}"
-  done
-}
-```
+**`print_summary` lives in `lib/goal-state.sh`, NOT inline here (issue #270).** It is *called* from the Phase-1/2/3 fences on every exit path (every circuit breaker and the convergence path — see the `print_summary "$cycle"` call sites in those fences), but each phase is a separate fresh shell and a shell function does **not** survive a fence boundary. Defining it in a Phase-4 fence stranded it: every non-Phase-4 exit hit `command not found` (rc 127) and silently dropped the operator summary line + held-PR post-mortem rows. Hoisting it into `lib/goal-state.sh` (which each fence already re-sources at its top) brings it into scope in every phase. Its contract is unchanged:
+
+- It reads `GOAL_ID` / `MAX_CYCLES` / `watch_start` from the calling shell, which every Phase-1/2/3 fence rehydrates via `uberdev_goal_read_run_state` at fence top (that helper also re-exports `UBERDEV_GOAL_ID` + `UBERDEV_TMPDIR`). It is therefore never called from Phase 0 (which has not run that rehydration).
+- It emits the `goal <GOAL_ID>: cycles=… prs_merged=… prs_held=… issues_resolved=… wall_secs=…` line to stdout, then one `  pr=<num> state=<yellow-held|red-held> blocks=#<i1>,…` row per held PR (its only dep, `_uberdev_goal_fetch_pr_body`, also lives in `lib/goal-state.sh`).
 
 ## Unblock rule
 
