@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.16] — 2026-05-29
+
+### Fixed
+- **Envelope the Phase-2 simplify-lens dispatch diff (prompt-injection — #271 follow-up)** (#286). #271 enveloped the Phase-1 reviewer dispatch + added the untrusted-input stanza to the six agent bodies (incl. `code-simplifier`), but the **Phase-2 simplify-lens dispatch** reused `code-simplifier` at two command-site points that still passed the diff raw: `commands/simplify.md` (`<<diff_brief>>`) and `commands/review-pr.md` Step 6 (`<<base_brief>>`). Both now wrap the diff in `<external-untrusted-input source="pr-diff">…</external-untrusted-input>` (the trusted `## Lens emphasis:` / `## Additional Focus` directives stay OUTSIDE the envelope), completing defense-in-depth across every diff-ingesting agent-dispatch site.
+
+### Tests
+- `tests/simplify.test.sh` + `tests/review-pr.test.sh` gain region-scoped open/close-tag asserts (awk-ranged to the Phase-2 lens-dispatch block so the pre-existing `source="post-impl-review-aggregate"` close tag cannot false-PASS) PLUS a literal dispatch-line pin on `prompt: <external-untrusted-input source="pr-diff">` (so a prose-only mention can't false-PASS). Mutation-tested via revert. 60/0 + 135/0.
+
 ## [0.35.15] — 2026-05-29
 
 ### Fixed
