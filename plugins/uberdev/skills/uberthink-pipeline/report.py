@@ -87,12 +87,25 @@ def ambition_score(novelty: float, feasibility: float, combination: float, impac
 
     Product form so a near-zero on any axis tanks the score — you can't win on
     novelty alone. Returns 0 if any input is 0 (kept implicit by the product).
+
+    Each axis is clamped to non-negative (``max(0.0, float(x))``) BEFORE the
+    fractional power. A negative base with a fractional exponent (BETA/GAMMA/
+    DELTA = 1.2/1.3/1.2) does NOT raise in Python — it returns a ``complex``
+    (e.g. ``(-2.0) ** 1.2`` is complex), which then makes ``round(...)`` raise
+    ``TypeError`` here and, if it ever reached the caller, makes ``rank()``'s
+    ``sorted(..., key=ambition)`` raise ``'<' not supported ... complex`` and
+    abort the dossier render. ``feasibility_floor_fails()`` only cuts ``feas <
+    4.0``, so a negative novelty/combination/impact from the Arbiter's
+    ``ranked.yaml`` survives the floor and would otherwise reach the exponent.
+    Clamping to 0 fails closed (a negative axis is worse than zero → product 0
+    → ambition tanks → still sortable), matching the existing zero-floor
+    semantics above.
     """
     return round(
-        float(novelty) ** ALPHA
-        * float(feasibility) ** BETA
-        * float(combination) ** GAMMA
-        * float(impact) ** DELTA,
+        max(0.0, float(novelty)) ** ALPHA
+        * max(0.0, float(feasibility)) ** BETA
+        * max(0.0, float(combination)) ** GAMMA
+        * max(0.0, float(impact)) ** DELTA,
         6,
     )
 

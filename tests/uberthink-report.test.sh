@@ -58,6 +58,63 @@ PY
 SCORING_RC=$?
 check "scoring contract: all 6 spec §3 asserts pass" "[ $SCORING_RC -eq 0 ]"
 
+# === Negative-axis clamp (issue #277): a negative axis must NOT become a Python
+# complex and crash the dossier sort. Before the fix, ambition_score() applied a
+# fractional exponent (BETA/GAMMA/DELTA = 1.2/1.3/1.2) to a negative base, which
+# returns a complex; round(complex) raises TypeError inside ambition_score(), and
+# any complex that escaped made rank()'s sorted(key=ambition) raise
+# "'<' not supported between instances of 'complex' and 'complex'", aborting the
+# Wave-7 render. The fix clamps each axis with max(0.0, float(x)) BEFORE the power
+# so a negative axis fails closed to 0 (worse than zero -> product 0 -> sortable). ===
+PYTHONPATH="$PIPELINE_DIR" python3 - <<'PY'
+import report
+
+# (a) ambition_score must return a real float (never complex) for a negative on
+#     EVERY axis — including feasibility/combination/impact whose exponents are
+#     fractional (the bases that previously went complex).
+for axis, args in {
+    "novelty":     (-2.0, 5.0, 5.0, 5.0),
+    "feasibility": (5.0, -2.0, 5.0, 5.0),
+    "combination": (5.0, 5.0, -2.0, 5.0),
+    "impact":      (5.0, 5.0, 5.0, -2.0),
+    "all":         (-1.0, -1.0, -1.0, -1.0),
+}.items():
+    v = report.ambition_score(*args)
+    assert isinstance(v, float) and not isinstance(v, complex), \
+        f"negative {axis}: ambition_score returned non-float {v!r} ({type(v).__name__})"
+    # Clamp-to-zero on a negative axis means the product collapses to 0 (fail-closed).
+    assert v == 0.0, f"negative {axis}: expected clamped 0.0, got {v!r}"
+
+# (b) Positive/zero inputs are unchanged — the clamp is a no-op above zero, so the
+#     existing scoring contract still holds (regression guard for the fix itself).
+assert abs(report.ambition_score(6, 6, 6, 6)
+           - round(6.0**1.0 * 6.0**1.2 * 6.0**1.3 * 6.0**1.2, 6)) < 1e-9
+assert report.ambition_score(0, 5, 5, 5) == 0.0
+
+# (c) rank() must NOT raise on a ranked.yaml carrying a negative axis that survives
+#     the feasibility floor (feas >= 4.0, every feas_sub > 0). A negative COMBINATION
+#     used to make ambition complex and crash the sort; now the design ranks last.
+designs = [
+    {"id": "NEG_COMB", "novelty": 7, "feasibility": 6, "combination": -3, "impact": 6,
+     "feas_subs": {"hard_constraint": 6, "survives_adversary": 6, "buildability": 6,
+                   "premortem_resilience": 6, "deployment_reality": 6}},
+    {"id": "NEG_IMP", "novelty": 7, "feasibility": 6, "combination": 6, "impact": -3,
+     "feas_subs": {"hard_constraint": 6, "survives_adversary": 6, "buildability": 6,
+                   "premortem_resilience": 6, "deployment_reality": 6}},
+    {"id": "OK", "novelty": 7, "feasibility": 7, "combination": 7, "impact": 7,
+     "feas_subs": {"hard_constraint": 7, "survives_adversary": 7, "buildability": 7,
+                   "premortem_resilience": 7, "deployment_reality": 7}},
+]
+ranked = report.rank(designs)   # must not raise TypeError
+ids = [d["id"] for d in ranked]
+assert ids[0] == "OK", f"positive design must rank first, got {ids}"
+assert all(isinstance(d["ambition"], float) for d in ranked), \
+    "every ranked design must carry a real-float ambition"
+print("NEGATIVE-AXIS CLAMP OK")
+PY
+CLAMP_RC=$?
+check "negative axis clamps to a real float (no complex -> no dossier sort crash) [#277]" "[ $CLAMP_RC -eq 0 ]"
+
 # === CLI smoke: --emit dossier writes the spec §6 layout (moonshot lane FIRST) ===
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 # Stage the shared fixture as $RUN_DIR/ranked.yaml so the CLI loads it via the
