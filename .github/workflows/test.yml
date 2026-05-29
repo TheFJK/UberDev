@@ -83,6 +83,7 @@ jobs:
           bash tests/solve-effort-flag.test.sh && \
           zsh tests/solve-pipeline-zsh.test.sh && \
           zsh tests/goal-state-zsh.test.sh && \
+          bash tests/docs-accuracy.test.sh && \
           bash tests/orchestrator-phase1-shortcircuit.test.sh && \
           bash tests/config-override.test.sh && \
           bash tests/orchestrator-phase-6-doc.test.sh && \
@@ -188,6 +189,7 @@ jobs:
           bash tests/turbo-flow.test.sh && \
           bash tests/issue-causal-fanout.test.sh && \
           bash tests/post-impl-review.test.sh && \
+          bash tests/docs-accuracy.test.sh && \
           bash tests/spec-reviewer-plan-aware.test.sh && \
           bash tests/audit-fixups.test.sh && \
           bash tests/review-pr.test.sh && \

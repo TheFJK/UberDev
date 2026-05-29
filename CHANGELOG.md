@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.11] — 2026-05-29
+
+### Fixed
+- **Docs-accuracy sweep — vendored `testing.md`, stale `CONTRIBUTING`, dead link, RFC 0004 collision** (#273). `plugins/uberdev/docs/testing.md` was verbatim-upstream Superpowers (documented `tests/claude-code/`, `run-skill-tests.sh`, `superpowers@superpowers-dev` — none exist here); rewritten to describe the real `tests/*.test.sh` shape-check harness and the `.github/workflows/test.yml` two-job (ubuntu + windows) matrix, with `uberdev@uberdev` as the marketplace key. `CONTRIBUTING.md` now points at `test.yml` as the test-suite SSOT (dropping the false "no behavioral tests yet" claim and the partial 4-file list) and its dead `[Repo layout](README.md#repo-layout)` link is fixed. The **RFC 0004 number collision** is resolved by renumbering the alias-reliability draft to **RFC 0011** (the dispatch-backends RFC keeps 0004 — shipped code + CHANGELOG cite it), with cross-refs updated in `hooks/session-start`, `lib/aliases-sync.sh`, and the CHANGELOG; the dispatch RFC's internal §4/§5 version refs are corrected to `0.29.0 → 0.30.0`.
+
+### Tests
+- New `tests/docs-accuracy.test.sh` (fail-loud on missing inputs; dynamic duplicate-RFC-number detection) guards against re-vendoring `testing.md`, the dead README link, and RFC-number collisions. Portable grep-and-assert — wired into both the ubuntu and windows CI jobs.
+
 ## [0.35.10] — 2026-05-29
 
 ### Fixed
@@ -581,7 +589,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Fixed
 
-- **Alias auto-install no longer silently depends on `jq`.** The `SessionStart` hook (`plugins/uberdev/hooks/session-start`) hard-requires `jq` to JSON-encode its context injection and `exit 0`s early when `jq` is absent — previously *before* the auto-alias-sync block ever ran, so a new user on a machine without `jq` got zero short-form aliases (`/issue`, `/solve`, `/turbo`, …) and no warning. The alias-sync block now runs **before** the `jq` guard, and `lib/aliases-sync.sh` no longer calls `jq` at all: its one use (`jq -r .version` on `plugin.json`) is replaced by a jq-free `_aliases_read_version()` `sed` parse of the plugin's own manifest. Forwarders now install regardless of `jq`. See `docs/rfc/0004-alias-install-reliability.md`.
+- **Alias auto-install no longer silently depends on `jq`.** The `SessionStart` hook (`plugins/uberdev/hooks/session-start`) hard-requires `jq` to JSON-encode its context injection and `exit 0`s early when `jq` is absent — previously *before* the auto-alias-sync block ever ran, so a new user on a machine without `jq` got zero short-form aliases (`/issue`, `/solve`, `/turbo`, …) and no warning. The alias-sync block now runs **before** the `jq` guard, and `lib/aliases-sync.sh` no longer calls `jq` at all: its one use (`jq -r .version` on `plugin.json`) is replaced by a jq-free `_aliases_read_version()` `sed` parse of the plugin's own manifest. Forwarders now install regardless of `jq`. See `docs/rfc/0011-alias-install-reliability.md`.
 
 ### Added
 
