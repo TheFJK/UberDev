@@ -16,21 +16,38 @@ if "%~1"=="" (
 )
 
 set "HOOK_DIR=%~dp0"
+set "HOOK_SCRIPT=%~1"
 
+REM Forward every argument after the script name to bash, mirroring the Unix
+REM arm's `exec bash ... "$@"` contract. The bare `%2 %3 ... %9` form was wrong
+REM twice over: it dropped any 10th+ argument and re-split/mis-quoted args that
+REM contain spaces. SHIFT past %1 (the script name) and accumulate the rest as
+REM individually de-quoted-then-re-quoted tokens so each survives as one arg.
+REM A goto-loop (not a parenthesised block) reads %HOOK_ARGS% fresh each pass,
+REM so no delayed expansion is needed.
+set "HOOK_ARGS="
+shift
+:collect_hook_args
+if "%~1"=="" goto run_hook
+set HOOK_ARGS=%HOOK_ARGS% "%~1"
+shift
+goto collect_hook_args
+
+:run_hook
 REM Try Git for Windows bash in standard locations
 if exist "C:\Program Files\Git\bin\bash.exe" (
-    "C:\Program Files\Git\bin\bash.exe" "%HOOK_DIR%%~1" %2 %3 %4 %5 %6 %7 %8 %9
+    "C:\Program Files\Git\bin\bash.exe" "%HOOK_DIR%%HOOK_SCRIPT%"%HOOK_ARGS%
     exit /b %ERRORLEVEL%
 )
 if exist "C:\Program Files (x86)\Git\bin\bash.exe" (
-    "C:\Program Files (x86)\Git\bin\bash.exe" "%HOOK_DIR%%~1" %2 %3 %4 %5 %6 %7 %8 %9
+    "C:\Program Files (x86)\Git\bin\bash.exe" "%HOOK_DIR%%HOOK_SCRIPT%"%HOOK_ARGS%
     exit /b %ERRORLEVEL%
 )
 
 REM Try bash on PATH (e.g. user-installed Git Bash, MSYS2, Cygwin)
 where bash >nul 2>nul
 if %ERRORLEVEL% equ 0 (
-    bash "%HOOK_DIR%%~1" %2 %3 %4 %5 %6 %7 %8 %9
+    bash "%HOOK_DIR%%HOOK_SCRIPT%"%HOOK_ARGS%
     exit /b %ERRORLEVEL%
 )
 
