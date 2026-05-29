@@ -349,7 +349,11 @@ EXPECTED_SOURCES_SORTED=$(printf '%s\n' \
 # surfaces in the FAIL message instead of being swallowed — fitting for the very
 # anti-silent-failure fix this suite guards.
 S15_PY_ERR="$(mktemp)"
-PY_SOURCES_SORTED=$(python3 -c "import sys; sys.path.insert(0,'$LIB_DIR'); from report_primitives import ACCEPTED_SOURCES; print('\n'.join(sorted(ACCEPTED_SOURCES)))" 2>"$S15_PY_ERR")
+# Cross-platform import (#268 CI): `cd` into the lib dir (bash resolves the
+# absolute path on Git Bash/Windows too) and let `python3 -c` find the module
+# via cwd — passing an absolute BASH path to native-Windows python's sys.path
+# (e.g. /d/a/...) raises ModuleNotFoundError. No path argument reaches python.
+PY_SOURCES_SORTED=$( (cd "$LIB_DIR" && python3 -c "from report_primitives import ACCEPTED_SOURCES; print('\n'.join(sorted(ACCEPTED_SOURCES)))") 2>"$S15_PY_ERR")
 if [[ "$PY_SOURCES_SORTED" == "$EXPECTED_SOURCES_SORTED" ]]; then
   echo "  PASS  S15.1 ACCEPTED_SOURCES frozenset imports with the 7 expected members"; PASS=$((PASS+1))
 else
@@ -390,7 +394,7 @@ EMITTER_SOURCES=$(grep -rhoE 'envelope\([^,]+,[[:space:]]*"[^"]+"' "$REPO_ROOT"/
 S15_3_OK=1
 while IFS= read -r src; do
   [[ -z "$src" ]] && continue
-  if ! python3 -c "import sys; sys.path.insert(0,'$LIB_DIR'); from report_primitives import ACCEPTED_SOURCES; sys.exit(0 if '$src' in ACCEPTED_SOURCES else 1)" 2>/dev/null; then
+  if ! ( cd "$LIB_DIR" && python3 -c "import sys; from report_primitives import ACCEPTED_SOURCES; sys.exit(0 if '$src' in ACCEPTED_SOURCES else 1)" ) 2>/dev/null; then
     echo "        emitter source NOT in ACCEPTED_SOURCES: $src"
     S15_3_OK=0
   fi
@@ -407,8 +411,8 @@ fi
 # ValueError" (the contract) with "python errored for another reason" (e.g. a broken
 # import), which would FALSELY pass S15.4a. The marker only prints on the intended
 # control path, so an import/syntax error yields neither marker → both checks FAIL.
-S15_4A_OUT=$(python3 -c "
-import sys; sys.path.insert(0, '$LIB_DIR')
+S15_4A_OUT=$( (cd "$LIB_DIR" && python3 -c "
+import sys
 from report_primitives import envelope
 import io
 try:
@@ -416,19 +420,18 @@ try:
 except ValueError:
     print('RAISED'); sys.exit(0)
 sys.exit(1)
-" 2>/dev/null)
+") 2>/dev/null)
 if [[ "$S15_4A_OUT" == "RAISED" ]]; then
   echo "  PASS  S15.4a envelope() raises ValueError on an un-accepted source"; PASS=$((PASS+1))
 else
   echo "  FAIL  S15.4a envelope() did not raise ValueError on an un-accepted source (marker='$S15_4A_OUT')"; FAIL=$((FAIL+1))
 fi
-S15_4B_OUT=$(python3 -c "
-import sys; sys.path.insert(0, '$LIB_DIR')
+S15_4B_OUT=$( (cd "$LIB_DIR" && python3 -c "
 from report_primitives import envelope
 import io
 envelope(io.StringIO(), 'testers-aggregate', 'x')
 print('OK')
-" 2>/dev/null)
+") 2>/dev/null)
 if [[ "$S15_4B_OUT" == "OK" ]]; then
   echo "  PASS  S15.4b envelope() accepts a valid source (testers-aggregate)"; PASS=$((PASS+1))
 else
