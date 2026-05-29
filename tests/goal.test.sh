@@ -81,6 +81,10 @@ assert_no_grep() {
   fi
 }
 
+# Shared structural-assertion helpers (assert_version_bump for G20). Fail-loud
+# guard per #209: a missing/unreadable helper aborts rc=2, not vacuous-green.
+source "$REPO_ROOT/tests/_lib_assert_structural.sh" || { echo "FATAL: _lib_assert_structural.sh missing/unreadable" >&2; exit 2; }
+
 echo "== G1: frontmatter (skill + command) =="
 assert_grep "$GOAL_SKILL" '^name: goal-pipeline$'        "G1.skill-name"
 assert_grep "$GOAL_CMD"   '^description: '               "G1.cmd-description"
@@ -296,11 +300,8 @@ assert_no_grep "$GOAL_LIB" '\bbash -c'                                   "G19.no
 assert_grep "$GOAL_CMD" '--i-know-what-im-doing'                         "G19.r12-mentioned-once"
 
 echo
-echo "== G20: version bump locked (0.35.6) =="
-assert_grep "$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json" '"version": "0\.35\.6"'  "G20.plugin-json"
-assert_grep "$REPO_ROOT/.claude-plugin/marketplace.json"            '"version": "0\.35\.6"'  "G20.marketplace-json"
-assert_grep "$REPO_ROOT/README.md"                                  'version-0\.35\.6-blue'  "G20.readme-badge"
-assert_grep "$REPO_ROOT/CHANGELOG.md"                               '## \[0\.35\.6\]'        "G20.changelog"
+echo "== G20: version bump locked (0.35.7) =="
+assert_version_bump "$REPO_ROOT" "0.35.7"
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
 
 assert_grep "$GOAL_SKILL" 'uberdev_dispatch_resolve_env'  "G20b.phase0-wires-resolve-env (#175 SSOT anchor)"

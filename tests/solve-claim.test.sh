@@ -55,6 +55,11 @@ assert_grep_not() {
   fi
 }
 
+# Shared structural-assertion helpers (assert_version_bump for the version-bump
+# block). Fail-loud guard per #209: a missing/unreadable helper aborts rc=2,
+# not vacuous-green.
+source "$REPO_ROOT/tests/_lib_assert_structural.sh" || { echo "FATAL: _lib_assert_structural.sh missing/unreadable" >&2; exit 2; }
+
 echo "== Claim-protocol constants bound shell-side =="
 assert_grep "$SOLVE_PIPELINE" \
   "^UBERDEV_ACTIVE_LABEL='uberdev:active'" \
@@ -262,19 +267,8 @@ assert_grep "$SOLVE_CMD" \
   "small-team issue-claim protocol" \
   "solve.md mentions small-team claim protocol"
 
-echo "== Version bump 0.35.5 -> 0.35.6 propagated =="
-assert_grep "$PLUGIN_JSON" \
-  '"version": "0.35.6"' \
-  "plugin.json bumped to 0.35.6"
-assert_grep "$MARKETPLACE_JSON" \
-  '"version": "0.35.6"' \
-  "marketplace.json bumped to 0.35.6"
-assert_grep "$README" \
-  "version-0\\.35\\.6-blue" \
-  "README version badge bumped to 0.35.6"
-assert_grep "$CHANGELOG" \
-  '^## \[0\.35\.6\]' \
-  "CHANGELOG has [0.35.6] section header"
+echo "== Version bump 0.35.6 -> 0.35.7 propagated =="
+assert_version_bump "$REPO_ROOT" "0.35.7"
 
 echo "== #123 B1: closing-keyword regex left-anchor (rejects preclose/postfix/unresolve) =="
 # The closing-keyword regex in merge-pipeline Step 3.4 MUST require either start-of-input
