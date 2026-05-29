@@ -185,7 +185,7 @@ mk_fake_bash() {  # $1=path $2=major
 [ "\$1" = "-c" ] && { echo $2; exit 0; }
 exit 0
 FAKE
-  chmod +x "$1"
+  chmod +x "$1" || { echo "FATAL: chmod +x $1 failed (fake bash would be non-executable -> P0 false result)" >&2; exit 3; }
 }
 mk_fake_bash "$WORK/bash5" 5
 mk_fake_bash "$WORK/bash3" 3
@@ -195,7 +195,14 @@ mk_fake_bash "$WORK/bash3" 3
 # Replace the two hard-coded paths with test-controlled ones, and stub
 # `command -v bash` to return nothing, so ONLY our fake binaries are probed.
 make_resolver_variant() {  # $1=outfile  $2=first-cand  $3=second-cand
-  sed "s#/opt/homebrew/bin/bash /usr/local/bin/bash#$2 $3#" "$RESOLVER_FENCE" > "$1"
+  sed "s#/opt/homebrew/bin/bash /usr/local/bin/bash#$2 $3#" "$RESOLVER_FENCE" > "$1" \
+    || { echo "FATAL: make_resolver_variant sed failed writing $1" >&2; exit 3; }
+  # Fail LOUD if the substitution did not apply. A drifted SKILL.md candidate-list
+  # anchor would make sed a no-op passthrough, leaving the REAL bash paths in the
+  # variant -> P0a/P0b would then probe the host's real bash and FALSE-PASS,
+  # defeating the regression guard. Assert the test-controlled path landed.
+  grep -q "$2" "$1" \
+    || { echo "FATAL: resolver candidate-list substitution did not apply (SKILL.md anchor '/opt/homebrew/bin/bash /usr/local/bin/bash' drifted?)" >&2; exit 3; }
 }
 
 # --- P0a POSITIVE: a usable bash>=4 is present -> resolve + proceed (NOT exit 2).
@@ -362,7 +369,7 @@ write_term_driver() {  # $1=outfile $2=gid $3=case
   } > "$out"
 }
 
-mkdir -p "$WORK/state"
+mkdir -p "$WORK/state" || { echo "FATAL: mkdir -p $WORK/state failed" >&2; exit 3; }
 audit_for() { printf '%s' "$WORK/state/goal-$1.jsonl"; }
 
 # --- P3a: rollover queue NON-EMPTY -> must NOT converge (issue #288 #1).
@@ -434,8 +441,9 @@ echo "== W: watch-loop step-2b verdict read — verdict-locator glob under zsh (
 STEP2B_SLICE="$WORK/step2b.slice.sh"
 if slice_fence 'for pr_num in $(uberdev_goal_list_prs_in_state "$GOAL_ID" pushed-reviewing)' \
                '2c. Barrier-gated merge dispatch' > "$STEP2B_SLICE" \
-   && [ -s "$STEP2B_SLICE" ] && grep -q 'uberdev_goal_locate_review_pr_audit_by_pr' "$STEP2B_SLICE"; then
-  pass "W.extract: sliced the step-2b verdict-read loop (incl. the verdict locator call) from the watch fence"
+   && [ -s "$STEP2B_SLICE" ] && grep -q 'uberdev_goal_locate_review_pr_audit_by_pr' "$STEP2B_SLICE" \
+   && grep -qE '^[[:space:]]*done' "$STEP2B_SLICE"; then
+  pass "W.extract: sliced the step-2b verdict-read loop (incl. the verdict locator call + a loop-closing 'done' — guards a head-only partial slice) from the watch fence"
 else
   fail "W.extract: could NOT slice the step-2b loop (loop head / step-2c marker moved?)"
 fi
@@ -447,7 +455,7 @@ fi
 WT_ROOT="$WORK/wt-root"
 WT_STATE="$WT_ROOT/state"
 WT_VERDICT_DIR="$WT_ROOT/.claude/worktrees/wt-A/.uberdev/runs/20260529-140000-cafe01"
-mkdir -p "$WT_STATE" "$WT_VERDICT_DIR"
+mkdir -p "$WT_STATE" "$WT_VERDICT_DIR" || { echo "FATAL: mkdir -p worktree-mirror sandbox ($WT_VERDICT_DIR) failed" >&2; exit 3; }
 printf '%s\n' '{"pr":200,"sha":"cafe01","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":0},"halted":false}}}' \
   > "$WT_VERDICT_DIR/review-pr-verdict.json"
 
