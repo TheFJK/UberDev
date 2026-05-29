@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.12] — 2026-05-29
+
+### Fixed
+- **Cross-platform shell portability — `run-hook.cmd` Windows args + GNU-sed `probe` dependency** (#274). The Windows `cmd.exe` arm of `plugins/uberdev/hooks/run-hook.cmd` forwarded args as bare `%2 %3 … %9` (re-splitting spaced/quoted args, capping at 8 trailing args), asymmetric with the Unix arm's `exec bash … "$@"`; it now uses a `SHIFT`-based `goto` loop accumulating `HOOK_ARGS` with quoting, mirroring the `"$@"` contract (the `: << 'CMDBLOCK'` polyglot heredoc stays balanced under both `bash -n` and `zsh -n`). `tests/manual/probe-prompt-file-slash-expansion.sh` used GNU-sed-only `\x1B` in its ANSI strip (treated literally by BSD/macOS sed → escapes survive → empty `SESSION_ID` → spurious `INDETERMINATE`); replaced with a portable `tr -d '\033'` + POSIX-sed strip.
+
+### Tests
+- New `tests/crossplatform-shell-wrappers.test.sh` (21 assertions): structural asserts the broken forms are gone + portable forms present, a POSIX model of the `cmd` SHIFT-loop proving 8/11/spaced-arg forwarding, a `bash -n`/`zsh -n` heredoc-balance check (the `zsh -n` arm self-skips when zsh is absent — Windows-safe), and a platform-independent ANSI-strip regression kernel. Reds pre-fix (8 fails), greens post-fix (21/21). Portable — wired into both CI jobs.
+
 ## [0.35.11] — 2026-05-29
 
 ### Fixed

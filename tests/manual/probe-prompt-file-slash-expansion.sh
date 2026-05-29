@@ -75,8 +75,17 @@ probe_out="$(claude --bg --prompt-file "$PROBE_FILE" 2>&1)" || {
   write_verdict INDETERMINATE; exit 3;
 }
 
+# ANSI-strip portably. The previous `sed -E 's/\x1B\[…//g'` relied on GNU sed's
+# `\xHH` escape, which BSD/macOS sed treats as the literal chars `x1B` — the ESC
+# (0x1B) bytes then survived into the awk extraction, yielding an empty
+# SESSION_ID and a spurious INDETERMINATE/exit-3 on the macOS operator's box.
+# `tr -d '\033'` removes the ESC control byte on every platform (octal escape is
+# POSIX tr); the residual CSI body (`[<params><final>`) is then stripped with a
+# POSIX-portable sed that matches only literal `[`. Mirrors the canonical
+# ANSI-strip contract in lib/dispatch.sh without the GNU-only escape.
 SESSION_ID="$(printf '%s\n' "$probe_out" \
-  | sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g' \
+  | tr -d '\033' \
+  | sed -E 's/\[[0-9;]*[a-zA-Z]//g' \
   | awk '/backgrounded · [0-9a-f]{8}/ { print $3; exit }')"
 if [[ -z "$SESSION_ID" ]]; then
   write_verdict INDETERMINATE; exit 3
