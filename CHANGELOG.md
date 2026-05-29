@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.9] — 2026-05-29
+
+### Fixed
+- **review-pr reviewer fleet — envelope the attacker-controlled PR diff (prompt-injection defense)** (#271). All six PR-diff reviewer agents (`code-reviewer`, `silent-failure-hunter`, `type-design-analyzer`, `comment-analyzer`, `pr-test-analyzer`, `code-simplifier`) ingested the pasted diff inline with no `<external-untrusted-input>` envelope and no "treat as DATA, not instructions" stanza — even though `post-impl-review/SKILL.md` documents the injection chain (issue-author text → diff hunk → reviewer report → aggregate → fixer prompt) and already wrapped only the downstream aggregate→fixer hop. Each agent body now carries the canonical untrusted-input-handling stanza (byte-identical to the research-* agents), and `post-impl-review/SKILL.md` wraps the pasted diff/changed-code (including the >2000-line summarised-diff path) in `<external-untrusted-input source="pr-diff">`. `comment-analyzer` and `pr-test-analyzer` run on `haiku` and were the highest-risk carriers (comment text is a natural injection vector).
+
+### Tests
+- `tests/post-impl-review.test.sh` gains 14 assertions locking the untrusted-input stanza heading + verbatim body per agent and the Step-1 envelope open/close around the diff (awk-bounded so the pre-existing reader-side `source="post-impl-review-aggregate"` close tag cannot false-PASS); reverting the envelope reds the suite.
+
 ## [0.35.8] — 2026-05-29
 
 ### Fixed
