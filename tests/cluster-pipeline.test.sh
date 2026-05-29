@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/cluster-pipeline.test.sh — behavioral gates for /uberdev:cluster (issue #247).
 #
-# 19 gates P1-P19 that exercise the actual SKILL.md bash bodies +
+# 21 gates P1-P21 that exercise the actual SKILL.md bash bodies +
 # cluster_propose.py runtime behavior. Uses mock-gh (PATH override pattern
 # borrowed from tests/findings-to-issues.test.sh:51-72) + python3 + mktemp + jq.
 #
@@ -1301,6 +1301,144 @@ if [ "$p19_ok" = "1" ]; then
   PASS=$((PASS+1))
 else
   echo "  FAIL  P19 cluster_propose.py render-validation contract violated"
+  FAIL=$((FAIL+1))
+fi
+
+# ============================================================================
+# P20 — Phase 1 TOTAL read hard-fails on unreadable/zero-byte/non-array issues.json (#265).
+# ============================================================================
+#
+# Mirrors the issues.json guard at SKILL.md:348-352 VERBATIM (modulo the 4-space
+# subshell indent; the BEGIN/END markers below delimit the byte-identical copy —
+# keep in lockstep). issues.json drives TOTAL_ISSUES, the cross-phase rendezvous
+# count every later phase reads. A crashed/partial/0-byte gh|jq producer must
+# FATAL — rc!=0, FATAL on stderr, NO proceed line — rather than silently floor
+# TOTAL to 0 (same masking class as #263). `jq 'length'` on a 0-byte file exits 0
+# with empty output, so the `-s` guard catches the likeliest crash artifact. A
+# genuinely-empty pool still writes valid `[]`, so the fence proceeds with
+# TOTAL=0. The post-guard `echo "TOTAL=$TOTAL"` makes the proceed path observable.
+# Run in a subshell so the production `exit 2` is catchable as the function's rc.
+echo "== P20 Phase 1 TOTAL read hard-fails on missing/zero-byte/non-array issues.json; proceeds on valid/empty"
+P20_DIR="$STAGE/p20"
+
+p20_fence() {
+  ( set -u
+    RUN_DIR="$1"
+    # --- BEGIN verbatim SKILL.md:348-352 ---
+    if [ ! -s "$RUN_DIR/issues.json" ] \
+       || ! TOTAL="$(jq 'if type == "array" then length else error("issues.json is not a JSON array") end' "$RUN_DIR/issues.json")"; then
+      echo "cluster: FATAL - cannot read issue count (non-empty JSON array) from $RUN_DIR/issues.json (upstream gh/jq producer crashed or partial-wrote); aborting" >&2
+      exit 2
+    fi
+    # --- END verbatim SKILL.md:348-352 ---
+    echo "TOTAL=$TOTAL"
+  )
+}
+
+p20_ok=1
+
+# Hard-fail cases: each must abort (rc!=0), leak NO proceed line, and emit FATAL.
+p20_assert_hardfail() {  # $1=label  $2=run_dir
+  local out rc
+  out="$(p20_fence "$2" 2>"$P20_DIR/$1.err")"; rc=$?
+  [ "$rc" -ne 0 ]                    || { echo "  .. $1: expected rc!=0, got 0"; p20_ok=0; }
+  [ -z "$out" ]                      || { echo "  .. $1: leaked proceed line '$out'"; p20_ok=0; }
+  grep -qF 'FATAL' "$P20_DIR/$1.err" || { echo "  .. $1: no FATAL on stderr"; p20_ok=0; }
+}
+# Proceed cases: rc=0 and TOTAL=<expected> ($-anchored so TOTAL=2 != TOTAL=20).
+p20_assert_proceed() {   # $1=label  $2=run_dir  $3=expected_count
+  local out rc
+  out="$(p20_fence "$2" 2>/dev/null)"; rc=$?
+  [ "$rc" -eq 0 ]                           || { echo "  .. $1: expected rc=0, got $rc"; p20_ok=0; }
+  printf '%s' "$out" | grep -qE "TOTAL=$3\$" || { echo "  .. $1: missing TOTAL=$3 ('$out')"; p20_ok=0; }
+}
+
+# (a) missing file (no issues.json)  -> hard-fail
+mkdir -p "$P20_DIR/missing";                                                  p20_assert_hardfail missing "$P20_DIR/missing"
+# (b) zero-byte file                 -> hard-fail (`-s` guard, not jq's rc, catches it)
+mkdir -p "$P20_DIR/zero";    : > "$P20_DIR/zero/issues.json";                  p20_assert_hardfail zero "$P20_DIR/zero"
+# (c) valid JSON, non-array {x:1}    -> hard-fail (type=="array" guard rejects it)
+mkdir -p "$P20_DIR/nonarray"; echo '{"x":1}' > "$P20_DIR/nonarray/issues.json"; p20_assert_hardfail nonarray "$P20_DIR/nonarray"
+# (d) valid array (2 issues)         -> proceed, TOTAL=2
+mkdir -p "$P20_DIR/valid";   echo '[{"number":1},{"number":2}]' > "$P20_DIR/valid/issues.json"
+p20_assert_proceed valid "$P20_DIR/valid" 2
+# (e) legitimate empty pool []       -> proceed, TOTAL=0 (NOT masked)
+mkdir -p "$P20_DIR/empty";   echo '[]' > "$P20_DIR/empty/issues.json"
+p20_assert_proceed empty "$P20_DIR/empty" 0
+
+if [ "$p20_ok" = "1" ]; then
+  echo "  PASS  P20 hard-fail on missing/zero-byte/non-array; proceed on valid([2])/empty([])"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  P20 Phase 1 TOTAL read hard-fail contract violated"
+  FAIL=$((FAIL+1))
+fi
+
+# ============================================================================
+# P21 — Phase 2 POOL_SIZE read hard-fails on unreadable/zero-byte/non-array cluster-pool.json (#265).
+# ============================================================================
+#
+# Mirrors the cluster-pool.json guard at SKILL.md:410-414 VERBATIM (modulo the
+# 4-space subshell indent; the BEGIN/END markers below delimit the byte-identical
+# copy — keep in lockstep). cluster-pool.json is always written just above the
+# guard (cp OR jq), so a missing/0-byte/non-array value here means that producer
+# crashed — FATAL rather than silently floor POOL_SIZE to 0 (#265). A
+# legitimately-empty pool still writes valid `[]`, so the fence proceeds with
+# POOL_SIZE=0. The post-guard `echo "POOL_SIZE=$POOL_SIZE"` makes the proceed path
+# observable. Run in a subshell so the production `exit 2` is catchable as rc.
+echo "== P21 Phase 2 POOL_SIZE read hard-fails on missing/zero-byte/non-array cluster-pool.json; proceeds on valid/empty"
+P21_DIR="$STAGE/p21"
+
+p21_fence() {
+  ( set -u
+    RUN_DIR="$1"
+    # --- BEGIN verbatim SKILL.md:410-414 ---
+    if [ ! -s "$RUN_DIR/cluster-pool.json" ] \
+       || ! POOL_SIZE="$(jq 'if type == "array" then length else error("cluster-pool.json is not a JSON array") end' "$RUN_DIR/cluster-pool.json")"; then
+      echo "cluster: FATAL - cannot read pool size (non-empty JSON array) from $RUN_DIR/cluster-pool.json (refuse-list filter producer crashed); aborting" >&2
+      exit 2
+    fi
+    # --- END verbatim SKILL.md:410-414 ---
+    echo "POOL_SIZE=$POOL_SIZE"
+  )
+}
+
+p21_ok=1
+
+# Hard-fail cases: each must abort (rc!=0), leak NO proceed line, and emit FATAL.
+p21_assert_hardfail() {  # $1=label  $2=run_dir
+  local out rc
+  out="$(p21_fence "$2" 2>"$P21_DIR/$1.err")"; rc=$?
+  [ "$rc" -ne 0 ]                    || { echo "  .. $1: expected rc!=0, got 0"; p21_ok=0; }
+  [ -z "$out" ]                      || { echo "  .. $1: leaked proceed line '$out'"; p21_ok=0; }
+  grep -qF 'FATAL' "$P21_DIR/$1.err" || { echo "  .. $1: no FATAL on stderr"; p21_ok=0; }
+}
+# Proceed cases: rc=0 and POOL_SIZE=<expected> ($-anchored so POOL_SIZE=3 != POOL_SIZE=30).
+p21_assert_proceed() {   # $1=label  $2=run_dir  $3=expected_count
+  local out rc
+  out="$(p21_fence "$2" 2>/dev/null)"; rc=$?
+  [ "$rc" -eq 0 ]                               || { echo "  .. $1: expected rc=0, got $rc"; p21_ok=0; }
+  printf '%s' "$out" | grep -qE "POOL_SIZE=$3\$" || { echo "  .. $1: missing POOL_SIZE=$3 ('$out')"; p21_ok=0; }
+}
+
+# (a) missing file (no cluster-pool.json) -> hard-fail
+mkdir -p "$P21_DIR/missing";                                                        p21_assert_hardfail missing "$P21_DIR/missing"
+# (b) zero-byte file                       -> hard-fail (`-s` guard, not jq's rc, catches it)
+mkdir -p "$P21_DIR/zero";    : > "$P21_DIR/zero/cluster-pool.json";                  p21_assert_hardfail zero "$P21_DIR/zero"
+# (c) valid JSON, non-array {x:1}          -> hard-fail (type=="array" guard rejects it)
+mkdir -p "$P21_DIR/nonarray"; echo '{"x":1}' > "$P21_DIR/nonarray/cluster-pool.json"; p21_assert_hardfail nonarray "$P21_DIR/nonarray"
+# (d) valid array (3 issues)               -> proceed, POOL_SIZE=3
+mkdir -p "$P21_DIR/valid";   echo '[{"number":1},{"number":2},{"number":3}]' > "$P21_DIR/valid/cluster-pool.json"
+p21_assert_proceed valid "$P21_DIR/valid" 3
+# (e) legitimate empty pool []             -> proceed, POOL_SIZE=0 (NOT masked)
+mkdir -p "$P21_DIR/empty";   echo '[]' > "$P21_DIR/empty/cluster-pool.json"
+p21_assert_proceed empty "$P21_DIR/empty" 0
+
+if [ "$p21_ok" = "1" ]; then
+  echo "  PASS  P21 hard-fail on missing/zero-byte/non-array; proceed on valid([3])/empty([])"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  P21 Phase 2 POOL_SIZE read hard-fail contract violated"
   FAIL=$((FAIL+1))
 fi
 
