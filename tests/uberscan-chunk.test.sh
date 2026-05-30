@@ -91,5 +91,19 @@ sys.exit(0 if max(b)<=2*mean else 1)'"
 # Fail-loud: --areas 0 is rejected (matches --budget-bytes/--max-chunks validation).
 check "rejects --areas 0 (fail-loud, non-zero exit)" "! python3 \"$CHUNK\" --scope . --areas 0 >/dev/null 2>&1"
 
+# Large-file invariant (pins the pack_areas binary-search LOWER bound
+# lo = max(max_file, ceil(total/N))): a single file bigger than the naive
+# fair-share (total/N) must still be PLACED in its own area and everything stays
+# covered — a wrong lower bound would under-size an area and drop the big file.
+# The fixture's huge.ts is >256KB (skipped by MAX_FILE_BYTES), so add a 150KB file
+# UNDER the cap. Added after the 6-file assertions above (their captures already ran).
+mkdir -p "$TMP/big"
+head -c 150000 /dev/zero | tr '\0' 'B' > "$TMP/big/big.ts"   # 150KB, < 256KB cap → kept
+git add -A 2>/dev/null
+BIGOUT="$(python3 "$CHUNK" --scope . --areas 3)"   # fair share ~50KB; big file 150KB >> that
+check "large-file run yields <= 3 areas" "printf '%s' \"\$BIGOUT\" | python3 -c 'import json,sys; sys.exit(0 if len(json.load(sys.stdin)[\"chunks\"])<=3 else 1)'"
+check "large-file (>fair-share) is placed, not dropped" "printf '%s' \"\$BIGOUT\" | python3 -c 'import json,sys; d=json.load(sys.stdin); allf=[f for c in d[\"chunks\"] for f in c[\"files\"]]; sys.exit(0 if \"big/big.ts\" in allf else 1)'"
+check "large-file run keeps total coverage (7 files, each once)" "printf '%s' \"\$BIGOUT\" | python3 -c 'import json,sys; d=json.load(sys.stdin); allf=[f for c in d[\"chunks\"] for f in c[\"files\"]]; sys.exit(0 if len(allf)==len(set(allf))==d[\"total_files\"]==7 else 1)'"
+
 echo "Results: $PASS passed, $FAIL failed"
 [ $FAIL -eq 0 ] && exit 0 || exit 1

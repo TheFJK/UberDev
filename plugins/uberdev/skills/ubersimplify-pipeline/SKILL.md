@@ -55,7 +55,7 @@ findings_disposition:
 ## Reuses
 
 - `lib/config-read.sh` — `uberdev_read_int_in_range` for NUM_AREAS / CONCURRENCY / MAX_AGENTS / MAX_NEW
-- `lib/chunk.py` — scope enumeration and budget-bounded chunking (shared with /uberscan)
+- `lib/chunk.py` — scope enumeration + balanced area-packing (`--areas N`; shared with /uberscan)
 - `skills/ubersimplify-pipeline/aggregate.py` — lens-merge dedup (`fixer` mode → `post-impl-review-aggregate` envelope) + leftover-issues collection (`issues` mode → `ubersimplify-aggregate` envelope)
 - `agents/code-simplifier.md` — the 3 lenses (Reuse / Quality / Efficiency), audit-only
 - `agents/code-fixer.md` — preserve-behavior apply as `refactor:` commits

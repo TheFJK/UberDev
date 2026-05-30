@@ -146,7 +146,7 @@ This reuses the exact source string `/simplify` already uses for its `code-fixer
 | `--lens=…` | Subset the lenses (default all three). |
 | `--max-chunks=N` / `--concurrency=N` / `--turbo` | As in `/uberscan`. |
 
-Config namespace (via `config-read.sh`, defaults mirror `/uberscan`): `ubersimplify.max_chunks` (25), `fanout_concurrency.ubersimplify` (3), `ubersimplify.chunk_budget_bytes` (49152), `ubersimplify.max_agents` (250), `ubersimplify.max_new` (10).
+Config namespace (via `config-read.sh`, defaults mirror `/uberscan`): `ubersimplify.max_chunks` (25), `fanout_concurrency.ubersimplify` (3), `ubersimplify.chunk_budget_bytes` (49152), `ubersimplify.max_agents` (250), `ubersimplify.max_new` (10). **⚠ Superseded by the 2026-05-30 amendment (below): `ubersimplify.max_chunks` / `ubersimplify.chunk_budget_bytes` are replaced by `ubersimplify.areas` (default 8, range 1-24); `fanout_concurrency.ubersimplify` / `.max_agents` / `.max_new` are unchanged.**
 
 ## 8. Circuit breakers
 

@@ -426,44 +426,58 @@ else
 fi
 rm -f "$SEC_JSON" 2>/dev/null || true
 
-# --- Test-coverage heuristic (inline). ---
+# --- Test-coverage heuristic (inline, fail-soft). ---
+# The whole computation is buffered into one string and the try/except wraps it,
+# so the artifact is EITHER the full report OR a single skip note — never a
+# partial write capped by a mid-loop traceback (which report.py would otherwise
+# file verbatim as a bogus issue). Mirrors the Semgrep block's fail-soft contract;
+# always exits 0 so the advisory coverage pass can never abort the audit.
 COV_OUT="$RUN_DIR/global-coverage.md"
-python3 - "$SCOPE" > "$COV_OUT" <<'PY'
+python3 - "$SCOPE" > "$COV_OUT" 2>/dev/null <<'PY' || printf '_(Test-coverage heuristic skipped — python3 unavailable or crashed.)_\n' > "$COV_OUT"
 import os, subprocess, sys
+
+def build(scope):
+    out = subprocess.run(["git", "ls-files", "--", scope], capture_output=True, text=True)
+    files = [f for f in out.stdout.splitlines() if f]
+    SRC_EXT = (".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".rb", ".java", ".sh", ".php")
+    TEST_MARK = (".test.", ".spec.", "_test.", "test_", "/tests/", "/test/", "/__tests__/")
+    src, tests = [], []
+    for f in files:
+        if not f.endswith(SRC_EXT):
+            continue
+        (tests if any(m in f for m in TEST_MARK) else src).append(f)
+    stems = set()
+    for t in tests:
+        base = os.path.basename(t)
+        for tok in (".test", ".spec", "test_", "_test"):
+            base = base.replace(tok, "")
+        stems.add(base.split(".")[0])
+    untested = []
+    for s in src:
+        if os.path.basename(s).split(".")[0] in stems:
+            continue
+        try:
+            n = sum(1 for _ in open(s, errors="ignore"))
+        except OSError:
+            n = 0
+        if n > 200:
+            untested.append((s, n))
+    untested.sort(key=lambda kv: -kv[1])
+    ratio = len(tests) / max(1, len(src))
+    lines = [f"Source files: {len(src)} · Test files: {len(tests)} · test:source ratio {ratio:.2f}\n",
+             f"Large (>200-line) source files with no matching test file: {len(untested)}\n"]
+    lines += [f"- {s} ({n} lines)" for s, n in untested[:30]]
+    if not untested:
+        lines.append("_(No large untested source files detected.)_")
+    return "\n".join(lines)
+
 scope = sys.argv[1] if len(sys.argv) > 1 else "."
-out = subprocess.run(["git", "ls-files", "--", scope], capture_output=True, text=True)
-files = [f for f in out.stdout.splitlines() if f]
-SRC_EXT = (".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".rb", ".java", ".sh", ".php")
-TEST_MARK = (".test.", ".spec.", "_test.", "test_", "/tests/", "/test/", "/__tests__/")
-src, tests = [], []
-for f in files:
-    if not f.endswith(SRC_EXT):
-        continue
-    (tests if any(m in f for m in TEST_MARK) else src).append(f)
-stems = set()
-for t in tests:
-    base = os.path.basename(t)
-    for tok in (".test", ".spec", "test_", "_test"):
-        base = base.replace(tok, "")
-    stems.add(base.split(".")[0])
-untested = []
-for s in src:
-    if os.path.basename(s).split(".")[0] in stems:
-        continue
-    try:
-        n = sum(1 for _ in open(s, errors="ignore"))
-    except OSError:
-        n = 0
-    if n > 200:
-        untested.append((s, n))
-untested.sort(key=lambda kv: -kv[1])
-ratio = len(tests) / max(1, len(src))
-print(f"Source files: {len(src)} · Test files: {len(tests)} · test:source ratio {ratio:.2f}\n")
-print(f"Large (>200-line) source files with no matching test file: {len(untested)}\n")
-for s, n in untested[:30]:
-    print(f"- {s} ({n} lines)")
-if not untested:
-    print("_(No large untested source files detected.)_")
+try:
+    # Build the WHOLE report first, then emit once — a crash mid-build writes only
+    # the skip note, never a half-report-plus-traceback into the artifact.
+    sys.stdout.write(build(scope) + "\n")
+except Exception as exc:
+    sys.stdout.write(f"_(Test-coverage heuristic skipped — {type(exc).__name__}: {exc})_\n")
 PY
 
 echo "[uberscan] global passes complete (Semgrep SAST + coverage) — ran INLINE, 0 dispatched agents"
