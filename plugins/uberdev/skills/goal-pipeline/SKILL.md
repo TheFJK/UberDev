@@ -169,7 +169,14 @@ Notes on the enums:
      agents are LEFT ALIVE (the reaper does NOT fire on a bounded-tick pause —
      only on a circuit-breaker halt or a genuine INT/TERM).
    - **`1`** — a circuit breaker fired (the reaper DOES fire here, exactly as in
-     the unbounded loop) → halt.
+     the unbounded loop) → halt. Exit `1` ALSO covers a fail-loud
+     run-state-flush failure at a bounded exit boundary (drain or pass/budget
+     bound): if `uberdev_goal_write_run_state` fails there, the fence halts with
+     a `goal: ERROR: run-state flush FAILED` diagnostic and exit 1 rather than
+     proceeding to Phase 3 on unpersisted state / re-inviting Phase 2 on a lost
+     bound that would silently revert to unbounded. The bg solver agents are
+     PRESERVED on this fail-loud path — distinct from a circuit-breaker exit 1,
+     which reaps first.
 
    When NEITHER `--watch-passes` / `--watch-budget` / `GOAL_SINGLE_TICK` is set,
    the watch loop runs unbounded (the legacy behaviour: one continuous fence
@@ -630,6 +637,9 @@ trap '_uberdev_goal_reap_zombies; exit 143' TERM
 # BOUNDED number of poll passes (or until a per-fence wall-clock budget) and
 # then exits 42 ("still-active, re-invoke") so an orchestrating harness can drive
 # the loop tick-by-tick within its own call cap (e.g. the 600s Bash-tool cap).
+# Exit 0 = drained -> proceed to Phase 3. Exit 1 = halt: a circuit breaker (reaps
+# first) OR a fail-loud run-state-flush failure at a bounded exit boundary (#300
+# Fix B — bg solver agents PRESERVED, no reap, distinct from a breaker exit 1).
 # _tick_start is the PER-FENCE wall-clock anchor (fresh every invocation — NOT
 # persisted, distinct from the goal-level watch_start that drives the 4h cap);
 # _tick_passes counts poll passes completed in THIS fence invocation.
@@ -1201,7 +1211,17 @@ while true; do
   if [ "$any_active" = "0" ] && \
      [ -z "$(uberdev_goal_list_prs_in_state "$GOAL_ID" merging)" ]; then
     if [ "$_watch_bounded" = "1" ]; then
-      uberdev_goal_write_run_state || echo "goal: warning: run-state flush failed at bounded-watch drain" >&2
+      # #300 Fix B (silent-failure-hunter CRITICAL) — fail LOUD on a run-state
+      # flush failure at this bounded-exit boundary. write_run_state persists the
+      # SOURCE-OF-TRUTH run-state (cycle/queue/active_issues + the WATCH_* bound);
+      # degrading a failed flush to a warning and still `exit 0` would proceed to
+      # Phase 3 on UNPERSISTED state. Halt with exit 1 instead. Do NOT reap here:
+      # this is a fail-loud halt distinct from a circuit-breaker exit 1 (which
+      # reaps first) — the bg solver agents must survive a transient persist blip.
+      if ! uberdev_goal_write_run_state; then
+        echo "goal: ERROR: run-state flush FAILED at drain boundary — halting (exit 1) rather than proceeding to Phase 3 on unpersisted state; bg solver agents left intact" >&2
+        exit 1
+      fi
       echo "goal: watch drained (no active agents, no merging PRs) -> proceed to Phase 3 [bounded-tick exit 0]" >&2
       exit 0
     fi
@@ -1213,8 +1233,7 @@ while true; do
   # run-state and exit 42 ("still-active, re-invoke") WITHOUT reaping — the bg
   # solver agents must survive the paused tick (the reaper fires ONLY on a
   # circuit-breaker halt or a genuine INT/TERM, never on a bounded pause). The
-  # budget check adds one POLL interval so we never overshoot the harness's call
-  # cap by sleeping into it. The UNBOUNDED path falls straight through to sleep.
+  # UNBOUNDED path falls straight through to sleep.
   if [ "$_watch_bounded" = "1" ]; then
     _tick_passes=$(( _tick_passes + 1 ))
     _tick_now="$(date +%s)"
@@ -1234,7 +1253,19 @@ while true; do
       _bound_hit=1
     fi
     if [ "$_bound_hit" = "1" ]; then
-      uberdev_goal_write_run_state || echo "goal: warning: run-state flush failed at bounded-watch tick boundary" >&2
+      # #300 Fix B (silent-failure-hunter CRITICAL) — fail LOUD on a run-state
+      # flush failure at this bounded-exit boundary. write_run_state persists the
+      # WATCH_PASSES/WATCH_BUDGET bound (+ cycle/queue/active_issues); if it fails
+      # and we still `exit 42`, the harness re-invokes a fresh Phase-2 fence that
+      # rehydrates from the UNWRITTEN sidecar -> WATCH_* default to 0 -> the loop
+      # SILENTLY reverts to UNBOUNDED (then the 600s harness cap SIGTERMs it ->
+      # reaper). Halt with exit 1 instead. Do NOT reap here: this is a fail-loud
+      # halt distinct from a circuit-breaker exit 1 (which reaps first) — the bg
+      # solver agents must survive a transient persist blip.
+      if ! uberdev_goal_write_run_state; then
+        echo "goal: ERROR: run-state flush FAILED at tick boundary — halting (exit 1) rather than re-inviting Phase 2 on a lost bound that would silently revert to unbounded; bg solver agents left intact" >&2
+        exit 1
+      fi
       echo "goal: watch bound reached (passes=$_tick_passes/${WATCH_PASSES:-0} budget=$(( _tick_now - _tick_start ))/${WATCH_BUDGET:-0}s); work still in flight -> re-invoke Phase 2 [bounded-tick exit 42]" >&2
       exit 42
     fi
