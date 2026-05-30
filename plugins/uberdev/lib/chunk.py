@@ -36,20 +36,28 @@ def keep_size(path):
     return None if sz > MAX_FILE_BYTES else sz
 
 
-def chunk_files(sized_paths, budget):
-    """Group (path, size) pairs by directory for cohesion, then pack into
-    budget-bounded chunks. Sizes are precomputed by keep_size — no re-stat."""
+def _ordered_by_dir(sized_paths):
+    """Order (path, size) pairs so each directory's files are adjacent (cohesion),
+    with directories visited in sorted order and files sorted within each. Shared by
+    chunk_files (budget mode) and pack_areas (area mode) — extracting it guarantees
+    the two packers can NEVER drift in how they sequence files (both MUST see the
+    identical order for consistent chunking)."""
     by_dir = {}
     for p, sz in sorted(sized_paths):
         by_dir.setdefault(os.path.dirname(p), []).append((p, sz))
+    return [ps for d in sorted(by_dir) for ps in by_dir[d]]
+
+
+def chunk_files(sized_paths, budget):
+    """Group (path, size) pairs by directory for cohesion, then pack into
+    budget-bounded chunks. Sizes are precomputed by keep_size — no re-stat."""
     chunks, cur, cur_bytes = [], [], 0
-    for _dir in sorted(by_dir):
-        for p, sz in by_dir[_dir]:
-            if cur and cur_bytes + sz > budget:
-                chunks.append((cur, cur_bytes))
-                cur, cur_bytes = [], 0
-            cur.append(p)
-            cur_bytes += sz
+    for p, sz in _ordered_by_dir(sized_paths):
+        if cur and cur_bytes + sz > budget:
+            chunks.append((cur, cur_bytes))
+            cur, cur_bytes = [], 0
+        cur.append(p)
+        cur_bytes += sz
     if cur:
         chunks.append((cur, cur_bytes))
     return chunks
@@ -71,10 +79,7 @@ def pack_areas(sized_paths, num_areas):
         agent gets a pathological context load.
     Files are ordered by directory so each directory's files stay adjacent and
     split points fall at directory boundaries whenever the byte balance allows."""
-    by_dir = {}
-    for p, sz in sorted(sized_paths):
-        by_dir.setdefault(os.path.dirname(p), []).append((p, sz))
-    ordered = [ps for d in sorted(by_dir) for ps in by_dir[d]]
+    ordered = _ordered_by_dir(sized_paths)
     if not ordered:
         return []
     n = max(1, min(num_areas, len(ordered)))  # never more areas than files
