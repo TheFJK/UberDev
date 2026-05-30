@@ -120,8 +120,9 @@ _UBERDEV_GOAL_WORKTREE_PREFIXES=("" ".claude/worktrees/*/" ".worktrees/*/" "work
 : "${_UBERDEV_GOAL_STUCK_DIALOG_SECS:=60}"   # ge 60 (preserved threshold)
 
 # Mirrored from skills/goal-pipeline/SKILL.md Phase 0 Constants block (issue #245).
-# This is the runtime SSOT — fresh-shell rehydration fences (SKILL.md ~210, 382,
-# 909, 1003, 1040, 1109) source ONLY this lib, never re-execute the Phase 0
+# This is the runtime SSOT — the per-phase fresh-shell rehydration fences (grep
+# SKILL.md for the `uberdev_goal_read_run_state` rehydration call) source ONLY
+# this lib, never re-execute the Phase 0
 # block. Defaulted-assignment ( := ) is order-safe: if the Phase 0 block ran
 # first (cycle 1 happy path), these are no-ops; if the lib was sourced fresh
 # (every Phase 2 poll iteration), these set the canonical defaults so the

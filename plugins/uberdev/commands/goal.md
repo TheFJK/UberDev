@@ -20,6 +20,9 @@ Autonomous convergence orchestrator that drives one or more GitHub issues to mer
   reason; no new breaker enum is added. Resolved via the same precedence as `--max-cycles`.
 - `--only-mine` — only enqueue `review-pr-finding` issues authored by `$GH_USER`. **Requires a single `gh` identity (issue #291):** it filters on `.author.login`, so it assumes the detached bg `/review-pr` agent that files the findings runs under the same `gh` identity as the watcher. On a CI-token / multi-identity setup the bg-filed findings carry a different author and would be silently dropped (false convergence with open blockers) — OMIT `--only-mine` there. Opt-in, OFF by default.
 - `--dry-run` — print planned cycle 1 dispatch + watch-loop preview, exit 0. No `/uberdev:orchestrator`, no `/merge`, no `/review-pr` is invoked.
+- `--watch-passes=N` — run a bounded number of Phase-2 poll passes per fence invocation, then exit for re-invocation (0=unbounded default).
+- `--watch-budget=SECS` — bound each Phase-2 fence to a wall-clock budget, then exit for re-invocation (0=unbounded default).
+- `GOAL_SINGLE_TICK=1` (env) — shorthand for `--watch-passes=1`.
 - `--backend=<name>` — pin a dispatch backend (`claude-bg` | `wezterm` | `background`); otherwise auto-resolved once by Phase 0 preflight and frozen for the run.
 
 **Merge barrier (issue #211).** `/merge` no longer fires per-PR the instant a PR turns GREEN.
@@ -63,6 +66,8 @@ The Claude-Code Bash tool runs every SKILL.md fence under `/bin/zsh` (where `BAS
 - **Already under bash ≥ 4** (e.g. CI, or an explicit `bash`-invoked fence): proceed.
 - **Not bash ≥ 4, but a bash ≥ 4 binary is discoverable** (checked in order: `/opt/homebrew/bin/bash`, `/usr/local/bin/bash`, `command -v bash` — each version-verified ≥ 4): Phase 0 publishes it as the exported `UBERDEV_GOAL_BASH`. If the fence was invoked as a real shebang **script file** it `exec`s that script under `UBERDEV_GOAL_BASH`; for an **inline** `zsh -c` body (no script path to re-feed) it proceeds and prints the resolved path. **Run `/goal`'s subsequent SKILL.md fences under `$UBERDEV_GOAL_BASH`** — e.g. by invoking each fence as `"$UBERDEV_GOAL_BASH" -c '<fence body>'`, or by ensuring the Bash tool's shell is bash ≥ 4 for the duration of the run. The bash-requiring glob lives in the Phase 2 watch loop; Phase 0/1's own steps are bash-safe under zsh, but the watch loop is NOT.
 - **No bash ≥ 4 anywhere**: Phase 0 exits 2 with `brew install bash`. This is the only case where `/goal` genuinely cannot run.
+
+A driving harness that bounds the watch loop (via `--watch-passes` / `--watch-budget` / `GOAL_SINGLE_TICK=1`) must honor the Phase-2 fence's exit contract: exit `0` = drained, proceed to Phase 3; exit `42` = work still in flight, re-invoke the Phase-2 fence; exit `1` = halt (a circuit breaker, or a fail-loud run-state-flush failure).
 
 > **TL;DR for operators:** on stock macOS run `brew install bash` once (gives `/opt/homebrew/bin/bash` 5.x). `/goal` then auto-discovers it. The old behavior — a hard `exit 2` on the first fence even with bash 5 installed — is fixed.
 
