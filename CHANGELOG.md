@@ -4,6 +4,14 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.36.1] — 2026-05-31
+
+### Fixed
+- **`/goal` Phase-2 watch loop is now driveable from the Claude Code Bash tool (#299).** Three fixes so `/ubergoal` → `/uberdev:goal` runs end-to-end as-presented:
+  - **Bounded / single-tick watch mode (finding 2).** New `--watch-passes=N` / `--watch-budget=SECS` flags (and the `GOAL_SINGLE_TICK=1` env shorthand for one pass) make the Phase-2 watch loop run a bounded number of poll passes (or a per-fence wall-clock budget) and then exit with a documented re-invocation contract instead of the unbounded `while true … sleep` loop that a single 600s-capped Bash-tool call cannot host. Exit codes: `0` = drained (proceed to Phase 3), `42` = still-active (re-invoke Phase 2), `1` = circuit-breaker halt. Each bounded tick persists run-state via `uberdev_goal_write_run_state` and prints current state; the reaper fires only on a breaker or a genuine INT/TERM — **never on a bounded pause**, so live bg solver agents survive between ticks. Default 0 = unbounded (legacy behaviour unchanged). The bound round-trips run-state (new `WATCH_PASSES` / `WATCH_BUDGET` sidecar fields, exported by `uberdev_goal_read_run_state`) so it survives the fresh-shell Phase-2 fences.
+  - **Doubled `goal-goal-<id>-` sidecar prefix dropped (finding 3).** `GOAL_ID` is now generated WITHOUT the leading `goal-` (`<epoch>-<rand>` instead of `goal-<epoch>-<rand>`), so the per-goal sidecars are single-`goal-`-prefixed on disk (`goal-<epoch>-<rand>-runstate`, …) instead of `goal-goal-…`. Fixes the debugging foot-gun where `"$TMPDIR"/goal-<id>-*` silently matched nothing. Read/write symmetry preserved (every site shares the `goal-$GOAL_ID-` format string); the id stays digits/dash/alnum so the path-traversal + mis-pathing guards are unaffected.
+  - **Cross-shell verdict-locator regression guard (finding 1).** Locks the (already-fixed at HEAD via `_uberdev_goal_glob_worktree`) behaviour that the watch loop's verdict locator + peer glob enumerators return cleanly on zero matches under zsh — a bare unmatched glob fatals `no matches found` under zsh, so a new `tests/goal-state-zsh.test.sh` case (Z10) asserts none of them ever fatal.
+
 ## [0.36.0] — 2026-05-30
 
 ### Changed
