@@ -272,3 +272,65 @@ Per project CLAUDE.md, all of the following must land in the same PR or in the i
 6. Alias surfaces (5): `lib/aliases-sync.sh` ALIASES row, `commands/install-aliases.md` table + count, `commands/uninstall-aliases.md` SHORTS list, `README.md` alias table + count, `tests/aliases.test.sh` canonical loop.
 7. Version bump to `0.32.0` in all 6 locations (plugin.json, marketplace.json, README badge, CHANGELOG, git tag, GH release).
 8. Tests: `tests/uberscan.test.sh` (structural, chunking algorithm, circuit-breaker halt, findings-to-issues adaptation).
+
+---
+
+## Amendment (2026-05-30, v0.36.0) — area-scoped fixed-fleet fanout
+
+> **Supersedes §3.1 (per-chunk × 6-reviewer fleet) and the CB1/CB7 calibration in §3.4.**
+> Status of this amendment: **Accepted, implemented.**
+
+### Problem
+
+The original model dispatched the 6-reviewer Phase-1 fleet against every
+byte-budget chunk (~48 KB each). Agent count therefore scaled as `files × 6`. On
+this repo (251 files → **70 chunks**) a true whole-repo scan (`--all`) projected
+**70 × 6 + 2 = 422 agents**. Worse, the default `MAX_CHUNKS=25` cap did not
+shrink the fleet — it **truncated coverage**: a "whole-codebase audit" silently
+audited only the first 25/70 chunks (~36% of the tree, alphabetically-ordered),
+or hard-halted asking the user to scope down or pass `--all` (→ 422 agents). There
+was no path to "audit the whole repo at a sane cost." This is why every real run
+manually capped the fleet (see `feedback_lean_scan_fanout_and_consolidated_issues`).
+
+### Decision
+
+Decouple agent count from repo size. The unit of fan-out is now a **logical
+AREA**, not a byte-budget chunk:
+
+1. **Fixed fleet.** `lib/chunk.py --areas N` (new `pack_areas`) packs **all**
+   in-scope files into **≤ N byte-balanced areas** (default `N=8`, range `[1,24]`,
+   config `uberscan.areas` / env `UBERDEV_UBERSCAN_AREAS`). A binary-searched
+   linear (contiguous) partition over directory-cohesive sorted files minimizes
+   the largest area's byte sum, so areas come out roughly equal (~405 KB ≈ ~100k
+   source tokens each on this repo) and **every file is covered exactly once** —
+   `overflow` is always false; nothing is ever truncated.
+2. **One multi-lens reviewer per area.** A single `code-reviewer` sweeps all five
+   Phase-1 lenses (correctness, silent-failures/error-handling, type-design,
+   comment-accuracy, test-coverage) + general catch-all in one pass over the whole
+   area, returning C2 directly. This trades the 6× redundant re-reading of the
+   same files for one coherent whole-area review (the RFC's own §6 conceded
+   reviewer-major "improves cross-file finding quality").
+3. **Inline global pass.** The repo-global Semgrep SAST + test-coverage passes run
+   **inline** in Phase 1b (plain `semgrep`/`python3`), not as 2 dispatched agents.
+
+Net: whole-repo `/uberscan` costs **~8 agents** regardless of repo size (was 422),
+and it actually covers the whole repo.
+
+### Circuit-breaker recalibration (§3.4)
+
+| Breaker | Before | After |
+|---|---|---|
+| **CB1** `MAX_CHUNKS` | 25; overflow → truncate/halt | **Retired** — area mode never overflows (every file covered in ≤ N areas). |
+| **CB7** `MAX_AGENTS` | projected `chunks×6 + 2` | projected `areas × 1`; pure backstop against an absurd explicit `--areas`. |
+
+CB3/CB4/CB5/CB6 are unchanged. The `--max-chunks=N` flag is retained as a
+**legacy alias** for `--areas=N`. The retired `uberscan.max_chunks` /
+`uberscan.chunk_budget_bytes` config keys are replaced by `uberscan.areas`.
+
+### Backward compatibility
+
+The manifest JSON keeps its `chunks[]` schema (each entry is now an area) and the
+per-area findings file keeps the `chunk-NNN-findings.yaml` name, so `report.py`,
+the findings-to-issues aggregate, and all downstream `jq` are unchanged.
+`lib/chunk.py` retains the legacy `--budget-bytes` chunking mode (unused by the
+pipelines now, kept for back-compat + its existing test).

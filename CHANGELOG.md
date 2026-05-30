@@ -4,6 +4,16 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.36.0] — 2026-05-30
+
+### Changed
+- **`/uberscan` + `/ubersimplify` fan-out is now area-scoped (fixed fleet) instead of per-byte-chunk × N reviewers.** The old model dispatched the 6-reviewer Phase-1 fleet (uberscan) or 3 lens Tasks (ubersimplify) against every ~48 KB chunk, so agent count scaled as `files × fleet`: on this 251-file repo a true whole-repo `/uberscan --all` projected **70 chunks × 6 + 2 = 422 agents**, and the default `MAX_CHUNKS=25` cap didn't shrink the fleet — it silently **truncated coverage** to the alphabetically-first 25/70 chunks (~36% of the tree). There was no path to "audit the whole repo at a sane cost." Now `lib/chunk.py --areas N` (new `pack_areas`) packs **all** in-scope files into **≤ N byte-balanced areas** (default 8, config `uberscan.areas` / `ubersimplify.areas`, range 1-24) via a binary-searched contiguous partition — every file covered exactly once, no overflow-truncation — and **one multi-lens agent reviews each area** (uberscan: a single `code-reviewer` sweeping correctness/silent-failures/type-design/comments/tests; ubersimplify: a single `code-simplifier` running all active lenses). Whole-repo cost drops from **422 → ~8 agents** (uberscan) and **210 → ~8** (ubersimplify), regardless of repo size, and the scan actually covers the whole repo.
+- **`/uberscan` repo-global Semgrep + test-coverage passes now run INLINE** (plain `semgrep`/`python3` in Phase 1b) instead of as 2 dispatched `research-*` agents — fail-soft (a missing/erroring Semgrep degrades to a skip note, never aborts the audit).
+- **Circuit-breaker recalibration:** CB1 (`MAX_CHUNKS` overflow) is **retired** in area mode (it can never trip — nothing is dropped); CB7 now projects `areas × 1` as a backstop against an absurd explicit `--areas`. New `--areas=N` flag on both commands; `--max-chunks=N` is retained as a legacy alias. The manifest `chunks[]` schema and `chunk-NNN-*.yaml` filenames are unchanged (each entry is now an area), so `report.py` / `aggregate.py` / findings-to-issues are untouched. Design: amendments to `docs/rfc/0007` + `docs/rfc/0008`.
+
+### Tests
+- `tests/uberscan-chunk.test.sh` gains 8 area-mode invariants (≤ N areas, every file covered exactly once, deterministic, byte-balanced, fail-loud on `--areas 0`). `tests/uberscan.test.sh` (U7) and `tests/ubersimplify.test.sh` add fixed-fleet shape locks so a regression to the per-chunk × N fan-out turns CI red.
+
 ## [0.35.19] — 2026-05-29
 
 ### Tests

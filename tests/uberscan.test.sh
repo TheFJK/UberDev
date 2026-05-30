@@ -130,6 +130,20 @@ ck "#192 behavioral: overflow-only is not a halt (exits 0)" "[ $RC -eq 0 ]"
 ck "#192 behavioral: overflow-only prints overflow banner" "printf '%s' \"\$OUT\" | grep -q 'overflow:'"
 ck "#192 behavioral: overflow-only has NO halted banner" "! printf '%s' \"\$OUT\" | grep -q 'halted:'"
 
+echo "== U7: area-scoped fixed-fleet fanout (the 422→~8 agent optimization) =="
+# Pack into <= NUM_AREAS areas, ONE multi-lens reviewer per area — NOT files×6.
+ck "Phase 0 packs via chunk.py --areas" "grep -qE 'chunk\.py' '$SKILL' && grep -q -- '--areas \"\$NUM_AREAS\"' '$SKILL'"
+ck "resolves uberscan.areas config key (default 8, range 1-24)" "grep -qE 'uberscan\.areas .*UBERDEV_UBERSCAN_AREAS .*1 24 8' '$SKILL'"
+ck "CB7 projects exactly 1 agent per area" "grep -qE 'PROJECTED_AGENTS=\\\$\\(\\( EMITTED_AREAS' '$SKILL'"
+ck "old chunks×6+2 projection removed" "[ \$(grep -c 'EMITTED_CHUNKS \* 6' '$SKILL') -eq 0 ]"
+# Dispatch directive: a single multi-lens reviewer, not the 6-agent roster.
+ck "dispatch directive uses a single multi-lens reviewer" "grep -q 'role: area-multi-lens-reviewer' '$SKILL'"
+ck "legacy 6-agent roster no longer dispatched (agent: lines)" "[ \$(grep -cE '^[[:space:]]*- agent: (silent-failure-hunter|type-design-analyzer|comment-analyzer|pr-test-analyzer)' '$SKILL') -eq 0 ]"
+# Phase 1b: Semgrep + coverage run INLINE, not as dispatched research agents.
+ck "Phase 1b runs Semgrep inline" "grep -qE 'semgrep scan --config' '$SKILL'"
+ck "Phase 1b coverage heuristic runs inline" "grep -q 'global-coverage.md' '$SKILL' && grep -qE 'git.*ls-files' '$SKILL'"
+ck "no research-security/research-test-coverage agent dispatch remains" "[ \$(grep -cE 'agent: research-(security|test-coverage)' '$SKILL') -eq 0 ]"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [ $FAIL -eq 0 ] && exit 0 || exit 1
