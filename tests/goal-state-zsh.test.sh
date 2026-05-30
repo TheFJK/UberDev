@@ -377,6 +377,11 @@ echo "== Z10: verdict-locator + peer enumerators do NOT fatal on ZERO matches un
 # localoptions nonomatch` removed, or `${~pat}` -> bare `$pat` with the loop
 # expanding the literal directly) => Z10 goes RED with a leaked `no matches
 # found` fatal.
+# Coverage note: Z10 exercises the ZERO-match path (the locator must not fatal).
+# The complementary POSITIVE-match path — the locator FINDING a worktree-mirror
+# verdict under zsh and the watch loop transitioning pushed-reviewing -> green —
+# is covered by goal-pipeline-zsh.test.sh `W` (it seeds a verdict in a worktree
+# mirror and runs the sliced step-2b loop). Together they lock both glob arms.
 Z10_TMP="$(mktemp -d)"
 Z10_OUT="$(
   GOAL_ID="goal-z10abc01"

@@ -246,8 +246,8 @@ Notes on the enums:
    ```bash
    export UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"   # D7 — stable sidecar dir for the watcher
    # #299 finding 3 — GOAL_ID does NOT carry a leading `goal-`. Every per-goal
-   # sidecar path is formatted `goal-$GOAL_ID-<suffix>` (lib/goal-state.sh, ~49
-   # sites), so a `goal-`-prefixed GOAL_ID produced `goal-goal-…` on disk — a
+   # sidecar path is formatted `goal-$GOAL_ID-<suffix>` throughout
+   # lib/goal-state.sh, so a `goal-`-prefixed GOAL_ID produced `goal-goal-…` on disk — a
    # debugging foot-gun (the obvious `"$TMPDIR"/goal-<id>-*` search matched
    # nothing). Generating the id WITHOUT the prefix yields a single clean
    # `goal-<epoch>-<rand>-…` on disk and preserves read/write symmetry (the same
@@ -1222,6 +1222,13 @@ while true; do
     if [ "${WATCH_PASSES:-0}" -gt 0 ] && [ "$_tick_passes" -ge "$WATCH_PASSES" ]; then
       _bound_hit=1
     fi
+    # WATCH_BUDGET is a FLOOR-OF-ONE-PASS, not a hard ceiling: this gate is
+    # reached only AFTER a full poll pass has completed, so a budget smaller than
+    # one pass of gh-call latency still runs (and is billed for) exactly one pass.
+    # The check bounds the SLEEP we are about to enter (it pre-adds one poll
+    # interval so we never sleep PAST the budget), not the pass duration — size
+    # the budget to leave headroom for one pass of gh latency under the harness
+    # call cap.
     if [ "${WATCH_BUDGET:-0}" -gt 0 ] && \
        [ "$(( _tick_now - _tick_start + _UBERDEV_GOAL_POLL_SECS ))" -gt "$WATCH_BUDGET" ]; then
       _bound_hit=1
