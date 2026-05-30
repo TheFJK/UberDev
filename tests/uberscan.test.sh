@@ -130,6 +130,40 @@ ck "#192 behavioral: overflow-only is not a halt (exits 0)" "[ $RC -eq 0 ]"
 ck "#192 behavioral: overflow-only prints overflow banner" "printf '%s' \"\$OUT\" | grep -q 'overflow:'"
 ck "#192 behavioral: overflow-only has NO halted banner" "! printf '%s' \"\$OUT\" | grep -q 'halted:'"
 
+echo "== U7: area-scoped fixed-fleet fanout (the 422→~8 agent optimization) =="
+# Pack into <= NUM_AREAS areas, ONE multi-lens reviewer per area — NOT files×6.
+ck "Phase 0 packs via chunk.py --areas" "grep -qE 'chunk\.py' '$SKILL' && grep -q -- '--areas \"\$NUM_AREAS\"' '$SKILL'"
+ck "resolves uberscan.areas config key (default 8, range 1-24)" "grep -qE 'uberscan\.areas .*UBERDEV_UBERSCAN_AREAS .*1 24 8' '$SKILL'"
+ck "CB7 projects exactly 1 agent per area" "grep -qE 'PROJECTED_AGENTS=\\\$\\(\\( EMITTED_AREAS' '$SKILL'"
+ck "old chunks×6+2 projection removed" "[ \$(grep -c 'EMITTED_CHUNKS \* 6' '$SKILL') -eq 0 ]"
+# Dispatch directive: a single multi-lens reviewer, not the 6-agent roster.
+ck "dispatch directive uses a single multi-lens reviewer" "grep -q 'role: area-multi-lens-reviewer' '$SKILL'"
+ck "legacy 6-agent roster no longer dispatched (agent: lines)" "[ \$(grep -cE '^[[:space:]]*- agent: (silent-failure-hunter|type-design-analyzer|comment-analyzer|pr-test-analyzer)' '$SKILL') -eq 0 ]"
+# Phase 1b: Semgrep + coverage run INLINE, not as dispatched research agents.
+ck "Phase 1b runs Semgrep inline" "grep -qE 'semgrep scan --config' '$SKILL'"
+ck "Phase 1b coverage heuristic runs inline" "grep -q 'global-coverage.md' '$SKILL' && grep -qE 'git.*ls-files' '$SKILL'"
+ck "no research-security/research-test-coverage agent dispatch remains" "[ \$(grep -cE 'agent: research-(security|test-coverage)' '$SKILL') -eq 0 ]"
+
+echo "== U8: Phase 1b inline coverage heuristic — behavioral (runtime-only code, not just shape) =="
+# The Phase 1b inline python is a SKILL.md bash-fence directive — shape tests never
+# execute it, so a typo / import error / non-fail-soft crash would only surface on a
+# live /uberscan. Extract the REAL coverage heredoc from the SKILL and run it.
+P1B_TMP="$(mktemp -d)"
+# Anchor on the unique coverage heredoc opener line (`...$COV_OUT" ... <<'PY'`);
+# capture the python body up to the closing `PY`. `.PY` dodges the inner single-quote.
+awk '/COV_OUT.*<<.PY/{f=1;next} f&&/^PY$/{f=0} f{print}' "$SKILL" > "$P1B_TMP/cov.py"
+ck "coverage heredoc extracted (non-empty)" "[ -s '$P1B_TMP/cov.py' ]"
+ck "coverage python is syntactically valid (catches a typo before it ships)" "python3 -c \"import ast,sys; ast.parse(open('$P1B_TMP/cov.py').read())\""
+# Execute the extracted code against a real git fixture; assert valid output + fail-soft.
+( cd "$P1B_TMP" && git init -q && mkdir -p src tests && printf 'a\nb\n' > src/mod.py && printf 'x\n' > tests/test_mod.py && git add -A 2>/dev/null )
+COV_RUN="$(cd "$P1B_TMP" && python3 cov.py . 2>&1)"
+ck "coverage run emits the 'Source files:' summary" "printf '%s' \"\$COV_RUN\" | grep -q 'Source files:'"
+ck "coverage run never writes a Python traceback into the artifact (fail-soft)" "! printf '%s' \"\$COV_RUN\" | grep -q 'Traceback (most recent call last)'"
+# Fail-soft on a non-git dir (git ls-files errors): must still exit 0 + valid markdown, no crash.
+COV_NONGIT="$(cd "$(mktemp -d)" && python3 "$P1B_TMP/cov.py" . 2>&1)"; COV_NONGIT_RC=$?
+ck "coverage is fail-soft outside a git repo (exit 0, no traceback)" "[ $COV_NONGIT_RC -eq 0 ] && ! printf '%s' \"\$COV_NONGIT\" | grep -q 'Traceback'"
+rm -rf "$P1B_TMP"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [ $FAIL -eq 0 ] && exit 0 || exit 1

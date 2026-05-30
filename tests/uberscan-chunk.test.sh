@@ -47,5 +47,63 @@ check "AC5: dirA files grouped in one chunk" "printf '%s' \"\$GROUP_OUT\" | pyth
 check "AC5: dirB files grouped in one chunk" "printf '%s' \"\$GROUP_OUT\" | python3 -c 'import json,sys; d=json.load(sys.stdin); chunks=[set(c[\"files\"]) for c in d[\"chunks\"]]; sys.exit(0 if any({\"dirB/b1.ts\",\"dirB/b2.ts\"} <= c for c in chunks) else 1)'"
 check "AC5: dirA and dirB never share a chunk (directory cohesion)" "printf '%s' \"\$GROUP_OUT\" | python3 -c 'import json,sys; d=json.load(sys.stdin); bad=any(any(f.startswith(\"dirA/\") for f in c[\"files\"]) and any(f.startswith(\"dirB/\") for f in c[\"files\"]) for c in d[\"chunks\"]); sys.exit(1 if bad else 0)'"
 
+# ============================================================================
+# AREA MODE (--areas N): fixed-fleet packing for /uberscan + /ubersimplify.
+# Replaces the per-byte-budget × 6-reviewer blow-up (~422 agents whole-repo)
+# with a bounded fleet of N area agents. Invariants the fleet-cost AND the
+# "no silent under-coverage" guarantee both depend on:
+#   1. ≤ N areas (never more — that is the agent-count ceiling).
+#   2. Every kept file lands in EXACTLY one area (no drops, no dups) — the
+#      whole-repo audit must actually cover the whole repo (no overflow-truncate).
+#   3. overflow is ALWAYS false in area mode (nothing is ever dropped).
+#   4. Deterministic: same scope → byte-identical manifest.
+#   5. Byte-balanced: no area is pathologically larger than the fair share.
+# Fixture kept set (post dirA/dirB adds, huge.ts/node_modules/dist/lock skipped):
+#   src/a.ts, src/b.ts, dirA/a1.ts, dirA/a2.ts, dirB/b1.ts, dirB/b2.ts  = 6 files
+# ============================================================================
+AREA3="$(python3 "$CHUNK" --scope . --areas 3)"
+check "area mode emits valid JSON" "printf '%s' \"\$AREA3\" | python3 -c 'import json,sys; json.load(sys.stdin)'"
+check "area mode tags mode=area" "printf '%s' \"\$AREA3\" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get(\"mode\")==\"area\" else 1)'"
+check "--areas 3 emits exactly 3 areas (6 files >= 3)" "printf '%s' \"\$AREA3\" | python3 -c 'import json,sys; sys.exit(0 if len(json.load(sys.stdin)[\"chunks\"])==3 else 1)'"
+check "area mode overflow is always false" "printf '%s' \"\$AREA3\" | python3 -c 'import json,sys; sys.exit(1 if json.load(sys.stdin)[\"overflow\"] else 0)'"
+# Invariant 2 — total coverage: union of all area files == every kept file, once.
+check "every kept file covered exactly once (no drop, no dup)" "printf '%s' \"\$AREA3\" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+allf=[f for c in d[\"chunks\"] for f in c[\"files\"]]
+expected={\"src/a.ts\",\"src/b.ts\",\"dirA/a1.ts\",\"dirA/a2.ts\",\"dirB/b1.ts\",\"dirB/b2.ts\"}
+sys.exit(0 if len(allf)==len(set(allf))==len(expected) and set(allf)==expected else 1)'"
+# Invariant 4 — determinism.
+AREA3B="$(python3 "$CHUNK" --scope . --areas 3)"
+check "area mode is deterministic" "[ \"\$AREA3\" = \"\$AREA3B\" ]"
+# Invariant 1 — fewer-than-N for tiny repos: 6 files, --areas 8 -> at most 6 areas.
+check "--areas 8 with 6 files yields <= 6 areas (never empty areas)" "python3 \"$CHUNK\" --scope . --areas 8 | python3 -c 'import json,sys; ch=json.load(sys.stdin)[\"chunks\"]; sys.exit(0 if len(ch)<=6 and all(c[\"files\"] for c in ch) else 1)'"
+# --areas 1 -> single area with all files.
+check "--areas 1 packs all files into one area" "python3 \"$CHUNK\" --scope . --areas 1 | python3 -c 'import json,sys; ch=json.load(sys.stdin)[\"chunks\"]; sys.exit(0 if len(ch)==1 and len(ch[0][\"files\"])==6 else 1)'"
+# Invariant 5 — byte balance: max area bytes <= 2x the mean (loose bound; the
+# linear partition guarantees max-area <= optimal min-max, comfortably under 2x).
+check "area mode is byte-balanced (max area <= 2x mean)" "printf '%s' \"\$AREA3\" | python3 -c '
+import json,sys
+ch=json.load(sys.stdin)[\"chunks\"]
+b=[c[\"bytes\"] for c in ch]
+mean=sum(b)/len(b)
+sys.exit(0 if max(b)<=2*mean else 1)'"
+# Fail-loud: --areas 0 is rejected (matches --budget-bytes/--max-chunks validation).
+check "rejects --areas 0 (fail-loud, non-zero exit)" "! python3 \"$CHUNK\" --scope . --areas 0 >/dev/null 2>&1"
+
+# Large-file invariant (pins the pack_areas binary-search LOWER bound
+# lo = max(max_file, ceil(total/N))): a single file bigger than the naive
+# fair-share (total/N) must still be PLACED in its own area and everything stays
+# covered — a wrong lower bound would under-size an area and drop the big file.
+# The fixture's huge.ts is >256KB (skipped by MAX_FILE_BYTES), so add a 150KB file
+# UNDER the cap. Added after the 6-file assertions above (their captures already ran).
+mkdir -p "$TMP/big"
+head -c 150000 /dev/zero | tr '\0' 'B' > "$TMP/big/big.ts"   # 150KB, < 256KB cap → kept
+git add -A 2>/dev/null
+BIGOUT="$(python3 "$CHUNK" --scope . --areas 3)"   # fair share ~50KB; big file 150KB >> that
+check "large-file run yields <= 3 areas" "printf '%s' \"\$BIGOUT\" | python3 -c 'import json,sys; sys.exit(0 if len(json.load(sys.stdin)[\"chunks\"])<=3 else 1)'"
+check "large-file (>fair-share) is placed, not dropped" "printf '%s' \"\$BIGOUT\" | python3 -c 'import json,sys; d=json.load(sys.stdin); allf=[f for c in d[\"chunks\"] for f in c[\"files\"]]; sys.exit(0 if \"big/big.ts\" in allf else 1)'"
+check "large-file run keeps total coverage (7 files, each once)" "printf '%s' \"\$BIGOUT\" | python3 -c 'import json,sys; d=json.load(sys.stdin); allf=[f for c in d[\"chunks\"] for f in c[\"files\"]]; sys.exit(0 if len(allf)==len(set(allf))==d[\"total_files\"]==7 else 1)'"
+
 echo "Results: $PASS passed, $FAIL failed"
 [ $FAIL -eq 0 ] && exit 0 || exit 1

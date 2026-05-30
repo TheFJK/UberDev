@@ -146,7 +146,7 @@ This reuses the exact source string `/simplify` already uses for its `code-fixer
 | `--lens=…` | Subset the lenses (default all three). |
 | `--max-chunks=N` / `--concurrency=N` / `--turbo` | As in `/uberscan`. |
 
-Config namespace (via `config-read.sh`, defaults mirror `/uberscan`): `ubersimplify.max_chunks` (25), `fanout_concurrency.ubersimplify` (3), `ubersimplify.chunk_budget_bytes` (49152), `ubersimplify.max_agents` (250), `ubersimplify.max_new` (10).
+Config namespace (via `config-read.sh`, defaults mirror `/uberscan`): `ubersimplify.max_chunks` (25), `fanout_concurrency.ubersimplify` (3), `ubersimplify.chunk_budget_bytes` (49152), `ubersimplify.max_agents` (250), `ubersimplify.max_new` (10). **⚠ Superseded by the 2026-05-30 amendment (below): `ubersimplify.max_chunks` / `ubersimplify.chunk_budget_bytes` are replaced by `ubersimplify.areas` (default 8, range 1-24); `fanout_concurrency.ubersimplify` / `.max_agents` / `.max_new` are unchanged.**
 
 ## 8. Circuit breakers
 
@@ -203,3 +203,47 @@ The apply phase (Phase 3) is bounded by the audited chunk set — no new unbound
 ## 13. Migration & compatibility
 
 Purely additive. No change to `/simplify`, `/uberscan`, or `findings-to-issues` default behavior (the new accepted source is an allow-list extension; the chunk.py move is path-only and test-guarded). New label `ubersimplify-finding` creates an independent backlog.
+
+---
+
+## Amendment (2026-05-30, v0.36.0) — area-scoped fixed-fleet fanout
+
+> **Supersedes the per-chunk × 3-lens fan-out.** Status: **Accepted, implemented.**
+> Mirrors the `/uberscan` amendment (RFC 0007) — same shared `lib/chunk.py` root cause.
+
+### Problem
+
+`/ubersimplify` dispatched 3 `code-simplifier` lens Tasks per byte-budget chunk, so
+agent count scaled as `chunks × 3`. On this repo (70 chunks) a whole-repo run
+projected **210 agents**, with the same `MAX_CHUNKS` truncation/halt dilemma as
+`/uberscan`.
+
+### Decision
+
+Adopt the same **area-scoped fixed-fleet** model:
+
+1. `lib/chunk.py --areas N` packs all in-scope files into **≤ N byte-balanced
+   areas** (default 8, config `ubersimplify.areas` / env
+   `UBERDEV_UBERSIMPLIFY_AREAS`); every file covered once, no overflow-truncation.
+2. **One multi-lens `code-simplifier` per area** runs all active lenses (Reuse,
+   Quality, Efficiency — narrowable via `--lens`) in a single pass, tagging each
+   finding with its `lens` so `aggregate.py` still merges by `file:line`.
+3. **Phase 3 applies one `code-fixer` per area, sequentially** (was per chunk) —
+   one `refactor:` commit per area; the sequential git-index invariant is unchanged.
+
+Net: whole-repo `/ubersimplify` costs **~8 audit agents + ≤8 sequential fixer
+dispatches** (was 210 audit agents).
+
+### Circuit-breaker recalibration
+
+CB1 (`MAX_CHUNKS` overflow) is **retired** — area mode never overflows. CB7
+projects `areas × 1` (was `chunks × 3`), a backstop against an absurd explicit
+`--areas`. `--max-chunks=N` is retained as a legacy alias for `--areas=N`; the
+`ubersimplify.max_chunks` / `ubersimplify.chunk_budget_bytes` config keys are
+replaced by `ubersimplify.areas`.
+
+### Backward compatibility
+
+Manifest `chunks[]` schema and `chunk-NNN-lens.yaml` / `chunk-NNN-fixer-disposition.yaml`
+filenames are unchanged (each is now an area), so `aggregate.py` and downstream
+`jq` are untouched.

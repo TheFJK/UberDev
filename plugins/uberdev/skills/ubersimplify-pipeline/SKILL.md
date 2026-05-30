@@ -1,17 +1,17 @@
 ---
 name: ubersimplify-pipeline
-description: Use when /uberdev:ubersimplify is invoked. Orchestrates whole-codebase 3-lens simplification — chunks the repo (shared lib/chunk.py), audits each chunk with the three code-simplifier lenses in concurrent waves, applies preserve-behavior fixes via code-fixer as one refactor: commit per chunk on a new branch, opens ONE PR, and files leftover blocker findings as GitHub issues. --audit-only is read-only.
+description: Use when /uberdev:ubersimplify is invoked. Orchestrates whole-codebase 3-lens simplification — packs the repo into a fixed fleet of byte-balanced areas (default 8, shared lib/chunk.py), audits each area with ONE multi-lens code-simplifier in concurrent waves, applies preserve-behavior fixes via code-fixer as one refactor: commit per area on a new branch, opens ONE PR, and files leftover blocker findings as GitHub issues. --audit-only is read-only.
 model: inherit
 ---
 
 # Ubersimplify Pipeline
 
-Owns the lifecycle of `/uberdev:ubersimplify`. The *writing* sibling of the read-only `/uberscan`: it audits the whole codebase with the `code-simplifier` lenses, then APPLIES preserve-behavior refactors via `code-fixer` — one `refactor:` commit per chunk — on a new branch behind a single PR. `--audit-only` collapses it to a read-only scan (no branch/fix/PR). The skill emits DISPATCH directives; the orchestrating session fires all `Task()` calls — one wave at a time in Phase 1, one chunk at a time in Phase 3.
+Owns the lifecycle of `/uberdev:ubersimplify`. The *writing* sibling of the read-only `/uberscan`: it audits the whole codebase with a FIXED FLEET of area agents (one multi-lens `code-simplifier` per byte-balanced area), then APPLIES preserve-behavior refactors via `code-fixer` — one `refactor:` commit per area — on a new branch behind a single PR. `--audit-only` collapses it to a read-only scan (no branch/fix/PR). The skill emits DISPATCH directives; the orchestrating session fires all `Task()` calls — one wave at a time in Phase 1, one area at a time in Phase 3.
 
 ## Phases
 
 - **Phase 0 — Parse + scope + chunk**
-- **Phase 1 — Per-chunk fan-out waves (3 code-simplifier lenses per chunk)**
+- **Phase 1 — Per-area fan-out waves (1 multi-lens code-simplifier per area; fixed fleet ≤ NUM_AREAS)**
 - **Phase 2 — Aggregate (per-chunk fixer aggregate via aggregate.py + human report)**
 - **Phase 3 — Branch + SEQUENTIAL code-fixer apply (skip iff --audit-only)**
 - **Phase 4 — Push + ONE gh pr create (skip iff --audit-only or 0 commits)**
@@ -54,8 +54,8 @@ findings_disposition:
 
 ## Reuses
 
-- `lib/config-read.sh` — `uberdev_read_int_in_range` for MAX_CHUNKS / CONCURRENCY / CHUNK_BUDGET / MAX_AGENTS / MAX_NEW
-- `lib/chunk.py` — scope enumeration and budget-bounded chunking (shared with /uberscan)
+- `lib/config-read.sh` — `uberdev_read_int_in_range` for NUM_AREAS / CONCURRENCY / MAX_AGENTS / MAX_NEW
+- `lib/chunk.py` — scope enumeration + balanced area-packing (`--areas N`; shared with /uberscan)
 - `skills/ubersimplify-pipeline/aggregate.py` — lens-merge dedup (`fixer` mode → `post-impl-review-aggregate` envelope) + leftover-issues collection (`issues` mode → `ubersimplify-aggregate` envelope)
 - `agents/code-simplifier.md` — the 3 lenses (Reuse / Quality / Efficiency), audit-only
 - `agents/code-fixer.md` — preserve-behavior apply as `refactor:` commits
@@ -104,8 +104,11 @@ if [ -z "$WORKING_DIR_ABS" ]; then
 fi
 
 # Parse flags from $ARGUMENTS
+# AREA MODEL: the whole repo is simplified by a FIXED FLEET of <= NUM_AREAS agents
+# (one multi-lens code-simplifier per byte-balanced area), so agent count is
+# bounded independent of repo size. Legacy `--max-chunks=N` aliases `--areas=N`.
 SCOPE="."; ALL=0; AUDIT_ONLY=0; NO_ISSUES=0; NO_REPORT=0
-MAX_CHUNKS_ARG=""; CONCURRENCY_ARG=""; TURBO=0; LENS_SUBSET=""
+AREAS_ARG=""; CONCURRENCY_ARG=""; TURBO=0; LENS_SUBSET=""
 for arg in $ARGUMENTS; do
   case "$arg" in
     --audit-only)     AUDIT_ONLY=1 ;;
@@ -114,7 +117,8 @@ for arg in $ARGUMENTS; do
     --no-report)      NO_REPORT=1 ;;
     --turbo)          TURBO=1 ;;
     --lens=*)         LENS_SUBSET="${arg#--lens=}" ;;
-    --max-chunks=*)   MAX_CHUNKS_ARG="${arg#--max-chunks=}" ;;
+    --areas=*)        AREAS_ARG="${arg#--areas=}" ;;
+    --max-chunks=*)   AREAS_ARG="${arg#--max-chunks=}" ;;  # legacy alias → areas
     --concurrency=*)  CONCURRENCY_ARG="${arg#--concurrency=}" ;;
     --*)              echo "warning: unknown flag $arg" >&2 ;;
     *)                SCOPE="$arg" ;;
@@ -122,34 +126,34 @@ for arg in $ARGUMENTS; do
 done
 
 # Resolve config via config-read.sh (precedence: env > config > default).
-# MAX_CHUNKS [1,200] def 25; CONCURRENCY [1,16] def 3; CHUNK_BUDGET [4096,1048576] def 49152;
-# MAX_AGENTS [1,2000] def 250.
+# NUM_AREAS [1,24] def 8; CONCURRENCY [1,16] def 3; MAX_AGENTS [1,2000] def 250.
+# An explicit --areas/--max-chunks flag is honored verbatim; the config/default
+# path is range-clamped.
 if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
   . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
-  if [ -n "$MAX_CHUNKS_ARG" ]; then
-    MAX_CHUNKS="$MAX_CHUNKS_ARG"
+  if [ -n "$AREAS_ARG" ]; then
+    NUM_AREAS="$AREAS_ARG"
   else
-    MAX_CHUNKS="$(uberdev_read_int_in_range ubersimplify.max_chunks UBERDEV_UBERSIMPLIFY_MAX_CHUNKS 1 200 25)"
+    NUM_AREAS="$(uberdev_read_int_in_range ubersimplify.areas UBERDEV_UBERSIMPLIFY_AREAS 1 24 8)"
   fi
   if [ -n "$CONCURRENCY_ARG" ]; then
     CONCURRENCY="$CONCURRENCY_ARG"
   else
     CONCURRENCY="$(uberdev_read_int_in_range fanout_concurrency.ubersimplify UBERDEV_UBERSIMPLIFY_FANOUT 1 16 3)"
   fi
-  CHUNK_BUDGET="$(uberdev_read_int_in_range ubersimplify.chunk_budget_bytes UBERDEV_UBERSIMPLIFY_CHUNK_BUDGET 4096 1048576 49152)"
   MAX_AGENTS="$(uberdev_read_int_in_range ubersimplify.max_agents UBERDEV_UBERSIMPLIFY_MAX_AGENTS 1 2000 250)"
 else
-  MAX_CHUNKS="${MAX_CHUNKS_ARG:-25}"
+  NUM_AREAS="${AREAS_ARG:-8}"
   CONCURRENCY="${CONCURRENCY_ARG:-3}"
-  CHUNK_BUDGET=49152
   MAX_AGENTS=250
 fi
 
-# Chunk the scope with the SHARED lib (not the retired uberscan-pipeline copy).
+# Pack the scope into <= NUM_AREAS byte-balanced areas with the SHARED lib (every
+# file covered; no overflow-truncation). Manifest keeps the `chunks[]` schema
+# (each entry is now an AREA), so aggregate.py + downstream jq are unchanged.
 python3 "${CLAUDE_PLUGIN_ROOT}/lib/chunk.py" \
   --scope "$SCOPE" \
-  --budget-bytes "$CHUNK_BUDGET" \
-  --max-chunks "$MAX_CHUNKS" \
+  --areas "$NUM_AREAS" \
   --run-id "$RUN_ID" \
   > "$RUN_DIR/manifest.json" || { echo "error: chunk.py failed (rc=$?); aborting" >&2; exit 2; }
 
@@ -159,45 +163,39 @@ if ! jq -e '.' "$RUN_DIR/manifest.json" >/dev/null 2>&1; then
   echo "error: manifest.json is not valid JSON; aborting" >&2; exit 2
 fi
 
-# CB1 overflow guard: repo chunked into more than MAX_CHUNKS pieces.
+# CB1 is RETIRED in the area model: pack_areas covers every file in <= NUM_AREAS
+# areas, so overflow is always false — a whole-repo simplification always runs
+# (it cannot silently drop the alphabetically-later files). The guard below is
+# purely defensive (chunk.py hardcodes overflow=false in area mode).
 OVERFLOW="$(jq -r '.overflow' "$RUN_DIR/manifest.json")"
-if [ "$OVERFLOW" = "true" ] && [ "$ALL" != "1" ]; then
-  TOTAL_CHUNKS="$(jq -r '.total_chunks' "$RUN_DIR/manifest.json")"
-  if [ "$TURBO" = "1" ]; then
-    echo "[ubersimplify] overflow: repo has $TOTAL_CHUNKS chunks; capped at MAX_CHUNKS=$MAX_CHUNKS (--turbo cap-and-continue)" >&2
-    echo "OVERFLOW=true" >> "$RUN_DIR/run-state.txt"
-  else
-    echo "error: repo chunked into $TOTAL_CHUNKS chunks which exceeds MAX_CHUNKS=$MAX_CHUNKS." >&2
-    echo "  Narrow with a path arg (e.g. /ubersimplify src/), or pass --all to override the cap," >&2
-    echo "  or set a higher cap with --max-chunks=N or ubersimplify.max_chunks in .uberdev/config.yaml." >&2
-    exit 1
-  fi
+if [ "$OVERFLOW" = "true" ]; then
+  echo "[ubersimplify] warning: unexpected overflow=true in an area-mode manifest (treating as non-fatal)" >&2
 fi
 
-EMITTED_CHUNKS="$(jq '.chunks | length' "$RUN_DIR/manifest.json")"
+EMITTED_AREAS="$(jq '.chunks | length' "$RUN_DIR/manifest.json")"
 
-# CB7 projected-agent ceiling: EMITTED_CHUNKS × 3 lenses (NO repo-global pass —
-# /ubersimplify has no Semgrep/coverage agents, unlike /uberscan). Independent
-# backstop on top of CB1 (a low MAX_CHUNKS with a wide fleet could still blow budget).
-PROJECTED_AGENTS=$(( EMITTED_CHUNKS * 3 ))
+# CB7 projected-agent ceiling: EMITTED_AREAS × 1 multi-lens code-simplifier per
+# area (Phase 3 then applies via one code-fixer per area, sequentially). Backstop
+# against an absurd explicit --areas override (the default path is clamped [1,24]).
+PROJECTED_AGENTS=$(( EMITTED_AREAS ))
 if [ "$PROJECTED_AGENTS" -gt "$MAX_AGENTS" ] && [ "$ALL" != "1" ]; then
   if [ "$TURBO" = "1" ]; then
     echo "[ubersimplify] CB7: projected $PROJECTED_AGENTS agents exceeds MAX_AGENTS=$MAX_AGENTS (--turbo cap-and-continue)" >&2
     echo "OVERFLOW=true" >> "$RUN_DIR/run-state.txt"
   else
-    echo "error: projected agent count ($PROJECTED_AGENTS = ${EMITTED_CHUNKS}×3) exceeds MAX_AGENTS=$MAX_AGENTS." >&2
-    echo "  Narrow with a path arg, pass --all to override, or raise ubersimplify.max_agents." >&2
+    echo "error: projected agent count ($PROJECTED_AGENTS areas) exceeds MAX_AGENTS=$MAX_AGENTS." >&2
+    echo "  Lower --areas=N, pass --all to override, or raise ubersimplify.max_agents." >&2
     exit 1
   fi
 fi
 
-echo "[ubersimplify] run_id=$RUN_ID scope=$SCOPE chunks=$EMITTED_CHUNKS concurrency=$CONCURRENCY lenses=${LENS_SUBSET:-Reuse,Quality,Efficiency} audit_only=$AUDIT_ONLY projected_agents=$PROJECTED_AGENTS"
+echo "[ubersimplify] run_id=$RUN_ID scope=$SCOPE areas=$EMITTED_AREAS concurrency=$CONCURRENCY lenses=${LENS_SUBSET:-Reuse,Quality,Efficiency} audit_only=$AUDIT_ONLY projected_agents=$PROJECTED_AGENTS (1 multi-lens simplifier per area)"
 ```
 
 
-## Phase 1 — Per-chunk fan-out waves (3 lenses per chunk)
+## Phase 1 — Per-area fan-out waves (1 multi-lens simplifier per area)
 
-Each chunk receives a **file-set audit brief**: the agents audit EXISTING files as they stand in the repo (not a diff). Per chunk the orchestrating session fires **3** `Task()` calls IN ONE MESSAGE — one per lens (`Reuse`, `Quality`, `Efficiency`), each `subagent_type: uberdev:code-simplifier`. If `LENS_SUBSET` is set, dispatch only the named lenses for every chunk (e.g. `--lens=Reuse,Quality` → 2 Tasks/chunk; recompute the per-chunk fleet size accordingly).
+Each **area** receives a **file-set audit brief** and is simplified by **ONE multi-lens code-simplifier** — the fixed-fleet model (one agent per area, not one Task per lens). The agent audits EXISTING files as they stand (not a diff) and runs ALL active lenses in a single pass, tagging each finding with its `lens`. The orchestrating session fires the wave's area `Task()` calls (one per area, up to `CONCURRENCY`) IN ONE MESSAGE, each `subagent_type: uberdev:code-simplifier`. `--lens=Reuse,Quality` narrows which lenses the single agent runs.
 
 ```bash
 # #171 — rehydrate RUN_ID/RUN_DIR in a fresh shell.
@@ -286,7 +284,7 @@ while [ "$IDX" -lt "${#CHUNK_ARRAY[@]}" ]; do
     CHUNK_FILES="$(printf '%s' "$CHUNK_FILES_JSON" | jq -r '.[]')"
     CHUNK_OUT="$RUN_DIR/chunk-${CHUNK_NUM}-lens.yaml"
 
-    # Write the dispatch directive for this chunk
+    # Write the dispatch directive for this area (one multi-lens simplifier).
     {
       echo "schema_version: 1"
       echo "run_id: $RUN_ID"
@@ -294,40 +292,39 @@ while [ "$IDX" -lt "${#CHUNK_ARRAY[@]}" ]; do
       echo "chunk_out: $CHUNK_OUT"
       echo "output_schema: C-LENS"
       echo "files: $CHUNK_FILES_JSON"
-      echo "lenses_to_dispatch: [$(printf '%s' "$ACTIVE_LENSES" | sed 's/ /, /g')]"
+      echo "lenses_to_run: [$(printf '%s' "$ACTIVE_LENSES" | sed 's/ /, /g')]"
       echo "agents_to_dispatch:"
-      for LENS in $ACTIVE_LENSES; do
-        echo "  - agent: code-simplifier"
-        echo "    subagent_type: uberdev:code-simplifier"
-        echo "    lens: $LENS"
-      done
+      echo "  - agent: code-simplifier"
+      echo "    subagent_type: uberdev:code-simplifier"
+      echo "    role: area-multi-lens-simplifier"
+      echo "    lenses: [$(printf '%s' "$ACTIVE_LENSES" | sed 's/ /, /g')]"
       echo "notes:"
-      echo "  - \"Agents audit EXISTING files as-they-stand (NOT a diff).\""
-      echo "  - \"One Task per lens; fire all lens Tasks for this chunk IN ONE MESSAGE.\""
-      echo "  - \"Per-lens failure: drop that lens and continue with the remaining lenses.\""
+      echo "  - \"ONE code-simplifier per area covering ALL listed lenses (fixed-fleet — NOT one Task per lens).\""
+      echo "  - \"Agent audits EXISTING files as-they-stand (NOT a diff); tag each finding's lens field.\""
+      echo "  - \"Area is the unit of failure: on BLOCKED/unparseable, log a warning and continue with remaining areas.\""
     } > "$RUN_DIR/dispatch-chunk-${CHUNK_NUM}.yaml"
 
     # ===========================================================================
     # DISPATCH POINT — the orchestrating session reads dispatch-chunk-NNN.yaml
-    # above and fires ONE Task() call PER ACTIVE LENS (default 3) IN A SINGLE
-    # assistant message, each with subagent_type: uberdev:code-simplifier. Each
-    # Task receives the file-set audit brief below PLUS its own lens-emphasis line.
+    # above and fires ONE Task() per area (the wave's areas together IN A SINGLE
+    # assistant message), each with subagent_type: uberdev:code-simplifier. The
+    # single agent runs ALL active lenses over the whole area.
     #
-    # FILE-SET AUDIT BRIEF (embed in each Task's prompt verbatim, substituting the
-    # lens name into the `## Lens emphasis` heading — code-simplifier runs the
-    # matching checklist for that heading; see agents/code-simplifier.md):
+    # FILE-SET AUDIT BRIEF (embed in the area Task's prompt verbatim, listing the
+    # active lenses in the `## Lens emphasis` heading — code-simplifier runs every
+    # listed checklist; see agents/code-simplifier.md):
     #
-    #   You are auditing EXISTING source files as they stand in the repository —
-    #   this is NOT a diff review. Your job is to find simplification
-    #   opportunities in the code as written today.
+    #   You are the sole simplifier for this AREA. You are auditing EXISTING source
+    #   files as they stand in the repository — this is NOT a diff review. Your job
+    #   is to find simplification opportunities in the code as written today.
     #
-    #   ## Lens emphasis: <Reuse | Quality | Efficiency>
+    #   ## Lens emphasis: <ACTIVE_LENSES — e.g. Reuse, Quality, Efficiency>
     #
-    #   > Audit these EXISTING files as they stand (NOT a diff). Apply your
-    #   > `## Lens emphasis` checklist. For the Reuse lens, hunt cross-file duplication
-    #   > across the whole repository.
+    #   > Audit these EXISTING files as they stand (NOT a diff). Run EVERY listed
+    #   > lens's checklist over the whole area. For the Reuse lens, hunt cross-file
+    #   > duplication across the whole repository.
     #
-    #   Files in this chunk:
+    #   Files in this area:
     #     <contents of CHUNK_FILES — one path per line>
     #
     #   Read each file in full. Return findings in the C-LENS record schema (one
@@ -335,15 +332,16 @@ while [ "$IDX" -lt "${#CHUNK_ARRAY[@]}" ]; do
     #
     #     - location: <path>:<line>
     #       severity: blocker | suggestion
-    #       lens: <this Task's lens — Reuse | Quality | Efficiency>
+    #       lens: <the lens this finding came from — Reuse | Quality | Efficiency>
     #       summary: <1-line, no source quoting>
     #       detail: <prose rationale + suggested direction>
     #
     #   If you have zero findings, return an empty list — do not invent findings.
     #
-    # Per-lens failure: if a lens Task returns BLOCKED or unparseable output, log a
-    # warning and continue with the remaining lenses for this chunk.
-    # Merge all lens findings for this chunk into ONE C-LENS file: $CHUNK_OUT
+    # Area failure: if the Task returns BLOCKED or unparseable output, log a warning
+    # and continue with the remaining areas (the area is the unit of failure — one
+    # agent owns the whole area, no per-lens retry).
+    # Write the area's C-LENS findings to: $CHUNK_OUT
     # ===========================================================================
 
     TOTAL_CHUNKS_PROCESSED=$(( TOTAL_CHUNKS_PROCESSED + 1 ))
@@ -359,7 +357,7 @@ while [ "$IDX" -lt "${#CHUNK_ARRAY[@]}" ]; do
   done
 
   IDX="$WAVE_END_IDX"
-  echo "[ubersimplify] wave $WAVE_NUM complete ($TOTAL_CHUNKS_PROCESSED/$TOTAL_EMITTED chunks processed)"
+  echo "[ubersimplify] wave $WAVE_NUM complete ($TOTAL_CHUNKS_PROCESSED/$TOTAL_EMITTED areas processed)"
 done
 ```
 
@@ -433,7 +431,7 @@ fi
 
 ## Phase 3 — Branch + sequential code-fixer apply (skip iff --audit-only)
 
-Skipped entirely under `--audit-only` (read-only mode). Otherwise a new branch is cut from the current branch, then a `code-fixer` Task is dispatched **one chunk at a time** — concurrent apply Tasks would race the git index (two `git add`/`git commit` in flight corrupt the staging area). Each `code-fixer` produces exactly one `refactor:` commit (Phase 2 single-commit invariant, R8.6).
+Skipped entirely under `--audit-only` (read-only mode). Otherwise a new branch is cut from the current branch, then a `code-fixer` Task is dispatched **one area at a time** — concurrent apply Tasks would race the git index (two `git add`/`git commit` in flight corrupt the staging area). Each `code-fixer` produces exactly one `refactor:` commit (Phase 2 single-commit invariant, R8.6).
 
 ```bash
 # #171 — rehydrate RUN_ID/RUN_DIR in a fresh shell.
@@ -513,7 +511,7 @@ else
     echo
     echo "Run \`$RUN_ID\` audited the codebase with the three \`code-simplifier\` lenses"
     echo "(**Reuse**, **Quality**, **Efficiency**) and applied preserve-behavior refactors"
-    echo "via \`code-fixer\` — one \`refactor:\` commit per chunk."
+    echo "via \`code-fixer\` — one \`refactor:\` commit per area."
     echo
     echo "| Metric | Value |"
     echo "|---|---|"
@@ -678,15 +676,21 @@ PY
 BLOCKER_COUNT="$(_ubersimplify_sev_total blocker)"
 SUGGESTION_COUNT="$(_ubersimplify_sev_total suggestion)"
 
+# Phase 6 runs in a FRESH shell — derive area counts from on-disk artifacts.
+SCOPE="$(jq -r '.scope // "."' "$RUN_DIR/manifest.json" 2>/dev/null)"
+{ [ -z "$SCOPE" ] || [ "$SCOPE" = "null" ]; } && SCOPE="(unknown)"
+TOTAL_AREAS="$(jq '.chunks | length' "$RUN_DIR/manifest.json" 2>/dev/null || echo '?')"
+AREAS_AUDITED="$(ls "$RUN_DIR"/chunk-*-lens.yaml 2>/dev/null | wc -l | tr -d ' ')"
+
 echo
 echo "[ubersimplify] === DONE ==="
 echo "  run_id:           $RUN_ID"
 echo "  scope:            $SCOPE"
-echo "  total_chunks:     $TOTAL_EMITTED"
-echo "  chunks_audited:   $TOTAL_CHUNKS_PROCESSED"
-echo "  lenses_per_chunk: ${LENS_SUBSET:-Reuse,Quality,Efficiency}"
+echo "  total_areas:      $TOTAL_AREAS"
+echo "  areas_audited:    $AREAS_AUDITED"
+echo "  lenses_per_area:  ${LENS_SUBSET:-Reuse,Quality,Efficiency}"
 [ "$FINDINGS_FLOOD" = "1" ] && echo "  partial:          yes (findings-flood CB5 triggered)"
-[ "$(grep -c OVERFLOW=true "$RUN_DIR/run-state.txt" 2>/dev/null || echo 0)" -gt 0 ] && echo "  overflow:         yes (capped at MAX_CHUNKS=$MAX_CHUNKS; use --all to override)"
+[ "$(grep -c OVERFLOW=true "$RUN_DIR/run-state.txt" 2>/dev/null || echo 0)" -gt 0 ] && echo "  overflow:         yes (CB7 agent-cap hit; lower --areas or raise ubersimplify.max_agents)"
 echo "  severity totals:"
 echo "    blocker:        $BLOCKER_COUNT"
 echo "    suggestion:     $SUGGESTION_COUNT"
@@ -716,11 +720,11 @@ exit 0
 
 | Circuit breaker | Trigger | Non-turbo behavior | Turbo behavior | Exit |
 |---|---|---|---|---|
-| **CB1** | `overflow=true` AND `--all` not passed | Halt with guidance | Cap-and-continue | `1` (non-turbo) / `0` (turbo) |
+| **CB1** | _Retired in area mode_ — `pack_areas` covers every file in ≤ NUM_AREAS areas, so `overflow` is always false (no truncation; a whole-repo run always covers everything) | n/a | n/a | — |
 | **CB3** | Per-wave timeout > 900s | Stop early, partial | Stop early, partial | `1` |
 | **CB4** | Wall-clock > 3600s (60 min) | Stop early, partial | Stop early, partial | `1` |
 | **CB5** | Cumulative blocker findings > 150 | Stop early, mark partial | Stop early, mark partial | `1` |
 | **CB6** | gh rate-limit floor not met | Skip issue filing; **keep branch/PR** | Skip issue filing; keep branch/PR | `0` |
-| **CB7** | Projected agents (chunks×3) > MAX_AGENTS (250) | Halt with guidance | Cap-and-continue | `1` (non-turbo) / `0` (turbo) |
+| **CB7** | Projected agents (areas×1) > MAX_AGENTS (250) — backstop against an absurd explicit `--areas` | Halt with guidance | Cap-and-continue | `1` (non-turbo) / `0` (turbo) |
 
-CB7 projects `chunks × 3` (three lenses, no repo-global pass — unlike `/uberscan`'s `chunks × 6 + 2`). CB6 differs from a fatal halt: it skips only issue filing and **retains the branch and PR** so the applied refactors are never lost to a transient rate-limit dip.
+CB7 projects `areas × 1` (one multi-lens simplifier per area; Phase 3 then applies via one code-fixer per area, sequentially). CB6 differs from a fatal halt: it skips only issue filing and **retains the branch and PR** so the applied refactors are never lost to a transient rate-limit dip.
