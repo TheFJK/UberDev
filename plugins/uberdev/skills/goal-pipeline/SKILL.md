@@ -130,6 +130,8 @@ Notes on the enums:
    max_parallel_cli=""
    barrier_timeout_cli=""
    review_grace_cli=""
+   watch_passes_cli=""
+   watch_budget_cli=""
    only_mine=0
    dry_run=0
    backend_cli=""
@@ -139,6 +141,8 @@ Notes on the enums:
        --max-parallel=*)       max_parallel_cli="${tok#--max-parallel=}" ;;
        --barrier-timeout=*)    barrier_timeout_cli="${tok#--barrier-timeout=}" ;;
        --review-grace-secs=*)  review_grace_cli="${tok#--review-grace-secs=}" ;;
+       --watch-passes=*)       watch_passes_cli="${tok#--watch-passes=}" ;;
+       --watch-budget=*)       watch_budget_cli="${tok#--watch-budget=}" ;;
        --only-mine)            only_mine=1 ;;
        --dry-run)              dry_run=1 ;;
        --backend=*)            backend_cli="${tok#--backend=}" ;;
@@ -146,6 +150,39 @@ Notes on the enums:
      esac
    done
    ```
+
+   **Bounded watch mode (issue #299, finding 2).** `--watch-passes=N` and
+   `--watch-budget=SECS` (and the `GOAL_SINGLE_TICK=1` env shorthand for
+   `--watch-passes=1`) make the Phase-2 watch loop run a BOUNDED number of poll
+   passes (or until a wall-clock budget) and then exit with a documented
+   re-invocation contract, instead of the default `while true … sleep` loop that
+   runs up to the 4h goal-level cap. This is what lets an orchestrating harness
+   (e.g. the Claude-Code Bash tool, whose single call is capped at 600s) drive
+   the watch loop tick-by-tick: each tick persists run-state (via
+   `uberdev_goal_write_run_state`), prints the current state to stderr, and
+   exits with one of three DOCUMENTED codes:
+
+   - **`0`** — the watch loop DRAINED this cycle (Phase-2 step 2f intra-cycle
+     termination: no active agents AND no merging PRs) → proceed to Phase 3.
+   - **`42`** — the bound (pass count or budget) was reached while work is still
+     in flight → re-invoke the Phase-2 fence to continue polling. The bg solver
+     agents are LEFT ALIVE (the reaper does NOT fire on a bounded-tick pause —
+     only on a circuit-breaker halt or a genuine INT/TERM).
+   - **`1`** — a circuit breaker fired (the reaper DOES fire here, exactly as in
+     the unbounded loop) → halt. Exit `1` ALSO covers a fail-loud
+     run-state-flush failure at a bounded exit boundary (drain or pass/budget
+     bound): if `uberdev_goal_write_run_state` fails there, the fence halts with
+     a `goal: ERROR: run-state flush FAILED` diagnostic and exit 1 rather than
+     proceeding to Phase 3 on unpersisted state / re-inviting Phase 2 on a lost
+     bound that would silently revert to unbounded. The bg solver agents are
+     PRESERVED on this fail-loud path — distinct from a circuit-breaker exit 1,
+     which reaps first.
+
+   When NEITHER `--watch-passes` / `--watch-budget` / `GOAL_SINGLE_TICK` is set,
+   the watch loop runs unbounded (the legacy behaviour: one continuous fence
+   that flows into Phase 3 inline on drain, bounded only by the 4h goal-level
+   `stuck_loop`). The bound is read in step 3 alongside the other range-checked
+   tunables.
 
 2. **Numeric-validate every positional argument** (T3 mitigation). For each token in `queue`, call `_uberdev_goal_validate_int` (from `lib/goal-state.sh`); any failure aborts before any `gh` call sees the value. This is the first defence against `gh` argument injection via PR/issue numbers (R3).
 
@@ -175,6 +212,23 @@ Notes on the enums:
    REVIEW_GRACE_SECS="$(UBERDEV_GOAL_REVIEW_GRACE_SECS="${review_grace_cli:-${UBERDEV_GOAL_REVIEW_GRACE_SECS:-}}" \
      uberdev_read_int_in_range goal.review_grace_secs UBERDEV_GOAL_REVIEW_GRACE_SECS 60 86400 \
      "$_UBERDEV_GOAL_DEFAULT_REVIEW_GRACE_SECS")"
+
+   # Bounded watch mode (issue #299 finding 2). WATCH_PASSES / WATCH_BUDGET use
+   # range [0, N] with default 0 — 0 is the UNBOUNDED sentinel (legacy
+   # `while true … sleep` behaviour). A positive value bounds the Phase-2 watch
+   # loop to N poll passes / SECS wall-clock per fence invocation; on the bound
+   # the loop persists run-state and exits 42 ("still-active, re-invoke"). Both
+   # default to 0 so the unbounded loop is unchanged unless explicitly opted in.
+   # GOAL_SINGLE_TICK=1 is the env shorthand for --watch-passes=1 (applied only
+   # when neither a pass nor a budget bound was given).
+   WATCH_PASSES="$(UBERDEV_GOAL_WATCH_PASSES="${watch_passes_cli:-${UBERDEV_GOAL_WATCH_PASSES:-}}" \
+     uberdev_read_int_in_range goal.watch_passes UBERDEV_GOAL_WATCH_PASSES 0 100000 0)"
+   WATCH_BUDGET="$(UBERDEV_GOAL_WATCH_BUDGET="${watch_budget_cli:-${UBERDEV_GOAL_WATCH_BUDGET:-}}" \
+     uberdev_read_int_in_range goal.watch_budget UBERDEV_GOAL_WATCH_BUDGET 0 86400 0)"
+   if [ "${GOAL_SINGLE_TICK:-0}" = "1" ] && [ "${WATCH_PASSES:-0}" -eq 0 ] && [ "${WATCH_BUDGET:-0}" -eq 0 ]; then
+     WATCH_PASSES=1
+   fi
+   export WATCH_PASSES WATCH_BUDGET
    ```
 
 4. **Source `lib/dispatch.sh`; call `uberdev_dispatch_preflight`** → sets `UBERDEV_RESOLVED_BACKEND` once for the whole run (D15). The resolved backend is forwarded to every `/uberdev:orchestrator` (Phase 1), `/merge`, and `/review-pr` (Phase 2) child dispatch in this run; it is NEVER re-resolved per cycle.
@@ -198,7 +252,17 @@ Notes on the enums:
 
    ```bash
    export UBERDEV_TMPDIR="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"   # D7 — stable sidecar dir for the watcher
-   GOAL_ID="goal-$(date +%s)-$(mktemp -u XXXXXXXX | tr -d '/' | head -c 8)"
+   # #299 finding 3 — GOAL_ID does NOT carry a leading `goal-`. Every per-goal
+   # sidecar path is formatted `goal-$GOAL_ID-<suffix>` throughout
+   # lib/goal-state.sh, so a `goal-`-prefixed GOAL_ID produced `goal-goal-…` on disk — a
+   # debugging foot-gun (the obvious `"$TMPDIR"/goal-<id>-*` search matched
+   # nothing). Generating the id WITHOUT the prefix yields a single clean
+   # `goal-<epoch>-<rand>-…` on disk and preserves read/write symmetry (the same
+   # `goal-$GOAL_ID-` format string drives both writers and readers). The id is
+   # still digits/dash/alnum only, so _uberdev_goal_validate_id accepts it, and
+   # it never begins with `goal-` so the sidecar mis-pathing guard
+   # (`case "$GOAL_ID" in goal--*`) cannot trip.
+   GOAL_ID="$(date +%s)-$(mktemp -u XXXXXXXX | tr -d '/' | head -c 8)"
    export UBERDEV_GOAL_ID="$GOAL_ID"
    ```
 
@@ -232,6 +296,8 @@ Notes on the enums:
      printf '  MAX_CYCLES=%s\n' "$MAX_CYCLES"
      printf '  MAX_PARALLEL=%s\n' "$MAX_PARALLEL"
      printf '  BARRIER_TIMEOUT_S=%s\n' "$BARRIER_TIMEOUT_S"
+     printf '  WATCH_PASSES=%s WATCH_BUDGET=%s (0=unbounded watch loop)\n' \
+       "${WATCH_PASSES:-0}" "${WATCH_BUDGET:-0}"
      printf '  backend=%s\n' "$UBERDEV_RESOLVED_BACKEND"
      printf '  issues=%s\n' "${queue[*]}"
      printf '  would emit goal_dispatched\n'
@@ -564,6 +630,25 @@ trap 'rm -f "$gh_err" "$findings_err"' EXIT
 # would force the reaper on graceful convergence (slow, wasteful).
 trap '_uberdev_goal_reap_zombies; exit 130' INT
 trap '_uberdev_goal_reap_zombies; exit 143' TERM
+
+# #299 finding 2 — bounded watch mode. WATCH_PASSES / WATCH_BUDGET are
+# rehydrated by uberdev_goal_read_run_state above (default 0 = UNBOUNDED, the
+# legacy `while true … sleep` loop). When EITHER is positive, this fence runs a
+# BOUNDED number of poll passes (or until a per-fence wall-clock budget) and
+# then exits 42 ("still-active, re-invoke") so an orchestrating harness can drive
+# the loop tick-by-tick within its own call cap (e.g. the 600s Bash-tool cap).
+# Exit 0 = drained -> proceed to Phase 3. Exit 1 = halt: a circuit breaker (reaps
+# first) OR a fail-loud run-state-flush failure at a bounded exit boundary (#300
+# Fix B — bg solver agents PRESERVED, no reap, distinct from a breaker exit 1).
+# _tick_start is the PER-FENCE wall-clock anchor (fresh every invocation — NOT
+# persisted, distinct from the goal-level watch_start that drives the 4h cap);
+# _tick_passes counts poll passes completed in THIS fence invocation.
+_tick_start="$(date +%s)"
+_tick_passes=0
+_watch_bounded=0
+if [ "${WATCH_PASSES:-0}" -gt 0 ] || [ "${WATCH_BUDGET:-0}" -gt 0 ]; then
+  _watch_bounded=1
+fi
 
 while true; do
   now="$(date +%s)"
@@ -1118,10 +1203,72 @@ while true; do
     esac
   done
 
-  # 2f. Termination check (intra-cycle)
+  # 2f. Termination check (intra-cycle). DRAINED = no active agents AND no
+  # merging PR. In the UNBOUNDED loop this `break`s out of `while true` and the
+  # fence flows inline into Phase 3. In BOUNDED mode there is no inline Phase 3
+  # (the harness re-invokes a separate Phase-3 fence), so persist run-state and
+  # exit 0 — the documented "drained -> proceed to Phase 3" code (#299 finding 2).
   if [ "$any_active" = "0" ] && \
      [ -z "$(uberdev_goal_list_prs_in_state "$GOAL_ID" merging)" ]; then
+    if [ "$_watch_bounded" = "1" ]; then
+      # #300 Fix B (silent-failure-hunter CRITICAL) — fail LOUD on a run-state
+      # flush failure at this bounded-exit boundary. write_run_state persists the
+      # SOURCE-OF-TRUTH run-state (cycle/queue/active_issues + the WATCH_* bound);
+      # degrading a failed flush to a warning and still `exit 0` would proceed to
+      # Phase 3 on UNPERSISTED state. Halt with exit 1 instead. Do NOT reap here:
+      # this is a fail-loud halt distinct from a circuit-breaker exit 1 (which
+      # reaps first) — the bg solver agents must survive a transient persist blip.
+      if ! uberdev_goal_write_run_state; then
+        echo "goal: ERROR: run-state flush FAILED at drain boundary — halting (exit 1) rather than proceeding to Phase 3 on unpersisted state; bg solver agents left intact" >&2
+        exit 1
+      fi
+      echo "goal: watch drained (no active agents, no merging PRs) -> proceed to Phase 3 [bounded-tick exit 0]" >&2
+      exit 0
+    fi
     break
+  fi
+
+  # #299 finding 2 — bounded-watch pass/budget gate. A pass just completed; count
+  # it, then decide whether THIS fence's bound is reached. If so, persist
+  # run-state and exit 42 ("still-active, re-invoke") WITHOUT reaping — the bg
+  # solver agents must survive the paused tick (the reaper fires ONLY on a
+  # circuit-breaker halt or a genuine INT/TERM, never on a bounded pause). The
+  # UNBOUNDED path falls straight through to sleep.
+  if [ "$_watch_bounded" = "1" ]; then
+    _tick_passes=$(( _tick_passes + 1 ))
+    _tick_now="$(date +%s)"
+    _bound_hit=0
+    if [ "${WATCH_PASSES:-0}" -gt 0 ] && [ "$_tick_passes" -ge "$WATCH_PASSES" ]; then
+      _bound_hit=1
+    fi
+    # WATCH_BUDGET is a FLOOR-OF-ONE-PASS, not a hard ceiling: this gate is
+    # reached only AFTER a full poll pass has completed, so a budget smaller than
+    # one pass of gh-call latency still runs (and is billed for) exactly one pass.
+    # The check bounds the SLEEP we are about to enter (it pre-adds one poll
+    # interval so we never sleep PAST the budget), not the pass duration — size
+    # the budget to leave headroom for one pass of gh latency under the harness
+    # call cap.
+    if [ "${WATCH_BUDGET:-0}" -gt 0 ] && \
+       [ "$(( _tick_now - _tick_start + _UBERDEV_GOAL_POLL_SECS ))" -gt "$WATCH_BUDGET" ]; then
+      _bound_hit=1
+    fi
+    if [ "$_bound_hit" = "1" ]; then
+      # #300 Fix B (silent-failure-hunter CRITICAL) — fail LOUD on a run-state
+      # flush failure at this bounded-exit boundary. write_run_state persists the
+      # WATCH_PASSES/WATCH_BUDGET bound (+ cycle/queue/active_issues); if it fails
+      # and we still `exit 42`, the harness re-invokes a fresh Phase-2 fence that
+      # rehydrates from the UNWRITTEN sidecar -> WATCH_* default to 0 -> the loop
+      # SILENTLY reverts to UNBOUNDED (then the 600s harness cap SIGTERMs it ->
+      # reaper). Halt with exit 1 instead. Do NOT reap here: this is a fail-loud
+      # halt distinct from a circuit-breaker exit 1 (which reaps first) — the bg
+      # solver agents must survive a transient persist blip.
+      if ! uberdev_goal_write_run_state; then
+        echo "goal: ERROR: run-state flush FAILED at tick boundary — halting (exit 1) rather than re-inviting Phase 2 on a lost bound that would silently revert to unbounded; bg solver agents left intact" >&2
+        exit 1
+      fi
+      echo "goal: watch bound reached (passes=$_tick_passes/${WATCH_PASSES:-0} budget=$(( _tick_now - _tick_start ))/${WATCH_BUDGET:-0}s); work still in flight -> re-invoke Phase 2 [bounded-tick exit 42]" >&2
+      exit 42
+    fi
   fi
 
   sleep "$_UBERDEV_GOAL_POLL_SECS"

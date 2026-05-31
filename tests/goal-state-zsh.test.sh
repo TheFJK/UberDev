@@ -361,6 +361,164 @@ case "$Z9_OUT" in
 esac
 rm -rf "$Z9_TMP" 2>/dev/null || true
 
+echo
+echo "== Z10: verdict-locator + peer enumerators do NOT fatal on ZERO matches under zsh (#299 finding 1) =="
+# #299 finding 1: the Phase-2 watch loop's verdict locator
+# (uberdev_goal_locate_review_pr_audit_by_pr) and peer enumerators iterate the
+# worktree-prefix globs via _uberdev_goal_glob_worktree. Under zsh a BARE
+# unmatched glob FATALS (`no matches found`) — proven below — so any enumerator
+# that expanded an unmatched glob WITHOUT the helper's `setopt localoptions
+# nonomatch` + `${~pat}` guard would abort the whole watch fence. The issue
+# reporter hit exactly this at uberdev 0.35.19. This locks the fix: every
+# glob-iterating enumerator must return cleanly (rc 0, empty) on zero matches —
+# NEVER fatal — even when run from a directory where NO .uberdev/runs/* exists.
+#
+# Mutation guard: revert _uberdev_goal_glob_worktree's zsh arm (`setopt
+# localoptions nonomatch` removed, or `${~pat}` -> bare `$pat` with the loop
+# expanding the literal directly) => Z10 goes RED with a leaked `no matches
+# found` fatal.
+# Coverage note: Z10 exercises the ZERO-match path (the locator must not fatal).
+# The complementary POSITIVE-match path — the locator FINDING a worktree-mirror
+# verdict under zsh and the watch loop transitioning pushed-reviewing -> green —
+# is covered by goal-pipeline-zsh.test.sh `W` (it seeds a verdict in a worktree
+# mirror and runs the sliced step-2b loop). Together they lock both glob arms.
+Z10_TMP="$(mktemp -d)"
+Z10_OUT="$(
+  GOAL_ID="goal-z10abc01"
+  export GOAL_ID UBERDEV_GOAL_ID="$GOAL_ID" UBERDEV_TMPDIR="$Z10_TMP"
+  uberdev_goal_state_init "$GOAL_ID" >/dev/null 2>&1
+  # cd to an EMPTY checkout: every worktree-mirror glob is UNMATCHED here, which
+  # is the exact zero-verdict state at the start of a /goal watch pass. A bare
+  # unmatched glob would FATAL here under zsh (`no matches found`); the
+  # helper-routed enumerators below must NOT.
+  cd "$Z10_TMP" || exit 9
+  # Stub gh so uberdev_goal_locate_review_pr_audit (issue->PR path) and the
+  # read_merge_result tier-1 gh probe never hit the network; both still drive the
+  # unmatched-glob enumeration internally.
+  gh() { return 1; }
+  errfile="$Z10_TMP/err.txt"
+  : > "$errfile"
+  for spec in \
+    "uberdev_goal_locate_review_pr_audit_by_pr 200" \
+    "uberdev_goal_list_prs_in_state $GOAL_ID pushed-reviewing" \
+    "uberdev_goal_read_merge_result 200" \
+    "_uberdev_goal_locked_marker_for_pr_fresh 200 3600" \
+    "uberdev_goal_locate_review_pr_audit 200"; do
+    out="$(eval "$spec" 2>>"$errfile")"
+    # A non-zero rc here is acceptable for the locked-marker probe (rc 1 = "no
+    # fresh marker") and the locators (empty = no verdict); the FATAL we guard
+    # against is the zsh `no matches found` abort, asserted on stderr below. A
+    # non-empty stdout would mean a stray match leaked from the empty checkout.
+    [ -n "$out" ] && printf 'UNEXPECTED-OUTPUT[%s]=%s\n' "$spec" "$out"
+  done
+  if grep -qi 'no matches found' "$errfile"; then
+    printf 'NOMATCH-FATAL=[%s]\n' "$(tr -d '\n' < "$errfile")"
+  else
+    printf 'CLEAN\n'
+  fi
+)"
+if printf '%s' "$Z10_OUT" | grep -q 'CLEAN' \
+   && ! printf '%s' "$Z10_OUT" | grep -qi 'no matches found'; then
+  pass "Z10a: all glob-iterating enumerators return cleanly on zero matches under $RUN_SHELL — no 'no matches found' fatal (#299 finding 1)"
+else
+  fail "Z10a: an enumerator FATALED on zero matches under $RUN_SHELL (got: [$Z10_OUT]) — verdict-locator glob regression (#299 finding 1)"
+fi
+rm -rf "$Z10_TMP" 2>/dev/null || true
+
+echo
+echo "== Z11: bounded-watch bound (WATCH_PASSES/WATCH_BUDGET) round-trips run-state under zsh (#299 finding 2) =="
+# #299 finding 2: the Phase-2 watch loop honours a BOUNDED bound so an
+# orchestrating harness can drive it tick-by-tick. WATCH_PASSES / WATCH_BUDGET
+# are persisted by uberdev_goal_write_run_state and rehydrated + EXPORTed by
+# uberdev_goal_read_run_state across the fresh-shell Phase-2 fences (exactly like
+# REVIEW_GRACE_SECS / MAX_PARALLEL). This proves the persistence SSOT carries the
+# bound in BOTH shells — if it did not, a bounded tick that re-invokes a fresh
+# Phase-2 fence would silently lose the bound and revert to the unbounded loop.
+Z11_TMP="$(mktemp -d)"
+Z11_OUT="$(
+  GOAL_ID="goal-z11abc01"
+  export GOAL_ID UBERDEV_GOAL_ID="$GOAL_ID" UBERDEV_TMPDIR="$Z11_TMP"
+  cycle=1; watch_start=1729000000; MAX_CYCLES=5
+  WATCH_PASSES=3; WATCH_BUDGET=540
+  queue=(); active_issues=()
+  uberdev_goal_state_init "$GOAL_ID" >/dev/null 2>&1
+  uberdev_goal_write_run_state >/dev/null 2>&1
+  # Fresh shell #2: clear the bound scalars, then rehydrate from the sidecar
+  # (the active-id pointer bootstraps GOAL_ID, mirroring a fresh Phase-2 fence).
+  unset WATCH_PASSES WATCH_BUDGET GOAL_ID UBERDEV_GOAL_ID
+  uberdev_goal_read_run_state >/dev/null 2>&1
+  printf 'passes=%s budget=%s exported_passes=%s\n' \
+    "${WATCH_PASSES:-UNSET}" "${WATCH_BUDGET:-UNSET}" \
+    "$(env | grep -c '^WATCH_PASSES=3$')"
+)"
+case "$Z11_OUT" in
+  *"passes=3 budget=540 exported_passes=1"*)
+    pass "Z11a: WATCH_PASSES/WATCH_BUDGET persist + rehydrate + export across a fresh shell under $RUN_SHELL (#299 finding 2)" ;;
+  *)
+    fail "Z11a: bounded-watch bound did NOT round-trip run-state (got: [$Z11_OUT]; expect passes=3 budget=540 exported_passes=1)" ;;
+esac
+rm -rf "$Z11_TMP" 2>/dev/null || true
+# Structural: the Phase-2 watch loop in SKILL.md must carry the bounded-tick
+# contract (exit 42 still-active + exit 0 drained + the no-reaper-on-pause
+# guarantee). These are the load-bearing exit codes the harness drives on.
+if grep -q 'bounded-tick exit 42' "$GOAL_SKILL"; then
+  pass "Z11b: Phase-2 watch loop emits the documented 'still-active, re-invoke' exit 42 (#299 finding 2)"
+else
+  fail "Z11b: Phase-2 watch loop must exit 42 on a bounded tick with work in flight (#299 finding 2)"
+fi
+if grep -q 'bounded-tick exit 0' "$GOAL_SKILL"; then
+  pass "Z11c: Phase-2 watch loop emits the documented 'drained -> Phase 3' exit 0 in bounded mode (#299 finding 2)"
+else
+  fail "Z11c: Phase-2 watch loop must exit 0 on a bounded-mode drain (#299 finding 2)"
+fi
+
+echo
+echo "== Z12: GOAL_ID generation yields a SINGLE goal- sidecar prefix (#299 finding 3) =="
+# #299 finding 3: every per-goal sidecar path is formatted `goal-$GOAL_ID-…` in
+# lib/goal-state.sh (~49 sites). A GOAL_ID that itself began with `goal-`
+# produced `goal-goal-…` files on disk — a debugging foot-gun (the obvious
+# `"$TMPDIR"/goal-<id>-*` search matched nothing). The fix generates the id
+# WITHOUT the leading `goal-`, so files are single-`goal-`-prefixed. This runs
+# the EXACT production generator from SKILL.md Phase-0 step 5 under the live
+# shell, inits state, and asserts: (1) no `goal-goal-` file exists, (2) the
+# `goal-<id>-*` glob now MATCHES (foot-gun resolved), (3) the id passes
+# _uberdev_goal_validate_id, (4) the sidecar mis-pathing guard cannot trip.
+# Mutation guard: revert the SKILL.md generator to `GOAL_ID="goal-$(date …)…"`
+# => Z12 RED (a goal-goal- file appears + the structural assert below fails).
+Z12_TMP="$(mktemp -d)"
+Z12_OUT="$(
+  export UBERDEV_TMPDIR="$Z12_TMP"
+  # Verbatim production generator (SKILL.md Phase-0 step 5, post-#299-finding-3).
+  GOAL_ID="$(date +%s)-$(mktemp -u XXXXXXXX | tr -d '/' | head -c 8)"
+  export GOAL_ID UBERDEV_GOAL_ID="$GOAL_ID"
+  uberdev_goal_state_init "$GOAL_ID" >/dev/null 2>&1
+  cycle=1; watch_start="$(date +%s)"; MAX_CYCLES=5; queue=(); active_issues=()
+  uberdev_goal_write_run_state >/dev/null 2>&1
+  dbl="$(ls "$Z12_TMP" 2>/dev/null | grep -c 'goal-goal-')"
+  single="$(ls "$Z12_TMP"/goal-"$GOAL_ID"-runstate 2>/dev/null | grep -c .)"
+  vid=0; _uberdev_goal_validate_id "$GOAL_ID" && vid=1
+  guard=safe; case "$GOAL_ID" in goal--*) guard=trips ;; esac
+  printf 'doubled=%s single=%s vid=%s guard=%s\n' "$dbl" "$single" "$vid" "$guard"
+)"
+case "$Z12_OUT" in
+  *"doubled=0 single=1 vid=1 guard=safe"*)
+    pass "Z12a: production GOAL_ID gen yields single-goal--prefixed sidecars (no goal-goal-), id valid, guard safe under $RUN_SHELL (#299 finding 3)" ;;
+  *)
+    fail "Z12a: GOAL_ID prefix wrong (#299 finding 3 — got: [$Z12_OUT]; expect doubled=0 single=1 vid=1 guard=safe)" ;;
+esac
+rm -rf "$Z12_TMP" 2>/dev/null || true
+# Structural: the SKILL.md generator must NOT emit a `goal-`-prefixed id.
+if grep -qE 'GOAL_ID="goal-\$\(date' "$GOAL_SKILL"; then
+  fail "Z12b: SKILL.md still generates a goal--prefixed GOAL_ID (produces goal-goal-… sidecars) — #299 finding 3 regression"
+else
+  pass "Z12b: SKILL.md GOAL_ID generator no longer carries a leading goal- prefix (#299 finding 3)"
+fi
+if grep -qE 'GOAL_ID="\$\(date \+%s\)-\$\(mktemp' "$GOAL_SKILL"; then
+  pass "Z12c: SKILL.md GOAL_ID generator uses the prefix-free \$(date)-\$(mktemp) form (#299 finding 3)"
+else
+  fail "Z12c: SKILL.md GOAL_ID generator must be the prefix-free \$(date +%s)-\$(mktemp …) form (#299 finding 3)"
+fi
+
 # Cleanup
 rm -rf "$Z2_TMP" "$Z3_TMP" "$Z4_TMP" 2>/dev/null || true
 

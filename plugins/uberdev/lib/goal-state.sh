@@ -120,8 +120,9 @@ _UBERDEV_GOAL_WORKTREE_PREFIXES=("" ".claude/worktrees/*/" ".worktrees/*/" "work
 : "${_UBERDEV_GOAL_STUCK_DIALOG_SECS:=60}"   # ge 60 (preserved threshold)
 
 # Mirrored from skills/goal-pipeline/SKILL.md Phase 0 Constants block (issue #245).
-# This is the runtime SSOT — fresh-shell rehydration fences (SKILL.md ~210, 382,
-# 909, 1003, 1040, 1109) source ONLY this lib, never re-execute the Phase 0
+# This is the runtime SSOT — the per-phase fresh-shell rehydration fences (grep
+# SKILL.md for the `uberdev_goal_read_run_state` rehydration call) source ONLY
+# this lib, never re-execute the Phase 0
 # block. Defaulted-assignment ( := ) is order-safe: if the Phase 0 block ran
 # first (cycle 1 happy path), these are no-ops; if the lib was sourced fresh
 # (every Phase 2 poll iteration), these set the canonical defaults so the
@@ -2203,7 +2204,8 @@ _uberdev_goal_rebase_collision_chain() {
 # uberdev_goal_write_run_state
 #   Reads GOAL_ID, cycle, watch_start, overflow_count, overflow_detected,
 #   MAX_CYCLES, UBERDEV_RESOLVED_BACKEND, MAX_PARALLEL, BARRIER_TIMEOUT_S,
-#   barrier_start_ts, and the queue/active_issues arrays from the caller's
+#   barrier_start_ts, REVIEW_GRACE_SECS, WATCH_PASSES, WATCH_BUDGET (#299
+#   bounded-watch bound), and the queue/active_issues arrays from the caller's
 #   shell; persists them to predictable, GOAL_ID-keyed sidecars under
 #   $UBERDEV_TMPDIR, plus a fixed-path goal-active-id.txt pointer so a fresh
 #   shell (no GOAL_ID in env/scalar) can discover the active GOAL_ID.
@@ -2232,11 +2234,12 @@ uberdev_goal_write_run_state() {
   _uberdev_dispatch_prepare_tmp_target "$sc" 0 "goal" || return 3
   local tmp _filtered aid
   tmp="$(mktemp "${sc}.XXXXXXXX")" || return 3
-  printf 'GOAL_ID=%s\ncycle=%s\nwatch_start=%s\noverflow_count=%s\noverflow_detected=%s\nMAX_CYCLES=%s\nUBERDEV_RESOLVED_BACKEND=%s\nMAX_PARALLEL=%s\nBARRIER_TIMEOUT_S=%s\nbarrier_start_ts=%s\nREVIEW_GRACE_SECS=%s\nCIRCUIT_BREAKER_HALT=%s\n' \
+  printf 'GOAL_ID=%s\ncycle=%s\nwatch_start=%s\noverflow_count=%s\noverflow_detected=%s\nMAX_CYCLES=%s\nUBERDEV_RESOLVED_BACKEND=%s\nMAX_PARALLEL=%s\nBARRIER_TIMEOUT_S=%s\nbarrier_start_ts=%s\nREVIEW_GRACE_SECS=%s\nWATCH_PASSES=%s\nWATCH_BUDGET=%s\nCIRCUIT_BREAKER_HALT=%s\n' \
     "$GOAL_ID" "${cycle:-0}" "${watch_start:-0}" "${overflow_count:-0}" \
     "${overflow_detected:-0}" "${MAX_CYCLES:-0}" "${UBERDEV_RESOLVED_BACKEND:-}" \
     "${MAX_PARALLEL:-0}" "${BARRIER_TIMEOUT_S:-0}" "${barrier_start_ts:-0}" \
-    "${REVIEW_GRACE_SECS:-0}" "${CIRCUIT_BREAKER_HALT:-}" > "$tmp"
+    "${REVIEW_GRACE_SECS:-0}" "${WATCH_PASSES:-0}" "${WATCH_BUDGET:-0}" \
+    "${CIRCUIT_BREAKER_HALT:-}" > "$tmp"
   # Append per-PID dialog-stuck samples (issue #220, AC ❸).
   # R3 SSOT (issue #220 simplify pass): single iterator over both prefixes —
   # PRIOR_LAST_ACTIVITY_<pid> and FIRST_DIALOG_TS_<pid> share identical
@@ -2308,7 +2311,8 @@ uberdev_goal_write_run_state() {
 #   goal-active-id.txt pointer (content gated through _uberdev_goal_validate_id).
 #   On success: sets the GOAL_ID, cycle, watch_start, overflow_count,
 #   overflow_detected, MAX_CYCLES, UBERDEV_RESOLVED_BACKEND, MAX_PARALLEL,
-#   BARRIER_TIMEOUT_S, barrier_start_ts scalars, rehydrates the
+#   BARRIER_TIMEOUT_S, barrier_start_ts, REVIEW_GRACE_SECS, WATCH_PASSES,
+#   WATCH_BUDGET scalars, rehydrates the
 #   queue/active_issues arrays, and EXPORTS UBERDEV_GOAL_ID + UBERDEV_TMPDIR
 #   (the env vars the uberdev_goal_* helpers + bare $UBERDEV_TMPDIR/... paths in
 #   the pipeline body depend on — see the export block at the function's end).
@@ -2347,6 +2351,8 @@ uberdev_goal_read_run_state() {
       BARRIER_TIMEOUT_S) _uberdev_goal_validate_int "$v" && BARRIER_TIMEOUT_S="$v" ;;
       barrier_start_ts)  _uberdev_goal_validate_int "$v" && barrier_start_ts="$v" ;;
       REVIEW_GRACE_SECS)  _uberdev_goal_validate_int "$v" && REVIEW_GRACE_SECS="$v" ;;
+      WATCH_PASSES)       _uberdev_goal_validate_int "$v" && WATCH_PASSES="$v" ;;
+      WATCH_BUDGET)       _uberdev_goal_validate_int "$v" && WATCH_BUDGET="$v" ;;
       CIRCUIT_BREAKER_HALT)
         case "$v" in
           max_cycles|nonconvergence|stuck_loop|merge_failed|gh_api_failed|unknown_merge_result|queue_empty_not_converged|agent_stuck_on_dialog)
@@ -2413,6 +2419,11 @@ uberdev_goal_read_run_state() {
   export UBERDEV_GOAL_ID="$GOAL_ID"
   export UBERDEV_TMPDIR="$tmpdir"
   export REVIEW_GRACE_SECS
+  # #299 finding 2 — re-export the bounded-watch bound so a fresh-shell Phase-2
+  # fence (and the per-pass write-back) keeps the same bound across tick-by-tick
+  # re-invocations. Default 0 (unbounded) when the sidecar predates the field.
+  export WATCH_PASSES="${WATCH_PASSES:-0}"
+  export WATCH_BUDGET="${WATCH_BUDGET:-0}"
   export CIRCUIT_BREAKER_HALT
   return 0
 }

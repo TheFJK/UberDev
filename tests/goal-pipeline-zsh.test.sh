@@ -505,6 +505,282 @@ else
   pass "W.nomatch: no zsh 'no matches found' fatal from the verdict-locator glob"
 fi
 
+# ==========================================================================
+# W2 — Phase-2 bounded-watch EXIT-CODE CONTRACT, executed (#299 finding 2).
+#
+# Finding-2's load-bearing behaviour is the exit code the watch loop returns so
+# an orchestrating harness (the 600s-capped Bash tool) can drive it tick-by-tick:
+#   exit 42 = bound (passes/budget) hit while work is STILL in flight -> re-invoke
+#   exit  0 = step-2f DRAINED (no active agents AND no merging PR)    -> Phase 3
+#   break   = the UNBOUNDED loop drains -> flow inline into Phase 3 (no exit)
+# and a hard guarantee: the reaper does NOT fire on a bounded-tick pause (only on
+# a circuit-breaker halt or a real INT/TERM), so the bg solver agents survive the
+# paused tick. Until now this was asserted ONLY by STRUCTURAL grep of SKILL.md
+# (goal-state-zsh.test.sh Z11b/Z11c grep for the `bounded-tick exit 42/0`
+# breadcrumb STRINGS) — a regression that flipped the exit-0/exit-42 ARMS keeps
+# both breadcrumb strings present (they live on separate lines from the `exit N`)
+# and ships GREEN. This test EXECUTES the real arms under zsh and asserts the
+# ACTUAL exit codes + the reaper-skip, so an arm-flip goes RED.
+#
+# Slicing discipline (mirrors the `W` step-2b slice above): the watch fence is a
+# ~595-line `while true; do … done`; running it whole would mean mocking ~30
+# step-2a..2e helpers (brittle, off-target). Instead slice the TWO load-bearing
+# fragments verbatim from SKILL.md —
+#   (A) the per-fence bound SETUP block (`_tick_start`/`_tick_passes`/the
+#       `_watch_bounded` derivation from WATCH_PASSES/WATCH_BUDGET), and
+#   (B) the step-2f drain check + the pass/budget gate + the trailing `sleep`
+#       (the EXACT exit-42 / exit-0 / break arms — the mutation target) —
+# then stitch them into a controllable single-iteration `while true` whose ONLY
+# free inputs are `any_active` (which steps 2a-2e set in production; we set it
+# directly) and the merging-PR list (seeded empty via state_init). This runs the
+# production exit-code logic byte-for-byte; nothing about the arms is re-typed.
+#
+# Mocking choices (each isolates the exit-code contract, none fakes it):
+#   - any_active is the loop's drain signal; set per scenario (the real 2a-2e
+#     walk would compute it from gh/agent state we are deliberately not exercising
+#     here — 2a-2e correctness is the `W` test's job, not W2's).
+#   - uberdev_goal_write_run_state is stubbed to rc 0 so a tmpdir/write hiccup
+#     cannot muddy the exit-code assertion (the bound's run-state ROUND-TRIP is
+#     already proven by goal-state-zsh.test.sh Z11a).
+#   - _uberdev_goal_reap_zombies is stubbed to TOUCH a sentinel so we can assert
+#     it is NOT called on the exit-42/exit-0 pause (W2c) — and a positive control
+#     (W2e) calls the stub directly to prove the sentinel mechanism works.
+#   - sleep is stubbed to exit 77: the bounded arms exit (42/0) BEFORE the sleep,
+#     so reaching sleep means the bound gate FAILED to fire (caught as rc 77, not
+#     a 60s hang); the unbounded drain `break`s before sleep too.
+#
+# Mutation guards (revert in your worktree, re-run -> the named assertion goes RED):
+#   - SWAP the two arms in SKILL.md's step 2f / budget gate (`exit 42`<->`exit 0`)
+#     => W2a flips to rc 0 and W2b flips to rc 42 (both RED). This is the exact
+#     regression Z11b/Z11c (grep-only) cannot see.
+#   - Move `_uberdev_goal_reap_zombies` INTO the bounded exit-42 path (reap-on-
+#     pause regression) => W2c RED (sentinel PRESENT after the 42 path).
+#   - Drop the `[ "$_watch_bounded" = "1" ]` guard on the 2f bounded arm, or the
+#     WATCH_PASSES/WATCH_BUDGET `-gt 0` derivation in the setup block
+#     => W2d RED (the unbounded loop would exit 0/42 mid-fence instead of break).
+# ==========================================================================
+echo
+echo "== W2: Phase-2 bounded-watch exit-code contract (42/0/break + reaper-skip) under zsh (#299 finding 2) =="
+
+# (A) the bound SETUP fragment: `_tick_start` .. the `_watch_bounded=1` line. The
+# slice deliberately STOPS before the closing `fi` (its own line carries no
+# unique anchor); the driver appends `fi` so the `if` closes in the SAME parse
+# unit (production runs setup + loop in one fence — inlining matches that).
+W2_SETUP="$WORK/w2_setup.frag.sh"
+# (B) the step-2f drain + pass/budget gate + trailing `sleep` — the real arms.
+W2_GATE="$WORK/w2_gate.frag.sh"
+if slice_fence '_tick_start="$(date' '_watch_bounded=1' > "$W2_SETUP" \
+   && [ -s "$W2_SETUP" ] && grep -q 'WATCH_PASSES' "$W2_SETUP" && grep -q 'WATCH_BUDGET' "$W2_SETUP"; then
+  pass "W2.extractA: sliced the per-fence bounded-watch SETUP block (_tick_start + _watch_bounded derivation) from the watch fence"
+else
+  fail "W2.extractA: could NOT slice the bounded-watch setup block (anchor '_tick_start=' / '_watch_bounded=1' moved?)"
+fi
+if slice_fence '2f. Termination check' 'sleep "$_UBERDEV_GOAL_POLL_SECS"' > "$W2_GATE" \
+   && [ -s "$W2_GATE" ] \
+   && grep -q 'bounded-tick exit 42' "$W2_GATE" \
+   && grep -q 'bounded-tick exit 0'  "$W2_GATE" \
+   && grep -qE '^[[:space:]]*exit 42[[:space:]]*$' "$W2_GATE" \
+   && grep -qE '^[[:space:]]*exit 0[[:space:]]*$'  "$W2_GATE"; then
+  pass "W2.extractB: sliced the step-2f drain check + pass/budget gate (both real 'exit 42' and 'exit 0' arms present — guards a head-only partial slice) from the watch fence"
+else
+  fail "W2.extractB: could NOT slice the step-2f/budget gate with BOTH exit arms (step-2f marker / sleep tail / an 'exit N' arm moved?)"
+fi
+
+# Emit one bounded-watch driver. $1=outfile $2=tag $3=WATCH_PASSES $4=WATCH_BUDGET
+# $5=any_active. Stitches: lib source + state_init (so the 2f `merging` probe is
+# set -u-clean and empty) + the stubs above + Slice A (+`fi`) + a single-iteration
+# `while true` carrying the controlled any_active + Slice B verbatim. A reaper
+# sentinel path is exported per driver so W2c can assert non-firing.
+write_w2_driver() {  # $1=out $2=tag $3=passes $4=budget $5=any_active
+  local out="$1" tag="$2" wp="$3" wb="$4" aa="$5"
+  {
+    echo 'set -u'
+    echo "export UBERDEV_TMPDIR='$WORK/w2-state-$tag'"
+    echo "export GOAL_ID='pipew2$tag'"
+    echo "export UBERDEV_GOAL_ID='pipew2$tag'"
+    echo ". \"\$CLAUDE_PLUGIN_ROOT/lib/dispatch.sh\""
+    echo ". \"\$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh\""
+    echo "uberdev_goal_state_init 'pipew2$tag' >/dev/null 2>&1"
+    # Reaper sentinel: the stub TOUCHES it; the exit-42/exit-0 pause must NOT.
+    echo "W2_REAPER_SENTINEL='$WORK/w2-reaper-$tag'"
+    echo '_uberdev_goal_reap_zombies() { echo fired > "$W2_REAPER_SENTINEL"; }'
+    # Isolate the exit-code contract from run-state I/O (Z11a proves the bound's
+    # run-state round-trip; here a write hiccup must not muddy the rc assertion).
+    echo 'uberdev_goal_write_run_state() { return 0; }'
+    # If the loop reaches `sleep`, the bound gate FAILED to exit — surface it as
+    # rc 77 (not a 60s hang). Bounded arms exit 42/0 BEFORE sleep; unbounded drain
+    # `break`s before it.
+    echo 'sleep() { echo "W2-REACHED-SLEEP arg=$1"; exit 77; }'
+    echo "WATCH_PASSES=$wp"
+    echo "WATCH_BUDGET=$wb"
+    # --- Slice A (bounded-watch setup) verbatim, then the closing fi it omits.
+    cat "$W2_SETUP"
+    echo 'fi'
+    # --- One controlled iteration carrying the real Slice B arms verbatim.
+    echo 'while true; do'
+    echo "  any_active=$aa"
+    cat "$W2_GATE"
+    echo 'done'
+    # Reached ONLY if Slice B `break`s out (the unbounded-drain path).
+    echo 'echo "W2-FELL-THROUGH rc=$?"'
+  } > "$out"
+}
+
+w2_sentinel_state() {  # $1=tag -> PRESENT|ABSENT
+  [ -f "$WORK/w2-reaper-$1" ] && printf 'PRESENT' || printf 'ABSENT'
+}
+
+# --- W2a: BOUND HIT, work in flight -> exit 42 (+ no reaper). WATCH_PASSES=1,
+# any_active=1 (a solver still working) so step 2f does NOT drain; one pass
+# completes, _tick_passes(1) >= WATCH_PASSES(1) -> _bound_hit -> exit 42.
+DRV_W2A="$WORK/drv_w2a.zsh"; write_w2_driver "$DRV_W2A" a 1 0 1
+W2A_OUT="$("$ZSH_BIN" -f "$DRV_W2A" 2>&1)"; W2A_RC=$?
+if [ "$W2A_RC" -eq 42 ] && printf '%s' "$W2A_OUT" | grep -q 'bounded-tick exit 42'; then
+  pass "W2a: bounded (WATCH_PASSES=1) + work in flight -> the watch fence EXITS 42 and prints the 'bounded-tick exit 42' breadcrumb (#299 finding 2)"
+else
+  fail "W2a: expected exit 42 + 'bounded-tick exit 42' breadcrumb (got rc=$W2A_RC, out=[$W2A_OUT]) — exit-code-arm regression?"
+fi
+# W2c (part 1): the reaper must NOT have fired on the exit-42 pause.
+if [ "$(w2_sentinel_state a)" = "ABSENT" ]; then
+  pass "W2c: reaper did NOT fire on the bounded exit-42 pause (bg solver agents survive the tick) — #299 finding 2 guarantee"
+else
+  fail "W2c: reaper FIRED on the bounded exit-42 pause (sentinel PRESENT) — reap-on-pause regression"
+fi
+
+# --- W2b: DRAINED -> exit 0. WATCH_PASSES=1 (bounded) but any_active=0 AND no
+# merging PR (state_init left the pr-states TSV empty), so step 2f's bounded arm
+# persists + exits 0 BEFORE the pass/budget gate is reached.
+DRV_W2B="$WORK/drv_w2b.zsh"; write_w2_driver "$DRV_W2B" b 1 0 0
+W2B_OUT="$("$ZSH_BIN" -f "$DRV_W2B" 2>&1)"; W2B_RC=$?
+if [ "$W2B_RC" -eq 0 ] && printf '%s' "$W2B_OUT" | grep -q 'bounded-tick exit 0'; then
+  pass "W2b: bounded + DRAINED (no active agents, no merging PR) -> the watch fence EXITS 0 and prints the 'bounded-tick exit 0' breadcrumb (#299 finding 2)"
+else
+  fail "W2b: expected exit 0 + 'bounded-tick exit 0' breadcrumb (got rc=$W2B_RC, out=[$W2B_OUT]) — exit-code-arm regression?"
+fi
+# W2c (part 2): reaper must NOT fire on the clean exit-0 drain either.
+if [ "$(w2_sentinel_state b)" = "ABSENT" ]; then
+  pass "W2c.drain: reaper did NOT fire on the bounded exit-0 drain (clean proceed-to-Phase-3 path)"
+else
+  fail "W2c.drain: reaper FIRED on the bounded exit-0 drain (sentinel PRESENT) — reap-on-drain regression"
+fi
+
+# --- W2d: UNBOUNDED -> no early exit. WATCH_PASSES=0 WATCH_BUDGET=0 so
+# _watch_bounded=0; drained step 2f takes the legacy `break` (NOT exit 0/42) and
+# control flows past the loop to the FELL-THROUGH breadcrumb (= inline Phase 3).
+DRV_W2D="$WORK/drv_w2d.zsh"; write_w2_driver "$DRV_W2D" d 0 0 0
+W2D_OUT="$("$ZSH_BIN" -f "$DRV_W2D" 2>&1)"; W2D_RC=$?
+if [ "$W2D_RC" -eq 0 ] \
+   && printf '%s' "$W2D_OUT" | grep -q 'W2-FELL-THROUGH' \
+   && ! printf '%s' "$W2D_OUT" | grep -q 'bounded-tick exit' \
+   && ! printf '%s' "$W2D_OUT" | grep -q 'W2-REACHED-SLEEP'; then
+  pass "W2d: unbounded (WATCH_PASSES=0 WATCH_BUDGET=0) + drained -> step 2f BREAKS into inline Phase 3 (no mid-fence exit 0/42, no sleep) (#299 finding 2)"
+else
+  fail "W2d: unbounded drain should break (FELL-THROUGH, no 'bounded-tick exit', no sleep); got rc=$W2D_RC, out=[$W2D_OUT]"
+fi
+
+# --- W2.budget: the BUDGET bound (not pass count) also fires exit 42. POLL=60s is
+# always added to the elapsed budget check, so WATCH_BUDGET=1 trips on pass 1 even
+# with WATCH_PASSES=0 — proving the wall-clock arm of the bound, independent of
+# the pass-count arm exercised by W2a.
+DRV_W2BU="$WORK/drv_w2bu.zsh"; write_w2_driver "$DRV_W2BU" bu 0 1 1
+W2BU_OUT="$("$ZSH_BIN" -f "$DRV_W2BU" 2>&1)"; W2BU_RC=$?
+if [ "$W2BU_RC" -eq 42 ] && printf '%s' "$W2BU_OUT" | grep -q 'bounded-tick exit 42'; then
+  pass "W2.budget: bounded by WATCH_BUDGET (wall-clock arm, WATCH_PASSES=0) + work in flight -> exit 42 (the budget gate fires, not just the pass-count gate)"
+else
+  fail "W2.budget: expected exit 42 from the budget arm (got rc=$W2BU_RC, out=[$W2BU_OUT]) — budget-gate regression?"
+fi
+
+# --- W2e: positive control — the reaper STUB itself writes the sentinel when
+# CALLED. Without this, an always-broken stub would make W2c pass vacuously
+# (sentinel never written for ANY reason). This proves W2c's ABSENT assertions
+# mean "not called", not "stub is a no-op".
+W2E_OUT="$("$ZSH_BIN" -f -c "
+  W2_REAPER_SENTINEL='$WORK/w2-reaper-e'
+  _uberdev_goal_reap_zombies() { echo fired > \"\$W2_REAPER_SENTINEL\"; }
+  _uberdev_goal_reap_zombies
+" 2>&1)"
+if [ -f "$WORK/w2-reaper-e" ]; then
+  pass "W2e: positive control — the reaper sentinel stub DOES write when invoked (so W2c's ABSENT means 'reaper not called', not 'stub is inert')"
+else
+  fail "W2e: reaper sentinel stub failed to write even when called directly (out=[$W2E_OUT]) — W2c would be a vacuous pass"
+fi
+
+# --- W2f: #300 Fix B (silent-failure-hunter CRITICAL) — a run-state FLUSH
+# FAILURE at a bounded exit boundary must FAIL LOUD (exit 1 + 'run-state flush
+# FAILED' breadcrumb), NOT degrade to a warning and still exit 42/0. write_run_state
+# persists the SOURCE-OF-TRUTH run-state (cycle/queue/active_issues + the WATCH_*
+# bound); if a failed flush still exit-42'd, the harness would re-invoke a fresh
+# Phase-2 fence that rehydrates WATCH_*=0 -> the loop SILENTLY reverts to unbounded
+# (then the 600s harness cap SIGTERMs it). So the boundary halts (exit 1) instead.
+#
+# Harness: bespoke driver mirroring write_w2_driver's slice assembly (cat $W2_SETUP
+# + the closing `fi` it omits + an any_active line + cat $W2_GATE), but with two
+# mutations: (1) uberdev_goal_write_run_state is stubbed to RETURN 1 (the flush
+# failure under test); (2) a reaper sentinel stub proves the exit-1 fail-loud path
+# does NOT reap (bg solver agents must survive a transient persist blip — the
+# fail-loud halt is DISTINCT from a circuit-breaker exit 1 which reaps first).
+# sleep is stubbed to exit 77 so a regression that falls through to the sleep is
+# caught (the bounded arm must exit BEFORE sleep). list_prs_in_state is stubbed
+# empty so the drain predicate is driven purely by $5 (any_active).
+#
+# MUTATION GUARD: revert EITHER bounded boundary's `if ! uberdev_goal_write_run_state;
+# then ... exit 1; fi` back to the old `uberdev_goal_write_run_state || echo warning`
+# form and W2f flips RED — the tick variant trips W2f.tick (rc 42 instead of 1), the
+# drain variant trips W2f.drain (rc 0 instead of 1). This is the exact silent-revert-
+# to-unbounded / proceed-on-unpersisted-state regression #300 Fix B closes.
+echo "== W2f: bounded-watch run-state FLUSH FAILURE fails loud (exit 1, no reap) under zsh (#300 Fix B) =="
+
+write_w2f_driver() {  # $1=out $2=tag $3=passes $4=budget $5=any_active
+  local out="$1" tag="$2" wp="$3" wb="$4" act="$5"
+  {
+    echo '#!/usr/bin/env zsh'
+    echo 'set -u'
+    echo "UBERDEV_TMPDIR='$WORK'"
+    echo 'GOAL_ID=w2f'
+    echo '_UBERDEV_GOAL_POLL_SECS=60'
+    # (1) the flush failure under test: write_run_state returns rc 1.
+    echo 'uberdev_goal_write_run_state() { return 1; }'
+    # (2) reaper sentinel — assert it does NOT fire on the fail-loud exit-1 path.
+    echo "W2F_REAPER_SENTINEL='$WORK/w2f-reaper-$tag'"
+    echo '_uberdev_goal_reap_zombies() { echo fired > "$W2F_REAPER_SENTINEL"; }'
+    # drain predicate is driven purely by $act; merging set is always empty.
+    echo 'uberdev_goal_list_prs_in_state() { :; }'
+    # sleep must never be reached (bounded arm exits first).
+    echo 'sleep() { echo "W2F-REACHED-SLEEP"; exit 77; }'
+    echo "WATCH_PASSES=$wp"
+    echo "WATCH_BUDGET=$wb"
+    cat "$W2_SETUP"; echo 'fi'        # Slice A + the closing fi it omits.
+    echo "any_active=$act"
+    cat "$W2_GATE"                    # Slice B (step-2f drain + pass/budget gate).
+    echo 'echo "W2F-FELL-THROUGH rc=$?"'
+  } > "$out"
+}
+
+# W2f.tick: bounded (WATCH_PASSES=1) + work in flight -> pass-count bound hit ->
+# flush fails -> EXIT 1 (NOT 42), 'run-state flush FAILED' breadcrumb, NO reaper.
+DRV_W2FT="$WORK/drv_w2f_tick.zsh"; write_w2f_driver "$DRV_W2FT" tick 1 0 1
+W2FT_OUT="$("$ZSH_BIN" -f "$DRV_W2FT" 2>&1)"; W2FT_RC=$?
+if [ "$W2FT_RC" -eq 1 ] && printf '%s' "$W2FT_OUT" | grep -q 'run-state flush FAILED'; then
+  pass "W2f.tick: bounded + work in flight + flush FAILS at the pass/budget bound -> the fence EXITS 1 (not 42) and prints the 'run-state flush FAILED' ERROR breadcrumb (#300 Fix B)"
+else
+  fail "W2f.tick: expected exit 1 + 'run-state flush FAILED' (got rc=$W2FT_RC, out=[$W2FT_OUT]) — a failed flush must NOT silently revert to unbounded via exit 42"
+fi
+if [ ! -f "$WORK/w2f-reaper-tick" ]; then
+  pass "W2f.tick.noreap: the fail-loud exit-1 flush-halt did NOT reap (bg solver agents survive a transient persist blip — distinct from a circuit-breaker exit 1)"
+else
+  fail "W2f.tick.noreap: reaper FIRED on the fail-loud flush-halt (sentinel PRESENT) — Fix B must NOT reap on this path"
+fi
+
+# W2f.drain: bounded + DRAINED (any_active=0, merging empty) + flush FAILS at the
+# step-2f drain boundary -> EXIT 1 (NOT 0), same breadcrumb. Cheap second arm.
+DRV_W2FD="$WORK/drv_w2f_drain.zsh"; write_w2f_driver "$DRV_W2FD" drain 1 0 0
+W2FD_OUT="$("$ZSH_BIN" -f "$DRV_W2FD" 2>&1)"; W2FD_RC=$?
+if [ "$W2FD_RC" -eq 1 ] && printf '%s' "$W2FD_OUT" | grep -q 'run-state flush FAILED'; then
+  pass "W2f.drain: bounded + drained + flush FAILS at the drain boundary -> the fence EXITS 1 (not 0); never proceeds to Phase 3 on unpersisted state (#300 Fix B)"
+else
+  fail "W2f.drain: expected exit 1 + 'run-state flush FAILED' (got rc=$W2FD_RC, out=[$W2FD_OUT]) — a failed drain flush must NOT proceed via exit 0"
+fi
+
 echo
 echo "== Summary =="
 echo "  harness shell: $LAUNCH_SHELL"
