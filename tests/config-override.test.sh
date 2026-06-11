@@ -33,11 +33,15 @@ for f in "$HELPER" "$REPO_ROOT/.github/workflows/test.yml"; do
 done
 
 SKILL_DIR="$REPO_ROOT/plugins/uberdev/skills"
+# CONFIG_REF (#309 hook diet): the user-facing config schema moved out of
+# using-uberdev/SKILL.md into references/configuration.md; I6 asserts target it.
+CONFIG_REF="$SKILL_DIR/using-uberdev/references/configuration.md"
 for f in "$SKILL_DIR/solve-pipeline/SKILL.md" \
          "$SKILL_DIR/orchestrator/SKILL.md" \
          "$SKILL_DIR/post-impl-review/SKILL.md" \
          "$SKILL_DIR/merge-pipeline/SKILL.md" \
-         "$SKILL_DIR/using-uberdev/SKILL.md"; do
+         "$SKILL_DIR/using-uberdev/SKILL.md" \
+         "$CONFIG_REF"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -430,12 +434,14 @@ else
 fi
 
 echo
-echo "== I6: using-uberdev YAML example + prose (Task 6) =="
+echo "== I6: using-uberdev config reference YAML example + prose (Task 6) =="
+# Re-pointed (#309 hook diet): the YAML example + key prose moved from
+# using-uberdev/SKILL.md into references/configuration.md.
 for key in solve_tier_floor solve_tier_ceiling \
            "fanout_concurrency:" "research:" "post_impl_review:" \
            "merge_strategy:" "conflict_resolver:" \
            "command_timeouts:" "solve:" "review_pr:" "merge:"; do
-  assert_grep_in "$SKILL_DIR/using-uberdev/SKILL.md" \
+  assert_grep_in "$CONFIG_REF" \
     "$key" \
     "I6: YAML example mentions $key"
 done
@@ -444,17 +450,22 @@ for env in SOLVE_TIER_FLOOR SOLVE_TIER_CEILING UBERDEV_FANOUT_RESEARCH \
            UBERDEV_FANOUT_POST_IMPL_REVIEW UBERDEV_FANOUT_MERGE_STRATEGY \
            UBERDEV_FANOUT_CONFLICT_RESOLVER UBERDEV_SOLVE_TIMEOUT \
            UBERDEV_REVIEW_PR_TIMEOUT UBERDEV_MERGE_TIMEOUT; do
-  assert_grep_in "$SKILL_DIR/using-uberdev/SKILL.md" \
+  assert_grep_in "$CONFIG_REF" \
     "$env" \
     "I6: prose mentions env override $env"
 done
 
-assert_grep_in "$SKILL_DIR/using-uberdev/SKILL.md" \
+assert_grep_in "$CONFIG_REF" \
   'ADVISORY-ONLY' \
   "I6: prose explicitly notes command_timeouts.{merge,review_pr} are ADVISORY-ONLY"
-assert_grep_in "$SKILL_DIR/using-uberdev/SKILL.md" \
+assert_grep_in "$CONFIG_REF" \
   'NEW default cap of 10' \
   "I6: prose calls out conflict_resolver introducing a NEW default cap of 10"
+# The SKILL.md primer must still POINT at the moved schema (the model has to
+# know where config docs live without the schema in context).
+assert_grep_in "$SKILL_DIR/using-uberdev/SKILL.md" \
+  'references/configuration\.md' \
+  "I6: SKILL.md primer points at references/configuration.md"
 
 echo
 echo "== I7: backward compat — pre-existing configs unaffected =="

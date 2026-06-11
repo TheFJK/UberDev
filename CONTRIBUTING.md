@@ -19,7 +19,7 @@ The marketplace manifest is `.claude-plugin/marketplace.json` (top-level); the s
 - `plugins/uberdev/commands/` — slash-command prompt files (`/uberdev:<command>`); frontmatter declares argument hints + allowed tools, the body is the prompt.
 - `plugins/uberdev/agents/` — reusable subagent prompts that orchestrator commands compose.
 - `plugins/uberdev/skills/` — discoverable workflow skills (each is a folder with `SKILL.md` + optional supporting files).
-- `plugins/uberdev/hooks/` — `SessionStart` / `PreToolUse` / `SessionEnd` / `PreCompact` event handlers, wired in `hooks.json`.
+- `plugins/uberdev/hooks/` — `SessionStart` / `UserPromptSubmit` / `SessionEnd` / `PreCompact` event handlers. Claude Code wiring is `hooks.json` (every entry routes through the `run-hook.cmd` polyglot so the same scripts run on Windows); Cursor wiring is `hooks-cursor.json` (executes the bash scripts directly — POSIX hosts only; **Cursor on Windows is unsupported**, pinned by `tests/docs-accuracy.test.sh`).
 - `plugins/uberdev/lib/` — sourced shell helpers shared across pipelines (e.g. `dispatch.sh`, `config-read.sh`, `aliases-sync.sh`).
 - `plugins/uberdev/docs/` — plugin-internal docs, including this `testing.md`.
 - `plugins/uberdev/licenses/` — bundled upstream license texts (Anthropic, Jesse Vincent) for the verbatim/adapted components listed in the README's "Bundled" section.
@@ -78,12 +78,15 @@ For pure markdown / docs edits, install the plugin locally and confirm the affec
 bash tests/<name>.test.sh
 ```
 
-…or run the whole suite the way CI does (one fixture, `solve-pipeline-zsh.test.sh`, runs under `zsh` — `tests/ci-wiring.test.sh` asserts every file on disk is wired into both CI jobs):
+…or run the whole suite the way CI does (the `*-zsh.test.sh` fixtures — `solve-pipeline-zsh`, `goal-state-zsh`, `goal-pipeline-zsh` — run under `zsh`; everything else under `bash`. `tests/ci-wiring.test.sh` asserts every file on disk is wired into both CI jobs):
 
 ```bash
 for t in tests/*.test.sh; do
   echo "== $t =="
-  if [ "$t" = "tests/solve-pipeline-zsh.test.sh" ]; then zsh "$t" || exit 1; else bash "$t" || exit 1; fi
+  case "$t" in
+    tests/*-zsh.test.sh) zsh "$t" || exit 1 ;;
+    *) bash "$t" || exit 1 ;;
+  esac
 done
 ```
 

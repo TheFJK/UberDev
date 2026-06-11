@@ -18,6 +18,36 @@
 set -euo pipefail
 shopt -s nullglob
 
+# ── per-prompt wall-clock instrumentation (RFC 0012 §7.9) ────────────────────
+# This hook runs on EVERY UserPromptSubmit. Emit exactly one stderr timing
+# line per invocation so the per-prompt latency tax stays observable. stderr
+# only — stdout is the injection channel and stays byte-identical; the EXIT
+# trap returns 0 so the hook's exit status is never altered (no behavior
+# change). GNU date supports %N (ns); BSD/macOS date prints a literal 'N' —
+# detected via the all-digits guard, falling back to 1 s resolution instead
+# of spawning python3 on every prompt.
+_ibsa_t0_ns="$(date +%s%N 2>/dev/null || true)"
+case "$_ibsa_t0_ns" in
+  *[!0-9]*|"") _ibsa_t0_ns="" ;;
+esac
+_ibsa_t0_s="$(date +%s 2>/dev/null || echo 0)"
+_ibsa_emit_timing() {
+  local rc=$? end_ns
+  if [ -n "$_ibsa_t0_ns" ]; then
+    end_ns="$(date +%s%N 2>/dev/null || true)"
+    case "$end_ns" in
+      *[!0-9]*|"") end_ns="" ;;
+    esac
+    if [ -n "$end_ns" ]; then
+      echo "uberdev/inject-brainstorm-answers: prompt-hook wall-clock $(( (end_ns - _ibsa_t0_ns) / 1000000 ))ms (rc=$rc)" >&2
+      return 0
+    fi
+  fi
+  echo "uberdev/inject-brainstorm-answers: prompt-hook wall-clock $(( $(date +%s 2>/dev/null || echo 0) - _ibsa_t0_s ))s (coarse: date +%N unsupported) (rc=$rc)" >&2
+  return 0
+}
+trap _ibsa_emit_timing EXIT
+
 readonly STALE_AFTER_SECONDS=3600
 
 # Portable mtime — macOS `stat -f %m`, GNU `stat -c %Y`. Empty string on failure.

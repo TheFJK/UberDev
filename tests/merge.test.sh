@@ -26,7 +26,7 @@
 #   M18 — SKILL.md Phase 2.4 is unconditional autopilot (no ON/OFF branches, no [y/N] prompt).
 #   M19 — SKILL.md Phase 4.5 carries autopilot affirmative-decision invariant.
 #   M20 — commands/merge.md surfaces --yes / -y as DEPRECATED.
-#   M21 — using-uberdev/SKILL.md flags auto_confirm as DEPRECATED.
+#   M21 — using-uberdev references/configuration.md flags auto_confirm as DEPRECATED.
 #   M22 — SKILL.md STRATEGY_ENUM declares drop (and does NOT declare the removed `defer`).
 #   M23 — SKILL.md AUDIT_EVENT_ENUM declares all new autopilot events.
 #   M24 — SKILL.md declares PARK_REASON_ENUM, STRATEGY_REASON_ENUM, STALE_REBASE_DECISION_ENUM.
@@ -390,19 +390,21 @@ else
 fi
 
 echo
-echo "== M21: using-uberdev/SKILL.md auto_confirm key documented as DEPRECATED =="
-USING_SKILL_FILE="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/SKILL.md"
+echo "== M21: using-uberdev config reference auto_confirm key documented as DEPRECATED =="
+# Re-pointed (#309 hook diet): the config schema moved from using-uberdev/SKILL.md
+# into using-uberdev/references/configuration.md; the mirror-site contract follows it.
+USING_SKILL_FILE="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/references/configuration.md"
 if [ ! -r "$USING_SKILL_FILE" ]; then
-  fail "M21 — using-uberdev SKILL.md missing or unreadable: $USING_SKILL_FILE"
+  fail "M21 — using-uberdev references/configuration.md missing or unreadable: $USING_SKILL_FILE"
 else
   assert_grep "$USING_SKILL_FILE" '^auto_confirm:' \
     "M21.1 — auto_confirm key still present in YAML example (parsed for backward compat)"
   assert_grep "$USING_SKILL_FILE" '\*\*`auto_confirm` precedence:\*\*' \
     "M21.2 — auto_confirm precedence paragraph still present (now flags deprecation)"
   if grep -qiE 'DEPRECATED' "$USING_SKILL_FILE"; then
-    pass "M21.3 — using-uberdev/SKILL.md flags auto_confirm as DEPRECATED"
+    pass "M21.3 — using-uberdev config reference flags auto_confirm as DEPRECATED"
   else
-    fail "M21.3 — using-uberdev/SKILL.md MUST flag auto_confirm as DEPRECATED"
+    fail "M21.3 — using-uberdev config reference MUST flag auto_confirm as DEPRECATED"
   fi
 fi
 
@@ -769,23 +771,25 @@ else
 fi
 
 echo
-echo "== M45: using-uberdev/SKILL.md mirror site synced (AC6) =="
-# Path is repo-relative; resolve from REPO_ROOT.
-USING_FILE="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/SKILL.md"
+echo "== M45: using-uberdev config-reference mirror site synced (AC6) =="
+# Path is repo-relative; resolve from REPO_ROOT. Re-pointed (#309 hook diet):
+# the bot_authors_allow_list semantics paragraph moved with the config schema
+# into using-uberdev/references/configuration.md.
+USING_FILE="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/references/configuration.md"
 if [ ! -r "$USING_FILE" ]; then
   echo "  FAIL  M45 — required file missing: $USING_FILE"
   FAIL=$((FAIL + 1))
 else
   assert_grep "$USING_FILE" 'PATH_1.*PATH_2|PATH_2.*PATH_1' \
-    "M45 — using-uberdev/SKILL.md bot_authors_allow_list paragraph contains PATH_1+PATH_2 layered wording"
-  # M45.trail: updated for issue #47 — T6 rewrote using-uberdev/SKILL.md mirror to
+    "M45 — config reference bot_authors_allow_list paragraph contains PATH_1+PATH_2 layered wording"
+  # M45.trail: updated for issue #47 — T6 rewrote this mirror to
   # describe the agent-decided trail (ancestor + diff-empty + log-empty primitives,
   # verdict enum {PASS, STALE, INVALID, FORCE_PUSHED}). The old label+trailer
   # composition string was retired from this mirror site.
   assert_grep "$USING_FILE" 'trust-trail-evaluator' \
-    "M45.trail — using-uberdev/SKILL.md names the trust-trail-evaluator agent"
+    "M45.trail — config reference names the trust-trail-evaluator agent"
   assert_grep "$USING_FILE" 'PASS, STALE, INVALID, FORCE_PUSHED|PASS.*STALE.*INVALID.*FORCE_PUSHED' \
-    "M45.verdict — using-uberdev/SKILL.md cites the verdict enum"
+    "M45.verdict — config reference cites the verdict enum"
 fi
 
 echo
@@ -961,8 +965,14 @@ fi
 
 echo
 echo "== M54: no forbidden 'use --bypass-protections to override' / 're-run /review-pr, then re-invoke /merge' wording in any mirror site =="
+# Mirror-site list extended (#309 hook diet): the config schema (incl. the /merge
+# mirror paragraphs) moved into references/configuration.md — an ABSENCE check
+# cannot fail from the move, so the new file must be listed explicitly or the
+# guard silently stops covering the moved text. using-uberdev/SKILL.md stays
+# listed to keep the primer covered.
 USING_FILE="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/SKILL.md"
-for FILE in "$SKILL_FILE" "$CMD_FILE" "$USING_FILE"; do
+USING_CONFIG_REF_FILE="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/references/configuration.md"
+for FILE in "$SKILL_FILE" "$CMD_FILE" "$USING_FILE" "$USING_CONFIG_REF_FILE"; do
   if grep -qE 'supply --bypass-protections to override|use --bypass-protections to override' "$FILE"; then
     echo "  FAIL  M54.bypass-override — forbidden 'supply/use --bypass-protections to override' in $FILE"
     FAIL=$((FAIL + 1))
