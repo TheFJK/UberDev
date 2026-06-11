@@ -191,8 +191,6 @@ MAX_TOTAL_ISSUES=1000
 CONCURRENCY=3
 TOTAL_ISSUES=0
 CHUNK_COUNT=0
-CIRCUIT_BREAKER_HALT=
-WRITES_SO_FAR=0
 EOF
 
 p1_ok=1
@@ -998,7 +996,9 @@ P15_RUN_DIR="$P15_TMPDIR/.uberdev/cluster/$P15_RUN_ID"
 # read, so we don't materialise that subdirectory. `dispatches/` is kept for
 # symmetry with P16/P17 (cheap and documents the run-dir contract).
 mkdir -p "$P15_RUN_DIR/dispatches"
-printf '%s\n' "$P15_RUN_ID" > "$P15_TMPDIR/cluster-active-id.txt"
+# 2-line bootstrap pointer (RUN_ID, RUN_DIR_ABS) — the Phase 0 contract; the
+# rehydration path under test resolves RUN_DIR from pointer line 2.
+printf '%s\n%s\n' "$P15_RUN_ID" "$P15_RUN_DIR" > "$P15_TMPDIR/cluster-active-id.txt"
 cat > "$P15_RUN_DIR/run-state.txt" <<EOF
 RUN_ID=$P15_RUN_ID
 RUN_DIR=$P15_RUN_DIR
@@ -1051,7 +1051,8 @@ P16_TMPDIR="$STAGE/p16-tmp"
 P16_RUN_ID="p16-execute-test"
 P16_RUN_DIR="$P16_TMPDIR/.uberdev/cluster/$P16_RUN_ID"
 mkdir -p "$P16_RUN_DIR/dispatches" "$P16_RUN_DIR/analyses"
-printf '%s\n' "$P16_RUN_ID" > "$P16_TMPDIR/cluster-active-id.txt"
+# 2-line bootstrap pointer (RUN_ID, RUN_DIR_ABS) — Phase 0 contract.
+printf '%s\n%s\n' "$P16_RUN_ID" "$P16_RUN_DIR" > "$P16_TMPDIR/cluster-active-id.txt"
 cat > "$P16_RUN_DIR/run-state.txt" <<EOF
 RUN_ID=$P16_RUN_ID
 RUN_DIR=$P16_RUN_DIR
@@ -1120,7 +1121,8 @@ P17_TMPDIR="$STAGE/p17-tmp"
 P17_RUN_ID="p17-boundary-test"
 P17_RUN_DIR="$P17_TMPDIR/.uberdev/cluster/$P17_RUN_ID"
 mkdir -p "$P17_RUN_DIR/dispatches" "$P17_RUN_DIR/analyses"
-printf '%s\n' "$P17_RUN_ID" > "$P17_TMPDIR/cluster-active-id.txt"
+# 2-line bootstrap pointer (RUN_ID, RUN_DIR_ABS) — Phase 0 contract.
+printf '%s\n%s\n' "$P17_RUN_ID" "$P17_RUN_DIR" > "$P17_TMPDIR/cluster-active-id.txt"
 cat > "$P17_RUN_DIR/run-state.txt" <<EOF
 RUN_ID=$P17_RUN_ID
 RUN_DIR=$P17_RUN_DIR
@@ -1447,22 +1449,28 @@ fi
 #       WITHOUT corrupting the JSON-array stdout (#265 Part 2).
 # ============================================================================
 #
-# PR #267 added three `sys.stderr.write("cluster: WARN …")` diagnostics to the
+# PR #267 added `sys.stderr.write("cluster: WARN …")` diagnostics to the
 # Phase-4 python3 aggregation heredoc (SKILL.md "## Phase 4 — Propose"):
-#   1. PyYAML-not-importable  -> WARN + print('[]') + exit 0 (degrade, not crash)
-#   2. per-file YAML parse error -> WARN + `continue` (skip the bad file)
-#   3. per-cluster non-numeric confidence -> WARN + `continue`
-# Without a gate, a regression that strips a `sys.stderr.write` (turning a
-# loud-skip back into a silent one — the exact #265 masking class) would pass
-# CI. This gate extracts the python body VERBATIM from SKILL.md and runs it
-# against a mock RUN_DIR, asserting a `cluster: WARN` line reaches stderr while
-# stdout stays a valid JSON array (the WARN must NOT pollute the stdout the
-# `>` redirect captures into clusters-filtered.json).
+#   1. per-file YAML parse error -> WARN + `continue` (skip the bad chunk file)
+#   2. per-cluster non-numeric confidence -> WARN + `continue`
+# RFC 0012 §3.11 (light-R5) then upgraded the PyYAML-not-importable arm from
+# WARN + print('[]') + exit 0 (a degrade the downstream non-empty-array guard
+# accepts as a legitimate empty run) to FAIL LOUD: FATAL on stderr + nonzero
+# exit + NO stdout. Without a gate, a regression that strips a
+# `sys.stderr.write` (turning a loud-skip back into a silent one — the exact
+# #265 masking class) or restores the silent '[]' degrade would pass CI. This
+# gate extracts the python body VERBATIM from SKILL.md and runs it against a
+# mock RUN_DIR, asserting the diagnostics reach stderr while stdout stays a
+# valid JSON array (the WARN must NOT pollute the stdout the `>` redirect
+# captures into clusters-filtered.json).
 #
 # Robust to PyYAML being absent on the CI runner (it may or may not be
 # installed): the import-present path seeds a valid + a deliberately-unparseable
 # analyses YAML and asserts the parse-error WARN; the import-absent path runs
-# against an empty analyses/ and asserts the not-importable WARN + exact `[]`.
+# against an empty analyses/ and asserts the FAIL-LOUD contract (nonzero rc,
+# FATAL diagnostic, empty stdout). P24 covers the fail-loud arm
+# DETERMINISTICALLY (import shim), so it is exercised even when PyYAML is
+# installed.
 echo "== P22 Phase 4 python aggregation WARN reaches stderr without corrupting JSON-array stdout"
 P22_DIR="$STAGE/p22"
 mkdir -p "$P22_DIR/analyses"
@@ -1506,19 +1514,24 @@ if [ "$p22_ok" = "1" ]; then
       p22_ok=0
     fi
   else
-    # PyYAML ABSENT: run against an empty analyses/ — the import guard fires,
-    # WARNs, prints '[]', and exits 0 (degrade, not crash).
+    # PyYAML ABSENT: the import guard must FAIL LOUD — nonzero rc, FATAL on
+    # stderr, and NO degraded '[]' on stdout (RFC 0012 §3.11 light-R5).
     printf '%s' "$P22_PY" | python3 - "$P22_DIR" "0.5" > "$P22_OUT" 2>"$P22_ERR"
     P22_RC=$?
 
-    # (1) stdout must be exactly `[]` (the import-guard's degraded output).
-    if [ "$(cat "$P22_OUT")" != "[]" ]; then
-      echo "  FAIL  P22 (PyYAML absent) stdout not exactly '[]' (rc=$P22_RC, got '$(cat "$P22_OUT")')"
+    # (1) rc must be nonzero (a missing dependency is a crash, not an empty run).
+    if [ "$P22_RC" -eq 0 ]; then
+      echo "  FAIL  P22 (PyYAML absent) expected nonzero rc, got 0"
       p22_ok=0
     fi
-    # (2) stderr must carry the literal not-importable WARN diagnostic.
-    if ! grep -qF 'cluster: WARN PyYAML not importable' "$P22_ERR"; then
-      echo "  FAIL  P22 (PyYAML absent) stderr missing 'cluster: WARN PyYAML not importable'"
+    # (2) stdout must be EMPTY — the silent '[]' degrade is the masked-crash class.
+    if [ -s "$P22_OUT" ]; then
+      echo "  FAIL  P22 (PyYAML absent) stdout not empty (got '$(cat "$P22_OUT")')"
+      p22_ok=0
+    fi
+    # (3) stderr must carry the literal not-importable FATAL diagnostic.
+    if ! grep -qF 'cluster: FATAL PyYAML not importable' "$P22_ERR"; then
+      echo "  FAIL  P22 (PyYAML absent) stderr missing 'cluster: FATAL PyYAML not importable'"
       p22_ok=0
     fi
   fi
@@ -1531,6 +1544,145 @@ else
   echo "  FAIL  P22 Phase-4 python WARN-diagnostic contract violated"
   [ -s "$P22_OUT" ] && { echo "  -- stdout:"; sed 's/^/     /' "$P22_OUT"; }
   [ -s "$P22_ERR" ] && { echo "  -- stderr:"; sed 's/^/     /' "$P22_ERR"; }
+  FAIL=$((FAIL+1))
+fi
+
+# ============================================================================
+# P23 — Phase 4 aggregation: meta-clusters.yaml is AUTHORITATIVE when present
+#       (chunk YAMLs ignored), and (lead, member-set) duplicates are deduped
+#       (RFC 0012 §3.11 light-R5 fix 1, #305).
+# ============================================================================
+#
+# Before the fix, SKILL.md's Phase-4 glob aggregated BOTH the chunk YAMLs and
+# meta-clusters.yaml; the meta pass passes single-chunk clusters through
+# verbatim, so every passthrough cluster appeared twice in
+# clusters-filtered.json — duplicate proposals in --dry-run, double-fold
+# attempts under --execute. Contract under test (same extracted python body
+# $P22_PY):
+#   (a) chunk YAMLs only (no meta file): cross-chunk duplicates collapse via
+#       the (lead, frozenset(members)) dedupe — 3 raw clusters in, 2 out, with
+#       a 'dropping duplicate cluster' WARN on stderr;
+#   (b) meta-clusters.yaml present: ONLY it is aggregated — chunk clusters
+#       (including lead=5, absent from meta) must NOT appear;
+#   (c) meta-clusters.yaml present but unparseable: FAIL LOUD (sole source —
+#       a silent '[]' would mask the parse failure as an empty run).
+echo "== P23 Phase 4 meta-authoritative aggregation + (lead, member-set) dedupe"
+p23_ok=1
+P23_DIR="$STAGE/p23"
+mkdir -p "$P23_DIR/analyses"
+
+if [ -z "$P22_PY" ]; then
+  echo "  FAIL  P23 Phase-4 python body unavailable (extraction failed earlier)"
+  p23_ok=0
+elif ! python3 -c 'import yaml' >/dev/null 2>&1; then
+  # PyYAML genuinely absent on this host: the parse-path assertions cannot
+  # run. The fail-loud arm is still covered deterministically by P24.
+  echo "  PASS  P23 skipped (PyYAML absent on this host; fail-loud arm covered by P24)"
+else
+  # chunk-01 carries clusters A(lead=1) + B(lead=5); chunk-02 re-proposes A.
+  cat > "$P23_DIR/analyses/chunk-01-clusters.yaml" <<'EOF'
+clusters:
+  - lead: 1
+    members: [1, 2]
+    rationale: "dup-A from chunk 1"
+    confidence: 0.9
+  - lead: 5
+    members: [5, 6]
+    rationale: "B only in chunks"
+    confidence: 0.9
+EOF
+  cat > "$P23_DIR/analyses/chunk-02-clusters.yaml" <<'EOF'
+clusters:
+  - lead: 1
+    members: [2, 1]
+    rationale: "dup-A again from chunk 2 (members reordered)"
+    confidence: 0.95
+EOF
+
+  # (a) no meta file -> chunk aggregation with dedupe: exactly 2 clusters.
+  printf '%s' "$P22_PY" | python3 - "$P23_DIR" "0.5" > "$P23_DIR/a.out" 2>"$P23_DIR/a.err"
+  p23_rc=$?
+  [ "$p23_rc" = "0" ] || { echo "  .. (a) rc=$p23_rc (expected 0)"; p23_ok=0; }
+  p23_a_n="$(jq 'length' "$P23_DIR/a.out" 2>/dev/null)"
+  [ "$p23_a_n" = "2" ] || { echo "  .. (a) expected 2 deduped clusters, got '$p23_a_n'"; p23_ok=0; }
+  grep -qF 'dropping duplicate cluster' "$P23_DIR/a.err" \
+    || { echo "  .. (a) stderr missing 'dropping duplicate cluster' WARN"; p23_ok=0; }
+
+  # (b) meta file present -> ONLY meta aggregated: 1 cluster, lead=1; the
+  # chunk-only lead=5 must not leak through.
+  cat > "$P23_DIR/analyses/meta-clusters.yaml" <<'EOF'
+clusters:
+  - lead: 1
+    members: [1, 2]
+    rationale: "meta consolidation of A"
+    confidence: 0.92
+EOF
+  printf '%s' "$P22_PY" | python3 - "$P23_DIR" "0.5" > "$P23_DIR/b.out" 2>"$P23_DIR/b.err"
+  p23_rc=$?
+  [ "$p23_rc" = "0" ] || { echo "  .. (b) rc=$p23_rc (expected 0)"; p23_ok=0; }
+  p23_b_n="$(jq 'length' "$P23_DIR/b.out" 2>/dev/null)"
+  [ "$p23_b_n" = "1" ] || { echo "  .. (b) expected exactly 1 cluster from meta, got '$p23_b_n'"; p23_ok=0; }
+  p23_b_lead="$(jq -r '.[0].lead' "$P23_DIR/b.out" 2>/dev/null)"
+  [ "$p23_b_lead" = "1" ] || { echo "  .. (b) expected lead=1 from meta, got '$p23_b_lead'"; p23_ok=0; }
+  jq -e 'map(.lead) | index(5)' "$P23_DIR/b.out" >/dev/null 2>&1 \
+    && { echo "  .. (b) chunk-only cluster lead=5 leaked past the meta-authoritative gate"; p23_ok=0; }
+
+  # (c) meta present but unparseable -> FAIL LOUD (rc!=0, FATAL, no stdout).
+  printf 'clusters: [1, 2\n' > "$P23_DIR/analyses/meta-clusters.yaml"
+  printf '%s' "$P22_PY" | python3 - "$P23_DIR" "0.5" > "$P23_DIR/c.out" 2>"$P23_DIR/c.err"
+  p23_rc=$?
+  [ "$p23_rc" != "0" ] || { echo "  .. (c) unparseable meta: expected rc!=0, got 0"; p23_ok=0; }
+  [ ! -s "$P23_DIR/c.out" ] || { echo "  .. (c) unparseable meta leaked stdout '$(cat "$P23_DIR/c.out")'"; p23_ok=0; }
+  grep -qF 'cluster: FATAL unparseable meta-clusters.yaml' "$P23_DIR/c.err" \
+    || { echo "  .. (c) stderr missing FATAL unparseable-meta diagnostic"; p23_ok=0; }
+fi
+
+if [ "$p23_ok" = "1" ]; then
+  echo "  PASS  P23 meta-authoritative aggregation + dedupe + loud unparseable-meta"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  P23 Phase-4 meta/dedupe aggregation contract violated"
+  FAIL=$((FAIL+1))
+fi
+
+# ============================================================================
+# P24 — Phase 4 PyYAML missing-dependency FAILS LOUD — deterministic via an
+#       import shim, so the arm is exercised even on PyYAML-equipped runners
+#       (RFC 0012 §3.11 light-R5 fix 5, #305).
+# ============================================================================
+#
+# A yaml.py that raises ImportError at module-exec time is placed FIRST on
+# PYTHONPATH; `import yaml` then raises exactly the exception the guard
+# catches, regardless of whether the real PyYAML is installed. Contract:
+# nonzero rc + 'cluster: FATAL PyYAML not importable' on stderr + EMPTY stdout
+# (the old print('[]') + exit 0 degrade let the downstream non-empty-array
+# guard accept a missing dependency as a legitimate "no clusters" run).
+echo "== P24 Phase 4 PyYAML fail-loud (deterministic import shim)"
+p24_ok=1
+P24_DIR="$STAGE/p24"
+P24_SHIM="$STAGE/p24-shim"
+mkdir -p "$P24_DIR/analyses" "$P24_SHIM"
+printf 'raise ImportError("PyYAML blocked by P24 fail-loud shim")\n' > "$P24_SHIM/yaml.py"
+
+if [ -z "$P22_PY" ]; then
+  echo "  FAIL  P24 Phase-4 python body unavailable (extraction failed earlier)"
+  p24_ok=0
+else
+  printf '%s' "$P22_PY" | PYTHONPATH="$P24_SHIM" python3 - "$P24_DIR" "0.5" \
+    > "$P24_DIR/out.txt" 2>"$P24_DIR/err.txt"
+  P24_RC=$?
+  [ "$P24_RC" != "0" ] || { echo "  .. expected nonzero rc, got 0"; p24_ok=0; }
+  [ ! -s "$P24_DIR/out.txt" ] \
+    || { echo "  .. stdout not empty (got '$(cat "$P24_DIR/out.txt")') — '[]' degrade resurfaced"; p24_ok=0; }
+  grep -qF 'cluster: FATAL PyYAML not importable' "$P24_DIR/err.txt" \
+    || { echo "  .. stderr missing 'cluster: FATAL PyYAML not importable'"; p24_ok=0; }
+fi
+
+if [ "$p24_ok" = "1" ]; then
+  echo "  PASS  P24 missing PyYAML -> nonzero rc + FATAL diagnostic + empty stdout"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  P24 PyYAML fail-loud contract violated"
   FAIL=$((FAIL+1))
 fi
 
