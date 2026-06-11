@@ -571,10 +571,13 @@ if [ "$NO_ISSUES" != "1" ]; then
     || { echo "error: aggregate.py issues failed (rc=$?); aborting" >&2; exit 2; }
   echo "[ubersimplify] findings-to-issues aggregate written: $RUN_DIR/f2i-aggregate.md"
 
-  # CB6 gh rate-limit floor check before any write (mirrors the rate-limit-floor
-  # pattern in agents/findings-to-issues.md Step 2 — the canonical reference).
-  CORE_REMAINING=$(gh api rate_limit --jq '.resources.core.remaining' 2>/dev/null)
-  SEARCH_REMAINING=$(gh api rate_limit --jq '.resources.search.remaining' 2>/dev/null)
+  # CB6 (gh rate-limit floor) is enforced INSIDE the dispatched agent:
+  # agents/findings-to-issues.md Step 2 probes BOTH gh rate_limit buckets before
+  # any write and fail-CLOSED refuses (status: REFUSED, rationale:
+  # rate-limit-budget-insufficient) when either floor is unmet. The duplicated
+  # pre-dispatch copy of that check was deleted (RFC 0012 scan-R5) — do not
+  # re-add it here; the agent is the canonical owner. A refusal skips only the
+  # issue filing: the branch/PR created in Phase 4 are retained either way.
 
   # Resolve MAX_NEW from config (key ubersimplify.max_new, default 10).
   if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
@@ -584,60 +587,38 @@ if [ "$NO_ISSUES" != "1" ]; then
     MAX_NEW=10
   fi
 
-  RATE_OK=1
-  if [ -z "$CORE_REMAINING" ] || ! printf '%s' "$CORE_REMAINING" | grep -qE '^[0-9]+$'; then
-    echo "[ubersimplify] CB6: gh rate_limit core probe returned non-numeric ('$CORE_REMAINING'); skipping issue filing" >&2
-    RATE_OK=0
+  # findings-to-issues REQUIRES an absolute working_dir inside the worktree (it
+  # refuses with input-malformed otherwise); repo_slug + pr_commit_sha back the
+  # issue-body Origin link. Local origin-URL parse first (fast); fall back to gh.
+  ORIGIN_URL="$(git remote get-url origin 2>/dev/null)"
+  REPO_SLUG="$(printf '%s' "$ORIGIN_URL" | sed -E 's@.*github\.com[:/]([^/]+/[^/.]+)(\.git)?$@\1@')"
+  if [ -z "$REPO_SLUG" ] || [ "$REPO_SLUG" = "$ORIGIN_URL" ]; then
+    REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)"
   fi
-  if [ -z "$SEARCH_REMAINING" ] || ! printf '%s' "$SEARCH_REMAINING" | grep -qE '^[0-9]+$'; then
-    echo "[ubersimplify] CB6: gh rate_limit search probe returned non-numeric ('$SEARCH_REMAINING'); skipping issue filing" >&2
-    RATE_OK=0
+  HEAD_SHA="$(git rev-parse HEAD 2>/dev/null)"
+  DISPATCH_OK=1
+  if [ -z "$WORKING_DIR_ABS" ] || [ -z "$HEAD_SHA" ] || [ -z "$REPO_SLUG" ]; then
+    echo "[ubersimplify] error: could not resolve working_dir/HEAD/repo_slug (git/gh failed); skipping issue filing" >&2
+    DISPATCH_OK=0
   fi
-  if [ "$RATE_OK" = "1" ] && [ "$CORE_REMAINING" -lt $(( 2 * MAX_NEW + 50 )) ]; then
-    echo "[ubersimplify] CB6: core rate limit remaining ($CORE_REMAINING) below floor ($(( 2 * MAX_NEW + 50 ))); skipping issue filing" >&2
-    RATE_OK=0
-  fi
-  if [ "$RATE_OK" = "1" ] && [ "$SEARCH_REMAINING" -lt $(( MAX_NEW + 5 )) ]; then
-    echo "[ubersimplify] CB6: search rate limit remaining ($SEARCH_REMAINING) below floor ($(( MAX_NEW + 5 ))); skipping issue filing" >&2
-    RATE_OK=0
-  fi
-
-  if [ "$RATE_OK" = "1" ]; then
-    # findings-to-issues REQUIRES an absolute working_dir inside the worktree (it
-    # refuses with input-malformed otherwise); repo_slug + pr_commit_sha back the
-    # issue-body Origin link. Local origin-URL parse first (fast); fall back to gh.
-    ORIGIN_URL="$(git remote get-url origin 2>/dev/null)"
-    REPO_SLUG="$(printf '%s' "$ORIGIN_URL" | sed -E 's@.*github\.com[:/]([^/]+/[^/.]+)(\.git)?$@\1@')"
-    if [ -z "$REPO_SLUG" ] || [ "$REPO_SLUG" = "$ORIGIN_URL" ]; then
-      REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)"
-    fi
-    HEAD_SHA="$(git rev-parse HEAD 2>/dev/null)"
-    DISPATCH_OK=1
-    if [ -z "$WORKING_DIR_ABS" ] || [ -z "$HEAD_SHA" ] || [ -z "$REPO_SLUG" ]; then
-      echo "[ubersimplify] error: could not resolve working_dir/HEAD/repo_slug (git/gh failed); skipping issue filing" >&2
-      DISPATCH_OK=0
-    fi
-    # ===========================================================================
-    # DISPATCH POINT — the orchestrating session fires ONE Task() call:
-    #
-    # DISPATCH: findings-to-issues
-    #   run_id=$RUN_ID
-    #   working_dir=$WORKING_DIR_ABS        (REQUIRED — agent refuses without it)
-    #   repo_slug=$REPO_SLUG
-    #   pr_commit_sha=$HEAD_SHA
-    #   phase1_aggregate_path=$RUN_DIR/f2i-aggregate.md
-    #   phase2_aggregate_path=      (empty — single-aggregate run)
-    #   finding_label=ubersimplify-finding
-    #   finding_marker_slug=ubersimplify
-    #   source_ref=/ubersimplify run $RUN_ID
-    #   pr_number=$PR_NUMBER        (empty under --audit-only / 0-commit clean run)
-    #   max_new=$MAX_NEW
-    # ===========================================================================
-    if [ "$DISPATCH_OK" = "1" ]; then
-      echo "DISPATCH: findings-to-issues with run_id=$RUN_ID, working_dir=$WORKING_DIR_ABS, repo_slug=$REPO_SLUG, pr_commit_sha=$HEAD_SHA, phase1_aggregate_path=$RUN_DIR/f2i-aggregate.md, phase2_aggregate_path= (empty), finding_label=ubersimplify-finding, finding_marker_slug=ubersimplify, source_ref=/ubersimplify run $RUN_ID, pr_number=${PR_NUMBER:-} (empty under --audit-only), max_new=$MAX_NEW"
-    fi
-  else
-    echo "[ubersimplify] issue filing skipped (rate-limit floor not met); branch/PR retained"
+  # ===========================================================================
+  # DISPATCH POINT — the orchestrating session fires ONE Task() call:
+  #
+  # DISPATCH: findings-to-issues
+  #   run_id=$RUN_ID
+  #   working_dir=$WORKING_DIR_ABS        (REQUIRED — agent refuses without it)
+  #   repo_slug=$REPO_SLUG
+  #   pr_commit_sha=$HEAD_SHA
+  #   phase1_aggregate_path=$RUN_DIR/f2i-aggregate.md
+  #   phase2_aggregate_path=      (empty — single-aggregate run)
+  #   finding_label=ubersimplify-finding
+  #   finding_marker_slug=ubersimplify
+  #   source_ref=/ubersimplify run $RUN_ID
+  #   pr_number=$PR_NUMBER        (empty under --audit-only / 0-commit clean run)
+  #   max_new=$MAX_NEW
+  # ===========================================================================
+  if [ "$DISPATCH_OK" = "1" ]; then
+    echo "DISPATCH: findings-to-issues with run_id=$RUN_ID, working_dir=$WORKING_DIR_ABS, repo_slug=$REPO_SLUG, pr_commit_sha=$HEAD_SHA, phase1_aggregate_path=$RUN_DIR/f2i-aggregate.md, phase2_aggregate_path= (empty), finding_label=ubersimplify-finding, finding_marker_slug=ubersimplify, source_ref=/ubersimplify run $RUN_ID, pr_number=${PR_NUMBER:-} (empty under --audit-only), max_new=$MAX_NEW"
   fi
 fi
 ```
@@ -724,7 +705,7 @@ exit 0
 | **CB3** | Per-wave timeout > 900s | Stop early, partial | Stop early, partial | `1` |
 | **CB4** | Wall-clock > 3600s (60 min) | Stop early, partial | Stop early, partial | `1` |
 | **CB5** | Cumulative blocker findings > 150 | Stop early, mark partial | Stop early, mark partial | `1` |
-| **CB6** | gh rate-limit floor not met | Skip issue filing; **keep branch/PR** | Skip issue filing; keep branch/PR | `0` |
+| **CB6** | gh rate-limit floor not met — _enforced inside `agents/findings-to-issues.md` Step 2 (canonical owner; the duplicated pre-dispatch fence was deleted, RFC 0012 scan-R5)_ | Agent refuses fail-CLOSED (`rate-limit-budget-insufficient`); no issues filed; **keep branch/PR** | Same; keep branch/PR | `0` |
 | **CB7** | Projected agents (areas×1) > MAX_AGENTS (250) — backstop against an absurd explicit `--areas` | Halt with guidance | Cap-and-continue | `1` (non-turbo) / `0` (turbo) |
 
-CB7 projects `areas × 1` (one multi-lens simplifier per area; Phase 3 then applies via one code-fixer per area, sequentially). CB6 differs from a fatal halt: it skips only issue filing and **retains the branch and PR** so the applied refactors are never lost to a transient rate-limit dip.
+CB7 projects `areas × 1` (one multi-lens simplifier per area; Phase 3 then applies via one code-fixer per area, sequentially). CB6 differs from a fatal halt: a `findings-to-issues` rate-floor refusal skips only issue filing and **retains the branch and PR** so the applied refactors are never lost to a transient rate-limit dip.

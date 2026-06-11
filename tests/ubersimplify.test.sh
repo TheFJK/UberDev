@@ -37,6 +37,14 @@ ck "old chunks×3 projection removed" "[ \$(grep -c 'EMITTED_CHUNKS \* 3' '$SKIL
 ck "per-lens Task fanout loop removed (no 'for LENS in')" "[ \$(grep -c 'for LENS in' '$SKILL') -eq 0 ]"
 ck "no Co-Authored-By trailer in PR body" "[ \$(grep -ci 'Co-Authored-By' '$SKILL') -eq 0 ]"
 
+echo "== scan-R5 (RFC 0012): duplicated CB6 rate-floor fence deleted =="
+# The pre-dispatch gh rate-limit floor duplicated agents/findings-to-issues.md
+# Step 2 (the canonical owner, which probes both buckets and refuses fail-CLOSED
+# with rate-limit-budget-insufficient). The SKILL must NOT re-grow a copy.
+ck "no pre-dispatch gh rate_limit probe remains in the SKILL" "[ \$(grep -c 'gh api rate_limit' '$SKILL') -eq 0 ]"
+ck "no RATE_OK gating remains in the SKILL" "[ \$(grep -c 'RATE_OK' '$SKILL') -eq 0 ]"
+ck "CB6 delegation to findings-to-issues Step 2 documented" "grep -q 'findings-to-issues.md Step 2' '$SKILL'"
+
 echo "== alias registration (byte-match) =="
 ck "alias row present" "grep -q '^ubersimplify|ubersimplify|' '$SYNC'"
 TOOLS_CMD="$(grep '^allowed-tools:' "$CMD" | sed 's/^allowed-tools: //')"
