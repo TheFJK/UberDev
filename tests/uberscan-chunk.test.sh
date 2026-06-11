@@ -17,21 +17,39 @@ printf '{}' > package-lock.json
 head -c 300000 /dev/zero | tr '\0' 'z' > src/huge.ts   # >256KB MAX_FILE_BYTES cap
 git add -A 2>/dev/null
 
-OUT="$(python3 "$CHUNK" --scope . --budget-bytes 4096)"
+# ============================================================================
+# Base filter invariants (IGNORE rules / lockfiles / oversize), asserted in AREA
+# MODE — the only packer since the dead --budget-bytes mode was deleted
+# (RFC 0012 scan-R4). Kept set at this point: src/a.ts, src/b.ts (huge.ts is
+# oversize; node_modules/dist/package-lock.json are rule-ignored).
+# ============================================================================
+OUT="$(python3 "$CHUNK" --scope . --areas 3)"
 check "emits valid JSON" "printf '%s' \"\$OUT\" | python3 -c 'import json,sys; json.load(sys.stdin)'"
 check "skips node_modules" "! printf '%s' \"\$OUT\" | grep -q node_modules"
 check "skips dist" "! printf '%s' \"\$OUT\" | grep -q 'dist/'"
 check "skips lockfile" "! printf '%s' \"\$OUT\" | grep -q package-lock.json"
 check "includes src files" "printf '%s' \"\$OUT\" | grep -q 'src/a.ts'"
-check "honors MAX_CHUNKS overflow flag" "python3 \"$CHUNK\" --scope . --budget-bytes 1 --max-chunks 1 | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d[\"overflow\"] else 1)'"
-check "skips oversized file (>256KB MAX_FILE_BYTES)" "! printf '%s' \"\$OUT\" | grep -q 'src/huge.ts'"
-check "rejects --budget-bytes=0 (fail-loud, non-zero exit)" "! python3 \"$CHUNK\" --scope . --budget-bytes 0 >/dev/null 2>&1"
+# Oversize handling (scan-R4): the >256KB file must be excluded from every area
+# AND surfaced BY NAME in skipped_oversize — a "whole-repo" audit's coverage gap
+# must be visible in the manifest, never a silent count.
+check "oversized file (>256KB MAX_FILE_BYTES) excluded from every area" "printf '%s' \"\$OUT\" | python3 -c 'import json,sys; d=json.load(sys.stdin); allf=[f for c in d[\"chunks\"] for f in c[\"files\"]]; sys.exit(1 if \"src/huge.ts\" in allf else 0)'"
+check "skipped-oversize file NAME surfaced in manifest (exactly src/huge.ts)" "printf '%s' \"\$OUT\" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin)[\"skipped_oversize\"]==[\"src/huge.ts\"] else 1)'"
+check "skipped_files still counts ALL skips (3 rule-ignored + 1 oversize = 4)" "printf '%s' \"\$OUT\" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin)[\"skipped_files\"]==4 else 1)'"
+# Dead-mode locks (scan-R4): the budget flags are GONE, and --areas is required.
+check "budget mode deleted: --budget-bytes is rejected" "! python3 \"$CHUNK\" --scope . --areas 3 --budget-bytes 4096 >/dev/null 2>&1"
+check "budget mode deleted: --max-chunks is rejected" "! python3 \"$CHUNK\" --scope . --areas 3 --max-chunks 25 >/dev/null 2>&1"
+check "--areas is required (fail-loud when omitted)" "! python3 \"$CHUNK\" --scope . >/dev/null 2>&1"
 
-# AC5 (issue #166): assert chunk CONTENTS under budget pressure, not just overflow.
-# Each file is ~100 bytes ("a\n" or "b\n" repeated 50 times = 2 bytes * 50 = 100 bytes).
-# Budget 250 >= 2*100 (fits 2 files) but < 3*100 (cannot fit a 3rd file).
-# chunk_files() groups by sorted directory first, so dirA's 2 files pack together into one
-# chunk (~200 bytes), then dirB's 2 files pack into the next chunk — never mixed.
+# ============================================================================
+# Directory-cohesion invariants (ported from the deleted budget-mode AC5 block,
+# issue #166): pack_areas partitions over a directory-cohesive layout, so
+#   (1) when the byte balance ALLOWS a split at a directory boundary, sibling
+#       dirs land in separate areas (never mixed), and
+#   (2) even when balance forces a mid-directory split, each directory's files
+#       remain CONTIGUOUS across the flattened area order (cohesion proper).
+# dirA/dirB are added to the MAIN fixture first — the area-mode block below
+# depends on the resulting 6-file kept set.
+# ============================================================================
 mkdir -p "$TMP/dirA" "$TMP/dirB"
 printf 'a\n%.0s' {1..50} > "$TMP/dirA/a1.ts"   # ~100 bytes
 printf 'a\n%.0s' {1..50} > "$TMP/dirA/a2.ts"    # ~100 bytes
@@ -39,13 +57,39 @@ printf 'b\n%.0s' {1..50} > "$TMP/dirB/b1.ts"    # ~100 bytes
 printf 'b\n%.0s' {1..50} > "$TMP/dirB/b2.ts"    # ~100 bytes
 git add -A 2>/dev/null
 
-# Budget 250: 2 files fit (200 bytes), 3 files do not (300 bytes > 250), forcing a split
-# between dirA and dirB. JSON schema: d["chunks"] is a list of objects with a "files" key
-# (list of git-relative paths, e.g. "dirA/a1.ts") and a "bytes" key.
-GROUP_OUT="$(python3 "$CHUNK" --scope . --budget-bytes 250)"
-check "AC5: dirA files grouped in one chunk" "printf '%s' \"\$GROUP_OUT\" | python3 -c 'import json,sys; d=json.load(sys.stdin); chunks=[set(c[\"files\"]) for c in d[\"chunks\"]]; sys.exit(0 if any({\"dirA/a1.ts\",\"dirA/a2.ts\"} <= c for c in chunks) else 1)'"
-check "AC5: dirB files grouped in one chunk" "printf '%s' \"\$GROUP_OUT\" | python3 -c 'import json,sys; d=json.load(sys.stdin); chunks=[set(c[\"files\"]) for c in d[\"chunks\"]]; sys.exit(0 if any({\"dirB/b1.ts\",\"dirB/b2.ts\"} <= c for c in chunks) else 1)'"
-check "AC5: dirA and dirB never share a chunk (directory cohesion)" "printf '%s' \"\$GROUP_OUT\" | python3 -c 'import json,sys; d=json.load(sys.stdin); bad=any(any(f.startswith(\"dirA/\") for f in c[\"files\"]) and any(f.startswith(\"dirB/\") for f in c[\"files\"]) for c in d[\"chunks\"]); sys.exit(1 if bad else 0)'"
+# (1) Clean-split fixture in an ISOLATED repo: two dirs x two ~100B files,
+# --areas 2 -> optimal min-max cap is 200 bytes, which lands the split exactly
+# on the dirA/dirB boundary: {dirA/*}, {dirB/*} — never mixed.
+TMP2="$(mktemp -d)"; trap 'rm -rf "$TMP" "$TMP2"' EXIT
+(
+  cd "$TMP2" && git init -q && mkdir -p dirA dirB
+  printf 'a\n%.0s' {1..50} > dirA/a1.ts
+  printf 'a\n%.0s' {1..50} > dirA/a2.ts
+  printf 'b\n%.0s' {1..50} > dirB/b1.ts
+  printf 'b\n%.0s' {1..50} > dirB/b2.ts
+  git add -A 2>/dev/null
+)
+COH_OUT="$(cd "$TMP2" && python3 "$CHUNK" --scope . --areas 2)"
+check "cohesion: dirA files grouped in one area" "printf '%s' \"\$COH_OUT\" | python3 -c 'import json,sys; d=json.load(sys.stdin); areas=[set(c[\"files\"]) for c in d[\"chunks\"]]; sys.exit(0 if any({\"dirA/a1.ts\",\"dirA/a2.ts\"} <= a for a in areas) else 1)'"
+check "cohesion: dirB files grouped in one area" "printf '%s' \"\$COH_OUT\" | python3 -c 'import json,sys; d=json.load(sys.stdin); areas=[set(c[\"files\"]) for c in d[\"chunks\"]]; sys.exit(0 if any({\"dirB/b1.ts\",\"dirB/b2.ts\"} <= a for a in areas) else 1)'"
+check "cohesion: dirs never mixed when balance allows a boundary split" "printf '%s' \"\$COH_OUT\" | python3 -c 'import json,sys; d=json.load(sys.stdin); bad=any(any(f.startswith(\"dirA/\") for f in c[\"files\"]) and any(f.startswith(\"dirB/\") for f in c[\"files\"]) for c in d[\"chunks\"]); sys.exit(1 if bad else 0)'"
+
+# (2) Adjacency invariant on the MAIN fixture: with src/ (2x200B) dominating,
+# --areas 3 byte-balance forces a mid-directory split — but each directory's
+# files must still occupy one CONTIGUOUS run of the flattened area order (a
+# directory may span an area boundary, yet never re-appears after another
+# directory interrupts it).
+ADJ_OUT="$(python3 "$CHUNK" --scope . --areas 3)"
+check "cohesion: each dir's files contiguous across the flattened area order" "printf '%s' \"\$ADJ_OUT\" | python3 -c '
+import json,sys,os
+d=json.load(sys.stdin)
+flat=[f for c in d[\"chunks\"] for f in c[\"files\"]]
+seen=set(); prev=None
+for dd in (os.path.dirname(f) for f in flat):
+    if dd!=prev and dd in seen: sys.exit(1)
+    if dd!=prev: seen.add(dd)
+    prev=dd
+sys.exit(0)'"
 
 # ============================================================================
 # AREA MODE (--areas N): fixed-fleet packing for /uberscan + /ubersimplify.
@@ -88,7 +132,7 @@ ch=json.load(sys.stdin)[\"chunks\"]
 b=[c[\"bytes\"] for c in ch]
 mean=sum(b)/len(b)
 sys.exit(0 if max(b)<=2*mean else 1)'"
-# Fail-loud: --areas 0 is rejected (matches --budget-bytes/--max-chunks validation).
+# Fail-loud: --areas 0 is rejected (non-positive fleet size is meaningless).
 check "rejects --areas 0 (fail-loud, non-zero exit)" "! python3 \"$CHUNK\" --scope . --areas 0 >/dev/null 2>&1"
 
 # Large-file invariant (pins the pack_areas binary-search LOWER bound
@@ -104,6 +148,9 @@ BIGOUT="$(python3 "$CHUNK" --scope . --areas 3)"   # fair share ~50KB; big file 
 check "large-file run yields <= 3 areas" "printf '%s' \"\$BIGOUT\" | python3 -c 'import json,sys; sys.exit(0 if len(json.load(sys.stdin)[\"chunks\"])<=3 else 1)'"
 check "large-file (>fair-share) is placed, not dropped" "printf '%s' \"\$BIGOUT\" | python3 -c 'import json,sys; d=json.load(sys.stdin); allf=[f for c in d[\"chunks\"] for f in c[\"files\"]]; sys.exit(0 if \"big/big.ts\" in allf else 1)'"
 check "large-file run keeps total coverage (7 files, each once)" "printf '%s' \"\$BIGOUT\" | python3 -c 'import json,sys; d=json.load(sys.stdin); allf=[f for c in d[\"chunks\"] for f in c[\"files\"]]; sys.exit(0 if len(allf)==len(set(allf))==d[\"total_files\"]==7 else 1)'"
+# Cap boundary: the 150KB UNDER-cap file must NOT be flagged skipped_oversize —
+# only the >256KB huge.ts belongs there (and still does on this later run).
+check "under-cap large file not flagged skipped_oversize (only huge.ts is)" "printf '%s' \"\$BIGOUT\" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin)[\"skipped_oversize\"]==[\"src/huge.ts\"] else 1)'"
 
 echo "Results: $PASS passed, $FAIL failed"
 [ $FAIL -eq 0 ] && exit 0 || exit 1
