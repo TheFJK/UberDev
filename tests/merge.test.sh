@@ -15,8 +15,8 @@
 #   M7  — SKILL.md documents the integration-branch precedence chain (D8).
 #   M8  — SKILL.md mandates single-message Task() fanout for conflict-resolve (D12).
 #   M9  — SKILL.md forbids --force against PR head refs (D13).
-#   M10 — SKILL.md references .git/uberdev-merge.lock for single-instance lock (D14).
-#   M11 — SKILL.md references .uberdev/runs/<run-id>/audit.jsonl (D15).
+#   M10 — SKILL.md references the .git/uberdev-merge.lock.d lock directory (D14, #303).
+#   M11 — SKILL.md declares the repo-root .uberdev/audit.jsonl audit-log path (D15, #303).
 #   M12 — SKILL.md mandates pre-push test gate (D16, no skip path).
 #   M13 — SKILL.md describes fork-PR preflight refusal for org-owned forks (Q3).
 #   M14 — agents/conflict-resolver.md exists with frontmatter + return contract.
@@ -193,14 +193,24 @@ assert_grep "$SKILL_FILE" 'Never `--force`|never --force|MUST NOT.*--force' \
   "M9 — explicit no-force-push prose"
 
 echo
-echo "== M10: SKILL.md references .git/uberdev-merge.lock for single-instance lock (D14) =="
-assert_grep "$SKILL_FILE" '\.git/uberdev-merge\.lock' \
-  "M10 — lock-file path declared"
+echo "== M10: SKILL.md references the .git/uberdev-merge.lock.d lock directory (D14, #303) =="
+assert_grep "$SKILL_FILE" '\.git/uberdev-merge\.lock\.d' \
+  "M10 — mkdir-atomic lock directory path declared"
 
 echo
-echo "== M11: SKILL.md references .uberdev/runs/<run-id>/audit.jsonl (D15) =="
-assert_grep "$SKILL_FILE" '\.uberdev/runs/.*audit\.jsonl' \
-  "M11 — audit log path declared"
+echo "== M11: SKILL.md declares the repo-root .uberdev/audit.jsonl audit-log path (D15; #303 docs-reality reconciliation) =="
+assert_grep "$SKILL_FILE" '\.uberdev/audit\.jsonl' \
+  "M11.1 — root audit-log path declared"
+# Negative: the audit LOG must never be re-documented under a per-run
+# .uberdev/runs/<run-id>/ directory. Every live writer in this skill appends
+# to the root .uberdev/audit.jsonl and /goal's uberdev_goal_read_merge_result
+# reader globs only the root — "fixing" the docs toward a per-run path
+# silently breaks /goal (#303). The per-run review-pr-verdict.json artifact
+# is unrelated and legitimately stays under .uberdev/runs/<run-id>/.
+assert_no_grep "$SKILL_FILE" '\.uberdev/runs/[^[:space:]]*audit\.jsonl' \
+  "M11.2 — audit.jsonl is NOT documented under .uberdev/runs/<run-id>/ (writers own the root-path contract; #303)"
+assert_grep "$SKILL_FILE" '^\| `AUDIT_LOG_DIR_PATTERN` \| `\.uberdev/`' \
+  "M11.3 — AUDIT_LOG_DIR_PATTERN constant row points at the repo-root .uberdev/ (#303)"
 
 echo
 echo "== M12: SKILL.md mandates pre-push test gate runs ALWAYS, with agent-decided fail response =="
@@ -1058,41 +1068,53 @@ else
 fi
 
 echo
-echo "== M62: SKILL.md Step 1.1 guards against missing flock(1) (issue #51) =="
-# Motivating case: macOS ships without flock(1), so the unguarded `flock` invocation
-# in Step 1.1 exits 127 ("command not found") and the prior prose mis-classified
-# every non-zero exit from the lock invocation as genuine contention. Result:
-# stock-macOS users see "another /merge run in progress" with no actual contender.
-# This test pins the contract that Step 1.1 (a) detects flock availability before
-# invoking it, (b) provides a portable fallback (mkdir-based mutex is the natural
-# POSIX-atomic choice) so /merge works out-of-the-box, and (c) explicitly
-# distinguishes the missing-binary path from real contention so the diagnostic
-# never mis-fires again.
+echo "== M62: SKILL.md Step 1.1 mkdir-atomic lock with heartbeat staleness (issue #51, redesigned by #303) =="
+# History: issue #51 was a missing-flock mis-classification on stock macOS;
+# the v0.21.x fix added a flock-probe + mkdir fallback + PID stamp + trap
+# cleanup. Issue #303 (RFC 0012 §3.2) found every process-lifetime-bound
+# mechanism void under per-fence shells — the fence that acquires the lock
+# exits in milliseconds while the /merge run continues for minutes, so the
+# stamped fence PID is dead before any second run can `kill -0` it (every
+# live run mis-classifies as stale), a `flock` fd closes at fence exit, and
+# a fence-scoped `trap ... EXIT` fires at fence exit, releasing the lock at
+# the START of the run. The redesign this section pins: mkdir stays the
+# atomic acquisition (the ONLY mechanism — no flock branch), liveness is
+# proven by HEARTBEAT AGE (wall-clock, process-independent), release is
+# EXPLICIT (Step 4.6 + documented post-acquisition early exits), and the
+# lock dir carries a run-scoped record.json whose workflowRunId field is
+# RESERVED for #310's status reader.
 PHASE_1_1_BLOCK=$(awk '/^### Step 1\.1/,/^### Step 1\.2/' "$SKILL_FILE")
 if [ -z "$PHASE_1_1_BLOCK" ]; then
   fail "M62 — could not slice Step 1.1 block; heading layout changed"
 else
-  if echo "$PHASE_1_1_BLOCK" | grep -qE 'command -v flock'; then
-    pass "M62.1 — Step 1.1 probes flock availability via 'command -v flock' before invoking it"
+  # M62.1 — mkdir is the atomic acquisition primitive (sole mechanism).
+  if echo "$PHASE_1_1_BLOCK" | grep -qE 'if mkdir "\$LOCK_DIR"'; then
+    pass "M62.1 — Step 1.1 acquires via the mkdir-atomic 'if mkdir \"\$LOCK_DIR\"' pattern (sole mechanism post-#303)"
   else
-    fail "M62.1 — Step 1.1 must probe flock availability via 'command -v flock' before invoking it"
+    fail "M62.1 — Step 1.1 must acquire via the mkdir-atomic 'if mkdir \"\$LOCK_DIR\"' pattern (#303 — no flock branch)"
   fi
-  if echo "$PHASE_1_1_BLOCK" | grep -qE '\bmkdir\b'; then
-    pass "M62.2 — Step 1.1 specifies a portable mkdir-based mutex fallback"
+  # M62.2 — the lock DIRECTORY literal.
+  if echo "$PHASE_1_1_BLOCK" | grep -qF '.git/uberdev-merge.lock.d'; then
+    pass "M62.2 — Step 1.1 declares the .git/uberdev-merge.lock.d lock directory"
   else
-    fail "M62.2 — Step 1.1 must specify a portable mkdir-based mutex fallback (POSIX-atomic, no flock dep)"
+    fail "M62.2 — Step 1.1 must declare the .git/uberdev-merge.lock.d lock directory (#303)"
   fi
-  if echo "$PHASE_1_1_BLOCK" | grep -qE '(MUST NOT|must not|never).*(contention|contended)|missing.*flock.*not.*contention|not.*lock.*contention'; then
-    pass "M62.3 — Step 1.1 explicitly forbids classifying missing-flock as contention"
+  # M62.3 — the void-lock retirement rationale is load-bearing prose: it is
+  # what stops a future simplification from re-introducing flock / PID
+  # stamps / traps (each re-opens the void-lock class).
+  if echo "$PHASE_1_1_BLOCK" | grep -qE 'flock\(1\), PID stamps, and traps are all retired'; then
+    pass "M62.3 — Step 1.1 documents the flock/PID/trap retirement rationale (#303 void-lock class)"
   else
-    fail "M62.3 — Step 1.1 must explicitly state that the missing-flock case is NOT contention (the issue-#51 mis-classification regression guard)"
+    fail "M62.3 — Step 1.1 must document why flock(1)/PID stamps/traps are retired (#303 — per-fence shells make every process-lifetime-bound mechanism void)"
   fi
-  # Phase 4.6 must clean up the mkdir fallback explicitly (flock auto-releases; mkdir does not).
+  # M62.4 — Step 4.6 releases explicitly with holder verification (run_id
+  # match before removal — never delete a lock another run reclaimed).
   PHASE_4_6_BLOCK=$(awk '/^### Step 4\.6/,/^## Quick Reference/' "$SKILL_FILE")
-  if echo "$PHASE_4_6_BLOCK" | grep -qE '\brmdir\b|rm -rf.*LOCK_DIR|remove.*lock dir|cleanup.*fallback|trap.*EXIT'; then
-    pass "M62.4 — Step 4.6 documents explicit cleanup for the mkdir fallback"
+  if echo "$PHASE_4_6_BLOCK" | grep -qE 'rm -rf "\$LOCK_DIR"' \
+     && echo "$PHASE_4_6_BLOCK" | grep -qE '\.run_id'; then
+    pass "M62.4 — Step 4.6 releases via holder-verified rm -rf (run_id match before removal; #303)"
   else
-    fail "M62.4 — Step 4.6 must document explicit cleanup (rmdir / trap EXIT) for the mkdir fallback path"
+    fail "M62.4 — Step 4.6 must release explicitly with a holder-verified rm -rf of the lock dir (#303 — there is no trap)"
   fi
   # M62.5 — Step 1.1 must distinguish mkdir filesystem errors from contention so users see the
   # right diagnostic. Without this, ENOSPC / EACCES / EROFS get mis-reported as "another /merge
@@ -1102,13 +1124,103 @@ else
   else
     fail "M62.5 — Step 1.1 must distinguish mkdir filesystem errors (ENOSPC / EACCES / EROFS) from lock contention so the diagnostic does not mis-fire"
   fi
-  # M62.6 — Step 1.1 must prescribe a concrete trap so cleanup-on-exit is consistent across
-  # every codegen pass. "MUST install a trap" without the literal trap line is hopeful prose;
-  # the literal `trap ... EXIT INT TERM` syntax pins the contract.
-  if echo "$PHASE_1_1_BLOCK" | grep -qE 'trap.*EXIT[ ]+INT[ ]+TERM|trap.*EXIT.*TERM'; then
-    pass "M62.6 — Step 1.1 prescribes concrete trap syntax (trap ... EXIT INT TERM) for fallback cleanup"
+  # M62.6 — INVERTED post-#303: Step 1.1 and Step 4.6 must NOT prescribe
+  # trap-based cleanup. A fence-scoped trap fires when the FENCE exits (the
+  # start of the run), silently releasing the lock — the exact void-lock
+  # class the redesign retires. The pattern targets literal trap-installation
+  # syntax (trap followed by a quoted command), not the retirement prose
+  # that merely mentions the word.
+  if echo "$PHASE_1_1_BLOCK" | grep -qE "trap +['\"]" \
+     || echo "$PHASE_4_6_BLOCK" | grep -qE "trap +['\"]"; then
+    fail "M62.6 — Steps 1.1/4.6 must NOT prescribe trap-based cleanup (#303 — a fence-scoped trap fires at fence exit, releasing the lock at the start of the run)"
   else
-    fail "M62.6 — Step 1.1 must prescribe concrete trap syntax (trap 'rm -rf \$LOCK_DIR' EXIT INT TERM) so cleanup-on-exit is generated consistently"
+    pass "M62.6 — no trap-installation syntax in Steps 1.1/4.6 (no-trap contract; #303)"
+  fi
+  # M62.7 — the lock record shape, including the workflowRunId reservation.
+  if echo "$PHASE_1_1_BLOCK" | grep -qF '{"run_id":"%s","started_at":"%s","workflowRunId":null}'; then
+    pass "M62.7a — Step 1.1 stamps record.json as {run_id, started_at, workflowRunId:null}"
+  else
+    fail "M62.7a — Step 1.1 must stamp record.json with the {run_id, started_at, workflowRunId:null} shape (#303/#310)"
+  fi
+  assert_grep "$SKILL_FILE" 'workflowRunId.*RESERVED for #310' \
+    "M62.7b — Constants row reserves workflowRunId for #310's status reader"
+  # M62.8 — staleness threshold formula + the 900 s hard floor.
+  if echo "$PHASE_1_1_BLOCK" | grep -qE 'max\(`?command_timeouts\.merge`?, `?LOCK_STALE_FLOOR_SEC`?\)'; then
+    pass "M62.8a — staleness threshold = max(command_timeouts.merge, LOCK_STALE_FLOOR_SEC) heartbeat age"
+  else
+    fail "M62.8a — Step 1.1 must define staleness as heartbeat age > max(command_timeouts.merge, LOCK_STALE_FLOOR_SEC) (#303)"
+  fi
+  assert_grep "$SKILL_FILE" '^\| `LOCK_STALE_FLOOR_SEC` \| `900`' \
+    "M62.8b — Constants table declares LOCK_STALE_FLOOR_SEC = 900"
+  # M62.9 — staleness must NEVER key on started_at age (a live long run —
+  # the 1.4.5 auto-review intercept alone can exceed CI_MONITOR_TIMEOUT_SEC —
+  # would be mis-stolen; that trades the void lock for a steal-during-live-run lock).
+  if echo "$PHASE_1_1_BLOCK" | grep -qE 'NEVER classify by `?started_at`? age'; then
+    pass "M62.9 — Step 1.1 forbids started_at-age staleness (heartbeat age only; #303)"
+  else
+    fail "M62.9 — Step 1.1 must forbid classifying staleness by started_at age (#303 — live long runs would be mis-stolen)"
+  fi
+  # M62.10 — the heartbeat protocol: canonical touch snippet + six mandatory
+  # touch sites (every per-PR iteration and phase boundary).
+  HEARTBEAT_BLOCK=$(awk '/^### Lock heartbeat protocol/,/^### Step 1\.2/' "$SKILL_FILE")
+  if [ -z "$HEARTBEAT_BLOCK" ]; then
+    fail "M62.10 — Lock heartbeat protocol section missing (#303)"
+  else
+    if echo "$HEARTBEAT_BLOCK" | grep -qE 'date \+%s > "\$LOCK_DIR/heartbeat"'; then
+      pass "M62.10a — canonical heartbeat touch snippet present (epoch-seconds overwrite)"
+    else
+      fail "M62.10a — heartbeat protocol must carry the canonical 'date +%s > \"\$LOCK_DIR/heartbeat\"' touch snippet (#303)"
+    fi
+    TOUCH_SITE_COUNT=$(echo "$HEARTBEAT_BLOCK" | grep -cE '^[1-6]\. (Step|Phase)' || true)
+    if [ "${TOUCH_SITE_COUNT:-0}" = "6" ]; then
+      pass "M62.10b — six mandatory heartbeat touch sites enumerated (count=$TOUCH_SITE_COUNT)"
+    else
+      fail "M62.10b — heartbeat protocol must enumerate exactly 6 mandatory touch sites, got ${TOUCH_SITE_COUNT:-0} (#303)"
+    fi
+    # M62.10c — the Step 1.1 acquire fence MUST echo the effective RUN_ID on
+    # success. RUN_ID is fence-scoped (does not survive into the per-fence
+    # touch/release shells), so the orchestrator can only re-establish it from a
+    # value it has observed — and the acquire fence is silent on success unless
+    # it prints the stamped literal. Without this echo, every verbatim touch
+    # fence has RUN_ID unset → holder check mismatches → heartbeat freezes at
+    # acquisition → the run becomes stealable past the staleness threshold (the
+    # exact steal-during-live-run class #303 closes); Step 4.6 likewise refuses
+    # release, blocking the next run. (RFC 0012 §3.2 item 1 cross-fence
+    # provisioning.)
+    if echo "$PHASE_1_1_BLOCK" | grep -qE 'echo "merge lock acquired \(run_id \$RUN_ID\)"'; then
+      pass "M62.10c — Step 1.1 acquire fence echoes the effective RUN_ID on success (cross-fence provisioning source; #303 / RFC 0012 §3.2)"
+    else
+      fail "M62.10c — Step 1.1 acquire fence must echo 'merge lock acquired (run_id \$RUN_ID)' on success so the orchestrator can re-establish RUN_ID in later touch/release fences (#303 — RUN_ID is fence-scoped; a silent acquire leaves every touch fence with RUN_ID unset and the heartbeat frozen at acquisition)"
+    fi
+    # M62.10d — the heartbeat protocol MUST instruct the orchestrator to
+    # re-establish RUN_ID in each touch/release fence. "Run it verbatim" alone
+    # is insufficient: a verbatim touch/release fence with RUN_ID unset
+    # warn-skips (empirically — zsh + bash 3.2). The prose must (1) state that
+    # RUN_ID does not survive fences, (2) mandate prepending the literal
+    # RUN_ID=<value> from the Step 1.1 acquire echo, and (3) forbid re-deriving
+    # run_id from record.json (which vacates the holder check). Same fence-scoped
+    # run-state class as goal-pipeline's cross-shell traps (#178).
+    if echo "$HEARTBEAT_BLOCK" | grep -qiE '`?RUN_ID`? does not survive fences' \
+       && echo "$HEARTBEAT_BLOCK" | grep -qE 'prepend the literal `?RUN_ID=' \
+       && echo "$HEARTBEAT_BLOCK" | grep -qiE 'MUST NOT re-derive `?run_id`? from `?record\.json`?'; then
+      pass "M62.10d — heartbeat protocol mandates RUN_ID re-establishment per fence (prepend RUN_ID=<value>; forbid re-derive from record.json; #303 / RFC 0012 §3.2)"
+    else
+      fail "M62.10d — 'Lock heartbeat protocol' must mandate per-fence RUN_ID provisioning: state RUN_ID does not survive fences, require prepending the literal 'RUN_ID=<value>' from Step 1.1, and forbid re-deriving run_id from record.json (#303 — 'run it verbatim' silently depends on undocumented orchestrator behavior otherwise; verbatim fence with RUN_ID unset warn-skips every heartbeat)"
+    fi
+  fi
+  # M62.11 — explicit release at every documented post-acquisition early exit
+  # (Step 1.2 branch-name abort, Step 1.3 fallback-branch-missing, Step 1.7
+  # nothing-to-merge) — there is no trap, so each exit names the release.
+  RELEASE_SITE_COUNT=$(grep -cF 'rm -rf .git/uberdev-merge.lock.d' "$SKILL_FILE" || true)
+  if [ "${RELEASE_SITE_COUNT:-0}" -ge 3 ]; then
+    pass "M62.11a — >=3 documented early-exit release sites cite rm -rf .git/uberdev-merge.lock.d (count=$RELEASE_SITE_COUNT)"
+  else
+    fail "M62.11a — Steps 1.2/1.3/1.7 must each cite the explicit lock release (rm -rf .git/uberdev-merge.lock.d), found ${RELEASE_SITE_COUNT:-0} (#303)"
+  fi
+  if echo "$HEARTBEAT_BLOCK" | grep -qE 'Release sites \(explicit'; then
+    pass "M62.11b — release-sites paragraph present (explicit — there is no trap)"
+  else
+    fail "M62.11b — heartbeat protocol must carry the explicit release-sites paragraph (#303)"
   fi
 fi
 
@@ -1180,29 +1292,35 @@ else
   pass "M63.inequality-phrasing-absent — sub-condition (d) does not carry the retired strict-inequality phrasing (issue #78 regression guard)"
 fi
 
-# M63.worktree-glob — regression guard locking the FULL worktree-mirror glob
-# enumeration across all four 5-surface fan-out sites: (a) the compgen-OR
-# existence-check chain in Step (c.0) bash, (b) the for-loop iteration list
-# in Step (c.0) bash, (c) sub-condition (d) prose at line ~418, and (d) the
-# Common Mistakes bullet that documents the pitfall. /review-pr writes its
-# audit JSON relative to its CWD; /merge runs from the main checkout, so when
-# the PR was produced by ANY worktree-based flow (/solve, /turbo per
-# solve-pipeline/SKILL.md, OR subagent-driven-dev / executing-plans / brainstorm
-# Phase 4 per the generic using-git-worktrees/SKILL.md), /merge MUST glob the
-# matching worktree layout(s). Without these mirrors, trust-trail-evaluator
-# silently short-circuits to STALE via phase2_5_present=false and gates valid
-# trust trails on every worktree-produced PR. The three covered worktree
-# layouts mirror using-git-worktrees/SKILL.md's preferred (`.worktrees/`) and
+# M63.worktree-glob — regression guard locking the FULL worktree-mirror
+# layout enumeration across all four fan-out surfaces (#303 find-based):
+# (a) the `discover_review_verdict_json` find-based helper in lib/discover.sh
+#     — the SINGLE discovery mechanism; Step (c.0) sources lib/discover.sh
+#     and calls it. The pre-#303 inline `compgen -G` OR-chain was a bashism
+#     that silently misfired under the zsh Bash tool (#294
+#     _uberdev_goal_glob_worktree class) — c0.no-compgen guards against
+#     re-inlining it.
+# (b) sub-condition (d) prose, and
+# (c) the Common Mistakes bullet that documents the pitfall.
+# /review-pr writes its audit JSON relative to its CWD; /merge runs from the
+# main checkout, so when the PR was produced by ANY worktree-based flow
+# (/solve, /turbo per solve-pipeline/SKILL.md, OR subagent-driven-dev /
+# executing-plans / brainstorm Phase 4 per the generic
+# using-git-worktrees/SKILL.md), /merge MUST search the matching worktree
+# layout(s). Without these mirrors, trust-trail-evaluator silently
+# short-circuits to STALE via phase2_5_present=false and gates valid trust
+# trails on every worktree-produced PR. The three covered worktree layouts
+# mirror using-git-worktrees/SKILL.md's preferred (`.worktrees/`) and
 # alternate (`worktrees/`) conventions plus the /solve|/turbo
 # `.claude/worktrees/` convention. The `~/.config/uberdev/worktrees/<project>/`
-# global layout is intentionally NOT globbed (out of scope — runtime $HOME
+# global layout is intentionally NOT searched (out of scope — runtime $HOME
 # resolution; tracked for the writer-side path-anchoring follow-up).
 
-# Single source of truth for the four canonical glob layouts. Iterated below
-# by the c0.compgen, c0.forloop, and d sub-assertion blocks. Adding a fifth
-# layout (e.g. a future worktree convention from using-git-worktrees) means
-# adding ONE entry here, not three. Mirrors the existing `for field in ...`
-# DRY pattern at line ~1198 (M64 conflict-files sub-block).
+# Single source of truth for the four canonical search layouts. Iterated
+# below by the c0.find and d sub-assertion blocks. Adding a fifth layout
+# (e.g. a future worktree convention from using-git-worktrees) means adding
+# ONE entry here, not three. Mirrors the existing `for field in ...` DRY
+# pattern (M64 conflict-files sub-block).
 WORKTREE_GLOBS=(
   '.uberdev/runs/*/review-pr-verdict.json'
   '.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json'
@@ -1210,43 +1328,45 @@ WORKTREE_GLOBS=(
   'worktrees/*/.uberdev/runs/*/review-pr-verdict.json'
 )
 
-# (a) bash discovery code in Step (c.0). Two independent sub-assertions —
-# c0.compgen for the OR'd existence-check chain, c0.forloop for the iteration
-# list — so a future refactor cannot remove a layout from one site while
-# leaving it in the other and have the guards still pass.
+# (a) the find-based helper in lib/discover.sh owns the enumeration (#303).
+DISCOVER_LIB_FILE="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/lib/discover.sh"
+HELPER_BLOCK=$(awk '/^discover_review_verdict_json\(\)/,/^\}/' "$DISCOVER_LIB_FILE" 2>/dev/null)
+if [ -z "$HELPER_BLOCK" ]; then
+  fail "M63.worktree-glob.c0 — discover_review_verdict_json() not found in lib/discover.sh (#303 find-based helper missing)"
+else
+  for glob in "${WORKTREE_GLOBS[@]}"; do
+    if echo "$HELPER_BLOCK" | grep -qF -- "-path '$glob'"; then
+      pass "M63.worktree-glob.c0.find[$glob] — discover_review_verdict_json find enumeration includes $glob"
+    else
+      fail "M63.worktree-glob.c0.find[$glob] — discover_review_verdict_json MUST search $glob (a removal silently skips that layout's verdict JSONs)"
+    fi
+  done
+  # (a.count) — exactly one find invocation per documented layout. A drift in
+  # either direction (dropped layout, or an undocumented fifth) fails loud.
+  FIND_COUNT=$(echo "$HELPER_BLOCK" | grep -cE '^[[:space:]]*find ' || true)
+  if [ "${FIND_COUNT:-0}" = "4" ]; then
+    pass "M63.worktree-glob.c0.find-count — helper runs exactly 4 find invocations (one per documented layout)"
+  else
+    fail "M63.worktree-glob.c0.find-count — helper MUST run exactly 4 find invocations, got ${FIND_COUNT:-0} (layout set drifted from the documented four)"
+  fi
+fi
+
+# (a.callsite) — Step (c.0) in SKILL.md delegates to the helper and carries
+# no inline compgen chain (bashism: silently misfires under the zsh Bash
+# tool — the #294 _uberdev_goal_glob_worktree class).
 # Anchor on the load-bearing identifier `discover \$AUDIT_JSON_PATH` rather
 # than the en-dash punctuation, so a future ASCII-normalisation pass (em-dash
 # → `--`) on SKILL.md cannot silently empty STEP_C0_BLOCK.
 STEP_C0_BLOCK=$(awk '/Step \(c\.0\).*discover \$AUDIT_JSON_PATH/,/AUDIT_JSON_PATH is now the most-recent verdict JSON/' "$SKILL_FILE")
-
-# Extract just the `if compgen ...` OR-chain (from `if compgen` to `then`).
-COMPGEN_CHAIN=$(echo "$STEP_C0_BLOCK" | awk '/^[[:space:]]*if compgen/,/then$/')
-# Extract just the `for f in ... do` iteration list (from `for f in` to `do`).
-FORLOOP_LIST=$(echo "$STEP_C0_BLOCK" | awk '/^[[:space:]]*for f in/,/do$/')
-
-for glob in "${WORKTREE_GLOBS[@]}"; do
-  if echo "$COMPGEN_CHAIN" | grep -qF "$glob"; then
-    pass "M63.worktree-glob.c0.compgen[$glob] — Step (c.0) compgen-OR existence-check chain includes $glob"
-  else
-    fail "M63.worktree-glob.c0.compgen[$glob] — Step (c.0) compgen-OR existence-check chain MUST include $glob (a removal here makes the chain fall-through on layouts where ONLY that glob has matches, silently skipping discovery)"
-  fi
-  if echo "$FORLOOP_LIST" | grep -qF "$glob"; then
-    pass "M63.worktree-glob.c0.forloop[$glob] — Step (c.0) for-loop iteration list includes $glob"
-  else
-    fail "M63.worktree-glob.c0.forloop[$glob] — Step (c.0) for-loop iteration list MUST include $glob (a removal here makes the loop never visit that layout's matches even when compgen passed)"
-  fi
-done
-
-# (a.OR) — guard the OR-operator semantics. If a future edit replaces `||`
-# with `&&` between the compgen calls, discovery silently fails when only one
-# layout has matches (the normal case from a worktree-produced PR). The
-# assertion counts `|| compgen` occurrences — expect exactly 3 (the 4 globs
-# are joined by 3 `||` operators).
-OR_COUNT=$(echo "$COMPGEN_CHAIN" | grep -cE '\|\|[[:space:]]+compgen' || true)
-if [ "$OR_COUNT" = "3" ]; then
-  pass 'M63.worktree-glob.c0.or-operator — Step (c.0) compgen chain joins the 4 globs with exactly 3 "|| compgen" operators (OR-semantics locked)'
+if echo "$STEP_C0_BLOCK" | grep -qE 'discover_review_verdict_json "\$PR_NUMBER"'; then
+  pass "M63.worktree-glob.c0.callsite — Step (c.0) delegates to discover_review_verdict_json \"\$PR_NUMBER\""
 else
-  fail "M63.worktree-glob.c0.or-operator — Step (c.0) compgen chain MUST use '|| compgen' between the 4 globs (got $OR_COUNT occurrences; expected 3). A regression to '&&' would silently break discovery when only one layout has matches."
+  fail "M63.worktree-glob.c0.callsite — Step (c.0) MUST call discover_review_verdict_json \"\$PR_NUMBER\" (lib/discover.sh owns the enumeration post-#303)"
+fi
+if echo "$STEP_C0_BLOCK" | grep -qE '^[[:space:]]*if compgen|\|\|[[:space:]]*compgen'; then
+  fail "M63.worktree-glob.c0.no-compgen — Step (c.0) MUST NOT re-inline a compgen chain (bashism — silently misfires under the zsh Bash tool; #303/#294)"
+else
+  pass "M63.worktree-glob.c0.no-compgen — Step (c.0) carries no inline compgen invocation (zsh-safe; #303)"
 fi
 
 # (b) sub-condition (d) prose at line ~418. Same four-glob enumeration must
@@ -1265,7 +1385,7 @@ done
 # prose refactor cannot accidentally delete the bullet that calls out the
 # worktree-mirror requirement. Mirrors the M86.7 convention which locks the
 # #95 Common Mistakes bullet.
-CM_BULLET=$(awk '/^- \*\*Globbing only `\.uberdev\/runs\/\*\/review-pr-verdict\.json` for sub-condition \(c\.0\)/{flag=1} flag{print; if(/^- /){count++; if(count>1)exit}}' "$SKILL_FILE")
+CM_BULLET=$(awk '/^- \*\*Searching only `\.uberdev\/runs\/\*\/review-pr-verdict\.json` for sub-condition \(c\.0\)/{flag=1} flag{print; if(/^- /){count++; if(count>1)exit}}' "$SKILL_FILE")
 if echo "$CM_BULLET" | grep -qF '.worktrees/*/.uberdev/runs/*/review-pr-verdict.json'; then
   pass "M63.worktree-glob.cm — Common Mistakes bullet enumerates .worktrees/ and worktrees/ glob layouts (defends against documentation regression)"
 else
@@ -1918,6 +2038,107 @@ if grep -E '^\| `AUDIT_EVENT_ENUM`' "$SKILL_FILE" | grep -q 'Field-level extensi
 else
   pass "M88.extracted — field-level prose no longer monolithic on the row"
 fi
+
+echo
+echo "== M89 (#303): Step 1.4 ci_red null-rollup settle probe =="
+# Transient null statusCheckRollup on just-pushed PRs is a known class
+# (~10-30 s before checks register). The settle probe re-probes a bounded
+# 3x10s and distinguishes no-checks-configured (proceed — solo-dev repos
+# without CI must not be parked forever) from pending (gate_fail — premature
+# land). Collapsing the two re-introduces one of those classes.
+assert_grep "$SKILL_FILE" '^\| `CI_ROLLUP_SETTLE_RETRIES` \| `3`' \
+  "M89.1 — Constants row CI_ROLLUP_SETTLE_RETRIES = 3"
+assert_grep "$SKILL_FILE" '^\| `CI_ROLLUP_SETTLE_INTERVAL_SEC` \| `10`' \
+  "M89.2 — Constants row CI_ROLLUP_SETTLE_INTERVAL_SEC = 10"
+# PHASE_14_BODY is set at file scope by M63; reuse it (mirrors the M64
+# SUMMARY_BLOCK-reuse convention).
+if echo "$PHASE_14_BODY" | grep -qE 'Null-rollup settle probe \(#303\)'; then
+  pass "M89.3 — Step 1.4 ci_red pre-condition carries the null-rollup settle probe (#303)"
+else
+  fail "M89.3 — Step 1.4 ci_red pre-condition must carry the null-rollup settle probe (#303 — transient null rollups are a known class)"
+fi
+if echo "$PHASE_14_BODY" | grep -qE 'no-checks-configured \(proceed\) from pending \(gate_fail\)'; then
+  pass "M89.4 — settle probe distinguishes no-checks-configured (proceed) from pending (gate_fail)"
+else
+  fail "M89.4 — settle probe MUST distinguish no-checks-configured (proceed) from pending (gate_fail) — collapsing them re-introduces the parked-forever or premature-land class"
+fi
+if echo "$PHASE_14_BODY" | grep -qE 'Still null/empty after the bounded re-probe.*no checks configured.*PASSES'; then
+  pass "M89.5 — still-null-after-settle classifies as no-checks-configured and PASSES"
+else
+  fail "M89.5 — the still-null-after-settle branch must classify as no-checks-configured and PASS the pre-condition (#303)"
+fi
+if echo "$PHASE_14_BODY" | grep -qE 'pending/queued/in-progress entry.*gate_fail.*ci_red'; then
+  pass "M89.6 — pending/queued/in-progress entries gate_fail as ci_red (not landable yet)"
+else
+  fail "M89.6 — a non-empty rollup with pending/queued/in-progress entries must gate_fail with ci_red (#303)"
+fi
+if echo "$PHASE_14_BODY" | grep -qE 'non-empty first read skips the settle probe entirely'; then
+  pass "M89.7 — non-empty first read skips the settle probe (zero added wall-clock on the common path)"
+else
+  fail "M89.7 — the settle probe must be skipped entirely on a non-empty first read (zero added wall-clock on the common path; #303)"
+fi
+if echo "$PHASE_14_BODY" | grep -qE 'gh pr view <N> --json statusCheckRollup'; then
+  pass "M89.8 — settle re-probe command shape (gh pr view <N> --json statusCheckRollup) declared"
+else
+  fail "M89.8 — Step 1.4 must declare the settle re-probe command (gh pr view <N> --json statusCheckRollup; #303)"
+fi
+
+echo
+echo "== M90 (#303): Step 3.0 per-iteration fetch + origin/<integration_branch> probe re-points =="
+# After PR-A lands server-side the integration tip moves; probing PR-B
+# against the pre-A tip yields false-clean probes that surface only as
+# server-side gh pr merge failures with NO conflict-resolve attempt. The fix
+# is two-sided and BOTH sides are load-bearing: (1) fetch at the top of EACH
+# landing iteration, AND (2) re-point the merge-tree probe + scratch-worktree
+# base at origin/<integration_branch> — `git fetch` updates refs/remotes/
+# only, so probing the bare local ref defeats the fetch entirely (the
+# local-ref probe is the actual bug). Step 4.5's stale-branch sweep probe
+# legitimately keeps the bare local ref — it runs AFTER Phase 4.2 has synced
+# the local integration branch.
+assert_grep "$SKILL_FILE" '^### Step 3\.0 — Per-iteration fetch' \
+  "M90.1 — Step 3.0 per-iteration fetch heading exists"
+assert_grep "$SKILL_FILE" 'git fetch origin "<integration_branch>" "<headRefName>"' \
+  "M90.2 — per-iteration fetch command refreshes integration + head refs"
+assert_grep "$SKILL_FILE" 'top of EACH landing iteration' \
+  "M90.3 — fetch is per-iteration (not once per run)"
+PHASE_3_BLOCK=$(awk '/^## Phase 3/,/^## Phase 4/' "$SKILL_FILE")
+ORIGIN_PROBE_COUNT=$(echo "$PHASE_3_BLOCK" | grep -cF 'git merge-tree --write-tree origin/<integration_branch> <headRefOid>' || true)
+if [ "${ORIGIN_PROBE_COUNT:-0}" = "2" ]; then
+  pass "M90.4 — Phase 3 probes origin/<integration_branch> at both sites (Step 3.1 + strategy-switch re-probe)"
+else
+  fail "M90.4 — Phase 3 must probe 'git merge-tree --write-tree origin/<integration_branch> <headRefOid>' at exactly 2 sites (Step 3.1 + strategy-switch), got ${ORIGIN_PROBE_COUNT:-0}"
+fi
+if echo "$PHASE_3_BLOCK" | grep -qE 'merge-tree --write-tree <integration_branch>'; then
+  fail "M90.5 — Phase 3 must NOT probe the bare local <integration_branch> (the local-ref probe is the actual stale-tip bug; #303)"
+else
+  pass "M90.5 — no Phase 3 probe against the bare local integration ref remains"
+fi
+assert_grep "$SKILL_FILE" 'git worktree add \.claude/worktrees/merge-<run-id> origin/<integration_branch>' \
+  "M90.6 — scratch worktree (3.3.ii) is based on origin/<integration_branch>"
+assert_no_grep "$SKILL_FILE" 'git worktree add \.claude/worktrees/merge-<run-id> <integration_branch>' \
+  "M90.7 — no scratch worktree based on the bare local integration ref remains (#303)"
+assert_grep "$SKILL_FILE" 'git_fetch_failed' \
+  "M90.8 — fetch-failure path documented (non-fatal: warn + error audit event, probe degrades to last-fetched tip)"
+assert_grep "$SKILL_FILE" 'fetch alone is NOT sufficient' \
+  "M90.9 — the fetch-alone-insufficient rationale is documented (refs/remotes vs local ref)"
+
+echo
+echo "== M91 (#303): commands/merge.md Task-tool rules match the skill's three mandated fanout sites =="
+# merge.md:11 said "Do NOT use the Task tool or internal subagents" while the
+# skill body mandates exactly three Task dispatch sites (trust-trail-evaluator,
+# merge-strategy-decider, conflict-resolver) and Task sits in allowed-tools.
+# The reworded RULES line scopes the prohibition to IMPROVISED dispatches
+# beyond the three skill-mandated sites.
+assert_no_grep "$CMD_FILE" 'Do NOT use the Task tool' \
+  "M91.1 — the blanket 'Do NOT use the Task tool' contradiction is gone (#303)"
+assert_grep "$CMD_FILE" 'exactly three Task-tool agent fanouts' \
+  "M91.2 — RULES line declares exactly three skill-mandated Task fanout sites"
+for M91_AGENT in trust-trail-evaluator merge-strategy-decider conflict-resolver; do
+  assert_grep "$CMD_FILE" "$M91_AGENT" \
+    "M91.3.$M91_AGENT — RULES line names $M91_AGENT"
+done
+assert_grep "$CMD_FILE" 'Do NOT improvise any Task dispatch beyond' \
+  "M91.4 — improvised Task dispatches beyond the three sites remain forbidden"
 
 echo
 echo "== Summary =="

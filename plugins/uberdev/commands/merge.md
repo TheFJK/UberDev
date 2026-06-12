@@ -8,7 +8,7 @@ allowed-tools: ["Bash", "Glob", "Grep", "Read", "Task"]
 
 Land approved PRs into the integration branch — ordering, strategy, conflict resolution, and local sync automated.
 
-**RULES:** Do NOT use the Task tool or internal subagents. The skill body owns all logic.
+**RULES:** The skill body owns all logic and mandates exactly three Task-tool agent fanouts — `trust-trail-evaluator` (Phase 1.4 PATH_2 (c)), `merge-strategy-decider` (Phase 2.2), and `conflict-resolver` (Phase 3.3) — which is why `Task` is in this command's allowed-tools. Do NOT improvise any Task dispatch beyond those three skill-mandated sites, and do NOT re-implement their logic inline.
 
 **Usage:** `/merge [<PR#> | --all] [--integration-branch=<name>] [--accept-blocker-deferred] [--accept-critical-deferred] [--i-know-what-im-doing]`
 

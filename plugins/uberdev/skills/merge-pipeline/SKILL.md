@@ -24,8 +24,11 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `CONVENTIONAL_COMMIT_THRESHOLD` | 3 (max commit count for rebase candidate) | D11 |
 | `PATCH_LINE_CAP` | 500 | D16 (agent rejection threshold) |
 | `PATCH_FILE_CAP` | 5 | D16 |
-| `LOCK_FILE_PATH` | `.git/uberdev-merge.lock` | D14 |
-| `AUDIT_LOG_DIR_PATTERN` | `.uberdev/runs/<run-id>/` | D15 |
+| `LOCK_FILE_PATH` | `.git/uberdev-merge.lock.d/` (the single-instance lock DIRECTORY — `mkdir`-atomic; contains `LOCK_RECORD_FILENAME` + `LOCK_HEARTBEAT_FILENAME`. Historical note: pre-#303 this was the flock file `.git/uberdev-merge.lock`; the `.d` directory was its fallback sibling) | D14, Step 1.1 (acquire), Step 4.6 (release) |
+| `LOCK_RECORD_FILENAME` | `record.json` — shape `{"run_id":"<RUN_ID>","started_at":"<ISO8601>","workflowRunId":null}`. `workflowRunId` is RESERVED for #310's status reader (always `null` today; do not repurpose) | Step 1.1 (stamp), Step 4.6 + heartbeat touches (holder verification), #310 |
+| `LOCK_HEARTBEAT_FILENAME` | `heartbeat` — epoch-seconds integer, overwritten in full on every touch | Step 1.1 (staleness probe), lock-heartbeat protocol touch sites |
+| `LOCK_STALE_FLOOR_SEC` | `900` (hard floor; lock staleness threshold = max(`command_timeouts.merge`, `LOCK_STALE_FLOOR_SEC`) seconds of heartbeat age — NEVER `started_at` age, which mis-classifies live long runs as stale) | Step 1.1 (contention vs stale classification) |
+| `AUDIT_LOG_DIR_PATTERN` | `.uberdev/` (repo-root; docs-reality reconciliation #303 — every live writer appends to the root `.uberdev/audit.jsonl` and `/goal`'s reader globs the root; the former `runs/<run-id>/` claim documented a path no writer ever used. Note: `review-pr-verdict.json` is a DIFFERENT artifact and legitimately lives under `.uberdev/runs/<run-id>/`) | D15 |
 | `AUDIT_LOG_FILENAME` | `audit.jsonl` | D15 |
 | `AUDIT_EVENT_ENUM` | `gate_pass`, `gate_fail`, `order_proposed`, `order_confirmed`, `strategy_chosen`, `probe_clean`, `probe_conflict`, `agent_dispatched`, `agent_returned`, `patch_applied`, `test_pass`, `test_fail`, `push_resolution`, `merge_executed`, `local_sync`, `branch_deleted`, `worktree_removed`, `admin_bypass`, `waiver_recorded`, `error`, `pr_parked`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision`, `trust_trail_agent_decision`, `merge_strategy_agent_decision`, `merge_strategy_fanout_wave_started`, `discovery_gh_failed`, `ci_probe_started`, `ci_probe_skipped_no_checks`, `ci_probe_unreachable`, `ci_monitor_green`, `ci_monitor_red`, `ci_monitor_timeout`, `ci_classify_dispatched`, `ci_classify_returned`, `ci_classify_ambiguous_routing_as_flaky`, `ci_fix_dispatched`, `ci_fix_dispatch_unknown_class`, `ci_fix_pushed`, `ci_flaky_rerun_queued`, `ci_flaky_rerun_failed`, `ci_loop_cap_reached`, `ci_phase_outcome`, `auto_review_dispatched`, `auto_review_returned`, `audit_json_phase2_5_parse_failure`, `halt_tool_unavailable`, `uberdev_active_label_cleared` | See the `AUDIT_EVENT_ENUM` event semantics subsection below the Constants table for field-level extensions and the member-addition history. |
 | `SCRATCH_WORKTREE_PATTERN` | `.claude/worktrees/merge-<run-id>/` | D10 |
@@ -75,6 +78,8 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `CI_MONITOR_TIMEOUT_SEC` | `1200` (prose constant, hard-coded) | `commands/review-pr.md` Phase 3 6c.2 MONITOR wall-clock cap |
 | `CI_WATCH_INTERVAL_SEC` | `30` (prose constant, hard-coded) | `commands/review-pr.md` Phase 3 6c.2 MONITOR `gh pr checks --watch` interval |
 | `CI_LOG_TRUNCATE_LINES` | `500` (prose constant, hard-coded) | `commands/review-pr.md` Phase 3 6c.3 CLASSIFY log truncation |
+| `CI_ROLLUP_SETTLE_RETRIES` | `3` (prose constant, hard-coded; bounded re-probe count when `statusCheckRollup` is null/empty on first read — transient null rollups on just-pushed PRs are a known class) | Step 1.4 pre-condition `ci_red` settle probe |
+| `CI_ROLLUP_SETTLE_INTERVAL_SEC` | `10` (prose constant, hard-coded; sleep between settle re-probes) | Step 1.4 pre-condition `ci_red` settle probe |
 
 
 ### `AUDIT_EVENT_ENUM` — event semantics & member history
@@ -142,7 +147,12 @@ Read `command_timeouts.merge` from `.claude/uberdev.local.md` (env:
 **advisory in v1** — `/merge` does NOT enforce a wall-clock kill (the
 pipeline executes inside the current Claude turn; wall-clock kill
 there would require orchestrator-loop changes, out of scope per Q1
-auto-pick). The resolved value is recorded under `uberdev_config_read`
+auto-pick). Post-#303 the value has exactly ONE live consumer: the
+Step 1.1 lock staleness threshold = max(`command_timeouts.merge`,
+`LOCK_STALE_FLOOR_SEC`) seconds of heartbeat age (the Step 1.1 fence
+re-resolves the value itself — fence-scoped shell state does not
+survive between fences, so this Step 1.0a read cannot feed it).
+The resolved value is recorded under `uberdev_config_read`
 in the audit log so post-run forensics can correlate slow runs with
 configured value. v2 issue can extend.
 
@@ -222,55 +232,113 @@ No new `AUDIT_EVENT_ENUM` member is introduced for Step 1.0.5; the stderr breadc
 
 ### Step 1.1 — Acquire the single-instance lock
 
-Probe for `flock(1)` availability via `command -v flock` BEFORE invoking it. `flock` is not part of the macOS base system, so the unguarded invocation path must not be the only one. Branch on the probe:
+The lock is a `mkdir`-atomic directory at `LOCK_FILE_PATH` (declared in `## Constants`) holding a run-scoped record + heartbeat — the ONLY mechanism. `mkdir` is POSIX-guaranteed atomic for exclusive creation, so two concurrent `/merge` runs cannot both succeed (the issue-#51 portable-mutex requirement is met without any tool-availability branch).
 
-- **`flock` available** (Linux, or macOS with Homebrew `flock`): use `flock` against `LOCK_FILE_PATH` (declared in `## Constants`). Default fail-fast on contention with message `"another /merge run in progress, PID <X>"`. `--wait` flag opt-in for queueing. Stale-lock cleanup: if PID dead, release.
+**Why flock(1), PID stamps, and traps are all retired (#303, RFC 0012 §3.2).** This skill's bash executes as short-lived per-fence shell processes: the fence that acquires the lock exits in milliseconds while the `/merge` run continues for minutes. Every process-lifetime-bound mechanism is therefore void by construction: a `flock` fd closes when the acquiring fence exits (lock silently released mid-run); a stamped fence PID is dead before any second run can probe it, so a `kill -0` liveness check classifies every live run as stale (steal-during-live-run); a fence-scoped `trap ... EXIT` fires when the FENCE exits, releasing the lock at the start of the run. Liveness is instead proven by **heartbeat age** (wall-clock, process-independent), and release is **explicit** (Step 4.6 + every documented post-acquisition early exit). Do NOT re-introduce `flock`, PID stamping, `kill -0` probes, or any `trap`-based cleanup here — each one re-opens the void-lock class.
 
-- **`flock` missing** (stock macOS, minimal container images, BSDs): fall back to a portable `mkdir`-based mutex at `${LOCK_FILE_PATH}.d/` (the directory sibling of the flock path). `mkdir` is POSIX-guaranteed atomic for exclusive creation, so two concurrent `/merge` runs cannot both succeed. Concrete acquisition + cleanup pattern:
+**Staleness rule.** The lock is stale iff the heartbeat file's age exceeds `max(command_timeouts.merge, LOCK_STALE_FLOOR_SEC)` seconds (threshold floor `900`). NEVER classify by `started_at` age — a live long run (the Step 1.4.5 auto-review intercept alone can hold the lock past `CI_MONITOR_TIMEOUT_SEC=1200` seconds) would be mis-stolen. A missing or non-integer heartbeat in an existing lock dir means a crashed acquisition: treat as stale.
 
-  ```bash
-  LOCK_DIR="${LOCK_FILE_PATH}.d"
-  if mkdir "$LOCK_DIR" 2>/dev/null; then
-    # Acquired. Stamp PID then install cleanup trap before any other work.
-    if ! printf '%s\n' "$$" > "$LOCK_DIR/pid" 2>/dev/null; then
-      rmdir "$LOCK_DIR" 2>/dev/null || rm -rf "$LOCK_DIR"
-      echo "error: cannot stamp PID into $LOCK_DIR/pid (filesystem error)" >&2
-      exit 1
-    fi
-    trap 'rm -rf "$LOCK_DIR"' EXIT INT TERM
-  else
-    # mkdir failed. Distinguish stale-holder vs live-contention vs filesystem error.
-    if [ ! -d "$LOCK_DIR" ]; then
-      # mkdir failed for a non-EEXIST reason (ENOSPC, EACCES, EROFS, parent missing).
-      echo "error: cannot create $LOCK_DIR (filesystem error — disk full / permission / read-only fs)" >&2
-      exit 1
-    fi
-    HOLDER_PID="$(cat "$LOCK_DIR/pid" 2>/dev/null || printf '')"
-    if [ -n "$HOLDER_PID" ] && kill -0 "$HOLDER_PID" 2>/dev/null; then
-      echo "another /merge run in progress, PID $HOLDER_PID" >&2
-      exit 1
-    fi
-    # Stale (holder dead OR PID file empty / unreadable). Clean up and retry once.
+Concrete acquisition pattern (no trap — release is explicit; see Step 4.6):
+
+```bash
+# Step 1.1 — mkdir-atomic lock + run-scoped record + heartbeat (#303).
+# Self-contained fence: re-resolves command_timeouts.merge itself (fence-scoped
+# shell state from Step 1.0a does not survive into this fence).
+LOCK_DIR=".git/uberdev-merge.lock.d"
+if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
+  . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+  MERGE_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.merge UBERDEV_MERGE_TIMEOUT 60 86400 600)"
+else
+  MERGE_TIMEOUT=600
+fi
+STALE_THRESHOLD="$MERGE_TIMEOUT"
+if [ "$STALE_THRESHOLD" -lt 900 ]; then STALE_THRESHOLD=900; fi   # LOCK_STALE_FLOOR_SEC
+if [ -z "${RUN_ID:-}" ]; then RUN_ID="$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)"; fi
+
+merge_lock_stamp() {
+  # Lock dir exists and is ours: write record.json + first heartbeat.
+  # workflowRunId is RESERVED for #310's status reader — always null today.
+  if ! printf '{"run_id":"%s","started_at":"%s","workflowRunId":null}\n' \
+         "$RUN_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCK_DIR/record.json" 2>/dev/null \
+     || ! date +%s > "$LOCK_DIR/heartbeat" 2>/dev/null; then
     rm -rf "$LOCK_DIR"
-    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-      # Lost the race to another live /merge during cleanup, OR the FS broke between attempts.
-      echo "another /merge run in progress, PID $(cat "$LOCK_DIR/pid" 2>/dev/null || echo unknown)" >&2
-      exit 1
-    fi
-    printf '%s\n' "$$" > "$LOCK_DIR/pid"
-    trap 'rm -rf "$LOCK_DIR"' EXIT INT TERM
+    echo "error: cannot stamp lock record into $LOCK_DIR (filesystem error)" >&2
+    exit 1
   fi
-  ```
+}
 
-  **Load-bearing failure-mode distinctions** (these silent-collapse cases were the reason issue #51 was misdiagnosed; do not let a future simplification re-collapse them):
-  - Missing-`flock` probe miss → silent fall-through to mkdir branch (**NOT contention**).
-  - `mkdir` EEXIST + holder alive → fail-fast `"another /merge run in progress, PID <X>"` (**true contention**).
-  - `mkdir` EEXIST + holder dead OR PID file empty → stale; clean up; retry `mkdir` once.
-  - `mkdir` non-EEXIST (ENOSPC, EACCES, EROFS, parent missing) → distinct `"filesystem error"` diagnostic (**NOT contention**).
-  - PID-file write failure (disk full immediately after `mkdir` succeeded) → release the lock dir; distinct `"cannot stamp PID"` diagnostic (**NOT contention**).
-  - `kill -0` exit 1 (process dead OR cross-UID permission denied) → treated as stale; safe under the run's own UID assumption (UberDev runs as the user, never cross-UID).
+if mkdir "$LOCK_DIR" 2>/dev/null; then
+  merge_lock_stamp
+else
+  # mkdir failed. Distinguish live-contention vs stale-holder vs filesystem error.
+  if [ ! -d "$LOCK_DIR" ]; then
+    # mkdir failed for a non-EEXIST reason (ENOSPC, EACCES, EROFS, parent missing).
+    echo "error: cannot create $LOCK_DIR (filesystem error — disk full / permission / read-only fs)" >&2
+    exit 1
+  fi
+  HB="$(cat "$LOCK_DIR/heartbeat" 2>/dev/null || printf '')"
+  case "$HB" in ''|*[!0-9]*) HB='' ;; esac
+  NOW="$(date +%s)"
+  if [ -n "$HB" ] && [ $(( NOW - HB )) -le "$STALE_THRESHOLD" ]; then
+    HOLDER_RUN_ID="$(jq -r '.run_id // "unknown"' "$LOCK_DIR/record.json" 2>/dev/null || echo unknown)"
+    HOLDER_STARTED="$(jq -r '.started_at // "unknown"' "$LOCK_DIR/record.json" 2>/dev/null || echo unknown)"
+    echo "another /merge run in progress (run_id ${HOLDER_RUN_ID}, started ${HOLDER_STARTED}, heartbeat $(( NOW - HB ))s ago)" >&2
+    exit 1
+  fi
+  # Stale: heartbeat older than STALE_THRESHOLD, OR heartbeat missing/non-integer
+  # (crashed acquisition between mkdir and stamp). Clean up and retry once.
+  rm -rf "$LOCK_DIR"
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    # Lost the race to another live /merge during stale cleanup, OR the FS broke.
+    echo "another /merge run in progress (lost the lock race during stale cleanup)" >&2
+    exit 1
+  fi
+  merge_lock_stamp
+fi
+# Acquired (every failure branch above exits 1). Echo the effective RUN_ID so the
+# orchestrator observes the EXACT value stamped into record.json — it is fence-scoped
+# and does NOT survive into the later touch/release fences, which must re-establish it
+# verbatim (see "Lock heartbeat protocol"). This line is the canonical source of that literal.
+echo "merge lock acquired (run_id $RUN_ID)"
+```
 
-The missing-`flock` case (`command -v flock` returns empty / exit 1) is **NOT contention** and MUST NOT emit the contention diagnostic — it is a tool-availability branch, taken silently as a fall-through to the portable mutex. Without this guard, every `/merge` invocation on a stock macOS install reports a false-positive "another /merge run in progress" before doing any work; that mis-classification was the root cause of issue #51.
+**Load-bearing failure-mode distinctions** (these silent-collapse cases were the reason issue #51 was misdiagnosed; do not let a future simplification re-collapse them):
+
+- `mkdir` EEXIST + heartbeat fresher than threshold → fail-fast `"another /merge run in progress (run_id <X>, started <T>, heartbeat <N>s ago)"` (**true contention**).
+- `mkdir` EEXIST + heartbeat older than threshold OR missing/non-integer → stale; clean up; retry `mkdir` once.
+- `mkdir` non-EEXIST (ENOSPC, EACCES, EROFS, parent missing) → distinct `"filesystem error"` diagnostic (**NOT contention**).
+- Record/heartbeat stamp failure (disk full immediately after `mkdir` succeeded) → release the lock dir; distinct `"cannot stamp lock record"` diagnostic (**NOT contention**).
+- No PID probe exists: fence PIDs are dead by the time a second run could probe them, so a `kill -0` check would mis-classify EVERY live run as stale — the contention/stale split keys on heartbeat age ONLY.
+
+### Lock heartbeat protocol (touch sites + release sites)
+
+The landing loop proves liveness by touching the heartbeat. **Canonical holder-verified touch snippet** (run it verbatim at every touch site; the `run_id` match guards against writing into a lock another run reclaimed after this run blew the staleness threshold):
+
+```bash
+# Lock heartbeat touch (holder-verified).
+LOCK_DIR=".git/uberdev-merge.lock.d"
+if [ -f "$LOCK_DIR/record.json" ] \
+   && [ "$(jq -r '.run_id // empty' "$LOCK_DIR/record.json" 2>/dev/null)" = "$RUN_ID" ]; then
+  date +%s > "$LOCK_DIR/heartbeat"
+else
+  echo "warning: merge lock not held by this run (record missing or run_id mismatch) — heartbeat skipped; a stale-lock reclaim may have occurred, or RUN_ID was not re-established in this fence" >&2
+fi
+```
+
+**RUN_ID provisioning (MANDATORY — `RUN_ID` does not survive fences).** Every touch and release fence runs in a fresh per-fence shell where `$RUN_ID` is unset, so the holder check above (and the Step 4.6 release) silently mismatches and warn-skips unless the orchestrator re-establishes it. When composing each touch/release fence, the orchestrator MUST carry the exact `run_id` echoed by the Step 1.1 acquire fence (`merge lock acquired (run_id <value>)`) and **prepend the literal `RUN_ID=<value>`** to the snippet (`RUN_ID=20260612-091500-a1b2c3d` followed by the touch/release body). The orchestrator MUST NOT re-derive `run_id` from `record.json` at touch time — reading the holder's own value back and comparing it to itself vacates the holder check (a steal-reclaimed lock would then be heartbeated by the dispossessed run). An unset `RUN_ID` always mismatches; a re-derived `RUN_ID` always matches — both defeat the protocol, so the literal from Step 1.1 is the only correct source.
+
+**Mandatory touch sites** (every per-PR iteration and phase boundary):
+
+1. Step 1.4 — top of each per-PR gate iteration.
+2. Step 1.4.5 — immediately BEFORE and immediately AFTER the synchronous `Skill("uberdev:review-pr")` dispatch (the single longest-running seam; see the staleness-rule rationale above).
+3. Phase 2 entry (before the Step 2.2 strategy fanout).
+4. Step 3.0 — top of each per-PR landing iteration (colocated with the per-iteration fetch).
+5. Phase 3.3v — immediately before and after the pre-push test gate run.
+6. Phase 4 entry.
+
+**Residual risk (documented, accepted):** any SINGLE step that runs longer than the staleness threshold with no touch in between (e.g. a >900 s test suite inside one fence) leaves a steal window. Operators with long test/CI cycles raise `command_timeouts.merge`; the threshold tracks it.
+
+**Release sites (explicit — there is no trap):** Step 4.6 (normal end of run) AND every documented post-acquisition early exit — the Step 1.2 branch-name validation abort, the Step 1.3 fallback-branch-missing exit, and the Step 1.7 nothing-to-merge clean exit. Exits BEFORE acquisition (Step 1.0.5 ambiguity error, Step 1.1 contention/filesystem errors) release nothing because nothing was acquired; the in-fence stamp-failure branch above releases inline.
 
 ### Step 1.2 — Read integration_branch via the four-tier precedence chain (D8)
 
@@ -279,7 +347,7 @@ The missing-`flock` case (`command -v flock` returns empty / exit 1) is **NOT co
 3. `.claude/uberdev.local.md` YAML frontmatter `INTEGRATION_BRANCH_KEY`
 4. `gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name'`
 
-Validate the resolved name against `BRANCH_NAME_REGEX` BEFORE any shell argv use. Reject and abort on regex fail.
+Validate the resolved name against `BRANCH_NAME_REGEX` BEFORE any shell argv use. Reject and abort on regex fail — **releasing the lock first** (`rm -rf .git/uberdev-merge.lock.d` — this is a documented post-acquisition early exit; there is no trap to fire, see Step 4.6).
 
 ### Step 1.2.5 — Multi-discover dispatch (deferred from Step 1.0.5)
 
@@ -317,11 +385,13 @@ If the check fails (the repo's default branch is not `main` — e.g., `master`, 
 
 1. Emit an `error` audit event to `audit.jsonl` with `data.reason="fallback-branch-missing"`.
 2. Emit one stderr line: `error: fallback branch '<INTEGRATION_BRANCH_FALLBACK>' does not exist on origin; cannot proceed with autopilot. Set integration_branch in .claude/uberdev.local.md to your repo's default.`
-3. Exit cleanly (no halt, no prompt — the user has a clear actionable next step).
+3. Release the lock (`rm -rf .git/uberdev-merge.lock.d` — documented post-acquisition early exit; no trap exists to fire), then exit cleanly (no halt, no prompt — the user has a clear actionable next step).
 
 This is the only Phase-1 path where /merge declines to run for a config reason. The clean exit is **not** a halt of an in-flight queue (no PRs have been processed yet), and it does not block the autopilot contract for properly-configured repos. M34's failure-mode-table check still holds — the failure mode here is a Phase-1 config-validation refusal, not an in-flight queue halt.
 
 ### Step 1.4 — Per-PR pre-flight gate (trust resolution)
+
+At the top of each per-PR gate iteration, run the canonical lock-heartbeat touch snippet (see "Lock heartbeat protocol", touch site 1).
 
 For each PR in the candidate set (per-PR fanout — the gate is dispatched once per discovered PR; bare-discover does not relax this dispatch shape), project the JSON via the canonical `pr_view_projection` lib function:
 
@@ -348,7 +418,13 @@ Pre-conditions that ALL must pass regardless of trust path (real blockers):
 
 - `state == "OPEN"` — else gate_fail with `data.reason="pr_state_not_open"`.
 - `isDraft == false` — else gate_fail with `data.reason="is_draft"`.
-- `statusCheckRollup` all green — else gate_fail with `data.reason="ci_red"`. **No bypass clause exists post-v0.17.0** (`--bypass-protections` is a no-op; CI-red is unconditionally a `gate_fail`).
+- `statusCheckRollup` all green — else gate_fail with `data.reason="ci_red"`. **No bypass clause exists post-v0.17.0** (`--bypass-protections` is a no-op; CI-red is unconditionally a `gate_fail`). **Null-rollup settle probe (#303):** transient null rollups are a known class — a just-pushed PR can report `statusCheckRollup: null`/`[]` for ~10–30 s before checks register. When (and only when) the rollup is null/empty on first read, re-probe up to `CI_ROLLUP_SETTLE_RETRIES` (3) times at `CI_ROLLUP_SETTLE_INTERVAL_SEC` (10 s) intervals via `gh pr view <N> --json statusCheckRollup --jq '.statusCheckRollup'` and classify on the FIRST non-empty result:
+  - **Still null/empty after the bounded re-probe** → **no checks configured** on this repo → the pre-condition PASSES (proceed; there is nothing to gate on — solo-dev repos without CI must not be parked forever).
+  - **Non-empty with any pending/queued/in-progress entry** → gate_fail with `data.reason="ci_red"` (the PR is not landable yet; the diagnostic cites "checks pending" and the next `/merge` invocation picks it up).
+  - **Non-empty with any failed entry** → gate_fail with `data.reason="ci_red"` (genuinely red).
+  - **Non-empty all green** → pre-condition passes.
+
+  A non-empty first read skips the settle probe entirely (zero added wall-clock on the common path). The settle probe distinguishes no-checks-configured (proceed) from pending (gate_fail) — collapsing the two re-introduces either the parked-forever class or the premature-land class.
 
 **Trust resolution** (NOT a single-condition gate — see D11 reframe). Probe two trust paths in priority order; first hit wins:
 
@@ -372,49 +448,34 @@ c. The extracted `<trailer-sha>` is delegated to the `trust-trail-evaluator` age
 
    ```bash
    # Step (c.0) — discover $AUDIT_JSON_PATH (mirrors sub-condition (d) prose below).
-   # Glob the canonical `.uberdev/runs/*/review-pr-verdict.json` AND every
-   # worktree-local mirror path declared by `solve-pipeline/SKILL.md` and the
-   # generic `using-git-worktrees/SKILL.md`:
-   #   - `.claude/worktrees/*/.uberdev/runs/*` — /solve / /turbo convention
-   #     (the `.claude/worktrees/solve-issue-N/` shape declared in
-   #     `solve-pipeline/SKILL.md`).
-   #   - `.worktrees/*/.uberdev/runs/*` — `using-git-worktrees` preferred
-   #     hidden convention.
-   #   - `worktrees/*/.uberdev/runs/*` — `using-git-worktrees` alternate
-   #     visible convention.
+   # Delegated to `discover_review_verdict_json` in lib/discover.sh (#303) — a
+   # find-based helper covering the canonical root layout AND every
+   # worktree-local mirror declared by `solve-pipeline/SKILL.md` and the
+   # generic `using-git-worktrees/SKILL.md` (the four documented layouts; the
+   # lib function header is the canonical enumeration). The previous inline
+   # `compgen -G` OR-chain was a bashism that silently misfired under the zsh
+   # Bash tool (#294 _uberdev_goal_glob_worktree class) — do NOT re-inline it.
    # The `~/.config/uberdev/worktrees/<project>/<branch>/.uberdev/runs/*`
    # global-fallback layout (also declared in `using-git-worktrees/SKILL.md`)
-   # is NOT globbed (it lives outside the project root and requires runtime
+   # is NOT searched (it lives outside the project root and requires runtime
    # $HOME resolution — out of scope for /merge's path-relative discovery;
-   # tracked for the writer-side path-anchoring follow-up). When /merge runs from
-   # the main checkout but the PR was produced by a worktree-based
+   # tracked for the writer-side path-anchoring follow-up). When /merge runs
+   # from the main checkout but the PR was produced by a worktree-based
    # /solve|/turbo|subagent-driven-dev|executing-plans|brainstorm-Phase-4,
    # the audit JSON lives inside the worktree's gitignored `.uberdev/` —
-   # invisible from the main checkout's first-glob alone. Filter by
-   # .pr == $PR_NUMBER, validate <run-id> against RUN_ID_REGEX before any
-   # path concatenation (D4/F8 path-traversal hardening; the
-   # basename-of-dirname projection works on ALL four layouts because the
-   # prefix segments are never concatenated from untrusted input), pick the
-   # lex-greatest <run-id> on multi-match.
-   AUDIT_JSON_PATH=""
-   if compgen -G '.uberdev/runs/*/review-pr-verdict.json' >/dev/null 2>&1 \
-      || compgen -G '.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json' >/dev/null 2>&1 \
-      || compgen -G '.worktrees/*/.uberdev/runs/*/review-pr-verdict.json' >/dev/null 2>&1 \
-      || compgen -G 'worktrees/*/.uberdev/runs/*/review-pr-verdict.json' >/dev/null 2>&1; then
-     AUDIT_JSON_PATH="$(
-       for f in .uberdev/runs/*/review-pr-verdict.json \
-                .claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json \
-                .worktrees/*/.uberdev/runs/*/review-pr-verdict.json \
-                worktrees/*/.uberdev/runs/*/review-pr-verdict.json; do
-         [ -r "$f" ] || continue
-         pr_field="$(jq -r '.pr // empty' "$f" 2>/dev/null)" || continue
-         [ "$pr_field" = "$PR_NUMBER" ] || continue
-         run_id="$(basename "$(dirname "$f")")"
-         [[ "$run_id" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]] || continue
-         printf '%s\t%s\n' "$run_id" "$f"
-       done | sort -r | head -1 | cut -f2
-     )"
+   # invisible to a root-only search. The helper filters by .pr == PR number,
+   # validates <run-id> against RUN_ID_REGEX before the candidate participates
+   # in selection (D4/F8 path-traversal hardening; the basename-of-dirname
+   # projection works on ALL four layouts because the prefix segments are
+   # never concatenated from untrusted input), and picks the lex-greatest
+   # <run-id> on multi-match.
+   if [ -r "${CLAUDE_PLUGIN_ROOT}/skills/merge-pipeline/lib/discover.sh" ]; then
+     . "${CLAUDE_PLUGIN_ROOT}/skills/merge-pipeline/lib/discover.sh"
+   else
+     echo "error: lib/discover.sh not found at ${CLAUDE_PLUGIN_ROOT}/skills/merge-pipeline/lib/" >&2
+     exit 1
    fi
+   AUDIT_JSON_PATH="$(discover_review_verdict_json "$PR_NUMBER")"
    # AUDIT_JSON_PATH is now the most-recent verdict JSON for this PR, or empty
    # if none exists (fresh clone / pre-v0.26.0 / corroborator unavailable).
 
@@ -462,7 +523,7 @@ c. The extracted `<trailer-sha>` is delegated to the `trust-trail-evaluator` age
       Any verdict from (c) other than `PASS` short-circuits sub-condition (d): the caller emits `gate_fail` immediately and does NOT evaluate (d). (d) is only checked when (c) returned `PASS`.
 
 d. ∃ a file matching `.uberdev/runs/<run-id>/review-pr-verdict.json` **whose top-level `.pr` integer field equals the current PR number `<N>`** is **corroborating-only** — the JSON is local-only debug telemetry per D1 and `.uberdev/` is gitignored, so its absence on a fresh clone is by design (the trailer + (c) agent verdict are the load-bearing trust artifacts). The check is presence + shape; strict `"sha" == headRefOid` is RETIRED post-#78 — sub-condition (c) already does tamper detection via the trust-trail-evaluator's cumulative-diff heuristic, and (d) gating harder than (c) contradicted the fast-forward-fixup tolerance documented immediately below at "Honest fast-forward fixup commits..." (see issue #78). Two evaluation paths:
-   - **JSON present (filtered by `.pr == <N>`).** Glob the canonical `.uberdev/runs/*/review-pr-verdict.json` AND every worktree-local mirror path declared by the worktree-creating skills: `.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json` (`/solve` / `/turbo` convention — `solve-pipeline/SKILL.md`), `.worktrees/*/.uberdev/runs/*/review-pr-verdict.json` (`using-git-worktrees` preferred hidden convention), and `worktrees/*/.uberdev/runs/*/review-pr-verdict.json` (`using-git-worktrees` alternate visible convention). The `~/.config/uberdev/worktrees/<project>/<branch>/.uberdev/runs/*` global-fallback layout (also declared in `using-git-worktrees/SKILL.md`) is NOT globbed (out of scope — requires runtime `$HOME` resolution; the writer-side path-anchoring follow-up tracks this). The `.uberdev/` directory is gitignored and per-worktree, so when `/merge` runs from the main checkout but the PR was produced by a worktree-based `/solve` / `/turbo` / `subagent-driven-dev` / `executing-plans` / brainstorm-Phase-4 run, the audit JSON lives inside that worktree — see Step (c.0) bash discovery code for the canonical glob set. Parse each match, retain only those whose top-level `.pr` integer field equals `<N>`; if multiple match, take the one with the lex-greatest `<run-id>` (most recent — `<run-id>` format `YYYYMMDD-HHMMSS-<short-sha>` lex-sorts identically to chronological order; the tie-break is path-layout-agnostic). Validate that `<run-id>` against `RUN_ID_REGEX` (D4, F8 path-traversal hardening) BEFORE any path concatenation; the `basename "$(dirname "$f")"` projection works identically on all four layouts because the prefix segments are never concatenated from untrusted input. On run-id regex fail, JSON parse fail, or missing/non-40-hex `"sha"` field: emit `gate_fail` with `data.reason="trust_trail_json_sha_mismatch"` (the reason name is preserved post-#78 for audit-log compatibility but its scope is narrowed to **shape-malformed only** — the SHA equality check is no longer performed). On shape OK: proceed to `gate_pass`. **No equality check against `headRefOid`** — the JSON's role is corroborator-only; (c) owns tamper detection.
+   - **JSON present (filtered by `.pr == <N>`).** Glob the canonical `.uberdev/runs/*/review-pr-verdict.json` AND every worktree-local mirror path declared by the worktree-creating skills: `.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json` (`/solve` / `/turbo` convention — `solve-pipeline/SKILL.md`), `.worktrees/*/.uberdev/runs/*/review-pr-verdict.json` (`using-git-worktrees` preferred hidden convention), and `worktrees/*/.uberdev/runs/*/review-pr-verdict.json` (`using-git-worktrees` alternate visible convention). The `~/.config/uberdev/worktrees/<project>/<branch>/.uberdev/runs/*` global-fallback layout (also declared in `using-git-worktrees/SKILL.md`) is NOT globbed (out of scope — requires runtime `$HOME` resolution; the writer-side path-anchoring follow-up tracks this). The `.uberdev/` directory is gitignored and per-worktree, so when `/merge` runs from the main checkout but the PR was produced by a worktree-based `/solve` / `/turbo` / `subagent-driven-dev` / `executing-plans` / brainstorm-Phase-4 run, the audit JSON lives inside that worktree — see `discover_review_verdict_json` in `lib/discover.sh` for the canonical find-based enumeration (Step (c.0) calls it; #303 replaced the inline `compgen` chain). Parse each match, retain only those whose top-level `.pr` integer field equals `<N>`; if multiple match, take the one with the lex-greatest `<run-id>` (most recent — `<run-id>` format `YYYYMMDD-HHMMSS-<short-sha>` lex-sorts identically to chronological order; the tie-break is path-layout-agnostic). Validate that `<run-id>` against `RUN_ID_REGEX` (D4, F8 path-traversal hardening) BEFORE any path concatenation; the `basename "$(dirname "$f")"` projection works identically on all four layouts because the prefix segments are never concatenated from untrusted input. On run-id regex fail, JSON parse fail, or missing/non-40-hex `"sha"` field: emit `gate_fail` with `data.reason="trust_trail_json_sha_mismatch"` (the reason name is preserved post-#78 for audit-log compatibility but its scope is narrowed to **shape-malformed only** — the SHA equality check is no longer performed). On shape OK: proceed to `gate_pass`. **No equality check against `headRefOid`** — the JSON's role is corroborator-only; (c) owns tamper detection.
    - **JSON absent for this PR.** None of the four glob layouts (`.uberdev/runs/`, `.claude/worktrees/*/.uberdev/runs/`, `.worktrees/*/.uberdev/runs/`, `worktrees/*/.uberdev/runs/`) has any `review-pr-verdict.json` with top-level `.pr == <N>` (any of those directories may contain JSONs for other PRs in the same repo — those are ignored, NOT compared against this PR's `headRefOid`). Emit one `error` audit event with `data.reason="trust_trail_json_absent"` `data.pr=<N>`, append a one-line advisory to the run summary (`audit JSON absent for PR <N> (fresh clone — corroborator unavailable; trailer + agent verdict are load-bearing)`), and emit `gate_pass` with `data.trust_anchor="uberdev_review_trail"`. The queue continues; no halt.
 
    **Old `data.reason="trust_trail_json_missing"` is RETIRED** post-#52 — the value remains declared in `GATE_FAIL_REASON_ENUM` for historical audit-log compatibility but is NEVER emitted (deprecation pattern; mirrors `admin_bypass`/`waiver_recorded`). **The strict `"sha" == headRefOid` equality check is RETIRED** post-#78 — `data.reason="trust_trail_json_sha_mismatch"` is still emitted for shape failures (run-id regex / JSON parse / missing-or-malformed `sha` field) but no longer for SHA-equality mismatches; tamper detection is fully delegated to sub-condition (c) via the trust-trail-evaluator agent's cumulative-diff heuristic. This eliminates the (c)/(d) contradiction where empty-diff fast-forward fixups (or sibling-equivalent `git commit --amend`) PASSed (c) but FAILed (d), gating valid trust trails.
@@ -523,9 +584,15 @@ else
   T_start=$(( $(date +%s) * 1000 ))   # BSD `date` lacks %3N; degrade to second granularity reported as ms
 fi
 
+# 3.5 Lock heartbeat touch immediately BEFORE the dispatch (touch site 2 —
+#     the auto-review is the single longest-running between-heartbeat seam).
+#     Run the canonical holder-verified snippet from "Lock heartbeat protocol".
+
 # 4. Synchronous cross-skill dispatch (await outcome). --turbo suppresses interactive halts.
 Skill("uberdev:review-pr", args: "${PR} --turbo")
 rc=$?
+
+# 4.5 Lock heartbeat touch immediately AFTER the dispatch returns (touch site 2).
 
 # 5. Stop wall-clock timer (same probe shape as start)
 if command -v gdate >/dev/null 2>&1; then
@@ -595,9 +662,11 @@ For every cross-repository PR (`isCrossRepository == true`):
 
 ### Step 1.7 — Single-PR pre-flight fail edge case
 
-If only one PR is in scope and its pre-flight fails: emit the `gate_fail` event, render the run-summary block with that PR listed under `Skipped:` and an empty `Merged:` set, and exit cleanly. **Not an error, not a halt** — there is simply nothing to merge this run. Bare-mode discovery (Step 1.2.5) returning an empty eligible set — whether because no open PRs exist against `$integration_branch` or because all candidates gated out at Phase 1.4 — follows this same clean-exit-0 contract; the run-summary block reports `Merged: 0 PRs / Skipped: M PRs / Parked: P PRs` and exit 0 (Q3 amends issue #56 AC #6 to align with this precedent).
+If only one PR is in scope and its pre-flight fails: emit the `gate_fail` event, render the run-summary block with that PR listed under `Skipped:` and an empty `Merged:` set, release the lock (`rm -rf .git/uberdev-merge.lock.d` — documented post-acquisition early exit; Phase 4.6 is never reached on this path and no trap exists), and exit cleanly. **Not an error, not a halt** — there is simply nothing to merge this run. Bare-mode discovery (Step 1.2.5) returning an empty eligible set — whether because no open PRs exist against `$integration_branch` or because all candidates gated out at Phase 1.4 — follows this same clean-exit-0 contract; the run-summary block reports `Merged: 0 PRs / Skipped: M PRs / Parked: P PRs` and exit 0 (Q3 amends issue #56 AC #6 to align with this precedent).
 
 ## Phase 2 — Merge plan
+
+On Phase 2 entry, run the canonical lock-heartbeat touch snippet (see "Lock heartbeat protocol", touch site 3).
 
 ### Step 2.1 — ORDER (Q4 layered algorithm)
 
@@ -687,9 +756,25 @@ Phase 2 has produced a fixed plan (order + per-PR strategy). Phase 3 executes it
 
 For each PR in confirmed order:
 
+### Step 3.0 — Per-iteration fetch + lock heartbeat (stale-tip guard, #303)
+
+At the top of EACH landing iteration — not once per run — refresh the remote-tracking refs and prove lock liveness:
+
+```bash
+# Step 3.0 — per-iteration fetch (stale-tip guard). Updates refs/remotes/origin/*
+# and makes the PR head SHA object present locally.
+git fetch origin "<integration_branch>" "<headRefName>"
+```
+
+Then run the canonical lock-heartbeat touch snippet (see "Lock heartbeat protocol", touch site 4).
+
+**Why per-iteration:** after PR-A lands server-side, the integration tip moves. Probing PR-B against the pre-A tip produces false-clean probes that surface only as server-side `gh pr merge` failures with NO conflict-resolve attempt (the conflict path never fires because the local probe lied). A fetch-failure (network blip) is non-fatal: emit one stderr warning + an `error` audit event with `data.reason="git_fetch_failed"`, and continue — the `--match-head-commit` TOCTOU guard and the server-side merge still protect correctness; the probe just degrades to the last-fetched tip.
+
+**The fetch alone is NOT sufficient:** `git fetch` updates `refs/remotes/` only — it never moves the LOCAL `<integration_branch>` ref. Steps 3.1 and 3.3.ii therefore MUST reference `origin/<integration_branch>` (the remote-tracking ref), never the bare local ref; probing the stale local ref defeats the fetch entirely (the local-ref probe is the actual bug — #303 / RFC 0012 §3.2).
+
 ### Step 3.1 — Probe (D9, non-destructive)
 
-Run `git merge-tree --write-tree <integration_branch> <headRefOid>`. Exit 0 = clean; exit 1 = conflicts. **Never** use `git merge --no-commit --no-ff` — `merge-tree` is the canonical non-destructive primitive (no working-tree mutation). On conflict, parse the "Conflicted file info" section to enumerate the conflicted file paths.
+Run `git merge-tree --write-tree origin/<integration_branch> <headRefOid>` (the `origin/` remote-tracking ref just refreshed by Step 3.0 — NEVER the bare local `<integration_branch>`, which Step 3.0's fetch does not move). Exit 0 = clean; exit 1 = conflicts. **Never** use `git merge --no-commit --no-ff` — `merge-tree` is the canonical non-destructive primitive (no working-tree mutation). On conflict, parse the "Conflicted file info" section to enumerate the conflicted file paths.
 
 ### Step 3.2 — Clean-merge path
 
@@ -710,7 +795,7 @@ If probe found conflicts:
 
 i. **Fork preflight (Q3 gate):** re-check `isCrossRepository` + `headRepository.owner.type` + `maintainerCanModify`. org-owned fork or `maintainerCanModify == false` → refuse, surface handoff, skip PR, queue continues.
 
-ii. **Create scratch worktree (D10):** `git worktree add .claude/worktrees/merge-<run-id> <integration_branch>` where `<run-id> = $(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)`. Verify `.claude/worktrees/` is gitignored (per `using-git-worktrees`).
+ii. **Create scratch worktree (D10):** `git worktree add .claude/worktrees/merge-<run-id> origin/<integration_branch>` where `<run-id> = $(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)`. The base is the `origin/` remote-tracking ref refreshed by Step 3.0 (detached at the fetched remote tip) — basing on the bare local `<integration_branch>` would materialize conflicts against a stale tip and defeat the Step 3.0 fetch (#303). Verify `.claude/worktrees/` is gitignored (per `using-git-worktrees`).
 
 iii. **Dispatch one Task() per conflicted file IN A SINGLE ASSISTANT TURN.**
 
@@ -743,7 +828,7 @@ This is the critical invariant. All Task() calls for this PR's conflict set MUST
 
 iv. **Apply resolutions** in the scratch worktree as each agent returns. Aggregate the YAML returns. **If any agent returns `status: AMBIGUOUS` or `status: REFUSED`:** park THIS PR via `drop` strategy. Emit `pr_parked` to `audit.jsonl` with `data.reason` set to the lowercase form (`ambiguous` or `refused`, ∈ `PARK_REASON_ENUM`); the agent's uppercase return status is normalized for audit-log uniformity. `data.strategy="drop"`, and `data.rationale` carrying the agent's structured handoff. Read `resolution_summary` (the justification) and `risks[]` (additional bullet detail) from each per-file YAML return where `status ∈ {AMBIGUOUS, REFUSED}`. Pass each string through `sanitize_agent_text` (defined in the run-summary block section) before embedding into the per-PR detail block. This strips C0/C1 control bytes and DEL but keeps `\n` and `\t`. Render the agent's uppercase status (`REFUSED` / `AMBIGUOUS`) as a lowercase bracketed tag (`[refused]` / `[ambiguous]`) — same casing as the audit-log `data.reason`. Wrap each justification + risks line at 80 columns via `fmt -w 80`. These fields appear in the run summary's per-PR detail block under a `conflict files:` sub-block (see `### Run-summary block`) only if outcome is Parked AND park reason ∈ {refused, ambiguous}. **Continue with the next PR — the queue does NOT halt.**
 
-v. **Pre-push test gate (D16, ALWAYS RUNS).** Test command discovery order: `package.json:scripts.test` > `Makefile` `test` target > `cargo test` if `Cargo.toml` exists > `pytest` if `pytest.ini`/`pyproject.toml` exists > `go test ./...` if `go.mod` exists.
+v. **Pre-push test gate (D16, ALWAYS RUNS).** Test command discovery order: `package.json:scripts.test` > `Makefile` `test` target > `cargo test` if `Cargo.toml` exists > `pytest` if `pytest.ini`/`pyproject.toml` exists > `go test ./...` if `go.mod` exists. Run the canonical lock-heartbeat touch snippet immediately before AND after the test run (see "Lock heartbeat protocol", touch site 5 — long test suites are a between-heartbeat seam).
 
 On test PASS: emit `test_pass`; proceed to push (step vi).
 
@@ -751,7 +836,7 @@ On test FAIL: agent picks the best applicable branch from (a), (b), (c); (a) and
 
 (a) **RE-RESOLVE** (`data.choice="re-resolve"`) — re-dispatch the conflict-resolver fanout (single-message Task() per conflicted file) for the same conflict set with the prior failure context attached. **Max 1 retry per PR per run.** **On conflict-resolver agent dispatch failure during re-dispatch** (timeout, agent crash, unhandled error before all per-file resolutions return): treat as equivalent to test fail and proceed to (b) if the switch budget is unused, otherwise fall through to (c). Emit a `test_fail_agent_decision` event with `data.choice="re-resolve"` and `data.rationale="agent-dispatch-failure"`. On second test pass: proceed to push. On second test fail: agent may switch to (b) if the switch budget is unused, otherwise fall through to (c).
 
-(b) **STRATEGY-SWITCH** (`data.choice="strategy-switch"`) — switch strategy (e.g. `squash` ↔ `merge`), re-probe via `git merge-tree --write-tree`, re-resolve if the new probe reports conflicts. **Max 1 switch per PR per run.** Emits `agent_strategy_switch` audit event with `data.from`, `data.to`, `data.rationale`. On test pass after switch: proceed to push. On test fail after switch: fall through to (c).
+(b) **STRATEGY-SWITCH** (`data.choice="strategy-switch"`) — switch strategy (e.g. `squash` ↔ `merge`), re-probe via `git merge-tree --write-tree origin/<integration_branch> <headRefOid>` (same `origin/` form as Step 3.1), re-resolve if the new probe reports conflicts. **Max 1 switch per PR per run.** Emits `agent_strategy_switch` audit event with `data.from`, `data.to`, `data.rationale`. On test pass after switch: proceed to push. On test fail after switch: fall through to (c).
 
 (c) **PARK** (`data.choice="park"`) — park this PR via `drop` strategy with `data.reason="test-fail-exhausted"` (∈ `PARK_REASON_ENUM`); emit `pr_parked`; surface in run summary with the failure tail; continue queue with next PR.
 
@@ -845,6 +930,8 @@ done
 
 ## Phase 4 — Post-merge local sync
 
+On Phase 4 entry, run the canonical lock-heartbeat touch snippet (see "Lock heartbeat protocol", touch site 6).
+
 For every PR that successfully merged in Phase 3:
 
 ### Step 4.0 — Capture pre-fetch integration tip
@@ -932,9 +1019,22 @@ For each stale branch, the agent decides (per-branch). Each decision emits one `
 
 **Invariant:** /merge never rebases without an explicit affirmative decision; the agent's typed decision-record is the affirmative form for autopilot mode. The structured decision-record (above — choice + rationale + safety-precondition checks, all written to `audit.jsonl`) supersedes the prior "never auto-rebase without typed `yes`" prose because the structured decision-record is an equivalently rigorous form of affirmation. Force-push to PR head refs remains forbidden absolutely.
 
-### Step 4.6 — Release the lock
+### Step 4.6 — Release the lock (explicit — no trap exists)
 
-`flock` releases automatically on process exit; no explicit unlock required for the flock path. The `mkdir`-based fallback (Step 1.1, missing-`flock` branch) does NOT auto-release — cleanup is handled by the `trap 'rm -rf "$LOCK_DIR"' EXIT INT TERM` installed in Step 1.1 immediately after acquisition. That trap fires on normal exit, on Ctrl-C (SIGINT), and on SIGTERM. SIGKILL is uncatchable by definition; the safety net for a SIGKILL'd holder is the next `/merge` invocation's `kill -0` liveness probe, which detects the dead holder and triggers the stale-cleanup-and-retry path. Step 4.6 therefore has no explicit work to do for the fallback path beyond letting the trap fire — but the trap installation in Step 1.1 is non-negotiable.
+Release is an explicit, holder-verified removal of the lock directory. There is NO trap to rely on (a fence-scoped trap would have fired when its fence exited — at the START of the run — which is the void-lock class Step 1.1 retires; see RFC 0012 §3.2). Like every touch fence, this release fence is a fresh per-fence shell: the orchestrator MUST prepend the literal `RUN_ID=<value>` carried from the Step 1.1 acquire echo (see "Lock heartbeat protocol" → RUN_ID provisioning), or the holder check below mismatches and the lock is left held for up to the staleness threshold. Run this verbatim (after the `RUN_ID=<value>` prefix):
+
+```bash
+# Step 4.6 — explicit lock release (holder-verified).
+LOCK_DIR=".git/uberdev-merge.lock.d"
+if [ -f "$LOCK_DIR/record.json" ] \
+   && [ "$(jq -r '.run_id // empty' "$LOCK_DIR/record.json" 2>/dev/null)" = "$RUN_ID" ]; then
+  rm -rf "$LOCK_DIR"
+else
+  echo "warning: merge lock record missing or owned by a different run_id at release time — not removing (a stale-lock reclaim may have occurred mid-run, or RUN_ID was not re-established in this fence)" >&2
+fi
+```
+
+The same release snippet runs at every documented post-acquisition early exit (Step 1.2 branch-name abort, Step 1.3 fallback-branch-missing exit, Step 1.7 nothing-to-merge clean exit) — Phase 4.6 is simply the normal-completion site. The safety net for a crashed or SIGKILL'd run that never released is the NEXT `/merge` invocation's heartbeat-age staleness probe (Step 1.1): once the heartbeat is older than `max(command_timeouts.merge, LOCK_STALE_FLOOR_SEC)` seconds, the dead lock is reclaimed via the stale-cleanup-and-retry path. The holder verification (run_id match) prevents this run from deleting a lock that a later run legitimately reclaimed after this run blew the staleness threshold.
 
 ## Quick Reference
 
@@ -962,13 +1062,13 @@ For each stale branch, the agent decides (per-branch). Each decision emits one `
 - **Adding an author allow-list back as a gate.** PR-author identity is intentionally NOT a Phase 1.4 gate condition in any path. Phase 1.4 trust resolution accepts EITHER `reviewDecision == "APPROVED"` (PATH_1, team / branch-protection path) OR a green `/review-pr` trail bound to current HEAD SHA (PATH_2, solo-dev / no-protection path) — author identity is not a gate in either path. `bot_authors_allow_list` is deprecated and parsed only for backward compat — it has no behavioural effect.
 - **Adding the trust trail without re-running /review-pr against the current head SHA.** Manually copying a stale `Reviewed-by:` trailer onto a new commit is a regression — Phase 1.4 PATH_2 (c) dispatches `trust-trail-evaluator`, which inspects ancestor + diff-empty + log-empty primitives. Trivial fast-forward fixups added after `/review-pr` evaluate to `PASS` without re-run; non-empty cumulative diffs evaluate to `STALE` and gate_fail with `data.reason="trust_trail_stale_sha"`; force-pushes evaluate to `FORCE_PUSHED`. Never hand-edit the trailer; the agent owns the decision.
 - **Treating sub-condition (d) as a tamper detector, or globbing all JSONs without filtering by `.pr`.** The JSON is local debug telemetry per D1 — `.uberdev/` is gitignored, so its absence on a fresh clone is by design. Sub-condition (d) is corroborating-only post-#78: JSON present (after filtering all four glob layouts — see the worktree-mirror bullet below — to those with `.pr == <N>`) → presence + shape check (`gate_fail` with `trust_trail_json_sha_mismatch` on shape-malformed only — narrow scope post-#78); JSON absent for this PR → advisory `error` audit event with `data.reason="trust_trail_json_absent"` + `gate_pass` (queue continues). Tamper detection is fully owned by sub-condition (c) — the trust-trail-evaluator agent's cumulative-diff heuristic. The retired `trust_trail_json_missing` reason is never emitted post-#52; the strict `"sha" == headRefOid` equality check is retired post-#78. Globbing JSONs without filtering by `.pr` (the pre-#78 bug) caused gate_fail when prior /review-pr runs from earlier states or other PRs left stale JSONs in `.uberdev/runs/`, even when the current-PR JSON had a valid SHA.
-- **Globbing only `.uberdev/runs/*/review-pr-verdict.json` for sub-condition (c.0) / (d) and missing the worktree-mirror paths.** `/review-pr` writes its audit JSON relative to its CWD; when `/merge` runs from the main checkout but the PR was produced by ANY worktree-based flow (`/solve` and `/turbo` per `solve-pipeline/SKILL.md`, OR `subagent-driven-dev` / `executing-plans` / brainstorm-Phase-4 per the generic `using-git-worktrees/SKILL.md`), the audit JSON lives inside that worktree's gitignored `.uberdev/runs/` — invisible from the main-checkout's first-glob alone. Both Step (c.0) bash discovery and sub-condition (d) prose MUST glob the FULL worktree-mirror enumeration alongside the canonical path:
+- **Searching only `.uberdev/runs/*/review-pr-verdict.json` for sub-condition (c.0) / (d) and missing the worktree-mirror paths.** `/review-pr` writes its audit JSON relative to its CWD; when `/merge` runs from the main checkout but the PR was produced by ANY worktree-based flow (`/solve` and `/turbo` per `solve-pipeline/SKILL.md`, OR `subagent-driven-dev` / `executing-plans` / brainstorm-Phase-4 per the generic `using-git-worktrees/SKILL.md`), the audit JSON lives inside that worktree's gitignored `.uberdev/runs/` — invisible to a root-only search. The `discover_review_verdict_json` helper in `lib/discover.sh` (the single discovery mechanism — Step (c.0) calls it; the pre-#303 inline `compgen -G` chain was a bashism that silently misfired under the zsh Bash tool) and sub-condition (d) prose MUST both enumerate the FULL worktree-mirror set alongside the canonical path:
   - `.uberdev/runs/*/review-pr-verdict.json` — canonical / main-checkout location.
   - `.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json` — `/solve` / `/turbo` convention (the `.claude/worktrees/solve-issue-N/` shape declared in `solve-pipeline/SKILL.md`).
   - `.worktrees/*/.uberdev/runs/*/review-pr-verdict.json` — `using-git-worktrees` preferred hidden convention.
   - `worktrees/*/.uberdev/runs/*/review-pr-verdict.json` — `using-git-worktrees` alternate visible convention.
 
-  The `~/.config/uberdev/worktrees/<project>/<branch>/.uberdev/runs/*` global-fallback layout (also declared in `using-git-worktrees/SKILL.md`) is intentionally NOT globbed — it lives outside the project root and would require runtime `$HOME` resolution; that case is deferred to the writer-side path-anchoring follow-up (anchor `/review-pr`'s artifact writer on the main-checkout root via `git rev-parse --show-toplevel`, mirroring the convention in `orchestrator/SKILL.md`). The pre-fix bug short-circuited `trust-trail-evaluator` to `STALE` via `phase2_5_present=false` in its Step 1.5 (legacy-audit branch) and gated otherwise-valid trust trails on every worktree-produced PR. The RUN_ID_REGEX basename-of-dirname projection (D4/F8 path-traversal hardening) works identically on all four path layouts because the prefix segments are never concatenated from untrusted input — no security regression. Future worktree conventions added to `using-git-worktrees/SKILL.md` MUST be paired with a glob addition here AND a matching `M63.worktree-glob.*` test assertion (5-surface fan-out: compgen-OR-chain + for-loop + sub-condition (d) prose + this bullet + tests/merge.test.sh).
+  The `~/.config/uberdev/worktrees/<project>/<branch>/.uberdev/runs/*` global-fallback layout (also declared in `using-git-worktrees/SKILL.md`) is intentionally NOT globbed — it lives outside the project root and would require runtime `$HOME` resolution; that case is deferred to the writer-side path-anchoring follow-up (anchor `/review-pr`'s artifact writer on the main-checkout root via `git rev-parse --show-toplevel`, mirroring the convention in `orchestrator/SKILL.md`). The pre-fix bug short-circuited `trust-trail-evaluator` to `STALE` via `phase2_5_present=false` in its Step 1.5 (legacy-audit branch) and gated otherwise-valid trust trails on every worktree-produced PR. The RUN_ID_REGEX basename-of-dirname projection (D4/F8 path-traversal hardening) works identically on all four path layouts because the prefix segments are never concatenated from untrusted input — no security regression. Future worktree conventions added to `using-git-worktrees/SKILL.md` MUST be paired with a layout addition AND a matching `M63.worktree-glob.*` test assertion (4-surface fan-out: the `discover_review_verdict_json` find enumeration in `lib/discover.sh` + sub-condition (d) prose + this bullet + tests/merge.test.sh).
 - **Treating `--bypass-protections` as a live admin-bypass anchor.** It is deprecated as a no-op post-v0.17.0 — the trust-trail-evaluator agent subsumes its job; there is no PATH_3 admin-bypass anchor and no CI-red waiver. The flag is parsed without error indefinitely (Terraform / npm CLI deprecation precedent), emits `BYPASS_PROTECTIONS_DEPRECATED_NOTE` once per run on first encounter, and records a `deprecated_flag_used` audit event. `admin_bypass` and `waiver_recorded` events are declared in `AUDIT_EVENT_ENUM` for backward-compat with audit-log consumers but are NEVER emitted post-v0.17.0.
 - **Inlining strategy heuristics in Phase 2.2 instead of dispatching `merge-strategy-decider`.** The agent owns the decision; the skill normalises inputs (commit_count, conventional_commit_ratio, divergence_commits, wip_marker_present, label_hint, repo_convention) and surfaces the verdict to the audit log via `merge_strategy_agent_decision` and `strategy_chosen` (`data.reason="agent_decided"`). There is NO "Per-invocation flag always wins" clause — `--squash` / `--rebase` / `--merge` are no-ops post-v0.17.0.
 - **Don't trigger auto-review on `review_decision_not_approved` alone, on `trust_trail_stale_sha`, or on any other non-whitelisted gate-fail reason.** The Phase 1.4.5 auto-review intercept fires ONLY on the positive whitelist `reason ∈ {trust_trail_label_missing, trust_trail_trailer_missing}` (D10). The non-trigger `GATE_FAIL_REASON_ENUM` members are excluded as a defensive completeness measure (D11): `review_decision_not_approved` (auto-bypassing branch protection is a security regression — security.md §2), `trust_trail_stale_sha` (deferred to v2 — requires a pricier full re-anchor), `trust_trail_agent_invalid_input` (input-malformed agent input is a manual-investigation signal), `trust_trail_json_sha_mismatch` (indicates a corrupted run-local path post-#78 — manual investigation per Q6), `pr_state_not_open`, `is_draft`, `ci_red`, `merge_state_blocked` (pre-condition gates evaluated before trust resolution — not auto-recoverable), `pr_view_unreachable` (infrastructure failure — not auto-recoverable). The cap is `AUTO_REVIEW_DISPATCH_CAP = 1` per `(pr_number, run_id)`; the counter is set BEFORE the synchronous `Skill("uberdev:review-pr")` dispatch (Step 1.4.5 cap-ordering invariant) so re-entry cannot bypass the cap even on green re-eval.
@@ -998,7 +1098,7 @@ Refuse signals — abort or skip the PR with clear handoff:
 
 ## Audit log JSONL schema (D15)
 
-Every phase writes one JSON line per event to `AUDIT_LOG_DIR_PATTERN` + `AUDIT_LOG_FILENAME` (e.g., `.uberdev/runs/20260430-153045-abc1234/audit.jsonl`):
+Every phase writes one JSON line per event to `AUDIT_LOG_DIR_PATTERN` + `AUDIT_LOG_FILENAME` — the repo-root `.uberdev/audit.jsonl`. (Docs-reality reconciliation #303: this section previously claimed a per-run `.uberdev/runs/<run-id>/` directory, but every live writer in this skill appends to the root file and `/goal`'s `uberdev_goal_read_merge_result` reader globs only the root — the writers are the contract; do NOT "fix" them toward a per-run path, which would silently break `/goal`. Rows carry `run_id` as a FIELD for per-run filtering. The per-run `.uberdev/runs/<run-id>/review-pr-verdict.json` artifact is unrelated — that is `/review-pr`'s verdict JSON, not this audit log.):
 
 ```json
 {"ts":"<ISO8601>","event":"<event-name>","pr":<N>,"data":{...}}
@@ -1056,6 +1156,6 @@ Per-PR detail block (one per PR in the run):
   Audit-log `data.rationale` keeps the **raw** bytes (forensic value). Sanitization happens at terminal-render time only.
 - **Wrap width.** Apply `fmt -w 80` to `justification` and each `risks[]` entry. Continuation lines indent 8 spaces (one indent level past `- file:`) so they visually attach to the parent item.
 - **Verdict casing.** Always lowercase, always bracketed (`[refused]`, `[ambiguous]`). Same lowercase form used for the audit-log `data.reason` per `PARK_REASON_ENUM`.
-- **Single source of truth.** The full untruncated agent rationale lives in `audit.jsonl` under `pr_parked.data.rationale`. The summary block is a human-readable surface; the user can `jq '.data.rationale' .uberdev/runs/<run-id>/audit.jsonl` to retrieve raw bytes if needed.
+- **Single source of truth.** The full untruncated agent rationale lives in `audit.jsonl` under `pr_parked.data.rationale`. The summary block is a human-readable surface; the user can `jq '.data.rationale' .uberdev/audit.jsonl` to retrieve raw bytes if needed (filter by the run's `run_id` field — the log is the root append-only stream, not per-run).
 
 Per spec: every `skipped` / `parked` / `aborted` MUST be surfaced here. **No silent skips.** Audit log path printed last; users grep for `pr_parked`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision`, `local_sync` to reconstruct the run.
