@@ -42,7 +42,10 @@ set -o pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LIB="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/lib/discover.sh"
 SKILL="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/SKILL.md"
-SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
+# #304 / RFC 0012 §3.4: the A10 canary (mktemp stderr capture in the Step 4
+# validation fetch) lives in lib/solve-launcher.sh, hoisted out of
+# solve-pipeline/SKILL.md.
+SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
 PLUGIN_JSON="$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json"
 MARKETPLACE_JSON="$REPO_ROOT/.claude-plugin/marketplace.json"
 README="$REPO_ROOT/README.md"

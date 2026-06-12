@@ -22,7 +22,10 @@ set -u
 set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
+# #304 / RFC 0012 §3.4: the Phase A parser block lives in lib/solve-launcher.sh
+# (hoisted out of solve-pipeline/SKILL.md); the awk extraction below targets
+# the lib file.
+SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
 HELPER="$REPO_ROOT/plugins/uberdev/lib/config-read.sh"
 
 for f in "$SOLVE_PIPELINE" "$HELPER"; do

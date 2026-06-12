@@ -2,8 +2,12 @@
 # Shape-check for the v0.28.0 small-team issue-claim protocol.
 #
 # The protocol spans three surfaces:
-#   1. solve-pipeline/SKILL.md — Phase A claim-collision check (Step 4),
-#      claim-write loop (Step 4.5), Phase B dispatch-failure rollback.
+#   1. lib/solve-launcher.sh — Phase A claim-collision check (Step 4),
+#      claim-write pass with post-write verification (Step 4.5), Phase B
+#      dispatch-failure rollback (#304 / RFC 0012 §3.4: the executable
+#      pipeline was hoisted out of solve-pipeline/SKILL.md, which is now
+#      contract/triage prose only — its TOCTOU limitation prose stays
+#      asserted via $SOLVE_SKILL below).
 #   2. merge-pipeline/SKILL.md — Step 3.4 post-merge issue cleanup.
 #   3. commands/turbo.md + commands/solve.md — --force flag documentation.
 #
@@ -17,7 +21,8 @@
 set -u
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
+SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
+SOLVE_SKILL="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
 MERGE_PIPELINE="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/SKILL.md"
 TURBO_CMD="$REPO_ROOT/plugins/uberdev/commands/turbo.md"
 SOLVE_CMD="$REPO_ROOT/plugins/uberdev/commands/solve.md"
@@ -124,9 +129,9 @@ assert_grep "$SOLVE_PIPELINE" \
   "FORCE_CLAIM=1 path emits warning"
 
 echo "== Phase A: claim-write loop (Step 4.5) =="
-assert_grep "$SOLVE_PIPELINE" \
+assert_grep "$SOLVE_SKILL" \
   '^### 4\.5\. Claim protocol' \
-  "Step 4.5 sub-section header present"
+  "Step 4.5 sub-section header present (SKILL.md contract prose)"
 assert_grep "$SOLVE_PIPELINE" \
   'if ! LABEL_PROVISION_ERR=\$\(gh label create --force "\$UBERDEV_ACTIVE_LABEL"' \
   "Step 4.5 label-create is FAIL-LOUD (if !-guarded, captures gh stderr) — the label gates a fail-loud combined claim write, so it cannot be fail-soft like finish-branch/dev-pipeline"
@@ -187,7 +192,7 @@ done
 
 echo "== Audit-enum membership (all 5 claim_* events listed) =="
 for evt in claim_acquired claim_collision claim_force_override claim_write_failed claim_released; do
-  assert_grep "$SOLVE_PIPELINE" \
+  assert_grep "$SOLVE_SKILL" \
     "\`$evt\`" \
     "$evt listed in SOLVE_AUDIT_EVENT_ENUM Constants table"
 done
@@ -201,10 +206,10 @@ echo "== Constants table updates =="
 # `\<non-meta>`. Single-quoting avoids the bash double-quote backtick-as-
 # command-substitution trap; `[|]` is a portable character-class alternative
 # to `\|` that behaves identically in BRE/ERE and across BSD/GNU implementations.
-assert_grep "$SOLVE_PIPELINE" \
+assert_grep "$SOLVE_SKILL" \
   '`UBERDEV_ACTIVE_LABEL` [|] `uberdev:active`' \
   "UBERDEV_ACTIVE_LABEL entry in Constants table"
-assert_grep "$SOLVE_PIPELINE" \
+assert_grep "$SOLVE_SKILL" \
   '`CLAIM_COMMENT_MARKER` [|] `<!-- uberdev-claim-comment v1 -->`' \
   "CLAIM_COMMENT_MARKER entry in Constants table"
 
@@ -268,8 +273,8 @@ assert_grep "$SOLVE_CMD" \
   "small-team issue-claim protocol" \
   "solve.md mentions small-team claim protocol"
 
-echo "== Version bump 0.36.5 -> 0.36.6 propagated =="
-assert_version_bump "$REPO_ROOT" "0.36.6"
+echo "== Version bump 0.36.6 -> 0.36.7 propagated =="
+assert_version_bump "$REPO_ROOT" "0.36.7"
 
 echo "== #123 B1: closing-keyword regex left-anchor (rejects preclose/postfix/unresolve) =="
 # The closing-keyword regex in merge-pipeline Step 3.4 MUST require either start-of-input
@@ -476,10 +481,10 @@ echo "== #123 B2: known-limitation (TOCTOU) honestly documented =="
 # B2 was deferred (real fix needs a design decision). The spec MUST be honest
 # about the race window — replace 'atomically' with 'in sequence with rollback'
 # and surface the limitation in both SKILL.md prose and CHANGELOG Why.
-assert_grep "$SOLVE_PIPELINE" \
+assert_grep "$SOLVE_SKILL" \
   "in sequence with rollback on partial failure" \
   "B2: SKILL.md no longer claims 'atomically'; states 'in sequence with rollback'"
-assert_grep "$SOLVE_PIPELINE" \
+assert_grep "$SOLVE_SKILL" \
   "Known limitation .* TOCTOU race window" \
   "B2: SKILL.md documents the TOCTOU race-window limitation"
 assert_grep "$CHANGELOG" \

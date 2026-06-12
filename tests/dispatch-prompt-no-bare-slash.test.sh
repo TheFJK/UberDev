@@ -38,9 +38,11 @@ echo "## dispatch-prompt-no-bare-slash drift guard (#235)"
 
 # The three callsite files that BUILD a per-issue prompt body for the
 # claude --bg dispatcher.
+# #304 / RFC 0012 §3.4: the solve/turbo prompt builds moved from
+# solve-pipeline/SKILL.md into lib/solve-launcher.sh.
 CALLSITES=(
   "$REPO_ROOT/plugins/uberdev/skills/goal-pipeline/SKILL.md"
-  "$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
+  "$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
   "$REPO_ROOT/plugins/uberdev/lib/goal-state.sh"
 )
 for f in "${CALLSITES[@]}"; do

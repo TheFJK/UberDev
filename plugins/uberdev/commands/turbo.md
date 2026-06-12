@@ -42,10 +42,12 @@ An audit event `deprecated_flag_used` is recorded for each first-encounter emiss
 
 ## Steps
 
+Run the shared launcher executable as **ONE Bash tool call** — the literal `--auto-mode=1 --turbo` flags select unattended (/turbo) behaviour, and everything after `--` is the raw user argument string (the renderer substitutes `$ARGUMENTS` into real argv words before the shell parses the line):
+
 ```bash
-export AUTO_MODE=1       # /turbo = unattended mode (post-impl-review omitted in trivial/small; orchestrator + review-pr detect turbo via UBERDEV_TURBO env-var OR --turbo arg — hybrid OR detector, #97)
-export UBERDEV_TURBO=1   # NEW (#97): chain-wide unattended-mode signal — inherits via Skill() into solve-pipeline + via fork+exec into claude --bg child (env(1)-mediated, since timeout(1) sits in front of the inline-prefix slot)
-unset SKIP_PERMISSIONS   # (#241) defend against shell-rc / stale-session pollution from a prior /goal export — bare /turbo (without --auto) retains operator-gated perms; /turbo --auto opts into AUTO_PERMISSIONS=1 which (post-#243) also resolves to --dangerously-skip-permissions. The unset prevents a stale /goal SKIP_PERMISSIONS=1 from silently elevating bare /turbo. MUST run BEFORE Skill('uberdev:solve-pipeline') below so the launcher inherits a clean env (mirrors the #97 UBERDEV_TURBO unset ordering rule for /solve).
+bash "$CLAUDE_PLUGIN_ROOT/lib/solve-launcher.sh" --auto-mode=1 --turbo -- $ARGUMENTS
 ```
 
-Now invoke the `uberdev:solve-pipeline` skill.
+**Runtime contract (binding):** set the Bash tool `timeout` up to **600000 ms**. For batches above **~10 issues**, run the call with `run_in_background: true` and watch it via Monitor instead — validation is 1 gh round-trip per issue, claim writes add ~2–3 more, and serial dispatch costs 2–8 s per issue, so the 120 s default timeout can expire mid-claim and strand a half-claimed batch.
+
+The launcher runs the whole pipeline in one process (Phase A validate-all-first → Step 4.5 claim protocol → Phase B per-issue dispatch) and **owns the `AUTO_MODE` / `UBERDEV_TURBO` / `SKIP_PERMISSIONS` env lifecycle in-process** (#97/#241): `--auto-mode=1 --turbo` exports `AUTO_MODE=1` + `UBERDEV_TURBO=1` (the chain-wide unattended-mode signal — inherits into each `claude --bg` child via the env(1)-mediated inline-prefix exec in `lib/dispatch.sh`) and unsets `SKIP_PERMISSIONS` inside the launcher process, so a stale `/goal` export cannot silently elevate bare `/turbo` (Bash tool calls share no shell state — an `unset` in a separate fence protects nothing). Do NOT run the historical multi-fence pipeline. The pipeline contract, constants, and triage table are documented in the `uberdev:solve-pipeline` skill (`skills/solve-pipeline/SKILL.md`); `lib/solve-launcher.sh` is the executable SSOT.
