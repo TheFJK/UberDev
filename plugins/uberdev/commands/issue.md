@@ -22,12 +22,19 @@ Auto-classifies → dispatches **two Task agents** in a single assistant turn (`
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
-NO_EXPLORE=$(echo "$ARGUMENTS" | grep -qE '\-\-no-explore' && echo 1 || echo 0)
-DESC=$(echo "$ARGUMENTS" | sed -E 's/ *--no-explore//g')
-if [ "$NO_EXPLORE" = "1" ]; then
-  echo "notice: --no-explore is deprecated; the default fanout is now 2 scouts. Removal target: v1.0.0" >&2
-fi
 ```
+
+**Parse the flags MODEL-SIDE — never through a shell fence.** Scan the tokens of
+the user's description (rendered after "User's description:" at the top of this
+file): if a `--no-explore` token is present, drop it and print this deprecation
+notice to the user verbatim —
+`notice: --no-explore is deprecated; the default fanout is now 2 scouts. Removal target: v1.0.0`
+— then everything else, in order, is `$DESC` (the same model-side token-scan
+parse dev-pipeline Phase 0 uses). The description is untrusted free text:
+echoing the raw arguments through a double-quoted shell fence (the old
+`echo`-into-`sed` shape) hands any `$(...)` or backticks inside a description
+to the shell. Model-side parsing keeps it data; the only bash in this phase is
+the `gh repo view` repo probe above.
 
 Work with `$DESC` from here on — the flags shouldn't bleed into the issue body.
 
@@ -181,14 +188,21 @@ Show the user a complete draft BEFORE creating.
 
 ## Phase 6: Create issue
 
+The body is delivered via `--body-file -` with the heredoc on stdin — **never**
+the `--body` flag with a `"$VAR"` or `"$(…)"` expansion (the dev-pipeline hard
+rule: issue bodies carry user-derived text, and stdin delivery keeps it opaque
+data).
+The heredoc delimiter is single-quoted so `$()`/backtick expansion stays
+disabled inside the body.
+
 ```bash
 ISSUE_URL=$(gh issue create \
   --title "<type(scope): description>" \
   --label "<comma,separated,labels>" \
-  --body "$(cat <<'EOF'
+  --body-file - <<'EOF'
 <body from Phase 4>
 EOF
-)")
+)
 echo "$ISSUE_URL"
 ISSUE_NUM=$(echo "$ISSUE_URL" | grep -oE '[0-9]+$')
 ```

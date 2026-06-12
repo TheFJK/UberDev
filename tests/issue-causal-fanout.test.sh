@@ -114,6 +114,36 @@ assert_no_grep "$ISSUE_CMD" \
   "shallow-mode placeholder string removed (no longer reachable)"
 
 echo
+echo "== Phase 0/6 injection hardening (RFC 0012 §3.12 light-R7) =="
+# Phase 0: the raw-arguments splice into a double-quoted shell fence is gone.
+# The renderer substitutes the user's description into the fence text BEFORE
+# the model runs it, so a description carrying $(...) or backticks executed.
+# Flag parsing is model-side now; only the gh repo probe stays in bash.
+assert_no_grep "$ISSUE_CMD" \
+  'echo "\$ARGUMENTS"' \
+  "Phase 0 no longer echoes raw arguments through a shell fence"
+assert_no_grep "$ISSUE_CMD" \
+  'NO_EXPLORE=\$\(echo' \
+  "Phase 0 NO_EXPLORE shell derivation removed"
+assert_grep "$ISSUE_CMD" \
+  'MODEL-SIDE' \
+  "Phase 0 mandates the model-side token parse"
+assert_grep "$ISSUE_CMD" \
+  'gh repo view --json nameWithOwner' \
+  "Phase 0 keeps the gh repo view probe as the only bash"
+# Phase 6: body delivery is --body-file - with the heredoc on stdin — never
+# --body "$(cat …)" (the dev-pipeline hard rule for user-derived bodies).
+assert_no_grep "$ISSUE_CMD" \
+  '\-\-body "\$\(cat' \
+  "Phase 6 no longer uses --body \"\$(cat ...)\""
+assert_grep "$ISSUE_CMD" \
+  '\-\-body-file -' \
+  "Phase 6 delivers the body via --body-file - on stdin"
+assert_grep "$ISSUE_CMD" \
+  "<<'EOF'" \
+  "Phase 6 heredoc delimiter is single-quoted (expansion disabled)"
+
+echo
 echo "== Bug template: causal triple labels =="
 assert_grep "$ISSUE_CMD" \
   '\*\*Symptom:\*\*' \
