@@ -165,6 +165,14 @@ if [ "$WATCH" = "1" ]; then
   echo "[testers] --watch set — using the No-Workflow fallback (inline directive path)."
   echo "[testers] run_id=$RUN_ID surface=$SURFACE target=${TARGET:-(auto)} rounds=$ROUNDS rps_cap=$RPS_CAP"
 else
+  # RFC 0012 §4.1: validate the on-disk Workflow script exists BEFORE emitting
+  # args and mandating the call. On a target install with a missing/misnamed
+  # workflow.js the args envelope would otherwise be emitted and the Workflow
+  # call mandated regardless — failing later at the runtime layer with a worse
+  # error than this clean preflight refusal. (--watch reaches the No-Workflow
+  # fallback above, so the guard sits inside this non-watch arm only.)
+  WORKFLOW_JS="$CLAUDE_PLUGIN_ROOT/skills/testers-pipeline/workflow.js"
+  [ -f "$WORKFLOW_JS" ] || { echo "error: $WORKFLOW_JS missing (RFC 0012 §4.1); reinstall the plugin or use --watch for the No-Workflow fallback" >&2; exit 2; }
   . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
   uberdev_emit_workflow_args testers \
     run_id="$RUN_ID" \

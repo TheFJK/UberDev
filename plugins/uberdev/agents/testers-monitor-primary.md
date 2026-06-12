@@ -37,6 +37,16 @@ loop_traps_detected: [<persona>, ...]
 confidence: low | medium | high
 ```
 
+### Dual-channel return (when dispatched by the testers Workflow)
+
+The YAML above is your **evidence channel** — always Write the full canonical document (including `cross_refs` and the snake_case `follow_ups_for_next_wave` map) to the scratch `out.yaml` path in your dispatch prompt; the aggregator and the next round's persona-prompt builder read it from disk.
+
+When a `StructuredOutput` tool is available (the Workflow dispatch path), ALSO return a **thin** structured result through it. Emit exactly these fields:
+
+- `scratchPath` — the absolute path you wrote the YAML to.
+- `followUps` — an object mapping each persona name to an array of natural-language follow-up prompts for the NEXT round; the empty object `{}` on the final round. **Note the channel-specific naming:** the disk YAML key is snake_case `follow_ups_for_next_wave`, while this return field is camelCase `followUps` — they carry the same per-persona prompt map; keep them in sync.
+- `verifiedAdded` — integer count of findings you promoted to `verified: true` this round (0 if none).
+
 ## Rules
 
 - **Read-only on app code.** You only read findings files and write to the run's `testers/` research dir (the absolute scratch path is in your dispatch prompt).

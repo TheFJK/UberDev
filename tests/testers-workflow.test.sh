@@ -127,6 +127,21 @@ else
   pass "W-10 no live dispatch_master call site in SKILL.md (master mode removed, #306)"
 fi
 
+# W-11 (RFC 0012 §4.1): the preflight RUNS the on-disk workflow.js existence
+# check before emitting args + mandating the call — not merely a prose CLAIM
+# that it did. Assert an executable `[ -f ... workflow.js ]` test guard in the
+# fence (a missing/misnamed workflow.js must refuse cleanly at preflight, not
+# fail later at the runtime layer with a worse error). The pattern matches the
+# `[ -f "$WORKFLOW_JS" ]` form where WORKFLOW_JS holds the workflow.js path; the
+# `-f` + workflow.js coupling on one line is what distinguishes the live test
+# from the §4.2 invocation/`scriptPath` references and the line-187 prose.
+if grep -nE '\[[[:space:]]+-f[[:space:]]+"\$WORKFLOW_JS"[[:space:]]+\]' "$SKILL" | grep -q . \
+   && grep -qE '^[[:space:]]*WORKFLOW_JS=.*skills/testers-pipeline/workflow\.js' "$SKILL"; then
+  pass "W-11 SKILL.md preflight executes the RFC §4.1 [ -f ...workflow.js ] existence guard (not just the prose claim)"
+else
+  fail "W-11 SKILL.md preflight lacks the executable [ -f \"\$WORKFLOW_JS\" ] existence guard before the Workflow mandate (RFC §4.1)"
+fi
+
 # ---------------------------------------------------------------------------
 # T3 behavioral fixture — drive workflow.js under the harness stubs.
 # Asserts the orchestration semantics the generic carrier dry-run does not.

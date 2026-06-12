@@ -362,6 +362,34 @@ fi
 # ---------------------------------------------------------------------------
 echo "== §4.2: Workflow opt-in + No-Workflow fallback shape guard =="
 
+# RFC 0012 §4.1 existence-guard detector (shared by the per-script loop and the
+# control fixtures below). Prints "inline"/"variable" + exit 0 when the SKILL.md
+# carries a LIVE `[ -f ...workflow.js ]` preflight guard; exit 1 otherwise. It
+# strips backtick-quoted inline-code spans (so the §3.10 prose-claims-the-check
+# class cannot satisfy it) and requires a real shell CONSEQUENCE (||/&&/then)
+# after the test bracket.
+skill_workflow_existence_guard() {
+  local md="$1" decoded var
+  decoded="$(sed -E 's/`[^`]*`//g' "$md")"
+  # Form (a): one decoded line with a `[ -f` test + workflow.js + a consequence.
+  if printf '%s\n' "$decoded" \
+       | grep -E '\[[[:space:]]+-f[[:space:]].*workflow\.js.*\][[:space:]]*(\|\||&&|;?[[:space:]]*then)' \
+       | grep -q .; then
+    echo inline; return 0
+  fi
+  # Form (b): a `VAR=...workflow.js` assignment + a `[ -f "$VAR" ]` test with a
+  # consequence referencing that same variable.
+  while IFS= read -r var; do
+    [ -n "$var" ] || continue
+    if printf '%s\n' "$decoded" \
+         | grep -E "\[[[:space:]]+-f[[:space:]]+\"\\\$$var\"[[:space:]]+\][[:space:]]*(\|\||&&|;?[[:space:]]*then)" \
+         | grep -q .; then
+      echo variable; return 0
+    fi
+  done < <(printf '%s\n' "$decoded" | grep -oE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=[^=]*workflow\.js' | sed -E 's/^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=.*/\1/')
+  return 1
+}
+
 GUARDED=0
 while IFS= read -r script; do
   [ -n "$script" ] || continue
@@ -386,9 +414,61 @@ while IFS= read -r script; do
   else
     fail "§4.2 $base: SKILL.md lacks the mandatory '## No-Workflow fallback' section (DR-10)"
   fi
+  # RFC 0012 §4.1: "The SKILL.md preflight validates
+  # `[ -f "$CLAUDE_PLUGIN_ROOT/skills/<name>/workflow.js" ]` before mandating
+  # the call." Assert an EXECUTABLE `[ -f ... workflow.js ]` test guard in the
+  # preflight — NOT merely the prose claim or the scriptPath mandate — so a
+  # missing/misnamed workflow.js on a target install refuses cleanly at
+  # preflight instead of failing later at the runtime layer. Every future
+  # migrated workflow.js inherits this requirement here (the §9 roadmap copies
+  # the proving-ground template).
+  #
+  # CRITICAL discriminator (the §3.10 prose-claims-a-validation-that-doesn't-
+  # exist class): the line-187/195-style prose ALSO contains a literal
+  # `[ -f "...workflow.js" ]` inside backticks. skill_workflow_existence_guard
+  # strips inline-code spans and requires a real shell consequence, so prose
+  # alone cannot satisfy it (locked by the control fixtures below).
+  if guard_form="$(skill_workflow_existence_guard "$skill_md")"; then
+    pass "§4.2 $base: SKILL.md preflight runs the RFC §4.1 [ -f ...workflow.js ] existence guard ($guard_form form, real shell test — not prose)"
+  else
+    fail "§4.2 $base: SKILL.md preflight lacks the RFC §4.1 [ -f ...workflow.js ] existence guard before the Workflow mandate (a missing/misnamed workflow.js must refuse at preflight, not at runtime; a backtick-wrapped prose claim does NOT count)"
+  fi
 done < "$SCRIPTS_FILE"
 if [ "$GUARDED" -eq 0 ]; then
   pass "§4.2 notice: no skills/*/workflow.js on disk yet — shape guard vacuously green"
+fi
+
+# §4.1 existence-guard control fixtures — keep skill_workflow_existence_guard
+# non-vacuous and lock the prose-rejection (the §3.10 class). These run every
+# invocation regardless of how many workflow.js files exist on disk.
+PROSE_ONLY_MD="$TMPDIR_FIXTURES/prose-only-SKILL.md"
+{
+  echo 'The preflight validated `[ -f "$CLAUDE_PLUGIN_ROOT/skills/x/workflow.js" ]`. Relay the JSON into Workflow.'
+  echo 'Workflow({scriptPath: "$CLAUDE_PLUGIN_ROOT/skills/x/workflow.js"}, <args>)'
+} > "$PROSE_ONLY_MD"
+if skill_workflow_existence_guard "$PROSE_ONLY_MD" >/dev/null; then
+  fail "§4.1.c1 a backtick-wrapped PROSE [ -f ...workflow.js ] claim must NOT satisfy the existence guard (the §3.10 prose-claims-the-check class)"
+else
+  pass "§4.1.c1 prose-only [ -f ...workflow.js ] claim is rejected (real shell consequence required)"
+fi
+
+INLINE_GUARD_MD="$TMPDIR_FIXTURES/inline-guard-SKILL.md"
+printf '%s\n' '[ -f "$CLAUDE_PLUGIN_ROOT/skills/x/workflow.js" ] || { echo missing >&2; exit 2; }' > "$INLINE_GUARD_MD"
+if skill_workflow_existence_guard "$INLINE_GUARD_MD" >/dev/null; then
+  pass "§4.1.c2 a live inline [ -f ...workflow.js ] || { exit; } guard is accepted"
+else
+  fail "§4.1.c2 a live inline [ -f ...workflow.js ] guard was rejected (false negative)"
+fi
+
+VAR_GUARD_MD="$TMPDIR_FIXTURES/var-guard-SKILL.md"
+{
+  echo 'WF="$CLAUDE_PLUGIN_ROOT/skills/x/workflow.js"'
+  echo '[ -f "$WF" ] || { echo missing >&2; exit 2; }'
+} > "$VAR_GUARD_MD"
+if skill_workflow_existence_guard "$VAR_GUARD_MD" >/dev/null; then
+  pass "§4.1.c3 a live variable-indirection [ -f \"\$VAR\" ] guard is accepted"
+else
+  fail "§4.1.c3 a live variable-indirection guard was rejected (false negative)"
 fi
 
 echo

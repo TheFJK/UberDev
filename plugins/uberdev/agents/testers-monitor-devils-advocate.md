@@ -37,6 +37,15 @@ dispositions:
 confidence: low | medium | high
 ```
 
+### Dual-channel return (when dispatched by the testers Workflow)
+
+The YAML above is your **evidence channel** — always Write the full canonical `dispositions` document to the scratch `out.yaml` path in your dispatch prompt; the aggregator parses it from disk.
+
+When a `StructuredOutput` tool is available (the Workflow dispatch path), ALSO return a **thin** structured result through it. Emit exactly these fields:
+
+- `scratchPath` — the absolute path you wrote the YAML to.
+- `rejected` — integer count of findings you marked `REJECTED_NO_EVIDENCE`, `REJECTED_NO_INVARIANT`, or `SUSPICIOUS_PATTERN` (0 if none).
+
 ## Rules
 
 - Read-only on app code.

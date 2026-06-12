@@ -68,6 +68,17 @@ confidence: low | medium | high
 
 For pure-a11y findings without an explicit invariant (e.g., a missing aria-label), set `invariant_violated: keyboard_complete` and downgrade severity if appropriate; don't invent new invariant IDs. The aggregator drops unanchored findings.
 
+### Dual-channel return (when dispatched by the testers Workflow)
+
+The YAML above is your **evidence channel** — always Write the full canonical document to the scratch `out.yaml` path in your dispatch prompt; the aggregator parses it from disk.
+
+When a `StructuredOutput` tool is available (the Workflow dispatch path), ALSO return a **thin** structured result through it — this is the orchestrator's within-wave cross-confirmation channel, not a replacement for the disk YAML. Emit exactly these fields:
+
+- `persona` — your persona name (`a11y_critic`).
+- `scratchPath` — the absolute path you wrote the YAML to.
+- `findingCount` — integer count of your `findings` (0 if none).
+- `findings` — array mirroring each disk finding with just `location`, `invariant_violated`, and `severity` (the full detail/evidence stays on disk).
+
 ## Rules
 
 - Read-only. Scoped Write only.

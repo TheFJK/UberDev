@@ -206,4 +206,39 @@ grep -q 'lib/rl-curl' "$SKILL_FILE" || fail "C10: SKILL dispatch directive does 
 grep -q -- '--rate-state-dir=' "$SKILL_FILE" || fail "C10: SKILL dispatch directive lacks the per-call --rate-state-dir= injection form"
 pass "C10: rl-curl shim, persona allowlists and per-call injection are consistent"
 
+# C11 (RFC 0012 DR-3/DR-4): the Workflow dispatches every agent with an
+# opts.schema and the agent's ## Output section must NAME the StructuredOutput
+# return fields — otherwise the agent receives a YAML-by-prose contract that
+# CONTRADICTS the schema it is forced through (the DR-4 prompt-tension class).
+# The disk YAML stays the evidence channel (C7 keeps verdict/findings/confidence);
+# this asserts the ADDED dual-channel stanza names the exact schema.* field set
+# workflow.js sends (S.persona / S.monitorPrimary / S.monitorDA).
+for a in "${PERSONA_AGENTS[@]}"; do
+  F="$AGENT_DIR/$a.md"
+  grep -q 'StructuredOutput' "$F" || fail "C11 $a: ## Output lacks the StructuredOutput dual-channel stanza (DR-4 prompt tension — the schema dispatch is undocumented)"
+  for field in scratchPath findingCount; do
+    grep -qF "$field" "$F" || fail "C11 $a: StructuredOutput stanza missing the '$field' schema field (S.persona)"
+  done
+  # The persona return field is `persona`; assert the stanza names it as a return field.
+  grep -qE '`persona`' "$F" || fail "C11 $a: StructuredOutput stanza missing the 'persona' return field (S.persona)"
+done
+# monitor-primary: scratchPath + followUps (camelCase return) + verifiedAdded,
+# AND the explicit reconciliation with the snake_case disk key.
+MP="$AGENT_DIR/testers-monitor-primary.md"
+grep -q 'StructuredOutput' "$MP" || fail "C11 monitor-primary: missing the StructuredOutput dual-channel stanza"
+for field in scratchPath followUps verifiedAdded; do
+  grep -qF "$field" "$MP" || fail "C11 monitor-primary: StructuredOutput stanza missing the '$field' schema field (S.monitorPrimary)"
+done
+# The camelCase return vs snake_case disk-key reconciliation must be explicit
+# (both names present so the two channels are documented in lockstep).
+grep -q 'follow_ups_for_next_wave' "$MP" \
+  || fail "C11 monitor-primary: stanza does not reconcile the snake_case follow_ups_for_next_wave disk key with the camelCase followUps return"
+# monitor-devils-advocate: scratchPath + rejected.
+MDA="$AGENT_DIR/testers-monitor-devils-advocate.md"
+grep -q 'StructuredOutput' "$MDA" || fail "C11 monitor-devils-advocate: missing the StructuredOutput dual-channel stanza"
+for field in scratchPath rejected; do
+  grep -qF "$field" "$MDA" || fail "C11 monitor-devils-advocate: StructuredOutput stanza missing the '$field' schema field (S.monitorDA)"
+done
+pass "C11: all 8 agents document the StructuredOutput dual-channel return matching the workflow schema (DR-4)"
+
 echo "ALL TESTS PASS"
