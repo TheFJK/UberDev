@@ -45,6 +45,20 @@ ck "no pre-dispatch gh rate_limit probe remains in the SKILL" "[ \$(grep -c 'gh 
 ck "no RATE_OK gating remains in the SKILL" "[ \$(grep -c 'RATE_OK' '$SKILL') -eq 0 ]"
 ck "CB6 delegation to findings-to-issues Step 2 documented" "grep -q 'findings-to-issues.md Step 2' '$SKILL'"
 
+# The Phase-5 (File leftover issues) dispatch fence is a FRESH shell (note its
+# own #171 RUN_ID/RUN_DIR rehydrate stanza), so it MUST re-resolve WORKING_DIR_ABS
+# locally — the only other assignment lives in the Phase-0 preflight fence, which
+# does not survive the fence boundary. Reading it without assigning leaves it
+# empty -> DISPATCH_OK=0 -> findings-to-issues is silently skipped every run.
+# Mirror the uberscan twin (which assigns it inline before ORIGIN_URL).
+# The SKILL has exactly TWO dispatch-resolution sites that guard on
+# $WORKING_DIR_ABS (Phase-0 preflight + Phase-5 leftover-issues), so the
+# count of git-rev-parse assignments of WORKING_DIR_ABS must be >= 2.
+WDA_ASSIGNS="$(grep -cF 'WORKING_DIR_ABS="$(git rev-parse --show-toplevel' "$SKILL")"
+WDA_GUARDS="$(grep -cF '[ -z "$WORKING_DIR_ABS" ]' "$SKILL")"
+ck "every WORKING_DIR_ABS guard fence also assigns it via git rev-parse --show-toplevel (fence-scoped state)" \
+  "[ \"\$WDA_ASSIGNS\" -ge \"\$WDA_GUARDS\" ] && [ \"\$WDA_GUARDS\" -ge 1 ]"
+
 echo "== alias registration (byte-match) =="
 ck "alias row present" "grep -q '^ubersimplify|ubersimplify|' '$SYNC'"
 TOOLS_CMD="$(grep '^allowed-tools:' "$CMD" | sed 's/^allowed-tools: //')"

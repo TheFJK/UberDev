@@ -172,6 +172,16 @@ ck "no pre-dispatch gh rate_limit probe remains in the SKILL" "[ \$(grep -c 'gh 
 ck "no RATE_OK gating remains in the SKILL" "[ \$(grep -c 'RATE_OK' '$SKILL') -eq 0 ]"
 ck "CB6 delegation to findings-to-issues Step 2 documented" "grep -q 'findings-to-issues.md Step 2' '$SKILL'"
 
+# The Phase-3 (File issues) dispatch fence is a FRESH shell (note its own #171
+# RUN_ID/RUN_DIR rehydrate stanza), so it MUST re-resolve WORKING_DIR_ABS inline
+# before guarding on it — reading it without assigning leaves it empty ->
+# DISPATCH_OK=0 -> findings-to-issues is silently skipped. Lock parity with the
+# ubersimplify twin: every guard fence must also carry the assignment.
+WDA_ASSIGNS="$(grep -cF 'WORKING_DIR_ABS="$(git rev-parse --show-toplevel' "$SKILL")"
+WDA_GUARDS="$(grep -cF '[ -z "$WORKING_DIR_ABS" ]' "$SKILL")"
+ck "every WORKING_DIR_ABS guard fence also assigns it via git rev-parse --show-toplevel (fence-scoped state)" \
+  "[ \"\$WDA_ASSIGNS\" -ge \"\$WDA_GUARDS\" ] && [ \"\$WDA_GUARDS\" -ge 1 ]"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [ $FAIL -eq 0 ] && exit 0 || exit 1

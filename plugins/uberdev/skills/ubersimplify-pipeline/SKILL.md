@@ -590,6 +590,10 @@ if [ "$NO_ISSUES" != "1" ]; then
   # findings-to-issues REQUIRES an absolute working_dir inside the worktree (it
   # refuses with input-malformed otherwise); repo_slug + pr_commit_sha back the
   # issue-body Origin link. Local origin-URL parse first (fast); fall back to gh.
+  # This fence is a fresh shell (see the #171 RUN_ID rehydrate above), so
+  # WORKING_DIR_ABS must be re-resolved here — the Phase-0 preflight assignment
+  # does not survive the fence boundary (mirrors uberscan-pipeline Phase 3).
+  WORKING_DIR_ABS="$(git rev-parse --show-toplevel 2>/dev/null)"
   ORIGIN_URL="$(git remote get-url origin 2>/dev/null)"
   REPO_SLUG="$(printf '%s' "$ORIGIN_URL" | sed -E 's@.*github\.com[:/]([^/]+/[^/.]+)(\.git)?$@\1@')"
   if [ -z "$REPO_SLUG" ] || [ "$REPO_SLUG" = "$ORIGIN_URL" ]; then
