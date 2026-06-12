@@ -215,12 +215,19 @@ MAX_TOTAL_ISSUES=$MAX_ISSUES
 CONCURRENCY=$CONCURRENCY
 TOTAL_ISSUES=0
 CHUNK_COUNT=0
-CIRCUIT_BREAKER_HALT=
-WRITES_SO_FAR=0
 EOF
+# Note: no CIRCUIT_BREAKER_HALT / WRITES_SO_FAR keys here — the only live fold
+# counter is the in-fence WRITES accumulator in Phase 5 (fence-scoped state in
+# a directive-emitter never survives to a later fence, so a run-state mirror of
+# it would be written once and never read — dead by construction).
 
-# Bootstrap pointer for cross-shell rehydration (memory project_uberdev_goal_runstate_crossshell_traps)
-printf '%s\n' "$RUN_ID" > "$UBERDEV_TMPDIR/cluster-active-id.txt"
+# Bootstrap pointer for cross-shell rehydration (memory project_uberdev_goal_runstate_crossshell_traps).
+# TWO lines: RUN_ID, then RUN_DIR_ABS. RUN_DIR is created under the repo CWD
+# (see mkdir above), NOT under $UBERDEV_TMPDIR — so later fresh-shell phases can
+# only relocate the run dir if the pointer carries the absolute path; a bare
+# RUN_ID would leave them with a CWD-relative guess that breaks the moment the
+# orchestrator's shell starts somewhere other than the repo root.
+printf '%s\n%s\n' "$RUN_ID" "$RUN_DIR_ABS" > "$UBERDEV_TMPDIR/cluster-active-id.txt"
 
 echo "DISPATCH: phase=preflight RUN_DIR=$RUN_DIR MODE=$MODE"
 ```
@@ -231,20 +238,33 @@ echo "DISPATCH: phase=preflight RUN_DIR=$RUN_DIR MODE=$MODE"
 set -u
 : "${UBERDEV_TMPDIR:=/tmp}"
 
-# Rehydrate from the bootstrap pointer (fresh shell — env did NOT survive)
+# Rehydrate from the bootstrap pointer (fresh shell — env did NOT survive).
+# Pointer format (Phase 0): line 1 = RUN_ID, line 2 = RUN_DIR_ABS. The old
+# probe $UBERDEV_TMPDIR/.uberdev/cluster/$RUN_ID could NEVER exist — Phase 0
+# creates RUN_DIR under the repo CWD, not under $UBERDEV_TMPDIR.
 if [ ! -r "$UBERDEV_TMPDIR/cluster-active-id.txt" ]; then
   echo "cluster: bootstrap pointer missing at $UBERDEV_TMPDIR/cluster-active-id.txt" >&2
   exit 2
 fi
-RUN_ID="$(cat "$UBERDEV_TMPDIR/cluster-active-id.txt")"
+RUN_ID=""
+RUN_DIR_PTR=""
+{ IFS= read -r RUN_ID || :; IFS= read -r RUN_DIR_PTR || :; } < "$UBERDEV_TMPDIR/cluster-active-id.txt"
 case "$RUN_ID" in
   ''|*[!0-9A-Za-z._-]*|*..*)
     echo "cluster: invalid RUN_ID pointer" >&2
     exit 2 ;;
 esac
-RUN_DIR="$UBERDEV_TMPDIR/.uberdev/cluster/$RUN_ID"
-# Fallback to repo-relative path if absolute did not land
-if [ ! -r "$RUN_DIR/run-state.txt" ]; then
+# Pointer RUN_DIR must be absolute and traversal-free; else discard it.
+case "$RUN_DIR_PTR" in
+  /*) ;;
+  *) RUN_DIR_PTR="" ;;
+esac
+case "$RUN_DIR_PTR" in
+  *..*) RUN_DIR_PTR="" ;;
+esac
+RUN_DIR="$RUN_DIR_PTR"
+# Fallback to repo-relative path (works only when CWD == repo root)
+if [ -z "$RUN_DIR" ] || [ ! -r "$RUN_DIR/run-state.txt" ]; then
   RUN_DIR=".uberdev/cluster/$RUN_ID"
 fi
 if [ ! -r "$RUN_DIR/run-state.txt" ]; then
@@ -373,16 +393,31 @@ echo "DISPATCH: phase=fetch TOTAL_ISSUES=$TOTAL REFUSE_COUNT=$REFUSE_COUNT"
 set -u
 : "${UBERDEV_TMPDIR:=/tmp}"
 
-# Rehydrate
-RUN_ID="$(cat "$UBERDEV_TMPDIR/cluster-active-id.txt" 2>/dev/null)"
+# Rehydrate from the 2-line bootstrap pointer (RUN_ID, RUN_DIR_ABS)
+RUN_ID=""
+RUN_DIR_PTR=""
+if [ -r "$UBERDEV_TMPDIR/cluster-active-id.txt" ]; then
+  { IFS= read -r RUN_ID || :; IFS= read -r RUN_DIR_PTR || :; } < "$UBERDEV_TMPDIR/cluster-active-id.txt"
+fi
 case "$RUN_ID" in
   ''|*[!0-9A-Za-z._-]*|*..*)
     echo "cluster: invalid RUN_ID pointer at phase 2" >&2
     exit 2 ;;
 esac
-RUN_DIR="$UBERDEV_TMPDIR/.uberdev/cluster/$RUN_ID"
-if [ ! -r "$RUN_DIR/run-state.txt" ]; then
+case "$RUN_DIR_PTR" in
+  /*) ;;
+  *) RUN_DIR_PTR="" ;;
+esac
+case "$RUN_DIR_PTR" in
+  *..*) RUN_DIR_PTR="" ;;
+esac
+RUN_DIR="$RUN_DIR_PTR"
+if [ -z "$RUN_DIR" ] || [ ! -r "$RUN_DIR/run-state.txt" ]; then
   RUN_DIR=".uberdev/cluster/$RUN_ID"
+fi
+if [ ! -r "$RUN_DIR/run-state.txt" ]; then
+  echo "cluster: cannot locate run-state.txt for RUN_ID=$RUN_ID at phase 2" >&2
+  exit 2
 fi
 while IFS='=' read -r k v; do
   case "$k" in
@@ -450,16 +485,31 @@ echo "DISPATCH: phase=chunk CHUNK_COUNT=$CHUNK_COUNT POOL_SIZE=$POOL_SIZE"
 set -u
 : "${UBERDEV_TMPDIR:=/tmp}"
 
-# Rehydrate
-RUN_ID="$(cat "$UBERDEV_TMPDIR/cluster-active-id.txt" 2>/dev/null)"
+# Rehydrate from the 2-line bootstrap pointer (RUN_ID, RUN_DIR_ABS)
+RUN_ID=""
+RUN_DIR_PTR=""
+if [ -r "$UBERDEV_TMPDIR/cluster-active-id.txt" ]; then
+  { IFS= read -r RUN_ID || :; IFS= read -r RUN_DIR_PTR || :; } < "$UBERDEV_TMPDIR/cluster-active-id.txt"
+fi
 case "$RUN_ID" in
   ''|*[!0-9A-Za-z._-]*|*..*)
     echo "cluster: invalid RUN_ID pointer at phase 3" >&2
     exit 2 ;;
 esac
-RUN_DIR="$UBERDEV_TMPDIR/.uberdev/cluster/$RUN_ID"
-if [ ! -r "$RUN_DIR/run-state.txt" ]; then
+case "$RUN_DIR_PTR" in
+  /*) ;;
+  *) RUN_DIR_PTR="" ;;
+esac
+case "$RUN_DIR_PTR" in
+  *..*) RUN_DIR_PTR="" ;;
+esac
+RUN_DIR="$RUN_DIR_PTR"
+if [ -z "$RUN_DIR" ] || [ ! -r "$RUN_DIR/run-state.txt" ]; then
   RUN_DIR=".uberdev/cluster/$RUN_ID"
+fi
+if [ ! -r "$RUN_DIR/run-state.txt" ]; then
+  echo "cluster: cannot locate run-state.txt for RUN_ID=$RUN_ID at phase 3" >&2
+  exit 2
 fi
 while IFS='=' read -r k v; do
   case "$k" in
@@ -484,7 +534,10 @@ echo "DISPATCH: phase=analyze WAVE_SIZE=$CONCURRENCY CHUNK_COUNT=$CHUNK_COUNT"
 The orchestrating session reads each `DISPATCH:` line and fires
 `Task("issue-similarity-analyzer", $prompt_path)` calls in **single-message batches of
 `$CONCURRENCY`** (skill `dispatching-parallel-agents`). Wave-major: wait for each wave's
-full return before firing the next. Each agent writes
+full return before firing the next. Each agent RETURNS its clusters as a trailing
+fenced YAML block — the analyzer is read-only (no Write tool;
+`agents/issue-similarity-analyzer.md` whitelists only `Bash(gh issue view*)` + `Read`)
+— and the ORCHESTRATOR transcribes each return verbatim to
 `$RUN_DIR/analyses/chunk-NN-clusters.yaml`.
 
 ## Phase 3.5 — Cross-chunk meta-pass (skip iff TOTAL_ISSUES < 2 x CHUNK_SIZE)
@@ -493,16 +546,31 @@ full return before firing the next. Each agent writes
 set -u
 : "${UBERDEV_TMPDIR:=/tmp}"
 
-# Rehydrate
-RUN_ID="$(cat "$UBERDEV_TMPDIR/cluster-active-id.txt" 2>/dev/null)"
+# Rehydrate from the 2-line bootstrap pointer (RUN_ID, RUN_DIR_ABS)
+RUN_ID=""
+RUN_DIR_PTR=""
+if [ -r "$UBERDEV_TMPDIR/cluster-active-id.txt" ]; then
+  { IFS= read -r RUN_ID || :; IFS= read -r RUN_DIR_PTR || :; } < "$UBERDEV_TMPDIR/cluster-active-id.txt"
+fi
 case "$RUN_ID" in
   ''|*[!0-9A-Za-z._-]*|*..*)
     echo "cluster: invalid RUN_ID pointer at phase 3.5" >&2
     exit 2 ;;
 esac
-RUN_DIR="$UBERDEV_TMPDIR/.uberdev/cluster/$RUN_ID"
-if [ ! -r "$RUN_DIR/run-state.txt" ]; then
+case "$RUN_DIR_PTR" in
+  /*) ;;
+  *) RUN_DIR_PTR="" ;;
+esac
+case "$RUN_DIR_PTR" in
+  *..*) RUN_DIR_PTR="" ;;
+esac
+RUN_DIR="$RUN_DIR_PTR"
+if [ -z "$RUN_DIR" ] || [ ! -r "$RUN_DIR/run-state.txt" ]; then
   RUN_DIR=".uberdev/cluster/$RUN_ID"
+fi
+if [ ! -r "$RUN_DIR/run-state.txt" ]; then
+  echo "cluster: cannot locate run-state.txt for RUN_ID=$RUN_ID at phase 3.5" >&2
+  exit 2
 fi
 while IFS='=' read -r k v; do
   case "$k" in
@@ -543,9 +611,11 @@ echo "DISPATCH: phase=meta prompt=$RUN_DIR/dispatches/meta-prompt.md"
 
 After the meta-pass prompt is emitted, the orchestrator fires ONE more
 `Task("issue-similarity-analyzer", $RUN_DIR/dispatches/meta-prompt.md)` call.
-The agent writes `$RUN_DIR/analyses/meta-clusters.yaml`. Per prior-art.md §7,
-the cross-chunk pass also acts as a soft calibration signal — clusters proposed
-by multiple chunks gain effective confidence.
+The agent RETURNS its consolidated clusters as a trailing fenced YAML block
+(read-only — no Write tool); the ORCHESTRATOR transcribes that return verbatim
+to `$RUN_DIR/analyses/meta-clusters.yaml`. Per prior-art.md §7, the cross-chunk
+pass also acts as a soft calibration signal — clusters proposed by multiple
+chunks gain effective confidence.
 
 ## Phase 4 — Propose
 
@@ -553,16 +623,31 @@ by multiple chunks gain effective confidence.
 set -u
 : "${UBERDEV_TMPDIR:=/tmp}"
 
-# Rehydrate
-RUN_ID="$(cat "$UBERDEV_TMPDIR/cluster-active-id.txt" 2>/dev/null)"
+# Rehydrate from the 2-line bootstrap pointer (RUN_ID, RUN_DIR_ABS)
+RUN_ID=""
+RUN_DIR_PTR=""
+if [ -r "$UBERDEV_TMPDIR/cluster-active-id.txt" ]; then
+  { IFS= read -r RUN_ID || :; IFS= read -r RUN_DIR_PTR || :; } < "$UBERDEV_TMPDIR/cluster-active-id.txt"
+fi
 case "$RUN_ID" in
   ''|*[!0-9A-Za-z._-]*|*..*)
     echo "cluster: invalid RUN_ID pointer at phase 4" >&2
     exit 2 ;;
 esac
-RUN_DIR="$UBERDEV_TMPDIR/.uberdev/cluster/$RUN_ID"
-if [ ! -r "$RUN_DIR/run-state.txt" ]; then
+case "$RUN_DIR_PTR" in
+  /*) ;;
+  *) RUN_DIR_PTR="" ;;
+esac
+case "$RUN_DIR_PTR" in
+  *..*) RUN_DIR_PTR="" ;;
+esac
+RUN_DIR="$RUN_DIR_PTR"
+if [ -z "$RUN_DIR" ] || [ ! -r "$RUN_DIR/run-state.txt" ]; then
   RUN_DIR=".uberdev/cluster/$RUN_ID"
+fi
+if [ ! -r "$RUN_DIR/run-state.txt" ]; then
+  echo "cluster: cannot locate run-state.txt for RUN_ID=$RUN_ID at phase 4" >&2
+  exit 2
 fi
 while IFS='=' read -r k v; do
   case "$k" in
@@ -571,33 +656,70 @@ while IFS='=' read -r k v; do
   export "$k=$v"
 done < "$RUN_DIR/run-state.txt"
 
-# Aggregate all analyses/*.yaml into one JSON array, filter by MIN_CONFIDENCE
+# Aggregate analyses into one JSON array, filter by MIN_CONFIDENCE.
+# Source selection: when the Phase-3.5 meta-pass ran, meta-clusters.yaml is the
+# AUTHORITATIVE consolidation (it passes single-chunk clusters through verbatim
+# — cluster_propose.py meta semantics), so aggregate ONLY it; globbing it
+# TOGETHER with the chunk YAMLs double-counts every passthrough cluster and
+# double-folds under --execute. No meta file → aggregate the chunk YAMLs.
+# Either way, dedupe by (lead, frozenset(members)).
+# A missing PyYAML dependency FAILS LOUD (nonzero exit + FATAL on stderr) —
+# never a silent empty-set stdout + exit 0, which the downstream
+# non-empty-array guard would accept as a legitimate empty run (the #263/#265
+# masking class).
 python3 - "$RUN_DIR" "$MIN_CONFIDENCE" > "$RUN_DIR/clusters-filtered.json" <<'PY'
 import json, sys, pathlib
 try:
     import yaml
 except ImportError:
-    sys.stderr.write("cluster: WARN PyYAML not importable; emitting empty cluster set (0 clusters). Install pyyaml to enable clustering.\n")
-    print('[]')
-    sys.exit(0)
+    sys.stderr.write("cluster: FATAL PyYAML not importable; cannot aggregate analyses YAML. Install pyyaml (pip install pyyaml) and re-run.\n")
+    sys.exit(3)
 run_dir = pathlib.Path(sys.argv[1])
 min_conf = float(sys.argv[2])
+meta_path = run_dir / "analyses" / "meta-clusters.yaml"
+if meta_path.is_file():
+    sources = [meta_path]
+    meta_only = True
+else:
+    sources = sorted((run_dir / "analyses").glob("*.yaml"))
+    meta_only = False
 clusters = []
-for yf in sorted((run_dir / "analyses").glob("*.yaml")):
+seen = set()
+for yf in sources:
     try:
         data = yaml.safe_load(yf.read_text()) or {}
     except Exception as e:
+        if meta_only:
+            # Sole source: a parse failure here would silently become "[] = no
+            # clusters" — fail loud instead (same masking class as the import).
+            sys.stderr.write(f"cluster: FATAL unparseable meta-clusters.yaml {yf}: {e}\n")
+            sys.exit(3)
         sys.stderr.write(f"cluster: WARN skipping unparseable analyses YAML {yf}: {e}\n")
         continue
     for c in data.get("clusters", []) or []:
         try:
-            if float(c.get("confidence", 0)) >= min_conf:
-                clusters.append(c)
+            if float(c.get("confidence", 0)) < min_conf:
+                continue
         except (TypeError, ValueError) as e:
             sys.stderr.write(f"cluster: WARN skipping cluster with non-numeric confidence in {yf}: {e}\n")
             continue
+        try:
+            key = (int(c.get("lead")), frozenset(int(m) for m in (c.get("members") or [])))
+        except (TypeError, ValueError) as e:
+            sys.stderr.write(f"cluster: WARN skipping cluster with non-numeric lead/members in {yf}: {e}\n")
+            continue
+        if key in seen:
+            sys.stderr.write(f"cluster: WARN dropping duplicate cluster lead={key[0]} (same member set already aggregated)\n")
+            continue
+        seen.add(key)
+        clusters.append(c)
 print(json.dumps(clusters))
 PY
+AGG_RC=$?
+if [ "$AGG_RC" -ne 0 ]; then
+  echo "cluster: FATAL - Phase 4 aggregation failed (rc=$AGG_RC); see stderr above. Aborting before render/dispatch." >&2
+  exit 2
+fi
 
 # Render proposal report via cluster_propose.py (default mode = render)
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/cluster-pipeline/cluster_propose.py" \
@@ -635,16 +757,31 @@ fi
 set -u
 : "${UBERDEV_TMPDIR:=/tmp}"
 
-# Rehydrate
-RUN_ID="$(cat "$UBERDEV_TMPDIR/cluster-active-id.txt" 2>/dev/null)"
+# Rehydrate from the 2-line bootstrap pointer (RUN_ID, RUN_DIR_ABS)
+RUN_ID=""
+RUN_DIR_PTR=""
+if [ -r "$UBERDEV_TMPDIR/cluster-active-id.txt" ]; then
+  { IFS= read -r RUN_ID || :; IFS= read -r RUN_DIR_PTR || :; } < "$UBERDEV_TMPDIR/cluster-active-id.txt"
+fi
 case "$RUN_ID" in
   ''|*[!0-9A-Za-z._-]*|*..*)
     echo "cluster: invalid RUN_ID pointer at phase 5" >&2
     exit 2 ;;
 esac
-RUN_DIR="$UBERDEV_TMPDIR/.uberdev/cluster/$RUN_ID"
-if [ ! -r "$RUN_DIR/run-state.txt" ]; then
+case "$RUN_DIR_PTR" in
+  /*) ;;
+  *) RUN_DIR_PTR="" ;;
+esac
+case "$RUN_DIR_PTR" in
+  *..*) RUN_DIR_PTR="" ;;
+esac
+RUN_DIR="$RUN_DIR_PTR"
+if [ -z "$RUN_DIR" ] || [ ! -r "$RUN_DIR/run-state.txt" ]; then
   RUN_DIR=".uberdev/cluster/$RUN_ID"
+fi
+if [ ! -r "$RUN_DIR/run-state.txt" ]; then
+  echo "cluster: cannot locate run-state.txt for RUN_ID=$RUN_ID at phase 5" >&2
+  exit 2
 fi
 while IFS='=' read -r k v; do
   case "$k" in
@@ -657,6 +794,21 @@ done < "$RUN_DIR/run-state.txt"
 if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/secret-scan.sh" ]; then
   . "${CLAUDE_PLUGIN_ROOT}/lib/secret-scan.sh"
 fi
+
+# Portable sha256: GNU coreutils ships sha256sum; stock macOS ships only
+# shasum. Fail LOUD up front if neither exists — an empty fingerprint would
+# make every later cluster false-SKIP on idempotency layer (a).
+if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+  echo "error: neither sha256sum nor shasum found on PATH; cannot compute fold fingerprints" >&2
+  exit 2
+fi
+_uberdev_cluster_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum
+  else
+    shasum -a 256
+  fi
+}
 
 # Provision the folded label — fail-CLOSED: if the label cannot be created or
 # updated, every subsequent `gh issue edit --add-label "folded"` would silently
@@ -707,8 +859,14 @@ while IFS= read -r cluster; do
     continue
   fi
 
-  # Fingerprint via sha256 + cut -c1-16 (NOT awk substr — renderer collision)
-  FP="$(printf '%s:%s:%s' "$LEAD" "$MEMBERS_CSV" "$RATIONALE" | sha256sum | cut -c1-16)"
+  # Fingerprint via portable sha256 (sha256sum or shasum -a 256, probed above)
+  # + cut -c1-16 (NOT awk substr — renderer collision)
+  FP="$(printf '%s:%s:%s' "$LEAD" "$MEMBERS_CSV" "$RATIONALE" | _uberdev_cluster_sha256 | cut -c1-16)"
+  case "$FP" in
+    *[!a-f0-9]*|"")
+      echo "error: fingerprint computation produced non-hex output for cluster $LEAD; aborting fold" >&2
+      exit 2 ;;
+  esac
 
   # Idempotency layer (a) — JSONL ledger
   if grep -qF "\"fingerprint\":\"$FP\"" "$RUN_DIR/ledger.jsonl" 2>/dev/null; then

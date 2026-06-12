@@ -23,6 +23,11 @@
 #   C8    — --repo regex ([A-Za-z0-9._-]) + viewerPermission preflight present
 #   C9    — --execute floor 0.85 + error message "requires --min-confidence >= 0.85"
 #   C10   — RFC docs/rfc/0010-uberdev-cluster-command.md exists and is non-empty
+#   C11   — RFC 0012 §3.11 light-R5 shape locks: 2-line bootstrap pointer carries
+#           RUN_DIR_ABS; dead CIRCUIT_BREAKER_HALT/WRITES_SO_FAR run-state keys
+#           gone; PyYAML degrade fails loud (no print('[]') resurrection);
+#           portable fingerprint (sha256sum OR shasum -a 256); analyzer-writes
+#           prose corrected to orchestrator-transcribes
 
 set -u
 
@@ -222,6 +227,29 @@ if [ -s "$RFC" ]; then
 else
   echo "  FAIL  C10.rfc-present"; FAIL=$((FAIL+1))
 fi
+
+echo "== C11: RFC 0012 §3.11 light-R5 shape locks =="
+# (a) Phase 0 persists RUN_DIR_ABS as pointer line 2 (the bare-RUN_ID pointer
+# left fresh-shell phases probing a $UBERDEV_TMPDIR path that can never exist).
+assert_grep "$SKILL" "printf '%s\\\\n%s\\\\n' \"\\\$RUN_ID\" \"\\\$RUN_DIR_ABS\"" \
+  "C11.pointer-carries-run-dir-abs"
+assert_no_grep "$SKILL" 'RUN_DIR="\$UBERDEV_TMPDIR/\.uberdev/cluster/\$RUN_ID"' \
+  "C11.dead-tmpdir-probe-gone"
+# (b) dead run-state keys deleted (written once, never read — fence-scoped
+# counters cannot live in run-state in a directive-emitter).
+assert_no_grep "$SKILL" '^CIRCUIT_BREAKER_HALT=' "C11.no-circuit-breaker-halt-key"
+assert_no_grep "$SKILL" '^WRITES_SO_FAR='        "C11.no-writes-so-far-key"
+# (c) PyYAML degrade fails loud; the silent '[]' + exit 0 shape must not return.
+assert_grep    "$SKILL" 'cluster: FATAL PyYAML not importable' "C11.pyyaml-fail-loud"
+assert_no_grep "$SKILL" "print\\('\\[\\]'\\)"                  "C11.no-silent-empty-print"
+# (d) portable fingerprint: shasum fallback for sha256sum-less macOS.
+assert_grep "$SKILL" 'shasum -a 256' "C11.shasum-fallback"
+# (e) analyzer has no Write tool — prose says the ORCHESTRATOR transcribes.
+assert_grep    "$SKILL" 'ORCHESTRATOR transcribes' "C11.orchestrator-transcribes-prose"
+assert_no_grep "$SKILL" 'Each agent writes'        "C11.no-agent-writes-prose"
+# (f) meta-authoritative aggregation marker: the meta-only source selection.
+assert_grep "$SKILL" 'meta-clusters\.yaml' "C11.meta-clusters-ref"
+assert_grep "$SKILL" 'frozenset'           "C11.dedupe-frozenset"
 
 echo
 echo "## cluster shape gates: $PASS pass, $FAIL fail"

@@ -17,6 +17,10 @@
 #   DP8   — harden-issue creation (gh issue create)
 #   DP9   — scope-gate section
 #   DP10  — slug-sanitization security gate + heredoc safety + PROTOTYPE MODE banner
+#   DP11  — machine-parseable trailing yaml report fences for builders/reviewer
+#           (RFC 0012 §3.12 light-R3): builder fence keys paths/smoke_test/
+#           cmd/result/deferred/blocker; reviewer fence keys verdict/blockers/
+#           harden_notes; Phase 3 stages the fence-parsed paths, never prose
 set -u
 set -o pipefail
 
@@ -137,6 +141,42 @@ assert_grep "$SKILL_FILE" "single-quoted delimiter|<<'EOF'" \
 # whole point of /dev.
 assert_grep "$SKILL_FILE" 'PROTOTYPE MODE' \
   "DP10.5: PROTOTYPE MODE banner present in implementer-prompt template"
+
+echo
+echo "== DP11: machine-parseable trailing yaml report fences (RFC 0012 §3.12 light-R3) =="
+# DP11.1-3 — builder OUTPUT CONTRACT is a trailing fenced yaml block with the
+# {paths[], smoke_test{cmd,result}, deferred[], blocker} schema. The fence keys
+# sit at column 0 inside the prompt template.
+assert_grep "$SKILL_FILE" '^paths:' \
+  "DP11.1: builder fence has paths: key"
+assert_grep "$SKILL_FILE" '^smoke_test:' \
+  "DP11.2: builder fence has smoke_test: key"
+assert_grep "$SKILL_FILE" '^[[:space:]]*cmd:' \
+  "DP11.2b: builder fence has smoke_test.cmd key"
+assert_grep "$SKILL_FILE" '^[[:space:]]*result:' \
+  "DP11.2c: builder fence has smoke_test.result key"
+assert_grep "$SKILL_FILE" '^deferred:' \
+  "DP11.3a: builder fence has deferred: key"
+assert_grep "$SKILL_FILE" '^blocker:' \
+  "DP11.3b: builder fence has blocker: key"
+# DP11.4 — reviewer OUTPUT CONTRACT fence: verdict / blockers / harden_notes.
+assert_grep "$SKILL_FILE" '^verdict:' \
+  "DP11.4a: reviewer fence has verdict: key"
+assert_grep "$SKILL_FILE" '^blockers:' \
+  "DP11.4b: reviewer fence has blockers: key"
+assert_grep "$SKILL_FILE" '^harden_notes:' \
+  "DP11.4c: reviewer fence has harden_notes: key"
+# DP11.5 — Phase 3 stages the EXACT paths parsed from the fence, and the
+# free-prose fallback is forbidden (missing/unparseable fence => no commit).
+assert_grep "$SKILL_FILE" 'EXACT paths parsed from that chunk.s report fence' \
+  "DP11.5: Phase 3 stages fence-parsed paths"
+assert_grep "$SKILL_FILE" 'never a file' \
+  "DP11.5b: prose-reconstruction of the staging list is forbidden"
+assert_no_grep "$SKILL_FILE" 'Created/modified paths:' \
+  "DP11.6: old free-prose OUTPUT CONTRACT line removed"
+# DP11.7 — reviewer fence fail-closed rule: missing/unparseable => BLOCKER.
+assert_grep "$SKILL_FILE" 'treated as .BLOCKER. \(fail-closed\)' \
+  "DP11.7: missing/unparseable reviewer fence fails closed to BLOCKER"
 
 echo
 echo "== Summary =="
