@@ -172,10 +172,19 @@ else
   echo "  PASS  G1.regression — old wave-*.md glob removed from live REVIEW_FILES= ls line"
   PASS=$((PASS + 1))
 fi
-# Glob #2 — RETAINED for legacy artifact matching.
-assert_grep "$FINISH_BRANCH" \
-  'issue-\*/post-impl-review\.md' \
-  "G2 — glob #2 .uberdev/research/issue-*/post-impl-review.md RETAINED for legacy artifact matching"
+# Glob #2 — DELETED (#308 / RFC 0012 §3.5). The legacy
+# .uberdev/research/issue-*/post-impl-review.md glob component pointed at the
+# orchestrator research cache, which was removed after a live grep proved it
+# had zero writers — the glob could only ever match nothing. It must NOT
+# reappear in any executable REVIEW_FILES= ls line (the cache + its read-side
+# oracle move together).
+if grep -E '^\s*REVIEW_FILES=.*issue-\*/post-impl-review\.md' "$FINISH_BRANCH" >/dev/null; then
+  echo "  FAIL  G2 — orphaned issue-*/post-impl-review.md glob must be removed from live REVIEW_FILES= ls line (#308 cache deletion)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  G2 — orphaned issue-*/post-impl-review.md glob removed from live REVIEW_FILES= ls line (#308 cache deletion)"
+  PASS=$((PASS + 1))
+fi
 
 echo
 echo "== Issue #67: Options 1/3/4 bypass caveat documented in interactive-mode docs =="
@@ -186,8 +195,8 @@ assert_grep "$FINISH_BRANCH" \
   'Only Option 2.*preserves the chain|Option 2.*preserves the chain' \
   "C2 — caveat names Option 2 as the only chain-preserving choice"
 assert_grep "$FINISH_BRANCH" \
-  '/uberdev:review-pr.*Phase 1.*5-reviewer|5-reviewer.*post-impl-review fanout|post-impl-review.*sole live caller' \
-  "C3 — caveat cross-references /uberdev:review-pr Phase 1 as the post-impl-review host"
+  '/uberdev:review-pr.*Phase 1.*6-reviewer|6-reviewer.*post-impl-review fanout|post-impl-review.*sole live caller' \
+  "C3 — caveat cross-references /uberdev:review-pr Phase 1 as the post-impl-review host (6-reviewer per #308 count fix)"
 
 echo
 echo "== Issue #67: Quick Reference table includes Post-impl review column =="

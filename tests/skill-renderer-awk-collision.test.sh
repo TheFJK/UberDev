@@ -372,8 +372,17 @@ fi
 
 awk '/^emit_topic_log\(\) \{/,/^\}/' "$ORCH_SKILL" > "$fixture_emit_topic_log_src"
 if [ ! -s "$fixture_emit_topic_log_src" ]; then
-  echo "  FAIL  R6 could not extract emit_topic_log() definition from $ORCH_SKILL"
-  FAIL=$((FAIL+1))
+  # emit_topic_log() was part of the Phase-1 research-cache freshness predicate,
+  # which RFC 0012 §3.5 / #308 DELETED from orchestrator/SKILL.md after a live
+  # grep proved the cache had zero writers. With the function gone there is no
+  # live subject to runtime-check — that is the correct post-deletion state, not
+  # a regression. R6's behavioral check below still runs (and guards the
+  # zsh-reserved-local hazard) whenever the function IS present; the static R4
+  # bare-$N scan over the whole SKILL.md remains in force regardless. The R5.bad
+  # / R5.safe inline fixtures preserve the classifier proof independently of this
+  # function's existence.
+  echo "  PASS  R6 emit_topic_log() absent from $ORCH_SKILL (retired with the #308 research-cache deletion; nothing to runtime-check)"
+  PASS=$((PASS+1))
 else
   # Hoist the function-body read out of the per-shell loop — the file content
   # is invariant across iterations, so one cat instead of N.

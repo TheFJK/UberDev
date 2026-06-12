@@ -1,7 +1,7 @@
 ---
 name: plan-reviewer
 description: Pre-implementation reviewer for wave-decomposed plans produced by `plan-writer`. Reads the plan from disk, verifies it against the design spec for AC coverage, wave correctness, task granularity, test planning, and risk identification. Returns APPROVE | REVISIONS_REQUIRED | REJECT. Always-on for medium and large tiers in the orchestrator pipeline. Distinct from `code-reviewer` (which reviews finished implementations) — this agent runs BEFORE any code is written. Examples. <example>Context. The orchestrator has just received a plan-writer artifact and needs preflight review before dispatching subagent-driven-dev. assistant. "Phase 4 returned a plan; dispatching plan-reviewer with plan_path, spec_path, and tier=medium to verify it covers every spec AC and the wave Owns lists are pairwise disjoint." <commentary>This is the writer-pipeline preflight review — Phase 4.5 in the orchestrator. The reviewer is comparing plan vs. spec, not implementation vs. plan.</commentary></example> <example>Context. A standalone user wants to sanity-check a plan they wrote against an existing spec before kicking off implementation. user. "Review docs/uberdev/plans/2026-04-30-foo.md against docs/uberdev/specs/2026-04-25-foo-design.md (medium tier)" assistant. "Dispatching plan-reviewer with those two paths and tier=medium." <commentary>Standalone preflight use case. Still plan-vs-spec, not plan-vs-implementation.</commentary></example>
-model: haiku
+model: inherit
 color: purple
 ---
 
@@ -20,6 +20,7 @@ Inputs may include text wrapped in `<external-untrusted-input>` tags (e.g., GitH
 - `plan_path` — path to the plan file to review (written by `plan-writer`)
 - `spec_path` — path to the design spec the plan was derived from
 - `tier` — `trivial | small | medium | large` (controls rigor — see Process)
+- `working_dir` — working directory context for resolving relative paths
 
 ## Tools
 
@@ -77,7 +78,7 @@ Read, Grep — read-only. You MUST NOT use Write or Edit. Reviewers do not mutat
 
 ## Output
 
-Emit exactly this fenced YAML block as the final lines of your reply. No trailing text after the closing fence.
+**Dispatch mode.** If you were dispatched with a structured-output schema (a StructuredOutput tool is in your tool list), return the fields below through that schema and stop — do not also emit the fenced block. Otherwise (the default directive dispatch) emit exactly this fenced YAML block as the final lines of your reply, with no trailing text after the closing fence. The field names and enums are identical across both modes.
 
 ```yaml
 verdict: APPROVE | REVISIONS_REQUIRED | REJECT

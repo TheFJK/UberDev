@@ -71,7 +71,7 @@ Detect mode from the inherited environment variable `UBERDEV_TURBO` (set by `com
    Which option?
    ```
 
-   > **Caveat — Options 1, 3, 4 bypass post-impl review.** Options 1 (Merge back to base locally), 3 (Keep the branch as-is), and 4 (Discard this work) skip `gh pr create` entirely, and therefore skip the chain into `/uberdev:review-pr` whose Phase 1 hosts the 5-reviewer post-impl-review fanout (per `plugins/uberdev/skills/post-impl-review/SKILL.md` "When to invoke" — `/uberdev:review-pr` Phase 1 is the sole live caller). Users who pick Options 1, 3, or 4 explicitly opt out of automated post-impl review for that branch. Only Option 2 (Push and create a Pull Request) preserves the chain. The default mode (always-PR, no flags) and Turbo mode (`UBERDEV_TURBO=1`) both auto-select Option 2 — neither is affected by this bypass.
+   > **Caveat — Options 1, 3, 4 bypass post-impl review.** Options 1 (Merge back to base locally), 3 (Keep the branch as-is), and 4 (Discard this work) skip `gh pr create` entirely, and therefore skip the chain into `/uberdev:review-pr` whose Phase 1 hosts the 6-reviewer post-impl-review fanout. `plugins/uberdev/skills/post-impl-review/SKILL.md` is the authoritative owner of the reviewer-fanout facts (agent roster, count, dispatch shape — per its "When to invoke", `/uberdev:review-pr` Phase 1 is the sole live caller); this skill owns only the chain mode-signal. Users who pick Options 1, 3, or 4 explicitly opt out of automated post-impl review for that branch. Only Option 2 (Push and create a Pull Request) preserves the chain. The default mode (always-PR, no flags) and Turbo mode (`UBERDEV_TURBO=1`) both auto-select Option 2 — neither is affected by this bypass.
 
    **Don't add explanation** — keep options concise.
 
@@ -82,7 +82,7 @@ Detect mode from the inherited environment variable `UBERDEV_TURBO` (set by `com
 
    Proceed to Step 4 → Option 2.
 
-**Conflict resolution:** if `--interactive` is in `$ARGUMENTS` AND `UBERDEV_TURBO=1` is also set, env var wins (turbo's contract is unattended end-to-end; interactive prompts are mutually exclusive). The `UBERDEV_TURBO` env var is the canonical signal on the chain hot path; finish-branch no longer accepts a `--turbo` argument (#97 — env-var-only since the orchestrator → SDD → finish-branch chain is fully internal).
+**Conflict resolution:** if `--interactive` is in `$ARGUMENTS` AND `UBERDEV_TURBO=1` is also set, env var wins (turbo's contract is unattended end-to-end; interactive prompts are mutually exclusive). The `UBERDEV_TURBO` env var is the canonical signal on the chain hot path; finish-branch no longer accepts a `--turbo` argument (#97 — env-var-only since the orchestrator → SDD → finish-branch chain is fully internal). This Step 3 is the authoritative owner of the chain mode-signal contract — upstream docs (orchestrator Phase 6, SDD Step 5) defer to it and must not restate flag-forwarding behaviour.
 
 **Discoverability:** the `--interactive` flag restores the legacy 4-option menu (Merge back to base / Push and create a Pull Request / Keep the branch as-is / Discard) for users who want it. The default is now always-PR; this fulfills the `~/.claude/CLAUDE.md` mandate "MANDATORY: run `/uberdev:review-pr` after pushing the PR. No exceptions, hotfixes included."
 
@@ -113,30 +113,64 @@ Then: Cleanup worktree (Step 5)
 
 Option 2 PR-body composition: in addition to the standard Summary + Test Plan, two conditional sections are appended when their source artifacts exist:
 
-- **`## Open questions answered by /turbo`** — table rendered from `.uberdev/research/$RUN_ID/questions.md` (written by orchestrator Phase 2 under `--turbo`). Columns: Question | Choice | Confidence. Reviewers can scan for `medium`/`low` confidence rows quickly.
-- **`## Reviewer findings summary`** — the post-impl-review aggregate (`post-impl-review-final.md`, written by `uberdev:post-impl-review` from `/uberdev:review-pr` Phase 1 after PR push) and any `pr-test-analyzer` output (large tier only). The read-site glob below (`post-impl-review-*.md`) matches both the new `-final.md` filename and any legacy `-wave-final.md` artifacts left over from pre-refactor runs (zero-migration).
+- **`## Open questions answered by /turbo`** — table rendered from the active-run `questions.md` (written by orchestrator Phase 2 under `--turbo`; run identity resolved via the per-worktree `active-run-id` sidecar below, written by orchestrator Phase 0). Columns: Question | Choice | Confidence. Reviewers can scan for `medium`/`low` confidence rows quickly.
+- **`## Reviewer findings summary`** — the post-impl-review aggregate (`post-impl-review-final.md`, written by `uberdev:post-impl-review` from `/uberdev:review-pr` Phase 1 after PR push) and any `pr-test-analyzer` output (large tier only, written by SDD Step 4.5 before this handoff). The read-site glob below (`post-impl-review-*.md`) matches both the new `-final.md` filename and any legacy `-wave-final.md` artifacts left over from pre-refactor runs (zero-migration).
 
 Both sections are read-only dumps; finish-branch does not block on confidence threshold or reviewer verdict (per #11 Q1: advisory only, auto-fix deferred).
 
 ```bash
-# Read the orchestrator questions.md (--turbo non-blocking Q&A log) if present.
-# Note: the file lives under the orchestrator $RUN_ID working dir, NOT issue-$N.
-QUESTIONS_FILE=""
-if [ -n "${RUN_ID:-}" ] && [ -f ".uberdev/research/$RUN_ID/questions.md" ]; then
-  QUESTIONS_FILE=".uberdev/research/$RUN_ID/questions.md"
-else
-  # Fallback: pick the most recent .uberdev/research/*/questions.md for cases
-  # where $RUN_ID was not exported across processes. (Glob expansion does NOT
-  # happen inside `[ -f ... ]`, so we use ls and a non-empty check instead.)
-  CANDIDATE=$(ls -t .uberdev/research/*/questions.md 2>/dev/null | head -1)
-  if [ -n "$CANDIDATE" ] && [ -f "$CANDIDATE" ]; then
-    QUESTIONS_FILE="$CANDIDATE"
+# Resolve run identity for the orchestrator artifact reads below. Environment
+# exports do NOT survive the claude-bg / Skill process boundary, so the
+# cross-process contract is the per-worktree sidecar written by orchestrator
+# Phase 0 — never a RUN_ID export. An in-process RUN_ID (same-agent chain) is
+# honoured first when it names a real run dir.
+# RUN_ID_FORMAT mirrors the orchestrator Phase 0 mint:
+# date +%Y%m%d-%H%M%S, then a hyphen, then short-SHA or the literal nohead.
+RUN_ID_FORMAT='^[0-9]{8}-[0-9]{6}-[0-9a-z]{4,40}$'
+RESEARCH_ROOT="$(git rev-parse --show-toplevel)/.uberdev/research"
+ACTIVE_RUN_ID=""
+if [ -n "${RUN_ID:-}" ] && [[ "${RUN_ID}" =~ $RUN_ID_FORMAT ]] && [ -d "$RESEARCH_ROOT/${RUN_ID}" ]; then
+  ACTIVE_RUN_ID="${RUN_ID}"
+elif [ -f "$RESEARCH_ROOT/active-run-id" ]; then
+  SIDECAR_ID="$(head -1 "$RESEARCH_ROOT/active-run-id" 2>/dev/null | tr -d '[:space:]')"
+  # Validate BEFORE any path concatenation: the sidecar is a worktree-writable
+  # file, so reject anything that does not match the run-id mint (this also
+  # excludes path metacharacters and traversal bytes by construction).
+  if [[ "$SIDECAR_ID" =~ $RUN_ID_FORMAT ]] && [ -d "$RESEARCH_ROOT/$SIDECAR_ID" ]; then
+    ACTIVE_RUN_ID="$SIDECAR_ID"
   fi
+fi
+# There is deliberately NO newest-across-runs fallback here (the old
+# ls -t over .uberdev/research/*/questions.md): mtime ordering can
+# cross-attach a stale or concurrent run artifact into the wrong PR body
+# (#308). When run identity does not resolve, the optional sections below
+# are silently omitted — omission beats misattribution.
+
+QUESTIONS_FILE=""
+if [ -n "$ACTIVE_RUN_ID" ] && [ -f "$RESEARCH_ROOT/$ACTIVE_RUN_ID/questions.md" ]; then
+  QUESTIONS_FILE="$RESEARCH_ROOT/$ACTIVE_RUN_ID/questions.md"
 fi
 
 # Read the post-impl-review aggregate (and pr-test-analyzer if present) for
-# the Reviewer findings summary section.
-REVIEW_FILES=$(ls -t .uberdev/research/*/post-impl-review-*.md .uberdev/research/issue-*/post-impl-review.md .uberdev/research/*/pr-test-analyzer.md 2>/dev/null | tr '\n' ' ')
+# the Reviewer findings summary section — scoped to the active run dir when
+# identity resolved; the wildcard branch covers manual invocations that have
+# no orchestrator run. The legacy .uberdev/research/issue-N glob component
+# was DELETED together with the orchestrator research cache (#308: the
+# issue-N cache had zero writers, so the glob could only ever match nothing).
+#
+# REVIEW_FILES stays NEWLINE-delimited (raw `ls -t` output, no `tr '\n' ' '`
+# join) so the consumer below can iterate it with a while-read loop. This
+# fence runs under /bin/zsh on macOS (the Claude-Code Bash tool default), where
+# SH_WORD_SPLIT is OFF: a space-joined scalar fed to a for-loop over the list
+# would NOT word-split — $f would bind to the whole list as one token, the
+# `[ -f "$f" ]` guard would fail, and the entire section (including the envelope
+# strip) would be silently skipped. Newline-delimited + read-loop is word-split-
+# independent and behaves identically under bash and zsh.
+if [ -n "$ACTIVE_RUN_ID" ]; then
+  REVIEW_FILES=$(ls -t "$RESEARCH_ROOT/$ACTIVE_RUN_ID"/post-impl-review-*.md "$RESEARCH_ROOT/$ACTIVE_RUN_ID"/pr-test-analyzer.md 2>/dev/null)
+else
+  REVIEW_FILES=$(ls -t .uberdev/research/*/post-impl-review-*.md .uberdev/research/*/pr-test-analyzer.md 2>/dev/null)
+fi
 
 # Compose PR body. Heredoc delimiter is unquoted (`<<EOF`, not the single-
 # quoted form) to avoid the Claude permission-pattern evaluator `unmatched '`
@@ -168,12 +202,27 @@ if [ -n "$REVIEW_FILES" ]; then
     echo
     echo "## Reviewer findings summary"
     echo
-    for f in $REVIEW_FILES; do
+    # Iterate the NEWLINE-delimited REVIEW_FILES with a while-read loop, NOT a
+    # for-loop over $REVIEW_FILES — under zsh (the Bash-tool default on macOS,
+    # and this is a raw bash code fence with no bash shebang) an unquoted scalar
+    # does not word-split (SH_WORD_SPLIT off), so the for-loop would bind $f to
+    # the entire list as one token, the `[ -f "$f" ]` guard would fail, and this
+    # whole section — including the envelope strip below — would be silently
+    # skipped. The read-loop is word-split-independent (identical under bash/zsh).
+    while IFS= read -r f; do
       [ -f "$f" ] || continue
       echo "### $(basename "$f")"
-      cat "$f"
+      # Strip external-untrusted-input envelope tag lines before pasting into
+      # the PR body: aggregate files carry the tags as file bytes once the
+      # #302 writer-side change lands (harmless no-op on files without them).
+      # Only PURE tag lines are dropped — finding text that merely mentions
+      # the tag inline survives. GitHub renders raw tags as noise; every LLM
+      # consumer re-wraps PR bodies at its own read site, so no validator is
+      # weakened by stripping here.
+      sed -E -e '/^[[:space:]]*<external-untrusted-input[^>]*>[[:space:]]*$/d' \
+             -e '/^[[:space:]]*<\/external-untrusted-input>[[:space:]]*$/d' "$f"
       echo
-    done
+    done <<< "$REVIEW_FILES"
   } >> "$PR_BODY_FILE"
 fi
 

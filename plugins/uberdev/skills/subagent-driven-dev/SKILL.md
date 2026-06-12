@@ -26,6 +26,16 @@ When invoked from `orchestrator/SKILL.md` Phase 5, this skill accepts:
 
 Inputs other than `plan_path` are additive and backward-compatible: pre-#92 manual SDD invocations continue to work unchanged (Step 4.5 is a no-op when `spec_path`, `summary_dir`, or `tier` is absent).
 
+## Loop caps
+
+Every retry loop in this skill is bounded. The caps are named constants — the future `sdd-waves` workflow inherits these exact names and defaults rather than re-inventing them, and this capped directive loop is retained permanently as the non-Workflow fallback path (Gemini / Copilot / pre-Workflow harnesses execute it directly):
+
+- **`fix_rounds` = 3** — per task, per review stage (spec compliance OR code quality): at most 3 review → fix → re-review iterations. On exhaustion, treat the task as BLOCKED (see "Handling Implementer Status") — never keep looping.
+- **`retest_rounds` = 2** — per wave: at most 2 regression-attribution re-dispatches of a suspected implementer after a red full-suite run. On exhaustion, halt the wave with committed work intact and escalate.
+- **`context_rounds` = 2** — per task: at most 2 NEEDS_CONTEXT answer-and-re-dispatch cycles. Overflow routes into the same BLOCKED ladder — a task still lacking context after 2 supplements has a plan problem, not a context problem.
+
+Cap exhaustion is never silent: report which cap fired and route through the BLOCKED ladder rather than accepting unreviewed work or looping unboundedly.
+
 ## Isolation: Pattern B is the opt-out
 
 This skill's wave-based controller-only-git approach is intentionally **not** worktree-isolated — it relies on provable file-set partitioning per wave. For any *other* parallel-agent dispatch (review fanouts, ad-hoc multi-agent edits), default to `isolation: "worktree"` on the Agent tool calls — see the `uberdev:dispatching-parallel-agents` skill.
@@ -68,15 +78,15 @@ digraph when_to_use {
    b. **Implementers never run git.** They edit files, run their tests, and report `Status + changed file paths + test results`.
    c. Wait for all wave implementers to report.
    d. For each completed implementer (in task ID order, sequential): controller stages **only that task's reported paths** with `git add <paths>` and commits with the task-specific message.
-   e. Run the project's full test command in the worktree once after all wave commits land. If it fails, identify which task regressed and re-dispatch that task's implementer with the failure context. Re-test until green.
+   e. Run the project's full test command in the worktree once after all wave commits land. If it fails, identify which task regressed and re-dispatch that task's implementer with the failure context. Re-test after each fix, capped at `retest_rounds` (2) suspected-implementer re-dispatches for the wave — still red after the cap means halt the wave with committed work intact and escalate (BLOCKED ladder); never loop further.
    f. For each committed task: dispatch spec reviewer (parallel across the wave). Pass each spec reviewer the dispatch parameters from `./spec-reviewer-prompt.md`:
       - `[FULL TEXT of task requirements]`: the spec excerpt for this task
       - `[plan_task_description]`: the FULL text of the plan entry for this task (from the wave's plan section, including Worktree-safe paths and any prescribed steps) — enables the reviewer to detect *plan drift* where the implementation satisfies the spec but deviates structurally from the plan. If the plan task entry exceeds ~3000 tokens, pass an excerpt covering the task header, Worktree-safe paths, and the numbered prescribed-steps subsection only — omit prose rationale.
       - `[task commit SHA]`: the SHA the controller produced when committing this task's reported paths
       - `[paths from the wave's ownership map]`: the allowlist for this task (reviewer must not look outside it)
       - `[From implementer's report]`: the implementer's status + claimed paths/test results
-   g. Loop spec fix-up per task until all spec reviewers approve. Fix dispatches still don't run git — controller amends the task's commit (or creates a fix-up commit) using the implementer's reported new paths.
-   h. Dispatch code quality reviewers (parallel). Same fix-loop pattern.
+   g. Loop spec fix-up per task until that task's spec reviewer approves, capped at `fix_rounds` (3) iterations per task — exhaustion routes the task into the BLOCKED ladder. Fix dispatches still don't run git — controller amends the task's commit (or creates a fix-up commit) using the implementer's reported new paths.
+   h. Dispatch each task's code quality reviewer **as soon as that task's spec review approves** (per-task quality start) — do NOT hold the whole wave's quality reviews hostage to the slowest sibling's spec fix-loop. Spec-before-quality ordering is per task, by stage order, not a wave-wide barrier. Same fix-loop pattern, same `fix_rounds` (3) cap per task.
    i. Mark every task in the wave complete in TodoWrite.
    j. **Mark wave complete.** No additional accumulation required at the SDD layer — `/uberdev:review-pr` Phase 1, chained post-push from `finish-branch`, computes its own `changed_paths` and `commit_range` against the pushed PR.
 
@@ -114,7 +124,7 @@ digraph when_to_use {
             hand off to uberdev:finish-branch
                 ↓ (finish-branch pushes PR, then chains)
             /uberdev:review-pr
-                Phase 1: uberdev:post-impl-review (5 agents, 1 message)
+                Phase 1: uberdev:post-impl-review (6 agents, 1 message)
                 Phase 2: simplify lenses (3 agents, 1 message)
 ```
 
@@ -161,21 +171,6 @@ digraph per_task {
 }
 ```
 
-## Model Selection
-
-Use the least powerful model that can handle each role to conserve cost and increase speed.
-
-**Mechanical implementation tasks** (isolated functions, clear specs, 1-2 files): use a fast, cheap model. Most implementation tasks are mechanical when the plan is well-specified.
-
-**Integration and judgment tasks** (multi-file coordination, pattern matching, debugging): use a standard model.
-
-**Architecture, design, and review tasks**: use the most capable available model.
-
-**Task complexity signals:**
-- Touches 1-2 files with a complete spec → cheap model
-- Touches multiple files with integration concerns → standard model
-- Requires design judgment or broad codebase understanding → most capable model
-
 ## Handling Implementer Status
 
 Implementer subagents report one of four statuses. Handle each appropriately:
@@ -184,7 +179,7 @@ Implementer subagents report one of four statuses. Handle each appropriately:
 
 **DONE_WITH_CONCERNS:** The implementer completed the work but flagged doubts. Read the concerns before proceeding. If the concerns are about correctness or scope, address them before review. If they're observations (e.g., "this file is getting large"), note them and proceed to review.
 
-**NEEDS_CONTEXT:** The implementer needs information that wasn't provided. Provide the missing context and re-dispatch.
+**NEEDS_CONTEXT:** The implementer needs information that wasn't provided. Provide the missing context and re-dispatch — at most `context_rounds` (2) answer-and-re-dispatch cycles per task; overflow routes into the BLOCKED ladder below.
 
 **BLOCKED:** The implementer cannot complete the task. Assess the blocker:
 1. If it's a context problem, provide more context and re-dispatch with the same model
@@ -264,10 +259,10 @@ Ownership map:
 [Run full test suite — green]
 
 [Single message: spec reviewers for T2, T3, T4 in parallel]
-[Loop: any failed spec review → re-dispatch that task's implementer (no git); controller amends or fix-up commits using reported paths; re-review until ✅]
+[Loop: any failed spec review → re-dispatch that task's implementer (no git); controller amends or fix-up commits using reported paths; re-review until ✅, max fix_rounds=3 per task; each task that reaches ✅ proceeds straight to its quality review]
 
 [Single message: code quality reviewers for T2, T3, T4 in parallel]
-[Loop: any failed quality review → same fix pattern → re-review until ✅]
+[Loop: any failed quality review → same fix pattern → re-review until ✅, max fix_rounds=3 per task]
 
 [Mark Tasks 2, 3, 4 complete]
 
@@ -281,7 +276,7 @@ Ownership map:
 
 [For large tier: SDD Step 4.5 dispatches pr-test-analyzer pre-merge before the finish-branch handoff]
 
-[Hand off to uberdev:finish-branch — which pushes the PR and chains into /uberdev:review-pr Phase 1 (5 reviewer agents, advisory)]
+[Hand off to uberdev:finish-branch — which pushes the PR and chains into /uberdev:review-pr Phase 1 (6 reviewer agents, advisory — roster owned by post-impl-review/SKILL.md)]
 ```
 
 ## Advantages
@@ -334,7 +329,7 @@ Ownership map:
 - Accept "close enough" on spec compliance (spec reviewer found issues = not done)
 - Skip review loops (reviewer found issues = implementer fixes = review again)
 - Let implementer self-review replace actual review (both are needed)
-- **Start code quality review before spec compliance is ✅** (wrong order)
+- **Start a task's code quality review before that task's spec compliance is ✅** (wrong order — but the gate is per task: a spec-approved task starts quality review immediately, regardless of siblings still in their spec fix-loops)
 - Move to next task while either review has open issues
 
 **If subagent asks questions:**
@@ -345,7 +340,7 @@ Ownership map:
 **If reviewer finds issues:**
 - Implementer (same subagent) fixes them
 - Reviewer reviews again
-- Repeat until approved
+- Repeat until approved or the task's `fix_rounds` cap (3) is exhausted — then route through the BLOCKED ladder, never an unbounded loop
 - Don't skip the re-review
 
 **If subagent fails task:**
