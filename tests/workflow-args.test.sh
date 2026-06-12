@@ -49,6 +49,19 @@ command -v jq >/dev/null 2>&1 || {
   exit 2
 }
 
+# MSYS2/Git-for-Windows arg mangling: on the windows runner, bash rewrites
+# absolute-POSIX-looking argv values (e.g. /pr) into Windows paths
+# (C:/Program Files/Git/pr) at the exec boundary when invoking NATIVE
+# binaries (jq.exe) — BEFORE jq ever sees them. That breaks byte-exact
+# envelope asserts (W4.1) while proving nothing about the emitter, whose
+# data-not-code contract is what this file tests. Disable the conversion for
+# this test process via the documented Git-for-Windows controls; inert on
+# POSIX hosts. (Production note: conversion of REAL host paths to C:/-style
+# in live Windows preflights is desirable for node-side consumption — the
+# emitter correctly leaves that to the platform.)
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL='*'
+
 PASS=0
 FAIL=0
 pass() { echo "  PASS  $1"; PASS=$((PASS + 1)); }
