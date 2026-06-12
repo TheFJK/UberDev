@@ -1177,6 +1177,36 @@ else
     else
       fail "M62.10b — heartbeat protocol must enumerate exactly 6 mandatory touch sites, got ${TOUCH_SITE_COUNT:-0} (#303)"
     fi
+    # M62.10c — the Step 1.1 acquire fence MUST echo the effective RUN_ID on
+    # success. RUN_ID is fence-scoped (does not survive into the per-fence
+    # touch/release shells), so the orchestrator can only re-establish it from a
+    # value it has observed — and the acquire fence is silent on success unless
+    # it prints the stamped literal. Without this echo, every verbatim touch
+    # fence has RUN_ID unset → holder check mismatches → heartbeat freezes at
+    # acquisition → the run becomes stealable past the staleness threshold (the
+    # exact steal-during-live-run class #303 closes); Step 4.6 likewise refuses
+    # release, blocking the next run. (RFC 0012 §3.2 item 1 cross-fence
+    # provisioning.)
+    if echo "$PHASE_1_1_BLOCK" | grep -qE 'echo "merge lock acquired \(run_id \$RUN_ID\)"'; then
+      pass "M62.10c — Step 1.1 acquire fence echoes the effective RUN_ID on success (cross-fence provisioning source; #303 / RFC 0012 §3.2)"
+    else
+      fail "M62.10c — Step 1.1 acquire fence must echo 'merge lock acquired (run_id \$RUN_ID)' on success so the orchestrator can re-establish RUN_ID in later touch/release fences (#303 — RUN_ID is fence-scoped; a silent acquire leaves every touch fence with RUN_ID unset and the heartbeat frozen at acquisition)"
+    fi
+    # M62.10d — the heartbeat protocol MUST instruct the orchestrator to
+    # re-establish RUN_ID in each touch/release fence. "Run it verbatim" alone
+    # is insufficient: a verbatim touch/release fence with RUN_ID unset
+    # warn-skips (empirically — zsh + bash 3.2). The prose must (1) state that
+    # RUN_ID does not survive fences, (2) mandate prepending the literal
+    # RUN_ID=<value> from the Step 1.1 acquire echo, and (3) forbid re-deriving
+    # run_id from record.json (which vacates the holder check). Same fence-scoped
+    # run-state class as goal-pipeline's cross-shell traps (#178).
+    if echo "$HEARTBEAT_BLOCK" | grep -qiE '`?RUN_ID`? does not survive fences' \
+       && echo "$HEARTBEAT_BLOCK" | grep -qE 'prepend the literal `?RUN_ID=' \
+       && echo "$HEARTBEAT_BLOCK" | grep -qiE 'MUST NOT re-derive `?run_id`? from `?record\.json`?'; then
+      pass "M62.10d — heartbeat protocol mandates RUN_ID re-establishment per fence (prepend RUN_ID=<value>; forbid re-derive from record.json; #303 / RFC 0012 §3.2)"
+    else
+      fail "M62.10d — 'Lock heartbeat protocol' must mandate per-fence RUN_ID provisioning: state RUN_ID does not survive fences, require prepending the literal 'RUN_ID=<value>' from Step 1.1, and forbid re-deriving run_id from record.json (#303 — 'run it verbatim' silently depends on undocumented orchestrator behavior otherwise; verbatim fence with RUN_ID unset warn-skips every heartbeat)"
+    fi
   fi
   # M62.11 — explicit release at every documented post-acquisition early exit
   # (Step 1.2 branch-name abort, Step 1.3 fallback-branch-missing, Step 1.7

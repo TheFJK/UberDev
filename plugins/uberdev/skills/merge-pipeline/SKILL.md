@@ -295,6 +295,11 @@ else
   fi
   merge_lock_stamp
 fi
+# Acquired (every failure branch above exits 1). Echo the effective RUN_ID so the
+# orchestrator observes the EXACT value stamped into record.json — it is fence-scoped
+# and does NOT survive into the later touch/release fences, which must re-establish it
+# verbatim (see "Lock heartbeat protocol"). This line is the canonical source of that literal.
+echo "merge lock acquired (run_id $RUN_ID)"
 ```
 
 **Load-bearing failure-mode distinctions** (these silent-collapse cases were the reason issue #51 was misdiagnosed; do not let a future simplification re-collapse them):
@@ -316,9 +321,11 @@ if [ -f "$LOCK_DIR/record.json" ] \
    && [ "$(jq -r '.run_id // empty' "$LOCK_DIR/record.json" 2>/dev/null)" = "$RUN_ID" ]; then
   date +%s > "$LOCK_DIR/heartbeat"
 else
-  echo "warning: merge lock not held by this run (record missing or run_id mismatch) — heartbeat skipped; a stale-lock reclaim may have occurred" >&2
+  echo "warning: merge lock not held by this run (record missing or run_id mismatch) — heartbeat skipped; a stale-lock reclaim may have occurred, or RUN_ID was not re-established in this fence" >&2
 fi
 ```
+
+**RUN_ID provisioning (MANDATORY — `RUN_ID` does not survive fences).** Every touch and release fence runs in a fresh per-fence shell where `$RUN_ID` is unset, so the holder check above (and the Step 4.6 release) silently mismatches and warn-skips unless the orchestrator re-establishes it. When composing each touch/release fence, the orchestrator MUST carry the exact `run_id` echoed by the Step 1.1 acquire fence (`merge lock acquired (run_id <value>)`) and **prepend the literal `RUN_ID=<value>`** to the snippet (`RUN_ID=20260612-091500-a1b2c3d` followed by the touch/release body). The orchestrator MUST NOT re-derive `run_id` from `record.json` at touch time — reading the holder's own value back and comparing it to itself vacates the holder check (a steal-reclaimed lock would then be heartbeated by the dispossessed run). An unset `RUN_ID` always mismatches; a re-derived `RUN_ID` always matches — both defeat the protocol, so the literal from Step 1.1 is the only correct source.
 
 **Mandatory touch sites** (every per-PR iteration and phase boundary):
 
@@ -1014,7 +1021,7 @@ For each stale branch, the agent decides (per-branch). Each decision emits one `
 
 ### Step 4.6 — Release the lock (explicit — no trap exists)
 
-Release is an explicit, holder-verified removal of the lock directory. There is NO trap to rely on (a fence-scoped trap would have fired when its fence exited — at the START of the run — which is the void-lock class Step 1.1 retires; see RFC 0012 §3.2). Run this verbatim:
+Release is an explicit, holder-verified removal of the lock directory. There is NO trap to rely on (a fence-scoped trap would have fired when its fence exited — at the START of the run — which is the void-lock class Step 1.1 retires; see RFC 0012 §3.2). Like every touch fence, this release fence is a fresh per-fence shell: the orchestrator MUST prepend the literal `RUN_ID=<value>` carried from the Step 1.1 acquire echo (see "Lock heartbeat protocol" → RUN_ID provisioning), or the holder check below mismatches and the lock is left held for up to the staleness threshold. Run this verbatim (after the `RUN_ID=<value>` prefix):
 
 ```bash
 # Step 4.6 — explicit lock release (holder-verified).
@@ -1023,7 +1030,7 @@ if [ -f "$LOCK_DIR/record.json" ] \
    && [ "$(jq -r '.run_id // empty' "$LOCK_DIR/record.json" 2>/dev/null)" = "$RUN_ID" ]; then
   rm -rf "$LOCK_DIR"
 else
-  echo "warning: merge lock record missing or owned by a different run_id at release time — not removing (a stale-lock reclaim may have occurred mid-run)" >&2
+  echo "warning: merge lock record missing or owned by a different run_id at release time — not removing (a stale-lock reclaim may have occurred mid-run, or RUN_ID was not re-established in this fence)" >&2
 fi
 ```
 
