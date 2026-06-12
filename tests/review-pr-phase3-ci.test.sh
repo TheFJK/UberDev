@@ -437,17 +437,31 @@ else
 fi
 
 echo
-echo "== S16: benign-cancel same-name dedupe (best-state-wins) + empty-checks settle window (#302) =="
+echo "== S16: benign-cancel same-name dedupe (drop-only-cancel) + empty-checks settle window (#302) =="
 # test.yml fires on push AND pull_request, so one head SHA carries two same-name
 # check runs per job; once #309's concurrency group lands, every superseded push
 # run reports bucket=cancel next to the authoritative completed run. The PROBE jq
-# MUST dedupe same-name entries best-state-wins (pass > skipping > pending > fail
-# > cancel) BEFORE the aggregate red/pending/green fold — else every superseded
-# push manufactures a permanent RED. #309 MUST land after this dedupe.
+# MUST dedupe same-name entries by DROPPING ONLY the benign `cancel` row when a
+# non-cancel sibling exists (a sole cancel stays red), BEFORE the aggregate
+# red/pending/green fold — else every superseded push manufactures a permanent RED.
+# This is DELIBERATELY NOT best-state-wins: best-state-wins lets a completed push
+# `pass` launder its still-running (`pending`) or failed (`fail`) pull_request
+# sibling into the GREEN fast-path that skips MONITOR/CLASSIFY (re-opening the
+# GREEN-describes-code-CI-never-validated window). fail/pending must stay
+# un-maskable; only the benign cancel is dropped. #309 MUST land after this dedupe.
 assert_grep "$REVIEW_PR" 'group_by\(\.name\)' \
   "S16.1 — PROBE verdict jq dedupes same-name check runs (group_by(.name))"
-assert_grep "$REVIEW_PR" 'pass > skipping > pending > fail > cancel' \
-  "S16.2 — best-state-wins rank order documented (pass > skipping > pending > fail > cancel)"
+assert_grep "$REVIEW_PR" 'select\(\.bucket != "cancel"\)' \
+  "S16.2 — dedupe drops ONLY benign cancel rows (select(.bucket != \"cancel\")), never fail/pending"
+# Guard against silent reintroduction of best-state-wins laundering: the old
+# rank/max_by construct must NOT come back (it let pass mask a fail/pending sibling).
+if grep -Eq 'max_by\(rank\)|def rank:' "$REVIEW_PR"; then
+  echo "  FAIL  S16.2b — best-state-wins laundering construct (max_by(rank)/def rank) reintroduced into PROBE jq"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S16.2b — no best-state-wins laundering construct (max_by(rank)/def rank) in PROBE jq"
+  PASS=$((PASS + 1))
+fi
 assert_grep "$REVIEW_PR" 'CI_SETTLE_AGE_SEC = 120' \
   "S16.3a — settle threshold constant declared (CI_SETTLE_AGE_SEC = 120)"
 assert_grep "$REVIEW_PR" 'CI_SETTLE_REPROBES = 3' \
@@ -501,6 +515,26 @@ else
   assert_verdict_inline \
     '[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"test","state":"FAILURE","bucket":"fail"},{"name":"lint","state":"IN_PROGRESS","bucket":"pending"}]' \
     red "S16-RT.5 — distinct-name mix keeps red-outranks-pending (dedupe is per-name only)"
+  # S16-RT.6 — THE LAUNDERING REGRESSION (#302 review-trust finding): a completed
+  # push `pass` next to its FAILED pull_request sibling of the SAME name must NOT
+  # be laundered green. best-state-wins (pass > fail) would have folded this to
+  # green and skipped MONITOR/CLASSIFY; drop-only-cancel keeps both rows, so the
+  # fail survives → red. The pull_request (merge-commit) run is authoritative.
+  assert_verdict_inline \
+    '[{"name":"shape-checks-windows","state":"SUCCESS","bucket":"pass"},{"name":"shape-checks-windows","state":"FAILURE","bucket":"fail"}]' \
+    red "S16-RT.6 — same-name fail+pass stays red (pass NEVER launders a failed sibling)"
+  # S16-RT.7 — same-name pass+pending: the still-running pull_request sibling must
+  # still gate via MONITOR. best-state-wins (pass > pending) would have fast-pathed
+  # green in the ~30s window before the pull_request run finishes; drop-only-cancel
+  # keeps the pending row → MONITOR.
+  assert_verdict_inline \
+    '[{"name":"shape-checks-windows","state":"SUCCESS","bucket":"pass"},{"name":"shape-checks-windows","state":"IN_PROGRESS","bucket":"pending"}]' \
+    pending "S16-RT.7 — same-name pass+pending stays pending (in-flight sibling still gates → MONITOR)"
+  # S16-RT.8 — fail-safe: an unknown/contract-broken bucket folds to red, never
+  # silently green (the `else "red"` arm). A pass sibling does not launder it.
+  assert_verdict_inline \
+    '[{"name":"shape-checks-windows","state":"WEIRD","bucket":"mystery"},{"name":"shape-checks-windows","state":"SUCCESS","bucket":"pass"}]' \
+    red "S16-RT.8 — unknown bucket folds to red (fail-safe; broken field contract never downgrades the gate)"
 fi
 
 echo

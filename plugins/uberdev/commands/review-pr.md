@@ -396,26 +396,37 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
     # collapses the array to one of: empty / green / pending / red. Never
     # line-grep the buckets — parse as JSON.
     #
-    # Same-name dedupe, best-state-wins (#302 benign-cancel fix): test.yml fires
-    # on BOTH push and pull_request, so one head SHA carries two same-name check
-    # runs per job. Once #309's concurrency group lands, every superseded push
-    # run reports bucket=cancel NEXT TO the authoritative completed run — counting
-    # that benign cancel as red would manufacture a permanent RED for every
-    # superseded push (which is why #309 MUST land after this dedupe). group_by
-    # the check name (always present per the --json field contract above) and
-    # keep the best state per name: pass > skipping > pending > fail > cancel —
-    # a cancel row only survives when it is the ONLY state for that name, and a
-    # real fail still outranks its own cancel sibling. Across the deduped names,
-    # `red` still outranks `pending` so a mix of failed + still-running checks
-    # routes through MONITOR→CLASSIFY.
+    # Benign-cancel same-name dedupe (#302), NARROWED to its motivating scope:
+    # test.yml fires on BOTH push and pull_request, so one head SHA carries two
+    # same-name check runs per job. Once #309's concurrency group lands, every
+    # superseded push run reports bucket=cancel NEXT TO the authoritative
+    # completed run — counting that benign cancel as red would manufacture a
+    # permanent RED for every superseded push (which is why #309 MUST land after
+    # this dedupe). group_by the check name (always present per the --json field
+    # contract above); within a name-group, DROP the `cancel` rows IFF a non-cancel
+    # sibling exists — a cancel only survives when it is the ONLY state for that
+    # name (a genuine cancellation, still red). Everything else is kept verbatim
+    # and fed UNCHANGED through the red>pending>green fold. This is deliberately
+    # NOT best-state-wins: best-state-wins would let a completed push `pass`
+    # launder its still-running (`pending`) or failed (`fail`) pull_request sibling
+    # into the GREEN fast-path that skips MONITOR/CLASSIFY — re-opening the
+    # GREEN-describes-code-CI-never-validated window this bundle exists to close
+    # (the pull_request / merge-commit run is the authoritative one; a passed push
+    # run must never mask it). Only the benign `cancel` row is laundered; fail and
+    # pending stay un-maskable. `red` still outranks `pending` across the surviving
+    # rows, and an unknown/missing bucket folds to red (fail-safe — never silently
+    # green) so a broken gh field contract cannot downgrade the trust gate.
     PROBE_VERDICT="$(jq -r '
-      def rank: {"pass": 4, "skipping": 3, "pending": 2, "fail": 1, "cancel": 0}[.bucket] // 1;
+      def known_good: .bucket == "pass" or .bucket == "skipping";
       if (type != "array") or (length == 0) then "empty"
       else
-        [group_by(.name)[] | max_by(rank)] as $best
-        | if any($best[]; .bucket == "fail" or .bucket == "cancel") then "red"
-          elif any($best[]; .bucket == "pending") then "pending"
-          else "green" end
+        [ group_by(.name)[]
+          | (if any(.[]; .bucket != "cancel") then map(select(.bucket != "cancel")) else . end)
+          | .[] ] as $kept
+        | if   any($kept[]; .bucket == "fail" or .bucket == "cancel") then "red"
+          elif any($kept[]; .bucket == "pending")                     then "pending"
+          elif all($kept[]; known_good)                               then "green"
+          else "red" end
       end
     ' <<<"$PROBE_JSON" 2>/dev/null)"
     ```
@@ -448,7 +459,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
     fi
     ```
 
-    Terminal mappings (parsed as JSON; never line-grepped; bucket conditions apply AFTER the same-name best-state dedupe above):
+    Terminal mappings (parsed as JSON; never line-grepped; bucket conditions apply AFTER the same-name benign-cancel dedupe above — only cancel rows with a non-cancel sibling are dropped; fail/pending are never masked):
 
     | `PROBE_JSON` content | `PROBE_VERDICT` | OUTCOME | Audit event |
     |---|---|---|---|
