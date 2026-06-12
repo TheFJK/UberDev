@@ -267,6 +267,81 @@ pr_view_projection() {
   return 0
 }
 
+# discover_review_verdict_json PR_NUMBER
+# Stdout: path to the most-recent review-pr-verdict.json whose top-level
+#         `.pr` integer equals PR_NUMBER, or empty when none matches.
+# Exit:   0 always (empty stdout = corroborator absent; the caller's
+#         sub-condition (d) advisory path handles absence).
+# Search surface — the four documented layouts (single source of truth for
+# the glob set; sub-condition (d) prose + the Common Mistakes bullet mirror
+# this enumeration; tests/merge.test.sh M63.worktree-glob.* locks all
+# surfaces). Each `find` pins -mindepth/-maxdepth to the documented segment
+# count so the -path glob is segment-exact (a bare find -path `*` would
+# cross `/` boundaries):
+#   .uberdev/runs/*/review-pr-verdict.json                      (canonical root)
+#   .claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json  (/solve, /turbo)
+#   .worktrees/*/.uberdev/runs/*/review-pr-verdict.json         (using-git-worktrees, hidden)
+#   worktrees/*/.uberdev/runs/*/review-pr-verdict.json          (using-git-worktrees, visible)
+# Why find, not glob: the previous SKILL.md fence used a `compgen -G` OR-chain
+# — a bashism that silently misfires under the zsh Bash tool (#294
+# _uberdev_goal_glob_worktree class; issue #303 / RFC 0012 §3.2 item 2).
+# `find` is an external binary with identical semantics under bash 3.2, zsh,
+# and CI bash. Missing roots are normal (2>/dev/null per find).
+# Hardening (D4/F8): the <run-id> path segment is validated against
+# RUN_ID_REGEX (^[0-9]{8}-[0-9]{6}-[a-f0-9]+$) via grep -E before the
+# candidate participates in selection (no [[ =~ ]] — BASH_REMATCH is a
+# bashism); the prefix segments are never concatenated from untrusted input.
+# Tie-break: lex-greatest <run-id> wins (run-id format lex-sorts
+# chronologically); on identical run-ids across layouts the first layout in
+# the order above wins (deterministic).
+discover_review_verdict_json() {
+  local pr_number="$1"
+  case "$pr_number" in
+    ''|*[!0-9]*) return 0 ;;  # non-integer PR number: no match by contract
+  esac
+  local found
+  found="$(
+    {
+      find .uberdev/runs -mindepth 2 -maxdepth 2 \
+        -path '.uberdev/runs/*/review-pr-verdict.json' 2>/dev/null
+      find .claude/worktrees -mindepth 5 -maxdepth 5 \
+        -path '.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json' 2>/dev/null
+      find .worktrees -mindepth 5 -maxdepth 5 \
+        -path '.worktrees/*/.uberdev/runs/*/review-pr-verdict.json' 2>/dev/null
+      find worktrees -mindepth 5 -maxdepth 5 \
+        -path 'worktrees/*/.uberdev/runs/*/review-pr-verdict.json' 2>/dev/null
+    } || true
+  )"
+  [ -n "$found" ] || return 0
+  local f pr_field run_id best_run_id="" best_path=""
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [ -r "$f" ] || continue
+    pr_field="$(jq -r '.pr // empty' "$f" 2>/dev/null)" || continue
+    [ "$pr_field" = "$pr_number" ] || continue
+    run_id="$(basename "$(dirname "$f")")"
+    printf '%s' "$run_id" | grep -qE '^[0-9]{8}-[0-9]{6}-[a-f0-9]+$' || continue
+    # Lexicographic compare via `expr` (C collation forced): `[ a \> b ]` is
+    # a bash test-builtin extension — zsh's `[` rejects `\>` with "condition
+    # expected: >", silently degrading the tie-break to first-found under
+    # the zsh Bash tool (the exact #294 bashism class this helper exists to
+    # fix). `expr` exits 0 when the comparison is true, 1 when false; equal
+    # run-ids across layouts keep the FIRST layout in the search order
+    # (documented tie-break above). Operands are regex-validated digit-lead
+    # strings, so expr cannot mistake them for options or pure integers.
+    if [ -z "$best_run_id" ] || LC_ALL=C expr "$run_id" \> "$best_run_id" >/dev/null; then
+      best_run_id="$run_id"
+      best_path="$f"
+    fi
+  done <<EOF
+$found
+EOF
+  if [ -n "$best_path" ]; then
+    printf '%s\n' "$best_path"
+  fi
+  return 0
+}
+
 # emit_gate_fail PR_NUMBER REASON
 # Discovery-adjacent helper. Appends one gate_fail event to the audit log
 # with {event:"gate_fail",pr:<N>,data:{reason:"<reason>"}} and writes a

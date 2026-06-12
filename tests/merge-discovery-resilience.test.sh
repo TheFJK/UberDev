@@ -600,6 +600,123 @@ rm -f "$B7_AUDIT"
 rm -rf "$B7_SANDBOX"
 
 echo
+echo "== A12: discover_review_verdict_json — find-based audit-JSON discovery shape (#303) =="
+# #303 / RFC 0012 §3.2 item 2: the inline `compgen -G` OR-chain in SKILL.md
+# Step (c.0) was a bashism that silently misfired under the zsh Bash tool
+# (#294 _uberdev_goal_glob_worktree class). The replacement is a find-based
+# helper here in lib/discover.sh; `find` is an external binary with identical
+# semantics under bash 3.2, zsh, and CI bash. tests/merge.test.sh
+# M63.worktree-glob.* locks the four-layout enumeration sync across surfaces;
+# this file locks the function shape + runtime behavior.
+assert_grep "$LIB" '^discover_review_verdict_json\(\)[[:space:]]*\{' \
+  "A12a: function discover_review_verdict_json defined"
+assert_no_grep "$LIB" '^[[:space:]]*(if[[:space:]]+)?compgen[[:space:]]|\|\|[[:space:]]*compgen[[:space:]]' \
+  "A12b: no compgen invocation in lib/discover.sh (bashism — #294 class; comments may mention it)"
+assert_grep "$LIB" 'grep -qE .\^\[0-9\]\{8\}-\[0-9\]\{6\}-\[a-f0-9\]\+\$' \
+  "A12c: run-id segment validated via grep -E against RUN_ID_REGEX (no [[ =~ ]] / BASH_REMATCH bashism)"
+# A12d — `[ a \> b ]` is a bash test-builtin extension: zsh's `[` rejects
+# `\>` with "condition expected: >", silently degrading the run-id tie-break
+# to first-found. Caught live during #303 implementation; the fix is
+# LC_ALL=C expr. Comment lines are stripped before the check (the rationale
+# comments legitimately mention the forbidden shape); LIB_NORMALISED is set
+# at A3.
+if printf '%s\n' "$LIB_NORMALISED" | grep -qE '\[ [^][]*\\>'; then
+  echo "  FAIL  A12d: '[ ... \\> ... ]' test-bracket string comparison present (zsh rejects it — use LC_ALL=C expr)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  A12d: no '[ ... \\> ... ]' test-bracket string comparison (zsh-safe tie-break)"
+  PASS=$((PASS + 1))
+fi
+
+echo
+echo "== B8: discover_review_verdict_json functional — four layouts, .pr filter, run-id regex, tie-break (#303) =="
+# Sandbox repo root with verdict JSONs across all four documented layouts.
+# The helper searches relative paths from CWD, so we cd into the sandbox
+# (mirrors the B7 sandbox convention).
+B8_SANDBOX="$(mktemp -d)"
+mkdir -p "$B8_SANDBOX/.uberdev/runs/20260101-000000-aaaa111"
+printf '{"pr":42,"sha":"deadbeef"}\n' \
+  > "$B8_SANDBOX/.uberdev/runs/20260101-000000-aaaa111/review-pr-verdict.json"
+mkdir -p "$B8_SANDBOX/.claude/worktrees/solve-issue-7/.uberdev/runs/20260102-000000-bbbb222"
+printf '{"pr":42,"sha":"deadbeef"}\n' \
+  > "$B8_SANDBOX/.claude/worktrees/solve-issue-7/.uberdev/runs/20260102-000000-bbbb222/review-pr-verdict.json"
+mkdir -p "$B8_SANDBOX/.worktrees/wt1/.uberdev/runs/20260103-000000-cccc333"
+printf '{"pr":99,"sha":"deadbeef"}\n' \
+  > "$B8_SANDBOX/.worktrees/wt1/.uberdev/runs/20260103-000000-cccc333/review-pr-verdict.json"
+mkdir -p "$B8_SANDBOX/worktrees/wt2/.uberdev/runs/20251231-000000-dddd444"
+printf '{"pr":77,"sha":"deadbeef"}\n' \
+  > "$B8_SANDBOX/worktrees/wt2/.uberdev/runs/20251231-000000-dddd444/review-pr-verdict.json"
+# Path-traversal / regex-rejection fixture: a verdict for PR 42 under a
+# run-id that fails RUN_ID_REGEX. "zz-invalid-run-id" sorts lex-GREATER than
+# any timestamp run-id, so if the regex validation were dropped this entry
+# would win the PR-42 tie-break — B8a doubles as the regex-rejection guard.
+mkdir -p "$B8_SANDBOX/worktrees/wt3/.uberdev/runs/zz-invalid-run-id"
+printf '{"pr":42,"sha":"deadbeef"}\n' \
+  > "$B8_SANDBOX/worktrees/wt3/.uberdev/runs/zz-invalid-run-id/review-pr-verdict.json"
+
+_b8_call() {
+  # Args: PR number (forwarded verbatim). Runs the helper from the sandbox.
+  ( cd "$B8_SANDBOX" && . "$LIB" && discover_review_verdict_json "$1" ) 2>/dev/null
+}
+
+B8_OUT="$(_b8_call 42)"
+assert_eq "$B8_OUT" \
+  ".claude/worktrees/solve-issue-7/.uberdev/runs/20260102-000000-bbbb222/review-pr-verdict.json" \
+  "B8a: PR 42 → lex-greatest VALID run-id wins across layouts (invalid run-id rejected despite sorting greater)"
+B8_OUT="$(_b8_call 99)"
+assert_eq "$B8_OUT" \
+  ".worktrees/wt1/.uberdev/runs/20260103-000000-cccc333/review-pr-verdict.json" \
+  "B8b: PR 99 → .worktrees/ hidden-convention layout found"
+B8_OUT="$(_b8_call 77)"
+assert_eq "$B8_OUT" \
+  "worktrees/wt2/.uberdev/runs/20251231-000000-dddd444/review-pr-verdict.json" \
+  "B8c: PR 77 → worktrees/ visible-convention layout found"
+B8_OUT="$(_b8_call 123)"
+B8_RC=$?
+assert_eq "$B8_OUT" "" "B8d: unmatched PR → empty stdout (corroborator absent)"
+assert_eq "$B8_RC" "0" "B8e: unmatched PR → exit 0 (absence is not an error; sub-condition (d) handles it)"
+B8_OUT="$(_b8_call 'x; rm -rf /')"
+B8_RC=$?
+assert_eq "$B8_OUT" "" "B8f: non-integer PR argument → empty stdout (input gate)"
+assert_eq "$B8_RC" "0" "B8g: non-integer PR argument → exit 0 (no match by contract)"
+rm -rf "$B8_SANDBOX"
+
+echo
+echo "== B9: discover_review_verdict_json zsh parity (#303 — the helper exists to fix a zsh bashism) =="
+# The pre-#303 compgen chain AND an early draft of this helper ([ a \> b ])
+# both misfired ONLY under zsh — bash-run tests alone cannot catch the
+# class (the #294 _uberdev_goal_glob_worktree lesson). Run the same
+# discovery under a real zsh when available (macOS always; CI ubuntu images
+# ship zsh — the solve-pipeline-zsh fixture relies on it) and assert
+# bash-identical output plus a clean stderr (a "condition expected" class
+# error surfaces there).
+if command -v zsh >/dev/null 2>&1; then
+  B9_SANDBOX="$(mktemp -d)"
+  mkdir -p "$B9_SANDBOX/.uberdev/runs/20260101-000000-aaaa111"
+  printf '{"pr":42}\n' \
+    > "$B9_SANDBOX/.uberdev/runs/20260101-000000-aaaa111/review-pr-verdict.json"
+  mkdir -p "$B9_SANDBOX/.claude/worktrees/w/.uberdev/runs/20260105-000000-ffff999"
+  printf '{"pr":42}\n' \
+    > "$B9_SANDBOX/.claude/worktrees/w/.uberdev/runs/20260105-000000-ffff999/review-pr-verdict.json"
+  B9_ERR="$(mktemp)"
+  B9_OUT="$(zsh -c "cd '$B9_SANDBOX' && . '$LIB' && discover_review_verdict_json 42" 2>"$B9_ERR")"
+  assert_eq "$B9_OUT" \
+    ".claude/worktrees/w/.uberdev/runs/20260105-000000-ffff999/review-pr-verdict.json" \
+    "B9a: zsh run picks the lex-greatest run-id (tie-break parity with bash)"
+  if [ -s "$B9_ERR" ]; then
+    echo "  FAIL  B9b: zsh run emitted stderr (bashism leak?): $(head -c 200 "$B9_ERR")"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  B9b: zsh run emitted no stderr (no 'condition expected' class errors)"
+    PASS=$((PASS + 1))
+  fi
+  rm -f "$B9_ERR"
+  rm -rf "$B9_SANDBOX"
+else
+  echo "  SKIP  B9: zsh not available on this runner (informational — macOS and CI ubuntu both ship zsh)"
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
