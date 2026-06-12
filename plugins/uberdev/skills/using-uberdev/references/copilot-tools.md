@@ -18,6 +18,7 @@ Skills use Claude Code tool names. When you encounter these in a skill, use your
 | `TodoWrite` (task tracking) | `sql` with built-in `todos` table |
 | `WebSearch` | No equivalent — use `web_fetch` with a search engine URL |
 | `EnterPlanMode` / `ExitPlanMode` | No equivalent — stay in the main session |
+| `Workflow` tool (background orchestration script) | No equivalent — use the skill's `## No-Workflow fallback` section |
 
 ## Agent types
 

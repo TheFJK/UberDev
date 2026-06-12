@@ -141,7 +141,9 @@ jobs:
           bash tests/skill-renderer-awk-collision.test.sh && \
           bash tests/dispatch-prompt-no-bare-slash.test.sh && \
           bash tests/bump-version.test.sh && \
-          bash tests/test-harness-source-guards.test.sh
+          bash tests/test-harness-source-guards.test.sh && \
+          bash tests/workflow-scripts.test.sh && \
+          bash tests/workflow-args.test.sh (feat(carrier): workflow-script test architecture (T1-T4) + config→args envelope + fallback convention + enum-lock extension)
 
   shape-checks-windows:
     name: shape-checks-windows
@@ -259,4 +261,6 @@ jobs:
           bash tests/skill-renderer-awk-collision.test.sh && \
           bash tests/dispatch-prompt-no-bare-slash.test.sh && \
           bash tests/bump-version.test.sh && \
-          bash tests/test-harness-source-guards.test.sh
+          bash tests/test-harness-source-guards.test.sh && \
+          bash tests/workflow-scripts.test.sh && \
+          bash tests/workflow-args.test.sh (feat(carrier): workflow-script test architecture (T1-T4) + config→args envelope + fallback convention + enum-lock extension)

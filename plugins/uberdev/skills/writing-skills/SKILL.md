@@ -372,6 +372,94 @@ pptx/
 ```
 When: Reference material too large for inline
 
+### Skill with a Workflow Orchestration Script (RFC 0012)
+```
+review-pr/
+  SKILL.md       # Thin preflight + Workflow invocation + No-Workflow fallback
+  workflow.js    # The orchestration script (never enters context; scriptPath only)
+  workflows/     # Optional child workflow scripts
+```
+When: The skill's heavy orchestration (multi-wave agent fanout, loops with
+circuit breakers, cross-wave state) migrates onto the Workflow tool. See the
+authoring conventions below.
+
+## Workflow-Script Authoring Conventions (RFC 0012)
+
+Binding conventions for any `skills/<name>/workflow.js` (children under
+`skills/<name>/workflows/`). They are enforced by the T1–T4 tiers in
+`tests/workflow-scripts.test.sh` + `tests/_workflow_harness.js` (see
+`plugins/uberdev/docs/testing.md`) — a script that breaks them reds CI.
+
+### META markers (T2)
+
+The `meta` export is a **pure-JSON literal** — no identifiers, comments,
+trailing commas, or computed values — between exactly one pair of markers:
+
+```js
+/* META-BEGIN */
+export const meta = { "name": "review-pr", "description": "...", "phases": ["Phase 1 — Review fanout", "Verdict"] };
+/* META-END */
+```
+
+Every `phase("...")` call and `opts.phase` string in the script body must be
+declared in `meta.phases` (exact match). Nothing else in the file may use
+`export`.
+
+### Script constraints (T1)
+
+- Plain self-contained JS: **no `import`/`require`**, no `process.`/`fs.`
+  (agents do all filesystem/git/gh work — the script only orchestrates).
+- **No `Date.now()` / `Math.random()` / argless `new Date()`** — the runtime
+  THROWS on them (resume determinism). Timestamps arrive frozen in `args`
+  (`now_epoch` / `now_iso`); mid-run wall-clock gates use agent-side `date`.
+- ≤ 512 KB; must parse under `node --check --input-type=module`.
+
+### Versioned SHARED blocks (T4)
+
+Scripts cannot import, so shared code is copy-paste — guarded by markers:
+
+```js
+// === SHARED:envelope v1 ===
+...copy-paste-identical code...
+// === END SHARED ===
+```
+
+Blocks with the same name+version must be **byte-identical** across all
+scripts (CI diffs them). Diverging legitimately? Bump `v<N>`. SHARED blocks
+are also the audited escape hatch for coarse forbidden-token greps (e.g. a
+reviewed `new Date(epochValue)` formatter) — the T3 runtime shadows still
+apply inside them.
+
+### Thin preflight + args envelope
+
+The SKILL.md keeps only what the script cannot do: `$ARGUMENTS` parsing,
+config reads, RUN_ID/timestamp mint, gh identity/repo resolution, feature
+probes. It then emits the canonical args JSON via
+`uberdev_emit_workflow_args <pipeline> KEY=VALUE...` (lib/config-read.sh,
+RFC 0012 §4.3) between `WORKFLOW_ARGS_BEGIN`/`WORKFLOW_ARGS_END` markers,
+and mandates the Workflow call with the JSON relayed **verbatim**:
+
+```
+Workflow({scriptPath: "$CLAUDE_PLUGIN_ROOT/skills/<name>/workflow.js"}, <the JSON between the markers>)
+```
+
+Always `scriptPath` (resolved from `${CLAUDE_PLUGIN_ROOT}`) — never the
+saved-workflow name form (unverified for plugin dirs). The preflight
+validates `[ -f "$CLAUDE_PLUGIN_ROOT/skills/<name>/workflow.js" ]` before
+mandating the call.
+
+### No-Workflow fallback section (mandatory)
+
+Every SKILL.md that mandates a Workflow call also carries a
+`## No-Workflow fallback` section: a SHORT degraded recipe (sequential
+inline execution or the retained legacy path), gated on the model
+self-checking its tool list ("if Workflow is not among your tools…").
+Platforms without the tool (see `references/{gemini,copilot,codex}-tools.md`)
+degrade instead of breaking. The shape guard in
+`tests/workflow-scripts.test.sh` fails any `skills/*/workflow.js` whose
+sibling SKILL.md lacks the invocation block or the fallback marker. Keep
+fallback recipes thin — or the token win evaporates.
+
 ## The Iron Law (Same as TDD)
 
 ```

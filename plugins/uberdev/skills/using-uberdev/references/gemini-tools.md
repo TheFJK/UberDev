@@ -15,6 +15,7 @@ Skills use Claude Code tool names. When you encounter these in a skill, use your
 | `WebSearch` | `google_web_search` |
 | `WebFetch` | `web_fetch` |
 | `Task` tool (dispatch subagent) | No equivalent — Gemini CLI does not support subagents |
+| `Workflow` tool (background orchestration script) | No equivalent — use the skill's `## No-Workflow fallback` section |
 
 ## No subagent support
 
