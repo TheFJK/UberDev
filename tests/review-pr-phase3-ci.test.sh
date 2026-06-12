@@ -437,6 +437,73 @@ else
 fi
 
 echo
+echo "== S16: benign-cancel same-name dedupe (best-state-wins) + empty-checks settle window (#302) =="
+# test.yml fires on push AND pull_request, so one head SHA carries two same-name
+# check runs per job; once #309's concurrency group lands, every superseded push
+# run reports bucket=cancel next to the authoritative completed run. The PROBE jq
+# MUST dedupe same-name entries best-state-wins (pass > skipping > pending > fail
+# > cancel) BEFORE the aggregate red/pending/green fold — else every superseded
+# push manufactures a permanent RED. #309 MUST land after this dedupe.
+assert_grep "$REVIEW_PR" 'group_by\(\.name\)' \
+  "S16.1 — PROBE verdict jq dedupes same-name check runs (group_by(.name))"
+assert_grep "$REVIEW_PR" 'pass > skipping > pending > fail > cancel' \
+  "S16.2 — best-state-wins rank order documented (pass > skipping > pending > fail > cancel)"
+assert_grep "$REVIEW_PR" 'CI_SETTLE_AGE_SEC = 120' \
+  "S16.3a — settle threshold constant declared (CI_SETTLE_AGE_SEC = 120)"
+assert_grep "$REVIEW_PR" 'CI_SETTLE_REPROBES = 3' \
+  "S16.3b — settle re-probe cap constant declared (CI_SETTLE_REPROBES = 3)"
+assert_grep "$REVIEW_PR" 'git show -s --format=%ct HEAD' \
+  "S16.4a — settle window computes head age from the head commit timestamp"
+assert_grep "$REVIEW_PR" 'SETTLE_REPROBES_USED' \
+  "S16.4b — settle loop tracks SETTLE_REPROBES_USED"
+assert_grep "$REVIEW_PR" 'subreason=settle_reprobe' \
+  "S16.5 — settle re-probe audited via ci_probe_started subreason=settle_reprobe (no new enum member)"
+assert_grep "$REVIEW_PR" 'settle window above is exhausted' \
+  "S16.6 — skipped_no_checks terminal row gated on settle-window exhaustion"
+
+echo
+echo "== S16-RUNTIME: same-name dedupe exercised against the documented jq =="
+# Reuses the JQ_VERDICT_PROG extracted live from review-pr.md in S15-RUNTIME, fed
+# with inline probe JSON (the same-name shapes the fake-gh modes don't model).
+assert_verdict_inline() {
+  local json="$1" expected="$2" desc="$3"
+  local got
+  got="$(jq -r "$JQ_VERDICT_PROG" <<<"$json" 2>/dev/null)"
+  if [ "$got" = "$expected" ]; then
+    echo "  PASS  $desc (→ $got)"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"; echo "        expected: $expected"; echo "        actual:   $got"; echo "        json:     $json"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+if [ -z "$JQ_VERDICT_PROG" ]; then
+  echo "  FAIL  S16-RT.0 — JQ_VERDICT_PROG empty (S15-RT.0 extraction failed); cannot exercise dedupe"
+  FAIL=$((FAIL + 1))
+else
+  # S16-RT.1 — benign cancel: superseded same-name run cancelled, sibling passed → green.
+  assert_verdict_inline \
+    '[{"name":"test","state":"CANCELLED","bucket":"cancel"},{"name":"test","state":"SUCCESS","bucket":"pass"},{"name":"build","state":"SUCCESS","bucket":"pass"}]' \
+    green "S16-RT.1 — same-name cancel+pass dedupes to pass (benign cancel → green)"
+  # S16-RT.2 — true cancel: cancel is the ONLY state for its name → still red.
+  assert_verdict_inline \
+    '[{"name":"test","state":"CANCELLED","bucket":"cancel"},{"name":"build","state":"SUCCESS","bucket":"pass"}]' \
+    red "S16-RT.2 — sole-state cancel stays red (dedupe never launders a real cancel)"
+  # S16-RT.3 — cancel + pending same name: the re-run is authoritative → MONITOR.
+  assert_verdict_inline \
+    '[{"name":"test","state":"CANCELLED","bucket":"cancel"},{"name":"test","state":"QUEUED","bucket":"pending"}]' \
+    pending "S16-RT.3 — same-name cancel+pending dedupes to pending (MONITOR transition)"
+  # S16-RT.4 — fail outranks its own cancel sibling: a real failure stays red.
+  assert_verdict_inline \
+    '[{"name":"test","state":"CANCELLED","bucket":"cancel"},{"name":"test","state":"FAILURE","bucket":"fail"},{"name":"build","state":"SUCCESS","bucket":"pass"}]' \
+    red "S16-RT.4 — same-name fail+cancel dedupes to fail (red; dedupe never masks a failure)"
+  # S16-RT.5 — distinct names untouched by dedupe (regression guard for S15-RT.4 semantics).
+  assert_verdict_inline \
+    '[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"test","state":"FAILURE","bucket":"fail"},{"name":"lint","state":"IN_PROGRESS","bucket":"pending"}]' \
+    red "S16-RT.5 — distinct-name mix keeps red-outranks-pending (dedupe is per-name only)"
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
