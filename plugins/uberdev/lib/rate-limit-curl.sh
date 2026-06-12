@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
 # SOURCED, never executed. Source-time idempotent (mirrors dispatch.sh:20-23).
+# DUAL-SHELL: persona agents (and the lib/rl-curl shim) source this under bash
+# OR zsh — the Claude Code Bash tool runs /bin/zsh on macOS. Two zsh traps are
+# handled explicitly below (#306 / RFC 0012 §3.10 testers-R2):
+#   - BASH_SOURCE is unset in zsh -> ${(%):-%x} prompt-escape fallback;
+#   - `trap ... RETURN` is an "undefined signal" error in zsh (the trap never
+#     installs) -> the mkdir-mutex is released EXPLICITLY on every return path.
 if [ "${_UBERDEV_RATE_LIMIT_LOADED:-0}" = "1" ]; then return 0 2>/dev/null || true; fi
 _UBERDEV_RATE_LIMIT_LOADED=1
 
 # Absolute dir of this lib so the wrapper can find its sibling normalize_host.py — the
 # SINGLE SOURCE OF TRUTH for per-host bucket keys, shared with lib/rate-cap-audit.sh.
-_UBERDEV_RATE_LIMIT_LIBDIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+# ${BASH_SOURCE[0]:-${(%):-%x}} resolves the sourced-file path in BOTH shells:
+# bash leaves the default unevaluated (BASH_SOURCE[0] is set when sourced, and
+# bash 3.2/5.x only expand `:-` defaults lazily); zsh has no BASH_SOURCE and
+# falls through to the %x prompt escape (file containing the executing code).
+_UBERDEV_RATE_LIMIT_SELF="${BASH_SOURCE[0]:-${(%):-%x}}"
+_UBERDEV_RATE_LIMIT_LIBDIR="$(CDPATH= cd -- "$(dirname -- "$_UBERDEV_RATE_LIMIT_SELF")" 2>/dev/null && pwd)"
 
 # uberdev_rate_limit_curl URL [curl-args...]
 #
@@ -18,7 +29,8 @@ _UBERDEV_RATE_LIMIT_LIBDIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 
 #   1. Normalizes <host> from URL via the shared normalize_host.py (lowercases; strips
 #      userinfo + :port; drops a trailing dot) so a@host / Host / host:443 / host. all
 #      share ONE bucket — the per-host cap can't be bypassed by varying the authority.
-#   2. Acquires mkdir-mutex on $RATE_STATE_DIR/<host>/.lock (trap on RETURN releases).
+#   2. Acquires mkdir-mutex on $RATE_STATE_DIR/<host>/.lock (bounded retry; released
+#      explicitly on every return path — never via `trap RETURN`, which zsh rejects).
 #   3. Reads $RATE_STATE_DIR/<host>/last_release (epoch-ms, default 0).
 #   4. Computes inter-call delay (FLOAT) = max(0, (1000 / $RPS_CAP) - (now_ms - last_ms)).
 #   5. If delay > 0, sleeps (`sleep "$delay_s"` where delay_s is delay/1000 via awk).
@@ -31,8 +43,10 @@ _UBERDEV_RATE_LIMIT_LIBDIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 
 #   - $RPS_CAP unset, non-integer, or out of [1, 1000] -> defensive re-validation;
 #     wrapper does NOT trust the env var since it could be re-injected mid-session.
 #     On bad value, exit 2.
-#   - mkdir-mutex contention -> retry every 10ms with no upper bound (per-host buckets
-#     mean contention is bounded by the number of agents hitting the same host, max 6).
+#   - mkdir-mutex contention -> retry every 10ms, BOUNDED at UBERDEV_RATE_MUTEX_MAX_TRIES
+#     (default 6000 ~= 60s). Legit contention is small (max 6 agents per host, each
+#     holding the lock for at most one ~1s pacing sleep); a leaked/stale .lock from a
+#     killed caller therefore fails LOUD with exit 2 instead of spinning forever.
 #   - URL parse fails (no host, or scope-escape host) -> exit 2 with stderr.
 #   - state-file write fails (full disk / RO fs) -> exit 2 with stderr (never silent).
 
@@ -66,9 +80,25 @@ uberdev_rate_limit_curl() {
   local LOCK="$HOST_DIR/.lock"
   local STATE="$HOST_DIR/last_release"
 
-  # mkdir-as-mutex (atomic across POSIX FS; no flock dependency).
-  until mkdir "$LOCK" 2>/dev/null; do sleep 0.01; done
-  trap 'rmdir "$LOCK" 2>/dev/null || true' RETURN
+  # mkdir-as-mutex (atomic across POSIX FS; no flock dependency). BOUNDED retry:
+  # a stale .lock left by a killed holder must fail loud, not spin forever. The
+  # default 6000 tries x 10ms ~= 60s sits far above worst-case legit contention
+  # (<=6 personas serialised behind a <=1s pacing sleep each); tests lower it
+  # via UBERDEV_RATE_MUTEX_MAX_TRIES (positive integer; malformed -> default).
+  local MUTEX_TRIES=0 MUTEX_MAX="${UBERDEV_RATE_MUTEX_MAX_TRIES:-6000}"
+  [[ "$MUTEX_MAX" =~ ^[1-9][0-9]*$ ]] || MUTEX_MAX=6000
+  until mkdir "$LOCK" 2>/dev/null; do
+    MUTEX_TRIES=$((MUTEX_TRIES + 1))
+    if [ "$MUTEX_TRIES" -ge "$MUTEX_MAX" ]; then
+      echo "rate-limit-curl: could not acquire mutex $LOCK after $MUTEX_MAX attempts — stale lock from a killed caller? rmdir it to recover" >&2
+      return 2
+    fi
+    sleep 0.01
+  done
+  # NO `trap ... RETURN` here: zsh rejects RETURN as an undefined signal, so the
+  # trap never installs and the mutex would leak on any early return — making
+  # the next caller's mutex loop spin until its retry bound. Every return path
+  # past this point MUST `rmdir "$LOCK"` explicitly first.
 
   local NOW_MS LAST_MS DELAY_S RELEASE_MS SLEPT
   # GNU date supports %3N (ms); BSD date (macOS) silently emits literal "3N".
@@ -105,12 +135,12 @@ EOF
   # re-paces from, silently corrupting the rate gate while the caller keeps requesting (#188).
   if ! { printf '%s' "$NOW_MS" > "$STATE.tmp" && mv -f "$STATE.tmp" "$STATE"; }; then
     rm -f "$STATE.tmp" 2>/dev/null || true
+    rmdir "$LOCK" 2>/dev/null || true  # explicit release — no RETURN trap (dead in zsh)
     echo "rate-limit-curl: failed to persist rate state to $STATE (refusing to proceed with stale pacing)" >&2
-    return 2  # RETURN trap releases the mutex
+    return 2
   fi
 
   rmdir "$LOCK" 2>/dev/null || true
-  trap - RETURN
 
   # `--` before URL neutralises -fOJ / -X-prefixed URL smuggling (security IMPORTANT-1).
   command curl --fail-with-body --silent --show-error "$@" -- "$URL"

@@ -4,7 +4,7 @@ description: Accessibility-critic persona for /uberdev:testers. Audits keyboard-
 # WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
 model: inherit
 color: cyan
-allowed-tools: ["Bash(curl*)", "Bash(echo*)", "Bash(date*)", "Read", "mcp__plugin_playwright_playwright__browser_navigate", "mcp__plugin_playwright_playwright__browser_press_key", "mcp__plugin_playwright_playwright__browser_take_screenshot", "mcp__plugin_playwright_playwright__browser_snapshot", "mcp__plugin_playwright_playwright__browser_evaluate", "Write(.uberdev/research/*)"]
+allowed-tools: ["Bash(curl*)", "Bash(*/lib/rl-curl*)", "Bash(echo*)", "Bash(date*)", "Read", "mcp__plugin_playwright_playwright__browser_navigate", "mcp__plugin_playwright_playwright__browser_press_key", "mcp__plugin_playwright_playwright__browser_take_screenshot", "mcp__plugin_playwright_playwright__browser_snapshot", "mcp__plugin_playwright_playwright__browser_evaluate", "Write(.uberdev/research/*)"]
 ---
 
 You are the **a11y-critic** persona in a `/uberdev:testers` squad audit.
@@ -29,9 +29,12 @@ You are the **a11y-critic** persona in a `/uberdev:testers` squad audit.
 
 - `max_actions: 200`
 - `max_clock_seconds: 300`
-- **Polite-rate (enforcement):** source `plugins/uberdev/lib/rate-limit-curl.sh`
-  and call `uberdev_rate_limit_curl <URL> <args>` for every `curl` invocation.
-  The wrapper hard-caps per-host RPS at the run's `--rps-cap` (default 10).
+- **Polite-rate (enforcement):** for every `curl` request, invoke the executable
+  shim `lib/rl-curl` as a SINGLE command word, with the per-call values from your
+  dispatch prompt — never a compound export/source form, and never ambient env:
+  `"<plugin-root>/lib/rl-curl" --rate-state-dir=<abs-dir> --rps-cap=<cap> <URL> <curl-args>`.
+  The shim wraps `uberdev_rate_limit_curl` from `plugins/uberdev/lib/rate-limit-curl.sh`,
+  hard-capping per-host RPS at the run's `--rps-cap` (default 10).
   Playwright / `browser_*` MCP calls cannot be HTTP-wrapped; the audit phase
   reads `evidence.network_request.timestamp` and fails the run if your per-host
   rolling 1-second RPS exceeds the cap. Populate `timestamp` on every
@@ -51,6 +54,11 @@ findings:
     evidence:
       screenshot: <path or null>
       dom_hash: <sha256 of a11y-tree subtree or null>
+      network_request:
+        method: <verb or null>
+        url: <url or null>
+        status: <code or null>
+        timestamp: <ISO 8601 with milliseconds, epoch-ms, or null>  # required for the rate-cap audit; rows without url+timestamp are skipped
       repro_steps: [<step>, ...]
       observed: <what happened>
       expected: <what should have happened per invariant>

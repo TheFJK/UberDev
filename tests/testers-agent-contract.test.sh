@@ -127,4 +127,72 @@ for a in "${EXPECTED_AGENTS[@]}"; do
 done
 pass "C7: all agents declare verdict / findings / confidence in their output contract"
 
+# C8 (#306 / RFC 0012 §3.10): the Phase-1 dispatch_master call site is guarded.
+# lib/dispatch.sh has NEVER defined dispatch_master (public surface:
+# uberdev_dispatch_preflight/_resolve_env/_one) — pre-guard, the rc=127 of the
+# missing function was swallowed by the success echo + exit 0, so the documented
+# default mode printed "dispatched master" with nothing running. Call/definition
+# pairing: if dispatch_master is ever actually implemented in lib/dispatch.sh the
+# first arm goes green (guard becomes optional); until then the SKILL must refuse
+# loud (exit 127) and steer to --watch BEFORE the call.
+SKILL_FILE="$SKILL_DIR/SKILL.md"
+DISPATCH_LIB="plugins/uberdev/lib/dispatch.sh"
+grep -q 'dispatch_master "$MASTER_PROMPT"' "$SKILL_FILE" \
+  || fail "C8: dispatch_master call site missing from SKILL.md (dispatch form changed? re-point this test)"
+if grep -qE '^[[:space:]]*(function[[:space:]]+dispatch_master|dispatch_master[[:space:]]*\(\))' "$DISPATCH_LIB"; then
+  pass "C8: dispatch_master is now defined in lib/dispatch.sh (fail-loud guard no longer load-bearing)"
+else
+  grep -q 'command -v dispatch_master' "$SKILL_FILE" \
+    || fail "C8: missing 'command -v dispatch_master' fail-loud guard (#306)"
+  grep -q 'master dispatch unavailable (#306)' "$SKILL_FILE" \
+    || fail "C8: guard lacks the 'master dispatch unavailable (#306)' error literal"
+  grep -q 'exit 127' "$SKILL_FILE" || fail "C8: guard must exit 127"
+  GUARD_LINE="$(grep -n 'command -v dispatch_master' "$SKILL_FILE" | head -1 | cut -d: -f1)"
+  CALL_LINE="$(grep -n 'dispatch_master "$MASTER_PROMPT"' "$SKILL_FILE" | head -1 | cut -d: -f1)"
+  [ "$GUARD_LINE" -lt "$CALL_LINE" ] \
+    || fail "C8: guard must PRECEDE the dispatch_master call (guard line $GUARD_LINE, call line $CALL_LINE)"
+  awk -v a="$GUARD_LINE" -v b="$CALL_LINE" 'NR>=a && NR<=b' "$SKILL_FILE" | grep -q -- '--watch' \
+    || fail "C8: the guard's refusal must steer users to --watch"
+  pass "C8: dispatch_master fail-loud guard precedes the call, exits 127, steers to --watch"
+fi
+
+# C9 (#306 / RFC 0012 testers-R3a): every persona's network_request evidence schema
+# carries url + timestamp. lib/rate-cap-audit.sh silently skips rows lacking EITHER
+# field (`if not url or not ts: continue`) — without these schema keys the personas
+# never emit them and the polite-rate breach gate audits ~nothing.
+for a in "${PERSONA_AGENTS[@]}"; do
+  F="$AGENT_DIR/$a.md"
+  grep -q 'network_request:' "$F" || fail "C9 $a: missing network_request evidence block"
+  grep -A5 'network_request:' "$F" | grep -q 'url:' \
+    || fail "C9 $a: network_request block lacks url: (rate-cap audit skips the row)"
+  grep -A5 'network_request:' "$F" | grep -q 'timestamp:' \
+    || fail "C9 $a: network_request block lacks timestamp: (rate-cap audit skips the row)"
+done
+pass "C9: all 6 persona network_request schema blocks carry url + timestamp"
+
+# C10 (#306 / RFC 0012 §3.10): the executable lib/rl-curl shim exists and the
+# rate-limit invocation chain is allowlist-reachable end to end:
+#   - shim is executable, bash-shebanged, sources the SSOT wrapper, and accepts
+#     per-call --rate-state-dir= / --rps-cap= argv injection;
+#   - every persona allowlist carries the Bash(*/lib/rl-curl*) pattern (the compound
+#     export+source+uberdev_rate_limit_curl form matches no Bash() pattern);
+#   - persona polite-rate blocks and the SKILL dispatch directive document the
+#     per-call long-option form (Phase-0 fence exports never reach persona agents).
+RLC="plugins/uberdev/lib/rl-curl"
+[ -f "$RLC" ] || fail "C10: $RLC missing"
+[ -x "$RLC" ] || fail "C10: $RLC is not executable (x-bit lost on checkout?)"
+head -1 "$RLC" | grep -q 'bash' || fail "C10: $RLC must run under a bash shebang"
+grep -q 'rate-limit-curl.sh' "$RLC" || fail "C10: shim does not source the SSOT wrapper rate-limit-curl.sh"
+grep -q 'uberdev_rate_limit_curl' "$RLC" || fail "C10: shim does not call uberdev_rate_limit_curl"
+grep -q -- '--rate-state-dir=' "$RLC" || fail "C10: shim lacks --rate-state-dir= argv injection"
+grep -q -- '--rps-cap=' "$RLC" || fail "C10: shim lacks --rps-cap= argv injection"
+for a in "${PERSONA_AGENTS[@]}"; do
+  F="$AGENT_DIR/$a.md"
+  grep -qF 'Bash(*/lib/rl-curl*)' "$F" || fail "C10 $a: allowed-tools lacks the Bash(*/lib/rl-curl*) pattern"
+  grep -q -- '--rate-state-dir=' "$F" || fail "C10 $a: polite-rate block lacks the per-call --rate-state-dir= injection form"
+done
+grep -q 'lib/rl-curl' "$SKILL_FILE" || fail "C10: SKILL dispatch directive does not reference lib/rl-curl"
+grep -q -- '--rate-state-dir=' "$SKILL_FILE" || fail "C10: SKILL dispatch directive lacks the per-call --rate-state-dir= injection form"
+pass "C10: rl-curl shim, persona allowlists and per-call injection are consistent"
+
 echo "ALL TESTS PASS"

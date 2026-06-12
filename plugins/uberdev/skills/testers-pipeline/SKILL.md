@@ -118,8 +118,14 @@ for arg in $ARGUMENTS; do
   esac
 done
 
+# Per-host rate-gate state for this run. ABSOLUTE path: the values are injected
+# into every persona Bash call via lib/rl-curl long options (see the Polite-rate
+# directive in Phase 2-4) — persona agents are fresh processes that never inherit
+# this fence's exports, and may run with a different cwd. The exports below serve
+# only same-fence consumers.
 mkdir -p "$RUN_DIR/.rate-state"
-export RATE_STATE_DIR="$RUN_DIR/.rate-state"
+RATE_STATE_DIR="$(pwd)/$RUN_DIR/.rate-state"
+export RATE_STATE_DIR
 export RPS_CAP
 
 # Auto-detect surface if needed
@@ -157,6 +163,16 @@ else
   MASTER_PROMPT="/uberdev:testers $ARGUMENTS --watch"
   # #171 — canonical CLAUDE_PLUGIN_ROOT-relative source (robust across cwd changes)
   [ -r "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh" ] && . "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh"
+  # #306 fail-loud guard: lib/dispatch.sh has NEVER provided dispatch_master (its
+  # public surface is uberdev_dispatch_preflight/_resolve_env/_one). Without this
+  # guard the rc=127 of the missing function was swallowed by the success echo +
+  # exit 0 below — the documented mode printed "dispatched master" with nothing
+  # running. `command -v` (not `type -t`, which misfires under zsh) hard-refuses
+  # instead, steering to the inline path.
+  command -v dispatch_master >/dev/null 2>&1 || {
+    echo "error: master dispatch unavailable (#306) — dispatch_master is not provided by lib/dispatch.sh; re-run /uberdev:testers with --watch to execute the audit inline" >&2
+    exit 127
+  }
   dispatch_master "$MASTER_PROMPT" "$RUN_DIR/master.log"
   echo "[testers] dispatched master. Watch progress: $RUN_DIR/master.log"
   echo "[testers] run_id=$RUN_ID surface=$SURFACE target=$TARGET"
@@ -233,14 +249,25 @@ EOF
   #   - scratch dir scoped to .uberdev/research/$RUN_ID/testers/scratch/<agent>/
   # Each Task returns the canonical reviewer YAML on stdout.
   #
-  # Per-persona prompts MUST embed the following Polite-rate directive verbatim
-  # so every dispatched persona enforces and audits the per-host RPS ceiling:
+  # Per-persona prompts MUST embed the following Polite-rate directive verbatim —
+  # with $RPS_CAP, $RATE_STATE_DIR and ${CLAUDE_PLUGIN_ROOT} expanded to their
+  # CONCRETE values — so every dispatched persona enforces and audits the
+  # per-host RPS ceiling:
   #
   # ## Polite-rate (enforcement)
   #
-  # Source plugins/uberdev/lib/rate-limit-curl.sh in your bash environment.
-  # Call `uberdev_rate_limit_curl <URL> <curl-args>` for EVERY HTTP request you
-  # make via curl. The wrapper hard-caps per-host RPS at $RPS_CAP (default 10).
+  # For EVERY HTTP request you make via curl, invoke the executable shim as a
+  # SINGLE command word (your allowed-tools carry Bash(*/lib/rl-curl*); a
+  # compound `export ...; source ...; uberdev_rate_limit_curl ...` form matches
+  # no allowlist pattern, and exports from the orchestrating session never
+  # reach your environment):
+  #
+  #   "${CLAUDE_PLUGIN_ROOT}/lib/rl-curl" --rate-state-dir="$RATE_STATE_DIR" --rps-cap=$RPS_CAP <URL> [curl-args...]
+  #
+  # The shim sources plugins/uberdev/lib/rate-limit-curl.sh and calls
+  # uberdev_rate_limit_curl, which hard-caps per-host RPS at $RPS_CAP
+  # (default 10). RATE_STATE_DIR / RPS_CAP are injected PER CALL via the long
+  # options — never rely on ambient env.
   #
   # Playwright / browser_* MCP calls cannot be HTTP-wrapped. The audit phase
   # reads your findings[].evidence.network_request.timestamp and fails the run
