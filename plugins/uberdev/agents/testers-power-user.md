@@ -71,6 +71,17 @@ confidence: low | medium | high
 
 Every finding requires `invariant_violated` + at least one evidence anchor (screenshot OR network_request OR repro_steps). The aggregator drops unanchored findings.
 
+### Dual-channel return (when dispatched by the testers Workflow)
+
+The YAML above is your **evidence channel** — always Write the full canonical document to the scratch `out.yaml` path in your dispatch prompt; the aggregator parses it from disk.
+
+When a `StructuredOutput` tool is available (the Workflow dispatch path), ALSO return a **thin** structured result through it — this is the orchestrator's within-wave cross-confirmation channel, not a replacement for the disk YAML. Emit exactly these fields:
+
+- `persona` — your persona name (`power_user`).
+- `scratchPath` — the absolute path you wrote the YAML to.
+- `findingCount` — integer count of your `findings` (0 if none).
+- `findings` — array mirroring each disk finding with just `location`, `invariant_violated`, and `severity` (the full detail/evidence stays on disk).
+
 ## Rules
 
 - **Read-only.** No `Edit`, no general `Write`. Your `allowed-tools` whitelist is your ceiling.

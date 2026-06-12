@@ -80,6 +80,16 @@ def main() -> int:
     p.add_argument("--invariants", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--rps-cap", required=True, type=int)
+    # RFC 0012 §3.10: pass A of the per-wave double-aggregate runs WITHOUT the
+    # politeness audit. The audit re-globs scratch and REBUILDS the wave file,
+    # so an audited pass A's synthetic polite_rate_cap row would be regenerated
+    # (not deduped) by pass B and the breach would double-fire. Pass B is the
+    # SOLE authoritative audit; pass A passes --no-audit and exits 0 right after
+    # writing the wave file. (Default off preserves the legacy single-pass
+    # SKILL.md path and every existing test invocation unchanged.)
+    p.add_argument("--no-audit", action="store_true",
+                   help="skip the post-hoc politeness audit (pass A of the "
+                        "RFC 0012 §3.10 double-aggregate; pass B is authoritative)")
     args = p.parse_args()
 
     invariants = load_invariants(args.invariants)
@@ -139,6 +149,12 @@ def main() -> int:
     with open(args.out, "w") as fh:
         yaml.safe_dump(out, fh, default_flow_style=False, sort_keys=False)
     print(f"aggregated {len(findings)} findings into {args.out}", file=sys.stderr)
+
+    if args.no_audit:
+        # Pass A of the RFC 0012 §3.10 double-aggregate: wave file written, no
+        # audit. The monitor wave then reads this file; pass B re-aggregates
+        # WITH the audit and is the single source of truth for politeBreach.
+        return 0
 
     plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
     if not plugin_root:

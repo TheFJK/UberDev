@@ -1,6 +1,6 @@
 ---
 name: testers-pipeline
-description: Use when /uberdev:testers is invoked. Orchestrates a read-only 8-agent adversarial QA audit squad (6 personas + 2 monitors) across 3 coordinated waves against a web/api/native target; routes findings into findings-to-issues.
+description: Use when /uberdev:testers is invoked. Orchestrates a read-only 8-agent adversarial QA audit squad (6 personas + 2 monitors) across N coordinated rounds against a web/api/native target via an on-disk Workflow script; routes findings into findings-to-issues. RFC 0012 §3.10 proving-ground migration.
 model: inherit
 ---
 
@@ -8,21 +8,21 @@ model: inherit
 
 Owns the lifecycle of `/uberdev:testers`. Read-only audit — the squad never writes app code. Findings are evidence-anchored and gated through monitors before being filed as GitHub issues.
 
+This pipeline is the **RFC 0012 proving ground**: `/testers` is the uberdev plugin's FIRST shipped Workflow script. The orchestration (per-round persona fan-out, the aggregate→monitor→aggregate barrier, the politeness-breach gate, report synthesis, issue filing) lives in an on-disk `workflow.js` that the deterministic Workflow runtime executes in the background; only its return value and `log()` lines reach the main session. The thin preflight below does only what the script cannot (the filesystem-dependent steps) and then mandates the Workflow call.
+
 ## Phases
 
-- **Phase 0 — Parse + auto-detect target**
-- **Phase 1 — Dispatch master agent (or run inline if --watch)**
-- **Phase 2 — Wave 1 (fresh eyes): 8-agent parallel Task() fan-out**
-- **Phase 3 — Wave 2 (verify + dig): monitor follow-ups → re-dispatch 8 agents**
-- **Phase 4 — Wave 3 (final cross-confirmation): adversarial monitor pass**
-- **Phase 5 — Synthesize report.md + dispatch findings-to-issues**
-- **Phase 6 — Emit summary line and exit**
+- **Preflight** — parse + auto-detect target, mint RUN_ID, refuse prod URLs, emit Workflow args.
+- **waves** (in `workflow.js`) — per round r in 1..rounds: 6 personas in parallel → aggregate pass A (`--no-audit`) → monitor-primary + devils-advocate in parallel → aggregate pass B (the SOLE authoritative politeness audit). Follow-ups carry forward; the budget guard bounds rounds.
+- **synthesis** (in `workflow.js`) — `report.py` → `report.md` (+ findings-to-issues aggregate unless `--no-issues`).
+- **issue-filing** (in `workflow.js`) — `findings-to-issues` via the registered agent (envelope `source=testers-aggregate`).
+- **Post-Workflow** — print the Phase-6 summary from the return and **EXIT 1 on `politeBreach`** (the headline contract).
 
 ## Schemas
 
-### `wave-N.yaml` — aggregated per-wave findings
+### `wave-N.yaml` — aggregated per-round findings
 
-Written to `.uberdev/research/$RUN_ID/testers/wave-<N>.yaml` after each wave.
+Written to `.uberdev/research/$RUN_ID/testers/wave-<N>.yaml` after each round (by `aggregate.py`).
 
 ```yaml
 schema_version: 1
@@ -47,7 +47,7 @@ findings:
         method: <verb-or-null>
         url: <url-or-null>
         status: <code-or-null>
-        timestamp: <iso8601-or-epoch-ms-or-null>   # NEW: required for rate-cap audit
+        timestamp: <iso8601-or-epoch-ms-or-null>   # required for rate-cap audit
       repro_steps: [<step>, ...]
       observed: <text>
       expected: <text>
@@ -56,43 +56,49 @@ cross_refs:
   - finding_id: <id>
     reproduced_by: [<persona>, <persona>]
     verified: true | false
-follow_ups_for_next_wave:                 # populated by monitor-primary, empty on wave 3
+follow_ups_for_next_wave:                 # populated by monitor-primary, empty on the final round
   <persona-name>:
     - <natural-language-prompt>
 ```
 
-### `findings-to-issues` aggregate (Phase 5 output)
+### Workflow return (the main-session contract)
 
-Re-uses the existing `findings-to-issues` aggregate shape (see `agents/findings-to-issues.md` for the canonical schema). Severity mapping: `blocker → BLOCKER`, `critical → CRITICAL`, `major → MAJOR`. Only `verified: true` findings are filed.
+`workflow.js` returns `{runId, surface, target, rounds, totalFindings, verifiedFindings, politeBreach, nullsByRound, auditEvents, reportPath, issues}`. `politeBreach` is the fail-the-run signal; `nullsByRound[r-1]` counts null persona/monitor returns in round r (a `-1` sentinel marks a round aborted by a throw); `issues` is `{issuesCreated:[...], skipped:N}`.
+
+### `findings-to-issues` aggregate
+
+Re-uses the existing `findings-to-issues` aggregate shape (see `agents/findings-to-issues.md`). Severity mapping: `blocker → BLOCKER`, `critical → CRITICAL`, `major → MAJOR`. Only `verified: true` findings are filed. The aggregate is written by `report.py` wrapped in the `<external-untrusted-input source="testers-aggregate">` envelope (leading file bytes).
 
 ## Reuses
 
-- `lib/dispatch.sh` — master backgrounding (RFC 0004)
-- `agents/findings-to-issues.md` — durable persistence (HTML-comment fingerprint dedupe, MAX_NEW=10 cap)
-- Reviewer YAML contract — `verdict: AUDITED | findings | confidence` shape
+- `agents/testers-*.md` — the 6 personas + 2 monitors, dispatched unmodified via `agentType` (DR-3).
+- `agents/findings-to-issues.md` — durable persistence (HTML-comment fingerprint dedupe, MAX_NEW cap).
+- `lib/config-read.sh` — `uberdev_emit_workflow_args` (the preflight → Workflow args seam, RFC 0012 §4.3).
+- `lib/rl-curl` + `lib/rate-limit-curl.sh` — the per-host RPS shim personas invoke (referenced in the No-Workflow fallback directive).
+- `skills/testers-pipeline/{aggregate.py,report.py,invariants.yaml}` — aggregation, reporting, the 10-invariant oracle.
 
-## Sub-skill imports
+## Preflight — parse, auto-detect, emit Workflow args
 
-None. This skill is fully self-contained.
-
-
-## Phase 0 — Parse + auto-detect target
-
-The skill is invoked with `$ARGUMENTS` in scope from `commands/testers.md`. Parse the following flags (Bash substring matching is fine; this isn't getopt-grade):
+The skill is invoked with `$ARGUMENTS` in scope from `commands/testers.md`. Run the fence below — it does only the filesystem-dependent work the Workflow script cannot (PyYAML probe, RUN_ID mint, surface auto-detect, prod-url refusal, mkdir), parses flags, then prints the canonical Workflow args JSON between the `WORKFLOW_ARGS_BEGIN`/`WORKFLOW_ARGS_END` markers via `uberdev_emit_workflow_args`.
 
 ```bash
-# Phase 0 precheck — PyYAML is the only runtime dep beyond python3 + bash.
-# aggregate.py and report.py both import yaml; fail fast if it's missing.
+# PyYAML is the only runtime dep beyond python3 + bash. aggregate.py and
+# report.py both import yaml; fail fast if it's missing.
 if ! python3 -c "import yaml" 2>/dev/null; then
   echo "error: PyYAML required (pip install pyyaml or python3 -m pip install pyyaml)" >&2
   exit 2
 fi
+if ! command -v jq >/dev/null 2>&1; then
+  echo "error: jq is required to emit the Workflow args (RFC 0012 §4.3); install jq or use the No-Workflow fallback below" >&2
+  exit 2
+fi
 
-RUN_ID="$(date +%Y%m%d-%H%M%S)-$(printf '%04x' $RANDOM)"
+RUN_ID="$(date +%Y%m%d-%H%M%S)-$(printf '%04x' "$RANDOM")"
 RUN_DIR=".uberdev/research/$RUN_ID/testers"
-mkdir -p "$RUN_DIR/scratch" "$RUN_DIR/screenshots" "$RUN_DIR/traces"
+mkdir -p "$RUN_DIR/scratch" "$RUN_DIR/screenshots" "$RUN_DIR/traces" "$RUN_DIR/.rate-state"
 
-# Parse flags
+# Parse flags (Bash substring matching; not getopt-grade). WATCH selects the
+# No-Workflow fallback (the retained inline directive path / interactive mode).
 TARGET=""; SURFACE="auto"; WATCH=0; ROUNDS=3; MAX_ISSUES=10; PERSONA_LIST=""; NO_ISSUES=0; RPS_CAP=10
 for arg in $ARGUMENTS; do
   case "$arg" in
@@ -105,11 +111,11 @@ for arg in $ARGUMENTS; do
     --rps-cap=*)
       RPS_CAP="${arg#--rps-cap=}"
       if ! [[ "$RPS_CAP" =~ ^[1-9][0-9]*$ ]]; then
-        echo "error: --rps-cap RPS_CAP must be a positive integer (no leading zero, no sign); got '$RPS_CAP'" >&2
+        echo "error: --rps-cap must be a positive integer (no leading zero, no sign); got '$RPS_CAP'" >&2
         exit 2
       fi
       if [ "$RPS_CAP" -lt 1 ] || [ "$RPS_CAP" -gt 1000 ]; then
-        echo "error: --rps-cap RPS_CAP must be an integer in [1, 1000]; got '$RPS_CAP'" >&2
+        echo "error: --rps-cap must be in [1, 1000]; got '$RPS_CAP'" >&2
         exit 2
       fi
       ;;
@@ -118,17 +124,13 @@ for arg in $ARGUMENTS; do
   esac
 done
 
-# Per-host rate-gate state for this run. ABSOLUTE path: the values are injected
-# into every persona Bash call via lib/rl-curl long options (see the Polite-rate
-# directive in Phase 2-4) — persona agents are fresh processes that never inherit
-# this fence's exports, and may run with a different cwd. The exports below serve
-# only same-fence consumers.
-mkdir -p "$RUN_DIR/.rate-state"
-RATE_STATE_DIR="$(pwd)/$RUN_DIR/.rate-state"
-export RATE_STATE_DIR
-export RPS_CAP
+# CLAMP rounds to [1, 10]: a large value collides mid-run with the 1000-agent
+# Workflow lifetime cap (RFC 0012 §3.10). Default 3; non-integer falls back to 3.
+if ! [[ "$ROUNDS" =~ ^[1-9][0-9]*$ ]]; then ROUNDS=3; fi
+if [ "$ROUNDS" -lt 1 ]; then ROUNDS=1; fi
+if [ "$ROUNDS" -gt 10 ]; then ROUNDS=10; fi
 
-# Auto-detect surface if needed
+# Auto-detect surface if needed.
 if [ "$SURFACE" = "auto" ]; then
   if [ -f package.json ] && grep -q '"playwright"' package.json; then SURFACE="web"
   elif find . -maxdepth 3 -name "openapi.yaml" -o -name "openapi.json" -o -name "swagger.yaml" 2>/dev/null | head -1 | read -r _; then SURFACE="api"
@@ -138,7 +140,7 @@ if [ "$SURFACE" = "auto" ]; then
   fi
 fi
 
-# Refuse if target matches prod patterns
+# Refuse if target matches prod patterns.
 if [ -f .uberdev/config.yaml ]; then
   PROD_PATTERNS="$(python3 -c "import yaml; cfg=yaml.safe_load(open('.uberdev/config.yaml')); print('\n'.join(cfg.get('prod_url_patterns', [])))" 2>/dev/null || true)"
   if [ -n "$PROD_PATTERNS" ] && [ -n "$TARGET" ]; then
@@ -149,221 +151,88 @@ if [ -f .uberdev/config.yaml ]; then
     done <<< "$PROD_PATTERNS"
   fi
 fi
-```
-
-## Phase 1 — Dispatch master (or run inline)
-
-If `--watch` is set, the skill continues in the current session (the wave loop below runs inline). Otherwise, dispatch a master via `plugins/uberdev/lib/dispatch.sh`:
-
-```bash
-if [ "$WATCH" = "1" ]; then
-  echo "[testers] running inline (--watch); session occupied for the duration."
-else
-  # Build the master prompt that re-enters this skill with the same args plus --watch
-  MASTER_PROMPT="/uberdev:testers $ARGUMENTS --watch"
-  # #171 — canonical CLAUDE_PLUGIN_ROOT-relative source (robust across cwd changes)
-  [ -r "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh" ] && . "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh"
-  # #306 fail-loud guard: lib/dispatch.sh has NEVER provided dispatch_master (its
-  # public surface is uberdev_dispatch_preflight/_resolve_env/_one). Without this
-  # guard the rc=127 of the missing function was swallowed by the success echo +
-  # exit 0 below — the documented mode printed "dispatched master" with nothing
-  # running. `command -v` (not `type -t`, which misfires under zsh) hard-refuses
-  # instead, steering to the inline path.
-  command -v dispatch_master >/dev/null 2>&1 || {
-    echo "error: master dispatch unavailable (#306) — dispatch_master is not provided by lib/dispatch.sh; re-run /uberdev:testers with --watch to execute the audit inline" >&2
-    exit 127
-  }
-  dispatch_master "$MASTER_PROMPT" "$RUN_DIR/master.log"
-  echo "[testers] dispatched master. Watch progress: $RUN_DIR/master.log"
-  echo "[testers] run_id=$RUN_ID surface=$SURFACE target=$TARGET"
-  exit 0
-fi
-```
-
-## Phase 2–4 — Three coordinated waves
-
-Wave loop. For each round in `1..ROUNDS`:
-
-```bash
-# Wave-file stat helper. Reads a wave-N.yaml and prints the requested count.
-# Centralises the python3-yaml invocation so per-wave summary lines and
-# Phase 6 share one parser instead of three inlined snippets.
-_wave_count() {
-  # _wave_count <path> <kind>  where kind ∈ {findings, verified}
-  python3 - "$1" "$2" <<'PY'
-import sys, yaml
-path, kind = sys.argv[1], sys.argv[2]
-doc = yaml.safe_load(open(path)) or {}
-if kind == "findings":
-    print(len(doc.get("findings") or []))
-elif kind == "verified":
-    print(sum(1 for cr in (doc.get("cross_refs") or []) if cr.get("verified")))
-else:
-    sys.exit(f"unknown kind: {kind}")
-PY
-}
 
 PERSONAS="${PERSONA_LIST:-panicked_grandma,power_user,adversarial_security,chaos_engineer,a11y_critic,mobile_thumb}"
-PREV_FINDINGS="null"
+RUN_DIR_ABS="$(pwd)/$RUN_DIR"
+INVARIANTS_ABS="${CLAUDE_PLUGIN_ROOT}/skills/testers-pipeline/invariants.yaml"
+# The invariant IDs travel as a comma list (path + IDs, never the YAML bytes —
+# RFC 0012 §3.10). One python3 read keeps the ID set the SINGLE source of truth.
+INVARIANT_IDS="$(python3 -c "import yaml,sys; print(','.join(i['id'] for i in yaml.safe_load(open(sys.argv[1]))['invariants']))" "$INVARIANTS_ABS" 2>/dev/null || true)"
+NO_ISSUES_BOOL=false; [ "$NO_ISSUES" = "1" ] && NO_ISSUES_BOOL=true
+NOW_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# Per-wave fan-out cap (RFC 0006 §Risks). Default 8 matches wave size.
-# Precedence env > config > default; range [1, 16].
-if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
-  . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
-  TESTERS_FANOUT="$(uberdev_read_int_in_range fanout_concurrency.testers UBERDEV_TESTERS_FANOUT 1 16 8)"
+if [ "$WATCH" = "1" ]; then
+  echo "[testers] --watch set — using the No-Workflow fallback (inline directive path)."
+  echo "[testers] run_id=$RUN_ID surface=$SURFACE target=${TARGET:-(auto)} rounds=$ROUNDS rps_cap=$RPS_CAP"
 else
-  TESTERS_FANOUT=8
-fi
-
-for WAVE in $(seq 1 "$ROUNDS"); do
-  WAVE_FILE="$RUN_DIR/wave-$WAVE.yaml"
-  echo "[testers] wave $WAVE/$ROUNDS starting"
-
-  # In ONE assistant message, dispatch all 6 personas + 2 monitors via Task() calls.
-  # The skill emits the dispatch directives below; the wrapping orchestrator (this Claude
-  # session) reads them and fires the actual Task() calls in a single message.
-  cat > "$RUN_DIR/dispatch-wave-$WAVE.yaml" <<EOF
-schema_version: 1
-wave: $WAVE
-run_id: $RUN_ID
-target:
-  surface: $SURFACE
-  url: $TARGET
-prev_findings_path: $PREV_FINDINGS
-budget:
-  max_actions: 200
-  max_clock_seconds: 300
-  rps_cap: $RPS_CAP
-agents_to_dispatch:
-  personas: [$PERSONAS]
-  monitors: [monitor_primary, monitor_devils_advocate]
-EOF
-
-  # ============================================================================
-  # DISPATCH POINT — the orchestrating session reads dispatch-wave-N.yaml above
-  # and fires N Task() calls IN A SINGLE assistant message. Each Task receives:
-  #   - target spec
-  #   - invariants.yaml (path)
-  #   - prev wave's findings (path or null)
-  #   - monitor-primary's follow_ups for this persona (from prev wave; empty on wave 1)
-  #   - scratch dir scoped to .uberdev/research/$RUN_ID/testers/scratch/<agent>/
-  # Each Task returns the canonical reviewer YAML on stdout.
-  #
-  # Per-persona prompts MUST embed the following Polite-rate directive verbatim —
-  # with $RPS_CAP, $RATE_STATE_DIR and ${CLAUDE_PLUGIN_ROOT} expanded to their
-  # CONCRETE values — so every dispatched persona enforces and audits the
-  # per-host RPS ceiling:
-  #
-  # ## Polite-rate (enforcement)
-  #
-  # For EVERY HTTP request you make via curl, invoke the executable shim as a
-  # SINGLE command word (your allowed-tools carry Bash(*/lib/rl-curl*); a
-  # compound `export ...; source ...; uberdev_rate_limit_curl ...` form matches
-  # no allowlist pattern, and exports from the orchestrating session never
-  # reach your environment):
-  #
-  #   "${CLAUDE_PLUGIN_ROOT}/lib/rl-curl" --rate-state-dir="$RATE_STATE_DIR" --rps-cap=$RPS_CAP <URL> [curl-args...]
-  #
-  # The shim sources plugins/uberdev/lib/rate-limit-curl.sh and calls
-  # uberdev_rate_limit_curl, which hard-caps per-host RPS at $RPS_CAP
-  # (default 10). RATE_STATE_DIR / RPS_CAP are injected PER CALL via the long
-  # options — never rely on ambient env.
-  #
-  # Playwright / browser_* MCP calls cannot be HTTP-wrapped. The audit phase
-  # reads your findings[].evidence.network_request.timestamp and fails the run
-  # if your per-host rolling 1-second RPS exceeds $RPS_CAP. Populate
-  # `timestamp` (ISO 8601 with milliseconds, or epoch-ms integer) on every
-  # network_request evidence anchor.
-  # ============================================================================
-
-  # aggregate.py runs the polite-rate audit internally and exits 1 on breach,
-  # 0 on clean, 2 on error. Capture the exit code and set POLITE_BREACH for
-  # Phase 6 fail-the-run. (Single audit invocation: aggregate.py is the source
-  # of truth; the audit script only runs from there.)
-  if python3 plugins/uberdev/skills/testers-pipeline/aggregate.py \
-    --run-id "$RUN_ID" \
-    --wave "$WAVE" \
-    --scratch-dir "$RUN_DIR/scratch" \
-    --invariants plugins/uberdev/skills/testers-pipeline/invariants.yaml \
-    --rps-cap "$RPS_CAP" \
-    --out "$WAVE_FILE"; then
-    :
-  else
-    rc=$?
-    case "$rc" in
-      1) POLITE_BREACH=1 ;;
-      *) echo "[testers] aggregate.py failed (exit $rc); aborting wave $WAVE" >&2; exit "$rc" ;;
-    esac
-  fi
-
-  PREV_FINDINGS="$WAVE_FILE"
-  echo "[testers] wave $WAVE complete: $(_wave_count "$WAVE_FILE" findings) findings"
-done
-```
-
-The skill ships `aggregate.py` alongside SKILL.md — a tiny script (~50 lines) that:
-
-1. Globs `scratch/<agent>/*.yaml`
-2. Parses each via `yaml.safe_load`
-3. Drops findings without `invariant_violated` OR without any `evidence.*` populated
-4. Computes stable `id` per finding via `sha256(persona + invariant_violated + location)[:16]`
-5. Merges all findings into one wave-N.yaml
-6. Runs monitor-primary's cross_refs logic IF the monitor agents' outputs are in scratch (else passes them through verbatim)
-
-
-## Phase 5 — Synthesize report.md and persist findings
-
-```bash
-# Generate the human-readable report
-python3 plugins/uberdev/skills/testers-pipeline/report.py \
-  --run-id "$RUN_ID" \
-  --waves-dir "$RUN_DIR" \
-  --invariants plugins/uberdev/skills/testers-pipeline/invariants.yaml \
-  --out "$RUN_DIR/report.md"
-
-echo "[testers] report written: $RUN_DIR/report.md"
-
-# Dispatch findings-to-issues unless --no-issues
-if [ "$NO_ISSUES" != "1" ]; then
-  # Build a findings-to-issues-compatible aggregate from the final wave file.
-  # Only verified: true findings with severity blocker|critical|major are filed.
-  python3 plugins/uberdev/skills/testers-pipeline/report.py \
-    --run-id "$RUN_ID" \
-    --waves-dir "$RUN_DIR" \
-    --invariants plugins/uberdev/skills/testers-pipeline/invariants.yaml \
-    --emit-findings-to-issues-aggregate "$RUN_DIR/findings-to-issues-aggregate.md"
-
-  # The Task() dispatch happens in the orchestrating session, not in this skill.
-  echo "DISPATCH: findings-to-issues with $RUN_DIR/findings-to-issues-aggregate.md (max_new=$MAX_ISSUES)"
+  # RFC 0012 §4.1: validate the on-disk Workflow script exists BEFORE emitting
+  # args and mandating the call. On a target install with a missing/misnamed
+  # workflow.js the args envelope would otherwise be emitted and the Workflow
+  # call mandated regardless — failing later at the runtime layer with a worse
+  # error than this clean preflight refusal. (--watch reaches the No-Workflow
+  # fallback above, so the guard sits inside this non-watch arm only.)
+  WORKFLOW_JS="$CLAUDE_PLUGIN_ROOT/skills/testers-pipeline/workflow.js"
+  [ -f "$WORKFLOW_JS" ] || { echo "error: $WORKFLOW_JS missing (RFC 0012 §4.1); reinstall the plugin or use --watch for the No-Workflow fallback" >&2; exit 2; }
+  . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+  uberdev_emit_workflow_args testers \
+    run_id="$RUN_ID" \
+    runId="$RUN_ID" \
+    runDirAbs="$RUN_DIR_ABS" \
+    pluginRootAbs="$CLAUDE_PLUGIN_ROOT" \
+    target="$TARGET" \
+    surface="$SURFACE" \
+    rounds="$ROUNDS" \
+    rpsCap="$RPS_CAP" \
+    maxIssues="$MAX_ISSUES" \
+    personas="$PERSONAS" \
+    noIssues="$NO_ISSUES_BOOL" \
+    invariantsPathAbs="$INVARIANTS_ABS" \
+    invariantIds="$INVARIANT_IDS" \
+    timestampIso="$NOW_ISO"
 fi
 ```
 
-The findings-to-issues aggregate is shaped to match the existing post-impl-review-final.md schema (see `agents/findings-to-issues.md`). The orchestrator session reads the `DISPATCH:` line and fires `Task(subagent_type: uberdev:findings-to-issues)` in the standard idiom.
+**Workflow mandate (unless `--watch`):** the preflight validated `[ -f "$CLAUDE_PLUGIN_ROOT/skills/testers-pipeline/workflow.js" ]`. Relay the JSON between `WORKFLOW_ARGS_BEGIN`/`WORKFLOW_ARGS_END` **verbatim** (DR-2 — no LLM-composed handoffs) into:
 
-## Phase 6 — Summary + exit
-
-```bash
-TOTAL="$(_wave_count "$RUN_DIR/wave-$ROUNDS.yaml" findings)"
-VERIFIED="$(_wave_count "$RUN_DIR/wave-$ROUNDS.yaml" verified)"
-
-echo
-echo "[testers] === DONE ==="
-echo "  run_id:        $RUN_ID"
-echo "  surface:       $SURFACE"
-echo "  target:        ${TARGET:-(auto)}"
-echo "  rounds:        $ROUNDS"
-echo "  total findings:    $TOTAL"
-echo "  verified findings: $VERIFIED"
-echo "  report:        $RUN_DIR/report.md"
-[ "$NO_ISSUES" != "1" ] && echo "  issues:        see findings-to-issues output above"
-
-# Fail-the-run on Polite-rate breach. The audit step in the wave loop sets
-# POLITE_BREACH=1 if any persona's per-host rolling 1-second RPS exceeded
-# $RPS_CAP; polite_rate_cap findings are already appended to wave-N.yaml and
-# rolled into report.md.
-if [ "${POLITE_BREACH:-0}" = "1" ]; then
-  echo "[testers] --rps-cap=$RPS_CAP was exceeded during the run; see polite_rate_cap findings in report.md" >&2
-  exit 1
-fi
 ```
-<!-- Phase logic implementations land via T15 (waves 2-4) and T17 (Phase 5). -->
+Workflow({scriptPath: "$CLAUDE_PLUGIN_ROOT/skills/testers-pipeline/workflow.js"}, <the JSON between the markers>)
+```
+
+**Post-Workflow mandate (stated explicitly — the one remaining prose directive at the seam):** when the Workflow returns, print the Phase-6 summary from its return value and **EXIT 1 on `politeBreach`**:
+
+```
+[testers] === DONE ===
+  run_id:            <return.runId>
+  surface:           <return.surface>
+  target:            <return.target or (auto)>
+  rounds:            <return.rounds>
+  total findings:    <return.totalFindings>
+  verified findings: <return.verifiedFindings>
+  null returns:      <return.nullsByRound>
+  report:            <return.reportPath>
+  issues:            <return.issues.issuesCreated> (<return.issues.skipped> skipped)
+```
+
+If `return.politeBreach` is `true`, additionally print `[testers] --rps-cap=<N> was exceeded during the run; see polite_rate_cap findings in report.md` to stderr and **exit 1** — this is the headline contract (live for the first time). Otherwise exit 0.
+
+## No-Workflow fallback
+
+Run this path when **Workflow is not among your tools** (Gemini / Copilot / pre-Workflow Claude Code — see `references/{gemini,copilot,codex}-tools.md`) OR when the user passed `--watch` (the retained inline directive path, which is also the interactive mode that keeps the QA-squad windows visible — workflow agent transcripts never reach the main session, so the watch-the-squad UX is otherwise unrecoverable).
+
+The never-worked master-dispatch mode is **removed**, not guarded: `lib/dispatch.sh` never provided `dispatch_master` (its public surface is `uberdev_dispatch_preflight`/`_resolve_env`/`_one`), so the old default printed "dispatched master" with nothing running (#306). There is no detached-session path here — use the inline directive recipe below.
+
+Inline directive recipe (one round at a time, `1..ROUNDS`):
+
+1. In ONE assistant message, dispatch all 6 personas (`Task` with `subagent_type: uberdev:testers-<persona>`) plus `monitor_primary` and `monitor_devils_advocate`. Each Task prompt carries: the target spec + surface; the invariants oracle by absolute PATH (`$INVARIANTS_ABS`, Read it — never inline the YAML); the previous round's `wave-<N-1>.yaml` path (null on round 1); monitor-primary's follow-ups for that persona (empty on round 1); and the persona's scratch dir `$RUN_DIR/scratch/<persona>/`. Each persona writes its canonical YAML to scratch (the evidence channel).
+2. **Polite-rate (enforcement) — embed verbatim in every persona prompt** with `$RPS_CAP`, `$RATE_STATE_DIR` and `${CLAUDE_PLUGIN_ROOT}` expanded to concrete values. For EVERY curl request, the persona invokes the executable shim as a SINGLE command word (the persona allowlists carry `Bash(*/lib/rl-curl*)`; a compound `export ...; source ...; uberdev_rate_limit_curl` form matches no allowlist pattern, and the preflight fence's exports never reach a fresh Task agent):
+
+   ```
+   "${CLAUDE_PLUGIN_ROOT}/lib/rl-curl" --rate-state-dir="$RATE_STATE_DIR" --rps-cap=$RPS_CAP <URL> [curl-args...]
+   ```
+
+   The shim sources `lib/rate-limit-curl.sh` and calls `uberdev_rate_limit_curl`, hard-capping per-host RPS at `$RPS_CAP`. Playwright / `browser_*` MCP calls cannot be HTTP-wrapped; the audit reads `findings[].evidence.network_request.timestamp` and fails the run if the per-host rolling 1-second RPS exceeds `$RPS_CAP`. (`RATE_STATE_DIR="$RUN_DIR_ABS/.rate-state"`.)
+3. After the 6 personas + 2 monitors return, aggregate the round: run `aggregate.py` (with `CLAUDE_PLUGIN_ROOT` exported) over `$RUN_DIR/scratch` → `$RUN_DIR/wave-<N>.yaml`. Capture its exit code: `1` = politeness breach → set `POLITE_BREACH=1`; `2` = error → abort. Carry monitor-primary's `follow_ups_for_next_wave` into the next round.
+4. After the last round, run `report.py` → `$RUN_DIR/report.md`, and (unless `--no-issues`) emit the `findings-to-issues` aggregate and dispatch `Task(subagent_type: uberdev:findings-to-issues)` with `max_new=$MAX_ISSUES`.
+5. Print the Phase-6 summary and **exit 1 if `POLITE_BREACH=1`** (same headline contract as the Workflow path).
+
+This fallback recipe is intentionally thin; the Workflow path is the default and carries the enforced barriers, real budget guard, and null-counting.
