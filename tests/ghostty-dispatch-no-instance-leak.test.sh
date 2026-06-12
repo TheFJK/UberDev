@@ -13,7 +13,11 @@
 set -u
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
+# #304 / RFC 0012 §3.4: the executable dispatch path lives in
+# lib/solve-launcher.sh (hoisted out of solve-pipeline/SKILL.md); the
+# tombstone scan targets the lib file. The #31 historical-rationale assert
+# below still reads the SKILL.md, which keeps the History section.
+SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
 
 PASS=0
 FAIL=0

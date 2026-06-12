@@ -25,7 +25,10 @@
 set -u
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
+# #304 / RFC 0012 §3.4: the dispatch composition modelled by the R2-R4
+# fixtures lives in lib/solve-launcher.sh (hoisted out of
+# solve-pipeline/SKILL.md).
+SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
 # #175: the PERM_FLAG/EFFORT_FLAG array hoist moved from solve-pipeline Phase A
 # into uberdev_dispatch_resolve_env() in lib/dispatch.sh (shared SSOT helper).
 # R1a/R1b now anchor on dispatch.sh; the runtime word-split fixtures (R2-R4)

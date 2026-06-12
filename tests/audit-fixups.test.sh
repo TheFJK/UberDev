@@ -30,12 +30,15 @@ TURBO_CMD="$REPO_ROOT/plugins/uberdev/commands/turbo.md"
 ISSUE_CMD="$REPO_ROOT/plugins/uberdev/commands/issue.md"
 BRAINSTORM_SKILL="$REPO_ROOT/plugins/uberdev/skills/brainstorm/SKILL.md"
 SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
+# #304 / RFC 0012 §3.4: the executable pipeline (incl. the PERM_DESC block
+# asserted by C8 below) was hoisted into lib/solve-launcher.sh.
+SOLVE_LAUNCHER="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
 
 # Pre-flight: refuse to run if any asserted-against file is missing or unreadable.
 # Without this, every assertion fails with a confusing "pattern not found"
 # instead of the real cause (mirrors issue-causal-fanout.test.sh).
 for f in "$CODE_SIMPLIFIER" "$STOP_SERVER" "$SESSION_START" \
-         "$SOLVE_CMD" "$TURBO_CMD" "$ISSUE_CMD" "$BRAINSTORM_SKILL" "$SOLVE_PIPELINE"; do
+         "$SOLVE_CMD" "$TURBO_CMD" "$ISSUE_CMD" "$BRAINSTORM_SKILL" "$SOLVE_PIPELINE" "$SOLVE_LAUNCHER"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -188,13 +191,13 @@ else
   PASS=$((PASS + 1))
 fi
 
-# Rename audit: AUTO_PERMISSIONS must appear (Risk 1 mitigation).
-perm_count=$(grep -c 'AUTO_PERMISSIONS' "$SOLVE_PIPELINE")
+# Rename audit: AUTO_PERMISSIONS must appear in the launcher (Risk 1 mitigation).
+perm_count=$(grep -c 'AUTO_PERMISSIONS' "$SOLVE_LAUNCHER")
 if [ "$perm_count" -ge 3 ]; then
-  echo "  PASS  solve-pipeline mentions AUTO_PERMISSIONS in $perm_count places (≥ 3 required)"
+  echo "  PASS  solve-launcher mentions AUTO_PERMISSIONS in $perm_count places (≥ 3 required)"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  solve-pipeline mentions AUTO_PERMISSIONS in only $perm_count place(s) (expected ≥ 3)"
+  echo "  FAIL  solve-launcher mentions AUTO_PERMISSIONS in only $perm_count place(s) (expected ≥ 3)"
   FAIL=$((FAIL + 1))
 fi
 
@@ -203,11 +206,11 @@ fi
 # AUTO_MODE is now the turbo flag; the permission-mode flag is AUTO_PERMISSIONS.
 # A copy-paste accident reintroducing the old pattern would silently alias the
 # two semantics — the test catches it.
-if grep -qE '\[\[ "\$AUTO_MODE" == "1" \]\][[:space:]]*&&[[:space:]]*PERM_FLAG_VAL' "$SOLVE_PIPELINE"; then
-  echo "  FAIL  solve-pipeline contains legacy AUTO_MODE/PERM_FLAG_VAL pattern (Risk 1 collision regression)"
+if grep -qE '\[\[ "\$AUTO_MODE" == "1" \]\][[:space:]]*&&[[:space:]]*PERM_FLAG_VAL' "$SOLVE_LAUNCHER"; then
+  echo "  FAIL  solve-launcher contains legacy AUTO_MODE/PERM_FLAG_VAL pattern (Risk 1 collision regression)"
   FAIL=$((FAIL + 1))
 else
-  echo "  PASS  solve-pipeline does NOT contain legacy AUTO_MODE/PERM_FLAG_VAL pattern (collision guard intact)"
+  echo "  PASS  solve-launcher does NOT contain legacy AUTO_MODE/PERM_FLAG_VAL pattern (collision guard intact)"
   PASS=$((PASS + 1))
 fi
 
@@ -236,9 +239,9 @@ echo "== C8: solve-pipeline 'Permission mode' line must use flat-var form (zsh-N
 # the resurrected one-liner, never the new flat-var if/else form.
 # (Inner labels updated from `auto (...)` to `bypass (...)` post-AUTO-collapse —
 # the example one-liner content shifts but the structural NOMATCH bug is unchanged.)
-if grep -qE '^echo "Permission mode: \$\(\[\[' "$SOLVE_PIPELINE"; then
+if grep -qE '^echo "Permission mode: \$\(\[\[' "$SOLVE_LAUNCHER"; then
   echo "  FAIL  solve-pipeline 'Permission mode' echo collapsed back to one-liner — zsh-NOMATCH regression"
-  echo "        file:    $SOLVE_PIPELINE"
+  echo "        file:    $SOLVE_LAUNCHER"
   echo "        rule:    use the flat-var if/else form, not 'echo \"... \$([[ ... ]] && echo ... || echo ...)\"'"
   FAIL=$((FAIL + 1))
 else
@@ -247,7 +250,7 @@ else
 fi
 # Positive companion: the flat-var form must actually be present (catches a
 # scenario where someone deletes the line entirely instead of regressing it).
-assert_grep "$SOLVE_PIPELINE" '^[[:space:]]*PERM_DESC="default \(manual per-tool gating\)"' \
+assert_grep "$SOLVE_LAUNCHER" '^[[:space:]]*PERM_DESC="default \(manual per-tool gating\)"' \
   "solve-pipeline assigns PERM_DESC=\"default (manual per-tool gating)\" in the else branch"
 # Post-#241 follow-up: AUTO_PERMISSIONS=1 now resolves to the same bypass
 # pair as SKIP_PERMISSIONS=1 (auto-mode-collapse). Post-#246 follow-up: the
@@ -258,23 +261,23 @@ assert_grep "$SOLVE_PIPELINE" '^[[:space:]]*PERM_DESC="default \(manual per-tool
 # print at dispatch time see the full bypass-pair surface. The tier-name
 # suffix (SKIP_PERMISSIONS / AUTO_PERMISSIONS) still lets post-hoc grep
 # attribute the bypass to /goal (SKIP) vs /turbo --auto / /solve --auto (AUTO).
-assert_grep "$SOLVE_PIPELINE" '^[[:space:]]*PERM_DESC="bypass \(--dangerously-skip-permissions --permission-mode bypassPermissions; SKIP_PERMISSIONS tier' \
+assert_grep "$SOLVE_LAUNCHER" '^[[:space:]]*PERM_DESC="bypass \(--dangerously-skip-permissions --permission-mode bypassPermissions; SKIP_PERMISSIONS tier' \
   "solve-pipeline assigns PERM_DESC=\"bypass (--dangerously-skip-permissions --permission-mode bypassPermissions; SKIP_PERMISSIONS tier ...)\" in the SKIP branch (#246 — names both flags)"
-assert_grep "$SOLVE_PIPELINE" '^[[:space:]]*PERM_DESC="bypass \(--dangerously-skip-permissions --permission-mode bypassPermissions; AUTO_PERMISSIONS tier' \
+assert_grep "$SOLVE_LAUNCHER" '^[[:space:]]*PERM_DESC="bypass \(--dangerously-skip-permissions --permission-mode bypassPermissions; AUTO_PERMISSIONS tier' \
   "solve-pipeline assigns PERM_DESC=\"bypass (--dangerously-skip-permissions --permission-mode bypassPermissions; AUTO_PERMISSIONS tier ...)\" in the AUTO branch (#246 — names both flags)"
 # Negative drift guard: the bare-form `--dangerously-skip-permissions;` (single
 # flag named in the parenthetical) must NOT reappear in PERM_DESC — that was
 # exactly the #246 misconception that masked the paired-flag contract from
 # operators reading the dispatch-time print. Anchor on the trailing `;` so the
 # new paired form (` --permission-mode bypassPermissions; `) does not red-flag.
-if grep -qE '^[[:space:]]*PERM_DESC="bypass \(--dangerously-skip-permissions;' "$SOLVE_PIPELINE"; then
+if grep -qE '^[[:space:]]*PERM_DESC="bypass \(--dangerously-skip-permissions;' "$SOLVE_LAUNCHER"; then
   echo "  FAIL  PERM_DESC contains a bare \"--dangerously-skip-permissions;\" form — names only one flag, hides the paired --permission-mode bypassPermissions from operators (#246 regression)"
   FAIL=$((FAIL + 1))
 else
   echo "  PASS  PERM_DESC has no bare \"--dangerously-skip-permissions;\" form (paired flags surfaced to operators per #246)"
   PASS=$((PASS + 1))
 fi
-assert_grep "$SOLVE_PIPELINE" '^echo "Permission mode: \$PERM_DESC"' \
+assert_grep "$SOLVE_LAUNCHER" '^echo "Permission mode: \$PERM_DESC"' \
   "solve-pipeline echoes 'Permission mode: \$PERM_DESC' (single-var interpolation, no nested substitution)"
 
 echo

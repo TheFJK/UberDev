@@ -340,16 +340,18 @@ fi
 
 echo
 echo "== I1: solve-pipeline tier-clamp wiring (Task 2) =="
-assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
+# #304 / RFC 0012 §3.4: the tier-clamp wiring lives in lib/solve-launcher.sh
+# (the executable hoisted out of solve-pipeline/SKILL.md).
+assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh" \
   'uberdev_read_enum solve_tier_floor[[:space:]]+SOLVE_TIER_FLOOR' \
   "I1a: solve-pipeline reads solve_tier_floor with SOLVE_TIER_FLOOR env"
-assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
+assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh" \
   'uberdev_read_enum solve_tier_ceiling[[:space:]]+SOLVE_TIER_CEILING' \
   "I1b: solve-pipeline reads solve_tier_ceiling with SOLVE_TIER_CEILING env"
-assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
+assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh" \
   'uberdev_clamp_tier "\$TIER" "\$FLOOR" "\$CEILING"' \
   "I1c: solve-pipeline calls uberdev_clamp_tier with TIER/FLOOR/CEILING"
-assert_grep_in "$SKILL_DIR/solve-pipeline/SKILL.md" \
+assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh" \
   'trivial\|small\|medium\|large' \
   "I1d: solve-pipeline enum allows all four tier names"
 

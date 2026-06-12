@@ -11,7 +11,9 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 POST_IMPL="$REPO_ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md"
 SOLVE_CMD="$REPO_ROOT/plugins/uberdev/commands/solve.md"
 SUBAGENT_DRIVEN="$REPO_ROOT/plugins/uberdev/skills/subagent-driven-dev/SKILL.md"
-SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
+# #304 / RFC 0012 §3.4: the tier-prompt heredocs (AUTO_MODE branches) live in
+# lib/solve-launcher.sh (hoisted out of solve-pipeline/SKILL.md).
+SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
 
 for f in "$POST_IMPL" "$SOLVE_CMD" "$SUBAGENT_DRIVEN" "$SOLVE_PIPELINE"; do
   if [ ! -r "$f" ]; then

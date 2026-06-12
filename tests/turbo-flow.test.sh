@@ -19,7 +19,11 @@ FINISH_BRANCH="$REPO_ROOT/plugins/uberdev/skills/finish-branch/SKILL.md"
 ORCHESTRATOR="$REPO_ROOT/plugins/uberdev/skills/orchestrator/SKILL.md"
 TURBO_CMD="$REPO_ROOT/plugins/uberdev/commands/turbo.md"
 SOLVE_CMD="$REPO_ROOT/plugins/uberdev/commands/solve.md"
-SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
+# #304 / RFC 0012 §3.4: the executable pipeline (Phase A + Step 4.5 + Phase B)
+# was hoisted out of solve-pipeline/SKILL.md into lib/solve-launcher.sh — one
+# bash file run as ONE Bash tool call. All launcher-shape asserts below grep
+# the lib file; solve-pipeline/SKILL.md is contract/triage prose only.
+SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
 DISPATCH_LIB="$REPO_ROOT/plugins/uberdev/lib/dispatch.sh"
 
 PASS=0
@@ -166,24 +170,38 @@ else
 fi
 
 echo
-echo "== thin /solve and /turbo wrappers invoke the solve-pipeline skill =="
+echo "== thin /solve and /turbo wrappers run lib/solve-launcher.sh with literal mode flags (#304 / RFC 0012 §3.4) =="
+# The command files pass LITERALS into ONE Bash call — no cross-fence env
+# reads anywhere (Bash tool calls share no shell state; the historical
+# `export AUTO_MODE=…` fence followed by a Skill() invocation was dead).
+# The renderer substitutes $ARGUMENTS into real argv words, which IS the
+# #304 renderer fix.
+assert_grep "$SOLVE_CMD" \
+  'bash "\$CLAUDE_PLUGIN_ROOT/lib/solve-launcher\.sh" --auto-mode=0 -- \$ARGUMENTS' \
+  "/solve thin wrapper runs solve-launcher.sh with literal --auto-mode=0 (ONE Bash call)"
+assert_grep "$TURBO_CMD" \
+  'bash "\$CLAUDE_PLUGIN_ROOT/lib/solve-launcher\.sh" --auto-mode=1 --turbo -- \$ARGUMENTS' \
+  "/turbo thin wrapper runs solve-launcher.sh with literal --auto-mode=1 --turbo (ONE Bash call)"
+assert_not_grep "$SOLVE_CMD" 'export AUTO_MODE|export UBERDEV_TURBO' \
+  "/solve thin wrapper carries NO cross-fence env exports (the launcher owns the lifecycle in-process)"
+assert_not_grep "$TURBO_CMD" 'export AUTO_MODE|export UBERDEV_TURBO' \
+  "/turbo thin wrapper carries NO cross-fence env exports (the launcher owns the lifecycle in-process)"
 SOLVE_PIPELINE_REF='uberdev:solve-pipeline|solve-pipeline skill'
 assert_grep "$SOLVE_CMD" "$SOLVE_PIPELINE_REF" \
-  "/solve thin wrapper invokes the solve-pipeline skill"
+  "/solve thin wrapper names the solve-pipeline skill as the contract/triage reference"
 assert_grep "$TURBO_CMD" "$SOLVE_PIPELINE_REF" \
-  "/turbo thin wrapper invokes the solve-pipeline skill"
-assert_grep "$SOLVE_CMD" 'export AUTO_MODE=0' \
-  "/solve thin wrapper sets AUTO_MODE=0 (interactive)"
-assert_grep "$TURBO_CMD" 'export AUTO_MODE=1' \
-  "/turbo thin wrapper sets AUTO_MODE=1 (unattended)"
-assert_grep "$TURBO_CMD" 'export UBERDEV_TURBO=1' \
-  "/turbo thin wrapper exports UBERDEV_TURBO=1 (#97 — chain-wide unattended-mode signal)"
-assert_grep "$SOLVE_CMD" 'unset UBERDEV_TURBO' \
-  "/solve thin wrapper unsets UBERDEV_TURBO (#97 — defends against shell-rc pollution)"
-assert_grep "$TURBO_CMD" 'unset SKIP_PERMISSIONS' \
-  "T-no-skip-turbo (#241 — /turbo defends against shell-rc pollution from prior /goal SKIP_PERMISSIONS=1 export)"
-assert_grep "$SOLVE_CMD" 'unset SKIP_PERMISSIONS' \
-  "T-no-skip-solve (#241 — /solve is interactive, never auto-elevates regardless of stale /goal export)"
+  "/turbo thin wrapper names the solve-pipeline skill as the contract/triage reference"
+# #97/#241 env hygiene moved INSIDE the launcher process: the shell profile
+# re-injects UBERDEV_TURBO/SKIP_PERMISSIONS into every fresh fence, so only
+# an in-process export/unset protects the spawned children.
+assert_grep "$SOLVE_PIPELINE" '^export AUTO_MODE$' \
+  "launcher exports AUTO_MODE for its children (set from the literal --auto-mode flag)"
+assert_grep "$SOLVE_PIPELINE" 'export UBERDEV_TURBO=1' \
+  "launcher exports UBERDEV_TURBO=1 under --turbo (#97 — chain-wide unattended-mode signal)"
+assert_grep "$SOLVE_PIPELINE" 'unset UBERDEV_TURBO' \
+  "launcher unsets UBERDEV_TURBO when --turbo is absent (#97 — defends against shell-profile pollution)"
+assert_grep "$SOLVE_PIPELINE" 'unset SKIP_PERMISSIONS' \
+  "T-no-skip (#241 — launcher unsets SKIP_PERMISSIONS in-process; a stale /goal export cannot elevate /solve or bare /turbo)"
 assert_grep "$TURBO_CMD" \
   'argument-hint:.*<issue-number>.*\[<issue-number>' \
   "/turbo argument-hint documents multi-issue syntax"
@@ -219,8 +237,8 @@ assert_grep "$SOLVE_PIPELINE" \
   'echo "\$TERMINAL_FLAG_DEPRECATED_NOTE" >&2' \
   "Phase A emits TERMINAL_FLAG_DEPRECATED_NOTE to stderr on --terminal= encounter"
 assert_grep "$SOLVE_PIPELINE" \
-  "awk -v c0=0 '!seen\[\\\$c0\]\+\+'" \
-  "solve-pipeline dedupes via awk -v c0=0 !seen[\$c0]++ (preserves first-seen order, prevents same-issue worktree race; #222 parameterised against renderer collision)"
+  "awk '!seen\[\\\$0\]\+\+'" \
+  "solve-pipeline dedupes via awk !seen[\$0]++ (preserves first-seen order, prevents same-issue worktree race; plain \$0 is safe in lib/ — the renderer never renders lib files, retiring the #222 c0-parameterisation)"
 assert_grep "$SOLVE_PIPELINE" \
   'SH_WORD_SPLIT|word-split|word split' \
   "solve-pipeline comment explains the zsh word-split footgun (regression-prevention)"
@@ -247,8 +265,8 @@ assert_grep "$SOLVE_PIPELINE" \
 # a multi-line `.*\n.*` alternation half is dead code). Lock the dedup loop and
 # the break-on-first-medium guard separately.
 assert_grep "$SOLVE_PIPELINE" \
-  'for n in "\$\{ISSUE_NUMS\[@\]\}"' \
-  "TURBO MODE banner loops over ISSUE_NUMS to scan tiers (dedup mechanic)"
+  'for n in "\$\{!ISSUE_NUMS\[@\]\}"' \
+  "TURBO MODE banner loops over ISSUE_NUMS indices to scan tiers (dedup mechanic; parallel indexed arrays — declare -A is unavailable on macOS bash 3.2)"
 assert_grep "$SOLVE_PIPELINE" \
   'TIERS\[\$n\].*medium' \
   "TURBO MODE banner checks TIERS[\$n] == medium (with break after first hit)"
@@ -533,7 +551,10 @@ fi
 # the medium dispatch are excluded. Anchor at 0 so a future regression that
 # reintroduces an inline `gh pr create` in any trivial/small heredoc is
 # caught immediately.
-TRIVIAL_SMALL_GHPR_COUNT=$(awk '/^\*\*trivial:\*\*/,/^\*\*medium\*\* \*\(and `--full`\)\*:/' "$SOLVE_PIPELINE" 2>/dev/null | grep -cF 'gh pr create')
+# Launcher form: the tier prompts live in a `case "$TIER" in` with column-0
+# arms — the trivial/small slice runs from the `trivial)` arm opener to the
+# `*)` (medium) arm opener.
+TRIVIAL_SMALL_GHPR_COUNT=$(awk '/^trivial\)$/,/^\*\)$/' "$SOLVE_PIPELINE" 2>/dev/null | grep -cF 'gh pr create')
 if [[ "$TRIVIAL_SMALL_GHPR_COUNT" -eq 0 ]]; then
   echo "  PASS  no inline 'gh pr create' inside the trivial/small slice (count=0)"
   PASS=$((PASS + 1))

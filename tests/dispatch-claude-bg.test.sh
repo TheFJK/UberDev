@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Shape-check for the v0.22.0 `claude --bg` dispatch in solve-pipeline/SKILL.md.
+# Shape-check for the v0.22.0 `claude --bg` dispatch in lib/solve-launcher.sh
+# (#304 / RFC 0012 §3.4: the executable Phase A + Step 4.5 + Phase B pipeline
+# was hoisted out of solve-pipeline/SKILL.md into the lib file).
 #
 # Verifies the three-arm BG_PROMPT_MODE case-switch, the Phase A probes,
 # the wave-batching outer loop, the --terminal= deprecation shim, and the
@@ -11,7 +13,8 @@
 set -u
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
+SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
+SOLVE_SKILL="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
 DISPATCH_LIB="$REPO_ROOT/plugins/uberdev/lib/dispatch.sh"
 
 PASS=0
@@ -108,10 +111,10 @@ echo "== Positive: --effort=<level> threaded into claude --bg (v0.22.1) =="
 # daemon's default (silent quality downgrade for /turbo). The Phase A
 # parser + EFFORT_FLAG hoist + threaded case arms close that gap; the
 # assertions below lock the contract in.
-assert_grep "$SOLVE_PIPELINE" \
+assert_grep "$SOLVE_SKILL" \
   '^\| `EFFORT_LEVEL_DEFAULT` \| `max`' \
   "Constants table declares EFFORT_LEVEL_DEFAULT = max (autopilot default)"
-assert_grep "$SOLVE_PIPELINE" \
+assert_grep "$SOLVE_SKILL" \
   '^\| `EFFORT_LEVEL_ENUM` \| `low \\\| medium \\\| high \\\| xhigh \\\| max`' \
   "Constants table declares EFFORT_LEVEL_ENUM = {low,medium,high,xhigh,max}"
 assert_grep "$SOLVE_PIPELINE" \
@@ -177,10 +180,11 @@ fi
 assert_grep "$DISPATCH_LIB" \
   'BG_TURBO_ENV\+=\( SKIP_PERMISSIONS=1 \)' \
   "BG_TURBO_ENV propagates SKIP_PERMISSIONS to nested child dispatches (#241)"
-assert_grep "$REPO_ROOT/plugins/uberdev/commands/turbo.md" 'unset SKIP_PERMISSIONS' \
-  "T-no-skip-turbo (#241 pollution defence — turbo defends against stale /goal export)"
-assert_grep "$REPO_ROOT/plugins/uberdev/commands/solve.md" 'unset SKIP_PERMISSIONS' \
-  "T-no-skip-solve (#241 pollution defence — solve is interactive, never auto-elevates)"
+# #304 / RFC 0012 §3.4: the #241 hygiene unset moved INSIDE the launcher
+# process (the shell profile re-injects SKIP_PERMISSIONS into every fresh
+# fence, so a command-file fence unset protected nothing).
+assert_grep "$SOLVE_PIPELINE" 'unset SKIP_PERMISSIONS' \
+  "T-no-skip (#241 pollution defence — launcher unsets SKIP_PERMISSIONS in-process; stale /goal export cannot elevate /solve or bare /turbo)"
 assert_grep "$SOLVE_PIPELINE" \
   '_uberdev_audit_emit effort_resolved' \
   "Phase A emits effort_resolved audit event with {source, level}"
