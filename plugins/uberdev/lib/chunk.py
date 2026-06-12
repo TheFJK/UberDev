@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
-"""Enumerate git-tracked source files in scope, filter, and pack into budget-bounded chunks."""
+"""Enumerate git-tracked source files in scope, filter, and pack into AT MOST
+--areas byte-balanced areas (the fixed-fleet model for /uberscan + /ubersimplify:
+one reviewer agent per area). The legacy --budget-bytes/--max-chunks chunking
+mode was deleted (RFC 0012 scan-R4) — area mode is the only packer."""
 import argparse, json, os, subprocess, sys
 
 IGNORE_DIRS = {"node_modules", "vendor", "dist", "build", ".git", ".worktrees", "__pycache__"}
 IGNORE_SUFFIXES = (".min.js", ".min.css", ".lock", ".map", ".png", ".jpg", ".jpeg",
                    ".gif", ".svg", ".ico", ".pdf", ".zip", ".gz", ".woff", ".woff2", ".ttf")
 IGNORE_NAMES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock", "poetry.lock"}
-MAX_FILE_BYTES = 256 * 1024  # per-file hard cap; oversized files are skipped
+# Per-file hard cap; oversized files are skipped AND their names are surfaced in
+# the manifest (skipped_oversize) — an oversize skip is a coverage gap in a
+# "whole-repo" audit, so it must never be a silent count.
+MAX_FILE_BYTES = 256 * 1024
 
 
 def tracked_files(scope):
@@ -18,49 +24,42 @@ def tracked_files(scope):
     return [p for p in out.stdout.splitlines() if p]
 
 
-def keep_size(path):
-    """Return the file's byte size if it should be audited, else None
-    (ignored dir/name/suffix, oversized, or unreadable). Stats the file at most
-    once — the returned size is reused by chunk_files (no second stat)."""
+def classify(path):
+    """Classify a tracked path for packing. Returns (size, None) when the file
+    should be audited, else (None, reason) with reason one of:
+      "ignored"    — IGNORE_DIRS / IGNORE_NAMES / IGNORE_SUFFIXES match
+                     (intentional exclusion; stays a silent count)
+      "unreadable" — stat failed (e.g. tracked but deleted from disk)
+      "oversize"   — size > MAX_FILE_BYTES (a COVERAGE GAP: main() surfaces
+                     these names in the manifest's skipped_oversize list)
+    Stats the file at most once — the returned size is reused by pack_areas
+    (no second stat)."""
     parts = set(path.split("/"))
     if parts & IGNORE_DIRS:
-        return None
+        return None, "ignored"
     if os.path.basename(path) in IGNORE_NAMES:
-        return None
+        return None, "ignored"
     if path.endswith(IGNORE_SUFFIXES):
-        return None
+        return None, "ignored"
     try:
         sz = os.path.getsize(path)
     except OSError:
-        return None
-    return None if sz > MAX_FILE_BYTES else sz
+        return None, "unreadable"
+    if sz > MAX_FILE_BYTES:
+        return None, "oversize"
+    return sz, None
 
 
 def _ordered_by_dir(sized_paths):
     """Order (path, size) pairs so each directory's files are adjacent (cohesion),
-    with directories visited in sorted order and files sorted within each. Shared by
-    chunk_files (budget mode) and pack_areas (area mode) — extracting it guarantees
-    the two packers can NEVER drift in how they sequence files (both MUST see the
-    identical order for consistent chunking)."""
+    with directories visited in sorted order and files sorted within each. This is
+    the layout pack_areas partitions over: because areas are CONTIGUOUS slices of
+    this order, every directory's files span a contiguous run of areas and split
+    points fall at directory boundaries whenever the byte balance allows."""
     by_dir = {}
     for p, sz in sorted(sized_paths):
         by_dir.setdefault(os.path.dirname(p), []).append((p, sz))
     return [ps for d in sorted(by_dir) for ps in by_dir[d]]
-
-
-def chunk_files(sized_paths, budget):
-    """Group (path, size) pairs by directory for cohesion, then pack into
-    budget-bounded chunks. Sizes are precomputed by keep_size — no re-stat."""
-    chunks, cur, cur_bytes = [], [], 0
-    for p, sz in _ordered_by_dir(sized_paths):
-        if cur and cur_bytes + sz > budget:
-            chunks.append((cur, cur_bytes))
-            cur, cur_bytes = [], 0
-        cur.append(p)
-        cur_bytes += sz
-    if cur:
-        chunks.append((cur, cur_bytes))
-    return chunks
 
 
 def pack_areas(sized_paths, num_areas):
@@ -121,59 +120,48 @@ def pack_areas(sized_paths, num_areas):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--scope", default=".")
-    ap.add_argument("--budget-bytes", type=int, default=49152)
-    ap.add_argument("--max-chunks", type=int, default=25)
-    ap.add_argument("--areas", type=int, default=None,
-                    help="Area mode: pack files into AT MOST N byte-balanced areas "
-                         "(one reviewer agent per area). When set, --budget-bytes and "
-                         "--max-chunks are ignored and overflow is always false (no file "
-                         "is ever dropped). Omit for legacy byte-budget chunking.")
+    ap.add_argument("--areas", type=int, required=True,
+                    help="Pack files into AT MOST N byte-balanced areas (one "
+                         "reviewer agent per area). Every kept file is covered "
+                         "exactly once — overflow is always false (no file is "
+                         "ever dropped).")
     ap.add_argument("--run-id", default="")
     args = ap.parse_args()
 
-    area_mode = args.areas is not None
-    if area_mode:
-        if args.areas <= 0:
-            print(f"error: --areas must be positive, got {args.areas}", file=sys.stderr)
-            sys.exit(2)
-    else:
-        if args.budget_bytes <= 0:
-            print(f"error: --budget-bytes must be positive, got {args.budget_bytes}", file=sys.stderr)
-            sys.exit(2)
-        if args.max_chunks <= 0:
-            print(f"error: --max-chunks must be positive, got {args.max_chunks}", file=sys.stderr)
-            sys.exit(2)
+    if args.areas <= 0:
+        print(f"error: --areas must be positive, got {args.areas}", file=sys.stderr)
+        sys.exit(2)
 
     all_tracked = tracked_files(args.scope)
-    kept = []
+    kept, skipped_oversize = [], []
+    skipped = 0
     for p in all_tracked:
-        sz = keep_size(p)
-        if sz is not None:
+        sz, reason = classify(p)
+        if reason is None:
             kept.append((p, sz))
-    skipped = len(all_tracked) - len(kept)
+        else:
+            skipped += 1
+            if reason == "oversize":
+                skipped_oversize.append(p)
 
-    if area_mode:
-        # Fixed-fleet: <= N byte-balanced areas, every file covered, never an
-        # overflow-truncation. The agent-count ceiling is N, independent of repo size.
-        emitted = pack_areas(kept, args.areas)
-        overflow = False
-        total_groups = len(emitted)
-    else:
-        chunks = chunk_files(kept, args.budget_bytes)
-        overflow = len(chunks) > args.max_chunks
-        emitted = chunks[: args.max_chunks] if overflow else chunks
-        total_groups = len(chunks)
+    # Fixed-fleet: <= N byte-balanced areas, every file covered, never an
+    # overflow-truncation. The agent-count ceiling is N, independent of repo size.
+    areas = pack_areas(kept, args.areas)
 
     print(json.dumps({
         "run_id": args.run_id,
         "scope": "whole-repo" if args.scope == "." else args.scope,
-        "mode": "area" if area_mode else "budget",
-        "chunk_budget_bytes": None if area_mode else args.budget_bytes,
+        "mode": "area",
         "total_files": len(kept),
         "skipped_files": skipped,
-        "total_chunks": total_groups,
-        "overflow": overflow,
-        "chunks": [{"id": i + 1, "files": f, "bytes": b} for i, (f, b) in enumerate(emitted)],
+        # Oversize skips BY NAME: these in-scope source files were excluded only
+        # for exceeding MAX_FILE_BYTES, so a "whole-repo" audit has a visible —
+        # not silent — coverage gap. Rule-based ignores (IGNORE_*) and unreadable
+        # files remain count-only in skipped_files.
+        "skipped_oversize": skipped_oversize,
+        "total_chunks": len(areas),
+        "overflow": False,
+        "chunks": [{"id": i + 1, "files": f, "bytes": b} for i, (f, b) in enumerate(areas)],
     }, indent=2))
 
 
