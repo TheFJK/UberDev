@@ -1,6 +1,6 @@
 # Testing UberDev
 
-UberDev's product is **markdown prompt files, shell libraries, and a little Python** — there is no application server and no build step. The test suite reflects that: it is a set of **shape-check scripts** (`tests/*.test.sh`) that grep the shipped command / agent / skill / lib files for the exact tokens, contracts, and invariants each change is supposed to preserve. A few fixtures additionally *execute* a sourced `lib/` helper to lock a runtime behaviour, but the suite is grep-and-assert throughout — it never spins up a real Claude Code session.
+UberDev's product is **markdown prompt files, shell libraries, a little Python, and (per RFC 0012) on-disk Workflow orchestration scripts in JavaScript** — there is no application server and no build step. The test suite reflects that: it is a set of **shape-check scripts** (`tests/*.test.sh`) that grep the shipped command / agent / skill / lib files for the exact tokens, contracts, and invariants each change is supposed to preserve. A few fixtures additionally *execute* a sourced `lib/` helper (or, for workflow scripts, a sandboxed dry-run — see the T1–T4 tier below) to lock a runtime behaviour, but the suite is grep-and-assert throughout — it never spins up a real Claude Code session.
 
 ## The harness at a glance
 
@@ -8,6 +8,7 @@ UberDev's product is **markdown prompt files, shell libraries, and a little Pyth
 - **Runner:** there is no separate runner binary — each file is self-contained and run directly with `bash tests/<name>.test.sh` (one fixture, `solve-pipeline-zsh.test.sh`, runs under `zsh` — see below).
 - **What CI runs:** `.github/workflows/test.yml` is the **single source of truth** for the active test set. Do not maintain a second hand-curated list anywhere — read `test.yml`.
 - **Shared assertion library:** `tests/_lib_assert_structural.sh` provides the section-scoped `assert_in_section` / structural helpers that many tests `source`.
+- **Workflow-script harness:** `tests/_workflow_harness.js` is a node-run helper (not a test file itself) that `tests/workflow-scripts.test.sh` drives for the T1–T4 workflow-script tiers below.
 
 ## Running tests locally
 
@@ -40,6 +41,19 @@ Each test prints a `PASS` / `FAIL` line per assertion and a `== Summary ==` bloc
 
 `tests/solve-pipeline-zsh.test.sh` is run with **`zsh`**, not `bash`. SKILL.md `bash` fences execute under Claude Code's Bash tool, which is `/bin/zsh` at runtime, so this fixture locks behaviour that only manifests under zsh's word-splitting and array semantics (e.g. the v0.22.2 regression where a scalar `EFFORT_FLAG="--effort max"` broke under `SH_WORD_SPLIT=off`). `ubuntu-latest` does not ship `zsh` by default, so the CI job installs it before running the suite. Run it locally with `zsh tests/solve-pipeline-zsh.test.sh`.
 
+### The workflow-script tier (T1–T4)
+
+RFC 0012 migrates the heavy pipelines onto on-disk Workflow orchestration scripts (`plugins/uberdev/skills/<name>/workflow.js`, children under `skills/<name>/workflows/`). Those scripts get their own four-tier check, driven by `tests/workflow-scripts.test.sh` (a normal `.test.sh`, wired into **both** CI jobs — node is preinstalled on the ubuntu and windows images) with `tests/_workflow_harness.js` as its engine:
+
+| Tier | What it locks | Where |
+| --- | --- | --- |
+| **T1 — lint** | every glob-discovered workflow script parses as ESM via the **pinned** stdin form `node --check --input-type=module < "$f"` (bare/unpinned `node --check` flips between Node versions on the `export const meta` + top-level-await shape); forbidden-token greps (`import`/`require`/`process.`/`fs.`/`Date.now`/`Math.random`/`new Date(` outside `SHARED` marker blocks); 512 KB runtime size cap | `workflow-scripts.test.sh` (shell) |
+| **T2 — meta validation** | the `meta` export is a **pure-JSON literal** between `/* META-BEGIN */` and `/* META-END */` markers; `{name, description, phases[]}` shape; every `phase()` / `opts.phase` string literal is declared in `meta.phases` | `_workflow_harness.js validate` |
+| **T3 — behavioral dry-run** | the harness strips the meta export, wraps the body in an async IIFE and executes it via `vm.runInNewContext` under **faithful runtime stubs** (`agent()` canned returns keyed by label/agentType; `parallel` = barrier + thunk-throws-to-null; `pipeline` = no inter-stage barrier + item drop; budget with falsy `total` by default; `Date.now`/`Math.random`/argless `new Date()` shadows that THROW). Dead-circuit-breaker bugs become executed, deterministic tests | `_workflow_harness.js validate` + per-pipeline fixtures |
+| **T4 — shared-snippet drift** | `// === SHARED:<name> v<N> ===` … `// === END SHARED ===` blocks with the same name+version must be **byte-identical** across scripts (scripts are self-contained; shared code is copy-paste) | `_workflow_harness.js shared-drift` |
+
+The harness ships **self-tests** (`node tests/_workflow_harness.js self-test`) locking every stub semantic and the preprocessing step, so the tier is non-vacuous even while zero `workflow.js` files exist on disk. `workflow-scripts.test.sh` also enforces the RFC 0012 §4.2 shape guard: every on-disk `skills/*/workflow.js` must have a sibling `SKILL.md` carrying both the Workflow invocation block and a `## No-Workflow fallback` section. Authoring conventions live in `plugins/uberdev/skills/writing-skills/SKILL.md`; the args-envelope contract (`uberdev_emit_workflow_args`, RFC 0012 §4.3) is locked by `tests/workflow-args.test.sh`.
+
 ## What the tests check (and what they don't)
 
 These are **structural / contract** checks, not end-to-end behavioural tests of a running agent:
@@ -49,7 +63,7 @@ These are **structural / contract** checks, not end-to-end behavioural tests of 
 - **Release-ratchet version locks** — `goal.test.sh` (the `G20: version bump locked` block) and `solve-claim.test.sh` (the `Version bump A.B.C -> X.Y.Z propagated` block) hardcode the current version and **turn CI red on a missed bump**. They are part of the mandatory bump-everywhere ritual (see the project `CLAUDE.md`). A contributor who skips the full suite skips exactly the tests that catch a forgotten version bump.
 - **CI-wiring invariant** — `tests/ci-wiring.test.sh` asserts that *every* `tests/*.test.sh` on disk is wired into the workflow, so a new test that is forgotten in `test.yml` fails CI rather than silently never running.
 
-They deliberately do **not** launch real `claude` sessions, parse session transcripts, or measure token usage. UberDev ships no headless-integration runner and no token-analysis script — the suite is the `tests/*.test.sh` shape-checks and nothing else.
+They deliberately do **not** launch real `claude` sessions, parse session transcripts, or measure token usage. UberDev ships no headless-integration runner and no token-analysis script — the suite is the `tests/*.test.sh` shape-checks (plus the helper files they drive: `tests/_lib_assert_structural.sh`, `tests/_workflow_harness.js`) and nothing else.
 
 ## The two-job CI matrix
 
@@ -111,4 +125,6 @@ Conventions worth honouring:
 - `.github/workflows/test.yml` — the authoritative test set and the two-job matrix.
 - `tests/ci-wiring.test.sh` — the wiring invariant that keeps the workflow and the on-disk test set in sync.
 - `tests/_lib_assert_structural.sh` — shared section-scoped assertion helpers.
+- `tests/_workflow_harness.js` — the T1–T4 workflow-script harness (self-tests: `node tests/_workflow_harness.js self-test`).
+- RFC 0012 (ultracode workflow migration, `docs/rfc/`) — defines the workflow-script conventions the T1–T4 tier enforces.
 - The project `CLAUDE.md` — the bump-version-everywhere ritual the version-lock tests enforce.

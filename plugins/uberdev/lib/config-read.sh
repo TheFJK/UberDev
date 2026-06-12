@@ -11,10 +11,15 @@
 #   uberdev_tier_rank          TIER_NAME            -> 0|1|2|3|""
 #   uberdev_tier_name          RANK                 -> trivial|small|medium|large
 #   uberdev_clamp_tier         TIER FLOOR CEILING   -> clamped tier name
+#   uberdev_emit_workflow_args PIPELINE [KEY=VALUE ...]
+#                              -> v1 Workflow args envelope between
+#                                 WORKFLOW_ARGS_BEGIN/END markers (RFC 0012 §4.3)
 #
 # Sourced by:
 #   - launcher script written by skills/solve-pipeline/SKILL.md (/tmp/solve-$N.sh)
 #   - tests/config-override.test.sh
+#   - tests/workflow-args.test.sh
+#   - migrated-pipeline thin preflights (RFC 0012 DR-2)
 #
 # All variable expansions are double-quoted (security mitigation 1, mirrors
 # aliases-sync.sh:36 discipline).
@@ -276,4 +281,165 @@ uberdev_clamp_tier() {
     return 0
   fi
   printf '%s' "$tier"
+}
+
+# uberdev_emit_workflow_args PIPELINE [KEY=VALUE ...]
+# RFC 0012 §4.3 (infra-R7): assemble and print the VERSIONED Workflow args
+# envelope between WORKFLOW_ARGS_BEGIN / WORKFLOW_ARGS_END marker lines, for
+# verbatim relay into the skill-mandated Workflow({scriptPath: ...}, args)
+# call (DR-2: the model relays the JSON between the markers verbatim — no
+# LLM-composed handoffs).
+#
+# Envelope (v1), one compact-JSON line:
+#   { "v": 1, "run_id": "...", "now_epoch": <int>, "now_iso": "...",
+#     "plugin_root": "<abs>", "repo_root": "<abs>", "cwd": "<abs>",
+#     "pipeline": "<name>", "config": { ... } }
+#
+# KEY=VALUE handling:
+#   - overridable top-level keys: run_id, plugin_root, repo_root, cwd
+#     (defaults: minted run_id / $CLAUDE_PLUGIN_ROOT / git toplevel / $PWD);
+#   - locked keys (v, now_epoch, now_iso, pipeline, config) are REJECTED —
+#     fail loud, never silently shadow the envelope skeleton;
+#   - every other KEY lands under .config — KEY may be dotted (e.g.
+#     fanout_concurrency.solve_bg), stored as a literal JSON key;
+#   - VALUES are expected to be ALREADY RESOLVED by the caller via the
+#     uberdev_read_int_in_range/enum/string helpers above. The env >
+#     uberdev.local.md > default precedence, the warn-once sentinels and
+#     the audit rows all live in THOSE helpers and are untouched here;
+#   - integer-shaped values (no leading zeros) and bare true/false are
+#     emitted as JSON numbers/booleans; everything else is a JSON string.
+#
+# FROZEN-TIME CONTRACT (RFC 0012 DR-7): now_epoch / now_iso freeze HERE, at
+# preflight emission, and never advance for the life of the workflow run —
+# the Workflow runtime forbids Date.now() / Math.random() / argless
+# new Date() inside scripts (resume determinism), so scripts read time ONLY
+# from these args. Any wall-clock gate evaluated MID-run (CI settle windows,
+# grace timers, stuck detection) must take live time from agent-side `date`,
+# NEVER from these frozen values. They are deliberately not overridable.
+#
+# SECURITY — constant-name discipline preserved: the read helpers above
+# expand only CONSTANT env NAMES chosen by repo code (the four printf-based
+# indirect-expansion sites in _uberdev_is_validated / uberdev_read_*).
+# This emitter extends that property by never expanding anything as code:
+# caller-supplied KEYs and VALUEs travel exclusively through `jq --arg` /
+# `--argjson` (data, not code), and KEYs are allow-list validated before
+# use. Values are never interpolated into shell words or jq programs.
+#
+# Requires jq (hard dependency for migrated preflights per RFC 0012 §4.3;
+# the session-start hook already warns loudly when jq is missing, and the
+# §4.2 No-Workflow fallback covers jq-less hosts).
+# Returns 0 + envelope on stdout; 2 + one stderr line on any usage error.
+uberdev_emit_workflow_args() {
+  if [ "$#" -lt 1 ] || [ -z "$1" ]; then
+    echo "uberdev_emit_workflow_args: missing PIPELINE argument" >&2
+    return 2
+  fi
+  local pipeline="$1"
+  shift
+  case "$pipeline" in
+    *[!A-Za-z0-9._-]*)
+      echo "uberdev_emit_workflow_args: invalid PIPELINE '$pipeline' (allowed: A-Za-z0-9._-)" >&2
+      return 2
+      ;;
+  esac
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "uberdev_emit_workflow_args: jq is required (RFC 0012 §4.3) but not on PATH" >&2
+    return 2
+  fi
+
+  local now_epoch now_iso
+  now_epoch="$(date -u +%s)"
+  now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  case "$now_epoch" in
+    ''|*[!0-9]*)
+      echo "uberdev_emit_workflow_args: date -u +%s returned non-integer '$now_epoch'" >&2
+      return 2
+      ;;
+  esac
+
+  # Defaults for the overridable top-level keys. run_id shape matches the
+  # established RUN_ID convention (^[0-9]{8}-[0-9]{6}-[a-f0-9]+$); callers
+  # with their own minted RUN_ID pass run_id=... to override.
+  local run_id plugin_root repo_root cwd
+  run_id="$(date -u +%Y%m%d-%H%M%S)-$(printf '%04x%04x' "$$" "$RANDOM")"
+  plugin_root="${CLAUDE_PLUGIN_ROOT:-}"
+  repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || repo_root=""
+  [ -n "$repo_root" ] || repo_root="$PWD"
+  cwd="$PWD"
+
+  # First pass: pull out top-level overrides, validate every KEY, and
+  # hard-reject locked keys. Second pass below folds the rest into .config.
+  local kv k v
+  for kv in "$@"; do
+    case "$kv" in
+      *=*) ;;
+      *)
+        echo "uberdev_emit_workflow_args: argument '$kv' is not KEY=VALUE" >&2
+        return 2
+        ;;
+    esac
+    k="${kv%%=*}"
+    v="${kv#*=}"
+    if [ -z "$k" ]; then
+      echo "uberdev_emit_workflow_args: empty KEY in '$kv'" >&2
+      return 2
+    fi
+    case "$k" in
+      *[!A-Za-z0-9._-]*)
+        echo "uberdev_emit_workflow_args: invalid KEY '$k' (allowed: A-Za-z0-9._-)" >&2
+        return 2
+        ;;
+    esac
+    case "$k" in
+      v|now_epoch|now_iso|pipeline|config)
+        echo "uberdev_emit_workflow_args: KEY '$k' is locked (envelope skeleton; now_* are frozen per DR-7)" >&2
+        return 2
+        ;;
+      run_id)      run_id="$v" ;;
+      plugin_root) plugin_root="$v" ;;
+      repo_root)   repo_root="$v" ;;
+      cwd)         cwd="$v" ;;
+    esac
+  done
+
+  local envelope
+  envelope="$(jq -nc \
+    --arg pipeline "$pipeline" \
+    --argjson now_epoch "$now_epoch" \
+    --arg now_iso "$now_iso" \
+    --arg run_id "$run_id" \
+    --arg plugin_root "$plugin_root" \
+    --arg repo_root "$repo_root" \
+    --arg cwd "$cwd" \
+    '{v: 1, run_id: $run_id, now_epoch: $now_epoch, now_iso: $now_iso,
+      plugin_root: $plugin_root, repo_root: $repo_root, cwd: $cwd,
+      pipeline: $pipeline, config: {}}')" || {
+    echo "uberdev_emit_workflow_args: jq failed to assemble the envelope skeleton" >&2
+    return 2
+  }
+
+  # Fold config entries in. Auto-typing keeps resolved ints/bools usable as
+  # JSON numbers/booleans inside scripts; the regex rejects leading zeros so
+  # values like "007" stay strings instead of shifting magnitude.
+  local int_re='^(0|-?[1-9][0-9]*)$'
+  for kv in "$@"; do
+    k="${kv%%=*}"
+    v="${kv#*=}"
+    case "$k" in
+      run_id|plugin_root|repo_root|cwd) continue ;;
+    esac
+    if [[ "$v" =~ $int_re ]]; then
+      envelope="$(printf '%s' "$envelope" | jq -c --arg k "$k" --argjson tv "$v" '.config[$k] = $tv')"
+    elif [ "$v" = "true" ] || [ "$v" = "false" ]; then
+      envelope="$(printf '%s' "$envelope" | jq -c --arg k "$k" --argjson tv "$v" '.config[$k] = $tv')"
+    else
+      envelope="$(printf '%s' "$envelope" | jq -c --arg k "$k" --arg tv "$v" '.config[$k] = $tv')"
+    fi
+    if [ -z "$envelope" ]; then
+      echo "uberdev_emit_workflow_args: jq failed while adding config key '$k'" >&2
+      return 2
+    fi
+  done
+
+  printf 'WORKFLOW_ARGS_BEGIN\n%s\nWORKFLOW_ARGS_END\n' "$envelope"
 }

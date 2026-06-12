@@ -76,8 +76,10 @@ for a in "${AGENTS[@]}"; do
   f="$AGENTS_DIR/uberthink-$a.md"
   ck "agent file exists: uberthink-$a.md" "[ -r '$f' ]"
   ck "agent frontmatter name is uberthink-$a" "grep -qE '^name: uberthink-$a\$' '$f'"
-  # model is one of opus|sonnet|haiku|inherit
-  ck "agent model in {opus,sonnet,haiku,inherit}: uberthink-$a" "grep -qE '^model: (opus|sonnet|haiku|inherit)\$' '$f'"
+  # model is one of opus|sonnet|haiku|fable|inherit (fable added per RFC 0012
+  # §5 — enum extension only; the per-agent WANT_MODEL lock below stays
+  # all-inherit, and no agent pins fable until open question Q5 resolves)
+  ck "agent model in {opus,sonnet,haiku,fable,inherit}: uberthink-$a" "grep -qE '^model: (opus|sonnet|haiku|fable|inherit)\$' '$f'"
   # spec §2.5 specific assignment
   want="${WANT_MODEL[$a]}"
   ck "agent model matches all-inherit policy: uberthink-$a == $want" "grep -qE '^model: $want\$' '$f'"
