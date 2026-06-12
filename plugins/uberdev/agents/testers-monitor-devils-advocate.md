@@ -17,7 +17,7 @@ You are skeptical by default. You assume every claimed finding is wrong until ev
 
 ## Mission
 
-Read the previous wave's findings file. For each finding:
+Read **this round's freshly-aggregated** findings file (the absolute path is in your dispatch prompt — it is the current round's `wave-<N>.yaml`, written by aggregate pass A). For each finding:
 
 1. **Demand evidence:** does `evidence` contain at least one of `screenshot`, `dom_hash`, `network_request`, `repro_steps`? If none, mark `disposition: REJECTED_NO_EVIDENCE`.
 2. **Demand invariant mapping:** does `invariant_violated` reference a real ID in `invariants.yaml`? If not, mark `disposition: REJECTED_NO_INVARIANT`.

@@ -31,7 +31,7 @@ simplify|simplify|["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", 
 review-pr|review-pr|["Bash(git*)", "Bash(gh*)", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", "Write"]
 merge|merge|["Bash", "Glob", "Grep", "Read", "Task"]
 dev|dev|["Bash", "Read", "Edit", "Write", "Task"]
-testers|testers|["Bash", "Read", "Write", "Task"]
+testers|testers|["Bash", "Read", "Write", "Task", "Workflow"]
 ubergoal|goal|["Bash", "Read", "Task"]
 uberscan|uberscan|["Bash(git*)", "Bash(gh*)", "Glob", "Grep", "Read", "Task", "Write"]
 ubersimplify|ubersimplify|["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", "Write"]

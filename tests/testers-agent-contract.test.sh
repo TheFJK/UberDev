@@ -127,34 +127,45 @@ for a in "${EXPECTED_AGENTS[@]}"; do
 done
 pass "C7: all agents declare verdict / findings / confidence in their output contract"
 
-# C8 (#306 / RFC 0012 §3.10): the Phase-1 dispatch_master call site is guarded.
-# lib/dispatch.sh has NEVER defined dispatch_master (public surface:
-# uberdev_dispatch_preflight/_resolve_env/_one) — pre-guard, the rc=127 of the
-# missing function was swallowed by the success echo + exit 0, so the documented
-# default mode printed "dispatched master" with nothing running. Call/definition
-# pairing: if dispatch_master is ever actually implemented in lib/dispatch.sh the
-# first arm goes green (guard becomes optional); until then the SKILL must refuse
-# loud (exit 127) and steer to --watch BEFORE the call.
+# C8 (#306 / RFC 0012 §3.10, re-anchored at the Workflow migration): the
+# never-worked master-dispatch mode is REMOVED, not guarded. lib/dispatch.sh
+# never provided dispatch_master (public surface:
+# uberdev_dispatch_preflight/_resolve_env/_one), so the documented default mode
+# printed "dispatched master" with nothing running. The migration deletes the
+# whole detached path: the Workflow runtime IS the background execution the
+# master was for, and the No-Workflow fallback is the retained inline --watch
+# directive recipe. This test now asserts the mode's ABSENCE (no dispatch_master
+# call site anywhere in SKILL.md) and that the SKILL records the removal so a
+# future re-introduction is a conscious, reviewed act.
 SKILL_FILE="$SKILL_DIR/SKILL.md"
-DISPATCH_LIB="plugins/uberdev/lib/dispatch.sh"
-grep -q 'dispatch_master "$MASTER_PROMPT"' "$SKILL_FILE" \
-  || fail "C8: dispatch_master call site missing from SKILL.md (dispatch form changed? re-point this test)"
-if grep -qE '^[[:space:]]*(function[[:space:]]+dispatch_master|dispatch_master[[:space:]]*\(\))' "$DISPATCH_LIB"; then
-  pass "C8: dispatch_master is now defined in lib/dispatch.sh (fail-loud guard no longer load-bearing)"
-else
-  grep -q 'command -v dispatch_master' "$SKILL_FILE" \
-    || fail "C8: missing 'command -v dispatch_master' fail-loud guard (#306)"
-  grep -q 'master dispatch unavailable (#306)' "$SKILL_FILE" \
-    || fail "C8: guard lacks the 'master dispatch unavailable (#306)' error literal"
-  grep -q 'exit 127' "$SKILL_FILE" || fail "C8: guard must exit 127"
-  GUARD_LINE="$(grep -n 'command -v dispatch_master' "$SKILL_FILE" | head -1 | cut -d: -f1)"
-  CALL_LINE="$(grep -n 'dispatch_master "$MASTER_PROMPT"' "$SKILL_FILE" | head -1 | cut -d: -f1)"
-  [ "$GUARD_LINE" -lt "$CALL_LINE" ] \
-    || fail "C8: guard must PRECEDE the dispatch_master call (guard line $GUARD_LINE, call line $CALL_LINE)"
-  awk -v a="$GUARD_LINE" -v b="$CALL_LINE" 'NR>=a && NR<=b' "$SKILL_FILE" | grep -q -- '--watch' \
-    || fail "C8: the guard's refusal must steer users to --watch"
-  pass "C8: dispatch_master fail-loud guard precedes the call, exits 127, steers to --watch"
+# No EXECUTABLE dispatch_master call site (the function-invocation form, e.g.
+# `dispatch_master "$MASTER_PROMPT"` or a bare-word `dispatch_master ...`
+# command). A backtick-quoted prose MENTION explaining the removal is allowed
+# and expected — we only forbid a live call. The patterns below match an
+# invocation: dispatch_master followed by a quote or by a non-backtick word,
+# but NOT `dispatch_master` in inline-code backticks.
+if grep -nE 'dispatch_master[[:space:]]+("|\$|[A-Za-z./])' "$SKILL_FILE" | grep -vE '`dispatch_master`' | grep -q .; then
+  fail "C8: an executable dispatch_master call site remains in SKILL.md — the never-worked master mode is removed at the RFC 0012 migration, not re-guarded (#306 / §3.10)"
 fi
+grep -qE 'master.dispatch.+(remove|removed)|master-dispatch mode is .*remove' "$SKILL_FILE" \
+  || fail "C8: SKILL.md must document that the master-dispatch mode is removed (No-Workflow fallback section, #306)"
+grep -q '#306' "$SKILL_FILE" \
+  || fail "C8: SKILL.md must reference #306 where it records the master-mode removal"
+pass "C8: no live dispatch_master call site; the master-mode removal is documented (#306 / §3.10)"
+
+# C8b (#306 / RFC 0012 §3.10): the Workflow path is mandated and the No-Workflow
+# fallback is present — the migration's two-sided opt-in shape. workflow.js ships
+# as the sibling; SKILL.md must carry the Workflow invocation block AND the
+# fallback section (the carrier's §4.2 shape guard also enforces this, but
+# anchoring it here keeps the testers contract self-describing).
+[ -f "$SKILL_DIR/workflow.js" ] || fail "C8b: skills/testers-pipeline/workflow.js missing (the migrated Workflow script)"
+grep -q 'Workflow(' "$SKILL_FILE" || fail "C8b: SKILL.md lacks the Workflow invocation block"
+grep -qF 'workflow.js' "$SKILL_FILE" || fail "C8b: SKILL.md does not reference the workflow.js scriptPath"
+grep -qF '## No-Workflow fallback' "$SKILL_FILE" || fail "C8b: SKILL.md lacks the '## No-Workflow fallback' section (DR-10)"
+# The headline politeBreach exit-1 contract is stated at the post-Workflow seam.
+grep -qiE 'exit 1|exit.1' "$SKILL_FILE" || fail "C8b: SKILL.md must state the politeBreach exit-1 mandate"
+grep -q 'politeBreach' "$SKILL_FILE" || fail "C8b: SKILL.md must name the politeBreach return field (the fail-the-run signal)"
+pass "C8b: Workflow path mandated, fallback present, politeBreach exit-1 contract stated"
 
 # C9 (#306 / RFC 0012 testers-R3a): every persona's network_request evidence schema
 # carries url + timestamp. lib/rate-cap-audit.sh silently skips rows lacking EITHER
