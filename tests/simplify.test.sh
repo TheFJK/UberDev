@@ -274,6 +274,72 @@ else
 fi
 
 echo
+echo "== E1..E4: simplify-aggregate envelope-as-file-bytes + read-side no-re-wrap (#302 / RFC 0012 §3.1) =="
+# Pre-#302 the Phase 3 aggregate was written bare and re-wrapped (under the
+# WRONG phase-1 source token) only at dispatch time — so findings-to-issues'
+# first-128-bytes validation refused every Phase 3.5 dispatch input-malformed.
+# The writer now owns the simplify-aggregate envelope as the file's own bytes.
+if ! grep -q '^## Phase 3: ' "$SIMPLIFY" || ! grep -q '^## Phase 3.5 ' "$SIMPLIFY"; then
+  echo "  FAIL  setup error: Phase 3 / Phase 3.5 anchors not found in $SIMPLIFY — section renamed? Update the awk range in tests/simplify.test.sh."
+  FAIL=$((FAIL + 1))
+else
+  PHASE3_REGION=$(awk '/^## Phase 3: /{f=1} f; /^## Phase 3.5 /{f=0}' "$SIMPLIFY")
+  if grep -qF '<external-untrusted-input source="simplify-aggregate">' <<<"$PHASE3_REGION"; then
+    echo "  PASS  E1.1 — Phase 3 writes the simplify-aggregate envelope into \$AGG_PATH"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  E1.1 — Phase 3 must write <external-untrusted-input source=\"simplify-aggregate\"> into \$AGG_PATH (#302)"
+    FAIL=$((FAIL + 1))
+  fi
+  if grep -qE 'LEADING bytes' <<<"$PHASE3_REGION" && grep -qE 'TRAILING bytes' <<<"$PHASE3_REGION"; then
+    echo "  PASS  E1.2 — Phase 3 pins the envelope as the file's LEADING/TRAILING bytes (first-128-bytes contract)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  E1.2 — Phase 3 must pin the envelope as the file's LEADING/TRAILING bytes (#302)"
+    FAIL=$((FAIL + 1))
+  fi
+  if grep -qF 'never re-wrapped' <<<"$PHASE3_REGION"; then
+    echo "  PASS  E1.3 — Phase 3 code-fixer dispatch passes path/enveloped bytes verbatim (never re-wrapped)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  E1.3 — Phase 3 code-fixer dispatch must pass the already-enveloped file verbatim (#302)"
+    FAIL=$((FAIL + 1))
+  fi
+fi
+# E2 — anti-regression: the dispatch no longer re-wraps the simplify aggregate
+# under the phase-1 token (the bug that fed code-fixer a mislabeled envelope).
+assert_no_grep "$SIMPLIFY" 'wraps simplify-final\.md under' \
+  "E2 — old dispatch-time re-wrap of simplify-final.md removed (#302)"
+
+echo
+echo "== E3: severity-enum doc rot fixed against the pinned blocker|suggestion (RFC 0012 scan-R5) =="
+# simplify.md:92/:119 described a critical/important enum the agent's Return
+# contract (R1 above) never emits — dedup max-severity and the Phase 3.5 filter
+# now speak the canonical two-member enum.
+assert_no_grep "$SIMPLIFY" '`critical` > `important` > `suggestion`' \
+  "E3.1 — rotted dedup severity rank (critical > important > suggestion) removed"
+assert_grep "$SIMPLIFY" '`blocker` > `suggestion`' \
+  "E3.2 — dedup max-severity rank uses the canonical blocker > suggestion"
+assert_no_grep "$SIMPLIFY" 'severity == critical' \
+  "E3.3 — Phase 3.5 filter no longer keyed on the non-emitted critical severity"
+assert_grep "$SIMPLIFY" 'severity == blocker AND disposition != APPLIED' \
+  "E3.4 — Phase 3.5 filter keyed on severity == blocker (canonical enum)"
+
+echo
+echo "== E4: code-fixer accepts the simplify-aggregate source for phase2 (closed two-member set) =="
+# With the dispatch passing simplify-final.md's own file bytes (source=
+# simplify-aggregate), code-fixer's Step-1 envelope validation must name that
+# source for phase2 — still a closed set, still refusing any other source.
+assert_in_section "$CODE_FIXER" '^## Process' '^## Refusal triggers' \
+  'source="simplify-aggregate"' \
+  "E4.1 — code-fixer Step 1 validation accepts simplify-aggregate for phase: phase2"
+assert_grep "$CODE_FIXER" 'closed two-member source set' \
+  "E4.2 — code-fixer documents the closed two-member source set (no open-ended sources)"
+assert_in_section "$CODE_FIXER" '^## Process' '^## Refusal triggers' \
+  'any other source attribute is malformed' \
+  "E4.3 — code-fixer Step 1 still refuses non-member sources (input-malformed)"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

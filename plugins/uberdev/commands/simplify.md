@@ -89,10 +89,10 @@ mkdir -p "$(dirname "$AGG_PATH")"
 **Dedup policy across lenses.** Two or three lenses may flag the same `file:line`. Aggregate by the `file:line` key:
 
 - If only one lens flagged the location, write one finding row, `lens: <Reuse | Quality | Efficiency>`.
-- If two or three lenses flagged the same `file:line`, merge into ONE finding row. Set `lens: Reuse+Quality` (or whichever combination, joined by `+` in checklist order: Reuse, Quality, Efficiency). Concatenate the `summary` fields with ` | ` separators, each prefixed by its lens name (e.g., `Reuse: <summary> | Quality: <summary>`). Concatenate the `detail` fields the same way. Severity = max severity across the merged findings (`critical` > `important` > `suggestion`).
+- If two or three lenses flagged the same `file:line`, merge into ONE finding row. Set `lens: Reuse+Quality` (or whichever combination, joined by `+` in checklist order: Reuse, Quality, Efficiency). Concatenate the `summary` fields with ` | ` separators, each prefixed by its lens name (e.g., `Reuse: <summary> | Quality: <summary>`). Concatenate the `detail` fields the same way. Severity = max severity across the merged findings (`blocker` > `suggestion` — the canonical two-member enum pinned in the agent's `## Return contract`).
 - The fixer treats merged findings as one edit candidate.
 
-Aggregate the deduped findings into `$AGG_PATH` using the structured shape pinned in the agent's `## Return contract` section.
+Aggregate the deduped findings into `$AGG_PATH` using the structured shape pinned in the agent's `## Return contract` section. **Envelope-as-file-bytes (#302 / RFC 0012 §3.1 do-first):** write `<external-untrusted-input source="simplify-aggregate">` as the file's LEADING bytes (no header, BOM, or blank line before it — `agents/findings-to-issues.md` Step 1 refuses `input-malformed` unless the marker sits within the first 128 bytes) and `</external-untrusted-input>` as its TRAILING bytes, with the deduped findings between. The envelope is written ONCE, here, by the writer; downstream readers (the Phase 3 `code-fixer` dispatch below and Phase 3.5 `findings-to-issues`) pass the path or the already-enveloped bytes verbatim — never re-wrapped. Byte-shape oracle: `tests/fixtures/findings-to-issues/simplify-final.sample.md`.
 
 Dispatch a fresh `code-fixer` subagent (defined in `plugins/uberdev/agents/code-fixer.md`) to apply the findings as a single `refactor:` conventional commit — this command's main turn no longer holds apply-loop edits in-context. Use the Task tool:
 
@@ -100,7 +100,9 @@ Dispatch a fresh `code-fixer` subagent (defined in `plugins/uberdev/agents/code-
 Task(
   subagent_type: uberdev:code-fixer,
   description: "Apply simplify findings as a refactor: commit",
-  prompt: <<wraps simplify-final.md under <external-untrusted-input source="post-impl-review-aggregate">,
+  prompt: <<passes $AGG_PATH (or its already-enveloped bytes VERBATIM — the file's own
+            <external-untrusted-input source="simplify-aggregate"> envelope written in the
+            aggregation step above; never re-wrapped under a second envelope),
             commit_range, working_dir, pr_number (or n/a if standalone),
             phase=phase2, commit_type_prefix=refactor:>>
 )
@@ -116,7 +118,7 @@ When the agent returns:
 
 ## Phase 3.5 — Findings-to-Issues sub-phase (skip iff `DEFER_ISSUES_PHASE=0` OR `defer_issues_enabled=false`)
 
-Persists deferred-critical findings (`severity == critical AND disposition != APPLIED`) from the simplify aggregate as durable GitHub issues with HTML-comment fingerprint dedupe. Default-on. Never fails the parent `/uberdev:simplify` run.
+Persists deferred blocker findings (`severity == blocker AND disposition != APPLIED` — `blocker` is the only non-suggestion member of the canonical `blocker | suggestion` enum pinned in `agents/code-simplifier.md` `## Return contract`) from the simplify aggregate as durable GitHub issues with HTML-comment fingerprint dedupe. Default-on. Never fails the parent `/uberdev:simplify` run.
 
 **Effective-enabled gate:**
 
@@ -148,7 +150,7 @@ RESEARCH_DIR_ABS="$WORKING_DIR_ABS/.uberdev/research/$RUN_ID"
 
 ```text
 Task(subagent_type: uberdev:findings-to-issues,
-  description: "Phase 3.5 — defer critical simplify findings to GH issues",
+  description: "Phase 3.5 — defer blocker simplify findings to GH issues",
   prompt: <<EOF
     run_id: $RUN_ID
     working_dir: $WORKING_DIR_ABS
@@ -181,7 +183,7 @@ Standalone invocations are still valid for these out-of-chain cases:
 - After a non-trivial implementation or bug fix has landed but you don't intend to open a PR yet (e.g. iterating on a long-lived branch).
 - After accepting code-review feedback that involves restructuring, before re-requesting review.
 - Ad-hoc, when you want to clean up a specific edit without going through the full `/review-pr` fanout.
-- `/uberdev:simplify --no-defer-issues` — runs the three simplify lenses and the auto-apply fixer, but skips persisting deferred critical findings as GitHub issues.
+- `/uberdev:simplify --no-defer-issues` — runs the three simplify lenses and the auto-apply fixer, but skips persisting deferred blocker findings as GitHub issues.
 
 ## When NOT to run
 

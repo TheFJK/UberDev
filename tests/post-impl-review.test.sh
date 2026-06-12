@@ -315,6 +315,56 @@ else
 fi
 
 echo
+echo "== Envelope-as-file-bytes: Step 4 WRITES the envelope into the aggregate (#302 / RFC 0012 §3.1) =="
+# Pre-#302, the envelope was a read-time wrap in /review-pr while the on-disk
+# aggregate stayed bare — so findings-to-issues' first-128-bytes validation
+# (agents/findings-to-issues.md Step 1) refused every Phase 2.5 dispatch
+# input-malformed → fail-open → GREEN with the RFC 0002 blocker gate silently
+# off. The writer (Step 4) now owns the envelope as the file's own bytes.
+if ! grep -q '^### Step 4: Aggregate' "$POST_IMPL" || ! grep -q '^## Output' "$POST_IMPL"; then
+  echo "  FAIL  setup error: Step 4 / Output anchors not found in $POST_IMPL — section renamed? Update the awk range in tests/post-impl-review.test.sh."
+  FAIL=$((FAIL + 1))
+else
+  STEP4_REGION=$(awk '/^### Step 4: Aggregate/{f=1} f; /^## Output/{f=0}' "$POST_IMPL")
+  if grep -qF '<external-untrusted-input source="post-impl-review-aggregate">' <<<"$STEP4_REGION"; then
+    echo "  PASS  W1.1 — Step 4 writes the post-impl-review-aggregate envelope into the artifact"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  W1.1 — Step 4 must write <external-untrusted-input source=\"post-impl-review-aggregate\"> into the artifact (#302)"
+    FAIL=$((FAIL + 1))
+  fi
+  if grep -qE 'LEADING bytes' <<<"$STEP4_REGION" && grep -qE 'TRAILING bytes' <<<"$STEP4_REGION"; then
+    echo "  PASS  W1.2 — Step 4 pins the envelope as the file's LEADING/TRAILING bytes (first-128-bytes contract)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  W1.2 — Step 4 must pin the envelope as the file's LEADING/TRAILING bytes (#302)"
+    FAIL=$((FAIL + 1))
+  fi
+  if grep -qF 'first 128 bytes' <<<"$STEP4_REGION"; then
+    echo "  PASS  W1.3 — Step 4 cites the findings-to-issues first-128-bytes validation"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  W1.3 — Step 4 must cite the first-128-bytes validation contract (#302)"
+    FAIL=$((FAIL + 1))
+  fi
+fi
+# W1.4 — reader side: pass path / already-enveloped bytes verbatim; never re-wrap.
+assert_grep "$POST_IMPL" 'MUST NOT re-wrap' \
+  "W1.4 — Findings artifact contract forbids reader-side re-wrapping (#302)"
+assert_no_grep "$POST_IMPL" 'reader MUST wrap the read content' \
+  "W1.5 — old read-time-wrap reader mandate removed (anti-regression; #302)"
+
+echo
+echo "== Model posture: lightweight-lens Haiku pins retired (RFC 0012 §5) =="
+# The tier input no longer drives model selection — all 6 reviewer agents inherit.
+assert_no_grep "$POST_IMPL" 'lightweight lenses pin Haiku' \
+  "M1.1 — 'lightweight lenses pin Haiku' prose removed (tier input dead for model selection)"
+assert_no_grep "$POST_IMPL" '\(haiku\)' \
+  "M1.2 — Step 2 dispatch table carries no (haiku) annotation"
+assert_grep "$POST_IMPL" 'model: inherit' \
+  "M1.3 — prose states reviewer agents carry model: inherit"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
