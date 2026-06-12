@@ -790,6 +790,57 @@ assert_grep "$REVIEW_PR" '\| `2` \|.*post-fixer push failure' \
   "R24.6 — exit-2 row names Step 6a post-fixer push failure"
 
 echo
+echo "== R26 (#302 / RFC 0012 §3.1 do-first ':174'): Step 6b WRITES the simplify-aggregate envelope as file bytes =="
+# Writer site #2 of the RFC's three writer sites (review-pr Step 6b Phase-2
+# aggregation). Sites 1 and 3 are locked (post-impl-review.test.sh W1.x;
+# simplify.test.sh E1/E2). This is the twin of simplify.test.sh E1/E2 for the
+# review-pr copy: the Phase-2 aggregate (`simplify-final.md`) MUST be WRITTEN
+# with the `simplify-aggregate` envelope as its own LEADING/TRAILING file bytes
+# (so findings-to-issues' first-128-bytes validation passes), and the code-fixer
+# dispatch MUST pass the path/already-enveloped bytes VERBATIM — never re-wrap.
+# Without this lock a silent revert of Step 6b to bare-write + dispatch-time
+# re-wrap (under the wrong phase-1 source token) re-opens the Phase-2.5
+# input-malformed fail-open class — and in this directive-emitter repo the .md
+# prose IS the executable spec, so the grep lock is the only regression guard.
+# R23's `do NOT re-wrap` grep is satisfied by Step 5's phase-1 text and R12.6
+# only locks phase=phase2, so neither trips on a Step 6b writer-side regression.
+if ! grep -qF 'Auto-apply simplify edits — Step 6b' "$REVIEW_PR" \
+   || ! grep -qE '^[[:space:]]*6b\. \*\*Phase 2\.5' "$REVIEW_PR"; then
+  echo "  FAIL  setup error: Step-6b 'Auto-apply' / 'Phase 2.5' anchors not found in $REVIEW_PR — section renamed? Update the awk range in tests/review-pr.test.sh (R26)."
+  FAIL=$((FAIL + 1))
+else
+  # Region: the Step-6b simplify-aggregate writer + code-fixer dispatch, bounded
+  # by the Step-6b 'Auto-apply' marker → the numbered '6b. **Phase 2.5' sub-phase.
+  STEP6B_REGION=$(awk '/^[[:space:]]*\*\*Auto-apply simplify edits — Step 6b/{f=1} f; /^[[:space:]]*6b\. \*\*Phase 2\.5/{f=0}' "$REVIEW_PR")
+  if grep -qF '<external-untrusted-input source="simplify-aggregate">' <<<"$STEP6B_REGION"; then
+    echo "  PASS  R26.1 — Step 6b writes the simplify-aggregate envelope into simplify-final.md"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R26.1 — Step 6b must write <external-untrusted-input source=\"simplify-aggregate\"> into simplify-final.md (#302)"
+    FAIL=$((FAIL + 1))
+  fi
+  if grep -qE 'LEADING bytes' <<<"$STEP6B_REGION" && grep -qE 'TRAILING bytes' <<<"$STEP6B_REGION"; then
+    echo "  PASS  R26.2 — Step 6b pins the envelope as the file's LEADING/TRAILING bytes (first-128-bytes contract)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R26.2 — Step 6b must pin the envelope as the file's LEADING/TRAILING bytes (#302)"
+    FAIL=$((FAIL + 1))
+  fi
+  if grep -qF 'never re-wrapped' <<<"$STEP6B_REGION"; then
+    echo "  PASS  R26.3 — Step 6b code-fixer dispatch passes path/enveloped bytes verbatim (never re-wrapped)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R26.3 — Step 6b code-fixer dispatch must pass the already-enveloped file verbatim (never re-wrapped) (#302)"
+    FAIL=$((FAIL + 1))
+  fi
+fi
+# R26.4 — anti-regression twin of simplify.test.sh E2: the old dispatch-time
+# re-wrap of simplify-final.md (under the phase-1 token) must not return to
+# review-pr.md's Step 6b. Mirrors `assert_no_grep "$SIMPLIFY" 'wraps simplify-final\.md under'`.
+assert_no_grep "$REVIEW_PR" 'wraps simplify-final\.md under' \
+  "R26.4 — old dispatch-time re-wrap of simplify-final.md removed from Step 6b (anti-regression; #302)"
+
+echo
 echo "== R25 (#302 / RFC 0012 §5): all 5 Phase-1 reviewer agent files inherit the session model =="
 # The 4 former lightweight-lens Haiku pins are retired — blocker verdicts feed an
 # auto-fixer, so every judgment lens inherits the flagship. code-reviewer was
