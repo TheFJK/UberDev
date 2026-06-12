@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Tests: lib/rate-limit-curl.sh + parse-site --rps-cap validation in SKILL.md.
-# Cases: 1-7 (parse + wrapper pacing + mkdir-mutex), 11-12 (security: flag-smuggling + defensive re-validation).
+# Tests: lib/rate-limit-curl.sh + lib/rl-curl shim + parse-site --rps-cap validation in SKILL.md.
+# Cases: 1-7 (parse + wrapper pacing + mkdir-mutex), 11-12 (security: flag-smuggling +
+# defensive re-validation), 13-20 (separator, mutex release, normalizer, float delay,
+# fail-loud), 21-25 (#306: explicit mutex release on error paths, bounded mutex retry,
+# zsh runtime fixture, rl-curl shim argv/env injection + fail-closed).
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TEST_TMPDIR="$(mktemp -d)"
@@ -220,9 +223,10 @@ EOF
 }
 test_curl_dash_dash_separator
 
-# Case 14: trap RETURN releases mutex even on curl failure
+# Case 14: mutex released even on curl failure (explicit release — trap RETURN is
+# dead under zsh, so the wrapper must never rely on it; see Cases 21-23)
 test_trap_release_on_curl_failure() {
-  # Verifies trap RETURN releases the mutex even when curl exits non-zero.
+  # Verifies the mutex is released even when curl exits non-zero.
   export RATE_STATE_DIR="$TEST_TMPDIR/trap-$RANDOM"
   mkdir -p "$RATE_STATE_DIR"
   export RPS_CAP=10
@@ -402,5 +406,138 @@ EOF
   pass "$FUNCNAME"
 }
 test_normalizer_tool_failure_surfaces
+
+# Case 21 (#306, testers-R2): the mutex is released on the state-write-failure RETURN
+# path. Pre-fix this relied on `trap RETURN` (dead under zsh: "undefined signal"); the
+# wrapper now rmdirs explicitly on EVERY return path, which must hold in bash too.
+test_mutex_release_on_state_write_failure() {
+  export RATE_STATE_DIR="$TEST_TMPDIR/relfail-$RANDOM"
+  mkdir -p "$RATE_STATE_DIR/relfail.test"
+  mkdir "$RATE_STATE_DIR/relfail.test/last_release.tmp"  # forces the write-failure return 2
+  export RPS_CAP=1000
+  SHIM="$TEST_TMPDIR/relfail-shim"; mkdir -p "$SHIM"
+  cat > "$SHIM/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$SHIM/curl"
+  OLD_PATH="$PATH"; export PATH="$SHIM:$PATH"
+  . "$REPO_ROOT/plugins/uberdev/lib/rate-limit-curl.sh"
+  uberdev_rate_limit_curl "http://relfail.test/x" >/dev/null 2>&1 || true
+  export PATH="$OLD_PATH"
+  if [ -d "$RATE_STATE_DIR/relfail.test/.lock" ]; then
+    fail "$FUNCNAME" "mutex leaked on the state-write-failure return path"; return
+  fi
+  pass "$FUNCNAME"
+}
+test_mutex_release_on_state_write_failure
+
+# Case 22 (#306, testers-R2): BOUNDED mutex retry — a stale .lock (holder killed
+# mid-call) fails LOUD with exit 2 + a recovery hint instead of spinning forever
+# (pre-fix: unbounded `until mkdir`). Bound lowered via UBERDEV_RATE_MUTEX_MAX_TRIES
+# so the case runs in ~30ms.
+test_bounded_mutex_retry_fails_loud_on_stale_lock() {
+  export RATE_STATE_DIR="$TEST_TMPDIR/stale-$RANDOM"
+  mkdir -p "$RATE_STATE_DIR/stale.test/.lock"  # pre-leaked lock with no live holder
+  export RPS_CAP=10
+  . "$REPO_ROOT/plugins/uberdev/lib/rate-limit-curl.sh"
+  export UBERDEV_RATE_MUTEX_MAX_TRIES=3
+  rc=0; out=$(uberdev_rate_limit_curl "http://stale.test/x" 2>&1) || rc=$?
+  unset UBERDEV_RATE_MUTEX_MAX_TRIES
+  [ "$rc" -eq 2 ] || { fail "$FUNCNAME" "expected exit 2 on stale lock, got $rc"; return; }
+  echo "$out" | grep -q "could not acquire mutex" || { fail "$FUNCNAME" "stderr lacks the bounded-retry error: $out"; return; }
+  pass "$FUNCNAME"
+}
+test_bounded_mutex_retry_fails_loud_on_stale_lock
+
+# Case 23 (#306, testers-R2): zsh runtime fixture — persona agents source the wrapper
+# under /bin/zsh (the Claude Code Bash tool shell on macOS), where BASH_SOURCE is unset
+# and `trap ... RETURN` never installs. Asserts under REAL zsh: (1) the dual-shell
+# ${BASH_SOURCE[0]:-${(%):-%x}} libdir fallback resolves (normalize_host.py found);
+# (2) a happy-path call paces + buckets; (3) the state-write-failure return releases
+# the mutex (the pre-fix leak); (4) a follow-up call does not spin on a leaked lock.
+# zsh is a hard dep of this case: CI installs it on ubuntu for the *-zsh fixtures and
+# macOS ships it — fail loud, never skip silently.
+test_wrapper_under_zsh() {
+  command -v zsh >/dev/null 2>&1 || { fail "$FUNCNAME" "zsh not on PATH (CI installs it; macOS ships it)"; return; }
+  ZSTATE="$TEST_TMPDIR/zsh-state-$RANDOM"
+  mkdir -p "$ZSTATE"
+  SHIM="$TEST_TMPDIR/zsh-shim"; mkdir -p "$SHIM"
+  cat > "$SHIM/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$SHIM/curl"
+  ZFIXTURE="$TEST_TMPDIR/zsh-fixture-$RANDOM.zsh"
+  cat > "$ZFIXTURE" <<'EOF'
+set -u
+. "$REPO_ROOT/plugins/uberdev/lib/rate-limit-curl.sh"
+[ -f "$_UBERDEV_RATE_LIMIT_LIBDIR/normalize_host.py" ] || { echo "ZFAIL libdir unresolved under zsh: ${_UBERDEV_RATE_LIMIT_LIBDIR:-unset}"; exit 1; }
+uberdev_rate_limit_curl "http://zwrap.test/a" >/dev/null || { echo "ZFAIL happy-path rc=$?"; exit 1; }
+[ -d "$RATE_STATE_DIR/zwrap.test" ] || { echo "ZFAIL host bucket missing"; exit 1; }
+mkdir -p "$RATE_STATE_DIR/zwrap.test/last_release.tmp"
+uberdev_rate_limit_curl "http://zwrap.test/b" >/dev/null 2>&1
+rc=$?
+[ "$rc" -eq 2 ] || { echo "ZFAIL write-failure rc=$rc (want 2)"; exit 1; }
+[ ! -d "$RATE_STATE_DIR/zwrap.test/.lock" ] || { echo "ZFAIL mutex leaked under zsh (trap RETURN regression)"; exit 1; }
+rmdir "$RATE_STATE_DIR/zwrap.test/last_release.tmp"
+UBERDEV_RATE_MUTEX_MAX_TRIES=5 uberdev_rate_limit_curl "http://zwrap.test/c" >/dev/null || { echo "ZFAIL follow-up call rc=$? (leaked-lock spin?)"; exit 1; }
+echo ZOK
+EOF
+  out="$(RATE_STATE_DIR="$ZSTATE" RPS_CAP=1000 PATH="$SHIM:$PATH" REPO_ROOT="$REPO_ROOT" zsh "$ZFIXTURE" 2>&1)" || { fail "$FUNCNAME" "zsh fixture failed: $out"; return; }
+  echo "$out" | grep -q "ZOK" || { fail "$FUNCNAME" "zsh fixture did not reach ZOK: $out"; return; }
+  pass "$FUNCNAME"
+}
+test_wrapper_under_zsh
+
+# Case 24 (#306, RFC 0012 §3.10): lib/rl-curl shim — SINGLE-word invocation with
+# per-call argv injection (the form persona allowed-tools carry via
+# Bash(*/lib/rl-curl*)). Ambient env deliberately UNSET: argv must be sufficient,
+# because Phase-0 fence exports never reach persona agents.
+test_rl_curl_shim_argv_injection() {
+  STATE_DIR="$TEST_TMPDIR/shim-argv-$RANDOM"
+  mkdir -p "$STATE_DIR"
+  SHIM="$TEST_TMPDIR/shimexe-shim"; mkdir -p "$SHIM"
+  cat > "$SHIM/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$SHIM/curl"
+  if ! env -u RATE_STATE_DIR -u RPS_CAP PATH="$SHIM:$PATH" \
+      "$REPO_ROOT/plugins/uberdev/lib/rl-curl" \
+      --rate-state-dir="$STATE_DIR" --rps-cap=10 "http://shimargv.test/x" >/dev/null 2>&1; then
+    fail "$FUNCNAME" "argv-injected shim call failed"; return
+  fi
+  [ -d "$STATE_DIR/shimargv.test" ] || { fail "$FUNCNAME" "no host bucket created via shim"; return; }
+  pass "$FUNCNAME"
+}
+test_rl_curl_shim_argv_injection
+
+# Case 25 (#306): shim env fallback works, and with NEITHER argv NOR env it fails
+# CLOSED (exit 2, no curl performed) — never a silent unwrapped request.
+test_rl_curl_shim_env_fallback_and_fail_closed() {
+  STATE_DIR="$TEST_TMPDIR/shim-env-$RANDOM"
+  mkdir -p "$STATE_DIR"
+  SHIM="$TEST_TMPDIR/shimenv-shim"; mkdir -p "$SHIM"
+  CURL_HITS="$TEST_TMPDIR/shimenv-hits-$RANDOM"
+  cat > "$SHIM/curl" <<EOF
+#!/usr/bin/env bash
+echo hit >> "$CURL_HITS"
+exit 0
+EOF
+  chmod +x "$SHIM/curl"
+  env RATE_STATE_DIR="$STATE_DIR" RPS_CAP=10 PATH="$SHIM:$PATH" \
+    "$REPO_ROOT/plugins/uberdev/lib/rl-curl" "http://shimenv.test/x" >/dev/null 2>&1 \
+    || { fail "$FUNCNAME" "env-fallback shim call failed"; return; }
+  rc=0
+  env -u RATE_STATE_DIR -u RPS_CAP PATH="$SHIM:$PATH" \
+    "$REPO_ROOT/plugins/uberdev/lib/rl-curl" "http://shimenv.test/y" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || { fail "$FUNCNAME" "expected fail-closed exit 2 without env/argv, got $rc"; return; }
+  # exactly one curl execution: the env-fallback call; the fail-closed call must not curl
+  hits="$(wc -l < "$CURL_HITS" | tr -d ' ')"
+  [ "$hits" = "1" ] || { fail "$FUNCNAME" "expected exactly 1 curl execution, got $hits (fail-closed path leaked a request?)"; return; }
+  pass "$FUNCNAME"
+}
+test_rl_curl_shim_env_fallback_and_fail_closed
 
 exit "$FAILS"

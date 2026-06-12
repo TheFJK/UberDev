@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# plugins/uberdev/lib/rl-curl — executable single-word shim over rate-limit-curl.sh.
+#
+# WHY THIS EXISTS (#306 / RFC 0012 §3.10): the testers persona agents run with
+# pattern-scoped allowed-tools (Bash(curl*), Bash(date*), ...). The previously
+# documented compound invocation `export RATE_STATE_DIR=...; source ...;
+# uberdev_rate_limit_curl ...` matches NONE of those patterns, and the testers
+# Phase-0 fence exports never reach a persona agent's environment anyway (each
+# Task agent is a fresh process) — so the rate-limit wrapper was unreachable at
+# every layer. This shim makes the wrapped call a SINGLE command word that the
+# persona allowlists can carry (`Bash(*/lib/rl-curl*)`), with RATE_STATE_DIR /
+# RPS_CAP injected PER CALL via argv (env remains the fallback).
+#
+# Usage:
+#   rl-curl [--rate-state-dir=DIR] [--rps-cap=N] URL [curl-args...]
+#
+# Options must precede the URL; the first non-option argument starts the
+# passthrough (a real URL can never begin with `--rate-state-dir=`, and URL
+# flag-smuggling is already neutralised inside the wrapper via `--`).
+# All validation (URL host parse, cap range/format, state-dir existence) lives
+# in uberdev_rate_limit_curl — the single source of truth; this shim stays thin.
+# Exit codes pass through: 2 on wrapper validation failure, else curl's rc.
+#
+# EXECUTED (never sourced) under its own bash shebang, so it is immune to the
+# zsh sourcing traps the lib itself handles; macOS bash-3.2-safe (no arrays,
+# no declare -A, no trap RETURN).
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --rate-state-dir=*) RATE_STATE_DIR="${1#--rate-state-dir=}"; export RATE_STATE_DIR; shift ;;
+    --rps-cap=*)        RPS_CAP="${1#--rps-cap=}";               export RPS_CAP;        shift ;;
+    *) break ;;
+  esac
+done
+
+_RL_CURL_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+if [ -z "$_RL_CURL_DIR" ] || [ ! -r "$_RL_CURL_DIR/rate-limit-curl.sh" ]; then
+  echo "rl-curl: cannot locate sibling rate-limit-curl.sh (lib dir: ${_RL_CURL_DIR:-unset})" >&2
+  exit 2
+fi
+. "$_RL_CURL_DIR/rate-limit-curl.sh"
+uberdev_rate_limit_curl "$@"
