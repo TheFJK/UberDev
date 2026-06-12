@@ -5,12 +5,14 @@
 # .claude/auto-memory.md (if present) by appending it with a timestamp header
 # to .claude/session-archive.md.
 #
-# Contract status (live-verified 2026-06-11, RFC 0012 §3.13): No in-repo or
-# harness surface writes .claude/auto-memory.md — verified beyond repo grep
-# (user settings, every cached plugin version, the claude binary's strings,
-# and a disk sweep for existing auto-memory.md artifacts all came back
-# empty; the harness's own auto-memory feature writes
-# ~/.claude/projects/<slug>/memory/MEMORY.md, a different tree). The path is
+# Contract status (live-verified 2026-06-12, RFC 0012 §3.13): No in-repo or
+# harness surface writes .claude/auto-memory.md — verified beyond repo grep:
+# user settings, every cached plugin version, and a disk sweep for existing
+# auto-memory.md artifacts came back empty, and the claude binary (v2.1.174)
+# contains ZERO references to the auto-memory.md filename — its auto-memory
+# feature writes MEMORY.md under a memory DIRECTORY (default
+# ~/.claude/projects/<slug>/memory/), a different tree and a different
+# filename even when memoryDirectory is custom. The path is
 # kept as a DOCUMENTED user/tooling-facing contract — it shipped in the
 # CHANGELOG ("append .claude/auto-memory.md to .claude/session-archive.md
 # before compaction"), so a user may hand-maintain that file and rely on the
