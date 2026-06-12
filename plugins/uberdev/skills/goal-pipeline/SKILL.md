@@ -167,7 +167,12 @@ Notes on the enums:
    - **`42`** — the bound (pass count or budget) was reached while work is still
      in flight → re-invoke the Phase-2 fence to continue polling. The bg solver
      agents are LEFT ALIVE (the reaper does NOT fire on a bounded-tick pause —
-     only on a circuit-breaker halt or a genuine INT/TERM).
+     only on a circuit-breaker halt or an operator INT/Ctrl-C). A harness
+     SIGTERM — e.g. the Bash tool's 600s call cap landing mid-pass — takes the
+     SAME exit-42 contract: the TERM trap persists run-state, emits a
+     `goal_reaper_skipped` audit row (`reason=harness_term`), and exits 42
+     WITHOUT reaping (#301; pre-#301 the TERM trap reaped, so the harness cap
+     killed every live solver ~10 minutes into a healthy run).
    - **`1`** — a circuit breaker fired (the reaper DOES fire here, exactly as in
      the unbounded loop) → halt. Exit `1` ALSO covers a fail-loud
      run-state-flush failure at a bounded exit boundary (drain or pass/budget
@@ -181,8 +186,14 @@ Notes on the enums:
    When NEITHER `--watch-passes` / `--watch-budget` / `GOAL_SINGLE_TICK` is set,
    the watch loop runs unbounded (the legacy behaviour: one continuous fence
    that flows into Phase 3 inline on drain, bounded only by the 4h goal-level
-   `stuck_loop`). The bound is read in step 3 alongside the other range-checked
-   tunables.
+   `stuck_loop`) — UNLESS the fence is executing under the Claude-Code Bash
+   tool (`CLAUDECODE` env marker), where step 3 defaults `WATCH_BUDGET` to
+   `_UBERDEV_GOAL_DEFAULT_WATCH_BUDGET` (480s; #301, RFC 0012 §3.3 goal-R1
+   item 3) because the tool's 600s call cap makes the unbounded loop
+   unreachable — it would be SIGTERMed mid-pass instead of ticking. Pass an
+   explicit `--watch-budget=0` (or `UBERDEV_GOAL_WATCH_BUDGET=0`) to force the
+   unbounded loop anyway. The bound is read in step 3 alongside the other
+   range-checked tunables.
 
 2. **Numeric-validate every positional argument** (T3 mitigation). For each token in `queue`, call `_uberdev_goal_validate_int` (from `lib/goal-state.sh`); any failure aborts before any `gh` call sees the value. This is the first defence against `gh` argument injection via PR/issue numbers (R3).
 
@@ -218,7 +229,9 @@ Notes on the enums:
    # `while true … sleep` behaviour). A positive value bounds the Phase-2 watch
    # loop to N poll passes / SECS wall-clock per fence invocation; on the bound
    # the loop persists run-state and exits 42 ("still-active, re-invoke"). Both
-   # default to 0 so the unbounded loop is unchanged unless explicitly opted in.
+   # default to 0 so the unbounded loop is unchanged unless explicitly opted in —
+   # EXCEPT under the Claude-Code Bash tool, where an un-opted run defaults
+   # WATCH_BUDGET to 480s (#301; see the CLAUDECODE block below).
    # GOAL_SINGLE_TICK=1 is the env shorthand for --watch-passes=1 (applied only
    # when neither a pass nor a budget bound was given).
    WATCH_PASSES="$(UBERDEV_GOAL_WATCH_PASSES="${watch_passes_cli:-${UBERDEV_GOAL_WATCH_PASSES:-}}" \
@@ -227,6 +240,30 @@ Notes on the enums:
      uberdev_read_int_in_range goal.watch_budget UBERDEV_GOAL_WATCH_BUDGET 0 86400 0)"
    if [ "${GOAL_SINGLE_TICK:-0}" = "1" ] && [ "${WATCH_PASSES:-0}" -eq 0 ] && [ "${WATCH_BUDGET:-0}" -eq 0 ]; then
      WATCH_PASSES=1
+   fi
+   # #301 (RFC 0012 §3.3 goal-R1 item 3) — bounded-watch DEFAULT under the
+   # Claude-Code Bash tool. The legacy 0-default (unbounded `while true … sleep`)
+   # is wrong under the Bash-tool runtime: a single Bash call is hard-capped at
+   # 600s, so an unbounded Phase-2 fence gets SIGTERMed mid-watch ~10 minutes in
+   # (and pre-#301 that TERM also fired the reaper, killing every live solver).
+   # When the operator gave NO explicit bound anywhere (no --watch-passes /
+   # --watch-budget, no UBERDEV_GOAL_WATCH_* env, no GOAL_SINGLE_TICK, no
+   # non-zero config value — both resolved 0) AND the fence is executing under
+   # the Claude-Code Bash tool (CLAUDECODE env marker), default WATCH_BUDGET to
+   # _UBERDEV_GOAL_DEFAULT_WATCH_BUDGET (480s = the 600s call cap minus headroom
+   # for one worst-case serial gh walk — the Phase-2 budget gate bounds the
+   # upcoming SLEEP, not pass gh-latency; see the sizing note in the watch
+   # fence). An explicit `--watch-budget=0` / UBERDEV_GOAL_WATCH_BUDGET=0 opts
+   # back into the unbounded loop (a config-key 0 is indistinguishable from
+   # unset after range-resolution — use the CLI/env zero to opt out). The lib
+   # fallback literal mirrors lib/goal-state.sh's runtime-SSOT default
+   # (goal-state.sh is sourced in step 6, AFTER this fence).
+   if [ -n "${CLAUDECODE:-}" ] \
+      && [ "${WATCH_PASSES:-0}" -eq 0 ] && [ "${WATCH_BUDGET:-0}" -eq 0 ] \
+      && [ -z "${watch_passes_cli:-}" ] && [ -z "${watch_budget_cli:-}" ] \
+      && [ -z "${UBERDEV_GOAL_WATCH_PASSES:-}" ] && [ -z "${UBERDEV_GOAL_WATCH_BUDGET:-}" ]; then
+     WATCH_BUDGET="${_UBERDEV_GOAL_DEFAULT_WATCH_BUDGET:-480}"
+     echo "goal: defaulting WATCH_BUDGET=${WATCH_BUDGET}s under the Claude-Code Bash tool (600s call cap; bounded-tick 0/42/1 re-invocation contract; pass --watch-budget=0 to force the unbounded loop)" >&2
    fi
    export WATCH_PASSES WATCH_BUDGET
    ```
@@ -625,11 +662,24 @@ findings_err=""
 trap 'rm -f "$gh_err" "$findings_err"' EXIT
 # Issue #220 — INT/TERM are SEPARATE signal slots from EXIT. The existing EXIT
 # trap above is NOT overwritten; bash supports one handler per signal slot.
-# Reaper runs on Ctrl-C (130) and external kill -TERM (143). EXIT keeps tempfile
-# cleanup running on every other exit path. NEVER chain reaper into EXIT — that
-# would force the reaper on graceful convergence (slow, wasteful).
+# EXIT keeps tempfile cleanup running on every other exit path. NEVER chain the
+# reaper into EXIT — that would force the reaper on graceful convergence (slow,
+# wasteful).
+#
+# #301 (RFC 0012 §3.3 goal-R1 item 3) — TERM is NOT an operator abort. Under
+# the Claude-Code Bash tool the 600s call cap delivers SIGTERM to a
+# still-running fence; the pre-#301 TERM trap chained into
+# _uberdev_goal_reap_zombies, so the HARNESS CAP (not a human) killed every
+# live solver ~10 minutes into a healthy run. TERM cannot distinguish an
+# operator `kill -TERM` from the harness cap, so TERM now uniformly takes the
+# harness interpretation via _uberdev_goal_handle_harness_term (lib/
+# goal-state.sh): persist run-state + emit a goal_reaper_skipped audit row
+# (reason=harness_term, keeping the no-reap choice visible post-mortem) +
+# exit 42 (the bounded-tick "still-active, re-invoke" contract) — NO reap.
+# Operator stop = INT (Ctrl-C, still reaps below) or an explicit
+# _uberdev_goal_reap_zombies invocation.
 trap '_uberdev_goal_reap_zombies; exit 130' INT
-trap '_uberdev_goal_reap_zombies; exit 143' TERM
+trap '_uberdev_goal_handle_harness_term' TERM
 
 # #299 finding 2 — bounded watch mode. WATCH_PASSES / WATCH_BUDGET are
 # rehydrated by uberdev_goal_read_run_state above (default 0 = UNBOUNDED, the
@@ -871,11 +921,29 @@ while true; do
           # #219 — surface a re-dispatch failure as a breadcrumb (mirrors the
           # register_batch_pr best-effort pattern above). The watch loop re-polls,
           # so a failed re-dispatch is retried next iteration rather than halting.
-          # Note: the helper returns rc 0 on the intentional cap-reached skip, so
-          # this only warns on a genuine dispatch failure.
-          _uberdev_goal_dispatch_review_pr "$pr_num" \
-            || printf 'goal-pipeline: review-pr re-dispatch for PR %s failed (rc=%s) — will retry next poll\n' "$pr_num" "$?" >&2
-          any_active=1
+          #
+          # #301 (RFC 0012 §3.3 goal-R1 item 4) — the helper returns the DISTINCT
+          # rc 5 on cap exhaustion (pre-#301 it returned rc 0 there, identical to
+          # a successful dispatch, so this arm kept any_active=1 and the PR spun
+          # in pushed-reviewing until the 4h stuck_loop reaped every live
+          # solver). On rc 5: every bounded re-review attempt is spent and no
+          # verdict landed — transition pushed-reviewing → red-held
+          # (pseudo-terminal for convergence; surfaced in print_summary's held
+          # rows; step 2c's snapshot tags it HELD for the barrier; step 2e still
+          # promotes it if a verdict ever lands) with a DISTINCT audit note, and
+          # do NOT hold any_active for it.
+          _uberdev_goal_dispatch_review_pr "$pr_num"
+          _rpr_rc=$?
+          if [ "$_rpr_rc" -eq 5 ]; then
+            uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" pushed-reviewing red-held
+            uberdev_goal_audit goal_review_pr_deferred \
+              "{\"goal_id\":\"$GOAL_ID\",\"pr\":$pr_num,\"reason\":\"dispatch_cap_exhausted\",\"action\":\"red_held\",\"cap\":${_UBERDEV_GOAL_MAX_REVIEW_PR_ATTEMPTS:-3}}" || true
+          elif [ "$_rpr_rc" -ne 0 ]; then
+            printf 'goal-pipeline: review-pr re-dispatch for PR %s failed (rc=%s) — will retry next poll\n' "$pr_num" "$_rpr_rc" >&2
+            any_active=1
+          else
+            any_active=1
+          fi
         fi
         ;;
     esac
@@ -1232,8 +1300,9 @@ while true; do
   # it, then decide whether THIS fence's bound is reached. If so, persist
   # run-state and exit 42 ("still-active, re-invoke") WITHOUT reaping — the bg
   # solver agents must survive the paused tick (the reaper fires ONLY on a
-  # circuit-breaker halt or a genuine INT/TERM, never on a bounded pause). The
-  # UNBOUNDED path falls straight through to sleep.
+  # circuit-breaker halt or an operator INT, never on a bounded pause; #301
+  # routes harness-TERM through the same no-reap persist + exit 42 contract).
+  # The UNBOUNDED path falls straight through to sleep.
   if [ "$_watch_bounded" = "1" ]; then
     _tick_passes=$(( _tick_passes + 1 ))
     _tick_now="$(date +%s)"
@@ -1373,9 +1442,19 @@ while IFS= read -r _cand_line; do
   case "$_cand_line" in ''|*[!0-9]*) continue ;; esac
   new_candidates+=("$_cand_line")
 done < <(printf '%s' "$candidates_json")
+
+# #301 (RFC 0012 §3.3 goal-R1 item 1) — flush new_candidates to the
+# cycle-tagged .candidates sidecar at the END of this fence. new_candidates is
+# built in THIS fresh shell and dies at the fence boundary; pre-#301
+# write_run_state persisted queue/active/scalars but NOT candidates, so the
+# downstream fingerprint + terminal fences rehydrated an EMPTY set and the
+# terminal gate emitted goal_converged with open BLOCKER/CRITICAL findings
+# still pending (the live false-converge BLOCKER). Fail LOUD on a flush
+# failure — proceeding would reproduce exactly that false converge.
+uberdev_goal_write_run_state || { echo "goal: failed to persist run-state after Phase-3 candidate collection" >&2; exit 3; }
 ```
 
-For each candidate, extract the fingerprint and check for repeat:
+For each candidate, extract the fingerprint and check for repeat (`new_candidates` rehydrates from the cycle-tagged `.candidates` sidecar via the fence-top `uberdev_goal_read_run_state` — #301):
 
 ```bash
 # #171 fresh-shell rehydration — re-source libs (idempotent via _UBERDEV_*_LOADED
@@ -1409,7 +1488,36 @@ done
 
 > **Identity requirement (issue #291 #2).** `--only-mine` filters strictly on `.author.login`, so it assumes the **detached bg `/review-pr` agent that FILES the `review-pr-finding` issues runs under the SAME `gh` identity as the interactive `/goal` watcher** (`gh api user`). On a solo, single-identity setup (the default, and the only setup `--only-mine` was designed for) this holds — `--only-mine` is unaffected. But if the bg agent authenticates with a DIFFERENT identity (e.g. a CI service token while the watcher runs as a human login), the findings it files carry that other `author.login`; `--only-mine` then drops them, `new_candidates` comes back empty, and the goal can converge with open BLOCKER/CRITICAL findings still pending (no breaker fires — the empty set is "correct" per the author filter). **`--only-mine` is therefore safe ONLY when the bg dispatch and the watcher share one `gh` identity.** Multi-identity / CI-token setups must OMIT `--only-mine` (rely on the `review-pr-finding` label as the coarse filter) so no self-filed finding is silently dropped. `--only-mine` is opt-in and OFF by default, so the default convergence loop is never exposed to this drop.
 
-**Cycle terminal conditions (evaluated AFTER the per-candidate fingerprint check):**
+**Blocker-overflow handler (D13).** When the upstream `/review-pr` run halted with too many BLOCKER findings (more than the file-issues cap), its audit JSON carries `halted_due_to_overflow: true` at the top level. **Detection lives in Phase 2b** (red signal case) where `$audit_json` and `$pr_num` are in scope; it sets `overflow_detected=1`. Phase 3's truncation step — **sequenced HERE, after the fingerprint repeat check and BEFORE the terminal/loop-back fence (#301, RFC 0012 §3.3 goal-R1 item 2; it previously sat AFTER the loop-back fence, where the un-truncated set had already been merged into `queue` and flushed, making the truncation dead code)** — then:
+
+- (Phase 2b already transitioned the PR to `red-held` for the red trust signal — overflow is functionally identical to RED, so the transition is shared);
+- queues only the first 10 candidate issues for the next cycle (the upstream agent already truncated the issue-file list at the cap; the queue cap mirrors that ceiling);
+- surfaces the overflow count in the `goal_cycle_completed` summary `{overflow_count: N}`;
+- **does NOT halt the entire goal** — `halted_due_to_overflow` is a per-PR cycle-management signal, not a goal-level circuit breaker. The goal continues to its next cycle and may converge once the overflow PR's issues are resolved.
+
+```bash
+# #171 fresh-shell rehydration — re-source libs (idempotent via _UBERDEV_*_LOADED
+# guards) and re-read run-state. Safe under set -u (${VAR:-} expansions).
+[ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ] && . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+[ -r "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh" ]    && . "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh"
+[ -r "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh" ]  && . "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh"
+GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
+uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 3 (overflow check)" >&2; exit 3; }
+uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
+# overflow_detected is set in Phase 2b's red case when any PR's /review-pr
+# audit JSON carried halted_due_to_overflow:true. Here in Phase 3 we apply
+# the first-10 truncation (no PR transition — Phase 2b already did that).
+if [ "${overflow_detected:-0}" = "1" ]; then
+  new_candidates=("${new_candidates[@]:0:10}")
+  # surfaced in cycle summary; goal continues — do NOT halt.
+  # #301 — re-flush the TRUNCATED set to the .candidates sidecar: the
+  # terminal/loop-back fence below is a fresh shell and rehydrates from disk;
+  # without this flush it would merge the FULL un-truncated set into `queue`.
+  uberdev_goal_write_run_state || { echo "goal: failed to persist run-state after overflow truncation" >&2; exit 3; }
+fi
+```
+
+**Cycle terminal conditions (evaluated AFTER the per-candidate fingerprint check and the D13 truncation above):**
 
 Every "converge / halt" gate below is additionally guarded on the rollover `queue` being EMPTY (`${#queue[@]} -eq 0`, issue #288 #1). When more issues than `--max-parallel` were queued, Phase 1 defers the overflow into `queue`; those issues have not been dispatched and have no PR, so they are invisible to the PR-state terminal calculus. A non-empty `queue` therefore falls THROUGH every terminal gate to the loop-back, which re-enters Phase 1 to drain it — the goal can never declare convergence (or a queue-empty halt) while rolled-over issues are still pending dispatch.
 
@@ -1486,6 +1594,12 @@ uberdev_goal_audit goal_cycle_completed \
   "{\"cycle\":$cycle,\"new_candidates\":${#new_candidates[@]},\"overflow_count\":${overflow_count:-0},\"rolled_over\":$_rolled_over}"
 queue=("${queue[@]}" "${new_candidates[@]}")
 cycle=$(( cycle + 1 ))
+# #301 — candidates are now CONSUMED into `queue`; clear before the loop-back
+# flush so the .candidates sidecar written below is EMPTY under the new cycle
+# tag. Without this, the flush would re-tag the already-merged set with cycle
+# N+1, and a crashed/skipped fence 1 next cycle would rehydrate it into the
+# terminal gates and merge the same candidates into `queue` a second time.
+new_candidates=()
 # Q4 — reset per-cycle accumulators before looping to Phase 1 (overflow_count
 # is per-cycle; overflow_detected gates the per-cycle truncation above).
 overflow_count=0
@@ -1511,31 +1625,6 @@ if ! : > "$_batch_prs_tsv"; then
 fi
 uberdev_goal_write_run_state || { echo "goal: failed to persist run-state before loop-back" >&2; exit 3; }
 # loop back to Phase 1
-```
-
-**Blocker-overflow handler (D13).** When the upstream `/review-pr` run halted with too many BLOCKER findings (more than the file-issues cap), its audit JSON carries `halted_due_to_overflow: true` at the top level. **Detection lives in Phase 2b** (red signal case) where `$audit_json` and `$pr_num` are in scope; it sets `overflow_detected=1`. Phase 3's truncation step then:
-
-- (Phase 2b already transitioned the PR to `red-held` for the red trust signal — overflow is functionally identical to RED, so the transition is shared);
-- queues only the first 10 candidate issues for the next cycle (the upstream agent already truncated the issue-file list at the cap; the queue cap mirrors that ceiling);
-- surfaces the overflow count in the `goal_cycle_completed` summary `{overflow_count: N}`;
-- **does NOT halt the entire goal** — `halted_due_to_overflow` is a per-PR cycle-management signal, not a goal-level circuit breaker. The goal continues to its next cycle and may converge once the overflow PR's issues are resolved.
-
-```bash
-# #171 fresh-shell rehydration — re-source libs (idempotent via _UBERDEV_*_LOADED
-# guards) and re-read run-state. Safe under set -u (${VAR:-} expansions).
-[ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ] && . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
-[ -r "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh" ]    && . "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh"
-[ -r "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh" ]  && . "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh"
-GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
-uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 3 (overflow check)" >&2; exit 3; }
-uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
-# overflow_detected is set in Phase 2b's red case when any PR's /review-pr
-# audit JSON carried halted_due_to_overflow:true. Here in Phase 3 we apply
-# the first-10 truncation (no PR transition — Phase 2b already did that).
-if [ "${overflow_detected:-0}" = "1" ]; then
-  new_candidates=("${new_candidates[@]:0:10}")
-  # surfaced in cycle summary; goal continues — do NOT halt.
-fi
 ```
 
 ## Phase 4 — Converge / Halt

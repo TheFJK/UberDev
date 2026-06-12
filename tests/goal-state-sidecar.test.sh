@@ -308,6 +308,7 @@ assert_eq "$?" "0" "cleanup returns 0"
 assert_absent "$sc"          "runstate sidecar removed"
 assert_absent "${sc}.queue"  "queue sidecar removed"
 assert_absent "${sc}.active" "active sidecar removed"
+assert_absent "${sc}.candidates" "candidates sidecar removed (#301)"
 assert_absent "$UBERDEV_TMPDIR/goal-active-id.txt" "active-id pointer removed (names this goal)"
 uberdev_goal_cleanup_run_state   # second call on already-gone files
 assert_eq "$?" "0" "cleanup idempotent (non-fatal when absent)"
@@ -431,6 +432,69 @@ if [ "$s6neg" = "REFUSED" ]; then
 else
   FAIL=$((FAIL+1)); echo "  FAIL  S6.forged-value-refused (got [$s6neg])" >&2
 fi
+
+echo "== S7: two-process Phase-3 fence handoff — .candidates sidecar (#301, RFC 0012 §3.3 goal-R1 item 1) =="
+# THE live false-converge BLOCKER reproduction: Phase-3 fence 1 builds
+# new_candidates from the gh query and flushes at fence END; the fingerprint /
+# terminal fences are SEPARATE fresh shells that must rehydrate the set from
+# DISK. Every process below runs `env -i` with ONLY UBERDEV_TMPDIR + PATH —
+# the fresh-shell-with-cleared-env style — because env-passing tests MASK
+# cross-fence traps (the #178 class: an exported scalar smuggles state the
+# real Bash-tool fence boundary would have dropped). Arrays can never ride
+# env at all, so a passing S7 proves the sidecar is the carrier.
+#
+# P0 (Phase-0 analogue): seed run-state — cycle=4, only_mine=1, no candidates.
+env -i UBERDEV_TMPDIR="$UBERDEV_TMPDIR" PATH="$PATH" GOAL_ID="goal-test-cand0001" bash -c '
+  . "'"$DISPATCH_LIB"'"
+  . "'"$GOAL_LIB"'"
+  cycle=4; watch_start=1716400000; overflow_count=0; overflow_detected=0
+  MAX_CYCLES=5; UBERDEV_RESOLVED_BACKEND=claude-bg; only_mine=1
+  queue=(); active_issues=(); new_candidates=()
+  uberdev_goal_write_run_state
+' || { FAIL=$((FAIL+1)); echo "  FAIL  S7.p0-seed errored" >&2; }
+# P1 (Phase-3 fence-1 analogue, process 1): rehydrate via the bootstrap
+# pointer (no GOAL_ID anywhere in env), build new_candidates as if from the
+# gh query, flush at fence END — the exact flush #301 adds.
+env -i UBERDEV_TMPDIR="$UBERDEV_TMPDIR" PATH="$PATH" bash -c '
+  . "'"$DISPATCH_LIB"'"
+  . "'"$GOAL_LIB"'"
+  uberdev_goal_read_run_state || exit 9
+  new_candidates=(311 412 513)
+  uberdev_goal_write_run_state || exit 8
+' || { FAIL=$((FAIL+1)); echo "  FAIL  S7.p1-fence1 errored" >&2; }
+# P2 (fingerprint/terminal fence analogue, process 2): rehydrate; candidates
+# AND the only_mine identity-filter flag must arrive from disk.
+s7_got="$(env -i UBERDEV_TMPDIR="$UBERDEV_TMPDIR" PATH="$PATH" bash -c '
+  . "'"$DISPATCH_LIB"'"
+  . "'"$GOAL_LIB"'"
+  uberdev_goal_read_run_state || exit 9
+  printf "%s|%s|%s" "${new_candidates[*]:-}" "${#new_candidates[@]}" "${only_mine:-UNSET}"
+')"
+assert_eq "$s7_got" "311 412 513|3|1" "S7: candidates + only_mine survive the two-process fence handoff via disk"
+
+echo "== S7-neg: stale-cycle .candidates sidecar is REFUSED, not rehydrated (#301 cycle-tag gate) =="
+# A Phase-3 fence that crashed between the gh query and its flush leaves a
+# PRIOR-cycle .candidates file behind. read_run_state must yield an EMPTY set
+# (fail-safe; the gh-rc breaker is the loud path) instead of feeding stale
+# candidates into the terminal gates. Scalar cycle on disk is 4; forge tag 3.
+s7sc="$UBERDEV_TMPDIR/goal-goal-test-cand0001-runstate"
+printf 'cycle=3\n311\n412\n513\n' > "${s7sc}.candidates"
+s7_stale="$(env -i UBERDEV_TMPDIR="$UBERDEV_TMPDIR" PATH="$PATH" bash -c '
+  . "'"$DISPATCH_LIB"'"
+  . "'"$GOAL_LIB"'"
+  uberdev_goal_read_run_state || exit 9
+  printf "rc0|%s" "${#new_candidates[@]}"
+')"
+assert_eq "$s7_stale" "rc0|0" "S7-neg: cycle-tag mismatch yields empty candidates (read still rc 0)"
+# Tag-less legacy/forged file (first line not cycle=N): same refusal.
+printf '311\n412\n' > "${s7sc}.candidates"
+s7_notag="$(env -i UBERDEV_TMPDIR="$UBERDEV_TMPDIR" PATH="$PATH" bash -c '
+  . "'"$DISPATCH_LIB"'"
+  . "'"$GOAL_LIB"'"
+  uberdev_goal_read_run_state || exit 9
+  printf "rc0|%s" "${#new_candidates[@]}"
+')"
+assert_eq "$s7_notag" "rc0|0" "S7-neg: tag-less candidates file yields empty candidates (read still rc 0)"
 
 echo
 printf 'goal-state-sidecar: %d passed, %d failed\n' "$PASS" "$FAIL"

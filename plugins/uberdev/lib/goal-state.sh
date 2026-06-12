@@ -138,6 +138,14 @@ _UBERDEV_GOAL_WORKTREE_PREFIXES=("" ".claude/worktrees/*/" ".worktrees/*/" "work
 : "${_UBERDEV_GOAL_SOLVE_TIMEOUT:=9000}"                  # 150m — no PR AND no live agent => issue failed (#180)
 : "${_UBERDEV_GOAL_DEFAULT_REVIEW_GRACE_SECS:=3600}"      # 60m default — overridable via goal.review_grace_secs / UBERDEV_GOAL_REVIEW_GRACE_SECS / --review-grace-secs (#220 AC ❶)
 : "${_UBERDEV_GOAL_MERGE_TIMEOUT:=3600}"                  # 60m — merging w/o MERGED AND agent idle => back to green for retry (#180)
+# #301 (RFC 0012 §3.3 goal-R1 item 3) — bounded-watch budget default applied by
+# Phase-0 step 3 when the fence runs under the Claude-Code Bash tool (CLAUDECODE
+# env marker) and the operator gave NO explicit bound. Sized to the Bash tool's
+# 600s hard call cap minus headroom for one worst-case serial gh walk: the
+# Phase-2 budget gate bounds the upcoming SLEEP, not pass gh-latency (see the
+# WATCH_BUDGET sizing note in the watch fence), so the fence must finish its
+# in-flight pass and exit 42 BEFORE the harness SIGTERM lands.
+: "${_UBERDEV_GOAL_DEFAULT_WATCH_BUDGET:=480}"            # 8m — 600s Bash-tool cap minus one serial gh walk
 : "${_UBERDEV_GOAL_BODY_CAP:=65536}"                      # 64 KiB
 : "${FINDING_LABEL:=review-pr-finding}"
 # #290.3 — consecutive gh-failure breaker threshold. The Phase-2a/2d polling
@@ -1745,11 +1753,18 @@ uberdev_goal_batch_unblock_wait_clear() {
 # missing/stale audit; the cap
 # bounds total dispatches per PR across the entire goal run (worst case
 # was 240/PR over the 4h stuck_loop window — now 3/PR). On cap-exceeded:
-# print a stderr warning and return rc=0 so the step 2a loop continues
-# normally (the PR stays in its current state; subsequent watch iterations
-# skip re-dispatch via the same cap check). Intentionally NOT a circuit
-# breaker — the goal continues toward convergence and the cap does NOT
-# halt the goal. The merge-attempts pattern (uberdev_goal_should_automerge
+# print a stderr warning and return the DISTINCT rc=5 (#301, RFC 0012 §3.3
+# goal-R1 item 4). The pre-#301 contract returned rc=0 here, making the
+# cap-skip indistinguishable from a successful dispatch — Phase 2b then
+# kept `any_active=1` and the PR spun in pushed-reviewing until the 4h
+# stuck_loop reaped every live solver. rc=5 lets the 2b caller transition
+# the PR to `red-held` (pseudo-terminal for convergence) with a distinct
+# audit note instead. Intentionally still NOT a circuit breaker — the goal
+# continues toward convergence and the cap does NOT halt the goal. Callers
+# that ignore the rc (the unblock rule at _uberdev_goal_check_unblock) keep
+# the pre-#301 skip-in-place behaviour. rc map: 0 dispatched; 1 validation/
+# mktemp/counter-write failure; 4 missing lib/dispatch.sh; 5 cap exhausted.
+# The merge-attempts pattern (uberdev_goal_should_automerge
 # at line 367) inspires the helper structure but the semantics differ:
 # merge-attempts gates a transition to `merging`; review-pr-attempts skips
 # a dispatch in-place.
@@ -1774,7 +1789,7 @@ _uberdev_goal_dispatch_review_pr() {
   if [ "$current" -ge "$cap" ]; then
     printf 'goal-pipeline: review-pr dispatch cap reached for PR #%s (cap=%s); skipping re-dispatch this cycle\n' \
       "$pr" "$cap" >&2
-    return 0
+    return 5   # #301 — DISTINCT cap-exhausted rc (was 0; see header rc map)
   fi
   local prompt_file
   # B5 — mktemp failure (read-only /tmp, exhausted inode table) used to fall
@@ -2205,10 +2220,19 @@ _uberdev_goal_rebase_collision_chain() {
 #   Reads GOAL_ID, cycle, watch_start, overflow_count, overflow_detected,
 #   MAX_CYCLES, UBERDEV_RESOLVED_BACKEND, MAX_PARALLEL, BARRIER_TIMEOUT_S,
 #   barrier_start_ts, REVIEW_GRACE_SECS, WATCH_PASSES, WATCH_BUDGET (#299
-#   bounded-watch bound), and the queue/active_issues arrays from the caller's
-#   shell; persists them to predictable, GOAL_ID-keyed sidecars under
+#   bounded-watch bound), only_mine (#301 — the #291 identity-filter flag,
+#   previously absent from the scalar flush: a fresh Phase-3 fence silently
+#   widened the candidate set past the --only-mine author filter), and the
+#   queue/active_issues/new_candidates arrays from the caller's shell; persists
+#   them to predictable, GOAL_ID-keyed sidecars under
 #   $UBERDEV_TMPDIR, plus a fixed-path goal-active-id.txt pointer so a fresh
 #   shell (no GOAL_ID in env/scalar) can discover the active GOAL_ID.
+#   The .candidates sidecar (#301, RFC 0012 §3.3 goal-R1 item 1) is
+#   CYCLE-TAGGED: its first line is `cycle=<N>` from the caller's $cycle, and
+#   uberdev_goal_read_run_state rehydrates it ONLY when the tag matches the
+#   scalar-sidecar cycle — a fence that crashed between the Phase-3 gh query
+#   and its flush must not leak the PRIOR cycle's candidates into the
+#   terminal gates.
 #   Returns 0 on success; 4 (fail-CLOSED) if its required lib/dispatch.sh helper
 #   _uberdev_dispatch_prepare_tmp_target is not sourced (see "External imports");
 #   1 if GOAL_ID is invalid; 3 (fail-CLOSED) if _uberdev_dispatch_prepare_tmp_target
@@ -2234,12 +2258,12 @@ uberdev_goal_write_run_state() {
   _uberdev_dispatch_prepare_tmp_target "$sc" 0 "goal" || return 3
   local tmp _filtered aid
   tmp="$(mktemp "${sc}.XXXXXXXX")" || return 3
-  printf 'GOAL_ID=%s\ncycle=%s\nwatch_start=%s\noverflow_count=%s\noverflow_detected=%s\nMAX_CYCLES=%s\nUBERDEV_RESOLVED_BACKEND=%s\nMAX_PARALLEL=%s\nBARRIER_TIMEOUT_S=%s\nbarrier_start_ts=%s\nREVIEW_GRACE_SECS=%s\nWATCH_PASSES=%s\nWATCH_BUDGET=%s\nCIRCUIT_BREAKER_HALT=%s\n' \
+  printf 'GOAL_ID=%s\ncycle=%s\nwatch_start=%s\noverflow_count=%s\noverflow_detected=%s\nMAX_CYCLES=%s\nUBERDEV_RESOLVED_BACKEND=%s\nMAX_PARALLEL=%s\nBARRIER_TIMEOUT_S=%s\nbarrier_start_ts=%s\nREVIEW_GRACE_SECS=%s\nWATCH_PASSES=%s\nWATCH_BUDGET=%s\nonly_mine=%s\nCIRCUIT_BREAKER_HALT=%s\n' \
     "$GOAL_ID" "${cycle:-0}" "${watch_start:-0}" "${overflow_count:-0}" \
     "${overflow_detected:-0}" "${MAX_CYCLES:-0}" "${UBERDEV_RESOLVED_BACKEND:-}" \
     "${MAX_PARALLEL:-0}" "${BARRIER_TIMEOUT_S:-0}" "${barrier_start_ts:-0}" \
     "${REVIEW_GRACE_SECS:-0}" "${WATCH_PASSES:-0}" "${WATCH_BUDGET:-0}" \
-    "${CIRCUIT_BREAKER_HALT:-}" > "$tmp"
+    "${only_mine:-0}" "${CIRCUIT_BREAKER_HALT:-}" > "$tmp"
   # Append per-PID dialog-stuck samples (issue #220, AC ❸).
   # R3 SSOT (issue #220 simplify pass): single iterator over both prefixes —
   # PRIOR_LAST_ACTIVITY_<pid> and FIRST_DIALOG_TS_<pid> share identical
@@ -2291,6 +2315,25 @@ uberdev_goal_write_run_state() {
   fi
   mv -f "$tmp" "${sc}.active" || { rm -f "$tmp"; return 3; }
 
+  # .candidates sidecar (#301, RFC 0012 §3.3 goal-R1 item 1) — mirrors the
+  # .queue writer above with ONE addition: a `cycle=<N>` first-line tag.
+  # new_candidates is built inside Phase-3 fence 1 (a fresh shell) and dies at
+  # the fence boundary; without this sidecar the downstream fingerprint /
+  # terminal fences rehydrated an EMPTY set and the terminal gate emitted
+  # goal_converged with open BLOCKER/CRITICAL findings still pending (the live
+  # false-converge BLOCKER). The cycle tag lets read_run_state refuse a
+  # stale-cycle file (crash between gh query and flush) instead of feeding the
+  # PRIOR cycle's candidates into the terminal gates.
+  _uberdev_dispatch_prepare_tmp_target "${sc}.candidates" 0 "goal" || return 3
+  tmp="$(mktemp "${sc}.candidates.XXXXXXXX")" || return 3
+  _filtered="$(printf '%s\n' "${new_candidates[@]:-}" | grep -E '^[0-9]+$' || true)"
+  if [ -n "$_filtered" ]; then
+    printf 'cycle=%s\n%s\n' "${cycle:-0}" "$_filtered" > "$tmp" || { rm -f "$tmp"; return 3; }
+  else
+    printf 'cycle=%s\n' "${cycle:-0}" > "$tmp" || { rm -f "$tmp"; return 3; }
+  fi
+  mv -f "$tmp" "${sc}.candidates" || { rm -f "$tmp"; return 3; }
+
   # Fixed-path pointer (issue #171 bootstrap): a fresh shell has no GOAL_ID in
   # env/scalar, so it cannot name the keyed sidecar above. Publish the active
   # GOAL_ID to a well-known path LAST — after the keyed data exists — so a
@@ -2312,8 +2355,13 @@ uberdev_goal_write_run_state() {
 #   On success: sets the GOAL_ID, cycle, watch_start, overflow_count,
 #   overflow_detected, MAX_CYCLES, UBERDEV_RESOLVED_BACKEND, MAX_PARALLEL,
 #   BARRIER_TIMEOUT_S, barrier_start_ts, REVIEW_GRACE_SECS, WATCH_PASSES,
-#   WATCH_BUDGET scalars, rehydrates the
-#   queue/active_issues arrays, and EXPORTS UBERDEV_GOAL_ID + UBERDEV_TMPDIR
+#   WATCH_BUDGET, only_mine (#301 — 0|1 allowlist, default 0) scalars,
+#   rehydrates the queue/active_issues arrays plus the cycle-tagged
+#   new_candidates array (#301 — rehydrated ONLY when the .candidates
+#   sidecar's `cycle=<N>` first-line tag matches the scalar-rehydrated
+#   cycle; a mismatched/absent tag yields an EMPTY array so a stale-cycle
+#   file can never feed the terminal gates),
+#   and EXPORTS UBERDEV_GOAL_ID + UBERDEV_TMPDIR
 #   (the env vars the uberdev_goal_* helpers + bare $UBERDEV_TMPDIR/... paths in
 #   the pipeline body depend on — see the export block at the function's end).
 #   Returns 0 on success; 1 if missing/unreadable. Invalid fields are skipped
@@ -2353,6 +2401,11 @@ uberdev_goal_read_run_state() {
       REVIEW_GRACE_SECS)  _uberdev_goal_validate_int "$v" && REVIEW_GRACE_SECS="$v" ;;
       WATCH_PASSES)       _uberdev_goal_validate_int "$v" && WATCH_PASSES="$v" ;;
       WATCH_BUDGET)       _uberdev_goal_validate_int "$v" && WATCH_BUDGET="$v" ;;
+      only_mine)
+        # #301 — 0|1 allowlist (tighter than the int gate: this flag branches
+        # the Phase-3 candidate query; a forged value must degrade to the
+        # default-0 "no identity filter" arm, never widen into truthiness).
+        case "$v" in 0|1) only_mine="$v" ;; esac ;;
       CIRCUIT_BREAKER_HALT)
         case "$v" in
           max_cycles|nonconvergence|stuck_loop|merge_failed|gh_api_failed|unknown_merge_result|queue_empty_not_converged|agent_stuck_on_dialog)
@@ -2404,6 +2457,40 @@ uberdev_goal_read_run_state() {
       _uberdev_goal_validate_int "$line2" && active_issues+=("$line2")
     done < "${sc}.active"
   fi
+
+  # .candidates rehydrate (#301, RFC 0012 §3.3 goal-R1 item 1) — cycle-tag
+  # gated. The first line must be `cycle=<N>` with N matching the cycle scalar
+  # rehydrated ABOVE (the scalar block is parsed before the arrays, so $cycle
+  # is already this run's value). On a missing/invalid/mismatched tag the
+  # array stays EMPTY: a Phase-3 fence that crashed between the gh query and
+  # its flush leaves the PRIOR cycle's file behind, and rehydrating that into
+  # the terminal gates would re-merge already-queued candidates (double-
+  # dispatch) or mask a real empty-query failure. Empty-on-mismatch is the
+  # documented fail-safe; the fence-1 gh-rc breaker (gh_api_failed) is the
+  # loud path for query failures.
+  new_candidates=()
+  if [ -r "${sc}.candidates" ]; then
+    local line3 _cand_tag _cand_first
+    _cand_tag=""
+    _cand_first=1
+    while IFS= read -r line3; do
+      if [ "$_cand_first" = "1" ]; then
+        _cand_first=0
+        case "$line3" in cycle=*) _cand_tag="${line3#cycle=}" ;; esac
+        _uberdev_goal_validate_int "${_cand_tag:-}" || break
+        [ "$_cand_tag" = "${cycle:-0}" ] || break
+        continue
+      fi
+      [ -n "$line3" ] || continue
+      _uberdev_goal_validate_int "$line3" && new_candidates+=("$line3")
+    done < "${sc}.candidates"
+  fi
+
+  # #301 — default the only_mine flag when the sidecar predates the field (or
+  # carried a forged value): the Phase-3 fence branches on a bare
+  # `[ "$only_mine" = "1" ]`, which must resolve to the safe "no identity
+  # filter" arm in a fresh shell rather than tripping set -u.
+  only_mine="${only_mine:-0}"
 
   # #178 — re-export the env vars a fresh shell's downstream consumers need.
   # Four uberdev_goal_* helpers gate on the UBERDEV_GOAL_ID *env var*, NOT the
@@ -2497,6 +2584,31 @@ _uberdev_goal_reap_zombies() {
   return 0
 }
 
+# _uberdev_goal_handle_harness_term   (#301, RFC 0012 §3.3 goal-R1 item 3)
+# TERM-trap body for the Phase-2 watch fence. Under the Claude-Code Bash tool
+# a single call is hard-capped at 600s; when the cap lands the harness delivers
+# SIGTERM to the still-running fence. The pre-#301 TERM trap chained into
+# _uberdev_goal_reap_zombies — so the HARNESS CAP (not an operator abort)
+# killed every live solver ~10 minutes into a healthy run. TERM cannot
+# distinguish an operator `kill -TERM` from the harness cap, so the TERM path
+# now uniformly takes the harness interpretation:
+#   1. persist run-state (best-effort — the fence's live scalars/arrays are
+#      still in scope inside the trap, so the next tick rehydrates them);
+#   2. emit a goal_reaper_skipped audit row (reason=harness_term) so the
+#      no-reap choice stays visible post-mortem;
+#   3. exit 42 — the bounded-tick "still-active, re-invoke" contract code —
+#      WITHOUT reaping (bg solver agents survive; the harness re-invokes the
+#      Phase-2 fence which rehydrates and resumes the watch).
+# Operator stop is INT (Ctrl-C — still reaps via the INT trap) or an explicit
+# _uberdev_goal_reap_zombies invocation.
+_uberdev_goal_handle_harness_term() {
+  uberdev_goal_write_run_state || \
+    printf 'goal-state: WARN run-state flush failed inside the TERM trap — next tick may rehydrate stale state\n' >&2
+  uberdev_goal_audit goal_reaper_skipped \
+    "{\"goal_id\":\"${UBERDEV_GOAL_ID:-unknown}\",\"reason\":\"harness_term\",\"exit\":42}" || true
+  exit 42
+}
+
 # uberdev_goal_cleanup_run_state
 #   Best-effort removal of the run-state sidecars + the fixed-path active-id
 #   pointer on goal completion / circuit-breaker halt. Never fatal; no globbing
@@ -2506,7 +2618,7 @@ uberdev_goal_cleanup_run_state() {
   local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
   _uberdev_goal_validate_id "${GOAL_ID:-}" || return 0
   local sc="$tmpdir/goal-$GOAL_ID-runstate"
-  rm -f "$sc" "${sc}.queue" "${sc}.active" "$tmpdir/goal-$GOAL_ID-batch-prs.tsv" 2>/dev/null
+  rm -f "$sc" "${sc}.queue" "${sc}.active" "${sc}.candidates" "$tmpdir/goal-$GOAL_ID-batch-prs.tsv" 2>/dev/null
   # Remove the fixed-path pointer only if it still names THIS goal, so a
   # concurrent goal's pointer is never clobbered.
   local aid="$tmpdir/goal-active-id.txt"
