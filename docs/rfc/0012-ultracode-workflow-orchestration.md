@@ -6,7 +6,7 @@
 | **Author**     | TheFJK |
 | **Created**    | 2026-06-11 |
 | **Targets**    | new `skills/<name>/workflow.js` scripts (review-pr, merge ×2, goal, solve-design, sdd-waves, scan-fleet, uberthink, testers, cluster-analyze, simplify-pass); thin rewrites of 9 pipeline `SKILL.md` bodies + `commands/review-pr.md`; new `lib/solve-launcher.sh`, `lib/goal-phase{0,1,3}.sh`, `lib/goal-watch.sh`, `lib/bump-version.sh`; `lib/config-read.sh` (args helper); `tests/workflow-scripts.test.sh` + `tests/_workflow_harness.js`; `hooks/session-start` + `skills/using-uberdev` (diet); docs surfaces: README.md mechanics sections, `plugins/uberdev/docs/testing.md`, `skills/writing-skills/SKILL.md`, status annotations on RFC 0005–0010 (§9 docs strategy) |
-| **Supersedes** | — (replaces the directive-emitter *substrate* of RFC 0005/0007/0008/0009/0010; their state machines, scoring contracts and trust trails are preserved byte-stable) |
+| **Supersedes** | — (replaces the directive-emitter *substrate* of RFC 0005/0006/0007/0008/0009/0010; their state machines, scoring contracts and trust trails are preserved byte-stable) |
 | **Tracking**   | #301–#310 dispositions in §8; new issues per §9 |
 | **Tier**       | Large (multi-release migration program; contract-affecting across every pipeline) |
 | **Target ver** | staged 0.37.0 → 0.4x per §9 roadmap (current `main` is 0.36.1; every release bumps the two `assert_version_bump` locks at `tests/goal.test.sh:424` + `tests/solve-claim.test.sh:272`) |
@@ -340,6 +340,8 @@ Revisions baked in (from falsification): tick, dispatch AND collect prompts all 
 
 **Keep (goal-R4):** detached solver/review/merge dispatch (constraint 5); the lowest-first + MERGING-interlock merge barrier (SKILL.md:884-1031 — parallelizing it re-opens the version-bump-collision class that bit twice); the goal-state store layout byte-stable (goal-`<id>` TSVs/jsonl + runstate sidecar + `goal-active-id.txt`) — #310's reader and /merge PATH_2's trust trail depend on it. Per-pass gh-memoization speedups (#301c) live in bash helpers agents still execute — do independently, any time.
 
+**Test re-anchors (goal-R5):** the grep-anchor re-points named in goal-R2's extraction PR — goal.test.sh G-greps + goal-pipeline-zsh fence slicers, with the Constants block kept byte-identical or G24/G28/G34 updated together. Called out as a discrete rec because §9 Phase 7 sequences it explicitly alongside the four-script extraction; the work itself lands in the same PR as goal-R2.
+
 **Joint-migration contract table.** /goal consumes only file globs, gh state/labels, and `claude agents` metadata — which is exactly why the three migrations are feasible, provided these literals survive byte-identically (acceptance checklist for Phases 4/5/7):
 
 | Contract | Producer → Consumer | Must preserve |
@@ -419,7 +421,7 @@ return {status, waves[{tasks[{id,sha,spec,quality,concerns}]}], escalations[], a
 ```
 
 - New agent files: `agents/sdd-implementer.md`, `agents/sdd-spec-reviewer.md` (ported from implementer-prompt.md / spec-reviewer-prompt.md); `uberdev:code-reviewer` reused unchanged. Implementer Q&A changes from conversational ("Ask them now", implementer-prompt.md:36-44) to one-shot NEEDS_CONTEXT re-dispatch — a deliberate semantic change. Interactive /solve medium/large routes through SDD too (not just /turbo), so the escalation contract is explicit: on BLOCKED rung 4 the workflow halts AFTER committing completed tasks, the main session surfaces the blocker (AskUserQuestion), and re-runs with `resumeFromRunId` same-session so the cached prefix skips finished waves; "plan is wrong" escalations surface through the return value.
-- The new preflight fence newly EXPOSES the renderer class (SDD's SKILL.md has zero bash fences today): no bare `$1/$2/$3` anywhere (awk -v / `${ARGUMENTS}` parsing only), and it must tolerate the `--turbo` positional that write-plan:189 forwards (test-locked at turbo-flow.test.sh:62-63).
+- The new preflight fence newly EXPOSES the renderer class (SDD's SKILL.md has zero bash fences today): no bare `$1/$2/$3` anywhere (awk -v / `${ARGUMENTS}` parsing only), and it must tolerate the `--turbo` positional that write-plan:190 forwards (test-locked at turbo-flow.test.sh:62-63).
 - Cross-session durability (cheap, constraint-4-legal): the git-controller agent appends a task-id → commit-SHA checkpoint (`<summary_dir>/sdd-state.json`) after each wave commit, so a FRESH session can re-run the workflow and skip already-committed tasks — landed commits are verifiable ground truth via `git log` — upgrading a mid-run crash from re-pay-all-dispatches to resume-from-last-committed-wave.
 - `sdd-waves.js` **never calls `workflow()`** — reserving the single nesting level so solve-design.js can later invoke SDD as a child workflow.
 - The main session stays hands-off the worktree while the workflow runs — a hard rule in the thinned SKILL.md.
