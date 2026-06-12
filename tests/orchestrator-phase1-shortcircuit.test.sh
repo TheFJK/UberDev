@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
-# Asserts the contract invariants for the orchestrator Phase 1
-# artifact-reuse short-circuit added by issue #62.
+# Asserts the orchestrator Phase 1 artifact-reuse cache DELETION contract.
+#
+# History: issue #62 added a ~200-line freshness predicate that gated per-topic
+# reuse of cached research before the fanout. RFC 0012 §3.5 / #308 DELETED it
+# after a live repo-wide grep proved the cache had zero writers (the predicate
+# could never fire). This test is the inverted oracle: it now locks the
+# decision record + the absence of the predicate machinery, so the cache can
+# never silently grow back without re-pointing this file.
 #
 # Modelled on tests/issue-causal-fanout.test.sh: grep-based structural
 # assertions against the rendered skill file. No live gh CLI invocation.
@@ -51,95 +57,69 @@ assert_no_grep() {
   fi
 }
 
-echo "== Artifact-reuse contract present =="
+echo "== Cache-deletion decision record present (#308 / RFC 0012 §3.5) =="
+# The decision record is the load-bearing artifact: it documents WHY the
+# predicate was deleted (zero writers) and the binding rules for any future
+# reintroduction, so a reader cannot mistake the deletion for an oversight.
 assert_grep "$SKILL" \
-  '^### The artifact-reuse contract' \
-  'contract subsection heading present'
+  '^### Phase 1 research cache — deleted' \
+  'cache-deletion decision-record heading present'
 assert_grep "$SKILL" \
-  'Freshness predicate' \
-  'freshness predicate label present'
+  'zero writers' \
+  'decision record cites the zero-writers finding'
 assert_grep "$SKILL" \
-  'no-cache' \
-  'no-cache reason discriminator listed'
+  'git rev-parse --git-common-dir' \
+  'future-reintroduction rule pins --git-common-dir for the MAIN repo root'
 assert_grep "$SKILL" \
-  'stale-mtime' \
-  'stale-mtime reason discriminator listed'
-assert_grep "$SKILL" \
-  'missing-summary' \
-  'missing-summary reason discriminator listed'
-assert_grep "$SKILL" \
-  'invalid-timestamp' \
-  'invalid-timestamp reason discriminator listed'
-assert_grep "$SKILL" \
-  'missing-head-sha' \
-  'missing-head-sha reason discriminator listed'
-assert_grep "$SKILL" \
-  'head-divergence' \
-  'head-divergence reason discriminator listed'
-assert_grep "$SKILL" \
-  'file-intersection' \
-  'file-intersection reason discriminator listed'
-assert_grep "$SKILL" \
-  'pr-closed' \
-  'pr-closed reason discriminator listed'
+  'thin preflight probe' \
+  'future-reintroduction rule forbids re-growing an inline freshness predicate'
 
 echo
-echo "== All six topics enumerated =="
-# Behavior assertion: the canonical six-topic list is declared exactly once
-# as a TOPICS array, and every Phase 1 loop iterates via "${TOPICS[@]}".
-# Pins the topic enumeration without pinning the literal `for TOPIC in ...; do`
-# string (which used to appear 4x and drifted easily).
-assert_grep "$SKILL" \
-  'TOPICS=\(codebase patterns prior-art constraints security test-coverage\)' \
-  'six-topic TOPICS array declaration present'
-assert_grep "$SKILL" \
-  'for TOPIC in "\$\{TOPICS\[@\]\}"; do' \
-  'Phase 1 loops iterate via "${TOPICS[@]}"'
-
-echo
-echo "== Per-topic log emission documented =="
-assert_grep "$SKILL" \
-  'status=reused' \
-  'status=reused log line present'
-assert_grep "$SKILL" \
-  'status=dispatched' \
-  'status=dispatched log line present'
-assert_grep "$SKILL" \
-  'note=fresh-run,reason=<no-cache\|stale-mtime\|missing-summary\|invalid-timestamp\|missing-head-sha\|head-divergence\|file-intersection\|pr-closed>' \
-  'dispatched-line bullet enumerates all eight reasons'
-assert_grep "$SKILL" \
-  'note=cache-hit,mtime=' \
-  'reused-line bullet present with mtime'
-
-echo
-echo "== New front-matter and env-var contract present =="
-assert_grep "$SKILL" \
-  'head_sha:' \
-  'head_sha front-matter field documented'
-assert_grep "$SKILL" \
-  'UBERDEV_CACHE_DIVERGENCE_THRESHOLD' \
-  'divergence threshold env var documented'
-assert_grep "$SKILL" \
-  'git cat-file -e' \
-  'git cat-file -e reachability probe documented'
-assert_grep "$SKILL" \
-  'git rev-list --count' \
-  'divergence count primitive documented'
-assert_grep "$SKILL" \
-  'gh pr list --state merged --search' \
-  'gh pr list closing-PR primitive documented'
-assert_grep "$SKILL" \
-  'Files investigated' \
-  'Files investigated section reference documented'
-
-echo
-echo "== Stale brainstorm cross-reference removed =="
+echo "== Freshness-predicate machinery is GONE =="
+# These were the ~200-line predicate's distinctive tokens. None may survive,
+# or the cache has crept back in. (The decision-record prose above is allowed
+# to NAME the deleted predicate — these patterns match only the live machinery,
+# which referenced the discriminators/array/log-lines/env-var as executable
+# contract, not as a historical mention.)
 assert_no_grep "$SKILL" \
-  'brainstorm/SKILL\.md:87-131' \
-  'stale brainstorm cross-reference removed'
+  '^### The artifact-reuse contract' \
+  'live artifact-reuse contract subsection removed'
+assert_no_grep "$SKILL" \
+  'TOPICS=\(codebase patterns prior-art constraints security test-coverage\)' \
+  'six-topic TOPICS reuse-array declaration removed'
+assert_no_grep "$SKILL" \
+  'for TOPIC in "\$\{TOPICS\[@\]\}"; do' \
+  'per-topic reuse loop removed'
+assert_no_grep "$SKILL" \
+  'note=fresh-run,reason=<no-cache\|stale-mtime\|missing-summary\|invalid-timestamp\|missing-head-sha\|head-divergence\|file-intersection\|pr-closed>' \
+  'per-topic reuse log-line (eight reason discriminators) removed'
+assert_no_grep "$SKILL" \
+  'note=cache-hit,mtime=' \
+  'cache-hit reused log-line removed'
+assert_no_grep "$SKILL" \
+  'UBERDEV_CACHE_DIVERGENCE_THRESHOLD' \
+  'cache-divergence threshold env var removed'
+assert_no_grep "$SKILL" \
+  'git rev-list --count' \
+  'divergence-count primitive removed'
+assert_no_grep "$SKILL" \
+  'gh pr list --state merged --search' \
+  'closing-PR cache-invalidation primitive removed'
 
 echo
-echo "== Trust-boundary cached-artifact clause present =="
+echo "== Phase 1 dispatches fresh every run =="
+# With the cache gone, the medium/large fanout is unconditionally fresh.
+assert_grep "$SKILL" \
+  'always dispatched fresh' \
+  'Phase 1 documents always-fresh fanout'
+assert_grep "$SKILL" \
+  'the cache short-circuit is deleted' \
+  'Phase 1 fanout names the deletion inline'
+
+echo
+echo "== Trust-boundary cached-artifact clause retained (future reuse) =="
+# The trust rule is retained verbatim for any future reintroduction — it is
+# NOT deleted with the predicate (reused artifacts would still be untrusted).
 assert_grep "$SKILL" \
   'cached-research-issue-' \
   'trust-boundary mentions cached-research-issue- envelope'

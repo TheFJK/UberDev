@@ -45,7 +45,7 @@ Do not use web search or other MCP tools. All external research has already been
 
 3. **Mirror an existing spec's structure.** Run `ls docs/uberdev/specs/` (from `working_dir`) and read the most recent prior spec file to confirm section ordering. Mirror it exactly.
 
-4. **Determine the output path.** Get today's date: `date +%Y-%m-%d`. Construct the path as `docs/uberdev/specs/YYYY-MM-DD-<topic_slug>-design.md`. Run `mkdir -p docs/uberdev/specs/` if needed.
+4. **Determine the output path.** Get today's date: `date +%Y-%m-%d`. Construct the path ABSOLUTE under `working_dir`: `<working_dir>/docs/uberdev/specs/YYYY-MM-DD-<topic_slug>-design.md` — never a relative path; under `claude --bg --worktree` your CWD may not be the worktree root, and the orchestrator verifies the file at the exact path you return from a different CWD. Run `mkdir -p "<working_dir>/docs/uberdev/specs/"` if needed.
 
 5. **Synthesise and write the spec.** The spec must contain these sections in order:
 
@@ -99,7 +99,7 @@ Do not use web search or other MCP tools. All external research has already been
    - `tier_hint: large` — if the change touches ≥5 files OR introduces a new skill/agent
    - `tier_hint: medium` — if the change touches 2–4 files
    - `tier_hint: small` — if the change touches ≤1 file
-   - `next_phase_recommendation: --paranoid` — if you flagged any high-stakes risk in the spec
+   - `next_phase_recommendation: review` — if you flagged any high-stakes risk in the spec (an advisory signal; spec-reviewer is always-on for medium/large regardless)
    - `next_phase_recommendation: abort` — only if a hard constraint makes the change infeasible
    - `next_phase_recommendation: auto` — otherwise
 
@@ -119,7 +119,7 @@ decisions:
 risks:
   - "<short risk statement>"
 tier_hint: small | medium | large
-next_phase_recommendation: auto | --paranoid | abort
+next_phase_recommendation: auto | review | abort
 ```
 
 Rules:
@@ -137,4 +137,4 @@ Rules:
 - **Research file unreadable** — log which path failed at the top of the spec under `## Open questions`; continue with available data; add a risk entry.
 - **Unable to determine author** — fall back to `working_dir`'s git remote URL owner, then `Unknown`.
 - **Malformed return (parse failure at orchestrator)** — on re-dispatch the orchestrator prepends a format example; honour it exactly and re-emit the full YAML block as the last thing in your reply.
-- **High-stakes risk** — set `next_phase_recommendation: --paranoid` so the orchestrator triggers `spec-reviewer`. Examples of high-stakes risks: breaking changes to public CLI surface, changes to shared state without locking, new external dependencies without pinned versions, removal of a user-facing feature.
+- **High-stakes risk** — set `next_phase_recommendation: review` to flag the spec for reviewer attention. This is advisory only: spec-reviewer is always-on for medium/large, so it runs regardless — the signal just surfaces the risk in the writer's return. Examples of high-stakes risks: breaking changes to public CLI surface, changes to shared state without locking, new external dependencies without pinned versions, removal of a user-facing feature.

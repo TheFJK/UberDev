@@ -41,7 +41,7 @@ decisions:
 risks:
   - "<short risk statement>"
 tier_hint: small | medium | large
-next_phase_recommendation: auto | --paranoid | abort
+next_phase_recommendation: auto | review | abort
 ```
 
 - `status: DONE` — all brief items addressed, spec is consistent and complete.
@@ -49,7 +49,7 @@ next_phase_recommendation: auto | --paranoid | abort
 - `status: BLOCKED` — brief is ambiguous or contradictory; set summary to the exact clarification needed and do not modify the spec.
 - `decisions[]` — preserve every row from the original spec's `## Decisions` table that the revision did not touch. Add new rows only for decisions introduced by this revision.
 - `tier_hint` — carry forward from the original spec unchanged unless the revision changes scope.
-- `next_phase_recommendation` — `auto` if the revised spec is ready to proceed; `--paranoid` if you added new complexity warranting a second reviewer pass; `abort` if the brief reveals a fundamental conflict with the issue requirements.
+- `next_phase_recommendation` — `auto` if the revised spec is ready to proceed; `review` (advisory) if you added new complexity warranting a fresh reviewer pass — note spec-reviewer is always-on for medium/large, so this only surfaces the signal; `abort` if the brief reveals a fundamental conflict with the issue requirements.
 
 ## Failure modes
 
