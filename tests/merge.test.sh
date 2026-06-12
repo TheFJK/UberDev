@@ -652,14 +652,14 @@ echo "== M35: SKILL.md Phase 1.4 enumerated set drops PATH_3 (issue #47) =="
 # M35: updated for issue #47 — PATH_3 retired; PATH_1 + PATH_2 only.
 # Pre-redesign assertion that PATH_3 is named in Phase 1.4 is REMOVED, not extended.
 PHASE_14_BODY=$(awk '/^### Step 1.4/,/^### Step 1.5/' "$SKILL_FILE")
-if echo "$PHASE_14_BODY" | grep -qE 'PATH_1.*PATH_2|PATH_2.*PATH_1'; then
+if grep -qE 'PATH_1.*PATH_2|PATH_2.*PATH_1' <<<"$PHASE_14_BODY"; then
   echo "  PASS  M35.path12 — Phase 1.4 body still names PATH_1 and PATH_2"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  M35.path12 — Phase 1.4 body must still name PATH_1 and PATH_2"
   FAIL=$((FAIL + 1))
 fi
-if echo "$PHASE_14_BODY" | grep -qE 'PATH_3'; then
+if grep -qE 'PATH_3' <<<"$PHASE_14_BODY"; then
   echo "  FAIL  M35.no-path3 — Phase 1.4 body must NOT name PATH_3 (retired in issue #47)"
   FAIL=$((FAIL + 1))
 else
@@ -856,21 +856,21 @@ fi
 echo
 echo "== M49: SKILL.md Phase 1.4 PATH_2 (c) dispatches trust-trail-evaluator via Task() =="
 PHASE_14_BODY=$(awk '/^### Step 1.4/,/^### Step 1.5/' "$SKILL_FILE")
-if echo "$PHASE_14_BODY" | grep -qE 'trust-trail-evaluator'; then
+if grep -qE 'trust-trail-evaluator' <<<"$PHASE_14_BODY"; then
   echo "  PASS  M49.1 — Phase 1.4 names trust-trail-evaluator agent"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  M49.1 — Phase 1.4 must name trust-trail-evaluator agent in PATH_2 (c) dispatch"
   FAIL=$((FAIL + 1))
 fi
-if echo "$PHASE_14_BODY" | grep -qE 'Task\('; then
+if grep -qE 'Task\(' <<<"$PHASE_14_BODY"; then
   echo "  PASS  M49.2 — Phase 1.4 mentions Task() dispatch"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  M49.2 — Phase 1.4 must mention Task() dispatch for trust-trail-evaluator"
   FAIL=$((FAIL + 1))
 fi
-if echo "$PHASE_14_BODY" | grep -qE 'PATH_3'; then
+if grep -qE 'PATH_3' <<<"$PHASE_14_BODY"; then
   echo "  FAIL  M49.no-path3-bypass — Phase 1.4 must NOT name PATH_3 (admin-bypass anchor retired)"
   FAIL=$((FAIL + 1))
 else
@@ -1032,7 +1032,7 @@ echo
 echo "== M60: SKILL.md Phase 1.4 PATH_2 (c) specifies INVALID retry path with git fetch --prune + max retry=1 =="
 PHASE_14_BODY=$(awk '/^### Step 1.4/,/^### Step 1.5/' "$SKILL_FILE")
 for KW in 'trailer_sha_not_in_local_clone' 'git fetch --prune' 'retry_attempt' 'input_malformed'; do
-  if echo "$PHASE_14_BODY" | grep -qE "$KW"; then
+  if grep -qE "$KW" <<<"$PHASE_14_BODY"; then
     echo "  PASS  M60.$KW — Phase 1.4 mentions $KW"
     PASS=$((PASS + 1))
   else
@@ -1246,7 +1246,7 @@ assert_grep "$SKILL_FILE" 'trust_trail_json_sha_mismatch' \
 # M63.missing-retired — scoped to Phase 1.4 body (between Step 1.4 heading and Step 1.5 heading);
 # the OLD reason must NOT appear as a gate_fail data.reason inside the (d) bullet body.
 PHASE_14_BODY=$(awk '/^### Step 1\.4/,/^### Step 1\.5/' "$SKILL_FILE")
-if echo "$PHASE_14_BODY" | grep -qE 'gate_fail.*data\.reason="trust_trail_json_missing"'; then
+if grep -qE 'gate_fail.*data\.reason="trust_trail_json_missing"' <<<"$PHASE_14_BODY"; then
   fail "M63.missing-retired — gate_fail with trust_trail_json_missing must NOT appear inside Phase 1.4 PATH_2 (d) prose post-#52"
 else
   pass "M63.missing-retired — Phase 1.4 PATH_2 (d) no longer emits gate_fail trust_trail_json_missing (deprecation-pattern preserved at the constants row only)"
@@ -2062,32 +2062,32 @@ assert_grep "$SKILL_FILE" '^\| `CI_ROLLUP_SETTLE_INTERVAL_SEC` \| `10`' \
   "M89.2 — Constants row CI_ROLLUP_SETTLE_INTERVAL_SEC = 10"
 # PHASE_14_BODY is set at file scope by M63; reuse it (mirrors the M64
 # SUMMARY_BLOCK-reuse convention).
-if echo "$PHASE_14_BODY" | grep -qE 'Null-rollup settle probe \(#303\)'; then
+if grep -qE 'Null-rollup settle probe \(#303\)' <<<"$PHASE_14_BODY"; then
   pass "M89.3 — Step 1.4 ci_red pre-condition carries the null-rollup settle probe (#303)"
 else
   fail "M89.3 — Step 1.4 ci_red pre-condition must carry the null-rollup settle probe (#303 — transient null rollups are a known class)"
 fi
-if echo "$PHASE_14_BODY" | grep -qE 'no-checks-configured \(proceed\) from pending \(gate_fail\)'; then
+if grep -qE 'no-checks-configured \(proceed\) from pending \(gate_fail\)' <<<"$PHASE_14_BODY"; then
   pass "M89.4 — settle probe distinguishes no-checks-configured (proceed) from pending (gate_fail)"
 else
   fail "M89.4 — settle probe MUST distinguish no-checks-configured (proceed) from pending (gate_fail) — collapsing them re-introduces the parked-forever or premature-land class"
 fi
-if echo "$PHASE_14_BODY" | grep -qE 'Still null/empty after the bounded re-probe.*no checks configured.*PASSES'; then
+if grep -qE 'Still null/empty after the bounded re-probe.*no checks configured.*PASSES' <<<"$PHASE_14_BODY"; then
   pass "M89.5 — still-null-after-settle classifies as no-checks-configured and PASSES"
 else
   fail "M89.5 — the still-null-after-settle branch must classify as no-checks-configured and PASS the pre-condition (#303)"
 fi
-if echo "$PHASE_14_BODY" | grep -qE 'pending/queued/in-progress entry.*gate_fail.*ci_red'; then
+if grep -qE 'pending/queued/in-progress entry.*gate_fail.*ci_red' <<<"$PHASE_14_BODY"; then
   pass "M89.6 — pending/queued/in-progress entries gate_fail as ci_red (not landable yet)"
 else
   fail "M89.6 — a non-empty rollup with pending/queued/in-progress entries must gate_fail with ci_red (#303)"
 fi
-if echo "$PHASE_14_BODY" | grep -qE 'non-empty first read skips the settle probe entirely'; then
+if grep -qE 'non-empty first read skips the settle probe entirely' <<<"$PHASE_14_BODY"; then
   pass "M89.7 — non-empty first read skips the settle probe (zero added wall-clock on the common path)"
 else
   fail "M89.7 — the settle probe must be skipped entirely on a non-empty first read (zero added wall-clock on the common path; #303)"
 fi
-if echo "$PHASE_14_BODY" | grep -qE 'gh pr view <N> --json statusCheckRollup'; then
+if grep -qE 'gh pr view <N> --json statusCheckRollup' <<<"$PHASE_14_BODY"; then
   pass "M89.8 — settle re-probe command shape (gh pr view <N> --json statusCheckRollup) declared"
 else
   fail "M89.8 — Step 1.4 must declare the settle re-probe command (gh pr view <N> --json statusCheckRollup; #303)"
