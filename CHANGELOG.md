@@ -4,6 +4,10 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.36.6] — 2026-06-12
+
+- _Release notes pending — replace this stub before committing (inserted by bump-version.sh)._
+
 ## [0.36.5] — 2026-06-12
 
 - _Release notes pending — replace this stub before committing (inserted by bump-version.sh)._
