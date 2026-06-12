@@ -420,8 +420,8 @@ assert_no_grep "$GOAL_LIB" '\bbash -c'                                   "G19.no
 assert_grep "$GOAL_CMD" '--i-know-what-im-doing'                         "G19.r12-mentioned-once"
 
 echo
-echo "== G20: version bump locked (0.36.4) =="
-assert_version_bump "$REPO_ROOT" "0.36.4"
+echo "== G20: version bump locked (0.36.5) =="
+assert_version_bump "$REPO_ROOT" "0.36.5"
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
 
 assert_grep "$GOAL_SKILL" 'uberdev_dispatch_resolve_env'  "G20b.phase0-wires-resolve-env (#175 SSOT anchor)"
@@ -650,10 +650,28 @@ assert_grep "$GOAL_LIB"   '\\"signal\\":\\"TERM\\"'                             
 assert_grep "$GOAL_LIB"   'kill -KILL'                                            "G35.kill-9-escalation"
 
 echo
-echo "== G36: INT/TERM traps installed, existing EXIT trap unchanged (issue #220, AC reaper) =="
+echo "== G36: INT/TERM traps installed, existing EXIT trap unchanged (issue #220, AC reaper; #301 TERM/INT split) =="
 assert_grep "$GOAL_SKILL" "trap '_uberdev_goal_reap_zombies; exit 130' INT"       "G36.int-trap"
-assert_grep "$GOAL_SKILL" "trap '_uberdev_goal_reap_zombies; exit 143' TERM"      "G36.term-trap"
+# #301 (RFC 0012 §3.3 goal-R1 item 3) — TERM is the HARNESS-cap signal, not an
+# operator abort: it must route to the no-reap persist+exit-42 handler, never
+# the reaper (the pre-#301 trap '_uberdev_goal_reap_zombies; exit 143' TERM
+# meant the Bash tool's 600s cap killed every live solver ~10 minutes in).
+assert_grep "$GOAL_SKILL" "trap '_uberdev_goal_handle_harness_term' TERM"         "G36.term-trap"
+assert_no_grep "$GOAL_SKILL" "trap '_uberdev_goal_reap_zombies; exit 143' TERM"   "G36.term-trap-no-reap-regression"
 assert_grep "$GOAL_SKILL" "trap 'rm -f \"\\\$gh_err\" \"\\\$findings_err\"' EXIT" "G36.exit-trap-unchanged"
+# Handler shape in the lib: defined + persists + audits goal_reaper_skipped
+# (reason=harness_term) + exits 42, and NEVER calls the reaper.
+assert_grep "$GOAL_LIB" '^_uberdev_goal_handle_harness_term\(\)'                  "G36.term-handler-defined"
+assert_grep "$GOAL_LIB" 'harness_term'                                            "G36.term-handler-audit-reason"
+_g36_handler_body="$(sed -n '/^_uberdev_goal_handle_harness_term()/,/^}/p' "$GOAL_LIB")"
+if printf '%s' "$_g36_handler_body" | grep -q 'uberdev_goal_write_run_state' \
+   && printf '%s' "$_g36_handler_body" | grep -q 'goal_reaper_skipped' \
+   && printf '%s' "$_g36_handler_body" | grep -qE '^[[:space:]]*exit 42$' \
+   && ! printf '%s' "$_g36_handler_body" | grep -q '_uberdev_goal_reap_zombies'; then
+  PASS=$((PASS+1)); echo "  PASS  G36.term-handler-shape (persist + goal_reaper_skipped + exit 42, NO reap)"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  G36.term-handler-shape (want persist + goal_reaper_skipped + exit 42 and NO reaper call; got: [$_g36_handler_body])" >&2
+fi
 
 echo
 echo "== G37: uberdev_goal_agent_stuck_on_dialog 60s window helper shape (issue #220, AC ❸) =="
@@ -3225,6 +3243,105 @@ fi
 # #291 #2 — the --only-mine identity requirement is documented (not a silent drop).
 assert_grep "$GOAL_SKILL" 'Identity requirement \(issue #291'                  "G43.only-mine-identity-doc-skill"
 assert_grep "$GOAL_CMD"   'Requires a single .gh. identity \(issue #291\)'      "G43.only-mine-identity-doc-cmd"
+
+echo
+echo "== G44: .candidates sidecar persistence + only_mine scalar flush (#301, RFC 0012 §3.3 goal-R1 item 1) =="
+# Writer mirrors the .queue shape with a cycle=<N> first-line tag; reader gates
+# rehydration on the tag matching the scalar-rehydrated cycle; cleanup removes it.
+assert_grep "$GOAL_LIB" '\$\{sc\}\.candidates'                                  "G44.lib-candidates-sidecar-path"
+assert_grep "$GOAL_LIB" "printf 'cycle=%s\\\\n%s\\\\n'"                          "G44.lib-candidates-cycle-tagged-writer"
+assert_grep "$GOAL_LIB" '"\$_cand_tag" = "\$\{cycle:-0\}"'                       "G44.lib-candidates-cycle-tag-gate"
+assert_grep "$GOAL_LIB" '"\$\{sc\}\.queue" "\$\{sc\}\.active" "\$\{sc\}\.candidates"' "G44.lib-cleanup-removes-candidates"
+# only_mine joins the scalar flush + the validating read arm (#291 identity
+# filter must survive the fresh Phase-3 fence).
+assert_grep "$GOAL_LIB" 'only_mine=%s'                                          "G44.lib-only-mine-in-scalar-flush"
+assert_grep "$GOAL_LIB" 'case "\$v" in 0\|1\) only_mine="\$v"'                   "G44.lib-only-mine-read-allowlist"
+# Phase-3 fence 1 flushes at fence END (the false-converge fix) — fail-loud.
+assert_grep "$GOAL_SKILL" 'failed to persist run-state after Phase-3 candidate collection' "G44.skill-fence1-flush-fail-loud"
+# Loop-back clears the consumed candidates BEFORE the flush (double-merge guard):
+# the clear must sit between the rollover merge and the loop-back write.
+_g44_merge_line="$(grep -nF 'queue=("${queue[@]}" "${new_candidates[@]}")' "$GOAL_SKILL" | head -1 | cut -d: -f1)"
+_g44_clear_line="$(grep -nF 'new_candidates=()' "$GOAL_SKILL" | awk -F: -v m="${_g44_merge_line:-0}" '$1 > m { print $1; exit }')"
+_g44_loopback_flush_line="$(grep -nF 'failed to persist run-state before loop-back' "$GOAL_SKILL" | head -1 | cut -d: -f1)"
+if [ -n "${_g44_merge_line:-}" ] && [ -n "${_g44_clear_line:-}" ] && [ -n "${_g44_loopback_flush_line:-}" ] \
+   && [ "$_g44_clear_line" -gt "$_g44_merge_line" ] && [ "$_g44_clear_line" -lt "$_g44_loopback_flush_line" ]; then
+  PASS=$((PASS+1)); echo "  PASS  G44.loopback-clears-consumed-candidates (merge=$_g44_merge_line < clear=$_g44_clear_line < flush=$_g44_loopback_flush_line)"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  G44.loopback-clears-consumed-candidates (merge=$_g44_merge_line clear=$_g44_clear_line flush=$_g44_loopback_flush_line)" >&2
+fi
+
+echo
+echo "== G45: D13 first-10 truncation sequenced BEFORE the terminal/loop-back fence (#301, RFC 0012 §3.3 goal-R1 item 2) =="
+# Pre-#301 the truncation fence sat AFTER the loop-back fence — dead code (the
+# un-truncated set had already merged into queue and flushed). Lock the order:
+# truncation line < terminal-gate line < rollover-merge line.
+_g45_trunc_line="$(grep -nF 'new_candidates=("${new_candidates[@]:0:10}")' "$GOAL_SKILL" | head -1 | cut -d: -f1)"
+_g45_term_line="$(grep -nF 'Terminal set for convergence' "$GOAL_SKILL" | head -1 | cut -d: -f1)"
+if [ -n "${_g45_trunc_line:-}" ] && [ -n "${_g45_term_line:-}" ] && [ "$_g45_trunc_line" -lt "$_g45_term_line" ]; then
+  PASS=$((PASS+1)); echo "  PASS  G45.truncation-precedes-terminal-fence (trunc=$_g45_trunc_line < terminal=$_g45_term_line)"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  G45.truncation-precedes-terminal-fence (trunc=${_g45_trunc_line:-MISSING} terminal=${_g45_term_line:-MISSING} — D13 truncation is dead again if it trails the terminal fence)" >&2
+fi
+# The truncation fence re-flushes the TRUNCATED set so the fresh-shell terminal
+# fence rehydrates first-10, not the full set.
+assert_grep "$GOAL_SKILL" 'failed to persist run-state after overflow truncation' "G45.truncation-reflushes-sidecar"
+
+echo
+echo "== G46: review-pr dispatch-cap exhaustion -> red-held with distinct audit note (#301, RFC 0012 §3.3 goal-R1 item 4) =="
+# Lib: cap-reached returns the DISTINCT rc 5 (was rc 0 — indistinguishable from
+# a successful dispatch, so 2b spun any_active=1 to the 4h stuck_loop).
+_g46_cap_block="$(sed -n '/review-pr dispatch cap reached/,/fi/p' "$GOAL_LIB")"
+if printf '%s' "$_g46_cap_block" | grep -qE 'return 5'; then
+  PASS=$((PASS+1)); echo "  PASS  G46.lib-cap-returns-distinct-rc5"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  G46.lib-cap-returns-distinct-rc5 (cap arm: [$_g46_cap_block])" >&2
+fi
+# SKILL 2b: rc captured, rc-5 arm transitions pushed-reviewing -> red-held and
+# emits the goal_review_pr_deferred note with reason=dispatch_cap_exhausted.
+assert_grep "$GOAL_SKILL" '_rpr_rc=\$\?'                                        "G46.skill-2b-rc-captured"
+assert_grep "$GOAL_SKILL" '\[ "\$_rpr_rc" -eq 5 \]'                              "G46.skill-2b-rc5-branch"
+assert_grep "$GOAL_SKILL" 'dispatch_cap_exhausted'                               "G46.skill-2b-distinct-audit-note"
+_g46_redheld_count="$(grep -cF 'uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" pushed-reviewing red-held' "$GOAL_SKILL")"
+if [ "$_g46_redheld_count" -ge 2 ]; then
+  PASS=$((PASS+1)); echo "  PASS  G46.skill-2b-red-held-transition (count=$_g46_redheld_count: red case + cap-exhaustion arm)"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  G46.skill-2b-red-held-transition (count=$_g46_redheld_count, want ge 2 — cap-exhaustion arm missing?)" >&2
+fi
+
+echo
+echo "== G47: bounded-watch default 480s under the Claude-Code Bash tool (#301, RFC 0012 §3.3 goal-R1 item 3) =="
+assert_grep "$GOAL_LIB"   '_UBERDEV_GOAL_DEFAULT_WATCH_BUDGET:=480'              "G47.lib-default-constant-480"
+assert_grep "$GOAL_SKILL" 'CLAUDECODE'                                           "G47.skill-claudecode-feature-detect"
+assert_grep "$GOAL_SKILL" 'WATCH_BUDGET="\$\{_UBERDEV_GOAL_DEFAULT_WATCH_BUDGET:-480\}"' "G47.skill-default-applied"
+assert_grep "$GOAL_CMD"   'defaults to .480'                                     "G47.cmd-documents-480-default"
+assert_grep "$GOAL_CMD"   'harness_term'                                         "G47.cmd-documents-term-contract"
+# The default must NOT override an explicit zero: the gate requires empty
+# CLI/env inputs, not just resolved-0 values.
+assert_grep "$GOAL_SKILL" '\-z "\$\{watch_budget_cli:-\}"'                       "G47.skill-explicit-zero-opt-out"
+
+echo
+echo "== BT86: _uberdev_goal_handle_harness_term behavioural — persist + audit + exit 42, NO reap (#301) =="
+bt86_dir="$(mktemp -d 2>/dev/null || printf '/tmp/goal-bt86-%s' "$$")"
+bt86_out="$(UBERDEV_TMPDIR="$bt86_dir" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  UBERDEV_GOAL_ID="goal-test-bt86abc1" bash -c '
+    . "$CLAUDE_PLUGIN_ROOT/lib/dispatch.sh"
+    . "$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh"
+    uberdev_goal_write_run_state() { echo persisted >> "$UBERDEV_TMPDIR/bt86-calls"; return 0; }
+    _uberdev_goal_reap_zombies()   { echo reaped    >> "$UBERDEV_TMPDIR/bt86-calls"; }
+    uberdev_goal_audit()           { echo "audit:$1:$2" >> "$UBERDEV_TMPDIR/bt86-calls"; }
+    ( _uberdev_goal_handle_harness_term )
+    printf "rc=%s\n" "$?"
+    cat "$UBERDEV_TMPDIR/bt86-calls" 2>/dev/null
+  ')"
+if printf '%s' "$bt86_out" | grep -q '^rc=42$' \
+   && printf '%s' "$bt86_out" | grep -q '^persisted$' \
+   && printf '%s' "$bt86_out" | grep -q '^audit:goal_reaper_skipped:.*harness_term' \
+   && ! printf '%s' "$bt86_out" | grep -q '^reaped$'; then
+  PASS=$((PASS+1)); echo "  PASS  BT86.term-handler-contract (exit 42 + persist + goal_reaper_skipped/harness_term, reaper NOT called)"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  BT86.term-handler-contract (got: [$bt86_out])" >&2
+fi
+rm -rf "$bt86_dir"
 
 echo
 echo "== Summary =="
