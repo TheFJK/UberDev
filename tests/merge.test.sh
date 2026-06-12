@@ -26,7 +26,7 @@
 #   M18 — SKILL.md Phase 2.4 is unconditional autopilot (no ON/OFF branches, no [y/N] prompt).
 #   M19 — SKILL.md Phase 4.5 carries autopilot affirmative-decision invariant.
 #   M20 — commands/merge.md surfaces --yes / -y as DEPRECATED.
-#   M21 — using-uberdev/SKILL.md flags auto_confirm as DEPRECATED.
+#   M21 — using-uberdev references/configuration.md flags auto_confirm as DEPRECATED.
 #   M22 — SKILL.md STRATEGY_ENUM declares drop (and does NOT declare the removed `defer`).
 #   M23 — SKILL.md AUDIT_EVENT_ENUM declares all new autopilot events.
 #   M24 — SKILL.md declares PARK_REASON_ENUM, STRATEGY_REASON_ENUM, STALE_REBASE_DECISION_ENUM.
@@ -390,19 +390,21 @@ else
 fi
 
 echo
-echo "== M21: using-uberdev/SKILL.md auto_confirm key documented as DEPRECATED =="
-USING_SKILL_FILE="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/SKILL.md"
+echo "== M21: using-uberdev config reference auto_confirm key documented as DEPRECATED =="
+# Re-pointed (#309 hook diet): the config schema moved from using-uberdev/SKILL.md
+# into using-uberdev/references/configuration.md; the mirror-site contract follows it.
+USING_SKILL_FILE="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/references/configuration.md"
 if [ ! -r "$USING_SKILL_FILE" ]; then
-  fail "M21 — using-uberdev SKILL.md missing or unreadable: $USING_SKILL_FILE"
+  fail "M21 — using-uberdev references/configuration.md missing or unreadable: $USING_SKILL_FILE"
 else
   assert_grep "$USING_SKILL_FILE" '^auto_confirm:' \
     "M21.1 — auto_confirm key still present in YAML example (parsed for backward compat)"
   assert_grep "$USING_SKILL_FILE" '\*\*`auto_confirm` precedence:\*\*' \
     "M21.2 — auto_confirm precedence paragraph still present (now flags deprecation)"
   if grep -qiE 'DEPRECATED' "$USING_SKILL_FILE"; then
-    pass "M21.3 — using-uberdev/SKILL.md flags auto_confirm as DEPRECATED"
+    pass "M21.3 — using-uberdev config reference flags auto_confirm as DEPRECATED"
   else
-    fail "M21.3 — using-uberdev/SKILL.md MUST flag auto_confirm as DEPRECATED"
+    fail "M21.3 — using-uberdev config reference MUST flag auto_confirm as DEPRECATED"
   fi
 fi
 
@@ -650,14 +652,14 @@ echo "== M35: SKILL.md Phase 1.4 enumerated set drops PATH_3 (issue #47) =="
 # M35: updated for issue #47 — PATH_3 retired; PATH_1 + PATH_2 only.
 # Pre-redesign assertion that PATH_3 is named in Phase 1.4 is REMOVED, not extended.
 PHASE_14_BODY=$(awk '/^### Step 1.4/,/^### Step 1.5/' "$SKILL_FILE")
-if echo "$PHASE_14_BODY" | grep -qE 'PATH_1.*PATH_2|PATH_2.*PATH_1'; then
+if grep -qE 'PATH_1.*PATH_2|PATH_2.*PATH_1' <<<"$PHASE_14_BODY"; then
   echo "  PASS  M35.path12 — Phase 1.4 body still names PATH_1 and PATH_2"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  M35.path12 — Phase 1.4 body must still name PATH_1 and PATH_2"
   FAIL=$((FAIL + 1))
 fi
-if echo "$PHASE_14_BODY" | grep -qE 'PATH_3'; then
+if grep -qE 'PATH_3' <<<"$PHASE_14_BODY"; then
   echo "  FAIL  M35.no-path3 — Phase 1.4 body must NOT name PATH_3 (retired in issue #47)"
   FAIL=$((FAIL + 1))
 else
@@ -769,23 +771,25 @@ else
 fi
 
 echo
-echo "== M45: using-uberdev/SKILL.md mirror site synced (AC6) =="
-# Path is repo-relative; resolve from REPO_ROOT.
-USING_FILE="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/SKILL.md"
+echo "== M45: using-uberdev config-reference mirror site synced (AC6) =="
+# Path is repo-relative; resolve from REPO_ROOT. Re-pointed (#309 hook diet):
+# the bot_authors_allow_list semantics paragraph moved with the config schema
+# into using-uberdev/references/configuration.md.
+USING_FILE="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/references/configuration.md"
 if [ ! -r "$USING_FILE" ]; then
   echo "  FAIL  M45 — required file missing: $USING_FILE"
   FAIL=$((FAIL + 1))
 else
   assert_grep "$USING_FILE" 'PATH_1.*PATH_2|PATH_2.*PATH_1' \
-    "M45 — using-uberdev/SKILL.md bot_authors_allow_list paragraph contains PATH_1+PATH_2 layered wording"
-  # M45.trail: updated for issue #47 — T6 rewrote using-uberdev/SKILL.md mirror to
+    "M45 — config reference bot_authors_allow_list paragraph contains PATH_1+PATH_2 layered wording"
+  # M45.trail: updated for issue #47 — T6 rewrote this mirror to
   # describe the agent-decided trail (ancestor + diff-empty + log-empty primitives,
   # verdict enum {PASS, STALE, INVALID, FORCE_PUSHED}). The old label+trailer
   # composition string was retired from this mirror site.
   assert_grep "$USING_FILE" 'trust-trail-evaluator' \
-    "M45.trail — using-uberdev/SKILL.md names the trust-trail-evaluator agent"
+    "M45.trail — config reference names the trust-trail-evaluator agent"
   assert_grep "$USING_FILE" 'PASS, STALE, INVALID, FORCE_PUSHED|PASS.*STALE.*INVALID.*FORCE_PUSHED' \
-    "M45.verdict — using-uberdev/SKILL.md cites the verdict enum"
+    "M45.verdict — config reference cites the verdict enum"
 fi
 
 echo
@@ -852,21 +856,21 @@ fi
 echo
 echo "== M49: SKILL.md Phase 1.4 PATH_2 (c) dispatches trust-trail-evaluator via Task() =="
 PHASE_14_BODY=$(awk '/^### Step 1.4/,/^### Step 1.5/' "$SKILL_FILE")
-if echo "$PHASE_14_BODY" | grep -qE 'trust-trail-evaluator'; then
+if grep -qE 'trust-trail-evaluator' <<<"$PHASE_14_BODY"; then
   echo "  PASS  M49.1 — Phase 1.4 names trust-trail-evaluator agent"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  M49.1 — Phase 1.4 must name trust-trail-evaluator agent in PATH_2 (c) dispatch"
   FAIL=$((FAIL + 1))
 fi
-if echo "$PHASE_14_BODY" | grep -qE 'Task\('; then
+if grep -qE 'Task\(' <<<"$PHASE_14_BODY"; then
   echo "  PASS  M49.2 — Phase 1.4 mentions Task() dispatch"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  M49.2 — Phase 1.4 must mention Task() dispatch for trust-trail-evaluator"
   FAIL=$((FAIL + 1))
 fi
-if echo "$PHASE_14_BODY" | grep -qE 'PATH_3'; then
+if grep -qE 'PATH_3' <<<"$PHASE_14_BODY"; then
   echo "  FAIL  M49.no-path3-bypass — Phase 1.4 must NOT name PATH_3 (admin-bypass anchor retired)"
   FAIL=$((FAIL + 1))
 else
@@ -961,8 +965,14 @@ fi
 
 echo
 echo "== M54: no forbidden 'use --bypass-protections to override' / 're-run /review-pr, then re-invoke /merge' wording in any mirror site =="
+# Mirror-site list extended (#309 hook diet): the config schema (incl. the /merge
+# mirror paragraphs) moved into references/configuration.md — an ABSENCE check
+# cannot fail from the move, so the new file must be listed explicitly or the
+# guard silently stops covering the moved text. using-uberdev/SKILL.md stays
+# listed to keep the primer covered.
 USING_FILE="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/SKILL.md"
-for FILE in "$SKILL_FILE" "$CMD_FILE" "$USING_FILE"; do
+USING_CONFIG_REF_FILE="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/references/configuration.md"
+for FILE in "$SKILL_FILE" "$CMD_FILE" "$USING_FILE" "$USING_CONFIG_REF_FILE"; do
   if grep -qE 'supply --bypass-protections to override|use --bypass-protections to override' "$FILE"; then
     echo "  FAIL  M54.bypass-override — forbidden 'supply/use --bypass-protections to override' in $FILE"
     FAIL=$((FAIL + 1))
@@ -1022,7 +1032,7 @@ echo
 echo "== M60: SKILL.md Phase 1.4 PATH_2 (c) specifies INVALID retry path with git fetch --prune + max retry=1 =="
 PHASE_14_BODY=$(awk '/^### Step 1.4/,/^### Step 1.5/' "$SKILL_FILE")
 for KW in 'trailer_sha_not_in_local_clone' 'git fetch --prune' 'retry_attempt' 'input_malformed'; do
-  if echo "$PHASE_14_BODY" | grep -qE "$KW"; then
+  if grep -qE "$KW" <<<"$PHASE_14_BODY"; then
     echo "  PASS  M60.$KW — Phase 1.4 mentions $KW"
     PASS=$((PASS + 1))
   else
@@ -1236,7 +1246,7 @@ assert_grep "$SKILL_FILE" 'trust_trail_json_sha_mismatch' \
 # M63.missing-retired — scoped to Phase 1.4 body (between Step 1.4 heading and Step 1.5 heading);
 # the OLD reason must NOT appear as a gate_fail data.reason inside the (d) bullet body.
 PHASE_14_BODY=$(awk '/^### Step 1\.4/,/^### Step 1\.5/' "$SKILL_FILE")
-if echo "$PHASE_14_BODY" | grep -qE 'gate_fail.*data\.reason="trust_trail_json_missing"'; then
+if grep -qE 'gate_fail.*data\.reason="trust_trail_json_missing"' <<<"$PHASE_14_BODY"; then
   fail "M63.missing-retired — gate_fail with trust_trail_json_missing must NOT appear inside Phase 1.4 PATH_2 (d) prose post-#52"
 else
   pass "M63.missing-retired — Phase 1.4 PATH_2 (d) no longer emits gate_fail trust_trail_json_missing (deprecation-pattern preserved at the constants row only)"
@@ -2052,32 +2062,32 @@ assert_grep "$SKILL_FILE" '^\| `CI_ROLLUP_SETTLE_INTERVAL_SEC` \| `10`' \
   "M89.2 — Constants row CI_ROLLUP_SETTLE_INTERVAL_SEC = 10"
 # PHASE_14_BODY is set at file scope by M63; reuse it (mirrors the M64
 # SUMMARY_BLOCK-reuse convention).
-if echo "$PHASE_14_BODY" | grep -qE 'Null-rollup settle probe \(#303\)'; then
+if grep -qE 'Null-rollup settle probe \(#303\)' <<<"$PHASE_14_BODY"; then
   pass "M89.3 — Step 1.4 ci_red pre-condition carries the null-rollup settle probe (#303)"
 else
   fail "M89.3 — Step 1.4 ci_red pre-condition must carry the null-rollup settle probe (#303 — transient null rollups are a known class)"
 fi
-if echo "$PHASE_14_BODY" | grep -qE 'no-checks-configured \(proceed\) from pending \(gate_fail\)'; then
+if grep -qE 'no-checks-configured \(proceed\) from pending \(gate_fail\)' <<<"$PHASE_14_BODY"; then
   pass "M89.4 — settle probe distinguishes no-checks-configured (proceed) from pending (gate_fail)"
 else
   fail "M89.4 — settle probe MUST distinguish no-checks-configured (proceed) from pending (gate_fail) — collapsing them re-introduces the parked-forever or premature-land class"
 fi
-if echo "$PHASE_14_BODY" | grep -qE 'Still null/empty after the bounded re-probe.*no checks configured.*PASSES'; then
+if grep -qE 'Still null/empty after the bounded re-probe.*no checks configured.*PASSES' <<<"$PHASE_14_BODY"; then
   pass "M89.5 — still-null-after-settle classifies as no-checks-configured and PASSES"
 else
   fail "M89.5 — the still-null-after-settle branch must classify as no-checks-configured and PASS the pre-condition (#303)"
 fi
-if echo "$PHASE_14_BODY" | grep -qE 'pending/queued/in-progress entry.*gate_fail.*ci_red'; then
+if grep -qE 'pending/queued/in-progress entry.*gate_fail.*ci_red' <<<"$PHASE_14_BODY"; then
   pass "M89.6 — pending/queued/in-progress entries gate_fail as ci_red (not landable yet)"
 else
   fail "M89.6 — a non-empty rollup with pending/queued/in-progress entries must gate_fail with ci_red (#303)"
 fi
-if echo "$PHASE_14_BODY" | grep -qE 'non-empty first read skips the settle probe entirely'; then
+if grep -qE 'non-empty first read skips the settle probe entirely' <<<"$PHASE_14_BODY"; then
   pass "M89.7 — non-empty first read skips the settle probe (zero added wall-clock on the common path)"
 else
   fail "M89.7 — the settle probe must be skipped entirely on a non-empty first read (zero added wall-clock on the common path; #303)"
 fi
-if echo "$PHASE_14_BODY" | grep -qE 'gh pr view <N> --json statusCheckRollup'; then
+if grep -qE 'gh pr view <N> --json statusCheckRollup' <<<"$PHASE_14_BODY"; then
   pass "M89.8 — settle re-probe command shape (gh pr view <N> --json statusCheckRollup) declared"
 else
   fail "M89.8 — Step 1.4 must declare the settle re-probe command (gh pr view <N> --json statusCheckRollup; #303)"

@@ -8,8 +8,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # ── auto-alias sync (issue #21; RFC 0011) ────────────────────────────
-# Install / refresh the seven top-level forwarders (/issue, /solve, /turbo,
-# /simplify, /review-pr, /merge, /dev) in ~/.claude/commands. This runs
+# Install / refresh the short-form top-level forwarders in ~/.claude/commands
+# (the ALIASES table in lib/aliases-sync.sh is the canonical set — no count
+# or name list is repeated here, so this comment cannot drift). This runs
 # BEFORE the jq guard below on purpose: alias sync has no jq dependency
 # (RFC 0011), so a machine without jq still gets its aliases. Idempotent:
 # if installed_version == plugin_version the helper returns immediately.

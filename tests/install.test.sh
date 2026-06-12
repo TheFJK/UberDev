@@ -282,6 +282,37 @@ else
 fi
 
 echo
+echo "== I10: claude --print calls are wall-clock bounded (RFC 0012 §3.13) =="
+# `claude --print` can hang indefinitely (auth prompt, network stall) and
+# would wedge the curl|bash one-liner before the jq-patch runs. Both
+# invocations must go through the run_bounded wrapper, which probes
+# timeout(1) then gtimeout (Homebrew coreutils on macOS) at 30s and
+# fails-open when neither exists.
+assert_grep "$INSTALL_SH" '^run_bounded\(\)' \
+  "I10.1 run_bounded wrapper is defined"
+assert_grep "$INSTALL_SH" 'timeout 30 "\$@"' \
+  "I10.2 wrapper bounds at 30s via timeout(1)"
+assert_grep "$INSTALL_SH" 'gtimeout 30 "\$@"' \
+  "I10.3 wrapper falls back to gtimeout (macOS Homebrew coreutils)"
+UNBOUNDED_CLAUDE="$(grep -nE '^[[:space:]]*claude --print' "$INSTALL_SH" || true)"
+if [ -z "$UNBOUNDED_CLAUDE" ]; then
+  echo "  PASS  I10.4 no unbounded claude --print invocation remains"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  I10.4 unbounded claude --print invocation(s) found:"
+  echo "$UNBOUNDED_CLAUDE" | sed 's/^/        /'
+  FAIL=$((FAIL + 1))
+fi
+BOUNDED_CLAUDE_COUNT="$(grep -cE '^[[:space:]]*run_bounded claude --print' "$INSTALL_SH" || true)"
+if [ "$BOUNDED_CLAUDE_COUNT" -eq 2 ] 2>/dev/null; then
+  echo "  PASS  I10.5 both claude --print invocations route through run_bounded"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  I10.5 expected 2 run_bounded claude --print invocations, found ${BOUNDED_CLAUDE_COUNT}"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

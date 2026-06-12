@@ -1,9 +1,24 @@
 #!/usr/bin/env bash
 # PreCompact hook for uberdev plugin.
 #
-# Compaction can drop in-memory context. Before that happens, archive any
-# compaction-vulnerable files under .claude/ (auto-memory.md and similar) by
-# appending them with a timestamp header to .claude/session-archive.md.
+# Compaction can drop in-memory context. Before that happens, archive
+# .claude/auto-memory.md (if present) by appending it with a timestamp header
+# to .claude/session-archive.md.
+#
+# Contract status (live-verified 2026-06-12, RFC 0012 §3.13): No in-repo or
+# harness surface writes .claude/auto-memory.md — verified beyond repo grep:
+# user settings, every cached plugin version, and a disk sweep for existing
+# auto-memory.md artifacts came back empty, and the claude binary (v2.1.174)
+# contains ZERO references to the auto-memory.md filename — its auto-memory
+# feature writes MEMORY.md under a memory DIRECTORY (default
+# ~/.claude/projects/<slug>/memory/), a different tree and a different
+# filename even when memoryDirectory is custom. The path is
+# kept as a DOCUMENTED user/tooling-facing contract — it shipped in the
+# CHANGELOG ("append .claude/auto-memory.md to .claude/session-archive.md
+# before compaction"), so a user may hand-maintain that file and rely on the
+# archive surviving compaction. Cost when absent: one [ -f ] test. Pinned by
+# tests/docs-accuracy.test.sh T8.5; if you delete this contract, remove the
+# hook AND its hooks.json + hooks-cursor.json wiring in the same change.
 #
 # Quiet, non-blocking — exits 0 on success or when nothing needs archiving.
 

@@ -41,10 +41,27 @@ fi
 # what unblocks /uberdev:* commands. `|| true` swallows failures so a stale
 # claude binary or a CC version that doesn't run slash commands in --print
 # mode doesn't break the install.
+#
+# run_bounded: cap each claude invocation at 30s (RFC 0012 §3.13). `claude
+# --print` can hang indefinitely (auth prompt, network stall), wedging the
+# curl|bash one-liner before the jq-patch ever runs. GNU/BSD `timeout` is
+# probed first, then Homebrew coreutils' `gtimeout` (macOS ships no system
+# timeout); if neither exists, run unbounded — fail-open keeps the best-effort
+# step alive on minimal hosts, and the jq-patch below remains the real fix.
+run_bounded() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 30 "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout 30 "$@"
+  else
+    "$@"
+  fi
+}
+
 if command -v claude >/dev/null 2>&1; then
   echo "→ Adding marketplace ${MARKETPLACE_REPO} and installing ${PLUGIN_KEY}…"
-  claude --print "/plugin marketplace add ${MARKETPLACE_REPO}" >/dev/null 2>&1 || true
-  claude --print "/plugin install ${PLUGIN_KEY}" >/dev/null 2>&1 || true
+  run_bounded claude --print "/plugin marketplace add ${MARKETPLACE_REPO}" >/dev/null 2>&1 || true
+  run_bounded claude --print "/plugin install ${PLUGIN_KEY}" >/dev/null 2>&1 || true
 else
   echo "⚠️  'claude' CLI not found on PATH." >&2
   echo "   Run these inside Claude Code, then re-run this installer to enable:" >&2

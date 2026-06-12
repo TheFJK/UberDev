@@ -31,11 +31,21 @@ ALIAS_RFC="$RFC_DIR/0011-alias-install-reliability.md"
 SESSION_START="$REPO_ROOT/plugins/uberdev/hooks/session-start"
 ALIASES_SYNC="$REPO_ROOT/plugins/uberdev/lib/aliases-sync.sh"
 TEST_YML="$REPO_ROOT/.github/workflows/test.yml"
+# Hook-diet surfaces (#309 / RFC 0012 §7.7): the session-start injection is
+# using-uberdev/SKILL.md (primer only); the config schema lives in the sibling
+# references/configuration.md.
+USING_SKILL="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/SKILL.md"
+CONFIG_REF="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/references/configuration.md"
+HOOKS_JSON="$REPO_ROOT/plugins/uberdev/hooks/hooks.json"
+HOOKS_CURSOR_JSON="$REPO_ROOT/plugins/uberdev/hooks/hooks-cursor.json"
+PRE_COMPACT="$REPO_ROOT/plugins/uberdev/hooks/pre-compact"
 
 # Hard-fail (exit 2) on a missing input — a moved/renamed file must be an
 # explicit failure, never silently-zero-assertions PASS.
 for f in "$TESTING_MD" "$CONTRIBUTING_MD" "$DISPATCH_RFC" "$ALIAS_RFC" \
-         "$SESSION_START" "$ALIASES_SYNC" "$TEST_YML"; do
+         "$SESSION_START" "$ALIASES_SYNC" "$TEST_YML" \
+         "$USING_SKILL" "$CONFIG_REF" "$HOOKS_JSON" "$HOOKS_CURSOR_JSON" \
+         "$PRE_COMPACT"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 
@@ -154,6 +164,128 @@ assert_absent_fixed "$ALIASES_SYNC"  "RFC 0004" "T5.4 lib/aliases-sync.sh no lon
 for f in "$SESSION_START" "$ALIASES_SYNC" "$ALIAS_RFC"; do
   assert_absent_fixed "$f" "0004-alias-install-reliability" "T5.5 no stale 0004-alias-install-reliability path in $(basename "$f")"
 done
+
+echo
+echo "== T6: hook diet (#309 / RFC 0012 §7.7) — schema in references/configuration.md, primer slim =="
+# The SessionStart hook injects using-uberdev/SKILL.md on EVERY startup/clear/
+# compact. The 11 KB config schema moved to references/configuration.md; the
+# primer keeps only a pointer. These pins make the diet a ratchet.
+assert_grep "$USING_SKILL" 'references/configuration\.md' \
+  "T6.1 SKILL.md primer points at references/configuration.md"
+assert_absent_fixed "$USING_SKILL" "solve_tier_floor" \
+  "T6.2 SKILL.md no longer carries the config schema (solve_tier_floor moved)"
+assert_absent_fixed "$USING_SKILL" "bot_authors_allow_list" \
+  "T6.3 SKILL.md no longer carries the config schema (bot_authors_allow_list moved)"
+assert_grep "$CONFIG_REF" 'solve_tier_floor' \
+  "T6.4 references/configuration.md carries the moved schema (solve_tier_floor)"
+# Size ratchet: the per-session-event injection payload stays dieted. 7168 B
+# (7 KiB) leaves headroom over the ~6.5 KB post-diet primer without allowing
+# the schema back in (pre-diet was 16,511 B).
+USING_SKILL_BYTES="$(wc -c < "$USING_SKILL" | tr -d '[:space:]')"
+if [ "$USING_SKILL_BYTES" -le 7168 ] 2>/dev/null; then
+  echo "  PASS  T6.5 using-uberdev/SKILL.md stays dieted (${USING_SKILL_BYTES} B <= 7168 B)"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  T6.5 using-uberdev/SKILL.md regressed past the diet ratchet (${USING_SKILL_BYTES} B > 7168 B)"
+  echo "        file: $USING_SKILL"; FAIL=$((FAIL + 1))
+fi
+# Workflow sanction lines (RFC 0012 §4.1): the primer must sanction
+# skill-mandated Workflow calls so migrated pipelines are covered from day one.
+assert_grep "$USING_SKILL" 'Skill-mandated Workflow calls' \
+  "T6.6 primer carries the Workflow sanction section"
+assert_grep "$USING_SKILL" 'WORKFLOW_ARGS_BEGIN' \
+  "T6.7 primer names the WORKFLOW_ARGS_BEGIN/END relay markers"
+assert_grep "$USING_SKILL" 'No-Workflow fallback' \
+  "T6.8 primer routes tool-less platforms to the No-Workflow fallback section"
+
+echo
+echo "== T6b: alias-count claims are SSOT-derived (lib/aliases-sync.sh ALIASES) =="
+# Derive the canonical alias count + short names from the ALIASES table (the
+# SSOT) instead of hardcoding, so adding alias #14 reds this test until the
+# docs follow. Range: the ALIASES='...' assignment through the closing quote;
+# every row contains a pipe.
+ALIAS_ROWS="$(sed -n "/^ALIASES='/,/^'\$/p" "$ALIASES_SYNC" | grep '|' | sed "s/^ALIASES='//")"
+ALIAS_COUNT="$(printf '%s\n' "$ALIAS_ROWS" | grep -c '|')"
+if [ "$ALIAS_COUNT" -ge 1 ] 2>/dev/null; then
+  echo "  PASS  T6b.1 ALIASES SSOT parsed (${ALIAS_COUNT} rows)"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  T6b.1 could not parse ALIASES rows from $ALIASES_SYNC"; FAIL=$((FAIL + 1))
+fi
+assert_grep "$CONFIG_REF" "installs ${ALIAS_COUNT} top-level forwarder commands" \
+  "T6b.2 configuration.md alias paragraph claims the SSOT count (${ALIAS_COUNT})"
+MISSING_ALIAS=""
+while IFS='|' read -r short _rest; do
+  [ -n "$short" ] || continue
+  grep -qF -e "/${short}" "$CONFIG_REF" || MISSING_ALIAS="${MISSING_ALIAS} /${short}"
+done <<EOF_ALIASES
+$ALIAS_ROWS
+EOF_ALIASES
+if [ -z "$MISSING_ALIAS" ]; then
+  echo "  PASS  T6b.3 configuration.md lists every SSOT short alias"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  T6b.3 configuration.md missing SSOT alias name(s):${MISSING_ALIAS}"
+  echo "        file: $CONFIG_REF"; FAIL=$((FAIL + 1))
+fi
+# The hook must not re-grow a hardcoded count claim (the 7-vs-11-vs-13 drift
+# class): no number word / digit immediately before 'top-level forwarder'.
+if grep -qE '(seven|nine|ten|eleven|twelve|thirteen|[0-9]+) top-level forwarder' "$SESSION_START"; then
+  echo "  FAIL  T6b.4 hooks/session-start carries a hardcoded forwarder count (drift-prone)"
+  echo "        file: $SESSION_START"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  T6b.4 hooks/session-start carries no hardcoded forwarder count"; PASS=$((PASS + 1))
+fi
+
+echo
+echo "== T7: CONTRIBUTING.md hook-event + zsh-fixture claims match reality =="
+assert_absent_fixed "$CONTRIBUTING_MD" "PreToolUse" \
+  "T7.1 CONTRIBUTING drops the false PreToolUse hook claim (no such handler is wired)"
+assert_grep "$CONTRIBUTING_MD" 'UserPromptSubmit' \
+  "T7.2 CONTRIBUTING names the real UserPromptSubmit handler"
+assert_absent_fixed "$CONTRIBUTING_MD" "one fixture," \
+  "T7.3 CONTRIBUTING drops the stale 'one fixture' zsh claim (three -zsh fixtures run under zsh)"
+assert_grep "$CONTRIBUTING_MD" 'tests/\*-zsh\.test\.sh' \
+  "T7.4 CONTRIBUTING's local-run loop special-cases the *-zsh.test.sh fixtures"
+# SSOT cross-check: every fixture test.yml runs under zsh must match the
+# *-zsh.test.sh glob CONTRIBUTING documents — keeps T7.4's pattern truthful.
+BAD_ZSH_WIRING="$(grep -E '^[[:space:]]*zsh tests/' "$TEST_YML" | grep -vE 'zsh tests/[A-Za-z0-9_-]*-zsh\.test\.sh' || true)"
+if [ -z "$BAD_ZSH_WIRING" ]; then
+  echo "  PASS  T7.5 every zsh-run fixture in test.yml matches the *-zsh.test.sh naming convention"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  T7.5 test.yml runs zsh fixture(s) outside the *-zsh.test.sh convention CONTRIBUTING documents:"
+  echo "$BAD_ZSH_WIRING" | sed 's/^/        /'; FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== T8: hooks wiring contract — run-hook.cmd on Claude Code; Cursor is POSIX-direct =="
+# hooks.json (Claude Code) must route EVERY handler through the run-hook.cmd
+# polyglot (Windows compat). Key-count equality catches a handler added
+# without the wrapper.
+HOOK_CMD_KEYS="$(grep -c '"command":' "$HOOKS_JSON")"
+HOOK_RUNHOOK_REFS="$(grep -c 'run-hook\.cmd' "$HOOKS_JSON")"
+if [ "$HOOK_CMD_KEYS" -ge 1 ] && [ "$HOOK_CMD_KEYS" -eq "$HOOK_RUNHOOK_REFS" ]; then
+  echo "  PASS  T8.1 hooks.json routes all ${HOOK_CMD_KEYS} handlers through run-hook.cmd"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  T8.1 hooks.json has ${HOOK_CMD_KEYS} command entries but ${HOOK_RUNHOOK_REFS} run-hook.cmd routes"
+  echo "        file: $HOOKS_JSON"; FAIL=$((FAIL + 1))
+fi
+# hooks-cursor.json deliberately does NOT route through run-hook.cmd: Cursor's
+# hook runner execs the bash scripts directly via their shebangs (POSIX hosts).
+# run-hook.cmd has no shebang (cmd.exe polyglot), so routing Cursor through it
+# would trade a working POSIX path for an unverified Windows one. The decision
+# (RFC 0012 §3.13): Cursor on Windows is UNSUPPORTED and documented as such in
+# CONTRIBUTING.md. If you flip this, verify Cursor-on-Windows end-to-end first.
+assert_absent_fixed "$HOOKS_CURSOR_JSON" "run-hook.cmd" \
+  "T8.2 hooks-cursor.json keeps direct POSIX exec (no run-hook.cmd routing)"
+assert_grep "$HOOKS_CURSOR_JSON" 'CLAUDE_PLUGIN_ROOT}/hooks/' \
+  "T8.3 hooks-cursor.json commands resolve under \${CLAUDE_PLUGIN_ROOT}/hooks/"
+assert_grep "$CONTRIBUTING_MD" 'Cursor on Windows is unsupported' \
+  "T8.4 CONTRIBUTING documents Cursor-on-Windows as unsupported"
+# pre-compact's auto-memory.md contract is live-verified dead-in-repo but kept
+# as a documented user/tooling-facing contract (CHANGELOG-published); the hook
+# header must say so explicitly so the next reader doesn't re-litigate.
+assert_grep "$PRE_COMPACT" 'Contract status \(live-verified' \
+  "T8.5 pre-compact documents the verified auto-memory.md contract status"
+assert_grep "$PRE_COMPACT" 'DOCUMENTED user/tooling-facing contract' \
+  "T8.6 pre-compact states the keep-as-documented-contract decision"
 
 echo
 echo "== Summary =="
