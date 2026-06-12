@@ -105,7 +105,9 @@ Do not use web search or other MCP tools. All external research has already been
 
 ## Output
 
-Emit the spec body to disk (step 5). Then, as the **final lines of your reply**, emit exactly this fenced YAML block — no trailing text after it:
+Emit the spec body to disk (step 5) in every mode — the disk artifact is the deliverable; the structured return is only its handle.
+
+**Dispatch mode.** If you were dispatched with a structured-output schema (a StructuredOutput tool is in your tool list), return the fields below through that schema and stop — do not also emit the fenced block. Otherwise (the default directive dispatch) emit, as the **final lines of your reply**, exactly this fenced YAML block — no trailing text after it. The field names are identical across both modes:
 
 ```yaml
 status: DONE | DONE_WITH_CONCERNS | BLOCKED

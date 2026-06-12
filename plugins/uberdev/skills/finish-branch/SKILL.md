@@ -157,10 +157,19 @@ fi
 # no orchestrator run. The legacy .uberdev/research/issue-N glob component
 # was DELETED together with the orchestrator research cache (#308: the
 # issue-N cache had zero writers, so the glob could only ever match nothing).
+#
+# REVIEW_FILES stays NEWLINE-delimited (raw `ls -t` output, no `tr '\n' ' '`
+# join) so the consumer below can iterate it with a while-read loop. This
+# fence runs under /bin/zsh on macOS (the Claude-Code Bash tool default), where
+# SH_WORD_SPLIT is OFF: a space-joined scalar fed to a for-loop over the list
+# would NOT word-split — $f would bind to the whole list as one token, the
+# `[ -f "$f" ]` guard would fail, and the entire section (including the envelope
+# strip) would be silently skipped. Newline-delimited + read-loop is word-split-
+# independent and behaves identically under bash and zsh.
 if [ -n "$ACTIVE_RUN_ID" ]; then
-  REVIEW_FILES=$(ls -t "$RESEARCH_ROOT/$ACTIVE_RUN_ID"/post-impl-review-*.md "$RESEARCH_ROOT/$ACTIVE_RUN_ID"/pr-test-analyzer.md 2>/dev/null | tr '\n' ' ')
+  REVIEW_FILES=$(ls -t "$RESEARCH_ROOT/$ACTIVE_RUN_ID"/post-impl-review-*.md "$RESEARCH_ROOT/$ACTIVE_RUN_ID"/pr-test-analyzer.md 2>/dev/null)
 else
-  REVIEW_FILES=$(ls -t .uberdev/research/*/post-impl-review-*.md .uberdev/research/*/pr-test-analyzer.md 2>/dev/null | tr '\n' ' ')
+  REVIEW_FILES=$(ls -t .uberdev/research/*/post-impl-review-*.md .uberdev/research/*/pr-test-analyzer.md 2>/dev/null)
 fi
 
 # Compose PR body. Heredoc delimiter is unquoted (`<<EOF`, not the single-
@@ -193,7 +202,14 @@ if [ -n "$REVIEW_FILES" ]; then
     echo
     echo "## Reviewer findings summary"
     echo
-    for f in $REVIEW_FILES; do
+    # Iterate the NEWLINE-delimited REVIEW_FILES with a while-read loop, NOT a
+    # for-loop over $REVIEW_FILES — under zsh (the Bash-tool default on macOS,
+    # and this is a raw bash code fence with no bash shebang) an unquoted scalar
+    # does not word-split (SH_WORD_SPLIT off), so the for-loop would bind $f to
+    # the entire list as one token, the `[ -f "$f" ]` guard would fail, and this
+    # whole section — including the envelope strip below — would be silently
+    # skipped. The read-loop is word-split-independent (identical under bash/zsh).
+    while IFS= read -r f; do
       [ -f "$f" ] || continue
       echo "### $(basename "$f")"
       # Strip external-untrusted-input envelope tag lines before pasting into
@@ -206,7 +222,7 @@ if [ -n "$REVIEW_FILES" ]; then
       sed -E -e '/^[[:space:]]*<external-untrusted-input[^>]*>[[:space:]]*$/d' \
              -e '/^[[:space:]]*<\/external-untrusted-input>[[:space:]]*$/d' "$f"
       echo
-    done
+    done <<< "$REVIEW_FILES"
   } >> "$PR_BODY_FILE"
 fi
 

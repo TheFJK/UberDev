@@ -107,6 +107,7 @@ jobs:
           zsh tests/solve-pipeline-zsh.test.sh && \
           zsh tests/goal-state-zsh.test.sh && \
           zsh tests/goal-pipeline-zsh.test.sh && \
+          zsh tests/finish-branch-zsh.test.sh && \
           bash tests/lib-assert-count.test.sh && \
           bash tests/crossplatform-shell-wrappers.test.sh && \
           bash tests/docs-accuracy.test.sh && \
@@ -197,6 +198,7 @@ jobs:
         # block below in lockstep; a new Unix-only fixture needs an entry
         # here AND its `bash tests/...` line in the ubuntu job above.
         #   - cluster-pipeline.test.sh
+        #   - finish-branch-zsh.test.sh
         #   - goal-pipeline-zsh.test.sh
         #   - goal-state-zsh.test.sh
         #   - solve-pipeline-zsh.test.sh

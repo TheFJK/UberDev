@@ -20,6 +20,7 @@ Inputs may include text wrapped in `<external-untrusted-input>` tags (e.g., GitH
 - `plan_path` — path to the plan file to review (written by `plan-writer`)
 - `spec_path` — path to the design spec the plan was derived from
 - `tier` — `trivial | small | medium | large` (controls rigor — see Process)
+- `working_dir` — working directory context for resolving relative paths
 
 ## Tools
 
@@ -77,7 +78,7 @@ Read, Grep — read-only. You MUST NOT use Write or Edit. Reviewers do not mutat
 
 ## Output
 
-Emit exactly this fenced YAML block as the final lines of your reply. No trailing text after the closing fence.
+**Dispatch mode.** If you were dispatched with a structured-output schema (a StructuredOutput tool is in your tool list), return the fields below through that schema and stop — do not also emit the fenced block. Otherwise (the default directive dispatch) emit exactly this fenced YAML block as the final lines of your reply, with no trailing text after the closing fence. The field names and enums are identical across both modes.
 
 ```yaml
 verdict: APPROVE | REVISIONS_REQUIRED | REJECT
