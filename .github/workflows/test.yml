@@ -2,7 +2,27 @@ name: Tests
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+# One CI set per change (#309, RFC 0012 §7.7 infra-R2). The unfiltered
+# push+pull_request pair used to fire TWO full runs for every push to a PR
+# branch, and a concurrency group ALONE cannot dedupe that pair: the group
+# keys differ per event (a push run keys on refs/heads/<branch>, the
+# pull_request run on refs/pull/<N>/merge), so the push branch filter above
+# is the load-bearing half — PR branches now get exactly one run, via the
+# authoritative pull_request event. The group below then cancels a
+# superseded PR run when a newer push lands on the same ref. Tag pushes
+# (releases) no longer trigger a run; the tagged SHA was already tested by
+# its push-to-main run.
+#
+# cancel-in-progress is ref-conditional: post-merge runs on main are NEVER
+# cancelled — sequential-release drives land PRs minutes apart, and the
+# per-commit main CI signal must survive every landing (a cancelled main
+# run would leave a release commit with no green check).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 # Least-privilege default. PR runs from forks otherwise inherit a write token
 # and would gate on enabling `Send write tokens to workflows from fork pull
@@ -14,7 +34,10 @@ jobs:
   shape-checks:
     name: shape-checks
     runs-on: ubuntu-latest
-    # 5 minutes is generous for the ~330 grep-and-assert checks (44 test files).
+    # 5 minutes is generous for the wired suite — 59 test files, ~2,700
+    # grep-and-assert checks, measured at #309 (ci-wiring.test.sh keeps the
+    # run list below complete against tests/*.test.sh on disk; these counts
+    # are a point-in-time snapshot, refresh when they age).
     # Caps the default 360-min budget so a hung test from a fork PR can't burn
     # the public-repo Actions allowance. Bump if the suite legitimately grows.
     timeout-minutes: 5
