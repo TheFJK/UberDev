@@ -1,7 +1,7 @@
 ---
 description: "Whole-codebase 3-lens simplification (Reuse/Quality/Efficiency). Packs the repo into a fixed fleet of byte-balanced areas (default 8), audits each area with ONE multi-lens code-simplifier, applies preserve-behavior fixes via code-fixer as one refactor: commit per area on a new branch, opens ONE PR for review, and files leftover blocker findings as GitHub issues. Whole-repo by default; pass a path/glob to narrow. --audit-only for a read-only scan."
 argument-hint: "[path-or-glob] [--audit-only] [--all] [--no-issues] [--no-report] [--lens=Reuse,Quality,Efficiency] [--areas=N] [--concurrency=N] [--turbo]"
-allowed-tools: ["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", "Write"]
+allowed-tools: ["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", "Workflow", "Write"]
 ---
 
 # /ubersimplify — whole-codebase 3-lens simplification

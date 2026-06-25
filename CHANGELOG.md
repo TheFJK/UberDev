@@ -4,6 +4,21 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.38.0] — 2026-06-25
+
+### Changed
+
+- **RFC 0012 Phase 3 — `/uberscan` + `/ubersimplify` migrated to the shared `scan-fleet` Workflow** (`skills/scan-fleet/workflow.js`). One `workflow.js` backs both commands via a `mode` (`scan`|`simplify`) branch: it packs the repo into ≤N byte-balanced areas (`lib/chunk.py`), runs ONE multi-lens reviewer per area in concurrency-bounded `parallel()` waves, then for scan runs an inline repo-global Semgrep+coverage pass and `report.py` aggregation, and for simplify runs `aggregate.py`, a sequential `code-fixer` apply (one `refactor:` commit per area on a shared branch — sequential to stay git-index-safe), one PR, and leftover-issue filing. Both pipeline `SKILL.md` bodies are now thin preflight + args-emit + Workflow mandate + `## No-Workflow fallback` seams (≈682/715 → ≈170 lines each). Closes the `/uberscan` + `/ubersimplify` half of #305 (the zsh `ARR=($VAR)` scalar-split wave bug, the fence-scoped circuit-breaker death, and the `$ARGUMENTS` hazards are eliminated by construction — the orchestration is JS, not a directive-emitter bash fence).
+
+### Added
+
+- `skills/scan-fleet/global-pass.sh` — the inline repo-global Semgrep SAST + test-coverage pass, extracted from the legacy `uberscan-pipeline` Phase 1b (reused by both the Workflow relay and the No-Workflow fallback).
+- `tests/scan-fleet-workflow.test.sh` — shape greps + a T3 behavioral fixture that drives `scan-fleet.js` under the harness stubs and asserts per-mode phase order, sequential-apply, model policy, CB5/CB7, and the budget-throw (DR-8) path.
+
+### Notes
+
+- The time-based circuit breakers CB3/CB4 (per-wave / wall-clock) are intentionally dropped: they were already dead in the ms-returning directive-emitter fence, and the Workflow runtime forbids `Date.now` (DR-7 determinism); the real `budget` lifetime cap + CB5 (blocker flood) + CB7 (agent ceiling) cover the live failure modes. The simplify apply phase uses sequential dispatch with NO worktree isolation (git forbids two worktrees on one branch; sequential dispatch already removes the index race).
+
 ## [0.37.1] — 2026-06-12
 
 - _Release notes pending — replace this stub before committing (inserted by bump-version.sh)._

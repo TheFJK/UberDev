@@ -1,7 +1,7 @@
 ---
 description: "Whole-codebase read-only audit. Packs the repo into a fixed fleet of byte-balanced areas (default 8) and runs ONE multi-lens reviewer per area, plus an inline repo-global Semgrep + test-coverage pass. Aggregates findings into a markdown report and files deduped GitHub issues. Never writes code. Whole-repo by default; pass a path/glob to narrow."
 argument-hint: "[path-or-glob] [--all] [--no-issues] [--no-report] [--areas=N] [--concurrency=N] [--severity=blocker|critical|major] [--turbo]"
-allowed-tools: ["Bash(git*)", "Bash(gh*)", "Glob", "Grep", "Read", "Task", "Write"]
+allowed-tools: ["Bash(git*)", "Bash(gh*)", "Glob", "Grep", "Read", "Task", "Workflow", "Write"]
 ---
 
 # /uberscan — whole-codebase read-only audit

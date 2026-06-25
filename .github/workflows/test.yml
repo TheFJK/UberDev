@@ -144,7 +144,8 @@ jobs:
           bash tests/test-harness-source-guards.test.sh && \
           bash tests/workflow-scripts.test.sh && \
           bash tests/workflow-args.test.sh && \
-          bash tests/testers-workflow.test.sh
+          bash tests/testers-workflow.test.sh && \
+          bash tests/scan-fleet-workflow.test.sh
 
   shape-checks-windows:
     name: shape-checks-windows
@@ -265,4 +266,5 @@ jobs:
           bash tests/test-harness-source-guards.test.sh && \
           bash tests/workflow-scripts.test.sh && \
           bash tests/workflow-args.test.sh && \
-          bash tests/testers-workflow.test.sh
+          bash tests/testers-workflow.test.sh && \
+          bash tests/scan-fleet-workflow.test.sh
