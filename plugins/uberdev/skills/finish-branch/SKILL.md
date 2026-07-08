@@ -48,7 +48,7 @@ Or ask: "This branch split from main - is that correct?"
 
 ### Step 3: Mode selection (precedence: UBERDEV_TURBO=1 > --interactive > default)
 
-Detect mode from the inherited environment variable `UBERDEV_TURBO` (set by `commands/turbo.md` → `solve-pipeline` → `claude --bg` inline-prefix exec, per #97) AND from `$ARGUMENTS` (for the `--interactive` flag only — finish-branch no longer parses `--turbo` as an argument; turbo signal is env-var-only on the chain hot path):
+Detect mode from the inherited environment variable `UBERDEV_TURBO` (set by the turbo/solve-pipeline dispatch environment and propagated by the active backend, per #97) AND from `$ARGUMENTS` (for the `--interactive` flag only — finish-branch no longer parses `--turbo` as an argument; turbo signal is env-var-only on the chain hot path):
 
 1. **Turbo mode** — if `[[ "${UBERDEV_TURBO:-0}" == "1" ]]`:
    Skip the prompt, auto-select **Option 2 (Push and create a Pull Request)**, and chain into `/uberdev:review-pr` (no `--turbo` arg — review-pr inherits the env var via Skill() invocation in the same agent process). Announce:
@@ -354,7 +354,7 @@ The two `gh` calls above are intentionally fail-soft — the fire-and-surface co
 
 **Chain hand-off (always-PR path, default + turbo):**
 
-After the PR is created and `PR_URL` is validated, **invoke `uberdev:review-pr` via the `Skill` tool** with the captured `PR_URL` (no `--turbo` arg). Review-pr inherits the unattended-mode signal via the `UBERDEV_TURBO=1` env var inherited from the parent `claude --bg` process; review-pr also retains a hybrid arg-OR-env detector for compatibility with the separate dispatch in `merge-pipeline` (which still passes `--turbo` as an arg — out-of-scope for #97). The chain is **fire-and-surface, not fire-and-block**: review-pr findings surface to the user via its own output, but `finish-branch` does NOT block on `REVISIONS_REQUIRED` (advisory only, per #11 Q1).
+After the PR is created and `PR_URL` is validated, **invoke `uberdev:review-pr` via the `Skill` tool** with the captured `PR_URL` (no `--turbo` arg). Review-pr inherits the unattended-mode signal via the `UBERDEV_TURBO=1` env var inherited from the parent dispatch process; review-pr also retains a hybrid arg-OR-env detector for compatibility with the separate dispatch in `merge-pipeline` (which still passes `--turbo` as an arg — out-of-scope for #97). The chain is **fire-and-surface, not fire-and-block**: review-pr findings surface to the user via its own output, but `finish-branch` does NOT block on `REVISIONS_REQUIRED` (advisory only, per #11 Q1).
 
 > Invoke `uberdev:review-pr` via the Skill tool with the captured `PR_URL` (no flag args). Findings are ADVISORY — do NOT block on `REVISIONS_REQUIRED` at this layer (the auto-fix loop is deferred per #11 Q1).
 

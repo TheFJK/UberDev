@@ -89,9 +89,10 @@ Or non-interactively:
 codex plugin add uberdev-codex@uberdev
 ```
 
-This installs the **skills + session-start hook** as a managed plugin (toggle on/off
-in `/plugins`, no file copying). The 42 agents and the AGENTS.md primer are **not**
-part of the plugin — run the standalone installer for those.
+This installs the **skills + session-start hook + Markdown agent prompt files** as
+a managed plugin (toggle on/off in `/plugins`, no file copying). The 42 Codex
+custom-agent TOML files and the AGENTS.md primer are **not** part of the plugin —
+run the standalone installer for those.
 
 ---
 
@@ -190,7 +191,7 @@ Override explicitly:
 --backend=claude-bg    # force claude --bg (needs claude CLI)
 ```
 
-The spawned session runs `codex exec --ask-for-approval never --sandbox workspace-write --json -o <result>`
+The spawned session runs `codex --ask-for-approval never exec --sandbox workspace-write --json -o <result>`
 in a per-issue git worktree. Liveness is PID-based (`kill -0`); the agent's
 final message lands in the `-o` result file for post-run inspection.
 
@@ -201,9 +202,8 @@ final message lands in the `-o` result file for post-run inspection.
   `## No-Workflow fallback` path (bounded manual `spawn_agent` / directive
   fallback — functional, but not the Workflow orchestration Claude gives).
 - **`uberdev_goal_review_pr_in_flight`**: the goal-loop's review-pr liveness
-  check queries `claude agents --json` (claude-specific). Under the codex
-  backend it returns "not in flight" (fail-safe — goal proceeds rather than
-  stalls). See the comment in `lib/goal-state.sh`.
+  check uses `claude agents --json` for Claude-backed sessions and the
+  backend status JSON PID for `background` / `codex` sessions.
 - **Agent model mapping**: 41 of 42 agents use `model: inherit` (Codex inherits
   the session model by omitting `model`). The one outlier (`research-test-
   coverage`, Claude `haiku`) maps to `gpt-5.4-mini` (OpenAI's fast tier as of

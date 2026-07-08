@@ -374,6 +374,9 @@ uberdev_emit_workflow_args() {
   local run_id plugin_root repo_root cwd
   run_id="$(date -u +%Y%m%d-%H%M%S)-$(printf '%04x%04x' "$$" "$RANDOM")"
   plugin_root="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}"
+  if [ -z "$plugin_root" ] && [ -n "${CODEX_HOME:-}" ]; then
+    plugin_root="${CODEX_HOME}/plugins/uberdev-codex"
+  fi
   repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || repo_root=""
   [ -n "$repo_root" ] || repo_root="$PWD"
   cwd="$PWD"

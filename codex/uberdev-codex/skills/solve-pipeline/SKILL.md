@@ -43,9 +43,9 @@ prior-fence `unset` protects nothing).
 The launcher validates every issue up front (Phase A, validate-all-first),
 echoes one `triage:` signal line per issue, claims each issue (Step 4.5), and
 dispatches one autonomous agent per issue (Phase B) via the platform-aware
-backend in `lib/dispatch.sh` (`claude-bg` / `wezterm` / `background`).
+backend in `lib/dispatch.sh` (`claude-bg` / `wezterm` / `background` / `codex`).
 The `codex` backend is also available under Codex or via `--backend=codex`;
-it runs detached `codex exec --ask-for-approval never --sandbox workspace-write --json -o <result>`.
+it runs detached `codex --ask-for-approval never exec --sandbox workspace-write --json -o <result>`.
 Per-issue artifacts (`$UBERDEV_TMPDIR/solve-prompt-N.txt`,
 `$UBERDEV_TMPDIR/solve-bg-stdout-N.log`, `$UBERDEV_TMPDIR/solve-codex-stdout-N.log`,
 `$UBERDEV_TMPDIR/solve-codex-status-N.json`, `$UBERDEV_TMPDIR/solve-codex-result-N.md`,

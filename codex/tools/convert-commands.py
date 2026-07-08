@@ -189,6 +189,9 @@ def main(argv: list[str]) -> int:
     print(f"Converting commands: {src_dir} → {out_dir}")
     ok, skipped, failed = convert_dir(src_dir, out_dir)
     print(f"\nDone: {ok} converted, {skipped} skipped (Claude-only), {failed} failed.")
+    if ok == 0:
+        print(f"error: no command skills generated from: {src_dir}", file=sys.stderr)
+        return 2
     return 0 if failed == 0 else 2
 
 

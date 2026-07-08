@@ -48,7 +48,7 @@ Or ask: "This branch split from main - is that correct?"
 
 ### Step 3: Mode selection (precedence: UBERDEV_TURBO=1 > --interactive > default)
 
-Detect mode from the inherited environment variable `UBERDEV_TURBO` (set by `commands/turbo.md` → `solve-pipeline` → `claude --bg` inline-prefix exec, per #97) AND from `$ARGUMENTS` (for the `--interactive` flag only — finish-branch no longer parses `--turbo` as an argument; turbo signal is env-var-only on the chain hot path):
+Detect mode from the inherited environment variable `UBERDEV_TURBO` (set by the turbo/solve-pipeline dispatch environment and propagated by the active backend, per #97) AND from `$ARGUMENTS` (for the `--interactive` flag only — finish-branch no longer parses `--turbo` as an argument; turbo signal is env-var-only on the chain hot path):
 
 1. **Turbo mode** — if `[[ "${UBERDEV_TURBO:-0}" == "1" ]]`:
    Skip the prompt, auto-select **Option 2 (Push and create a Pull Request)**, and chain into `/uberdev:review-pr` (no `--turbo` arg — review-pr inherits the env var via Skill() invocation in the same agent process). Announce:
@@ -354,15 +354,15 @@ The two `gh` calls above are intentionally fail-soft — the fire-and-surface co
 
 **Chain hand-off (always-PR path, default + turbo):**
 
-After the PR is created and `PR_URL` is validated, **invoke `uberdev:review-pr` via the `Skill` tool** with the captured `PR_URL` (no `--turbo` arg). Review-pr inherits the unattended-mode signal via the `UBERDEV_TURBO=1` env var inherited from the parent `claude --bg` process; review-pr also retains a hybrid arg-OR-env detector for compatibility with the separate dispatch in `merge-pipeline` (which still passes `--turbo` as an arg — out-of-scope for #97). The chain is **fire-and-surface, not fire-and-block**: review-pr findings surface to the user via its own output, but `finish-branch` does NOT block on `REVISIONS_REQUIRED` (advisory only, per #11 Q1).
+After the PR is created and `PR_URL` is validated, **invoke `uberdev:review-pr` via the Codex skill mechanism** with the captured `PR_URL` (no `--turbo` arg). Review-pr inherits the unattended-mode signal via the `UBERDEV_TURBO=1` env var inherited from the parent dispatch process; review-pr also retains a hybrid arg-OR-env detector for compatibility with the separate dispatch in `merge-pipeline` (which still passes `--turbo` as an arg — out-of-scope for #97). The chain is **fire-and-surface, not fire-and-block**: review-pr findings surface to the user via its own output, but `finish-branch` does NOT block on `REVISIONS_REQUIRED` (advisory only, per #11 Q1).
 
-> Invoke `uberdev:review-pr` via the Skill tool with the captured `PR_URL` (no flag args). Findings are ADVISORY — do NOT block on `REVISIONS_REQUIRED` at this layer (the auto-fix loop is deferred per #11 Q1).
+> Invoke `uberdev:review-pr` via the Codex skill mechanism with the captured `PR_URL` (no flag args). Findings are ADVISORY — do NOT block on `REVISIONS_REQUIRED` at this layer (the auto-fix loop is deferred per #11 Q1).
 
-Mirrors the canonical `subagent-driven-dev → post-impl-review` precedent (commit `73b2562`). `commands/review-pr.md` has no `disable-model-invocation` flag, so the `Skill` tool can invoke the slash command directly without promotion.
+Mirrors the canonical `subagent-driven-dev → post-impl-review` precedent (commit `73b2562`). `commands/review-pr.md` has no `disable-model-invocation` flag, so the Codex skill mechanism can invoke the generated command-skill directly without promotion.
 
 A review-pr failure (e.g., reviewer agent crash, `gh pr view` error) is loud-logged but does NOT roll back the PR or branch state. `finish-branch` returns success once the PR is open and the chain has been kicked off.
 
-Use the `Skill` tool for this dispatch — never the agent-spawning tool.
+Use the Codex skill mechanism for this dispatch — never the agent-spawning tool.
 
 Then: Cleanup worktree (Step 5)
 
@@ -462,4 +462,4 @@ git worktree remove <worktree-path>
 - **`uberdev:merge`** — follows Option 2. `finish-branch` opens the PR; `/merge` lands it. Together they form the lifecycle `/issue → /solve → push → /review-pr → /merge`.
 
 **Chains into:**
-- **`uberdev:review-pr`** — invoked via the `Skill` tool after PR creation on the always-PR path (default mode + Turbo mode under `UBERDEV_TURBO=1`). Mirrors `subagent-driven-dev → post-impl-review` (commit `73b2562`). Advisory only — `finish-branch` does not block on reviewer verdict.
+- **`uberdev:review-pr`** — invoked via the Codex skill mechanism after PR creation on the always-PR path (default mode + Turbo mode under `UBERDEV_TURBO=1`). Mirrors `subagent-driven-dev → post-impl-review` (commit `73b2562`). Advisory only — `finish-branch` does not block on reviewer verdict.

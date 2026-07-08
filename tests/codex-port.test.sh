@@ -100,6 +100,9 @@ fi
 echo "== Command converter: 13 skills + 2 skipped =="
 assert_cmd 0 "convert-commands runs clean" \
   python3 "$CONVERT_COMMANDS" "$REPO_ROOT/plugins/uberdev/commands" "$TMP/cmd-skills"
+mkdir -p "$TMP/empty-commands-src"
+assert_cmd 2 "convert-commands fails when source contains zero commands" \
+  python3 "$CONVERT_COMMANDS" "$TMP/empty-commands-src" "$TMP/empty-commands-out"
 N_CMD="$(find "$TMP/cmd-skills" -maxdepth 1 -name 'uberdev-cmd-*' -type d 2>/dev/null | wc -l | tr -d ' ')"
 [ "$N_CMD" -eq 13 ] && pass "13 uberdev-cmd-* skills produced" || fail "expected 13 cmd skills, got $N_CMD"
 # install-aliases / uninstall-aliases NOT present (skipped)

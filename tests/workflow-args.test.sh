@@ -162,6 +162,19 @@ fi
 [ -z "$_LAST_STDERR" ] \
   && pass "W2.5 happy path emits nothing on stderr" \
   || fail "W2.5 happy path emits nothing on stderr (got: $_LAST_STDERR)"
+_isolate '
+  unset CLAUDE_PLUGIN_ROOT PLUGIN_ROOT
+  export CODEX_HOME="$PWD/codex-home"
+  mkdir -p "$CODEX_HOME/plugins/uberdev-codex"
+  uberdev_emit_workflow_args scan-fleet
+'
+payload="$(_payload)"
+if printf '%s' "$payload" | jq -e '.plugin_root | endswith("/codex-home/plugins/uberdev-codex")' >/dev/null 2>&1; then
+  pass "W2.6 CODEX_HOME-only runtime emits plugin_root from CODEX_HOME/plugins/uberdev-codex"
+else
+  expected_codex_root="$(printf '%s' "$payload" | jq -r '.plugin_root // "<missing>"' 2>/dev/null || printf '%s' "$payload")"
+  fail "W2.6 CODEX_HOME-only runtime emits plugin_root fallback (got: ${expected_codex_root:-$payload})"
+fi
 
 # ---------------------------------------------------------------------------
 echo "== W3: config folding + auto-typing =="

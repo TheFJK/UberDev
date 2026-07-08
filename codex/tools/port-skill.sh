@@ -227,6 +227,21 @@ for root in roots:
         text = text2
         changed = True
 
+    if skill_md.parent.name == "finish-branch":
+        text2 = text
+        replacements = {
+            "via the `Skill` tool": "via the Codex skill mechanism",
+            "via the Skill tool": "via the Codex skill mechanism",
+            "the `Skill` tool can invoke the slash command directly": "the Codex skill mechanism can invoke the generated command-skill directly",
+            "Use the `Skill` tool for this dispatch — never the agent-spawning tool.": "Use the Codex skill mechanism for this dispatch — never the agent-spawning tool.",
+            "invoked via the `Skill` tool": "invoked via the Codex skill mechanism",
+        }
+        for old, new in replacements.items():
+            text2 = text2.replace(old, new)
+        if text2 != text:
+            text = text2
+            changed = True
+
     if changed:
         skill_md.write_text(text, encoding="utf-8")
 PY

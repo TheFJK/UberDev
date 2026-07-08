@@ -29,6 +29,7 @@
 #   uberdev_goal_pr_state_gh                   PR_NUM      (gh; issue #180)
 #   uberdev_goal_pr_is_merged                  PR_NUM      (gh; issue #180)
 #   uberdev_goal_gh_failure_breaker_check      GOAL_ID [THRESHOLD]   (issue #290.3)
+#   uberdev_goal_gh_failure_count              GOAL_ID               (issue #329 review)
 #   uberdev_goal_agent_busy_for_issue          ISSUE_NUM   (claude agents; issue #180)
 #   uberdev_goal_codex_status_for_issue        ISSUE_NUM   (Codex status JSON; issue #329 review)
 #   uberdev_goal_list_prs_in_state             GOAL_ID STATE
@@ -1203,6 +1204,22 @@ _uberdev_goal_reset_gh_failure() {
   return 0
 }
 
+# uberdev_goal_gh_failure_count GOAL_ID
+# Public read-side view of the consecutive gh-failure counter. Phase 2 needs this
+# to distinguish "no PR exists" from "PR lookup was unavailable" after
+# uberdev_goal_find_pr_for_issue fail-opens to empty stdout.
+uberdev_goal_gh_failure_count() {
+  local goal_id="${1:?goal_id required}"
+  _uberdev_goal_validate_id "$goal_id" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  local f="$tmpdir/goal-$goal_id-gh-failures.txt"
+  [ -r "$f" ] || { printf '0'; return 0; }
+  local count
+  count="$(cat "$f" 2>/dev/null)" || count=0
+  _uberdev_goal_validate_int "$count" || count=0
+  printf '%s' "$count"
+}
+
 # uberdev_goal_gh_failure_breaker_check GOAL_ID [THRESHOLD]
 # rc 0 (FIRE) iff the consecutive gh-failure counter for GOAL_ID is >= THRESHOLD
 # (default _UBERDEV_GOAL_MAX_GH_FAILURES). On fire, emits ONE goal_circuit_breaker
@@ -1287,15 +1304,19 @@ uberdev_goal_agent_busy_for_issue() {
 uberdev_goal_review_pr_in_flight() {
   local pr="$1"
   _uberdev_goal_validate_int "$pr" || return 1
-  # NOTE (RFC 0012 §3.4 codex-port): this query is claude-specific — it inspects
-  # `claude agents --json` for a live review-pr session. Under the codex /
-  # background backends there is no equivalent session registry; review-pr runs
-  # as in-session parallel fanout (spawn_agent), not a dispatched bg job, so
-  # there is no PID to track either. The function therefore returns rc 1 (not
-  # in flight) on those backends — the fail-safe default that lets /goal
-  # proceed rather than stall. If a future codex release dispatches review-pr
-  # as a tracked bg session, add a backend branch here mirroring
-  # uberdev_goal_agent_busy_for_issue's PID path.
+  # RFC 0012 §3.4 codex-port: claude-bg/wezterm have `claude agents --json`;
+  # background/codex have only the status JSON written by dispatch.sh. For the
+  # PID-based backends, review-pr in-flight means the tracked wrapper process
+  # for this PR is still alive.
+  case "${UBERDEV_RESOLVED_BACKEND:-}" in
+    background|codex)
+      local pid
+      pid="$(_uberdev_goal_pid_for_issue "$pr" 2>/dev/null)" || return 1
+      [ -n "$pid" ] || return 1
+      kill -0 "$pid" 2>/dev/null
+      return $?
+      ;;
+  esac
   if claude agents --json 2>/dev/null | jq -e --argjson pr "$pr" '
     [ .[]?
       | select(

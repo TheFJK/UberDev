@@ -101,7 +101,7 @@ _uberdev_dispatch_codex_available() {
 }
 
 # uberdev_dispatch_preflight
-# Resolves UBERDEV_DISPATCH_BACKEND_REQUESTED (auto|claude-bg|wezterm|background)
+# Resolves UBERDEV_DISPATCH_BACKEND_REQUESTED (auto|claude-bg|wezterm|background|codex)
 # to a concrete UBERDEV_RESOLVED_BACKEND, ONCE per invocation, committed for
 # the whole batch (no mid-fanout switch). Hard-errors (return 1) when an
 # explicit backend is unusable on this host. Emits dispatch_backend_resolved.
@@ -768,8 +768,7 @@ EOF_STATUS
       fi
 
       if cd "$WORKTREE_DIR"; then
-        env "$@" codex exec \
-        --ask-for-approval never \
+        env "$@" codex --ask-for-approval never exec \
         --sandbox workspace-write \
         --json \
         -o "$RESULT_FILE" \

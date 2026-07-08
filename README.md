@@ -350,14 +350,14 @@ Bundled upstream license texts in `plugins/uberdev/licenses/`.
 | **`/merge` autopilot has no author gate** | Trust anchor is `reviewDecision == "APPROVED"` + GitHub branch protections. Bot vs. human vs. external contributor — same eligibility. |
 | **No `Co-Authored-By: Claude` trailer** | Commits and PR bodies use the user's authorship only. |
 | **Wave-based parallel execution** | Plans declare task dependencies + file ownership; `subagent-driven-dev` fires every wave's tasks concurrently in one shared worktree. Controller-only git eliminates index races without per-task worktree ceremony. |
-| **No HARD-GATE approval checkpoints** | Upstream's brainstorm pauses for user sign-off before implementation. UberDev replaces user gates with parallel research fanout and always-on agent reviewers (`spec-reviewer`, `plan-reviewer`, end-of-issue `post-impl-review`). Quality wins from review depth, not approval ceremony. |
+| **No HARD-GATE approval checkpoints** | Upstream's brainstorm pauses for user sign-off before implementation. UberDev replaces user gates with parallel research fanout and always-on agent reviewers (`spec-reviewer`, `plan-reviewer`, post-push `/review-pr` Phase 1 `post-impl-review`). Quality wins from review depth, not approval ceremony. |
 
 <details>
 <summary><strong>Why doesn't UberDev pause for me to approve the design?</strong></summary>
 
 Upstream `obra/superpowers` gates implementation behind a user-approval HARD-GATE: brainstorm halts, asks "does this look right so far?", and waits for sign-off before any subagent runs. Per-section approval prompts and a 3-iteration review-loop cap follow the same pattern.
 
-UberDev rejects all of those. User gates trade quality for ceremony — every pause shifts review burden onto a non-expert reader (you) and adds wall-clock cost. Quality wins from **parallel research fanout** (six research agents in one shot), **always-on reviewers** (`spec-reviewer` runs on medium/large tier per orchestrator Phase 3.5; `plan-reviewer` runs on every plan per Phase 4.5), and an **end-of-issue `post-impl-review` fanout** (5 advisory reviewers — code-reviewer, code-simplifier, silent-failure-hunter, type-design-analyzer, comment-analyzer — dispatched in one message after PR push via `/uberdev:review-pr`).
+UberDev rejects all of those. User gates trade quality for ceremony — every pause shifts review burden onto a non-expert reader (you) and adds wall-clock cost. Quality wins from **parallel research fanout** (six research agents in one shot), **always-on reviewers** (`spec-reviewer` runs on medium/large tier per orchestrator Phase 3.5; `plan-reviewer` runs on every plan per Phase 4.5), and a **post-push `/review-pr` Phase 1 `post-impl-review` fanout** (six advisory reviewers — correctness, silent-failure, type-design, comment/doc, PR-test, and general quality lenses — dispatched in one message after PR push; simplification is `/review-pr` Phase 2).
 
 </details>
 

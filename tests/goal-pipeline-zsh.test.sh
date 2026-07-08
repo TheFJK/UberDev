@@ -335,7 +335,7 @@ else
   fail "P3.extract: could NOT extract the terminal fence (anchor 'Terminal set for convergence' moved?)"
 fi
 
-# Driver template emitter: $1=goal-id $2=case(conv|queue|stuck).
+# Driver template emitter: $1=goal-id $2=case(conv|queue|stuck|failed).
 # Seeds the pr-states.tsv per case, then runs the extracted terminal fence.
 write_term_driver() {  # $1=outfile $2=gid $3=case
   local out="$1" gid="$2" cs="$3"
@@ -363,6 +363,7 @@ write_term_driver() {  # $1=outfile $2=gid $3=case
       conv)  echo 'queue=()' ;;
       queue) echo 'queue=(777)' ;;   # #288 #1: a non-empty rollover must BLOCK convergence
       stuck) echo 'queue=()' ;;
+      failed) echo 'queue=()' ;;
     esac
     echo "source '$TERMINAL_FENCE'"
     echo 'echo "FELL-THROUGH rc=$?"'
@@ -417,6 +418,22 @@ if [ "$S_RC" -eq 1 ] \
   pass "P3c: queue empty + a PR still pushed-reviewing -> queue_empty_not_converged, exit 1 (deterministic pre-empt of the 4h stuck_loop)"
 else
   fail "P3c: stuck-but-drained path wrong (rc=$S_RC, out=[$S_OUT], audit=[$(tr -d '\n' < "$(audit_for "$G_S")" 2>/dev/null)])"
+fi
+
+# --- P3d: queue empty + no PRs + a failed issue -> solver_failed, exit 1.
+G_F="pipefailed01"
+: > "$WORK/state/goal-$G_F-pr-states.tsv"
+printf '4242\tfailed\t10\n' > "$WORK/state/goal-$G_F-issue-states.tsv"
+: > "$(audit_for "$G_F")"
+DRV_F="$WORK/drv_term_failed.zsh"; write_term_driver "$DRV_F" "$G_F" failed
+F_OUT="$("$ZSH_BIN" -f "$DRV_F" 2>&1)"
+F_RC=$?
+if [ "$F_RC" -eq 1 ] \
+   && grep -q 'solver_failed' "$(audit_for "$G_F")" 2>/dev/null \
+   && ! grep -q 'goal_converged' "$(audit_for "$G_F")" 2>/dev/null; then
+  pass "P3d: failed solver issue halts with solver_failed before convergence, exit 1"
+else
+  fail "P3d: failed solver issue did not halt before convergence (rc=$F_RC, out=[$F_OUT], audit=[$(tr -d '\n' < "$(audit_for "$G_F")" 2>/dev/null)])"
 fi
 
 # ==========================================================================

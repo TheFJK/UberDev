@@ -726,6 +726,14 @@ while true; do
     istate="$(uberdev_goal_get_issue_state "$GOAL_ID" "$issue" 2>/dev/null)"
     case "$istate" in pr-pushed|resolved|resolved-by-no-action|failed) continue ;; esac
     pr_num="$(uberdev_goal_find_pr_for_issue "$issue")"
+    _gh_failure_count="$(uberdev_goal_gh_failure_count "$GOAL_ID" 2>/dev/null || printf '0')"
+    _uberdev_goal_validate_int "$_gh_failure_count" || _gh_failure_count=0
+    if [ -z "$pr_num" ] && [ "$_gh_failure_count" -gt 0 ]; then
+      printf 'goal-pipeline: PR lookup for issue %s is unavailable after gh failure count=%s — deferring no-PR classification\n' \
+        "$issue" "$_gh_failure_count" >&2
+      any_active=1
+      continue
+    fi
     if [ -n "$pr_num" ]; then
       # #211 — register the PR into the batch-PR registry once it's resolved.
       # Registration is deferred from Phase 1 (no PR number at dispatch-time)
@@ -813,8 +821,11 @@ while true; do
         fi
       fi
       if [ "$gh_rc" -ne 0 ]; then
-        printf 'goal-pipeline: gh issue view %s failed rc=%d — falling through to timeout backstop\n' \
+        _uberdev_goal_record_gh_failure
+        printf 'goal-pipeline: gh issue view %s failed rc=%d — deferring no-PR classification until GitHub state probe succeeds\n' \
           "$issue" "$gh_rc" >&2
+        any_active=1
+        continue
       elif [ "$_codex_state" = "completed" ]; then
         printf 'goal-pipeline: codex agent for issue %s completed without a PR or closed issue (exit_code=%s; log=%s; result=%s)\n' \
           "$issue" "${_codex_exit:-unknown}" "${_codex_log:-unknown}" "${_codex_result:-unknown}" >&2
@@ -1730,6 +1741,6 @@ Called from Phase 2 step 2d on every `merging → merged` PR transition, for eac
 
 - **Phase 0 resolves once.** `uberdev_dispatch_preflight` sets `UBERDEV_RESOLVED_BACKEND` for the whole run; no per-cycle re-resolution at the goal level.
 - **Phase 1 no longer forwards `--backend=` as a CLI arg.** The `/uberdev:orchestrator` invocation does not accept a `--backend=` flag, so backend is *not* threaded through argv — only through the env table.
-- **Env-var inheritance via `claude --bg` is the canonical mechanism.** `claude --bg` inherits the parent shell's full env table by default; every child (orchestrator, plus the Phase 2 `/merge` and `/review-pr` dispatches in `lib/goal-state.sh::_uberdev_goal_dispatch_{merge,review_pr}`) re-resolves the backend in its own preflight from `UBERDEV_RESOLVED_BACKEND`.
+- **Backend inheritance via `UBERDEV_RESOLVED_BACKEND` is the canonical mechanism.** `claude-bg` inherits the parent shell's full env table, while `background` and `codex` also write PID/status files for the file-polled paths. Every child (orchestrator, plus the Phase 2 `/merge` and `/review-pr` dispatches in `lib/goal-state.sh::_uberdev_goal_dispatch_{merge,review_pr}`) re-resolves the backend in its own preflight from `UBERDEV_RESOLVED_BACKEND`.
 - **Orthogonal to `BG_TURBO_ENV`.** The env-var path carries `UBERDEV_RESOLVED_BACKEND`; `BG_TURBO_ENV` carries only `UBERDEV_TURBO` + `SKIP_PERMISSIONS`. Both reach the child via independent mechanisms (env table for backend, the BG_TURBO_ENV array-wrap for the permission/turbo flags).
-- **Per-cycle re-resolution forbidden.** A transient `claude --version` flake mid-run must not silently swap backends — splitting a single goal's solvers across incompatible dispatch mechanisms. Each backend (`claude-bg` / `wezterm` / `background`) has its own session-management and worktree conventions that must stay stable across cycles so the gh + file detection signals (PR discovery via `closingIssuesReferences`, liveness via `claude agents --json` cwd matching, verdict via the file-based locator — issue #180) resolve consistently for every solver in the run.
+- **Per-cycle re-resolution forbidden.** A transient CLI probe flake mid-run must not silently swap backends — splitting a single goal's solvers across incompatible dispatch mechanisms. Each backend (`claude-bg` / `wezterm` / `background` / `codex`) has its own session-management and worktree conventions that must stay stable across cycles so the gh + file detection signals (PR discovery via `closingIssuesReferences`, backend-specific liveness, verdict via the file-based locator — issue #180) resolve consistently for every solver in the run.

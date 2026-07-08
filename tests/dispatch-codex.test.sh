@@ -87,14 +87,14 @@ assert_grep "$DISPATCH_LIB" \
   'git worktree add' \
   "codex backend runs explicit git worktree add (same as background)"
 assert_grep "$DISPATCH_LIB" \
-  'codex exec' \
-  "codex backend launches headless codex exec (NOT claude -p)"
+  'codex --ask-for-approval never exec' \
+  "codex backend launches headless codex exec with top-level approval policy (NOT claude -p)"
 assert_grep "$DISPATCH_LIB" \
   '--sandbox workspace-write' \
   "codex backend passes --sandbox workspace-write for autonomous edits"
-assert_grep "$DISPATCH_LIB" \
-  '--ask-for-approval never' \
-  "codex backend pins approval policy to never for detached execution"
+assert_grep_not "$DISPATCH_LIB" \
+  'codex exec[[:space:]]+\\?[[:space:]]*--ask-for-approval' \
+  "codex backend does not pass top-level-only approval policy after exec"
 assert_grep "$DISPATCH_LIB" \
   '--json' \
   "codex backend passes --json for progress streaming"
@@ -104,9 +104,6 @@ assert_grep "$DISPATCH_LIB" \
 assert_grep "$DISPATCH_LIB" \
   'disown' \
   "codex backend disowns the detached process"
-assert_grep "$DISPATCH_LIB" \
-  'kill -0 "\$DISPATCH_ID"' \
-  "codex backend PID-liveness-gates before reporting success"
 assert_grep "$DISPATCH_LIB" \
   '_uberdev_dispatch_prepare_tmp_target "\$RESULT_FILE" "\$ISSUE_NUM" "codex"' \
   "codex backend guards the predictable result file before passing it to codex exec"
@@ -134,6 +131,12 @@ if printf '%s\n' "$CODEX_BODY" | grep -qE '\<(PERM_FLAG|EFFORT_FLAG|claude -p)\>
     "$(printf '%s\n' "$CODEX_BODY" | grep -nE '\<(PERM_FLAG|EFFORT_FLAG|claude -p)\>')"
 else
   pass_msg "codex backend body does not reference Claude-only flags or claude -p"
+fi
+if printf '%s\n' "$CODEX_BODY" | grep -qF 'WRAPPER_PID="$$"' \
+   && ! printf '%s\n' "$CODEX_BODY" | grep -qF 'kill -0 "$DISPATCH_ID"'; then
+  pass_msg "codex backend status contract tracks wrapper pid instead of parent-side liveness probing"
+else
+  fail_msg "codex backend status contract tracks wrapper pid instead of parent-side liveness probing"
 fi
 
 echo "== goal-state backend-awareness =="
@@ -300,13 +303,13 @@ case "$BEH_OUT" in
   *)
     fail_msg "codex dispatch writes completed status with exit_code and result after stub exits" "$BEH_OUT" ;;
 esac
-if grep -Fq -- '--sandbox] [workspace-write]' "$BEH_TMP/codex-capture.txt" \
-   && grep -Fq -- '--ask-for-approval] [never]' "$BEH_TMP/codex-capture.txt" \
+if grep -Fq -- 'argv: [--ask-for-approval] [never] [exec]' "$BEH_TMP/codex-capture.txt" \
+   && grep -Fq -- '--sandbox] [workspace-write]' "$BEH_TMP/codex-capture.txt" \
    && grep -Fq -- 'UBERDEV_TURBO=1' "$BEH_TMP/codex-capture.txt" \
    && grep -Fq -- '[prompt body for codex]' "$BEH_TMP/codex-capture.txt"; then
-  pass_msg "codex dispatch passes sandbox, approval policy, turbo env, and prompt body to codex exec"
+  pass_msg "codex dispatch passes approval policy before exec plus sandbox, turbo env, and prompt body"
 else
-  fail_msg "codex dispatch passes sandbox, approval policy, turbo env, and prompt body to codex exec" \
+  fail_msg "codex dispatch passes approval policy before exec plus sandbox, turbo env, and prompt body" \
     "$(cat "$BEH_TMP/codex-capture.txt" 2>/dev/null)"
 fi
 if printf '%s\n' "$BEH_OUT" | grep -Eq '"pid":"[0-9]+"'; then

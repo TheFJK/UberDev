@@ -367,12 +367,13 @@ assert_grep "$GOAL_LIB" '_UBERDEV_GOAL_BODY_CAP|head -c 65536'           "G18.bo
 
 echo
 echo "== G19: lib/goal-state.sh shape =="
-# Public function names (23 — 18 prior + 3 new barrier helpers added by issue #211:
+# Public function names (24 — 18 prior + 3 new barrier helpers added by issue #211:
 # uberdev_goal_register_batch_pr, uberdev_goal_batch_all_terminal,
 # uberdev_goal_batch_unblock_wait_clear; issue #220 adds two helpers —
 # uberdev_goal_review_pr_in_flight (in-flight gate for Phase 2b + 2c) and
 # uberdev_goal_agent_stuck_on_dialog (60s activity-window detector via
-# audit-log row-count proxy)).
+# audit-log row-count proxy); issue #329 adds the gh-failure counter reader so
+# Phase 2 can distinguish "no PR" from "PR lookup unavailable".
 for fn in uberdev_goal_state_init uberdev_goal_pr_state_transition uberdev_goal_issue_state_transition \
           uberdev_goal_read_trust_signal uberdev_goal_check_fingerprint_repeat uberdev_goal_should_automerge \
           uberdev_goal_audit uberdev_goal_locate_review_pr_audit \
@@ -385,7 +386,8 @@ for fn in uberdev_goal_state_init uberdev_goal_pr_state_transition uberdev_goal_
           uberdev_goal_list_prs_in_state uberdev_goal_read_merge_result \
           uberdev_goal_register_batch_pr \
           uberdev_goal_batch_all_terminal \
-          uberdev_goal_batch_unblock_wait_clear; do
+          uberdev_goal_batch_unblock_wait_clear \
+          uberdev_goal_gh_failure_count; do
   assert_grep "$GOAL_LIB" "^${fn}\\(\\)" "G19.public.${fn}"
 done
 # Internal function names (19 underscore-prefixed helpers — `_uberdev_goal_validate_id`
@@ -617,6 +619,7 @@ assert_grep "$GOAL_LIB" 'jq -e --argjson pr'                                    
 assert_grep "$GOAL_LIB" '/uberdev:review-pr '                                      "G32.substring-name-regex"
 assert_grep "$GOAL_LIB" '(\$\|\[\^0-9\])'                                          "G32.regex-trailing-boundary"
 assert_grep "$GOAL_LIB" 'busy\|running\|starting\|working'                         "G32.status-whitelist"
+assert_grep "$GOAL_LIB" 'background\|codex'                                         "G32.codex-background-status-file-branch"
 assert_grep "$GOAL_SKILL" 'uberdev_goal_review_pr_in_flight'                       "G32.called-from-skill"
 
 echo
@@ -2501,6 +2504,7 @@ assert_rc "$?" "1" "BT69.state-machine-merging-to-yellow-still-invalid"
 # BT70 — find_pr_for_issue: a gh FAILURE (rc!=0) is fail-open (empty + rc 0 so
 # the caller keeps re-polling) BUT emits a stderr breadcrumb — it must NOT
 # masquerade silently as "no PR yet".
+UBERDEV_GOAL_ID=test-bt70-ghcount
 MOCK_PR_LIST_JSON='[]'; MOCK_PR_LIST_RC=1
 _bt70_err="$_b12_tmpdir/bt70-stderr"; : > "$_bt70_err"
 _bt70_rc=0
@@ -2513,6 +2517,14 @@ else
   FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "BT70.find-pr-gh-failure-breadcrumb" >&2
 fi
 MOCK_PR_LIST_RC=0; MOCK_PR_LIST_JSON='[]'
+
+uberdev_goal_gh_failure_count test-bt70-ghcount >/dev/null 2>&1
+assert_rc "$?" "0" "BT70b.gh-failure-count-helper-readable"
+_bt70_count="$(uberdev_goal_gh_failure_count test-bt70-ghcount)"
+assert_eq "$_bt70_count" "1" "BT70b.find-pr-gh-failure-recorded-counter"
+_uberdev_goal_reset_gh_failure
+_bt70_reset_count="$(uberdev_goal_gh_failure_count test-bt70-ghcount)"
+assert_eq "$_bt70_reset_count" "0" "BT70b.gh-failure-counter-reset-readable"
 
 # BT71 — pr_state_gh: gh FAILURE (rc!=0) -> empty + breadcrumb; pr_is_merged false.
 MOCK_PR_STATE="OPEN"; MOCK_PR_STATE_RC=1
@@ -2729,6 +2741,27 @@ _bt76 42  0 "BT76.match-42"
 _bt76 43  1 "BT76.no-match-43"
 _bt76 421 1 "BT76.no-match-421-boundary (regression: 42 must not match 421)"
 _bt76_nl 42  0 "BT76.match-nl-wrapper (post-#235 prompt body shape matches probe regex)"
+_bt76_status_file() {
+  local backend="$1" status_name="$2" pid="$3" expected_rc="$4" label="$5"
+  local tmp got
+  tmp="$(mktemp -d)"
+  printf '{"issue":42,"backend":"%s","pid":"%s"}\n' "$backend" "$pid" > "$tmp/$status_name"
+  UBERDEV_TMPDIR="$tmp" UBERDEV_RESOLVED_BACKEND="$backend" bash -c '
+    . "'"$DISPATCH_LIB"'"
+    . "'"$GOAL_LIB"'"
+    uberdev_goal_review_pr_in_flight 42
+  '
+  got=$?
+  rm -rf "$tmp"
+  if [ "$got" -eq "$expected_rc" ]; then
+    PASS=$((PASS+1)); echo "  PASS  $label (rc=$got)"
+  else
+    FAIL=$((FAIL+1)); echo "  FAIL  $label (rc=$got want=$expected_rc)" >&2
+  fi
+}
+_bt76_status_file codex solve-codex-status-42.json "$$" 0 "BT76.codex-status-live-pid-in-flight"
+_bt76_status_file background solve-bg-status-42.json "$$" 0 "BT76.background-status-live-pid-in-flight"
+_bt76_status_file codex solve-codex-status-42.json 999999999 1 "BT76.codex-status-dead-pid-not-in-flight"
 
 echo "== BT77: Phase 2c emits goal_merge_deferred with mock in-flight /review-pr (issue #220 AC ❷) =="
 # B5 (post-impl-review): the original BT77 verified (a) the deferred event was
