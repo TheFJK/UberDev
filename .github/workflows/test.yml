@@ -120,6 +120,7 @@ jobs:
           bash tests/solve-claim.test.sh && \
           bash tests/dispatch-fallback.test.sh && \
           bash tests/dispatch-background.test.sh && \
+          bash tests/dispatch-codex.test.sh && \
           bash tests/dispatch-wezterm.test.sh && \
           bash tests/ubersimplify.test.sh && \
           bash tests/ubersimplify-aggregate.test.sh && \
@@ -145,7 +146,8 @@ jobs:
           bash tests/workflow-scripts.test.sh && \
           bash tests/workflow-args.test.sh && \
           bash tests/testers-workflow.test.sh && \
-          bash tests/scan-fleet-workflow.test.sh
+          bash tests/scan-fleet-workflow.test.sh && \
+          bash tests/codex-port.test.sh
 
   shape-checks-windows:
     name: shape-checks-windows
@@ -216,9 +218,13 @@ jobs:
         #   - uberthink.test.sh
         #   - uberthink-report.test.sh
         #   - merge-discovery-resilience.test.sh
-        #   - review-pr-phase3-ci.test.sh
-        #   - lib-assert-count.test.sh
-        # === END ci-wiring windows-skip-list ===
+#   - review-pr-phase3-ci.test.sh
+#   - lib-assert-count.test.sh
+#   - codex-port.test.sh                  (python3 -c + mktemp -d path-translation
+#                                         issue on Git Bash, same as uberscan/
+#                                         uberthink; also calls rsync which isn't
+#                                         on windows-latest's Git Bash)
+# === END ci-wiring windows-skip-list ===
         run: |
           bash tests/ci-wiring.test.sh && \
           bash tests/turbo-flow.test.sh && \
@@ -251,6 +257,7 @@ jobs:
           bash tests/solve-claim.test.sh && \
           bash tests/dispatch-fallback.test.sh && \
           bash tests/dispatch-background.test.sh && \
+          bash tests/dispatch-codex.test.sh && \
           bash tests/dispatch-wezterm.test.sh && \
           bash tests/ubersimplify.test.sh && \
           bash tests/ubersimplify-aggregate.test.sh && \

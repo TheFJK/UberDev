@@ -281,7 +281,11 @@ assert_grep "$SOLVE_PIPELINE" \
   "Phase B reads DISPATCH_RC post-condition from lib/dispatch.sh (uberdev_dispatch_one sets DISPATCH_RC + DISPATCH_ID as a documented SSOT contract — see uberdev_dispatch_one's header contract and its central SSOT reset in lib/dispatch.sh)"
 # Phase A hoist check: the version gate + BG_PROMPT_MODE assignment must
 # precede the Phase B per-issue loop (resolved once; identical for every spawn).
-SP_PHASE_A_LINE=$(grep -n '^_uberdev_require_claude_version "2.1.152"\|^BG_PROMPT_MODE=argv' "$SOLVE_PIPELINE" | head -1 | cut -d: -f1)
+# The version gate is backend-conditional (RFC 0012 §3.4 codex-port: codex
+# backend skips the claude check, see the if/else around it), so it lives in an
+# indented else-branch — no ^ anchor. BG_PROMPT_MODE stays column-0 in
+# dispatch.sh's resolve_env. Ordering is the real invariant.
+SP_PHASE_A_LINE=$(grep -nE '_uberdev_require_claude_version "2.1.152"|^BG_PROMPT_MODE=argv' "$SOLVE_PIPELINE" | head -1 | cut -d: -f1)
 SP_PHASE_B_LINE=$(grep -nE 'for ISSUE_NUM in "\$\{ISSUE_NUMS\[@\]\}"|for ISSUE_NUM in "\$\{ISSUE_NUMS\[@\]:' "$SOLVE_PIPELINE" | tail -1 | cut -d: -f1)
 if [[ -n "$SP_PHASE_A_LINE" && -n "$SP_PHASE_B_LINE" && "$SP_PHASE_A_LINE" -lt "$SP_PHASE_B_LINE" ]]; then
   echo "  PASS  Phase A hoisted before Phase B loop (line $SP_PHASE_A_LINE before $SP_PHASE_B_LINE)"
