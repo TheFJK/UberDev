@@ -4,6 +4,12 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.39.1] — 2026-07-08
+
+### Fixed
+
+- `codex/install-codex.sh` now adopts older full UberDev Codex skill installs that predate `.uberdev-codex-managed` markers, upgrades them in place, and installs the missing runtime directory while still refusing partial or user-owned skill collisions.
+
 ## [0.39.0] — 2026-07-08
 
 ### Added — Codex CLI support (RFC 0012 §3.4 codex-port)
