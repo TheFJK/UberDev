@@ -1,19 +1,19 @@
-# Per-project configuration — `.claude/uberdev.local.md`
+# Per-project configuration — `.claude/uberdev.local.md` / `.codex/uberdev.local.md`
 
 > Moved out of `using-uberdev/SKILL.md` (the SessionStart injection) by the RFC 0012 §7.7 hook diet.
 > The primer carries only a pointer here. Read this file when you need a key's type, range,
 > default, env override, or precedence rule — do not answer config questions from memory.
 
-UberDev reads optional config from `.claude/uberdev.local.md` in your project root. The file uses YAML frontmatter for typed settings:
+Claude Code reads optional config from `.claude/uberdev.local.md` in your project root. Codex prefers `.codex/uberdev.local.md` when present and falls back to `.claude/uberdev.local.md` for shared repos. The file uses YAML frontmatter for typed settings:
 
 ```yaml
 ---
 solve_tier_default: small        # one of: small, medium, large
 review_depth: full               # one of: quick, full
 parallel_solve: true
-auto_install_aliases: true       # boolean — auto-install the short-form aliases (see aliases-sync.sh for the canonical set) at SessionStart (default: true; env override: UBERDEV_NO_AUTO_ALIAS=1)
+auto_install_aliases: true       # Claude Code only: auto-install the short-form aliases (see aliases-sync.sh for the canonical set) at SessionStart (default: true; env override: UBERDEV_NO_AUTO_ALIAS=1). Codex uses $uberdev-cmd-* skills instead.
 integration_branch: main         # branch /merge lands PRs into; default = repo default branch
-dispatch_backend: auto           # one of: auto, claude-bg, wezterm, background — how /solve & /turbo dispatch per-issue agents (RFC 0004); default auto (platform-aware); env override: UBERDEV_DISPATCH_BACKEND
+dispatch_backend: auto           # one of: auto, claude-bg, wezterm, background, codex — how /solve & /turbo dispatch per-issue agents (RFC 0004/RFC 0012); default auto (platform-aware); env override: UBERDEV_DISPATCH_BACKEND
 auto_review_on_merge: false      # boolean — when true, /merge Phase 1.4 auto-dispatches /review-pr <N> --turbo once per PR with missing trust trail (whitelisted reasons only); default false; env override: UBERDEV_AUTO_REVIEW_ON_MERGE (#89)
 auto_confirm: false              # DEPRECATED — no behavioural effect. /merge is fully unattended (autopilot). Key parses for backward compat; first encounter emits a stderr deprecation notice.
 bot_authors_allow_list:          # DEPRECATED — no behavioural effect. /merge no longer gates on PR-author identity (any APPROVED + CI-green PR is eligible). Key parses for backward compat.
@@ -29,7 +29,7 @@ solve_tier_ceiling: medium       # one of: trivial, small, medium, large; clamps
 fanout_concurrency:
   research: 6                    # int [1, 50]; orchestrator Phase 1 research-fanout cap; default 6; env: UBERDEV_FANOUT_RESEARCH
   solve_bg: 6                    # int [1, 50]; /turbo parallel claude --bg fanout cap; default 6; env: UBERDEV_FANOUT_SOLVE_BG
-  post_impl_review: 5            # int [1, 50]; post-impl-review reviewer fanout cap; default 5; env: UBERDEV_FANOUT_POST_IMPL_REVIEW
+  post_impl_review: 6            # int [1, 50]; post-impl-review reviewer fanout cap; default 6; env: UBERDEV_FANOUT_POST_IMPL_REVIEW
   merge_strategy: 10             # int [1, 50]; /merge Phase 2.2 strategy-decider fanout cap; default 10; env: UBERDEV_FANOUT_MERGE_STRATEGY (alias for MAX_PARALLEL_AGENTS in merge-pipeline/SKILL.md Constants)
   conflict_resolver: 10          # int [1, 50]; /merge Phase 3.3 conflict-resolver fanout cap; default 10; env: UBERDEV_FANOUT_CONFLICT_RESOLVER (NEW — Phase 3.3 was uncapped previously)
 
@@ -46,7 +46,7 @@ command_timeouts:
 
 Settings take effect on next SessionStart. Environment variables (`UBERDEV_FANOUT_SOLVE_BG`, `SOLVE_AUTO`, etc.) override file settings — use whichever is more convenient for your workflow.
 
-**Auto-installed aliases:** UberDev's SessionStart hook installs 13 top-level forwarder commands (`/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`, `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify`, `/uberthink`, `/ubercluster`) into `~/.claude/commands/` on first session and refreshes them on plugin upgrade. The `ALIASES` table in `lib/aliases-sync.sh` is the canonical set (SSOT) — this paragraph mirrors it and is count-checked by `tests/docs-accuracy.test.sh`. Hand-authored files at any of those paths are preserved (the hook detects them via a `managed-by: uberdev-aliases` marker and skips). Disable per-project with `auto_install_aliases: false` or globally with `UBERDEV_NO_AUTO_ALIAS=1`. Remove already-installed forwarders with `/uberdev:uninstall-aliases`.
+**Auto-installed aliases (Claude Code only):** UberDev's SessionStart hook installs 13 top-level forwarder commands (`/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`, `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify`, `/uberthink`, `/ubercluster`) into Claude Code's user commands directory on first session and refreshes them on plugin upgrade. The `ALIASES` table in `lib/aliases-sync.sh` is the canonical set (SSOT) — this paragraph mirrors it and is count-checked by `tests/docs-accuracy.test.sh`. Hand-authored files at any of those command paths are preserved (the hook detects them via a `managed-by: uberdev-aliases` marker and skips). Disable per-project with `auto_install_aliases: false` or globally with `UBERDEV_NO_AUTO_ALIAS=1`. Remove already-installed forwarders with `/uberdev:uninstall-aliases`. Codex does not have a slash-alias install path; use the installed `$uberdev-cmd-*` skills instead.
 
 **`integration_branch` precedence:** CLI flag `--integration-branch=<name>` > env var `UBERDEV_INTEGRATION_BRANCH` > config file (this YAML) > `gh repo view --json defaultBranchRef`. If all four tiers are empty, `/merge` falls back to the literal `main` and emits a one-line stderr warning — it does NOT prompt (autopilot is unconditional).
 
@@ -71,13 +71,13 @@ skill splits dispatch into `ceil(N / cap)` sequential single-message
 waves (the per-wave single-message Task() invariant is preserved).
 Useful for rate-limited tiers and laptop runs where 10 parallel Claude
 sessions overwhelm RAM. `solve_bg` caps the number of parallel `claude --bg` background sessions dispatched by `/turbo` (and `/solve` when multiple issue numbers are passed). Larger queues split into `ceil(N / cap)` sequential single-message waves with per-wave `solve_bg_fanout_wave_started` audit events. Mirrors `merge_strategy` (`merge-pipeline/SKILL.md:401`).
-Defaults: 6 / 5 / 10 / 10 / 6 respectively. Env overrides: `UBERDEV_FANOUT_{RESEARCH, POST_IMPL_REVIEW, MERGE_STRATEGY, CONFLICT_RESOLVER, SOLVE_BG}`. Note: `conflict_resolver`
+Defaults: 6 / 6 / 10 / 10 / 6 respectively. Env overrides: `UBERDEV_FANOUT_{RESEARCH, POST_IMPL_REVIEW, MERGE_STRATEGY, CONFLICT_RESOLVER, SOLVE_BG}`. Note: `conflict_resolver`
 introduces a NEW default cap of 10 in Phase 3.3 of `/merge`, where the
 fanout was previously uncapped — queues of 11+ conflicted files in a
 single PR now chunk into multiple waves (intentional behavioural
 change; matches the `merge_strategy` chunking precedent).
 
-**`dispatch_backend` precedence (RFC 0004):** CLI flag `--backend=<name>` > env var `UBERDEV_DISPATCH_BACKEND` > config file (this YAML) > default `auto`. Accepts `auto | claude-bg | wezterm | background`. `auto` resolves once per `/solve` or `/turbo` invocation via `lib/dispatch.sh`'s preflight: macOS → `wezterm` (if its mux comes up) else `claude-bg`; native Windows → `wezterm` (if available) else `background`; WSL2 → `claude-bg`. The resolved backend is committed for the whole batch — a fan-out is never split across backends. An explicit `--backend=X` hard-errors before any dispatch if `X` is unusable on the host (e.g. `--backend=wezterm` from WSL2 targeting a native-Windows WezTerm). Invalid values fall back to `auto` non-fatally and emit a `uberdev_config_invalid` audit event via the existing `uberdev_read_enum` machinery.
+**`dispatch_backend` precedence (RFC 0004 / RFC 0012):** CLI flag `--backend=<name>` > env var `UBERDEV_DISPATCH_BACKEND` > config file (this YAML) > default `auto`. Accepts `auto | claude-bg | wezterm | background | codex`. `auto` resolves once per `/solve` or `/turbo` invocation via `lib/dispatch.sh`'s preflight: Codex session (`CODEX_HOME` set) or Codex-only host → `codex`; macOS → `wezterm` (if its mux comes up) else `claude-bg`; native Windows → `wezterm` (if available) else `background`; WSL2 → `claude-bg`. The resolved backend is committed for the whole batch — a fan-out is never split across backends. An explicit `--backend=X` hard-errors before any dispatch if `X` is unusable on the host (e.g. `--backend=wezterm` from WSL2 targeting a native-Windows WezTerm, or `--backend=codex` without `codex` on PATH). Invalid values fall back to `auto` non-fatally and emit a `uberdev_config_invalid` audit event via the existing `uberdev_read_enum` machinery.
 
 **`command_timeouts.{solve, review_pr, merge}`:** per-command
 wall-clock timeout in seconds, range `[60, 86400]` (1m–24h).

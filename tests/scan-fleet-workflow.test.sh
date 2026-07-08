@@ -21,6 +21,7 @@ set -o pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SKILL="$REPO_ROOT/plugins/uberdev/skills/scan-fleet/SKILL.md"
 WORKFLOW="$REPO_ROOT/plugins/uberdev/skills/scan-fleet/workflow.js"
+CODEX_RUNTIME="$REPO_ROOT/codex/uberdev-codex"
 HARNESS="$REPO_ROOT/tests/_workflow_harness.js"
 
 for f in "$SKILL" "$WORKFLOW" "$HARNESS"; do
@@ -80,6 +81,17 @@ fi
 grep -q 'NEVER parallel' "$WORKFLOW" \
   && pass "G-5 the apply fixer loop is documented sequential (git-index race guard)" \
   || fail "G-5 no sequential-apply guard documented"
+
+missing_prompts=""
+for src in "$REPO_ROOT/plugins/uberdev/agents"/*.md; do
+  base="$(basename "$src")"
+  [ -r "$CODEX_RUNTIME/agents/$base" ] || missing_prompts="${missing_prompts} ${base}"
+done
+if [ -z "$missing_prompts" ]; then
+  pass "G-6 Codex runtime bundles all Markdown agent prompts scan-fleet workflow reads"
+else
+  fail "G-6 Codex runtime missing Markdown agent prompts:${missing_prompts}"
+fi
 
 # ---------------------------------------------------------------------------
 # Shape greps over the §4.2 sibling SKILL.md seam

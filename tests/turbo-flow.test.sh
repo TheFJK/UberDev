@@ -281,7 +281,11 @@ assert_grep "$SOLVE_PIPELINE" \
   "Phase B reads DISPATCH_RC post-condition from lib/dispatch.sh (uberdev_dispatch_one sets DISPATCH_RC + DISPATCH_ID as a documented SSOT contract — see uberdev_dispatch_one's header contract and its central SSOT reset in lib/dispatch.sh)"
 # Phase A hoist check: the version gate + BG_PROMPT_MODE assignment must
 # precede the Phase B per-issue loop (resolved once; identical for every spawn).
-SP_PHASE_A_LINE=$(grep -n '^_uberdev_require_claude_version "2.1.152"\|^BG_PROMPT_MODE=argv' "$SOLVE_PIPELINE" | head -1 | cut -d: -f1)
+# The version gate is backend-conditional (RFC 0012 §3.4 codex-port: codex
+# backend skips the claude check, see the if/else around it), so it lives in an
+# indented else-branch — no ^ anchor. BG_PROMPT_MODE stays column-0 in
+# dispatch.sh's resolve_env. Ordering is the real invariant.
+SP_PHASE_A_LINE=$(grep -nE '_uberdev_require_claude_version "2.1.152"|^BG_PROMPT_MODE=argv' "$SOLVE_PIPELINE" | head -1 | cut -d: -f1)
 SP_PHASE_B_LINE=$(grep -nE 'for ISSUE_NUM in "\$\{ISSUE_NUMS\[@\]\}"|for ISSUE_NUM in "\$\{ISSUE_NUMS\[@\]:' "$SOLVE_PIPELINE" | tail -1 | cut -d: -f1)
 if [[ -n "$SP_PHASE_A_LINE" && -n "$SP_PHASE_B_LINE" && "$SP_PHASE_A_LINE" -lt "$SP_PHASE_B_LINE" ]]; then
   echo "  PASS  Phase A hoisted before Phase B loop (line $SP_PHASE_A_LINE before $SP_PHASE_B_LINE)"
@@ -457,18 +461,13 @@ assert_not_grep "$SUBAGENT_DRIVEN" 'WAVE.*final|WAVE: .final.' \
   "subagent-driven-dev no longer passes WAVE=final (no in-skill post-impl-review dispatch post-#67)"
 
 echo
-echo "== turbo medium/large parity: end-of-issue post-impl-review documented in turbo.md =="
-assert_grep "$TURBO_CMD" 'post-impl-review.* once at end-of-issue' \
-  "turbo.md documents end-of-issue post-impl-review for medium/large"
-assert_grep "$TURBO_CMD" 'consolidated across all waves' \
-  "turbo.md names the consolidated semantics (one fanout, all waves)"
-if grep -qE 'uberdev:post-impl-review. per wave' "$TURBO_CMD"; then
-  echo "  FAIL  obsolete 'per wave' wording in turbo.md medium/large bullet must be removed"
-  FAIL=$((FAIL + 1))
-else
-  echo "  PASS  turbo.md medium/large bullet drops 'per wave' wording"
-  PASS=$((PASS + 1))
-fi
+echo "== turbo medium/large parity: post-push post-impl-review documented in turbo.md =="
+assert_grep "$TURBO_CMD" 'post-PR-push.*(/review-pr|review-pr).*Phase 1|(/review-pr|review-pr).*Phase 1.*post-PR-push' \
+  "turbo.md documents post-push /review-pr Phase 1 post-impl-review for medium/large"
+assert_grep "$TURBO_CMD" 'against the pushed diff' \
+  "turbo.md names the pushed-diff review target"
+assert_not_grep "$TURBO_CMD" 'post-impl-review.*once at end-of-issue|consolidated across all waves|uberdev:post-impl-review. per wave' \
+  "turbo.md drops retired end-of-issue/per-wave post-impl-review wording"
 
 echo
 echo "== finish-branch composes new PR-body sections =="

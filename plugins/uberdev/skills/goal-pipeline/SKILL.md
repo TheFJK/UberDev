@@ -19,7 +19,7 @@ All audit-event names, state-machine enums, regex shapes, and tunable thresholds
 
 ```
 GOAL_AUDIT_EVENT_ENUM='goal_dispatched|goal_pr_transition|goal_unblock_triggered|goal_cycle_completed|goal_converged|goal_circuit_breaker|goal_merge_deferred|goal_review_pr_deferred|goal_review_grace|goal_reaper_kill|goal_reaper_skipped|goal_issue_closed_without_pr'
-GOAL_CIRCUIT_BREAKER_REASONS='max_cycles|nonconvergence|stuck_loop|merge_failed|gh_api_failed|unknown_merge_result|queue_empty_not_converged|agent_stuck_on_dialog'
+GOAL_CIRCUIT_BREAKER_REASONS='max_cycles|nonconvergence|stuck_loop|merge_failed|gh_api_failed|unknown_merge_result|queue_empty_not_converged|agent_stuck_on_dialog|solver_failed'
 GOAL_PR_STATE_ENUM='dispatched|pushed-reviewing|green|yellow-held|red-held|merging|merged|merge-failed'
 GOAL_ISSUE_STATE_ENUM='input|dispatched|solving|pr-pushed|resolved|resolved-by-no-action|failed'
 TRUST_SIGNAL_ENUM='green|yellow|red|stale|missing'
@@ -42,7 +42,7 @@ BLOCKS_LINE_REGEX='^Blocks: #([0-9]+)$'
 Notes on the enums:
 
 - **`GOAL_AUDIT_EVENT_ENUM`** — the 12 events `lib/goal-state.sh::uberdev_goal_audit` accepts. Any other event name returns non-zero from the helper and is dropped on the floor; consumers grep these literals.
-- **`GOAL_CIRCUIT_BREAKER_REASONS`** — the 8 halt reasons emitted by Phase 2/3/4 inside the `goal_circuit_breaker` payload's `.reason` field. The four original reasons (`max_cycles`, `nonconvergence`, `stuck_loop`, `merge_failed`); two surfaced-failure reasons added during post-impl-review (`gh_api_failed` — Phase 3 `gh issue list` rc!=0 instead of falsely treating an empty candidates list as convergence; `unknown_merge_result` — Phase 2d case default arm for a `uberdev_goal_read_merge_result` value outside the documented `success|conflict|hook_failed|missing` set); and `queue_empty_not_converged` — Phase 3 deterministic halt when the candidate queue is empty but at least one PR is still in a non-terminal state (issue #160; deterministic alternative to the 4h `stuck_loop` wall-clock fallback); and `agent_stuck_on_dialog` (issue #220 — Phase 2 stuck-on-dialog detector, see Component 3.4). The set is closed; new reasons require an RFC amendment.
+- **`GOAL_CIRCUIT_BREAKER_REASONS`** — the 9 halt reasons emitted by Phase 2/3/4 inside the `goal_circuit_breaker` payload's `.reason` field. The four original reasons (`max_cycles`, `nonconvergence`, `stuck_loop`, `merge_failed`); two surfaced-failure reasons added during post-impl-review (`gh_api_failed` — Phase 3 `gh issue list` rc!=0 instead of falsely treating an empty candidates list as convergence; `unknown_merge_result` — Phase 2d case default arm for a `uberdev_goal_read_merge_result` value outside the documented `success|conflict|hook_failed|missing` set); `queue_empty_not_converged` — Phase 3 deterministic halt when the candidate queue is empty but at least one PR is still in a non-terminal state (issue #160; deterministic alternative to the 4h `stuck_loop` wall-clock fallback); `agent_stuck_on_dialog` (issue #220 — Phase 2 stuck-on-dialog detector, see Component 3.4); and `solver_failed` — a dispatched solver reached a terminal failed/no-PR state, so convergence would be false. The set is closed; new reasons require an RFC amendment.
 - **`GOAL_PR_STATE_ENUM`** — the 8 states the PR machine in `_uberdev_goal_pr_state_machine_valid` recognises. `merged` and `merge-failed` are hard terminal (no further transitions); `yellow-held` and `red-held` are pseudo-terminal for convergence (Phase 3 counts them as terminal so the goal can converge cleanly with held PRs remaining, but the held-PR re-review poll loop in Phase 2 step 2e can still arc them to `green` once a re-review clears the findings, or cross-classify between `yellow-held`/`red-held` if a re-review's trust signal severity changed). `yellow-held → merging` and `red-held → merging` are hard-forbidden (D17 — never merge YELLOW/RED inside `/goal`).
 - **`GOAL_ISSUE_STATE_ENUM`** — the 7 states the issue machine recognises. Happy path: `input → dispatched → solving → pr-pushed → resolved`. Close-without-PR path (issue #249): `input → dispatched → solving → resolved-by-no-action` — distinct from `resolved` (which means "PR landed and the issue auto-closed via `Closes #N`"); `resolved-by-no-action` means `/uberdev:orchestrator` legitimately closed the GitHub issue without producing a PR (e.g. stale finding, already-resolved). `dispatched` (issue #236) is written by the parent BEFORE `uberdev_dispatch_one` so any leaf-side crash between spawn and the post-spawn `solving` write still leaves a TSV row the Phase-1 skip-check (`dispatched|solving|pr-pushed`) matches on the next cycle — closes the silent double-spawn surface where a pre-state-write leaf failure looked identical to "never attempted". `pr-pushed → resolved` and the three `→ failed` sinks (`dispatched`, `solving`, `pr-pushed`) are terminal.
 - **`TRUST_SIGNAL_ENUM`** — the 5 values `uberdev_goal_read_trust_signal` returns. `stale` (phase2_5 missing in audit JSON) and `missing` (audit JSON absent) both trigger `_uberdev_goal_dispatch_review_pr` rather than an assumed GREEN (D17).
@@ -272,7 +272,9 @@ Notes on the enums:
 
    ```bash
    [ -r "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh" ] && . "${CLAUDE_PLUGIN_ROOT}/lib/dispatch.sh"
-   uberdev_dispatch_preflight "${backend_cli:-auto}"
+   UBERDEV_DISPATCH_BACKEND_REQUESTED="${backend_cli:-${UBERDEV_DISPATCH_BACKEND_REQUESTED:-auto}}"
+   export UBERDEV_DISPATCH_BACKEND_REQUESTED
+   uberdev_dispatch_preflight
    # UBERDEV_RESOLVED_BACKEND is now exported (D15: resolved once, frozen for the run).
    # /goal dispatches /uberdev:orchestrator per issue; mirror /turbo's unattended dispatch env so the orchestrator child inherits the same flags /turbo would have set.
    export AUTO_MODE=1            # matches commands/turbo.md (enables UBERDEV_TURBO=1 in the bg env)
@@ -282,7 +284,7 @@ Notes on the enums:
    # /turbo + /solve defensively unset this var (see commands/turbo.md and
    # commands/solve.md). EFFORT_LEVEL stays unset -> helper applies :-max.
    export SKIP_PERMISSIONS=1     # (#241) /goal autonomous-loop opt-in; propagation via BG_TURBO_ENV — see lib/dispatch.sh BG_TURBO_ENV blocks
-   uberdev_dispatch_resolve_env || exit 1   # establishes TIMEOUT_BIN/SOLVE_TIMEOUT/MODEL/PERM_FLAG/EFFORT_FLAG/BG_PROMPT_MODE once
+   uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # establishes TIMEOUT_BIN/SOLVE_TIMEOUT/MODEL/PERM_FLAG/EFFORT_FLAG/BG_PROMPT_MODE once
    ```
 
 5. **Generate `GOAL_ID`.** Random suffix per D4 — NEVER derived from `$@` or issue numbers (those are attacker-controlled; using them would let a caller collide TMPDIR paths):
@@ -375,7 +377,7 @@ Per cycle, walk the current `queue` and dispatch one `/uberdev:orchestrator` age
 [ -r "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh" ]  && . "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh"
 GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
 uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 1" >&2; exit 3; }
-uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
+uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 
 # Issue #288 #2 (CRITICAL) — cycle-ceiling backstop at the TOP of Phase 1.
 # `cycle` is incremented + checked against MAX_CYCLES only inside the Phase-3
@@ -650,7 +652,7 @@ uberdev_goal_write_run_state || { echo "goal: failed to persist run-state after 
 [ -r "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh" ]  && . "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh"
 GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
 uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 2" >&2; exit 3; }
-uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
+uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 # watch_start is set in Phase 0 (step 7) — goal-level wall-clock anchor.
 # The 4h stuck-loop check below measures total goal wall-clock, not per-cycle.
 # Q1 — bash supports ONE EXIT trap per shell; register the combined cleanup
@@ -720,10 +722,30 @@ while true; do
   # issue N exists on GitHub (`closingIssuesReferences` / `feat/N-` head). When
   # no PR exists yet, `uberdev_goal_agent_busy_for_issue` disambiguates "solver
   # still working" from "solver died", bounded by _UBERDEV_GOAL_SOLVE_TIMEOUT.
+  _uberdev_goal_phase2_release_claim() {
+    local issue="$1" context="${2:-terminal}" release_err release_rc
+    _uberdev_goal_validate_int "$issue" || return 0
+    release_err="$(gh issue edit "$issue" --remove-label "uberdev:active" --remove-assignee "@me" 2>&1 >/dev/null)"
+    release_rc=$?
+    if [ "$release_rc" -ne 0 ]; then
+      printf 'goal-pipeline: WARN release uberdev:active claim failed for issue %s (%s, rc=%d): %s\n' \
+        "$issue" "$context" "$release_rc" "$release_err" >&2
+    fi
+    return 0
+  }
+
   for issue in "${active_issues[@]}"; do
     istate="$(uberdev_goal_get_issue_state "$GOAL_ID" "$issue" 2>/dev/null)"
     case "$istate" in pr-pushed|resolved|resolved-by-no-action|failed) continue ;; esac
     pr_num="$(uberdev_goal_find_pr_for_issue "$issue")"
+    _gh_failure_count="$(uberdev_goal_gh_failure_count "$GOAL_ID" 2>/dev/null || printf '0')"
+    _uberdev_goal_validate_int "$_gh_failure_count" || _gh_failure_count=0
+    if [ -z "$pr_num" ] && [ "$_gh_failure_count" -gt 0 ]; then
+      printf 'goal-pipeline: PR lookup for issue %s is unavailable after gh failure count=%s — deferring no-PR classification\n' \
+        "$issue" "$_gh_failure_count" >&2
+      any_active=1
+      continue
+    fi
     if [ -n "$pr_num" ]; then
       # #211 — register the PR into the batch-PR registry once it's resolved.
       # Registration is deferred from Phase 1 (no PR number at dispatch-time)
@@ -753,6 +775,43 @@ while true; do
     if uberdev_goal_agent_busy_for_issue "$issue"; then
       any_active=1
     else
+      _codex_state=""
+      _codex_exit=""
+      _codex_log=""
+      _codex_result=""
+      if [ "${UBERDEV_RESOLVED_BACKEND:-}" = "codex" ]; then
+        if _codex_status="$(uberdev_goal_codex_status_for_issue "$issue")"; then
+          _codex_state="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $1}')"
+          _codex_exit="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $2}')"
+          _codex_log="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $3}')"
+          _codex_result="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $4}')"
+        else
+          _codex_status_rc=$?
+          if [ "$_codex_status_rc" -eq 2 ]; then
+            printf 'goal-pipeline: invalid Codex status for issue %s — failing solver instead of waiting for timeout\n' "$issue" >&2
+            uberdev_goal_issue_state_transition "$GOAL_ID" "$issue" solving failed \
+              || printf 'goal-pipeline: WARN transition solving->failed failed for Codex issue %s (invalid status file)\n' "$issue" >&2
+            _uberdev_goal_phase2_release_claim "$issue" "invalid_status"
+            uberdev_goal_audit goal_circuit_breaker \
+              "{\"reason\":\"solver_failed\",\"issue\":$issue,\"backend\":\"codex\",\"state\":\"invalid_status\",\"exit_code\":null}"
+            _uberdev_goal_reap_zombies || true
+            print_summary "$cycle"
+            exit 1
+          fi
+        fi
+        if [ "$_codex_state" = "failed" ]; then
+          printf 'goal-pipeline: codex agent for issue %s failed (exit_code=%s; log=%s; result=%s)\n' \
+            "$issue" "${_codex_exit:-unknown}" "${_codex_log:-unknown}" "${_codex_result:-unknown}" >&2
+          uberdev_goal_issue_state_transition "$GOAL_ID" "$issue" solving failed \
+            || printf 'goal-pipeline: WARN transition solving->failed failed for Codex issue %s (status file reports failed)\n' "$issue" >&2
+          _uberdev_goal_phase2_release_claim "$issue" "codex_failed"
+          uberdev_goal_audit goal_circuit_breaker \
+            "{\"reason\":\"solver_failed\",\"issue\":$issue,\"backend\":\"codex\",\"state\":\"failed\",\"exit_code\":${_codex_exit:-null}}"
+          _uberdev_goal_reap_zombies || true
+          print_summary "$cycle"
+          exit 1
+        fi
+      fi
       # Issue #249 — issue may have been legitimately closed without a PR
       # (orchestrator marked it stale / already-resolved / non-actionable —
       # concrete prior cases: #226 / #227). Probe GitHub state before falling
@@ -779,17 +838,31 @@ while true; do
             printf 'goal-pipeline: WARN audit goal_issue_closed_without_pr failed for issue %s (rc=%d) — close-without-PR row may be missing from audit log\n' \
               "$issue" "$?" >&2
           # Issue #291 #1 — terminal non-merge transition: release the
-          # cross-process `uberdev:active` claim. Inlined here (Phase 2 is a
-          # fresh shell; the Phase-1 _uberdev_goal_release_claim helper is not in
-          # scope) — combined remove-label + remove-assignee, fail-soft (the
-          # issue is already CLOSED, so the label is stale; mirrors merge Step 3.4).
-          gh issue edit "$issue" --remove-label "uberdev:active" --remove-assignee "@me" >/dev/null 2>&1 || true
+          # cross-process `uberdev:active` claim via the Phase 2 local helper.
+          # Phase 2 is a fresh shell, so the Phase-1 _uberdev_goal_release_claim
+          # helper is not in scope; the local helper keeps the same fail-soft
+          # semantics while surfacing release failures as breadcrumbs.
+          _uberdev_goal_phase2_release_claim "$issue" "closed_without_pr"
           continue
         fi
       fi
       if [ "$gh_rc" -ne 0 ]; then
-        printf 'goal-pipeline: gh issue view %s failed rc=%d — falling through to timeout backstop\n' \
+        _uberdev_goal_record_gh_failure
+        printf 'goal-pipeline: gh issue view %s failed rc=%d — deferring no-PR classification until GitHub state probe succeeds\n' \
           "$issue" "$gh_rc" >&2
+        any_active=1
+        continue
+      elif [ "$_codex_state" = "completed" ]; then
+        printf 'goal-pipeline: codex agent for issue %s completed without a PR or closed issue (exit_code=%s; log=%s; result=%s)\n' \
+          "$issue" "${_codex_exit:-unknown}" "${_codex_log:-unknown}" "${_codex_result:-unknown}" >&2
+        uberdev_goal_issue_state_transition "$GOAL_ID" "$issue" solving failed \
+          || printf 'goal-pipeline: WARN transition solving->failed failed for Codex issue %s (status file reports completed without PR)\n' "$issue" >&2
+        _uberdev_goal_phase2_release_claim "$issue" "codex_completed_no_pr"
+        uberdev_goal_audit goal_circuit_breaker \
+          "{\"reason\":\"solver_failed\",\"issue\":$issue,\"backend\":\"codex\",\"state\":\"completed\",\"exit_code\":${_codex_exit:-null}}"
+        _uberdev_goal_reap_zombies || true
+        print_summary "$cycle"
+        exit 1
       fi
       dispatch_ts="$(uberdev_goal_issue_ts_in_state "$GOAL_ID" "$issue" solving 2>/dev/null)"
       if [ "$(( now - dispatch_ts ))" -lt "$_UBERDEV_GOAL_SOLVE_TIMEOUT" ]; then
@@ -801,8 +874,8 @@ while true; do
         # Issue #291 #1 — terminal non-merge transition (SOLVE_TIMEOUT, no PR):
         # the GitHub issue is still OPEN, so a stranded `uberdev:active` claim
         # would block every future /goal cycle AND any manual /solve retry on
-        # this issue. Release it (inlined — fresh-shell Phase 2; fail-soft).
-        gh issue edit "$issue" --remove-label "uberdev:active" --remove-assignee "@me" >/dev/null 2>&1 || true
+        # this issue. Release it through the Phase 2 local helper.
+        _uberdev_goal_phase2_release_claim "$issue" "solve_timeout"
       fi
     fi
   done
@@ -1360,7 +1433,7 @@ After Phase 2 drains (no active agents, no merging PRs), enumerate the new BLOCK
 [ -r "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh" ]  && . "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh"
 GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
 uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 3" >&2; exit 3; }
-uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
+uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 # Snapshot goal start for the createdAt filter — only consider findings filed
 # during THIS goal run, not pre-existing review-pr-finding issues that pre-date
 # the cycle. The TZ-Z timestamp lines up with gh's ISO-8601 createdAt format.
@@ -1464,7 +1537,7 @@ For each candidate, extract the fingerprint and check for repeat (`new_candidate
 [ -r "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh" ]  && . "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh"
 GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
 uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 3 (fingerprint loop)" >&2; exit 3; }
-uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
+uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 for issue in "${new_candidates[@]}"; do
   # Issues don't go through _uberdev_goal_fetch_pr_body (PR-specific helper);
   # keep the inline gh issue view + 64KiB cap here. The cap shape is shared
@@ -1503,7 +1576,7 @@ done
 [ -r "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh" ]  && . "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh"
 GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
 uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 3 (overflow check)" >&2; exit 3; }
-uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
+uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 # overflow_detected is set in Phase 2b's red case when any PR's /review-pr
 # audit JSON carried halted_due_to_overflow:true. Here in Phase 3 we apply
 # the first-10 truncation (no PR transition — Phase 2b already did that).
@@ -1521,6 +1594,7 @@ fi
 
 Every "converge / halt" gate below is additionally guarded on the rollover `queue` being EMPTY (`${#queue[@]} -eq 0`, issue #288 #1). When more issues than `--max-parallel` were queued, Phase 1 defers the overflow into `queue`; those issues have not been dispatched and have no PR, so they are invisible to the PR-state terminal calculus. A non-empty `queue` therefore falls THROUGH every terminal gate to the loop-back, which re-enters Phase 1 to drain it — the goal can never declare convergence (or a queue-empty halt) while rolled-over issues are still pending dispatch.
 
+- If any issue in the run is `failed`: halt with `goal_circuit_breaker reason=solver_failed`, exit 1. A failed solver is terminal work, but not successful convergence.
 - If `cycle >= MAX_CYCLES` AND `new_candidates` is non-empty: halt with `goal_circuit_breaker reason=max_cycles`, exit 1. The operator has explicitly capped iteration count via `--max-cycles=N` or the `goal.max_cycles` config key; we respect the cap rather than spinning forever. (A `cycle > MAX_CYCLES` over-run is ALSO caught at the top of Phase 1 — issue #288 #2 — so the ceiling holds regardless of which fence the orchestrator re-enters.)
 - If `new_candidates` is empty AND every PR in this run is in `{merged, merge-failed, yellow-held, red-held}` AND `queue` is empty: convergence reached, emit `goal_converged`, exit 0. Held states are **pseudo-terminal for convergence** (#160) — they are surfaced to the operator via `print_summary` (each held PR's `Blocks: #N` list is printed) and are addressed out-of-band; counting them as terminal here is what lets the goal converge cleanly instead of spinning until the 4h `stuck_loop` fires. `merge-failed` PRs are counted as terminal-converged because the merge-failed circuit breaker would have already fired upstream — reaching this state means every PR has been driven to a stable resting state.
 - If `new_candidates` is empty AND `queue` is empty AND at least one PR is still in a non-terminal in-flight state (`dispatched`, `pushed-reviewing`, `green` not yet merged, `merging`): emit `goal_circuit_breaker reason=queue_empty_not_converged`, exit 1 (#160). This is the deterministic alternative to the 4h `stuck_loop` wall-clock fallback — the queue is drained but PRs are stuck, so surface immediately instead of spinning against the GitHub API.
@@ -1534,7 +1608,15 @@ Every "converge / halt" gate below is additionally guarded on the rollover `queu
 [ -r "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh" ]  && . "${CLAUDE_PLUGIN_ROOT}/lib/goal-state.sh"
 GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
 uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 3 (terminal check)" >&2; exit 3; }
-uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
+uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # re-derive backend/env (idempotent, D8); not persisted
+failed_issue_count="$(uberdev_goal_count_failed_issues "$GOAL_ID")"
+if [ "$failed_issue_count" -gt 0 ]; then
+  uberdev_goal_audit goal_circuit_breaker \
+    "{\"reason\":\"solver_failed\",\"cycle\":$cycle,\"failed_issues\":$failed_issue_count}"
+  _uberdev_goal_reap_zombies || true
+  print_summary "$cycle"
+  exit 1
+fi
 if [ "$cycle" -ge "$MAX_CYCLES" ] && [ "${#new_candidates[@]}" -gt 0 ]; then
   uberdev_goal_audit goal_circuit_breaker \
     "{\"reason\":\"max_cycles\",\"cycle\":$cycle,\"max\":$MAX_CYCLES,\"queued\":${#new_candidates[@]}}"
@@ -1685,6 +1767,6 @@ Called from Phase 2 step 2d on every `merging → merged` PR transition, for eac
 
 - **Phase 0 resolves once.** `uberdev_dispatch_preflight` sets `UBERDEV_RESOLVED_BACKEND` for the whole run; no per-cycle re-resolution at the goal level.
 - **Phase 1 no longer forwards `--backend=` as a CLI arg.** The `/uberdev:orchestrator` invocation does not accept a `--backend=` flag, so backend is *not* threaded through argv — only through the env table.
-- **Env-var inheritance via `claude --bg` is the canonical mechanism.** `claude --bg` inherits the parent shell's full env table by default; every child (orchestrator, plus the Phase 2 `/merge` and `/review-pr` dispatches in `lib/goal-state.sh::_uberdev_goal_dispatch_{merge,review_pr}`) re-resolves the backend in its own preflight from `UBERDEV_RESOLVED_BACKEND`.
+- **Backend inheritance via `UBERDEV_RESOLVED_BACKEND` is the canonical mechanism.** `claude-bg` inherits the parent shell's full env table, while `background` and `codex` also write PID/status files for the file-polled paths. Every child (orchestrator, plus the Phase 2 `/merge` and `/review-pr` dispatches in `lib/goal-state.sh::_uberdev_goal_dispatch_{merge,review_pr}`) re-resolves the backend in its own preflight from `UBERDEV_RESOLVED_BACKEND`.
 - **Orthogonal to `BG_TURBO_ENV`.** The env-var path carries `UBERDEV_RESOLVED_BACKEND`; `BG_TURBO_ENV` carries only `UBERDEV_TURBO` + `SKIP_PERMISSIONS`. Both reach the child via independent mechanisms (env table for backend, the BG_TURBO_ENV array-wrap for the permission/turbo flags).
-- **Per-cycle re-resolution forbidden.** A transient `claude --version` flake mid-run must not silently swap backends — splitting a single goal's solvers across incompatible dispatch mechanisms. Each backend (`claude-bg` / `wezterm` / `background`) has its own session-management and worktree conventions that must stay stable across cycles so the gh + file detection signals (PR discovery via `closingIssuesReferences`, liveness via `claude agents --json` cwd matching, verdict via the file-based locator — issue #180) resolve consistently for every solver in the run.
+- **Per-cycle re-resolution forbidden.** A transient CLI probe flake mid-run must not silently swap backends — splitting a single goal's solvers across incompatible dispatch mechanisms. Each backend (`claude-bg` / `wezterm` / `background` / `codex`) has its own session-management and worktree conventions that must stay stable across cycles so the gh + file detection signals (PR discovery via `closingIssuesReferences`, backend-specific liveness, verdict via the file-based locator — issue #180) resolve consistently for every solver in the run.

@@ -1,0 +1,20 @@
+{
+  "name": "uberdev",
+  "interface": {
+    "displayName": "UberDev"
+  },
+  "plugins": [
+    {
+      "name": "uberdev-codex",
+      "source": {
+        "source": "local",
+        "path": "./codex/uberdev-codex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "workflow"
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 ---
 name: solve-pipeline
-description: "Shared launcher pipeline for /uberdev:solve and /uberdev:turbo. Parses arguments, classifies tier, writes tier-appropriate prompt, dispatches a Claude agent into a fresh terminal session per issue. The executable lives in lib/solve-launcher.sh and runs as ONE Bash call; this skill is the contract + triage reference. Invoked by both commands — never call directly."
+description: "Shared launcher pipeline for /uberdev:solve and /uberdev:turbo. Parses arguments, classifies tier, writes tier-appropriate prompt, dispatches an autonomous agent through the resolved backend per issue. The executable lives in lib/solve-launcher.sh and runs as ONE Bash call; this skill is the contract + triage reference. Invoked by both commands — never call directly."
 ---
 
 # Solve Pipeline (shared contract for /solve and /turbo)
@@ -12,6 +12,8 @@ the command files run as **ONE Bash tool call**:
 bash "$CLAUDE_PLUGIN_ROOT/lib/solve-launcher.sh" --auto-mode=0 -- <user arguments>   # /solve
 bash "$CLAUDE_PLUGIN_ROOT/lib/solve-launcher.sh" --auto-mode=1 --turbo -- <user arguments>   # /turbo
 ```
+
+On Codex, the command-skills call the same launcher through `$PLUGIN_ROOT`.
 
 Why one call, why a lib file (#304 root fix, RFC 0012 §3.4): Bash tool calls
 share **no shell state** — the historical multi-fence pipeline silently lost
@@ -41,14 +43,17 @@ prior-fence `unset` protects nothing).
 The launcher validates every issue up front (Phase A, validate-all-first),
 echoes one `triage:` signal line per issue, claims each issue (Step 4.5), and
 dispatches one autonomous agent per issue (Phase B) via the platform-aware
-backend in `lib/dispatch.sh` (`claude-bg` / `wezterm` / `background`).
+backend in `lib/dispatch.sh` (`claude-bg` / `wezterm` / `background` / `codex`).
+The `codex` backend is also available under Codex or via `--backend=codex`;
+it runs detached `codex --ask-for-approval never exec --sandbox workspace-write --json -o <result>`.
 Per-issue artifacts (`$UBERDEV_TMPDIR/solve-prompt-N.txt`,
-`$UBERDEV_TMPDIR/solve-bg-stdout-N.log`, `.claude/worktrees/solve-issue-N/`,
-`worktree-solve-issue-N` branch) are namespaced by issue number, so
-concurrent spawns are collision-free. Override flags
+`$UBERDEV_TMPDIR/solve-bg-stdout-N.log`, `$UBERDEV_TMPDIR/solve-codex-stdout-N.log`,
+`$UBERDEV_TMPDIR/solve-codex-status-N.json`, `$UBERDEV_TMPDIR/solve-codex-result-N.md`,
+`.claude/worktrees/solve-issue-N/`, `worktree-solve-issue-N` branch) are
+namespaced by issue number, so concurrent spawns are collision-free. Override flags
 (`--trivial|--small|--full`, `--auto`, `--force`, `--effort=<level>`,
-`--backend=<name>`) apply batch-wide. Monitor via `claude agents` (claude-bg)
-or visible panes (wezterm).
+`--backend=<name>`) apply batch-wide. Monitor via `claude agents` (claude-bg),
+visible panes (wezterm), or PID/log/result files (background/codex).
 
 ## Constants
 
@@ -59,7 +64,7 @@ is the documentation surface.
 |---|---|---|
 | `TERMINAL_FLAG_DEPRECATED_NOTE` | see the column-0 binding in `lib/solve-launcher.sh` (verbatim note also quoted under `## Deprecated Flags` in both command files) | Phase A stderr emission on first `--terminal=` / `$SOLVE_TERMINAL` encounter. |
 | `MIN_CLAUDE_VERSION` | `2.1.152` | Phase A hard gate (`claude --bg` needs 2.1.139+; `--permission-mode bypassPermissions` needs 2.1.152+, #246). |
-| `DISPATCH_BACKEND_ENUM` | `auto \| claude-bg \| wezterm \| background` | `--backend=` parser; `auto` defers to `lib/dispatch.sh` preflight. |
+| `DISPATCH_BACKEND_ENUM` | `auto \| claude-bg \| wezterm \| background \| codex` | `--backend=` parser; `auto` defers to `lib/dispatch.sh` preflight. |
 | `FANOUT_CONCURRENCY_SOLVE_BG_DEFAULT` | `6` | `MAX_PARALLEL_BG_AGENTS` default (dispatch-burst chunk size). |
 | `GH_PARALLEL_CAP` | `8` | Chunk size for the parallel gh stages (validation reads, claim writes) — GitHub secondary-rate-limit courtesy. |
 | `EFFORT_LEVEL_DEFAULT` | `max` | /turbo is unattended — quality > cost. |

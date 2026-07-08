@@ -367,12 +367,13 @@ assert_grep "$GOAL_LIB" '_UBERDEV_GOAL_BODY_CAP|head -c 65536'           "G18.bo
 
 echo
 echo "== G19: lib/goal-state.sh shape =="
-# Public function names (23 — 18 prior + 3 new barrier helpers added by issue #211:
+# Public function names (24 — 18 prior + 3 new barrier helpers added by issue #211:
 # uberdev_goal_register_batch_pr, uberdev_goal_batch_all_terminal,
 # uberdev_goal_batch_unblock_wait_clear; issue #220 adds two helpers —
 # uberdev_goal_review_pr_in_flight (in-flight gate for Phase 2b + 2c) and
 # uberdev_goal_agent_stuck_on_dialog (60s activity-window detector via
-# audit-log row-count proxy)).
+# audit-log row-count proxy); issue #329 adds the gh-failure counter reader so
+# Phase 2 can distinguish "no PR" from "PR lookup unavailable".
 for fn in uberdev_goal_state_init uberdev_goal_pr_state_transition uberdev_goal_issue_state_transition \
           uberdev_goal_read_trust_signal uberdev_goal_check_fingerprint_repeat uberdev_goal_should_automerge \
           uberdev_goal_audit uberdev_goal_locate_review_pr_audit \
@@ -385,7 +386,8 @@ for fn in uberdev_goal_state_init uberdev_goal_pr_state_transition uberdev_goal_
           uberdev_goal_list_prs_in_state uberdev_goal_read_merge_result \
           uberdev_goal_register_batch_pr \
           uberdev_goal_batch_all_terminal \
-          uberdev_goal_batch_unblock_wait_clear; do
+          uberdev_goal_batch_unblock_wait_clear \
+          uberdev_goal_gh_failure_count; do
   assert_grep "$GOAL_LIB" "^${fn}\\(\\)" "G19.public.${fn}"
 done
 # Internal function names (19 underscore-prefixed helpers — `_uberdev_goal_validate_id`
@@ -420,8 +422,8 @@ assert_no_grep "$GOAL_LIB" '\bbash -c'                                   "G19.no
 assert_grep "$GOAL_CMD" '--i-know-what-im-doing'                         "G19.r12-mentioned-once"
 
 echo
-echo "== G20: version bump locked (0.38.0) =="
-assert_version_bump "$REPO_ROOT" "0.38.0"
+echo "== G20: version bump locked (0.39.0) =="
+assert_version_bump "$REPO_ROOT" "0.39.0"
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
 
 assert_grep "$GOAL_SKILL" 'uberdev_dispatch_resolve_env'  "G20b.phase0-wires-resolve-env (#175 SSOT anchor)"
@@ -617,6 +619,7 @@ assert_grep "$GOAL_LIB" 'jq -e --argjson pr'                                    
 assert_grep "$GOAL_LIB" '/uberdev:review-pr '                                      "G32.substring-name-regex"
 assert_grep "$GOAL_LIB" '(\$\|\[\^0-9\])'                                          "G32.regex-trailing-boundary"
 assert_grep "$GOAL_LIB" 'busy\|running\|starting\|working'                         "G32.status-whitelist"
+assert_grep "$GOAL_LIB" 'background\|codex'                                         "G32.codex-background-status-file-branch"
 assert_grep "$GOAL_SKILL" 'uberdev_goal_review_pr_in_flight'                       "G32.called-from-skill"
 
 echo
@@ -712,6 +715,30 @@ assert_grep "$GOAL_SKILL" 'uberdev_goal_issue_state_transition "\$GOAL_ID" "\$is
 assert_grep "$GOAL_SKILL" 'uberdev_goal_audit goal_issue_closed_without_pr' \
   "G39.audit-event-emitted"
 # See BT84/BT85 below for the behavioural complement.
+
+echo "== G39b: Phase 2 surfaces terminal Codex agent failure immediately =="
+assert_grep "$GOAL_LIB" '^uberdev_goal_codex_status_for_issue\(\)' \
+  "G39b.codex-status-helper-defined"
+assert_grep "$GOAL_SKILL" 'uberdev_goal_codex_status_for_issue "\$issue"' \
+  "G39b.phase2-checks-codex-terminal-status"
+assert_grep "$GOAL_LIB" 'Codex returns in-flight' \
+  "G39b.codex-review-pr-ambiguous-status-contract-documented"
+assert_grep "$GOAL_SKILL" 'codex agent for issue .* failed' \
+  "G39b.codex-failed-surfaces-immediately"
+assert_grep "$GOAL_SKILL" 'GOAL_CIRCUIT_BREAKER_REASONS=.*solver_failed' \
+  "G39b.solver-failed-reason-in-enum"
+assert_grep "$GOAL_SKILL" 'goal_circuit_breaker.*solver_failed' \
+  "G39b.codex-terminal-failure-circuit-breaks"
+assert_grep "$GOAL_SKILL" '\$_codex_state.*completed' \
+  "G39b.codex-completed-without-pr-is-terminal"
+
+echo "== G39c: Phase 0 threads parsed --backend into dispatch preflight =="
+assert_grep "$GOAL_SKILL" 'UBERDEV_DISPATCH_BACKEND_REQUESTED="\$\{backend_cli:-\$\{UBERDEV_DISPATCH_BACKEND_REQUESTED:-auto\}\}"' \
+  "G39c.backend-cli-export-assigned"
+assert_grep "$GOAL_SKILL" 'export UBERDEV_DISPATCH_BACKEND_REQUESTED' \
+  "G39c.backend-cli-exported"
+assert_grep "$GOAL_SKILL" '^[[:space:]]*uberdev_dispatch_preflight[[:space:]]*$' \
+  "G39c.preflight-uses-env-request"
 
 echo
 echo "== Behavioral tests (B12 — sourced-function exercises) =="
@@ -1290,6 +1317,8 @@ uberdev_goal_issue_state_transition test-bt12 101 solving failed      2>/dev/nul
 assert_rc "$?" "0" "BT12.d-solving-to-failed"
 uberdev_goal_issue_state_transition test-bt12 102 pr-pushed failed    2>/dev/null
 assert_rc "$?" "0" "BT12.e-pr-pushed-to-failed"
+_bt12_failed_count="$(uberdev_goal_count_failed_issues test-bt12 2>/dev/null || printf 'MISSING')"
+assert_eq "$_bt12_failed_count" "2" "BT12.f-count-failed-issues-for-terminal-gate"
 
 # BT13 — invalid transitions return rc=2.
 # Covers the seven shapes the case-block rejects: skip-states, backwards,
@@ -2477,6 +2506,7 @@ assert_rc "$?" "1" "BT69.state-machine-merging-to-yellow-still-invalid"
 # BT70 — find_pr_for_issue: a gh FAILURE (rc!=0) is fail-open (empty + rc 0 so
 # the caller keeps re-polling) BUT emits a stderr breadcrumb — it must NOT
 # masquerade silently as "no PR yet".
+UBERDEV_GOAL_ID=test-bt70-ghcount
 MOCK_PR_LIST_JSON='[]'; MOCK_PR_LIST_RC=1
 _bt70_err="$_b12_tmpdir/bt70-stderr"; : > "$_bt70_err"
 _bt70_rc=0
@@ -2489,6 +2519,14 @@ else
   FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "BT70.find-pr-gh-failure-breadcrumb" >&2
 fi
 MOCK_PR_LIST_RC=0; MOCK_PR_LIST_JSON='[]'
+
+uberdev_goal_gh_failure_count test-bt70-ghcount >/dev/null 2>&1
+assert_rc "$?" "0" "BT70b.gh-failure-count-helper-readable"
+_bt70_count="$(uberdev_goal_gh_failure_count test-bt70-ghcount)"
+assert_eq "$_bt70_count" "1" "BT70b.find-pr-gh-failure-recorded-counter"
+_uberdev_goal_reset_gh_failure
+_bt70_reset_count="$(uberdev_goal_gh_failure_count test-bt70-ghcount)"
+assert_eq "$_bt70_reset_count" "0" "BT70b.gh-failure-counter-reset-readable"
 
 # BT71 — pr_state_gh: gh FAILURE (rc!=0) -> empty + breadcrumb; pr_is_merged false.
 MOCK_PR_STATE="OPEN"; MOCK_PR_STATE_RC=1
@@ -2533,6 +2571,32 @@ MOCK_CLAUDE_AGENTS_JSON='[{"cwd":"/x/solve-issue-7","status":"busy"}]'
 uberdev_goal_agent_busy_for_issue 77
 assert_rc "$?" "1" "BT75.agent-busy-prefix-isolation-7-not-77"
 MOCK_CLAUDE_AGENTS_JSON='[]'
+
+# BT75b — Codex solver liveness must honor terminal status before PID liveness.
+# Phase 2a calls agent_busy_for_issue before reading terminal Codex status; if a
+# completed/failed status with a still-live wrapper PID returns busy, the watch
+# loop skips the terminal handling and waits until the stuck-loop breaker.
+_bt75b_prev_tmp="${UBERDEV_TMPDIR:-}"
+_bt75b_prev_backend="${UBERDEV_RESOLVED_BACKEND:-}"
+_bt75b_tmp="$(mktemp -d)"
+printf '%s\n' '{"issue":77,"backend":"codex","state":"completed","exit_code":0,"pid":"'"$$"'"}' \
+  > "$_bt75b_tmp/solve-codex-status-77.json"
+. "$DISPATCH_LIB"
+export UBERDEV_TMPDIR="$_bt75b_tmp" UBERDEV_RESOLVED_BACKEND=codex
+uberdev_goal_agent_busy_for_issue 77
+assert_rc "$?" "1" "BT75b.agent-busy-codex-completed-not-busy"
+printf '%s\n' '{"issue":77,"backend":"codex","state":"failed","exit_code":17,"pid":"'"$$"'"}' \
+  > "$_bt75b_tmp/solve-codex-status-77.json"
+uberdev_goal_agent_busy_for_issue 77
+assert_rc "$?" "1" "BT75b.agent-busy-codex-failed-not-busy"
+UBERDEV_TMPDIR="$_bt75b_prev_tmp"
+if [ -n "$_bt75b_prev_backend" ]; then
+  UBERDEV_RESOLVED_BACKEND="$_bt75b_prev_backend"
+else
+  unset UBERDEV_RESOLVED_BACKEND
+fi
+export UBERDEV_TMPDIR
+rm -rf "$_bt75b_tmp"
 
 # ----- H1-H6 — #156 goal_id path-traversal guard + #157 unwritable-tmpdir surfacing -----
 # Both findings target plugins/uberdev/lib/goal-state.sh. #156: goal_id was
@@ -2705,6 +2769,49 @@ _bt76 42  0 "BT76.match-42"
 _bt76 43  1 "BT76.no-match-43"
 _bt76 421 1 "BT76.no-match-421-boundary (regression: 42 must not match 421)"
 _bt76_nl 42  0 "BT76.match-nl-wrapper (post-#235 prompt body shape matches probe regex)"
+_bt76_status_file() {
+  local backend="$1" status_name="$2" pid="$3" expected_rc="$4" label="$5"
+  local tmp got
+  tmp="$(mktemp -d)"
+  printf '{"issue":42,"backend":"%s","pid":"%s"}\n' "$backend" "$pid" > "$tmp/$status_name"
+  UBERDEV_TMPDIR="$tmp" UBERDEV_RESOLVED_BACKEND="$backend" bash -c '
+    . "'"$DISPATCH_LIB"'"
+    . "'"$GOAL_LIB"'"
+    uberdev_goal_review_pr_in_flight 42
+  '
+  got=$?
+  rm -rf "$tmp"
+  if [ "$got" -eq "$expected_rc" ]; then
+    PASS=$((PASS+1)); echo "  PASS  $label (rc=$got)"
+  else
+    FAIL=$((FAIL+1)); echo "  FAIL  $label (rc=$got want=$expected_rc)" >&2
+  fi
+}
+_bt76_status_file codex solve-codex-status-42.json "$$" 0 "BT76.codex-status-live-pid-in-flight"
+_bt76_status_file background solve-bg-status-42.json "$$" 0 "BT76.background-status-live-pid-in-flight"
+_bt76_status_file codex solve-codex-status-42.json 999999999 1 "BT76.codex-status-dead-pid-not-in-flight"
+_bt76_status_file codex solve-codex-status-42.json 0 1 "BT76.codex-status-pid-zero-not-in-flight"
+_bt76_status_file_json() {
+  local json="$1" expected_rc="$2" label="$3"
+  local tmp got
+  tmp="$(mktemp -d)"
+  printf '%s\n' "$json" > "$tmp/solve-codex-status-42.json"
+  UBERDEV_TMPDIR="$tmp" UBERDEV_RESOLVED_BACKEND=codex bash -c '
+    . "'"$DISPATCH_LIB"'"
+    . "'"$GOAL_LIB"'"
+    uberdev_goal_review_pr_in_flight 42
+  '
+  got=$?
+  rm -rf "$tmp"
+  if [ "$got" -eq "$expected_rc" ]; then
+    PASS=$((PASS+1)); echo "  PASS  $label (rc=$got)"
+  else
+    FAIL=$((FAIL+1)); echo "  FAIL  $label (rc=$got want=$expected_rc)" >&2
+  fi
+}
+_bt76_status_file_json '{"issue":42,"backend":"codex","state":"completed","exit_code":0,"pid":"'"$$"'"}' 1 "BT76.codex-status-completed-not-in-flight"
+_bt76_status_file_json '{"issue":42,"backend":"codex","state":"failed","exit_code":17,"pid":"'"$$"'"}' 1 "BT76.codex-status-failed-not-in-flight"
+_bt76_status_file_json '{"issue":42,"backend":"codex","state":"running","exit_code":null,"pid":"not-a-pid"}' 0 "BT76.codex-status-running-invalid-pid-defers"
 
 echo "== BT77: Phase 2c emits goal_merge_deferred with mock in-flight /review-pr (issue #220 AC ❷) =="
 # B5 (post-impl-review): the original BT77 verified (a) the deferred event was

@@ -403,6 +403,9 @@ assert_grep_in "$SKILL_DIR/post-impl-review/SKILL.md" \
 assert_grep_in "$SKILL_DIR/post-impl-review/SKILL.md" \
   'POST_IMPL_REVIEW_CAP' \
   "I4b: post-impl-review binds POST_IMPL_REVIEW_CAP shell var"
+assert_grep_in "$CONFIG_REF" \
+  'post_impl_review:[[:space:]]+6[[:space:]]+# int \[1, 50\]; post-impl-review reviewer fanout cap; default 6;' \
+  "I4b2: config reference documents post_impl_review default 6"
 assert_grep_in "$SKILL_DIR/post-impl-review/SKILL.md" \
   'uberdev_read_int_in_range command_timeouts.review_pr[[:space:]]+UBERDEV_REVIEW_PR_TIMEOUT[[:space:]]+60[[:space:]]+86400[[:space:]]+900' \
   "I4c: post-impl-review reads command_timeouts.review_pr with bounds [60,86400] default 900"

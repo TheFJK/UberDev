@@ -4,7 +4,7 @@
 
 **Personal Claude Code marketplace — opinionated GitHub-workflow slash commands.**
 
-[![Version](https://img.shields.io/badge/version-0.38.0-blue)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.39.0-blue)](./CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8B5CF6)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Repo Agnostic](https://img.shields.io/badge/repo--agnostic-yes-success)](#configuration)
@@ -25,7 +25,7 @@
 
 ## Heads up — this plugin burns tokens fast
 
-UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-scout fanout, `/uberdev:review-pr` and `/uberdev:simplify` fan out 3–5 reviewers concurrently, `/solve` waves dispatch every task in parallel, `/merge` spawns one conflict-resolver per conflicted file. That's where the speed and quality come from — and that's where the cost comes from.
+UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-scout fanout, `/uberdev:review-pr` fans out six reviewers, `/uberdev:simplify` runs three simplification lenses concurrently, `/solve` waves dispatch every task in parallel, `/merge` spawns one conflict-resolver per conflicted file. That's where the speed and quality come from — and that's where the cost comes from.
 
 **Recommended setup: 2× Claude Max ×20 subscriptions.** A single Pro or single Max usage window genuinely is not enough headroom for a normal day of `/turbo` + `/review-pr` + `/merge` cycles. Expect to hit the limit mid-task on a single seat.
 
@@ -90,6 +90,21 @@ jq '.enabledPlugins["uberdev@uberdev"] = true' \
 ```
 
 </details>
+
+### Codex CLI
+
+UberDev also installs into the [OpenAI Codex CLI](https://developers.openai.com/codex) — same workflows (brainstorm → plan → execute, TDD, debugging, parallel PR review, autonomous issue resolution, the testers QA squad), adapted to Codex's skill / subagent / AGENTS.md model. Two paths:
+
+```bash
+# Path 1 — standalone installer (carries the 42 subagents; needed for /solve, /turbo, /review-pr fanout)
+curl -fsSL https://raw.githubusercontent.com/TheFJK/UberDev/main/codex/install-codex.sh | bash
+
+# Path 2 — Codex-native plugin (browse & toggle skills; pairs with Path 1)
+codex plugin marketplace add TheFJK/UberDev   # then /plugins → Space to enable
+```
+
+Restart Codex after install so the skills, hooks, and subagents load. The 13 slash commands surface as `$uberdev-cmd-*` skills (Codex custom prompts are deprecated; skills are the shareable replacement). See [`codex/README.md`](./codex/README.md) for the full guide, the tool-mapping shim, and known v1 limitations.
+The Codex one-liner bootstraps a temporary repo snapshot automatically; running `./codex/install-codex.sh` from a clone uses the local files.
 
 ---
 
@@ -335,14 +350,14 @@ Bundled upstream license texts in `plugins/uberdev/licenses/`.
 | **`/merge` autopilot has no author gate** | Trust anchor is `reviewDecision == "APPROVED"` + GitHub branch protections. Bot vs. human vs. external contributor — same eligibility. |
 | **No `Co-Authored-By: Claude` trailer** | Commits and PR bodies use the user's authorship only. |
 | **Wave-based parallel execution** | Plans declare task dependencies + file ownership; `subagent-driven-dev` fires every wave's tasks concurrently in one shared worktree. Controller-only git eliminates index races without per-task worktree ceremony. |
-| **No HARD-GATE approval checkpoints** | Upstream's brainstorm pauses for user sign-off before implementation. UberDev replaces user gates with parallel research fanout and always-on agent reviewers (`spec-reviewer`, `plan-reviewer`, end-of-issue `post-impl-review`). Quality wins from review depth, not approval ceremony. |
+| **No HARD-GATE approval checkpoints** | Upstream's brainstorm pauses for user sign-off before implementation. UberDev replaces user gates with parallel research fanout and always-on agent reviewers (`spec-reviewer`, `plan-reviewer`, post-push `/review-pr` Phase 1 `post-impl-review`). Quality wins from review depth, not approval ceremony. |
 
 <details>
 <summary><strong>Why doesn't UberDev pause for me to approve the design?</strong></summary>
 
 Upstream `obra/superpowers` gates implementation behind a user-approval HARD-GATE: brainstorm halts, asks "does this look right so far?", and waits for sign-off before any subagent runs. Per-section approval prompts and a 3-iteration review-loop cap follow the same pattern.
 
-UberDev rejects all of those. User gates trade quality for ceremony — every pause shifts review burden onto a non-expert reader (you) and adds wall-clock cost. Quality wins from **parallel research fanout** (six research agents in one shot), **always-on reviewers** (`spec-reviewer` runs on medium/large tier per orchestrator Phase 3.5; `plan-reviewer` runs on every plan per Phase 4.5), and an **end-of-issue `post-impl-review` fanout** (5 advisory reviewers — code-reviewer, code-simplifier, silent-failure-hunter, type-design-analyzer, comment-analyzer — dispatched in one message after PR push via `/uberdev:review-pr`).
+UberDev rejects all of those. User gates trade quality for ceremony — every pause shifts review burden onto a non-expert reader (you) and adds wall-clock cost. Quality wins from **parallel research fanout** (six research agents in one shot), **always-on reviewers** (`spec-reviewer` runs on medium/large tier per orchestrator Phase 3.5; `plan-reviewer` runs on every plan per Phase 4.5), and a **post-push `/review-pr` Phase 1 `post-impl-review` fanout** (six advisory reviewers — correctness, silent-failure, type-design, comment/doc, PR-test, and general quality lenses — dispatched in one message after PR push; simplification is `/review-pr` Phase 2).
 
 </details>
 

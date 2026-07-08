@@ -23,8 +23,9 @@
 #     false-positive.
 #
 #   assert_version_bump <repo_root> <version>
-#     Asserts <version> is propagated to all four manifest surfaces
-#     (plugin.json, marketplace.json, README badge, CHANGELOG header). DRYs the
+#     Asserts <version> is propagated to all five manifest surfaces
+#     (plugin.json, marketplace.json, Codex plugin.json, README badge,
+#     CHANGELOG header). DRYs the
 #     version-lock block previously duplicated across goal.test.sh (G20) and
 #     solve-claim.test.sh. A release bump is now one <version>-arg change per
 #     call site instead of lockstep multi-form-regex edits (#231).
@@ -91,8 +92,8 @@ assert_in_section() {
 # assert_version_bump <repo_root> <version>
 # DRY the version-lock assertion block that was duplicated across
 # tests/goal.test.sh (G20) and tests/solve-claim.test.sh — asserts <version> is
-# propagated to all four manifest surfaces (plugin.json, marketplace.json,
-# README badge, CHANGELOG header). Self-contained (own grep + $PASS/$FAIL bump,
+# propagated to all five manifest surfaces (plugin.json, marketplace.json,
+# Codex plugin.json, README badge, CHANGELOG header). Self-contained (own grep + $PASS/$FAIL bump,
 # same caller-counter contract as assert_count). A release bump is now ONE
 # <version>-arg change per call site instead of lockstep multi-line regex edits
 # across two files (#231).
@@ -109,6 +110,7 @@ assert_version_bump() {
   local v="${ver//./\\.}"   # escape dots so grep -E matches them literally
   _assert_version_bump_one "$root/plugins/uberdev/.claude-plugin/plugin.json" "\"version\": \"$v\"" "version-bump: plugin.json == $ver"
   _assert_version_bump_one "$root/.claude-plugin/marketplace.json"            "\"version\": \"$v\"" "version-bump: marketplace.json == $ver"
+  _assert_version_bump_one "$root/codex/uberdev-codex/.codex-plugin/plugin.json" "\"version\": \"$v\"" "version-bump: Codex plugin.json == $ver"
   _assert_version_bump_one "$root/README.md"                                  "version-$v-blue"     "version-bump: README badge == $ver"
   _assert_version_bump_one "$root/CHANGELOG.md"                               "## \[$v\]"           "version-bump: CHANGELOG [$ver] header"
 }

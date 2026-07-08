@@ -335,7 +335,7 @@ else
   fail "P3.extract: could NOT extract the terminal fence (anchor 'Terminal set for convergence' moved?)"
 fi
 
-# Driver template emitter: $1=goal-id $2=case(conv|queue|stuck).
+# Driver template emitter: $1=goal-id $2=case(conv|queue|stuck|failed).
 # Seeds the pr-states.tsv per case, then runs the extracted terminal fence.
 write_term_driver() {  # $1=outfile $2=gid $3=case
   local out="$1" gid="$2" cs="$3"
@@ -363,6 +363,7 @@ write_term_driver() {  # $1=outfile $2=gid $3=case
       conv)  echo 'queue=()' ;;
       queue) echo 'queue=(777)' ;;   # #288 #1: a non-empty rollover must BLOCK convergence
       stuck) echo 'queue=()' ;;
+      failed) echo 'queue=()' ;;
     esac
     echo "source '$TERMINAL_FENCE'"
     echo 'echo "FELL-THROUGH rc=$?"'
@@ -417,6 +418,22 @@ if [ "$S_RC" -eq 1 ] \
   pass "P3c: queue empty + a PR still pushed-reviewing -> queue_empty_not_converged, exit 1 (deterministic pre-empt of the 4h stuck_loop)"
 else
   fail "P3c: stuck-but-drained path wrong (rc=$S_RC, out=[$S_OUT], audit=[$(tr -d '\n' < "$(audit_for "$G_S")" 2>/dev/null)])"
+fi
+
+# --- P3d: queue empty + no PRs + a failed issue -> solver_failed, exit 1.
+G_F="pipefailed01"
+: > "$WORK/state/goal-$G_F-pr-states.tsv"
+printf '4242\tfailed\t10\n' > "$WORK/state/goal-$G_F-issue-states.tsv"
+: > "$(audit_for "$G_F")"
+DRV_F="$WORK/drv_term_failed.zsh"; write_term_driver "$DRV_F" "$G_F" failed
+F_OUT="$("$ZSH_BIN" -f "$DRV_F" 2>&1)"
+F_RC=$?
+if [ "$F_RC" -eq 1 ] \
+   && grep -q 'solver_failed' "$(audit_for "$G_F")" 2>/dev/null \
+   && ! grep -q 'goal_converged' "$(audit_for "$G_F")" 2>/dev/null; then
+  pass "P3d: failed solver issue halts with solver_failed before convergence, exit 1"
+else
+  fail "P3d: failed solver issue did not halt before convergence (rc=$F_RC, out=[$F_OUT], audit=[$(tr -d '\n' < "$(audit_for "$G_F")" 2>/dev/null)])"
 fi
 
 # ==========================================================================
@@ -779,6 +796,74 @@ if [ "$W2FD_RC" -eq 1 ] && printf '%s' "$W2FD_OUT" | grep -q 'run-state flush FA
   pass "W2f.drain: bounded + drained + flush FAILS at the drain boundary -> the fence EXITS 1 (not 0); never proceeds to Phase 3 on unpersisted state (#300 Fix B)"
 else
   fail "W2f.drain: expected exit 1 + 'run-state flush FAILED' (got rc=$W2FD_RC, out=[$W2FD_OUT]) — a failed drain flush must NOT proceed via exit 0"
+fi
+
+# ==========================================================================
+# W3 — Phase-2 Codex malformed-status fail-closed (#329 review).
+#
+# The no-PR branch asks `uberdev_goal_codex_status_for_issue` whether the Codex
+# solver wrapper has reached a terminal state. A malformed status JSON is not
+# equivalent to "no status yet": it is a corrupted/unknown terminal signal and
+# must be surfaced immediately. The regression this catches was
+# `2>/dev/null || true`, which normalized parser/schema failures to empty state
+# and then fell through to the generic solve timeout path.
+# ==========================================================================
+echo "== W3: Codex malformed solver status is surfaced, not swallowed (#329 review) =="
+
+W3_STEP2A="$WORK/w3_step2a.slice.sh"
+if slice_fence '_uberdev_goal_phase2_release_claim() {' '2b. Read the leaf /review-pr verdict' > "$W3_STEP2A" \
+   && [ -s "$W3_STEP2A" ] \
+   && grep -q 'uberdev_goal_codex_status_for_issue' "$W3_STEP2A" \
+   && grep -q '_uberdev_goal_phase2_release_claim "$issue" "invalid_status"' "$W3_STEP2A" \
+   && grep -qE '^[[:space:]]*done' "$W3_STEP2A"; then
+  pass "W3.extract: sliced the step-2a no-PR solver-status loop from the watch fence"
+else
+  fail "W3.extract: could NOT slice the step-2a loop (loop head / step-2b marker moved?)"
+fi
+
+W3_STATE="$WORK/w3-state"
+mkdir -p "$W3_STATE" || { echo "FATAL: mkdir -p $W3_STATE failed" >&2; exit 3; }
+printf '{bad json\n' > "$W3_STATE/solve-codex-status-42.json"
+DRV_W3="$WORK/drv_w3.zsh"
+{
+  echo 'set -u'
+  echo "export UBERDEV_TMPDIR='$W3_STATE'"
+  echo "export GOAL_ID='pipew3'"
+  echo "export UBERDEV_GOAL_ID='pipew3'"
+  echo 'export UBERDEV_RESOLVED_BACKEND=codex'
+  echo ". \"\$CLAUDE_PLUGIN_ROOT/lib/dispatch.sh\""
+  echo ". \"\$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh\""
+  echo 'active_issues=(42)'
+  echo 'now="$(date +%s)"'
+  echo 'cycle=1'
+  echo 'any_active=0'
+  echo '_UBERDEV_GOAL_SOLVE_TIMEOUT=3600'
+  echo 'uberdev_goal_get_issue_state() { printf "solving"; }'
+  echo 'uberdev_goal_find_pr_for_issue() { :; }'
+  echo 'uberdev_goal_gh_failure_count() { printf "0"; }'
+  echo 'uberdev_goal_agent_busy_for_issue() { return 1; }'
+  echo 'uberdev_goal_issue_ts_in_state() { printf "%s" "$now"; }'
+  echo 'uberdev_goal_issue_state_transition() { echo "$2:$3->$4" > "$UBERDEV_TMPDIR/w3-transition"; return 0; }'
+  echo 'uberdev_goal_audit() { printf "%s %s\n" "$1" "$2" >> "$UBERDEV_TMPDIR/w3-audit"; }'
+  echo '_uberdev_goal_reap_zombies() { echo reaped > "$UBERDEV_TMPDIR/w3-reaped"; }'
+  echo 'print_summary() { :; }'
+  echo 'gh() { case "$1 $2" in "issue view") printf "OPEN";; "issue edit") printf "edit denied\n" >&2; return 9;; *) return 0;; esac; }'
+  echo "source '$W3_STEP2A'"
+  echo 'echo "W3-FELL-THROUGH any_active=$any_active"'
+} > "$DRV_W3"
+
+W3_OUT="$("$ZSH_BIN" -f "$DRV_W3" 2>"$WORK/w3.err")"; W3_RC=$?
+W3_ERR="$(cat "$WORK/w3.err" 2>/dev/null)"
+if [ "$W3_RC" -eq 1 ] \
+   && printf '%s' "$W3_ERR" | grep -q 'invalid Codex status for issue 42' \
+   && printf '%s' "$W3_ERR" | grep -q 'release uberdev:active claim failed for issue 42' \
+   && printf '%s' "$W3_ERR" | grep -q 'edit denied' \
+   && grep -q '"reason":"solver_failed"' "$W3_STATE/w3-audit" 2>/dev/null \
+   && grep -q '"state":"invalid_status"' "$W3_STATE/w3-audit" 2>/dev/null \
+   && grep -q '42:solving->failed' "$W3_STATE/w3-transition" 2>/dev/null; then
+  pass "W3: malformed Codex status file fails closed with diagnostic, release breadcrumb, failed transition, and solver_failed audit"
+else
+  fail "W3: malformed Codex status should fail closed with release breadcrumb (rc=$W3_RC, out=[$W3_OUT], err=[$W3_ERR], audit=[$(cat "$W3_STATE/w3-audit" 2>/dev/null)], transition=[$(cat "$W3_STATE/w3-transition" 2>/dev/null)])"
 fi
 
 echo

@@ -1,0 +1,53 @@
+---
+name: triage-scout
+description: "Lightweight triage scout for /uberdev:issue (runs on inherit — the session model). Runs gh search issues (open + closed), gh label list, and reads commitlint config if present. Returns duplicate matches, validated label set, and validated commit scope. Never invents labels."
+model: inherit
+tools: ["Bash", "Read"]
+---
+
+# Triage scout — `/uberdev:issue` Phase 2
+
+Validate labels and scope against the **real** repo state, and surface possible duplicates (open or closed — closed = regression evidence). This agent does not draft any prose for the issue body; it only returns structured data the main thread will compose.
+
+## Inputs
+
+```yaml
+description: "<verbatim user description>"
+issue_type: fix | feat | refactor | test | docs | chore
+working_dir: "<absolute path>"
+repo_slug: "<owner>/<repo>"
+model_hint: inherit   # audit-trail aid
+```
+
+## Process
+
+1. **Duplicate search.** `gh search issues --repo "$repo_slug" "<top keywords>" --limit 10 --state all --json number,title,state,url`. Keep entries whose title genuinely overlaps with `description`; discard noise.
+2. **Label list.** `gh label list --repo "$repo_slug" --limit 100 --json name,description`. Pick the base label (`bug` for `fix`, `enhancement` for `feat`) **only if it exists**, then add context labels by matching description keywords to real label names. Never invent labels.
+3. **Scope validation.** Search for `commitlint.config.{js,cjs,mjs,ts}` under `working_dir` (max-depth 3, skip `node_modules`). If found, `Read` it and extract the `scope-enum` array. The valid scope is the closest match to a description keyword from that array. If `commitlint.config.*` is missing, fall back to the conventional-commits hardcoded set: `feat fix refactor test docs chore`. `commitlint_present` reflects which path was taken.
+
+## Return contract
+
+Emit exactly one fenced ```yaml block as the LAST thing in your reply:
+
+```yaml
+status: DONE | DONE_WITH_CONCERNS | BLOCKED
+duplicates:
+  - { number: <int>, title: "<title>", state: open | closed }
+  # 0+ entries; closed entries flag possible regression
+valid_labels: ["<label-1>", "<label-2>"]
+valid_scope: "<scope>"
+commitlint_present: true | false
+summary: |
+  <=120 words. Notes which validations succeeded, any commitlint fallback used,
+  and any duplicate that warrants regression flagging.
+```
+
+## Failure modes
+
+- **`gh search issues` fails** — return `status: DONE_WITH_CONCERNS`, set `duplicates: []`, document in `summary`. The dispatcher proceeds without a `## Possible duplicates` section.
+- **`gh label list` fails** — return `status: DONE_WITH_CONCERNS` with `valid_labels: []`. The dispatcher creates the issue with no `--label` flags.
+- **No matching scope-enum entry** — set `valid_scope` to the closest match and note the substitution in `summary`.
+
+## Cost note
+
+Runs on `inherit` — the session model (the Codex session model).
