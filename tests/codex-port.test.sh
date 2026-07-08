@@ -79,6 +79,14 @@ NG="$(grep -lE '^(color|allowed-tools|tools) ' "$TMP/agents"/uberdev-*.toml 2>/d
 NG="$(grep -rlE 'CLAUDE_PLUGIN_ROOT|~/\.claude' "$TMP/agents" 2>/dev/null | wc -l | tr -d ' ')"
 [ "$NG" -eq 0 ] && pass "zero Claude-only path/env residuals in generated agents" \
   || fail "found $NG generated agents with Claude-only path/env residuals"
+NB="$(grep -rlE '\$\{PLUGIN_ROOT\}/|\$PLUGIN_ROOT/' "$TMP/agents" 2>/dev/null | wc -l | tr -d ' ')"
+[ "$NB" -eq 0 ] && pass "generated agents do not depend on bare PLUGIN_ROOT script paths" \
+  || fail "found $NB generated agents with bare PLUGIN_ROOT script paths"
+if grep -Rql 'â' "$TMP/agents" 2>/dev/null; then
+  fail "generated agent metadata has no UTF-8 mojibake"
+else
+  pass "generated agent metadata has no UTF-8 mojibake"
+fi
 
 echo "== Command converter: 13 skills + 2 skipped =="
 assert_cmd 0 "convert-commands runs clean" \
@@ -104,6 +112,38 @@ assert_cmd 0 "port-skill runs clean" \
 NG="$(grep -rl 'CLAUDE_PLUGIN_ROOT' "$TMP/skills" 2>/dev/null | wc -l | tr -d ' ')"
 [ "$NG" -eq 0 ] && pass "zero CLAUDE_PLUGIN_ROOT residuals in ported skills" \
   || fail "found $NG files still referencing CLAUDE_PLUGIN_ROOT"
+NG="$(grep -rlE '(^|[^~])\$\{HOME\}/\.claude|\.claude/plugins' "$TMP/skills" 2>/dev/null | wc -l | tr -d ' ')"
+[ "$NG" -eq 0 ] && pass "ported skills have no HOME/.claude plugin-search residuals" \
+  || fail "found $NG ported skills with HOME/.claude plugin-search residuals"
+if [ ! -d "$TMP/skills/_shared" ]; then
+  pass "ported plugin skill root does not expose _shared as a skill"
+else
+  fail "ported plugin skill root exposes _shared without SKILL.md"
+fi
+python3 - <<PY
+from pathlib import Path
+root = Path("$TMP/skills")
+bad = []
+for d in root.iterdir():
+    if d.is_dir() and d.name != "_shared" and not (d / "SKILL.md").is_file():
+        bad.append(f"{d.name}: missing SKILL.md")
+for p in root.glob("*/SKILL.md"):
+    text = p.read_text(encoding="utf-8")
+    if not text.startswith("---\\n"):
+        bad.append(f"{p}: missing frontmatter")
+        continue
+    fm = text.split("---", 2)[1]
+    for line in fm.splitlines():
+        if line.startswith("description: "):
+            value = line[len("description: "):].strip()
+            if ": " in value and not value.startswith(("'", '"')):
+                bad.append(f"{p}: unquoted description with colon")
+if bad:
+    print("\\n".join(bad))
+    raise SystemExit(1)
+PY
+[ $? -eq 0 ] && pass "ported plugin skills have validator-safe frontmatter and SKILL.md roots" \
+  || fail "ported plugin skills have invalid frontmatter or exposed non-skill dirs"
 
 echo "== Installer: idempotency + uninstall =="
 # Two consecutive installs into the same throwaway HOME, then verify no
@@ -141,6 +181,17 @@ if grep -Rql '~/\.codex/commands' "$TH/.agents/skills" 2>/dev/null; then
 else
   pass "installed Codex skills do not advertise a nonexistent ~/.codex/commands alias path"
 fi
+mkdir -p "$TH/.agents/skills/obsolete-managed" "$TH/.codex/agents"
+printf 'managed-by=uberdev-codex\n' > "$TH/.agents/skills/obsolete-managed/.uberdev-codex-managed"
+printf 'stale agent\n' > "$TH/.codex/agents/uberdev-obsolete.toml"
+assert_cmd 0 "upgrade install removes stale managed skills and agents" \
+  env HOME="$TH" CODEX_HOME="$TH/.codex" bash "$INSTALLER"
+if [ ! -e "$TH/.agents/skills/obsolete-managed" ] \
+  && [ ! -e "$TH/.codex/agents/uberdev-obsolete.toml" ]; then
+  pass "upgrade install removes stale managed skills and agents"
+else
+  fail "upgrade install left stale managed artifacts"
+fi
 assert_cmd 0 "uninstall runs clean" \
   env HOME="$TH" CODEX_HOME="$TH/.codex" bash "$INSTALLER" --uninstall
 NS="$(find "$TH/.agents/skills" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d '[:space:]')"
@@ -159,10 +210,13 @@ if env HOME="$TH_COLLIDE" CODEX_HOME="$TH_COLLIDE/.codex" bash "$INSTALLER" >/tm
   fail "installer refuses to overwrite pre-existing user-owned skill directories"
 else
   if grep -q 'user-owned skill' "$TH_COLLIDE/.agents/skills/brainstorm/SKILL.md" \
-     && grep -qi 'collision' /tmp/codex-collide-out; then
+     && grep -qi 'collision' /tmp/codex-collide-out \
+     && [ ! -e "$TH_COLLIDE/.codex/plugins/uberdev-codex" ] \
+     && [ ! -d "$TH_COLLIDE/.codex/agents" ] \
+     && ! grep -q 'BEGIN uberdev-codex-primer' "$TH_COLLIDE/.codex/AGENTS.md" 2>/dev/null; then
     pass "installer refuses to overwrite pre-existing user-owned skill directories"
   else
-    fail "installer collision refusal preserves user-owned skill and names collision"
+    fail "installer collision refusal preserves user-owned skill, names collision, and leaves no partial install"
   fi
 fi
 
@@ -233,6 +287,7 @@ fi
 echo "== Plugin manifest + marketplace JSON validity =="
 python3 - <<PY
 import json, os, sys
+from pathlib import Path
 m = json.load(open("$MANIFEST"))
 ok = True
 for k in ("name", "version", "description", "skills"):
@@ -251,9 +306,24 @@ mp = json.load(open("$MARKETPLACE"))
 p = mp["plugins"][0]
 if not os.path.isfile("codex/uberdev-codex/.codex-plugin/plugin.json"): ok = False
 if p["source"]["path"] != "./codex/uberdev-codex": print("  FAIL  marketplace source.path wrong"); ok = False
+skills = Path("$REPO_ROOT/codex/uberdev-codex") / m["skills"]
+for d in skills.iterdir():
+    if d.is_dir() and not (d / "SKILL.md").is_file():
+        print(f"  FAIL  manifest-exposed skills dir lacks SKILL.md: {d.name}"); ok = False
+for skill in skills.glob("*/SKILL.md"):
+    text = skill.read_text(encoding="utf-8")
+    if not text.startswith("---\\n"):
+        print(f"  FAIL  {skill} missing frontmatter"); ok = False
+        continue
+    fm = text.split("---", 2)[1]
+    for line in fm.splitlines():
+        if line.startswith("description: "):
+            value = line[len("description: "):].strip()
+            if ": " in value and not value.startswith(("'", '"')):
+                print(f"  FAIL  {skill} has validator-unsafe description frontmatter"); ok = False
 sys.exit(0 if ok else 1)
 PY
-[ $? -eq 0 ] && pass "manifest valid (name/version/description/skills, NO agents field); marketplace path resolves" \
+[ $? -eq 0 ] && pass "manifest valid and exposed skill package is validator-safe" \
   || fail "manifest or marketplace invalid"
 if [ -r "$REPO_ROOT/codex/uberdev-codex/lib/dispatch.sh" ] \
   && [ -r "$REPO_ROOT/codex/uberdev-codex/lib/solve-launcher.sh" ] \
@@ -268,6 +338,9 @@ echo "== Checked-in Codex artifacts =="
 NG="$(grep -rlE 'CLAUDE_PLUGIN_ROOT|~/\.claude|~/\.codex/commands' "$REPO_ROOT/codex/agents" "$REPO_ROOT/codex/uberdev-codex/skills" 2>/dev/null | wc -l | tr -d ' ')"
 [ "$NG" -eq 0 ] && pass "checked-in Codex artifacts have no Claude env/path or fake Codex alias residuals" \
   || fail "checked-in Codex artifacts contain $NG stale Claude/Codex-alias residual files"
+NG="$(grep -rlE '\$\{PLUGIN_ROOT\}/|\$PLUGIN_ROOT/|(^|[^~])\$\{HOME\}/\.claude|\.claude/plugins' "$REPO_ROOT/codex/agents" "$REPO_ROOT/codex/uberdev-codex/skills" 2>/dev/null | wc -l | tr -d ' ')"
+[ "$NG" -eq 0 ] && pass "checked-in Codex artifacts avoid bare PLUGIN_ROOT and HOME/.claude plugin paths" \
+  || fail "checked-in Codex artifacts contain $NG bare plugin-root or HOME/.claude plugin path residual files"
 
 echo "== Primer/tool mapping freshness =="
 if grep -q 'wait_agent' "$REPO_ROOT/codex/AGENTS.md" \

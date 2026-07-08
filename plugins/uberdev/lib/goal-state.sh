@@ -29,6 +29,7 @@
 #   uberdev_goal_pr_is_merged                  PR_NUM      (gh; issue #180)
 #   uberdev_goal_gh_failure_breaker_check      GOAL_ID [THRESHOLD]   (issue #290.3)
 #   uberdev_goal_agent_busy_for_issue          ISSUE_NUM   (claude agents; issue #180)
+#   uberdev_goal_codex_status_for_issue        ISSUE_NUM   (Codex status JSON; issue #329 review)
 #   uberdev_goal_list_prs_in_state             GOAL_ID STATE
 #   uberdev_goal_read_merge_result             PR_NUM
 #   uberdev_goal_write_run_state               (env-driven)
@@ -271,6 +272,40 @@ _uberdev_goal_pid_for_issue() {
   pid="$(jq -r '.pid // empty' < "$status_file" 2>/dev/null)" || return 1
   _uberdev_goal_validate_int "$pid" || return 1
   printf '%s' "$pid"
+}
+
+# uberdev_goal_codex_status_for_issue ISSUE_NUM
+# Emits: state<TAB>exit_code<TAB>log<TAB>result
+#
+# Codex dispatch is PID-polled for liveness, but the detached wrapper also
+# writes a terminal status JSON. /goal uses this to surface a failed codex exec
+# immediately instead of waiting for the generic solve timeout.
+uberdev_goal_codex_status_for_issue() {
+  local issue="$1"
+  _uberdev_goal_validate_int "$issue" || return 1
+  [ "${UBERDEV_RESOLVED_BACKEND:-}" = "codex" ] || return 1
+  command -v _uberdev_dispatch_tmp_target_safe >/dev/null 2>&1 || return 1
+
+  local status_file row
+  status_file="${UBERDEV_TMPDIR:-/tmp}/solve-codex-status-$issue.json"
+  _uberdev_dispatch_tmp_target_safe "$status_file" || return 1
+
+  row="$(jq -er --argjson issue "$issue" '
+    select(.backend == "codex" and .issue == $issue)
+    | .state as $state
+    | select($state == "running" or $state == "completed" or $state == "failed")
+    | .exit_code as $exit_code
+    | select($exit_code == null or ($exit_code | type) == "number")
+    | [
+        $state,
+        (if $exit_code == null then "null" else ($exit_code | tostring) end),
+        (.log // ""),
+        (.result // "")
+      ]
+    | @tsv
+  ' < "$status_file" 2>/dev/null)" || return 1
+  [ -n "$row" ] || return 1
+  printf '%s' "$row"
 }
 
 # _uberdev_goal_glob_worktree SUFFIX

@@ -2,7 +2,7 @@
 # Re-run the installer to refresh; do not edit by hand (edits will be overwritten).
 name = "uberdev-codebase-scout"
 description = """
-Lightweight codebase scout for /uberdev:issue (runs on inherit â the session model). Greps and reads on description keywords, returns 1-3 real file paths under ## Likely area and an optional one-line root-cause hypothesis when issue_type=fix. Never invents paths.
+Lightweight codebase scout for /uberdev:issue (runs on inherit — the session model). Greps and reads on description keywords, returns 1-3 real file paths under ## Likely area and an optional one-line root-cause hypothesis when issue_type=fix. Never invents paths.
 """
 developer_instructions = """
 # Codebase scout — `/uberdev:issue` Phase 2

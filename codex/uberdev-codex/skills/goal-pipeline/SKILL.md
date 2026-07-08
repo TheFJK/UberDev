@@ -282,7 +282,7 @@ Notes on the enums:
    # /turbo + /solve defensively unset this var (see commands/turbo.md and
    # commands/solve.md). EFFORT_LEVEL stays unset -> helper applies :-max.
    export SKIP_PERMISSIONS=1     # (#241) /goal autonomous-loop opt-in; propagation via BG_TURBO_ENV — see lib/dispatch.sh BG_TURBO_ENV blocks
-   uberdev_dispatch_resolve_env || exit 1   # establishes TIMEOUT_BIN/SOLVE_TIMEOUT/MODEL/PERM_FLAG/EFFORT_FLAG/BG_PROMPT_MODE once
+   uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # establishes TIMEOUT_BIN/SOLVE_TIMEOUT/MODEL/PERM_FLAG/EFFORT_FLAG/BG_PROMPT_MODE once
    ```
 
 5. **Generate `GOAL_ID`.** Random suffix per D4 — NEVER derived from `$@` or issue numbers (those are attacker-controlled; using them would let a caller collide TMPDIR paths):
@@ -375,7 +375,7 @@ Per cycle, walk the current `queue` and dispatch one `/uberdev:orchestrator` age
 [ -r "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-state.sh" ]  && . "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-state.sh"
 GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
 uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 1" >&2; exit 3; }
-uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
+uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 
 # Issue #288 #2 (CRITICAL) — cycle-ceiling backstop at the TOP of Phase 1.
 # `cycle` is incremented + checked against MAX_CYCLES only inside the Phase-3
@@ -650,7 +650,7 @@ uberdev_goal_write_run_state || { echo "goal: failed to persist run-state after 
 [ -r "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-state.sh" ]  && . "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-state.sh"
 GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
 uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 2" >&2; exit 3; }
-uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
+uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 # watch_start is set in Phase 0 (step 7) — goal-level wall-clock anchor.
 # The 4h stuck-loop check below measures total goal wall-clock, not per-cycle.
 # Q1 — bash supports ONE EXIT trap per shell; register the combined cleanup
@@ -753,6 +753,21 @@ while true; do
     if uberdev_goal_agent_busy_for_issue "$issue"; then
       any_active=1
     else
+      if [ "${UBERDEV_RESOLVED_BACKEND:-}" = "codex" ]; then
+        _codex_status="$(uberdev_goal_codex_status_for_issue "$issue" 2>/dev/null || true)"
+        _codex_state="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $1}')"
+        _codex_exit="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $2}')"
+        _codex_log="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $3}')"
+        _codex_result="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $4}')"
+        if [ "$_codex_state" = "failed" ]; then
+          printf 'goal-pipeline: codex agent for issue %s failed (exit_code=%s; log=%s; result=%s)\n' \
+            "$issue" "${_codex_exit:-unknown}" "${_codex_log:-unknown}" "${_codex_result:-unknown}" >&2
+          uberdev_goal_issue_state_transition "$GOAL_ID" "$issue" solving failed \
+            || printf 'goal-pipeline: WARN transition solving->failed failed for Codex issue %s (status file reports failed)\n' "$issue" >&2
+          gh issue edit "$issue" --remove-label "uberdev:active" --remove-assignee "@me" >/dev/null 2>&1 || true
+          continue
+        fi
+      fi
       # Issue #249 — issue may have been legitimately closed without a PR
       # (orchestrator marked it stale / already-resolved / non-actionable —
       # concrete prior cases: #226 / #227). Probe GitHub state before falling
@@ -1360,7 +1375,7 @@ After Phase 2 drains (no active agents, no merging PRs), enumerate the new BLOCK
 [ -r "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-state.sh" ]  && . "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-state.sh"
 GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
 uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 3" >&2; exit 3; }
-uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
+uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 # Snapshot goal start for the createdAt filter — only consider findings filed
 # during THIS goal run, not pre-existing review-pr-finding issues that pre-date
 # the cycle. The TZ-Z timestamp lines up with gh's ISO-8601 createdAt format.
@@ -1464,7 +1479,7 @@ For each candidate, extract the fingerprint and check for repeat (`new_candidate
 [ -r "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-state.sh" ]  && . "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-state.sh"
 GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
 uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 3 (fingerprint loop)" >&2; exit 3; }
-uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
+uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 for issue in "${new_candidates[@]}"; do
   # Issues don't go through _uberdev_goal_fetch_pr_body (PR-specific helper);
   # keep the inline gh issue view + 64KiB cap here. The cap shape is shared
@@ -1503,7 +1518,7 @@ done
 [ -r "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-state.sh" ]  && . "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-state.sh"
 GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
 uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 3 (overflow check)" >&2; exit 3; }
-uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
+uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 # overflow_detected is set in Phase 2b's red case when any PR's /review-pr
 # audit JSON carried halted_due_to_overflow:true. Here in Phase 3 we apply
 # the first-10 truncation (no PR transition — Phase 2b already did that).
@@ -1534,7 +1549,7 @@ Every "converge / halt" gate below is additionally guarded on the rollover `queu
 [ -r "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-state.sh" ]  && . "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-state.sh"
 GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
 uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 3 (terminal check)" >&2; exit 3; }
-uberdev_dispatch_resolve_env || exit 1   # re-derive backend/env (idempotent, D8); not persisted
+uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 if [ "$cycle" -ge "$MAX_CYCLES" ] && [ "${#new_candidates[@]}" -gt 0 ]; then
   uberdev_goal_audit goal_circuit_breaker \
     "{\"reason\":\"max_cycles\",\"cycle\":$cycle,\"max\":$MAX_CYCLES,\"queued\":${#new_candidates[@]}}"

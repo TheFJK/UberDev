@@ -99,6 +99,7 @@ def codex_port_text(value: str) -> str:
         value.replace("CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT")
         .replace('"$PLUGIN_ROOT/', f'"{codex_plugin_root}/')
         .replace('"${PLUGIN_ROOT}/', f'"{codex_plugin_root}/')
+        .replace(".claude/uberdev.local.md", ".codex/uberdev.local.md")
         .replace("~/.claude/CLAUDE.md", "~/.codex/AGENTS.md")
         .replace("~/.claude/", "~/.codex/")
         .replace("~/.claude", "~/.codex")

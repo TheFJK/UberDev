@@ -124,15 +124,17 @@ the Codex app's native controls ("Create branch" / "Hand off to local").
 
 Claude Code slash commands (`/issue`, `/review-pr`, `/solve`, `/turbo`,
 `/merge`, `/testers`, `/brainstorm`, etc.) have no Codex equivalent — Codex
-removed custom prompts in v0.117.0 and points everyone to skills. They ship
+custom prompts are deprecated, and skills are the documented shareable
+replacement. They ship
 here as skills named `uberdev-cmd-<name>` (e.g. `$uberdev-cmd-issue`), and they
 also trigger implicitly when your task matches their description. So "create an
 issue for the login bug" invokes `uberdev-cmd-issue` automatically.
 
 ## Per-project configuration
 
-UberDev reads optional per-project config from `.claude/uberdev.local.md` (YAML
-frontmatter; env vars override file values). The full key schema lives in
+UberDev reads optional per-project config from `.codex/uberdev.local.md`
+(preferred in Codex) or `.claude/uberdev.local.md` (fallback; YAML frontmatter;
+env vars override file values). The full key schema lives in
 `~/.agents/skills/using-uberdev/references/configuration.md` — read it before
 answering config questions or changing a knob; never guess keys, ranges, or
 defaults from memory.

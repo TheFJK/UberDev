@@ -179,22 +179,18 @@ bootstrap_source_tree() {
 do_uninstall() {
   echo "Removing UberDev from Codex (skills, agents, primer)…"
   local failed=0
-  # Skills: remove every skill dir whose SKILL.md we'd install. Rather than
-  # hardcode the list, remove any dir in ~/.agents/skills/ that also exists in
-  # the repo's skills source AND carries our managed marker (so we only delete
-  # our own, never user skills with a colliding generic name).
-  if [ -d "${SKILLS_SRC}" ]; then
-    for skill_dir in "${SKILLS_SRC}"/*/; do
+  # Skills: remove every dir carrying our managed marker, including stale
+  # skills from older releases that no longer exist in the current source tree.
+  if [ -d "${SKILLS_USER_DIR}" ]; then
+    for skill_dir in "${SKILLS_USER_DIR}"/*; do
       [ -d "$skill_dir" ] || continue
+      [ -f "${skill_dir}/${MANAGED_MARKER}" ] || continue
       name="$(basename "$skill_dir")"
-      [ "$name" = "_shared" ] && continue
-      if [ -f "${SKILLS_USER_DIR}/${name}/${MANAGED_MARKER}" ]; then
-        if rm -rf "${SKILLS_USER_DIR}/${name}"; then
-          echo "  removed skill: ${name}"
-        else
-          err "failed to remove managed skill: ${SKILLS_USER_DIR}/${name}"
-          failed=1
-        fi
+      if rm -rf "${skill_dir}"; then
+        echo "  removed skill: ${name}"
+      else
+        err "failed to remove managed skill: ${skill_dir}"
+        failed=1
       fi
     done
   fi
@@ -263,7 +259,6 @@ strip_primer() {
     err "malformed UberDev primer block in ${AGENTS_MD}; no changes made."
     return 1
   fi
-  # Also drop a leading blank line left behind, if any.
   if [ -s "${tmp}" ]; then
     mv "${tmp}" "${AGENTS_MD}"
   else
@@ -307,6 +302,45 @@ ensure_agents_md_regular_file() {
   warn "converted ${AGENTS_MD} from symlink to regular Codex guidance file (old symlink backed up at ${backup}; target was ${link_target:-unknown})."
 }
 
+# Ensure a run that would fail on a user-authored skill collision fails before
+# touching runtime, agents, or primer.
+preflight_skill_collisions() {
+  if [ ! -d "${SKILLS_SRC}" ]; then
+    err "skills source not found: ${SKILLS_SRC}"
+    exit 1
+  fi
+  local skill_dir name
+  for skill_dir in "${SKILLS_SRC}"/*/; do
+    [ -d "$skill_dir" ] || continue
+    name="$(basename "$skill_dir")"
+    [ "$name" = "_shared" ] && continue
+    if [ -e "${SKILLS_USER_DIR}/${name}" ] && [ ! -f "${SKILLS_USER_DIR}/${name}/${MANAGED_MARKER}" ]; then
+      err "skill collision: ${SKILLS_USER_DIR}/${name} already exists and is not managed by UberDev."
+      printf '       Move or remove that skill, then rerun the installer. No files were overwritten.\n' >&2
+      exit 1
+    fi
+  done
+}
+
+cleanup_stale_managed_skills() {
+  [ -d "${SKILLS_USER_DIR}" ] || return 0
+  local installed name stale
+  for installed in "${SKILLS_USER_DIR}"/*; do
+    [ -d "$installed" ] || continue
+    [ -f "${installed}/${MANAGED_MARKER}" ] || continue
+    name="$(basename "$installed")"
+    [ -d "${SKILLS_SRC}/${name}" ] && continue
+    stale=1
+    if rm -rf "$installed"; then
+      echo "  removed stale managed skill: ${name}"
+    else
+      err "failed to remove stale managed skill: ${installed}"
+      exit 1
+    fi
+  done
+  return 0
+}
+
 # ── Install ──────────────────────────────────────────────────────────────────
 install_skills() {
   echo "→ Installing skills → ${SKILLS_USER_DIR}/"
@@ -316,6 +350,7 @@ install_skills() {
   fi
   ensure_skills_user_dir_regular
   mkdir -p "${SKILLS_USER_DIR}"
+  cleanup_stale_managed_skills
   # Mirror each skill dir individually. --delete only within each skill's own
   # dir (not the whole SKILLS_USER_DIR) so we never touch unrelated user skills.
   for skill_dir in "${SKILLS_SRC}"/*/; do
@@ -323,11 +358,6 @@ install_skills() {
     name="$(basename "$skill_dir")"
     # _shared holds cross-skill templates (document-reviewer), not a skill.
     [ "$name" = "_shared" ] && continue
-    if [ -e "${SKILLS_USER_DIR}/${name}" ] && [ ! -f "${SKILLS_USER_DIR}/${name}/${MANAGED_MARKER}" ]; then
-      err "skill collision: ${SKILLS_USER_DIR}/${name} already exists and is not managed by UberDev."
-      printf '       Move or remove that skill, then rerun the installer. No files were overwritten.\n' >&2
-      exit 1
-    fi
     mkdir -p "${SKILLS_USER_DIR}/${name}"
     rsync -a --delete \
       --exclude '__pycache__/' --exclude '*.pyc' \
@@ -363,11 +393,24 @@ install_agents() {
     exit 1
   fi
   mkdir -p "${AGENTS_DIR}"
-  # Convert fresh into the target dir every run (deterministic; overwrites).
-  if ! python3 "${CONVERTER}" "${UBERDEV_SRC}/agents" "${AGENTS_DIR}" >/dev/null; then
+  local tmp_agents agent_file
+  tmp_agents="$(mktemp -d "${CODEX_HOME}/.uberdev-agents.XXXXXX")"
+  # Convert fresh into a temp dir, then replace the managed namespace. This
+  # removes agents that existed in an older UberDev release but no longer ship.
+  if ! python3 "${CONVERTER}" "${UBERDEV_SRC}/agents" "${tmp_agents}" >/dev/null; then
+    rm -rf "${tmp_agents}"
     err "agent conversion failed (see messages above)."
     exit 1
   fi
+  for agent_file in "${AGENTS_DIR}"/uberdev-*.toml; do
+    [ -e "$agent_file" ] || continue
+    rm -f "$agent_file"
+  done
+  for agent_file in "${tmp_agents}"/uberdev-*.toml; do
+    [ -e "$agent_file" ] || continue
+    cp "$agent_file" "${AGENTS_DIR}/"
+  done
+  rm -rf "${tmp_agents}"
   local count
   count="$(find "${AGENTS_DIR}" -maxdepth 1 -name 'uberdev-*.toml' | wc -l | tr -d ' ')"
   ok "${count} agents installed to ${AGENTS_DIR}/ (as uberdev-*.toml)"
@@ -453,6 +496,7 @@ main() {
     warn "'codex' CLI not found on PATH. Install it from https://developers.openai.com/codex — the files are still placed correctly for when it is."
   fi
 
+  preflight_skill_collisions
   install_runtime
   install_skills
   install_agents

@@ -178,7 +178,7 @@ uberdev_dispatch_preflight() {
 }
 
 # ---------------------------------------------------------------------------
-# uberdev_dispatch_resolve_env
+# uberdev_dispatch_resolve_env [BACKEND]
 # Resolves the six deterministic dispatch-env vars consumed by every backend:
 #   BG_PROMPT_MODE, MODEL, PERM_FLAG[], EFFORT_FLAG[], SOLVE_TIMEOUT, TIMEOUT_BIN.
 # SSOT for both solve-pipeline (replaces its inline Phase A block) and
@@ -186,8 +186,11 @@ uberdev_dispatch_preflight() {
 # bash arrays that cannot survive an env(1)/fork+exec boundary, so they must be
 # set in the caller's shell scope. Idempotent: deterministic scalars, arrays
 # rebuilt each call. Returns 1 (fail-loud) when no timeout(1)/gtimeout(1) is on
-# PATH. Does NOT read or write UBERDEV_RESOLVED_BACKEND (that is preflight's;
-# RFC 0005 D15 constrains backend resolution only — env resolution is exempt).
+# PATH for Claude-backed backends. Does NOT read or write
+# UBERDEV_RESOLVED_BACKEND (that is preflight's; RFC 0005 D15 constrains
+# backend resolution only — env resolution is exempt). Codex callers pass
+# BACKEND=codex explicitly so this helper can skip timeout(1) without reading
+# preflight's global.
 # Inputs (read with safe defaults so goal-pipeline, which has no arg-parser,
 # can call it). Exhaustive list — this is the SSOT for both solve-pipeline
 # Phase A and goal-pipeline Phase 0 callers; any new opt-in env var must be
@@ -208,6 +211,7 @@ uberdev_dispatch_preflight() {
 #                                   why pairing is required — bg-session UI cycle ring).
 #   EFFORT_LEVEL     (default max)
 uberdev_dispatch_resolve_env() {
+  local _dispatch_env_backend="${1:-}"
   # BG_PROMPT_MODE: hardcoded `argv`. Verified 2026-05-28 against claude-code
   # 2.1.153 via tests/manual/probe-prompt-file-slash-expansion.sh — probe verdict
   # was `INDETERMINATE`: --prompt-file is accepted as a flag (session backgrounds
@@ -286,6 +290,14 @@ uberdev_dispatch_resolve_env() {
   else
     echo "warning: config-read.sh not found at ${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}/lib/; uberdev.local.md timeout settings ignored" >&2
     SOLVE_TIMEOUT=3600
+  fi
+
+  # Codex does not wrap `codex exec` in timeout(1): the wrapper PID + status
+  # JSON are the liveness contract. Do not require GNU coreutils on Codex-only
+  # hosts just to resolve Claude-backed dispatch settings.
+  if [ "$_dispatch_env_backend" = "codex" ]; then
+    TIMEOUT_BIN=""
+    return 0
   fi
 
   # TIMEOUT_BIN probe (RFC 0004 §3.8 order — absolute /usr/bin/timeout FIRST
@@ -666,10 +678,10 @@ EOF
 # What's different from `background`:
 #   - execs `codex exec` instead of `claude -p` (Codex's headless non-interactive
 #     mode). --sandbox workspace-write grants autonomous edits without approval
-#     prompts (the documented non-interactive analog of "yolo"); --cd pins the
-#     worktree as the workspace root; --json streams progress to the log so the
-#     launcher can tail it; -o captures the agent's final message to a result
-#     file the user can inspect after the run.
+#     prompts (the documented non-interactive analog of "yolo"); the wrapper
+#     `cd`s into the worktree before invoking codex; --json streams progress to
+#     the log so the launcher can tail it; -o captures the agent's final message
+#     to a result file the user can inspect after the run.
 #   - --skip-git-repo-check is NOT passed: the dispatcher creates a real git
 #     worktree above, so codex's repo guard is satisfied and serves as a
 #     useful safety net (refuses to run in a non-repo CWD).
@@ -692,9 +704,6 @@ _uberdev_dispatch_codex() {
   # TOCTOU hardening (#155): guard + 0600-create the predictable paths before
   # any redirect writes to them (mirrors the background arm exactly).
   if ! _uberdev_dispatch_prepare_tmp_target "$LOG_FILE" "$ISSUE_NUM" "codex"; then
-    DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
-  fi
-  if ! _uberdev_dispatch_prepare_tmp_target "$STATUS_FILE.pid" "$ISSUE_NUM" "codex"; then
     DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
   fi
   if ! _uberdev_dispatch_prepare_tmp_target "$STATUS_FILE" "$ISSUE_NUM" "codex"; then
@@ -729,13 +738,12 @@ _uberdev_dispatch_codex() {
   # so it's intentionally NOT propagated here (would be a no-op env var).
   local BG_TURBO_ENV=()
   [[ "${AUTO_MODE:-0}" == "1" ]] && BG_TURBO_ENV=( UBERDEV_TURBO=1 )
-  # Detached wrapper around headless codex exec. cwd = the worktree. The wrapper
-  # waits for codex exec to exit, then updates the status JSON with state and
-  # exit_code. Track the wrapper PID, not the raw codex child, so /goal can poll
-  # a process that owns the final status write.
-  (
-    cd "$WORKTREE_DIR" || exit 127
-    nohup bash -c '
+  # Detached wrapper around headless codex exec. The parent publishes the
+  # running status immediately after capturing $!, so a slow shell startup
+  # cannot be misreported as dispatch failure. Track the wrapper PID, not the
+  # raw codex child, so /goal can poll a process that owns the final status
+  # write.
+  nohup bash -c '
       ISSUE_NUM="$1"
       TIER="$2"
       STATUS_FILE="$3"
@@ -744,20 +752,9 @@ _uberdev_dispatch_codex() {
       WORKTREE_DIR="$6"
       WORKTREE_BRANCH="$7"
       PROMPT_BODY="$8"
-      PID_FILE="$9"
-      shift 9
-      WRAPPER_PID=""
-      for _i in 1 2 3 4 5; do
-        if [ -s "$PID_FILE" ]; then
-          WRAPPER_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-          break
-        fi
-        sleep 1
-      done
-      [ -n "$WRAPPER_PID" ] || WRAPPER_PID="unknown"
-      cat > "$STATUS_FILE" <<EOF_STATUS_RUNNING
-{"issue":$ISSUE_NUM,"tier":"$TIER","backend":"codex","state":"running","exit_code":null,"pid":"$WRAPPER_PID","log":"$LOG_FILE","result":"$RESULT_FILE","worktree":"$WORKTREE_DIR","branch":"$WORKTREE_BRANCH"}
-EOF_STATUS_RUNNING
+      shift 8
+      cd "$WORKTREE_DIR" || exit 127
+      WRAPPER_PID="$$"
       env "$@" codex exec \
         --sandbox workspace-write \
         --json \
@@ -766,47 +763,35 @@ EOF_STATUS_RUNNING
       CODEX_RC=$?
       CODEX_STATE=failed
       [ "$CODEX_RC" -eq 0 ] && CODEX_STATE=completed
-      cat > "$STATUS_FILE" <<EOF_STATUS_FINAL
+      if ! cat > "$STATUS_FILE" <<EOF_STATUS_FINAL
 {"issue":$ISSUE_NUM,"tier":"$TIER","backend":"codex","state":"$CODEX_STATE","exit_code":$CODEX_RC,"pid":"$WRAPPER_PID","log":"$LOG_FILE","result":"$RESULT_FILE","worktree":"$WORKTREE_DIR","branch":"$WORKTREE_BRANCH"}
 EOF_STATUS_FINAL
+      then
+        printf "codex dispatch: failed to write final status file: %s\n" "$STATUS_FILE" >&2
+        exit 126
+      fi
       exit "$CODEX_RC"
-    ' _ "$ISSUE_NUM" "$TIER" "$STATUS_FILE" "$RESULT_FILE" "$LOG_FILE" "$WORKTREE_DIR" "$WORKTREE_BRANCH" "$PROMPT_BODY" "$STATUS_FILE.pid" "${BG_TURBO_ENV[@]}" \
-      >"$LOG_FILE" 2>&1 &
-    printf '%s' "$!" > "$STATUS_FILE.pid"
-    disown 2>/dev/null || true
-  )
+    ' _ "$ISSUE_NUM" "$TIER" "$STATUS_FILE" "$RESULT_FILE" "$LOG_FILE" "$WORKTREE_DIR" "$WORKTREE_BRANCH" "$PROMPT_BODY" "${BG_TURBO_ENV[@]}" \
+    >"$LOG_FILE" 2>&1 &
   DISPATCH_RC=$?
-  # #155 defence-in-depth: re-verify the .pid side-file before parsing.
-  if ! _uberdev_dispatch_tmp_target_safe "$STATUS_FILE.pid"; then
-    DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"
+  DISPATCH_ID="$!"
+  disown 2>/dev/null || true
+  if ! cat > "$STATUS_FILE" <<EOF_STATUS_RUNNING
+{"issue":$ISSUE_NUM,"tier":"$TIER","backend":"codex","state":"running","exit_code":null,"pid":"$DISPATCH_ID","log":"$LOG_FILE","result":"$RESULT_FILE","worktree":"$WORKTREE_DIR","branch":"$WORKTREE_BRANCH"}
+EOF_STATUS_RUNNING
+  then
+    [ -n "$DISPATCH_ID" ] && kill "$DISPATCH_ID" 2>/dev/null || true
+    DISPATCH_ID=""
+    DISPATCH_RC=1
+    DISPATCH_LOG="$LOG_FILE"
     _uberdev_dispatch_audit dispatch_setup_failed \
-      "{\"issue\":$ISSUE_NUM,\"phase\":\"pid_target_unsafe\",\"backend\":\"codex\",\"rc\":3}"
-    return 3
+      "{\"issue\":$ISSUE_NUM,\"phase\":\"status_write\",\"backend\":\"codex\",\"rc\":1}"
+    return 1
   fi
-  DISPATCH_ID="$(cat "$STATUS_FILE.pid" 2>/dev/null || echo '')"
-  rm -f "$STATUS_FILE.pid" 2>/dev/null || true
-  # Liveness gate: a `codex exec` that failed to launch (binary exec error,
-  # bad sandbox config, etc.) still leaves DISPATCH_RC=0 after the fork.
-  # Confirm the captured pid is live; if not, clear DISPATCH_ID so the success
-  # guard below falls through to the error path (same contract as background).
-  if [[ -n "$DISPATCH_ID" ]] && ! kill -0 "$DISPATCH_ID" 2>/dev/null; then
-    DISPATCH_ID=""
-  fi
-  # Wait briefly for the wrapper to publish the running status. Without this,
-  # the launcher could return success with an empty status file during the small
-  # parent/wrapper handoff window.
-  local _status_ready=0 _status_wait
-  for _status_wait in 1 2 3 4 5; do
-    if [ -s "$STATUS_FILE" ]; then
-      _status_ready=1
-      break
-    fi
-    [ -n "$DISPATCH_ID" ] && kill -0 "$DISPATCH_ID" 2>/dev/null || break
-    sleep 1
-  done
-  if [[ "$_status_ready" -ne 1 ]]; then
-    DISPATCH_ID=""
-  fi
+  # A fast `codex exec` failure is a terminal agent outcome, not a parent
+  # dispatch setup failure. The wrapper records that in the final status JSON;
+  # the parent succeeds once it has forked the wrapper and published the running
+  # status file.
   if [[ "$DISPATCH_RC" -eq 0 && -n "$DISPATCH_ID" ]]; then
     _uberdev_dispatch_audit agent_dispatched \
       "{\"issue\":$ISSUE_NUM,\"tier\":\"$TIER\",\"backend\":\"codex\",\"pid\":\"$DISPATCH_ID\",\"log\":\"$LOG_FILE\"}"

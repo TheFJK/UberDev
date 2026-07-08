@@ -90,12 +90,52 @@ def _unquote_scalar(raw: str) -> str:
     raw = raw.rstrip("\r\n")
     if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
         inner = raw[1:-1]
-        # Decode \" \\ \n \t etc. (basic YAML double-quoted escapes)
-        return inner.encode("utf-8").decode("unicode_escape")
+        return _decode_yaml_double_quoted(inner)
     if len(raw) >= 2 and raw[0] == "'" and raw[-1] == "'":
         # YAML single-quoted: only '' → '
         return raw[1:-1].replace("''", "'")
     return _strip_inline_comment(raw).rstrip()
+
+
+def _decode_yaml_double_quoted(inner: str) -> str:
+    """Decode the small YAML double-quoted escape set UberDev frontmatter uses.
+
+    Avoid Python's unicode_escape codec here: it reinterprets already-decoded
+    UTF-8 text byte-by-byte, which turns em dashes and other non-ASCII prose
+    into mojibake in generated TOML.
+    """
+    escapes = {
+        "0": "\0",
+        "a": "\a",
+        "b": "\b",
+        "t": "\t",
+        "\t": "\t",
+        "n": "\n",
+        "v": "\v",
+        "f": "\f",
+        "r": "\r",
+        "e": "\033",
+        '"': '"',
+        "/": "/",
+        "\\": "\\",
+        " ": " ",
+    }
+    out: list[str] = []
+    i = 0
+    while i < len(inner):
+        ch = inner[i]
+        if ch != "\\" or i + 1 >= len(inner):
+            out.append(ch)
+            i += 1
+            continue
+        nxt = inner[i + 1]
+        if nxt in escapes:
+            out.append(escapes[nxt])
+            i += 2
+            continue
+        out.append(nxt)
+        i += 2
+    return "".join(out)
 
 
 def parse_agent(md_path: Path) -> tuple[dict, str]:
@@ -204,12 +244,16 @@ def codex_port_text(value: str) -> str:
     This mirrors codex/tools/port-skill.sh so generated agents do not retain
     Claude-only runtime variables.
     """
-    return (
+    codex_plugin_root = "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}"
+    ported = (
         value.replace("CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT")
+        .replace("${PLUGIN_ROOT}/", f"{codex_plugin_root}/")
+        .replace("$PLUGIN_ROOT/", f"{codex_plugin_root}/")
         .replace("~/.claude/CLAUDE.md", "~/.codex/AGENTS.md")
         .replace("~/.claude/", "~/.codex/")
         .replace("~/.claude", "~/.codex")
     )
+    return "\n".join(line.rstrip(" \t") for line in ported.split("\n"))
 
 
 def toml_escape_scalar(value: str) -> str:

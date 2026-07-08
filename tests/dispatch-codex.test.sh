@@ -116,6 +116,9 @@ assert_grep "$DISPATCH_LIB" \
 assert_grep "$DISPATCH_LIB" \
   '"backend":"codex"' \
   "codex backend status-file + audit payload carries backend=codex"
+assert_grep "$DISPATCH_LIB" \
+  'WRAPPER_PID="\$\$"' \
+  "codex wrapper uses its own numeric shell PID for status"
 
 echo "== Codex backend does NOT thread claude-specific flags =="
 CODEX_BODY="$(awk '
@@ -154,6 +157,21 @@ assert_grep "$LAUNCHER" \
 assert_grep "$LAUNCHER" \
   'solve-codex-result-\$ISSUE_NUM\.md' \
   "solve-launcher prints codex result path in final summary"
+
+echo "== Codex backend does not require timeout/gtimeout =="
+NO_TIMEOUT_BIN="$(mktemp -d)"
+cat > "$NO_TIMEOUT_BIN/codex" <<'SH'
+#!/bin/sh
+exit 0
+SH
+chmod +x "$NO_TIMEOUT_BIN/codex"
+if UBERDEV_RESOLVED_BACKEND=codex PATH="$NO_TIMEOUT_BIN" /bin/bash -c \
+  '. "$1"; uberdev_dispatch_resolve_env codex' _ "$DISPATCH_LIB" >/tmp/codex-no-timeout-out 2>&1; then
+  pass_msg "codex dispatch env resolution skips timeout/gtimeout requirement"
+else
+  fail_msg "codex dispatch env resolution skips timeout/gtimeout requirement" "$(cat /tmp/codex-no-timeout-out)"
+fi
+rm -rf "$NO_TIMEOUT_BIN"
 
 echo "== Public launcher parser accepts codex =="
 PARSER_OUT="$(mktemp)"
@@ -206,6 +224,18 @@ if [ -z "$PID_BACKEND_MISMATCH_OUT" ]; then
 else
   fail_msg "goal-state PID helper validates backend field before trusting pid" "got '$PID_BACKEND_MISMATCH_OUT'"
 fi
+printf '%s\n' '{"issue":42,"backend":"codex","state":"failed","exit_code":17,"pid":"222222","log":"/tmp/log","result":"/tmp/result"}' > "$TMPD/solve-codex-status-42.json"
+CODEX_STATUS_OUT="$(
+  UBERDEV_TMPDIR="$TMPD" UBERDEV_RESOLVED_BACKEND=codex bash -c \
+    '. "$1"; . "$2"; uberdev_goal_codex_status_for_issue 42' \
+    _ "$DISPATCH_LIB" "$GOAL_LIB" 2>/dev/null
+)"
+case "$CODEX_STATUS_OUT" in
+  failed$'\t'17$'\t'/tmp/log$'\t'/tmp/result)
+    pass_msg "goal-state exposes terminal codex failed status with exit/log/result" ;;
+  *)
+    fail_msg "goal-state exposes terminal codex failed status with exit/log/result" "got '$CODEX_STATUS_OUT'" ;;
+esac
 rm -rf "$TMPD"
 
 echo "== _uberdev_dispatch_codex behavior with stubbed git/codex =="
@@ -275,7 +305,109 @@ else
   fail_msg "codex dispatch passes sandbox, turbo env, and prompt body to codex exec" \
     "$(cat "$BEH_TMP/codex-capture.txt" 2>/dev/null)"
 fi
+if printf '%s\n' "$BEH_OUT" | grep -Eq '"pid":"[0-9]+"'; then
+  pass_msg "codex dispatch status pid is numeric"
+else
+  fail_msg "codex dispatch status pid is numeric" "$BEH_OUT"
+fi
 rm -rf "$BEH_TMP"
+
+echo "== _uberdev_dispatch_codex failure and delayed-wrapper behavior =="
+FAIL_TMP="$(mktemp -d)"
+mkdir -p "$FAIL_TMP/bin" "$FAIL_TMP/repo" "$FAIL_TMP/tmp"
+cp "$BEH_TMP/bin/git" "$FAIL_TMP/bin/git" 2>/dev/null || cat > "$FAIL_TMP/bin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "worktree" ] && [ "$2" = "add" ]; then
+  mkdir -p "$3"
+  exit 0
+fi
+exit 1
+SH
+cat > "$FAIL_TMP/bin/codex" <<'SH'
+#!/usr/bin/env bash
+out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$out" ] && printf 'codex refused\n' > "$out"
+exit 17
+SH
+chmod +x "$FAIL_TMP/bin/git" "$FAIL_TMP/bin/codex"
+printf 'prompt body for failure' > "$FAIL_TMP/prompt.txt"
+FAIL_OUT="$(
+  cd "$FAIL_TMP/repo" && \
+  PATH="$FAIL_TMP/bin:/usr/bin:/bin" \
+  UBERDEV_TMPDIR="$FAIL_TMP/tmp" \
+  /bin/bash -c '
+    . "$1"
+    _uberdev_dispatch_codex 42 small "$2"
+    rc=$?
+    pid="${DISPATCH_ID:-}"
+    i=0
+    while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 5 ]; do sleep 1; i=$((i + 1)); done
+    printf "rc=%s\nstatus=%s\nresult=%s\n" "$rc" "$(cat "$UBERDEV_TMPDIR/solve-codex-status-42.json" 2>/dev/null)" "$(cat "$UBERDEV_TMPDIR/solve-codex-result-42.md" 2>/dev/null)"
+  ' _ "$DISPATCH_LIB" "$FAIL_TMP/prompt.txt"
+)"
+case "$FAIL_OUT" in
+  *'rc=0'*'"state":"failed"'*'"exit_code":17'*'result=codex refused'*)
+    pass_msg "codex dispatch records failed child status without treating dispatch as failed" ;;
+  *)
+    fail_msg "codex dispatch records failed child status without treating dispatch as failed" "$FAIL_OUT" ;;
+esac
+rm -rf "$FAIL_TMP"
+
+RACE_TMP="$(mktemp -d)"
+mkdir -p "$RACE_TMP/bin" "$RACE_TMP/repo" "$RACE_TMP/tmp"
+cat > "$RACE_TMP/bin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "worktree" ] && [ "$2" = "add" ]; then
+  mkdir -p "$3"
+  exit 0
+fi
+exit 1
+SH
+cat > "$RACE_TMP/bin/codex" <<'SH'
+#!/usr/bin/env bash
+out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$out" ] && printf 'delayed codex result\n' > "$out"
+exit 0
+SH
+cat > "$RACE_TMP/bin/bash" <<'SH'
+#!/bin/sh
+sleep 6
+exec /bin/bash "$@"
+SH
+chmod +x "$RACE_TMP/bin/git" "$RACE_TMP/bin/codex" "$RACE_TMP/bin/bash"
+printf 'prompt body delayed' > "$RACE_TMP/prompt.txt"
+RACE_OUT="$(
+  cd "$RACE_TMP/repo" && \
+  PATH="$RACE_TMP/bin:/usr/bin:/bin" \
+  UBERDEV_TMPDIR="$RACE_TMP/tmp" \
+  /bin/bash -c '
+    . "$1"
+    _uberdev_dispatch_codex 42 small "$2"
+    rc=$?
+    pid="${DISPATCH_ID:-}"
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    printf "rc=%s\npid=%s\nstatus=%s\n" "$rc" "$pid" "$(cat "$UBERDEV_TMPDIR/solve-codex-status-42.json" 2>/dev/null)"
+  ' _ "$DISPATCH_LIB" "$RACE_TMP/prompt.txt"
+)"
+case "$RACE_OUT" in
+  *'rc=0'*'"state":"running"'*'"pid":"'*)
+    pass_msg "codex dispatch publishes running status before delayed wrapper starts" ;;
+  *)
+    fail_msg "codex dispatch publishes running status before delayed wrapper starts" "$RACE_OUT" ;;
+esac
+rm -rf "$RACE_TMP"
 
 echo "== Codex plugin package is self-contained =="
 if [ -r "$PLUGIN_ROOT/lib/dispatch.sh" ] && [ -r "$PLUGIN_ROOT/lib/solve-launcher.sh" ] && [ -x "$PLUGIN_ROOT/hooks/session-start" ]; then

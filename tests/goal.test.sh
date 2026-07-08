@@ -713,6 +713,14 @@ assert_grep "$GOAL_SKILL" 'uberdev_goal_audit goal_issue_closed_without_pr' \
   "G39.audit-event-emitted"
 # See BT84/BT85 below for the behavioural complement.
 
+echo "== G39b: Phase 2 surfaces terminal Codex agent failure immediately =="
+assert_grep "$GOAL_LIB" '^uberdev_goal_codex_status_for_issue\(\)' \
+  "G39b.codex-status-helper-defined"
+assert_grep "$GOAL_SKILL" 'uberdev_goal_codex_status_for_issue "\$issue"' \
+  "G39b.phase2-checks-codex-terminal-status"
+assert_grep "$GOAL_SKILL" 'codex agent for issue .* failed' \
+  "G39b.codex-failed-surfaces-immediately"
+
 echo
 echo "== Behavioral tests (B12 — sourced-function exercises) =="
 # These tests SOURCE plugins/uberdev/lib/goal-state.sh and exercise the

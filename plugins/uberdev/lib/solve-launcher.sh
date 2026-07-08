@@ -274,10 +274,17 @@ if [[ -n "$AUTO_FLAG" ]]; then
   AUTO_PERMISSIONS=1
 elif [[ "${SOLVE_AUTO:-}" == "1" ]]; then
   AUTO_PERMISSIONS=1
-elif [[ -f .claude/uberdev.local.md ]] && grep -qE '^solve_auto:[[:space:]]*true[[:space:]]*$' .claude/uberdev.local.md; then
-  AUTO_PERMISSIONS=1
 else
-  AUTO_PERMISSIONS=0
+  if [ -r "${UBERDEV_PLUGIN_ROOT:-}/lib/config-read.sh" ]; then
+    # shellcheck source=/dev/null
+    . "${UBERDEV_PLUGIN_ROOT}/lib/config-read.sh"
+  fi
+  if command -v uberdev_read_enum >/dev/null 2>&1 \
+     && [ "$(uberdev_read_enum solve_auto UBERDEV_SOLVE_AUTO_CONFIG 'true|false' 'false')" = "true" ]; then
+    AUTO_PERMISSIONS=1
+  else
+    AUTO_PERMISSIONS=0
+  fi
 fi
 
 # Permission-mode description for operator visibility. Flat-var if/else form
@@ -532,7 +539,7 @@ if [ -r "${UBERDEV_PLUGIN_ROOT:-}/lib/dispatch.sh" ]; then
   # shellcheck source=/dev/null
   . "${UBERDEV_PLUGIN_ROOT}/lib/dispatch.sh"
   uberdev_dispatch_preflight || exit 1
-  uberdev_dispatch_resolve_env || exit 1
+  uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1
 else
   echo "error: lib/dispatch.sh not found at ${UBERDEV_PLUGIN_ROOT:-}/lib/" >&2
   exit 1

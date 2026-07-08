@@ -12,12 +12,13 @@
 #   Manifest surfaces (the drift pre-check refuses if these disagree):
 #     1. plugins/uberdev/.claude-plugin/plugin.json   "version" (canonical SSOT — what /plugin reads)
 #     2. .claude-plugin/marketplace.json              plugins[0].version (marketplace listing)
-#     3. README.md                                    shields.io badge `version-X.Y.Z-blue`
-#     4. CHANGELOG.md                                 new dated `## [X.Y.Z] — YYYY-MM-DD` section stub
+#     3. codex/uberdev-codex/.codex-plugin/plugin.json "version" (Codex plugin)
+#     4. README.md                                    shields.io badge `version-X.Y.Z-blue`
+#     5. CHANGELOG.md                                 new dated `## [X.Y.Z] — YYYY-MM-DD` section stub
 #   CI release-ratchet test locks (red CI on a clean main if missed):
-#     5. tests/goal.test.sh                           G20 `assert_version_bump` arg + the
+#     6. tests/goal.test.sh                           G20 `assert_version_bump` arg + the
 #                                                     `version bump locked (X.Y.Z)` echo header
-#     6. tests/solve-claim.test.sh                    `assert_version_bump` arg + the
+#     7. tests/solve-claim.test.sh                    `assert_version_bump` arg + the
 #                                                     `Version bump A.B.C -> X.Y.Z propagated` echo header
 #
 # Contract:
@@ -25,8 +26,8 @@
 #     zeros, no `v` prefix, no pre-release/build suffix).
 #   - Drift-grep PRE-check: refuses (exit 3) BEFORE editing anything if the
 #     version surfaces disagree about the current version — a half-bumped
-#     repo needs a human, not more sed. The 4 manifest surfaces are the
-#     mandated refusal set (RFC 0012 §7.7); the 2 test-lock files are
+#     repo needs a human, not more sed. The manifest/badge/CHANGELOG surfaces
+#     are the mandated refusal set (RFC 0012 §7.7); the 2 test-lock files are
 #     pre-checked with the SAME line-scoped patterns the edits use, so a
 #     replace can never silently no-op into a half-bump.
 #   - Idempotent: <new-version> == current with every surface consistent is
@@ -207,13 +208,14 @@ fi
 # --- surface inventory ---------------------------------------------------------
 PLUGIN_JSON="$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json"
 MARKETPLACE_JSON="$REPO_ROOT/.claude-plugin/marketplace.json"
+CODEX_PLUGIN_JSON="$REPO_ROOT/codex/uberdev-codex/.codex-plugin/plugin.json"
 README_MD="$REPO_ROOT/README.md"
 CHANGELOG_MD="$REPO_ROOT/CHANGELOG.md"
 GOAL_TEST="$REPO_ROOT/tests/goal.test.sh"
 SOLVE_CLAIM_TEST="$REPO_ROOT/tests/solve-claim.test.sh"
 
 MISSING=""
-for f in "$PLUGIN_JSON" "$MARKETPLACE_JSON" "$README_MD" "$CHANGELOG_MD" "$GOAL_TEST" "$SOLVE_CLAIM_TEST"; do
+for f in "$PLUGIN_JSON" "$MARKETPLACE_JSON" "$CODEX_PLUGIN_JSON" "$README_MD" "$CHANGELOG_MD" "$GOAL_TEST" "$SOLVE_CLAIM_TEST"; do
   if [ ! -r "$f" ]; then
     MISSING="${MISSING}  - ${f}"$'\n'
   fi
@@ -248,6 +250,7 @@ check_surface() {  # <file> <ere-pattern> <label>
 
 check_surface "$PLUGIN_JSON"      "${VERSION_KEY_RE}\"${CUR_ERE}\"" "plugin.json \"version\""
 check_surface "$MARKETPLACE_JSON" "${VERSION_KEY_RE}\"${CUR_ERE}\"" "marketplace.json plugins[0].version"
+check_surface "$CODEX_PLUGIN_JSON" "${VERSION_KEY_RE}\"${CUR_ERE}\"" "Codex plugin.json \"version\""
 check_surface "$README_MD"        "version-${CUR_ERE}-blue"         "README.md version badge"
 # CHANGELOG: the TOPMOST released section must be the current version.
 TOP_HEADER="$(awk '/^## \[/ { print; exit }' "$CHANGELOG_MD")"
@@ -291,6 +294,8 @@ bv_edit_inplace "$PLUGIN_JSON" \
   -e "s/\"version\"[[:space:]]*:[[:space:]]*\"${CUR_SED}\"/\"version\": \"${NEW_VERSION}\"/" || EDIT_FAILED=1
 bv_edit_inplace "$MARKETPLACE_JSON" \
   -e "s/\"version\"[[:space:]]*:[[:space:]]*\"${CUR_SED}\"/\"version\": \"${NEW_VERSION}\"/" || EDIT_FAILED=1
+bv_edit_inplace "$CODEX_PLUGIN_JSON" \
+  -e "s/\"version\"[[:space:]]*:[[:space:]]*\"${CUR_SED}\"/\"version\": \"${NEW_VERSION}\"/" || EDIT_FAILED=1
 bv_edit_inplace "$README_MD" \
   -e "s/version-${CUR_SED}-blue/version-${NEW_VERSION}-blue/" || EDIT_FAILED=1
 bv_insert_changelog_stub "$CHANGELOG_MD" "$NEW_VERSION" "$TODAY" || EDIT_FAILED=1
@@ -319,6 +324,7 @@ verify_surface() {  # <file> <ere-pattern> <label>
 
 verify_surface "$PLUGIN_JSON"      "${VERSION_KEY_RE}\"${NEW_ERE}\""                       "plugin.json"
 verify_surface "$MARKETPLACE_JSON" "${VERSION_KEY_RE}\"${NEW_ERE}\""                       "marketplace.json"
+verify_surface "$CODEX_PLUGIN_JSON" "${VERSION_KEY_RE}\"${NEW_ERE}\""                      "Codex plugin.json"
 verify_surface "$README_MD"        "version-${NEW_ERE}-blue"                               "README.md badge"
 verify_surface "$CHANGELOG_MD"     "^## \[${NEW_ERE}\].*${TODAY//-/\\-}"                   "CHANGELOG.md dated stub"
 verify_surface "$GOAL_TEST"        "assert_version_bump[[:space:]].*\"${NEW_ERE}\""        "tests/goal.test.sh assert_version_bump arg"
@@ -343,6 +349,7 @@ printf 'bump-version: %s -> %s — all locked surfaces updated:\n' "$CURRENT" "$
 printf '  - %s\n' \
   "plugins/uberdev/.claude-plugin/plugin.json  (\"version\")" \
   ".claude-plugin/marketplace.json             (plugins[0].version)" \
+  "codex/uberdev-codex/.codex-plugin/plugin.json (\"version\")" \
   "README.md                                   (version badge)" \
   "CHANGELOG.md                                (## [${NEW_VERSION}] — ${TODAY} stub inserted)" \
   "tests/goal.test.sh                          (G20 version lock + echo header)" \

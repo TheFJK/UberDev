@@ -198,8 +198,8 @@ final message lands in the `-o` result file for post-run inspection.
 
 - **`Workflow` tool**: the testers-pipeline and scan-fleet skills use Claude's
   `Workflow` orchestration tool, which Codex lacks. They fall back to their
-  `## No-Workflow fallback` path (sequential `spawn_agent` fanout — functional,
-  but not the parallel orchestration the Workflow tool gives).
+  `## No-Workflow fallback` path (bounded manual `spawn_agent` / directive
+  fallback — functional, but not the Workflow orchestration Claude gives).
 - **`uberdev_goal_review_pr_in_flight`**: the goal-loop's review-pr liveness
   check queries `claude agents --json` (claude-specific). Under the codex
   backend it returns "not in flight" (fail-safe — goal proceeds rather than

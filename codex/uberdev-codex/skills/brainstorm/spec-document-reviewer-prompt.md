@@ -1,5 +1,5 @@
 <!--
-  Shared skeleton: ../_shared/document-reviewer-template.md
+  Shared skeleton: ../../shared/document-reviewer-template.md
   Substitute: [DOCUMENT_TYPE] = spec, [DOCUMENT_TYPE_TITLE] = Spec.
   Mirror file: ../write-plan/plan-document-reviewer-prompt.md.
   Claude Code skills do not auto-include partials — when the skeleton changes,

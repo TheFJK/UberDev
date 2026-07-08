@@ -14,8 +14,8 @@ UberDev now installs into the [OpenAI Codex CLI](https://developers.openai.com/c
 - **Codex-native plugin + marketplace** — `codex/uberdev-codex/` (`.codex-plugin/plugin.json` bundles skills + session-start hook) + `.agents/plugins/marketplace.json`. Install via `codex plugin marketplace add TheFJK/UberDev` → `/plugins`. Browse-and-toggle UX; pairs with the installer for full functionality.
 
 **Converter tooling** (`codex/tools/`, idempotent, regeneratable from source):
-- `convert-agents.py` — Claude `agents/*.md` (YAML frontmatter + body) → Codex `*.toml` (`name`/`description`/`developer_instructions`). Tolerant of Claude's lenient unquoted-scalar-with-colons frontmatter (8 of 42 agents tripped strict YAML). `model: inherit` (41 agents) → omit `model`; `model: haiku` (the lone outlier, `research-test-coverage`) → `gpt-5.4`. Drops Claude-only `color`/`allowed-tools`/`tools`.
-- `convert-commands.py` — 13 Claude slash commands → `uberdev-cmd-*` Codex skills (Codex removed custom prompts in v0.117.0; skills are the documented replacement). Skips the 2 Claude-only alias commands (`install-aliases`/`uninstall-aliases` — no Codex equivalent).
+- `convert-agents.py` — Claude `agents/*.md` (YAML frontmatter + body) → Codex `*.toml` (`name`/`description`/`developer_instructions`). Tolerant of Claude's lenient unquoted-scalar-with-colons frontmatter (8 of 42 agents tripped strict YAML). `model: inherit` (41 agents) → omit `model`; `model: haiku` (the lone outlier, `research-test-coverage`) → `gpt-5.4-mini`. Drops Claude-only `color`/`allowed-tools`/`tools`.
+- `convert-commands.py` — 13 Claude slash commands → `uberdev-cmd-*` Codex skills (Codex custom prompts are deprecated; skills are the documented shareable replacement). Skips the 2 Claude-only alias commands (`install-aliases`/`uninstall-aliases` — no Codex equivalent).
 - `port-skill.sh` — copies the 26 skills ~verbatim with `CLAUDE_PLUGIN_ROOT`→`PLUGIN_ROOT` + `~/.claude/`→`~/.codex/` path fixes. Tool-name bridging (`Task`→`spawn_agent`, etc.) is runtime, via the shipped `references/codex-tools.md`.
 
 **Dispatch backend** — new `codex` arm in `lib/dispatch.sh` (`_uberdev_dispatch_codex`): execs `codex exec --sandbox workspace-write --json -o <result>` in a per-issue git worktree, nohup-detached + PID-tracked (mirrors the proven `background` backend — no new liveness mechanism). Auto-selected when `CODEX_HOME` is set or `claude` is absent + `codex` present; overridable via `--backend=codex`. `lib/solve-launcher.sh`'s claude-version gate is now backend-conditional (codex path requires `codex` on PATH instead). `lib/goal-state.sh` liveness polling is backend-aware: the codex/background path uses `kill -0` PID checks instead of `claude agents --json`.
@@ -26,9 +26,9 @@ UberDev now installs into the [OpenAI Codex CLI](https://developers.openai.com/c
 
 ### Known limitations (Codex v1)
 
-- The `testers-pipeline` / `scan-fleet` `workflow.js` skills use Claude's `Workflow` tool (no Codex equivalent); they fall back to their `## No-Workflow fallback` path (sequential `spawn_agent` — functional, not parallel-orchestrated).
+- The `testers-pipeline` / `scan-fleet` `workflow.js` skills use Claude's `Workflow` tool (no Codex equivalent); they fall back to their `## No-Workflow fallback` path (bounded manual `spawn_agent` / directive fallback — functional, not Workflow-orchestrated).
 - `uberdev_goal_review_pr_in_flight` queries `claude agents --json` (claude-specific); under the codex backend it returns "not in flight" (fail-safe — goal proceeds rather than stalls). Documented in `lib/goal-state.sh`.
-- Agent model mapping (`haiku`→`gpt-5.4`) is a 2026-07 snapshot — revisit on each OpenAI model release.
+- Agent model mapping (`haiku`→`gpt-5.4-mini`) is a 2026-07 snapshot — revisit on each OpenAI model release.
 - `codex cloud exec` (async server-side dispatch) is a future enhancement; v1 uses local `codex exec` + `nohup`.
 
 ## [0.38.0] — 2026-06-25

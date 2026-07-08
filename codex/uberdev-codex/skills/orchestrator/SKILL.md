@@ -146,9 +146,9 @@ Use `AskUserQuestion` with 2 options (`Yes` / `No`) so the consent is structural
 **Starting the server (first visual question only).** Resolve the plugin scripts dir via plugin-root env var with a `find` fallback, then invoke `start-server.sh`:
 
 ```bash
-PLUGIN_SCRIPTS="${PLUGIN_ROOT:-${PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}/skills/brainstorm/scripts"
+PLUGIN_SCRIPTS="${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/skills/brainstorm/scripts"
 if [[ ! -d "$PLUGIN_SCRIPTS" ]]; then
-  PLUGIN_SCRIPTS="$(find "${HOME}/.claude/plugins" "${HOME}/.cursor/plugins" -type d -path '*/uberdev/skills/brainstorm/scripts' 2>/dev/null | head -1)"
+  PLUGIN_SCRIPTS="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex/skills/brainstorm/scripts" "${HOME}/.agents/skills/brainstorm/scripts" -maxdepth 0 -type d 2>/dev/null | head -1)"
 fi
 if [[ ! -d "$PLUGIN_SCRIPTS" ]]; then
   echo "uberdev brainstorm scripts not found — falling back to terminal-only Phase 2" >&2

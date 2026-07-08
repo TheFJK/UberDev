@@ -56,10 +56,10 @@ Active config keys read by `/merge` at run start (in addition to the deprecated 
 The following flags / config keys are accepted for backward compat but have no behavioural effect:
 
 - `--yes`, `-y` (CLI flags)
-- `auto_confirm: true|false` (config key in `.claude/uberdev.local.md`)
+- `auto_confirm: true|false` (config key in `.codex/uberdev.local.md`)
 - `--squash`, `--rebase`, `--merge` (CLI flags) — `merge-strategy-decider` agent picks per-PR strategy from PR-shape signals plus an advisory `merge-strategy:<name>` label hint. The CLI flag does NOT override the agent's choice for any PR.
 - `--bypass-protections` (CLI flag) — trust resolution is fully agent-decided via `trust-trail-evaluator` (Phase 1.4 PATH_2 sub-condition (c)). No CI-red waiver, no PATH_3 admin-bypass anchor.
-- `bot_authors_allow_list: [...]` (config key in `.claude/uberdev.local.md`) — as of v0.14.0, /merge no longer gates on PR-author identity; any APPROVED + CI-green PR is eligible regardless of author. Phase 1.4 trust resolution accepts EITHER `reviewDecision == "APPROVED"` (PATH_1, team / branch-protection path) OR a green `/review-pr` trail bound to current HEAD SHA via the `trust-trail-evaluator` agent (PATH_2, solo-dev / no-protection path; the agent emits verdicts in `{PASS, STALE, INVALID, FORCE_PUSHED}` over structural primitives) — author identity is not a gate in either path. The key remains parseable for backward compat.
+- `bot_authors_allow_list: [...]` (config key in `.codex/uberdev.local.md`) — as of v0.14.0, /merge no longer gates on PR-author identity; any APPROVED + CI-green PR is eligible regardless of author. Phase 1.4 trust resolution accepts EITHER `reviewDecision == "APPROVED"` (PATH_1, team / branch-protection path) OR a green `/review-pr` trail bound to current HEAD SHA via the `trust-trail-evaluator` agent (PATH_2, solo-dev / no-protection path; the agent emits verdicts in `{PASS, STALE, INVALID, FORCE_PUSHED}` over structural primitives) — author identity is not a gate in either path. The key remains parseable for backward compat.
 
 On first encounter per run, /merge emits this stderr notice (verbatim) for the autopilot flags:
 

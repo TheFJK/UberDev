@@ -47,9 +47,10 @@ backend in `lib/dispatch.sh` (`claude-bg` / `wezterm` / `background`).
 The `codex` backend is also available under Codex or via `--backend=codex`;
 it runs detached `codex exec --sandbox workspace-write --json -o <result>`.
 Per-issue artifacts (`$UBERDEV_TMPDIR/solve-prompt-N.txt`,
-`$UBERDEV_TMPDIR/solve-bg-stdout-N.log`, `.claude/worktrees/solve-issue-N/`,
-`worktree-solve-issue-N` branch) are namespaced by issue number, so
-concurrent spawns are collision-free. Override flags
+`$UBERDEV_TMPDIR/solve-bg-stdout-N.log`, `$UBERDEV_TMPDIR/solve-codex-stdout-N.log`,
+`$UBERDEV_TMPDIR/solve-codex-status-N.json`, `$UBERDEV_TMPDIR/solve-codex-result-N.md`,
+`.claude/worktrees/solve-issue-N/`, `worktree-solve-issue-N` branch) are
+namespaced by issue number, so concurrent spawns are collision-free. Override flags
 (`--trivial|--small|--full`, `--auto`, `--force`, `--effort=<level>`,
 `--backend=<name>`) apply batch-wide. Monitor via `claude agents` (claude-bg),
 visible panes (wezterm), or PID/log/result files (background/codex).
