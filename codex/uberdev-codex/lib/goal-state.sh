@@ -283,15 +283,21 @@ _uberdev_goal_pid_for_issue() {
 # Codex dispatch is PID-polled for liveness, but the detached wrapper also
 # writes a terminal status JSON. /goal uses this to surface a failed codex exec
 # immediately instead of waiting for the generic solve timeout.
+# rc 0: valid status emitted on stdout.
+# rc 1: no usable status yet (wrong backend, missing file, zero-byte startup
+#       placeholder, or helper unavailable).
+# rc 2: non-empty status file exists but is malformed or schema-invalid.
 uberdev_goal_codex_status_for_issue() {
   local issue="$1"
   _uberdev_goal_validate_int "$issue" || return 1
   [ "${UBERDEV_RESOLVED_BACKEND:-}" = "codex" ] || return 1
   command -v _uberdev_dispatch_tmp_target_safe >/dev/null 2>&1 || return 1
 
-  local status_file row
+  local status_file
   status_file="${UBERDEV_TMPDIR:-/tmp}/solve-codex-status-$issue.json"
   _uberdev_dispatch_tmp_target_safe "$status_file" || return 1
+  [ -r "$status_file" ] || return 1
+  [ -s "$status_file" ] || return 1
 
   local jq_out
   jq_out="$(jq -er --argjson issue "$issue" '
@@ -1258,20 +1264,19 @@ uberdev_goal_gh_failure_breaker_check() {
 }
 
 # uberdev_goal_agent_busy_for_issue ISSUE_NUM   (issue #180)
-# rc 0 iff a live `claude` background session is working in the solver's
-# worktree for issue N (cwd ends `solve-issue-N`, status ∈ busy|running|
-# starting|working). Phase 2a uses it to disambiguate "solver still working,
+# rc 0 iff the resolved backend still has an active solver for issue N:
+# claude-bg/wezterm poll `claude agents --json` for a live session in the
+# solver worktree; background polls the recorded wrapper PID; codex first
+# treats terminal completed/failed status files as not busy, then falls back to
+# the wrapper PID. Phase 2a uses this to disambiguate "solver still working,
 # no PR yet" from "solver died" before the per-issue solve-timeout fires.
 # Deliberately NOT used to gate review-readiness: the leaf solver routinely
 # goes idle for ~20m while its OWN finish-branch /review-pr runs, so keying
 # re-review on liveness fires redundant reviews and prematurely red-holds a PR
 # whose GREEN verdict simply has not landed (Phase 2b uses a time-grace +
-# verdict-poll model instead). jq parses the agent list (codebase-standard;
-# avoids a python3 runtime dependency); a parse failure or empty list yields
-# "not busy", the fail-safe default. The rc is normalised to exactly 0 (busy)
-# or 1 (not busy) — `jq -e` returns 1 on a `false` result but 2/5 on a parse
-# error, so the explicit if/return collapses every "not busy" cause (no match,
-# malformed JSON, claude failure) to a single rc 1 for a crisp caller contract.
+# verdict-poll model instead). Missing/unreadable state, dead PIDs, empty
+# lists, malformed JSON, and CLI failures all yield rc 1 (not busy), the
+# fail-safe default for this contract.
 uberdev_goal_agent_busy_for_issue() {
   local n="$1"
   _uberdev_goal_validate_int "$n" || return 1

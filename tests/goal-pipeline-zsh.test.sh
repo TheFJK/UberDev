@@ -811,9 +811,10 @@ fi
 echo "== W3: Codex malformed solver status is surfaced, not swallowed (#329 review) =="
 
 W3_STEP2A="$WORK/w3_step2a.slice.sh"
-if slice_fence 'for issue in "${active_issues[@]}"; do' '2b. Read the leaf /review-pr verdict' > "$W3_STEP2A" \
+if slice_fence '_uberdev_goal_phase2_release_claim() {' '2b. Read the leaf /review-pr verdict' > "$W3_STEP2A" \
    && [ -s "$W3_STEP2A" ] \
    && grep -q 'uberdev_goal_codex_status_for_issue' "$W3_STEP2A" \
+   && grep -q '_uberdev_goal_phase2_release_claim "$issue" "invalid_status"' "$W3_STEP2A" \
    && grep -qE '^[[:space:]]*done' "$W3_STEP2A"; then
   pass "W3.extract: sliced the step-2a no-PR solver-status loop from the watch fence"
 else
@@ -846,7 +847,7 @@ DRV_W3="$WORK/drv_w3.zsh"
   echo 'uberdev_goal_audit() { printf "%s %s\n" "$1" "$2" >> "$UBERDEV_TMPDIR/w3-audit"; }'
   echo '_uberdev_goal_reap_zombies() { echo reaped > "$UBERDEV_TMPDIR/w3-reaped"; }'
   echo 'print_summary() { :; }'
-  echo 'gh() { case "$1 $2" in "issue view") printf "OPEN";; "issue edit") return 0;; *) return 0;; esac; }'
+  echo 'gh() { case "$1 $2" in "issue view") printf "OPEN";; "issue edit") printf "edit denied\n" >&2; return 9;; *) return 0;; esac; }'
   echo "source '$W3_STEP2A'"
   echo 'echo "W3-FELL-THROUGH any_active=$any_active"'
 } > "$DRV_W3"
@@ -855,12 +856,14 @@ W3_OUT="$("$ZSH_BIN" -f "$DRV_W3" 2>"$WORK/w3.err")"; W3_RC=$?
 W3_ERR="$(cat "$WORK/w3.err" 2>/dev/null)"
 if [ "$W3_RC" -eq 1 ] \
    && printf '%s' "$W3_ERR" | grep -q 'invalid Codex status for issue 42' \
+   && printf '%s' "$W3_ERR" | grep -q 'release uberdev:active claim failed for issue 42' \
+   && printf '%s' "$W3_ERR" | grep -q 'edit denied' \
    && grep -q '"reason":"solver_failed"' "$W3_STATE/w3-audit" 2>/dev/null \
    && grep -q '"state":"invalid_status"' "$W3_STATE/w3-audit" 2>/dev/null \
    && grep -q '42:solving->failed' "$W3_STATE/w3-transition" 2>/dev/null; then
-  pass "W3: malformed Codex status file fails closed with diagnostic, failed transition, and solver_failed audit"
+  pass "W3: malformed Codex status file fails closed with diagnostic, release breadcrumb, failed transition, and solver_failed audit"
 else
-  fail "W3: malformed Codex status should fail closed (rc=$W3_RC, out=[$W3_OUT], err=[$W3_ERR], audit=[$(cat "$W3_STATE/w3-audit" 2>/dev/null)], transition=[$(cat "$W3_STATE/w3-transition" 2>/dev/null)])"
+  fail "W3: malformed Codex status should fail closed with release breadcrumb (rc=$W3_RC, out=[$W3_OUT], err=[$W3_ERR], audit=[$(cat "$W3_STATE/w3-audit" 2>/dev/null)], transition=[$(cat "$W3_STATE/w3-transition" 2>/dev/null)])"
 fi
 
 echo

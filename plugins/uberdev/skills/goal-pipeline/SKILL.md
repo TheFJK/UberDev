@@ -722,6 +722,18 @@ while true; do
   # issue N exists on GitHub (`closingIssuesReferences` / `feat/N-` head). When
   # no PR exists yet, `uberdev_goal_agent_busy_for_issue` disambiguates "solver
   # still working" from "solver died", bounded by _UBERDEV_GOAL_SOLVE_TIMEOUT.
+  _uberdev_goal_phase2_release_claim() {
+    local issue="$1" context="${2:-terminal}" release_err release_rc
+    _uberdev_goal_validate_int "$issue" || return 0
+    release_err="$(gh issue edit "$issue" --remove-label "uberdev:active" --remove-assignee "@me" 2>&1 >/dev/null)"
+    release_rc=$?
+    if [ "$release_rc" -ne 0 ]; then
+      printf 'goal-pipeline: WARN release uberdev:active claim failed for issue %s (%s, rc=%d): %s\n' \
+        "$issue" "$context" "$release_rc" "$release_err" >&2
+    fi
+    return 0
+  }
+
   for issue in "${active_issues[@]}"; do
     istate="$(uberdev_goal_get_issue_state "$GOAL_ID" "$issue" 2>/dev/null)"
     case "$istate" in pr-pushed|resolved|resolved-by-no-action|failed) continue ;; esac
@@ -779,7 +791,7 @@ while true; do
             printf 'goal-pipeline: invalid Codex status for issue %s — failing solver instead of waiting for timeout\n' "$issue" >&2
             uberdev_goal_issue_state_transition "$GOAL_ID" "$issue" solving failed \
               || printf 'goal-pipeline: WARN transition solving->failed failed for Codex issue %s (invalid status file)\n' "$issue" >&2
-            gh issue edit "$issue" --remove-label "uberdev:active" --remove-assignee "@me" >/dev/null 2>&1 || true
+            _uberdev_goal_phase2_release_claim "$issue" "invalid_status"
             uberdev_goal_audit goal_circuit_breaker \
               "{\"reason\":\"solver_failed\",\"issue\":$issue,\"backend\":\"codex\",\"state\":\"invalid_status\",\"exit_code\":null}"
             _uberdev_goal_reap_zombies || true
@@ -792,7 +804,7 @@ while true; do
             "$issue" "${_codex_exit:-unknown}" "${_codex_log:-unknown}" "${_codex_result:-unknown}" >&2
           uberdev_goal_issue_state_transition "$GOAL_ID" "$issue" solving failed \
             || printf 'goal-pipeline: WARN transition solving->failed failed for Codex issue %s (status file reports failed)\n' "$issue" >&2
-          gh issue edit "$issue" --remove-label "uberdev:active" --remove-assignee "@me" >/dev/null 2>&1 || true
+          _uberdev_goal_phase2_release_claim "$issue" "codex_failed"
           uberdev_goal_audit goal_circuit_breaker \
             "{\"reason\":\"solver_failed\",\"issue\":$issue,\"backend\":\"codex\",\"state\":\"failed\",\"exit_code\":${_codex_exit:-null}}"
           _uberdev_goal_reap_zombies || true
@@ -830,7 +842,7 @@ while true; do
           # fresh shell; the Phase-1 _uberdev_goal_release_claim helper is not in
           # scope) — combined remove-label + remove-assignee, fail-soft (the
           # issue is already CLOSED, so the label is stale; mirrors merge Step 3.4).
-          gh issue edit "$issue" --remove-label "uberdev:active" --remove-assignee "@me" >/dev/null 2>&1 || true
+          _uberdev_goal_phase2_release_claim "$issue" "closed_without_pr"
           continue
         fi
       fi
@@ -845,7 +857,7 @@ while true; do
           "$issue" "${_codex_exit:-unknown}" "${_codex_log:-unknown}" "${_codex_result:-unknown}" >&2
         uberdev_goal_issue_state_transition "$GOAL_ID" "$issue" solving failed \
           || printf 'goal-pipeline: WARN transition solving->failed failed for Codex issue %s (status file reports completed without PR)\n' "$issue" >&2
-        gh issue edit "$issue" --remove-label "uberdev:active" --remove-assignee "@me" >/dev/null 2>&1 || true
+        _uberdev_goal_phase2_release_claim "$issue" "codex_completed_no_pr"
         uberdev_goal_audit goal_circuit_breaker \
           "{\"reason\":\"solver_failed\",\"issue\":$issue,\"backend\":\"codex\",\"state\":\"completed\",\"exit_code\":${_codex_exit:-null}}"
         _uberdev_goal_reap_zombies || true
@@ -863,7 +875,7 @@ while true; do
         # the GitHub issue is still OPEN, so a stranded `uberdev:active` claim
         # would block every future /goal cycle AND any manual /solve retry on
         # this issue. Release it (inlined — fresh-shell Phase 2; fail-soft).
-        gh issue edit "$issue" --remove-label "uberdev:active" --remove-assignee "@me" >/dev/null 2>&1 || true
+        _uberdev_goal_phase2_release_claim "$issue" "solve_timeout"
       fi
     fi
   done

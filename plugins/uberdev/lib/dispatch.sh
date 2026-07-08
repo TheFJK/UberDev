@@ -757,9 +757,20 @@ _uberdev_dispatch_codex() {
       write_status() {
         _state="$1"
         _exit_code="$2"
-        cat > "$STATUS_FILE" <<EOF_STATUS
+        _status_tmp="$(umask 077; mktemp "${STATUS_FILE}.tmp.$$.XXXXXX")" || return 1
+        cat > "$_status_tmp" <<EOF_STATUS
 {"issue":$ISSUE_NUM,"tier":"$TIER","backend":"codex","state":"$_state","exit_code":$_exit_code,"pid":"$WRAPPER_PID","log":"$LOG_FILE","result":"$RESULT_FILE","worktree":"$WORKTREE_DIR","branch":"$WORKTREE_BRANCH"}
 EOF_STATUS
+        _status_rc=$?
+        if [ "$_status_rc" -ne 0 ]; then
+          rm -f "$_status_tmp" 2>/dev/null || true
+          return "$_status_rc"
+        fi
+        mv -f "$_status_tmp" "$STATUS_FILE" || {
+          _status_rc=$?
+          rm -f "$_status_tmp" 2>/dev/null || true
+          return "$_status_rc"
+        }
       }
 
       if ! write_status running null; then

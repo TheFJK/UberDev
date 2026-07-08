@@ -21,7 +21,23 @@ if [ ! -f "$CONVERTER" ]; then
   echo "error: converter not found: $CONVERTER" >&2
   exit 1
 fi
-SRC_COUNT="$(find "$SRC" -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l | tr -d ' ')"
+FIND_ERR="$(mktemp "${TMPDIR:-/tmp}/uberdev-port-agents-find.XXXXXX")" || {
+  echo "error: failed to allocate find diagnostic file" >&2
+  exit 1
+}
+if ! SRC_COUNT="$(find "$SRC" -maxdepth 1 -name '*.md' -type f 2>"$FIND_ERR" | wc -l | tr -d ' ')"; then
+  echo "error: unable to scan source agents dir: $SRC" >&2
+  sed 's/^/find: /' "$FIND_ERR" >&2
+  rm -f "$FIND_ERR"
+  exit 1
+fi
+if [ -s "$FIND_ERR" ]; then
+  echo "error: unable to scan source agents dir: $SRC" >&2
+  sed 's/^/find: /' "$FIND_ERR" >&2
+  rm -f "$FIND_ERR"
+  exit 1
+fi
+rm -f "$FIND_ERR"
 if [ "$SRC_COUNT" -eq 0 ]; then
   echo "error: no *.md agents found in $SRC" >&2
   exit 2

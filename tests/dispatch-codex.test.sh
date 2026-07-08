@@ -134,6 +134,12 @@ assert_grep "$DISPATCH_LIB" \
   'write_status "\$CODEX_STATE" "\$CODEX_RC"' \
   "codex wrapper records codex exec exit code in the status file"
 assert_grep "$DISPATCH_LIB" \
+  'mktemp "\$\{STATUS_FILE\}\.tmp\.\$\$\.XXXXXX"' \
+  "codex wrapper stages status JSON in a same-directory temp file"
+assert_grep "$DISPATCH_LIB" \
+  'mv -f "\$_status_tmp" "\$STATUS_FILE"' \
+  "codex wrapper publishes status JSON atomically"
+assert_grep "$DISPATCH_LIB" \
   '"backend":"codex"' \
   "codex backend status-file + audit payload carries backend=codex"
 assert_grep "$DISPATCH_LIB" \
@@ -277,6 +283,25 @@ case "$CODEX_STATUS_OUT" in
   *)
     fail_msg "goal-state exposes terminal codex failed status with exit/log/result" "got '$CODEX_STATUS_OUT'" ;;
 esac
+: > "$TMPD/solve-codex-status-42.json"
+CODEX_EMPTY_STATUS_OUT="/tmp/uberdev-codex-empty-status-out.$$"
+CODEX_EMPTY_STATUS_ERR="/tmp/uberdev-codex-empty-status-err.$$"
+if UBERDEV_TMPDIR="$TMPD" UBERDEV_RESOLVED_BACKEND=codex bash -c \
+    '. "$1"; . "$2"; uberdev_goal_codex_status_for_issue 42' \
+    _ "$DISPATCH_LIB" "$GOAL_LIB" >"$CODEX_EMPTY_STATUS_OUT" 2>"$CODEX_EMPTY_STATUS_ERR"; then
+  fail_msg "goal-state treats zero-byte codex status as not ready" "unexpected success: $(cat "$CODEX_EMPTY_STATUS_OUT")"
+else
+  CODEX_EMPTY_STATUS_RC=$?
+  if [ "$CODEX_EMPTY_STATUS_RC" -eq 1 ] \
+    && [ ! -s "$CODEX_EMPTY_STATUS_OUT" ] \
+    && [ ! -s "$CODEX_EMPTY_STATUS_ERR" ]; then
+    pass_msg "goal-state treats zero-byte codex status as not ready"
+  else
+    fail_msg "goal-state treats zero-byte codex status as not ready" \
+      "rc=$CODEX_EMPTY_STATUS_RC out=$(cat "$CODEX_EMPTY_STATUS_OUT") err=$(cat "$CODEX_EMPTY_STATUS_ERR")"
+  fi
+fi
+rm -f "$CODEX_EMPTY_STATUS_OUT" "$CODEX_EMPTY_STATUS_ERR"
 rm -rf "$TMPD"
 
 echo "== _uberdev_dispatch_codex behavior with stubbed git/codex =="

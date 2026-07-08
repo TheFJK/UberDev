@@ -136,11 +136,15 @@ else
 fi
 if grep -q 'Reads Codex AGENTS.md plus project CLAUDE.md/AGENTS.md' "$TMP/agents/uberdev-research-constraints.toml" \
    && grep -q 'from AGENTS.md/CLAUDE.md, RFCs, and ADRs' "$TMP/agents/uberdev-research-constraints.toml" \
+   && grep -q '<working_dir>/AGENTS.md` — repo-root project rules' "$TMP/agents/uberdev-research-constraints.toml" \
+   && grep -q 'Any nested `AGENTS.md` files along the path of files mentioned in `issue_body`' "$TMP/agents/uberdev-research-constraints.toml" \
    && grep -q 'Reads Codex AGENTS.md plus project CLAUDE.md/AGENTS.md' "$TMP/runtime-agents/research-constraints.md" \
-   && grep -q 'from AGENTS.md/CLAUDE.md, RFCs, and ADRs' "$TMP/runtime-agents/research-constraints.md"; then
-  pass "generated research-constraints prompts describe Codex/global instruction source order"
+   && grep -q 'from AGENTS.md/CLAUDE.md, RFCs, and ADRs' "$TMP/runtime-agents/research-constraints.md" \
+   && grep -q '<working_dir>/AGENTS.md` — repo-root project rules' "$TMP/runtime-agents/research-constraints.md" \
+   && grep -q 'Any nested `AGENTS.md` files along the path of files mentioned in `issue_body`' "$TMP/runtime-agents/research-constraints.md"; then
+  pass "generated research-constraints prompts read Codex/global instruction sources"
 else
-  fail "generated research-constraints prompts describe Codex/global instruction source order"
+  fail "generated research-constraints prompts read Codex/global instruction sources"
 fi
 mkdir -p "$TMP/empty-runtime-agent-src" "$TMP/runtime-agent-preserve"
 printf 'existing prompt\n' > "$TMP/runtime-agent-preserve/existing.md"
@@ -152,6 +156,24 @@ else
     pass "port-agent-prompts refuses empty source before touching destination"
   else
     fail "port-agent-prompts empty-source failure deleted or rewrote destination"
+  fi
+fi
+mkdir -p "$TMP/unreadable-runtime-agent-src" "$TMP/unreadable-runtime-agent-preserve"
+printf 'existing prompt\n' > "$TMP/unreadable-runtime-agent-preserve/existing.md"
+chmod 000 "$TMP/unreadable-runtime-agent-src"
+if bash "$PORT_AGENT_PROMPTS" "$TMP/unreadable-runtime-agent-src" "$TMP/unreadable-runtime-agent-preserve" >/tmp/codex-unreadable-runtime-agents-out 2>&1; then
+  chmod 700 "$TMP/unreadable-runtime-agent-src"
+  fail "port-agent-prompts reports unreadable source directories"
+else
+  _unreadable_rc=$?
+  chmod 700 "$TMP/unreadable-runtime-agent-src"
+  if [ "$_unreadable_rc" -eq 1 ] \
+     && [ -f "$TMP/unreadable-runtime-agent-preserve/existing.md" ] \
+     && grep -q 'unable to scan source agents dir' /tmp/codex-unreadable-runtime-agents-out \
+     && grep -q "$TMP/unreadable-runtime-agent-src" /tmp/codex-unreadable-runtime-agents-out; then
+    pass "port-agent-prompts reports unreadable source directories before touching destination"
+  else
+    fail "port-agent-prompts unreadable-source failure lacked diagnostic or touched destination" "$(cat /tmp/codex-unreadable-runtime-agents-out)"
   fi
 fi
 
@@ -511,11 +533,15 @@ else
 fi
 if grep -q 'Reads Codex AGENTS.md plus project CLAUDE.md/AGENTS.md' "$REPO_ROOT/codex/agents/uberdev-research-constraints.toml" \
    && grep -q 'from AGENTS.md/CLAUDE.md, RFCs, and ADRs' "$REPO_ROOT/codex/agents/uberdev-research-constraints.toml" \
+   && grep -q '<working_dir>/AGENTS.md` — repo-root project rules' "$REPO_ROOT/codex/agents/uberdev-research-constraints.toml" \
+   && grep -q 'Any nested `AGENTS.md` files along the path of files mentioned in `issue_body`' "$REPO_ROOT/codex/agents/uberdev-research-constraints.toml" \
    && grep -q 'Reads Codex AGENTS.md plus project CLAUDE.md/AGENTS.md' "$REPO_ROOT/codex/uberdev-codex/agents/research-constraints.md" \
-   && grep -q 'from AGENTS.md/CLAUDE.md, RFCs, and ADRs' "$REPO_ROOT/codex/uberdev-codex/agents/research-constraints.md"; then
-  pass "checked-in research-constraints prompts describe Codex/global instruction source order"
+   && grep -q 'from AGENTS.md/CLAUDE.md, RFCs, and ADRs' "$REPO_ROOT/codex/uberdev-codex/agents/research-constraints.md" \
+   && grep -q '<working_dir>/AGENTS.md` — repo-root project rules' "$REPO_ROOT/codex/uberdev-codex/agents/research-constraints.md" \
+   && grep -q 'Any nested `AGENTS.md` files along the path of files mentioned in `issue_body`' "$REPO_ROOT/codex/uberdev-codex/agents/research-constraints.md"; then
+  pass "checked-in research-constraints prompts read Codex/global instruction sources"
 else
-  fail "checked-in research-constraints prompts describe Codex/global instruction source order"
+  fail "checked-in research-constraints prompts read Codex/global instruction sources"
 fi
 
 echo "== Primer/tool mapping freshness =="
