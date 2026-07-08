@@ -93,6 +93,7 @@ while IFS= read -r -d '' f; do
     -e 's|\${HOME}/\.claude/plugins|${CODEX_HOME:-$HOME/.codex}/plugins|g' \
     -e 's|\${HOME}/\.cursor/plugins|${HOME}/.agents/skills|g' \
     -e 's|\.\./_shared/|../../shared/|g' \
+    -e 's|\.claude/uberdev\.local\.md|.codex/uberdev.local.md|g' \
     -e 's|~/\.claude/CLAUDE\.md|~/.codex/AGENTS.md|g' \
     -e 's|~/\.claude/|~/.codex/|g' \
     -e 's|~/\.claude\([^/[:alnum:]_]\)|~/.codex\1|g' \
@@ -108,6 +109,7 @@ done < <(find "${find_roots[@]}" -type f -print0)
 
 python3 - "$DST" "$SHARED_DST" <<'PY'
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -186,6 +188,43 @@ for root in roots:
     )
     if old_b in text:
         text = text.replace(old_b, new_b)
+        changed = True
+
+    codex_config = (
+        "UberDev reads optional per-project config from `.codex/uberdev.local.md` "
+        "(YAML frontmatter; env vars override file values). The full key schema "
+        "lives in `references/configuration.md` next to this skill — Read it "
+        "before answering config questions or changing a knob; never guess keys, "
+        "ranges, or defaults from memory. Codex command workflows are invoked as "
+        "`$uberdev-cmd-*` skills; Codex does not install short-form slash aliases."
+    )
+    text2 = re.sub(
+        r"UberDev reads optional per-project config from `\.codex/uberdev\.local\.md`"
+        r".*?UBERDEV_NO_AUTO_ALIAS=1`\)\.",
+        codex_config,
+        text,
+        count=1,
+    )
+    if text2 != text:
+        text = text2
+        changed = True
+
+    text2 = text.replace("Opus 4.8 1M", "the Codex session model")
+    text2 = re.sub(
+        r"\s*To force a specific subagent model[^.\n]*CLAUDE_CODE_SUBAGENT_MODEL[^.\n]*(?:\([^)]*\))?\.\s*",
+        " ",
+        text2,
+    )
+    text2 = re.sub(
+        r"\s*Escape hatch to force[^.\n]*CLAUDE_CODE_SUBAGENT_MODEL[^.\n]*(?:\([^)]*\))?\.\s*",
+        " ",
+        text2,
+    )
+    text2 = "\n".join(
+        line for line in text2.split("\n") if "CLAUDE_CODE_SUBAGENT_MODEL" not in line
+    )
+    if text2 != text:
+        text = text2
         changed = True
 
     if changed:

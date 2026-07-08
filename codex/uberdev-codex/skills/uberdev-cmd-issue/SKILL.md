@@ -71,11 +71,9 @@ Parse `$DESC`. Determine:
 
 ## Phase 2: Dispatch the two scouts (single assistant turn)
 
-Phase 2 dispatches **two Task agents** in a single assistant turn (one message, two `Task` tool_use blocks): `uberdev:codebase-scout` and `uberdev:triage-scout`. Both pin `model: inherit` in their frontmatter, so they run on the session model (Opus 4.8 1M). Their returns are inline YAML; nothing is persisted to disk.
+Phase 2 dispatches **two Task agents** in a single assistant turn (one message, two `Task` tool_use blocks): `uberdev:codebase-scout` and `uberdev:triage-scout`. Both pin `model: inherit` in their frontmatter, so they run on the session model (the Codex session model). Their returns are inline YAML; nothing is persisted to disk.
 
-> **Model override.** To force a specific subagent model regardless of the session, set `CLAUDE_CODE_SUBAGENT_MODEL=<model>` as a global override (tracked at `affaan-m/everything-claude-code#173`).
-
-Each brief carries the literal resolved values for `description` (the user's `$DESC` from Phase 0), `issue_type` (from Phase 1 classification), `working_dir` (the absolute repo root), and `repo_slug` (the resolved `$REPO`).
+> **Model override.** Each brief carries the literal resolved values for `description` (the user's `$DESC` from Phase 0), `issue_type` (from Phase 1 classification), `working_dir` (the absolute repo root), and `repo_slug` (the resolved `$REPO`).
 
 - **`uberdev:codebase-scout`** — receives `{description, issue_type, working_dir, model_hint: inherit}` and returns YAML with `likely_area: [paths]` and (if `issue_type=fix`) `likely_root_cause: "one-line hypothesis"`. Drives the bug template's `## Likely area` and `## Likely root cause` sections.
 - **`uberdev:triage-scout`** — receives `{description, issue_type, working_dir, repo_slug, model_hint: inherit}` and returns YAML with `duplicates: [{number, title, state}]`, `valid_labels: [...]`, `valid_scope: "..."`, `commitlint_present: true|false`. Drives the duplicate section, the `--label` flags, and the title scope. (`issue_type` is required so the scout picks the base label — `bug` for `fix`, `enhancement` for `feat` — without re-classifying.)
@@ -254,4 +252,3 @@ Next step: /solve $ISSUE_NUM
 - **Always confirm** — show the full draft, wait for explicit approval before `gh issue create`.
 - **No screenshots section** — user adds those manually after creation if needed.
 - **WHAT/HOW boundary enforced** — issue body never contains an implementation checklist or fix design; that work belongs in `/uberdev:brainstorm`. Bug template's `## Likely root cause` is a causal triple (symptom/mechanism/owning code), not a file list. Feat template's `## What changes` describes externally visible result, not implementation strategy.
-- **Model override** — to force a specific subagent model regardless of the session, set `CLAUDE_CODE_SUBAGENT_MODEL=<model>` as a global override. Tracked at `affaan-m/everything-claude-code#173`.

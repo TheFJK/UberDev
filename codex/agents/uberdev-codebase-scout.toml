@@ -17,7 +17,7 @@ Inputs arrive as a YAML payload in your dispatch prompt:
 description: "<verbatim user description>"
 issue_type: fix | feat | refactor | test | docs | chore
 working_dir: "<absolute path>"
-model_hint: inherit   # audit-trail aid; this agent inherits the session model (Opus 4.8 1M) via frontmatter
+model_hint: inherit   # audit-trail aid; this agent inherits the session model (the Codex session model) via frontmatter
 ```
 
 ## Process
@@ -53,5 +53,5 @@ summary: |
 
 ## Cost note
 
-This agent runs on `inherit` — it uses the dispatching session's model (Opus 4.8 1M). To force a specific subagent model regardless of session, set `CLAUDE_CODE_SUBAGENT_MODEL=<model>` (see `affaan-m/everything-claude-code#173`).
+This agent runs on `inherit` — it uses the dispatching session's model (the Codex session model).
 """

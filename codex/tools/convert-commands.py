@@ -95,7 +95,7 @@ def codex_port_text(value: str) -> str:
     retain Claude-only runtime variables.
     """
     codex_plugin_root = "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}"
-    return (
+    ported = (
         value.replace("CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT")
         .replace('"$PLUGIN_ROOT/', f'"{codex_plugin_root}/')
         .replace('"${PLUGIN_ROOT}/', f'"{codex_plugin_root}/')
@@ -104,6 +104,21 @@ def codex_port_text(value: str) -> str:
         .replace("~/.claude/", "~/.codex/")
         .replace("~/.claude", "~/.codex")
     )
+    ported = ported.replace("Opus 4.8 1M", "the Codex session model")
+    ported = re.sub(
+        r"\s*To force a specific subagent model[^.\n]*CLAUDE_CODE_SUBAGENT_MODEL[^.\n]*(?:\([^)]*\))?\.\s*",
+        " ",
+        ported,
+    )
+    ported = re.sub(
+        r"\s*Escape hatch to force[^.\n]*CLAUDE_CODE_SUBAGENT_MODEL[^.\n]*(?:\([^)]*\))?\.\s*",
+        " ",
+        ported,
+    )
+    ported = "\n".join(
+        line for line in ported.split("\n") if "CLAUDE_CODE_SUBAGENT_MODEL" not in line
+    )
+    return ported
 
 
 def render_skill(name: str, fm: dict, body: str) -> str:

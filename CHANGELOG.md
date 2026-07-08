@@ -4,7 +4,7 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.39.0] — 2026-07-02
+## [0.39.0] — 2026-07-08
 
 ### Added — Codex CLI support (RFC 0012 §3.4 codex-port)
 
@@ -18,7 +18,7 @@ UberDev now installs into the [OpenAI Codex CLI](https://developers.openai.com/c
 - `convert-commands.py` — 13 Claude slash commands → `uberdev-cmd-*` Codex skills (Codex custom prompts are deprecated; skills are the documented shareable replacement). Skips the 2 Claude-only alias commands (`install-aliases`/`uninstall-aliases` — no Codex equivalent).
 - `port-skill.sh` — copies the 26 skills ~verbatim with `CLAUDE_PLUGIN_ROOT`→`PLUGIN_ROOT` + `~/.claude/`→`~/.codex/` path fixes. Tool-name bridging (`Task`→`spawn_agent`, etc.) is runtime, via the shipped `references/codex-tools.md`.
 
-**Dispatch backend** — new `codex` arm in `lib/dispatch.sh` (`_uberdev_dispatch_codex`): execs `codex exec --sandbox workspace-write --json -o <result>` in a per-issue git worktree, nohup-detached + PID-tracked (mirrors the proven `background` backend — no new liveness mechanism). Auto-selected when `CODEX_HOME` is set or `claude` is absent + `codex` present; overridable via `--backend=codex`. `lib/solve-launcher.sh`'s claude-version gate is now backend-conditional (codex path requires `codex` on PATH instead). `lib/goal-state.sh` liveness polling is backend-aware: the codex/background path uses `kill -0` PID checks instead of `claude agents --json`.
+**Dispatch backend** — new `codex` arm in `lib/dispatch.sh` (`_uberdev_dispatch_codex`): execs `codex exec --ask-for-approval never --sandbox workspace-write --json -o <result>` in a per-issue git worktree, nohup-detached + PID-tracked (mirrors the proven `background` backend — no new liveness mechanism). Auto-selected when `CODEX_HOME` is set or `claude` is absent + `codex` present; overridable via `--backend=codex`. `lib/solve-launcher.sh`'s claude-version gate is now backend-conditional (codex path requires `codex` on PATH instead). `lib/goal-state.sh` liveness polling is backend-aware: the codex/background path uses `kill -0` PID checks instead of `claude agents --json`.
 
 **Hooks** — `hooks/session-start` gained a Codex arm (`CODEX_HOME` → SDK-standard `additionalContext` shape), extending the existing three-way Cursor/Claude/Copilot platform dispatch. The `using-uberdev` primer is distilled into `codex/AGENTS.md` for Codex's global-instruction layer.
 

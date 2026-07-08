@@ -27,6 +27,8 @@ Usage:
     python3 convert-agents.py <agents_md_dir> <output_toml_dir>
 
 Exit codes: 0 = success, 1 = usage/IO error, 2 = parse error in one+ agents.
+An empty but existing source directory is treated as a conversion failure so an
+installer cannot silently replace a working agent namespace with zero agents.
 """
 from __future__ import annotations
 
@@ -253,6 +255,20 @@ def codex_port_text(value: str) -> str:
         .replace("~/.claude/", "~/.codex/")
         .replace("~/.claude", "~/.codex")
     )
+    ported = ported.replace("Opus 4.8 1M", "the Codex session model")
+    ported = re.sub(
+        r"\s*To force a specific subagent model[^.\n]*CLAUDE_CODE_SUBAGENT_MODEL[^.\n]*(?:\([^)]*\))?\.\s*",
+        " ",
+        ported,
+    )
+    ported = re.sub(
+        r"\s*Escape hatch to force[^.\n]*CLAUDE_CODE_SUBAGENT_MODEL[^.\n]*(?:\([^)]*\))?\.\s*",
+        " ",
+        ported,
+    )
+    ported = "\n".join(
+        line for line in ported.split("\n") if "CLAUDE_CODE_SUBAGENT_MODEL" not in line
+    )
     return "\n".join(line.rstrip(" \t") for line in ported.split("\n"))
 
 
@@ -337,7 +353,8 @@ def convert_dir(src_dir: Path, out_dir: Path) -> tuple[int, int]:
     ok = fail = 0
     md_files = sorted(src_dir.glob("*.md"))
     if not md_files:
-        print(f"warning: no *.md agents found in {src_dir}", file=sys.stderr)
+        print(f"error: no *.md agents found in {src_dir}", file=sys.stderr)
+        return 0, 1
 
     for md_path in md_files:
         source_name = md_path.name

@@ -118,7 +118,7 @@ Instructions say WHAT, not HOW. "Add X" or "Fix Y" doesn't mean skip workflows.
 
 ## Per-project configuration
 
-UberDev reads optional per-project config from `.claude/uberdev.local.md` (YAML frontmatter; env vars override file values; settings apply on next SessionStart). The full key schema lives in `references/configuration.md` next to this skill — Read it before answering config questions or changing a knob; never guess keys, ranges, or defaults from memory. The SessionStart hook also auto-installs the short-form aliases (the `ALIASES` table in `lib/aliases-sync.sh` is the canonical set; opt out with `auto_install_aliases: false` or `UBERDEV_NO_AUTO_ALIAS=1`).
+UberDev reads optional per-project config from `.codex/uberdev.local.md` (YAML frontmatter; env vars override file values). The full key schema lives in `references/configuration.md` next to this skill — Read it before answering config questions or changing a knob; never guess keys, ranges, or defaults from memory. Codex command workflows are invoked as `$uberdev-cmd-*` skills; Codex does not install short-form slash aliases.
 
 ## Skill-mandated Workflow calls
 

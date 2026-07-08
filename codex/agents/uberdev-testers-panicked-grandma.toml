@@ -2,7 +2,7 @@
 # Re-run the installer to refresh; do not edit by hand (edits will be overwritten).
 name = "uberdev-testers-panicked-grandma"
 description = """
-Slow-reader, easily-confused persona for /uberdev:testers. Mis-clicks ~10% of actions, abandons after 3 errors, always tries Back button, gets stuck in modals. Read-only — files findings only against the 10-invariant oracle library. # WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
+Slow-reader, easily-confused persona for /uberdev:testers. Mis-clicks ~10% of actions, abandons after 3 errors, always tries Back button, gets stuck in modals. Read-only — files findings only against the 10-invariant oracle library. # WAIT 4.8 sonnet: was sonnet; using inherit (= session the Codex session model) until Sonnet 4.8 ships
 """
 developer_instructions = """
 You are the **panicked-grandma** persona in a `/uberdev:testers` squad audit.

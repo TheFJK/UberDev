@@ -40,6 +40,10 @@ trap 'rm -rf "$TMP"' EXIT
 assert_cmd 0 "convert-agents runs clean over the 42 agents" \
   python3 "$CONVERT_AGENTS" "$REPO_ROOT/plugins/uberdev/agents" "$TMP/agents"
 
+mkdir -p "$TMP/empty-agents-src"
+assert_cmd 2 "convert-agents fails when source contains zero agents" \
+  python3 "$CONVERT_AGENTS" "$TMP/empty-agents-src" "$TMP/empty-agents-out"
+
 # All 42 agents produced a uberdev-*.toml.
 N="$(find "$TMP/agents" -name 'uberdev-*.toml' 2>/dev/null | wc -l | tr -d ' ')"
 [ "$N" -eq 42 ] && pass "42 uberdev-*.toml produced" || fail "expected 42 toml, got $N"
@@ -87,6 +91,11 @@ if grep -Rql 'â' "$TMP/agents" 2>/dev/null; then
 else
   pass "generated agent metadata has no UTF-8 mojibake"
 fi
+if grep -RqlE 'Opus 4\.8|CLAUDE_CODE_SUBAGENT_MODEL|Claude-specific model override' "$TMP/agents" 2>/dev/null; then
+  fail "generated agents do not preserve Claude-only model guidance"
+else
+  pass "generated agents do not preserve Claude-only model guidance"
+fi
 
 echo "== Command converter: 13 skills + 2 skipped =="
 assert_cmd 0 "convert-commands runs clean" \
@@ -105,6 +114,11 @@ if grep -Rql 'wait_agent' "$TMP/cmd-skills"; then
 else
   fail "command-skill bridge does not mention wait_agent"
 fi
+if grep -Rql 'subagent-driven-dev.*post-impl-review.*end-of-issue' "$TMP/cmd-skills" 2>/dev/null; then
+  fail "generated command-skills do not describe retired pre-push post-impl-review flow"
+else
+  pass "generated command-skills do not describe retired pre-push post-impl-review flow"
+fi
 
 echo "== Skill-port: no CLAUDE_PLUGIN_ROOT residuals =="
 assert_cmd 0 "port-skill runs clean" \
@@ -119,6 +133,19 @@ if [ ! -d "$TMP/skills/_shared" ]; then
   pass "ported plugin skill root does not expose _shared as a skill"
 else
   fail "ported plugin skill root exposes _shared without SKILL.md"
+fi
+if [ -r "$TMP/shared/document-reviewer-template.md" ] \
+   && ! grep -Rql '../_shared/document-reviewer-template.md' "$TMP/skills" 2>/dev/null; then
+  pass "ported skills resolve shared templates from package-level shared directory"
+else
+  fail "ported skills do not resolve shared templates from package-level shared directory"
+fi
+if grep -q '.codex/uberdev.local.md' "$TMP/skills/using-uberdev/SKILL.md" \
+   && grep -q '\$uberdev-cmd-\*' "$TMP/skills/using-uberdev/SKILL.md" \
+   && ! grep -q 'SessionStart hook also auto-installs the short-form aliases' "$TMP/skills/using-uberdev/SKILL.md"; then
+  pass "ported using-uberdev skill documents Codex config and command-skill behavior"
+else
+  fail "ported using-uberdev skill still documents Claude-only config or alias behavior"
 fi
 python3 - <<PY
 from pathlib import Path
@@ -220,6 +247,29 @@ else
   fi
 fi
 
+TH_ZERO="$TMP/home-zero-agents"
+ZERO_SRC="$TMP/zero-agent-source"
+ZERO_CONVERTER="$TMP/zero-agent-converter.sh"
+mkdir -p "$TH_ZERO/.codex/agents" "$ZERO_SRC/agents"
+printf 'existing agent\n' > "$TH_ZERO/.codex/agents/uberdev-existing.toml"
+cat > "$ZERO_CONVERTER" <<'SH'
+import os
+import sys
+
+os.makedirs(sys.argv[2], exist_ok=True)
+SH
+chmod +x "$ZERO_CONVERTER"
+if env HOME="$TH_ZERO" CODEX_HOME="$TH_ZERO/.codex" UBERDEV_SRC="$ZERO_SRC" CONVERTER="$ZERO_CONVERTER" bash "$INSTALLER" >/tmp/codex-zero-agents-out 2>&1; then
+  fail "installer refuses zero-agent converter output before replacing existing agents"
+else
+  if [ -f "$TH_ZERO/.codex/agents/uberdev-existing.toml" ] \
+     && grep -qi 'zero agents' /tmp/codex-zero-agents-out; then
+    pass "installer refuses zero-agent converter output before replacing existing agents"
+  else
+    fail "installer zero-agent refusal did not preserve existing agents or name the failure"
+  fi
+fi
+
 TH2="$TMP/home-override"
 mkdir -p "$TH2/.codex"
 printf '# temporary override\n' > "$TH2/.codex/AGENTS.override.md"
@@ -284,6 +334,35 @@ else
   fail "skills symlink conversion did not isolate Codex skills from Claude target"
 fi
 
+TH6="$TMP/home-offline-uninstall"
+STANDALONE_UNINSTALL="$TMP/offline/install-codex.sh"
+mkdir -p "$(dirname "$STANDALONE_UNINSTALL")" \
+  "$TH6/.agents/skills/obsolete-managed" \
+  "$TH6/.codex/agents" \
+  "$TH6/.codex/plugins/uberdev-codex/lib"
+cp "$INSTALLER" "$STANDALONE_UNINSTALL"
+printf 'managed-by=uberdev-codex\n' > "$TH6/.agents/skills/obsolete-managed/.uberdev-codex-managed"
+printf 'stale agent\n' > "$TH6/.codex/agents/uberdev-obsolete.toml"
+printf 'runtime\n' > "$TH6/.codex/plugins/uberdev-codex/lib/stale"
+cat > "$TH6/.codex/AGENTS.md" <<'EOF_PRIMER'
+before
+<!-- BEGIN uberdev-codex-primer (managed by install-codex.sh) -->
+managed primer
+<!-- END uberdev-codex-primer -->
+after
+EOF_PRIMER
+if (cd "$TMP" && env HOME="$TH6" CODEX_HOME="$TH6/.codex" UBERDEV_BOOTSTRAP_TARBALL="$TMP/missing-bootstrap.tar.gz" bash "$STANDALONE_UNINSTALL" --uninstall) >/tmp/codex-offline-uninstall-out 2>&1; then
+  NS="$(find "$TH6/.agents/skills" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d '[:space:]')"
+  NA="$(find "$TH6/.codex/agents" -maxdepth 1 -name 'uberdev-*.toml' 2>/dev/null | wc -l | tr -d '[:space:]')"
+  NP="$(grep -c 'uberdev-codex-primer' "$TH6/.codex/AGENTS.md" 2>/dev/null | tr -d '[:space:]'; true)"
+  NR="$(find "$TH6/.codex/plugins/uberdev-codex" -mindepth 1 2>/dev/null | wc -l | tr -d '[:space:]')"
+  [ "$NS" -eq 0 ] && [ "$NA" -eq 0 ] && [ "$NP" -eq 0 ] && [ "$NR" -eq 0 ] \
+    && pass "standalone uninstall works offline without bootstrapping repo sources" \
+    || fail "offline uninstall left residue: skills=$NS agents=$NA primer=$NP runtime=$NR"
+else
+  fail "standalone uninstall works offline without bootstrapping repo sources"
+fi
+
 echo "== Plugin manifest + marketplace JSON validity =="
 python3 - <<PY
 import json, os, sys
@@ -341,6 +420,9 @@ NG="$(grep -rlE 'CLAUDE_PLUGIN_ROOT|~/\.claude|~/\.codex/commands' "$REPO_ROOT/c
 NG="$(grep -rlE '\$\{PLUGIN_ROOT\}/|\$PLUGIN_ROOT/|(^|[^~])\$\{HOME\}/\.claude|\.claude/plugins' "$REPO_ROOT/codex/agents" "$REPO_ROOT/codex/uberdev-codex/skills" 2>/dev/null | wc -l | tr -d ' ')"
 [ "$NG" -eq 0 ] && pass "checked-in Codex artifacts avoid bare PLUGIN_ROOT and HOME/.claude plugin paths" \
   || fail "checked-in Codex artifacts contain $NG bare plugin-root or HOME/.claude plugin path residual files"
+NG="$(grep -rlE 'Opus 4\.8|CLAUDE_CODE_SUBAGENT_MODEL' "$REPO_ROOT/codex/agents" "$REPO_ROOT/codex/uberdev-codex/skills" 2>/dev/null | wc -l | tr -d ' ')"
+[ "$NG" -eq 0 ] && pass "checked-in Codex artifacts have no Claude-only model guidance" \
+  || fail "checked-in Codex artifacts contain $NG Claude-only model guidance files"
 
 echo "== Primer/tool mapping freshness =="
 if grep -q 'wait_agent' "$REPO_ROOT/codex/AGENTS.md" \

@@ -461,18 +461,13 @@ assert_not_grep "$SUBAGENT_DRIVEN" 'WAVE.*final|WAVE: .final.' \
   "subagent-driven-dev no longer passes WAVE=final (no in-skill post-impl-review dispatch post-#67)"
 
 echo
-echo "== turbo medium/large parity: end-of-issue post-impl-review documented in turbo.md =="
-assert_grep "$TURBO_CMD" 'post-impl-review.* once at end-of-issue' \
-  "turbo.md documents end-of-issue post-impl-review for medium/large"
-assert_grep "$TURBO_CMD" 'consolidated across all waves' \
-  "turbo.md names the consolidated semantics (one fanout, all waves)"
-if grep -qE 'uberdev:post-impl-review. per wave' "$TURBO_CMD"; then
-  echo "  FAIL  obsolete 'per wave' wording in turbo.md medium/large bullet must be removed"
-  FAIL=$((FAIL + 1))
-else
-  echo "  PASS  turbo.md medium/large bullet drops 'per wave' wording"
-  PASS=$((PASS + 1))
-fi
+echo "== turbo medium/large parity: post-push post-impl-review documented in turbo.md =="
+assert_grep "$TURBO_CMD" 'post-PR-push.*(/review-pr|review-pr).*Phase 1|(/review-pr|review-pr).*Phase 1.*post-PR-push' \
+  "turbo.md documents post-push /review-pr Phase 1 post-impl-review for medium/large"
+assert_grep "$TURBO_CMD" 'against the pushed diff' \
+  "turbo.md names the pushed-diff review target"
+assert_not_grep "$TURBO_CMD" 'post-impl-review.*once at end-of-issue|consolidated across all waves|uberdev:post-impl-review. per wave' \
+  "turbo.md drops retired end-of-issue/per-wave post-impl-review wording"
 
 echo
 echo "== finish-branch composes new PR-body sections =="

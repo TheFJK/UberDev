@@ -46,7 +46,7 @@ If a reviewer agent surfaces a finding that "we should re-plan", record it as a 
 ### Pre-flight: command_timeouts.review_pr (advisory-only)
 
 Before Step 1, read `command_timeouts.review_pr` from
-`.claude/uberdev.local.md` (env: `UBERDEV_REVIEW_PR_TIMEOUT`; default
+`.codex/uberdev.local.md` (env: `UBERDEV_REVIEW_PR_TIMEOUT`; default
 900s; range [60, 86400]). The value is **advisory in v1** — this skill
 does NOT enforce a wall-clock kill (the 6 Task() reviewers run inside
 the caller's Claude turn; enforcing kill semantics there would require

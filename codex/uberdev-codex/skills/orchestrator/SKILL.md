@@ -258,7 +258,7 @@ If `verdict: REJECT` → abort with diagnostic.
 
 ### Phase 4: plan-writer
 
-Dispatch `plan-writer` with `spec_path` (absolute), `tier`, `topic_slug`, `working_dir` (declared input — same value as Phase 3), and `summary_dir: $RESEARCH_DIR_ABS/`. The plan-writer internally dispatches its own research subagents (session model — Opus 4.8 1M) — orchestrator just waits for the final return. On its first pass plan-writer persists its internal dependency maps to `$RESEARCH_DIR_ABS/plan-file-deps.md` and (tier ≥ medium) `$RESEARCH_DIR_ABS/plan-test-coverage.md`; the Phase 4.5 revision retry reuses them via supplied-deps mode (see `agents/plan-writer.md` "Supplied-deps mode"). plan-writer returns `artifact_path` ABSOLUTE under `working_dir`; treat a relative return as a verification failure.
+Dispatch `plan-writer` with `spec_path` (absolute), `tier`, `topic_slug`, `working_dir` (declared input — same value as Phase 3), and `summary_dir: $RESEARCH_DIR_ABS/`. The plan-writer internally dispatches its own research subagents (session model — the Codex session model) — orchestrator just waits for the final return. On its first pass plan-writer persists its internal dependency maps to `$RESEARCH_DIR_ABS/plan-file-deps.md` and (tier ≥ medium) `$RESEARCH_DIR_ABS/plan-test-coverage.md`; the Phase 4.5 revision retry reuses them via supplied-deps mode (see `agents/plan-writer.md` "Supplied-deps mode"). plan-writer returns `artifact_path` ABSOLUTE under `working_dir`; treat a relative return as a verification failure.
 
 Verification: `[ -f $artifact_path ]`, `[ $(wc -c < $artifact_path) -gt 500 ]`, `grep -E "^## Execution Waves" $artifact_path` succeeds, content sha matches.
 

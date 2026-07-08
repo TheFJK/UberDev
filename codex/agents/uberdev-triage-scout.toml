@@ -50,5 +50,5 @@ summary: |
 
 ## Cost note
 
-Runs on `inherit` — the session model (Opus 4.8 1M). To force a specific subagent model, set `CLAUDE_CODE_SUBAGENT_MODEL=<model>` (see `affaan-m/everything-claude-code#173`).
+Runs on `inherit` — the session model (the Codex session model).
 """

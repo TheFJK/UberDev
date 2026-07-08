@@ -22,6 +22,7 @@
 #   uberdev_goal_batch_has_pr                  GOAL_ID PR
 #   uberdev_goal_count_distinct_prs            GOAL_ID
 #   uberdev_goal_count_resolved_issues         GOAL_ID
+#   uberdev_goal_count_failed_issues           GOAL_ID
 #   uberdev_goal_record_held_audit             GOAL_ID PR AUDIT_PATH
 #   uberdev_goal_get_last_held_audit           GOAL_ID PR
 #   uberdev_goal_find_pr_for_issue             ISSUE_NUM   (gh; issue #180/#290.4)
@@ -1011,6 +1012,18 @@ uberdev_goal_count_resolved_issues() {
   local f="$tmpdir/goal-$goal_id-issue-states.tsv"
   [ -f "$f" ] || { printf '0\n'; return 0; }
   awk -F'\t' '$2=="resolved" || $2=="resolved-by-no-action" {n++} END {print n+0}' "$f"
+}
+
+# uberdev_goal_count_failed_issues GOAL_ID
+# Count of issue-states.tsv rows in failed. Used by the Phase-3 convergence
+# gate so a terminal solver failure cannot be misread as clean convergence.
+uberdev_goal_count_failed_issues() {
+  local goal_id="$1"
+  _uberdev_goal_validate_id "$goal_id" || return 1   # #156
+  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  local f="$tmpdir/goal-$goal_id-issue-states.tsv"
+  [ -f "$f" ] || { printf '0\n'; return 0; }
+  awk -F'\t' '$2=="failed" {n++} END {print n+0}' "$f"
 }
 
 # uberdev_goal_record_held_audit GOAL_ID PR AUDIT_PATH

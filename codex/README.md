@@ -190,7 +190,7 @@ Override explicitly:
 --backend=claude-bg    # force claude --bg (needs claude CLI)
 ```
 
-The spawned session runs `codex exec --sandbox workspace-write --json -o <result>`
+The spawned session runs `codex exec --ask-for-approval never --sandbox workspace-write --json -o <result>`
 in a per-issue git worktree. Liveness is PID-based (`kill -0`); the agent's
 final message lands in the `-o` result file for post-run inspection.
 

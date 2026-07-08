@@ -738,11 +738,10 @@ _uberdev_dispatch_codex() {
   # so it's intentionally NOT propagated here (would be a no-op env var).
   local BG_TURBO_ENV=()
   [[ "${AUTO_MODE:-0}" == "1" ]] && BG_TURBO_ENV=( UBERDEV_TURBO=1 )
-  # Detached wrapper around headless codex exec. The parent publishes the
-  # running status immediately after capturing $!, so a slow shell startup
-  # cannot be misreported as dispatch failure. Track the wrapper PID, not the
-  # raw codex child, so /goal can poll a process that owns the final status
-  # write.
+  # Detached wrapper around headless codex exec. The wrapper owns both status
+  # writes (running -> terminal) so a fast codex exit cannot race with the parent
+  # and be overwritten back to "running". Track the wrapper PID, not the raw
+  # codex child, so /goal can poll a process that owns the final status write.
   nohup bash -c '
       ISSUE_NUM="$1"
       TIER="$2"
@@ -753,20 +752,35 @@ _uberdev_dispatch_codex() {
       WORKTREE_BRANCH="$7"
       PROMPT_BODY="$8"
       shift 8
-      cd "$WORKTREE_DIR" || exit 127
       WRAPPER_PID="$$"
-      env "$@" codex exec \
+
+      write_status() {
+        _state="$1"
+        _exit_code="$2"
+        cat > "$STATUS_FILE" <<EOF_STATUS
+{"issue":$ISSUE_NUM,"tier":"$TIER","backend":"codex","state":"$_state","exit_code":$_exit_code,"pid":"$WRAPPER_PID","log":"$LOG_FILE","result":"$RESULT_FILE","worktree":"$WORKTREE_DIR","branch":"$WORKTREE_BRANCH"}
+EOF_STATUS
+      }
+
+      if ! write_status running null; then
+        printf "codex dispatch: failed to write running status file: %s\n" "$STATUS_FILE" >&2
+        exit 126
+      fi
+
+      if cd "$WORKTREE_DIR"; then
+        env "$@" codex exec \
+        --ask-for-approval never \
         --sandbox workspace-write \
         --json \
         -o "$RESULT_FILE" \
         "$PROMPT_BODY"
-      CODEX_RC=$?
+        CODEX_RC=$?
+      else
+        CODEX_RC=127
+      fi
       CODEX_STATE=failed
       [ "$CODEX_RC" -eq 0 ] && CODEX_STATE=completed
-      if ! cat > "$STATUS_FILE" <<EOF_STATUS_FINAL
-{"issue":$ISSUE_NUM,"tier":"$TIER","backend":"codex","state":"$CODEX_STATE","exit_code":$CODEX_RC,"pid":"$WRAPPER_PID","log":"$LOG_FILE","result":"$RESULT_FILE","worktree":"$WORKTREE_DIR","branch":"$WORKTREE_BRANCH"}
-EOF_STATUS_FINAL
-      then
+      if ! write_status "$CODEX_STATE" "$CODEX_RC"; then
         printf "codex dispatch: failed to write final status file: %s\n" "$STATUS_FILE" >&2
         exit 126
       fi
@@ -776,22 +790,9 @@ EOF_STATUS_FINAL
   DISPATCH_RC=$?
   DISPATCH_ID="$!"
   disown 2>/dev/null || true
-  if ! cat > "$STATUS_FILE" <<EOF_STATUS_RUNNING
-{"issue":$ISSUE_NUM,"tier":"$TIER","backend":"codex","state":"running","exit_code":null,"pid":"$DISPATCH_ID","log":"$LOG_FILE","result":"$RESULT_FILE","worktree":"$WORKTREE_DIR","branch":"$WORKTREE_BRANCH"}
-EOF_STATUS_RUNNING
-  then
-    [ -n "$DISPATCH_ID" ] && kill "$DISPATCH_ID" 2>/dev/null || true
-    DISPATCH_ID=""
-    DISPATCH_RC=1
-    DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      "{\"issue\":$ISSUE_NUM,\"phase\":\"status_write\",\"backend\":\"codex\",\"rc\":1}"
-    return 1
-  fi
   # A fast `codex exec` failure is a terminal agent outcome, not a parent
   # dispatch setup failure. The wrapper records that in the final status JSON;
-  # the parent succeeds once it has forked the wrapper and published the running
-  # status file.
+  # the parent succeeds once it has forked the wrapper and captured its PID.
   if [[ "$DISPATCH_RC" -eq 0 && -n "$DISPATCH_ID" ]]; then
     _uberdev_dispatch_audit agent_dispatched \
       "{\"issue\":$ISSUE_NUM,\"tier\":\"$TIER\",\"backend\":\"codex\",\"pid\":\"$DISPATCH_ID\",\"log\":\"$LOG_FILE\"}"

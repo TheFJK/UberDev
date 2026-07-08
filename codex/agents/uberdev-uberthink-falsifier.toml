@@ -2,7 +2,7 @@
 # Re-run the installer to refresh; do not edit by hand (edits will be overwritten).
 name = "uberdev-uberthink-falsifier"
 description = """
-dispatched by /uberthink — Wave-5 falsify (lens ∈ steelman | premortem | redteam | physics); marks each kill-cause fatal|fixable for the genetic loop # WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
+dispatched by /uberthink — Wave-5 falsify (lens ∈ steelman | premortem | redteam | physics); marks each kill-cause fatal|fixable for the genetic loop # WAIT 4.8 sonnet: was sonnet; using inherit (= session the Codex session model) until Sonnet 4.8 ships
 """
 developer_instructions = """
 # Uberthink Falsifier (Wave 5)

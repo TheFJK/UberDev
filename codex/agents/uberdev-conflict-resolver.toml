@@ -2,7 +2,7 @@
 # Re-run the installer to refresh; do not edit by hand (edits will be overwritten).
 name = "uberdev-conflict-resolver"
 description = """
-Resolves a single conflicted file from a PR merge in a scratch worktree. Reads <ours> and <theirs> hunks; returns a textually-justified resolution or a clean refusal. One agent per conflicted file; dispatched in a SINGLE assistant turn from skills/merge-pipeline/SKILL.md Phase 3. # WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
+Resolves a single conflicted file from a PR merge in a scratch worktree. Reads <ours> and <theirs> hunks; returns a textually-justified resolution or a clean refusal. One agent per conflicted file; dispatched in a SINGLE assistant turn from skills/merge-pipeline/SKILL.md Phase 3. # WAIT 4.8 sonnet: was sonnet; using inherit (= session the Codex session model) until Sonnet 4.8 ships
 """
 developer_instructions = """
 # Conflict-Resolver Agent

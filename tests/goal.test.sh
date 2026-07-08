@@ -720,6 +720,20 @@ assert_grep "$GOAL_SKILL" 'uberdev_goal_codex_status_for_issue "\$issue"' \
   "G39b.phase2-checks-codex-terminal-status"
 assert_grep "$GOAL_SKILL" 'codex agent for issue .* failed' \
   "G39b.codex-failed-surfaces-immediately"
+assert_grep "$GOAL_SKILL" 'GOAL_CIRCUIT_BREAKER_REASONS=.*solver_failed' \
+  "G39b.solver-failed-reason-in-enum"
+assert_grep "$GOAL_SKILL" 'goal_circuit_breaker.*solver_failed' \
+  "G39b.codex-terminal-failure-circuit-breaks"
+assert_grep "$GOAL_SKILL" '\$_codex_state.*completed' \
+  "G39b.codex-completed-without-pr-is-terminal"
+
+echo "== G39c: Phase 0 threads parsed --backend into dispatch preflight =="
+assert_grep "$GOAL_SKILL" 'UBERDEV_DISPATCH_BACKEND_REQUESTED="\$\{backend_cli:-\$\{UBERDEV_DISPATCH_BACKEND_REQUESTED:-auto\}\}"' \
+  "G39c.backend-cli-export-assigned"
+assert_grep "$GOAL_SKILL" 'export UBERDEV_DISPATCH_BACKEND_REQUESTED' \
+  "G39c.backend-cli-exported"
+assert_grep "$GOAL_SKILL" '^[[:space:]]*uberdev_dispatch_preflight[[:space:]]*$' \
+  "G39c.preflight-uses-env-request"
 
 echo
 echo "== Behavioral tests (B12 — sourced-function exercises) =="
@@ -1298,6 +1312,8 @@ uberdev_goal_issue_state_transition test-bt12 101 solving failed      2>/dev/nul
 assert_rc "$?" "0" "BT12.d-solving-to-failed"
 uberdev_goal_issue_state_transition test-bt12 102 pr-pushed failed    2>/dev/null
 assert_rc "$?" "0" "BT12.e-pr-pushed-to-failed"
+_bt12_failed_count="$(uberdev_goal_count_failed_issues test-bt12 2>/dev/null || printf 'MISSING')"
+assert_eq "$_bt12_failed_count" "2" "BT12.f-count-failed-issues-for-terminal-gate"
 
 # BT13 — invalid transitions return rc=2.
 # Covers the seven shapes the case-block rejects: skip-states, backwards,

@@ -93,6 +93,9 @@ assert_grep "$DISPATCH_LIB" \
   '--sandbox workspace-write' \
   "codex backend passes --sandbox workspace-write for autonomous edits"
 assert_grep "$DISPATCH_LIB" \
+  '--ask-for-approval never' \
+  "codex backend pins approval policy to never for detached execution"
+assert_grep "$DISPATCH_LIB" \
   '--json' \
   "codex backend passes --json for progress streaming"
 assert_grep "$DISPATCH_LIB" \
@@ -108,10 +111,10 @@ assert_grep "$DISPATCH_LIB" \
   '_uberdev_dispatch_prepare_tmp_target "\$RESULT_FILE" "\$ISSUE_NUM" "codex"' \
   "codex backend guards the predictable result file before passing it to codex exec"
 assert_grep "$DISPATCH_LIB" \
-  '"state":"running"' \
-  "codex backend status file records running state"
+  'write_status running null' \
+  "codex backend wrapper records running state before launching codex"
 assert_grep "$DISPATCH_LIB" \
-  '"exit_code":\$CODEX_RC' \
+  'write_status "\$CODEX_STATE" "\$CODEX_RC"' \
   "codex wrapper records codex exec exit code in the status file"
 assert_grep "$DISPATCH_LIB" \
   '"backend":"codex"' \
@@ -298,11 +301,12 @@ case "$BEH_OUT" in
     fail_msg "codex dispatch writes completed status with exit_code and result after stub exits" "$BEH_OUT" ;;
 esac
 if grep -Fq -- '--sandbox] [workspace-write]' "$BEH_TMP/codex-capture.txt" \
+   && grep -Fq -- '--ask-for-approval] [never]' "$BEH_TMP/codex-capture.txt" \
    && grep -Fq -- 'UBERDEV_TURBO=1' "$BEH_TMP/codex-capture.txt" \
    && grep -Fq -- '[prompt body for codex]' "$BEH_TMP/codex-capture.txt"; then
-  pass_msg "codex dispatch passes sandbox, turbo env, and prompt body to codex exec"
+  pass_msg "codex dispatch passes sandbox, approval policy, turbo env, and prompt body to codex exec"
 else
-  fail_msg "codex dispatch passes sandbox, turbo env, and prompt body to codex exec" \
+  fail_msg "codex dispatch passes sandbox, approval policy, turbo env, and prompt body to codex exec" \
     "$(cat "$BEH_TMP/codex-capture.txt" 2>/dev/null)"
 fi
 if printf '%s\n' "$BEH_OUT" | grep -Eq '"pid":"[0-9]+"'; then
@@ -378,16 +382,24 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-[ -n "$out" ] && printf 'delayed codex result\n' > "$out"
-exit 0
+[ -n "$out" ] && printf 'fast failed codex result\n' > "$out"
+exit 23
 SH
-cat > "$RACE_TMP/bin/bash" <<'SH'
-#!/bin/sh
-sleep 6
-exec /bin/bash "$@"
+cat > "$RACE_TMP/bin/cat" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" -gt 0 ]; then
+  exec /bin/cat "$@"
+fi
+tmp="$(mktemp)"
+/bin/cat > "$tmp"
+if grep -q '"state":"running"' "$tmp"; then
+  sleep 1
+fi
+/bin/cat "$tmp"
+rm -f "$tmp"
 SH
-chmod +x "$RACE_TMP/bin/git" "$RACE_TMP/bin/codex" "$RACE_TMP/bin/bash"
-printf 'prompt body delayed' > "$RACE_TMP/prompt.txt"
+chmod +x "$RACE_TMP/bin/git" "$RACE_TMP/bin/codex" "$RACE_TMP/bin/cat"
+printf 'prompt body fast fail' > "$RACE_TMP/prompt.txt"
 RACE_OUT="$(
   cd "$RACE_TMP/repo" && \
   PATH="$RACE_TMP/bin:/usr/bin:/bin" \
@@ -397,15 +409,16 @@ RACE_OUT="$(
     _uberdev_dispatch_codex 42 small "$2"
     rc=$?
     pid="${DISPATCH_ID:-}"
-    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
-    printf "rc=%s\npid=%s\nstatus=%s\n" "$rc" "$pid" "$(cat "$UBERDEV_TMPDIR/solve-codex-status-42.json" 2>/dev/null)"
+    i=0
+    while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 5 ]; do sleep 1; i=$((i + 1)); done
+    printf "rc=%s\npid=%s\nstatus=%s\nresult=%s\n" "$rc" "$pid" "$(cat "$UBERDEV_TMPDIR/solve-codex-status-42.json" 2>/dev/null)" "$(cat "$UBERDEV_TMPDIR/solve-codex-result-42.md" 2>/dev/null)"
   ' _ "$DISPATCH_LIB" "$RACE_TMP/prompt.txt"
 )"
 case "$RACE_OUT" in
-  *'rc=0'*'"state":"running"'*'"pid":"'*)
-    pass_msg "codex dispatch publishes running status before delayed wrapper starts" ;;
+  *'rc=0'*'"state":"failed"'*'"exit_code":23'*'result=fast failed codex result'*)
+    pass_msg "codex dispatch never overwrites terminal child status with stale running status" ;;
   *)
-    fail_msg "codex dispatch publishes running status before delayed wrapper starts" "$RACE_OUT" ;;
+    fail_msg "codex dispatch never overwrites terminal child status with stale running status" "$RACE_OUT" ;;
 esac
 rm -rf "$RACE_TMP"
 

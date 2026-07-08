@@ -393,13 +393,19 @@ install_agents() {
     exit 1
   fi
   mkdir -p "${AGENTS_DIR}"
-  local tmp_agents agent_file
+  local tmp_agents agent_file converted_count
   tmp_agents="$(mktemp -d "${CODEX_HOME}/.uberdev-agents.XXXXXX")"
   # Convert fresh into a temp dir, then replace the managed namespace. This
   # removes agents that existed in an older UberDev release but no longer ship.
   if ! python3 "${CONVERTER}" "${UBERDEV_SRC}/agents" "${tmp_agents}" >/dev/null; then
     rm -rf "${tmp_agents}"
     err "agent conversion failed (see messages above)."
+    exit 1
+  fi
+  converted_count="$(find "${tmp_agents}" -maxdepth 1 -name 'uberdev-*.toml' | wc -l | tr -d ' ')"
+  if [ "${converted_count}" -eq 0 ]; then
+    rm -rf "${tmp_agents}"
+    err "agent conversion produced zero agents; refusing to replace existing uberdev agents."
     exit 1
   fi
   for agent_file in "${AGENTS_DIR}"/uberdev-*.toml; do
@@ -469,7 +475,7 @@ EOF
 # ── Main ─────────────────────────────────────────────────────────────────────
 main() {
   case "${1:-}" in
-    --uninstall|-u) bootstrap_source_tree; do_uninstall; exit 0 ;;
+    --uninstall|-u) do_uninstall; exit 0 ;;
     --help|-h)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//'
       exit 0 ;;

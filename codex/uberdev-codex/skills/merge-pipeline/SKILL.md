@@ -44,7 +44,7 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `INTEGRATION_BRANCH_KEY` | `integration_branch` (config key) | D8 |
 | `INTEGRATION_BRANCH_ENV_VAR` | `UBERDEV_INTEGRATION_BRANCH` | D8 |
 | `INTEGRATION_BRANCH_FALLBACK` | `main` (hardcoded literal — autopilot picks the GitHub-default convention rather than prompting; users override out-of-band via `integration_branch:` config) | D8, Phase 1.3 (used when all four resolution tiers are empty) |
-| `AUTO_CONFIRM_KEY` | `auto_confirm` (config key in `.claude/uberdev.local.md`) **(deprecated; no behavioural effect)** | Phase 2.4 (no-op acknowledgement only; Phase 4.5 no longer consumes this key under unconditional autopilot) |
+| `AUTO_CONFIRM_KEY` | `auto_confirm` (config key in `.codex/uberdev.local.md`) **(deprecated; no behavioural effect)** | Phase 2.4 (no-op acknowledgement only; Phase 4.5 no longer consumes this key under unconditional autopilot) |
 | `AUTO_CONFIRM_FLAGS` | `--yes`, `-y` (CLI flags) **(deprecated; no behavioural effect)** | Phase 2.4 (no-op acknowledgement only; Phase 4.5 no longer consumes these flags under unconditional autopilot) |
 | `AUTO_CONFIRM_REASON_ENUM` | `autopilot-default` (only value emitted under autopilot; `single-pr-default`, `cli-flag`, `config-auto_confirm` are historical from pre-autopilot runs and are unreachable now) | Phase 2.4 |
 | `STRATEGY_REASON_ENUM` | `cli-flag` (deprecated; never emitted post-v0.17.0), `pr-label` (deprecated as authoritative; reused by agent rationale), `heuristic-conventional` (deprecated as authoritative; reused by agent rationale), `heuristic-wip` (deprecated as authoritative; reused by agent rationale), `heuristic-single-commit` (deprecated as authoritative; reused by agent rationale), `heuristic-mixed` (deprecated as authoritative; reused by agent rationale), `agent_decided` | Phase 2.2, Phase 3.3 (audit-log `data.reason` for `strategy_chosen`) |
@@ -120,7 +120,7 @@ Integration-branch resolution (four-tier precedence chain, highest wins; on full
 
 1. **CLI flag** `--integration-branch=<name>` — explicit per-invocation override.
 2. **Env var** `UBERDEV_INTEGRATION_BRANCH` (see `INTEGRATION_BRANCH_ENV_VAR`) — shell-scoped override.
-3. **Config file** `.claude/uberdev.local.md` `integration_branch:` key (see `INTEGRATION_BRANCH_KEY`) — repo-local default.
+3. **Config file** `.codex/uberdev.local.md` `integration_branch:` key (see `INTEGRATION_BRANCH_KEY`) — repo-local default.
 4. **Fallback** `gh repo view --json defaultBranchRef` — GitHub's recorded default branch.
 5. **Last-resort literal** `INTEGRATION_BRANCH_FALLBACK` (`main`) — used when all four tiers are empty (network-detached clone, missing remote). Emit a one-line stderr warning citing the fallback; never prompt.
 
@@ -142,7 +142,7 @@ This is transparency for the autopilot contract — every blocking gate has been
 
 ### Step 1.0a — command_timeouts.merge (advisory-only)
 
-Read `command_timeouts.merge` from `.claude/uberdev.local.md` (env:
+Read `command_timeouts.merge` from `.codex/uberdev.local.md` (env:
 `UBERDEV_MERGE_TIMEOUT`; default 600s; range [60, 86400]). The value is
 **advisory in v1** — `/merge` does NOT enforce a wall-clock kill (the
 pipeline executes inside the current Claude turn; wall-clock kill
@@ -183,7 +183,7 @@ fi
 declare -A AUTO_REVIEW_DISPATCHED=()
 ```
 
-**Precedence (inherited from `uberdev_read_enum` generic semantics):** `UBERDEV_AUTO_REVIEW_ON_MERGE` env > `auto_review_on_merge:` in `.claude/uberdev.local.md` > default `false`. Invalid values (anything outside `true|false`) trigger the standard D7 warning format, emit a `uberdev_config_invalid` audit event via existing helper machinery, and fall back to default `false` non-fatally — no new event needed for invalid config. The `AUTO_REVIEW_DISPATCHED` associative array is declared empty at hoist time and indexed by the composite key `${PR}:${RUN_ID}` at intercept time (see Step 1.4.5).
+**Precedence (inherited from `uberdev_read_enum` generic semantics):** `UBERDEV_AUTO_REVIEW_ON_MERGE` env > `auto_review_on_merge:` in `.codex/uberdev.local.md` > default `false`. Invalid values (anything outside `true|false`) trigger the standard D7 warning format, emit a `uberdev_config_invalid` audit event via existing helper machinery, and fall back to default `false` non-fatally — no new event needed for invalid config. The `AUTO_REVIEW_DISPATCHED` associative array is declared empty at hoist time and indexed by the composite key `${PR}:${RUN_ID}` at intercept time (see Step 1.4.5).
 
 ### Step 1.0.5 — Bare-mode detection (mode-only, no dispatch)
 
@@ -344,7 +344,7 @@ fi
 
 1. CLI flag `--integration-branch=<name>` (highest)
 2. env var `INTEGRATION_BRANCH_ENV_VAR`
-3. `.claude/uberdev.local.md` YAML frontmatter `INTEGRATION_BRANCH_KEY`
+3. `.codex/uberdev.local.md` YAML frontmatter `INTEGRATION_BRANCH_KEY`
 4. `gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name'`
 
 Validate the resolved name against `BRANCH_NAME_REGEX` BEFORE any shell argv use. Reject and abort on regex fail — **releasing the lock first** (`rm -rf .git/uberdev-merge.lock.d` — this is a documented post-acquisition early exit; there is no trap to fire, see Step 4.6).
@@ -373,7 +373,7 @@ This step is the `$integration_branch`-dependent half of the split detection int
 
 ### Step 1.3 — Last-resort fallback when all four tiers are empty
 
-If the four-tier chain returns nothing (network-detached clone, missing remote): use the literal `INTEGRATION_BRANCH_FALLBACK` (`main`) and emit one stderr line: `warning: integration_branch unresolved from CLI / env / config / gh; falling back to 'main'. Set integration_branch in .claude/uberdev.local.md to silence this.` Validate the fallback against `BRANCH_NAME_REGEX` (it passes by construction). **Never prompt the user.** No persist step — autopilot does not ask, it acts; if the user wants a different default, they edit the config file out-of-band.
+If the four-tier chain returns nothing (network-detached clone, missing remote): use the literal `INTEGRATION_BRANCH_FALLBACK` (`main`) and emit one stderr line: `warning: integration_branch unresolved from CLI / env / config / gh; falling back to 'main'. Set integration_branch in .codex/uberdev.local.md to silence this.` Validate the fallback against `BRANCH_NAME_REGEX` (it passes by construction). **Never prompt the user.** No persist step — autopilot does not ask, it acts; if the user wants a different default, they edit the config file out-of-band.
 
 **Fallback-branch existence check.** Before proceeding to Step 1.4 with the fallback, verify the branch actually exists on `origin`:
 
@@ -384,7 +384,7 @@ git ls-remote --exit-code --heads origin "<INTEGRATION_BRANCH_FALLBACK>" >/dev/n
 If the check fails (the repo's default branch is not `main` — e.g., `master`, `trunk`, `develop`), execute these three actions **in order**:
 
 1. Emit an `error` audit event to `audit.jsonl` with `data.reason="fallback-branch-missing"`.
-2. Emit one stderr line: `error: fallback branch '<INTEGRATION_BRANCH_FALLBACK>' does not exist on origin; cannot proceed with autopilot. Set integration_branch in .claude/uberdev.local.md to your repo's default.`
+2. Emit one stderr line: `error: fallback branch '<INTEGRATION_BRANCH_FALLBACK>' does not exist on origin; cannot proceed with autopilot. Set integration_branch in .codex/uberdev.local.md to your repo's default.`
 3. Release the lock (`rm -rf .git/uberdev-merge.lock.d` — documented post-acquisition early exit; no trap exists to fire), then exit cleanly (no halt, no prompt — the user has a clear actionable next step).
 
 This is the only Phase-1 path where /merge declines to run for a config reason. The clean exit is **not** a halt of an in-flight queue (no PRs have been processed yet), and it does not block the autopilot contract for properly-configured repos. M34's failure-mode-table check still holds — the failure mode here is a Phase-1 config-validation refusal, not an in-flight queue halt.
@@ -680,7 +680,7 @@ Skip Step 2.1 if only 1 PR is in scope (no ordering decision to make).
 
 ### Step 2.2 — PER-PR STRATEGY (agent-decided)
 
-For each PR in the in-scope set, dispatch a `merge-strategy-decider` agent. Inputs per PR: `pr_number`, `commit_count` (from `git rev-list --count <integration_branch>..<head_ref_oid>`), `conventional_commit_ratio` (from a regex pass over `git log <integration_branch>..<head_ref_oid> --format=%s` matching `^(feat|fix|chore|refactor|test|docs)(\(.+\))?:`), `wip_marker_present` (from a regex pass over the same log matching `WIP_MESSAGE_REGEX`), `divergence_commits` (`git rev-list --count <merge-base>..<head_ref_oid>`), `label_hint` (suffix of any `merge-strategy:<name>` label on the PR, advisory; null otherwise; wrapped in `<external-untrusted-input source="github-pr-label">…</external-untrusted-input>` envelope), `repo_convention` (recorded preference from `.claude/uberdev.local.md` `merge_strategy:` key, null if absent), `working_dir`.
+For each PR in the in-scope set, dispatch a `merge-strategy-decider` agent. Inputs per PR: `pr_number`, `commit_count` (from `git rev-list --count <integration_branch>..<head_ref_oid>`), `conventional_commit_ratio` (from a regex pass over `git log <integration_branch>..<head_ref_oid> --format=%s` matching `^(feat|fix|chore|refactor|test|docs)(\(.+\))?:`), `wip_marker_present` (from a regex pass over the same log matching `WIP_MESSAGE_REGEX`), `divergence_commits` (`git rev-list --count <merge-base>..<head_ref_oid>`), `label_hint` (suffix of any `merge-strategy:<name>` label on the PR, advisory; null otherwise; wrapped in `<external-untrusted-input source="github-pr-label">…</external-untrusted-input>` envelope), `repo_convention` (recorded preference from `.codex/uberdev.local.md` `merge_strategy:` key, null if absent), `working_dir`.
 
 **Per-repo fanout cap.** At the top of Phase 2.2, source
 `${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/config-read.sh` and resolve
