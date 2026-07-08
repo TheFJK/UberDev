@@ -63,6 +63,7 @@ UBERDEV_REF="${UBERDEV_REF:-main}"
 UBERDEV_REPO_URL="${UBERDEV_REPO_URL:-https://github.com/TheFJK/UberDev.git}"
 UBERDEV_ARCHIVE_URL="${UBERDEV_ARCHIVE_URL:-https://github.com/TheFJK/UberDev/archive/refs/heads/${UBERDEV_REF}.tar.gz}"
 BOOTSTRAP_PARENT=""
+ADOPT_LEGACY_SKILLS=0
 
 # Stable sentinels wrap the injected primer block so re-runs replace cleanly
 # instead of appending duplicate copies. The marker text never appears in real
@@ -309,17 +310,63 @@ preflight_skill_collisions() {
     err "skills source not found: ${SKILLS_SRC}"
     exit 1
   fi
+  if legacy_uberdev_skill_set_present; then
+    ADOPT_LEGACY_SKILLS=1
+  fi
   local skill_dir name
   for skill_dir in "${SKILLS_SRC}"/*/; do
     [ -d "$skill_dir" ] || continue
     name="$(basename "$skill_dir")"
     [ "$name" = "_shared" ] && continue
     if [ -e "${SKILLS_USER_DIR}/${name}" ] && [ ! -f "${SKILLS_USER_DIR}/${name}/${MANAGED_MARKER}" ]; then
+      if [ "${ADOPT_LEGACY_SKILLS}" -eq 1 ] && skill_frontmatter_name_matches "${SKILLS_USER_DIR}/${name}/SKILL.md" "$name"; then
+        continue
+      fi
       err "skill collision: ${SKILLS_USER_DIR}/${name} already exists and is not managed by UberDev."
       printf '       Move or remove that skill, then rerun the installer. No files were overwritten.\n' >&2
       exit 1
     fi
   done
+}
+
+skill_frontmatter_name_matches() {
+  local skill_file="$1" expected="$2"
+  [ -f "${skill_file}" ] || return 1
+  awk -v expected="${expected}" '
+    BEGIN { found=0; ok=0 }
+    NR == 1 && $0 != "---" { exit 1 }
+    NR > 1 && $0 == "---" { exit 1 }
+    NR > 1 && $1 == "name:" {
+      name=$0
+      sub(/^name:[[:space:]]*/, "", name)
+      gsub(/^["'\'']|["'\'']$/, "", name)
+      found=1
+      ok=(name == expected)
+      exit(ok ? 0 : 1)
+    }
+    NR > 80 { exit 1 }
+    END { if (!found || !ok) exit 1 }
+  ' "${skill_file}"
+}
+
+legacy_uberdev_skill_set_present() {
+  [ -d "${SKILLS_USER_DIR}" ] || return 1
+  [ -f "${SKILLS_USER_DIR}/uberdev-cmd-solve/SKILL.md" ] || return 1
+  grep -qF "Codex bridge" "${SKILLS_USER_DIR}/uberdev-cmd-solve/SKILL.md" || return 1
+  [ -f "${SKILLS_USER_DIR}/using-uberdev/SKILL.md" ] || return 1
+
+  local skill_dir name expected=0 matched=0
+  for skill_dir in "${SKILLS_SRC}"/*/; do
+    [ -d "$skill_dir" ] || continue
+    name="$(basename "$skill_dir")"
+    [ "$name" = "_shared" ] && continue
+    expected=$((expected + 1))
+    if [ -d "${SKILLS_USER_DIR}/${name}" ]; then
+      skill_frontmatter_name_matches "${SKILLS_USER_DIR}/${name}/SKILL.md" "$name" || return 1
+      matched=$((matched + 1))
+    fi
+  done
+  [ "${expected}" -gt 0 ] && [ "${matched}" -eq "${expected}" ]
 }
 
 cleanup_stale_managed_skills() {
@@ -350,6 +397,9 @@ install_skills() {
   fi
   ensure_skills_user_dir_regular
   mkdir -p "${SKILLS_USER_DIR}"
+  if [ "${ADOPT_LEGACY_SKILLS}" -eq 1 ]; then
+    warn "adopting legacy unmarked UberDev Codex skills in ${SKILLS_USER_DIR}/."
+  fi
   cleanup_stale_managed_skills
   # Mirror each skill dir individually. --delete only within each skill's own
   # dir (not the whole SKILLS_USER_DIR) so we never touch unrelated user skills.

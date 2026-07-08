@@ -329,6 +329,46 @@ NR="$(find "$TH/.codex/plugins/uberdev-codex" -mindepth 1 2>/dev/null | wc -l | 
   && pass "uninstall removes all skills, agents, runtime files, and the primer block" \
   || fail "uninstall left residue: skills=$NS agents=$NA primer=$NP runtime=$NR"
 
+TH_LEGACY="$TMP/home-legacy-skills"
+mkdir -p "$TH_LEGACY/.agents/skills" "$TH_LEGACY/.codex"
+rsync -a --delete \
+  --exclude '.uberdev-codex-managed' \
+  "$REPO_ROOT/codex/uberdev-codex/skills/" "$TH_LEGACY/.agents/skills/"
+find "$TH_LEGACY/.agents/skills" -name '.uberdev-codex-managed' -delete
+assert_cmd 0 "installer adopts full legacy unmarked UberDev skill set" \
+  env HOME="$TH_LEGACY" CODEX_HOME="$TH_LEGACY/.codex" bash "$INSTALLER"
+NS="$(find "$TH_LEGACY/.agents/skills" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d '[:space:]')"
+NM="$(find "$TH_LEGACY/.agents/skills" -maxdepth 2 -name '.uberdev-codex-managed' 2>/dev/null | wc -l | tr -d '[:space:]')"
+if [ "$NS" -eq 39 ] \
+  && [ "$NM" -eq 39 ] \
+  && [ -x "$TH_LEGACY/.codex/plugins/uberdev-codex/lib/solve-launcher.sh" ] \
+  && grep -Rql '\.codex/uberdev.local.md' "$TH_LEGACY/.agents/skills/uberdev-cmd-solve/SKILL.md"; then
+  pass "legacy unmarked skill adoption upgrades skills, markers, and runtime"
+else
+  fail "legacy unmarked skill adoption incomplete: skills=$NS markers=$NM"
+fi
+
+TH_LEGACY_BAD="$TMP/home-legacy-skills-bad-frontmatter"
+mkdir -p "$TH_LEGACY_BAD/.agents/skills" "$TH_LEGACY_BAD/.codex"
+rsync -a --delete \
+  --exclude '.uberdev-codex-managed' \
+  "$REPO_ROOT/codex/uberdev-codex/skills/" "$TH_LEGACY_BAD/.agents/skills/"
+find "$TH_LEGACY_BAD/.agents/skills" -name '.uberdev-codex-managed' -delete
+: > "$TH_LEGACY_BAD/.agents/skills/brainstorm/SKILL.md"
+if env HOME="$TH_LEGACY_BAD" CODEX_HOME="$TH_LEGACY_BAD/.codex" bash "$INSTALLER" >/tmp/codex-legacy-bad-out 2>&1; then
+  fail "installer refuses full legacy-looking skill set with malformed frontmatter"
+else
+  if [ ! -s "$TH_LEGACY_BAD/.agents/skills/brainstorm/SKILL.md" ] \
+     && grep -qi 'collision' /tmp/codex-legacy-bad-out \
+     && [ ! -e "$TH_LEGACY_BAD/.codex/plugins/uberdev-codex" ] \
+     && [ ! -d "$TH_LEGACY_BAD/.codex/agents" ] \
+     && ! grep -q 'BEGIN uberdev-codex-primer' "$TH_LEGACY_BAD/.codex/AGENTS.md" 2>/dev/null; then
+    pass "installer refuses full legacy-looking skill set with malformed frontmatter"
+  else
+    fail "malformed legacy-looking refusal did not preserve files or avoid partial install"
+  fi
+fi
+
 TH_COLLIDE="$TMP/home-collide"
 mkdir -p "$TH_COLLIDE/.agents/skills/brainstorm" "$TH_COLLIDE/.codex"
 printf 'user-owned skill\n' > "$TH_COLLIDE/.agents/skills/brainstorm/SKILL.md"
