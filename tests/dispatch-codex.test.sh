@@ -175,6 +175,12 @@ assert_grep "$GOAL_LIB" \
 assert_grep "$GOAL_LIB" \
   'solve-codex-status-\$n\.json' \
   "goal-state codex solver liveness reads solve-codex-status-N.json"
+assert_grep "$GOAL_LIB" \
+  'unreadable Codex status file for issue' \
+  "goal-state codex status helper diagnoses unreadable non-empty status files"
+assert_grep "$GOAL_LIB" \
+  'return 2' \
+  "goal-state codex status helper can fail closed on invalid status files"
 
 echo "== solve-launcher backend-conditional version gate =="
 assert_grep "$LAUNCHER" \
@@ -283,6 +289,25 @@ case "$CODEX_STATUS_OUT" in
   *)
     fail_msg "goal-state exposes terminal codex failed status with exit/log/result" "got '$CODEX_STATUS_OUT'" ;;
 esac
+rm -f "$TMPD/solve-codex-status-42.json"
+CODEX_MISSING_STATUS_OUT="/tmp/uberdev-codex-missing-status-out.$$"
+CODEX_MISSING_STATUS_ERR="/tmp/uberdev-codex-missing-status-err.$$"
+if UBERDEV_TMPDIR="$TMPD" UBERDEV_RESOLVED_BACKEND=codex bash -c \
+    '. "$1"; . "$2"; uberdev_goal_codex_status_for_issue 42' \
+    _ "$DISPATCH_LIB" "$GOAL_LIB" >"$CODEX_MISSING_STATUS_OUT" 2>"$CODEX_MISSING_STATUS_ERR"; then
+  fail_msg "goal-state treats missing codex status as not ready" "unexpected success: $(cat "$CODEX_MISSING_STATUS_OUT")"
+else
+  CODEX_MISSING_STATUS_RC=$?
+  if [ "$CODEX_MISSING_STATUS_RC" -eq 1 ] \
+    && [ ! -s "$CODEX_MISSING_STATUS_OUT" ] \
+    && [ ! -s "$CODEX_MISSING_STATUS_ERR" ]; then
+    pass_msg "goal-state treats missing codex status as not ready"
+  else
+    fail_msg "goal-state treats missing codex status as not ready" \
+      "rc=$CODEX_MISSING_STATUS_RC out=$(cat "$CODEX_MISSING_STATUS_OUT") err=$(cat "$CODEX_MISSING_STATUS_ERR")"
+  fi
+fi
+rm -f "$CODEX_MISSING_STATUS_OUT" "$CODEX_MISSING_STATUS_ERR"
 : > "$TMPD/solve-codex-status-42.json"
 CODEX_EMPTY_STATUS_OUT="/tmp/uberdev-codex-empty-status-out.$$"
 CODEX_EMPTY_STATUS_ERR="/tmp/uberdev-codex-empty-status-err.$$"
@@ -304,26 +329,31 @@ fi
 rm -f "$CODEX_EMPTY_STATUS_OUT" "$CODEX_EMPTY_STATUS_ERR"
 printf '%s\n' '{"issue":42,"backend":"codex","state":"failed","exit_code":17,"pid":"222222","log":"/tmp/log","result":"/tmp/result"}' > "$TMPD/solve-codex-status-42.json"
 chmod 000 "$TMPD/solve-codex-status-42.json"
-CODEX_UNREADABLE_STATUS_OUT="/tmp/uberdev-codex-unreadable-status-out.$$"
-CODEX_UNREADABLE_STATUS_ERR="/tmp/uberdev-codex-unreadable-status-err.$$"
-if UBERDEV_TMPDIR="$TMPD" UBERDEV_RESOLVED_BACKEND=codex bash -c \
-    '. "$1"; . "$2"; uberdev_goal_codex_status_for_issue 42' \
-    _ "$DISPATCH_LIB" "$GOAL_LIB" >"$CODEX_UNREADABLE_STATUS_OUT" 2>"$CODEX_UNREADABLE_STATUS_ERR"; then
+if [ -r "$TMPD/solve-codex-status-42.json" ]; then
   chmod 600 "$TMPD/solve-codex-status-42.json"
-  fail_msg "goal-state treats unreadable non-empty codex status as invalid" "unexpected success: $(cat "$CODEX_UNREADABLE_STATUS_OUT")"
+  pass_msg "goal-state unreadable-status runtime fixture skipped when chmod cannot remove readability"
 else
-  CODEX_UNREADABLE_STATUS_RC=$?
-  chmod 600 "$TMPD/solve-codex-status-42.json"
-  if [ "$CODEX_UNREADABLE_STATUS_RC" -eq 2 ] \
-    && [ ! -s "$CODEX_UNREADABLE_STATUS_OUT" ] \
-    && grep -q 'unreadable Codex status file for issue 42' "$CODEX_UNREADABLE_STATUS_ERR"; then
-    pass_msg "goal-state treats unreadable non-empty codex status as invalid"
+  CODEX_UNREADABLE_STATUS_OUT="/tmp/uberdev-codex-unreadable-status-out.$$"
+  CODEX_UNREADABLE_STATUS_ERR="/tmp/uberdev-codex-unreadable-status-err.$$"
+  if UBERDEV_TMPDIR="$TMPD" UBERDEV_RESOLVED_BACKEND=codex bash -c \
+      '. "$1"; . "$2"; uberdev_goal_codex_status_for_issue 42' \
+      _ "$DISPATCH_LIB" "$GOAL_LIB" >"$CODEX_UNREADABLE_STATUS_OUT" 2>"$CODEX_UNREADABLE_STATUS_ERR"; then
+    chmod 600 "$TMPD/solve-codex-status-42.json"
+    fail_msg "goal-state treats unreadable non-empty codex status as invalid" "unexpected success: $(cat "$CODEX_UNREADABLE_STATUS_OUT")"
   else
-    fail_msg "goal-state treats unreadable non-empty codex status as invalid" \
-      "rc=$CODEX_UNREADABLE_STATUS_RC out=$(cat "$CODEX_UNREADABLE_STATUS_OUT") err=$(cat "$CODEX_UNREADABLE_STATUS_ERR")"
+    CODEX_UNREADABLE_STATUS_RC=$?
+    chmod 600 "$TMPD/solve-codex-status-42.json"
+    if [ "$CODEX_UNREADABLE_STATUS_RC" -eq 2 ] \
+      && [ ! -s "$CODEX_UNREADABLE_STATUS_OUT" ] \
+      && grep -q 'unreadable Codex status file for issue 42' "$CODEX_UNREADABLE_STATUS_ERR"; then
+      pass_msg "goal-state treats unreadable non-empty codex status as invalid"
+    else
+      fail_msg "goal-state treats unreadable non-empty codex status as invalid" \
+        "rc=$CODEX_UNREADABLE_STATUS_RC out=$(cat "$CODEX_UNREADABLE_STATUS_OUT") err=$(cat "$CODEX_UNREADABLE_STATUS_ERR")"
+    fi
   fi
+  rm -f "$CODEX_UNREADABLE_STATUS_OUT" "$CODEX_UNREADABLE_STATUS_ERR"
 fi
-rm -f "$CODEX_UNREADABLE_STATUS_OUT" "$CODEX_UNREADABLE_STATUS_ERR"
 rm -rf "$TMPD"
 
 echo "== _uberdev_dispatch_codex behavior with stubbed git/codex =="
