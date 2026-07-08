@@ -241,10 +241,10 @@ def codex_model_for(claude_model: str | None, source: str) -> str | None:
 
 
 def codex_port_text(value: str) -> str:
-    """Apply safe, context-free Codex path substitutions.
+    """Apply safe Codex prompt normalization and path substitutions.
 
-    This mirrors codex/tools/port-skill.sh so generated agents do not retain
-    Claude-only runtime variables.
+    This mirrors codex/tools/port-skill.sh for shared path rewrites, then
+    normalizes generated agent wording that differs between Claude and Codex.
     """
     codex_plugin_root = "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}"
     codex_config_path = "__UBERDEV_CODEX_CONFIG_PATH__"

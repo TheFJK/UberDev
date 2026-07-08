@@ -286,7 +286,8 @@ _uberdev_goal_pid_for_issue() {
 # rc 0: valid status emitted on stdout.
 # rc 1: no usable status yet (wrong backend, missing file, zero-byte startup
 #       placeholder, or helper unavailable).
-# rc 2: non-empty status file exists but is malformed or schema-invalid.
+# rc 2: non-empty status file exists but is unreadable, malformed, or
+#       schema-invalid.
 uberdev_goal_codex_status_for_issue() {
   local issue="$1"
   _uberdev_goal_validate_int "$issue" || return 1
@@ -296,8 +297,13 @@ uberdev_goal_codex_status_for_issue() {
   local status_file
   status_file="${UBERDEV_TMPDIR:-/tmp}/solve-codex-status-$issue.json"
   _uberdev_dispatch_tmp_target_safe "$status_file" || return 1
-  [ -r "$status_file" ] || return 1
+  [ -e "$status_file" ] || return 1
   [ -s "$status_file" ] || return 1
+  if [ ! -r "$status_file" ]; then
+    printf 'goal-state: unreadable Codex status file for issue %s (%s)\n' \
+      "$issue" "$status_file" >&2
+    return 2
+  fi
 
   local jq_out
   jq_out="$(jq -er --argjson issue "$issue" '

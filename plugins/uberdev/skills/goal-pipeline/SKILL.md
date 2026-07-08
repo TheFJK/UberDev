@@ -838,10 +838,10 @@ while true; do
             printf 'goal-pipeline: WARN audit goal_issue_closed_without_pr failed for issue %s (rc=%d) — close-without-PR row may be missing from audit log\n' \
               "$issue" "$?" >&2
           # Issue #291 #1 — terminal non-merge transition: release the
-          # cross-process `uberdev:active` claim. Inlined here (Phase 2 is a
-          # fresh shell; the Phase-1 _uberdev_goal_release_claim helper is not in
-          # scope) — combined remove-label + remove-assignee, fail-soft (the
-          # issue is already CLOSED, so the label is stale; mirrors merge Step 3.4).
+          # cross-process `uberdev:active` claim via the Phase 2 local helper.
+          # Phase 2 is a fresh shell, so the Phase-1 _uberdev_goal_release_claim
+          # helper is not in scope; the local helper keeps the same fail-soft
+          # semantics while surfacing release failures as breadcrumbs.
           _uberdev_goal_phase2_release_claim "$issue" "closed_without_pr"
           continue
         fi
@@ -874,7 +874,7 @@ while true; do
         # Issue #291 #1 — terminal non-merge transition (SOLVE_TIMEOUT, no PR):
         # the GitHub issue is still OPEN, so a stranded `uberdev:active` claim
         # would block every future /goal cycle AND any manual /solve retry on
-        # this issue. Release it (inlined — fresh-shell Phase 2; fail-soft).
+        # this issue. Release it through the Phase 2 local helper.
         _uberdev_goal_phase2_release_claim "$issue" "solve_timeout"
       fi
     fi

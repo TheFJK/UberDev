@@ -89,10 +89,11 @@ Original argument hint: `{arg_hint}`
 
 
 def codex_port_text(value: str) -> str:
-    """Apply safe, context-free Codex path substitutions.
+    """Apply safe Codex prompt normalization and path substitutions.
 
-    This mirrors codex/tools/port-skill.sh so generated command-skills do not
-    retain Claude-only runtime variables.
+    This mirrors codex/tools/port-skill.sh for shared path rewrites, then
+    normalizes generated command-skill wording that differs between Claude and
+    Codex.
     """
     codex_plugin_root = "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}"
     codex_config_path = "__UBERDEV_CODEX_CONFIG_PATH__"
