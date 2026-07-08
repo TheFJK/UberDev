@@ -186,7 +186,7 @@ assert_grep "$GOAL_LIB" \
 CODEX_STATUS_BODY="$(extract_function_body 'uberdev_goal_codex_status_for_issue' "$GOAL_LIB")"
 if printf '%s\n' "$CODEX_STATUS_BODY" | awk '
   /unreadable Codex status file for issue/ {seen=1}
-  seen && /return 2/ {found=1; exit}
+  seen && /^[[:space:]]*return[[:space:]]+2([[:space:]]*(#.*)?)?$/ {found=1; exit}
   seen && /^  fi$/ && !found {exit}
   END {exit found ? 0 : 1}
 '; then
