@@ -43,6 +43,18 @@ assert_grep_not() {
 
 pass_msg() { echo "  PASS  $1"; PASS=$((PASS + 1)); }
 fail_msg() { echo "  FAIL  $1"; [ -n "${2:-}" ] && echo "        $2"; FAIL=$((FAIL + 1)); }
+extract_function_body() {
+  local fn="$1" file="$2"
+  awk -v fn="$fn" '
+    $0 ~ "^" fn "\\(\\) \\{" {in_body=1; depth=0}
+    in_body {
+      print
+      depth += gsub(/\{/, "{")
+      depth -= gsub(/\}/, "}")
+      if (depth == 0) exit
+    }
+  ' "$file"
+}
 
 echo "== Codex packaged runtime mirrors source libs =="
 if cmp -s "$DISPATCH_LIB" "$CODEX_DISPATCH_LIB"; then
@@ -147,11 +159,7 @@ assert_grep "$DISPATCH_LIB" \
   "codex wrapper uses its own numeric shell PID for status"
 
 echo "== Codex backend does NOT thread claude-specific flags =="
-CODEX_BODY="$(awk '
-  /^_uberdev_dispatch_codex\(\) \{/ {in_body=1}
-  in_body {print}
-  in_body && /^}/ {exit}
-' "$DISPATCH_LIB")"
+CODEX_BODY="$(extract_function_body '_uberdev_dispatch_codex' "$DISPATCH_LIB")"
 if printf '%s\n' "$CODEX_BODY" | grep -qE '\<(PERM_FLAG|EFFORT_FLAG|claude -p)\>'; then
   fail_msg "codex backend body does not reference Claude-only flags or claude -p" \
     "$(printf '%s\n' "$CODEX_BODY" | grep -nE '\<(PERM_FLAG|EFFORT_FLAG|claude -p)\>')"
@@ -175,12 +183,17 @@ assert_grep "$GOAL_LIB" \
 assert_grep "$GOAL_LIB" \
   'solve-codex-status-\$n\.json' \
   "goal-state codex solver liveness reads solve-codex-status-N.json"
-assert_grep "$GOAL_LIB" \
-  'unreadable Codex status file for issue' \
-  "goal-state codex status helper diagnoses unreadable non-empty status files"
-assert_grep "$GOAL_LIB" \
-  'return 2' \
-  "goal-state codex status helper can fail closed on invalid status files"
+CODEX_STATUS_BODY="$(extract_function_body 'uberdev_goal_codex_status_for_issue' "$GOAL_LIB")"
+if printf '%s\n' "$CODEX_STATUS_BODY" | awk '
+  /unreadable Codex status file for issue/ {seen=1}
+  seen && /return 2/ {found=1; exit}
+  seen && /^  fi$/ && !found {exit}
+  END {exit found ? 0 : 1}
+'; then
+  pass_msg "goal-state codex status helper fails closed on unreadable non-empty status files"
+else
+  fail_msg "goal-state codex status helper fails closed on unreadable non-empty status files"
+fi
 
 echo "== solve-launcher backend-conditional version gate =="
 assert_grep "$LAUNCHER" \
