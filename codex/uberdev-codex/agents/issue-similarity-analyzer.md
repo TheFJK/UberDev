@@ -153,4 +153,4 @@ In all three cases, refuse the **entire chunk** — do not emit a partial cluste
 
 ## Cost note
 
-Uses `model: inherit` (= the session model, the Codex session model) per the all-inherit policy (v0.35.0, #256) — the analyzer was authored before that policy and is now aligned with it (the 8-ships intent, same as the former scouts).
+Uses `model: inherit` (= the session model, the Codex session model) per the all-inherit policy (v0.35.0, #256) — the analyzer was authored before that policy and is now aligned with it.

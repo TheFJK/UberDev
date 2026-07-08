@@ -798,6 +798,71 @@ else
   fail "W2f.drain: expected exit 1 + 'run-state flush FAILED' (got rc=$W2FD_RC, out=[$W2FD_OUT]) — a failed drain flush must NOT proceed via exit 0"
 fi
 
+# ==========================================================================
+# W3 — Phase-2 Codex malformed-status fail-closed (#329 review).
+#
+# The no-PR branch asks `uberdev_goal_codex_status_for_issue` whether the Codex
+# solver wrapper has reached a terminal state. A malformed status JSON is not
+# equivalent to "no status yet": it is a corrupted/unknown terminal signal and
+# must be surfaced immediately. The regression this catches was
+# `2>/dev/null || true`, which normalized parser/schema failures to empty state
+# and then fell through to the generic solve timeout path.
+# ==========================================================================
+echo "== W3: Codex malformed solver status is surfaced, not swallowed (#329 review) =="
+
+W3_STEP2A="$WORK/w3_step2a.slice.sh"
+if slice_fence 'for issue in "${active_issues[@]}"; do' '2b. Read the leaf /review-pr verdict' > "$W3_STEP2A" \
+   && [ -s "$W3_STEP2A" ] \
+   && grep -q 'uberdev_goal_codex_status_for_issue' "$W3_STEP2A" \
+   && grep -qE '^[[:space:]]*done' "$W3_STEP2A"; then
+  pass "W3.extract: sliced the step-2a no-PR solver-status loop from the watch fence"
+else
+  fail "W3.extract: could NOT slice the step-2a loop (loop head / step-2b marker moved?)"
+fi
+
+W3_STATE="$WORK/w3-state"
+mkdir -p "$W3_STATE" || { echo "FATAL: mkdir -p $W3_STATE failed" >&2; exit 3; }
+printf '{bad json\n' > "$W3_STATE/solve-codex-status-42.json"
+DRV_W3="$WORK/drv_w3.zsh"
+{
+  echo 'set -u'
+  echo "export UBERDEV_TMPDIR='$W3_STATE'"
+  echo "export GOAL_ID='pipew3'"
+  echo "export UBERDEV_GOAL_ID='pipew3'"
+  echo 'export UBERDEV_RESOLVED_BACKEND=codex'
+  echo ". \"\$CLAUDE_PLUGIN_ROOT/lib/dispatch.sh\""
+  echo ". \"\$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh\""
+  echo 'active_issues=(42)'
+  echo 'now="$(date +%s)"'
+  echo 'cycle=1'
+  echo 'any_active=0'
+  echo '_UBERDEV_GOAL_SOLVE_TIMEOUT=3600'
+  echo 'uberdev_goal_get_issue_state() { printf "solving"; }'
+  echo 'uberdev_goal_find_pr_for_issue() { :; }'
+  echo 'uberdev_goal_gh_failure_count() { printf "0"; }'
+  echo 'uberdev_goal_agent_busy_for_issue() { return 1; }'
+  echo 'uberdev_goal_issue_ts_in_state() { printf "%s" "$now"; }'
+  echo 'uberdev_goal_issue_state_transition() { echo "$2:$3->$4" > "$UBERDEV_TMPDIR/w3-transition"; return 0; }'
+  echo 'uberdev_goal_audit() { printf "%s %s\n" "$1" "$2" >> "$UBERDEV_TMPDIR/w3-audit"; }'
+  echo '_uberdev_goal_reap_zombies() { echo reaped > "$UBERDEV_TMPDIR/w3-reaped"; }'
+  echo 'print_summary() { :; }'
+  echo 'gh() { case "$1 $2" in "issue view") printf "OPEN";; "issue edit") return 0;; *) return 0;; esac; }'
+  echo "source '$W3_STEP2A'"
+  echo 'echo "W3-FELL-THROUGH any_active=$any_active"'
+} > "$DRV_W3"
+
+W3_OUT="$("$ZSH_BIN" -f "$DRV_W3" 2>"$WORK/w3.err")"; W3_RC=$?
+W3_ERR="$(cat "$WORK/w3.err" 2>/dev/null)"
+if [ "$W3_RC" -eq 1 ] \
+   && printf '%s' "$W3_ERR" | grep -q 'invalid Codex status for issue 42' \
+   && grep -q '"reason":"solver_failed"' "$W3_STATE/w3-audit" 2>/dev/null \
+   && grep -q '"state":"invalid_status"' "$W3_STATE/w3-audit" 2>/dev/null \
+   && grep -q '42:solving->failed' "$W3_STATE/w3-transition" 2>/dev/null; then
+  pass "W3: malformed Codex status file fails closed with diagnostic, failed transition, and solver_failed audit"
+else
+  fail "W3: malformed Codex status should fail closed (rc=$W3_RC, out=[$W3_OUT], err=[$W3_ERR], audit=[$(cat "$W3_STATE/w3-audit" 2>/dev/null)], transition=[$(cat "$W3_STATE/w3-transition" 2>/dev/null)])"
+fi
+
 echo
 echo "== Summary =="
 echo "  harness shell: $LAUNCH_SHELL"

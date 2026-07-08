@@ -568,9 +568,14 @@ echo "== B14b: batch unblock wait records transient gh issue failures (#329 revi
       "issue view") printf 'network unavailable' >&2; return 1 ;;
     esac
   }
-  if uberdev_goal_batch_unblock_wait_clear "$GOAL_ID" >/dev/null 2>&1; then
+  err="$SCRATCH/b14b.err"
+  if uberdev_goal_batch_unblock_wait_clear "$GOAL_ID" >/dev/null 2>"$err"; then
     echo "B14b.transient-gh-error-must-gate FAIL"; exit 1
   fi
+  grep -q 'goal-state: batch unblock PR 100 blocked by issue 201 gh issue view failed rc=1' "$err" \
+    || { echo "B14b.transient-gh-error-breadcrumb FAIL (stderr=$(cat "$err"))"; exit 1; }
+  grep -q 'network unavailable' "$err" \
+    || { echo "B14b.transient-gh-error-stderr FAIL (stderr=$(cat "$err"))"; exit 1; }
   count="$(uberdev_goal_gh_failure_count "$GOAL_ID")"
   [ "$count" = "1" ] || { echo "B14b.transient-gh-error-must-record FAIL (count=$count)"; exit 1; }
   gh() {

@@ -768,11 +768,25 @@ while true; do
       _codex_log=""
       _codex_result=""
       if [ "${UBERDEV_RESOLVED_BACKEND:-}" = "codex" ]; then
-        _codex_status="$(uberdev_goal_codex_status_for_issue "$issue" 2>/dev/null || true)"
-        _codex_state="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $1}')"
-        _codex_exit="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $2}')"
-        _codex_log="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $3}')"
-        _codex_result="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $4}')"
+        if _codex_status="$(uberdev_goal_codex_status_for_issue "$issue")"; then
+          _codex_state="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $1}')"
+          _codex_exit="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $2}')"
+          _codex_log="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $3}')"
+          _codex_result="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $4}')"
+        else
+          _codex_status_rc=$?
+          if [ "$_codex_status_rc" -eq 2 ]; then
+            printf 'goal-pipeline: invalid Codex status for issue %s — failing solver instead of waiting for timeout\n' "$issue" >&2
+            uberdev_goal_issue_state_transition "$GOAL_ID" "$issue" solving failed \
+              || printf 'goal-pipeline: WARN transition solving->failed failed for Codex issue %s (invalid status file)\n' "$issue" >&2
+            gh issue edit "$issue" --remove-label "uberdev:active" --remove-assignee "@me" >/dev/null 2>&1 || true
+            uberdev_goal_audit goal_circuit_breaker \
+              "{\"reason\":\"solver_failed\",\"issue\":$issue,\"backend\":\"codex\",\"state\":\"invalid_status\",\"exit_code\":null}"
+            _uberdev_goal_reap_zombies || true
+            print_summary "$cycle"
+            exit 1
+          fi
+        fi
         if [ "$_codex_state" = "failed" ]; then
           printf 'goal-pipeline: codex agent for issue %s failed (exit_code=%s; log=%s; result=%s)\n' \
             "$issue" "${_codex_exit:-unknown}" "${_codex_log:-unknown}" "${_codex_result:-unknown}" >&2

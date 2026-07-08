@@ -93,12 +93,18 @@ else
   pass "generated agent metadata has no UTF-8 mojibake"
 fi
 MODEL_RE='Opus 4\.8|Sonnet 4\.8|WAIT 4\.8|CLAUDE_CODE_SUBAGENT_MODEL|Claude-specific model override'
+DANGLING_WAIT_RE='(^|[^[:alnum:]])8-ships intent'
 CODEX_PATH_RE='CLAUDE_PLUGIN_ROOT|~/\.claude|~/\.codex/commands'
 BARE_ROOT_RE='\$\{PLUGIN_ROOT\}/|\$PLUGIN_ROOT/|(^|[^~])\$\{HOME\}/\.claude|\.claude/plugins'
 if grep -RqlE "$MODEL_RE" "$TMP/agents" 2>/dev/null; then
   fail "generated agents do not preserve Claude-only model guidance"
 else
   pass "generated agents do not preserve Claude-only model guidance"
+fi
+if grep -RqlE "$DANGLING_WAIT_RE" "$TMP/agents" 2>/dev/null; then
+  fail "generated agents do not leave dangling WAIT-marker fragments"
+else
+  pass "generated agents do not leave dangling WAIT-marker fragments"
 fi
 
 echo "== Runtime Markdown agent prompt porter =="
@@ -116,6 +122,37 @@ if grep -RqlE "$MODEL_RE" "$TMP/runtime-agents" 2>/dev/null; then
   fail "runtime Markdown prompts do not preserve Claude-only model guidance"
 else
   pass "runtime Markdown prompts do not preserve Claude-only model guidance"
+fi
+if grep -RqlE "$DANGLING_WAIT_RE" "$TMP/runtime-agents" 2>/dev/null; then
+  fail "runtime Markdown prompts do not leave dangling WAIT-marker fragments"
+else
+  pass "runtime Markdown prompts do not leave dangling WAIT-marker fragments"
+fi
+if grep -q '`merge_strategy:` key in `.codex/uberdev.local.md` (falling back to `.claude/uberdev.local.md`)' "$TMP/agents/uberdev-merge-strategy-decider.toml" \
+   && grep -q '`merge_strategy:` key in `.codex/uberdev.local.md` (falling back to `.claude/uberdev.local.md`)' "$TMP/runtime-agents/merge-strategy-decider.md"; then
+  pass "generated merge-strategy prompts document Codex config primary and Claude fallback"
+else
+  fail "generated merge-strategy prompts document Codex config primary and Claude fallback"
+fi
+if grep -q 'Reads Codex AGENTS.md plus project CLAUDE.md/AGENTS.md' "$TMP/agents/uberdev-research-constraints.toml" \
+   && grep -q 'from AGENTS.md/CLAUDE.md, RFCs, and ADRs' "$TMP/agents/uberdev-research-constraints.toml" \
+   && grep -q 'Reads Codex AGENTS.md plus project CLAUDE.md/AGENTS.md' "$TMP/runtime-agents/research-constraints.md" \
+   && grep -q 'from AGENTS.md/CLAUDE.md, RFCs, and ADRs' "$TMP/runtime-agents/research-constraints.md"; then
+  pass "generated research-constraints prompts describe Codex/global instruction source order"
+else
+  fail "generated research-constraints prompts describe Codex/global instruction source order"
+fi
+mkdir -p "$TMP/empty-runtime-agent-src" "$TMP/runtime-agent-preserve"
+printf 'existing prompt\n' > "$TMP/runtime-agent-preserve/existing.md"
+if bash "$PORT_AGENT_PROMPTS" "$TMP/empty-runtime-agent-src" "$TMP/runtime-agent-preserve" >/tmp/codex-empty-runtime-agents-out 2>&1; then
+  fail "port-agent-prompts refuses empty source before touching destination"
+else
+  if [ -f "$TMP/runtime-agent-preserve/existing.md" ] \
+     && grep -q 'no \*.md agents found' /tmp/codex-empty-runtime-agents-out; then
+    pass "port-agent-prompts refuses empty source before touching destination"
+  else
+    fail "port-agent-prompts empty-source failure deleted or rewrote destination"
+  fi
 fi
 
 echo "== Command converter: 13 skills + 2 skipped =="
@@ -142,6 +179,11 @@ if grep -Rql 'subagent-driven-dev.*post-impl-review.*end-of-issue' "$TMP/cmd-ski
   fail "generated command-skills do not describe retired pre-push post-impl-review flow"
 else
   pass "generated command-skills do not describe retired pre-push post-impl-review flow"
+fi
+if grep -RqlE "$MODEL_RE|$DANGLING_WAIT_RE" "$TMP/cmd-skills" 2>/dev/null; then
+  fail "generated command-skills do not preserve Claude-only model guidance or dangling WAIT fragments"
+else
+  pass "generated command-skills do not preserve Claude-only model guidance or dangling WAIT fragments"
 fi
 
 echo "== Skill-port: no CLAUDE_PLUGIN_ROOT residuals =="
@@ -458,6 +500,23 @@ NG="$(grep -rlE "$BARE_ROOT_RE" "$REPO_ROOT/codex/agents" "$REPO_ROOT/codex/uber
 NG="$(grep -rlE "$MODEL_RE" "$REPO_ROOT/codex/agents" "$REPO_ROOT/codex/uberdev-codex/skills" "$REPO_ROOT/codex/uberdev-codex/agents" 2>/dev/null | wc -l | tr -d ' ')"
 [ "$NG" -eq 0 ] && pass "checked-in Codex artifacts have no Claude-only model guidance" \
   || fail "checked-in Codex artifacts contain $NG Claude-only model guidance files"
+NG="$(grep -rlE "$DANGLING_WAIT_RE" "$REPO_ROOT/codex/agents" "$REPO_ROOT/codex/uberdev-codex/skills" "$REPO_ROOT/codex/uberdev-codex/agents" 2>/dev/null | wc -l | tr -d ' ')"
+[ "$NG" -eq 0 ] && pass "checked-in Codex artifacts have no dangling WAIT-marker fragments" \
+  || fail "checked-in Codex artifacts contain $NG dangling WAIT-marker fragment files"
+if grep -q '`merge_strategy:` key in `.codex/uberdev.local.md` (falling back to `.claude/uberdev.local.md`)' "$REPO_ROOT/codex/agents/uberdev-merge-strategy-decider.toml" \
+   && grep -q '`merge_strategy:` key in `.codex/uberdev.local.md` (falling back to `.claude/uberdev.local.md`)' "$REPO_ROOT/codex/uberdev-codex/agents/merge-strategy-decider.md"; then
+  pass "checked-in merge-strategy prompts document Codex config primary and Claude fallback"
+else
+  fail "checked-in merge-strategy prompts document Codex config primary and Claude fallback"
+fi
+if grep -q 'Reads Codex AGENTS.md plus project CLAUDE.md/AGENTS.md' "$REPO_ROOT/codex/agents/uberdev-research-constraints.toml" \
+   && grep -q 'from AGENTS.md/CLAUDE.md, RFCs, and ADRs' "$REPO_ROOT/codex/agents/uberdev-research-constraints.toml" \
+   && grep -q 'Reads Codex AGENTS.md plus project CLAUDE.md/AGENTS.md' "$REPO_ROOT/codex/uberdev-codex/agents/research-constraints.md" \
+   && grep -q 'from AGENTS.md/CLAUDE.md, RFCs, and ADRs' "$REPO_ROOT/codex/uberdev-codex/agents/research-constraints.md"; then
+  pass "checked-in research-constraints prompts describe Codex/global instruction source order"
+else
+  fail "checked-in research-constraints prompts describe Codex/global instruction source order"
+fi
 
 echo "== Primer/tool mapping freshness =="
 if grep -q 'wait_agent' "$REPO_ROOT/codex/AGENTS.md" \

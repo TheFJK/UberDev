@@ -21,6 +21,11 @@ if [ ! -f "$CONVERTER" ]; then
   echo "error: converter not found: $CONVERTER" >&2
   exit 1
 fi
+SRC_COUNT="$(find "$SRC" -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l | tr -d ' ')"
+if [ "$SRC_COUNT" -eq 0 ]; then
+  echo "error: no *.md agents found in $SRC" >&2
+  exit 2
+fi
 
 echo "Porting runtime agent prompts: $SRC → $DST"
 

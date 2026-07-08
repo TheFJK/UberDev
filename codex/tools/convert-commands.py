@@ -95,17 +95,25 @@ def codex_port_text(value: str) -> str:
     retain Claude-only runtime variables.
     """
     codex_plugin_root = "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}"
+    codex_config_path = "__UBERDEV_CODEX_CONFIG_PATH__"
+    claude_config_fallback = "__UBERDEV_CLAUDE_CONFIG_FALLBACK__"
     ported = (
-        value.replace("CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT")
+        value.replace("`.claude/uberdev.local.md`", f"`{codex_config_path}` (falling back to `{claude_config_fallback}`)")
+        .replace("CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT")
         .replace('"$PLUGIN_ROOT/', f'"{codex_plugin_root}/')
         .replace('"${PLUGIN_ROOT}/', f'"{codex_plugin_root}/')
         .replace(".claude/uberdev.local.md", ".codex/uberdev.local.md")
         .replace("~/.claude/CLAUDE.md", "~/.codex/AGENTS.md")
         .replace("~/.claude/", "~/.codex/")
         .replace("~/.claude", "~/.codex")
+        .replace(codex_config_path, ".codex/uberdev.local.md")
+        .replace(claude_config_fallback, ".claude/uberdev.local.md")
+        .replace("Reads CLAUDE.md (global + project)", "Reads Codex AGENTS.md plus project CLAUDE.md/AGENTS.md")
+        .replace("from CLAUDE.md, RFCs, and ADRs", "from AGENTS.md/CLAUDE.md, RFCs, and ADRs")
     )
     ported = ported.replace("Opus 4.8 1M", "the Codex session model")
-    ported = re.sub(r"`# WAIT 4\.8 sonnet`[^.\n]*\.\s*", "", ported)
+    ported = re.sub(r"\s*\([^()\n]*`# WAIT 4\.8 sonnet`[^()\n]*\)", "", ported)
+    ported = re.sub(r"\s*`# WAIT 4\.8 sonnet`[^\n]*", "", ported)
     ported = re.sub(r"\s*# WAIT 4\.8 sonnet:[^\n]*", "", ported)
     ported = re.sub(
         r"\s*To force a specific subagent model[^.\n]*CLAUDE_CODE_SUBAGENT_MODEL[^.\n]*(?:\([^)]*\))?\.\s*",

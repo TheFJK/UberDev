@@ -293,7 +293,8 @@ uberdev_goal_codex_status_for_issue() {
   status_file="${UBERDEV_TMPDIR:-/tmp}/solve-codex-status-$issue.json"
   _uberdev_dispatch_tmp_target_safe "$status_file" || return 1
 
-  row="$(jq -er --argjson issue "$issue" '
+  local jq_out
+  jq_out="$(jq -er --argjson issue "$issue" '
     select(.backend == "codex" and .issue == $issue)
     | .state as $state
     | select($state == "running" or $state == "completed" or $state == "failed")
@@ -306,9 +307,20 @@ uberdev_goal_codex_status_for_issue() {
         (.result // "")
       ]
     | @tsv
-  ' < "$status_file" 2>/dev/null)" || return 1
-  [ -n "$row" ] || return 1
-  printf '%s' "$row"
+  ' < "$status_file" 2>&1)"
+  case $? in
+    0) ;;
+    *)
+      printf 'goal-state: invalid Codex status file for issue %s (%s): %s\n' \
+        "$issue" "$status_file" "$jq_out" >&2
+      return 2 ;;
+  esac
+  [ -n "$jq_out" ] || {
+    printf 'goal-state: invalid Codex status file for issue %s (%s): empty parsed row\n' \
+      "$issue" "$status_file" >&2
+    return 2
+  }
+  printf '%s' "$jq_out"
 }
 
 # _uberdev_goal_glob_worktree SUFFIX
@@ -1265,17 +1277,42 @@ uberdev_goal_agent_busy_for_issue() {
   _uberdev_goal_validate_int "$n" || return 1
   # Backend-aware liveness (RFC 0012 §3.4 codex-port). claude-bg/wezterm
   # dispatch named sessions queryable via `claude agents --json`; background
-  # and codex dispatch nohup-detached processes tracked only by PID in the
-  # per-issue status file. For the PID-based backends, "busy" = the captured
-  # PID is still alive (kill -0). Same fail-safe default as the claude arm:
-  # missing status file / unreadable PID / dead process all yield rc 1 (not
-  # busy), so goal proceeds rather than stalling on a lost session.
+  # dispatch tracks only a wrapper PID. Codex has a richer status JSON, so
+  # terminal completed/failed states return "not busy" before PID probing; this
+  # lets Phase 2a surface terminal Codex failures instead of skipping them just
+  # because the wrapper PID is still alive or reused. Same fail-safe default as
+  # the claude arm: missing status file / unreadable PID / dead process all
+  # yield rc 1 (not busy), so goal proceeds rather than stalling on a lost
+  # session.
   case "${UBERDEV_RESOLVED_BACKEND:-}" in
-    background|codex)
+    background)
       local pid
       pid="$(_uberdev_goal_pid_for_issue "$n" 2>/dev/null)" || return 1
       [ -n "$pid" ] || return 1
       kill -0 "$pid" 2>/dev/null
+      return $?
+      ;;
+    codex)
+      local pid status_file status_state
+      status_file="${UBERDEV_TMPDIR:-/tmp}/solve-codex-status-$n.json"
+      _uberdev_dispatch_tmp_target_safe "$status_file" || return 1
+      [ -r "$status_file" ] || return 1
+      status_state="$(jq -r --argjson issue "$n" '
+        if (.backend == "codex" and .issue == $issue) then (.state // "")
+        else "__mismatch__"
+        end
+      ' < "$status_file" 2>/dev/null)" || return 1
+      case "$status_state" in
+        completed|failed)
+          return 1 ;;
+        running|"")
+          pid="$(_uberdev_goal_pid_for_issue "$n" 2>/dev/null)" || return 1
+          [ -n "$pid" ] || return 1
+          kill -0 "$pid" 2>/dev/null
+          return $? ;;
+        *)
+          return 1 ;;
+      esac
       ;;
     *)
       if claude agents --json 2>/dev/null | jq -e --arg n "$n" '
@@ -1291,17 +1328,20 @@ uberdev_goal_agent_busy_for_issue() {
 }
 
 # uberdev_goal_review_pr_in_flight PR_NUM   (issue #220, AC ❷)
-# rc 0 iff `claude agents --json` shows a live /uberdev:review-pr <pr> agent
-# (status ∈ busy|running|starting|working). Used by Phase 2c (pre-/merge gate)
-# and Phase 2b stale|missing arm (pre-/review-pr-re-dispatch gate) to defer
-# rather than dispatch when the leaf is still working. --argjson safely passes
-# the validated PR int as a JSON number. The regex uses an unanchored substring
-# match (no leading ^) because the agent's .name field is the verbatim prompt
-# body, and post-#235 dispatch bodies open with a natural-language imperative
-# ("Invoke the slash command /uberdev:review-pr <pr> now. ...") rather than a
-# bare slash. The trailing ($|[^0-9]) boundary is the load-bearing anti-
-# collision guard: it rejects 21 matching 218, 42 matching 421, etc.
-# (.name // "") + (.status // "") are null-safe (security.md).
+# rc 0 means a review-pr dispatch must be treated as in-flight. For
+# claude-bg/wezterm this means `claude agents --json` shows a live
+# /uberdev:review-pr <pr> agent (status ∈ busy|running|starting|working). For
+# background it means the tracked wrapper PID is alive. Codex returns in-flight
+# for ambiguous running status files (malformed JSON or running state with an
+# unreadable/empty PID) so Phase 2b/2c defers duplicate dispatch instead of
+# launching a second reviewer while the status writer may still be updating.
+# --argjson safely passes the validated PR int as a JSON number. The regex uses
+# an unanchored substring match (no leading ^) because the agent's .name field
+# is the verbatim prompt body, and post-#235 dispatch bodies open with a
+# natural-language imperative ("Invoke the slash command /uberdev:review-pr
+# <pr> now. ...") rather than a bare slash. The trailing ($|[^0-9]) boundary is
+# the load-bearing anti-collision guard: it rejects 21 matching 218, 42 matching
+# 421, etc. (.name // "") + (.status // "") are null-safe (security.md).
 uberdev_goal_review_pr_in_flight() {
   local pr="$1"
   _uberdev_goal_validate_int "$pr" || return 1
@@ -1858,6 +1898,8 @@ uberdev_goal_batch_unblock_wait_clear() {
           issue_state="CLOSED"   # 404 → deleted upstream → treat as closed
           _uberdev_goal_reset_gh_failure
         else
+          printf 'goal-state: batch unblock PR %s blocked by issue %s gh issue view failed rc=%d: %s\n' \
+            "$pr" "$i" "$issue_rc" "$issue_raw" >&2
           _uberdev_goal_record_gh_failure
           return 1               # transient gh error → keep waiting (B11)
         fi

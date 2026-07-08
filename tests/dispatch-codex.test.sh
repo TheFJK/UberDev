@@ -164,8 +164,11 @@ assert_grep "$GOAL_LIB" \
   'claude-bg\|wezterm\|background\|codex' \
   "goal-state UBERDEV_RESOLVED_BACKEND allowlist includes codex"
 assert_grep "$GOAL_LIB" \
-  'background\|codex' \
-  "goal-state busy-for-issue liveness branches on background|codex (PID path)"
+  'terminal completed/failed states return "not busy"' \
+  "goal-state codex solver liveness treats terminal statuses as not busy"
+assert_grep "$GOAL_LIB" \
+  'solve-codex-status-\$n\.json' \
+  "goal-state codex solver liveness reads solve-codex-status-N.json"
 
 echo "== solve-launcher backend-conditional version gate =="
 assert_grep "$LAUNCHER" \

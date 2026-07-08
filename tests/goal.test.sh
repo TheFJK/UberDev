@@ -721,6 +721,8 @@ assert_grep "$GOAL_LIB" '^uberdev_goal_codex_status_for_issue\(\)' \
   "G39b.codex-status-helper-defined"
 assert_grep "$GOAL_SKILL" 'uberdev_goal_codex_status_for_issue "\$issue"' \
   "G39b.phase2-checks-codex-terminal-status"
+assert_grep "$GOAL_LIB" 'Codex returns in-flight' \
+  "G39b.codex-review-pr-ambiguous-status-contract-documented"
 assert_grep "$GOAL_SKILL" 'codex agent for issue .* failed' \
   "G39b.codex-failed-surfaces-immediately"
 assert_grep "$GOAL_SKILL" 'GOAL_CIRCUIT_BREAKER_REASONS=.*solver_failed' \
@@ -2569,6 +2571,32 @@ MOCK_CLAUDE_AGENTS_JSON='[{"cwd":"/x/solve-issue-7","status":"busy"}]'
 uberdev_goal_agent_busy_for_issue 77
 assert_rc "$?" "1" "BT75.agent-busy-prefix-isolation-7-not-77"
 MOCK_CLAUDE_AGENTS_JSON='[]'
+
+# BT75b — Codex solver liveness must honor terminal status before PID liveness.
+# Phase 2a calls agent_busy_for_issue before reading terminal Codex status; if a
+# completed/failed status with a still-live wrapper PID returns busy, the watch
+# loop skips the terminal handling and waits until the stuck-loop breaker.
+_bt75b_prev_tmp="${UBERDEV_TMPDIR:-}"
+_bt75b_prev_backend="${UBERDEV_RESOLVED_BACKEND:-}"
+_bt75b_tmp="$(mktemp -d)"
+printf '%s\n' '{"issue":77,"backend":"codex","state":"completed","exit_code":0,"pid":"'"$$"'"}' \
+  > "$_bt75b_tmp/solve-codex-status-77.json"
+. "$DISPATCH_LIB"
+export UBERDEV_TMPDIR="$_bt75b_tmp" UBERDEV_RESOLVED_BACKEND=codex
+uberdev_goal_agent_busy_for_issue 77
+assert_rc "$?" "1" "BT75b.agent-busy-codex-completed-not-busy"
+printf '%s\n' '{"issue":77,"backend":"codex","state":"failed","exit_code":17,"pid":"'"$$"'"}' \
+  > "$_bt75b_tmp/solve-codex-status-77.json"
+uberdev_goal_agent_busy_for_issue 77
+assert_rc "$?" "1" "BT75b.agent-busy-codex-failed-not-busy"
+UBERDEV_TMPDIR="$_bt75b_prev_tmp"
+if [ -n "$_bt75b_prev_backend" ]; then
+  UBERDEV_RESOLVED_BACKEND="$_bt75b_prev_backend"
+else
+  unset UBERDEV_RESOLVED_BACKEND
+fi
+export UBERDEV_TMPDIR
+rm -rf "$_bt75b_tmp"
 
 # ----- H1-H6 — #156 goal_id path-traversal guard + #157 unwritable-tmpdir surfacing -----
 # Both findings target plugins/uberdev/lib/goal-state.sh. #156: goal_id was

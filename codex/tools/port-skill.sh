@@ -210,7 +210,8 @@ for root in roots:
         changed = True
 
     text2 = text.replace("Opus 4.8 1M", "the Codex session model")
-    text2 = re.sub(r"`# WAIT 4\.8 sonnet`[^.\n]*\.\s*", "", text2)
+    text2 = re.sub(r"\s*\([^()\n]*`# WAIT 4\.8 sonnet`[^()\n]*\)", "", text2)
+    text2 = re.sub(r"\s*`# WAIT 4\.8 sonnet`[^\n]*", "", text2)
     text2 = re.sub(r"\s*# WAIT 4\.8 sonnet:[^\n]*", "", text2)
     text2 = re.sub(
         r"\s*To force a specific subagent model[^.\n]*CLAUDE_CODE_SUBAGENT_MODEL[^.\n]*(?:\([^)]*\))?\.\s*",
