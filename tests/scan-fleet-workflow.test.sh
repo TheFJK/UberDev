@@ -82,12 +82,15 @@ grep -q 'NEVER parallel' "$WORKFLOW" \
   && pass "G-5 the apply fixer loop is documented sequential (git-index race guard)" \
   || fail "G-5 no sequential-apply guard documented"
 
-if [ -r "$CODEX_RUNTIME/agents/code-reviewer.md" ] \
-   && [ -r "$CODEX_RUNTIME/agents/code-simplifier.md" ] \
-   && [ -r "$CODEX_RUNTIME/agents/code-fixer.md" ]; then
-  pass "G-6 Codex runtime bundles the Markdown agent prompts scan-fleet workflow reads"
+missing_prompts=""
+for src in "$REPO_ROOT/plugins/uberdev/agents"/*.md; do
+  base="$(basename "$src")"
+  [ -r "$CODEX_RUNTIME/agents/$base" ] || missing_prompts="${missing_prompts} ${base}"
+done
+if [ -z "$missing_prompts" ]; then
+  pass "G-6 Codex runtime bundles all Markdown agent prompts scan-fleet workflow reads"
 else
-  fail "G-6 Codex runtime missing one or more Markdown agent prompts read by scan-fleet workflow"
+  fail "G-6 Codex runtime missing Markdown agent prompts:${missing_prompts}"
 fi
 
 # ---------------------------------------------------------------------------

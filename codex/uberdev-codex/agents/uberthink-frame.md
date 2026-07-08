@@ -1,7 +1,6 @@
 ---
 name: uberthink-frame
 description: dispatched by /uberthink — Wave-0 framing (lens ∈ schema/teardown/prior-art/constraints); schema lens also does donor selection + scope gate
-# WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
 model: inherit
 color: cyan
 ---

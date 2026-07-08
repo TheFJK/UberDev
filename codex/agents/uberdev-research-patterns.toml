@@ -2,7 +2,7 @@
 # Re-run the installer to refresh; do not edit by hand (edits will be overwritten).
 name = "uberdev-research-patterns"
 description = """
-In-repo pattern research subagent. Finds related closed PRs, similar features, commit-history precedents. Distinct from research-codebase (which maps files for the current issue) — this looks for prior precedents to mirror. # WAIT 4.8 sonnet: was sonnet; using inherit (= session the Codex session model) until Sonnet 4.8 ships
+In-repo pattern research subagent. Finds related closed PRs, similar features, commit-history precedents. Distinct from research-codebase (which maps files for the current issue) — this looks for prior precedents to mirror.
 """
 developer_instructions = """
 # In-Repo Pattern Research Subagent

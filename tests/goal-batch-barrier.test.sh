@@ -548,6 +548,46 @@ echo "== B14: consecutive gh-failure breaker (#290.3) =="
 ) || { FAIL=$((FAIL + 1)); echo "  FAIL  B14 block exited non-zero"; }
 
 # ---------------------------------------------------------------------------
+# B14b — #329 review — batch_unblock_wait_clear feeds the same consecutive
+# gh-failure breaker as the main unblock checker. A transient `gh issue view`
+# failure must tick the breaker; a healthy follow-up clears it.
+# ---------------------------------------------------------------------------
+echo "== B14b: batch unblock wait records transient gh issue failures (#329 review) =="
+(
+  set -u
+  SCRATCH="$(mktemp -d)"; trap 'rm -rf "$SCRATCH"' EXIT
+  export UBERDEV_TMPDIR="$SCRATCH"; export UBERDEV_GOAL_ID="b14b"
+  GOAL_ID="$UBERDEV_GOAL_ID"
+  . "$DISPATCH_LIB"; . "$GOAL_LIB"
+  uberdev_goal_state_init "$GOAL_ID" >/dev/null
+  uberdev_goal_register_batch_pr "$GOAL_ID" 100 200 >/dev/null
+  _uberdev_goal_set_batch_terminal_state "$GOAL_ID" 100 HELD
+  gh() {
+    case "$1 $2" in
+      "pr view") case "$*" in *body*) printf 'Blocks: #201';; *labels*) printf '0';; esac ;;
+      "issue view") printf 'network unavailable' >&2; return 1 ;;
+    esac
+  }
+  if uberdev_goal_batch_unblock_wait_clear "$GOAL_ID" >/dev/null 2>&1; then
+    echo "B14b.transient-gh-error-must-gate FAIL"; exit 1
+  fi
+  count="$(uberdev_goal_gh_failure_count "$GOAL_ID")"
+  [ "$count" = "1" ] || { echo "B14b.transient-gh-error-must-record FAIL (count=$count)"; exit 1; }
+  gh() {
+    case "$1 $2" in
+      "pr view") case "$*" in *body*) printf 'Blocks: #201';; *labels*) printf '0';; esac ;;
+      "issue view") printf 'CLOSED' ;;
+    esac
+  }
+  if ! uberdev_goal_batch_unblock_wait_clear "$GOAL_ID" >/dev/null 2>&1; then
+    echo "B14b.healthy-gh-closed-must-clear FAIL"; exit 1
+  fi
+  count="$(uberdev_goal_gh_failure_count "$GOAL_ID")"
+  [ "$count" = "0" ] || { echo "B14b.healthy-gh-must-reset FAIL (count=$count)"; exit 1; }
+  echo "B14b PASS"
+) || { FAIL=$((FAIL + 1)); echo "  FAIL  B14b block exited non-zero"; }
+
+# ---------------------------------------------------------------------------
 # B15 — #290.4 (MAJOR) — find_pr_for_issue prefers the closingIssuesReferences
 # match over the feat/N- head-ref heuristic, and scans --state open. The lib
 # must use `--state open` (not `--state all`).

@@ -1,7 +1,6 @@
 ---
 name: research-prior-art
 description: External prior-art research subagent. Web search + Context7 docs lookup for libraries, frameworks, or design patterns relevant to the issue. Distinct from research-patterns (in-repo) — this is the outside view.
-# WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
 model: inherit
 color: yellow
 ---

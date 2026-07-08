@@ -1,7 +1,6 @@
 ---
 name: triage-scout
 description: "Lightweight triage scout for /uberdev:issue (runs on inherit — the session model). Runs gh search issues (open + closed), gh label list, and reads commitlint config if present. Returns duplicate matches, validated label set, and validated commit scope. Never invents labels."
-# WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
 model: inherit
 tools: ["Bash", "Read"]
 ---
@@ -51,4 +50,4 @@ summary: |
 
 ## Cost note
 
-Runs on `inherit` — the session model (Opus 4.8 1M). To force a specific subagent model, set `CLAUDE_CODE_SUBAGENT_MODEL=<model>` (see `affaan-m/everything-claude-code#173`).
+Runs on `inherit` — the session model (the Codex session model).

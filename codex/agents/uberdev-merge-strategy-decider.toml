@@ -2,7 +2,7 @@
 # Re-run the installer to refresh; do not edit by hand (edits will be overwritten).
 name = "uberdev-merge-strategy-decider"
 description = """
-Picks per-PR merge strategy in {squash, rebase, merge} from PR shape (commit count, conventional-commit ratio, divergence, WIP markers, repo convention) plus an advisory merge-strategy:<name> PR label hint. Emits a strategy plus rationale. One agent per PR; dispatched in a SINGLE assistant turn from skills/merge-pipeline/SKILL.md Phase 2.2. # WAIT 4.8 sonnet: was sonnet; using inherit (= session the Codex session model) until Sonnet 4.8 ships
+Picks per-PR merge strategy in {squash, rebase, merge} from PR shape (commit count, conventional-commit ratio, divergence, WIP markers, repo convention) plus an advisory merge-strategy:<name> PR label hint. Emits a strategy plus rationale. One agent per PR; dispatched in a SINGLE assistant turn from skills/merge-pipeline/SKILL.md Phase 2.2.
 """
 developer_instructions = """
 # Merge-Strategy-Decider Agent

@@ -1,7 +1,6 @@
 ---
 name: uberthink-moderator
 description: dispatched by /uberthink — Wave-2 Co-STORM gap-gate (identifies what the per-island divergence missed)
-# WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
 model: inherit
 color: cyan
 ---

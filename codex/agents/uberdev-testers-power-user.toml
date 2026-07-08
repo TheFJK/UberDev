@@ -2,7 +2,7 @@
 # Re-run the installer to refresh; do not edit by hand (edits will be overwritten).
 name = "uberdev-testers-power-user"
 description = """
-Power-user persona for /uberdev:testers. Pastes 10k-char inputs, opens 20 tabs, double-clicks everything, hammers Enter, uses keyboard shortcuts. Read-only — files findings only against the 10-invariant oracle library. # WAIT 4.8 sonnet: was sonnet; using inherit (= session the Codex session model) until Sonnet 4.8 ships
+Power-user persona for /uberdev:testers. Pastes 10k-char inputs, opens 20 tabs, double-clicks everything, hammers Enter, uses keyboard shortcuts. Read-only — files findings only against the 10-invariant oracle library.
 """
 developer_instructions = """
 You are the **power-user** persona in a `/uberdev:testers` squad audit.

@@ -210,6 +210,8 @@ for root in roots:
         changed = True
 
     text2 = text.replace("Opus 4.8 1M", "the Codex session model")
+    text2 = re.sub(r"`# WAIT 4\.8 sonnet`[^.\n]*\.\s*", "", text2)
+    text2 = re.sub(r"\s*# WAIT 4\.8 sonnet:[^\n]*", "", text2)
     text2 = re.sub(
         r"\s*To force a specific subagent model[^.\n]*CLAUDE_CODE_SUBAGENT_MODEL[^.\n]*(?:\([^)]*\))?\.\s*",
         " ",
@@ -221,7 +223,11 @@ for root in roots:
         text2,
     )
     text2 = "\n".join(
-        line for line in text2.split("\n") if "CLAUDE_CODE_SUBAGENT_MODEL" not in line
+        line
+        for line in text2.split("\n")
+        if "CLAUDE_CODE_SUBAGENT_MODEL" not in line
+        and "Sonnet 4.8" not in line
+        and "WAIT 4.8" not in line
     )
     if text2 != text:
         text = text2
@@ -244,6 +250,20 @@ for root in roots:
 
     if changed:
         skill_md.write_text(text, encoding="utf-8")
+
+for root in roots:
+  for config_md in root.rglob("configuration.md"):
+    text = config_md.read_text(encoding="utf-8")
+    text2 = text.replace(
+        "# Per-project configuration — `.codex/uberdev.local.md` / `.codex/uberdev.local.md`",
+        "# Per-project configuration — `.codex/uberdev.local.md` / `.claude/uberdev.local.md`",
+    )
+    text2 = text2.replace(
+        "Claude Code reads optional config from `.codex/uberdev.local.md` in your project root. Codex prefers `.codex/uberdev.local.md` when present and falls back to `.codex/uberdev.local.md` for shared repos. The file uses YAML frontmatter for typed settings:",
+        "Codex prefers optional config from `.codex/uberdev.local.md` in your project root and falls back to `.claude/uberdev.local.md` for shared repos. The file uses YAML frontmatter for typed settings:",
+    )
+    if text2 != text:
+        config_md.write_text(text2, encoding="utf-8")
 PY
 
 echo "Done: $(find "$DST" -name SKILL.md | wc -l | tr -d ' ') skills, $count files path-fixed."

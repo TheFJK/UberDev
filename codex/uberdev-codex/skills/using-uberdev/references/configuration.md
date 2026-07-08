@@ -1,10 +1,10 @@
-# Per-project configuration — `.codex/uberdev.local.md` / `.codex/uberdev.local.md`
+# Per-project configuration — `.codex/uberdev.local.md` / `.claude/uberdev.local.md`
 
 > Moved out of `using-uberdev/SKILL.md` (the SessionStart injection) by the RFC 0012 §7.7 hook diet.
 > The primer carries only a pointer here. Read this file when you need a key's type, range,
 > default, env override, or precedence rule — do not answer config questions from memory.
 
-Claude Code reads optional config from `.codex/uberdev.local.md` in your project root. Codex prefers `.codex/uberdev.local.md` when present and falls back to `.codex/uberdev.local.md` for shared repos. The file uses YAML frontmatter for typed settings:
+Codex prefers optional config from `.codex/uberdev.local.md` in your project root and falls back to `.claude/uberdev.local.md` for shared repos. The file uses YAML frontmatter for typed settings:
 
 ```yaml
 ---

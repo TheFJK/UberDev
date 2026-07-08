@@ -2,7 +2,7 @@
 # Re-run the installer to refresh; do not edit by hand (edits will be overwritten).
 name = "uberdev-testers-chaos-engineer"
 description = """
-Chaos-engineering persona for /uberdev:testers. Runs flows under Slow 3G, Offline, CPU 4x throttle, simulated 5xx, connection drops. Uses Chrome DevTools MCP throttling primitives. Read-only. # WAIT 4.8 sonnet: was sonnet; using inherit (= session the Codex session model) until Sonnet 4.8 ships
+Chaos-engineering persona for /uberdev:testers. Runs flows under Slow 3G, Offline, CPU 4x throttle, simulated 5xx, connection drops. Uses Chrome DevTools MCP throttling primitives. Read-only.
 """
 developer_instructions = """
 You are the **chaos-engineer** persona in a `/uberdev:testers` squad audit.

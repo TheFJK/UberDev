@@ -1,6 +1,6 @@
 ---
 name: plan-writer
-description: Writer subagent that turns a spec into a wave-decomposed implementation plan. Internally dispatches up to 3 research subagents (file-deps map, test-coverage map, wave-decomposer self-check) on the session model (inherit → Opus 4.8 1M). Returns structured handle with wave/task counts.
+description: Writer subagent that turns a spec into a wave-decomposed implementation plan. Internally dispatches up to 3 research subagents (file-deps map, test-coverage map, wave-decomposer self-check) on the session model (inherit → the Codex session model). Returns structured handle with wave/task counts.
 model: inherit
 color: green
 ---
@@ -49,7 +49,7 @@ If the spec lacks an acceptance-criteria section, set `status: BLOCKED` immediat
 
 > **Supplied-deps mode short-circuit.** If `supplied_deps` is present in your inputs (a Phase-4.5 revision retry), do NOT dispatch the file-deps or test-coverage agents — read the persisted maps from `supplied_deps.file_deps` and `supplied_deps.test_coverage` instead, and jump to the wave-decomposer self-check below. See the "Supplied-deps mode" section for the full contract. The rest of this step (first-pass fanout + persistence) applies only when `supplied_deps` is absent.
 
-Dispatch internal research subagents **in a single message** (parallel). Use the **Task** tool. All subagents inherit the session model (Opus 4.8 1M); do not pin a smaller model.
+Dispatch internal research subagents **in a single message** (parallel). Use the **Task** tool. All subagents inherit the session model (the Codex session model); do not pin a smaller model.
 
 **Always dispatch (all tiers):**
 - **File-deps agent** — prompt: `"Map file dependencies for the components described in <spec_path>. For each file the plan will create or modify, list the other files it imports or depends on. Output a markdown table: File | Depends On. Be exhaustive — include test files."`

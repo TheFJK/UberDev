@@ -273,6 +273,7 @@ _uberdev_goal_pid_for_issue() {
   [ "$status_issue" = "$issue" ] || return 1
   pid="$(jq -r '.pid // empty' < "$status_file" 2>/dev/null)" || return 1
   _uberdev_goal_validate_int "$pid" || return 1
+  [ "$pid" -gt 0 ] || return 1
   printf '%s' "$pid"
 }
 
@@ -1309,12 +1310,48 @@ uberdev_goal_review_pr_in_flight() {
   # PID-based backends, review-pr in-flight means the tracked wrapper process
   # for this PR is still alive.
   case "${UBERDEV_RESOLVED_BACKEND:-}" in
-    background|codex)
+    background)
       local pid
       pid="$(_uberdev_goal_pid_for_issue "$pr" 2>/dev/null)" || return 1
       [ -n "$pid" ] || return 1
       kill -0 "$pid" 2>/dev/null
       return $?
+      ;;
+    codex)
+      local pid status_file status_state
+      status_file="${UBERDEV_TMPDIR:-/tmp}/solve-codex-status-$pr.json"
+      _uberdev_dispatch_tmp_target_safe "$status_file" || return 1
+      [ -r "$status_file" ] || return 1
+      status_state="$(jq -r --argjson issue "$pr" '
+        if (.backend == "codex" and .issue == $issue) then (.state // "")
+        else "__mismatch__"
+        end
+      ' < "$status_file" 2>/dev/null)" || {
+        printf 'goal-state: codex review-pr status for PR %s is unreadable; deferring duplicate dispatch\n' "$pr" >&2
+        return 0
+      }
+      case "$status_state" in
+        completed|failed)
+          return 1 ;;
+        running)
+          pid="$(_uberdev_goal_pid_for_issue "$pr" 2>/dev/null)" || {
+            printf 'goal-state: codex review-pr status for PR %s is running but PID is unreadable; deferring duplicate dispatch\n' "$pr" >&2
+            return 0
+          }
+          [ -n "$pid" ] || {
+            printf 'goal-state: codex review-pr status for PR %s is running but PID is empty; deferring duplicate dispatch\n' "$pr" >&2
+            return 0
+          }
+          kill -0 "$pid" 2>/dev/null
+          return $? ;;
+        "")
+          pid="$(_uberdev_goal_pid_for_issue "$pr" 2>/dev/null)" || return 1
+          [ -n "$pid" ] || return 1
+          kill -0 "$pid" 2>/dev/null
+          return $? ;;
+        "__mismatch__"|*)
+          return 1 ;;
+      esac
       ;;
   esac
   if claude agents --json 2>/dev/null | jq -e --argjson pr "$pr" '
@@ -1819,10 +1856,13 @@ uberdev_goal_batch_unblock_wait_clear() {
       if [ "$issue_rc" -ne 0 ]; then
         if printf '%s' "$issue_raw" | grep -q 'Could not resolve to an Issue'; then
           issue_state="CLOSED"   # 404 → deleted upstream → treat as closed
+          _uberdev_goal_reset_gh_failure
         else
+          _uberdev_goal_record_gh_failure
           return 1               # transient gh error → keep waiting (B11)
         fi
       else
+        _uberdev_goal_reset_gh_failure
         issue_state="$issue_raw"
       fi
       if [ "$issue_state" != "CLOSED" ]; then any_open=1; break; fi

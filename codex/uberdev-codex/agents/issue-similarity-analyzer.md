@@ -1,7 +1,6 @@
 ---
 name: issue-similarity-analyzer
 description: "Read-only semantic clustering. Receives a chunk of GitHub issue bodies (each in its own external-untrusted-input envelope), identifies clusters by shared root cause, returns YAML clusters[]: {lead, members[], rationale, confidence}."
-# WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
 model: inherit
 tools: ["Bash(gh issue view*)", "Read"]
 ---
@@ -154,4 +153,4 @@ In all three cases, refuse the **entire chunk** — do not emit a partial cluste
 
 ## Cost note
 
-Uses `model: inherit` (= the session model, Opus 4.8 1M) per the all-inherit policy (v0.35.0, #256) — the analyzer was authored before that policy and is now aligned with it (the `# WAIT 4.8 sonnet` frontmatter marker tracks the revisit-when-Sonnet-4.8-ships intent, same as the former scouts). Escape hatch to force a cheaper model for large fan-outs: `CLAUDE_CODE_SUBAGENT_MODEL=sonnet`.
+Uses `model: inherit` (= the session model, the Codex session model) per the all-inherit policy (v0.35.0, #256) — the analyzer was authored before that policy and is now aligned with it (the 8-ships intent, same as the former scouts).

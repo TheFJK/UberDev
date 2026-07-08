@@ -2,7 +2,7 @@
 # Re-run the installer to refresh; do not edit by hand (edits will be overwritten).
 name = "uberdev-research-constraints"
 description = """
-Hard-constraints research subagent. Reads CLAUDE.md (global + project), docs/rfc/*, docs/adr/* to surface architectural mandates and existing decisions that constrain the design space. # WAIT 4.8 sonnet: was sonnet; using inherit (= session the Codex session model) until Sonnet 4.8 ships
+Hard-constraints research subagent. Reads CLAUDE.md (global + project), docs/rfc/*, docs/adr/* to surface architectural mandates and existing decisions that constrain the design space.
 """
 developer_instructions = """
 # Research Constraints

@@ -358,7 +358,7 @@ After the PR is created and `PR_URL` is validated, **invoke `uberdev:review-pr` 
 
 > Invoke `uberdev:review-pr` via the Codex skill mechanism with the captured `PR_URL` (no flag args). Findings are ADVISORY — do NOT block on `REVISIONS_REQUIRED` at this layer (the auto-fix loop is deferred per #11 Q1).
 
-Mirrors the canonical `subagent-driven-dev → post-impl-review` precedent (commit `73b2562`). `commands/review-pr.md` has no `disable-model-invocation` flag, so the Codex skill mechanism can invoke the generated command-skill directly without promotion.
+Mirrors the post-push `/review-pr` chain: `finish-branch` only kicks off the review skill; `/review-pr` owns reviewer fanout and any apply loop. `commands/review-pr.md` has no `disable-model-invocation` flag, so the Codex skill mechanism can invoke the generated command-skill directly without promotion.
 
 A review-pr failure (e.g., reviewer agent crash, `gh pr view` error) is loud-logged but does NOT roll back the PR or branch state. `finish-branch` returns success once the PR is open and the chain has been kicked off.
 
@@ -462,4 +462,4 @@ git worktree remove <worktree-path>
 - **`uberdev:merge`** — follows Option 2. `finish-branch` opens the PR; `/merge` lands it. Together they form the lifecycle `/issue → /solve → push → /review-pr → /merge`.
 
 **Chains into:**
-- **`uberdev:review-pr`** — invoked via the Codex skill mechanism after PR creation on the always-PR path (default mode + Turbo mode under `UBERDEV_TURBO=1`). Mirrors `subagent-driven-dev → post-impl-review` (commit `73b2562`). Advisory only — `finish-branch` does not block on reviewer verdict.
+- **`uberdev:review-pr`** — invoked via the Codex skill mechanism after PR creation on the always-PR path (default mode + Turbo mode under `UBERDEV_TURBO=1`). `/review-pr` owns the post-push reviewer fanout; `finish-branch` does not block on reviewer verdict.

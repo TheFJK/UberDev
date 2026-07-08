@@ -1,7 +1,6 @@
 ---
 name: testers-panicked-grandma
 description: Slow-reader, easily-confused persona for /uberdev:testers. Mis-clicks ~10% of actions, abandons after 3 errors, always tries Back button, gets stuck in modals. Read-only — files findings only against the 10-invariant oracle library.
-# WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
 model: inherit
 color: yellow
 allowed-tools: ["Bash(curl*)", "Bash(*/lib/rl-curl*)", "Bash(echo*)", "Bash(date*)", "Read", "mcp__plugin_playwright_playwright__browser_navigate", "mcp__plugin_playwright_playwright__browser_click", "mcp__plugin_playwright_playwright__browser_take_screenshot", "mcp__plugin_playwright_playwright__browser_snapshot", "mcp__plugin_playwright_playwright__browser_console_messages", "mcp__plugin_playwright_playwright__browser_navigate_back", "Write(.uberdev/research/*)"]

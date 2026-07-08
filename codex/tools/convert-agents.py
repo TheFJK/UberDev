@@ -256,6 +256,8 @@ def codex_port_text(value: str) -> str:
         .replace("~/.claude", "~/.codex")
     )
     ported = ported.replace("Opus 4.8 1M", "the Codex session model")
+    ported = re.sub(r"`# WAIT 4\.8 sonnet`[^.\n]*\.\s*", "", ported)
+    ported = re.sub(r"\s*# WAIT 4\.8 sonnet:[^\n]*", "", ported)
     ported = re.sub(
         r"\s*To force a specific subagent model[^.\n]*CLAUDE_CODE_SUBAGENT_MODEL[^.\n]*(?:\([^)]*\))?\.\s*",
         " ",
@@ -267,7 +269,11 @@ def codex_port_text(value: str) -> str:
         ported,
     )
     ported = "\n".join(
-        line for line in ported.split("\n") if "CLAUDE_CODE_SUBAGENT_MODEL" not in line
+        line
+        for line in ported.split("\n")
+        if "CLAUDE_CODE_SUBAGENT_MODEL" not in line
+        and "Sonnet 4.8" not in line
+        and "WAIT 4.8" not in line
     )
     return "\n".join(line.rstrip(" \t") for line in ported.split("\n"))
 

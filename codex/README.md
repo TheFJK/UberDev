@@ -226,11 +226,18 @@ bash codex/tools/port-skill.sh plugins/uberdev/skills codex/uberdev-codex/skills
 # Agents → codex/agents/*.toml (Claude .md → Codex .toml)
 python3 codex/tools/convert-agents.py plugins/uberdev/agents codex/agents
 
+# Runtime Markdown prompts → codex/uberdev-codex/agents/ (Codex-path-safe copies)
+bash codex/tools/port-agent-prompts.sh plugins/uberdev/agents codex/uberdev-codex/agents
+
 # Commands → codex/uberdev-codex/skills/uberdev-cmd-*/ (13 command-skills)
 python3 codex/tools/convert-commands.py plugins/uberdev/commands codex/uberdev-codex/skills
+
+# Runtime shell libraries → codex/uberdev-codex/lib/
+rsync -a --delete --exclude '__pycache__/' --exclude '*.pyc' --exclude '*.bak' --exclude '*.bak2' --exclude '*.fix' --exclude '.DS_Store' \
+  plugins/uberdev/lib/ codex/uberdev-codex/lib/
 ```
 
-All three are idempotent. Keep `codex/uberdev-codex/.codex-plugin/plugin.json`'s
+All five are idempotent. Keep `codex/uberdev-codex/.codex-plugin/plugin.json`'s
 `version` in sync with `plugins/uberdev/.claude-plugin/plugin.json`.
 
 ## License

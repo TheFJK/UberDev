@@ -16,6 +16,9 @@ GOAL_LIB="$REPO_ROOT/plugins/uberdev/lib/goal-state.sh"
 LAUNCHER="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
 PLUGIN_HOOKS="$REPO_ROOT/codex/uberdev-codex/hooks/hooks.json"
 PLUGIN_ROOT="$REPO_ROOT/codex/uberdev-codex"
+CODEX_DISPATCH_LIB="$PLUGIN_ROOT/lib/dispatch.sh"
+CODEX_GOAL_LIB="$PLUGIN_ROOT/lib/goal-state.sh"
+CODEX_CONFIG_LIB="$PLUGIN_ROOT/lib/config-read.sh"
 
 PASS=0
 FAIL=0
@@ -40,6 +43,23 @@ assert_grep_not() {
 
 pass_msg() { echo "  PASS  $1"; PASS=$((PASS + 1)); }
 fail_msg() { echo "  FAIL  $1"; [ -n "${2:-}" ] && echo "        $2"; FAIL=$((FAIL + 1)); }
+
+echo "== Codex packaged runtime mirrors source libs =="
+if cmp -s "$DISPATCH_LIB" "$CODEX_DISPATCH_LIB"; then
+  pass_msg "packaged Codex dispatch.sh is byte-identical to source runtime lib"
+else
+  fail_msg "packaged Codex dispatch.sh drifted from source runtime lib"
+fi
+if cmp -s "$GOAL_LIB" "$CODEX_GOAL_LIB"; then
+  pass_msg "packaged Codex goal-state.sh is byte-identical to source runtime lib"
+else
+  fail_msg "packaged Codex goal-state.sh drifted from source runtime lib"
+fi
+if [ -r "$CODEX_CONFIG_LIB" ]; then
+  pass_msg "packaged Codex config-read.sh exists for workflow-args runtime"
+else
+  fail_msg "packaged Codex config-read.sh missing"
+fi
 
 echo "== Enum + probe =="
 assert_grep "$DISPATCH_LIB" \
@@ -204,6 +224,18 @@ if [ "$PID_OUT" = "999999" ]; then
   echo "  PASS  goal-state PID helper reads solve-codex-status-N.json for codex backend"; PASS=$((PASS + 1))
 else
   echo "  FAIL  goal-state PID helper did not read codex status file (got '$PID_OUT')"; FAIL=$((FAIL + 1))
+fi
+
+printf '%s\n' '{"issue":42,"backend":"codex","pid":"0"}' > "$TMPD/solve-codex-status-42.json"
+PID_ZERO_OUT="$(
+  UBERDEV_TMPDIR="$TMPD" UBERDEV_RESOLVED_BACKEND=codex bash -c \
+    '. "$1"; . "$2"; _uberdev_goal_pid_for_issue 42' \
+    _ "$DISPATCH_LIB" "$GOAL_LIB" 2>/dev/null
+)"
+if [ -z "$PID_ZERO_OUT" ]; then
+  pass_msg "goal-state PID helper refuses pid 0"
+else
+  fail_msg "goal-state PID helper refuses pid 0" "got '$PID_ZERO_OUT'"
 fi
 
 rm -f "$TMPD/solve-codex-status-42.json"

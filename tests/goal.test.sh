@@ -2762,6 +2762,28 @@ _bt76_status_file() {
 _bt76_status_file codex solve-codex-status-42.json "$$" 0 "BT76.codex-status-live-pid-in-flight"
 _bt76_status_file background solve-bg-status-42.json "$$" 0 "BT76.background-status-live-pid-in-flight"
 _bt76_status_file codex solve-codex-status-42.json 999999999 1 "BT76.codex-status-dead-pid-not-in-flight"
+_bt76_status_file codex solve-codex-status-42.json 0 1 "BT76.codex-status-pid-zero-not-in-flight"
+_bt76_status_file_json() {
+  local json="$1" expected_rc="$2" label="$3"
+  local tmp got
+  tmp="$(mktemp -d)"
+  printf '%s\n' "$json" > "$tmp/solve-codex-status-42.json"
+  UBERDEV_TMPDIR="$tmp" UBERDEV_RESOLVED_BACKEND=codex bash -c '
+    . "'"$DISPATCH_LIB"'"
+    . "'"$GOAL_LIB"'"
+    uberdev_goal_review_pr_in_flight 42
+  '
+  got=$?
+  rm -rf "$tmp"
+  if [ "$got" -eq "$expected_rc" ]; then
+    PASS=$((PASS+1)); echo "  PASS  $label (rc=$got)"
+  else
+    FAIL=$((FAIL+1)); echo "  FAIL  $label (rc=$got want=$expected_rc)" >&2
+  fi
+}
+_bt76_status_file_json '{"issue":42,"backend":"codex","state":"completed","exit_code":0,"pid":"'"$$"'"}' 1 "BT76.codex-status-completed-not-in-flight"
+_bt76_status_file_json '{"issue":42,"backend":"codex","state":"failed","exit_code":17,"pid":"'"$$"'"}' 1 "BT76.codex-status-failed-not-in-flight"
+_bt76_status_file_json '{"issue":42,"backend":"codex","state":"running","exit_code":null,"pid":"not-a-pid"}' 0 "BT76.codex-status-running-invalid-pid-defers"
 
 echo "== BT77: Phase 2c emits goal_merge_deferred with mock in-flight /review-pr (issue #220 AC ❷) =="
 # B5 (post-impl-review): the original BT77 verified (a) the deferred event was

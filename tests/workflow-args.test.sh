@@ -39,9 +39,11 @@ set -u
 set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HELPER="$REPO_ROOT/plugins/uberdev/lib/config-read.sh"
+SOURCE_HELPER="$REPO_ROOT/plugins/uberdev/lib/config-read.sh"
+CODEX_HELPER="$REPO_ROOT/codex/uberdev-codex/lib/config-read.sh"
+HELPER="$SOURCE_HELPER"
 
-for f in "$HELPER"; do
+for f in "$SOURCE_HELPER" "$CODEX_HELPER"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 command -v jq >/dev/null 2>&1 || {
@@ -96,6 +98,24 @@ _isolate() {
 # Extract the JSON payload between the markers from _LAST_STDOUT.
 _payload() {
   printf '%s\n' "$_LAST_STDOUT" | sed -n '/^WORKFLOW_ARGS_BEGIN$/,/^WORKFLOW_ARGS_END$/p' | sed '1d;$d'
+}
+
+_assert_codex_home_plugin_root() {
+  local helper_path="$1" label="$2" payload expected_codex_root
+  HELPER="$helper_path"
+  _isolate '
+    unset CLAUDE_PLUGIN_ROOT PLUGIN_ROOT
+    export CODEX_HOME="$PWD/codex-home"
+    mkdir -p "$CODEX_HOME/plugins/uberdev-codex"
+    uberdev_emit_workflow_args scan-fleet
+  '
+  payload="$(_payload)"
+  if printf '%s' "$payload" | jq -e '.plugin_root | endswith("/codex-home/plugins/uberdev-codex")' >/dev/null 2>&1; then
+    pass "W2.6 ${label} CODEX_HOME-only runtime emits plugin_root from CODEX_HOME/plugins/uberdev-codex"
+  else
+    expected_codex_root="$(printf '%s' "$payload" | jq -r '.plugin_root // "<missing>"' 2>/dev/null || printf '%s' "$payload")"
+    fail "W2.6 ${label} CODEX_HOME-only runtime emits plugin_root fallback (got: ${expected_codex_root:-$payload})"
+  fi
 }
 
 echo "## workflow-args contract (RFC 0012 §4.3 — uberdev_emit_workflow_args)"
@@ -162,19 +182,9 @@ fi
 [ -z "$_LAST_STDERR" ] \
   && pass "W2.5 happy path emits nothing on stderr" \
   || fail "W2.5 happy path emits nothing on stderr (got: $_LAST_STDERR)"
-_isolate '
-  unset CLAUDE_PLUGIN_ROOT PLUGIN_ROOT
-  export CODEX_HOME="$PWD/codex-home"
-  mkdir -p "$CODEX_HOME/plugins/uberdev-codex"
-  uberdev_emit_workflow_args scan-fleet
-'
-payload="$(_payload)"
-if printf '%s' "$payload" | jq -e '.plugin_root | endswith("/codex-home/plugins/uberdev-codex")' >/dev/null 2>&1; then
-  pass "W2.6 CODEX_HOME-only runtime emits plugin_root from CODEX_HOME/plugins/uberdev-codex"
-else
-  expected_codex_root="$(printf '%s' "$payload" | jq -r '.plugin_root // "<missing>"' 2>/dev/null || printf '%s' "$payload")"
-  fail "W2.6 CODEX_HOME-only runtime emits plugin_root fallback (got: ${expected_codex_root:-$payload})"
-fi
+_assert_codex_home_plugin_root "$SOURCE_HELPER" "source helper"
+_assert_codex_home_plugin_root "$CODEX_HELPER" "packaged Codex helper"
+HELPER="$SOURCE_HELPER"
 
 # ---------------------------------------------------------------------------
 echo "== W3: config folding + auto-typing =="

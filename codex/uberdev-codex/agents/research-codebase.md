@@ -1,7 +1,6 @@
 ---
 name: research-codebase
 description: Codebase research subagent for the orchestrator. Maps existing patterns, conventions, and relevant files for an issue. Returns a summary file path; orchestrator never reads the raw research into its context.
-# WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
 model: inherit
 color: cyan
 ---

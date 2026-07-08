@@ -1,7 +1,6 @@
 ---
 name: research-constraints
 description: Hard-constraints research subagent. Reads CLAUDE.md (global + project), docs/rfc/*, docs/adr/* to surface architectural mandates and existing decisions that constrain the design space.
-# WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
 model: inherit
 color: red
 ---
@@ -28,7 +27,7 @@ Read, Grep, Glob, Bash
 
 Read sources in this order, skipping any that do not exist:
 
-1. `~/.claude/CLAUDE.md` — user-global rules (apply to every project)
+1. `~/.codex/AGENTS.md` — user-global rules (apply to every project)
 2. `<working_dir>/CLAUDE.md` — repo-root project rules
 3. Any nested `CLAUDE.md` files along the path of files mentioned in `issue_body` (use Glob to find them; read only those on relevant paths)
 4. `<working_dir>/docs/rfc/RFC-*.md` — approved RFCs
@@ -85,7 +84,7 @@ Write `<summary_dir>/constraints.md` with this structure:
 ```
 # Constraints Research
 
-## Source: ~/.claude/CLAUDE.md
+## Source: ~/.codex/AGENTS.md
 - [hard] "<verbatim quote>" — <one-line note on relevance>
 - [soft] "<verbatim quote>" — <one-line note on relevance>
 

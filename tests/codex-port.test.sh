@@ -12,6 +12,7 @@ set -u
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONVERT_AGENTS="$REPO_ROOT/codex/tools/convert-agents.py"
 CONVERT_COMMANDS="$REPO_ROOT/codex/tools/convert-commands.py"
+PORT_AGENT_PROMPTS="$REPO_ROOT/codex/tools/port-agent-prompts.sh"
 PORT_SKILL="$REPO_ROOT/codex/tools/port-skill.sh"
 INSTALLER="$REPO_ROOT/codex/install-codex.sh"
 MANIFEST="$REPO_ROOT/codex/uberdev-codex/.codex-plugin/plugin.json"
@@ -91,10 +92,30 @@ if grep -Rql 'â' "$TMP/agents" 2>/dev/null; then
 else
   pass "generated agent metadata has no UTF-8 mojibake"
 fi
-if grep -RqlE 'Opus 4\.8|CLAUDE_CODE_SUBAGENT_MODEL|Claude-specific model override' "$TMP/agents" 2>/dev/null; then
+MODEL_RE='Opus 4\.8|Sonnet 4\.8|WAIT 4\.8|CLAUDE_CODE_SUBAGENT_MODEL|Claude-specific model override'
+CODEX_PATH_RE='CLAUDE_PLUGIN_ROOT|~/\.claude|~/\.codex/commands'
+BARE_ROOT_RE='\$\{PLUGIN_ROOT\}/|\$PLUGIN_ROOT/|(^|[^~])\$\{HOME\}/\.claude|\.claude/plugins'
+if grep -RqlE "$MODEL_RE" "$TMP/agents" 2>/dev/null; then
   fail "generated agents do not preserve Claude-only model guidance"
 else
   pass "generated agents do not preserve Claude-only model guidance"
+fi
+
+echo "== Runtime Markdown agent prompt porter =="
+assert_cmd 0 "port-agent-prompts runs clean over the 42 agents" \
+  bash "$PORT_AGENT_PROMPTS" "$REPO_ROOT/plugins/uberdev/agents" "$TMP/runtime-agents"
+N_MD="$(find "$TMP/runtime-agents" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l | tr -d ' ')"
+[ "$N_MD" -eq 42 ] && pass "42 runtime Markdown prompts produced" || fail "expected 42 runtime Markdown prompts, got $N_MD"
+NG="$(grep -rlE 'CLAUDE_PLUGIN_ROOT|~/\.claude' "$TMP/runtime-agents" 2>/dev/null | wc -l | tr -d ' ')"
+[ "$NG" -eq 0 ] && pass "zero Claude-only path/env residuals in runtime Markdown prompts" \
+  || fail "found $NG runtime Markdown prompts with Claude-only path/env residuals"
+NB="$(grep -rlE '\$\{PLUGIN_ROOT\}/|\$PLUGIN_ROOT/' "$TMP/runtime-agents" 2>/dev/null | wc -l | tr -d ' ')"
+[ "$NB" -eq 0 ] && pass "runtime Markdown prompts do not depend on bare PLUGIN_ROOT script paths" \
+  || fail "found $NB runtime Markdown prompts with bare PLUGIN_ROOT script paths"
+if grep -RqlE "$MODEL_RE" "$TMP/runtime-agents" 2>/dev/null; then
+  fail "runtime Markdown prompts do not preserve Claude-only model guidance"
+else
+  pass "runtime Markdown prompts do not preserve Claude-only model guidance"
 fi
 
 echo "== Command converter: 13 skills + 2 skipped =="
@@ -149,6 +170,14 @@ if grep -q '.codex/uberdev.local.md' "$TMP/skills/using-uberdev/SKILL.md" \
   pass "ported using-uberdev skill documents Codex config and command-skill behavior"
 else
   fail "ported using-uberdev skill still documents Claude-only config or alias behavior"
+fi
+if grep -q '# Per-project configuration — `.codex/uberdev.local.md` / `.claude/uberdev.local.md`' "$TMP/skills/using-uberdev/references/configuration.md" \
+   && grep -q 'Codex prefers optional config from `.codex/uberdev.local.md`' "$TMP/skills/using-uberdev/references/configuration.md" \
+   && grep -q 'falls back to `.claude/uberdev.local.md`' "$TMP/skills/using-uberdev/references/configuration.md" \
+   && ! grep -q 'Claude Code reads optional config from `.codex/uberdev.local.md`' "$TMP/skills/using-uberdev/references/configuration.md"; then
+  pass "ported configuration reference preserves Codex primary + Claude fallback paths"
+else
+  fail "ported configuration reference rewrote both config paths to .codex"
 fi
 python3 - <<PY
 from pathlib import Path
@@ -206,6 +235,9 @@ NS="$(find "$TH/.agents/skills" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc
 NG="$(grep -rlE 'CLAUDE_PLUGIN_ROOT|~/\.claude' "$TH/.agents/skills" 2>/dev/null | wc -l | tr -d ' ')"
 [ "$NG" -eq 0 ] && pass "installed skills are Codex-path-safe" \
   || fail "installed skills contain $NG Claude-only path/env residuals"
+NG="$(grep -rlE "${CODEX_PATH_RE}|${BARE_ROOT_RE}|${MODEL_RE}" "$TH/.codex/plugins/uberdev-codex/agents" 2>/dev/null | wc -l | tr -d ' ')"
+[ "$NG" -eq 0 ] && pass "installed runtime Markdown prompts are Codex-path-safe" \
+  || fail "installed runtime Markdown prompts contain $NG Claude-only residual files"
 if grep -Rql '~/\.codex/commands' "$TH/.agents/skills" 2>/dev/null; then
   fail "installed Codex skills claim slash aliases are installed into ~/.codex/commands"
 else
@@ -417,13 +449,13 @@ else
 fi
 
 echo "== Checked-in Codex artifacts =="
-NG="$(grep -rlE 'CLAUDE_PLUGIN_ROOT|~/\.claude|~/\.codex/commands' "$REPO_ROOT/codex/agents" "$REPO_ROOT/codex/uberdev-codex/skills" 2>/dev/null | wc -l | tr -d ' ')"
+NG="$(grep -rlE "$CODEX_PATH_RE" "$REPO_ROOT/codex/agents" "$REPO_ROOT/codex/uberdev-codex/skills" "$REPO_ROOT/codex/uberdev-codex/agents" 2>/dev/null | wc -l | tr -d ' ')"
 [ "$NG" -eq 0 ] && pass "checked-in Codex artifacts have no Claude env/path or fake Codex alias residuals" \
   || fail "checked-in Codex artifacts contain $NG stale Claude/Codex-alias residual files"
-NG="$(grep -rlE '\$\{PLUGIN_ROOT\}/|\$PLUGIN_ROOT/|(^|[^~])\$\{HOME\}/\.claude|\.claude/plugins' "$REPO_ROOT/codex/agents" "$REPO_ROOT/codex/uberdev-codex/skills" 2>/dev/null | wc -l | tr -d ' ')"
+NG="$(grep -rlE "$BARE_ROOT_RE" "$REPO_ROOT/codex/agents" "$REPO_ROOT/codex/uberdev-codex/skills" "$REPO_ROOT/codex/uberdev-codex/agents" 2>/dev/null | wc -l | tr -d ' ')"
 [ "$NG" -eq 0 ] && pass "checked-in Codex artifacts avoid bare PLUGIN_ROOT and HOME/.claude plugin paths" \
   || fail "checked-in Codex artifacts contain $NG bare plugin-root or HOME/.claude plugin path residual files"
-NG="$(grep -rlE 'Opus 4\.8|CLAUDE_CODE_SUBAGENT_MODEL' "$REPO_ROOT/codex/agents" "$REPO_ROOT/codex/uberdev-codex/skills" 2>/dev/null | wc -l | tr -d ' ')"
+NG="$(grep -rlE "$MODEL_RE" "$REPO_ROOT/codex/agents" "$REPO_ROOT/codex/uberdev-codex/skills" "$REPO_ROOT/codex/uberdev-codex/agents" 2>/dev/null | wc -l | tr -d ' ')"
 [ "$NG" -eq 0 ] && pass "checked-in Codex artifacts have no Claude-only model guidance" \
   || fail "checked-in Codex artifacts contain $NG Claude-only model guidance files"
 

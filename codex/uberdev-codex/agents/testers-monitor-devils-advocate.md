@@ -1,7 +1,6 @@
 ---
 name: testers-monitor-devils-advocate
 description: Devil's-advocate monitor for /uberdev:testers. Challenges every claimed finding, demands evidence anchors, flags findings without an invariant_violated mapping, rejects sycophantic confirmations. Separate-prompt critic (Snorkel self-critique-paradox countermeasure). Read-only.
-# WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
 model: inherit
 color: magenta
 allowed-tools: ["Bash(date*)", "Bash(jq*)", "Read", "Write(.uberdev/research/*)"]

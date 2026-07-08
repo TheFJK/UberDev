@@ -25,7 +25,7 @@
 
 ## Heads up — this plugin burns tokens fast
 
-UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-scout fanout, `/uberdev:review-pr` and `/uberdev:simplify` fan out 3–5 reviewers concurrently, `/solve` waves dispatch every task in parallel, `/merge` spawns one conflict-resolver per conflicted file. That's where the speed and quality come from — and that's where the cost comes from.
+UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-scout fanout, `/uberdev:review-pr` fans out six reviewers, `/uberdev:simplify` runs three simplification lenses concurrently, `/solve` waves dispatch every task in parallel, `/merge` spawns one conflict-resolver per conflicted file. That's where the speed and quality come from — and that's where the cost comes from.
 
 **Recommended setup: 2× Claude Max ×20 subscriptions.** A single Pro or single Max usage window genuinely is not enough headroom for a normal day of `/turbo` + `/review-pr` + `/merge` cycles. Expect to hit the limit mid-task on a single seat.
 
