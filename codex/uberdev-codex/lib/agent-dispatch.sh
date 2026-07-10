@@ -474,12 +474,21 @@ def validate(payload):
  if not isinstance(metadata["risk_signals"],list) or any(item not in risks for item in metadata["risk_signals"]): raise ValueError()
  if "triage_decision" in metadata:
   triage=metadata["triage_decision"]
-  triage_keys={"schema_version","issue","raw_tier","clamped_tier","effective_tier","tier","source","matched_rules","risk_signals","files","components"}
+  triage_keys={"schema_version","issue","raw_tier","clamped_tier","effective_tier","tier","source","matched_rules","risk_signals","file_count","files","component_count","components"}
   if not isinstance(triage,dict) or set(triage)!=triage_keys or triage.get("schema_version")!=1: raise ValueError()
   if triage.get("issue")!=metadata["issue_num"] or triage.get("effective_tier")!=metadata["task_tier"] or triage.get("tier")!=metadata["task_tier"] or triage.get("risk_signals")!=metadata["risk_signals"]: raise ValueError()
   if triage.get("raw_tier") not in {"trivial","small","medium","large"} or triage.get("clamped_tier") not in {"trivial","small","medium","large"} or triage.get("source") not in {"computed","floor","ceiling","override"}: raise ValueError()
   if not isinstance(triage.get("matched_rules"),list) or not all(isinstance(x,str) and x for x in triage["matched_rules"]): raise ValueError()
-  if not isinstance(triage.get("files"),list) or not isinstance(triage.get("components"),list): raise ValueError()
+  files=triage.get("files"); components=triage.get("components"); rules=triage.get("matched_rules")
+  if not isinstance(files,list) or not isinstance(components,list): raise ValueError()
+  if len(files)>256 or len(components)>64 or len(rules)>32 or triage.get("file_count")!=len(files) or triage.get("component_count")!=len(components): raise ValueError()
+  if files!=sorted(set(files)) or components!=sorted(set(components)) or triage["risk_signals"]!=sorted(set(triage["risk_signals"])): raise ValueError()
+  if any(not isinstance(x,str) or not re.fullmatch(r"[a-z0-9_.][a-z0-9_./-]{0,255}",x) for x in files): raise ValueError()
+  if any(not isinstance(x,str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,127}",x) for x in components): raise ValueError()
+  if any(not isinstance(x,str) or not re.fullmatch(r"[a-z0-9][a-z0-9:_-]{0,127}",x) for x in rules): raise ValueError()
+  allowed_rule=re.compile(r"(?:large-label:(?:epic|needs-discussion|architectural|architecture|infrastructure)|large:(?:three-files|multi-component-high-risk|cross-cutting-refactor)|trivial:bounded-explicit-signal|small:concrete-reproduction|medium:fallback|(?:floor|ceiling|override):(?:trivial|small|medium|large))")
+  if len(rules)!=len(set(rules)) or any(not allowed_rule.fullmatch(x) for x in rules): raise ValueError()
+  if len(json.dumps(triage,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode("utf-8"))>32768: raise ValueError()
  if request.get("workflow")!=metadata["workflow"] or request.get("backend")!=metadata["backend"] or request.get("task_tier")!=metadata["task_tier"] or request.get("risk_signals",[])!=metadata["risk_signals"]: raise ValueError()
  if decision.get("backend")!=metadata["backend"] or decision.get("risk_signals",[])!=metadata["risk_signals"]: raise ValueError()
  return payload

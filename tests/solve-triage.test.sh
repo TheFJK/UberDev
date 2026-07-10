@@ -43,7 +43,16 @@ PASS=$((PASS+1))
 ONE="$(python3 -I "$TRIAGE" classify --snapshot "$FIX/small.json")"
 python3 - "$ONE" <<'PY'
 import json,sys
-v=json.loads(sys.argv[1]); assert v["components"]==["lib/parser.py"],v
+v=json.loads(sys.argv[1]); assert v["components"]==["lib"] and v["component_count"]==1 and v["file_count"]==1,v
+PY
+PASS=$((PASS+1))
+cat >"$TMP/same-component.json" <<'JSON'
+{"number":9,"title":"Two auth files","state":"OPEN","body":"Expected fix in auth/a.py and auth/b.py. Actual error.","labels":[{"name":"bug"}]}
+JSON
+SAME="$(python3 -I "$TRIAGE" classify --snapshot "$TMP/same-component.json")"
+python3 - "$SAME" <<'PY'
+import json,sys
+v=json.loads(sys.argv[1]); assert v["files"]==["auth/a.py","auth/b.py"] and v["file_count"]==2; assert v["components"]==["auth"] and v["component_count"]==1
 PY
 PASS=$((PASS+1))
 cat >"$TMP/modules.json" <<'JSON'

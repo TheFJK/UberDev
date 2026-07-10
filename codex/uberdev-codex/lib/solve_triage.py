@@ -19,6 +19,7 @@ MAX_BODY = 65_536
 MAX_LABELS = 100
 MAX_LABEL = 128
 MAX_COMPONENTS = 64
+MAX_FILES = 256
 TIERS = ("trivial", "small", "medium", "large")
 
 FILE_RE = re.compile(
@@ -134,11 +135,14 @@ def validate_snapshot(value: dict[str, Any]) -> tuple[int, str, str, list[str]]:
 
 
 def named_files(body: str) -> list[str]:
-    return sorted({match.group(0).strip("./").casefold() for match in FILE_RE.finditer(body)})
+    files = sorted({match.group(0).strip("./").casefold() for match in FILE_RE.finditer(body)})
+    if len(files) > MAX_FILES:
+        fail("triage_limit_files")
+    return files
 
 
 def component_tokens(files: list[str]) -> list[str]:
-    result = sorted(set(files))
+    result = sorted({name.split("/", 1)[0] if "/" in name else name.rsplit(".", 1)[0] for name in files})
     if len(result) > MAX_COMPONENTS:
         fail("triage_limit_components")
     return result
@@ -234,8 +238,10 @@ def classify(value: dict[str, Any], floor: str | None, ceiling: str | None, over
         matched.append(f"override:{override}")
     return {
         "clamped_tier": clamped,
+        "component_count": len(components),
         "components": components,
         "effective_tier": effective,
+        "file_count": len(files),
         "files": files,
         "issue": number,
         "matched_rules": list(dict.fromkeys(matched)),
@@ -245,6 +251,21 @@ def classify(value: dict[str, Any], floor: str | None, ceiling: str | None, over
         "source": source,
         "tier": effective,
     }
+
+
+def finalize_decision(value: dict[str, Any], clamped: str, override: str | None) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("raw_tier") not in TIERS or clamped not in TIERS:
+        fail("triage_decision_invalid")
+    result = dict(value); matched = list(result.get("matched_rules", [])); raw = result["raw_tier"]
+    result["clamped_tier"] = clamped
+    source = "computed"
+    if TIERS.index(clamped) > TIERS.index(raw): source = "floor"; matched.append(f"floor:{clamped}")
+    elif TIERS.index(clamped) < TIERS.index(raw): source = "ceiling"; matched.append(f"ceiling:{clamped}")
+    effective = clamped
+    if override: effective=override; source="override"; matched.append(f"override:{override}")
+    result["effective_tier"]=effective; result["tier"]=effective; result["source"]=source
+    result["matched_rules"]=list(dict.fromkeys(matched))
+    return result
 
 
 def tier_arg(value: str) -> str:
@@ -361,6 +382,10 @@ def main(argv: list[str]) -> int:
     classify_parser.add_argument("--secure-root")
     validate_parser = commands.add_parser("validate-issues")
     validate_parser.add_argument("issues", nargs="+")
+    finalize_parser = commands.add_parser("finalize")
+    finalize_parser.add_argument("--decision", required=True)
+    finalize_parser.add_argument("--clamped", required=True, type=tier_arg)
+    finalize_parser.add_argument("--override", type=tier_arg)
     args = parser.parse_args(argv)
     if args.command == "validate-issues":
         issues: list[int] = []
@@ -373,6 +398,11 @@ def main(argv: list[str]) -> int:
         if len(issues) > MAX_ISSUES:
             fail("triage_limit_issues")
         print(canonical(issues))
+        return 0
+    if args.command == "finalize":
+        try: decision=json.loads(args.decision)
+        except Exception: fail("triage_decision_invalid")
+        print(canonical(finalize_decision(decision,args.clamped,args.override)))
         return 0
     print(canonical(classify(load_snapshot(args.snapshot, args.secure_root), args.floor, args.ceiling, args.override, args.expected_issue)))
     return 0

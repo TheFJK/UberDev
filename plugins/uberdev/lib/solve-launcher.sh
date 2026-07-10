@@ -344,6 +344,8 @@ import os,stat,sys,tempfile
 base=os.path.realpath(sys.argv[1])
 entry=os.stat(base,follow_symlinks=False)
 if not stat.S_ISDIR(entry.st_mode): raise SystemExit(2)
+mode=stat.S_IMODE(entry.st_mode)
+if mode & 0o022 and not mode & stat.S_ISVTX: raise SystemExit(2)
 path=tempfile.mkdtemp(prefix=f"uberdev-solve-{os.geteuid()}-",dir=base)
 os.chmod(path,0o700); current=os.stat(path,follow_symlinks=False)
 if current.st_uid!=os.geteuid() or stat.S_IMODE(current.st_mode)!=0o700: raise SystemExit(2)
@@ -355,6 +357,19 @@ print(path,end="")
 fi
 export UBERDEV_TMPDIR
 umask 077
+UBERDEV_KEEP_TMPDIR=0
+_uberdev_cleanup_private_root() {
+  [ "${UBERDEV_KEEP_TMPDIR:-0}" = "0" ] || return 0
+  python3 -I -B -c '
+import os,shutil,stat,sys
+path,base=sys.argv[1:]; path=os.path.realpath(path); base=os.path.realpath(base)
+entry=os.stat(path,follow_symlinks=False)
+if os.path.dirname(path)!=base or not os.path.basename(path).startswith(f"uberdev-solve-{os.geteuid()}-"): raise SystemExit(2)
+if not stat.S_ISDIR(entry.st_mode) or entry.st_uid!=os.geteuid() or stat.S_IMODE(entry.st_mode)!=0o700: raise SystemExit(2)
+shutil.rmtree(path)
+' "$UBERDEV_TMPDIR" "$_UBERDEV_TMP_BASE" 2>/dev/null || true
+}
+trap _uberdev_cleanup_private_root EXIT
 
 # Native-Windows-no-bash fast-fail + WSL2 9P warning (RFC 0004).
 if [ -z "${BASH:-}" ] && { [ "${OS:-}" = "Windows_NT" ] || case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) true ;; *) false ;; esac; }; then
@@ -390,7 +405,9 @@ _uberdev_fetch_issue_json() {
   if ! python3 -I -B -c '
 import os,stat,sys
 root,target=sys.argv[1:]; root=os.path.realpath(root); target=os.path.abspath(target)
-if os.path.dirname(target)!=root: raise SystemExit(2)
+root_entry=os.stat(root,follow_symlinks=False)
+if not stat.S_ISDIR(root_entry.st_mode) or root_entry.st_uid!=os.geteuid() or stat.S_IMODE(root_entry.st_mode)!=0o700: raise SystemExit(2)
+if os.path.islink(root) or os.path.dirname(target)!=root: raise SystemExit(2)
 fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)
 entry=os.fstat(fd); os.close(fd)
 if entry.st_uid!=os.geteuid() or entry.st_nlink!=1 or not stat.S_ISREG(entry.st_mode): raise SystemExit(2)
@@ -436,6 +453,13 @@ if [ -r "${UBERDEV_PLUGIN_ROOT:-}/lib/config-read.sh" ]; then
   . "${UBERDEV_PLUGIN_ROOT}/lib/config-read.sh"
   FLOOR="$(uberdev_read_enum solve_tier_floor SOLVE_TIER_FLOOR "trivial|small|medium|large" "")"
   CEILING="$(uberdev_read_enum solve_tier_ceiling SOLVE_TIER_CEILING "trivial|small|medium|large" "")"
+fi
+FLOOR_RANK="$(uberdev_tier_rank "$FLOOR")"
+CEILING_RANK="$(uberdev_tier_rank "$CEILING")"
+if [ -n "$FLOOR_RANK" ] && [ -n "$CEILING_RANK" ] && [ "$FLOOR_RANK" -gt "$CEILING_RANK" ]; then
+  TIER=medium
+  uberdev_clamp_tier "$TIER" "$FLOOR" "$CEILING" >/dev/null
+  FLOOR=""; CEILING=""
 fi
 _vidx=0
 for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
@@ -514,10 +538,16 @@ for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
   fi
   # Pure deterministic classification from the exact bounded snapshot.
   TRIAGE_ARGS=( classify --snapshot "$UBERDEV_TMPDIR/solve-validate-$ISSUE_NUM.json" --secure-root "$UBERDEV_TMPDIR" --expected-issue "$ISSUE_NUM" )
-  [[ -z "$FLOOR" ]] || TRIAGE_ARGS+=( --floor "$FLOOR" )
-  [[ -z "$CEILING" ]] || TRIAGE_ARGS+=( --ceiling "$CEILING" )
-  [[ -z "$OVERRIDE" ]] || TRIAGE_ARGS+=( --override "$OVERRIDE" )
-  if ! TRIAGE_JSON="$(python3 -I "$_UBERDEV_SOLVE_TRIAGE" "${TRIAGE_ARGS[@]}" 2>&1)"; then
+  if ! TRIAGE_RAW_JSON="$(python3 -I "$_UBERDEV_SOLVE_TRIAGE" "${TRIAGE_ARGS[@]}" 2>&1)"; then
+    ERRORS+=("#$ISSUE_NUM: $TRIAGE_RAW_JSON")
+    _vidx=$((_vidx + 1))
+    continue
+  fi
+  TIER="$(python3 -I -c 'import json,sys; print(json.loads(sys.argv[1])["raw_tier"],end="")' "$TRIAGE_RAW_JSON")"
+  CLAMPED_TIER="$(uberdev_clamp_tier "$TIER" "$FLOOR" "$CEILING")"
+  FINALIZE_ARGS=( finalize --decision "$TRIAGE_RAW_JSON" --clamped "$CLAMPED_TIER" )
+  [[ -z "$OVERRIDE" ]] || FINALIZE_ARGS+=( --override "$OVERRIDE" )
+  if ! TRIAGE_JSON="$(python3 -I "$_UBERDEV_SOLVE_TRIAGE" "${FINALIZE_ARGS[@]}" 2>&1)"; then
     ERRORS+=("#$ISSUE_NUM: $TRIAGE_JSON")
     _vidx=$((_vidx + 1))
     continue
@@ -1012,6 +1042,7 @@ BG_DISPATCH_RC="$DISPATCH_RC"
 BG_SESSION_ID="${DISPATCH_ID:-}"
 
 if [[ "$BG_DISPATCH_RC" -eq 0 ]]; then
+  UBERDEV_KEEP_TMPDIR=1
   # lib/dispatch.sh emitted agent_dispatched with the backend-specific id.
   SPAWNED+=("#$ISSUE_NUM ($TIER, ${UBERDEV_RESOLVED_BACKEND} ${BG_SESSION_ID:-?})")
 else
