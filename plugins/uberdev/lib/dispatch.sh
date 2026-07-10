@@ -656,13 +656,16 @@ _uberdev_dispatch_background() {
   local WORKTREE_DIR=".claude/worktrees/solve-issue-$ISSUE_NUM"
   local WORKTREE_BRANCH="worktree-solve-issue-$ISSUE_NUM"
   local LOG_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM.log"
-  local STATUS_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-bg-status-$ISSUE_NUM.json"
+  local STATUS_FILE="${UBERDEV_AGENT_STATUS_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-bg-status-$ISSUE_NUM.json}"
   # TOCTOU hardening (#155): guard + 0600-create the predictable log + pid
   # paths before any redirect writes to them (world-writable $UBERDEV_TMPDIR).
   if ! _uberdev_dispatch_prepare_tmp_target "$LOG_FILE" "$ISSUE_NUM" "background"; then
     DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
   fi
   if ! _uberdev_dispatch_prepare_tmp_target "$STATUS_FILE.pid" "$ISSUE_NUM" "background"; then
+    DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
+  fi
+  if ! _uberdev_dispatch_prepare_tmp_target "$STATUS_FILE" "$ISSUE_NUM" "background"; then
     DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
   fi
   # Explicit dispatcher-controlled worktree — sidesteps the Windows
@@ -691,18 +694,36 @@ _uberdev_dispatch_background() {
   local BG_TURBO_ENV=()
   [[ "${AUTO_MODE:-0}" == "1" ]] && BG_TURBO_ENV=( UBERDEV_TURBO=1 )
   [[ "${SKIP_PERMISSIONS:-0}" == "1" ]] && BG_TURBO_ENV+=( SKIP_PERMISSIONS=1 )
-  # Detached headless claude -p. cwd = the worktree. `claude -p` print mode
-  # is non-interactive and verified on native Windows -> logs cleanly.
-  # nohup + `&` + disown fully detach so the agent outlives this shell.
-  (
-    cd "$WORKTREE_DIR" || exit 127
-    nohup env "${BG_TURBO_ENV[@]}" claude -p "$PROMPT_BODY" \
-      --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" \
-      >"$LOG_FILE" 2>&1 &
-    printf '%s' "$!" > "$STATUS_FILE.pid"
-    disown 2>/dev/null || true
-  )
+  # Detached wrapper preserves the exact provider argv while atomically
+  # maintaining the canonical running/terminal status consumed by lifecycle
+  # reconciliation. DISPATCH_ID is the wrapper PID, so kill -0 and status
+  # describe the same lifetime.
+  local PROVIDER_CMD=( env "${BG_TURBO_ENV[@]}" claude -p "$PROMPT_BODY"
+    --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" )
+  nohup bash -c '
+    WORKTREE_DIR="$1"; STATUS_FILE="$2"; ISSUE_NUM="$3"; TIER="$4"; shift 4
+    WRAPPER_PID="$$"
+    write_status() {
+      STATE="$1"; EXIT_CODE="$2"; TMP_STATUS="$(mktemp "${STATUS_FILE}.tmp.XXXXXX")" || return 1
+      if [ "$EXIT_CODE" = null ]; then EXIT_JSON=null; else EXIT_JSON="$EXIT_CODE"; fi
+      chmod 600 "$TMP_STATUS" || { rm -f "$TMP_STATUS"; return 1; }
+      printf '\''{"issue":%s,"tier":"%s","backend":"background","state":"%s","exit_code":%s,"pid":"%s"}\n'\'' \
+          "$ISSUE_NUM" "$TIER" "$STATE" "$EXIT_JSON" "$WRAPPER_PID" > "$TMP_STATUS" || { rm -f "$TMP_STATUS"; return 1; }
+      mv -f "$TMP_STATUS" "$STATUS_FILE"
+    }
+    write_status running null || exit 126
+    cd "$WORKTREE_DIR" || { write_status failed 127; exit 127; }
+    "$@"
+    PROVIDER_RC=$?
+    if [ "$PROVIDER_RC" -eq 0 ]; then STATE=completed; else STATE=failed; fi
+    write_status "$STATE" "$PROVIDER_RC" || exit 126
+    exit "$PROVIDER_RC"
+  ' _ "$WORKTREE_DIR" "$STATUS_FILE" "$ISSUE_NUM" "$TIER" "${PROVIDER_CMD[@]}" \
+    >"$LOG_FILE" 2>&1 &
   DISPATCH_RC=$?
+  DISPATCH_ID="$!"
+  printf '%s' "$DISPATCH_ID" > "$STATUS_FILE.pid"
+  disown "$DISPATCH_ID" 2>/dev/null || true
   # #155: re-verify the .pid side-file is ours and not a symlink before parsing
   # (defence-in-depth across the subshell-write → parent-read window — a swap
   # here could feed an attacker-chosen pid into DISPATCH_ID).
@@ -724,24 +745,6 @@ _uberdev_dispatch_background() {
   # clear DISPATCH_ID so the success guard below falls through to the error path.
   if [[ -n "$DISPATCH_ID" ]] && ! kill -0 "$DISPATCH_ID" 2>/dev/null; then
     DISPATCH_ID=""
-  fi
-  # Per-issue status file — the dispatcher tracks PID liveness + log tail
-  # against this; Step 6's summary prints its path. B6 fix: guard the
-  # heredoc write so a failed write ($UBERDEV_TMPDIR unwritable, disk full,
-  # etc.) surfaces as dispatch_setup_failed instead of a fake-success audit
-  # with no status file for Step 6 to read.
-  if ! _uberdev_dispatch_prepare_tmp_target "$STATUS_FILE" "$ISSUE_NUM" "background"; then
-    DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
-  fi
-  if ! cat > "$STATUS_FILE" <<EOF
-{"issue":$ISSUE_NUM,"tier":"$TIER","backend":"background","pid":"${DISPATCH_ID:-}","log":"$LOG_FILE","worktree":"$WORKTREE_DIR","branch":"$WORKTREE_BRANCH"}
-EOF
-  then
-    DISPATCH_RC=1
-    DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      "{\"issue\":$ISSUE_NUM,\"phase\":\"status_write\",\"backend\":\"background\",\"rc\":1}"
-    return 1
   fi
   if [[ "$DISPATCH_RC" -eq 0 && -n "$DISPATCH_ID" ]]; then
     _uberdev_dispatch_audit agent_dispatched \
@@ -991,11 +994,15 @@ _uberdev_dispatch_wezterm() {
   local WORKTREE_DIR=".claude/worktrees/solve-issue-$ISSUE_NUM"
   local WORKTREE_BRANCH="worktree-solve-issue-$ISSUE_NUM"
   local LOG_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM.log"
+  local STATUS_FILE="${UBERDEV_AGENT_STATUS_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-bg-status-$ISSUE_NUM.json}"
   # TOCTOU hardening (#155): guard + 0600-create the predictable log path
   # before the worktree-add redirect below — the wezterm backend writes the
   # SAME world-writable path the claude-bg / background backends harden, so it
   # must fail-CLOSED on a symlink/foreign-owned target too.
   if ! _uberdev_dispatch_prepare_tmp_target "$LOG_FILE" "$ISSUE_NUM" "wezterm"; then
+    DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
+  fi
+  if ! _uberdev_dispatch_prepare_tmp_target "$STATUS_FILE" "$ISSUE_NUM" "wezterm"; then
     DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
   fi
   # The backend runs its own worktree add — a pane's `claude -p` does not get
@@ -1034,9 +1041,27 @@ _uberdev_dispatch_wezterm() {
   # to stdout — the partial string was then treated as a valid pane id. AND-
   # gating SPAWN_RC=0 with the non-empty check covers both failure shapes.
   local SPAWN_RC
+  local PROVIDER_CMD=( claude -p "$PROMPT_BODY" --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" )
   DISPATCH_ID="$(MSYS2_ARG_CONV_EXCL='*' wezterm cli spawn \
     --domain-name uberdev --cwd "$WORKTREE_ABS" -- \
-    claude -p "$PROMPT_BODY" --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" \
+    bash -c '
+      STATUS_FILE="$1"; ISSUE_NUM="$2"; TIER="$3"; shift 3
+      WRAPPER_PID="$$"
+      write_status() {
+        STATE="$1"; EXIT_CODE="$2"; TMP_STATUS="$(mktemp "${STATUS_FILE}.tmp.XXXXXX")" || return 1
+        if [ "$EXIT_CODE" = null ]; then EXIT_JSON=null; else EXIT_JSON="$EXIT_CODE"; fi
+        chmod 600 "$TMP_STATUS" || { rm -f "$TMP_STATUS"; return 1; }
+        printf "{\"issue\":%s,\"tier\":\"%s\",\"backend\":\"wezterm\",\"state\":\"%s\",\"exit_code\":%s,\"pid\":\"pane\"}\n" \
+            "$ISSUE_NUM" "$TIER" "$STATE" "$EXIT_JSON" > "$TMP_STATUS" || { rm -f "$TMP_STATUS"; return 1; }
+        mv -f "$TMP_STATUS" "$STATUS_FILE"
+      }
+      write_status running null || exit 126
+      "$@"
+      PROVIDER_RC=$?
+      if [ "$PROVIDER_RC" -eq 0 ]; then STATE=completed; else STATE=failed; fi
+      write_status "$STATE" "$PROVIDER_RC" || exit 126
+      exit "$PROVIDER_RC"
+    ' _ "$STATUS_FILE" "$ISSUE_NUM" "$TIER" "${PROVIDER_CMD[@]}" \
     2> >(tee -a "$LOG_FILE" >&2))"
   SPAWN_RC=$?
   if [[ "$SPAWN_RC" -ne 0 || -z "$DISPATCH_ID" ]]; then

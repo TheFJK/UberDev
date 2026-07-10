@@ -43,11 +43,19 @@ export UBERDEV_TEST_CAPTURE="$TMP/backend.json"
 # defines the same hook and selects exactly one existing backend arm.
 _uberdev_agent_dispatch_backend() {
   [ "$#" -eq 7 ]
+  count=0
+  [ ! -r "$TMP/provider-count" ] || read -r count < "$TMP/provider-count"
+  printf '%s\n' "$((count + 1))" > "$TMP/provider-count"
   # The lifecycle start is durable before the one provider boundary is crossed.
-  python3 - "$STATE_DIR/agent-lifecycle.jsonl" <<'PY'
+  python3 - "$STATE_DIR/agent-lifecycle.jsonl" "$6" <<'PY'
 import json, pathlib, sys
 events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
-assert [event["event"] for event in events[-2:]] == ["route_decided", "agent_started"], events[-2:]
+status = str(pathlib.Path(sys.argv[2]).resolve())
+started = [event for event in events if event.get("event") == "agent_started" and event.get("status_path") == status]
+assert len(started) == 1, started
+run_id = started[0]["run_id"]
+actual = [event["event"] for event in events if event["run_id"] == run_id]
+assert actual == ["route_decided", "agent_started"], actual
 PY
   python3 - "$UBERDEV_TEST_CAPTURE" "$@" <<'PY'
 import json, sys
@@ -70,8 +78,21 @@ PY
     *no-status.md)
       :
       ;;
-    *)
+    *async-terminal.md)
       printf '{"backend":"codex","state":"running","exit_code":null,"pid":"opaque:test-handle"}\n' > "$6"
+      (
+        sleep 1
+        printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
+      ) &
+      ;;
+    *generation-race.md)
+      printf '{"backend":"codex","state":"running","exit_code":null,"pid":"opaque:test-handle"}\n' > "$6"
+      ;;
+    *result.md)
+      printf '{"backend":"codex","state":"running","exit_code":null,"pid":"opaque:test-handle"}\n' > "$6"
+      ;;
+    *)
+      printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
       ;;
   esac
   return 0
@@ -105,6 +126,35 @@ PY
 # Opaque handles remain live for reconciliation and retain their lease.
 LEASES="$(find "$STATE_DIR" -name '*.lease' -type f | wc -l | tr -d ' ')"
 [ "$LEASES" = 1 ] || { echo "expected one registered opaque lease, got $LEASES" >&2; exit 1; }
+printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$TMP/run/status.json"
+for _ in 1 2 3 4 5; do
+  ! grep -R -q 'run_id=agent-dispatch-test' "$STATE_DIR/semaphore-v1" 2>/dev/null && break
+  sleep 1
+done
+if grep -R -q 'run_id=agent-dispatch-test' "$STATE_DIR/semaphore-v1" 2>/dev/null; then
+  echo "terminalized opaque fixture retained its lease" >&2
+  exit 1
+fi
+
+# A detached status transition is consumed by the adapter-owned watcher: it
+# appends the real terminal event and releases capacity without an abandoned
+# reconciliation record.
+ASYNC_REQUEST="${REQUEST/agent-dispatch-test/agent-dispatch-async}"
+uberdev_agent_dispatch "$ASYNC_REQUEST" "$TMP/run/prompt.txt" "$TMP/run/async-terminal.md" "$TMP/run/async-terminal.json"
+for _ in 1 2 3 4 5; do
+  grep -q '"run_id":"agent-dispatch-async".*"event":"completed"\|"event":"completed".*"run_id":"agent-dispatch-async"' "$STATE_DIR/agent-lifecycle.jsonl" 2>/dev/null && break
+  sleep 1
+done
+python3 - "$STATE_DIR/agent-lifecycle.jsonl" <<'PY'
+import json, pathlib, sys
+events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+actual = [event["event"] for event in events if event["run_id"] == "agent-dispatch-async"]
+assert actual == ["route_decided", "agent_started", "completed"], actual
+PY
+if grep -R -q 'run_id=agent-dispatch-async' "$STATE_DIR/semaphore-v1" 2>/dev/null; then
+  echo "terminal async dispatch retained its lease" >&2
+  exit 1
+fi
 
 variant_request() {
   python3 - "$REQUEST" "$1" "$2" <<'PY'
@@ -171,17 +221,65 @@ assert decision["effective_policy"] == "inherit"
 assert decision["model"] is None and decision["reasoning_effort"] is None
 PY
 
-# An opaque provider without a status probe must remain unknown, not be
-# synthesized as permanently running by the adapter. The lease still records
-# the canonical path for a later provider write or dead-owner reconciliation.
+# An opaque provider without an immediate status write is registered through
+# the adapter watcher and later converges on the provider terminal status.
 NO_STATUS_REQUEST="$(variant_request agent-dispatch-no-status inherit)"
 uberdev_agent_dispatch "$NO_STATUS_REQUEST" "$TMP/run/prompt.txt" "$TMP/run/no-status.md" "$TMP/run/no-status.json"
-[ ! -e "$TMP/run/no-status.json" ] || {
-  echo "adapter synthesized a permanently-live opaque status" >&2; exit 1;
+grep -q '"state":"running"' "$TMP/run/no-status.json" || {
+  echo "opaque dispatch did not publish canonical running status" >&2; exit 1;
 }
 grep -R -q "run_id=agent-dispatch-no-status" "$STATE_DIR/semaphore-v1" || {
   echo "opaque dispatch without current status was not registered" >&2; exit 1;
 }
+printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$TMP/run/no-status.json"
+for _ in 1 2 3 4 5; do
+  ! grep -R -q 'run_id=agent-dispatch-no-status' "$STATE_DIR/semaphore-v1" 2>/dev/null && break
+  sleep 1
+done
+if grep -R -q 'run_id=agent-dispatch-no-status' "$STATE_DIR/semaphore-v1" 2>/dev/null; then
+  echo "terminalized no-status fixture retained its lease" >&2
+  exit 1
+fi
+
+# A watcher releases only the exact lease inode it registered. Replacing the
+# path with a separately published record that copies the visible generation
+# must not let the old watcher delete the replacement.
+GENERATION_REQUEST="$(variant_request agent-dispatch-generation-race inherit)"
+uberdev_agent_dispatch "$GENERATION_REQUEST" "$TMP/run/prompt.txt" \
+  "$TMP/run/generation-race.md" "$TMP/run/generation-race.json"
+generation_lease="$(grep -R -l '^run_id=agent-dispatch-generation-race$' "$STATE_DIR/semaphore-v1" | head -1)"
+[ -n "$generation_lease" ] || { echo "generation-race lease missing" >&2; exit 1; }
+python3 -I - "$generation_lease" <<'PY'
+import os, pathlib, sys, tempfile
+path = pathlib.Path(sys.argv[1])
+payload = path.read_text().replace(
+    "run_id=agent-dispatch-generation-race\n",
+    "run_id=replacement-generation-race\n",
+)
+assert "run_id=replacement-generation-race\n" in payload
+descriptor, temporary = tempfile.mkstemp(prefix=".replacement-lease.", dir=path.parent)
+try:
+    os.fchmod(descriptor, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+PY
+printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$TMP/run/generation-race.json"
+for _ in 1 2 3 4 5; do
+  grep -q 'agent-dispatch-generation-race.*"event":"completed"\|"event":"completed".*agent-dispatch-generation-race' \
+    "$STATE_DIR/agent-lifecycle.jsonl" 2>/dev/null && break
+  sleep 1
+done
+[ -f "$generation_lease" ] && grep -q '^run_id=replacement-generation-race$' "$generation_lease" || {
+  echo "old watcher removed a replacement lease" >&2
+  exit 1
+}
+rm -f "$generation_lease"
 
 # A Codex-only forced route aimed at a Claude backend fails before launch.
 cp "$TMP/backend.json" "$TMP/before-unsupported.json"
@@ -193,6 +291,35 @@ fi
 cmp -s "$TMP/backend.json" "$TMP/before-unsupported.json" || {
   echo "unsupported forced route reached provider boundary" >&2; exit 1;
 }
+
+# All caller paths are one disjoint set outside private lifecycle state.
+provider_before="$(cat "$TMP/provider-count")"
+lease_path="$(find "$STATE_DIR/semaphore-v1" -name '*.lease' -type f | head -1)"
+ln "$TMP/run/prompt.txt" "$TMP/run/prompt-hardlink.txt"
+for paths in \
+  "$TMP/run/prompt.txt|$TMP/run/prompt.txt|$TMP/run/equal-status.json" \
+  "$TMP/run/prompt.txt|$TMP/run/./prompt.txt|$TMP/run/normalized-status.json" \
+  "$TMP/run/prompt.txt|$TMP/run/prompt-hardlink.txt|$TMP/run/hardlink-status.json" \
+  "$TMP/run/prompt.txt|$STATE_DIR/agent-lifecycle.jsonl|$TMP/run/manifest-status.json" \
+  "$TMP/run/prompt.txt|$STATE_DIR/model-catalog-v1.json|$TMP/run/catalog-status.json" \
+  "$TMP/run/prompt.txt|$lease_path|$TMP/run/lease-status.json"
+do
+  old_ifs="$IFS"; IFS='|'; set -- $paths; IFS="$old_ifs"
+  alias_request="${REQUEST/agent-dispatch-test/agent-dispatch-alias-$RANDOM}"
+  if uberdev_agent_dispatch "$alias_request" "$1" "$2" "$3" >/dev/null 2>&1; then
+    echo "agent-dispatch accepted aliased/private caller paths: $paths" >&2
+    exit 1
+  fi
+done
+rm -f "$TMP/run/prompt-hardlink.txt"
+[ "$(cat "$TMP/provider-count")" = "$provider_before" ] || {
+  echo "path-alias rejection reached provider boundary" >&2; exit 1;
+}
+if grep -q 'agent-dispatch-alias-' "$STATE_DIR/agent-lifecycle.jsonl"; then
+  echo "path-alias rejection recorded lifecycle events" >&2; exit 1
+fi
+python3 "$ROOT/plugins/uberdev/lib/run_manifest.py" verify \
+  --manifest "$STATE_DIR/agent-lifecycle.jsonl" >/dev/null
 
 CLAUDE_FAST_REQUEST="$(variant_request agent-dispatch-claude-fast claude-fast)"
 if uberdev_agent_dispatch "$CLAUDE_FAST_REQUEST" "$TMP/run/prompt.txt" "$TMP/run/claude-fast.md" "$TMP/run/claude-fast.json" >/dev/null 2>&1; then
@@ -274,5 +401,136 @@ failed = [event for event in events if event["run_id"] == "agent-dispatch-fail"]
 assert [event["event"] for event in failed] == ["route_decided", "agent_started", "failed"], failed
 assert failed[-1]["error_class"] == "provider_launch_failed"
 PY
+
+# zsh NOMATCH must not explode the semaphore's empty `*.lease` loops, and the
+# adapter must restore both NOMATCH and NULL_GLOB on success and failure.
+ZRUN="$TMP/zsh-run"
+mkdir -p "$ZRUN"
+printf 'zsh prompt\n' > "$ZRUN/prompt.txt"
+zsh -f -c '
+  setopt nomatch
+  unsetopt nullglob
+  . "$1"
+  make_request() {
+    python3 -I -c '\''import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":sys.argv[2],"repository_id":"zsh-fixture","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":77,"issue_num":77,"capacity":2,"timeout_s":10},separators=(",",":")))'\'' "$1" "$2"
+  }
+  _uberdev_agent_dispatch_backend() {
+    DISPATCH_ID="opaque:zsh"
+    if [ "${ZSH_FAIL_PROVIDER:-0}" = 1 ]; then DISPATCH_RC=17; return 17; fi
+    printf '\''{"state":"completed"}\n'\'' > "$6"
+    DISPATCH_RC=0
+    return 0
+  }
+  before_nomatch=$options[nomatch]; before_null=$options[nullglob]
+  request=$(make_request "$2" zsh-success)
+  uberdev_agent_dispatch "$request" "$2/prompt.txt" "$2/result.md" "$2/status.json" || exit 91
+  [ "$options[nomatch]" = "$before_nomatch" ] && [ "$options[nullglob]" = "$before_null" ]
+  request=$(make_request "$2" zsh-failure)
+  ZSH_FAIL_PROVIDER=1 uberdev_agent_dispatch "$request" "$2/prompt.txt" "$2/fail.md" "$2/fail.json"
+  rc=$?
+  [ "$rc" -eq 17 ]
+  [ "$options[nomatch]" = "$before_nomatch" ] && [ "$options[nullglob]" = "$before_null" ]
+' _ "$LIB" "$ZRUN"
+
+# Owner-exit reconciliation is proven independently for every async backend.
+# A second process cannot take cap=1 while canonical status is live, can take
+# it after terminal, and run-manifest reconciliation never invents abandoned.
+CROSS_BIN="$TMP/cross-bin"
+mkdir -p "$CROSS_BIN"
+cat > "$CROSS_BIN/claude" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = agents ] && [ "${2:-}" = --json ] || exit 2
+cat "$CROSS_CLAUDE_STATE"
+SH
+chmod +x "$CROSS_BIN/claude"
+
+# The short Claude handle must resolve to exactly one full session. A shared
+# prefix is ambiguous and must remain unknown instead of selecting row order.
+printf '[{"sessionId":"abc12345-one","status":"running"},{"sessionId":"abc12345-two","status":"completed"}]\n' \
+  > "$TMP/ambiguous-claude-agents.json"
+if CROSS_CLAUDE_STATE="$TMP/ambiguous-claude-agents.json" PATH="$CROSS_BIN:$PATH" \
+    _uberdev_agent_claude_probe abc12345 >/dev/null 2>&1; then
+  echo "Claude watcher accepted an ambiguous session prefix" >&2
+  exit 1
+fi
+printf '[{"sessionId":"abc12345-one","status":"future-state"}]\n' \
+  > "$TMP/unknown-claude-status.json"
+if CROSS_CLAUDE_STATE="$TMP/unknown-claude-status.json" PATH="$CROSS_BIN:$PATH" \
+    _uberdev_agent_claude_probe abc12345 >/dev/null 2>&1; then
+  echo "Claude watcher treated an unknown status as completed" >&2
+  exit 1
+fi
+
+cross_backend_case() {
+  backend="$1"
+  run="$TMP/cross-$backend"
+  mkdir -p "$run"
+  printf 'cross-process prompt\n' > "$run/prompt.txt"
+  request="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"cross-"+sys.argv[2],"repository_id":"cross-repository","backend":sys.argv[2],"workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":88,"issue_num":88,"capacity":1,"timeout_s":20},separators=(",",":")))' "$run" "$backend")"
+  state="$run/.agent-state-$(id -u)"
+  if [ "$backend" = claude-bg ]; then
+    printf '[{"sessionId":"abc12345-full","status":"running"}]\n' > "$run/claude-agents.json"
+    nohup bash -c 'sleep 1.5; printf "[{\"sessionId\":\"abc12345-full\",\"status\":\"completed\"}]\\n" > "$1"' _ "$run/claude-agents.json" >/dev/null 2>&1 &
+  fi
+  (
+    CROSS_BACKEND="$backend" CROSS_RUN="$run" CROSS_CLAUDE_STATE="$run/claude-agents.json" \
+      PATH="$CROSS_BIN:$PATH" uberdev_agent_dispatch "$request" "$run/prompt.txt" "$run/result.md" "$run/status.json"
+  )
+  [ -r "$run/status.json" ] && grep -q '"state":"running"' "$run/status.json" || {
+    echo "$backend did not publish live canonical status" >&2; return 1;
+  }
+  if UBERDEV_SEMAPHORE_ACQUIRE_MAX_TRIES=1 \
+      probe="$(uberdev_semaphore_acquire "$state" cross-repository "$backend" 1 "probe-live-$backend" 20 2>/dev/null)"; then
+    uberdev_semaphore_release "$probe" >/dev/null 2>&1 || true
+    echo "$backend released capacity while provider status was live" >&2
+    return 1
+  fi
+  python3 -I "$ROOT/plugins/uberdev/lib/run_manifest.py" reconcile \
+    --manifest "$state/agent-lifecycle.jsonl" >/dev/null
+  for _ in 1 2 3 4 5 6; do
+    grep -q '"state":"completed"' "$run/status.json" 2>/dev/null \
+      && ! grep -R -q "run_id=cross-$backend" "$state/semaphore-v1" 2>/dev/null \
+      && break
+    sleep 1
+  done
+  probe="$(uberdev_semaphore_acquire "$state" cross-repository "$backend" 1 "probe-terminal-$backend" 20)" || {
+    echo "$backend did not recover capacity after terminal" >&2; return 1;
+  }
+  uberdev_semaphore_release "$probe"
+  python3 -I - "$state/agent-lifecycle.jsonl" "$backend" <<'PY'
+import json, pathlib, sys
+events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+actual = [event["event"] for event in events if event["run_id"] == "cross-" + sys.argv[2]]
+assert actual == ["route_decided", "agent_started", "completed"], actual
+PY
+}
+
+_uberdev_agent_dispatch_backend() {
+  backend="$1"; status_path="$6"
+  DISPATCH_LOG=""
+  case "$backend" in
+    claude-bg)
+      DISPATCH_ID=abc12345
+      ;;
+    wezterm)
+      DISPATCH_ID=777
+      printf '{"backend":"wezterm","state":"running","exit_code":null,"pid":"pane"}\n' > "$status_path"
+      nohup bash -c 'sleep 0.5; tmp="$1.tmp"; printf "{\"backend\":\"wezterm\",\"state\":\"completed\",\"exit_code\":0,\"pid\":\"pane\"}\\n" > "$tmp"; mv "$tmp" "$1"' _ "$status_path" >/dev/null 2>&1 &
+      ;;
+    codex|background)
+      nohup sleep 2 >/dev/null 2>&1 &
+      DISPATCH_ID="$!"
+      printf '{"backend":"%s","state":"running","exit_code":null,"pid":"%s"}\n' "$backend" "$DISPATCH_ID" > "$status_path"
+      nohup bash -c 'sleep 0.5; tmp="$1.tmp"; printf "{\"backend\":\"%s\",\"state\":\"completed\",\"exit_code\":0,\"pid\":\"%s\"}\\n" "$2" "$3" > "$tmp"; mv "$tmp" "$1"' _ "$status_path" "$backend" "$DISPATCH_ID" >/dev/null 2>&1 &
+      ;;
+  esac
+  DISPATCH_RC=0
+  return 0
+}
+
+cross_backend_case codex
+cross_backend_case background
+cross_backend_case claude-bg
+cross_backend_case wezterm
 
 echo "agent-dispatch: PASS"
