@@ -9,6 +9,8 @@
 #   uberdev_read_int_in_range  KEY ENV_VAR MIN MAX DEFAULT
 #   uberdev_read_enum          KEY ENV_VAR ALLOWED_PIPE_LIST DEFAULT
 #   uberdev_read_string        KEY ENV_VAR REGEX DEFAULT
+#   uberdev_read_model_routing
+#                              -> exports validated RFC 0013 routing config
 #   uberdev_tier_rank          TIER_NAME            -> 0|1|2|3|""
 #   uberdev_tier_name          RANK                 -> trivial|small|medium|large
 #   uberdev_clamp_tier         TIER FLOOR CEILING   -> clamped tier name
@@ -38,9 +40,15 @@ _UBERDEV_CONFIG_READ_LOADED=1
 # Used by every validation-failure path; tests assert on this exact shape.
 _UBERDEV_WARN_FORMAT='warning: %s = %s is invalid (%s); falling back to default %s'
 
-# Default config-file path (callers may override by exporting UBERDEV_CONFIG_FILE).
-if [ -z "${UBERDEV_CONFIG_FILE:-}" ]; then
-  if [ -n "${CODEX_HOME:-}" ] && [ -r "${PWD}/.codex/uberdev.local.md" ]; then
+# Preserve a caller-selected file as a sole-file override. Otherwise retain a
+# compatibility value in UBERDEV_CONFIG_FILE for legacy direct consumers while
+# the public readers below resolve each key across Codex then Claude.
+if [ -n "${UBERDEV_CONFIG_FILE:-}" ]; then
+  _UBERDEV_CONFIG_FILE_EXPLICIT=1
+  _UBERDEV_CONFIG_FILE_DEFAULT=""
+else
+  _UBERDEV_CONFIG_FILE_EXPLICIT=0
+  if [ -r "${PWD}/.codex/uberdev.local.md" ]; then
     UBERDEV_CONFIG_FILE="${PWD}/.codex/uberdev.local.md"
   elif [ -r "${PWD}/.claude/uberdev.local.md" ]; then
     UBERDEV_CONFIG_FILE="${PWD}/.claude/uberdev.local.md"
@@ -48,6 +56,34 @@ if [ -z "${UBERDEV_CONFIG_FILE:-}" ]; then
     UBERDEV_CONFIG_FILE="${PWD}/.codex/uberdev.local.md"
   else
     UBERDEV_CONFIG_FILE="${PWD}/.claude/uberdev.local.md"
+  fi
+  _UBERDEV_CONFIG_FILE_DEFAULT="$UBERDEV_CONFIG_FILE"
+fi
+
+if [ -n "${BASH_VERSION:-}" ]; then
+  _UBERDEV_CONFIG_READ_SOURCE="${BASH_SOURCE[0]}"
+elif [ -n "${ZSH_VERSION:-}" ]; then
+  # `%x` is zsh's source-file identity. Keep the zsh-only expansion inside a
+  # constant eval so Bash 3.2 never parses it as a parameter expansion.
+  eval '_UBERDEV_CONFIG_READ_SOURCE="${(%):-%x}"'
+else
+  _UBERDEV_CONFIG_READ_SOURCE=""
+fi
+_UBERDEV_CONFIG_READ_FILE=""
+_UBERDEV_CONFIG_READ_DIR=""
+if [ -n "$_UBERDEV_CONFIG_READ_SOURCE" ]; then
+  case "$_UBERDEV_CONFIG_READ_SOURCE" in
+    /*) _UBERDEV_CONFIG_READ_CANDIDATE="$_UBERDEV_CONFIG_READ_SOURCE" ;;
+    *) _UBERDEV_CONFIG_READ_CANDIDATE="${PWD}/$_UBERDEV_CONFIG_READ_SOURCE" ;;
+  esac
+  if [ -f "$_UBERDEV_CONFIG_READ_CANDIDATE" ] \
+    && [ -r "$_UBERDEV_CONFIG_READ_CANDIDATE" ] \
+    && [ ! -L "$_UBERDEV_CONFIG_READ_CANDIDATE" ] \
+    && [ "$(basename "$_UBERDEV_CONFIG_READ_CANDIDATE")" = "config-read.sh" ]; then
+    _UBERDEV_CONFIG_READ_DIR="$(cd "$(dirname "$_UBERDEV_CONFIG_READ_CANDIDATE")" 2>/dev/null && pwd -P)"
+    if [ -n "$_UBERDEV_CONFIG_READ_DIR" ]; then
+      _UBERDEV_CONFIG_READ_FILE="${_UBERDEV_CONFIG_READ_DIR}/config-read.sh"
+    fi
   fi
 fi
 
@@ -120,14 +156,15 @@ _uberdev_read_nested() {
       leaf="${key_path#*.}"
       # Section-bounded extraction: from the parent header to the next
       # top-level key (^[A-Za-z_]) OR end-of-file.
-      raw="$(awk -v p="^${parent}:" -v l="^[[:space:]]+${leaf}:" '
+      raw="$(_uberdev_frontmatter_body "$file" | awk -v p="^${parent}:" -v l="^[[:space:]]+${leaf}:" '
         $0 ~ p { in_block=1; next }
         in_block && /^[A-Za-z_]/ { in_block=0 }
         in_block && $0 ~ l { sub(/^[[:space:]]+[^:]+:[[:space:]]*/, ""); print; exit }
-      ' "$file")"
+      ')"
       ;;
     *)
-      raw="$(grep -E "^${key_path}:" "$file" 2>/dev/null \
+      raw="$(_uberdev_frontmatter_body "$file" \
+        | grep -E "^${key_path}:" 2>/dev/null \
         | head -1 \
         | sed -E "s/^${key_path}:[[:space:]]*//")"
       ;;
@@ -137,6 +174,79 @@ _uberdev_read_nested() {
   # POSIX-portable trim: strip leading/trailing spaces and tabs.
   raw="$(printf '%s' "$raw" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
   printf '%s' "$raw"
+}
+
+# _uberdev_frontmatter_body FILE
+# Emit only the first YAML frontmatter body when the first non-empty line is
+# `---`; otherwise emit the complete delimiter-free legacy document. Structural
+# delimiter validation remains in the isolated routing-map parser.
+_uberdev_frontmatter_body() {
+  local file="$1"
+  [ -f "$file" ] || return 0
+  awk '
+    !started {
+      if ($0 ~ /^[[:space:]]*$/) { next }
+      started=1
+      if ($0 ~ /^---\r?$/) { frontmatter=1; next }
+    }
+    frontmatter && $0 ~ /^---\r?$/ { exit }
+    { print }
+  ' "$file"
+}
+
+# _uberdev_has_nested KEY_PATH FILE
+# Exit 0 when the exact scalar/map key exists, even when its value is empty.
+_uberdev_has_nested() {
+  local key_path="$1" file="$2" parent leaf
+  [ -f "$file" ] || return 1
+  case "$key_path" in
+    *.*)
+      parent="${key_path%%.*}"
+      leaf="${key_path#*.}"
+      _uberdev_frontmatter_body "$file" | awk -v p="^${parent}:" -v l="^[[:space:]]+${leaf}:" '
+        $0 ~ p { in_block=1; next }
+        in_block && /^[A-Za-z_]/ { in_block=0 }
+        in_block && $0 ~ l { found=1; exit }
+        END { exit(found ? 0 : 1) }
+      '
+      ;;
+    *)
+      _uberdev_frontmatter_body "$file" | awk -v k="^${key_path}:" '
+        $0 ~ k { found=1 }
+        END { exit(found ? 0 : 1) }
+      '
+      ;;
+  esac
+}
+
+# _uberdev_config_file_for_key KEY
+# Explicit UBERDEV_CONFIG_FILE is the sole file. Otherwise choose per key:
+# readable .codex value, then readable .claude value, then no file/default.
+_uberdev_config_file_for_key() {
+  local key="$1" candidate
+  if [ -n "${UBERDEV_CONFIG_FILE:-}" ] && { \
+    [ "${_UBERDEV_CONFIG_FILE_EXPLICIT:-0}" = "1" ] \
+      || [ "${UBERDEV_CONFIG_FILE}" != "${_UBERDEV_CONFIG_FILE_DEFAULT:-}" ]; \
+  }; then
+    printf '%s' "${UBERDEV_CONFIG_FILE:-}"
+    return 0
+  fi
+  for candidate in "${PWD}/.codex/uberdev.local.md" "${PWD}/.claude/uberdev.local.md"; do
+    if [ -r "$candidate" ] && _uberdev_has_nested "$key" "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# _uberdev_read_project_key KEY
+# Print the selected per-key project value, or empty when no file defines it.
+_uberdev_read_project_key() {
+  local key="$1" file
+  if file="$(_uberdev_config_file_for_key "$key")"; then
+    _uberdev_read_nested "$key" "$file"
+  fi
 }
 
 # uberdev_read_int_in_range KEY ENV_VAR MIN MAX DEFAULT
@@ -149,11 +259,11 @@ uberdev_read_int_in_range() {
   # Tier 1: env var.
   val="$(eval "printf '%s' \"\${$env_var:-}\"")"
   if [ -n "$val" ]; then
-    source=env
+    source='env'
   else
     # Tier 2: config file.
-    val="$(_uberdev_read_nested "$key" "$UBERDEV_CONFIG_FILE")"
-    source=file
+    val="$(_uberdev_read_project_key "$key")"
+    source='file'
   fi
 
   # Tier 3: empty -> default (silent; absence is not an error).
@@ -193,7 +303,7 @@ uberdev_read_enum() {
   local val
   val="$(eval "printf '%s' \"\${$env_var:-}\"")"
   if [ -z "$val" ]; then
-    val="$(_uberdev_read_nested "$key" "$UBERDEV_CONFIG_FILE")"
+    val="$(_uberdev_read_project_key "$key")"
   fi
   if [ -z "$val" ]; then
     _uberdev_set_validated "$key"
@@ -220,7 +330,7 @@ uberdev_read_string() {
   local val
   val="$(eval "printf '%s' \"\${$env_var:-}\"")"
   if [ -z "$val" ]; then
-    val="$(_uberdev_read_nested "$key" "$UBERDEV_CONFIG_FILE")"
+    val="$(_uberdev_read_project_key "$key")"
   fi
   if [ -z "$val" ]; then
     _uberdev_set_validated "$key"
@@ -239,6 +349,383 @@ uberdev_read_string() {
   _uberdev_warn_invalid "$key" "$val" regex_mismatch "$default"
   _uberdev_set_validated "$key"
   printf '%s' "$default"
+}
+
+# _uberdev_parse_routing_map SCOPE SOURCE PAYLOAD
+#
+# Normalize a role/workflow override map into compact JSON. SOURCE is `env`
+# (PAYLOAD is strict JSON) or `file` (PAYLOAD is the selected config path).
+# The parser is deliberately data-only: it never evaluates map keys or values,
+# rejects duplicate keys, and applies closed shape/count/size bounds before the
+# JSON is handed to model_routing.py.
+_uberdev_parse_routing_map() {
+  local scope="$1" source="$2" payload="$3" policy_file="$4" routing_lib="$5"
+  if ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+  if [ "$source" = "env" ] && [ "${#payload}" -gt 16384 ]; then
+    return 1
+  fi
+  python3 -I -c '
+import json
+import importlib.util
+import re
+import sys
+
+scope, source, payload, policy_path, routing_lib = sys.argv[1:]
+MAX_BYTES = 16384
+MAX_ENTRIES = 64
+KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+SANDBOXES = {"read-only", "workspace-write"}
+WORKFLOWS = {"solve", "turbo"}
+
+class Invalid(Exception):
+    pass
+
+def unique(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise Invalid("duplicate key")
+        result[key] = value
+    return result
+
+def strict_json(raw):
+    try:
+        return json.loads(raw, object_pairs_hook=unique)
+    except (ValueError, TypeError) as exc:
+        raise Invalid("invalid JSON") from exc
+
+def policy_data(path, validator_path):
+    try:
+        spec = importlib.util.spec_from_file_location("_uberdev_model_routing_validator", validator_path)
+        if spec is None or spec.loader is None:
+            raise Invalid("validator unavailable")
+        validator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(validator)
+        policy = validator.load_policy(path)
+        # Public API call deliberately exercises T40-1s complete policy
+        # validator without requiring a provider/model invocation.
+        validator.classify_minimum_route(
+            policy,
+            {"task_tier": "small", "risk_signals": [], "role": "lead"},
+        )
+    except BaseException as exc:
+        raise Invalid("invalid canonical policy") from exc
+    routes = policy["routes"]
+    aliases = policy["aliases"]
+    roles = policy["roles"]
+    route_names = set(routes)
+    efforts = set()
+    for row in routes.values():
+        efforts.add(row["codex"]["reasoning_effort"])
+    return route_names | set(aliases), set(roles), efforts
+
+def scalar(raw):
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("\"", chr(39)):
+        value = value[1:-1]
+    if not value or any(char.isspace() for char in value):
+        raise Invalid("invalid scalar")
+    return value
+
+def config_document(raw):
+    lines = raw.splitlines(keepends=True)
+    delimiters = [
+        index for index, line in enumerate(lines)
+        if line.rstrip("\r\n") == "---"
+    ]
+    if not delimiters:
+        return raw
+    first_nonempty = next(
+        (index for index, line in enumerate(lines) if line.strip()),
+        None,
+    )
+    if first_nonempty is None or delimiters[0] != first_nonempty or len(delimiters) != 2:
+        raise Invalid("invalid frontmatter delimiters")
+    return "".join(lines[delimiters[0] + 1:delimiters[1]])
+
+def yaml_map(raw, wanted):
+    if "\t" in raw:
+        raise Invalid("tabs are not accepted")
+    lines = raw.splitlines()
+    model_headers = [i for i, line in enumerate(lines) if re.match(r"^model_routing:[ ]*(?:#.*)?$", line)]
+    if not model_headers:
+        return None
+    if len(model_headers) != 1:
+        raise Invalid("duplicate model_routing")
+    start = model_headers[0] + 1
+    end = len(lines)
+    for i in range(start, len(lines)):
+        line = lines[i]
+        if line.strip() and not line.startswith((" ", "#")):
+            end = i
+            break
+    headers = []
+    header_value = ""
+    for i in range(start, end):
+        clean = lines[i].split("#", 1)[0].rstrip()
+        match = re.fullmatch(r"  ([A-Za-z_][A-Za-z0-9_]*):(?:[ ]*(.*))?", clean)
+        if match and match.group(1) == wanted:
+            headers.append(i)
+            header_value = (match.group(2) or "").strip()
+    if not headers:
+        return None
+    if len(headers) != 1:
+        raise Invalid("duplicate scope")
+    if header_value:
+        value = strict_json(header_value)
+        return value
+
+    block_start = headers[0] + 1
+    block_end = end
+    for i in range(block_start, end):
+        clean = lines[i].split("#", 1)[0].rstrip()
+        if clean and len(clean) - len(clean.lstrip(" ")) <= 2:
+            block_end = i
+            break
+    block_raw = "\n".join(lines[headers[0]:block_end])
+    if len(block_raw.encode("utf-8")) > MAX_BYTES:
+        raise Invalid("map too large")
+    result = {}
+    i = block_start
+    while i < block_end:
+        clean = lines[i].split("#", 1)[0].rstrip()
+        i += 1
+        if not clean.strip():
+            continue
+        match = re.fullmatch(r"    ([A-Za-z0-9][A-Za-z0-9._-]{0,127}):(?:[ ]*(.*))?", clean)
+        if not match:
+            raise Invalid("invalid entry")
+        key, rest = match.group(1), (match.group(2) or "").strip()
+        if key in result:
+            raise Invalid("duplicate key")
+        if rest:
+            result[key] = strict_json(rest) if rest.startswith("{") else scalar(rest)
+            continue
+        fields = {}
+        while i < block_end:
+            child = lines[i].split("#", 1)[0].rstrip()
+            if not child.strip():
+                i += 1
+                continue
+            indent = len(child) - len(child.lstrip(" "))
+            if indent <= 4:
+                break
+            child_match = re.fullmatch(r"      ([A-Za-z_][A-Za-z0-9_]*):[ ]*(.*)", child)
+            if not child_match:
+                raise Invalid("invalid nested entry")
+            field, value = child_match.group(1), scalar(child_match.group(2))
+            if field in fields:
+                raise Invalid("duplicate nested key")
+            fields[field] = value
+            i += 1
+        if not fields:
+            raise Invalid("empty entry")
+        result[key] = fields
+    return result
+
+def validate(value, routes, roles, efforts):
+    if not isinstance(value, dict) or len(value) > MAX_ENTRIES:
+        raise Invalid("invalid map/count")
+    for key, entry in value.items():
+        if not isinstance(key, str) or not KEY_RE.fullmatch(key) or ".." in key:
+            raise Invalid("invalid key")
+        if scope == "roles" and key not in roles:
+            raise Invalid("unknown role")
+        if scope == "workflows" and key not in WORKFLOWS:
+            raise Invalid("unknown workflow")
+        if isinstance(entry, str):
+            if entry not in routes:
+                raise Invalid("invalid route")
+            continue
+        if not isinstance(entry, dict) or not entry or not set(entry).issubset({"route", "sandbox", "effort", "reasoning_effort"}):
+            raise Invalid("invalid override shape")
+        if "effort" in entry and "reasoning_effort" in entry:
+            raise Invalid("duplicate effort aliases")
+        if "effort" in entry:
+            entry["reasoning_effort"] = entry.pop("effort")
+        if "route" in entry and "reasoning_effort" in entry:
+            raise Invalid("route/effort conflict")
+        if "route" in entry and entry["route"] not in routes:
+            raise Invalid("invalid route")
+        if "sandbox" in entry and entry["sandbox"] not in SANDBOXES:
+            raise Invalid("invalid sandbox")
+        if "reasoning_effort" in entry and entry["reasoning_effort"] not in efforts:
+            raise Invalid("invalid effort")
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) > MAX_BYTES:
+        raise Invalid("map too large")
+    return encoded
+
+try:
+    routes, roles, efforts = policy_data(policy_path, routing_lib)
+    if source == "env":
+        value = strict_json(payload)
+    elif source == "file":
+        try:
+            with open(payload, "r", encoding="utf-8") as handle:
+                raw = handle.read(1048577)
+        except FileNotFoundError:
+            raw = ""
+        if len(raw.encode("utf-8")) > 1048576:
+            raise Invalid("config too large")
+        value = yaml_map(config_document(raw), scope)
+    else:
+        raise Invalid("invalid source")
+    if value is None:
+        sys.exit(3)
+    print(validate(value, routes, roles, efforts), end="")
+except (Invalid, OSError, UnicodeError):
+    sys.exit(1)
+' "$scope" "$source" "$payload" "$policy_file" "$routing_lib"
+}
+
+# _uberdev_routing_policy_file
+# Resolve the canonical policy explicitly, then through source/install/repo
+# locations. An explicit unreadable path fails closed and never falls through.
+_uberdev_routing_policy_file() {
+  local candidate
+  if [ -n "${UBERDEV_ROUTING_POLICY_FILE:-}" ]; then
+    [ -r "$UBERDEV_ROUTING_POLICY_FILE" ] || return 1
+    printf '%s' "$UBERDEV_ROUTING_POLICY_FILE"
+    return 0
+  fi
+  candidate="${_UBERDEV_CONFIG_READ_DIR}/../policy/model-routing-v1.json"
+  if [ -n "$_UBERDEV_CONFIG_READ_DIR" ] && [ -r "$candidate" ]; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+  if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+    candidate="${CLAUDE_PLUGIN_ROOT}/policy/model-routing-v1.json"
+    if [ -r "$candidate" ]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  fi
+  if [ -n "${CODEX_HOME:-}" ]; then
+    candidate="${CODEX_HOME}/plugins/uberdev-codex/policy/model-routing-v1.json"
+    if [ -r "$candidate" ]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  fi
+  for candidate in \
+    "${PWD}/plugins/uberdev/policy/model-routing-v1.json" \
+    "${PWD}/codex/uberdev-codex/policy/model-routing-v1.json"; do
+    if [ -n "$candidate" ] && [ -r "$candidate" ]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# _uberdev_normalize_trusted_file PATH
+# Resolve a regular non-symlink file to an absolute path. Used only to compare
+# the validator against a fixed allowlist; arbitrary paths are never imported.
+_uberdev_normalize_trusted_file() {
+  local file_path="$1" dir base
+  case "$file_path" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  [ -f "$file_path" ] && [ -r "$file_path" ] && [ ! -L "$file_path" ] || return 1
+  dir="$(cd "$(dirname "$file_path")" 2>/dev/null && pwd -P)" || return 1
+  base="$(basename "$file_path")"
+  [ "$base" = "model_routing.py" ] || return 1
+  printf '%s/%s' "$dir" "$base"
+}
+
+# _uberdev_model_routing_lib_file
+# Resolve T40-1s canonical complete validator. UBERDEV_MODEL_ROUTING_LIB is a
+# test/embedding selector, not a general import path: it must exactly match one
+# trusted source/install/repo candidate after normalization.
+_uberdev_model_routing_lib_file() {
+  local requested="${UBERDEV_MODEL_ROUTING_LIB:-}" sibling normalized_sibling normalized_requested
+  [ -n "${_UBERDEV_CONFIG_READ_FILE:-}" ] && [ -n "${_UBERDEV_CONFIG_READ_DIR:-}" ] || return 1
+  sibling="${_UBERDEV_CONFIG_READ_DIR}/model_routing.py"
+  normalized_sibling="$(_uberdev_normalize_trusted_file "$sibling")" || return 1
+  if [ -z "$requested" ]; then
+    printf '%s' "$normalized_sibling"
+    return 0
+  fi
+  normalized_requested="$(_uberdev_normalize_trusted_file "$requested")" || return 1
+  [ "$normalized_requested" = "$normalized_sibling" ] || return 1
+  printf '%s' "$normalized_sibling"
+}
+
+# _uberdev_read_routing_map KEY ENV_VAR SCOPE
+# Returns normalized compact JSON or `{}` after one existing-format warning.
+_uberdev_read_routing_map() {
+  local key="$1" env_var="$2" scope="$3"
+  local raw source payload parsed policy_file routing_lib parse_status file
+  raw="$(printenv "$env_var" 2>/dev/null || true)"
+  if [ -n "$raw" ]; then
+    source='env'
+    payload="$raw"
+  else
+    source='file'
+    if file="$(_uberdev_config_file_for_key "$key")"; then
+      payload="$file"
+    else
+      _uberdev_set_validated "$key"
+      printf '{}'
+      return 0
+    fi
+  fi
+  if ! policy_file="$(_uberdev_routing_policy_file)"; then
+    _uberdev_warn_invalid "$key" "<invalid-map>" invalid_map "{}"
+    _uberdev_set_validated "$key"
+    printf '{}'
+    return 0
+  fi
+  if ! routing_lib="$(_uberdev_model_routing_lib_file)"; then
+    _uberdev_warn_invalid "$key" "<invalid-map>" invalid_map "{}"
+    _uberdev_set_validated "$key"
+    printf '{}'
+    return 0
+  fi
+  if parsed="$(_uberdev_parse_routing_map "$scope" "$source" "$payload" "$policy_file" "$routing_lib")"; then
+    _uberdev_set_validated "$key"
+    printf '%s' "$parsed"
+    return 0
+  else
+    parse_status=$?
+  fi
+  if [ "$parse_status" -eq 3 ]; then
+    _uberdev_set_validated "$key"
+    printf '{}'
+    return 0
+  fi
+  _uberdev_warn_invalid "$key" "<invalid-map>" invalid_map "{}"
+  _uberdev_set_validated "$key"
+  printf '{}'
+}
+
+# uberdev_read_model_routing
+# Resolve and export the v0.40 routing configuration. Input environment names
+# intentionally differ from resolved output names so repeated reads cannot
+# self-shadow a later caller-provided override. Role/workflow maps are compact
+# JSON data for model_routing.py; no map content is evaluated by the shell.
+uberdev_read_model_routing() {
+  UBERDEV_ROUTING_MODE="$(uberdev_read_enum model_routing.mode UBERDEV_MODEL_ROUTING_MODE 'adaptive|inherit' 'inherit')"
+  _uberdev_set_validated model_routing.mode
+  UBERDEV_ROUTING_SERVICE_TIER="$(uberdev_read_enum model_routing.service_tier UBERDEV_SERVICE_TIER 'default|fast|flex' 'default')"
+  _uberdev_set_validated model_routing.service_tier
+  UBERDEV_ROUTING_RISK_ESCALATION="$(uberdev_read_enum model_routing.risk_escalation UBERDEV_MODEL_ROUTING_RISK_ESCALATION 'true|false' 'true')"
+  _uberdev_set_validated model_routing.risk_escalation
+  UBERDEV_ROUTING_ADAPTIVE_FALLBACK="$(uberdev_read_enum model_routing.adaptive_fallback UBERDEV_MODEL_ROUTING_ADAPTIVE_FALLBACK 'true|false' 'true')"
+  _uberdev_set_validated model_routing.adaptive_fallback
+  UBERDEV_ROUTING_SHADOW="$(uberdev_read_enum model_routing.shadow UBERDEV_MODEL_ROUTING_SHADOW 'true|false' 'false')"
+  _uberdev_set_validated model_routing.shadow
+  UBERDEV_ROUTING_WORKFLOWS="$(_uberdev_read_routing_map model_routing.workflows UBERDEV_MODEL_ROUTING_WORKFLOWS workflows)"
+  _uberdev_set_validated model_routing.workflows
+  UBERDEV_ROUTING_ROLES="$(_uberdev_read_routing_map model_routing.roles UBERDEV_MODEL_ROUTING_ROLES roles)"
+  _uberdev_set_validated model_routing.roles
+  export UBERDEV_ROUTING_MODE UBERDEV_ROUTING_SERVICE_TIER
+  export UBERDEV_ROUTING_RISK_ESCALATION UBERDEV_ROUTING_ADAPTIVE_FALLBACK
+  export UBERDEV_ROUTING_SHADOW UBERDEV_ROUTING_WORKFLOWS UBERDEV_ROUTING_ROLES
 }
 
 # uberdev_tier_rank TIER_NAME -> integer rank (0..3) on stdout, "" on unknown.

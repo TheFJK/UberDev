@@ -4,7 +4,7 @@
 > The primer carries only a pointer here. Read this file when you need a key's type, range,
 > default, env override, or precedence rule — do not answer config questions from memory.
 
-Claude Code reads optional config from `.claude/uberdev.local.md` in your project root. Codex prefers `.codex/uberdev.local.md` when present and falls back to `.claude/uberdev.local.md` for shared repos. The file uses YAML frontmatter for typed settings:
+UberDev reads optional project config from `.codex/uberdev.local.md` when present and falls back to `.claude/uberdev.local.md` for shared and legacy repos. The file uses YAML frontmatter for typed settings:
 
 ```yaml
 ---
@@ -19,6 +19,16 @@ auto_confirm: false              # DEPRECATED — no behavioural effect. /merge 
 bot_authors_allow_list:          # DEPRECATED — no behavioural effect. /merge no longer gates on PR-author identity (any APPROVED + CI-green PR is eligible). Key parses for backward compat.
   - dependabot[bot]
   - renovate[bot]
+
+# --- GPT-5.6 routing (RFC 0013; opt-in in v0.40) ---
+model_routing:
+  mode: inherit                  # adaptive | inherit; v0.40 default: inherit
+  service_tier: default          # default | fast | flex; independent of model/effort
+  risk_escalation: true          # true | false; automatic risk upshift policy (hard floors remain enforced)
+  adaptive_fallback: true        # true | false; provider-compatible fallback after resolution
+  shadow: false                  # true computes an adaptive proposal but executes inherit
+  workflows: {}                  # solve/turbo only; bounded route/effort/sandbox overrides
+  roles: {}                      # canonical policy roles; bounded route/effort/sandbox overrides
 
 # --- /solve tier clamp ---
 solve_tier_floor: small          # one of: trivial, small, medium, large; clamps auto-triage UP to floor; default unset (no lower clamp); env: SOLVE_TIER_FLOOR
@@ -45,6 +55,117 @@ command_timeouts:
 ```
 
 Settings take effect on next SessionStart. Environment variables (`UBERDEV_FANOUT_SOLVE_BG`, `SOLVE_AUTO`, etc.) override file settings — use whichever is more convenient for your workflow.
+
+## GPT-5.6 model routing (RFC 0013, v0.40)
+
+`model_routing.mode` accepts `inherit | adaptive`. Version 0.40 defaults to
+`inherit`, which is the safe rollback path: bundled workflows use an unpinned
+provider carrier and keep the ambient model/reasoning selection. `adaptive` is
+an explicit opt-in that lets the deterministic policy choose a route for each
+lead and role. Version 0.42 plans to make `adaptive` the default only after its
+quality gates pass; that transition is planned, not current behavior.
+
+`model_routing.service_tier` accepts `default | fast | flex` and defaults to
+`default`. It is independent from model and reasoning effort. The `--fast`
+CLI alias is wired by the solve launcher in T40-6 and maps only to explicit
+`--service-tier=fast`; setting this config key does not silently alter a route.
+
+`model_routing.risk_escalation` and `model_routing.adaptive_fallback` are
+strict booleans and both default to `true`. The former controls optional
+automatic risk upshifts; setting it false never bypasses mandatory role/run
+risk floors. The latter permits only the resolver's provider-compatible
+post-resolution fallback chain. `model_routing.shadow` is
+a strict boolean defaulting to `false`; when true, UberDev records the adaptive
+proposal while effective execution remains `inherit` (unknown effective model
+and effort stay null unless the provider reports them).
+
+`model_routing.workflows` and `model_routing.roles` are data-only override
+maps. Each accepts at most 64 entries and 16 KiB of normalized JSON. Keys use
+`A-Za-z0-9._-` (no traversal-shaped `..` or slash). A value is either a route
+name/alias or an object containing only `route`, `reasoning_effort` (the input
+alias `effort` normalizes to this exact resolver field), and/or `sandbox`.
+Reasoning effort must be declared by a canonical policy route; sandbox is
+`read-only | workspace-write`. A concrete route already supplies its canonical
+model/effort pair, so `route` and `reasoning_effort` are mutually exclusive in
+one override entry. Role names are loaded from the canonical
+`model-routing-v1.json`; the v0.40 public workflow scope is exactly `solve` and
+`turbo`. Duplicate or unknown keys, duplicate effort aliases, unknown fields,
+routes or efforts, malformed JSON/YAML, excessive input, and
+`danger-full-access` reject the whole map to the safe `{}` default. Contents
+are never evaluated as shell or Python code. YAML examples:
+
+```yaml
+model_routing:
+  workflows:
+    solve: quality
+    turbo:
+      effort: high               # normalized to reasoning_effort
+      sandbox: read-only
+  roles:
+    triage-scout: economy
+    code-reviewer:
+      route: sol-high
+      sandbox: read-only
+```
+
+Routing config precedence is environment > project files per key > release
+default. For each omitted key, UberDev checks readable
+`.codex/uberdev.local.md` first and then `.claude/uberdev.local.md`; a Codex
+file can therefore define one key while a complementary Claude file supplies
+another. An invalid higher-precedence value safely defaults and is not replaced
+by a lower-precedence value. Explicit `UBERDEV_CONFIG_FILE` remains a sole-file
+override: missing keys in it do not fall through to either project file.
+Environment
+names are `UBERDEV_MODEL_ROUTING_MODE`, `UBERDEV_SERVICE_TIER`,
+`UBERDEV_MODEL_ROUTING_RISK_ESCALATION`,
+`UBERDEV_MODEL_ROUTING_ADAPTIVE_FALLBACK`,
+`UBERDEV_MODEL_ROUTING_SHADOW`, `UBERDEV_MODEL_ROUTING_WORKFLOWS`, and
+`UBERDEV_MODEL_ROUTING_ROLES`. Map environment values are strict JSON. The
+resolved exports use the separate `UBERDEV_ROUTING_*` namespace so input
+overrides cannot self-shadow. Invalid values use the standard one-warning-per-
+key fallback format. Existing files containing no `model_routing` block remain
+warning-silent and behavior-compatible.
+
+Map validation resolves its canonical policy from an explicit
+`UBERDEV_ROUTING_POLICY_FILE`, then packaged/source/install-safe locations.
+The explicit variable is also the test/embedding hook. If it is unreadable,
+malformed, duplicate-keyed, or lacks canonical routes/roles/efforts, a present
+map fails closed to `{}` with the standard single redacted warning; UberDev
+never accepts unvalidated role typos merely because the JSON/YAML is valid.
+Before extracting those bounded sets, the reader loads T40-1's trusted
+`model_routing.py` and invokes its public complete validator. The optional
+`UBERDEV_MODEL_ROUTING_LIB` selector is accepted only when its canonical,
+absolute, regular, non-symlink path exactly matches the
+`model_routing.py` sibling of the actual sourced `config-read.sh`. The helper
+captures its own source identity at source time under Bash 3.2 or zsh; current
+working directory, `CLAUDE_PLUGIN_ROOT`, and `CODEX_HOME` are not validator
+trust roots. A copied helper without its own sibling therefore fails closed,
+and the selector is not an arbitrary Python import path. Missing or unloadable
+validators and semantically invalid policies (including incomplete route
+mappings, duplicate capability ranks/provider pairs, malformed role rows, and
+unsupported reasoning efforts) fail the map closed with the same single
+redacted warning. Scalar/legacy readers do not require the validator.
+
+All routing-map parsing and validator imports run with isolated Python mode
+(`python3 -I`), so project-local modules such as `json.py` or `importlib.py`
+cannot shadow the standard library or execute before trust checks.
+
+When a config contains YAML delimiters, only the first YAML frontmatter body
+is configuration; tabs, headings, examples, and hostile-looking text in the
+Markdown notes after its closing `---` are ignored. The opening delimiter must
+be the first non-empty line and the file must contain exactly one opening and
+one closing delimiter. Unterminated or multiple delimiter structures fail a
+present routing map closed with one redacted warning. Delimiter-free legacy
+config remains supported and is parsed as the complete document. Per-key
+Codex-to-Claude fallback examines the same frontmatter slice, so a key written
+only in Codex notes cannot shadow a real Claude frontmatter value.
+
+Concrete run-level environment controls are `UBERDEV_ROUTE`, `UBERDEV_MODEL`,
+and `UBERDEV_REASONING_EFFORT`. The config reader leaves these inputs intact;
+T40-6 passes them to the policy resolver, which validates catalog membership,
+same-source conflicts, exact model/effort pairs, and risk floors before any
+dispatch. Together with `UBERDEV_MODEL_ROUTING_MODE` and
+`UBERDEV_SERVICE_TIER`, these are the complete RFC 0013 environment controls.
 
 **Auto-installed aliases (Claude Code only):** UberDev's SessionStart hook installs 13 top-level forwarder commands (`/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`, `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify`, `/uberthink`, `/ubercluster`) into Claude Code's user commands directory on first session and refreshes them on plugin upgrade. The `ALIASES` table in `lib/aliases-sync.sh` is the canonical set (SSOT) — this paragraph mirrors it and is count-checked by `tests/docs-accuracy.test.sh`. Hand-authored files at any of those command paths are preserved (the hook detects them via a `managed-by: uberdev-aliases` marker and skips). Disable per-project with `auto_install_aliases: false` or globally with `UBERDEV_NO_AUTO_ALIAS=1`. Remove already-installed forwarders with `/uberdev:uninstall-aliases`. Codex does not have a slash-alias install path; use the installed `$uberdev-cmd-*` skills instead.
 
