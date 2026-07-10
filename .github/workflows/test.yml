@@ -115,9 +115,11 @@ jobs:
           bash tests/config-override.test.sh && \
           bash tests/model-routing.test.sh && \
           bash tests/model-routing-config.test.sh && \
+          bash tests/plan-writer-routing.test.sh && \
           bash tests/run-manifest.test.sh && \
           bash tests/live-semaphore.test.sh && \
           bash tests/agent-dispatch.test.sh && \
+          bash tests/route-context.test.sh && \
           bash tests/dispatch-routing-parity.test.sh && \
           bash tests/orchestrator-plan-flatten.test.sh && \
           bash tests/orchestrator-phase-6-doc.test.sh && \
@@ -227,9 +229,11 @@ jobs:
         #   - merge-discovery-resilience.test.sh
         #   - model-routing.test.sh
         #   - model-routing-config.test.sh
+        #   - plan-writer-routing.test.sh
         #   - run-manifest.test.sh
         #   - live-semaphore.test.sh
         #   - agent-dispatch.test.sh
+        #   - route-context.test.sh
         #   - dispatch-routing-parity.test.sh
         #   - orchestrator-plan-flatten.test.sh
 #   - review-pr-phase3-ci.test.sh
