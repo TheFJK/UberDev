@@ -2,6 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; LIB="$ROOT/plugins/uberdev/lib/agent-dispatch.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT; mkdir -p "$TMP/run"
+trap 'echo "route-context failure: line=$LINENO command=$BASH_COMMAND" >&2' ERR
 . "$LIB"
 # Config provenance is per-key, redacted, deterministic, and path-canonical.
 mkdir -p "$TMP/project/.codex"
@@ -50,6 +51,16 @@ SHA="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_sha256
 [ "$(stat -f '%Lp' "$CTX" 2>/dev/null || stat -c '%a' "$CTX")" = 600 ]
 uberdev_agent_context_validate "$CTX" "$SHA" "$TMP/run" >/dev/null
 cp "$CTX" "$TMP/copy"; printf 'x' >> "$CTX"; ! uberdev_agent_context_validate "$CTX" "$SHA" "$TMP/run" >/dev/null 2>&1; mv "$TMP/copy" "$CTX"; chmod 600 "$CTX"
+# Even a caller-supplied matching hash cannot bless a valid-shaped but
+# request-incoherent persisted decision.
+cp "$CTX" "$TMP/coherent-copy"
+TAMPERED_SHA="$(python3 - "$CTX" <<'PY'
+import hashlib,json,pathlib,sys
+p=pathlib.Path(sys.argv[1]); value=json.loads(p.read_text()); value['root_decision']['logical_route']='deep'; value['root_decision']['reasoning_effort']='high'; raw=json.dumps(value,sort_keys=True,separators=(',',':')).encode(); p.write_bytes(raw); print(hashlib.sha256(raw).hexdigest())
+PY
+)"
+! uberdev_agent_context_validate "$CTX" "$TAMPERED_SHA" "$TMP/run" >/dev/null 2>&1
+mv "$TMP/coherent-copy" "$CTX"; chmod 600 "$CTX"
 ln "$CTX" "$TMP/hard"; ! uberdev_agent_context_validate "$CTX" "$SHA" "$TMP/run" >/dev/null 2>&1; rm "$TMP/hard"
 mv "$CTX" "$TMP/real"; ln -s "$TMP/real" "$CTX"; ! uberdev_agent_context_validate "$CTX" "$SHA" "$TMP/run" >/dev/null 2>&1
 # Restore the immutable context, then prove a decision mismatch is rejected
@@ -150,6 +161,30 @@ for kind in request decision provenance metadata created; do
   [ ! -e "$TMP/schema-root/.agent-state-$(id -u)" ]
 done
 
+# Allowed keys still require exact semantic values and the persisted decision
+# must be the canonical decision for the persisted request.
+SMALL_REQ="$(python3 -c 'import json,sys;r=json.loads(sys.argv[1]);r["task_tier"]="small";print(json.dumps(r,separators=(",",":")))' "$REQ")"
+SMALL_DECISION="$(uberdev_agent_resolve_request "$SMALL_REQ")"
+RISK_REQ="$(python3 -c 'import json,sys;r=json.loads(sys.argv[1]);r["task_tier"]="small";r["risk_signals"]=["security"];print(json.dumps(r,separators=(",",":")))' "$REQ")"
+RISK_META='{"run_id":"root-1","repository_id":"repo","workflow":"solve","backend":"codex","issue_num":7,"task_tier":"small","risk_signals":["security"]}'
+for kind in env-bool project-scalar project-map parent-null decision-type request-decision risk-decision service-decision; do
+  ROOT_CASE="$TMP/schema-$kind"; mkdir "$ROOT_CASE"
+  R="$REQ"; D="$DECISION"; M="$META"
+  case "$kind" in
+    env-bool) R="$(python3 -c 'import json,sys;r=json.loads(sys.argv[1]);r["environment"]={"UBERDEV_MODEL_ROUTING_RISK_ESCALATION":"secret"};print(json.dumps(r,separators=(",",":")))' "$REQ")" ;;
+    project-scalar) R="$(python3 -c 'import json,sys;r=json.loads(sys.argv[1]);r["project_routing"]={"mode":"bogus"};print(json.dumps(r,separators=(",",":")))' "$REQ")" ;;
+    project-map) R="$(python3 -c 'import json,sys;r=json.loads(sys.argv[1]);r["project_routing"]={"roles":{"plan-writer":{"route":"bogus"}}};print(json.dumps(r,separators=(",",":")))' "$REQ")" ;;
+    parent-null) R="$(python3 -c 'import json,sys;r=json.loads(sys.argv[1]);r.pop("routing_mode",None);r["parent_run"]={"forced":True,"logical_route":None,"model":"gpt-5.6-sol","reasoning_effort":"ultra"};print(json.dumps(r,separators=(",",":")))' "$REQ")" ;;
+    decision-type) D="$(python3 -c 'import json,sys;d=json.loads(sys.argv[1]);d["forced"]="false";print(json.dumps(d,separators=(",",":")))' "$DECISION")" ;;
+    request-decision) D="$SMALL_DECISION" ;;
+    risk-decision) R="$RISK_REQ"; D="$SMALL_DECISION"; M="$RISK_META" ;;
+    service-decision) D="$(python3 -c 'import json,sys;d=json.loads(sys.argv[1]);d["service_tier"]="fast";d["field_sources"]["service_tier"]="cli-service-tier";print(json.dumps(d,separators=(",",":")))' "$DECISION")" ;;
+  esac
+  ! uberdev_agent_context_create "$ROOT_CASE" "$R" "$D" "$PROV" "$M" '2026-07-10T00:00:00Z' >/dev/null 2>"$TMP/semantic-$kind.err"
+  [ ! -e "$ROOT_CASE/.agent-state-$(id -u)" ]
+  [ -z "$(find "$ROOT_CASE" -name '.route-context.*' -print -quit)" ]
+done
+
 # A state-directory ancestor cannot be replaced by a symlink outside run root.
 mkdir "$TMP/escape-root"
 ESC="$(uberdev_agent_context_create "$TMP/escape-root" "$REQ" "$DECISION" "$PROV" "$META" '2026-07-10T00:00:00Z')"
@@ -161,20 +196,23 @@ mv "$TMP/escape-root/.agent-state-$(id -u)" "$TMP/escaped-state"; ln -s "$TMP/es
 mkdir "$TMP/race-root"
 RACE="$(uberdev_agent_context_create "$TMP/race-root" "$REQ" "$DECISION" "$PROV" "$META" '2026-07-10T00:00:00Z')"; RACE_FILE="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_file"])' "$RACE")"; RACE_SHA="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_sha256"])' "$RACE")"
 cp -R "$TMP/race-root/.agent-state-$(id -u)" "$TMP/race-outside"
+printf 'dir-0\n' >"$TMP/race-phase"
 (
-  for _ in $(seq 1 150); do
+  for i in $(seq 1 150); do
     mv "$TMP/race-root/.agent-state-$(id -u)" "$TMP/race-hold" 2>/dev/null || continue
     ln -s "$TMP/race-outside" "$TMP/race-root/.agent-state-$(id -u)" 2>/dev/null || true
+    printf 'link-%s\n' "$i" >"$TMP/race-phase.tmp"; mv "$TMP/race-phase.tmp" "$TMP/race-phase"
+    command sleep 0.002
     rm "$TMP/race-root/.agent-state-$(id -u)" 2>/dev/null || true
     mv "$TMP/race-hold" "$TMP/race-root/.agent-state-$(id -u)" 2>/dev/null || true
+    printf 'dir-%s\n' "$i" >"$TMP/race-phase.tmp"; mv "$TMP/race-phase.tmp" "$TMP/race-phase"
   done
 ) & RACE_PID=$!
 for _ in $(seq 1 150); do
-  BEFORE_LINK=0; AFTER_LINK=0; RC=1
-  [ ! -L "$TMP/race-root/.agent-state-$(id -u)" ] || BEFORE_LINK=1
+  BEFORE_PHASE="$(cat "$TMP/race-phase")"; RC=1
   uberdev_agent_context_validate "$RACE_FILE" "$RACE_SHA" "$TMP/race-root" >/dev/null 2>&1 && RC=0 || true
-  [ ! -L "$TMP/race-root/.agent-state-$(id -u)" ] || AFTER_LINK=1
-  [ "$BEFORE_LINK:$AFTER_LINK:$RC" != 1:1:0 ]
+  AFTER_PHASE="$(cat "$TMP/race-phase")"
+  case "$BEFORE_PHASE:$AFTER_PHASE:$RC" in link-*:*:0) [ "$BEFORE_PHASE" != "$AFTER_PHASE" ] ;; esac
 done
 wait "$RACE_PID"
 uberdev_agent_context_validate "$RACE_FILE" "$RACE_SHA" "$TMP/race-root" >/dev/null
@@ -191,4 +229,4 @@ AFTER="$(find "$TMP/runtime" -type f -exec shasum -a 256 {} + | sort)"
 BAD='{"backend":"codex","workflow":"solve","role":"plan-writer","task_tier":"small","risk_signals":[],"routing_mode":""}'
 ! uberdev_agent_resolve_request "$BAD" >/dev/null 2>"$TMP/error"
 ! grep -q "$TMP" "$TMP/error"
-echo 'route-context: 63 checks passed'
+echo 'route-context: 88 checks passed'

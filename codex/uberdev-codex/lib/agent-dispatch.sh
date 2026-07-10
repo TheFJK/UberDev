@@ -272,7 +272,7 @@ print(path, end="")
 # `project_routing`, and an already-normalized descendant decision in
 # `parent_run`. Empty-string carrier values are rejected instead of silently
 # changing provenance.
-uberdev_agent_resolve_request() {
+_uberdev_agent_resolve_request_internal() {
   local request_json="${1:-}" injected="${UBERDEV_MODEL_CATALOG_FILE:-}"
   [ "$#" -eq 1 ] || { _uberdev_agent_error 'resolve_request expects REQUEST_JSON'; return 2; }
   python3 -I -B -c '
@@ -357,6 +357,14 @@ except Exception as exc:
 ' "$request_json" "$_UBERDEV_AGENT_POLICY" "$_UBERDEV_AGENT_ROUTER" "$injected"
 }
 
+uberdev_agent_resolve_request() {
+  _uberdev_agent_resolve_request_internal "$@"
+}
+
+_uberdev_agent_compact_json() {
+  python3 -I -B -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1]),sort_keys=True,separators=(",",":")),end="")' "$1"
+}
+
 _uberdev_agent_context_schema_validate() {
   local mode="$1"; shift
   python3 -I -B -c '
@@ -427,8 +435,17 @@ print(json.dumps(validate(payload),sort_keys=True,separators=(",",":"),ensure_as
 # derived only from the validated run_id and is exclusive: an existing context
 # is never replaced.
 uberdev_agent_context_create() {
-  local payload
+  local payload canonical_decision supplied_decision
   [ "$#" -eq 6 ] || { _uberdev_agent_error 'context_create expects RUN_ROOT REQUEST DECISION PROVENANCE METADATA CREATED_AT'; return 2; }
+  canonical_decision="$(_uberdev_agent_resolve_request_internal "$2" 2>/dev/null)" || {
+    _uberdev_agent_error 'route_context_request_invalid'; return 2;
+  }
+  supplied_decision="$(_uberdev_agent_compact_json "$3" 2>/dev/null)" || {
+    _uberdev_agent_error 'route_context_decision_invalid'; return 2;
+  }
+  if [ "$canonical_decision" != "$supplied_decision" ]; then
+    _uberdev_agent_error 'route_context_mismatch'; return 2
+  fi
   payload="$(_uberdev_agent_context_schema_validate create "$2" "$3" "$4" "$5" "$6" 2>/dev/null)" || {
     _uberdev_agent_error 'route_context_create_failed'; return 2;
   }
@@ -471,7 +488,7 @@ except Exception:
 }
 
 uberdev_agent_context_validate() {
-  local payload validated
+  local payload validated routing_request stored_decision canonical_decision
   [ "$#" -eq 3 ] || return 2
   payload="$(python3 -I -B -c '
 import hashlib,json,os,stat,sys
@@ -498,6 +515,10 @@ try:
 except Exception: raise SystemExit(2)
 ' "$1" "$2" "$3")" || return 2
   validated="$(_uberdev_agent_context_schema_validate payload "$payload" 2>/dev/null)" || return 2
+  routing_request="$(python3 -I -B -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["routing_request"],sort_keys=True,separators=(",",":")),end="")' "$validated")" || return 2
+  stored_decision="$(python3 -I -B -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["root_decision"],sort_keys=True,separators=(",",":")),end="")' "$validated")" || return 2
+  canonical_decision="$(_uberdev_agent_resolve_request_internal "$routing_request" 2>/dev/null)" || return 2
+  [ "$canonical_decision" = "$stored_decision" ] || return 2
   python3 -I -B -c '
 import json,sys
 path,digest,raw=sys.argv[1:]; value=json.loads(raw)
