@@ -34,7 +34,7 @@ jobs:
   shape-checks:
     name: shape-checks
     runs-on: ubuntu-latest
-    # 5 minutes is generous for the wired suite — 59 test files, ~2,700
+    # 5 minutes is generous for the wired suite — 63 test files, ~2,700+
     # grep-and-assert checks, measured at #309 (ci-wiring.test.sh keeps the
     # run list below complete against tests/*.test.sh on disk; these counts
     # are a point-in-time snapshot, refresh when they age).
@@ -113,6 +113,10 @@ jobs:
           bash tests/docs-accuracy.test.sh && \
           bash tests/orchestrator-phase1-shortcircuit.test.sh && \
           bash tests/config-override.test.sh && \
+          bash tests/model-routing.test.sh && \
+          bash tests/run-manifest.test.sh && \
+          bash tests/live-semaphore.test.sh && \
+          bash tests/orchestrator-plan-flatten.test.sh && \
           bash tests/orchestrator-phase-6-doc.test.sh && \
           bash tests/orchestrator-phase-0-bg-detection.test.sh && \
           bash tests/dev.test.sh && \
@@ -218,6 +222,10 @@ jobs:
         #   - uberthink.test.sh
         #   - uberthink-report.test.sh
         #   - merge-discovery-resilience.test.sh
+        #   - model-routing.test.sh
+        #   - run-manifest.test.sh
+        #   - live-semaphore.test.sh
+        #   - orchestrator-plan-flatten.test.sh
 #   - review-pr-phase3-ci.test.sh
 #   - lib-assert-count.test.sh
 #   - codex-port.test.sh                  (python3 -c + mktemp -d path-translation
