@@ -922,13 +922,11 @@ def probe_status_file(path: str) -> str:
     return verdict
 
 
-def _canonical_terminal_truth(started: dict[str, Any]) -> str | None:
-    """Return validated provider terminal truth without importing status payload."""
+def _terminal_truth_from_snapshot(
+    started: dict[str, Any], verdict: str, snapshot: dict[str, Any] | None
+) -> str | None:
+    """Validate terminal truth without importing arbitrary status fields."""
 
-    status_path = started.get("status_path")
-    if not isinstance(status_path, str):
-        return None
-    verdict, snapshot = _probe_status_snapshot(status_path)
     if verdict != "terminal" or snapshot is None:
         return None
     state_keys = [
@@ -949,6 +947,40 @@ def _canonical_terminal_truth(started: dict[str, Any]) -> str | None:
     if terminal != "completed" and exit_code == 0:
         return None
     return terminal
+
+
+def _canonical_terminal_truth(started: dict[str, Any]) -> str | None:
+    """Return validated provider terminal truth without importing status payload."""
+
+    status_path = started.get("status_path")
+    if not isinstance(status_path, str):
+        return None
+    verdict, snapshot = _probe_status_snapshot(status_path)
+    return _terminal_truth_from_snapshot(started, verdict, snapshot)
+
+
+def _reconciliation_status(
+    started: dict[str, Any],
+) -> tuple[bool | None, str | None]:
+    """Classify one secure snapshot for reconciliation exactly once.
+
+    Invalid, contradictory, missing, and unsafe snapshots are unavailable
+    evidence. They never force a backend dead before its numeric handle probe.
+    """
+
+    status_path = started.get("status_path")
+    if not isinstance(status_path, str):
+        return None, None
+    try:
+        verdict, snapshot = _probe_status_snapshot(status_path)
+    except (ManifestRejected, ManifestRuntimeError):
+        return None, None
+    terminal_truth = _terminal_truth_from_snapshot(started, verdict, snapshot)
+    if terminal_truth is not None:
+        return False, terminal_truth
+    if verdict == "live":
+        return True, None
+    return None, None
 
 
 def _lease_generation(payload: bytes) -> str:
@@ -1065,7 +1097,9 @@ def secure_remove_lease(path: str, generation: str) -> None:
         os.close(parent_descriptor)
 
 
-def _backend_live(started: dict[str, Any]) -> bool:
+def _backend_live(
+    started: dict[str, Any], status: bool | None = None, *, status_known: bool = False
+) -> bool:
     """Apply the shared backend-liveness matrix used by live-semaphore.sh.
 
     Terminal status is always dead. Status-only and opaque handles are live
@@ -1073,12 +1107,12 @@ def _backend_live(started: dict[str, Any]) -> bool:
     process probe exclusively, so stale live status cannot revive a dead PID.
     """
 
-    status_path = started.get("status_path")
-    status: bool | None = None
-    if isinstance(status_path, str):
-        status = _status_liveness(status_path)
-        if status is False:
-            return False
+    if not status_known:
+        status_path = started.get("status_path")
+        if isinstance(status_path, str):
+            status = _status_liveness(status_path)
+    if status is False:
+        return False
     handle = started.get("backend_handle")
     if handle in (None, ""):
         return status is True
@@ -1202,7 +1236,7 @@ def reconcile_manifest(path: str) -> dict[str, Any]:
             state = states[identity]
             if state.started is None or state.terminal is not None:
                 continue
-            terminal_truth = _canonical_terminal_truth(state.started)
+            status_liveness, terminal_truth = _reconciliation_status(state.started)
             if terminal_truth is not None:
                 run_id, agent_id = identity
                 terminal: dict[str, Any] = {
@@ -1242,7 +1276,9 @@ def reconcile_manifest(path: str) -> dict[str, Any]:
                 appended_count += 1
                 continue
             owner_live = _pid_live(state.started.get("owner_pid"))
-            backend_live = _backend_live(state.started)
+            backend_live = _backend_live(
+                state.started, status_liveness, status_known=True
+            )
             if owner_live or backend_live:
                 continue
             run_id, agent_id = identity

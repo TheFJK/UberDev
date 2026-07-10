@@ -724,6 +724,63 @@ else
   fail "canonical terminal reconciliation is idempotent" "rc=$CAPTURE_RC lines=$before_true_terminal_lines/$after_true_terminal_lines out=$CAPTURE_OUT"
 fi
 
+# Terminal-shaped status that fails backend or exit-code validation is
+# unavailable evidence. It cannot override a proven-live numeric backend PID,
+# but the orphan may be abandoned after that PID actually exits.
+sleep 30 & invalid_terminal_backend=$!
+INVALID_BACKEND_STATUS="$TMP/invalid-terminal-backend/status.json"
+INVALID_BACKEND_MANIFEST="$TMP/invalid-terminal-backend/events.jsonl"
+mkdir -p "$(dirname "$INVALID_BACKEND_STATUS")"
+printf '{"backend":"background","state":"completed","exit_code":0,"pid":"%s"}\n' "$invalid_terminal_backend" > "$INVALID_BACKEND_STATUS"
+append_event "$INVALID_BACKEND_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:07:25Z","run_id":"run-invalid-terminal-backend","backend":"codex"}' >/dev/null
+append_event "$INVALID_BACKEND_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:26Z\",\"run_id\":\"run-invalid-terminal-backend\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"backend_handle\":\"$invalid_terminal_backend\",\"status_path\":\"$INVALID_BACKEND_STATUS\"}" >/dev/null
+capture python3 "$MANIFEST" reconcile --manifest "$INVALID_BACKEND_MANIFEST"
+invalid_backend_live_rc="$CAPTURE_RC"
+invalid_backend_live_out="$CAPTURE_OUT"
+invalid_backend_live_lines="$(wc -l < "$INVALID_BACKEND_MANIFEST" | tr -d ' ')"
+if [ "$invalid_backend_live_rc" -eq 0 ] \
+   && [ "$invalid_backend_live_out" = '{"abandoned":0,"open":1,"status":"ok"}' ] \
+   && [ "$invalid_backend_live_lines" -eq 2 ]; then
+  pass "backend-mismatched terminal status cannot override a live numeric handle"
+else
+  fail "backend-mismatched terminal status cannot override a live numeric handle" "rc=$invalid_backend_live_rc out=$invalid_backend_live_out lines=$invalid_backend_live_lines"
+fi
+
+INVALID_EXIT_STATUS="$TMP/invalid-terminal-exit/status.json"
+INVALID_EXIT_MANIFEST="$TMP/invalid-terminal-exit/events.jsonl"
+mkdir -p "$(dirname "$INVALID_EXIT_STATUS")"
+printf '{"backend":"codex","state":"completed","exit_code":9,"pid":"%s"}\n' "$invalid_terminal_backend" > "$INVALID_EXIT_STATUS"
+append_event "$INVALID_EXIT_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:07:27Z","run_id":"run-invalid-terminal-exit","backend":"codex"}' >/dev/null
+append_event "$INVALID_EXIT_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:28Z\",\"run_id\":\"run-invalid-terminal-exit\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"backend_handle\":\"$invalid_terminal_backend\",\"status_path\":\"$INVALID_EXIT_STATUS\"}" >/dev/null
+capture python3 "$MANIFEST" reconcile --manifest "$INVALID_EXIT_MANIFEST"
+invalid_exit_live_rc="$CAPTURE_RC"
+invalid_exit_live_out="$CAPTURE_OUT"
+invalid_exit_live_lines="$(wc -l < "$INVALID_EXIT_MANIFEST" | tr -d ' ')"
+if [ "$invalid_exit_live_rc" -eq 0 ] \
+   && [ "$invalid_exit_live_out" = '{"abandoned":0,"open":1,"status":"ok"}' ] \
+   && [ "$invalid_exit_live_lines" -eq 2 ]; then
+  pass "contradictory completed exit code cannot override a live numeric handle"
+else
+  fail "contradictory completed exit code cannot override a live numeric handle" "rc=$invalid_exit_live_rc out=$invalid_exit_live_out lines=$invalid_exit_live_lines"
+fi
+
+kill "$invalid_terminal_backend" 2>/dev/null || true
+wait "$invalid_terminal_backend" 2>/dev/null || true
+capture python3 "$MANIFEST" reconcile --manifest "$INVALID_BACKEND_MANIFEST"
+invalid_backend_dead_rc="$CAPTURE_RC"
+invalid_backend_dead_out="$CAPTURE_OUT"
+capture python3 "$MANIFEST" reconcile --manifest "$INVALID_EXIT_MANIFEST"
+invalid_exit_dead_rc="$CAPTURE_RC"
+invalid_exit_dead_out="$CAPTURE_OUT"
+if [ "$invalid_backend_dead_rc" -eq 0 ] \
+   && [ "$invalid_backend_dead_out" = '{"abandoned":1,"open":0,"status":"ok"}' ] \
+   && [ "$invalid_exit_dead_rc" -eq 0 ] \
+   && [ "$invalid_exit_dead_out" = '{"abandoned":1,"open":0,"status":"ok"}' ]; then
+  pass "invalid terminal shapes become abandonable only after numeric handle death"
+else
+  fail "invalid terminal shapes become abandonable only after numeric handle death" "backend=$invalid_backend_dead_rc/$invalid_backend_dead_out exit=$invalid_exit_dead_rc/$invalid_exit_dead_out"
+fi
+
 MALFORMED_TRUTH_STATUS="$TMP/malformed-truth/status.json"
 MALFORMED_TRUTH_MANIFEST="$TMP/malformed-truth/events.jsonl"
 mkdir -p "$(dirname "$MALFORMED_TRUTH_STATUS")"
@@ -734,6 +791,7 @@ malformed_lines_before="$(wc -l < "$MALFORMED_TRUTH_MANIFEST" | tr -d ' ')"
 capture python3 "$MANIFEST" reconcile --manifest "$MALFORMED_TRUTH_MANIFEST"
 malformed_rc="$CAPTURE_RC"
 malformed_lines_after="$(wc -l < "$MALFORMED_TRUTH_MANIFEST" | tr -d ' ')"
+malformed_terminal="$(tail -n 1 "$MALFORMED_TRUTH_MANIFEST")"
 
 UNKNOWN_TRUTH_STATUS="$TMP/unknown-truth/status.json"
 UNKNOWN_TRUTH_MANIFEST="$TMP/unknown-truth/events.jsonl"
@@ -743,12 +801,13 @@ append_event "$UNKNOWN_TRUTH_MANIFEST" '{"schema_version":1,"event":"route_decid
 append_event "$UNKNOWN_TRUTH_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:41Z\",\"run_id\":\"run-unknown-truth\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"backend_handle\":\"$dead_pid\",\"status_path\":\"$UNKNOWN_TRUTH_STATUS\"}" >/dev/null
 capture python3 "$MANIFEST" reconcile --manifest "$UNKNOWN_TRUTH_MANIFEST"
 unknown_terminal="$(tail -n 1 "$UNKNOWN_TRUTH_MANIFEST")"
-if [ "$malformed_rc" -eq 2 ] \
-   && [ "$malformed_lines_before" -eq "$malformed_lines_after" ] \
+if [ "$malformed_rc" -eq 0 ] \
+   && [ "$malformed_lines_after" -eq $((malformed_lines_before + 1)) ] \
+   && printf '%s' "$malformed_terminal" | grep -q '"event":"abandoned"' \
    && ! printf '%s' "$unknown_terminal" | grep -Eq '"event":"(completed|failed|timed_out|cancelled)"'; then
-  pass "malformed and unknown status never fabricate provider terminal truth"
+  pass "malformed and unknown status are unavailable and never provider terminal truth"
 else
-  fail "malformed and unknown status never fabricate provider terminal truth" "malformed_rc=$malformed_rc lines=$malformed_lines_before/$malformed_lines_after unknown=$unknown_terminal"
+  fail "malformed and unknown status are unavailable and never provider terminal truth" "malformed_rc=$malformed_rc lines=$malformed_lines_before/$malformed_lines_after malformed=$malformed_terminal unknown=$unknown_terminal"
 fi
 
 FUTURE_TRUE_STATUS="$TMP/future-true/status.json"
