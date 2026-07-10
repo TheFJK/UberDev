@@ -27,6 +27,8 @@ ROUTE_ERROR_FIELDS = ("code", "detail")
 
 _ROUTING_MODES = {"adaptive", "inherit"}
 _RISK_SCOPES = {"run", "subtask"}
+_CANONICAL_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
+_PROJECT_OVERRIDE_SOURCES = frozenset({"project-role", "project-workflow"})
 _SANDBOX_RANK = {"read-only": 0, "workspace-write": 1, "danger-full-access": 2}
 _SELECTABLE_SANDBOXES = {"read-only", "workspace-write"}
 _FALLBACK_ERROR_CLASSES = {
@@ -67,6 +69,12 @@ class _DuplicateKeyError(ValueError):
 
 def _error(code: str, detail: str) -> RouteError:
     return RouteError(code, detail)
+
+
+def _validate_reasoning_effort_token(value: object, error_code: str, source: str) -> str:
+    if not isinstance(value, str) or value not in _CANONICAL_REASONING_EFFORTS:
+        raise _error(error_code, f"{source} has unknown reasoning effort {value!r}")
+    return value
 
 
 def _as_mapping(value: object, name: str) -> Mapping[str, Any]:
@@ -115,7 +123,9 @@ def _json_load(path: Path, error_code: str) -> dict[str, object]:
 def load_policy(path: Path | str) -> dict[str, object]:
     """Load a routing policy without consulting ambient configuration."""
 
-    return _json_load(Path(path), "invalid_policy")
+    policy = _json_load(Path(path), "invalid_policy")
+    _validate_policy(policy)
+    return policy
 
 
 def _routes(policy: Mapping[str, Any]) -> Mapping[str, Mapping[str, Any]]:
@@ -230,6 +240,7 @@ def _validate_policy(policy: Mapping[str, Any]) -> None:
         for field in ("model", "reasoning_effort", "service_tier"):
             if not isinstance(provider.get(field), str) or not provider.get(field):
                 raise _error("invalid_policy", f"route {name!r} has invalid Codex field {field!r}")
+        _validate_reasoning_effort_token(provider.get("reasoning_effort"), "invalid_policy", f"route {name!r}")
         pair = (str(provider["model"]), str(provider["reasoning_effort"]))
         if pair in provider_pairs:
             raise _error("invalid_policy", f"multiple routes map to provider pair {pair[0]}/{pair[1]}")
@@ -356,6 +367,8 @@ def validate_catalog(policy: Mapping[str, Any], catalog: Mapping[str, Any]) -> N
             or len(set(efforts)) != len(efforts)
         ):
             raise _error("invalid_catalog", f"model {model!r} must declare unique reasoning efforts")
+        for effort in efforts:
+            _validate_reasoning_effort_token(effort, "invalid_catalog", f"model {model!r}")
 
     source_roles = catalog.get("source_roles")
     if not isinstance(source_roles, list) or any(not isinstance(role, str) for role in source_roles):
@@ -386,6 +399,7 @@ def validate_catalog(policy: Mapping[str, Any], catalog: Mapping[str, Any]) -> N
             raise _error("invalid_catalog", f"ranked pair {index} has unknown or missing fields")
         if not isinstance(route, str) or type(rank) is not int or pair is None:
             raise _error("invalid_catalog", f"ranked pair {index} is incomplete")
+        _validate_reasoning_effort_token(pair[1], "invalid_catalog", f"ranked pair {index}")
         if pair in ranked_pairs_seen:
             raise _error("incompatible_pair", f"provider pair {pair[0]}/{pair[1]} has multiple logical ranks")
         ranked_pairs_seen.add(pair)
@@ -436,6 +450,7 @@ def validate_catalog(policy: Mapping[str, Any], catalog: Mapping[str, Any]) -> N
         pair = _pair_key(raw_pair)
         if pair is None:
             raise _error("invalid_catalog", f"available pair {index} is incomplete")
+        _validate_reasoning_effort_token(pair[1], "invalid_catalog", f"available pair {index}")
         if pair in seen:
             raise _error("invalid_catalog", f"available pair {pair[0]}/{pair[1]} is duplicated")
         seen.add(pair)
@@ -517,6 +532,12 @@ def _route_from_override(value: object, name: str) -> object:
     raise _error("invalid_request", f"{name} route override must be a string or object")
 
 
+def _effort_from_override(value: object) -> object:
+    if isinstance(value, Mapping):
+        return value.get("reasoning_effort")
+    return None
+
+
 def _project_override_entry(config: Mapping[str, Any], scope: str, key: str) -> object:
     collection = config.get(scope, {})
     if collection is None:
@@ -541,6 +562,66 @@ def _project_route(policy: Mapping[str, Any], request: Mapping[str, Any]) -> tup
         if _present(workflow_value):
             return _normalize_route(policy, workflow_value), "project-workflow"
     return None
+
+
+def _project_provider_fields(
+    policy: Mapping[str, Any],
+    request: Mapping[str, Any],
+) -> tuple[object, str | None, object, str | None, list[str]]:
+    """Resolve project model/effort fields without coupling sandbox selection."""
+
+    config = _project_routing_config(request)
+    role = request.get("role", "lead")
+    workflow = request.get("workflow", "")
+    scopes: list[tuple[str, str, str]] = []
+    if isinstance(role, str):
+        scopes.append(("roles", role, "project-role"))
+    if isinstance(workflow, str):
+        scopes.append(("workflows", workflow, "project-workflow"))
+
+    model: object = None
+    effort: object = None
+    model_source: str | None = None
+    effort_source: str | None = None
+    reasons: list[str] = []
+    for scope, key, source in scopes:
+        entry = _project_override_entry(config, scope, key)
+        route_value = _route_from_override(entry, f"{scope[:-1]} {key!r}")
+        effort_value = _effort_from_override(entry)
+        if _present(route_value):
+            route = _normalize_route(policy, route_value)
+            route_model, route_effort = _canonical_pair(policy, route)
+            used = False
+            if model is None:
+                model, model_source = route_model, source
+                used = True
+            if effort is None:
+                effort, effort_source = route_effort, source
+                used = True
+            if used:
+                reasons.append(f"{source}-override")
+        elif effort is None and _present(effort_value):
+            effort, effort_source = effort_value, source
+            reasons.append(f"{source}-provider-field")
+    return model, model_source, effort, effort_source, reasons
+
+
+def _validate_project_override_values(policy: Mapping[str, Any], request: Mapping[str, Any]) -> None:
+    config = _project_routing_config(request)
+    for scope in ("roles", "workflows"):
+        entries = config.get(scope, {})
+        if not isinstance(entries, Mapping):
+            continue
+        for key, entry in entries.items():
+            source = f"project-{scope[:-1]}"
+            route_value = _route_from_override(entry, f"{scope[:-1]} {key!r}")
+            effort_value = _effort_from_override(entry)
+            if _present(route_value) and _present(effort_value):
+                raise _error("route_conflict", f"{source} route is mutually exclusive with reasoning_effort")
+            if _present(route_value):
+                _normalize_route(policy, route_value)
+            if _present(effort_value):
+                _validate_reasoning_effort_token(effort_value, "invalid_request", source)
 
 
 def _project_mode(request: Mapping[str, Any]) -> object:
@@ -576,10 +657,12 @@ def _validate_override_map(config: Mapping[str, Any], scope: str) -> None:
             if not entry:
                 raise _error("invalid_request", f"project routing {scope}.{key} route must not be empty")
             continue
-        if not isinstance(entry, Mapping) or not entry or not set(entry).issubset({"route", "sandbox"}):
-            raise _error("invalid_request", f"project routing {scope}.{key} must be a route string or route/sandbox object")
+        if not isinstance(entry, Mapping) or not entry or not set(entry).issubset({"route", "reasoning_effort", "sandbox"}):
+            raise _error("invalid_request", f"project routing {scope}.{key} must be a route string or route/reasoning_effort/sandbox object")
         for field in entry:
-            _validate_optional_string(entry, field, f"project routing {scope}.{key}")
+            value = entry.get(field)
+            if not isinstance(value, str) or not value:
+                raise _error("invalid_request", f"project routing {scope}.{key}.{field} must be a non-empty string")
 
 
 def _validate_request_types(request: Mapping[str, Any]) -> None:
@@ -876,6 +959,7 @@ def _decision_context(
         "minimum_route": minimum,
         "fallback_chain": [],
         "ignored_sources": list(ignored_sources),
+        "ignored_fields": [],
     }
 
 
@@ -906,6 +990,109 @@ def _base_decision(
     field_sources = dict(decision["field_sources"])
     field_sources.update({"model": source, "reasoning_effort": source})
     decision["field_sources"] = field_sources
+    return decision
+
+
+def _set_provider_field_sources(
+    decision: dict[str, object],
+    model_source: str,
+    effort_source: str,
+) -> dict[str, object]:
+    field_sources = dict(decision["field_sources"])
+    field_sources["model"] = model_source
+    field_sources["reasoning_effort"] = effort_source
+    decision["field_sources"] = field_sources
+    return decision
+
+
+def _reconcile_project_sources(
+    decision: dict[str, object],
+    request: Mapping[str, Any],
+    *related_decisions: Mapping[str, Any],
+) -> dict[str, object]:
+    """Reconcile coarse and field-level provenance for matching project overrides."""
+
+    current_decisions = (decision, *related_decisions)
+    used_sources: set[str] = set()
+    for current in current_decisions:
+        route_source = current.get("route_source")
+        if route_source in _PROJECT_OVERRIDE_SOURCES:
+            used_sources.add(str(route_source))
+        field_sources = current.get("field_sources")
+        if isinstance(field_sources, Mapping):
+            used_sources.update(
+                str(source)
+                for source in field_sources.values()
+                if source in _PROJECT_OVERRIDE_SOURCES
+            )
+        reason_codes = current.get("reason_codes")
+        if isinstance(reason_codes, list):
+            for source in _PROJECT_OVERRIDE_SOURCES:
+                if any(isinstance(reason, str) and reason.startswith(f"{source}-") for reason in reason_codes):
+                    used_sources.add(source)
+
+    config = _project_routing_config(request)
+    role = request.get("role", "lead")
+    workflow = request.get("workflow", "")
+    scoped_entries: list[tuple[str, object]] = []
+    if isinstance(role, str):
+        scoped_entries.append(("project-role", _project_override_entry(config, "roles", role)))
+    if isinstance(workflow, str):
+        scoped_entries.append(("project-workflow", _project_override_entry(config, "workflows", workflow)))
+
+    ignored_fields: list[dict[str, str]] = []
+    field_order = ("route", "reasoning_effort", "sandbox")
+    for source, entry in scoped_entries:
+        if isinstance(entry, str):
+            configured_fields = {"route"}
+        elif isinstance(entry, Mapping):
+            configured_fields = set(entry)
+        else:
+            configured_fields = set()
+        for field in field_order:
+            if field not in configured_fields:
+                continue
+            if field == "route":
+                used = any(
+                    current.get("route_source") == source
+                    or (
+                        isinstance(current.get("field_sources"), Mapping)
+                        and (
+                            current["field_sources"].get("model") == source
+                            or current["field_sources"].get("reasoning_effort") == source
+                        )
+                    )
+                    or (
+                        isinstance(current.get("reason_codes"), list)
+                        and f"{source}-override" in current["reason_codes"]
+                    )
+                    for current in current_decisions
+                )
+            elif field == "reasoning_effort":
+                used = any(
+                    (
+                        isinstance(current.get("field_sources"), Mapping)
+                        and current["field_sources"].get("reasoning_effort") == source
+                    )
+                    or (
+                        isinstance(current.get("reason_codes"), list)
+                        and f"{source}-provider-field" in current["reason_codes"]
+                    )
+                    for current in current_decisions
+                )
+            else:
+                used = any(
+                    isinstance(current.get("field_sources"), Mapping)
+                    and current["field_sources"].get("sandbox") == source
+                    for current in current_decisions
+                )
+            if not used:
+                ignored_fields.append({"source": source, "field": field, "reason": "not-selected"})
+
+    ignored = decision.get("ignored_sources")
+    if isinstance(ignored, list):
+        decision["ignored_sources"] = [source for source in ignored if source not in used_sources]
+    decision["ignored_fields"] = ignored_fields
     return decision
 
 
@@ -1027,6 +1214,16 @@ def _concrete_field_selection(
                 effort, effort_source = env_effort, "environment-exact"
 
     if model is None or effort is None:
+        project_model, project_model_source, project_effort, project_effort_source, project_reasons = (
+            _project_provider_fields(policy, request)
+        )
+        if model is None and _present(project_model):
+            model, model_source = project_model, project_model_source
+        if effort is None and _present(project_effort):
+            effort, effort_source = project_effort, project_effort_source
+        reasons.extend(project_reasons)
+
+    if model is None or effort is None:
         base_route, base_source, base_reasons = _adaptive_selection(policy, request, minimum)
         base_model, base_effort = _canonical_pair(policy, base_route)
         if model is None:
@@ -1038,10 +1235,13 @@ def _concrete_field_selection(
         raise _error("invalid_request", "model/effort precedence did not resolve a complete pair")
     route = _ranked_exact_route(policy, catalog, model, effort)
     route_source = model_source if model_source == effort_source else "mixed-exact"
-    if route_source in {"cli-route", "environment-route"}:
-        reasons.append("explicit-route")
-    else:
+    used_sources = {model_source, effort_source}
+    if any(source in {"cli-exact", "environment-exact"} for source in used_sources) or any(
+        reason.endswith("-provider-field") for reason in reasons
+    ):
         reasons.append("explicit-provider-fields")
+    elif any(source in {"cli-route", "environment-route"} for source in used_sources):
+        reasons.append("explicit-route")
     return route, route_source, model_source, effort_source, reasons
 
 
@@ -1218,6 +1418,7 @@ def resolve_route(
         raise _error("invalid_request", "request must be an object")
     _validate_request_types(request)
     validate_catalog(policy, catalog)
+    _validate_project_override_values(policy, request)
     backend = request.get("backend", "codex")
     if backend != "codex":
         raise _error("unsupported_backend", f"backend {backend!r} is not supported by this catalog")
@@ -1273,6 +1474,7 @@ def resolve_route(
             ["forced-parent-propagation"],
             _ignored_lower_sources(request, "parent"),
         )
+        decision = _reconcile_project_sources(decision, request)
         return _apply_catalog_availability(policy, catalog, decision)
 
     # A complete higher-precedence CLI selection shadows environment routing.
@@ -1343,10 +1545,8 @@ def resolve_route(
             reasons,
             ignored,
         )
-        field_sources = dict(decision["field_sources"])
-        field_sources["model"] = model_source
-        field_sources["reasoning_effort"] = effort_source
-        decision["field_sources"] = field_sources
+        decision = _set_provider_field_sources(decision, model_source, effort_source)
+        decision = _reconcile_project_sources(decision, request)
         return _apply_catalog_availability(policy, catalog, decision)
 
     if _present(cli_mode):
@@ -1359,7 +1559,23 @@ def resolve_route(
         mode = _validate_mode(policy.get("release_default_mode"), "release default")
 
     if shadow:
-        proposal_route, proposal_source, proposal_reasons = _adaptive_selection(policy, request, minimum)
+        proposal_route, proposal_source, proposal_model_source, proposal_effort_source, proposal_reasons = (
+            _concrete_field_selection(
+                policy,
+                catalog,
+                request,
+                minimum,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                False,
+            )
+        )
+        if _route_rank(policy, proposal_route) < _route_rank(policy, minimum):
+            raise _error("route_below_risk_floor", f"adaptive route {proposal_route!r} is below minimum {minimum!r}")
         proposal = _base_decision(
             policy,
             catalog,
@@ -1371,11 +1587,29 @@ def resolve_route(
             proposal_reasons,
             ignored,
         )
+        proposal = _set_provider_field_sources(proposal, proposal_model_source, proposal_effort_source)
+        proposal = _reconcile_project_sources(proposal, request)
         proposal = _apply_catalog_availability(policy, catalog, proposal)
-        return _inherit_decision(policy, catalog, request, minimum, "shadow", ignored, proposal)
+        shadow_decision = _inherit_decision(policy, catalog, request, minimum, "shadow", ignored, proposal)
+        return _reconcile_project_sources(shadow_decision, request, proposal)
     if mode == "inherit":
-        return _inherit_decision(policy, catalog, request, minimum, "inherit", ignored, None)
-    route, source, reason_codes = _adaptive_selection(policy, request, minimum)
+        inherit_decision = _inherit_decision(policy, catalog, request, minimum, "inherit", ignored, None)
+        return _reconcile_project_sources(inherit_decision, request)
+    route, source, model_source, effort_source, reason_codes = _concrete_field_selection(
+        policy,
+        catalog,
+        request,
+        minimum,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        False,
+    )
+    if _route_rank(policy, route) < _route_rank(policy, minimum):
+        raise _error("route_below_risk_floor", f"adaptive route {route!r} is below minimum {minimum!r}")
     decision = _base_decision(
         policy,
         catalog,
@@ -1387,6 +1621,8 @@ def resolve_route(
         reason_codes,
         ignored,
     )
+    decision = _set_provider_field_sources(decision, model_source, effort_source)
+    decision = _reconcile_project_sources(decision, request)
     return _apply_catalog_availability(policy, catalog, decision)
 
 

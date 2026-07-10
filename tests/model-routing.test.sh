@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 ROOT = Path(os.environ["MODEL_ROUTING_TEST_ROOT"])
 RESOLVER = ROOT / "plugins/uberdev/lib/model_routing.py"
@@ -52,6 +53,18 @@ def expect_error(code, callable_):
         checks += 1
         return error
     raise AssertionError(f"expected RouteError {code}")
+
+
+def error_signature(callable_):
+    try:
+        callable_()
+    except module.RouteError as error:
+        return json.dumps(
+            {"error": {"code": error.code, "detail": error.detail}},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    raise AssertionError("expected RouteError")
 
 
 def request(**overrides):
@@ -110,6 +123,9 @@ policy = module.load_policy(POLICY_PATH)
 catalog_valid = read_json(CATALOG_PATH)
 catalog_unavailable = read_json(FIXTURES / "catalog-unavailable.json")
 catalog_mini_ultra = read_json(FIXTURES / "catalog-mini-ultra.json")
+catalog_official_xhigh = copy.deepcopy(catalog_valid)
+catalog_official_xhigh["models"]["gpt-5.6-sol"]["reasoning_efforts"].append("xhigh")
+catalog_official_xhigh["available_pairs"].append({"model": "gpt-5.6-sol", "reasoning_effort": "xhigh"})
 module.validate_catalog(policy, catalog_valid)
 checks += 1
 
@@ -173,6 +189,13 @@ expect_error("invalid_policy", lambda: module.validate_catalog(missing_metadata,
 bad_default_mode = copy.deepcopy(policy)
 bad_default_mode["release_default_mode"] = "automatic-ish"
 expect_error("invalid_policy", lambda: module.validate_catalog(bad_default_mode, catalog_valid))
+unknown_policy_effort = copy.deepcopy(policy)
+unknown_policy_effort["routes"]["deep"]["codex"]["reasoning_effort"] = "warp"
+expect_error("invalid_policy", lambda: module.validate_catalog(unknown_policy_effort, catalog_valid))
+with tempfile.TemporaryDirectory() as temporary_directory:
+    unknown_effort_path = Path(temporary_directory) / "unknown-effort-policy.json"
+    unknown_effort_path.write_text(json.dumps(unknown_policy_effort), encoding="utf-8")
+    expect_error("invalid_policy", lambda: module.load_policy(unknown_effort_path))
 bool_policy_rank = copy.deepcopy(policy)
 bool_policy_rank["routes"]["economy"]["rank"] = False
 expect_error("invalid_policy", lambda: module.validate_catalog(bool_policy_rank, catalog_valid))
@@ -182,6 +205,15 @@ expect_error("invalid_catalog", lambda: module.validate_catalog(policy, bool_cat
 null_availability = copy.deepcopy(catalog_valid)
 null_availability["available_pairs"] = None
 expect_error("invalid_catalog", lambda: module.validate_catalog(policy, null_availability))
+unknown_catalog_effort = copy.deepcopy(catalog_valid)
+unknown_catalog_effort["models"]["gpt-5.6-sol"]["reasoning_efforts"].append("warp")
+expect_error("invalid_catalog", lambda: module.validate_catalog(policy, unknown_catalog_effort))
+unknown_available_effort = copy.deepcopy(unknown_catalog_effort)
+unknown_available_effort["available_pairs"].append({"model": "gpt-5.6-sol", "reasoning_effort": "warp"})
+expect_error("invalid_catalog", lambda: module.validate_catalog(policy, unknown_available_effort))
+duplicate_available_pair = copy.deepcopy(catalog_valid)
+duplicate_available_pair["available_pairs"].append(copy.deepcopy(duplicate_available_pair["available_pairs"][0]))
+expect_error("invalid_catalog", lambda: module.validate_catalog(policy, duplicate_available_pair))
 duplicate_policy_pair = copy.deepcopy(policy)
 duplicate_policy_pair["routes"]["standard"]["codex"]["model"] = "gpt-5.6-luna"
 duplicate_policy_pair["routes"]["standard"]["codex"]["reasoning_effort"] = "low"
@@ -318,6 +350,178 @@ for name, overrides, expected_route, model_source, effort_source in partial_case
     check(decision["field_sources"]["model"] == model_source, f"partial model provenance failed: {name}")
     check(decision["field_sources"]["reasoning_effort"] == effort_source, f"partial effort provenance failed: {name}")
 
+# Project role/workflow effort overrides are exact provider fields, independent
+# from route and sandbox selection, and participate in field-wise precedence.
+workflow_effort = resolve(request(
+    role="code-simplifier",
+    phase="review",
+    project_config={"workflows": {"solve": {"reasoning_effort": "high"}}},
+))
+check((workflow_effort["logical_route"], workflow_effort["model"], workflow_effort["reasoning_effort"]) == ("deep", "gpt-5.6-sol", "high"), "workflow effort override did not rank the exact pair")
+check(workflow_effort["field_sources"]["model"] == "role-policy" and workflow_effort["field_sources"]["reasoning_effort"] == "project-workflow", "workflow effort provenance drifted")
+check("project-workflow-provider-field" in workflow_effort["reason_codes"] and "explicit-provider-fields" in workflow_effort["reason_codes"], "workflow effort reason codes drifted")
+
+role_effort = resolve(request(
+    role="code-simplifier",
+    phase="review",
+    project_config={"roles": {"code-simplifier": {"reasoning_effort": "high"}}},
+))
+check((role_effort["logical_route"], role_effort["reasoning_effort"]) == ("deep", "high"), "role effort override did not rank the exact pair")
+check(role_effort["field_sources"]["reasoning_effort"] == "project-role", "role effort provenance drifted")
+check("project-role-provider-field" in role_effort["reason_codes"] and "explicit-provider-fields" in role_effort["reason_codes"], "role effort reason codes drifted")
+
+role_beats_workflow_effort = resolve(request(
+    role="code-simplifier",
+    phase="review",
+    project_config={
+        "roles": {"code-simplifier": {"reasoning_effort": "medium"}},
+        "workflows": {"solve": {"reasoning_effort": "high"}},
+    },
+))
+check((role_beats_workflow_effort["logical_route"], role_beats_workflow_effort["reasoning_effort"]) == ("quality", "medium"), "project role effort did not outrank workflow effort")
+check(role_beats_workflow_effort["field_sources"]["reasoning_effort"] == "project-role", "role/workflow effort precedence provenance drifted")
+
+independent_project_fields = resolve(request(
+    role="code-simplifier",
+    phase="review",
+    project_config={
+        "roles": {"code-simplifier": {"reasoning_effort": "high", "sandbox": "workspace-write"}},
+        "workflows": {"solve": {"route": "quality", "sandbox": "read-only"}},
+    },
+))
+check((independent_project_fields["logical_route"], independent_project_fields["model"], independent_project_fields["reasoning_effort"]) == ("deep", "gpt-5.6-sol", "high"), "project route and effort fields did not resolve independently")
+check((independent_project_fields["field_sources"]["model"], independent_project_fields["field_sources"]["reasoning_effort"], independent_project_fields["field_sources"]["sandbox"]) == ("project-workflow", "project-role", "project-workflow"), "independent project field provenance drifted")
+check(not ({"project-role", "project-workflow"} & set(independent_project_fields["ignored_sources"])), "adaptive decision both used and ignored a project source")
+
+shadow_project_fields = resolve(request(
+    role="code-simplifier",
+    phase="review",
+    shadow=True,
+    project_config={
+        "roles": {"code-simplifier": {"reasoning_effort": "high", "sandbox": "workspace-write"}},
+        "workflows": {"solve": {"route": "quality", "sandbox": "read-only"}},
+    },
+))
+shadow_proposal = shadow_project_fields["adaptive_proposal"]
+check(shadow_proposal["field_sources"]["model"] == "project-workflow" and shadow_proposal["field_sources"]["reasoning_effort"] == "project-role", "shadow proposal project provenance drifted")
+check(not ({"project-role", "project-workflow"} & set(shadow_project_fields["ignored_sources"])), "shadow execution both used and ignored a project source")
+check(not ({"project-role", "project-workflow"} & set(shadow_proposal["ignored_sources"])), "shadow proposal both used and ignored a project source")
+
+partially_shadowed_project = {
+    "roles": {"code-simplifier": "quality"},
+    "workflows": {"solve": {"reasoning_effort": "high", "sandbox": "read-only"}},
+}
+adaptive_partial = resolve(request(
+    role="code-simplifier",
+    phase="review",
+    project_config=partially_shadowed_project,
+))
+expected_workflow_effort_ignored = [{
+    "source": "project-workflow",
+    "field": "reasoning_effort",
+    "reason": "not-selected",
+}]
+check(adaptive_partial["ignored_fields"] == expected_workflow_effort_ignored, "adaptive field-level ignored provenance drifted")
+check("project-workflow" not in adaptive_partial["ignored_sources"], "adaptive partially-used source remained coarsely ignored")
+
+shadow_partial = resolve(request(
+    role="code-simplifier",
+    phase="review",
+    shadow=True,
+    project_config=partially_shadowed_project,
+))
+check(shadow_partial["ignored_fields"] == expected_workflow_effort_ignored, "shadow field-level ignored provenance drifted")
+check(shadow_partial["adaptive_proposal"]["ignored_fields"] == expected_workflow_effort_ignored, "shadow proposal field-level ignored provenance drifted")
+
+forced_partial = resolve(request(
+    role="code-simplifier",
+    phase="review",
+    routing_mode=None,
+    explicit_route="sol-high",
+    project_config={"roles": {"code-simplifier": {"reasoning_effort": "ultra", "sandbox": "read-only"}}},
+))
+check(forced_partial["ignored_fields"] == [{
+    "source": "project-role",
+    "field": "reasoning_effort",
+    "reason": "not-selected",
+}], "forced field-level ignored provenance drifted")
+check("project-role" not in forced_partial["ignored_sources"], "forced partially-used source remained coarsely ignored")
+
+inherit_partial_payload = request(
+    role="code-simplifier",
+    phase="review",
+    routing_mode="inherit",
+    project_config={"roles": {"code-simplifier": {"route": "ultra", "sandbox": "read-only"}}},
+)
+inherit_partial = resolve(inherit_partial_payload)
+expected_inherit_route_ignored = [{
+    "source": "project-role",
+    "field": "route",
+    "reason": "not-selected",
+}]
+check(inherit_partial["ignored_fields"] == expected_inherit_route_ignored, "inherit field-level ignored provenance drifted")
+check(inherit_partial["field_sources"]["sandbox"] == "project-role" and "project-role" not in inherit_partial["ignored_sources"], "inherit source-level provenance contradicted its used sandbox")
+check(
+    json.dumps(inherit_partial["ignored_fields"], sort_keys=True, separators=(",", ":"))
+    == json.dumps(resolve(inherit_partial_payload)["ignored_fields"], sort_keys=True, separators=(",", ":")),
+    "field-level ignored provenance was nondeterministic",
+)
+
+cli_over_project_effort = resolve(request(
+    role="code-simplifier",
+    phase="review",
+    routing_mode=None,
+    explicit_effort="medium",
+    environment={"UBERDEV_REASONING_EFFORT": "high"},
+    project_config={"roles": {"code-simplifier": {"reasoning_effort": "ultra"}}},
+))
+check((cli_over_project_effort["logical_route"], cli_over_project_effort["reasoning_effort"], cli_over_project_effort["field_sources"]["reasoning_effort"]) == ("quality", "medium", "cli-exact"), "CLI effort did not outrank environment and project effort")
+env_over_project_effort = resolve(request(
+    role="code-simplifier",
+    phase="review",
+    routing_mode=None,
+    environment={"UBERDEV_REASONING_EFFORT": "high"},
+    project_config={"roles": {"code-simplifier": {"reasoning_effort": "ultra"}}},
+))
+check((env_over_project_effort["logical_route"], env_over_project_effort["reasoning_effort"], env_over_project_effort["field_sources"]["reasoning_effort"]) == ("deep", "high", "environment-exact"), "environment effort did not outrank project effort")
+
+expect_error("invalid_request", lambda: resolve(request(project_config={"roles": {"code-simplifier": {"reasoning_effort": []}}})))
+expect_error("invalid_request", lambda: resolve(request(project_config={"roles": {"code-simplifier": {"reasoning_effort": "warp"}}})))
+expect_error("unranked_exact_pair", lambda: resolve(request(
+    role="code-simplifier",
+    phase="review",
+    project_config={"roles": {"code-simplifier": {"reasoning_effort": "low"}}},
+)))
+expect_error("unranked_exact_pair", lambda: resolve(
+    request(
+        role="code-simplifier",
+        phase="review",
+        project_config={"roles": {"code-simplifier": {"reasoning_effort": "xhigh"}}},
+    ),
+    catalog_official_xhigh,
+))
+expect_error("unranked_exact_pair", lambda: resolve(
+    request(
+        role="code-simplifier",
+        phase="review",
+        routing_mode=None,
+        explicit_model="gpt-5.6-sol",
+        explicit_effort="xhigh",
+    ),
+    catalog_official_xhigh,
+))
+expect_error("route_conflict", lambda: resolve(request(project_config={
+    "roles": {"code-simplifier": {"route": "quality", "reasoning_effort": "high"}},
+})))
+expect_error("invalid_request", lambda: resolve(request(project_config={"roles": {"code-simplifier": {"effort": "high"}}})))
+for scope, key in (("roles", "code-simplifier"), ("workflows", "solve")):
+    for field in ("route", "reasoning_effort", "sandbox"):
+        invalid_null = request(project_config={scope: {key: {field: None}}})
+        first_signature = error_signature(lambda invalid_null=invalid_null: resolve(invalid_null))
+        second_signature = error_signature(lambda invalid_null=invalid_null: resolve(invalid_null))
+        check(first_signature == second_signature, f"explicit null error was nondeterministic: {scope}.{key}.{field}")
+        check(json.loads(first_signature)["error"]["code"] == "invalid_request", f"explicit null was not invalid_request: {scope}.{key}.{field}")
+
 # Logical routes and exact provider fields retain distinct machine reason codes.
 cli_logical = resolve(request(role="triage-scout", phase="triage", routing_mode=None, explicit_route="sol"))
 env_logical = resolve(request(role="triage-scout", phase="triage", routing_mode=None, environment={"UBERDEV_ROUTE": "sol"}))
@@ -361,6 +565,11 @@ expect_error("invalid_leaf_contract", lambda: module.validate_catalog(invalid_ro
 available_unranked = copy.deepcopy(catalog_valid)
 available_unranked["available_pairs"].append({"model": "gpt-5.6-sol", "reasoning_effort": "low"})
 module.validate_catalog(policy, available_unranked)
+checks += 1
+official_unranked = copy.deepcopy(catalog_valid)
+official_unranked["models"]["gpt-5.6-sol"]["reasoning_efforts"].append("xhigh")
+official_unranked["available_pairs"].append({"model": "gpt-5.6-sol", "reasoning_effort": "xhigh"})
+module.validate_catalog(policy, official_unranked)
 checks += 1
 expect_error("invalid_request", lambda: resolve(request(role=[])))
 
