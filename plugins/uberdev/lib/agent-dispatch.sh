@@ -288,13 +288,14 @@ try:
     if any(request.get(key)=="" for key in carriers): raise ValueError("empty_carrier")
     environment=request.get("environment",{})
     if not isinstance(environment,dict): raise ValueError("invalid_environment")
-    environment_allowed={"UBERDEV_MODEL_ROUTING_MODE","UBERDEV_ROUTE","UBERDEV_MODEL","UBERDEV_REASONING_EFFORT","UBERDEV_SERVICE_TIER","UBERDEV_MODEL_ROUTING_RISK_ESCALATION","UBERDEV_MODEL_ROUTING_ADAPTIVE_FALLBACK","UBERDEV_MODEL_ROUTING_SHADOW"}
+    environment_allowed={"UBERDEV_MODEL_ROUTING_MODE","UBERDEV_ROUTE","UBERDEV_MODEL","UBERDEV_REASONING_EFFORT","UBERDEV_SERVICE_TIER","UBERDEV_MODEL_ROUTING_RISK_ESCALATION","UBERDEV_MODEL_ROUTING_ADAPTIVE_FALLBACK","UBERDEV_MODEL_ROUTING_SHADOW","UBERDEV_MODEL_ROUTING_WORKFLOWS","UBERDEV_MODEL_ROUTING_ROLES"}
     if set(environment)-environment_allowed: raise ValueError("unknown_environment_fields")
-    string_environment={"UBERDEV_MODEL_ROUTING_MODE","UBERDEV_ROUTE","UBERDEV_MODEL","UBERDEV_REASONING_EFFORT","UBERDEV_SERVICE_TIER"}
+    string_environment={"UBERDEV_MODEL_ROUTING_MODE","UBERDEV_ROUTE","UBERDEV_MODEL","UBERDEV_REASONING_EFFORT","UBERDEV_SERVICE_TIER"}; map_environment={"UBERDEV_MODEL_ROUTING_WORKFLOWS","UBERDEV_MODEL_ROUTING_ROLES"}
     for key,value in environment.items():
         if value is None: continue
         if key in string_environment and (not isinstance(value,str) or not value): raise ValueError("invalid_environment_carrier")
-        if key not in string_environment and not isinstance(value,bool): raise ValueError("invalid_environment_boolean")
+        if key in map_environment and not isinstance(value,dict): raise ValueError("invalid_environment_map")
+        if key not in string_environment|map_environment and not isinstance(value,bool): raise ValueError("invalid_environment_boolean")
     decision_fields={"schema_version","policy_version","backend","service_tier","sandbox","field_sources","adaptive_fallback","risk_signals","risk_scope","minimum_route","fallback_chain","ignored_sources","ignored_fields","logical_route","model","reasoning_effort","routing_mode","effective_policy","route_source","forced","reason_codes","adaptive_proposal"}
     parent=request.get("parent_run",{})
     if not isinstance(parent,dict) or set(parent)-decision_fields: raise ValueError("invalid_parent_run")
@@ -323,7 +324,7 @@ try:
         if isinstance(project,dict) and "model_routing" in project: project=project["model_routing"]
         role=routing.get("role","lead"); workflow=routing.get("workflow","")
         project_concrete=(project.get("service_tier") not in (None,"","default") or (isinstance(project.get("roles"),dict) and project["roles"].get(role) is not None) or (isinstance(project.get("workflows"),dict) and project["workflows"].get(workflow) is not None))
-        environment_concrete=any(environment.get(key) not in (None,"") for key in ("UBERDEV_ROUTE","UBERDEV_MODEL","UBERDEV_REASONING_EFFORT")) or environment.get("UBERDEV_SERVICE_TIER") not in (None,"","default")
+        environment_concrete=any(environment.get(key) not in (None,"") for key in ("UBERDEV_ROUTE","UBERDEV_MODEL","UBERDEV_REASONING_EFFORT")) or environment.get("UBERDEV_SERVICE_TIER") not in (None,"","default") or any(environment.get(key) for key in ("UBERDEV_MODEL_ROUTING_WORKFLOWS","UBERDEV_MODEL_ROUTING_ROLES"))
         service=routing.get("explicit_service_tier") or environment.get("UBERDEV_SERVICE_TIER") or project.get("service_tier") or "default"
         if any(routing.get(k) not in (None,"") for k in ("explicit_route","explicit_model","explicit_effort")) or parent.get("forced") is True or service!="default" or environment_concrete or project_concrete:
             class Unenforceable(Exception): code="route_unenforceable"
@@ -347,7 +348,16 @@ try:
             available.append({"model":model,"reasoning_effort":effort}); tiers.add(provider["service_tier"])
         for row in models.values(): row["reasoning_efforts"]=list(dict.fromkeys(row["reasoning_efforts"]))
         catalog={"schema_version":1,"provider":"codex","models":models,"ranked_pairs":ranked,"available_pairs":available,"service_tiers":sorted(tiers),"source_roles":sorted(policy["roles"])}
-    decision=module.resolve_route(policy,catalog,routing)
+    resolver_request=dict(routing); resolver_environment=dict(environment)
+    project_config=dict(request.get("project_routing") or {})
+    for env_key,scope in (("UBERDEV_MODEL_ROUTING_WORKFLOWS","workflows"),("UBERDEV_MODEL_ROUTING_ROLES","roles")):
+        env_map=resolver_environment.pop(env_key,None)
+        if env_map is not None:
+            merged=dict(project_config.get(scope,{}) or {}); merged.update(env_map); project_config[scope]=merged
+    if resolver_environment: resolver_request["environment"]=resolver_environment
+    else: resolver_request.pop("environment",None)
+    if project_config: resolver_request["project_routing"]=project_config
+    decision=module.resolve_route(policy,catalog,resolver_request)
     print(json.dumps(decision,sort_keys=True,separators=(",",":")),end="")
 except Exception as exc:
     code=getattr(exc,"code","invalid_request")
@@ -380,7 +390,7 @@ def validate(payload):
  if not isinstance(payload["created_at"],str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",payload["created_at"]): raise ValueError()
  request=payload["routing_request"]
  if not isinstance(request,dict) or set(request)-routing_allowed: raise ValueError()
- environment=request.get("environment",{}); env_keys={"UBERDEV_MODEL_ROUTING_MODE","UBERDEV_ROUTE","UBERDEV_MODEL","UBERDEV_REASONING_EFFORT","UBERDEV_SERVICE_TIER","UBERDEV_MODEL_ROUTING_RISK_ESCALATION","UBERDEV_MODEL_ROUTING_ADAPTIVE_FALLBACK","UBERDEV_MODEL_ROUTING_SHADOW"}
+ environment=request.get("environment",{}); env_keys={"UBERDEV_MODEL_ROUTING_MODE","UBERDEV_ROUTE","UBERDEV_MODEL","UBERDEV_REASONING_EFFORT","UBERDEV_SERVICE_TIER","UBERDEV_MODEL_ROUTING_RISK_ESCALATION","UBERDEV_MODEL_ROUTING_ADAPTIVE_FALLBACK","UBERDEV_MODEL_ROUTING_SHADOW","UBERDEV_MODEL_ROUTING_WORKFLOWS","UBERDEV_MODEL_ROUTING_ROLES"}
  if not isinstance(environment,dict) or set(environment)-env_keys: raise ValueError()
  for key in ("routing_mode","explicit_route","explicit_model","explicit_effort","explicit_service_tier","explicit_sandbox","parent_sandbox"):
   if request.get(key)=="": raise ValueError()
@@ -412,6 +422,35 @@ def validate(payload):
   path=record["file"]
   if record["source"] in {"env","default"} and path is not None: raise ValueError()
   if record["source"] not in {"env","default"} and (not isinstance(path,str) or not os.path.isabs(path) or os.path.normpath(path)!=path): raise ValueError()
+ request_project=request.get("project_routing")
+ if request_project is None:
+  request_project=request.get("project_config",{})
+  if isinstance(request_project,dict) and "model_routing" in request_project: request_project=request_project["model_routing"]
+ if not isinstance(request_project,dict): raise ValueError()
+ field_contracts={
+  "mode":("UBERDEV_MODEL_ROUTING_MODE",("mode","routing_mode"),"inherit"),
+  "service_tier":("UBERDEV_SERVICE_TIER",("service_tier",),"default"),
+  "risk_escalation":("UBERDEV_MODEL_ROUTING_RISK_ESCALATION",("risk_escalation",),True),
+  "adaptive_fallback":("UBERDEV_MODEL_ROUTING_ADAPTIVE_FALLBACK",("adaptive_fallback",),True),
+  "shadow":("UBERDEV_MODEL_ROUTING_SHADOW",("shadow",),False),
+  "workflows":("UBERDEV_MODEL_ROUTING_WORKFLOWS",("workflows",),{}),
+  "roles":("UBERDEV_MODEL_ROUTING_ROLES",("roles",),{}),
+ }
+ for field,(env_key,project_keys,default) in field_contracts.items():
+  record=provenance[field]; source=record["source"]
+  env_selected=env_key is not None and env_key in environment and environment[env_key] is not None
+  configured=[key for key in project_keys if key in request_project]
+  project_selected=bool(configured)
+  project_value=request_project[configured[0]] if configured else None
+  if source=="env":
+   if not env_selected: raise ValueError()
+  elif source=="default":
+   if env_selected or (project_selected and project_value!=default): raise ValueError()
+  else:
+   if env_selected or not project_selected: raise ValueError()
+   path=record["file"]
+   if source=="project-codex" and not path.endswith("/.codex/uberdev.local.md"): raise ValueError()
+   if source=="project-claude" and not path.endswith("/.claude/uberdev.local.md"): raise ValueError()
  metadata=payload["metadata"]
  if not isinstance(metadata,dict) or set(metadata)!={"run_id","repository_id","workflow","backend","issue_num","task_tier","risk_signals"}: raise ValueError()
  if not isinstance(metadata["run_id"],str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",metadata["run_id"]): raise ValueError()

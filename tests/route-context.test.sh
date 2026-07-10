@@ -95,6 +95,17 @@ r=json.loads(pathlib.Path(sys.argv[1]).read_text()); assert r['explicit_route']=
 assert r['environment']=={'UBERDEV_MODEL_ROUTING_MODE':'adaptive','UBERDEV_SERVICE_TIER':'fast'}; assert 'project_routing' not in r
 assert (r['workflow'],r['phase'],r['role'],r['risk_signals'])==('turbo','plan','plan-writer',['security'])
 PY
+(
+  . "$ROOT/plugins/uberdev/lib/dispatch.sh"
+  uberdev_agent_dispatch() { printf '%s' "$1" >"$TMP/env-map-assembled.json"; return 0; }
+  UBERDEV_RESOLVED_BACKEND=codex UBERDEV_TMPDIR="$TMP/run" SOLVE_TIMEOUT=30 UBERDEV_MODEL_ROUTING_MODE=adaptive \
+    UBERDEV_MODEL_ROUTING_ROLES='{"plan-writer":"deep"}' UBERDEV_AGENT_ROLE=plan-writer UBERDEV_AGENT_PHASE=plan \
+    uberdev_dispatch_one 7 medium "$TMP/run/prompt.txt"
+)
+python3 - "$TMP/env-map-assembled.json" <<'PY'
+import json,pathlib,sys
+r=json.loads(pathlib.Path(sys.argv[1]).read_text()); assert r['environment']['UBERDEV_MODEL_ROUTING_ROLES']=={'plan-writer':'deep'}; assert 'project_routing' not in r
+PY
 # Invalid config-backed environment values must not be forwarded after the
 # config reader has fallen back; concrete route/model/effort remain raw inputs.
 (
@@ -185,6 +196,44 @@ for kind in env-bool project-scalar project-map parent-null decision-type reques
   [ -z "$(find "$ROOT_CASE" -name '.route-context.*' -print -quit)" ]
 done
 
+# Provenance must describe the selected config/env/project layer carried in the
+# immutable request; it may not contradict or invent that layer.
+for kind in env-mode-default env-service-default env-risk-default env-source-missing workflows-env-missing project-role-default project-source-wrong-file project-env-wins invalid-source-file; do
+  ROOT_CASE="$TMP/provenance-$kind"; mkdir "$ROOT_CASE"
+  CASE_DATA="$(python3 - "$REQ" "$PROV" "$TMP/project/.codex/uberdev.local.md" "$kind" <<'PY'
+import json,pathlib,sys
+r=json.loads(sys.argv[1]); p=json.loads(sys.argv[2]); codex=str(pathlib.Path(sys.argv[3]).resolve()); kind=sys.argv[4]
+if kind.startswith('env-'): r.pop('routing_mode',None)
+if kind=='env-mode-default': r['environment']={'UBERDEV_MODEL_ROUTING_MODE':'adaptive'}
+elif kind=='env-service-default': r['environment']={'UBERDEV_SERVICE_TIER':'fast'}
+elif kind=='env-risk-default': r['environment']={'UBERDEV_MODEL_ROUTING_RISK_ESCALATION':False}; r['risk_signals']=['security']
+elif kind=='env-source-missing': p['mode']={'source':'env','file':None}
+elif kind=='workflows-env-missing': p['workflows']={'source':'env','file':None}
+elif kind=='project-role-default': r['project_routing']={'roles':{'plan-writer':'deep'}}
+elif kind=='project-source-wrong-file': r['project_routing']={'roles':{'plan-writer':'deep'}}; p['roles']={'source':'project-codex','file':codex.replace('/.codex/','/.claude/')}
+elif kind=='project-env-wins': r.pop('routing_mode',None); r['environment']={'UBERDEV_MODEL_ROUTING_MODE':'adaptive'}; r['project_routing']={'mode':'inherit'}; p['mode']={'source':'project-codex','file':codex}
+elif kind=='invalid-source-file': p['mode']={'source':'env','file':codex}
+print(json.dumps(r,separators=(',',':'))); print(json.dumps(p,separators=(',',':')))
+PY
+)"
+  CASE_REQ="$(printf '%s\n' "$CASE_DATA" | sed -n '1p')"; CASE_PROV="$(printf '%s\n' "$CASE_DATA" | sed -n '2p')"
+  CASE_DECISION="$(uberdev_agent_resolve_request "$CASE_REQ")"
+  CASE_META="$(python3 - "$CASE_REQ" <<'PY'
+import json,sys
+r=json.loads(sys.argv[1]); print(json.dumps({'run_id':'root-1','repository_id':'repo','workflow':r['workflow'],'backend':r['backend'],'issue_num':7,'task_tier':r['task_tier'],'risk_signals':r.get('risk_signals',[])},separators=(',',':')))
+PY
+)"
+  ! uberdev_agent_context_create "$ROOT_CASE" "$CASE_REQ" "$CASE_DECISION" "$CASE_PROV" "$CASE_META" '2026-07-10T00:00:00Z' >/dev/null 2>"$TMP/provenance-$kind.err"
+  [ ! -e "$ROOT_CASE/.agent-state-$(id -u)" ]
+done
+VALID_PROV_ROOT="$TMP/provenance-valid"; mkdir "$VALID_PROV_ROOT"
+VALID_PROV_REQ="$(python3 -c 'import json,sys;r=json.loads(sys.argv[1]);r.pop("routing_mode",None);r["environment"]={"UBERDEV_MODEL_ROUTING_MODE":"adaptive","UBERDEV_SERVICE_TIER":"fast","UBERDEV_MODEL_ROUTING_ROLES":{"plan-writer":"deep"}};print(json.dumps(r,separators=(",",":")))' "$REQ")"
+VALID_PROV_DECISION="$(uberdev_agent_resolve_request "$VALID_PROV_REQ")"
+VALID_PROV="$(python3 -c 'import json,sys;p=json.loads(sys.argv[1]);p["mode"]={"source":"env","file":None};p["service_tier"]={"source":"env","file":None};p["roles"]={"source":"env","file":None};print(json.dumps(p,separators=(",",":")))' "$PROV")"
+VALID_PROV_OUT="$(uberdev_agent_context_create "$VALID_PROV_ROOT" "$VALID_PROV_REQ" "$VALID_PROV_DECISION" "$VALID_PROV" "$META" '2026-07-10T00:00:00Z')"
+VALID_PROV_FILE="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_file"])' "$VALID_PROV_OUT")"; VALID_PROV_SHA="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_sha256"])' "$VALID_PROV_OUT")"
+uberdev_agent_context_validate "$VALID_PROV_FILE" "$VALID_PROV_SHA" "$VALID_PROV_ROOT" >/dev/null
+
 # A state-directory ancestor cannot be replaced by a symlink outside run root.
 mkdir "$TMP/escape-root"
 ESC="$(uberdev_agent_context_create "$TMP/escape-root" "$REQ" "$DECISION" "$PROV" "$META" '2026-07-10T00:00:00Z')"
@@ -229,4 +278,4 @@ AFTER="$(find "$TMP/runtime" -type f -exec shasum -a 256 {} + | sort)"
 BAD='{"backend":"codex","workflow":"solve","role":"plan-writer","task_tier":"small","risk_signals":[],"routing_mode":""}'
 ! uberdev_agent_resolve_request "$BAD" >/dev/null 2>"$TMP/error"
 ! grep -q "$TMP" "$TMP/error"
-echo 'route-context: 88 checks passed'
+echo 'route-context: 111 checks passed'

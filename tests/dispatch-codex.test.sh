@@ -79,6 +79,46 @@ if [ -r "$CODEX_CONFIG_LIB" ]; then
 else
   fail_msg "packaged Codex config-read.sh missing"
 fi
+for relative in lib/config-read.sh lib/model_routing.py lib/run_manifest.py lib/live-semaphore.sh policy/model-routing-v1.json; do
+  if cmp -s "$REPO_ROOT/plugins/uberdev/$relative" "$PLUGIN_ROOT/$relative"; then
+    pass_msg "packaged Codex $relative is byte-identical to canonical runtime"
+  else
+    fail_msg "packaged Codex $relative drifted from canonical runtime"
+  fi
+done
+
+PACKAGE_TMP="$(mktemp -d)"
+cp -R "$PLUGIN_ROOT" "$PACKAGE_TMP/uberdev-codex"
+mkdir -p "$PACKAGE_TMP/home" "$PACKAGE_TMP/codex-home" "$PACKAGE_TMP/outside"
+PACKAGE_SMOKE_LOG="$PACKAGE_TMP/smoke.log"
+if HOME="$PACKAGE_TMP/home" CODEX_HOME="$PACKAGE_TMP/codex-home" PWD="$PACKAGE_TMP" \
+  REPO_SENTINEL="$REPO_ROOT" PACKAGE_COPY="$PACKAGE_TMP/uberdev-codex" OUTSIDE_DIR="$PACKAGE_TMP/outside" \
+  INHERIT_REQUEST='{"backend":"codex","workflow":"solve","role":"plan-writer","task_tier":"medium","risk_signals":[],"routing_mode":"inherit"}' \
+  ADAPTIVE_REQUEST='{"backend":"codex","workflow":"solve","role":"plan-writer","task_tier":"medium","risk_signals":[],"routing_mode":"adaptive"}' \
+  bash -c '
+    set -euo pipefail
+    cd "$OUTSIDE_DIR"
+    . "$PACKAGE_COPY/lib/dispatch.sh"
+    command -v uberdev_read_model_routing >/dev/null
+    uberdev_read_model_routing
+    [ "$UBERDEV_ROUTING_MODE" = inherit ]
+    inherit=$(uberdev_agent_resolve_request "$INHERIT_REQUEST")
+    adaptive=$(uberdev_agent_resolve_request "$ADAPTIVE_REQUEST")
+    python3 -I - "$inherit" "$adaptive" "$PACKAGE_COPY" "$REPO_SENTINEL" <<'''PY'''
+import json, pathlib, sys
+inherit, adaptive = map(json.loads, sys.argv[1:3])
+assert inherit["model"] is None and inherit["reasoning_effort"] is None
+assert adaptive["logical_route"] == "frontier" and adaptive["reasoning_effort"] == "max"
+package, repo = map(pathlib.Path, sys.argv[3:5])
+assert package.resolve() != repo.resolve()
+PY
+    case "$_UBERDEV_AGENT_ROUTER:$_UBERDEV_AGENT_POLICY:$_UBERDEV_AGENT_MANIFEST_TOOL" in *"$REPO_SENTINEL"*) exit 9 ;; esac
+  ' >"$PACKAGE_SMOKE_LOG" 2>&1; then
+  pass_msg "clean copied Codex package is a self-contained routing runtime"
+else
+  fail_msg "clean copied Codex package is a self-contained routing runtime" "$(tail -20 "$PACKAGE_SMOKE_LOG")"
+fi
+rm -rf "$PACKAGE_TMP"
 
 echo "== Enum + probe =="
 assert_grep "$DISPATCH_LIB" \
