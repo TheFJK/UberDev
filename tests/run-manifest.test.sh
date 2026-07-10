@@ -713,6 +713,56 @@ else
   fail "reconcile consumes canonical failed status with validated nonzero exit" "rc=$failed_reconcile_rc out=$failed_reconcile_out terminal=$failed_terminal"
 fi
 
+HANDLELESS_TERMINAL_STATUS="$TMP/handleless-terminal/status.json"
+mkdir -p "$(dirname "$HANDLELESS_TERMINAL_STATUS")"
+invalid_handleless_terminal_cases=(
+  'boolean-pid|{"backend":"codex","state":"completed","exit_code":0,"pid":true}'
+  'zero-pid|{"backend":"codex","state":"completed","exit_code":0,"pid":0}'
+  'negative-pid|{"backend":"codex","state":"completed","exit_code":0,"pid":-1}'
+  'float-pid|{"backend":"codex","state":"completed","exit_code":0,"pid":1.5}'
+  'empty-pid|{"backend":"codex","state":"completed","exit_code":0,"pid":""}'
+  'malformed-pid|{"backend":"codex","state":"completed","exit_code":0,"pid":"not a pid"}'
+  'multiple-handles|{"backend":"codex","state":"completed","exit_code":0,"pid":"41","backend_handle":"41"}'
+  'malformed-backend-handle|{"backend":"codex","state":"completed","exit_code":0,"backend_handle":{}}'
+)
+invalid_handleless_terminal_accepted=""
+for invalid_handleless_terminal_case in "${invalid_handleless_terminal_cases[@]}"; do
+  invalid_handleless_terminal_name="${invalid_handleless_terminal_case%%|*}"
+  invalid_handleless_terminal_payload="${invalid_handleless_terminal_case#*|}"
+  printf '%s\n' "$invalid_handleless_terminal_payload" > "$HANDLELESS_TERMINAL_STATUS"
+  capture python3 "$MANIFEST" probe-terminal \
+    --status-path "$HANDLELESS_TERMINAL_STATUS" --expected-backend codex
+  if [ "$CAPTURE_RC" -ne 0 ] || [ "$CAPTURE_OUT" != unknown ]; then
+    invalid_handleless_terminal_accepted="${invalid_handleless_terminal_accepted}${invalid_handleless_terminal_name}:${CAPTURE_RC}/${CAPTURE_OUT} "
+  fi
+done
+if [ -z "$invalid_handleless_terminal_accepted" ]; then
+  pass "handle-less starts reject every malformed reported terminal handle"
+else
+  fail "handle-less starts reject every malformed reported terminal handle" "$invalid_handleless_terminal_accepted"
+fi
+
+valid_handleless_terminal_results=""
+for valid_handleless_terminal_case in \
+  '{"backend":"codex","state":"completed","exit_code":0}' \
+  '{"backend":"codex","state":"completed","exit_code":0,"pid":"41"}' \
+  '{"backend":"codex","state":"completed","exit_code":0,"backend_handle":"provider-job-41"}'; do
+  printf '%s\n' "$valid_handleless_terminal_case" > "$HANDLELESS_TERMINAL_STATUS"
+  capture python3 "$MANIFEST" probe-terminal \
+    --status-path "$HANDLELESS_TERMINAL_STATUS" --expected-backend codex
+  valid_handleless_terminal_results="${valid_handleless_terminal_results}${CAPTURE_RC}/${CAPTURE_OUT} "
+done
+printf '%s\n' '{"backend":"codex","state":"completed","exit_code":0,"pid":"42"}' > "$HANDLELESS_TERMINAL_STATUS"
+capture python3 "$MANIFEST" probe-terminal \
+  --status-path "$HANDLELESS_TERMINAL_STATUS" --expected-backend codex \
+  --expected-handle 41
+if [ "$valid_handleless_terminal_results" = '0/completed 0/completed 0/completed ' ] \
+   && [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = unknown ]; then
+  pass "valid missing, numeric, and opaque terminal handles work while mismatches reject"
+else
+  fail "valid missing, numeric, and opaque terminal handles work while mismatches reject" "valid=$valid_handleless_terminal_results mismatch=$CAPTURE_RC/$CAPTURE_OUT"
+fi
+
 before_true_terminal_lines="$(wc -l < "$TRUE_COMPLETED_MANIFEST" | tr -d ' ')"
 capture python3 "$MANIFEST" reconcile --manifest "$TRUE_COMPLETED_MANIFEST"
 after_true_terminal_lines="$(wc -l < "$TRUE_COMPLETED_MANIFEST" | tr -d ' ')"

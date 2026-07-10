@@ -949,10 +949,14 @@ def _terminal_truth_from_snapshot(
     reported_keys = [key for key in ("pid", "backend_handle") if key in snapshot]
     if len(reported_keys) > 1:
         return None
-    expected_handle = started.get("backend_handle")
-    if expected_handle not in (None, "") and reported_keys:
-        expected_identity = _canonical_backend_handle(expected_handle)
+    reported_identity = None
+    if reported_keys:
         reported_identity = _canonical_backend_handle(snapshot[reported_keys[0]])
+        if reported_identity is None:
+            return None
+    expected_handle = started.get("backend_handle")
+    if expected_handle not in (None, "") and reported_identity is not None:
+        expected_identity = _canonical_backend_handle(expected_handle)
         if expected_identity is None or reported_identity != expected_identity:
             return None
     return terminal
