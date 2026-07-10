@@ -513,17 +513,22 @@ record_max() {
   rmdir "$TMP/max.lock"
 }
 count_race_leases() {
-  local listing
-  if [ ! -d "$RACE_STATE" ]; then
+  local scope_root="$RACE_STATE/semaphore-v1" scope listing scope_count count=0
+  if [ ! -d "$scope_root" ]; then
     printf '0\n'
     return 0
   fi
-  listing="$(find "$RACE_STATE" -name '*.lease' -type f -print)" || return $?
-  if [ -z "$listing" ]; then
-    printf '0\n'
-  else
-    printf '%s\n' "$listing" | awk 'END { print NR }'
-  fi
+  for scope in "$scope_root"/*.scope; do
+    if [ ! -e "$scope" ] && [ ! -L "$scope" ]; then
+      continue
+    fi
+    [ -d "$scope" ] && [ ! -L "$scope" ] || return 1
+    listing="$(find "$scope" -mindepth 1 -maxdepth 1 -name '*.lease' -type f -print)" || return $?
+    [ -n "$listing" ] || continue
+    scope_count="$(printf '%s\n' "$listing" | awk 'END { print NR }')" || return $?
+    count=$((count + scope_count))
+  done
+  printf '%s\n' "$count"
 }
 race_pids=""
 n=1
