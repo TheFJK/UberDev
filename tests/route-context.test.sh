@@ -260,6 +260,26 @@ PY
   done
 done
 
+for scope in roles workflows; do
+  SANDBOX_REQ="$(python3 - "$scope" <<'PY'
+import json,sys
+if sys.argv[1]=='roles':
+    request={'backend':'codex','workflow':'solve','role':'plan-writer','task_tier':'medium','risk_signals':[],'routing_mode':'adaptive','environment':{'UBERDEV_MODEL_ROUTING_ROLES':{'plan-writer':{'sandbox':'read-only'}}}}
+else:
+    request={'backend':'codex','workflow':'solve','role':'lead','task_tier':'medium','risk_signals':[],'routing_mode':'adaptive','environment':{'UBERDEV_MODEL_ROUTING_WORKFLOWS':{'solve':{'sandbox':'read-only'}}}}
+print(json.dumps(request,separators=(',',':')))
+PY
+)"
+  SANDBOX_DECISION="$(uberdev_agent_resolve_request "$SANDBOX_REQ")"
+  python3 - "$SANDBOX_DECISION" "$scope" <<'PY'
+import json,sys
+decision=json.loads(sys.argv[1]); expected='environment-role' if sys.argv[2]=='roles' else 'environment-workflow'
+assert decision['sandbox']=='read-only',decision
+assert decision['field_sources']['sandbox']==expected,decision
+assert decision['route_source'] in {'role-policy','task-policy'},decision
+PY
+done
+
 # Presence is provenance: an explicit project value equal to the canonical
 # default is project-sourced, never indistinguishable from absence/default.
 for field in mode service_tier risk_escalation adaptive_fallback shadow workflows roles; do
@@ -343,4 +363,4 @@ AFTER="$(find "$TMP/runtime" -type f -exec shasum -a 256 {} + | sort)"
 BAD='{"backend":"codex","workflow":"solve","role":"plan-writer","task_tier":"small","risk_signals":[],"routing_mode":""}'
 ! uberdev_agent_resolve_request "$BAD" >/dev/null 2>"$TMP/error"
 ! grep -q "$TMP" "$TMP/error"
-echo 'route-context: 169 checks passed'
+echo 'route-context: 175 checks passed'

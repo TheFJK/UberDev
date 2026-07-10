@@ -358,16 +358,19 @@ try:
     else: resolver_request.pop("environment",None)
     if project_config: resolver_request["project_routing"]=project_config
     decision=module.resolve_route(policy,catalog,resolver_request)
-    source_rewrite=None
     role=resolver_request.get("role","lead"); workflow=resolver_request.get("workflow","")
-    if isinstance(environment.get("UBERDEV_MODEL_ROUTING_ROLES"),dict) and role in environment["UBERDEV_MODEL_ROUTING_ROLES"] and decision.get("route_source")=="project-role":
-        source_rewrite=("project-role","environment-role")
-    elif isinstance(environment.get("UBERDEV_MODEL_ROUTING_WORKFLOWS"),dict) and workflow in environment["UBERDEV_MODEL_ROUTING_WORKFLOWS"] and decision.get("route_source")=="project-workflow":
-        source_rewrite=("project-workflow","environment-workflow")
-    if source_rewrite:
-        old,new=source_rewrite; decision["route_source"]=new
-        decision["field_sources"]={key:(new if value==old else value) for key,value in decision.get("field_sources",{}).items()}
-        decision["reason_codes"]=[reason.replace(old,new,1) if isinstance(reason,str) and reason.startswith(old) else reason for reason in decision.get("reason_codes",[])]
+    source_rewrites=[]
+    if isinstance(environment.get("UBERDEV_MODEL_ROUTING_ROLES"),dict) and role in environment["UBERDEV_MODEL_ROUTING_ROLES"]:
+        source_rewrites.append(("project-role","environment-role"))
+    if isinstance(environment.get("UBERDEV_MODEL_ROUTING_WORKFLOWS"),dict) and workflow in environment["UBERDEV_MODEL_ROUTING_WORKFLOWS"]:
+        source_rewrites.append(("project-workflow","environment-workflow"))
+    def rewrite_source_tokens(value,old,new):
+        if isinstance(value,dict): return {key:rewrite_source_tokens(item,old,new) for key,item in value.items()}
+        if isinstance(value,list): return [rewrite_source_tokens(item,old,new) for item in value]
+        if isinstance(value,str) and (value==old or value.startswith(old+"-")): return new+value[len(old):]
+        return value
+    for old,new in source_rewrites:
+        decision=rewrite_source_tokens(decision,old,new)
     print(json.dumps(decision,sort_keys=True,separators=(",",":")),end="")
 except Exception as exc:
     code=getattr(exc,"code","invalid_request")
