@@ -408,7 +408,7 @@ import json, sys
  cli_mode,cli_route,cli_model,cli_effort,cli_service,cli_fast,cli_sandbox,
  env_mode,env_route,env_model,env_effort,env_service,env_risk,env_fallback,env_shadow,
  effective_mode,effective_service,effective_risk,effective_fallback,effective_shadow,effective_workflows,effective_roles,
- workflow,phase,role,risks_raw,parent_raw)=sys.argv[1:]
+ workflow,phase,role,risks_raw,parent_raw,triage_raw)=sys.argv[1:]
 provenance=json.loads(provenance_raw)
 request = {
   "schema_version":1, "run_dir":run_dir, "run_id":run_id,
@@ -435,13 +435,14 @@ project={key:value for key,value in effective.items() if provenance.get(key,{}).
 if project: request["project_routing"]=project
 parent=json.loads(parent_raw)
 if parent: request["parent_run"]=parent
+if triage_raw: request["triage_decision"]=json.loads(triage_raw)
 print(json.dumps(request, sort_keys=True, separators=(",", ":")))
 ' "$run_dir" "$run_id" "$repository_id" "$UBERDEV_RESOLVED_BACKEND" "$TIER" "$ISSUE_NUM" \
     "$capacity" "$timeout_s" "$provenance" \
     "${UBERDEV_DISPATCH_ROUTING_MODE:-}" "${UBERDEV_DISPATCH_ROUTE:-}" "${UBERDEV_DISPATCH_MODEL:-}" "${UBERDEV_DISPATCH_REASONING_EFFORT:-}" "${UBERDEV_DISPATCH_SERVICE_TIER:-}" "${UBERDEV_DISPATCH_FAST:-}" "${UBERDEV_DISPATCH_SANDBOX:-}" \
     "${UBERDEV_MODEL_ROUTING_MODE:-}" "${UBERDEV_ROUTE:-}" "${UBERDEV_MODEL:-}" "${UBERDEV_REASONING_EFFORT:-}" "${UBERDEV_SERVICE_TIER:-}" "${UBERDEV_MODEL_ROUTING_RISK_ESCALATION:-}" "${UBERDEV_MODEL_ROUTING_ADAPTIVE_FALLBACK:-}" "${UBERDEV_MODEL_ROUTING_SHADOW:-}" \
     "${UBERDEV_ROUTING_MODE:-inherit}" "${UBERDEV_ROUTING_SERVICE_TIER:-default}" "${UBERDEV_ROUTING_RISK_ESCALATION:-true}" "${UBERDEV_ROUTING_ADAPTIVE_FALLBACK:-true}" "${UBERDEV_ROUTING_SHADOW:-false}" "$workflow_routes" "$role_routes" \
-    "${UBERDEV_AGENT_WORKFLOW:-solve}" "${UBERDEV_AGENT_PHASE:-lead}" "${UBERDEV_AGENT_ROLE:-lead}" "${UBERDEV_AGENT_RISK_SIGNALS_JSON:-[]}" "$parent_run")" || {
+    "${UBERDEV_AGENT_WORKFLOW:-solve}" "${UBERDEV_AGENT_PHASE:-lead}" "${UBERDEV_AGENT_ROLE:-lead}" "${UBERDEV_AGENT_RISK_SIGNALS_JSON:-[]}" "$parent_run" "${UBERDEV_AGENT_TRIAGE_DECISION_JSON:-}")" || {
       DISPATCH_RC=2; return 2;
     }
   if [ -n "${UBERDEV_AGENT_PREPARED_REQUEST_JSON:-}" ]; then
@@ -461,8 +462,9 @@ print(json.dumps(request,sort_keys=True,separators=(",",":")),end="")
     decision="$(uberdev_agent_resolve_request "$request_json")" || { DISPATCH_RC=2; return 2; }
     metadata="$(python3 -I -B -c '
 import json,sys
-r=json.loads(sys.argv[1])
-print(json.dumps({"run_id":r["run_id"],"repository_id":r["repository_id"],"workflow":r["workflow"],"backend":r["backend"],"issue_num":r["issue_num"],"task_tier":r["task_tier"],"risk_signals":r.get("risk_signals",[])},sort_keys=True,separators=(",",":")),end="")
+r=json.loads(sys.argv[1]); m={"run_id":r["run_id"],"repository_id":r["repository_id"],"workflow":r["workflow"],"backend":r["backend"],"issue_num":r["issue_num"],"task_tier":r["task_tier"],"risk_signals":r.get("risk_signals",[])}
+if "triage_decision" in r: m["triage_decision"]=r["triage_decision"]
+print(json.dumps(m,sort_keys=True,separators=(",",":")),end="")
 ' "$request_json")" || { DISPATCH_RC=2; return 2; }
     created="$(date -u +%FT%TZ)"
     context="$(uberdev_agent_context_create "$run_dir" "$request_json" "$decision" "$provenance" "$metadata" "$created")" || { DISPATCH_RC=2; return 2; }
@@ -484,14 +486,20 @@ print(json.dumps(r,sort_keys=True,separators=(",",":")),end="")
 # Resolve and persist one root request without launching a provider. The
 # launcher calls this for every issue before the first claim mutation.
 uberdev_dispatch_prepare_root() {
-  local issue_num="$1" tier="$2" risk_json="$3" workflow="$4" prepared rc
+  local issue_num="$1" tier="$2" risk_json="$3" workflow="$4" triage_json="${5:-}" prepared rc saved_prepared had_prepared=0
   UBERDEV_AGENT_RISK_SIGNALS_JSON="$risk_json"
   UBERDEV_AGENT_WORKFLOW="$workflow"
+  UBERDEV_AGENT_TRIAGE_DECISION_JSON="$triage_json"
+  if [ "${UBERDEV_AGENT_PREPARED_REQUEST_JSON+x}" = x ]; then
+    had_prepared=1; saved_prepared="$UBERDEV_AGENT_PREPARED_REQUEST_JSON"
+  fi
+  unset UBERDEV_AGENT_PREPARED_REQUEST_JSON
   UBERDEV_AGENT_PREPARE_ONLY=1
-  export UBERDEV_AGENT_RISK_SIGNALS_JSON UBERDEV_AGENT_WORKFLOW UBERDEV_AGENT_PREPARE_ONLY
+  export UBERDEV_AGENT_RISK_SIGNALS_JSON UBERDEV_AGENT_WORKFLOW UBERDEV_AGENT_TRIAGE_DECISION_JSON UBERDEV_AGENT_PREPARE_ONLY
   prepared="$(uberdev_dispatch_one "$issue_num" "$tier" /dev/null)"
   rc=$?
   unset UBERDEV_AGENT_PREPARE_ONLY
+  if [ "$had_prepared" -eq 1 ]; then export UBERDEV_AGENT_PREPARED_REQUEST_JSON="$saved_prepared"; else unset UBERDEV_AGENT_PREPARED_REQUEST_JSON; fi
   if [ "$rc" -ne 0 ]; then return "$rc"; fi
   printf '%s' "$prepared"
 }

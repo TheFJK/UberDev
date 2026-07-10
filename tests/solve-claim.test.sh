@@ -407,7 +407,7 @@ echo "== #123 Phase 2 simplify-lens: Q1 — field-extraction \"?\" fallback bug 
 # conditional-assign only when non-empty (pre-init "?" defaults stay in place).
 assert_grep_not "$SOLVE_PIPELINE" \
   "CLAIM_USER=\\\$\\(printf '%s.n' \"\\\$LATEST_CLAIM_BODY\".* sed 's/\\^User: //'.*\\|\\| echo \"\\?\"" \
-  "Q1: broken `|| echo \"?\"` field-extraction form is gone"
+  "Q1: broken logical-or echo fallback field-extraction form is gone"
 assert_grep "$SOLVE_PIPELINE" \
   "_v=\\\$\\(printf .* \"\\\$LATEST_CLAIM_BODY\" \\| grep -m1 '\\^User: ' +\\| sed 's/\\^User: //'\\); +\\[\\[ -n \"\\\$_v\" \\]\\] && CLAIM_USER=\"\\\$_v\"" \
   "Q1: capture-then-conditional-assign form for CLAIM_USER (pre-init \"?\" default preserved)"
@@ -423,7 +423,7 @@ assert_grep "$SOLVE_PIPELINE" \
 # Constants-table prose update: must NOT still claim the `?` fallback works.
 assert_grep_not "$SOLVE_PIPELINE" \
   "the field-extraction grep tolerates missing fields via the .\\?. fallback" \
-  "Q1: false Constants-table claim about `?` fallback removed"
+  "Q1: false Constants-table claim about question-mark fallback removed"
 # Behavioural test: simulate the bug shape on a real shell. With the
 # old form, an empty grep result leaves the variable EMPTY; with the
 # fix, the pre-init "?" stays in place.

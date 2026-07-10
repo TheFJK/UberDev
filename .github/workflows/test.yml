@@ -120,6 +120,9 @@ jobs:
           bash tests/live-semaphore.test.sh && \
           bash tests/agent-dispatch.test.sh && \
           bash tests/route-context.test.sh && \
+          bash tests/solve-triage.test.sh && \
+          bash tests/solve-routing.test.sh && \
+          bash tests/route-unsupported.test.sh && \
           bash tests/dispatch-routing-parity.test.sh && \
           bash tests/orchestrator-plan-flatten.test.sh && \
           bash tests/orchestrator-phase-6-doc.test.sh && \
@@ -234,6 +237,9 @@ jobs:
         #   - live-semaphore.test.sh
         #   - agent-dispatch.test.sh
         #   - route-context.test.sh
+        #   - route-unsupported.test.sh
+        #   - solve-routing.test.sh
+        #   - solve-triage.test.sh
         #   - dispatch-routing-parity.test.sh
         #   - orchestrator-plan-flatten.test.sh
 #   - review-pr-phase3-ci.test.sh

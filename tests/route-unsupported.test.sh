@@ -10,6 +10,10 @@ for backend in claude-bg wezterm background; do
   fi
   grep -q route_unenforceable "/tmp/route-unsupported.$$"; PASS=$((PASS+1))
 done
+if uberdev_agent_resolve_request '{"backend":"background","workflow":"solve","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"adaptive"}' >/dev/null 2>"/tmp/route-unsupported.$$"; then
+  echo "FAIL: non-Codex adaptive silently inherited" >&2; exit 1
+fi
+grep -q route_unenforceable "/tmp/route-unsupported.$$"; PASS=$((PASS+1))
 rm -f "/tmp/route-unsupported.$$"
 grep -q 'ultra is Codex-only' "$ROOT/plugins/uberdev/lib/solve-launcher.sh"; PASS=$((PASS+1))
 grep -q 'no claims written; no agents dispatched' "$ROOT/plugins/uberdev/lib/solve-launcher.sh"; PASS=$((PASS+1))

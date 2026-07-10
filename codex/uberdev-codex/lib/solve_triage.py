@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -69,9 +71,19 @@ def canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def load_snapshot(path: str) -> dict[str, Any]:
+def load_snapshot(path: str, secure_root: str | None = None) -> dict[str, Any]:
     target = Path(path)
     try:
+        if secure_root is not None:
+            root = Path(secure_root)
+            root_entry = root.lstat()
+            target_entry = target.lstat()
+            if root.is_symlink() or not root.is_dir() or root_entry.st_uid != os.geteuid() or stat.S_IMODE(root_entry.st_mode) != 0o700:
+                fail("triage_snapshot_unsafe")
+            if not target.is_absolute() or target.is_symlink() or target.parent.resolve() != root.resolve():
+                fail("triage_snapshot_unsafe")
+            if not stat.S_ISREG(target_entry.st_mode) or target_entry.st_uid != os.geteuid() or target_entry.st_nlink != 1 or stat.S_IMODE(target_entry.st_mode) != 0o600:
+                fail("triage_snapshot_unsafe")
         if target.stat().st_size > MAX_SNAPSHOT_BYTES:
             fail("triage_snapshot_too_large")
         raw = target.read_bytes()
@@ -126,19 +138,33 @@ def named_files(body: str) -> list[str]:
 
 
 def component_tokens(files: list[str]) -> list[str]:
-    tokens: set[str] = set()
-    for name in files:
-        parts = [part for part in name.split("/") if part not in {".", ".."}]
-        if len(parts) > 1:
-            tokens.add(parts[-2])
-        tokens.add(parts[-1].rsplit(".", 1)[0])
-    result = sorted(tokens)
+    result = sorted(set(files))
     if len(result) > MAX_COMPONENTS:
         fail("triage_limit_components")
     return result
 
 
+def named_modules(text: str) -> list[str]:
+    """Extract only grammatically named extensionless module lists."""
+    found: set[str] = set()
+    list_pattern = re.compile(
+        r"\b(?:the\s+)?([a-z][a-z0-9_-]*(?:\s*,\s*[a-z][a-z0-9_-]*)*"
+        r"(?:\s*,?\s+(?:and|&)\s+[a-z][a-z0-9_-]*)?)\s+"
+        r"(?:modules?|components?|services?|packages?)\b",
+        re.I,
+    )
+    for match in list_pattern.finditer(text):
+        phrase = re.sub(r"\s+(?:and|&)\s+", ",", match.group(1), flags=re.I)
+        for token in phrase.split(","):
+            normalized = token.strip().casefold()
+            if normalized and normalized not in {"multiple", "several", "many", "other"}:
+                found.add(normalized)
+    return sorted(found)
+
+
 def clamp(tier: str, floor: str | None, ceiling: str | None) -> str:
+    if floor and ceiling and TIERS.index(floor) > TIERS.index(ceiling):
+        return tier
     rank = TIERS.index(tier)
     if floor:
         rank = max(rank, TIERS.index(floor))
@@ -147,10 +173,14 @@ def clamp(tier: str, floor: str | None, ceiling: str | None) -> str:
     return TIERS[rank]
 
 
-def classify(value: dict[str, Any], floor: str | None, ceiling: str | None, override: str | None) -> dict[str, Any]:
+def classify(value: dict[str, Any], floor: str | None, ceiling: str | None, override: str | None, expected_issue: int | None = None) -> dict[str, Any]:
     number, title, body, labels = validate_snapshot(value)
+    if expected_issue is not None and number != expected_issue:
+        fail("triage_issue_mismatch")
     files = named_files(body)
-    components = component_tokens(files)
+    components = sorted(set(component_tokens(files)) | set(named_modules("\n".join((title, body)))))
+    if len(components) > MAX_COMPONENTS:
+        fail("triage_limit_components")
     combined = "\n".join((title, body, " ".join(labels)))
     risks = sorted(name for name, pattern in RISK_PATTERNS.items() if pattern.search(combined))
     stack = bool(STACK_RE.search(body))
@@ -189,27 +219,31 @@ def classify(value: dict[str, Any], floor: str | None, ceiling: str | None, over
         raw = "medium"
         matched.append("medium:fallback")
 
-    tier = clamp(raw, floor, ceiling)
+    clamps_valid = not (floor and ceiling and TIERS.index(floor) > TIERS.index(ceiling))
+    clamped = clamp(raw, floor, ceiling)
     source = "computed"
-    if floor and TIERS.index(raw) < TIERS.index(floor):
+    if clamps_valid and floor and TIERS.index(raw) < TIERS.index(floor):
         source = "floor"
         matched.append(f"floor:{floor}")
-    if ceiling and TIERS.index(raw) > TIERS.index(ceiling):
+    if clamps_valid and ceiling and TIERS.index(raw) > TIERS.index(ceiling):
         source = "ceiling"
         matched.append(f"ceiling:{ceiling}")
+    effective = clamped
     if override:
-        tier, source = override, "override"
+        effective, source = override, "override"
         matched.append(f"override:{override}")
     return {
+        "clamped_tier": clamped,
         "components": components,
+        "effective_tier": effective,
         "files": files,
         "issue": number,
-        "matched_rules": sorted(set(matched)),
+        "matched_rules": list(dict.fromkeys(matched)),
         "raw_tier": raw,
         "risk_signals": risks,
         "schema_version": 1,
         "source": source,
-        "tier": tier,
+        "tier": effective,
     }
 
 
@@ -301,7 +335,7 @@ def parse_cli(tokens: list[str]) -> dict[str, Any]:
         fail("routing_cli_conflict")
     if result["route"] is not None and (result["model"] is not None or result["effort"] is not None):
         fail("routing_cli_conflict")
-    if result.get("fast") and result["service_tier"] is not None:
+    if result.get("fast") and result["service_tier"] not in {None, "fast"}:
         fail("routing_cli_conflict")
     if result.get("fast"):
         result["service_tier"] = "fast"
@@ -323,6 +357,8 @@ def main(argv: list[str]) -> int:
     classify_parser.add_argument("--floor", type=tier_arg)
     classify_parser.add_argument("--ceiling", type=tier_arg)
     classify_parser.add_argument("--override", type=tier_arg)
+    classify_parser.add_argument("--expected-issue", type=int)
+    classify_parser.add_argument("--secure-root")
     validate_parser = commands.add_parser("validate-issues")
     validate_parser.add_argument("issues", nargs="+")
     args = parser.parse_args(argv)
@@ -338,7 +374,7 @@ def main(argv: list[str]) -> int:
             fail("triage_limit_issues")
         print(canonical(issues))
         return 0
-    print(canonical(classify(load_snapshot(args.snapshot), args.floor, args.ceiling, args.override)))
+    print(canonical(classify(load_snapshot(args.snapshot, args.secure_root), args.floor, args.ceiling, args.override, args.expected_issue)))
     return 0
 
 

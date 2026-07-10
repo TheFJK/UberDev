@@ -4,10 +4,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TRIAGE="$ROOT/plugins/uberdev/lib/solve_triage.py"
 FIX="$ROOT/tests/fixtures/solve-routing"
 PASS=0
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 assert_case() {
   local fixture="$1" expected="$2"; shift 2
   local out
-  out="$(python3 -I "$TRIAGE" classify --snapshot "$FIX/$fixture" "$@")"
+  case "$fixture" in /*) snapshot="$fixture" ;; *) snapshot="$FIX/$fixture" ;; esac
+  out="$(python3 -I "$TRIAGE" classify --snapshot "$snapshot" "$@")"
   python3 - "$out" "$expected" <<'PY'
 import json,sys
 v=json.loads(sys.argv[1]); expected=sys.argv[2]
@@ -37,8 +39,40 @@ v=json.loads(sys.argv[1]); assert v["source"]=="override"; assert "authorization
 PY
 PASS=$((PASS+1))
 
+# One file path is one component; explicit extensionless module lists count.
+ONE="$(python3 -I "$TRIAGE" classify --snapshot "$FIX/small.json")"
+python3 - "$ONE" <<'PY'
+import json,sys
+v=json.loads(sys.argv[1]); assert v["components"]==["lib/parser.py"],v
+PY
+PASS=$((PASS+1))
+cat >"$TMP/modules.json" <<'JSON'
+{"number":8,"title":"Refactor module boundaries","state":"OPEN","body":"Refactor the auth, payments, and notifications modules.","labels":[{"name":"refactor"}]}
+JSON
+assert_case "$TMP/modules.json" large
+
+# Inverted clamps are ignored as a pair, matching config-read's contract.
+INVERTED="$(python3 -I "$TRIAGE" classify --snapshot "$FIX/trivial.json" --floor large --ceiling small)"
+python3 - "$INVERTED" <<'PY'
+import json,sys
+v=json.loads(sys.argv[1]); assert v["raw_tier"]==v["clamped_tier"]==v["effective_tier"]=="trivial"; assert v["source"]=="computed"
+PY
+PASS=$((PASS+1))
+
+if python3 -I "$TRIAGE" classify --snapshot "$FIX/trivial.json" --expected-issue 99 >"$TMP/out" 2>"$TMP/err"; then exit 1; fi
+grep -q triage_issue_mismatch "$TMP/err"; PASS=$((PASS+1))
+
+SECURE="$TMP/secure"; mkdir "$SECURE"; chmod 700 "$SECURE"
+cp "$FIX/trivial.json" "$SECURE/issue.json"; chmod 600 "$SECURE/issue.json"
+python3 -I "$TRIAGE" classify --snapshot "$SECURE/issue.json" --secure-root "$SECURE" --expected-issue 1 >/dev/null; PASS=$((PASS+1))
+ln "$SECURE/issue.json" "$SECURE/hard.json"
+if python3 -I "$TRIAGE" classify --snapshot "$SECURE/issue.json" --secure-root "$SECURE" >"$TMP/out" 2>"$TMP/err"; then exit 1; fi
+grep -q triage_snapshot_unsafe "$TMP/err"; rm "$SECURE/hard.json"; PASS=$((PASS+1))
+ln -s "$SECURE/issue.json" "$SECURE/link.json"
+if python3 -I "$TRIAGE" classify --snapshot "$SECURE/link.json" --secure-root "$SECURE" >"$TMP/out" 2>"$TMP/err"; then exit 1; fi
+grep -q triage_snapshot_unsafe "$TMP/err"; PASS=$((PASS+1))
+
 # Bounds are reject-not-truncate, and malformed/closed/oversized snapshots fail.
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 python3 - "$TMP" <<'PY'
 import json,pathlib,sys
 p=pathlib.Path(sys.argv[1])

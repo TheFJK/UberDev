@@ -281,7 +281,7 @@ request_raw, policy_path, router_path, catalog_path = sys.argv[1:]
 try:
     request=json.loads(request_raw)
     if not isinstance(request,dict): raise ValueError("request_not_object")
-    allowed={"schema_version","run_dir","run_id","repository_id","backend","workflow","phase","role","task_tier","risk_scope","risk_signals","issue_or_pr","issue_num","capacity","timeout_s","routing_mode","explicit_route","explicit_model","explicit_effort","explicit_service_tier","fast","explicit_sandbox","parent_sandbox","environment","project_routing","project_config","parent_run","shadow","adaptive_fallback","parent_run_id","agent_id","context_file","context_sha256","root_decision"}
+    allowed={"schema_version","run_dir","run_id","repository_id","backend","workflow","phase","role","task_tier","risk_scope","risk_signals","issue_or_pr","issue_num","capacity","timeout_s","routing_mode","explicit_route","explicit_model","explicit_effort","explicit_service_tier","fast","explicit_sandbox","parent_sandbox","environment","project_routing","project_config","parent_run","shadow","adaptive_fallback","parent_run_id","agent_id","context_file","context_sha256","root_decision","triage_decision"}
     unknown=set(request)-allowed
     if unknown: raise ValueError("unknown_request_fields")
     carriers={"routing_mode","explicit_route","explicit_model","explicit_effort","explicit_service_tier","explicit_sandbox","parent_sandbox"}
@@ -317,7 +317,7 @@ try:
             if set(project)!={"model_routing"}: raise ValueError("unknown_project_config_fields")
             validate_project(project["model_routing"])
         else: validate_project(project)
-    routing={key:value for key,value in request.items() if key not in {"schema_version","run_dir","run_id","repository_id","issue_or_pr","issue_num","capacity","timeout_s","parent_run_id","agent_id","context_file","context_sha256","root_decision"}}
+    routing={key:value for key,value in request.items() if key not in {"schema_version","run_dir","run_id","repository_id","issue_or_pr","issue_num","capacity","timeout_s","parent_run_id","agent_id","context_file","context_sha256","root_decision","triage_decision"}}
     backend=routing.get("backend","codex")
     if backend!="codex":
         project=request.get("project_routing") or request.get("project_config") or {}
@@ -326,7 +326,8 @@ try:
         project_concrete=(project.get("service_tier") not in (None,"","default") or (isinstance(project.get("roles"),dict) and project["roles"].get(role) is not None) or (isinstance(project.get("workflows"),dict) and project["workflows"].get(workflow) is not None))
         environment_concrete=any(environment.get(key) not in (None,"") for key in ("UBERDEV_ROUTE","UBERDEV_MODEL","UBERDEV_REASONING_EFFORT")) or environment.get("UBERDEV_SERVICE_TIER") not in (None,"","default") or any(environment.get(key) for key in ("UBERDEV_MODEL_ROUTING_WORKFLOWS","UBERDEV_MODEL_ROUTING_ROLES"))
         service=routing.get("explicit_service_tier") or environment.get("UBERDEV_SERVICE_TIER") or project.get("service_tier") or "default"
-        if any(routing.get(k) not in (None,"") for k in ("explicit_route","explicit_model","explicit_effort")) or parent.get("forced") is True or service!="default" or environment_concrete or project_concrete:
+        adaptive_requested=(routing.get("routing_mode")=="adaptive" or environment.get("UBERDEV_MODEL_ROUTING_MODE")=="adaptive" or project.get("mode",project.get("routing_mode"))=="adaptive")
+        if adaptive_requested or any(routing.get(k) not in (None,"") for k in ("explicit_route","explicit_model","explicit_effort")) or parent.get("forced") is True or service!="default" or environment_concrete or project_concrete:
             class Unenforceable(Exception): code="route_unenforceable"
             raise Unenforceable()
         decision={"schema_version":1,"backend":backend,"routing_mode":"inherit","effective_policy":"inherit","logical_route":None,"model":None,"reasoning_effort":None,"service_tier":"default","sandbox":None,"forced":False,"route_source":"backend-neutral-inherit","risk_signals":routing.get("risk_signals",[]),"fallback_chain":[],"minimum_route":None}
@@ -394,7 +395,7 @@ _uberdev_agent_context_schema_validate() {
 import json,os,re,sys
 mode=sys.argv[1]
 routing_allowed={"backend","workflow","phase","role","task_tier","risk_scope","risk_signals","routing_mode","explicit_route","explicit_model","explicit_effort","explicit_service_tier","fast","explicit_sandbox","parent_sandbox","environment","project_routing","project_config","parent_run","shadow","adaptive_fallback"}
-adapter_metadata={"schema_version","run_dir","run_id","repository_id","issue_or_pr","issue_num","capacity","timeout_s","parent_run_id","agent_id","context_file","context_sha256","root_decision"}
+adapter_metadata={"schema_version","run_dir","run_id","repository_id","issue_or_pr","issue_num","capacity","timeout_s","parent_run_id","agent_id","context_file","context_sha256","root_decision","triage_decision"}
 decision_allowed={"schema_version","policy_version","backend","service_tier","sandbox","field_sources","adaptive_fallback","risk_signals","risk_scope","minimum_route","fallback_chain","ignored_sources","ignored_fields","logical_route","model","reasoning_effort","routing_mode","effective_policy","route_source","forced","reason_codes","adaptive_proposal"}
 provenance_keys={"mode","service_tier","risk_escalation","adaptive_fallback","shadow","workflows","roles"}; sources={"env","project-codex","project-claude","explicit-config-file","default"}
 risks={"authentication","authorization","concurrency","cryptography","data-loss","destructive-operations","force-push","public-api-compatibility","release-infrastructure","schema-migration","security"}
@@ -465,11 +466,20 @@ def validate(payload):
    if source=="project-codex" and not path.endswith("/.codex/uberdev.local.md"): raise ValueError()
    if source=="project-claude" and not path.endswith("/.claude/uberdev.local.md"): raise ValueError()
  metadata=payload["metadata"]
- if not isinstance(metadata,dict) or set(metadata)!={"run_id","repository_id","workflow","backend","issue_num","task_tier","risk_signals"}: raise ValueError()
+ metadata_base={"run_id","repository_id","workflow","backend","issue_num","task_tier","risk_signals"}
+ if not isinstance(metadata,dict) or frozenset(metadata) not in {frozenset(metadata_base),frozenset(metadata_base|{"triage_decision"})}: raise ValueError()
  if not isinstance(metadata["run_id"],str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",metadata["run_id"]): raise ValueError()
  if not isinstance(metadata["repository_id"],str) or not metadata["repository_id"] or metadata["workflow"] not in {"solve","turbo"} or not isinstance(metadata["backend"],str): raise ValueError()
  if type(metadata["issue_num"]) is not int or metadata["issue_num"]<=0 or metadata["task_tier"] not in {"trivial","small","medium","large"}: raise ValueError()
  if not isinstance(metadata["risk_signals"],list) or any(item not in risks for item in metadata["risk_signals"]): raise ValueError()
+ if "triage_decision" in metadata:
+  triage=metadata["triage_decision"]
+  triage_keys={"schema_version","issue","raw_tier","clamped_tier","effective_tier","tier","source","matched_rules","risk_signals","files","components"}
+  if not isinstance(triage,dict) or set(triage)!=triage_keys or triage.get("schema_version")!=1: raise ValueError()
+  if triage.get("issue")!=metadata["issue_num"] or triage.get("effective_tier")!=metadata["task_tier"] or triage.get("tier")!=metadata["task_tier"] or triage.get("risk_signals")!=metadata["risk_signals"]: raise ValueError()
+  if triage.get("raw_tier") not in {"trivial","small","medium","large"} or triage.get("clamped_tier") not in {"trivial","small","medium","large"} or triage.get("source") not in {"computed","floor","ceiling","override"}: raise ValueError()
+  if not isinstance(triage.get("matched_rules"),list) or not all(isinstance(x,str) and x for x in triage["matched_rules"]): raise ValueError()
+  if not isinstance(triage.get("files"),list) or not isinstance(triage.get("components"),list): raise ValueError()
  if request.get("workflow")!=metadata["workflow"] or request.get("backend")!=metadata["backend"] or request.get("task_tier")!=metadata["task_tier"] or request.get("risk_signals",[])!=metadata["risk_signals"]: raise ValueError()
  if decision.get("backend")!=metadata["backend"] or decision.get("risk_signals",[])!=metadata["risk_signals"]: raise ValueError()
  return payload

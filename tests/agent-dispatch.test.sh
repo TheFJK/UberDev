@@ -258,7 +258,7 @@ elif kind == "ultra": request["explicit_route"] = "sol-ultra"
 elif kind == "shadow": request["shadow"] = True
 elif kind == "claude":
     request["backend"] = "claude-bg"
-    request["routing_mode"] = "adaptive"
+    request["routing_mode"] = "inherit"
 elif kind == "claude-forced":
     request["backend"] = "claude-bg"
     request["explicit_route"] = "sol-ultra"

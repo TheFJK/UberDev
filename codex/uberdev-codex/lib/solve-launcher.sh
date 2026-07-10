@@ -335,11 +335,26 @@ if ! REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>&1)"; 
 fi
 
 # --- Phase A: portable temp dir (v0.29.0 — RFC 0004 §3.8) ---
-# One temp root resolved once; every per-issue artifact (prompt, stdout log,
-# claim json, validation snapshot) lives under it. Exported so lib/dispatch.sh
-# inherits it. Hoisted ahead of validation because the parallel fetch below
-# stages per-issue JSON under it.
-export UBERDEV_TMPDIR="${TMPDIR:-/tmp}"
+# Allocate a private per-launch root beneath the caller's temp base. Shared
+# roots such as /tmp are commonly root-owned and cannot safely host immutable
+# contexts or predictable redirect targets directly.
+_UBERDEV_TMP_BASE="${TMPDIR:-/tmp}"
+if ! UBERDEV_TMPDIR="$(python3 -I -B -c '
+import os,stat,sys,tempfile
+base=os.path.realpath(sys.argv[1])
+entry=os.stat(base,follow_symlinks=False)
+if not stat.S_ISDIR(entry.st_mode): raise SystemExit(2)
+path=tempfile.mkdtemp(prefix=f"uberdev-solve-{os.geteuid()}-",dir=base)
+os.chmod(path,0o700); current=os.stat(path,follow_symlinks=False)
+if current.st_uid!=os.geteuid() or stat.S_IMODE(current.st_mode)!=0o700: raise SystemExit(2)
+print(path,end="")
+' "$_UBERDEV_TMP_BASE")"; then
+  echo "error: could not allocate private solve staging under $_UBERDEV_TMP_BASE" >&2
+  echo "no claims written; no agents dispatched" >&2
+  exit 1
+fi
+export UBERDEV_TMPDIR
+umask 077
 
 # Native-Windows-no-bash fast-fail + WSL2 9P warning (RFC 0004).
 if [ -z "${BASH:-}" ] && { [ "${OS:-}" = "Windows_NT" ] || case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) true ;; *) false ;; esac; }; then
@@ -369,16 +384,29 @@ fi
 # (the 21ad417 mktemp-stderr-capture canary).
 _uberdev_fetch_issue_json() {
   local n="$1"
-  local GH_ERR
+  local GH_ERR TARGET
   GH_ERR=$(mktemp)
+  TARGET="$UBERDEV_TMPDIR/solve-validate-$n.json"
+  if ! python3 -I -B -c '
+import os,stat,sys
+root,target=sys.argv[1:]; root=os.path.realpath(root); target=os.path.abspath(target)
+if os.path.dirname(target)!=root: raise SystemExit(2)
+fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)
+entry=os.fstat(fd); os.close(fd)
+if entry.st_uid!=os.geteuid() or entry.st_nlink!=1 or not stat.S_ISREG(entry.st_mode): raise SystemExit(2)
+' "$UBERDEV_TMPDIR" "$TARGET"; then
+    printf '%s\n' 'unsafe validation snapshot target' > "$UBERDEV_TMPDIR/solve-validate-$n.err"
+    rm -f "$GH_ERR"
+    return 0
+  fi
   # JSON fields include `assignees,comments` to feed the Step 4 collision
   # check — keeps Phase A to a single round-trip per issue.
   if gh issue view "$n" --json number,title,state,body,labels,assignees,comments \
-      > "$UBERDEV_TMPDIR/solve-validate-$n.json" 2>"$GH_ERR"; then
+      > "$TARGET" 2>"$GH_ERR"; then
     rm -f "$GH_ERR" "$UBERDEV_TMPDIR/solve-validate-$n.err" 2>/dev/null
   else
     mv "$GH_ERR" "$UBERDEV_TMPDIR/solve-validate-$n.err"
-    rm -f "$UBERDEV_TMPDIR/solve-validate-$n.json" 2>/dev/null
+    rm -f "$TARGET" 2>/dev/null
   fi
 }
 
@@ -485,7 +513,7 @@ for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
     TITLE="$TITLE_RAW"
   fi
   # Pure deterministic classification from the exact bounded snapshot.
-  TRIAGE_ARGS=( classify --snapshot "$UBERDEV_TMPDIR/solve-validate-$ISSUE_NUM.json" )
+  TRIAGE_ARGS=( classify --snapshot "$UBERDEV_TMPDIR/solve-validate-$ISSUE_NUM.json" --secure-root "$UBERDEV_TMPDIR" --expected-issue "$ISSUE_NUM" )
   [[ -z "$FLOOR" ]] || TRIAGE_ARGS+=( --floor "$FLOOR" )
   [[ -z "$CEILING" ]] || TRIAGE_ARGS+=( --ceiling "$CEILING" )
   [[ -z "$OVERRIDE" ]] || TRIAGE_ARGS+=( --override "$OVERRIDE" )
@@ -497,6 +525,12 @@ for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
   TIER="$(python3 -I -c 'import json,sys; print(json.loads(sys.argv[1])["tier"],end="")' "$TRIAGE_JSON")"
   TIER_SOURCE="$(python3 -I -c 'import json,sys; print(json.loads(sys.argv[1])["source"],end="")' "$TRIAGE_JSON")"
   RISK_JSON="$(python3 -I -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["risk_signals"],separators=(",",":")),end="")' "$TRIAGE_JSON")"
+  TRIAGE_ISSUE="$(python3 -I -c 'import json,sys; print(json.loads(sys.argv[1])["issue"],end="")' "$TRIAGE_JSON")"
+  if [ "$TRIAGE_ISSUE" != "$ISSUE_NUM" ]; then
+    ERRORS+=("#$ISSUE_NUM: triage_issue_mismatch")
+    _vidx=$((_vidx + 1))
+    continue
+  fi
   TRIAGE_LABELS=$(jq -r '[.labels[].name] | join(",")' <<<"$ISSUE_JSON")
   TRIAGE_BODY_CHARS=$(jq -r '.body // "" | length' <<<"$ISSUE_JSON")
   if jq -r '.body // ""' <<<"$ISSUE_JSON" | grep -qE 'Traceback \(most recent call last\)|^[[:space:]]+at .+\(.+:[0-9]+|^[[:space:]]*File "|panic:|stack trace|Stack trace'; then
@@ -598,7 +632,7 @@ WORKFLOW=solve
 [[ "$TURBO_OPT" == "1" ]] && WORKFLOW=turbo
 _ridx=0
 for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
-  if ! ROOT_REQUEST="$(uberdev_dispatch_prepare_root "$ISSUE_NUM" "${TIERS[$_ridx]}" "${RISKS[$_ridx]}" "$WORKFLOW")"; then
+  if ! ROOT_REQUEST="$(uberdev_dispatch_prepare_root "$ISSUE_NUM" "${TIERS[$_ridx]}" "${RISKS[$_ridx]}" "$WORKFLOW" "${TRIAGE_DECISIONS[$_ridx]}")"; then
     echo "error: #$ISSUE_NUM routing/context validation failed" >&2
     echo "no claims written; no agents dispatched" >&2
     exit 1
@@ -966,7 +1000,8 @@ TITLE="${TITLES[$_widx]}"
 UBERDEV_AGENT_PREPARED_REQUEST_JSON="${ROOT_REQUESTS[$_widx]}"
 UBERDEV_AGENT_RISK_SIGNALS_JSON="${RISKS[$_widx]}"
 UBERDEV_AGENT_WORKFLOW="$WORKFLOW"
-export UBERDEV_AGENT_PREPARED_REQUEST_JSON UBERDEV_AGENT_RISK_SIGNALS_JSON UBERDEV_AGENT_WORKFLOW
+UBERDEV_AGENT_TRIAGE_DECISION_JSON="${TRIAGE_DECISIONS[$_widx]}"
+export UBERDEV_AGENT_PREPARED_REQUEST_JSON UBERDEV_AGENT_RISK_SIGNALS_JSON UBERDEV_AGENT_WORKFLOW UBERDEV_AGENT_TRIAGE_DECISION_JSON
 _widx=$((_widx + 1))
 # DISPATCH_RC + DISPATCH_ID are reset at the top of uberdev_dispatch_one
 # (lib/dispatch.sh central SSOT reset) and documented always-set on return.
