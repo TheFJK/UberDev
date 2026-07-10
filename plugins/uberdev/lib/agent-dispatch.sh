@@ -353,11 +353,21 @@ try:
     for env_key,scope in (("UBERDEV_MODEL_ROUTING_WORKFLOWS","workflows"),("UBERDEV_MODEL_ROUTING_ROLES","roles")):
         env_map=resolver_environment.pop(env_key,None)
         if env_map is not None:
-            merged=dict(project_config.get(scope,{}) or {}); merged.update(env_map); project_config[scope]=merged
+            project_config[scope]=dict(env_map)
     if resolver_environment: resolver_request["environment"]=resolver_environment
     else: resolver_request.pop("environment",None)
     if project_config: resolver_request["project_routing"]=project_config
     decision=module.resolve_route(policy,catalog,resolver_request)
+    source_rewrite=None
+    role=resolver_request.get("role","lead"); workflow=resolver_request.get("workflow","")
+    if isinstance(environment.get("UBERDEV_MODEL_ROUTING_ROLES"),dict) and role in environment["UBERDEV_MODEL_ROUTING_ROLES"] and decision.get("route_source")=="project-role":
+        source_rewrite=("project-role","environment-role")
+    elif isinstance(environment.get("UBERDEV_MODEL_ROUTING_WORKFLOWS"),dict) and workflow in environment["UBERDEV_MODEL_ROUTING_WORKFLOWS"] and decision.get("route_source")=="project-workflow":
+        source_rewrite=("project-workflow","environment-workflow")
+    if source_rewrite:
+        old,new=source_rewrite; decision["route_source"]=new
+        decision["field_sources"]={key:(new if value==old else value) for key,value in decision.get("field_sources",{}).items()}
+        decision["reason_codes"]=[reason.replace(old,new,1) if isinstance(reason,str) and reason.startswith(old) else reason for reason in decision.get("reason_codes",[])]
     print(json.dumps(decision,sort_keys=True,separators=(",",":")),end="")
 except Exception as exc:
     code=getattr(exc,"code","invalid_request")
@@ -445,7 +455,7 @@ def validate(payload):
   if source=="env":
    if not env_selected: raise ValueError()
   elif source=="default":
-   if env_selected or (project_selected and project_value!=default): raise ValueError()
+   if env_selected or project_selected: raise ValueError()
   else:
    if env_selected or not project_selected: raise ValueError()
    path=record["file"]

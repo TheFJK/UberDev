@@ -234,6 +234,71 @@ VALID_PROV_OUT="$(uberdev_agent_context_create "$VALID_PROV_ROOT" "$VALID_PROV_R
 VALID_PROV_FILE="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_file"])' "$VALID_PROV_OUT")"; VALID_PROV_SHA="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_sha256"])' "$VALID_PROV_OUT")"
 uberdev_agent_context_validate "$VALID_PROV_FILE" "$VALID_PROV_SHA" "$VALID_PROV_ROOT" >/dev/null
 
+# Environment role/workflow maps replace the complete corresponding project
+# map. Non-overlapping project Ultra pins must not survive, and explicit `{}`
+# is a meaningful clear rather than an absent carrier.
+for scope in roles workflows; do
+  for env_kind in nonoverlap empty; do
+    MAP_REQ="$(python3 - "$scope" "$env_kind" <<'PY'
+import json,sys
+scope,kind=sys.argv[1:]
+if scope=='roles':
+ r={'backend':'codex','workflow':'solve','phase':'plan','role':'plan-writer','task_tier':'medium','risk_signals':[],'routing_mode':'adaptive','project_routing':{'roles':{'plan-writer':'ultra'}},'environment':{'UBERDEV_MODEL_ROUTING_ROLES':({'code-simplifier':'deep'} if kind=='nonoverlap' else {})}}
+else:
+ r={'backend':'codex','workflow':'solve','phase':'lead','role':'lead','task_tier':'medium','risk_signals':[],'routing_mode':'adaptive','project_routing':{'workflows':{'solve':'ultra'}},'environment':{'UBERDEV_MODEL_ROUTING_WORKFLOWS':({'turbo':'deep'} if kind=='nonoverlap' else {})}}
+print(json.dumps(r,separators=(',',':')))
+PY
+)"
+    MAP_DECISION="$(uberdev_agent_resolve_request "$MAP_REQ")"
+    python3 - "$MAP_DECISION" "$scope" "$env_kind" <<'PY'
+import json,sys
+d=json.loads(sys.argv[1]); scope=sys.argv[2]
+if scope=='roles': assert (d['logical_route'],d['route_source'])==('frontier','role-policy'),d
+else: assert (d['logical_route'],d['route_source'])==('quality','task-policy'),d
+assert d['logical_route']!='ultra',d
+PY
+  done
+done
+
+# Presence is provenance: an explicit project value equal to the canonical
+# default is project-sourced, never indistinguishable from absence/default.
+for field in mode service_tier risk_escalation adaptive_fallback shadow workflows roles; do
+  for source_case in default codex-wrong-family claude-wrong-family; do
+    ROOT_CASE="$TMP/project-default-$field-$source_case"; mkdir "$ROOT_CASE"
+    CASE_DATA="$(python3 - "$REQ" "$PROV" "$field" "$source_case" "$TMP/project/.codex/uberdev.local.md" <<'PY'
+import json,pathlib,sys
+r=json.loads(sys.argv[1]); p=json.loads(sys.argv[2]); field,case=sys.argv[3:5]; codex=str(pathlib.Path(sys.argv[5]).resolve())
+defaults={'mode':'inherit','service_tier':'default','risk_escalation':True,'adaptive_fallback':True,'shadow':False,'workflows':{},'roles':{}}
+r['project_routing']={field:defaults[field]}
+if case=='codex-wrong-family': p[field]={'source':'project-codex','file':codex.replace('/.codex/','/.claude/')}
+elif case=='claude-wrong-family': p[field]={'source':'project-claude','file':codex}
+print(json.dumps(r,separators=(',',':'))); print(json.dumps(p,separators=(',',':')))
+PY
+)"
+    CASE_REQ="$(printf '%s\n' "$CASE_DATA" | sed -n '1p')"; CASE_PROV="$(printf '%s\n' "$CASE_DATA" | sed -n '2p')"; CASE_DECISION="$(uberdev_agent_resolve_request "$CASE_REQ")"
+    ! uberdev_agent_context_create "$ROOT_CASE" "$CASE_REQ" "$CASE_DECISION" "$CASE_PROV" "$META" '2026-07-10T00:00:00Z' >/dev/null 2>"$TMP/project-default-$field-$source_case.err"
+    [ ! -e "$ROOT_CASE/.agent-state-$(id -u)" ]
+  done
+done
+
+for scope in roles workflows; do
+  SOURCE_REQ="$(python3 - "$scope" <<'PY'
+import json,sys
+if sys.argv[1]=='roles':
+    request={'backend':'codex','workflow':'solve','role':'plan-writer','task_tier':'medium','risk_signals':[],'routing_mode':'adaptive','environment':{'UBERDEV_MODEL_ROUTING_ROLES':{'plan-writer':'deep'}}}
+else:
+    request={'backend':'codex','workflow':'solve','role':'lead','task_tier':'medium','risk_signals':[],'routing_mode':'adaptive','environment':{'UBERDEV_MODEL_ROUTING_WORKFLOWS':{'solve':'deep'}}}
+print(json.dumps(request,separators=(',',':')))
+PY
+)"
+  SOURCE_DECISION="$(uberdev_agent_resolve_request "$SOURCE_REQ")"
+  python3 - "$SOURCE_DECISION" "$scope" <<'PY'
+import json,sys
+decision=json.loads(sys.argv[1]); expected='environment-role' if sys.argv[2]=='roles' else 'environment-workflow'
+assert (decision['logical_route'],decision['route_source'])==('deep',expected),decision
+PY
+done
+
 # A state-directory ancestor cannot be replaced by a symlink outside run root.
 mkdir "$TMP/escape-root"
 ESC="$(uberdev_agent_context_create "$TMP/escape-root" "$REQ" "$DECISION" "$PROV" "$META" '2026-07-10T00:00:00Z')"
@@ -278,4 +343,4 @@ AFTER="$(find "$TMP/runtime" -type f -exec shasum -a 256 {} + | sort)"
 BAD='{"backend":"codex","workflow":"solve","role":"plan-writer","task_tier":"small","risk_signals":[],"routing_mode":""}'
 ! uberdev_agent_resolve_request "$BAD" >/dev/null 2>"$TMP/error"
 ! grep -q "$TMP" "$TMP/error"
-echo 'route-context: 111 checks passed'
+echo 'route-context: 169 checks passed'
