@@ -337,18 +337,13 @@ assert_grep "$SOLVE_PIPELINE" \
   "dispatch_failure_rollback_skipped" \
   "B3: claim_released event carries the rollback-skipped reason for audit-log filtering"
 
-echo "== #123 B4: stale-claim sweeper on closed issues (pre-state-reject) =="
-# The sweeper MUST inspect HAS_ACTIVE_LABEL on closed issues BEFORE the
-# state-reject so a stuck label gets pruned even though dispatch refuses.
+echo "== #123 B4: closed-issue validation is mutation-free =="
+assert_grep_not "$SOLVE_PIPELINE" \
+  'CLOSED_HAS_ACTIVE_LABEL=' \
+  "B4: closed-issue validation does not prune a claim before routing/context validation"
 assert_grep "$SOLVE_PIPELINE" \
-  'CLOSED_HAS_ACTIVE_LABEL=\$\(jq -r ' \
-  "B4: sweeper queries .labels for uberdev:active on closed issues"
-assert_grep "$SOLVE_PIPELINE" \
-  'reason\\":\\"stale_on_closed\\"' \
-  "B4: sweeper emits claim_released with reason=stale_on_closed"
-assert_grep "$SOLVE_PIPELINE" \
-  "auto-pruned" \
-  "B4: sweeper emits operator-visible 'auto-pruned' notice on stderr"
+  'no claims written; no agents dispatched' \
+  "B4: validation failures publish exact no-mutation evidence"
 
 echo "== #123 B5: merge-pipeline cleanup clears @me assignee =="
 # Step 3.4 cleanup MUST clear both label AND assignee per linked issue —
@@ -471,7 +466,7 @@ assert_grep "$SOLVE_PIPELINE" \
 # All four release-reason values are present somewhere in the file (either as a
 # literal payload field for sites still embedded inline, or as a $2 arg to the
 # helper). Lock the canonical set so future churn cannot silently drop one.
-for reason in batch_rollback claim_write_failed dispatch_failure stale_on_closed; do
+for reason in batch_rollback claim_write_failed dispatch_failure; do
   assert_grep "$SOLVE_PIPELINE" \
     "\\b$reason\\b" \
     "S1+E3: claim_released reason='$reason' present in solve-pipeline (helper arg or inline payload)"

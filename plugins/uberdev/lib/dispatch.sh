@@ -444,9 +444,56 @@ print(json.dumps(request, sort_keys=True, separators=(",", ":")))
     "${UBERDEV_AGENT_WORKFLOW:-solve}" "${UBERDEV_AGENT_PHASE:-lead}" "${UBERDEV_AGENT_ROLE:-lead}" "${UBERDEV_AGENT_RISK_SIGNALS_JSON:-[]}" "$parent_run")" || {
       DISPATCH_RC=2; return 2;
     }
+  if [ -n "${UBERDEV_AGENT_PREPARED_REQUEST_JSON:-}" ]; then
+    request_json="$(python3 -I -B -c '
+import json,sys
+request=json.loads(sys.argv[1]); issue=int(sys.argv[2]); tier=sys.argv[3]; backend=sys.argv[4]; workflow=sys.argv[5]
+if request.get("issue_num")!=issue or request.get("issue_or_pr")!=issue or request.get("task_tier")!=tier or request.get("backend")!=backend or request.get("workflow")!=workflow:
+ raise SystemExit(2)
+print(json.dumps(request,sort_keys=True,separators=(",",":")),end="")
+' "$UBERDEV_AGENT_PREPARED_REQUEST_JSON" "$ISSUE_NUM" "$TIER" "$UBERDEV_RESOLVED_BACKEND" "${UBERDEV_AGENT_WORKFLOW:-solve}")" || {
+      echo "error: prepared route context does not match dispatch identity" >&2
+      DISPATCH_RC=2; return 2
+    }
+  fi
+  if [ "${UBERDEV_AGENT_PREPARE_ONLY:-0}" = "1" ]; then
+    local decision context metadata created context_file context_sha
+    decision="$(uberdev_agent_resolve_request "$request_json")" || { DISPATCH_RC=2; return 2; }
+    metadata="$(python3 -I -B -c '
+import json,sys
+r=json.loads(sys.argv[1])
+print(json.dumps({"run_id":r["run_id"],"repository_id":r["repository_id"],"workflow":r["workflow"],"backend":r["backend"],"issue_num":r["issue_num"],"task_tier":r["task_tier"],"risk_signals":r.get("risk_signals",[])},sort_keys=True,separators=(",",":")),end="")
+' "$request_json")" || { DISPATCH_RC=2; return 2; }
+    created="$(date -u +%FT%TZ)"
+    context="$(uberdev_agent_context_create "$run_dir" "$request_json" "$decision" "$provenance" "$metadata" "$created")" || { DISPATCH_RC=2; return 2; }
+    context_file="$(_uberdev_agent_json_get "$context" context_file)" || { DISPATCH_RC=2; return 2; }
+    context_sha="$(_uberdev_agent_json_get "$context" context_sha256)" || { DISPATCH_RC=2; return 2; }
+    python3 -I -B -c '
+import json,sys
+r=json.loads(sys.argv[1]); r["context_file"]=sys.argv[2]; r["context_sha256"]=sys.argv[3]; r["root_decision"]=json.loads(sys.argv[4])
+print(json.dumps(r,sort_keys=True,separators=(",",":")),end="")
+' "$request_json" "$context_file" "$context_sha" "$decision"
+    DISPATCH_RC=$?
+    return "$DISPATCH_RC"
+  fi
   uberdev_agent_dispatch "$request_json" "$PROMPT_FILE" "$result_file" "$status_file"
   DISPATCH_RC=$?
   return "$DISPATCH_RC"
+}
+
+# Resolve and persist one root request without launching a provider. The
+# launcher calls this for every issue before the first claim mutation.
+uberdev_dispatch_prepare_root() {
+  local issue_num="$1" tier="$2" risk_json="$3" workflow="$4" prepared rc
+  UBERDEV_AGENT_RISK_SIGNALS_JSON="$risk_json"
+  UBERDEV_AGENT_WORKFLOW="$workflow"
+  UBERDEV_AGENT_PREPARE_ONLY=1
+  export UBERDEV_AGENT_RISK_SIGNALS_JSON UBERDEV_AGENT_WORKFLOW UBERDEV_AGENT_PREPARE_ONLY
+  prepared="$(uberdev_dispatch_one "$issue_num" "$tier" /dev/null)"
+  rc=$?
+  unset UBERDEV_AGENT_PREPARE_ONLY
+  if [ "$rc" -ne 0 ]; then return "$rc"; fi
+  printf '%s' "$prepared"
 }
 
 # _uberdev_dispatch_claude_bg ISSUE_NUM TIER PROMPT_FILE

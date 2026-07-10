@@ -295,8 +295,8 @@ if bash "$LAUNCHER" --auto-mode=0 -- --backend=codex >"$PARSER_OUT" 2>&1; then
   echo "  FAIL  parser-only invocation should exit with usage when no issue is supplied"; FAIL=$((FAIL + 1))
 elif grep -q "not in {auto,claude-bg,wezterm,background" "$PARSER_OUT"; then
   echo "  FAIL  public launcher rejected --backend=codex"; cat "$PARSER_OUT"; FAIL=$((FAIL + 1))
-elif grep -q "Usage:" "$PARSER_OUT"; then
-  echo "  PASS  public launcher parser accepts --backend=codex before usage check"; PASS=$((PASS + 1))
+elif grep -q "routing_cli_invalid_issue" "$PARSER_OUT"; then
+  echo "  PASS  public launcher parser accepts --backend=codex and then rejects the missing issue"; PASS=$((PASS + 1))
 else
   echo "  FAIL  public launcher parser produced unexpected output"; cat "$PARSER_OUT"; FAIL=$((FAIL + 1))
 fi

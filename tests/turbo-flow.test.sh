@@ -222,23 +222,23 @@ echo "== solve-pipeline accepts multiple issue numbers (multi-issue dispatch) ==
 # would die at the usage check. The pipeline avoids this — `arr=($(cmd))`
 # word-splits the substitution output on $IFS in BOTH bash and zsh.
 assert_grep "$SOLVE_PIPELINE" \
-  "ISSUE_NUMS=\(\\\$\(echo .*ARGUMENTS" \
-  "solve-pipeline declares ISSUE_NUMS via portable subshell pipeline"
+  'solve_triage.py' \
+  "solve-pipeline uses the deterministic bounded triage/parser helper"
 assert_grep "$SOLVE_PIPELINE" \
   "tr ' ' '\\\\n'" \
   "solve-pipeline tokenizes \$ARGUMENTS via tr (portable across bash/zsh)"
 assert_grep "$SOLVE_PIPELINE" \
-  "grep -E '\^\[0-9\]\+\\\$'" \
-  "solve-pipeline filters to purely-numeric tokens (anchored ^[0-9]+\$ rejects --terminal=foo123)"
+  'json.loads\(sys.argv\[1\]\)\["issues"\]' \
+  "solve-pipeline consumes the parser's validated positive issue list"
 assert_grep "$SOLVE_PIPELINE" \
   'TERMINAL_FLAG_USED=.*grep -oE .\\-\\-terminal=' \
   "Phase A captures --terminal= flag for deprecation emission (v0.22.0 deprecation shim)"
 assert_grep "$SOLVE_PIPELINE" \
   'echo "\$TERMINAL_FLAG_DEPRECATED_NOTE" >&2' \
   "Phase A emits TERMINAL_FLAG_DEPRECATED_NOTE to stderr on --terminal= encounter"
-assert_grep "$SOLVE_PIPELINE" \
-  "awk '!seen\[\\\$0\]\+\+'" \
-  "solve-pipeline dedupes via awk !seen[\$0]++ (preserves first-seen order, prevents same-issue worktree race; plain \$0 is safe in lib/ — the renderer never renders lib files, retiring the #222 c0-parameterisation)"
+assert_grep "$REPO_ROOT/plugins/uberdev/lib/solve_triage.py" \
+  'routing_cli_duplicate' \
+  "solve-pipeline's parser contract rejects duplicate singleton routing flags"
 assert_grep "$SOLVE_PIPELINE" \
   'SH_WORD_SPLIT|word-split|word split' \
   "solve-pipeline comment explains the zsh word-split footgun (regression-prevention)"
