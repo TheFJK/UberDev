@@ -374,8 +374,7 @@ _uberdev_agent_dispatch_backend() {
 # the lifecycle/capacity adapter.
 uberdev_dispatch_one() {
   local ISSUE_NUM="$1" TIER="$2" PROMPT_FILE="$3" run_dir result_file status_file
-  local repository_id request_json routing_mode service_tier route model effort capacity timeout_s run_id
-  local risk_escalation adaptive_fallback shadow workflow_routes role_routes
+  local repository_id request_json capacity timeout_s run_id provenance workflow_routes role_routes parent_run
   DISPATCH_RC=0
   DISPATCH_ID=""
   DISPATCH_LOG=""
@@ -396,51 +395,49 @@ uberdev_dispatch_one() {
       ;;
   esac
   repository_id="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
-  routing_mode="${UBERDEV_ROUTING_MODE:-inherit}"
-  service_tier="${UBERDEV_ROUTING_SERVICE_TIER:-default}"
-  risk_escalation="${UBERDEV_ROUTING_RISK_ESCALATION:-true}"
-  adaptive_fallback="${UBERDEV_ROUTING_ADAPTIVE_FALLBACK:-true}"
-  shadow="${UBERDEV_ROUTING_SHADOW:-false}"
-  workflow_routes="${UBERDEV_ROUTING_WORKFLOWS:-}"
-  role_routes="${UBERDEV_ROUTING_ROLES:-}"
-  [ -n "$workflow_routes" ] || workflow_routes='{}'
-  [ -n "$role_routes" ] || role_routes='{}'
-  route="${UBERDEV_ROUTE:-}"
-  model="${UBERDEV_MODEL:-}"
-  effort="${UBERDEV_REASONING_EFFORT:-}"
+  provenance="${UBERDEV_ROUTING_PROVENANCE_JSON:-}"; [ -n "$provenance" ] || provenance='{}'
+  workflow_routes="${UBERDEV_ROUTING_WORKFLOWS:-}"; [ -n "$workflow_routes" ] || workflow_routes='{}'
+  role_routes="${UBERDEV_ROUTING_ROLES:-}"; [ -n "$role_routes" ] || role_routes='{}'
+  parent_run="${UBERDEV_AGENT_PARENT_RUN_JSON:-}"; [ -n "$parent_run" ] || parent_run='{}'
   capacity="${UBERDEV_AGENT_CAPACITY:-6}"
   timeout_s="${SOLVE_TIMEOUT:-3600}"
   run_id="solve-${UBERDEV_RESOLVED_BACKEND}-${ISSUE_NUM}-$$-${RANDOM:-0}"
   request_json="$(python3 -I -c '
 import json, sys
-(run_dir, run_id, repository_id, backend, tier, issue, capacity, timeout,
- mode, service, route, model, effort, risk_escalation, adaptive_fallback,
- shadow, workflow_routes, role_routes) = sys.argv[1:]
+(run_dir,run_id,repository_id,backend,tier,issue,capacity,timeout,provenance_raw,
+ cli_mode,cli_route,cli_model,cli_effort,cli_service,cli_fast,cli_sandbox,
+ env_mode,env_route,env_model,env_effort,env_service,env_risk,env_fallback,env_shadow,
+ effective_mode,effective_service,effective_risk,effective_fallback,effective_shadow,effective_workflows,effective_roles,
+ workflow,phase,role,risks_raw,parent_raw)=sys.argv[1:]
+provenance=json.loads(provenance_raw)
 request = {
   "schema_version":1, "run_dir":run_dir, "run_id":run_id,
-  "repository_id":repository_id, "backend":backend, "workflow":"solve",
-  "phase":"lead", "role":"lead", "task_tier":tier, "risk_signals":[],
+  "repository_id":repository_id, "backend":backend, "workflow":workflow,
+  "phase":phase, "role":role, "task_tier":tier, "risk_signals":json.loads(risks_raw),
   "issue_or_pr":int(issue), "issue_num":int(issue),
   "capacity":int(capacity), "timeout_s":int(timeout),
-  "explicit_service_tier":service,
-  "adaptive_fallback": adaptive_fallback == "true",
-  "shadow": shadow == "true",
-  "project_routing": {
-    "risk_escalation": risk_escalation == "true",
-    "adaptive_fallback": adaptive_fallback == "true",
-    "shadow": shadow == "true",
-    "workflows": json.loads(workflow_routes),
-    "roles": json.loads(role_routes),
-  },
 }
-if route: request["explicit_route"] = route
-if model: request["explicit_model"] = model
-if effort: request["explicit_effort"] = effort
-if not (route or model or effort): request["routing_mode"] = mode
+for key,value in (("routing_mode",cli_mode),("explicit_route",cli_route),("explicit_model",cli_model),("explicit_effort",cli_effort),("explicit_service_tier",cli_service),("explicit_sandbox",cli_sandbox)):
+ if value: request[key]=value
+if cli_fast: request["fast"]=cli_fast=="true"
+environment={}
+for key,value in (("UBERDEV_MODEL_ROUTING_MODE",env_mode),("UBERDEV_ROUTE",env_route),("UBERDEV_MODEL",env_model),("UBERDEV_REASONING_EFFORT",env_effort),("UBERDEV_SERVICE_TIER",env_service)):
+ if value: environment[key]=value
+for key,value in (("UBERDEV_MODEL_ROUTING_RISK_ESCALATION",env_risk),("UBERDEV_MODEL_ROUTING_ADAPTIVE_FALLBACK",env_fallback),("UBERDEV_MODEL_ROUTING_SHADOW",env_shadow)):
+ if value: environment[key]=value=="true"
+if environment: request["environment"]=environment
+effective={"mode":effective_mode,"service_tier":effective_service,"risk_escalation":effective_risk=="true","adaptive_fallback":effective_fallback=="true","shadow":effective_shadow=="true","workflows":json.loads(effective_workflows),"roles":json.loads(effective_roles)}
+project={key:value for key,value in effective.items() if provenance.get(key,{}).get("source") in {"project-codex","project-claude","explicit-config-file"}}
+if project: request["project_routing"]=project
+parent=json.loads(parent_raw)
+if parent: request["parent_run"]=parent
 print(json.dumps(request, sort_keys=True, separators=(",", ":")))
 ' "$run_dir" "$run_id" "$repository_id" "$UBERDEV_RESOLVED_BACKEND" "$TIER" "$ISSUE_NUM" \
-    "$capacity" "$timeout_s" "$routing_mode" "$service_tier" "$route" "$model" "$effort" \
-    "$risk_escalation" "$adaptive_fallback" "$shadow" "$workflow_routes" "$role_routes")" || {
+    "$capacity" "$timeout_s" "$provenance" \
+    "${UBERDEV_DISPATCH_ROUTING_MODE:-}" "${UBERDEV_DISPATCH_ROUTE:-}" "${UBERDEV_DISPATCH_MODEL:-}" "${UBERDEV_DISPATCH_REASONING_EFFORT:-}" "${UBERDEV_DISPATCH_SERVICE_TIER:-}" "${UBERDEV_DISPATCH_FAST:-}" "${UBERDEV_DISPATCH_SANDBOX:-}" \
+    "${UBERDEV_MODEL_ROUTING_MODE:-}" "${UBERDEV_ROUTE:-}" "${UBERDEV_MODEL:-}" "${UBERDEV_REASONING_EFFORT:-}" "${UBERDEV_SERVICE_TIER:-}" "${UBERDEV_MODEL_ROUTING_RISK_ESCALATION:-}" "${UBERDEV_MODEL_ROUTING_ADAPTIVE_FALLBACK:-}" "${UBERDEV_MODEL_ROUTING_SHADOW:-}" \
+    "${UBERDEV_ROUTING_MODE:-inherit}" "${UBERDEV_ROUTING_SERVICE_TIER:-default}" "${UBERDEV_ROUTING_RISK_ESCALATION:-true}" "${UBERDEV_ROUTING_ADAPTIVE_FALLBACK:-true}" "${UBERDEV_ROUTING_SHADOW:-false}" "$workflow_routes" "$role_routes" \
+    "${UBERDEV_AGENT_WORKFLOW:-solve}" "${UBERDEV_AGENT_PHASE:-lead}" "${UBERDEV_AGENT_ROLE:-lead}" "${UBERDEV_AGENT_RISK_SIGNALS_JSON:-[]}" "$parent_run")" || {
       DISPATCH_RC=2; return 2;
     }
   uberdev_agent_dispatch "$request_json" "$PROMPT_FILE" "$result_file" "$status_file"

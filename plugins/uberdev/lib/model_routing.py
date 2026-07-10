@@ -305,8 +305,24 @@ def _validate_policy(policy: Mapping[str, Any]) -> None:
     for role, raw_row in roles.items():
         if not isinstance(role, str) or not isinstance(raw_row, Mapping):
             raise _error("invalid_policy", "every role must be a named object")
-        if set(raw_row) != {"route", "risk_floor", "sandbox_ceiling", "delegation_mode", "risk_judgment"}:
+        base_role_fields = {"route", "risk_floor", "sandbox_ceiling", "delegation_mode", "risk_judgment"}
+        role_fields = set(raw_row)
+        conditional_fields = {"tier_routes", "high_risk_route"}
+        if role_fields - (base_role_fields | conditional_fields) or not base_role_fields.issubset(role_fields):
             raise _error("invalid_policy", f"role {role!r} has unknown or missing fields")
+        if role != "plan-writer" and role_fields != base_role_fields:
+            raise _error("invalid_policy", f"role {role!r} may not declare conditional routes")
+        if role == "plan-writer":
+            if role_fields != base_role_fields | conditional_fields:
+                raise _error("invalid_policy", "plan-writer must declare tier_routes and high_risk_route")
+            tier_routes = raw_row.get("tier_routes")
+            if not isinstance(tier_routes, Mapping) or set(tier_routes) != {"trivial", "small", "medium", "large"}:
+                raise _error("invalid_policy", "plan-writer tier_routes must cover every canonical tier")
+            if any(not isinstance(value, str) or value not in routes for value in tier_routes.values()):
+                raise _error("invalid_policy", "plan-writer tier_routes reference an unknown route")
+            high_risk_route = raw_row.get("high_risk_route")
+            if not isinstance(high_risk_route, str) or high_risk_route not in routes:
+                raise _error("invalid_policy", "plan-writer high_risk_route must reference a declared route")
         route = raw_row.get("route")
         floor = raw_row.get("risk_floor")
         sandbox = raw_row.get("sandbox_ceiling")
@@ -488,6 +504,12 @@ def classify_minimum_route(policy: Mapping[str, Any], request: Mapping[str, Any]
     if risk_scope not in _RISK_SCOPES:
         raise _error("invalid_risk_scope", f"risk scope {risk_scope!r} must be run or subtask")
     risks = _canonical_risks(policy, request)
+    risk_escalation = _environment(request).get(
+        "UBERDEV_MODEL_ROUTING_RISK_ESCALATION",
+        _project_routing_config(request).get("risk_escalation", True),
+    )
+    if not isinstance(risk_escalation, bool):
+        raise _error("invalid_request", "project routing risk_escalation must be boolean")
     role = request.get("role", "lead")
     roles = _roles(policy)
     if role in (None, "", "lead"):
@@ -504,7 +526,10 @@ def classify_minimum_route(policy: Mapping[str, Any], request: Mapping[str, Any]
     floor = row.get("risk_floor")
     if not isinstance(floor, str):
         raise _error("invalid_policy", f"role {role!r} has no risk floor")
-    if risks and row.get("risk_judgment") is True:
+    if risks and risk_escalation and row.get("risk_judgment") is True:
+        conditional = row.get("high_risk_route")
+        if isinstance(conditional, str):
+            return conditional
         high_risk_floor = policy.get("high_risk_floor")
         if not isinstance(high_risk_floor, str):
             raise _error("invalid_policy", "high_risk_floor must be a string")
@@ -513,6 +538,11 @@ def classify_minimum_route(policy: Mapping[str, Any], request: Mapping[str, Any]
 
 
 def _project_routing_config(request: Mapping[str, Any]) -> Mapping[str, Any]:
+    if "project_routing" in request:
+        project_routing = request.get("project_routing")
+        if not isinstance(project_routing, Mapping):
+            raise _error("invalid_request", "project_routing must be an object")
+        return project_routing
     project = request.get("project_config", {})
     if not isinstance(project, Mapping):
         raise _error("invalid_request", "project_config must be an object")
@@ -696,6 +726,9 @@ def _validate_request_types(request: Mapping[str, Any]) -> None:
         "UBERDEV_SERVICE_TIER",
     ):
         _validate_optional_string(environment, key, "environment")
+    for key in ("UBERDEV_MODEL_ROUTING_RISK_ESCALATION", "UBERDEV_MODEL_ROUTING_ADAPTIVE_FALLBACK", "UBERDEV_MODEL_ROUTING_SHADOW"):
+        if key in environment and not isinstance(environment.get(key), bool):
+            raise _error("invalid_request", f"environment.{key} must be boolean")
 
     config = _project_routing_config(request)
     if any(not isinstance(key, str) for key in config):
@@ -739,6 +772,8 @@ def _validate_request_types(request: Mapping[str, Any]) -> None:
 def _adaptive_fallback_enabled(request: Mapping[str, Any]) -> bool:
     if "adaptive_fallback" in request:
         value = request.get("adaptive_fallback")
+    elif "UBERDEV_MODEL_ROUTING_ADAPTIVE_FALLBACK" in _environment(request):
+        value = _environment(request).get("UBERDEV_MODEL_ROUTING_ADAPTIVE_FALLBACK")
     else:
         value = _project_routing_config(request).get("adaptive_fallback", True)
     if not isinstance(value, bool):
@@ -894,7 +929,12 @@ def _adaptive_selection(
     role = request.get("role", "lead")
     roles = _roles(policy)
     if isinstance(role, str) and role in roles:
-        role_route = roles[role].get("route")
+        role_policy = roles[role]
+        role_route = role_policy.get("route")
+        tier_routes = role_policy.get("tier_routes")
+        tier = request.get("task_tier", "medium")
+        if isinstance(tier_routes, Mapping):
+            role_route = tier_routes.get(tier)
         if not isinstance(role_route, str):
             raise _error("invalid_policy", f"role {role!r} has a non-string route")
         route = _max_route(policy, role_route, minimum)
@@ -1499,7 +1539,10 @@ def resolve_route(
         selected_level = "default"
     ignored = _ignored_lower_sources(request, selected_level)
 
-    project_shadow = _project_routing_config(request).get("shadow", False)
+    project_shadow = _environment(request).get(
+        "UBERDEV_MODEL_ROUTING_SHADOW",
+        _project_routing_config(request).get("shadow", False),
+    )
     shadow_is_request_local = "shadow" in request
     shadow = request.get("shadow", project_shadow)
     if not isinstance(shadow, bool):

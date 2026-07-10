@@ -726,6 +726,39 @@ uberdev_read_model_routing() {
   export UBERDEV_ROUTING_MODE UBERDEV_ROUTING_SERVICE_TIER
   export UBERDEV_ROUTING_RISK_ESCALATION UBERDEV_ROUTING_ADAPTIVE_FALLBACK
   export UBERDEV_ROUTING_SHADOW UBERDEV_ROUTING_WORKFLOWS UBERDEV_ROUTING_ROLES
+  local p_mode p_service p_risk p_fallback p_shadow p_workflows p_roles
+  p_mode="$(_uberdev_routing_source model_routing.mode "${UBERDEV_MODEL_ROUTING_MODE:-}" "$UBERDEV_ROUTING_MODE" inherit)"
+  p_service="$(_uberdev_routing_source model_routing.service_tier "${UBERDEV_SERVICE_TIER:-}" "$UBERDEV_ROUTING_SERVICE_TIER" default)"
+  p_risk="$(_uberdev_routing_source model_routing.risk_escalation "${UBERDEV_MODEL_ROUTING_RISK_ESCALATION:-}" "$UBERDEV_ROUTING_RISK_ESCALATION" true)"
+  p_fallback="$(_uberdev_routing_source model_routing.adaptive_fallback "${UBERDEV_MODEL_ROUTING_ADAPTIVE_FALLBACK:-}" "$UBERDEV_ROUTING_ADAPTIVE_FALLBACK" true)"
+  p_shadow="$(_uberdev_routing_source model_routing.shadow "${UBERDEV_MODEL_ROUTING_SHADOW:-}" "$UBERDEV_ROUTING_SHADOW" false)"
+  p_workflows="$(_uberdev_routing_source model_routing.workflows "${UBERDEV_MODEL_ROUTING_WORKFLOWS:-}" "$UBERDEV_ROUTING_WORKFLOWS" '{}')"
+  p_roles="$(_uberdev_routing_source model_routing.roles "${UBERDEV_MODEL_ROUTING_ROLES:-}" "$UBERDEV_ROUTING_ROLES" '{}')"
+  UBERDEV_ROUTING_PROVENANCE_JSON="$(python3 -I -c '
+import json,sys
+names=("mode","service_tier","risk_escalation","adaptive_fallback","shadow","workflows","roles")
+rows={name:{"source":raw.split("\t",1)[0],"file":raw.split("\t",1)[1] or None} for name,raw in zip(names,sys.argv[1:])}
+print(json.dumps(rows,sort_keys=True,separators=(",",":")),end="")
+' "$p_mode" "$p_service" "$p_risk" "$p_fallback" "$p_shadow" "$p_workflows" "$p_roles")" || return 2
+  export UBERDEV_ROUTING_PROVENANCE_JSON
+}
+
+_uberdev_routing_source() {
+  local key="$1" env_value="$2" effective="$3" default="$4" file='' file_value='' source='default' canonical=''
+  if [ -n "$env_value" ]; then
+    if [ "$env_value" = "$effective" ] || [ "$effective" != "$default" ]; then source='env'; fi
+  elif file="$(_uberdev_config_file_for_key "$key" 2>/dev/null)" && [ -n "$file" ]; then
+    file_value="$(_uberdev_read_nested "$key" "$file")"
+    if [ "$effective" != "$default" ] || { [ -n "$file_value" ] && [ "$file_value" = "$effective" ]; }; then
+      if [ "${_UBERDEV_CONFIG_FILE_EXPLICIT:-0}" = 1 ] || { [ -n "${UBERDEV_CONFIG_FILE:-}" ] && [ "$UBERDEV_CONFIG_FILE" != "${_UBERDEV_CONFIG_FILE_DEFAULT:-}" ]; }; then
+        source='explicit-config-file'
+      else
+        case "$file" in */.codex/uberdev.local.md) source='project-codex' ;; *) source='project-claude' ;; esac
+      fi
+      canonical="$(cd "$(dirname "$file")" 2>/dev/null && pwd -P)/$(basename "$file")"
+    fi
+  fi
+  printf '%s\t%s' "$source" "$canonical"
 }
 
 # uberdev_tier_rank TIER_NAME -> integer rank (0..3) on stdout, "" on unknown.

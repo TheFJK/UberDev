@@ -201,6 +201,13 @@
     },
     "plan-writer": {
       "route": "deep",
+      "tier_routes": {
+        "trivial": "deep",
+        "small": "deep",
+        "medium": "frontier",
+        "large": "ultra"
+      },
+      "high_risk_route": "ultra",
       "risk_floor": "deep",
       "sandbox_ceiling": "workspace-write",
       "delegation_mode": "leaf",
