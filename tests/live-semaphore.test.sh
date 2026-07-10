@@ -8,9 +8,12 @@ FIXTURES="$ROOT/tests/fixtures/live-semaphore"
 TMP="$(mktemp -d)" || exit 1
 backend_pid=""
 owner_pid=""
+race_pids=""
 cleanup() {
   [ -z "$backend_pid" ] || kill "$backend_pid" 2>/dev/null || true
   [ -z "$owner_pid" ] || kill "$owner_pid" 2>/dev/null || true
+  for race_pid in $race_pids; do kill "$race_pid" 2>/dev/null || true; done
+  for race_pid in $race_pids; do wait "$race_pid" 2>/dev/null || true; done
   rm -rf "$TMP"
 }
 trap cleanup EXIT INT TERM
@@ -494,7 +497,10 @@ capture uberdev_semaphore_set_handle "$TMP/not-a-scope/arbitrary.lease" 123 ''
 
 printf '== live semaphore: eight-way cap race ==\n'
 RACE_STATE="$TMP/race-state"
+RACE_GATE="$TMP/race-release"
+RACE_BARRIER_ERR="$TMP/race-barrier.err"
 printf '0\n' > "$TMP/max"
+: > "$RACE_BARRIER_ERR"
 record_max() {
   local current="$1" old tries=0
   while ! mkdir "$TMP/max.lock" 2>/dev/null; do
@@ -506,32 +512,112 @@ record_max() {
   [ "$current" -le "$old" ] || printf '%s\n' "$current" > "$TMP/max"
   rmdir "$TMP/max.lock"
 }
-pids=""
+count_race_leases() {
+  local listing
+  if [ ! -d "$RACE_STATE" ]; then
+    printf '0\n'
+    return 0
+  fi
+  listing="$(find "$RACE_STATE" -name '*.lease' -type f -print)" || return $?
+  if [ -z "$listing" ]; then
+    printf '0\n'
+  else
+    printf '%s\n' "$listing" | awk 'END { print NR }'
+  fi
+}
+race_pids=""
 n=1
 while [ "$n" -le 8 ]; do
   (
+    UBERDEV_SEMAPHORE_ACQUIRE_MAX_TRIES=1000
+    export UBERDEV_SEMAPHORE_ACQUIRE_MAX_TRIES
     # shellcheck source=/dev/null
     . "$LIB"
     lease="$(uberdev_semaphore_acquire "$RACE_STATE" race-repo codex 3 "run-$n" 5)" || exit 1
     [ -n "$lease" ] || exit 1
-    active="$(find "$RACE_STATE" -name '*.lease' -type f | wc -l | tr -d ' ')"
+    active="$(count_race_leases)" || exit 1
     record_max "$active" || exit 1
-    sleep 0.15
+    holder_slot=''
+    slot=1
+    while [ "$slot" -le 3 ]; do
+      if mkdir "$TMP/race-holder-$slot" 2>/dev/null; then
+        holder_slot="$slot"
+        break
+      fi
+      slot=$((slot + 1))
+    done
+    if [ -n "$holder_slot" ]; then
+      gate_tries=0
+      while [ ! -f "$RACE_GATE" ] && [ "$gate_tries" -lt 1000 ]; do
+        sleep 0.01
+        gate_tries=$((gate_tries + 1))
+      done
+      if [ ! -f "$RACE_GATE" ]; then
+        live_now="$(count_race_leases)" || {
+          printf 'holder %s could not count live leases\n' "$holder_slot" >&2
+          uberdev_semaphore_release "$lease" >/dev/null 2>&1 || true
+          exit 1
+        }
+        printf 'holder %s timed out waiting for release gate (live=%s tries=%s)\n' \
+          "$holder_slot" "$live_now" "$gate_tries" >&2
+        uberdev_semaphore_release "$lease" >/dev/null 2>&1 || true
+        exit 1
+      fi
+    fi
     uberdev_semaphore_release "$lease" || exit 1
   ) 2>"$TMP/race-$n.err" &
-  pids="$pids $!"
+  race_pids="$race_pids $!"
   n=$((n + 1))
 done
+barrier_ready=0
+barrier_tries=0
+barrier_live=0
+barrier_holders=0
+while [ "$barrier_tries" -lt 500 ]; do
+  barrier_live="$(count_race_leases)" || {
+    printf 'parent could not count live leases (tries=%s)\n' \
+      "$barrier_tries" > "$RACE_BARRIER_ERR"
+    break
+  }
+  barrier_holders="$(find "$TMP" -maxdepth 1 -name 'race-holder-*' -type d | wc -l | tr -d ' ')"
+  record_max "$barrier_live" || {
+    printf 'parent could not record live lease count (live=%s tries=%s)\n' \
+      "$barrier_live" "$barrier_tries" > "$RACE_BARRIER_ERR"
+    break
+  }
+  if [ "$barrier_live" -eq 3 ] && [ "$barrier_holders" -eq 3 ]; then
+    barrier_ready=1
+    break
+  fi
+  if [ "$barrier_live" -gt 3 ]; then
+    printf 'semaphore exceeded cap before barrier release (live=%s holders=%s tries=%s)\n' \
+      "$barrier_live" "$barrier_holders" "$barrier_tries" > "$RACE_BARRIER_ERR"
+    break
+  fi
+  sleep 0.01
+  barrier_tries=$((barrier_tries + 1))
+done
+if [ "$barrier_ready" -ne 1 ] && [ ! -s "$RACE_BARRIER_ERR" ]; then
+  printf 'parent timed out waiting for saturated barrier (live=%s holders=%s tries=%s)\n' \
+    "$barrier_live" "$barrier_holders" "$barrier_tries" > "$RACE_BARRIER_ERR"
+fi
+: > "$RACE_GATE"
 race_rc=0
-for pid in $pids; do wait "$pid" || race_rc=1; done
+for pid in $race_pids; do wait "$pid" || race_rc=1; done
+race_pids=""
 observed_max="$(cat "$TMP/max")"
 printf 'observed_max=%s\n' "$observed_max"
-remaining="$(find "$RACE_STATE" -name '*.lease' -type f | wc -l | tr -d ' ')"
-race_stderr="$(cat "$TMP"/race-*.err)"
-if [ "$race_rc" -eq 0 ] && [ "$observed_max" -eq 3 ] && [ "$remaining" -eq 0 ] && [ -z "$race_stderr" ]; then
+remaining="$(count_race_leases)" || {
+  remaining=count-error
+  race_rc=1
+}
+race_stderr="$(cat "$TMP"/race-*.err "$RACE_BARRIER_ERR")"
+if [ "$race_rc" -eq 0 ] && [ "$barrier_ready" -eq 1 ] && [ "$observed_max" -eq 3 ] \
+   && [ "$remaining" -eq 0 ] && [ -z "$race_stderr" ]; then
   pass "eight contenders eventually acquire/release without exceeding cap 3"
 else
-  fail "eight contenders eventually acquire/release without exceeding cap 3" "race_rc=$race_rc observed_max=$observed_max remaining=$remaining stderr=$race_stderr"
+  fail "eight contenders eventually acquire/release without exceeding cap 3" \
+    "race_rc=$race_rc barrier_ready=$barrier_ready observed_max=$observed_max remaining=$remaining stderr=$race_stderr"
 fi
 
 printf '== live semaphore: killed owner, stale timeout, and backend liveness ==\n'
