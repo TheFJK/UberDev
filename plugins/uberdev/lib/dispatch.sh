@@ -22,6 +22,29 @@
 if [ "${_UBERDEV_DISPATCH_LOADED:-0}" = "1" ]; then
   return 0 2>/dev/null || true
 fi
+
+# The instrumented adapter is the sole detached-provider entry point.  Keep
+# provider arms in this file so their mature argv/timeout behavior remains
+# local and regression-testable.
+_uberdev_dispatch_source_path() {
+  if [ -n "${BASH_SOURCE[0]:-}" ]; then
+    printf '%s' "${BASH_SOURCE[0]}"
+  elif [ -n "${ZSH_VERSION:-}" ]; then
+    printf '%s' "${(%):-%x}"
+  else
+    return 1
+  fi
+}
+_UBERDEV_DISPATCH_FILE="$(_uberdev_dispatch_source_path)" || return 1
+case "$_UBERDEV_DISPATCH_FILE" in
+  */*) _UBERDEV_DISPATCH_LIB_DIR="${_UBERDEV_DISPATCH_FILE%/*}" ;;
+  *) _UBERDEV_DISPATCH_LIB_DIR='.' ;;
+esac
+_UBERDEV_DISPATCH_LIB_DIR="$(cd "$_UBERDEV_DISPATCH_LIB_DIR" 2>/dev/null && pwd -P)"
+# shellcheck source=/dev/null
+. "$_UBERDEV_DISPATCH_LIB_DIR/agent-dispatch.sh" || return 1
+# shellcheck source=/dev/null
+. "$_UBERDEV_DISPATCH_LIB_DIR/config-read.sh" || return 1
 _UBERDEV_DISPATCH_LOADED=1
 
 # The dispatch_backend enum — identical to the --backend= flag's accepted set.
@@ -322,42 +345,106 @@ uberdev_dispatch_resolve_env() {
   return 0
 }
 
+# _uberdev_agent_dispatch_backend BACKEND ISSUE TIER PROMPT RESULT STATUS DECISION
+# Provider boundary consumed by agent-dispatch.sh. Exactly one case arm runs.
+_uberdev_agent_dispatch_backend() {
+  local backend="$1" issue_num="$2" tier="$3" prompt_file="$4"
+  local result_file="$5" status_file="$6" decision="$7"
+  UBERDEV_AGENT_ROUTING_MODE="$(_uberdev_agent_json_get "$decision" routing_mode 2>/dev/null || true)"
+  UBERDEV_AGENT_EFFECTIVE_POLICY="$(_uberdev_agent_json_get "$decision" effective_policy 2>/dev/null || true)"
+  UBERDEV_AGENT_ROUTE_MODEL="$(_uberdev_agent_json_get "$decision" model 2>/dev/null || true)"
+  UBERDEV_AGENT_ROUTE_EFFORT="$(_uberdev_agent_json_get "$decision" reasoning_effort 2>/dev/null || true)"
+  UBERDEV_AGENT_SERVICE_TIER="$(_uberdev_agent_json_get "$decision" service_tier 2>/dev/null || true)"
+  UBERDEV_AGENT_SANDBOX="$(_uberdev_agent_json_get "$decision" sandbox 2>/dev/null || true)"
+  UBERDEV_AGENT_RESULT_FILE="$result_file"
+  UBERDEV_AGENT_STATUS_FILE="$status_file"
+  export UBERDEV_AGENT_ROUTING_MODE UBERDEV_AGENT_EFFECTIVE_POLICY UBERDEV_AGENT_ROUTE_MODEL UBERDEV_AGENT_ROUTE_EFFORT
+  export UBERDEV_AGENT_SERVICE_TIER UBERDEV_AGENT_SANDBOX UBERDEV_AGENT_RESULT_FILE UBERDEV_AGENT_STATUS_FILE
+  case "$backend" in
+    claude-bg)   _uberdev_dispatch_claude_bg "$issue_num" "$tier" "$prompt_file" ;;
+    wezterm)     _uberdev_dispatch_wezterm "$issue_num" "$tier" "$prompt_file" ;;
+    background)  _uberdev_dispatch_background "$issue_num" "$tier" "$prompt_file" ;;
+    codex)       _uberdev_dispatch_codex "$issue_num" "$tier" "$prompt_file" ;;
+    *) DISPATCH_RC=1; DISPATCH_ID=""; DISPATCH_LOG="unsupported backend: $backend"; return 1 ;;
+  esac
+}
+
 # uberdev_dispatch_one ISSUE_NUM TIER PROMPT_FILE
-# Routes one issue to the backend resolved by uberdev_dispatch_preflight.
-# Sets DISPATCH_RC + DISPATCH_ID (+ DISPATCH_LOG on failure); returns the backend's rc.
+# Preserve the historical public globals while routing every provider through
+# the lifecycle/capacity adapter.
 uberdev_dispatch_one() {
-  local ISSUE_NUM="$1" TIER="$2" PROMPT_FILE="$3"
-  # Reset the caller-visible out-params so a prior iteration's values — esp.
-  # DISPATCH_LOG, which a backend sets only on its error path — never leak
-  # into a subsequent success (T6/T7 code-review finding; central SSOT reset).
+  local ISSUE_NUM="$1" TIER="$2" PROMPT_FILE="$3" run_dir result_file status_file
+  local repository_id request_json routing_mode service_tier route model effort capacity timeout_s run_id
+  local risk_escalation adaptive_fallback shadow workflow_routes role_routes
   DISPATCH_RC=0
   DISPATCH_ID=""
   DISPATCH_LOG=""
   if [ -z "${UBERDEV_RESOLVED_BACKEND:-}" ]; then
     uberdev_dispatch_preflight || { DISPATCH_RC=1; return 1; }
   fi
-  case "${UBERDEV_RESOLVED_BACKEND:-}" in
-    claude-bg)   _uberdev_dispatch_claude_bg  "$ISSUE_NUM" "$TIER" "$PROMPT_FILE" ;;
-    wezterm)     _uberdev_dispatch_wezterm    "$ISSUE_NUM" "$TIER" "$PROMPT_FILE" ;;
-    background)  _uberdev_dispatch_background  "$ISSUE_NUM" "$TIER" "$PROMPT_FILE" ;;
-    codex)       _uberdev_dispatch_codex       "$ISSUE_NUM" "$TIER" "$PROMPT_FILE" ;;
+  uberdev_read_model_routing >/dev/null || true
+  run_dir="${UBERDEV_TMPDIR:-/tmp}"
+  [ -d "$run_dir" ] || mkdir -p "$run_dir" || { DISPATCH_RC=1; return 1; }
+  case "$UBERDEV_RESOLVED_BACKEND" in
+    codex)
+      result_file="$run_dir/solve-codex-result-$ISSUE_NUM.md"
+      status_file="$run_dir/solve-codex-status-$ISSUE_NUM.json"
+      ;;
     *)
-      # Unreachable by design — uberdev_dispatch_preflight only ever exports
-      # one of the concrete backends (claude-bg/wezterm/background/codex) (or returns non-zero, handled
-      # above). Still emit dispatch_setup_failed so an out-of-band mutation
-      # of UBERDEV_RESOLVED_BACKEND leaves an audit trace like every other
-      # failure arm in this file, rather than only an stderr line.
-      echo "error: uberdev_dispatch_one: unresolved backend '${UBERDEV_RESOLVED_BACKEND:-}'" >&2
-      DISPATCH_RC=1
-      _uberdev_dispatch_audit dispatch_setup_failed \
-        "{\"issue\":$ISSUE_NUM,\"phase\":\"unresolved_backend\",\"backend\":\"${UBERDEV_RESOLVED_BACKEND:-}\",\"rc\":1}"
-      return 1 ;;
+      result_file="$run_dir/solve-bg-result-$ISSUE_NUM.md"
+      status_file="$run_dir/solve-bg-status-$ISSUE_NUM.json"
+      ;;
   esac
-  # Explicit return of the backend's rc. Each backend already returns its
-  # own DISPATCH_RC, so the case statement's exit status is well-defined
-  # today; this makes the function contract explicit and stops a future
-  # backend arm that forgets to `return` from silently leaking the rc of
-  # whatever ran last inside it.
+  repository_id="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
+  routing_mode="${UBERDEV_ROUTING_MODE:-inherit}"
+  service_tier="${UBERDEV_ROUTING_SERVICE_TIER:-default}"
+  risk_escalation="${UBERDEV_ROUTING_RISK_ESCALATION:-true}"
+  adaptive_fallback="${UBERDEV_ROUTING_ADAPTIVE_FALLBACK:-true}"
+  shadow="${UBERDEV_ROUTING_SHADOW:-false}"
+  workflow_routes="${UBERDEV_ROUTING_WORKFLOWS:-}"
+  role_routes="${UBERDEV_ROUTING_ROLES:-}"
+  [ -n "$workflow_routes" ] || workflow_routes='{}'
+  [ -n "$role_routes" ] || role_routes='{}'
+  route="${UBERDEV_ROUTE:-}"
+  model="${UBERDEV_MODEL:-}"
+  effort="${UBERDEV_REASONING_EFFORT:-}"
+  capacity="${UBERDEV_AGENT_CAPACITY:-6}"
+  timeout_s="${SOLVE_TIMEOUT:-3600}"
+  run_id="solve-${UBERDEV_RESOLVED_BACKEND}-${ISSUE_NUM}-$$-${RANDOM:-0}"
+  request_json="$(python3 -I -c '
+import json, sys
+(run_dir, run_id, repository_id, backend, tier, issue, capacity, timeout,
+ mode, service, route, model, effort, risk_escalation, adaptive_fallback,
+ shadow, workflow_routes, role_routes) = sys.argv[1:]
+request = {
+  "schema_version":1, "run_dir":run_dir, "run_id":run_id,
+  "repository_id":repository_id, "backend":backend, "workflow":"solve",
+  "phase":"lead", "role":"lead", "task_tier":tier, "risk_signals":[],
+  "issue_or_pr":int(issue), "issue_num":int(issue),
+  "capacity":int(capacity), "timeout_s":int(timeout),
+  "explicit_service_tier":service,
+  "adaptive_fallback": adaptive_fallback == "true",
+  "shadow": shadow == "true",
+  "project_routing": {
+    "risk_escalation": risk_escalation == "true",
+    "adaptive_fallback": adaptive_fallback == "true",
+    "shadow": shadow == "true",
+    "workflows": json.loads(workflow_routes),
+    "roles": json.loads(role_routes),
+  },
+}
+if route: request["explicit_route"] = route
+if model: request["explicit_model"] = model
+if effort: request["explicit_effort"] = effort
+if not (route or model or effort): request["routing_mode"] = mode
+print(json.dumps(request, sort_keys=True, separators=(",", ":")))
+' "$run_dir" "$run_id" "$repository_id" "$UBERDEV_RESOLVED_BACKEND" "$TIER" "$ISSUE_NUM" \
+    "$capacity" "$timeout_s" "$routing_mode" "$service_tier" "$route" "$model" "$effort" \
+    "$risk_escalation" "$adaptive_fallback" "$shadow" "$workflow_routes" "$role_routes")" || {
+      DISPATCH_RC=2; return 2;
+    }
+  uberdev_agent_dispatch "$request_json" "$PROMPT_FILE" "$result_file" "$status_file"
+  DISPATCH_RC=$?
   return "$DISPATCH_RC"
 }
 
@@ -699,8 +786,17 @@ _uberdev_dispatch_codex() {
   local WORKTREE_DIR=".claude/worktrees/solve-issue-$ISSUE_NUM"
   local WORKTREE_BRANCH="worktree-solve-issue-$ISSUE_NUM"
   local LOG_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-codex-stdout-$ISSUE_NUM.log"
-  local STATUS_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-codex-status-$ISSUE_NUM.json"
-  local RESULT_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-codex-result-$ISSUE_NUM.md"
+  local STATUS_FILE="${UBERDEV_AGENT_STATUS_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-codex-status-$ISSUE_NUM.json}"
+  local RESULT_FILE="${UBERDEV_AGENT_RESULT_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-codex-result-$ISSUE_NUM.md}"
+  local ROUTE_MODEL="${UBERDEV_AGENT_ROUTE_MODEL:-gpt-5.6-sol}"
+  local ROUTE_EFFORT="${UBERDEV_AGENT_ROUTE_EFFORT:-medium}"
+  local ROUTE_SERVICE_TIER="${UBERDEV_AGENT_SERVICE_TIER:-default}"
+  local ROUTE_SANDBOX="${UBERDEV_AGENT_SANDBOX:-workspace-write}"
+  local EFFECTIVE_POLICY="${UBERDEV_AGENT_EFFECTIVE_POLICY:-${UBERDEV_AGENT_ROUTING_MODE:-adaptive}}"
+  if [ "$EFFECTIVE_POLICY" = inherit ]; then
+    ROUTE_MODEL=""
+    ROUTE_EFFORT=""
+  fi
   # TOCTOU hardening (#155): guard + 0600-create the predictable paths before
   # any redirect writes to them (mirrors the background arm exactly).
   if ! _uberdev_dispatch_prepare_tmp_target "$LOG_FILE" "$ISSUE_NUM" "codex"; then
@@ -722,10 +818,9 @@ _uberdev_dispatch_codex() {
       "{\"issue\":$ISSUE_NUM,\"phase\":\"worktree\",\"backend\":\"codex\",\"rc\":1}"
     return 1
   fi
-  local PROMPT_BODY
-  # Guard the prompt read (B5 fix, same as background): an unreadable
-  # $PROMPT_FILE must surface as a setup failure, not a garbage dispatch.
-  if ! PROMPT_BODY="$(cat "$PROMPT_FILE" 2>>"$LOG_FILE")"; then
+  # Validate readability without copying prompt content into argv. Codex exec
+  # accepts positional `-` and reads the instruction from stdin.
+  if [ ! -f "$PROMPT_FILE" ] || [ ! -r "$PROMPT_FILE" ]; then
     DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
     _uberdev_dispatch_audit dispatch_setup_failed \
@@ -750,8 +845,12 @@ _uberdev_dispatch_codex() {
       LOG_FILE="$5"
       WORKTREE_DIR="$6"
       WORKTREE_BRANCH="$7"
-      PROMPT_BODY="$8"
-      shift 8
+      PROMPT_FILE="$8"
+      ROUTE_MODEL="$9"
+      ROUTE_EFFORT="${10}"
+      ROUTE_SERVICE_TIER="${11}"
+      ROUTE_SANDBOX="${12}"
+      shift 12
       WRAPPER_PID="$$"
 
       write_status() {
@@ -779,11 +878,18 @@ EOF_STATUS
       fi
 
       if cd "$WORKTREE_DIR"; then
+        CODEX_ROUTE_ARGS=()
+        [ -z "$ROUTE_MODEL" ] || CODEX_ROUTE_ARGS+=( -m "$ROUTE_MODEL" )
+        [ -z "$ROUTE_EFFORT" ] || CODEX_ROUTE_ARGS+=( -c "model_reasoning_effort=\"$ROUTE_EFFORT\"" )
         env "$@" codex --ask-for-approval never exec \
-        --sandbox workspace-write \
+        --sandbox "$ROUTE_SANDBOX" \
+        "${CODEX_ROUTE_ARGS[@]}" \
+        -c "service_tier=\"$ROUTE_SERVICE_TIER\"" \
+        -c "features.multi_agent=false" \
+        -c "agents.max_depth=0" \
         --json \
         -o "$RESULT_FILE" \
-        "$PROMPT_BODY"
+        - < "$PROMPT_FILE"
         CODEX_RC=$?
       else
         CODEX_RC=127
@@ -795,7 +901,8 @@ EOF_STATUS
         exit 126
       fi
       exit "$CODEX_RC"
-    ' _ "$ISSUE_NUM" "$TIER" "$STATUS_FILE" "$RESULT_FILE" "$LOG_FILE" "$WORKTREE_DIR" "$WORKTREE_BRANCH" "$PROMPT_BODY" "${BG_TURBO_ENV[@]}" \
+    ' _ "$ISSUE_NUM" "$TIER" "$STATUS_FILE" "$RESULT_FILE" "$LOG_FILE" "$WORKTREE_DIR" "$WORKTREE_BRANCH" "$PROMPT_FILE" \
+    "$ROUTE_MODEL" "$ROUTE_EFFORT" "$ROUTE_SERVICE_TIER" "$ROUTE_SANDBOX" "${BG_TURBO_ENV[@]}" \
     >"$LOG_FILE" 2>&1 &
   DISPATCH_RC=$?
   DISPATCH_ID="$!"

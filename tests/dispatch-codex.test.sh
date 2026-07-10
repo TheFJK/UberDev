@@ -17,6 +17,8 @@ LAUNCHER="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
 PLUGIN_HOOKS="$REPO_ROOT/codex/uberdev-codex/hooks/hooks.json"
 PLUGIN_ROOT="$REPO_ROOT/codex/uberdev-codex"
 CODEX_DISPATCH_LIB="$PLUGIN_ROOT/lib/dispatch.sh"
+AGENT_DISPATCH_LIB="$REPO_ROOT/plugins/uberdev/lib/agent-dispatch.sh"
+CODEX_AGENT_DISPATCH_LIB="$PLUGIN_ROOT/lib/agent-dispatch.sh"
 CODEX_GOAL_LIB="$PLUGIN_ROOT/lib/goal-state.sh"
 CODEX_CONFIG_LIB="$PLUGIN_ROOT/lib/config-read.sh"
 
@@ -61,6 +63,11 @@ if cmp -s "$DISPATCH_LIB" "$CODEX_DISPATCH_LIB"; then
   pass_msg "packaged Codex dispatch.sh is byte-identical to source runtime lib"
 else
   fail_msg "packaged Codex dispatch.sh drifted from source runtime lib"
+fi
+if cmp -s "$AGENT_DISPATCH_LIB" "$CODEX_AGENT_DISPATCH_LIB"; then
+  pass_msg "packaged Codex agent-dispatch.sh is byte-identical to source runtime lib"
+else
+  fail_msg "packaged Codex agent-dispatch.sh drifted from source runtime lib"
 fi
 if cmp -s "$GOAL_LIB" "$CODEX_GOAL_LIB"; then
   pass_msg "packaged Codex goal-state.sh is byte-identical to source runtime lib"
@@ -130,6 +137,21 @@ assert_grep_not "$DISPATCH_LIB" \
 assert_grep "$DISPATCH_LIB" \
   '--json' \
   "codex backend passes --json for progress streaming"
+assert_grep "$DISPATCH_LIB" \
+  'model_reasoning_effort=' \
+  "codex backend can pass an explicit reasoning effort override"
+assert_grep "$DISPATCH_LIB" \
+  'service_tier=' \
+  "codex backend always passes the independently resolved service tier"
+assert_grep "$DISPATCH_LIB" \
+  'features\.multi_agent=false' \
+  "codex leaf dispatch disables descendant multi-agent fanout"
+assert_grep "$DISPATCH_LIB" \
+  'agents\.max_depth=0' \
+  "codex leaf dispatch pins agent depth to zero"
+assert_grep "$DISPATCH_LIB" \
+  '< "\$PROMPT_FILE"' \
+  "codex backend redirects the validated prompt file to stdin"
 assert_grep "$DISPATCH_LIB" \
   'nohup' \
   "codex backend detaches via nohup (same as background)"
@@ -389,6 +411,8 @@ out=""
   for arg in "$@"; do printf ' [%s]' "$arg"; done
   printf '\nUBERDEV_TURBO=%s\n' "${UBERDEV_TURBO:-}"
 } >> "$CODEX_CAPTURE"
+IFS= read -r stdin_body || true
+printf 'stdin=%s\n' "$stdin_body" >> "$CODEX_CAPTURE"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
@@ -430,11 +454,18 @@ case "$BEH_OUT" in
 esac
 if grep -Fq -- 'argv: [--ask-for-approval] [never] [exec]' "$BEH_TMP/codex-capture.txt" \
    && grep -Fq -- '--sandbox] [workspace-write]' "$BEH_TMP/codex-capture.txt" \
+   && grep -Fq -- '[-m] [gpt-5.6-sol]' "$BEH_TMP/codex-capture.txt" \
+   && grep -Fq -- '[-c] [model_reasoning_effort="medium"]' "$BEH_TMP/codex-capture.txt" \
+   && grep -Fq -- '[-c] [service_tier="default"]' "$BEH_TMP/codex-capture.txt" \
+   && grep -Fq -- '[-c] [features.multi_agent=false]' "$BEH_TMP/codex-capture.txt" \
+   && grep -Fq -- '[-c] [agents.max_depth=0]' "$BEH_TMP/codex-capture.txt" \
+   && grep -Fq -- '[--json] [-o]' "$BEH_TMP/codex-capture.txt" \
+   && grep -Fq -- '[-]' "$BEH_TMP/codex-capture.txt" \
    && grep -Fq -- 'UBERDEV_TURBO=1' "$BEH_TMP/codex-capture.txt" \
-   && grep -Fq -- '[prompt body for codex]' "$BEH_TMP/codex-capture.txt"; then
-  pass_msg "codex dispatch passes approval policy before exec plus sandbox, turbo env, and prompt body"
+   && grep -Fq -- 'stdin=prompt body for codex' "$BEH_TMP/codex-capture.txt"; then
+  pass_msg "codex dispatch passes exact routed leaf argv and prompt on stdin"
 else
-  fail_msg "codex dispatch passes approval policy before exec plus sandbox, turbo env, and prompt body" \
+  fail_msg "codex dispatch passes exact routed leaf argv and prompt on stdin" \
     "$(cat "$BEH_TMP/codex-capture.txt" 2>/dev/null)"
 fi
 if printf '%s\n' "$BEH_OUT" | grep -Eq '"pid":"[0-9]+"'; then
@@ -443,6 +474,64 @@ else
   fail_msg "codex dispatch status pid is numeric" "$BEH_OUT"
 fi
 rm -rf "$BEH_TMP"
+
+echo "== Codex inherit carrier omits model and effort pins =="
+INHERIT_TMP="$(mktemp -d)"
+mkdir -p "$INHERIT_TMP/bin" "$INHERIT_TMP/repo" "$INHERIT_TMP/tmp"
+cat > "$INHERIT_TMP/bin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "worktree" ] && [ "$2" = "add" ]; then mkdir -p "$3"; exit 0; fi
+exit 1
+SH
+cat > "$INHERIT_TMP/bin/codex" <<'SH'
+#!/usr/bin/env bash
+{
+  printf 'argv:'
+  for arg in "$@"; do printf ' [%s]' "$arg"; done
+  printf '\n'
+} > "$CODEX_CAPTURE"
+IFS= read -r body || true
+printf 'stdin=%s\n' "$body" >> "$CODEX_CAPTURE"
+exit 0
+SH
+chmod +x "$INHERIT_TMP/bin/git" "$INHERIT_TMP/bin/codex"
+printf 'inherit prompt' > "$INHERIT_TMP/prompt.txt"
+(
+  cd "$INHERIT_TMP/repo"
+  PATH="$INHERIT_TMP/bin:/usr/bin:/bin" UBERDEV_TMPDIR="$INHERIT_TMP/tmp" \
+    UBERDEV_AGENT_ROUTING_MODE=inherit UBERDEV_AGENT_SERVICE_TIER=fast CODEX_CAPTURE="$INHERIT_TMP/capture.txt" \
+    bash -c '. "$1"; _uberdev_dispatch_codex 43 small "$2"; pid=$DISPATCH_ID; i=0; while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 5 ]; do sleep 1; i=$((i+1)); done' \
+    _ "$DISPATCH_LIB" "$INHERIT_TMP/prompt.txt"
+)
+if grep -Fq -- '[-m]' "$INHERIT_TMP/capture.txt" \
+   || grep -Fq -- 'model_reasoning_effort=' "$INHERIT_TMP/capture.txt"; then
+  fail_msg "inherit Codex carrier omits model and reasoning pins" "$(cat "$INHERIT_TMP/capture.txt")"
+elif grep -Fq -- '[-c] [service_tier="fast"]' "$INHERIT_TMP/capture.txt" \
+   && grep -Fq -- 'stdin=inherit prompt' "$INHERIT_TMP/capture.txt"; then
+  pass_msg "inherit Codex carrier omits model and reasoning pins"
+else
+  fail_msg "inherit Codex carrier preserves independent service tier and stdin" "$(cat "$INHERIT_TMP/capture.txt")"
+fi
+
+rm -f "$INHERIT_TMP/capture.txt"
+(
+  cd "$INHERIT_TMP/repo"
+  PATH="$INHERIT_TMP/bin:/usr/bin:/bin" UBERDEV_TMPDIR="$INHERIT_TMP/tmp" \
+    UBERDEV_AGENT_ROUTING_MODE=shadow UBERDEV_AGENT_EFFECTIVE_POLICY=inherit \
+    UBERDEV_AGENT_ROUTE_MODEL=gpt-5.6-sol UBERDEV_AGENT_ROUTE_EFFORT=medium \
+    UBERDEV_AGENT_SERVICE_TIER=fast CODEX_CAPTURE="$INHERIT_TMP/capture.txt" \
+    bash -c '. "$1"; _uberdev_dispatch_codex 44 small "$2"; pid=$DISPATCH_ID; i=0; while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 5 ]; do sleep 1; i=$((i+1)); done' \
+    _ "$DISPATCH_LIB" "$INHERIT_TMP/prompt.txt"
+)
+if grep -Fq -- '[-m]' "$INHERIT_TMP/capture.txt" \
+   || grep -Fq -- 'model_reasoning_effort=' "$INHERIT_TMP/capture.txt"; then
+  fail_msg "shadow Codex carrier executes inherit without model and reasoning pins" "$(cat "$INHERIT_TMP/capture.txt")"
+elif grep -Fq -- '[-c] [service_tier="fast"]' "$INHERIT_TMP/capture.txt"; then
+  pass_msg "shadow Codex carrier executes inherit without model and reasoning pins"
+else
+  fail_msg "shadow Codex carrier preserves independent service tier" "$(cat "$INHERIT_TMP/capture.txt")"
+fi
+rm -rf "$INHERIT_TMP"
 
 echo "== _uberdev_dispatch_codex failure and delayed-wrapper behavior =="
 FAIL_TMP="$(mktemp -d)"
