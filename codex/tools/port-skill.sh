@@ -260,7 +260,7 @@ for root in roots:
         "# Per-project configuration — `.codex/uberdev.local.md` / `.claude/uberdev.local.md`",
     )
     text2 = text2.replace(
-        "Claude Code reads optional config from `.codex/uberdev.local.md` in your project root. Codex prefers `.codex/uberdev.local.md` when present and falls back to `.codex/uberdev.local.md` for shared repos. The file uses YAML frontmatter for typed settings:",
+        "UberDev reads optional project config from `.codex/uberdev.local.md` when present and falls back to `.codex/uberdev.local.md` for shared and legacy repos. The file uses YAML frontmatter for typed settings:",
         "Codex prefers optional config from `.codex/uberdev.local.md` in your project root and falls back to `.claude/uberdev.local.md` for shared repos. The file uses YAML frontmatter for typed settings:",
     )
     if text2 != text:
