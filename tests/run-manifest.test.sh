@@ -781,6 +781,70 @@ else
   fail "invalid terminal shapes become abandonable only after numeric handle death" "backend=$invalid_backend_dead_rc/$invalid_backend_dead_out exit=$invalid_exit_dead_rc/$invalid_exit_dead_out"
 fi
 
+printf '== run manifest: numeric handle recovery from canonical status ==\n'
+sleep 30 & recovered_live_pid=$!
+RECOVERED_LIVE_STATUS="$TMP/recovered-live/status.json"
+RECOVERED_LIVE_MANIFEST="$TMP/recovered-live/events.jsonl"
+mkdir -p "$(dirname "$RECOVERED_LIVE_STATUS")"
+printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$recovered_live_pid" > "$RECOVERED_LIVE_STATUS"
+append_event "$RECOVERED_LIVE_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:07:50Z","run_id":"run-recovered-live","backend":"codex"}' >/dev/null
+append_event "$RECOVERED_LIVE_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:51Z\",\"run_id\":\"run-recovered-live\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"status_path\":\"$RECOVERED_LIVE_STATUS\"}" >/dev/null
+capture python3 "$MANIFEST" reconcile --manifest "$RECOVERED_LIVE_MANIFEST"
+if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = '{"abandoned":0,"open":1,"status":"ok"}' ]; then
+  pass "canonical numeric status handle keeps a live wrapper open"
+else
+  fail "canonical numeric status handle keeps a live wrapper open" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+
+RECOVERED_DEAD_STATUS="$TMP/recovered-dead/status.json"
+RECOVERED_DEAD_MANIFEST="$TMP/recovered-dead/events.jsonl"
+mkdir -p "$(dirname "$RECOVERED_DEAD_STATUS")"
+printf '{"backend":"background","state":"running","exit_code":null,"pid":"%s"}\n' "$dead_pid" > "$RECOVERED_DEAD_STATUS"
+append_event "$RECOVERED_DEAD_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:07:52Z","run_id":"run-recovered-dead","backend":"background"}' >/dev/null
+append_event "$RECOVERED_DEAD_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:53Z\",\"run_id\":\"run-recovered-dead\",\"backend\":\"background\",\"owner_pid\":$dead_pid,\"status_path\":\"$RECOVERED_DEAD_STATUS\"}" >/dev/null
+capture python3 "$MANIFEST" reconcile --manifest "$RECOVERED_DEAD_MANIFEST"
+if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = '{"abandoned":1,"open":0,"status":"ok"}' ]; then
+  pass "stale running status with a dead recovered wrapper is abandoned"
+else
+  fail "stale running status with a dead recovered wrapper is abandoned" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+
+RECOVERED_MISMATCH_STATUS="$TMP/recovered-mismatch/status.json"
+RECOVERED_MISMATCH_MANIFEST="$TMP/recovered-mismatch/events.jsonl"
+mkdir -p "$(dirname "$RECOVERED_MISMATCH_STATUS")"
+printf '{"backend":"background","state":"running","exit_code":null,"pid":"%s"}\n' "$recovered_live_pid" > "$RECOVERED_MISMATCH_STATUS"
+append_event "$RECOVERED_MISMATCH_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:07:54Z","run_id":"run-recovered-mismatch","backend":"codex"}' >/dev/null
+append_event "$RECOVERED_MISMATCH_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:55Z\",\"run_id\":\"run-recovered-mismatch\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"status_path\":\"$RECOVERED_MISMATCH_STATUS\"}" >/dev/null
+capture python3 "$MANIFEST" reconcile --manifest "$RECOVERED_MISMATCH_MANIFEST"
+mismatch_handle_out="$CAPTURE_OUT"
+
+RECOVERED_MALFORMED_STATUS="$TMP/recovered-malformed/status.json"
+RECOVERED_MALFORMED_MANIFEST="$TMP/recovered-malformed/events.jsonl"
+mkdir -p "$(dirname "$RECOVERED_MALFORMED_STATUS")"
+printf '{"backend":"codex","state":"running","exit_code":null,"pid":true}\n' > "$RECOVERED_MALFORMED_STATUS"
+append_event "$RECOVERED_MALFORMED_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:07:56Z","run_id":"run-recovered-malformed","backend":"codex"}' >/dev/null
+append_event "$RECOVERED_MALFORMED_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:57Z\",\"run_id\":\"run-recovered-malformed\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"status_path\":\"$RECOVERED_MALFORMED_STATUS\"}" >/dev/null
+capture python3 "$MANIFEST" reconcile --manifest "$RECOVERED_MALFORMED_MANIFEST"
+malformed_handle_out="$CAPTURE_OUT"
+if [ "$mismatch_handle_out" = '{"abandoned":1,"open":0,"status":"ok"}' ] \
+   && [ "$malformed_handle_out" = '{"abandoned":1,"open":0,"status":"ok"}' ]; then
+  pass "mismatched and malformed recovered handles are unavailable evidence"
+else
+  fail "mismatched and malformed recovered handles are unavailable evidence" "mismatch=$mismatch_handle_out malformed=$malformed_handle_out"
+fi
+
+kill "$recovered_live_pid" 2>/dev/null || true
+wait "$recovered_live_pid" 2>/dev/null || true
+capture python3 "$MANIFEST" reconcile --manifest "$RECOVERED_LIVE_MANIFEST"
+recovered_dead_out="$CAPTURE_OUT"
+capture python3 "$MANIFEST" reconcile --manifest "$RECOVERED_LIVE_MANIFEST"
+if [ "$recovered_dead_out" = '{"abandoned":1,"open":0,"status":"ok"}' ] \
+   && [ "$CAPTURE_OUT" = '{"abandoned":0,"open":0,"status":"ok"}' ]; then
+  pass "recovered numeric wrapper abandons after death exactly once"
+else
+  fail "recovered numeric wrapper abandons after death exactly once" "first=$recovered_dead_out second=$CAPTURE_OUT"
+fi
+
 MALFORMED_TRUTH_STATUS="$TMP/malformed-truth/status.json"
 MALFORMED_TRUTH_MANIFEST="$TMP/malformed-truth/events.jsonl"
 mkdir -p "$(dirname "$MALFORMED_TRUTH_STATUS")"

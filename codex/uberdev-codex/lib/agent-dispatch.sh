@@ -74,6 +74,37 @@ else:
 ' "$raw" "$key"
 }
 
+_uberdev_agent_validate_issue_identity() {
+  python3 -I -c '
+import json, re, sys
+try:
+    request = json.loads(sys.argv[1])
+except (TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(2)
+if not isinstance(request, dict):
+    raise SystemExit(2)
+issue = request.get("issue_num")
+if type(issue) is not int or issue <= 0:
+    raise SystemExit(2)
+if request.get("workflow") in {"solve", "turbo"}:
+    reference = request.get("issue_or_pr")
+    if type(reference) is int:
+        normalized = reference if reference > 0 else None
+    elif isinstance(reference, str):
+        match = re.fullmatch(
+            r"(?:#?|(?:issue|pr)[:#]?)([1-9][0-9]*)|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#([1-9][0-9]*)",
+            reference,
+            re.IGNORECASE,
+        )
+        normalized = int(next(group for group in match.groups() if group)) if match else None
+    else:
+        normalized = None
+    if normalized != issue:
+        raise SystemExit(2)
+print(issue, end="")
+' "$1"
+}
+
 _uberdev_agent_validate_run_dir() {
   python3 -I -c '
 import os, stat, sys
@@ -307,27 +338,14 @@ _uberdev_agent_append_event() {
 }
 
 _uberdev_agent_status_terminal_event() {
-  python3 -I -c '
-import json, os, stat, sys
-path = sys.argv[1]
-flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-try:
-    descriptor = os.open(path, flags)
-    target = os.fstat(descriptor)
-    if not stat.S_ISREG(target.st_mode) or target.st_size > 65536:
-        raise SystemExit(1)
-    with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
-        value = json.load(handle)
-except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
-    raise SystemExit(1)
-keys = [key for key in ("state", "status", "terminal_status") if key in value]
-if len(keys) != 1 or not isinstance(value[keys[0]], str):
-    raise SystemExit(1)
-event = value[keys[0]].strip().lower()
-if event not in {"completed", "failed", "timed_out", "cancelled", "abandoned"}:
-    raise SystemExit(1)
-print(event, end="")
-' "$1"
+  local status_path="$1" backend="$2" handle="${3:-}" event
+  event="$(python3 -I "$_UBERDEV_AGENT_MANIFEST_TOOL" probe-terminal \
+    --status-path "$status_path" --expected-backend "$backend" \
+    --expected-handle "$handle" 2>/dev/null)" || return 1
+  case "$event" in
+    completed|failed|timed_out|cancelled) printf '%s' "$event" ;;
+    *) return 1 ;;
+  esac
 }
 
 _uberdev_agent_publish_status() {
@@ -518,19 +536,19 @@ _uberdev_agent_start_watcher() {
   local manifest="$1" lease="$2" lease_identity="$3" status_file="$4" backend="$5" handle="$6" request_json="$7" decision="$8"
   local watcher_pid
   (
-    local terminal_event='' probe='' absent_count=0 observed_live=0 event_json=''
+    local terminal_event='' probe='' absent_count=0 event_json=''
     while [ -d "$(dirname "$status_file")" ]; do
-      terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" 2>/dev/null || true)"
+      terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
       [ -z "$terminal_event" ] || break
       if [ "$backend" = claude-bg ]; then
         probe="$(_uberdev_agent_claude_probe "$handle" 2>/dev/null || true)"
         case "$probe" in
-          live) observed_live=1; absent_count=0 ;;
+          live) absent_count=0 ;;
           completed|failed|timed_out|cancelled) terminal_event="$probe"; break ;;
           absent)
             absent_count=$((absent_count + 1))
             if [ "$absent_count" -ge 3 ]; then
-              if [ "$observed_live" -eq 1 ]; then terminal_event=completed; else terminal_event=failed; fi
+              terminal_event=failed
               break
             fi
             ;;
@@ -569,6 +587,9 @@ uberdev_agent_dispatch() {
   [ -r "$_UBERDEV_AGENT_ROUTER" ] && [ -r "$_UBERDEV_AGENT_POLICY" ] && [ -r "$_UBERDEV_AGENT_MANIFEST_TOOL" ] || {
     _uberdev_agent_error 'routing runtime is incomplete'; return 2;
   }
+  issue_num="$(_uberdev_agent_validate_issue_identity "$request_json")" || {
+    _uberdev_agent_error 'invalid issue identity'; return 2;
+  }
   run_dir="$(_uberdev_agent_json_get "$request_json" run_dir)" || { _uberdev_agent_error 'invalid run_dir'; return 2; }
   run_dir="$(_uberdev_agent_validate_run_dir "$run_dir")" || { _uberdev_agent_error 'unsafe run_dir'; return 2; }
   state_dir="$run_dir/.agent-state-$(python3 -I -c 'import os; print(os.geteuid())')" || return 2
@@ -581,7 +602,6 @@ uberdev_agent_dispatch() {
   run_id="$(_uberdev_agent_json_get "$request_json" run_id)" || { _uberdev_agent_error 'invalid run_id'; return 2; }
   repository_id="$(_uberdev_agent_json_get "$request_json" repository_id)" || { _uberdev_agent_error 'invalid repository_id'; return 2; }
   backend="$(_uberdev_agent_json_get "$request_json" backend)" || { _uberdev_agent_error 'invalid backend'; return 2; }
-  issue_num="$(_uberdev_agent_json_get "$request_json" issue_num)" || { _uberdev_agent_error 'invalid issue_num'; return 2; }
   tier="$(_uberdev_agent_json_get "$request_json" task_tier)" || { _uberdev_agent_error 'invalid task_tier'; return 2; }
   capacity="$(_uberdev_agent_json_get "$request_json" capacity)" || { _uberdev_agent_error 'invalid capacity'; return 2; }
   timeout_s="$(_uberdev_agent_json_get "$request_json" timeout_s)" || { _uberdev_agent_error 'invalid timeout_s'; return 2; }
@@ -647,7 +667,7 @@ uberdev_agent_dispatch() {
     return "$rc"
   fi
 
-  terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" 2>/dev/null || true)"
+  terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
   lease_handle="$handle"
   [ "$backend" != wezterm ] || lease_handle="pane:$handle"
   if ! PYTHONPATH= PYTHONHOME= uberdev_semaphore_set_handle "$lease" "$lease_handle" "$status_file"; then

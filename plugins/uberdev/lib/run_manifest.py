@@ -946,7 +946,44 @@ def _terminal_truth_from_snapshot(
         return None
     if terminal != "completed" and exit_code == 0:
         return None
+    reported_keys = [key for key in ("pid", "backend_handle") if key in snapshot]
+    if len(reported_keys) > 1:
+        return None
+    expected_handle = started.get("backend_handle")
+    if expected_handle not in (None, "") and reported_keys:
+        expected_identity = _canonical_backend_handle(expected_handle)
+        reported_identity = _canonical_backend_handle(snapshot[reported_keys[0]])
+        if expected_identity is None or reported_identity != expected_identity:
+            return None
     return terminal
+
+
+def _canonical_backend_handle(value: Any) -> str | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value) if value > 0 else None
+    if not isinstance(value, str) or not value:
+        return None
+    numeric = value[4:] if value.startswith("pid:") else value
+    if numeric.isdigit():
+        return numeric if re.fullmatch(r"[1-9][0-9]*", numeric) else None
+    return value if _IDENTIFIER_PATTERN.fullmatch(value) is not None else None
+
+
+def validated_terminal_status(
+    path: str, expected_backend: str, expected_handle: str | None
+) -> str | None:
+    """Return terminal truth only after the shared canonical status checks."""
+
+    try:
+        verdict, snapshot = _probe_status_snapshot(path)
+    except (ManifestRejected, ManifestRuntimeError):
+        return None
+    started: dict[str, Any] = {"backend": expected_backend}
+    if expected_handle not in (None, ""):
+        started["backend_handle"] = expected_handle
+    return _terminal_truth_from_snapshot(started, verdict, snapshot)
 
 
 def _canonical_terminal_truth(started: dict[str, Any]) -> str | None:
@@ -961,7 +998,7 @@ def _canonical_terminal_truth(started: dict[str, Any]) -> str | None:
 
 def _reconciliation_status(
     started: dict[str, Any],
-) -> tuple[bool | None, str | None]:
+) -> tuple[bool | None, str | None, str | None]:
     """Classify one secure snapshot for reconciliation exactly once.
 
     Invalid, contradictory, missing, and unsafe snapshots are unavailable
@@ -970,17 +1007,38 @@ def _reconciliation_status(
 
     status_path = started.get("status_path")
     if not isinstance(status_path, str):
-        return None, None
+        return None, None, None
     try:
         verdict, snapshot = _probe_status_snapshot(status_path)
     except (ManifestRejected, ManifestRuntimeError):
-        return None, None
+        return None, None, None
     terminal_truth = _terminal_truth_from_snapshot(started, verdict, snapshot)
     if terminal_truth is not None:
-        return False, terminal_truth
+        return False, terminal_truth, None
+    if snapshot is None:
+        return None, None, None
+    expected_backend = started.get("backend")
+    reported_backend = snapshot.get("backend")
+    if reported_backend is not None and reported_backend != expected_backend:
+        return None, None, None
+    recovered_handle: str | None = None
+    needs_numeric_recovery = (
+        started.get("backend_handle") in (None, "")
+        and expected_backend in {"codex", "background"}
+    )
+    if needs_numeric_recovery:
+        if reported_backend != expected_backend:
+            return None, None, None
+        reported_keys = [key for key in ("pid", "backend_handle") if key in snapshot]
+        if len(reported_keys) == 1:
+            candidate = _canonical_backend_handle(snapshot[reported_keys[0]])
+            if candidate is not None and candidate.isdigit():
+                recovered_handle = candidate
+        if recovered_handle is None:
+            return None, None, None
     if verdict == "live":
-        return True, None
-    return None, None
+        return True, None, recovered_handle
+    return None, None, recovered_handle
 
 
 def _lease_generation(payload: bytes) -> str:
@@ -1236,7 +1294,9 @@ def reconcile_manifest(path: str) -> dict[str, Any]:
             state = states[identity]
             if state.started is None or state.terminal is not None:
                 continue
-            status_liveness, terminal_truth = _reconciliation_status(state.started)
+            status_liveness, terminal_truth, recovered_handle = _reconciliation_status(
+                state.started
+            )
             if terminal_truth is not None:
                 run_id, agent_id = identity
                 terminal: dict[str, Any] = {
@@ -1276,8 +1336,11 @@ def reconcile_manifest(path: str) -> dict[str, Any]:
                 appended_count += 1
                 continue
             owner_live = _pid_live(state.started.get("owner_pid"))
+            backend_state = state.started
+            if recovered_handle is not None:
+                backend_state = dict(state.started, backend_handle=recovered_handle)
             backend_live = _backend_live(
-                state.started, status_liveness, status_known=True
+                backend_state, status_liveness, status_known=True
             )
             if owner_live or backend_live:
                 continue
@@ -1341,6 +1404,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     status_parser.add_argument("--status-path", required=True)
 
+    terminal_parser = subparsers.add_parser("probe-terminal", help=argparse.SUPPRESS)
+    terminal_parser.add_argument("--status-path", required=True)
+    terminal_parser.add_argument("--expected-backend", required=True)
+    terminal_parser.add_argument("--expected-handle")
+
     lease_write_parser = subparsers.add_parser(
         "secure-write-lease", help=argparse.SUPPRESS
     )
@@ -1369,6 +1437,14 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "probe-status":
             print(probe_status_file(args.status_path))
+            return 0
+        if args.command == "probe-terminal":
+            print(
+                validated_terminal_status(
+                    args.status_path, args.expected_backend, args.expected_handle
+                )
+                or "unknown"
+            )
             return 0
         if args.command == "secure-write-lease":
             secure_write_lease(args.lease_path, sys.stdin.buffer.read(16385))

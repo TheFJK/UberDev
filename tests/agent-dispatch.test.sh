@@ -88,6 +88,24 @@ PY
     *generation-race.md)
       printf '{"backend":"codex","state":"running","exit_code":null,"pid":"opaque:test-handle"}\n' > "$6"
       ;;
+    *terminal-invalid-backend-exit.md)
+      printf '{"backend":"background","state":"completed","exit_code":9,"pid":"opaque:test-handle"}\n' > "$6"
+      ;;
+    *terminal-backend-mismatch.md)
+      printf '{"backend":"background","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
+      ;;
+    *terminal-multiple-state.md)
+      printf '{"backend":"codex","state":"completed","status":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
+      ;;
+    *terminal-bool-exit.md)
+      printf '{"backend":"codex","state":"completed","exit_code":true,"pid":"opaque:test-handle"}\n' > "$6"
+      ;;
+    *terminal-string-exit.md)
+      printf '{"backend":"codex","state":"completed","exit_code":"0","pid":"opaque:test-handle"}\n' > "$6"
+      ;;
+    *terminal-handle-mismatch.md)
+      printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:other-handle"}\n' > "$6"
+      ;;
     *result.md)
       printf '{"backend":"codex","state":"running","exit_code":null,"pid":"opaque:test-handle"}\n' > "$6"
       ;;
@@ -136,12 +154,60 @@ if grep -R -q 'run_id=agent-dispatch-test' "$STATE_DIR/semaphore-v1" 2>/dev/null
   exit 1
 fi
 
+# Public issue identity is a canonical positive JSON integer and must agree
+# with issue_or_pr before any private state or provider boundary exists.
+ISSUE_SENTINEL="$TMP/outside-issue-sentinel"
+printf 'unchanged\n' > "$ISSUE_SENTINEL"
+issue_provider_before="$(cat "$TMP/provider-count")"
+issue_validation_failures=''
+while IFS='|' read -r issue_label issue_json issue_or_pr_json; do
+  issue_run="$TMP/invalid-issue-$issue_label"
+  mkdir -p "$issue_run"
+  printf 'invalid issue prompt\n' > "$issue_run/prompt.txt"
+  issue_request="$(python3 -I - "$REQUEST" "$issue_run" "$issue_label" "$issue_json" "$issue_or_pr_json" <<'PY'
+import json, sys
+request = json.loads(sys.argv[1])
+request["run_dir"] = sys.argv[2]
+request["run_id"] = "invalid-issue-" + sys.argv[3]
+request["issue_num"] = json.loads(sys.argv[4])
+request["issue_or_pr"] = json.loads(sys.argv[5])
+print(json.dumps(request, sort_keys=True, separators=(",", ":")))
+PY
+)"
+  if uberdev_agent_dispatch "$issue_request" "$issue_run/prompt.txt" \
+      "$issue_run/result.md" "$issue_run/status.json" >/dev/null 2>&1; then
+    issue_validation_failures="$issue_validation_failures accepted:$issue_label"
+  fi
+  if [ -e "$issue_run/.agent-state-$(id -u)" ]; then
+    issue_validation_failures="$issue_validation_failures state-created:$issue_label"
+  fi
+done <<'EOF_ISSUES'
+traversal|"x/../../victim"|42
+absolute|"/tmp/absolute-victim"|42
+numeric-string|"42"|42
+boolean|true|42
+zero|0|0
+negative|-1|-1
+float|1.5|1.5
+mismatch|42|43
+EOF_ISSUES
+if [ "$(cat "$TMP/provider-count")" != "$issue_provider_before" ]; then
+  issue_validation_failures="$issue_validation_failures provider-called"
+fi
+if [ "$(cat "$ISSUE_SENTINEL")" != unchanged ]; then
+  issue_validation_failures="$issue_validation_failures sentinel-clobbered"
+fi
+if [ -n "$issue_validation_failures" ]; then
+  echo "issue identity validation failed:$issue_validation_failures" >&2
+  exit 1
+fi
+
 # A detached status transition is consumed by the adapter-owned watcher: it
 # appends the real terminal event and releases capacity without an abandoned
 # reconciliation record.
 ASYNC_REQUEST="${REQUEST/agent-dispatch-test/agent-dispatch-async}"
 uberdev_agent_dispatch "$ASYNC_REQUEST" "$TMP/run/prompt.txt" "$TMP/run/async-terminal.md" "$TMP/run/async-terminal.json"
-for _ in 1 2 3 4 5; do
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
   grep -q '"run_id":"agent-dispatch-async".*"event":"completed"\|"event":"completed".*"run_id":"agent-dispatch-async"' "$STATE_DIR/agent-lifecycle.jsonl" 2>/dev/null && break
   sleep 1
 done
@@ -179,6 +245,40 @@ elif kind == "claude-fast":
 print(json.dumps(request, sort_keys=True, separators=(",", ":")))
 PY
 }
+
+# Terminal-shaped provider files are authoritative only after the full
+# canonical backend/exit/state-carrier/handle validation succeeds.
+terminal_validation_failures=''
+for terminal_case in \
+  invalid-backend-exit backend-mismatch multiple-state bool-exit string-exit handle-mismatch
+do
+  terminal_run_id="agent-dispatch-terminal-$terminal_case"
+  terminal_request="$(variant_request "$terminal_run_id" inherit)"
+  terminal_result="$TMP/run/terminal-$terminal_case.md"
+  terminal_status="$TMP/run/terminal-$terminal_case.json"
+  uberdev_agent_dispatch "$terminal_request" "$TMP/run/prompt.txt" "$terminal_result" "$terminal_status"
+  if ! python3 -I - "$STATE_DIR/agent-lifecycle.jsonl" "$terminal_run_id" <<'PY'
+import json, pathlib, sys
+events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+actual = [event["event"] for event in events if event["run_id"] == sys.argv[2]]
+assert actual == ["route_decided", "agent_started"], actual
+PY
+  then
+    terminal_validation_failures="$terminal_validation_failures terminal-appended:$terminal_case"
+  fi
+  if ! grep -R -q "run_id=$terminal_run_id" "$STATE_DIR/semaphore-v1" 2>/dev/null; then
+    terminal_validation_failures="$terminal_validation_failures lease-released:$terminal_case"
+  fi
+  printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$terminal_status"
+  for _ in 1 2 3 4 5; do
+    ! grep -R -q "run_id=$terminal_run_id" "$STATE_DIR/semaphore-v1" 2>/dev/null && break
+    sleep 1
+  done
+done
+if [ -n "$terminal_validation_failures" ]; then
+  echo "terminal status validation failed:$terminal_validation_failures" >&2
+  exit 1
+fi
 
 SHADOW_REQUEST="$(variant_request agent-dispatch-shadow shadow)"
 uberdev_agent_dispatch "$SHADOW_REQUEST" "$TMP/run/prompt.txt" "$TMP/run/shadow.md" "$TMP/run/shadow.json"
@@ -490,8 +590,12 @@ cross_backend_case() {
     printf '[{"sessionId":"abc12345-full","status":"completed"}]\n' > "$run/claude-agents.json"
   else
     tmp_status="$run/status.json.tmp"
-    printf '{"backend":"%s","state":"completed","exit_code":0,"pid":"%s"}\n' \
-      "$backend" "${DISPATCH_ID:-pane}" > "$tmp_status"
+    if [ "$backend" = wezterm ]; then
+      printf '{"backend":"wezterm","state":"completed","exit_code":0}\n' > "$tmp_status"
+    else
+      printf '{"backend":"%s","state":"completed","exit_code":0}\n' \
+        "$backend" > "$tmp_status"
+    fi
     mv "$tmp_status" "$run/status.json"
   fi
   for _ in 1 2 3 4 5 6; do
@@ -520,6 +624,9 @@ _uberdev_agent_dispatch_backend() {
       DISPATCH_ID=abc12345
       if [ "${CROSS_CLAUDE_DROP_AFTER_LIVE:-0}" = 1 ]; then
         nohup bash -c 'sleep 0.5; printf "[]\\n" > "$1"' _ "$CROSS_CLAUDE_STATE" >/dev/null 2>&1 &
+      elif [ -n "${CROSS_CLAUDE_TERMINAL_AFTER_LIVE:-}" ]; then
+        nohup bash -c 'sleep 0.5; printf "[{\"sessionId\":\"abc12345-full\",\"status\":\"%s\"}]\\n" "$2" > "$1"' \
+          _ "$CROSS_CLAUDE_STATE" "$CROSS_CLAUDE_TERMINAL_AFTER_LIVE" >/dev/null 2>&1 &
       fi
       ;;
     wezterm)
@@ -545,7 +652,7 @@ claude_watcher_case() {
   request="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"claude-watch-"+sys.argv[2],"repository_id":"claude-watch-repository","backend":"claude-bg","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":89,"issue_num":89,"capacity":1,"timeout_s":1},separators=(",",":")))' "$run" "$mode")"
   case "$mode" in
     initial-absent) printf '[]\n' > "$run/claude-agents.json" ;;
-    live-then-absent) printf '[{"sessionId":"abc12345-full","status":"running"}]\n' > "$run/claude-agents.json" ;;
+    live-then-absent|explicit-completed) printf '[{"sessionId":"abc12345-full","status":"running"}]\n' > "$run/claude-agents.json" ;;
     ambiguous) printf '[{"sessionId":"abc12345-one","status":"running"},{"sessionId":"abc12345-two","status":"completed"}]\n' > "$run/claude-agents.json" ;;
     probe-error) printf '{not-json\n' > "$run/claude-agents.json" ;;
   esac
@@ -553,12 +660,15 @@ claude_watcher_case() {
     sleep() { command sleep 0.1; }
     drop=0
     [ "$mode" != live-then-absent ] || drop=1
-    CROSS_CLAUDE_DROP_AFTER_LIVE="$drop" CROSS_CLAUDE_STATE="$run/claude-agents.json" \
+    explicit=''
+    [ "$mode" != explicit-completed ] || explicit=completed
+    CROSS_CLAUDE_DROP_AFTER_LIVE="$drop" CROSS_CLAUDE_TERMINAL_AFTER_LIVE="$explicit" \
+      CROSS_CLAUDE_STATE="$run/claude-agents.json" \
       PATH="$CROSS_BIN:$PATH" uberdev_agent_dispatch "$request" \
         "$run/prompt.txt" "$run/result.md" "$run/status.json"
   )
   case "$mode" in
-    initial-absent|live-then-absent)
+    initial-absent|live-then-absent|explicit-completed)
       for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
         grep -Eq '"state":"(completed|failed)"' "$run/status.json" 2>/dev/null && break
         command sleep 0.1
@@ -586,8 +696,13 @@ assert actual == ["route_decided", "agent_started", "failed"], actual
 PY
       ;;
     live-then-absent)
+      grep -q '"state":"failed"' "$run/status.json" || {
+        echo "observed-live Claude disappearance fabricated success" >&2; return 1;
+      }
+      ;;
+    explicit-completed)
       grep -q '"state":"completed"' "$run/status.json" || {
-        echo "observed-live Claude disappearance did not complete" >&2; return 1;
+        echo "explicit Claude completion did not complete" >&2; return 1;
       }
       ;;
     ambiguous|probe-error)
@@ -609,6 +724,7 @@ PY
 
 claude_watcher_case initial-absent
 claude_watcher_case live-then-absent
+claude_watcher_case explicit-completed
 claude_watcher_case ambiguous
 claude_watcher_case probe-error
 

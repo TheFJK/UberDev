@@ -1051,7 +1051,7 @@ _uberdev_dispatch_wezterm() {
         STATE="$1"; EXIT_CODE="$2"; TMP_STATUS="$(mktemp "${STATUS_FILE}.tmp.XXXXXX")" || return 1
         if [ "$EXIT_CODE" = null ]; then EXIT_JSON=null; else EXIT_JSON="$EXIT_CODE"; fi
         chmod 600 "$TMP_STATUS" || { rm -f "$TMP_STATUS"; return 1; }
-        printf "{\"issue\":%s,\"tier\":\"%s\",\"backend\":\"wezterm\",\"state\":\"%s\",\"exit_code\":%s,\"pid\":\"pane\"}\n" \
+        printf "{\"issue\":%s,\"tier\":\"%s\",\"backend\":\"wezterm\",\"state\":\"%s\",\"exit_code\":%s}\n" \
             "$ISSUE_NUM" "$TIER" "$STATE" "$EXIT_JSON" > "$TMP_STATUS" || { rm -f "$TMP_STATUS"; return 1; }
         mv -f "$TMP_STATUS" "$STATUS_FILE"
       }
