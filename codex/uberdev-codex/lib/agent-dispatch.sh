@@ -52,7 +52,7 @@ _uberdev_agent_error() {
 
 _uberdev_agent_json_get() {
   local raw="$1" key="$2"
-  python3 -I -c '
+  python3 -I -B -c '
 import json, sys
 try:
     value = json.loads(sys.argv[1])
@@ -75,7 +75,7 @@ else:
 }
 
 _uberdev_agent_validate_issue_identity() {
-  python3 -I -c '
+  python3 -I -B -c '
 import json, re, sys
 try:
     request = json.loads(sys.argv[1])
@@ -106,7 +106,7 @@ print(issue, end="")
 }
 
 _uberdev_agent_validate_run_dir() {
-  python3 -I -c '
+  python3 -I -B -c '
 import os, stat, sys
 path = os.path.abspath(sys.argv[1])
 if not os.path.isabs(sys.argv[1]) or not os.path.isdir(path):
@@ -275,7 +275,7 @@ print(path, end="")
 uberdev_agent_resolve_request() {
   local request_json="${1:-}" injected="${UBERDEV_MODEL_CATALOG_FILE:-}"
   [ "$#" -eq 1 ] || { _uberdev_agent_error 'resolve_request expects REQUEST_JSON'; return 2; }
-  python3 -I -c '
+  python3 -I -B -c '
 import hashlib, importlib.util, json, os, pathlib, stat, sys
 request_raw, policy_path, router_path, catalog_path = sys.argv[1:]
 try:
@@ -286,11 +286,50 @@ try:
     if unknown: raise ValueError("unknown_request_fields")
     carriers={"routing_mode","explicit_route","explicit_model","explicit_effort","explicit_service_tier","explicit_sandbox","parent_sandbox"}
     if any(request.get(key)=="" for key in carriers): raise ValueError("empty_carrier")
-    for container_name in ("environment",):
-        container=request.get(container_name,{})
-        if not isinstance(container,dict): raise ValueError("invalid_environment")
-        if any(value=="" for value in container.values()): raise ValueError("empty_environment_carrier")
+    environment=request.get("environment",{})
+    if not isinstance(environment,dict): raise ValueError("invalid_environment")
+    environment_allowed={"UBERDEV_MODEL_ROUTING_MODE","UBERDEV_ROUTE","UBERDEV_MODEL","UBERDEV_REASONING_EFFORT","UBERDEV_SERVICE_TIER","UBERDEV_MODEL_ROUTING_RISK_ESCALATION","UBERDEV_MODEL_ROUTING_ADAPTIVE_FALLBACK","UBERDEV_MODEL_ROUTING_SHADOW"}
+    if set(environment)-environment_allowed: raise ValueError("unknown_environment_fields")
+    string_environment={"UBERDEV_MODEL_ROUTING_MODE","UBERDEV_ROUTE","UBERDEV_MODEL","UBERDEV_REASONING_EFFORT","UBERDEV_SERVICE_TIER"}
+    for key,value in environment.items():
+        if value is None: continue
+        if key in string_environment and (not isinstance(value,str) or not value): raise ValueError("invalid_environment_carrier")
+        if key not in string_environment and not isinstance(value,bool): raise ValueError("invalid_environment_boolean")
+    decision_fields={"schema_version","policy_version","backend","service_tier","sandbox","field_sources","adaptive_fallback","risk_signals","risk_scope","minimum_route","fallback_chain","ignored_sources","ignored_fields","logical_route","model","reasoning_effort","routing_mode","effective_policy","route_source","forced","reason_codes","adaptive_proposal"}
+    parent=request.get("parent_run",{})
+    if not isinstance(parent,dict) or set(parent)-decision_fields: raise ValueError("invalid_parent_run")
+    config_allowed={"mode","routing_mode","service_tier","risk_escalation","adaptive_fallback","shadow","roles","workflows"}
+    def validate_project(value):
+        if not isinstance(value,dict): raise ValueError("invalid_project_routing")
+        if set(value)-config_allowed: raise ValueError("unknown_project_fields")
+        for scope in ("roles","workflows"):
+            entries=value.get(scope,{})
+            if not isinstance(entries,dict): raise ValueError("invalid_project_map")
+            for name,entry in entries.items():
+                if not isinstance(name,str) or not name or (not isinstance(entry,str) and not isinstance(entry,dict)): raise ValueError("invalid_project_entry")
+                if isinstance(entry,dict) and (set(entry)-{"route","reasoning_effort","sandbox"}): raise ValueError("unknown_project_entry_fields")
+    if "project_routing" in request: validate_project(request["project_routing"])
+    if "project_config" in request:
+        project=request["project_config"]
+        if not isinstance(project,dict): raise ValueError("invalid_project_config")
+        if "model_routing" in project:
+            if set(project)!={"model_routing"}: raise ValueError("unknown_project_config_fields")
+            validate_project(project["model_routing"])
+        else: validate_project(project)
     routing={key:value for key,value in request.items() if key not in {"schema_version","run_dir","run_id","repository_id","issue_or_pr","issue_num","capacity","timeout_s","parent_run_id","agent_id","context_file","context_sha256","root_decision"}}
+    backend=routing.get("backend","codex")
+    if backend!="codex":
+        project=request.get("project_routing") or request.get("project_config") or {}
+        if isinstance(project,dict) and "model_routing" in project: project=project["model_routing"]
+        role=routing.get("role","lead"); workflow=routing.get("workflow","")
+        project_concrete=(project.get("service_tier") not in (None,"","default") or (isinstance(project.get("roles"),dict) and project["roles"].get(role) is not None) or (isinstance(project.get("workflows"),dict) and project["workflows"].get(workflow) is not None))
+        environment_concrete=any(environment.get(key) not in (None,"") for key in ("UBERDEV_ROUTE","UBERDEV_MODEL","UBERDEV_REASONING_EFFORT")) or environment.get("UBERDEV_SERVICE_TIER") not in (None,"","default")
+        service=routing.get("explicit_service_tier") or environment.get("UBERDEV_SERVICE_TIER") or project.get("service_tier") or "default"
+        if any(routing.get(k) not in (None,"") for k in ("explicit_route","explicit_model","explicit_effort")) or parent.get("forced") is True or service!="default" or environment_concrete or project_concrete:
+            class Unenforceable(Exception): code="route_unenforceable"
+            raise Unenforceable()
+        decision={"schema_version":1,"backend":backend,"routing_mode":"inherit","effective_policy":"inherit","logical_route":None,"model":None,"reasoning_effort":None,"service_tier":"default","sandbox":None,"forced":False,"route_source":"backend-neutral-inherit","risk_signals":routing.get("risk_signals",[]),"fallback_chain":[],"minimum_route":None}
+        print(json.dumps(decision,sort_keys=True,separators=(",",":")),end=""); raise SystemExit(0)
     spec=importlib.util.spec_from_file_location("_uberdev_model_routing",router_path)
     if spec is None or spec.loader is None: raise ValueError("router_unavailable")
     module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module; spec.loader.exec_module(module)
@@ -308,12 +347,7 @@ try:
             available.append({"model":model,"reasoning_effort":effort}); tiers.add(provider["service_tier"])
         for row in models.values(): row["reasoning_efforts"]=list(dict.fromkeys(row["reasoning_efforts"]))
         catalog={"schema_version":1,"provider":"codex","models":models,"ranked_pairs":ranked,"available_pairs":available,"service_tiers":sorted(tiers),"source_roles":sorted(policy["roles"])}
-    if routing.get("backend","codex")=="codex": decision=module.resolve_route(policy,catalog,routing)
-    else:
-        parent=routing.get("parent_run") or {}; service=routing.get("explicit_service_tier") or "default"
-        if any(routing.get(k) is not None for k in ("explicit_route","explicit_model","explicit_effort")) or parent.get("forced") is True or service!="default":
-            raise module.RouteError("route_unenforceable","route pins cannot be enforced by backend")
-        decision={"schema_version":1,"backend":routing.get("backend"),"routing_mode":"inherit","effective_policy":"inherit","logical_route":None,"model":None,"reasoning_effort":None,"service_tier":service,"sandbox":None,"forced":False,"route_source":"backend-neutral-inherit","risk_signals":routing.get("risk_signals",[]),"fallback_chain":[],"minimum_route":None}
+    decision=module.resolve_route(policy,catalog,routing)
     print(json.dumps(decision,sort_keys=True,separators=(",",":")),end="")
 except Exception as exc:
     code=getattr(exc,"code","invalid_request")
@@ -323,81 +357,152 @@ except Exception as exc:
 ' "$request_json" "$_UBERDEV_AGENT_POLICY" "$_UBERDEV_AGENT_ROUTER" "$injected"
 }
 
+_uberdev_agent_context_schema_validate() {
+  local mode="$1"; shift
+  python3 -I -B -c '
+import json,os,re,sys
+mode=sys.argv[1]
+routing_allowed={"backend","workflow","phase","role","task_tier","risk_scope","risk_signals","routing_mode","explicit_route","explicit_model","explicit_effort","explicit_service_tier","fast","explicit_sandbox","parent_sandbox","environment","project_routing","project_config","parent_run","shadow","adaptive_fallback"}
+adapter_metadata={"schema_version","run_dir","run_id","repository_id","issue_or_pr","issue_num","capacity","timeout_s","parent_run_id","agent_id","context_file","context_sha256","root_decision"}
+decision_allowed={"schema_version","policy_version","backend","service_tier","sandbox","field_sources","adaptive_fallback","risk_signals","risk_scope","minimum_route","fallback_chain","ignored_sources","ignored_fields","logical_route","model","reasoning_effort","routing_mode","effective_policy","route_source","forced","reason_codes","adaptive_proposal"}
+provenance_keys={"mode","service_tier","risk_escalation","adaptive_fallback","shadow","workflows","roles"}; sources={"env","project-codex","project-claude","explicit-config-file","default"}
+risks={"authentication","authorization","concurrency","cryptography","data-loss","destructive-operations","force-push","public-api-compatibility","release-infrastructure","schema-migration","security"}
+def validate(payload):
+ if not isinstance(payload,dict) or set(payload)!={"schema_version","created_at","routing_request","root_decision","config_provenance","metadata"} or payload.get("schema_version")!=1: raise ValueError()
+ if not isinstance(payload["created_at"],str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",payload["created_at"]): raise ValueError()
+ request=payload["routing_request"]
+ if not isinstance(request,dict) or set(request)-routing_allowed: raise ValueError()
+ environment=request.get("environment",{}); env_keys={"UBERDEV_MODEL_ROUTING_MODE","UBERDEV_ROUTE","UBERDEV_MODEL","UBERDEV_REASONING_EFFORT","UBERDEV_SERVICE_TIER","UBERDEV_MODEL_ROUTING_RISK_ESCALATION","UBERDEV_MODEL_ROUTING_ADAPTIVE_FALLBACK","UBERDEV_MODEL_ROUTING_SHADOW"}
+ if not isinstance(environment,dict) or set(environment)-env_keys: raise ValueError()
+ for key in ("routing_mode","explicit_route","explicit_model","explicit_effort","explicit_service_tier","explicit_sandbox","parent_sandbox"):
+  if request.get(key)=="": raise ValueError()
+ parent=request.get("parent_run",{})
+ if not isinstance(parent,dict) or set(parent)-decision_allowed: raise ValueError()
+ config_allowed={"mode","routing_mode","service_tier","risk_escalation","adaptive_fallback","shadow","roles","workflows"}
+ def project(value):
+  if not isinstance(value,dict) or set(value)-config_allowed: raise ValueError()
+  for scope in ("roles","workflows"):
+   entries=value.get(scope,{})
+   if not isinstance(entries,dict): raise ValueError()
+   for name,entry in entries.items():
+    if not isinstance(name,str) or not name or (not isinstance(entry,str) and not isinstance(entry,dict)): raise ValueError()
+    if isinstance(entry,dict) and set(entry)-{"route","reasoning_effort","sandbox"}: raise ValueError()
+ if "project_routing" in request: project(request["project_routing"])
+ if "project_config" in request:
+  value=request["project_config"]
+  if not isinstance(value,dict): raise ValueError()
+  if "model_routing" in value:
+   if set(value)!={"model_routing"}: raise ValueError()
+   project(value["model_routing"])
+  else: project(value)
+ decision=payload["root_decision"]
+ if not isinstance(decision,dict) or set(decision)-decision_allowed or not {"schema_version","backend","routing_mode","effective_policy","logical_route","model","reasoning_effort","service_tier","forced","route_source","risk_signals","fallback_chain","minimum_route"}.issubset(decision): raise ValueError()
+ provenance=payload["config_provenance"]
+ if not isinstance(provenance,dict) or set(provenance)!=provenance_keys: raise ValueError()
+ for record in provenance.values():
+  if not isinstance(record,dict) or set(record)!={"source","file"} or record["source"] not in sources: raise ValueError()
+  path=record["file"]
+  if record["source"] in {"env","default"} and path is not None: raise ValueError()
+  if record["source"] not in {"env","default"} and (not isinstance(path,str) or not os.path.isabs(path) or os.path.normpath(path)!=path): raise ValueError()
+ metadata=payload["metadata"]
+ if not isinstance(metadata,dict) or set(metadata)!={"run_id","repository_id","workflow","backend","issue_num","task_tier","risk_signals"}: raise ValueError()
+ if not isinstance(metadata["run_id"],str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",metadata["run_id"]): raise ValueError()
+ if not isinstance(metadata["repository_id"],str) or not metadata["repository_id"] or metadata["workflow"] not in {"solve","turbo"} or not isinstance(metadata["backend"],str): raise ValueError()
+ if type(metadata["issue_num"]) is not int or metadata["issue_num"]<=0 or metadata["task_tier"] not in {"trivial","small","medium","large"}: raise ValueError()
+ if not isinstance(metadata["risk_signals"],list) or any(item not in risks for item in metadata["risk_signals"]): raise ValueError()
+ if request.get("workflow")!=metadata["workflow"] or request.get("backend")!=metadata["backend"] or request.get("task_tier")!=metadata["task_tier"] or request.get("risk_signals",[])!=metadata["risk_signals"]: raise ValueError()
+ if decision.get("backend")!=metadata["backend"] or decision.get("risk_signals",[])!=metadata["risk_signals"]: raise ValueError()
+ return payload
+if mode=="create":
+ request,decision,provenance,metadata=(json.loads(value) for value in sys.argv[2:6]); created=sys.argv[6]
+ if not isinstance(request,dict) or set(request)-(routing_allowed|adapter_metadata): raise ValueError()
+ payload={"schema_version":1,"created_at":created,"routing_request":{key:value for key,value in request.items() if key not in adapter_metadata},"root_decision":decision,"config_provenance":provenance,"metadata":metadata}
+else:
+ payload=json.loads(sys.argv[2])
+print(json.dumps(validate(payload),sort_keys=True,separators=(",",":"),ensure_ascii=False),end="")
+' "$mode" "$@"
+}
+
 # Atomically create an immutable v1 root routing context. The filename is
 # derived only from the validated run_id and is exclusive: an existing context
 # is never replaced.
 uberdev_agent_context_create() {
+  local payload
   [ "$#" -eq 6 ] || { _uberdev_agent_error 'context_create expects RUN_ROOT REQUEST DECISION PROVENANCE METADATA CREATED_AT'; return 2; }
-  python3 -I -c '
-import hashlib,json,os,re,stat,sys,tempfile
-root,request_raw,decision_raw,provenance_raw,metadata_raw,created_at=sys.argv[1:]
+  payload="$(_uberdev_agent_context_schema_validate create "$2" "$3" "$4" "$5" "$6" 2>/dev/null)" || {
+    _uberdev_agent_error 'route_context_create_failed'; return 2;
+  }
+  python3 -I -B -c '
+import hashlib,json,os,re,secrets,stat,sys
+root,payload_raw=sys.argv[1:]
 try:
- root=os.path.realpath(root); entry=os.stat(root)
- if not stat.S_ISDIR(entry.st_mode): raise ValueError()
- request=json.loads(request_raw); decision=json.loads(decision_raw); provenance=json.loads(provenance_raw); metadata=json.loads(metadata_raw)
- if not all(isinstance(v,dict) for v in (request,decision,provenance,metadata)): raise ValueError()
- required={"run_id","repository_id","workflow","backend","issue_num","task_tier","risk_signals"}
- if set(metadata)!=required or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",str(metadata["run_id"])): raise ValueError()
+ root=os.path.realpath(root)
+ entry=os.stat(root,follow_symlinks=False)
+ if not stat.S_ISDIR(entry.st_mode) or entry.st_uid!=os.geteuid(): raise ValueError()
+ payload=json.loads(payload_raw); metadata=payload["metadata"]
  run_id=metadata["run_id"]
- state=os.path.join(root,f".agent-state-{os.geteuid()}"); os.makedirs(state,mode=0o700,exist_ok=True)
- se=os.lstat(state)
- if stat.S_ISLNK(se.st_mode) or not stat.S_ISDIR(se.st_mode) or se.st_uid!=os.geteuid(): raise ValueError()
- os.chmod(state,0o700)
- routing_metadata={"schema_version","run_dir","run_id","repository_id","issue_or_pr","issue_num","capacity","timeout_s","parent_run_id","agent_id","context_file","context_sha256","root_decision"}
- routing_request={key:value for key,value in request.items() if key not in routing_metadata}
- payload={"schema_version":1,"created_at":created_at,"routing_request":routing_request,"root_decision":decision,"config_provenance":provenance,"metadata":metadata}
- raw=json.dumps(payload,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()
+ state_name=f".agent-state-{os.geteuid()}"; state=os.path.join(root,state_name)
+ rootfd=os.open(root,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0))
+ try:
+  try: os.mkdir(state_name,0o700,dir_fd=rootfd)
+  except FileExistsError: pass
+  statefd=os.open(state_name,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0),dir_fd=rootfd)
+ finally: os.close(rootfd)
+ se=os.fstat(statefd)
+ if not stat.S_ISDIR(se.st_mode) or se.st_uid!=os.geteuid(): raise ValueError()
+ os.fchmod(statefd,0o700)
+ raw=payload_raw.encode()
  digest=hashlib.sha256(raw).hexdigest(); destination=os.path.join(state,f"route-context-v1-{run_id}.json")
- fd,tmp=tempfile.mkstemp(prefix=".route-context.",dir=state)
+ tmp=f".route-context.{secrets.token_hex(16)}"; fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600,dir_fd=statefd)
  try:
   os.fchmod(fd,0o600)
   with os.fdopen(fd,"wb") as stream: stream.write(raw); stream.flush(); os.fsync(stream.fileno())
-  os.link(tmp,destination,follow_symlinks=False)
+  os.link(tmp,os.path.basename(destination),src_dir_fd=statefd,dst_dir_fd=statefd,follow_symlinks=False)
  finally:
-  if os.path.exists(tmp): os.unlink(tmp)
+  try: os.unlink(tmp,dir_fd=statefd)
+  except FileNotFoundError: pass
+ current=os.stat(state,follow_symlinks=False)
+ if (current.st_dev,current.st_ino)!=(se.st_dev,se.st_ino): raise ValueError()
+ os.close(statefd)
  print(json.dumps({"context_file":destination,"context_sha256":digest,"run_id":run_id,"workflow":metadata["workflow"]},sort_keys=True,separators=(",",":")),end="")
 except Exception:
  print("uberdev agent dispatch: route_context_create_failed",file=sys.stderr); raise SystemExit(2)
-' "$1" "$2" "$3" "$4" "$5" "$6"
+' "$1" "$payload"
 }
 
 uberdev_agent_context_validate() {
+  local payload validated
   [ "$#" -eq 3 ] || return 2
-  python3 -I -c '
+  payload="$(python3 -I -B -c '
 import hashlib,json,os,stat,sys
 path,expected,root=sys.argv[1:]
 try:
  if not os.path.isabs(path) or not os.path.isabs(root): raise ValueError()
- root=os.path.realpath(root); state=os.path.realpath(os.path.join(root,f".agent-state-{os.geteuid()}")); lexical=os.path.abspath(path)
- if os.path.realpath(os.path.dirname(lexical))!=state or not os.path.basename(lexical).startswith("route-context-v1-"): raise ValueError()
- if stat.S_ISLNK(os.lstat(lexical).st_mode): raise ValueError()
- flags=os.O_RDONLY|getattr(os,"O_NOFOLLOW",0); fd=os.open(lexical,flags)
+ root=os.path.realpath(root)
+ state=os.path.join(root,f".agent-state-{os.geteuid()}"); lexical=os.path.abspath(path); name=os.path.basename(lexical)
+ if os.path.dirname(lexical)!=state or not name.startswith("route-context-v1-"): raise ValueError()
+ if stat.S_ISLNK(os.lstat(state).st_mode): raise ValueError()
+ statefd=os.open(state,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0))
+ state_entry=os.fstat(statefd)
+ flags=os.O_RDONLY|getattr(os,"O_NOFOLLOW",0); fd=os.open(name,flags,dir_fd=statefd)
  try:
-  opened=os.fstat(fd); current=os.stat(lexical,follow_symlinks=False); raw=os.read(fd,1048577)
+  opened=os.fstat(fd); current=os.stat(name,dir_fd=statefd,follow_symlinks=False); raw=os.read(fd,1048577)
   if len(raw)>1048576 or not stat.S_ISREG(opened.st_mode) or opened.st_uid!=os.geteuid() or opened.st_nlink!=1 or stat.S_IMODE(opened.st_mode)!=0o600 or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino): raise ValueError()
  finally: os.close(fd)
+ state_current=os.stat(state,follow_symlinks=False)
+ if (state_current.st_dev,state_current.st_ino)!=(state_entry.st_dev,state_entry.st_ino): raise ValueError()
+ os.close(statefd)
  digest=hashlib.sha256(raw).hexdigest()
  if digest!=expected or len(expected)!=64 or expected.lower()!=expected: raise ValueError()
- value=json.loads(raw)
- if set(value)!={"schema_version","created_at","routing_request","root_decision","config_provenance","metadata"} or value["schema_version"]!=1: raise ValueError()
- if not isinstance(value["created_at"],str) or not value["created_at"]: raise ValueError()
- metadata=value["metadata"]
- if not isinstance(metadata,dict) or set(metadata)!={"run_id","repository_id","workflow","backend","issue_num","task_tier","risk_signals"}: raise ValueError()
- routing=value["routing_request"]
- routing_allowed={"backend","workflow","phase","role","task_tier","risk_scope","risk_signals","routing_mode","explicit_route","explicit_model","explicit_effort","explicit_service_tier","fast","explicit_sandbox","parent_sandbox","environment","project_routing","project_config","parent_run","shadow","adaptive_fallback"}
- if not isinstance(routing,dict) or set(routing)-routing_allowed: raise ValueError()
- provenance=value["config_provenance"]
- if not isinstance(provenance,dict) or set(provenance)!={"mode","service_tier","risk_escalation","adaptive_fallback","shadow","workflows","roles"}: raise ValueError()
- sources={"env","project-codex","project-claude","explicit-config-file","default"}
- for record in provenance.values():
-  if not isinstance(record,dict) or set(record)!={"source","file"} or record["source"] not in sources or (record["file"] is not None and not isinstance(record["file"],str)): raise ValueError()
- decision=value["root_decision"]
- decision_allowed={"schema_version","policy_version","backend","service_tier","sandbox","field_sources","adaptive_fallback","risk_signals","risk_scope","minimum_route","fallback_chain","ignored_sources","ignored_fields","logical_route","model","reasoning_effort","routing_mode","effective_policy","route_source","forced","reason_codes","adaptive_proposal"}
- if not isinstance(decision,dict) or set(decision)-decision_allowed: raise ValueError()
- if raw!=json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode(): raise ValueError()
- print(json.dumps({"context_file":lexical,"context_sha256":digest,"run_id":value["metadata"]["run_id"],"workflow":value["metadata"]["workflow"],"root_decision":value["root_decision"]},sort_keys=True,separators=(",",":")),end="")
+ print(raw.decode("utf-8"),end="")
 except Exception: raise SystemExit(2)
-' "$1" "$2" "$3"
+' "$1" "$2" "$3")" || return 2
+  validated="$(_uberdev_agent_context_schema_validate payload "$payload" 2>/dev/null)" || return 2
+  python3 -I -B -c '
+import json,sys
+path,digest,raw=sys.argv[1:]; value=json.loads(raw)
+print(json.dumps({"context_file":path,"context_sha256":digest,"run_id":value["metadata"]["run_id"],"workflow":value["metadata"]["workflow"],"root_decision":value["root_decision"]},sort_keys=True,separators=(",",":")),end="")
+' "$1" "$2" "$validated"
 }
 
 _uberdev_agent_non_codex_decision() {

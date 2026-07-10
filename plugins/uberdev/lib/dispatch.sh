@@ -421,10 +421,12 @@ for key,value in (("routing_mode",cli_mode),("explicit_route",cli_route),("expli
  if value: request[key]=value
 if cli_fast: request["fast"]=cli_fast=="true"
 environment={}
-for key,value in (("UBERDEV_MODEL_ROUTING_MODE",env_mode),("UBERDEV_ROUTE",env_route),("UBERDEV_MODEL",env_model),("UBERDEV_REASONING_EFFORT",env_effort),("UBERDEV_SERVICE_TIER",env_service)):
+for key,value in (("UBERDEV_ROUTE",env_route),("UBERDEV_MODEL",env_model),("UBERDEV_REASONING_EFFORT",env_effort)):
  if value: environment[key]=value
-for key,value in (("UBERDEV_MODEL_ROUTING_RISK_ESCALATION",env_risk),("UBERDEV_MODEL_ROUTING_ADAPTIVE_FALLBACK",env_fallback),("UBERDEV_MODEL_ROUTING_SHADOW",env_shadow)):
- if value: environment[key]=value=="true"
+for provenance_key,key,value in (("mode","UBERDEV_MODEL_ROUTING_MODE",env_mode),("service_tier","UBERDEV_SERVICE_TIER",env_service)):
+ if value and provenance.get(provenance_key,{}).get("source")=="env": environment[key]=value
+for provenance_key,key,value in (("risk_escalation","UBERDEV_MODEL_ROUTING_RISK_ESCALATION",env_risk),("adaptive_fallback","UBERDEV_MODEL_ROUTING_ADAPTIVE_FALLBACK",env_fallback),("shadow","UBERDEV_MODEL_ROUTING_SHADOW",env_shadow)):
+ if value and provenance.get(provenance_key,{}).get("source")=="env": environment[key]=value=="true"
 if environment: request["environment"]=environment
 effective={"mode":effective_mode,"service_tier":effective_service,"risk_escalation":effective_risk=="true","adaptive_fallback":effective_fallback=="true","shadow":effective_shadow=="true","workflows":json.loads(effective_workflows),"roles":json.loads(effective_roles)}
 project={key:value for key,value in effective.items() if provenance.get(key,{}).get("source") in {"project-codex","project-claude","explicit-config-file"}}

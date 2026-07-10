@@ -84,7 +84,111 @@ r=json.loads(pathlib.Path(sys.argv[1]).read_text()); assert r['explicit_route']=
 assert r['environment']=={'UBERDEV_MODEL_ROUTING_MODE':'adaptive','UBERDEV_SERVICE_TIER':'fast'}; assert 'project_routing' not in r
 assert (r['workflow'],r['phase'],r['role'],r['risk_signals'])==('turbo','plan','plan-writer',['security'])
 PY
+# Invalid config-backed environment values must not be forwarded after the
+# config reader has fallen back; concrete route/model/effort remain raw inputs.
+(
+  . "$ROOT/plugins/uberdev/lib/dispatch.sh"
+  uberdev_agent_dispatch() { printf '%s' "$1" >"$TMP/invalid-assembled.json"; return 0; }
+  UBERDEV_RESOLVED_BACKEND=codex UBERDEV_TMPDIR="$TMP/run" SOLVE_TIMEOUT=30 \
+    UBERDEV_MODEL_ROUTING_MODE=bogus UBERDEV_SERVICE_TIER=bogus \
+    UBERDEV_MODEL_ROUTING_RISK_ESCALATION=bogus UBERDEV_MODEL_ROUTING_ADAPTIVE_FALLBACK=bogus UBERDEV_MODEL_ROUTING_SHADOW=bogus \
+    UBERDEV_ROUTE=deep UBERDEV_MODEL=gpt-5.6-sol UBERDEV_REASONING_EFFORT=high \
+    uberdev_dispatch_one 7 small "$TMP/run/prompt.txt" 2>/dev/null
+)
+python3 - "$TMP/invalid-assembled.json" <<'PY'
+import json,pathlib,sys
+r=json.loads(pathlib.Path(sys.argv[1]).read_text()); e=r['environment']
+assert e=={'UBERDEV_ROUTE':'deep','UBERDEV_MODEL':'gpt-5.6-sol','UBERDEV_REASONING_EFFORT':'high'},e
+PY
+(
+  . "$ROOT/plugins/uberdev/lib/dispatch.sh"
+  uberdev_agent_dispatch() { printf '%s' "$1" >"$TMP/invalid-risk.json"; return 0; }
+  UBERDEV_RESOLVED_BACKEND=codex UBERDEV_TMPDIR="$TMP/run" SOLVE_TIMEOUT=30 UBERDEV_MODEL_ROUTING_MODE=adaptive \
+    UBERDEV_MODEL_ROUTING_RISK_ESCALATION=bogus UBERDEV_AGENT_ROLE=plan-writer UBERDEV_AGENT_PHASE=plan UBERDEV_AGENT_RISK_SIGNALS_JSON='["security"]' \
+    uberdev_dispatch_one 7 small "$TMP/run/prompt.txt" 2>/dev/null
+)
+INVALID_RISK_DECISION="$(uberdev_agent_resolve_request "$(cat "$TMP/invalid-risk.json")")"
+python3 - "$INVALID_RISK_DECISION" <<'PY'
+import json,sys
+d=json.loads(sys.argv[1]); assert d['logical_route']=='ultra',d
+PY
+# Non-Codex backends reject every environment concrete/service pin, while
+# ambient inherit does not consult an unrelated unsafe Codex catalog.
+for key in UBERDEV_ROUTE UBERDEV_MODEL UBERDEV_REASONING_EFFORT UBERDEV_SERVICE_TIER; do
+  VALUE=deep; [ "$key" != UBERDEV_MODEL ] || VALUE=gpt-5.6-sol; [ "$key" != UBERDEV_REASONING_EFFORT ] || VALUE=high; [ "$key" != UBERDEV_SERVICE_TIER ] || VALUE=fast
+  PINNED="$(python3 - "$key" "$VALUE" <<'PY'
+import json,sys
+print(json.dumps({'backend':'background','workflow':'solve','role':'lead','task_tier':'small','risk_signals':[],'environment':{sys.argv[1]:sys.argv[2]}},separators=(',',':')))
+PY
+)"
+  ! uberdev_agent_resolve_request "$PINNED" >/dev/null 2>"$TMP/noncodex-$key.err"
+  grep -q route_unenforceable "$TMP/noncodex-$key.err"
+done
+UBERDEV_MODEL_CATALOG_FILE="$TMP/missing-catalog" uberdev_agent_resolve_request '{"backend":"background","workflow":"solve","role":"lead","task_tier":"small","risk_signals":[]}' >/dev/null
+
+# Recursive request shapes are closed and secret-shaped nested keys fail.
+for payload in \
+  '{"backend":"codex","workflow":"solve","role":"lead","task_tier":"small","risk_signals":[],"environment":{"AWS_SECRET_ACCESS_KEY":"x"}}' \
+  '{"backend":"codex","workflow":"solve","role":"lead","task_tier":"small","risk_signals":[],"environment":{"SURPRISE":"x"}}' \
+  '{"backend":"codex","workflow":"solve","role":"lead","task_tier":"small","risk_signals":[],"project_routing":{"surprise":true}}' \
+  '{"backend":"codex","workflow":"solve","role":"lead","task_tier":"small","risk_signals":[],"parent_run":{"surprise":"x"}}'; do
+  ! uberdev_agent_resolve_request "$payload" >/dev/null 2>"$TMP/nested.err"
+done
+
+# Context creation validates the complete closed schema before state mutation.
+mkdir "$TMP/schema-root"
+for kind in request decision provenance metadata created; do
+  R="$REQ"; D="$DECISION"; P="$PROV"; M="$META"; C='2026-07-10T00:00:00Z'
+  case "$kind" in
+    request) R="$(python3 -c 'import json,sys;r=json.loads(sys.argv[1]);r["surprise"]=1;print(json.dumps(r))' "$REQ")" ;;
+    decision) D='{"surprise":true}' ;;
+    provenance) P='{"surprise":{"source":"env","file":null}}' ;;
+    metadata) M='{"run_id":"root-1","repository_id":"repo","workflow":"solve","backend":"codex","issue_num":7,"task_tier":"gigantic","risk_signals":["AWS_SECRET_ACCESS_KEY"]}' ;;
+    created) C='' ;;
+  esac
+  ! uberdev_agent_context_create "$TMP/schema-root" "$R" "$D" "$P" "$M" "$C" >/dev/null 2>"$TMP/schema-$kind.err"
+  [ ! -e "$TMP/schema-root/.agent-state-$(id -u)" ]
+done
+
+# A state-directory ancestor cannot be replaced by a symlink outside run root.
+mkdir "$TMP/escape-root"
+ESC="$(uberdev_agent_context_create "$TMP/escape-root" "$REQ" "$DECISION" "$PROV" "$META" '2026-07-10T00:00:00Z')"
+ESC_FILE="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_file"])' "$ESC")"; ESC_SHA="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_sha256"])' "$ESC")"
+mv "$TMP/escape-root/.agent-state-$(id -u)" "$TMP/escaped-state"; ln -s "$TMP/escaped-state" "$TMP/escape-root/.agent-state-$(id -u)"
+! uberdev_agent_context_validate "$ESC_FILE" "$ESC_SHA" "$TMP/escape-root" >/dev/null 2>&1
+# Race the state entry between its owned directory and an outside symlink. A
+# validation that begins and ends on the symlink must never succeed.
+mkdir "$TMP/race-root"
+RACE="$(uberdev_agent_context_create "$TMP/race-root" "$REQ" "$DECISION" "$PROV" "$META" '2026-07-10T00:00:00Z')"; RACE_FILE="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_file"])' "$RACE")"; RACE_SHA="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_sha256"])' "$RACE")"
+cp -R "$TMP/race-root/.agent-state-$(id -u)" "$TMP/race-outside"
+(
+  for _ in $(seq 1 150); do
+    mv "$TMP/race-root/.agent-state-$(id -u)" "$TMP/race-hold" 2>/dev/null || continue
+    ln -s "$TMP/race-outside" "$TMP/race-root/.agent-state-$(id -u)" 2>/dev/null || true
+    rm "$TMP/race-root/.agent-state-$(id -u)" 2>/dev/null || true
+    mv "$TMP/race-hold" "$TMP/race-root/.agent-state-$(id -u)" 2>/dev/null || true
+  done
+) & RACE_PID=$!
+for _ in $(seq 1 150); do
+  BEFORE_LINK=0; AFTER_LINK=0; RC=1
+  [ ! -L "$TMP/race-root/.agent-state-$(id -u)" ] || BEFORE_LINK=1
+  uberdev_agent_context_validate "$RACE_FILE" "$RACE_SHA" "$TMP/race-root" >/dev/null 2>&1 && RC=0 || true
+  [ ! -L "$TMP/race-root/.agent-state-$(id -u)" ] || AFTER_LINK=1
+  [ "$BEFORE_LINK:$AFTER_LINK:$RC" != 1:1:0 ]
+done
+wait "$RACE_PID"
+uberdev_agent_context_validate "$RACE_FILE" "$RACE_SHA" "$TMP/race-root" >/dev/null
+
+# Repeated isolated resolution leaves a copied runtime byte-for-byte unchanged.
+mkdir -p "$TMP/runtime/lib" "$TMP/runtime/policy"
+cp "$ROOT/plugins/uberdev/lib/agent-dispatch.sh" "$ROOT/plugins/uberdev/lib/model_routing.py" "$ROOT/plugins/uberdev/lib/live-semaphore.sh" "$ROOT/plugins/uberdev/lib/run_manifest.py" "$TMP/runtime/lib/"
+cp "$ROOT/plugins/uberdev/policy/model-routing-v1.json" "$TMP/runtime/policy/"
+BEFORE="$(find "$TMP/runtime" -type f -exec shasum -a 256 {} + | sort)"
+( . "$TMP/runtime/lib/agent-dispatch.sh"; uberdev_agent_resolve_request '{"backend":"codex","workflow":"solve","role":"plan-writer","task_tier":"medium","risk_signals":[],"routing_mode":"adaptive"}' >/dev/null; uberdev_agent_resolve_request '{"backend":"codex","workflow":"solve","role":"plan-writer","task_tier":"medium","risk_signals":[],"routing_mode":"adaptive"}' >/dev/null )
+AFTER="$(find "$TMP/runtime" -type f -exec shasum -a 256 {} + | sort)"
+[ "$BEFORE" = "$AFTER" ]
+[ ! -d "$TMP/runtime/lib/__pycache__" ]
 BAD='{"backend":"codex","workflow":"solve","role":"plan-writer","task_tier":"small","risk_signals":[],"routing_mode":""}'
 ! uberdev_agent_resolve_request "$BAD" >/dev/null 2>"$TMP/error"
 ! grep -q "$TMP" "$TMP/error"
-echo 'route-context: 32 checks passed'
+echo 'route-context: 63 checks passed'

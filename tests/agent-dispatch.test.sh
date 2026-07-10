@@ -120,6 +120,37 @@ export -f _uberdev_agent_dispatch_backend
 # shellcheck source=/dev/null
 . "$LIB"
 
+wait_for_terminal_and_release() {
+  local manifest="$1" state_dir="$2" run_id="$3" terminal="$4" attempts="${5:-80}" delay="${6:-0.1}" actual
+  for _ in $(seq 1 "$attempts"); do
+    if python3 -I - "$manifest" "$run_id" "$terminal" <<'PY'
+import json, pathlib, sys
+path, run_id, terminal = sys.argv[1:]
+try:
+    events = [json.loads(line) for line in pathlib.Path(path).read_text().splitlines()]
+except (FileNotFoundError, ValueError):
+    raise SystemExit(1)
+actual = [event.get("event") for event in events if event.get("run_id") == run_id]
+raise SystemExit(0 if actual == ["route_decided", "agent_started", terminal] else 1)
+PY
+    then
+      if ! grep -R -q "run_id=$run_id" "$state_dir/semaphore-v1" 2>/dev/null; then
+        return 0
+      fi
+    fi
+    command sleep "$delay"
+  done
+  actual="$(python3 -I - "$manifest" "$run_id" <<'PY'
+import json, pathlib, sys
+try: events=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+except Exception: events=[]
+print([event.get("event") for event in events if event.get("run_id")==sys.argv[2]])
+PY
+)"
+  echo "terminal invariant timeout: run_id=$run_id expected=$terminal actual=$actual lease=$(grep -R -l "run_id=$run_id" "$state_dir/semaphore-v1" 2>/dev/null | head -1)" >&2
+  return 1
+}
+
 uberdev_agent_dispatch "$REQUEST" \
   "$TMP/run/prompt.txt" "$TMP/run/result.md" "$TMP/run/status.json"
 
@@ -207,20 +238,13 @@ fi
 # reconciliation record.
 ASYNC_REQUEST="${REQUEST/agent-dispatch-test/agent-dispatch-async}"
 uberdev_agent_dispatch "$ASYNC_REQUEST" "$TMP/run/prompt.txt" "$TMP/run/async-terminal.md" "$TMP/run/async-terminal.json"
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-  grep -q '"run_id":"agent-dispatch-async".*"event":"completed"\|"event":"completed".*"run_id":"agent-dispatch-async"' "$STATE_DIR/agent-lifecycle.jsonl" 2>/dev/null && break
-  sleep 1
-done
+wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-async completed 150 0.1
 python3 - "$STATE_DIR/agent-lifecycle.jsonl" <<'PY'
 import json, pathlib, sys
 events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
 actual = [event["event"] for event in events if event["run_id"] == "agent-dispatch-async"]
-assert actual == ["route_decided", "agent_started", "completed"], actual
+assert actual == ["route_decided", "agent_started", "completed"], ("agent-dispatch-async", actual)
 PY
-if grep -R -q 'run_id=agent-dispatch-async' "$STATE_DIR/semaphore-v1" 2>/dev/null; then
-  echo "terminal async dispatch retained its lease" >&2
-  exit 1
-fi
 
 variant_request() {
   python3 - "$REQUEST" "$1" "$2" <<'PY'
@@ -261,7 +285,7 @@ do
 import json, pathlib, sys
 events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
 actual = [event["event"] for event in events if event["run_id"] == sys.argv[2]]
-assert actual == ["route_decided", "agent_started"], actual
+assert actual == ["route_decided", "agent_started"], (sys.argv[2], actual)
 PY
   then
     terminal_validation_failures="$terminal_validation_failures terminal-appended:$terminal_case"
@@ -612,7 +636,7 @@ cross_backend_case() {
 import json, pathlib, sys
 events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
 actual = [event["event"] for event in events if event["run_id"] == "cross-" + sys.argv[2]]
-assert actual == ["route_decided", "agent_started", "completed"], (sys.argv[2], actual)
+assert actual == ["route_decided", "agent_started", "completed"], ("cross-" + sys.argv[2], actual)
 PY
 }
 
@@ -688,11 +712,12 @@ claude_watcher_case() {
       grep -q '"state":"failed"' "$run/status.json" || {
         echo "initial Claude absence did not fail closed" >&2; return 1;
       }
+      wait_for_terminal_and_release "$state/agent-lifecycle.jsonl" "$state" claude-watch-initial-absent failed 80 0.1 || return 1
       python3 -I - "$state/agent-lifecycle.jsonl" <<'PY'
 import json, pathlib, sys
 events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
 actual = [event["event"] for event in events if event["run_id"] == "claude-watch-initial-absent"]
-assert actual == ["route_decided", "agent_started", "failed"], actual
+assert actual == ["route_decided", "agent_started", "failed"], ("claude-watch-initial-absent", actual)
 PY
       ;;
     live-then-absent)
@@ -767,7 +792,7 @@ python3 -I - "$RACE_MANIFEST" <<'PY'
 import json, pathlib, sys
 events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
 actual = [event["event"] for event in events if event["run_id"] == "adapter-reconcile-wins"]
-assert actual == ["route_decided", "agent_started", "completed"], actual
+assert actual == ["route_decided", "agent_started", "completed"], ("adapter-reconcile-wins", actual)
 assert all(event["event"] != "abandoned" for event in events if event["run_id"] == "adapter-reconcile-wins")
 PY
 [ ! -e "$RACE_LEASE" ] || { echo "reconcile-winning watcher retained its exact lease" >&2; exit 1; }
