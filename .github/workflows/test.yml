@@ -114,6 +114,7 @@ jobs:
           bash tests/orchestrator-phase1-shortcircuit.test.sh && \
           bash tests/config-override.test.sh && \
           bash tests/model-routing.test.sh && \
+          bash tests/model-routing-config.test.sh && \
           bash tests/run-manifest.test.sh && \
           bash tests/live-semaphore.test.sh && \
           bash tests/orchestrator-plan-flatten.test.sh && \
@@ -223,6 +224,7 @@ jobs:
         #   - uberthink-report.test.sh
         #   - merge-discovery-resilience.test.sh
         #   - model-routing.test.sh
+        #   - model-routing-config.test.sh
         #   - run-manifest.test.sh
         #   - live-semaphore.test.sh
         #   - orchestrator-plan-flatten.test.sh
