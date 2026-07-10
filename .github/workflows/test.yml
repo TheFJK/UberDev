@@ -117,6 +117,8 @@ jobs:
           bash tests/model-routing-config.test.sh && \
           bash tests/run-manifest.test.sh && \
           bash tests/live-semaphore.test.sh && \
+          bash tests/agent-dispatch.test.sh && \
+          bash tests/dispatch-routing-parity.test.sh && \
           bash tests/orchestrator-plan-flatten.test.sh && \
           bash tests/orchestrator-phase-6-doc.test.sh && \
           bash tests/orchestrator-phase-0-bg-detection.test.sh && \
@@ -227,6 +229,8 @@ jobs:
         #   - model-routing-config.test.sh
         #   - run-manifest.test.sh
         #   - live-semaphore.test.sh
+        #   - agent-dispatch.test.sh
+        #   - dispatch-routing-parity.test.sh
         #   - orchestrator-plan-flatten.test.sh
 #   - review-pr-phase3-ci.test.sh
 #   - lib-assert-count.test.sh
