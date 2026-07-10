@@ -477,22 +477,62 @@ finally:
   return "$rc"
 }
 
+_uberdev_agent_manifest_terminal_matches() {
+  local manifest="$1" request_json="$2" expected="$3"
+  python3 -I -c '
+import json, pathlib, sys
+manifest, request_raw, expected = sys.argv[1:]
+request = json.loads(request_raw)
+identity = (request["run_id"], request.get("agent_id"))
+terminals = []
+for line in pathlib.Path(manifest).read_text(encoding="utf-8").splitlines():
+    event = json.loads(line)
+    if (event.get("run_id"), event.get("agent_id")) != identity:
+        continue
+    if event.get("event") in {"completed", "failed", "timed_out", "cancelled", "abandoned"}:
+        terminals.append(event.get("event"))
+if terminals != [expected]:
+    raise SystemExit(1)
+' "$manifest" "$request_json" "$expected"
+}
+
+_uberdev_agent_finalize_terminal() {
+  local manifest="$1" lease="$2" lease_identity="$3" status_file="$4" backend="$5" handle="$6"
+  local request_json="$7" decision="$8" terminal_event="$9" terminal_rc event_json
+  case "$terminal_event" in
+    completed) terminal_rc=0 ;;
+    failed|timed_out|cancelled|abandoned) terminal_rc=1 ;;
+    *) return 2 ;;
+  esac
+  if [ "$backend" = claude-bg ]; then
+    _uberdev_agent_publish_status "$status_file" "$backend" "$handle" "$terminal_event" "$terminal_rc" replace || return 2
+  fi
+  event_json="$(_uberdev_agent_event_json "$terminal_event" "$request_json" "$decision" "$handle" "$status_file" "$terminal_rc")" || return 2
+  if ! _uberdev_agent_append_event "$manifest" "$event_json"; then
+    _uberdev_agent_manifest_terminal_matches "$manifest" "$request_json" "$terminal_event" || return 2
+  fi
+  PYTHONPATH= PYTHONHOME= _uberdev_agent_release_exact_lease "$lease" "$lease_identity"
+}
+
 _uberdev_agent_start_watcher() {
   local manifest="$1" lease="$2" lease_identity="$3" status_file="$4" backend="$5" handle="$6" request_json="$7" decision="$8"
   local watcher_pid
   (
-    local terminal_event='' probe='' absent_count=0 event_json=''
+    local terminal_event='' probe='' absent_count=0 observed_live=0 event_json=''
     while [ -d "$(dirname "$status_file")" ]; do
       terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" 2>/dev/null || true)"
       [ -z "$terminal_event" ] || break
       if [ "$backend" = claude-bg ]; then
-        probe="$(_uberdev_agent_claude_probe "$handle" 2>/dev/null)"
+        probe="$(_uberdev_agent_claude_probe "$handle" 2>/dev/null || true)"
         case "$probe" in
-          live) absent_count=0 ;;
+          live) observed_live=1; absent_count=0 ;;
           completed|failed|timed_out|cancelled) terminal_event="$probe"; break ;;
           absent)
             absent_count=$((absent_count + 1))
-            if [ "$absent_count" -ge 3 ]; then terminal_event=completed; break; fi
+            if [ "$absent_count" -ge 3 ]; then
+              if [ "$observed_live" -eq 1 ]; then terminal_event=completed; else terminal_event=failed; fi
+              break
+            fi
             ;;
           *) absent_count=0 ;;
         esac
@@ -510,16 +550,8 @@ _uberdev_agent_start_watcher() {
       sleep 1
     done
     [ -n "$terminal_event" ] || exit 0
-    case "$terminal_event" in
-      completed) terminal_rc=0 ;;
-      *) terminal_rc=1 ;;
-    esac
-    if [ "$backend" = claude-bg ]; then
-      _uberdev_agent_publish_status "$status_file" "$backend" "$handle" "$terminal_event" "$terminal_rc" replace || exit 0
-    fi
-    event_json="$(_uberdev_agent_event_json "$terminal_event" "$request_json" "$decision" "$handle" "$status_file" "$terminal_rc")" || exit 0
-    _uberdev_agent_append_event "$manifest" "$event_json" || exit 0
-    PYTHONPATH= PYTHONHOME= _uberdev_agent_release_exact_lease "$lease" "$lease_identity" >/dev/null 2>&1 || true
+    _uberdev_agent_finalize_terminal "$manifest" "$lease" "$lease_identity" "$status_file" \
+      "$backend" "$handle" "$request_json" "$decision" "$terminal_event" >/dev/null 2>&1 || true
   ) </dev/null >/dev/null 2>&1 &
   watcher_pid="$!"
   disown "$watcher_pid" 2>/dev/null || true
@@ -625,15 +657,8 @@ uberdev_agent_dispatch() {
   fi
   lease_identity="$(_uberdev_agent_lease_identity "$lease")" || return 2
   if [ -n "$terminal_event" ]; then
-    event_json="$(_uberdev_agent_event_json "$terminal_event" "$request_json" "$decision" "$handle" "$status_file" 0)" || {
-      PYTHONPATH= PYTHONHOME= uberdev_semaphore_release "$lease" >/dev/null 2>&1 || true
-      return 2
-    }
-    if ! _uberdev_agent_append_event "$manifest" "$event_json"; then
-      PYTHONPATH= PYTHONHOME= uberdev_semaphore_release "$lease" >/dev/null 2>&1 || true
-      return 2
-    fi
-    PYTHONPATH= PYTHONHOME= _uberdev_agent_release_exact_lease "$lease" "$lease_identity" >/dev/null 2>&1 || return 2
+    _uberdev_agent_finalize_terminal "$manifest" "$lease" "$lease_identity" "$status_file" \
+      "$backend" "$handle" "$request_json" "$decision" "$terminal_event" || return 2
   else
     _uberdev_agent_publish_status "$status_file" "$backend" "$lease_handle" running '' create || return 2
     _uberdev_agent_start_watcher "$manifest" "$lease" "$lease_identity" "$status_file" "$backend" "$lease_handle" "$request_json" "$decision"

@@ -674,6 +674,100 @@ fi
 capture python3 "$MANIFEST" verify --manifest "$ORPHAN" --strict
 [ "$CAPTURE_RC" -eq 0 ] && pass "reconciled orphan has exactly one terminal" || fail "reconciled orphan has exactly one terminal" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 
+printf '== run manifest: canonical terminal status reconciliation ==\n'
+TRUE_COMPLETED_STATUS="$TMP/true-completed/status.json"
+TRUE_COMPLETED_MANIFEST="$TMP/true-completed/events.jsonl"
+mkdir -p "$(dirname "$TRUE_COMPLETED_STATUS")"
+printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"%s","ignored":"not-manifest-data"}\n' "$dead_pid" > "$TRUE_COMPLETED_STATUS"
+append_event "$TRUE_COMPLETED_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:07:10Z","run_id":"run-true-completed","backend":"codex"}' >/dev/null
+append_event "$TRUE_COMPLETED_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:11Z\",\"run_id\":\"run-true-completed\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"backend_handle\":\"$dead_pid\",\"status_path\":\"$TRUE_COMPLETED_STATUS\"}" >/dev/null
+capture python3 "$MANIFEST" reconcile --manifest "$TRUE_COMPLETED_MANIFEST"
+completed_reconcile_rc="$CAPTURE_RC"
+completed_reconcile_out="$CAPTURE_OUT"
+completed_terminal="$(tail -n 1 "$TRUE_COMPLETED_MANIFEST")"
+if [ "$completed_reconcile_rc" -eq 0 ] \
+   && [ "$completed_reconcile_out" = '{"abandoned":0,"open":0,"status":"ok"}' ] \
+   && printf '%s' "$completed_terminal" | grep -q '"event":"completed"' \
+   && ! printf '%s' "$completed_terminal" | grep -q 'ignored'; then
+  pass "reconcile consumes canonical completed status without copying arbitrary fields"
+else
+  fail "reconcile consumes canonical completed status without copying arbitrary fields" "rc=$completed_reconcile_rc out=$completed_reconcile_out terminal=$completed_terminal"
+fi
+
+TRUE_FAILED_STATUS="$TMP/true-failed/status.json"
+TRUE_FAILED_MANIFEST="$TMP/true-failed/events.jsonl"
+mkdir -p "$(dirname "$TRUE_FAILED_STATUS")"
+printf '{"backend":"codex","state":"failed","exit_code":17,"pid":"%s"}\n' "$dead_pid" > "$TRUE_FAILED_STATUS"
+append_event "$TRUE_FAILED_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:07:20Z","run_id":"run-true-failed","backend":"codex"}' >/dev/null
+append_event "$TRUE_FAILED_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:21Z\",\"run_id\":\"run-true-failed\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"backend_handle\":\"$dead_pid\",\"status_path\":\"$TRUE_FAILED_STATUS\"}" >/dev/null
+capture python3 "$MANIFEST" reconcile --manifest "$TRUE_FAILED_MANIFEST"
+failed_reconcile_rc="$CAPTURE_RC"
+failed_reconcile_out="$CAPTURE_OUT"
+failed_terminal="$(tail -n 1 "$TRUE_FAILED_MANIFEST")"
+if [ "$failed_reconcile_rc" -eq 0 ] \
+   && [ "$failed_reconcile_out" = '{"abandoned":0,"open":0,"status":"ok"}' ] \
+   && printf '%s' "$failed_terminal" | grep -q '"event":"failed"' \
+   && printf '%s' "$failed_terminal" | grep -q '"error_class":"provider_failed"'; then
+  pass "reconcile consumes canonical failed status with validated nonzero exit"
+else
+  fail "reconcile consumes canonical failed status with validated nonzero exit" "rc=$failed_reconcile_rc out=$failed_reconcile_out terminal=$failed_terminal"
+fi
+
+before_true_terminal_lines="$(wc -l < "$TRUE_COMPLETED_MANIFEST" | tr -d ' ')"
+capture python3 "$MANIFEST" reconcile --manifest "$TRUE_COMPLETED_MANIFEST"
+after_true_terminal_lines="$(wc -l < "$TRUE_COMPLETED_MANIFEST" | tr -d ' ')"
+if [ "$CAPTURE_RC" -eq 0 ] \
+   && [ "$CAPTURE_OUT" = '{"abandoned":0,"open":0,"status":"ok"}' ] \
+   && [ "$before_true_terminal_lines" -eq "$after_true_terminal_lines" ]; then
+  pass "canonical terminal reconciliation is idempotent"
+else
+  fail "canonical terminal reconciliation is idempotent" "rc=$CAPTURE_RC lines=$before_true_terminal_lines/$after_true_terminal_lines out=$CAPTURE_OUT"
+fi
+
+MALFORMED_TRUTH_STATUS="$TMP/malformed-truth/status.json"
+MALFORMED_TRUTH_MANIFEST="$TMP/malformed-truth/events.jsonl"
+mkdir -p "$(dirname "$MALFORMED_TRUTH_STATUS")"
+printf '{not-json\n' > "$MALFORMED_TRUTH_STATUS"
+append_event "$MALFORMED_TRUTH_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:07:30Z","run_id":"run-malformed-truth","backend":"codex"}' >/dev/null
+append_event "$MALFORMED_TRUTH_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:31Z\",\"run_id\":\"run-malformed-truth\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"backend_handle\":\"$dead_pid\",\"status_path\":\"$MALFORMED_TRUTH_STATUS\"}" >/dev/null
+malformed_lines_before="$(wc -l < "$MALFORMED_TRUTH_MANIFEST" | tr -d ' ')"
+capture python3 "$MANIFEST" reconcile --manifest "$MALFORMED_TRUTH_MANIFEST"
+malformed_rc="$CAPTURE_RC"
+malformed_lines_after="$(wc -l < "$MALFORMED_TRUTH_MANIFEST" | tr -d ' ')"
+
+UNKNOWN_TRUTH_STATUS="$TMP/unknown-truth/status.json"
+UNKNOWN_TRUTH_MANIFEST="$TMP/unknown-truth/events.jsonl"
+mkdir -p "$(dirname "$UNKNOWN_TRUTH_STATUS")"
+printf '{"backend":"codex","state":"future-state","exit_code":0}\n' > "$UNKNOWN_TRUTH_STATUS"
+append_event "$UNKNOWN_TRUTH_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:07:40Z","run_id":"run-unknown-truth","backend":"codex"}' >/dev/null
+append_event "$UNKNOWN_TRUTH_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:41Z\",\"run_id\":\"run-unknown-truth\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"backend_handle\":\"$dead_pid\",\"status_path\":\"$UNKNOWN_TRUTH_STATUS\"}" >/dev/null
+capture python3 "$MANIFEST" reconcile --manifest "$UNKNOWN_TRUTH_MANIFEST"
+unknown_terminal="$(tail -n 1 "$UNKNOWN_TRUTH_MANIFEST")"
+if [ "$malformed_rc" -eq 2 ] \
+   && [ "$malformed_lines_before" -eq "$malformed_lines_after" ] \
+   && ! printf '%s' "$unknown_terminal" | grep -Eq '"event":"(completed|failed|timed_out|cancelled)"'; then
+  pass "malformed and unknown status never fabricate provider terminal truth"
+else
+  fail "malformed and unknown status never fabricate provider terminal truth" "malformed_rc=$malformed_rc lines=$malformed_lines_before/$malformed_lines_after unknown=$unknown_terminal"
+fi
+
+FUTURE_TRUE_STATUS="$TMP/future-true/status.json"
+FUTURE_TRUE_MANIFEST="$TMP/future-true/events.jsonl"
+mkdir -p "$(dirname "$FUTURE_TRUE_STATUS")"
+printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"%s"}\n' "$dead_pid" > "$FUTURE_TRUE_STATUS"
+append_event "$FUTURE_TRUE_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2099-01-01T00:00:10Z","run_id":"run-future-true","backend":"codex"}' >/dev/null
+append_event "$FUTURE_TRUE_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2099-01-01T00:00:11.999999Z\",\"run_id\":\"run-future-true\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"backend_handle\":\"$dead_pid\",\"status_path\":\"$FUTURE_TRUE_STATUS\"}" >/dev/null
+capture python3 "$MANIFEST" reconcile --manifest "$FUTURE_TRUE_MANIFEST"
+future_true_rc="$CAPTURE_RC"
+capture python3 "$MANIFEST" verify --manifest "$FUTURE_TRUE_MANIFEST" --strict
+future_true_terminal="$(tail -n 1 "$FUTURE_TRUE_MANIFEST")"
+if [ "$future_true_rc" -eq 0 ] && [ "$CAPTURE_RC" -eq 0 ] \
+   && printf '%s' "$future_true_terminal" | grep -q '"event":"completed"'; then
+  pass "reconciled provider terminal timestamp is never before agent start"
+else
+  fail "reconciled provider terminal timestamp is never before agent start" "reconcile_rc=$future_true_rc verify=$CAPTURE_RC/$CAPTURE_OUT terminal=$future_true_terminal"
+fi
+
 FUTURE_ORPHAN="$TMP/future-orphan/events.jsonl"
 append_event "$FUTURE_ORPHAN" '{"schema_version":1,"event":"route_decided","timestamp":"2099-01-01T00:00:00Z","run_id":"run-future-orphan","backend":"codex"}' >/dev/null
 append_event "$FUTURE_ORPHAN" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2099-01-01T00:00:01.999999Z\",\"run_id\":\"run-future-orphan\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"backend_handle\":\"$dead_pid\"}" >/dev/null

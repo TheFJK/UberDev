@@ -856,11 +856,11 @@ def _locked_manifest(path: str) -> Iterable[int]:
             os.close(descriptor)
 
 
-def probe_status_file(path: str) -> str:
-    """Return live, terminal, or unknown from one canonical top-level state."""
+def _probe_status_snapshot(path: str) -> tuple[str, dict[str, Any] | None]:
+    """Read one status atomically enough for liveness and terminal truth."""
 
     if not path:
-        return "unknown"
+        return "unknown", None
     parent_descriptor: int | None = None
     descriptor: int | None = None
     try:
@@ -877,7 +877,7 @@ def probe_status_file(path: str) -> str:
         # A launcher may publish the status path before the first atomic status
         # write, and may remove it during cleanup.  Absence is not structural
         # corruption; it is simply no evidence that an opaque backend is live.
-        return "unknown"
+        return "unknown", None
     except (OSError, UnicodeError, ManifestRuntimeError) as exc:
         raise ManifestRejected("status_probe_unreadable") from exc
     finally:
@@ -909,10 +909,46 @@ def probe_status_file(path: str) -> str:
         raise ManifestRejected("status_probe_invalid_state")
     normalized = state.strip().lower()
     if normalized in TERMINAL_EVENTS:
-        return "terminal"
+        return "terminal", parsed
     if normalized in {"running", "busy", "starting", "working", "queued"}:
-        return "live"
-    return "unknown"
+        return "live", parsed
+    return "unknown", parsed
+
+
+def probe_status_file(path: str) -> str:
+    """Return live, terminal, or unknown from one canonical top-level state."""
+
+    verdict, _ = _probe_status_snapshot(path)
+    return verdict
+
+
+def _canonical_terminal_truth(started: dict[str, Any]) -> str | None:
+    """Return validated provider terminal truth without importing status payload."""
+
+    status_path = started.get("status_path")
+    if not isinstance(status_path, str):
+        return None
+    verdict, snapshot = _probe_status_snapshot(status_path)
+    if verdict != "terminal" or snapshot is None:
+        return None
+    state_keys = [
+        key for key in ("state", "status", "terminal_status") if key in snapshot
+    ]
+    if len(state_keys) != 1:
+        return None
+    terminal = str(snapshot[state_keys[0]]).strip().lower()
+    if terminal not in {"completed", "failed", "timed_out", "cancelled"}:
+        return None
+    if snapshot.get("backend") != started.get("backend"):
+        return None
+    exit_code = snapshot.get("exit_code")
+    if not _is_plain_int(exit_code):
+        return None
+    if terminal == "completed" and exit_code != 0:
+        return None
+    if terminal != "completed" and exit_code == 0:
+        return None
+    return terminal
 
 
 def _lease_generation(payload: bytes) -> str:
@@ -1155,6 +1191,7 @@ def verify_manifest(path: str, *, strict: bool) -> tuple[dict[str, Any], int]:
 def reconcile_manifest(path: str) -> dict[str, Any]:
     prepared = _prepare_private_path(path)
     abandoned_count = 0
+    appended_count = 0
     with _locked_manifest(prepared) as descriptor:
         records, read_errors = _read_records_from_descriptor(descriptor)
         states, lifecycle_errors, _ = _evaluate(records, strict=False)
@@ -1164,6 +1201,45 @@ def reconcile_manifest(path: str) -> dict[str, Any]:
         for identity in sorted(states):
             state = states[identity]
             if state.started is None or state.terminal is not None:
+                continue
+            terminal_truth = _canonical_terminal_truth(state.started)
+            if terminal_truth is not None:
+                run_id, agent_id = identity
+                terminal: dict[str, Any] = {
+                    "schema_version": SCHEMA_VERSION,
+                    "event": terminal_truth,
+                    "timestamp": _utc_not_before(state.last_timestamp),
+                    "run_id": run_id,
+                    "backend": state.started["backend"],
+                    "terminal_status": terminal_truth,
+                }
+                error_classes = {
+                    "failed": "provider_failed",
+                    "timed_out": "provider_timed_out",
+                    "cancelled": "provider_cancelled",
+                }
+                if terminal_truth in error_classes:
+                    terminal["error_class"] = error_classes[terminal_truth]
+                if agent_id:
+                    terminal["agent_id"] = agent_id
+                for field in (
+                    "parent_run_id",
+                    "workflow",
+                    "phase",
+                    "role",
+                    "issue_or_pr",
+                ):
+                    if state.started.get(field) is not None:
+                        terminal[field] = state.started[field]
+                validation_errors = _validate_event(terminal)
+                if validation_errors:
+                    raise ManifestRuntimeError(validation_errors[0])
+                line_number = (records[-1][0] if records else 0) + appended_count + 1
+                transition_errors = _transition(state, terminal, line_number)
+                if transition_errors:
+                    raise ManifestRuntimeError(transition_errors[0])
+                _atomic_append(prepared, terminal, descriptor)
+                appended_count += 1
                 continue
             owner_live = _pid_live(state.started.get("owner_pid"))
             backend_live = _backend_live(state.started)
@@ -1187,12 +1263,13 @@ def reconcile_manifest(path: str) -> dict[str, Any]:
             validation_errors = _validate_event(terminal)
             if validation_errors:
                 raise ManifestRuntimeError(validation_errors[0])
-            line_number = (records[-1][0] if records else 0) + abandoned_count + 1
+            line_number = (records[-1][0] if records else 0) + appended_count + 1
             transition_errors = _transition(state, terminal, line_number)
             if transition_errors:
                 raise ManifestRuntimeError(transition_errors[0])
             _atomic_append(prepared, terminal, descriptor)
             abandoned_count += 1
+            appended_count += 1
         open_count = sum(
             1
             for state in states.values()

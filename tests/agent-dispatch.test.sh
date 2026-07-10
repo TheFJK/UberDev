@@ -470,7 +470,6 @@ cross_backend_case() {
   state="$run/.agent-state-$(id -u)"
   if [ "$backend" = claude-bg ]; then
     printf '[{"sessionId":"abc12345-full","status":"running"}]\n' > "$run/claude-agents.json"
-    nohup bash -c 'sleep 1.5; printf "[{\"sessionId\":\"abc12345-full\",\"status\":\"completed\"}]\\n" > "$1"' _ "$run/claude-agents.json" >/dev/null 2>&1 &
   fi
   (
     CROSS_BACKEND="$backend" CROSS_RUN="$run" CROSS_CLAUDE_STATE="$run/claude-agents.json" \
@@ -487,6 +486,14 @@ cross_backend_case() {
   fi
   python3 -I "$ROOT/plugins/uberdev/lib/run_manifest.py" reconcile \
     --manifest "$state/agent-lifecycle.jsonl" >/dev/null
+  if [ "$backend" = claude-bg ]; then
+    printf '[{"sessionId":"abc12345-full","status":"completed"}]\n' > "$run/claude-agents.json"
+  else
+    tmp_status="$run/status.json.tmp"
+    printf '{"backend":"%s","state":"completed","exit_code":0,"pid":"%s"}\n' \
+      "$backend" "${DISPATCH_ID:-pane}" > "$tmp_status"
+    mv "$tmp_status" "$run/status.json"
+  fi
   for _ in 1 2 3 4 5 6; do
     grep -q '"state":"completed"' "$run/status.json" 2>/dev/null \
       && ! grep -R -q "run_id=cross-$backend" "$state/semaphore-v1" 2>/dev/null \
@@ -501,7 +508,7 @@ cross_backend_case() {
 import json, pathlib, sys
 events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
 actual = [event["event"] for event in events if event["run_id"] == "cross-" + sys.argv[2]]
-assert actual == ["route_decided", "agent_started", "completed"], actual
+assert actual == ["route_decided", "agent_started", "completed"], (sys.argv[2], actual)
 PY
 }
 
@@ -511,26 +518,142 @@ _uberdev_agent_dispatch_backend() {
   case "$backend" in
     claude-bg)
       DISPATCH_ID=abc12345
+      if [ "${CROSS_CLAUDE_DROP_AFTER_LIVE:-0}" = 1 ]; then
+        nohup bash -c 'sleep 0.5; printf "[]\\n" > "$1"' _ "$CROSS_CLAUDE_STATE" >/dev/null 2>&1 &
+      fi
       ;;
     wezterm)
       DISPATCH_ID=777
       printf '{"backend":"wezterm","state":"running","exit_code":null,"pid":"pane"}\n' > "$status_path"
-      nohup bash -c 'sleep 0.5; tmp="$1.tmp"; printf "{\"backend\":\"wezterm\",\"state\":\"completed\",\"exit_code\":0,\"pid\":\"pane\"}\\n" > "$tmp"; mv "$tmp" "$1"' _ "$status_path" >/dev/null 2>&1 &
       ;;
     codex|background)
-      nohup sleep 2 >/dev/null 2>&1 &
+      nohup sleep 5 >/dev/null 2>&1 &
       DISPATCH_ID="$!"
       printf '{"backend":"%s","state":"running","exit_code":null,"pid":"%s"}\n' "$backend" "$DISPATCH_ID" > "$status_path"
-      nohup bash -c 'sleep 0.5; tmp="$1.tmp"; printf "{\"backend\":\"%s\",\"state\":\"completed\",\"exit_code\":0,\"pid\":\"%s\"}\\n" "$2" "$3" > "$tmp"; mv "$tmp" "$1"' _ "$status_path" "$backend" "$DISPATCH_ID" >/dev/null 2>&1 &
       ;;
   esac
   DISPATCH_RC=0
   return 0
 }
 
+claude_watcher_case() {
+  mode="$1"
+  run="$TMP/claude-watch-$mode"
+  mkdir -p "$run"
+  printf 'claude watcher prompt\n' > "$run/prompt.txt"
+  state="$run/.agent-state-$(id -u)"
+  request="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"claude-watch-"+sys.argv[2],"repository_id":"claude-watch-repository","backend":"claude-bg","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":89,"issue_num":89,"capacity":1,"timeout_s":1},separators=(",",":")))' "$run" "$mode")"
+  case "$mode" in
+    initial-absent) printf '[]\n' > "$run/claude-agents.json" ;;
+    live-then-absent) printf '[{"sessionId":"abc12345-full","status":"running"}]\n' > "$run/claude-agents.json" ;;
+    ambiguous) printf '[{"sessionId":"abc12345-one","status":"running"},{"sessionId":"abc12345-two","status":"completed"}]\n' > "$run/claude-agents.json" ;;
+    probe-error) printf '{not-json\n' > "$run/claude-agents.json" ;;
+  esac
+  (
+    sleep() { command sleep 0.1; }
+    drop=0
+    [ "$mode" != live-then-absent ] || drop=1
+    CROSS_CLAUDE_DROP_AFTER_LIVE="$drop" CROSS_CLAUDE_STATE="$run/claude-agents.json" \
+      PATH="$CROSS_BIN:$PATH" uberdev_agent_dispatch "$request" \
+        "$run/prompt.txt" "$run/result.md" "$run/status.json"
+  )
+  case "$mode" in
+    initial-absent|live-then-absent)
+      for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        grep -Eq '"state":"(completed|failed)"' "$run/status.json" 2>/dev/null && break
+        command sleep 0.1
+      done
+      ;;
+    ambiguous)
+      command sleep 0.6
+      ;;
+    probe-error)
+      # Exceed request timeout_s. Unknown probe evidence must still retain the
+      # live lease and may not synthesize a terminal.
+      command sleep 1.3
+      ;;
+  esac
+  case "$mode" in
+    initial-absent)
+      grep -q '"state":"failed"' "$run/status.json" || {
+        echo "initial Claude absence did not fail closed" >&2; return 1;
+      }
+      python3 -I - "$state/agent-lifecycle.jsonl" <<'PY'
+import json, pathlib, sys
+events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+actual = [event["event"] for event in events if event["run_id"] == "claude-watch-initial-absent"]
+assert actual == ["route_decided", "agent_started", "failed"], actual
+PY
+      ;;
+    live-then-absent)
+      grep -q '"state":"completed"' "$run/status.json" || {
+        echo "observed-live Claude disappearance did not complete" >&2; return 1;
+      }
+      ;;
+    ambiguous|probe-error)
+      grep -q '"state":"running"' "$run/status.json" || {
+        echo "$mode Claude probe did not remain nonterminal" >&2; return 1;
+      }
+      if grep -Eq '"event":"(completed|failed|timed_out|cancelled|abandoned)"' "$state/agent-lifecycle.jsonl"; then
+        echo "$mode Claude probe fabricated a terminal event" >&2
+        return 1
+      fi
+      grep -R -q "run_id=claude-watch-$mode" "$state/semaphore-v1" || {
+        echo "$mode Claude probe released live capacity" >&2; return 1;
+      }
+      rm -rf "$run"
+      command sleep 0.2
+      ;;
+  esac
+}
+
+claude_watcher_case initial-absent
+claude_watcher_case live-then-absent
+claude_watcher_case ambiguous
+claude_watcher_case probe-error
+
 cross_backend_case codex
 cross_backend_case background
 cross_backend_case claude-bg
 cross_backend_case wezterm
+
+# Deterministic watcher/reconciler race: pause watcher registration, publish a
+# canonical terminal, let manifest reconciliation consume it first, then run
+# adapter finalization. The manifest keeps one true terminal and the exact
+# dev:ino:generation lease is still released.
+RACE_RUN="$TMP/reconcile-wins"
+mkdir -p "$RACE_RUN"
+printf 'reconcile race prompt\n' > "$RACE_RUN/prompt.txt"
+RACE_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-reconcile-wins","repository_id":"adapter-race-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":90,"issue_num":90,"capacity":1,"timeout_s":20},separators=(",",":")))' "$RACE_RUN")"
+_uberdev_agent_dispatch_backend() {
+  DISPATCH_ID="opaque:race-handle"
+  DISPATCH_LOG=""
+  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"opaque:race-handle"}\n' > "$6"
+  DISPATCH_RC=0
+  return 0
+}
+_uberdev_agent_start_watcher() {
+  RACE_MANIFEST="$1"
+  RACE_LEASE="$2"
+  RACE_LEASE_IDENTITY="$3"
+  RACE_STATUS="$4"
+  RACE_BACKEND="$5"
+  RACE_HANDLE="$6"
+  RACE_REQUEST_CAPTURE="$7"
+  RACE_DECISION="$8"
+}
+uberdev_agent_dispatch "$RACE_REQUEST" "$RACE_RUN/prompt.txt" "$RACE_RUN/result.md" "$RACE_RUN/status.json"
+printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:race-handle"}\n' > "$RACE_RUN/status.json"
+python3 -I "$ROOT/plugins/uberdev/lib/run_manifest.py" reconcile --manifest "$RACE_MANIFEST" >/dev/null
+_uberdev_agent_finalize_terminal "$RACE_MANIFEST" "$RACE_LEASE" "$RACE_LEASE_IDENTITY" \
+  "$RACE_STATUS" "$RACE_BACKEND" "$RACE_HANDLE" "$RACE_REQUEST_CAPTURE" "$RACE_DECISION" completed
+python3 -I - "$RACE_MANIFEST" <<'PY'
+import json, pathlib, sys
+events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+actual = [event["event"] for event in events if event["run_id"] == "adapter-reconcile-wins"]
+assert actual == ["route_decided", "agent_started", "completed"], actual
+assert all(event["event"] != "abandoned" for event in events if event["run_id"] == "adapter-reconcile-wins")
+PY
+[ ! -e "$RACE_LEASE" ] || { echo "reconcile-winning watcher retained its exact lease" >&2; exit 1; }
 
 echo "agent-dispatch: PASS"
