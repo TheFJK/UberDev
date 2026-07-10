@@ -57,7 +57,7 @@ The optimization program MUST NOT:
 - Build a general DAG scheduler, distributed queue, or replacement agent runtime.
 - Raise `agents.max_depth` to preserve nested delegation.
 - Depend on GPT-5.6 Pro mode, direct Responses API integration, or undocumented Codex APIs.
-- Enable priority/Fast service by default; latency tier is independent from model quality and consumes more usage.
+- Enable Fast service by default; latency tier is independent from model quality and consumes more usage.
 - Cache non-identical reasoning inputs or any side-effecting operation.
 - Weaken trust-trail, claim, permission, security, merge, or final-review safety semantics.
 - Migrate unrelated Claude model identifiers as part of the Codex optimization.
@@ -165,7 +165,7 @@ Provider-compatible fallback is a post-resolution state transition, not a preced
 | `frontier` | `sol-max` | `gpt-5.6-sol` | `max` | Largest quality-first single-agent judgments and large leads |
 | `ultra` | `sol-ultra` | `gpt-5.6-sol` | `ultra` | Explicit forced runs or large high-risk work benefiting from maximum reasoning/delegation |
 
-The implementation MUST use explicit model slugs rather than the moving `gpt-5.6` alias. `service_tier` defaults to `default` for every logical route. `--fast` is only an alias for explicit `--service-tier=priority`; it MUST NOT change model or effort.
+The implementation MUST use explicit model slugs rather than the moving `gpt-5.6` alias. `service_tier` defaults to `default` for every logical route. `--fast` is only an alias for explicit `--service-tier=fast`; Codex maps that native config value to the provider request's priority tier. `--fast` MUST NOT change model or effort. `flex` MAY be selected explicitly where the active provider/catalog supports it, but it is never an availability fallback.
 
 ### 5.5 Top-level route policy
 
@@ -184,7 +184,7 @@ Risk propagates at the scope where judgment is performed. A run-level high-risk 
 
 ### 5.6 Forced Sol Ultra
 
-`--route=sol-ultra` MUST set the detached lead and every LLM descendant in the same UberDev run tree to `gpt-5.6-sol` + `ultra`. The scope includes research, design, implementation, review, repair, monitor, and semantic-relay calls; deterministic program steps are not model invocations and are unaffected. It MUST NOT widen sandbox permissions or enable priority service.
+`--route=sol-ultra` MUST set the detached lead and every LLM descendant in the same UberDev run tree to `gpt-5.6-sol` + `ultra`. The scope includes research, design, implementation, review, repair, monitor, and semantic-relay calls; deterministic program steps are not model invocations and are unaffected. It MUST NOT widen sandbox permissions or enable Fast service.
 
 Role TOMLs enforce adaptive defaults; they are not the forced-route mechanism. If the active native subagent surface cannot override a role TOML for a forced child route, the provider adapter MUST use an explicit supported carrier (`codex exec` with `-m` and `-c model_reasoning_effort=...`) or fail with `route_unenforceable`. The implementation MUST NOT generate a role-by-route Cartesian set of agent files. It MUST NOT report that Sol Ultra propagated when the child merely inherited an unknown route.
 
@@ -415,9 +415,10 @@ CLI controls:
 --routing-mode: adaptive | inherit
 --route: economy | standard | quality | deep | frontier | ultra
          luna | terra | sol | sol-high | sol-max | sol-ultra
+--service-tier: default | fast | flex
 ```
 
-`--route` selects and propagates a concrete forced route. `--routing-mode=adaptive` enables policy selection without a pin; `--routing-mode=inherit` selects the unpinned rollback path.
+`--route` selects and propagates a concrete forced route. `--routing-mode=adaptive` enables policy selection without a pin; `--routing-mode=inherit` selects the unpinned rollback path. `--fast` aliases `--service-tier=fast`; service tier remains independent from model and effort.
 
 Environment overrides:
 
