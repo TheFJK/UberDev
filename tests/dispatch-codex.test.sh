@@ -728,13 +728,21 @@ IMMEDIATE_OUT="$(
     terminal_pid="$DISPATCH_ID"
     ! _uberdev_dispatch_accept_immediate_terminal background "$terminal_pid" "$UBERDEV_AGENT_STATUS_FILE" "$UBERDEV_AGENT_RESULT_FILE" >/dev/null 2>&1 || failures=$((failures + 1))
     ! _uberdev_dispatch_accept_immediate_terminal codex "$((terminal_pid + 1))" "$UBERDEV_AGENT_STATUS_FILE" "$UBERDEV_AGENT_RESULT_FILE" >/dev/null 2>&1 || failures=$((failures + 1))
-    # A plain live child is sufficient for the fail-closed liveness check and
-    # stays portable to native Windows Python, where os.setsid is unavailable.
-    sleep 30 &
-    live_pid=$!
+    # Publish the native process PID explicitly. On Git Bash, `$!` is an MSYS
+    # namespace handle while the production liveness probe uses native Windows
+    # PIDs, so a plain `sleep &` would test the wrong namespace.
+    live_pid_file="$UBERDEV_TMPDIR/live-native.pid"
+    _uberdev_dispatch_python -I -c '\''import os,sys,time
+with open(sys.argv[1],"w",encoding="ascii") as handle:
+ handle.write(str(os.getpid())); handle.flush(); os.fsync(handle.fileno())
+time.sleep(30)'\'' "$live_pid_file" &
+    live_launch_pid=$!
+    i=0; while [ ! -s "$live_pid_file" ] && [ "$i" -lt 200 ]; do sleep 0.025; i=$((i + 1)); done
+    live_pid="$(cat "$live_pid_file" 2>/dev/null)"
     printf "{\"backend\":\"codex\",\"state\":\"completed\",\"exit_code\":0,\"pid\":\"%s\"}\n" "$live_pid" > "$UBERDEV_AGENT_STATUS_FILE"
     ! _uberdev_dispatch_accept_immediate_terminal codex "$live_pid" "$UBERDEV_AGENT_STATUS_FILE" "$UBERDEV_AGENT_RESULT_FILE" >/dev/null 2>&1 || failures=$((failures + 1))
-    kill -TERM "$live_pid" 2>/dev/null || true; wait "$live_pid" 2>/dev/null || true
+    _uberdev_dispatch_python -I -c '\''import os,signal,sys; os.kill(int(sys.argv[1]),signal.SIGTERM)'\'' "$live_pid" 2>/dev/null || true
+    wait "$live_launch_pid" 2>/dev/null || true
     printf "failures=%s%s\n" "$failures" "$details"
   ' _ "$DISPATCH_LIB"
 )"
