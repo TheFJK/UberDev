@@ -27,6 +27,11 @@ fence_open = re.compile(
     r"^(?P<indent> {0,3})(?P<marker>`{3,}|~{3,})(?P<info>[^\r\n]*)$"
 )
 fence_close = re.compile(r"^ {0,3}(?P<marker>`+|~+)[ \t]*$")
+fence_suffix = re.compile(r"(?P<marker>`{3,}|~{3,})(?P<info>[^\r\n]*)$")
+container_prefix = re.compile(
+    r"^[ \t]*(?:(?:>[ \t]*)|"
+    r"(?:(?:[-+*]|[0-9]{1,9}[.)])[ \t]+(?:\[[ xX]\][ \t]+)?))+[ \t]*$"
+)
 shell_languages = {"bash", "sh", "zsh"}
 forbidden = re.compile(
     r"(?<![A-Za-z0-9])(?:spawn_agent|uberdev_agent_dispatch|"
@@ -34,6 +39,21 @@ forbidden = re.compile(
     r"(?![A-Za-z0-9])|"
     r"(?<![A-Za-z0-9])(?:Task|Agent)[ \t]*\("
 )
+
+
+def unsupported_shell_container(line):
+    candidate = fence_suffix.search(line)
+    if not candidate:
+        return False
+    marker = candidate.group("marker")
+    info = candidate.group("info").strip(" \t")
+    if marker[0] == "`" and "`" in info:
+        return False
+    language = info.split(None, 1)[0] if info else ""
+    if language not in shell_languages:
+        return False
+    prefix = line[:candidate.start()]
+    return bool(container_prefix.fullmatch(prefix))
 
 violations = []
 for path in sys.argv[1:]:
@@ -46,6 +66,12 @@ for path in sys.argv[1:]:
         for line_number, raw in enumerate(stream, 1):
             line = raw.rstrip("\r\n")
             if not in_fence:
+                if unsupported_shell_container(line):
+                    violations.append(
+                        f"{path}:{line_number}: absolute deny violation: "
+                        "unsupported container-prefixed executable shell fence"
+                    )
+                    continue
                 opening = fence_open.fullmatch(line)
                 if opening:
                     marker = opening.group("marker")
@@ -163,10 +189,25 @@ assert_document_rejected backtick-info-shadow $'```text`invalid\n```bash\ncodex 
 assert_document_rejected four-space-closer-shadow $'```bash\nprintf ok\n    ```\ncodex exec review\n```\n'
 assert_document_rejected tab-closer-shadow $'~~~sh\nprintf ok\n\t~~~\nclaude --print review\n~~~\n'
 
-# Four-space indentation is ordinary indented code, not a fenced shell block.
+# Container-prefixed and ambiguously over-indented executable fences are an
+# unsupported governed-source form. Reject at the opener even when their body
+# is clean; this keeps the scanner fail-closed without parsing container bodies.
+assert_document_rejected blockquote-shell-clean $'> ```bash\n> printf ok\n> ```\n'
+assert_document_rejected unordered-list-shell-clean $'- ~~~sh\n  printf ok\n  ~~~\n'
+assert_document_rejected ordered-list-shell-clean $'10. ```zsh\n    printf ok\n    ```\n'
+assert_document_rejected task-list-shell-clean $'- [ ] ```bash\n  printf ok\n  ```\n'
+assert_document_rejected nested-container-shell-clean $'  > 1. - [x] ````sh\n      printf ok\n      ````\n'
+assert_document_rejected blockquote-provider-bypass $'> ```bash\n> codex exec review\n> ```\n'
+
+# Ordinary container prose and clearly non-shell container fences remain data.
+assert_document_accepted blockquote-prose $'> Prose may mention ```bash and codex.\n'
+assert_document_accepted list-prose $'- Prose may mention ~~~sh and claude.\n'
+assert_document_accepted blockquote-non-shell $'> ```json\n> {"provider":"codex"}\n> ```\n'
+assert_document_accepted list-non-shell $'- ~~~text\n  claude and codex are data\n  ~~~\n'
+assert_document_accepted indented-pseudo-shell $'    ```bash\n    codex exec review\n    ```\n'
+
 # A valid non-shell fence may still contain shell-looking literal text, and a
 # tilde fence may contain backticks in its info string.
-assert_document_accepted indented-pseudo-shell $'    ```bash\n    codex exec review\n    ```\n'
 assert_document_accepted valid-non-shell-shadow $'   ```text\n```bash\ncodex exec review\n```\n'
 assert_document_accepted tilde-backtick-info $'~~~text`allowed\n```bash\ncodex exec review\n~~~\n'
 
