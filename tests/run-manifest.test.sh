@@ -314,6 +314,7 @@ fi
 
 capture python3 - "$MANIFEST" "$TMP/windows-lock/events.jsonl" <<'PY'
 import builtins
+import glob
 import importlib.util
 import sys
 import types
@@ -368,6 +369,15 @@ try:
     assert write_fds == [calls[0][0]], (write_fds, calls)
     verified, rc = module.verify_manifest(manifest_path, strict=False)
     assert rc == 0 and verified["events"] == 1, (rc, verified)
+    generation = "a" * 32
+    lease_parent = module.os.path.dirname(manifest_path)
+    lease = module.os.path.join(lease_parent, f"{generation}{'b' * 32}.lease")
+    lease_payload = f"generation={generation}\nrun_id=windows-lease\n".encode()
+    module.secure_write_lease(lease, lease_payload)
+    module.secure_write_lease(lease, lease_payload)
+    with open(lease, "rb") as handle:
+        assert handle.read() == lease_payload
+    assert not glob.glob(module.os.path.join(lease_parent, ".lease.tmp.*"))
 finally:
     module.os.name = original_os_name
     module.os.write = real_write

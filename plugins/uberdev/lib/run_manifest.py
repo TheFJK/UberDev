@@ -1143,6 +1143,36 @@ def secure_write_lease(path: str, payload: bytes) -> None:
     generation = _lease_generation(payload)
     if not name.startswith(generation):
         raise ManifestRejected("lease_generation_mismatch")
+    if os.name == "nt":
+        absolute = os.path.abspath(path)
+        parent = os.path.dirname(absolute)
+        _reject_symlinked_ancestors(parent)
+        temporary_path = os.path.join(parent, f".lease.tmp.{secrets.token_hex(16)}")
+        descriptor: int | None = None
+        try:
+            if os.path.lexists(absolute):
+                existing = _secure_open_regular(absolute, os.O_RDONLY)
+                try:
+                    if _lease_generation(_read_bounded_descriptor(existing)) != generation:
+                        raise ManifestRejected("lease_generation_mismatch")
+                finally:
+                    os.close(existing)
+            descriptor = _secure_open_regular(
+                temporary_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+            )
+            if os.write(descriptor, payload) != len(payload):
+                raise ManifestRuntimeError("lease_short_write")
+            os.close(descriptor)
+            descriptor = None
+            os.replace(temporary_path, absolute)
+            return
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
     parent_descriptor = _open_directory_fd(os.path.dirname(os.path.abspath(path)))
     temporary = f".lease.tmp.{secrets.token_hex(16)}"
     descriptor: int | None = None
