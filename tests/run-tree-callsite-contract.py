@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -82,7 +83,62 @@ def _executable_bash(text: str) -> str:
     return "\n".join(body for _info, body in BASH_FENCE.findall(text))
 
 
-def _token_is_executable(line: str, offset: int) -> bool:
+def _prefix_expects_command(prefix: str) -> bool:
+    try:
+        lexer = shlex.shlex(prefix, posix=True, punctuation_chars=";&|(){}<>")
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    at_start = True
+    command_wrapper = False
+    declaration = False
+    assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\+)?=.*", re.DOTALL)
+    for token in tokens:
+        if token and all(char in ";&|(){}<>" for char in token):
+            if token.startswith(("<", ">")):
+                at_start = False
+                command_wrapper = False
+            elif any(char in token for char in ";&|") or token in {"(", ")", "{"}:
+                at_start = True
+                command_wrapper = False
+                declaration = False
+            continue
+        if declaration:
+            at_start = False
+            declaration = False
+            continue
+        if not at_start:
+            continue
+        if assignment.fullmatch(token):
+            continue
+        if token == "function":
+            declaration = True
+            continue
+        if command_wrapper:
+            if token == "--" or token == "-p":
+                continue
+            if token in {"-v", "-V"}:
+                at_start = False
+                command_wrapper = False
+                continue
+            at_start = False
+            command_wrapper = False
+            continue
+        if token == "command":
+            command_wrapper = True
+            continue
+        if token in {"!", "if", "then", "elif", "else", "while", "until", "do"}:
+            continue
+        if token in {"for", "select", "case"}:
+            at_start = False
+            continue
+        at_start = False
+    return at_start and not declaration
+
+
+def _token_is_executable(line: str, offset: int, token_end: int) -> bool:
     """Recognize a command-position token without parsing shell grammar."""
     single = False
     double = False
@@ -114,10 +170,10 @@ def _token_is_executable(line: str, offset: int) -> bool:
         return False
     if double and not substitutions:
         return False
+    if re.match(r"[ \t]*\([ \t]*\)[ \t]*(?:\{|\()", line[token_end:]):
+        return False
     prefix = line[substitutions[-1] if substitutions else 0 : offset].rstrip()
-    if not prefix:
-        return True
-    return re.search(r"(?:\$\(|[;|&()]|\bif|\bthen|\bdo|\belse)\s*$", prefix) is not None
+    return _prefix_expects_command(prefix)
 
 
 def _heredoc_declarations(line: str) -> list[tuple[str, bool]]:
@@ -205,7 +261,7 @@ def _has_executable_helper(text: str, helper: str) -> bool:
         if stripped.startswith("#"):
             continue
         for match in token.finditer(line):
-            if _token_is_executable(line, match.start()):
+            if _token_is_executable(line, match.start(), match.end()):
                 return True
     return False
 
@@ -218,7 +274,8 @@ def _command(text: str, helper: str, argument: str) -> bool:
         if line.lstrip().startswith("#"):
             continue
         for match in pattern.finditer(line):
-            if _token_is_executable(line, match.start()):
+            helper_end = match.start() + len(helper)
+            if _token_is_executable(line, match.start(), helper_end):
                 return True
     return False
 

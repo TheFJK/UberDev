@@ -30,6 +30,9 @@ def rejected(overrides, needle):
         assert needle in str(error),(needle,str(error))
     else: raise AssertionError(f"mutation accepted: {needle}")
 
+def accepted(overrides):
+    module.validate(root,tree,fixture,overrides)
+
 def rejected_tree(mutate, needle):
     value=json.loads(tree.read_text())
     mutate(value)
@@ -101,6 +104,26 @@ for label,heredoc in (
         heredoc,1)
     assert mutated != brain,label
     rejected({brain_rel:mutated},"routed chain missing uberdev_dispatch_child")
+reserved_word_argument=brain.replace(
+    'uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null',
+    "if printf '%s\\n' if uberdev_dispatch_child; then :; fi",1)
+assert reserved_word_argument != brain
+rejected({brain_rel:reserved_word_argument},"routed chain missing uberdev_dispatch_child")
+function_declaration=brain.replace(
+    'uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null',
+    'if uberdev_dispatch_child() { :; }; then :; fi',1)
+assert function_declaration != brain
+rejected({brain_rel:function_declaration},"routed chain missing uberdev_dispatch_child")
+command_wrapper=brain.replace(
+    'uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null',
+    'command uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null',1)
+assert command_wrapper != brain
+accepted({brain_rel:command_wrapper})
+assignment_prefix=brain.replace(
+    'uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null',
+    'UBERDEV_TRACE=1 uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null',1)
+assert assignment_prefix != brain
+accepted({brain_rel:assignment_prefix})
 
 def drift_question_type(value):
     value["edges"]["brainstorm.research.codebase"]["required_inputs"]["question"]="boolean"
