@@ -1086,7 +1086,7 @@ uberdev_agent_dispatch() {
   event_json="$(_uberdev_agent_event_json route_decided "$request_json" "$decision")" || return 2
   _uberdev_agent_append_event "$manifest" "$event_json" || return 2
 
-  lease="$(PYTHONPATH= PYTHONHOME= uberdev_semaphore_acquire "$state_dir" "$repository_id" "$backend" "$capacity" "$run_id" "$timeout_s")" || {
+  lease="$(UBERDEV_SEMAPHORE_OWNER_PID=$$ PYTHONPATH= PYTHONHOME= uberdev_semaphore_acquire "$state_dir" "$repository_id" "$backend" "$capacity" "$run_id" "$timeout_s")" || {
     rc=$?
     return "$rc"
   }

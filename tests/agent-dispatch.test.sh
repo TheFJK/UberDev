@@ -144,6 +144,11 @@ export -f _uberdev_agent_dispatch_backend
 # shellcheck source=/dev/null
 . "$LIB"
 
+grep -Fq 'UBERDEV_SEMAPHORE_OWNER_PID=$$ PYTHONPATH= PYTHONHOME= uberdev_semaphore_acquire' "$LIB" || {
+  echo "agent-dispatch: known shell owner is not supplied to semaphore acquisition" >&2
+  exit 1
+}
+
 wait_for_terminal_and_release() {
   local manifest="$1" state_dir="$2" run_id="$3" terminal="$4" attempts="${5:-80}" delay="${6:-0.1}" actual
   for _ in $(seq 1 "$attempts"); do
