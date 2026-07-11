@@ -198,6 +198,11 @@ IMMEDIATE_OUT="$(
       return 1
     }
     MODEL=sonnet; PERM_FLAG=(); EFFORT_FLAG=(); failures=0; issue=70
+    record_failure() {
+      failures=$((failures + 1))
+      printf "mismatch issue=%s outcome=%s check=%s rc=%s dispatch_id=%q status=%q result=%q mode=%q partials=%q child_log=%q\n" \
+        "$issue" "$outcome" "$1" "$rc" "${DISPATCH_ID:-}" "$status" "$result" "$mode" "$partials" "$child_log"
+    }
     for outcome in completed failed completed failed completed failed; do
       issue=$((issue + 1))
       printf "%s\n" "$outcome" > "$UBERDEV_TMPDIR/prompt-$issue.txt"
@@ -206,19 +211,22 @@ IMMEDIATE_OUT="$(
       export UBERDEV_AGENT_STATUS_FILE UBERDEV_AGENT_RESULT_FILE
       _uberdev_dispatch_background "$issue" small "$UBERDEV_TMPDIR/prompt-$issue.txt"
       rc=$?; status="$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)"
+      result="$(cat "$UBERDEV_AGENT_RESULT_FILE" 2>/dev/null)"
+      mode="$(stat -f %Lp "$UBERDEV_AGENT_RESULT_FILE" 2>/dev/null || stat -c %a "$UBERDEV_AGENT_RESULT_FILE" 2>/dev/null)"
+      partials="$(find "$UBERDEV_TMPDIR" -maxdepth 1 \( -name "result-$issue.md.partial.*" -o -name "result-$issue.md.tmp.*" \) -print)"
+      child_log="$(cat "$UBERDEV_TMPDIR/solve-bg-stdout-$issue.log" 2>/dev/null)"
       case "$outcome:$rc:$DISPATCH_ID:$status" in
         completed:0:*:*\"state\":\"completed\"*\"exit_code\":0*)
-          [ "$(cat "$UBERDEV_AGENT_RESULT_FILE" 2>/dev/null)" = "immediate completed result" ] || failures=$((failures + 1))
-          [ "$(stat -f %Lp "$UBERDEV_AGENT_RESULT_FILE" 2>/dev/null || stat -c %a "$UBERDEV_AGENT_RESULT_FILE" 2>/dev/null)" = 600 ] || failures=$((failures + 1))
+          [ "$result" = "immediate completed result" ] || record_failure completed_result
+          [ "$mode" = 600 ] || record_failure completed_result_mode
           ;;
         failed:0:*:*\"state\":\"failed\"*\"exit_code\":29*)
-          [ ! -s "$UBERDEV_AGENT_RESULT_FILE" ] || failures=$((failures + 1))
+          [ ! -s "$UBERDEV_AGENT_RESULT_FILE" ] || record_failure failed_result_empty
           ;;
-        *) failures=$((failures + 1)) ;;
+        *) record_failure terminal_contract ;;
       esac
-      [ -z "$(find "$UBERDEV_TMPDIR" -maxdepth 1 \( -name "result-$issue.md.partial.*" -o -name "result-$issue.md.tmp.*" \) -print -quit)" ] \
-        || failures=$((failures + 1))
-      [ -n "${DISPATCH_ID:-}" ] || failures=$((failures + 1))
+      [ -z "$partials" ] || record_failure partial_cleanup
+      [ -n "${DISPATCH_ID:-}" ] || record_failure dispatch_id
     done
     printf "failures=%s\n" "$failures"
   ' _ "$DISPATCH_LIB"
