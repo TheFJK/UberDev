@@ -1270,8 +1270,17 @@ def _atomic_append(
     payload = (_compact_json(event) + "\n").encode("utf-8")
     if len(payload) > 65536:
         raise ManifestRejected("event_record_too_large")
-    flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY
-    descriptor = _secure_open_regular(path, flags, 0o600)
+    owns_descriptor = not (os.name == "nt" and locked_descriptor is not None)
+    if owns_descriptor:
+        flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY
+        descriptor = _secure_open_regular(path, flags, 0o600)
+    else:
+        # Windows byte-range locks also block a second handle in this process.
+        # Write through the handle that owns the lock; its critical section
+        # serializes the seek-to-end plus the single write.
+        descriptor = locked_descriptor
+        assert descriptor is not None
+        os.lseek(descriptor, 0, os.SEEK_END)
     original_length: int | None = None
     try:
         opened = os.fstat(descriptor)
@@ -1299,7 +1308,8 @@ def _atomic_append(
                 raise ManifestRuntimeError("manifest_rollback_failed") from exc
             raise ManifestRuntimeError("manifest_short_write")
     finally:
-        os.close(descriptor)
+        if owns_descriptor:
+            os.close(descriptor)
 
 
 def _normalized_append_event(raw: Any) -> dict[str, Any]:

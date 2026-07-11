@@ -345,6 +345,12 @@ finally:
 
 original_os_name = module.os.name
 original_fchmod = getattr(module.os, "fchmod", None)
+real_write = module.os.write
+write_fds = []
+def tracked_windows_write(fd, payload):
+    write_fds.append(fd)
+    return real_write(fd, payload)
+module.os.write = tracked_windows_write
 module.os.name = "nt"
 if original_fchmod is not None:
     del module.os.fchmod
@@ -359,10 +365,12 @@ try:
     assert result["status"] == "appended", result
     assert [mode for _, mode, _ in calls] == [fake_msvcrt.LK_NBLCK, fake_msvcrt.LK_UNLCK], calls
     assert all(count == 1 for _, _, count in calls), calls
+    assert write_fds == [calls[0][0]], (write_fds, calls)
     verified, rc = module.verify_manifest(manifest_path, strict=False)
     assert rc == 0 and verified["events"] == 1, (rc, verified)
 finally:
     module.os.name = original_os_name
+    module.os.write = real_write
     if original_fchmod is not None:
         module.os.fchmod = original_fchmod
 print("windows-lock-fallback-ok")
