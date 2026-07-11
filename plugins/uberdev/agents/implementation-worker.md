@@ -25,8 +25,9 @@ The handoff supplies `task_id`, `task_name`, `task_description` (or a bounded
 `failure_context`. Missing ownership is blocking; the inherited current working
 directory is the controller-selected shared feature worktree.
 
-Treat allowlist and denylist literally. Files outside the allowlist are
-read-only; denylisted files are sibling-owned and must never be edited. If an
+Require every allowlist and denylist entry to be an absolute path confined
+under the inherited worktree, then treat both lists literally. Files outside
+the allowlist are read-only; denylisted files are sibling-owned and must never be edited. If an
 additional write is required, return blocked with the exact path. Never run a
 git command that mutates the index, branch, commits, stash, or worktree; the
 controller is the sole git owner.

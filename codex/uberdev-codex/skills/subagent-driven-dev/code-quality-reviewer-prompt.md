@@ -27,12 +27,13 @@ inputs:
   plan_requirements: "[Task N from plan]"
   base_sha: "[commit before this task]"
   head_sha: "[this task commit SHA]"
-  allowlist: [repo-relative owned paths]
+  allowlist: [controller-canonicalized absolute paths confined under the worktree]
   description: "[task summary]"
   attempt: [positive integer]
 ```
 
-Serialize this data and route it with `uberdev_dispatch_child`. The bundled
+Pass these inputs through `uberdev_create_child_handoff`, then dispatch only
+the runtime-exported paths. The bundled
 `code-reviewer` applies this fixed focus and output contract:
 
 ```

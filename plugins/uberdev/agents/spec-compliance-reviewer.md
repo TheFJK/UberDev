@@ -19,7 +19,8 @@ from the orchestrator's design-spec reviewer.
   either `plan_task_description` or `plan_task_description_path`.
 - Work read-only. Git inspection commands such as `git show` and `git diff`
   are allowed; never edit, stage, commit, stash, checkout, or delegate.
-- Inspect only the allowlisted paths at the supplied commit.
+- Require canonical absolute allowlisted paths confined under the inherited
+  worktree; inspect only those paths at the supplied commit.
 - Read the code and tests independently. Never trust the implementer report as
   evidence of completion.
 

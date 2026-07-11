@@ -17,11 +17,12 @@ inputs:
   plan_task_description: "[full plan task entry or approved bounded excerpt; if too large, omit and pass plan_task_description_path]"
   implementer_report: "[status, claimed paths, and test results]"
   commit_sha: "[controller-created task commit SHA]"
-  allowlist: [repo-relative owned paths]
+  allowlist: [controller-canonicalized absolute paths confined under the worktree]
   attempt: [positive integer]
 ```
 
-Serialize this data and route it with `uberdev_dispatch_child`. The
+Pass these inputs through `uberdev_create_child_handoff`, then dispatch only
+the runtime-exported paths. The
 `spec-compliance-reviewer` role applies the review contract below:
 
 ```

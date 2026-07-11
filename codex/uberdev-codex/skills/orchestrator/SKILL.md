@@ -161,9 +161,15 @@ Exit code is `2`, which propagates through `solve-pipeline`'s `claude --bg` exec
 
 #### Routed descendant runtime (all provider edges)
 
-Every LLM descendant below MUST cross `lib/child-dispatch.sh`; native `Task`/`spawn_agent` calls are forbidden in this skill. The lead receives `UBERDEV_AGENT_PREPARED_REQUEST_JSON` from the solve launcher. It is the immutable carrier source: child handoffs may select `role`, `phase`, bounded risk, and semantic inputs, but MUST NOT contain model, route, effort, service-tier, sandbox, command, environment, or credential fields.
+Every provider descendant below MUST cross `lib/child-dispatch.sh`; there is no alternate provider-call path in this skill. The lead receives `UBERDEV_AGENT_PREPARED_REQUEST_JSON` from the solve launcher. It is the immutable carrier source: child handoffs select only registered edges, immutable instance identities, bounded risks, and semantic inputs; routing policy supplies all execution posture.
 
-Run this setup once before the first child edge. `uberdev_design_dispatch` creates the closed handoff, calls `uberdev_dispatch_child`, and leaves the detached child running. `uberdev_design_wait` is used only after every child in the current wave has been issued. Attempts are immutable allocation identities: `a1` is the original call and `a2` is the single format/artifact retry.
+Run this setup once before the first child edge. The runtime owns handoff
+validation, confinement, allocation, and output paths.
+`uberdev_design_dispatch` records every successful receipt and leaves the
+detached child running. `uberdev_design_wait` is used only after every child
+in the current wave has been issued. Attempts are immutable allocation
+identities: `a1` is the original call and every bounded retry increments the
+attempt suffix without reuse.
 
 ```bash uberdev-executable
 set -euo pipefail
@@ -171,29 +177,62 @@ set -euo pipefail
 UBERDEV_DESIGN_PLUGIN_ROOT="${PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}"
 . "$UBERDEV_DESIGN_PLUGIN_ROOT/lib/child-dispatch.sh"
 
+UBERDEV_DESIGN_DISPATCH_RECEIPTS=()
+
+uberdev_unwind_child_receipts() {
+  local receipt instance remainder status result cleanup_rc=0
+  # timeout=0 is the runtime drain contract: observe each launched child until
+  # its real terminal event, collect its result when present, and release only
+  # the matching lease. It never fabricates a timeout terminal.
+  for receipt in "${UBERDEV_DESIGN_DISPATCH_RECEIPTS[@]}"; do
+    instance="${receipt%%|*}"; remainder="${receipt#*|}"
+    status="${remainder%%|*}"; result="${remainder#*|}"
+    if ! uberdev_wait_child "$status" "$result" 0; then
+      cleanup_rc=1
+    fi
+  done
+  UBERDEV_DESIGN_DISPATCH_RECEIPTS=()
+  return "$cleanup_rc"
+}
+
 uberdev_design_dispatch() {
   local edge="$1" instance="$2" role="$3" phase="$4" risk_scope="$5" risks_json="$6" inputs_json="$7"
-  local handoff_dir handoff result status
-  handoff_dir="$(python3 -I -B -c 'import json,os,sys; r=json.loads(sys.argv[1]); print(os.path.join(os.path.dirname(os.path.dirname(r["context_file"])),"handoffs"))' "$UBERDEV_AGENT_PREPARED_REQUEST_JSON")"
-  mkdir -p "$handoff_dir" && chmod 700 "$handoff_dir"
-  handoff="$handoff_dir/$instance.json"
-  python3 -I -B - "$UBERDEV_AGENT_PREPARED_REQUEST_JSON" "$edge" "$instance" "$role" "$phase" "$risk_scope" "$risks_json" "$inputs_json" "$handoff" <<'PY'
-import json,os,sys
-root,edge,instance,role,phase,scope,risks,inputs,path=sys.argv[1:]
-r=json.loads(root)
-value={"schema_version":1,"carrier":{"schema_version":1,"run_id":r["run_id"],"workflow":r["workflow"],"issue_num":r["issue_num"],"context_file":r["context_file"],"context_sha256":r["context_sha256"]},"edge_id":edge,"instance_id":instance,"parent_run_id":r["run_id"],"role":role,"phase":phase,"risk_scope":scope,"risk_signals":sorted(set(json.loads(risks))),"inputs":json.loads(inputs)}
-fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
-with os.fdopen(fd,"w") as f: json.dump(value,f,sort_keys=True,separators=(",",":")); f.write("\n")
-PY
-  result="$(dirname "$handoff_dir")/children/$instance/result.md"
-  status="$(dirname "$handoff_dir")/children/$instance/status.json"
-  uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null
+  local handoff result status create_rc dispatch_rc cleanup_rc
+  : "$role" "$phase" "$risk_scope" # edge manifest is the authority for these fields
+  if uberdev_create_child_handoff "$edge" "$instance" "$inputs_json" "$risks_json"; then
+    :
+  else
+    create_rc=$?; cleanup_rc=0
+    uberdev_unwind_child_receipts || cleanup_rc=$?
+    [ "$cleanup_rc" -eq 0 ] || echo "error: child receipt unwind failed after handoff edge=$edge instance=$instance" >&2
+    return "$create_rc"
+  fi
+  handoff="$UBERDEV_CHILD_HANDOFF"
+  result="$UBERDEV_CHILD_RESULT"
+  status="$UBERDEV_CHILD_STATUS"
+  if uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null; then
+    UBERDEV_DESIGN_DISPATCH_RECEIPTS+=("$instance|$status|$result")
+    return 0
+  else
+    dispatch_rc=$?
+    cleanup_rc=0
+    uberdev_unwind_child_receipts || cleanup_rc=$?
+    [ "$cleanup_rc" -eq 0 ] || echo "error: child receipt unwind failed after edge=$edge instance=$instance" >&2
+    return "$dispatch_rc"
+  fi
 }
 
 uberdev_design_wait() {
-  local instance="$1" timeout_s="$2" run_dir
-  run_dir="$(python3 -I -B -c 'import json,os,sys; print(os.path.dirname(os.path.dirname(json.loads(sys.argv[1])["context_file"])))' "$UBERDEV_AGENT_PREPARED_REQUEST_JSON")"
-  uberdev_wait_child "$run_dir/children/$instance/status.json" "$run_dir/children/$instance/result.md" "$timeout_s"
+  local wanted="$1" timeout_s="$2" receipt instance remainder status result
+  for receipt in "${UBERDEV_DESIGN_DISPATCH_RECEIPTS[@]}"; do
+    instance="${receipt%%|*}"
+    if [ "$instance" = "$wanted" ]; then
+      remainder="${receipt#*|}"; status="${remainder%%|*}"; result="${remainder#*|}"
+      uberdev_wait_child "$status" "$result" "$timeout_s"
+      return $?
+    fi
+  done
+  return 2
 }
 ```
 
@@ -289,9 +328,25 @@ Each result uses the role's existing YAML contract. Read it from the determinist
 
 Wait for all to return and parse each YAML block's `status` first. If required `research-codebase` returns `BLOCKED`, require empty artifact fields and abort before artifact verification. If any optional role returns `BLOCKED` — including `research-security` when Semgrep is unavailable or times out — require empty artifact fields, log an advisory warning, omit that artifact from the research bundle, and continue. Do not retry artifact verification for a BLOCKED return.
 
-If parse fails, create the same edge with a fresh `-a2` instance and add `format_retry: true` plus `format_example_path` to the flat inputs, then dispatch and wait once. Max 2 attempts total; afterward apply the required/advisory policy above and log a warning. Never reuse an `a1` instance directory.
+If parse fails, retain that child's `edge_id`, role, original inputs, and `a1`
+identity as controller state, then execute this one-child retry before applying
+the required/advisory policy:
+
+```bash uberdev-executable retry=format
+FORMAT_RETRY_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["format_retry"]=True; v["format_example_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$failed_inputs_json" "$format_example_path")"
+format_retry_instance="${failed_instance%-a1}-a2"
+uberdev_design_dispatch "$failed_edge" "$format_retry_instance" "$failed_role" "$failed_phase" none "$failed_risks_json" "$FORMAT_RETRY_INPUTS"
+uberdev_design_wait "$format_retry_instance" 300
+```
+
+Max 2 attempts total; afterward apply the required/advisory policy above and log a warning. Never reuse an `a1` instance directory.
 
 ### Phase 2: Q&A
+
+```yaml lineage
+edge_id: orchestrator.brainstorm.qa
+model_invocation: false
+```
 
 **This phase is the only signal that distinguishes `/solve` from `/turbo` for medium/large tier.** Every other phase (research, spec-writer, spec-reviewer, plan-writer, plan-reviewer, subagent-driven-dev, finish-branch auto-PR) is unattended in both modes. Skipping Phase 2 in non-turbo mode collapses `/solve` into `/turbo`. **Do not skip.**
 
@@ -303,7 +358,15 @@ uberdev_design_dispatch orchestrator.research.followup orchestrator-research-fol
 uberdev_design_wait orchestrator-research-followup-a1 300
 ```
 
-Its BLOCKED result is advisory. A malformed result receives one `a2` format retry; then log the missing follow-up and continue with the original research bundle.
+Its BLOCKED result is advisory. A malformed result executes one format retry:
+
+```bash uberdev-executable edge=orchestrator.research.followup retry=format
+FOLLOWUP_FORMAT_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["format_retry"]=True; v["format_example_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$FOLLOWUP_INPUTS" "$followup_format_example_path")"
+uberdev_design_dispatch orchestrator.research.followup orchestrator-research-followup-a2 research-codebase research none '[]' "$FOLLOWUP_FORMAT_INPUTS"
+uberdev_design_wait orchestrator-research-followup-a2 300
+```
+
+Then log a still-missing follow-up and continue with the original research bundle.
 
 > **Tooling caveat — AskUserQuestion is a deferred tool in current Claude Code harnesses.** Calling it without first loading its schema fails with `InputValidationError`. Before your first call, run `ToolSearch` with `query: "select:AskUserQuestion"` to load the schema. **Do NOT silently auto-pick on tool-load failure** — that turns `/solve` into `/turbo` invisibly. If `ToolSearch` itself fails (rare), abort Phase 2 with a clear stderr error and surface to the user; never fall through to auto-pick in non-turbo mode.
 
@@ -329,7 +392,7 @@ Use `AskUserQuestion` with 2 options (`Yes` / `No`) so the consent is structural
 ```bash
 PLUGIN_SCRIPTS="${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/skills/brainstorm/scripts"
 if [[ ! -d "$PLUGIN_SCRIPTS" ]]; then
-  PLUGIN_SCRIPTS="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex/skills/brainstorm/scripts" "${HOME}/.agents/skills/brainstorm/scripts" -maxdepth 0 -type d 2>/dev/null | head -1)"
+  PLUGIN_SCRIPTS="$(find "${CODEX_HOME:-$HOME/.codex}/plugins" "${HOME}/.agents/skills" -type d -path '*/uberdev/skills/brainstorm/scripts' 2>/dev/null | head -1)"
 fi
 if [[ ! -d "$PLUGIN_SCRIPTS" ]]; then
   echo "uberdev brainstorm scripts not found — falling back to terminal-only Phase 2" >&2
@@ -417,7 +480,15 @@ Wait for return. Parse YAML.
 3. `grep -E -- "^## (Goal|Architecture|Components)" "$artifact_path" | wc -l` ≥ 3 (required sections present)
 4. content sha matches reported `artifact_sha` (recompute and compare)
 
-If any check fails: write verification feedback to a private in-run file and re-dispatch the same edge once as `orchestrator-spec-write-a2` with `verification_feedback_path`. Max 2 attempts. Then fall back to **in-main spec synthesis** (do NOT invoke `uberdev:brainstorm` — its handoff would re-trigger plan-writing and conflict with Phase 4):
+If any check fails, persist verification feedback and execute the sole retry:
+
+```bash uberdev-executable edge=orchestrator.spec.write retry=verification
+SPEC_WRITE_RETRY_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["verification_feedback_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$SPEC_WRITE_INPUTS" "$verification_feedback_path")"
+uberdev_design_dispatch orchestrator.spec.write orchestrator-spec-write-a2 spec-writer spec run "$validated_risk_signals_json" "$SPEC_WRITE_RETRY_INPUTS"
+uberdev_design_wait orchestrator-spec-write-a2 600
+```
+
+Max 2 attempts total. If `a2` also fails verification, fall back to **in-main spec synthesis** (do not enter a second design workflow, which would duplicate Phase 4):
 1. Read all available research summary files.
 2. Read the most recent prior spec under `docs/uberdev/specs/` as a template.
 3. Synthesise the spec yourself in-main and write it to `$(git rev-parse --show-toplevel)/docs/uberdev/specs/$(date +%Y-%m-%d)-$topic_slug-design.md`.
@@ -440,19 +511,55 @@ uberdev_design_dispatch orchestrator.spec.review orchestrator-spec-review-a1 spe
 uberdev_design_wait orchestrator-spec-review-a1 600
 ```
 
-Parse its YAML. A malformed response receives one fresh `orchestrator-spec-review-a2` format retry.
+Parse its YAML. A malformed response receives exactly one executable format retry:
+
+```bash uberdev-executable edge=orchestrator.spec.review retry=format
+SPEC_REVIEW_FORMAT_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["format_retry"]=True; v["format_example_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$SPEC_REVIEW_INPUTS" "$spec_review_format_example_path")"
+uberdev_design_dispatch orchestrator.spec.review orchestrator-spec-review-a2 spec-reviewer spec run "$validated_risk_signals_json" "$SPEC_REVIEW_FORMAT_INPUTS"
+uberdev_design_wait orchestrator-spec-review-a2 600
+```
 
 If `verdict: APPROVE` → continue to Phase 4.
 
-If `verdict: REVISIONS_REQUIRED`, persist findings as a private `revision_brief_path` and dispatch `spec-reviser` with internal paths only:
+If `verdict: REVISIONS_REQUIRED`, persist findings as a private
+`revision_brief_path`. Execute at most two revision cycles. Each cycle uses a
+fresh reviser attempt, verifies the revised artifact, and re-reviews it. A
+malformed reviser or reviewer result gets the same edge's `a2` format retry;
+no identity is reused. The bounded identities are
+`orchestrator-spec-revise-r1-a1`, `orchestrator-spec-revise-r1-a2`,
+`orchestrator-spec-review-r1-a1`, `orchestrator-spec-review-r1-a2`,
+`orchestrator-spec-revise-r2-a1`, `orchestrator-spec-revise-r2-a2`,
+`orchestrator-spec-review-r2-a1`, and `orchestrator-spec-review-r2-a2`.
 
 ```bash uberdev-executable edge=orchestrator.spec.revise
 SPEC_REVISE_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"spec_path":sys.argv[1],"revision_brief_path":sys.argv[2],"working_dir":sys.argv[3]},separators=(",",":")))' "$spec_path" "$revision_brief_path" "$WORKING_DIR_ABS")"
-uberdev_design_dispatch orchestrator.spec.revise orchestrator-spec-revise-r1 spec-reviser spec run "$validated_risk_signals_json" "$SPEC_REVISE_INPUTS"
-uberdev_design_wait orchestrator-spec-revise-r1 600
+for revision_cycle in 1 2; do
+  revise_instance="orchestrator-spec-revise-r${revision_cycle}-a1"
+  uberdev_design_dispatch orchestrator.spec.revise "$revise_instance" spec-reviser spec run "$validated_risk_signals_json" "$SPEC_REVISE_INPUTS"
+  uberdev_design_wait "$revise_instance" 600
+  if [ "${spec_reviser_format_invalid:-0}" = 1 ]; then
+    revise_retry_instance="orchestrator-spec-revise-r${revision_cycle}-a2"
+    SPEC_REVISE_FORMAT_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["format_retry"]=True; v["format_example_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$SPEC_REVISE_INPUTS" "$spec_reviser_format_example_path")"
+    uberdev_design_dispatch orchestrator.spec.revise "$revise_retry_instance" spec-reviser spec run "$validated_risk_signals_json" "$SPEC_REVISE_FORMAT_INPUTS"
+    uberdev_design_wait "$revise_retry_instance" 600
+  fi
+
+  # Run the four spec artifact checks above before this re-review.
+  SPEC_REREVIEW_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["spec_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$SPEC_REVIEW_INPUTS" "$spec_path")"
+  review_instance="orchestrator-spec-review-r${revision_cycle}-a1"
+  uberdev_design_dispatch orchestrator.spec.review "$review_instance" spec-reviewer spec run "$validated_risk_signals_json" "$SPEC_REREVIEW_INPUTS"
+  uberdev_design_wait "$review_instance" 600
+  if [ "${spec_reviewer_format_invalid:-0}" = 1 ]; then
+    review_retry_instance="orchestrator-spec-review-r${revision_cycle}-a2"
+    SPEC_REREVIEW_FORMAT_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["format_retry"]=True; v["format_example_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$SPEC_REREVIEW_INPUTS" "$spec_review_format_example_path")"
+    uberdev_design_dispatch orchestrator.spec.review "$review_retry_instance" spec-reviewer spec run "$validated_risk_signals_json" "$SPEC_REREVIEW_FORMAT_INPUTS"
+    uberdev_design_wait "$review_retry_instance" 600
+  fi
+  [ "$spec_review_verdict" = REVISIONS_REQUIRED ] || break
+done
 ```
 
-Verify and review again; loop max 2 revision cycles, using fresh `r2` identities for the second cycle. After 2 still REVISIONS_REQUIRED:
+After 2 cycles still REVISIONS_REQUIRED:
 - `--turbo` mode: log warning, accept current spec, continue.
 - interactive mode: surface findings to user, ask whether to continue or abort.
 
@@ -584,7 +691,7 @@ if [ "${planning_security_dispatched:-0}" = 1 ]; then
 fi
 ```
 
-Parse status before artifact fields. A base-role BLOCKED return is required-planning terminal: require the no-artifact fields and do not dispatch `plan-writer`. A planning-security BLOCKED return is advisory: require the no-artifact fields, log the missing security evidence, and continue without reading or verifying a security artifact. A malformed return gets one fresh `a2` format retry for that edge only.
+Parse status before artifact fields. A base-role BLOCKED return is required-planning terminal: require the no-artifact fields and do not dispatch `plan-writer`. A planning-security BLOCKED return is advisory: require the no-artifact fields, log the missing security evidence, and continue without reading or verifying a security artifact. A malformed return executes the generic format-retry block from Phase 1 with that planning edge's retained inputs, phase `plan`, and fresh `${failed_instance%-a1}-a2` identity; dispatch and wait once for that edge only.
 
 Before dispatching `plan-writer`, validate the three base artifacts by invoking the exact production shim separately for each key:
 
@@ -619,7 +726,22 @@ Parse status first; its BLOCKED return is required-planning terminal and must co
 
 Verification: [ -f "$artifact_path" ], [ "$(wc -c < "$artifact_path")" -gt 500 ], grep -E -- "^## Execution Waves" "$artifact_path" succeeds, content sha matches.
 
-If verification fails: persist feedback and dispatch the same edge once with fresh `orchestrator-plan-write-a2` identity and `verification_feedback_path`. Then fall back to **in-main plan synthesis** (do NOT invoke uberdev:write-plan, whose execution handoff would duplicate-invoke Phase 5):
+Plan verification permits exactly two retries after `a1`, matching the
+run-tree contract's `verification: 2`. Persist feedback separately for each
+failed attempt and execute both fresh identities before fallback:
+
+```bash uberdev-executable edge=orchestrator.plan.write retry=verification
+PLAN_WRITE_A2_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["verification_feedback_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$PLAN_WRITE_INPUTS" "$plan_write_a1_feedback_path")"
+uberdev_design_dispatch orchestrator.plan.write orchestrator-plan-write-a2 plan-writer plan run "$validated_risk_signals_json" "$PLAN_WRITE_A2_INPUTS"
+uberdev_design_wait orchestrator-plan-write-a2 600
+if [ "${plan_write_verification_failed:-0}" = 1 ]; then
+  PLAN_WRITE_A3_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["verification_feedback_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$PLAN_WRITE_INPUTS" "$plan_write_a2_feedback_path")"
+  uberdev_design_dispatch orchestrator.plan.write orchestrator-plan-write-a3 plan-writer plan run "$validated_risk_signals_json" "$PLAN_WRITE_A3_INPUTS"
+  uberdev_design_wait orchestrator-plan-write-a3 600
+fi
+```
+
+If `a3` still fails verification, fall back to **in-main plan synthesis** (do not enter the standalone write-plan workflow, whose execution handoff would duplicate Phase 5):
 1. Read the spec and all three already-validated planning_research artifacts.
 2. Synthesise the wave-decomposed plan yourself in-main, mirroring the write-plan template (For agentic workers note, Goal, Architecture, Tech Stack, Execution Waves summary, Task blocks with Depends on / Wave / Owns / Files / checkbox steps).
 3. Write to $(git rev-parse --show-toplevel)/docs/uberdev/plans/$(date +%Y-%m-%d)-$topic_slug.md.
@@ -638,15 +760,43 @@ uberdev_design_wait orchestrator-plan-review-a1 600
 
 Parse the universal reviewer YAML (`verdict: APPROVE/REVISIONS_REQUIRED/REJECT`, `findings[]`, `confidence`).
 
-If the plan-reviewer's response cannot be parsed as YAML (no `verdict:` key, invalid enum, or YAML syntax error), dispatch the same edge once as `orchestrator-plan-review-a2` with a private `format_example_path`. If still unparseable: log `phase=plan-reviewer status=parse-failure note=proceeding-with-current-plan` to `$RESEARCH_DIR_ABS/orchestrator.log` and continue to Phase 5 with the current plan. Do NOT silently default to `APPROVE` without logging.
+If the plan-reviewer's response cannot be parsed as YAML (no `verdict:` key,
+invalid enum, or YAML syntax error), execute one format retry:
+
+```bash uberdev-executable edge=orchestrator.plan.review retry=format
+PLAN_REVIEW_FORMAT_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["format_retry"]=True; v["format_example_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$PLAN_REVIEW_INPUTS" "$plan_review_format_example_path")"
+uberdev_design_dispatch orchestrator.plan.review orchestrator-plan-review-a2 plan-reviewer plan run "$validated_risk_signals_json" "$PLAN_REVIEW_FORMAT_INPUTS"
+uberdev_design_wait orchestrator-plan-review-a2 600
+```
+
+If still unparseable: log `phase=plan-reviewer status=parse-failure note=proceeding-with-current-plan` to `$RESEARCH_DIR_ABS/orchestrator.log` and continue to Phase 5 with the current plan. Do not silently default to `APPROVE` without logging.
 
 - `verdict: APPROVE` → continue to Phase 5.
 - `verdict: REVISIONS_REQUIRED` → persist findings as `revision_brief_path`, add it to the same flat inputs, and execute:
 
 ```bash uberdev-executable edge=orchestrator.plan.write
 PLAN_REVISION_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["revision_brief_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$PLAN_WRITE_INPUTS" "$revision_brief_path")"
-uberdev_design_dispatch orchestrator.plan.write orchestrator-plan-write-r1 plan-writer plan run "$validated_risk_signals_json" "$PLAN_REVISION_INPUTS"
-uberdev_design_wait orchestrator-plan-write-r1 600
+uberdev_design_dispatch orchestrator.plan.write orchestrator-plan-write-r1-a1 plan-writer plan run "$validated_risk_signals_json" "$PLAN_REVISION_INPUTS"
+uberdev_design_wait orchestrator-plan-write-r1-a1 600
+if [ "${plan_revision_verification_failed:-0}" = 1 ]; then
+  PLAN_REVISION_A2_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["verification_feedback_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$PLAN_REVISION_INPUTS" "$plan_revision_a1_feedback_path")"
+  uberdev_design_dispatch orchestrator.plan.write orchestrator-plan-write-r1-a2 plan-writer plan run "$validated_risk_signals_json" "$PLAN_REVISION_A2_INPUTS"
+  uberdev_design_wait orchestrator-plan-write-r1-a2 600
+fi
+if [ "${plan_revision_verification_failed:-0}" = 1 ]; then
+  PLAN_REVISION_A3_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["verification_feedback_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$PLAN_REVISION_INPUTS" "$plan_revision_a2_feedback_path")"
+  uberdev_design_dispatch orchestrator.plan.write orchestrator-plan-write-r1-a3 plan-writer plan run "$validated_risk_signals_json" "$PLAN_REVISION_A3_INPUTS"
+  uberdev_design_wait orchestrator-plan-write-r1-a3 600
+fi
+
+PLAN_REREVIEW_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["plan_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$PLAN_REVIEW_INPUTS" "$plan_path")"
+uberdev_design_dispatch orchestrator.plan.review orchestrator-plan-review-r1-a1 plan-reviewer plan run "$validated_risk_signals_json" "$PLAN_REREVIEW_INPUTS"
+uberdev_design_wait orchestrator-plan-review-r1-a1 600
+if [ "${plan_rereview_format_invalid:-0}" = 1 ]; then
+  PLAN_REREVIEW_FORMAT_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["format_retry"]=True; v["format_example_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$PLAN_REREVIEW_INPUTS" "$plan_review_format_example_path")"
+  uberdev_design_dispatch orchestrator.plan.review orchestrator-plan-review-r1-a2 plan-reviewer plan run "$validated_risk_signals_json" "$PLAN_REREVIEW_FORMAT_INPUTS"
+  uberdev_design_wait orchestrator-plan-review-r1-a2 600
+fi
 ```
 
   The spec and root-produced planning artifacts are unchanged, so the leaf revalidates and rereads them; no planning-research child is re-run. Hard cap at 1 revision. Then log `phase=plan-reviewer status=revisions-exceeded note=proceeding-with-current-plan` and continue.
@@ -655,6 +805,11 @@ uberdev_design_wait orchestrator-plan-write-r1 600
 Trivial/small tier bypass orchestrator entirely; plan-reviewer is N/A there.
 
 ### Phase 5: subagent-driven-dev
+
+```yaml lineage
+edge_id: orchestrator.sdd
+model_invocation: false
+```
 
 Invoke `uberdev:subagent-driven-dev` via the Skill tool. This transition is `model_invocation: false`: pass `plan_path` (absolute), `spec_path` (absolute), `summary_dir: $RESEARCH_DIR_ABS/`, `tier`, and the five-field `routing_context` carrier from "Routed descendant runtime". Do not call the route resolver at the skill boundary; subagent-driven-dev uses the propagated context when it creates its own routed children. The downstream chain (`subagent-driven-dev → finish-branch`) detects unattended mode via inherited `UBERDEV_TURBO=1` — no per-call `--turbo` arg-forwarding needed (#97). The existing skill handles wave dispatch, two-stage review, and the finish-branch handoff. The post-impl-review reviewer fanout is NOT dispatched from `subagent-driven-dev`; it runs post-PR-push from `/uberdev:review-pr` Phase 1. Findings are advisory at this layer; the auto-fix loop is deferred per Q1 of the design spec.
 

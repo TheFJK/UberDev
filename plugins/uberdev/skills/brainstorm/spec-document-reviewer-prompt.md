@@ -8,16 +8,15 @@
 
 # Spec Document Reviewer Prompt Template
 
-Use this template when dispatching a spec document reviewer subagent.
+Use this checklist for the skill's inline spec self-review. It is not a
+provider edge and must not create a child.
 
 **Purpose:** Verify the spec is complete, consistent, and ready for implementation planning.
 
 **Dispatch after:** Spec document is written to `docs/uberdev/specs/`
 
 ```
-Task tool (general-purpose):
-  description: "Review spec document"
-  prompt: |
+Review spec document:
     You are a spec document reviewer. Verify this spec is complete and ready for planning.
 
     **Spec to review:** [SPEC_FILE_PATH]

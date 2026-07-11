@@ -185,6 +185,11 @@ If you find issues, fix them inline. No need to re-review — just fix and move 
 
 ## Execution Handoff
 
+```yaml lineage
+edge_id: write_plan.sdd
+model_invocation: false
+```
+
 After saving the plan, hand off non-interactively:
 
 - **Default path (subagent-driven):** announce "Plan saved to `docs/uberdev/plans/<filename>.md`. Handing off to `uberdev:subagent-driven-dev`." and invoke that skill. This transition is `model_invocation: false`: when a routing context exists, propagate only `context_file`, `context_sha256`, root `run_id`, `workflow`, and `issue_num`; do not resolve or attach a model, effort, service tier, or sandbox. This is the recommended path and runs without user prompts. **If `--turbo` is in `$ARGUMENTS`** (forwarded from `uberdev:brainstorm` via `/turbo`), invoke as `uberdev:subagent-driven-dev --turbo` so the downstream pipeline (subagent-driven-dev → finish-branch) also stays unattended.

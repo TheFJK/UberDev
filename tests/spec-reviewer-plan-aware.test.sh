@@ -67,6 +67,77 @@ assert_grep "$SUBAGENT_DRIVEN" \
   "subagent-driven-dev SKILL.md names plan_task_description as a spec-reviewer dispatch parameter"
 
 echo
+echo "== SDD runtime handoff, confinement, unwind, and lineage contracts =="
+assert_grep "$SUBAGENT_DRIVEN" \
+  'uberdev_create_child_handoff "\$edge_id" "\$instance_id" "\$inputs_json" "\$risk_json"' \
+  "SDD delegates all handoff allocation and validation to the runtime helper"
+assert_grep "$SUBAGENT_DRIVEN" \
+  'if uberdev_create_child_handoff "\$edge_id" "\$instance_id" "\$inputs_json" "\$risk_json"; then' \
+  "SDD unwinds earlier receipts when later handoff creation fails"
+assert_grep "$SUBAGENT_DRIVEN" \
+  'sdd_validate_instance_dimensions' \
+  "SDD validates wave/task/stage/attempt dimensions before handoff creation"
+assert_grep "$SUBAGENT_DRIVEN" \
+  'sdd_canonicalize_owned_paths' \
+  "SDD canonicalizes allow/deny paths under the worktree before handoff creation"
+assert_grep "$SUBAGENT_DRIVEN" \
+  'SDD_DISPATCH_RECEIPTS' \
+  "SDD records every successful dispatch receipt"
+assert_grep "$SUBAGENT_DRIVEN" \
+  'sdd_unwind_child_receipts' \
+  "SDD unwinds all earlier receipts after a partial fanout failure"
+assert_grep "$SUBAGENT_DRIVEN" \
+  'uberdev_wait_child "\$status" "\$result" 0' \
+  "SDD unwind drains every receipt to truthful terminalization"
+if grep -A1 -F 'edge_id: sdd.finish_branch' "$SUBAGENT_DRIVEN" | grep -qF 'model_invocation: false'; then
+  echo "  PASS  SDD finish-branch transition has stable non-model lineage"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  SDD finish-branch transition lacks stable non-model lineage"
+  FAIL=$((FAIL + 1))
+fi
+
+if grep -qE 'sdd_write_handoff|os\.open\(destination|handoff_file="\$SDD_RUN_DIR' "$SUBAGENT_DRIVEN"; then
+  echo "  FAIL  SDD retains a caller-owned raw handoff writer"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  SDD has no caller-owned raw handoff writer"
+  PASS=$((PASS + 1))
+fi
+
+if python3 - "$SUBAGENT_DRIVEN" <<'PY'
+import re
+import subprocess
+import sys
+from pathlib import Path
+text=Path(sys.argv[1]).read_text(encoding="utf-8")
+match=re.search(r"sdd_unwind_child_receipts\(\) \{.*?\n\}",text,re.S)
+if not match: raise SystemExit("unwind function missing")
+script=f'''set -u
+calls=()
+uberdev_wait_child() {{ calls+=("$1|$2|$3"); [ "${{#calls[@]}}" -ne 1 ]; }}
+SDD_DISPATCH_RECEIPTS=("one|/tmp/status-1|/tmp/result-1" "two|/tmp/status-2|/tmp/result-2")
+{match.group(0)}
+rc=0
+sdd_unwind_child_receipts || rc=$?
+[ "$rc" -eq 1 ]
+[ "${{#calls[@]}}" -eq 2 ]
+[ "${{calls[0]}}" = "/tmp/status-1|/tmp/result-1|0" ]
+[ "${{calls[1]}}" = "/tmp/status-2|/tmp/result-2|0" ]
+[ "${{#SDD_DISPATCH_RECEIPTS[@]}}" -eq 0 ]
+'''
+result=subprocess.run(["bash","-c",script],text=True,capture_output=True)
+if result.returncode: raise SystemExit(result.stderr)
+PY
+then
+  echo "  PASS  SDD partial-fanout unwind drains every receipt after an earlier wait error"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  SDD partial-fanout unwind abandoned a recorded child"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

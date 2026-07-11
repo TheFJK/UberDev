@@ -9,6 +9,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ORCHESTRATOR="$ROOT/plugins/uberdev/skills/orchestrator/SKILL.md"
 PLAN_WRITER="$ROOT/plugins/uberdev/agents/plan-writer.md"
+CODEX_PLAN_WRITER="$ROOT/codex/uberdev-codex/agents/plan-writer.md"
+CODEX_ORCHESTRATOR="$ROOT/codex/uberdev-codex/skills/orchestrator/SKILL.md"
+BRAINSTORM="$ROOT/plugins/uberdev/skills/brainstorm/SKILL.md"
+WRITE_PLAN="$ROOT/plugins/uberdev/skills/write-plan/SKILL.md"
 RESEARCH_CODEBASE="$ROOT/plugins/uberdev/agents/research-codebase.md"
 RESEARCH_TEST_COVERAGE="$ROOT/plugins/uberdev/agents/research-test-coverage.md"
 RESEARCH_CONSTRAINTS="$ROOT/plugins/uberdev/agents/research-constraints.md"
@@ -43,6 +47,9 @@ assert_ge() {
 for required in \
   "$ORCHESTRATOR" \
   "$PLAN_WRITER" \
+  "$CODEX_PLAN_WRITER" \
+  "$BRAINSTORM" \
+  "$WRITE_PLAN" \
   "$RESEARCH_CODEBASE" \
   "$RESEARCH_TEST_COVERAGE" \
   "$RESEARCH_CONSTRAINTS" \
@@ -1675,6 +1682,138 @@ else
 fi
 n=$(grep -cE '^\| small \|.*\| N/A \(orchestrator bypassed\) \|' "$ORCHESTRATOR" || true)
 assert_eq 'F8 small-tier planning research is N/A because small bypasses orchestrator' 1 "$n"
+
+printf '%s\n' '== F9 routed helper, retry identity, cleanup, and lineage contracts =='
+if python3 - "$ORCHESTRATOR" "$BRAINSTORM" "$WRITE_PLAN" "$PLAN_WRITER" "$CODEX_PLAN_WRITER" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+orchestrator, brainstorm, write_plan, plan_writer, codex_plan_writer = (
+    Path(path).read_text(encoding="utf-8") for path in sys.argv[1:]
+)
+
+for name, text in (("orchestrator", orchestrator), ("brainstorm", brainstorm)):
+    if 'uberdev_create_child_handoff "$edge" "$instance" "$inputs_json" "$risks_json"' not in text:
+        raise SystemExit(f"{name}: missing runtime handoff helper")
+    if 'if uberdev_create_child_handoff "$edge" "$instance" "$inputs_json" "$risks_json"; then' not in text:
+        raise SystemExit(f"{name}: helper failure bypasses partial-fanout unwind")
+    if 'UBERDEV_CHILD_HANDOFF' not in text or 'UBERDEV_CHILD_RESULT' not in text or 'UBERDEV_CHILD_STATUS' not in text:
+        raise SystemExit(f"{name}: missing exported runtime paths")
+    if 'children/$instance/status.json' in text or 'children/$instance/result.md' in text:
+        raise SystemExit(f"{name}: wait path is caller-computed instead of receipt-derived")
+    if 'DISPATCH_RECEIPTS' not in text or 'uberdev_unwind_child_receipts' not in text:
+        raise SystemExit(f"{name}: missing partial-fanout receipt unwind")
+    if 'uberdev_wait_child "$status" "$result" 0' not in text:
+        raise SystemExit(f"{name}: unwind does not drain every receipt to a real terminal")
+    if 'os.open(path' in text or 'handoff_dir="$run_dir/handoffs"' in text:
+        raise SystemExit(f"{name}: caller-owned raw handoff writer remains")
+
+required_instances = (
+    "orchestrator-spec-write-a2",
+    "orchestrator-spec-review-a2",
+    "orchestrator-spec-revise-r1-a1",
+    "orchestrator-spec-revise-r1-a2",
+    "orchestrator-spec-review-r1-a1",
+    "orchestrator-spec-review-r1-a2",
+    "orchestrator-spec-revise-r2-a1",
+    "orchestrator-spec-revise-r2-a2",
+    "orchestrator-spec-review-r2-a1",
+    "orchestrator-spec-review-r2-a2",
+    "orchestrator-plan-write-a2",
+    "orchestrator-plan-write-a3",
+    "orchestrator-plan-review-a2",
+    "orchestrator-plan-write-r1-a1",
+    "orchestrator-plan-write-r1-a2",
+    "orchestrator-plan-write-r1-a3",
+    "orchestrator-plan-review-r1-a1",
+    "orchestrator-plan-review-r1-a2",
+)
+for instance in required_instances:
+    if instance not in orchestrator:
+        raise SystemExit(f"orchestrator: missing fresh bounded retry instance {instance}")
+
+if 'orchestrator-plan-write-a4' in orchestrator or 'orchestrator-plan-write-r1-a4' in orchestrator:
+    raise SystemExit("plan verification exceeds intended two retries")
+
+if 'brainstorm.research.prior_art brainstorm-research-prior-art-a1 research-prior-art' not in brainstorm:
+    raise SystemExit("brainstorm prior_art edge role mismatch")
+if 'brainstorm.research.library brainstorm-research-library-a1 research-patterns' not in brainstorm:
+    raise SystemExit("brainstorm library edge role mismatch")
+
+for name, text in (("canonical plan-writer", plan_writer), ("Codex plan-writer", codex_plan_writer)):
+    for forbidden in ("Task tool", "Use the **Task**", "spawn_agent", "internal research subagents", "Internally dispatches"):
+        if forbidden in text:
+            raise SystemExit(f"{name}: delegation prose remains: {forbidden}")
+    if "**Do not delegate.**" not in text:
+        raise SystemExit(f"{name}: leaf prohibition missing")
+
+markers = {
+    "brainstorm.write_plan": brainstorm,
+    "write_plan.sdd": write_plan,
+    "orchestrator.brainstorm.qa": orchestrator,
+    "orchestrator.sdd": orchestrator,
+}
+for edge, text in markers.items():
+    marker = f"edge_id: {edge}\nmodel_invocation: false"
+    if marker not in text:
+        raise SystemExit(f"missing lineage marker: {edge}")
+PY
+then
+  printf '%s\n' '  PASS F9 routed retries/fanout cleanup/role mappings/leaf/lineage are explicit'
+  PASS=$((PASS + 1))
+else
+  printf '%s\n' '  FAIL F9 routed retry and transition contracts are incomplete'
+  FAIL=$((FAIL + 1))
+fi
+
+if grep -qE 'CLAUDE_PLUGIN_ROOT|~/\.claude|\$\{PLUGIN_ROOT\}/|\$PLUGIN_ROOT/' "$CODEX_ORCHESTRATOR"; then
+  printf '%s\n' '  FAIL F9b Codex orchestrator retains a Claude or bare-root path'
+  FAIL=$((FAIL + 1))
+else
+  printf '%s\n' '  PASS F9b Codex orchestrator is porter-safe'
+  PASS=$((PASS + 1))
+fi
+
+if python3 - "$ORCHESTRATOR" "$BRAINSTORM" <<'PY'
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+cases = (
+    (Path(sys.argv[1]), "UBERDEV_DESIGN_DISPATCH_RECEIPTS"),
+    (Path(sys.argv[2]), "UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS"),
+)
+for path, ledger in cases:
+    text = path.read_text(encoding="utf-8")
+    match = re.search(r"uberdev_unwind_child_receipts\(\) \{.*?\n\}", text, re.S)
+    if not match:
+        raise SystemExit(f"{path}: unwind function missing")
+    script = f'''set -u
+calls=()
+uberdev_wait_child() {{ calls+=("$1|$2|$3"); [ "${{#calls[@]}}" -ne 1 ]; }}
+{ledger}=("one|/tmp/status-1|/tmp/result-1" "two|/tmp/status-2|/tmp/result-2")
+{match.group(0)}
+rc=0
+uberdev_unwind_child_receipts || rc=$?
+[ "$rc" -eq 1 ]
+[ "${{#calls[@]}}" -eq 2 ]
+[ "${{calls[0]}}" = "/tmp/status-1|/tmp/result-1|0" ]
+[ "${{calls[1]}}" = "/tmp/status-2|/tmp/result-2|0" ]
+[ "${{#{ledger}[@]}}" -eq 0 ]
+'''
+    completed = subprocess.run(["bash", "-c", script], text=True, capture_output=True)
+    if completed.returncode:
+        raise SystemExit(f"{path}: partial fanout unwind failed: {completed.stderr}")
+PY
+then
+  printf '%s\n' '  PASS F9c partial-fanout unwind drains every recorded receipt after an earlier wait error'
+  PASS=$((PASS + 1))
+else
+  printf '%s\n' '  FAIL F9c partial-fanout unwind abandoned a recorded child'
+  FAIL=$((FAIL + 1))
+fi
 
 printf '\n[orchestrator-plan-flatten] PASS=%s FAIL=%s\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then

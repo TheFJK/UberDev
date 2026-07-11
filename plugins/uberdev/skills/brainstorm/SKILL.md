@@ -94,23 +94,55 @@ set -euo pipefail
 : "${UBERDEV_AGENT_PREPARED_REQUEST_JSON:?missing immutable routing context}"
 UBERDEV_BRAINSTORM_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}"
 . "$UBERDEV_BRAINSTORM_PLUGIN_ROOT/lib/child-dispatch.sh"
+UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS=()
+uberdev_unwind_child_receipts() {
+  local receipt instance remainder status result cleanup_rc=0
+  for receipt in "${UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[@]}"; do
+    instance="${receipt%%|*}"; remainder="${receipt#*|}"
+    status="${remainder%%|*}"; result="${remainder#*|}"
+    # timeout=0 drains to the child's real terminal event and lets the runtime
+    # collect result/manifest truth without fabricating timeout or losing lease ownership.
+    if ! uberdev_wait_child "$status" "$result" 0; then cleanup_rc=1; fi
+  done
+  UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS=()
+  return "$cleanup_rc"
+}
 uberdev_brainstorm_dispatch() {
-  local edge="$1" instance="$2" role="$3" inputs_json="$4" handoff_dir handoff run_dir
-  run_dir="$(python3 -I -B -c 'import json,os,sys; print(os.path.dirname(os.path.dirname(json.loads(sys.argv[1])["context_file"])))' "$UBERDEV_AGENT_PREPARED_REQUEST_JSON")"
-  handoff_dir="$run_dir/handoffs"; mkdir -p "$handoff_dir"; chmod 700 "$handoff_dir"; handoff="$handoff_dir/$instance.json"
-  python3 -I -B - "$UBERDEV_AGENT_PREPARED_REQUEST_JSON" "$edge" "$instance" "$role" "$inputs_json" "$handoff" <<'PY'
-import json,os,sys
-root,edge,instance,role,inputs,path=sys.argv[1:]; r=json.loads(root)
-v={"schema_version":1,"carrier":{"schema_version":1,"run_id":r["run_id"],"workflow":r["workflow"],"issue_num":r["issue_num"],"context_file":r["context_file"],"context_sha256":r["context_sha256"]},"edge_id":edge,"instance_id":instance,"parent_run_id":r["run_id"],"role":role,"phase":"research","risk_scope":"none","risk_signals":[],"inputs":json.loads(inputs)}
-fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
-with os.fdopen(fd,"w") as f: json.dump(v,f,sort_keys=True,separators=(",",":")); f.write("\n")
-PY
-  uberdev_dispatch_child "$edge" "$handoff" "$run_dir/children/$instance/result.md" "$run_dir/children/$instance/status.json" >/dev/null
+  local edge="$1" instance="$2" role="$3" inputs_json="$4"
+  local risks_json='[]' handoff result status create_rc dispatch_rc cleanup_rc
+  : "$role" # the registered edge manifest selects the role
+  if uberdev_create_child_handoff "$edge" "$instance" "$inputs_json" "$risks_json"; then
+    :
+  else
+    create_rc=$?; cleanup_rc=0
+    uberdev_unwind_child_receipts || cleanup_rc=$?
+    [ "$cleanup_rc" -eq 0 ] || echo "error: brainstorm receipt unwind failed after handoff edge=$edge instance=$instance" >&2
+    return "$create_rc"
+  fi
+  handoff="$UBERDEV_CHILD_HANDOFF"
+  result="$UBERDEV_CHILD_RESULT"
+  status="$UBERDEV_CHILD_STATUS"
+  if uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null; then
+    UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS+=("$instance|$status|$result")
+    return 0
+  else
+    dispatch_rc=$?; cleanup_rc=0
+    uberdev_unwind_child_receipts || cleanup_rc=$?
+    [ "$cleanup_rc" -eq 0 ] || echo "error: brainstorm receipt unwind failed after edge=$edge instance=$instance" >&2
+    return "$dispatch_rc"
+  fi
 }
 uberdev_brainstorm_wait() {
-  local instance="$1" run_dir
-  run_dir="$(python3 -I -B -c 'import json,os,sys; print(os.path.dirname(os.path.dirname(json.loads(sys.argv[1])["context_file"])))' "$UBERDEV_AGENT_PREPARED_REQUEST_JSON")"
-  uberdev_wait_child "$run_dir/children/$instance/status.json" "$run_dir/children/$instance/result.md" 300
+  local wanted="$1" receipt instance remainder status result
+  for receipt in "${UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[@]}"; do
+    instance="${receipt%%|*}"
+    if [ "$instance" = "$wanted" ]; then
+      remainder="${receipt#*|}"; status="${remainder%%|*}"; result="${remainder#*|}"
+      uberdev_wait_child "$status" "$result" 300
+      return $?
+    fi
+  done
+  return 2
 }
 BRAINSTORM_RESEARCH_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"issue_body_path":sys.argv[1],"working_dir":sys.argv[2],"summary_dir":sys.argv[3],"research_mode":"general"},separators=(",",":")))' "$brief_path" "$working_dir" "$summary_dir")"
 ```
@@ -122,11 +154,11 @@ uberdev_brainstorm_dispatch brainstorm.research.codebase brainstorm-research-cod
 ```
 
 ```bash uberdev-executable edge=brainstorm.research.prior_art
-uberdev_brainstorm_dispatch brainstorm.research.prior_art brainstorm-research-prior-art-a1 research-patterns "$BRAINSTORM_RESEARCH_INPUTS"
+uberdev_brainstorm_dispatch brainstorm.research.prior_art brainstorm-research-prior-art-a1 research-prior-art "$BRAINSTORM_RESEARCH_INPUTS"
 ```
 
 ```bash uberdev-executable edge=brainstorm.research.library
-uberdev_brainstorm_dispatch brainstorm.research.library brainstorm-research-library-a1 research-prior-art "$BRAINSTORM_RESEARCH_INPUTS"
+uberdev_brainstorm_dispatch brainstorm.research.library brainstorm-research-library-a1 research-patterns "$BRAINSTORM_RESEARCH_INPUTS"
 ```
 
 ```bash uberdev-executable barrier=brainstorm.research
@@ -135,7 +167,18 @@ for instance in brainstorm-research-codebase-a1 brainstorm-research-prior-art-a1
 done
 ```
 
-Only wait for edges actually selected by the heuristic. A malformed result gets one fresh `a2` format retry. Research is advisory in ad-hoc brainstorming except that a requested codebase-grounded design MUST have usable codebase evidence. If no routing context is present (standalone ad-hoc use), research those dimensions in the host context; never fall back to an un-routed native child call.
+Only wait for edges actually selected by the heuristic. For a malformed result,
+retain its selected edge, role, inputs, and `a1` identity, then execute exactly
+one fresh format retry:
+
+```bash uberdev-executable retry=format
+BRAINSTORM_FORMAT_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["format_retry"]=True; v["format_example_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$failed_inputs_json" "$format_example_path")"
+format_retry_instance="${failed_instance%-a1}-a2"
+uberdev_brainstorm_dispatch "$failed_edge" "$format_retry_instance" "$failed_role" "$BRAINSTORM_FORMAT_INPUTS"
+uberdev_brainstorm_wait "$format_retry_instance"
+```
+
+Research is advisory in ad-hoc brainstorming except that a requested codebase-grounded design MUST have usable codebase evidence. If no routing context is present (standalone ad-hoc use), research those dimensions in the host context; never enter an unregistered provider path.
 
 The synthesis step reads the summary text into context verbatim; no re-derivation required.
 
@@ -180,6 +223,11 @@ If the user invoked this skill with `--turbo` (e.g. via `/turbo`), skip the clar
 - Don't propose unrelated refactoring. Stay focused on what serves the current goal.
 
 ## After the Design
+
+```yaml lineage
+edge_id: brainstorm.write_plan
+model_invocation: false
+```
 
 **Documentation:**
 

@@ -18,13 +18,14 @@ inputs:
   stage: "implement | spec-fix | quality-fix"
   attempt: [positive integer]
   sibling_tasks: [task IDs in this wave]
-  allowlist: [repo-relative owned paths]
-  denylist: [repo-relative sibling-owned paths]
+  allowlist: [controller-canonicalized absolute paths confined under the worktree]
+  denylist: [controller-canonicalized absolute sibling-owned paths confined under the worktree]
   failure_context: "[empty on first attempt; exact test/review findings on bounded fixes]"
 ```
 
-Serialize the handoff as data and call `uberdev_dispatch_child`; do not append
-free-form instructions to the generated provider prompt. The
+Pass these inputs through `uberdev_create_child_handoff`, then dispatch only
+the runtime-exported paths; do not append free-form instructions to the
+generated provider prompt. The
 `implementation-worker` role applies the fixed execution contract below to
 these inputs:
 

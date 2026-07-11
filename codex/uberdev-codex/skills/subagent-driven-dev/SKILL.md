@@ -44,42 +44,20 @@ This skill's wave-based controller-only-git approach is intentionally **not** wo
 
 ## Routed child adapter (mandatory)
 
-All model execution in this skill goes through `lib/child-dispatch.sh`. Native
-model-tool and direct provider calls are not executable alternatives. Before
-the first wave, source the adapter and derive the immutable
-carrier from the root request exported by the solve/turbo launcher:
+All provider execution in this skill goes through `lib/child-dispatch.sh`.
+Before the first wave, source the adapter and capture the immutable root risks:
 
 ```bash
 . "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/child-dispatch.sh"
 SDD_ROOT_REQUEST_JSON="${UBERDEV_AGENT_PREPARED_REQUEST_JSON:?missing routed root request}"
-SDD_CARRIER_JSON="$(python3 -I -B -c '
-import json,sys
-r=json.loads(sys.argv[1])
-keys=("run_id","workflow","issue_num","context_file","context_sha256")
-if any(key not in r for key in keys): raise SystemExit(2)
-value={"schema_version":1,**{key:r[key] for key in keys}}
-print(json.dumps(value,sort_keys=True,separators=(",",":")),end="")
-' "$SDD_ROOT_REQUEST_JSON")" || return 2
-SDD_PARENT_RUN_ID="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["run_id"],end="")' "$SDD_CARRIER_JSON")"
-SDD_RUN_DIR="$(python3 -I -B -c 'import json,os,sys;print(os.path.dirname(os.path.dirname(json.loads(sys.argv[1])["context_file"])),end="")' "$SDD_CARRIER_JSON")"
-mkdir -p "$SDD_RUN_DIR/.sdd-handoffs"
-chmod 700 "$SDD_RUN_DIR/.sdd-handoffs"
+SDD_WORKTREE="$(git rev-parse --show-toplevel)"
+SDD_RISK_JSON="$(python3 -I -B -c 'import json,sys; r=json.loads(sys.argv[1]); print(json.dumps(r.get("root_decision",{}).get("risk_signals",r.get("risk_signals",[])),separators=(",",":")),end="")' "$SDD_ROOT_REQUEST_JSON")"
 ```
 
-For every child, serialize one closed handoff with `python3 -I -B` (JSON data,
-never shell interpolation), create it mode `0600`, and call:
-
-```bash
-uberdev_dispatch_child "$edge_id" "$handoff_file" \
-  "$SDD_RUN_DIR/children/$instance_id/result.md" \
-  "$SDD_RUN_DIR/children/$instance_id/status.json"
-```
-
-The handoff is schema v1 and contains exactly `carrier`, `edge_id`,
-`instance_id`, `parent_run_id`, `role`, `phase`, `risk_scope`, `risk_signals`,
-and `inputs`. Inputs contain context only—requirements, reports, commit
-identities, relative allowlists, and artifact paths. They never contain model,
-route, effort, service-tier, sandbox, environment, shell, or command fields.
+The runtime helper validates the registered edge, immutable carrier, instance,
+inputs, risks, confinement, and allocation. It atomically creates the private
+handoff and exports `UBERDEV_CHILD_HANDOFF`, `UBERDEV_CHILD_RESULT`, and
+`UBERDEV_CHILD_STATUS`; callers never compute or write those paths.
 
 Instance IDs are allocation identities and are never reused:
 
@@ -96,40 +74,91 @@ dynamic dimensions. The four stable routing edges are:
 | `sdd.task.quality_review` | `code-reviewer` | required |
 | `sdd.premerge.test_review` | `pr-test-analyzer` | advisory; large tier only |
 
-Use this data-only writer for every edge (the controller constructs
-`inputs_json` from the corresponding prompt template):
+Before any helper call, validate all instance dimensions and canonicalize the
+task ownership lists. Ownership paths arrive repo-relative, but child inputs
+carry absolute canonical paths confined under the current worktree. Existing
+symlink ancestors are resolved before the confinement check; absolute inputs,
+empty paths, escapes, and allow/deny overlap are rejected.
 
 ```bash
-sdd_write_handoff() {
-  local edge_id="$1" instance_id="$2" role="$3" phase="$4" inputs_json="$5" destination="$6"
-  python3 -I -B - "$SDD_CARRIER_JSON" "$SDD_PARENT_RUN_ID" "$edge_id" "$instance_id" "$role" "$phase" "$inputs_json" "$destination" "$SDD_ROOT_REQUEST_JSON" <<'PY'
+sdd_validate_instance_dimensions() {
+  local wave="$1" task="$2" stage="$3" attempt="$4"
+  case "$wave" in ''|*[!0-9]*|0) return 2 ;; esac
+  case "$task" in ''|*[!0-9]*|0) return 2 ;; esac
+  case "$attempt" in ''|*[!0-9]*|0) return 2 ;; esac
+  case "$stage" in implement|spec-review|spec-fix|quality-review|quality-fix|test-review) ;; *) return 2 ;; esac
+}
+
+sdd_canonicalize_owned_paths() {
+  local inputs_json="$1"
+  python3 -I -B - "$SDD_WORKTREE" "$inputs_json" <<'PY'
 import json,os,sys
-carrier,parent,edge,instance,role,phase,inputs,destination,root_raw=sys.argv[1:]
-root=json.loads(root_raw); risks=root.get("root_decision",{}).get("risk_signals",root.get("risk_signals",[]))
-value={"schema_version":1,"carrier":json.loads(carrier),"edge_id":edge,"instance_id":instance,"parent_run_id":parent,"role":role,"phase":phase,"risk_scope":"subtask","risk_signals":risks,"inputs":json.loads(inputs)}
-raw=json.dumps(value,sort_keys=True,separators=(",",":")).encode()
-fd=os.open(destination,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
-with os.fdopen(fd,"wb") as stream: stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+root=os.path.realpath(sys.argv[1]); value=json.loads(sys.argv[2])
+def canon(key):
+    raw=value.get(key,[])
+    if not isinstance(raw,list) or any(not isinstance(p,str) or not p or os.path.isabs(p) for p in raw): raise SystemExit(2)
+    out=[]
+    for item in raw:
+        path=os.path.realpath(os.path.join(root,item))
+        if os.path.commonpath((root,path)) != root: raise SystemExit(2)
+        out.append(path)
+    if len(out)!=len(set(out)): raise SystemExit(2)
+    value[key]=out
+    return set(out)
+allowed=canon("allowlist"); denied=canon("denylist")
+if allowed & denied: raise SystemExit(2)
+print(json.dumps(value,sort_keys=True,separators=(",",":")),end="")
 PY
 }
 
+SDD_DISPATCH_RECEIPTS=()
+sdd_unwind_child_receipts() {
+  local receipt instance remainder status result cleanup_rc=0
+  for receipt in "${SDD_DISPATCH_RECEIPTS[@]}"; do
+    instance="${receipt%%|*}"; remainder="${receipt#*|}"
+    status="${remainder%%|*}"; result="${remainder#*|}"
+    # timeout=0 drains to real terminal truth; runtime owns cancellation/CAS,
+    # result collection, manifest terminal, and exact lease release.
+    if ! uberdev_wait_child "$status" "$result" 0; then cleanup_rc=1; fi
+  done
+  SDD_DISPATCH_RECEIPTS=()
+  return "$cleanup_rc"
+}
+
 sdd_dispatch_prepared() {
-  local stage_kind="$1" handoff="$2" result="$3" status="$4"
-  case "$stage_kind" in
-    implement|spec-fix|quality-fix)
-      uberdev_dispatch_child "sdd.task.implement" "$handoff" "$result" "$status"
-      ;;
-    spec-review)
-      uberdev_dispatch_child "sdd.task.spec_review" "$handoff" "$result" "$status"
-      ;;
-    quality-review)
-      uberdev_dispatch_child "sdd.task.quality_review" "$handoff" "$result" "$status"
-      ;;
-    test-review)
-      uberdev_dispatch_child "sdd.premerge.test_review" "$handoff" "$result" "$status"
-      ;;
-    *) return 2 ;;
-  esac
+  local edge_id="$1" instance_id="$2" inputs_json="$3" risk_json="$4"
+  local handoff result status create_rc dispatch_rc cleanup_rc
+  if uberdev_create_child_handoff "$edge_id" "$instance_id" "$inputs_json" "$risk_json"; then
+    :
+  else
+    create_rc=$?; cleanup_rc=0
+    sdd_unwind_child_receipts || cleanup_rc=$?
+    [ "$cleanup_rc" -eq 0 ] || echo "error: SDD receipt unwind failed after handoff edge=$edge_id instance=$instance_id" >&2
+    return "$create_rc"
+  fi
+  handoff="$UBERDEV_CHILD_HANDOFF"; result="$UBERDEV_CHILD_RESULT"; status="$UBERDEV_CHILD_STATUS"
+  if uberdev_dispatch_child "$edge_id" "$handoff" "$result" "$status"; then
+    SDD_DISPATCH_RECEIPTS+=("$instance_id|$status|$result")
+    return 0
+  else
+    dispatch_rc=$?; cleanup_rc=0
+    sdd_unwind_child_receipts || cleanup_rc=$?
+    [ "$cleanup_rc" -eq 0 ] || echo "error: SDD receipt unwind failed after edge=$edge_id instance=$instance_id" >&2
+    return "$dispatch_rc"
+  fi
+}
+
+sdd_wait_receipt() {
+  local wanted="$1" timeout="$2" receipt instance remainder status result
+  for receipt in "${SDD_DISPATCH_RECEIPTS[@]}"; do
+    instance="${receipt%%|*}"
+    if [ "$instance" = "$wanted" ]; then
+      remainder="${receipt#*|}"; status="${remainder%%|*}"; result="${remainder#*|}"
+      uberdev_wait_child "$status" "$result" "$timeout"
+      return $?
+    fi
+  done
+  return 2
 }
 ```
 
@@ -137,26 +166,26 @@ Executable batch shape (substitute the edge/role/stage from the table):
 
 ```bash
 # Dispatch the complete batch first.
+SDD_DISPATCH_RECEIPTS=()
 for task_id in $SDD_BATCH_TASK_IDS; do
+  sdd_validate_instance_dimensions "$wave" "$task_id" "$stage" "$attempt" || return 2
   instance_id="sdd-w${wave}-t${task_id}-${stage}-a${attempt}"
-  handoff_file="$SDD_RUN_DIR/.sdd-handoffs/$instance_id.json"
-  result_file="$SDD_RUN_DIR/children/$instance_id/result.md"
-  status_file="$SDD_RUN_DIR/children/$instance_id/status.json"
-  sdd_write_handoff "$edge_id" "$instance_id" "$role" "$phase" "$inputs_json" "$handoff_file"
-  sdd_dispatch_prepared "$stage" "$handoff_file" "$result_file" "$status_file" || return $?
+  task_inputs_json="$(sdd_inputs_for_task "$task_id")" || return 2
+  task_inputs_json="$(sdd_canonicalize_owned_paths "$task_inputs_json")" || return 2
+  sdd_dispatch_prepared "$edge_id" "$instance_id" "$task_inputs_json" "$SDD_RISK_JSON" || return $?
 done
 # Only after every dispatch receipt, wait for the complete batch.
 for task_id in $SDD_BATCH_TASK_IDS; do
   instance_id="sdd-w${wave}-t${task_id}-${stage}-a${attempt}"
-  uberdev_wait_child "$SDD_RUN_DIR/children/$instance_id/status.json" \
-    "$SDD_RUN_DIR/children/$instance_id/result.md" "$SDD_CHILD_TIMEOUT" || return $?
+  sdd_wait_receipt "$instance_id" "$SDD_CHILD_TIMEOUT" || return $?
 done
 ```
 
 For every parallel batch, issue every `uberdev_dispatch_child` call first.
-Only after the complete batch has receipts may the controller call
-`uberdev_wait_child STATUS RESULT TIMEOUT` for each child. A dispatch failure
-cancels the batch gate; a required wait/review failure blocks the task. The
+Only after the complete batch has receipts may the controller wait for each
+child. If a later dispatch fails, `sdd_unwind_child_receipts` drains every
+earlier receipt to a truthful terminal and collects it before returning the
+dispatch error; it never abandons a running lease. A required wait/review failure blocks the task. The
 large-tier test-review edge preserves Step 4.5's advisory logging behavior.
 
 ```dot
@@ -209,14 +238,14 @@ digraph when_to_use {
 
    **Step 4.5 — Pre-merge `pr-test-analyzer` dispatch (large-tier only, requires `spec_path` and `summary_dir`).** Runs once after all waves complete and before the Step 5 handoff. If `tier == "large"` AND `spec_path` is non-empty AND `summary_dir` is non-empty, securely pre-create the regular artifact file (the handoff validator rejects directory-valued context and requires absolute artifact paths to exist), then dispatch edge `sdd.premerge.test_review` to role `pr-test-analyzer`, stage `test-review`, attempt 1:
 
-   ```bash
-   SDD_TEST_REVIEW_OUTPUT="${summary_dir%/}/pr-test-analyzer.md"
-   python3 -I -B - "$SDD_TEST_REVIEW_OUTPUT" <<'PY'
+```bash
+SDD_TEST_REVIEW_OUTPUT="${summary_dir%/}/pr-test-analyzer.md"
+python3 -I -B - "$SDD_TEST_REVIEW_OUTPUT" <<'PY'
 import os,sys
 fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
 os.close(fd)
 PY
-   ```
+```
 
    Its context inputs are `commit_range`, `spec_path`, `plan_path`, the verbatim acceptance-criteria section, and `output_path=$SDD_TEST_REVIEW_OUTPUT`. `summary_dir` is a controller gate, never a child input. Wait with `uberdev_wait_child` before Step 5, then copy the successful immutable child result to `output_path` byte-for-byte and keep mode `0600`; on dispatch/wait failure, remove the empty pre-created output. Do NOT parse or transform the YAML — the artifact on disk IS the integration point. This is one advisory routed child, not the post-push reviewer fanout.
 
@@ -224,6 +253,11 @@ PY
    1. The result verdict is `APPROVE` — artifact is on disk; no log entry.
    2. The result verdict is `REJECT` — the agent completed analysis and found gaps; artifact IS on disk; log the `REJECT` verdict to `<summary_dir>/orchestrator.log` with a `REJECT` tag.
    3. Dispatch/wait fails or no valid result envelope exists — log `FAILURE` and the cause to `<summary_dir>/orchestrator.log` (best-effort; artifact may be absent or partial).
+
+```yaml lineage
+edge_id: sdd.finish_branch
+model_invocation: false
+```
 
 5. Hand off to `uberdev:finish-branch` (no flag arg). The branch close-out detects unattended mode via the inherited `UBERDEV_TURBO=1` environment variable from the selected dispatch backend — under that signal, `finish-branch` auto-selects "Push and Create PR" without prompting (#97). For large tier, `pr-test-analyzer` was dispatched in Step 4.5 (above) and its findings are now on disk at `<summary_dir>/pr-test-analyzer.md`. `finish-branch` will discover and include them in the PR body's `## Reviewer findings summary` section. Post-implementation reviewer fanout is hosted by `/uberdev:review-pr` Phase 1 (chained from `finish-branch` after PR push); no reviewer *fanout* is dispatched from `subagent-driven-dev` itself (see Step 4.5 for the carve-out vs the retired `uberdev:post-impl-review` fanout).
 
