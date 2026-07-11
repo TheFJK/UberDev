@@ -194,8 +194,36 @@ assert_grep "$SOLVE_PIPELINE" \
 assert_grep "$SOLVE_PIPELINE" \
   'ultra is Codex-only' \
   "Claude-backed resolution rejects public ultra before claims"
+WINDOWS_PATH_TMP="$(mktemp -d)"
+mkdir "$WINDOWS_PATH_TMP/bin"
+cat >"$WINDOWS_PATH_TMP/bin/cygpath" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >"$CYGPATH_LOG"
+[ "$1" = -m ] || exit 2
+printf 'C:/native-temp\n'
+SH
+chmod +x "$WINDOWS_PATH_TMP/bin/cygpath"
+WINDOWS_TMP_BLOCK="$(awk '/^_UBERDEV_TMP_BASE=/{capture=1} capture&&/^if ! UBERDEV_TMPDIR=/{exit} capture{print}' "$SOLVE_PIPELINE")"
+WINDOWS_NORMALIZED="$(MSYSTEM=MINGW64 CYGPATH_LOG="$WINDOWS_PATH_TMP/cygpath.log" PATH="$WINDOWS_PATH_TMP/bin:$PATH" TMPDIR=/tmp/posix-temp \
+  bash -c "$WINDOWS_TMP_BLOCK
+printf '%s' \"\$_UBERDEV_TMP_BASE\"")"
+if [ "$WINDOWS_NORMALIZED" = 'C:/native-temp' ] \
+   && grep -q '^-m /tmp/posix-temp$' "$WINDOWS_PATH_TMP/cygpath.log"; then
+  echo "  PASS  Git Bash temp base is normalized for native Windows Python"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  Git Bash temp base was not normalized for native Windows Python"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$WINDOWS_PATH_TMP"
 WINDOWS_STAGING_TMP="$(mktemp -d)"
-if python3 -I -B - "$SOLVE_PIPELINE" "$WINDOWS_STAGING_TMP" <<'PY'
+WINDOWS_STAGING_BASE="$WINDOWS_STAGING_TMP"
+case "${MSYSTEM:-}:$(uname -s 2>/dev/null)" in
+  MINGW*:*|MSYS*:*|CYGWIN*:*|*:MINGW*|*:MSYS*|*:CYGWIN*)
+    WINDOWS_STAGING_BASE="$(cygpath -m "$WINDOWS_STAGING_TMP")"
+    ;;
+esac
+if python3 -I -B - "$SOLVE_PIPELINE" "$WINDOWS_STAGING_BASE" <<'PY'
 import contextlib
 import io
 import os

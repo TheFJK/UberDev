@@ -339,6 +339,21 @@ fi
 # roots such as /tmp are commonly root-owned and cannot safely host immutable
 # contexts or predictable redirect targets directly.
 _UBERDEV_TMP_BASE="${TMPDIR:-/tmp}"
+case "${MSYSTEM:-}:$(uname -s 2>/dev/null)" in
+  MINGW*:*|MSYS*:*|CYGWIN*:*|*:MINGW*|*:MSYS*|*:CYGWIN*)
+    if command -v cygpath >/dev/null 2>&1; then
+      _UBERDEV_TMP_BASE="$(cygpath -m "$_UBERDEV_TMP_BASE")" || {
+        echo "error: could not normalize native-Windows temp base: ${TMPDIR:-/tmp}" >&2
+        echo "no claims written; no agents dispatched" >&2
+        exit 1
+      }
+    else
+      echo "error: cygpath is required to normalize the Git Bash temp directory for native Python" >&2
+      echo "no claims written; no agents dispatched" >&2
+      exit 1
+    fi
+    ;;
+esac
 if ! UBERDEV_TMPDIR="$(python3 -I -B -c '
 import os,stat,sys,tempfile
 base=os.path.realpath(sys.argv[1])
