@@ -41,6 +41,33 @@ PY
   printf '%s' "$canonical"
 }
 
+_uberdev_child_inputs_run() {
+  local manifest_path helper output
+  manifest_path="$(_uberdev_child_manifest_path)" || return 2
+  helper="$_UBERDEV_CHILD_LIB_DIR/child-inputs.py"
+  [ -f "$helper" ] || { _uberdev_child_error 'child inputs helper missing'; return 2; }
+  output="$(python3 -I -B "$helper" --manifest "$manifest_path" "$@")" || return $?
+  printf '%s' "$output"
+}
+
+# Build and validate manifest-derived provider inputs without duplicating the
+# schema at callsites. Filesystem ownership/scope checks remain in the immutable
+# handoff boundary below, immediately before dispatch.
+uberdev_child_inputs_build() {
+  [ "$#" -ge 1 ] || { _uberdev_child_error 'child inputs build expects EDGE_ID [KEY JSON_VALUE]...'; return 2; }
+  _uberdev_child_inputs_run build "$@"
+}
+
+uberdev_child_inputs_validate() {
+  [ "$#" -eq 2 ] || { _uberdev_child_error 'child inputs validate expects EDGE_ID INPUTS_JSON'; return 2; }
+  _uberdev_child_inputs_run validate "$@"
+}
+
+uberdev_child_inputs_format_retry() {
+  [ "$#" -eq 3 ] || { _uberdev_child_error 'format retry expects EDGE_ID BASE_INPUTS_JSON FORMAT_EXAMPLE_PATH'; return 2; }
+  _uberdev_child_inputs_run format-retry "$@"
+}
+
 # Prepare an honest root carrier for workflows entered outside /solve or
 # /turbo. Review-pr uses its positive PR number; standalone simplify uses 0 to
 # mean "no GitHub subject". The persisted context remains the routing SSOT.
