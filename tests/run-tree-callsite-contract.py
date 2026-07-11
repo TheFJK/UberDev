@@ -31,6 +31,7 @@ LITERAL_DISPATCH = re.compile(
 )
 ROW_KEYS = {"inputs", "optional_inputs", "allowed_workflows", "risk_scope", "risk_argument"}
 WORKFLOWS = {"review-pr", "simplify", "solve", "turbo"}
+FORMAT_OPTIONALS = {"format_retry", "format_example_path"}
 
 
 class ContractFailure(Exception):
@@ -63,6 +64,17 @@ def _payload_keys(command: str) -> set[str]:
     if "jq -cn" in command:
         return set(re.findall(r"(?:\{|,)\s*([a-z][a-z0-9_]*)\s*:", command))
     return set()
+
+
+def _augment_keys(command: str) -> set[str]:
+    if "json.loads" not in command:
+        return set()
+    return set(re.findall(r'v\["([a-z][a-z0-9_]*)"\]\s*=', command))
+
+
+def _format_augment(edge_or_group: str, keys: set[str]) -> None:
+    if keys != FORMAT_OPTIONALS:
+        fail(f"{edge_or_group}: retry augment mismatch expected={sorted(FORMAT_OPTIONALS)} actual={sorted(keys)}")
 
 
 def _literal_payloads(fences: list[tuple[str, str]]) -> dict[str, set[str]]:
@@ -154,6 +166,105 @@ def _post_review_payloads(bash: str, declared: set[str]) -> dict[str, set[str]]:
     return {edge: general if edge == "review_pr.review.general" else standard for edge in enumerated}
 
 
+def _post_review_retry_edges(bash: str, raw_rows: dict[str, Any]) -> set[str]:
+    conditional = re.search(
+        r'if \[ "\$FAILED_REVIEW_EDGE" = review_pr\.review\.general \]; then(.*?)^\s*else(.*?)^\s*fi',
+        bash,
+        re.MULTILINE | re.DOTALL,
+    )
+    repair = re.search(
+        r'^\s*post_review_record "\$FAILED_REVIEW_EDGE" "\$REPAIR_INSTANCE" "\$REPAIR_INPUTS" '
+        r"'\[\]' \"\$REPAIR_PREFIX\.records\"\s*$",
+        bash,
+        re.MULTILINE,
+    )
+    if not conditional or not repair:
+        fail("post-impl-review: missing executable review repair")
+    variants = {
+        edge: _payload_keys(conditional.group(1) if edge == "review_pr.review.general" else conditional.group(2))
+        for edge in raw_rows
+    }
+    for edge, actual in variants.items():
+        required = set(raw_rows[edge]["inputs"])
+        allowed = required | set(raw_rows[edge]["optional_inputs"])
+        if "format_retry" not in actual or not required <= actual or not actual <= allowed:
+            fail(f"{edge}: retry augment mismatch actual={sorted(actual)}")
+    return set(raw_rows)
+
+
+def _clone_retry_edges(relative: str, bash: str, raw_rows: dict[str, Any]) -> set[str]:
+    augmentations: dict[str, set[str]] = {}
+    for line in bash.splitlines():
+        assignment = re.match(r"\s*([A-Z][A-Z0-9_]*)=", line)
+        keys = _augment_keys(line)
+        if assignment and keys & FORMAT_OPTIONALS:
+            augmentations[assignment.group(1)] = keys
+
+    proven: set[str] = set()
+    for line in bash.splitlines():
+        if not LITERAL_DISPATCH.match(line):
+            continue
+        edges = EDGE_LITERAL.findall(line)
+        variables = {
+            variable
+            for variable in re.findall(r"\$\{?([A-Z][A-Z0-9_]*)", line)
+            if variable in augmentations
+        }
+        if len(edges) == 1 and len(variables) == 1:
+            edge = edges[0]
+            _format_augment(edge, augmentations[next(iter(variables))])
+            proven.add(edge)
+
+    if relative.endswith("brainstorm/SKILL.md"):
+        keys = augmentations.get("BRAINSTORM_FORMAT_INPUTS")
+        if keys is None:
+            fail("brainstorm: missing retry augmentation")
+        _format_augment("brainstorm dynamic retry", keys)
+        dynamic = re.search(
+            r'^\s*uberdev_brainstorm_dispatch "\$failed_edge" "\$format_retry_instance" '
+            r'"\$failed_role" "\$BRAINSTORM_FORMAT_INPUTS"\s*$',
+            bash,
+            re.MULTILINE,
+        )
+        if not dynamic:
+            fail("brainstorm: missing dynamic retry dispatch")
+        proven.update(raw_rows)
+    elif relative.endswith("orchestrator/SKILL.md"):
+        keys = augmentations.get("FORMAT_RETRY_INPUTS")
+        if keys is None:
+            fail("orchestrator: missing research retry augmentation")
+        _format_augment("orchestrator dynamic retry", keys)
+        dynamic = re.search(
+            r'^\s*uberdev_design_dispatch "\$failed_edge" "\$format_retry_instance" '
+            r'"\$failed_role" "\$failed_phase" none "\$failed_risks_json" "\$FORMAT_RETRY_INPUTS"\s*$',
+            bash,
+            re.MULTILINE,
+        )
+        if not dynamic:
+            fail("orchestrator: missing dynamic retry dispatch")
+        proven.update(
+            edge
+            for edge in raw_rows
+            if edge.startswith("orchestrator.research.") and edge != "orchestrator.research.followup"
+        )
+    return proven
+
+
+def validate_retry_contracts(relative: str, text: str, raw_rows: dict[str, Any]) -> None:
+    bash = "\n".join(body for _info, body in BASH_FENCE.findall(text))
+    expected = {
+        edge
+        for edge, row in raw_rows.items()
+        if FORMAT_OPTIONALS <= set(row["optional_inputs"])
+    }
+    if relative.endswith("post-impl-review/SKILL.md"):
+        proven = _post_review_retry_edges(bash, raw_rows)
+    else:
+        proven = _clone_retry_edges(relative, bash, raw_rows)
+    if proven != expected:
+        fail(f"{relative}: retry edge mismatch expected={sorted(expected)} executable={sorted(proven)}")
+
+
 def _simplify_payloads(bash: str, declared: set[str]) -> dict[str, set[str]]:
     loops = re.finditer(r"for LENS in ([^;\n]+); do\n(.*?)^\s*done", bash, re.MULTILINE | re.DOTALL)
     selected: tuple[list[str], str] | None = None
@@ -205,6 +316,7 @@ def executable_payloads(relative: str, text: str, raw_rows: dict[str, Any]) -> d
             f"{relative}: executable edge mismatch "
             f"missing={sorted(declared - set(payloads))} extra={sorted(set(payloads) - declared)}"
         )
+    validate_retry_contracts(relative, text, raw_rows)
     return payloads
 
 
@@ -335,6 +447,15 @@ def validate(
         }
         if item != expected_row:
             fail(f"source/manifest contract mismatch: {edge}")
+        source_format_retry = FORMAT_OPTIONALS <= set(item["optional_inputs"])
+        manifest_retry = manifest.get("retry", {})
+        manifest_format_retry = isinstance(manifest_retry, dict) and manifest_retry.get("format") == 1
+        if source_format_retry != manifest_format_retry:
+            fail(f"source/manifest format retry mismatch: {edge}")
+        if source_format_retry:
+            optional_schema = manifest.get("optional_inputs", {})
+            if optional_schema.get("format_retry") != "boolean" or optional_schema.get("format_example_path") != "path":
+                fail(f"source/manifest format retry schema mismatch: {edge}")
     return rows
 
 
