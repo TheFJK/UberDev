@@ -4,6 +4,10 @@ name = "uberdev-uberthink-moderator"
 description = """
 dispatched by /uberthink — Wave-2 Co-STORM gap-gate (identifies what the per-island divergence missed)
 """
+model = "gpt-5.6-sol"
+model_reasoning_effort = "medium"
+sandbox_mode = "read-only"
+features.multi_agent = false
 developer_instructions = """
 # Uberthink Moderator (Co-STORM Gap-Gate)
 

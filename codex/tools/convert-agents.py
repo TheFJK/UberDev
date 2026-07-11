@@ -2,7 +2,7 @@
 """
 convert-agents.py — Claude Code agents/*.md → Codex ~/.codex/agents/*.toml
 
-UberDev ships 42 subagents as Claude-Code-style markdown (YAML frontmatter +
+UberDev ships 44 subagents as Claude-Code-style markdown (YAML frontmatter +
 body). Codex CLI's subagent system reads standalone TOML files from
 ~/.codex/agents/ (personal) or .codex/agents/ (project). This converter bridges
 the two formats.
@@ -11,8 +11,8 @@ Field mapping (see codex/README.md §Agent port mapping for the rationale):
   name            → uberdev-<name>               (required; namespaced)
   description     → description                  (required)
   <body>          → developer_instructions       (required, triple-quoted)
-  model: inherit  → (omitted — inherits default) [41 of 42 agents]
-  model: haiku    → model = "gpt-5.4-mini"       [1 agent: research-test-coverage]
+  source name     → RFC 0013 role-default model + reasoning + sandbox profile
+  delegation_mode: leaf → features.multi_agent = false
   color           → dropped                      (Claude-Code UI hint only)
   allowed-tools   → dropped                      (Codex uses sandbox/approval model)
   tools           → dropped                      (same)
@@ -33,6 +33,7 @@ installer cannot silently replace a working agent namespace with zero agents.
 from __future__ import annotations
 
 import re
+import json
 import sys
 from pathlib import Path
 
@@ -44,19 +45,7 @@ from pathlib import Path
 # trip this. The parser below mirrors Claude's lenient reading instead.
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Codex model mapping. Claude's model: inherit → Codex inherits the session
-# model by simply omitting the `model` key. The lone non-inherit agent
-# (research-test-coverage.md, model: haiku) maps to a Codex fast-tier model.
-# Haiku is Claude's smallest/fastest coding tier; gpt-5.4-mini is OpenAI's
-# current lower-cost/faster subagent tier as of 2026-07. Model names evolve —
-# revisit on each OpenAI release.
-# ─────────────────────────────────────────────────────────────────────────────
-CODEX_MODEL_FOR_CLAUDE = {
-    "haiku": "gpt-5.4-mini",
-    # inherit → omit `model` key entirely (default behaviour); not listed here.
-    # sonnet/opus/etc. are never used by UberDev agents, so unmapped → warning.
-}
+POLICY_FILENAME = "model-routing-v1.json"
 
 FRONTMATTER_RE = re.compile(r"\A---[ \t]*\n(.*?)\n---[ \t]*(?:\n|\Z)(.*)\Z", re.DOTALL)
 
@@ -224,20 +213,37 @@ def parse_agent(md_path: Path) -> tuple[dict, str]:
     return fm, body
 
 
-def codex_model_for(claude_model: str | None, source: str) -> str | None:
-    """Return the Codex model string, or None to inherit the session model."""
-    if claude_model is None or claude_model == "inherit":
-        return None
-    mapped = CODEX_MODEL_FOR_CLAUDE.get(claude_model)
-    if mapped is None:
-        # Unknown non-inherit model: warn but don't fail the whole run. Fall
-        # back to inherit so the agent still works (just on the session model).
-        print(
-            f"warning: {source}: unmapped model '{claude_model}' → "
-            f"inheriting session model",
-            file=sys.stderr,
-        )
-    return mapped
+def load_routing_policy(path: Path) -> dict:
+    """Load the canonical RFC 0013 routing policy used by generated profiles."""
+    try:
+        policy = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot load routing policy {path}: {exc}") from exc
+    if not isinstance(policy.get("routes"), dict) or not isinstance(
+        policy.get("roles"), dict
+    ):
+        raise ValueError(f"routing policy {path} must define routes and roles")
+    return policy
+
+
+def role_profile(policy: dict, role: str, source: str) -> tuple[str, str, str]:
+    """Resolve one role's default model, effort, and sandbox from the policy."""
+    role_policy = policy["roles"].get(role)
+    if not isinstance(role_policy, dict):
+        raise ValueError(f"{source}: no routing policy for role '{role}'")
+    if role_policy.get("delegation_mode") != "leaf":
+        raise ValueError(f"{source}: role '{role}' must use delegation_mode=leaf")
+    route_name = role_policy.get("route")
+    route = policy["routes"].get(route_name)
+    codex = route.get("codex") if isinstance(route, dict) else None
+    if not isinstance(codex, dict):
+        raise ValueError(f"{source}: role '{role}' references invalid route {route_name!r}")
+    model = codex.get("model")
+    effort = codex.get("reasoning_effort")
+    sandbox = role_policy.get("sandbox_ceiling")
+    if not all(isinstance(value, str) and value for value in (model, effort, sandbox)):
+        raise ValueError(f"{source}: incomplete routing profile for role '{role}'")
+    return model, effort, sandbox
 
 
 def codex_port_text(value: str) -> str:
@@ -324,7 +330,7 @@ def toml_block(value: str) -> str:
     return f'"""{escaped}"""'
 
 
-def render_toml(fm: dict, body: str, source: str) -> str:
+def render_toml(fm: dict, body: str, source: str, policy: dict) -> str:
     """Render the full Codex agent TOML document."""
     lines: list[str] = []
 
@@ -344,9 +350,14 @@ def render_toml(fm: dict, body: str, source: str) -> str:
     lines.append(f"name = {toml_escape_scalar(name)}")
     lines.append(f"description = {toml_block(description)}")
 
-    model = codex_model_for(fm.get("model"), source)
-    if model is not None:
-        lines.append(f"model = \"{model}\"")
+    model, effort, sandbox = role_profile(policy, source_name, source)
+    lines.append(f"model = {toml_escape_scalar(model)}")
+    lines.append(f"model_reasoning_effort = {toml_escape_scalar(effort)}")
+    lines.append(f"sandbox_mode = {toml_escape_scalar(sandbox)}")
+    # Codex 0.144.1 rejects agents.max_depth=0. A role config is a regular
+    # config layer, so disabling the stable multi_agent feature is the
+    # supported per-role leaf constraint.
+    lines.append("features.multi_agent = false")
 
     # developer_instructions is the agent's system-prompt body. Required by Codex.
     lines.append(f"developer_instructions = {toml_block(body)}")
@@ -373,11 +384,17 @@ def convert_dir(src_dir: Path, out_dir: Path) -> tuple[int, int]:
         print(f"error: no *.md agents found in {src_dir}", file=sys.stderr)
         return 0, 1
 
+    try:
+        policy = load_routing_policy(src_dir.parent / "policy" / POLICY_FILENAME)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 0, 1
+
     for md_path in md_files:
         source_name = md_path.name
         try:
             fm, body = parse_agent(md_path)
-            toml_text = render_toml(fm, body, source_name)
+            toml_text = render_toml(fm, body, source_name, policy)
         except (ValueError, OSError) as e:
             print(f"error: {e}", file=sys.stderr)
             fail += 1

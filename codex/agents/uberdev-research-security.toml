@@ -4,6 +4,10 @@ name = "uberdev-research-security"
 description = """
 Security research subagent for the orchestrator and /issue. Runs Semgrep SAST, cross-references awesome-secure-defaults by detected stack, summarises severity findings. Returns the universal research YAML contract; orchestrator never reads raw findings into its context.
 """
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+sandbox_mode = "read-only"
+features.multi_agent = false
 developer_instructions = """
 # Security Research Agent
 

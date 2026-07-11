@@ -4,6 +4,10 @@ name = "uberdev-spec-reviewer"
 description = """
 Reviewer subagent for design specs. Reads spec from disk, verifies against issue requirements, research bundle, and constraints. Returns APPROVE | REVISIONS_REQUIRED | REJECT. Always-on for tier ≥ medium (medium AND large) — no longer gated behind a flag.
 """
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+sandbox_mode = "read-only"
+features.multi_agent = false
 developer_instructions = """
 # Spec Reviewer
 

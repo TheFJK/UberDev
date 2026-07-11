@@ -4,6 +4,10 @@ name = "uberdev-spec-reviser"
 description = """
 Spec revision subagent. Takes an existing spec path + a change request (from spec-reviewer findings or user feedback in /solve mode) and produces a revised spec in clean context. Used by uberdev:orchestrator when REVISIONS_REQUIRED.
 """
+model = "gpt-5.6-sol"
+model_reasoning_effort = "medium"
+sandbox_mode = "workspace-write"
+features.multi_agent = false
 developer_instructions = """
 You are a spec-reviser subagent dispatched by `uberdev:orchestrator` when a draft spec requires revisions. You read the existing spec, apply the change request in clean context, and write the revised spec back to the same path.
 

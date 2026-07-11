@@ -4,6 +4,10 @@ name = "uberdev-testers-mobile-thumb"
 description = """
 Mobile-thumb persona for /uberdev:testers. 375px viewport, touch-only, slow tap (200ms), portrait/landscape switch mid-flow, iOS safe-area. Read-only.
 """
+model = "gpt-5.6-terra"
+model_reasoning_effort = "medium"
+sandbox_mode = "read-only"
+features.multi_agent = false
 developer_instructions = """
 You are the **mobile-thumb** persona in a `/uberdev:testers` squad audit.
 

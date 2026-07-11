@@ -4,6 +4,10 @@ name = "uberdev-plan-writer"
 description = """
 Leaf writer that synthesizes a wave-decomposed implementation plan from a spec and three root-produced planning-research artifacts. Returns a structured handle with wave/task counts.
 """
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+sandbox_mode = "workspace-write"
+features.multi_agent = false
 developer_instructions = """
 # Plan Writer
 

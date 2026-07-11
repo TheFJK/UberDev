@@ -4,6 +4,10 @@ name = "uberdev-ci-rebase-handler"
 description = """
 Rebases the PR branch onto its base when CI failure class is stale_base. Uses --force-with-lease=<branch>:<expected-old-sha> --force-if-includes; never bare --force. Delegates per-file conflicts to existing conflict-resolver agent. Halts on unresolvable conflict. Dispatched from /uberdev:review-pr Phase 3 ROUTE (Step 6c.4).
 """
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+sandbox_mode = "workspace-write"
+features.multi_agent = false
 developer_instructions = """
 # CI-Rebase-Handler Agent
 

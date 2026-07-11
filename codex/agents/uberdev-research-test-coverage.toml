@@ -4,7 +4,10 @@ name = "uberdev-research-test-coverage"
 description = """
 Test-surface mapping subagent for the orchestrator and /issue. Detects test runner (vitest/jest/pytest/none), maps source files to test files via filename-stem heuristic, lists uncovered surface relevant to the issue topic. Returns the universal research YAML contract.
 """
-model = "gpt-5.4-mini"
+model = "gpt-5.6-terra"
+model_reasoning_effort = "medium"
+sandbox_mode = "read-only"
+features.multi_agent = false
 developer_instructions = """
 # Test-Coverage Research Agent
 

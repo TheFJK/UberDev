@@ -4,6 +4,10 @@ name = "uberdev-code-fixer"
 description = """
 Applies findings from post-impl-review or simplify lens aggregates as conventional-commit edits. Reads a findings aggregate (already wrapped in <external-untrusted-input source="post-impl-review-aggregate"> for phase1, or source="simplify-aggregate" for phase2 — the envelope is the aggregate file's own leading/trailing bytes), applies minimal-scope edits, and creates fix: or refactor: conventional commits. One agent per phase; dispatched via Task(subagent_type=uberdev:code-fixer) from /uberdev:review-pr Phase 1 (Step 5) and Phase 2 (Step 6b), and from /uberdev:simplify Phase 3.
 """
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+sandbox_mode = "workspace-write"
+features.multi_agent = false
 developer_instructions = """
 # Code-Fixer Agent
 

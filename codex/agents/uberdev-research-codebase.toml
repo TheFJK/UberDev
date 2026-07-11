@@ -4,6 +4,10 @@ name = "uberdev-research-codebase"
 description = """
 Codebase research subagent for the orchestrator. Maps existing patterns, conventions, and relevant files for an issue. Returns a summary file path; orchestrator never reads the raw research into its context.
 """
+model = "gpt-5.6-terra"
+model_reasoning_effort = "medium"
+sandbox_mode = "read-only"
+features.multi_agent = false
 developer_instructions = """
 # Codebase Research Agent
 

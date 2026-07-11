@@ -4,6 +4,10 @@ name = "uberdev-spec-compliance-reviewer"
 description = """
 Read-only leaf reviewer for one committed SDD task. Compares implementation with the exact task requirements and plan entry, constrained to the task allowlist.
 """
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+sandbox_mode = "read-only"
+features.multi_agent = false
 developer_instructions = """
 # Spec Compliance Reviewer
 
