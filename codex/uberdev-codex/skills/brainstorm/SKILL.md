@@ -107,6 +107,8 @@ UBERDEV_BRAINSTORM_PLUGIN_ROOT="${PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOM
 UBERDEV_BRAINSTORM_PREPARED_EDGES=(); UBERDEV_BRAINSTORM_PREPARED_INSTANCES=()
 UBERDEV_BRAINSTORM_PREPARED_HANDOFFS=(); UBERDEV_BRAINSTORM_PREPARED_RESULTS=()
 UBERDEV_BRAINSTORM_PREPARED_STATUSES=(); UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS=()
+UBERDEV_BRAINSTORM_RECEIPT_STATUSES=(); UBERDEV_BRAINSTORM_RECEIPT_RESULTS=()
+UBERDEV_BRAINSTORM_WAITED_INSTANCES=()
 UBERDEV_BRAINSTORM_WAITED=0; UBERDEV_BRAINSTORM_BATCH_LAUNCHED=0
 UBERDEV_BRAINSTORM_UNWIND_TIMEOUT="${UBERDEV_BRAINSTORM_UNWIND_TIMEOUT:-300}"
 case "$UBERDEV_BRAINSTORM_UNWIND_TIMEOUT" in ''|*[!0-9]*|0) return 2 ;; esac
@@ -114,13 +116,31 @@ uberdev_brainstorm_reset_batch() {
   UBERDEV_BRAINSTORM_PREPARED_EDGES=(); UBERDEV_BRAINSTORM_PREPARED_INSTANCES=()
   UBERDEV_BRAINSTORM_PREPARED_HANDOFFS=(); UBERDEV_BRAINSTORM_PREPARED_RESULTS=()
   UBERDEV_BRAINSTORM_PREPARED_STATUSES=(); UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS=()
+  UBERDEV_BRAINSTORM_RECEIPT_STATUSES=(); UBERDEV_BRAINSTORM_RECEIPT_RESULTS=()
+  UBERDEV_BRAINSTORM_WAITED_INSTANCES=()
   UBERDEV_BRAINSTORM_WAITED=0; UBERDEV_BRAINSTORM_BATCH_LAUNCHED=0
 }
 uberdev_unwind_child_receipts() {
-  local receipt instance remainder status result cleanup_rc=0
-  for receipt in "${UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[@]}"; do
-    instance="${receipt%%|*}"; remainder="${receipt#*|}"
-    status="${remainder%%|*}"; result="${remainder#*|}"
+  local index status result cleanup_rc=0
+  for ((index=0; index<${#UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[@]}; index++)); do
+    status="${UBERDEV_BRAINSTORM_RECEIPT_STATUSES[$index]}"
+    result="${UBERDEV_BRAINSTORM_RECEIPT_RESULTS[$index]}"
+    if ! uberdev_unwind_child "$status" "$result" "$UBERDEV_BRAINSTORM_UNWIND_TIMEOUT"; then cleanup_rc=1; fi
+  done
+  uberdev_brainstorm_reset_batch
+  return "$cleanup_rc"
+}
+uberdev_brainstorm_drain_after_wait_failure() {
+  local index instance waited status result skip cleanup_rc=0
+  for ((index=0; index<${#UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[@]}; index++)); do
+    instance="${UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[$index]}"
+    skip=0
+    for waited in "${UBERDEV_BRAINSTORM_WAITED_INSTANCES[@]}"; do
+      [ "$instance" = "$waited" ] && skip=1 && break
+    done
+    [ "$skip" -eq 1 ] && continue
+    status="${UBERDEV_BRAINSTORM_RECEIPT_STATUSES[$index]}"
+    result="${UBERDEV_BRAINSTORM_RECEIPT_RESULTS[$index]}"
     if ! uberdev_unwind_child "$status" "$result" "$UBERDEV_BRAINSTORM_UNWIND_TIMEOUT"; then cleanup_rc=1; fi
   done
   uberdev_brainstorm_reset_batch
@@ -160,7 +180,9 @@ uberdev_brainstorm_launch_batch() {
     result="${UBERDEV_BRAINSTORM_PREPARED_RESULTS[$index]}"
     status="${UBERDEV_BRAINSTORM_PREPARED_STATUSES[$index]}"
     if uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null; then
-      UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS+=("$instance|$status|$result")
+      UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS+=("$instance")
+      UBERDEV_BRAINSTORM_RECEIPT_STATUSES+=("$status")
+      UBERDEV_BRAINSTORM_RECEIPT_RESULTS+=("$result")
     else
       dispatch_rc=$?; cleanup_rc=0
       uberdev_unwind_child_receipts || cleanup_rc=$?
@@ -171,15 +193,24 @@ uberdev_brainstorm_launch_batch() {
   UBERDEV_BRAINSTORM_BATCH_LAUNCHED=1
 }
 uberdev_brainstorm_wait() {
-  local wanted="$1" receipt instance remainder status result
+  local wanted="$1" timeout_s="${2:-300}" index instance status result wait_rc cleanup_rc
   if [ "$UBERDEV_BRAINSTORM_BATCH_LAUNCHED" -eq 0 ]; then
     uberdev_brainstorm_launch_batch || return $?
   fi
-  for receipt in "${UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[@]}"; do
-    instance="${receipt%%|*}"
+  for ((index=0; index<${#UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[@]}; index++)); do
+    instance="${UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[$index]}"
     if [ "$instance" = "$wanted" ]; then
-      remainder="${receipt#*|}"; status="${remainder%%|*}"; result="${remainder#*|}"
-      uberdev_wait_child "$status" "$result" 300 || return $?
+      status="${UBERDEV_BRAINSTORM_RECEIPT_STATUSES[$index]}"
+      result="${UBERDEV_BRAINSTORM_RECEIPT_RESULTS[$index]}"
+      if uberdev_wait_child "$status" "$result" "$timeout_s"; then
+        :
+      else
+        wait_rc=$?; cleanup_rc=0
+        uberdev_brainstorm_drain_after_wait_failure || cleanup_rc=$?
+        [ "$cleanup_rc" -eq 0 ] || echo "error: bounded brainstorm sibling unwind failed after wait instance=$wanted" >&2
+        return "$wait_rc"
+      fi
+      UBERDEV_BRAINSTORM_WAITED_INSTANCES+=("$wanted")
       UBERDEV_BRAINSTORM_WAITED=$((UBERDEV_BRAINSTORM_WAITED + 1))
       if [ "$UBERDEV_BRAINSTORM_WAITED" -eq "${#UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[@]}" ]; then
         uberdev_brainstorm_reset_batch

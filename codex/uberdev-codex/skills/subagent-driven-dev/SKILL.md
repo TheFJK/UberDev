@@ -126,16 +126,24 @@ PY
 }
 
 SDD_PREPARED_EDGES=(); SDD_PREPARED_INSTANCES=(); SDD_PREPARED_HANDOFFS=()
-SDD_PREPARED_RESULTS=(); SDD_PREPARED_STATUSES=(); SDD_DISPATCH_RECEIPTS=()
+SDD_PREPARED_RESULTS=(); SDD_PREPARED_STATUSES=()
+SDD_RECEIPT_INSTANCES=(); SDD_RECEIPT_STATUSES=(); SDD_RECEIPT_RESULTS=()
 sdd_reset_batch() {
   SDD_PREPARED_EDGES=(); SDD_PREPARED_INSTANCES=(); SDD_PREPARED_HANDOFFS=()
-  SDD_PREPARED_RESULTS=(); SDD_PREPARED_STATUSES=(); SDD_DISPATCH_RECEIPTS=()
+  SDD_PREPARED_RESULTS=(); SDD_PREPARED_STATUSES=()
+  SDD_RECEIPT_INSTANCES=(); SDD_RECEIPT_STATUSES=(); SDD_RECEIPT_RESULTS=()
+}
+sdd_begin_batch() {
+  [ "${#SDD_PREPARED_HANDOFFS[@]}" -eq 0 ] || return 2
+  [ "${#SDD_RECEIPT_INSTANCES[@]}" -eq 0 ] || return 2
+  [ "${#SDD_RECEIPT_STATUSES[@]}" -eq 0 ] || return 2
+  [ "${#SDD_RECEIPT_RESULTS[@]}" -eq 0 ] || return 2
+  sdd_reset_batch
 }
 sdd_unwind_child_receipts() {
-  local receipt instance remainder status result cleanup_rc=0
-  for receipt in "${SDD_DISPATCH_RECEIPTS[@]}"; do
-    instance="${receipt%%|*}"; remainder="${receipt#*|}"
-    status="${remainder%%|*}"; result="${remainder#*|}"
+  local index status result cleanup_rc=0
+  for ((index=0; index<${#SDD_RECEIPT_INSTANCES[@]}; index++)); do
+    status="${SDD_RECEIPT_STATUSES[$index]}"; result="${SDD_RECEIPT_RESULTS[$index]}"
     if ! uberdev_unwind_child "$status" "$result" "$SDD_CHILD_TIMEOUT"; then cleanup_rc=1; fi
   done
   sdd_reset_batch
@@ -170,7 +178,9 @@ sdd_launch_prepared_batch() {
     handoff="${SDD_PREPARED_HANDOFFS[$index]}"; result="${SDD_PREPARED_RESULTS[$index]}"
     status="${SDD_PREPARED_STATUSES[$index]}"
     if uberdev_dispatch_child "$edge" "$handoff" "$result" "$status"; then
-      SDD_DISPATCH_RECEIPTS+=("$instance|$status|$result")
+      SDD_RECEIPT_INSTANCES+=("$instance")
+      SDD_RECEIPT_STATUSES+=("$status")
+      SDD_RECEIPT_RESULTS+=("$result")
     else
       dispatch_rc=$?; cleanup_rc=0
       sdd_unwind_child_receipts || cleanup_rc=$?
@@ -180,17 +190,26 @@ sdd_launch_prepared_batch() {
   done
 }
 
-sdd_wait_receipt() {
-  local wanted="$1" timeout="$2" receipt instance remainder status result
-  for receipt in "${SDD_DISPATCH_RECEIPTS[@]}"; do
-    instance="${receipt%%|*}"
-    if [ "$instance" = "$wanted" ]; then
-      remainder="${receipt#*|}"; status="${remainder%%|*}"; result="${remainder#*|}"
-      uberdev_wait_child "$status" "$result" "$timeout"
-      return $?
+sdd_wait_prepared_batch() {
+  local timeout="$1" index status result wait_rc first_rc=0 cleanup_rc=0
+  case "$timeout" in ''|*[!0-9]*|0) return 2 ;; esac
+  [ "${#SDD_RECEIPT_INSTANCES[@]}" -gt 0 ] || return 2
+  for ((index=0; index<${#SDD_RECEIPT_INSTANCES[@]}; index++)); do
+    status="${SDD_RECEIPT_STATUSES[$index]}"; result="${SDD_RECEIPT_RESULTS[$index]}"
+    if uberdev_wait_child "$status" "$result" "$timeout"; then
+      continue
+    else
+      wait_rc=$?
     fi
+    [ "$first_rc" -ne 0 ] || first_rc="$wait_rc"
+    if ! uberdev_unwind_child "$status" "$result" "$timeout"; then cleanup_rc=1; fi
   done
-  return 2
+  sdd_reset_batch
+  if [ "$first_rc" -ne 0 ]; then
+    [ "$cleanup_rc" -eq 0 ] || echo "error: bounded SDD unwind failed after child wait" >&2
+    return "$first_rc"
+  fi
+  return 0
 }
 
 sdd_inputs_for_task() {
@@ -218,7 +237,7 @@ Executable batch shape (substitute the edge/role/stage from the table):
 
 ```bash
 # Dispatch the complete batch first.
-SDD_DISPATCH_RECEIPTS=()
+sdd_begin_batch || return $?
 for task_id in $SDD_BATCH_TASK_IDS; do
   sdd_validate_instance_dimensions "$wave" "$task_id" "$stage" "$attempt" || return 2
   instance_id="sdd-w${wave}-t${task_id}-${stage}-a${attempt}"
@@ -228,17 +247,18 @@ for task_id in $SDD_BATCH_TASK_IDS; do
 done
 sdd_launch_prepared_batch || return $?
 # Only after every dispatch receipt, wait for the complete batch.
-for task_id in $SDD_BATCH_TASK_IDS; do
-  instance_id="sdd-w${wave}-t${task_id}-${stage}-a${attempt}"
-  sdd_wait_receipt "$instance_id" "$SDD_CHILD_TIMEOUT" || return $?
-done
+sdd_wait_prepared_batch "$SDD_CHILD_TIMEOUT" || return $?
 ```
 
 For every parallel batch, issue every `uberdev_dispatch_child` call first.
 Only after the complete batch has receipts may the controller wait for each
 child. If a later dispatch fails, `sdd_unwind_child_receipts` drains every
 earlier receipt to a truthful terminal and collects it before returning the
-dispatch error; it never abandons a running lease. A required wait/review failure blocks the task. The
+dispatch error; it never abandons a running lease. A wait failure still
+inspects every sibling, boundedly unwinds each non-successful child, preserves
+the first wait failure, and atomically resets all prepared/receipt state before
+the next batch. Receipt fields are held in parallel shell arrays, never encoded
+into delimiter-sensitive path strings. A required wait/review failure blocks the task. The
 large-tier test-review edge preserves Step 4.5's advisory logging behavior.
 
 ```dot
