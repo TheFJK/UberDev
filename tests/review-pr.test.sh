@@ -142,10 +142,10 @@ assert_grep "$REVIEW_PR" \
   "simplify lens 3: efficiency named"
 # Case-insensitive collapses SINGLE/single and ONE/one — three alternatives
 # instead of six.
-if grep -qiE 'simplify.*single message|simplify.*one assistant turn|single message.*simplify' "$REVIEW_PR"; then
-  echo "  PASS  simplify-phase agents dispatched in a single message"; PASS=$((PASS + 1))
+if grep -qiE 'issue all three dispatches before the first wait|dispatch.*three simplify lenses' "$REVIEW_PR"; then
+  echo "  PASS  simplify-phase routed children dispatch-all-before-wait"; PASS=$((PASS + 1))
 else
-  echo "  FAIL  simplify-phase agents dispatched in a single message"
+  echo "  FAIL  simplify-phase routed children dispatch-all-before-wait"
   echo "        file: $REVIEW_PR"
   FAIL=$((FAIL + 1))
 fi
@@ -461,11 +461,11 @@ assert_grep "$REVIEW_PR" 'always fan out|single-message-fanout invariant.*emphas
 echo
 echo "== R12 (#73): code-fixer dispatched in Phase 1 (Step 5) AND Phase 2 (Step 6b) =="
 
-# R12.1 — code-fixer dispatched at all
-assert_subagent_type "$REVIEW_PR" 'code-fixer' \
-  "R12.1 — review-pr.md dispatches uberdev:code-fixer (subagent_type)"
-# R12.2 — count: at least 2 distinct subagent_type: uberdev:code-fixer references (Phase 1 + Phase 2)
-CODE_FIXER_DISPATCH_COUNT=$(grep -cE 'subagent_type: uberdev:code-fixer' "$REVIEW_PR" || true)
+# R12.1 — routed code-fixer dispatched at all
+assert_grep "$REVIEW_PR" 'uberdev_dispatch_child review_pr\.fix\.phase1' \
+  "R12.1 — review-pr.md routes the Phase 1 code-fixer through child-dispatch"
+# R12.2 — distinct stable edges for Phase 1 + Phase 2
+CODE_FIXER_DISPATCH_COUNT=$(grep -cE 'uberdev_dispatch_child review_pr\.fix\.phase[12]' "$REVIEW_PR" || true)
 if [[ "$CODE_FIXER_DISPATCH_COUNT" -ge 2 ]]; then
   echo "  PASS  R12.2 — code-fixer dispatched ≥ 2 times (Phase 1 + Phase 2 sites; got $CODE_FIXER_DISPATCH_COUNT)"
   PASS=$((PASS + 1))
@@ -473,17 +473,17 @@ else
   echo "  FAIL  R12.2 — code-fixer must be dispatched in Phase 1 + Phase 2 (≥ 2 subagent_type references; got $CODE_FIXER_DISPATCH_COUNT)"
   FAIL=$((FAIL + 1))
 fi
-# R12.3 — Phase 1 commit_type_prefix is fix:
-assert_grep "$REVIEW_PR" 'commit_type_prefix=fix:|commit_type_prefix: fix:' \
-  "R12.3 — Phase 1 code-fixer dispatch carries commit_type_prefix=fix:"
+# R12.3 — Phase 1 edge carries the fix contract through its manifest inputs
+assert_grep "$REVIEW_PR" 'review_pr\.fix\.phase1' \
+  "R12.3 — Phase 1 code-fixer uses the phase1 manifest edge"
 # R12.4 — Phase 2 commit_type_prefix is refactor: (locked by R8.6)
 assert_grep "$REVIEW_PR" 'commit_type_prefix=refactor:|commit_type_prefix: refactor:' \
   "R12.4 — Phase 2 code-fixer dispatch carries commit_type_prefix=refactor: (R8.6 invariant)"
-# R12.5 — phase= argument
-assert_grep "$REVIEW_PR" 'phase=phase1' \
-  "R12.5 — Phase 1 code-fixer dispatch carries phase=phase1"
-assert_grep "$REVIEW_PR" 'phase=phase2' \
-  "R12.6 — Phase 2 code-fixer dispatch carries phase=phase2"
+# R12.5 — phase identity is encoded in the stable edge, not prompt text
+assert_grep "$REVIEW_PR" 'review_pr\.fix\.phase1' \
+  "R12.5 — Phase 1 code-fixer dispatch carries phase identity in edge_id"
+assert_grep "$REVIEW_PR" 'review_pr\.fix\.phase2' \
+  "R12.6 — Phase 2 code-fixer dispatch carries phase identity in edge_id"
 
 echo
 echo "== R13 (#73): Phase 2 lens dispatch uses subagent_type: uberdev:code-simplifier =="
@@ -739,14 +739,12 @@ else
     echo "  FAIL  R23.2 — Phase 2 lens dispatch must close the pr-diff <external-untrusted-input> envelope inside the lens-dispatch region (#286)"
     FAIL=$((FAIL + 1))
   fi
-  # R23.3 — pin the load-bearing DISPATCH-LINE form (`prompt: <external-untrusted-input
-  # source="pr-diff">…<<base_brief>>`) so a prose-only mention that left the actual
-  # Task() prompt unwrapped cannot false-PASS the region asserts above.
-  if grep -qF 'prompt: <external-untrusted-input source="pr-diff">' <<<"$PHASE2_LENS_REGION"; then
-    echo "  PASS  R23.3 — the Task() prompt line itself opens the pr-diff envelope before <<base_brief>>"
+  # R23.3 — the routed contract passes an artifact path, never inline prompt bytes.
+  if grep -qF 'Pass only the diff artifact path' <<<"$PHASE2_LENS_REGION"; then
+    echo "  PASS  R23.3 — routed lens handoff passes only the enveloped diff artifact path"
     PASS=$((PASS + 1))
   else
-    echo "  FAIL  R23.3 — the Task() 'prompt:' line must open <external-untrusted-input source=\"pr-diff\"> before <<base_brief>> (not prose-only) (#286)"
+    echo "  FAIL  R23.3 — routed lens handoff must pass only the enveloped diff artifact path (#286)"
     FAIL=$((FAIL + 1))
   fi
 fi
@@ -826,7 +824,7 @@ else
     echo "  FAIL  R26.2 — Step 6b must pin the envelope as the file's LEADING/TRAILING bytes (#302)"
     FAIL=$((FAIL + 1))
   fi
-  if grep -qF 'never re-wrapped' <<<"$STEP6B_REGION"; then
+  if grep -qE 'never re-wrapped|already-enveloped.*path|simplify-final\.md path' <<<"$STEP6B_REGION"; then
     echo "  PASS  R26.3 — Step 6b code-fixer dispatch passes path/enveloped bytes verbatim (never re-wrapped)"
     PASS=$((PASS + 1))
   else

@@ -283,6 +283,13 @@
       "delegation_mode": "leaf",
       "risk_judgment": true
     },
+    "spec-compliance-reviewer": {
+      "route": "deep",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
     "spec-reviser": {
       "route": "quality",
       "risk_floor": "standard",

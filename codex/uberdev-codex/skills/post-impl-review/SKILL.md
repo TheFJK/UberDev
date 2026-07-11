@@ -94,6 +94,33 @@ The brief is identical for all 6 reviewers — each agent's own system prompt na
 
 ### Step 2: Dispatch 6 Task() agents in a SINGLE message
 
+### Routed execution contract (normative)
+
+Source `${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/child-dispatch.sh`. Resolve the six provider
+edges from `policy/solve-run-tree-v1.json`, create one immutable handoff JSON
+and unique instance directory for each edge, then issue every dispatch before
+waiting for any result:
+
+```bash
+REVIEW_EDGES=(
+  review_pr.review.correctness review_pr.review.silent_failures
+  review_pr.review.types review_pr.review.comments
+  review_pr.review.tests review_pr.review.general
+)
+for EDGE_ID in "${REVIEW_EDGES[@]}"; do
+  # HANDOFF/RESULT/STATUS are the context-only paths allocated for EDGE_ID.
+  uberdev_dispatch_child "$EDGE_ID" "$HANDOFF" "$RESULT" "$STATUS"
+done
+for EDGE_ID in "${REVIEW_EDGES[@]}"; do
+  uberdev_wait_child "$STATUS" "$RESULT" "$REVIEW_PR_TIMEOUT"
+done
+```
+
+The handoff carries paths and bounded scalar metadata only; never inline the
+diff, provider command, model, route, effort, sandbox, or secrets. The actual
+sixth `code-reviewer` general lens is intentionally retained in v1. Every
+retry/re-entry mints a new `instance_id` with the same stable dotted edge ID.
+
 In ONE assistant turn, fire 6 Task() calls in parallel. Each receives the same brief; each returns its own reviewer YAML.
 
 | Reviewer | Agent file | Lens |

@@ -354,6 +354,11 @@ The two `gh` calls above are intentionally fail-soft — the fire-and-surface co
 
 **Chain hand-off (always-PR path, default + turbo):**
 
+This is the context-only run-tree edge `finish_branch.review_pr`. It reuses the
+current `UBERDEV_RUN_CARRIER_JSON` pointer/hash unchanged and does not resolve a
+role, model, effort, service tier, sandbox, or provider. Only the downstream
+review workflow may create provider children.
+
 After the PR is created and `PR_URL` is validated, **invoke `uberdev:review-pr` via the `Skill` tool** with the captured `PR_URL` (no `--turbo` arg). Review-pr inherits the unattended-mode signal via the `UBERDEV_TURBO=1` env var inherited from the parent dispatch process; review-pr also retains a hybrid arg-OR-env detector for compatibility with the separate dispatch in `merge-pipeline` (which still passes `--turbo` as an arg — out-of-scope for #97). The chain is **fire-and-surface, not fire-and-block**: review-pr findings surface to the user via its own output, but `finish-branch` does NOT block on `REVISIONS_REQUIRED` (advisory only, per #11 Q1).
 
 > Invoke `uberdev:review-pr` via the Skill tool with the captured `PR_URL` (no flag args). Findings are ADVISORY — do NOT block on `REVISIONS_REQUIRED` at this layer (the auto-fix loop is deferred per #11 Q1).

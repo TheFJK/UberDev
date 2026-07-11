@@ -121,6 +121,7 @@ jobs:
           bash tests/agent-dispatch.test.sh && \
           bash tests/child-dispatch.test.sh && \
           bash tests/child-wait.test.sh && \
+          bash tests/solve-run-tree.test.sh && \
           bash tests/route-context.test.sh && \
           bash tests/solve-triage.test.sh && \
           bash tests/solve-routing.test.sh && \
@@ -278,6 +279,7 @@ jobs:
           bash tests/solve-effort-flag.test.sh && \
           bash tests/orchestrator-phase1-shortcircuit.test.sh && \
           bash tests/config-override.test.sh && \
+          bash tests/solve-run-tree.test.sh && \
           bash tests/orchestrator-phase-6-doc.test.sh && \
           bash tests/orchestrator-phase-0-bg-detection.test.sh && \
           bash tests/dev.test.sh && \
