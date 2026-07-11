@@ -65,6 +65,19 @@ fi
 
 capture uberdev_semaphore_acquire "relative/state" repo codex 1 run 5
 [ "$CAPTURE_RC" -eq 2 ] && pass "relative state root is rejected" || fail "relative state root is rejected" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+if (
+  cygpath() { [ "$1" = -u ] && printf '%s\n' "$TMP/windows-state"; }
+  _uberdev_semaphore_reject_symlinked_ancestors 'C:\Users\runneradmin\state'
+); then
+  pass "native Windows state roots are normalized for ancestor validation"
+else
+  fail "native Windows state roots are normalized for ancestor validation" "drive path rejected"
+fi
+if grep -Fq '/*|[A-Za-z]:/*|[A-Za-z]:\\*)' "$LIB"; then
+  pass "native Windows drive roots satisfy the absolute state-root guard"
+else
+  fail "native Windows drive roots satisfy the absolute state-root guard" "drive-root case missing"
+fi
 capture uberdev_semaphore_acquire "$TMP/invalid-cap" repo codex 0 run 5
 [ "$CAPTURE_RC" -eq 2 ] && pass "zero cap is rejected" || fail "zero cap is rejected" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 capture uberdev_semaphore_acquire "$TMP/invalid-cap-text" repo codex nope run 5

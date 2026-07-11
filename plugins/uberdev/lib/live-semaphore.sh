@@ -26,6 +26,16 @@ _uberdev_semaphore_reject_symlinked_ancestors() {
   local path remaining current component os_name
   path="$1"
   case "$path" in
+    [A-Za-z]:/*|[A-Za-z]:\\*)
+      if command -v cygpath >/dev/null 2>&1; then
+        path="$(cygpath -u "$path")" || return 2
+      else
+        _uberdev_semaphore_error 'cygpath is required for a native-Windows state path'
+        return 2
+      fi
+      ;;
+  esac
+  case "$path" in
     /*) ;;
     *) return 2 ;;
   esac
@@ -190,13 +200,15 @@ _uberdev_semaphore_prepare_scope() {
   backend="${3-}"
 
   case "$state_root" in
-    /*) ;;
+    /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
     *) _uberdev_semaphore_error 'STATE_ROOT must be absolute'; return 2 ;;
   esac
-  [ "$state_root" != '/' ] || {
-    _uberdev_semaphore_error 'STATE_ROOT cannot be filesystem root'
-    return 2
-  }
+  case "$state_root" in
+    /|[A-Za-z]:|[A-Za-z]:/|[A-Za-z]:\\)
+      _uberdev_semaphore_error 'STATE_ROOT cannot be filesystem root'
+      return 2
+      ;;
+  esac
   _uberdev_semaphore_reject_symlinked_ancestors "$state_root" || return 2
   _uberdev_semaphore_safe_text "$repo_id" || {
     _uberdev_semaphore_error 'REPO_ID must be non-empty single-line text'
