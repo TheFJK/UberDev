@@ -7,6 +7,7 @@ SKILL="${ORCHESTRATOR_SKILL_UNDER_TEST:-$ROOT/plugins/uberdev/skills/orchestrato
 TMP="$(mktemp -d "$ROOT/tests/_fixtures/orchestrator-child-inputs.XXXXXX")"
 RUN_DIR="$TMP/runtime"
 HANDOFFS="$RUN_DIR/handoffs"
+LIFECYCLE="$RUN_DIR/.agent-state-$(id -u)/agent-lifecycle.jsonl"
 RECEIPTS="$TMP/receipts/child-dispatch.jsonl"
 PROVIDER_CALLS="$TMP/provider-calls"
 trap 'rm -rf "$TMP"' EXIT
@@ -111,7 +112,7 @@ if (last.get('event'),last.get('source'),last.get('edge_id'),last.get('instance_
     raise SystemExit(f'provider seam reached before correlated dispatch receipt: {last!r}')
 PY
   decision="$(python3 -I -B -c 'import json,sys; r=json.loads(sys.argv[1]); d=r["root_decision"].copy(); d["risk_scope"]=r["risk_scope"]; d["risk_signals"]=r["risk_signals"]; print(json.dumps(d,sort_keys=True,separators=(",",":")),end="")' "$request")" || return 2
-  manifest="$RUN_DIR/.agent-state-$(id -u)/agent-lifecycle.jsonl"
+  manifest="$LIFECYCLE"
   event="$(_uberdev_agent_event_json route_decided "$request" "$decision")" || return 2
   _uberdev_agent_append_event "$manifest" "$event" || return 2
   event="$(_uberdev_agent_event_json agent_started "$request" "$decision" '' "$status")" || return 2
@@ -231,12 +232,13 @@ plan_revision_verification_failed=1
 plan_rereview_format_invalid=1
 run_fence 'edge=orchestrator.plan.write' 2
 
-python3 -I -B - "$RECEIPTS" "$HANDOFFS" "$PROVIDER_CALLS" "$UBERDEV_CHILD_TEST_SOURCE" <<'PY'
+validate_runtime() {
+  [ "$#" -eq 5 ] || return 2
+  python3 -I -B - "$1" "$2" "$3" "$4" "$5" <<'PY'
 import hashlib,json,re,sys
-from collections import Counter
 from pathlib import Path
 
-receipt_path,handoff_dir,provider_path,source=sys.argv[1:]
+receipt_path,lifecycle_path,handoff_dir,provider_path,source=sys.argv[1:]
 expected_instances={}
 def expect(edge,*instances):
     for instance in instances:
@@ -287,8 +289,9 @@ actual_files={path.stem:path for path in handoff_root.glob('*.json')}
 if set(actual_files) != set(expected_instances):
     raise SystemExit(f'handoff identity mismatch: expected={sorted(expected_instances)!r} actual={sorted(actual_files)!r}')
 
-expected_build=Counter()
-expected_correlated=Counter()
+handoff_values={}
+expected_chain={}
+expected_groups={}
 for instance,edge in expected_instances.items():
     value=json.loads(actual_files[instance].read_text())
     if value.get('instance_id') != instance or value.get('edge_id') != edge:
@@ -298,13 +301,16 @@ for instance,edge in expected_instances.items():
         raise SystemExit(f'handoff inputs missing: {instance}')
     canonical=json.dumps(inputs,sort_keys=True,separators=(',',':'),ensure_ascii=True,allow_nan=False).encode()
     digest=hashlib.sha256(canonical).hexdigest()
-    expected_build[(edge,digest)]+=1
-    expected_correlated[(edge,instance,digest)]+=1
+    key=(edge,digest)
+    handoff_values[instance]=value
+    expected_chain[instance]=key
+    expected_groups.setdefault(key,set()).add(instance)
 
 raw=Path(receipt_path).read_text()
 rows=[json.loads(line) for line in raw.splitlines()]
-build=Counter(); handoff=Counter(); dispatch=Counter()
-for row in rows:
+grouped={}
+dispatch_order=[]
+for index,row in enumerate(rows):
     event=row.get('event')
     keys={'schema_version','event','source','edge_id','inputs_sha256'}
     if event != 'build': keys.add('instance_id')
@@ -316,34 +322,160 @@ for row in rows:
     if not isinstance(digest,str) or not re.fullmatch(r'[0-9a-f]{64}',digest):
         raise SystemExit(f'invalid receipt digest: {row!r}')
     edge=row['edge_id']
+    key=(edge,digest)
+    if key not in expected_groups:
+        raise SystemExit(f'unknown receipt build/digest: {row!r}')
     if event == 'build':
-        build[(edge,digest)]+=1
+        instance=None
     elif event in {'handoff','dispatch'}:
         instance=row.get('instance_id')
-        if expected_instances.get(instance) != edge:
+        if expected_chain.get(instance) != key:
             raise SystemExit(f'unknown receipt chain: {row!r}')
-        target=handoff if event == 'handoff' else dispatch
-        target[(edge,instance,digest)]+=1
+        if event == 'dispatch':
+            dispatch_order.append((edge,instance))
     else:
         raise SystemExit(f'unknown receipt event: {row!r}')
+    grouped.setdefault(key,[]).append((event,instance,index))
 
-if build != expected_build:
-    raise SystemExit(f'incomplete build correlations: expected={expected_build!r} actual={build!r}')
-if handoff != expected_correlated:
-    raise SystemExit(f'incomplete handoff correlations: expected={expected_correlated!r} actual={handoff!r}')
-if dispatch != expected_correlated:
-    raise SystemExit(f'incomplete dispatch correlations: expected={expected_correlated!r} actual={dispatch!r}')
-if len(rows) != 93:
-    raise SystemExit(f'unknown receipt count: expected=93 actual={len(rows)}')
+for key,expected_group_instances in expected_groups.items():
+    pending_builds=0
+    open_instance=None
+    seen=set()
+    for event,instance,index in grouped.get(key,[]):
+        if event == 'build':
+            if open_instance is not None:
+                raise SystemExit(f'receipt event order mismatch: build interrupted instance={open_instance} index={index}')
+            pending_builds+=1
+        elif event == 'handoff':
+            if open_instance is not None:
+                raise SystemExit(f'receipt event order mismatch: duplicate handoff instance={instance} index={index}')
+            if pending_builds < 1:
+                raise SystemExit(f'receipt missing prior build: instance={instance} index={index}')
+            if instance not in expected_group_instances or instance in seen:
+                raise SystemExit(f'unknown or duplicate receipt handoff: instance={instance} index={index}')
+            open_instance=instance
+        else:
+            if open_instance != instance:
+                raise SystemExit(f'receipt event order mismatch: dispatch instance={instance} open={open_instance} index={index}')
+            seen.add(instance)
+            open_instance=None
+            pending_builds=0
+    if open_instance is not None or pending_builds:
+        raise SystemExit(f'incomplete ordered receipt group: edge={key[0]} digest={key[1]}')
+    if seen != expected_group_instances:
+        raise SystemExit(f'incomplete receipt identities: expected={sorted(expected_group_instances)!r} actual={sorted(seen)!r}')
+
+lifecycle_rows=[json.loads(line) for line in Path(lifecycle_path).read_text().splitlines()]
+lifecycle_by_instance={instance:[] for instance in expected_instances}
+for row in lifecycle_rows:
+    instance=row.get('run_id')
+    if instance not in lifecycle_by_instance:
+        raise SystemExit(f'unknown lifecycle instance: {row!r}')
+    lifecycle_by_instance[instance].append(row)
+
+for instance,edge in expected_instances.items():
+    events=lifecycle_by_instance[instance]
+    if [row.get('event') for row in events] != ['route_decided','agent_started','completed']:
+        raise SystemExit(f'lifecycle event sequence mismatch: instance={instance} events={[row.get("event") for row in events]!r}')
+    handoff=handoff_values[instance]
+    for row in events:
+        correlated=(
+          row.get('run_id')==instance and row.get('agent_id')==instance and
+          row.get('parent_run_id')=='orchestrator-receipt-root' and
+          row.get('backend')=='codex' and row.get('workflow')=='solve' and
+          row.get('phase')==handoff.get('phase') and row.get('role')==handoff.get('role') and
+          row.get('task_tier')=='large' and row.get('risk_signals')==handoff.get('risk_signals')
+        )
+        if not correlated:
+            raise SystemExit(f'lifecycle correlation mismatch: instance={instance} event={row.get("event")}')
+    expected_status=handoff_root.parent/'children'/instance/'status.json'
+    if events[1].get('status_path') != str(expected_status):
+        raise SystemExit(f'lifecycle status-path mismatch: instance={instance}')
+    if 'terminal_status' in events[0] or 'terminal_status' in events[1] or events[2].get('terminal_status')!='completed':
+        raise SystemExit(f'lifecycle terminal mismatch: instance={instance}')
+    status=json.loads(expected_status.read_text())
+    if status.get('state')!='completed' or status.get('exit_code')!=0:
+        raise SystemExit(f'child status not completed: instance={instance}')
 
 provider=[]
 for line in Path(provider_path).read_text().splitlines():
     edge,instance=line.split('|',1)
     provider.append((edge,instance))
-expected_provider=Counter((edge,instance) for instance,edge in expected_instances.items())
-if Counter(provider) != expected_provider:
-    raise SystemExit(f'provider seam mismatch: expected={expected_provider!r} actual={Counter(provider)!r}')
+if provider != dispatch_order:
+    raise SystemExit(f'provider seam mismatch: expected={dispatch_order!r} actual={provider!r}')
 PY
+}
+
+validate_runtime "$RECEIPTS" "$LIFECYCLE" "$HANDOFFS" "$PROVIDER_CALLS" "$UBERDEV_CHILD_TEST_SOURCE"
+
+MUTATION_DIR="$TMP/runtime-mutations"
+mkdir -p "$MUTATION_DIR"
+chmod 700 "$MUTATION_DIR"
+RECEIPT_REORDERED="$MUTATION_DIR/receipt-reordered.jsonl"
+RECEIPT_BUILD_LATE="$MUTATION_DIR/receipt-build-late.jsonl"
+LIFECYCLE_OMITTED="$MUTATION_DIR/lifecycle-omitted.jsonl"
+LIFECYCLE_MISCORRELATED="$MUTATION_DIR/lifecycle-miscorrelated.jsonl"
+python3 -I -B - "$RECEIPTS" "$LIFECYCLE" \
+  "$RECEIPT_REORDERED" "$RECEIPT_BUILD_LATE" \
+  "$LIFECYCLE_OMITTED" "$LIFECYCLE_MISCORRELATED" <<'PY'
+import json,os,sys
+from pathlib import Path
+
+receipt_path,lifecycle_path,reordered_path,late_path,omitted_path,miscorrelated_path=sys.argv[1:]
+
+def write(path,rows):
+    Path(path).write_text(''.join(json.dumps(row,sort_keys=True,separators=(',',':'))+'\n' for row in rows))
+    os.chmod(path,0o600)
+
+receipts=[json.loads(line) for line in Path(receipt_path).read_text().splitlines()]
+reordered=[dict(row) for row in receipts]
+target='orchestrator-research-followup-a1'
+handoff_index=next(i for i,row in enumerate(reordered) if row.get('event')=='handoff' and row.get('instance_id')==target)
+dispatch_index=next(i for i,row in enumerate(reordered) if row.get('event')=='dispatch' and row.get('instance_id')==target)
+reordered[handoff_index],reordered[dispatch_index]=reordered[dispatch_index],reordered[handoff_index]
+write(reordered_path,reordered)
+
+late=[dict(row) for row in receipts]
+target='orchestrator-research-patterns-a1'
+handoff=next(row for row in late if row.get('event')=='handoff' and row.get('instance_id')==target)
+build_indexes=[i for i,row in enumerate(late) if row.get('event')=='build' and row.get('edge_id')==handoff['edge_id'] and row.get('inputs_sha256')==handoff['inputs_sha256']]
+if not build_indexes: raise SystemExit('receipt build-late mutation target missing')
+build_rows=[late[i] for i in build_indexes]
+late=[row for i,row in enumerate(late) if i not in set(build_indexes)]
+dispatch_index=next(i for i,row in enumerate(late) if row.get('event')=='dispatch' and row.get('instance_id')==target)
+late[dispatch_index+1:dispatch_index+1]=build_rows
+write(late_path,late)
+
+lifecycle=[json.loads(line) for line in Path(lifecycle_path).read_text().splitlines()]
+target='orchestrator-spec-write-a1'
+omitted=[row for row in lifecycle if not (row.get('run_id')==target and row.get('event')=='agent_started')]
+if len(omitted)!=len(lifecycle)-1: raise SystemExit('lifecycle omission mutation target missing')
+write(omitted_path,omitted)
+
+target='orchestrator-plan-write-a1'; wrong='orchestrator-plan-write-a2'
+miscorrelated=[dict(row) for row in lifecycle]
+row=next(row for row in miscorrelated if row.get('run_id')==target and row.get('event')=='completed')
+row['run_id']=wrong
+write(miscorrelated_path,miscorrelated)
+PY
+
+assert_runtime_rejected() {
+  local name="$1" expected="$2" receipts="$3" lifecycle="$4"
+  if validate_runtime "$receipts" "$lifecycle" "$HANDOFFS" "$PROVIDER_CALLS" "$UBERDEV_CHILD_TEST_SOURCE" \
+      >"$MUTATION_DIR/$name.out" 2>"$MUTATION_DIR/$name.err"; then
+    echo "runtime mutation unexpectedly passed: $name" >&2
+    return 1
+  fi
+  grep -Fq "$expected" "$MUTATION_DIR/$name.err" || {
+    echo "runtime mutation failed for the wrong reason: $name" >&2
+    return 1
+  }
+}
+
+assert_runtime_rejected receipt-reordered 'receipt event order mismatch' "$RECEIPT_REORDERED" "$LIFECYCLE"
+assert_runtime_rejected receipt-build-late 'receipt missing prior build' "$RECEIPT_BUILD_LATE" "$LIFECYCLE"
+assert_runtime_rejected lifecycle-omitted 'lifecycle event sequence mismatch' "$RECEIPTS" "$LIFECYCLE_OMITTED"
+assert_runtime_rejected lifecycle-miscorrelated 'lifecycle event sequence mismatch' "$RECEIPTS" "$LIFECYCLE_MISCORRELATED"
 
 export HANDOFFS WORKING_DIR_ABS issue_body_path research_codebase_summary_path
 export research_patterns_summary_path research_prior_art_summary_path
