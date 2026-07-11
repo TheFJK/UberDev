@@ -28,6 +28,18 @@ word_atom = re.compile(
 )
 call_atom = re.compile(r"(?<![A-Za-z0-9_])(?:Task|Agent)[ \t]*\(")
 shell_boundaries = ";|&()<> \t\r\n"
+assignment_atom = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+forbidden_words = {
+    "spawn_agent",
+    "uberdev_agent_dispatch",
+    "uberdev_dispatch_one",
+    "_uberdev_agent_dispatch_backend",
+    "claude",
+    "codex",
+}
+command_starters = {"if", "elif", "while", "until", "then", "else", "do", "!"}
+command_wrappers = {"command", "builtin", "exec", "env", "nohup", "sudo", "time"}
+command_shells = {"bash", "sh", "zsh"}
 
 
 class PolicyError(Exception):
@@ -89,6 +101,117 @@ def check_atoms(chars, protected, text, base_line):
         for match in pattern.finditer(semantic):
             if not all(protected[match.start():match.end()]):
                 return match.group(0), line_at(semantic, match.start(), base_line)
+    return None
+
+
+def shell_tokens(chars, protected, delimiters):
+    semantic = "".join(chars)
+    tokens = []
+    index = 0
+    while index < len(chars):
+        if delimiters[index]:
+            start = index
+            if chars[index] in ";|&<>":
+                while index < len(chars) and delimiters[index] and chars[index] in ";|&<>":
+                    index += 1
+            else:
+                index += 1
+            tokens.append(("separator", semantic[start:index], (), start))
+            continue
+        start = index
+        while index < len(chars) and not delimiters[index]:
+            index += 1
+        tokens.append(("word", semantic[start:index], tuple(protected[start:index]), start))
+    return tokens
+
+
+def check_command_context(chars, protected, delimiters, base_line):
+    expect_command = True
+    wrapper_mode = False
+    redirection_target = False
+    eval_payload = False
+    shell_options = False
+    shell_payload = False
+    case_state = None
+
+    for kind, value, word_protected, start in shell_tokens(chars, protected, delimiters):
+        if kind == "separator":
+            if not value.strip():
+                continue
+            if case_state == "pattern" and value == ")":
+                case_state = "body"
+                expect_command = True
+                continue
+            if case_state == "body" and value in {";;", ";&", ";;&"}:
+                case_state = "pattern"
+                expect_command = False
+                continue
+            if value[0] in "<>":
+                redirection_target = True
+                continue
+            if value[0] in ";|&()":
+                expect_command = True
+                wrapper_mode = False
+                eval_payload = False
+                shell_options = False
+                shell_payload = False
+            continue
+
+        hit_line = line_at("".join(chars), start, base_line)
+        if case_state == "header":
+            if value == "in":
+                case_state = "pattern"
+            continue
+        if case_state == "pattern":
+            continue
+        if redirection_target:
+            redirection_target = False
+            continue
+        if eval_payload:
+            hit = scan_shell(value, hit_line)
+            if hit is not None:
+                return hit
+            continue
+        if shell_payload:
+            return scan_shell(value, hit_line)
+        if shell_options:
+            if value.startswith("-") and not value.startswith("--") and "c" in value[1:]:
+                shell_payload = True
+                continue
+            if value.startswith("-"):
+                continue
+            shell_options = False
+            continue
+        if not expect_command:
+            continue
+        if assignment_atom.match(value):
+            continue
+        if wrapper_mode and value.startswith("-"):
+            continue
+        if value in command_starters:
+            expect_command = True
+            wrapper_mode = False
+            continue
+        if value == "case":
+            case_state = "header"
+            expect_command = False
+            continue
+        if value in forbidden_words or value in {"Task(", "Agent("}:
+            return value, hit_line
+        if value in command_wrappers:
+            wrapper_mode = True
+            expect_command = True
+            continue
+        if value == "eval":
+            eval_payload = True
+            expect_command = False
+            continue
+        if value.rsplit("/", 1)[-1] in command_shells:
+            shell_options = True
+            expect_command = False
+            continue
+        expect_command = False
+        wrapper_mode = False
     return None
 
 
@@ -225,14 +348,19 @@ def scan_heredoc_expansions(body, base_line):
 def scan_shell(text, base_line):
     chars = []
     protected = []
+    delimiters = []
     pending_heredocs = []
     at_boundary = True
     index = 0
 
-    def append(value, is_protected):
+    def append(value, is_protected, can_delimit=None):
         nonlocal at_boundary
         chars.extend(value)
         protected.extend([is_protected] * len(value))
+        if can_delimit is None:
+            delimiters.extend([not is_protected and char in shell_boundaries for char in value])
+        else:
+            delimiters.extend([can_delimit] * len(value))
         if value:
             at_boundary = value[-1] in shell_boundaries
 
@@ -282,18 +410,18 @@ def scan_shell(text, base_line):
             if text[index + 1] == "\n":
                 index += 2
                 continue
-            append(text[index + 1], False)
+            append(text[index + 1], False, can_delimit=False)
             at_boundary = False
             index += 2
             continue
         if char == "'":
             index, chunk = quoted_chunk(text, index, "'")
-            append(chunk, True)
+            append(chunk, True, can_delimit=False)
             at_boundary = False
             continue
         if text.startswith("$'", index):
             index, chunk = quoted_chunk(text, index + 1, "'", ansi=True)
-            append(chunk, True)
+            append(chunk, True, can_delimit=False)
             at_boundary = False
             continue
         if char == '"':
@@ -305,7 +433,7 @@ def scan_shell(text, base_line):
                     if text[index + 1] == "\n":
                         index += 2
                     else:
-                        append(text[index + 1], True)
+                        append(text[index + 1], True, can_delimit=False)
                         index += 2
                     continue
                 if text.startswith("$(", index):
@@ -313,7 +441,7 @@ def scan_shell(text, base_line):
                     hit = scan_shell(nested, line_at(text, index, base_line))
                     if hit is not None:
                         return hit
-                    append("\0", True)
+                    append("\0", True, can_delimit=False)
                     index = end
                     continue
                 if text[index] == "`":
@@ -321,10 +449,10 @@ def scan_shell(text, base_line):
                     hit = scan_shell(nested, line_at(text, index, base_line))
                     if hit is not None:
                         return hit
-                    append("\0", True)
+                    append("\0", True, can_delimit=False)
                     index = end
                     continue
-                append(text[index], True)
+                append(text[index], True, can_delimit=False)
                 index += 1
             if index >= len(text):
                 raise PolicyError("unclosed double quote")
@@ -336,7 +464,7 @@ def scan_shell(text, base_line):
             hit = scan_shell(nested, line_at(text, index, base_line))
             if hit is not None:
                 return hit
-            append("\0", False)
+            append("\0", False, can_delimit=False)
             index = end
             continue
         if char == "`":
@@ -344,7 +472,7 @@ def scan_shell(text, base_line):
             hit = scan_shell(nested, line_at(text, index, base_line))
             if hit is not None:
                 return hit
-            append("\0", False)
+            append("\0", False, can_delimit=False)
             index = end
             continue
         if text.startswith("<<<", index):
@@ -365,7 +493,10 @@ def scan_shell(text, base_line):
 
     if pending_heredocs:
         raise PolicyError("unclosed heredoc")
-    return check_atoms(chars, protected, text, base_line)
+    hit = check_atoms(chars, protected, text, base_line)
+    if hit is not None:
+        return hit
+    return check_command_context(chars, protected, delimiters, base_line)
 
 
 violations = []
@@ -480,6 +611,14 @@ assert_rejected ansi-hex-claude "cl\$'\\x61'ude --print review"
 assert_rejected ansi-unsupported-escape "printf \$'\\q'"
 assert_rejected ansi-empty-hex-escape "printf \$'\\x'"
 assert_rejected ansi-invalid-unicode "printf \$'\\uD800'"
+assert_rejected fully-double-quoted-command '"codex" exec review'
+assert_rejected fully-ansi-quoted-command "\$'\\x63odex' exec review"
+assert_rejected fully-single-quoted-command "'spawn_agent' --task review"
+assert_rejected wrapped-fully-quoted-command 'command "claude" --print review'
+assert_rejected eval-quoted-command 'eval "codex exec review"'
+assert_rejected bash-c-single-quoted-command "bash -c 'claude --print review'"
+assert_rejected bash-combined-c-option "bash -lc 'codex exec review'"
+assert_rejected zsh-c-ansi-quoted-command "zsh -c \$'spawn_agent --task review'"
 assert_rejected nested-substitution 'result="$(printf "%s" "$(codex exec review)")"'
 assert_rejected double-quoted-backtick 'result="prefix `claude --print review` suffix"'
 assert_rejected unquoted-heredoc-substitution $'cat <<EOF\n$(codex exec review)\nEOF'
@@ -513,6 +652,9 @@ printf '%s\n' 'claude'
 printf '%s\n' $'spawn_agent Task( Agent('
 printf '%s\n' $'\x63odex \143laude \u0073pawn_agent Task( Agent('
 printf '%s\n' "fully quoted codex and claude data"
+provider_name="codex"
+eval 'printf "%s\n" "codex"'
+bash -c 'printf "%s\n" "claude"'
 uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks"
 uberdev_dispatch_child "$edge" "$handoff" "$result" "$status"
 python3 - <<'PY'
