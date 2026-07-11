@@ -22,6 +22,13 @@ _uberdev_semaphore_safe_text() {
   [ "$sanitized" = "$1" ]
 }
 
+_uberdev_semaphore_is_absolute_path() {
+  case "${1-}" in
+    /*|[A-Za-z]:/*|[A-Za-z]:\\*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 _uberdev_semaphore_reject_symlinked_ancestors() {
   local path remaining current component os_name
   path="$1"
@@ -199,10 +206,9 @@ _uberdev_semaphore_prepare_scope() {
   repo_id="${2-}"
   backend="${3-}"
 
-  case "$state_root" in
-    /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
-    *) _uberdev_semaphore_error 'STATE_ROOT must be absolute'; return 2 ;;
-  esac
+  _uberdev_semaphore_is_absolute_path "$state_root" || {
+    _uberdev_semaphore_error 'STATE_ROOT must be absolute'; return 2
+  }
   case "$state_root" in
     /|[A-Za-z]:|[A-Za-z]:/|[A-Za-z]:\\)
       _uberdev_semaphore_error 'STATE_ROOT cannot be filesystem root'
@@ -502,10 +508,9 @@ _uberdev_semaphore_mutex_acquire() {
 _uberdev_semaphore_validate_lease_path() {
   local lease scope scope_base version_base lease_base
   lease="${1-}"
-  case "$lease" in
-    /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
-    *) _uberdev_semaphore_error 'LEASE_PATH must be absolute'; return 2 ;;
-  esac
+  _uberdev_semaphore_is_absolute_path "$lease" || {
+    _uberdev_semaphore_error 'LEASE_PATH must be absolute'; return 2
+  }
   scope="$(dirname "$lease")"
   scope_base="$(basename "$scope")"
   version_base="$(basename "$(dirname "$scope")")"
@@ -905,10 +910,9 @@ uberdev_semaphore_set_handle() {
     return 2
   fi
   if [ -n "$status_path" ]; then
-    case "$status_path" in
-      /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
-      *) _uberdev_semaphore_error 'STATUS_PATH must be absolute'; return 2 ;;
-    esac
+    _uberdev_semaphore_is_absolute_path "$status_path" || {
+      _uberdev_semaphore_error 'STATUS_PATH must be absolute'; return 2
+    }
     [ ! -L "$status_path" ] || {
       _uberdev_semaphore_error 'STATUS_PATH symlinks are forbidden'
       return 2

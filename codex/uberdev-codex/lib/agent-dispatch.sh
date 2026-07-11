@@ -214,73 +214,6 @@ print(path, end="")
 ' "$1"
 }
 
-_uberdev_agent_default_catalog() {
-  local state_dir="$1"
-  local catalog="$state_dir/model-catalog-v1.json"
-  python3 -I -c '
-import json, os, stat, sys, tempfile
-policy_path, destination = sys.argv[1:]
-with open(policy_path, "r", encoding="utf-8") as handle:
-    policy = json.load(handle)
-routes = policy["routes"]
-models = {}
-ranked = []
-available = []
-service_tiers = {"default", "fast", "flex"}
-for route, row in sorted(routes.items(), key=lambda item: item[1]["rank"]):
-    provider = row["codex"]
-    model, effort = provider["model"], provider["reasoning_effort"]
-    models.setdefault(model, {"reasoning_efforts": []})["reasoning_efforts"].append(effort)
-    ranked.append({
-        "logical_route": route, "rank": row["rank"],
-        "model": model, "reasoning_effort": effort,
-    })
-    available.append({"model": model, "reasoning_effort": effort})
-    service_tiers.add(provider["service_tier"])
-for row in models.values():
-    row["reasoning_efforts"] = list(dict.fromkeys(row["reasoning_efforts"]))
-catalog = {
-    "schema_version": 1, "provider": "codex", "models": models,
-    "ranked_pairs": ranked, "available_pairs": available,
-    "service_tiers": sorted(service_tiers),
-    "source_roles": sorted(policy["roles"]),
-}
-parent = os.path.dirname(destination)
-fd, temporary = tempfile.mkstemp(prefix=".model-catalog.", dir=parent)
-try:
-    os.fchmod(fd, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(catalog, handle, sort_keys=True, separators=(",", ":"))
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    if os.path.lexists(destination) and stat.S_ISLNK(os.lstat(destination).st_mode):
-        raise RuntimeError("catalog destination is a symlink")
-    os.replace(temporary, destination)
-finally:
-    if os.path.exists(temporary):
-        os.unlink(temporary)
-' "$_UBERDEV_AGENT_POLICY" "$catalog" || return 1
-  printf '%s' "$catalog"
-}
-
-_uberdev_agent_catalog() {
-  local state_dir="$1" injected="${UBERDEV_MODEL_CATALOG_FILE:-}"
-  if [ -z "$injected" ]; then
-    _uberdev_agent_default_catalog "$state_dir"
-    return $?
-  fi
-  python3 -I -c '
-import os, stat, sys
-path = os.path.abspath(sys.argv[1])
-if not os.path.isabs(sys.argv[1]) or not os.path.isfile(path):
-    raise SystemExit(2)
-if stat.S_ISLNK(os.lstat(path).st_mode):
-    raise SystemExit(2)
-print(path, end="")
-' "$injected"
-}
-
 # Resolve a request without publishing lifecycle state or acquiring capacity.
 # This is the stable launcher seam for Wave 4a.2: callers pass raw CLI fields at
 # top level, raw environment values in `environment`, project values in
@@ -611,28 +544,6 @@ import json,sys
 path,digest,raw=sys.argv[1:]; value=json.loads(raw)
 print(json.dumps({"context_file":path,"context_sha256":digest,"run_id":value["metadata"]["run_id"],"workflow":value["metadata"]["workflow"],"root_decision":value["root_decision"]},sort_keys=True,separators=(",",":")),end="")
 ' "$1" "$2" "$validated"
-}
-
-_uberdev_agent_non_codex_decision() {
-  python3 -I -c '
-import json, sys
-request = json.loads(sys.argv[1])
-parent = request.get("parent_run") or {}
-service = request.get("explicit_service_tier") or "default"
-if (any(request.get(key) not in (None, "") for key in ("explicit_route", "explicit_model", "explicit_effort"))
-        or parent.get("forced") is True or service != "default"):
-    print(json.dumps({"error":{"code":"route_unenforceable","detail":"Codex route pins cannot be enforced by this backend"}}, separators=(",", ":")), file=sys.stderr)
-    raise SystemExit(2)
-decision = {
-    "schema_version": 1, "backend": request.get("backend"),
-    "routing_mode": "inherit", "effective_policy": "inherit",
-    "logical_route": None, "model": None, "reasoning_effort": None,
-    "service_tier": service, "sandbox": None, "forced": False,
-    "route_source": "backend-neutral-inherit", "risk_signals": request.get("risk_signals", []),
-    "fallback_chain": [], "minimum_route": None,
-}
-print(json.dumps(decision, sort_keys=True, separators=(",", ":")))
-' "$1"
 }
 
 _uberdev_agent_event_json() {
