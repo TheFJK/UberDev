@@ -86,6 +86,12 @@ if [ "$CAPTURE_RC" -eq 2 ] && ! printf '%s' "$CAPTURE_OUT" | grep -q 'LEASE_PATH
 else
   fail "native Windows lease paths advance past the absolute-path guard" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
+windows_absolute_guards="$(grep -Fc '/*|[A-Za-z]:/*|[A-Za-z]:\\*)' "$LIB")"
+if [ "$windows_absolute_guards" -ge 3 ]; then
+  pass "state, lease, and status guards all accept native Windows drive paths"
+else
+  fail "state, lease, and status guards all accept native Windows drive paths" "guards=$windows_absolute_guards"
+fi
 capture uberdev_semaphore_acquire "$TMP/invalid-cap" repo codex 0 run 5
 [ "$CAPTURE_RC" -eq 2 ] && pass "zero cap is rejected" || fail "zero cap is rejected" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 capture uberdev_semaphore_acquire "$TMP/invalid-cap-text" repo codex nope run 5

@@ -906,7 +906,7 @@ uberdev_semaphore_set_handle() {
   fi
   if [ -n "$status_path" ]; then
     case "$status_path" in
-      /*) ;;
+      /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
       *) _uberdev_semaphore_error 'STATUS_PATH must be absolute'; return 2 ;;
     esac
     [ ! -L "$status_path" ] || {
