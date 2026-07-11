@@ -50,8 +50,7 @@ the first wave, source the adapter and derive the immutable
 carrier from the root request exported by the solve/turbo launcher:
 
 ```bash
-SDD_PLUGIN_ROOT="${UBERDEV_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}"
-. "$SDD_PLUGIN_ROOT/lib/child-dispatch.sh"
+. "${CLAUDE_PLUGIN_ROOT}/lib/child-dispatch.sh"
 SDD_ROOT_REQUEST_JSON="${UBERDEV_AGENT_PREPARED_REQUEST_JSON:?missing routed root request}"
 SDD_CARRIER_JSON="$(python3 -I -B -c '
 import json,sys
