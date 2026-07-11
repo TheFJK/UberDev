@@ -120,9 +120,87 @@ def _token_is_executable(line: str, offset: int) -> bool:
     return re.search(r"(?:\$\(|[;|&()]|\bif|\bthen|\bdo|\belse)\s*$", prefix) is not None
 
 
+def _heredoc_declarations(line: str) -> list[tuple[str, bool]]:
+    """Return bounded heredoc delimiter/strip-tab declarations on one code line."""
+    declarations: list[tuple[str, bool]] = []
+    index = 0
+    single = False
+    double = False
+    escaped = False
+    while index < len(line):
+        char = line[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if char == "\\" and not single:
+            escaped = True
+            index += 1
+            continue
+        if char == "'" and not double:
+            single = not single
+            index += 1
+            continue
+        if char == '"' and not single:
+            double = not double
+            index += 1
+            continue
+        if single or double:
+            index += 1
+            continue
+        if char == "#" and (index == 0 or line[index - 1].isspace() or line[index - 1] in ";|&()"):
+            break
+        if line.startswith("<<<", index):
+            index += 3
+            continue
+        if not line.startswith("<<", index):
+            index += 1
+            continue
+        cursor = index + 2
+        strip_tabs = cursor < len(line) and line[cursor] == "-"
+        if strip_tabs:
+            cursor += 1
+        while cursor < len(line) and line[cursor] in " \t":
+            cursor += 1
+        if cursor >= len(line):
+            break
+        if line[cursor] in "'\"":
+            quote = line[cursor]
+            end = line.find(quote, cursor + 1)
+            if end < 0:
+                break
+            delimiter = line[cursor + 1 : end]
+            cursor = end + 1
+        else:
+            if line[cursor] == "\\":
+                cursor += 1
+            end = cursor
+            while end < len(line) and not line[end].isspace() and line[end] not in ";|&()<>":
+                end += 1
+            delimiter = line[cursor:end]
+            cursor = end
+        if delimiter:
+            declarations.append((delimiter, strip_tabs))
+        index = max(cursor, index + 2)
+    return declarations
+
+
+def _executable_lines(text: str):
+    pending: list[tuple[str, bool]] = []
+    for line in text.splitlines():
+        if pending:
+            delimiter, strip_tabs = pending[0]
+            candidate = line.lstrip("\t") if strip_tabs else line
+            if candidate == delimiter:
+                pending.pop(0)
+            continue
+        yield line
+        pending.extend(_heredoc_declarations(line))
+
+
 def _has_executable_helper(text: str, helper: str) -> bool:
     token = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(helper)}(?![A-Za-z0-9_])")
-    for line in text.splitlines():
+    for line in _executable_lines(text):
         stripped = line.lstrip()
         if stripped.startswith("#"):
             continue
@@ -136,7 +214,7 @@ def _command(text: str, helper: str, argument: str) -> bool:
     pattern = re.compile(
         rf"(?<![A-Za-z0-9_]){re.escape(helper)}[ \t]+{re.escape(argument)}(?:[ \t\\]|$)"
     )
-    for line in text.splitlines():
+    for line in _executable_lines(text):
         if line.lstrip().startswith("#"):
             continue
         for match in pattern.finditer(line):

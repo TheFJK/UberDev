@@ -86,6 +86,21 @@ nested_data_dispatch=brain.replace(
     'printf \'%s\' "$(printf uberdev_dispatch_child)"',1)
 assert nested_data_dispatch != brain
 rejected({brain_rel:nested_data_dispatch},"routed chain missing uberdev_dispatch_child")
+quoted_heredoc_dispatch=brain.replace(
+    'uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null',
+    "cat <<'DISPATCH_DATA'\nuberdev_dispatch_child \\\"$edge\\\" \\\"$handoff\\\" \\\"$result\\\" \\\"$status\\\"\nDISPATCH_DATA",1)
+assert quoted_heredoc_dispatch != brain
+rejected({brain_rel:quoted_heredoc_dispatch},"routed chain missing uberdev_dispatch_child")
+for label,heredoc in (
+    ("unquoted", 'cat <<DISPATCH_DATA\nuberdev_dispatch_child "$edge"\nDISPATCH_DATA'),
+    ("strip-tabs", 'cat <<-DISPATCH_DATA\n\tuberdev_dispatch_child "$edge"\n\tDISPATCH_DATA'),
+    ("multiple", "cat <<FIRST_DATA <<'SECOND_DATA'\nuberdev_dispatch_child \"$edge\"\nFIRST_DATA\nuberdev_dispatch_child \"$edge\"\nSECOND_DATA"),
+):
+    mutated=brain.replace(
+        'uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null',
+        heredoc,1)
+    assert mutated != brain,label
+    rejected({brain_rel:mutated},"routed chain missing uberdev_dispatch_child")
 
 def drift_question_type(value):
     value["edges"]["brainstorm.research.codebase"]["required_inputs"]["question"]="boolean"
