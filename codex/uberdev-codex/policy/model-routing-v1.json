@@ -178,6 +178,13 @@
       "delegation_mode": "leaf",
       "risk_judgment": true
     },
+    "implementation-worker": {
+      "route": "quality",
+      "risk_floor": "standard",
+      "sandbox_ceiling": "workspace-write",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
     "issue-similarity-analyzer": {
       "route": "standard",
       "risk_floor": "economy",

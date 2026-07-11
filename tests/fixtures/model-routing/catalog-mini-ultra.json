@@ -37,6 +37,7 @@
     "comment-analyzer",
     "conflict-resolver",
     "findings-to-issues",
+    "implementation-worker",
     "issue-similarity-analyzer",
     "merge-strategy-decider",
     "plan-reviewer",

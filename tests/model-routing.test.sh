@@ -162,16 +162,16 @@ for agent_path in sorted((ROOT / "plugins/uberdev/agents").glob("*.md")):
             role = line.split(": ", 1)[1].strip()
             break
     source_roles.add(role or agent_path.stem)
-check(len(source_roles) == 42, f"expected 42 canonical roles, got {len(source_roles)}")
+check(len(source_roles) == 43, f"expected 43 canonical roles, got {len(source_roles)}")
 check(set(policy["roles"]) == source_roles, "policy/source role inventory mismatch")
 expected_route_groups = {
     "economy": {"triage-scout", "ci-failure-classifier", "merge-strategy-decider", "testers-monitor-primary", "testers-monitor-devils-advocate"},
     "standard": {"codebase-scout", "research-codebase", "research-constraints", "research-patterns", "research-prior-art", "research-test-coverage", "issue-similarity-analyzer", "comment-analyzer", "testers-a11y-critic", "testers-chaos-engineer", "testers-mobile-thumb", "testers-panicked-grandma", "testers-power-user"},
-    "quality": {"code-simplifier", "spec-reviser", "uberthink-frame", "uberthink-generator", "uberthink-moderator"},
+    "quality": {"code-simplifier", "implementation-worker", "spec-reviser", "uberthink-frame", "uberthink-generator", "uberthink-moderator"},
     "deep": {"ci-code-fixer", "ci-rebase-handler", "code-fixer", "code-reviewer", "conflict-resolver", "findings-to-issues", "plan-reviewer", "plan-writer", "pr-test-analyzer", "research-security", "silent-failure-hunter", "spec-reviewer", "spec-writer", "testers-adversarial-security", "type-design-analyzer", "uberthink-falsifier", "uberthink-synthesizer"},
     "frontier": {"trust-trail-evaluator", "uberthink-arbiter"},
 }
-workspace_write_roles = {"ci-code-fixer", "ci-rebase-handler", "code-fixer", "conflict-resolver", "plan-writer", "spec-reviser", "spec-writer"}
+workspace_write_roles = {"ci-code-fixer", "ci-rebase-handler", "code-fixer", "conflict-resolver", "implementation-worker", "plan-writer", "spec-reviser", "spec-writer"}
 expected_floor = {"economy": "economy", "standard": "economy", "quality": "standard", "deep": "deep", "frontier": "deep"}
 for route, roles in expected_route_groups.items():
     for role in roles:

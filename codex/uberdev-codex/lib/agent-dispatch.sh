@@ -910,7 +910,7 @@ uberdev_agent_dispatch() {
   local request_json="${1:-}" prompt_requested="${2:-}" result_requested="${3:-}" status_requested="${4:-}"
   local run_dir run_id repository_id backend issue_num tier capacity timeout_s
   local prompt_file result_file status_file state_dir manifest decision lease lease_identity event_json rc handle lease_handle terminal_event paths_json
-  local context_file context_sha context_validation persisted_decision supplied_root
+  local context_file context_sha context_validation persisted_decision supplied_root supplied_parent context_run_id parent_run_id agent_id
   [ "$#" -eq 4 ] || { _uberdev_agent_error 'expected REQUEST_JSON PROMPT_FILE RESULT_FILE STATUS_FILE'; return 2; }
   if [ -n "${ZSH_VERSION:-}" ]; then
     setopt localoptions nullglob || return 2
@@ -950,7 +950,19 @@ uberdev_agent_dispatch() {
       _uberdev_agent_error 'route_context_mismatch'; return 2;
     }
     persisted_decision="$(python3 -I -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["root_decision"],sort_keys=True,separators=(",",":")),end="")' "$context_validation")" || return 2
-    if [ "$decision" != "$persisted_decision" ] || [ "$decision" != "$supplied_root" ]; then
+    if [ "$persisted_decision" != "$supplied_root" ]; then
+      _uberdev_agent_error 'route_context_mismatch'; return 2
+    fi
+    parent_run_id="$(_uberdev_agent_json_get "$request_json" parent_run_id 2>/dev/null || true)"
+    agent_id="$(_uberdev_agent_json_get "$request_json" agent_id 2>/dev/null || true)"
+    if [ -n "$parent_run_id$agent_id" ]; then
+      [ -n "$parent_run_id" ] && [ -n "$agent_id" ] || { _uberdev_agent_error 'route_context_mismatch'; return 2; }
+      context_run_id="$(_uberdev_agent_json_get "$context_validation" run_id 2>/dev/null || true)"
+      supplied_parent="$(python3 -I -c 'import json,sys; v=json.loads(sys.argv[1]).get("parent_run"); print(json.dumps(v,sort_keys=True,separators=(",",":")),end="") if v is not None else None' "$request_json")" || return 2
+      if [ "$parent_run_id" != "$context_run_id" ] || [ "$supplied_parent" != "$persisted_decision" ]; then
+        _uberdev_agent_error 'route_context_mismatch'; return 2
+      fi
+    elif [ "$decision" != "$persisted_decision" ]; then
       _uberdev_agent_error 'route_context_mismatch'; return 2
     fi
   fi

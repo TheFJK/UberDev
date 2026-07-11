@@ -38,16 +38,16 @@ echo "== Agent converter: round-trip md→toml =="
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-assert_cmd 0 "convert-agents runs clean over the 42 agents" \
+assert_cmd 0 "convert-agents runs clean over the 43 agents" \
   python3 "$CONVERT_AGENTS" "$REPO_ROOT/plugins/uberdev/agents" "$TMP/agents"
 
 mkdir -p "$TMP/empty-agents-src"
 assert_cmd 2 "convert-agents fails when source contains zero agents" \
   python3 "$CONVERT_AGENTS" "$TMP/empty-agents-src" "$TMP/empty-agents-out"
 
-# All 42 agents produced a uberdev-*.toml.
+# All 43 agents produced a uberdev-*.toml.
 N="$(find "$TMP/agents" -name 'uberdev-*.toml' 2>/dev/null | wc -l | tr -d ' ')"
-[ "$N" -eq 42 ] && pass "42 uberdev-*.toml produced" || fail "expected 42 toml, got $N"
+[ "$N" -eq 43 ] && pass "43 uberdev-*.toml produced" || fail "expected 43 toml, got $N"
 
 # Every produced .toml parses as valid TOML with the 3 required keys, and the
 # custom-agent name is namespaced to match the file (Codex uses the name field
@@ -108,10 +108,10 @@ else
 fi
 
 echo "== Runtime Markdown agent prompt porter =="
-assert_cmd 0 "port-agent-prompts runs clean over the 42 agents" \
+assert_cmd 0 "port-agent-prompts runs clean over the 43 agents" \
   bash "$PORT_AGENT_PROMPTS" "$REPO_ROOT/plugins/uberdev/agents" "$TMP/runtime-agents"
 N_MD="$(find "$TMP/runtime-agents" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l | tr -d ' ')"
-[ "$N_MD" -eq 42 ] && pass "42 runtime Markdown prompts produced" || fail "expected 42 runtime Markdown prompts, got $N_MD"
+[ "$N_MD" -eq 43 ] && pass "43 runtime Markdown prompts produced" || fail "expected 43 runtime Markdown prompts, got $N_MD"
 NG="$(grep -rlE 'CLAUDE_PLUGIN_ROOT|~/\.claude' "$TMP/runtime-agents" 2>/dev/null | wc -l | tr -d ' ')"
 [ "$NG" -eq 0 ] && pass "zero Claude-only path/env residuals in runtime Markdown prompts" \
   || fail "found $NG runtime Markdown prompts with Claude-only path/env residuals"
@@ -435,7 +435,7 @@ assert_cmd 0 "standalone copied installer bootstraps missing repo sources from a
 NS="$(find "$TH3/.agents/skills" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d '[:space:]')"
 NA="$(find "$TH3/.codex/agents" -maxdepth 1 -name 'uberdev-*.toml' 2>/dev/null | wc -l | tr -d '[:space:]')"
 NB="$(grep -c 'BEGIN uberdev-codex-primer' "$TH3/.codex/AGENTS.md" 2>/dev/null || echo 0)"
-[ "$NS" -eq 39 ] && [ "$NA" -eq 42 ] && [ "$NB" -eq 1 ] \
+[ "$NS" -eq 39 ] && [ "$NA" -eq 43 ] && [ "$NB" -eq 1 ] \
   && pass "bootstrapped standalone install carries skills, agents, and primer" \
   || fail "bootstrapped install incomplete: skills=$NS agents=$NA primer=$NB"
 
