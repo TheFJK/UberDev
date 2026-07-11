@@ -21,8 +21,8 @@ scan_shell_fences() {
 import re
 import sys
 
-fence_open = re.compile(r"^[ \t]*```(?:bash|sh|zsh)(?=[ \t]|$)")
-fence_close = re.compile(r"^[ \t]*```[ \t]*$")
+fence_open = re.compile(r"^[ \t]*(?P<marker>`{3,}|~{3,})(?P<info>[^\r\n]*)$")
+shell_languages = {"bash", "sh", "zsh"}
 forbidden = re.compile(
     r"(?<![A-Za-z0-9])(?:spawn_agent|uberdev_agent_dispatch|"
     r"uberdev_dispatch_one|_uberdev_agent_dispatch_backend|claude|codex)"
@@ -32,27 +32,43 @@ forbidden = re.compile(
 
 violations = []
 for path in sys.argv[1:]:
-    in_shell_fence = False
+    in_fence = False
+    scan_body = False
+    marker_character = ""
+    marker_length = 0
     fence_body_line = 0
     with open(path, encoding="utf-8") as stream:
         for line_number, raw in enumerate(stream, 1):
             line = raw.rstrip("\r\n")
-            if not in_shell_fence:
-                if fence_open.match(line):
-                    in_shell_fence = True
+            if not in_fence:
+                opening = fence_open.fullmatch(line)
+                if opening:
+                    marker = opening.group("marker")
+                    info = opening.group("info").strip(" \t")
+                    language = info.split(None, 1)[0] if info else ""
+                    in_fence = True
+                    scan_body = language in shell_languages
+                    marker_character = marker[0]
+                    marker_length = len(marker)
                     fence_body_line = line_number + 1
                 continue
 
-            if fence_close.fullmatch(line):
-                in_shell_fence = False
+            stripped = line.strip(" \t")
+            if (
+                len(stripped) >= marker_length
+                and stripped == marker_character * len(stripped)
+            ):
+                in_fence = False
+                scan_body = False
                 continue
 
-            for match in forbidden.finditer(raw):
-                violations.append(
-                    f"{path}:{line_number}: absolute deny violation: {match.group(0)}"
-                )
+            if scan_body:
+                for match in forbidden.finditer(raw):
+                    violations.append(
+                        f"{path}:{line_number}: absolute deny violation: {match.group(0)}"
+                    )
 
-    if in_shell_fence:
+    if in_fence and scan_body:
         violations.append(
             f"{path}:{fence_body_line}: absolute deny violation: unclosed executable fence"
         )
@@ -113,6 +129,10 @@ assert_rejected command-chain-context 'printf ok && uberdev_dispatch_one 42 medi
 assert_rejected underscore-boundary 'value=prefix_codex_suffix'
 assert_document_rejected sh-fence $'```sh\nprintf "%s\\n" claude\n```\n'
 assert_document_rejected zsh-fence $'```zsh\nAgent (role=reviewer)\n```\n'
+assert_document_rejected four-backtick-fence $'````bash\nprintf "%s\\n" codex\n````\n'
+assert_document_rejected longer-backtick-closer $'````sh\nprovider=claude\n`````\n'
+assert_document_rejected tilde-shell-fence $'~~~zsh\nspawn_agent --task review\n~~~\n'
+assert_document_rejected short-backtick-closer $'````bash\nprintf ok\n```\n'
 assert_document_rejected unclosed-fence $'```bash\nprintf ok\n'
 
 # Clean controls cover the intended exclusions: case-sensitive uppercase host
@@ -124,6 +144,10 @@ uberdev_dispatch_one, _uberdev_agent_dispatch_backend, claude, and codex.
 ```json
 {"examples":["spawn_agent","Task(","Agent(","claude","codex"]}
 ```
+
+~~~~text
+Non-shell fenced content may mention claude, codex, spawn_agent, Task(, and Agent(.
+~~~~
 
 ```bash
 set -euo pipefail

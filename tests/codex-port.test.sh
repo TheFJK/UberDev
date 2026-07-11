@@ -207,10 +207,77 @@ if grep -RqlE "$MODEL_RE|$DANGLING_WAIT_RE" "$TMP/cmd-skills" 2>/dev/null; then
 else
   pass "generated command-skills do not preserve Claude-only model guidance or dangling WAIT fragments"
 fi
+COMMAND_ROOT_LINE="$(grep -m1 '^UBERDEV_REVIEW_PLUGIN_ROOT=' "$TMP/cmd-skills/uberdev-cmd-review-pr/SKILL.md" || true)"
+COMMAND_CODEX_HOME="$TMP/command-root-home/.codex"
+COMMAND_ROOT="$(
+  env CODEX_HOME="$COMMAND_CODEX_HOME" ROOT_LINE="$COMMAND_ROOT_LINE" bash -u -c '
+    unset PLUGIN_ROOT CLAUDE_PLUGIN_ROOT CURSOR_PLUGIN_ROOT
+    eval "$ROOT_LINE"
+    printf "%s" "$UBERDEV_REVIEW_PLUGIN_ROOT"
+  '
+)"
+if [ "$COMMAND_ROOT" = "$COMMAND_CODEX_HOME/plugins/uberdev-codex" ]; then
+  pass "converted command resolves runtime root from CODEX_HOME without PLUGIN_ROOT"
+else
+  fail "converted command CODEX_HOME fallback broken (got ${COMMAND_ROOT:-<empty>})"
+fi
 
 echo "== Skill-port: no CLAUDE_PLUGIN_ROOT residuals =="
 assert_cmd 0 "port-skill runs clean" \
   bash "$PORT_SKILL" "$REPO_ROOT/plugins/uberdev/skills" "$TMP/skills"
+SKILL_ROOT_LINE="$(grep -m1 '^UBERDEV_BRAINSTORM_PLUGIN_ROOT=' "$TMP/skills/brainstorm/SKILL.md" || true)"
+SKILL_CODEX_HOME="$TMP/skill-root-home/.codex"
+SKILL_ROOT="$(
+  env CODEX_HOME="$SKILL_CODEX_HOME" ROOT_LINE="$SKILL_ROOT_LINE" bash -u -c '
+    unset PLUGIN_ROOT CLAUDE_PLUGIN_ROOT CURSOR_PLUGIN_ROOT
+    eval "$ROOT_LINE"
+    printf "%s" "$UBERDEV_BRAINSTORM_PLUGIN_ROOT"
+  '
+)"
+if [ "$SKILL_ROOT" = "$SKILL_CODEX_HOME/plugins/uberdev-codex" ]; then
+  pass "ported skill resolves runtime root from CODEX_HOME without PLUGIN_ROOT"
+else
+  fail "ported skill CODEX_HOME fallback broken (got ${SKILL_ROOT:-<empty>})"
+fi
+VISUAL_CODEX_HOME="$TMP/visual-root-home/.codex"
+PORTED_VISUAL_LINES="$(grep -E '^(PLUGIN_SCRIPTS_ROOT|PLUGIN_SCRIPTS)=' "$TMP/skills/orchestrator/SKILL.md" || true)"
+PORTED_VISUAL_SCRIPTS="$(
+  env CODEX_HOME="$VISUAL_CODEX_HOME" VISUAL_LINES="$PORTED_VISUAL_LINES" bash -u -c '
+    unset PLUGIN_ROOT CLAUDE_PLUGIN_ROOT CURSOR_PLUGIN_ROOT
+    eval "$VISUAL_LINES"
+    printf "%s" "$PLUGIN_SCRIPTS"
+  '
+)"
+if [ "$PORTED_VISUAL_SCRIPTS" = "$VISUAL_CODEX_HOME/plugins/uberdev-codex/skills/brainstorm/scripts" ]; then
+  pass "ported visual companion resolves installed scripts from CODEX_HOME without PLUGIN_ROOT"
+else
+  fail "ported visual companion CODEX_HOME fallback broken (got ${PORTED_VISUAL_SCRIPTS:-<empty>})"
+fi
+
+CANONICAL_ORCHESTRATOR="$REPO_ROOT/plugins/uberdev/skills/orchestrator/SKILL.md"
+if grep -q 'host-provided plugin-root variables' "$CANONICAL_ORCHESTRATOR" \
+   && ! grep -q 'with a `find` fallback' "$CANONICAL_ORCHESTRATOR"; then
+  pass "canonical visual companion prose matches host-root-only resolution"
+else
+  fail "canonical visual companion prose still promises a removed find fallback"
+fi
+CANONICAL_VISUAL_BLOCK="$TMP/canonical-visual-companion.sh"
+awk '
+  /^PLUGIN_SCRIPTS_ROOT=/ { capture=1 }
+  capture && /^```/ { exit }
+  capture { print }
+' "$CANONICAL_ORCHESTRATOR" > "$CANONICAL_VISUAL_BLOCK"
+if [ ! -s "$CANONICAL_VISUAL_BLOCK" ]; then
+  fail "canonical visual companion exposes an executable host-root resolution block"
+elif env -u PLUGIN_ROOT -u CLAUDE_PLUGIN_ROOT -u CURSOR_PLUGIN_ROOT \
+       bash -u "$CANONICAL_VISUAL_BLOCK" \
+       >"$TMP/canonical-visual.stdout" 2>"$TMP/canonical-visual.stderr" \
+     && grep -qF 'plugin root unavailable (set PLUGIN_ROOT, CLAUDE_PLUGIN_ROOT, or CURSOR_PLUGIN_ROOT)' \
+          "$TMP/canonical-visual.stderr"; then
+  pass "canonical visual companion degrades with a provider-neutral missing-root diagnostic"
+else
+  fail "canonical visual companion missing-root path is silent or provider-specific"
+fi
 NG="$(grep -rl 'CLAUDE_PLUGIN_ROOT' "$TMP/skills" 2>/dev/null | wc -l | tr -d ' ')"
 [ "$NG" -eq 0 ] && pass "zero CLAUDE_PLUGIN_ROOT residuals in ported skills" \
   || fail "found $NG files still referencing CLAUDE_PLUGIN_ROOT"

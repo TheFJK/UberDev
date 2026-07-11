@@ -524,11 +524,15 @@ Use `AskUserQuestion` with 2 options (`Yes` / `No`) so the consent is structural
 
 **Per-question decision.** Even after consent, decide PER QUESTION whether browser or terminal fits — the test is *would the user understand this better by seeing it than reading it?* Visual: UI mockups, layout comparisons, color/theme choices, architecture diagrams, spatial relationships. Terminal: scope/requirements, A/B/C text choices, tradeoff lists, technical decisions. The 3-5 Phase 2 questions may mix freely.
 
-**Starting the server (first visual question only).** Resolve the plugin scripts dir via plugin-root env var with a `find` fallback, then invoke `start-server.sh`:
+**Starting the server (first visual question only).** Resolve the plugin scripts dir from the host-provided plugin-root variables, then invoke `start-server.sh`:
 
 ```bash
-PLUGIN_SCRIPTS="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}/skills/brainstorm/scripts"
-if [[ ! -d "$PLUGIN_SCRIPTS" ]]; then
+PLUGIN_SCRIPTS_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
+PLUGIN_SCRIPTS="${PLUGIN_SCRIPTS_ROOT:+$PLUGIN_SCRIPTS_ROOT/skills/brainstorm/scripts}"
+if [[ -z "$PLUGIN_SCRIPTS_ROOT" ]]; then
+  echo "uberdev plugin root unavailable (set PLUGIN_ROOT, CLAUDE_PLUGIN_ROOT, or CURSOR_PLUGIN_ROOT) — falling back to terminal-only Phase 2" >&2
+  # continue without visual companion; AskUserQuestion path still works
+elif [[ ! -d "$PLUGIN_SCRIPTS" ]]; then
   echo "uberdev brainstorm scripts not found — falling back to terminal-only Phase 2" >&2
   # continue without visual companion; AskUserQuestion path still works
 else
