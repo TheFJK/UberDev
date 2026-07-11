@@ -1088,7 +1088,9 @@ if os.name=="nt":
  flags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
  diagnostic=os.environ.get("UBERDEV_DETACH_DIAGNOSTICS")=="1"
  bash_path=shutil.which("bash")
- launch_argv=[bash_path,"-x","-c",*sys.argv[1:]] if diagnostic else argv
+ launch_argv=[bash_path]
+ if diagnostic: launch_argv.append("-x")
+ launch_argv.extend(["-c",*sys.argv[1:]])
  if diagnostic: print(f"detach diagnostic: bash={bash_path!r} cwd={os.getcwd()!r} flags={flags} argv={launch_argv!r}",file=sys.stderr,flush=True)
  try: child=subprocess.Popen(launch_argv,stdout=sys.stdout,stderr=sys.stderr,creationflags=flags)
  except BaseException:
@@ -1296,7 +1298,9 @@ if os.name=="nt":
  flags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
  diagnostic=os.environ.get("UBERDEV_DETACH_DIAGNOSTICS")=="1"
  bash_path=shutil.which("bash")
- launch_argv=[bash_path,"-x","-c",*sys.argv[1:]] if diagnostic else argv
+ launch_argv=[bash_path]
+ if diagnostic: launch_argv.append("-x")
+ launch_argv.extend(["-c",*sys.argv[1:]])
  if diagnostic: print(f"detach diagnostic: bash={bash_path!r} cwd={os.getcwd()!r} flags={flags} argv={launch_argv!r}",file=sys.stderr,flush=True)
  try: child=subprocess.Popen(launch_argv,stdout=sys.stdout,stderr=sys.stderr,creationflags=flags)
  except BaseException:

@@ -175,11 +175,13 @@ posix_setsid_count="$(grep -Fc 'os.setsid()' "$DISPATCH_LIB")"
 wrapper_pid_bridge_count="$(grep -Fc 'os.environ["UBERDEV_WRAPPER_PID"]=str(os.getpid())' "$DISPATCH_LIB")"
 supervisor_pid_file_count="$(grep -Fc 'UBERDEV_SUPERVISOR_PID_FILE="$STATUS_FILE.pid" nohup' "$DISPATCH_LIB")"
 secure_pid_writer_count="$(grep -Fc 'pid_path=os.environ["UBERDEV_SUPERVISOR_PID_FILE"]' "$DISPATCH_LIB")"
+absolute_bash_launcher_count="$(grep -Fc 'launch_argv=[bash_path]' "$DISPATCH_LIB")"
 if [ "$windows_detach_count" -eq 2 ] \
     && [ "$posix_setsid_count" -eq 2 ] \
     && [ "$wrapper_pid_bridge_count" -eq 2 ] \
     && [ "$supervisor_pid_file_count" -eq 2 ] \
     && [ "$secure_pid_writer_count" -eq 2 ] \
+    && [ "$absolute_bash_launcher_count" -eq 2 ] \
     && grep -Fq '_uberdev_dispatch_read_secure_pid_file' "$DISPATCH_LIB" \
     && ! grep -Fq 'os.setsid(); os.execvp' "$DISPATCH_LIB"; then
   echo "  PASS  detached launchers securely bridge native Windows supervisor PIDs and preserve POSIX setsid"; PASS=$((PASS + 1))
