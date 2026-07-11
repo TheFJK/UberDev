@@ -1031,15 +1031,16 @@ UBERDEV_AGENT_PREPARED_REQUEST_JSON="${ROOT_REQUESTS[$_widx]}"
 UBERDEV_AGENT_RISK_SIGNALS_JSON="${RISKS[$_widx]}"
 UBERDEV_AGENT_WORKFLOW="$WORKFLOW"
 UBERDEV_AGENT_TRIAGE_DECISION_JSON="${TRIAGE_DECISIONS[$_widx]}"
-# Root carrier for solve.issue.lead. Descendant workflows inherit this closed,
+# Root carrier lineage `solve.lead.<tier>` (legacy catalog alias:
+# `solve.issue.lead`). Descendant workflows inherit this closed,
 # immutable pointer/hash tuple and use it to construct handoff JSON for
 # uberdev_dispatch_child; they never reconstruct routing state from prose.
 UBERDEV_RUN_CARRIER_JSON="$(python3 -I -B -c '
 import json,sys
 r=json.loads(sys.argv[1])
 print(json.dumps({"schema_version":1,"run_id":r["run_id"],"workflow":r["workflow"],"issue_num":r["issue_num"],"context_file":r["context_file"],"context_sha256":r["context_sha256"]},sort_keys=True,separators=(",",":")),end="")
-' "$UBERDEV_AGENT_PREPARED_REQUEST_JSON")" || { echo "error: failed to construct solve.issue.lead carrier" >&2; exit 2; }
-UBERDEV_ROOT_EDGE_ID=solve.issue.lead
+' "$UBERDEV_AGENT_PREPARED_REQUEST_JSON")" || { echo "error: failed to construct solve.lead.$TIER carrier" >&2; exit 2; }
+UBERDEV_ROOT_EDGE_ID="solve.lead.$TIER"
 export UBERDEV_AGENT_PREPARED_REQUEST_JSON UBERDEV_AGENT_RISK_SIGNALS_JSON UBERDEV_AGENT_WORKFLOW UBERDEV_AGENT_TRIAGE_DECISION_JSON UBERDEV_RUN_CARRIER_JSON UBERDEV_ROOT_EDGE_ID
 _widx=$((_widx + 1))
 # DISPATCH_RC + DISPATCH_ID are reset at the top of uberdev_dispatch_one
