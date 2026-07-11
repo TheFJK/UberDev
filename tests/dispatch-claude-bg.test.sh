@@ -194,6 +194,43 @@ assert_grep "$SOLVE_PIPELINE" \
 assert_grep "$SOLVE_PIPELINE" \
   'ultra is Codex-only' \
   "Claude-backed resolution rejects public ultra before claims"
+WINDOWS_STAGING_TMP="$(mktemp -d)"
+if python3 -I -B - "$SOLVE_PIPELINE" "$WINDOWS_STAGING_TMP" <<'PY'
+import contextlib
+import io
+import os
+import pathlib
+import stat
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+base = pathlib.Path(sys.argv[2]).resolve()
+base.chmod(0o700)
+prefix = "if ! UBERDEV_TMPDIR=\"$(python3 -I -B -c '\n"
+suffix = "\n' \"$_UBERDEV_TMP_BASE\")\"; then"
+start = source.index(prefix) + len(prefix)
+end = source.index(suffix, start)
+snippet = source[start:end]
+if hasattr(os, "geteuid"):
+    del os.geteuid
+sys.argv = ["embedded-staging", str(base)]
+stdout = io.StringIO()
+with contextlib.redirect_stdout(stdout):
+    exec(compile(snippet, "solve-launcher-staging", "exec"), {})
+created = pathlib.Path(stdout.getvalue())
+assert created.parent == base
+assert created.name.startswith("uberdev-solve-windows-")
+assert stat.S_IMODE(created.stat().st_mode) == 0o700
+created.rmdir()
+PY
+then
+  echo "  PASS  solve staging works when Python has no os.geteuid (native Windows)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  solve staging requires unavailable os.geteuid on native Windows"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$WINDOWS_STAGING_TMP"
 ULTRA_TMP="$(mktemp -d)"; mkdir "$ULTRA_TMP/bin"
 cat >"$ULTRA_TMP/bin/gh" <<'SH'
 #!/usr/bin/env bash

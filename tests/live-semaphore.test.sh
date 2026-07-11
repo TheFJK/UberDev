@@ -78,6 +78,29 @@ capture uberdev_semaphore_acquire "$TMP/invalid-run" repo codex 1 '' 5
 capture uberdev_semaphore_acquire "$TMP/invalid-run-newline" repo codex 1 $'run\nowner_pid=1' 5
 [ "$CAPTURE_RC" -eq 2 ] && pass "lease-field newline injection is rejected" || fail "lease-field newline injection is rejected" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 
+# GNU stat accepts `-f` as filesystem-report mode and may print colon-bearing
+# output before rejecting the BSD format operand. The identity helper must try
+# GNU `-c` first and accept only one numeric device:inode pair.
+gnu_identity="$({
+  stat() {
+    if [ "$1" = -c ] && [ "$2" = '%d:%i' ]; then
+      printf '123:456\n'
+      return 0
+    fi
+    if [ "$1" = -f ]; then
+      printf '  File: "%s"\n' "$3"
+      return 1
+    fi
+    command stat "$@"
+  }
+  _uberdev_semaphore_path_identity "$TMP"
+} 2>/dev/null)"
+if [ "$gnu_identity" = '123:456' ]; then
+  pass "path identity prefers GNU stat and rejects filesystem-report noise"
+else
+  fail "path identity prefers GNU stat and rejects filesystem-report noise" "identity=$gnu_identity"
+fi
+
 capture /bin/bash -c '. "$1"; shasum() { return 1; }; uberdev_semaphore_acquire "$2" repo codex 1 run 5' \
   _ "$LIB" "$TMP/hash-tool-failure"
 if [ "$CAPTURE_RC" -eq 2 ] && ! find "$TMP/hash-tool-failure" -name '.scope' -print 2>/dev/null | grep -q .; then

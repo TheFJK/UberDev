@@ -277,11 +277,16 @@ _uberdev_semaphore_prepare_scope() {
 
 _uberdev_semaphore_path_identity() {
   local value
-  value="$(stat -f '%d:%i' "$1" 2>/dev/null || true)"
+  # GNU stat interprets `-f` as filesystem-report mode and can emit a
+  # colon-bearing report before rejecting the following BSD format operand.
+  # Probe GNU first, fall back to BSD, and validate the complete output before
+  # using it as the load-bearing mutex directory identity.
+  value="$(stat -c '%d:%i' "$1" 2>/dev/null || stat -f '%d:%i' "$1" 2>/dev/null)" || return 2
   case "$value" in
-    *:*) printf '%s\n' "$value"; return 0 ;;
+    ''|*[!0-9:]*|:*|*:|*:*:*) return 2 ;;
+    *:*) printf '%s\n' "$value" ;;
+    *) return 2 ;;
   esac
-  stat -c '%d:%i' "$1" 2>/dev/null
 }
 
 _uberdev_semaphore_quarantine_mutex() {
