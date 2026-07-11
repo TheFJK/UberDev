@@ -291,7 +291,7 @@ if set(actual_files) != set(expected_instances):
 
 handoff_values={}
 expected_chain={}
-expected_groups={}
+expected_edge_instances={}
 for instance,edge in expected_instances.items():
     value=json.loads(actual_files[instance].read_text())
     if value.get('instance_id') != instance or value.get('edge_id') != edge:
@@ -304,7 +304,7 @@ for instance,edge in expected_instances.items():
     key=(edge,digest)
     handoff_values[instance]=value
     expected_chain[instance]=key
-    expected_groups.setdefault(key,set()).add(instance)
+    expected_edge_instances.setdefault(edge,set()).add(instance)
 
 raw=Path(receipt_path).read_text()
 rows=[json.loads(line) for line in raw.splitlines()]
@@ -323,8 +323,6 @@ for index,row in enumerate(rows):
         raise SystemExit(f'invalid receipt digest: {row!r}')
     edge=row['edge_id']
     key=(edge,digest)
-    if key not in expected_groups:
-        raise SystemExit(f'unknown receipt build/digest: {row!r}')
     if event == 'build':
         instance=None
     elif event in {'handoff','dispatch'}:
@@ -335,33 +333,35 @@ for index,row in enumerate(rows):
             dispatch_order.append((edge,instance))
     else:
         raise SystemExit(f'unknown receipt event: {row!r}')
-    grouped.setdefault(key,[]).append((event,instance,index))
+    grouped.setdefault(edge,[]).append((event,instance,digest,index))
 
-for key,expected_group_instances in expected_groups.items():
-    pending_builds=0
-    open_instance=None
+for edge,expected_group_instances in expected_edge_instances.items():
+    pending_builds=[]
+    open_chain=None
     seen=set()
-    for event,instance,index in grouped.get(key,[]):
+    for event,instance,digest,index in grouped.get(edge,[]):
         if event == 'build':
-            if open_instance is not None:
-                raise SystemExit(f'receipt event order mismatch: build interrupted instance={open_instance} index={index}')
-            pending_builds+=1
+            if open_chain is not None:
+                raise SystemExit(f'receipt event order mismatch: build interrupted instance={open_chain[0]} index={index}')
+            pending_builds.append(digest)
         elif event == 'handoff':
-            if open_instance is not None:
+            if open_chain is not None:
                 raise SystemExit(f'receipt event order mismatch: duplicate handoff instance={instance} index={index}')
-            if pending_builds < 1:
+            if not pending_builds:
                 raise SystemExit(f'receipt missing prior build: instance={instance} index={index}')
+            if pending_builds[-1] != digest:
+                raise SystemExit(f'receipt final build mismatch: instance={instance} index={index}')
             if instance not in expected_group_instances or instance in seen:
                 raise SystemExit(f'unknown or duplicate receipt handoff: instance={instance} index={index}')
-            open_instance=instance
+            open_chain=(instance,digest)
         else:
-            if open_instance != instance:
-                raise SystemExit(f'receipt event order mismatch: dispatch instance={instance} open={open_instance} index={index}')
+            if open_chain != (instance,digest):
+                raise SystemExit(f'receipt event order mismatch: dispatch instance={instance} open={open_chain} index={index}')
             seen.add(instance)
-            open_instance=None
-            pending_builds=0
-    if open_instance is not None or pending_builds:
-        raise SystemExit(f'incomplete ordered receipt group: edge={key[0]} digest={key[1]}')
+            open_chain=None
+            pending_builds=[]
+    if open_chain is not None or pending_builds:
+        raise SystemExit(f'incomplete ordered receipt group: edge={edge}')
     if seen != expected_group_instances:
         raise SystemExit(f'incomplete receipt identities: expected={sorted(expected_group_instances)!r} actual={sorted(seen)!r}')
 
@@ -413,15 +413,24 @@ mkdir -p "$MUTATION_DIR"
 chmod 700 "$MUTATION_DIR"
 RECEIPT_REORDERED="$MUTATION_DIR/receipt-reordered.jsonl"
 RECEIPT_BUILD_LATE="$MUTATION_DIR/receipt-build-late.jsonl"
+RECEIPT_PRENORMALIZED="$MUTATION_DIR/receipt-prenormalized.jsonl"
+RECEIPT_BUILD_AFTER_HANDOFF="$MUTATION_DIR/receipt-build-after-handoff.jsonl"
+RECEIPT_FINAL_MISMATCH="$MUTATION_DIR/receipt-final-mismatch.jsonl"
+RECEIPT_MISCORRELATED="$MUTATION_DIR/receipt-miscorrelated.jsonl"
 LIFECYCLE_OMITTED="$MUTATION_DIR/lifecycle-omitted.jsonl"
 LIFECYCLE_MISCORRELATED="$MUTATION_DIR/lifecycle-miscorrelated.jsonl"
 python3 -I -B - "$RECEIPTS" "$LIFECYCLE" \
-  "$RECEIPT_REORDERED" "$RECEIPT_BUILD_LATE" \
+  "$RECEIPT_REORDERED" "$RECEIPT_BUILD_LATE" "$RECEIPT_PRENORMALIZED" \
+  "$RECEIPT_BUILD_AFTER_HANDOFF" "$RECEIPT_FINAL_MISMATCH" "$RECEIPT_MISCORRELATED" \
   "$LIFECYCLE_OMITTED" "$LIFECYCLE_MISCORRELATED" <<'PY'
-import json,os,sys
+import hashlib,json,os,sys
 from pathlib import Path
 
-receipt_path,lifecycle_path,reordered_path,late_path,omitted_path,miscorrelated_path=sys.argv[1:]
+(
+ receipt_path,lifecycle_path,reordered_path,late_path,prenormalized_path,
+ after_handoff_path,final_mismatch_path,receipt_miscorrelated_path,
+ omitted_path,lifecycle_miscorrelated_path,
+)=sys.argv[1:]
 
 def write(path,rows):
     Path(path).write_text(''.join(json.dumps(row,sort_keys=True,separators=(',',':'))+'\n' for row in rows))
@@ -446,6 +455,40 @@ dispatch_index=next(i for i,row in enumerate(late) if row.get('event')=='dispatc
 late[dispatch_index+1:dispatch_index+1]=build_rows
 write(late_path,late)
 
+prenormalized=[dict(row) for row in receipts]
+target='orchestrator-research-patterns-a1'
+handoff_index=next(i for i,row in enumerate(prenormalized) if row.get('event')=='handoff' and row.get('instance_id')==target)
+handoff=prenormalized[handoff_index]
+final_build_index=max(i for i,row in enumerate(prenormalized[:handoff_index]) if row.get('event')=='build' and row.get('edge_id')==handoff['edge_id'] and row.get('inputs_sha256')==handoff['inputs_sha256'])
+snapshot=dict(prenormalized[final_build_index])
+snapshot['inputs_sha256']=hashlib.sha256(b'pre-normalization-build-A').hexdigest()
+if snapshot['inputs_sha256']==handoff['inputs_sha256']: raise SystemExit('pre-normalization digest collision')
+prenormalized.insert(final_build_index,snapshot)
+write(prenormalized_path,prenormalized)
+
+after_handoff=[dict(row) for row in receipts]
+target='orchestrator-research-followup-a1'
+handoff_index=next(i for i,row in enumerate(after_handoff) if row.get('event')=='handoff' and row.get('instance_id')==target)
+handoff=after_handoff[handoff_index]
+final_build_index=max(i for i,row in enumerate(after_handoff[:handoff_index]) if row.get('event')=='build' and row.get('edge_id')==handoff['edge_id'])
+after_handoff.insert(handoff_index+1,dict(after_handoff[final_build_index]))
+write(after_handoff_path,after_handoff)
+
+final_mismatch=[dict(row) for row in receipts]
+target='orchestrator-research-prior-art-a1'
+handoff_index=next(i for i,row in enumerate(final_mismatch) if row.get('event')=='handoff' and row.get('instance_id')==target)
+handoff=final_mismatch[handoff_index]
+final_build_index=max(i for i,row in enumerate(final_mismatch[:handoff_index]) if row.get('event')=='build' and row.get('edge_id')==handoff['edge_id'])
+final_mismatch[final_build_index]['inputs_sha256']=hashlib.sha256(b'missing-matching-final-build').hexdigest()
+if final_mismatch[final_build_index]['inputs_sha256']==handoff['inputs_sha256']: raise SystemExit('final mismatch digest collision')
+write(final_mismatch_path,final_mismatch)
+
+receipt_miscorrelated=[dict(row) for row in receipts]
+target='orchestrator-research-constraints-a1'
+row=next(row for row in receipt_miscorrelated if row.get('event')=='dispatch' and row.get('instance_id')==target)
+row['instance_id']='orchestrator-research-patterns-a1'
+write(receipt_miscorrelated_path,receipt_miscorrelated)
+
 lifecycle=[json.loads(line) for line in Path(lifecycle_path).read_text().splitlines()]
 target='orchestrator-spec-write-a1'
 omitted=[row for row in lifecycle if not (row.get('run_id')==target and row.get('event')=='agent_started')]
@@ -453,10 +496,10 @@ if len(omitted)!=len(lifecycle)-1: raise SystemExit('lifecycle omission mutation
 write(omitted_path,omitted)
 
 target='orchestrator-plan-write-a1'; wrong='orchestrator-plan-write-a2'
-miscorrelated=[dict(row) for row in lifecycle]
-row=next(row for row in miscorrelated if row.get('run_id')==target and row.get('event')=='completed')
+lifecycle_miscorrelated=[dict(row) for row in lifecycle]
+row=next(row for row in lifecycle_miscorrelated if row.get('run_id')==target and row.get('event')=='completed')
 row['run_id']=wrong
-write(miscorrelated_path,miscorrelated)
+write(lifecycle_miscorrelated_path,lifecycle_miscorrelated)
 PY
 
 assert_runtime_rejected() {
@@ -472,8 +515,18 @@ assert_runtime_rejected() {
   }
 }
 
+if ! validate_runtime "$RECEIPT_PRENORMALIZED" "$LIFECYCLE" "$HANDOFFS" "$PROVIDER_CALLS" "$UBERDEV_CHILD_TEST_SOURCE" \
+    >"$MUTATION_DIR/receipt-prenormalized.out" 2>"$MUTATION_DIR/receipt-prenormalized.err"; then
+  echo 'valid pre-normalization receipt sequence rejected: build(A) -> build(B) -> handoff(B) -> dispatch(B)' >&2
+  sed -n '1p' "$MUTATION_DIR/receipt-prenormalized.err" >&2
+  exit 1
+fi
+
 assert_runtime_rejected receipt-reordered 'receipt event order mismatch' "$RECEIPT_REORDERED" "$LIFECYCLE"
 assert_runtime_rejected receipt-build-late 'receipt missing prior build' "$RECEIPT_BUILD_LATE" "$LIFECYCLE"
+assert_runtime_rejected receipt-build-after-handoff 'receipt event order mismatch' "$RECEIPT_BUILD_AFTER_HANDOFF" "$LIFECYCLE"
+assert_runtime_rejected receipt-final-mismatch 'receipt final build mismatch' "$RECEIPT_FINAL_MISMATCH" "$LIFECYCLE"
+assert_runtime_rejected receipt-miscorrelated 'unknown receipt chain' "$RECEIPT_MISCORRELATED" "$LIFECYCLE"
 assert_runtime_rejected lifecycle-omitted 'lifecycle event sequence mismatch' "$RECEIPTS" "$LIFECYCLE_OMITTED"
 assert_runtime_rejected lifecycle-miscorrelated 'lifecycle event sequence mismatch' "$RECEIPTS" "$LIFECYCLE_MISCORRELATED"
 
