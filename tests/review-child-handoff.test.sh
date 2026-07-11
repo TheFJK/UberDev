@@ -98,8 +98,65 @@ for spec in "$REVIEW:review-pr" "$SIMPLIFY:simplify" "$POST:post-impl-review"; d
   env -i HOME="$HOME" PATH="$PATH" CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" \
     CLAUDE_PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$ROOT" \
     RUN_ID="20260710-000000-abcdef0" PR_NUMBER=1 ARGUMENTS='' \
-    RESEARCH_DIR_ABS="$TMP/setup-$name" UBERDEV_RUN_CARRIER_JSON="$UBERDEV_RUN_CARRIER_JSON" \
+    RESEARCH_DIR_ABS="$TMP/run/setup-$name" UBERDEV_RUN_CARRIER_JSON="$UBERDEV_RUN_CARRIER_JSON" \
     bash "$setup"
+done
+
+# Setup is a fail-closed validation boundary. Neither a standalone carrier
+# preparation failure nor an invalid/spoofed inherited carrier may create the
+# command-owned research directory or any artifact beneath it.
+FAKE_PLUGIN="$TMP/failing-plugin"
+mkdir -p "$FAKE_PLUGIN/lib"
+cat >"$FAKE_PLUGIN/lib/child-dispatch.sh" <<'SH'
+uberdev_prepare_run_carrier() { return 17; }
+SH
+for spec in "$REVIEW:review-pr" "$SIMPLIFY:simplify"; do
+  doc="${spec%:*}"; name="${spec##*:}"; setup="$TMP/setup-$name.sh"
+
+  failed_target="$TMP/prepare-failed-$name"
+  if env -i HOME="$HOME" PATH="$PATH" CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" \
+    CLAUDE_PLUGIN_ROOT="$FAKE_PLUGIN" WORKTREE_ROOT="$ROOT" \
+    RUN_ID="20260710-000000-abcdef0" PR_NUMBER=1 ARGUMENTS='' \
+    RESEARCH_DIR_ABS="$failed_target" bash "$setup" >/dev/null 2>&1; then
+    echo "setup unexpectedly survived carrier preparation failure: $name" >&2
+    exit 1
+  fi
+  [ ! -e "$failed_target" ]
+
+  invalid_target="$TMP/invalid-carrier-$name"
+  invalid_carrier="$(jq -c '.context_sha256 = ("0" * 64)' <<<"$UBERDEV_RUN_CARRIER_JSON")"
+  if env -i HOME="$HOME" PATH="$PATH" CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" \
+    CLAUDE_PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$ROOT" \
+    RUN_ID="20260710-000000-abcdef0" PR_NUMBER=1 ARGUMENTS='' \
+    RESEARCH_DIR_ABS="$invalid_target" UBERDEV_RUN_CARRIER_JSON="$invalid_carrier" \
+    bash "$setup" >/dev/null 2>&1; then
+    echo "setup unexpectedly accepted invalid inherited carrier: $name" >&2
+    exit 1
+  fi
+  [ ! -e "$invalid_target" ]
+
+  spoof_root="$TMP/spoof-root-$name"; mkdir -p "$spoof_root"
+  spoof_target="$spoof_root/research"
+  if env -i HOME="$HOME" PATH="$PATH" CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" \
+    CLAUDE_PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$spoof_root" \
+    RUN_ID="20260710-000000-abcdef0" PR_NUMBER=1 ARGUMENTS='' \
+    RESEARCH_DIR_ABS="$spoof_target" UBERDEV_RUN_CARRIER_JSON="$UBERDEV_RUN_CARRIER_JSON" \
+    bash "$setup" >/dev/null 2>&1; then
+    echo "setup unexpectedly accepted spoofed inherited repository: $name" >&2
+    exit 1
+  fi
+  [ ! -e "$spoof_target" ]
+
+  escaped_target="$TMP/escaped-research-$name"
+  if env -i HOME="$HOME" PATH="$PATH" CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" \
+    CLAUDE_PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$ROOT" \
+    RUN_ID="20260710-000000-abcdef0" PR_NUMBER=1 ARGUMENTS='' \
+    RESEARCH_DIR_ABS="$escaped_target" UBERDEV_RUN_CARRIER_JSON="$UBERDEV_RUN_CARRIER_JSON" \
+    bash "$setup" >/dev/null 2>&1; then
+    echo "setup unexpectedly accepted research path outside verified roots: $name" >&2
+    exit 1
+  fi
+  [ ! -e "$escaped_target" ]
 done
 
 # The executable builder preflights the complete immutable batch before the

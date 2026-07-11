@@ -18,13 +18,54 @@ Standalone `/simplify` sources `lib/child-dispatch.sh` and, when no inherited ca
 set -u
 UBERDEV_REVIEW_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}"
 . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh"
-WORKTREE_ROOT="${WORKTREE_ROOT:-$(git rev-parse --show-toplevel)}"
-RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)}"
+PR_NUMBER="${PR_NUMBER:-0}"
+if [ -z "${UBERDEV_RUN_CARRIER_JSON:-}" ]; then
+  uberdev_prepare_run_carrier simplify 0 medium '[]' >/dev/null || {
+    rc=$?; return "$rc" 2>/dev/null || exit "$rc"
+  }
+fi
+UBERDEV_SETUP_BOUNDARY_JSON="$(python3 -I -B - "$UBERDEV_RUN_CARRIER_JSON" "${WORKTREE_ROOT:-}" <<'PY'
+import hashlib,json,os,stat,sys
+def fail(): raise SystemExit(2)
+try:
+    carrier=json.loads(sys.argv[1]); requested_root=sys.argv[2]
+    if set(carrier)!={'schema_version','run_id','workflow','issue_num','context_file','context_sha256'} or carrier.get('schema_version')!=1: fail()
+    ctx=carrier['context_file']; digest=carrier['context_sha256']
+    if not isinstance(ctx,str) or not os.path.isabs(ctx) or not isinstance(digest,str) or len(digest)!=64: fail()
+    entry=os.lstat(ctx); raw=open(ctx,'rb').read(1048577)
+    if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_uid!=os.geteuid() or entry.st_nlink!=1 or stat.S_IMODE(entry.st_mode)!=0o600: fail()
+    if len(raw)>1048576 or hashlib.sha256(raw).hexdigest()!=digest: fail()
+    context=json.loads(raw); metadata=context['metadata']
+    if (metadata.get('run_id'),metadata.get('workflow'),metadata.get('issue_num'))!=(carrier['run_id'],carrier['workflow'],carrier['issue_num']): fail()
+    repo=metadata.get('repository_id')
+    if not isinstance(repo,str) or not os.path.isabs(repo) or not os.path.isdir(repo): fail()
+    repo=os.path.realpath(repo); run_dir=os.path.realpath(os.path.dirname(os.path.dirname(ctx)))
+    if not os.path.isdir(run_dir): fail()
+    if requested_root and (not os.path.isabs(requested_root) or os.path.realpath(requested_root)!=repo): fail()
+except Exception: fail()
+print(json.dumps({'repository_root':repo,'run_dir':run_dir},sort_keys=True,separators=(',',':')),end='')
+PY
+)" || { rc=$?; return "$rc" 2>/dev/null || exit "$rc"; }
+WORKTREE_ROOT="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["repository_root"],end="")' "$UBERDEV_SETUP_BOUNDARY_JSON")" || { rc=$?; return "$rc" 2>/dev/null || exit "$rc"; }
+UBERDEV_CARRIER_RUN_DIR="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["run_dir"],end="")' "$UBERDEV_SETUP_BOUNDARY_JSON")" || { rc=$?; return "$rc" 2>/dev/null || exit "$rc"; }
+UBERDEV_GIT_ROOT="$(git -C "$WORKTREE_ROOT" rev-parse --show-toplevel)" || { rc=$?; return "$rc" 2>/dev/null || exit "$rc"; }
+[ "$(cd "$UBERDEV_GIT_ROOT" && pwd -P)" = "$WORKTREE_ROOT" ] || { return 2 2>/dev/null || exit 2; }
+RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$(git -C "$WORKTREE_ROOT" rev-parse --short HEAD)}"
 REVIEW_ITERATION="${REVIEW_ITERATION:-1}"
 REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"
 FOCUS="${FOCUS:-${ARGUMENTS:-}}"
-PR_NUMBER="${PR_NUMBER:-0}"
-RESEARCH_DIR_ABS="${RESEARCH_DIR_ABS:-$WORKTREE_ROOT/.uberdev/research/$RUN_ID}"
+RESEARCH_DIR_ABS="$(python3 -I -B - "${RESEARCH_DIR_ABS:-$WORKTREE_ROOT/.uberdev/research/$RUN_ID}" "$WORKTREE_ROOT" "$UBERDEV_CARRIER_RUN_DIR" <<'PY'
+import os,sys
+candidate,repo,run_dir=sys.argv[1:]
+if not os.path.isabs(candidate): raise SystemExit(2)
+candidate=os.path.realpath(candidate)
+def inside(root,path):
+    try: return path!=root and os.path.commonpath((root,path))==root
+    except ValueError: return False
+if not (inside(repo,candidate) or inside(run_dir,candidate)): raise SystemExit(2)
+print(candidate,end='')
+PY
+)" || { rc=$?; return "$rc" 2>/dev/null || exit "$rc"; }
 mkdir -p "$RESEARCH_DIR_ABS"
 DIFF_ARTIFACT_PATH="${DIFF_ARTIFACT_PATH:-$RESEARCH_DIR_ABS/pr-diff.md}"
 AGG_PATH="${AGG_PATH:-$RESEARCH_DIR_ABS/simplify-final.md}"
@@ -35,7 +76,6 @@ PHASE2_DISPOSITION_PATH="${PHASE2_DISPOSITION_PATH:-$RESEARCH_DIR_ABS/phase2-dis
 [ -f "$PHASE1_DISPOSITION_PATH" ] || printf '{}\n' >"$PHASE1_DISPOSITION_PATH"
 [ -f "$PHASE2_DISPOSITION_PATH" ] || printf '{}\n' >"$PHASE2_DISPOSITION_PATH"
 if [ ! -f "$DIFF_ARTIFACT_PATH" ]; then printf '%s\n%s\n' '<external-untrusted-input source="pr-diff">' '</external-untrusted-input>' >"$DIFF_ARTIFACT_PATH"; fi
-if [ -z "${UBERDEV_RUN_CARRIER_JSON:-}" ]; then uberdev_prepare_run_carrier simplify 0 medium '[]' >/dev/null; fi
 ```
 
 <!-- BEGIN review-child-builder-v1 -->

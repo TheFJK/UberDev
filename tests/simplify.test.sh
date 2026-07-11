@@ -146,9 +146,10 @@ assert_grep "$CODE_SIMPLIFIER" 'function signatures, return types, thrown except
 assert_grep "$CODE_SIMPLIFIER" 'iron rule' \
   "G2 — agent file labels its iron-rule clause"
 
-# G3 — RUN_ID minting recipe inlined in /simplify Phase 3 (matches review-pr)
-assert_grep "$SIMPLIFY" 'RUN_ID="\$\(date \+%Y%m%d-%H%M%S\)-\$\(git rev-parse --short HEAD\)"' \
-  "G3 — /simplify Phase 3 inlines the canonical RUN_ID recipe"
+# G3 — setup mints RUN_ID only after the carrier has established the verified
+# repository root; the git lookup must be explicitly rooted there.
+assert_grep "$SIMPLIFY" 'RUN_ID="\$\{RUN_ID:-\$\(date \+%Y%m%d-%H%M%S\)-\$\(git -C "\$WORKTREE_ROOT" rev-parse --short HEAD\)\}"' \
+  "G3 — /simplify setup mints RUN_ID from the carrier-verified repository"
 assert_grep "$SIMPLIFY" '\^\[0-9\]\{8\}-\[0-9\]\{6\}-\[a-f0-9\]\+\$' \
   "G3 — /simplify Phase 3 validates RUN_ID against the canonical regex"
 
