@@ -352,6 +352,7 @@ BASE_SHA=$'conflict-base-"quoted"\\sha*?[x]\t'
 # handoffs, then requires an exact build/handoff/dispatch correlation for every
 # instance. It rejects unknown sources, edges, instances, events, and shapes.
 python3 -I -B - "$RECEIPTS" "$HANDOFFS" "$PROVIDER_CALLS" "$POST_SOURCE" "$REVIEW_SOURCE" <<'PY'
+import copy
 import hashlib
 import json
 import re
@@ -406,7 +407,6 @@ if set(actual_files) != set(expected):
         f"handoff identity mismatch: expected={sorted(expected)!r} actual={sorted(actual_files)!r}"
     )
 
-expected_build = Counter()
 expected_correlated = Counter()
 for instance, (source, edge) in expected.items():
     value = json.loads(actual_files[instance].read_text(encoding="utf-8"))
@@ -419,54 +419,102 @@ for instance, (source, edge) in expected.items():
         inputs, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
     ).encode()
     digest = hashlib.sha256(canonical).hexdigest()
-    expected_build[(source, edge, digest)] += 1
     expected_correlated[(source, edge, instance, digest)] += 1
 
 rows = [
     json.loads(line)
     for line in Path(receipt_path).read_text(encoding="utf-8").splitlines()
 ]
-build = Counter()
-handoff = Counter()
-dispatch = Counter()
-actual_pairs = set()
-for row in rows:
-    event = row.get("event")
-    keys = {"schema_version", "event", "source", "edge_id", "inputs_sha256"}
-    if event != "build":
-        keys.add("instance_id")
-    if set(row) != keys or row.get("schema_version") != 1:
-        raise SystemExit(f"unknown receipt shape: {row!r}")
-    source, edge = row.get("source"), row.get("edge_id")
-    actual_pairs.add((source, edge))
-    if (source, edge) not in expected_pairs:
-        raise SystemExit(f"unknown receipt source/edge: {row!r}")
-    digest = row.get("inputs_sha256")
-    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
-        raise SystemExit(f"invalid receipt digest: {row!r}")
-    if event == "build":
-        build[(source, edge, digest)] += 1
-    elif event in {"handoff", "dispatch"}:
+def validate_receipts(candidate_rows):
+    prior_builds = Counter()
+    handoff = Counter()
+    dispatch = Counter()
+    actual_pairs = set()
+    for row in candidate_rows:
+        event = row.get("event")
+        keys = {"schema_version", "event", "source", "edge_id", "inputs_sha256"}
+        if event != "build":
+            keys.add("instance_id")
+        assert set(row) == keys and row.get("schema_version") == 1, (
+            f"unknown receipt shape: {row!r}"
+        )
+        source, edge = row.get("source"), row.get("edge_id")
+        actual_pairs.add((source, edge))
+        assert (source, edge) in expected_pairs, f"unknown receipt source/edge: {row!r}"
+        digest = row.get("inputs_sha256")
+        assert isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest), (
+            f"invalid receipt digest: {row!r}"
+        )
+        correlation = (source, edge, digest)
+        if event == "build":
+            prior_builds[correlation] += 1
+            continue
+        assert event in {"handoff", "dispatch"}, f"unknown receipt event: {row!r}"
         instance = row.get("instance_id")
-        if expected.get(instance) != (source, edge):
-            raise SystemExit(f"unknown receipt chain: {row!r}")
+        assert expected.get(instance) == (source, edge), f"unknown receipt chain: {row!r}"
+        assert prior_builds[correlation] >= 1, (
+            f"unmatched prior build digest: {row!r}"
+        )
         target = handoff if event == "handoff" else dispatch
         target[(source, edge, instance, digest)] += 1
-    else:
-        raise SystemExit(f"unknown receipt event: {row!r}")
 
-if actual_pairs != expected_pairs or len(actual_pairs) != 17:
-    raise SystemExit(
-        f"unique source/edge closure mismatch: expected={expected_pairs!r} actual={actual_pairs!r}"
+    assert actual_pairs == expected_pairs and len(actual_pairs) == 17, (
+        f"unique source/edge closure mismatch: expected={expected_pairs!r} "
+        f"actual={actual_pairs!r}"
     )
-if build != expected_build:
-    raise SystemExit(f"incomplete build correlations: expected={expected_build!r} actual={build!r}")
-if handoff != expected_correlated:
-    raise SystemExit(f"incomplete handoff correlations: expected={expected_correlated!r} actual={handoff!r}")
-if dispatch != expected_correlated:
-    raise SystemExit(f"incomplete dispatch correlations: expected={expected_correlated!r} actual={dispatch!r}")
-if len(rows) != len(expected) * 3:
-    raise SystemExit(f"unknown receipt count: expected={len(expected) * 3} actual={len(rows)}")
+    assert handoff == expected_correlated, (
+        f"incomplete handoff correlations: expected={expected_correlated!r} actual={handoff!r}"
+    )
+    assert dispatch == expected_correlated, (
+        f"incomplete dispatch correlations: expected={expected_correlated!r} actual={dispatch!r}"
+    )
+
+try:
+    validate_receipts(rows)
+except AssertionError as error:
+    raise SystemExit(str(error))
+
+# Positive mutation: successful validation may emit an additional identical
+# build snapshot. Cardinality is open for builds, but closed for terminals.
+extra_build = copy.deepcopy(rows)
+first_handoff = next(index for index, row in enumerate(extra_build) if row["event"] == "handoff")
+source = extra_build[first_handoff]["source"]
+edge = extra_build[first_handoff]["edge_id"]
+digest = extra_build[first_handoff]["inputs_sha256"]
+matching_build = next(
+    row for row in extra_build[:first_handoff]
+    if (row["event"], row["source"], row["edge_id"], row["inputs_sha256"])
+    == ("build", source, edge, digest)
+)
+extra_build.insert(first_handoff, copy.deepcopy(matching_build))
+validate_receipts(extra_build)
+
+def assert_rejected(candidate_rows, needle):
+    try:
+        validate_receipts(candidate_rows)
+    except AssertionError as error:
+        assert needle in str(error), (needle, str(error))
+    else:
+        raise AssertionError(f"receipt mutation accepted: {needle}")
+
+# Negative mutation: a handoff/dispatch pair may agree with each other yet is
+# incomplete unless its digest appeared in a prior build snapshot.
+unmatched = copy.deepcopy(rows)
+used_digests = {row["inputs_sha256"] for row in unmatched}
+unmatched_digest = next(char * 64 for char in "0123456789abcdef" if char * 64 not in used_digests)
+first_instance = unmatched[first_handoff]["instance_id"]
+for row in unmatched:
+    if row.get("instance_id") == first_instance and row["event"] in {"handoff", "dispatch"}:
+        row["inputs_sha256"] = unmatched_digest
+assert_rejected(unmatched, "unmatched prior build digest")
+
+# Negative mutation: open build cardinality does not admit an unknown
+# source/edge pair.
+unknown_extra = copy.deepcopy(rows)
+unknown_build = copy.deepcopy(matching_build)
+unknown_build["edge_id"] = "review_pr.review.unknown"
+unknown_extra.insert(first_handoff, unknown_build)
+assert_rejected(unknown_extra, "unknown receipt source/edge")
 
 provider = Counter()
 for line in Path(provider_path).read_text(encoding="utf-8").splitlines():
