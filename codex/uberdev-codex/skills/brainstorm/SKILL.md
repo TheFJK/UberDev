@@ -24,7 +24,7 @@ Every project goes through this process. A todo list, a single-function utility,
 You MUST create a task for each of these items and complete them in order:
 
 1. **Explore project context** — check files, docs, recent commits
-2. **Dispatch parallel research agents** (heuristic from prompt) — 2-3 `Explore`/`general-purpose` agents in one message researching codebase patterns, prior art, and library docs; synthesize findings (3-5 bullets) before continuing. Skip only for truly trivial tasks. See "Parallel research dispatch" below.
+2. **Dispatch routed research agents** (heuristic from prompt) — up to three existing roles (`research-codebase`, `research-patterns`, `research-prior-art`) in one wave; synthesize findings (3-5 bullets) before continuing. Skip only for truly trivial tasks. See "Parallel research dispatch" below.
 3. **Offer visual companion** (if topic will involve visual questions) — its own message, not combined with a clarifying question. See the Visual Companion section below.
 4. **Ask clarifying questions** — one at a time, informed by research; understand purpose/constraints/success criteria *(skipped in turbo mode — see "Turbo Mode" section)*
 5. **Propose 2-3 approaches** — with trade-offs and your recommendation, grounded in research findings
@@ -74,15 +74,68 @@ digraph brainstorming {
 
 **Parallel research dispatch (default first step):**
 
-After project-context exploration, before clarifying questions, dispatch 2-3 research agents in a single message to gather context in parallel. Read the user's request and infer the research questions yourself — don't ask the user what to research.
+After project-context exploration, before clarifying questions, dispatch up to three routed research agents in one wave. Read the user's request and infer the research questions yourself — don't ask the user what to research.
 
 Heuristics for inferring research questions:
-- Codebase questions ("how do we currently do X?", "any existing utilities for this?") → `Explore` agent
-- Library / prior-art questions ("standard pattern for Y?", "has anyone built this before?") → `general-purpose` agent with Context7 / web search
+- Codebase questions ("how do we currently do X?", "any existing utilities for this?") → `research-codebase`
+- In-repo precedent questions ("how did this repo solve a similar problem?") → `research-patterns`
+- Library / external prior-art questions ("standard pattern for Y?", "has anyone built this before?") → `research-prior-art`
 
 Synthesize findings into a brief summary before engaging the user with clarifying questions. The 2-3 approaches you propose later MUST be grounded in this research, not speculation.
 
-For architecturally consequential choices, this pattern also supports independent parallel exploration of design directions (one agent per direction). See `uberdev:dispatching-parallel-agents`.
+For architecturally consequential choices, broaden the semantic focus supplied to these roles; do not create an unregistered generic role.
+
+### Routed research execution
+
+When this skill receives a `routing_context` from `/solve` or `/turbo`, every provider edge MUST use `lib/child-dispatch.sh`. The handoffs contain no model, route, effort, service tier, sandbox, environment, or commands. Persist the user's brief as a private `brief_path`; never paste it into a child prompt. Run this setup once:
+
+```bash uberdev-executable
+set -euo pipefail
+: "${UBERDEV_AGENT_PREPARED_REQUEST_JSON:?missing immutable routing context}"
+UBERDEV_BRAINSTORM_PLUGIN_ROOT="${PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}"
+. "$UBERDEV_BRAINSTORM_PLUGIN_ROOT/lib/child-dispatch.sh"
+uberdev_brainstorm_dispatch() {
+  local edge="$1" instance="$2" role="$3" inputs_json="$4" handoff_dir handoff run_dir
+  run_dir="$(python3 -I -B -c 'import json,os,sys; print(os.path.dirname(os.path.dirname(json.loads(sys.argv[1])["context_file"])))' "$UBERDEV_AGENT_PREPARED_REQUEST_JSON")"
+  handoff_dir="$run_dir/handoffs"; mkdir -p "$handoff_dir"; chmod 700 "$handoff_dir"; handoff="$handoff_dir/$instance.json"
+  python3 -I -B - "$UBERDEV_AGENT_PREPARED_REQUEST_JSON" "$edge" "$instance" "$role" "$inputs_json" "$handoff" <<'PY'
+import json,os,sys
+root,edge,instance,role,inputs,path=sys.argv[1:]; r=json.loads(root)
+v={"schema_version":1,"carrier":{"schema_version":1,"run_id":r["run_id"],"workflow":r["workflow"],"issue_num":r["issue_num"],"context_file":r["context_file"],"context_sha256":r["context_sha256"]},"edge_id":edge,"instance_id":instance,"parent_run_id":r["run_id"],"role":role,"phase":"research","risk_scope":"none","risk_signals":[],"inputs":json.loads(inputs)}
+fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+with os.fdopen(fd,"w") as f: json.dump(v,f,sort_keys=True,separators=(",",":")); f.write("\n")
+PY
+  uberdev_dispatch_child "$edge" "$handoff" "$run_dir/children/$instance/result.md" "$run_dir/children/$instance/status.json" >/dev/null
+}
+uberdev_brainstorm_wait() {
+  local instance="$1" run_dir
+  run_dir="$(python3 -I -B -c 'import json,os,sys; print(os.path.dirname(os.path.dirname(json.loads(sys.argv[1])["context_file"])))' "$UBERDEV_AGENT_PREPARED_REQUEST_JSON")"
+  uberdev_wait_child "$run_dir/children/$instance/status.json" "$run_dir/children/$instance/result.md" 300
+}
+BRAINSTORM_RESEARCH_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"issue_body_path":sys.argv[1],"working_dir":sys.argv[2],"summary_dir":sys.argv[3],"research_mode":"general"},separators=(",",":")))' "$brief_path" "$working_dir" "$summary_dir")"
+```
+
+Create `BRAINSTORM_RESEARCH_INPUTS` as flat JSON containing `issue_body_path: brief_path`, `working_dir`, `summary_dir`, and `research_mode: "general"`, then issue the selected edges before waiting:
+
+```bash uberdev-executable edge=brainstorm.research.codebase
+uberdev_brainstorm_dispatch brainstorm.research.codebase brainstorm-research-codebase-a1 research-codebase "$BRAINSTORM_RESEARCH_INPUTS"
+```
+
+```bash uberdev-executable edge=brainstorm.research.prior_art
+uberdev_brainstorm_dispatch brainstorm.research.prior_art brainstorm-research-prior-art-a1 research-patterns "$BRAINSTORM_RESEARCH_INPUTS"
+```
+
+```bash uberdev-executable edge=brainstorm.research.library
+uberdev_brainstorm_dispatch brainstorm.research.library brainstorm-research-library-a1 research-prior-art "$BRAINSTORM_RESEARCH_INPUTS"
+```
+
+```bash uberdev-executable barrier=brainstorm.research
+for instance in brainstorm-research-codebase-a1 brainstorm-research-prior-art-a1 brainstorm-research-library-a1; do
+  uberdev_brainstorm_wait "$instance"
+done
+```
+
+Only wait for edges actually selected by the heuristic. A malformed result gets one fresh `a2` format retry. Research is advisory in ad-hoc brainstorming except that a requested codebase-grounded design MUST have usable codebase evidence. If no routing context is present (standalone ad-hoc use), research those dimensions in the host context; never fall back to an un-routed native child call.
 
 The synthesis step reads the summary text into context verbatim; no re-derivation required.
 
@@ -146,7 +199,7 @@ Fix any issues inline. No need to re-review — just fix and move on.
 
 **Implementation:**
 
-- Immediately invoke the `uberdev:write-plan` skill to create a detailed implementation plan. **No "review the spec" pause.** If the user wants to revise the spec, they'll interrupt; otherwise the plan-writing phase is the next forward step.
+- Immediately invoke the `uberdev:write-plan` skill to create a detailed implementation plan. This skill transition is `model_invocation: false`: propagate only `context_file`, `context_sha256`, root `run_id`, `workflow`, and `issue_num` when a routing context exists. Do not call the resolver and do not attach model/effort fields at the skill boundary. **No "review the spec" pause.** If the user wants to revise the spec, they'll interrupt; otherwise the plan-writing phase is the next forward step.
 - **Forward `--turbo` if it was in `$ARGUMENTS`** — invoke as `uberdev:write-plan --turbo …` so the downstream pipeline (write-plan → subagent-driven-dev → finish-branch) stays unattended end-to-end.
 - Do NOT invoke any other skill. `uberdev:write-plan` is the next step.
 
