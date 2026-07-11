@@ -45,6 +45,26 @@ def tokens_for(line):
     return list(lexer)
 
 
+def strip_inline_comment(line):
+    single = False
+    double = False
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "'" and not double:
+            single = not single
+        elif char == '"' and not single:
+            double = not double
+        elif (char == "#" and not single and not double
+              and (index == 0 or line[index - 1].isspace() or line[index - 1] in ";|&(){}")):
+            return line[:index]
+        index += 1
+    return line
+
+
 def substitution_bodies(line):
     bodies = []
     index = 0
@@ -80,6 +100,27 @@ def substitution_bodies(line):
             else:
                 index += 1
             continue
+        if char == "$" and line.startswith("$((", index):
+            depth = 2
+            end = index + 3
+            while end < len(line):
+                current = line[end]
+                if current == "\\":
+                    end += 2
+                    continue
+                if current == "(":
+                    depth += 1
+                elif current == ")":
+                    depth -= 1
+                    if depth == 0:
+                        arithmetic = line[index + 3:end - 1]
+                        bodies.extend(substitution_bodies(arithmetic))
+                        index = end + 1
+                        break
+                end += 1
+            else:
+                index += 3
+            continue
         if char == "$" and index + 1 < len(line) and line[index + 1] == "(":
             depth = 1
             end = index + 2
@@ -111,34 +152,38 @@ def substitution_bodies(line):
     return bodies
 
 
-def forbidden_command(line, case_state=None):
+def forbidden_command(line, case_stack=()):
+    line = strip_inline_comment(line)
     for body in substitution_bodies(line):
-        hit, _ = forbidden_command(body)
+        hit, _ = forbidden_command(body, ())
         if hit is not None:
-            return hit, case_state
+            return hit, case_stack
     try:
         tokens = tokens_for(line)
     except ValueError:
-        return None, case_state
-    expect_command = case_state != "pattern"
+        return None, case_stack
+    stack = list(case_stack)
+    expect_command = not stack or stack[-1] != "pattern"
     wrapper_mode = False
     for index, token in enumerate(tokens):
-        if case_state == "header":
-            if token == "in":
-                case_state = "pattern"
+        if stack and token == "esac":
+            stack.pop()
+            expect_command = False
+            wrapper_mode = False
             continue
-        if case_state == "pattern":
+        state = stack[-1] if stack else None
+        if state == "header":
+            if token == "in":
+                stack[-1] = "pattern"
+            continue
+        if state == "pattern":
             if token == ")":
-                case_state = "body"
+                stack[-1] = "body"
                 expect_command = True
             continue
-        if case_state == "body":
-            if token == "esac":
-                case_state = None
-                expect_command = False
-                continue
+        if state == "body":
             if token in {";;", ";&", ";;&"}:
-                case_state = "pattern"
+                stack[-1] = "pattern"
                 expect_command = False
                 continue
         if token in separators or token in command_starters:
@@ -153,11 +198,11 @@ def forbidden_command(line, case_state=None):
             continue
         name = os.path.basename(token)
         if name in forbidden_exact:
-            return name, case_state
+            return name, tuple(stack)
         if name in {"Task", "Agent"} and index + 1 < len(tokens) and tokens[index + 1] == "(":
-            return name + "(", case_state
+            return name + "(", tuple(stack)
         if name == "case":
-            case_state = "header"
+            stack.append("header")
             expect_command = False
             wrapper_mode = False
             continue
@@ -166,7 +211,7 @@ def forbidden_command(line, case_state=None):
             continue
         expect_command = False
         wrapper_mode = False
-    return None, case_state
+    return None, tuple(stack)
 
 
 violations = []
@@ -174,7 +219,7 @@ for raw_path in sys.argv[1:]:
     path = os.path.abspath(raw_path)
     in_bash = False
     heredoc_end = None
-    case_state = None
+    case_stack = ()
     logical = ""
     logical_line = 0
     with open(path, encoding="utf-8") as stream:
@@ -191,7 +236,7 @@ for raw_path in sys.argv[1:]:
             if fence_close.match(line):
                 in_bash = False
                 logical = ""
-                case_state = None
+                case_stack = ()
                 continue
             if not logical and (not line.strip() or line.lstrip().startswith("#")):
                 continue
@@ -201,7 +246,7 @@ for raw_path in sys.argv[1:]:
                 logical += line.rstrip()[:-1] + " "
                 continue
             logical += line
-            hit, case_state = forbidden_command(logical, case_state)
+            hit, case_stack = forbidden_command(logical, case_stack)
             if hit is not None:
                 violations.append(f"{path}:{logical_line}: routed provider bypass command: {hit}")
             match = heredoc.search(logical)
@@ -243,11 +288,14 @@ assert_rejected wrapped-codex 'env UBERDEV_TEST=1 codex exec review'
 assert_rejected case-arm-codex 'case "$x" in foo) codex exec review ;; esac'
 assert_rejected case-arm-spawn '  case "$x" in foo|bar) spawn_agent --task review ;; esac'
 assert_rejected case-arm-multiline $'case "$x" in\n  foo)\n    Agent(role="reviewer")\n    ;;\nesac'
+assert_rejected nested-case-outer-arm $'case "$outer" in\n  first)\n    case "$inner" in\n      nested) :; esac\n    ;;\n  second) codex exec review ;;\nesac'
 assert_rejected timed-codex 'time codex exec review'
 assert_rejected timed-claude '  time -p claude --print review'
 assert_rejected timed-after-if 'if time -p codex exec review; then :; fi'
 assert_rejected backtick-codex 'result=`codex exec review`'
 assert_rejected dollar-substitution-claude 'result="$(claude --print review)"'
+assert_rejected command-inside-arithmetic 'value=$((1 + $(codex exec review)))'
+assert_rejected hash-inside-word 'printf foo#$(claude --print review)'
 [ "$MUTATION_FAILURES" -eq 0 ]
 
 # Prose, comment-only mentions, quoted data, heredoc payloads, and the two
@@ -261,6 +309,10 @@ uberdev_dispatch_one, _uberdev_agent_dispatch_backend, claude, and codex.
 # routed-provider-edge: codex exec review
 printf '%s\n' 'spawn_agent Task( Agent( uberdev_agent_dispatch uberdev_dispatch_one _uberdev_agent_dispatch_backend claude codex'
 printf '%s\n' 'literal `codex exec review` and $(claude --print review) data'
+printf ok # $(codex exec review)
+printf ok # `claude --print review`
+value=$((codex + 1))
+case "$provider_name" in codex) printf ok ;; esac
 provider_name=codex
 uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks"
 uberdev_dispatch_child "$edge" "$handoff" "$result" "$status"
