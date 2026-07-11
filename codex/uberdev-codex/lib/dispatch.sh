@@ -47,6 +47,28 @@ _UBERDEV_DISPATCH_LIB_DIR="$(cd "$_UBERDEV_DISPATCH_LIB_DIR" 2>/dev/null && pwd 
 . "$_UBERDEV_DISPATCH_LIB_DIR/config-read.sh" || return 1
 _UBERDEV_DISPATCH_LOADED=1
 
+_uberdev_dispatch_resolve_python() {
+  if command -v python3 >/dev/null 2>&1; then
+    _UBERDEV_PYTHON_EXE="$(command -v python3)"; _UBERDEV_PYTHON_PREFIX=''
+  elif command -v python >/dev/null 2>&1; then
+    _UBERDEV_PYTHON_EXE="$(command -v python)"; _UBERDEV_PYTHON_PREFIX=''
+  elif command -v py >/dev/null 2>&1; then
+    _UBERDEV_PYTHON_EXE="$(command -v py)"; _UBERDEV_PYTHON_PREFIX='-3'
+  else
+    echo 'error: Python 3 is required (tried python3, python, and py -3)' >&2
+    return 127
+  fi
+}
+
+_uberdev_dispatch_python() {
+  _uberdev_dispatch_resolve_python || return $?
+  if [ -n "$_UBERDEV_PYTHON_PREFIX" ]; then
+    "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$@"
+  else
+    "$_UBERDEV_PYTHON_EXE" "$@"
+  fi
+}
+
 # The dispatch_backend enum — identical to the --backend= flag's accepted set.
 # `codex` is the OpenAI Codex CLI backend (RFC 0012 §3.4 codex-port): execs
 # `codex exec` headless + nohup-detached, PID-tracked like `background`.
@@ -377,7 +399,7 @@ _uberdev_dispatch_cancel_claude_bg() {
 }
 
 _uberdev_dispatch_group_live() {
-  python3 -I -B - "$1" <<'PY'
+  _uberdev_dispatch_python -I -B - "$1" <<'PY'
 import subprocess,sys
 pgid=int(sys.argv[1]); live=False
 try: rows=subprocess.check_output(["ps","-axo","pgid=,stat="],text=True).splitlines()
@@ -391,7 +413,7 @@ PY
 }
 
 _uberdev_dispatch_group_owned_session() {
-  python3 -I -B - "$1" "$2" <<'PY'
+  _uberdev_dispatch_python -I -B - "$1" "$2" <<'PY'
 import os,subprocess,sys
 pgid,sid=map(int,sys.argv[1:]); live=[]
 try: rows=subprocess.check_output(["ps","-axo","pid=,pgid=,stat="],text=True).splitlines()
@@ -434,7 +456,7 @@ EOF_IDENTITY
 # non-zombie PID is rejected because it may be reused or unisolated.
 _uberdev_dispatch_accept_immediate_terminal() {
   local backend="$1" pid="$2" status_file="$3" result_file="${4:-}"
-  python3 -I -B - "$backend" "$pid" "$status_file" "$result_file" <<'PY'
+  _uberdev_dispatch_python -I -B - "$backend" "$pid" "$status_file" "$result_file" <<'PY'
 import json,os,stat,subprocess,sys
 backend,pid,status_path,result_path=sys.argv[1:]
 if not pid.isdigit() or int(pid)<=0: raise SystemExit(2)
@@ -444,6 +466,17 @@ except (OSError,subprocess.CalledProcessError): process_state=""
 if process_state and not process_state.startswith("Z"): raise SystemExit(1)
 def secure_read(path,limit):
  parent=os.path.dirname(os.path.abspath(path)); name=os.path.basename(path)
+ if os.name=="nt":
+  fd=os.open(os.path.abspath(path),os.O_RDONLY|getattr(os,"O_BINARY",0)); opened=os.fstat(fd)
+  try:
+   current=os.lstat(path); uid_fn=getattr(os,"geteuid",None); uid=uid_fn() if uid_fn else None
+   if (stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(opened.st_mode)
+       or (uid is not None and opened.st_uid!=uid) or opened.st_nlink!=1
+       or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)): raise ValueError()
+   raw=os.read(fd,limit+1)
+   if len(raw)>limit: raise ValueError()
+   return raw
+  finally: os.close(fd)
  parent_fd=os.open(parent,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0)); fd=None
  try:
   fd=os.open(name,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0),dir_fd=parent_fd)
@@ -479,7 +512,7 @@ PY
 # never follows a parent, result, or staging-file symlink.
 _uberdev_dispatch_cleanup_dead_partial_result() {
   local result_file="$1" handle="$2"
-  python3 -I -B - "$result_file" "$handle" <<'PY'
+  _uberdev_dispatch_python -I -B - "$result_file" "$handle" <<'PY'
 import os,stat,sys
 result,pid=sys.argv[1:]
 if not os.path.isabs(result) or not pid.isdigit() or int(pid)<=0: raise SystemExit(2)
@@ -569,7 +602,7 @@ EOF_IDENTITY
     wezterm)
       pane="${handle#pane:}"; case "$pane" in ''|*[!0-9]*) return 2 ;; esac
       wezterm cli --domain-name uberdev kill-pane --pane-id "$pane" >/dev/null 2>&1 || return 2
-      wezterm cli --domain-name uberdev list --format json 2>/dev/null | python3 -I -B -c '
+      wezterm cli --domain-name uberdev list --format json 2>/dev/null | _uberdev_dispatch_python -I -B -c '
 import json,sys
 pane=int(sys.argv[1])
 try: rows=json.load(sys.stdin)
@@ -614,7 +647,7 @@ uberdev_dispatch_one() {
   capacity="${UBERDEV_AGENT_CAPACITY:-6}"
   timeout_s="${SOLVE_TIMEOUT:-3600}"
   run_id="solve-${UBERDEV_RESOLVED_BACKEND}-${ISSUE_NUM}-$$-${RANDOM:-0}"
-  request_json="$(python3 -I -c '
+  request_json="$(_uberdev_dispatch_python -I -c '
 import json, sys
 (run_dir,run_id,repository_id,backend,tier,issue,capacity,timeout,provenance_raw,
  cli_mode,cli_route,cli_model,cli_effort,cli_service,cli_fast,cli_sandbox,
@@ -658,7 +691,7 @@ print(json.dumps(request, sort_keys=True, separators=(",", ":")))
       DISPATCH_RC=2; return 2;
     }
   if [ -n "${UBERDEV_AGENT_PREPARED_REQUEST_JSON:-}" ]; then
-    request_json="$(python3 -I -B -c '
+    request_json="$(_uberdev_dispatch_python -I -B -c '
 import json,sys
 request=json.loads(sys.argv[1]); issue=int(sys.argv[2]); tier=sys.argv[3]; backend=sys.argv[4]; workflow=sys.argv[5]
 if request.get("issue_num")!=issue or request.get("issue_or_pr")!=issue or request.get("task_tier")!=tier or request.get("backend")!=backend or request.get("workflow")!=workflow:
@@ -672,7 +705,7 @@ print(json.dumps(request,sort_keys=True,separators=(",",":")),end="")
   if [ "${UBERDEV_AGENT_PREPARE_ONLY:-0}" = "1" ]; then
     local decision context metadata created context_file context_sha
     decision="$(uberdev_agent_resolve_request "$request_json")" || { DISPATCH_RC=2; return 2; }
-    metadata="$(python3 -I -B -c '
+    metadata="$(_uberdev_dispatch_python -I -B -c '
 import json,sys
 r=json.loads(sys.argv[1]); m={"run_id":r["run_id"],"repository_id":r["repository_id"],"workflow":r["workflow"],"backend":r["backend"],"issue_num":r["issue_num"],"task_tier":r["task_tier"],"risk_signals":r.get("risk_signals",[])}
 if "triage_decision" in r: m["triage_decision"]=r["triage_decision"]
@@ -682,7 +715,7 @@ print(json.dumps(m,sort_keys=True,separators=(",",":")),end="")
     context="$(uberdev_agent_context_create "$run_dir" "$request_json" "$decision" "$provenance" "$metadata" "$created")" || { DISPATCH_RC=2; return 2; }
     context_file="$(_uberdev_agent_json_get "$context" context_file)" || { DISPATCH_RC=2; return 2; }
     context_sha="$(_uberdev_agent_json_get "$context" context_sha256)" || { DISPATCH_RC=2; return 2; }
-    python3 -I -B -c '
+    _uberdev_dispatch_python -I -B -c '
 import json,sys
 r=json.loads(sys.argv[1]); r["context_file"]=sys.argv[2]; r["context_sha256"]=sys.argv[3]; r["root_decision"]=json.loads(sys.argv[4])
 print(json.dumps(r,sort_keys=True,separators=(",",":")),end="")
@@ -972,7 +1005,14 @@ _uberdev_dispatch_background() {
   # describe the same lifetime.
   local PROVIDER_CMD=( env "${BG_TURBO_ENV[@]}" claude -p "$PROMPT_BODY"
     --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" )
-  nohup python3 -I -c 'import os,sys; os.setsid(); os.execvp("bash", ["bash","-c",*sys.argv[1:]])' '
+  _uberdev_dispatch_resolve_python || { DISPATCH_RC=1; DISPATCH_LOG="$LOG_FILE"; return 1; }
+  local PYTHON_LAUNCH=( "$_UBERDEV_PYTHON_EXE" )
+  [ -z "$_UBERDEV_PYTHON_PREFIX" ] || PYTHON_LAUNCH+=( "$_UBERDEV_PYTHON_PREFIX" )
+  nohup "${PYTHON_LAUNCH[@]}" -I -c 'import os,sys; os.setsid(); os.execvp("bash", ["bash","-c",*sys.argv[1:]])' '
+    PYTHON_EXE="$1"; PYTHON_PREFIX="$2"; shift 2
+    run_python() {
+      if [ -n "$PYTHON_PREFIX" ]; then "$PYTHON_EXE" "$PYTHON_PREFIX" "$@"; else "$PYTHON_EXE" "$@"; fi
+    }
     WORKTREE_DIR="$1"; STATUS_FILE="$2"; RESULT_FILE="$3"; ISSUE_NUM="$4"; TIER="$5"; shift 5
     WRAPPER_PID="$$"
     write_status() {
@@ -986,10 +1026,17 @@ _uberdev_dispatch_background() {
     write_status running null || exit 126
     cd "$WORKTREE_DIR" || { write_status failed 127; exit 127; }
     TMP_RESULT="${RESULT_FILE}.partial.${WRAPPER_PID}"
-    TMP_RESULT_ID="$(python3 -I -c '\''import os,sys; p=sys.argv[1]; fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600); os.fchmod(fd,0o600); e=os.fstat(fd); os.close(fd); print(f"{e.st_dev}:{e.st_ino}",end="")'\'' "$TMP_RESULT")" \
+    TMP_RESULT_ID="$(run_python -I -c '\''import os,sys; p=sys.argv[1]; fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600); os.fchmod(fd,0o600) if os.name!="nt" else None; e=os.fstat(fd); os.close(fd); print(f"{e.st_dev}:{e.st_ino}",end="")'\'' "$TMP_RESULT")" \
       || { write_status failed 126; exit 126; }
     cleanup_partial() {
-      python3 -I -c '\''import os,stat,sys; p,identity=sys.argv[1:]; parent,name=os.path.dirname(p),os.path.basename(p); d=os.open(parent,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0)); f=None
+      run_python -I -c '\''import os,stat,sys; p,identity=sys.argv[1:]; parent,name=os.path.dirname(p),os.path.basename(p)
+if os.name=="nt":
+ try:
+  e=os.lstat(p)
+  if stat.S_ISREG(e.st_mode) and not stat.S_ISLNK(e.st_mode) and e.st_nlink==1 and f"{e.st_dev}:{e.st_ino}"==identity: os.unlink(p)
+ except FileNotFoundError: pass
+ raise SystemExit(0)
+d=os.open(parent,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0)); f=None
 try:
  f=os.open(name,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0),dir_fd=d); e=os.fstat(f); c=os.stat(name,dir_fd=d,follow_symlinks=False)
  if stat.S_ISREG(e.st_mode) and e.st_uid==os.geteuid() and e.st_nlink==1 and stat.S_IMODE(e.st_mode)==0o600 and f"{e.st_dev}:{e.st_ino}"==identity and (e.st_dev,e.st_ino)==(c.st_dev,c.st_ino): os.unlink(name,dir_fd=d)
@@ -1008,7 +1055,7 @@ finally:
       PROVIDER_RC=65; STATE=failed
     fi
     if [ "$PROVIDER_RC" -eq 0 ]; then
-      python3 -I -c '\''import os,sys; os.replace(sys.argv[1],sys.argv[2])'\'' "$TMP_RESULT" "$RESULT_FILE" \
+      run_python -I -c '\''import os,sys; os.replace(sys.argv[1],sys.argv[2])'\'' "$TMP_RESULT" "$RESULT_FILE" \
         || { rm -f -- "$TMP_RESULT"; write_status failed 126; exit 126; }
     else
       rm -f -- "$TMP_RESULT"
@@ -1016,7 +1063,7 @@ finally:
     trap - EXIT HUP INT TERM
     write_status "$STATE" "$PROVIDER_RC" || exit 126
     exit "$PROVIDER_RC"
-  ' _ "$WORKTREE_DIR" "$STATUS_FILE" "$RESULT_FILE" "$ISSUE_NUM" "$TIER" "${PROVIDER_CMD[@]}" \
+  ' _ "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$WORKTREE_DIR" "$STATUS_FILE" "$RESULT_FILE" "$ISSUE_NUM" "$TIER" "${PROVIDER_CMD[@]}" \
     >"$LOG_FILE" 2>&1 &
   DISPATCH_RC=$?
   DISPATCH_ID="$!"
@@ -1139,7 +1186,10 @@ _uberdev_dispatch_codex() {
   # writes (running -> terminal) so a fast codex exit cannot race with the parent
   # and be overwritten back to "running". Track the wrapper PID, not the raw
   # codex child, so /goal can poll a process that owns the final status write.
-  nohup python3 -I -c 'import os,sys; os.setsid(); os.execvp("bash", ["bash","-c",*sys.argv[1:]])' '
+  _uberdev_dispatch_resolve_python || { DISPATCH_RC=1; DISPATCH_LOG="$LOG_FILE"; return 1; }
+  local PYTHON_LAUNCH=( "$_UBERDEV_PYTHON_EXE" )
+  [ -z "$_UBERDEV_PYTHON_PREFIX" ] || PYTHON_LAUNCH+=( "$_UBERDEV_PYTHON_PREFIX" )
+  nohup "${PYTHON_LAUNCH[@]}" -I -c 'import os,sys; os.setsid(); os.execvp("bash", ["bash","-c",*sys.argv[1:]])' '
       ISSUE_NUM="$1"
       TIER="$2"
       STATUS_FILE="$3"

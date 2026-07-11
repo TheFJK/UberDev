@@ -123,6 +123,49 @@ echo "== #246 D-skip: SKIP_PERMISSIONS=1 yields --dangerously-skip-permissions -
 rm -f "$TALLY_FILE"
 
 echo
+echo "== Portable Python command resolution =="
+PYTHON_RESOLVER_TMP="$(mktemp -d)"
+REAL_PYTHON="$(command -v python3)"
+cat > "$PYTHON_RESOLVER_TMP/python" <<SH
+#!/bin/sh
+exec "$REAL_PYTHON" "\$@"
+SH
+cat > "$PYTHON_RESOLVER_TMP/py" <<SH
+#!/bin/sh
+[ "\$1" = -3 ] || exit 97
+shift
+exec "$REAL_PYTHON" "\$@"
+SH
+chmod +x "$PYTHON_RESOLVER_TMP/python" "$PYTHON_RESOLVER_TMP/py"
+if PYTHON_ONLY_OUT="$(/bin/bash -c '. "$1"; PATH="$2"; _uberdev_dispatch_python -c "print(\"python-only\")"' _ "$DISPATCH_LIB" "$PYTHON_RESOLVER_TMP" 2>&1)" \
+    && [ "$PYTHON_ONLY_OUT" = python-only ]; then
+  echo "  PASS  dispatch resolves Windows python when python3 is absent"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  dispatch resolves Windows python when python3 is absent: $PYTHON_ONLY_OUT"; FAIL=$((FAIL + 1))
+fi
+rm -f "$PYTHON_RESOLVER_TMP/python"
+if PY_LAUNCHER_OUT="$(/bin/bash -c '. "$1"; PATH="$2"; _uberdev_dispatch_python -c "print(\"py-launcher\")"' _ "$DISPATCH_LIB" "$PYTHON_RESOLVER_TMP" 2>&1)" \
+    && [ "$PY_LAUNCHER_OUT" = py-launcher ]; then
+  echo "  PASS  dispatch resolves Windows py -3 launcher as final fallback"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  dispatch resolves Windows py -3 launcher as final fallback: $PY_LAUNCHER_OUT"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$PYTHON_RESOLVER_TMP"
+if grep -Eq '(^|[[:space:]|(&])python3[[:space:]]+-' "$DISPATCH_LIB"; then
+  echo "  FAIL  dispatch.sh retains a literal python3 invocation"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  all dispatch Python calls use the portable resolver"; PASS=$((PASS + 1))
+fi
+detached_resolver_count="$(grep -Fc 'nohup "${PYTHON_LAUNCH[@]}"' "$DISPATCH_LIB")"
+if [ "$detached_resolver_count" -eq 2 ] \
+    && grep -Fq 'PYTHON_EXE="$1"; PYTHON_PREFIX="$2"; shift 2' "$DISPATCH_LIB" \
+    && grep -Fq '"$PYTHON_EXE" "$PYTHON_PREFIX" "$@"' "$DISPATCH_LIB"; then
+  echo "  PASS  detached and nested dispatch preserve the py -3 argv prefix"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  detached and nested dispatch preserve the py -3 argv prefix"; FAIL=$((FAIL + 1))
+fi
+
+echo
 echo "== Immediate terminal background wrapper keeps its exact handle =="
 IMMEDIATE_TMP="$(mktemp -d)"
 mkdir -p "$IMMEDIATE_TMP/bin" "$IMMEDIATE_TMP/repo" "$IMMEDIATE_TMP/tmp"
