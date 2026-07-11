@@ -211,6 +211,96 @@ bash "$TMP/lifecycle.sh" "$TMP/builder.sh" "$TMP/lifecycle.log" "$TMP/lifecycle"
 grep -q '^preflight 2$' "$TMP/lifecycle.log"
 grep -Eq '^unwind .+ .+ 17$' "$TMP/lifecycle.log"
 
+# If receipt-ledger serialization fails after dispatch returns success, the
+# controller must unwind the current child first, then every prior ledgered
+# child, and preserve the serialization rc even when current cleanup fails.
+sed -n '/BEGIN review-child-builder-v1/,/END review-child-builder-v1/p' "$SIMPLIFY" \
+  | sed '/BEGIN review-child-builder-v1/d;/END review-child-builder-v1/d;/^```/d' >"$TMP/simplify-builder.sh"
+awk '/^post_review_fanout\(\) \{/{active=1} active{print} active && /^\}/{exit}' "$POST" >"$TMP/post-builder.sh"
+awk '/^post_review_fanout\(\) \{/{active=1} active{print} /^post_review_wait_all\(\) \{/{wait_fn=1} active && wait_fn && /^\}/{exit}' "$POST" >"$TMP/post-runtime.sh"
+cat >"$TMP/ledger-failure.sh" <<'SH'
+set -u
+runtime="$1"; fanout="$2"; flavor="$3"; run="$4"; mkdir -p "$run"
+log="$run/unwind.log"; marker="$run/fail-next-ledger"; dispatches="$run/dispatches"
+: >"$log"; : >"$dispatches"
+REAL_PYTHON="$(command -v python3)"; REAL_JQ="$(command -v jq)"
+. "$runtime"
+python3() {
+  local arg
+  for arg in "$@"; do
+    if [ -e "$marker" ] && [ "$arg" = "$run/launched" ]; then rm -f "$marker"; return 73; fi
+  done
+  command "$REAL_PYTHON" "$@"
+}
+jq() {
+  if [ -e "$marker" ] && [ "${1:-}" = -cn ]; then rm -f "$marker"; return 73; fi
+  command "$REAL_JQ" "$@"
+}
+uberdev_create_child_handoff() {
+  UBERDEV_CHILD_HANDOFF="$run/$2.handoff"; UBERDEV_CHILD_RESULT="$run/$2.result"; UBERDEV_CHILD_STATUS="$run/$2.status"
+  : >"$UBERDEV_CHILD_HANDOFF"
+}
+uberdev_preflight_child_batch() { [ "$#" -eq 2 ]; }
+uberdev_dispatch_child() {
+  printf '%s\n' "$1" >>"$dispatches"
+  if [ "$(wc -l <"$dispatches" | tr -d ' ')" -eq 2 ]; then : >"$marker"; fi
+  printf 'receipt-%s' "$1"
+}
+uberdev_unwind_child() {
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$log"
+  case "$1" in *second.status) return 9 ;; *) return 0 ;; esac
+}
+printf '%s\n' \
+  '{"edge":"first.edge","instance":"first","inputs":{},"risks":[]}' \
+  '{"edge":"second.edge","instance":"second","inputs":{},"risks":[]}' >"$run/records"
+set +e
+"$fanout" "$run/records" "$run/descriptors" "$run/launched" 29 >"$run/stdout" 2>"$run/stderr"
+rc=$?
+set -e
+[ "$rc" -eq 73 ]
+[ "$(wc -l <"$log" | tr -d ' ')" -eq 2 ]
+[ "$(sed -n '1p' "$log")" = "$run/second.status	$run/second.result	29" ]
+[ "$(sed -n '2p' "$log")" = "$run/first.status	$run/first.result	29" ]
+grep -q 'current child cleanup failed' "$run/stderr"
+SH
+bash "$TMP/ledger-failure.sh" "$TMP/builder.sh" review_child_fanout review "$TMP/ledger-review"
+bash "$TMP/ledger-failure.sh" "$TMP/simplify-builder.sh" review_child_fanout simplify "$TMP/ledger-simplify"
+bash "$TMP/ledger-failure.sh" "$TMP/post-builder.sh" post_review_fanout post "$TMP/ledger-post"
+
+# Wait failures are drained current-by-current without abandoning later
+# receipts. Preserve the first wait rc even when a cleanup fails.
+cat >"$TMP/wait-ledger-failure.sh" <<'SH'
+set -u
+runtime="$1"; wait_all="$2"; run="$3"; mkdir -p "$run"
+wait_log="$run/wait.log"; unwind_log="$run/unwind.log"; : >"$wait_log"; : >"$unwind_log"
+. "$runtime"
+uberdev_wait_child() {
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$wait_log"
+  case "$1" in *wait-fail-first.status) return 7 ;; *wait-fail-second.status) return 8 ;; *) return 0 ;; esac
+}
+uberdev_unwind_child() {
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$unwind_log"
+  case "$1" in *wait-fail-first.status) return 9 ;; *) return 0 ;; esac
+}
+printf '%s\n' \
+  "{\"status\":\"$run/ok.status\",\"result\":\"$run/ok.result\"}" \
+  "{\"status\":\"$run/wait-fail-first.status\",\"result\":\"$run/wait-fail-first.result\"}" \
+  "{\"status\":\"$run/wait-fail-second.status\",\"result\":\"$run/wait-fail-second.result\"}" >"$run/launched"
+set +e
+"$wait_all" "$run/launched" 31 >"$run/stdout" 2>"$run/stderr"
+rc=$?
+set -e
+[ "$rc" -eq 7 ]
+[ "$(wc -l <"$wait_log" | tr -d ' ')" -eq 3 ]
+[ "$(wc -l <"$unwind_log" | tr -d ' ')" -eq 2 ]
+[ "$(sed -n '1p' "$unwind_log")" = "$run/wait-fail-first.status	$run/wait-fail-first.result	31" ]
+[ "$(sed -n '2p' "$unwind_log")" = "$run/wait-fail-second.status	$run/wait-fail-second.result	31" ]
+grep -q 'cleanup failed after child wait' "$run/stderr"
+SH
+bash "$TMP/wait-ledger-failure.sh" "$TMP/builder.sh" review_child_wait_all "$TMP/wait-review"
+bash "$TMP/wait-ledger-failure.sh" "$TMP/simplify-builder.sh" review_child_wait_all "$TMP/wait-simplify"
+bash "$TMP/wait-ledger-failure.sh" "$TMP/post-runtime.sh" post_review_wait_all "$TMP/wait-post"
+
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$REVIEW"
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$SIMPLIFY"
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$POST"

@@ -445,14 +445,24 @@ PY
   done
 }
 
+# Once the provider reports a successful launch, every local failure must
+# collect that exact child before control returns to a caller that has not yet
+# persisted its receipt. Cleanup diagnostics never replace the originating rc.
+_uberdev_child_fail_after_launch() {
+  local original_rc="$1" status_file="$2" result="$3" reason="$4" cleanup_rc=0
+  if uberdev_unwind_child "$status_file" "$result" 600; then :; else cleanup_rc=$?; fi
+  [ "$cleanup_rc" -eq 0 ] || _uberdev_child_error "post-launch cleanup failed after $reason"
+  return "$original_rc"
+}
+
 uberdev_dispatch_child() {
-  local edge="${1:-}" handoff="${2:-}" result="${3:-}" status_file="${4:-}" prepared request prompt rc handle receipt
+  local edge="${1:-}" handoff="${2:-}" result="${3:-}" status_file="${4:-}" prepared request prompt rc receipt
   [ "$#" -eq 4 ] || { _uberdev_child_error 'expected EDGE_ID HANDOFF_JSON_FILE RESULT_FILE STATUS_FILE'; return 2; }
   prepared="$(_uberdev_child_prepare "$edge" "$handoff" "$result" "$status_file")" || return $?
   request="$(python3 -I -B -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["request"],sort_keys=True,separators=(",",":")),end="")' "$prepared")" || return 2
   prompt="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["prompt"],end="")' "$prepared")" || return 2
   if uberdev_agent_dispatch "$request" "$prompt" "$result" "$status_file"; then rc=0; else rc=$?; return "$rc"; fi
-  receipt="$(python3 -I -B - "$edge" "$request" "$result" "$status_file" <<'PY'
+  if receipt="$(python3 -I -B - "$edge" "$request" "$result" "$status_file" <<'PY'
 import hashlib,json,os,stat,sys
 edge,request_raw,result,status=sys.argv[1:]
 try:
@@ -469,8 +479,22 @@ try:
  print(json.dumps(value,sort_keys=True,separators=(',',':')),end='')
 except Exception: raise SystemExit(2)
 PY
-)" || { _uberdev_child_error 'provider did not publish canonical running status'; return 2; }
-  printf '%s' "$receipt"
+)"; then
+    :
+  else
+    rc=$?
+    _uberdev_child_error 'failed to construct canonical child dispatch receipt'
+    _uberdev_child_fail_after_launch "$rc" "$status_file" "$result" 'receipt construction'
+    return $?
+  fi
+  if printf '%s' "$receipt"; then
+    return 0
+  else
+    rc=$?
+    _uberdev_child_error 'failed to publish child dispatch receipt'
+    _uberdev_child_fail_after_launch "$rc" "$status_file" "$result" 'receipt publication'
+    return $?
+  fi
 }
 
 _uberdev_child_wait_probe() {

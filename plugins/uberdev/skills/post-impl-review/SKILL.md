@@ -120,7 +120,7 @@ with open(path,'a') as f:f.write(json.dumps({'edge':edge,'instance':instance,'in
 PY
 }
 post_review_fanout() {
-  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff result status receipt
+  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff result status receipt dispatch_rc ledger_rc cleanup_rc
   local handoffs=()
   : >"$descriptors"; : >"$launched"
   while IFS= read -r row; do
@@ -135,18 +135,43 @@ post_review_fanout() {
   while IFS= read -r row; do
     edge="$(jq -r .edge <<<"$row")"; handoff="$(jq -r .handoff <<<"$row")"
     result="$(jq -r .result <<<"$row")"; status="$(jq -r .status <<<"$row")"
-    if ! receipt="$(uberdev_dispatch_child "$edge" "$handoff" "$result" "$status")"; then
-      while IFS= read -r row; do uberdev_unwind_child "$(jq -r .status <<<"$row")" "$(jq -r .result <<<"$row")" "$timeout_s" || true; done <"$launched"
-      return 1
+    if receipt="$(uberdev_dispatch_child "$edge" "$handoff" "$result" "$status")"; then
+      :
+    else
+      dispatch_rc=$?; cleanup_rc=0
+      while IFS= read -r row; do uberdev_unwind_child "$(jq -r .status <<<"$row")" "$(jq -r .result <<<"$row")" "$timeout_s" || cleanup_rc=1; done <"$launched"
+      [ "$cleanup_rc" -eq 0 ] || echo "error: prior child cleanup failed after dispatch edge=$edge" >&2
+      return "$dispatch_rc"
     fi
-    jq -cn --arg edge "$edge" --arg receipt "$receipt" --arg result "$result" --arg status "$status" \
-      '{edge:$edge,receipt:$receipt,result:$result,status:$status}' >>"$launched"
+    if jq -cn --arg edge "$edge" --arg receipt "$receipt" --arg result "$result" --arg status "$status" \
+      '{edge:$edge,receipt:$receipt,result:$result,status:$status}' >>"$launched"; then
+      :
+    else
+      ledger_rc=$?; cleanup_rc=0
+      uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
+      while IFS= read -r row; do uberdev_unwind_child "$(jq -r .status <<<"$row")" "$(jq -r .result <<<"$row")" "$timeout_s" || cleanup_rc=1; done <"$launched"
+      [ "$cleanup_rc" -eq 0 ] || echo "error: current child cleanup failed after receipt ledger write edge=$edge" >&2
+      return "$ledger_rc"
+    fi
   done <"$descriptors"
 }
 post_review_wait_all() {
-  local launched="$1" timeout_s="$2" row rc=0
-  while IFS= read -r row; do uberdev_wait_child "$(jq -r .status <<<"$row")" "$(jq -r .result <<<"$row")" "$timeout_s" || rc=1; done <"$launched"
-  return "$rc"
+  local launched="$1" timeout_s="$2" row status result wait_rc first_rc=0 cleanup_rc=0
+  while IFS= read -r row; do
+    status="$(jq -r .status <<<"$row")"; result="$(jq -r .result <<<"$row")"
+    if uberdev_wait_child "$status" "$result" "$timeout_s"; then
+      continue
+    else
+      wait_rc=$?
+    fi
+    [ "$first_rc" -ne 0 ] || first_rc="$wait_rc"
+    uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
+  done <"$launched"
+  if [ "$first_rc" -ne 0 ]; then
+    [ "$cleanup_rc" -eq 0 ] || echo "error: cleanup failed after child wait" >&2
+    return "$first_rc"
+  fi
+  return 0
 }
 
 REVIEW_EDGES=(

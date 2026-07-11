@@ -194,6 +194,52 @@ for f in handoff.v1.json prompt.txt status.json; do
 done
 cmp "$HANDOFF" "$TMP/run/children/implementation-0001/handoff.v1.json"
 
+# A provider may launch successfully but publish a status that cannot be
+# serialized into the closed dispatch receipt. The central boundary must
+# boundedly collect that current child before returning the original receipt
+# construction rc, even when cleanup itself reports failure.
+python3 - "$HANDOFF" "$TMP/receipt-construction-fail.json" <<'PY'
+import json,sys
+v=json.load(open(sys.argv[1])); v['instance_id']='receipt-construction-fail'; json.dump(v,open(sys.argv[2],'w'),separators=(',',':'))
+PY
+eval "$(declare -f uberdev_unwind_child | sed '1s/uberdev_unwind_child/_real_uberdev_unwind_child/')"
+REAL_RECEIPT_PYTHON="$(command -v python3)"
+python3() {
+  if [ -e "$TMP/fail-receipt-constructor" ] && [ "${1:-}" = -I ] && [ "${2:-}" = -B ] && [ "${3:-}" = - ]; then
+    rm -f "$TMP/fail-receipt-constructor"
+    return 37
+  fi
+  command "$REAL_RECEIPT_PYTHON" "$@"
+}
+uberdev_agent_dispatch() {
+  : >"$TMP/receipt-provider-launched"
+  : >"$TMP/fail-receipt-constructor"
+  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"receipt-provider"}\n' >"$4"
+  chmod 600 "$4"
+  return 0
+}
+uberdev_unwind_child() {
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$TMP/receipt-current-unwind.log"
+  return 9
+}
+set +e
+uberdev_dispatch_child implementation "$TMP/receipt-construction-fail.json" \
+  "$TMP/run/children/receipt-construction-fail/result.md" \
+  "$TMP/run/children/receipt-construction-fail/status.json" \
+  >"$TMP/receipt-construction.out" 2>"$TMP/receipt-construction.err"
+receipt_failure_rc=$?
+set -e
+[ "$receipt_failure_rc" -eq 37 ]
+[ -e "$TMP/receipt-provider-launched" ]
+grep -Fq "$TMP/run/children/receipt-construction-fail/status.json" "$TMP/receipt-current-unwind.log"
+grep -Fq "$TMP/run/children/receipt-construction-fail/result.md" "$TMP/receipt-current-unwind.log"
+grep -Fq $'\t600' "$TMP/receipt-current-unwind.log"
+grep -q 'failed to construct canonical child dispatch receipt' "$TMP/receipt-construction.err"
+grep -q 'post-launch cleanup failed' "$TMP/receipt-construction.err"
+eval "$(declare -f _real_uberdev_unwind_child | sed '1s/_real_uberdev_unwind_child/uberdev_unwind_child/')"
+unset -f python3
+uberdev_agent_dispatch() { _capture_dispatch "$@"; }
+
 # Approved dotted edge IDs work, and a caller-path failure allocates nothing so
 # retrying the exact same instance succeeds.
 python3 - "$HANDOFF" "$TMP/dotted.json" <<'PY'

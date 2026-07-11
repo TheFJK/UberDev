@@ -58,7 +58,7 @@ with open(path,'a') as f:f.write(json.dumps({'edge':edge,'instance':instance,'in
 PY
 }
 review_child_fanout() {
-  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff result status receipt
+  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff result status receipt dispatch_rc ledger_rc cleanup_rc
   local handoffs=()
   : >"$descriptors"; : >"$launched"
   while IFS= read -r row; do
@@ -80,29 +80,56 @@ PY
     handoff="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["handoff"])' "$row")"
     result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
     status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
-    if ! receipt="$(uberdev_dispatch_child "$edge" "$handoff" "$result" "$status")"; then
+    if receipt="$(uberdev_dispatch_child "$edge" "$handoff" "$result" "$status")"; then
+      :
+    else
+      dispatch_rc=$?; cleanup_rc=0
       while IFS= read -r row; do
         result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
         status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
-        uberdev_unwind_child "$status" "$result" "$timeout_s" || true
+        uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
       done <"$launched"
-      return 1
+      [ "$cleanup_rc" -eq 0 ] || echo "error: prior child cleanup failed after dispatch edge=$edge" >&2
+      return "$dispatch_rc"
     fi
-    python3 -I -B - "$edge" "$receipt" "$result" "$status" "$launched" <<'PY'
+    if python3 -I -B - "$edge" "$receipt" "$result" "$status" "$launched" <<'PY'
 import json,sys
 edge,receipt,result,status,path=sys.argv[1:]
 with open(path,'a') as f:f.write(json.dumps({'edge':edge,'receipt':receipt,'result':result,'status':status},sort_keys=True,separators=(',',':'))+'\n')
 PY
+    then
+      :
+    else
+      ledger_rc=$?; cleanup_rc=0
+      uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
+      while IFS= read -r row; do
+        result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
+        status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
+        uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
+      done <"$launched"
+      [ "$cleanup_rc" -eq 0 ] || echo "error: current child cleanup failed after receipt ledger write edge=$edge" >&2
+      return "$ledger_rc"
+    fi
   done <"$descriptors"
 }
 review_child_wait_all() {
-  local launched="$1" timeout_s="$2" row result status rc=0
+  local launched="$1" timeout_s="$2" row result status wait_rc first_rc=0 cleanup_rc=0
   while IFS= read -r row; do
     result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
     status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
-    uberdev_wait_child "$status" "$result" "$timeout_s" || rc=1
+    if uberdev_wait_child "$status" "$result" "$timeout_s"; then
+      continue
+    else
+      wait_rc=$?
+    fi
+    [ "$first_rc" -ne 0 ] || first_rc="$wait_rc"
+    uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
   done <"$launched"
-  return "$rc"
+  if [ "$first_rc" -ne 0 ]; then
+    [ "$cleanup_rc" -eq 0 ] || echo "error: cleanup failed after child wait" >&2
+    return "$first_rc"
+  fi
+  return 0
 }
 review_child_single() {
   local edge="$1" instance="$2" inputs="$3" risks="$4" prefix="$5" timeout_s="$6"
