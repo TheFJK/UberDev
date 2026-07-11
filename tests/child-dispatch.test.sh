@@ -441,13 +441,14 @@ SH
 cat >"$TMP/wez-bin/claude" <<'SH'
 #!/usr/bin/env bash
 printf 'wezterm result\n' >"$UBERDEV_AGENT_RESULT_FILE"
-sleep .3
 SH
 cat >"$TMP/wez-bin/wezterm" <<'SH'
 #!/usr/bin/env bash
 if [ "$1 $2" = 'cli spawn' ]; then
   while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done; shift
-  nohup "$@" >/dev/null 2>&1 & echo "$!"; exit 0
+  nohup "$@" >/dev/null 2>&1 & pane_pid="$!"
+  sleep .5
+  echo "$pane_pid"; exit 0
 fi
 if [ "$1 $2" = 'cli list-clients' ]; then exit 0; fi
 if [ "$1 $2" = 'cli list' ]; then printf '[]\n'; exit 0; fi
@@ -464,7 +465,9 @@ _uberdev_agent_dispatch_backend() { _real_uberdev_agent_dispatch_backend "$@"; }
 import json,sys
 r=json.loads(sys.argv[1]); s=json.load(open(sys.argv[2]))
 assert r['backend']=='wezterm' and r['handle'].startswith('pane:'),r
-assert s['backend']=='wezterm' and str(s['pid']).startswith('pane:') and len(s['lease_generation'])==32,s
+assert r['state']=='completed',r
+assert s['backend']=='wezterm' and s['state']=='completed' and s['exit_code']==0,s
+assert 'pid' not in s and 'lease_generation' not in s,s
 PY
   uberdev_wait_child "$TMP/wez-run/children/wezterm-0001/status.json" "$TMP/wez-run/children/wezterm-0001/result.md" 8 >/dev/null
 )

@@ -529,16 +529,17 @@ _uberdev_child_fail_after_launch() {
 }
 
 uberdev_dispatch_child() {
-  local edge="${1:-}" handoff="${2:-}" result="${3:-}" status_file="${4:-}" prepared request prompt rc receipt
+  local edge="${1:-}" handoff="${2:-}" result="${3:-}" status_file="${4:-}" prepared request prompt rc receipt provider_handle
   [ "$#" -eq 4 ] || { _uberdev_child_error 'expected EDGE_ID HANDOFF_JSON_FILE RESULT_FILE STATUS_FILE'; return 2; }
   prepared="$(_uberdev_child_prepare "$edge" "$handoff" "$result" "$status_file")" || return $?
   request="$(python3 -I -B -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["request"],sort_keys=True,separators=(",",":")),end="")' "$prepared")" || return 2
   prompt="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["prompt"],end="")' "$prepared")" || return 2
   _uberdev_child_receipt_emit_handoff dispatch "$edge" "${prompt%/*}/handoff.v1.json" || return $?
   if uberdev_agent_dispatch "$request" "$prompt" "$result" "$status_file"; then rc=0; else rc=$?; return "$rc"; fi
-  if receipt="$(python3 -I -B - "$edge" "$request" "$result" "$status_file" <<'PY'
+  provider_handle="${DISPATCH_ID:-}"
+  if receipt="$(python3 -I -B - "$edge" "$request" "$result" "$status_file" "$provider_handle" <<'PY'
 import hashlib,json,os,stat,sys
-edge,request_raw,result,status=sys.argv[1:]
+edge,request_raw,result,status,provider_handle=sys.argv[1:]
 try:
  s=json.load(open(status)); r=json.loads(request_raw)
  allowed={'issue','tier','backend','state','exit_code','pid','log','result','worktree','branch','process_identity','lease_generation'}
@@ -548,6 +549,9 @@ try:
  if state=='completed' and (type(code) is not int or code!=0): raise ValueError()
  if state=='failed' and (type(code) is not int or code==0): raise ValueError()
  handle=s.get('pid')
+ if handle is None and state in {'completed','failed'} and s['backend']=='wezterm':
+  if not provider_handle.isascii() or not provider_handle.isdecimal() or int(provider_handle)<=0: raise ValueError()
+  handle='pane:'+provider_handle
  if not isinstance(handle,(str,int)) or isinstance(handle,bool) or not str(handle): raise ValueError()
  value={'schema_version':1,'edge_id':edge,'instance_id':r['run_id'],'backend':s['backend'],'handle':str(handle),'state':state,'result_file':os.path.abspath(result),'status_file':os.path.abspath(status)}
  print(json.dumps(value,sort_keys=True,separators=(',',':')),end='')
