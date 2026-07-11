@@ -376,24 +376,59 @@ _uberdev_dispatch_cancel_claude_bg() {
   return 2
 }
 
+_uberdev_dispatch_group_live() {
+  python3 -I -B - "$1" <<'PY'
+import subprocess,sys
+pgid=int(sys.argv[1]); live=False
+try: rows=subprocess.check_output(["ps","-axo","pgid=,stat="],text=True).splitlines()
+except Exception: raise SystemExit(2)
+for row in rows:
+ parts=row.split(None,1)
+ if len(parts)==2 and parts[0].isdigit() and int(parts[0])==pgid and not parts[1].startswith("Z"):
+  live=True; break
+raise SystemExit(0 if live else 1)
+PY
+}
+
+_uberdev_dispatch_wait_owned_session() {
+  local pid="$1" identity identity_pid identity_pgid identity_sid identity_started attempts=0
+  while [ "$attempts" -lt 40 ]; do
+    identity="$(_uberdev_agent_process_identity "$pid" 2>/dev/null || true)"
+    if [ -n "$identity" ]; then
+      IFS='|' read -r identity_pid identity_pgid identity_sid identity_started <<EOF_IDENTITY
+$identity
+EOF_IDENTITY
+      if [ "$identity_pid" = "$pid" ] && [ "$identity_pgid" = "$pid" ] && [ "$identity_sid" = "$pid" ] && [ -n "$identity_started" ]; then
+        return 0
+      fi
+    fi
+    sleep 0.025; attempts=$((attempts + 1))
+  done
+  return 1
+}
+
 # Cancel one already-registered provider handle. Numeric processes require the
 # launch-time process identity recorded by agent-dispatch; a reused PID is
 # rejected before signaling. Opaque providers use their native handle API and
 # prove the handle is no longer live before returning success.
 _uberdev_dispatch_cancel_backend() {
-  local backend="$1" handle="$2" expected_identity="${3:-}" current pane probe attempts cancel_rc
+  local backend="$1" handle="$2" expected_identity="${3:-}" current pane probe attempts cancel_rc identity_pid identity_pgid identity_sid identity_started
   case "$backend" in
     codex|background)
       case "$handle" in ''|*[!0-9]*) return 2 ;; esac
       [ -n "$expected_identity" ] || return 2
       current="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
       [ "$current" = "$expected_identity" ] || return 2
-      kill -TERM "$handle" 2>/dev/null || return 2
+      IFS='|' read -r identity_pid identity_pgid identity_sid identity_started <<EOF_IDENTITY
+$expected_identity
+EOF_IDENTITY
+      [ "$identity_pid" = "$handle" ] && [ "$identity_pgid" = "$handle" ] && [ "$identity_sid" = "$handle" ] && [ -n "$identity_started" ] || return 2
+      kill -TERM "-$identity_pgid" 2>/dev/null || return 2
       attempts=0
-      while [ "$attempts" -lt 20 ]; do
+      while [ "$attempts" -lt 40 ]; do
         current="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
-        [ -z "$current" ] && return 0
-        [ "$current" = "$expected_identity" ] || return 2
+        if [ -n "$current" ] && [ "$current" != "$expected_identity" ]; then return 2; fi
+        if ! _uberdev_dispatch_group_live "$identity_pgid"; then return 0; fi
         sleep 0.05; attempts=$((attempts + 1))
       done
       return 1
@@ -815,7 +850,7 @@ _uberdev_dispatch_background() {
   # describe the same lifetime.
   local PROVIDER_CMD=( env "${BG_TURBO_ENV[@]}" claude -p "$PROMPT_BODY"
     --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" )
-  nohup bash -c '
+  nohup python3 -I -c 'import os,sys; os.setsid(); os.execvp("bash", ["bash","-c",*sys.argv[1:]])' '
     WORKTREE_DIR="$1"; STATUS_FILE="$2"; ISSUE_NUM="$3"; TIER="$4"; shift 4
     WRAPPER_PID="$$"
     write_status() {
@@ -859,6 +894,9 @@ _uberdev_dispatch_background() {
   # leaves DISPATCH_RC=0. Confirm the captured pid is a live process; if not,
   # clear DISPATCH_ID so the success guard below falls through to the error path.
   if [[ -n "$DISPATCH_ID" ]] && ! kill -0 "$DISPATCH_ID" 2>/dev/null; then
+    DISPATCH_ID=""
+  fi
+  if [[ -n "$DISPATCH_ID" ]] && ! _uberdev_dispatch_wait_owned_session "$DISPATCH_ID"; then
     DISPATCH_ID=""
   fi
   if [[ "$DISPATCH_RC" -eq 0 && -n "$DISPATCH_ID" ]]; then
@@ -955,7 +993,7 @@ _uberdev_dispatch_codex() {
   # writes (running -> terminal) so a fast codex exit cannot race with the parent
   # and be overwritten back to "running". Track the wrapper PID, not the raw
   # codex child, so /goal can poll a process that owns the final status write.
-  nohup bash -c '
+  nohup python3 -I -c 'import os,sys; os.setsid(); os.execvp("bash", ["bash","-c",*sys.argv[1:]])' '
       ISSUE_NUM="$1"
       TIER="$2"
       STATUS_FILE="$3"
@@ -1025,6 +1063,10 @@ EOF_STATUS
   DISPATCH_RC=$?
   DISPATCH_ID="$!"
   disown 2>/dev/null || true
+  if [[ -n "$DISPATCH_ID" ]] && ! _uberdev_dispatch_wait_owned_session "$DISPATCH_ID"; then
+    DISPATCH_RC=1
+    DISPATCH_ID=""
+  fi
   # A fast `codex exec` failure is a terminal agent outcome, not a parent
   # dispatch setup failure. The wrapper records that in the final status JSON;
   # the parent succeeds once it has forked the wrapper and captured its PID.

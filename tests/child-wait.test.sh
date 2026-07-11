@@ -37,14 +37,30 @@ s=json.load(open(sys.argv[1])); assert s['state']=='running' and s['exit_code'] 
 PY
 kill -TERM "$SLEEP_PID"; wait "$SLEEP_PID" 2>/dev/null || true
 
-# PID reuse/identity defense: wrong launch identity is rejected without a
-# signal; the exact identity cancels and proves the process is gone.
-( while :; do sleep 1; done ) & PID_GUARD=$!
+# PID/group reuse defense: launch an owned session whose wrapper has a live
+# provider child. Wrong identity is rejected; exact cancellation proves the
+# complete group is gone, not merely the wrapper.
+python3 -I -c 'import os; os.setsid(); os.execvp("bash",["bash","-c","sleep 30 & wait"])' & PID_GUARD=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do PROVIDER_CHILD="$(pgrep -P "$PID_GUARD" | head -1 || true)"; [ -z "$PROVIDER_CHILD" ] || break; sleep .1; done
+[ -n "$PROVIDER_CHILD" ] && kill -0 "$PROVIDER_CHILD"
 IDENTITY="$(_uberdev_agent_process_identity "$PID_GUARD")"
-! _uberdev_dispatch_cancel_backend codex "$PID_GUARD" "$PID_GUARD:reused-identity"
+! _uberdev_dispatch_cancel_backend codex "$PID_GUARD" 'reused-group-identity'
 kill -0 "$PID_GUARD"
+kill -0 "$PROVIDER_CHILD"
 _uberdev_dispatch_cancel_backend codex "$PID_GUARD" "$IDENTITY"
 ! kill -0 "$PID_GUARD" 2>/dev/null
+! kill -0 "$PROVIDER_CHILD" 2>/dev/null
+
+# A precreated private zero-byte status target is the normal delayed-wrapper
+# race and must be atomically canonicalized, not parsed as malformed JSON.
+ZERO_STATUS="$TMP/run/children/worker-0001/zero-status.json"
+( umask 077; : >"$ZERO_STATUS" )
+_uberdev_agent_publish_status "$ZERO_STATUS" codex 999 running '' create '999|999|999|fixture' 0123456789abcdef0123456789abcdef
+python3 - "$ZERO_STATUS" <<'PY'
+import json,stat,os,sys
+s=json.load(open(sys.argv[1])); assert s['state']=='running' and s['pid']=='999' and s['lease_generation']=='0123456789abcdef0123456789abcdef'
+assert stat.S_IMODE(os.stat(sys.argv[1]).st_mode)==0o600
+PY
 
 # Opaque Claude sessions cancel through an explicit provider capability hook
 # and require an absent/terminal probe, never a fabricated local state.
@@ -96,4 +112,4 @@ zsh -f -c '. "$1"; uberdev_wait_child "$2" "$3" 2' _ "$LIB" "$STATUS" "$RESULT" 
 ! uberdev_wait_child "$TMP/outside-status" "$RESULT" 1 >/dev/null 2>&1
 ! uberdev_wait_child "$STATUS" "$TMP/outside-result" 1 >/dev/null 2>&1
 ! uberdev_wait_child "$STATUS" "$RESULT" 0 >/dev/null 2>&1
-echo 'child-wait: 31 checks passed'
+echo 'child-wait: 41 checks passed'

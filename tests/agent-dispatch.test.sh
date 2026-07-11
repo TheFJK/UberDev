@@ -113,6 +113,10 @@ PY
       printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
       ;;
   esac
+  # Provider status is a private lifecycle record. Production provider arms
+  # precreate it 0600 and retain that mode across atomic replacements; keep
+  # this boundary stub faithful to the same contract.
+  [ ! -e "$6" ] || chmod 600 "$6"
   return 0
 }
 export -f _uberdev_agent_dispatch_backend
@@ -155,7 +159,7 @@ uberdev_agent_dispatch "$REQUEST" \
   "$TMP/run/prompt.txt" "$TMP/run/result.md" "$TMP/run/status.json"
 
 python3 - "$TMP/backend.json" "$STATE_DIR/agent-lifecycle.jsonl" "$TMP/run/status.json" "$$" <<'PY'
-import json, pathlib, sys
+import json, pathlib, stat, sys
 capture = json.loads(pathlib.Path(sys.argv[1]).read_text())
 decision = capture["decision"]
 assert capture["backend"] == "codex"
@@ -170,6 +174,7 @@ assert events[0]["effective_model"] == "gpt-5.6-sol"
 assert "backend_handle" not in events[1]
 assert events[1]["status_path"] == str(pathlib.Path(sys.argv[3]).resolve())
 assert events[1]["owner_pid"] == int(sys.argv[4]), events[1]
+assert stat.S_IMODE(pathlib.Path(sys.argv[3]).stat().st_mode) == 0o600
 PY
 
 # Opaque handles remain live for reconciliation and retain their lease.
@@ -542,6 +547,7 @@ zsh -f -c '
     DISPATCH_ID="opaque:zsh"
     if [ "${ZSH_FAIL_PROVIDER:-0}" = 1 ]; then DISPATCH_RC=17; return 17; fi
     printf '\''{"state":"completed"}\n'\'' > "$6"
+    chmod 600 "$6"
     DISPATCH_RC=0
     return 0
   }
@@ -620,6 +626,7 @@ cross_backend_case() {
       printf '{"backend":"%s","state":"completed","exit_code":0}\n' \
         "$backend" > "$tmp_status"
     fi
+    chmod 600 "$tmp_status"
     mv "$tmp_status" "$run/status.json"
   fi
   for _ in 1 2 3 4 5 6; do
@@ -656,11 +663,13 @@ _uberdev_agent_dispatch_backend() {
     wezterm)
       DISPATCH_ID=777
       printf '{"backend":"wezterm","state":"running","exit_code":null,"pid":"pane"}\n' > "$status_path"
+      chmod 600 "$status_path"
       ;;
     codex|background)
       nohup sleep 5 >/dev/null 2>&1 &
       DISPATCH_ID="$!"
       printf '{"backend":"%s","state":"running","exit_code":null,"pid":"%s"}\n' "$backend" "$DISPATCH_ID" > "$status_path"
+      chmod 600 "$status_path"
       ;;
   esac
   DISPATCH_RC=0
@@ -770,6 +779,7 @@ _uberdev_agent_dispatch_backend() {
   DISPATCH_ID="opaque:race-handle"
   DISPATCH_LOG=""
   printf '{"backend":"codex","state":"running","exit_code":null,"pid":"opaque:race-handle"}\n' > "$6"
+  chmod 600 "$6"
   DISPATCH_RC=0
   return 0
 }

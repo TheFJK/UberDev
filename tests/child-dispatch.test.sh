@@ -7,20 +7,21 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 . "$LIB"
 
 make_context() {
-  local run="$1" mode="$2" run_id="$3" request decision metadata output
+  local run="$1" mode="$2" run_id="$3" backend="${4:-codex}" request decision metadata output
   mkdir -p "$run"
-  request="$(python3 - "$run" "$mode" "$run_id" <<'PY'
+  request="$(python3 - "$run" "$mode" "$run_id" "$backend" <<'PY'
 import json,sys
-run,mode,run_id=sys.argv[1:]
-r={'schema_version':1,'run_dir':run,'run_id':run_id,'repository_id':'fixture-repository','backend':'codex','workflow':'solve','phase':'lead','role':'lead','task_tier':'medium','risk_signals':[],'routing_mode':mode,'issue_or_pr':42,'issue_num':42,'capacity':4,'timeout_s':20}
-if mode=='forced': r.pop('routing_mode'); r['explicit_route']='sol-ultra'
+run,mode,run_id,backend=sys.argv[1:]
+r={'schema_version':1,'run_dir':run,'run_id':run_id,'repository_id':'fixture-repository','backend':backend,'workflow':'solve','phase':'lead','role':'lead','task_tier':'medium','risk_signals':[],'issue_or_pr':42,'issue_num':42,'capacity':4,'timeout_s':20}
+if backend=='codex': r['routing_mode']=mode
+if mode=='forced': r.pop('routing_mode',None); r['explicit_route']='sol-ultra'
 print(json.dumps(r,separators=(',',':')))
 PY
 )"
   decision="$(uberdev_agent_resolve_request "$request")"
-  metadata="$(python3 - "$run_id" <<'PY'
+  metadata="$(python3 - "$run_id" "$backend" <<'PY'
 import json,sys
-print(json.dumps({'run_id':sys.argv[1],'repository_id':'fixture-repository','workflow':'solve','backend':'codex','issue_num':42,'task_tier':'medium','risk_signals':[]},separators=(',',':')))
+print(json.dumps({'run_id':sys.argv[1],'repository_id':'fixture-repository','workflow':'solve','backend':sys.argv[2],'issue_num':42,'task_tier':'medium','risk_signals':[]},separators=(',',':')))
 PY
 )"
   output="$(uberdev_agent_context_create "$run" "$request" "$decision" \
@@ -50,6 +51,7 @@ _capture_dispatch() {
   return 0
 }
 eval "$(declare -f uberdev_agent_dispatch | sed '1s/uberdev_agent_dispatch/_real_uberdev_agent_dispatch/')"
+eval "$(declare -f _uberdev_agent_dispatch_backend | sed '1s/_uberdev_agent_dispatch_backend/_real_uberdev_agent_dispatch_backend/')"
 uberdev_agent_dispatch() { _capture_dispatch "$@"; }
 
 RESULT="$TMP/run/children/implementation-0001/result.md"
@@ -161,7 +163,7 @@ import json,sys
 v=json.load(open(sys.argv[1])); v['edge_id']='timeout'; v['instance_id']='timeout-0003'; json.dump(v,open(sys.argv[2],'w'),separators=(',',':'))
 PY
 _uberdev_agent_dispatch_backend() {
-  nohup sleep 30 >/dev/null 2>&1 & DISPATCH_ID="$!"
+  nohup python3 -I -c 'import os; os.setsid(); os.execvp("sleep",["sleep","30"])' >/dev/null 2>&1 & DISPATCH_ID="$!"
   printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" >"$6"; chmod 600 "$6"
   DISPATCH_RC=0; return 0
 }
@@ -174,6 +176,57 @@ set -e
 [ "$TIMEOUT_RC" -eq 124 ]
 grep -q '"event":"timed_out".*"run_id":"timeout-0003"' "$TMP/run/.agent-state-$(id -u)/agent-lifecycle.jsonl"
 ! grep -R -q 'run_id=timeout-0003' "$TMP/run/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
+
+# Real WezTerm provider arm: a stubbed CLI executes the actual pane wrapper.
+# Agent dispatch canonicalizes the precreated empty status to pane:<id> plus
+# generation, returns a closed receipt, then watcher/wait reconcile terminal.
+WEZ_OUT="$(make_context "$TMP/wez-run" inherit root-wezterm wezterm)"
+WEZ_CTX="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["context_file"])' "$WEZ_OUT")"
+WEZ_SHA="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["context_sha256"])' "$WEZ_OUT")"
+mkdir -p "$TMP/wez-run/inputs" "$TMP/wez-bin" "$TMP/wez-home" "$TMP/wez-repo"
+printf wez >"$TMP/wez-run/inputs/task.md"
+python3 - "$TMP/wez-handoff.json" "$WEZ_CTX" "$WEZ_SHA" "$TMP/wez-run/inputs/task.md" <<'PY'
+import json,sys
+p,c,s,i=sys.argv[1:]
+json.dump({'schema_version':1,'carrier':{'schema_version':1,'run_id':'root-wezterm','workflow':'solve','issue_num':42,'context_file':c,'context_sha256':s},'edge_id':'wezterm.child','instance_id':'wezterm-0001','parent_run_id':'root-wezterm','role':'implementation-worker','phase':'implementation','risk_scope':'subtask','risk_signals':[],'inputs':{'paths':[i]}},open(p,'w'),separators=(',',':'))
+PY
+cat >"$TMP/wez-bin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "$1 $2" = 'worktree add' ]; then mkdir -p "$3"; exit 0; fi
+exit 2
+SH
+cat >"$TMP/wez-bin/claude" <<'SH'
+#!/usr/bin/env bash
+printf 'wezterm result\n' >"$UBERDEV_AGENT_RESULT_FILE"
+sleep .3
+SH
+cat >"$TMP/wez-bin/wezterm" <<'SH'
+#!/usr/bin/env bash
+if [ "$1 $2" = 'cli spawn' ]; then
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done; shift
+  nohup "$@" >/dev/null 2>&1 & echo "$!"; exit 0
+fi
+if [ "$1 $2" = 'cli list-clients' ]; then exit 0; fi
+if [ "$1 $2" = 'cli list' ]; then printf '[]\n'; exit 0; fi
+exit 2
+SH
+chmod +x "$TMP/wez-bin/git" "$TMP/wez-bin/claude" "$TMP/wez-bin/wezterm"
+_uberdev_agent_dispatch_backend() { _real_uberdev_agent_dispatch_backend "$@"; }
+(
+  cd "$TMP/wez-repo"
+  export PATH="$TMP/wez-bin:$PATH" HOME="$TMP/wez-home" UBERDEV_TMPDIR="$TMP/wez-run"
+  MODEL=sonnet; PERM_FLAG=(); EFFORT_FLAG=()
+  WEZ_RECEIPT="$(uberdev_dispatch_child wezterm.child "$TMP/wez-handoff.json" "$TMP/wez-run/children/wezterm-0001/result.md" "$TMP/wez-run/children/wezterm-0001/status.json")"
+  python3 - "$WEZ_RECEIPT" "$TMP/wez-run/children/wezterm-0001/status.json" <<'PY'
+import json,sys
+r=json.loads(sys.argv[1]); s=json.load(open(sys.argv[2]))
+assert r['backend']=='wezterm' and r['handle'].startswith('pane:'),r
+assert s['backend']=='wezterm' and str(s['pid']).startswith('pane:') and len(s['lease_generation'])==32,s
+PY
+  uberdev_wait_child "$TMP/wez-run/children/wezterm-0001/status.json" "$TMP/wez-run/children/wezterm-0001/result.md" 8 >/dev/null
+)
+grep -q '"event":"completed".*"run_id":"wezterm-0001"' "$TMP/wez-run/.agent-state-$(id -u)/agent-lifecycle.jsonl"
+! grep -R -q 'run_id=wezterm-0001' "$TMP/wez-run/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
 
 # Fresh zsh sources the standalone runtime and executes prepare + real adapter
 # dispatch + wait without colliding with readonly special parameters.
@@ -248,4 +301,4 @@ PACKAGE_LIB="$TMP/installed-package/lib/child-dispatch.sh" PACKAGE_HANDOFF="$TMP
 AFTER="$(find "$TMP/installed-package" -type f -exec shasum -a 256 {} + | sort)"
 [ "$BEFORE" = "$AFTER" ]
 [ ! -d "$TMP/installed-package/lib/__pycache__" ]
-echo 'child-dispatch: 81 checks passed'
+echo 'child-dispatch: 94 checks passed'

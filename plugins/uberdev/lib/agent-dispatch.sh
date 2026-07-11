@@ -702,11 +702,22 @@ try:
         try:
             os.link(temporary, path, follow_symlinks=False)
         except FileExistsError:
-            if stat.S_ISLNK(os.lstat(path).st_mode) or not os.path.isfile(path):
+            entry = os.lstat(path)
+            if (stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode)
+                    or entry.st_uid != os.geteuid() or entry.st_nlink != 1
+                    or stat.S_IMODE(entry.st_mode) != 0o600):
                 raise SystemExit(2)
-            with open(path, "r", encoding="utf-8") as existing_stream:
-                existing = json.load(existing_stream)
-            if existing.get("state") == "running" and str(existing.get("pid")) == str(handle):
+            replace = entry.st_size == 0
+            if not replace:
+                with open(path, "r", encoding="utf-8") as existing_stream:
+                    existing = json.load(existing_stream)
+                replace = (existing.get("state") == "running"
+                           and existing.get("backend") == backend
+                           and existing.get("pid") in (None, "", handle, int(handle) if handle.isdigit() else handle))
+            current = os.stat(path, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (entry.st_dev, entry.st_ino):
+                raise SystemExit(2)
+            if replace:
                 os.replace(temporary, path)
     else:
         if os.path.lexists(path) and stat.S_ISLNK(os.lstat(path).st_mode):
@@ -719,11 +730,18 @@ finally:
 }
 
 _uberdev_agent_process_identity() {
-  local pid="$1" started
+  local pid="$1"
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  started="$(ps -o lstart= -p "$pid" 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]][[:space:]]*/ /g')"
-  [ -n "$started" ] || return 1
-  printf '%s:%s' "$pid" "$started"
+  python3 -I -B - "$pid" <<'PY'
+import hashlib,os,subprocess,sys
+pid=int(sys.argv[1])
+try:
+ pgid=os.getpgid(pid); sid=os.getsid(pid)
+ started=subprocess.check_output(["ps","-o","lstart=","-p",str(pid)],text=True,stderr=subprocess.DEVNULL).strip()
+ if not started: raise ValueError()
+ print(f"{pid}|{pgid}|{sid}|{hashlib.sha256(started.encode()).hexdigest()}",end="")
+except Exception: raise SystemExit(1)
+PY
 }
 
 _uberdev_agent_claude_probe() {

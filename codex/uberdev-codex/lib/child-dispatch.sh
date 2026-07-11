@@ -321,7 +321,12 @@ uberdev_wait_child() {
       case "$state" in
         completed|failed|timed_out|cancelled)
           terminal="$(_uberdev_child_manifest_terminal "$manifest" "$instance" 2>/dev/null || true)"
-          [ "$terminal" = "$state" ] || return 1
+          if [ "$terminal" != "$state" ]; then
+            now="$(date +%s)"
+            [ $((now - start)) -lt "$timeout" ] || return 1
+            sleep 1
+            continue
+          fi
           if [ "$state" = completed ]; then
             python3 -I -B - "$result" <<'PY' || return 1
 import os,stat,sys
