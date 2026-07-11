@@ -86,6 +86,7 @@ prior_art_question=$'compare \\ prior art * safely'
 library_question=$'which library handles [arrays]?'
 # shellcheck source=/dev/null
 . "$TMP/setup.sh"
+PRODUCTION_AGENT_DISPATCH_DEFINITION="$(declare -f uberdev_agent_dispatch)"
 
 python3 -I -B - \
   "$BRAINSTORM_CODEBASE_INPUTS" "$BRAINSTORM_PRIOR_ART_INPUTS" "$BRAINSTORM_LIBRARY_INPUTS" \
@@ -218,11 +219,15 @@ export UBERDEV_RUN_CARRIER_JSON
 
 PROVIDER_LOG="$TMP/provider-instances.log"
 : >"$PROVIDER_LOG"
-uberdev_agent_dispatch() {
-  local request="$1" prompt="$2" result="$3" status="$4" instance
+_uberdev_agent_dispatch_backend() {
+  local backend="$1" prompt="$4" result="$5" status="$6" decision="$7" instance edge
+  [ "$#" -eq 7 ]
+  [ "$backend" = codex ]
   : "$prompt"
-  instance="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["run_id"],end="")' "$request")"
-  python3 -I -B - "$RECEIPT_FILE" "$UBERDEV_CHILD_TEST_SOURCE" "$instance" <<'PY'
+  instance="$(basename "$(dirname "$status")")"
+  edge="$(python3 -I -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["edge_id"],end="")' \
+    "$CHAIN_RUN/handoffs/$instance.json")"
+  python3 -I -B - "$RECEIPT_FILE" "$UBERDEV_CHILD_TEST_SOURCE" "$edge" "$instance" "$decision" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -230,26 +235,54 @@ from pathlib import Path
 rows = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
 assert rows[-1]["event"] == "dispatch", rows[-1]
 assert rows[-1]["source"] == sys.argv[2], rows[-1]
-assert rows[-1]["instance_id"] == sys.argv[3], rows[-1]
+assert rows[-1]["edge_id"] == sys.argv[3], rows[-1]
+assert rows[-1]["instance_id"] == sys.argv[4], rows[-1]
+decision = json.loads(sys.argv[5])
+assert decision["risk_scope"] == "none" and decision["risk_signals"] == [], decision
 PY
   printf '%s\n' "$instance" >>"$PROVIDER_LOG"
   printf 'completed by receipt provider seam\n' >"$result"
   chmod 600 "$result"
-  printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"receipt-%s"}\n' "$instance" >"$status"
+  DISPATCH_ID="brainstorm-receipt-provider-$instance"
+  printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"%s"}\n' \
+    "$DISPATCH_ID" >"$status"
   chmod 600 "$status"
+}
+
+# Receipt-only wrapper stubs were the false-positive mutation: all nine receipt
+# events could exist while routing, lifecycle, and lease handling were skipped.
+if [ "${BRAINSTORM_MUTATE_AGENT_DISPATCH_WRAPPER:-0}" = 1 ]; then
+  uberdev_agent_dispatch() {
+    local request="$1" result="$3" status="$4" instance
+    instance="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["run_id"],end="")' "$request")"
+    printf '%s\n' "$instance" >>"$PROVIDER_LOG"
+    printf 'completed by mutated wrapper seam\n' >"$result"
+    chmod 600 "$result"
+    printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"mutated-%s"}\n' \
+      "$instance" >"$status"
+    chmod 600 "$status"
+  }
+fi
+
+[ "$(declare -f uberdev_agent_dispatch)" = "$PRODUCTION_AGENT_DISPATCH_DEFINITION" ] || {
+  printf 'FAIL: real uberdev_agent_dispatch wrapper is required\n' >&2
+  exit 1
 }
 
 uberdev_brainstorm_launch_batch
 
+LIFECYCLE_FILE="$CHAIN_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl"
+SEMAPHORE_ROOT="$CHAIN_RUN/.agent-state-$(id -u)/semaphore-v1"
 python3 -I -B - \
   "$RECEIPT_FILE" "$PROVIDER_LOG" "$UBERDEV_CHILD_TEST_SOURCE" \
+  "$LIFECYCLE_FILE" "$SEMAPHORE_ROOT" \
   "$BRAINSTORM_CODEBASE_INPUTS" "$BRAINSTORM_PRIOR_ART_INPUTS" "$BRAINSTORM_LIBRARY_INPUTS" <<'PY'
 import hashlib
 import json
 import sys
 from pathlib import Path
 
-receipt_path, provider_path, source, *inputs_raw = sys.argv[1:]
+receipt_path, provider_path, source, lifecycle_path, semaphore_root, *inputs_raw = sys.argv[1:]
 rows = [json.loads(line) for line in Path(receipt_path).read_text().splitlines()]
 edges = (
     ("brainstorm.research.codebase", "brainstorm-research-codebase-a1"),
@@ -284,6 +317,33 @@ for (edge, instance), inputs in zip(edges, inputs_raw, strict=True):
 
 provider_instances = Path(provider_path).read_text().splitlines()
 assert provider_instances == [instance for _, instance in edges], provider_instances
+
+lifecycle = [json.loads(line) for line in Path(lifecycle_path).read_text().splitlines()]
+expected_lifecycle = [
+    *((event, instance) for _, instance in edges for event in ('route_decided', 'agent_started', 'completed')),
+]
+assert [(row.get('event'), row.get('run_id')) for row in lifecycle] == expected_lifecycle, lifecycle
+for row in lifecycle:
+    assert row.get('agent_id') == row['run_id'], row
+    assert row.get('backend') == 'codex' and row.get('workflow') == 'solve', row
+    assert row.get('phase') == 'research' and row.get('risk_signals') == [], row
+
+semaphore = Path(semaphore_root)
+assert semaphore.is_dir(), semaphore
+leases = list(semaphore.rglob('*.lease'))
+assert leases == [], leases
 PY
 
-printf 'brainstorm-child-inputs: production build -> handoff -> dispatch chains and hostile quoting passed\n'
+mutation_status=skipped
+if [ "${BRAINSTORM_SKIP_WRAPPER_MUTATION_PROOF:-0}" != 1 ]; then
+  if BRAINSTORM_SKIP_WRAPPER_MUTATION_PROOF=1 BRAINSTORM_MUTATE_AGENT_DISPATCH_WRAPPER=1 \
+      bash "$0" >"$TMP/mutation.out" 2>"$TMP/mutation.err"; then
+    printf 'FAIL: wrapper-stub mutation unexpectedly passed\n' >&2
+    exit 1
+  fi
+  grep -Fxq 'FAIL: real uberdev_agent_dispatch wrapper is required' "$TMP/mutation.err"
+  mutation_status=rejected
+fi
+
+printf 'brainstorm-child-inputs: production build -> handoff -> dispatch chains, lifecycle, hostile quoting, and wrapper mutation %s\n' \
+  "$mutation_status"
