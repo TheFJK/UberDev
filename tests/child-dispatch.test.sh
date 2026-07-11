@@ -9,21 +9,21 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 . "$LIB"
 
 make_context() {
-  local run="$1" mode="$2" run_id="$3" backend="${4:-codex}" request decision metadata output
+  local run="$1" mode="$2" run_id="$3" backend="${4:-codex}" risks="${5:-[]}" request decision metadata output
   mkdir -p "$run"
-  request="$(python3 - "$run" "$mode" "$run_id" "$backend" <<'PY'
+  request="$(python3 - "$run" "$mode" "$run_id" "$backend" "$risks" <<'PY'
 import json,sys
-run,mode,run_id,backend=sys.argv[1:]
-r={'schema_version':1,'run_dir':run,'run_id':run_id,'repository_id':'fixture-repository','backend':backend,'workflow':'solve','phase':'lead','role':'lead','task_tier':'medium','risk_signals':[],'issue_or_pr':42,'issue_num':42,'capacity':4,'timeout_s':20}
+run,mode,run_id,backend,risks=sys.argv[1:]
+r={'schema_version':1,'run_dir':run,'run_id':run_id,'repository_id':'fixture-repository','backend':backend,'workflow':'solve','phase':'lead','role':'lead','task_tier':'medium','risk_signals':json.loads(risks),'issue_or_pr':42,'issue_num':42,'capacity':4,'timeout_s':20}
 if backend=='codex': r['routing_mode']=mode
 if mode=='forced': r.pop('routing_mode',None); r['explicit_route']='sol-ultra'
 print(json.dumps(r,separators=(',',':')))
 PY
 )"
   decision="$(uberdev_agent_resolve_request "$request")"
-  metadata="$(python3 - "$run_id" "$backend" <<'PY'
+  metadata="$(python3 - "$run_id" "$backend" "$risks" <<'PY'
 import json,sys
-print(json.dumps({'run_id':sys.argv[1],'repository_id':'fixture-repository','workflow':'solve','backend':sys.argv[2],'issue_num':42,'task_tier':'medium','risk_signals':[]},separators=(',',':')))
+print(json.dumps({'run_id':sys.argv[1],'repository_id':'fixture-repository','workflow':'solve','backend':sys.argv[2],'issue_num':42,'task_tier':'medium','risk_signals':json.loads(sys.argv[3])},separators=(',',':')))
 PY
 )"
   output="$(uberdev_agent_context_create "$run" "$request" "$decision" \
@@ -63,10 +63,53 @@ e=os.stat(os.path.dirname(v['handoff_file'])); assert stat.S_IMODE(e.st_mode)==0
 e=os.stat(v['handoff_file']); assert stat.S_IMODE(e.st_mode)==0o600
 h=json.load(open(v['handoff_file'])); assert h['role']=='implementation-worker' and h['phase']=='implementation' and h['risk_scope']=='subtask'
 PY
+uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF"
+[ ! -e "$TMP/run/children/sdd-w1-t1-implement-a1" ]
 ! uberdev_create_child_handoff run-risk run-risk-mismatch \
   "$(python3 -c 'import json,sys;print(json.dumps({"paths":[sys.argv[1]]}))' "$TMP/run/inputs/task.md")" \
   '["security"]' >/dev/null 2>&1
 [ ! -e "$TMP/run/handoffs/run-risk-mismatch.json" ]
+
+# Null risks derive immutable run risks; explicit mismatches fail closed.
+RISK_OUT="$(make_context "$TMP/risk-run" adaptive root-risk codex '["security"]')"
+RISK_CTX="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_file"])' "$RISK_OUT")"
+RISK_SHA="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_sha256"])' "$RISK_OUT")"
+mkdir -p "$TMP/risk-run/inputs"; printf risk >"$TMP/risk-run/inputs/x"
+SAVED_CARRIER="$UBERDEV_RUN_CARRIER_JSON"
+UBERDEV_RUN_CARRIER_JSON="$(python3 - "$RISK_CTX" "$RISK_SHA" <<'PY'
+import json,sys
+print(json.dumps({'schema_version':1,'run_id':'root-risk','workflow':'solve','issue_num':42,'context_file':sys.argv[1],'context_sha256':sys.argv[2]},separators=(',',':')))
+PY
+)"
+RISK_INPUTS="$(python3 -c 'import json,sys;print(json.dumps({"paths":[sys.argv[1]]}))' "$TMP/risk-run/inputs/x")"
+uberdev_create_child_handoff run-risk run-risk-derived "$RISK_INPUTS" null >/dev/null
+python3 - "$UBERDEV_CHILD_HANDOFF" <<'PY'
+import json,sys
+assert json.load(open(sys.argv[1]))['risk_signals']==['security']
+PY
+! uberdev_create_child_handoff run-risk run-risk-explicit-mismatch "$RISK_INPUTS" '[]' >/dev/null 2>&1
+UBERDEV_RUN_CARRIER_JSON="$SAVED_CARRIER"
+
+# Unsupported cancellation providers are rejected for the complete batch
+# before any child directory/provider allocation.
+CLAUDE_OUT="$(make_context "$TMP/claude-preflight" inherit root-claude-preflight claude-bg)"
+CLAUDE_CTX="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_file"])' "$CLAUDE_OUT")"
+CLAUDE_SHA="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_sha256"])' "$CLAUDE_OUT")"
+mkdir -p "$TMP/claude-preflight/inputs"; printf task >"$TMP/claude-preflight/inputs/task"; printf failure >"$TMP/claude-preflight/inputs/failure"
+UBERDEV_RUN_CARRIER_JSON="$(python3 - "$CLAUDE_CTX" "$CLAUDE_SHA" <<'PY'
+import json,sys
+print(json.dumps({'schema_version':1,'run_id':'root-claude-preflight','workflow':'solve','issue_num':42,'context_file':sys.argv[1],'context_sha256':sys.argv[2]},separators=(',',':')))
+PY
+)"
+CLAUDE_INPUTS="$(python3 - "$TMP/claude-preflight/inputs/task" "$TMP/claude-preflight" "$TMP/claude-preflight/inputs/failure" <<'PY'
+import json,sys
+print(json.dumps({'task_path':sys.argv[1],'working_dir':sys.argv[2],'allowed_paths':[sys.argv[1]],'denied_paths':[],'failure_path':sys.argv[3],'attempt':1},separators=(',',':')))
+PY
+)"
+uberdev_create_child_handoff sdd.task.implement claude-preflight-a1 "$CLAUDE_INPUTS" '[]' >/dev/null
+! uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" >/dev/null 2>&1
+[ ! -e "$TMP/claude-preflight/children/claude-preflight-a1" ]
+UBERDEV_RUN_CARRIER_JSON="$SAVED_CARRIER"
 
 # Production manifest enforcement happens before child allocation/provider use.
 (
@@ -105,6 +148,7 @@ PY
 import json,sys
 v=json.loads(sys.argv[1]); assert v['workflow']=='simplify' and v['issue_num']==0
 PY
+  ! uberdev_create_child_handoff sdd.task.implement simplify-forbidden "$BUILDER_INPUTS" '[]' >/dev/null 2>&1
 )
 HANDOFF="$TMP/handoff.json"
 python3 - "$HANDOFF" "$CTX" "$SHA" "$TMP/run/inputs/task.md" <<'PY'
@@ -221,7 +265,7 @@ PY
 printf 'done\n' >"$TMP/run/children/integration-0002/result.md"
 printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:child"}\n' >"$TMP/run/children/integration-0002/status.json"
 chmod 600 "$TMP/run/children/integration-0002/status.json"
-uberdev_wait_child "$TMP/run/children/integration-0002/status.json" "$TMP/run/children/integration-0002/result.md" 0 >/dev/null
+uberdev_wait_child "$TMP/run/children/integration-0002/status.json" "$TMP/run/children/integration-0002/result.md" 5 >/dev/null
 for _ in 1 2 3 4 5; do
   grep -q '"event":"completed".*"run_id":"integration-0002"' "$TMP/run/.agent-state-$(id -u)/agent-lifecycle.jsonl" && break
   sleep 1
@@ -243,10 +287,10 @@ _uberdev_agent_dispatch_backend() {
 uberdev_agent_dispatch() { _real_uberdev_agent_dispatch "$@"; }
 uberdev_dispatch_child timeout "$TMP/timeout-handoff.json" "$TMP/run/children/timeout-0003/result.md" "$TMP/run/children/timeout-0003/status.json" >/dev/null
 set +e
-uberdev_wait_child "$TMP/run/children/timeout-0003/status.json" "$TMP/run/children/timeout-0003/result.md" 1 >/dev/null
+uberdev_unwind_child "$TMP/run/children/timeout-0003/status.json" "$TMP/run/children/timeout-0003/result.md" 1 >/dev/null
 TIMEOUT_RC=$?
 set -e
-[ "$TIMEOUT_RC" -eq 124 ]
+[ "$TIMEOUT_RC" -eq 0 ]
 grep -q '"event":"timed_out".*"run_id":"timeout-0003"' "$TMP/run/.agent-state-$(id -u)/agent-lifecycle.jsonl"
 ! grep -R -q 'run_id=timeout-0003' "$TMP/run/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
 

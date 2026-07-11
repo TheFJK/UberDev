@@ -20,21 +20,19 @@
       "phase": "lead",
       "cardinality": "exactly_one_per_claimed_issue",
       "required": true,
-      "inputs": [
-        "issue_num",
-        "tier",
-        "workflow",
-        "risk_signals",
-        "prompt_path"
+      "risk_scope": "run",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
       ],
-      "input_types": {
+      "required_inputs": {
         "issue_num": "integer",
         "tier": "string",
         "workflow": "string",
-        "risk_signals": "string_list",
+        "risk_signals": "string_array",
         "prompt_path": "path"
       },
-      "risk_scope": "run"
+      "optional_inputs": {}
     },
     "solve.lead.orchestrator": {
       "kind": "skill",
@@ -67,17 +65,17 @@
       "phase": "research",
       "cardinality": "zero_or_one_escalation",
       "required": false,
-      "inputs": [
-        "working_dir",
-        "summary_path",
-        "question"
+      "risk_scope": "none",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
       ],
-      "input_types": {
+      "required_inputs": {
         "working_dir": "directory",
         "summary_path": "path",
         "question": "string"
       },
-      "risk_scope": "none"
+      "optional_inputs": {}
     },
     "brainstorm.research.prior_art": {
       "kind": "provider",
@@ -86,17 +84,17 @@
       "phase": "research",
       "cardinality": "zero_or_one_escalation",
       "required": false,
-      "inputs": [
-        "working_dir",
-        "summary_path",
-        "question"
+      "risk_scope": "none",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
       ],
-      "input_types": {
+      "required_inputs": {
         "working_dir": "directory",
         "summary_path": "path",
         "question": "string"
       },
-      "risk_scope": "none"
+      "optional_inputs": {}
     },
     "brainstorm.research.library": {
       "kind": "provider",
@@ -105,17 +103,17 @@
       "phase": "research",
       "cardinality": "zero_or_one_escalation",
       "required": false,
-      "inputs": [
-        "working_dir",
-        "summary_path",
-        "question"
+      "risk_scope": "none",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
       ],
-      "input_types": {
+      "required_inputs": {
         "working_dir": "directory",
         "summary_path": "path",
         "question": "string"
       },
-      "risk_scope": "none"
+      "optional_inputs": {}
     },
     "brainstorm.write_plan": {
       "kind": "skill",
@@ -140,20 +138,23 @@
       "phase": "research",
       "cardinality": "exactly_one_medium_large",
       "required": true,
-      "inputs": [
-        "issue_path",
-        "working_dir",
-        "summary_path"
-      ],
       "retry": {
         "format": 1
       },
-      "input_types": {
+      "risk_scope": "none",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
         "issue_path": "path",
         "working_dir": "directory",
         "summary_path": "path"
       },
-      "risk_scope": "none"
+      "optional_inputs": {
+        "format_retry": "boolean",
+        "format_example_path": "path"
+      }
     },
     "orchestrator.research.patterns": {
       "kind": "provider",
@@ -162,20 +163,23 @@
       "phase": "research",
       "cardinality": "exactly_one_medium_large",
       "required": false,
-      "inputs": [
-        "issue_path",
-        "working_dir",
-        "summary_path"
-      ],
       "retry": {
         "format": 1
       },
-      "input_types": {
+      "risk_scope": "none",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
         "issue_path": "path",
         "working_dir": "directory",
         "summary_path": "path"
       },
-      "risk_scope": "none"
+      "optional_inputs": {
+        "format_retry": "boolean",
+        "format_example_path": "path"
+      }
     },
     "orchestrator.research.prior_art": {
       "kind": "provider",
@@ -184,20 +188,23 @@
       "phase": "research",
       "cardinality": "exactly_one_medium_large",
       "required": false,
-      "inputs": [
-        "issue_path",
-        "working_dir",
-        "summary_path"
-      ],
       "retry": {
         "format": 1
       },
-      "input_types": {
+      "risk_scope": "none",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
         "issue_path": "path",
         "working_dir": "directory",
         "summary_path": "path"
       },
-      "risk_scope": "none"
+      "optional_inputs": {
+        "format_retry": "boolean",
+        "format_example_path": "path"
+      }
     },
     "orchestrator.research.constraints": {
       "kind": "provider",
@@ -206,20 +213,23 @@
       "phase": "research",
       "cardinality": "exactly_one_medium_large",
       "required": false,
-      "inputs": [
-        "issue_path",
-        "working_dir",
-        "summary_path"
-      ],
       "retry": {
         "format": 1
       },
-      "input_types": {
+      "risk_scope": "none",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
         "issue_path": "path",
         "working_dir": "directory",
         "summary_path": "path"
       },
-      "risk_scope": "none"
+      "optional_inputs": {
+        "format_retry": "boolean",
+        "format_example_path": "path"
+      }
     },
     "orchestrator.research.security": {
       "kind": "provider",
@@ -228,20 +238,23 @@
       "phase": "research",
       "cardinality": "exactly_one_medium_large",
       "required": false,
-      "inputs": [
-        "issue_path",
-        "working_dir",
-        "summary_path"
-      ],
       "retry": {
         "format": 1
       },
-      "input_types": {
+      "risk_scope": "subtask",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
         "issue_path": "path",
         "working_dir": "directory",
         "summary_path": "path"
       },
-      "risk_scope": "subtask"
+      "optional_inputs": {
+        "format_retry": "boolean",
+        "format_example_path": "path"
+      }
     },
     "orchestrator.research.test_coverage": {
       "kind": "provider",
@@ -250,20 +263,23 @@
       "phase": "research",
       "cardinality": "exactly_one_medium_large",
       "required": false,
-      "inputs": [
-        "issue_path",
-        "working_dir",
-        "summary_path"
-      ],
       "retry": {
         "format": 1
       },
-      "input_types": {
+      "risk_scope": "none",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
         "issue_path": "path",
         "working_dir": "directory",
         "summary_path": "path"
       },
-      "risk_scope": "none"
+      "optional_inputs": {
+        "format_retry": "boolean",
+        "format_example_path": "path"
+      }
     },
     "orchestrator.research.followup": {
       "kind": "provider",
@@ -272,19 +288,18 @@
       "phase": "research",
       "cardinality": "zero_or_one_scope_shift",
       "required": false,
-      "inputs": [
-        "working_dir",
-        "summary_path",
-        "question",
-        "answer"
+      "risk_scope": "none",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
       ],
-      "input_types": {
+      "required_inputs": {
         "working_dir": "directory",
         "summary_path": "path",
         "question": "string",
         "answer": "string"
       },
-      "risk_scope": "none"
+      "optional_inputs": {}
     },
     "orchestrator.brainstorm.qa": {
       "kind": "skill",
@@ -301,24 +316,24 @@
       "phase": "specification",
       "cardinality": "exactly_one_medium_large_plus_bounded_attempts",
       "required": true,
-      "inputs": [
-        "issue_path",
-        "research_paths",
-        "questions_path",
-        "working_dir",
-        "summary_path"
-      ],
       "retry": {
         "verification": 1
       },
-      "input_types": {
+      "risk_scope": "run",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
         "issue_path": "path",
-        "research_paths": "path_list",
+        "research_paths": "path_array",
         "questions_path": "path",
         "working_dir": "directory",
         "summary_path": "path"
       },
-      "risk_scope": "run"
+      "optional_inputs": {
+        "verification_feedback_path": "path"
+      }
     },
     "orchestrator.spec.review": {
       "kind": "provider",
@@ -327,22 +342,21 @@
       "phase": "specification",
       "cardinality": "one_per_spec_revision_cycle",
       "required": true,
-      "inputs": [
-        "spec_path",
-        "issue_path",
-        "research_paths",
-        "working_dir"
-      ],
       "retry": {
         "revision_cycles": 2
       },
-      "input_types": {
+      "risk_scope": "run",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
         "spec_path": "path",
         "issue_path": "path",
-        "research_paths": "path_list",
+        "research_paths": "path_array",
         "working_dir": "directory"
       },
-      "risk_scope": "run"
+      "optional_inputs": {}
     },
     "orchestrator.spec.revise": {
       "kind": "provider",
@@ -351,17 +365,17 @@
       "phase": "specification",
       "cardinality": "zero_to_two",
       "required": true,
-      "inputs": [
-        "spec_path",
-        "revision_path",
-        "working_dir"
+      "risk_scope": "run",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
       ],
-      "input_types": {
+      "required_inputs": {
         "spec_path": "path",
         "revision_path": "path",
         "working_dir": "directory"
       },
-      "risk_scope": "run"
+      "optional_inputs": {}
     },
     "orchestrator.plan.research.dependency": {
       "kind": "provider",
@@ -370,24 +384,22 @@
       "phase": "planning",
       "cardinality": "exactly_one_medium_large",
       "required": true,
-      "inputs": [
-        "spec_path",
-        "working_dir",
-        "summary_path",
-        "output_path",
-        "validation_path"
-      ],
       "retry": {
         "targeted": 1
       },
-      "input_types": {
+      "risk_scope": "none",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
         "spec_path": "path",
         "working_dir": "directory",
         "summary_path": "path",
         "output_path": "path",
         "validation_path": "path"
       },
-      "risk_scope": "none"
+      "optional_inputs": {}
     },
     "orchestrator.plan.research.tests": {
       "kind": "provider",
@@ -396,24 +408,22 @@
       "phase": "planning",
       "cardinality": "exactly_one_medium_large",
       "required": true,
-      "inputs": [
-        "spec_path",
-        "working_dir",
-        "summary_path",
-        "output_path",
-        "validation_path"
-      ],
       "retry": {
         "targeted": 1
       },
-      "input_types": {
+      "risk_scope": "none",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
         "spec_path": "path",
         "working_dir": "directory",
         "summary_path": "path",
         "output_path": "path",
         "validation_path": "path"
       },
-      "risk_scope": "none"
+      "optional_inputs": {}
     },
     "orchestrator.plan.research.risks": {
       "kind": "provider",
@@ -422,24 +432,22 @@
       "phase": "planning",
       "cardinality": "exactly_one_medium_large",
       "required": true,
-      "inputs": [
-        "spec_path",
-        "working_dir",
-        "summary_path",
-        "output_path",
-        "validation_path"
-      ],
       "retry": {
         "targeted": 1
       },
-      "input_types": {
+      "risk_scope": "none",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
         "spec_path": "path",
         "working_dir": "directory",
         "summary_path": "path",
         "output_path": "path",
         "validation_path": "path"
       },
-      "risk_scope": "none"
+      "optional_inputs": {}
     },
     "orchestrator.plan.research.security": {
       "kind": "provider",
@@ -448,23 +456,20 @@
       "phase": "planning",
       "cardinality": "zero_or_one_high_risk",
       "required": false,
-      "inputs": [
-        "spec_path",
-        "working_dir",
-        "summary_path",
-        "output_path",
-        "validation_path",
-        "risk_signals"
+      "risk_scope": "subtask",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
       ],
-      "input_types": {
+      "required_inputs": {
         "spec_path": "path",
         "working_dir": "directory",
         "summary_path": "path",
         "output_path": "path",
         "validation_path": "path",
-        "risk_signals": "string_list"
+        "risk_signals": "string_array"
       },
-      "risk_scope": "subtask"
+      "optional_inputs": {}
     },
     "orchestrator.plan.write": {
       "kind": "provider",
@@ -473,27 +478,27 @@
       "phase": "planning",
       "cardinality": "exactly_one_medium_large_plus_bounded_attempts",
       "required": true,
-      "inputs": [
-        "spec_path",
-        "tier",
-        "working_dir",
-        "summary_path",
-        "planning_paths",
-        "validation_path"
-      ],
       "retry": {
-        "verification": 1,
+        "verification": 2,
         "revision": 1
       },
-      "input_types": {
+      "risk_scope": "run",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
         "spec_path": "path",
         "tier": "string",
         "working_dir": "directory",
         "summary_path": "path",
-        "planning_paths": "path_list",
+        "planning_paths": "path_array",
         "validation_path": "path"
       },
-      "risk_scope": "run"
+      "optional_inputs": {
+        "verification_feedback_path": "path",
+        "revision_brief_path": "path"
+      }
     },
     "orchestrator.plan.review": {
       "kind": "provider",
@@ -502,22 +507,24 @@
       "phase": "planning",
       "cardinality": "exactly_one_medium_large",
       "required": false,
-      "inputs": [
-        "plan_path",
-        "spec_path",
-        "tier",
-        "working_dir"
-      ],
       "retry": {
         "format": 1
       },
-      "input_types": {
+      "risk_scope": "run",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
         "plan_path": "path",
         "spec_path": "path",
         "tier": "string",
         "working_dir": "directory"
       },
-      "risk_scope": "run"
+      "optional_inputs": {
+        "format_retry": "boolean",
+        "format_example_path": "path"
+      }
     },
     "orchestrator.sdd": {
       "kind": "skill",
@@ -534,23 +541,20 @@
       "phase": "implementation",
       "cardinality": "one_per_task_plus_bounded_fix_attempts",
       "required": true,
-      "inputs": [
-        "task_path",
-        "working_dir",
-        "allowed_paths",
-        "denied_paths",
-        "failure_path",
-        "attempt"
+      "risk_scope": "subtask",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
       ],
-      "input_types": {
+      "required_inputs": {
         "task_path": "path",
         "working_dir": "directory",
-        "allowed_paths": "path_list",
-        "denied_paths": "path_list",
-        "failure_path": "path",
+        "allowed_paths": "path_array",
+        "denied_paths": "path_array",
+        "failure_path": "optional_path",
         "attempt": "integer"
       },
-      "risk_scope": "subtask"
+      "optional_inputs": {}
     },
     "sdd.task.spec_review": {
       "kind": "provider",
@@ -559,21 +563,19 @@
       "phase": "implementation_review",
       "cardinality": "one_per_task_plus_three_rechecks",
       "required": true,
-      "inputs": [
-        "spec_path",
-        "plan_path",
-        "commit_sha",
-        "allowed_paths",
-        "report_path"
+      "risk_scope": "subtask",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
       ],
-      "input_types": {
+      "required_inputs": {
         "spec_path": "path",
         "plan_path": "path",
         "commit_sha": "string",
-        "allowed_paths": "path_list",
+        "allowed_paths": "path_array",
         "report_path": "path"
       },
-      "risk_scope": "subtask"
+      "optional_inputs": {}
     },
     "sdd.task.quality_review": {
       "kind": "provider",
@@ -582,21 +584,19 @@
       "phase": "implementation_review",
       "cardinality": "one_per_task_plus_three_rechecks",
       "required": true,
-      "inputs": [
-        "plan_path",
-        "base_sha",
-        "head_sha",
-        "allowed_paths",
-        "report_path"
+      "risk_scope": "subtask",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
       ],
-      "input_types": {
+      "required_inputs": {
         "plan_path": "path",
         "base_sha": "string",
         "head_sha": "string",
-        "allowed_paths": "path_list",
+        "allowed_paths": "path_array",
         "report_path": "path"
       },
-      "risk_scope": "subtask"
+      "optional_inputs": {}
     },
     "sdd.premerge.test_review": {
       "kind": "provider",
@@ -605,21 +605,19 @@
       "phase": "implementation_review",
       "cardinality": "zero_or_one_large",
       "required": false,
-      "inputs": [
-        "commit_range_path",
-        "spec_path",
-        "plan_path",
-        "acceptance_path",
-        "summary_path"
+      "risk_scope": "subtask",
+      "allowed_workflows": [
+        "solve",
+        "turbo"
       ],
-      "input_types": {
+      "required_inputs": {
         "commit_range_path": "path",
         "spec_path": "path",
         "plan_path": "path",
         "acceptance_path": "path",
         "summary_path": "path"
       },
-      "risk_scope": "subtask"
+      "optional_inputs": {}
     },
     "sdd.finish_branch": {
       "kind": "skill",
@@ -652,21 +650,24 @@
       "phase": "review",
       "cardinality": "one_per_review_iteration",
       "required": true,
-      "inputs": [
-        "changed_paths",
-        "diff_path",
-        "criteria_path",
-        "emphasis"
-      ],
-      "input_types": {
-        "changed_paths": "path_list",
-        "diff_path": "path",
-        "criteria_path": "path",
-        "emphasis": "string_list"
-      },
       "risk_scope": "subtask",
       "retry": {
         "format": 1
+      },
+      "allowed_workflows": [
+        "review-pr",
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
+        "changed_paths": "path_array",
+        "diff_path": "path",
+        "criteria_path": "path",
+        "emphasis": "string_array"
+      },
+      "optional_inputs": {
+        "format_retry": "boolean",
+        "format_example_path": "path"
       }
     },
     "review_pr.review.silent_failures": {
@@ -676,21 +677,24 @@
       "phase": "review",
       "cardinality": "one_per_review_iteration",
       "required": true,
-      "inputs": [
-        "changed_paths",
-        "diff_path",
-        "criteria_path",
-        "emphasis"
-      ],
-      "input_types": {
-        "changed_paths": "path_list",
-        "diff_path": "path",
-        "criteria_path": "path",
-        "emphasis": "string_list"
-      },
       "risk_scope": "subtask",
       "retry": {
         "format": 1
+      },
+      "allowed_workflows": [
+        "review-pr",
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
+        "changed_paths": "path_array",
+        "diff_path": "path",
+        "criteria_path": "path",
+        "emphasis": "string_array"
+      },
+      "optional_inputs": {
+        "format_retry": "boolean",
+        "format_example_path": "path"
       }
     },
     "review_pr.review.types": {
@@ -700,21 +704,24 @@
       "phase": "review",
       "cardinality": "one_per_review_iteration",
       "required": true,
-      "inputs": [
-        "changed_paths",
-        "diff_path",
-        "criteria_path",
-        "emphasis"
-      ],
-      "input_types": {
-        "changed_paths": "path_list",
-        "diff_path": "path",
-        "criteria_path": "path",
-        "emphasis": "string_list"
-      },
       "risk_scope": "subtask",
       "retry": {
         "format": 1
+      },
+      "allowed_workflows": [
+        "review-pr",
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
+        "changed_paths": "path_array",
+        "diff_path": "path",
+        "criteria_path": "path",
+        "emphasis": "string_array"
+      },
+      "optional_inputs": {
+        "format_retry": "boolean",
+        "format_example_path": "path"
       }
     },
     "review_pr.review.comments": {
@@ -724,21 +731,24 @@
       "phase": "review",
       "cardinality": "one_per_review_iteration",
       "required": true,
-      "inputs": [
-        "changed_paths",
-        "diff_path",
-        "criteria_path",
-        "emphasis"
-      ],
-      "input_types": {
-        "changed_paths": "path_list",
-        "diff_path": "path",
-        "criteria_path": "path",
-        "emphasis": "string_list"
-      },
       "risk_scope": "subtask",
       "retry": {
         "format": 1
+      },
+      "allowed_workflows": [
+        "review-pr",
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
+        "changed_paths": "path_array",
+        "diff_path": "path",
+        "criteria_path": "path",
+        "emphasis": "string_array"
+      },
+      "optional_inputs": {
+        "format_retry": "boolean",
+        "format_example_path": "path"
       }
     },
     "review_pr.review.tests": {
@@ -748,21 +758,24 @@
       "phase": "review",
       "cardinality": "one_per_review_iteration",
       "required": true,
-      "inputs": [
-        "changed_paths",
-        "diff_path",
-        "criteria_path",
-        "emphasis"
-      ],
-      "input_types": {
-        "changed_paths": "path_list",
-        "diff_path": "path",
-        "criteria_path": "path",
-        "emphasis": "string_list"
-      },
       "risk_scope": "subtask",
       "retry": {
         "format": 1
+      },
+      "allowed_workflows": [
+        "review-pr",
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
+        "changed_paths": "path_array",
+        "diff_path": "path",
+        "criteria_path": "path",
+        "emphasis": "string_array"
+      },
+      "optional_inputs": {
+        "format_retry": "boolean",
+        "format_example_path": "path"
       }
     },
     "review_pr.review.general": {
@@ -772,23 +785,25 @@
       "phase": "review",
       "cardinality": "one_per_review_iteration",
       "required": true,
-      "inputs": [
-        "changed_paths",
-        "diff_path",
-        "criteria_path",
-        "emphasis",
-        "lens"
-      ],
-      "input_types": {
-        "changed_paths": "path_list",
-        "diff_path": "path",
-        "criteria_path": "path",
-        "emphasis": "string_list",
-        "lens": "string"
-      },
       "risk_scope": "subtask",
       "retry": {
         "format": 1
+      },
+      "allowed_workflows": [
+        "review-pr",
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
+        "changed_paths": "path_array",
+        "diff_path": "path",
+        "criteria_path": "path",
+        "emphasis": "string_array",
+        "lens": "string"
+      },
+      "optional_inputs": {
+        "format_retry": "boolean",
+        "format_example_path": "path"
       }
     },
     "review_pr.fix.phase1": {
@@ -798,21 +813,20 @@
       "phase": "review_fix",
       "cardinality": "one_per_review_iteration",
       "required": false,
-      "inputs": [
-        "findings_path",
-        "commit_range_path",
-        "working_dir",
-        "pr_number",
-        "disposition_path"
+      "risk_scope": "run",
+      "allowed_workflows": [
+        "review-pr",
+        "solve",
+        "turbo"
       ],
-      "input_types": {
+      "required_inputs": {
         "findings_path": "path",
         "commit_range_path": "path",
         "working_dir": "directory",
         "pr_number": "integer",
         "disposition_path": "path"
       },
-      "risk_scope": "run"
+      "optional_inputs": {}
     },
     "review_pr.simplify.reuse": {
       "kind": "provider",
@@ -821,17 +835,21 @@
       "phase": "simplify",
       "cardinality": "zero_or_one_per_review_iteration",
       "required": true,
-      "inputs": [
-        "diff_path",
-        "lens",
-        "focus"
+      "risk_scope": "subtask",
+      "allowed_workflows": [
+        "review-pr",
+        "simplify",
+        "solve",
+        "turbo"
       ],
-      "input_types": {
+      "required_inputs": {
         "diff_path": "path",
         "lens": "string",
         "focus": "string"
       },
-      "risk_scope": "subtask"
+      "optional_inputs": {
+        "additional_focus": "optional_string"
+      }
     },
     "review_pr.simplify.quality": {
       "kind": "provider",
@@ -840,17 +858,21 @@
       "phase": "simplify",
       "cardinality": "zero_or_one_per_review_iteration",
       "required": true,
-      "inputs": [
-        "diff_path",
-        "lens",
-        "focus"
+      "risk_scope": "subtask",
+      "allowed_workflows": [
+        "review-pr",
+        "simplify",
+        "solve",
+        "turbo"
       ],
-      "input_types": {
+      "required_inputs": {
         "diff_path": "path",
         "lens": "string",
         "focus": "string"
       },
-      "risk_scope": "subtask"
+      "optional_inputs": {
+        "additional_focus": "optional_string"
+      }
     },
     "review_pr.simplify.efficiency": {
       "kind": "provider",
@@ -859,17 +881,21 @@
       "phase": "simplify",
       "cardinality": "zero_or_one_per_review_iteration",
       "required": true,
-      "inputs": [
-        "diff_path",
-        "lens",
-        "focus"
+      "risk_scope": "subtask",
+      "allowed_workflows": [
+        "review-pr",
+        "simplify",
+        "solve",
+        "turbo"
       ],
-      "input_types": {
+      "required_inputs": {
         "diff_path": "path",
         "lens": "string",
         "focus": "string"
       },
-      "risk_scope": "subtask"
+      "optional_inputs": {
+        "additional_focus": "optional_string"
+      }
     },
     "review_pr.fix.phase2": {
       "kind": "provider",
@@ -878,21 +904,21 @@
       "phase": "simplify_fix",
       "cardinality": "zero_or_one_per_review_iteration",
       "required": false,
-      "inputs": [
-        "findings_path",
-        "commit_range_path",
-        "working_dir",
-        "pr_number",
-        "disposition_path"
+      "risk_scope": "run",
+      "allowed_workflows": [
+        "review-pr",
+        "simplify",
+        "solve",
+        "turbo"
       ],
-      "input_types": {
+      "required_inputs": {
         "findings_path": "path",
         "commit_range_path": "path",
         "working_dir": "directory",
         "pr_number": "integer",
         "disposition_path": "path"
       },
-      "risk_scope": "run"
+      "optional_inputs": {}
     },
     "review_pr.defer.findings": {
       "kind": "provider",
@@ -901,23 +927,22 @@
       "phase": "defer_findings",
       "cardinality": "zero_or_one_per_review_iteration",
       "required": false,
-      "inputs": [
-        "phase1_path",
-        "phase2_path",
-        "phase1_disposition_path",
-        "phase2_disposition_path",
-        "working_dir",
-        "pr_number"
+      "risk_scope": "run",
+      "allowed_workflows": [
+        "review-pr",
+        "simplify",
+        "solve",
+        "turbo"
       ],
-      "input_types": {
-        "phase1_path": "path",
-        "phase2_path": "path",
-        "phase1_disposition_path": "path",
-        "phase2_disposition_path": "path",
+      "required_inputs": {
+        "phase1_path": "optional_path",
+        "phase2_path": "optional_path",
+        "phase1_disposition_path": "optional_path",
+        "phase2_disposition_path": "optional_path",
         "working_dir": "directory",
         "pr_number": "integer"
       },
-      "risk_scope": "run"
+      "optional_inputs": {}
     },
     "review_pr.ci.classify": {
       "kind": "provider",
@@ -926,17 +951,18 @@
       "phase": "ci",
       "cardinality": "zero_or_one_per_red_ci_iteration",
       "required": true,
-      "inputs": [
-        "pr_number",
-        "run_id",
-        "log_path"
+      "risk_scope": "subtask",
+      "allowed_workflows": [
+        "review-pr",
+        "solve",
+        "turbo"
       ],
-      "input_types": {
+      "required_inputs": {
         "pr_number": "integer",
         "run_id": "string",
         "log_path": "path"
       },
-      "risk_scope": "subtask"
+      "optional_inputs": {}
     },
     "review_pr.ci.fix_code": {
       "kind": "provider",
@@ -945,19 +971,19 @@
       "phase": "ci_fix",
       "cardinality": "zero_or_one_per_code_bug_or_env_drift",
       "required": true,
-      "inputs": [
-        "classification_path",
-        "log_path",
-        "working_dir",
-        "pr_number"
+      "risk_scope": "run",
+      "allowed_workflows": [
+        "review-pr",
+        "solve",
+        "turbo"
       ],
-      "input_types": {
+      "required_inputs": {
         "classification_path": "path",
         "log_path": "path",
         "working_dir": "directory",
         "pr_number": "integer"
       },
-      "risk_scope": "run"
+      "optional_inputs": {}
     },
     "review_pr.ci.rebase": {
       "kind": "provider",
@@ -966,19 +992,19 @@
       "phase": "ci_fix",
       "cardinality": "zero_or_one_per_stale_base",
       "required": true,
-      "inputs": [
-        "working_dir",
-        "pr_number",
-        "head_sha",
-        "base_sha"
+      "risk_scope": "run",
+      "allowed_workflows": [
+        "review-pr",
+        "solve",
+        "turbo"
       ],
-      "input_types": {
+      "required_inputs": {
         "working_dir": "directory",
         "pr_number": "integer",
         "head_sha": "string",
         "base_sha": "string"
       },
-      "risk_scope": "run"
+      "optional_inputs": {}
     },
     "review_pr.ci.defer_refusal": {
       "kind": "provider",
@@ -987,17 +1013,18 @@
       "phase": "defer_findings",
       "cardinality": "zero_or_one_ci_fixer_refusal",
       "required": false,
-      "inputs": [
-        "phase1_path",
-        "working_dir",
-        "pr_number"
+      "risk_scope": "run",
+      "allowed_workflows": [
+        "review-pr",
+        "solve",
+        "turbo"
       ],
-      "input_types": {
+      "required_inputs": {
         "phase1_path": "path",
         "working_dir": "directory",
         "pr_number": "integer"
       },
-      "risk_scope": "run"
+      "optional_inputs": {}
     },
     "review_pr.ci.resolve_conflict": {
       "kind": "provider",
@@ -1006,21 +1033,20 @@
       "phase": "conflict_resolution",
       "cardinality": "one_per_conflicted_file_per_bounded_stage",
       "required": true,
-      "inputs": [
-        "file_path",
-        "working_dir",
-        "pr_branch",
-        "integration_branch",
-        "base_sha"
+      "risk_scope": "run",
+      "allowed_workflows": [
+        "review-pr",
+        "solve",
+        "turbo"
       ],
-      "input_types": {
+      "required_inputs": {
         "file_path": "path",
         "working_dir": "directory",
         "pr_branch": "string",
         "integration_branch": "string",
         "base_sha": "string"
       },
-      "risk_scope": "run"
+      "optional_inputs": {}
     }
   }
 }

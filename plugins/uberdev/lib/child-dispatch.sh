@@ -103,25 +103,34 @@ if (meta.get('run_id'),meta.get('workflow'),meta.get('issue_num'))!=(carrier['ru
 row=manifest.get('edges',{}).get(edge)
 if not isinstance(row,dict) or row.get('kind')!='provider': fail('undeclared_edge')
 if not isinstance(row.get('role'),str) or not isinstance(row.get('phase'),str) or row.get('risk_scope') not in {'run','subtask','none'} or type(row.get('required')) is not bool: fail('invalid_manifest_edge')
-if not isinstance(inputs,dict) or set(inputs)!=set(row.get('inputs',[])) or set(row.get('input_types',{}))!=set(inputs): fail('input_schema_mismatch')
-if not isinstance(risks,list) or risks!=sorted(set(risks)) or any(x not in RISKS for x in risks): fail('invalid_risk_signals')
-if row['risk_scope']=='none' and risks: fail('risk_scope_mismatch')
+allowed=row.get('allowed_workflows'); required=row.get('required_inputs'); optional=row.get('optional_inputs')
+if not isinstance(allowed,list) or carrier['workflow'] not in allowed: fail('workflow_not_allowed')
+if not isinstance(required,dict) or not isinstance(optional,dict) or set(required)&set(optional): fail('invalid_manifest_edge')
+if not isinstance(inputs,dict) or not set(required)<=set(inputs) or not set(inputs)<=set(required)|set(optional): fail('input_schema_mismatch')
 run_risks=meta.get('risk_signals')
 if not isinstance(run_risks,list) or any(x not in RISKS for x in run_risks): fail('invalid_context_risk_signals')
-if row['risk_scope']=='run' and risks!=sorted(set(run_risks)): fail('risk_scope_mismatch')
+run_risks=sorted(set(run_risks))
+if risks is None and row['risk_scope']=='run': risks=run_risks
+if not isinstance(risks,list) or risks!=sorted(set(risks)) or any(x not in RISKS for x in risks): fail('invalid_risk_signals')
+if row['risk_scope']=='none' and risks: fail('risk_scope_mismatch')
+if row['risk_scope']=='run' and risks!=run_risks: fail('risk_scope_mismatch')
 run_dir=os.path.dirname(os.path.dirname(ctx)); repo=meta.get('repository_id')
 repo_root=os.path.realpath(repo) if isinstance(repo,str) and os.path.isdir(repo) else os.path.realpath(run_dir)
 def scalar(value,kind):
  if kind=='integer':
   if type(value) is not int: fail('input_type_mismatch')
   return
- if kind=='string':
-  if not isinstance(value,str) or not value or len(value)>8192 or any(c in value for c in '\r\n\0'): fail('input_type_mismatch')
+ if kind=='boolean':
+  if type(value) is not bool: fail('input_type_mismatch')
   return
- if kind=='string_list':
+ if kind in {'string','optional_string'}:
+  if not isinstance(value,str) or (kind=='string' and not value) or len(value)>8192 or any(c in value for c in '\r\n\0'): fail('input_type_mismatch')
+  return
+ if kind=='string_array':
   if not isinstance(value,list) or len(value)>128 or any(not isinstance(x,str) or not x or len(x)>8192 or any(c in x for c in '\r\n\0') for x in value): fail('input_type_mismatch')
   return
- values=value if kind=='path_list' else [value]
+ if kind in {'optional_path','optional_path_array'} and value in ('',[]): return
+ values=value if kind in {'path_array','optional_path_array'} else [value]
  if not isinstance(values,list) or len(values)>128: fail('input_type_mismatch')
  for path in values:
   if not isinstance(path,str) or not os.path.isabs(path): fail('path_must_be_absolute')
@@ -133,7 +142,8 @@ def scalar(value,kind):
   if kind=='directory':
    if not stat.S_ISDIR(pe.st_mode): fail('input_type_mismatch')
   elif not stat.S_ISREG(pe.st_mode) or pe.st_nlink!=1 or pe.st_size>16777216: fail('input_type_mismatch')
-for key,value in inputs.items(): scalar(value,row['input_types'][key])
+types={**required,**optional}
+for key,value in inputs.items(): scalar(value,types[key])
 handoff_dir=os.path.join(run_dir,'handoffs')
 try: os.mkdir(handoff_dir,0o700)
 except FileExistsError: pass
@@ -161,11 +171,11 @@ PY
 # directory, and emit the descendant routing request. All mutable files are
 # opened relative to verified directory descriptors by the helper.
 _uberdev_child_prepare() {
-  local edge="$1" handoff="$2" result="$3" status_file="$4" manifest_path
+  local edge="$1" handoff="$2" result="$3" status_file="$4" mode="${5:-dispatch}" manifest_path
   manifest_path="$(_uberdev_child_manifest_path)" || return 2
-  python3 -I -B - "$edge" "$handoff" "$result" "$status_file" "$_UBERDEV_CHILD_ROOT" "$manifest_path" <<'PY'
+  python3 -I -B - "$edge" "$handoff" "$result" "$status_file" "$_UBERDEV_CHILD_ROOT" "$manifest_path" "$mode" <<'PY'
 import hashlib,html,json,os,re,secrets,stat,sys
-edge,handoff_arg,result_arg,status_arg,plugin_root,manifest_path=sys.argv[1:]
+edge,handoff_arg,result_arg,status_arg,plugin_root,manifest_path,mode=sys.argv[1:]
 FORBIDDEN={'command','commands','shell','model','route','effort','reasoning_effort','service','service_tier','sandbox','environment','env'}
 RISKS={'authentication','authorization','concurrency','cryptography','data-loss','destructive-operations','force-push','public-api-compatibility','release-infrastructure','schema-migration','security'}
 IDENT=re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
@@ -239,11 +249,14 @@ try: manifest=json.load(open(manifest_path))
 except Exception: fail('invalid_run_tree_manifest')
 row=manifest.get('edges',{}).get(edge)
 if not isinstance(row,dict) or row.get('kind')!='provider': fail('undeclared_edge')
+allowed=row.get('allowed_workflows'); required_inputs=row.get('required_inputs'); optional_inputs=row.get('optional_inputs')
+if not isinstance(allowed,list) or carrier['workflow'] not in allowed: fail('workflow_not_allowed')
+if not isinstance(required_inputs,dict) or not isinstance(optional_inputs,dict) or set(required_inputs)&set(optional_inputs): fail('invalid_manifest_edge')
 if value.get('role')!=row.get('role'): fail('role_mismatch')
 if value.get('phase')!=row.get('phase'): fail('phase_mismatch')
 if value.get('risk_scope')!=row.get('risk_scope'): fail('risk_scope_mismatch')
 if type(row.get('required')) is not bool: fail('invalid_manifest_edge')
-if set(inputs)!=set(row.get('inputs',[])) or set(row.get('input_types',{}))!=set(inputs): fail('input_schema_mismatch')
+if not set(required_inputs)<=set(inputs) or not set(inputs)<=set(required_inputs)|set(optional_inputs): fail('input_schema_mismatch')
 if row['risk_scope']=='none' and risks: fail('risk_scope_mismatch')
 run_risks=context.get('metadata',{}).get('risk_signals')
 if not isinstance(run_risks,list) or any(x not in RISKS for x in run_risks): fail('invalid_context_risk_signals')
@@ -252,13 +265,17 @@ def validate_typed(item,kind):
     if kind=='integer':
         if type(item) is not int: fail('input_type_mismatch')
         return
-    if kind=='string':
-        if not isinstance(item,str) or not item or len(item)>8192 or '\x00' in item or '\r' in item or '\n' in item: fail('input_type_mismatch')
+    if kind=='boolean':
+        if type(item) is not bool: fail('input_type_mismatch')
         return
-    if kind=='string_list':
+    if kind in {'string','optional_string'}:
+        if not isinstance(item,str) or (kind=='string' and not item) or len(item)>8192 or '\x00' in item or '\r' in item or '\n' in item: fail('input_type_mismatch')
+        return
+    if kind=='string_array':
         if not isinstance(item,list) or len(item)>128 or any(not isinstance(x,str) or not x or len(x)>8192 or any(c in x for c in '\r\n\0') for x in item): fail('input_type_mismatch')
         return
-    values=item if kind=='path_list' else [item]
+    if kind in {'optional_path','optional_path_array'} and item in ('',[]): return
+    values=item if kind in {'path_array','optional_path_array'} else [item]
     if not isinstance(values,list) or len(values)>128: fail('input_type_mismatch')
     for path in values:
         if not isinstance(path,str) or not os.path.isabs(path): fail('path_must_be_absolute')
@@ -270,13 +287,18 @@ def validate_typed(item,kind):
         if kind=='directory':
             if not stat.S_ISDIR(entry.st_mode): fail('input_type_mismatch')
         elif not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1 or entry.st_size>16777216: fail('input_type_mismatch')
-for key,item in inputs.items(): validate_typed(item,row['input_types'][key])
+input_types={**required_inputs,**optional_inputs}
+for key,item in inputs.items(): validate_typed(item,input_types[key])
 role_path=os.path.join(plugin_root,'agents',value['role']+'.md')
 safe_existing(role_path,max_bytes=262144)
 children_name='children'; instance=value['instance_id']
 child_dir=os.path.join(run_real,children_name,instance)
 expected_result=os.path.join(child_dir,'result.md'); expected_status=os.path.join(child_dir,'status.json')
 if os.path.realpath(result_arg)!=expected_result or os.path.realpath(status_arg)!=expected_status: fail('caller_path_mismatch')
+if mode=='preflight':
+    print(json.dumps({'backend':context['metadata']['backend'],'edge_id':edge,'instance_id':instance},sort_keys=True,separators=(',',':')))
+    raise SystemExit(0)
+if mode!='dispatch': fail('invalid_prepare_mode')
 runfd=os.open(run_real,os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0))
 created_child=False; childrenfd=None; childfd=None
 try:
@@ -341,6 +363,45 @@ if isinstance(env,dict):
 if root_decision.get('forced') is True: request.pop('routing_mode',None)
 print(json.dumps({'request':request,'prompt':os.path.join(child_dir,'prompt.txt'),'result':expected_result,'status':expected_status},sort_keys=True,separators=(',',':')))
 PY
+}
+
+_uberdev_child_backend_cancellation_supported() {
+  case "$1" in
+    codex|background) return 0 ;;
+    wezterm) command -v wezterm >/dev/null 2>&1 ;;
+    claude-bg) _uberdev_dispatch_cancel_claude_bg '__uberdev_capability_probe__' >/dev/null 2>&1 ;;
+    *) return 2 ;;
+  esac
+}
+
+# Validate an entire immutable handoff batch and the selected provider's
+# cancellation capability before the caller launches the first child.
+# Usage: uberdev_preflight_child_batch HANDOFF_JSON_FILE [...]
+uberdev_preflight_child_batch() {
+  [ "$#" -gt 0 ] || { _uberdev_child_error 'expected at least one HANDOFF_JSON_FILE'; return 2; }
+  local handoff info edge instance context run_dir result status prepared backend seen='|'
+  for handoff in "$@"; do
+    info="$(python3 -I -B - "$handoff" <<'PY'
+import json,os,sys
+try:
+ v=json.load(open(sys.argv[1])); carrier=v['carrier']
+ print(json.dumps({'edge':v['edge_id'],'instance':v['instance_id'],'context':carrier['context_file']},sort_keys=True,separators=(',',':')),end='')
+except Exception: raise SystemExit(2)
+PY
+)" || return 2
+    edge="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["edge"],end="")' "$info")" || return 2
+    instance="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["instance"],end="")' "$info")" || return 2
+    context="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["context"],end="")' "$info")" || return 2
+    run_dir="$(dirname "$(dirname "$context")")"
+    result="$run_dir/children/$instance/result.md"; status="$run_dir/children/$instance/status.json"
+    prepared="$(_uberdev_child_prepare "$edge" "$handoff" "$result" "$status" preflight)" || return $?
+    case "$seen" in *"|$instance|"*) _uberdev_child_error 'duplicate batch instance'; return 2 ;; esac
+    seen="${seen}${instance}|"
+    backend="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["backend"],end="")' "$prepared")" || return 2
+    _uberdev_child_backend_cancellation_supported "$backend" || {
+      _uberdev_child_error "backend lacks cancellation capability: $backend"; return 2;
+    }
+  done
 }
 
 uberdev_dispatch_child() {
@@ -451,10 +512,53 @@ print(term[0],end='')
 PY
 }
 
+_uberdev_child_terminal_lease_proof() {
+  python3 -I -B - "$1" <<'PY'
+import json,os,stat,sys
+status=os.path.realpath(sys.argv[1]); child=os.path.dirname(status)
+run_dir=os.path.dirname(os.path.dirname(child)); instance=os.path.basename(child)
+state=os.path.join(run_dir,f'.agent-state-{os.geteuid()}')
+try:
+ s=json.load(open(status)); terminal=s['state']
+ if terminal not in {'completed','failed','timed_out','cancelled'}: raise ValueError()
+ rows=[json.loads(x) for x in open(os.path.join(state,'agent-lifecycle.jsonl')) if x.strip()]
+ events=[r.get('event') for r in rows if r.get('run_id')==instance and r.get('event') in {'completed','failed','timed_out','cancelled','abandoned'}]
+ if events!=[terminal]: raise ValueError()
+ for root,dirs,files in os.walk(os.path.join(state,'semaphore-v1')):
+  dirs[:]=[d for d in dirs if not os.path.islink(os.path.join(root,d))]
+  for name in files:
+   if not name.endswith('.lease'): continue
+   path=os.path.join(root,name); e=os.lstat(path)
+   if stat.S_ISLNK(e.st_mode) or not stat.S_ISREG(e.st_mode): continue
+   try: lease=dict(line.split('=',1) for line in open(path).read().splitlines())
+   except Exception: continue
+   if lease.get('run_id')==instance and lease.get('status_path')==status: raise ValueError()
+except Exception: raise SystemExit(1)
+PY
+}
+
+# Bounded cleanup for a previously launched child. A failed/timed-out/cancelled
+# child is a successful unwind only after lifecycle terminal and lease absence
+# are both proven.
+uberdev_unwind_child() {
+  local status_file="${1:-}" result="${2:-}" timeout="${3:-}" rc start now
+  [ "$#" -eq 3 ] || return 2
+  case "$timeout" in ''|*[!0-9]*|0) return 2 ;; esac
+  if uberdev_wait_child "$status_file" "$result" "$timeout" >/dev/null; then rc=0; else rc=$?; fi
+  case "$rc" in 0|1|124) ;; *) return "$rc" ;; esac
+  start="$(date +%s)"
+  while ! _uberdev_child_terminal_lease_proof "$status_file"; do
+    now="$(date +%s)"; [ $((now-start)) -lt "$timeout" ] || return 2
+    sleep 1
+  done
+  return 0
+}
+
 uberdev_wait_child() {
   local status_file="${1:-}" result="${2:-}" timeout="${3:-}" start now probe state handle='' backend process_identity lease_generation snapshot child run_dir instance manifest terminal state_dir lease_info lease lease_identity cas rc
   [ "$#" -eq 3 ] || return 2
   case "$timeout" in ''|*[!0-9]*) return 2 ;; esac
+  [ "$timeout" -gt 0 ] || return 2
   status_file="$(python3 -I -B -c 'import os,sys; print(os.path.realpath(sys.argv[1]),end="")' "$status_file")" || return 2
   result="$(python3 -I -B -c 'import os,sys; print(os.path.realpath(sys.argv[1]),end="")' "$result")" || return 2
   child="$(dirname "$status_file")"; run_dir="$(dirname "$(dirname "$child")")"; instance="$(basename "$child")"
@@ -475,7 +579,7 @@ uberdev_wait_child() {
           terminal="$(_uberdev_child_manifest_terminal "$manifest" "$instance" 2>/dev/null || true)"
           if [ "$terminal" != "$state" ]; then
             now="$(date +%s)"
-            [ "$timeout" -eq 0 ] || [ $((now - start)) -lt "$timeout" ] || return 1
+            [ $((now - start)) -lt "$timeout" ] || return 1
             sleep 1
             continue
           fi
@@ -496,7 +600,7 @@ PY
       return 2
     fi
     now="$(date +%s)"
-    if [ "$timeout" -gt 0 ] && [ $((now - start)) -ge "$timeout" ]; then
+    if [ $((now - start)) -ge "$timeout" ]; then
       lease_info="$(_uberdev_child_find_lease "$state_dir" "$instance" "$status_file" 2>/dev/null)" || return 2
       lease="${lease_info%%	*}"; [ "$lease" != "$lease_info" ] || return 2
       [ "${lease_info#*	}" = "$lease_generation" ] && [ -n "$lease_generation" ] || return 2

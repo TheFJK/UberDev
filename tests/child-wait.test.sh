@@ -17,6 +17,7 @@ terminal_manifest() {
 }
 printf 'completed result\n' >"$RESULT"; printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"; terminal_manifest completed
 uberdev_wait_child "$STATUS" "$RESULT" 2 >/dev/null
+uberdev_unwind_child "$STATUS" "$RESULT" 2
 
 : >"$RESULT"; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
 printf x >"$RESULT"; printf '{bad\n' >"$STATUS"; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
@@ -136,8 +137,8 @@ grep -q '"state":"completed"' "$STATUS"
 printf 'zsh result\n' >"$RESULT"; printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"; terminal_manifest completed
 zsh -f -c '. "$1"; uberdev_wait_child "$2" "$3" 2' _ "$LIB" "$STATUS" "$RESULT" >/dev/null
 
-# A zero timeout is the explicit partial-batch unwind mode: it drains until a
-# real provider terminal state appears and never fabricates timeout/cancel.
+# Zero is rejected: cleanup uses the bounded uberdev_unwind_child API. A normal
+# positive wait still observes a delayed real terminal without fabrication.
 printf '{"backend":"codex","state":"running","exit_code":null,"pid":"321"}\n' >"$STATUS"
 printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00.000Z","run_id":"worker-0001"}\n{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001"}\n' >"$MANIFEST"
 (
@@ -146,7 +147,8 @@ printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:0
   printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"
   terminal_manifest completed
 ) & DRAIN_WRITER=$!
-uberdev_wait_child "$STATUS" "$RESULT" 0 >/dev/null
+! uberdev_wait_child "$STATUS" "$RESULT" 0 >/dev/null 2>&1
+uberdev_wait_child "$STATUS" "$RESULT" 2 >/dev/null
 wait "$DRAIN_WRITER"
 grep -q '"state":"completed"' "$STATUS"
 ! grep -q 'timed_out\|cancel' "$STATUS"

@@ -24,14 +24,16 @@ for edge_id,edge in edges.items():
         role=edge.get('role')
         if role is not None: assert role in policy['roles'], (edge_id,role)
         assert edge.get('required') in {True,False}
-        assert isinstance(edge.get('inputs'),list)
         assert edge.get('risk_scope') in {'none','subtask','run'}, edge_id
-        input_types=edge.get('input_types')
-        assert isinstance(input_types,dict), edge_id
-        assert set(input_types)==set(edge['inputs']), edge_id
-        assert set(input_types.values()) <= {
-            'string','integer','path','directory','path_list','string_list'
+        required_inputs=edge.get('required_inputs'); optional_inputs=edge.get('optional_inputs')
+        assert isinstance(required_inputs,dict) and isinstance(optional_inputs,dict), edge_id
+        assert not set(required_inputs)&set(optional_inputs), edge_id
+        assert set(required_inputs.values())|set(optional_inputs.values()) <= {
+            'string','optional_string','integer','boolean','path','optional_path',
+            'directory','path_array','optional_path_array','string_array'
         }, edge_id
+        allowed=edge.get('allowed_workflows')
+        assert isinstance(allowed,list) and allowed==sorted(set(allowed)), edge_id
     else:
         assert edge.get('role') is None and edge.get('route') is None
 
@@ -57,7 +59,7 @@ assert {
 } <= edges.keys()
 assert edges['brainstorm.research.prior_art']['role']=='research-patterns'
 assert edges['brainstorm.research.library']['role']=='research-prior-art'
-assert edges['orchestrator.plan.write']['retry']['verification']==1
+assert edges['orchestrator.plan.write']['retry']['verification']==2
 for edge_id in {
  'review_pr.review.correctness','review_pr.review.silent_failures',
  'review_pr.review.types','review_pr.review.comments',
