@@ -47,10 +47,10 @@ This skill's wave-based controller-only-git approach is intentionally **not** wo
 <!-- BEGIN child-callsite-contracts-v1 -->
 ```json
 {
-  "sdd.task.implement":{"inputs":["task_path","working_dir","allowed_paths","denied_paths","failure_path","attempt"],"risk_scope":"subtask","risk_argument":"subtask"},
-  "sdd.task.spec_review":{"inputs":["spec_path","plan_path","commit_sha","allowed_paths","report_path"],"risk_scope":"subtask","risk_argument":"subtask"},
-  "sdd.task.quality_review":{"inputs":["plan_path","base_sha","head_sha","allowed_paths","report_path"],"risk_scope":"subtask","risk_argument":"subtask"},
-  "sdd.premerge.test_review":{"inputs":["commit_range_path","spec_path","plan_path","acceptance_path","summary_path"],"risk_scope":"subtask","risk_argument":"subtask"}
+  "sdd.task.implement":{"inputs":["task_path","working_dir","allowed_paths","denied_paths","failure_path","attempt"],"optional_inputs":[],"allowed_workflows":["solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "sdd.task.spec_review":{"inputs":["spec_path","plan_path","commit_sha","allowed_paths","report_path"],"optional_inputs":[],"allowed_workflows":["solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "sdd.task.quality_review":{"inputs":["plan_path","base_sha","head_sha","allowed_paths","report_path"],"optional_inputs":[],"allowed_workflows":["solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "sdd.premerge.test_review":{"inputs":["commit_range_path","spec_path","plan_path","acceptance_path","summary_path"],"optional_inputs":[],"allowed_workflows":["solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"}
 }
 ```
 <!-- END child-callsite-contracts-v1 -->

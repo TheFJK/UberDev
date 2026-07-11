@@ -90,9 +90,9 @@ For architecturally consequential choices, broaden the semantic focus supplied t
 <!-- BEGIN child-callsite-contracts-v1 -->
 ```json
 {
-  "brainstorm.research.codebase": {"inputs":["working_dir","summary_path","question"],"risk_scope":"none","risk_argument":[]},
-  "brainstorm.research.prior_art": {"inputs":["working_dir","summary_path","question"],"risk_scope":"none","risk_argument":[]},
-  "brainstorm.research.library": {"inputs":["working_dir","summary_path","question"],"risk_scope":"none","risk_argument":[]}
+  "brainstorm.research.codebase":{"inputs":["working_dir","summary_path","question"],"optional_inputs":[],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "brainstorm.research.prior_art":{"inputs":["working_dir","summary_path","question"],"optional_inputs":[],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "brainstorm.research.library":{"inputs":["working_dir","summary_path","question"],"optional_inputs":[],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]}
 }
 ```
 <!-- END child-callsite-contracts-v1 -->

@@ -95,6 +95,19 @@ The brief is identical for all 6 reviewers — each agent's own system prompt na
 
 ### Step 2: Dispatch 6 required routed reviewers
 
+<!-- BEGIN child-callsite-contracts-v1 -->
+```json
+{
+  "review_pr.review.correctness":{"inputs":["changed_paths","diff_path","criteria_path","emphasis"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "review_pr.review.silent_failures":{"inputs":["changed_paths","diff_path","criteria_path","emphasis"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "review_pr.review.types":{"inputs":["changed_paths","diff_path","criteria_path","emphasis"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "review_pr.review.comments":{"inputs":["changed_paths","diff_path","criteria_path","emphasis"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "review_pr.review.tests":{"inputs":["changed_paths","diff_path","criteria_path","emphasis"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "review_pr.review.general":{"inputs":["changed_paths","diff_path","criteria_path","emphasis","lens"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"}
+}
+```
+<!-- END child-callsite-contracts-v1 -->
+
 ### Routed execution contract (normative)
 
 Source `${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}/lib/child-dispatch.sh`. The caller propagates the immutable carrier through the context-only lineage edge `review_pr.post_impl_review`; this skill never resolves a model. Resolve the six provider edges from policy, create unique iteration/attempt instances with `uberdev_create_child_handoff`, and issue every dispatch before waiting:

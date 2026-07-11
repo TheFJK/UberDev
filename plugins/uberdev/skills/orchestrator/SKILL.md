@@ -164,22 +164,22 @@ Exit code is `2`, which propagates through `solve-pipeline`'s `claude --bg` exec
 <!-- BEGIN child-callsite-contracts-v1 -->
 ```json
 {
-  "orchestrator.research.codebase":{"inputs":["issue_path","working_dir","summary_path"],"risk_scope":"none","risk_argument":[]},
-  "orchestrator.research.patterns":{"inputs":["issue_path","working_dir","summary_path"],"risk_scope":"none","risk_argument":[]},
-  "orchestrator.research.prior_art":{"inputs":["issue_path","working_dir","summary_path"],"risk_scope":"none","risk_argument":[]},
-  "orchestrator.research.constraints":{"inputs":["issue_path","working_dir","summary_path"],"risk_scope":"none","risk_argument":[]},
-  "orchestrator.research.security":{"inputs":["issue_path","working_dir","summary_path"],"risk_scope":"subtask","risk_argument":"subtask"},
-  "orchestrator.research.test_coverage":{"inputs":["issue_path","working_dir","summary_path"],"risk_scope":"none","risk_argument":[]},
-  "orchestrator.research.followup":{"inputs":["working_dir","summary_path","question","answer"],"risk_scope":"none","risk_argument":[]},
-  "orchestrator.spec.write":{"inputs":["issue_path","research_paths","questions_path","working_dir","summary_path"],"risk_scope":"run","risk_argument":null},
-  "orchestrator.spec.review":{"inputs":["spec_path","issue_path","research_paths","working_dir"],"risk_scope":"run","risk_argument":null},
-  "orchestrator.spec.revise":{"inputs":["spec_path","revision_path","working_dir"],"risk_scope":"run","risk_argument":null},
-  "orchestrator.plan.research.dependency":{"inputs":["spec_path","working_dir","summary_path","output_path","validation_path"],"risk_scope":"none","risk_argument":[]},
-  "orchestrator.plan.research.tests":{"inputs":["spec_path","working_dir","summary_path","output_path","validation_path"],"risk_scope":"none","risk_argument":[]},
-  "orchestrator.plan.research.risks":{"inputs":["spec_path","working_dir","summary_path","output_path","validation_path"],"risk_scope":"none","risk_argument":[]},
-  "orchestrator.plan.research.security":{"inputs":["spec_path","working_dir","summary_path","output_path","validation_path","risk_signals"],"risk_scope":"subtask","risk_argument":"subtask"},
-  "orchestrator.plan.write":{"inputs":["spec_path","tier","working_dir","summary_path","planning_paths","validation_path"],"risk_scope":"run","risk_argument":null},
-  "orchestrator.plan.review":{"inputs":["plan_path","spec_path","tier","working_dir"],"risk_scope":"run","risk_argument":null}
+  "orchestrator.research.codebase":{"inputs":["issue_path","working_dir","summary_path"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "orchestrator.research.patterns":{"inputs":["issue_path","working_dir","summary_path"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "orchestrator.research.prior_art":{"inputs":["issue_path","working_dir","summary_path"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "orchestrator.research.constraints":{"inputs":["issue_path","working_dir","summary_path"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "orchestrator.research.security":{"inputs":["issue_path","working_dir","summary_path"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "orchestrator.research.test_coverage":{"inputs":["issue_path","working_dir","summary_path"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "orchestrator.research.followup":{"inputs":["working_dir","summary_path","question","answer"],"optional_inputs":[],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "orchestrator.spec.write":{"inputs":["issue_path","research_paths","questions_path","working_dir","summary_path"],"optional_inputs":["verification_feedback_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "orchestrator.spec.review":{"inputs":["spec_path","issue_path","research_paths","working_dir"],"optional_inputs":[],"allowed_workflows":["solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "orchestrator.spec.revise":{"inputs":["spec_path","revision_path","working_dir"],"optional_inputs":[],"allowed_workflows":["solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "orchestrator.plan.research.dependency":{"inputs":["spec_path","working_dir","summary_path","output_path","validation_path"],"optional_inputs":[],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "orchestrator.plan.research.tests":{"inputs":["spec_path","working_dir","summary_path","output_path","validation_path"],"optional_inputs":[],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "orchestrator.plan.research.risks":{"inputs":["spec_path","working_dir","summary_path","output_path","validation_path"],"optional_inputs":[],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "orchestrator.plan.research.security":{"inputs":["spec_path","working_dir","summary_path","output_path","validation_path","risk_signals"],"optional_inputs":[],"allowed_workflows":["solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "orchestrator.plan.write":{"inputs":["spec_path","tier","working_dir","summary_path","planning_paths","validation_path"],"optional_inputs":["verification_feedback_path","revision_brief_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "orchestrator.plan.review":{"inputs":["plan_path","spec_path","tier","working_dir"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"run","risk_argument":null}
 }
 ```
 <!-- END child-callsite-contracts-v1 -->
