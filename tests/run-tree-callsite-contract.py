@@ -87,26 +87,34 @@ def _token_is_executable(line: str, offset: int) -> bool:
     single = False
     double = False
     escaped = False
-    double_start = -1
+    substitutions: list[int] = []
     for index, char in enumerate(line[:offset]):
         if escaped:
             escaped = False
             continue
         if char == "\\" and not single:
             escaped = True
-        elif char == "'" and not double:
+            continue
+        if char == "'" and not double:
             single = not single
-        elif char == '"' and not single:
+            continue
+        if char == '"' and not single:
             double = not double
-            double_start = index if double else -1
+            continue
+        if single:
+            continue
+        if char == "#" and (index == 0 or line[index - 1].isspace() or line[index - 1] in ";|&()"):
+            return False
+        if char == "$" and index + 1 < offset and line[index + 1] == "(":
+            substitutions.append(index + 2)
+            continue
+        if char == ")" and substitutions:
+            substitutions.pop()
     if single:
         return False
-    if double:
-        quoted_prefix = line[double_start + 1 : offset]
-        if quoted_prefix.rfind("$(") <= quoted_prefix.rfind(")"):
-            return False
-        return True
-    prefix = line[:offset].rstrip()
+    if double and not substitutions:
+        return False
+    prefix = line[substitutions[-1] if substitutions else 0 : offset].rstrip()
     if not prefix:
         return True
     return re.search(r"(?:\$\(|[;|&()]|\bif|\bthen|\bdo|\belse)\s*$", prefix) is not None

@@ -76,6 +76,16 @@ quoted_runtime_dispatch=brain.replace(
     "printf '%s\\n' 'uberdev_dispatch_child \\\"$edge\\\" \\\"$handoff\\\" \\\"$result\\\" \\\"$status\\\"' >/dev/null",1)
 assert quoted_runtime_dispatch != brain
 rejected({brain_rel:quoted_runtime_dispatch},"routed chain missing uberdev_dispatch_child")
+inline_comment_dispatch=brain.replace(
+    'uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null',
+    ': # then uberdev_dispatch_child "$edge" "$handoff" "$result" "$status"',1)
+assert inline_comment_dispatch != brain
+rejected({brain_rel:inline_comment_dispatch},"routed chain missing uberdev_dispatch_child")
+nested_data_dispatch=brain.replace(
+    'uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null',
+    'printf \'%s\' "$(printf uberdev_dispatch_child)"',1)
+assert nested_data_dispatch != brain
+rejected({brain_rel:nested_data_dispatch},"routed chain missing uberdev_dispatch_child")
 
 def drift_question_type(value):
     value["edges"]["brainstorm.research.codebase"]["required_inputs"]["question"]="boolean"
