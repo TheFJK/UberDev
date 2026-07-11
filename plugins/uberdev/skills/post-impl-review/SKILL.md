@@ -57,8 +57,9 @@ with the configured value. v2 issue can extend.
 
 ```bash
 # Pre-flight: read advisory timeout
-if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
-  . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+POST_REVIEW_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}"
+if [ -r "$POST_REVIEW_PLUGIN_ROOT/lib/config-read.sh" ]; then
+  . "$POST_REVIEW_PLUGIN_ROOT/lib/config-read.sh"
   REVIEW_PR_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.review_pr UBERDEV_REVIEW_PR_TIMEOUT 60 86400 900)"
   # Record the advisory value to the run audit (no kill).
   if [ -d ".uberdev" ]; then
@@ -98,28 +99,82 @@ The brief is identical for all 6 reviewers — each agent's own system prompt na
 
 Source `${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}/lib/child-dispatch.sh`. The caller propagates the immutable carrier through the context-only lineage edge `review_pr.post_impl_review`; this skill never resolves a model. Resolve the six provider edges from policy, create unique iteration/attempt instances with `uberdev_create_child_handoff`, and issue every dispatch before waiting:
 
-```bash uberdev-executable
+```bash uberdev-executable setup=post-impl-review
+set -u
+UBERDEV_REVIEW_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}"
+. "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh"
+WORKTREE_ROOT="${WORKTREE_ROOT:-$(git rev-parse --show-toplevel)}"
+RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)}"
+REVIEW_ITERATION="${REVIEW_ITERATION:-1}"
+REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"
+RESEARCH_DIR_ABS="${RESEARCH_DIR_ABS:-$WORKTREE_ROOT/.uberdev/research/$RUN_ID}"
+mkdir -p "$RESEARCH_DIR_ABS"
+DIFF_ARTIFACT_PATH="${DIFF_ARTIFACT_PATH:-$RESEARCH_DIR_ABS/pr-diff.md}"
+CRITERIA_PATH="${CRITERIA_PATH:-$RESEARCH_DIR_ABS/review-criteria.md}"
+CHANGED_PATHS_JSON="${CHANGED_PATHS_JSON:-[]}"
+EMPHASIS_JSON="${EMPHASIS_JSON:-[]}"
+[ -f "$CRITERIA_PATH" ] || : >"$CRITERIA_PATH"
+if [ ! -f "$DIFF_ARTIFACT_PATH" ]; then printf '%s\n%s\n' '<external-untrusted-input source="pr-diff">' '</external-untrusted-input>' >"$DIFF_ARTIFACT_PATH"; fi
+
+post_review_record() {
+  python3 -I -B - "$1" "$2" "$3" "$4" "$5" <<'PY'
+import json,sys
+edge,instance,inputs,risks,path=sys.argv[1:]
+with open(path,'a') as f:f.write(json.dumps({'edge':edge,'instance':instance,'inputs':json.loads(inputs),'risks':json.loads(risks)},sort_keys=True,separators=(',',':'))+'\n')
+PY
+}
+post_review_fanout() {
+  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff result status receipt
+  local handoffs=()
+  : >"$descriptors"; : >"$launched"
+  while IFS= read -r row; do
+    edge="$(jq -r .edge <<<"$row")"; instance="$(jq -r .instance <<<"$row")"
+    inputs="$(jq -c .inputs <<<"$row")"; risks="$(jq -c .risks <<<"$row")"
+    uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks" >/dev/null || return $?
+    jq -cn --arg edge "$edge" --arg handoff "$UBERDEV_CHILD_HANDOFF" --arg result "$UBERDEV_CHILD_RESULT" --arg status "$UBERDEV_CHILD_STATUS" \
+      '{edge:$edge,handoff:$handoff,result:$result,status:$status}' >>"$descriptors"
+    handoffs+=("$UBERDEV_CHILD_HANDOFF")
+  done <"$records"
+  uberdev_preflight_child_batch "${handoffs[@]}" || return $?
+  while IFS= read -r row; do
+    edge="$(jq -r .edge <<<"$row")"; handoff="$(jq -r .handoff <<<"$row")"
+    result="$(jq -r .result <<<"$row")"; status="$(jq -r .status <<<"$row")"
+    if ! receipt="$(uberdev_dispatch_child "$edge" "$handoff" "$result" "$status")"; then
+      while IFS= read -r row; do uberdev_unwind_child "$(jq -r .status <<<"$row")" "$(jq -r .result <<<"$row")" "$timeout_s" || true; done <"$launched"
+      return 1
+    fi
+    jq -cn --arg edge "$edge" --arg receipt "$receipt" --arg result "$result" --arg status "$status" \
+      '{edge:$edge,receipt:$receipt,result:$result,status:$status}' >>"$launched"
+  done <"$descriptors"
+}
+post_review_wait_all() {
+  local launched="$1" timeout_s="$2" row rc=0
+  while IFS= read -r row; do uberdev_wait_child "$(jq -r .status <<<"$row")" "$(jq -r .result <<<"$row")" "$timeout_s" || rc=1; done <"$launched"
+  return "$rc"
+}
+
 REVIEW_EDGES=(
   review_pr.review.correctness review_pr.review.silent_failures
   review_pr.review.types review_pr.review.comments
   review_pr.review.tests review_pr.review.general
 )
-REVIEW_DESCRIPTORS="$RESEARCH_DIR_ABS/post-review.descriptors"; : >"$REVIEW_DESCRIPTORS"
+REVIEW_RECORDS="$RESEARCH_DIR_ABS/post-review.records"
+REVIEW_DESCRIPTORS="$RESEARCH_DIR_ABS/post-review.descriptors"
+REVIEW_LAUNCHED="$RESEARCH_DIR_ABS/post-review.launched"
+: >"$REVIEW_RECORDS"
 REVIEW_INDEX=0
 for EDGE_ID in "${REVIEW_EDGES[@]}"; do
   REVIEW_INDEX=$((REVIEW_INDEX + 1))
-  INSTANCE="post-review-r${REVIEW_INDEX}-iter${REVIEW_ITERATION:-01}-attempt01"
-  INPUTS_JSON="$(jq -cn --arg brief_path "$REVIEW_BRIEF_PATH" --arg lens_index "$REVIEW_INDEX" '{brief_path:$brief_path,lens_index:($lens_index|tonumber)}')"
-  uberdev_create_child_handoff "$EDGE_ID" "$INSTANCE" "$INPUTS_JSON" '[]'
-  if ! RECEIPT="$(uberdev_dispatch_child "$EDGE_ID" "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS")"; then
-    while IFS="$(printf '\t')" read -r _ _ result status; do uberdev_wait_child "$status" "$result" 0 >/dev/null 2>&1 || true; done <"$REVIEW_DESCRIPTORS"
-    return 1
+  INSTANCE="post-review-r${REVIEW_INDEX}-iter${REVIEW_ITERATION}-attempt01"
+  if [ "$EDGE_ID" = review_pr.review.general ]; then
+    INPUTS_JSON="$(jq -cn --argjson changed_paths "$CHANGED_PATHS_JSON" --arg diff_path "$DIFF_ARTIFACT_PATH" --arg criteria_path "$CRITERIA_PATH" --argjson emphasis "$EMPHASIS_JSON" --arg lens general '{changed_paths:$changed_paths,diff_path:$diff_path,criteria_path:$criteria_path,emphasis:$emphasis,lens:$lens}')"
+  else
+    INPUTS_JSON="$(jq -cn --argjson changed_paths "$CHANGED_PATHS_JSON" --arg diff_path "$DIFF_ARTIFACT_PATH" --arg criteria_path "$CRITERIA_PATH" --argjson emphasis "$EMPHASIS_JSON" '{changed_paths:$changed_paths,diff_path:$diff_path,criteria_path:$criteria_path,emphasis:$emphasis}')"
   fi
-  printf '%s\t%s\t%s\t%s\n' "$EDGE_ID" "$RECEIPT" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" >>"$REVIEW_DESCRIPTORS"
+  post_review_record "$EDGE_ID" "$INSTANCE" "$INPUTS_JSON" '[]' "$REVIEW_RECORDS"
 done
-while IFS="$(printf '\t')" read -r EDGE_ID RECEIPT RESULT STATUS; do
-  uberdev_wait_child "$STATUS" "$RESULT" "$REVIEW_PR_TIMEOUT" || REVIEW_WAVE_BLOCKED=1
-done <"$REVIEW_DESCRIPTORS"
+post_review_fanout "$REVIEW_RECORDS" "$REVIEW_DESCRIPTORS" "$REVIEW_LAUNCHED" "$REVIEW_PR_TIMEOUT"
+post_review_wait_all "$REVIEW_LAUNCHED" "$REVIEW_PR_TIMEOUT" || REVIEW_WAVE_BLOCKED=1
 ```
 
 The handoff carries paths and bounded scalar metadata only; never inline the
@@ -151,8 +206,8 @@ precedence env > config > default.
 
 ```bash
 # Step 2 fanout cap
-if [ -r "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh" ]; then
-  . "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+if [ -r "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh" ]; then
+  . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh"
   POST_IMPL_REVIEW_CAP="$(uberdev_read_int_in_range fanout_concurrency.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 6)"
 else
   POST_IMPL_REVIEW_CAP=6
@@ -178,11 +233,17 @@ Wait until all 6 routed calls have returned. Parse each YAML block.
 Failure handling is fail-closed. A BLOCKED or unparseable reviewer gets exactly one format-repair retry using the same stable edge and a fresh `attempt02` instance whose inputs add `format_repair: true`. If the repaired return is still BLOCKED or unparseable, the aggregate verdict is BLOCKED and `/review-pr` cannot emit a green trust signal. Never drop a reviewer and continue with N-1 evidence.
 
 ```bash uberdev-executable
-REPAIR_INPUTS="$(jq -cn --arg brief_path "$REVIEW_BRIEF_PATH" --argjson lens_index "$FAILED_REVIEW_INDEX" '{brief_path:$brief_path,lens_index:$lens_index,format_repair:true}')"
-REPAIR_INSTANCE="post-review-r${FAILED_REVIEW_INDEX}-iter${REVIEW_ITERATION:-01}-attempt02"
-uberdev_create_child_handoff "$FAILED_REVIEW_EDGE" "$REPAIR_INSTANCE" "$REPAIR_INPUTS" '[]'
-REPAIR_RECEIPT="$(uberdev_dispatch_child "$FAILED_REVIEW_EDGE" "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS")"
-uberdev_wait_child "$UBERDEV_CHILD_STATUS" "$UBERDEV_CHILD_RESULT" "$REVIEW_PR_TIMEOUT"
+if [ "$FAILED_REVIEW_EDGE" = review_pr.review.general ]; then
+  REPAIR_INPUTS="$(jq -cn --argjson changed_paths "$CHANGED_PATHS_JSON" --arg diff_path "$DIFF_ARTIFACT_PATH" --arg criteria_path "$CRITERIA_PATH" --argjson emphasis "$EMPHASIS_JSON" --arg lens general '{changed_paths:$changed_paths,diff_path:$diff_path,criteria_path:$criteria_path,emphasis:$emphasis,lens:$lens,format_repair:true}')"
+else
+  REPAIR_INPUTS="$(jq -cn --argjson changed_paths "$CHANGED_PATHS_JSON" --arg diff_path "$DIFF_ARTIFACT_PATH" --arg criteria_path "$CRITERIA_PATH" --argjson emphasis "$EMPHASIS_JSON" '{changed_paths:$changed_paths,diff_path:$diff_path,criteria_path:$criteria_path,emphasis:$emphasis,format_repair:true}')"
+fi
+REPAIR_INSTANCE="post-review-r${FAILED_REVIEW_INDEX}-iter${REVIEW_ITERATION}-attempt02"
+REPAIR_PREFIX="$RESEARCH_DIR_ABS/post-review-repair-r${FAILED_REVIEW_INDEX}"
+: >"$REPAIR_PREFIX.records"
+post_review_record "$FAILED_REVIEW_EDGE" "$REPAIR_INSTANCE" "$REPAIR_INPUTS" '[]' "$REPAIR_PREFIX.records"
+post_review_fanout "$REPAIR_PREFIX.records" "$REPAIR_PREFIX.descriptors" "$REPAIR_PREFIX.launched" "$REVIEW_PR_TIMEOUT"
+post_review_wait_all "$REPAIR_PREFIX.launched" "$REVIEW_PR_TIMEOUT" || REVIEW_WAVE_BLOCKED=1
 ```
 
 ### Step 4: Aggregate
