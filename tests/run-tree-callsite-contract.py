@@ -28,6 +28,19 @@ EDGE = re.compile(r"[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)+")
 ROW_KEYS = {"inputs", "optional_inputs", "allowed_workflows", "risk_scope", "risk_argument"}
 WORKFLOWS = {"review-pr", "simplify", "solve", "turbo"}
 FORMAT_INPUTS = {"format_example_path", "format_retry"}
+TYPE_MAP_KEYS = {"required_input_types", "optional_input_types"}
+INPUT_TYPES = {
+    "boolean",
+    "directory",
+    "integer",
+    "optional_path",
+    "optional_path_array",
+    "optional_string",
+    "path",
+    "path_array",
+    "string",
+    "string_array",
+}
 
 
 class ContractFailure(Exception):
@@ -69,9 +82,59 @@ def _executable_bash(text: str) -> str:
     return "\n".join(body for _info, body in BASH_FENCE.findall(text))
 
 
+def _token_is_executable(line: str, offset: int) -> bool:
+    """Recognize a command-position token without parsing shell grammar."""
+    single = False
+    double = False
+    escaped = False
+    double_start = -1
+    for index, char in enumerate(line[:offset]):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and not single:
+            escaped = True
+        elif char == "'" and not double:
+            single = not single
+        elif char == '"' and not single:
+            double = not double
+            double_start = index if double else -1
+    if single:
+        return False
+    if double:
+        quoted_prefix = line[double_start + 1 : offset]
+        if quoted_prefix.rfind("$(") <= quoted_prefix.rfind(")"):
+            return False
+        return True
+    prefix = line[:offset].rstrip()
+    if not prefix:
+        return True
+    return re.search(r"(?:\$\(|[;|&()]|\bif|\bthen|\bdo|\belse)\s*$", prefix) is not None
+
+
+def _has_executable_helper(text: str, helper: str) -> bool:
+    token = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(helper)}(?![A-Za-z0-9_])")
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            continue
+        for match in token.finditer(line):
+            if _token_is_executable(line, match.start()):
+                return True
+    return False
+
+
 def _command(text: str, helper: str, argument: str) -> bool:
-    pattern = rf"^[ \t]*(?!#)[^#\n]*\b{re.escape(helper)}[ \t]+{re.escape(argument)}(?:[ \t\\\n]|$)"
-    return re.search(pattern, text, re.MULTILINE) is not None
+    pattern = re.compile(
+        rf"(?<![A-Za-z0-9_]){re.escape(helper)}[ \t]+{re.escape(argument)}(?:[ \t\\]|$)"
+    )
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        for match in pattern.finditer(line):
+            if _token_is_executable(line, match.start()):
+                return True
+    return False
 
 
 def _function_body(text: str, name: str) -> str:
@@ -97,9 +160,9 @@ def _require_dispatch_chain(relative: str, bash: str) -> None:
     for function in functions:
         if re.search(rf"^[ \t]*{re.escape(function)}\(\)[ \t]*\{{", bash, re.MULTILINE) is None:
             fail(f"{relative}: routed chain missing {function}")
-    if "uberdev_create_child_handoff" not in bash:
+    if not _has_executable_helper(bash, "uberdev_create_child_handoff"):
         fail(f"{relative}: routed chain missing uberdev_create_child_handoff")
-    if "uberdev_dispatch_child" not in bash:
+    if not _has_executable_helper(bash, "uberdev_dispatch_child"):
         fail(f"{relative}: routed chain missing uberdev_dispatch_child")
 
 
@@ -275,6 +338,35 @@ def emitted_fixture(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {"schema_version": 1, "contracts": rows, "pending_edges": []}
 
 
+def _typed_fixture(rows: list[dict[str, Any]], fixture_path: Path) -> list[dict[str, Any]]:
+    try:
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    except Exception as error:
+        fail(f"invalid fixture: {error}")
+    if not isinstance(fixture, dict) or fixture.get("schema_version") != 1 or fixture.get("pending_edges") != []:
+        fail("invalid fixture envelope")
+    contracts = fixture.get("contracts")
+    if not isinstance(contracts, list) or len(contracts) != 40:
+        fail("invalid fixture contracts")
+    source_rows: list[dict[str, Any]] = []
+    for item in contracts:
+        if not isinstance(item, dict) or not TYPE_MAP_KEYS <= set(item):
+            fail("fixture contract missing input type maps")
+        base = {key: value for key, value in item.items() if key not in TYPE_MAP_KEYS}
+        required_types = item["required_input_types"]
+        optional_types = item["optional_input_types"]
+        if not isinstance(required_types, dict) or set(required_types) != set(base.get("required_inputs", [])):
+            fail(f"fixture required input types mismatch: {base.get('edge_id')}")
+        if not isinstance(optional_types, dict) or set(optional_types) != set(base.get("optional_inputs", [])):
+            fail(f"fixture optional input types mismatch: {base.get('edge_id')}")
+        if any(value not in INPUT_TYPES for value in (*required_types.values(), *optional_types.values())):
+            fail(f"fixture unsupported input type: {base.get('edge_id')}")
+        source_rows.append(base)
+    if emitted_fixture(source_rows) != emitted_fixture(rows):
+        fail("fixture differs from source-derived contracts")
+    return contracts
+
+
 def _validate_runtime_helpers(root: Path) -> None:
     runtime = (root / "plugins/uberdev/lib/child-dispatch.sh").read_text(encoding="utf-8")
     for helper, action in (
@@ -283,20 +375,14 @@ def _validate_runtime_helpers(root: Path) -> None:
         ("uberdev_child_inputs_format_retry", "format-retry"),
     ):
         body = _function_body(runtime, helper)
-        if f"_uberdev_child_inputs_run {action}" not in body:
+        if not _command(body, "_uberdev_child_inputs_run", action):
             fail(f"production helper is not reachable: {helper}")
 
 
 def validate(root: Path, tree_path: Path, fixture_path: Path, overrides: dict[str, str] | None = None) -> list[dict[str, Any]]:
     _validate_runtime_helpers(root)
     rows = collect_sources(root, overrides)
-    expected = emitted_fixture(rows)
-    try:
-        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
-    except Exception as error:
-        fail(f"invalid fixture: {error}")
-    if fixture != expected:
-        fail("fixture differs from source-derived contracts")
+    typed_rows = _typed_fixture(rows, fixture_path)
     try:
         tree = json.loads(tree_path.read_text(encoding="utf-8"))
     except Exception as error:
@@ -305,6 +391,7 @@ def validate(root: Path, tree_path: Path, fixture_path: Path, overrides: dict[st
     source_edges = {row["edge_id"] for row in rows}
     if source_edges != set(providers):
         fail(f"source/manifest edge mismatch missing={sorted(set(providers)-source_edges)} extra={sorted(source_edges-set(providers))}")
+    typed_by_edge = {item["edge_id"]: item for item in typed_rows}
     for item in rows:
         edge = item["edge_id"]
         manifest = providers[edge]
@@ -319,13 +406,16 @@ def validate(root: Path, tree_path: Path, fixture_path: Path, overrides: dict[st
         }
         if item != manifest_contract:
             fail(f"source/manifest contract mismatch: {edge}")
+        typed = typed_by_edge[edge]
+        if typed["required_input_types"] != manifest.get("required_inputs") or typed["optional_input_types"] != manifest.get("optional_inputs"):
+            fail(f"manifest input type mismatch: {edge}")
         has_retry = FORMAT_INPUTS <= set(item["optional_inputs"])
         retry = manifest.get("retry")
         if has_retry != (isinstance(retry, dict) and retry.get("format") == 1):
             fail(f"source/manifest format retry mismatch: {edge}")
         if has_retry and (manifest["optional_inputs"].get("format_retry") != "boolean" or manifest["optional_inputs"].get("format_example_path") != "path"):
             fail(f"source/manifest format retry schema mismatch: {edge}")
-    return rows
+    return typed_rows
 
 
 def main() -> int:
@@ -336,7 +426,8 @@ def main() -> int:
     parser.add_argument("--fixture", required=True, type=Path)
     args = parser.parse_args()
     if args.action == "emit":
-        print(json.dumps(emitted_fixture(collect_sources(args.root)), indent=2))
+        rows = collect_sources(args.root)
+        print(json.dumps(emitted_fixture(_typed_fixture(rows, args.fixture)), indent=2))
         return 0
     rows = validate(args.root, args.tree, args.fixture)
     print(f"run-tree-callsite-contract: {len(rows)} closed, 0 pending")

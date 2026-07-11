@@ -9,10 +9,19 @@
         "summary_path",
         "working_dir"
       ],
+      "required_input_types": {
+        "question": "string",
+        "summary_path": "path",
+        "working_dir": "directory"
+      },
       "optional_inputs": [
         "format_example_path",
         "format_retry"
       ],
+      "optional_input_types": {
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -28,10 +37,19 @@
         "summary_path",
         "working_dir"
       ],
+      "required_input_types": {
+        "question": "string",
+        "summary_path": "path",
+        "working_dir": "directory"
+      },
       "optional_inputs": [
         "format_example_path",
         "format_retry"
       ],
+      "optional_input_types": {
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -47,10 +65,19 @@
         "summary_path",
         "working_dir"
       ],
+      "required_input_types": {
+        "question": "string",
+        "summary_path": "path",
+        "working_dir": "directory"
+      },
       "optional_inputs": [
         "format_example_path",
         "format_retry"
       ],
+      "optional_input_types": {
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -68,7 +95,15 @@
         "validation_path",
         "working_dir"
       ],
+      "required_input_types": {
+        "output_path": "path",
+        "spec_path": "path",
+        "summary_path": "path",
+        "validation_path": "path",
+        "working_dir": "directory"
+      },
       "optional_inputs": [],
+      "optional_input_types": {},
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -86,7 +121,15 @@
         "validation_path",
         "working_dir"
       ],
+      "required_input_types": {
+        "output_path": "path",
+        "spec_path": "path",
+        "summary_path": "path",
+        "validation_path": "path",
+        "working_dir": "directory"
+      },
       "optional_inputs": [],
+      "optional_input_types": {},
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -105,7 +148,16 @@
         "validation_path",
         "working_dir"
       ],
+      "required_input_types": {
+        "output_path": "path",
+        "risk_signals": "string_array",
+        "spec_path": "path",
+        "summary_path": "path",
+        "validation_path": "path",
+        "working_dir": "directory"
+      },
       "optional_inputs": [],
+      "optional_input_types": {},
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -123,7 +175,15 @@
         "validation_path",
         "working_dir"
       ],
+      "required_input_types": {
+        "output_path": "path",
+        "spec_path": "path",
+        "summary_path": "path",
+        "validation_path": "path",
+        "working_dir": "directory"
+      },
       "optional_inputs": [],
+      "optional_input_types": {},
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -140,10 +200,20 @@
         "tier",
         "working_dir"
       ],
+      "required_input_types": {
+        "plan_path": "path",
+        "spec_path": "path",
+        "tier": "string",
+        "working_dir": "directory"
+      },
       "optional_inputs": [
         "format_example_path",
         "format_retry"
       ],
+      "optional_input_types": {
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -162,10 +232,22 @@
         "validation_path",
         "working_dir"
       ],
+      "required_input_types": {
+        "planning_paths": "path_array",
+        "spec_path": "path",
+        "summary_path": "path",
+        "tier": "string",
+        "validation_path": "path",
+        "working_dir": "directory"
+      },
       "optional_inputs": [
         "revision_brief_path",
         "verification_feedback_path"
       ],
+      "optional_input_types": {
+        "revision_brief_path": "path",
+        "verification_feedback_path": "path"
+      },
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -181,10 +263,19 @@
         "summary_path",
         "working_dir"
       ],
+      "required_input_types": {
+        "issue_path": "path",
+        "summary_path": "path",
+        "working_dir": "directory"
+      },
       "optional_inputs": [
         "format_example_path",
         "format_retry"
       ],
+      "optional_input_types": {
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -200,10 +291,19 @@
         "summary_path",
         "working_dir"
       ],
+      "required_input_types": {
+        "issue_path": "path",
+        "summary_path": "path",
+        "working_dir": "directory"
+      },
       "optional_inputs": [
         "format_example_path",
         "format_retry"
       ],
+      "optional_input_types": {
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -220,10 +320,20 @@
         "summary_path",
         "working_dir"
       ],
+      "required_input_types": {
+        "answer": "string",
+        "question": "string",
+        "summary_path": "path",
+        "working_dir": "directory"
+      },
       "optional_inputs": [
         "format_example_path",
         "format_retry"
       ],
+      "optional_input_types": {
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -239,10 +349,19 @@
         "summary_path",
         "working_dir"
       ],
+      "required_input_types": {
+        "issue_path": "path",
+        "summary_path": "path",
+        "working_dir": "directory"
+      },
       "optional_inputs": [
         "format_example_path",
         "format_retry"
       ],
+      "optional_input_types": {
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -258,10 +377,19 @@
         "summary_path",
         "working_dir"
       ],
+      "required_input_types": {
+        "issue_path": "path",
+        "summary_path": "path",
+        "working_dir": "directory"
+      },
       "optional_inputs": [
         "format_example_path",
         "format_retry"
       ],
+      "optional_input_types": {
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -277,10 +405,19 @@
         "summary_path",
         "working_dir"
       ],
+      "required_input_types": {
+        "issue_path": "path",
+        "summary_path": "path",
+        "working_dir": "directory"
+      },
       "optional_inputs": [
         "format_example_path",
         "format_retry"
       ],
+      "optional_input_types": {
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -296,10 +433,19 @@
         "summary_path",
         "working_dir"
       ],
+      "required_input_types": {
+        "issue_path": "path",
+        "summary_path": "path",
+        "working_dir": "directory"
+      },
       "optional_inputs": [
         "format_example_path",
         "format_retry"
       ],
+      "optional_input_types": {
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -316,10 +462,20 @@
         "spec_path",
         "working_dir"
       ],
+      "required_input_types": {
+        "issue_path": "path",
+        "research_paths": "path_array",
+        "spec_path": "path",
+        "working_dir": "directory"
+      },
       "optional_inputs": [
         "format_example_path",
         "format_retry"
       ],
+      "optional_input_types": {
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -335,10 +491,19 @@
         "spec_path",
         "working_dir"
       ],
+      "required_input_types": {
+        "revision_path": "path",
+        "spec_path": "path",
+        "working_dir": "directory"
+      },
       "optional_inputs": [
         "format_example_path",
         "format_retry"
       ],
+      "optional_input_types": {
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -356,9 +521,19 @@
         "summary_path",
         "working_dir"
       ],
+      "required_input_types": {
+        "issue_path": "path",
+        "questions_path": "path",
+        "research_paths": "path_array",
+        "summary_path": "path",
+        "working_dir": "directory"
+      },
       "optional_inputs": [
         "verification_feedback_path"
       ],
+      "optional_input_types": {
+        "verification_feedback_path": "path"
+      },
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -374,7 +549,13 @@
         "pr_number",
         "run_id"
       ],
+      "required_input_types": {
+        "log_path": "path",
+        "pr_number": "integer",
+        "run_id": "string"
+      },
       "optional_inputs": [],
+      "optional_input_types": {},
       "allowed_workflows": [
         "review-pr",
         "solve",
@@ -391,7 +572,13 @@
         "pr_number",
         "working_dir"
       ],
+      "required_input_types": {
+        "phase1_path": "path",
+        "pr_number": "integer",
+        "working_dir": "directory"
+      },
       "optional_inputs": [],
+      "optional_input_types": {},
       "allowed_workflows": [
         "review-pr",
         "solve",
@@ -409,7 +596,14 @@
         "pr_number",
         "working_dir"
       ],
+      "required_input_types": {
+        "classification_path": "path",
+        "log_path": "path",
+        "pr_number": "integer",
+        "working_dir": "directory"
+      },
       "optional_inputs": [],
+      "optional_input_types": {},
       "allowed_workflows": [
         "review-pr",
         "solve",
@@ -427,7 +621,14 @@
         "pr_number",
         "working_dir"
       ],
+      "required_input_types": {
+        "base_sha": "string",
+        "head_sha": "string",
+        "pr_number": "integer",
+        "working_dir": "directory"
+      },
       "optional_inputs": [],
+      "optional_input_types": {},
       "allowed_workflows": [
         "review-pr",
         "solve",
@@ -446,7 +647,15 @@
         "pr_branch",
         "working_dir"
       ],
+      "required_input_types": {
+        "base_sha": "string",
+        "file_path": "path",
+        "integration_branch": "string",
+        "pr_branch": "string",
+        "working_dir": "directory"
+      },
       "optional_inputs": [],
+      "optional_input_types": {},
       "allowed_workflows": [
         "review-pr",
         "solve",
@@ -466,7 +675,16 @@
         "pr_number",
         "working_dir"
       ],
+      "required_input_types": {
+        "phase1_disposition_path": "optional_path",
+        "phase1_path": "optional_path",
+        "phase2_disposition_path": "optional_path",
+        "phase2_path": "optional_path",
+        "pr_number": "integer",
+        "working_dir": "directory"
+      },
       "optional_inputs": [],
+      "optional_input_types": {},
       "allowed_workflows": [
         "review-pr",
         "simplify",
@@ -486,7 +704,15 @@
         "pr_number",
         "working_dir"
       ],
+      "required_input_types": {
+        "commit_range_path": "path",
+        "disposition_path": "path",
+        "findings_path": "path",
+        "pr_number": "integer",
+        "working_dir": "directory"
+      },
       "optional_inputs": [],
+      "optional_input_types": {},
       "allowed_workflows": [
         "review-pr",
         "solve",
@@ -505,7 +731,15 @@
         "pr_number",
         "working_dir"
       ],
+      "required_input_types": {
+        "commit_range_path": "path",
+        "disposition_path": "path",
+        "findings_path": "path",
+        "pr_number": "integer",
+        "working_dir": "directory"
+      },
       "optional_inputs": [],
+      "optional_input_types": {},
       "allowed_workflows": [
         "review-pr",
         "simplify",
@@ -524,10 +758,20 @@
         "diff_path",
         "emphasis"
       ],
+      "required_input_types": {
+        "changed_paths": "path_array",
+        "criteria_path": "path",
+        "diff_path": "path",
+        "emphasis": "string_array"
+      },
       "optional_inputs": [
         "format_example_path",
         "format_retry"
       ],
+      "optional_input_types": {
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
       "allowed_workflows": [
         "review-pr",
         "solve",
@@ -545,10 +789,20 @@
         "diff_path",
         "emphasis"
       ],
+      "required_input_types": {
+        "changed_paths": "path_array",
+        "criteria_path": "path",
+        "diff_path": "path",
+        "emphasis": "string_array"
+      },
       "optional_inputs": [
         "format_example_path",
         "format_retry"
       ],
+      "optional_input_types": {
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
       "allowed_workflows": [
         "review-pr",
         "solve",
@@ -567,10 +821,21 @@
         "emphasis",
         "lens"
       ],
+      "required_input_types": {
+        "changed_paths": "path_array",
+        "criteria_path": "path",
+        "diff_path": "path",
+        "emphasis": "string_array",
+        "lens": "string"
+      },
       "optional_inputs": [
         "format_example_path",
         "format_retry"
       ],
+      "optional_input_types": {
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
       "allowed_workflows": [
         "review-pr",
         "solve",
@@ -588,10 +853,20 @@
         "diff_path",
         "emphasis"
       ],
+      "required_input_types": {
+        "changed_paths": "path_array",
+        "criteria_path": "path",
+        "diff_path": "path",
+        "emphasis": "string_array"
+      },
       "optional_inputs": [
         "format_example_path",
         "format_retry"
       ],
+      "optional_input_types": {
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
       "allowed_workflows": [
         "review-pr",
         "solve",
@@ -609,10 +884,20 @@
         "diff_path",
         "emphasis"
       ],
+      "required_input_types": {
+        "changed_paths": "path_array",
+        "criteria_path": "path",
+        "diff_path": "path",
+        "emphasis": "string_array"
+      },
       "optional_inputs": [
         "format_example_path",
         "format_retry"
       ],
+      "optional_input_types": {
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
       "allowed_workflows": [
         "review-pr",
         "solve",
@@ -630,10 +915,20 @@
         "diff_path",
         "emphasis"
       ],
+      "required_input_types": {
+        "changed_paths": "path_array",
+        "criteria_path": "path",
+        "diff_path": "path",
+        "emphasis": "string_array"
+      },
       "optional_inputs": [
         "format_example_path",
         "format_retry"
       ],
+      "optional_input_types": {
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
       "allowed_workflows": [
         "review-pr",
         "solve",
@@ -649,9 +944,16 @@
         "diff_path",
         "lens"
       ],
+      "required_input_types": {
+        "diff_path": "path",
+        "lens": "string"
+      },
       "optional_inputs": [
         "focus"
       ],
+      "optional_input_types": {
+        "focus": "optional_string"
+      },
       "allowed_workflows": [
         "review-pr",
         "simplify",
@@ -668,9 +970,16 @@
         "diff_path",
         "lens"
       ],
+      "required_input_types": {
+        "diff_path": "path",
+        "lens": "string"
+      },
       "optional_inputs": [
         "focus"
       ],
+      "optional_input_types": {
+        "focus": "optional_string"
+      },
       "allowed_workflows": [
         "review-pr",
         "simplify",
@@ -687,9 +996,16 @@
         "diff_path",
         "lens"
       ],
+      "required_input_types": {
+        "diff_path": "path",
+        "lens": "string"
+      },
       "optional_inputs": [
         "focus"
       ],
+      "optional_input_types": {
+        "focus": "optional_string"
+      },
       "allowed_workflows": [
         "review-pr",
         "simplify",
@@ -709,7 +1025,15 @@
         "spec_path",
         "summary_path"
       ],
+      "required_input_types": {
+        "acceptance_path": "path",
+        "commit_range_path": "path",
+        "plan_path": "path",
+        "spec_path": "path",
+        "summary_path": "path"
+      },
       "optional_inputs": [],
+      "optional_input_types": {},
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -728,7 +1052,16 @@
         "task_path",
         "working_dir"
       ],
+      "required_input_types": {
+        "allowed_paths": "path_array",
+        "attempt": "integer",
+        "denied_paths": "path_array",
+        "failure_path": "optional_path",
+        "task_path": "path",
+        "working_dir": "directory"
+      },
       "optional_inputs": [],
+      "optional_input_types": {},
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -746,7 +1079,15 @@
         "plan_path",
         "report_path"
       ],
+      "required_input_types": {
+        "allowed_paths": "path_array",
+        "base_sha": "string",
+        "head_sha": "string",
+        "plan_path": "path",
+        "report_path": "path"
+      },
       "optional_inputs": [],
+      "optional_input_types": {},
       "allowed_workflows": [
         "solve",
         "turbo"
@@ -764,7 +1105,15 @@
         "report_path",
         "spec_path"
       ],
+      "required_input_types": {
+        "allowed_paths": "path_array",
+        "commit_sha": "string",
+        "plan_path": "path",
+        "report_path": "path",
+        "spec_path": "path"
+      },
       "optional_inputs": [],
+      "optional_input_types": {},
       "allowed_workflows": [
         "solve",
         "turbo"

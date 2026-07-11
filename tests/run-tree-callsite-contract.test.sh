@@ -16,7 +16,7 @@ PY
 # Mutation proofs: the checker must independently reject source deletion,
 # optional-input drift, and loss of explicit reachability for a dynamic edge.
 python3 -I -B - "$CHECKER" "$ROOT" "$TREE" "$CONTRACT" <<'PY'
-import importlib.util,re,sys
+import importlib.util,json,re,sys,tempfile
 from pathlib import Path
 
 checker_path,root_raw,tree_raw,fixture_raw=sys.argv[1:]
@@ -29,6 +29,18 @@ def rejected(overrides, needle):
     except module.ContractFailure as error:
         assert needle in str(error),(needle,str(error))
     else: raise AssertionError(f"mutation accepted: {needle}")
+
+def rejected_tree(mutate, needle):
+    value=json.loads(tree.read_text())
+    mutate(value)
+    with tempfile.NamedTemporaryFile("w",suffix=".json",delete=False) as stream:
+        json.dump(value,stream); mutated=Path(stream.name)
+    try:
+        try: module.validate(root,mutated,fixture)
+        except module.ContractFailure as error:
+            assert needle in str(error),(needle,str(error))
+        else: raise AssertionError(f"manifest mutation accepted: {needle}")
+    finally: mutated.unlink()
 
 brain_rel="plugins/uberdev/skills/brainstorm/SKILL.md"
 brain=(root/brain_rel).read_text()
@@ -44,6 +56,11 @@ swapped_builder_edge=brain.replace(
     'uberdev_child_inputs_build brainstorm.research.library',1)
 assert swapped_builder_edge != brain
 rejected({brain_rel:swapped_builder_edge},"builder edge mismatch")
+quoted_builder=brain.replace(
+    'uberdev_child_inputs_build brainstorm.research.codebase',
+    "printf '%s' 'uberdev_child_inputs_build brainstorm.research.codebase'",1)
+assert quoted_builder != brain
+rejected({brain_rel:quoted_builder},"builder edge mismatch")
 brain_without_retry_dispatch=brain.replace(
     'uberdev_brainstorm_dispatch "$failed_edge" "$format_retry_instance" "$failed_role" "$BRAINSTORM_FORMAT_INPUTS"',
     ': "$failed_edge" "$format_retry_instance" "$failed_role" "$BRAINSTORM_FORMAT_INPUTS"',1)
@@ -54,6 +71,15 @@ commented_dispatch=brain.replace(
     '# uberdev_brainstorm_dispatch brainstorm.research.codebase',1)
 assert commented_dispatch != brain
 rejected({brain_rel:commented_dispatch},"executable edge mismatch")
+quoted_runtime_dispatch=brain.replace(
+    'uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null',
+    "printf '%s\\n' 'uberdev_dispatch_child \\\"$edge\\\" \\\"$handoff\\\" \\\"$result\\\" \\\"$status\\\"' >/dev/null",1)
+assert quoted_runtime_dispatch != brain
+rejected({brain_rel:quoted_runtime_dispatch},"routed chain missing uberdev_dispatch_child")
+
+def drift_question_type(value):
+    value["edges"]["brainstorm.research.codebase"]["required_inputs"]["question"]="boolean"
+rejected_tree(drift_question_type,"manifest input type mismatch: brainstorm.research.codebase")
 
 orch_rel="plugins/uberdev/skills/orchestrator/SKILL.md"
 orch=(root/orch_rel).read_text()
