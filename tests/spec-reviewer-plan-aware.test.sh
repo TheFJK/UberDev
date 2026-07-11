@@ -88,8 +88,8 @@ assert_grep "$SUBAGENT_DRIVEN" \
   'uberdev_preflight_child_batch' \
   "SDD preflights the complete prepared batch before first dispatch"
 assert_grep "$SUBAGENT_DRIVEN" \
-  'SDD_DISPATCH_RECEIPTS' \
-  "SDD records every successful dispatch receipt"
+  'SDD_RECEIPT_INSTANCES' \
+  "SDD records successful dispatch receipt fields without delimiters"
 assert_grep "$SUBAGENT_DRIVEN" \
   'sdd_unwind_child_receipts' \
   "SDD unwinds all earlier receipts after a partial fanout failure"
@@ -113,7 +113,7 @@ match=re.search(r'<!-- BEGIN child-callsite-contracts-v1 -->\s*```json\s*(.*?)\s
 if not match: raise SystemExit("missing SDD callsite fixtures")
 for edge,row in json.loads(match.group(1)).items():
     declared=manifest["edges"][edge]
-    if row["inputs"] != declared["inputs"] or row["risk_scope"] != declared["risk_scope"]:
+    if row["inputs"] != list(declared["required_inputs"]) or row["risk_scope"] != declared["risk_scope"]:
         raise SystemExit(f"{edge}: manifest divergence")
     if row["risk_argument"] != "subtask": raise SystemExit(f"{edge}: risk argument")
 PY
@@ -145,16 +145,18 @@ script=f'''set -u
 calls=()
 uberdev_unwind_child() {{ calls+=("$1|$2|$3"); [ "${{#calls[@]}}" -ne 1 ]; }}
 SDD_CHILD_TIMEOUT=600
-SDD_DISPATCH_RECEIPTS=("one|/tmp/status-1|/tmp/result-1" "two|/tmp/status-2|/tmp/result-2")
-sdd_reset_batch() {{ SDD_DISPATCH_RECEIPTS=(); }}
+SDD_RECEIPT_INSTANCES=("one" "two")
+SDD_RECEIPT_STATUSES=("/tmp/status|1" "/tmp/status|2")
+SDD_RECEIPT_RESULTS=("/tmp/result|1" "/tmp/result|2")
+sdd_reset_batch() {{ SDD_RECEIPT_INSTANCES=(); SDD_RECEIPT_STATUSES=(); SDD_RECEIPT_RESULTS=(); }}
 {match.group(0)}
 rc=0
 sdd_unwind_child_receipts || rc=$?
 [ "$rc" -eq 1 ]
 [ "${{#calls[@]}}" -eq 2 ]
-[ "${{calls[0]}}" = "/tmp/status-1|/tmp/result-1|600" ]
-[ "${{calls[1]}}" = "/tmp/status-2|/tmp/result-2|600" ]
-[ "${{#SDD_DISPATCH_RECEIPTS[@]}}" -eq 0 ]
+[ "${{calls[0]}}" = "/tmp/status|1|/tmp/result|1|600" ]
+[ "${{calls[1]}}" = "/tmp/status|2|/tmp/result|2|600" ]
+[ "${{#SDD_RECEIPT_INSTANCES[@]}}" -eq 0 ]
 '''
 result=subprocess.run(["bash","-c",script],text=True,capture_output=True)
 if result.returncode: raise SystemExit(result.stderr)
