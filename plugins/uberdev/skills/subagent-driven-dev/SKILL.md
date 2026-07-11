@@ -42,6 +42,124 @@ This skill's wave-based controller-only-git approach is intentionally **not** wo
 
 ## When to Use
 
+## Routed child adapter (mandatory)
+
+All model execution in this skill goes through `lib/child-dispatch.sh`. Native
+model-tool and direct provider calls are not executable alternatives. Before
+the first wave, source the adapter and derive the immutable
+carrier from the root request exported by the solve/turbo launcher:
+
+```bash
+SDD_PLUGIN_ROOT="${UBERDEV_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}"
+. "$SDD_PLUGIN_ROOT/lib/child-dispatch.sh"
+SDD_ROOT_REQUEST_JSON="${UBERDEV_AGENT_PREPARED_REQUEST_JSON:?missing routed root request}"
+SDD_CARRIER_JSON="$(python3 -I -B -c '
+import json,sys
+r=json.loads(sys.argv[1])
+keys=("run_id","workflow","issue_num","context_file","context_sha256")
+if any(key not in r for key in keys): raise SystemExit(2)
+value={"schema_version":1,**{key:r[key] for key in keys}}
+print(json.dumps(value,sort_keys=True,separators=(",",":")),end="")
+' "$SDD_ROOT_REQUEST_JSON")" || return 2
+SDD_PARENT_RUN_ID="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["run_id"],end="")' "$SDD_CARRIER_JSON")"
+SDD_RUN_DIR="$(python3 -I -B -c 'import json,os,sys;print(os.path.dirname(os.path.dirname(json.loads(sys.argv[1])["context_file"])),end="")' "$SDD_CARRIER_JSON")"
+mkdir -p "$SDD_RUN_DIR/.sdd-handoffs"
+chmod 700 "$SDD_RUN_DIR/.sdd-handoffs"
+```
+
+For every child, serialize one closed handoff with `python3 -I -B` (JSON data,
+never shell interpolation), create it mode `0600`, and call:
+
+```bash
+uberdev_dispatch_child "$edge_id" "$handoff_file" \
+  "$SDD_RUN_DIR/children/$instance_id/result.md" \
+  "$SDD_RUN_DIR/children/$instance_id/status.json"
+```
+
+The handoff is schema v1 and contains exactly `carrier`, `edge_id`,
+`instance_id`, `parent_run_id`, `role`, `phase`, `risk_scope`, `risk_signals`,
+and `inputs`. Inputs contain context only—requirements, reports, commit
+identities, relative allowlists, and artifact paths. They never contain model,
+route, effort, service-tier, sandbox, environment, shell, or command fields.
+
+Instance IDs are allocation identities and are never reused:
+
+`sdd-w<WAVE>-t<TASK>-<STAGE>-a<ATTEMPT>`
+
+where stage is one of `implement`, `spec-review`, `spec-fix`, `quality-review`,
+`quality-fix`, or `test-review`. Wave, task, stage, and attempt are explicit
+dynamic dimensions. The four stable routing edges are:
+
+| Edge | Role | Gate |
+|---|---|---|
+| `sdd.task.implement` | `implementation-worker` | required |
+| `sdd.task.spec_review` | `spec-compliance-reviewer` | required |
+| `sdd.task.quality_review` | `code-reviewer` | required |
+| `sdd.premerge.test_review` | `pr-test-analyzer` | advisory; large tier only |
+
+Use this data-only writer for every edge (the controller constructs
+`inputs_json` from the corresponding prompt template):
+
+```bash
+sdd_write_handoff() {
+  local edge_id="$1" instance_id="$2" role="$3" phase="$4" inputs_json="$5" destination="$6"
+  python3 -I -B - "$SDD_CARRIER_JSON" "$SDD_PARENT_RUN_ID" "$edge_id" "$instance_id" "$role" "$phase" "$inputs_json" "$destination" "$SDD_ROOT_REQUEST_JSON" <<'PY'
+import json,os,sys
+carrier,parent,edge,instance,role,phase,inputs,destination,root_raw=sys.argv[1:]
+root=json.loads(root_raw); risks=root.get("root_decision",{}).get("risk_signals",root.get("risk_signals",[]))
+value={"schema_version":1,"carrier":json.loads(carrier),"edge_id":edge,"instance_id":instance,"parent_run_id":parent,"role":role,"phase":phase,"risk_scope":"subtask","risk_signals":risks,"inputs":json.loads(inputs)}
+raw=json.dumps(value,sort_keys=True,separators=(",",":")).encode()
+fd=os.open(destination,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+with os.fdopen(fd,"wb") as stream: stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+PY
+}
+
+sdd_dispatch_prepared() {
+  local stage_kind="$1" handoff="$2" result="$3" status="$4"
+  case "$stage_kind" in
+    implement|spec-fix|quality-fix)
+      uberdev_dispatch_child "sdd.task.implement" "$handoff" "$result" "$status"
+      ;;
+    spec-review)
+      uberdev_dispatch_child "sdd.task.spec_review" "$handoff" "$result" "$status"
+      ;;
+    quality-review)
+      uberdev_dispatch_child "sdd.task.quality_review" "$handoff" "$result" "$status"
+      ;;
+    test-review)
+      uberdev_dispatch_child "sdd.premerge.test_review" "$handoff" "$result" "$status"
+      ;;
+    *) return 2 ;;
+  esac
+}
+```
+
+Executable batch shape (substitute the edge/role/stage from the table):
+
+```bash
+# Dispatch the complete batch first.
+for task_id in $SDD_BATCH_TASK_IDS; do
+  instance_id="sdd-w${wave}-t${task_id}-${stage}-a${attempt}"
+  handoff_file="$SDD_RUN_DIR/.sdd-handoffs/$instance_id.json"
+  result_file="$SDD_RUN_DIR/children/$instance_id/result.md"
+  status_file="$SDD_RUN_DIR/children/$instance_id/status.json"
+  sdd_write_handoff "$edge_id" "$instance_id" "$role" "$phase" "$inputs_json" "$handoff_file"
+  sdd_dispatch_prepared "$stage" "$handoff_file" "$result_file" "$status_file" || return $?
+done
+# Only after every dispatch receipt, wait for the complete batch.
+for task_id in $SDD_BATCH_TASK_IDS; do
+  instance_id="sdd-w${wave}-t${task_id}-${stage}-a${attempt}"
+  uberdev_wait_child "$SDD_RUN_DIR/children/$instance_id/status.json" \
+    "$SDD_RUN_DIR/children/$instance_id/result.md" "$SDD_CHILD_TIMEOUT" || return $?
+done
+```
+
+For every parallel batch, issue every `uberdev_dispatch_child` call first.
+Only after the complete batch has receipts may the controller call
+`uberdev_wait_child STATUS RESULT TIMEOUT` for each child. A dispatch failure
+cancels the batch gate; a required wait/review failure blocks the task. The
+large-tier test-review edge preserves Step 4.5's advisory logging behavior.
+
 ```dot
 digraph when_to_use {
     "Have implementation plan?" [shape=diamond];
@@ -74,37 +192,48 @@ digraph when_to_use {
 2. **Create TodoWrite** with one todo per task, labeled with its wave (e.g., `[wave-2] Task 4: ...`).
 3. **Verify clean baseline:** `git status` is clean; you're on the feature branch in the feature-branch worktree. Capture `BASELINE_SHA=$(git rev-parse HEAD)` — useful only for diagnostic logging now that the post-impl-review's `commit_range` is computed independently inside `/uberdev:review-pr` Phase 1.
 4. **For each wave (sequential):**
-   a. Dispatch every implementer in the wave **in a single message** with multiple `Agent` tool calls. All run in the current worktree. Each implementer gets an explicit allowlist of files it owns and an explicit denylist of files owned by sibling tasks.
+   a. Build every implementer handoff from `./implementer-prompt.md`, using edge `sdd.task.implement`, role `implementation-worker`, phase `implementation`, and instance stage `implement`. Dispatch every implementer in the wave with `uberdev_dispatch_child` before waiting for any of them. All run in the current worktree. Each handoff carries an explicit allowlist of files it owns and an explicit denylist of files owned by sibling tasks.
    b. **Implementers never run git.** They edit files, run their tests, and report `Status + changed file paths + test results`.
-   c. Wait for all wave implementers to report.
+   c. After all dispatch receipts exist, wait for all wave implementers with `uberdev_wait_child`; read each immutable result artifact only after its wait succeeds.
    d. For each completed implementer (in task ID order, sequential): controller stages **only that task's reported paths** with `git add <paths>` and commits with the task-specific message.
-   e. Run the project's full test command in the worktree once after all wave commits land. If it fails, identify which task regressed and re-dispatch that task's implementer with the failure context. Re-test after each fix, capped at `retest_rounds` (2) suspected-implementer re-dispatches for the wave — still red after the cap means halt the wave with committed work intact and escalate (BLOCKED ladder); never loop further.
-   f. For each committed task: dispatch spec reviewer (parallel across the wave). Pass each spec reviewer the dispatch parameters from `./spec-reviewer-prompt.md`:
+   e. Run the project's full test command in the worktree once after all wave commits land. If it fails, identify which task regressed and re-dispatch edge `sdd.task.implement` to that task's `implementation-worker`, with stage `implement` and the next attempt plus the failure context. Re-test after each fix, capped at `retest_rounds` (2) suspected-implementer re-dispatches for the wave — still red after the cap means halt the wave with committed work intact and escalate (BLOCKED ladder); never loop further.
+   f. For each committed task, build a `sdd.task.spec_review` handoff for role `spec-compliance-reviewer` from `./spec-reviewer-prompt.md`. Dispatch all wave-eligible spec reviewers before waiting for any. Pass each reviewer these context inputs:
       - `[FULL TEXT of task requirements]`: the spec excerpt for this task
       - `[plan_task_description]`: the FULL text of the plan entry for this task (from the wave's plan section, including Worktree-safe paths and any prescribed steps) — enables the reviewer to detect *plan drift* where the implementation satisfies the spec but deviates structurally from the plan. If the plan task entry exceeds ~3000 tokens, pass an excerpt covering the task header, Worktree-safe paths, and the numbered prescribed-steps subsection only — omit prose rationale.
       - `[task commit SHA]`: the SHA the controller produced when committing this task's reported paths
       - `[paths from the wave's ownership map]`: the allowlist for this task (reviewer must not look outside it)
       - `[From implementer's report]`: the implementer's status + claimed paths/test results
-   g. Loop spec fix-up per task until that task's spec reviewer approves, capped at `fix_rounds` (3) iterations per task — exhaustion routes the task into the BLOCKED ladder. Fix dispatches still don't run git — controller amends the task's commit (or creates a fix-up commit) using the implementer's reported new paths.
-   h. Dispatch each task's code quality reviewer **as soon as that task's spec review approves** (per-task quality start) — do NOT hold the whole wave's quality reviews hostage to the slowest sibling's spec fix-loop. Spec-before-quality ordering is per task, by stage order, not a wave-wide barrier. Same fix-loop pattern, same `fix_rounds` (3) cap per task.
+   g. Loop spec fix-up per task until that task's reviewer approves, capped at `fix_rounds` (3) iterations per task. Fixes use `sdd.task.implement`/`implementation-worker`, stage `spec-fix`, and the next attempt; re-reviews use `sdd.task.spec_review` with the next attempt. Exhaustion routes the task into the BLOCKED ladder. Fix dispatches still don't run git — controller amends the task's commit (or creates a fix-up commit) using the implementer's reported new paths.
+   h. As soon as a task's spec review approves, add its `sdd.task.quality_review`/`code-reviewer` handoff to the next eligible quality batch. Dispatch every child in that batch before waiting. Do NOT hold all quality reviews hostage to the slowest sibling's spec fix-loop. Quality fixes use `sdd.task.implement`, stage `quality-fix`; quality re-reviews use the quality edge with the next attempt. Same `fix_rounds` (3) cap per task.
    i. Mark every task in the wave complete in TodoWrite.
    j. **Mark wave complete.** No additional accumulation required at the SDD layer — `/uberdev:review-pr` Phase 1, chained post-push from `finish-branch`, computes its own `changed_paths` and `commit_range` against the pushed PR.
 
-   **Step 4.5 — Pre-merge `pr-test-analyzer` dispatch (large-tier only, requires `spec_path` and `summary_dir`).** Runs once after all waves complete and before the Step 5 handoff. If `tier == "large"` AND `spec_path` is non-empty AND `summary_dir` is non-empty, dispatch a single `Task("pr-test-analyzer", { commit_range: HEAD~N..HEAD, spec_path: <input>, plan_path: <input>, acceptance_criteria: <verbatim copy of the spec's "## Acceptance-criteria mapping" or "## Acceptance criteria" section, whichever is present>, summary_dir: <input> })` (otherwise — including non-orchestrator callers that omit any input — skip Step 4.5 entirely). The dispatch prompt MUST instruct the agent to write its YAML findings to `<summary_dir>/pr-test-analyzer.md` as its final action, before emitting the return envelope. Wait for the `Task()` to return before proceeding to Step 5. Do NOT parse or transform the YAML — the artifact on disk IS the integration point; `finish-branch` reads it via its post-impl-review artifact-collection glob. This is a direct single-agent `Task()` — NOT a fanout — and is therefore NOT routed via `uberdev:post-impl-review` (which is reserved for the post-PR-push fanout owned by `/uberdev:review-pr` Phase 1).
+   **Step 4.5 — Pre-merge `pr-test-analyzer` dispatch (large-tier only, requires `spec_path` and `summary_dir`).** Runs once after all waves complete and before the Step 5 handoff. If `tier == "large"` AND `spec_path` is non-empty AND `summary_dir` is non-empty, securely pre-create the regular artifact file (the handoff validator rejects directory-valued context and requires absolute artifact paths to exist), then dispatch edge `sdd.premerge.test_review` to role `pr-test-analyzer`, stage `test-review`, attempt 1:
+
+   ```bash
+   SDD_TEST_REVIEW_OUTPUT="${summary_dir%/}/pr-test-analyzer.md"
+   python3 -I -B - "$SDD_TEST_REVIEW_OUTPUT" <<'PY'
+import os,sys
+fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+os.close(fd)
+PY
+   ```
+
+   Its context inputs are `commit_range`, `spec_path`, `plan_path`, the verbatim acceptance-criteria section, and `output_path=$SDD_TEST_REVIEW_OUTPUT`. `summary_dir` is a controller gate, never a child input. Wait with `uberdev_wait_child` before Step 5, then copy the successful immutable child result to `output_path` byte-for-byte and keep mode `0600`; on dispatch/wait failure, remove the empty pre-created output. Do NOT parse or transform the YAML — the artifact on disk IS the integration point. This is one advisory routed child, not the post-push reviewer fanout.
 
    All three return cases below end by proceeding to Step 5; `finish-branch`'s artifact-collection glob discovers whatever is on disk. Each case differs only in its log action:
-   1. `Task()` returns with verdict `APPROVE` — artifact is on disk; no log entry.
-   2. `Task()` returns with verdict `REJECT` — the agent completed analysis and found gaps; artifact IS on disk; log the `REJECT` verdict to `<summary_dir>/orchestrator.log` with a `REJECT` tag.
-   3. `Task()` failed to return an envelope (timeout / agent crash) — log the failure to `<summary_dir>/orchestrator.log` with a `FAILURE` tag and the cause (best-effort; the artifact may be absent or partial, and in that case the PR body will silently omit the `pr-test-analyzer` subsection — observable only via `orchestrator.log`).
+   1. The result verdict is `APPROVE` — artifact is on disk; no log entry.
+   2. The result verdict is `REJECT` — the agent completed analysis and found gaps; artifact IS on disk; log the `REJECT` verdict to `<summary_dir>/orchestrator.log` with a `REJECT` tag.
+   3. Dispatch/wait fails or no valid result envelope exists — log `FAILURE` and the cause to `<summary_dir>/orchestrator.log` (best-effort; artifact may be absent or partial).
 
 5. Hand off to `uberdev:finish-branch` (no flag arg). The branch close-out detects unattended mode via the inherited `UBERDEV_TURBO=1` environment variable from the selected dispatch backend — under that signal, `finish-branch` auto-selects "Push and Create PR" without prompting (#97). For large tier, `pr-test-analyzer` was dispatched in Step 4.5 (above) and its findings are now on disk at `<summary_dir>/pr-test-analyzer.md`. `finish-branch` will discover and include them in the PR body's `## Reviewer findings summary` section. Post-implementation reviewer fanout is hosted by `/uberdev:review-pr` Phase 1 (chained from `finish-branch` after PR push); no reviewer *fanout* is dispatched from `subagent-driven-dev` itself (see Step 4.5 for the carve-out vs the retired `uberdev:post-impl-review` fanout).
 
 ### Parallel Dispatch Pattern
 
 ```
-[wave-1] →  Agent(T1, edits files only)  ┐
-            Agent(T2, edits files only)  ├─ all in ONE message, shared CWD
-            Agent(T3, edits files only)  ┘
+[wave-1] →  Child(T1, edits files only)  ┐
+            Child(T2, edits files only)  ├─ dispatch complete batch, shared CWD
+            Child(T3, edits files only)  ┘
                 ↓ wait for all three
             controller: git add <T1 paths> && git commit  (sequential, deterministic)
             controller: git add <T2 paths> && git commit
@@ -116,8 +245,8 @@ digraph when_to_use {
                 ↓ wave complete (no SDD-layer accumulation —
                 ↓ /review-pr Phase 1 computes its own diff post-push)
                 ↓ no merge step — already on feature branch
-[wave-2] →  Agent(T4, edits files only)  ┐
-            Agent(T5, edits files only)  ┘  (parallel, depend on wave-1 commits)
+[wave-2] →  Child(T4, edits files only)  ┐
+            Child(T5, edits files only)  ┘  (parallel, depend on wave-1 commits)
             ...
 [wave-N] →  ...  (last wave finishes)
                 ↓
@@ -182,12 +311,12 @@ Implementer subagents report one of four statuses. Handle each appropriately:
 **NEEDS_CONTEXT:** The implementer needs information that wasn't provided. Provide the missing context and re-dispatch — at most `context_rounds` (2) answer-and-re-dispatch cycles per task; overflow routes into the BLOCKED ladder below.
 
 **BLOCKED:** The implementer cannot complete the task. Assess the blocker:
-1. If it's a context problem, provide more context and re-dispatch with the same model
-2. If the task requires more reasoning, re-dispatch with a more capable model
+1. If it's a context problem, provide more context and re-dispatch the same stable edge
+2. If the task exposes additional risk, update the root risk evidence and let policy select the warranted route; never put a model override in the handoff
 3. If the task is too large, break it into smaller pieces
 4. If the plan itself is wrong, escalate to the human
 
-**Never** ignore an escalation or force the same model to retry without changes. If the implementer said it's stuck, something needs to change.
+**Never** ignore an escalation or retry unchanged context and risk evidence. If the implementer said it's stuck, something needs to change.
 
 ## Prompt Templates
 
@@ -244,10 +373,10 @@ Ownership map:
   T3 owns: src/progress.ts, tests/progress.test.ts
   T4 owns: src/telemetry.ts, tests/telemetry.test.ts
 
-[Single message, three Agent calls in parallel — same shared worktree, no git permitted]
-  Agent(T2: Recovery modes,    allow=[T2 paths], deny=[T3+T4 paths])
-  Agent(T3: Progress reporting, allow=[T3 paths], deny=[T2+T4 paths])
-  Agent(T4: Telemetry hooks,    allow=[T4 paths], deny=[T2+T3 paths])
+[Dispatch all three routed children before waiting — same shared worktree, no git permitted]
+  Routed child(T2: Recovery modes,    allow=[T2 paths], deny=[T3+T4 paths])
+  Routed child(T3: Progress reporting, allow=[T3 paths], deny=[T2+T4 paths])
+  Routed child(T4: Telemetry hooks,    allow=[T4 paths], deny=[T2+T3 paths])
 
 [Wait for all three implementers to report back with their changed paths]
 
@@ -258,10 +387,10 @@ Ownership map:
 
 [Run full test suite — green]
 
-[Single message: spec reviewers for T2, T3, T4 in parallel]
+[Dispatch complete spec-review batch for T2, T3, T4 before waiting]
 [Loop: any failed spec review → re-dispatch that task's implementer (no git); controller amends or fix-up commits using reported paths; re-review until ✅, max fix_rounds=3 per task; each task that reaches ✅ proceeds straight to its quality review]
 
-[Single message: code quality reviewers for T2, T3, T4 in parallel]
+[Dispatch complete eligible code-quality batch before waiting]
 [Loop: any failed quality review → same fix pattern → re-review until ✅, max fix_rounds=3 per task]
 
 [Mark Tasks 2, 3, 4 complete]
@@ -338,7 +467,7 @@ Ownership map:
 - Don't rush them into implementation
 
 **If reviewer finds issues:**
-- Implementer (same subagent) fixes them
+- A fresh `implementation-worker` child on the implementation edge fixes them
 - Reviewer reviews again
 - Repeat until approved or the task's `fix_rounds` cap (3) is exhausted — then route through the BLOCKED ladder, never an unbounded loop
 - Don't skip the re-review

@@ -1,5 +1,5 @@
 <!--
-  This file is a thin Task-tool dispatch wrapper that delegates to the `uberdev:code-reviewer`
+  This file is a routed child handoff template for the bundled `code-reviewer`
   agent. The full reviewer prompt (checklist + output format + example) lives in:
   ../requesting-code-review/code-reviewer.md
   Both files share the Strengths / Critical / Important / Minor verdict shape — keep that
@@ -14,15 +14,28 @@ Use this template when dispatching a code quality reviewer subagent.
 
 **Only dispatch after spec compliance review passes.**
 
+```yaml
+edge_id: sdd.task.quality_review
+role: code-reviewer
+phase: quality-review
+instance_id: sdd-w[wave]-t[task]-quality-review-a[attempt]
+risk_scope: subtask
+risk_signals: [copy from the immutable root decision]
+inputs:
+  task_id: "[task ID]"
+  implemented_summary: "[from implementer report]"
+  plan_requirements: "[Task N from plan]"
+  base_sha: "[commit before this task]"
+  head_sha: "[this task commit SHA]"
+  allowlist: [repo-relative owned paths]
+  description: "[task summary]"
+  attempt: [positive integer]
 ```
-Task tool (uberdev:code-reviewer):
 
-  WHAT_WAS_IMPLEMENTED: [from implementer's report]
-  PLAN_OR_REQUIREMENTS: Task N from [plan-file]
-  BASE_SHA: [commit before this task — for the wave's first reviewed task this is the wave's starting SHA; for later tasks in the same wave it's the previous task's commit SHA, since the controller committed in task ID order]
-  HEAD_SHA: [this task's commit SHA]
-  ALLOWED_PATHS: [task's file allowlist — review nothing outside these]
-  DESCRIPTION: [task summary]
+Serialize this data and route it with `uberdev_dispatch_child`. The bundled
+`code-reviewer` applies this fixed focus and output contract:
+
+```
 
   Review focus:
   - Plan alignment: did the implementation cover the task's requirements?

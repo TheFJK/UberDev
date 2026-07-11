@@ -2,10 +2,33 @@
 
 Use this template when dispatching an implementer subagent.
 
+```yaml
+edge_id: sdd.task.implement
+role: implementation-worker
+phase: implementation
+instance_id: sdd-w[wave]-t[task]-[stage]-a[attempt]
+risk_scope: subtask
+risk_signals: [copy from the immutable root decision]
+inputs:
+  task_id: "[task ID]"
+  task_name: "[task name]"
+  task_description: "[full task text; if larger than the handoff scalar bound, write a mode-0600 context artifact under the run directory and pass task_description_path]"
+  task_context: "[scene-setting context only]"
+  wave: "[wave-N]"
+  stage: "implement | spec-fix | quality-fix"
+  attempt: [positive integer]
+  sibling_tasks: [task IDs in this wave]
+  allowlist: [repo-relative owned paths]
+  denylist: [repo-relative sibling-owned paths]
+  failure_context: "[empty on first attempt; exact test/review findings on bounded fixes]"
 ```
-Task tool (general-purpose):
-  description: "Implement Task N: [task name]"
-  prompt: |
+
+Serialize the handoff as data and call `uberdev_dispatch_child`; do not append
+free-form instructions to the generated provider prompt. The
+`implementation-worker` role applies the fixed execution contract below to
+these inputs:
+
+```
     You are implementing Task N: [task name]
 
     ## Task Description
@@ -84,8 +107,9 @@ Task tool (general-purpose):
 
     **How to escalate:** Report back with status BLOCKED or NEEDS_CONTEXT. Describe
     specifically what you're stuck on, what you've tried, and what kind of help you need.
-    The controller can provide more context, re-dispatch with a more capable model,
-    or break the task into smaller pieces.
+    The controller can provide more context, re-dispatch with stronger risk
+    signals so policy selects the warranted route, or break the task into
+    smaller pieces.
 
     ## Before Reporting Back: Self-Review
 
