@@ -215,7 +215,8 @@ print(path, end="")
 }
 
 _uberdev_agent_default_catalog() {
-  local state_dir="$1" catalog="$state_dir/model-catalog-v1.json"
+  local state_dir="$1"
+  local catalog="$state_dir/model-catalog-v1.json"
   python3 -I -c '
 import json, os, stat, sys, tempfile
 policy_path, destination = sys.argv[1:]

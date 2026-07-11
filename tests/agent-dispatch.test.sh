@@ -144,6 +144,18 @@ export -f _uberdev_agent_dispatch_backend
 # shellcheck source=/dev/null
 . "$LIB"
 
+mkdir -p "$TMP/catalog-state"
+CATALOG_PATH="$(_uberdev_agent_default_catalog "$TMP/catalog-state")"
+[ "$CATALOG_PATH" = "$TMP/catalog-state/model-catalog-v1.json" ]
+python3 -I - "$CATALOG_PATH" <<'PY'
+import json, os, stat, sys
+path = sys.argv[1]
+catalog = json.load(open(path, encoding="utf-8"))
+assert catalog["schema_version"] == 1
+assert catalog["provider"] == "codex"
+assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+PY
+
 grep -Fq 'UBERDEV_SEMAPHORE_OWNER_PID=$$ PYTHONPATH= PYTHONHOME= uberdev_semaphore_acquire' "$LIB" || {
   echo "agent-dispatch: known shell owner is not supplied to semaphore acquisition" >&2
   exit 1
