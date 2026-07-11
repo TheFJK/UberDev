@@ -212,21 +212,66 @@ sdd_wait_prepared_batch() {
   return 0
 }
 
+sdd_json_string() {
+  [ "$#" -eq 1 ] || return 2
+  python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "$1"
+}
+
 sdd_inputs_for_task() {
   local edge_id="$1" task_id="$2"
+  local task_path_json working_dir_json failure_path_json spec_path_json
+  local plan_path_json commit_sha_json report_path_json base_sha_json head_sha_json
+  local commit_range_path_json acceptance_path_json summary_path_json
   : "$task_id" # controller selects the task-scoped artifact variables below
   case "$edge_id" in
     sdd.task.implement)
-      python3 -I -B -c 'import json,sys; print(json.dumps({"task_path":sys.argv[1],"working_dir":sys.argv[2],"allowed_paths":json.loads(sys.argv[3]),"denied_paths":json.loads(sys.argv[4]),"failure_path":sys.argv[5],"attempt":int(sys.argv[6])},separators=(",",":")))' "$task_path" "$SDD_WORKTREE" "$allowed_paths_json" "$denied_paths_json" "$failure_path" "$attempt"
+      task_path_json="$(sdd_json_string "$task_path")" || return 2
+      working_dir_json="$(sdd_json_string "$SDD_WORKTREE")" || return 2
+      failure_path_json="$(sdd_json_string "$failure_path")" || return 2
+      uberdev_child_inputs_build sdd.task.implement \
+        task_path "$task_path_json" \
+        working_dir "$working_dir_json" \
+        allowed_paths "$allowed_paths_json" \
+        denied_paths "$denied_paths_json" \
+        failure_path "$failure_path_json" \
+        attempt "$attempt"
       ;;
     sdd.task.spec_review)
-      python3 -I -B -c 'import json,sys; print(json.dumps({"spec_path":sys.argv[1],"plan_path":sys.argv[2],"commit_sha":sys.argv[3],"allowed_paths":json.loads(sys.argv[4]),"report_path":sys.argv[5]},separators=(",",":")))' "$spec_path" "$plan_path" "$commit_sha" "$allowed_paths_json" "$report_path"
+      spec_path_json="$(sdd_json_string "$spec_path")" || return 2
+      plan_path_json="$(sdd_json_string "$plan_path")" || return 2
+      commit_sha_json="$(sdd_json_string "$commit_sha")" || return 2
+      report_path_json="$(sdd_json_string "$report_path")" || return 2
+      uberdev_child_inputs_build sdd.task.spec_review \
+        spec_path "$spec_path_json" \
+        plan_path "$plan_path_json" \
+        commit_sha "$commit_sha_json" \
+        allowed_paths "$allowed_paths_json" \
+        report_path "$report_path_json"
       ;;
     sdd.task.quality_review)
-      python3 -I -B -c 'import json,sys; print(json.dumps({"plan_path":sys.argv[1],"base_sha":sys.argv[2],"head_sha":sys.argv[3],"allowed_paths":json.loads(sys.argv[4]),"report_path":sys.argv[5]},separators=(",",":")))' "$plan_path" "$base_sha" "$head_sha" "$allowed_paths_json" "$report_path"
+      plan_path_json="$(sdd_json_string "$plan_path")" || return 2
+      base_sha_json="$(sdd_json_string "$base_sha")" || return 2
+      head_sha_json="$(sdd_json_string "$head_sha")" || return 2
+      report_path_json="$(sdd_json_string "$report_path")" || return 2
+      uberdev_child_inputs_build sdd.task.quality_review \
+        plan_path "$plan_path_json" \
+        base_sha "$base_sha_json" \
+        head_sha "$head_sha_json" \
+        allowed_paths "$allowed_paths_json" \
+        report_path "$report_path_json"
       ;;
     sdd.premerge.test_review)
-      python3 -I -B -c 'import json,sys; print(json.dumps({"commit_range_path":sys.argv[1],"spec_path":sys.argv[2],"plan_path":sys.argv[3],"acceptance_path":sys.argv[4],"summary_path":sys.argv[5]},separators=(",",":")))' "$commit_range_path" "$spec_path" "$plan_path" "$acceptance_path" "$summary_path"
+      commit_range_path_json="$(sdd_json_string "$commit_range_path")" || return 2
+      spec_path_json="$(sdd_json_string "$spec_path")" || return 2
+      plan_path_json="$(sdd_json_string "$plan_path")" || return 2
+      acceptance_path_json="$(sdd_json_string "$acceptance_path")" || return 2
+      summary_path_json="$(sdd_json_string "$summary_path")" || return 2
+      uberdev_child_inputs_build sdd.premerge.test_review \
+        commit_range_path "$commit_range_path_json" \
+        spec_path "$spec_path_json" \
+        plan_path "$plan_path_json" \
+        acceptance_path "$acceptance_path_json" \
+        summary_path "$summary_path_json"
       ;;
     *) return 2 ;;
   esac
@@ -243,6 +288,7 @@ for task_id in $SDD_BATCH_TASK_IDS; do
   instance_id="sdd-w${wave}-t${task_id}-${stage}-a${attempt}"
   task_inputs_json="$(sdd_inputs_for_task "$edge_id" "$task_id")" || return 2
   task_inputs_json="$(sdd_canonicalize_owned_paths "$task_inputs_json")" || return 2
+  task_inputs_json="$(uberdev_child_inputs_validate "$edge_id" "$task_inputs_json")" || return 2
   sdd_dispatch_prepared "$edge_id" "$instance_id" "$task_inputs_json" "$SDD_RISK_JSON" || return $?
 done
 sdd_launch_prepared_batch || return $?
@@ -260,6 +306,9 @@ the first wait failure, and atomically resets all prepared/receipt state before
 the next batch. Receipt fields are held in parallel shell arrays, never encoded
 into delimiter-sensitive path strings. A required wait/review failure blocks the task. The
 large-tier test-review edge preserves Step 4.5's advisory logging behavior.
+These four SDD edges do not declare `retry.format`, so they never call
+`uberdev_child_inputs_format_retry`; retry attempts rebuild their exact edge
+inputs through `uberdev_child_inputs_build` instead.
 
 ```dot
 digraph when_to_use {
