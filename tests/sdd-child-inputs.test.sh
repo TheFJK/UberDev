@@ -117,7 +117,20 @@ EXPECTED_EDGES="$(printf '%s\n' \
   exit 1
 }
 
-for numeric_case in '007|7' '00|0' '00042|42' '10|10'; do
+for zero_spelling in 00 000 000000; do
+  builder_calls_before="$(wc -l <"$BUILDER_LOG" | tr -d ' ')"
+  if sdd_validate_instance_dimensions 1 1 implement "$zero_spelling"; then
+    printf 'all-zero attempt spelling was accepted: %s\n' "$zero_spelling" >&2
+    exit 1
+  fi
+  builder_calls_after="$(wc -l <"$BUILDER_LOG" | tr -d ' ')"
+  [ "$builder_calls_after" -eq "$builder_calls_before" ] || {
+    printf 'all-zero attempt reached input construction: %s\n' "$zero_spelling" >&2
+    exit 1
+  }
+done
+
+for numeric_case in '007|7' '01|1' '00042|42' '10|10'; do
   attempt="${numeric_case%%|*}"
   expected_attempt="${numeric_case#*|}"
   sdd_validate_instance_dimensions 1 1 implement "$attempt"

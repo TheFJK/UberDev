@@ -96,10 +96,18 @@ empty paths, escapes, and allow/deny overlap are rejected.
 ```bash
 sdd_validate_instance_dimensions() {
   local wave="$1" task="$2" stage="$3" attempt="$4"
-  case "$wave" in ''|*[!0-9]*|0) return 2 ;; esac
-  case "$task" in ''|*[!0-9]*|0) return 2 ;; esac
-  case "$attempt" in ''|*[!0-9]*|0) return 2 ;; esac
+  sdd_validate_positive_decimal "$wave" || return 2
+  sdd_validate_positive_decimal "$task" || return 2
+  sdd_validate_positive_decimal "$attempt" || return 2
   case "$stage" in implement|spec-review|spec-fix|quality-review|quality-fix|test-review) ;; *) return 2 ;; esac
+}
+
+sdd_validate_positive_decimal() {
+  case "$1" in
+    ''|*[!0-9]*) return 2 ;;
+    *[1-9]*) return 0 ;;
+    *) return 2 ;;
+  esac
 }
 
 sdd_canonicalize_owned_paths() {
