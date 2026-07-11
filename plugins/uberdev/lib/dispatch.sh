@@ -1011,13 +1011,20 @@ _uberdev_dispatch_background() {
   _uberdev_dispatch_resolve_python || { DISPATCH_RC=1; DISPATCH_LOG="$LOG_FILE"; return 1; }
   local PYTHON_LAUNCH=( "$_UBERDEV_PYTHON_EXE" )
   [ -z "$_UBERDEV_PYTHON_PREFIX" ] || PYTHON_LAUNCH+=( "$_UBERDEV_PYTHON_PREFIX" )
-  nohup "${PYTHON_LAUNCH[@]}" -I -c 'import os,sys; os.setsid(); os.execvp("bash", ["bash","-c",*sys.argv[1:]])' '
+  nohup "${PYTHON_LAUNCH[@]}" -I -c 'import os,subprocess,sys
+argv=["bash","-c",*sys.argv[1:]]
+if os.name=="nt":
+ os.environ["UBERDEV_WRAPPER_PID"]=str(os.getpid())
+ flags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+ raise SystemExit(subprocess.call(argv,creationflags=flags))
+os.setsid()
+os.execvp("bash",argv)' '
     PYTHON_EXE="$1"; PYTHON_PREFIX="$2"; shift 2
     run_python() {
       if [ -n "$PYTHON_PREFIX" ]; then "$PYTHON_EXE" "$PYTHON_PREFIX" "$@"; else "$PYTHON_EXE" "$@"; fi
     }
     WORKTREE_DIR="$1"; STATUS_FILE="$2"; RESULT_FILE="$3"; ISSUE_NUM="$4"; TIER="$5"; shift 5
-    WRAPPER_PID="$$"
+    WRAPPER_PID="${UBERDEV_WRAPPER_PID:-$$}"
     write_status() {
       STATE="$1"; EXIT_CODE="$2"; TMP_STATUS="$(mktemp "${STATUS_FILE}.tmp.XXXXXX")" || return 1
       if [ "$EXIT_CODE" = null ]; then EXIT_JSON=null; else EXIT_JSON="$EXIT_CODE"; fi
@@ -1192,7 +1199,14 @@ _uberdev_dispatch_codex() {
   _uberdev_dispatch_resolve_python || { DISPATCH_RC=1; DISPATCH_LOG="$LOG_FILE"; return 1; }
   local PYTHON_LAUNCH=( "$_UBERDEV_PYTHON_EXE" )
   [ -z "$_UBERDEV_PYTHON_PREFIX" ] || PYTHON_LAUNCH+=( "$_UBERDEV_PYTHON_PREFIX" )
-  nohup "${PYTHON_LAUNCH[@]}" -I -c 'import os,sys; os.setsid(); os.execvp("bash", ["bash","-c",*sys.argv[1:]])' '
+  nohup "${PYTHON_LAUNCH[@]}" -I -c 'import os,subprocess,sys
+argv=["bash","-c",*sys.argv[1:]]
+if os.name=="nt":
+ os.environ["UBERDEV_WRAPPER_PID"]=str(os.getpid())
+ flags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+ raise SystemExit(subprocess.call(argv,creationflags=flags))
+os.setsid()
+os.execvp("bash",argv)' '
       ISSUE_NUM="$1"
       TIER="$2"
       STATUS_FILE="$3"
@@ -1206,7 +1220,7 @@ _uberdev_dispatch_codex() {
       ROUTE_SERVICE_TIER="${11}"
       ROUTE_SANDBOX="${12}"
       shift 12
-      WRAPPER_PID="$$"
+      WRAPPER_PID="${UBERDEV_WRAPPER_PID:-$$}"
 
       write_status() {
         _state="$1"

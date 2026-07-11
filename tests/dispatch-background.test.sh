@@ -170,6 +170,17 @@ if [ "$detached_resolver_count" -eq 2 ] \
 else
   echo "  FAIL  detached and nested dispatch preserve the py -3 argv prefix"; FAIL=$((FAIL + 1))
 fi
+windows_detach_count="$(grep -Fc 'subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS' "$DISPATCH_LIB")"
+posix_setsid_count="$(grep -Fc 'os.setsid()' "$DISPATCH_LIB")"
+wrapper_pid_bridge_count="$(grep -Fc 'os.environ["UBERDEV_WRAPPER_PID"]=str(os.getpid())' "$DISPATCH_LIB")"
+if [ "$windows_detach_count" -eq 2 ] \
+    && [ "$posix_setsid_count" -eq 2 ] \
+    && [ "$wrapper_pid_bridge_count" -eq 2 ] \
+    && ! grep -Fq 'os.setsid(); os.execvp' "$DISPATCH_LIB"; then
+  echo "  PASS  detached launchers use native Windows process flags and preserve POSIX setsid"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  detached launchers use native Windows process flags and preserve POSIX setsid"; FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== Immediate terminal background wrapper keeps its exact handle =="
@@ -203,6 +214,16 @@ IMMEDIATE_OUT="$(
       printf "mismatch issue=%s outcome=%s check=%s rc=%s dispatch_id=%q status=%q result=%q mode=%q partials=%q child_log=%q\n" \
         "$issue" "$outcome" "$1" "$rc" "${DISPATCH_ID:-}" "$status" "$result" "$mode" "$partials" "$child_log"
     }
+    probe_mode() {
+      local candidate
+      candidate="$(stat -c %a "$1" 2>/dev/null)"
+      if [ -n "$candidate" ]; then
+        case "$candidate" in *[!0-7]*) ;; *) printf "%s" "$candidate"; return 0 ;; esac
+      fi
+      candidate="$(stat -f %Lp "$1" 2>/dev/null)"
+      [ -n "$candidate" ] || return 1
+      case "$candidate" in *[!0-7]*) return 1 ;; *) printf "%s" "$candidate" ;; esac
+    }
     for outcome in completed failed completed failed completed failed; do
       issue=$((issue + 1))
       printf "%s\n" "$outcome" > "$UBERDEV_TMPDIR/prompt-$issue.txt"
@@ -212,13 +233,18 @@ IMMEDIATE_OUT="$(
       _uberdev_dispatch_background "$issue" small "$UBERDEV_TMPDIR/prompt-$issue.txt"
       rc=$?; status="$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)"
       result="$(cat "$UBERDEV_AGENT_RESULT_FILE" 2>/dev/null)"
-      mode="$(stat -f %Lp "$UBERDEV_AGENT_RESULT_FILE" 2>/dev/null || stat -c %a "$UBERDEV_AGENT_RESULT_FILE" 2>/dev/null)"
+      mode="$(probe_mode "$UBERDEV_AGENT_RESULT_FILE")"
       partials="$(find "$UBERDEV_TMPDIR" -maxdepth 1 \( -name "result-$issue.md.partial.*" -o -name "result-$issue.md.tmp.*" \) -print)"
       child_log="$(cat "$UBERDEV_TMPDIR/solve-bg-stdout-$issue.log" 2>/dev/null)"
       case "$outcome:$rc:$DISPATCH_ID:$status" in
         completed:0:*:*\"state\":\"completed\"*\"exit_code\":0*)
           [ "$result" = "immediate completed result" ] || record_failure completed_result
-          [ "$mode" = 600 ] || record_failure completed_result_mode
+          # Git Bash reports synthesized POSIX bits over native Windows ACLs;
+          # require a validated octal probe there, and exact 0600 on POSIX.
+          case "$(uname -s)" in
+            MINGW*|MSYS*|CYGWIN*) [ -n "$mode" ] || record_failure completed_result_mode ;;
+            *) [ "$mode" = 600 ] || record_failure completed_result_mode ;;
+          esac
           ;;
         failed:0:*:*\"state\":\"failed\"*\"exit_code\":29*)
           [ ! -s "$UBERDEV_AGENT_RESULT_FILE" ] || record_failure failed_result_empty

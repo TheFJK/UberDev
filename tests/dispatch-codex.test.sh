@@ -217,8 +217,8 @@ assert_grep "$DISPATCH_LIB" \
   '"backend":"codex"' \
   "codex backend status-file + audit payload carries backend=codex"
 assert_grep "$DISPATCH_LIB" \
-  'WRAPPER_PID="\$\$"' \
-  "codex wrapper uses its own numeric shell PID for status"
+  'WRAPPER_PID="\$\{UBERDEV_WRAPPER_PID:-\$\$\}"' \
+  "codex wrapper status uses the detached supervisor PID with a shell-PID fallback"
 
 echo "== Codex backend does NOT thread claude-specific flags =="
 CODEX_BODY="$(extract_function_body '_uberdev_dispatch_codex' "$DISPATCH_LIB")"
@@ -228,11 +228,11 @@ if printf '%s\n' "$CODEX_BODY" | grep -qE '\<(PERM_FLAG|EFFORT_FLAG|claude -p)\>
 else
   pass_msg "codex backend body does not reference Claude-only flags or claude -p"
 fi
-if printf '%s\n' "$CODEX_BODY" | grep -qF 'WRAPPER_PID="$$"' \
+if printf '%s\n' "$CODEX_BODY" | grep -qF 'WRAPPER_PID="${UBERDEV_WRAPPER_PID:-$$}"' \
    && ! printf '%s\n' "$CODEX_BODY" | grep -qF 'kill -0 "$DISPATCH_ID"'; then
-  pass_msg "codex backend status contract tracks wrapper pid instead of parent-side liveness probing"
+  pass_msg "codex backend status contract tracks the detached supervisor instead of parent-side liveness probing"
 else
-  fail_msg "codex backend status contract tracks wrapper pid instead of parent-side liveness probing"
+  fail_msg "codex backend status contract tracks the detached supervisor instead of parent-side liveness probing"
 fi
 
 echo "== goal-state backend-awareness =="
@@ -671,7 +671,9 @@ IMMEDIATE_OUT="$(
     terminal_pid="$DISPATCH_ID"
     ! _uberdev_dispatch_accept_immediate_terminal background "$terminal_pid" "$UBERDEV_AGENT_STATUS_FILE" "$UBERDEV_AGENT_RESULT_FILE" >/dev/null 2>&1 || failures=$((failures + 1))
     ! _uberdev_dispatch_accept_immediate_terminal codex "$((terminal_pid + 1))" "$UBERDEV_AGENT_STATUS_FILE" "$UBERDEV_AGENT_RESULT_FILE" >/dev/null 2>&1 || failures=$((failures + 1))
-    python3 -I -c "import os; os.setsid(); os.execvp(\"sleep\",[\"sleep\",\"30\"])" &
+    # A plain live child is sufficient for the fail-closed liveness check and
+    # stays portable to native Windows Python, where os.setsid is unavailable.
+    sleep 30 &
     live_pid=$!
     printf "{\"backend\":\"codex\",\"state\":\"completed\",\"exit_code\":0,\"pid\":\"%s\"}\n" "$live_pid" > "$UBERDEV_AGENT_STATUS_FILE"
     ! _uberdev_dispatch_accept_immediate_terminal codex "$live_pid" "$UBERDEV_AGENT_STATUS_FILE" "$UBERDEV_AGENT_RESULT_FILE" >/dev/null 2>&1 || failures=$((failures + 1))
