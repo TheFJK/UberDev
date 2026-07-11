@@ -330,6 +330,9 @@ uberdev_design_wait() {
       return 0
     fi
   done
+  cleanup_rc=0
+  uberdev_design_drain_after_wait_failure || cleanup_rc=$?
+  [ "$cleanup_rc" -eq 0 ] || echo "error: bounded sibling unwind failed after missing receipt instance=$wanted" >&2
   return 2
 }
 ```
@@ -425,7 +428,8 @@ uberdev_design_dispatch orchestrator.research.test_coverage orchestrator-researc
 After every edge in the current slice has been issued, wait at the shared barrier. For a cap slice, include only its instance IDs; for the default wave use all six:
 
 ```bash uberdev-executable barrier=orchestrator.research
-for instance in orchestrator-research-codebase-a1 orchestrator-research-patterns-a1 orchestrator-research-prior-art-a1 orchestrator-research-constraints-a1 orchestrator-research-security-a1 orchestrator-research-test-coverage-a1; do
+UBERDEV_DESIGN_BARRIER_INSTANCES=("${UBERDEV_DESIGN_PREPARED_INSTANCES[@]}")
+for instance in "${UBERDEV_DESIGN_BARRIER_INSTANCES[@]}"; do
   uberdev_design_wait "$instance" 300
 done
 ```
@@ -788,12 +792,10 @@ The role writes only its allocated staging path and the shim atomically replaces
 Wait for all planning-research children only after the three base edges and conditional security edge have been issued:
 
 ```bash uberdev-executable barrier=orchestrator.plan.research
-for instance in orchestrator-plan-research-dependency-a1 orchestrator-plan-research-tests-a1 orchestrator-plan-research-risks-a1; do
+UBERDEV_DESIGN_BARRIER_INSTANCES=("${UBERDEV_DESIGN_PREPARED_INSTANCES[@]}")
+for instance in "${UBERDEV_DESIGN_BARRIER_INSTANCES[@]}"; do
   uberdev_design_wait "$instance" 300
 done
-if [ "${planning_security_dispatched:-0}" = 1 ]; then
-  uberdev_design_wait orchestrator-plan-research-security-a1 300
-fi
 ```
 
 Parse status before artifact fields. A base-role BLOCKED return is required-planning terminal: require the no-artifact fields and do not dispatch `plan-writer`. A planning-security BLOCKED return is advisory: require the no-artifact fields, log the missing security evidence, and continue without reading or verifying a security artifact. A malformed return executes the generic format-retry block from Phase 1 with that planning edge's retained inputs, phase `plan`, and fresh `${failed_instance%-a1}-a2` identity; dispatch and wait once for that edge only.

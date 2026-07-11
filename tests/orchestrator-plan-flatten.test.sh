@@ -1925,6 +1925,36 @@ rc=0
 [ "${{#{ledger}_RECEIPT_STATUSES[@]}}" -eq 0 ]
 [ "${{#{ledger}_RECEIPT_RESULTS[@]}}" -eq 0 ]
 [ "${{#{ledger}_WAITED_INSTANCES[@]}}" -eq 0 ]
+
+# A caller-side identity miss after launch is also terminal for the batch. One
+# receipt has already completed successfully; it must remain skipped while all
+# other receipts are boundedly unwound and the original lookup rc=2 survives a
+# cleanup error.
+wait_calls=()
+unwind_calls=()
+{ledger}_PREPARED_EDGES=(edge-one edge-two edge-three)
+{ledger}_PREPARED_INSTANCES=(one two three)
+{ledger}_PREPARED_HANDOFFS=(h1 h2 h3)
+{ledger}_PREPARED_RESULTS=(r1 r2 r3)
+{ledger}_PREPARED_STATUSES=(s1 s2 s3)
+{ledger}_DISPATCH_RECEIPTS=(one two three)
+{ledger}_RECEIPT_STATUSES=("/tmp/run|root/status|ok" "/tmp/run|root/status|cleanup-error" "/tmp/run|root/status|live")
+{ledger}_RECEIPT_RESULTS=("/tmp/run|root/result|ok" "/tmp/run|root/result|cleanup-error" "/tmp/run|root/result|live")
+{ledger}_WAITED_INSTANCES=()
+{ledger}_WAITED=0
+{ledger}_BATCH_LAUNCHED=1
+{prefix}_wait one 23
+missing_rc=0
+{prefix}_wait absent-from-receipts 23 || missing_rc=$?
+[ "$missing_rc" -eq 2 ]
+[ "${{#wait_calls[@]}}" -eq 1 ]
+[ "${{#unwind_calls[@]}}" -eq 2 ]
+[ "${{unwind_calls[0]}}" = "/tmp/run|root/status|cleanup-error::/tmp/run|root/result|cleanup-error::19" ]
+[ "${{unwind_calls[1]}}" = "/tmp/run|root/status|live::/tmp/run|root/result|live::19" ]
+[ "${{#{ledger}_DISPATCH_RECEIPTS[@]}}" -eq 0 ]
+[ "${{#{ledger}_RECEIPT_STATUSES[@]}}" -eq 0 ]
+[ "${{#{ledger}_RECEIPT_RESULTS[@]}}" -eq 0 ]
+[ "${{#{ledger}_WAITED_INSTANCES[@]}}" -eq 0 ]
 '''
     completed = subprocess.run(["bash", "-c", script], text=True, capture_output=True)
     if completed.returncode:
@@ -1935,6 +1965,57 @@ then
   PASS=$((PASS + 1))
 else
   printf '%s\n' '  FAIL F9d wait failure abandoned siblings or corrupted structured receipts'
+  FAIL=$((FAIL + 1))
+fi
+
+if python3 - "$BRAINSTORM" <<'PY'
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+text=Path(sys.argv[1]).read_text(encoding="utf-8")
+def function(name: str) -> str:
+    match=re.search(rf"(?ms)^{re.escape(name)}\(\) \{{.*?^\}}$",text)
+    if not match: raise SystemExit(f"missing production function: {name}")
+    return match.group(0)
+barrier_match=re.search(r"```bash uberdev-executable barrier=brainstorm\.research\n(.*?)```",text,re.S)
+if not barrier_match: raise SystemExit("missing brainstorm research barrier")
+barrier=barrier_match.group(1)
+script=f'''set -eu
+wait_calls=()
+unwind_calls=()
+uberdev_wait_child() {{ wait_calls+=("$1::$2::$3"); return 0; }}
+uberdev_unwind_child() {{ unwind_calls+=("$1::$2::$3"); return 0; }}
+UBERDEV_BRAINSTORM_UNWIND_TIMEOUT=19
+UBERDEV_BRAINSTORM_PREPARED_EDGES=(edge-codebase edge-prior)
+UBERDEV_BRAINSTORM_PREPARED_INSTANCES=(brainstorm-research-codebase-a1 brainstorm-research-prior-art-a1)
+UBERDEV_BRAINSTORM_PREPARED_HANDOFFS=(h1 h2)
+UBERDEV_BRAINSTORM_PREPARED_RESULTS=(r1 r2)
+UBERDEV_BRAINSTORM_PREPARED_STATUSES=(s1 s2)
+UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS=(brainstorm-research-codebase-a1 brainstorm-research-prior-art-a1)
+UBERDEV_BRAINSTORM_RECEIPT_STATUSES=(status-codebase status-prior)
+UBERDEV_BRAINSTORM_RECEIPT_RESULTS=(result-codebase result-prior)
+UBERDEV_BRAINSTORM_WAITED_INSTANCES=()
+UBERDEV_BRAINSTORM_WAITED=0
+UBERDEV_BRAINSTORM_BATCH_LAUNCHED=1
+{function("uberdev_brainstorm_reset_batch")}
+{function("uberdev_brainstorm_drain_after_wait_failure")}
+{function("uberdev_brainstorm_wait")}
+{barrier}
+[ "${{#wait_calls[@]}}" -eq 2 ]
+[ "${{#unwind_calls[@]}}" -eq 0 ]
+[ "${{#UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[@]}}" -eq 0 ]
+'''
+completed=subprocess.run(["bash","-c",script],text=True,capture_output=True)
+if completed.returncode:
+    raise SystemExit(f"selected-subset brainstorm barrier failed: {completed.stderr}")
+PY
+then
+  printf '%s\n' '  PASS F9e missing lookup drains safely and brainstorm waits only for selected receipts'
+  PASS=$((PASS + 1))
+else
+  printf '%s\n' '  FAIL F9e missing receipt lookup or selected-subset brainstorm barrier leaks a batch'
   FAIL=$((FAIL + 1))
 fi
 

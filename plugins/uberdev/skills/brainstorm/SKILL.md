@@ -218,6 +218,9 @@ uberdev_brainstorm_wait() {
       return 0
     fi
   done
+  cleanup_rc=0
+  uberdev_brainstorm_drain_after_wait_failure || cleanup_rc=$?
+  [ "$cleanup_rc" -eq 0 ] || echo "error: bounded brainstorm sibling unwind failed after missing receipt instance=$wanted" >&2
   return 2
 }
 BRAINSTORM_CODEBASE_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"working_dir":sys.argv[1],"summary_path":sys.argv[2],"question":sys.argv[3]},separators=(",",":")))' "$working_dir" "$codebase_summary_path" "$codebase_question")"
@@ -243,7 +246,8 @@ uberdev_brainstorm_dispatch brainstorm.research.library brainstorm-research-libr
 ```
 
 ```bash uberdev-executable barrier=brainstorm.research
-for instance in brainstorm-research-codebase-a1 brainstorm-research-prior-art-a1 brainstorm-research-library-a1; do
+UBERDEV_BRAINSTORM_BARRIER_INSTANCES=("${UBERDEV_BRAINSTORM_PREPARED_INSTANCES[@]}")
+for instance in "${UBERDEV_BRAINSTORM_BARRIER_INSTANCES[@]}"; do
   uberdev_brainstorm_wait "$instance"
 done
 ```
