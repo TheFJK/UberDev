@@ -74,6 +74,25 @@ grep -q triage_issue_mismatch "$TMP/err"; PASS=$((PASS+1))
 SECURE="$TMP/secure"; mkdir "$SECURE"; chmod 700 "$SECURE"
 cp "$FIX/trivial.json" "$SECURE/issue.json"; chmod 600 "$SECURE/issue.json"
 python3 -I "$TRIAGE" classify --snapshot "$SECURE/issue.json" --secure-root "$SECURE" --expected-issue 1 >/dev/null; PASS=$((PASS+1))
+python3 -I - "$TRIAGE" "$SECURE/issue.json" "$SECURE" <<'PY'
+import importlib.util
+import os
+import sys
+
+spec = importlib.util.spec_from_file_location("solve_triage", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+original_geteuid = getattr(os, "geteuid", None)
+if original_geteuid is not None:
+    del os.geteuid
+try:
+    assert module.load_snapshot(sys.argv[2], sys.argv[3])["number"] == 1
+finally:
+    if original_geteuid is not None:
+        os.geteuid = original_geteuid
+PY
+PASS=$((PASS+1))
 ln "$SECURE/issue.json" "$SECURE/hard.json"
 if python3 -I "$TRIAGE" classify --snapshot "$SECURE/issue.json" --secure-root "$SECURE" >"$TMP/out" 2>"$TMP/err"; then exit 1; fi
 grep -q triage_snapshot_unsafe "$TMP/err"; rm "$SECURE/hard.json"; PASS=$((PASS+1))

@@ -79,11 +79,18 @@ def load_snapshot(path: str, secure_root: str | None = None) -> dict[str, Any]:
             root = Path(secure_root)
             root_entry = root.lstat()
             target_entry = target.lstat()
-            if root.is_symlink() or not root.is_dir() or root_entry.st_uid != os.geteuid() or stat.S_IMODE(root_entry.st_mode) != 0o700:
+            uid = os.geteuid() if hasattr(os, "geteuid") else None
+            posix_security = os.name != "nt"
+            if (root.is_symlink() or not root.is_dir()
+                    or (uid is not None and root_entry.st_uid != uid)
+                    or (posix_security and stat.S_IMODE(root_entry.st_mode) != 0o700)):
                 fail("triage_snapshot_unsafe")
             if not target.is_absolute() or target.is_symlink() or target.parent.resolve() != root.resolve():
                 fail("triage_snapshot_unsafe")
-            if not stat.S_ISREG(target_entry.st_mode) or target_entry.st_uid != os.geteuid() or target_entry.st_nlink != 1 or stat.S_IMODE(target_entry.st_mode) != 0o600:
+            if (not stat.S_ISREG(target_entry.st_mode)
+                    or (uid is not None and target_entry.st_uid != uid)
+                    or target_entry.st_nlink != 1
+                    or (posix_security and stat.S_IMODE(target_entry.st_mode) != 0o600)):
                 fail("triage_snapshot_unsafe")
         if target.stat().st_size > MAX_SNAPSHOT_BYTES:
             fail("triage_snapshot_too_large")
