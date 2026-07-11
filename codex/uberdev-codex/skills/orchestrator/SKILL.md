@@ -217,7 +217,7 @@ case "$UBERDEV_DESIGN_UNWIND_TIMEOUT" in ''|*[!0-9]*|0) return 2 ;; esac
 
 uberdev_design_json_string() {
   [ "$#" -eq 1 ] || return 2
-  python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "$1"
+  python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "${@:1:1}"
 }
 
 uberdev_design_reset_batch() {
@@ -262,7 +262,7 @@ uberdev_design_drain_after_wait_failure() {
 }
 
 uberdev_design_dispatch() {
-  local edge="$1" instance="$2" role="$3" phase="$4" risk_scope="$5" risks_json="$6" inputs_json="$7"
+  local edge="${@:1:1}" instance="${@:2:1}" role="${@:3:1}" phase="${@:4:1}" risk_scope="${@:5:1}" risks_json="${@:6:1}" inputs_json="${@:7:1}"
   local handoff result status create_rc cleanup_rc
   : "$role" "$phase" "$risk_scope" # edge manifest is the authority for these fields
   if uberdev_create_child_handoff "$edge" "$instance" "$inputs_json" "$risks_json"; then
@@ -310,7 +310,7 @@ uberdev_design_launch_batch() {
 }
 
 uberdev_design_wait() {
-  local wanted="$1" timeout_s="$2" index instance status result wait_rc cleanup_rc
+  local wanted="${@:1:1}" timeout_s="${@:2:1}" index instance status result wait_rc cleanup_rc
   if [ "$UBERDEV_DESIGN_BATCH_LAUNCHED" -eq 0 ]; then
     uberdev_design_launch_batch || return $?
   fi
