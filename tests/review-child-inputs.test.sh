@@ -8,7 +8,28 @@ REVIEW="${REVIEW_PR_UNDER_TEST:-$ROOT/plugins/uberdev/commands/review-pr.md}"
 LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
 CANONICAL_POST_SOURCE='plugins/uberdev/skills/post-impl-review/SKILL.md'
 CANONICAL_REVIEW_SOURCE='plugins/uberdev/commands/review-pr.md'
+RUN_ID=''
+TMP=''
+
+cleanup() {
+  local tmp="${TMP:-}" run_id="${RUN_ID:-}"
+  TMP=''
+  RUN_ID=''
+
+  if [ -n "$tmp" ]; then
+    case "$tmp" in
+      "$ROOT/tests/_fixtures/review-child-inputs."??????)
+        rm -rf -- "$tmp"
+        ;;
+    esac
+  fi
+  if [ -n "$run_id" ] && [[ "$run_id" =~ ^20260711-000000-[0-9a-f]{12}$ ]]; then
+    rm -rf -- "$ROOT/.uberdev/research/$run_id"
+  fi
+}
+
 TMP="$(mktemp -d "$ROOT/tests/_fixtures/review-child-inputs.XXXXXX")"
+trap cleanup EXIT
 RUN_SUFFIX="$(python3 -I -B -c 'import secrets; print(secrets.token_hex(6),end="")')"
 RUN_ID="20260711-000000-$RUN_SUFFIX"
 
@@ -44,14 +65,6 @@ review_require_canonical_source "$REVIEW" "$CANONICAL_REVIEW_SOURCE" || {
   echo "review-child-inputs: review source-under-test is not canonical: $REVIEW_SOURCE" >&2
   exit 1
 }
-
-cleanup() {
-  rm -rf "$TMP"
-  case "$RUN_ID" in
-    20260711-000000-[0-9a-f]*) rm -rf "$ROOT/.uberdev/research/$RUN_ID" ;;
-  esac
-}
-trap cleanup EXIT
 
 RECEIPT_DIR="$TMP/receipts"
 RECEIPTS="$RECEIPT_DIR/review.jsonl"
@@ -1028,5 +1041,110 @@ except AssertionError as error:
 else:
     raise AssertionError("corrupted canonical callsite mutation accepted")
 PY
+
+# Early setup failures must not strand private fixture directories. Run these
+# probes last so each child exits before production extraction or dispatch.
+review_fixture_snapshot() {
+  find "$ROOT/tests/_fixtures" -maxdepth 1 -type d \
+    -name 'review-child-inputs.*' -print | LC_ALL=C sort
+}
+
+review_fixture_count() {
+  review_fixture_snapshot | awk 'END { print NR + 0 }'
+}
+
+review_remove_probe_leaks() {
+  local before="$1" after="$2" leaked
+  while IFS= read -r leaked; do
+    [ -n "$leaked" ] || continue
+    case "$leaked" in
+      "$ROOT/tests/_fixtures/review-child-inputs."??????)
+        rm -rf -- "$leaked"
+        ;;
+      *)
+        echo "refusing to remove unexpected early-failure fixture: $leaked" >&2
+        return 1
+        ;;
+    esac
+  done < <(comm -13 "$before" "$after")
+}
+
+review_assert_early_failure_clean() {
+  local name="$1" expected="$2" mode="$3"
+  local before="$TMP/$name.before" after="$TMP/$name.after" log="$TMP/$name.log"
+  local before_count after_count rc=0 fixtures_changed=0
+  review_fixture_snapshot >"$before"
+  before_count="$(review_fixture_count)"
+
+  set +e
+  case "$mode" in
+    noncanonical)
+      REVIEW_EARLY_PROBE_CHILD=1 \
+        REVIEW_POST_UNDER_TEST="$GOOD_COPY" \
+        REVIEW_PR_UNDER_TEST="$REVIEW" \
+        bash "$ROOT/tests/review-child-inputs.test.sh" >"$log" 2>&1
+      rc=$?
+      ;;
+    suffix)
+      REVIEW_EARLY_PROBE_CHILD=1 \
+        REVIEW_POST_UNDER_TEST="$POST" \
+        REVIEW_PR_UNDER_TEST="$REVIEW" \
+        REVIEW_REAL_PYTHON3="$REAL_PYTHON3" \
+        PATH="$SUFFIX_FAIL_BIN:$PATH" \
+        bash "$ROOT/tests/review-child-inputs.test.sh" >"$log" 2>&1
+      rc=$?
+      ;;
+    *)
+      echo "unknown early-failure probe mode: $mode" >&2
+      rc=2
+      ;;
+  esac
+  set -e
+
+  review_fixture_snapshot >"$after"
+  after_count="$(review_fixture_count)"
+  if [ "$before_count" -ne "$after_count" ] || ! cmp -s "$before" "$after"; then
+    fixtures_changed=1
+    review_remove_probe_leaks "$before" "$after"
+  fi
+  if [ "$rc" -eq 0 ]; then
+    echo "$name unexpectedly succeeded" >&2
+    return 1
+  fi
+  if ! grep -Fq "$expected" "$log"; then
+    echo "$name failed without expected diagnostic: $expected" >&2
+    sed -n '1,20p' "$log" >&2
+    return 1
+  fi
+  if [ "$fixtures_changed" -ne 0 ]; then
+    echo "$name changed fixture count: before=$before_count after=$after_count" >&2
+    return 1
+  fi
+}
+
+if [ "${REVIEW_EARLY_PROBE_CHILD:-0}" != 1 ]; then
+  SUFFIX_FAIL_BIN="$TMP/suffix-fail-bin"
+  REAL_PYTHON3="$(command -v python3)"
+  mkdir -p "$SUFFIX_FAIL_BIN"
+  cat >"$SUFFIX_FAIL_BIN/python3" <<'SH'
+#!/usr/bin/env bash
+if [ "${1-}" = '-I' ] && [ "${2-}" = '-B' ] && [ "${3-}" = '-c' ] && \
+    [ "${4-}" = 'import secrets; print(secrets.token_hex(6),end="")' ]; then
+  echo 'forced suffix generation failure' >&2
+  exit 91
+fi
+exec "$REVIEW_REAL_PYTHON3" "$@"
+SH
+  chmod 700 "$SUFFIX_FAIL_BIN/python3"
+
+  EARLY_PROBE_FAILURES=0
+  review_assert_early_failure_clean \
+    noncanonical-source 'post source-under-test is not canonical' noncanonical || \
+    EARLY_PROBE_FAILURES=$((EARLY_PROBE_FAILURES + 1))
+  review_assert_early_failure_clean \
+    suffix-generation 'forced suffix generation failure' suffix || \
+    EARLY_PROBE_FAILURES=$((EARLY_PROBE_FAILURES + 1))
+  [ "$EARLY_PROBE_FAILURES" -eq 0 ] || exit 1
+fi
 
 printf 'review-child-inputs: PASS (17 unique source/edge pairs; 21 complete chains, dual simplify focus, lifecycle closed)\n'
