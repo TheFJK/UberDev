@@ -87,6 +87,7 @@ jobs:
           bash tests/post-impl-review.test.sh && \
           bash tests/testers-pipeline.test.sh && \
           bash tests/spec-reviewer-plan-aware.test.sh && \
+          bash tests/sdd-routed-lifecycle.test.sh && \
           bash tests/audit-fixups.test.sh && \
           bash tests/review-pr.test.sh && \
           bash tests/review-pr-phase3-ci.test.sh && \
@@ -124,6 +125,7 @@ jobs:
           bash tests/child-wait.test.sh && \
           bash tests/solve-run-tree.test.sh && \
           bash tests/child-contract-v2.test.sh && \
+          bash tests/command-workspace.test.sh && \
           bash tests/production-run-tree-builder.test.sh && \
           bash tests/run-tree-callsite-contract.test.sh && \
           bash tests/route-context.test.sh && \
@@ -246,6 +248,7 @@ jobs:
         #   - child-dispatch.test.sh
         #   - child-wait.test.sh
         #   - child-contract-v2.test.sh
+        #   - command-workspace.test.sh
         #   - production-run-tree-builder.test.sh
         #   - run-tree-callsite-contract.test.sh
         #   - route-context.test.sh
@@ -254,6 +257,7 @@ jobs:
         #   - solve-triage.test.sh
         #   - dispatch-routing-parity.test.sh
         #   - orchestrator-plan-flatten.test.sh
+        #   - sdd-routed-lifecycle.test.sh
 #   - review-pr-phase3-ci.test.sh
 #   - review-child-handoff.test.sh
 #   - lib-assert-count.test.sh
