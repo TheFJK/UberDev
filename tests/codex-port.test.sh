@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shape + functional checks for the Codex port deliverables under codex/.
 # Verifies: the agent converter round-trips (md→toml, valid TOML, correct
-# field mapping incl. the haiku→gpt-5.4-mini outlier + inherit→omit); the
+# field mapping incl. RFC 0013 role-default model/effort/sandbox profiles); the
 # command converter produces 13 skills + skips the 2 Claude-only ones; generated
 # artifacts are Codex-path-safe; the installer is idempotent + installs the
 # Codex-ported skill tree; uninstall works; the plugin manifest +
@@ -49,7 +49,8 @@ assert_cmd 2 "convert-agents fails when source contains zero agents" \
 N="$(find "$TMP/agents" -name 'uberdev-*.toml' 2>/dev/null | wc -l | tr -d ' ')"
 [ "$N" -eq 44 ] && pass "44 uberdev-*.toml produced" || fail "expected 44 toml, got $N"
 
-# Every produced .toml parses as valid TOML with the 3 required keys, and the
+# Every produced .toml parses as valid TOML with the required identity and
+# execution-profile keys, and the
 # custom-agent name is namespaced to match the file (Codex uses the name field
 # as the agent identifier, not the filename).
 python3 - <<PY
@@ -58,7 +59,10 @@ files = glob.glob("$TMP/agents/uberdev-*.toml")
 bad = 0
 for p in files:
     d = tomllib.load(open(p, "rb"))
-    for k in ("name", "description", "developer_instructions"):
+    for k in (
+        "name", "description", "developer_instructions", "model",
+        "model_reasoning_effort", "sandbox_mode", "features",
+    ):
         if k not in d:
             print(f"  FAIL  {p.split('/')[-1]} missing key: {k}"); bad += 1
     expected = p.split("/")[-1].removesuffix(".toml")
@@ -68,15 +72,63 @@ sys.exit(1 if bad else 0)
 PY
 [ $? -eq 0 ] && pass "all .toml parse + have required keys + namespaced name" || fail "some .toml invalid, missing keys, or unnamespaced"
 
-echo "== Agent converter: model mapping edge cases =="
-# haiku outlier → gpt-5.4-mini
-if grep -q '^model = "gpt-5.4-mini"' "$TMP/agents/uberdev-research-test-coverage.toml"; then
-  pass "haiku model mapped to gpt-5.4-mini (research-test-coverage)"
-else fail "haiku model not mapped to gpt-5.4-mini"; fi
-# inherit (41 agents) → no model key
+echo "== Agent converter: RFC 0013 adaptive role profiles =="
+python3 - <<PY
+import glob
+import json
+import sys
+import tomllib
+from pathlib import Path
+
+policy = json.loads(Path("$REPO_ROOT/plugins/uberdev/policy/model-routing-v1.json").read_text())
+files = sorted(glob.glob("$TMP/agents/uberdev-*.toml"))
+bad = 0
+seen = set()
+for path in files:
+    role = Path(path).stem.removeprefix("uberdev-")
+    seen.add(role)
+    role_policy = policy["roles"].get(role)
+    if role_policy is None:
+        print(f"  FAIL  {role}: missing policy role"); bad += 1; continue
+    route = policy["routes"][role_policy["route"]]["codex"]
+    data = tomllib.load(open(path, "rb"))
+    expected = {
+        "model": route["model"],
+        "model_reasoning_effort": route["reasoning_effort"],
+        "sandbox_mode": role_policy["sandbox_ceiling"],
+    }
+    for key, value in expected.items():
+        if data.get(key) != value:
+            print(f"  FAIL  {role}: {key}={data.get(key)!r}, expected {value!r}"); bad += 1
+    if data.get("features", {}).get("multi_agent") is not False:
+        print(f"  FAIL  {role}: leaf profile must set features.multi_agent=false"); bad += 1
+    if "max_depth" in data.get("agents", {}):
+        print(f"  FAIL  {role}: agents.max_depth is unsupported in role profiles"); bad += 1
+
+missing = set(policy["roles"]) - seen
+extra = seen - set(policy["roles"])
+if missing or extra:
+    print(f"  FAIL  role/profile mismatch: missing={sorted(missing)}, extra={sorted(extra)}")
+    bad += 1
+sys.exit(1 if bad else 0)
+PY
+[ $? -eq 0 ] && pass "all 44 role TOMLs exactly match RFC 0013 policy defaults" \
+  || fail "generated role TOMLs drift from RFC 0013 policy defaults"
+
 N_MODEL="$(grep -lE '^model = ' "$TMP/agents"/uberdev-*.toml 2>/dev/null | wc -l | tr -d ' ')"
-[ "$N_MODEL" -eq 1 ] && pass "only 1 agent has a model key (the haiku outlier; rest inherit)" \
-  || fail "expected exactly 1 model key, found $N_MODEL"
+[ "$N_MODEL" -eq 44 ] && pass "all 44 agents pin policy-owned models" \
+  || fail "expected 44 policy-owned model keys, found $N_MODEL"
+if diff -qr "$TMP/agents" "$REPO_ROOT/codex/agents" >/tmp/codex-agent-drift 2>&1; then
+  pass "checked-in role TOMLs match deterministic converter output"
+else
+  fail "checked-in role TOMLs drift from converter output"
+  cat /tmp/codex-agent-drift
+fi
+if grep -RqlE '^model = "gpt-5\.4-mini"' "$TMP/agents" 2>/dev/null; then
+  fail "generated profiles retain legacy Claude model mapping"
+else
+  pass "generated profiles contain no legacy Claude model mapping"
+fi
 # Claude-only fields dropped
 NG="$(grep -lE '^(color|allowed-tools|tools) ' "$TMP/agents"/uberdev-*.toml 2>/dev/null | wc -l | tr -d ' ')"
 [ "$NG" -eq 0 ] && pass "Claude-only fields (color/allowed-tools/tools) dropped from all .toml" \
@@ -207,6 +259,11 @@ if grep -RqlE "$MODEL_RE|$DANGLING_WAIT_RE" "$TMP/cmd-skills" 2>/dev/null; then
 else
   pass "generated command-skills do not preserve Claude-only model guidance or dangling WAIT fragments"
 fi
+if grep -RqlF '${PLUGIN_ROOT:-${PLUGIN_ROOT:-' "$TMP/cmd-skills" 2>/dev/null; then
+  fail "generated command-skills do not nest an already-fallback-capable PLUGIN_ROOT"
+else
+  pass "generated command-skills do not nest an already-fallback-capable PLUGIN_ROOT"
+fi
 COMMAND_ROOT_LINE="$(grep -m1 '^UBERDEV_REVIEW_PLUGIN_ROOT=' "$TMP/cmd-skills/uberdev-cmd-review-pr/SKILL.md" || true)"
 COMMAND_CODEX_HOME="$TMP/command-root-home/.codex"
 COMMAND_ROOT="$(
@@ -225,6 +282,11 @@ fi
 echo "== Skill-port: no CLAUDE_PLUGIN_ROOT residuals =="
 assert_cmd 0 "port-skill runs clean" \
   bash "$PORT_SKILL" "$REPO_ROOT/plugins/uberdev/skills" "$TMP/skills"
+if grep -RqlF '${PLUGIN_ROOT:-${PLUGIN_ROOT:-' "$TMP/skills" 2>/dev/null; then
+  fail "ported skills do not nest an already-fallback-capable PLUGIN_ROOT"
+else
+  pass "ported skills do not nest an already-fallback-capable PLUGIN_ROOT"
+fi
 SKILL_ROOT_LINE="$(grep -m1 '^UBERDEV_BRAINSTORM_PLUGIN_ROOT=' "$TMP/skills/brainstorm/SKILL.md" || true)"
 SKILL_CODEX_HOME="$TMP/skill-root-home/.codex"
 SKILL_ROOT="$(

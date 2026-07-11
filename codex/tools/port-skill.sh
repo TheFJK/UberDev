@@ -71,9 +71,13 @@ while IFS= read -r -d '' f; do
   # SKILL.md. macOS sed needs -i ''. GNU sed needs -i. The temp-file path is
   # portable across both.
   tmp="$(mktemp)"
-  # 1. The canonical provider-neutral plugin-root chain gets the standalone
+  # 1. Provider-specific chains that already contain the standalone Codex
+  #    fallback collapse to that fallback before any broad variable rewrite.
+  #    Otherwise CLAUDE_PLUGIN_ROOT → PLUGIN_ROOT would create a nested
+  #    ${PLUGIN_ROOT:-${PLUGIN_ROOT:-...}} expression.
+  # 2. The canonical provider-neutral plugin-root chain gets the standalone
   #    Codex fallback before any bare variable-name normalization.
-  # 2. CLAUDE_PLUGIN_ROOT → PLUGIN_ROOT  (bare-word, any context)
+  # 3. CLAUDE_PLUGIN_ROOT → PLUGIN_ROOT  (bare-word, any context)
   #    Codex provides PLUGIN_ROOT to bundled hooks/scripts; semantically the
   #    same plugin-root concept as Claude's CLAUDE_PLUGIN_ROOT. Replacing the
   #    bare token catches every form it appears in: ${CLAUDE_PLUGIN_ROOT},
@@ -81,13 +85,14 @@ while IFS= read -r -d '' f; do
   #    and bare CLAUDE_PLUGIN_ROOT=foo env assignments. CURSOR_PLUGIN_ROOT and
   #    the COPILOT_CLI branches are left intact (they're sibling-platform
   #    fallbacks that harmlessly no-op on Codex).
-  # 3. PLUGIN_ROOT path references get a standalone-install fallback. Bundled
+  # 4. PLUGIN_ROOT path references get a standalone-install fallback. Bundled
   #    Codex plugins set PLUGIN_ROOT; the standalone installer copies the
   #    runtime to ${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex.
-  # 4. ~/.claude/CLAUDE.md → ~/.codex/AGENTS.md (Codex global instructions)
-  # 5. ~/.claude/ → ~/.codex/   (Codex config home)
-  # 6. ~/.claude  → ~/.codex     (bare, word-boundary — catches "~/.claude" at EOL)
+  # 5. ~/.claude/CLAUDE.md → ~/.codex/AGENTS.md (Codex global instructions)
+  # 6. ~/.claude/ → ~/.codex/   (Codex config home)
+  # 7. ~/.claude  → ~/.codex     (bare, word-boundary — catches "~/.claude" at EOL)
   sed \
+    -e 's|\${CLAUDE_PLUGIN_ROOT:-\${PLUGIN_ROOT:-\${CODEX_HOME:-$HOME/\.codex}/plugins/uberdev-codex}}|${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}|g' \
     -e 's|\${PLUGIN_ROOT:-\${CLAUDE_PLUGIN_ROOT:-\${CURSOR_PLUGIN_ROOT:-}}}|${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}|g' \
     -e 's|CLAUDE_PLUGIN_ROOT|PLUGIN_ROOT|g' \
     -e 's|\${PLUGIN_ROOT:-\${PLUGIN_ROOT:-\${CURSOR_PLUGIN_ROOT:-}}}|${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}|g' \
