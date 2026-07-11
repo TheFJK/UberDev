@@ -248,7 +248,8 @@ with contextlib.redirect_stdout(stdout):
 created = pathlib.Path(stdout.getvalue())
 assert created.parent == base
 assert created.name.startswith("uberdev-solve-windows-")
-assert stat.S_IMODE(created.stat().st_mode) == 0o700
+if os.name != "nt":
+    assert stat.S_IMODE(created.stat().st_mode) == 0o700
 created.rmdir()
 PY
 then

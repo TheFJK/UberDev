@@ -358,14 +358,16 @@ if ! UBERDEV_TMPDIR="$(python3 -I -B -c '
 import os,stat,sys,tempfile
 base=os.path.realpath(sys.argv[1])
 uid=os.geteuid() if hasattr(os,"geteuid") else None
+posix_security=os.name!="nt"
 owner_tag=str(uid) if uid is not None else "windows"
 entry=os.stat(base,follow_symlinks=False)
 if not stat.S_ISDIR(entry.st_mode): raise SystemExit(2)
 mode=stat.S_IMODE(entry.st_mode)
-if mode & 0o022 and not mode & stat.S_ISVTX: raise SystemExit(2)
+if posix_security and mode & 0o022 and not mode & stat.S_ISVTX: raise SystemExit(2)
 path=tempfile.mkdtemp(prefix=f"uberdev-solve-{owner_tag}-",dir=base)
-os.chmod(path,0o700); current=os.stat(path,follow_symlinks=False)
-if (uid is not None and current.st_uid!=uid) or stat.S_IMODE(current.st_mode)!=0o700: raise SystemExit(2)
+if posix_security: os.chmod(path,0o700)
+current=os.stat(path,follow_symlinks=False)
+if not stat.S_ISDIR(current.st_mode) or (uid is not None and current.st_uid!=uid) or (posix_security and stat.S_IMODE(current.st_mode)!=0o700): raise SystemExit(2)
 print(path,end="")
 ' "$_UBERDEV_TMP_BASE")"; then
   echo "error: could not allocate private solve staging under $_UBERDEV_TMP_BASE" >&2
@@ -381,10 +383,11 @@ _uberdev_cleanup_private_root() {
 import os,shutil,stat,sys
 path,base=sys.argv[1:]; path=os.path.realpath(path); base=os.path.realpath(base)
 uid=os.geteuid() if hasattr(os,"geteuid") else None
+posix_security=os.name!="nt"
 owner_tag=str(uid) if uid is not None else "windows"
 entry=os.stat(path,follow_symlinks=False)
 if os.path.dirname(path)!=base or not os.path.basename(path).startswith(f"uberdev-solve-{owner_tag}-"): raise SystemExit(2)
-if not stat.S_ISDIR(entry.st_mode) or (uid is not None and entry.st_uid!=uid) or stat.S_IMODE(entry.st_mode)!=0o700: raise SystemExit(2)
+if not stat.S_ISDIR(entry.st_mode) or (uid is not None and entry.st_uid!=uid) or (posix_security and stat.S_IMODE(entry.st_mode)!=0o700): raise SystemExit(2)
 shutil.rmtree(path)
 ' "$UBERDEV_TMPDIR" "$_UBERDEV_TMP_BASE" 2>/dev/null || true
 }
@@ -425,8 +428,9 @@ _uberdev_fetch_issue_json() {
 import os,stat,sys
 root,target=sys.argv[1:]; root=os.path.realpath(root); target=os.path.abspath(target)
 uid=os.geteuid() if hasattr(os,"geteuid") else None
+posix_security=os.name!="nt"
 root_entry=os.stat(root,follow_symlinks=False)
-if not stat.S_ISDIR(root_entry.st_mode) or (uid is not None and root_entry.st_uid!=uid) or stat.S_IMODE(root_entry.st_mode)!=0o700: raise SystemExit(2)
+if not stat.S_ISDIR(root_entry.st_mode) or (uid is not None and root_entry.st_uid!=uid) or (posix_security and stat.S_IMODE(root_entry.st_mode)!=0o700): raise SystemExit(2)
 if os.path.islink(root) or os.path.dirname(target)!=root: raise SystemExit(2)
 fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)
 entry=os.fstat(fd); os.close(fd)
