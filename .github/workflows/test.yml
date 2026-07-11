@@ -122,12 +122,20 @@ jobs:
           bash tests/live-semaphore.test.sh && \
           bash tests/agent-dispatch.test.sh && \
           bash tests/child-dispatch.test.sh && \
+          bash tests/child-dispatch-receipts.test.sh && \
+          bash tests/child-inputs.test.sh && \
           bash tests/child-wait.test.sh && \
           bash tests/solve-run-tree.test.sh && \
           bash tests/child-contract-v2.test.sh && \
           bash tests/command-workspace.test.sh && \
           bash tests/production-run-tree-builder.test.sh && \
+          bash tests/brainstorm-child-inputs.test.sh && \
+          bash tests/orchestrator-child-inputs.test.sh && \
+          bash tests/sdd-child-inputs.test.sh && \
+          bash tests/review-child-inputs.test.sh && \
+          bash tests/routed-provider-bypass.test.sh && \
           bash tests/run-tree-callsite-contract.test.sh && \
+          bash tests/run-tree-execution-receipts.test.sh && \
           bash tests/route-context.test.sh && \
           bash tests/solve-triage.test.sh && \
           bash tests/solve-routing.test.sh && \
@@ -246,11 +254,19 @@ jobs:
         #   - live-semaphore.test.sh
         #   - agent-dispatch.test.sh
         #   - child-dispatch.test.sh
+        #   - child-dispatch-receipts.test.sh
+        #   - child-inputs.test.sh
         #   - child-wait.test.sh
         #   - child-contract-v2.test.sh
         #   - command-workspace.test.sh
         #   - production-run-tree-builder.test.sh
+        #   - brainstorm-child-inputs.test.sh
+        #   - orchestrator-child-inputs.test.sh
+        #   - sdd-child-inputs.test.sh
+        #   - review-child-inputs.test.sh
+        #   - routed-provider-bypass.test.sh
         #   - run-tree-callsite-contract.test.sh
+        #   - run-tree-execution-receipts.test.sh
         #   - route-context.test.sh
         #   - route-unsupported.test.sh
         #   - solve-routing.test.sh
