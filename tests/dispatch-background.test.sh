@@ -184,6 +184,14 @@ fi
 
 echo
 echo "== Immediate terminal background wrapper keeps its exact handle =="
+FIXTURE_WAIT_BODY="$(awk '/^    _uberdev_dispatch_wait_owned_session\(\)/{f=1} f{print} f&&/^    }/{exit}' "$0")"
+if printf '%s\n' "$FIXTURE_WAIT_BODY" | grep -Eq 'state.*completed' \
+    && printf '%s\n' "$FIXTURE_WAIT_BODY" | grep -Fq 'attempts' \
+    && ! printf '%s\n' "$FIXTURE_WAIT_BODY" | grep -Fq 'ps -o'; then
+  echo "  PASS  immediate fixture waits on bounded canonical terminal evidence"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  immediate fixture waits on bounded canonical terminal evidence"; FAIL=$((FAIL + 1))
+fi
 IMMEDIATE_TMP="$(mktemp -d)"
 mkdir -p "$IMMEDIATE_TMP/bin" "$IMMEDIATE_TMP/repo" "$IMMEDIATE_TMP/tmp"
 cat > "$IMMEDIATE_TMP/bin/git" <<'SH'
@@ -204,8 +212,32 @@ IMMEDIATE_OUT="$(
   _UBERDEV_PYTHON_EXE="$REAL_PYTHON" _UBERDEV_PYTHON_PREFIX='' \
   /bin/bash -c '
     . "$1"
+    fixture_pids=()
     _uberdev_dispatch_wait_owned_session() {
-      while state="$(ps -o stat= -p "$1" 2>/dev/null)" && [ -n "$state" ] && [ "${state#Z}" = "$state" ]; do :; done
+      local status attempts=0 terminal_seen=0
+      fixture_pids+=("$1")
+      while [ "$attempts" -lt 200 ]; do
+        status="$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)"
+        if [[ "$status" == *\"state\":\"completed\"* \
+            && "$status" == *\"exit_code\":0* \
+            && -s "$UBERDEV_AGENT_RESULT_FILE" ]]; then
+          terminal_seen=1; break
+        fi
+        if [[ "$status" == *\"state\":\"failed\"* \
+            && "$status" =~ \"exit_code\":-?[1-9][0-9]* ]]; then
+          terminal_seen=1; break
+        fi
+        sleep 0.025; attempts=$((attempts + 1))
+      done
+      [ "$terminal_seen" -eq 1 ] || return 0
+      # Give the detached supervisor a bounded window to exit after publishing
+      # its canonical terminal snapshot. Returning 1 selects the exact-handle
+      # immediate-terminal validation path in the dispatcher.
+      attempts=0
+      while kill -0 "$1" 2>/dev/null && [ "$attempts" -lt 200 ]; do
+        sleep 0.025; attempts=$((attempts + 1))
+      done
+      kill -0 "$1" 2>/dev/null && return 0
       return 1
     }
     MODEL=sonnet; PERM_FLAG=(); EFFORT_FLAG=(); failures=0; issue=70
@@ -253,6 +285,16 @@ IMMEDIATE_OUT="$(
       esac
       [ -z "$partials" ] || record_failure partial_cleanup
       [ -n "${DISPATCH_ID:-}" ] || record_failure dispatch_id
+    done
+    for fixture_pid in "${fixture_pids[@]}"; do
+      attempts=0
+      while kill -0 "$fixture_pid" 2>/dev/null && [ "$attempts" -lt 200 ]; do
+        sleep 0.025; attempts=$((attempts + 1))
+      done
+      if kill -0 "$fixture_pid" 2>/dev/null; then
+        kill -TERM "$fixture_pid" 2>/dev/null || true
+      fi
+      wait "$fixture_pid" 2>/dev/null || true
     done
     printf "failures=%s\n" "$failures"
   ' _ "$DISPATCH_LIB"
