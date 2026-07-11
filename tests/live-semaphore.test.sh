@@ -681,6 +681,46 @@ else
     "race_rc=$race_rc barrier_ready=$barrier_ready observed_max=$observed_max remaining=$remaining stderr=$race_stderr"
 fi
 
+# Releasing a mutex quarantines its directory generation. A racing observer
+# must treat a legitimate generation replacement or owner disappearance as
+# contention, while stable non-regular owner paths remain fail-closed above.
+printf '== live semaphore: mutex generation replacement stress ==\n'
+REPLACE_SCOPE="$TMP/mutex-replacement.scope"
+mkdir -p "$REPLACE_SCOPE/.mutex"
+printf '%s\n%s\n' "$$" '11111111111111111111111111111111' > "$REPLACE_SCOPE/.mutex/owner_pid"
+replace_rc=0
+replace_err="$TMP/mutex-replacement.err"
+: > "$replace_err"
+(
+  round=0
+  while [ "$round" -lt 400 ]; do
+    old="$REPLACE_SCOPE/.old-$round"
+    if mv "$REPLACE_SCOPE/.mutex" "$old" 2>/dev/null; then
+      mkdir "$REPLACE_SCOPE/.mutex" || exit 1
+      printf '%s\n%s\n' "$$" '11111111111111111111111111111111' > "$REPLACE_SCOPE/.mutex/owner_pid"
+      rm -rf "$old"
+    fi
+    round=$((round + 1))
+  done
+) &
+replace_writer=$!
+round=0
+while [ "$round" -lt 800 ]; do
+  _uberdev_semaphore_mutex_reclaim_dead "$REPLACE_SCOPE" 0 2>>"$replace_err"
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    replace_rc=1
+    break
+  fi
+  round=$((round + 1))
+done
+wait "$replace_writer" || replace_rc=1
+if [ "$replace_rc" -eq 0 ] && ! grep -q 'unsafe mutex owner path' "$replace_err"; then
+  pass "mutex generation replacement remains ordinary contention"
+else
+  fail "mutex generation replacement remains ordinary contention" "$(cat "$replace_err")"
+fi
+
 printf '== live semaphore: killed owner, stale timeout, and backend liveness ==\n'
 SUBSHELL_STATE="$TMP/subshell-killed-state"
 SUBSHELL_PATH_FILE="$TMP/subshell-killed-lease-path"

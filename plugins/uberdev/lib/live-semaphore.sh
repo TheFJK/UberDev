@@ -352,7 +352,7 @@ _uberdev_semaphore_mutex_release() {
 }
 
 _uberdev_semaphore_mutex_reclaim_dead() {
-  local scope mutex allow_reclaim owner observed identity
+  local scope mutex allow_reclaim owner observed identity current_identity
   scope="$1"
   allow_reclaim="${2:-0}"
   mutex="$scope/.mutex"
@@ -377,10 +377,19 @@ _uberdev_semaphore_mutex_reclaim_dead() {
     _uberdev_semaphore_quarantine_mutex "$scope" "$identity"
     return $?
   fi
-  [ -f "$mutex/owner_pid" ] || {
+  if [ ! -f "$mutex/owner_pid" ]; then
+    # A legitimate holder may atomically quarantine this mutex while a new
+    # contender creates its successor between the existence and type checks.
+    # Retry only when that directory generation changed or the owner vanished;
+    # a stable non-regular owner remains a fail-closed path violation.
+    current_identity="$(_uberdev_semaphore_path_identity "$mutex" 2>/dev/null || true)"
+    if [ -z "$current_identity" ] || [ "$current_identity" != "$identity" ] \
+        || [ ! -e "$mutex/owner_pid" ]; then
+      return 1
+    fi
     _uberdev_semaphore_error 'unsafe mutex owner path'
     return 2
-  }
+  fi
   owner="$(sed -n '1p' "$mutex/owner_pid" 2>/dev/null || true)"
   if ! _uberdev_semaphore_is_positive_integer "$owner"; then
     [ "$allow_reclaim" -eq 1 ] || return 1
