@@ -180,11 +180,11 @@ jobs:
   shape-checks-windows:
     name: shape-checks-windows
     runs-on: windows-latest
-    # Proves the shape-check harness is Git-Bash-portable on native Windows
-    # (RFC 0004 §3.8 / D10). windows-latest ships Git for Windows -> Git Bash
-    # is on PATH. Runtime dispatch validation stays out of scope: the suite
-    # is grep-and-assert throughout.
-    timeout-minutes: 5
+    # Proves the shape-check harness and routed dispatch lifecycle are portable
+    # on native Windows/Git Bash. Real detached-process fixtures now run close
+    # to five minutes; ten minutes preserves a bounded hang guard across hosted
+    # runner variance.
+    timeout-minutes: 10
     defaults:
       run:
         # Force every `run:` step into Git Bash, not PowerShell or cmd.
