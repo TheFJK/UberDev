@@ -66,6 +66,102 @@ assert payload["error"] == "terminal_finalize_failed" and payload["attempts"] ==
 assert not glob.glob(os.path.join(os.path.dirname(output_path), ".watcher-error.*"))
 PY
 
+python3 -I - "$LIB" "$TMP/run/windows-agent-status.json" <<'PY'
+import glob
+import json
+import os
+import stat
+import sys
+import tempfile
+
+source_path, output_path = sys.argv[1:]
+with open(source_path, encoding="utf-8") as handle:
+    source = handle.read()
+function = source.index("_uberdev_agent_publish_status() {")
+prefix = "python3 -I -c '\n"
+start = source.index(prefix, function) + len(prefix)
+end = source.index("\n' \"$status_path\"", start)
+snippet = source[start:end]
+original_name = os.name
+original_fchmod = getattr(os, "fchmod", None)
+os.name = "nt"
+if original_fchmod is not None:
+    del os.fchmod
+try:
+    sys.argv = ["agent-status", output_path, "codex", "handle-1", "running", "", "create", "", ""]
+    exec(compile(snippet, "agent-status-publisher", "exec"), {})
+    sys.argv = ["agent-status", output_path, "codex", "handle-1", "running", "", "create", "", ""]
+    exec(compile(snippet, "agent-status-publisher", "exec"), {})
+    sys.argv = ["agent-status", output_path, "codex", "handle-1", "completed", "0", "replace", "", ""]
+    exec(compile(snippet, "agent-status-publisher", "exec"), {})
+finally:
+    os.name = original_name
+    if original_fchmod is not None:
+        os.fchmod = original_fchmod
+with open(output_path, encoding="utf-8") as handle:
+    payload = json.load(handle)
+assert payload["state"] == "completed" and payload["exit_code"] == 0
+assert not glob.glob(os.path.join(os.path.dirname(output_path), ".agent-status.*"))
+PY
+
+python3 -I - "$LIB" "$TMP/run" <<'PY'
+import contextlib
+import glob
+import hashlib
+import io
+import json
+import os
+import re
+import secrets
+import stat
+import sys
+import tempfile
+
+source_path, run_root = sys.argv[1:]
+with open(source_path, encoding="utf-8") as handle:
+    source = handle.read()
+function = source.index("uberdev_agent_context_create() {")
+prefix = "python3 -I -B -c '\n"
+start = source.index(prefix, function) + len(prefix)
+end = source.index("\n' \"$1\" \"$payload\"", start)
+snippet = source[start:end]
+payload = json.dumps({"metadata": {"run_id": "windows-route", "workflow": "solve"}}, sort_keys=True, separators=(",", ":"))
+run_root = os.path.realpath(run_root)
+original_name = os.name
+original_fchmod = getattr(os, "fchmod", None)
+os.name = "nt"
+if original_fchmod is not None:
+    del os.fchmod
+try:
+    sys.argv = ["route-context", run_root, payload]
+    stdout = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(stdout):
+            exec(compile(snippet, "route-context-publisher", "exec"), {})
+    except SystemExit as exc:
+        assert exc.code == 0, exc.code
+    result = json.loads(stdout.getvalue())
+    destination = result["context_file"]
+    with open(destination, encoding="utf-8") as handle:
+        assert handle.read() == payload
+    assert result["context_sha256"] == hashlib.sha256(payload.encode()).hexdigest()
+    assert not glob.glob(os.path.join(os.path.dirname(destination), ".route-context.*"))
+    sys.argv = ["route-context", run_root, payload]
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            exec(compile(snippet, "route-context-publisher", "exec"), {})
+    except SystemExit as exc:
+        assert exc.code == 2, exc.code
+    else:
+        raise AssertionError("immutable Windows route context was replaced")
+    with open(destination, encoding="utf-8") as handle:
+        assert handle.read() == payload
+finally:
+    os.name = original_name
+    if original_fchmod is not None:
+        os.fchmod = original_fchmod
+PY
+
 REQUEST="$(python3 - "$TMP/run" <<'PY'
 import json, sys
 run = sys.argv[1]

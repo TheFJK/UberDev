@@ -469,9 +469,16 @@ uberdev_agent_context_create() {
     _uberdev_agent_error 'route_context_create_failed'; return 2;
   }
   python3 -I -B -c '
-import hashlib,json,os,re,secrets,stat,sys
+import hashlib,json,os,re,secrets,stat,sys,tempfile
 root,payload_raw=sys.argv[1:]
 try:
+ lexical_root=os.path.abspath(root)
+ if os.name=="nt":
+  drive,tail=os.path.splitdrive(lexical_root); current=drive+os.path.sep
+  for component in tail.split(os.path.sep):
+   if not component: continue
+   current=os.path.join(current,component)
+   if os.path.lexists(current) and stat.S_ISLNK(os.lstat(current).st_mode): raise ValueError()
  root=os.path.realpath(root)
  entry=os.stat(root,follow_symlinks=False)
  uid_fn=getattr(os,"geteuid",None); uid=uid_fn() if uid_fn else None
@@ -479,6 +486,36 @@ try:
  payload=json.loads(payload_raw); metadata=payload["metadata"]
  run_id=metadata["run_id"]
  state_name=f".agent-state-{uid if uid is not None else 0}"; state=os.path.join(root,state_name)
+ raw=payload_raw.encode()
+ digest=hashlib.sha256(raw).hexdigest(); destination=os.path.join(state,f"route-context-v1-{run_id}.json")
+ if os.name=="nt":
+  os.makedirs(state,exist_ok=True)
+  se=os.lstat(state)
+  if stat.S_ISLNK(se.st_mode) or not stat.S_ISDIR(se.st_mode): raise ValueError()
+  reserve_fd=os.open(destination,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_BINARY",0),0o600)
+  try: reservation=os.fstat(reserve_fd)
+  finally: os.close(reserve_fd)
+  reserved=True; fd=None; tmp=None
+  try:
+   fd,tmp=tempfile.mkstemp(prefix=".route-context.",dir=state)
+   written=os.write(fd,raw)
+   if written!=len(raw): raise ValueError()
+   os.fsync(fd); os.close(fd); fd=None
+   current=os.lstat(destination)
+   if (not stat.S_ISREG(current.st_mode) or current.st_size!=0
+       or (current.st_dev,current.st_ino)!=(reservation.st_dev,reservation.st_ino)): raise ValueError()
+   os.replace(tmp,destination); tmp=None; reserved=False
+  finally:
+   if fd is not None: os.close(fd)
+   if tmp is not None and os.path.exists(tmp): os.unlink(tmp)
+   if reserved and os.path.lexists(destination):
+    current=os.lstat(destination)
+    if ((current.st_dev,current.st_ino)==(reservation.st_dev,reservation.st_ino)
+        and stat.S_ISREG(current.st_mode) and current.st_size==0): os.unlink(destination)
+  current=os.lstat(state)
+  if (current.st_dev,current.st_ino)!=(se.st_dev,se.st_ino): raise ValueError()
+  print(json.dumps({"context_file":destination,"context_sha256":digest,"run_id":run_id,"workflow":metadata["workflow"]},sort_keys=True,separators=(",",":")),end="")
+  raise SystemExit(0)
  rootfd=os.open(root,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0))
  try:
   try: os.mkdir(state_name,0o700,dir_fd=rootfd)
@@ -488,8 +525,6 @@ try:
  se=os.fstat(statefd)
  if not stat.S_ISDIR(se.st_mode) or (uid is not None and se.st_uid!=uid): raise ValueError()
  os.fchmod(statefd,0o700)
- raw=payload_raw.encode()
- digest=hashlib.sha256(raw).hexdigest(); destination=os.path.join(state,f"route-context-v1-{run_id}.json")
  tmp=f".route-context.{secrets.token_hex(16)}"; fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600,dir_fd=statefd)
  try:
   os.fchmod(fd,0o600)
@@ -619,8 +654,10 @@ if process_identity: payload["process_identity"] = process_identity
 if lease_generation: payload["lease_generation"] = lease_generation
 fd, temporary = tempfile.mkstemp(prefix=".agent-status.", dir=parent)
 try:
-    os.fchmod(fd, 0o600)
+    if os.name != "nt":
+        os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        fd = None
         json.dump(payload, stream, sort_keys=True, separators=(",", ":"))
         stream.write("\n")
         stream.flush()
@@ -632,7 +669,7 @@ try:
             entry = os.lstat(path)
             if (stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode)
                     or (getattr(os,"geteuid",None) is not None and entry.st_uid != getattr(os,"geteuid")()) or entry.st_nlink != 1
-                    or stat.S_IMODE(entry.st_mode) != 0o600):
+                    or (os.name != "nt" and stat.S_IMODE(entry.st_mode) != 0o600)):
                 raise SystemExit(2)
             replace = entry.st_size == 0
             if not replace:
@@ -651,6 +688,8 @@ try:
             raise SystemExit(2)
         os.replace(temporary, path)
 finally:
+    if fd is not None:
+        os.close(fd)
     if os.path.exists(temporary):
         os.unlink(temporary)
 ' "$status_path" "$backend" "$handle" "$state" "$exit_code" "$mode" "$process_identity" "$lease_generation"
