@@ -501,9 +501,16 @@ BEH_OUT="$(
       sleep 0.025; i=$((i + 1))
     done
     i=0
-    while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 5 ]; do
-      sleep 1
-      i=$((i + 1))
+    while [ "$i" -lt 400 ]; do
+      terminal="$(cat "$status_file" 2>/dev/null)"
+      case "$terminal" in
+        *\"state\":\"completed\"*|*\"state\":\"failed\"*) break ;;
+      esac
+      sleep 0.025; i=$((i + 1))
+    done
+    i=0
+    while [ -n "$pid" ] && _uberdev_dispatch_wait_owned_session "$pid" && [ "$i" -lt 200 ]; do
+      sleep 0.025; i=$((i + 1))
     done
     printf "rc=%s\npid=%s\nrunning=%s\n" "$rc" "$pid" "$running"
     printf "status=%s\n" "$(cat "$UBERDEV_TMPDIR/solve-codex-status-42.json" 2>/dev/null)"
@@ -572,7 +579,7 @@ printf 'inherit prompt' > "$INHERIT_TMP/prompt.txt"
   cd "$INHERIT_TMP/repo"
   PATH="$INHERIT_TMP/bin:/usr/bin:/bin" UBERDEV_TMPDIR="$INHERIT_TMP/tmp" \
     UBERDEV_AGENT_ROUTING_MODE=inherit UBERDEV_AGENT_SERVICE_TIER=fast CODEX_CAPTURE="$INHERIT_TMP/capture.txt" \
-    bash -c '. "$1"; _uberdev_dispatch_codex 43 small "$2"; pid=$DISPATCH_ID; i=0; while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 5 ]; do sleep 1; i=$((i+1)); done' \
+    bash -c '. "$1"; _uberdev_dispatch_codex 43 small "$2"; pid=$DISPATCH_ID; i=0; while [ "$i" -lt 400 ]; do status="$(cat "$UBERDEV_TMPDIR/solve-codex-status-43.json" 2>/dev/null)"; case "$status" in *\"state\":\"completed\"*|*\"state\":\"failed\"*) break ;; esac; sleep 0.025; i=$((i+1)); done; i=0; while _uberdev_dispatch_wait_owned_session "$pid" && [ "$i" -lt 200 ]; do sleep 0.025; i=$((i+1)); done' \
     _ "$DISPATCH_LIB" "$INHERIT_TMP/prompt.txt"
 )
 if grep -Fq -- '[-m]' "$INHERIT_TMP/capture.txt" \
@@ -592,7 +599,7 @@ rm -f "$INHERIT_TMP/capture.txt"
     UBERDEV_AGENT_ROUTING_MODE=shadow UBERDEV_AGENT_EFFECTIVE_POLICY=inherit \
     UBERDEV_AGENT_ROUTE_MODEL=gpt-5.6-sol UBERDEV_AGENT_ROUTE_EFFORT=medium \
     UBERDEV_AGENT_SERVICE_TIER=fast CODEX_CAPTURE="$INHERIT_TMP/capture.txt" \
-    bash -c '. "$1"; _uberdev_dispatch_codex 44 small "$2"; pid=$DISPATCH_ID; i=0; while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 5 ]; do sleep 1; i=$((i+1)); done' \
+    bash -c '. "$1"; _uberdev_dispatch_codex 44 small "$2"; pid=$DISPATCH_ID; i=0; while [ "$i" -lt 400 ]; do status="$(cat "$UBERDEV_TMPDIR/solve-codex-status-44.json" 2>/dev/null)"; case "$status" in *\"state\":\"completed\"*|*\"state\":\"failed\"*) break ;; esac; sleep 0.025; i=$((i+1)); done; i=0; while _uberdev_dispatch_wait_owned_session "$pid" && [ "$i" -lt 200 ]; do sleep 0.025; i=$((i+1)); done' \
     _ "$DISPATCH_LIB" "$INHERIT_TMP/prompt.txt"
 )
 if grep -Fq -- '[-m]' "$INHERIT_TMP/capture.txt" \
@@ -640,7 +647,13 @@ FAIL_OUT="$(
     rc=$?
     pid="${DISPATCH_ID:-}"
     i=0
-    while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 5 ]; do sleep 1; i=$((i + 1)); done
+    while [ "$i" -lt 400 ]; do
+      status="$(cat "$UBERDEV_TMPDIR/solve-codex-status-42.json" 2>/dev/null)"
+      case "$status" in *\"state\":\"completed\"*|*\"state\":\"failed\"*) break ;; esac
+      sleep 0.025; i=$((i + 1))
+    done
+    i=0
+    while [ -n "$pid" ] && _uberdev_dispatch_wait_owned_session "$pid" && [ "$i" -lt 200 ]; do sleep 0.025; i=$((i + 1)); done
     printf "rc=%s\nstatus=%s\nresult=%s\n" "$rc" "$(cat "$UBERDEV_TMPDIR/solve-codex-status-42.json" 2>/dev/null)" "$(cat "$UBERDEV_TMPDIR/solve-codex-result-42.md" 2>/dev/null)"
   ' _ "$DISPATCH_LIB" "$FAIL_TMP/prompt.txt"
 )"
@@ -653,6 +666,12 @@ esac
 rm -rf "$FAIL_TMP"
 
 echo "== _uberdev_dispatch_codex immediate terminal handoff =="
+unix_ps_pattern='ps -o ''stat= -p'
+if grep -Fq "$unix_ps_pattern" "$0"; then
+  fail_msg "Codex fixtures avoid Unix-only process-table polling"
+else
+  pass_msg "Codex fixtures await canonical terminal evidence portably"
+fi
 IMMEDIATE_TMP="$(mktemp -d)"
 mkdir -p "$IMMEDIATE_TMP/bin" "$IMMEDIATE_TMP/repo" "$IMMEDIATE_TMP/tmp"
 cat > "$IMMEDIATE_TMP/bin/git" <<'SH'
@@ -680,8 +699,13 @@ IMMEDIATE_OUT="$(
     # artificial sleep: wait reaps the exact wrapper before reporting that its
     # owned session can no longer be observed.
     _uberdev_dispatch_wait_owned_session() {
-      while state="$(ps -o stat= -p "$1" 2>/dev/null)" && [ -n "$state" ] && [ "${state#Z}" = "$state" ]; do :; done
-      return 1
+      local status i=0
+      while [ "$i" -lt 400 ]; do
+        status="$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)"
+        case "$status" in *\"state\":\"completed\"*|*\"state\":\"failed\"*) return 1 ;; esac
+        sleep 0.025; i=$((i + 1))
+      done
+      return 0
     }
     failures=0; details=""
     for outcome in completed failed completed failed completed failed; do
@@ -767,7 +791,13 @@ RACE_OUT="$(
     rc=$?
     pid="${DISPATCH_ID:-}"
     i=0
-    while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 5 ]; do sleep 1; i=$((i + 1)); done
+    while [ "$i" -lt 400 ]; do
+      status="$(cat "$UBERDEV_TMPDIR/solve-codex-status-42.json" 2>/dev/null)"
+      case "$status" in *\"state\":\"completed\"*|*\"state\":\"failed\"*) break ;; esac
+      sleep 0.025; i=$((i + 1))
+    done
+    i=0
+    while [ -n "$pid" ] && _uberdev_dispatch_wait_owned_session "$pid" && [ "$i" -lt 200 ]; do sleep 0.025; i=$((i + 1)); done
     printf "rc=%s\npid=%s\nstatus=%s\nresult=%s\n" "$rc" "$pid" "$(cat "$UBERDEV_TMPDIR/solve-codex-status-42.json" 2>/dev/null)" "$(cat "$UBERDEV_TMPDIR/solve-codex-result-42.md" 2>/dev/null)"
   ' _ "$DISPATCH_LIB" "$RACE_TMP/prompt.txt"
 )"
