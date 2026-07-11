@@ -473,6 +473,38 @@ print(state,end="")
 PY
 }
 
+# Remove the one deterministic background-result staging file belonging to a
+# verified-dead wrapper. The caller must first prove complete process-group
+# death with _uberdev_dispatch_cancel_backend. This helper never globs and
+# never follows a parent, result, or staging-file symlink.
+_uberdev_dispatch_cleanup_dead_partial_result() {
+  local result_file="$1" handle="$2"
+  python3 -I -B - "$result_file" "$handle" <<'PY'
+import os,stat,sys
+result,pid=sys.argv[1:]
+if not os.path.isabs(result) or not pid.isdigit() or int(pid)<=0: raise SystemExit(2)
+parent=os.path.dirname(result); result_name=os.path.basename(result)
+partial_name=f"{result_name}.partial.{pid}"
+parent_fd=os.open(parent,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0))
+result_fd=partial_fd=None
+try:
+ result_fd=os.open(result_name,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0),dir_fd=parent_fd)
+ result_entry=os.fstat(result_fd)
+ if not stat.S_ISREG(result_entry.st_mode) or result_entry.st_uid!=os.geteuid() or result_entry.st_nlink!=1: raise ValueError()
+ try: partial_fd=os.open(partial_name,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0),dir_fd=parent_fd)
+ except FileNotFoundError: raise SystemExit(0)
+ opened=os.fstat(partial_fd); current=os.stat(partial_name,dir_fd=parent_fd,follow_symlinks=False)
+ if (not stat.S_ISREG(opened.st_mode) or opened.st_uid!=os.geteuid() or opened.st_nlink!=1
+     or stat.S_IMODE(opened.st_mode)!=0o600
+     or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)): raise ValueError()
+ os.unlink(partial_name,dir_fd=parent_fd)
+finally:
+ if partial_fd is not None: os.close(partial_fd)
+ if result_fd is not None: os.close(result_fd)
+ os.close(parent_fd)
+PY
+}
+
 # Cancel one already-registered provider handle. Numeric processes require the
 # launch-time process identity recorded by agent-dispatch; a reused PID is
 # rejected before signaling. Opaque providers use their native handle API and
@@ -953,8 +985,20 @@ _uberdev_dispatch_background() {
     }
     write_status running null || exit 126
     cd "$WORKTREE_DIR" || { write_status failed 127; exit 127; }
-    TMP_RESULT="$(mktemp "${RESULT_FILE}.tmp.XXXXXX")" || { write_status failed 126; exit 126; }
-    chmod 600 "$TMP_RESULT" || { rm -f -- "$TMP_RESULT"; write_status failed 126; exit 126; }
+    TMP_RESULT="${RESULT_FILE}.partial.${WRAPPER_PID}"
+    TMP_RESULT_ID="$(python3 -I -c '\''import os,sys; p=sys.argv[1]; fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600); os.fchmod(fd,0o600); e=os.fstat(fd); os.close(fd); print(f"{e.st_dev}:{e.st_ino}",end="")'\'' "$TMP_RESULT")" \
+      || { write_status failed 126; exit 126; }
+    cleanup_partial() {
+      python3 -I -c '\''import os,stat,sys; p,identity=sys.argv[1:]; parent,name=os.path.dirname(p),os.path.basename(p); d=os.open(parent,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0)); f=None
+try:
+ f=os.open(name,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0),dir_fd=d); e=os.fstat(f); c=os.stat(name,dir_fd=d,follow_symlinks=False)
+ if stat.S_ISREG(e.st_mode) and e.st_uid==os.geteuid() and e.st_nlink==1 and stat.S_IMODE(e.st_mode)==0o600 and f"{e.st_dev}:{e.st_ino}"==identity and (e.st_dev,e.st_ino)==(c.st_dev,c.st_ino): os.unlink(name,dir_fd=d)
+except FileNotFoundError: pass
+finally:
+ os.close(f) if f is not None else None; os.close(d)'\'' "$TMP_RESULT" "$TMP_RESULT_ID" >/dev/null 2>&1 || true
+    }
+    trap cleanup_partial EXIT
+    trap '\''exit 143'\'' HUP INT TERM
     "$@" > "$TMP_RESULT"
     PROVIDER_RC=$?
     cat "$TMP_RESULT"
@@ -969,6 +1013,7 @@ _uberdev_dispatch_background() {
     else
       rm -f -- "$TMP_RESULT"
     fi
+    trap - EXIT HUP INT TERM
     write_status "$STATE" "$PROVIDER_RC" || exit 126
     exit "$PROVIDER_RC"
   ' _ "$WORKTREE_DIR" "$STATUS_FILE" "$RESULT_FILE" "$ISSUE_NUM" "$TIER" "${PROVIDER_CMD[@]}" \

@@ -177,6 +177,57 @@ set -e
 grep -q '"event":"timed_out".*"run_id":"timeout-0003"' "$TMP/run/.agent-state-$(id -u)/agent-lifecycle.jsonl"
 ! grep -R -q 'run_id=timeout-0003' "$TMP/run/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
 
+# The production background wrapper captures provider stdout in a private
+# partial result before promotion. A provider that emits sensitive output and
+# ignores TERM forces cancellation through the verified group-death/KILL path;
+# the exact owned partial must be gone afterward, while the canonical result is
+# never promoted and lifecycle/lease truth still converges.
+BG_OUT="$(make_context "$TMP/background-timeout-run" inherit root-background-timeout background)"
+BG_CTX="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["context_file"])' "$BG_OUT")"
+BG_SHA="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["context_sha256"])' "$BG_OUT")"
+mkdir -p "$TMP/background-timeout-run/inputs" "$TMP/background-timeout-bin" "$TMP/background-timeout-repo"
+printf 'background timeout input\n' >"$TMP/background-timeout-run/inputs/task.md"
+python3 - "$TMP/background-timeout-handoff.json" "$BG_CTX" "$BG_SHA" "$TMP/background-timeout-run/inputs/task.md" <<'PY'
+import json,sys
+p,c,s,i=sys.argv[1:]
+json.dump({'schema_version':1,'carrier':{'schema_version':1,'run_id':'root-background-timeout','workflow':'solve','issue_num':42,'context_file':c,'context_sha256':s},'edge_id':'background-timeout','instance_id':'background-timeout-0004','parent_run_id':'root-background-timeout','role':'implementation-worker','phase':'implementation','risk_scope':'subtask','risk_signals':[],'inputs':{'paths':[i]}},open(p,'w'),separators=(',',':'))
+PY
+cat >"$TMP/background-timeout-bin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = worktree ] && [ "$2" = add ]; then mkdir -p "$3"; exit 0; fi
+exit 1
+SH
+cat >"$TMP/background-timeout-bin/claude" <<'SH'
+#!/usr/bin/env bash
+printf 'SENSITIVE-PARTIAL-RESULT\n'
+trap '' TERM
+while :; do sleep 1; done
+SH
+chmod +x "$TMP/background-timeout-bin/git" "$TMP/background-timeout-bin/claude"
+(
+  cd "$TMP/background-timeout-repo"
+  PATH="$TMP/background-timeout-bin:/usr/bin:/bin" MODEL=sonnet AUTO_MODE=0 SKIP_PERMISSIONS=0 \
+    CHILD_LIB="$LIB" BG_HANDOFF="$TMP/background-timeout-handoff.json" \
+    BG_RESULT="$TMP/background-timeout-run/children/background-timeout-0004/result.md" \
+    BG_STATUS="$TMP/background-timeout-run/children/background-timeout-0004/status.json" \
+    bash -c '
+      set -eo pipefail
+      . "$CHILD_LIB"
+      PERM_FLAG=(); EFFORT_FLAG=()
+      uberdev_dispatch_child background-timeout "$BG_HANDOFF" "$BG_RESULT" "$BG_STATUS" >/dev/null
+      set +e
+      uberdev_wait_child "$BG_STATUS" "$BG_RESULT" 1 >/dev/null
+      rc=$?
+      set -e
+      [ "$rc" -eq 124 ]
+    '
+)
+BG_CHILD="$TMP/background-timeout-run/children/background-timeout-0004"
+[ ! -s "$BG_CHILD/result.md" ]
+[ -z "$(find "$BG_CHILD" -maxdepth 1 \( -name 'result.md.partial.*' -o -name 'result.md.tmp.*' \) -print -quit)" ]
+grep -q '"event":"timed_out".*"run_id":"background-timeout-0004"' "$TMP/background-timeout-run/.agent-state-$(id -u)/agent-lifecycle.jsonl"
+! grep -R -q 'run_id=background-timeout-0004' "$TMP/background-timeout-run/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
+
 # Real WezTerm provider arm: a stubbed CLI executes the actual pane wrapper.
 # Agent dispatch canonicalizes the precreated empty status to pane:<id> plus
 # generation, returns a closed receipt, then watcher/wait reconcile terminal.

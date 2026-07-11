@@ -922,8 +922,13 @@ _uberdev_agent_start_watcher() {
           ''|*[!0-9]*) ;;
           *)
             if ! kill -0 "$handle" 2>/dev/null; then
-              terminal_event=failed
-              break
+              absent_count=$((absent_count + 1))
+              if [ "$absent_count" -ge 3 ]; then
+                terminal_event=failed
+                break
+              fi
+            else
+              absent_count=0
             fi
             ;;
         esac

@@ -350,6 +350,9 @@ PY
       [ "${lease_info#*	}" = "$lease_generation" ] && [ -n "$lease_generation" ] || return 2
       lease_identity="$(_uberdev_agent_lease_identity "$lease")" || return 2
       _uberdev_dispatch_cancel_backend "$backend" "$handle" "$process_identity" || return 2
+      if [ "$backend" = background ]; then
+        _uberdev_dispatch_cleanup_dead_partial_result "$result" "$handle" || return 2
+      fi
       cas="$(_uberdev_child_timeout_cas "$status_file" "$snapshot" "$handle" "$lease_generation" 2>/dev/null)"; rc=$?
       if [ "$rc" -eq 3 ]; then continue; fi
       [ "$rc" -eq 0 ] && [ "$cas" = updated ] || return 2

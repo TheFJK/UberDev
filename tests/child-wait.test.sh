@@ -67,6 +67,18 @@ _uberdev_dispatch_cancel_backend background "$TERM_GUARD" "$TERM_IDENTITY"
 ! kill -0 "$TERM_GUARD" 2>/dev/null
 ! kill -0 "$TERM_CHILD" 2>/dev/null
 
+# Exact post-death partial cleanup never follows or removes attacker-controlled
+# symlink/hardlink targets. It fails closed without globbing sibling files.
+printf 'victim\n' >"$TMP/victim"
+ln -s "$TMP/victim" "${RESULT}.partial.991"
+! _uberdev_dispatch_cleanup_dead_partial_result "$RESULT" 991 >/dev/null 2>&1
+[ "$(cat "$TMP/victim")" = victim ]
+rm -f "${RESULT}.partial.991"
+ln "$TMP/victim" "${RESULT}.partial.992"
+! _uberdev_dispatch_cleanup_dead_partial_result "$RESULT" 992 >/dev/null 2>&1
+[ "$(cat "$TMP/victim")" = victim ]
+rm -f "${RESULT}.partial.992"
+
 # A precreated private zero-byte status target is the normal delayed-wrapper
 # race and must be atomically canonicalized, not parsed as malformed JSON.
 ZERO_STATUS="$TMP/run/children/worker-0001/zero-status.json"
@@ -128,4 +140,4 @@ zsh -f -c '. "$1"; uberdev_wait_child "$2" "$3" 2' _ "$LIB" "$STATUS" "$RESULT" 
 ! uberdev_wait_child "$TMP/outside-status" "$RESULT" 1 >/dev/null 2>&1
 ! uberdev_wait_child "$STATUS" "$TMP/outside-result" 1 >/dev/null 2>&1
 ! uberdev_wait_child "$STATUS" "$RESULT" 0 >/dev/null 2>&1
-echo 'child-wait: 41 checks passed'
+echo 'child-wait: 45 checks passed'

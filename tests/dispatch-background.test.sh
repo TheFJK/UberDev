@@ -166,6 +166,8 @@ IMMEDIATE_OUT="$(
           ;;
         *) failures=$((failures + 1)) ;;
       esac
+      [ -z "$(find "$UBERDEV_TMPDIR" -maxdepth 1 \( -name "result-$issue.md.partial.*" -o -name "result-$issue.md.tmp.*" \) -print -quit)" ] \
+        || failures=$((failures + 1))
       [ -n "${DISPATCH_ID:-}" ] || failures=$((failures + 1))
     done
     printf "failures=%s\n" "$failures"
