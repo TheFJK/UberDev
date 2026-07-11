@@ -212,6 +212,7 @@ IMMEDIATE_OUT="$(
   _UBERDEV_PYTHON_EXE="$REAL_PYTHON" _UBERDEV_PYTHON_PREFIX='' \
   /bin/bash -c '
     . "$1"
+    UBERDEV_DETACH_DIAGNOSTICS=1; export UBERDEV_DETACH_DIAGNOSTICS
     fixture_pids=()
     _uberdev_dispatch_wait_owned_session() {
       local status attempts=0 terminal_seen=0

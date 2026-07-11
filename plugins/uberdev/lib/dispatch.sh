@@ -1011,12 +1011,22 @@ _uberdev_dispatch_background() {
   _uberdev_dispatch_resolve_python || { DISPATCH_RC=1; DISPATCH_LOG="$LOG_FILE"; return 1; }
   local PYTHON_LAUNCH=( "$_UBERDEV_PYTHON_EXE" )
   [ -z "$_UBERDEV_PYTHON_PREFIX" ] || PYTHON_LAUNCH+=( "$_UBERDEV_PYTHON_PREFIX" )
-  nohup "${PYTHON_LAUNCH[@]}" -I -c 'import os,subprocess,sys
+  nohup "${PYTHON_LAUNCH[@]}" -I -c 'import os,shutil,subprocess,sys,traceback
 argv=["bash","-c",*sys.argv[1:]]
 if os.name=="nt":
  os.environ["UBERDEV_WRAPPER_PID"]=str(os.getpid())
  flags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
- raise SystemExit(subprocess.call(argv,creationflags=flags))
+ diagnostic=os.environ.get("UBERDEV_DETACH_DIAGNOSTICS")=="1"
+ bash_path=shutil.which("bash")
+ if diagnostic: print(f"detach diagnostic: bash={bash_path!r} cwd={os.getcwd()!r} flags={flags} argv={argv!r}",file=sys.stderr,flush=True)
+ try: child=subprocess.Popen(argv,creationflags=flags)
+ except BaseException:
+  if diagnostic: traceback.print_exc(file=sys.stderr)
+  raise
+ if diagnostic: print(f"detach diagnostic: child_pid={child.pid}",file=sys.stderr,flush=True)
+ rc=child.wait()
+ if diagnostic: print(f"detach diagnostic: child_rc={rc}",file=sys.stderr,flush=True)
+ raise SystemExit(rc)
 os.setsid()
 os.execvp("bash",argv)' '
     PYTHON_EXE="$1"; PYTHON_PREFIX="$2"; shift 2
@@ -1199,12 +1209,22 @@ _uberdev_dispatch_codex() {
   _uberdev_dispatch_resolve_python || { DISPATCH_RC=1; DISPATCH_LOG="$LOG_FILE"; return 1; }
   local PYTHON_LAUNCH=( "$_UBERDEV_PYTHON_EXE" )
   [ -z "$_UBERDEV_PYTHON_PREFIX" ] || PYTHON_LAUNCH+=( "$_UBERDEV_PYTHON_PREFIX" )
-  nohup "${PYTHON_LAUNCH[@]}" -I -c 'import os,subprocess,sys
+  nohup "${PYTHON_LAUNCH[@]}" -I -c 'import os,shutil,subprocess,sys,traceback
 argv=["bash","-c",*sys.argv[1:]]
 if os.name=="nt":
  os.environ["UBERDEV_WRAPPER_PID"]=str(os.getpid())
  flags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
- raise SystemExit(subprocess.call(argv,creationflags=flags))
+ diagnostic=os.environ.get("UBERDEV_DETACH_DIAGNOSTICS")=="1"
+ bash_path=shutil.which("bash")
+ if diagnostic: print(f"detach diagnostic: bash={bash_path!r} cwd={os.getcwd()!r} flags={flags} argv={argv!r}",file=sys.stderr,flush=True)
+ try: child=subprocess.Popen(argv,creationflags=flags)
+ except BaseException:
+  if diagnostic: traceback.print_exc(file=sys.stderr)
+  raise
+ if diagnostic: print(f"detach diagnostic: child_pid={child.pid}",file=sys.stderr,flush=True)
+ rc=child.wait()
+ if diagnostic: print(f"detach diagnostic: child_rc={rc}",file=sys.stderr,flush=True)
+ raise SystemExit(rc)
 os.setsid()
 os.execvp("bash",argv)' '
       ISSUE_NUM="$1"
