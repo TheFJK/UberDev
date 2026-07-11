@@ -135,7 +135,6 @@ jobs:
           bash tests/review-child-inputs.test.sh && \
           bash tests/routed-provider-bypass.test.sh && \
           bash tests/run-tree-callsite-contract.test.sh && \
-          bash tests/run-tree-execution-receipts.test.sh && \
           bash tests/route-context.test.sh && \
           bash tests/solve-triage.test.sh && \
           bash tests/solve-routing.test.sh && \
@@ -266,7 +265,6 @@ jobs:
         #   - review-child-inputs.test.sh
         #   - routed-provider-bypass.test.sh
         #   - run-tree-callsite-contract.test.sh
-        #   - run-tree-execution-receipts.test.sh
         #   - route-context.test.sh
         #   - route-unsupported.test.sh
         #   - solve-routing.test.sh

@@ -14,8 +14,8 @@ assert json.load(open(sys.argv[1])) == json.load(open(sys.argv[2]))
 PY
 
 # The static checker owns only declared/typed contract closure. Executability is
-# proved independently by run-tree-execution-receipts.test.sh, so shell grammar
-# and reachability heuristics must not grow back here.
+# proved independently by the four production child-input harnesses, so shell
+# grammar and reachability heuristics must not grow back here.
 python3 -I -B - "$CHECKER" "$ROOT" "$TREE" "$CONTRACT" <<'PY'
 import importlib.util,json,re,sys,tempfile
 from pathlib import Path
