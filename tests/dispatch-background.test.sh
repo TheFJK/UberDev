@@ -173,13 +173,18 @@ fi
 windows_detach_count="$(grep -Fc 'subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS' "$DISPATCH_LIB")"
 posix_setsid_count="$(grep -Fc 'os.setsid()' "$DISPATCH_LIB")"
 wrapper_pid_bridge_count="$(grep -Fc 'os.environ["UBERDEV_WRAPPER_PID"]=str(os.getpid())' "$DISPATCH_LIB")"
+supervisor_pid_file_count="$(grep -Fc 'UBERDEV_SUPERVISOR_PID_FILE="$STATUS_FILE.pid" nohup' "$DISPATCH_LIB")"
+secure_pid_writer_count="$(grep -Fc 'pid_path=os.environ["UBERDEV_SUPERVISOR_PID_FILE"]' "$DISPATCH_LIB")"
 if [ "$windows_detach_count" -eq 2 ] \
     && [ "$posix_setsid_count" -eq 2 ] \
     && [ "$wrapper_pid_bridge_count" -eq 2 ] \
+    && [ "$supervisor_pid_file_count" -eq 2 ] \
+    && [ "$secure_pid_writer_count" -eq 2 ] \
+    && grep -Fq '_uberdev_dispatch_read_secure_pid_file' "$DISPATCH_LIB" \
     && ! grep -Fq 'os.setsid(); os.execvp' "$DISPATCH_LIB"; then
-  echo "  PASS  detached launchers use native Windows process flags and preserve POSIX setsid"; PASS=$((PASS + 1))
+  echo "  PASS  detached launchers securely bridge native Windows supervisor PIDs and preserve POSIX setsid"; PASS=$((PASS + 1))
 else
-  echo "  FAIL  detached launchers use native Windows process flags and preserve POSIX setsid"; FAIL=$((FAIL + 1))
+  echo "  FAIL  detached launchers securely bridge native Windows supervisor PIDs and preserve POSIX setsid"; FAIL=$((FAIL + 1))
 fi
 
 echo
@@ -290,15 +295,9 @@ IMMEDIATE_OUT="$(
       esac
       [ -z "$partials" ] || record_failure partial_cleanup
       [ -n "${DISPATCH_ID:-}" ] || record_failure dispatch_id
+      [[ "$status" == *\"pid\":\"$DISPATCH_ID\"* ]] || record_failure terminal_pid_identity
     done
     for fixture_pid in "${fixture_pids[@]}"; do
-      attempts=0
-      while kill -0 "$fixture_pid" 2>/dev/null && [ "$attempts" -lt 200 ]; do
-        sleep 0.025; attempts=$((attempts + 1))
-      done
-      if kill -0 "$fixture_pid" 2>/dev/null; then
-        kill -TERM "$fixture_pid" 2>/dev/null || true
-      fi
       wait "$fixture_pid" 2>/dev/null || true
     done
     [ "$fixture_running_count" -eq 6 ] || { failures=$((failures + 1)); printf "mismatch check=running_status count=%s\n" "$fixture_running_count"; }
@@ -312,6 +311,59 @@ else
   echo "        $IMMEDIATE_OUT"; FAIL=$((FAIL + 1))
 fi
 rm -rf "$IMMEDIATE_TMP"
+
+echo
+echo "== Delayed background wrapper registers one PID through running and terminal state =="
+DELAYED_TMP="$(mktemp -d)"
+mkdir -p "$DELAYED_TMP/bin" "$DELAYED_TMP/repo" "$DELAYED_TMP/tmp"
+cat > "$DELAYED_TMP/bin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = worktree ] && [ "$2" = add ]; then mkdir -p "$3"; exit 0; fi
+exit 1
+SH
+cat > "$DELAYED_TMP/bin/claude" <<'SH'
+#!/usr/bin/env bash
+sleep 1
+printf 'delayed background result\n'
+SH
+chmod +x "$DELAYED_TMP/bin/git" "$DELAYED_TMP/bin/claude"
+printf 'delayed' > "$DELAYED_TMP/prompt.txt"
+DELAYED_OUT="$(
+  cd "$DELAYED_TMP/repo" &&
+  PATH="$DELAYED_TMP/bin:/usr/bin:/bin" UBERDEV_TMPDIR="$DELAYED_TMP/tmp" \
+  _UBERDEV_PYTHON_EXE="$REAL_PYTHON" _UBERDEV_PYTHON_PREFIX='' \
+  /bin/bash -c '
+    . "$1"
+    MODEL=sonnet; PERM_FLAG=(); EFFORT_FLAG=()
+    _uberdev_dispatch_background 90 small "$2"
+    rc=$?; pid="${DISPATCH_ID:-}"; status_file="$UBERDEV_TMPDIR/solve-bg-status-90.json"
+    attempts=0; running=""
+    while [ "$attempts" -lt 200 ]; do
+      running="$(cat "$status_file" 2>/dev/null)"
+      [[ "$running" == *\"state\":\"running\"* ]] && break
+      sleep 0.025; attempts=$((attempts + 1))
+    done
+    attempts=0; terminal="$running"
+    while [ "$attempts" -lt 200 ]; do
+      terminal="$(cat "$status_file" 2>/dev/null)"
+      [[ "$terminal" == *\"state\":\"completed\"* ]] && break
+      sleep 0.025; attempts=$((attempts + 1))
+    done
+    printf "rc=%s\npid=%s\nrunning=%s\nterminal=%s\nresult=%s\n" \
+      "$rc" "$pid" "$running" "$terminal" "$(cat "$UBERDEV_TMPDIR/solve-bg-result-90.md" 2>/dev/null)"
+  ' _ "$DISPATCH_LIB" "$DELAYED_TMP/prompt.txt"
+)"
+delayed_pid="$(printf '%s\n' "$DELAYED_OUT" | sed -n 's/^pid=//p')"
+if [ -n "$delayed_pid" ] \
+    && printf '%s\n' "$DELAYED_OUT" | grep -Fq 'rc=0' \
+    && printf '%s\n' "$DELAYED_OUT" | grep -Fq "running={\"issue\":90,\"tier\":\"small\",\"backend\":\"background\",\"state\":\"running\",\"exit_code\":null,\"pid\":\"$delayed_pid\"}" \
+    && printf '%s\n' "$DELAYED_OUT" | grep -Fq "terminal={\"issue\":90,\"tier\":\"small\",\"backend\":\"background\",\"state\":\"completed\",\"exit_code\":0,\"pid\":\"$delayed_pid\"}" \
+    && printf '%s\n' "$DELAYED_OUT" | grep -Fq 'result=delayed background result'; then
+  echo "  PASS  delayed background running and terminal receipts retain the dispatch PID"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  delayed background running and terminal receipts retain the dispatch PID: $DELAYED_OUT"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$DELAYED_TMP"
 
 echo
 echo "== Anti-pattern: background backend never uses claude --bg =="

@@ -437,6 +437,13 @@ PY
 
 _uberdev_dispatch_wait_owned_session() {
   local pid="$1" identity identity_pid identity_pgid identity_sid identity_started attempts=0
+  if _uberdev_dispatch_python -I -B - "$pid" <<'PY' >/dev/null 2>&1
+import os,sys
+if os.name!="nt": raise SystemExit(2)
+try: os.kill(int(sys.argv[1]),0)
+except OSError: raise SystemExit(1)
+PY
+  then return 0; fi
   while [ "$attempts" -lt 40 ]; do
     identity="$(_uberdev_agent_process_identity "$pid" 2>/dev/null || true)"
     if [ -n "$identity" ]; then
@@ -827,6 +834,60 @@ _uberdev_dispatch_prepare_tmp_target() {
   return 0
 }
 
+# Read the native-Windows supervisor PID without trusting a pathname between
+# validation and read. The descriptor and the current directory entry must
+# still name the same single-link regular file; the payload is one positive
+# decimal PID and nothing else.
+_uberdev_dispatch_read_secure_pid_file() {
+  _uberdev_dispatch_python -I -B - "$1" <<'PY'
+import os, stat, sys
+p = sys.argv[1]
+fd = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    opened = os.fstat(fd)
+    current = os.lstat(p)
+    if (not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(current.st_mode)
+            or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)):
+        raise SystemExit(1)
+    payload = os.read(fd, 64)
+    if os.read(fd, 1):
+        raise SystemExit(1)
+finally:
+    os.close(fd)
+try:
+    text = payload.decode("ascii")
+except UnicodeDecodeError:
+    raise SystemExit(1)
+if not text.isdecimal() or int(text) <= 0:
+    raise SystemExit(1)
+print(text, end="")
+PY
+}
+
+# POSIX keeps the historical shell $! bridge. Native Windows instead waits
+# for the Python supervisor to publish os.getpid(), because Git Bash's $! is a
+# shell compatibility PID and is not the native PID used by Python liveness.
+_uberdev_dispatch_capture_supervisor_pid() {
+  local launch_pid="$1" pid_file="$2" attempts=0 captured=""
+  if [ "$(_uberdev_dispatch_os_class)" != windows-native ]; then
+    printf '%s' "$launch_pid" > "$pid_file" || return 1
+    _uberdev_dispatch_tmp_target_safe "$pid_file" || return 1
+    captured="$(cat "$pid_file" 2>/dev/null || true)"
+  else
+    while [ "$attempts" -lt 200 ]; do
+      if _uberdev_dispatch_tmp_target_safe "$pid_file"; then
+        captured="$(_uberdev_dispatch_read_secure_pid_file "$pid_file" 2>/dev/null || true)"
+      fi
+      [ -n "$captured" ] && break
+      sleep 0.025
+      attempts=$((attempts + 1))
+    done
+  fi
+  case "$captured" in ''|*[!0-9]*|0) return 1 ;; esac
+  printf '%s' "$captured"
+}
+
 _uberdev_dispatch_claude_bg() {
   local ISSUE_NUM="$1" TIER="$2" PROMPT_FILE="$3"
   DISPATCH_RC=0
@@ -1011,9 +1072,18 @@ _uberdev_dispatch_background() {
   _uberdev_dispatch_resolve_python || { DISPATCH_RC=1; DISPATCH_LOG="$LOG_FILE"; return 1; }
   local PYTHON_LAUNCH=( "$_UBERDEV_PYTHON_EXE" )
   [ -z "$_UBERDEV_PYTHON_PREFIX" ] || PYTHON_LAUNCH+=( "$_UBERDEV_PYTHON_PREFIX" )
-  nohup "${PYTHON_LAUNCH[@]}" -I -c 'import os,shutil,subprocess,sys,traceback
+  UBERDEV_SUPERVISOR_PID_FILE="$STATUS_FILE.pid" nohup "${PYTHON_LAUNCH[@]}" -I -c 'import os,shutil,stat,subprocess,sys,traceback
 argv=["bash","-c",*sys.argv[1:]]
 if os.name=="nt":
+ pid_path=os.environ["UBERDEV_SUPERVISOR_PID_FILE"]
+ fd=os.open(pid_path,os.O_WRONLY|getattr(os,"O_NOFOLLOW",0))
+ try:
+  opened=os.fstat(fd); current=os.lstat(pid_path)
+  if not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(current.st_mode) or opened.st_nlink!=1 or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino): raise RuntimeError("unsafe supervisor pid file")
+  payload=str(os.getpid()).encode("ascii")
+  if os.write(fd,payload)!=len(payload): raise RuntimeError("short supervisor pid write")
+  os.ftruncate(fd,len(payload)); os.fsync(fd)
+ finally: os.close(fd)
  os.environ["UBERDEV_WRAPPER_PID"]=str(os.getpid())
  flags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
  diagnostic=os.environ.get("UBERDEV_DETACH_DIAGNOSTICS")=="1"
@@ -1087,19 +1157,16 @@ finally:
   ' _ "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$WORKTREE_DIR" "$STATUS_FILE" "$RESULT_FILE" "$ISSUE_NUM" "$TIER" "${PROVIDER_CMD[@]}" \
     >"$LOG_FILE" 2>&1 &
   DISPATCH_RC=$?
-  DISPATCH_ID="$!"
-  printf '%s' "$DISPATCH_ID" > "$STATUS_FILE.pid"
-  disown "$DISPATCH_ID" 2>/dev/null || true
-  # #155: re-verify the .pid side-file is ours and not a symlink before parsing
-  # (defence-in-depth across the subshell-write → parent-read window — a swap
-  # here could feed an attacker-chosen pid into DISPATCH_ID).
-  if ! _uberdev_dispatch_tmp_target_safe "$STATUS_FILE.pid"; then
+  local LAUNCH_PID="$!"
+  disown "$LAUNCH_PID" 2>/dev/null || true
+  if ! DISPATCH_ID="$(_uberdev_dispatch_capture_supervisor_pid "$LAUNCH_PID" "$STATUS_FILE.pid")"; then
+    kill -TERM "$LAUNCH_PID" 2>/dev/null || true
     DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"
     _uberdev_dispatch_audit dispatch_setup_failed \
       "{\"issue\":$ISSUE_NUM,\"phase\":\"pid_target_unsafe\",\"backend\":\"background\",\"rc\":3}"
+    rm -f "$STATUS_FILE.pid" 2>/dev/null || true
     return 3
   fi
-  DISPATCH_ID="$(cat "$STATUS_FILE.pid" 2>/dev/null || echo '')"
   # S10 cleanup: $STATUS_FILE.pid is a one-shot inter-subshell side file
   # whose only purpose is bridging the pid back from the subshell above.
   # Delete it now so a subsequent rerun for the same issue cannot read a
@@ -1172,6 +1239,9 @@ _uberdev_dispatch_codex() {
   if ! _uberdev_dispatch_prepare_tmp_target "$LOG_FILE" "$ISSUE_NUM" "codex"; then
     DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
   fi
+  if ! _uberdev_dispatch_prepare_tmp_target "$STATUS_FILE.pid" "$ISSUE_NUM" "codex"; then
+    DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
+  fi
   if ! _uberdev_dispatch_prepare_tmp_target "$STATUS_FILE" "$ISSUE_NUM" "codex"; then
     DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
   fi
@@ -1210,9 +1280,18 @@ _uberdev_dispatch_codex() {
   _uberdev_dispatch_resolve_python || { DISPATCH_RC=1; DISPATCH_LOG="$LOG_FILE"; return 1; }
   local PYTHON_LAUNCH=( "$_UBERDEV_PYTHON_EXE" )
   [ -z "$_UBERDEV_PYTHON_PREFIX" ] || PYTHON_LAUNCH+=( "$_UBERDEV_PYTHON_PREFIX" )
-  nohup "${PYTHON_LAUNCH[@]}" -I -c 'import os,shutil,subprocess,sys,traceback
+  UBERDEV_SUPERVISOR_PID_FILE="$STATUS_FILE.pid" nohup "${PYTHON_LAUNCH[@]}" -I -c 'import os,shutil,stat,subprocess,sys,traceback
 argv=["bash","-c",*sys.argv[1:]]
 if os.name=="nt":
+ pid_path=os.environ["UBERDEV_SUPERVISOR_PID_FILE"]
+ fd=os.open(pid_path,os.O_WRONLY|getattr(os,"O_NOFOLLOW",0))
+ try:
+  opened=os.fstat(fd); current=os.lstat(pid_path)
+  if not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(current.st_mode) or opened.st_nlink!=1 or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino): raise RuntimeError("unsafe supervisor pid file")
+  payload=str(os.getpid()).encode("ascii")
+  if os.write(fd,payload)!=len(payload): raise RuntimeError("short supervisor pid write")
+  os.ftruncate(fd,len(payload)); os.fsync(fd)
+ finally: os.close(fd)
  os.environ["UBERDEV_WRAPPER_PID"]=str(os.getpid())
  flags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
  diagnostic=os.environ.get("UBERDEV_DETACH_DIAGNOSTICS")=="1"
@@ -1296,8 +1375,17 @@ EOF_STATUS
     "$ROUTE_MODEL" "$ROUTE_EFFORT" "$ROUTE_SERVICE_TIER" "$ROUTE_SANDBOX" "${BG_TURBO_ENV[@]}" \
     >"$LOG_FILE" 2>&1 &
   DISPATCH_RC=$?
-  DISPATCH_ID="$!"
+  local LAUNCH_PID="$!"
   disown 2>/dev/null || true
+  if ! DISPATCH_ID="$(_uberdev_dispatch_capture_supervisor_pid "$LAUNCH_PID" "$STATUS_FILE.pid")"; then
+    kill -TERM "$LAUNCH_PID" 2>/dev/null || true
+    DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"
+    _uberdev_dispatch_audit dispatch_setup_failed \
+      "{\"issue\":$ISSUE_NUM,\"phase\":\"pid_capture\",\"backend\":\"codex\",\"rc\":3}"
+    rm -f "$STATUS_FILE.pid" 2>/dev/null || true
+    return 3
+  fi
+  rm -f "$STATUS_FILE.pid" 2>/dev/null || true
   if [[ -n "$DISPATCH_ID" ]] && ! _uberdev_dispatch_wait_owned_session "$DISPATCH_ID"; then
     if ! _uberdev_dispatch_accept_immediate_terminal codex "$DISPATCH_ID" "$STATUS_FILE" "$RESULT_FILE" >/dev/null; then
       DISPATCH_RC=1

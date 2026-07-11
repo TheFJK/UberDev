@@ -476,22 +476,37 @@ BEH_OUT="$(
     _uberdev_dispatch_codex 42 small "$2"
     rc=$?
     pid="${DISPATCH_ID:-}"
+    status_file="$UBERDEV_TMPDIR/solve-codex-status-42.json"
+    i=0; running=""
+    while [ "$i" -lt 200 ]; do
+      running="$(cat "$status_file" 2>/dev/null)"
+      [[ "$running" == *\"state\":\"running\"* ]] && break
+      sleep 0.025; i=$((i + 1))
+    done
     i=0
     while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 5 ]; do
       sleep 1
       i=$((i + 1))
     done
-    printf "rc=%s\npid=%s\n" "$rc" "$pid"
+    printf "rc=%s\npid=%s\nrunning=%s\n" "$rc" "$pid" "$running"
     printf "status=%s\n" "$(cat "$UBERDEV_TMPDIR/solve-codex-status-42.json" 2>/dev/null)"
     printf "result=%s\n" "$(cat "$UBERDEV_TMPDIR/solve-codex-result-42.md" 2>/dev/null)"
   ' _ "$DISPATCH_LIB" "$BEH_TMP/prompt.txt"
 )"
-case "$BEH_OUT" in
-  *'rc=0'*'"state":"completed"'*'"exit_code":0'*'result=codex final result'*)
-    pass_msg "codex dispatch writes completed status with exit_code and result after stub exits" ;;
-  *)
-    fail_msg "codex dispatch writes completed status with exit_code and result after stub exits" "$BEH_OUT" ;;
-esac
+beh_pid="$(printf '%s\n' "$BEH_OUT" | sed -n 's/^pid=//p')"
+if [ -n "$beh_pid" ] \
+    && printf '%s\n' "$BEH_OUT" | grep -Fq 'rc=0' \
+    && printf '%s\n' "$BEH_OUT" | grep -Fq 'running=' \
+    && printf '%s\n' "$BEH_OUT" | grep -Fq '"state":"running"' \
+    && printf '%s\n' "$BEH_OUT" | grep -Fq "\"pid\":\"$beh_pid\"" \
+    && printf '%s\n' "$BEH_OUT" | grep -Fq 'status=' \
+    && printf '%s\n' "$BEH_OUT" | grep -Fq '"state":"completed"' \
+    && printf '%s\n' "$BEH_OUT" | grep -Fq '"exit_code":0' \
+    && printf '%s\n' "$BEH_OUT" | grep -Fq 'result=codex final result'; then
+  pass_msg "codex delayed running and terminal receipts retain the dispatch PID"
+else
+  fail_msg "codex dispatch publishes running then completed status and result" "$BEH_OUT"
+fi
 if grep -Fq -- 'argv: [--ask-for-approval] [never] [exec]' "$BEH_TMP/codex-capture.txt" \
    && grep -Fq -- '--sandbox] [workspace-write]' "$BEH_TMP/codex-capture.txt" \
    && grep -Fq -- '[-m] [gpt-5.6-sol]' "$BEH_TMP/codex-capture.txt" \
@@ -667,6 +682,7 @@ IMMEDIATE_OUT="$(
         *) failures=$((failures + 1)); details="$details outcome=$outcome rc=$rc pid=${DISPATCH_ID:-none} status=$status" ;;
       esac
       [ -n "${DISPATCH_ID:-}" ] || failures=$((failures + 1))
+      [[ "$status" == *\"pid\":\"$DISPATCH_ID\"* ]] || failures=$((failures + 1))
     done
     terminal_pid="$DISPATCH_ID"
     ! _uberdev_dispatch_accept_immediate_terminal background "$terminal_pid" "$UBERDEV_AGENT_STATUS_FILE" "$UBERDEV_AGENT_RESULT_FILE" >/dev/null 2>&1 || failures=$((failures + 1))
