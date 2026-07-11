@@ -30,10 +30,16 @@ def rejected(overrides, needle):
         assert needle in str(error),(needle,str(error))
     else: raise AssertionError(f"mutation accepted: {needle}")
 
+def accepted(overrides):
+    module.validate(root,tree,fixture,overrides)
+
 brain_rel="plugins/uberdev/skills/brainstorm/SKILL.md"
 brain=(root/brain_rel).read_text()
 deleted=re.sub(r'^\s*"brainstorm\.research\.codebase"[^\n]*\n?', '', brain, count=1, flags=re.M)
 rejected({brain_rel:deleted},"expected 40")
+payload_drift=brain.replace('"question":sys.argv[3]', '"questions":sys.argv[3]', 1)
+assert payload_drift != brain
+rejected({brain_rel:payload_drift},"executable payload mismatch")
 
 orch_rel="plugins/uberdev/skills/orchestrator/SKILL.md"
 orch=(root/orch_rel).read_text()
@@ -43,7 +49,12 @@ rejected({orch_rel:altered},"fixture differs")
 
 review_rel="plugins/uberdev/commands/review-pr.md"
 review=(root/review_rel).read_text()
+missing_lens=review.replace('for LENS in reuse quality efficiency; do', 'for LENS in quality efficiency; do', 1)
+assert missing_lens != review
+rejected({review_rel:missing_lens},"dynamic edge mismatch")
 marker="# routed-provider-edge: review_pr.simplify.reuse"
 assert marker in review
-rejected({review_rel:review.replace(marker,"",1)},"unreachable source edge")
+accepted({review_rel:review.replace(marker,"",1)})
+invalid_marker=review.replace(marker,"# routed-provider-edge: review_pr.simplify.unregistered",1)
+rejected({review_rel:invalid_marker},"dynamic marker mismatch")
 PY
