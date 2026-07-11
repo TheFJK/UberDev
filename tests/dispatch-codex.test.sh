@@ -22,6 +22,23 @@ CODEX_AGENT_DISPATCH_LIB="$PLUGIN_ROOT/lib/agent-dispatch.sh"
 CODEX_GOAL_LIB="$PLUGIN_ROOT/lib/goal-state.sh"
 CODEX_CONFIG_LIB="$PLUGIN_ROOT/lib/config-read.sh"
 
+# Behavioral fixtures intentionally narrow PATH to stub git/codex. Preserve a
+# validated interpreter argv first so dispatch exercises the real portable
+# resolver contract instead of depending on which Python launcher survives in
+# each fixture directory (notably native Windows runners).
+_UBERDEV_PYTHON_PREFIX=''
+if _UBERDEV_PYTHON_EXE="$(command -v python3 2>/dev/null)" && [ -n "$_UBERDEV_PYTHON_EXE" ]; then
+  :
+elif _UBERDEV_PYTHON_EXE="$(command -v python 2>/dev/null)" && [ -n "$_UBERDEV_PYTHON_EXE" ]; then
+  :
+elif _UBERDEV_PYTHON_EXE="$(command -v py 2>/dev/null)" && [ -n "$_UBERDEV_PYTHON_EXE" ]; then
+  _UBERDEV_PYTHON_PREFIX='-3'
+else
+  echo "error: Python 3 is required for dispatch-codex fixtures" >&2
+  exit 1
+fi
+export _UBERDEV_PYTHON_EXE _UBERDEV_PYTHON_PREFIX
+
 PASS=0
 FAIL=0
 
