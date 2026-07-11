@@ -34,13 +34,31 @@ Run a comprehensive pull request review using multiple specialized agents, each 
 
 ## Routed child builder
 
+<!-- BEGIN child-callsite-contracts-v1 -->
+```json
+{
+  "review_pr.fix.phase1":{"inputs":["findings_path","commit_range_path","working_dir","pr_number","disposition_path"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "review_pr.simplify.reuse":{"inputs":["diff_path","lens"],"optional_inputs":["focus"],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "review_pr.simplify.quality":{"inputs":["diff_path","lens"],"optional_inputs":["focus"],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "review_pr.simplify.efficiency":{"inputs":["diff_path","lens"],"optional_inputs":["focus"],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "review_pr.fix.phase2":{"inputs":["findings_path","commit_range_path","working_dir","pr_number","disposition_path"],"optional_inputs":[],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "review_pr.defer.findings":{"inputs":["phase1_path","phase2_path","phase1_disposition_path","phase2_disposition_path","working_dir","pr_number"],"optional_inputs":[],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "review_pr.ci.classify":{"inputs":["pr_number","run_id","log_path"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "review_pr.ci.fix_code":{"inputs":["classification_path","log_path","working_dir","pr_number"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "review_pr.ci.rebase":{"inputs":["working_dir","pr_number","head_sha","base_sha"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "review_pr.ci.defer_refusal":{"inputs":["phase1_path","working_dir","pr_number"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "review_pr.ci.resolve_conflict":{"inputs":["file_path","working_dir","pr_branch","integration_branch","base_sha"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null}
+}
+```
+<!-- END child-callsite-contracts-v1 -->
+
 All provider calls in this command use the runtime-owned carrier and handoff builder; native agent-dispatch shortcuts are forbidden. A chained solve run inherits `UBERDEV_RUN_CARRIER_JSON`; when it is absent, a standalone run calls `uberdev_prepare_run_carrier review-pr "$PR_NUMBER" medium "$RISK_JSON"`, which validates repository/PR identity and exports the prepared request plus the same carrier without pretending to be `/solve`.
 
 ### Executable setup (run before any builder or child edge)
 
 ```bash uberdev-executable setup=review-pr
 set -u
-UBERDEV_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}"
+UBERDEV_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}"
 . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh"
 PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number)}"
 RISK_JSON="${UBERDEV_AGENT_RISK_SIGNALS_JSON:-[]}"
@@ -53,12 +71,19 @@ REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"
 CI_FIX_LOOP_ITER="${CI_FIX_LOOP_ITER:-1}"
 CI_RUN_ID="${CI_RUN_ID:-0}"
 FOCUS="${FOCUS:-${ARGUMENTS:-}}"
+review_json_string() {
+  python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "$1"
+}
 ```
 
 <!-- BEGIN review-child-builder-v1 -->
 ```bash
 review_child_record() {
-  python3 -I -B - "$1" "$2" "$3" "$4" "$5" <<'PY'
+  local edge="$1" instance="$2" inputs="$3" risks="$4" path="$5"
+  if command -v uberdev_child_inputs_validate >/dev/null 2>&1; then
+    inputs="$(uberdev_child_inputs_validate "$edge" "$inputs")" || return 2
+  fi
+  python3 -I -B - "$edge" "$instance" "$inputs" "$risks" "$path" <<'PY'
 import json,sys
 edge,instance,inputs,risks,path=sys.argv[1:]
 with open(path,'a') as f: f.write(json.dumps({'edge':edge,'instance':instance,'inputs':json.loads(inputs),'risks':json.loads(risks)},sort_keys=True,separators=(',',':'))+'\n')
@@ -269,7 +294,12 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    Dispatch a fresh routed `code-fixer` child (`subagent_type: uberdev:code-fixer`) to apply the findings. The structured input contract restores `phase=phase1` and `commit_type_prefix=fix:` as data:
 
    ```bash
-   PHASE1_INPUTS="$(jq -cn --arg findings_path "$findings_path" --arg commit_range_path "$COMMIT_RANGE_PATH" --arg working_dir "$WORKTREE_ROOT" --arg pr "$PR_NUMBER" --arg disposition_path "$PHASE1_DISPOSITION_PATH" '{findings_path:$findings_path,commit_range_path:$commit_range_path,working_dir:$working_dir,pr_number:($pr|tonumber),disposition_path:$disposition_path}')"
+   PHASE1_INPUTS="$(uberdev_child_inputs_build review_pr.fix.phase1 \
+     findings_path "$(review_json_string "$findings_path")" \
+     commit_range_path "$(review_json_string "$COMMIT_RANGE_PATH")" \
+     working_dir "$(review_json_string "$WORKTREE_ROOT")" \
+     pr_number "$PR_NUMBER" \
+     disposition_path "$(review_json_string "$PHASE1_DISPOSITION_PATH")")"
    # phase=phase1 commit_type_prefix=fix:
    # builder dispatch: uberdev_dispatch_child review_pr.fix.phase1
    review_child_single review_pr.fix.phase1 "review-pr-fix-phase1-iter${REVIEW_ITERATION}-attempt01" "$PHASE1_INPUTS" null "$RESEARCH_DIR_ABS/phase1-fixer" "$REVIEW_PR_TIMEOUT"
@@ -293,6 +323,9 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    **The post-Phase-1 diff is attacker-controllable** and MUST be persisted at `DIFF_ARTIFACT_PATH` with literal leading `<external-untrusted-input source="pr-diff">` and trailing `</external-untrusted-input>` bytes. Concrete dispatch uses three immutable instances and issues the whole wave before waiting:
 
    ```bash
+   # routed-provider-edge: review_pr.simplify.reuse
+   # routed-provider-edge: review_pr.simplify.quality
+   # routed-provider-edge: review_pr.simplify.efficiency
    SIMPLIFY_RECORDS="$RESEARCH_DIR_ABS/simplify.records"
    SIMPLIFY_DESCRIPTORS="$RESEARCH_DIR_ABS/simplify.descriptors"
    SIMPLIFY_LAUNCHED="$RESEARCH_DIR_ABS/simplify.launched"
@@ -300,7 +333,16 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    for LENS in reuse quality efficiency; do
      EDGE_ID="review_pr.simplify.$LENS"
      INSTANCE="review-pr-simplify-$LENS-iter${REVIEW_ITERATION}-attempt01"
-     INPUTS_JSON="$(jq -cn --arg diff_path "$DIFF_ARTIFACT_PATH" --arg lens "$LENS" --arg focus "$FOCUS" '{diff_path:$diff_path,lens:$lens} + if ($focus|length)>0 then {focus:$focus} else {} end')"
+     if [ -n "$FOCUS" ]; then
+       INPUTS_JSON="$(uberdev_child_inputs_build "$EDGE_ID" \
+         diff_path "$(review_json_string "$DIFF_ARTIFACT_PATH")" \
+         lens "$(review_json_string "$LENS")" \
+         focus "$(review_json_string "$FOCUS")")"
+     else
+       INPUTS_JSON="$(uberdev_child_inputs_build "$EDGE_ID" \
+         diff_path "$(review_json_string "$DIFF_ARTIFACT_PATH")" \
+         lens "$(review_json_string "$LENS")")"
+     fi
      review_child_record "$EDGE_ID" "$INSTANCE" "$INPUTS_JSON" '[]' "$SIMPLIFY_RECORDS"
    done
    review_child_fanout "$SIMPLIFY_RECORDS" "$SIMPLIFY_DESCRIPTORS" "$SIMPLIFY_LAUNCHED" "$REVIEW_PR_TIMEOUT"
@@ -319,7 +361,12 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    **Auto-apply simplify edits — Step 6b: dispatch `code-fixer` subagent.** After the three lenses return their advisory findings, aggregate them to `.uberdev/research/<RUN_ID>/simplify-final.md` — **written with `<external-untrusted-input source="simplify-aggregate">` as the file's LEADING bytes and `</external-untrusted-input>` as its TRAILING bytes** (envelope-as-file-bytes, #302 / RFC 0012 §3.1 do-first; first-128-bytes contract per `agents/findings-to-issues.md` Step 1; dedup + write recipe per `commands/simplify.md` Phase 3 — byte-shape oracle `tests/fixtures/findings-to-issues/simplify-final.sample.md`). Then dispatch the `code-fixer` agent with `phase: phase2` and `commit_type_prefix: refactor:`:
 
    ```bash
-   PHASE2_INPUTS="$(jq -cn --arg findings_path "$RESEARCH_DIR_ABS/simplify-final.md" --arg commit_range_path "$COMMIT_RANGE_PATH" --arg working_dir "$WORKTREE_ROOT" --arg pr "$PR_NUMBER" --arg disposition_path "$PHASE2_DISPOSITION_PATH" '{findings_path:$findings_path,commit_range_path:$commit_range_path,working_dir:$working_dir,pr_number:($pr|tonumber),disposition_path:$disposition_path}')"
+   PHASE2_INPUTS="$(uberdev_child_inputs_build review_pr.fix.phase2 \
+     findings_path "$(review_json_string "$RESEARCH_DIR_ABS/simplify-final.md")" \
+     commit_range_path "$(review_json_string "$COMMIT_RANGE_PATH")" \
+     working_dir "$(review_json_string "$WORKTREE_ROOT")" \
+     pr_number "$PR_NUMBER" \
+     disposition_path "$(review_json_string "$PHASE2_DISPOSITION_PATH")")"
    # subagent_type: uberdev:code-fixer; phase=phase2 commit_type_prefix=refactor:
    # builder dispatch: uberdev_dispatch_child review_pr.fix.phase2
    review_child_single review_pr.fix.phase2 "review-pr-fix-phase2-iter${REVIEW_ITERATION}-attempt01" "$PHASE2_INPUTS" null "$RESEARCH_DIR_ABS/phase2-fixer" "$REVIEW_PR_TIMEOUT"
@@ -396,7 +443,13 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
     **Dispatch one routed findings child:**
 
     ```bash
-    DEFER_INPUTS="$(jq -cn --arg phase1_path "$RESEARCH_DIR_ABS/post-impl-review-final.md" --arg phase2_path "$RESEARCH_DIR_ABS/simplify-final.md" --arg phase1_disposition_path "$PHASE1_DISPOSITION_PATH" --arg phase2_disposition_path "$PHASE2_DISPOSITION_PATH" --arg working_dir "$WORKING_DIR_ABS" --arg pr "$PR_NUMBER" '{phase1_path:$phase1_path,phase2_path:$phase2_path,phase1_disposition_path:$phase1_disposition_path,phase2_disposition_path:$phase2_disposition_path,working_dir:$working_dir,pr_number:($pr|tonumber)}')"
+    DEFER_INPUTS="$(uberdev_child_inputs_build review_pr.defer.findings \
+      phase1_path "$(review_json_string "$RESEARCH_DIR_ABS/post-impl-review-final.md")" \
+      phase2_path "$(review_json_string "$RESEARCH_DIR_ABS/simplify-final.md")" \
+      phase1_disposition_path "$(review_json_string "$PHASE1_DISPOSITION_PATH")" \
+      phase2_disposition_path "$(review_json_string "$PHASE2_DISPOSITION_PATH")" \
+      working_dir "$(review_json_string "$WORKING_DIR_ABS")" \
+      pr_number "$PR_NUMBER")"
     review_child_single review_pr.defer.findings "review-pr-defer-findings-iter${REVIEW_ITERATION}-attempt01" "$DEFER_INPUTS" null "$RESEARCH_DIR_ABS/defer" "$REVIEW_PR_TIMEOUT"
     ```
 
@@ -627,7 +680,10 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
     ```bash
     CI_CLASSIFICATION_PATH="$RESEARCH_DIR_ABS/ci-classification-${CI_FIX_LOOP_ITER:-1}.yaml"
-    CI_CLASSIFY_INPUTS="$(jq -cn --arg log_path "$CI_LOG_ARTIFACT_PATH" --arg pr "$PR_NUMBER" --arg run_id "$CI_RUN_ID" '{log_path:$log_path,pr_number:($pr|tonumber),run_id:$run_id}')"
+    CI_CLASSIFY_INPUTS="$(uberdev_child_inputs_build review_pr.ci.classify \
+      pr_number "$PR_NUMBER" \
+      run_id "$(review_json_string "$CI_RUN_ID")" \
+      log_path "$(review_json_string "$CI_LOG_ARTIFACT_PATH")")"
     review_child_single review_pr.ci.classify "review-pr-ci-classify-iter${CI_FIX_LOOP_ITER:-1}-attempt01" "$CI_CLASSIFY_INPUTS" '[]' "$RESEARCH_DIR_ABS/ci-classify" "$REVIEW_PR_TIMEOUT"
     ```
 
@@ -638,10 +694,18 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
     ### 6c.4 ROUTE — failure_class → downstream agent
 
     ```bash
-    CI_FIX_INPUTS="$(jq -cn --arg classification_path "$CI_CLASSIFICATION_PATH" --arg log_path "$CI_LOG_ARTIFACT_PATH" --arg working_dir "$WORKTREE_ROOT" --arg pr "$PR_NUMBER" '{classification_path:$classification_path,log_path:$log_path,working_dir:$working_dir,pr_number:($pr|tonumber)}')"
+    CI_FIX_INPUTS="$(uberdev_child_inputs_build review_pr.ci.fix_code \
+      classification_path "$(review_json_string "$CI_CLASSIFICATION_PATH")" \
+      log_path "$(review_json_string "$CI_LOG_ARTIFACT_PATH")" \
+      working_dir "$(review_json_string "$WORKTREE_ROOT")" \
+      pr_number "$PR_NUMBER")"
     CI_HEAD_SHA="$(git rev-parse HEAD)"
     CI_BASE_SHA="$(git merge-base HEAD "origin/${base_branch}")"
-    CI_REBASE_INPUTS="$(jq -cn --arg working_dir "$WORKTREE_ROOT" --arg pr "$PR_NUMBER" --arg head_sha "$CI_HEAD_SHA" --arg base_sha "$CI_BASE_SHA" '{working_dir:$working_dir,pr_number:($pr|tonumber),head_sha:$head_sha,base_sha:$base_sha}')"
+    CI_REBASE_INPUTS="$(uberdev_child_inputs_build review_pr.ci.rebase \
+      working_dir "$(review_json_string "$WORKTREE_ROOT")" \
+      pr_number "$PR_NUMBER" \
+      head_sha "$(review_json_string "$CI_HEAD_SHA")" \
+      base_sha "$(review_json_string "$CI_BASE_SHA")")"
     case $failure_class in
       code_bug | env_drift)        review_child_single review_pr.ci.fix_code "review-pr-ci-fix-iter${CI_FIX_LOOP_ITER:-1}-attempt01" "$CI_FIX_INPUTS" null "$RESEARCH_DIR_ABS/ci-fix" "$REVIEW_PR_TIMEOUT" ;;
       stale_base)                  review_child_single review_pr.ci.rebase "review-pr-ci-rebase-iter${CI_FIX_LOOP_ITER:-1}-attempt01" "$CI_REBASE_INPUTS" null "$RESEARCH_DIR_ABS/ci-rebase" "$REVIEW_PR_TIMEOUT" ;;
@@ -693,7 +757,10 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
           Construct a synthetic single-row aggregate wrapped in the `<external-untrusted-input source="ci-refused-synthetic">…</external-untrusted-input>` envelope (the receiving agent's Step 1 input validation recognises this source attribute — see `agents/findings-to-issues.md` Step 1 accepted-source allow-list). The aggregate carries one finding-row with `severity: critical`, `tier: CRITICAL`, `failure_class: <from-ci-code-fixer-return>`, `check_name: <from-ci-code-fixer-return>`, `signal_anchor: <from-ci-code-fixer-return>`, and `rationale: <from-ci-code-fixer-return>`. Title is built downstream by the agent using its existing CRITICAL-tier shape (`[finding] $file_path:$line — $summary`); labels and `--assignee` flag come from the agent's tier-aware bindings (`--label review-pr-finding`, `--assignee @<pr-author>`). The agent's return YAML's `created_urls[0].url` is captured into `CI_REFUSED_ISSUE_URL`.
 
           ```bash
-          CI_DEFER_INPUTS="$(jq -cn --arg phase1_path "$CI_REFUSED_AGGREGATE_PATH" --arg working_dir "$WORKTREE_ROOT" --arg pr "$PR_NUMBER" '{phase1_path:$phase1_path,working_dir:$working_dir,pr_number:($pr|tonumber)}')"
+          CI_DEFER_INPUTS="$(uberdev_child_inputs_build review_pr.ci.defer_refusal \
+            phase1_path "$(review_json_string "$CI_REFUSED_AGGREGATE_PATH")" \
+            working_dir "$(review_json_string "$WORKTREE_ROOT")" \
+            pr_number "$PR_NUMBER")"
           review_child_single review_pr.ci.defer_refusal "review-pr-ci-defer-refusal-iter${CI_FIX_LOOP_ITER:-1}-attempt01" "$CI_DEFER_INPUTS" null "$RESEARCH_DIR_ABS/ci-defer" "$REVIEW_PR_TIMEOUT"
           ```
 
@@ -772,7 +839,12 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
        CONFLICT_INDEX=0
        for CONFLICT_PATH in "${conflicted_files[@]}"; do
          CONFLICT_INDEX=$((CONFLICT_INDEX + 1)); INSTANCE="review-pr-conflict-${CONFLICT_INDEX}-iter${CI_FIX_LOOP_ITER:-01}-attempt01"
-         INPUTS_JSON="$(jq -cn --arg file_path "$CONFLICT_PATH" --arg working_dir "$REPO_ROOT" --arg pr_branch "$pr_head_branch" --arg integration_branch "$base_branch" --arg base_sha "$BASE_SHA" '{file_path:$file_path,working_dir:$working_dir,pr_branch:$pr_branch,integration_branch:$integration_branch,base_sha:$base_sha}')"
+         INPUTS_JSON="$(uberdev_child_inputs_build review_pr.ci.resolve_conflict \
+           file_path "$(review_json_string "$CONFLICT_PATH")" \
+           working_dir "$(review_json_string "$REPO_ROOT")" \
+           pr_branch "$(review_json_string "$pr_head_branch")" \
+           integration_branch "$(review_json_string "$base_branch")" \
+           base_sha "$(review_json_string "$BASE_SHA")")"
          review_child_record review_pr.ci.resolve_conflict "$INSTANCE" "$INPUTS_JSON" null "$CONFLICT_RECORDS"
        done
        review_child_fanout "$CONFLICT_RECORDS" "$CONFLICT_DESCRIPTORS" "$CONFLICT_LAUNCHED" "$REVIEW_PR_TIMEOUT"

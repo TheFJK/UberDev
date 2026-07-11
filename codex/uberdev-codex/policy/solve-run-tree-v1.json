@@ -65,6 +65,9 @@
       "phase": "research",
       "cardinality": "zero_or_one_escalation",
       "required": false,
+      "retry": {
+        "format": 1
+      },
       "risk_scope": "none",
       "allowed_workflows": [
         "solve",
@@ -75,7 +78,10 @@
         "summary_path": "path",
         "question": "string"
       },
-      "optional_inputs": {}
+      "optional_inputs": {
+        "format_retry": "boolean",
+        "format_example_path": "path"
+      }
     },
     "brainstorm.research.prior_art": {
       "kind": "provider",
@@ -84,6 +90,9 @@
       "phase": "research",
       "cardinality": "zero_or_one_escalation",
       "required": false,
+      "retry": {
+        "format": 1
+      },
       "risk_scope": "none",
       "allowed_workflows": [
         "solve",
@@ -94,7 +103,10 @@
         "summary_path": "path",
         "question": "string"
       },
-      "optional_inputs": {}
+      "optional_inputs": {
+        "format_retry": "boolean",
+        "format_example_path": "path"
+      }
     },
     "brainstorm.research.library": {
       "kind": "provider",
@@ -103,6 +115,9 @@
       "phase": "research",
       "cardinality": "zero_or_one_escalation",
       "required": false,
+      "retry": {
+        "format": 1
+      },
       "risk_scope": "none",
       "allowed_workflows": [
         "solve",
@@ -113,7 +128,10 @@
         "summary_path": "path",
         "question": "string"
       },
-      "optional_inputs": {}
+      "optional_inputs": {
+        "format_retry": "boolean",
+        "format_example_path": "path"
+      }
     },
     "brainstorm.write_plan": {
       "kind": "skill",
@@ -288,6 +306,9 @@
       "phase": "research",
       "cardinality": "zero_or_one_scope_shift",
       "required": false,
+      "retry": {
+        "format": 1
+      },
       "risk_scope": "none",
       "allowed_workflows": [
         "solve",
@@ -299,7 +320,10 @@
         "question": "string",
         "answer": "string"
       },
-      "optional_inputs": {}
+      "optional_inputs": {
+        "format_retry": "boolean",
+        "format_example_path": "path"
+      }
     },
     "orchestrator.brainstorm.qa": {
       "kind": "skill",
@@ -343,7 +367,8 @@
       "cardinality": "one_per_spec_revision_cycle",
       "required": true,
       "retry": {
-        "revision_cycles": 2
+        "revision_cycles": 2,
+        "format": 1
       },
       "risk_scope": "run",
       "allowed_workflows": [
@@ -356,7 +381,10 @@
         "research_paths": "path_array",
         "working_dir": "directory"
       },
-      "optional_inputs": {}
+      "optional_inputs": {
+        "format_retry": "boolean",
+        "format_example_path": "path"
+      }
     },
     "orchestrator.spec.revise": {
       "kind": "provider",
@@ -365,6 +393,9 @@
       "phase": "specification",
       "cardinality": "zero_to_two",
       "required": true,
+      "retry": {
+        "format": 1
+      },
       "risk_scope": "run",
       "allowed_workflows": [
         "solve",
@@ -375,7 +406,10 @@
         "revision_path": "path",
         "working_dir": "directory"
       },
-      "optional_inputs": {}
+      "optional_inputs": {
+        "format_retry": "boolean",
+        "format_example_path": "path"
+      }
     },
     "orchestrator.plan.research.dependency": {
       "kind": "provider",

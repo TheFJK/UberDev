@@ -57,7 +57,7 @@ with the configured value. v2 issue can extend.
 
 ```bash
 # Pre-flight: read advisory timeout
-POST_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}"
+POST_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}"
 if [ -r "$POST_REVIEW_PLUGIN_ROOT/lib/config-read.sh" ]; then
   . "$POST_REVIEW_PLUGIN_ROOT/lib/config-read.sh"
   REVIEW_PR_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.review_pr UBERDEV_REVIEW_PR_TIMEOUT 60 86400 900)"
@@ -95,13 +95,26 @@ The brief is identical for all 6 reviewers — each agent's own system prompt na
 
 ### Step 2: Dispatch 6 required routed reviewers
 
+<!-- BEGIN child-callsite-contracts-v1 -->
+```json
+{
+  "review_pr.review.correctness":{"inputs":["changed_paths","diff_path","criteria_path","emphasis"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "review_pr.review.silent_failures":{"inputs":["changed_paths","diff_path","criteria_path","emphasis"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "review_pr.review.types":{"inputs":["changed_paths","diff_path","criteria_path","emphasis"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "review_pr.review.comments":{"inputs":["changed_paths","diff_path","criteria_path","emphasis"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "review_pr.review.tests":{"inputs":["changed_paths","diff_path","criteria_path","emphasis"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "review_pr.review.general":{"inputs":["changed_paths","diff_path","criteria_path","emphasis","lens"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"}
+}
+```
+<!-- END child-callsite-contracts-v1 -->
+
 ### Routed execution contract (normative)
 
 Source `${PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}/lib/child-dispatch.sh`. The caller propagates the immutable carrier through the context-only lineage edge `review_pr.post_impl_review`; this skill never resolves a model. Resolve the six provider edges from policy, create unique iteration/attempt instances with `uberdev_create_child_handoff`, and issue every dispatch before waiting:
 
 ```bash uberdev-executable setup=post-impl-review
 set -u
-UBERDEV_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}"
+UBERDEV_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}"
 . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh"
 : "${RUN_ID:?post-impl-review requires parent RUN_ID}"
 uberdev_command_workspace_prepare post-impl-review 0 medium '[]' "$RUN_ID" "${WORKTREE_ROOT:-}" >/dev/null || {
@@ -111,9 +124,16 @@ REVIEW_ITERATION="${REVIEW_ITERATION:-1}"
 REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"
 CHANGED_PATHS_JSON="${CHANGED_PATHS_JSON:-[]}"
 EMPHASIS_JSON="${EMPHASIS_JSON:-[]}"
+post_review_json_string() {
+  python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "$1"
+}
 
 post_review_record() {
-  python3 -I -B - "$1" "$2" "$3" "$4" "$5" <<'PY'
+  local edge="$1" instance="$2" inputs="$3" risks="$4" path="$5"
+  if command -v uberdev_child_inputs_validate >/dev/null 2>&1; then
+    inputs="$(uberdev_child_inputs_validate "$edge" "$inputs")" || return 2
+  fi
+  python3 -I -B - "$edge" "$instance" "$inputs" "$risks" "$path" <<'PY'
 import json,sys
 edge,instance,inputs,risks,path=sys.argv[1:]
 with open(path,'a') as f:f.write(json.dumps({'edge':edge,'instance':instance,'inputs':json.loads(inputs),'risks':json.loads(risks)},sort_keys=True,separators=(',',':'))+'\n')
@@ -188,9 +208,18 @@ for EDGE_ID in "${REVIEW_EDGES[@]}"; do
   REVIEW_INDEX=$((REVIEW_INDEX + 1))
   INSTANCE="post-review-r${REVIEW_INDEX}-iter${REVIEW_ITERATION}-attempt01"
   if [ "$EDGE_ID" = review_pr.review.general ]; then
-    INPUTS_JSON="$(jq -cn --argjson changed_paths "$CHANGED_PATHS_JSON" --arg diff_path "$DIFF_ARTIFACT_PATH" --arg criteria_path "$CRITERIA_PATH" --argjson emphasis "$EMPHASIS_JSON" --arg lens general '{changed_paths:$changed_paths,diff_path:$diff_path,criteria_path:$criteria_path,emphasis:$emphasis,lens:$lens}')"
+    INPUTS_JSON="$(uberdev_child_inputs_build "$EDGE_ID" \
+      changed_paths "$CHANGED_PATHS_JSON" \
+      diff_path "$(post_review_json_string "$DIFF_ARTIFACT_PATH")" \
+      criteria_path "$(post_review_json_string "$CRITERIA_PATH")" \
+      emphasis "$EMPHASIS_JSON" \
+      lens '"general"')"
   else
-    INPUTS_JSON="$(jq -cn --argjson changed_paths "$CHANGED_PATHS_JSON" --arg diff_path "$DIFF_ARTIFACT_PATH" --arg criteria_path "$CRITERIA_PATH" --argjson emphasis "$EMPHASIS_JSON" '{changed_paths:$changed_paths,diff_path:$diff_path,criteria_path:$criteria_path,emphasis:$emphasis}')"
+    INPUTS_JSON="$(uberdev_child_inputs_build "$EDGE_ID" \
+      changed_paths "$CHANGED_PATHS_JSON" \
+      diff_path "$(post_review_json_string "$DIFF_ARTIFACT_PATH")" \
+      criteria_path "$(post_review_json_string "$CRITERIA_PATH")" \
+      emphasis "$EMPHASIS_JSON")"
   fi
   post_review_record "$EDGE_ID" "$INSTANCE" "$INPUTS_JSON" '[]' "$REVIEW_RECORDS"
 done
@@ -254,11 +283,9 @@ Wait until all 6 routed calls have returned. Parse each YAML block.
 Failure handling is fail-closed. A BLOCKED or unparseable reviewer gets exactly one format-repair retry using the same stable edge and a fresh `attempt02` instance whose inputs add `format_retry: true`. If the repaired return is still BLOCKED or unparseable, the aggregate verdict is BLOCKED and `/review-pr` cannot emit a green trust signal. Never drop a reviewer and continue with N-1 evidence.
 
 ```bash uberdev-executable
-if [ "$FAILED_REVIEW_EDGE" = review_pr.review.general ]; then
-  REPAIR_INPUTS="$(jq -cn --argjson changed_paths "$CHANGED_PATHS_JSON" --arg diff_path "$DIFF_ARTIFACT_PATH" --arg criteria_path "$CRITERIA_PATH" --argjson emphasis "$EMPHASIS_JSON" --arg lens general '{changed_paths:$changed_paths,diff_path:$diff_path,criteria_path:$criteria_path,emphasis:$emphasis,lens:$lens,format_retry:true}')"
-else
-  REPAIR_INPUTS="$(jq -cn --argjson changed_paths "$CHANGED_PATHS_JSON" --arg diff_path "$DIFF_ARTIFACT_PATH" --arg criteria_path "$CRITERIA_PATH" --argjson emphasis "$EMPHASIS_JSON" '{changed_paths:$changed_paths,diff_path:$diff_path,criteria_path:$criteria_path,emphasis:$emphasis,format_retry:true}')"
-fi
+FORMAT_EXAMPLE_PATH="${FORMAT_EXAMPLE_PATH:-$CRITERIA_PATH}"
+FAILED_REVIEW_INPUTS="$(jq -ce --arg edge "$FAILED_REVIEW_EDGE" 'select(.edge == $edge) | .inputs' "$REVIEW_RECORDS")"
+REPAIR_INPUTS="$(uberdev_child_inputs_format_retry "$FAILED_REVIEW_EDGE" "$FAILED_REVIEW_INPUTS" "$FORMAT_EXAMPLE_PATH")"
 REPAIR_INSTANCE="post-review-r${FAILED_REVIEW_INDEX}-iter${REVIEW_ITERATION}-attempt02"
 REPAIR_PREFIX="$RESEARCH_DIR_ABS/post-review-repair-r${FAILED_REVIEW_INDEX}"
 : >"$REPAIR_PREFIX.records"

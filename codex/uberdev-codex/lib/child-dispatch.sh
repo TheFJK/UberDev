@@ -25,20 +25,85 @@ _UBERDEV_CHILD_DISPATCH_LOADED=1
 
 _uberdev_child_error() { printf 'uberdev child dispatch: %s\n' "$1" >&2; }
 
+# Receipt collection is an explicit test-only seam. UBERDEV_CHILD_TEST_MODE is
+# also used by older manifest-fixture tests, so receipt-specific variables are
+# what request collection. Normal production and legacy test execution never
+# invoke or require the receipt helper.
+_uberdev_child_receipts_requested() {
+  [ "${UBERDEV_CHILD_TEST_MODE:-0}" = 1 ] || return 1
+  [ "${UBERDEV_CHILD_TEST_SOURCE+x}" = x ] || [ "${UBERDEV_CHILD_TEST_RECEIPT_FILE+x}" = x ]
+}
+
+_uberdev_child_receipt_emit_inputs() {
+  _uberdev_child_receipts_requested || return 0
+  local helper="$_UBERDEV_CHILD_LIB_DIR/child-receipts.py"
+  [ -f "$helper" ] || { _uberdev_child_error 'child receipts helper missing'; return 2; }
+  python3 -I -B "$helper" append --event "$1" --edge-id "$2" --inputs-json "$3"
+}
+
+_uberdev_child_receipt_emit_handoff() {
+  _uberdev_child_receipts_requested || return 0
+  local helper="$_UBERDEV_CHILD_LIB_DIR/child-receipts.py"
+  [ -f "$helper" ] || { _uberdev_child_error 'child receipts helper missing'; return 2; }
+  python3 -I -B "$helper" append-handoff --event "$1" --edge-id "$2" --handoff-file "$3"
+}
+
 _uberdev_child_manifest_path() {
   local canonical="$_UBERDEV_CHILD_ROOT/policy/solve-run-tree-v1.json" candidate="${UBERDEV_CHILD_MANIFEST_PATH:-}"
   if [ "${UBERDEV_CHILD_TEST_MODE:-0}" = 1 ] && [ -n "$candidate" ]; then
     python3 -I -B - "$candidate" "$(cd "$_UBERDEV_CHILD_ROOT/../.." && pwd -P)/tests/_fixtures" <<'PY'
 import os,stat,sys
-path=os.path.realpath(sys.argv[1]); root=os.path.realpath(sys.argv[2])
-try: e=os.lstat(path)
-except OSError: raise SystemExit(2)
-if os.path.commonpath((root,path))!=root or stat.S_ISLNK(e.st_mode) or not stat.S_ISREG(e.st_mode) or e.st_uid!=os.geteuid() or e.st_nlink!=1: raise SystemExit(2)
+def fail():
+ print('uberdev child dispatch: unsafe child manifest override',file=sys.stderr); raise SystemExit(2)
+candidate=os.path.abspath(sys.argv[1]); root=os.path.realpath(sys.argv[2])
+try: e=os.lstat(candidate)
+except OSError: fail()
+if stat.S_ISLNK(e.st_mode) or not stat.S_ISREG(e.st_mode) or e.st_uid!=os.geteuid() or e.st_nlink!=1: fail()
+path=os.path.realpath(candidate)
+try: contained=os.path.commonpath((root,path))==root
+except ValueError: contained=False
+if not contained: fail()
 print(path,end='')
 PY
     return
   fi
   printf '%s' "$canonical"
+}
+
+_uberdev_child_inputs_run() {
+  local manifest_path helper output
+  manifest_path="$(_uberdev_child_manifest_path)" || return 2
+  helper="$_UBERDEV_CHILD_LIB_DIR/child-inputs.py"
+  [ -f "$helper" ] || { _uberdev_child_error 'child inputs helper missing'; return 2; }
+  output="$(python3 -I -B "$helper" --manifest "$manifest_path" "$@")" || return $?
+  printf '%s' "$output"
+}
+
+# Build and validate manifest-derived provider inputs without duplicating the
+# schema at callsites. Filesystem ownership/scope checks remain in the immutable
+# handoff boundary below, immediately before dispatch.
+uberdev_child_inputs_build() {
+  local output
+  [ "$#" -ge 1 ] || { _uberdev_child_error 'child inputs build expects EDGE_ID [KEY JSON_VALUE]...'; return 2; }
+  output="$(_uberdev_child_inputs_run build "$@")" || return $?
+  _uberdev_child_receipt_emit_inputs build "$1" "$output" || return $?
+  printf '%s' "$output"
+}
+
+uberdev_child_inputs_validate() {
+  local output
+  [ "$#" -eq 2 ] || { _uberdev_child_error 'child inputs validate expects EDGE_ID INPUTS_JSON'; return 2; }
+  output="$(_uberdev_child_inputs_run validate "$@")" || return $?
+  _uberdev_child_receipt_emit_inputs build "$1" "$output" || return $?
+  printf '%s' "$output"
+}
+
+uberdev_child_inputs_format_retry() {
+  local output
+  [ "$#" -eq 3 ] || { _uberdev_child_error 'format retry expects EDGE_ID BASE_INPUTS_JSON FORMAT_EXAMPLE_PATH'; return 2; }
+  output="$(_uberdev_child_inputs_run format-retry "$@")" || return $?
+  _uberdev_child_receipt_emit_inputs build "$1" "$output" || return $?
+  printf '%s' "$output"
 }
 
 # Prepare an honest root carrier for workflows entered outside /solve or
@@ -205,6 +270,7 @@ PY
   UBERDEV_CHILD_RESULT="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result_file"],end="")' "$output")" || return 2
   UBERDEV_CHILD_STATUS="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status_file"],end="")' "$output")" || return 2
   export UBERDEV_CHILD_HANDOFF UBERDEV_CHILD_RESULT UBERDEV_CHILD_STATUS
+  _uberdev_child_receipt_emit_handoff handoff "$edge" "$UBERDEV_CHILD_HANDOFF" || return $?
   printf '%s' "$output"
 }
 
@@ -461,6 +527,7 @@ uberdev_dispatch_child() {
   prepared="$(_uberdev_child_prepare "$edge" "$handoff" "$result" "$status_file")" || return $?
   request="$(python3 -I -B -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["request"],sort_keys=True,separators=(",",":")),end="")' "$prepared")" || return 2
   prompt="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["prompt"],end="")' "$prepared")" || return 2
+  _uberdev_child_receipt_emit_handoff dispatch "$edge" "${prompt%/*}/handoff.v1.json" || return $?
   if uberdev_agent_dispatch "$request" "$prompt" "$result" "$status_file"; then rc=0; else rc=$?; return "$rc"; fi
   if receipt="$(python3 -I -B - "$edge" "$request" "$result" "$status_file" <<'PY'
 import hashlib,json,os,stat,sys

@@ -99,13 +99,13 @@ For current v0.40 callers that do not yet supply the carrier, use the exact `on_
 
 ```bash
 # Step 0: bg-context gate (issue #93).
-# Refuse interactive /solve under claude --bg or any non-TTY launcher.
+# Refuse interactive /solve under a background or non-TTY launcher.
 
 # Turbo exemption: any explicit turbo signal short-circuits the gate.
 if [[ "${ARGUMENTS:-}" == *"--turbo"* ]] || [[ "${UBERDEV_TURBO:-0}" == "1" ]]; then
   :  # fall through to step 1
 elif [ -n "${CLAUDE_JOB_DIR:-}" ] || [ ! -t 0 ]; then
-  echo "error: interactive orchestrator (/solve or /uberdev:orchestrator without --turbo) cannot run in a claude --bg session." >&2
+  echo "error: interactive orchestrator (/solve or /uberdev:orchestrator without --turbo) cannot run in a background or non-TTY session." >&2
   echo "  - re-run with /turbo <N> for unattended mode, or" >&2
   echo "  - run /solve <N> from a foreground terminal, or" >&2
   echo "  - re-invoke /uberdev:orchestrator --turbo … if you invoked it standalone." >&2
@@ -164,22 +164,22 @@ Exit code is `2`, which propagates through `solve-pipeline`'s `claude --bg` exec
 <!-- BEGIN child-callsite-contracts-v1 -->
 ```json
 {
-  "orchestrator.research.codebase":{"inputs":["issue_path","working_dir","summary_path"],"risk_scope":"none","risk_argument":[]},
-  "orchestrator.research.patterns":{"inputs":["issue_path","working_dir","summary_path"],"risk_scope":"none","risk_argument":[]},
-  "orchestrator.research.prior_art":{"inputs":["issue_path","working_dir","summary_path"],"risk_scope":"none","risk_argument":[]},
-  "orchestrator.research.constraints":{"inputs":["issue_path","working_dir","summary_path"],"risk_scope":"none","risk_argument":[]},
-  "orchestrator.research.security":{"inputs":["issue_path","working_dir","summary_path"],"risk_scope":"subtask","risk_argument":"subtask"},
-  "orchestrator.research.test_coverage":{"inputs":["issue_path","working_dir","summary_path"],"risk_scope":"none","risk_argument":[]},
-  "orchestrator.research.followup":{"inputs":["working_dir","summary_path","question","answer"],"risk_scope":"none","risk_argument":[]},
-  "orchestrator.spec.write":{"inputs":["issue_path","research_paths","questions_path","working_dir","summary_path"],"risk_scope":"run","risk_argument":null},
-  "orchestrator.spec.review":{"inputs":["spec_path","issue_path","research_paths","working_dir"],"risk_scope":"run","risk_argument":null},
-  "orchestrator.spec.revise":{"inputs":["spec_path","revision_path","working_dir"],"risk_scope":"run","risk_argument":null},
-  "orchestrator.plan.research.dependency":{"inputs":["spec_path","working_dir","summary_path","output_path","validation_path"],"risk_scope":"none","risk_argument":[]},
-  "orchestrator.plan.research.tests":{"inputs":["spec_path","working_dir","summary_path","output_path","validation_path"],"risk_scope":"none","risk_argument":[]},
-  "orchestrator.plan.research.risks":{"inputs":["spec_path","working_dir","summary_path","output_path","validation_path"],"risk_scope":"none","risk_argument":[]},
-  "orchestrator.plan.research.security":{"inputs":["spec_path","working_dir","summary_path","output_path","validation_path","risk_signals"],"risk_scope":"subtask","risk_argument":"subtask"},
-  "orchestrator.plan.write":{"inputs":["spec_path","tier","working_dir","summary_path","planning_paths","validation_path"],"risk_scope":"run","risk_argument":null},
-  "orchestrator.plan.review":{"inputs":["plan_path","spec_path","tier","working_dir"],"risk_scope":"run","risk_argument":null}
+  "orchestrator.research.codebase":{"inputs":["issue_path","working_dir","summary_path"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "orchestrator.research.patterns":{"inputs":["issue_path","working_dir","summary_path"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "orchestrator.research.prior_art":{"inputs":["issue_path","working_dir","summary_path"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "orchestrator.research.constraints":{"inputs":["issue_path","working_dir","summary_path"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "orchestrator.research.security":{"inputs":["issue_path","working_dir","summary_path"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "orchestrator.research.test_coverage":{"inputs":["issue_path","working_dir","summary_path"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "orchestrator.research.followup":{"inputs":["working_dir","summary_path","question","answer"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "orchestrator.spec.write":{"inputs":["issue_path","research_paths","questions_path","working_dir","summary_path"],"optional_inputs":["verification_feedback_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "orchestrator.spec.review":{"inputs":["spec_path","issue_path","research_paths","working_dir"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "orchestrator.spec.revise":{"inputs":["spec_path","revision_path","working_dir"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "orchestrator.plan.research.dependency":{"inputs":["spec_path","working_dir","summary_path","output_path","validation_path"],"optional_inputs":[],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "orchestrator.plan.research.tests":{"inputs":["spec_path","working_dir","summary_path","output_path","validation_path"],"optional_inputs":[],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "orchestrator.plan.research.risks":{"inputs":["spec_path","working_dir","summary_path","output_path","validation_path"],"optional_inputs":[],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "orchestrator.plan.research.security":{"inputs":["spec_path","working_dir","summary_path","output_path","validation_path","risk_signals"],"optional_inputs":[],"allowed_workflows":["solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "orchestrator.plan.write":{"inputs":["spec_path","tier","working_dir","summary_path","planning_paths","validation_path"],"optional_inputs":["verification_feedback_path","revision_brief_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "orchestrator.plan.review":{"inputs":["plan_path","spec_path","tier","working_dir"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"run","risk_argument":null}
 }
 ```
 <!-- END child-callsite-contracts-v1 -->
@@ -198,7 +198,7 @@ attempt suffix without reuse.
 ```bash uberdev-executable
 set -euo pipefail
 : "${UBERDEV_AGENT_PREPARED_REQUEST_JSON:?missing immutable routing context}"
-UBERDEV_DESIGN_PLUGIN_ROOT="${PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}"
+UBERDEV_DESIGN_PLUGIN_ROOT="${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}"
 . "$UBERDEV_DESIGN_PLUGIN_ROOT/lib/child-dispatch.sh"
 
 UBERDEV_DESIGN_PREPARED_EDGES=()
@@ -214,6 +214,11 @@ UBERDEV_DESIGN_WAITED=0
 UBERDEV_DESIGN_BATCH_LAUNCHED=0
 UBERDEV_DESIGN_UNWIND_TIMEOUT="${UBERDEV_DESIGN_UNWIND_TIMEOUT:-600}"
 case "$UBERDEV_DESIGN_UNWIND_TIMEOUT" in ''|*[!0-9]*|0) return 2 ;; esac
+
+uberdev_design_json_string() {
+  [ "$#" -eq 1 ] || return 2
+  python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "$1"
+}
 
 uberdev_design_reset_batch() {
   UBERDEV_DESIGN_PREPARED_EDGES=(); UBERDEV_DESIGN_PREPARED_INSTANCES=()
@@ -396,32 +401,50 @@ content itself never enters a handoff. Build all handoffs in a cap slice before
 the first wait, which preflights the complete slice before dispatch.
 
 ```bash uberdev-executable edge=orchestrator.research.codebase
-GENERAL_CODEBASE_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"issue_path":sys.argv[1],"working_dir":sys.argv[2],"summary_path":sys.argv[3]},separators=(",",":")))' "$issue_body_path" "$WORKING_DIR_ABS" "$research_codebase_summary_path")"
+GENERAL_CODEBASE_INPUTS="$(uberdev_child_inputs_build orchestrator.research.codebase \
+  issue_path "$(uberdev_design_json_string "$issue_body_path")" \
+  working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")" \
+  summary_path "$(uberdev_design_json_string "$research_codebase_summary_path")")"
 uberdev_design_dispatch orchestrator.research.codebase orchestrator-research-codebase-a1 research-codebase research none '[]' "$GENERAL_CODEBASE_INPUTS"
 ```
 
 ```bash uberdev-executable edge=orchestrator.research.patterns
-GENERAL_PATTERNS_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"issue_path":sys.argv[1],"working_dir":sys.argv[2],"summary_path":sys.argv[3]},separators=(",",":")))' "$issue_body_path" "$WORKING_DIR_ABS" "$research_patterns_summary_path")"
+GENERAL_PATTERNS_INPUTS="$(uberdev_child_inputs_build orchestrator.research.patterns \
+  issue_path "$(uberdev_design_json_string "$issue_body_path")" \
+  working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")" \
+  summary_path "$(uberdev_design_json_string "$research_patterns_summary_path")")"
 uberdev_design_dispatch orchestrator.research.patterns orchestrator-research-patterns-a1 research-patterns research none '[]' "$GENERAL_PATTERNS_INPUTS"
 ```
 
 ```bash uberdev-executable edge=orchestrator.research.prior_art
-GENERAL_PRIOR_ART_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"issue_path":sys.argv[1],"working_dir":sys.argv[2],"summary_path":sys.argv[3]},separators=(",",":")))' "$issue_body_path" "$WORKING_DIR_ABS" "$research_prior_art_summary_path")"
+GENERAL_PRIOR_ART_INPUTS="$(uberdev_child_inputs_build orchestrator.research.prior_art \
+  issue_path "$(uberdev_design_json_string "$issue_body_path")" \
+  working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")" \
+  summary_path "$(uberdev_design_json_string "$research_prior_art_summary_path")")"
 uberdev_design_dispatch orchestrator.research.prior_art orchestrator-research-prior-art-a1 research-prior-art research none '[]' "$GENERAL_PRIOR_ART_INPUTS"
 ```
 
 ```bash uberdev-executable edge=orchestrator.research.constraints
-GENERAL_CONSTRAINTS_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"issue_path":sys.argv[1],"working_dir":sys.argv[2],"summary_path":sys.argv[3]},separators=(",",":")))' "$issue_body_path" "$WORKING_DIR_ABS" "$research_constraints_summary_path")"
+GENERAL_CONSTRAINTS_INPUTS="$(uberdev_child_inputs_build orchestrator.research.constraints \
+  issue_path "$(uberdev_design_json_string "$issue_body_path")" \
+  working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")" \
+  summary_path "$(uberdev_design_json_string "$research_constraints_summary_path")")"
 uberdev_design_dispatch orchestrator.research.constraints orchestrator-research-constraints-a1 research-constraints research none '[]' "$GENERAL_CONSTRAINTS_INPUTS"
 ```
 
 ```bash uberdev-executable edge=orchestrator.research.security
-GENERAL_SECURITY_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"issue_path":sys.argv[1],"working_dir":sys.argv[2],"summary_path":sys.argv[3]},separators=(",",":")))' "$issue_body_path" "$WORKING_DIR_ABS" "$research_security_summary_path")"
+GENERAL_SECURITY_INPUTS="$(uberdev_child_inputs_build orchestrator.research.security \
+  issue_path "$(uberdev_design_json_string "$issue_body_path")" \
+  working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")" \
+  summary_path "$(uberdev_design_json_string "$research_security_summary_path")")"
 uberdev_design_dispatch orchestrator.research.security orchestrator-research-security-a1 research-security research subtask "$validated_risk_signals_json" "$GENERAL_SECURITY_INPUTS"
 ```
 
 ```bash uberdev-executable edge=orchestrator.research.test_coverage
-GENERAL_TEST_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"issue_path":sys.argv[1],"working_dir":sys.argv[2],"summary_path":sys.argv[3]},separators=(",",":")))' "$issue_body_path" "$WORKING_DIR_ABS" "$research_test_summary_path")"
+GENERAL_TEST_INPUTS="$(uberdev_child_inputs_build orchestrator.research.test_coverage \
+  issue_path "$(uberdev_design_json_string "$issue_body_path")" \
+  working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")" \
+  summary_path "$(uberdev_design_json_string "$research_test_summary_path")")"
 uberdev_design_dispatch orchestrator.research.test_coverage orchestrator-research-test-coverage-a1 research-test-coverage research none '[]' "$GENERAL_TEST_INPUTS"
 ```
 
@@ -443,7 +466,7 @@ identity as controller state, then execute this one-child retry before applying
 the required/advisory policy:
 
 ```bash uberdev-executable retry=format
-FORMAT_RETRY_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["format_retry"]=True; v["format_example_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$failed_inputs_json" "$format_example_path")"
+FORMAT_RETRY_INPUTS="$(uberdev_child_inputs_format_retry "$failed_edge" "$failed_inputs_json" "$format_example_path")"
 format_retry_instance="${failed_instance%-a1}-a2"
 uberdev_design_dispatch "$failed_edge" "$format_retry_instance" "$failed_role" "$failed_phase" none "$failed_risks_json" "$FORMAT_RETRY_INPUTS"
 uberdev_design_wait "$format_retry_instance" 300
@@ -463,7 +486,11 @@ model_invocation: false
 **Non-turbo (interactive — DEFAULT when `--turbo` is absent):** You MUST ask 3-5 clarifying questions, one at a time, via `AskUserQuestion`, and store the answers in `qa_answers`. Do NOT proceed to Phase 3 until the user has answered. Use the research bundle to inform the questions (e.g. "research-codebase found that file X follows pattern A but the issue suggests pattern B; which?"). Persist the normalized answers as private `$RESEARCH_DIR_ABS/qa-answers.md` and set `qa_answers_path`. If an answer reveals a scope shift, issue exactly one narrow `research-codebase` follow-up; do not re-run the full fanout:
 
 ```bash uberdev-executable edge=orchestrator.research.followup
-FOLLOWUP_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"working_dir":sys.argv[1],"summary_path":sys.argv[2],"question":sys.argv[3],"answer":sys.argv[4]},separators=(",",":")))' "$WORKING_DIR_ABS" "$followup_summary_path" "$scope_shift_question" "$scope_shift_answer")"
+FOLLOWUP_INPUTS="$(uberdev_child_inputs_build orchestrator.research.followup \
+  working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")" \
+  summary_path "$(uberdev_design_json_string "$followup_summary_path")" \
+  question "$(uberdev_design_json_string "$scope_shift_question")" \
+  answer "$(uberdev_design_json_string "$scope_shift_answer")")"
 uberdev_design_dispatch orchestrator.research.followup orchestrator-research-followup-a1 research-codebase research none '[]' "$FOLLOWUP_INPUTS"
 uberdev_design_wait orchestrator-research-followup-a1 300
 ```
@@ -471,7 +498,7 @@ uberdev_design_wait orchestrator-research-followup-a1 300
 Its BLOCKED result is advisory. A malformed result executes one format retry:
 
 ```bash uberdev-executable edge=orchestrator.research.followup retry=format
-FOLLOWUP_FORMAT_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["format_retry"]=True; v["format_example_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$FOLLOWUP_INPUTS" "$followup_format_example_path")"
+FOLLOWUP_FORMAT_INPUTS="$(uberdev_child_inputs_format_retry orchestrator.research.followup "$FOLLOWUP_INPUTS" "$followup_format_example_path")"
 uberdev_design_dispatch orchestrator.research.followup orchestrator-research-followup-a2 research-codebase research none '[]' "$FOLLOWUP_FORMAT_INPUTS"
 uberdev_design_wait orchestrator-research-followup-a2 300
 ```
@@ -497,14 +524,15 @@ Use `AskUserQuestion` with 2 options (`Yes` / `No`) so the consent is structural
 
 **Per-question decision.** Even after consent, decide PER QUESTION whether browser or terminal fits — the test is *would the user understand this better by seeing it than reading it?* Visual: UI mockups, layout comparisons, color/theme choices, architecture diagrams, spatial relationships. Terminal: scope/requirements, A/B/C text choices, tradeoff lists, technical decisions. The 3-5 Phase 2 questions may mix freely.
 
-**Starting the server (first visual question only).** Resolve the plugin scripts dir via plugin-root env var with a `find` fallback, then invoke `start-server.sh`:
+**Starting the server (first visual question only).** Resolve the plugin scripts dir from the host-provided plugin-root variables, then invoke `start-server.sh`:
 
 ```bash
-PLUGIN_SCRIPTS="${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/skills/brainstorm/scripts"
-if [[ ! -d "$PLUGIN_SCRIPTS" ]]; then
-  PLUGIN_SCRIPTS="$(find "${CODEX_HOME:-$HOME/.codex}/plugins" "${HOME}/.agents/skills" -type d -path '*/uberdev/skills/brainstorm/scripts' 2>/dev/null | head -1)"
-fi
-if [[ ! -d "$PLUGIN_SCRIPTS" ]]; then
+PLUGIN_SCRIPTS_ROOT="${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}"
+PLUGIN_SCRIPTS="${PLUGIN_SCRIPTS_ROOT:+$PLUGIN_SCRIPTS_ROOT/skills/brainstorm/scripts}"
+if [[ -z "$PLUGIN_SCRIPTS_ROOT" ]]; then
+  echo "uberdev plugin root unavailable (set PLUGIN_ROOT, PLUGIN_ROOT, or CURSOR_PLUGIN_ROOT) — falling back to terminal-only Phase 2" >&2
+  # continue without visual companion; AskUserQuestion path still works
+elif [[ ! -d "$PLUGIN_SCRIPTS" ]]; then
   echo "uberdev brainstorm scripts not found — falling back to terminal-only Phase 2" >&2
   # continue without visual companion; AskUserQuestion path still works
 else
@@ -575,7 +603,12 @@ Format:
 Dispatch `spec-writer` through the routed edge below. `research_paths_json` is a flat JSON array of the available absolute Phase-1 artifacts; `qa_answers_path` points to the normalized answers (or turbo auto-picks). No raw issue or answer text enters the handoff.
 
 ```bash uberdev-executable edge=orchestrator.spec.write
-SPEC_WRITE_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"issue_path":sys.argv[1],"research_paths":json.loads(sys.argv[2]),"questions_path":sys.argv[3],"working_dir":sys.argv[4],"summary_path":sys.argv[5]},separators=(",",":")))' "$issue_body_path" "$research_paths_json" "$qa_answers_path" "$WORKING_DIR_ABS" "$spec_summary_path")"
+SPEC_WRITE_INPUTS="$(uberdev_child_inputs_build orchestrator.spec.write \
+  issue_path "$(uberdev_design_json_string "$issue_body_path")" \
+  research_paths "$research_paths_json" \
+  questions_path "$(uberdev_design_json_string "$qa_answers_path")" \
+  working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")" \
+  summary_path "$(uberdev_design_json_string "$spec_summary_path")")"
 uberdev_design_dispatch orchestrator.spec.write orchestrator-spec-write-a1 spec-writer spec run 'null' "$SPEC_WRITE_INPUTS"
 uberdev_design_wait orchestrator-spec-write-a1 600
 ```
@@ -593,7 +626,13 @@ Wait for return. Parse YAML.
 If any check fails, persist verification feedback and execute the sole retry:
 
 ```bash uberdev-executable edge=orchestrator.spec.write retry=verification
-SPEC_WRITE_RETRY_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["verification_feedback_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$SPEC_WRITE_INPUTS" "$verification_feedback_path")"
+SPEC_WRITE_RETRY_INPUTS="$(uberdev_child_inputs_build orchestrator.spec.write \
+  issue_path "$(uberdev_design_json_string "$issue_body_path")" \
+  research_paths "$research_paths_json" \
+  questions_path "$(uberdev_design_json_string "$qa_answers_path")" \
+  working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")" \
+  summary_path "$(uberdev_design_json_string "$spec_summary_path")" \
+  verification_feedback_path "$(uberdev_design_json_string "$verification_feedback_path")")"
 uberdev_design_dispatch orchestrator.spec.write orchestrator-spec-write-a2 spec-writer spec run 'null' "$SPEC_WRITE_RETRY_INPUTS"
 uberdev_design_wait orchestrator-spec-write-a2 600
 ```
@@ -616,7 +655,11 @@ If `--paranoid` was passed, log the deprecation notice from the Args section but
 Dispatch `spec-reviewer` with internal paths plus the issue-body path, then wait:
 
 ```bash uberdev-executable edge=orchestrator.spec.review
-SPEC_REVIEW_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"spec_path":sys.argv[1],"issue_path":sys.argv[2],"research_paths":json.loads(sys.argv[3]),"working_dir":sys.argv[4]},separators=(",",":")))' "$spec_path" "$issue_body_path" "$research_paths_json" "$WORKING_DIR_ABS")"
+SPEC_REVIEW_INPUTS="$(uberdev_child_inputs_build orchestrator.spec.review \
+  spec_path "$(uberdev_design_json_string "$spec_path")" \
+  issue_path "$(uberdev_design_json_string "$issue_body_path")" \
+  research_paths "$research_paths_json" \
+  working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")")"
 uberdev_design_dispatch orchestrator.spec.review orchestrator-spec-review-a1 spec-reviewer spec run 'null' "$SPEC_REVIEW_INPUTS"
 uberdev_design_wait orchestrator-spec-review-a1 600
 ```
@@ -624,7 +667,7 @@ uberdev_design_wait orchestrator-spec-review-a1 600
 Parse its YAML. A malformed response receives exactly one executable format retry:
 
 ```bash uberdev-executable edge=orchestrator.spec.review retry=format
-SPEC_REVIEW_FORMAT_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["format_retry"]=True; v["format_example_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$SPEC_REVIEW_INPUTS" "$spec_review_format_example_path")"
+SPEC_REVIEW_FORMAT_INPUTS="$(uberdev_child_inputs_format_retry orchestrator.spec.review "$SPEC_REVIEW_INPUTS" "$spec_review_format_example_path")"
 uberdev_design_dispatch orchestrator.spec.review orchestrator-spec-review-a2 spec-reviewer spec run 'null' "$SPEC_REVIEW_FORMAT_INPUTS"
 uberdev_design_wait orchestrator-spec-review-a2 600
 ```
@@ -642,26 +685,33 @@ no identity is reused. The bounded identities are
 `orchestrator-spec-review-r2-a1`, and `orchestrator-spec-review-r2-a2`.
 
 ```bash uberdev-executable edge=orchestrator.spec.revise
-SPEC_REVISE_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"spec_path":sys.argv[1],"revision_path":sys.argv[2],"working_dir":sys.argv[3]},separators=(",",":")))' "$spec_path" "$revision_brief_path" "$WORKING_DIR_ABS")"
+SPEC_REVISE_INPUTS="$(uberdev_child_inputs_build orchestrator.spec.revise \
+  spec_path "$(uberdev_design_json_string "$spec_path")" \
+  revision_path "$(uberdev_design_json_string "$revision_brief_path")" \
+  working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")")"
 for revision_cycle in 1 2; do
   revise_instance="orchestrator-spec-revise-r${revision_cycle}-a1"
   uberdev_design_dispatch orchestrator.spec.revise "$revise_instance" spec-reviser spec run 'null' "$SPEC_REVISE_INPUTS"
   uberdev_design_wait "$revise_instance" 600
   if [ "${spec_reviser_format_invalid:-0}" = 1 ]; then
     revise_retry_instance="orchestrator-spec-revise-r${revision_cycle}-a2"
-    SPEC_REVISE_FORMAT_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["format_retry"]=True; v["format_example_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$SPEC_REVISE_INPUTS" "$spec_reviser_format_example_path")"
+    SPEC_REVISE_FORMAT_INPUTS="$(uberdev_child_inputs_format_retry orchestrator.spec.revise "$SPEC_REVISE_INPUTS" "$spec_reviser_format_example_path")"
     uberdev_design_dispatch orchestrator.spec.revise "$revise_retry_instance" spec-reviser spec run 'null' "$SPEC_REVISE_FORMAT_INPUTS"
     uberdev_design_wait "$revise_retry_instance" 600
   fi
 
   # Run the four spec artifact checks above before this re-review.
-  SPEC_REREVIEW_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["spec_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$SPEC_REVIEW_INPUTS" "$spec_path")"
+  SPEC_REREVIEW_INPUTS="$(uberdev_child_inputs_build orchestrator.spec.review \
+    spec_path "$(uberdev_design_json_string "$spec_path")" \
+    issue_path "$(uberdev_design_json_string "$issue_body_path")" \
+    research_paths "$research_paths_json" \
+    working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")")"
   review_instance="orchestrator-spec-review-r${revision_cycle}-a1"
   uberdev_design_dispatch orchestrator.spec.review "$review_instance" spec-reviewer spec run 'null' "$SPEC_REREVIEW_INPUTS"
   uberdev_design_wait "$review_instance" 600
   if [ "${spec_reviewer_format_invalid:-0}" = 1 ]; then
     review_retry_instance="orchestrator-spec-review-r${revision_cycle}-a2"
-    SPEC_REREVIEW_FORMAT_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["format_retry"]=True; v["format_example_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$SPEC_REREVIEW_INPUTS" "$spec_review_format_example_path")"
+    SPEC_REREVIEW_FORMAT_INPUTS="$(uberdev_child_inputs_format_retry orchestrator.spec.review "$SPEC_REREVIEW_INPUTS" "$spec_review_format_example_path")"
     uberdev_design_dispatch orchestrator.spec.review "$review_retry_instance" spec-reviewer spec run 'null' "$SPEC_REREVIEW_FORMAT_INPUTS"
     uberdev_design_wait "$review_retry_instance" 600
   fi
@@ -766,24 +816,45 @@ In planning mode, every role invokes only the supplied executable for `validate`
 The executable base edges are:
 
 ```bash uberdev-executable edge=orchestrator.plan.research.dependency
-PLAN_DEP_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"spec_path":sys.argv[1],"working_dir":sys.argv[2],"summary_path":sys.argv[3],"output_path":sys.argv[4],"validation_path":sys.argv[5]},separators=(",",":")))' "$spec_path" "$WORKING_DIR_ABS" "$planning_dependency_summary_path" "$dependency_map_path" "$PLANNING_RESEARCH_OUTPUT_SHIM")"
+PLAN_DEP_INPUTS="$(uberdev_child_inputs_build orchestrator.plan.research.dependency \
+  spec_path "$(uberdev_design_json_string "$spec_path")" \
+  working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")" \
+  summary_path "$(uberdev_design_json_string "$planning_dependency_summary_path")" \
+  output_path "$(uberdev_design_json_string "$dependency_map_path")" \
+  validation_path "$(uberdev_design_json_string "$PLANNING_RESEARCH_OUTPUT_SHIM")")"
 uberdev_design_dispatch orchestrator.plan.research.dependency orchestrator-plan-research-dependency-a1 research-codebase plan none '[]' "$PLAN_DEP_INPUTS"
 ```
 
 ```bash uberdev-executable edge=orchestrator.plan.research.tests
-PLAN_TEST_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"spec_path":sys.argv[1],"working_dir":sys.argv[2],"summary_path":sys.argv[3],"output_path":sys.argv[4],"validation_path":sys.argv[5]},separators=(",",":")))' "$spec_path" "$WORKING_DIR_ABS" "$planning_tests_summary_path" "$test_map_path" "$PLANNING_RESEARCH_OUTPUT_SHIM")"
+PLAN_TEST_INPUTS="$(uberdev_child_inputs_build orchestrator.plan.research.tests \
+  spec_path "$(uberdev_design_json_string "$spec_path")" \
+  working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")" \
+  summary_path "$(uberdev_design_json_string "$planning_tests_summary_path")" \
+  output_path "$(uberdev_design_json_string "$test_map_path")" \
+  validation_path "$(uberdev_design_json_string "$PLANNING_RESEARCH_OUTPUT_SHIM")")"
 uberdev_design_dispatch orchestrator.plan.research.tests orchestrator-plan-research-tests-a1 research-test-coverage plan none '[]' "$PLAN_TEST_INPUTS"
 ```
 
 ```bash uberdev-executable edge=orchestrator.plan.research.risks
-PLAN_RISK_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"spec_path":sys.argv[1],"working_dir":sys.argv[2],"summary_path":sys.argv[3],"output_path":sys.argv[4],"validation_path":sys.argv[5]},separators=(",",":")))' "$spec_path" "$WORKING_DIR_ABS" "$planning_risks_summary_path" "$implementation_risk_path" "$PLANNING_RESEARCH_OUTPUT_SHIM")"
+PLAN_RISK_INPUTS="$(uberdev_child_inputs_build orchestrator.plan.research.risks \
+  spec_path "$(uberdev_design_json_string "$spec_path")" \
+  working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")" \
+  summary_path "$(uberdev_design_json_string "$planning_risks_summary_path")" \
+  output_path "$(uberdev_design_json_string "$implementation_risk_path")" \
+  validation_path "$(uberdev_design_json_string "$PLANNING_RESEARCH_OUTPUT_SHIM")")"
 uberdev_design_dispatch orchestrator.plan.research.risks orchestrator-plan-research-risks-a1 research-constraints plan none '[]' "$PLAN_RISK_INPUTS"
 ```
 
 If `validated_risk_signals` contains at least one resolver-declared high-risk entry, add `research-security` as a fourth direct child before the same shared wait. Do not infer risk from issue body or issue text:
 
 ```bash uberdev-executable edge=orchestrator.plan.research.security
-PLAN_SECURITY_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"spec_path":sys.argv[1],"working_dir":sys.argv[2],"summary_path":sys.argv[3],"output_path":sys.argv[4],"validation_path":sys.argv[5],"risk_signals":json.loads(sys.argv[6])},separators=(",",":")))' "$spec_path" "$WORKING_DIR_ABS" "$planning_security_summary_path" "$planning_security_output_path" "$PLANNING_RESEARCH_OUTPUT_SHIM" "$validated_risk_signals_json")"
+PLAN_SECURITY_INPUTS="$(uberdev_child_inputs_build orchestrator.plan.research.security \
+  spec_path "$(uberdev_design_json_string "$spec_path")" \
+  working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")" \
+  summary_path "$(uberdev_design_json_string "$planning_security_summary_path")" \
+  output_path "$(uberdev_design_json_string "$planning_security_output_path")" \
+  validation_path "$(uberdev_design_json_string "$PLANNING_RESEARCH_OUTPUT_SHIM")" \
+  risk_signals "$validated_risk_signals_json")"
 uberdev_design_dispatch orchestrator.plan.research.security orchestrator-plan-research-security-a1 research-security plan subtask "$validated_risk_signals_json" "$PLAN_SECURITY_INPUTS"
 ```
 
@@ -821,8 +892,19 @@ planning_research:
 
 Dispatch `plan-writer` with the three mapping entries flattened only for the closed transport; the leaf interprets them as the exact `planning_research` mapping above. It is a synthesis-only leaf and independently invokes the same shim's `--operation validate --mode postwrite` flow for all three inputs.
 
+The builder arguments below are the manifest-validated replacement for the
+former inline object fields `"planning_paths":json.loads(...)` and
+`"validation_path":...`; the exact three-path value and validation path are
+unchanged.
+
 ```bash uberdev-executable edge=orchestrator.plan.write
-PLAN_WRITE_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"spec_path":sys.argv[1],"tier":sys.argv[2],"working_dir":sys.argv[3],"summary_path":sys.argv[4],"planning_paths":json.loads(sys.argv[5]),"validation_path":sys.argv[6]},separators=(",",":")))' "$spec_path" "$tier" "$WORKING_DIR_ABS" "$plan_summary_path" "$planning_paths_json" "$PLANNING_RESEARCH_OUTPUT_SHIM")"
+PLAN_WRITE_INPUTS="$(uberdev_child_inputs_build orchestrator.plan.write \
+  spec_path "$(uberdev_design_json_string "$spec_path")" \
+  tier "$(uberdev_design_json_string "$tier")" \
+  working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")" \
+  summary_path "$(uberdev_design_json_string "$plan_summary_path")" \
+  planning_paths "$planning_paths_json" \
+  validation_path "$(uberdev_design_json_string "$PLANNING_RESEARCH_OUTPUT_SHIM")")"
 uberdev_design_dispatch orchestrator.plan.write orchestrator-plan-write-a1 plan-writer plan run 'null' "$PLAN_WRITE_INPUTS"
 uberdev_design_wait orchestrator-plan-write-a1 600
 ```
@@ -838,11 +920,19 @@ run-tree contract's `verification: 2`. Persist feedback separately for each
 failed attempt and execute both fresh identities before fallback:
 
 ```bash uberdev-executable edge=orchestrator.plan.write retry=verification
-PLAN_WRITE_A2_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["verification_feedback_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$PLAN_WRITE_INPUTS" "$plan_write_a1_feedback_path")"
+PLAN_WRITE_A2_INPUTS="$(uberdev_child_inputs_build orchestrator.plan.write \
+  spec_path "$(uberdev_design_json_string "$spec_path")" tier "$(uberdev_design_json_string "$tier")" \
+  working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")" summary_path "$(uberdev_design_json_string "$plan_summary_path")" \
+  planning_paths "$planning_paths_json" validation_path "$(uberdev_design_json_string "$PLANNING_RESEARCH_OUTPUT_SHIM")" \
+  verification_feedback_path "$(uberdev_design_json_string "$plan_write_a1_feedback_path")")"
 uberdev_design_dispatch orchestrator.plan.write orchestrator-plan-write-a2 plan-writer plan run 'null' "$PLAN_WRITE_A2_INPUTS"
 uberdev_design_wait orchestrator-plan-write-a2 600
 if [ "${plan_write_verification_failed:-0}" = 1 ]; then
-  PLAN_WRITE_A3_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["verification_feedback_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$PLAN_WRITE_INPUTS" "$plan_write_a2_feedback_path")"
+  PLAN_WRITE_A3_INPUTS="$(uberdev_child_inputs_build orchestrator.plan.write \
+    spec_path "$(uberdev_design_json_string "$spec_path")" tier "$(uberdev_design_json_string "$tier")" \
+    working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")" summary_path "$(uberdev_design_json_string "$plan_summary_path")" \
+    planning_paths "$planning_paths_json" validation_path "$(uberdev_design_json_string "$PLANNING_RESEARCH_OUTPUT_SHIM")" \
+    verification_feedback_path "$(uberdev_design_json_string "$plan_write_a2_feedback_path")")"
   uberdev_design_dispatch orchestrator.plan.write orchestrator-plan-write-a3 plan-writer plan run 'null' "$PLAN_WRITE_A3_INPUTS"
   uberdev_design_wait orchestrator-plan-write-a3 600
 fi
@@ -860,7 +950,11 @@ If `a3` still fails verification, fall back to **in-main plan synthesis** (do no
 After plan-writer's verification passes, dispatch `plan-reviewer` and wait:
 
 ```bash uberdev-executable edge=orchestrator.plan.review
-PLAN_REVIEW_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"plan_path":sys.argv[1],"spec_path":sys.argv[2],"tier":sys.argv[3],"working_dir":sys.argv[4]},separators=(",",":")))' "$plan_path" "$spec_path" "$tier" "$WORKING_DIR_ABS")"
+PLAN_REVIEW_INPUTS="$(uberdev_child_inputs_build orchestrator.plan.review \
+  plan_path "$(uberdev_design_json_string "$plan_path")" \
+  spec_path "$(uberdev_design_json_string "$spec_path")" \
+  tier "$(uberdev_design_json_string "$tier")" \
+  working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")")"
 uberdev_design_dispatch orchestrator.plan.review orchestrator-plan-review-a1 plan-reviewer plan run 'null' "$PLAN_REVIEW_INPUTS"
 uberdev_design_wait orchestrator-plan-review-a1 600
 ```
@@ -871,7 +965,7 @@ If the plan-reviewer's response cannot be parsed as YAML (no `verdict:` key,
 invalid enum, or YAML syntax error), execute one format retry:
 
 ```bash uberdev-executable edge=orchestrator.plan.review retry=format
-PLAN_REVIEW_FORMAT_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["format_retry"]=True; v["format_example_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$PLAN_REVIEW_INPUTS" "$plan_review_format_example_path")"
+PLAN_REVIEW_FORMAT_INPUTS="$(uberdev_child_inputs_format_retry orchestrator.plan.review "$PLAN_REVIEW_INPUTS" "$plan_review_format_example_path")"
 uberdev_design_dispatch orchestrator.plan.review orchestrator-plan-review-a2 plan-reviewer plan run 'null' "$PLAN_REVIEW_FORMAT_INPUTS"
 uberdev_design_wait orchestrator-plan-review-a2 600
 ```
@@ -882,25 +976,43 @@ If still unparseable: log `phase=plan-reviewer status=parse-failure note=proceed
 - `verdict: REVISIONS_REQUIRED` → persist findings as `revision_brief_path`, add it to the same flat inputs, and execute:
 
 ```bash uberdev-executable edge=orchestrator.plan.write
-PLAN_REVISION_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["revision_brief_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$PLAN_WRITE_INPUTS" "$revision_brief_path")"
+PLAN_REVISION_INPUTS="$(uberdev_child_inputs_build orchestrator.plan.write \
+  spec_path "$(uberdev_design_json_string "$spec_path")" tier "$(uberdev_design_json_string "$tier")" \
+  working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")" summary_path "$(uberdev_design_json_string "$plan_summary_path")" \
+  planning_paths "$planning_paths_json" validation_path "$(uberdev_design_json_string "$PLANNING_RESEARCH_OUTPUT_SHIM")" \
+  revision_brief_path "$(uberdev_design_json_string "$revision_brief_path")")"
 uberdev_design_dispatch orchestrator.plan.write orchestrator-plan-write-r1-a1 plan-writer plan run 'null' "$PLAN_REVISION_INPUTS"
 uberdev_design_wait orchestrator-plan-write-r1-a1 600
 if [ "${plan_revision_verification_failed:-0}" = 1 ]; then
-  PLAN_REVISION_A2_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["verification_feedback_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$PLAN_REVISION_INPUTS" "$plan_revision_a1_feedback_path")"
+  PLAN_REVISION_A2_INPUTS="$(uberdev_child_inputs_build orchestrator.plan.write \
+    spec_path "$(uberdev_design_json_string "$spec_path")" tier "$(uberdev_design_json_string "$tier")" \
+    working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")" summary_path "$(uberdev_design_json_string "$plan_summary_path")" \
+    planning_paths "$planning_paths_json" validation_path "$(uberdev_design_json_string "$PLANNING_RESEARCH_OUTPUT_SHIM")" \
+    revision_brief_path "$(uberdev_design_json_string "$revision_brief_path")" \
+    verification_feedback_path "$(uberdev_design_json_string "$plan_revision_a1_feedback_path")")"
   uberdev_design_dispatch orchestrator.plan.write orchestrator-plan-write-r1-a2 plan-writer plan run 'null' "$PLAN_REVISION_A2_INPUTS"
   uberdev_design_wait orchestrator-plan-write-r1-a2 600
 fi
 if [ "${plan_revision_verification_failed:-0}" = 1 ]; then
-  PLAN_REVISION_A3_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["verification_feedback_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$PLAN_REVISION_INPUTS" "$plan_revision_a2_feedback_path")"
+  PLAN_REVISION_A3_INPUTS="$(uberdev_child_inputs_build orchestrator.plan.write \
+    spec_path "$(uberdev_design_json_string "$spec_path")" tier "$(uberdev_design_json_string "$tier")" \
+    working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")" summary_path "$(uberdev_design_json_string "$plan_summary_path")" \
+    planning_paths "$planning_paths_json" validation_path "$(uberdev_design_json_string "$PLANNING_RESEARCH_OUTPUT_SHIM")" \
+    revision_brief_path "$(uberdev_design_json_string "$revision_brief_path")" \
+    verification_feedback_path "$(uberdev_design_json_string "$plan_revision_a2_feedback_path")")"
   uberdev_design_dispatch orchestrator.plan.write orchestrator-plan-write-r1-a3 plan-writer plan run 'null' "$PLAN_REVISION_A3_INPUTS"
   uberdev_design_wait orchestrator-plan-write-r1-a3 600
 fi
 
-PLAN_REREVIEW_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["plan_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$PLAN_REVIEW_INPUTS" "$plan_path")"
+PLAN_REREVIEW_INPUTS="$(uberdev_child_inputs_build orchestrator.plan.review \
+  plan_path "$(uberdev_design_json_string "$plan_path")" \
+  spec_path "$(uberdev_design_json_string "$spec_path")" \
+  tier "$(uberdev_design_json_string "$tier")" \
+  working_dir "$(uberdev_design_json_string "$WORKING_DIR_ABS")")"
 uberdev_design_dispatch orchestrator.plan.review orchestrator-plan-review-r1-a1 plan-reviewer plan run 'null' "$PLAN_REREVIEW_INPUTS"
 uberdev_design_wait orchestrator-plan-review-r1-a1 600
 if [ "${plan_rereview_format_invalid:-0}" = 1 ]; then
-  PLAN_REREVIEW_FORMAT_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["format_retry"]=True; v["format_example_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$PLAN_REREVIEW_INPUTS" "$plan_review_format_example_path")"
+  PLAN_REREVIEW_FORMAT_INPUTS="$(uberdev_child_inputs_format_retry orchestrator.plan.review "$PLAN_REREVIEW_INPUTS" "$plan_review_format_example_path")"
   uberdev_design_dispatch orchestrator.plan.review orchestrator-plan-review-r1-a2 plan-reviewer plan run 'null' "$PLAN_REREVIEW_FORMAT_INPUTS"
   uberdev_design_wait orchestrator-plan-review-r1-a2 600
 fi
