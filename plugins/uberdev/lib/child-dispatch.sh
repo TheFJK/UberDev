@@ -91,8 +91,11 @@ uberdev_child_inputs_build() {
 }
 
 uberdev_child_inputs_validate() {
+  local output
   [ "$#" -eq 2 ] || { _uberdev_child_error 'child inputs validate expects EDGE_ID INPUTS_JSON'; return 2; }
-  _uberdev_child_inputs_run validate "$@"
+  output="$(_uberdev_child_inputs_run validate "$@")" || return $?
+  _uberdev_child_receipt_emit_inputs build "$1" "$output" || return $?
+  printf '%s' "$output"
 }
 
 uberdev_child_inputs_format_retry() {

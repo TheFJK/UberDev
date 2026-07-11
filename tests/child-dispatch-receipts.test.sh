@@ -331,6 +331,73 @@ for secret in ('SENSITIVE-TASK-PATH','SENSITIVE-FAILURE-PATH','PROMPT-PAYLOAD','
 PY
 pass 'real production boundaries emit one correlated build -> handoff -> dispatch chain in seam order'
 
+# SDD builds inputs before canonicalizing owned paths, then validates the
+# transformed snapshot. Both successful manifest-valid snapshots are build
+# evidence; the handoff/dispatch digest must correlate to a prior matching one.
+TRANSFORM_FILE="$TMP/transformed/receipts.jsonl"
+private_file "$(dirname "$TRANSFORM_FILE")" "$TRANSFORM_FILE"
+CHAIN_FILE="$TRANSFORM_FILE"
+export UBERDEV_CHILD_TEST_RECEIPT_FILE="$CHAIN_FILE"
+PRE_TASK_PATH="$TMP/run/inputs/../inputs/SENSITIVE-TASK-PATH.md"
+PRE_FAILURE_PATH="$TMP/run/inputs/../inputs/SENSITIVE-FAILURE-PATH.md"
+PRE_WORKING_DIR="$TMP/run/."
+PRE_CANONICAL_INPUTS="$(uberdev_child_inputs_build sdd.task.implement \
+  task_path "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$PRE_TASK_PATH")" \
+  working_dir "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$PRE_WORKING_DIR")" \
+  allowed_paths "$(python3 -c 'import json,sys;print(json.dumps([sys.argv[1]]))' "$PRE_TASK_PATH")" \
+  denied_paths '[]' \
+  failure_path "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$PRE_FAILURE_PATH")" \
+  attempt 1)"
+TRANSFORMED_INPUTS="$(python3 -I -B - "$PRE_CANONICAL_INPUTS" <<'PY'
+import json,os,sys
+value=json.loads(sys.argv[1])
+for key in ('task_path','working_dir','failure_path'):
+    value[key]=os.path.realpath(value[key])
+for key in ('allowed_paths','denied_paths'):
+    value[key]=[os.path.realpath(path) for path in value[key]]
+print(json.dumps(value,sort_keys=True,separators=(',',':')),end='')
+PY
+)"
+[ "$PRE_CANONICAL_INPUTS" != "$TRANSFORMED_INPUTS" ] || fail 'transformed input fixture' 'canonicalization did not change the snapshot'
+VALIDATED_TRANSFORMED="$(uberdev_child_inputs_validate sdd.task.implement "$TRANSFORMED_INPUTS")"
+[ "$VALIDATED_TRANSFORMED" = "$TRANSFORMED_INPUTS" ] || fail 'validate output stability' 'canonical output changed'
+[ "$(wc -l <"$CHAIN_FILE" | tr -d ' ')" -eq 2 ] || \
+  fail 'validated build snapshot receipt' 'expected pre-transform and validated build events'
+pass 'successful validate preserves canonical output and emits the transformed build snapshot'
+
+before_failed_validate="$(wc -l <"$CHAIN_FILE" | tr -d ' ')"
+assert_fails_cleanly 'failed validate emits no build snapshot' 'missing required inputs' \
+  uberdev_child_inputs_validate sdd.task.implement '{"attempt":1}'
+[ "$(wc -l <"$CHAIN_FILE" | tr -d ' ')" -eq "$before_failed_validate" ] || \
+  fail 'failed validate receipt count' 'failed validation appended a build event'
+pass 'failed validate leaves the receipt stream unchanged'
+
+DUPLICATE_VALIDATED="$(uberdev_child_inputs_validate sdd.task.implement "$VALIDATED_TRANSFORMED")"
+[ "$DUPLICATE_VALIDATED" = "$VALIDATED_TRANSFORMED" ] || fail 'duplicate validate output' 'canonical output changed'
+[ "$(wc -l <"$CHAIN_FILE" | tr -d ' ')" -eq 3 ] || \
+  fail 'duplicate validated snapshot' 'identical successful snapshot was not appended'
+pass 'duplicate identical validated build snapshots are allowed'
+
+INSTANCE_ID='receipt-worker-transformed'
+uberdev_create_child_handoff sdd.task.implement "$INSTANCE_ID" "$VALIDATED_TRANSFORMED" '[]' >/dev/null
+PROVIDER_CALLED=0
+uberdev_dispatch_child sdd.task.implement "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" >/dev/null
+[ "$PROVIDER_CALLED" -eq 1 ] || fail 'transformed provider seam' 'provider was not called'
+python3 -I -B - "$CHAIN_FILE" "$PRE_CANONICAL_INPUTS" "$VALIDATED_TRANSFORMED" "$INSTANCE_ID" <<'PY'
+import hashlib,json,pathlib,sys
+path,pre_raw,validated_raw,instance=sys.argv[1:]
+rows=[json.loads(line) for line in pathlib.Path(path).read_text().splitlines()]
+assert [row['event'] for row in rows]==['build','build','build','handoff','dispatch'],rows
+digest=lambda raw: hashlib.sha256(json.dumps(json.loads(raw),sort_keys=True,separators=(',',':')).encode()).hexdigest()
+pre_digest=digest(pre_raw); validated_digest=digest(validated_raw)
+assert pre_digest!=validated_digest
+assert [row['inputs_sha256'] for row in rows[:3]]==[pre_digest,validated_digest,validated_digest]
+assert rows[3]['inputs_sha256']==validated_digest and rows[4]['inputs_sha256']==validated_digest
+assert rows[3]['inputs_sha256'] in {row['inputs_sha256'] for row in rows[:3]}
+assert rows[3]['instance_id']==instance and rows[4]['instance_id']==instance
+PY
+pass 'transformed handoff and dispatch correlate to a prior validated build digest'
+
 # A malformed handoff cannot be converted into a receipt record.
 MALFORMED_HANDOFF="$TMP/malformed-handoff.json"
 printf '%s' $'{"safe":1}\nFORGED-HANDOFF-LOG-LINE' >"$MALFORMED_HANDOFF"; chmod 600 "$MALFORMED_HANDOFF"
