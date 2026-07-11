@@ -229,7 +229,7 @@ Read-only: `uberthink-arbiter` and the dedicated escalation/arbitration role.
 
 No role MAY default to `ultra` or `danger-full-access`. Route overrides never widen sandbox.
 
-Every role MUST declare `delegation_mode: leaf | orchestrator` in the policy catalog. Every bundled custom-agent role in this RFC is a leaf: its profile MUST disable multi-agent tools and set maximum spawn depth to zero, and detached launches MUST pass the equivalent `features.multi_agent=false` and `agents.max_depth=0` overrides. The root host orchestrator retains `agents.max_depth=1`. Installation and CI probes MUST prove every custom agent, including `plan-writer`, cannot spawn a child; a prompt-only “do not delegate” sentence is not sufficient enforcement. Adding a future custom-agent orchestrator requires a spec amendment and an enforceable depth design.
+Every role MUST declare `delegation_mode: leaf | orchestrator` in the policy catalog. Every bundled custom-agent role in this RFC is a leaf. Its role profile MUST disable multi-agent tools with `features.multi_agent=false`; it MUST NOT set `agents.max_depth`, because Codex 0.144.1 rejects that field in custom-agent profiles. Detached launches MUST pass both `-c features.multi_agent=false` and `-c agents.max_depth=0`, where the depth override is supported. The root host orchestrator retains `agents.max_depth=1`. Installation and CI probes MUST prove every custom agent, including `plan-writer`, cannot spawn a child; a prompt-only “do not delegate” sentence is not sufficient enforcement. Adding a future custom-agent orchestrator requires a spec amendment and an enforceable depth design.
 
 ## 8. Provider compatibility and fallback
 
