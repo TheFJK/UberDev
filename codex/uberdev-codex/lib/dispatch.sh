@@ -893,7 +893,7 @@ _uberdev_dispatch_background() {
   local WORKTREE_BRANCH="worktree-solve-issue-$ISSUE_NUM"
   local LOG_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM.log"
   local STATUS_FILE="${UBERDEV_AGENT_STATUS_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-bg-status-$ISSUE_NUM.json}"
-  local RESULT_FILE="${UBERDEV_AGENT_RESULT_FILE:-}"
+  local RESULT_FILE="${UBERDEV_AGENT_RESULT_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-bg-result-$ISSUE_NUM.md}"
   # TOCTOU hardening (#155): guard + 0600-create the predictable log + pid
   # paths before any redirect writes to them (world-writable $UBERDEV_TMPDIR).
   if ! _uberdev_dispatch_prepare_tmp_target "$LOG_FILE" "$ISSUE_NUM" "background"; then
@@ -903,6 +903,9 @@ _uberdev_dispatch_background() {
     DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
   fi
   if ! _uberdev_dispatch_prepare_tmp_target "$STATUS_FILE" "$ISSUE_NUM" "background"; then
+    DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
+  fi
+  if ! _uberdev_dispatch_prepare_tmp_target "$RESULT_FILE" "$ISSUE_NUM" "background"; then
     DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
   fi
   # Explicit dispatcher-controlled worktree — sidesteps the Windows
@@ -938,7 +941,7 @@ _uberdev_dispatch_background() {
   local PROVIDER_CMD=( env "${BG_TURBO_ENV[@]}" claude -p "$PROMPT_BODY"
     --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" )
   nohup python3 -I -c 'import os,sys; os.setsid(); os.execvp("bash", ["bash","-c",*sys.argv[1:]])' '
-    WORKTREE_DIR="$1"; STATUS_FILE="$2"; ISSUE_NUM="$3"; TIER="$4"; shift 4
+    WORKTREE_DIR="$1"; STATUS_FILE="$2"; RESULT_FILE="$3"; ISSUE_NUM="$4"; TIER="$5"; shift 5
     WRAPPER_PID="$$"
     write_status() {
       STATE="$1"; EXIT_CODE="$2"; TMP_STATUS="$(mktemp "${STATUS_FILE}.tmp.XXXXXX")" || return 1
@@ -950,12 +953,25 @@ _uberdev_dispatch_background() {
     }
     write_status running null || exit 126
     cd "$WORKTREE_DIR" || { write_status failed 127; exit 127; }
-    "$@"
+    TMP_RESULT="$(mktemp "${RESULT_FILE}.tmp.XXXXXX")" || { write_status failed 126; exit 126; }
+    chmod 600 "$TMP_RESULT" || { rm -f -- "$TMP_RESULT"; write_status failed 126; exit 126; }
+    "$@" > "$TMP_RESULT"
     PROVIDER_RC=$?
+    cat "$TMP_RESULT"
     if [ "$PROVIDER_RC" -eq 0 ]; then STATE=completed; else STATE=failed; fi
+    if [ "$PROVIDER_RC" -eq 0 ] && [ ! -s "$TMP_RESULT" ]; then
+      printf "%s\n" "error: background provider completed without a result" >&2
+      PROVIDER_RC=65; STATE=failed
+    fi
+    if [ "$PROVIDER_RC" -eq 0 ]; then
+      python3 -I -c '\''import os,sys; os.replace(sys.argv[1],sys.argv[2])'\'' "$TMP_RESULT" "$RESULT_FILE" \
+        || { rm -f -- "$TMP_RESULT"; write_status failed 126; exit 126; }
+    else
+      rm -f -- "$TMP_RESULT"
+    fi
     write_status "$STATE" "$PROVIDER_RC" || exit 126
     exit "$PROVIDER_RC"
-  ' _ "$WORKTREE_DIR" "$STATUS_FILE" "$ISSUE_NUM" "$TIER" "${PROVIDER_CMD[@]}" \
+  ' _ "$WORKTREE_DIR" "$STATUS_FILE" "$RESULT_FILE" "$ISSUE_NUM" "$TIER" "${PROVIDER_CMD[@]}" \
     >"$LOG_FILE" 2>&1 &
   DISPATCH_RC=$?
   DISPATCH_ID="$!"

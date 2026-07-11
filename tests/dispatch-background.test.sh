@@ -134,7 +134,7 @@ SH
 cat > "$IMMEDIATE_TMP/bin/claude" <<'SH'
 #!/usr/bin/env bash
 body="$2"
-printf 'immediate %s result\n' "$body" > "$UBERDEV_AGENT_RESULT_FILE"
+printf 'immediate %s result\n' "$body"
 case "$body" in *failed*) exit 29 ;; *) exit 0 ;; esac
 SH
 chmod +x "$IMMEDIATE_TMP/bin/git" "$IMMEDIATE_TMP/bin/claude"
@@ -157,8 +157,13 @@ IMMEDIATE_OUT="$(
       _uberdev_dispatch_background "$issue" small "$UBERDEV_TMPDIR/prompt-$issue.txt"
       rc=$?; status="$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)"
       case "$outcome:$rc:$DISPATCH_ID:$status" in
-        completed:0:*:*\"state\":\"completed\"*\"exit_code\":0*) ;;
-        failed:0:*:*\"state\":\"failed\"*\"exit_code\":29*) ;;
+        completed:0:*:*\"state\":\"completed\"*\"exit_code\":0*)
+          [ "$(cat "$UBERDEV_AGENT_RESULT_FILE" 2>/dev/null)" = "immediate completed result" ] || failures=$((failures + 1))
+          [ "$(stat -f %Lp "$UBERDEV_AGENT_RESULT_FILE" 2>/dev/null || stat -c %a "$UBERDEV_AGENT_RESULT_FILE" 2>/dev/null)" = 600 ] || failures=$((failures + 1))
+          ;;
+        failed:0:*:*\"state\":\"failed\"*\"exit_code\":29*)
+          [ ! -s "$UBERDEV_AGENT_RESULT_FILE" ] || failures=$((failures + 1))
+          ;;
         *) failures=$((failures + 1)) ;;
       esac
       [ -n "${DISPATCH_ID:-}" ] || failures=$((failures + 1))
@@ -167,9 +172,9 @@ IMMEDIATE_OUT="$(
   ' _ "$DISPATCH_LIB"
 )"
 if [[ "$IMMEDIATE_OUT" == *'failures=0'* ]]; then
-  echo "  PASS  background preserves exact handles for repeated immediate completed and failed terminals"; PASS=$((PASS + 1))
+  echo "  PASS  background captures provider stdout into a private canonical result and preserves exact immediate terminal handles"; PASS=$((PASS + 1))
 else
-  echo "  FAIL  background preserves exact handles for repeated immediate completed and failed terminals"
+  echo "  FAIL  background captures provider stdout into a private canonical result and preserves exact immediate terminal handles"
   echo "        $IMMEDIATE_OUT"; FAIL=$((FAIL + 1))
 fi
 rm -rf "$IMMEDIATE_TMP"
