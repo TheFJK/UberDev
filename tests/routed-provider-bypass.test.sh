@@ -34,6 +34,51 @@ class PolicyError(Exception):
     pass
 
 
+def decode_ansi_escape(text, index):
+    simple = {
+        "a": "\a",
+        "b": "\b",
+        "e": "\x1b",
+        "E": "\x1b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "v": "\v",
+        "\\": "\\",
+        "'": "'",
+        '"': '"',
+        "?": "?",
+    }
+    if index + 1 >= len(text):
+        raise PolicyError("unclosed ANSI-C escape")
+    marker = text[index + 1]
+    if marker in simple:
+        return simple[marker], index + 2
+    if marker in "01234567":
+        end = index + 1
+        while end < len(text) and end < index + 4 and text[end] in "01234567":
+            end += 1
+        return chr(int(text[index + 1:end], 8)), end
+    if marker in "xuU":
+        limit = {"x": 2, "u": 4, "U": 8}[marker]
+        start = index + 2
+        end = start
+        while end < len(text) and end < start + limit and text[end] in "0123456789abcdefABCDEF":
+            end += 1
+        if end == start:
+            raise PolicyError(f"invalid ANSI-C \\{marker} escape")
+        value = int(text[start:end], 16)
+        if value > 0x10FFFF or 0xD800 <= value <= 0xDFFF:
+            raise PolicyError("invalid ANSI-C Unicode code point")
+        return chr(value), end
+    if marker == "c":
+        if index + 2 >= len(text):
+            raise PolicyError("incomplete ANSI-C control escape")
+        return chr(ord(text[index + 2].upper()) ^ 0x40), index + 3
+    raise PolicyError(f"unsupported ANSI-C escape: \\{marker}")
+
+
 def line_at(text, index, base_line):
     return base_line + text.count("\n", 0, index)
 
@@ -55,14 +100,8 @@ def quoted_chunk(text, index, quote, ansi=False):
         if char == quote:
             return index + 1, chars
         if ansi and char == "\\":
-            if index + 1 >= len(text):
-                raise PolicyError("unclosed ANSI-C quote")
-            escaped = text[index + 1]
-            if escaped == "\n":
-                index += 2
-                continue
-            chars.append(escaped)
-            index += 2
+            decoded, index = decode_ansi_escape(text, index)
+            chars.extend(decoded)
             continue
         chars.append(char)
         index += 1
@@ -431,6 +470,16 @@ assert_rejected continued-atom $'co\\\ndex exec review'
 assert_rejected mixed-double-quote 'co"dex" exec review'
 assert_rejected mixed-single-quote "'co'dex exec review"
 assert_rejected escaped-spelling 'co\dex exec review'
+assert_rejected ansi-hex-codex "provider=\$'\\x63o'dex"
+assert_rejected ansi-octal-codex "provider=\$'\\143o'dex"
+assert_rejected ansi-unicode-codex "provider=\$'\\u0063o'dex"
+assert_rejected ansi-hex-task-call "\$'\\x54ask' (prompt=review)"
+assert_rejected ansi-octal-agent-call "\$'\\101gent'(role=reviewer)"
+assert_rejected ansi-unicode-spawn-agent "\$'\\u0073pawn_'agent --task review"
+assert_rejected ansi-hex-claude "cl\$'\\x61'ude --print review"
+assert_rejected ansi-unsupported-escape "printf \$'\\q'"
+assert_rejected ansi-empty-hex-escape "printf \$'\\x'"
+assert_rejected ansi-invalid-unicode "printf \$'\\uD800'"
 assert_rejected nested-substitution 'result="$(printf "%s" "$(codex exec review)")"'
 assert_rejected double-quoted-backtick 'result="prefix `claude --print review` suffix"'
 assert_rejected unquoted-heredoc-substitution $'cat <<EOF\n$(codex exec review)\nEOF'
@@ -462,6 +511,7 @@ case "$provider_name" in other) printf '%s\n' esac ;; esac
 printf '%s\n' "codex"
 printf '%s\n' 'claude'
 printf '%s\n' $'spawn_agent Task( Agent('
+printf '%s\n' $'\x63odex \143laude \u0073pawn_agent Task( Agent('
 printf '%s\n' "fully quoted codex and claude data"
 uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks"
 uberdev_dispatch_child "$edge" "$handoff" "$result" "$status"
