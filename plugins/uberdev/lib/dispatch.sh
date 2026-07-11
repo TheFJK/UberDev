@@ -390,6 +390,26 @@ raise SystemExit(0 if live else 1)
 PY
 }
 
+_uberdev_dispatch_group_owned_session() {
+  python3 -I -B - "$1" "$2" <<'PY'
+import os,subprocess,sys
+pgid,sid=map(int,sys.argv[1:]); live=[]
+try: rows=subprocess.check_output(["ps","-axo","pid=,pgid=,stat="],text=True).splitlines()
+except Exception: raise SystemExit(2)
+for row in rows:
+ parts=row.split(None,2)
+ if len(parts)!=3 or not all(x.isdigit() for x in parts[:2]): continue
+ proc_pid,proc_pgid=map(int,parts[:2])
+ if proc_pgid==pgid and not parts[2].startswith("Z"):
+  try: proc_sid=os.getsid(proc_pid)
+  except ProcessLookupError: continue
+  live.append((proc_pid,proc_sid))
+if not live: raise SystemExit(1)
+if any(proc_sid!=sid for _,proc_sid in live): raise SystemExit(2)
+raise SystemExit(0)
+PY
+}
+
 _uberdev_dispatch_wait_owned_session() {
   local pid="$1" identity identity_pid identity_pgid identity_sid identity_started attempts=0
   while [ "$attempts" -lt 40 ]; do
@@ -407,12 +427,58 @@ EOF_IDENTITY
   return 1
 }
 
+
+# A detached wrapper can write its final status and exit before the parent gets
+# scheduled to observe the new session. Accept that race only from one secure,
+# canonical terminal snapshot naming the exact PID we just launched. A live
+# non-zombie PID is rejected because it may be reused or unisolated.
+_uberdev_dispatch_accept_immediate_terminal() {
+  local backend="$1" pid="$2" status_file="$3" result_file="${4:-}"
+  python3 -I -B - "$backend" "$pid" "$status_file" "$result_file" <<'PY'
+import json,os,stat,subprocess,sys
+backend,pid,status_path,result_path=sys.argv[1:]
+if not pid.isdigit() or int(pid)<=0: raise SystemExit(2)
+try:
+ process_state=subprocess.check_output(["ps","-o","stat=","-p",pid],text=True,stderr=subprocess.DEVNULL).strip()
+except (OSError,subprocess.CalledProcessError): process_state=""
+if process_state and not process_state.startswith("Z"): raise SystemExit(1)
+def secure_read(path,limit):
+ parent=os.path.dirname(os.path.abspath(path)); name=os.path.basename(path)
+ parent_fd=os.open(parent,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0)); fd=None
+ try:
+  fd=os.open(name,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0),dir_fd=parent_fd)
+  opened=os.fstat(fd); current=os.stat(name,dir_fd=parent_fd,follow_symlinks=False)
+  if (not stat.S_ISREG(opened.st_mode) or opened.st_uid!=os.geteuid() or opened.st_nlink!=1
+      or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)): raise ValueError()
+  raw=os.read(fd,limit+1)
+  if len(raw)>limit: raise ValueError()
+  return raw
+ finally:
+  if fd is not None: os.close(fd)
+  os.close(parent_fd)
+try:
+ snapshot=json.loads(secure_read(status_path,65536))
+ allowed={"issue","tier","backend","state","exit_code","pid","log","result","worktree","branch","process_identity","lease_generation"}
+ if not isinstance(snapshot,dict) or set(snapshot)-allowed: raise ValueError()
+ if snapshot.get("backend")!=backend or str(snapshot.get("pid"))!=pid: raise ValueError()
+ state=snapshot.get("state"); code=snapshot.get("exit_code")
+ if isinstance(code,bool) or not isinstance(code,int): raise ValueError()
+ if state=="completed":
+  if code!=0 or not result_path or len(secure_read(result_path,16*1024*1024))==0: raise ValueError()
+ elif state=="failed":
+  if code==0: raise ValueError()
+ else: raise ValueError()
+except (OSError,ValueError,TypeError,json.JSONDecodeError): raise SystemExit(1)
+print(state,end="")
+PY
+}
+
 # Cancel one already-registered provider handle. Numeric processes require the
 # launch-time process identity recorded by agent-dispatch; a reused PID is
 # rejected before signaling. Opaque providers use their native handle API and
 # prove the handle is no longer live before returning success.
 _uberdev_dispatch_cancel_backend() {
-  local backend="$1" handle="$2" expected_identity="${3:-}" current pane probe attempts cancel_rc identity_pid identity_pgid identity_sid identity_started
+  local backend="$1" handle="$2" expected_identity="${3:-}" current pane probe attempts cancel_rc group_rc identity_pid identity_pgid identity_sid identity_started
   case "$backend" in
     codex|background)
       case "$handle" in ''|*[!0-9]*) return 2 ;; esac
@@ -423,12 +489,32 @@ _uberdev_dispatch_cancel_backend() {
 $expected_identity
 EOF_IDENTITY
       [ "$identity_pid" = "$handle" ] && [ "$identity_pgid" = "$handle" ] && [ "$identity_sid" = "$handle" ] && [ -n "$identity_started" ] || return 2
-      kill -TERM "-$identity_pgid" 2>/dev/null || return 2
+      _uberdev_dispatch_group_owned_session "$identity_pgid" "$identity_sid" || return 2
+      if ! kill -TERM "-$identity_pgid" 2>/dev/null; then
+        _uberdev_dispatch_group_live "$identity_pgid" && return 2
+        return 0
+      fi
       attempts=0
       while [ "$attempts" -lt 40 ]; do
         current="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
         if [ -n "$current" ] && [ "$current" != "$expected_identity" ]; then return 2; fi
-        if ! _uberdev_dispatch_group_live "$identity_pgid"; then return 0; fi
+        if _uberdev_dispatch_group_owned_session "$identity_pgid" "$identity_sid"; then group_rc=0; else group_rc=$?; fi
+        [ "$group_rc" -ne 1 ] || return 0
+        [ "$group_rc" -eq 0 ] || return 2
+        sleep 0.05; attempts=$((attempts + 1))
+      done
+      current="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
+      if [ -n "$current" ] && [ "$current" != "$expected_identity" ]; then return 2; fi
+      _uberdev_dispatch_group_owned_session "$identity_pgid" "$identity_sid" || return 2
+      if ! kill -KILL "-$identity_pgid" 2>/dev/null; then
+        _uberdev_dispatch_group_live "$identity_pgid" && return 2
+        return 0
+      fi
+      attempts=0
+      while [ "$attempts" -lt 40 ]; do
+        if _uberdev_dispatch_group_owned_session "$identity_pgid" "$identity_sid"; then group_rc=0; else group_rc=$?; fi
+        [ "$group_rc" -ne 1 ] || return 0
+        [ "$group_rc" -eq 0 ] || return 2
         sleep 0.05; attempts=$((attempts + 1))
       done
       return 1
@@ -807,6 +893,7 @@ _uberdev_dispatch_background() {
   local WORKTREE_BRANCH="worktree-solve-issue-$ISSUE_NUM"
   local LOG_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM.log"
   local STATUS_FILE="${UBERDEV_AGENT_STATUS_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-bg-status-$ISSUE_NUM.json}"
+  local RESULT_FILE="${UBERDEV_AGENT_RESULT_FILE:-}"
   # TOCTOU hardening (#155): guard + 0600-create the predictable log + pid
   # paths before any redirect writes to them (world-writable $UBERDEV_TMPDIR).
   if ! _uberdev_dispatch_prepare_tmp_target "$LOG_FILE" "$ISSUE_NUM" "background"; then
@@ -889,15 +976,13 @@ _uberdev_dispatch_background() {
   # Delete it now so a subsequent rerun for the same issue cannot read a
   # stale pid (the canonical record lives in $STATUS_FILE below).
   rm -f "$STATUS_FILE.pid" 2>/dev/null || true
-  # Liveness gate: `nohup … &` makes `DISPATCH_RC=$?` report the fork, not the
-  # exec — a `claude -p` that failed to launch (binary missing, etc.) still
-  # leaves DISPATCH_RC=0. Confirm the captured pid is a live process; if not,
-  # clear DISPATCH_ID so the success guard below falls through to the error path.
-  if [[ -n "$DISPATCH_ID" ]] && ! kill -0 "$DISPATCH_ID" 2>/dev/null; then
-    DISPATCH_ID=""
-  fi
+  # The wrapper may already be terminal before the parent observes its owned
+  # session. Preserve its exact launch handle only when the canonical status
+  # and result/exit evidence prove that immediate terminal race.
   if [[ -n "$DISPATCH_ID" ]] && ! _uberdev_dispatch_wait_owned_session "$DISPATCH_ID"; then
-    DISPATCH_ID=""
+    if ! _uberdev_dispatch_accept_immediate_terminal background "$DISPATCH_ID" "$STATUS_FILE" "$RESULT_FILE" >/dev/null; then
+      DISPATCH_ID=""
+    fi
   fi
   if [[ "$DISPATCH_RC" -eq 0 && -n "$DISPATCH_ID" ]]; then
     _uberdev_dispatch_audit agent_dispatched \
@@ -1064,8 +1149,10 @@ EOF_STATUS
   DISPATCH_ID="$!"
   disown 2>/dev/null || true
   if [[ -n "$DISPATCH_ID" ]] && ! _uberdev_dispatch_wait_owned_session "$DISPATCH_ID"; then
-    DISPATCH_RC=1
-    DISPATCH_ID=""
+    if ! _uberdev_dispatch_accept_immediate_terminal codex "$DISPATCH_ID" "$STATUS_FILE" "$RESULT_FILE" >/dev/null; then
+      DISPATCH_RC=1
+      DISPATCH_ID=""
+    fi
   fi
   # A fast `codex exec` failure is a terminal agent outcome, not a parent
   # dispatch setup failure. The wrapper records that in the final status JSON;

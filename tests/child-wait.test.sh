@@ -51,6 +51,22 @@ _uberdev_dispatch_cancel_backend codex "$PID_GUARD" "$IDENTITY"
 ! kill -0 "$PID_GUARD" 2>/dev/null
 ! kill -0 "$PROVIDER_CHILD" 2>/dev/null
 
+# A provider descendant may deliberately ignore TERM. Cancellation escalates
+# only after revalidating the exact owned process group/session, then proves no
+# non-zombie members remain. A mismatched launch identity never signals either
+# the wrapper or its resistant child.
+python3 -I -c 'import os; os.setsid(); os.execvp("bash",["bash","-c","trap \"\" TERM; (trap \"\" TERM; while :; do :; done) & wait"])' & TERM_GUARD=$!
+disown "$TERM_GUARD" 2>/dev/null || true
+for _ in 1 2 3 4 5 6 7 8 9 10; do TERM_CHILD="$(pgrep -P "$TERM_GUARD" | head -1 || true)"; [ -z "$TERM_CHILD" ] || break; done
+[ -n "$TERM_CHILD" ] && kill -0 "$TERM_CHILD"
+TERM_IDENTITY="$(_uberdev_agent_process_identity "$TERM_GUARD")"
+! _uberdev_dispatch_cancel_backend background "$TERM_GUARD" "${TERM_IDENTITY%|*}|reused"
+kill -0 "$TERM_GUARD" && kill -0 "$TERM_CHILD"
+_uberdev_dispatch_cancel_backend background "$TERM_GUARD" "$TERM_IDENTITY"
+! _uberdev_dispatch_group_live "$TERM_GUARD"
+! kill -0 "$TERM_GUARD" 2>/dev/null
+! kill -0 "$TERM_CHILD" 2>/dev/null
+
 # A precreated private zero-byte status target is the normal delayed-wrapper
 # race and must be atomically canonicalized, not parsed as malformed JSON.
 ZERO_STATUS="$TMP/run/children/worker-0001/zero-status.json"

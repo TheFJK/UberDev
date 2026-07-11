@@ -620,6 +620,71 @@ case "$FAIL_OUT" in
 esac
 rm -rf "$FAIL_TMP"
 
+echo "== _uberdev_dispatch_codex immediate terminal handoff =="
+IMMEDIATE_TMP="$(mktemp -d)"
+mkdir -p "$IMMEDIATE_TMP/bin" "$IMMEDIATE_TMP/repo" "$IMMEDIATE_TMP/tmp"
+cat > "$IMMEDIATE_TMP/bin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = worktree ] && [ "$2" = add ]; then mkdir -p "$3"; exit 0; fi
+exit 1
+SH
+cat > "$IMMEDIATE_TMP/bin/codex" <<'SH'
+#!/usr/bin/env bash
+out=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) out="$2"; shift 2 ;; *) shift ;; esac
+done
+body="$(cat)"
+printf 'immediate %s result\n' "$body" > "$out"
+case "$body" in *failed*) exit 19 ;; *) exit 0 ;; esac
+SH
+chmod +x "$IMMEDIATE_TMP/bin/git" "$IMMEDIATE_TMP/bin/codex"
+IMMEDIATE_OUT="$(
+  cd "$IMMEDIATE_TMP/repo" &&
+  PATH="$IMMEDIATE_TMP/bin:/usr/bin:/bin" UBERDEV_TMPDIR="$IMMEDIATE_TMP/tmp" \
+  /bin/bash -c '
+    . "$1"
+    # Force the real launcher into the already-terminal branch without an
+    # artificial sleep: wait reaps the exact wrapper before reporting that its
+    # owned session can no longer be observed.
+    _uberdev_dispatch_wait_owned_session() {
+      while state="$(ps -o stat= -p "$1" 2>/dev/null)" && [ -n "$state" ] && [ "${state#Z}" = "$state" ]; do :; done
+      return 1
+    }
+    failures=0; details=""
+    for outcome in completed failed completed failed completed failed; do
+      issue=$((issue + 1))
+      printf "%s\n" "$outcome" > "$UBERDEV_TMPDIR/prompt-$issue.txt"
+      UBERDEV_AGENT_STATUS_FILE="$UBERDEV_TMPDIR/status-$issue.json"
+      UBERDEV_AGENT_RESULT_FILE="$UBERDEV_TMPDIR/result-$issue.md"
+      export UBERDEV_AGENT_STATUS_FILE UBERDEV_AGENT_RESULT_FILE
+      _uberdev_dispatch_codex "$issue" small "$UBERDEV_TMPDIR/prompt-$issue.txt"
+      rc=$?
+      status="$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)"
+      case "$outcome:$rc:$DISPATCH_ID:$status" in
+        completed:0:*:*\"state\":\"completed\"*\"exit_code\":0*) ;;
+        failed:0:*:*\"state\":\"failed\"*\"exit_code\":19*) ;;
+        *) failures=$((failures + 1)); details="$details outcome=$outcome rc=$rc pid=${DISPATCH_ID:-none} status=$status" ;;
+      esac
+      [ -n "${DISPATCH_ID:-}" ] || failures=$((failures + 1))
+    done
+    terminal_pid="$DISPATCH_ID"
+    ! _uberdev_dispatch_accept_immediate_terminal background "$terminal_pid" "$UBERDEV_AGENT_STATUS_FILE" "$UBERDEV_AGENT_RESULT_FILE" >/dev/null 2>&1 || failures=$((failures + 1))
+    ! _uberdev_dispatch_accept_immediate_terminal codex "$((terminal_pid + 1))" "$UBERDEV_AGENT_STATUS_FILE" "$UBERDEV_AGENT_RESULT_FILE" >/dev/null 2>&1 || failures=$((failures + 1))
+    python3 -I -c "import os; os.setsid(); os.execvp(\"sleep\",[\"sleep\",\"30\"])" &
+    live_pid=$!
+    printf "{\"backend\":\"codex\",\"state\":\"completed\",\"exit_code\":0,\"pid\":\"%s\"}\n" "$live_pid" > "$UBERDEV_AGENT_STATUS_FILE"
+    ! _uberdev_dispatch_accept_immediate_terminal codex "$live_pid" "$UBERDEV_AGENT_STATUS_FILE" "$UBERDEV_AGENT_RESULT_FILE" >/dev/null 2>&1 || failures=$((failures + 1))
+    kill -TERM "$live_pid" 2>/dev/null || true; wait "$live_pid" 2>/dev/null || true
+    printf "failures=%s%s\n" "$failures" "$details"
+  ' _ "$DISPATCH_LIB"
+)"
+case "$IMMEDIATE_OUT" in
+  *'failures=0'*) pass_msg "codex preserves exact handles for repeated immediate completed and failed terminals" ;;
+  *) fail_msg "codex preserves exact handles for repeated immediate completed and failed terminals" "$IMMEDIATE_OUT" ;;
+esac
+rm -rf "$IMMEDIATE_TMP"
+
 RACE_TMP="$(mktemp -d)"
 mkdir -p "$RACE_TMP/bin" "$RACE_TMP/repo" "$RACE_TMP/tmp"
 cat > "$RACE_TMP/bin/git" <<'SH'
