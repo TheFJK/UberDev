@@ -48,6 +48,9 @@ _UBERDEV_DISPATCH_LIB_DIR="$(cd "$_UBERDEV_DISPATCH_LIB_DIR" 2>/dev/null && pwd 
 _UBERDEV_DISPATCH_LOADED=1
 
 _uberdev_dispatch_resolve_python() {
+  if [ -n "${_UBERDEV_PYTHON_EXE:-}" ] && [ -x "$_UBERDEV_PYTHON_EXE" ]; then
+    case "${_UBERDEV_PYTHON_PREFIX:-}" in ''|-3) return 0 ;; esac
+  fi
   if command -v python3 >/dev/null 2>&1; then
     _UBERDEV_PYTHON_EXE="$(command -v python3)"; _UBERDEV_PYTHON_PREFIX=''
   elif command -v python >/dev/null 2>&1; then

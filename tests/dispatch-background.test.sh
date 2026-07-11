@@ -150,6 +150,12 @@ if PY_LAUNCHER_OUT="$(/bin/bash -c '. "$1"; PATH="$2"; _uberdev_dispatch_python 
 else
   echo "  FAIL  dispatch resolves Windows py -3 launcher as final fallback: $PY_LAUNCHER_OUT"; FAIL=$((FAIL + 1))
 fi
+if CACHED_PYTHON_OUT="$(/bin/bash -c '. "$1"; _uberdev_dispatch_resolve_python; PATH="$2"; _uberdev_dispatch_python -c "print(\"cached-python\")"' _ "$DISPATCH_LIB" "$PYTHON_RESOLVER_TMP/empty" 2>&1)" \
+    && [ "$CACHED_PYTHON_OUT" = cached-python ]; then
+  echo "  PASS  resolved absolute Python argv survives later PATH narrowing"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  resolved absolute Python argv survives later PATH narrowing: $CACHED_PYTHON_OUT"; FAIL=$((FAIL + 1))
+fi
 rm -rf "$PYTHON_RESOLVER_TMP"
 if grep -Eq '(^|[[:space:]|(&])python3[[:space:]]+-' "$DISPATCH_LIB"; then
   echo "  FAIL  dispatch.sh retains a literal python3 invocation"; FAIL=$((FAIL + 1))
@@ -184,6 +190,7 @@ chmod +x "$IMMEDIATE_TMP/bin/git" "$IMMEDIATE_TMP/bin/claude"
 IMMEDIATE_OUT="$(
   cd "$IMMEDIATE_TMP/repo" &&
   PATH="$IMMEDIATE_TMP/bin:/usr/bin:/bin" UBERDEV_TMPDIR="$IMMEDIATE_TMP/tmp" \
+  _UBERDEV_PYTHON_EXE="$REAL_PYTHON" _UBERDEV_PYTHON_PREFIX='' \
   /bin/bash -c '
     . "$1"
     _uberdev_dispatch_wait_owned_session() {
