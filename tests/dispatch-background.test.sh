@@ -202,6 +202,7 @@ SH
 cat > "$IMMEDIATE_TMP/bin/claude" <<'SH'
 #!/usr/bin/env bash
 body="$2"
+sleep 0.05
 printf 'immediate %s result\n' "$body"
 case "$body" in *failed*) exit 29 ;; *) exit 0 ;; esac
 SH
@@ -213,12 +214,15 @@ IMMEDIATE_OUT="$(
   /bin/bash -c '
     . "$1"
     UBERDEV_DETACH_DIAGNOSTICS=1; export UBERDEV_DETACH_DIAGNOSTICS
-    fixture_pids=()
+    fixture_pids=(); fixture_running_count=0
     _uberdev_dispatch_wait_owned_session() {
-      local status attempts=0 terminal_seen=0
+      local status attempts=0 terminal_seen=0 running_seen=0
       fixture_pids+=("$1")
       while [ "$attempts" -lt 200 ]; do
         status="$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)"
+        if [[ "$status" == *\"state\":\"running\"* && "$running_seen" -eq 0 ]]; then
+          running_seen=1; fixture_running_count=$((fixture_running_count + 1))
+        fi
         if [[ "$status" == *\"state\":\"completed\"* \
             && "$status" == *\"exit_code\":0* \
             && -s "$UBERDEV_AGENT_RESULT_FILE" ]]; then
@@ -297,6 +301,7 @@ IMMEDIATE_OUT="$(
       fi
       wait "$fixture_pid" 2>/dev/null || true
     done
+    [ "$fixture_running_count" -eq 6 ] || { failures=$((failures + 1)); printf "mismatch check=running_status count=%s\n" "$fixture_running_count"; }
     printf "failures=%s\n" "$failures"
   ' _ "$DISPATCH_LIB"
 )"
