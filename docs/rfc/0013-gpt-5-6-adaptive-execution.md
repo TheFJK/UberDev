@@ -338,8 +338,10 @@ dispatch boundaries. This property is proven by execution, not by attempting
 to parse Markdown-embedded shell.
 
 When an explicit test-only mode is enabled, the child runtime writes correlated
-JSONL receipts after successful input construction, handoff creation, and
-routed dispatch entry. Receipts contain only schema version, event type,
+JSONL receipts after successful input construction or revalidation, handoff
+creation, and routed dispatch entry. Deterministic callsite normalization may
+therefore produce multiple `build` snapshots; the handoff MUST correlate to a
+prior validated snapshot with the same canonical digest. Receipts contain only schema version, event type,
 test-declared canonical source, edge ID, instance ID where applicable, and a
 SHA-256 digest of canonicalized inputs. They MUST NOT contain prompts, source
 text, issue bodies, paths supplied as model inputs, credentials, or other
