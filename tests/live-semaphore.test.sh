@@ -78,6 +78,14 @@ if grep -Fq '/*|[A-Za-z]:/*|[A-Za-z]:\\*)' "$LIB"; then
 else
   fail "native Windows drive roots satisfy the absolute state-root guard" "drive-root case missing"
 fi
+windows_scope="$(printf 'a%.0s' {1..64}).scope"
+windows_lease="$(printf 'b%.0s' {1..64}).lease"
+capture _uberdev_semaphore_validate_lease_path "C:\\state/semaphore-v1/$windows_scope/$windows_lease"
+if [ "$CAPTURE_RC" -eq 2 ] && ! printf '%s' "$CAPTURE_OUT" | grep -q 'LEASE_PATH must be absolute'; then
+  pass "native Windows lease paths advance past the absolute-path guard"
+else
+  fail "native Windows lease paths advance past the absolute-path guard" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
 capture uberdev_semaphore_acquire "$TMP/invalid-cap" repo codex 0 run 5
 [ "$CAPTURE_RC" -eq 2 ] && pass "zero cap is rejected" || fail "zero cap is rejected" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 capture uberdev_semaphore_acquire "$TMP/invalid-cap-text" repo codex nope run 5

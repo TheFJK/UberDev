@@ -503,7 +503,7 @@ _uberdev_semaphore_validate_lease_path() {
   local lease scope scope_base version_base lease_base
   lease="${1-}"
   case "$lease" in
-    /*) ;;
+    /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
     *) _uberdev_semaphore_error 'LEASE_PATH must be absolute'; return 2 ;;
   esac
   scope="$(dirname "$lease")"
