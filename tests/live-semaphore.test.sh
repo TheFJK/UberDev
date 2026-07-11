@@ -603,6 +603,31 @@ count_race_leases() {
   printf '%s\n' "$count"
 }
 
+UNSAFE_COUNT_SCOPE="$RACE_STATE/semaphore-v1/unsafe-count.scope"
+mkdir -p "$UNSAFE_COUNT_SCOPE"
+printf 'unchanged\n' > "$TMP/unsafe-count-victim"
+ln -s "$TMP/unsafe-count-victim" "$UNSAFE_COUNT_SCOPE/symlink.lease"
+unsafe_count_out="$(count_race_leases 2>"$TMP/unsafe-count.err")"
+unsafe_count_rc=$?
+if [ "$unsafe_count_rc" -ne 0 ]; then
+  pass "lease observation rejects a symlink named as a lease"
+else
+  fail "lease observation rejects a symlink named as a lease" \
+    "rc=$unsafe_count_rc count=$unsafe_count_out stderr=$(cat "$TMP/unsafe-count.err")"
+fi
+rm -rf "$UNSAFE_COUNT_SCOPE"
+
+mkdir -p "$UNSAFE_COUNT_SCOPE/directory.lease"
+unsafe_count_out="$(count_race_leases 2>"$TMP/unsafe-count.err")"
+unsafe_count_rc=$?
+if [ "$unsafe_count_rc" -ne 0 ]; then
+  pass "lease observation rejects a stable non-regular lease candidate"
+else
+  fail "lease observation rejects a stable non-regular lease candidate" \
+    "rc=$unsafe_count_rc count=$unsafe_count_out stderr=$(cat "$TMP/unsafe-count.err")"
+fi
+rm -rf "$UNSAFE_COUNT_SCOPE"
+
 # Simulate GNU find observing a mutex generation after it was selected for
 # traversal but before it can be visited. Lease observation must remain valid
 # because mutex generations are unrelated to the direct *.lease population.
@@ -624,12 +649,14 @@ observer_remover=$!
 observer_count="$(PATH="$OBSERVER_FIND_BIN:$PATH" count_race_leases 2>"$TMP/observer-find.err")"
 observer_rc=$?
 wait "$observer_remover"
+observer_remover_rc=$?
 if [ "$observer_rc" -eq 0 ] && [ "$observer_count" -eq 1 ] \
-   && [ ! -e "$OBSERVER_SCOPE/.mutex" ] && [ ! -s "$TMP/observer-find.err" ]; then
+   && [ "$observer_remover_rc" -eq 0 ] && [ ! -e "$OBSERVER_SCOPE/.mutex" ] \
+   && [ ! -s "$TMP/observer-find.err" ]; then
   pass "lease observation ignores a concurrently removed mutex generation"
 else
   fail "lease observation ignores a concurrently removed mutex generation" \
-    "rc=$observer_rc count=$observer_count stderr=$(cat "$TMP/observer-find.err")"
+    "rc=$observer_rc remover_rc=$observer_remover_rc count=$observer_count stderr=$(cat "$TMP/observer-find.err")"
 fi
 rm -rf "$OBSERVER_SCOPE" "$OBSERVER_FIND_BIN"
 
