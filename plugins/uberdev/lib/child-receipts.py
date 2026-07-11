@@ -25,6 +25,32 @@ SOURCE_PATTERN = re.compile(
     r"plugins/uberdev/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+"
 )
 EVENTS = {"build", "handoff", "dispatch"}
+CLOSED_ERRORS = frozenset(
+    {
+        "build event must not include instance_id",
+        "dispatch event requires instance_id",
+        "duplicate inputs key",
+        "handoff edge mismatch",
+        "handoff event requires instance_id",
+        "incomplete receipt append",
+        "inputs must be a JSON object",
+        "invalid edge_id",
+        "invalid handoff JSON",
+        "invalid inputs JSON",
+        "invalid instance_id",
+        "invalid receipt arguments",
+        "invalid receipt command",
+        "invalid receipt event",
+        "invalid test source",
+        "missing UBERDEV_CHILD_TEST_RECEIPT_FILE",
+        "missing UBERDEV_CHILD_TEST_SOURCE",
+        "receipt operation failed",
+        "unsafe handoff directory",
+        "unsafe handoff file",
+        "unsafe receipt directory",
+        "unsafe receipt file",
+    }
+)
 
 
 class ReceiptFailure(Exception):
@@ -38,14 +64,22 @@ class ReceiptConfig:
 
 
 def fail(message: str) -> NoReturn:
-    raise ReceiptFailure(message)
+    closed = message if message in CLOSED_ERRORS else "receipt operation failed"
+    raise ReceiptFailure(closed)
+
+
+class ClosedArgumentParser(argparse.ArgumentParser):
+    """Argparse boundary that never echoes hostile argument content."""
+
+    def error(self, _message: str) -> NoReturn:
+        fail("invalid receipt arguments")
 
 
 def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value: dict[str, Any] = {}
     for key, item in pairs:
         if key in value:
-            fail(f"duplicate inputs key: {key}")
+            fail("duplicate inputs key")
         value[key] = item
     return value
 
@@ -153,16 +187,16 @@ def build_record(
     ).encode("utf-8")
 
 
-def private_directory_fd(path: str) -> int:
+def private_parent_fd(path: str, file_error: str, directory_error: str) -> int:
     if not os.path.isabs(path) or os.path.normpath(path) != path:
-        fail("unsafe receipt file")
+        fail(file_error)
     parent = os.path.dirname(path)
     if not parent or not os.path.basename(path):
-        fail("unsafe receipt file")
+        fail(file_error)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     directory = getattr(os, "O_DIRECTORY", 0)
     if not nofollow or not directory:
-        fail("unsafe receipt directory")
+        fail(directory_error)
     try:
         before = os.lstat(parent)
         fd = os.open(
@@ -170,27 +204,39 @@ def private_directory_fd(path: str) -> int:
             os.O_RDONLY | directory | nofollow | getattr(os, "O_CLOEXEC", 0),
         )
     except OSError:
-        fail("unsafe receipt directory")
+        fail(directory_error)
     try:
-        opened = os.fstat(fd)
+        opened = require_private_directory(fd, directory_error)
         if (
             stat.S_ISLNK(before.st_mode)
             or not stat.S_ISDIR(before.st_mode)
-            or not stat.S_ISDIR(opened.st_mode)
             or before.st_dev != opened.st_dev
             or before.st_ino != opened.st_ino
-            or opened.st_uid != os.geteuid()
-            or stat.S_IMODE(opened.st_mode) & 0o077
         ):
-            fail("unsafe receipt directory")
+            fail(directory_error)
     except BaseException:
         os.close(fd)
         raise
     return fd
 
 
+def require_private_directory(fd: int, error: str) -> os.stat_result:
+    opened = os.fstat(fd)
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or opened.st_uid != os.geteuid()
+        or stat.S_IMODE(opened.st_mode) & 0o077
+    ):
+        fail(error)
+    return opened
+
+
 def append_record(path: str, record: bytes) -> None:
-    directory_fd = private_directory_fd(path)
+    directory_fd = private_parent_fd(
+        path,
+        "unsafe receipt file",
+        "unsafe receipt directory",
+    )
     file_fd: int | None = None
     try:
         name = os.path.basename(path)
@@ -222,6 +268,7 @@ def append_record(path: str, record: bytes) -> None:
             or stat.S_IMODE(opened.st_mode) & 0o077
         ):
             fail("unsafe receipt file")
+        require_private_directory(directory_fd, "unsafe receipt directory")
         written = os.write(file_fd, record)
         if written != len(record):
             fail("incomplete receipt append")
@@ -232,18 +279,28 @@ def append_record(path: str, record: bytes) -> None:
 
 
 def safe_handoff(path: str) -> dict[str, Any]:
-    if not os.path.isabs(path) or os.path.normpath(path) != path:
-        fail("unsafe handoff file")
+    directory_fd = private_parent_fd(
+        path,
+        "unsafe handoff file",
+        "unsafe handoff directory",
+    )
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     if not nofollow:
+        os.close(directory_fd)
         fail("unsafe handoff file")
+    file_fd: int | None = None
     try:
-        before = os.lstat(path)
-        fd = os.open(path, os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0))
-    except OSError:
-        fail("unsafe handoff file")
-    try:
-        opened = os.fstat(fd)
+        name = os.path.basename(path)
+        try:
+            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            file_fd = os.open(
+                name,
+                os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=directory_fd,
+            )
+        except OSError:
+            fail("unsafe handoff file")
+        opened = os.fstat(file_fd)
         if (
             stat.S_ISLNK(before.st_mode)
             or not stat.S_ISREG(before.st_mode)
@@ -252,12 +309,32 @@ def safe_handoff(path: str) -> dict[str, Any]:
             or before.st_ino != opened.st_ino
             or opened.st_uid != os.geteuid()
             or opened.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode) & 0o077
             or opened.st_size > MAX_HANDOFF_BYTES
         ):
             fail("unsafe handoff file")
-        raw = os.read(fd, MAX_HANDOFF_BYTES + 1)
+        require_private_directory(directory_fd, "unsafe handoff directory")
+        chunks: list[bytes] = []
+        remaining = MAX_HANDOFF_BYTES + 1
+        while remaining:
+            chunk = os.read(file_fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(file_fd)
+        if (
+            (opened.st_dev, opened.st_ino, opened.st_size)
+            != (after.st_dev, after.st_ino, after.st_size)
+            or opened.st_mtime_ns != after.st_mtime_ns
+            or opened.st_ctime_ns != after.st_ctime_ns
+        ):
+            fail("unsafe handoff file")
     finally:
-        os.close(fd)
+        if file_fd is not None:
+            os.close(file_fd)
+        os.close(directory_fd)
     if len(raw) > MAX_HANDOFF_BYTES:
         fail("unsafe handoff file")
     try:
@@ -302,7 +379,7 @@ def append_from_handoff(args: argparse.Namespace, config: ReceiptConfig) -> None
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(description=__doc__)
+    root = ClosedArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
 
     append = commands.add_parser("append")
@@ -338,8 +415,8 @@ def main() -> int:
     except ReceiptFailure as error:
         print(f"uberdev child receipts: {error}", file=sys.stderr)
         return 2
-    except (OSError, UnicodeError, RecursionError) as error:
-        print(f"uberdev child receipts: receipt append failed: {error}", file=sys.stderr)
+    except (OSError, UnicodeError, RecursionError):
+        print("uberdev child receipts: receipt operation failed", file=sys.stderr)
         return 2
 
 

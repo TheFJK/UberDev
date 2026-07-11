@@ -22,6 +22,18 @@ assert_fails_cleanly() {
   ! grep -q 'Traceback (most recent call last)' "$TMP/failure.err" || fail "$name" 'Python traceback escaped'
   pass "$name"
 }
+assert_helper_fails_fixed() {
+  local name="$1" expected="$2"; shift 2
+  : >"$TMP/failure.out"; : >"$TMP/failure.err"
+  if "$@" >"$TMP/failure.out" 2>"$TMP/failure.err"; then
+    fail "$name" 'unexpected success'
+  fi
+  [ ! -s "$TMP/failure.out" ] || fail "$name" 'partial stdout escaped'
+  [ "$(wc -l <"$TMP/failure.err" | tr -d ' ')" -eq 1 ] || fail "$name" "diagnostic was not one line: $(<"$TMP/failure.err")"
+  [ "$(<"$TMP/failure.err")" = "uberdev child receipts: $expected" ] || \
+    fail "$name" "unexpected diagnostic: $(<"$TMP/failure.err")"
+  pass "$name"
+}
 private_file() {
   local directory="$1" file="$2"
   mkdir -p "$directory"
@@ -170,6 +182,55 @@ assert_fails_cleanly 'rejects hard-linked receipt file' 'unsafe receipt file' \
   env UBERDEV_CHILD_TEST_MODE=1 UBERDEV_CHILD_TEST_SOURCE="$SOURCE_PATH" UBERDEV_CHILD_TEST_RECEIPT_FILE="$HARDLINK_DIR/receipts.jsonl" \
   python3 -I -B "$HELPER" append --event build --edge-id receipt.path --inputs-json '{}'
 
+# Handoff-derived receipts accept only private immutable-workspace files. The
+# parent is opened without symlink traversal and the handoff is opened relative
+# to that descriptor so path replacement cannot swap the checked object.
+SAFE_HANDOFF_DIR="$TMP/safe-handoff"
+SAFE_HANDOFF="$SAFE_HANDOFF_DIR/handoff.json"
+mkdir -p "$SAFE_HANDOFF_DIR"; chmod 700 "$SAFE_HANDOFF_DIR"
+printf '%s\n' '{"edge_id":"receipt.security","instance_id":"worker-1","inputs":{"value":1}}' >"$SAFE_HANDOFF"
+chmod 600 "$SAFE_HANDOFF"
+
+PUBLIC_HANDOFF_FILE_DIR="$TMP/public-handoff-file"
+PUBLIC_HANDOFF_FILE="$PUBLIC_HANDOFF_FILE_DIR/handoff.json"
+mkdir -p "$PUBLIC_HANDOFF_FILE_DIR"; chmod 700 "$PUBLIC_HANDOFF_FILE_DIR"
+cp "$SAFE_HANDOFF" "$PUBLIC_HANDOFF_FILE"; chmod 666 "$PUBLIC_HANDOFF_FILE"
+assert_fails_cleanly 'rejects group/world-writable handoff file' 'unsafe handoff file' \
+  python3 -I -B "$HELPER" append-handoff --event dispatch --edge-id receipt.security --handoff-file "$PUBLIC_HANDOFF_FILE"
+
+PUBLIC_HANDOFF_DIR="$TMP/public-handoff-dir"
+PUBLIC_DIR_HANDOFF="$PUBLIC_HANDOFF_DIR/handoff.json"
+mkdir -p "$PUBLIC_HANDOFF_DIR"; chmod 777 "$PUBLIC_HANDOFF_DIR"
+cp "$SAFE_HANDOFF" "$PUBLIC_DIR_HANDOFF"; chmod 600 "$PUBLIC_DIR_HANDOFF"
+assert_fails_cleanly 'rejects handoff inside non-private directory' 'unsafe handoff directory' \
+  python3 -I -B "$HELPER" append-handoff --event dispatch --edge-id receipt.security --handoff-file "$PUBLIC_DIR_HANDOFF"
+
+REAL_HANDOFF_PARENT="$TMP/real-handoff-parent"
+LINK_HANDOFF_PARENT="$TMP/link-handoff-parent"
+mkdir -p "$REAL_HANDOFF_PARENT"; chmod 700 "$REAL_HANDOFF_PARENT"
+cp "$SAFE_HANDOFF" "$REAL_HANDOFF_PARENT/handoff.json"; chmod 600 "$REAL_HANDOFF_PARENT/handoff.json"
+ln -s "$REAL_HANDOFF_PARENT" "$LINK_HANDOFF_PARENT"
+assert_fails_cleanly 'rejects handoff through symlink directory' 'unsafe handoff directory' \
+  python3 -I -B "$HELPER" append-handoff --event dispatch --edge-id receipt.security --handoff-file "$LINK_HANDOFF_PARENT/handoff.json"
+
+HARDLINK_HANDOFF_DIR="$TMP/hardlink-handoff"
+mkdir -p "$HARDLINK_HANDOFF_DIR"; chmod 700 "$HARDLINK_HANDOFF_DIR"
+cp "$SAFE_HANDOFF" "$HARDLINK_HANDOFF_DIR/original.json"; chmod 600 "$HARDLINK_HANDOFF_DIR/original.json"
+ln "$HARDLINK_HANDOFF_DIR/original.json" "$HARDLINK_HANDOFF_DIR/handoff.json"
+assert_fails_cleanly 'rejects hard-linked handoff file' 'unsafe handoff file' \
+  python3 -I -B "$HELPER" append-handoff --event dispatch --edge-id receipt.security --handoff-file "$HARDLINK_HANDOFF_DIR/handoff.json"
+
+# JSON and CLI diagnostics are closed single-line messages. Attacker-controlled
+# keys or malformed content must never become terminal/log output.
+DUPLICATE_INJECTION='{"line\nFORGED-LOG-LINE":1,"line\nFORGED-LOG-LINE":2}'
+assert_helper_fails_fixed 'duplicate JSON key cannot inject a diagnostic line' 'duplicate inputs key' \
+  append_event --event build --edge-id receipt.digest --inputs-json "$DUPLICATE_INJECTION"
+MALFORMED_INJECTION=$'{"safe":1}\nFORGED-MALFORMED-LINE'
+assert_helper_fails_fixed 'malformed JSON content is absent from diagnostics' 'invalid inputs JSON' \
+  append_event --event build --edge-id receipt.digest --inputs-json "$MALFORMED_INJECTION"
+assert_helper_fails_fixed 'malformed CLI arguments are a closed diagnostic' 'invalid receipt arguments' \
+  python3 -I -B "$HELPER" $'invalid-command\nFORGED-ARGUMENT-LINE'
+
 # A full real runtime path emits build -> handoff -> dispatch only after each
 # production boundary succeeds. The provider stub observes dispatch already
 # appended, proving it is immediately above the provider seam.
@@ -272,8 +333,8 @@ pass 'real production boundaries emit one correlated build -> handoff -> dispatc
 
 # A malformed handoff cannot be converted into a receipt record.
 MALFORMED_HANDOFF="$TMP/malformed-handoff.json"
-printf '{' >"$MALFORMED_HANDOFF"; chmod 600 "$MALFORMED_HANDOFF"
-assert_fails_cleanly 'malformed handoff event fails closed' 'invalid handoff JSON' \
+printf '%s' $'{"safe":1}\nFORGED-HANDOFF-LOG-LINE' >"$MALFORMED_HANDOFF"; chmod 600 "$MALFORMED_HANDOFF"
+assert_helper_fails_fixed 'malformed handoff event is a closed diagnostic' 'invalid handoff JSON' \
   python3 -I -B "$HELPER" append-handoff --event dispatch --edge-id sdd.task.implement --handoff-file "$MALFORMED_HANDOFF"
 
 # Concurrent writers each issue one bounded O_APPEND write; every resulting
