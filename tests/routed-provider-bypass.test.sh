@@ -166,22 +166,27 @@ def forbidden_command(line, case_stack=()):
     expect_command = not stack or stack[-1] != "pattern"
     wrapper_mode = False
     for index, token in enumerate(tokens):
-        if stack and token == "esac":
-            stack.pop()
-            expect_command = False
-            wrapper_mode = False
-            continue
         state = stack[-1] if stack else None
         if state == "header":
             if token == "in":
                 stack[-1] = "pattern"
             continue
         if state == "pattern":
+            if token == "esac" and not (index + 1 < len(tokens) and tokens[index + 1] == ")"):
+                stack.pop()
+                expect_command = False
+                wrapper_mode = False
+                continue
             if token == ")":
                 stack[-1] = "body"
                 expect_command = True
             continue
         if state == "body":
+            if token == "esac" and expect_command:
+                stack.pop()
+                expect_command = False
+                wrapper_mode = False
+                continue
             if token in {";;", ";&", ";;&"}:
                 stack[-1] = "pattern"
                 expect_command = False
@@ -289,6 +294,9 @@ assert_rejected case-arm-codex 'case "$x" in foo) codex exec review ;; esac'
 assert_rejected case-arm-spawn '  case "$x" in foo|bar) spawn_agent --task review ;; esac'
 assert_rejected case-arm-multiline $'case "$x" in\n  foo)\n    Agent(role="reviewer")\n    ;;\nesac'
 assert_rejected nested-case-outer-arm $'case "$outer" in\n  first)\n    case "$inner" in\n      nested) :; esac\n    ;;\n  second) codex exec review ;;\nesac'
+assert_rejected esac-selector 'case esac in foo) codex exec review ;; esac'
+assert_rejected esac-pattern 'case "$x" in esac) spawn_agent --task review ;; esac'
+assert_rejected quoted-esac-pattern 'case "$x" in "esac") codex exec review ;; esac'
 assert_rejected timed-codex 'time codex exec review'
 assert_rejected timed-claude '  time -p claude --print review'
 assert_rejected timed-after-if 'if time -p codex exec review; then :; fi'
@@ -313,6 +321,7 @@ printf ok # $(codex exec review)
 printf ok # `claude --print review`
 value=$((codex + 1))
 case "$provider_name" in codex) printf ok ;; esac
+case "$provider_name" in other) printf '%s\n' esac ;; esac
 provider_name=codex
 uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks"
 uberdev_dispatch_child "$edge" "$handoff" "$result" "$status"
