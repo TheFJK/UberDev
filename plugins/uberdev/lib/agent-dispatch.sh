@@ -680,14 +680,16 @@ _uberdev_agent_status_terminal_event() {
 }
 
 _uberdev_agent_publish_status() {
-  local status_path="$1" backend="$2" handle="$3" state="$4" exit_code="${5:-}" mode="${6:-replace}"
+  local status_path="$1" backend="$2" handle="$3" state="$4" exit_code="${5:-}" mode="${6:-replace}" process_identity="${7:-}" lease_generation="${8:-}"
   python3 -I -c '
 import json, os, stat, sys, tempfile
-path, backend, handle, state, exit_code, mode = sys.argv[1:]
+path, backend, handle, state, exit_code, mode, process_identity, lease_generation = sys.argv[1:]
 parent = os.path.dirname(path)
 if not os.path.isdir(parent):
     raise SystemExit(2)
 payload = {"backend": backend, "state": state, "exit_code": int(exit_code) if exit_code else None, "pid": handle}
+if process_identity: payload["process_identity"] = process_identity
+if lease_generation: payload["lease_generation"] = lease_generation
 fd, temporary = tempfile.mkstemp(prefix=".agent-status.", dir=parent)
 try:
     os.fchmod(fd, 0o600)
@@ -702,6 +704,10 @@ try:
         except FileExistsError:
             if stat.S_ISLNK(os.lstat(path).st_mode) or not os.path.isfile(path):
                 raise SystemExit(2)
+            with open(path, "r", encoding="utf-8") as existing_stream:
+                existing = json.load(existing_stream)
+            if existing.get("state") == "running" and str(existing.get("pid")) == str(handle):
+                os.replace(temporary, path)
     else:
         if os.path.lexists(path) and stat.S_ISLNK(os.lstat(path).st_mode):
             raise SystemExit(2)
@@ -709,7 +715,15 @@ try:
 finally:
     if os.path.exists(temporary):
         os.unlink(temporary)
-' "$status_path" "$backend" "$handle" "$state" "$exit_code" "$mode"
+' "$status_path" "$backend" "$handle" "$state" "$exit_code" "$mode" "$process_identity" "$lease_generation"
+}
+
+_uberdev_agent_process_identity() {
+  local pid="$1" started
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  started="$(ps -o lstart= -p "$pid" 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]][[:space:]]*/ /g')"
+  [ -n "$started" ] || return 1
+  printf '%s:%s' "$pid" "$started"
 }
 
 _uberdev_agent_claude_probe() {
@@ -910,7 +924,7 @@ uberdev_agent_dispatch() {
   local request_json="${1:-}" prompt_requested="${2:-}" result_requested="${3:-}" status_requested="${4:-}"
   local run_dir run_id repository_id backend issue_num tier capacity timeout_s
   local prompt_file result_file status_file state_dir manifest decision lease lease_identity event_json rc handle lease_handle terminal_event paths_json
-  local context_file context_sha context_validation persisted_decision supplied_root supplied_parent context_run_id parent_run_id agent_id
+  local context_file context_sha context_validation persisted_decision supplied_root supplied_parent context_run_id parent_run_id agent_id process_identity lease_generation
   [ "$#" -eq 4 ] || { _uberdev_agent_error 'expected REQUEST_JSON PROMPT_FILE RESULT_FILE STATUS_FILE'; return 2; }
   if [ -n "${ZSH_VERSION:-}" ]; then
     setopt localoptions nullglob || return 2
@@ -1027,11 +1041,13 @@ uberdev_agent_dispatch() {
     return 2
   fi
   lease_identity="$(_uberdev_agent_lease_identity "$lease")" || return 2
+  lease_generation="${lease_identity##*:}"
   if [ -n "$terminal_event" ]; then
     _uberdev_agent_finalize_terminal "$manifest" "$lease" "$lease_identity" "$status_file" \
       "$backend" "$handle" "$request_json" "$decision" "$terminal_event" || return 2
   else
-    _uberdev_agent_publish_status "$status_file" "$backend" "$lease_handle" running '' create || return 2
+    process_identity="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
+    _uberdev_agent_publish_status "$status_file" "$backend" "$lease_handle" running '' create "$process_identity" "$lease_generation" || return 2
     _uberdev_agent_start_watcher "$manifest" "$lease" "$lease_identity" "$status_file" "$backend" "$lease_handle" "$request_json" "$decision"
   fi
   DISPATCH_RC=0

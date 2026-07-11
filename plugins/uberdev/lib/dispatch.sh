@@ -369,6 +369,65 @@ _uberdev_agent_dispatch_backend() {
   esac
 }
 
+# Claude's current agent CLI exposes observation but no cancellation command.
+# Keep cancellation as an explicit provider capability seam so an integration
+# may opt in without fabricating a CLI operation in the production default.
+_uberdev_dispatch_cancel_claude_bg() {
+  return 2
+}
+
+# Cancel one already-registered provider handle. Numeric processes require the
+# launch-time process identity recorded by agent-dispatch; a reused PID is
+# rejected before signaling. Opaque providers use their native handle API and
+# prove the handle is no longer live before returning success.
+_uberdev_dispatch_cancel_backend() {
+  local backend="$1" handle="$2" expected_identity="${3:-}" current pane probe attempts cancel_rc
+  case "$backend" in
+    codex|background)
+      case "$handle" in ''|*[!0-9]*) return 2 ;; esac
+      [ -n "$expected_identity" ] || return 2
+      current="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
+      [ "$current" = "$expected_identity" ] || return 2
+      kill -TERM "$handle" 2>/dev/null || return 2
+      attempts=0
+      while [ "$attempts" -lt 20 ]; do
+        current="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
+        [ -z "$current" ] && return 0
+        [ "$current" = "$expected_identity" ] || return 2
+        sleep 0.05; attempts=$((attempts + 1))
+      done
+      return 1
+      ;;
+    claude-bg)
+      if _uberdev_dispatch_cancel_claude_bg "$handle"; then
+        :
+      else
+        cancel_rc=$?
+        return "$cancel_rc"
+      fi
+      attempts=0
+      while [ "$attempts" -lt 20 ]; do
+        probe="$(_uberdev_agent_claude_probe "$handle" 2>/dev/null || true)"
+        case "$probe" in absent|completed|failed|timed_out|cancelled) return 0 ;; esac
+        sleep 0.05; attempts=$((attempts + 1))
+      done
+      return 1
+      ;;
+    wezterm)
+      pane="${handle#pane:}"; case "$pane" in ''|*[!0-9]*) return 2 ;; esac
+      wezterm cli --domain-name uberdev kill-pane --pane-id "$pane" >/dev/null 2>&1 || return 2
+      wezterm cli --domain-name uberdev list --format json 2>/dev/null | python3 -I -B -c '
+import json,sys
+pane=int(sys.argv[1])
+try: rows=json.load(sys.stdin)
+except Exception: raise SystemExit(2)
+if any(isinstance(row,dict) and row.get("pane_id")==pane for row in rows): raise SystemExit(1)
+' "$pane"
+      ;;
+    *) return 2 ;;
+  esac
+}
+
 # uberdev_dispatch_one ISSUE_NUM TIER PROMPT_FILE
 # Preserve the historical public globals while routing every provider through
 # the lifecycle/capacity adapter.
