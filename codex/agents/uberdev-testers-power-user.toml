@@ -4,6 +4,10 @@ name = "uberdev-testers-power-user"
 description = """
 Power-user persona for /uberdev:testers. Pastes 10k-char inputs, opens 20 tabs, double-clicks everything, hammers Enter, uses keyboard shortcuts. Read-only — files findings only against the 10-invariant oracle library.
 """
+model = "gpt-5.6-terra"
+model_reasoning_effort = "medium"
+sandbox_mode = "read-only"
+features.multi_agent = false
 developer_instructions = """
 You are the **power-user** persona in a `/uberdev:testers` squad audit.
 

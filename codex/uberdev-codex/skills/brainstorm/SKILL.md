@@ -24,7 +24,7 @@ Every project goes through this process. A todo list, a single-function utility,
 You MUST create a task for each of these items and complete them in order:
 
 1. **Explore project context** — check files, docs, recent commits
-2. **Dispatch parallel research agents** (heuristic from prompt) — 2-3 `Explore`/`general-purpose` agents in one message researching codebase patterns, prior art, and library docs; synthesize findings (3-5 bullets) before continuing. Skip only for truly trivial tasks. See "Parallel research dispatch" below.
+2. **Dispatch routed research agents** (heuristic from prompt) — up to three existing roles (`research-codebase`, `research-patterns`, `research-prior-art`) in one wave; synthesize findings (3-5 bullets) before continuing. Skip only for truly trivial tasks. See "Parallel research dispatch" below.
 3. **Offer visual companion** (if topic will involve visual questions) — its own message, not combined with a clarifying question. See the Visual Companion section below.
 4. **Ask clarifying questions** — one at a time, informed by research; understand purpose/constraints/success criteria *(skipped in turbo mode — see "Turbo Mode" section)*
 5. **Propose 2-3 approaches** — with trade-offs and your recommendation, grounded in research findings
@@ -74,15 +74,206 @@ digraph brainstorming {
 
 **Parallel research dispatch (default first step):**
 
-After project-context exploration, before clarifying questions, dispatch 2-3 research agents in a single message to gather context in parallel. Read the user's request and infer the research questions yourself — don't ask the user what to research.
+After project-context exploration, before clarifying questions, dispatch up to three routed research agents in one wave. Read the user's request and infer the research questions yourself — don't ask the user what to research.
 
 Heuristics for inferring research questions:
-- Codebase questions ("how do we currently do X?", "any existing utilities for this?") → `Explore` agent
-- Library / prior-art questions ("standard pattern for Y?", "has anyone built this before?") → `general-purpose` agent with Context7 / web search
+- Codebase questions ("how do we currently do X?", "any existing utilities for this?") → `research-codebase`
+- In-repo precedent questions ("how did this repo solve a similar problem?") → `research-patterns`
+- Library / external prior-art questions ("standard pattern for Y?", "has anyone built this before?") → `research-prior-art`
 
 Synthesize findings into a brief summary before engaging the user with clarifying questions. The 2-3 approaches you propose later MUST be grounded in this research, not speculation.
 
-For architecturally consequential choices, this pattern also supports independent parallel exploration of design directions (one agent per direction). See `uberdev:dispatching-parallel-agents`.
+For architecturally consequential choices, broaden the semantic focus supplied to these roles; do not create an unregistered generic role.
+
+### Routed research execution
+
+<!-- BEGIN child-callsite-contracts-v1 -->
+```json
+{
+  "brainstorm.research.codebase":{"inputs":["working_dir","summary_path","question"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "brainstorm.research.prior_art":{"inputs":["working_dir","summary_path","question"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]},
+  "brainstorm.research.library":{"inputs":["working_dir","summary_path","question"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["solve","turbo"],"risk_scope":"none","risk_argument":[]}
+}
+```
+<!-- END child-callsite-contracts-v1 -->
+
+When this skill receives a `routing_context` from `/solve` or `/turbo`, every provider edge MUST use `lib/child-dispatch.sh`. The handoffs contain no model, route, effort, service tier, sandbox, environment, or commands. Persist the user's brief as a private `brief_path`; never paste it into a child prompt. Run this setup once:
+
+```bash uberdev-executable
+set -euo pipefail
+: "${UBERDEV_AGENT_PREPARED_REQUEST_JSON:?missing immutable routing context}"
+UBERDEV_BRAINSTORM_PLUGIN_ROOT="${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}"
+. "$UBERDEV_BRAINSTORM_PLUGIN_ROOT/lib/child-dispatch.sh"
+UBERDEV_BRAINSTORM_PREPARED_EDGES=(); UBERDEV_BRAINSTORM_PREPARED_INSTANCES=()
+UBERDEV_BRAINSTORM_PREPARED_HANDOFFS=(); UBERDEV_BRAINSTORM_PREPARED_RESULTS=()
+UBERDEV_BRAINSTORM_PREPARED_STATUSES=(); UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS=()
+UBERDEV_BRAINSTORM_RECEIPT_STATUSES=(); UBERDEV_BRAINSTORM_RECEIPT_RESULTS=()
+UBERDEV_BRAINSTORM_WAITED_INSTANCES=()
+UBERDEV_BRAINSTORM_WAITED=0; UBERDEV_BRAINSTORM_BATCH_LAUNCHED=0
+UBERDEV_BRAINSTORM_UNWIND_TIMEOUT="${UBERDEV_BRAINSTORM_UNWIND_TIMEOUT:-300}"
+case "$UBERDEV_BRAINSTORM_UNWIND_TIMEOUT" in ''|*[!0-9]*|0) return 2 ;; esac
+uberdev_brainstorm_reset_batch() {
+  UBERDEV_BRAINSTORM_PREPARED_EDGES=(); UBERDEV_BRAINSTORM_PREPARED_INSTANCES=()
+  UBERDEV_BRAINSTORM_PREPARED_HANDOFFS=(); UBERDEV_BRAINSTORM_PREPARED_RESULTS=()
+  UBERDEV_BRAINSTORM_PREPARED_STATUSES=(); UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS=()
+  UBERDEV_BRAINSTORM_RECEIPT_STATUSES=(); UBERDEV_BRAINSTORM_RECEIPT_RESULTS=()
+  UBERDEV_BRAINSTORM_WAITED_INSTANCES=()
+  UBERDEV_BRAINSTORM_WAITED=0; UBERDEV_BRAINSTORM_BATCH_LAUNCHED=0
+}
+uberdev_unwind_child_receipts() {
+  local index status result cleanup_rc=0
+  for ((index=0; index<${#UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[@]}; index++)); do
+    status="${UBERDEV_BRAINSTORM_RECEIPT_STATUSES[$index]}"
+    result="${UBERDEV_BRAINSTORM_RECEIPT_RESULTS[$index]}"
+    if ! uberdev_unwind_child "$status" "$result" "$UBERDEV_BRAINSTORM_UNWIND_TIMEOUT"; then cleanup_rc=1; fi
+  done
+  uberdev_brainstorm_reset_batch
+  return "$cleanup_rc"
+}
+uberdev_brainstorm_drain_after_wait_failure() {
+  local index instance waited status result skip cleanup_rc=0
+  for ((index=0; index<${#UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[@]}; index++)); do
+    instance="${UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[$index]}"
+    skip=0
+    for waited in "${UBERDEV_BRAINSTORM_WAITED_INSTANCES[@]}"; do
+      [ "$instance" = "$waited" ] && skip=1 && break
+    done
+    [ "$skip" -eq 1 ] && continue
+    status="${UBERDEV_BRAINSTORM_RECEIPT_STATUSES[$index]}"
+    result="${UBERDEV_BRAINSTORM_RECEIPT_RESULTS[$index]}"
+    if ! uberdev_unwind_child "$status" "$result" "$UBERDEV_BRAINSTORM_UNWIND_TIMEOUT"; then cleanup_rc=1; fi
+  done
+  uberdev_brainstorm_reset_batch
+  return "$cleanup_rc"
+}
+uberdev_brainstorm_dispatch() {
+  local edge="$1" instance="$2" role="$3" inputs_json="$4"
+  local risks_json='[]' handoff result status create_rc cleanup_rc
+  : "$role" # the registered edge manifest selects the role
+  if uberdev_create_child_handoff "$edge" "$instance" "$inputs_json" "$risks_json"; then
+    :
+  else
+    create_rc=$?; cleanup_rc=0
+    uberdev_unwind_child_receipts || cleanup_rc=$?
+    [ "$cleanup_rc" -eq 0 ] || echo "error: brainstorm receipt unwind failed after handoff edge=$edge instance=$instance" >&2
+    return "$create_rc"
+  fi
+  handoff="$UBERDEV_CHILD_HANDOFF"
+  result="$UBERDEV_CHILD_RESULT"
+  status="$UBERDEV_CHILD_STATUS"
+  UBERDEV_BRAINSTORM_PREPARED_EDGES+=("$edge")
+  UBERDEV_BRAINSTORM_PREPARED_INSTANCES+=("$instance")
+  UBERDEV_BRAINSTORM_PREPARED_HANDOFFS+=("$handoff")
+  UBERDEV_BRAINSTORM_PREPARED_RESULTS+=("$result")
+  UBERDEV_BRAINSTORM_PREPARED_STATUSES+=("$status")
+}
+uberdev_brainstorm_launch_batch() {
+  local index edge instance handoff result status dispatch_rc cleanup_rc
+  [ "${#UBERDEV_BRAINSTORM_PREPARED_HANDOFFS[@]}" -gt 0 ] || return 2
+  uberdev_preflight_child_batch "${UBERDEV_BRAINSTORM_PREPARED_HANDOFFS[@]}" || {
+    dispatch_rc=$?; uberdev_brainstorm_reset_batch; return "$dispatch_rc"
+  }
+  for ((index=0; index<${#UBERDEV_BRAINSTORM_PREPARED_HANDOFFS[@]}; index++)); do
+    edge="${UBERDEV_BRAINSTORM_PREPARED_EDGES[$index]}"
+    instance="${UBERDEV_BRAINSTORM_PREPARED_INSTANCES[$index]}"
+    handoff="${UBERDEV_BRAINSTORM_PREPARED_HANDOFFS[$index]}"
+    result="${UBERDEV_BRAINSTORM_PREPARED_RESULTS[$index]}"
+    status="${UBERDEV_BRAINSTORM_PREPARED_STATUSES[$index]}"
+    if uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null; then
+      UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS+=("$instance")
+      UBERDEV_BRAINSTORM_RECEIPT_STATUSES+=("$status")
+      UBERDEV_BRAINSTORM_RECEIPT_RESULTS+=("$result")
+    else
+      dispatch_rc=$?; cleanup_rc=0
+      uberdev_unwind_child_receipts || cleanup_rc=$?
+      [ "$cleanup_rc" -eq 0 ] || echo "error: bounded brainstorm unwind failed after edge=$edge instance=$instance" >&2
+      return "$dispatch_rc"
+    fi
+  done
+  UBERDEV_BRAINSTORM_BATCH_LAUNCHED=1
+}
+uberdev_brainstorm_wait() {
+  local wanted="$1" timeout_s="${2:-300}" index instance status result wait_rc cleanup_rc
+  if [ "$UBERDEV_BRAINSTORM_BATCH_LAUNCHED" -eq 0 ]; then
+    uberdev_brainstorm_launch_batch || return $?
+  fi
+  for ((index=0; index<${#UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[@]}; index++)); do
+    instance="${UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[$index]}"
+    if [ "$instance" = "$wanted" ]; then
+      status="${UBERDEV_BRAINSTORM_RECEIPT_STATUSES[$index]}"
+      result="${UBERDEV_BRAINSTORM_RECEIPT_RESULTS[$index]}"
+      if uberdev_wait_child "$status" "$result" "$timeout_s"; then
+        :
+      else
+        wait_rc=$?; cleanup_rc=0
+        uberdev_brainstorm_drain_after_wait_failure || cleanup_rc=$?
+        [ "$cleanup_rc" -eq 0 ] || echo "error: bounded brainstorm sibling unwind failed after wait instance=$wanted" >&2
+        return "$wait_rc"
+      fi
+      UBERDEV_BRAINSTORM_WAITED_INSTANCES+=("$wanted")
+      UBERDEV_BRAINSTORM_WAITED=$((UBERDEV_BRAINSTORM_WAITED + 1))
+      if [ "$UBERDEV_BRAINSTORM_WAITED" -eq "${#UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[@]}" ]; then
+        uberdev_brainstorm_reset_batch
+      fi
+      return 0
+    fi
+  done
+  cleanup_rc=0
+  uberdev_brainstorm_drain_after_wait_failure || cleanup_rc=$?
+  [ "$cleanup_rc" -eq 0 ] || echo "error: bounded brainstorm sibling unwind failed after missing receipt instance=$wanted" >&2
+  return 2
+}
+BRAINSTORM_WORKING_DIR_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")))' "$working_dir")"
+BRAINSTORM_CODEBASE_SUMMARY_PATH_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")))' "$codebase_summary_path")"
+BRAINSTORM_PATTERNS_SUMMARY_PATH_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")))' "$patterns_summary_path")"
+BRAINSTORM_LIBRARY_SUMMARY_PATH_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")))' "$library_summary_path")"
+BRAINSTORM_CODEBASE_QUESTION_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")))' "$codebase_question")"
+BRAINSTORM_PRIOR_ART_QUESTION_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")))' "$prior_art_question")"
+BRAINSTORM_LIBRARY_QUESTION_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")))' "$library_question")"
+BRAINSTORM_CODEBASE_INPUTS="$(uberdev_child_inputs_build brainstorm.research.codebase \
+  working_dir "$BRAINSTORM_WORKING_DIR_JSON" summary_path "$BRAINSTORM_CODEBASE_SUMMARY_PATH_JSON" question "$BRAINSTORM_CODEBASE_QUESTION_JSON")"
+BRAINSTORM_PRIOR_ART_INPUTS="$(uberdev_child_inputs_build brainstorm.research.prior_art \
+  working_dir "$BRAINSTORM_WORKING_DIR_JSON" summary_path "$BRAINSTORM_PATTERNS_SUMMARY_PATH_JSON" question "$BRAINSTORM_PRIOR_ART_QUESTION_JSON")"
+BRAINSTORM_LIBRARY_INPUTS="$(uberdev_child_inputs_build brainstorm.research.library \
+  working_dir "$BRAINSTORM_WORKING_DIR_JSON" summary_path "$BRAINSTORM_LIBRARY_SUMMARY_PATH_JSON" question "$BRAINSTORM_LIBRARY_QUESTION_JSON")"
+```
+
+Allocate each `summary_path` as a private regular run artifact first. Construct
+all selected handoffs with the exact three manifest keys above; the builder
+rejects additions. The calls below only prepare handoffs. The first wait
+preflights the whole selected batch before dispatching any provider.
+
+```bash uberdev-executable edge=brainstorm.research.codebase
+uberdev_brainstorm_dispatch brainstorm.research.codebase brainstorm-research-codebase-a1 research-codebase "$BRAINSTORM_CODEBASE_INPUTS"
+```
+
+```bash uberdev-executable edge=brainstorm.research.prior_art
+uberdev_brainstorm_dispatch brainstorm.research.prior_art brainstorm-research-prior-art-a1 research-patterns "$BRAINSTORM_PRIOR_ART_INPUTS"
+```
+
+```bash uberdev-executable edge=brainstorm.research.library
+uberdev_brainstorm_dispatch brainstorm.research.library brainstorm-research-library-a1 research-prior-art "$BRAINSTORM_LIBRARY_INPUTS"
+```
+
+```bash uberdev-executable barrier=brainstorm.research
+UBERDEV_BRAINSTORM_BARRIER_INSTANCES=("${UBERDEV_BRAINSTORM_PREPARED_INSTANCES[@]}")
+for instance in "${UBERDEV_BRAINSTORM_BARRIER_INSTANCES[@]}"; do
+  uberdev_brainstorm_wait "$instance"
+done
+```
+
+Only wait for edges actually selected by the heuristic. For a malformed result,
+retain its selected edge, role, inputs, and `a1` identity, then execute exactly
+one fresh format retry:
+
+```bash uberdev-executable retry=format
+BRAINSTORM_FORMAT_INPUTS="$(uberdev_child_inputs_format_retry "$failed_edge" "$failed_inputs_json" "$format_example_path")"
+format_retry_instance="${failed_instance%-a1}-a2"
+uberdev_brainstorm_dispatch "$failed_edge" "$format_retry_instance" "$failed_role" "$BRAINSTORM_FORMAT_INPUTS"
+uberdev_brainstorm_wait "$format_retry_instance"
+```
+
+Research is advisory in ad-hoc brainstorming except that a requested codebase-grounded design MUST have usable codebase evidence. If no routing context is present (standalone ad-hoc use), research those dimensions in the host context; never enter an unregistered provider path.
 
 The synthesis step reads the summary text into context verbatim; no re-derivation required.
 
@@ -128,6 +319,11 @@ If the user invoked this skill with `--turbo` (e.g. via `/turbo`), skip the clar
 
 ## After the Design
 
+```yaml lineage
+edge_id: brainstorm.write_plan
+model_invocation: false
+```
+
 **Documentation:**
 
 - Write the validated design (spec) to `docs/uberdev/specs/YYYY-MM-DD-<topic>-design.md`
@@ -146,7 +342,7 @@ Fix any issues inline. No need to re-review — just fix and move on.
 
 **Implementation:**
 
-- Immediately invoke the `uberdev:write-plan` skill to create a detailed implementation plan. **No "review the spec" pause.** If the user wants to revise the spec, they'll interrupt; otherwise the plan-writing phase is the next forward step.
+- Immediately invoke the `uberdev:write-plan` skill to create a detailed implementation plan. This skill transition is `model_invocation: false`: propagate only `context_file`, `context_sha256`, root `run_id`, `workflow`, and `issue_num` when a routing context exists. Do not call the resolver and do not attach model/effort fields at the skill boundary. **No "review the spec" pause.** If the user wants to revise the spec, they'll interrupt; otherwise the plan-writing phase is the next forward step.
 - **Forward `--turbo` if it was in `$ARGUMENTS`** — invoke as `uberdev:write-plan --turbo …` so the downstream pipeline (write-plan → subagent-driven-dev → finish-branch) stays unattended end-to-end.
 - Do NOT invoke any other skill. `uberdev:write-plan` is the next step.
 

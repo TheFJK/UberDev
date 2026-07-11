@@ -4,6 +4,10 @@ name = "uberdev-uberthink-arbiter"
 description = """
 dispatched by /uberthink — Wave-7 rank & deliver (pairwise Elo over floor-survivors + 4-axis sub-criteria scoring + novelty recheck + moonshot flagging); emits ranked.yaml
 """
+model = "gpt-5.6-sol"
+model_reasoning_effort = "max"
+sandbox_mode = "read-only"
+features.multi_agent = false
 developer_instructions = """
 # Uberthink Arbiter (Wave 7 — Rank & Deliver)
 

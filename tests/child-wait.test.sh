@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"; LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+[ -r "$LIB" ] || { echo "RED: child wait runtime missing" >&2; exit 1; }
+. "$LIB"
+mkdir -p "$TMP/run/children/worker-0001" "$TMP/run/.agent-state-$(id -u)"
+HANDOFF="$TMP/run/children/worker-0001/handoff.v1.json"
+printf '{"schema_version":1,"instance_id":"worker-0001"}\n' >"$HANDOFF"
+RESULT="$TMP/run/children/worker-0001/result.md"; STATUS="$TMP/run/children/worker-0001/status.json"
+MANIFEST="$TMP/run/.agent-state-$(id -u)/agent-lifecycle.jsonl"
+terminal_manifest() {
+  local terminal="$1"
+  printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00.000Z","run_id":"worker-0001"}\n' >"$MANIFEST"
+  printf '{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001"}\n' >>"$MANIFEST"
+  printf '{"schema_version":1,"event":"%s","timestamp":"2026-07-10T00:00:02.000Z","run_id":"worker-0001"}\n' "$terminal" >>"$MANIFEST"
+}
+printf 'completed result\n' >"$RESULT"; printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"; terminal_manifest completed
+uberdev_wait_child "$STATUS" "$RESULT" 2 >/dev/null
+uberdev_unwind_child "$STATUS" "$RESULT" 2
+
+: >"$RESULT"; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
+printf x >"$RESULT"; printf '{bad\n' >"$STATUS"; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
+printf '{"backend":"codex","state":"completed","exit_code":1,"pid":"321"}\n' >"$STATUS"; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
+printf '{"backend":"codex","state":"failed","exit_code":1,"pid":"321"}\n' >"$STATUS"; terminal_manifest failed; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
+printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"; terminal_manifest failed; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
+
+# A running status without the exact lifecycle lease is not cancellation
+# authority: never signal or synthesize timed_out.
+( trap 'exit 0' TERM; while :; do sleep 1; done ) & SLEEP_PID=$!
+printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$SLEEP_PID" >"$STATUS"
+printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00.000Z","run_id":"worker-0001"}\n{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001"}\n' >"$MANIFEST"
+! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
+kill -0 "$SLEEP_PID"
+python3 - "$STATUS" <<'PY'
+import json,sys
+s=json.load(open(sys.argv[1])); assert s['state']=='running' and s['exit_code'] is None
+PY
+kill -TERM "$SLEEP_PID"; wait "$SLEEP_PID" 2>/dev/null || true
+
+# PID/group reuse defense: launch an owned session whose wrapper has a live
+# provider child. Wrong identity is rejected; exact cancellation proves the
+# complete group is gone, not merely the wrapper.
+python3 -I -c 'import os; os.setsid(); os.execvp("bash",["bash","-c","sleep 30 & wait"])' & PID_GUARD=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do PROVIDER_CHILD="$(pgrep -P "$PID_GUARD" | head -1 || true)"; [ -z "$PROVIDER_CHILD" ] || break; sleep .1; done
+[ -n "$PROVIDER_CHILD" ] && kill -0 "$PROVIDER_CHILD"
+IDENTITY="$(_uberdev_agent_process_identity "$PID_GUARD")"
+! _uberdev_dispatch_cancel_backend codex "$PID_GUARD" 'reused-group-identity'
+kill -0 "$PID_GUARD"
+kill -0 "$PROVIDER_CHILD"
+_uberdev_dispatch_cancel_backend codex "$PID_GUARD" "$IDENTITY"
+! kill -0 "$PID_GUARD" 2>/dev/null
+! kill -0 "$PROVIDER_CHILD" 2>/dev/null
+
+# A provider descendant may deliberately ignore TERM. Cancellation escalates
+# only after revalidating the exact owned process group/session, then proves no
+# non-zombie members remain. A mismatched launch identity never signals either
+# the wrapper or its resistant child.
+python3 -I -c 'import os; os.setsid(); os.execvp("bash",["bash","-c","trap \"\" TERM; (trap \"\" TERM; while :; do :; done) & wait"])' & TERM_GUARD=$!
+disown "$TERM_GUARD" 2>/dev/null || true
+for _ in 1 2 3 4 5 6 7 8 9 10; do TERM_CHILD="$(pgrep -P "$TERM_GUARD" | head -1 || true)"; [ -z "$TERM_CHILD" ] || break; done
+[ -n "$TERM_CHILD" ] && kill -0 "$TERM_CHILD"
+TERM_IDENTITY="$(_uberdev_agent_process_identity "$TERM_GUARD")"
+! _uberdev_dispatch_cancel_backend background "$TERM_GUARD" "${TERM_IDENTITY%|*}|reused"
+kill -0 "$TERM_GUARD" && kill -0 "$TERM_CHILD"
+_uberdev_dispatch_cancel_backend background "$TERM_GUARD" "$TERM_IDENTITY"
+! _uberdev_dispatch_group_live "$TERM_GUARD"
+! kill -0 "$TERM_GUARD" 2>/dev/null
+! kill -0 "$TERM_CHILD" 2>/dev/null
+
+# Exact post-death partial cleanup never follows or removes attacker-controlled
+# symlink/hardlink targets. It fails closed without globbing sibling files.
+printf 'victim\n' >"$TMP/victim"
+ln -s "$TMP/victim" "${RESULT}.partial.991"
+! _uberdev_dispatch_cleanup_dead_partial_result "$RESULT" 991 >/dev/null 2>&1
+[ "$(cat "$TMP/victim")" = victim ]
+rm -f "${RESULT}.partial.991"
+ln "$TMP/victim" "${RESULT}.partial.992"
+! _uberdev_dispatch_cleanup_dead_partial_result "$RESULT" 992 >/dev/null 2>&1
+[ "$(cat "$TMP/victim")" = victim ]
+rm -f "${RESULT}.partial.992"
+
+# A precreated private zero-byte status target is the normal delayed-wrapper
+# race and must be atomically canonicalized, not parsed as malformed JSON.
+ZERO_STATUS="$TMP/run/children/worker-0001/zero-status.json"
+( umask 077; : >"$ZERO_STATUS" )
+_uberdev_agent_publish_status "$ZERO_STATUS" codex 999 running '' create '999|999|999|fixture' 0123456789abcdef0123456789abcdef
+python3 - "$ZERO_STATUS" <<'PY'
+import json,stat,os,sys
+s=json.load(open(sys.argv[1])); assert s['state']=='running' and s['pid']=='999' and s['lease_generation']=='0123456789abcdef0123456789abcdef'
+assert stat.S_IMODE(os.stat(sys.argv[1]).st_mode)==0o600
+PY
+
+# Opaque Claude sessions cancel through an explicit provider capability hook
+# and require an absent/terminal probe, never a fabricated local state.
+mkdir "$TMP/bin"; printf '[{"sessionId":"abc12345-full","status":"running"}]\n' >"$TMP/claude-state"
+cat >"$TMP/bin/claude" <<'SH'
+#!/usr/bin/env bash
+if [ "$1 $2" = 'agents --json' ]; then cat "$CLAUDE_STATE"; exit 0; fi
+exit 2
+SH
+chmod +x "$TMP/bin/claude"
+_uberdev_dispatch_cancel_claude_bg() { printf '[]\n' >"$CLAUDE_STATE"; }
+CLAUDE_STATE="$TMP/claude-state" PATH="$TMP/bin:$PATH" _uberdev_dispatch_cancel_backend claude-bg abc12345 ''
+
+# The production Claude provider has no cancellation capability. A timeout
+# therefore fails closed before mutating status, manifest, or the live lease.
+_uberdev_dispatch_cancel_claude_bg() { return 2; }
+GENERATION=abcdef0123456789abcdef0123456789
+printf '{"backend":"claude-bg","state":"running","exit_code":null,"pid":"unsupported-session","lease_generation":"%s"}\n' "$GENERATION" >"$STATUS"
+printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00.000Z","run_id":"worker-0001"}\n{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001"}\n' >"$MANIFEST"
+LEASE_DIR="$TMP/run/.agent-state-$(id -u)/semaphore-v1/slots"; mkdir -p "$LEASE_DIR"
+LEASE="$LEASE_DIR/unsupported.lease"
+printf 'run_id=worker-0001\nstatus_path=%s\ngeneration=%s\n' "$STATUS" "$GENERATION" >"$LEASE"
+STATUS_SHA="$(shasum -a 256 "$STATUS" | awk '{print $1}')"
+MANIFEST_SHA="$(shasum -a 256 "$MANIFEST" | awk '{print $1}')"
+LEASE_SHA="$(shasum -a 256 "$LEASE" | awk '{print $1}')"
+set +e
+uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
+WAIT_RC=$?
+set -e
+[ "$WAIT_RC" -eq 2 ]
+[ "$WAIT_RC" -ne 124 ]
+[ "$(shasum -a 256 "$STATUS" | awk '{print $1}')" = "$STATUS_SHA" ]
+[ "$(shasum -a 256 "$MANIFEST" | awk '{print $1}')" = "$MANIFEST_SHA" ]
+[ -f "$LEASE" ] && [ "$(shasum -a 256 "$LEASE" | awk '{print $1}')" = "$LEASE_SHA" ]
+
+# CAS cannot overwrite a provider completion that wins the timeout race.
+printf '{"backend":"codex","state":"running","exit_code":null,"pid":"777","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$STATUS"
+OLD_SHA="$(shasum -a 256 "$STATUS" | awk '{print $1}')"
+printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"777","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$STATUS"
+! _uberdev_child_timeout_cas "$STATUS" "$OLD_SHA" 777 0123456789abcdef0123456789abcdef >/dev/null 2>&1
+grep -q '"state":"completed"' "$STATUS"
+
+# zsh can source and execute the public wait API without colliding with its
+# readonly `status` special parameter.
+printf 'zsh result\n' >"$RESULT"; printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"; terminal_manifest completed
+zsh -f -c '. "$1"; uberdev_wait_child "$2" "$3" 2' _ "$LIB" "$STATUS" "$RESULT" >/dev/null
+
+# Zero is rejected: cleanup uses the bounded uberdev_unwind_child API. A normal
+# positive wait still observes a delayed real terminal without fabrication.
+printf '{"backend":"codex","state":"running","exit_code":null,"pid":"321"}\n' >"$STATUS"
+printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00.000Z","run_id":"worker-0001"}\n{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001"}\n' >"$MANIFEST"
+(
+  sleep .2
+  printf 'drained result\n' >"$RESULT"
+  printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"
+  terminal_manifest completed
+) & DRAIN_WRITER=$!
+! uberdev_wait_child "$STATUS" "$RESULT" 0 >/dev/null 2>&1
+uberdev_wait_child "$STATUS" "$RESULT" 2 >/dev/null
+wait "$DRAIN_WRITER"
+grep -q '"state":"completed"' "$STATUS"
+! grep -q 'timed_out\|cancel' "$STATUS"
+
+# Paths must be the canonical owned child pair.
+! uberdev_wait_child "$TMP/outside-status" "$RESULT" 1 >/dev/null 2>&1
+! uberdev_wait_child "$STATUS" "$TMP/outside-result" 1 >/dev/null 2>&1
+echo 'child-wait: 47 checks passed'

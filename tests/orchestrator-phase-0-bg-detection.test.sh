@@ -64,10 +64,10 @@ n_tty=$(printf '%s\n' "$phase0_body" | grep -cE '! -t 0' || true)
 assert_ge "A1a Phase 0 names CLAUDE_JOB_DIR"        1 "$n_jobdir"
 assert_ge "A1b Phase 0 names POSIX [ ! -t 0 ] arm"  1 "$n_tty"
 
-# A2 — literal stderr abort message present (generalised form covers the
-# standalone-invocation path per reviewer finding; either form is accepted).
-n=$(printf '%s\n' "$phase0_body" | grep -cE 'cannot run in a claude --bg session' || true)
-assert_ge "A2 Phase 0 contains stderr abort message" 1 "$n"
+# A2 — literal provider-neutral stderr abort message present (generalised form
+# covers every background/non-TTY launcher and the standalone invocation path).
+n=$(printf '%s\n' "$phase0_body" | grep -cF 'cannot run in a background or non-TTY session' || true)
+assert_ge "A2 Phase 0 contains provider-neutral stderr abort message" 1 "$n"
 
 # A2b — all three escape-hatch bullets present (regression guard:
 # if any one bullet is deleted, A2 still passes today, degrading user

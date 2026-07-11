@@ -21,7 +21,7 @@ description: Shared post-implementation review fanout — dispatches 6 advisory 
 
 Quote from `~/.codex/AGENTS.md`: *"Parallelize independent work — single message, multiple Agent tool calls."*
 
-The 6 Task() calls below MUST be in ONE assistant turn. Splitting across messages defeats parallelism and regresses the design contract — six sequential round-trips would multiply wall-clock cost and break the "one round-trip for six perspectives" guarantee that the rest of the pipeline relies on.
+The 6 routed child calls calls below MUST be in ONE assistant turn. Splitting across messages defeats parallelism and regresses the design contract — six sequential round-trips would multiply wall-clock cost and break the "one round-trip for six perspectives" guarantee that the rest of the pipeline relies on.
 
 ## Critical invariant — no skill re-entry
 
@@ -48,7 +48,7 @@ If a reviewer agent surfaces a finding that "we should re-plan", record it as a 
 Before Step 1, read `command_timeouts.review_pr` from
 `.codex/uberdev.local.md` (env: `UBERDEV_REVIEW_PR_TIMEOUT`; default
 900s; range [60, 86400]). The value is **advisory in v1** — this skill
-does NOT enforce a wall-clock kill (the 6 Task() reviewers run inside
+does NOT enforce a wall-clock kill (the 6 routed child calls reviewers run inside
 the caller's Claude turn; enforcing kill semantics there would require
 deeper orchestrator-loop changes, which is out of scope per Q1
 auto-pick). The resolved value is recorded in the audit log under
@@ -57,8 +57,9 @@ with the configured value. v2 issue can extend.
 
 ```bash
 # Pre-flight: read advisory timeout
-if [ -r "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/config-read.sh" ]; then
-  . "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/config-read.sh"
+POST_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}"
+if [ -r "$POST_REVIEW_PLUGIN_ROOT/lib/config-read.sh" ]; then
+  . "$POST_REVIEW_PLUGIN_ROOT/lib/config-read.sh"
   REVIEW_PR_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.review_pr UBERDEV_REVIEW_PR_TIMEOUT 60 86400 900)"
   # Record the advisory value to the run audit (no kill).
   if [ -d ".uberdev" ]; then
@@ -92,9 +93,146 @@ Assemble a single brief that all 6 reviewers will receive verbatim:
 
 The brief is identical for all 6 reviewers — each agent's own system prompt narrows the lens. If `aspect_emphasis` is set, the same `## Emphasis` section is included verbatim in every reviewer's brief — emphasis is uniform across reviewers, never per-reviewer (single-message-fanout invariant: aspect filters never gate dispatch).
 
-### Step 2: Dispatch 6 Task() agents in a SINGLE message
+### Step 2: Dispatch 6 required routed reviewers
 
-In ONE assistant turn, fire 6 Task() calls in parallel. Each receives the same brief; each returns its own reviewer YAML.
+<!-- BEGIN child-callsite-contracts-v1 -->
+```json
+{
+  "review_pr.review.correctness":{"inputs":["changed_paths","diff_path","criteria_path","emphasis"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "review_pr.review.silent_failures":{"inputs":["changed_paths","diff_path","criteria_path","emphasis"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "review_pr.review.types":{"inputs":["changed_paths","diff_path","criteria_path","emphasis"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "review_pr.review.comments":{"inputs":["changed_paths","diff_path","criteria_path","emphasis"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "review_pr.review.tests":{"inputs":["changed_paths","diff_path","criteria_path","emphasis"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "review_pr.review.general":{"inputs":["changed_paths","diff_path","criteria_path","emphasis","lens"],"optional_inputs":["format_retry","format_example_path"],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"}
+}
+```
+<!-- END child-callsite-contracts-v1 -->
+
+### Routed execution contract (normative)
+
+Source `${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/child-dispatch.sh`. The caller propagates the immutable carrier through the context-only lineage edge `review_pr.post_impl_review`; this skill never resolves a model. Resolve the six provider edges from policy, create unique iteration/attempt instances with `uberdev_create_child_handoff`, and issue every dispatch before waiting:
+
+```bash uberdev-executable setup=post-impl-review
+set -u
+UBERDEV_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}"
+. "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh"
+: "${RUN_ID:?post-impl-review requires parent RUN_ID}"
+uberdev_command_workspace_prepare post-impl-review 0 medium '[]' "$RUN_ID" "${WORKTREE_ROOT:-}" >/dev/null || {
+  rc=$?; return "$rc" 2>/dev/null || exit "$rc"
+}
+REVIEW_ITERATION="${REVIEW_ITERATION:-1}"
+REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"
+CHANGED_PATHS_JSON="${CHANGED_PATHS_JSON:-[]}"
+EMPHASIS_JSON="${EMPHASIS_JSON:-[]}"
+post_review_json_string() {
+  python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "$1"
+}
+
+post_review_record() {
+  local edge="$1" instance="$2" inputs="$3" risks="$4" path="$5"
+  if command -v uberdev_child_inputs_validate >/dev/null 2>&1; then
+    inputs="$(uberdev_child_inputs_validate "$edge" "$inputs")" || return 2
+  fi
+  python3 -I -B - "$edge" "$instance" "$inputs" "$risks" "$path" <<'PY'
+import json,sys
+edge,instance,inputs,risks,path=sys.argv[1:]
+with open(path,'a') as f:f.write(json.dumps({'edge':edge,'instance':instance,'inputs':json.loads(inputs),'risks':json.loads(risks)},sort_keys=True,separators=(',',':'))+'\n')
+PY
+}
+post_review_fanout() {
+  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff result status receipt dispatch_rc ledger_rc cleanup_rc
+  local handoffs=()
+  : >"$descriptors"; : >"$launched"
+  while IFS= read -r row; do
+    edge="$(jq -r .edge <<<"$row")"; instance="$(jq -r .instance <<<"$row")"
+    inputs="$(jq -c .inputs <<<"$row")"; risks="$(jq -c .risks <<<"$row")"
+    uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks" >/dev/null || return $?
+    jq -cn --arg edge "$edge" --arg handoff "$UBERDEV_CHILD_HANDOFF" --arg result "$UBERDEV_CHILD_RESULT" --arg status "$UBERDEV_CHILD_STATUS" \
+      '{edge:$edge,handoff:$handoff,result:$result,status:$status}' >>"$descriptors"
+    handoffs+=("$UBERDEV_CHILD_HANDOFF")
+  done <"$records"
+  uberdev_preflight_child_batch "${handoffs[@]}" || return $?
+  while IFS= read -r row; do
+    edge="$(jq -r .edge <<<"$row")"; handoff="$(jq -r .handoff <<<"$row")"
+    result="$(jq -r .result <<<"$row")"; status="$(jq -r .status <<<"$row")"
+    if receipt="$(uberdev_dispatch_child "$edge" "$handoff" "$result" "$status")"; then
+      :
+    else
+      dispatch_rc=$?; cleanup_rc=0
+      while IFS= read -r row; do uberdev_unwind_child "$(jq -r .status <<<"$row")" "$(jq -r .result <<<"$row")" "$timeout_s" || cleanup_rc=1; done <"$launched"
+      [ "$cleanup_rc" -eq 0 ] || echo "error: prior child cleanup failed after dispatch edge=$edge" >&2
+      return "$dispatch_rc"
+    fi
+    if jq -cn --arg edge "$edge" --arg receipt "$receipt" --arg result "$result" --arg status "$status" \
+      '{edge:$edge,receipt:$receipt,result:$result,status:$status}' >>"$launched"; then
+      :
+    else
+      ledger_rc=$?; cleanup_rc=0
+      uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
+      while IFS= read -r row; do uberdev_unwind_child "$(jq -r .status <<<"$row")" "$(jq -r .result <<<"$row")" "$timeout_s" || cleanup_rc=1; done <"$launched"
+      [ "$cleanup_rc" -eq 0 ] || echo "error: current child cleanup failed after receipt ledger write edge=$edge" >&2
+      return "$ledger_rc"
+    fi
+  done <"$descriptors"
+}
+post_review_wait_all() {
+  local launched="$1" timeout_s="$2" row status result wait_rc first_rc=0 cleanup_rc=0
+  while IFS= read -r row; do
+    status="$(jq -r .status <<<"$row")"; result="$(jq -r .result <<<"$row")"
+    if uberdev_wait_child "$status" "$result" "$timeout_s"; then
+      continue
+    else
+      wait_rc=$?
+    fi
+    [ "$first_rc" -ne 0 ] || first_rc="$wait_rc"
+    uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
+  done <"$launched"
+  if [ "$first_rc" -ne 0 ]; then
+    [ "$cleanup_rc" -eq 0 ] || echo "error: cleanup failed after child wait" >&2
+    return "$first_rc"
+  fi
+  return 0
+}
+
+REVIEW_EDGES=(
+  review_pr.review.correctness review_pr.review.silent_failures
+  review_pr.review.types review_pr.review.comments
+  review_pr.review.tests review_pr.review.general
+)
+REVIEW_RECORDS="$RESEARCH_DIR_ABS/post-review.records"
+REVIEW_DESCRIPTORS="$RESEARCH_DIR_ABS/post-review.descriptors"
+REVIEW_LAUNCHED="$RESEARCH_DIR_ABS/post-review.launched"
+: >"$REVIEW_RECORDS"
+REVIEW_INDEX=0
+for EDGE_ID in "${REVIEW_EDGES[@]}"; do
+  REVIEW_INDEX=$((REVIEW_INDEX + 1))
+  INSTANCE="post-review-r${REVIEW_INDEX}-iter${REVIEW_ITERATION}-attempt01"
+  if [ "$EDGE_ID" = review_pr.review.general ]; then
+    INPUTS_JSON="$(uberdev_child_inputs_build "$EDGE_ID" \
+      changed_paths "$CHANGED_PATHS_JSON" \
+      diff_path "$(post_review_json_string "$DIFF_ARTIFACT_PATH")" \
+      criteria_path "$(post_review_json_string "$CRITERIA_PATH")" \
+      emphasis "$EMPHASIS_JSON" \
+      lens '"general"')"
+  else
+    INPUTS_JSON="$(uberdev_child_inputs_build "$EDGE_ID" \
+      changed_paths "$CHANGED_PATHS_JSON" \
+      diff_path "$(post_review_json_string "$DIFF_ARTIFACT_PATH")" \
+      criteria_path "$(post_review_json_string "$CRITERIA_PATH")" \
+      emphasis "$EMPHASIS_JSON")"
+  fi
+  post_review_record "$EDGE_ID" "$INSTANCE" "$INPUTS_JSON" '[]' "$REVIEW_RECORDS"
+done
+post_review_fanout "$REVIEW_RECORDS" "$REVIEW_DESCRIPTORS" "$REVIEW_LAUNCHED" "$REVIEW_PR_TIMEOUT"
+post_review_wait_all "$REVIEW_LAUNCHED" "$REVIEW_PR_TIMEOUT" || REVIEW_WAVE_BLOCKED=1
+```
+
+The handoff carries paths and bounded scalar metadata only; never inline the
+diff, provider command, model, route, effort, sandbox, or secrets. The actual
+sixth `code-reviewer` general lens is intentionally retained in v1. Every
+retry/re-entry mints a new `instance_id` with the same stable dotted edge ID.
+
+All six receive the same brief path and return their own reviewer YAML. All six are required quality evidence.
 
 | Reviewer | Agent file | Lens |
 |---|---|---|
@@ -110,16 +248,16 @@ In ONE assistant turn, fire 6 Task() calls in parallel. Each receives the same b
 **Per-repo fanout cap.** Before dispatching the 6 reviewer
 agents, source `${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/config-read.sh` and
 call `CAP=$(uberdev_read_int_in_range fanout_concurrency.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 6)`.
-When `CAP < 6`, split the 6 Task() calls into `ceil(6 / CAP)` sequential
-single-message waves — each wave still obeys the single-message
+When `CAP < 6`, split the 6 routed calls into `ceil(6 / CAP)` sequential
+waves — each wave still obeys the dispatch-all-before-wait
 invariant. When `CAP >= 6` (default), dispatch all 6 in one wave
 (today's behaviour, unchanged). Default 6, range [1, 50],
 precedence env > config > default.
 
 ```bash
 # Step 2 fanout cap
-if [ -r "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/config-read.sh" ]; then
-  . "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/config-read.sh"
+if [ -r "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh" ]; then
+  . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh"
   POST_IMPL_REVIEW_CAP="$(uberdev_read_int_in_range fanout_concurrency.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 6)"
 else
   POST_IMPL_REVIEW_CAP=6
@@ -140,11 +278,21 @@ confidence: low | medium | high
 
 ### Step 3: Wait for all 6 returns; parse each YAML
 
-Wait until all 6 Task() calls have returned (the harness blocks the assistant turn until they all complete — that is the parallelism win). Parse each YAML block.
+Wait until all 6 routed calls have returned. Parse each YAML block.
 
-Failure handling:
-- If any single reviewer returns `BLOCKED` (timeout / agent error / unparseable YAML): log a warning to `.uberdev/research/$RUN_ID/post-impl-review.log`, drop that reviewer, continue with N-1.
-- If `code-reviewer` itself returns `BLOCKED`: log critical and surface to caller — the caller chooses to continue or escalate (e.g. retry the wave, or open an issue and continue).
+Failure handling is fail-closed. A BLOCKED or unparseable reviewer gets exactly one format-repair retry using the same stable edge and a fresh `attempt02` instance whose inputs add `format_retry: true`. If the repaired return is still BLOCKED or unparseable, the aggregate verdict is BLOCKED and `/review-pr` cannot emit a green trust signal. Never drop a reviewer and continue with N-1 evidence.
+
+```bash uberdev-executable
+FORMAT_EXAMPLE_PATH="${FORMAT_EXAMPLE_PATH:-$CRITERIA_PATH}"
+FAILED_REVIEW_INPUTS="$(jq -ce --arg edge "$FAILED_REVIEW_EDGE" 'select(.edge == $edge) | .inputs' "$REVIEW_RECORDS")"
+REPAIR_INPUTS="$(uberdev_child_inputs_format_retry "$FAILED_REVIEW_EDGE" "$FAILED_REVIEW_INPUTS" "$FORMAT_EXAMPLE_PATH")"
+REPAIR_INSTANCE="post-review-r${FAILED_REVIEW_INDEX}-iter${REVIEW_ITERATION}-attempt02"
+REPAIR_PREFIX="$RESEARCH_DIR_ABS/post-review-repair-r${FAILED_REVIEW_INDEX}"
+: >"$REPAIR_PREFIX.records"
+post_review_record "$FAILED_REVIEW_EDGE" "$REPAIR_INSTANCE" "$REPAIR_INPUTS" '[]' "$REPAIR_PREFIX.records"
+post_review_fanout "$REPAIR_PREFIX.records" "$REPAIR_PREFIX.descriptors" "$REPAIR_PREFIX.launched" "$REVIEW_PR_TIMEOUT"
+post_review_wait_all "$REPAIR_PREFIX.launched" "$REVIEW_PR_TIMEOUT" || REVIEW_WAVE_BLOCKED=1
+```
 
 ### Step 4: Aggregate
 
@@ -185,17 +333,13 @@ Return a prose summary of the aggregation table above to the caller. Example:
 
 > Post-impl review for issue #11 complete (post-PR-push, /review-pr Phase 1). 6 reviewers ran in parallel. Aggregated: 0 blockers, 2 suggestions (pr-test-analyzer flagged a missing edge-case test in `foo.test.ts`; comment-analyzer flagged a stale TODO in `bar.ts`). Full table at `.uberdev/research/$RUN_ID/post-impl-review-final.md`. Continue.
 
-Findings are advisory at this layer — **the caller does NOT block on `REVISIONS_REQUIRED`**. (This skill is audit-only by design. The aggregated file is the artifact downstream tooling reads to triage findings; to apply simplifier findings, run `/uberdev:simplify` or `/uberdev:review-pr` Phase 2.)
+Findings remain advisory, but missing reviewer evidence is not advisory: **the caller blocks green trust on BLOCKED/unparseable after the one repair retry**.
 
 ## Failure modes
 
 | Symptom | Action |
 |---|---|
-| 1 reviewer returns `BLOCKED` (timeout/error) | Log warning, drop that reviewer, continue with N-1. |
-| 2+ reviewers return `BLOCKED` | Log warning, continue with whatever returned. The aggregation table notes the dropped reviewers as `BLOCKED` rows. |
-| `code-reviewer` itself returns `BLOCKED` | Log critical. Surface to caller: caller decides continue-vs-escalate. |
-| All 6 return `BLOCKED` | Log critical, return summary `Aggregated: 0 blockers, 0 suggestions (all reviewers blocked). Continue.` — caller still continues; the absence of review is itself recorded. |
-| YAML parse fails on a return | Treat as `BLOCKED` for that reviewer; same handling as above. |
+| Any reviewer returns `BLOCKED` or malformed YAML | Retry that edge once with a fresh `attempt02`; if still invalid, aggregate BLOCKED and suppress green trust. |
 
 ## Integration
 

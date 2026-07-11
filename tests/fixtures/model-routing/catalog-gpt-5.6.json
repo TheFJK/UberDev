@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "provider": "codex",
+  "models": {
+    "gpt-5.6-luna": {
+      "reasoning_efforts": ["low", "medium"]
+    },
+    "gpt-5.6-mini": {
+      "reasoning_efforts": ["low", "medium", "high"]
+    },
+    "gpt-5.6-sol": {
+      "reasoning_efforts": ["low", "medium", "high", "max", "ultra"]
+    },
+    "gpt-5.6-terra": {
+      "reasoning_efforts": ["low", "medium", "high"]
+    }
+  },
+  "ranked_pairs": [
+    {"logical_route": "economy", "rank": 0, "model": "gpt-5.6-luna", "reasoning_effort": "low"},
+    {"logical_route": "standard", "rank": 1, "model": "gpt-5.6-terra", "reasoning_effort": "medium"},
+    {"logical_route": "quality", "rank": 2, "model": "gpt-5.6-sol", "reasoning_effort": "medium"},
+    {"logical_route": "deep", "rank": 3, "model": "gpt-5.6-sol", "reasoning_effort": "high"},
+    {"logical_route": "frontier", "rank": 4, "model": "gpt-5.6-sol", "reasoning_effort": "max"},
+    {"logical_route": "ultra", "rank": 5, "model": "gpt-5.6-sol", "reasoning_effort": "ultra"}
+  ],
+  "available_pairs": [
+    {"model": "gpt-5.6-luna", "reasoning_effort": "low"},
+    {"model": "gpt-5.6-terra", "reasoning_effort": "medium"},
+    {"model": "gpt-5.6-sol", "reasoning_effort": "medium"},
+    {"model": "gpt-5.6-sol", "reasoning_effort": "high"},
+    {"model": "gpt-5.6-sol", "reasoning_effort": "max"},
+    {"model": "gpt-5.6-sol", "reasoning_effort": "ultra"}
+  ],
+  "service_tiers": ["default", "fast", "flex"],
+  "source_roles": [
+    "ci-code-fixer",
+    "ci-failure-classifier",
+    "ci-rebase-handler",
+    "code-fixer",
+    "code-reviewer",
+    "code-simplifier",
+    "codebase-scout",
+    "comment-analyzer",
+    "conflict-resolver",
+    "findings-to-issues",
+    "implementation-worker",
+    "issue-similarity-analyzer",
+    "merge-strategy-decider",
+    "plan-reviewer",
+    "plan-writer",
+    "pr-test-analyzer",
+    "research-codebase",
+    "research-constraints",
+    "research-patterns",
+    "research-prior-art",
+    "research-security",
+    "research-test-coverage",
+    "silent-failure-hunter",
+    "spec-compliance-reviewer",
+    "spec-reviewer",
+    "spec-reviser",
+    "spec-writer",
+    "testers-a11y-critic",
+    "testers-adversarial-security",
+    "testers-chaos-engineer",
+    "testers-mobile-thumb",
+    "testers-monitor-devils-advocate",
+    "testers-monitor-primary",
+    "testers-panicked-grandma",
+    "testers-power-user",
+    "triage-scout",
+    "trust-trail-evaluator",
+    "type-design-analyzer",
+    "uberthink-arbiter",
+    "uberthink-falsifier",
+    "uberthink-frame",
+    "uberthink-generator",
+    "uberthink-moderator",
+    "uberthink-synthesizer"
+  ]
+}

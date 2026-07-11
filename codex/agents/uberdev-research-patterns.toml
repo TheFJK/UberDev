@@ -4,6 +4,10 @@ name = "uberdev-research-patterns"
 description = """
 In-repo pattern research subagent. Finds related closed PRs, similar features, commit-history precedents. Distinct from research-codebase (which maps files for the current issue) — this looks for prior precedents to mirror.
 """
+model = "gpt-5.6-terra"
+model_reasoning_effort = "medium"
+sandbox_mode = "read-only"
+features.multi_agent = false
 developer_instructions = """
 # In-Repo Pattern Research Subagent
 

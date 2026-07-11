@@ -123,6 +123,251 @@ echo "== #246 D-skip: SKIP_PERMISSIONS=1 yields --dangerously-skip-permissions -
 rm -f "$TALLY_FILE"
 
 echo
+echo "== Portable Python command resolution =="
+PYTHON_RESOLVER_TMP="$(mktemp -d)"
+REAL_PYTHON="$(command -v python3)"
+cat > "$PYTHON_RESOLVER_TMP/python" <<SH
+#!/bin/sh
+exec "$REAL_PYTHON" "\$@"
+SH
+cat > "$PYTHON_RESOLVER_TMP/py" <<SH
+#!/bin/sh
+[ "\$1" = -3 ] || exit 97
+shift
+exec "$REAL_PYTHON" "\$@"
+SH
+chmod +x "$PYTHON_RESOLVER_TMP/python" "$PYTHON_RESOLVER_TMP/py"
+if PYTHON_ONLY_OUT="$(/bin/bash -c '. "$1"; PATH="$2"; _uberdev_dispatch_python -c "print(\"python-only\")"' _ "$DISPATCH_LIB" "$PYTHON_RESOLVER_TMP" 2>&1)" \
+    && [ "$PYTHON_ONLY_OUT" = python-only ]; then
+  echo "  PASS  dispatch resolves Windows python when python3 is absent"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  dispatch resolves Windows python when python3 is absent: $PYTHON_ONLY_OUT"; FAIL=$((FAIL + 1))
+fi
+rm -f "$PYTHON_RESOLVER_TMP/python"
+if PY_LAUNCHER_OUT="$(/bin/bash -c '. "$1"; PATH="$2"; _uberdev_dispatch_python -c "print(\"py-launcher\")"' _ "$DISPATCH_LIB" "$PYTHON_RESOLVER_TMP" 2>&1)" \
+    && [ "$PY_LAUNCHER_OUT" = py-launcher ]; then
+  echo "  PASS  dispatch resolves Windows py -3 launcher as final fallback"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  dispatch resolves Windows py -3 launcher as final fallback: $PY_LAUNCHER_OUT"; FAIL=$((FAIL + 1))
+fi
+if CACHED_PYTHON_OUT="$(/bin/bash -c '. "$1"; _uberdev_dispatch_resolve_python; PATH="$2"; _uberdev_dispatch_python -c "print(\"cached-python\")"' _ "$DISPATCH_LIB" "$PYTHON_RESOLVER_TMP/empty" 2>&1)" \
+    && [ "$CACHED_PYTHON_OUT" = cached-python ]; then
+  echo "  PASS  resolved absolute Python argv survives later PATH narrowing"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  resolved absolute Python argv survives later PATH narrowing: $CACHED_PYTHON_OUT"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$PYTHON_RESOLVER_TMP"
+if grep -Eq '(^|[[:space:]|(&])python3[[:space:]]+-' "$DISPATCH_LIB"; then
+  echo "  FAIL  dispatch.sh retains a literal python3 invocation"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  all dispatch Python calls use the portable resolver"; PASS=$((PASS + 1))
+fi
+detached_resolver_count="$(grep -Fc 'nohup "${PYTHON_LAUNCH[@]}"' "$DISPATCH_LIB")"
+if [ "$detached_resolver_count" -eq 2 ] \
+    && grep -Fq 'PYTHON_EXE="$1"; PYTHON_PREFIX="$2"; shift 2' "$DISPATCH_LIB" \
+    && grep -Fq '"$PYTHON_EXE" "$PYTHON_PREFIX" "$@"' "$DISPATCH_LIB"; then
+  echo "  PASS  detached and nested dispatch preserve the py -3 argv prefix"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  detached and nested dispatch preserve the py -3 argv prefix"; FAIL=$((FAIL + 1))
+fi
+windows_detach_count="$(grep -Fc 'subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS' "$DISPATCH_LIB")"
+posix_setsid_count="$(grep -Fc 'os.setsid()' "$DISPATCH_LIB")"
+wrapper_pid_bridge_count="$(grep -Fc 'os.environ["UBERDEV_WRAPPER_PID"]=str(os.getpid())' "$DISPATCH_LIB")"
+supervisor_pid_file_count="$(grep -Fc 'UBERDEV_SUPERVISOR_PID_FILE="$STATUS_FILE.pid" nohup' "$DISPATCH_LIB")"
+secure_pid_writer_count="$(grep -Fc 'pid_path=os.environ["UBERDEV_SUPERVISOR_PID_FILE"]' "$DISPATCH_LIB")"
+absolute_bash_launcher_count="$(grep -Fc 'launch_argv=[bash_path]' "$DISPATCH_LIB")"
+if [ "$windows_detach_count" -eq 2 ] \
+    && [ "$posix_setsid_count" -eq 2 ] \
+    && [ "$wrapper_pid_bridge_count" -eq 2 ] \
+    && [ "$supervisor_pid_file_count" -eq 2 ] \
+    && [ "$secure_pid_writer_count" -eq 2 ] \
+    && [ "$absolute_bash_launcher_count" -eq 2 ] \
+    && grep -Fq '_uberdev_dispatch_read_secure_pid_file' "$DISPATCH_LIB" \
+    && ! grep -Fq 'os.setsid(); os.execvp' "$DISPATCH_LIB"; then
+  echo "  PASS  detached launchers securely bridge native Windows supervisor PIDs and preserve POSIX setsid"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  detached launchers securely bridge native Windows supervisor PIDs and preserve POSIX setsid"; FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== Immediate terminal background wrapper keeps its exact handle =="
+FIXTURE_WAIT_BODY="$(awk '/^    _uberdev_dispatch_wait_owned_session\(\)/{f=1} f{print} f&&/^    }/{exit}' "$0")"
+if printf '%s\n' "$FIXTURE_WAIT_BODY" | grep -Eq 'state.*completed' \
+    && printf '%s\n' "$FIXTURE_WAIT_BODY" | grep -Fq 'attempts' \
+    && ! printf '%s\n' "$FIXTURE_WAIT_BODY" | grep -Fq 'ps -o'; then
+  echo "  PASS  immediate fixture waits on bounded canonical terminal evidence"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  immediate fixture waits on bounded canonical terminal evidence"; FAIL=$((FAIL + 1))
+fi
+IMMEDIATE_TMP="$(mktemp -d)"
+mkdir -p "$IMMEDIATE_TMP/bin" "$IMMEDIATE_TMP/repo" "$IMMEDIATE_TMP/tmp"
+cat > "$IMMEDIATE_TMP/bin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = worktree ] && [ "$2" = add ]; then mkdir -p "$3"; exit 0; fi
+exit 1
+SH
+cat > "$IMMEDIATE_TMP/bin/claude" <<'SH'
+#!/usr/bin/env bash
+body="$2"
+sleep 0.05
+printf 'immediate %s result\n' "$body"
+case "$body" in *failed*) exit 29 ;; *) exit 0 ;; esac
+SH
+chmod +x "$IMMEDIATE_TMP/bin/git" "$IMMEDIATE_TMP/bin/claude"
+IMMEDIATE_OUT="$(
+  cd "$IMMEDIATE_TMP/repo" &&
+  PATH="$IMMEDIATE_TMP/bin:/usr/bin:/bin" UBERDEV_TMPDIR="$IMMEDIATE_TMP/tmp" \
+  _UBERDEV_PYTHON_EXE="$REAL_PYTHON" _UBERDEV_PYTHON_PREFIX='' \
+  /bin/bash -c '
+    . "$1"
+    UBERDEV_DETACH_DIAGNOSTICS=1; export UBERDEV_DETACH_DIAGNOSTICS
+    fixture_pids=(); fixture_running_count=0
+    _uberdev_dispatch_wait_owned_session() {
+      local status attempts=0 terminal_seen=0 running_seen=0
+      fixture_pids+=("$1")
+      while [ "$attempts" -lt 200 ]; do
+        status="$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)"
+        if [[ "$status" == *\"state\":\"running\"* && "$running_seen" -eq 0 ]]; then
+          running_seen=1; fixture_running_count=$((fixture_running_count + 1))
+        fi
+        if [[ "$status" == *\"state\":\"completed\"* \
+            && "$status" == *\"exit_code\":0* \
+            && -s "$UBERDEV_AGENT_RESULT_FILE" ]]; then
+          terminal_seen=1; break
+        fi
+        if [[ "$status" == *\"state\":\"failed\"* \
+            && "$status" =~ \"exit_code\":-?[1-9][0-9]* ]]; then
+          terminal_seen=1; break
+        fi
+        sleep 0.025; attempts=$((attempts + 1))
+      done
+      [ "$terminal_seen" -eq 1 ] || return 0
+      # Give the detached supervisor a bounded window to exit after publishing
+      # its canonical terminal snapshot. Returning 1 selects the exact-handle
+      # immediate-terminal validation path in the dispatcher.
+      attempts=0
+      while kill -0 "$1" 2>/dev/null && [ "$attempts" -lt 200 ]; do
+        sleep 0.025; attempts=$((attempts + 1))
+      done
+      kill -0 "$1" 2>/dev/null && return 0
+      return 1
+    }
+    MODEL=sonnet; PERM_FLAG=(); EFFORT_FLAG=(); failures=0; issue=70
+    record_failure() {
+      failures=$((failures + 1))
+      printf "mismatch issue=%s outcome=%s check=%s rc=%s dispatch_id=%q status=%q result=%q mode=%q partials=%q child_log=%q\n" \
+        "$issue" "$outcome" "$1" "$rc" "${DISPATCH_ID:-}" "$status" "$result" "$mode" "$partials" "$child_log"
+    }
+    probe_mode() {
+      local candidate
+      candidate="$(stat -c %a "$1" 2>/dev/null)"
+      if [ -n "$candidate" ]; then
+        case "$candidate" in *[!0-7]*) ;; *) printf "%s" "$candidate"; return 0 ;; esac
+      fi
+      candidate="$(stat -f %Lp "$1" 2>/dev/null)"
+      [ -n "$candidate" ] || return 1
+      case "$candidate" in *[!0-7]*) return 1 ;; *) printf "%s" "$candidate" ;; esac
+    }
+    for outcome in completed failed completed failed completed failed; do
+      issue=$((issue + 1))
+      printf "%s\n" "$outcome" > "$UBERDEV_TMPDIR/prompt-$issue.txt"
+      UBERDEV_AGENT_STATUS_FILE="$UBERDEV_TMPDIR/status-$issue.json"
+      UBERDEV_AGENT_RESULT_FILE="$UBERDEV_TMPDIR/result-$issue.md"
+      export UBERDEV_AGENT_STATUS_FILE UBERDEV_AGENT_RESULT_FILE
+      _uberdev_dispatch_background "$issue" small "$UBERDEV_TMPDIR/prompt-$issue.txt"
+      rc=$?; status="$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)"
+      result="$(cat "$UBERDEV_AGENT_RESULT_FILE" 2>/dev/null)"
+      mode="$(probe_mode "$UBERDEV_AGENT_RESULT_FILE")"
+      partials="$(find "$UBERDEV_TMPDIR" -maxdepth 1 \( -name "result-$issue.md.partial.*" -o -name "result-$issue.md.tmp.*" \) -print)"
+      child_log="$(cat "$UBERDEV_TMPDIR/solve-bg-stdout-$issue.log" 2>/dev/null)"
+      case "$outcome:$rc:$DISPATCH_ID:$status" in
+        completed:0:*:*\"state\":\"completed\"*\"exit_code\":0*)
+          [ "$result" = "immediate completed result" ] || record_failure completed_result
+          # Git Bash reports synthesized POSIX bits over native Windows ACLs;
+          # require a validated octal probe there, and exact 0600 on POSIX.
+          case "$(uname -s)" in
+            MINGW*|MSYS*|CYGWIN*) [ -n "$mode" ] || record_failure completed_result_mode ;;
+            *) [ "$mode" = 600 ] || record_failure completed_result_mode ;;
+          esac
+          ;;
+        failed:0:*:*\"state\":\"failed\"*\"exit_code\":29*)
+          [ ! -s "$UBERDEV_AGENT_RESULT_FILE" ] || record_failure failed_result_empty
+          ;;
+        *) record_failure terminal_contract ;;
+      esac
+      [ -z "$partials" ] || record_failure partial_cleanup
+      [ -n "${DISPATCH_ID:-}" ] || record_failure dispatch_id
+      [[ "$status" == *\"pid\":\"$DISPATCH_ID\"* ]] || record_failure terminal_pid_identity
+    done
+    for fixture_pid in "${fixture_pids[@]}"; do
+      wait "$fixture_pid" 2>/dev/null || true
+    done
+    [ "$fixture_running_count" -eq 6 ] || { failures=$((failures + 1)); printf "mismatch check=running_status count=%s\n" "$fixture_running_count"; }
+    printf "failures=%s\n" "$failures"
+  ' _ "$DISPATCH_LIB"
+)"
+if [[ "$IMMEDIATE_OUT" == *'failures=0'* ]]; then
+  echo "  PASS  background captures provider stdout into a private canonical result and preserves exact immediate terminal handles"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  background captures provider stdout into a private canonical result and preserves exact immediate terminal handles"
+  echo "        $IMMEDIATE_OUT"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$IMMEDIATE_TMP"
+
+echo
+echo "== Delayed background wrapper registers one PID through running and terminal state =="
+DELAYED_TMP="$(mktemp -d)"
+mkdir -p "$DELAYED_TMP/bin" "$DELAYED_TMP/repo" "$DELAYED_TMP/tmp"
+cat > "$DELAYED_TMP/bin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = worktree ] && [ "$2" = add ]; then mkdir -p "$3"; exit 0; fi
+exit 1
+SH
+cat > "$DELAYED_TMP/bin/claude" <<'SH'
+#!/usr/bin/env bash
+sleep 1
+printf 'delayed background result\n'
+SH
+chmod +x "$DELAYED_TMP/bin/git" "$DELAYED_TMP/bin/claude"
+printf 'delayed' > "$DELAYED_TMP/prompt.txt"
+DELAYED_OUT="$(
+  cd "$DELAYED_TMP/repo" &&
+  PATH="$DELAYED_TMP/bin:/usr/bin:/bin" UBERDEV_TMPDIR="$DELAYED_TMP/tmp" \
+  _UBERDEV_PYTHON_EXE="$REAL_PYTHON" _UBERDEV_PYTHON_PREFIX='' \
+  /bin/bash -c '
+    . "$1"
+    MODEL=sonnet; PERM_FLAG=(); EFFORT_FLAG=()
+    _uberdev_dispatch_background 90 small "$2"
+    rc=$?; pid="${DISPATCH_ID:-}"; status_file="$UBERDEV_TMPDIR/solve-bg-status-90.json"
+    attempts=0; running=""
+    while [ "$attempts" -lt 200 ]; do
+      running="$(cat "$status_file" 2>/dev/null)"
+      [[ "$running" == *\"state\":\"running\"* ]] && break
+      sleep 0.025; attempts=$((attempts + 1))
+    done
+    attempts=0; terminal="$running"
+    while [ "$attempts" -lt 200 ]; do
+      terminal="$(cat "$status_file" 2>/dev/null)"
+      [[ "$terminal" == *\"state\":\"completed\"* ]] && break
+      sleep 0.025; attempts=$((attempts + 1))
+    done
+    printf "rc=%s\npid=%s\nrunning=%s\nterminal=%s\nresult=%s\n" \
+      "$rc" "$pid" "$running" "$terminal" "$(cat "$UBERDEV_TMPDIR/solve-bg-result-90.md" 2>/dev/null)"
+  ' _ "$DISPATCH_LIB" "$DELAYED_TMP/prompt.txt"
+)"
+delayed_pid="$(printf '%s\n' "$DELAYED_OUT" | sed -n 's/^pid=//p')"
+if [ -n "$delayed_pid" ] \
+    && printf '%s\n' "$DELAYED_OUT" | grep -Fq 'rc=0' \
+    && printf '%s\n' "$DELAYED_OUT" | grep -Fq "running={\"issue\":90,\"tier\":\"small\",\"backend\":\"background\",\"state\":\"running\",\"exit_code\":null,\"pid\":\"$delayed_pid\"}" \
+    && printf '%s\n' "$DELAYED_OUT" | grep -Fq "terminal={\"issue\":90,\"tier\":\"small\",\"backend\":\"background\",\"state\":\"completed\",\"exit_code\":0,\"pid\":\"$delayed_pid\"}" \
+    && printf '%s\n' "$DELAYED_OUT" | grep -Fq 'result=delayed background result'; then
+  echo "  PASS  delayed background running and terminal receipts retain the dispatch PID"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  delayed background running and terminal receipts retain the dispatch PID: $DELAYED_OUT"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$DELAYED_TMP"
+
+echo
 echo "== Anti-pattern: background backend never uses claude --bg =="
 # Extract just the _uberdev_dispatch_background function body and assert
 # `claude --bg` does not appear inside it (sibling backends in the same

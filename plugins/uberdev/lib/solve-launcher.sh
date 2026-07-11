@@ -74,6 +74,32 @@ if [ -z "${UBERDEV_PLUGIN_ROOT:-}" ]; then
   fi
 fi
 
+# Parse the public CLI once through the bounded deterministic parser. This is
+# the fail-closed gate for duplicates, conflicts, issue count, aliases, and
+# routing field enums. It runs before gh and therefore before every claim or
+# stale-label mutation.
+_UBERDEV_SOLVE_TRIAGE="$UBERDEV_PLUGIN_ROOT/lib/solve_triage.py"
+if [ ! -r "$_UBERDEV_SOLVE_TRIAGE" ]; then
+  echo "error: solve routing validator missing: $_UBERDEV_SOLVE_TRIAGE" >&2
+  echo "no claims written; no agents dispatched" >&2
+  exit 1
+fi
+if ! SOLVE_CLI_JSON="$(python3 -I "$_UBERDEV_SOLVE_TRIAGE" parse-cli "$@" 2>&1)"; then
+  echo "error: $SOLVE_CLI_JSON" >&2
+  echo "no claims written; no agents dispatched" >&2
+  exit 1
+fi
+_uberdev_cli_get() {
+  python3 -I -c 'import json,sys; v=json.loads(sys.argv[1]).get(sys.argv[2]); print("" if v is None else ("1" if v is True else "0" if v is False else v),end="")' "$SOLVE_CLI_JSON" "$1"
+}
+UBERDEV_DISPATCH_ROUTING_MODE="$(_uberdev_cli_get routing_mode)"
+UBERDEV_DISPATCH_ROUTE="$(_uberdev_cli_get route)"
+UBERDEV_DISPATCH_MODEL="$(_uberdev_cli_get model)"
+UBERDEV_DISPATCH_REASONING_EFFORT="$(_uberdev_cli_get effort)"
+UBERDEV_DISPATCH_SERVICE_TIER="$(_uberdev_cli_get service_tier)"
+export UBERDEV_DISPATCH_ROUTING_MODE UBERDEV_DISPATCH_ROUTE UBERDEV_DISPATCH_MODEL
+export UBERDEV_DISPATCH_REASONING_EFFORT UBERDEV_DISPATCH_SERVICE_TIER
+
 # Env ownership (#97/#241) — see header. AUTO_MODE gates turbo-vs-interactive
 # behaviour in Steps 4/5a; UBERDEV_TURBO is the chain-wide unattended-mode
 # signal (inherits into claude --bg children via lib/dispatch.sh BG_TURBO_ENV);
@@ -111,12 +137,12 @@ _uberdev_require_claude_version() {
   cur="$(claude --version 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
   if [[ -z "$cur" ]]; then
     echo "error: \`claude --version\` returned no output; cannot verify version >= $min" >&2
-    exit 1
+    return 1
   fi
   if [[ "$(printf '%s\n%s\n' "$min" "$cur" | sort -V | head -1)" != "$min" ]]; then
     echo "error: /solve and /turbo require Claude Code >= $min (found: $cur)" >&2
     echo "       install with: npm i -g @anthropic-ai/claude-code@latest" >&2
-    exit 1
+    return 1
   fi
 }
 
@@ -139,7 +165,7 @@ _uberdev_audit_emit() {
 # that forced the fence-era pipeline shape no longer applies — the pipeline
 # form is kept because it also filters (anchored `^[0-9]+$` rejects flag
 # tokens like `--terminal=foo123`) and dedupes in one pass.
-ISSUE_NUMS=($(echo "$ARGUMENTS" | tr ' ' '\n' | grep -E '^[0-9]+$' | awk '!seen[$0]++'))
+ISSUE_NUMS=($(python3 -I -c 'import json,sys; print(" ".join(map(str,json.loads(sys.argv[1])["issues"])))' "$SOLVE_CLI_JSON"))
 
 OVERRIDE=$(echo "$ARGUMENTS" | grep -oE '\-\-(trivial|small|full)' | head -1 | sed 's/--//')
 # --- Phase A: --terminal= deprecation shim (v0.22.0) ---
@@ -217,8 +243,8 @@ fi
 # validates only the value it reads itself) — reject loudly; a typoed
 # `--effort=hgh` would otherwise surface as a far less actionable child error.
 case "$EFFORT_LEVEL" in
-  low|medium|high|xhigh|max) ;;
-  *) echo "error: --effort='$EFFORT_LEVEL' not in {low,medium,high,xhigh,max}" >&2; exit 1 ;;
+  low|medium|high|xhigh|max|ultra) ;;
+  *) echo "error: --effort='$EFFORT_LEVEL' not in {low,medium,high,xhigh,max,ultra}" >&2; exit 1 ;;
 esac
 # --- Phase A: --backend=<name> parser (v0.29.0 — RFC 0004) ---
 # Precedence: --backend= CLI flag > UBERDEV_DISPATCH_BACKEND env >
@@ -253,16 +279,8 @@ fi
 # --full is an alias for medium/large (keeps current behavior)
 [[ "$OVERRIDE" == "full" ]] && OVERRIDE="medium"
 
-# Warn on unrecognized leftover tokens (#304): a mistyped or wrong-case flag
-# (`--effort=LOW`, `--backed=wezterm`) was previously dropped silently and the
-# run proceeded on defaults. Warn-only — behaviour is unchanged.
-UNRECOGNIZED_TOKENS="$(echo "$ARGUMENTS" | tr ' ' '\n' | grep -vE '^$|^[0-9]+$|^--(trivial|small|full|auto|force)$|^-f$|^--effort=[a-z]+$|^--backend=[a-z-]+$|^--terminal=[a-z]+$' || true)"
-if [[ -n "$UNRECOGNIZED_TOKENS" ]]; then
-  while IFS= read -r _tok; do
-    [[ -z "$_tok" ]] && continue
-    echo "warning: unrecognized token '$_tok' ignored (check flag spelling/case — flags are lowercase, e.g. --effort=max)" >&2
-  done <<< "$UNRECOGNIZED_TOKENS"
-fi
+# Unknown tokens are rejected by solve_triage.py; no warn-and-ignore path is
+# permitted because a typo could silently change the requested route.
 
 # AUTO_PERMISSIONS precedence (controls the bypass pair on the spawned agent —
 # see lib/dispatch.sh:uberdev_dispatch_resolve_env): CLI flag > env var >
@@ -312,15 +330,68 @@ echo "Permission mode: $PERM_DESC"
 if ! REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>&1)"; then
   echo "error: gh cannot resolve this repo (auth or remote problem):" >&2
   echo "  ${REPO_SLUG:-<no output>}" >&2
+  echo "no claims written; no agents dispatched" >&2
   exit 1
 fi
 
 # --- Phase A: portable temp dir (v0.29.0 — RFC 0004 §3.8) ---
-# One temp root resolved once; every per-issue artifact (prompt, stdout log,
-# claim json, validation snapshot) lives under it. Exported so lib/dispatch.sh
-# inherits it. Hoisted ahead of validation because the parallel fetch below
-# stages per-issue JSON under it.
-export UBERDEV_TMPDIR="${TMPDIR:-/tmp}"
+# Allocate a private per-launch root beneath the caller's temp base. Shared
+# roots such as /tmp are commonly root-owned and cannot safely host immutable
+# contexts or predictable redirect targets directly.
+_UBERDEV_TMP_BASE="${TMPDIR:-/tmp}"
+case "${MSYSTEM:-}:$(uname -s 2>/dev/null)" in
+  MINGW*:*|MSYS*:*|CYGWIN*:*|*:MINGW*|*:MSYS*|*:CYGWIN*)
+    if command -v cygpath >/dev/null 2>&1; then
+      _UBERDEV_TMP_BASE="$(cygpath -m "$_UBERDEV_TMP_BASE")" || {
+        echo "error: could not normalize native-Windows temp base: ${TMPDIR:-/tmp}" >&2
+        echo "no claims written; no agents dispatched" >&2
+        exit 1
+      }
+    else
+      echo "error: cygpath is required to normalize the Git Bash temp directory for native Python" >&2
+      echo "no claims written; no agents dispatched" >&2
+      exit 1
+    fi
+    ;;
+esac
+if ! UBERDEV_TMPDIR="$(python3 -I -B -c '
+import os,stat,sys,tempfile
+base=os.path.realpath(sys.argv[1])
+uid=os.geteuid() if hasattr(os,"geteuid") else None
+posix_security=os.name!="nt"
+owner_tag=str(uid) if uid is not None else "windows"
+entry=os.stat(base,follow_symlinks=False)
+if not stat.S_ISDIR(entry.st_mode): raise SystemExit(2)
+mode=stat.S_IMODE(entry.st_mode)
+if posix_security and mode & 0o022 and not mode & stat.S_ISVTX: raise SystemExit(2)
+path=tempfile.mkdtemp(prefix=f"uberdev-solve-{owner_tag}-",dir=base)
+if posix_security: os.chmod(path,0o700)
+current=os.stat(path,follow_symlinks=False)
+if not stat.S_ISDIR(current.st_mode) or (uid is not None and current.st_uid!=uid) or (posix_security and stat.S_IMODE(current.st_mode)!=0o700): raise SystemExit(2)
+print(path,end="")
+' "$_UBERDEV_TMP_BASE")"; then
+  echo "error: could not allocate private solve staging under $_UBERDEV_TMP_BASE" >&2
+  echo "no claims written; no agents dispatched" >&2
+  exit 1
+fi
+export UBERDEV_TMPDIR
+umask 077
+UBERDEV_KEEP_TMPDIR=0
+_uberdev_cleanup_private_root() {
+  [ "${UBERDEV_KEEP_TMPDIR:-0}" = "0" ] || return 0
+  python3 -I -B -c '
+import os,shutil,stat,sys
+path,base=sys.argv[1:]; path=os.path.realpath(path); base=os.path.realpath(base)
+uid=os.geteuid() if hasattr(os,"geteuid") else None
+posix_security=os.name!="nt"
+owner_tag=str(uid) if uid is not None else "windows"
+entry=os.stat(path,follow_symlinks=False)
+if os.path.dirname(path)!=base or not os.path.basename(path).startswith(f"uberdev-solve-{owner_tag}-"): raise SystemExit(2)
+if not stat.S_ISDIR(entry.st_mode) or (uid is not None and entry.st_uid!=uid) or (posix_security and stat.S_IMODE(entry.st_mode)!=0o700): raise SystemExit(2)
+shutil.rmtree(path)
+' "$UBERDEV_TMPDIR" "$_UBERDEV_TMP_BASE" 2>/dev/null || true
+}
+trap _uberdev_cleanup_private_root EXIT
 
 # Native-Windows-no-bash fast-fail + WSL2 9P warning (RFC 0004).
 if [ -z "${BASH:-}" ] && { [ "${OS:-}" = "Windows_NT" ] || case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) true ;; *) false ;; esac; }; then
@@ -350,16 +421,33 @@ fi
 # (the 21ad417 mktemp-stderr-capture canary).
 _uberdev_fetch_issue_json() {
   local n="$1"
-  local GH_ERR
+  local GH_ERR TARGET
   GH_ERR=$(mktemp)
+  TARGET="$UBERDEV_TMPDIR/solve-validate-$n.json"
+  if ! python3 -I -B -c '
+import os,stat,sys
+root,target=sys.argv[1:]; root=os.path.realpath(root); target=os.path.abspath(target)
+uid=os.geteuid() if hasattr(os,"geteuid") else None
+posix_security=os.name!="nt"
+root_entry=os.stat(root,follow_symlinks=False)
+if not stat.S_ISDIR(root_entry.st_mode) or (uid is not None and root_entry.st_uid!=uid) or (posix_security and stat.S_IMODE(root_entry.st_mode)!=0o700): raise SystemExit(2)
+if os.path.islink(root) or os.path.dirname(target)!=root: raise SystemExit(2)
+fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)
+entry=os.fstat(fd); os.close(fd)
+if (uid is not None and entry.st_uid!=uid) or entry.st_nlink!=1 or not stat.S_ISREG(entry.st_mode): raise SystemExit(2)
+' "$UBERDEV_TMPDIR" "$TARGET"; then
+    printf '%s\n' 'unsafe validation snapshot target' > "$UBERDEV_TMPDIR/solve-validate-$n.err"
+    rm -f "$GH_ERR"
+    return 0
+  fi
   # JSON fields include `assignees,comments` to feed the Step 4 collision
   # check — keeps Phase A to a single round-trip per issue.
   if gh issue view "$n" --json number,title,state,body,labels,assignees,comments \
-      > "$UBERDEV_TMPDIR/solve-validate-$n.json" 2>"$GH_ERR"; then
+      > "$TARGET" 2>"$GH_ERR"; then
     rm -f "$GH_ERR" "$UBERDEV_TMPDIR/solve-validate-$n.err" 2>/dev/null
   else
     mv "$GH_ERR" "$UBERDEV_TMPDIR/solve-validate-$n.err"
-    rm -f "$UBERDEV_TMPDIR/solve-validate-$n.json" 2>/dev/null
+    rm -f "$TARGET" 2>/dev/null
   fi
 }
 
@@ -379,11 +467,30 @@ wait
 # errors on the macOS system bash).
 TIERS=()
 TITLES=()
+RISKS=()
+TRIAGE_DECISIONS=()
 ERRORS=()
+FLOOR=""
+CEILING=""
+if [ -r "${UBERDEV_PLUGIN_ROOT:-}/lib/config-read.sh" ]; then
+  # shellcheck source=/dev/null
+  . "${UBERDEV_PLUGIN_ROOT}/lib/config-read.sh"
+  FLOOR="$(uberdev_read_enum solve_tier_floor SOLVE_TIER_FLOOR "trivial|small|medium|large" "")"
+  CEILING="$(uberdev_read_enum solve_tier_ceiling SOLVE_TIER_CEILING "trivial|small|medium|large" "")"
+fi
+FLOOR_RANK="$(uberdev_tier_rank "$FLOOR")"
+CEILING_RANK="$(uberdev_tier_rank "$CEILING")"
+if [ -n "$FLOOR_RANK" ] && [ -n "$CEILING_RANK" ] && [ "$FLOOR_RANK" -gt "$CEILING_RANK" ]; then
+  TIER=medium
+  uberdev_clamp_tier "$TIER" "$FLOOR" "$CEILING" >/dev/null
+  FLOOR=""; CEILING=""
+fi
 _vidx=0
 for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
   TIERS[$_vidx]=""
   TITLES[$_vidx]=""
+  RISKS[$_vidx]='[]'
+  TRIAGE_DECISIONS[$_vidx]='{}'
   if [[ ! -s "$UBERDEV_TMPDIR/solve-validate-$ISSUE_NUM.json" ]]; then
     ERRORS+=("#$ISSUE_NUM: gh fetch failed: $(cat "$UBERDEV_TMPDIR/solve-validate-$ISSUE_NUM.err" 2>/dev/null || echo '<no stderr captured>')")
     rm -f "$UBERDEV_TMPDIR/solve-validate-$ISSUE_NUM.err"
@@ -391,21 +498,10 @@ for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
     continue
   fi
   ISSUE_JSON="$(cat "$UBERDEV_TMPDIR/solve-validate-$ISSUE_NUM.json")"
-  rm -f "$UBERDEV_TMPDIR/solve-validate-$ISSUE_NUM.json"
   STATE=$(jq -r .state <<<"$ISSUE_JSON")
-  # --- Phase A: stale-claim sweeper on closed issues (v0.28.0; #123 B4) ---
-  # A crashed dispatcher can leave `uberdev:active` on a closed issue forever
-  # (/merge only clears on successful merge). Prune BEFORE the state-reject so
-  # GitHub state is clean for a future re-open; the reject still fires.
+  # Closed issues are rejected read-only. Stale-label cleanup must not mutate
+  # GitHub before the full routing/context batch is proven enforceable.
   if [[ "$STATE" != "OPEN" ]]; then
-    CLOSED_HAS_ACTIVE_LABEL=$(jq -r '[.labels[].name] | index("uberdev:active") // empty' <<<"$ISSUE_JSON")
-    if [[ -n "$CLOSED_HAS_ACTIVE_LABEL" ]]; then
-      if gh issue edit "$ISSUE_NUM" --remove-label "uberdev:active" >/dev/null 2>&1; then
-        echo "notice: #$ISSUE_NUM is $STATE but carried a stale uberdev:active label — auto-pruned" >&2
-        _uberdev_audit_emit claim_released \
-          "{\"issue\":$ISSUE_NUM,\"reason\":\"stale_on_closed\",\"state\":\"$STATE\"}" || true
-      fi
-    fi
     ERRORS+=("#$ISSUE_NUM: state=$STATE (must be OPEN)")
     _vidx=$((_vidx + 1))
     continue
@@ -464,26 +560,31 @@ for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
   else
     TITLE="$TITLE_RAW"
   fi
-  # Tier: $OVERRIDE if the user passed --trivial|--small|--full, else default
-  # "medium" (the safe escalation tier — full brainstorm + plan + review
-  # pipeline). The triage table in solve-pipeline/SKILL.md maps the signals
-  # echoed below onto a tier; pass an explicit override flag to act on them.
-  TIER="${OVERRIDE:-medium}"
-  TIER_SOURCE="default"
-  [[ -n "$OVERRIDE" ]] && TIER_SOURCE="override"
-  # Per-repo tier clamp via uberdev_clamp_tier (solve_tier_floor /
-  # solve_tier_ceiling in .claude/uberdev.local.md; env overrides).
-  if [ -r "${UBERDEV_PLUGIN_ROOT:-}/lib/config-read.sh" ]; then
-    # shellcheck source=/dev/null
-    . "${UBERDEV_PLUGIN_ROOT}/lib/config-read.sh"
-    FLOOR="$(uberdev_read_enum solve_tier_floor   SOLVE_TIER_FLOOR   "trivial|small|medium|large" "")"
-    CEILING="$(uberdev_read_enum solve_tier_ceiling SOLVE_TIER_CEILING "trivial|small|medium|large" "")"
-    TIER="$(uberdev_clamp_tier "$TIER" "$FLOOR" "$CEILING")"
+  # Pure deterministic classification from the exact bounded snapshot.
+  TRIAGE_ARGS=( classify --snapshot "$UBERDEV_TMPDIR/solve-validate-$ISSUE_NUM.json" --secure-root "$UBERDEV_TMPDIR" --expected-issue "$ISSUE_NUM" )
+  if ! TRIAGE_RAW_JSON="$(python3 -I "$_UBERDEV_SOLVE_TRIAGE" "${TRIAGE_ARGS[@]}" 2>&1)"; then
+    ERRORS+=("#$ISSUE_NUM: $TRIAGE_RAW_JSON")
+    _vidx=$((_vidx + 1))
+    continue
   fi
-  # --- Phase A: triage-signal echo (#304) ---
-  # One compact line per validated issue so the triage table's signals
-  # actually reach the deciding model (labels CSV, body size, stack-trace +
-  # file-mention booleans). Zero extra fetches — derived from $ISSUE_JSON.
+  TIER="$(python3 -I -c 'import json,sys; print(json.loads(sys.argv[1])["raw_tier"],end="")' "$TRIAGE_RAW_JSON")"
+  CLAMPED_TIER="$(uberdev_clamp_tier "$TIER" "$FLOOR" "$CEILING")"
+  FINALIZE_ARGS=( finalize --decision "$TRIAGE_RAW_JSON" --clamped "$CLAMPED_TIER" )
+  [[ -z "$OVERRIDE" ]] || FINALIZE_ARGS+=( --override "$OVERRIDE" )
+  if ! TRIAGE_JSON="$(python3 -I "$_UBERDEV_SOLVE_TRIAGE" "${FINALIZE_ARGS[@]}" 2>&1)"; then
+    ERRORS+=("#$ISSUE_NUM: $TRIAGE_JSON")
+    _vidx=$((_vidx + 1))
+    continue
+  fi
+  TIER="$(python3 -I -c 'import json,sys; print(json.loads(sys.argv[1])["tier"],end="")' "$TRIAGE_JSON")"
+  TIER_SOURCE="$(python3 -I -c 'import json,sys; print(json.loads(sys.argv[1])["source"],end="")' "$TRIAGE_JSON")"
+  RISK_JSON="$(python3 -I -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["risk_signals"],separators=(",",":")),end="")' "$TRIAGE_JSON")"
+  TRIAGE_ISSUE="$(python3 -I -c 'import json,sys; print(json.loads(sys.argv[1])["issue"],end="")' "$TRIAGE_JSON")"
+  if [ "$TRIAGE_ISSUE" != "$ISSUE_NUM" ]; then
+    ERRORS+=("#$ISSUE_NUM: triage_issue_mismatch")
+    _vidx=$((_vidx + 1))
+    continue
+  fi
   TRIAGE_LABELS=$(jq -r '[.labels[].name] | join(",")' <<<"$ISSUE_JSON")
   TRIAGE_BODY_CHARS=$(jq -r '.body // "" | length' <<<"$ISSUE_JSON")
   if jq -r '.body // ""' <<<"$ISSUE_JSON" | grep -qE 'Traceback \(most recent call last\)|^[[:space:]]+at .+\(.+:[0-9]+|^[[:space:]]*File "|panic:|stack trace|Stack trace'; then
@@ -495,12 +596,15 @@ for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
   echo "triage: #$ISSUE_NUM tier=$TIER($TIER_SOURCE) labels=[$TRIAGE_LABELS] body_chars=$TRIAGE_BODY_CHARS stack_trace=$TRIAGE_STACK files_mentioned=$TRIAGE_FILES title=\"$TITLE\""
   TIERS[$_vidx]="$TIER"
   TITLES[$_vidx]="$TITLE"
+  RISKS[$_vidx]="$RISK_JSON"
+  TRIAGE_DECISIONS[$_vidx]="$TRIAGE_JSON"
+  rm -f "$UBERDEV_TMPDIR/solve-validate-$ISSUE_NUM.json"
   _vidx=$((_vidx + 1))
 done
 
 if [[ ${#ERRORS[@]} -gt 0 ]]; then
   printf 'error: %s\n' "${ERRORS[@]}" >&2
-  echo "no agents dispatched" >&2
+  echo "no claims written; no agents dispatched" >&2
   exit 1
 fi
 
@@ -538,10 +642,11 @@ _uberdev_audit_emit effort_resolved \
 if [ -r "${UBERDEV_PLUGIN_ROOT:-}/lib/dispatch.sh" ]; then
   # shellcheck source=/dev/null
   . "${UBERDEV_PLUGIN_ROOT}/lib/dispatch.sh"
-  uberdev_dispatch_preflight || exit 1
-  uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1
+  uberdev_dispatch_preflight || { echo "no claims written; no agents dispatched" >&2; exit 1; }
+  uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || { echo "no claims written; no agents dispatched" >&2; exit 1; }
 else
   echo "error: lib/dispatch.sh not found at ${UBERDEV_PLUGIN_ROOT:-}/lib/" >&2
+  echo "no claims written; no agents dispatched" >&2
   exit 1
 fi
 
@@ -554,11 +659,41 @@ if [ "${UBERDEV_RESOLVED_BACKEND:-}" = "codex" ]; then
   if ! command -v codex >/dev/null 2>&1; then
     echo "error: /solve and /turbo resolved to the codex backend but 'codex' is not on PATH" >&2
     echo "       install Codex from https://developers.openai.com/codex or use --backend=claude-bg" >&2
+    echo "no claims written; no agents dispatched" >&2
     exit 1
   fi
 else
-  _uberdev_require_claude_version "2.1.152"
+  if [ "${UBERDEV_DISPATCH_REASONING_EFFORT:-}" = "ultra" ]; then
+    echo "error: --effort=ultra is Codex-only; resolved backend is ${UBERDEV_RESOLVED_BACKEND:-unknown}" >&2
+    echo "no claims written; no agents dispatched" >&2
+    exit 1
+  fi
+  # On Claude-backed providers --effort is the legacy child effort flag, not
+  # an exact Codex route field. Keep EFFORT_LEVEL/EFFORT_FLAG and clear only
+  # the provider-neutral request carrier before route enforceability checks.
+  UBERDEV_DISPATCH_REASONING_EFFORT=""
+  export UBERDEV_DISPATCH_REASONING_EFFORT
+  _uberdev_require_claude_version "2.1.152" || {
+    echo "no claims written; no agents dispatched" >&2
+    exit 1
+  }
 fi
+
+# Resolve every lead route and create its immutable context before the first
+# GitHub claim write. A single unenforceable route aborts the whole batch.
+ROOT_REQUESTS=()
+WORKFLOW=solve
+[[ "$TURBO_OPT" == "1" ]] && WORKFLOW=turbo
+_ridx=0
+for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
+  if ! ROOT_REQUEST="$(uberdev_dispatch_prepare_root "$ISSUE_NUM" "${TIERS[$_ridx]}" "${RISKS[$_ridx]}" "$WORKFLOW" "${TRIAGE_DECISIONS[$_ridx]}")"; then
+    echo "error: #$ISSUE_NUM routing/context validation failed" >&2
+    echo "no claims written; no agents dispatched" >&2
+    exit 1
+  fi
+  ROOT_REQUESTS[$_ridx]="$ROOT_REQUEST"
+  _ridx=$((_ridx + 1))
+done
 
 # ---------------------------------------------------------------------------
 # Step 4.5 — claim protocol: mark issues ACTIVE (v0.28.0; verification NEW)
@@ -916,15 +1051,32 @@ _widx="$wave_start"
 for ISSUE_NUM in "${ISSUE_NUMS[@]:$wave_start:$wave_size}"; do
 TIER="${TIERS[$_widx]}"
 TITLE="${TITLES[$_widx]}"
+UBERDEV_AGENT_PREPARED_REQUEST_JSON="${ROOT_REQUESTS[$_widx]}"
+UBERDEV_AGENT_RISK_SIGNALS_JSON="${RISKS[$_widx]}"
+UBERDEV_AGENT_WORKFLOW="$WORKFLOW"
+UBERDEV_AGENT_TRIAGE_DECISION_JSON="${TRIAGE_DECISIONS[$_widx]}"
+# Root carrier lineage `solve.lead.<tier>` (legacy catalog alias:
+# `solve.issue.lead`). Descendant workflows inherit this closed,
+# immutable pointer/hash tuple and use it to construct handoff JSON for
+# uberdev_dispatch_child; they never reconstruct routing state from prose.
+UBERDEV_RUN_CARRIER_JSON="$(python3 -I -B -c '
+import json,sys
+r=json.loads(sys.argv[1])
+print(json.dumps({"schema_version":1,"run_id":r["run_id"],"workflow":r["workflow"],"issue_num":r["issue_num"],"context_file":r["context_file"],"context_sha256":r["context_sha256"]},sort_keys=True,separators=(",",":")),end="")
+' "$UBERDEV_AGENT_PREPARED_REQUEST_JSON")" || { echo "error: failed to construct solve.lead.$TIER carrier" >&2; exit 2; }
+UBERDEV_ROOT_EDGE_ID="solve.lead.$TIER"
+export UBERDEV_AGENT_PREPARED_REQUEST_JSON UBERDEV_AGENT_RISK_SIGNALS_JSON UBERDEV_AGENT_WORKFLOW UBERDEV_AGENT_TRIAGE_DECISION_JSON UBERDEV_RUN_CARRIER_JSON UBERDEV_ROOT_EDGE_ID
 _widx=$((_widx + 1))
 # DISPATCH_RC + DISPATCH_ID are reset at the top of uberdev_dispatch_one
 # (lib/dispatch.sh central SSOT reset) and documented always-set on return.
 PROMPT_FILE="$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt"
 uberdev_dispatch_one "$ISSUE_NUM" "$TIER" "$PROMPT_FILE"
+unset UBERDEV_AGENT_PREPARED_REQUEST_JSON UBERDEV_RUN_CARRIER_JSON UBERDEV_ROOT_EDGE_ID
 BG_DISPATCH_RC="$DISPATCH_RC"
 BG_SESSION_ID="${DISPATCH_ID:-}"
 
 if [[ "$BG_DISPATCH_RC" -eq 0 ]]; then
+  UBERDEV_KEEP_TMPDIR=1
   # lib/dispatch.sh emitted agent_dispatched with the backend-specific id.
   SPAWNED+=("#$ISSUE_NUM ($TIER, ${UBERDEV_RESOLVED_BACKEND} ${BG_SESSION_ID:-?})")
 else

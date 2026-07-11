@@ -7,7 +7,7 @@
 ## What this gives you
 
 UberDev installs a workflow toolkit into Codex: ~39 **skills** and command-skills
-(in `~/.agents/skills/`) and ~42 **subagents** (in
+(in `~/.agents/skills/`) and 44 **subagents** (in
 `~/.codex/agents/uberdev-*.toml`).
 Skills encode reusable workflows (brainstorm, write-plan, execute-plan, TDD,
 systematic-debugging, PR review, GitHub-issue triage, etc.); subagents are the

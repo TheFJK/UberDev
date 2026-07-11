@@ -4,6 +4,10 @@ name = "uberdev-uberthink-synthesizer"
 description = """
 dispatched by /uberthink — Wave-3 per-island + Wave-6 global combine (lens ∈ weave | crossover | mutate)
 """
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+sandbox_mode = "read-only"
+features.multi_agent = false
 developer_instructions = """
 # Uberthink Synthesizer (Wave 3 / Wave 6)
 

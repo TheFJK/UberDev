@@ -1,0 +1,998 @@
+#!/usr/bin/env bash
+# Process-safe live-session semaphore for UberDev dispatch backends.
+#
+# This file is a library.  It deliberately installs no traps; callers own
+# lifecycle traps because only they know when a backend session is terminal.
+
+_uberdev_semaphore_error() {
+  printf 'uberdev semaphore: %s\n' "$1" >&2
+}
+
+_uberdev_semaphore_is_positive_integer() {
+  case "${1-}" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$1" -gt 0 ] 2>/dev/null
+}
+
+_uberdev_semaphore_safe_text() {
+  local sanitized
+  [ -n "${1-}" ] || return 1
+  sanitized="$(printf '%s' "$1" | tr -d '\r\n')"
+  [ "$sanitized" = "$1" ]
+}
+
+_uberdev_semaphore_is_absolute_path() {
+  case "${1-}" in
+    /*|[A-Za-z]:/*|[A-Za-z]:\\*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_uberdev_semaphore_reject_symlinked_ancestors() {
+  local path remaining current component os_name
+  path="$1"
+  case "$path" in
+    [A-Za-z]:/*|[A-Za-z]:\\*)
+      if command -v cygpath >/dev/null 2>&1; then
+        path="$(cygpath -u "$path")" || return 2
+      else
+        _uberdev_semaphore_error 'cygpath is required for a native-Windows state path'
+        return 2
+      fi
+      ;;
+  esac
+  case "$path" in
+    /*) ;;
+    *) return 2 ;;
+  esac
+  remaining="${path#/}"
+  current=''
+  os_name="$(uname -s 2>/dev/null || true)"
+  while [ -n "$remaining" ]; do
+    case "$remaining" in
+      */*) component="${remaining%%/*}"; remaining="${remaining#*/}" ;;
+      *) component="$remaining"; remaining='' ;;
+    esac
+    [ -n "$component" ] || continue
+    [ "$component" != '..' ] || {
+      _uberdev_semaphore_error 'path traversal component is forbidden'
+      return 2
+    }
+    [ "$component" != '.' ] || continue
+    current="$current/$component"
+    if [ -L "$current" ]; then
+      # macOS exposes these two stable platform roots as compatibility links.
+      if [ "$os_name" = 'Darwin' ] && { [ "$current" = '/var' ] || [ "$current" = '/tmp' ]; }; then
+        continue
+      fi
+      _uberdev_semaphore_error "symlinked path ancestor is forbidden: $current"
+      return 2
+    fi
+    [ -e "$current" ] || break
+  done
+  return 0
+}
+
+_uberdev_semaphore_hash() {
+  local raw digest
+  if command -v shasum >/dev/null 2>&1; then
+    raw="$(printf '%s' "$1" | shasum -a 256)" || {
+      _uberdev_semaphore_error 'SHA-256 digest generation failed'
+      return 2
+    }
+  elif command -v sha256sum >/dev/null 2>&1; then
+    raw="$(printf '%s' "$1" | sha256sum)" || {
+      _uberdev_semaphore_error 'SHA-256 digest generation failed'
+      return 2
+    }
+  else
+    _uberdev_semaphore_error 'SHA-256 utility is unavailable'
+    return 2
+  fi
+  digest="${raw%%[[:space:]]*}"
+  if ! [[ "$digest" =~ ^[0-9a-f]{64}$ ]]; then
+    _uberdev_semaphore_error 'SHA-256 utility returned a malformed digest'
+    return 2
+  fi
+  printf '%s\n' "$digest"
+}
+
+_uberdev_semaphore_pid_live() {
+  local pid
+  pid="${1-}"
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$pid" -gt 0 ] 2>/dev/null || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
+_uberdev_semaphore_write_process_identity() {
+  local mode="$1" destination="$2"
+  command -v python3 >/dev/null 2>&1 || return 2
+  python3 - "$mode" "$destination" <<'PY'
+import ctypes
+import os
+import stat
+import sys
+
+
+def parent_pid(pid: int) -> int:
+    if sys.platform.startswith("linux"):
+        with open(f"/proc/{pid}/stat", "r", encoding="ascii") as handle:
+            raw = handle.read()
+        tail = raw[raw.rfind(")") + 2 :].split()
+        return int(tail[1])
+    if sys.platform == "darwin":
+        class ProcBSDInfo(ctypes.Structure):
+            _fields_ = [
+                ("pbi_flags", ctypes.c_uint32), ("pbi_status", ctypes.c_uint32),
+                ("pbi_xstatus", ctypes.c_uint32), ("pbi_pid", ctypes.c_uint32),
+                ("pbi_ppid", ctypes.c_uint32), ("pbi_uid", ctypes.c_uint32),
+                ("pbi_gid", ctypes.c_uint32), ("pbi_ruid", ctypes.c_uint32),
+                ("pbi_rgid", ctypes.c_uint32), ("pbi_svuid", ctypes.c_uint32),
+                ("pbi_svgid", ctypes.c_uint32), ("pbi_rfu_1", ctypes.c_uint32),
+                ("pbi_comm", ctypes.c_char * 16), ("pbi_name", ctypes.c_char * 32),
+                ("pbi_nfiles", ctypes.c_uint32), ("pbi_pgid", ctypes.c_uint32),
+                ("pbi_pjobc", ctypes.c_uint32), ("e_tdev", ctypes.c_uint32),
+                ("e_tpgid", ctypes.c_uint32), ("pbi_nice", ctypes.c_int32),
+                ("pbi_start_tvsec", ctypes.c_uint64),
+                ("pbi_start_tvusec", ctypes.c_uint64),
+            ]
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        libproc.proc_pidinfo.argtypes = [
+            ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+            ctypes.c_void_p, ctypes.c_int,
+        ]
+        info = ProcBSDInfo()
+        size = ctypes.sizeof(info)
+        if libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), size) != size:
+            raise OSError("proc_pidinfo failed")
+        return int(info.pbi_ppid)
+    raise OSError("unsupported process table")
+
+
+self_pid = os.getppid()
+mode = sys.argv[1]
+if mode == "mutex":
+    result = self_pid
+elif mode == "lease":
+    # The documented API returns through command substitution.  Its stdout is
+    # a pipe, so the logical owner is the shell one level above that helper.
+    result = parent_pid(self_pid) if stat.S_ISFIFO(os.fstat(1).st_mode) else self_pid
+else:
+    raise SystemExit(2)
+if result <= 0:
+    raise SystemExit(2)
+with open(sys.argv[2], "w", encoding="ascii") as handle:
+    handle.write(f"{result}\n")
+PY
+}
+
+_uberdev_semaphore_capture_lease_owner() {
+  local scope="$1" probe old_umask owner
+  if [ -n "${UBERDEV_SEMAPHORE_OWNER_PID:-}" ]; then
+    owner="$UBERDEV_SEMAPHORE_OWNER_PID"
+    if ! _uberdev_semaphore_is_positive_integer "$owner" \
+        || ! _uberdev_semaphore_pid_live "$owner"; then
+      _uberdev_semaphore_error 'UBERDEV_SEMAPHORE_OWNER_PID is not a live process'
+      return 2
+    fi
+    _UBERDEV_SEMAPHORE_LEASE_OWNER_PID="$owner"
+    return 0
+  fi
+  old_umask="$(umask)"
+  umask 077
+  probe="$(mktemp "$scope/.owner-probe.XXXXXX")" || {
+    umask "$old_umask"
+    return 2
+  }
+  umask "$old_umask"
+  if ! _uberdev_semaphore_write_process_identity lease "$probe"; then
+    rm -f "$probe" 2>/dev/null || true
+    return 2
+  fi
+  read -r owner < "$probe" || owner=''
+  rm -f "$probe" 2>/dev/null || return 2
+  _uberdev_semaphore_is_positive_integer "$owner" || return 2
+  _UBERDEV_SEMAPHORE_LEASE_OWNER_PID="$owner"
+  return 0
+}
+
+_uberdev_semaphore_prepare_scope() {
+  local state_root repo_id backend identity scope_hash version_root scope old_umask
+  state_root="${1-}"
+  repo_id="${2-}"
+  backend="${3-}"
+
+  _uberdev_semaphore_is_absolute_path "$state_root" || {
+    _uberdev_semaphore_error 'STATE_ROOT must be absolute'; return 2
+  }
+  case "$state_root" in
+    /|[A-Za-z]:|[A-Za-z]:/|[A-Za-z]:\\)
+      _uberdev_semaphore_error 'STATE_ROOT cannot be filesystem root'
+      return 2
+      ;;
+  esac
+  _uberdev_semaphore_reject_symlinked_ancestors "$state_root" || return 2
+  _uberdev_semaphore_safe_text "$repo_id" || {
+    _uberdev_semaphore_error 'REPO_ID must be non-empty single-line text'
+    return 2
+  }
+  case "$backend" in
+    ''|*[!A-Za-z0-9._-]*)
+      _uberdev_semaphore_error 'BACKEND contains unsafe characters'
+      return 2
+      ;;
+  esac
+  if [ -L "$state_root" ]; then
+    _uberdev_semaphore_error 'STATE_ROOT symlinks are forbidden'
+    return 2
+  fi
+  if [ -e "$state_root" ] && [ ! -d "$state_root" ]; then
+    _uberdev_semaphore_error 'STATE_ROOT must be a directory'
+    return 2
+  fi
+
+  old_umask="$(umask)"
+  umask 077
+  if ! mkdir -p "$state_root"; then
+    umask "$old_umask"
+    _uberdev_semaphore_error 'cannot create STATE_ROOT'
+    return 2
+  fi
+  _uberdev_semaphore_reject_symlinked_ancestors "$state_root" || {
+    umask "$old_umask"
+    return 2
+  }
+  version_root="$state_root/semaphore-v1"
+  if [ -L "$version_root" ]; then
+    umask "$old_umask"
+    _uberdev_semaphore_error 'semaphore version root is a symlink'
+    return 2
+  fi
+  if ! mkdir -p "$version_root"; then
+    umask "$old_umask"
+    _uberdev_semaphore_error 'cannot create semaphore version root'
+    return 2
+  fi
+  chmod 700 "$state_root" "$version_root" 2>/dev/null || {
+    umask "$old_umask"
+    _uberdev_semaphore_error 'cannot make semaphore state private'
+    return 2
+  }
+
+  identity="repo:${#repo_id}:$repo_id|backend:${#backend}:$backend"
+  scope_hash="$(_uberdev_semaphore_hash "$identity")" || {
+    umask "$old_umask"
+    return 2
+  }
+  scope="$version_root/$scope_hash.scope"
+  if [ -L "$scope" ]; then
+    umask "$old_umask"
+    _uberdev_semaphore_error 'semaphore scope is a symlink'
+    return 2
+  fi
+  if [ -e "$scope" ] && [ ! -d "$scope" ]; then
+    umask "$old_umask"
+    _uberdev_semaphore_error 'semaphore scope must be a directory'
+    return 2
+  fi
+  if ! mkdir -p "$scope"; then
+    umask "$old_umask"
+    _uberdev_semaphore_error 'cannot create semaphore scope'
+    return 2
+  fi
+  chmod 700 "$scope" 2>/dev/null || {
+    umask "$old_umask"
+    _uberdev_semaphore_error 'cannot make semaphore scope private'
+    return 2
+  }
+  umask "$old_umask"
+  printf '%s\n' "$scope"
+}
+
+_uberdev_semaphore_path_identity() {
+  local value
+  # GNU stat interprets `-f` as filesystem-report mode and can emit a
+  # colon-bearing report before rejecting the following BSD format operand.
+  # Probe GNU first, fall back to BSD, and validate the complete output before
+  # using it as the load-bearing mutex directory identity.
+  value="$(stat -c '%d:%i' "$1" 2>/dev/null || stat -f '%d:%i' "$1" 2>/dev/null)" || return 2
+  case "$value" in
+    ''|*[!0-9:]*|:*|*:|*:*:*) return 2 ;;
+    *:*) printf '%s\n' "$value" ;;
+    *) return 2 ;;
+  esac
+}
+
+_uberdev_semaphore_quarantine_mutex() {
+  local scope="$1" expected_identity="$2" mutex token_file token quarantine actual entry
+  mutex="$scope/.mutex"
+  token_file="$(mktemp "$scope/.quarantine-id.XXXXXX")" || return 2
+  token="$(basename "$token_file")"
+  rm -f "$token_file" 2>/dev/null || return 2
+  quarantine="$scope/.mutex.quarantine.$token"
+  mv "$mutex" "$quarantine" 2>/dev/null || return 1
+  [ ! -L "$quarantine" ] && [ -d "$quarantine" ] || return 2
+  actual="$(_uberdev_semaphore_path_identity "$quarantine")" || return 2
+  [ "$actual" = "$expected_identity" ] || return 2
+  for entry in "$quarantine"/* "$quarantine"/.[!.]* "$quarantine"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    [ "$(basename "$entry")" = owner_pid ] && [ -f "$entry" ] && [ ! -L "$entry" ] || return 2
+    rm -f "$entry" 2>/dev/null || return 2
+  done
+  rmdir "$quarantine" 2>/dev/null
+}
+
+_uberdev_semaphore_mutex_release() {
+  local scope mutex observed_token identity
+  scope="$1"
+  mutex="$scope/.mutex"
+  [ ! -L "$mutex" ] || return 2
+  if [ ! -d "$mutex" ]; then
+    [ ! -e "$mutex" ] && return 0
+    return 2
+  fi
+  [ -f "$mutex/owner_pid" ] && [ ! -L "$mutex/owner_pid" ] || return 2
+  identity="$(_uberdev_semaphore_path_identity "$mutex")" || return 2
+  [ -n "${_UBERDEV_SEMAPHORE_MUTEX_IDENTITY:-}" ] \
+    && [ "$identity" = "$_UBERDEV_SEMAPHORE_MUTEX_IDENTITY" ] || return 2
+  observed_token="$(sed -n '2p' "$mutex/owner_pid" 2>/dev/null || true)"
+  [ -n "${_UBERDEV_SEMAPHORE_MUTEX_TOKEN:-}" ] \
+    && [ "$observed_token" = "$_UBERDEV_SEMAPHORE_MUTEX_TOKEN" ] || {
+      _uberdev_semaphore_error 'mutex ownership changed before release'
+      return 2
+    }
+  _uberdev_semaphore_quarantine_mutex "$scope" "$identity" || return 2
+  _UBERDEV_SEMAPHORE_MUTEX_TOKEN=''
+  _UBERDEV_SEMAPHORE_MUTEX_IDENTITY=''
+  return 0
+}
+
+_uberdev_semaphore_mutex_reclaim_dead() {
+  local scope mutex allow_reclaim owner observed identity current_identity
+  scope="$1"
+  allow_reclaim="${2:-0}"
+  mutex="$scope/.mutex"
+  [ -e "$mutex" ] || [ -L "$mutex" ] || return 1
+  if [ -L "$mutex" ]; then
+    _uberdev_semaphore_error 'unsafe mutex path'
+    return 2
+  fi
+  if [ ! -d "$mutex" ]; then
+    # The owner may have released between our failed mkdir and inspection.
+    [ ! -e "$mutex" ] && return 1
+    _uberdev_semaphore_error 'unsafe mutex path'
+    return 2
+  fi
+  identity="$(_uberdev_semaphore_path_identity "$mutex")" || return 1
+  [ ! -L "$mutex/owner_pid" ] || {
+    _uberdev_semaphore_error 'unsafe mutex owner path'
+    return 2
+  }
+  if [ ! -e "$mutex/owner_pid" ]; then
+    [ "$allow_reclaim" -eq 1 ] || return 1
+    _uberdev_semaphore_quarantine_mutex "$scope" "$identity"
+    return $?
+  fi
+  if [ ! -f "$mutex/owner_pid" ]; then
+    # A legitimate holder may atomically quarantine this mutex while a new
+    # contender creates its successor between the existence and type checks.
+    # Retry only when that directory generation changed or the owner vanished;
+    # a stable non-regular owner remains a fail-closed path violation.
+    current_identity="$(_uberdev_semaphore_path_identity "$mutex" 2>/dev/null || true)"
+    if [ -z "$current_identity" ] || [ "$current_identity" != "$identity" ] \
+        || [ ! -e "$mutex/owner_pid" ]; then
+      return 1
+    fi
+    _uberdev_semaphore_error 'unsafe mutex owner path'
+    return 2
+  fi
+  owner="$(sed -n '1p' "$mutex/owner_pid" 2>/dev/null || true)"
+  if ! _uberdev_semaphore_is_positive_integer "$owner"; then
+    [ "$allow_reclaim" -eq 1 ] || return 1
+    _uberdev_semaphore_quarantine_mutex "$scope" "$identity"
+    return $?
+  fi
+  _uberdev_semaphore_pid_live "$owner" && return 1
+  [ "$allow_reclaim" -eq 1 ] || return 1
+
+  # Re-read before removal so a changed owner is never reclaimed.
+  observed="$(cat "$mutex/owner_pid" 2>/dev/null || true)"
+  [ "$(printf '%s\n' "$observed" | sed -n '1p')" = "$owner" ] || return 1
+  _uberdev_semaphore_quarantine_mutex "$scope" "$identity"
+}
+
+_uberdev_semaphore_mutex_acquire() {
+  local scope mutex maximum tries old_umask reclaim_rc candidate candidate_name token pause_tries
+  local identity current_identity observed_token
+  scope="$1"
+  mutex="$scope/.mutex"
+  maximum="${UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES:-500}"
+  _uberdev_semaphore_is_positive_integer "$maximum" || maximum=500
+  tries=0
+  while [ "$tries" -lt "$maximum" ]; do
+    old_umask="$(umask)"
+    umask 077
+    candidate="$(mktemp "$scope/.mutex-candidate.XXXXXX")" || {
+      umask "$old_umask"
+      _uberdev_semaphore_error 'cannot create mutex owner candidate'
+      return 2
+    }
+    if ! _uberdev_semaphore_write_process_identity mutex "$candidate"; then
+      umask "$old_umask"
+      rm -f "$candidate" 2>/dev/null || true
+      _uberdev_semaphore_error 'cannot record mutex owner'
+      return 2
+    fi
+    candidate_name="$(basename "$candidate")"
+    token="$(_uberdev_semaphore_hash "mutex:${#candidate_name}:$candidate_name")" || {
+      umask "$old_umask"
+      rm -f "$candidate" 2>/dev/null || true
+      return 2
+    }
+    token="$(printf '%s' "$token" | cut -c 1-32)"
+    printf '%s\n' "$token" >> "$candidate" || {
+      umask "$old_umask"
+      rm -f "$candidate" 2>/dev/null || true
+      return 2
+    }
+    chmod 600 "$candidate" 2>/dev/null || {
+      umask "$old_umask"
+      rm -f "$candidate" 2>/dev/null || true
+      _uberdev_semaphore_error 'cannot protect mutex owner candidate'
+      return 2
+    }
+    if mkdir "$mutex" 2>/dev/null; then
+      identity="$(_uberdev_semaphore_path_identity "$mutex")" || {
+        umask "$old_umask"
+        rm -f "$candidate" 2>/dev/null || true
+        continue
+      }
+      if [ "${UBERDEV_SEMAPHORE_TESTING:-0}" = '1' ] \
+          && [ -n "${UBERDEV_SEMAPHORE_TEST_PAUSE_AFTER_MKDIR:-}" ] \
+          && [ -n "${UBERDEV_SEMAPHORE_TEST_CONTINUE_FILE:-}" ]; then
+        printf 'paused\n' > "$UBERDEV_SEMAPHORE_TEST_PAUSE_AFTER_MKDIR"
+        pause_tries=0
+        while [ ! -e "$UBERDEV_SEMAPHORE_TEST_CONTINUE_FILE" ] \
+            && [ "$pause_tries" -lt 1000 ]; do
+          pause_tries=$((pause_tries + 1))
+          sleep 0.01
+        done
+      fi
+      current_identity="$(_uberdev_semaphore_path_identity "$mutex" 2>/dev/null || true)"
+      if [ "$current_identity" = "$identity" ] \
+          && ln "$candidate" "$mutex/owner_pid" 2>/dev/null \
+          && [ "$candidate" -ef "$mutex/owner_pid" ] \
+          && [ "$(_uberdev_semaphore_path_identity "$mutex" 2>/dev/null || true)" = "$identity" ]; then
+        rm -f "$candidate" 2>/dev/null || {
+          umask "$old_umask"
+          _uberdev_semaphore_error 'cannot retire mutex owner candidate'
+          return 2
+        }
+        _UBERDEV_SEMAPHORE_MUTEX_TOKEN="$token"
+        _UBERDEV_SEMAPHORE_MUTEX_IDENTITY="$identity"
+        umask "$old_umask"
+        return 0
+      fi
+      if [ -f "$mutex/owner_pid" ] && [ ! -L "$mutex/owner_pid" ]; then
+        observed_token="$(sed -n '2p' "$mutex/owner_pid" 2>/dev/null || true)"
+        if [ "$observed_token" = "$token" ]; then
+          current_identity="$(_uberdev_semaphore_path_identity "$mutex" 2>/dev/null || true)"
+          [ -z "$current_identity" ] || _uberdev_semaphore_quarantine_mutex "$scope" "$current_identity" >/dev/null 2>&1 || true
+        fi
+      fi
+      umask "$old_umask"
+      rm -f "$candidate" 2>/dev/null || true
+      tries=$((tries + 1))
+      [ "$tries" -ge "$maximum" ] || sleep 0.01
+      continue
+    fi
+    umask "$old_umask"
+    rm -f "$candidate" 2>/dev/null || return 2
+    _uberdev_semaphore_mutex_reclaim_dead "$scope" 0
+    reclaim_rc=$?
+    [ "$reclaim_rc" -ne 2 ] || return 2
+    if [ "$reclaim_rc" -eq 0 ]; then
+      continue
+    fi
+    tries=$((tries + 1))
+    if [ "$tries" -ge "$maximum" ]; then
+      _uberdev_semaphore_mutex_reclaim_dead "$scope" 1
+      reclaim_rc=$?
+      [ "$reclaim_rc" -ne 2 ] || return 2
+      if [ "$reclaim_rc" -eq 0 ]; then
+        tries=$((maximum - 1))
+        continue
+      fi
+    fi
+    [ "$tries" -ge "$maximum" ] || sleep 0.01
+  done
+  _uberdev_semaphore_error 'mutex retry limit exceeded'
+  return 75
+}
+
+_uberdev_semaphore_validate_lease_path() {
+  local lease scope scope_base version_base lease_base
+  lease="${1-}"
+  _uberdev_semaphore_is_absolute_path "$lease" || {
+    _uberdev_semaphore_error 'LEASE_PATH must be absolute'; return 2
+  }
+  scope="$(dirname "$lease")"
+  scope_base="$(basename "$scope")"
+  version_base="$(basename "$(dirname "$scope")")"
+  lease_base="$(basename "$lease")"
+  printf '%s\n' "$scope_base" | grep -Eq '^[0-9a-f]{64}\.scope$' || {
+    _uberdev_semaphore_error 'LEASE_PATH is outside a semaphore scope'
+    return 2
+  }
+  [ "$version_base" = 'semaphore-v1' ] || {
+    _uberdev_semaphore_error 'LEASE_PATH has the wrong state version'
+    return 2
+  }
+  printf '%s\n' "$lease_base" | grep -Eq '^[0-9a-f]{64}\.lease$' || {
+    _uberdev_semaphore_error 'LEASE_PATH has an unsafe filename'
+    return 2
+  }
+  [ ! -L "$scope" ] && [ -d "$scope" ] || {
+    _uberdev_semaphore_error 'LEASE_PATH scope is unsafe'
+    return 2
+  }
+  if [ -L "$lease" ]; then
+    _uberdev_semaphore_error 'lease symlinks are forbidden'
+    return 2
+  fi
+  if [ -e "$lease" ] && [ ! -f "$lease" ]; then
+    _uberdev_semaphore_error 'lease must be a regular file'
+    return 2
+  fi
+  return 0
+}
+
+_uberdev_semaphore_classify_handle() {
+  local handle numeric
+  handle="${1-}"
+  case "$handle" in
+    '')
+      printf '%s\n' status-only
+      ;;
+    pid:*)
+      numeric="${handle#pid:}"
+      _uberdev_semaphore_is_positive_integer "$numeric" || return 1
+      printf 'pid:%s\n' "$numeric"
+      ;;
+    *[!0-9]*)
+      _uberdev_semaphore_safe_text "$handle" || return 1
+      printf '%s\n' opaque
+      ;;
+    *)
+      _uberdev_semaphore_is_positive_integer "$handle" || return 1
+      printf 'pid:%s\n' "$handle"
+      ;;
+  esac
+}
+
+_uberdev_semaphore_read_lease() {
+  local lease line key value handle_kind
+  local seen_version=0 seen_generation=0 seen_run_id=0 seen_owner_pid=0
+  local seen_backend_handle=0 seen_start_epoch=0 seen_timeout_s=0 seen_status_path=0
+  lease="$1"
+  _UBERDEV_LEASE_VERSION=''
+  _UBERDEV_LEASE_GENERATION=''
+  _UBERDEV_LEASE_RUN_ID=''
+  _UBERDEV_LEASE_OWNER_PID=''
+  _UBERDEV_LEASE_BACKEND_HANDLE=''
+  _UBERDEV_LEASE_START_EPOCH=''
+  _UBERDEV_LEASE_TIMEOUT_S=''
+  _UBERDEV_LEASE_STATUS_PATH=''
+  [ ! -L "$lease" ] && [ -f "$lease" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *=*) ;;
+      *) return 1 ;;
+    esac
+    key="${line%%=*}"
+    value="${line#*=}"
+    case "$key" in
+      version)
+        [ "$seen_version" -eq 0 ] || return 1
+        seen_version=1; _UBERDEV_LEASE_VERSION="$value"
+        ;;
+      generation)
+        [ "$seen_generation" -eq 0 ] || return 1
+        seen_generation=1; _UBERDEV_LEASE_GENERATION="$value"
+        ;;
+      run_id)
+        [ "$seen_run_id" -eq 0 ] || return 1
+        seen_run_id=1; _UBERDEV_LEASE_RUN_ID="$value"
+        ;;
+      owner_pid)
+        [ "$seen_owner_pid" -eq 0 ] || return 1
+        seen_owner_pid=1; _UBERDEV_LEASE_OWNER_PID="$value"
+        ;;
+      backend_handle)
+        [ "$seen_backend_handle" -eq 0 ] || return 1
+        seen_backend_handle=1; _UBERDEV_LEASE_BACKEND_HANDLE="$value"
+        ;;
+      start_epoch)
+        [ "$seen_start_epoch" -eq 0 ] || return 1
+        seen_start_epoch=1; _UBERDEV_LEASE_START_EPOCH="$value"
+        ;;
+      timeout_s)
+        [ "$seen_timeout_s" -eq 0 ] || return 1
+        seen_timeout_s=1; _UBERDEV_LEASE_TIMEOUT_S="$value"
+        ;;
+      status_path)
+        [ "$seen_status_path" -eq 0 ] || return 1
+        seen_status_path=1; _UBERDEV_LEASE_STATUS_PATH="$value"
+        ;;
+      *) return 1 ;;
+    esac
+  done < "$lease"
+  [ "$seen_version$seen_generation$seen_run_id$seen_owner_pid$seen_backend_handle$seen_start_epoch$seen_timeout_s$seen_status_path" = '11111111' ] || return 1
+  [ "$_UBERDEV_LEASE_VERSION" = '1' ] || return 1
+  printf '%s\n' "$_UBERDEV_LEASE_GENERATION" | grep -Eq '^[0-9a-f]{32}$' || return 1
+  case "$(basename "$lease")" in
+    "$_UBERDEV_LEASE_GENERATION"*.lease) ;;
+    *) return 1 ;;
+  esac
+  _uberdev_semaphore_safe_text "$_UBERDEV_LEASE_RUN_ID" || return 1
+  _uberdev_semaphore_is_positive_integer "$_UBERDEV_LEASE_OWNER_PID" || return 1
+  _uberdev_semaphore_is_positive_integer "$_UBERDEV_LEASE_START_EPOCH" || return 1
+  _uberdev_semaphore_is_positive_integer "$_UBERDEV_LEASE_TIMEOUT_S" || return 1
+  handle_kind="$(_uberdev_semaphore_classify_handle "$_UBERDEV_LEASE_BACKEND_HANDLE")" || return 1
+  if [ -n "$_UBERDEV_LEASE_STATUS_PATH" ]; then
+    _uberdev_semaphore_safe_text "$_UBERDEV_LEASE_STATUS_PATH" || return 1
+    _uberdev_semaphore_is_absolute_path "$_UBERDEV_LEASE_STATUS_PATH" || return 1
+  fi
+  [ "$handle_kind" != opaque ] || [ -n "$_UBERDEV_LEASE_STATUS_PATH" ] || return 1
+  return 0
+}
+
+_uberdev_semaphore_manifest_tool() {
+  local library_dir
+  library_dir="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" || return 2
+  printf '%s\n' "$library_dir/run_manifest.py"
+}
+
+_uberdev_semaphore_status_kind() {
+  local status_path manifest_tool output
+  status_path="${1-}"
+  [ -n "$status_path" ] || { printf '%s\n' unknown; return 0; }
+  command -v python3 >/dev/null 2>&1 || return 2
+  manifest_tool="$(_uberdev_semaphore_manifest_tool)" || return 2
+  output="$(python3 "$manifest_tool" probe-status --status-path "$status_path" 2>/dev/null)" || {
+    _uberdev_semaphore_error 'backend status is malformed, ambiguous, or unsafe'
+    return 2
+  }
+  case "$output" in
+    live|terminal|unknown) printf '%s\n' "$output" ;;
+    *) _uberdev_semaphore_error 'backend status probe returned an invalid verdict'; return 2 ;;
+  esac
+}
+
+_uberdev_semaphore_backend_live() {
+  local handle status_kind handle_kind pid
+  handle="${1-}"
+  status_kind="${2-unknown}"
+  # Shared backend-liveness matrix (kept in parity with run_manifest.py):
+  # terminal -> dead; status-only/opaque -> live only from live status;
+  # numeric and pid:<numeric> -> process probe only.
+  [ "$status_kind" != 'terminal' ] || return 1
+  handle_kind="$(_uberdev_semaphore_classify_handle "$handle")" || return 1
+  case "$handle_kind" in
+    status-only|opaque)
+      [ "$status_kind" = 'live' ]
+      return $?
+      ;;
+    pid:*)
+      pid="${handle_kind#pid:}"
+      _uberdev_semaphore_pid_live "$pid"
+      return $?
+      ;;
+  esac
+  return 1
+}
+
+_uberdev_semaphore_reconcile_locked() {
+  local scope now lease status_kind age owner_live backend_live remove
+  scope="$1"
+  now="$(date +%s)"
+  _UBERDEV_SEMAPHORE_REMOVED=0
+  for lease in "$scope"/*.lease; do
+    [ -e "$lease" ] || [ -L "$lease" ] || continue
+    [ ! -L "$lease" ] && [ -f "$lease" ] || {
+      _uberdev_semaphore_error "unsafe lease: $(basename "$lease")"
+      return 2
+    }
+    if ! _uberdev_semaphore_read_lease "$lease"; then
+      _uberdev_semaphore_error "malformed lease: $(basename "$lease")"
+      return 2
+    fi
+    status_kind="$(_uberdev_semaphore_status_kind "$_UBERDEV_LEASE_STATUS_PATH")" || return 2
+    remove=0
+    if [ "$status_kind" = 'terminal' ]; then
+      remove=1
+    else
+      owner_live=0
+      backend_live=0
+      _uberdev_semaphore_pid_live "$_UBERDEV_LEASE_OWNER_PID" && owner_live=1
+      _uberdev_semaphore_backend_live "$_UBERDEV_LEASE_BACKEND_HANDLE" "$status_kind" && backend_live=1
+      age=$((now - _UBERDEV_LEASE_START_EPOCH))
+      [ "$age" -ge 0 ] || age=0
+      if [ "$owner_live" -eq 0 ] && [ "$backend_live" -eq 0 ]; then
+        remove=1
+      elif [ "$age" -gt "$_UBERDEV_LEASE_TIMEOUT_S" ] && [ "$backend_live" -eq 0 ]; then
+        remove=1
+      fi
+    fi
+    if [ "$remove" -eq 1 ]; then
+      if _uberdev_semaphore_remove_lease "$lease" "$_UBERDEV_LEASE_GENERATION"; then
+        _UBERDEV_SEMAPHORE_REMOVED=$((_UBERDEV_SEMAPHORE_REMOVED + 1))
+      else
+        _uberdev_semaphore_error "cannot remove reconciled lease: $(basename "$lease")"
+        return 2
+      fi
+    fi
+  done
+}
+
+_uberdev_semaphore_count_locked() {
+  local scope lease count
+  scope="$1"
+  count=0
+  for lease in "$scope"/*.lease; do
+    [ -f "$lease" ] && [ ! -L "$lease" ] || continue
+    count=$((count + 1))
+  done
+  printf '%s\n' "$count"
+}
+
+_uberdev_semaphore_run_exists_locked() {
+  local scope="$1" run_id="$2" lease
+  for lease in "$scope"/*.lease; do
+    [ -e "$lease" ] || [ -L "$lease" ] || continue
+    [ -f "$lease" ] && [ ! -L "$lease" ] || return 2
+    _uberdev_semaphore_read_lease "$lease" || return 2
+    [ "$_UBERDEV_LEASE_RUN_ID" != "$run_id" ] || return 0
+  done
+  return 1
+}
+
+_uberdev_semaphore_new_lease_path_locked() {
+  local scope="$1" run_id="$2" nonce_file nonce lease_hash lease old_umask attempts
+  attempts=0
+  while [ "$attempts" -lt 3 ]; do
+    old_umask="$(umask)"
+    umask 077
+    nonce_file="$(mktemp "$scope/.lease-id.XXXXXX")" || {
+      umask "$old_umask"
+      return 2
+    }
+    umask "$old_umask"
+    nonce="$(basename "$nonce_file")"
+    rm -f "$nonce_file" 2>/dev/null || return 2
+    lease_hash="$(_uberdev_semaphore_hash "run:${#run_id}:$run_id|nonce:${#nonce}:$nonce")" || return 2
+    lease="$scope/$lease_hash.lease"
+    if [ ! -e "$lease" ] && [ ! -L "$lease" ]; then
+      printf '%s\n' "$lease"
+      return 0
+    fi
+    attempts=$((attempts + 1))
+  done
+  _uberdev_semaphore_error 'cannot allocate unique lease identity'
+  return 2
+}
+
+_uberdev_semaphore_publish_lease() {
+  local scope lease generation run_id owner_pid backend_handle start_epoch timeout_s status_path manifest_tool
+  scope="$1"
+  lease="$2"
+  generation="$(basename "$lease" .lease | cut -c 1-32)"
+  run_id="$3"
+  owner_pid="$4"
+  backend_handle="$5"
+  start_epoch="$6"
+  timeout_s="$7"
+  status_path="$8"
+  manifest_tool="$(_uberdev_semaphore_manifest_tool)" || return 2
+  printf 'version=1\ngeneration=%s\nrun_id=%s\nowner_pid=%s\nbackend_handle=%s\nstart_epoch=%s\ntimeout_s=%s\nstatus_path=%s\n' \
+    "$generation" "$run_id" "$owner_pid" "$backend_handle" "$start_epoch" "$timeout_s" "$status_path" \
+    | python3 "$manifest_tool" secure-write-lease --lease-path "$lease" >/dev/null
+}
+
+_uberdev_semaphore_remove_lease() {
+  local lease="$1" generation="${2-}" manifest_tool
+  if [ -z "$generation" ]; then
+    _uberdev_semaphore_read_lease "$lease" || return 2
+    generation="$_UBERDEV_LEASE_GENERATION"
+  fi
+  manifest_tool="$(_uberdev_semaphore_manifest_tool)" || return 2
+  python3 "$manifest_tool" secure-remove-lease --lease-path "$lease" \
+    --generation "$generation" >/dev/null
+}
+
+uberdev_semaphore_acquire() {
+  local state_root repo_id backend cap run_id timeout_s scope lease active wait_tries wait_max mutex_rc duplicate_rc owner_pid
+  state_root="${1-}"
+  repo_id="${2-}"
+  backend="${3-}"
+  cap="${4-}"
+  run_id="${5-}"
+  timeout_s="${6-}"
+
+  _uberdev_semaphore_is_positive_integer "$cap" || {
+    _uberdev_semaphore_error 'CAP must be a positive integer'
+    return 2
+  }
+  _uberdev_semaphore_is_positive_integer "$timeout_s" || {
+    _uberdev_semaphore_error 'TIMEOUT_S must be a positive integer'
+    return 2
+  }
+  _uberdev_semaphore_safe_text "$run_id" || {
+    _uberdev_semaphore_error 'RUN_ID must be non-empty single-line text'
+    return 2
+  }
+  scope="$(_uberdev_semaphore_prepare_scope "$state_root" "$repo_id" "$backend")" || return $?
+  wait_tries=0
+  wait_max="${UBERDEV_SEMAPHORE_ACQUIRE_MAX_TRIES:-30000}"
+  _uberdev_semaphore_is_positive_integer "$wait_max" || wait_max=30000
+
+  while [ "$wait_tries" -lt "$wait_max" ]; do
+    _uberdev_semaphore_mutex_acquire "$scope"
+    mutex_rc=$?
+    [ "$mutex_rc" -eq 0 ] || return "$mutex_rc"
+    if ! _uberdev_semaphore_reconcile_locked "$scope"; then
+      _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true
+      return 2
+    fi
+    _uberdev_semaphore_run_exists_locked "$scope" "$run_id"
+    duplicate_rc=$?
+    case "$duplicate_rc" in
+      0)
+        _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true
+        _uberdev_semaphore_error 'RUN_ID already owns a live lease'
+        return 73
+        ;;
+      1) ;;
+      *)
+        _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true
+        _uberdev_semaphore_error 'cannot validate leases for duplicate RUN_ID'
+        return 2
+        ;;
+    esac
+    active="$(_uberdev_semaphore_count_locked "$scope")"
+    if [ "$active" -lt "$cap" ]; then
+      lease="$(_uberdev_semaphore_new_lease_path_locked "$scope" "$run_id")" || {
+        _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true
+        return 2
+      }
+      _uberdev_semaphore_capture_lease_owner "$scope" || {
+        _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true
+        _uberdev_semaphore_error 'cannot resolve lease owner process'
+        return 2
+      }
+      owner_pid="$_UBERDEV_SEMAPHORE_LEASE_OWNER_PID"
+      if ! _uberdev_semaphore_publish_lease "$scope" "$lease" "$run_id" "$owner_pid" '' "$(date +%s)" "$timeout_s" ''; then
+        _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true
+        _uberdev_semaphore_error 'cannot publish lease'
+        return 2
+      fi
+      _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || {
+        _uberdev_semaphore_remove_lease "$lease" \
+          "$(basename "$lease" .lease | cut -c 1-32)" >/dev/null 2>&1 || true
+        _uberdev_semaphore_error 'cannot release acquisition mutex'
+        return 2
+      }
+      printf '%s\n' "$lease"
+      return 0
+    fi
+    _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || return 2
+    wait_tries=$((wait_tries + 1))
+    [ "$wait_tries" -ge "$wait_max" ] || sleep 0.02
+  done
+  _uberdev_semaphore_error 'capacity wait limit exceeded'
+  return 75
+}
+
+uberdev_semaphore_set_handle() {
+  local lease backend_handle status_path scope mutex_rc publish_rc handle_kind
+  lease="${1-}"
+  backend_handle="${2-}"
+  status_path="${3-}"
+  _uberdev_semaphore_validate_lease_path "$lease" || return 2
+  [ -f "$lease" ] || {
+    _uberdev_semaphore_error 'lease does not exist'
+    return 2
+  }
+  handle_kind="$(_uberdev_semaphore_classify_handle "$backend_handle")" || {
+    _uberdev_semaphore_error 'BACKEND_HANDLE is invalid'
+    return 2
+  }
+  if [ "$handle_kind" = opaque ] && [ -z "$status_path" ]; then
+    _uberdev_semaphore_error 'opaque BACKEND_HANDLE requires STATUS_PATH'
+    return 2
+  fi
+  if [ -n "$status_path" ]; then
+    _uberdev_semaphore_is_absolute_path "$status_path" || {
+      _uberdev_semaphore_error 'STATUS_PATH must be absolute'; return 2
+    }
+    [ ! -L "$status_path" ] || {
+      _uberdev_semaphore_error 'STATUS_PATH symlinks are forbidden'
+      return 2
+    }
+    if [ -e "$status_path" ] && [ ! -f "$status_path" ]; then
+      _uberdev_semaphore_error 'STATUS_PATH must be a regular file'
+      return 2
+    fi
+    _uberdev_semaphore_safe_text "$status_path" || {
+      _uberdev_semaphore_error 'STATUS_PATH must be single-line'
+      return 2
+    }
+  fi
+  scope="$(dirname "$lease")"
+  _uberdev_semaphore_mutex_acquire "$scope"
+  mutex_rc=$?
+  [ "$mutex_rc" -eq 0 ] || return "$mutex_rc"
+  if [ -L "$lease" ] || [ ! -f "$lease" ] || ! _uberdev_semaphore_read_lease "$lease"; then
+    _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true
+    _uberdev_semaphore_error 'lease changed before handle update'
+    return 2
+  fi
+  _uberdev_semaphore_publish_lease "$scope" "$lease" "$_UBERDEV_LEASE_RUN_ID" \
+    "$_UBERDEV_LEASE_OWNER_PID" "$backend_handle" "$_UBERDEV_LEASE_START_EPOCH" \
+    "$_UBERDEV_LEASE_TIMEOUT_S" "$status_path"
+  publish_rc=$?
+  _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || {
+    [ "$publish_rc" -ne 0 ] || publish_rc=2
+  }
+  [ "$publish_rc" -eq 0 ] || _uberdev_semaphore_error 'cannot update lease handle'
+  return "$publish_rc"
+}
+
+uberdev_semaphore_release() {
+  local lease scope mutex_rc remove_rc
+  lease="${1-}"
+  _uberdev_semaphore_validate_lease_path "$lease" || return 2
+  [ -e "$lease" ] || return 0
+  scope="$(dirname "$lease")"
+  _uberdev_semaphore_mutex_acquire "$scope"
+  mutex_rc=$?
+  [ "$mutex_rc" -eq 0 ] || return "$mutex_rc"
+  remove_rc=0
+  if [ -L "$lease" ]; then
+    remove_rc=2
+  elif [ -e "$lease" ]; then
+    if ! _uberdev_semaphore_read_lease "$lease"; then
+      remove_rc=2
+    else
+      _uberdev_semaphore_remove_lease "$lease" "$_UBERDEV_LEASE_GENERATION" || remove_rc=2
+    fi
+  fi
+  _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || {
+    [ "$remove_rc" -ne 0 ] || remove_rc=2
+  }
+  return "$remove_rc"
+}
+
+uberdev_semaphore_reconcile() {
+  local state_root repo_id backend scope mutex_rc removed release_rc
+  state_root="${1-}"
+  repo_id="${2-}"
+  backend="${3-}"
+  scope="$(_uberdev_semaphore_prepare_scope "$state_root" "$repo_id" "$backend")" || return $?
+  _uberdev_semaphore_mutex_acquire "$scope"
+  mutex_rc=$?
+  [ "$mutex_rc" -eq 0 ] || return "$mutex_rc"
+  if ! _uberdev_semaphore_reconcile_locked "$scope"; then
+    _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true
+    return 2
+  fi
+  removed="$_UBERDEV_SEMAPHORE_REMOVED"
+  _uberdev_semaphore_mutex_release "$scope"
+  release_rc=$?
+  [ "$release_rc" -eq 0 ] || return "$release_rc"
+  printf '%s\n' "$removed"
+}

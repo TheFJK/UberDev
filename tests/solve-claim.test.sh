@@ -273,8 +273,8 @@ assert_grep "$SOLVE_CMD" \
   "small-team issue-claim protocol" \
   "solve.md mentions small-team claim protocol"
 
-echo "== Version bump 0.39.1 -> 0.39.1 propagated =="
-assert_version_bump "$REPO_ROOT" "0.39.1"
+echo "== Version bump 0.39.1 -> 0.40.0 propagated =="
+assert_version_bump "$REPO_ROOT" "0.40.0"
 
 echo "== #123 B1: closing-keyword regex left-anchor (rejects preclose/postfix/unresolve) =="
 # The closing-keyword regex in merge-pipeline Step 3.4 MUST require either start-of-input
@@ -337,18 +337,13 @@ assert_grep "$SOLVE_PIPELINE" \
   "dispatch_failure_rollback_skipped" \
   "B3: claim_released event carries the rollback-skipped reason for audit-log filtering"
 
-echo "== #123 B4: stale-claim sweeper on closed issues (pre-state-reject) =="
-# The sweeper MUST inspect HAS_ACTIVE_LABEL on closed issues BEFORE the
-# state-reject so a stuck label gets pruned even though dispatch refuses.
+echo "== #123 B4: closed-issue validation is mutation-free =="
+assert_grep_not "$SOLVE_PIPELINE" \
+  'CLOSED_HAS_ACTIVE_LABEL=' \
+  "B4: closed-issue validation does not prune a claim before routing/context validation"
 assert_grep "$SOLVE_PIPELINE" \
-  'CLOSED_HAS_ACTIVE_LABEL=\$\(jq -r ' \
-  "B4: sweeper queries .labels for uberdev:active on closed issues"
-assert_grep "$SOLVE_PIPELINE" \
-  'reason\\":\\"stale_on_closed\\"' \
-  "B4: sweeper emits claim_released with reason=stale_on_closed"
-assert_grep "$SOLVE_PIPELINE" \
-  "auto-pruned" \
-  "B4: sweeper emits operator-visible 'auto-pruned' notice on stderr"
+  'no claims written; no agents dispatched' \
+  "B4: validation failures publish exact no-mutation evidence"
 
 echo "== #123 B5: merge-pipeline cleanup clears @me assignee =="
 # Step 3.4 cleanup MUST clear both label AND assignee per linked issue —
@@ -412,7 +407,7 @@ echo "== #123 Phase 2 simplify-lens: Q1 — field-extraction \"?\" fallback bug 
 # conditional-assign only when non-empty (pre-init "?" defaults stay in place).
 assert_grep_not "$SOLVE_PIPELINE" \
   "CLAIM_USER=\\\$\\(printf '%s.n' \"\\\$LATEST_CLAIM_BODY\".* sed 's/\\^User: //'.*\\|\\| echo \"\\?\"" \
-  "Q1: broken `|| echo \"?\"` field-extraction form is gone"
+  "Q1: broken logical-or echo fallback field-extraction form is gone"
 assert_grep "$SOLVE_PIPELINE" \
   "_v=\\\$\\(printf .* \"\\\$LATEST_CLAIM_BODY\" \\| grep -m1 '\\^User: ' +\\| sed 's/\\^User: //'\\); +\\[\\[ -n \"\\\$_v\" \\]\\] && CLAIM_USER=\"\\\$_v\"" \
   "Q1: capture-then-conditional-assign form for CLAIM_USER (pre-init \"?\" default preserved)"
@@ -428,7 +423,7 @@ assert_grep "$SOLVE_PIPELINE" \
 # Constants-table prose update: must NOT still claim the `?` fallback works.
 assert_grep_not "$SOLVE_PIPELINE" \
   "the field-extraction grep tolerates missing fields via the .\\?. fallback" \
-  "Q1: false Constants-table claim about `?` fallback removed"
+  "Q1: false Constants-table claim about question-mark fallback removed"
 # Behavioural test: simulate the bug shape on a real shell. With the
 # old form, an empty grep result leaves the variable EMPTY; with the
 # fix, the pre-init "?" stays in place.
@@ -471,7 +466,7 @@ assert_grep "$SOLVE_PIPELINE" \
 # All four release-reason values are present somewhere in the file (either as a
 # literal payload field for sites still embedded inline, or as a $2 arg to the
 # helper). Lock the canonical set so future churn cannot silently drop one.
-for reason in batch_rollback claim_write_failed dispatch_failure stale_on_closed; do
+for reason in batch_rollback claim_write_failed dispatch_failure; do
   assert_grep "$SOLVE_PIPELINE" \
     "\\b$reason\\b" \
     "S1+E3: claim_released reason='$reason' present in solve-pipeline (helper arg or inline payload)"

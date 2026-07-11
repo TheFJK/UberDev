@@ -196,7 +196,7 @@ STDERR_FILE="$(mktemp)"
 RC=$?
 STDERR_CONTENT="$(cat "$STDERR_FILE")"
 rm -rf "$SANDBOX" "$STDERR_FILE"
-if [[ "$RC" -ne 0 ]] && grep -q "not in {low,medium,high,xhigh,max}" <<<"$STDERR_CONTENT"; then
+if [[ "$RC" -ne 0 ]] && grep -q "not in {low,medium,high,xhigh,max,ultra}" <<<"$STDERR_CONTENT"; then
   pass "R2a: --effort=hgh rejected (rc=$RC, stderr names the enum)"
 else
   fail "R2a: --effort=hgh should exit non-zero and name the enum; rc=$RC stderr=$STDERR_CONTENT"
@@ -218,7 +218,7 @@ STDERR_FILE="$(mktemp)"
 RC=$?
 STDERR_CONTENT="$(cat "$STDERR_FILE")"
 rm -rf "$SANDBOX" "$STDERR_FILE"
-if [[ "$RC" -ne 0 ]] && grep -q "not in {low,medium,high,xhigh,max}" <<<"$STDERR_CONTENT"; then
+if [[ "$RC" -ne 0 ]] && grep -q "not in {low,medium,high,xhigh,max,ultra}" <<<"$STDERR_CONTENT"; then
   pass "R2b: UBERDEV_SOLVE_EFFORT=ludicrous rejected (rc=$RC, stderr names the enum)"
 else
   fail "R2b: invalid env value should exit non-zero and name the enum; rc=$RC stderr=$STDERR_CONTENT"

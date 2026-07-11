@@ -17,8 +17,27 @@ LAUNCHER="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
 PLUGIN_HOOKS="$REPO_ROOT/codex/uberdev-codex/hooks/hooks.json"
 PLUGIN_ROOT="$REPO_ROOT/codex/uberdev-codex"
 CODEX_DISPATCH_LIB="$PLUGIN_ROOT/lib/dispatch.sh"
+AGENT_DISPATCH_LIB="$REPO_ROOT/plugins/uberdev/lib/agent-dispatch.sh"
+CODEX_AGENT_DISPATCH_LIB="$PLUGIN_ROOT/lib/agent-dispatch.sh"
 CODEX_GOAL_LIB="$PLUGIN_ROOT/lib/goal-state.sh"
 CODEX_CONFIG_LIB="$PLUGIN_ROOT/lib/config-read.sh"
+
+# Behavioral fixtures intentionally narrow PATH to stub git/codex. Preserve a
+# validated interpreter argv first so dispatch exercises the real portable
+# resolver contract instead of depending on which Python launcher survives in
+# each fixture directory (notably native Windows runners).
+_UBERDEV_PYTHON_PREFIX=''
+if _UBERDEV_PYTHON_EXE="$(command -v python3 2>/dev/null)" && [ -n "$_UBERDEV_PYTHON_EXE" ]; then
+  :
+elif _UBERDEV_PYTHON_EXE="$(command -v python 2>/dev/null)" && [ -n "$_UBERDEV_PYTHON_EXE" ]; then
+  :
+elif _UBERDEV_PYTHON_EXE="$(command -v py 2>/dev/null)" && [ -n "$_UBERDEV_PYTHON_EXE" ]; then
+  _UBERDEV_PYTHON_PREFIX='-3'
+else
+  echo "error: Python 3 is required for dispatch-codex fixtures" >&2
+  exit 1
+fi
+export _UBERDEV_PYTHON_EXE _UBERDEV_PYTHON_PREFIX
 
 PASS=0
 FAIL=0
@@ -62,6 +81,11 @@ if cmp -s "$DISPATCH_LIB" "$CODEX_DISPATCH_LIB"; then
 else
   fail_msg "packaged Codex dispatch.sh drifted from source runtime lib"
 fi
+if cmp -s "$AGENT_DISPATCH_LIB" "$CODEX_AGENT_DISPATCH_LIB"; then
+  pass_msg "packaged Codex agent-dispatch.sh is byte-identical to source runtime lib"
+else
+  fail_msg "packaged Codex agent-dispatch.sh drifted from source runtime lib"
+fi
 if cmp -s "$GOAL_LIB" "$CODEX_GOAL_LIB"; then
   pass_msg "packaged Codex goal-state.sh is byte-identical to source runtime lib"
 else
@@ -72,6 +96,46 @@ if [ -r "$CODEX_CONFIG_LIB" ]; then
 else
   fail_msg "packaged Codex config-read.sh missing"
 fi
+for relative in lib/config-read.sh lib/model_routing.py lib/run_manifest.py lib/live-semaphore.sh policy/model-routing-v1.json; do
+  if cmp -s "$REPO_ROOT/plugins/uberdev/$relative" "$PLUGIN_ROOT/$relative"; then
+    pass_msg "packaged Codex $relative is byte-identical to canonical runtime"
+  else
+    fail_msg "packaged Codex $relative drifted from canonical runtime"
+  fi
+done
+
+PACKAGE_TMP="$(mktemp -d)"
+cp -R "$PLUGIN_ROOT" "$PACKAGE_TMP/uberdev-codex"
+mkdir -p "$PACKAGE_TMP/home" "$PACKAGE_TMP/codex-home" "$PACKAGE_TMP/outside"
+PACKAGE_SMOKE_LOG="$PACKAGE_TMP/smoke.log"
+if HOME="$PACKAGE_TMP/home" CODEX_HOME="$PACKAGE_TMP/codex-home" PWD="$PACKAGE_TMP" \
+  REPO_SENTINEL="$REPO_ROOT" PACKAGE_COPY="$PACKAGE_TMP/uberdev-codex" OUTSIDE_DIR="$PACKAGE_TMP/outside" \
+  INHERIT_REQUEST='{"backend":"codex","workflow":"solve","role":"plan-writer","task_tier":"medium","risk_signals":[],"routing_mode":"inherit"}' \
+  ADAPTIVE_REQUEST='{"backend":"codex","workflow":"solve","role":"plan-writer","task_tier":"medium","risk_signals":[],"routing_mode":"adaptive"}' \
+  bash -c '
+    set -euo pipefail
+    cd "$OUTSIDE_DIR"
+    . "$PACKAGE_COPY/lib/dispatch.sh"
+    command -v uberdev_read_model_routing >/dev/null
+    uberdev_read_model_routing
+    [ "$UBERDEV_ROUTING_MODE" = inherit ]
+    inherit=$(uberdev_agent_resolve_request "$INHERIT_REQUEST")
+    adaptive=$(uberdev_agent_resolve_request "$ADAPTIVE_REQUEST")
+    python3 -I - "$inherit" "$adaptive" "$PACKAGE_COPY" "$REPO_SENTINEL" <<'''PY'''
+import json, pathlib, sys
+inherit, adaptive = map(json.loads, sys.argv[1:3])
+assert inherit["model"] is None and inherit["reasoning_effort"] is None
+assert adaptive["logical_route"] == "frontier" and adaptive["reasoning_effort"] == "max"
+package, repo = map(pathlib.Path, sys.argv[3:5])
+assert package.resolve() != repo.resolve()
+PY
+    case "$_UBERDEV_AGENT_ROUTER:$_UBERDEV_AGENT_POLICY:$_UBERDEV_AGENT_MANIFEST_TOOL" in *"$REPO_SENTINEL"*) exit 9 ;; esac
+  ' >"$PACKAGE_SMOKE_LOG" 2>&1; then
+  pass_msg "clean copied Codex package is a self-contained routing runtime"
+else
+  fail_msg "clean copied Codex package is a self-contained routing runtime" "$(tail -20 "$PACKAGE_SMOKE_LOG")"
+fi
+rm -rf "$PACKAGE_TMP"
 
 echo "== Enum + probe =="
 assert_grep "$DISPATCH_LIB" \
@@ -131,6 +195,21 @@ assert_grep "$DISPATCH_LIB" \
   '--json' \
   "codex backend passes --json for progress streaming"
 assert_grep "$DISPATCH_LIB" \
+  'model_reasoning_effort=' \
+  "codex backend can pass an explicit reasoning effort override"
+assert_grep "$DISPATCH_LIB" \
+  'service_tier=' \
+  "codex backend always passes the independently resolved service tier"
+assert_grep "$DISPATCH_LIB" \
+  'features\.multi_agent=false' \
+  "codex leaf dispatch disables descendant multi-agent fanout"
+assert_grep "$DISPATCH_LIB" \
+  'agents\.max_depth=0' \
+  "codex leaf dispatch pins agent depth to zero"
+assert_grep "$DISPATCH_LIB" \
+  '< "\$PROMPT_FILE"' \
+  "codex backend redirects the validated prompt file to stdin"
+assert_grep "$DISPATCH_LIB" \
   'nohup' \
   "codex backend detaches via nohup (same as background)"
 assert_grep "$DISPATCH_LIB" \
@@ -155,8 +234,8 @@ assert_grep "$DISPATCH_LIB" \
   '"backend":"codex"' \
   "codex backend status-file + audit payload carries backend=codex"
 assert_grep "$DISPATCH_LIB" \
-  'WRAPPER_PID="\$\$"' \
-  "codex wrapper uses its own numeric shell PID for status"
+  'WRAPPER_PID="\$\{UBERDEV_WRAPPER_PID:-\$\$\}"' \
+  "codex wrapper status uses the detached supervisor PID with a shell-PID fallback"
 
 echo "== Codex backend does NOT thread claude-specific flags =="
 CODEX_BODY="$(extract_function_body '_uberdev_dispatch_codex' "$DISPATCH_LIB")"
@@ -166,11 +245,11 @@ if printf '%s\n' "$CODEX_BODY" | grep -qE '\<(PERM_FLAG|EFFORT_FLAG|claude -p)\>
 else
   pass_msg "codex backend body does not reference Claude-only flags or claude -p"
 fi
-if printf '%s\n' "$CODEX_BODY" | grep -qF 'WRAPPER_PID="$$"' \
+if printf '%s\n' "$CODEX_BODY" | grep -qF 'WRAPPER_PID="${UBERDEV_WRAPPER_PID:-$$}"' \
    && ! printf '%s\n' "$CODEX_BODY" | grep -qF 'kill -0 "$DISPATCH_ID"'; then
-  pass_msg "codex backend status contract tracks wrapper pid instead of parent-side liveness probing"
+  pass_msg "codex backend status contract tracks the detached supervisor instead of parent-side liveness probing"
 else
-  fail_msg "codex backend status contract tracks wrapper pid instead of parent-side liveness probing"
+  fail_msg "codex backend status contract tracks the detached supervisor instead of parent-side liveness probing"
 fi
 
 echo "== goal-state backend-awareness =="
@@ -233,8 +312,8 @@ if bash "$LAUNCHER" --auto-mode=0 -- --backend=codex >"$PARSER_OUT" 2>&1; then
   echo "  FAIL  parser-only invocation should exit with usage when no issue is supplied"; FAIL=$((FAIL + 1))
 elif grep -q "not in {auto,claude-bg,wezterm,background" "$PARSER_OUT"; then
   echo "  FAIL  public launcher rejected --backend=codex"; cat "$PARSER_OUT"; FAIL=$((FAIL + 1))
-elif grep -q "Usage:" "$PARSER_OUT"; then
-  echo "  PASS  public launcher parser accepts --backend=codex before usage check"; PASS=$((PASS + 1))
+elif grep -q "routing_cli_invalid_issue" "$PARSER_OUT"; then
+  echo "  PASS  public launcher parser accepts --backend=codex and then rejects the missing issue"; PASS=$((PASS + 1))
 else
   echo "  FAIL  public launcher parser produced unexpected output"; cat "$PARSER_OUT"; FAIL=$((FAIL + 1))
 fi
@@ -389,6 +468,8 @@ out=""
   for arg in "$@"; do printf ' [%s]' "$arg"; done
   printf '\nUBERDEV_TURBO=%s\n' "${UBERDEV_TURBO:-}"
 } >> "$CODEX_CAPTURE"
+IFS= read -r stdin_body || true
+printf 'stdin=%s\n' "$stdin_body" >> "$CODEX_CAPTURE"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
@@ -412,29 +493,58 @@ BEH_OUT="$(
     _uberdev_dispatch_codex 42 small "$2"
     rc=$?
     pid="${DISPATCH_ID:-}"
-    i=0
-    while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 5 ]; do
-      sleep 1
-      i=$((i + 1))
+    status_file="$UBERDEV_TMPDIR/solve-codex-status-42.json"
+    i=0; running=""
+    while [ "$i" -lt 200 ]; do
+      running="$(cat "$status_file" 2>/dev/null)"
+      [[ "$running" == *\"state\":\"running\"* ]] && break
+      sleep 0.025; i=$((i + 1))
     done
-    printf "rc=%s\npid=%s\n" "$rc" "$pid"
+    i=0
+    while [ "$i" -lt 400 ]; do
+      terminal="$(cat "$status_file" 2>/dev/null)"
+      case "$terminal" in
+        *\"state\":\"completed\"*|*\"state\":\"failed\"*) break ;;
+      esac
+      sleep 0.025; i=$((i + 1))
+    done
+    i=0
+    while [ -n "$pid" ] && _uberdev_dispatch_wait_owned_session "$pid" && [ "$i" -lt 200 ]; do
+      sleep 0.025; i=$((i + 1))
+    done
+    printf "rc=%s\npid=%s\nrunning=%s\n" "$rc" "$pid" "$running"
     printf "status=%s\n" "$(cat "$UBERDEV_TMPDIR/solve-codex-status-42.json" 2>/dev/null)"
     printf "result=%s\n" "$(cat "$UBERDEV_TMPDIR/solve-codex-result-42.md" 2>/dev/null)"
   ' _ "$DISPATCH_LIB" "$BEH_TMP/prompt.txt"
 )"
-case "$BEH_OUT" in
-  *'rc=0'*'"state":"completed"'*'"exit_code":0'*'result=codex final result'*)
-    pass_msg "codex dispatch writes completed status with exit_code and result after stub exits" ;;
-  *)
-    fail_msg "codex dispatch writes completed status with exit_code and result after stub exits" "$BEH_OUT" ;;
-esac
+beh_pid="$(printf '%s\n' "$BEH_OUT" | sed -n 's/^pid=//p')"
+if [ -n "$beh_pid" ] \
+    && printf '%s\n' "$BEH_OUT" | grep -Fq 'rc=0' \
+    && printf '%s\n' "$BEH_OUT" | grep -Fq 'running=' \
+    && printf '%s\n' "$BEH_OUT" | grep -Fq '"state":"running"' \
+    && printf '%s\n' "$BEH_OUT" | grep -Fq "\"pid\":\"$beh_pid\"" \
+    && printf '%s\n' "$BEH_OUT" | grep -Fq 'status=' \
+    && printf '%s\n' "$BEH_OUT" | grep -Fq '"state":"completed"' \
+    && printf '%s\n' "$BEH_OUT" | grep -Fq '"exit_code":0' \
+    && printf '%s\n' "$BEH_OUT" | grep -Fq 'result=codex final result'; then
+  pass_msg "codex delayed running and terminal receipts retain the dispatch PID"
+else
+  fail_msg "codex dispatch publishes running then completed status and result" "$BEH_OUT"
+fi
 if grep -Fq -- 'argv: [--ask-for-approval] [never] [exec]' "$BEH_TMP/codex-capture.txt" \
    && grep -Fq -- '--sandbox] [workspace-write]' "$BEH_TMP/codex-capture.txt" \
+   && grep -Fq -- '[-m] [gpt-5.6-sol]' "$BEH_TMP/codex-capture.txt" \
+   && grep -Fq -- '[-c] [model_reasoning_effort="medium"]' "$BEH_TMP/codex-capture.txt" \
+   && grep -Fq -- '[-c] [service_tier="default"]' "$BEH_TMP/codex-capture.txt" \
+   && grep -Fq -- '[-c] [features.multi_agent=false]' "$BEH_TMP/codex-capture.txt" \
+   && grep -Fq -- '[-c] [agents.max_depth=0]' "$BEH_TMP/codex-capture.txt" \
+   && grep -Fq -- '[--json] [-o]' "$BEH_TMP/codex-capture.txt" \
+   && grep -Fq -- '[-]' "$BEH_TMP/codex-capture.txt" \
    && grep -Fq -- 'UBERDEV_TURBO=1' "$BEH_TMP/codex-capture.txt" \
-   && grep -Fq -- '[prompt body for codex]' "$BEH_TMP/codex-capture.txt"; then
-  pass_msg "codex dispatch passes approval policy before exec plus sandbox, turbo env, and prompt body"
+   && grep -Fq -- 'stdin=prompt body for codex' "$BEH_TMP/codex-capture.txt"; then
+  pass_msg "codex dispatch passes exact routed leaf argv and prompt on stdin"
 else
-  fail_msg "codex dispatch passes approval policy before exec plus sandbox, turbo env, and prompt body" \
+  fail_msg "codex dispatch passes exact routed leaf argv and prompt on stdin" \
     "$(cat "$BEH_TMP/codex-capture.txt" 2>/dev/null)"
 fi
 if printf '%s\n' "$BEH_OUT" | grep -Eq '"pid":"[0-9]+"'; then
@@ -443,6 +553,64 @@ else
   fail_msg "codex dispatch status pid is numeric" "$BEH_OUT"
 fi
 rm -rf "$BEH_TMP"
+
+echo "== Codex inherit carrier omits model and effort pins =="
+INHERIT_TMP="$(mktemp -d)"
+mkdir -p "$INHERIT_TMP/bin" "$INHERIT_TMP/repo" "$INHERIT_TMP/tmp"
+cat > "$INHERIT_TMP/bin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "worktree" ] && [ "$2" = "add" ]; then mkdir -p "$3"; exit 0; fi
+exit 1
+SH
+cat > "$INHERIT_TMP/bin/codex" <<'SH'
+#!/usr/bin/env bash
+{
+  printf 'argv:'
+  for arg in "$@"; do printf ' [%s]' "$arg"; done
+  printf '\n'
+} > "$CODEX_CAPTURE"
+IFS= read -r body || true
+printf 'stdin=%s\n' "$body" >> "$CODEX_CAPTURE"
+exit 0
+SH
+chmod +x "$INHERIT_TMP/bin/git" "$INHERIT_TMP/bin/codex"
+printf 'inherit prompt' > "$INHERIT_TMP/prompt.txt"
+(
+  cd "$INHERIT_TMP/repo"
+  PATH="$INHERIT_TMP/bin:/usr/bin:/bin" UBERDEV_TMPDIR="$INHERIT_TMP/tmp" \
+    UBERDEV_AGENT_ROUTING_MODE=inherit UBERDEV_AGENT_SERVICE_TIER=fast CODEX_CAPTURE="$INHERIT_TMP/capture.txt" \
+    bash -c '. "$1"; _uberdev_dispatch_codex 43 small "$2"; pid=$DISPATCH_ID; i=0; while [ "$i" -lt 400 ]; do status="$(cat "$UBERDEV_TMPDIR/solve-codex-status-43.json" 2>/dev/null)"; case "$status" in *\"state\":\"completed\"*|*\"state\":\"failed\"*) break ;; esac; sleep 0.025; i=$((i+1)); done; i=0; while _uberdev_dispatch_wait_owned_session "$pid" && [ "$i" -lt 200 ]; do sleep 0.025; i=$((i+1)); done' \
+    _ "$DISPATCH_LIB" "$INHERIT_TMP/prompt.txt"
+)
+if grep -Fq -- '[-m]' "$INHERIT_TMP/capture.txt" \
+   || grep -Fq -- 'model_reasoning_effort=' "$INHERIT_TMP/capture.txt"; then
+  fail_msg "inherit Codex carrier omits model and reasoning pins" "$(cat "$INHERIT_TMP/capture.txt")"
+elif grep -Fq -- '[-c] [service_tier="fast"]' "$INHERIT_TMP/capture.txt" \
+   && grep -Fq -- 'stdin=inherit prompt' "$INHERIT_TMP/capture.txt"; then
+  pass_msg "inherit Codex carrier omits model and reasoning pins"
+else
+  fail_msg "inherit Codex carrier preserves independent service tier and stdin" "$(cat "$INHERIT_TMP/capture.txt")"
+fi
+
+rm -f "$INHERIT_TMP/capture.txt"
+(
+  cd "$INHERIT_TMP/repo"
+  PATH="$INHERIT_TMP/bin:/usr/bin:/bin" UBERDEV_TMPDIR="$INHERIT_TMP/tmp" \
+    UBERDEV_AGENT_ROUTING_MODE=shadow UBERDEV_AGENT_EFFECTIVE_POLICY=inherit \
+    UBERDEV_AGENT_ROUTE_MODEL=gpt-5.6-sol UBERDEV_AGENT_ROUTE_EFFORT=medium \
+    UBERDEV_AGENT_SERVICE_TIER=fast CODEX_CAPTURE="$INHERIT_TMP/capture.txt" \
+    bash -c '. "$1"; _uberdev_dispatch_codex 44 small "$2"; pid=$DISPATCH_ID; i=0; while [ "$i" -lt 400 ]; do status="$(cat "$UBERDEV_TMPDIR/solve-codex-status-44.json" 2>/dev/null)"; case "$status" in *\"state\":\"completed\"*|*\"state\":\"failed\"*) break ;; esac; sleep 0.025; i=$((i+1)); done; i=0; while _uberdev_dispatch_wait_owned_session "$pid" && [ "$i" -lt 200 ]; do sleep 0.025; i=$((i+1)); done' \
+    _ "$DISPATCH_LIB" "$INHERIT_TMP/prompt.txt"
+)
+if grep -Fq -- '[-m]' "$INHERIT_TMP/capture.txt" \
+   || grep -Fq -- 'model_reasoning_effort=' "$INHERIT_TMP/capture.txt"; then
+  fail_msg "shadow Codex carrier executes inherit without model and reasoning pins" "$(cat "$INHERIT_TMP/capture.txt")"
+elif grep -Fq -- '[-c] [service_tier="fast"]' "$INHERIT_TMP/capture.txt"; then
+  pass_msg "shadow Codex carrier executes inherit without model and reasoning pins"
+else
+  fail_msg "shadow Codex carrier preserves independent service tier" "$(cat "$INHERIT_TMP/capture.txt")"
+fi
+rm -rf "$INHERIT_TMP"
 
 echo "== _uberdev_dispatch_codex failure and delayed-wrapper behavior =="
 FAIL_TMP="$(mktemp -d)"
@@ -479,7 +647,13 @@ FAIL_OUT="$(
     rc=$?
     pid="${DISPATCH_ID:-}"
     i=0
-    while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 5 ]; do sleep 1; i=$((i + 1)); done
+    while [ "$i" -lt 400 ]; do
+      status="$(cat "$UBERDEV_TMPDIR/solve-codex-status-42.json" 2>/dev/null)"
+      case "$status" in *\"state\":\"completed\"*|*\"state\":\"failed\"*) break ;; esac
+      sleep 0.025; i=$((i + 1))
+    done
+    i=0
+    while [ -n "$pid" ] && _uberdev_dispatch_wait_owned_session "$pid" && [ "$i" -lt 200 ]; do sleep 0.025; i=$((i + 1)); done
     printf "rc=%s\nstatus=%s\nresult=%s\n" "$rc" "$(cat "$UBERDEV_TMPDIR/solve-codex-status-42.json" 2>/dev/null)" "$(cat "$UBERDEV_TMPDIR/solve-codex-result-42.md" 2>/dev/null)"
   ' _ "$DISPATCH_LIB" "$FAIL_TMP/prompt.txt"
 )"
@@ -490,6 +664,100 @@ case "$FAIL_OUT" in
     fail_msg "codex dispatch records failed child status without treating dispatch as failed" "$FAIL_OUT" ;;
 esac
 rm -rf "$FAIL_TMP"
+
+echo "== _uberdev_dispatch_codex immediate terminal handoff =="
+unix_ps_pattern='ps -o ''stat= -p'
+if grep -Fq "$unix_ps_pattern" "$0"; then
+  fail_msg "Codex fixtures avoid Unix-only process-table polling"
+else
+  pass_msg "Codex fixtures await canonical terminal evidence portably"
+fi
+IMMEDIATE_ACCEPT_BODY="$(extract_function_body _uberdev_dispatch_accept_immediate_terminal "$DISPATCH_LIB")"
+if printf '%s\n' "$IMMEDIATE_ACCEPT_BODY" | grep -Fq 'if os.name=="nt"' \
+   && printf '%s\n' "$IMMEDIATE_ACCEPT_BODY" | grep -Fq 'os.kill(int(pid),0)'; then
+  pass_msg "immediate-terminal liveness uses native Windows PID probing"
+else
+  fail_msg "immediate-terminal liveness uses native Windows PID probing"
+fi
+IMMEDIATE_TMP="$(mktemp -d)"
+mkdir -p "$IMMEDIATE_TMP/bin" "$IMMEDIATE_TMP/repo" "$IMMEDIATE_TMP/tmp"
+cat > "$IMMEDIATE_TMP/bin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = worktree ] && [ "$2" = add ]; then mkdir -p "$3"; exit 0; fi
+exit 1
+SH
+cat > "$IMMEDIATE_TMP/bin/codex" <<'SH'
+#!/usr/bin/env bash
+out=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) out="$2"; shift 2 ;; *) shift ;; esac
+done
+body="$(cat)"
+printf 'immediate %s result\n' "$body" > "$out"
+case "$body" in *failed*) exit 19 ;; *) exit 0 ;; esac
+SH
+chmod +x "$IMMEDIATE_TMP/bin/git" "$IMMEDIATE_TMP/bin/codex"
+IMMEDIATE_OUT="$(
+  cd "$IMMEDIATE_TMP/repo" &&
+  PATH="$IMMEDIATE_TMP/bin:/usr/bin:/bin" UBERDEV_TMPDIR="$IMMEDIATE_TMP/tmp" \
+  /bin/bash -c '
+    . "$1"
+    # Force the real launcher into the already-terminal branch without an
+    # artificial sleep: wait reaps the exact wrapper before reporting that its
+    # owned session can no longer be observed.
+    _uberdev_dispatch_wait_owned_session() {
+      local status i=0
+      while [ "$i" -lt 400 ]; do
+        status="$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)"
+        case "$status" in *\"state\":\"completed\"*|*\"state\":\"failed\"*) return 1 ;; esac
+        sleep 0.025; i=$((i + 1))
+      done
+      return 0
+    }
+    failures=0; details=""
+    for outcome in completed failed completed failed completed failed; do
+      issue=$((issue + 1))
+      printf "%s\n" "$outcome" > "$UBERDEV_TMPDIR/prompt-$issue.txt"
+      UBERDEV_AGENT_STATUS_FILE="$UBERDEV_TMPDIR/status-$issue.json"
+      UBERDEV_AGENT_RESULT_FILE="$UBERDEV_TMPDIR/result-$issue.md"
+      export UBERDEV_AGENT_STATUS_FILE UBERDEV_AGENT_RESULT_FILE
+      _uberdev_dispatch_codex "$issue" small "$UBERDEV_TMPDIR/prompt-$issue.txt"
+      rc=$?
+      status="$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)"
+      case "$outcome:$rc:$DISPATCH_ID:$status" in
+        completed:0:*:*\"state\":\"completed\"*\"exit_code\":0*) ;;
+        failed:0:*:*\"state\":\"failed\"*\"exit_code\":19*) ;;
+        *) failures=$((failures + 1)); details="$details outcome=$outcome rc=$rc pid=${DISPATCH_ID:-none} status=$status" ;;
+      esac
+      [ -n "${DISPATCH_ID:-}" ] || failures=$((failures + 1))
+      [[ "$status" == *\"pid\":\"$DISPATCH_ID\"* ]] || failures=$((failures + 1))
+    done
+    terminal_pid="$DISPATCH_ID"
+    ! _uberdev_dispatch_accept_immediate_terminal background "$terminal_pid" "$UBERDEV_AGENT_STATUS_FILE" "$UBERDEV_AGENT_RESULT_FILE" >/dev/null 2>&1 || failures=$((failures + 1))
+    ! _uberdev_dispatch_accept_immediate_terminal codex "$((terminal_pid + 1))" "$UBERDEV_AGENT_STATUS_FILE" "$UBERDEV_AGENT_RESULT_FILE" >/dev/null 2>&1 || failures=$((failures + 1))
+    # Publish the native process PID explicitly. On Git Bash, `$!` is an MSYS
+    # namespace handle while the production liveness probe uses native Windows
+    # PIDs, so a plain `sleep &` would test the wrong namespace.
+    live_pid_file="$UBERDEV_TMPDIR/live-native.pid"
+    _uberdev_dispatch_python -I -c '\''import os,sys,time
+with open(sys.argv[1],"w",encoding="ascii") as handle:
+ handle.write(str(os.getpid())); handle.flush(); os.fsync(handle.fileno())
+time.sleep(30)'\'' "$live_pid_file" &
+    live_launch_pid=$!
+    i=0; while [ ! -s "$live_pid_file" ] && [ "$i" -lt 200 ]; do sleep 0.025; i=$((i + 1)); done
+    live_pid="$(cat "$live_pid_file" 2>/dev/null)"
+    printf "{\"backend\":\"codex\",\"state\":\"completed\",\"exit_code\":0,\"pid\":\"%s\"}\n" "$live_pid" > "$UBERDEV_AGENT_STATUS_FILE"
+    ! _uberdev_dispatch_accept_immediate_terminal codex "$live_pid" "$UBERDEV_AGENT_STATUS_FILE" "$UBERDEV_AGENT_RESULT_FILE" >/dev/null 2>&1 || failures=$((failures + 1))
+    _uberdev_dispatch_python -I -c '\''import os,signal,sys; os.kill(int(sys.argv[1]),signal.SIGTERM)'\'' "$live_pid" 2>/dev/null || true
+    wait "$live_launch_pid" 2>/dev/null || true
+    printf "failures=%s%s\n" "$failures" "$details"
+  ' _ "$DISPATCH_LIB"
+)"
+case "$IMMEDIATE_OUT" in
+  *'failures=0'*) pass_msg "codex preserves exact handles for repeated immediate completed and failed terminals" ;;
+  *) fail_msg "codex preserves exact handles for repeated immediate completed and failed terminals" "$IMMEDIATE_OUT" ;;
+esac
+rm -rf "$IMMEDIATE_TMP"
 
 RACE_TMP="$(mktemp -d)"
 mkdir -p "$RACE_TMP/bin" "$RACE_TMP/repo" "$RACE_TMP/tmp"
@@ -538,7 +806,13 @@ RACE_OUT="$(
     rc=$?
     pid="${DISPATCH_ID:-}"
     i=0
-    while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 5 ]; do sleep 1; i=$((i + 1)); done
+    while [ "$i" -lt 400 ]; do
+      status="$(cat "$UBERDEV_TMPDIR/solve-codex-status-42.json" 2>/dev/null)"
+      case "$status" in *\"state\":\"completed\"*|*\"state\":\"failed\"*) break ;; esac
+      sleep 0.025; i=$((i + 1))
+    done
+    i=0
+    while [ -n "$pid" ] && _uberdev_dispatch_wait_owned_session "$pid" && [ "$i" -lt 200 ]; do sleep 0.025; i=$((i + 1)); done
     printf "rc=%s\npid=%s\nstatus=%s\nresult=%s\n" "$rc" "$pid" "$(cat "$UBERDEV_TMPDIR/solve-codex-status-42.json" 2>/dev/null)" "$(cat "$UBERDEV_TMPDIR/solve-codex-result-42.md" 2>/dev/null)"
   ' _ "$DISPATCH_LIB" "$RACE_TMP/prompt.txt"
 )"

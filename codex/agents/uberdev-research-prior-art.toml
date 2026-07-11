@@ -4,6 +4,10 @@ name = "uberdev-research-prior-art"
 description = """
 External prior-art research subagent. Web search + Context7 docs lookup for libraries, frameworks, or design patterns relevant to the issue. Distinct from research-patterns (in-repo) — this is the outside view.
 """
+model = "gpt-5.6-terra"
+model_reasoning_effort = "medium"
+sandbox_mode = "read-only"
+features.multi_agent = false
 developer_instructions = """
 # Research Prior Art
 

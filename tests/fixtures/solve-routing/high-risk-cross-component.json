@@ -1,0 +1,1 @@
+{"number":5,"title":"Prevent authorization race","state":"OPEN","body":"Authorization and concurrency changes span auth/session.py and api/permissions.py.","labels":[{"name":"security"}],"assignees":[],"comments":[]}

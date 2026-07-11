@@ -96,11 +96,20 @@ def codex_port_text(value: str) -> str:
     Codex.
     """
     codex_plugin_root = "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}"
+    claude_with_codex_fallback = (
+        "${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}"
+        "/plugins/uberdev-codex}}"
+    )
+    neutral_plugin_root = "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
+    normalized_neutral_root = "${PLUGIN_ROOT:-${PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
     codex_config_path = "__UBERDEV_CODEX_CONFIG_PATH__"
     claude_config_fallback = "__UBERDEV_CLAUDE_CONFIG_FALLBACK__"
     ported = (
-        value.replace("`.claude/uberdev.local.md`", f"`{codex_config_path}` (falling back to `{claude_config_fallback}`)")
+        value.replace(claude_with_codex_fallback, codex_plugin_root)
+        .replace(neutral_plugin_root, codex_plugin_root)
+        .replace("`.claude/uberdev.local.md`", f"`{codex_config_path}` (falling back to `{claude_config_fallback}`)")
         .replace("CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT")
+        .replace(normalized_neutral_root, codex_plugin_root)
         .replace('"$PLUGIN_ROOT/', f'"{codex_plugin_root}/')
         .replace('"${PLUGIN_ROOT}/', f'"{codex_plugin_root}/')
         .replace(".claude/uberdev.local.md", ".codex/uberdev.local.md")

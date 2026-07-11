@@ -1,0 +1,427 @@
+{
+  "schema_version": 1,
+  "policy_version": "2026-07-09",
+  "release_default_mode": "inherit",
+  "default_sandbox": "workspace-write",
+  "routes": {
+    "economy": {
+      "rank": 0,
+      "codex": {
+        "model": "gpt-5.6-luna",
+        "reasoning_effort": "low",
+        "service_tier": "default"
+      }
+    },
+    "standard": {
+      "rank": 1,
+      "codex": {
+        "model": "gpt-5.6-terra",
+        "reasoning_effort": "medium",
+        "service_tier": "default"
+      }
+    },
+    "quality": {
+      "rank": 2,
+      "codex": {
+        "model": "gpt-5.6-sol",
+        "reasoning_effort": "medium",
+        "service_tier": "default"
+      }
+    },
+    "deep": {
+      "rank": 3,
+      "codex": {
+        "model": "gpt-5.6-sol",
+        "reasoning_effort": "high",
+        "service_tier": "default"
+      }
+    },
+    "frontier": {
+      "rank": 4,
+      "codex": {
+        "model": "gpt-5.6-sol",
+        "reasoning_effort": "max",
+        "service_tier": "default"
+      }
+    },
+    "ultra": {
+      "rank": 5,
+      "codex": {
+        "model": "gpt-5.6-sol",
+        "reasoning_effort": "ultra",
+        "service_tier": "default"
+      }
+    }
+  },
+  "aliases": {
+    "luna": "economy",
+    "terra": "standard",
+    "sol": "quality",
+    "sol-high": "deep",
+    "sol-max": "frontier",
+    "sol-ultra": "ultra"
+  },
+  "lead_routes": {
+    "trivial": {
+      "default": "standard",
+      "high_risk": "deep"
+    },
+    "small": {
+      "default": "standard",
+      "high_risk": "deep"
+    },
+    "medium": {
+      "default": "quality",
+      "high_risk": "frontier"
+    },
+    "large": {
+      "default": "frontier",
+      "high_risk": "ultra"
+    }
+  },
+  "high_risk_floor": "deep",
+  "risk_signals": [
+    "authentication",
+    "authorization",
+    "concurrency",
+    "cryptography",
+    "data-loss",
+    "destructive-operations",
+    "force-push",
+    "public-api-compatibility",
+    "release-infrastructure",
+    "schema-migration",
+    "security"
+  ],
+  "fallback_order": [
+    "ultra",
+    "frontier",
+    "deep",
+    "quality",
+    "standard",
+    "economy"
+  ],
+  "delegation_contracts": {
+    "leaf": {
+      "features_multi_agent": false,
+      "agents_max_depth": 0
+    }
+  },
+  "roles": {
+    "ci-code-fixer": {
+      "route": "deep",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "workspace-write",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "ci-failure-classifier": {
+      "route": "economy",
+      "risk_floor": "economy",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": false
+    },
+    "ci-rebase-handler": {
+      "route": "deep",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "workspace-write",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "code-fixer": {
+      "route": "deep",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "workspace-write",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "code-reviewer": {
+      "route": "deep",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "code-simplifier": {
+      "route": "quality",
+      "risk_floor": "standard",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "codebase-scout": {
+      "route": "standard",
+      "risk_floor": "economy",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "comment-analyzer": {
+      "route": "standard",
+      "risk_floor": "economy",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": false
+    },
+    "conflict-resolver": {
+      "route": "deep",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "workspace-write",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "findings-to-issues": {
+      "route": "deep",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "implementation-worker": {
+      "route": "quality",
+      "risk_floor": "standard",
+      "sandbox_ceiling": "workspace-write",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "issue-similarity-analyzer": {
+      "route": "standard",
+      "risk_floor": "economy",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": false
+    },
+    "merge-strategy-decider": {
+      "route": "economy",
+      "risk_floor": "economy",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "plan-reviewer": {
+      "route": "deep",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "plan-writer": {
+      "route": "deep",
+      "tier_routes": {
+        "trivial": "deep",
+        "small": "deep",
+        "medium": "frontier",
+        "large": "ultra"
+      },
+      "high_risk_route": "ultra",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "workspace-write",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "pr-test-analyzer": {
+      "route": "deep",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "research-codebase": {
+      "route": "standard",
+      "risk_floor": "economy",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "research-constraints": {
+      "route": "standard",
+      "risk_floor": "economy",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "research-patterns": {
+      "route": "standard",
+      "risk_floor": "economy",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "research-prior-art": {
+      "route": "standard",
+      "risk_floor": "economy",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "research-security": {
+      "route": "deep",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "research-test-coverage": {
+      "route": "standard",
+      "risk_floor": "economy",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "silent-failure-hunter": {
+      "route": "deep",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "spec-reviewer": {
+      "route": "deep",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "spec-compliance-reviewer": {
+      "route": "deep",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "spec-reviser": {
+      "route": "quality",
+      "risk_floor": "standard",
+      "sandbox_ceiling": "workspace-write",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "spec-writer": {
+      "route": "deep",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "workspace-write",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "testers-a11y-critic": {
+      "route": "standard",
+      "risk_floor": "economy",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "testers-adversarial-security": {
+      "route": "deep",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "testers-chaos-engineer": {
+      "route": "standard",
+      "risk_floor": "economy",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "testers-mobile-thumb": {
+      "route": "standard",
+      "risk_floor": "economy",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "testers-monitor-devils-advocate": {
+      "route": "economy",
+      "risk_floor": "economy",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": false
+    },
+    "testers-monitor-primary": {
+      "route": "economy",
+      "risk_floor": "economy",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": false
+    },
+    "testers-panicked-grandma": {
+      "route": "standard",
+      "risk_floor": "economy",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "testers-power-user": {
+      "route": "standard",
+      "risk_floor": "economy",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "triage-scout": {
+      "route": "economy",
+      "risk_floor": "economy",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "trust-trail-evaluator": {
+      "route": "frontier",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "type-design-analyzer": {
+      "route": "deep",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "uberthink-arbiter": {
+      "route": "frontier",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "uberthink-falsifier": {
+      "route": "deep",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "uberthink-frame": {
+      "route": "quality",
+      "risk_floor": "standard",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "uberthink-generator": {
+      "route": "quality",
+      "risk_floor": "standard",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "uberthink-moderator": {
+      "route": "quality",
+      "risk_floor": "standard",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "uberthink-synthesizer": {
+      "route": "deep",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    }
+  }
+}

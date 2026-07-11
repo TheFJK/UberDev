@@ -115,8 +115,8 @@ assert_grep "$SOLVE_SKILL" \
   '^\| `EFFORT_LEVEL_DEFAULT` \| `max`' \
   "Constants table declares EFFORT_LEVEL_DEFAULT = max (autopilot default)"
 assert_grep "$SOLVE_SKILL" \
-  '^\| `EFFORT_LEVEL_ENUM` \| `low \\\| medium \\\| high \\\| xhigh \\\| max`' \
-  "Constants table declares EFFORT_LEVEL_ENUM = {low,medium,high,xhigh,max}"
+  '^\| `EFFORT_LEVEL_ENUM` \| `low \\\| medium \\\| high \\\| xhigh \\\| max \\\| ultra`' \
+  "Public effort enum includes Codex-only ultra; Claude legacy effort remains five values"
 assert_grep "$SOLVE_PIPELINE" \
   'effort_resolved' \
   "SOLVE_AUDIT_EVENT_ENUM contains effort_resolved (Phase A telemetry)"
@@ -189,8 +189,102 @@ assert_grep "$SOLVE_PIPELINE" \
   '_uberdev_audit_emit effort_resolved' \
   "Phase A emits effort_resolved audit event with {source, level}"
 assert_grep "$SOLVE_PIPELINE" \
-  'low\|medium\|high\|xhigh\|max' \
-  "Phase A validates resolved level against the {low,medium,high,xhigh,max} enum"
+  'low\|medium\|high\|xhigh\|max\|ultra' \
+  "Phase A validates the six-value provider-neutral public enum"
+assert_grep "$SOLVE_PIPELINE" \
+  'ultra is Codex-only' \
+  "Claude-backed resolution rejects public ultra before claims"
+WINDOWS_PATH_TMP="$(mktemp -d)"
+mkdir "$WINDOWS_PATH_TMP/bin"
+cat >"$WINDOWS_PATH_TMP/bin/cygpath" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >"$CYGPATH_LOG"
+[ "$1" = -m ] || exit 2
+printf 'C:/native-temp\n'
+SH
+chmod +x "$WINDOWS_PATH_TMP/bin/cygpath"
+WINDOWS_TMP_BLOCK="$(awk '/^_UBERDEV_TMP_BASE=/{capture=1} capture&&/^if ! UBERDEV_TMPDIR=/{exit} capture{print}' "$SOLVE_PIPELINE")"
+WINDOWS_NORMALIZED="$(MSYSTEM=MINGW64 CYGPATH_LOG="$WINDOWS_PATH_TMP/cygpath.log" PATH="$WINDOWS_PATH_TMP/bin:$PATH" TMPDIR=/tmp/posix-temp \
+  bash -c "$WINDOWS_TMP_BLOCK
+printf '%s' \"\$_UBERDEV_TMP_BASE\"")"
+if [ "$WINDOWS_NORMALIZED" = 'C:/native-temp' ] \
+   && grep -q '^-m /tmp/posix-temp$' "$WINDOWS_PATH_TMP/cygpath.log"; then
+  echo "  PASS  Git Bash temp base is normalized for native Windows Python"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  Git Bash temp base was not normalized for native Windows Python"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$WINDOWS_PATH_TMP"
+WINDOWS_STAGING_TMP="$(mktemp -d)"
+WINDOWS_STAGING_BASE="$WINDOWS_STAGING_TMP"
+case "${MSYSTEM:-}:$(uname -s 2>/dev/null)" in
+  MINGW*:*|MSYS*:*|CYGWIN*:*|*:MINGW*|*:MSYS*|*:CYGWIN*)
+    WINDOWS_STAGING_BASE="$(cygpath -m "$WINDOWS_STAGING_TMP")"
+    ;;
+esac
+if python3 -I -B - "$SOLVE_PIPELINE" "$WINDOWS_STAGING_BASE" <<'PY'
+import contextlib
+import io
+import os
+import pathlib
+import stat
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+base = pathlib.Path(sys.argv[2]).resolve()
+base.chmod(0o700)
+prefix = "if ! UBERDEV_TMPDIR=\"$(python3 -I -B -c '\n"
+suffix = "\n' \"$_UBERDEV_TMP_BASE\")\"; then"
+start = source.index(prefix) + len(prefix)
+end = source.index(suffix, start)
+snippet = source[start:end]
+if hasattr(os, "geteuid"):
+    del os.geteuid
+sys.argv = ["embedded-staging", str(base)]
+stdout = io.StringIO()
+with contextlib.redirect_stdout(stdout):
+    exec(compile(snippet, "solve-launcher-staging", "exec"), {})
+created = pathlib.Path(stdout.getvalue())
+assert created.parent == base
+assert created.name.startswith("uberdev-solve-windows-")
+if os.name != "nt":
+    assert stat.S_IMODE(created.stat().st_mode) == 0o700
+created.rmdir()
+PY
+then
+  echo "  PASS  solve staging works when Python has no os.geteuid (native Windows)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  solve staging requires unavailable os.geteuid on native Windows"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$WINDOWS_STAGING_TMP"
+ULTRA_TMP="$(mktemp -d)"; mkdir "$ULTRA_TMP/bin"
+cat >"$ULTRA_TMP/bin/gh" <<'SH'
+#!/usr/bin/env bash
+echo "$*" >>"$ULTRA_GH_LOG"
+case "$1 $2" in
+  "repo view") echo owner/repo ;;
+  "issue view") echo '{"number":91,"title":"README typo","state":"OPEN","body":"Fix typo in README.md.","labels":[{"name":"docs"}],"assignees":[],"comments":[]}' ;;
+  *) exit 3 ;;
+esac
+SH
+chmod +x "$ULTRA_TMP/bin/gh"
+if PATH="$ULTRA_TMP/bin:$PATH" ULTRA_GH_LOG="$ULTRA_TMP/gh.log" TMPDIR="$ULTRA_TMP" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  bash "$SOLVE_PIPELINE" --auto-mode=0 -- 91 --backend=background --effort=ultra >"$ULTRA_TMP/out" 2>&1; then
+  ULTRA_RC=0
+else
+  ULTRA_RC=$?
+fi
+if [ "$ULTRA_RC" -ne 0 ] && grep -q 'ultra is Codex-only' "$ULTRA_TMP/out" && ! grep -q '^label create' "$ULTRA_TMP/gh.log"; then
+  echo "  PASS  Claude Ultra fails behaviorally before claim mutation"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  Claude Ultra must fail before claims (rc=$ULTRA_RC output=$(cat "$ULTRA_TMP/out"))"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$ULTRA_TMP"
 # Each of the three case-statement arms threads ${EFFORT_FLAG[@]} immediately
 # after ${PERM_FLAG[@]}. The literal `"${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}"`
 # token-pair must appear at least three times (file arm, stdin arm, argv arm).

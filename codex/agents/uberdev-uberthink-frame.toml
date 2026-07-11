@@ -4,6 +4,10 @@ name = "uberdev-uberthink-frame"
 description = """
 dispatched by /uberthink — Wave-0 framing (lens ∈ schema/teardown/prior-art/constraints); schema lens also does donor selection + scope gate
 """
+model = "gpt-5.6-sol"
+model_reasoning_effort = "medium"
+sandbox_mode = "read-only"
+features.multi_agent = false
 developer_instructions = """
 # Uberthink Frame (Wave 0)
 

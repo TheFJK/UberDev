@@ -34,13 +34,13 @@ jobs:
   shape-checks:
     name: shape-checks
     runs-on: ubuntu-latest
-    # 5 minutes is generous for the wired suite — 59 test files, ~2,700
-    # grep-and-assert checks, measured at #309 (ci-wiring.test.sh keeps the
-    # run list below complete against tests/*.test.sh on disk; these counts
-    # are a point-in-time snapshot, refresh when they age).
+    # Routed lifecycle, semaphore-race, and provider-contract fixtures now make
+    # the complete Linux suite legitimately exceed ten minutes on hosted runners.
+    # Fifteen minutes preserves the hang guard while leaving room for the real runtime checks
+    # wired below (ci-wiring.test.sh keeps that list complete).
     # Caps the default 360-min budget so a hung test from a fork PR can't burn
     # the public-repo Actions allowance. Bump if the suite legitimately grows.
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install zsh
@@ -87,12 +87,14 @@ jobs:
           bash tests/post-impl-review.test.sh && \
           bash tests/testers-pipeline.test.sh && \
           bash tests/spec-reviewer-plan-aware.test.sh && \
+          bash tests/sdd-routed-lifecycle.test.sh && \
           bash tests/audit-fixups.test.sh && \
           bash tests/review-pr.test.sh && \
           bash tests/review-pr-phase3-ci.test.sh && \
           bash tests/cluster.test.sh && \
           bash tests/cluster-pipeline.test.sh && \
           bash tests/code-fixer-dispatch.test.sh && \
+          bash tests/review-child-handoff.test.sh && \
           bash tests/findings-to-issues.test.sh && \
           bash tests/trust-trail-evaluator.test.sh && \
           bash tests/finish-branch-auto-chain.test.sh && \
@@ -113,6 +115,32 @@ jobs:
           bash tests/docs-accuracy.test.sh && \
           bash tests/orchestrator-phase1-shortcircuit.test.sh && \
           bash tests/config-override.test.sh && \
+          bash tests/model-routing.test.sh && \
+          bash tests/model-routing-config.test.sh && \
+          bash tests/plan-writer-routing.test.sh && \
+          bash tests/run-manifest.test.sh && \
+          bash tests/live-semaphore.test.sh && \
+          bash tests/agent-dispatch.test.sh && \
+          bash tests/child-dispatch.test.sh && \
+          bash tests/child-dispatch-receipts.test.sh && \
+          bash tests/child-inputs.test.sh && \
+          bash tests/child-wait.test.sh && \
+          bash tests/solve-run-tree.test.sh && \
+          bash tests/child-contract-v2.test.sh && \
+          bash tests/command-workspace.test.sh && \
+          bash tests/production-run-tree-builder.test.sh && \
+          bash tests/brainstorm-child-inputs.test.sh && \
+          bash tests/orchestrator-child-inputs.test.sh && \
+          bash tests/sdd-child-inputs.test.sh && \
+          bash tests/review-child-inputs.test.sh && \
+          bash tests/routed-provider-bypass.test.sh && \
+          bash tests/run-tree-callsite-contract.test.sh && \
+          bash tests/route-context.test.sh && \
+          bash tests/solve-triage.test.sh && \
+          bash tests/solve-routing.test.sh && \
+          bash tests/route-unsupported.test.sh && \
+          bash tests/dispatch-routing-parity.test.sh && \
+          bash tests/orchestrator-plan-flatten.test.sh && \
           bash tests/orchestrator-phase-6-doc.test.sh && \
           bash tests/orchestrator-phase-0-bg-detection.test.sh && \
           bash tests/dev.test.sh && \
@@ -152,11 +180,11 @@ jobs:
   shape-checks-windows:
     name: shape-checks-windows
     runs-on: windows-latest
-    # Proves the shape-check harness is Git-Bash-portable on native Windows
-    # (RFC 0004 §3.8 / D10). windows-latest ships Git for Windows -> Git Bash
-    # is on PATH. Runtime dispatch validation stays out of scope: the suite
-    # is grep-and-assert throughout.
-    timeout-minutes: 5
+    # Proves the shape-check harness and routed dispatch lifecycle are portable
+    # on native Windows/Git Bash. Real detached-process fixtures now run close
+    # to five minutes; ten minutes preserves a bounded hang guard across hosted
+    # runner variance.
+    timeout-minutes: 10
     defaults:
       run:
         # Force every `run:` step into Git Bash, not PowerShell or cmd.
@@ -218,7 +246,34 @@ jobs:
         #   - uberthink.test.sh
         #   - uberthink-report.test.sh
         #   - merge-discovery-resilience.test.sh
+        #   - model-routing.test.sh
+        #   - model-routing-config.test.sh
+        #   - plan-writer-routing.test.sh
+        #   - run-manifest.test.sh
+        #   - live-semaphore.test.sh
+        #   - agent-dispatch.test.sh
+        #   - child-dispatch.test.sh
+        #   - child-dispatch-receipts.test.sh
+        #   - child-inputs.test.sh
+        #   - child-wait.test.sh
+        #   - child-contract-v2.test.sh
+        #   - command-workspace.test.sh
+        #   - production-run-tree-builder.test.sh
+        #   - brainstorm-child-inputs.test.sh
+        #   - orchestrator-child-inputs.test.sh
+        #   - sdd-child-inputs.test.sh
+        #   - review-child-inputs.test.sh
+        #   - routed-provider-bypass.test.sh
+        #   - run-tree-callsite-contract.test.sh
+        #   - route-context.test.sh
+        #   - route-unsupported.test.sh
+        #   - solve-routing.test.sh
+        #   - solve-triage.test.sh
+        #   - dispatch-routing-parity.test.sh
+        #   - orchestrator-plan-flatten.test.sh
+        #   - sdd-routed-lifecycle.test.sh
 #   - review-pr-phase3-ci.test.sh
+#   - review-child-handoff.test.sh
 #   - lib-assert-count.test.sh
 #   - codex-port.test.sh                  (python3 -c + mktemp -d path-translation
 #                                         issue on Git Bash, same as uberscan/
@@ -250,6 +305,7 @@ jobs:
           bash tests/solve-effort-flag.test.sh && \
           bash tests/orchestrator-phase1-shortcircuit.test.sh && \
           bash tests/config-override.test.sh && \
+          bash tests/solve-run-tree.test.sh && \
           bash tests/orchestrator-phase-6-doc.test.sh && \
           bash tests/orchestrator-phase-0-bg-detection.test.sh && \
           bash tests/dev.test.sh && \

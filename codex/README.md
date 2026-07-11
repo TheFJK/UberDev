@@ -1,6 +1,6 @@
 # UberDev for Codex
 
-UberDev's full workflow toolkit — 39 skills and command-skills, 42 subagents,
+UberDev's full workflow toolkit — 39 skills and command-skills, 44 subagents,
 plus the autonomous dispatch backend — installable into the
 [OpenAI Codex CLI](https://developers.openai.com/codex).
 
@@ -13,7 +13,7 @@ delivery surfaces are adapted to Codex's skill / subagent / AGENTS.md model.
 
 Codex's documented plugin manifest bundles **skills, MCP servers, apps, and
 hooks** — but has **no `agents` field** (as of July 2026). So a
-plugin alone can ship the skills but cannot ship the 42 subagents that
+plugin alone can ship the skills but cannot ship the 44 subagents that
 `/review-pr`, `/testers`, `/solve`, and the research/spec/plan pipelines fan
 out to. Two paths cover this:
 
@@ -50,7 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/TheFJK/UberDev/main/codex/install-c
 This installs three things:
 
 1. **Skills** → `~/.agents/skills/` (39 Codex-ported UberDev skills, including command-skills)
-2. **Agents** → `~/.codex/agents/uberdev-*.toml` (42 custom subagents, converted from Claude `.md`)
+2. **Agents** → `~/.codex/agents/uberdev-*.toml` (44 custom subagents, converted from Claude `.md`)
 3. **Primer** → merged into the active global instruction file (`~/.codex/AGENTS.override.md` when present, otherwise `~/.codex/AGENTS.md`)
 
 When run from a clone, the installer uses the local repo files. When run as the
@@ -61,7 +61,7 @@ Restart Codex. Verify:
 
 ```bash
 ls ~/.agents/skills/      # ~39 UberDev skill dirs incl. command-skills
-ls ~/.codex/agents/       # 42 uberdev-*.toml
+ls ~/.codex/agents/       # 44 uberdev-*.toml
 grep uberdev-codex-primer ~/.codex/AGENTS*.md  # primer block present
 ```
 
@@ -204,11 +204,13 @@ final message lands in the `-o` result file for post-run inspection.
 - **`uberdev_goal_review_pr_in_flight`**: the goal-loop's review-pr liveness
   check uses `claude agents --json` for Claude-backed sessions and the
   backend status JSON PID for `background` / `codex` sessions.
-- **Agent model mapping**: 41 of 42 agents use `model: inherit` (Codex inherits
-  the session model by omitting `model`). The one outlier (`research-test-
-  coverage`, Claude `haiku`) maps to `gpt-5.4-mini` (OpenAI's fast tier as of
-  2026-07). Revisit on each OpenAI model release — the mapping lives in
-  `codex/tools/convert-agents.py` (`CODEX_MODEL_FOR_CLAUDE`).
+- **Agent execution profiles**: all 44 generated role TOMLs receive their
+  default `model`, `model_reasoning_effort`, and `sandbox_mode` directly from
+  `plugins/uberdev/policy/model-routing-v1.json` (RFC 0013). Claude
+  `model: inherit` / `model: haiku` frontmatter no longer controls Codex.
+  Leaf roles also set `features.multi_agent = false`; Codex 0.144.1 rejects
+  `agents.max_depth = 0`, while the feature flag is a supported role-config
+  field and prevents nested delegation.
 - **`codex cloud exec`** (async server-side dispatch) is a future enhancement;
   v1 uses local `codex exec` + `nohup`.
 - **Windows**: the codex backend is cross-platform (`codex exec` runs on

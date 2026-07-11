@@ -4,6 +4,27 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.40.0] — 2026-07-11
+
+### Added
+
+- Adaptive GPT-5.6 routing for Codex with six named routes: Luna economy, Terra standard, and Sol quality/high/max/ultra. Lead work scales by issue tier and risk; high-risk work is promoted to a safe minimum automatically.
+- Role-aware fanout routing across research, planning, implementation, review, CI repair, testers, and UberThink. Mechanical and routine tasks use cheaper routes while judgment-heavy work receives Sol; large or high-risk plan writing uses Sol Ultra.
+- Project and environment overrides for routing mode, role/workflow routes, reasoning effort, service tier, and policy location, with `.codex/uberdev.local.md` preferred over the Claude fallback.
+- A versioned 40-edge run-tree contract with typed child inputs, canonical handoffs, bounded leaf delegation, lifecycle receipts, risk propagation, and format-retry validation.
+
+### Changed
+
+- Brainstorm, orchestrator, subagent-driven development, post-implementation review, `/review-pr`, and `/simplify` now dispatch every provider child through the shared routing runtime.
+- Codex dispatch now passes the independently resolved model, reasoning effort, service tier, sandbox ceiling, and leaf-agent limits instead of inheriting one expensive model for every fanout task.
+- The plan writer remains a non-delegating leaf and receives tier-aware Sol routing: high for trivial/small, max for medium, and Ultra for large or high-risk plans.
+- Codex skills, command-skills, agents, runtime libraries, and policy mirrors are regenerated from the canonical plugin sources.
+
+### Security
+
+- Routed child inputs are validated before handoff; receipt and manifest files use private modes, atomic writes, symlink/hard-link defenses, closed schemas, and payload-free diagnostics.
+- Provider invocations outside the routing boundary are denied by CI, while production fanout harnesses verify the real build → handoff → dispatch lifecycle.
+
 ## [0.39.1] — 2026-07-08
 
 ### Fixed

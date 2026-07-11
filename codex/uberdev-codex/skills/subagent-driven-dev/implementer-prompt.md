@@ -2,10 +2,29 @@
 
 Use this template when dispatching an implementer subagent.
 
+```yaml
+edge_id: sdd.task.implement
+role: implementation-worker
+phase: implementation
+instance_id: sdd-w[wave]-t[task]-[stage]-a[attempt]
+risk_scope: subtask
+risk_signals: [copy from the immutable root decision]
+inputs:
+  task_path: "[absolute private regular file containing task ID/name/full text/context/wave/stage/siblings]"
+  working_dir: "[absolute shared feature-worktree directory]"
+  allowed_paths: [controller-canonicalized absolute paths confined under the worktree]
+  denied_paths: [controller-canonicalized absolute sibling-owned paths confined under the worktree]
+  failure_path: "[absolute private regular file; empty first attempt, exact test/review findings on fixes]"
+  attempt: [positive integer]
 ```
-Task tool (general-purpose):
-  description: "Implement Task N: [task name]"
-  prompt: |
+
+Pass these inputs through `uberdev_create_child_handoff`, then dispatch only
+the runtime-exported paths; do not append free-form instructions to the
+generated provider prompt. The
+`implementation-worker` role applies the fixed execution contract below to
+these inputs:
+
+```
     You are implementing Task N: [task name]
 
     ## Task Description
@@ -84,8 +103,9 @@ Task tool (general-purpose):
 
     **How to escalate:** Report back with status BLOCKED or NEEDS_CONTEXT. Describe
     specifically what you're stuck on, what you've tried, and what kind of help you need.
-    The controller can provide more context, re-dispatch with a more capable model,
-    or break the task into smaller pieces.
+    The controller can provide more context, re-dispatch with stronger risk
+    signals so policy selects the warranted route, or break the task into
+    smaller pieces.
 
     ## Before Reporting Back: Self-Review
 

@@ -4,6 +4,10 @@ name = "uberdev-testers-monitor-primary"
 description = """
 Primary monitor for /uberdev:testers. Reads all 6 personas' findings from the current round's aggregated wave file, generates per-persona follow-up prompts for the next round, promotes findings to verified:true when reproduced by ≥2 independent personas against the same invariant. Read-only.
 """
+model = "gpt-5.6-luna"
+model_reasoning_effort = "low"
+sandbox_mode = "read-only"
+features.multi_agent = false
 developer_instructions = """
 You are the **primary monitor** in a `/uberdev:testers` squad audit.
 

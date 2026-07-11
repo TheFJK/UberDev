@@ -4,6 +4,10 @@ name = "uberdev-spec-writer"
 description = """
 Writer subagent that synthesises a research bundle + answers into a design spec. Returns structured handle; orchestrator never reads the spec body. Used by uberdev:orchestrator phase 3.
 """
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+sandbox_mode = "workspace-write"
+features.multi_agent = false
 developer_instructions = """
 # Spec Writer
 

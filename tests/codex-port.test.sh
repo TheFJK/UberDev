@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shape + functional checks for the Codex port deliverables under codex/.
 # Verifies: the agent converter round-trips (md→toml, valid TOML, correct
-# field mapping incl. the haiku→gpt-5.4-mini outlier + inherit→omit); the
+# field mapping incl. RFC 0013 role-default model/effort/sandbox profiles); the
 # command converter produces 13 skills + skips the 2 Claude-only ones; generated
 # artifacts are Codex-path-safe; the installer is idempotent + installs the
 # Codex-ported skill tree; uninstall works; the plugin manifest +
@@ -38,18 +38,53 @@ echo "== Agent converter: round-trip md→toml =="
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-assert_cmd 0 "convert-agents runs clean over the 42 agents" \
+assert_cmd 0 "convert-agents runs clean over the 44 agents" \
   python3 "$CONVERT_AGENTS" "$REPO_ROOT/plugins/uberdev/agents" "$TMP/agents"
 
 mkdir -p "$TMP/empty-agents-src"
 assert_cmd 2 "convert-agents fails when source contains zero agents" \
   python3 "$CONVERT_AGENTS" "$TMP/empty-agents-src" "$TMP/empty-agents-out"
 
-# All 42 agents produced a uberdev-*.toml.
-N="$(find "$TMP/agents" -name 'uberdev-*.toml' 2>/dev/null | wc -l | tr -d ' ')"
-[ "$N" -eq 42 ] && pass "42 uberdev-*.toml produced" || fail "expected 42 toml, got $N"
+# The converter must use the canonical routing-policy validator, not merely
+# read the values it later emits. Each mutation remains syntactically valid
+# JSON (except the intentional duplicate-key ambiguity) but violates policy v1.
+for mutation in duplicate route effort sandbox; do
+  MUT_ROOT="$TMP/policy-mutation-$mutation/uberdev"
+  mkdir -p "$MUT_ROOT"
+  cp -R "$REPO_ROOT/plugins/uberdev/agents" "$MUT_ROOT/agents"
+  cp -R "$REPO_ROOT/plugins/uberdev/lib" "$MUT_ROOT/lib"
+  cp -R "$REPO_ROOT/plugins/uberdev/policy" "$MUT_ROOT/policy"
+  python3 - "$MUT_ROOT/policy/model-routing-v1.json" "$mutation" <<'PY'
+import json
+import sys
+from pathlib import Path
 
-# Every produced .toml parses as valid TOML with the 3 required keys, and the
+path = Path(sys.argv[1])
+mutation = sys.argv[2]
+raw = path.read_text()
+if mutation == "duplicate":
+    raw = raw.replace('"schema_version": 1,', '"schema_version": 1,\n  "schema_version": 1,', 1)
+    path.write_text(raw)
+else:
+    value = json.loads(raw)
+    if mutation == "route":
+        value["routes"]["standard"]["unexpected"] = True
+    elif mutation == "effort":
+        value["routes"]["standard"]["codex"]["reasoning_effort"] = "impossible"
+    else:
+        value["roles"]["research-codebase"]["sandbox_ceiling"] = "danger-full-access"
+    path.write_text(json.dumps(value, indent=2) + "\n")
+PY
+  assert_cmd 2 "convert-agents rejects $mutation policy mutation" \
+    python3 "$CONVERT_AGENTS" "$MUT_ROOT/agents" "$TMP/mutated-$mutation-out"
+done
+
+# All 44 agents produced a uberdev-*.toml.
+N="$(find "$TMP/agents" -name 'uberdev-*.toml' 2>/dev/null | wc -l | tr -d ' ')"
+[ "$N" -eq 44 ] && pass "44 uberdev-*.toml produced" || fail "expected 44 toml, got $N"
+
+# Every produced .toml parses as valid TOML with the required identity and
+# execution-profile keys, and the
 # custom-agent name is namespaced to match the file (Codex uses the name field
 # as the agent identifier, not the filename).
 python3 - <<PY
@@ -58,7 +93,10 @@ files = glob.glob("$TMP/agents/uberdev-*.toml")
 bad = 0
 for p in files:
     d = tomllib.load(open(p, "rb"))
-    for k in ("name", "description", "developer_instructions"):
+    for k in (
+        "name", "description", "developer_instructions", "model",
+        "model_reasoning_effort", "sandbox_mode", "features",
+    ):
         if k not in d:
             print(f"  FAIL  {p.split('/')[-1]} missing key: {k}"); bad += 1
     expected = p.split("/")[-1].removesuffix(".toml")
@@ -68,15 +106,63 @@ sys.exit(1 if bad else 0)
 PY
 [ $? -eq 0 ] && pass "all .toml parse + have required keys + namespaced name" || fail "some .toml invalid, missing keys, or unnamespaced"
 
-echo "== Agent converter: model mapping edge cases =="
-# haiku outlier → gpt-5.4-mini
-if grep -q '^model = "gpt-5.4-mini"' "$TMP/agents/uberdev-research-test-coverage.toml"; then
-  pass "haiku model mapped to gpt-5.4-mini (research-test-coverage)"
-else fail "haiku model not mapped to gpt-5.4-mini"; fi
-# inherit (41 agents) → no model key
+echo "== Agent converter: RFC 0013 adaptive role profiles =="
+python3 - <<PY
+import glob
+import json
+import sys
+import tomllib
+from pathlib import Path
+
+policy = json.loads(Path("$REPO_ROOT/plugins/uberdev/policy/model-routing-v1.json").read_text())
+files = sorted(glob.glob("$TMP/agents/uberdev-*.toml"))
+bad = 0
+seen = set()
+for path in files:
+    role = Path(path).stem.removeprefix("uberdev-")
+    seen.add(role)
+    role_policy = policy["roles"].get(role)
+    if role_policy is None:
+        print(f"  FAIL  {role}: missing policy role"); bad += 1; continue
+    route = policy["routes"][role_policy["route"]]["codex"]
+    data = tomllib.load(open(path, "rb"))
+    expected = {
+        "model": route["model"],
+        "model_reasoning_effort": route["reasoning_effort"],
+        "sandbox_mode": role_policy["sandbox_ceiling"],
+    }
+    for key, value in expected.items():
+        if data.get(key) != value:
+            print(f"  FAIL  {role}: {key}={data.get(key)!r}, expected {value!r}"); bad += 1
+    if data.get("features", {}).get("multi_agent") is not False:
+        print(f"  FAIL  {role}: leaf profile must set features.multi_agent=false"); bad += 1
+    if "max_depth" in data.get("agents", {}):
+        print(f"  FAIL  {role}: agents.max_depth is unsupported in role profiles"); bad += 1
+
+missing = set(policy["roles"]) - seen
+extra = seen - set(policy["roles"])
+if missing or extra:
+    print(f"  FAIL  role/profile mismatch: missing={sorted(missing)}, extra={sorted(extra)}")
+    bad += 1
+sys.exit(1 if bad else 0)
+PY
+[ $? -eq 0 ] && pass "all 44 role TOMLs exactly match RFC 0013 policy defaults" \
+  || fail "generated role TOMLs drift from RFC 0013 policy defaults"
+
 N_MODEL="$(grep -lE '^model = ' "$TMP/agents"/uberdev-*.toml 2>/dev/null | wc -l | tr -d ' ')"
-[ "$N_MODEL" -eq 1 ] && pass "only 1 agent has a model key (the haiku outlier; rest inherit)" \
-  || fail "expected exactly 1 model key, found $N_MODEL"
+[ "$N_MODEL" -eq 44 ] && pass "all 44 agents pin policy-owned models" \
+  || fail "expected 44 policy-owned model keys, found $N_MODEL"
+if diff -qr "$TMP/agents" "$REPO_ROOT/codex/agents" >/tmp/codex-agent-drift 2>&1; then
+  pass "checked-in role TOMLs match deterministic converter output"
+else
+  fail "checked-in role TOMLs drift from converter output"
+  cat /tmp/codex-agent-drift
+fi
+if grep -RqlE '^model = "gpt-5\.4-mini"' "$TMP/agents" 2>/dev/null; then
+  fail "generated profiles retain legacy Claude model mapping"
+else
+  pass "generated profiles contain no legacy Claude model mapping"
+fi
 # Claude-only fields dropped
 NG="$(grep -lE '^(color|allowed-tools|tools) ' "$TMP/agents"/uberdev-*.toml 2>/dev/null | wc -l | tr -d ' ')"
 [ "$NG" -eq 0 ] && pass "Claude-only fields (color/allowed-tools/tools) dropped from all .toml" \
@@ -108,10 +194,10 @@ else
 fi
 
 echo "== Runtime Markdown agent prompt porter =="
-assert_cmd 0 "port-agent-prompts runs clean over the 42 agents" \
+assert_cmd 0 "port-agent-prompts runs clean over the 44 agents" \
   bash "$PORT_AGENT_PROMPTS" "$REPO_ROOT/plugins/uberdev/agents" "$TMP/runtime-agents"
 N_MD="$(find "$TMP/runtime-agents" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l | tr -d ' ')"
-[ "$N_MD" -eq 42 ] && pass "42 runtime Markdown prompts produced" || fail "expected 42 runtime Markdown prompts, got $N_MD"
+[ "$N_MD" -eq 44 ] && pass "44 runtime Markdown prompts produced" || fail "expected 44 runtime Markdown prompts, got $N_MD"
 NG="$(grep -rlE 'CLAUDE_PLUGIN_ROOT|~/\.claude' "$TMP/runtime-agents" 2>/dev/null | wc -l | tr -d ' ')"
 [ "$NG" -eq 0 ] && pass "zero Claude-only path/env residuals in runtime Markdown prompts" \
   || fail "found $NG runtime Markdown prompts with Claude-only path/env residuals"
@@ -207,10 +293,87 @@ if grep -RqlE "$MODEL_RE|$DANGLING_WAIT_RE" "$TMP/cmd-skills" 2>/dev/null; then
 else
   pass "generated command-skills do not preserve Claude-only model guidance or dangling WAIT fragments"
 fi
+if grep -RqlF '${PLUGIN_ROOT:-${PLUGIN_ROOT:-' "$TMP/cmd-skills" 2>/dev/null; then
+  fail "generated command-skills do not nest an already-fallback-capable PLUGIN_ROOT"
+else
+  pass "generated command-skills do not nest an already-fallback-capable PLUGIN_ROOT"
+fi
+COMMAND_ROOT_LINE="$(grep -m1 '^UBERDEV_REVIEW_PLUGIN_ROOT=' "$TMP/cmd-skills/uberdev-cmd-review-pr/SKILL.md" || true)"
+COMMAND_CODEX_HOME="$TMP/command-root-home/.codex"
+COMMAND_ROOT="$(
+  env CODEX_HOME="$COMMAND_CODEX_HOME" ROOT_LINE="$COMMAND_ROOT_LINE" bash -u -c '
+    unset PLUGIN_ROOT CLAUDE_PLUGIN_ROOT CURSOR_PLUGIN_ROOT
+    eval "$ROOT_LINE"
+    printf "%s" "$UBERDEV_REVIEW_PLUGIN_ROOT"
+  '
+)"
+if [ "$COMMAND_ROOT" = "$COMMAND_CODEX_HOME/plugins/uberdev-codex" ]; then
+  pass "converted command resolves runtime root from CODEX_HOME without PLUGIN_ROOT"
+else
+  fail "converted command CODEX_HOME fallback broken (got ${COMMAND_ROOT:-<empty>})"
+fi
 
 echo "== Skill-port: no CLAUDE_PLUGIN_ROOT residuals =="
 assert_cmd 0 "port-skill runs clean" \
   bash "$PORT_SKILL" "$REPO_ROOT/plugins/uberdev/skills" "$TMP/skills"
+if grep -RqlF '${PLUGIN_ROOT:-${PLUGIN_ROOT:-' "$TMP/skills" 2>/dev/null; then
+  fail "ported skills do not nest an already-fallback-capable PLUGIN_ROOT"
+else
+  pass "ported skills do not nest an already-fallback-capable PLUGIN_ROOT"
+fi
+SKILL_ROOT_LINE="$(grep -m1 '^UBERDEV_BRAINSTORM_PLUGIN_ROOT=' "$TMP/skills/brainstorm/SKILL.md" || true)"
+SKILL_CODEX_HOME="$TMP/skill-root-home/.codex"
+SKILL_ROOT="$(
+  env CODEX_HOME="$SKILL_CODEX_HOME" ROOT_LINE="$SKILL_ROOT_LINE" bash -u -c '
+    unset PLUGIN_ROOT CLAUDE_PLUGIN_ROOT CURSOR_PLUGIN_ROOT
+    eval "$ROOT_LINE"
+    printf "%s" "$UBERDEV_BRAINSTORM_PLUGIN_ROOT"
+  '
+)"
+if [ "$SKILL_ROOT" = "$SKILL_CODEX_HOME/plugins/uberdev-codex" ]; then
+  pass "ported skill resolves runtime root from CODEX_HOME without PLUGIN_ROOT"
+else
+  fail "ported skill CODEX_HOME fallback broken (got ${SKILL_ROOT:-<empty>})"
+fi
+VISUAL_CODEX_HOME="$TMP/visual-root-home/.codex"
+PORTED_VISUAL_LINES="$(grep -E '^(PLUGIN_SCRIPTS_ROOT|PLUGIN_SCRIPTS)=' "$TMP/skills/orchestrator/SKILL.md" || true)"
+PORTED_VISUAL_SCRIPTS="$(
+  env CODEX_HOME="$VISUAL_CODEX_HOME" VISUAL_LINES="$PORTED_VISUAL_LINES" bash -u -c '
+    unset PLUGIN_ROOT CLAUDE_PLUGIN_ROOT CURSOR_PLUGIN_ROOT
+    eval "$VISUAL_LINES"
+    printf "%s" "$PLUGIN_SCRIPTS"
+  '
+)"
+if [ "$PORTED_VISUAL_SCRIPTS" = "$VISUAL_CODEX_HOME/plugins/uberdev-codex/skills/brainstorm/scripts" ]; then
+  pass "ported visual companion resolves installed scripts from CODEX_HOME without PLUGIN_ROOT"
+else
+  fail "ported visual companion CODEX_HOME fallback broken (got ${PORTED_VISUAL_SCRIPTS:-<empty>})"
+fi
+
+CANONICAL_ORCHESTRATOR="$REPO_ROOT/plugins/uberdev/skills/orchestrator/SKILL.md"
+if grep -q 'host-provided plugin-root variables' "$CANONICAL_ORCHESTRATOR" \
+   && ! grep -q 'with a `find` fallback' "$CANONICAL_ORCHESTRATOR"; then
+  pass "canonical visual companion prose matches host-root-only resolution"
+else
+  fail "canonical visual companion prose still promises a removed find fallback"
+fi
+CANONICAL_VISUAL_BLOCK="$TMP/canonical-visual-companion.sh"
+awk '
+  /^PLUGIN_SCRIPTS_ROOT=/ { capture=1 }
+  capture && /^```/ { exit }
+  capture { print }
+' "$CANONICAL_ORCHESTRATOR" > "$CANONICAL_VISUAL_BLOCK"
+if [ ! -s "$CANONICAL_VISUAL_BLOCK" ]; then
+  fail "canonical visual companion exposes an executable host-root resolution block"
+elif env -u PLUGIN_ROOT -u CLAUDE_PLUGIN_ROOT -u CURSOR_PLUGIN_ROOT \
+       bash -u "$CANONICAL_VISUAL_BLOCK" \
+       >"$TMP/canonical-visual.stdout" 2>"$TMP/canonical-visual.stderr" \
+     && grep -qF 'plugin root unavailable (set PLUGIN_ROOT, CLAUDE_PLUGIN_ROOT, or CURSOR_PLUGIN_ROOT)' \
+          "$TMP/canonical-visual.stderr"; then
+  pass "canonical visual companion degrades with a provider-neutral missing-root diagnostic"
+else
+  fail "canonical visual companion missing-root path is silent or provider-specific"
+fi
 NG="$(grep -rl 'CLAUDE_PLUGIN_ROOT' "$TMP/skills" 2>/dev/null | wc -l | tr -d ' ')"
 [ "$NG" -eq 0 ] && pass "zero CLAUDE_PLUGIN_ROOT residuals in ported skills" \
   || fail "found $NG files still referencing CLAUDE_PLUGIN_ROOT"
@@ -269,13 +432,49 @@ PY
   || fail "ported plugin skills have invalid frontmatter or exposed non-skill dirs"
 
 echo "== Installer: idempotency + uninstall =="
+# Codex doctor is a local schema probe; its overall exit can be nonzero because
+# an isolated probe home intentionally has no credentials. This stub preserves
+# that contract and lets installer failure paths be tested without Codex/auth.
+CODEX_STUB="$TMP/codex-profile-probe"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'count="$(find "${CODEX_HOME:?}/agents" -maxdepth 1 -name '\''uberdev-*.toml'\'' 2>/dev/null | wc -l | tr -d '\''[:space:]'\'')"' \
+  'if [ "${1:-}" != doctor ] || [ "${2:-}" != --json ] || [ "$count" -ne 44 ]; then exit 64; fi' \
+  'if [ "${CODEX_PROFILE_PROBE_MODE:-ok}" = reject ]; then' \
+  '  printf '\''%s\n'\'' '\''{"checks":{"config.load":{"details":{"startup warning":"Ignoring malformed agent role definition: /secret/profile/payload"}}}}'\''' \
+  'else' \
+  '  printf '\''%s\n'\'' '\''{"checks":{"config.load":{"details":{}}}}'\''' \
+  'fi' \
+  'exit 1' > "$CODEX_STUB"
+chmod +x "$CODEX_STUB"
+export CODEX_BIN="$CODEX_STUB"
+
+TH_PROFILE_REJECT="$TMP/home-profile-reject"
+mkdir -p "$TH_PROFILE_REJECT/.codex/agents"
+printf 'existing-user-agent\n' > "$TH_PROFILE_REJECT/.codex/agents/uberdev-existing.toml"
+if env HOME="$TH_PROFILE_REJECT" CODEX_HOME="$TH_PROFILE_REJECT/.codex" \
+    CODEX_PROFILE_PROBE_MODE=reject bash "$INSTALLER" \
+    >/tmp/codex-profile-reject-out 2>&1; then
+  fail "installer rejects malformed staged profiles before live mutation"
+elif grep -q 'existing-user-agent' "$TH_PROFILE_REJECT/.codex/agents/uberdev-existing.toml" \
+  && [ ! -e "$TH_PROFILE_REJECT/.codex/plugins/uberdev-codex" ] \
+  && [ ! -e "$TH_PROFILE_REJECT/.agents/skills" ] \
+  && [ ! -e "$TH_PROFILE_REJECT/.codex/AGENTS.md" ] \
+  && grep -q 'staged Codex agent profile validation failed' /tmp/codex-profile-reject-out \
+  && ! grep -q '/secret/profile/payload' /tmp/codex-profile-reject-out; then
+  pass "installer rejects malformed staged profiles before live mutation"
+else
+  fail "profile rejection mutated live state or leaked raw diagnostics"
+fi
+
 # Two consecutive installs into the same throwaway HOME, then verify no
 # duplicate primer blocks. Then uninstall and verify cleanup.
 TH="$TMP/home"
 assert_cmd 0 "first install into throwaway HOME" \
   env HOME="$TH" CODEX_HOME="$TH/.codex" bash "$INSTALLER"
 if [ -x "$TH/.codex/plugins/uberdev-codex/lib/solve-launcher.sh" ] \
-  && [ -r "$TH/.codex/plugins/uberdev-codex/lib/dispatch.sh" ]; then
+  && [ -r "$TH/.codex/plugins/uberdev-codex/lib/dispatch.sh" ] \
+  && [ -r "$TH/.codex/plugins/uberdev-codex/lib/command-workspace.py" ]; then
   pass "standalone installer installs stable runtime lib under CODEX_HOME"
 else
   fail "standalone installer did not install stable runtime lib under CODEX_HOME"
@@ -342,6 +541,7 @@ NM="$(find "$TH_LEGACY/.agents/skills" -maxdepth 2 -name '.uberdev-codex-managed
 if [ "$NS" -eq 39 ] \
   && [ "$NM" -eq 39 ] \
   && [ -x "$TH_LEGACY/.codex/plugins/uberdev-codex/lib/solve-launcher.sh" ] \
+  && [ -r "$TH_LEGACY/.codex/plugins/uberdev-codex/lib/command-workspace.py" ] \
   && grep -Rql '\.codex/uberdev.local.md' "$TH_LEGACY/.agents/skills/uberdev-cmd-solve/SKILL.md"; then
   pass "legacy unmarked skill adoption upgrades skills, markers, and runtime"
 else
@@ -435,7 +635,8 @@ assert_cmd 0 "standalone copied installer bootstraps missing repo sources from a
 NS="$(find "$TH3/.agents/skills" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d '[:space:]')"
 NA="$(find "$TH3/.codex/agents" -maxdepth 1 -name 'uberdev-*.toml' 2>/dev/null | wc -l | tr -d '[:space:]')"
 NB="$(grep -c 'BEGIN uberdev-codex-primer' "$TH3/.codex/AGENTS.md" 2>/dev/null || echo 0)"
-[ "$NS" -eq 39 ] && [ "$NA" -eq 42 ] && [ "$NB" -eq 1 ] \
+[ "$NS" -eq 39 ] && [ "$NA" -eq 44 ] && [ "$NB" -eq 1 ] \
+  && [ -r "$TH3/.codex/plugins/uberdev-codex/lib/command-workspace.py" ] \
   && pass "bootstrapped standalone install carries skills, agents, and primer" \
   || fail "bootstrapped install incomplete: skills=$NS agents=$NA primer=$NB"
 
@@ -545,6 +746,7 @@ PY
   || fail "manifest or marketplace invalid"
 if [ -r "$REPO_ROOT/codex/uberdev-codex/lib/dispatch.sh" ] \
   && [ -r "$REPO_ROOT/codex/uberdev-codex/lib/solve-launcher.sh" ] \
+  && [ -r "$REPO_ROOT/codex/uberdev-codex/lib/command-workspace.py" ] \
   && [ -x "$REPO_ROOT/codex/uberdev-codex/hooks/session-start" ] \
   && grep -q '\${PLUGIN_ROOT}/hooks/session-start' "$REPO_ROOT/codex/uberdev-codex/hooks/hooks.json"; then
   pass "plugin package carries runtime lib and plugin-local hook command"
