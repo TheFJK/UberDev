@@ -25,6 +25,10 @@ CONTRACT_BLOCK = re.compile(
 )
 BASH_FENCE = re.compile(r"^[ \t]*```bash([^\n]*)\n(.*?)^[ \t]*```[ \t]*$", re.MULTILINE | re.DOTALL)
 EDGE_LITERAL = re.compile(r"(?<![a-z0-9_.])((?:brainstorm|orchestrator|sdd|review_pr)\.[a-z0-9_.]+)")
+LITERAL_DISPATCH = re.compile(
+    r"^\s*(?:[a-z0-9_ |*-]+\)\s*)?"
+    r"(?:uberdev_brainstorm_dispatch|uberdev_design_dispatch|review_child_single|review_child_record)\s+"
+)
 ROW_KEYS = {"inputs", "optional_inputs", "allowed_workflows", "risk_scope", "risk_argument"}
 WORKFLOWS = {"review-pr", "simplify", "solve", "turbo"}
 
@@ -73,6 +77,8 @@ def _literal_payloads(fences: list[tuple[str, str]]) -> dict[str, set[str]]:
 
     payloads: dict[str, set[str]] = {}
     for line in bodies.splitlines():
+        if not LITERAL_DISPATCH.match(line):
+            continue
         edges = EDGE_LITERAL.findall(line)
         referenced = {
             variable
@@ -107,6 +113,18 @@ def _sdd_payloads(bash: str) -> dict[str, set[str]]:
         if not keys:
             fail(f"{edge}: missing executable payload constructor")
         payloads[edge] = keys
+    constructor_flow = re.search(
+        r'^\s*task_inputs_json="\$\(sdd_inputs_for_task "\$edge_id" "\$task_id"\)"',
+        bash,
+        re.MULTILINE,
+    )
+    dispatch = re.search(
+        r'^\s*sdd_dispatch_prepared "\$edge_id" "\$instance_id" "\$task_inputs_json" "\$SDD_RISK_JSON"(?:\s|$)',
+        bash,
+        re.MULTILINE,
+    )
+    if not constructor_flow or not dispatch:
+        fail("subagent-driven-dev: missing executable SDD dispatch")
     return payloads
 
 
@@ -119,6 +137,13 @@ def _post_review_payloads(bash: str, declared: set[str]) -> dict[str, set[str]]:
     )
     if not array or not conditional:
         fail("post-impl-review: missing executable review enumeration/payload branch")
+    record = re.search(
+        r'^\s*post_review_record "\$EDGE_ID" "\$INSTANCE" "\$INPUTS_JSON" \'\[\]\' "\$REVIEW_RECORDS"\s*$',
+        bash,
+        re.MULTILINE,
+    )
+    if not record:
+        fail("post-impl-review: missing executable review record")
     enumerated = set(EDGE_LITERAL.findall(array.group(1)))
     if enumerated != declared:
         fail(f"post-impl-review: dynamic edge mismatch declared={sorted(declared)} executable={sorted(enumerated)}")
@@ -143,6 +168,13 @@ def _simplify_payloads(bash: str, declared: set[str]) -> dict[str, set[str]]:
     if selected is None:
         fail("review-pr: missing dynamic simplify loop")
     lenses, body = selected
+    record = re.search(
+        r'^\s*review_child_record "\$EDGE_ID" "\$INSTANCE" "\$INPUTS_JSON" \'\[\]\' "\$SIMPLIFY_RECORDS"\s*$',
+        body,
+        re.MULTILINE,
+    )
+    if not record:
+        fail("review-pr: missing executable simplify record")
     executable = {f"review_pr.simplify.{lens}" for lens in lenses}
     if executable != declared:
         fail(f"review-pr: dynamic edge mismatch declared={sorted(declared)} executable={sorted(executable)}")
