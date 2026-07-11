@@ -126,11 +126,21 @@ def shell_tokens(chars, protected, delimiters):
     return tokens
 
 
-def heredoc_shell_owner(chars, protected, delimiters):
+def heredoc_shell_owner(chars, protected, delimiters, marker):
+    segment = []
+    for token in shell_tokens(chars, protected, delimiters):
+        kind, value, _, start = token
+        if kind == "separator" and value.strip() and value[0] in ";|&()":
+            if start < marker:
+                segment = []
+                continue
+            break
+        segment.append(token)
+
     expect_command = True
     wrapper_mode = False
     redirection_target = False
-    for kind, value, _, _ in shell_tokens(chars, protected, delimiters):
+    for kind, value, _, _ in segment:
         if kind == "separator":
             if not value.strip():
                 continue
@@ -168,6 +178,8 @@ def check_command_context(chars, protected, delimiters, base_line):
     shell_options = False
     shell_option_operand = False
     shell_payload = False
+    active_shell = False
+    here_string_shell = False
     case_state = None
 
     for kind, value, word_protected, start in shell_tokens(chars, protected, delimiters):
@@ -184,6 +196,7 @@ def check_command_context(chars, protected, delimiters, base_line):
                 continue
             if value[0] in "<>":
                 redirection_target = True
+                here_string_shell = value.startswith("<<<") and active_shell
                 continue
             if value[0] in ";|&()":
                 expect_command = True
@@ -191,6 +204,8 @@ def check_command_context(chars, protected, delimiters, base_line):
                 eval_payload = False
                 shell_options = False
                 shell_payload = False
+                active_shell = False
+                here_string_shell = False
             continue
 
         hit_line = line_at("".join(chars), start, base_line)
@@ -202,6 +217,11 @@ def check_command_context(chars, protected, delimiters, base_line):
             continue
         if redirection_target:
             redirection_target = False
+            if here_string_shell:
+                here_string_shell = False
+                hit = scan_shell(value, hit_line)
+                if hit is not None:
+                    return hit
             continue
         if eval_payload:
             hit = scan_shell(value, hit_line)
@@ -216,6 +236,8 @@ def check_command_context(chars, protected, delimiters, base_line):
             shell_option_operand = False
             continue
         if shell_options:
+            if value.startswith(("-o", "+o", "-O", "+O")) and len(value) > 2:
+                continue
             if value.startswith("-") and not value.startswith("--") and "c" in value[1:]:
                 shell_payload = True
                 continue
@@ -253,6 +275,7 @@ def check_command_context(chars, protected, delimiters, base_line):
             continue
         if value.rsplit("/", 1)[-1] in command_shells:
             shell_options = True
+            active_shell = True
             expect_command = False
             continue
         expect_command = False
@@ -415,7 +438,8 @@ def scan_shell(text, base_line):
             append(char, False)
             index += 1
             while pending_heredocs:
-                delimiter, strip_tabs, quoted, shell_body = pending_heredocs.pop(0)
+                delimiter, strip_tabs, quoted, marker = pending_heredocs.pop(0)
+                shell_body = heredoc_shell_owner(chars, protected, delimiters, marker)
                 body_start = index
                 body_parts = []
                 while index < len(text):
@@ -530,12 +554,12 @@ def scan_shell(text, base_line):
             continue
         if text.startswith("<<", index):
             strip_tabs = text.startswith("<<-", index)
-            shell_body = heredoc_shell_owner(chars, protected, delimiters)
+            marker = len(chars)
             index += 3 if strip_tabs else 2
             while index < len(text) and text[index] in " \t":
                 index += 1
             delimiter, quoted, index = heredoc_word(text, index)
-            pending_heredocs.append((delimiter, strip_tabs, quoted, shell_body))
+            pending_heredocs.append((delimiter, strip_tabs, quoted, marker))
             append(" ", False)
             continue
         append(char, False)
@@ -674,6 +698,8 @@ assert_rejected bash-lower-o-operand "bash -o posix -c 'claude --print review'"
 assert_rejected bash-rcfile-operand "bash --rcfile /tmp/review.rc -c 'codex exec review'"
 assert_rejected zsh-emulate-operand "zsh --emulate sh -c 'claude --print review'"
 assert_rejected zsh-o-operand "zsh -o SH_WORD_SPLIT -c 'spawn_agent --task review'"
+assert_rejected zsh-attached-o-operand "zsh -ocorrect -c 'codex exec review'"
+assert_rejected bash-attached-o-operand "bash -oposix -c 'claude --print review'"
 assert_rejected sh-o-operand "sh -o noglob -c 'codex exec review'"
 assert_rejected zsh-c-ansi-quoted-command "zsh -c \$'spawn_agent --task review'"
 assert_rejected relative-path-quoted-command '"./codex" exec review'
@@ -681,6 +707,12 @@ assert_rejected absolute-path-quoted-command '"/usr/local/bin/codex" exec review
 assert_rejected brace-group-quoted-command '{ "codex" exec review; }'
 assert_rejected shell-heredoc-executable $'bash <<EOF\ncodex exec review\nEOF'
 assert_rejected shell-quoted-heredoc-executable $'sh <<\'EOF\'\nclaude --print review\nEOF'
+assert_rejected shell-heredoc-after-separator $'printf ok; bash <<EOF\ncodex exec review\nEOF'
+assert_rejected shell-heredoc-after-pipeline $'printf ok | bash <<EOF\nspawn_agent --task review\nEOF'
+assert_rejected shell-heredoc-after-and $'printf ok && zsh <<EOF\nclaude --print review\nEOF'
+assert_rejected shell-heredoc-before-command $'<<EOF bash\ncodex exec review\nEOF'
+assert_rejected shell-here-string "bash <<< 'codex exec review'"
+assert_rejected shell-here-string-after-separator "printf ok; zsh <<< 'claude --print review'"
 assert_rejected nested-substitution 'result="$(printf "%s" "$(codex exec review)")"'
 assert_rejected double-quoted-backtick 'result="prefix `claude --print review` suffix"'
 assert_rejected unquoted-heredoc-substitution $'cat <<EOF\n$(codex exec review)\nEOF'
@@ -717,6 +749,11 @@ printf '%s\n' "fully quoted codex and claude data"
 provider_name="codex"
 eval 'printf "%s\n" "codex"'
 bash -c 'printf "%s\n" "claude"'
+bash <<< 'printf "%s\n" "codex"'
+cat <<< 'codex is inert data for cat'
+printf ok; cat <<'DATA'
+codex remains inert non-shell heredoc data
+DATA
 uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks"
 uberdev_dispatch_child "$edge" "$handoff" "$result" "$status"
 python3 - <<'PY'
