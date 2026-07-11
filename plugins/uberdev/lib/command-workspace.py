@@ -79,7 +79,9 @@ def open_directory(path: str, private: bool = False) -> int:
     return fd
 
 
-def load_carrier(raw: str, caller: str) -> tuple[dict[str, Any], dict[str, Any], str, str]:
+def load_carrier(
+    raw: str, caller: str
+) -> tuple[dict[str, Any], dict[str, Any], str, str, tuple[int, int]]:
     try:
         carrier = json.loads(raw)
     except Exception:
@@ -132,23 +134,34 @@ def load_carrier(raw: str, caller: str) -> tuple[dict[str, Any], dict[str, Any],
     if repo != repo_raw:
         fail("invalid_repository")
     repo_fd = open_directory(repo)
-    os.close(repo_fd)
     try:
+        verified_repo = os.fstat(repo_fd)
+        repo_identity = (verified_repo.st_dev, verified_repo.st_ino)
+        git_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        git_env.update({
+            "GIT_CONFIG_COUNT": "0",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+        })
         git_toplevel = subprocess.run(
             ["git", "-C", repo, "rev-parse", "--show-toplevel"],
             check=True,
+            env=git_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
         ).stdout.rstrip("\n")
+        current_repo = os.stat(repo, follow_symlinks=False)
     except (OSError, subprocess.CalledProcessError):
         fail("invalid_repository")
-    if git_toplevel != repo:
+    finally:
+        os.close(repo_fd)
+    if git_toplevel != repo or (current_repo.st_dev, current_repo.st_ino) != repo_identity:
         fail("invalid_repository")
     carrier_run_dir = os.path.realpath(os.path.dirname(state))
     run_fd = open_directory(carrier_run_dir)
     os.close(run_fd)
-    return carrier, context, repo, carrier_run_dir
+    return carrier, context, repo, carrier_run_dir, repo_identity
 
 
 def open_or_create_dir(parent_fd: int, name: str, private: bool) -> tuple[int, bool]:
@@ -172,8 +185,17 @@ def open_or_create_dir(parent_fd: int, name: str, private: bool) -> tuple[int, b
     return fd, created
 
 
-def allocate_workspace(repo: str, run_id: str, artifacts: dict[str, tuple[str, bytes | None]]) -> tuple[str, dict[str, str]]:
+def allocate_workspace(
+    repo: str,
+    run_id: str,
+    artifacts: dict[str, tuple[str, bytes | None]],
+    expected_repo_identity: tuple[int, int],
+) -> tuple[str, dict[str, str]]:
     repo_fd = open_directory(repo)
+    opened_repo = os.fstat(repo_fd)
+    if (opened_repo.st_dev, opened_repo.st_ino) != expected_repo_identity:
+        os.close(repo_fd)
+        fail("repository_changed")
     opened: list[int] = [repo_fd]
     created_dirs: list[tuple[int, str]] = []
     created_files: list[str] = []
@@ -258,7 +280,7 @@ def main() -> int:
     args = parser.parse_args()
     if not RUN_ID.fullmatch(args.run_id):
         fail("invalid_run_id")
-    carrier, _context, repo, carrier_run_dir = load_carrier(args.carrier_json, args.caller)
+    carrier, _context, repo, carrier_run_dir, repo_identity = load_carrier(args.carrier_json, args.caller)
     if args.requested_root:
         if not os.path.isabs(args.requested_root) or os.path.realpath(args.requested_root) != repo:
             fail("repository_mismatch")
@@ -303,7 +325,7 @@ def main() -> int:
     if not isinstance(presets, dict):
         fail("invalid_presets")
     validate_presets(presets, expected_globals, repo, expected_workspace)
-    workspace, paths = allocate_workspace(repo, args.run_id, artifacts)
+    workspace, paths = allocate_workspace(repo, args.run_id, artifacts, repo_identity)
     descriptor = {
         "schema_version": 1, "caller": args.caller, "carrier_workflow": carrier["workflow"],
         "carrier_run_id": carrier["run_id"], "context_file": carrier["context_file"],

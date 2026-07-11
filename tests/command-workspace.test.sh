@@ -54,6 +54,19 @@ if [ -e "$NON_GIT_REPO/.uberdev/research/$NON_GIT_RUN" ]; then
   SECURITY_FAILURES=$((SECURITY_FAILURES + 1))
 fi
 
+# Inherited Git environment cannot make a canonical non-Git directory appear
+# to be the verified worktree.
+MASQUERADE_RUN=20260710-010200-abcdeff
+if GIT_DIR="$REPO/.git" GIT_WORK_TREE="$NON_GIT_REPO" \
+  python3 "$HELPER" --caller review-pr --carrier-json "$NON_GIT_CARRIER" --run-id "$MASQUERADE_RUN" --presets-json '{}' >/dev/null 2>&1; then
+  echo 'inherited Git environment masqueraded a non-Git repository' >&2
+  SECURITY_FAILURES=$((SECURITY_FAILURES + 1))
+fi
+if [ -e "$NON_GIT_REPO/.uberdev/research/$MASQUERADE_RUN" ]; then
+  echo 'Git-environment masquerade wrote a workspace' >&2
+  SECURITY_FAILURES=$((SECURITY_FAILURES + 1))
+fi
+
 REPO_LINK="$TMP/repo-link"
 ln -s "$REPO" "$REPO_LINK"
 SYMLINK_REPO_CARRIER="$(make_carrier solve 44 "$REPO_LINK" "$RUNROOT/symlink-repo")"
@@ -80,6 +93,51 @@ if python3 "$HELPER" --caller review-pr --carrier-json "$WRONG_MODE_CARRIER" --r
 fi
 if [ -e "$REPO/.uberdev/research/$WRONG_MODE_RUN" ]; then
   echo 'wrong-mode context workspace was written' >&2
+  SECURITY_FAILURES=$((SECURITY_FAILURES + 1))
+fi
+
+# Allocation remains bound to the exact repository inode verified by
+# load_carrier, even if that pathname is replaced before the first mkdir.
+RACE_REPO="$TMP/race-repo"
+mkdir -p "$RACE_REPO"
+RACE_REPO="$(cd "$RACE_REPO" && pwd -P)"
+git -C "$RACE_REPO" init -q
+RACE_CARRIER="$(make_carrier solve 46 "$RACE_REPO" "$RUNROOT/race-repo")"
+RACE_RUN=20260710-010202-abcdeff
+if ! python3 - "$HELPER" "$RACE_CARRIER" "$RACE_RUN" <<'PY'
+import importlib.util
+import json
+import os
+import sys
+
+helper_path, carrier_raw, run_id = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("command_workspace", helper_path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+loaded = module.load_carrier(carrier_raw, "review-pr")
+repo = loaded[2]
+verified_identity = loaded[4]
+current = os.stat(repo, follow_symlinks=False)
+assert verified_identity == (current.st_dev, current.st_ino)
+os.rename(repo, repo + ".verified")
+os.mkdir(repo, 0o700)
+rejected = False
+try:
+    module.allocate_workspace(
+        repo,
+        run_id,
+        module.CALLERS["review-pr"]["artifacts"],
+        expected_repo_identity=verified_identity,
+    )
+except module.Failure:
+    rejected = True
+workspace = os.path.join(repo, ".uberdev", "research", run_id)
+if not rejected or os.path.lexists(workspace):
+    raise SystemExit(1)
+PY
+then
+  echo 'repository inode replacement was not rejected before writes' >&2
   SECURITY_FAILURES=$((SECURITY_FAILURES + 1))
 fi
 [ "$SECURITY_FAILURES" -eq 0 ]
