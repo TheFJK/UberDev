@@ -64,11 +64,19 @@ for i in "${!edges[@]}"; do
   jq -e --arg edge "${edges[$i]}" '.edge_id==$edge and (.inputs|type)=="object"' "$UBERDEV_CHILD_HANDOFF" >/dev/null
 done
 
-# Every required reviewer supports one unique, exact-input format repair retry.
+# Every required reviewer supports one unique, exact-input format retry.
 for i in 0 1 2 3 4 5; do
-  retry="$(jq -c '. + {format_repair:true}' <<<"${inputs[$i]}")"
+  retry="$(jq -c '. + {format_retry:true}' <<<"${inputs[$i]}")"
   uberdev_create_child_handoff "${edges[$i]}" "review-contract-${i}-iter1-attempt02" "$retry" '[]' >/dev/null
-  jq -e '.inputs.format_repair == true' "$UBERDEV_CHILD_HANDOFF" >/dev/null
+  jq -e '.inputs.format_retry == true' "$UBERDEV_CHILD_HANDOFF" >/dev/null
+done
+
+# A standalone simplify run may omit an additional focus hint.
+for lens in reuse quality efficiency; do
+  edge="review_pr.simplify.$lens"
+  input="$(jq -cn --arg p "$path" --arg lens "$lens" '{diff_path:$p,lens:$lens}')"
+  uberdev_create_child_handoff "$edge" "simplify-no-focus-$lens-iter1-attempt01" "$input" '[]' >/dev/null
+  jq -e '(.inputs | has("focus") | not)' "$UBERDEV_CHILD_HANDOFF" >/dev/null
 done
 
 # Source/init precedes the builders, and all executable snippets are nounset-safe.
@@ -126,5 +134,7 @@ grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$REVIEW"
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$SIMPLIFY"
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$POST"
 ! rg -n "wait_child .* 0|IFS='\\|'|additional_focus|brief_path|lens_index" "$REVIEW" "$SIMPLIFY" "$POST"
+! rg -n 'format_repair' "$POST"
+rg -q 'format_retry' "$POST"
 
 echo 'review-child-handoff: PASS'

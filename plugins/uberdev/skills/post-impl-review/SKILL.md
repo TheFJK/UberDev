@@ -230,13 +230,13 @@ confidence: low | medium | high
 
 Wait until all 6 routed calls have returned. Parse each YAML block.
 
-Failure handling is fail-closed. A BLOCKED or unparseable reviewer gets exactly one format-repair retry using the same stable edge and a fresh `attempt02` instance whose inputs add `format_repair: true`. If the repaired return is still BLOCKED or unparseable, the aggregate verdict is BLOCKED and `/review-pr` cannot emit a green trust signal. Never drop a reviewer and continue with N-1 evidence.
+Failure handling is fail-closed. A BLOCKED or unparseable reviewer gets exactly one format-repair retry using the same stable edge and a fresh `attempt02` instance whose inputs add `format_retry: true`. If the repaired return is still BLOCKED or unparseable, the aggregate verdict is BLOCKED and `/review-pr` cannot emit a green trust signal. Never drop a reviewer and continue with N-1 evidence.
 
 ```bash uberdev-executable
 if [ "$FAILED_REVIEW_EDGE" = review_pr.review.general ]; then
-  REPAIR_INPUTS="$(jq -cn --argjson changed_paths "$CHANGED_PATHS_JSON" --arg diff_path "$DIFF_ARTIFACT_PATH" --arg criteria_path "$CRITERIA_PATH" --argjson emphasis "$EMPHASIS_JSON" --arg lens general '{changed_paths:$changed_paths,diff_path:$diff_path,criteria_path:$criteria_path,emphasis:$emphasis,lens:$lens,format_repair:true}')"
+  REPAIR_INPUTS="$(jq -cn --argjson changed_paths "$CHANGED_PATHS_JSON" --arg diff_path "$DIFF_ARTIFACT_PATH" --arg criteria_path "$CRITERIA_PATH" --argjson emphasis "$EMPHASIS_JSON" --arg lens general '{changed_paths:$changed_paths,diff_path:$diff_path,criteria_path:$criteria_path,emphasis:$emphasis,lens:$lens,format_retry:true}')"
 else
-  REPAIR_INPUTS="$(jq -cn --argjson changed_paths "$CHANGED_PATHS_JSON" --arg diff_path "$DIFF_ARTIFACT_PATH" --arg criteria_path "$CRITERIA_PATH" --argjson emphasis "$EMPHASIS_JSON" '{changed_paths:$changed_paths,diff_path:$diff_path,criteria_path:$criteria_path,emphasis:$emphasis,format_repair:true}')"
+  REPAIR_INPUTS="$(jq -cn --argjson changed_paths "$CHANGED_PATHS_JSON" --arg diff_path "$DIFF_ARTIFACT_PATH" --arg criteria_path "$CRITERIA_PATH" --argjson emphasis "$EMPHASIS_JSON" '{changed_paths:$changed_paths,diff_path:$diff_path,criteria_path:$criteria_path,emphasis:$emphasis,format_retry:true}')"
 fi
 REPAIR_INSTANCE="post-review-r${FAILED_REVIEW_INDEX}-iter${REVIEW_ITERATION}-attempt02"
 REPAIR_PREFIX="$RESEARCH_DIR_ABS/post-review-repair-r${FAILED_REVIEW_INDEX}"

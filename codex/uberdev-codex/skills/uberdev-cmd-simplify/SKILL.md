@@ -9,6 +9,9 @@ This skill was ported from a Claude Code slash command (`/simplify`). On Codex:
 
 - **`$ARGUMENTS`** below = the user's free-text request (the words after the
   command name, or your whole task description if invoked implicitly).
+- **`Task` tool** calls → use `spawn_agent`; collect results with `wait_agent`
+  (see ~/.agents/skills/using-uberdev/references/codex-tools.md for the
+  named-agent mapping).
 - **`Skill` tool** invocations → skills load natively; just follow the named
   skill's instructions.
 - **`Workflow` tool** (testers/uberscan/ubersimplify) → no Codex equivalent;
@@ -48,7 +51,9 @@ AGG_PATH="${AGG_PATH:-$RESEARCH_DIR_ABS/simplify-final.md}"
 COMMIT_RANGE_PATH="${COMMIT_RANGE_PATH:-$RESEARCH_DIR_ABS/commit-range.txt}"
 PHASE1_DISPOSITION_PATH="${PHASE1_DISPOSITION_PATH:-$RESEARCH_DIR_ABS/phase1-disposition.json}"
 PHASE2_DISPOSITION_PATH="${PHASE2_DISPOSITION_PATH:-$RESEARCH_DIR_ABS/phase2-disposition.json}"
-: >"$COMMIT_RANGE_PATH"; : >"$PHASE1_DISPOSITION_PATH"; : >"$PHASE2_DISPOSITION_PATH"
+[ -f "$COMMIT_RANGE_PATH" ] || : >"$COMMIT_RANGE_PATH"
+[ -f "$PHASE1_DISPOSITION_PATH" ] || printf '{}\n' >"$PHASE1_DISPOSITION_PATH"
+[ -f "$PHASE2_DISPOSITION_PATH" ] || printf '{}\n' >"$PHASE2_DISPOSITION_PATH"
 if [ ! -f "$DIFF_ARTIFACT_PATH" ]; then printf '%s\n%s\n' '<external-untrusted-input source="pr-diff">' '</external-untrusted-input>' >"$DIFF_ARTIFACT_PATH"; fi
 if [ -z "${UBERDEV_RUN_CARRIER_JSON:-}" ]; then uberdev_prepare_run_carrier simplify 0 medium '[]' >/dev/null; fi
 ```
@@ -156,7 +161,7 @@ Source `${PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberde
 SIMPLIFY_RECORDS="$RESEARCH_DIR_ABS/simplify.records"; SIMPLIFY_DESCRIPTORS="$RESEARCH_DIR_ABS/simplify.descriptors"; SIMPLIFY_LAUNCHED="$RESEARCH_DIR_ABS/simplify.launched"; : >"$SIMPLIFY_RECORDS"
 for LENS in reuse quality efficiency; do
   EDGE_ID="review_pr.simplify.$LENS"; INSTANCE="simplify-$LENS-iter01-attempt01"
-  INPUTS_JSON="$(jq -cn --arg diff_path "$DIFF_ARTIFACT_PATH" --arg lens "$LENS" --arg focus "$FOCUS" '{diff_path:$diff_path,lens:$lens,focus:$focus}')"
+  INPUTS_JSON="$(jq -cn --arg diff_path "$DIFF_ARTIFACT_PATH" --arg lens "$LENS" --arg focus "$FOCUS" '{diff_path:$diff_path,lens:$lens} + if ($focus|length)>0 then {focus:$focus} else {} end')"
   review_child_record "$EDGE_ID" "$INSTANCE" "$INPUTS_JSON" '[]' "$SIMPLIFY_RECORDS"
 done
 review_child_fanout "$SIMPLIFY_RECORDS" "$SIMPLIFY_DESCRIPTORS" "$SIMPLIFY_LAUNCHED" "$REVIEW_PR_TIMEOUT"

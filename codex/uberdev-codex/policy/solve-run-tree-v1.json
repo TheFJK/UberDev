@@ -844,11 +844,10 @@
       ],
       "required_inputs": {
         "diff_path": "path",
-        "lens": "string",
-        "focus": "string"
+        "lens": "string"
       },
       "optional_inputs": {
-        "additional_focus": "optional_string"
+        "focus": "optional_string"
       }
     },
     "review_pr.simplify.quality": {
@@ -867,11 +866,10 @@
       ],
       "required_inputs": {
         "diff_path": "path",
-        "lens": "string",
-        "focus": "string"
+        "lens": "string"
       },
       "optional_inputs": {
-        "additional_focus": "optional_string"
+        "focus": "optional_string"
       }
     },
     "review_pr.simplify.efficiency": {
@@ -890,11 +888,10 @@
       ],
       "required_inputs": {
         "diff_path": "path",
-        "lens": "string",
-        "focus": "string"
+        "lens": "string"
       },
       "optional_inputs": {
-        "additional_focus": "optional_string"
+        "focus": "optional_string"
       }
     },
     "review_pr.fix.phase2": {

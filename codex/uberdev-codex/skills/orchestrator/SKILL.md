@@ -463,7 +463,7 @@ Use `AskUserQuestion` with 2 options (`Yes` / `No`) so the consent is structural
 ```bash
 PLUGIN_SCRIPTS="${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/skills/brainstorm/scripts"
 if [[ ! -d "$PLUGIN_SCRIPTS" ]]; then
-  PLUGIN_SCRIPTS="$(find "${CODEX_HOME:-$HOME/.codex}/plugins" "${HOME}/.agents/skills" -type d -path '*/uberdev/skills/brainstorm/scripts' 2>/dev/null | head -1)"
+  PLUGIN_SCRIPTS="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex/skills/brainstorm/scripts" "${HOME}/.agents/skills/brainstorm/scripts" -maxdepth 0 -type d 2>/dev/null | head -1)"
 fi
 if [[ ! -d "$PLUGIN_SCRIPTS" ]]; then
   echo "uberdev brainstorm scripts not found — falling back to terminal-only Phase 2" >&2

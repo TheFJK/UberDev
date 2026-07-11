@@ -27,6 +27,11 @@ for edge,row in providers.items():
     if row.get('retry',{}).get('format'):
         assert row['optional_inputs']['format_retry']=='boolean', edge
         assert row['optional_inputs']['format_example_path']=='path', edge
+for edge in ('review_pr.simplify.reuse','review_pr.simplify.quality','review_pr.simplify.efficiency'):
+    row=providers[edge]
+    assert 'focus' not in row['required_inputs'], edge
+    assert row['optional_inputs'].get('focus')=='optional_string', edge
+    assert 'additional_focus' not in row['optional_inputs'], edge
 PY
 
 grep -q '^uberdev_preflight_child_batch()' "$LIB"
