@@ -37,9 +37,10 @@ forbidden_words = {
     "claude",
     "codex",
 }
-command_starters = {"if", "elif", "while", "until", "then", "else", "do", "!"}
+command_starters = {"if", "elif", "while", "until", "then", "else", "do", "!", "{"}
 command_wrappers = {"command", "builtin", "exec", "env", "nohup", "sudo", "time"}
 command_shells = {"bash", "sh", "zsh"}
+shell_operand_options = {"-O", "+O", "-o", "+o", "--init-file", "--rcfile", "--emulate"}
 
 
 class PolicyError(Exception):
@@ -125,12 +126,47 @@ def shell_tokens(chars, protected, delimiters):
     return tokens
 
 
+def heredoc_shell_owner(chars, protected, delimiters):
+    expect_command = True
+    wrapper_mode = False
+    redirection_target = False
+    for kind, value, _, _ in shell_tokens(chars, protected, delimiters):
+        if kind == "separator":
+            if not value.strip():
+                continue
+            if value[0] in "<>":
+                redirection_target = True
+                continue
+            if value[0] in ";|&()":
+                expect_command = True
+                wrapper_mode = False
+                redirection_target = False
+            continue
+        if redirection_target:
+            redirection_target = False
+            continue
+        if not expect_command:
+            continue
+        if assignment_atom.match(value):
+            continue
+        if value in command_starters:
+            continue
+        if value in command_wrappers:
+            wrapper_mode = True
+            continue
+        if wrapper_mode and value.startswith("-"):
+            continue
+        return value.rsplit("/", 1)[-1] in command_shells
+    return False
+
+
 def check_command_context(chars, protected, delimiters, base_line):
     expect_command = True
     wrapper_mode = False
     redirection_target = False
     eval_payload = False
     shell_options = False
+    shell_option_operand = False
     shell_payload = False
     case_state = None
 
@@ -173,12 +209,20 @@ def check_command_context(chars, protected, delimiters, base_line):
                 return hit
             continue
         if shell_payload:
+            if value == "--":
+                continue
             return scan_shell(value, hit_line)
+        if shell_option_operand:
+            shell_option_operand = False
+            continue
         if shell_options:
             if value.startswith("-") and not value.startswith("--") and "c" in value[1:]:
                 shell_payload = True
                 continue
-            if value.startswith("-"):
+            if value in shell_operand_options:
+                shell_option_operand = True
+                continue
+            if value.startswith(("-", "+")):
                 continue
             shell_options = False
             continue
@@ -196,7 +240,8 @@ def check_command_context(chars, protected, delimiters, base_line):
             case_state = "header"
             expect_command = False
             continue
-        if value in forbidden_words or value in {"Task(", "Agent("}:
+        executable_name = value.rsplit("/", 1)[-1]
+        if executable_name in forbidden_words or value in {"Task(", "Agent("}:
             return value, hit_line
         if value in command_wrappers:
             wrapper_mode = True
@@ -370,7 +415,7 @@ def scan_shell(text, base_line):
             append(char, False)
             index += 1
             while pending_heredocs:
-                delimiter, strip_tabs, quoted = pending_heredocs.pop(0)
+                delimiter, strip_tabs, quoted, shell_body = pending_heredocs.pop(0)
                 body_start = index
                 body_parts = []
                 while index < len(text):
@@ -391,7 +436,11 @@ def scan_shell(text, base_line):
                     raise PolicyError("unclosed heredoc")
                 if index == len(text) and candidate != delimiter:
                     raise PolicyError("unclosed heredoc")
-                if not quoted:
+                if shell_body:
+                    hit = scan_shell("".join(body_parts), line_at(text, body_start, base_line))
+                    if hit is not None:
+                        return hit
+                elif not quoted:
                     hit = scan_heredoc_expansions("".join(body_parts), line_at(text, body_start, base_line))
                     if hit is not None:
                         return hit
@@ -481,11 +530,12 @@ def scan_shell(text, base_line):
             continue
         if text.startswith("<<", index):
             strip_tabs = text.startswith("<<-", index)
+            shell_body = heredoc_shell_owner(chars, protected, delimiters)
             index += 3 if strip_tabs else 2
             while index < len(text) and text[index] in " \t":
                 index += 1
             delimiter, quoted, index = heredoc_word(text, index)
-            pending_heredocs.append((delimiter, strip_tabs, quoted))
+            pending_heredocs.append((delimiter, strip_tabs, quoted, shell_body))
             append(" ", False)
             continue
         append(char, False)
@@ -618,7 +668,19 @@ assert_rejected wrapped-fully-quoted-command 'command "claude" --print review'
 assert_rejected eval-quoted-command 'eval "codex exec review"'
 assert_rejected bash-c-single-quoted-command "bash -c 'claude --print review'"
 assert_rejected bash-combined-c-option "bash -lc 'codex exec review'"
+assert_rejected bash-c-option-terminator "bash -c -- 'codex exec review'"
+assert_rejected bash-capital-o-operand "bash -O extglob -c 'codex exec review'"
+assert_rejected bash-lower-o-operand "bash -o posix -c 'claude --print review'"
+assert_rejected bash-rcfile-operand "bash --rcfile /tmp/review.rc -c 'codex exec review'"
+assert_rejected zsh-emulate-operand "zsh --emulate sh -c 'claude --print review'"
+assert_rejected zsh-o-operand "zsh -o SH_WORD_SPLIT -c 'spawn_agent --task review'"
+assert_rejected sh-o-operand "sh -o noglob -c 'codex exec review'"
 assert_rejected zsh-c-ansi-quoted-command "zsh -c \$'spawn_agent --task review'"
+assert_rejected relative-path-quoted-command '"./codex" exec review'
+assert_rejected absolute-path-quoted-command '"/usr/local/bin/codex" exec review'
+assert_rejected brace-group-quoted-command '{ "codex" exec review; }'
+assert_rejected shell-heredoc-executable $'bash <<EOF\ncodex exec review\nEOF'
+assert_rejected shell-quoted-heredoc-executable $'sh <<\'EOF\'\nclaude --print review\nEOF'
 assert_rejected nested-substitution 'result="$(printf "%s" "$(codex exec review)")"'
 assert_rejected double-quoted-backtick 'result="prefix `claude --print review` suffix"'
 assert_rejected unquoted-heredoc-substitution $'cat <<EOF\n$(codex exec review)\nEOF'
