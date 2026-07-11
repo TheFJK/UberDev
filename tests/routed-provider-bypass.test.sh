@@ -21,7 +21,12 @@ scan_shell_fences() {
 import re
 import sys
 
-fence_open = re.compile(r"^[ \t]*(?P<marker>`{3,}|~{3,})(?P<info>[^\r\n]*)$")
+# CommonMark/GFM fences allow 0-3 leading spaces. Backtick info strings are
+# validated below because, unlike tilde info strings, they cannot contain `.
+fence_open = re.compile(
+    r"^(?P<indent> {0,3})(?P<marker>`{3,}|~{3,})(?P<info>[^\r\n]*)$"
+)
+fence_close = re.compile(r"^ {0,3}(?P<marker>`+|~+)[ \t]*$")
 shell_languages = {"bash", "sh", "zsh"}
 forbidden = re.compile(
     r"(?<![A-Za-z0-9])(?:spawn_agent|uberdev_agent_dispatch|"
@@ -45,6 +50,8 @@ for path in sys.argv[1:]:
                 if opening:
                     marker = opening.group("marker")
                     info = opening.group("info").strip(" \t")
+                    if marker[0] == "`" and "`" in info:
+                        continue
                     language = info.split(None, 1)[0] if info else ""
                     in_fence = True
                     scan_body = language in shell_languages
@@ -53,10 +60,11 @@ for path in sys.argv[1:]:
                     fence_body_line = line_number + 1
                 continue
 
-            stripped = line.strip(" \t")
+            closing = fence_close.fullmatch(line)
+            closing_marker = closing.group("marker") if closing else ""
             if (
-                len(stripped) >= marker_length
-                and stripped == marker_character * len(stripped)
+                closing_marker.startswith(marker_character)
+                and len(closing_marker) >= marker_length
             ):
                 in_fence = False
                 scan_body = False
@@ -107,6 +115,17 @@ assert_document_rejected() {
   fi
 }
 
+assert_document_accepted() {
+  local label="$1" document="$2" fixture
+  fixture="$TMP/$label.md"
+  printf '%s' "$document" >"$fixture"
+  if ! scan_shell_fences "$fixture" >"$TMP/$label.stdout" 2>"$TMP/$label.stderr"; then
+    echo "scanner rejected clean document: $label" >&2
+    sed -n '1,10p' "$TMP/$label.stderr" >&2
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
 # Every closed forbidden atom is rejected. Task/Agent accept horizontal space
 # before the opening parenthesis.
 assert_rejected spawn-agent 'spawn_agent --task review'
@@ -132,8 +151,24 @@ assert_document_rejected zsh-fence $'```zsh\nAgent (role=reviewer)\n```\n'
 assert_document_rejected four-backtick-fence $'````bash\nprintf "%s\\n" codex\n````\n'
 assert_document_rejected longer-backtick-closer $'````sh\nprovider=claude\n`````\n'
 assert_document_rejected tilde-shell-fence $'~~~zsh\nspawn_agent --task review\n~~~\n'
+assert_document_rejected three-space-shell-fence $'   ```bash\ncodex exec review\n   ```\n'
 assert_document_rejected short-backtick-closer $'````bash\nprintf ok\n```\n'
 assert_document_rejected unclosed-fence $'```bash\nprintf ok\n'
+
+# Invalid Markdown fences must not enter parser state and shadow a later real
+# executable fence. Invalid over-indented closers likewise must not end one.
+assert_document_rejected four-space-opener-shadow $'    ```text\n```bash\ncodex exec review\n```\n'
+assert_document_rejected tab-opener-shadow $'\t~~~text\n~~~sh\nclaude --print review\n~~~\n'
+assert_document_rejected backtick-info-shadow $'```text`invalid\n```bash\ncodex exec review\n```\n'
+assert_document_rejected four-space-closer-shadow $'```bash\nprintf ok\n    ```\ncodex exec review\n```\n'
+assert_document_rejected tab-closer-shadow $'~~~sh\nprintf ok\n\t~~~\nclaude --print review\n~~~\n'
+
+# Four-space indentation is ordinary indented code, not a fenced shell block.
+# A valid non-shell fence may still contain shell-looking literal text, and a
+# tilde fence may contain backticks in its info string.
+assert_document_accepted indented-pseudo-shell $'    ```bash\n    codex exec review\n    ```\n'
+assert_document_accepted valid-non-shell-shadow $'   ```text\n```bash\ncodex exec review\n```\n'
+assert_document_accepted tilde-backtick-info $'~~~text`allowed\n```bash\ncodex exec review\n~~~\n'
 
 # Clean controls cover the intended exclusions: case-sensitive uppercase host
 # variables, routed APIs, prose/non-shell fences, and alnum-extended words.
