@@ -480,7 +480,10 @@ _uberdev_child_backend_cancellation_supported() {
     # cancellation verb. The adapter watcher is still a complete supervision
     # path for healthy/terminal runs; timeout remains fail-closed without
     # fabricating a terminal (child-wait.test.sh locks that behavior).
-    claude-bg) command -v claude >/dev/null 2>&1 ;;
+    claude-bg)
+      command -v _uberdev_agent_claude_probe >/dev/null 2>&1 \
+        && command -v _uberdev_agent_start_watcher >/dev/null 2>&1
+      ;;
     *) return 2 ;;
   esac
 }
