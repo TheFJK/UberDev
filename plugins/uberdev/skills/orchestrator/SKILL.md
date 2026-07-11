@@ -207,6 +207,9 @@ UBERDEV_DESIGN_PREPARED_HANDOFFS=()
 UBERDEV_DESIGN_PREPARED_RESULTS=()
 UBERDEV_DESIGN_PREPARED_STATUSES=()
 UBERDEV_DESIGN_DISPATCH_RECEIPTS=()
+UBERDEV_DESIGN_RECEIPT_STATUSES=()
+UBERDEV_DESIGN_RECEIPT_RESULTS=()
+UBERDEV_DESIGN_WAITED_INSTANCES=()
 UBERDEV_DESIGN_WAITED=0
 UBERDEV_DESIGN_BATCH_LAUNCHED=0
 UBERDEV_DESIGN_UNWIND_TIMEOUT="${UBERDEV_DESIGN_UNWIND_TIMEOUT:-600}"
@@ -216,14 +219,35 @@ uberdev_design_reset_batch() {
   UBERDEV_DESIGN_PREPARED_EDGES=(); UBERDEV_DESIGN_PREPARED_INSTANCES=()
   UBERDEV_DESIGN_PREPARED_HANDOFFS=(); UBERDEV_DESIGN_PREPARED_RESULTS=()
   UBERDEV_DESIGN_PREPARED_STATUSES=(); UBERDEV_DESIGN_DISPATCH_RECEIPTS=()
+  UBERDEV_DESIGN_RECEIPT_STATUSES=(); UBERDEV_DESIGN_RECEIPT_RESULTS=()
+  UBERDEV_DESIGN_WAITED_INSTANCES=()
   UBERDEV_DESIGN_WAITED=0; UBERDEV_DESIGN_BATCH_LAUNCHED=0
 }
 
 uberdev_unwind_child_receipts() {
-  local receipt instance remainder status result cleanup_rc=0
-  for receipt in "${UBERDEV_DESIGN_DISPATCH_RECEIPTS[@]}"; do
-    instance="${receipt%%|*}"; remainder="${receipt#*|}"
-    status="${remainder%%|*}"; result="${remainder#*|}"
+  local index status result cleanup_rc=0
+  for ((index=0; index<${#UBERDEV_DESIGN_DISPATCH_RECEIPTS[@]}; index++)); do
+    status="${UBERDEV_DESIGN_RECEIPT_STATUSES[$index]}"
+    result="${UBERDEV_DESIGN_RECEIPT_RESULTS[$index]}"
+    if ! uberdev_unwind_child "$status" "$result" "$UBERDEV_DESIGN_UNWIND_TIMEOUT"; then
+      cleanup_rc=1
+    fi
+  done
+  uberdev_design_reset_batch
+  return "$cleanup_rc"
+}
+
+uberdev_design_drain_after_wait_failure() {
+  local index instance waited status result skip cleanup_rc=0
+  for ((index=0; index<${#UBERDEV_DESIGN_DISPATCH_RECEIPTS[@]}; index++)); do
+    instance="${UBERDEV_DESIGN_DISPATCH_RECEIPTS[$index]}"
+    skip=0
+    for waited in "${UBERDEV_DESIGN_WAITED_INSTANCES[@]}"; do
+      [ "$instance" = "$waited" ] && skip=1 && break
+    done
+    [ "$skip" -eq 1 ] && continue
+    status="${UBERDEV_DESIGN_RECEIPT_STATUSES[$index]}"
+    result="${UBERDEV_DESIGN_RECEIPT_RESULTS[$index]}"
     if ! uberdev_unwind_child "$status" "$result" "$UBERDEV_DESIGN_UNWIND_TIMEOUT"; then
       cleanup_rc=1
     fi
@@ -267,7 +291,9 @@ uberdev_design_launch_batch() {
     result="${UBERDEV_DESIGN_PREPARED_RESULTS[$index]}"
     status="${UBERDEV_DESIGN_PREPARED_STATUSES[$index]}"
     if uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null; then
-      UBERDEV_DESIGN_DISPATCH_RECEIPTS+=("$instance|$status|$result")
+      UBERDEV_DESIGN_DISPATCH_RECEIPTS+=("$instance")
+      UBERDEV_DESIGN_RECEIPT_STATUSES+=("$status")
+      UBERDEV_DESIGN_RECEIPT_RESULTS+=("$result")
     else
       dispatch_rc=$?; cleanup_rc=0
       uberdev_unwind_child_receipts || cleanup_rc=$?
@@ -279,15 +305,24 @@ uberdev_design_launch_batch() {
 }
 
 uberdev_design_wait() {
-  local wanted="$1" timeout_s="$2" receipt instance remainder status result
+  local wanted="$1" timeout_s="$2" index instance status result wait_rc cleanup_rc
   if [ "$UBERDEV_DESIGN_BATCH_LAUNCHED" -eq 0 ]; then
     uberdev_design_launch_batch || return $?
   fi
-  for receipt in "${UBERDEV_DESIGN_DISPATCH_RECEIPTS[@]}"; do
-    instance="${receipt%%|*}"
+  for ((index=0; index<${#UBERDEV_DESIGN_DISPATCH_RECEIPTS[@]}; index++)); do
+    instance="${UBERDEV_DESIGN_DISPATCH_RECEIPTS[$index]}"
     if [ "$instance" = "$wanted" ]; then
-      remainder="${receipt#*|}"; status="${remainder%%|*}"; result="${remainder#*|}"
-      uberdev_wait_child "$status" "$result" "$timeout_s" || return $?
+      status="${UBERDEV_DESIGN_RECEIPT_STATUSES[$index]}"
+      result="${UBERDEV_DESIGN_RECEIPT_RESULTS[$index]}"
+      if uberdev_wait_child "$status" "$result" "$timeout_s"; then
+        :
+      else
+        wait_rc=$?; cleanup_rc=0
+        uberdev_design_drain_after_wait_failure || cleanup_rc=$?
+        [ "$cleanup_rc" -eq 0 ] || echo "error: bounded sibling unwind failed after wait instance=$wanted" >&2
+        return "$wait_rc"
+      fi
+      UBERDEV_DESIGN_WAITED_INSTANCES+=("$wanted")
       UBERDEV_DESIGN_WAITED=$((UBERDEV_DESIGN_WAITED + 1))
       if [ "$UBERDEV_DESIGN_WAITED" -eq "${#UBERDEV_DESIGN_DISPATCH_RECEIPTS[@]}" ]; then
         uberdev_design_reset_batch

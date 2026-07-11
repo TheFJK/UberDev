@@ -1756,7 +1756,8 @@ for name,text in (("orchestrator",orchestrator),("brainstorm",brainstorm)):
     contracts.update(json.loads(match.group(1)))
 for edge,row in contracts.items():
     declared=manifest["edges"].get(edge)
-    if not declared or row["inputs"] != declared["inputs"] or row["risk_scope"] != declared["risk_scope"]:
+    required_inputs=list(declared.get("required_inputs", {})) if declared else []
+    if not declared or row["inputs"] != required_inputs or row["risk_scope"] != declared["risk_scope"]:
         raise SystemExit(f"{edge}: callsite contract diverges from manifest")
     expected_risk = None if declared["risk_scope"] == "run" else ([] if declared["risk_scope"] == "none" else "subtask")
     if row["risk_argument"] != expected_risk:
@@ -1817,13 +1818,17 @@ for path, ledger in cases:
     if not match:
         raise SystemExit(f"{path}: unwind function missing")
     reset = "uberdev_design_reset_batch" if "DESIGN" in ledger else "uberdev_brainstorm_reset_batch"
+    statuses = ledger.replace("DISPATCH_RECEIPTS", "RECEIPT_STATUSES")
+    results = ledger.replace("DISPATCH_RECEIPTS", "RECEIPT_RESULTS")
     script = f'''set -u
 calls=()
 uberdev_unwind_child() {{ calls+=("$1|$2|$3"); [ "${{#calls[@]}}" -ne 1 ]; }}
 UBERDEV_DESIGN_UNWIND_TIMEOUT=600
 UBERDEV_BRAINSTORM_UNWIND_TIMEOUT=300
-{ledger}=("one|/tmp/status-1|/tmp/result-1" "two|/tmp/status-2|/tmp/result-2")
-{reset}() {{ {ledger}=(); }}
+{ledger}=(one two)
+{statuses}=(/tmp/status-1 /tmp/status-2)
+{results}=(/tmp/result-1 /tmp/result-2)
+{reset}() {{ {ledger}=(); {statuses}=(); {results}=(); }}
 {match.group(0)}
 rc=0
 uberdev_unwind_child_receipts || rc=$?
@@ -1832,6 +1837,8 @@ uberdev_unwind_child_receipts || rc=$?
 [ "${{calls[0]}}" != "/tmp/status-1|/tmp/result-1|0" ]
 [ "${{calls[1]}}" != "/tmp/status-2|/tmp/result-2|0" ]
 [ "${{#{ledger}[@]}}" -eq 0 ]
+[ "${{#{statuses}[@]}}" -eq 0 ]
+[ "${{#{results}[@]}}" -eq 0 ]
 '''
     completed = subprocess.run(["bash", "-c", script], text=True, capture_output=True)
     if completed.returncode:
@@ -1842,6 +1849,92 @@ then
   PASS=$((PASS + 1))
 else
   printf '%s\n' '  FAIL F9c partial-fanout unwind abandoned a recorded child'
+  FAIL=$((FAIL + 1))
+fi
+
+if python3 - "$ORCHESTRATOR" "$BRAINSTORM" <<'PY'
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+cases = (
+    (
+        Path(sys.argv[1]),
+        "uberdev_design",
+        "UBERDEV_DESIGN",
+    ),
+    (
+        Path(sys.argv[2]),
+        "uberdev_brainstorm",
+        "UBERDEV_BRAINSTORM",
+    ),
+)
+
+def function(text: str, name: str) -> str:
+    match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{.*?^\}}$", text)
+    if not match:
+        raise SystemExit(f"missing production function: {name}")
+    return match.group(0)
+
+for path, prefix, ledger in cases:
+    text = path.read_text(encoding="utf-8")
+    if '"$instance|$status|$result"' in text:
+        raise SystemExit(f"{path}: delimiter-packed receipt remains")
+    reset = function(text, f"{prefix}_reset_batch")
+    drain = function(text, f"{prefix}_drain_after_wait_failure")
+    wait = function(text, f"{prefix}_wait")
+    script = f'''set -eu
+wait_calls=()
+unwind_calls=()
+uberdev_wait_child() {{
+  wait_calls+=("$1::$2::$3")
+  [ "$1" != "/tmp/run|root/status|failed" ] || return 7
+}}
+uberdev_unwind_child() {{
+  unwind_calls+=("$1::$2::$3")
+  [ "$1" != "/tmp/run|root/status|cleanup-error" ] || return 9
+}}
+{ledger}_UNWIND_TIMEOUT=19
+{ledger}_PREPARED_EDGES=(edge-one edge-two edge-three edge-four)
+{ledger}_PREPARED_INSTANCES=(one two three four)
+{ledger}_PREPARED_HANDOFFS=(h1 h2 h3 h4)
+{ledger}_PREPARED_RESULTS=(r1 r2 r3 r4)
+{ledger}_PREPARED_STATUSES=(s1 s2 s3 s4)
+{ledger}_DISPATCH_RECEIPTS=(one two three four)
+{ledger}_RECEIPT_STATUSES=("/tmp/run|root/status|ok" "/tmp/run|root/status|failed" "/tmp/run|root/status|cleanup-error" "/tmp/run|root/status|live")
+{ledger}_RECEIPT_RESULTS=("/tmp/run|root/result|ok" "/tmp/run|root/result|failed" "/tmp/run|root/result|cleanup-error" "/tmp/run|root/result|live")
+{ledger}_WAITED_INSTANCES=()
+{ledger}_WAITED=0
+{ledger}_BATCH_LAUNCHED=1
+{reset}
+{drain}
+{wait}
+{prefix}_wait one 23
+rc=0
+{prefix}_wait two 23 || rc=$?
+[ "$rc" -eq 7 ]
+[ "${{#wait_calls[@]}}" -eq 2 ]
+[ "${{wait_calls[0]}}" = "/tmp/run|root/status|ok::/tmp/run|root/result|ok::23" ]
+[ "${{wait_calls[1]}}" = "/tmp/run|root/status|failed::/tmp/run|root/result|failed::23" ]
+[ "${{#unwind_calls[@]}}" -eq 3 ]
+[ "${{unwind_calls[0]}}" = "/tmp/run|root/status|failed::/tmp/run|root/result|failed::19" ]
+[ "${{unwind_calls[1]}}" = "/tmp/run|root/status|cleanup-error::/tmp/run|root/result|cleanup-error::19" ]
+[ "${{unwind_calls[2]}}" = "/tmp/run|root/status|live::/tmp/run|root/result|live::19" ]
+[ "${{#{ledger}_DISPATCH_RECEIPTS[@]}}" -eq 0 ]
+[ "${{#{ledger}_RECEIPT_STATUSES[@]}}" -eq 0 ]
+[ "${{#{ledger}_RECEIPT_RESULTS[@]}}" -eq 0 ]
+[ "${{#{ledger}_WAITED_INSTANCES[@]}}" -eq 0 ]
+'''
+    completed = subprocess.run(["bash", "-c", script], text=True, capture_output=True)
+    if completed.returncode:
+        raise SystemExit(f"{path}: wait-failure drain contract failed: {completed.stderr}")
+PY
+then
+  printf '%s\n' '  PASS F9d wait failure drains current and live sibling receipts, preserves paths, and resets state'
+  PASS=$((PASS + 1))
+else
+  printf '%s\n' '  FAIL F9d wait failure abandoned siblings or corrupted structured receipts'
   FAIL=$((FAIL + 1))
 fi
 
