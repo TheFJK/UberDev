@@ -34,13 +34,13 @@ jobs:
   shape-checks:
     name: shape-checks
     runs-on: ubuntu-latest
-    # 5 minutes is generous for the wired suite — 63 test files, ~2,700+
-    # grep-and-assert checks, measured at #309 (ci-wiring.test.sh keeps the
-    # run list below complete against tests/*.test.sh on disk; these counts
-    # are a point-in-time snapshot, refresh when they age).
+    # Routed lifecycle, semaphore-race, and provider-contract fixtures now make
+    # the complete Linux suite legitimately exceed five minutes. Ten minutes
+    # preserves the hang guard while leaving room for the real runtime checks
+    # wired below (ci-wiring.test.sh keeps that list complete).
     # Caps the default 360-min budget so a hung test from a fork PR can't burn
     # the public-repo Actions allowance. Bump if the suite legitimately grows.
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install zsh
