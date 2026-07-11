@@ -3,6 +3,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; LIB="$ROOT/plugins/uberdev/lib/agent-dispatch.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT; mkdir -p "$TMP/run"
 trap 'echo "route-context failure: line=$LINENO command=$BASH_COMMAND" >&2' ERR
+file_mode() {
+  local value
+  value="$(stat -c '%a' "$1" 2>/dev/null || true)"
+  case "$value" in
+    ''|*[!0-7]*) stat -f '%Lp' "$1" 2>/dev/null ;;
+    *) printf '%s\n' "$value" ;;
+  esac
+}
 . "$LIB"
 # Config provenance is per-key, redacted, deterministic, and path-canonical.
 mkdir -p "$TMP/project/.codex"
@@ -48,7 +56,7 @@ META='{"run_id":"root-1","repository_id":"repo","workflow":"solve","backend":"co
 OUT="$(uberdev_agent_context_create "$TMP/run" "$REQ" "$DECISION" "$PROV" "$META" '2026-07-10T00:00:00Z')"
 CTX="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_file"])' "$OUT")"
 SHA="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_sha256"])' "$OUT")"
-[ "$(stat -f '%Lp' "$CTX" 2>/dev/null || stat -c '%a' "$CTX")" = 600 ]
+[ "$(file_mode "$CTX")" = 600 ]
 uberdev_agent_context_validate "$CTX" "$SHA" "$TMP/run" >/dev/null
 cp "$CTX" "$TMP/copy"; printf 'x' >> "$CTX"; ! uberdev_agent_context_validate "$CTX" "$SHA" "$TMP/run" >/dev/null 2>&1; mv "$TMP/copy" "$CTX"; chmod 600 "$CTX"
 # Even a caller-supplied matching hash cannot bless a valid-shaped but
