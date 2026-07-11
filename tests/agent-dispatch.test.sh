@@ -6,6 +6,22 @@ LIB="$ROOT/plugins/uberdev/lib/agent-dispatch.sh"
 
 [ -r "$LIB" ] || { echo "agent-dispatch: missing $LIB" >&2; exit 1; }
 
+# Windows Python does not expose os.geteuid(). Every embedded ownership/state
+# expression must use the same deterministic portable fallback.
+python3 -I - "$LIB" <<'PY'
+import os,pathlib,sys
+text=pathlib.Path(sys.argv[1]).read_text()
+assert 'os.geteuid()' not in text
+saved=getattr(os,'geteuid',None)
+if saved is not None: del os.geteuid
+try:
+ uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
+ assert f'.agent-state-{uid if uid is not None else 0}'=='.agent-state-0'
+ assert uid is None  # ownership checks are intentionally skipped on Windows
+finally:
+ if saved is not None: os.geteuid=saved
+PY
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/run"
@@ -766,6 +782,87 @@ cross_backend_case codex
 cross_backend_case background
 cross_backend_case claude-bg
 cross_backend_case wezterm
+
+# A numeric provider that disappears before publishing a terminal snapshot is
+# failed coherently: status, manifest, and capacity must agree.
+DEAD_RUN="$TMP/dead-without-terminal"
+mkdir -p "$DEAD_RUN"
+printf 'dead provider prompt\n' > "$DEAD_RUN/prompt.txt"
+DEAD_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-dead-without-terminal","repository_id":"adapter-death-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":91,"issue_num":91,"capacity":1,"timeout_s":20},separators=(",",":")))' "$DEAD_RUN")"
+_uberdev_agent_dispatch_backend() {
+  nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(.2)' >/dev/null 2>&1 &
+  DISPATCH_ID="$!"; DISPATCH_LOG=""
+  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" > "$6"
+  chmod 600 "$6"
+}
+uberdev_agent_dispatch "$DEAD_REQUEST" "$DEAD_RUN/prompt.txt" "$DEAD_RUN/result.md" "$DEAD_RUN/status.json"
+for _ in 1 2 3 4 5 6; do
+  grep -q '"state":"failed"' "$DEAD_RUN/status.json" 2>/dev/null && break
+  sleep 1
+done
+grep -q '"state":"failed"' "$DEAD_RUN/status.json" || { echo "dead provider retained running status" >&2; exit 1; }
+python3 -I - "$DEAD_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" <<'PY'
+import json,pathlib,sys
+rows=[json.loads(x) for x in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+terminal=[x for x in rows if x.get('run_id')=='adapter-dead-without-terminal' and x.get('event')=='failed']
+assert len(terminal)==1 and terminal[0].get('error_class')=='provider_execution_failed',terminal
+PY
+! grep -R -q 'run_id=adapter-dead-without-terminal' "$DEAD_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
+
+# Once launch succeeds, a failure to bind the exact handle must cancel that
+# provider and reconcile a terminal instead of returning an unowned child.
+. "$ROOT/plugins/uberdev/lib/dispatch.sh"
+POST_RUN="$TMP/post-launch-setup-failure"
+mkdir -p "$POST_RUN"
+printf 'post-launch failure prompt\n' > "$POST_RUN/prompt.txt"
+POST_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-post-launch-failure","repository_id":"adapter-postlaunch-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":92,"issue_num":92,"capacity":1,"timeout_s":20},separators=(",",":")))' "$POST_RUN")"
+eval "$(declare -f uberdev_semaphore_set_handle | sed '1s/uberdev_semaphore_set_handle/_real_postlaunch_set_handle/')"
+POST_SET_CALLS=0
+uberdev_semaphore_set_handle() {
+  POST_SET_CALLS=$((POST_SET_CALLS + 1))
+  [ "$POST_SET_CALLS" -ne 2 ] || return 23
+  _real_postlaunch_set_handle "$@"
+}
+_uberdev_agent_dispatch_backend() {
+  nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(30)' >/dev/null 2>&1 &
+  DISPATCH_ID="$!"; DISPATCH_LOG=""; printf '%s\n' "$DISPATCH_ID" > "$POST_RUN/provider.pid"
+  _uberdev_dispatch_wait_owned_session "$DISPATCH_ID"
+  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" > "$6"
+  chmod 600 "$6"
+}
+if uberdev_agent_dispatch "$POST_REQUEST" "$POST_RUN/prompt.txt" "$POST_RUN/result.md" "$POST_RUN/status.json"; then
+  echo "post-launch setup failure was reported as success" >&2; exit 1
+fi
+POST_PID="$(cat "$POST_RUN/provider.pid")"
+for _ in 1 2 3 4 5; do kill -0 "$POST_PID" 2>/dev/null || break; sleep .1; done
+wait "$POST_PID" 2>/dev/null || true
+kill -0 "$POST_PID" 2>/dev/null && { echo "post-launch setup failure orphaned provider $POST_PID" >&2; exit 1; }
+grep -q '"state":"failed"' "$POST_RUN/status.json"
+! grep -R -q 'run_id=adapter-post-launch-failure' "$POST_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
+eval "$(declare -f _real_postlaunch_set_handle | sed '1s/_real_postlaunch_set_handle/uberdev_semaphore_set_handle/')"
+
+# A detached watcher finalization failure is durable and visible; it may not be
+# redirected away while the lease silently remains live.
+WATCH_RUN="$TMP/watcher-finalize-failure"
+mkdir -p "$WATCH_RUN"
+printf 'watcher failure prompt\n' > "$WATCH_RUN/prompt.txt"
+WATCH_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-watcher-finalize-failure","repository_id":"adapter-watcher-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":93,"issue_num":93,"capacity":1,"timeout_s":20},separators=(",",":")))' "$WATCH_RUN")"
+eval "$(declare -f _uberdev_agent_finalize_terminal | sed '1s/_uberdev_agent_finalize_terminal/_real_watcher_finalize_terminal/')"
+_uberdev_agent_finalize_terminal() { return 29; }
+_uberdev_agent_dispatch_backend() {
+  nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(5)' >/dev/null 2>&1 &
+  DISPATCH_ID="$!"; DISPATCH_LOG=""
+  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" > "$6"; chmod 600 "$6"
+  nohup bash -c 'sleep 1; printf '\''{"backend":"codex","state":"completed","exit_code":0,"pid":"%s"}\\n'\'' "$1" > "$2"; chmod 600 "$2"' _ "$DISPATCH_ID" "$6" >/dev/null 2>&1 &
+}
+uberdev_agent_dispatch "$WATCH_REQUEST" "$WATCH_RUN/prompt.txt" "$WATCH_RUN/result.md" "$WATCH_RUN/status.json"
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$WATCH_RUN/status.json.watcher-error.json" ] && break; sleep 1; done
+python3 -I - "$WATCH_RUN/status.json.watcher-error.json" <<'PY'
+import json,sys
+row=json.load(open(sys.argv[1]))
+assert row['error']=='terminal_finalize_failed' and row['attempts']==3,row
+PY
+eval "$(declare -f _real_watcher_finalize_terminal | sed '1s/_real_watcher_finalize_terminal/_uberdev_agent_finalize_terminal/')"
 
 # Deterministic watcher/reconciler race: pause watcher registration, publish a
 # canonical terminal, let manifest reconciliation consume it first, then run

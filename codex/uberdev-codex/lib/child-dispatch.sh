@@ -476,7 +476,11 @@ _uberdev_child_backend_cancellation_supported() {
   case "$1" in
     codex|background) return 0 ;;
     wezterm) command -v wezterm >/dev/null 2>&1 ;;
-    claude-bg) _uberdev_dispatch_cancel_claude_bg '__uberdev_capability_probe__' >/dev/null 2>&1 ;;
+    # Claude's background-session API is observable but currently has no
+    # cancellation verb. The adapter watcher is still a complete supervision
+    # path for healthy/terminal runs; timeout remains fail-closed without
+    # fabricating a terminal (child-wait.test.sh locks that behavior).
+    claude-bg) command -v claude >/dev/null 2>&1 ;;
     *) return 2 ;;
   esac
 }
@@ -506,7 +510,7 @@ PY
     seen="${seen}${instance}|"
     backend="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["backend"],end="")' "$prepared")" || return 2
     _uberdev_child_backend_cancellation_supported "$backend" || {
-      _uberdev_child_error "backend lacks cancellation capability: $backend"; return 2;
+      _uberdev_child_error "backend lacks lifecycle supervision: $backend"; return 2;
     }
   done
 }

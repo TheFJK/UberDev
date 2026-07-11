@@ -90,8 +90,9 @@ PY
 ! uberdev_create_child_handoff run-risk run-risk-explicit-mismatch "$RISK_INPUTS" '[]' >/dev/null 2>&1
 UBERDEV_RUN_CARRIER_JSON="$SAVED_CARRIER"
 
-# Unsupported cancellation providers are rejected for the complete batch
-# before any child directory/provider allocation.
+# Observable providers without cancellation remain eligible for supervised
+# execution. Timeout still fails closed (covered by child-wait.test.sh), but a
+# healthy Claude-backed workflow must not be disabled before its first child.
 CLAUDE_OUT="$(make_context "$TMP/claude-preflight" inherit root-claude-preflight claude-bg)"
 CLAUDE_CTX="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_file"])' "$CLAUDE_OUT")"
 CLAUDE_SHA="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_sha256"])' "$CLAUDE_OUT")"
@@ -107,7 +108,7 @@ print(json.dumps({'task_path':sys.argv[1],'working_dir':sys.argv[2],'allowed_pat
 PY
 )"
 uberdev_create_child_handoff sdd.task.implement claude-preflight-a1 "$CLAUDE_INPUTS" '[]' >/dev/null
-! uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" >/dev/null 2>&1
+uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" >/dev/null
 [ ! -e "$TMP/claude-preflight/children/claude-preflight-a1" ]
 UBERDEV_RUN_CARRIER_JSON="$SAVED_CARRIER"
 

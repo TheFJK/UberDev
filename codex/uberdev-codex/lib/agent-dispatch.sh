@@ -178,7 +178,9 @@ _uberdev_agent_prepare_state_dir() {
   python3 -I -c '
 import os, stat, sys
 run_dir = sys.argv[1]
-path = os.path.join(run_dir, f".agent-state-{os.geteuid()}")
+uid_fn = getattr(os, "geteuid", None)
+uid = uid_fn() if uid_fn else None
+path = os.path.join(run_dir, f".agent-state-{uid if uid is not None else 0}")
 try:
     os.mkdir(path, 0o700)
 except FileExistsError:
@@ -186,13 +188,13 @@ except FileExistsError:
 entry = os.lstat(path)
 if stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode):
     raise SystemExit(2)
-if entry.st_uid != os.geteuid():
+if uid is not None and entry.st_uid != uid:
     raise SystemExit(2)
 flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 descriptor = os.open(path, flags)
 try:
     current = os.fstat(descriptor)
-    if not stat.S_ISDIR(current.st_mode) or current.st_uid != os.geteuid():
+    if not stat.S_ISDIR(current.st_mode) or (uid is not None and current.st_uid != uid):
         raise SystemExit(2)
     os.fchmod(descriptor, 0o700)
 finally:
@@ -527,10 +529,11 @@ root,payload_raw=sys.argv[1:]
 try:
  root=os.path.realpath(root)
  entry=os.stat(root,follow_symlinks=False)
- if not stat.S_ISDIR(entry.st_mode) or entry.st_uid!=os.geteuid(): raise ValueError()
+ uid_fn=getattr(os,"geteuid",None); uid=uid_fn() if uid_fn else None
+ if not stat.S_ISDIR(entry.st_mode) or (uid is not None and entry.st_uid!=uid): raise ValueError()
  payload=json.loads(payload_raw); metadata=payload["metadata"]
  run_id=metadata["run_id"]
- state_name=f".agent-state-{os.geteuid()}"; state=os.path.join(root,state_name)
+ state_name=f".agent-state-{uid if uid is not None else 0}"; state=os.path.join(root,state_name)
  rootfd=os.open(root,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0))
  try:
   try: os.mkdir(state_name,0o700,dir_fd=rootfd)
@@ -538,7 +541,7 @@ try:
   statefd=os.open(state_name,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0),dir_fd=rootfd)
  finally: os.close(rootfd)
  se=os.fstat(statefd)
- if not stat.S_ISDIR(se.st_mode) or se.st_uid!=os.geteuid(): raise ValueError()
+ if not stat.S_ISDIR(se.st_mode) or (uid is not None and se.st_uid!=uid): raise ValueError()
  os.fchmod(statefd,0o700)
  raw=payload_raw.encode()
  digest=hashlib.sha256(raw).hexdigest(); destination=os.path.join(state,f"route-context-v1-{run_id}.json")
@@ -568,7 +571,7 @@ path,expected,root=sys.argv[1:]
 try:
  if not os.path.isabs(path) or not os.path.isabs(root): raise ValueError()
  root=os.path.realpath(root)
- state=os.path.join(root,f".agent-state-{os.geteuid()}"); lexical=os.path.abspath(path); name=os.path.basename(lexical)
+ uid_fn=getattr(os,"geteuid",None); uid=uid_fn() if uid_fn else None; state=os.path.join(root,f".agent-state-{uid if uid is not None else 0}"); lexical=os.path.abspath(path); name=os.path.basename(lexical)
  if os.path.dirname(lexical)!=state or not name.startswith("route-context-v1-"): raise ValueError()
  if stat.S_ISLNK(os.lstat(state).st_mode): raise ValueError()
  statefd=os.open(state,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0))
@@ -576,7 +579,7 @@ try:
  flags=os.O_RDONLY|getattr(os,"O_NOFOLLOW",0); fd=os.open(name,flags,dir_fd=statefd)
  try:
   opened=os.fstat(fd); current=os.stat(name,dir_fd=statefd,follow_symlinks=False); raw=os.read(fd,1048577)
-  if len(raw)>1048576 or not stat.S_ISREG(opened.st_mode) or opened.st_uid!=os.geteuid() or opened.st_nlink!=1 or stat.S_IMODE(opened.st_mode)!=0o600 or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino): raise ValueError()
+  if len(raw)>1048576 or not stat.S_ISREG(opened.st_mode) or (uid is not None and opened.st_uid!=uid) or opened.st_nlink!=1 or stat.S_IMODE(opened.st_mode)!=0o600 or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino): raise ValueError()
  finally: os.close(fd)
  state_current=os.stat(state,follow_symlinks=False)
  if (state_current.st_dev,state_current.st_ino)!=(state_entry.st_dev,state_entry.st_ino): raise ValueError()
@@ -621,10 +624,10 @@ print(json.dumps(decision, sort_keys=True, separators=(",", ":")))
 }
 
 _uberdev_agent_event_json() {
-  local event="$1" request="$2" decision="$3" handle="${4:-}" status_path="${5:-}" rc="${6:-}" owner_pid="$$"
+  local event="$1" request="$2" decision="$3" handle="${4:-}" status_path="${5:-}" rc="${6:-}" error_class="${7:-}" owner_pid="$$"
   python3 -I -c '
 import json, sys
-event_name, request_raw, decision_raw, handle, status_path, rc, owner_pid = sys.argv[1:]
+event_name, request_raw, decision_raw, handle, status_path, rc, error_class, owner_pid = sys.argv[1:]
 request = json.loads(request_raw); decision = json.loads(decision_raw)
 routing = decision.get("routing_mode", "inherit")
 effective = decision.get("effective_policy", "inherit")
@@ -659,9 +662,9 @@ if event_name == "agent_started":
     if status_path: record["status_path"] = status_path
 if event_name in {"completed", "failed", "timed_out", "cancelled", "abandoned"}:
     record["terminal_status"] = event_name
-    if event_name == "failed": record["error_class"] = "provider_launch_failed"
+    if event_name == "failed": record["error_class"] = error_class or "provider_launch_failed"
 print(json.dumps({key:value for key,value in record.items() if value is not None}, sort_keys=True, separators=(",", ":")))
-' "$event" "$request" "$decision" "$handle" "$status_path" "$rc" "$owner_pid"
+' "$event" "$request" "$decision" "$handle" "$status_path" "$rc" "$error_class" "$owner_pid"
 }
 
 _uberdev_agent_append_event() {
@@ -705,7 +708,7 @@ try:
         except FileExistsError:
             entry = os.lstat(path)
             if (stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode)
-                    or entry.st_uid != os.geteuid() or entry.st_nlink != 1
+                    or (getattr(os,"geteuid",None) is not None and entry.st_uid != getattr(os,"geteuid")()) or entry.st_nlink != 1
                     or stat.S_IMODE(entry.st_mode) != 0o600):
                 raise SystemExit(2)
             replace = entry.st_size == 0
@@ -886,14 +889,37 @@ _uberdev_agent_finalize_terminal() {
     failed|timed_out|cancelled|abandoned) terminal_rc=1 ;;
     *) return 2 ;;
   esac
-  if [ "$backend" = claude-bg ]; then
+  local published
+  published="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
+  if [ "$published" != "$terminal_event" ]; then
     _uberdev_agent_publish_status "$status_file" "$backend" "$handle" "$terminal_event" "$terminal_rc" replace || return 2
   fi
-  event_json="$(_uberdev_agent_event_json "$terminal_event" "$request_json" "$decision" "$handle" "$status_file" "$terminal_rc")" || return 2
+  event_json="$(_uberdev_agent_event_json "$terminal_event" "$request_json" "$decision" "$handle" "$status_file" "$terminal_rc" "${10:-}")" || return 2
   if ! _uberdev_agent_append_event "$manifest" "$event_json"; then
     _uberdev_agent_manifest_terminal_matches "$manifest" "$request_json" "$terminal_event" || return 2
   fi
   PYTHONPATH= PYTHONHOME= _uberdev_agent_release_exact_lease "$lease" "$lease_identity"
+}
+
+_uberdev_agent_persist_watcher_error() {
+  local status_file="$1" backend="$2" handle="$3" terminal="$4" attempts="$5"
+  python3 -I -B - "$status_file.watcher-error.json" "$backend" "$handle" "$terminal" "$attempts" <<'PY'
+import json,os,stat,sys,tempfile
+path,backend,handle,terminal,attempts=sys.argv[1:]
+parent=os.path.dirname(path)
+entry=os.stat(parent,follow_symlinks=False)
+uid_fn=getattr(os,"geteuid",None); uid=uid_fn() if uid_fn else None
+if not stat.S_ISDIR(entry.st_mode) or (uid is not None and entry.st_uid!=uid): raise SystemExit(2)
+payload={"schema_version":1,"error":"terminal_finalize_failed","backend":backend,"handle":handle,"terminal":terminal,"attempts":int(attempts)}
+fd,tmp=tempfile.mkstemp(prefix=".watcher-error.",dir=parent)
+try:
+ os.fchmod(fd,0o600)
+ with os.fdopen(fd,"w",encoding="utf-8") as stream:
+  json.dump(payload,stream,sort_keys=True,separators=(",",":")); stream.write("\n"); stream.flush(); os.fsync(stream.fileno())
+ os.replace(tmp,path)
+finally:
+ if os.path.exists(tmp): os.unlink(tmp)
+PY
 }
 
 _uberdev_agent_start_watcher() {
@@ -937,11 +963,47 @@ _uberdev_agent_start_watcher() {
       sleep 1
     done
     [ -n "$terminal_event" ] || exit 0
-    _uberdev_agent_finalize_terminal "$manifest" "$lease" "$lease_identity" "$status_file" \
-      "$backend" "$handle" "$request_json" "$decision" "$terminal_event" >/dev/null 2>&1 || true
+    local finalize_attempt=1 error_class=''
+    [ "$terminal_event" != failed ] || error_class=provider_execution_failed
+    while [ "$finalize_attempt" -le 3 ]; do
+      if _uberdev_agent_finalize_terminal "$manifest" "$lease" "$lease_identity" "$status_file" \
+          "$backend" "$handle" "$request_json" "$decision" "$terminal_event" "$error_class"; then
+        exit 0
+      fi
+      [ "$finalize_attempt" -ge 3 ] || sleep 0.1
+      finalize_attempt=$((finalize_attempt + 1))
+    done
+    _uberdev_agent_persist_watcher_error "$status_file" "$backend" "$handle" "$terminal_event" 3 || \
+      printf 'uberdev agent dispatch: failed to persist watcher terminal failure for %s\n' "$status_file" >&2
+    exit 2
   ) </dev/null >/dev/null 2>&1 &
   watcher_pid="$!"
   disown "$watcher_pid" 2>/dev/null || true
+}
+
+_uberdev_agent_abort_after_launch() {
+  local manifest="$1" lease="$2" status_file="$3" result_file="$4" backend="$5" handle="$6" request_json="$7" decision="$8" reason="$9"
+  local process_identity lease_identity event_json cleanup_rc=0
+  process_identity="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
+  lease_identity="$(_uberdev_agent_lease_identity "$lease" 2>/dev/null || true)"
+  if ! _uberdev_dispatch_cancel_backend "$backend" "$handle" "$process_identity"; then
+    _uberdev_agent_persist_watcher_error "$status_file" "$backend" "$handle" failed 1 || true
+    return 2
+  fi
+  if [ "$backend" = background ]; then
+    _uberdev_dispatch_cleanup_dead_partial_result "$result_file" "$handle" || cleanup_rc=2
+  fi
+  _uberdev_agent_publish_status "$status_file" "$backend" "$handle" failed 70 replace "$process_identity" || cleanup_rc=2
+  event_json="$(_uberdev_agent_event_json failed "$request_json" "$decision" "$handle" "$status_file" 70 dispatch_setup_failed)" || cleanup_rc=2
+  [ -z "$event_json" ] || _uberdev_agent_append_event "$manifest" "$event_json" || cleanup_rc=2
+  if [ -n "$lease_identity" ]; then
+    PYTHONPATH= PYTHONHOME= _uberdev_agent_release_exact_lease "$lease" "$lease_identity" || cleanup_rc=2
+  else
+    cleanup_rc=2
+  fi
+  [ "$cleanup_rc" -eq 0 ] || _uberdev_agent_persist_watcher_error "$status_file" "$backend" "$handle" failed 1 || true
+  _uberdev_agent_error "post-launch setup failed: $reason"
+  return 2
 }
 
 uberdev_agent_dispatch() {
@@ -962,7 +1024,7 @@ uberdev_agent_dispatch() {
   }
   run_dir="$(_uberdev_agent_json_get "$request_json" run_dir)" || { _uberdev_agent_error 'invalid run_dir'; return 2; }
   run_dir="$(_uberdev_agent_validate_run_dir "$run_dir")" || { _uberdev_agent_error 'unsafe run_dir'; return 2; }
-  state_dir="$run_dir/.agent-state-$(python3 -I -c 'import os; print(os.geteuid())')" || return 2
+  state_dir="$run_dir/.agent-state-$(python3 -I -c 'import os; f=getattr(os,"geteuid",None); print(f() if f else 0)')" || return 2
   paths_json="$(_uberdev_agent_validate_paths "$run_dir" "$state_dir" "$prompt_requested" "$result_requested" "$status_requested")" || {
     _uberdev_agent_error 'unsafe or aliased caller paths'; return 2;
   }
@@ -1060,18 +1122,26 @@ uberdev_agent_dispatch() {
   lease_handle="$handle"
   [ "$backend" != wezterm ] || lease_handle="pane:$handle"
   if ! PYTHONPATH= PYTHONHOME= uberdev_semaphore_set_handle "$lease" "$lease_handle" "$status_file"; then
-    # The provider has already launched exactly once. Keep the status-only
-    # lease instead of releasing capacity or retrying a live provider.
-    return 2
+    _uberdev_agent_abort_after_launch "$manifest" "$lease" "$status_file" "$result_file" \
+      "$backend" "$handle" "$request_json" "$decision" lease_handle_update
+    return $?
   fi
-  lease_identity="$(_uberdev_agent_lease_identity "$lease")" || return 2
+  lease_identity="$(_uberdev_agent_lease_identity "$lease")" || {
+    _uberdev_agent_abort_after_launch "$manifest" "$lease" "$status_file" "$result_file" \
+      "$backend" "$handle" "$request_json" "$decision" lease_identity
+    return $?
+  }
   lease_generation="${lease_identity##*:}"
   if [ -n "$terminal_event" ]; then
     _uberdev_agent_finalize_terminal "$manifest" "$lease" "$lease_identity" "$status_file" \
       "$backend" "$handle" "$request_json" "$decision" "$terminal_event" || return 2
   else
     process_identity="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
-    _uberdev_agent_publish_status "$status_file" "$backend" "$lease_handle" running '' create "$process_identity" "$lease_generation" || return 2
+    _uberdev_agent_publish_status "$status_file" "$backend" "$lease_handle" running '' create "$process_identity" "$lease_generation" || {
+      _uberdev_agent_abort_after_launch "$manifest" "$lease" "$status_file" "$result_file" \
+        "$backend" "$handle" "$request_json" "$decision" status_publication
+      return $?
+    }
     _uberdev_agent_start_watcher "$manifest" "$lease" "$lease_identity" "$status_file" "$backend" "$lease_handle" "$request_json" "$decision"
   fi
   DISPATCH_RC=0
