@@ -12,13 +12,11 @@ instance_id: sdd-w[wave]-t[task]-spec-review-a[attempt]
 risk_scope: subtask
 risk_signals: [copy from the immutable root decision]
 inputs:
-  task_id: "[task ID]"
-  task_requirements: "[full task requirements; if too large, omit and pass task_requirements_path to a mode-0600 context artifact]"
-  plan_task_description: "[full plan task entry or approved bounded excerpt; if too large, omit and pass plan_task_description_path]"
-  implementer_report: "[status, claimed paths, and test results]"
+  spec_path: "[absolute design spec path]"
+  plan_path: "[absolute implementation plan path]"
   commit_sha: "[controller-created task commit SHA]"
-  allowlist: [controller-canonicalized absolute paths confined under the worktree]
-  attempt: [positive integer]
+  allowed_paths: [controller-canonicalized absolute paths confined under the worktree]
+  report_path: "[absolute immutable implementer-result path]"
 ```
 
 Pass these inputs through `uberdev_create_child_handoff`, then dispatch only

@@ -10,17 +10,12 @@ instance_id: sdd-w[wave]-t[task]-[stage]-a[attempt]
 risk_scope: subtask
 risk_signals: [copy from the immutable root decision]
 inputs:
-  task_id: "[task ID]"
-  task_name: "[task name]"
-  task_description: "[full task text; if larger than the handoff scalar bound, write a mode-0600 context artifact under the run directory and pass task_description_path]"
-  task_context: "[scene-setting context only]"
-  wave: "[wave-N]"
-  stage: "implement | spec-fix | quality-fix"
+  task_path: "[absolute private regular file containing task ID/name/full text/context/wave/stage/siblings]"
+  working_dir: "[absolute shared feature-worktree directory]"
+  allowed_paths: [controller-canonicalized absolute paths confined under the worktree]
+  denied_paths: [controller-canonicalized absolute sibling-owned paths confined under the worktree]
+  failure_path: "[absolute private regular file; empty first attempt, exact test/review findings on fixes]"
   attempt: [positive integer]
-  sibling_tasks: [task IDs in this wave]
-  allowlist: [controller-canonicalized absolute paths confined under the worktree]
-  denylist: [controller-canonicalized absolute sibling-owned paths confined under the worktree]
-  failure_context: "[empty on first attempt; exact test/review findings on bounded fixes]"
 ```
 
 Pass these inputs through `uberdev_create_child_handoff`, then dispatch only

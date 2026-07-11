@@ -24,20 +24,19 @@ You receive these inputs in your prompt:
 
 - `spec_path` — path to the design spec to plan against (written by `spec-writer` or `spec-reviser`)
 - `tier` — `small | medium | large` (controls plan granularity and review recommendation)
-- `topic_slug` — kebab-case slug for the plan filename (e.g. `writer-subagent-orchestrator`)
 - `working_dir` — absolute path to the worktree root
-- `summary_dir` — absolute path to the current run's research directory (`$RESEARCH_DIR_ABS/`); this is the trusted confinement root for `planning_research`
-- `validation_shim` — absolute path to the orchestrator-supplied `lib/planning_research_output.py` executable
-- `planning_research` — the exact root-produced path contract below, with `/absolute/run-dir` replaced by the canonical `summary_dir` value:
+- `summary_path` — absolute private regular-file summary artifact for this plan-writing attempt; its canonical parent is the trusted current run directory
+- `validation_path` — absolute path to the orchestrator-supplied `lib/planning_research_output.py` executable
+- `planning_paths` — the exact ordered root-produced path list below:
 
 ```yaml
-planning_research:
-  dependency_map_path: /absolute/run-dir/dependency-map.md
-  test_map_path: /absolute/run-dir/test-map.md
-  implementation_risk_path: /absolute/run-dir/implementation-risk.md
+planning_paths:
+  - /absolute/run-dir/dependency-map.md
+  - /absolute/run-dir/test-map.md
+  - /absolute/run-dir/implementation-risk.md
 ```
 
-- `revision_brief` *(optional)* — present only on a Phase-4.5 revision retry: reviewer findings (or user feedback) bullets describing what the plan must change. When present you are revising an existing plan against an **unchanged** spec and unchanged root-produced research, not writing from scratch — read the brief in full, map each item to the plan section(s) it affects, and apply only the requested changes (do not expand scope).
+- `revision_brief_path` *(optional retry key)* — present only on a Phase-4.5 revision retry: private reviewer findings describing what the plan must change. Read it in full, map each item to affected plan sections, and do not expand scope.
 
 ## Tools
 
@@ -51,16 +50,19 @@ Do not use web search or other MCP tools. All research is already captured in th
 
 Validate every path before reading the spec or writing the plan:
 
-1. `validation_shim` MUST be an absolute executable path ending in `/lib/planning_research_output.py`. A missing or different shim is validation failure.
+1. `validation_path` MUST be an absolute executable path ending in `/lib/planning_research_output.py`. A missing or different shim is validation failure. Set `summary_dir` to the canonical parent directory of `summary_path`.
 2. Invoke that exact executable once for every supplied artifact, before reading any artifact:
 
 ```bash
-"$validation_shim" --operation validate --mode postwrite --summary-dir "$summary_dir" --output-path "$dependency_map_path" --expected-basename dependency-map.md --key dependency_map_path
-"$validation_shim" --operation validate --mode postwrite --summary-dir "$summary_dir" --output-path "$test_map_path" --expected-basename test-map.md --key test_map_path
-"$validation_shim" --operation validate --mode postwrite --summary-dir "$summary_dir" --output-path "$implementation_risk_path" --expected-basename implementation-risk.md --key implementation_risk_path
+"$validation_path" --operation validate --mode postwrite --summary-dir "$summary_dir" --output-path "${planning_paths[0]}" --expected-basename dependency-map.md --key dependency_map_path
+"$validation_path" --operation validate --mode postwrite --summary-dir "$summary_dir" --output-path "${planning_paths[1]}" --expected-basename test-map.md --key test_map_path
+"$validation_path" --operation validate --mode postwrite --summary-dir "$summary_dir" --output-path "${planning_paths[2]}" --expected-basename implementation-risk.md --key implementation_risk_path
 ```
 
 3. Parse each compact JSON result. Every invocation MUST exit successfully and return `status: "valid"` with the exact requested `output_path`. The executable owns absolute-path, canonical-parent, basename, regular-file, readability, symlink, hard-link/inode-alias, and run-directory-confinement validation. Do not reproduce or weaken those checks in prose or inline shell.
+
+After validation, bind the three entries by their required basenames as
+`dependency_map_path`, `test_map_path`, and `implementation_risk_path`.
 
 **Allocation cleanup is N/A for plan-writer.** This leaf receives only already-published research paths and never receives or owns a `staging_path` / `allocation_token`; therefore it must not invoke `allocate`, `abort`, or `publish`. If validation fails, return the no-artifact `BLOCKED` result below and leave lifecycle cleanup to the producing role and shim capability contract.
 
@@ -95,11 +97,13 @@ Read all three validated research files in full:
 - `test_map_path` supplies current coverage, uncovered paths, and focused verification commands.
 - `implementation_risk_path` supplies binding constraints, sequencing hazards, rollback requirements, and unresolved risks.
 
-On a revision pass, read these same unchanged artifacts again and apply only `revision_brief`; never regenerate or replace the research.
+On a revision pass, read these same unchanged artifacts again and apply only the findings at `revision_brief_path`; never regenerate or replace the research.
 
 ### Step 3: Synthesise the plan
 
 Using the spec, dependency map, test map, and implementation-risk artifact, write the plan to disk.
+
+Derive a kebab-case `topic_slug` from the validated spec title.
 
 **Output path:** `<working_dir>/docs/uberdev/plans/YYYY-MM-DD-<topic_slug>.md`
 - Get today's date: `date +%Y-%m-%d`

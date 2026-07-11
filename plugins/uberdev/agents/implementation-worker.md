@@ -19,15 +19,14 @@ Implement exactly one bounded task supplied by the routed child adapter.
 
 ## Expected handoff inputs
 
-The handoff supplies `task_id`, `task_name`, `task_description` (or a bounded
-`task_description_path`), `task_context`, `wave`, `stage`, `attempt`,
-`sibling_tasks`, `allowlist`, `denylist`, and optional
-`failure_context`. Missing ownership is blocking; the inherited current working
-directory is the controller-selected shared feature worktree.
+The handoff supplies exactly `task_path`, `working_dir`, `allowed_paths`,
+`denied_paths`, `failure_path`, and `attempt`. Read bounded task identity,
+requirements, context, wave/stage, and sibling IDs from `task_path`; read
+failure evidence from `failure_path` when non-empty.
 
-Require every allowlist and denylist entry to be an absolute path confined
+Require every `allowed_paths` and `denied_paths` entry to be an absolute path confined
 under the inherited worktree, then treat both lists literally. Files outside
-the allowlist are read-only; denylisted files are sibling-owned and must never be edited. If an
+`allowed_paths` are read-only; denied files are sibling-owned and must never be edited. If an
 additional write is required, return blocked with the exact path. Never run a
 git command that mutates the index, branch, commits, stash, or worktree; the
 controller is the sole git owner.

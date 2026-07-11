@@ -44,6 +44,17 @@ This skill's wave-based controller-only-git approach is intentionally **not** wo
 
 ## Routed child adapter (mandatory)
 
+<!-- BEGIN child-callsite-contracts-v1 -->
+```json
+{
+  "sdd.task.implement":{"inputs":["task_path","working_dir","allowed_paths","denied_paths","failure_path","attempt"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "sdd.task.spec_review":{"inputs":["spec_path","plan_path","commit_sha","allowed_paths","report_path"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "sdd.task.quality_review":{"inputs":["plan_path","base_sha","head_sha","allowed_paths","report_path"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "sdd.premerge.test_review":{"inputs":["commit_range_path","spec_path","plan_path","acceptance_path","summary_path"],"risk_scope":"subtask","risk_argument":"subtask"}
+}
+```
+<!-- END child-callsite-contracts-v1 -->
+
 All provider execution in this skill goes through `lib/child-dispatch.sh`.
 Before the first wave, source the adapter and capture the immutable root risks:
 
@@ -52,6 +63,8 @@ Before the first wave, source the adapter and capture the immutable root risks:
 SDD_ROOT_REQUEST_JSON="${UBERDEV_AGENT_PREPARED_REQUEST_JSON:?missing routed root request}"
 SDD_WORKTREE="$(git rev-parse --show-toplevel)"
 SDD_RISK_JSON="$(python3 -I -B -c 'import json,sys; r=json.loads(sys.argv[1]); print(json.dumps(r.get("root_decision",{}).get("risk_signals",r.get("risk_signals",[])),separators=(",",":")),end="")' "$SDD_ROOT_REQUEST_JSON")"
+SDD_CHILD_TIMEOUT="${SDD_CHILD_TIMEOUT:-600}"
+case "$SDD_CHILD_TIMEOUT" in ''|*[!0-9]*|0) return 2 ;; esac
 ```
 
 The runtime helper validates the registered edge, immutable carrier, instance,
@@ -95,6 +108,7 @@ sdd_canonicalize_owned_paths() {
 import json,os,sys
 root=os.path.realpath(sys.argv[1]); value=json.loads(sys.argv[2])
 def canon(key):
+    if key not in value: return set()
     raw=value.get(key,[])
     if not isinstance(raw,list) or any(not isinstance(p,str) or not p or os.path.isabs(p) for p in raw): raise SystemExit(2)
     out=[]
@@ -105,29 +119,32 @@ def canon(key):
     if len(out)!=len(set(out)): raise SystemExit(2)
     value[key]=out
     return set(out)
-allowed=canon("allowlist"); denied=canon("denylist")
+allowed=canon("allowed_paths"); denied=canon("denied_paths")
 if allowed & denied: raise SystemExit(2)
 print(json.dumps(value,sort_keys=True,separators=(",",":")),end="")
 PY
 }
 
-SDD_DISPATCH_RECEIPTS=()
+SDD_PREPARED_EDGES=(); SDD_PREPARED_INSTANCES=(); SDD_PREPARED_HANDOFFS=()
+SDD_PREPARED_RESULTS=(); SDD_PREPARED_STATUSES=(); SDD_DISPATCH_RECEIPTS=()
+sdd_reset_batch() {
+  SDD_PREPARED_EDGES=(); SDD_PREPARED_INSTANCES=(); SDD_PREPARED_HANDOFFS=()
+  SDD_PREPARED_RESULTS=(); SDD_PREPARED_STATUSES=(); SDD_DISPATCH_RECEIPTS=()
+}
 sdd_unwind_child_receipts() {
   local receipt instance remainder status result cleanup_rc=0
   for receipt in "${SDD_DISPATCH_RECEIPTS[@]}"; do
     instance="${receipt%%|*}"; remainder="${receipt#*|}"
     status="${remainder%%|*}"; result="${remainder#*|}"
-    # timeout=0 drains to real terminal truth; runtime owns cancellation/CAS,
-    # result collection, manifest terminal, and exact lease release.
-    if ! uberdev_wait_child "$status" "$result" 0; then cleanup_rc=1; fi
+    if ! uberdev_unwind_child "$status" "$result" "$SDD_CHILD_TIMEOUT"; then cleanup_rc=1; fi
   done
-  SDD_DISPATCH_RECEIPTS=()
+  sdd_reset_batch
   return "$cleanup_rc"
 }
 
 sdd_dispatch_prepared() {
   local edge_id="$1" instance_id="$2" inputs_json="$3" risk_json="$4"
-  local handoff result status create_rc dispatch_rc cleanup_rc
+  local handoff result status create_rc cleanup_rc
   if uberdev_create_child_handoff "$edge_id" "$instance_id" "$inputs_json" "$risk_json"; then
     :
   else
@@ -137,15 +154,30 @@ sdd_dispatch_prepared() {
     return "$create_rc"
   fi
   handoff="$UBERDEV_CHILD_HANDOFF"; result="$UBERDEV_CHILD_RESULT"; status="$UBERDEV_CHILD_STATUS"
-  if uberdev_dispatch_child "$edge_id" "$handoff" "$result" "$status"; then
-    SDD_DISPATCH_RECEIPTS+=("$instance_id|$status|$result")
-    return 0
-  else
-    dispatch_rc=$?; cleanup_rc=0
-    sdd_unwind_child_receipts || cleanup_rc=$?
-    [ "$cleanup_rc" -eq 0 ] || echo "error: SDD receipt unwind failed after edge=$edge_id instance=$instance_id" >&2
-    return "$dispatch_rc"
-  fi
+  SDD_PREPARED_EDGES+=("$edge_id"); SDD_PREPARED_INSTANCES+=("$instance_id")
+  SDD_PREPARED_HANDOFFS+=("$handoff"); SDD_PREPARED_RESULTS+=("$result")
+  SDD_PREPARED_STATUSES+=("$status")
+}
+
+sdd_launch_prepared_batch() {
+  local index edge instance handoff result status dispatch_rc cleanup_rc
+  [ "${#SDD_PREPARED_HANDOFFS[@]}" -gt 0 ] || return 2
+  uberdev_preflight_child_batch "${SDD_PREPARED_HANDOFFS[@]}" || {
+    dispatch_rc=$?; sdd_reset_batch; return "$dispatch_rc"
+  }
+  for ((index=0; index<${#SDD_PREPARED_HANDOFFS[@]}; index++)); do
+    edge="${SDD_PREPARED_EDGES[$index]}"; instance="${SDD_PREPARED_INSTANCES[$index]}"
+    handoff="${SDD_PREPARED_HANDOFFS[$index]}"; result="${SDD_PREPARED_RESULTS[$index]}"
+    status="${SDD_PREPARED_STATUSES[$index]}"
+    if uberdev_dispatch_child "$edge" "$handoff" "$result" "$status"; then
+      SDD_DISPATCH_RECEIPTS+=("$instance|$status|$result")
+    else
+      dispatch_rc=$?; cleanup_rc=0
+      sdd_unwind_child_receipts || cleanup_rc=$?
+      [ "$cleanup_rc" -eq 0 ] || echo "error: bounded SDD unwind failed after edge=$edge instance=$instance" >&2
+      return "$dispatch_rc"
+    fi
+  done
 }
 
 sdd_wait_receipt() {
@@ -160,6 +192,26 @@ sdd_wait_receipt() {
   done
   return 2
 }
+
+sdd_inputs_for_task() {
+  local edge_id="$1" task_id="$2"
+  : "$task_id" # controller selects the task-scoped artifact variables below
+  case "$edge_id" in
+    sdd.task.implement)
+      python3 -I -B -c 'import json,sys; print(json.dumps({"task_path":sys.argv[1],"working_dir":sys.argv[2],"allowed_paths":json.loads(sys.argv[3]),"denied_paths":json.loads(sys.argv[4]),"failure_path":sys.argv[5],"attempt":int(sys.argv[6])},separators=(",",":")))' "$task_path" "$SDD_WORKTREE" "$allowed_paths_json" "$denied_paths_json" "$failure_path" "$attempt"
+      ;;
+    sdd.task.spec_review)
+      python3 -I -B -c 'import json,sys; print(json.dumps({"spec_path":sys.argv[1],"plan_path":sys.argv[2],"commit_sha":sys.argv[3],"allowed_paths":json.loads(sys.argv[4]),"report_path":sys.argv[5]},separators=(",",":")))' "$spec_path" "$plan_path" "$commit_sha" "$allowed_paths_json" "$report_path"
+      ;;
+    sdd.task.quality_review)
+      python3 -I -B -c 'import json,sys; print(json.dumps({"plan_path":sys.argv[1],"base_sha":sys.argv[2],"head_sha":sys.argv[3],"allowed_paths":json.loads(sys.argv[4]),"report_path":sys.argv[5]},separators=(",",":")))' "$plan_path" "$base_sha" "$head_sha" "$allowed_paths_json" "$report_path"
+      ;;
+    sdd.premerge.test_review)
+      python3 -I -B -c 'import json,sys; print(json.dumps({"commit_range_path":sys.argv[1],"spec_path":sys.argv[2],"plan_path":sys.argv[3],"acceptance_path":sys.argv[4],"summary_path":sys.argv[5]},separators=(",",":")))' "$commit_range_path" "$spec_path" "$plan_path" "$acceptance_path" "$summary_path"
+      ;;
+    *) return 2 ;;
+  esac
+}
 ```
 
 Executable batch shape (substitute the edge/role/stage from the table):
@@ -170,10 +222,11 @@ SDD_DISPATCH_RECEIPTS=()
 for task_id in $SDD_BATCH_TASK_IDS; do
   sdd_validate_instance_dimensions "$wave" "$task_id" "$stage" "$attempt" || return 2
   instance_id="sdd-w${wave}-t${task_id}-${stage}-a${attempt}"
-  task_inputs_json="$(sdd_inputs_for_task "$task_id")" || return 2
+  task_inputs_json="$(sdd_inputs_for_task "$edge_id" "$task_id")" || return 2
   task_inputs_json="$(sdd_canonicalize_owned_paths "$task_inputs_json")" || return 2
   sdd_dispatch_prepared "$edge_id" "$instance_id" "$task_inputs_json" "$SDD_RISK_JSON" || return $?
 done
+sdd_launch_prepared_batch || return $?
 # Only after every dispatch receipt, wait for the complete batch.
 for task_id in $SDD_BATCH_TASK_IDS; do
   instance_id="sdd-w${wave}-t${task_id}-${stage}-a${attempt}"
@@ -220,19 +273,19 @@ digraph when_to_use {
 2. **Create TodoWrite** with one todo per task, labeled with its wave (e.g., `[wave-2] Task 4: ...`).
 3. **Verify clean baseline:** `git status` is clean; you're on the feature branch in the feature-branch worktree. Capture `BASELINE_SHA=$(git rev-parse HEAD)` — useful only for diagnostic logging now that the post-impl-review's `commit_range` is computed independently inside `/uberdev:review-pr` Phase 1.
 4. **For each wave (sequential):**
-   a. Build every implementer handoff from `./implementer-prompt.md`, using edge `sdd.task.implement`, role `implementation-worker`, phase `implementation`, and instance stage `implement`. Dispatch every implementer in the wave with `uberdev_dispatch_child` before waiting for any of them. All run in the current worktree. Each handoff carries an explicit allowlist of files it owns and an explicit denylist of files owned by sibling tasks.
+   a. Build every implementer handoff from `./implementer-prompt.md`, using edge `sdd.task.implement`, role `implementation-worker`, phase `implementation`, and instance stage `implement`. Prepare every handoff, preflight the complete wave, then dispatch before waiting. Each handoff carries exact manifest keys, including canonical absolute `allowed_paths` and `denied_paths`.
    b. **Implementers never run git.** They edit files, run their tests, and report `Status + changed file paths + test results`.
    c. After all dispatch receipts exist, wait for all wave implementers with `uberdev_wait_child`; read each immutable result artifact only after its wait succeeds.
    d. For each completed implementer (in task ID order, sequential): controller stages **only that task's reported paths** with `git add <paths>` and commits with the task-specific message.
    e. Run the project's full test command in the worktree once after all wave commits land. If it fails, identify which task regressed and re-dispatch edge `sdd.task.implement` to that task's `implementation-worker`, with stage `implement` and the next attempt plus the failure context. Re-test after each fix, capped at `retest_rounds` (2) suspected-implementer re-dispatches for the wave — still red after the cap means halt the wave with committed work intact and escalate (BLOCKED ladder); never loop further.
-   f. For each committed task, build a `sdd.task.spec_review` handoff for role `spec-compliance-reviewer` from `./spec-reviewer-prompt.md`. Dispatch all wave-eligible spec reviewers before waiting for any. Pass each reviewer these context inputs:
-      - `[FULL TEXT of task requirements]`: the spec excerpt for this task
-      - `[plan_task_description]`: the FULL text of the plan entry for this task (from the wave's plan section, including Worktree-safe paths and any prescribed steps) — enables the reviewer to detect *plan drift* where the implementation satisfies the spec but deviates structurally from the plan. If the plan task entry exceeds ~3000 tokens, pass an excerpt covering the task header, Worktree-safe paths, and the numbered prescribed-steps subsection only — omit prose rationale.
-      - `[task commit SHA]`: the SHA the controller produced when committing this task's reported paths
-      - `[paths from the wave's ownership map]`: the allowlist for this task (reviewer must not look outside it)
-      - `[From implementer's report]`: the implementer's status + claimed paths/test results
+   f. For each committed task, build a `sdd.task.spec_review` handoff for role `spec-compliance-reviewer` from `./spec-reviewer-prompt.md`. Prepare all wave-eligible reviewers, preflight the batch, then dispatch before waiting. Pass each reviewer these context inputs:
+      - `spec_path`: absolute design spec
+      - `plan_path`: absolute implementation plan
+      - `commit_sha`: controller-created task commit
+      - `allowed_paths`: canonical absolute ownership paths
+      - `report_path`: immutable implementer result
    g. Loop spec fix-up per task until that task's reviewer approves, capped at `fix_rounds` (3) iterations per task. Fixes use `sdd.task.implement`/`implementation-worker`, stage `spec-fix`, and the next attempt; re-reviews use `sdd.task.spec_review` with the next attempt. Exhaustion routes the task into the BLOCKED ladder. Fix dispatches still don't run git — controller amends the task's commit (or creates a fix-up commit) using the implementer's reported new paths.
-   h. As soon as a task's spec review approves, add its `sdd.task.quality_review`/`code-reviewer` handoff to the next eligible quality batch. Dispatch every child in that batch before waiting. Do NOT hold all quality reviews hostage to the slowest sibling's spec fix-loop. Quality fixes use `sdd.task.implement`, stage `quality-fix`; quality re-reviews use the quality edge with the next attempt. Same `fix_rounds` (3) cap per task.
+   h. As soon as a task's spec review approves, add its `sdd.task.quality_review`/`code-reviewer` handoff to the next eligible quality batch. Prepare all handoffs, preflight the batch, then dispatch before waiting. Do NOT hold all quality reviews hostage to the slowest sibling's spec fix-loop. Quality fixes use `sdd.task.implement`, stage `quality-fix`; quality re-reviews use the quality edge with the next attempt. Same `fix_rounds` (3) cap per task.
    i. Mark every task in the wave complete in TodoWrite.
    j. **Mark wave complete.** No additional accumulation required at the SDD layer — `/uberdev:review-pr` Phase 1, chained post-push from `finish-branch`, computes its own `changed_paths` and `commit_range` against the pushed PR.
 
@@ -247,7 +300,14 @@ os.close(fd)
 PY
 ```
 
-   Its context inputs are `commit_range`, `spec_path`, `plan_path`, the verbatim acceptance-criteria section, and `output_path=$SDD_TEST_REVIEW_OUTPUT`. `summary_dir` is a controller gate, never a child input. Wait with `uberdev_wait_child` before Step 5, then copy the successful immutable child result to `output_path` byte-for-byte and keep mode `0600`; on dispatch/wait failure, remove the empty pre-created output. Do NOT parse or transform the YAML — the artifact on disk IS the integration point. This is one advisory routed child, not the post-push reviewer fanout.
+   Its exact inputs are `commit_range_path`, `spec_path`, `plan_path`,
+   `acceptance_path`, and `summary_path=$SDD_TEST_REVIEW_OUTPUT`. The controller
+   first writes commit range and acceptance criteria to private regular run
+   artifacts. `summary_dir` is a controller gate, never a child input. Prepare
+   this one-child batch, preflight, dispatch, and wait before Step 5. After a
+   successful wait, copy the immutable child result byte-for-byte to the
+   already-confined `summary_path`; do not parse or transform it. This is
+   one advisory routed child, not the post-push reviewer fanout.
 
    All three return cases below end by proceeding to Step 5; `finish-branch`'s artifact-collection glob discovers whatever is on disk. Each case differs only in its log action:
    1. The result verdict is `APPROVE` — artifact is on disk; no log entry.

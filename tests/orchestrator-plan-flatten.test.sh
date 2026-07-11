@@ -9,6 +9,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ORCHESTRATOR="$ROOT/plugins/uberdev/skills/orchestrator/SKILL.md"
 PLAN_WRITER="$ROOT/plugins/uberdev/agents/plan-writer.md"
+RUN_TREE="$ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
 CODEX_PLAN_WRITER="$ROOT/codex/uberdev-codex/agents/plan-writer.md"
 CODEX_ORCHESTRATOR="$ROOT/codex/uberdev-codex/skills/orchestrator/SKILL.md"
 BRAINSTORM="$ROOT/plugins/uberdev/skills/brainstorm/SKILL.md"
@@ -47,6 +48,7 @@ assert_ge() {
 for required in \
   "$ORCHESTRATOR" \
   "$PLAN_WRITER" \
+  "$RUN_TREE" \
   "$CODEX_PLAN_WRITER" \
   "$BRAINSTORM" \
   "$WRITE_PLAN" \
@@ -614,8 +616,8 @@ phase4 = re.search(r"(?ms)^### Phase 4: plan-writer$(.*?)(?=^### Phase 4\.5:)", 
 if not phase4:
     raise SystemExit("orchestrator Phase 4 missing")
 for marker in (
-    "research_mode: planning",
-    "validation_shim",
+    "summary_path",
+    "validation_path",
     "output_path",
     "planning-security.md",
 ):
@@ -691,25 +693,25 @@ else
   PASS=$((PASS + 1))
 fi
 
-printf '%s\n' '== F4 exactly three planning_research keys everywhere =='
+printf '%s\n' '== F4 exact three-path planning input =='
 if python3 - "$ORCHESTRATOR" "$PLAN_WRITER" <<'PY'
 import re
 import sys
 from pathlib import Path
 
-expected = ["dependency_map_path", "test_map_path", "implementation_risk_path"]
-for raw_path in sys.argv[1:]:
-    text = Path(raw_path).read_text(encoding="utf-8")
-    blocks = re.findall(r"(?ms)^planning_research:\s*\n((?:^[ ]{2}[a-z_]+:\s*\S+\s*$\n?)+)", text)
-    if not blocks:
-        raise SystemExit(f"{raw_path}: missing planning_research mapping")
-    for block in blocks:
-        keys = re.findall(r"(?m)^[ ]{2}([a-z_]+):", block)
-        if keys != expected:
-            raise SystemExit(f"{raw_path}: mapping keys drifted: {keys!r}")
+orchestrator=Path(sys.argv[1]).read_text()
+writer=Path(sys.argv[2]).read_text()
+expected=["dependency-map.md","test-map.md","implementation-risk.md"]
+match=re.search(r"planning_paths:\s*\n((?:  - .*\n?){3})",writer)
+if not match: raise SystemExit("plan-writer missing planning_paths list")
+paths=re.findall(r"(?m)^  - (\S+)",match.group(1))
+if [path.rsplit('/',1)[-1] for path in paths] != expected:
+    raise SystemExit("plan-writer planning_paths order drift")
+if '"planning_paths":json.loads' not in orchestrator or '"validation_path":' not in orchestrator:
+    raise SystemExit("orchestrator plan-writer payload missing canonical fields")
 PY
 then
-  printf '%s\n' '  PASS F4b every concrete planning_research mapping has exactly three canonical keys'
+  printf '%s\n' '  PASS F4b plan-writer receives the exact ordered three-path manifest input'
   PASS=$((PASS + 1))
 else
   printf '%s\n' '  FAIL F4b planning_research mappings must have exactly three canonical keys'
@@ -1684,14 +1686,16 @@ n=$(grep -cE '^\| small \|.*\| N/A \(orchestrator bypassed\) \|' "$ORCHESTRATOR"
 assert_eq 'F8 small-tier planning research is N/A because small bypasses orchestrator' 1 "$n"
 
 printf '%s\n' '== F9 routed helper, retry identity, cleanup, and lineage contracts =='
-if python3 - "$ORCHESTRATOR" "$BRAINSTORM" "$WRITE_PLAN" "$PLAN_WRITER" "$CODEX_PLAN_WRITER" <<'PY'
+if python3 - "$ORCHESTRATOR" "$BRAINSTORM" "$WRITE_PLAN" "$PLAN_WRITER" "$CODEX_PLAN_WRITER" "$RUN_TREE" <<'PY'
+import json
 import re
 import sys
 from pathlib import Path
 
 orchestrator, brainstorm, write_plan, plan_writer, codex_plan_writer = (
-    Path(path).read_text(encoding="utf-8") for path in sys.argv[1:]
+    Path(path).read_text(encoding="utf-8") for path in sys.argv[1:6]
 )
+manifest=json.loads(Path(sys.argv[6]).read_text(encoding="utf-8"))
 
 for name, text in (("orchestrator", orchestrator), ("brainstorm", brainstorm)):
     if 'uberdev_create_child_handoff "$edge" "$instance" "$inputs_json" "$risks_json"' not in text:
@@ -1700,12 +1704,16 @@ for name, text in (("orchestrator", orchestrator), ("brainstorm", brainstorm)):
         raise SystemExit(f"{name}: helper failure bypasses partial-fanout unwind")
     if 'UBERDEV_CHILD_HANDOFF' not in text or 'UBERDEV_CHILD_RESULT' not in text or 'UBERDEV_CHILD_STATUS' not in text:
         raise SystemExit(f"{name}: missing exported runtime paths")
+    if 'uberdev_preflight_child_batch' not in text:
+        raise SystemExit(f"{name}: batch preflight missing")
     if 'children/$instance/status.json' in text or 'children/$instance/result.md' in text:
         raise SystemExit(f"{name}: wait path is caller-computed instead of receipt-derived")
     if 'DISPATCH_RECEIPTS' not in text or 'uberdev_unwind_child_receipts' not in text:
         raise SystemExit(f"{name}: missing partial-fanout receipt unwind")
-    if 'uberdev_wait_child "$status" "$result" 0' not in text:
-        raise SystemExit(f"{name}: unwind does not drain every receipt to a real terminal")
+    if 'uberdev_unwind_child "$status" "$result" "$' not in text:
+        raise SystemExit(f"{name}: bounded production unwind missing")
+    if 'uberdev_wait_child "$status" "$result" 0' in text:
+        raise SystemExit(f"{name}: infinite wait remains in unwind")
     if 'os.open(path' in text or 'handoff_dir="$run_dir/handoffs"' in text:
         raise SystemExit(f"{name}: caller-owned raw handoff writer remains")
 
@@ -1736,10 +1744,28 @@ for instance in required_instances:
 if 'orchestrator-plan-write-a4' in orchestrator or 'orchestrator-plan-write-r1-a4' in orchestrator:
     raise SystemExit("plan verification exceeds intended two retries")
 
-if 'brainstorm.research.prior_art brainstorm-research-prior-art-a1 research-prior-art' not in brainstorm:
+if 'brainstorm.research.prior_art brainstorm-research-prior-art-a1 research-patterns' not in brainstorm:
     raise SystemExit("brainstorm prior_art edge role mismatch")
-if 'brainstorm.research.library brainstorm-research-library-a1 research-patterns' not in brainstorm:
+if 'brainstorm.research.library brainstorm-research-library-a1 research-prior-art' not in brainstorm:
     raise SystemExit("brainstorm library edge role mismatch")
+
+contracts={}
+for name,text in (("orchestrator",orchestrator),("brainstorm",brainstorm)):
+    match=re.search(r'<!-- BEGIN child-callsite-contracts-v1 -->\s*```json\s*(.*?)\s*```\s*<!-- END child-callsite-contracts-v1 -->',text,re.S)
+    if not match: raise SystemExit(f"{name}: missing executable callsite contract fixture")
+    contracts.update(json.loads(match.group(1)))
+for edge,row in contracts.items():
+    declared=manifest["edges"].get(edge)
+    if not declared or row["inputs"] != declared["inputs"] or row["risk_scope"] != declared["risk_scope"]:
+        raise SystemExit(f"{edge}: callsite contract diverges from manifest")
+    expected_risk = None if declared["risk_scope"] == "run" else ([] if declared["risk_scope"] == "none" else "subtask")
+    if row["risk_argument"] != expected_risk:
+        raise SystemExit(f"{edge}: risk argument mismatch")
+for forbidden in ('{"issue_body_path":','"qa_answers_path":','"summary_dir":','"validation_shim":','"topic_slug":'):
+    if forbidden in orchestrator or forbidden in brainstorm:
+        raise SystemExit(f"legacy payload key remains: {forbidden}")
+if re.search(r'uberdev_design_dispatch .*\brun\b (?![\'\"]null[\'\"])',orchestrator):
+    raise SystemExit("run-scope callsite does not pass literal null")
 
 for name, text in (("canonical plan-writer", plan_writer), ("Codex plan-writer", codex_plan_writer)):
     for forbidden in ("Task tool", "Use the **Task**", "spawn_agent", "internal research subagents", "Internally dispatches"):
@@ -1790,17 +1816,21 @@ for path, ledger in cases:
     match = re.search(r"uberdev_unwind_child_receipts\(\) \{.*?\n\}", text, re.S)
     if not match:
         raise SystemExit(f"{path}: unwind function missing")
+    reset = "uberdev_design_reset_batch" if "DESIGN" in ledger else "uberdev_brainstorm_reset_batch"
     script = f'''set -u
 calls=()
-uberdev_wait_child() {{ calls+=("$1|$2|$3"); [ "${{#calls[@]}}" -ne 1 ]; }}
+uberdev_unwind_child() {{ calls+=("$1|$2|$3"); [ "${{#calls[@]}}" -ne 1 ]; }}
+UBERDEV_DESIGN_UNWIND_TIMEOUT=600
+UBERDEV_BRAINSTORM_UNWIND_TIMEOUT=300
 {ledger}=("one|/tmp/status-1|/tmp/result-1" "two|/tmp/status-2|/tmp/result-2")
+{reset}() {{ {ledger}=(); }}
 {match.group(0)}
 rc=0
 uberdev_unwind_child_receipts || rc=$?
 [ "$rc" -eq 1 ]
 [ "${{#calls[@]}}" -eq 2 ]
-[ "${{calls[0]}}" = "/tmp/status-1|/tmp/result-1|0" ]
-[ "${{calls[1]}}" = "/tmp/status-2|/tmp/result-2|0" ]
+[ "${{calls[0]}}" != "/tmp/status-1|/tmp/result-1|0" ]
+[ "${{calls[1]}}" != "/tmp/status-2|/tmp/result-2|0" ]
 [ "${{#{ledger}[@]}}" -eq 0 ]
 '''
     completed = subprocess.run(["bash", "-c", script], text=True, capture_output=True)

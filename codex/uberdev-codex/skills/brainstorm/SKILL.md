@@ -87,6 +87,16 @@ For architecturally consequential choices, broaden the semantic focus supplied t
 
 ### Routed research execution
 
+<!-- BEGIN child-callsite-contracts-v1 -->
+```json
+{
+  "brainstorm.research.codebase": {"inputs":["working_dir","summary_path","question"],"risk_scope":"none","risk_argument":[]},
+  "brainstorm.research.prior_art": {"inputs":["working_dir","summary_path","question"],"risk_scope":"none","risk_argument":[]},
+  "brainstorm.research.library": {"inputs":["working_dir","summary_path","question"],"risk_scope":"none","risk_argument":[]}
+}
+```
+<!-- END child-callsite-contracts-v1 -->
+
 When this skill receives a `routing_context` from `/solve` or `/turbo`, every provider edge MUST use `lib/child-dispatch.sh`. The handoffs contain no model, route, effort, service tier, sandbox, environment, or commands. Persist the user's brief as a private `brief_path`; never paste it into a child prompt. Run this setup once:
 
 ```bash uberdev-executable
@@ -94,22 +104,31 @@ set -euo pipefail
 : "${UBERDEV_AGENT_PREPARED_REQUEST_JSON:?missing immutable routing context}"
 UBERDEV_BRAINSTORM_PLUGIN_ROOT="${PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}"
 . "$UBERDEV_BRAINSTORM_PLUGIN_ROOT/lib/child-dispatch.sh"
-UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS=()
+UBERDEV_BRAINSTORM_PREPARED_EDGES=(); UBERDEV_BRAINSTORM_PREPARED_INSTANCES=()
+UBERDEV_BRAINSTORM_PREPARED_HANDOFFS=(); UBERDEV_BRAINSTORM_PREPARED_RESULTS=()
+UBERDEV_BRAINSTORM_PREPARED_STATUSES=(); UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS=()
+UBERDEV_BRAINSTORM_WAITED=0; UBERDEV_BRAINSTORM_BATCH_LAUNCHED=0
+UBERDEV_BRAINSTORM_UNWIND_TIMEOUT="${UBERDEV_BRAINSTORM_UNWIND_TIMEOUT:-300}"
+case "$UBERDEV_BRAINSTORM_UNWIND_TIMEOUT" in ''|*[!0-9]*|0) return 2 ;; esac
+uberdev_brainstorm_reset_batch() {
+  UBERDEV_BRAINSTORM_PREPARED_EDGES=(); UBERDEV_BRAINSTORM_PREPARED_INSTANCES=()
+  UBERDEV_BRAINSTORM_PREPARED_HANDOFFS=(); UBERDEV_BRAINSTORM_PREPARED_RESULTS=()
+  UBERDEV_BRAINSTORM_PREPARED_STATUSES=(); UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS=()
+  UBERDEV_BRAINSTORM_WAITED=0; UBERDEV_BRAINSTORM_BATCH_LAUNCHED=0
+}
 uberdev_unwind_child_receipts() {
   local receipt instance remainder status result cleanup_rc=0
   for receipt in "${UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[@]}"; do
     instance="${receipt%%|*}"; remainder="${receipt#*|}"
     status="${remainder%%|*}"; result="${remainder#*|}"
-    # timeout=0 drains to the child's real terminal event and lets the runtime
-    # collect result/manifest truth without fabricating timeout or losing lease ownership.
-    if ! uberdev_wait_child "$status" "$result" 0; then cleanup_rc=1; fi
+    if ! uberdev_unwind_child "$status" "$result" "$UBERDEV_BRAINSTORM_UNWIND_TIMEOUT"; then cleanup_rc=1; fi
   done
-  UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS=()
+  uberdev_brainstorm_reset_batch
   return "$cleanup_rc"
 }
 uberdev_brainstorm_dispatch() {
   local edge="$1" instance="$2" role="$3" inputs_json="$4"
-  local risks_json='[]' handoff result status create_rc dispatch_rc cleanup_rc
+  local risks_json='[]' handoff result status create_rc cleanup_rc
   : "$role" # the registered edge manifest selects the role
   if uberdev_create_child_handoff "$edge" "$instance" "$inputs_json" "$risks_json"; then
     :
@@ -122,43 +141,74 @@ uberdev_brainstorm_dispatch() {
   handoff="$UBERDEV_CHILD_HANDOFF"
   result="$UBERDEV_CHILD_RESULT"
   status="$UBERDEV_CHILD_STATUS"
-  if uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null; then
-    UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS+=("$instance|$status|$result")
-    return 0
-  else
-    dispatch_rc=$?; cleanup_rc=0
-    uberdev_unwind_child_receipts || cleanup_rc=$?
-    [ "$cleanup_rc" -eq 0 ] || echo "error: brainstorm receipt unwind failed after edge=$edge instance=$instance" >&2
-    return "$dispatch_rc"
-  fi
+  UBERDEV_BRAINSTORM_PREPARED_EDGES+=("$edge")
+  UBERDEV_BRAINSTORM_PREPARED_INSTANCES+=("$instance")
+  UBERDEV_BRAINSTORM_PREPARED_HANDOFFS+=("$handoff")
+  UBERDEV_BRAINSTORM_PREPARED_RESULTS+=("$result")
+  UBERDEV_BRAINSTORM_PREPARED_STATUSES+=("$status")
+}
+uberdev_brainstorm_launch_batch() {
+  local index edge instance handoff result status dispatch_rc cleanup_rc
+  [ "${#UBERDEV_BRAINSTORM_PREPARED_HANDOFFS[@]}" -gt 0 ] || return 2
+  uberdev_preflight_child_batch "${UBERDEV_BRAINSTORM_PREPARED_HANDOFFS[@]}" || {
+    dispatch_rc=$?; uberdev_brainstorm_reset_batch; return "$dispatch_rc"
+  }
+  for ((index=0; index<${#UBERDEV_BRAINSTORM_PREPARED_HANDOFFS[@]}; index++)); do
+    edge="${UBERDEV_BRAINSTORM_PREPARED_EDGES[$index]}"
+    instance="${UBERDEV_BRAINSTORM_PREPARED_INSTANCES[$index]}"
+    handoff="${UBERDEV_BRAINSTORM_PREPARED_HANDOFFS[$index]}"
+    result="${UBERDEV_BRAINSTORM_PREPARED_RESULTS[$index]}"
+    status="${UBERDEV_BRAINSTORM_PREPARED_STATUSES[$index]}"
+    if uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null; then
+      UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS+=("$instance|$status|$result")
+    else
+      dispatch_rc=$?; cleanup_rc=0
+      uberdev_unwind_child_receipts || cleanup_rc=$?
+      [ "$cleanup_rc" -eq 0 ] || echo "error: bounded brainstorm unwind failed after edge=$edge instance=$instance" >&2
+      return "$dispatch_rc"
+    fi
+  done
+  UBERDEV_BRAINSTORM_BATCH_LAUNCHED=1
 }
 uberdev_brainstorm_wait() {
   local wanted="$1" receipt instance remainder status result
+  if [ "$UBERDEV_BRAINSTORM_BATCH_LAUNCHED" -eq 0 ]; then
+    uberdev_brainstorm_launch_batch || return $?
+  fi
   for receipt in "${UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[@]}"; do
     instance="${receipt%%|*}"
     if [ "$instance" = "$wanted" ]; then
       remainder="${receipt#*|}"; status="${remainder%%|*}"; result="${remainder#*|}"
-      uberdev_wait_child "$status" "$result" 300
-      return $?
+      uberdev_wait_child "$status" "$result" 300 || return $?
+      UBERDEV_BRAINSTORM_WAITED=$((UBERDEV_BRAINSTORM_WAITED + 1))
+      if [ "$UBERDEV_BRAINSTORM_WAITED" -eq "${#UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[@]}" ]; then
+        uberdev_brainstorm_reset_batch
+      fi
+      return 0
     fi
   done
   return 2
 }
-BRAINSTORM_RESEARCH_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"issue_body_path":sys.argv[1],"working_dir":sys.argv[2],"summary_dir":sys.argv[3],"research_mode":"general"},separators=(",",":")))' "$brief_path" "$working_dir" "$summary_dir")"
+BRAINSTORM_CODEBASE_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"working_dir":sys.argv[1],"summary_path":sys.argv[2],"question":sys.argv[3]},separators=(",",":")))' "$working_dir" "$codebase_summary_path" "$codebase_question")"
+BRAINSTORM_PRIOR_ART_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"working_dir":sys.argv[1],"summary_path":sys.argv[2],"question":sys.argv[3]},separators=(",",":")))' "$working_dir" "$patterns_summary_path" "$prior_art_question")"
+BRAINSTORM_LIBRARY_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"working_dir":sys.argv[1],"summary_path":sys.argv[2],"question":sys.argv[3]},separators=(",",":")))' "$working_dir" "$library_summary_path" "$library_question")"
 ```
 
-Create `BRAINSTORM_RESEARCH_INPUTS` as flat JSON containing `issue_body_path: brief_path`, `working_dir`, `summary_dir`, and `research_mode: "general"`, then issue the selected edges before waiting:
+Allocate each `summary_path` as a private regular run artifact first. Construct
+all selected handoffs with the exact three manifest keys above; the builder
+rejects additions. The calls below only prepare handoffs. The first wait
+preflights the whole selected batch before dispatching any provider.
 
 ```bash uberdev-executable edge=brainstorm.research.codebase
-uberdev_brainstorm_dispatch brainstorm.research.codebase brainstorm-research-codebase-a1 research-codebase "$BRAINSTORM_RESEARCH_INPUTS"
+uberdev_brainstorm_dispatch brainstorm.research.codebase brainstorm-research-codebase-a1 research-codebase "$BRAINSTORM_CODEBASE_INPUTS"
 ```
 
 ```bash uberdev-executable edge=brainstorm.research.prior_art
-uberdev_brainstorm_dispatch brainstorm.research.prior_art brainstorm-research-prior-art-a1 research-prior-art "$BRAINSTORM_RESEARCH_INPUTS"
+uberdev_brainstorm_dispatch brainstorm.research.prior_art brainstorm-research-prior-art-a1 research-patterns "$BRAINSTORM_PRIOR_ART_INPUTS"
 ```
 
 ```bash uberdev-executable edge=brainstorm.research.library
-uberdev_brainstorm_dispatch brainstorm.research.library brainstorm-research-library-a1 research-patterns "$BRAINSTORM_RESEARCH_INPUTS"
+uberdev_brainstorm_dispatch brainstorm.research.library brainstorm-research-library-a1 research-prior-art "$BRAINSTORM_LIBRARY_INPUTS"
 ```
 
 ```bash uberdev-executable barrier=brainstorm.research

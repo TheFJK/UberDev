@@ -22,14 +22,11 @@ instance_id: sdd-w[wave]-t[task]-quality-review-a[attempt]
 risk_scope: subtask
 risk_signals: [copy from the immutable root decision]
 inputs:
-  task_id: "[task ID]"
-  implemented_summary: "[from implementer report]"
-  plan_requirements: "[Task N from plan]"
+  plan_path: "[absolute implementation plan path]"
   base_sha: "[commit before this task]"
   head_sha: "[this task commit SHA]"
-  allowlist: [controller-canonicalized absolute paths confined under the worktree]
-  description: "[task summary]"
-  attempt: [positive integer]
+  allowed_paths: [controller-canonicalized absolute paths confined under the worktree]
+  report_path: "[absolute immutable implementer-result path]"
 ```
 
 Pass these inputs through `uberdev_create_child_handoff`, then dispatch only
