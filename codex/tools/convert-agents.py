@@ -33,7 +33,7 @@ installer cannot silently replace a working agent namespace with zero agents.
 from __future__ import annotations
 
 import re
-import json
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -214,15 +214,27 @@ def parse_agent(md_path: Path) -> tuple[dict, str]:
 
 
 def load_routing_policy(path: Path) -> dict:
-    """Load the canonical RFC 0013 routing policy used by generated profiles."""
+    """Load and canonically validate the RFC 0013 routing policy."""
+    validator_path = path.parent.parent / "lib" / "model_routing.py"
     try:
-        policy = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"cannot load routing policy {path}: {exc}") from exc
-    if not isinstance(policy.get("routes"), dict) or not isinstance(
-        policy.get("roles"), dict
-    ):
-        raise ValueError(f"routing policy {path} must define routes and roles")
+        spec = importlib.util.spec_from_file_location(
+            "_uberdev_model_routing_validator", validator_path
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError("validator module has no loader")
+        validator = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = validator
+        try:
+            spec.loader.exec_module(validator)
+        finally:
+            sys.modules.pop(spec.name, None)
+        policy = validator.load_policy(path)
+    except Exception as exc:
+        raise ValueError(
+            f"cannot validate routing policy {path}: {type(exc).__name__}"
+        ) from exc
+    if not isinstance(policy, dict):
+        raise ValueError(f"routing policy validator returned invalid data for {path}")
     return policy
 
 

@@ -22,7 +22,7 @@
 # path; the plugin is the "browse and toggle" path. See codex/README.md.
 #
 # Why two paths: the documented Codex plugin manifest has no `agents` field,
-# so the plugin can ship skills but NOT the 42 agents. This installer carries
+# so the plugin can ship skills but NOT the 44 agents. This installer carries
 # the agents. Users who want agents + dispatch MUST run this installer (the
 # plugin alone leaves /solve, /turbo, /review-pr without their subagents).
 #
@@ -63,7 +63,10 @@ UBERDEV_REF="${UBERDEV_REF:-main}"
 UBERDEV_REPO_URL="${UBERDEV_REPO_URL:-https://github.com/TheFJK/UberDev.git}"
 UBERDEV_ARCHIVE_URL="${UBERDEV_ARCHIVE_URL:-https://github.com/TheFJK/UberDev/archive/refs/heads/${UBERDEV_REF}.tar.gz}"
 BOOTSTRAP_PARENT=""
+STAGED_AGENT_HOME=""
+STAGED_AGENTS_DIR=""
 ADOPT_LEGACY_SKILLS=0
+CODEX_BIN="${CODEX_BIN:-codex}"
 
 # Stable sentinels wrap the injected primer block so re-runs replace cleanly
 # instead of appending duplicate copies. The marker text never appears in real
@@ -107,6 +110,11 @@ source_tree_ready() {
 }
 
 cleanup_bootstrap() {
+  if [ -n "${STAGED_AGENT_HOME}" ] && [ -d "${STAGED_AGENT_HOME}" ]; then
+    rm -rf "${STAGED_AGENT_HOME}"
+    STAGED_AGENT_HOME=""
+    STAGED_AGENTS_DIR=""
+  fi
   if [ -n "${BOOTSTRAP_PARENT}" ] && [ -d "${BOOTSTRAP_PARENT}" ]; then
     rm -rf "${BOOTSTRAP_PARENT}"
   fi
@@ -436,37 +444,80 @@ install_runtime() {
   ok "runtime installed to ${RUNTIME_DIR}/"
 }
 
-install_agents() {
-  echo "→ Installing agents → ${AGENTS_DIR}/"
+stage_and_validate_agents() {
+  echo "→ Staging and validating Codex agent profiles"
   if [ ! -f "${CONVERTER}" ]; then
     err "agent converter not found: ${CONVERTER}"
     exit 1
   fi
-  mkdir -p "${AGENTS_DIR}"
-  local tmp_agents agent_file converted_count
-  tmp_agents="$(mktemp -d "${CODEX_HOME}/.uberdev-agents.XXXXXX")"
-  # Convert fresh into a temp dir, then replace the managed namespace. This
-  # removes agents that existed in an older UberDev release but no longer ship.
-  if ! python3 "${CONVERTER}" "${UBERDEV_SRC}/agents" "${tmp_agents}" >/dev/null; then
-    rm -rf "${tmp_agents}"
+  STAGED_AGENT_HOME="$(mktemp -d "${TMPDIR:-/tmp}/uberdev-codex-profile-probe.XXXXXX")"
+  STAGED_AGENTS_DIR="${STAGED_AGENT_HOME}/codex-home/agents"
+  mkdir -p "${STAGED_AGENTS_DIR}" "${STAGED_AGENT_HOME}/home"
+  trap cleanup_bootstrap EXIT
+
+  if ! python3 "${CONVERTER}" "${UBERDEV_SRC}/agents" "${STAGED_AGENTS_DIR}" >/dev/null; then
     err "agent conversion failed (see messages above)."
     exit 1
   fi
-  converted_count="$(find "${tmp_agents}" -maxdepth 1 -name 'uberdev-*.toml' | wc -l | tr -d ' ')"
+  local converted_count probe_json probe_stderr
+  converted_count="$(find "${STAGED_AGENTS_DIR}" -maxdepth 1 -name 'uberdev-*.toml' | wc -l | tr -d ' ')"
   if [ "${converted_count}" -eq 0 ]; then
-    rm -rf "${tmp_agents}"
     err "agent conversion produced zero agents; refusing to replace existing uberdev agents."
     exit 1
   fi
+
+  probe_json="${STAGED_AGENT_HOME}/doctor.json"
+  probe_stderr="${STAGED_AGENT_HOME}/doctor.stderr"
+  # `codex doctor --json` is local-only and loads custom role files. Its
+  # overall status may be nonzero because this isolated home has no auth; the
+  # config diagnostic is the authoritative profile result.
+  HOME="${STAGED_AGENT_HOME}/home" \
+    CODEX_HOME="${STAGED_AGENT_HOME}/codex-home" \
+    "${CODEX_BIN}" doctor --json >"${probe_json}" 2>"${probe_stderr}" || true
+  if ! python3 - "${probe_json}" <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+try:
+    if os.path.getsize(path) > 1_048_576:
+        raise ValueError("oversized diagnostic")
+    with open(path, "r", encoding="utf-8") as handle:
+        report = json.load(handle)
+    details = report["checks"]["config.load"]["details"]
+    if not isinstance(details, dict):
+        raise TypeError("invalid config details")
+    warning = details.get("startup warning", "")
+    if not isinstance(warning, str) or warning:
+        raise ValueError("agent profile warning")
+except (OSError, UnicodeError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+    raise SystemExit(1)
+PY
+  then
+    err "staged Codex agent profile validation failed; live files were not changed."
+    exit 1
+  fi
+  ok "${converted_count} staged agent profiles accepted by Codex"
+}
+
+install_agents() {
+  echo "→ Installing agents → ${AGENTS_DIR}/"
+  if [ -z "${STAGED_AGENTS_DIR}" ] || [ ! -d "${STAGED_AGENTS_DIR}" ]; then
+    err "validated staged agents are unavailable."
+    exit 1
+  fi
+  mkdir -p "${AGENTS_DIR}"
+  local agent_file
+  # Replace only after the entire staged namespace passed Codex's loader.
   for agent_file in "${AGENTS_DIR}"/uberdev-*.toml; do
     [ -e "$agent_file" ] || continue
     rm -f "$agent_file"
   done
-  for agent_file in "${tmp_agents}"/uberdev-*.toml; do
+  for agent_file in "${STAGED_AGENTS_DIR}"/uberdev-*.toml; do
     [ -e "$agent_file" ] || continue
     cp "$agent_file" "${AGENTS_DIR}/"
   done
-  rm -rf "${tmp_agents}"
   local count
   count="$(find "${AGENTS_DIR}" -maxdepth 1 -name 'uberdev-*.toml' | wc -l | tr -d ' ')"
   ok "${count} agents installed to ${AGENTS_DIR}/ (as uberdev-*.toml)"
@@ -546,13 +597,10 @@ main() {
   require_cmd python3 "macOS ships it; elsewhere see https://python.org"
   require_cmd rsync "macOS: brew install rsync; Debian: sudo apt install rsync"
 
-  # Warn (don't fail) if codex itself isn't on PATH — user may be installing
-  # on a box before installing Codex, or have it under a different name.
-  if ! command -v codex >/dev/null 2>&1; then
-    warn "'codex' CLI not found on PATH. Install it from https://developers.openai.com/codex — the files are still placed correctly for when it is."
-  fi
+  require_cmd "${CODEX_BIN}" "Install Codex 0.144.1 or newer so staged agent profiles can be validated before installation."
 
   preflight_skill_collisions
+  stage_and_validate_agents
   install_runtime
   install_skills
   install_agents

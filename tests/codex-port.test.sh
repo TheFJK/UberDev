@@ -45,6 +45,40 @@ mkdir -p "$TMP/empty-agents-src"
 assert_cmd 2 "convert-agents fails when source contains zero agents" \
   python3 "$CONVERT_AGENTS" "$TMP/empty-agents-src" "$TMP/empty-agents-out"
 
+# The converter must use the canonical routing-policy validator, not merely
+# read the values it later emits. Each mutation remains syntactically valid
+# JSON (except the intentional duplicate-key ambiguity) but violates policy v1.
+for mutation in duplicate route effort sandbox; do
+  MUT_ROOT="$TMP/policy-mutation-$mutation/uberdev"
+  mkdir -p "$MUT_ROOT"
+  cp -R "$REPO_ROOT/plugins/uberdev/agents" "$MUT_ROOT/agents"
+  cp -R "$REPO_ROOT/plugins/uberdev/lib" "$MUT_ROOT/lib"
+  cp -R "$REPO_ROOT/plugins/uberdev/policy" "$MUT_ROOT/policy"
+  python3 - "$MUT_ROOT/policy/model-routing-v1.json" "$mutation" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+mutation = sys.argv[2]
+raw = path.read_text()
+if mutation == "duplicate":
+    raw = raw.replace('"schema_version": 1,', '"schema_version": 1,\n  "schema_version": 1,', 1)
+    path.write_text(raw)
+else:
+    value = json.loads(raw)
+    if mutation == "route":
+        value["routes"]["standard"]["unexpected"] = True
+    elif mutation == "effort":
+        value["routes"]["standard"]["codex"]["reasoning_effort"] = "impossible"
+    else:
+        value["roles"]["research-codebase"]["sandbox_ceiling"] = "danger-full-access"
+    path.write_text(json.dumps(value, indent=2) + "\n")
+PY
+  assert_cmd 2 "convert-agents rejects $mutation policy mutation" \
+    python3 "$CONVERT_AGENTS" "$MUT_ROOT/agents" "$TMP/mutated-$mutation-out"
+done
+
 # All 44 agents produced a uberdev-*.toml.
 N="$(find "$TMP/agents" -name 'uberdev-*.toml' 2>/dev/null | wc -l | tr -d ' ')"
 [ "$N" -eq 44 ] && pass "44 uberdev-*.toml produced" || fail "expected 44 toml, got $N"
@@ -398,6 +432,41 @@ PY
   || fail "ported plugin skills have invalid frontmatter or exposed non-skill dirs"
 
 echo "== Installer: idempotency + uninstall =="
+# Codex doctor is a local schema probe; its overall exit can be nonzero because
+# an isolated probe home intentionally has no credentials. This stub preserves
+# that contract and lets installer failure paths be tested without Codex/auth.
+CODEX_STUB="$TMP/codex-profile-probe"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'count="$(find "${CODEX_HOME:?}/agents" -maxdepth 1 -name '\''uberdev-*.toml'\'' 2>/dev/null | wc -l | tr -d '\''[:space:]'\'')"' \
+  'if [ "${1:-}" != doctor ] || [ "${2:-}" != --json ] || [ "$count" -ne 44 ]; then exit 64; fi' \
+  'if [ "${CODEX_PROFILE_PROBE_MODE:-ok}" = reject ]; then' \
+  '  printf '\''%s\n'\'' '\''{"checks":{"config.load":{"details":{"startup warning":"Ignoring malformed agent role definition: /secret/profile/payload"}}}}'\''' \
+  'else' \
+  '  printf '\''%s\n'\'' '\''{"checks":{"config.load":{"details":{}}}}'\''' \
+  'fi' \
+  'exit 1' > "$CODEX_STUB"
+chmod +x "$CODEX_STUB"
+export CODEX_BIN="$CODEX_STUB"
+
+TH_PROFILE_REJECT="$TMP/home-profile-reject"
+mkdir -p "$TH_PROFILE_REJECT/.codex/agents"
+printf 'existing-user-agent\n' > "$TH_PROFILE_REJECT/.codex/agents/uberdev-existing.toml"
+if env HOME="$TH_PROFILE_REJECT" CODEX_HOME="$TH_PROFILE_REJECT/.codex" \
+    CODEX_PROFILE_PROBE_MODE=reject bash "$INSTALLER" \
+    >/tmp/codex-profile-reject-out 2>&1; then
+  fail "installer rejects malformed staged profiles before live mutation"
+elif grep -q 'existing-user-agent' "$TH_PROFILE_REJECT/.codex/agents/uberdev-existing.toml" \
+  && [ ! -e "$TH_PROFILE_REJECT/.codex/plugins/uberdev-codex" ] \
+  && [ ! -e "$TH_PROFILE_REJECT/.agents/skills" ] \
+  && [ ! -e "$TH_PROFILE_REJECT/.codex/AGENTS.md" ] \
+  && grep -q 'staged Codex agent profile validation failed' /tmp/codex-profile-reject-out \
+  && ! grep -q '/secret/profile/payload' /tmp/codex-profile-reject-out; then
+  pass "installer rejects malformed staged profiles before live mutation"
+else
+  fail "profile rejection mutated live state or leaked raw diagnostics"
+fi
+
 # Two consecutive installs into the same throwaway HOME, then verify no
 # duplicate primer blocks. Then uninstall and verify cleanup.
 TH="$TMP/home"

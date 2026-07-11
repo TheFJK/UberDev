@@ -61,7 +61,7 @@ Restart Codex. Verify:
 
 ```bash
 ls ~/.agents/skills/      # ~39 UberDev skill dirs incl. command-skills
-ls ~/.codex/agents/       # 42 uberdev-*.toml
+ls ~/.codex/agents/       # 44 uberdev-*.toml
 grep uberdev-codex-primer ~/.codex/AGENTS*.md  # primer block present
 ```
 
