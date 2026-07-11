@@ -9,6 +9,26 @@ trap 'rm -rf "$TMP"' EXIT
 
 . "$LIB"
 
+file_mode() {
+  local value
+  value="$(stat -f '%Lp' "$1" 2>/dev/null || true)"
+  if [[ "$value" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s\n' "$value"
+  else
+    stat -c '%a' "$1" 2>/dev/null
+  fi
+}
+
+file_link_count() {
+  local value
+  value="$(stat -f '%l' "$1" 2>/dev/null || true)"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$value"
+  else
+    stat -c '%h' "$1" 2>/dev/null
+  fi
+}
+
 make_carrier() {
   local workflow="$1" issue="$2" repo="$3" run="$4" request decision metadata context_out context sha
   mkdir -p "$run"
@@ -251,15 +271,15 @@ uberdev_command_workspace_prepare review-pr 77 medium '[]' "$RUN_ID" '' >/dev/nu
 EXPECTED="$REPO/.uberdev/research/$RUN_ID"
 [ "$WORKTREE_ROOT" = "$REPO" ]
 [ "$RESEARCH_DIR_ABS" = "$EXPECTED" ]
-[ "$(stat -f '%Lp' "$RESEARCH_DIR_ABS")" = 700 ]
+[ "$(file_mode "$RESEARCH_DIR_ABS")" = 700 ]
 [ "$DIFF_ARTIFACT_PATH" = "$EXPECTED/pr-diff.md" ]
 [ "$CRITERIA_PATH" = "$EXPECTED/review-criteria.md" ]
 [ "$COMMIT_RANGE_PATH" = "$EXPECTED/commit-range.txt" ]
 [ "$PHASE1_DISPOSITION_PATH" = "$EXPECTED/phase1-disposition.json" ]
 [ "$PHASE2_DISPOSITION_PATH" = "$EXPECTED/phase2-disposition.json" ]
 for path in "$DIFF_ARTIFACT_PATH" "$CRITERIA_PATH" "$COMMIT_RANGE_PATH" "$PHASE1_DISPOSITION_PATH" "$PHASE2_DISPOSITION_PATH"; do
-  [ "$(stat -f '%Lp' "$path")" = 600 ]
-  [ "$(stat -f '%l' "$path")" = 1 ]
+  [ "$(file_mode "$path")" = 600 ]
+  [ "$(file_link_count "$path")" = 1 ]
 done
 grep -q '^<external-untrusted-input source="pr-diff">$' "$DIFF_ARTIFACT_PATH"
 jq -e '.caller=="review-pr" and .carrier_workflow=="solve" and .repository_root==$repo and .research_dir==$research and (.artifacts|keys)==["commit_range","criteria","diff","phase1_disposition","phase2_disposition"]' \
@@ -325,7 +345,7 @@ SIMPLIFY_RUN=20260710-010205-abcdef0
 uberdev_command_workspace_prepare simplify 0 medium '[]' "$SIMPLIFY_RUN" '' >/dev/null
 [ "$mint_calls" -eq 1 ]
 [ "$AGG_PATH" = "$REPO/.uberdev/research/$SIMPLIFY_RUN/simplify-final.md" ]
-[ "$(stat -f '%Lp' "$AGG_PATH")" = 600 ]
+[ "$(file_mode "$AGG_PATH")" = 600 ]
 
 # Post-review requires the inherited descriptor, attaches exactly, and preserves bytes.
 UBERDEV_RUN_CARRIER_JSON="$SOLVE_CARRIER"
