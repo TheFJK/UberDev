@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract and verify routed-provider callsite contracts from production docs."""
+"""Verify the durable source-owned provider callsite contract."""
 
 from __future__ import annotations
 
@@ -24,14 +24,10 @@ CONTRACT_BLOCK = re.compile(
     re.DOTALL,
 )
 BASH_FENCE = re.compile(r"^[ \t]*```bash([^\n]*)\n(.*?)^[ \t]*```[ \t]*$", re.MULTILINE | re.DOTALL)
-EDGE_LITERAL = re.compile(r"(?<![a-z0-9_.])((?:brainstorm|orchestrator|sdd|review_pr)\.[a-z0-9_.]+)")
-LITERAL_DISPATCH = re.compile(
-    r"^\s*(?:[a-z0-9_ |*-]+\)\s*)?"
-    r"(?:uberdev_brainstorm_dispatch|uberdev_design_dispatch|review_child_single|review_child_record)\s+"
-)
+EDGE = re.compile(r"[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)+")
 ROW_KEYS = {"inputs", "optional_inputs", "allowed_workflows", "risk_scope", "risk_argument"}
 WORKFLOWS = {"review-pr", "simplify", "solve", "turbo"}
-FORMAT_OPTIONALS = {"format_retry", "format_example_path"}
+FORMAT_INPUTS = {"format_example_path", "format_retry"}
 
 
 class ContractFailure(Exception):
@@ -42,10 +38,10 @@ def fail(message: str) -> None:
     raise ContractFailure(message)
 
 
-def _string_list(value: Any, label: str, *, allow_empty: bool = True) -> list[str]:
+def _string_list(value: Any, label: str, *, nonempty: bool = False) -> list[str]:
     if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
         fail(f"{label}: expected string list")
-    if not allow_empty and not value:
+    if nonempty and not value:
         fail(f"{label}: empty list")
     if len(value) != len(set(value)):
         fail(f"{label}: duplicate value")
@@ -56,294 +52,183 @@ def _risk_argument(scope: str) -> Any:
     return {"none": [], "subtask": "subtask", "run": None}[scope]
 
 
-def _payload_keys(command: str) -> set[str]:
-    """Extract keys from the actual Python/jq object constructor in a command."""
-    python_object = re.search(r"json\.dumps\(\{(.*?)\},\s*separators=", command, re.DOTALL)
-    if python_object:
-        return set(re.findall(r"[\"']([a-z][a-z0-9_]*)[\"']\s*:", python_object.group(1)))
-    if "jq -cn" in command:
-        return set(re.findall(r"(?:\{|,)\s*([a-z][a-z0-9_]*)\s*:", command))
-    return set()
-
-
-def _augment_keys(command: str) -> set[str]:
-    if "json.loads" not in command:
-        return set()
-    return set(re.findall(r'v\["([a-z][a-z0-9_]*)"\]\s*=', command))
-
-
-def _format_augment(edge_or_group: str, keys: set[str]) -> None:
-    if keys != FORMAT_OPTIONALS:
-        fail(f"{edge_or_group}: retry augment mismatch expected={sorted(FORMAT_OPTIONALS)} actual={sorted(keys)}")
-
-
-def _literal_payloads(fences: list[tuple[str, str]]) -> dict[str, set[str]]:
-    """Resolve literal edge dispatches to the payload variables they consume."""
-    variables: dict[str, set[str]] = {}
-    bodies = "\n".join(body for _info, body in fences)
-    for line in bodies.splitlines():
-        assignment = re.match(r"\s*([A-Z][A-Z0-9_]*)=", line)
-        keys = _payload_keys(line)
-        if assignment and keys:
-            variables[assignment.group(1)] = keys
-
-    payloads: dict[str, set[str]] = {}
-    for line in bodies.splitlines():
-        if not LITERAL_DISPATCH.match(line):
-            continue
-        edges = EDGE_LITERAL.findall(line)
-        referenced = {
-            variable
-            for variable in re.findall(r"\$\{?([A-Z][A-Z0-9_]*)", line)
-            if variable in variables
-        }
-        if len(edges) == 1 and len(referenced) == 1:
-            edge = edges[0]
-            keys = variables[next(iter(referenced))]
-            previous = payloads.get(edge)
-            if previous is not None and previous != keys:
-                fail(f"{edge}: conflicting executable payload constructors")
-            payloads[edge] = keys
-    return payloads
-
-
-def _sdd_payloads(bash: str) -> dict[str, set[str]]:
-    function = re.search(
-        r"sdd_inputs_for_task\(\)\s*\{.*?case \"\$edge_id\" in(.*?)^\s*esac",
-        bash,
-        re.MULTILINE | re.DOTALL,
-    )
-    if not function:
-        fail("subagent-driven-dev: missing executable payload switch")
-    payloads: dict[str, set[str]] = {}
-    branch = re.compile(
-        r"^\s*(sdd\.[a-z0-9_.]+)\)\s*(.*?)(?=^\s*(?:sdd\.[a-z0-9_.]+\)|\*\)))",
-        re.MULTILINE | re.DOTALL,
-    )
-    for edge, body in branch.findall(function.group(1)):
-        keys = _payload_keys(body)
-        if not keys:
-            fail(f"{edge}: missing executable payload constructor")
-        payloads[edge] = keys
-    constructor_flow = re.search(
-        r'^\s*task_inputs_json="\$\(sdd_inputs_for_task "\$edge_id" "\$task_id"\)"',
-        bash,
-        re.MULTILINE,
-    )
-    dispatch = re.search(
-        r'^\s*sdd_dispatch_prepared "\$edge_id" "\$instance_id" "\$task_inputs_json" "\$SDD_RISK_JSON"(?:\s|$)',
-        bash,
-        re.MULTILINE,
-    )
-    if not constructor_flow or not dispatch:
-        fail("subagent-driven-dev: missing executable SDD dispatch")
-    return payloads
-
-
-def _post_review_payloads(bash: str, declared: set[str]) -> dict[str, set[str]]:
-    array = re.search(r"REVIEW_EDGES=\((.*?)\)", bash, re.DOTALL)
-    conditional = re.search(
-        r'if \[ "\$EDGE_ID" = review_pr\.review\.general \]; then(.*?)^\s*else(.*?)^\s*fi',
-        bash,
-        re.MULTILINE | re.DOTALL,
-    )
-    if not array or not conditional:
-        fail("post-impl-review: missing executable review enumeration/payload branch")
-    record = re.search(
-        r'^\s*post_review_record "\$EDGE_ID" "\$INSTANCE" "\$INPUTS_JSON" \'\[\]\' "\$REVIEW_RECORDS"\s*$',
-        bash,
-        re.MULTILINE,
-    )
-    if not record:
-        fail("post-impl-review: missing executable review record")
-    enumerated = set(EDGE_LITERAL.findall(array.group(1)))
-    if enumerated != declared:
-        fail(f"post-impl-review: dynamic edge mismatch declared={sorted(declared)} executable={sorted(enumerated)}")
-    general = _payload_keys(conditional.group(1))
-    standard = _payload_keys(conditional.group(2))
-    if not general or not standard:
-        fail("post-impl-review: missing executable review payload constructor")
-    return {edge: general if edge == "review_pr.review.general" else standard for edge in enumerated}
-
-
-def _post_review_retry_edges(bash: str, raw_rows: dict[str, Any]) -> set[str]:
-    conditional = re.search(
-        r'if \[ "\$FAILED_REVIEW_EDGE" = review_pr\.review\.general \]; then(.*?)^\s*else(.*?)^\s*fi',
-        bash,
-        re.MULTILINE | re.DOTALL,
-    )
-    repair = re.search(
-        r'^\s*post_review_record "\$FAILED_REVIEW_EDGE" "\$REPAIR_INSTANCE" "\$REPAIR_INPUTS" '
-        r"'\[\]' \"\$REPAIR_PREFIX\.records\"\s*$",
-        bash,
-        re.MULTILINE,
-    )
-    if not conditional or not repair:
-        fail("post-impl-review: missing executable review repair")
-    variants = {
-        edge: _payload_keys(conditional.group(1) if edge == "review_pr.review.general" else conditional.group(2))
-        for edge in raw_rows
-    }
-    for edge, actual in variants.items():
-        required = set(raw_rows[edge]["inputs"])
-        allowed = required | set(raw_rows[edge]["optional_inputs"])
-        if "format_retry" not in actual or not required <= actual or not actual <= allowed:
-            fail(f"{edge}: retry augment mismatch actual={sorted(actual)}")
-    return set(raw_rows)
-
-
-def _clone_retry_edges(relative: str, bash: str, raw_rows: dict[str, Any]) -> set[str]:
-    augmentations: dict[str, set[str]] = {}
-    for line in bash.splitlines():
-        assignment = re.match(r"\s*([A-Z][A-Z0-9_]*)=", line)
-        keys = _augment_keys(line)
-        if assignment and keys & FORMAT_OPTIONALS:
-            augmentations[assignment.group(1)] = keys
-
-    proven: set[str] = set()
-    for line in bash.splitlines():
-        if not LITERAL_DISPATCH.match(line):
-            continue
-        edges = EDGE_LITERAL.findall(line)
-        variables = {
-            variable
-            for variable in re.findall(r"\$\{?([A-Z][A-Z0-9_]*)", line)
-            if variable in augmentations
-        }
-        if len(edges) == 1 and len(variables) == 1:
-            edge = edges[0]
-            _format_augment(edge, augmentations[next(iter(variables))])
-            proven.add(edge)
-
-    if relative.endswith("brainstorm/SKILL.md"):
-        keys = augmentations.get("BRAINSTORM_FORMAT_INPUTS")
-        if keys is None:
-            fail("brainstorm: missing retry augmentation")
-        _format_augment("brainstorm dynamic retry", keys)
-        dynamic = re.search(
-            r'^\s*uberdev_brainstorm_dispatch "\$failed_edge" "\$format_retry_instance" '
-            r'"\$failed_role" "\$BRAINSTORM_FORMAT_INPUTS"\s*$',
-            bash,
-            re.MULTILINE,
-        )
-        if not dynamic:
-            fail("brainstorm: missing dynamic retry dispatch")
-        proven.update(raw_rows)
-    elif relative.endswith("orchestrator/SKILL.md"):
-        keys = augmentations.get("FORMAT_RETRY_INPUTS")
-        if keys is None:
-            fail("orchestrator: missing research retry augmentation")
-        _format_augment("orchestrator dynamic retry", keys)
-        dynamic = re.search(
-            r'^\s*uberdev_design_dispatch "\$failed_edge" "\$format_retry_instance" '
-            r'"\$failed_role" "\$failed_phase" none "\$failed_risks_json" "\$FORMAT_RETRY_INPUTS"\s*$',
-            bash,
-            re.MULTILINE,
-        )
-        if not dynamic:
-            fail("orchestrator: missing dynamic retry dispatch")
-        proven.update(
-            edge
-            for edge in raw_rows
-            if edge.startswith("orchestrator.research.") and edge != "orchestrator.research.followup"
-        )
-    return proven
-
-
-def validate_retry_contracts(relative: str, text: str, raw_rows: dict[str, Any]) -> None:
-    bash = "\n".join(body for _info, body in BASH_FENCE.findall(text))
-    expected = {
-        edge
-        for edge, row in raw_rows.items()
-        if FORMAT_OPTIONALS <= set(row["optional_inputs"])
-    }
-    if relative.endswith("post-impl-review/SKILL.md"):
-        proven = _post_review_retry_edges(bash, raw_rows)
-    else:
-        proven = _clone_retry_edges(relative, bash, raw_rows)
-    if proven != expected:
-        fail(f"{relative}: retry edge mismatch expected={sorted(expected)} executable={sorted(proven)}")
-
-
-def _simplify_payloads(bash: str, declared: set[str]) -> dict[str, set[str]]:
-    loops = re.finditer(r"for LENS in ([^;\n]+); do\n(.*?)^\s*done", bash, re.MULTILINE | re.DOTALL)
-    selected: tuple[list[str], str] | None = None
-    for loop in loops:
-        body = loop.group(2)
-        if 'EDGE_ID="review_pr.simplify.$LENS"' in body:
-            lenses = loop.group(1).split()
-            if not lenses or len(lenses) != len(set(lenses)) or any(not re.fullmatch(r"[a-z0-9_]+", lens) for lens in lenses):
-                fail("review-pr: malformed dynamic simplify enumeration")
-            selected = (lenses, body)
-            break
-    if selected is None:
-        fail("review-pr: missing dynamic simplify loop")
-    lenses, body = selected
-    record = re.search(
-        r'^\s*review_child_record "\$EDGE_ID" "\$INSTANCE" "\$INPUTS_JSON" \'\[\]\' "\$SIMPLIFY_RECORDS"\s*$',
-        body,
-        re.MULTILINE,
-    )
-    if not record:
-        fail("review-pr: missing executable simplify record")
-    executable = {f"review_pr.simplify.{lens}" for lens in lenses}
-    if executable != declared:
-        fail(f"review-pr: dynamic edge mismatch declared={sorted(declared)} executable={sorted(executable)}")
-    markers = set(re.findall(r"#\s*routed-provider-edge:\s*(review_pr\.simplify\.[a-z0-9_]+)", bash))
-    invalid_markers = markers - executable
-    if invalid_markers:
-        fail(f"review-pr: dynamic marker mismatch: {sorted(invalid_markers)}")
-    keys = _payload_keys(body)
-    if not keys:
-        fail("review-pr: missing dynamic simplify payload constructor")
-    return {edge: keys for edge in executable}
-
-
-def executable_payloads(relative: str, text: str, raw_rows: dict[str, Any]) -> dict[str, set[str]]:
-    fences = BASH_FENCE.findall(text)
-    bash = "\n".join(body for _info, body in fences)
-    payloads = _literal_payloads(fences)
-    declared = set(raw_rows)
-    if relative.endswith("subagent-driven-dev/SKILL.md"):
-        payloads.update(_sdd_payloads(bash))
-    elif relative.endswith("post-impl-review/SKILL.md"):
-        payloads.update(_post_review_payloads(bash, declared))
-    elif relative.endswith("commands/review-pr.md"):
-        simplify = {edge for edge in declared if edge.startswith("review_pr.simplify.")}
-        payloads.update(_simplify_payloads(bash, simplify))
-    if set(payloads) != declared:
-        fail(
-            f"{relative}: executable edge mismatch "
-            f"missing={sorted(declared - set(payloads))} extra={sorted(set(payloads) - declared)}"
-        )
-    validate_retry_contracts(relative, text, raw_rows)
-    return payloads
-
-
-def _load_contract_block(relative: str, text: str) -> dict[str, Any]:
+def _load_contract(relative: str, text: str) -> dict[str, Any]:
     matches = CONTRACT_BLOCK.findall(text)
     if len(matches) != 1:
         fail(f"{relative}: expected exactly one child-callsite-contracts-v1 block")
     try:
-        raw_rows = json.loads(matches[0])
+        rows = json.loads(matches[0])
     except Exception as error:
         fail(f"{relative}: invalid contract JSON: {error}")
-    if not isinstance(raw_rows, dict) or not raw_rows:
+    if not isinstance(rows, dict) or not rows:
         fail(f"{relative}: contract block must be a non-empty object")
-    return raw_rows
+    return rows
 
 
-def parse_source(relative: str, text: str) -> tuple[dict[str, dict[str, Any]], set[str]]:
-    raw_rows = _load_contract_block(relative, text)
-    payloads = executable_payloads(relative, text, raw_rows)
-    rows: dict[str, dict[str, Any]] = {}
-    reachable: set[str] = set()
+def _executable_bash(text: str) -> str:
+    return "\n".join(body for _info, body in BASH_FENCE.findall(text))
+
+
+def _command(text: str, helper: str, argument: str) -> bool:
+    pattern = rf"^[ \t]*(?!#)[^#\n]*\b{re.escape(helper)}[ \t]+{re.escape(argument)}(?:[ \t\\\n]|$)"
+    return re.search(pattern, text, re.MULTILINE) is not None
+
+
+def _function_body(text: str, name: str) -> str:
+    match = re.search(rf"^[ \t]*{re.escape(name)}\(\)[ \t]*\{{(.*?)^[ \t]*\}}", text, re.MULTILINE | re.DOTALL)
+    if not match:
+        fail(f"missing executable function: {name}")
+    return match.group(1)
+
+
+def _require_dispatch_chain(relative: str, bash: str) -> None:
+    if "child-dispatch.sh" not in bash:
+        fail(f"{relative}: missing production child-dispatch source")
+    if relative.endswith("brainstorm/SKILL.md"):
+        functions = ("uberdev_brainstorm_dispatch", "uberdev_brainstorm_launch_batch")
+    elif relative.endswith("orchestrator/SKILL.md"):
+        functions = ("uberdev_design_dispatch", "uberdev_design_launch_batch")
+    elif relative.endswith("subagent-driven-dev/SKILL.md"):
+        functions = ("sdd_dispatch_prepared", "sdd_launch_prepared_batch")
+    elif relative.endswith("post-impl-review/SKILL.md"):
+        functions = ("post_review_fanout",)
+    else:
+        functions = ("review_child_fanout",)
+    for function in functions:
+        if re.search(rf"^[ \t]*{re.escape(function)}\(\)[ \t]*\{{", bash, re.MULTILINE) is None:
+            fail(f"{relative}: routed chain missing {function}")
+    if "uberdev_create_child_handoff" not in bash:
+        fail(f"{relative}: routed chain missing uberdev_create_child_handoff")
+    if "uberdev_dispatch_child" not in bash:
+        fail(f"{relative}: routed chain missing uberdev_dispatch_child")
+
+
+def _literal_dispatch(relative: str, bash: str, edge: str) -> bool:
+    if relative.endswith("brainstorm/SKILL.md"):
+        helpers = ("uberdev_brainstorm_dispatch",)
+    elif relative.endswith("orchestrator/SKILL.md"):
+        helpers = ("uberdev_design_dispatch",)
+    else:
+        helpers = ("review_child_single", "review_child_record")
+    return any(_command(bash, helper, edge) for helper in helpers)
+
+
+def _validate_sdd(relative: str, bash: str, declared: set[str]) -> set[str]:
+    switch = re.search(r'sdd_inputs_for_task\(\).*?case "\$edge_id" in(.*?)^[ \t]*esac', bash, re.MULTILINE | re.DOTALL)
+    if not switch:
+        fail(f"{relative}: missing executable SDD input switch")
+    owned = set(re.findall(r"^[ \t]*(sdd\.[a-z0-9_.]+)\)", switch.group(1), re.MULTILINE))
+    if owned != declared:
+        fail(f"{relative}: dynamic edge mismatch declared={sorted(declared)} executable={sorted(owned)}")
+    for edge in owned:
+        if not _command(switch.group(1), "uberdev_child_inputs_build", edge):
+            fail(f"{edge}: builder edge mismatch")
+    if not _command(bash, "uberdev_child_inputs_validate", '"$edge_id"'):
+        fail(f"{relative}: missing production input validation")
+    if not _command(bash, "sdd_dispatch_prepared", '"$edge_id"'):
+        fail(f"{relative}: missing executable SDD dispatch")
+    return owned
+
+
+def _validate_post_review(relative: str, bash: str, declared: set[str]) -> set[str]:
+    array = re.search(r"REVIEW_EDGES=\((.*?)\)", bash, re.DOTALL)
+    if not array:
+        fail(f"{relative}: missing dynamic review ownership")
+    owned = set(EDGE.findall(array.group(1)))
+    if owned != declared:
+        fail(f"{relative}: dynamic edge mismatch declared={sorted(declared)} executable={sorted(owned)}")
+    if not _command(bash, "uberdev_child_inputs_build", '"$EDGE_ID"'):
+        fail(f"{relative}: missing dynamic builder call")
+    if not _command(bash, "post_review_record", '"$EDGE_ID"'):
+        fail(f"{relative}: missing executable review record")
+    record = _function_body(bash, "post_review_record")
+    if not _command(record, "uberdev_child_inputs_validate", '"$edge"'):
+        fail(f"{relative}: missing production input validation")
+    if not _command(bash, "uberdev_child_inputs_format_retry", '"$FAILED_REVIEW_EDGE"') or not _command(
+        bash, "post_review_record", '"$FAILED_REVIEW_EDGE"'
+    ):
+        fail(f"{relative}: retry helper edge mismatch")
+    return owned
+
+
+def _validate_simplify(relative: str, bash: str, declared: set[str]) -> set[str]:
+    simplify = {edge for edge in declared if edge.startswith("review_pr.simplify.")}
+    loop = re.search(r"for LENS in ([^;\n]+); do\n(.*?)^[ \t]*done", bash, re.MULTILINE | re.DOTALL)
+    if not loop or 'EDGE_ID="review_pr.simplify.$LENS"' not in loop.group(2):
+        fail(f"{relative}: missing dynamic simplify loop")
+    owned = {f"review_pr.simplify.{lens}" for lens in loop.group(1).split()}
+    markers = set(re.findall(r"^[ \t]*# routed-provider-edge: (review_pr\.simplify\.[a-z0-9_]+)[ \t]*$", bash, re.MULTILINE))
+    if owned != simplify:
+        fail(f"{relative}: dynamic edge mismatch declared={sorted(simplify)} executable={sorted(owned)}")
+    if markers != owned:
+        fail(f"{relative}: dynamic marker mismatch expected={sorted(owned)} actual={sorted(markers)}")
+    if not _command(loop.group(2), "uberdev_child_inputs_build", '"$EDGE_ID"'):
+        fail(f"{relative}: missing dynamic builder call")
+    if not _command(loop.group(2), "review_child_record", '"$EDGE_ID"'):
+        fail(f"{relative}: missing executable simplify record")
+    record = _function_body(bash, "review_child_record")
+    if not _command(record, "uberdev_child_inputs_validate", '"$edge"'):
+        fail(f"{relative}: missing production input validation")
+    return owned
+
+
+def _validate_retry_edges(relative: str, text: str, bash: str, expected: set[str]) -> None:
+    literal: set[str] = set()
+    for info, body in BASH_FENCE.findall(text):
+        edge_match = re.search(r"(?:^|\s)edge=([a-z][a-z0-9_.-]+)(?:\s|$)", info)
+        if "retry=format" not in info or not edge_match:
+            continue
+        edge = edge_match.group(1)
+        if not _command(body, "uberdev_child_inputs_format_retry", edge):
+            fail(f"{edge}: retry helper edge mismatch")
+        if not _literal_dispatch(relative, body, edge):
+            fail(f"{edge}: retry dispatch edge mismatch")
+        literal.add(edge)
+    if not literal <= expected:
+        fail(f"{relative}: retry edge mismatch extra={sorted(literal - expected)}")
+    dynamic = expected - literal
+    if not dynamic:
+        return
+    if relative.endswith("brainstorm/SKILL.md") or relative.endswith("orchestrator/SKILL.md"):
+        variable = '"$failed_edge"'
+        dispatch = "uberdev_brainstorm_dispatch" if relative.endswith("brainstorm/SKILL.md") else "uberdev_design_dispatch"
+        if not _command(bash, "uberdev_child_inputs_format_retry", variable) or not _command(bash, dispatch, variable):
+            fail(f"{relative}: missing dynamic retry dispatch")
+    elif relative.endswith("post-impl-review/SKILL.md"):
+        # The owned enumeration and shared helper/record identity were checked together above.
+        return
+    else:
+        fail(f"{relative}: retry edge mismatch missing={sorted(dynamic)}")
+
+
+def _validate_source_reachability(relative: str, text: str, declared: set[str], retry_edges: set[str]) -> None:
+    bash = _executable_bash(text)
+    _require_dispatch_chain(relative, bash)
+    dynamic: set[str] = set()
+    if relative.endswith("subagent-driven-dev/SKILL.md"):
+        dynamic = _validate_sdd(relative, bash, declared)
+    elif relative.endswith("post-impl-review/SKILL.md"):
+        dynamic = _validate_post_review(relative, bash, declared)
+    elif relative.endswith("commands/review-pr.md"):
+        dynamic = _validate_simplify(relative, bash, declared)
+    for edge in declared - dynamic:
+        if not _command(bash, "uberdev_child_inputs_build", edge):
+            fail(f"{edge}: builder edge mismatch")
+        if not _literal_dispatch(relative, bash, edge):
+            fail(f"{edge}: executable edge mismatch")
+    _validate_retry_edges(relative, text, bash, retry_edges)
+
+
+def parse_source(relative: str, text: str) -> list[dict[str, Any]]:
+    raw_rows = _load_contract(relative, text)
+    rows: list[dict[str, Any]] = []
+    retry_edges: set[str] = set()
     for edge, raw in raw_rows.items():
-        if not isinstance(edge, str) or not edge or not isinstance(raw, dict) or set(raw) != ROW_KEYS:
+        if not isinstance(edge, str) or not EDGE.fullmatch(edge) or not isinstance(raw, dict) or set(raw) != ROW_KEYS:
             fail(f"{relative}: invalid row schema for {edge!r}")
         required = _string_list(raw["inputs"], f"{edge}.inputs")
         optional = _string_list(raw["optional_inputs"], f"{edge}.optional_inputs")
-        workflows = _string_list(raw["allowed_workflows"], f"{edge}.allowed_workflows", allow_empty=False)
+        workflows = _string_list(raw["allowed_workflows"], f"{edge}.allowed_workflows", nonempty=True)
         if set(required) & set(optional):
             fail(f"{edge}: required/optional inputs overlap")
         if workflows != sorted(workflows) or not set(workflows) <= WORKFLOWS:
@@ -351,67 +236,60 @@ def parse_source(relative: str, text: str) -> tuple[dict[str, dict[str, Any]], s
         scope = raw["risk_scope"]
         if scope not in {"none", "subtask", "run"} or raw["risk_argument"] != _risk_argument(scope):
             fail(f"{edge}: risk scope/argument mismatch")
-        rows[edge] = {
-            "edge_id": edge,
-            "source": relative,
-            "required_inputs": sorted(required),
-            "optional_inputs": sorted(optional),
-            "allowed_workflows": workflows,
-            "risk_scope": scope,
-            "risk_argument": raw["risk_argument"],
-        }
-        actual = payloads[edge]
-        allowed = set(required) | set(optional)
-        if not set(required) <= actual or not actual <= allowed:
-            fail(
-                f"{edge}: executable payload mismatch "
-                f"required={sorted(required)} optional={sorted(optional)} actual={sorted(actual)}"
-            )
-        reachable.add(edge)
-    return rows, reachable
+        if FORMAT_INPUTS <= set(optional):
+            retry_edges.add(edge)
+        rows.append(
+            {
+                "edge_id": edge,
+                "source": relative,
+                "required_inputs": sorted(required),
+                "optional_inputs": sorted(optional),
+                "allowed_workflows": workflows,
+                "risk_scope": scope,
+                "risk_argument": raw["risk_argument"],
+            }
+        )
+    _validate_source_reachability(relative, text, set(raw_rows), retry_edges)
+    return rows
 
 
-def collect_sources(root: Path, overrides: dict[str, str] | None = None) -> tuple[list[dict[str, Any]], set[str]]:
+def collect_sources(root: Path, overrides: dict[str, str] | None = None) -> list[dict[str, Any]]:
     overrides = overrides or {}
-    source_texts: dict[str, str] = {}
+    merged: dict[str, dict[str, Any]] = {}
     declared_count = 0
     for relative in SOURCE_FILES:
-        text = overrides.get(relative)
-        if text is None:
-            text = (root / relative).read_text(encoding="utf-8")
-        source_texts[relative] = text
-        declared_count += len(_load_contract_block(relative, text))
-    if declared_count != 40:
-        fail(f"source contract count: expected 40, got {declared_count}")
-
-    merged: dict[str, dict[str, Any]] = {}
-    reachable: set[str] = set()
-    for relative in SOURCE_FILES:
-        rows, source_reachable = parse_source(relative, source_texts[relative])
-        overlap = set(merged) & set(rows)
-        if overlap:
-            fail("duplicate source edge: " + ",".join(sorted(overlap)))
-        merged.update(rows)
-        reachable.update(source_reachable)
-    if len(merged) != 40:
-        fail(f"source contract count: expected 40, got {len(merged)}")
-    missing = set(merged) - reachable
-    if missing:
-        fail("unreachable source edge: " + ",".join(sorted(missing)))
-    return [merged[edge] for edge in sorted(merged)], reachable
+        text = overrides.get(relative, (root / relative).read_text(encoding="utf-8"))
+        raw = _load_contract(relative, text)
+        declared_count += len(raw)
+        for row in parse_source(relative, text):
+            edge = row["edge_id"]
+            if edge in merged:
+                fail(f"duplicate source edge: {edge}")
+            merged[edge] = row
+    if declared_count != 40 or len(merged) != 40:
+        fail(f"source contract count: expected 40, got {declared_count} declared/{len(merged)} unique")
+    return [merged[edge] for edge in sorted(merged)]
 
 
 def emitted_fixture(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {"schema_version": 1, "contracts": rows, "pending_edges": []}
 
 
-def validate(
-    root: Path,
-    tree_path: Path,
-    fixture_path: Path,
-    overrides: dict[str, str] | None = None,
-) -> list[dict[str, Any]]:
-    rows, _reachable = collect_sources(root, overrides)
+def _validate_runtime_helpers(root: Path) -> None:
+    runtime = (root / "plugins/uberdev/lib/child-dispatch.sh").read_text(encoding="utf-8")
+    for helper, action in (
+        ("uberdev_child_inputs_build", "build"),
+        ("uberdev_child_inputs_validate", "validate"),
+        ("uberdev_child_inputs_format_retry", "format-retry"),
+    ):
+        body = _function_body(runtime, helper)
+        if f"_uberdev_child_inputs_run {action}" not in body:
+            fail(f"production helper is not reachable: {helper}")
+
+
+def validate(root: Path, tree_path: Path, fixture_path: Path, overrides: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    _validate_runtime_helpers(root)
+    rows = collect_sources(root, overrides)
     expected = emitted_fixture(rows)
     try:
         fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
@@ -423,20 +301,14 @@ def validate(
         tree = json.loads(tree_path.read_text(encoding="utf-8"))
     except Exception as error:
         fail(f"invalid run-tree manifest: {error}")
-    providers = {
-        edge: row
-        for edge, row in tree.get("edges", {}).items()
-        if row.get("kind") == "provider" and isinstance(row.get("role"), str)
-    }
+    providers = {edge: row for edge, row in tree.get("edges", {}).items() if row.get("kind") == "provider" and isinstance(row.get("role"), str)}
     source_edges = {row["edge_id"] for row in rows}
     if source_edges != set(providers):
-        missing = sorted(set(providers) - source_edges)
-        extra = sorted(source_edges - set(providers))
-        fail(f"source/manifest edge mismatch missing={missing} extra={extra}")
+        fail(f"source/manifest edge mismatch missing={sorted(set(providers)-source_edges)} extra={sorted(source_edges-set(providers))}")
     for item in rows:
         edge = item["edge_id"]
         manifest = providers[edge]
-        expected_row = {
+        manifest_contract = {
             "edge_id": edge,
             "source": manifest.get("source"),
             "required_inputs": sorted(manifest.get("required_inputs", {})),
@@ -445,17 +317,14 @@ def validate(
             "risk_scope": manifest.get("risk_scope"),
             "risk_argument": _risk_argument(manifest.get("risk_scope")),
         }
-        if item != expected_row:
+        if item != manifest_contract:
             fail(f"source/manifest contract mismatch: {edge}")
-        source_format_retry = FORMAT_OPTIONALS <= set(item["optional_inputs"])
-        manifest_retry = manifest.get("retry", {})
-        manifest_format_retry = isinstance(manifest_retry, dict) and manifest_retry.get("format") == 1
-        if source_format_retry != manifest_format_retry:
+        has_retry = FORMAT_INPUTS <= set(item["optional_inputs"])
+        retry = manifest.get("retry")
+        if has_retry != (isinstance(retry, dict) and retry.get("format") == 1):
             fail(f"source/manifest format retry mismatch: {edge}")
-        if source_format_retry:
-            optional_schema = manifest.get("optional_inputs", {})
-            if optional_schema.get("format_retry") != "boolean" or optional_schema.get("format_example_path") != "path":
-                fail(f"source/manifest format retry schema mismatch: {edge}")
+        if has_retry and (manifest["optional_inputs"].get("format_retry") != "boolean" or manifest["optional_inputs"].get("format_example_path") != "path"):
+            fail(f"source/manifest format retry schema mismatch: {edge}")
     return rows
 
 
@@ -467,8 +336,7 @@ def main() -> int:
     parser.add_argument("--fixture", required=True, type=Path)
     args = parser.parse_args()
     if args.action == "emit":
-        rows, _reachable = collect_sources(args.root)
-        print(json.dumps(emitted_fixture(rows), indent=2, sort_keys=False))
+        print(json.dumps(emitted_fixture(collect_sources(args.root)), indent=2))
         return 0
     rows = validate(args.root, args.tree, args.fixture)
     print(f"run-tree-callsite-contract: {len(rows)} closed, 0 pending")
