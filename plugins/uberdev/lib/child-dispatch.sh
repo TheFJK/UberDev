@@ -30,10 +30,16 @@ _uberdev_child_manifest_path() {
   if [ "${UBERDEV_CHILD_TEST_MODE:-0}" = 1 ] && [ -n "$candidate" ]; then
     python3 -I -B - "$candidate" "$(cd "$_UBERDEV_CHILD_ROOT/../.." && pwd -P)/tests/_fixtures" <<'PY'
 import os,stat,sys
-path=os.path.realpath(sys.argv[1]); root=os.path.realpath(sys.argv[2])
-try: e=os.lstat(path)
-except OSError: raise SystemExit(2)
-if os.path.commonpath((root,path))!=root or stat.S_ISLNK(e.st_mode) or not stat.S_ISREG(e.st_mode) or e.st_uid!=os.geteuid() or e.st_nlink!=1: raise SystemExit(2)
+def fail():
+ print('uberdev child dispatch: unsafe child manifest override',file=sys.stderr); raise SystemExit(2)
+candidate=os.path.abspath(sys.argv[1]); root=os.path.realpath(sys.argv[2])
+try: e=os.lstat(candidate)
+except OSError: fail()
+if stat.S_ISLNK(e.st_mode) or not stat.S_ISREG(e.st_mode) or e.st_uid!=os.geteuid() or e.st_nlink!=1: fail()
+path=os.path.realpath(candidate)
+try: contained=os.path.commonpath((root,path))==root
+except ValueError: contained=False
+if not contained: fail()
 print(path,end='')
 PY
     return

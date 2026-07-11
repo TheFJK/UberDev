@@ -4,8 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
 FIXTURE="$(mktemp "$ROOT/tests/_fixtures/child-inputs-manifest.XXXXXX.json")"
+MALFORMED_FIXTURE="$(mktemp "$ROOT/tests/_fixtures/child-inputs-malformed.XXXXXX.json")"
+INVALID_UTF8_FIXTURE="$(mktemp "$ROOT/tests/_fixtures/child-inputs-encoding.XXXXXX.json")"
+SYMLINK_FIXTURE="$FIXTURE.link"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP" "$FIXTURE"' EXIT
+trap 'rm -rf "$TMP" "$FIXTURE" "$MALFORMED_FIXTURE" "$INVALID_UTF8_FIXTURE" "$SYMLINK_FIXTURE"' EXIT
 
 cat >"$FIXTURE" <<'JSON'
 {"edges":{"all.types":{"kind":"provider","retry":{"format":1},"required_inputs":{"attempt":"integer","enabled":"boolean","name":"string","file":"path","workdir":"directory","tags":"string_array","files":"path_array"},"optional_inputs":{"note":"optional_string","maybe_file":"optional_path","maybe_files":"optional_path_array","format_retry":"boolean","format_example_path":"path"}},"no.retry":{"kind":"provider","required_inputs":{},"optional_inputs":{"format_retry":"boolean","format_example_path":"path"}},"bad.retry.keys":{"kind":"provider","retry":{"format":1},"required_inputs":{},"optional_inputs":{"format_retry":"boolean"}},"skill.edge":{"kind":"skill","required_inputs":{},"optional_inputs":{}}}}
@@ -24,6 +27,7 @@ assert_fails_cleanly() {
   if "$@" >"$TMP/out" 2>"$TMP/err"; then fail "$name" 'unexpected success'; fi
   [ ! -s "$TMP/out" ] || fail "$name" 'partial stdout escaped on failure'
   [ -s "$TMP/err" ] || fail "$name" 'stderr was empty'
+  ! grep -q 'Traceback (most recent call last)' "$TMP/err" || fail "$name" 'Python traceback escaped'
   pass "$name"
 }
 
@@ -46,6 +50,7 @@ assert_fails_cleanly 'build validates required keys before output' uberdev_child
 assert_fails_cleanly 'validate rejects non-object JSON' uberdev_child_inputs_validate all.types '[]'
 assert_fails_cleanly 'validate rejects missing keys' uberdev_child_inputs_validate all.types '{"attempt":7}'
 assert_fails_cleanly 'validate rejects extra keys' uberdev_child_inputs_validate all.types "${expected%\}}\,"extra":1}"
+assert_fails_cleanly 'validate rejects duplicate keys in raw JSON' uberdev_child_inputs_validate all.types "${expected%\}}\,"name":"second"}"
 assert_fails_cleanly 'validate rejects undeclared edges' uberdev_child_inputs_validate absent.edge '{}'
 assert_fails_cleanly 'validate rejects non-provider edges' uberdev_child_inputs_validate skill.edge '{}'
 
@@ -85,6 +90,18 @@ assert_fails_cleanly 'format retry rejects preexisting format_example_path' uber
 assert_fails_cleanly 'format retry requires retry.format=1' uberdev_child_inputs_format_retry no.retry '{}' /tmp/example.md
 assert_fails_cleanly 'format retry requires both optional keys' uberdev_child_inputs_format_retry bad.retry.keys '{}' /tmp/example.md
 assert_fails_cleanly 'format retry revalidates its non-empty example path' uberdev_child_inputs_format_retry all.types "$expected" ''
+
+printf '%s' '{"edges":{"bad.schema":{"kind":"provider","required_inputs":{"value":[]},"optional_inputs":{}}}}' >"$MALFORMED_FIXTURE"
+export UBERDEV_CHILD_MANIFEST_PATH="$MALFORMED_FIXTURE"
+assert_fails_cleanly 'array-valued manifest types fail without a traceback' uberdev_child_inputs_validate bad.schema '{"value":"x"}'
+
+printf '\377' >"$INVALID_UTF8_FIXTURE"
+export UBERDEV_CHILD_MANIFEST_PATH="$INVALID_UTF8_FIXTURE"
+assert_fails_cleanly 'invalid manifest encoding fails without a traceback' uberdev_child_inputs_validate bad.schema '{}'
+
+ln -s "$FIXTURE" "$SYMLINK_FIXTURE"
+export UBERDEV_CHILD_MANIFEST_PATH="$SYMLINK_FIXTURE"
+assert_fails_cleanly 'test manifest override rejects a symlink candidate' uberdev_child_inputs_validate all.types "$expected"
 
 canonical_manifest="$_UBERDEV_CHILD_ROOT/policy/solve-run-tree-v1.json"
 unset UBERDEV_CHILD_MANIFEST_PATH

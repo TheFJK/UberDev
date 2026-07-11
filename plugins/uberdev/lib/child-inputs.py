@@ -52,14 +52,14 @@ def parse_json(raw: str, label: str) -> Any:
         )
     except InputFailure:
         raise
-    except (TypeError, ValueError, json.JSONDecodeError) as error:
+    except (TypeError, ValueError, RecursionError) as error:
         fail(f"invalid {label} JSON: {error}")
 
 
 def load_manifest(path: str) -> dict[str, Any]:
     try:
         raw = Path(path).read_text(encoding="utf-8")
-    except OSError as error:
+    except (OSError, UnicodeError) as error:
         fail(f"cannot read child manifest: {error}")
     manifest = parse_json(raw, "manifest")
     if not isinstance(manifest, dict) or not isinstance(manifest.get("edges"), dict):
@@ -78,7 +78,7 @@ def edge_schema(manifest: dict[str, Any], edge_id: str) -> tuple[dict[str, str],
     if set(required) & set(optional):
         fail(f"overlapping input schema for edge: {edge_id}")
     for key, kind in {**required, **optional}.items():
-        if not isinstance(key, str) or kind not in SUPPORTED_TYPES:
+        if not isinstance(key, str) or not isinstance(kind, str) or kind not in SUPPORTED_TYPES:
             fail(f"unsupported input schema for edge: {edge_id}")
     return required, optional, row
 
