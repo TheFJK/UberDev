@@ -103,18 +103,14 @@ Source `${PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberde
 set -u
 UBERDEV_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}"
 . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh"
-WORKTREE_ROOT="${WORKTREE_ROOT:-$(git rev-parse --show-toplevel)}"
-RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)}"
+: "${RUN_ID:?post-impl-review requires parent RUN_ID}"
+uberdev_command_workspace_prepare post-impl-review 0 medium '[]' "$RUN_ID" "${WORKTREE_ROOT:-}" >/dev/null || {
+  rc=$?; return "$rc" 2>/dev/null || exit "$rc"
+}
 REVIEW_ITERATION="${REVIEW_ITERATION:-1}"
 REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"
-RESEARCH_DIR_ABS="${RESEARCH_DIR_ABS:-$WORKTREE_ROOT/.uberdev/research/$RUN_ID}"
-mkdir -p "$RESEARCH_DIR_ABS"
-DIFF_ARTIFACT_PATH="${DIFF_ARTIFACT_PATH:-$RESEARCH_DIR_ABS/pr-diff.md}"
-CRITERIA_PATH="${CRITERIA_PATH:-$RESEARCH_DIR_ABS/review-criteria.md}"
 CHANGED_PATHS_JSON="${CHANGED_PATHS_JSON:-[]}"
 EMPHASIS_JSON="${EMPHASIS_JSON:-[]}"
-[ -f "$CRITERIA_PATH" ] || : >"$CRITERIA_PATH"
-if [ ! -f "$DIFF_ARTIFACT_PATH" ]; then printf '%s\n%s\n' '<external-untrusted-input source="pr-diff">' '</external-untrusted-input>' >"$DIFF_ARTIFACT_PATH"; fi
 
 post_review_record() {
   python3 -I -B - "$1" "$2" "$3" "$4" "$5" <<'PY'
