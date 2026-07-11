@@ -470,10 +470,15 @@ _uberdev_dispatch_accept_immediate_terminal() {
 import json,os,stat,subprocess,sys
 backend,pid,status_path,result_path=sys.argv[1:]
 if not pid.isdigit() or int(pid)<=0: raise SystemExit(2)
-try:
- process_state=subprocess.check_output(["ps","-o","stat=","-p",pid],text=True,stderr=subprocess.DEVNULL).strip()
-except (OSError,subprocess.CalledProcessError): process_state=""
-if process_state and not process_state.startswith("Z"): raise SystemExit(1)
+if os.name=="nt":
+ try: os.kill(int(pid),0)
+ except OSError: pass
+ else: raise SystemExit(1)
+else:
+ try:
+  process_state=subprocess.check_output(["ps","-o","stat=","-p",pid],text=True,stderr=subprocess.DEVNULL).strip()
+ except (OSError,subprocess.CalledProcessError): process_state=""
+ if process_state and not process_state.startswith("Z"): raise SystemExit(1)
 def secure_read(path,limit):
  parent=os.path.dirname(os.path.abspath(path)); name=os.path.basename(path)
  if os.name=="nt":
