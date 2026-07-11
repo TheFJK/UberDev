@@ -93,6 +93,7 @@ jobs:
           bash tests/cluster.test.sh && \
           bash tests/cluster-pipeline.test.sh && \
           bash tests/code-fixer-dispatch.test.sh && \
+          bash tests/review-child-handoff.test.sh && \
           bash tests/findings-to-issues.test.sh && \
           bash tests/trust-trail-evaluator.test.sh && \
           bash tests/finish-branch-auto-chain.test.sh && \
@@ -248,6 +249,7 @@ jobs:
         #   - dispatch-routing-parity.test.sh
         #   - orchestrator-plan-flatten.test.sh
 #   - review-pr-phase3-ci.test.sh
+#   - review-child-handoff.test.sh
 #   - lib-assert-count.test.sh
 #   - codex-port.test.sh                  (python3 -c + mktemp -d path-translation
 #                                         issue on Git Bash, same as uberscan/
