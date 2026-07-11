@@ -18,7 +18,7 @@ This skill was ported from a Claude Code slash command (`/turbo`). On Codex:
   follow the skill's `## No-Workflow fallback` section instead.
 - **`MultiEdit`** → apply edits with your native file-edit tool.
 
-Original argument hint: `<issue-number> [<issue-number>...] [--trivial|--small|--full] [--auto] [--effort=<level>] [--force] [--backend=<name>]`
+Original argument hint: `<issue-number> [<issue-number>...] [--force] [--routing-mode=adaptive|inherit] [--route=<route>|--model=<slug> --effort=<level>] [--service-tier=default|fast|flex|--fast] [--backend=<name>]`
 
 ---
 
@@ -38,13 +38,13 @@ Spawn an autonomous agent per GitHub issue in **#$ARGUMENTS** — multiple issue
 
 **RULES:** Do NOT use the Task tool or internal subagents. Use bash commands only.
 
-**Usage:** `/turbo <issue-number> [<issue-number>...] [--trivial|--small|--full] [--auto] [--effort=<level>] [--force] [--backend=<name>]`
+**Usage:** `/turbo <issue-number> [<issue-number>...] [--force] [--trivial|--small|--full] [--routing-mode=adaptive|inherit] [--route=<route>|--model=<slug> --effort=<level>] [--service-tier=default|fast|flex|--fast] [--backend=<name>]`
 
 - Same flag semantics as `/solve`. `--auto` is orthogonal to `/turbo` — **`/turbo <issue> --auto` is the max-autonomy combo**.
 - Multi-issue example: `/turbo 5 6 7` ⇒ three parallel agents, one per issue. Same flag set applies to all three.
-- `--effort=<level>` (`low | medium | high | xhigh | max`) — sets the `--effort` flag passed to Claude-backed children. **Default is `max` for `/turbo`** (autopilot, quality > cost — `claude --bg` does NOT inherit the parent session's `/effort` setting in Claude Code 2.1.139, so without this flag every spawn falls back to the supervised daemon's default and silently downgrades quality). The `codex` backend uses Codex model/config defaults instead. Override per-invocation with `--effort=high` etc. Configurable repo-wide via `solve_effort:` in `.codex/uberdev.local.md` (falling back to `.claude/uberdev.local.md`) (env override: `UBERDEV_SOLVE_EFFORT`). Precedence: CLI flag > env > config > default `max`.
+- Routing/service flags are identical to `/solve`; unattended execution does not select a stronger route. `--effort=ultra` is Codex-only, and `--fast` changes service tier only.
 - `--backend=<name>` (`auto | claude-bg | wezterm | background | codex`) — selects how `/turbo` dispatches each per-issue agent. `auto` (default) resolves per-platform: Codex session (`CODEX_HOME` set) or Codex-only host → `codex`; macOS → `wezterm` if available else `claude-bg`; native Windows → `wezterm` if available else `background`; WSL2 → `claude-bg`. `claude-bg` = today's `claude --bg` supervised background sessions (monitor via `claude agents`). `wezterm` = each agent in a visible WezTerm pane (watch them live). `background` = a dependency-free `git worktree add` + detached headless `claude -p` (the Windows-robust fallback). `codex` = detached `codex --ask-for-approval never exec --sandbox workspace-write --json -o <result>` in a per-issue worktree (monitor via PID/log/result file). An explicit `--backend=X` hard-errors if `X` is unusable on this host. Configurable repo-wide via `dispatch_backend:` in `.codex/uberdev.local.md` (falling back to `.claude/uberdev.local.md`) (env override: `UBERDEV_DISPATCH_BACKEND`). Precedence: CLI flag > env > config > default `auto`.
-- `--force` / `-f` → **override the small-team issue-claim protocol** (NEW v0.28.0). On dispatch, `/turbo` marks each issue ACTIVE on GitHub (label `uberdev:active` + assigns `@me` + posts an audit comment with branch, dispatcher, hostname, timestamp) so teammates running concurrent `/turbo` invocations on overlapping issue numbers get a hard refusal showing who/where/when, instead of racing into divergent worktrees and duplicate PRs. The claim is auto-cleared by `/merge` when the PR lands (or when the issue closes — the dispatch-time sweeper handles stale labels on closed issues). `--force` proceeds even if the issue is already claimed — useful for stale-claim recovery after a crashed dispatcher or to reclaim an issue another teammate has abandoned. The override is recorded as `claim_force_override` in the audit log so post-hoc grep can distinguish intentional recoveries from regressions. Solo-dev workflow is unaffected: a single user running `/turbo` from one machine sees no behaviour change (the collision check only refuses cross-machine duplicates).
+- `--force` / `-f` overrides the small-team issue-claim protocol only after the whole batch's route/context validation succeeds; the override emits `claim_force_override`.
 
 ## Deprecated Flags
 

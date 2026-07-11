@@ -204,11 +204,13 @@ final message lands in the `-o` result file for post-run inspection.
 - **`uberdev_goal_review_pr_in_flight`**: the goal-loop's review-pr liveness
   check uses `claude agents --json` for Claude-backed sessions and the
   backend status JSON PID for `background` / `codex` sessions.
-- **Agent model mapping**: 41 of 42 agents use `model: inherit` (Codex inherits
-  the session model by omitting `model`). The one outlier (`research-test-
-  coverage`, Claude `haiku`) maps to `gpt-5.4-mini` (OpenAI's fast tier as of
-  2026-07). Revisit on each OpenAI model release — the mapping lives in
-  `codex/tools/convert-agents.py` (`CODEX_MODEL_FOR_CLAUDE`).
+- **Agent execution profiles**: all 44 generated role TOMLs receive their
+  default `model`, `model_reasoning_effort`, and `sandbox_mode` directly from
+  `plugins/uberdev/policy/model-routing-v1.json` (RFC 0013). Claude
+  `model: inherit` / `model: haiku` frontmatter no longer controls Codex.
+  Leaf roles also set `features.multi_agent = false`; Codex 0.144.1 rejects
+  `agents.max_depth = 0`, while the feature flag is a supported role-config
+  field and prevents nested delegation.
 - **`codex cloud exec`** (async server-side dispatch) is a future enhancement;
   v1 uses local `codex exec` + `nohup`.
 - **Windows**: the codex backend is cross-platform (`codex exec` runs on

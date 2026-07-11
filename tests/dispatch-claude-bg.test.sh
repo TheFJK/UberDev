@@ -115,8 +115,8 @@ assert_grep "$SOLVE_SKILL" \
   '^\| `EFFORT_LEVEL_DEFAULT` \| `max`' \
   "Constants table declares EFFORT_LEVEL_DEFAULT = max (autopilot default)"
 assert_grep "$SOLVE_SKILL" \
-  '^\| `EFFORT_LEVEL_ENUM` \| `low \\\| medium \\\| high \\\| xhigh \\\| max`' \
-  "Constants table declares EFFORT_LEVEL_ENUM = {low,medium,high,xhigh,max}"
+  '^\| `EFFORT_LEVEL_ENUM` \| `low \\\| medium \\\| high \\\| xhigh \\\| max \\\| ultra`' \
+  "Public effort enum includes Codex-only ultra; Claude legacy effort remains five values"
 assert_grep "$SOLVE_PIPELINE" \
   'effort_resolved' \
   "SOLVE_AUDIT_EVENT_ENUM contains effort_resolved (Phase A telemetry)"
@@ -189,8 +189,36 @@ assert_grep "$SOLVE_PIPELINE" \
   '_uberdev_audit_emit effort_resolved' \
   "Phase A emits effort_resolved audit event with {source, level}"
 assert_grep "$SOLVE_PIPELINE" \
-  'low\|medium\|high\|xhigh\|max' \
-  "Phase A validates resolved level against the {low,medium,high,xhigh,max} enum"
+  'low\|medium\|high\|xhigh\|max\|ultra' \
+  "Phase A validates the six-value provider-neutral public enum"
+assert_grep "$SOLVE_PIPELINE" \
+  'ultra is Codex-only' \
+  "Claude-backed resolution rejects public ultra before claims"
+ULTRA_TMP="$(mktemp -d)"; mkdir "$ULTRA_TMP/bin"
+cat >"$ULTRA_TMP/bin/gh" <<'SH'
+#!/usr/bin/env bash
+echo "$*" >>"$ULTRA_GH_LOG"
+case "$1 $2" in
+  "repo view") echo owner/repo ;;
+  "issue view") echo '{"number":91,"title":"README typo","state":"OPEN","body":"Fix typo in README.md.","labels":[{"name":"docs"}],"assignees":[],"comments":[]}' ;;
+  *) exit 3 ;;
+esac
+SH
+chmod +x "$ULTRA_TMP/bin/gh"
+if PATH="$ULTRA_TMP/bin:$PATH" ULTRA_GH_LOG="$ULTRA_TMP/gh.log" TMPDIR="$ULTRA_TMP" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  bash "$SOLVE_PIPELINE" --auto-mode=0 -- 91 --backend=background --effort=ultra >"$ULTRA_TMP/out" 2>&1; then
+  ULTRA_RC=0
+else
+  ULTRA_RC=$?
+fi
+if [ "$ULTRA_RC" -ne 0 ] && grep -q 'ultra is Codex-only' "$ULTRA_TMP/out" && ! grep -q '^label create' "$ULTRA_TMP/gh.log"; then
+  echo "  PASS  Claude Ultra fails behaviorally before claim mutation"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  Claude Ultra must fail before claims (rc=$ULTRA_RC output=$(cat "$ULTRA_TMP/out"))"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$ULTRA_TMP"
 # Each of the three case-statement arms threads ${EFFORT_FLAG[@]} immediately
 # after ${PERM_FLAG[@]}. The literal `"${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}"`
 # token-pair must appear at least three times (file arm, stdin arm, argv arm).

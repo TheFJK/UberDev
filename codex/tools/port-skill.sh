@@ -71,7 +71,13 @@ while IFS= read -r -d '' f; do
   # SKILL.md. macOS sed needs -i ''. GNU sed needs -i. The temp-file path is
   # portable across both.
   tmp="$(mktemp)"
-  # 1. CLAUDE_PLUGIN_ROOT → PLUGIN_ROOT  (bare-word, any context)
+  # 1. Provider-specific chains that already contain the standalone Codex
+  #    fallback collapse to that fallback before any broad variable rewrite.
+  #    Otherwise CLAUDE_PLUGIN_ROOT → PLUGIN_ROOT would create a nested
+  #    ${PLUGIN_ROOT:-${PLUGIN_ROOT:-...}} expression.
+  # 2. The canonical provider-neutral plugin-root chain gets the standalone
+  #    Codex fallback before any bare variable-name normalization.
+  # 3. CLAUDE_PLUGIN_ROOT → PLUGIN_ROOT  (bare-word, any context)
   #    Codex provides PLUGIN_ROOT to bundled hooks/scripts; semantically the
   #    same plugin-root concept as Claude's CLAUDE_PLUGIN_ROOT. Replacing the
   #    bare token catches every form it appears in: ${CLAUDE_PLUGIN_ROOT},
@@ -79,13 +85,15 @@ while IFS= read -r -d '' f; do
   #    and bare CLAUDE_PLUGIN_ROOT=foo env assignments. CURSOR_PLUGIN_ROOT and
   #    the COPILOT_CLI branches are left intact (they're sibling-platform
   #    fallbacks that harmlessly no-op on Codex).
-  # 2. PLUGIN_ROOT path references get a standalone-install fallback. Bundled
+  # 4. PLUGIN_ROOT path references get a standalone-install fallback. Bundled
   #    Codex plugins set PLUGIN_ROOT; the standalone installer copies the
   #    runtime to ${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex.
-  # 3. ~/.claude/CLAUDE.md → ~/.codex/AGENTS.md (Codex global instructions)
-  # 4. ~/.claude/ → ~/.codex/   (Codex config home)
-  # 5. ~/.claude  → ~/.codex     (bare, word-boundary — catches "~/.claude" at EOL)
+  # 5. ~/.claude/CLAUDE.md → ~/.codex/AGENTS.md (Codex global instructions)
+  # 6. ~/.claude/ → ~/.codex/   (Codex config home)
+  # 7. ~/.claude  → ~/.codex     (bare, word-boundary — catches "~/.claude" at EOL)
   sed \
+    -e 's|\${CLAUDE_PLUGIN_ROOT:-\${PLUGIN_ROOT:-\${CODEX_HOME:-$HOME/\.codex}/plugins/uberdev-codex}}|${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}|g' \
+    -e 's|\${PLUGIN_ROOT:-\${CLAUDE_PLUGIN_ROOT:-\${CURSOR_PLUGIN_ROOT:-}}}|${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}|g' \
     -e 's|CLAUDE_PLUGIN_ROOT|PLUGIN_ROOT|g' \
     -e 's|\${PLUGIN_ROOT:-\${PLUGIN_ROOT:-\${CURSOR_PLUGIN_ROOT:-}}}|${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}|g' \
     -e 's|\${PLUGIN_ROOT}/|${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/|g' \
@@ -160,36 +168,6 @@ for root in roots:
             if changed:
                 text = "---\n" + "".join(lines) + text[end:]
 
-    # The Claude/Cursor fallback searches plugin directory layouts that do not
-    # exist in Codex. Keep the plugin-root fast path, but make fallback cover
-    # both Codex plugin and standalone installer layouts.
-    replacement_a = (
-        'PLUGIN_SCRIPTS="${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}'
-        '/skills/brainstorm/scripts"'
-    )
-    old_a = (
-        'PLUGIN_SCRIPTS="${PLUGIN_ROOT:-${PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}'
-        '/skills/brainstorm/scripts"'
-    )
-    if old_a in text:
-        text = text.replace(old_a, replacement_a)
-        changed = True
-
-    old_b = (
-        'PLUGIN_SCRIPTS="$(find "${CODEX_HOME:-$HOME/.codex}/plugins" '
-        '"${HOME}/.agents/skills" -type d -path '
-        "'*/uberdev/skills/brainstorm/scripts' 2>/dev/null | head -1)\""
-    )
-    new_b = (
-        'PLUGIN_SCRIPTS="$(find '
-        '"${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex/skills/brainstorm/scripts" '
-        '"${HOME}/.agents/skills/brainstorm/scripts" -maxdepth 0 -type d '
-        '2>/dev/null | head -1)"'
-    )
-    if old_b in text:
-        text = text.replace(old_b, new_b)
-        changed = True
-
     codex_config = (
         "UberDev reads optional per-project config from `.codex/uberdev.local.md` "
         "(YAML frontmatter; env vars override file values). The full key schema "
@@ -260,7 +238,7 @@ for root in roots:
         "# Per-project configuration — `.codex/uberdev.local.md` / `.claude/uberdev.local.md`",
     )
     text2 = text2.replace(
-        "Claude Code reads optional config from `.codex/uberdev.local.md` in your project root. Codex prefers `.codex/uberdev.local.md` when present and falls back to `.codex/uberdev.local.md` for shared repos. The file uses YAML frontmatter for typed settings:",
+        "UberDev reads optional project config from `.codex/uberdev.local.md` when present and falls back to `.codex/uberdev.local.md` for shared and legacy repos. The file uses YAML frontmatter for typed settings:",
         "Codex prefers optional config from `.codex/uberdev.local.md` in your project root and falls back to `.claude/uberdev.local.md` for shared repos. The file uses YAML frontmatter for typed settings:",
     )
     if text2 != text:

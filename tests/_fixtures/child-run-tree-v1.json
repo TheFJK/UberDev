@@ -1,0 +1,186 @@
+{
+  "schema_version": 1,
+  "tree_id": "child-test-run-tree-v1",
+  "edges": {
+    "sdd.task.implement": {
+      "kind": "provider",
+      "role": "implementation-worker",
+      "phase": "implementation",
+      "risk_scope": "subtask",
+      "required": true,
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
+        "task_path": "path",
+        "working_dir": "directory",
+        "allowed_paths": "path_array",
+        "denied_paths": "path_array",
+        "failure_path": "optional_path",
+        "attempt": "integer"
+      },
+      "optional_inputs": {}
+    },
+    "implementation": {
+      "kind": "provider",
+      "role": "implementation-worker",
+      "phase": "implementation",
+      "risk_scope": "subtask",
+      "required": true,
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
+        "summary": "string",
+        "attempt": "integer",
+        "paths": "path_array"
+      },
+      "optional_inputs": {}
+    },
+    "orchestrator.plan-writer": {
+      "kind": "provider",
+      "role": "implementation-worker",
+      "phase": "implementation",
+      "risk_scope": "subtask",
+      "required": true,
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
+        "summary": "string",
+        "attempt": "integer",
+        "paths": "path_array"
+      },
+      "optional_inputs": {}
+    },
+    "timeout": {
+      "kind": "provider",
+      "role": "implementation-worker",
+      "phase": "implementation",
+      "risk_scope": "subtask",
+      "required": true,
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
+        "summary": "string",
+        "attempt": "integer",
+        "paths": "path_array"
+      },
+      "optional_inputs": {}
+    },
+    "zsh.runtime": {
+      "kind": "provider",
+      "role": "implementation-worker",
+      "phase": "implementation",
+      "risk_scope": "subtask",
+      "required": true,
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
+        "summary": "string",
+        "attempt": "integer",
+        "paths": "path_array"
+      },
+      "optional_inputs": {}
+    },
+    "package": {
+      "kind": "provider",
+      "role": "implementation-worker",
+      "phase": "implementation",
+      "risk_scope": "subtask",
+      "required": true,
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
+        "summary": "string",
+        "attempt": "integer",
+        "paths": "path_array"
+      },
+      "optional_inputs": {}
+    },
+    "fix": {
+      "kind": "provider",
+      "role": "implementation-worker",
+      "phase": "implementation",
+      "risk_scope": "subtask",
+      "required": true,
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
+        "paths": "path_array"
+      },
+      "optional_inputs": {}
+    },
+    "integration": {
+      "kind": "provider",
+      "role": "implementation-worker",
+      "phase": "implementation",
+      "risk_scope": "subtask",
+      "required": true,
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
+        "paths": "path_array"
+      },
+      "optional_inputs": {}
+    },
+    "background-timeout": {
+      "kind": "provider",
+      "role": "implementation-worker",
+      "phase": "implementation",
+      "risk_scope": "subtask",
+      "required": true,
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
+        "paths": "path_array"
+      },
+      "optional_inputs": {}
+    },
+    "wezterm.child": {
+      "kind": "provider",
+      "role": "implementation-worker",
+      "phase": "implementation",
+      "risk_scope": "subtask",
+      "required": true,
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
+        "paths": "path_array"
+      },
+      "optional_inputs": {}
+    },
+    "run-risk": {
+      "kind": "provider",
+      "role": "implementation-worker",
+      "phase": "implementation",
+      "risk_scope": "run",
+      "required": true,
+      "allowed_workflows": [
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
+        "paths": "path_array"
+      },
+      "optional_inputs": {}
+    }
+  }
+}

@@ -4,6 +4,10 @@ name = "uberdev-findings-to-issues"
 description = """
 Persists deferred findings (severity ∈ {blocker, critical, major, important} AND disposition != APPLIED) from /uberdev:review-pr Phase 1 + Phase 2 aggregates as durable GitHub issues with HTML-comment fingerprint dedupe, fail-CLOSED safety, and a hard MAX_NEW=10 per-run write cap. Blocker/critical findings receive @author mentions and Blocks: PR-N backrefs; major/important findings are filed silently. Dispatched via Task(subagent_type=uberdev:findings-to-issues) from /uberdev:review-pr Phase 2.5 and /uberdev:simplify Phase 3.5. Halts the parent run iff blocker findings are deferred OR critical/blocker overflow exceeds MAX_NEW (RFC 0002).
 """
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+sandbox_mode = "read-only"
+features.multi_agent = false
 developer_instructions = """
 # Findings-to-Issues Agent
 

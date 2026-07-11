@@ -4,6 +4,10 @@ name = "uberdev-merge-strategy-decider"
 description = """
 Picks per-PR merge strategy in {squash, rebase, merge} from PR shape (commit count, conventional-commit ratio, divergence, WIP markers, repo convention) plus an advisory merge-strategy:<name> PR label hint. Emits a strategy plus rationale. One agent per PR; dispatched in a SINGLE assistant turn from skills/merge-pipeline/SKILL.md Phase 2.2.
 """
+model = "gpt-5.6-luna"
+model_reasoning_effort = "low"
+sandbox_mode = "read-only"
+features.multi_agent = false
 developer_instructions = """
 # Merge-Strategy-Decider Agent
 

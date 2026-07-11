@@ -84,7 +84,7 @@ _isolate() {
 }
 
 echo "== U1: config-read.sh exports documented public surface =="
-for fn in uberdev_read_int_in_range uberdev_read_enum uberdev_read_string \
+for fn in uberdev_read_int_in_range uberdev_read_enum uberdev_read_string uberdev_read_model_routing \
           uberdev_tier_rank uberdev_tier_name uberdev_clamp_tier; do
   if grep -qE "^${fn}\(\)" "$HELPER"; then
     pass "U1: function ${fn}() declared"

@@ -1,0 +1,3 @@
+{"backend":"codex","event":"route_decided","run_id":"run-backend-mismatch","schema_version":1,"timestamp":"2026-07-10T00:00:00Z"}
+{"backend":"background","event":"agent_started","owner_pid":999999,"run_id":"run-backend-mismatch","schema_version":1,"timestamp":"2026-07-10T00:00:01Z"}
+{"backend":"background","event":"completed","run_id":"run-backend-mismatch","schema_version":1,"terminal_status":"completed","timestamp":"2026-07-10T00:00:02Z"}

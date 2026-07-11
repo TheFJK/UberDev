@@ -4,6 +4,10 @@ name = "uberdev-ci-failure-classifier"
 description = """
 Classifies a failed GitHub Actions check log into one of six failure classes. Reads the log under <external-untrusted-input> envelope, returns a structured YAML enum + signal_anchor (file:line pointer). Never quotes log lines verbatim. Dispatched from /uberdev:review-pr Phase 3 (Step 6c.3).
 """
+model = "gpt-5.6-luna"
+model_reasoning_effort = "low"
+sandbox_mode = "read-only"
+features.multi_agent = false
 developer_instructions = """
 # CI-Failure-Classifier Agent
 

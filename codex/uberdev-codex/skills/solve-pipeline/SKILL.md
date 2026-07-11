@@ -51,8 +51,8 @@ Per-issue artifacts (`$UBERDEV_TMPDIR/solve-prompt-N.txt`,
 `$UBERDEV_TMPDIR/solve-codex-status-N.json`, `$UBERDEV_TMPDIR/solve-codex-result-N.md`,
 `.claude/worktrees/solve-issue-N/`, `worktree-solve-issue-N` branch) are
 namespaced by issue number, so concurrent spawns are collision-free. Override flags
-(`--trivial|--small|--full`, `--auto`, `--force`, `--effort=<level>`,
-`--backend=<name>`) apply batch-wide. Monitor via `claude agents` (claude-bg),
+(`--trivial|--small|--full`, `--auto`, `--force`, routing/model/effort/service
+flags, `--backend=<name>`) apply batch-wide. Monitor via `claude agents` (claude-bg),
 visible panes (wezterm), or PID/log/result files (background/codex).
 
 ## Constants
@@ -68,39 +68,39 @@ is the documentation surface.
 | `FANOUT_CONCURRENCY_SOLVE_BG_DEFAULT` | `6` | `MAX_PARALLEL_BG_AGENTS` default (dispatch-burst chunk size). |
 | `GH_PARALLEL_CAP` | `8` | Chunk size for the parallel gh stages (validation reads, claim writes) — GitHub secondary-rate-limit courtesy. |
 | `EFFORT_LEVEL_DEFAULT` | `max` | /turbo is unattended — quality > cost. |
-| `EFFORT_LEVEL_ENUM` | `low \| medium \| high \| xhigh \| max` | `--effort=` validation; matches `claude --effort` accepted values. |
+| `EFFORT_LEVEL_ENUM` | `low \| medium \| high \| xhigh \| max \| ultra` | Public parser; `ultra` is rejected unless backend resolution selects Codex. Claude legacy effort remains the first five values. |
 | `EFFORT_SOURCE_ENUM` | `cli \| env \| config \| default` | Source tag in the `effort_resolved` audit event. |
 | `SOLVE_AUDIT_EVENT_ENUM` | `agent_dispatched`, `deprecated_flag_used`, `solve_bg_fanout_wave_started`, `effort_resolved`, `error`, `claim_acquired`, `claim_collision`, `claim_force_override`, `claim_write_failed`, `claim_released`, `dispatch_backend_resolved`, `dispatch_setup_failed` | Audit-log writers (launcher + `lib/dispatch.sh`). `dispatch_setup_failed` carries `phase` (+ `subphase` ∈ {`marker_absent`, `pipeline_error`} on `id_extract`); `claim_collision` carries `phase:"post_write_verification"` when the post-write re-read lost to a racing dispatcher. |
 | `UBERDEV_ACTIVE_LABEL` | `uberdev:active` | Step 4.5 claim protocol — applied on dispatch; cleared by `/merge` post-merge or the dispatch-failure rollback. NEVER set or removed by hand (color `D93F0B`; description ≤100 chars — GitHub 422s longer). |
 | `CLAIM_COMMENT_MARKER` | `<!-- uberdev-claim-comment v1 -->` | HTML-comment fingerprint on every claim audit comment — the only safe parser surface. Collision checks match the **version-stripped prefix** so rolling v1/v2 upgrades stay mutually visible (#123 B7); adding optional body fields is backward-compatible (missing fields parse as `"?"`), removing/renaming fields MUST bump the marker version. |
 
-## Triage heuristics (Phase A echoes these signals; act via override flags)
+## Deterministic triage heuristics
 
 | Tier | Signals (any strong match) | Spawned workflow |
 |------|----------------------------|------------------|
 | **trivial** | Labels: `typo`, `docs`, `documentation`, `chore`, `good-first-issue`. Body <300 chars after stripping markdown. Title matches `typo\|rename\|bump\|version\|readme`. No stack trace. Single file named. | Read pre-collected research → minimal edit → test (if touched code is tested) → PR. **No brainstorm, no multi-step plan.** Phase 1 of `/uberdev:review-pr` runs the post-impl reviewer fanout and Phase 2 runs the simplify lenses after the PR opens. |
 | **small** | Clear reproduction + error message. Localized to one module/package. Estimated ≤50 LOC. Labels: `bug` (scoped) or none. Not cross-cutting. | Read pre-collected research → lightweight TodoWrite plan (3–6 tasks) → TDD → PR. **No brainstorm.** Phase 1 of `/uberdev:review-pr` runs the post-impl reviewer fanout and Phase 2 runs the simplify lenses after the PR opens. |
-| **medium/large** *(default)* | Labels: `epic`, `needs-discussion`, `architectural`, `infrastructure` (multi-service), `refactor`. ≥3 files/modules mentioned. Missing clear problem statement. Cross-package scope. | Full `/uberdev:brainstorm` → `/uberdev:write-plan` → `/uberdev:subagent-driven-dev` → `/uberdev:review-pr` pipeline. |
+| **medium/large** | Large: epic/discussion/architecture/infrastructure labels, ≥3 named files, multi-component high risk, or refactor plus ≥2 components/cross-cutting marker. Bare `refactor` is not sufficient. Medium is the fallback. | Full `/uberdev:brainstorm` → `/uberdev:write-plan` → `/uberdev:subagent-driven-dev` → `/uberdev:review-pr` pipeline. |
 
-**When in doubt, default to medium/large.** Misclassification is recoverable.
-The launcher defaults every issue to `medium` unless `--trivial|--small|--full`
-is passed; its per-issue `triage:` line surfaces the mechanical signals
-(labels CSV, body size, stack-trace and file-mention counts) so the operator
-— or the invoking model — can re-run with an explicit tier override when the
-signals clearly match a lighter row.
+`lib/solve_triage.py` computes raw tier and closed risk signals, then applies
+floor, ceiling, and the explicit tier override last without erasing risks. It
+rejects oversized snapshots instead of truncating them and emits canonical JSON.
 
 ## Pipeline phases (all inside the launcher)
 
 ### Phase A — validate-all-first (Steps 1–4)
 
-Argument parsing (numeric tokens deduped; flag parsers for
+Strict argument parsing (positive issue tokens deduped, maximum 50; duplicate,
+conflicting, and unknown flags rejected; parsers for
 `--trivial|--small|--full`, `--auto`, `--force`/`-f`, `--effort=<level>`,
-`--backend=<name>`, plus the `--terminal=` deprecation shim), the Claude
+`--routing-mode`, `--route`, `--model`, `--service-tier`, `--fast`,
+`--backend=<name>`, plus the `--terminal=` deprecation shim), the provider
 version gate, repo guard, and per-issue `gh issue view --json` validation
 (parallelized in `GH_PARALLEL_CAP` chunks; stdout kept pure JSON with stderr
 captured separately). Any failure (closed, missing, gh error, live claim
-without `--force`) prints **all** errors and aborts with `no agents
-dispatched` — partial dispatches are not allowed.
+without `--force`) prints **all** errors and aborts with `no claims written;
+no agents dispatched`. Root routes and immutable contexts for the complete
+batch are resolved before Step 4.5; partial claims or dispatches are forbidden.
 
 Permission tiers: `--auto` (or `SOLVE_AUTO=1`, or `solve_auto: true` in
 `.codex/uberdev.local.md`) sets `AUTO_PERMISSIONS=1`, which resolves to the

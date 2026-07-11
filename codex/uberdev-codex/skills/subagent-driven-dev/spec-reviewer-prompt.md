@@ -4,10 +4,26 @@ Use this template when dispatching a spec compliance reviewer subagent.
 
 **Purpose:** Verify implementer built what was requested (nothing more, nothing less)
 
+```yaml
+edge_id: sdd.task.spec_review
+role: spec-compliance-reviewer
+phase: spec-review
+instance_id: sdd-w[wave]-t[task]-spec-review-a[attempt]
+risk_scope: subtask
+risk_signals: [copy from the immutable root decision]
+inputs:
+  spec_path: "[absolute design spec path]"
+  plan_path: "[absolute implementation plan path]"
+  commit_sha: "[controller-created task commit SHA]"
+  allowed_paths: [controller-canonicalized absolute paths confined under the worktree]
+  report_path: "[absolute immutable implementer-result path]"
 ```
-Task tool (general-purpose):
-  description: "Review spec compliance for Task N"
-  prompt: |
+
+Pass these inputs through `uberdev_create_child_handoff`, then dispatch only
+the runtime-exported paths. The
+`spec-compliance-reviewer` role applies the review contract below:
+
+```
     You are reviewing whether an implementation matches its specification.
 
     ## What Was Requested

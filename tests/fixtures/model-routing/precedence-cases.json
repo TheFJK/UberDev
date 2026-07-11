@@ -1,0 +1,133 @@
+[
+  {
+    "name": "cli route shadows environment exact fields",
+    "request": {
+      "backend": "codex",
+      "workflow": "solve",
+      "phase": "lead",
+      "role": "lead",
+      "task_tier": "small",
+      "explicit_route": "sol-max",
+      "environment": {
+        "UBERDEV_MODEL": "gpt-5.6-luna",
+        "UBERDEV_REASONING_EFFORT": "low"
+      }
+    },
+    "expected": {
+      "logical_route": "frontier",
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "max",
+      "forced": true,
+      "field_sources.model": "cli-route",
+      "field_sources.reasoning_effort": "cli-route"
+    }
+  },
+  {
+    "name": "cli inherit mode shadows environment route",
+    "request": {
+      "backend": "codex",
+      "workflow": "solve",
+      "phase": "lead",
+      "role": "lead",
+      "task_tier": "small",
+      "routing_mode": "inherit",
+      "environment": {"UBERDEV_ROUTE": "sol-ultra"}
+    },
+    "expected": {
+      "logical_route": null,
+      "model": null,
+      "reasoning_effort": null,
+      "forced": false,
+      "effective_policy": "inherit",
+      "field_sources.model": "ambient"
+    }
+  },
+  {
+    "name": "forced parent shadows environment route",
+    "request": {
+      "backend": "codex",
+      "workflow": "solve",
+      "phase": "research",
+      "role": "research-codebase",
+      "task_tier": "large",
+      "environment": {"UBERDEV_ROUTE": "luna"},
+      "parent_run": {
+        "forced": true,
+        "logical_route": "ultra",
+        "model": "gpt-5.6-sol",
+        "reasoning_effort": "ultra"
+      }
+    },
+    "expected": {
+      "logical_route": "ultra",
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "ultra",
+      "forced": true,
+      "route_source": "forced-parent",
+      "field_sources.model": "forced-parent"
+    }
+  },
+  {
+    "name": "environment exact pair shadows project overrides",
+    "request": {
+      "backend": "codex",
+      "workflow": "solve",
+      "phase": "review",
+      "role": "code-reviewer",
+      "task_tier": "medium",
+      "environment": {
+        "UBERDEV_MODEL": "gpt-5.6-sol",
+        "UBERDEV_REASONING_EFFORT": "max"
+      },
+      "project_config": {
+        "roles": {"code-reviewer": "deep"},
+        "workflows": {"solve": "quality"}
+      }
+    },
+    "expected": {
+      "logical_route": "frontier",
+      "forced": true,
+      "field_sources.model": "environment-exact",
+      "field_sources.reasoning_effort": "environment-exact"
+    }
+  },
+  {
+    "name": "project role route beats workflow route",
+    "request": {
+      "backend": "codex",
+      "workflow": "solve",
+      "phase": "research",
+      "role": "research-codebase",
+      "task_tier": "medium",
+      "routing_mode": "adaptive",
+      "project_config": {
+        "roles": {"research-codebase": "quality"},
+        "workflows": {"solve": "deep"}
+      }
+    },
+    "expected": {
+      "logical_route": "quality",
+      "forced": false,
+      "route_source": "project-role",
+      "field_sources.model": "project-role"
+    }
+  },
+  {
+    "name": "project workflow route beats role policy",
+    "request": {
+      "backend": "codex",
+      "workflow": "solve",
+      "phase": "research",
+      "role": "research-codebase",
+      "task_tier": "medium",
+      "routing_mode": "adaptive",
+      "project_config": {"workflows": {"solve": "deep"}}
+    },
+    "expected": {
+      "logical_route": "deep",
+      "forced": false,
+      "route_source": "project-workflow",
+      "field_sources.model": "project-workflow"
+    }
+  }
+]

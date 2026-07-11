@@ -123,6 +123,65 @@ echo "== #246 D-skip: SKIP_PERMISSIONS=1 yields --dangerously-skip-permissions -
 rm -f "$TALLY_FILE"
 
 echo
+echo "== Immediate terminal background wrapper keeps its exact handle =="
+IMMEDIATE_TMP="$(mktemp -d)"
+mkdir -p "$IMMEDIATE_TMP/bin" "$IMMEDIATE_TMP/repo" "$IMMEDIATE_TMP/tmp"
+cat > "$IMMEDIATE_TMP/bin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = worktree ] && [ "$2" = add ]; then mkdir -p "$3"; exit 0; fi
+exit 1
+SH
+cat > "$IMMEDIATE_TMP/bin/claude" <<'SH'
+#!/usr/bin/env bash
+body="$2"
+printf 'immediate %s result\n' "$body"
+case "$body" in *failed*) exit 29 ;; *) exit 0 ;; esac
+SH
+chmod +x "$IMMEDIATE_TMP/bin/git" "$IMMEDIATE_TMP/bin/claude"
+IMMEDIATE_OUT="$(
+  cd "$IMMEDIATE_TMP/repo" &&
+  PATH="$IMMEDIATE_TMP/bin:/usr/bin:/bin" UBERDEV_TMPDIR="$IMMEDIATE_TMP/tmp" \
+  /bin/bash -c '
+    . "$1"
+    _uberdev_dispatch_wait_owned_session() {
+      while state="$(ps -o stat= -p "$1" 2>/dev/null)" && [ -n "$state" ] && [ "${state#Z}" = "$state" ]; do :; done
+      return 1
+    }
+    MODEL=sonnet; PERM_FLAG=(); EFFORT_FLAG=(); failures=0; issue=70
+    for outcome in completed failed completed failed completed failed; do
+      issue=$((issue + 1))
+      printf "%s\n" "$outcome" > "$UBERDEV_TMPDIR/prompt-$issue.txt"
+      UBERDEV_AGENT_STATUS_FILE="$UBERDEV_TMPDIR/status-$issue.json"
+      UBERDEV_AGENT_RESULT_FILE="$UBERDEV_TMPDIR/result-$issue.md"
+      export UBERDEV_AGENT_STATUS_FILE UBERDEV_AGENT_RESULT_FILE
+      _uberdev_dispatch_background "$issue" small "$UBERDEV_TMPDIR/prompt-$issue.txt"
+      rc=$?; status="$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)"
+      case "$outcome:$rc:$DISPATCH_ID:$status" in
+        completed:0:*:*\"state\":\"completed\"*\"exit_code\":0*)
+          [ "$(cat "$UBERDEV_AGENT_RESULT_FILE" 2>/dev/null)" = "immediate completed result" ] || failures=$((failures + 1))
+          [ "$(stat -f %Lp "$UBERDEV_AGENT_RESULT_FILE" 2>/dev/null || stat -c %a "$UBERDEV_AGENT_RESULT_FILE" 2>/dev/null)" = 600 ] || failures=$((failures + 1))
+          ;;
+        failed:0:*:*\"state\":\"failed\"*\"exit_code\":29*)
+          [ ! -s "$UBERDEV_AGENT_RESULT_FILE" ] || failures=$((failures + 1))
+          ;;
+        *) failures=$((failures + 1)) ;;
+      esac
+      [ -z "$(find "$UBERDEV_TMPDIR" -maxdepth 1 \( -name "result-$issue.md.partial.*" -o -name "result-$issue.md.tmp.*" \) -print -quit)" ] \
+        || failures=$((failures + 1))
+      [ -n "${DISPATCH_ID:-}" ] || failures=$((failures + 1))
+    done
+    printf "failures=%s\n" "$failures"
+  ' _ "$DISPATCH_LIB"
+)"
+if [[ "$IMMEDIATE_OUT" == *'failures=0'* ]]; then
+  echo "  PASS  background captures provider stdout into a private canonical result and preserves exact immediate terminal handles"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  background captures provider stdout into a private canonical result and preserves exact immediate terminal handles"
+  echo "        $IMMEDIATE_OUT"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$IMMEDIATE_TMP"
+
+echo
 echo "== Anti-pattern: background backend never uses claude --bg =="
 # Extract just the _uberdev_dispatch_background function body and assert
 # `claude --bg` does not appear inside it (sibling backends in the same

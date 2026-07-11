@@ -55,9 +55,9 @@ assert_grep "$SIMPLIFY" '^allowed-tools:' "frontmatter has allowed-tools"
 echo
 echo "== Phase 2: three lens dispatch with subagent_type: uberdev:code-simplifier (#73 Q4) =="
 
-# P2.1 — Phase 2 uses the Task tool with the named subagent_type
-assert_subagent_type "$SIMPLIFY" 'code-simplifier' \
-  "P2.1 — Phase 2 dispatch uses subagent_type: uberdev:code-simplifier (named lens)"
+# P2.1 — Phase 2 uses the routed manifest lens edges
+assert_grep "$SIMPLIFY" 'uberdev_dispatch_child.*EDGE_ID' \
+  "P2.1 — Phase 2 routes code-simplifier lenses through child-dispatch"
 # P2.2 — three lenses each have a Lens emphasis line
 assert_grep "$SIMPLIFY" '## Lens emphasis: Reuse' \
   "P2.2 — Lens 1: ## Lens emphasis: Reuse"
@@ -75,15 +75,13 @@ assert_grep "$SIMPLIFY" 'three agents|three lenses|three .Task. tool_use blocks|
 echo
 echo "== Phase 3: dispatch code-fixer subagent (#73 Q3) =="
 
-# P3.1 — Phase 3 uses subagent_type: uberdev:code-fixer
-assert_subagent_type "$SIMPLIFY" 'code-fixer' \
-  "P3.1 — Phase 3 dispatch uses subagent_type: uberdev:code-fixer"
-# P3.2 — phase=phase2 (Phase 3 of /simplify is the Phase 2 fixer per #73)
-assert_grep "$SIMPLIFY" 'phase=phase2|phase: phase2' \
-  "P3.2 — Phase 3 code-fixer dispatch carries phase=phase2"
-# P3.3 — commit_type_prefix=refactor:
-assert_grep "$SIMPLIFY" 'commit_type_prefix=refactor:|commit_type_prefix: refactor:' \
-  "P3.3 — Phase 3 code-fixer dispatch carries commit_type_prefix=refactor:"
+# P3.1-P3.3 — stable phase2 edge owns the code-fixer route and refactor contract
+assert_grep "$SIMPLIFY" 'uberdev_dispatch_child review_pr\.fix\.phase2' \
+  "P3.1 — Phase 3 routes code-fixer through child-dispatch"
+assert_grep "$SIMPLIFY" 'review_pr\.fix\.phase2' \
+  "P3.2 — Phase 3 code-fixer carries phase identity in edge_id"
+assert_grep "$SIMPLIFY" 'ONE `refactor:` commit|single `refactor:`' \
+  "P3.3 — Phase 3 code-fixer retains the refactor contract"
 # P3.4 — refactor: as the conventional commit type (separate-commit invariant)
 assert_grep "$SIMPLIFY" 'separate `refactor:` conventional commit|ONE `refactor:` commit|single `refactor:`' \
   "P3.4 — Phase 3 commits as a separate refactor: conventional commit"
@@ -148,9 +146,12 @@ assert_grep "$CODE_SIMPLIFIER" 'function signatures, return types, thrown except
 assert_grep "$CODE_SIMPLIFIER" 'iron rule' \
   "G2 — agent file labels its iron-rule clause"
 
-# G3 — RUN_ID minting recipe inlined in /simplify Phase 3 (matches review-pr)
-assert_grep "$SIMPLIFY" 'RUN_ID="\$\(date \+%Y%m%d-%H%M%S\)-\$\(git rev-parse --short HEAD\)"' \
-  "G3 — /simplify Phase 3 inlines the canonical RUN_ID recipe"
+# G3 — RUN_ID is minted read-only from the current checkout before the shared
+# runtime boundary verifies the carrier and atomically allocates exact paths.
+assert_grep "$SIMPLIFY" 'RUN_ID="\$\{RUN_ID:-\$\(date \+%Y%m%d-%H%M%S\)-\$\(git rev-parse --short HEAD\)\}"' \
+  "G3 — /simplify setup mints RUN_ID before workspace allocation"
+assert_grep "$SIMPLIFY" 'uberdev_command_workspace_prepare simplify 0 medium' \
+  "G3 — /simplify delegates repository verification and allocation to the runtime boundary"
 assert_grep "$SIMPLIFY" '\^\[0-9\]\{8\}-\[0-9\]\{6\}-\[a-f0-9\]\+\$' \
   "G3 — /simplify Phase 3 validates RUN_ID against the canonical regex"
 
@@ -264,11 +265,11 @@ else
   # Pin the load-bearing DISPATCH-LINE form (`prompt: <external-untrusted-input
   # source="pr-diff">…<<diff_brief>>`) so a prose-only mention that left the actual
   # Task() prompt unwrapped cannot false-PASS the region asserts above.
-  if grep -qF 'prompt: <external-untrusted-input source="pr-diff">' <<<"$PHASE2_REGION"; then
-    echo "  PASS  the Task() prompt line itself opens the pr-diff envelope before <<diff_brief>>"
+  if grep -qF 'Pass only the diff artifact path' <<<"$PHASE2_REGION"; then
+    echo "  PASS  routed handoff passes only the enveloped diff artifact path"
     PASS=$((PASS + 1))
   else
-    echo "  FAIL  the Task() 'prompt:' line must open <external-untrusted-input source=\"pr-diff\"> before <<diff_brief>> (not prose-only) (#286)"
+    echo "  FAIL  routed handoff must pass only the enveloped diff artifact path (#286)"
     FAIL=$((FAIL + 1))
   fi
 fi
