@@ -57,7 +57,7 @@ with the configured value. v2 issue can extend.
 
 ```bash
 # Pre-flight: read advisory timeout
-POST_REVIEW_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}"
+POST_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
 if [ -r "$POST_REVIEW_PLUGIN_ROOT/lib/config-read.sh" ]; then
   . "$POST_REVIEW_PLUGIN_ROOT/lib/config-read.sh"
   REVIEW_PR_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.review_pr UBERDEV_REVIEW_PR_TIMEOUT 60 86400 900)"
@@ -114,7 +114,7 @@ Source `${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins
 
 ```bash uberdev-executable setup=post-impl-review
 set -u
-UBERDEV_REVIEW_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}"
+UBERDEV_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
 . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh"
 : "${RUN_ID:?post-impl-review requires parent RUN_ID}"
 uberdev_command_workspace_prepare post-impl-review 0 medium '[]' "$RUN_ID" "${WORKTREE_ROOT:-}" >/dev/null || {

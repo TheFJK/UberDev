@@ -38,7 +38,7 @@ All provider calls in this command use the runtime-owned carrier and handoff bui
 
 ```bash uberdev-executable setup=review-pr
 set -u
-UBERDEV_REVIEW_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}"
+UBERDEV_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
 . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh"
 PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number)}"
 RISK_JSON="${UBERDEV_AGENT_RISK_SIGNALS_JSON:-[]}"

@@ -16,7 +16,7 @@ Standalone `/simplify` sources `lib/child-dispatch.sh` and, when no inherited ca
 
 ```bash uberdev-executable setup=simplify
 set -u
-UBERDEV_REVIEW_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}"
+UBERDEV_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
 . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh"
 PR_NUMBER="${PR_NUMBER:-0}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)}"

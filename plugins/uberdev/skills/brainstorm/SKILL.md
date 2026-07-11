@@ -102,7 +102,7 @@ When this skill receives a `routing_context` from `/solve` or `/turbo`, every pr
 ```bash uberdev-executable
 set -euo pipefail
 : "${UBERDEV_AGENT_PREPARED_REQUEST_JSON:?missing immutable routing context}"
-UBERDEV_BRAINSTORM_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}"
+UBERDEV_BRAINSTORM_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
 . "$UBERDEV_BRAINSTORM_PLUGIN_ROOT/lib/child-dispatch.sh"
 UBERDEV_BRAINSTORM_PREPARED_EDGES=(); UBERDEV_BRAINSTORM_PREPARED_INSTANCES=()
 UBERDEV_BRAINSTORM_PREPARED_HANDOFFS=(); UBERDEV_BRAINSTORM_PREPARED_RESULTS=()

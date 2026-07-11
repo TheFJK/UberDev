@@ -99,13 +99,13 @@ For current v0.40 callers that do not yet supply the carrier, use the exact `on_
 
 ```bash
 # Step 0: bg-context gate (issue #93).
-# Refuse interactive /solve under claude --bg or any non-TTY launcher.
+# Refuse interactive /solve under a background or non-TTY launcher.
 
 # Turbo exemption: any explicit turbo signal short-circuits the gate.
 if [[ "${ARGUMENTS:-}" == *"--turbo"* ]] || [[ "${UBERDEV_TURBO:-0}" == "1" ]]; then
   :  # fall through to step 1
 elif [ -n "${CLAUDE_JOB_DIR:-}" ] || [ ! -t 0 ]; then
-  echo "error: interactive orchestrator (/solve or /uberdev:orchestrator without --turbo) cannot run in a claude --bg session." >&2
+  echo "error: interactive orchestrator (/solve or /uberdev:orchestrator without --turbo) cannot run in a background or non-TTY session." >&2
   echo "  - re-run with /turbo <N> for unattended mode, or" >&2
   echo "  - run /solve <N> from a foreground terminal, or" >&2
   echo "  - re-invoke /uberdev:orchestrator --turbo … if you invoked it standalone." >&2
@@ -198,7 +198,7 @@ attempt suffix without reuse.
 ```bash uberdev-executable
 set -euo pipefail
 : "${UBERDEV_AGENT_PREPARED_REQUEST_JSON:?missing immutable routing context}"
-UBERDEV_DESIGN_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}"
+UBERDEV_DESIGN_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
 . "$UBERDEV_DESIGN_PLUGIN_ROOT/lib/child-dispatch.sh"
 
 UBERDEV_DESIGN_PREPARED_EDGES=()
@@ -528,9 +528,6 @@ Use `AskUserQuestion` with 2 options (`Yes` / `No`) so the consent is structural
 
 ```bash
 PLUGIN_SCRIPTS="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}/skills/brainstorm/scripts"
-if [[ ! -d "$PLUGIN_SCRIPTS" ]]; then
-  PLUGIN_SCRIPTS="$(find "${HOME}/.claude/plugins" "${HOME}/.cursor/plugins" -type d -path '*/uberdev/skills/brainstorm/scripts' 2>/dev/null | head -1)"
-fi
 if [[ ! -d "$PLUGIN_SCRIPTS" ]]; then
   echo "uberdev brainstorm scripts not found — falling back to terminal-only Phase 2" >&2
   # continue without visual companion; AskUserQuestion path still works
