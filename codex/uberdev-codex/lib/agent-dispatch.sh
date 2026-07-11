@@ -836,11 +836,13 @@ if not stat.S_ISDIR(entry.st_mode) or (uid is not None and entry.st_uid!=uid): r
 payload={"schema_version":1,"error":"terminal_finalize_failed","backend":backend,"handle":handle,"terminal":terminal,"attempts":int(attempts)}
 fd,tmp=tempfile.mkstemp(prefix=".watcher-error.",dir=parent)
 try:
- os.fchmod(fd,0o600)
+ if os.name!="nt": os.fchmod(fd,0o600)
  with os.fdopen(fd,"w",encoding="utf-8") as stream:
+  fd=None
   json.dump(payload,stream,sort_keys=True,separators=(",",":")); stream.write("\n"); stream.flush(); os.fsync(stream.fileno())
  os.replace(tmp,path)
 finally:
+ if fd is not None: os.close(fd)
  if os.path.exists(tmp): os.unlink(tmp)
 PY
 }

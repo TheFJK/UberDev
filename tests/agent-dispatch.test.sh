@@ -32,6 +32,40 @@ mkdir -p "$TMP/run"
 STATE_DIR="$TMP/run/.agent-state-$(id -u)"
 printf 'instrumented prompt\n' > "$TMP/run/prompt.txt"
 
+python3 -I - "$LIB" "$TMP/run/windows-watcher-error.json" <<'PY'
+import glob
+import json
+import os
+import stat
+import sys
+import tempfile
+
+source_path, output_path = sys.argv[1:]
+with open(source_path, encoding="utf-8") as handle:
+    source = handle.read()
+function = source.index("_uberdev_agent_persist_watcher_error() {")
+prefix = "<<'PY'\n"
+start = source.index(prefix, function) + len(prefix)
+end = source.index("\nPY\n}", start)
+snippet = source[start:end]
+original_name = os.name
+original_fchmod = getattr(os, "fchmod", None)
+os.name = "nt"
+if original_fchmod is not None:
+    del os.fchmod
+try:
+    sys.argv = ["watcher-error", output_path, "codex", "handle-1", "failed", "3"]
+    exec(compile(snippet, "watcher-error-publisher", "exec"), {})
+finally:
+    os.name = original_name
+    if original_fchmod is not None:
+        os.fchmod = original_fchmod
+with open(output_path, encoding="utf-8") as handle:
+    payload = json.load(handle)
+assert payload["error"] == "terminal_finalize_failed" and payload["attempts"] == 3
+assert not glob.glob(os.path.join(os.path.dirname(output_path), ".watcher-error.*"))
+PY
+
 REQUEST="$(python3 - "$TMP/run" <<'PY'
 import json, sys
 run = sys.argv[1]
