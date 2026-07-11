@@ -12,6 +12,10 @@ python3 -I - "$LIB" <<'PY'
 import os,pathlib,sys
 text=pathlib.Path(sys.argv[1]).read_text()
 assert 'os.geteuid()' not in text
+prepare=text.split('_uberdev_agent_prepare_state_dir() {',1)[1].split('\n}',1)[0]
+assert 'if os.name == "nt":' in prepare
+assert 'os.makedirs(path, exist_ok=True)' in prepare
+assert prepare.index('if os.name == "nt":') < prepare.index('descriptor = os.open(path, flags)')
 saved=getattr(os,'geteuid',None)
 if saved is not None: del os.geteuid
 try:

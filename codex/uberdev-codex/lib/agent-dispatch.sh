@@ -181,6 +181,17 @@ run_dir = sys.argv[1]
 uid_fn = getattr(os, "geteuid", None)
 uid = uid_fn() if uid_fn else None
 path = os.path.join(run_dir, f".agent-state-{uid if uid is not None else 0}")
+if os.name == "nt":
+    # Native Windows denies POSIX-style os.open() on directories and has no
+    # meaningful st_uid/fchmod contract. The run root is already canonical;
+    # reject reparse-point aliases, then rely on the current-user ACL inherited
+    # from the private temp root instead of weakening the POSIX branch below.
+    os.makedirs(path, exist_ok=True)
+    entry = os.lstat(path)
+    if os.path.islink(path) or not stat.S_ISDIR(entry.st_mode):
+        raise SystemExit(2)
+    print(path, end="")
+    raise SystemExit(0)
 try:
     os.mkdir(path, 0o700)
 except FileExistsError:
