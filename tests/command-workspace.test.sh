@@ -392,8 +392,8 @@ fi
 
 # Markdown setups are thin runtime clients with no duplicate validator or writes.
 for doc in "$ROOT/plugins/uberdev/commands/review-pr.md" "$ROOT/plugins/uberdev/commands/simplify.md" "$ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md"; do
-  rg -q 'uberdev_command_workspace_prepare' "$doc"
-  ! rg -n 'UBERDEV_SETUP_BOUNDARY_JSON|mkdir -p "\$RESEARCH_DIR_ABS"|DIFF_ARTIFACT_PATH="\$\{DIFF_ARTIFACT_PATH|CRITERIA_PATH="\$\{CRITERIA_PATH' "$doc"
+  grep -qF 'uberdev_command_workspace_prepare' "$doc"
+  ! grep -nE 'UBERDEV_SETUP_BOUNDARY_JSON|mkdir -p "\$RESEARCH_DIR_ABS"|DIFF_ARTIFACT_PATH="\$\{DIFF_ARTIFACT_PATH|CRITERIA_PATH="\$\{CRITERIA_PATH' "$doc"
 done
 
 # The Codex package is a checked-in runtime mirror, not an independent helper.

@@ -732,7 +732,7 @@ for body_name in phase4_body validation_body; do
   done
 done
 
-legacy_helper_hits=$(rg -n 'planning-research-preflight-v1|uberdev_canonical_path|uberdev_validate_planning_output' \
+legacy_helper_hits=$(grep -nE 'planning-research-preflight-v1|uberdev_canonical_path|uberdev_validate_planning_output' \
   "$ORCHESTRATOR" "$PLAN_WRITER" "$RESEARCH_CODEBASE" "$RESEARCH_TEST_COVERAGE" "$RESEARCH_CONSTRAINTS" || true)
 if [[ -n "$legacy_helper_hits" ]]; then
   printf '%s\n' '  FAIL F5 Markdown helper/function dependency remains:'

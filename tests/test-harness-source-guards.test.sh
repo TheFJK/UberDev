@@ -86,6 +86,31 @@ if [ "$SAW_ANY_SOURCING_FILE" -eq 0 ]; then
 fi
 
 echo
+echo "== A2: CI shell harnesses have no undeclared ripgrep runtime dependency =="
+RG_HITS="$(python3 -I - "$TESTS_DIR" "$0" <<'PY'
+import pathlib,re,sys
+root=pathlib.Path(sys.argv[1]); current=pathlib.Path(sys.argv[2]).resolve()
+command="r"+"g"
+pattern=re.compile(r"(^|[;&|()\\s])"+command+r"(?=\\s|$)")
+hits=[]
+for path in sorted(root.glob("*.test.sh")):
+    if path.resolve()==current: continue
+    for number,line in enumerate(path.read_text(encoding="utf-8").splitlines(),1):
+        if line.lstrip().startswith("#"): continue
+        if pattern.search(line): hits.append(f"{path.name}:{number}:{line.strip()}")
+print("\\n".join(hits))
+PY
+)"
+if [ -n "$RG_HITS" ]; then
+  echo "  FAIL  CI harnesses invoke ripgrep without installing it"
+  printf '        %s\n' "$RG_HITS"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  CI harnesses use repository-portable text tools"
+  PASS=$((PASS + 1))
+fi
+
+echo
 echo "==================================================================="
 echo "  PASS=$PASS  FAIL=$FAIL"
 echo "==================================================================="

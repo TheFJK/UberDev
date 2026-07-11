@@ -104,7 +104,7 @@ done
 # Provider invocations in Group-C command/skill sources must use the routed
 # adapter. Historical discussion may name the legacy tool, but executable
 # call syntax is forbidden.
-if rg -n '^[[:space:]]*(Task|spawn_agent)\(' \
+if grep -nE '^[[:space:]]*(Task|spawn_agent)\(' \
   "$ROOT/plugins/uberdev/commands/review-pr.md" \
   "$ROOT/plugins/uberdev/commands/simplify.md" \
   "$ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md"; then
