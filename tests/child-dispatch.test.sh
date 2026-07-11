@@ -110,12 +110,16 @@ PY
 uberdev_create_child_handoff sdd.task.implement claude-preflight-a1 "$CLAUDE_INPUTS" '[]' >/dev/null
 # The root provider already proved Claude availability before creating this
 # carrier. Descendant supervision is a loaded adapter capability, not an
-# ambient PATH probe. Keep the stripped-PATH regression scoped to that contract
-# so the preflight's unrelated helper commands remain portable across runners.
-(
-  PATH=/usr/bin:/bin
-  _uberdev_child_backend_cancellation_supported claude-bg
-)
+# ambient PATH probe. Lock that implementation contract without replacing the
+# runner's command environment; the real preflight below exercises the loaded
+# probe/watcher functions end to end.
+CLAUDE_CAPABILITY_BODY="$(declare -f _uberdev_child_backend_cancellation_supported)"
+case "$CLAUDE_CAPABILITY_BODY" in
+  *'command -v claude'*)
+    echo 'child-dispatch: Claude supervision regressed to an ambient binary probe' >&2
+    exit 1
+    ;;
+esac
 uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" >/dev/null
 [ ! -e "$TMP/claude-preflight/children/claude-preflight-a1" ]
 UBERDEV_RUN_CARRIER_JSON="$SAVED_CARRIER"
