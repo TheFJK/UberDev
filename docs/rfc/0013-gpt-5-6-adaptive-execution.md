@@ -330,6 +330,56 @@ Release 0.41.0 MUST extract deterministic work from three oversized agents:
 
 Removed agent work MUST no longer count as model invocations. External writes retain existing safety and idempotency gates.
 
+### 10.4 Run-tree callsite enforcement
+
+Every governed provider edge MUST construct manifest-valid inputs through the
+shared child-input runtime and MUST reach the immutable handoff and routed
+dispatch boundaries. This property is proven by execution, not by attempting
+to parse Markdown-embedded shell.
+
+When an explicit test-only mode is enabled, the child runtime writes correlated
+JSONL receipts after successful input construction, handoff creation, and
+routed dispatch entry. Receipts contain only schema version, event type,
+test-declared canonical source, edge ID, instance ID where applicable, and a
+SHA-256 digest of canonicalized inputs. They MUST NOT contain prompts, source
+text, issue bodies, paths supplied as model inputs, credentials, or other
+sensitive payload content. The receipt file MUST be a caller-owned regular file
+inside a private test directory; symlinks, unsafe ownership, and malformed
+events fail closed. Production execution does not emit these test receipts.
+
+The receipt validator MUST require an exact three-event chain for all 40
+source-owned provider edges:
+
+```text
+build(source, edge, inputs_sha256)
+  -> handoff(source, edge, instance, inputs_sha256)
+  -> dispatch(source, edge, instance, inputs_sha256)
+```
+
+Multiple complete chains are permitted for bounded retries and revisions. An
+unknown edge, missing event, digest mismatch, conflicting instance, or edge
+outside the typed source fixture fails validation. Source-specific executable
+harnesses MUST invoke the real production callsite and runtime wrappers; a
+test-authored direct builder call is not reachability evidence.
+
+Static enforcement remains responsible only for deterministic declarations:
+exactly 40 unique source contracts, typed fixture equality, and exact manifest
+schema/workflow/risk equality. It MUST NOT infer caller-local JSON construction,
+shell command position, quoting, substitutions, function invocation, or heredoc
+execution.
+
+Governed executable fences also use a deliberately strict source rule: the raw
+fence text MUST contain none of the direct provider/backend atoms
+`spawn_agent`, `uberdev_agent_dispatch`, `uberdev_dispatch_one`,
+`_uberdev_agent_dispatch_backend`, `claude`, or `codex`, and no `Task(` or
+`Agent(` call. The rule is case-sensitive and has no exceptions for quotes,
+comments, paths, heredocs, or here-strings. Provider-specific path discovery
+belongs in the host adapter or generated-provider porter; canonical workflow
+fences consume neutral root variables and routed child APIs. The scanner is a
+raw bounded-text check, not a shell parser. Deliberately constructing provider
+names from fragments is outside this source-style rule and remains prohibited
+by the routed runtime contract and code review.
+
 ## 11. Workflow efficiency gates
 
 Release 0.42.0 includes quality-neutral gates:
