@@ -579,7 +579,7 @@ record_max() {
   rmdir "$TMP/max.lock"
 }
 count_race_leases() {
-  local scope_root="$RACE_STATE/semaphore-v1" scope listing scope_count count=0
+  local scope_root="$RACE_STATE/semaphore-v1" scope lease count=0
   if [ ! -d "$scope_root" ]; then
     printf '0\n'
     return 0
@@ -589,13 +589,77 @@ count_race_leases() {
       continue
     fi
     [ -d "$scope" ] && [ ! -L "$scope" ] || return 1
-    listing="$(find "$scope" -mindepth 1 -maxdepth 1 -name '*.lease' -type f -print)" || return $?
-    [ -n "$listing" ] || continue
-    scope_count="$(printf '%s\n' "$listing" | awk 'END { print NR }')" || return $?
-    count=$((count + scope_count))
+    for lease in "$scope"/*.lease; do
+      if [ -L "$lease" ]; then
+        return 1
+      fi
+      if [ -f "$lease" ]; then
+        count=$((count + 1))
+      elif [ -e "$lease" ]; then
+        return 1
+      fi
+    done
   done
   printf '%s\n' "$count"
 }
+
+UNSAFE_COUNT_SCOPE="$RACE_STATE/semaphore-v1/unsafe-count.scope"
+mkdir -p "$UNSAFE_COUNT_SCOPE"
+printf 'unchanged\n' > "$TMP/unsafe-count-victim"
+ln -s "$TMP/unsafe-count-victim" "$UNSAFE_COUNT_SCOPE/symlink.lease"
+unsafe_count_out="$(count_race_leases 2>"$TMP/unsafe-count.err")"
+unsafe_count_rc=$?
+if [ "$unsafe_count_rc" -ne 0 ]; then
+  pass "lease observation rejects a symlink named as a lease"
+else
+  fail "lease observation rejects a symlink named as a lease" \
+    "rc=$unsafe_count_rc count=$unsafe_count_out stderr=$(cat "$TMP/unsafe-count.err")"
+fi
+rm -rf "$UNSAFE_COUNT_SCOPE"
+
+mkdir -p "$UNSAFE_COUNT_SCOPE/directory.lease"
+unsafe_count_out="$(count_race_leases 2>"$TMP/unsafe-count.err")"
+unsafe_count_rc=$?
+if [ "$unsafe_count_rc" -ne 0 ]; then
+  pass "lease observation rejects a stable non-regular lease candidate"
+else
+  fail "lease observation rejects a stable non-regular lease candidate" \
+    "rc=$unsafe_count_rc count=$unsafe_count_out stderr=$(cat "$TMP/unsafe-count.err")"
+fi
+rm -rf "$UNSAFE_COUNT_SCOPE"
+
+# Simulate GNU find observing a mutex generation after it was selected for
+# traversal but before it can be visited. Lease observation must remain valid
+# because mutex generations are unrelated to the direct *.lease population.
+OBSERVER_SCOPE="$RACE_STATE/semaphore-v1/observer.scope"
+OBSERVER_FIND_BIN="$TMP/observer-find-bin"
+mkdir -p "$OBSERVER_SCOPE/.mutex" "$OBSERVER_FIND_BIN"
+printf 'lease\n' > "$OBSERVER_SCOPE/observer.lease"
+observer_find="$OBSERVER_FIND_BIN/find"
+# These variables are expanded by the generated shim, not this test process.
+# shellcheck disable=SC2016
+printf '%s\n' '#!/bin/sh' \
+  'scope=$1' \
+  'while [ -d "$scope/.mutex" ]; do sleep 0.01; done' \
+  'printf "find: %s/.mutex: No such file or directory\\n" "$scope" >&2' \
+  'exit 1' > "$observer_find"
+chmod +x "$observer_find"
+(sleep 0.02; rm -rf "$OBSERVER_SCOPE/.mutex") &
+observer_remover=$!
+observer_count="$(PATH="$OBSERVER_FIND_BIN:$PATH" count_race_leases 2>"$TMP/observer-find.err")"
+observer_rc=$?
+wait "$observer_remover"
+observer_remover_rc=$?
+if [ "$observer_rc" -eq 0 ] && [ "$observer_count" -eq 1 ] \
+   && [ "$observer_remover_rc" -eq 0 ] && [ ! -e "$OBSERVER_SCOPE/.mutex" ] \
+   && [ ! -s "$TMP/observer-find.err" ]; then
+  pass "lease observation ignores a concurrently removed mutex generation"
+else
+  fail "lease observation ignores a concurrently removed mutex generation" \
+    "rc=$observer_rc remover_rc=$observer_remover_rc count=$observer_count stderr=$(cat "$TMP/observer-find.err")"
+fi
+rm -rf "$OBSERVER_SCOPE" "$OBSERVER_FIND_BIN"
+
 race_pids=""
 n=1
 while [ "$n" -le 8 ]; do

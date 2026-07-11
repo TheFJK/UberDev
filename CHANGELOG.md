@@ -4,6 +4,12 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.40.1] — 2026-07-11
+
+### Fixed
+
+- Hardened the live-semaphore CI observer against concurrent mutex generation removal while preserving strict direct-lease counting.
+
 ## [0.40.0] — 2026-07-11
 
 ### Added
