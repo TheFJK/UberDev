@@ -223,9 +223,19 @@ uberdev_brainstorm_wait() {
   [ "$cleanup_rc" -eq 0 ] || echo "error: bounded brainstorm sibling unwind failed after missing receipt instance=$wanted" >&2
   return 2
 }
-BRAINSTORM_CODEBASE_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"working_dir":sys.argv[1],"summary_path":sys.argv[2],"question":sys.argv[3]},separators=(",",":")))' "$working_dir" "$codebase_summary_path" "$codebase_question")"
-BRAINSTORM_PRIOR_ART_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"working_dir":sys.argv[1],"summary_path":sys.argv[2],"question":sys.argv[3]},separators=(",",":")))' "$working_dir" "$patterns_summary_path" "$prior_art_question")"
-BRAINSTORM_LIBRARY_INPUTS="$(python3 -I -B -c 'import json,sys; print(json.dumps({"working_dir":sys.argv[1],"summary_path":sys.argv[2],"question":sys.argv[3]},separators=(",",":")))' "$working_dir" "$library_summary_path" "$library_question")"
+BRAINSTORM_WORKING_DIR_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")))' "$working_dir")"
+BRAINSTORM_CODEBASE_SUMMARY_PATH_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")))' "$codebase_summary_path")"
+BRAINSTORM_PATTERNS_SUMMARY_PATH_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")))' "$patterns_summary_path")"
+BRAINSTORM_LIBRARY_SUMMARY_PATH_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")))' "$library_summary_path")"
+BRAINSTORM_CODEBASE_QUESTION_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")))' "$codebase_question")"
+BRAINSTORM_PRIOR_ART_QUESTION_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")))' "$prior_art_question")"
+BRAINSTORM_LIBRARY_QUESTION_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")))' "$library_question")"
+BRAINSTORM_CODEBASE_INPUTS="$(uberdev_child_inputs_build brainstorm.research.codebase \
+  working_dir "$BRAINSTORM_WORKING_DIR_JSON" summary_path "$BRAINSTORM_CODEBASE_SUMMARY_PATH_JSON" question "$BRAINSTORM_CODEBASE_QUESTION_JSON")"
+BRAINSTORM_PRIOR_ART_INPUTS="$(uberdev_child_inputs_build brainstorm.research.prior_art \
+  working_dir "$BRAINSTORM_WORKING_DIR_JSON" summary_path "$BRAINSTORM_PATTERNS_SUMMARY_PATH_JSON" question "$BRAINSTORM_PRIOR_ART_QUESTION_JSON")"
+BRAINSTORM_LIBRARY_INPUTS="$(uberdev_child_inputs_build brainstorm.research.library \
+  working_dir "$BRAINSTORM_WORKING_DIR_JSON" summary_path "$BRAINSTORM_LIBRARY_SUMMARY_PATH_JSON" question "$BRAINSTORM_LIBRARY_QUESTION_JSON")"
 ```
 
 Allocate each `summary_path` as a private regular run artifact first. Construct
@@ -257,7 +267,7 @@ retain its selected edge, role, inputs, and `a1` identity, then execute exactly
 one fresh format retry:
 
 ```bash uberdev-executable retry=format
-BRAINSTORM_FORMAT_INPUTS="$(python3 -I -B -c 'import json,sys; v=json.loads(sys.argv[1]); v["format_retry"]=True; v["format_example_path"]=sys.argv[2]; print(json.dumps(v,separators=(",",":")))' "$failed_inputs_json" "$format_example_path")"
+BRAINSTORM_FORMAT_INPUTS="$(uberdev_child_inputs_format_retry "$failed_edge" "$failed_inputs_json" "$format_example_path")"
 format_retry_instance="${failed_instance%-a1}-a2"
 uberdev_brainstorm_dispatch "$failed_edge" "$format_retry_instance" "$failed_role" "$BRAINSTORM_FORMAT_INPUTS"
 uberdev_brainstorm_wait "$format_retry_instance"
