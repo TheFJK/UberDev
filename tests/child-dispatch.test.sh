@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
+child_dispatch_err() {
+  local rc="$?" line="$1" command="$2"
+  case "$-" in
+    *e*) printf 'child-dispatch: FAIL line=%s rc=%s command=%s\n' "$line" "$rc" "$command" >&2 ;;
+  esac
+  return "$rc"
+}
+trap 'child_dispatch_err "$LINENO" "$BASH_COMMAND"' ERR
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
 export UBERDEV_CHILD_TEST_MODE=1
