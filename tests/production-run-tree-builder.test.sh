@@ -15,7 +15,8 @@ uberdev_child_inputs_build() {
 }
 
 CASE_BUILDER="$TMP/build-cases.py"
-apply_case_fixture() { python3 -I -B "$CASE_BUILDER" "$TREE" "$1" "$2" "$(id -u)"; }
+build_case_fixture() { python3 -I -B "$CASE_BUILDER" "$TREE" "$1" "$2" "$(id -u)"; }
+apply_case_fixture() { build_case_fixture "$1" "$2"; }
 coverage_is_complete() { [ "$(wc -l <"$1" | tr -d ' ')" -eq "$EXPECTED_COUNT" ]; }
 
 python3 -I -B - "$CASE_BUILDER" <<'PY'
@@ -26,6 +27,14 @@ tree=json.load(open(sys.argv[1])); fixture=json.load(open(sys.argv[2])); root=pa
 edges=tree.get('edges'); contracts=fixture.get('contracts')
 assert fixture.get('schema_version')==1 and isinstance(edges,dict) and isinstance(contracts,list)
 contexts={}
+
+def governed_source(edge):
+ if edge.startswith('brainstorm.'): return 'plugins/uberdev/skills/brainstorm/SKILL.md'
+ if edge.startswith('orchestrator.'): return 'plugins/uberdev/skills/orchestrator/SKILL.md'
+ if edge.startswith('sdd.'): return 'plugins/uberdev/skills/subagent-driven-dev/SKILL.md'
+ if edge.startswith('review_pr.review.'): return 'plugins/uberdev/skills/post-impl-review/SKILL.md'
+ if edge.startswith('review_pr.'): return 'plugins/uberdev/commands/review-pr.md'
+ raise AssertionError(edge)
 
 def context(workflow,issue):
  if workflow in contexts:return contexts[workflow]
@@ -55,9 +64,12 @@ for contract in contracts:
  assert isinstance(contract,dict)
  edge=contract.get('edge_id'); source=contract.get('source')
  required=contract.get('required_inputs'); optional=contract.get('optional_inputs'); workflows=contract.get('allowed_workflows')
+ required_types=contract.get('required_input_types'); optional_types=contract.get('optional_input_types')
  assert isinstance(edge,str) and edge not in seen; seen.add(edge)
  assert isinstance(source,str) and source and '\t' not in source and '\n' not in source
+ assert source==governed_source(edge)
  assert isinstance(required,list) and isinstance(optional,list) and isinstance(workflows,list) and workflows
+ assert isinstance(required_types,dict) and isinstance(optional_types,dict)
  assert all(isinstance(key,str) and key for key in required+optional)
  assert len(required)==len(set(required)) and len(optional)==len(set(optional)) and not set(required)&set(optional)
  assert all(workflow in {'solve','turbo','review-pr','simplify'} for workflow in workflows) and len(workflows)==len(set(workflows))
@@ -67,12 +79,13 @@ for contract in contracts:
  risk_scope=contract.get('risk_scope'); risk_argument=contract.get('risk_argument')
  assert risk_scope==row.get('risk_scope') and risk_scope in {'run','subtask','none'}
  assert risk_argument==({'run':None,'subtask':'subtask','none':[]}[risk_scope])
- manifest_types={**row.get('required_inputs',{}),**row.get('optional_inputs',{})}
- assert all(key in manifest_types for key in required+optional)
+ assert set(required)==set(required_types) and set(optional)==set(optional_types)
+ assert required_types==row.get('required_inputs') and optional_types==row.get('optional_inputs')
+ fixture_types={**required_types,**optional_types}
  for workflow in workflows:
   index+=1; issue=0 if workflow=='simplify' else 42
   run,carrier=context(workflow,issue)
-  inputs={key:value(manifest_types[key],run,key,index) for key in required+optional}
+  inputs={key:value(fixture_types[key],run,key,index) for key in required+optional}
   argv_path=root/'argv'/f'{index:03d}.tsv'; argv_path.parent.mkdir(exist_ok=True)
   argv_path.write_text(''.join(f'{key}\t{json.dumps(inputs[key],separators=(",",":"))}\n' for key in required+optional))
   risks=None if risk_scope=='run' else []
@@ -91,6 +104,27 @@ apply_case_fixture "$CONTRACT" "$RUNTIME" >"$TMP/cases.tsv"
 awk -F '	' 'NF != 6 { exit 1 }' "$TMP/cases.tsv"
 coverage_is_complete "$TMP/cases.tsv"
 
+# Same-count mutation proof: optional-key, type, and source drift must each fail
+# even though contract and expanded-workflow counts remain unchanged.
+python3 -I -B - "$CONTRACT" "$TMP" <<'PY'
+import json,pathlib,sys
+source=json.load(open(sys.argv[1])); root=pathlib.Path(sys.argv[2])
+def write(name,mutate):
+ value=json.loads(json.dumps(source)); mutate(value['contracts'][0])
+ (root/f'drifted-{name}.json').write_text(json.dumps(value,sort_keys=True,separators=(',',':')))
+def optional(row):
+ removed=row['optional_inputs'].pop(); row['optional_input_types'].pop(removed)
+write('optional',optional)
+write('type',lambda row: row['required_input_types'].__setitem__('question','boolean'))
+write('source',lambda row: row.__setitem__('source','README.md'))
+PY
+for DRIFT in optional type source; do
+  if apply_case_fixture "$TMP/drifted-$DRIFT.json" "$TMP/drifted-$DRIFT-runtime" >"$TMP/drifted-$DRIFT.tsv" 2>"$TMP/drifted-$DRIFT.err"; then
+    echo "production-run-tree-builder: same-count $DRIFT drift accepted" >&2
+    exit 1
+  fi
+done
+
 # Mutation proof: deleting one source-derived contract removes all of that
 # contract's workflow cases. The exact coverage gate must reject the reduced
 # set instead of silently reconstructing the omitted edge from the manifest.
@@ -100,7 +134,7 @@ value=json.load(open(sys.argv[1])); removed=value['contracts'].pop(0)
 pathlib.Path(sys.argv[2]).write_text(json.dumps(value,sort_keys=True,separators=(',',':')))
 pathlib.Path(sys.argv[3]).write_text(removed['edge_id'])
 PY
-apply_case_fixture "$TMP/omitted-contract.json" "$TMP/mutation-runtime" >"$TMP/omitted-cases.tsv"
+build_case_fixture "$TMP/omitted-contract.json" "$TMP/mutation-runtime" >"$TMP/omitted-cases.tsv"
 [ "$(wc -l <"$TMP/omitted-cases.tsv" | tr -d ' ')" -lt "$EXPECTED_COUNT" ]
 ! grep -Fq "$(<"$TMP/omitted-edge")" "$TMP/omitted-cases.tsv"
 if coverage_is_complete "$TMP/omitted-cases.tsv"; then
