@@ -25,6 +25,13 @@ for edge_id,edge in edges.items():
         if role is not None: assert role in policy['roles'], (edge_id,role)
         assert edge.get('required') in {True,False}
         assert isinstance(edge.get('inputs'),list)
+        assert edge.get('risk_scope') in {'none','subtask','run'}, edge_id
+        input_types=edge.get('input_types')
+        assert isinstance(input_types,dict), edge_id
+        assert set(input_types)==set(edge['inputs']), edge_id
+        assert set(input_types.values()) <= {
+            'string','integer','path','directory','path_list','string_list'
+        }, edge_id
     else:
         assert edge.get('role') is None and edge.get('route') is None
 
@@ -39,6 +46,25 @@ required={
  'review_pr.ci.resolve_conflict'
 }
 assert required <= edges.keys(), sorted(required-edges.keys())
+for stale in {
+ 'orchestrator.plan.research_dependency','orchestrator.plan.research_tests',
+ 'orchestrator.plan.research_risks','orchestrator.plan.research_security'
+}:
+    assert stale not in edges, stale
+assert {
+ 'orchestrator.plan.research.dependency','orchestrator.plan.research.tests',
+ 'orchestrator.plan.research.risks','orchestrator.plan.research.security'
+} <= edges.keys()
+assert edges['brainstorm.research.prior_art']['role']=='research-patterns'
+assert edges['brainstorm.research.library']['role']=='research-prior-art'
+assert edges['orchestrator.plan.write']['retry']['verification']==1
+for edge_id in {
+ 'review_pr.review.correctness','review_pr.review.silent_failures',
+ 'review_pr.review.types','review_pr.review.comments',
+ 'review_pr.review.tests','review_pr.review.general'
+}:
+    assert edges[edge_id]['required'] is True, edge_id
+    assert edges[edge_id]['retry']=={'format':1}, edge_id
 assert policy['roles']['spec-compliance-reviewer']=={
  'route':'deep','risk_floor':'deep','sandbox_ceiling':'read-only',
  'delegation_mode':'leaf','risk_judgment':True

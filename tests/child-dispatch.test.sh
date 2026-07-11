@@ -2,6 +2,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
+export UBERDEV_CHILD_TEST_MODE=1
+export UBERDEV_CHILD_MANIFEST_PATH="$ROOT/tests/_fixtures/child-run-tree-v1.json"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 [ -r "$LIB" ] || { echo "RED: child dispatch runtime missing" >&2; exit 1; }
 . "$LIB"
@@ -34,6 +36,76 @@ CTX_OUT="$(make_context "$TMP/run" adaptive root-adaptive)"
 CTX="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["context_file"])' "$CTX_OUT")"
 SHA="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["context_sha256"])' "$CTX_OUT")"
 mkdir -p "$TMP/run/inputs"; printf 'bounded input\n' >"$TMP/run/inputs/task.md"
+printf 'failure context\n' >"$TMP/run/inputs/failure.md"
+UBERDEV_RUN_CARRIER_JSON="$(python3 - "$CTX" "$SHA" <<'PY'
+import json,sys
+print(json.dumps({'schema_version':1,'run_id':'root-adaptive','workflow':'solve','issue_num':42,'context_file':sys.argv[1],'context_sha256':sys.argv[2]},separators=(',',':')))
+PY
+)"
+export UBERDEV_RUN_CARRIER_JSON
+BUILDER_INPUTS="$(python3 - "$TMP/run/inputs/task.md" "$TMP/run" "$TMP/run/inputs/failure.md" <<'PY'
+import json,sys
+task,working,failure=sys.argv[1:]
+print(json.dumps({'task_path':task,'working_dir':working,'allowed_paths':[task],'denied_paths':[],'failure_path':failure,'attempt':1},separators=(',',':')))
+PY
+)"
+uberdev_create_child_handoff sdd.task.implement sdd-w1-t1-implement-a1 "$BUILDER_INPUTS" '[]' >"$TMP/builder-receipt.json"
+BUILDER_OUT="$(cat "$TMP/builder-receipt.json")"
+CANON_RUN="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$TMP/run")"
+[ "$UBERDEV_CHILD_HANDOFF" = "$CANON_RUN/handoffs/sdd-w1-t1-implement-a1.json" ]
+[ "$UBERDEV_CHILD_RESULT" = "$CANON_RUN/children/sdd-w1-t1-implement-a1/result.md" ]
+[ "$UBERDEV_CHILD_STATUS" = "$CANON_RUN/children/sdd-w1-t1-implement-a1/status.json" ]
+python3 - "$BUILDER_OUT" <<'PY'
+import json,os,stat,sys
+v=json.loads(sys.argv[1]); assert set(v)=={'edge_id','handoff_file','instance_id','required','result_file','status_file'}
+for key in ('handoff_file','result_file','status_file'): assert os.path.isabs(v[key])
+e=os.stat(os.path.dirname(v['handoff_file'])); assert stat.S_IMODE(e.st_mode)==0o700
+e=os.stat(v['handoff_file']); assert stat.S_IMODE(e.st_mode)==0o600
+h=json.load(open(v['handoff_file'])); assert h['role']=='implementation-worker' and h['phase']=='implementation' and h['risk_scope']=='subtask'
+PY
+! uberdev_create_child_handoff run-risk run-risk-mismatch \
+  "$(python3 -c 'import json,sys;print(json.dumps({"paths":[sys.argv[1]]}))' "$TMP/run/inputs/task.md")" \
+  '["security"]' >/dev/null 2>&1
+[ ! -e "$TMP/run/handoffs/run-risk-mismatch.json" ]
+
+# Production manifest enforcement happens before child allocation/provider use.
+(
+  unset UBERDEV_CHILD_TEST_MODE UBERDEV_CHILD_MANIFEST_PATH
+  ! uberdev_create_child_handoff undeclared.edge prod-undeclared "$BUILDER_INPUTS" '[]' >/dev/null 2>&1
+  [ ! -e "$TMP/run/children/prod-undeclared" ]
+  BAD_INPUTS="$(python3 - "$BUILDER_INPUTS" <<'PY'
+import json,sys
+v=json.loads(sys.argv[1]); v['secret']='x'; print(json.dumps(v,separators=(',',':')))
+PY
+)"
+  ! uberdev_create_child_handoff sdd.task.implement prod-bad-inputs "$BAD_INPUTS" '[]' >/dev/null 2>&1
+  GOOD="$(uberdev_create_child_handoff sdd.task.implement prod-role-mismatch "$BUILDER_INPUTS" '[]')"
+  H="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["handoff_file"])' "$GOOD")"
+  R="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["result_file"])' "$GOOD")"
+  S="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["status_file"])' "$GOOD")"
+  python3 - "$H" <<'PY'
+import json,sys
+p=sys.argv[1]; v=json.load(open(p)); v['role']='code-reviewer'; json.dump(v,open(p,'w'),separators=(',',':'))
+PY
+  ! uberdev_dispatch_child sdd.task.implement "$H" "$R" "$S" >/dev/null 2>&1
+  [ ! -e "$TMP/run/children/prod-role-mismatch" ]
+)
+
+# Standalone simplify uses an honest workflow carrier with subject 0.
+(
+  unset UBERDEV_CHILD_TEST_MODE UBERDEV_CHILD_MANIFEST_PATH UBERDEV_RUN_CARRIER_JSON UBERDEV_AGENT_PREPARED_REQUEST_JSON
+  mkdir -p "$TMP/standalone"
+  UBERDEV_TMPDIR="$TMP/standalone" UBERDEV_RESOLVED_BACKEND=codex
+  export UBERDEV_TMPDIR UBERDEV_RESOLVED_BACKEND
+  uberdev_prepare_run_carrier simplify 0 medium '[]' >"$TMP/standalone-carrier.json"
+  CARRIER="$(cat "$TMP/standalone-carrier.json")"
+  [ "$UBERDEV_RUN_CARRIER_JSON" = "$CARRIER" ]
+  [ -n "$UBERDEV_AGENT_PREPARED_REQUEST_JSON" ]
+  python3 - "$CARRIER" <<'PY'
+import json,sys
+v=json.loads(sys.argv[1]); assert v['workflow']=='simplify' and v['issue_num']==0
+PY
+)
 HANDOFF="$TMP/handoff.json"
 python3 - "$HANDOFF" "$CTX" "$SHA" "$TMP/run/inputs/task.md" <<'PY'
 import json,sys
@@ -149,6 +221,7 @@ PY
 printf 'done\n' >"$TMP/run/children/integration-0002/result.md"
 printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:child"}\n' >"$TMP/run/children/integration-0002/status.json"
 chmod 600 "$TMP/run/children/integration-0002/status.json"
+uberdev_wait_child "$TMP/run/children/integration-0002/status.json" "$TMP/run/children/integration-0002/result.md" 0 >/dev/null
 for _ in 1 2 3 4 5; do
   grep -q '"event":"completed".*"run_id":"integration-0002"' "$TMP/run/.agent-state-$(id -u)/agent-lifecycle.jsonl" && break
   sleep 1
@@ -335,9 +408,9 @@ cmp "$ROOT/plugins/uberdev/policy/model-routing-v1.json" "$ROOT/codex/uberdev-co
 cmp "$ROOT/plugins/uberdev/agents/implementation-worker.md" "$ROOT/codex/uberdev-codex/agents/implementation-worker.md"
 cp -R "$ROOT/codex/uberdev-codex" "$TMP/installed-package"
 BEFORE="$(find "$TMP/installed-package" -type f -exec shasum -a 256 {} + | sort)"
-python3 - "$HANDOFF" "$TMP/package-handoff.json" <<'PY'
+python3 - "$HANDOFF" "$TMP/package-handoff.json" "$TMP/run/inputs/task.md" "$TMP/run" "$TMP/run/inputs/failure.md" <<'PY'
 import json,sys
-v=json.load(open(sys.argv[1])); v['edge_id']='package'; v['instance_id']='package-0001'; json.dump(v,open(sys.argv[2],'w'),separators=(',',':'))
+v=json.load(open(sys.argv[1])); v['edge_id']='sdd.task.implement'; v['instance_id']='package-0001'; v['inputs']={'task_path':sys.argv[3],'working_dir':sys.argv[4],'allowed_paths':[sys.argv[3]],'denied_paths':[],'failure_path':sys.argv[5],'attempt':1}; json.dump(v,open(sys.argv[2],'w'),separators=(',',':'))
 PY
 PACKAGE_LIB="$TMP/installed-package/lib/child-dispatch.sh" PACKAGE_HANDOFF="$TMP/package-handoff.json" PACKAGE_RESULT="$TMP/run/children/package-0001/result.md" PACKAGE_STATUS="$TMP/run/children/package-0001/status.json" bash -c '
   . "$PACKAGE_LIB"
@@ -346,10 +419,11 @@ PACKAGE_LIB="$TMP/installed-package/lib/child-dispatch.sh" PACKAGE_HANDOFF="$TMP
     printf '\''{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:package"}\n'\'' >"$6"; chmod 600 "$6"
     DISPATCH_ID=opaque:package; DISPATCH_RC=0; return 0
   }
-  uberdev_dispatch_child package "$PACKAGE_HANDOFF" "$PACKAGE_RESULT" "$PACKAGE_STATUS" >/dev/null
+  unset UBERDEV_CHILD_TEST_MODE UBERDEV_CHILD_MANIFEST_PATH
+  uberdev_dispatch_child sdd.task.implement "$PACKAGE_HANDOFF" "$PACKAGE_RESULT" "$PACKAGE_STATUS" >/dev/null
   uberdev_wait_child "$PACKAGE_STATUS" "$PACKAGE_RESULT" 2 >/dev/null
 '
 AFTER="$(find "$TMP/installed-package" -type f -exec shasum -a 256 {} + | sort)"
 [ "$BEFORE" = "$AFTER" ]
 [ ! -d "$TMP/installed-package/lib/__pycache__" ]
-echo 'child-dispatch: 94 checks passed'
+echo 'child-dispatch: 101 checks passed'

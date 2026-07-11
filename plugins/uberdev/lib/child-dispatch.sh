@@ -25,14 +25,147 @@ _UBERDEV_CHILD_DISPATCH_LOADED=1
 
 _uberdev_child_error() { printf 'uberdev child dispatch: %s\n' "$1" >&2; }
 
+_uberdev_child_manifest_path() {
+  local canonical="$_UBERDEV_CHILD_ROOT/policy/solve-run-tree-v1.json" candidate="${UBERDEV_CHILD_MANIFEST_PATH:-}"
+  if [ "${UBERDEV_CHILD_TEST_MODE:-0}" = 1 ] && [ -n "$candidate" ]; then
+    python3 -I -B - "$candidate" "$(cd "$_UBERDEV_CHILD_ROOT/../.." && pwd -P)/tests/_fixtures" <<'PY'
+import os,stat,sys
+path=os.path.realpath(sys.argv[1]); root=os.path.realpath(sys.argv[2])
+try: e=os.lstat(path)
+except OSError: raise SystemExit(2)
+if os.path.commonpath((root,path))!=root or stat.S_ISLNK(e.st_mode) or not stat.S_ISREG(e.st_mode) or e.st_uid!=os.geteuid() or e.st_nlink!=1: raise SystemExit(2)
+print(path,end='')
+PY
+    return
+  fi
+  printf '%s' "$canonical"
+}
+
+# Prepare an honest root carrier for workflows entered outside /solve or
+# /turbo. Review-pr uses its positive PR number; standalone simplify uses 0 to
+# mean "no GitHub subject". The persisted context remains the routing SSOT.
+uberdev_prepare_run_carrier() {
+  local workflow="${1:-}" subject="${2:-}" tier="${3:-}" risks="${4:-}" prepared carrier
+  [ "$#" -eq 4 ] || { _uberdev_child_error 'expected WORKFLOW SUBJECT_ID TIER RISK_JSON'; return 2; }
+  case "$workflow" in review-pr|simplify) ;; *) _uberdev_child_error 'standalone workflow must be review-pr or simplify'; return 2 ;; esac
+  case "$subject" in ''|*[!0-9]*) _uberdev_child_error 'subject id must be a non-negative integer'; return 2 ;; esac
+  [ "$workflow" = simplify ] || [ "$subject" -gt 0 ] || { _uberdev_child_error 'review-pr requires a positive PR number'; return 2; }
+  case "$tier" in trivial|small|medium|large) ;; *) _uberdev_child_error 'invalid task tier'; return 2 ;; esac
+  prepared="$(uberdev_dispatch_prepare_root "$subject" "$tier" "$risks" "$workflow" '')" || return $?
+  carrier="$(python3 -I -B -c '
+import json,sys
+r=json.loads(sys.argv[1]); keys=("run_id","workflow","issue_num","context_file","context_sha256")
+print(json.dumps({"schema_version":1,**{k:r[k] for k in keys}},sort_keys=True,separators=(",",":")),end="")
+' "$prepared")" || return 2
+  UBERDEV_AGENT_PREPARED_REQUEST_JSON="$prepared"
+  UBERDEV_RUN_CARRIER_JSON="$carrier"
+  export UBERDEV_AGENT_PREPARED_REQUEST_JSON UBERDEV_RUN_CARRIER_JSON
+  printf '%s' "$carrier"
+}
+
+# Create one manifest-derived immutable handoff. Call directly (not through
+# command substitution) when the exported path globals are needed; the JSON
+# return is also suitable for callers that prefer parsing a receipt.
+uberdev_create_child_handoff() {
+  local edge="${1:-}" instance="${2:-}" inputs_json="${3:-}" risks_json="${4:-[]}" output
+  [ "$#" -eq 4 ] || { _uberdev_child_error 'expected EDGE_ID INSTANCE_ID INPUTS_JSON RISK_JSON'; return 2; }
+  local manifest_path; manifest_path="$(_uberdev_child_manifest_path)" || return 2
+  output="$(python3 -I -B - "$UBERDEV_RUN_CARRIER_JSON" "$edge" "$instance" "$inputs_json" "$risks_json" "$_UBERDEV_CHILD_ROOT" "$manifest_path" <<'PY'
+import hashlib,json,os,re,stat,sys
+carrier_raw,edge,instance,inputs_raw,risks_raw,plugin_root,manifest_path=sys.argv[1:]
+IDENT=re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
+EDGE=re.compile(r'[a-z][a-z0-9_-]{0,31}(?:\.[a-z][a-z0-9_-]{0,31}){0,3}')
+RISKS={'authentication','authorization','concurrency','cryptography','data-loss','destructive-operations','force-push','public-api-compatibility','release-infrastructure','schema-migration','security'}
+def fail(code): print('uberdev child dispatch: '+code,file=sys.stderr); raise SystemExit(2)
+def beneath(root,path):
+ try:return os.path.commonpath((root,path))==root
+ except ValueError:return False
+try:
+ carrier=json.loads(carrier_raw); inputs=json.loads(inputs_raw); risks=json.loads(risks_raw)
+ manifest=json.load(open(manifest_path))
+except Exception: fail('invalid_builder_input')
+if not EDGE.fullmatch(edge) or not IDENT.fullmatch(instance): fail('invalid_identity')
+if set(carrier)!={'schema_version','run_id','workflow','issue_num','context_file','context_sha256'} or carrier.get('schema_version')!=1: fail('invalid_carrier_schema')
+if carrier.get('workflow') not in {'solve','turbo','review-pr','simplify'}: fail('invalid_carrier')
+issue=carrier.get('issue_num')
+if type(issue) is not int or issue<0 or (carrier['workflow']!='simplify' and issue==0): fail('invalid_carrier')
+if not IDENT.fullmatch(carrier.get('run_id','')): fail('invalid_identity')
+ctx=carrier.get('context_file'); digest=carrier.get('context_sha256')
+if not isinstance(ctx,str) or not os.path.isabs(ctx) or not re.fullmatch(r'[0-9a-f]{64}',digest or ''): fail('invalid_context_path')
+try:
+ e=os.lstat(ctx); raw=open(ctx,'rb').read(1048577)
+ if stat.S_ISLNK(e.st_mode) or not stat.S_ISREG(e.st_mode) or e.st_uid!=os.geteuid() or e.st_nlink!=1 or stat.S_IMODE(e.st_mode)!=0o600: raise ValueError()
+ context=json.loads(raw)
+except Exception: fail('invalid_context_path')
+if len(raw)>1048576 or hashlib.sha256(raw).hexdigest()!=digest: fail('context_hash_mismatch')
+meta=context.get('metadata',{})
+if (meta.get('run_id'),meta.get('workflow'),meta.get('issue_num'))!=(carrier['run_id'],carrier['workflow'],issue): fail('carrier_context_mismatch')
+row=manifest.get('edges',{}).get(edge)
+if not isinstance(row,dict) or row.get('kind')!='provider': fail('undeclared_edge')
+if not isinstance(row.get('role'),str) or not isinstance(row.get('phase'),str) or row.get('risk_scope') not in {'run','subtask','none'} or type(row.get('required')) is not bool: fail('invalid_manifest_edge')
+if not isinstance(inputs,dict) or set(inputs)!=set(row.get('inputs',[])) or set(row.get('input_types',{}))!=set(inputs): fail('input_schema_mismatch')
+if not isinstance(risks,list) or risks!=sorted(set(risks)) or any(x not in RISKS for x in risks): fail('invalid_risk_signals')
+if row['risk_scope']=='none' and risks: fail('risk_scope_mismatch')
+run_risks=meta.get('risk_signals')
+if not isinstance(run_risks,list) or any(x not in RISKS for x in run_risks): fail('invalid_context_risk_signals')
+if row['risk_scope']=='run' and risks!=sorted(set(run_risks)): fail('risk_scope_mismatch')
+run_dir=os.path.dirname(os.path.dirname(ctx)); repo=meta.get('repository_id')
+repo_root=os.path.realpath(repo) if isinstance(repo,str) and os.path.isdir(repo) else os.path.realpath(run_dir)
+def scalar(value,kind):
+ if kind=='integer':
+  if type(value) is not int: fail('input_type_mismatch')
+  return
+ if kind=='string':
+  if not isinstance(value,str) or not value or len(value)>8192 or any(c in value for c in '\r\n\0'): fail('input_type_mismatch')
+  return
+ if kind=='string_list':
+  if not isinstance(value,list) or len(value)>128 or any(not isinstance(x,str) or not x or len(x)>8192 or any(c in x for c in '\r\n\0') for x in value): fail('input_type_mismatch')
+  return
+ values=value if kind=='path_list' else [value]
+ if not isinstance(values,list) or len(values)>128: fail('input_type_mismatch')
+ for path in values:
+  if not isinstance(path,str) or not os.path.isabs(path): fail('path_must_be_absolute')
+  canonical=os.path.realpath(path)
+  if not (beneath(repo_root,canonical) or beneath(os.path.realpath(run_dir),canonical)): fail('input_path_outside_scope')
+  try: pe=os.lstat(path)
+  except OSError: fail('unsafe_path')
+  if stat.S_ISLNK(pe.st_mode) or pe.st_uid!=os.geteuid(): fail('unsafe_path')
+  if kind=='directory':
+   if not stat.S_ISDIR(pe.st_mode): fail('input_type_mismatch')
+  elif not stat.S_ISREG(pe.st_mode) or pe.st_nlink!=1 or pe.st_size>16777216: fail('input_type_mismatch')
+for key,value in inputs.items(): scalar(value,row['input_types'][key])
+handoff_dir=os.path.join(run_dir,'handoffs')
+try: os.mkdir(handoff_dir,0o700)
+except FileExistsError: pass
+de=os.lstat(handoff_dir)
+if stat.S_ISLNK(de.st_mode) or not stat.S_ISDIR(de.st_mode) or de.st_uid!=os.geteuid(): fail('unsafe_handoff_dir')
+os.chmod(handoff_dir,0o700)
+handoff=os.path.join(handoff_dir,instance+'.json')
+value={'schema_version':1,'carrier':carrier,'edge_id':edge,'instance_id':instance,'parent_run_id':carrier['run_id'],'role':row['role'],'phase':row['phase'],'risk_scope':row['risk_scope'],'risk_signals':risks,'inputs':inputs}
+raw=json.dumps(value,sort_keys=True,separators=(',',':')).encode()+b'\n'
+try: fd=os.open(handoff,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),0o600)
+except OSError: fail('instance_exists')
+with os.fdopen(fd,'wb') as stream: stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+child=os.path.join(run_dir,'children',instance)
+print(json.dumps({'edge_id':edge,'instance_id':instance,'required':row['required'],'handoff_file':handoff,'result_file':os.path.join(child,'result.md'),'status_file':os.path.join(child,'status.json')},sort_keys=True,separators=(',',':')),end='')
+PY
+)" || return $?
+  UBERDEV_CHILD_HANDOFF="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["handoff_file"],end="")' "$output")" || return 2
+  UBERDEV_CHILD_RESULT="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result_file"],end="")' "$output")" || return 2
+  UBERDEV_CHILD_STATUS="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status_file"],end="")' "$output")" || return 2
+  export UBERDEV_CHILD_HANDOFF UBERDEV_CHILD_RESULT UBERDEV_CHILD_STATUS
+  printf '%s' "$output"
+}
+
 # Validate the immutable carrier and closed handoff, create one private child
 # directory, and emit the descendant routing request. All mutable files are
 # opened relative to verified directory descriptors by the helper.
 _uberdev_child_prepare() {
-  local edge="$1" handoff="$2" result="$3" status_file="$4"
-  python3 -I -B - "$edge" "$handoff" "$result" "$status_file" "$_UBERDEV_CHILD_ROOT" <<'PY'
+  local edge="$1" handoff="$2" result="$3" status_file="$4" manifest_path
+  manifest_path="$(_uberdev_child_manifest_path)" || return 2
+  python3 -I -B - "$edge" "$handoff" "$result" "$status_file" "$_UBERDEV_CHILD_ROOT" "$manifest_path" <<'PY'
 import hashlib,html,json,os,re,secrets,stat,sys
-edge,handoff_arg,result_arg,status_arg,plugin_root=sys.argv[1:]
+edge,handoff_arg,result_arg,status_arg,plugin_root,manifest_path=sys.argv[1:]
 FORBIDDEN={'command','commands','shell','model','route','effort','reasoning_effort','service','service_tier','sandbox','environment','env'}
 RISKS={'authentication','authorization','concurrency','cryptography','data-loss','destructive-operations','force-push','public-api-compatibility','release-infrastructure','schema-migration','security'}
 IDENT=re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
@@ -67,7 +200,7 @@ for field in ('run_id','instance_id','parent_run_id'):
     if not isinstance(value.get(field) if field!='run_id' else carrier.get(field),str): fail('invalid_identity')
 if not IDENT.fullmatch(carrier['run_id']) or not IDENT.fullmatch(value['instance_id']) or not IDENT.fullmatch(value['parent_run_id']): fail('invalid_identity')
 if value['parent_run_id']!=carrier['run_id']: fail('parent_mismatch')
-if carrier.get('workflow') not in {'solve','turbo'} or type(carrier.get('issue_num')) is not int or carrier['issue_num']<=0: fail('invalid_carrier')
+if carrier.get('workflow') not in {'solve','turbo','review-pr','simplify'} or type(carrier.get('issue_num')) is not int or carrier['issue_num']<0 or (carrier.get('workflow')!='simplify' and carrier['issue_num']==0): fail('invalid_carrier')
 if not isinstance(value.get('role'),str) or not TOKEN.fullmatch(value['role']): fail('invalid_role')
 if not isinstance(value.get('phase'),str) or not TOKEN.fullmatch(value['phase']): fail('invalid_phase')
 if value.get('risk_scope') not in {'run','subtask','none'}: fail('invalid_risk_scope')
@@ -102,22 +235,42 @@ repo=context.get('metadata',{}).get('repository_id')
 if not isinstance(repo,str) or not repo: fail('invalid_repository')
 repo_root=os.path.realpath(repo) if os.path.isabs(repo) and os.path.isdir(repo) else run_dir
 run_real=os.path.realpath(run_dir)
-def validate_scalar(item,is_path=False):
-    if item is None or isinstance(item,bool) or (isinstance(item,(int,float)) and not isinstance(item,bool)): return
-    if not isinstance(item,str) or len(item)>8192 or '\x00' in item or '\r' in item: fail('invalid_input_scalar')
-    if item.startswith(('../','./')) or '/..' in item or '\\..' in item: fail('relative_path_traversal')
-    if is_path and not os.path.isabs(item): fail('path_must_be_absolute')
-    if os.path.isabs(item):
-        lexical=os.path.abspath(item); canonical=os.path.realpath(item)
+try: manifest=json.load(open(manifest_path))
+except Exception: fail('invalid_run_tree_manifest')
+row=manifest.get('edges',{}).get(edge)
+if not isinstance(row,dict) or row.get('kind')!='provider': fail('undeclared_edge')
+if value.get('role')!=row.get('role'): fail('role_mismatch')
+if value.get('phase')!=row.get('phase'): fail('phase_mismatch')
+if value.get('risk_scope')!=row.get('risk_scope'): fail('risk_scope_mismatch')
+if type(row.get('required')) is not bool: fail('invalid_manifest_edge')
+if set(inputs)!=set(row.get('inputs',[])) or set(row.get('input_types',{}))!=set(inputs): fail('input_schema_mismatch')
+if row['risk_scope']=='none' and risks: fail('risk_scope_mismatch')
+run_risks=context.get('metadata',{}).get('risk_signals')
+if not isinstance(run_risks,list) or any(x not in RISKS for x in run_risks): fail('invalid_context_risk_signals')
+if row['risk_scope']=='run' and risks!=sorted(set(run_risks)): fail('risk_scope_mismatch')
+def validate_typed(item,kind):
+    if kind=='integer':
+        if type(item) is not int: fail('input_type_mismatch')
+        return
+    if kind=='string':
+        if not isinstance(item,str) or not item or len(item)>8192 or '\x00' in item or '\r' in item or '\n' in item: fail('input_type_mismatch')
+        return
+    if kind=='string_list':
+        if not isinstance(item,list) or len(item)>128 or any(not isinstance(x,str) or not x or len(x)>8192 or any(c in x for c in '\r\n\0') for x in item): fail('input_type_mismatch')
+        return
+    values=item if kind=='path_list' else [item]
+    if not isinstance(values,list) or len(values)>128: fail('input_type_mismatch')
+    for path in values:
+        if not isinstance(path,str) or not os.path.isabs(path): fail('path_must_be_absolute')
+        canonical=os.path.realpath(path)
         if not (beneath(repo_root,canonical) or beneath(run_real,canonical)): fail('input_path_outside_scope')
-        safe_existing(lexical,max_bytes=16777216)
-for key,item in inputs.items():
-    is_path=key=='paths' or key.endswith('_path') or key.endswith('_paths')
-    if isinstance(item,list):
-        if len(item)>128: fail('input_array_too_large')
-        for scalar in item: validate_scalar(scalar,is_path)
-    elif isinstance(item,dict): fail('nested_input')
-    else: validate_scalar(item,is_path)
+        try: entry=os.lstat(path)
+        except OSError: fail('unsafe_path')
+        if stat.S_ISLNK(entry.st_mode) or entry.st_uid!=os.geteuid(): fail('unsafe_path')
+        if kind=='directory':
+            if not stat.S_ISDIR(entry.st_mode): fail('input_type_mismatch')
+        elif not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1 or entry.st_size>16777216: fail('input_type_mismatch')
+for key,item in inputs.items(): validate_typed(item,row['input_types'][key])
 role_path=os.path.join(plugin_root,'agents',value['role']+'.md')
 safe_existing(role_path,max_bytes=262144)
 children_name='children'; instance=value['instance_id']
@@ -302,7 +455,6 @@ uberdev_wait_child() {
   local status_file="${1:-}" result="${2:-}" timeout="${3:-}" start now probe state handle='' backend process_identity lease_generation snapshot child run_dir instance manifest terminal state_dir lease_info lease lease_identity cas rc
   [ "$#" -eq 3 ] || return 2
   case "$timeout" in ''|*[!0-9]*) return 2 ;; esac
-  [ "$timeout" -gt 0 ] || return 2
   status_file="$(python3 -I -B -c 'import os,sys; print(os.path.realpath(sys.argv[1]),end="")' "$status_file")" || return 2
   result="$(python3 -I -B -c 'import os,sys; print(os.path.realpath(sys.argv[1]),end="")' "$result")" || return 2
   child="$(dirname "$status_file")"; run_dir="$(dirname "$(dirname "$child")")"; instance="$(basename "$child")"
@@ -323,7 +475,7 @@ uberdev_wait_child() {
           terminal="$(_uberdev_child_manifest_terminal "$manifest" "$instance" 2>/dev/null || true)"
           if [ "$terminal" != "$state" ]; then
             now="$(date +%s)"
-            [ $((now - start)) -lt "$timeout" ] || return 1
+            [ "$timeout" -eq 0 ] || [ $((now - start)) -lt "$timeout" ] || return 1
             sleep 1
             continue
           fi
@@ -344,7 +496,7 @@ PY
       return 2
     fi
     now="$(date +%s)"
-    if [ $((now - start)) -ge "$timeout" ]; then
+    if [ "$timeout" -gt 0 ] && [ $((now - start)) -ge "$timeout" ]; then
       lease_info="$(_uberdev_child_find_lease "$state_dir" "$instance" "$status_file" 2>/dev/null)" || return 2
       lease="${lease_info%%	*}"; [ "$lease" != "$lease_info" ] || return 2
       [ "${lease_info#*	}" = "$lease_generation" ] && [ -n "$lease_generation" ] || return 2

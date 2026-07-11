@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "tree_id": "child-test-run-tree-v1",
+  "edges": {
+    "sdd.task.implement": {"kind":"provider","role":"implementation-worker","phase":"implementation","risk_scope":"subtask","required":true,"inputs":["task_path","working_dir","allowed_paths","denied_paths","failure_path","attempt"],"input_types":{"task_path":"path","working_dir":"directory","allowed_paths":"path_list","denied_paths":"path_list","failure_path":"path","attempt":"integer"}},
+    "implementation": {"kind":"provider","role":"implementation-worker","phase":"implementation","risk_scope":"subtask","required":true,"inputs":["summary","attempt","paths"],"input_types":{"summary":"string","attempt":"integer","paths":"path_list"}},
+    "orchestrator.plan-writer": {"kind":"provider","role":"implementation-worker","phase":"implementation","risk_scope":"subtask","required":true,"inputs":["summary","attempt","paths"],"input_types":{"summary":"string","attempt":"integer","paths":"path_list"}},
+    "timeout": {"kind":"provider","role":"implementation-worker","phase":"implementation","risk_scope":"subtask","required":true,"inputs":["summary","attempt","paths"],"input_types":{"summary":"string","attempt":"integer","paths":"path_list"}},
+    "zsh.runtime": {"kind":"provider","role":"implementation-worker","phase":"implementation","risk_scope":"subtask","required":true,"inputs":["summary","attempt","paths"],"input_types":{"summary":"string","attempt":"integer","paths":"path_list"}},
+    "package": {"kind":"provider","role":"implementation-worker","phase":"implementation","risk_scope":"subtask","required":true,"inputs":["summary","attempt","paths"],"input_types":{"summary":"string","attempt":"integer","paths":"path_list"}},
+    "fix": {"kind":"provider","role":"implementation-worker","phase":"implementation","risk_scope":"subtask","required":true,"inputs":["paths"],"input_types":{"paths":"path_list"}},
+    "integration": {"kind":"provider","role":"implementation-worker","phase":"implementation","risk_scope":"subtask","required":true,"inputs":["paths"],"input_types":{"paths":"path_list"}},
+    "background-timeout": {"kind":"provider","role":"implementation-worker","phase":"implementation","risk_scope":"subtask","required":true,"inputs":["paths"],"input_types":{"paths":"path_list"}},
+    "wezterm.child": {"kind":"provider","role":"implementation-worker","phase":"implementation","risk_scope":"subtask","required":true,"inputs":["paths"],"input_types":{"paths":"path_list"}},
+    "run-risk": {"kind":"provider","role":"implementation-worker","phase":"implementation","risk_scope":"run","required":true,"inputs":["paths"],"input_types":{"paths":"path_list"}}
+  }
+}

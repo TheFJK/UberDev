@@ -84,9 +84,10 @@ except (TypeError, ValueError, json.JSONDecodeError):
 if not isinstance(request, dict):
     raise SystemExit(2)
 issue = request.get("issue_num")
-if type(issue) is not int or issue <= 0:
+workflow=request.get("workflow")
+if workflow not in {"solve","turbo","review-pr","simplify"} or type(issue) is not int or issue < 0 or (workflow!="simplify" and issue==0):
     raise SystemExit(2)
-if request.get("workflow") in {"solve", "turbo"}:
+if workflow in {"solve", "turbo", "review-pr"}:
     reference = request.get("issue_or_pr")
     if type(reference) is int:
         normalized = reference if reference > 0 else None
@@ -469,8 +470,8 @@ def validate(payload):
  metadata_base={"run_id","repository_id","workflow","backend","issue_num","task_tier","risk_signals"}
  if not isinstance(metadata,dict) or frozenset(metadata) not in {frozenset(metadata_base),frozenset(metadata_base|{"triage_decision"})}: raise ValueError()
  if not isinstance(metadata["run_id"],str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",metadata["run_id"]): raise ValueError()
- if not isinstance(metadata["repository_id"],str) or not metadata["repository_id"] or metadata["workflow"] not in {"solve","turbo"} or not isinstance(metadata["backend"],str): raise ValueError()
- if type(metadata["issue_num"]) is not int or metadata["issue_num"]<=0 or metadata["task_tier"] not in {"trivial","small","medium","large"}: raise ValueError()
+ if not isinstance(metadata["repository_id"],str) or not metadata["repository_id"] or metadata["workflow"] not in {"solve","turbo","review-pr","simplify"} or not isinstance(metadata["backend"],str): raise ValueError()
+ if type(metadata["issue_num"]) is not int or metadata["issue_num"]<0 or (metadata["workflow"]!="simplify" and metadata["issue_num"]==0) or metadata["task_tier"] not in {"trivial","small","medium","large"}: raise ValueError()
  if not isinstance(metadata["risk_signals"],list) or any(item not in risks for item in metadata["risk_signals"]): raise ValueError()
  if "triage_decision" in metadata:
   triage=metadata["triage_decision"]
