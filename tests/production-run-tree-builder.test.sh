@@ -6,6 +6,13 @@ TREE="$ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
 CONTRACT="$ROOT/tests/fixtures/run-tree-callsite-contract-v1.json"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 . "$LIB"
+BUILDER_CALLS="$TMP/builder-calls"
+: >"$BUILDER_CALLS"
+eval "$(declare -f uberdev_child_inputs_build | sed '1s/uberdev_child_inputs_build/uberdev_child_inputs_build_production/')"
+uberdev_child_inputs_build() {
+  printf '%s\n' "$1" >>"$BUILDER_CALLS"
+  uberdev_child_inputs_build_production "$@"
+}
 
 CASE_BUILDER="$TMP/build-cases.py"
 apply_case_fixture() { python3 -I -B "$CASE_BUILDER" "$TREE" "$1" "$2" "$(id -u)"; }
@@ -66,8 +73,10 @@ for contract in contracts:
   index+=1; issue=0 if workflow=='simplify' else 42
   run,carrier=context(workflow,issue)
   inputs={key:value(manifest_types[key],run,key,index) for key in required+optional}
+  argv_path=root/'argv'/f'{index:03d}.tsv'; argv_path.parent.mkdir(exist_ok=True)
+  argv_path.write_text(''.join(f'{key}\t{json.dumps(inputs[key],separators=(",",":"))}\n' for key in required+optional))
   risks=None if risk_scope=='run' else []
-  fields=(edge,source,f'contract-edge-{index:03d}',json.dumps(carrier,separators=(',',':')),json.dumps(inputs,separators=(',',':')),json.dumps(risks,separators=(',',':')))
+  fields=(edge,source,f'contract-edge-{index:03d}',json.dumps(carrier,separators=(',',':')),json.dumps(risks,separators=(',',':')),str(argv_path))
   print('\t'.join(fields))
 ''')
 PY
@@ -101,14 +110,26 @@ fi
 
 COUNT=0
 INVALID_TYPE_CHECKED=0
-while IFS="$(printf '\t')" read -r EDGE SOURCE INSTANCE CARRIER INPUTS RISKS; do
+VALID_BUILDER_CALLS=0
+while IFS="$(printf '\t')" read -r EDGE SOURCE INSTANCE CARRIER RISKS ARGV_FILE; do
   [ -f "$ROOT/$SOURCE" ]
-  VALIDATED="$(uberdev_child_inputs_validate "$EDGE" "$INPUTS")"
-  [ "$VALIDATED" = "$(python3 -I -B -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1]),sort_keys=True,separators=(",",":")))' "$INPUTS")" ]
+  set --
+  while IFS="$(printf '\t')" read -r KEY JSON_LITERAL; do
+    set -- "$@" "$KEY" "$JSON_LITERAL"
+  done <"$ARGV_FILE"
+  BUILT="$(uberdev_child_inputs_build "$EDGE" "$@")"
+  VALID_BUILDER_CALLS=$((VALID_BUILDER_CALLS + 1))
+  VALIDATED="$(uberdev_child_inputs_validate "$EDGE" "$BUILT")"
+  [ "$VALIDATED" = "$BUILT" ]
   if [ "$INVALID_TYPE_CHECKED" -eq 0 ]; then
-    INVALID_INPUTS="$(python3 -I -B -c 'import json,sys; value=json.loads(sys.argv[1]); value[next(iter(value))]=None; print(json.dumps(value,separators=(",",":")))' "$INPUTS")"
-    if uberdev_child_inputs_validate "$EDGE" "$INVALID_INPUTS" >/dev/null 2>&1; then
-      echo "production-run-tree-builder: invalid type accepted for $EDGE" >&2
+    set --
+    FIRST_ARGUMENT=1
+    while IFS="$(printf '\t')" read -r KEY JSON_LITERAL; do
+      if [ "$FIRST_ARGUMENT" -eq 1 ]; then JSON_LITERAL=null; FIRST_ARGUMENT=0; fi
+      set -- "$@" "$KEY" "$JSON_LITERAL"
+    done <"$ARGV_FILE"
+    if uberdev_child_inputs_build "$EDGE" "$@" >/dev/null 2>&1; then
+      echo "production-run-tree-builder: production builder accepted invalid type for $EDGE" >&2
       exit 1
     fi
     INVALID_TYPE_CHECKED=1
@@ -123,4 +144,6 @@ while IFS="$(printf '\t')" read -r EDGE SOURCE INSTANCE CARRIER INPUTS RISKS; do
 done <"$TMP/cases.tsv"
 [ "$INVALID_TYPE_CHECKED" -eq 1 ]
 [ "$COUNT" -eq "$EXPECTED_COUNT" ]
+[ "$VALID_BUILDER_CALLS" -eq "$EXPECTED_COUNT" ]
+[ "$(wc -l <"$BUILDER_CALLS" | tr -d ' ')" -eq "$((EXPECTED_COUNT + 1))" ]
 echo "production-run-tree-builder: $COUNT fixture-derived provider contracts passed"
