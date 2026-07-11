@@ -15,7 +15,7 @@ export UBERDEV_CHILD_TEST_MODE=1
 export UBERDEV_CHILD_TEST_SOURCE='plugins/uberdev/skills/subagent-driven-dev/SKILL.md'
 export UBERDEV_CHILD_TEST_RECEIPT_FILE="$RECEIPT_FILE"
 
-python3 -I -B - "$SKILL" "$TMP/runtime.sh" <<'PY'
+python3 -I -B - "$SKILL" "$TMP/runtime.sh" "$TMP/batch-callsite.sh" <<'PY'
 import re
 import sys
 from pathlib import Path
@@ -29,22 +29,51 @@ match = re.search(
 if not match:
     raise SystemExit("SDD routed runtime fence missing")
 Path(sys.argv[2]).write_text(match.group(1), encoding="utf-8")
+batch = re.search(
+    r"Executable batch shape \(substitute the edge/role/stage from the table\):"
+    r"\n\n```bash\n(.*?)\n```",
+    text,
+    re.DOTALL,
+)
+if not batch:
+    raise SystemExit("SDD executable batch callsite fence missing")
+Path(sys.argv[3]).write_text(batch.group(1) + "\n", encoding="utf-8")
 PY
 
 . "$LIB"
 eval "$(declare -f uberdev_child_inputs_build | sed '1s/uberdev_child_inputs_build/uberdev_child_inputs_build_production/')"
 
 BUILDER_LOG="$TMP/builder.log"
+BUILDER_INPUTS_LOG="$TMP/builder-inputs.jsonl"
 : >"$BUILDER_LOG"
+: >"$BUILDER_INPUTS_LOG"
 uberdev_child_inputs_build() {
+  local output
   printf '%s\n' "$1" >>"$BUILDER_LOG"
-  uberdev_child_inputs_build_production "$@"
+  output="$(uberdev_child_inputs_build_production "$@")" || return $?
+  printf '%s\n' "$output" >>"$BUILDER_INPUTS_LOG"
+  printf '%s' "$output"
 }
 
 SDD_WORKTREE="$ROOT"
 SDD_RISK_JSON='[]'
 SDD_CHILD_TIMEOUT=5
 . "$TMP/runtime.sh"
+eval "$(declare -f sdd_canonicalize_owned_paths | sed '1s/sdd_canonicalize_owned_paths/sdd_canonicalize_owned_paths_production/')"
+eval "$(declare -f uberdev_child_inputs_validate | sed '1s/uberdev_child_inputs_validate/uberdev_child_inputs_validate_production/')"
+
+CANONICALIZE_LOG="$TMP/canonicalize.log"
+VALIDATE_LOG="$TMP/validate.log"
+: >"$CANONICALIZE_LOG"
+: >"$VALIDATE_LOG"
+sdd_canonicalize_owned_paths() {
+  printf '%s\n' "$edge_id" >>"$CANONICALIZE_LOG"
+  sdd_canonicalize_owned_paths_production "$@"
+}
+uberdev_child_inputs_validate() {
+  printf '%s\n' "$1" >>"$VALIDATE_LOG"
+  uberdev_child_inputs_validate_production "$@"
+}
 
 make_context() {
   local run="$1" run_id="$2" request decision metadata
@@ -119,9 +148,9 @@ INPUT_DIR="$RUN_DIR/inputs"
 mkdir -p "$INPUT_DIR"
 task_path="$INPUT_DIR/task \"quoted\" \\ path.md"
 allowed_paths_json="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1:]),end="")' \
-  "$INPUT_DIR/allowed \"one\".ts" "$INPUT_DIR/allowed \\ two.ts")"
+  'inputs/allowed "one".ts' 'inputs/allowed \ two.ts')"
 denied_paths_json="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1:]),end="")' \
-  "$INPUT_DIR/denied \"sibling\".ts")"
+  'inputs/denied "sibling".ts')"
 failure_fixture_path="$INPUT_DIR/failures/attempt \\ \"one\".md"
 failure_path=''
 attempt=007
@@ -182,25 +211,18 @@ PY
 
 sdd_dispatch_case() {
   local edge_id="$1" task_id="$2" stage="$3" raw_attempt="$4" output_name="$5"
-  local canonical_attempt instance_id task_inputs_json
-  sdd_validate_instance_dimensions 1 "$task_id" "$stage" "$raw_attempt"
-  canonical_attempt="$(sdd_json_decimal_integer "$raw_attempt")"
-  instance_id="sdd-w1-t${task_id}-${stage}-a${canonical_attempt}"
-  sdd_begin_batch
-  task_inputs_json="$(sdd_inputs_for_task "$edge_id" "$task_id")"
+  local wave=1 attempt="$raw_attempt" SDD_BATCH_TASK_IDS="$task_id" task_inputs_json
+  . "$TMP/batch-callsite.sh" >/dev/null
   printf -v "$output_name" '%s' "$task_inputs_json"
-  sdd_dispatch_prepared "$edge_id" "$instance_id" "$task_inputs_json" "$SDD_RISK_JSON" >/dev/null
-  sdd_launch_prepared_batch >/dev/null
-  sdd_wait_prepared_batch "$SDD_CHILD_TIMEOUT" >/dev/null
 }
 
 implement_json=
 spec_json=
 quality_json=
 premerge_json=
-sdd_dispatch_case sdd.task.implement 41 implement 007 implement_json
-sdd_dispatch_case sdd.task.spec_review 42 spec-review 01 spec_json
-sdd_dispatch_case sdd.task.quality_review 43 quality-review 0001 quality_json
+sdd_dispatch_case sdd.task.implement 41 implement 7 implement_json
+sdd_dispatch_case sdd.task.spec_review 42 spec-review 1 spec_json
+sdd_dispatch_case sdd.task.quality_review 43 quality-review 1 quality_json
 sdd_dispatch_case sdd.premerge.test_review 44 test-review 1 premerge_json
 
 python3 -I -B - \
@@ -209,6 +231,7 @@ python3 -I -B - \
   "$spec_path" "$plan_path" "$commit_sha" "$report_path" "$base_sha" "$head_sha" \
   "$commit_range_path" "$acceptance_path" "$summary_path" <<'PY'
 import json
+import os
 import sys
 
 (
@@ -221,8 +244,8 @@ import sys
 assert json.loads(implement_raw) == {
     "task_path": task_path,
     "working_dir": working_dir,
-    "allowed_paths": json.loads(allowed_raw),
-    "denied_paths": json.loads(denied_raw),
+    "allowed_paths": [os.path.realpath(os.path.join(working_dir, path)) for path in json.loads(allowed_raw)],
+    "denied_paths": [os.path.realpath(os.path.join(working_dir, path)) for path in json.loads(denied_raw)],
     "failure_path": failure_path,
     "attempt": int(attempt),
 }
@@ -230,14 +253,14 @@ assert json.loads(spec_raw) == {
     "spec_path": spec_path,
     "plan_path": plan_path,
     "commit_sha": commit_sha,
-    "allowed_paths": json.loads(allowed_raw),
+    "allowed_paths": [os.path.realpath(os.path.join(working_dir, path)) for path in json.loads(allowed_raw)],
     "report_path": report_path,
 }
 assert json.loads(quality_raw) == {
     "plan_path": plan_path,
     "base_sha": base_sha,
     "head_sha": head_sha,
-    "allowed_paths": json.loads(allowed_raw),
+    "allowed_paths": [os.path.realpath(os.path.join(working_dir, path)) for path in json.loads(allowed_raw)],
     "report_path": report_path,
 }
 assert json.loads(premerge_raw) == {
@@ -259,43 +282,142 @@ EXPECTED_EDGES="$(printf '%s\n' \
     "$EXPECTED_EDGES" "$(<"$BUILDER_LOG")" >&2
   exit 1
 }
+[ "$(<"$CANONICALIZE_LOG")" = "$EXPECTED_EDGES" ] || {
+  printf 'SDD production batch callsite did not canonicalize each routed edge\n' >&2
+  exit 1
+}
+[ "$(<"$VALIDATE_LOG")" = "$EXPECTED_EDGES" ] || {
+  printf 'SDD production batch callsite did not validate each routed edge\n' >&2
+  exit 1
+}
 
 python3 -I -B - \
-  "$RECEIPT_FILE" "$UBERDEV_CHILD_TEST_SOURCE" \
+  "$RECEIPT_FILE" "$UBERDEV_CHILD_TEST_SOURCE" "$BUILDER_INPUTS_LOG" \
   "$implement_json" "$spec_json" "$quality_json" "$premerge_json" <<'PY'
+import copy
 import hashlib
 import json
+import os
+import re
 import sys
 from pathlib import Path
 
-path, source, *inputs_raw = sys.argv[1:]
+path, source, builder_inputs_path, *inputs_raw = sys.argv[1:]
 rows = [json.loads(line) for line in Path(path).read_text().splitlines()]
+built_raw = Path(builder_inputs_path).read_text().splitlines()
 cases = [
     ("sdd.implement", "sdd.task.implement", "sdd-w1-t41-implement-a7"),
     ("sdd.spec_review", "sdd.task.spec_review", "sdd-w1-t42-spec-review-a1"),
     ("sdd.quality_review", "sdd.task.quality_review", "sdd-w1-t43-quality-review-a1"),
     ("sdd.pre_merge_test_analysis", "sdd.premerge.test_review", "sdd-w1-t44-test-review-a1"),
 ]
-assert len(rows) == len(cases) * 3, rows
-for index, ((name, edge_id, instance_id), raw) in enumerate(zip(cases, inputs_raw)):
-    chain = rows[index * 3:(index + 1) * 3]
-    assert [row["event"] for row in chain] == ["build", "handoff", "dispatch"], (name, chain)
-    canonical = json.dumps(
-        json.loads(raw), sort_keys=True, separators=(",", ":")
-    ).encode()
-    digest = hashlib.sha256(canonical).hexdigest()
-    for row in chain:
-        expected_keys = {"schema_version", "event", "source", "edge_id", "inputs_sha256"}
-        if row["event"] != "build":
-            expected_keys.add("instance_id")
-        assert set(row) == expected_keys, (name, row)
-        assert row["schema_version"] == 1, (name, row)
-        assert row["source"] == source, (name, row)
-        assert row["edge_id"] == edge_id, (name, row)
-        assert row["inputs_sha256"] == digest, (name, row)
-        if row["event"] != "build":
-            assert row["instance_id"] == instance_id, (name, row)
-implement_inputs = json.loads(inputs_raw[0])
+assert len(built_raw) == len(cases), built_raw
+
+def inputs_digest(raw):
+    canonical = json.dumps(json.loads(raw), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+def validate_shape(row):
+    assert isinstance(row, dict), "incomplete receipt: row is not an object"
+    event = row.get("event")
+    assert event in {"build", "handoff", "dispatch"}, f"unknown receipt event: {event!r}"
+    expected = {"schema_version", "event", "source", "edge_id", "inputs_sha256"}
+    if event != "build":
+        expected.add("instance_id")
+    assert set(row) == expected, f"incomplete receipt fields: {row!r}"
+    assert row["schema_version"] == 1, f"unknown receipt schema: {row!r}"
+    assert row["source"] == source, f"unknown receipt source: {row!r}"
+    assert re.fullmatch(r"[0-9a-f]{64}", row["inputs_sha256"]), (
+        f"incomplete receipt digest: {row!r}"
+    )
+
+def validate_receipts(candidate_rows):
+    for row in candidate_rows:
+        validate_shape(row)
+    cursor = 0
+    for (name, edge_id, instance_id), built, validated in zip(cases, built_raw, inputs_raw):
+        built_digest = inputs_digest(built)
+        validated_digest = inputs_digest(validated)
+        if edge_id == "sdd.premerge.test_review":
+            assert built_digest == validated_digest, f"{name}: unexpected input transformation"
+        else:
+            assert built_digest != validated_digest, f"{name}: missing canonical input snapshot"
+        snapshots = []
+        while cursor < len(candidate_rows) and candidate_rows[cursor]["event"] == "build":
+            row = candidate_rows[cursor]
+            assert row["edge_id"] == edge_id, f"{name}: unmatched build edge: {row!r}"
+            snapshots.append(row["inputs_sha256"])
+            cursor += 1
+        assert len(snapshots) >= 2, f"{name}: incomplete build snapshot chain: {snapshots!r}"
+        expected_snapshots = {built_digest, validated_digest}
+        assert set(snapshots) == expected_snapshots, (
+            f"{name}: unknown build snapshot: expected={expected_snapshots!r} "
+            f"actual={set(snapshots)!r}"
+        )
+        terminal = []
+        for expected_event in ("handoff", "dispatch"):
+            assert cursor < len(candidate_rows), f"{name}: incomplete {expected_event} event"
+            row = candidate_rows[cursor]
+            assert row["event"] == expected_event, (
+                f"{name}: unknown receipt event order: expected={expected_event} actual={row!r}"
+            )
+            assert row["edge_id"] == edge_id, f"{name}: unmatched terminal edge: {row!r}"
+            assert row["instance_id"] == instance_id, (
+                f"{name}: unmatched terminal instance: {row!r}"
+            )
+            assert row["inputs_sha256"] in snapshots, (
+                f"{name}: unmatched validated digest: {row['inputs_sha256']}"
+            )
+            assert row["inputs_sha256"] == validated_digest, (
+                f"{name}: terminal receipt did not use validated canonical inputs: {row!r}"
+            )
+            terminal.append(row["inputs_sha256"])
+            cursor += 1
+        assert terminal[0] == terminal[1], f"{name}: handoff/dispatch digest mismatch"
+    assert cursor == len(candidate_rows), f"unknown trailing receipt events: {candidate_rows[cursor:]!r}"
+
+validate_receipts(rows)
+
+additional_snapshot = copy.deepcopy(rows)
+first_handoff = next(
+    index for index, row in enumerate(additional_snapshot)
+    if row["edge_id"] == "sdd.task.implement" and row["event"] == "handoff"
+)
+additional_snapshot.insert(first_handoff, copy.deepcopy(additional_snapshot[first_handoff - 1]))
+validate_receipts(additional_snapshot)
+
+def assert_rejected(mutated, needle):
+    try:
+        validate_receipts(mutated)
+    except AssertionError as error:
+        assert needle in str(error), (needle, str(error))
+    else:
+        raise AssertionError(f"receipt mutation accepted: {needle}")
+
+unmatched = copy.deepcopy(rows)
+for row in unmatched:
+    if row["edge_id"] == "sdd.task.implement" and row["event"] in {"handoff", "dispatch"}:
+        row["inputs_sha256"] = "0" * 64
+assert_rejected(unmatched, "unmatched validated digest")
+
+unknown = copy.deepcopy(rows)
+unknown[0]["event"] = "launch"
+assert_rejected(unknown, "unknown receipt event")
+
+incomplete = copy.deepcopy(rows)
+del incomplete[0]["source"]
+assert_rejected(incomplete, "incomplete receipt")
+
+missing_terminal = copy.deepcopy(rows[:-1])
+assert_rejected(missing_terminal, "incomplete dispatch event")
+
+raw_implement = json.loads(built_raw[0])
+validated_implement = json.loads(inputs_raw[0])
+assert all(not os.path.isabs(path) for path in raw_implement["allowed_paths"])
+assert all(not os.path.isabs(path) for path in raw_implement["denied_paths"])
+assert all(os.path.isabs(path) for path in validated_implement["allowed_paths"])
+assert all(os.path.isabs(path) for path in validated_implement["denied_paths"])
+implement_inputs = validated_implement
 assert implement_inputs["attempt"] == 7
 assert implement_inputs["failure_path"] == ""
 PY
