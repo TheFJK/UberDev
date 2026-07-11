@@ -1,6 +1,6 @@
 # UberDev for Codex
 
-UberDev's full workflow toolkit — 39 skills and command-skills, 42 subagents,
+UberDev's full workflow toolkit — 39 skills and command-skills, 44 subagents,
 plus the autonomous dispatch backend — installable into the
 [OpenAI Codex CLI](https://developers.openai.com/codex).
 
@@ -13,7 +13,7 @@ delivery surfaces are adapted to Codex's skill / subagent / AGENTS.md model.
 
 Codex's documented plugin manifest bundles **skills, MCP servers, apps, and
 hooks** — but has **no `agents` field** (as of July 2026). So a
-plugin alone can ship the skills but cannot ship the 42 subagents that
+plugin alone can ship the skills but cannot ship the 44 subagents that
 `/review-pr`, `/testers`, `/solve`, and the research/spec/plan pipelines fan
 out to. Two paths cover this:
 
@@ -50,7 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/TheFJK/UberDev/main/codex/install-c
 This installs three things:
 
 1. **Skills** → `~/.agents/skills/` (39 Codex-ported UberDev skills, including command-skills)
-2. **Agents** → `~/.codex/agents/uberdev-*.toml` (42 custom subagents, converted from Claude `.md`)
+2. **Agents** → `~/.codex/agents/uberdev-*.toml` (44 custom subagents, converted from Claude `.md`)
 3. **Primer** → merged into the active global instruction file (`~/.codex/AGENTS.override.md` when present, otherwise `~/.codex/AGENTS.md`)
 
 When run from a clone, the installer uses the local repo files. When run as the

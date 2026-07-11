@@ -107,8 +107,8 @@ fi
 if python3 - "$SUBAGENT_DRIVEN" "$RUN_TREE" <<'PY'
 import json,re,sys
 from pathlib import Path
-text=Path(sys.argv[1]).read_text()
-manifest=json.loads(Path(sys.argv[2]).read_text())
+text=Path(sys.argv[1]).read_text(encoding="utf-8")
+manifest=json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
 match=re.search(r'<!-- BEGIN child-callsite-contracts-v1 -->\s*```json\s*(.*?)\s*```\s*<!-- END child-callsite-contracts-v1 -->',text,re.S)
 if not match: raise SystemExit("missing SDD callsite fixtures")
 for edge,row in json.loads(match.group(1)).items():
@@ -133,7 +133,7 @@ else
   PASS=$((PASS + 1))
 fi
 
-if python3 - "$SUBAGENT_DRIVEN" <<'PY'
+if python3 - "$SUBAGENT_DRIVEN" "$BASH" <<'PY'
 import re
 import subprocess
 import sys
@@ -158,7 +158,7 @@ sdd_unwind_child_receipts || rc=$?
 [ "${{calls[1]}}" = "/tmp/status|2|/tmp/result|2|600" ]
 [ "${{#SDD_RECEIPT_INSTANCES[@]}}" -eq 0 ]
 '''
-result=subprocess.run(["bash","-c",script],text=True,capture_output=True)
+result=subprocess.run([sys.argv[2],"-c",script],text=True,capture_output=True)
 if result.returncode: raise SystemExit(result.stderr)
 PY
 then

@@ -96,7 +96,7 @@ jq '.enabledPlugins["uberdev@uberdev"] = true' \
 UberDev also installs into the [OpenAI Codex CLI](https://developers.openai.com/codex) — same workflows (brainstorm → plan → execute, TDD, debugging, parallel PR review, autonomous issue resolution, the testers QA squad), adapted to Codex's skill / subagent / AGENTS.md model. Two paths:
 
 ```bash
-# Path 1 — standalone installer (carries the 42 subagents; needed for /solve, /turbo, /review-pr fanout)
+# Path 1 — standalone installer (carries the 44 subagents; needed for /solve, /turbo, /review-pr fanout)
 curl -fsSL https://raw.githubusercontent.com/TheFJK/UberDev/main/codex/install-codex.sh | bash
 
 # Path 2 — Codex-native plugin (browse & toggle skills; pairs with Path 1)

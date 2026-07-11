@@ -304,8 +304,8 @@ bash "$TMP/wait-ledger-failure.sh" "$TMP/post-runtime.sh" post_review_wait_all "
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$REVIEW"
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$SIMPLIFY"
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$POST"
-! rg -n "wait_child .* 0|IFS='\\|'|additional_focus|brief_path|lens_index" "$REVIEW" "$SIMPLIFY" "$POST"
-! rg -n 'format_repair' "$POST"
-rg -q 'format_retry' "$POST"
+! grep -En "wait_child .* 0|IFS='\\|'|additional_focus|brief_path|lens_index" "$REVIEW" "$SIMPLIFY" "$POST"
+! grep -En 'format_repair' "$POST"
+grep -Eq 'format_retry' "$POST"
 
 echo 'review-child-handoff: PASS'

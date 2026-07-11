@@ -514,7 +514,7 @@ Next steps:
 
   2. Verify:
        ls ~/.agents/skills/      # ~39 UberDev skills incl. command-skills
-       ls ~/.codex/agents/       # ~42 uberdev-*.toml subagents
+       ls ~/.codex/agents/       # 44 uberdev-*.toml subagents
        grep uberdev-codex-primer ~/.codex/AGENTS*.md   # primer block present
 
 Uninstall:  ./codex/install-codex.sh --uninstall
