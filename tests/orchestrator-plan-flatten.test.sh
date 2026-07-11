@@ -1109,11 +1109,11 @@ if not staging.is_symlink() or digest(sentinel) != before:
 # outside the allocation capability and must not be unlinked or modified.
 race_dir = root / "race replacement"
 race_dir.mkdir()
-staging, token = allocate(race_dir, "dependency-map.md")
-staging.unlink()
 sentinel = race_dir / "race-sentinel.md"
 sentinel.write_text("race sentinel\n", encoding="utf-8")
 before = digest(sentinel)
+staging, token = allocate(race_dir, "dependency-map.md")
+staging.unlink()
 os.link(sentinel, staging)
 result, payload = publish(race_dir, "dependency-map.md", staging, token)
 expect_failure(result, payload, "allocation_mismatch")
