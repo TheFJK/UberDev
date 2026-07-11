@@ -138,7 +138,7 @@ def _prefix_expects_command(prefix: str) -> bool:
     return at_start and not declaration
 
 
-def _token_is_executable(line: str, offset: int, token_end: int) -> bool:
+def _token_is_executable(line: str, offset: int, token_end: int, *, reject_declaration: bool = True) -> bool:
     """Recognize a command-position token without parsing shell grammar."""
     single = False
     double = False
@@ -170,7 +170,7 @@ def _token_is_executable(line: str, offset: int, token_end: int) -> bool:
         return False
     if double and not substitutions:
         return False
-    if re.match(r"[ \t]*\([ \t]*\)[ \t]*(?:\{|\()", line[token_end:]):
+    if reject_declaration and re.match(r"[ \t]*\([ \t]*\)[ \t]*(?:\{|\()", line[token_end:]):
         return False
     prefix = line[substitutions[-1] if substitutions else 0 : offset].rstrip()
     return _prefix_expects_command(prefix)
@@ -281,31 +281,79 @@ def _command(text: str, helper: str, argument: str) -> bool:
 
 
 def _function_body(text: str, name: str) -> str:
-    match = re.search(rf"^[ \t]*{re.escape(name)}\(\)[ \t]*\{{(.*?)^[ \t]*\}}", text, re.MULTILINE | re.DOTALL)
+    match = re.search(rf"^(?P<indent>[ \t]*){re.escape(name)}\(\)[ \t]*\{{[^\n]*\n", text, re.MULTILINE)
     if not match:
         fail(f"missing executable function: {name}")
-    return match.group(1)
+    peer = re.search(
+        rf"^{re.escape(match.group('indent'))}[A-Za-z_][A-Za-z0-9_]*\(\)[ \t]*\{{",
+        text[match.end() :],
+        re.MULTILINE,
+    )
+    end = match.end() + peer.start() if peer else len(text)
+    return text[match.end() : end]
+
+
+def _brace_delta(line: str) -> int:
+    try:
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|(){}<>")
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        tokens = list(lexer)
+    except ValueError:
+        return 0
+    return sum(token.count("{") - token.count("}") for token in tokens if token and all(char in ";&|(){}<>" for char in token))
+
+
+def _without_nested_functions(text: str) -> str:
+    declaration = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)[ \t]*\([ \t]*\)[ \t]*\{")
+    kept: list[str] = []
+    depth = 0
+    for line in _executable_lines(text):
+        if depth:
+            depth += _brace_delta(line)
+            continue
+        if _heredoc_declarations(line):
+            # _executable_lines already removed this declaration's body and
+            # terminator; omit the opener so downstream scans cannot reopen it.
+            continue
+        nested = next(
+            (
+                match
+                for match in declaration.finditer(line)
+                if _token_is_executable(
+                    line,
+                    match.start(1),
+                    match.end(1),
+                    reject_declaration=False,
+                )
+            ),
+            None,
+        )
+        if nested is None:
+            kept.append(line)
+            continue
+        depth = _brace_delta(line[nested.start(1) :])
+    return "\n".join(kept)
 
 
 def _require_dispatch_chain(relative: str, bash: str) -> None:
     if "child-dispatch.sh" not in bash:
         fail(f"{relative}: missing production child-dispatch source")
     if relative.endswith("brainstorm/SKILL.md"):
-        functions = ("uberdev_brainstorm_dispatch", "uberdev_brainstorm_launch_batch")
+        prepare_name, launch_name = "uberdev_brainstorm_dispatch", "uberdev_brainstorm_launch_batch"
     elif relative.endswith("orchestrator/SKILL.md"):
-        functions = ("uberdev_design_dispatch", "uberdev_design_launch_batch")
+        prepare_name, launch_name = "uberdev_design_dispatch", "uberdev_design_launch_batch"
     elif relative.endswith("subagent-driven-dev/SKILL.md"):
-        functions = ("sdd_dispatch_prepared", "sdd_launch_prepared_batch")
+        prepare_name, launch_name = "sdd_dispatch_prepared", "sdd_launch_prepared_batch"
     elif relative.endswith("post-impl-review/SKILL.md"):
-        functions = ("post_review_fanout",)
+        prepare_name = launch_name = "post_review_fanout"
     else:
-        functions = ("review_child_fanout",)
-    for function in functions:
-        if re.search(rf"^[ \t]*{re.escape(function)}\(\)[ \t]*\{{", bash, re.MULTILINE) is None:
-            fail(f"{relative}: routed chain missing {function}")
-    if not _has_executable_helper(bash, "uberdev_create_child_handoff"):
+        prepare_name = launch_name = "review_child_fanout"
+    prepare = _without_nested_functions(_function_body(bash, prepare_name))
+    launch = _without_nested_functions(_function_body(bash, launch_name))
+    if not _has_executable_helper(prepare, "uberdev_create_child_handoff"):
         fail(f"{relative}: routed chain missing uberdev_create_child_handoff")
-    if not _has_executable_helper(bash, "uberdev_dispatch_child"):
+    if not _has_executable_helper(launch, "uberdev_dispatch_child"):
         fail(f"{relative}: routed chain missing uberdev_dispatch_child")
 
 
