@@ -645,10 +645,7 @@ _uberdev_semaphore_read_lease() {
   handle_kind="$(_uberdev_semaphore_classify_handle "$_UBERDEV_LEASE_BACKEND_HANDLE")" || return 1
   if [ -n "$_UBERDEV_LEASE_STATUS_PATH" ]; then
     _uberdev_semaphore_safe_text "$_UBERDEV_LEASE_STATUS_PATH" || return 1
-    case "$_UBERDEV_LEASE_STATUS_PATH" in
-      /*) ;;
-      *) return 1 ;;
-    esac
+    _uberdev_semaphore_is_absolute_path "$_UBERDEV_LEASE_STATUS_PATH" || return 1
   fi
   [ "$handle_kind" != opaque ] || [ -n "$_UBERDEV_LEASE_STATUS_PATH" ] || return 1
   return 0

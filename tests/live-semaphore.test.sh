@@ -98,6 +98,16 @@ if [ -z "$absolute_failures" ]; then
 else
   fail "one absolute-path predicate covers POSIX, Windows, relative, and drive-root paths" "$absolute_failures"
 fi
+windows_generation="$(printf 'c%.0s' {1..32})"
+windows_status_lease="$TMP/${windows_generation}$(printf 'd%.0s' {1..32}).lease"
+printf 'version=1\ngeneration=%s\nrun_id=windows-status-reread\nowner_pid=%s\nbackend_handle=\nstart_epoch=1\ntimeout_s=5\nstatus_path=C:\\state\\status.json\n' \
+  "$windows_generation" "$$" > "$windows_status_lease"
+if _uberdev_semaphore_read_lease "$windows_status_lease" \
+    && [ "$_UBERDEV_LEASE_STATUS_PATH" = 'C:\state\status.json' ]; then
+  pass "persisted native Windows status paths survive lease reread"
+else
+  fail "persisted native Windows status paths survive lease reread" "status=$_UBERDEV_LEASE_STATUS_PATH"
+fi
 capture uberdev_semaphore_acquire "$TMP/invalid-cap" repo codex 0 run 5
 [ "$CAPTURE_RC" -eq 2 ] && pass "zero cap is rejected" || fail "zero cap is rejected" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 capture uberdev_semaphore_acquire "$TMP/invalid-cap-text" repo codex nope run 5
