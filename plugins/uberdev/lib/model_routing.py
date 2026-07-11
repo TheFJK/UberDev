@@ -26,7 +26,7 @@ PUBLIC_API = {
 ROUTE_ERROR_FIELDS = ("code", "detail")
 
 _ROUTING_MODES = {"adaptive", "inherit"}
-_RISK_SCOPES = {"run", "subtask"}
+_RISK_SCOPES = {"run", "subtask", "none"}
 _CANONICAL_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
 _PROJECT_OVERRIDE_SOURCES = frozenset({"project-role", "project-workflow"})
 _SANDBOX_RANK = {"read-only": 0, "workspace-write": 1, "danger-full-access": 2}
@@ -502,8 +502,10 @@ def classify_minimum_route(policy: Mapping[str, Any], request: Mapping[str, Any]
         raise _error("invalid_task_tier", f"task tier {tier!r} is not declared")
     risk_scope = request.get("risk_scope", "run")
     if risk_scope not in _RISK_SCOPES:
-        raise _error("invalid_risk_scope", f"risk scope {risk_scope!r} must be run or subtask")
+        raise _error("invalid_risk_scope", f"risk scope {risk_scope!r} must be run, subtask, or none")
     risks = _canonical_risks(policy, request)
+    if risk_scope == "none" and risks:
+        raise _error("risk_scope_mismatch", "risk scope 'none' requires empty risk_signals")
     risk_escalation = _environment(request).get(
         "UBERDEV_MODEL_ROUTING_RISK_ESCALATION",
         _project_routing_config(request).get("risk_escalation", True),

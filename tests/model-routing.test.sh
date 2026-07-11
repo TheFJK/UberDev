@@ -258,6 +258,40 @@ expect_error("invalid_risk_signal", lambda: resolve(request(risk_signals=["issue
 # Role defaults, scoped risk floors, and forced-route safety.
 decision = resolve(request(role="code-simplifier", phase="review"))
 check((decision["logical_route"], decision["minimum_route"], decision["sandbox"]) == ("quality", "standard", "read-only"), "quality role policy failed")
+for risk_scope in ("run", "subtask"):
+    decision = resolve(request(role="code-simplifier", phase="review", risk_scope=risk_scope))
+    check(
+        (decision["logical_route"], decision["minimum_route"], decision["risk_scope"])
+        == ("quality", "standard", risk_scope),
+        f"existing {risk_scope} scope changed the normal role floor",
+    )
+none_scope = resolve(request(role="research-codebase", phase="research", risk_scope="none", risk_signals=[]))
+check(
+    (
+        none_scope["logical_route"],
+        none_scope["minimum_route"],
+        none_scope["risk_scope"],
+        none_scope["risk_signals"],
+    )
+    == ("standard", "economy", "none", []),
+    "risk_scope none did not preserve the normal role floor and decision contract",
+)
+none_scope_mismatch = expect_error(
+    "risk_scope_mismatch",
+    lambda: resolve(request(role="research-codebase", phase="research", risk_scope="none", risk_signals=["security"])),
+)
+check(
+    none_scope_mismatch.detail == "risk scope 'none' requires empty risk_signals",
+    "risk_scope none mismatch diagnostic drifted",
+)
+invalid_scope = expect_error(
+    "invalid_risk_scope",
+    lambda: resolve(request(role="code-simplifier", phase="review", risk_scope="edge")),
+)
+check(
+    invalid_scope.detail == "risk scope 'edge' must be run, subtask, or none",
+    "invalid risk scope diagnostic drifted",
+)
 decision = resolve(request(role="testers-monitor-primary", phase="monitor", risk_signals=["security"], risk_scope="subtask"))
 check((decision["logical_route"], decision["minimum_route"]) == ("economy", "economy"), "bookkeeping monitor must retain role floor")
 decision = resolve(request(role="spec-reviser", phase="design", risk_signals=["security"], risk_scope="subtask"))
