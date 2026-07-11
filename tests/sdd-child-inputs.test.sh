@@ -117,6 +117,22 @@ EXPECTED_EDGES="$(printf '%s\n' \
   exit 1
 }
 
+for numeric_case in '007|7' '00|0' '00042|42' '10|10'; do
+  attempt="${numeric_case%%|*}"
+  expected_attempt="${numeric_case#*|}"
+  sdd_validate_instance_dimensions 1 1 implement "$attempt"
+  normalized_json="$(sdd_inputs_for_task sdd.task.implement 45)"
+  python3 -I -B - "$normalized_json" "$expected_attempt" <<'PY'
+import json
+import sys
+
+actual = json.loads(sys.argv[1])["attempt"]
+expected = int(sys.argv[2])
+assert type(actual) is int
+assert actual == expected, (actual, expected)
+PY
+done
+
 grep -Fq 'task_inputs_json="$(uberdev_child_inputs_validate "$edge_id" "$task_inputs_json")" || return 2' "$SKILL"
 ! grep -Eq 'json\.dumps\(\{.*(task_path|spec_path|base_sha|commit_range_path)' "$TMP/runtime.sh"
 

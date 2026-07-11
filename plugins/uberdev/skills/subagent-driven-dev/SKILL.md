@@ -217,9 +217,14 @@ sdd_json_string() {
   python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "$1"
 }
 
+sdd_json_decimal_integer() {
+  [ "$#" -eq 1 ] || return 2
+  python3 -I -B -c 'import re,sys; raw=sys.argv[1]; re.fullmatch(r"[0-9]+",raw) or sys.exit(2); print(str(int(raw,10)),end="")' "$1"
+}
+
 sdd_inputs_for_task() {
   local edge_id="$1" task_id="$2"
-  local task_path_json working_dir_json failure_path_json spec_path_json
+  local task_path_json working_dir_json failure_path_json attempt_json spec_path_json
   local plan_path_json commit_sha_json report_path_json base_sha_json head_sha_json
   local commit_range_path_json acceptance_path_json summary_path_json
   : "$task_id" # controller selects the task-scoped artifact variables below
@@ -228,13 +233,14 @@ sdd_inputs_for_task() {
       task_path_json="$(sdd_json_string "$task_path")" || return 2
       working_dir_json="$(sdd_json_string "$SDD_WORKTREE")" || return 2
       failure_path_json="$(sdd_json_string "$failure_path")" || return 2
+      attempt_json="$(sdd_json_decimal_integer "$attempt")" || return 2
       uberdev_child_inputs_build sdd.task.implement \
         task_path "$task_path_json" \
         working_dir "$working_dir_json" \
         allowed_paths "$allowed_paths_json" \
         denied_paths "$denied_paths_json" \
         failure_path "$failure_path_json" \
-        attempt "$attempt"
+        attempt "$attempt_json"
       ;;
     sdd.task.spec_review)
       spec_path_json="$(sdd_json_string "$spec_path")" || return 2
