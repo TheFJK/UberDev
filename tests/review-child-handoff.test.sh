@@ -9,9 +9,12 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
 . "$LIB"
 mkdir -p "$TMP/run"
-request="$(jq -cn --arg run "$TMP/run" --arg repo "$ROOT" '{schema_version:1,run_dir:$run,run_id:"review-contract",repository_id:$repo,backend:"codex",workflow:"review-pr",phase:"review",role:"lead",task_tier:"medium",risk_signals:["security"],issue_or_pr:1,issue_num:1,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
+TEST_REPO="$TMP/repo"; mkdir -p "$TEST_REPO"; TEST_REPO="$(cd "$TEST_REPO" && pwd -P)"
+git -C "$TEST_REPO" init -q
+printf 'fixture\n' >"$TEST_REPO/README.md"
+request="$(jq -cn --arg run "$TMP/run" --arg repo "$TEST_REPO" '{schema_version:1,run_dir:$run,run_id:"review-contract",repository_id:$repo,backend:"codex",workflow:"review-pr",phase:"review",role:"lead",task_tier:"medium",risk_signals:["security"],issue_or_pr:1,issue_num:1,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
 decision="$(uberdev_agent_resolve_request "$request")"
-metadata="$(jq -cn --arg repo "$ROOT" '{run_id:"review-contract",repository_id:$repo,workflow:"review-pr",backend:"codex",issue_num:1,task_tier:"medium",risk_signals:["security"]}')"
+metadata="$(jq -cn --arg repo "$TEST_REPO" '{run_id:"review-contract",repository_id:$repo,workflow:"review-pr",backend:"codex",issue_num:1,task_tier:"medium",risk_signals:["security"]}')"
 context_out="$(uberdev_agent_context_create "$TMP/run" "$request" "$decision" \
   '{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}' \
   "$metadata" '2026-07-10T00:00:00Z')"
@@ -19,7 +22,17 @@ ctx="$(jq -r .context_file <<<"$context_out")"; sha="$(jq -r .context_sha256 <<<
 UBERDEV_RUN_CARRIER_JSON="$(jq -cn --arg ctx "$ctx" --arg sha "$sha" '{schema_version:1,run_id:"review-contract",workflow:"review-pr",issue_num:1,context_file:$ctx,context_sha256:$sha}')"
 export UBERDEV_RUN_CARRIER_JSON
 
-path="$ROOT/README.md"; dir="$ROOT"
+mkdir -p "$TMP/simplify-run"
+simplify_request="$(jq -cn --arg run "$TMP/simplify-run" --arg repo "$TEST_REPO" '{schema_version:1,run_dir:$run,run_id:"simplify-contract",repository_id:$repo,backend:"codex",workflow:"simplify",phase:"simplify",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:0,issue_num:0,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
+simplify_decision="$(uberdev_agent_resolve_request "$simplify_request")"
+simplify_metadata="$(jq -cn --arg repo "$TEST_REPO" '{run_id:"simplify-contract",repository_id:$repo,workflow:"simplify",backend:"codex",issue_num:0,task_tier:"medium",risk_signals:[]}')"
+simplify_context_out="$(uberdev_agent_context_create "$TMP/simplify-run" "$simplify_request" "$simplify_decision" \
+  '{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}' \
+  "$simplify_metadata" '2026-07-10T00:00:00Z')"
+simplify_ctx="$(jq -r .context_file <<<"$simplify_context_out")"; simplify_sha="$(jq -r .context_sha256 <<<"$simplify_context_out")"
+SIMPLIFY_CARRIER_JSON="$(jq -cn --arg ctx "$simplify_ctx" --arg sha "$simplify_sha" '{schema_version:1,run_id:"simplify-contract",workflow:"simplify",issue_num:0,context_file:$ctx,context_sha256:$sha}')"
+
+path="$TEST_REPO/README.md"; dir="$TEST_REPO"
 declare -a edges inputs risks
 for lens in correctness silent_failures types comments tests; do
   edges+=("review_pr.review.$lens")
@@ -85,8 +98,7 @@ for doc in "$REVIEW" "$SIMPLIFY"; do
   builder_line="$(grep -n 'review_child_record()' "$doc" | head -1 | cut -d: -f1)"
   [ "$setup_line" -lt "$builder_line" ]
 done
-# Execute each setup fence in isolation under `set -u`; inherited carriers avoid
-# external preparation while still proving source/init ordering and defaults.
+# Extract each production setup fence.
 for spec in "$REVIEW:review-pr" "$SIMPLIFY:simplify" "$POST:post-impl-review"; do
   doc="${spec%:*}"; name="${spec##*:}"; setup="$TMP/setup-$name.sh"
   awk -v marker="uberdev-executable setup=$name" '
@@ -95,12 +107,23 @@ for spec in "$REVIEW:review-pr" "$SIMPLIFY:simplify" "$POST:post-impl-review"; d
     active{print}
   ' "$doc" >"$setup"
   [ -s "$setup" ]
-  env -i HOME="$HOME" PATH="$PATH" CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" \
-    CLAUDE_PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$ROOT" \
-    RUN_ID="20260710-000000-abcdef0" PR_NUMBER=1 ARGUMENTS='' \
-    RESEARCH_DIR_ABS="$TMP/run/setup-$name" UBERDEV_RUN_CARRIER_JSON="$UBERDEV_RUN_CARRIER_JSON" \
-    bash "$setup"
 done
+
+# Review and simplify execute with inherited carriers. Post-review attaches to
+# the exact descriptor exported by its parent review setup.
+REVIEW_RUN_ID=20260710-000000-abcdef0
+REVIEW_DESCRIPTOR="$(env -i HOME="$HOME" PATH="$PATH" CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" \
+  CLAUDE_PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$TEST_REPO" \
+  RUN_ID="$REVIEW_RUN_ID" PR_NUMBER=1 ARGUMENTS='' UBERDEV_RUN_CARRIER_JSON="$UBERDEV_RUN_CARRIER_JSON" \
+  bash -c '. "$1"; printf "%s" "$UBERDEV_COMMAND_WORKSPACE_JSON"' _ "$TMP/setup-review-pr.sh")"
+env -i HOME="$HOME" PATH="$PATH" CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" \
+  CLAUDE_PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$TEST_REPO" \
+  RUN_ID=20260710-000001-abcdef0 PR_NUMBER=1 ARGUMENTS='' UBERDEV_RUN_CARRIER_JSON="$SIMPLIFY_CARRIER_JSON" \
+  bash "$TMP/setup-simplify.sh"
+env -i HOME="$HOME" PATH="$PATH" CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" \
+  CLAUDE_PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$TEST_REPO" \
+  RUN_ID="$REVIEW_RUN_ID" PR_NUMBER=1 ARGUMENTS='' UBERDEV_RUN_CARRIER_JSON="$UBERDEV_RUN_CARRIER_JSON" \
+  UBERDEV_COMMAND_WORKSPACE_JSON="$REVIEW_DESCRIPTOR" bash "$TMP/setup-post-impl-review.sh"
 
 # Setup is a fail-closed validation boundary. Neither a standalone carrier
 # preparation failure nor an invalid/spoofed inherited carrier may create the
@@ -110,25 +133,27 @@ mkdir -p "$FAKE_PLUGIN/lib"
 cat >"$FAKE_PLUGIN/lib/child-dispatch.sh" <<'SH'
 uberdev_prepare_run_carrier() { return 17; }
 SH
+setup_index=0
 for spec in "$REVIEW:review-pr" "$SIMPLIFY:simplify"; do
+  setup_index=$((setup_index + 1))
   doc="${spec%:*}"; name="${spec##*:}"; setup="$TMP/setup-$name.sh"
 
-  failed_target="$TMP/prepare-failed-$name"
+  failed_run="$(printf '20260710-0001%02d-abcdef0' "$setup_index")"
+  failed_target="$TEST_REPO/.uberdev/research/$failed_run"
   if env -i HOME="$HOME" PATH="$PATH" CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" \
-    CLAUDE_PLUGIN_ROOT="$FAKE_PLUGIN" WORKTREE_ROOT="$ROOT" \
-    RUN_ID="20260710-000000-abcdef0" PR_NUMBER=1 ARGUMENTS='' \
-    RESEARCH_DIR_ABS="$failed_target" bash "$setup" >/dev/null 2>&1; then
+    CLAUDE_PLUGIN_ROOT="$FAKE_PLUGIN" WORKTREE_ROOT="$TEST_REPO" \
+    RUN_ID="$failed_run" PR_NUMBER=1 ARGUMENTS='' bash "$setup" >/dev/null 2>&1; then
     echo "setup unexpectedly survived carrier preparation failure: $name" >&2
     exit 1
   fi
   [ ! -e "$failed_target" ]
 
-  invalid_target="$TMP/invalid-carrier-$name"
+  invalid_run="$(printf '20260710-0002%02d-abcdef0' "$setup_index")"
+  invalid_target="$TEST_REPO/.uberdev/research/$invalid_run"
   invalid_carrier="$(jq -c '.context_sha256 = ("0" * 64)' <<<"$UBERDEV_RUN_CARRIER_JSON")"
   if env -i HOME="$HOME" PATH="$PATH" CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" \
-    CLAUDE_PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$ROOT" \
-    RUN_ID="20260710-000000-abcdef0" PR_NUMBER=1 ARGUMENTS='' \
-    RESEARCH_DIR_ABS="$invalid_target" UBERDEV_RUN_CARRIER_JSON="$invalid_carrier" \
+    CLAUDE_PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$TEST_REPO" \
+    RUN_ID="$invalid_run" PR_NUMBER=1 ARGUMENTS='' UBERDEV_RUN_CARRIER_JSON="$invalid_carrier" \
     bash "$setup" >/dev/null 2>&1; then
     echo "setup unexpectedly accepted invalid inherited carrier: $name" >&2
     exit 1
@@ -136,11 +161,10 @@ for spec in "$REVIEW:review-pr" "$SIMPLIFY:simplify"; do
   [ ! -e "$invalid_target" ]
 
   spoof_root="$TMP/spoof-root-$name"; mkdir -p "$spoof_root"
-  spoof_target="$spoof_root/research"
+  spoof_target="$TEST_REPO/.uberdev/research/20260710-000030-abcdef0"
   if env -i HOME="$HOME" PATH="$PATH" CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" \
     CLAUDE_PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$spoof_root" \
-    RUN_ID="20260710-000000-abcdef0" PR_NUMBER=1 ARGUMENTS='' \
-    RESEARCH_DIR_ABS="$spoof_target" UBERDEV_RUN_CARRIER_JSON="$UBERDEV_RUN_CARRIER_JSON" \
+    RUN_ID="20260710-000030-abcdef0" PR_NUMBER=1 ARGUMENTS='' UBERDEV_RUN_CARRIER_JSON="$UBERDEV_RUN_CARRIER_JSON" \
     bash "$setup" >/dev/null 2>&1; then
     echo "setup unexpectedly accepted spoofed inherited repository: $name" >&2
     exit 1
@@ -149,8 +173,8 @@ for spec in "$REVIEW:review-pr" "$SIMPLIFY:simplify"; do
 
   escaped_target="$TMP/escaped-research-$name"
   if env -i HOME="$HOME" PATH="$PATH" CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" \
-    CLAUDE_PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$ROOT" \
-    RUN_ID="20260710-000000-abcdef0" PR_NUMBER=1 ARGUMENTS='' \
+    CLAUDE_PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$TEST_REPO" \
+    RUN_ID="20260710-000040-abcdef0" PR_NUMBER=1 ARGUMENTS='' \
     RESEARCH_DIR_ABS="$escaped_target" UBERDEV_RUN_CARRIER_JSON="$UBERDEV_RUN_CARRIER_JSON" \
     bash "$setup" >/dev/null 2>&1; then
     echo "setup unexpectedly accepted research path outside verified roots: $name" >&2

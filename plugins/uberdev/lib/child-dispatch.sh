@@ -63,6 +63,47 @@ print(json.dumps({"schema_version":1,**{k:r[k] for k in keys}},sort_keys=True,se
   printf '%s' "$carrier"
 }
 
+# Prepare one private command-owned workspace from an immutable routing carrier.
+# Markdown callers receive only runtime-derived repository/artifact paths.
+uberdev_command_workspace_prepare() {
+  local caller="${1:-}" subject="${2:-}" tier="${3:-}" risks="${4:-}" run_id="${5:-}" requested_root="${6:-}"
+  local parent_descriptor presets output helper context_file context_sha context_run
+  [ "$#" -eq 6 ] || { _uberdev_child_error 'workspace expects CALLER SUBJECT TIER RISK_JSON RUN_ID REQUESTED_ROOT'; return 2; }
+  case "$caller" in review-pr|simplify|post-impl-review) ;; *) _uberdev_child_error 'invalid workspace caller'; return 2 ;; esac
+  if [ -z "${UBERDEV_RUN_CARRIER_JSON:-}" ]; then
+    case "$caller" in
+      review-pr) uberdev_prepare_run_carrier review-pr "$subject" "$tier" "$risks" >/dev/null || return $? ;;
+      simplify) uberdev_prepare_run_carrier simplify 0 "$tier" "$risks" >/dev/null || return $? ;;
+      post-impl-review) _uberdev_child_error 'post-impl-review requires inherited carrier'; return 2 ;;
+    esac
+  fi
+  context_file="$(_uberdev_agent_json_get "$UBERDEV_RUN_CARRIER_JSON" context_file)" || return 2
+  context_sha="$(_uberdev_agent_json_get "$UBERDEV_RUN_CARRIER_JSON" context_sha256)" || return 2
+  context_run="$(dirname "$(dirname "$context_file")")" || return 2
+  uberdev_agent_context_validate "$context_file" "$context_sha" "$context_run" >/dev/null || return 2
+  parent_descriptor="${UBERDEV_COMMAND_WORKSPACE_JSON:-}"
+  [ "$caller" != post-impl-review ] || [ -n "$parent_descriptor" ] || { _uberdev_child_error 'post-impl-review requires parent workspace'; return 2; }
+  presets="$(python3 -I -B -c 'import json,sys; keys=("WORKTREE_ROOT","RESEARCH_DIR_ABS","DIFF_ARTIFACT_PATH","CRITERIA_PATH","COMMIT_RANGE_PATH","PHASE1_DISPOSITION_PATH","PHASE2_DISPOSITION_PATH","AGG_PATH"); print(json.dumps(dict(zip(keys,sys.argv[1:])),sort_keys=True,separators=(",",":")),end="")' \
+    "${WORKTREE_ROOT:-}" "${RESEARCH_DIR_ABS:-}" "${DIFF_ARTIFACT_PATH:-}" "${CRITERIA_PATH:-}" \
+    "${COMMIT_RANGE_PATH:-}" "${PHASE1_DISPOSITION_PATH:-}" "${PHASE2_DISPOSITION_PATH:-}" "${AGG_PATH:-}")" || return 2
+  helper="$_UBERDEV_CHILD_LIB_DIR/command-workspace.py"
+  [ -f "$helper" ] || { _uberdev_child_error 'command workspace helper missing'; return 2; }
+  output="$(python3 -I -B "$helper" --caller "$caller" --carrier-json "$UBERDEV_RUN_CARRIER_JSON" --run-id "$run_id" --requested-root "$requested_root" --parent-workspace-json "$parent_descriptor" --presets-json "$presets")" || return $?
+  UBERDEV_COMMAND_WORKSPACE_JSON="$output"
+  WORKTREE_ROOT="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["repository_root"],end="")' "$output")" || return 2
+  UBERDEV_CARRIER_RUN_DIR="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["carrier_run_dir"],end="")' "$output")" || return 2
+  RESEARCH_DIR_ABS="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["research_dir"],end="")' "$output")" || return 2
+  DIFF_ARTIFACT_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("diff",""),end="")' "$output")" || return 2
+  CRITERIA_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("criteria",""),end="")' "$output")" || return 2
+  COMMIT_RANGE_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("commit_range",""),end="")' "$output")" || return 2
+  PHASE1_DISPOSITION_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("phase1_disposition",""),end="")' "$output")" || return 2
+  PHASE2_DISPOSITION_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("phase2_disposition",""),end="")' "$output")" || return 2
+  AGG_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("aggregate",""),end="")' "$output")" || return 2
+  export UBERDEV_COMMAND_WORKSPACE_JSON WORKTREE_ROOT UBERDEV_CARRIER_RUN_DIR RESEARCH_DIR_ABS
+  export DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH
+  printf '%s' "$output"
+}
+
 # Create one manifest-derived immutable handoff. Call directly (not through
 # command substitution) when the exported path globals are needed; the JSON
 # return is also suitable for callers that prefer parsing a receipt.
