@@ -16,248 +16,346 @@ CANONICAL=(
 
 scan_bash_fences() {
   python3 -I -B - "$@" <<'PY'
-import os
 import re
-import shlex
 import sys
 
 fence_open = re.compile(r"^\s*```(?:bash|sh|zsh)(?:\s|$)")
 fence_close = re.compile(r"^\s*```\s*$")
-assignment = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-heredoc = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
-separators = {";", "&", "&&", "|", "||", "(", "{", "!"}
-command_starters = {"if", "elif", "while", "until", "then", "else", "do"}
-wrappers = {"command", "builtin", "exec", "env", "nohup", "sudo", "time"}
-forbidden_exact = {
-    "spawn_agent",
-    "uberdev_agent_dispatch",
-    "uberdev_dispatch_one",
-    "_uberdev_agent_dispatch_backend",
-    "claude",
-    "codex",
-}
+word_atom = re.compile(
+    r"(?<![A-Za-z0-9_])(?:spawn_agent|uberdev_agent_dispatch|"
+    r"uberdev_dispatch_one|_uberdev_agent_dispatch_backend|claude|codex)"
+    r"(?![A-Za-z0-9_])"
+)
+call_atom = re.compile(r"(?<![A-Za-z0-9_])(?:Task|Agent)[ \t]*\(")
+shell_boundaries = ";|&()<> \t\r\n"
 
 
-def tokens_for(line):
-    lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|(){}")
-    lexer.commenters = "#"
-    lexer.whitespace_split = True
-    return list(lexer)
+class PolicyError(Exception):
+    pass
 
 
-def strip_inline_comment(line):
-    single = False
-    double = False
-    index = 0
-    while index < len(line):
-        char = line[index]
-        if char == "\\":
+def line_at(text, index, base_line):
+    return base_line + text.count("\n", 0, index)
+
+
+def check_atoms(chars, protected, text, base_line):
+    semantic = "".join(chars)
+    for pattern in (word_atom, call_atom):
+        for match in pattern.finditer(semantic):
+            if not all(protected[match.start():match.end()]):
+                return match.group(0), line_at(semantic, match.start(), base_line)
+    return None
+
+
+def quoted_chunk(text, index, quote, ansi=False):
+    chars = []
+    index += 1
+    while index < len(text):
+        char = text[index]
+        if char == quote:
+            return index + 1, chars
+        if ansi and char == "\\":
+            if index + 1 >= len(text):
+                raise PolicyError("unclosed ANSI-C quote")
+            escaped = text[index + 1]
+            if escaped == "\n":
+                index += 2
+                continue
+            chars.append(escaped)
             index += 2
             continue
-        if char == "'" and not double:
-            single = not single
-        elif char == '"' and not single:
-            double = not double
-        elif (char == "#" and not single and not double
-              and (index == 0 or line[index - 1].isspace() or line[index - 1] in ";|&(){}")):
-            return line[:index]
+        chars.append(char)
         index += 1
-    return line
+    raise PolicyError("unclosed quote")
 
 
-def substitution_bodies(line):
-    bodies = []
-    index = 0
-    single = False
-    double = False
-    while index < len(line):
-        char = line[index]
+def backtick_body(text, index):
+    start = index + 1
+    index = start
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+            continue
+        if text[index] == "`":
+            return text[start:index], index + 1
+        index += 1
+    raise PolicyError("unclosed backtick substitution")
+
+
+def paren_body(text, index):
+    start = index + 2
+    index = start
+    depth = 1
+    state = "normal"
+    while index < len(text):
+        char = text[index]
+        if state == "single":
+            if char == "'":
+                state = "normal"
+            index += 1
+            continue
+        if state == "double":
+            if char == "\\":
+                index += 2
+                continue
+            if char == '"':
+                state = "normal"
+            index += 1
+            continue
         if char == "\\":
             index += 2
             continue
-        if char == "'" and not double:
-            single = not single
+        if char == "'":
+            state = "single"
             index += 1
             continue
-        if char == '"' and not single:
-            double = not double
-            index += 1
-            continue
-        if single:
+        if char == '"':
+            state = "double"
             index += 1
             continue
         if char == "`":
-            end = index + 1
-            while end < len(line):
-                if line[end] == "\\":
-                    end += 2
-                    continue
-                if line[end] == "`":
-                    bodies.append(line[index + 1:end])
-                    index = end + 1
-                    break
-                end += 1
-            else:
-                index += 1
+            _, index = backtick_body(text, index)
             continue
-        if char == "$" and line.startswith("$((", index):
-            depth = 2
-            end = index + 3
-            while end < len(line):
-                current = line[end]
-                if current == "\\":
-                    end += 2
-                    continue
-                if current == "(":
-                    depth += 1
-                elif current == ")":
-                    depth -= 1
-                    if depth == 0:
-                        arithmetic = line[index + 3:end - 1]
-                        bodies.extend(substitution_bodies(arithmetic))
-                        index = end + 1
-                        break
-                end += 1
-            else:
-                index += 3
+        if char == "#" and (index == start or text[index - 1] in shell_boundaries):
+            newline = text.find("\n", index)
+            index = len(text) if newline < 0 else newline + 1
             continue
-        if char == "$" and index + 1 < len(line) and line[index + 1] == "(":
-            depth = 1
-            end = index + 2
-            inner_single = False
-            inner_double = False
-            while end < len(line):
-                current = line[end]
-                if current == "\\":
-                    end += 2
-                    continue
-                if current == "'" and not inner_double:
-                    inner_single = not inner_single
-                elif current == '"' and not inner_single:
-                    inner_double = not inner_double
-                elif not inner_single and not inner_double:
-                    if current == "(":
-                        depth += 1
-                    elif current == ")":
-                        depth -= 1
-                        if depth == 0:
-                            bodies.append(line[index + 2:end])
-                            index = end + 1
-                            break
-                end += 1
-            else:
-                index += 2
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start:index], index + 1
+        index += 1
+    raise PolicyError("unclosed dollar substitution")
+
+
+def heredoc_word(text, index):
+    chars = []
+    quoted = False
+    while index < len(text) and text[index] not in shell_boundaries:
+        char = text[index]
+        if char == "\\":
+            quoted = True
+            if index + 1 >= len(text) or text[index + 1] == "\n":
+                raise PolicyError("malformed heredoc delimiter")
+            chars.append(text[index + 1])
+            index += 2
+            continue
+        if char in "'\"":
+            quoted = True
+            index, chunk = quoted_chunk(text, index, char)
+            chars.extend(chunk)
+            continue
+        if text.startswith("$'", index):
+            quoted = True
+            index, chunk = quoted_chunk(text, index + 1, "'", ansi=True)
+            chars.extend(chunk)
+            continue
+        chars.append(char)
+        index += 1
+    if not chars:
+        raise PolicyError("missing heredoc delimiter")
+    return "".join(chars), quoted, index
+
+
+def scan_heredoc_expansions(body, base_line):
+    index = 0
+    while index < len(body):
+        if body[index] == "\\":
+            index += 2
+            continue
+        if body.startswith("$(", index):
+            nested, end = paren_body(body, index)
+            hit = scan_shell(nested, line_at(body, index, base_line))
+            if hit is not None:
+                return hit
+            index = end
+            continue
+        if body[index] == "`":
+            nested, end = backtick_body(body, index)
+            hit = scan_shell(nested, line_at(body, index, base_line))
+            if hit is not None:
+                return hit
+            index = end
             continue
         index += 1
-    return bodies
+    return None
 
 
-def forbidden_command(line, case_stack=()):
-    line = strip_inline_comment(line)
-    for body in substitution_bodies(line):
-        hit, _ = forbidden_command(body, ())
-        if hit is not None:
-            return hit, case_stack
-    try:
-        tokens = tokens_for(line)
-    except ValueError:
-        return None, case_stack
-    stack = list(case_stack)
-    expect_command = not stack or stack[-1] != "pattern"
-    wrapper_mode = False
-    for index, token in enumerate(tokens):
-        state = stack[-1] if stack else None
-        if state == "header":
-            if token == "in":
-                stack[-1] = "pattern"
+def scan_shell(text, base_line):
+    chars = []
+    protected = []
+    pending_heredocs = []
+    at_boundary = True
+    index = 0
+
+    def append(value, is_protected):
+        nonlocal at_boundary
+        chars.extend(value)
+        protected.extend([is_protected] * len(value))
+        if value:
+            at_boundary = value[-1] in shell_boundaries
+
+    while index < len(text):
+        char = text[index]
+        if char == "\n":
+            append(char, False)
+            index += 1
+            while pending_heredocs:
+                delimiter, strip_tabs, quoted = pending_heredocs.pop(0)
+                body_start = index
+                body_parts = []
+                while index < len(text):
+                    end = text.find("\n", index)
+                    if end < 0:
+                        raw_line = text[index:]
+                        next_index = len(text)
+                    else:
+                        raw_line = text[index:end]
+                        next_index = end + 1
+                    candidate = raw_line.lstrip("\t") if strip_tabs else raw_line
+                    if candidate == delimiter:
+                        index = next_index
+                        break
+                    body_parts.append(text[index:next_index])
+                    index = next_index
+                else:
+                    raise PolicyError("unclosed heredoc")
+                if index == len(text) and candidate != delimiter:
+                    raise PolicyError("unclosed heredoc")
+                if not quoted:
+                    hit = scan_heredoc_expansions("".join(body_parts), line_at(text, body_start, base_line))
+                    if hit is not None:
+                        return hit
             continue
-        if state == "pattern":
-            if token == "esac" and not (index + 1 < len(tokens) and tokens[index + 1] == ")"):
-                stack.pop()
-                expect_command = False
-                wrapper_mode = False
+        if char == "#" and at_boundary:
+            end = text.find("\n", index)
+            if end < 0:
+                index = len(text)
+            else:
+                append("\n", False)
+                index = end + 1
+            continue
+        if char == "\\":
+            if index + 1 >= len(text):
+                raise PolicyError("dangling escape")
+            if text[index + 1] == "\n":
+                index += 2
                 continue
-            if token == ")":
-                stack[-1] = "body"
-                expect_command = True
+            append(text[index + 1], False)
+            at_boundary = False
+            index += 2
             continue
-        if state == "body":
-            if token == "esac" and expect_command:
-                stack.pop()
-                expect_command = False
-                wrapper_mode = False
-                continue
-            if token in {";;", ";&", ";;&"}:
-                stack[-1] = "pattern"
-                expect_command = False
-                continue
-        if token in separators or token in command_starters:
-            expect_command = True
-            wrapper_mode = False
+        if char == "'":
+            index, chunk = quoted_chunk(text, index, "'")
+            append(chunk, True)
+            at_boundary = False
             continue
-        if not expect_command:
+        if text.startswith("$'", index):
+            index, chunk = quoted_chunk(text, index + 1, "'", ansi=True)
+            append(chunk, True)
+            at_boundary = False
             continue
-        if assignment.fullmatch(token) or assignment.match(token):
+        if char == '"':
+            index += 1
+            while index < len(text) and text[index] != '"':
+                if text[index] == "\\":
+                    if index + 1 >= len(text):
+                        raise PolicyError("unclosed double quote")
+                    if text[index + 1] == "\n":
+                        index += 2
+                    else:
+                        append(text[index + 1], True)
+                        index += 2
+                    continue
+                if text.startswith("$(", index):
+                    nested, end = paren_body(text, index)
+                    hit = scan_shell(nested, line_at(text, index, base_line))
+                    if hit is not None:
+                        return hit
+                    append("\0", True)
+                    index = end
+                    continue
+                if text[index] == "`":
+                    nested, end = backtick_body(text, index)
+                    hit = scan_shell(nested, line_at(text, index, base_line))
+                    if hit is not None:
+                        return hit
+                    append("\0", True)
+                    index = end
+                    continue
+                append(text[index], True)
+                index += 1
+            if index >= len(text):
+                raise PolicyError("unclosed double quote")
+            index += 1
+            at_boundary = False
             continue
-        if wrapper_mode and token.startswith("-"):
+        if text.startswith("$(", index):
+            nested, end = paren_body(text, index)
+            hit = scan_shell(nested, line_at(text, index, base_line))
+            if hit is not None:
+                return hit
+            append("\0", False)
+            index = end
             continue
-        name = os.path.basename(token)
-        if name in forbidden_exact:
-            return name, tuple(stack)
-        if name in {"Task", "Agent"} and index + 1 < len(tokens) and tokens[index + 1] == "(":
-            return name + "(", tuple(stack)
-        if name == "case":
-            stack.append("header")
-            expect_command = False
-            wrapper_mode = False
+        if char == "`":
+            nested, end = backtick_body(text, index)
+            hit = scan_shell(nested, line_at(text, index, base_line))
+            if hit is not None:
+                return hit
+            append("\0", False)
+            index = end
             continue
-        if name in wrappers:
-            wrapper_mode = True
+        if text.startswith("<<<", index):
+            append("<<<", False)
+            index += 3
             continue
-        expect_command = False
-        wrapper_mode = False
-    return None, tuple(stack)
+        if text.startswith("<<", index):
+            strip_tabs = text.startswith("<<-", index)
+            index += 3 if strip_tabs else 2
+            while index < len(text) and text[index] in " \t":
+                index += 1
+            delimiter, quoted, index = heredoc_word(text, index)
+            pending_heredocs.append((delimiter, strip_tabs, quoted))
+            append(" ", False)
+            continue
+        append(char, False)
+        index += 1
+
+    if pending_heredocs:
+        raise PolicyError("unclosed heredoc")
+    return check_atoms(chars, protected, text, base_line)
 
 
 violations = []
-for raw_path in sys.argv[1:]:
-    path = os.path.abspath(raw_path)
+for path in sys.argv[1:]:
     in_bash = False
-    heredoc_end = None
-    case_stack = ()
-    logical = ""
-    logical_line = 0
+    fence_lines = []
+    fence_line = 0
     with open(path, encoding="utf-8") as stream:
         for line_number, raw in enumerate(stream, 1):
             line = raw.rstrip("\n")
             if not in_bash:
                 if fence_open.match(line):
                     in_bash = True
-                continue
-            if heredoc_end is not None:
-                if line.strip("\t") == heredoc_end:
-                    heredoc_end = None
+                    fence_line = line_number + 1
+                    fence_lines = []
                 continue
             if fence_close.match(line):
+                try:
+                    hit = scan_shell("".join(fence_lines), fence_line)
+                    if hit is not None:
+                        atom, hit_line = hit
+                        violations.append(f"{path}:{hit_line}: routed provider bypass command: {atom}")
+                except PolicyError as error:
+                    violations.append(f"{path}:{fence_line}: routed provider bypass command: malformed shell ({error})")
                 in_bash = False
-                logical = ""
-                case_stack = ()
                 continue
-            if not logical and (not line.strip() or line.lstrip().startswith("#")):
-                continue
-            if not logical:
-                logical_line = line_number
-            if line.rstrip().endswith("\\"):
-                logical += line.rstrip()[:-1] + " "
-                continue
-            logical += line
-            hit, case_stack = forbidden_command(logical, case_stack)
-            if hit is not None:
-                violations.append(f"{path}:{logical_line}: routed provider bypass command: {hit}")
-            match = heredoc.search(logical)
-            if match:
-                heredoc_end = match.group(2)
-            logical = ""
+            fence_lines.append(raw)
+    if in_bash:
+        violations.append(f"{path}:{fence_line}: routed provider bypass command: unclosed shell fence")
 
 if violations:
     print("\n".join(violations), file=sys.stderr)
@@ -274,6 +372,18 @@ assert_rejected() {
   printf '```bash\n%s\n```\n' "$command_line" >"$fixture"
   if scan_bash_fences "$fixture" >"$TMP/$label.stdout" 2>"$TMP/$label.stderr"; then
     echo "scanner accepted forbidden command: $label" >&2
+    MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
+    return 0
+  fi
+  grep -q 'routed provider bypass command' "$TMP/$label.stderr"
+}
+
+assert_document_rejected() {
+  local label="$1" document="$2" fixture
+  fixture="$TMP/$label.md"
+  printf '%s' "$document" >"$fixture"
+  if scan_bash_fences "$fixture" >"$TMP/$label.stdout" 2>"$TMP/$label.stderr"; then
+    echo "scanner accepted malformed document: $label" >&2
     MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
     return 0
   fi
@@ -304,6 +414,35 @@ assert_rejected backtick-codex 'result=`codex exec review`'
 assert_rejected dollar-substitution-claude 'result="$(claude --print review)"'
 assert_rejected command-inside-arithmetic 'value=$((1 + $(codex exec review)))'
 assert_rejected hash-inside-word 'printf foo#$(claude --print review)'
+assert_rejected assignment-atom 'provider_name=codex'
+assert_rejected argument-atom 'printf "%s\n" codex'
+assert_rejected case-selector-atom 'case codex in other) : ;; esac'
+assert_rejected case-pattern-atom 'case "$provider_name" in codex) : ;; esac'
+assert_rejected arithmetic-atom 'value=$((codex + 1))'
+assert_rejected comparison-atom '[[ "$provider" == codex ]]'
+assert_rejected backend-option-atom 'route --backend=codex review'
+assert_rejected path-atom 'route /opt/codex/bin review'
+assert_rejected attached-hash-atom 'printf foo#codex'
+assert_rejected quoted-space-attached-hash 'printf "x "#codex'
+assert_rejected escaped-space-attached-hash 'printf foo\ #codex'
+assert_rejected brace-attached-hash 'printf foo{#codex'
+assert_rejected bracket-attached-hash 'printf foo[#codex'
+assert_rejected continued-atom $'co\\\ndex exec review'
+assert_rejected mixed-double-quote 'co"dex" exec review'
+assert_rejected mixed-single-quote "'co'dex exec review"
+assert_rejected escaped-spelling 'co\dex exec review'
+assert_rejected nested-substitution 'result="$(printf "%s" "$(codex exec review)")"'
+assert_rejected double-quoted-backtick 'result="prefix `claude --print review` suffix"'
+assert_rejected unquoted-heredoc-substitution $'cat <<EOF\n$(codex exec review)\nEOF'
+assert_rejected unquoted-heredoc-backtick $'cat <<EOF\n`claude --print review`\nEOF'
+assert_rejected multiple-heredoc-second $'cat <<ONE <<-TWO\nsafe\nONE\n\t$(spawn_agent --task review)\n\tTWO'
+assert_rejected unclosed-single-quote "printf '%s codex"
+assert_rejected unclosed-double-quote 'printf "%s codex'
+assert_rejected unclosed-ansi-c-quote "printf $'codex"
+assert_rejected unclosed-dollar-substitution 'result=$(printf ok'
+assert_rejected unclosed-backtick 'result=`printf ok'
+assert_rejected unclosed-heredoc $'cat <<EOF\nsafe'
+assert_document_rejected unclosed-fence $'```bash\nprintf ok\n'
 [ "$MUTATION_FAILURES" -eq 0 ]
 
 # Prose, comment-only mentions, quoted data, heredoc payloads, and the two
@@ -319,16 +458,21 @@ printf '%s\n' 'spawn_agent Task( Agent( uberdev_agent_dispatch uberdev_dispatch_
 printf '%s\n' 'literal `codex exec review` and $(claude --print review) data'
 printf ok # $(codex exec review)
 printf ok # `claude --print review`
-value=$((codex + 1))
-case "$provider_name" in codex) printf ok ;; esac
 case "$provider_name" in other) printf '%s\n' esac ;; esac
-provider_name=codex
+printf '%s\n' "codex"
+printf '%s\n' 'claude'
+printf '%s\n' $'spawn_agent Task( Agent('
+printf '%s\n' "fully quoted codex and claude data"
 uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks"
 uberdev_dispatch_child "$edge" "$handoff" "$result" "$status"
 python3 - <<'PY'
 codex exec is heredoc data, not a shell command
 spawn_agent is also heredoc data
+$(claude --print review) remains inert in a quoted heredoc
 PY
+cat <<INNER
+codex and spawn_agent are inert heredoc text without substitutions
+INNER
 ```
 EOF
 scan_bash_fences "$TMP/clean.md"
