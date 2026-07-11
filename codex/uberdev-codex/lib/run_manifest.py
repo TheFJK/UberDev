@@ -1282,7 +1282,8 @@ def _atomic_append(
             original_length = locked.st_size
         else:
             original_length = opened.st_size
-        os.fchmod(descriptor, 0o600)
+        if os.name != "nt":
+            os.fchmod(descriptor, 0o600)
         try:
             written = os.write(descriptor, payload)
         except OSError as exc:

@@ -344,7 +344,10 @@ finally:
     builtins.__import__ = real_import
 
 original_os_name = module.os.name
+original_fchmod = getattr(module.os, "fchmod", None)
 module.os.name = "nt"
+if original_fchmod is not None:
+    del module.os.fchmod
 try:
     result = module.append_event(manifest_path, {
         "schema_version": 1,
@@ -360,6 +363,8 @@ try:
     assert rc == 0 and verified["events"] == 1, (rc, verified)
 finally:
     module.os.name = original_os_name
+    if original_fchmod is not None:
+        module.os.fchmod = original_fchmod
 print("windows-lock-fallback-ok")
 PY
 if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = 'windows-lock-fallback-ok' ]; then
