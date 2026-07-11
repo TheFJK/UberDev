@@ -312,6 +312,62 @@ else
   fail "concurrent appends remain 24 complete JSONL records" "append_rc=$atomic_rc verify_rc=$CAPTURE_RC lines=$atomic_lines out=$CAPTURE_OUT"
 fi
 
+capture python3 - "$MANIFEST" "$TMP/windows-lock/events.jsonl" <<'PY'
+import builtins
+import importlib.util
+import sys
+import types
+
+module_path, manifest_path = sys.argv[1:]
+calls = []
+fake_msvcrt = types.ModuleType("msvcrt")
+fake_msvcrt.LK_NBLCK = 1
+fake_msvcrt.LK_UNLCK = 2
+fake_msvcrt.locking = lambda fd, mode, count: calls.append((fd, mode, count))
+real_import = builtins.__import__
+
+def windows_import(name, *args, **kwargs):
+    if name == "fcntl":
+        raise ImportError("native Windows has no fcntl")
+    if name == "msvcrt":
+        return fake_msvcrt
+    return real_import(name, *args, **kwargs)
+
+builtins.__import__ = windows_import
+try:
+    spec = importlib.util.spec_from_file_location("run_manifest_windows_lock", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+finally:
+    builtins.__import__ = real_import
+
+original_os_name = module.os.name
+module.os.name = "nt"
+try:
+    result = module.append_event(manifest_path, {
+        "schema_version": 1,
+        "event": "route_decided",
+        "timestamp": "2026-07-10T00:05:15Z",
+        "run_id": "run-windows-lock",
+        "backend": "codex",
+    })
+    assert result["status"] == "appended", result
+    assert [mode for _, mode, _ in calls] == [fake_msvcrt.LK_NBLCK, fake_msvcrt.LK_UNLCK], calls
+    assert all(count == 1 for _, _, count in calls), calls
+    verified, rc = module.verify_manifest(manifest_path, strict=False)
+    assert rc == 0 and verified["events"] == 1, (rc, verified)
+finally:
+    module.os.name = original_os_name
+print("windows-lock-fallback-ok")
+PY
+if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = 'windows-lock-fallback-ok' ]; then
+  pass "manifest imports and appends with the Windows msvcrt lock backend"
+else
+  fail "manifest imports and appends with the Windows msvcrt lock backend" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+
 capture python3 - "$MANIFEST" "$TMP/open-flags/events.jsonl" <<'PY'
 import importlib.util
 import json

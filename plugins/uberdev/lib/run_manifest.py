@@ -17,17 +17,28 @@ made private before use, and direct symlink targets are rejected.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import datetime as dt
+import errno
 import json
 import os
 import re
 import secrets
 import stat
 import sys
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Iterable
+
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - exercised by native Windows CI
+    _fcntl = None
+
+try:
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - unavailable on POSIX
+    _msvcrt = None
 
 
 SCHEMA_VERSION = 1
@@ -708,13 +719,14 @@ def _prepare_private_path(path: str) -> str:
         raise ManifestRejected("manifest_parent_must_be_real_directory")
     if hasattr(os, "geteuid") and parent_stat.st_uid != os.geteuid():
         raise ManifestRejected("manifest_parent_not_owned_by_user")
-    parent_descriptor = _open_directory_fd(parent)
-    try:
-        os.fchmod(parent_descriptor, 0o700)
-    except OSError as exc:
-        raise ManifestRuntimeError(f"manifest_parent_chmod_failed: {exc.errno}") from exc
-    finally:
-        os.close(parent_descriptor)
+    if os.name != "nt":
+        parent_descriptor = _open_directory_fd(parent)
+        try:
+            os.fchmod(parent_descriptor, 0o700)
+        except OSError as exc:
+            raise ManifestRuntimeError(f"manifest_parent_chmod_failed: {exc.errno}") from exc
+        finally:
+            os.close(parent_descriptor)
 
     if os.path.lexists(absolute):
         try:
@@ -732,8 +744,9 @@ def _prepare_private_path(path: str) -> str:
 
 def _reject_symlinked_ancestors(path: str) -> None:
     absolute = os.path.abspath(path)
-    current = os.path.sep
-    for component in absolute.split(os.path.sep)[1:]:
+    drive, tail = os.path.splitdrive(absolute)
+    current = drive + os.path.sep if drive else os.path.sep
+    for component in tail.split(os.path.sep):
         if component in ("", "."):
             continue
         if component == "..":
@@ -821,7 +834,32 @@ def _open_directory_fd(path: str) -> int:
 def _secure_open_regular(path: str, flags: int, mode: int = 0o600) -> int:
     """Open a regular file relative to a no-follow parent directory handle."""
 
-    parent_descriptor = _open_directory_fd(os.path.dirname(os.path.abspath(path)))
+    absolute = os.path.abspath(path)
+    if os.name == "nt":
+        # Native Windows has no dir_fd/O_NOFOLLOW support.  Reject reparse-point
+        # ancestors before opening, then bind the opened handle to the lstat
+        # identity.  The containing user temp/state directory supplies the ACL.
+        _reject_symlinked_ancestors(os.path.dirname(absolute))
+        try:
+            descriptor = os.open(
+                absolute,
+                flags | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0),
+                mode,
+            )
+        except OSError as exc:
+            raise ManifestRuntimeError(f"manifest_open_failed: {exc.errno}") from exc
+        try:
+            current = os.lstat(absolute)
+            opened = os.fstat(descriptor)
+            if (stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(opened.st_mode)
+                    or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)):
+                raise ManifestRejected("manifest_not_regular_file")
+            return descriptor
+        except Exception:
+            os.close(descriptor)
+            raise
+
+    parent_descriptor = _open_directory_fd(os.path.dirname(absolute))
     try:
         descriptor = os.open(
             os.path.basename(path),
@@ -840,18 +878,48 @@ def _secure_open_regular(path: str, flags: int, mode: int = 0o600) -> int:
     return descriptor
 
 
+def _lock_manifest_descriptor(descriptor: int) -> None:
+    if _fcntl is not None:
+        _fcntl.flock(descriptor, _fcntl.LOCK_EX)
+        return
+    if _msvcrt is None:
+        raise ManifestRuntimeError("manifest_lock_unavailable")
+    while True:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        try:
+            _msvcrt.locking(descriptor, _msvcrt.LK_NBLCK, 1)
+            return
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                raise ManifestRuntimeError(
+                    f"manifest_lock_failed: {exc.errno}"
+                ) from exc
+            time.sleep(0.05)
+
+
+def _unlock_manifest_descriptor(descriptor: int) -> None:
+    if _fcntl is not None:
+        _fcntl.flock(descriptor, _fcntl.LOCK_UN)
+        return
+    if _msvcrt is None:
+        return
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    _msvcrt.locking(descriptor, _msvcrt.LK_UNLCK, 1)
+
+
 @contextmanager
 def _locked_manifest(path: str) -> Iterable[int]:
     """Hold an advisory inode lock while lifecycle state is checked and changed."""
 
     descriptor = _secure_open_regular(path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        os.fchmod(descriptor, 0o600)
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        if os.name != "nt":
+            os.fchmod(descriptor, 0o600)
+        _lock_manifest_descriptor(descriptor)
         yield descriptor
     finally:
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            _unlock_manifest_descriptor(descriptor)
         finally:
             os.close(descriptor)
 
@@ -1102,7 +1170,8 @@ def secure_write_lease(path: str, payload: bytes) -> None:
             0o600,
             dir_fd=parent_descriptor,
         )
-        os.fchmod(descriptor, 0o600)
+        if os.name != "nt":
+            os.fchmod(descriptor, 0o600)
         if os.write(descriptor, payload) != len(payload):
             raise ManifestRuntimeError("lease_short_write")
         os.close(descriptor)
