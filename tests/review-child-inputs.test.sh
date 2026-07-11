@@ -1,18 +1,371 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-POST="$ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md"
-REVIEW="$ROOT/plugins/uberdev/commands/review-pr.md"
+ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+POST="${REVIEW_POST_UNDER_TEST:-$ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md}"
+REVIEW="${REVIEW_PR_UNDER_TEST:-$ROOT/plugins/uberdev/commands/review-pr.md}"
 LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
+POST_SOURCE='plugins/uberdev/skills/post-impl-review/SKILL.md'
+REVIEW_SOURCE='plugins/uberdev/commands/review-pr.md'
+TMP="$(mktemp -d "$ROOT/tests/_fixtures/review-child-inputs.XXXXXX")"
+RUN_SUFFIX="$(python3 -I -B -c 'import secrets; print(secrets.token_hex(6),end="")')"
+RUN_ID="20260711-000000-$RUN_SUFFIX"
 
-python3 -I -B - "$POST" "$REVIEW" <<'PY'
+cleanup() {
+  rm -rf "$TMP"
+  case "$RUN_ID" in
+    20260711-000000-[0-9a-f]*) rm -rf "$ROOT/.uberdev/research/$RUN_ID" ;;
+  esac
+}
+trap cleanup EXIT
+
+RECEIPT_DIR="$TMP/receipts"
+RECEIPTS="$RECEIPT_DIR/review.jsonl"
+PROVIDER_CALLS="$TMP/provider-calls"
+mkdir -p "$RECEIPT_DIR"
+chmod 700 "$RECEIPT_DIR"
+: >"$RECEIPTS"
+: >"$PROVIDER_CALLS"
+chmod 600 "$RECEIPTS" "$PROVIDER_CALLS"
+export UBERDEV_CHILD_TEST_MODE=1
+export UBERDEV_CHILD_TEST_SOURCE="$REVIEW_SOURCE"
+export UBERDEV_CHILD_TEST_RECEIPT_FILE="$RECEIPTS"
+
+# Extract executable production definitions and callsites. The test never
+# reconstructs a child input object or calls a builder on behalf of production.
+python3 -I -B - "$POST" "$REVIEW" "$TMP" <<'PY'
 import re
 import sys
 from pathlib import Path
 
-post = Path(sys.argv[1]).read_text(encoding="utf-8")
-review = Path(sys.argv[2]).read_text(encoding="utf-8")
+post_path, review_path, out_dir = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+post = post_path.read_text(encoding="utf-8")
+review = review_path.read_text(encoding="utf-8")
+fence = re.escape(chr(96) * 3)
+
+def bash_fences(text):
+    return [
+        ((match.group(1) or "").strip(), match.group(2))
+        for match in re.finditer(
+            rf"^[ \t]*{fence}bash(?: ([^\n]*))?\n(.*?)\n[ \t]*{fence}$",
+            text,
+            re.MULTILINE | re.DOTALL,
+        )
+    ]
+
+def executable(text, header):
+    expected = "uberdev-executable" + (f" {header}" if header else "")
+    found = [body for metadata, body in bash_fences(text) if metadata == expected]
+    if len(found) != 1:
+        raise SystemExit(f"expected one executable fence {expected!r}, found {len(found)}")
+    return found[0]
+
+def containing(text, token):
+    found = [body for _metadata, body in bash_fences(text) if token in body]
+    if len(found) != 1:
+        raise SystemExit(f"expected one bash fence containing {token!r}, found {len(found)}")
+    return found[0]
+
+def write(name, body):
+    path = out_dir / name
+    path.write_text(body.rstrip() + "\n", encoding="utf-8")
+
+post_setup = executable(post, "setup=post-impl-review")
+marker = "REVIEW_EDGES=("
+if post_setup.count(marker) != 1:
+    raise SystemExit("post-review executable roster split marker drifted")
+prefix, roster = post_setup.split(marker, 1)
+write("post-prefix.sh", prefix)
+write("post-roster.sh", marker + roster)
+write("post-retry.sh", executable(post, ""))
+write("review-setup.sh", executable(review, "setup=review-pr"))
+
+builder_region = re.search(
+    r"<!-- BEGIN review-child-builder-v1 -->\s*(.*?)\s*<!-- END review-child-builder-v1 -->",
+    review,
+    re.DOTALL,
+)
+if builder_region is None:
+    raise SystemExit("review child builder marker block missing")
+builder_fences = bash_fences(builder_region.group(1))
+if len(builder_fences) != 1:
+    raise SystemExit("review child builder must contain one canonical bash fence")
+write("review-builder.sh", builder_fences[0][1])
+
+write("review-phase1.sh", containing(review, 'PHASE1_INPUTS="$(uberdev_child_inputs_build review_pr.fix.phase1'))
+write("review-simplify.sh", containing(review, 'SIMPLIFY_RECORDS="$RESEARCH_DIR_ABS/simplify.records"'))
+write("review-phase2.sh", containing(review, 'PHASE2_INPUTS="$(uberdev_child_inputs_build review_pr.fix.phase2'))
+write("review-defer.sh", containing(review, 'DEFER_INPUTS="$(uberdev_child_inputs_build review_pr.defer.findings'))
+write("review-classify.sh", containing(review, 'CI_CLASSIFY_INPUTS="$(uberdev_child_inputs_build review_pr.ci.classify'))
+write("review-defer-refusal.sh", containing(review, 'CI_DEFER_INPUTS="$(uberdev_child_inputs_build review_pr.ci.defer_refusal'))
+write("review-conflict.sh", containing(review, 'CONFLICT_RECORDS="$RESEARCH_DIR_ABS/conflicts.records"'))
+
+route = containing(review, 'CI_FIX_INPUTS="$(uberdev_child_inputs_build review_pr.ci.fix_code')
+
+def assignment(block, variable):
+    lines = block.splitlines()
+    starts = [
+        index for index, line in enumerate(lines)
+        if line.strip().startswith(f'{variable}="$(uberdev_child_inputs_build ')
+    ]
+    if len(starts) != 1:
+        raise SystemExit(f"{variable} constructor occurrence drifted")
+    selected = []
+    for line in lines[starts[0]:]:
+        selected.append(line.strip())
+        if line.rstrip().endswith(')"'):
+            break
+    else:
+        raise SystemExit(f"{variable} constructor terminator missing")
+    return "\n".join(selected)
+
+fix_dispatch = re.search(
+    r"^\s*code_bug \| env_drift\)\s*(review_child_single review_pr\.ci\.fix_code .*?)\s*;;$",
+    route,
+    re.MULTILINE,
+)
+rebase_dispatch = re.search(
+    r"^\s*stale_base\)\s*(review_child_single review_pr\.ci\.rebase .*?)\s*;;$",
+    route,
+    re.MULTILINE,
+)
+if fix_dispatch is None or rebase_dispatch is None:
+    raise SystemExit("review CI route dispatch arms drifted")
+write(
+    "review-ci-builders.sh",
+    assignment(route, "CI_FIX_INPUTS") + "\n" + assignment(route, "CI_REBASE_INPUTS"),
+)
+write("review-ci-fix-dispatch.sh", fix_dispatch.group(1))
+write("review-ci-rebase-dispatch.sh", rebase_dispatch.group(1))
+PY
+
+for extracted in "$TMP"/*.sh; do
+  bash -n "$extracted"
+done
+
+# Build one real immutable review-pr carrier. The command setup extracted below
+# then allocates its canonical workspace and the post-review child setup reuses
+# that exact parent descriptor.
+. "$LIB"
+CARRIER_RUN="$TMP/runtime"
+ROOT_REQUEST_JSON="$(python3 -I -B - "$CARRIER_RUN" "$ROOT" <<'PY'
+import json
+import sys
+
+run, repository = sys.argv[1:]
+print(json.dumps({
+    "schema_version": 1,
+    "run_dir": run,
+    "run_id": "review-receipt-root",
+    "repository_id": repository,
+    "backend": "codex",
+    "workflow": "review-pr",
+    "phase": "lead",
+    "role": "lead",
+    "task_tier": "medium",
+    "risk_signals": ["security"],
+    "issue_or_pr": 73,
+    "issue_num": 73,
+    "capacity": 20,
+    "timeout_s": 20,
+    "routing_mode": "adaptive",
+}, sort_keys=True, separators=(",", ":")))
+PY
+)"
+mkdir -p "$CARRIER_RUN"
+ROOT_DECISION_JSON="$(uberdev_agent_resolve_request "$ROOT_REQUEST_JSON")"
+ROOT_METADATA_JSON="$(python3 -I -B - "$ROOT" <<'PY'
+import json
+import sys
+
+print(json.dumps({
+    "run_id": "review-receipt-root",
+    "repository_id": sys.argv[1],
+    "workflow": "review-pr",
+    "backend": "codex",
+    "issue_num": 73,
+    "task_tier": "medium",
+    "risk_signals": ["security"],
+}, sort_keys=True, separators=(",", ":")))
+PY
+)"
+ROOT_CONTEXT_OUT="$(uberdev_agent_context_create "$CARRIER_RUN" "$ROOT_REQUEST_JSON" "$ROOT_DECISION_JSON" \
+  '{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}' \
+  "$ROOT_METADATA_JSON" '2026-07-11T00:00:00Z')"
+ROOT_CONTEXT_FILE="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["context_file"],end="")' "$ROOT_CONTEXT_OUT")"
+ROOT_CONTEXT_SHA="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["context_sha256"],end="")' "$ROOT_CONTEXT_OUT")"
+UBERDEV_RUN_CARRIER_JSON="$(python3 -I -B - "$ROOT_CONTEXT_FILE" "$ROOT_CONTEXT_SHA" <<'PY'
+import json
+import sys
+
+print(json.dumps({
+    "schema_version": 1,
+    "run_id": "review-receipt-root",
+    "workflow": "review-pr",
+    "issue_num": 73,
+    "context_file": sys.argv[1],
+    "context_sha256": sys.argv[2],
+}, sort_keys=True, separators=(",", ":")))
+PY
+)"
+export UBERDEV_RUN_CARRIER_JSON
+export UBERDEV_AGENT_PREPARED_REQUEST_JSON="$ROOT_REQUEST_JSON"
+export UBERDEV_AGENT_RISK_SIGNALS_JSON='["security"]'
+export PLUGIN_ROOT="$ROOT/plugins/uberdev"
+export PR_NUMBER=73
+unset UBERDEV_COMMAND_WORKSPACE_JSON UBERDEV_CARRIER_RUN_DIR RESEARCH_DIR_ABS
+unset DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH
+unset PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH
+export WORKTREE_ROOT="$ROOT"
+export RUN_ID
+export REVIEW_ITERATION=7
+export REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-5}"
+export CI_FIX_LOOP_ITER=3
+export CI_RUN_ID=$'run "quoted" \\id *?[x]\t'
+export FOCUS=$'focus "quoted" \\glob*?[x]\t'
+
+. "$TMP/review-setup.sh"
+. "$TMP/review-builder.sh"
+REVIEW_WORKSPACE_JSON="$UBERDEV_COMMAND_WORKSPACE_JSON"
+
+# Keep every production layer through child-dispatch. Only the immediate final
+# provider seam is replaced, and it refuses to run before its correlated
+# dispatch receipt is durable.
+HANDOFFS="$CARRIER_RUN/handoffs"
+_uberdev_agent_dispatch_backend() {
+  local backend="$1" prompt="$4" result="$5" status="$6"
+  local instance edge
+  [ "$#" -eq 7 ]
+  [ "$backend" = codex ]
+  instance="$(basename "$(dirname "$status")")"
+  edge="$(python3 -I -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["edge_id"],end="")' "$HANDOFFS/$instance.json")"
+  python3 -I -B - "$RECEIPTS" "$UBERDEV_CHILD_TEST_SOURCE" "$edge" "$instance" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+receipt, source, edge, instance = sys.argv[1:]
+rows = Path(receipt).read_text(encoding="utf-8").splitlines()
+if not rows:
+    raise SystemExit("provider seam reached before any dispatch receipt")
+last = json.loads(rows[-1])
+identity = (last.get("event"), last.get("source"), last.get("edge_id"), last.get("instance_id"))
+if identity != ("dispatch", source, edge, instance):
+    raise SystemExit(f"provider seam reached before correlated dispatch receipt: {last!r}")
+PY
+  printf 'fixture result for %s\n' "$instance" >"$result"
+  chmod 600 "$result"
+  DISPATCH_ID="fixture-$instance"
+  printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"fixture-%s"}\n' "$instance" >"$status"
+  chmod 600 "$status"
+  printf '%s|%s|%s\n' "$UBERDEV_CHILD_TEST_SOURCE" "$edge" "$instance" >>"$PROVIDER_CALLS"
+}
+
+# Source the production post-review setup/record/fanout definitions against the
+# real parent review workspace before substituting hostile but schema-valid
+# fixture values at the callsite boundary.
+export UBERDEV_CHILD_TEST_SOURCE="$POST_SOURCE"
+export UBERDEV_COMMAND_WORKSPACE_JSON="$REVIEW_WORKSPACE_JSON"
+. "$TMP/post-prefix.sh"
+
+HOSTILE_DIR="$RESEARCH_DIR_ABS"$'/review dir\nwith "quotes" and \\slashes *?[x]'
+mkdir -p "$HOSTILE_DIR"
+CHANGED_ONE="$HOSTILE_DIR"$'/changed "one" \\path*.ts'
+CHANGED_TWO="$HOSTILE_DIR"$'/changed two [x] \\path?.sh'
+DIFF_PATH="$HOSTILE_DIR"$'/diff "quoted" \\path*?[x].md'
+CRITERIA_FIXTURE="$HOSTILE_DIR"$'/criteria "quoted" \\path*?[x].md'
+FORMAT_EXAMPLE="$HOSTILE_DIR"$'/format "quoted" \\path*?[x].yaml'
+POST_FINAL="$RESEARCH_DIR_ABS/post-impl-review-final.md"
+SIMPLIFY_FINAL="$RESEARCH_DIR_ABS/simplify-final.md"
+COMMIT_RANGE_FIXTURE="$HOSTILE_DIR"$'/commit "range" \\path*.txt'
+PHASE1_DISPOSITION_FIXTURE="$HOSTILE_DIR"$'/phase1 "disposition" \\path*.json'
+PHASE2_DISPOSITION_FIXTURE="$HOSTILE_DIR"$'/phase2 "disposition" \\path*.json'
+CLASSIFICATION_PATH="$HOSTILE_DIR"$'/classification "quoted" \\path*.yaml'
+CI_LOG_ARTIFACT_PATH="$HOSTILE_DIR"$'/ci "log" \\path*.txt'
+CI_REFUSED_AGGREGATE_PATH="$HOSTILE_DIR"$'/refused "aggregate" \\path*.md'
+CONFLICT_PATH="$HOSTILE_DIR"$'/conflict "quoted" \\path*.ts'
+
+for fixture in \
+  "$CHANGED_ONE" "$CHANGED_TWO" "$DIFF_PATH" "$CRITERIA_FIXTURE" "$FORMAT_EXAMPLE" \
+  "$POST_FINAL" "$SIMPLIFY_FINAL" "$COMMIT_RANGE_FIXTURE" \
+  "$PHASE1_DISPOSITION_FIXTURE" "$PHASE2_DISPOSITION_FIXTURE" \
+  "$CLASSIFICATION_PATH" "$CI_LOG_ARTIFACT_PATH" "$CI_REFUSED_AGGREGATE_PATH" \
+  "$CONFLICT_PATH"; do
+  printf 'private hostile review fixture: %s\n' "${fixture##*/}" >"$fixture"
+  chmod 600 "$fixture"
+done
+
+CHANGED_PATHS_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1:],separators=(",",":")),end="")' "$CHANGED_ONE" "$CHANGED_TWO")"
+EMPHASIS_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1:],separators=(",",":")),end="")' \
+  $'tests "quoted" \\focus*?[x]\t' $'errors "quoted" \\focus*?[x]\t')"
+DIFF_ARTIFACT_PATH="$DIFF_PATH"
+CRITERIA_PATH="$CRITERIA_FIXTURE"
+
+# Canonical six-edge roster -> post_review_record -> post_review_fanout.
+. "$TMP/post-roster.sh"
+
+# Canonical format retry -> record -> fanout path. This deliberately produces
+# a second complete chain for one of the 17 unique source/edge pairs.
+FAILED_REVIEW_EDGE=review_pr.review.types
+FAILED_REVIEW_INDEX=3
+FORMAT_EXAMPLE_PATH="$FORMAT_EXAMPLE"
+. "$TMP/post-retry.sh"
+
+# Execute all eleven command-owned production callsites through the extracted
+# review_child_single/fanout wrappers.
+export UBERDEV_CHILD_TEST_SOURCE="$REVIEW_SOURCE"
+WORKTREE_ROOT="$HOSTILE_DIR"
+WORKING_DIR_ABS="$HOSTILE_DIR"
+COMMIT_RANGE_PATH="$COMMIT_RANGE_FIXTURE"
+PHASE1_DISPOSITION_PATH="$PHASE1_DISPOSITION_FIXTURE"
+PHASE2_DISPOSITION_PATH="$PHASE2_DISPOSITION_FIXTURE"
+findings_path="$POST_FINAL"
+. "$TMP/review-phase1.sh"
+
+DIFF_ARTIFACT_PATH="$DIFF_PATH"
+. "$TMP/review-simplify.sh"
+. "$TMP/review-phase2.sh"
+. "$TMP/review-defer.sh"
+
+CI_CLASSIFICATION_PATH="$CLASSIFICATION_PATH"
+. "$TMP/review-classify.sh"
+printf 'fixture classifier output\n' >"$CI_CLASSIFICATION_PATH"
+chmod 600 "$CI_CLASSIFICATION_PATH"
+CLASSIFICATION_PATH="$CI_CLASSIFICATION_PATH"
+
+CI_HEAD_SHA=$'head "quoted" \\sha*?[x]\t'
+CI_BASE_SHA=$'base "quoted" \\sha*?[x]\t'
+. "$TMP/review-ci-builders.sh"
+. "$TMP/review-ci-fix-dispatch.sh"
+. "$TMP/review-ci-rebase-dispatch.sh"
+. "$TMP/review-defer-refusal.sh"
+
+conflicted_files=("$CONFLICT_PATH")
+REPO_ROOT="$HOSTILE_DIR"
+pr_head_branch=$'feature/"quoted"\\branch*?[x]\t'
+base_branch=$'main-"quoted"\\branch*?[x]\t'
+BASE_SHA=$'conflict-base-"quoted"\\sha*?[x]\t'
+. "$TMP/review-conflict.sh"
+
+# The receipt oracle derives expected digests from immutable production
+# handoffs, then requires an exact build/handoff/dispatch correlation for every
+# instance. It rejects unknown sources, edges, instances, events, and shapes.
+python3 -I -B - "$RECEIPTS" "$HANDOFFS" "$PROVIDER_CALLS" "$POST_SOURCE" "$REVIEW_SOURCE" <<'PY'
+import hashlib
+import json
+import re
+import sys
+from collections import Counter
+from pathlib import Path
+
+receipt_path, handoff_dir, provider_path, post_source, review_source = sys.argv[1:]
+expected = {}
+
+def expect(source, edge, instance):
+    if instance in expected:
+        raise AssertionError(instance)
+    expected[instance] = (source, edge)
 
 post_edges = (
     "review_pr.review.correctness",
@@ -22,73 +375,289 @@ post_edges = (
     "review_pr.review.tests",
     "review_pr.review.general",
 )
-review_edges = (
-    "review_pr.fix.phase1",
+for index, edge in enumerate(post_edges, 1):
+    expect(post_source, edge, f"post-review-r{index}-iter7-attempt01")
+expect(post_source, "review_pr.review.types", "post-review-r3-iter7-attempt02")
+
+review_cases = (
+    ("review_pr.fix.phase1", "review-pr-fix-phase1-iter7-attempt01"),
+    ("review_pr.simplify.reuse", "review-pr-simplify-reuse-iter7-attempt01"),
+    ("review_pr.simplify.quality", "review-pr-simplify-quality-iter7-attempt01"),
+    ("review_pr.simplify.efficiency", "review-pr-simplify-efficiency-iter7-attempt01"),
+    ("review_pr.fix.phase2", "review-pr-fix-phase2-iter7-attempt01"),
+    ("review_pr.defer.findings", "review-pr-defer-findings-iter7-attempt01"),
+    ("review_pr.ci.classify", "review-pr-ci-classify-iter3-attempt01"),
+    ("review_pr.ci.fix_code", "review-pr-ci-fix-iter3-attempt01"),
+    ("review_pr.ci.rebase", "review-pr-ci-rebase-iter3-attempt01"),
+    ("review_pr.ci.defer_refusal", "review-pr-ci-defer-refusal-iter3-attempt01"),
+    ("review_pr.ci.resolve_conflict", "review-pr-conflict-1-iter3-attempt01"),
+)
+for edge, instance in review_cases:
+    expect(review_source, edge, instance)
+
+expected_pairs = set(expected.values())
+if len(expected_pairs) != 17 or len(expected) != 18:
+    raise SystemExit("invalid receipt expectation fixture")
+
+handoff_root = Path(handoff_dir)
+actual_files = {path.stem: path for path in handoff_root.glob("*.json")}
+if set(actual_files) != set(expected):
+    raise SystemExit(
+        f"handoff identity mismatch: expected={sorted(expected)!r} actual={sorted(actual_files)!r}"
+    )
+
+expected_build = Counter()
+expected_correlated = Counter()
+for instance, (source, edge) in expected.items():
+    value = json.loads(actual_files[instance].read_text(encoding="utf-8"))
+    if value.get("instance_id") != instance or value.get("edge_id") != edge:
+        raise SystemExit(f"handoff identity/edge mismatch: {instance}")
+    inputs = value.get("inputs")
+    if not isinstance(inputs, dict):
+        raise SystemExit(f"handoff inputs missing: {instance}")
+    canonical = json.dumps(
+        inputs, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+    ).encode()
+    digest = hashlib.sha256(canonical).hexdigest()
+    expected_build[(source, edge, digest)] += 1
+    expected_correlated[(source, edge, instance, digest)] += 1
+
+rows = [
+    json.loads(line)
+    for line in Path(receipt_path).read_text(encoding="utf-8").splitlines()
+]
+build = Counter()
+handoff = Counter()
+dispatch = Counter()
+actual_pairs = set()
+for row in rows:
+    event = row.get("event")
+    keys = {"schema_version", "event", "source", "edge_id", "inputs_sha256"}
+    if event != "build":
+        keys.add("instance_id")
+    if set(row) != keys or row.get("schema_version") != 1:
+        raise SystemExit(f"unknown receipt shape: {row!r}")
+    source, edge = row.get("source"), row.get("edge_id")
+    actual_pairs.add((source, edge))
+    if (source, edge) not in expected_pairs:
+        raise SystemExit(f"unknown receipt source/edge: {row!r}")
+    digest = row.get("inputs_sha256")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise SystemExit(f"invalid receipt digest: {row!r}")
+    if event == "build":
+        build[(source, edge, digest)] += 1
+    elif event in {"handoff", "dispatch"}:
+        instance = row.get("instance_id")
+        if expected.get(instance) != (source, edge):
+            raise SystemExit(f"unknown receipt chain: {row!r}")
+        target = handoff if event == "handoff" else dispatch
+        target[(source, edge, instance, digest)] += 1
+    else:
+        raise SystemExit(f"unknown receipt event: {row!r}")
+
+if actual_pairs != expected_pairs or len(actual_pairs) != 17:
+    raise SystemExit(
+        f"unique source/edge closure mismatch: expected={expected_pairs!r} actual={actual_pairs!r}"
+    )
+if build != expected_build:
+    raise SystemExit(f"incomplete build correlations: expected={expected_build!r} actual={build!r}")
+if handoff != expected_correlated:
+    raise SystemExit(f"incomplete handoff correlations: expected={expected_correlated!r} actual={handoff!r}")
+if dispatch != expected_correlated:
+    raise SystemExit(f"incomplete dispatch correlations: expected={expected_correlated!r} actual={dispatch!r}")
+if len(rows) != len(expected) * 3:
+    raise SystemExit(f"unknown receipt count: expected={len(expected) * 3} actual={len(rows)}")
+
+provider = Counter()
+for line in Path(provider_path).read_text(encoding="utf-8").splitlines():
+    source, edge, instance = line.split("|", 2)
+    provider[(source, edge, instance)] += 1
+expected_provider = Counter(
+    (source, edge, instance)
+    for instance, (source, edge) in expected.items()
+)
+if provider != expected_provider:
+    raise SystemExit(f"provider seam mismatch: expected={expected_provider!r} actual={provider!r}")
+PY
+
+export HANDOFFS CHANGED_PATHS_JSON EMPHASIS_JSON DIFF_PATH CRITERIA_FIXTURE FORMAT_EXAMPLE
+export HOSTILE_DIR POST_FINAL SIMPLIFY_FINAL COMMIT_RANGE_FIXTURE
+export PHASE1_DISPOSITION_FIXTURE PHASE2_DISPOSITION_FIXTURE
+export CLASSIFICATION_PATH CI_LOG_ARTIFACT_PATH CI_REFUSED_AGGREGATE_PATH CONFLICT_PATH
+export CI_RUN_ID FOCUS CI_HEAD_SHA CI_BASE_SHA pr_head_branch base_branch BASE_SHA
+
+# Exact payload assertions catch wrong callsite variable mappings while retaining
+# hostile quotes, whitespace, backslashes, globs, arrays, dynamic simplify
+# edges, retry optionals, and manifest-typed scalar focus.
+python3 -I -B - <<'PY'
+import json
+import os
+from pathlib import Path
+
+env = os.environ
+handoff_root = Path(env["HANDOFFS"])
+
+def handoff(instance):
+    path = handoff_root / f"{instance}.json"
+    if not path.is_file():
+        raise SystemExit(f"missing production handoff: {instance}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+def exact(instance, expected):
+    actual = handoff(instance).get("inputs")
+    if actual != expected:
+        raise SystemExit(
+            f"payload mismatch for {instance}: expected={expected!r} actual={actual!r}"
+        )
+
+changed = json.loads(env["CHANGED_PATHS_JSON"])
+emphasis = json.loads(env["EMPHASIS_JSON"])
+if not isinstance(changed, list) or not isinstance(emphasis, list):
+    raise SystemExit("post-review changed_paths/emphasis lost array types")
+review_base = {
+    "changed_paths": changed,
+    "diff_path": env["DIFF_PATH"],
+    "criteria_path": env["CRITERIA_FIXTURE"],
+    "emphasis": emphasis,
+}
+post_edges = (
+    "correctness", "silent_failures", "types", "comments", "tests", "general"
+)
+for index, suffix in enumerate(post_edges, 1):
+    expected = dict(review_base)
+    if suffix == "general":
+        expected["lens"] = "general"
+    exact(f"post-review-r{index}-iter7-attempt01", expected)
+exact(
+    "post-review-r3-iter7-attempt02",
+    review_base | {
+        "format_retry": True,
+        "format_example_path": env["FORMAT_EXAMPLE"],
+    },
+)
+
+phase1 = {
+    "findings_path": env["POST_FINAL"],
+    "commit_range_path": env["COMMIT_RANGE_FIXTURE"],
+    "working_dir": env["HOSTILE_DIR"],
+    "pr_number": 73,
+    "disposition_path": env["PHASE1_DISPOSITION_FIXTURE"],
+}
+exact("review-pr-fix-phase1-iter7-attempt01", phase1)
+
+for lens in ("reuse", "quality", "efficiency"):
+    exact(
+        f"review-pr-simplify-{lens}-iter7-attempt01",
+        {
+            "diff_path": env["DIFF_PATH"],
+            "lens": lens,
+            "focus": env["FOCUS"],
+        },
+    )
+
+exact(
+    "review-pr-fix-phase2-iter7-attempt01",
+    phase1 | {
+        "findings_path": env["SIMPLIFY_FINAL"],
+        "disposition_path": env["PHASE2_DISPOSITION_FIXTURE"],
+    },
+)
+exact(
+    "review-pr-defer-findings-iter7-attempt01",
+    {
+        "phase1_path": env["POST_FINAL"],
+        "phase2_path": env["SIMPLIFY_FINAL"],
+        "phase1_disposition_path": env["PHASE1_DISPOSITION_FIXTURE"],
+        "phase2_disposition_path": env["PHASE2_DISPOSITION_FIXTURE"],
+        "working_dir": env["HOSTILE_DIR"],
+        "pr_number": 73,
+    },
+)
+exact(
+    "review-pr-ci-classify-iter3-attempt01",
+    {
+        "pr_number": 73,
+        "run_id": env["CI_RUN_ID"],
+        "log_path": env["CI_LOG_ARTIFACT_PATH"],
+    },
+)
+exact(
+    "review-pr-ci-fix-iter3-attempt01",
+    {
+        "classification_path": env["CLASSIFICATION_PATH"],
+        "log_path": env["CI_LOG_ARTIFACT_PATH"],
+        "working_dir": env["HOSTILE_DIR"],
+        "pr_number": 73,
+    },
+)
+exact(
+    "review-pr-ci-rebase-iter3-attempt01",
+    {
+        "working_dir": env["HOSTILE_DIR"],
+        "pr_number": 73,
+        "head_sha": env["CI_HEAD_SHA"],
+        "base_sha": env["CI_BASE_SHA"],
+    },
+)
+exact(
+    "review-pr-ci-defer-refusal-iter3-attempt01",
+    {
+        "phase1_path": env["CI_REFUSED_AGGREGATE_PATH"],
+        "working_dir": env["HOSTILE_DIR"],
+        "pr_number": 73,
+    },
+)
+exact(
+    "review-pr-conflict-1-iter3-attempt01",
+    {
+        "file_path": env["CONFLICT_PATH"],
+        "working_dir": env["HOSTILE_DIR"],
+        "pr_branch": env["pr_head_branch"],
+        "integration_branch": env["base_branch"],
+        "base_sha": env["BASE_SHA"],
+    },
+)
+
+subtask_edges = {
+    "review_pr.review.correctness",
+    "review_pr.review.silent_failures",
+    "review_pr.review.types",
+    "review_pr.review.comments",
+    "review_pr.review.tests",
+    "review_pr.review.general",
     "review_pr.simplify.reuse",
     "review_pr.simplify.quality",
     "review_pr.simplify.efficiency",
-    "review_pr.fix.phase2",
-    "review_pr.defer.findings",
     "review_pr.ci.classify",
-    "review_pr.ci.fix_code",
-    "review_pr.ci.rebase",
-    "review_pr.ci.defer_refusal",
-    "review_pr.ci.resolve_conflict",
-)
-
-for edge in post_edges:
-    if edge not in post:
-        raise SystemExit(f"RED: missing post-review edge roster member: {edge}")
-if 'uberdev_child_inputs_build "$EDGE_ID"' not in post:
-    raise SystemExit("RED: post-review roster does not use the production input builder")
-if 'inputs="$(uberdev_child_inputs_validate "$edge" "$inputs")" || return 2' not in post:
-    raise SystemExit("RED: post-review record boundary does not revalidate inputs")
-if 'uberdev_child_inputs_format_retry "$FAILED_REVIEW_EDGE" "$FAILED_REVIEW_INPUTS" "$FORMAT_EXAMPLE_PATH"' not in post:
-    raise SystemExit("RED: post-review format retry does not use the production helper")
-
-for edge in review_edges:
-    fixed = rf"uberdev_child_inputs_build\s+{re.escape(edge)}(?:\s|\\)"
-    dynamic_simplify = edge.startswith("review_pr.simplify.") and 'uberdev_child_inputs_build "$EDGE_ID"' in review
-    dynamic_conflict = edge == "review_pr.ci.resolve_conflict" and 'uberdev_child_inputs_build review_pr.ci.resolve_conflict' in review
-    if not re.search(fixed, review) and not dynamic_simplify and not dynamic_conflict:
-        raise SystemExit(f"RED: review edge does not use production input builder: {edge}")
-if 'inputs="$(uberdev_child_inputs_validate "$edge" "$inputs")" || return 2' not in review:
-    raise SystemExit("RED: review record boundary does not revalidate inputs")
-
-for source, label in ((post, "post-review"), (review, "review-pr")):
-    if re.search(r'INPUTS(?:_JSON)?="\$\(jq -cn ', source):
-        raise SystemExit(f"RED: {label} still constructs routed inputs inline with jq")
+}
+for path in handoff_root.glob("*.json"):
+    value = json.loads(path.read_text(encoding="utf-8"))
+    expected_risks = [] if value["edge_id"] in subtask_edges else ["security"]
+    if value.get("risk_signals") != expected_risks:
+        raise SystemExit(f"risk mapping mismatch: {value['instance_id']}")
 PY
 
-. "$LIB"
-json_string() {
-  python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "$1"
-}
+# Mutation proof: a schema-valid but wrong production variable must now fail.
+# The legacy direct-builder test passed this mutation, which was the RED.
+if [ "${REVIEW_CHILD_SKIP_MUTATION_PROOF:-0}" != 1 ]; then
+  MUTATED="$TMP/post-mutated.md"
+  python3 -I -B - "$POST" "$MUTATED" <<'PY'
+from pathlib import Path
+import sys
 
-HOSTILE=$'/tmp/review dir\nwith "quotes" and \\slashes/*?[x]'
-PATH_JSON="$(json_string "$HOSTILE")"
-STRING_JSON="$(json_string $'focus "quoted"\n\\glob*')"
-PATHS_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps([sys.argv[1]],separators=(",",":")),end="")' "$HOSTILE")"
-STRINGS_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps([sys.argv[1]],separators=(",",":")),end="")' $'tests\n"errors"')"
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+old = 'diff_path "$(post_review_json_string "$DIFF_ARTIFACT_PATH")"'
+new = 'diff_path "$(post_review_json_string "$CRITERIA_PATH")"'
+if source.count(old) != 2:
+    raise SystemExit("mutation target count drifted")
+Path(sys.argv[2]).write_text(source.replace(old, new), encoding="utf-8")
+PY
+  if REVIEW_CHILD_SKIP_MUTATION_PROOF=1 REVIEW_POST_UNDER_TEST="$MUTATED" \
+      bash "$0" >"$TMP/mutation.out" 2>"$TMP/mutation.err"; then
+    echo 'mutation unexpectedly passed: wrong post-review diff mapping' >&2
+    exit 1
+  fi
+  grep -Fq 'payload mismatch for post-review-r1-iter7-attempt01' "$TMP/mutation.err"
+fi
 
-for edge in correctness silent_failures types comments tests; do
-  base="$(uberdev_child_inputs_build "review_pr.review.$edge" changed_paths "$PATHS_JSON" diff_path "$PATH_JSON" criteria_path "$PATH_JSON" emphasis "$STRINGS_JSON")"
-  uberdev_child_inputs_format_retry "review_pr.review.$edge" "$base" "$HOSTILE" >/dev/null
-done
-base="$(uberdev_child_inputs_build review_pr.review.general changed_paths "$PATHS_JSON" diff_path "$PATH_JSON" criteria_path "$PATH_JSON" emphasis "$STRINGS_JSON" lens '"general"')"
-uberdev_child_inputs_format_retry review_pr.review.general "$base" "$HOSTILE" >/dev/null
-
-for edge in review_pr.fix.phase1 review_pr.fix.phase2; do
-  uberdev_child_inputs_build "$edge" findings_path "$PATH_JSON" commit_range_path "$PATH_JSON" working_dir "$PATH_JSON" pr_number 73 disposition_path "$PATH_JSON" >/dev/null
-done
-for lens in reuse quality efficiency; do
-  uberdev_child_inputs_build "review_pr.simplify.$lens" diff_path "$PATH_JSON" lens "$(json_string "$lens")" focus "$STRING_JSON" >/dev/null
-done
-uberdev_child_inputs_build review_pr.defer.findings phase1_path "$PATH_JSON" phase2_path "$PATH_JSON" phase1_disposition_path "$PATH_JSON" phase2_disposition_path "$PATH_JSON" working_dir "$PATH_JSON" pr_number 73 >/dev/null
-uberdev_child_inputs_build review_pr.ci.classify pr_number 73 run_id "$STRING_JSON" log_path "$PATH_JSON" >/dev/null
-uberdev_child_inputs_build review_pr.ci.fix_code classification_path "$PATH_JSON" log_path "$PATH_JSON" working_dir "$PATH_JSON" pr_number 73 >/dev/null
-uberdev_child_inputs_build review_pr.ci.rebase working_dir "$PATH_JSON" pr_number 73 head_sha "$STRING_JSON" base_sha "$STRING_JSON" >/dev/null
-uberdev_child_inputs_build review_pr.ci.defer_refusal phase1_path "$PATH_JSON" working_dir "$PATH_JSON" pr_number 73 >/dev/null
-uberdev_child_inputs_build review_pr.ci.resolve_conflict file_path "$PATH_JSON" working_dir "$PATH_JSON" pr_branch "$STRING_JSON" integration_branch "$STRING_JSON" base_sha "$STRING_JSON" >/dev/null
-
-printf 'review-child-inputs: PASS (17 governed edges, retry, hostile-safe JSON)\n'
+printf 'review-child-inputs: PASS (17 unique production source/edge pairs; 18 complete receipt chains including retry)\n'
