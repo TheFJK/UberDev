@@ -275,7 +275,8 @@ TH="$TMP/home"
 assert_cmd 0 "first install into throwaway HOME" \
   env HOME="$TH" CODEX_HOME="$TH/.codex" bash "$INSTALLER"
 if [ -x "$TH/.codex/plugins/uberdev-codex/lib/solve-launcher.sh" ] \
-  && [ -r "$TH/.codex/plugins/uberdev-codex/lib/dispatch.sh" ]; then
+  && [ -r "$TH/.codex/plugins/uberdev-codex/lib/dispatch.sh" ] \
+  && [ -r "$TH/.codex/plugins/uberdev-codex/lib/command-workspace.py" ]; then
   pass "standalone installer installs stable runtime lib under CODEX_HOME"
 else
   fail "standalone installer did not install stable runtime lib under CODEX_HOME"
@@ -342,6 +343,7 @@ NM="$(find "$TH_LEGACY/.agents/skills" -maxdepth 2 -name '.uberdev-codex-managed
 if [ "$NS" -eq 39 ] \
   && [ "$NM" -eq 39 ] \
   && [ -x "$TH_LEGACY/.codex/plugins/uberdev-codex/lib/solve-launcher.sh" ] \
+  && [ -r "$TH_LEGACY/.codex/plugins/uberdev-codex/lib/command-workspace.py" ] \
   && grep -Rql '\.codex/uberdev.local.md' "$TH_LEGACY/.agents/skills/uberdev-cmd-solve/SKILL.md"; then
   pass "legacy unmarked skill adoption upgrades skills, markers, and runtime"
 else
@@ -436,6 +438,7 @@ NS="$(find "$TH3/.agents/skills" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | w
 NA="$(find "$TH3/.codex/agents" -maxdepth 1 -name 'uberdev-*.toml' 2>/dev/null | wc -l | tr -d '[:space:]')"
 NB="$(grep -c 'BEGIN uberdev-codex-primer' "$TH3/.codex/AGENTS.md" 2>/dev/null || echo 0)"
 [ "$NS" -eq 39 ] && [ "$NA" -eq 44 ] && [ "$NB" -eq 1 ] \
+  && [ -r "$TH3/.codex/plugins/uberdev-codex/lib/command-workspace.py" ] \
   && pass "bootstrapped standalone install carries skills, agents, and primer" \
   || fail "bootstrapped install incomplete: skills=$NS agents=$NA primer=$NB"
 
@@ -545,6 +548,7 @@ PY
   || fail "manifest or marketplace invalid"
 if [ -r "$REPO_ROOT/codex/uberdev-codex/lib/dispatch.sh" ] \
   && [ -r "$REPO_ROOT/codex/uberdev-codex/lib/solve-launcher.sh" ] \
+  && [ -r "$REPO_ROOT/codex/uberdev-codex/lib/command-workspace.py" ] \
   && [ -x "$REPO_ROOT/codex/uberdev-codex/hooks/session-start" ] \
   && grep -q '\${PLUGIN_ROOT}/hooks/session-start' "$REPO_ROOT/codex/uberdev-codex/hooks/hooks.json"; then
   pass "plugin package carries runtime lib and plugin-local hook command"

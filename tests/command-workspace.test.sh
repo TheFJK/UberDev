@@ -376,4 +376,7 @@ for doc in "$ROOT/plugins/uberdev/commands/review-pr.md" "$ROOT/plugins/uberdev/
   ! rg -n 'UBERDEV_SETUP_BOUNDARY_JSON|mkdir -p "\$RESEARCH_DIR_ABS"|DIFF_ARTIFACT_PATH="\$\{DIFF_ARTIFACT_PATH|CRITERIA_PATH="\$\{CRITERIA_PATH' "$doc"
 done
 
+# The Codex package is a checked-in runtime mirror, not an independent helper.
+cmp "$HELPER" "$ROOT/codex/uberdev-codex/lib/command-workspace.py"
+
 echo 'command-workspace: PASS'
