@@ -166,23 +166,36 @@ def load_carrier(
 
 def open_or_create_dir(parent_fd: int, name: str, private: bool) -> tuple[int, bool]:
     created = False
+    fd: int | None = None
     try:
         os.mkdir(name, PRIVATE_DIR, dir_fd=parent_fd)
         created = True
     except FileExistsError:
         pass
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(name, flags, dir_fd=parent_fd)
-    entry = os.fstat(fd)
-    current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    if (not stat.S_ISDIR(entry.st_mode) or entry.st_uid != os.geteuid()
-            or (entry.st_dev, entry.st_ino) != (current.st_dev, current.st_ino)
-            or (private and stat.S_IMODE(entry.st_mode) != PRIVATE_DIR)):
-        os.close(fd)
-        fail("unsafe_directory")
-    if created:
-        os.fchmod(fd, PRIVATE_DIR)
-    return fd, created
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(name, flags, dir_fd=parent_fd)
+        entry = os.fstat(fd)
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (not stat.S_ISDIR(entry.st_mode) or entry.st_uid != os.geteuid()
+                or (entry.st_dev, entry.st_ino) != (current.st_dev, current.st_ino)
+                or (private and stat.S_IMODE(entry.st_mode) != PRIVATE_DIR)):
+            fail("unsafe_directory")
+        if created:
+            os.fchmod(fd, PRIVATE_DIR)
+        return fd, created
+    except Exception:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if created:
+            try:
+                os.rmdir(name, dir_fd=parent_fd)
+            except OSError:
+                pass
+        raise
 
 
 def allocate_workspace(

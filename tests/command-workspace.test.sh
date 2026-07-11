@@ -142,6 +142,105 @@ then
 fi
 [ "$SECURITY_FAILURES" -eq 0 ]
 
+# Every failure after a successful mkdir is locally transactional: the helper
+# removes only the directory it created and leaves no workspace or artifacts.
+if ! python3 - "$HELPER" "$TMP/transaction-cases" <<'PY'
+import importlib.util
+import os
+import sys
+
+helper_path, cases_root = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("command_workspace_transaction", helper_path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+os.mkdir(cases_root, 0o700)
+failures = []
+
+real_open = module.os.open
+real_stat = module.os.stat
+real_fchmod = module.os.fchmod
+
+def run_case(stage):
+    repo = os.path.join(cases_root, stage)
+    os.mkdir(repo, 0o700)
+    entry = os.stat(repo, follow_symlinks=False)
+    identity = (entry.st_dev, entry.st_ino)
+
+    def fault_open(path, flags, *args, **kwargs):
+        if stage == "open" and path == ".uberdev" and kwargs.get("dir_fd") is not None:
+            raise OSError("injected post-mkdir open failure")
+        return real_open(path, flags, *args, **kwargs)
+
+    def fault_stat(path, *args, **kwargs):
+        if stage == "validation" and path == ".uberdev" and kwargs.get("dir_fd") is not None:
+            raise OSError("injected post-mkdir validation failure")
+        return real_stat(path, *args, **kwargs)
+
+    def fault_fchmod(fd, mode):
+        if stage == "chmod":
+            raise OSError("injected post-mkdir chmod failure")
+        return real_fchmod(fd, mode)
+
+    module.os.open = fault_open
+    module.os.stat = fault_stat
+    module.os.fchmod = fault_fchmod
+    rejected = False
+    try:
+        module.allocate_workspace(
+            repo,
+            "20260710-010202-acdeef0",
+            module.CALLERS["review-pr"]["artifacts"],
+            identity,
+        )
+    except OSError:
+        rejected = True
+    finally:
+        module.os.open = real_open
+        module.os.stat = real_stat
+        module.os.fchmod = real_fchmod
+    if not rejected or os.path.lexists(os.path.join(repo, ".uberdev")):
+        failures.append(f"{stage} failure left residual workspace state")
+
+for fault_stage in ("open", "validation", "chmod"):
+    run_case(fault_stage)
+
+# A failing open of an existing directory must never remove that directory.
+repo = os.path.join(cases_root, "preexisting")
+os.mkdir(repo, 0o700)
+existing = os.path.join(repo, ".uberdev")
+os.mkdir(existing, 0o700)
+repo_entry = os.stat(repo, follow_symlinks=False)
+
+def fail_existing_open(path, flags, *args, **kwargs):
+    if path == ".uberdev" and kwargs.get("dir_fd") is not None:
+        raise OSError("injected existing-directory open failure")
+    return real_open(path, flags, *args, **kwargs)
+
+module.os.open = fail_existing_open
+try:
+    module.allocate_workspace(
+        repo,
+        "20260710-010202-acdeef1",
+        module.CALLERS["review-pr"]["artifacts"],
+        (repo_entry.st_dev, repo_entry.st_ino),
+    )
+except OSError:
+    pass
+else:
+    raise SystemExit("existing-directory failure was unexpectedly accepted")
+finally:
+    module.os.open = real_open
+if not os.path.isdir(existing):
+    failures.append("pre-existing directory was removed")
+if failures:
+    raise SystemExit("; ".join(failures))
+PY
+then
+  echo 'post-mkdir transaction rollback failed' >&2
+  exit 1
+fi
+
 RUN_ID=20260710-010203-abcdef0
 UBERDEV_RUN_CARRIER_JSON="$SOLVE_CARRIER"
 export UBERDEV_RUN_CARRIER_JSON
