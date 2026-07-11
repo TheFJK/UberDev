@@ -129,6 +129,12 @@ uncalled_function_dispatch=brain.replace(
     '    p6_unused_dispatch() {\n      uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null\n    }\n    if true; then',1)
 assert uncalled_function_dispatch != brain
 rejected({brain_rel:uncalled_function_dispatch},"routed chain missing uberdev_dispatch_child")
+for declaration in ("function p6_unused_dispatch {", "function p6_unused_dispatch() {"):
+    alternate_function_dispatch=brain.replace(
+        '    if uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null; then',
+        f'    {declaration}\n      uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null\n    }}\n    if true; then',1)
+    assert alternate_function_dispatch != brain,declaration
+    rejected({brain_rel:alternate_function_dispatch},"routed chain missing uberdev_dispatch_child")
 
 def drift_question_type(value):
     value["edges"]["brainstorm.research.codebase"]["required_inputs"]["question"]="boolean"

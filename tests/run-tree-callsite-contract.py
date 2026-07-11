@@ -305,7 +305,13 @@ def _brace_delta(line: str) -> int:
 
 
 def _without_nested_functions(text: str) -> str:
-    declaration = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)[ \t]*\([ \t]*\)[ \t]*\{")
+    declaration = re.compile(
+        r"(?<![A-Za-z0-9_])(?:"
+        r"(?P<keyword>function)[ \t]+(?P<keyword_name>[A-Za-z_][A-Za-z0-9_]*)"
+        r"(?:[ \t]*\([ \t]*\))?"
+        r"|(?P<short_name>[A-Za-z_][A-Za-z0-9_]*)[ \t]*\([ \t]*\)"
+        r")[ \t]*\{"
+    )
     kept: list[str] = []
     depth = 0
     for line in _executable_lines(text):
@@ -316,23 +322,21 @@ def _without_nested_functions(text: str) -> str:
             # _executable_lines already removed this declaration's body and
             # terminator; omit the opener so downstream scans cannot reopen it.
             continue
-        nested = next(
-            (
-                match
-                for match in declaration.finditer(line)
-                if _token_is_executable(
-                    line,
-                    match.start(1),
-                    match.end(1),
-                    reject_declaration=False,
-                )
-            ),
-            None,
-        )
+        nested = None
+        for candidate in declaration.finditer(line):
+            command_group = "keyword" if candidate.group("keyword") else "short_name"
+            if _token_is_executable(
+                line,
+                candidate.start(command_group),
+                candidate.end(command_group),
+                reject_declaration=False,
+            ):
+                nested = candidate
+                break
         if nested is None:
             kept.append(line)
             continue
-        depth = _brace_delta(line[nested.start(1) :])
+        depth = _brace_delta(line[nested.start() :])
     return "\n".join(kept)
 
 
