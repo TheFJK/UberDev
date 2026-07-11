@@ -21,23 +21,40 @@ import sys
 from pathlib import Path
 
 text = Path(sys.argv[1]).read_text(encoding="utf-8")
-match = re.search(
-    r"```bash\n(sdd_validate_instance_dimensions\(\).*?\n)```",
-    text,
-    re.DOTALL,
+runtime_pattern = re.compile(
+    r"```bash\n(sdd_validate_instance_dimensions\(\).*?\n)```", re.DOTALL
 )
-if not match:
-    raise SystemExit("SDD routed runtime fence missing")
-Path(sys.argv[2]).write_text(match.group(1), encoding="utf-8")
-batch = re.search(
+batch_pattern = re.compile(
     r"Executable batch shape \(substitute the edge/role/stage from the table\):"
     r"\n\n```bash\n(.*?)\n```",
-    text,
     re.DOTALL,
 )
-if not batch:
-    raise SystemExit("SDD executable batch callsite fence missing")
-Path(sys.argv[3]).write_text(batch.group(1) + "\n", encoding="utf-8")
+
+def exactly_one(pattern, value, label):
+    matches = pattern.findall(value)
+    if len(matches) != 1:
+        raise SystemExit(f"SDD {label} fence count must be exactly one, found {len(matches)}")
+    return matches[0]
+
+runtime = exactly_one(runtime_pattern, text, "routed runtime")
+batch = exactly_one(batch_pattern, text, "executable batch callsite")
+Path(sys.argv[2]).write_text(runtime, encoding="utf-8")
+Path(sys.argv[3]).write_text(batch + "\n", encoding="utf-8")
+
+def assert_duplicate_rejected(pattern, duplicate, label):
+    try:
+        exactly_one(pattern, text + duplicate, label)
+    except SystemExit:
+        return
+    raise SystemExit(f"SDD stale duplicate {label} fence was accepted")
+
+assert_duplicate_rejected(runtime_pattern, f"\n```bash\n{runtime}```\n", "routed runtime")
+assert_duplicate_rejected(
+    batch_pattern,
+    "\nExecutable batch shape (substitute the edge/role/stage from the table):"
+    f"\n\n```bash\n{batch}\n```\n",
+    "executable batch callsite",
+)
 PY
 
 . "$LIB"
@@ -64,15 +81,20 @@ eval "$(declare -f uberdev_child_inputs_validate | sed '1s/uberdev_child_inputs_
 
 CANONICALIZE_LOG="$TMP/canonicalize.log"
 VALIDATE_LOG="$TMP/validate.log"
+VALIDATED_INPUTS_LOG="$TMP/validated-inputs.jsonl"
 : >"$CANONICALIZE_LOG"
 : >"$VALIDATE_LOG"
+: >"$VALIDATED_INPUTS_LOG"
 sdd_canonicalize_owned_paths() {
   printf '%s\n' "$edge_id" >>"$CANONICALIZE_LOG"
   sdd_canonicalize_owned_paths_production "$@"
 }
 uberdev_child_inputs_validate() {
+  local output
   printf '%s\n' "$1" >>"$VALIDATE_LOG"
-  uberdev_child_inputs_validate_production "$@"
+  output="$(uberdev_child_inputs_validate_production "$@")" || return $?
+  printf '%s\n' "$output" >>"$VALIDATED_INPUTS_LOG"
+  printf '%s' "$output"
 }
 
 make_context() {
@@ -185,7 +207,9 @@ for artifact in \
 done
 
 PROVIDER_LOG="$TMP/provider.log"
+PROVIDER_ARGS_LOG="$TMP/provider-args.jsonl"
 : >"$PROVIDER_LOG"
+: >"$PROVIDER_ARGS_LOG"
 _uberdev_agent_dispatch_backend() {
   local instance
   [ "$#" -eq 7 ]
@@ -200,6 +224,26 @@ assert rows[-1]["event"] == "dispatch", rows[-1]
 assert rows[-1]["source"] == sys.argv[2], rows[-1]
 assert rows[-1]["instance_id"] == sys.argv[3], rows[-1]
 PY
+  python3 -I -B - "$PROVIDER_ARGS_LOG" "$instance" "$@" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path, instance, backend, issue, tier, prompt, result, status, decision_raw = sys.argv[1:]
+decision = json.loads(decision_raw)
+record = {
+    "instance_id": instance,
+    "backend": backend,
+    "issue": int(issue),
+    "tier": tier,
+    "prompt": prompt,
+    "result": result,
+    "status": status,
+    "decision": decision,
+}
+with Path(path).open("a", encoding="utf-8") as stream:
+    stream.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+PY
   printf '%s\n' "$instance" >>"$PROVIDER_LOG"
   printf 'completed %s\n' "$instance" >"$5"
   chmod 600 "$5"
@@ -210,8 +254,8 @@ PY
 }
 
 sdd_dispatch_case() {
-  local edge_id="$1" task_id="$2" stage="$3" raw_attempt="$4" output_name="$5"
-  local wave=1 attempt="$raw_attempt" SDD_BATCH_TASK_IDS="$task_id" task_inputs_json
+  local edge_id="$1" task_ids="$2" stage="$3" raw_attempt="$4" output_name="$5"
+  local wave=1 attempt="$raw_attempt" SDD_BATCH_TASK_IDS="$task_ids" task_inputs_json
   . "$TMP/batch-callsite.sh" >/dev/null
   printf -v "$output_name" '%s' "$task_inputs_json"
 }
@@ -220,10 +264,10 @@ implement_json=
 spec_json=
 quality_json=
 premerge_json=
-sdd_dispatch_case sdd.task.implement 41 implement 7 implement_json
-sdd_dispatch_case sdd.task.spec_review 42 spec-review 1 spec_json
-sdd_dispatch_case sdd.task.quality_review 43 quality-review 1 quality_json
-sdd_dispatch_case sdd.premerge.test_review 44 test-review 1 premerge_json
+sdd_dispatch_case sdd.task.implement '41 42' implement 7 implement_json
+sdd_dispatch_case sdd.task.spec_review 43 spec-review 1 spec_json
+sdd_dispatch_case sdd.task.quality_review 44 quality-review 1 quality_json
+sdd_dispatch_case sdd.premerge.test_review 45 test-review 1 premerge_json
 
 python3 -I -B - \
   "$implement_json" "$spec_json" "$quality_json" "$premerge_json" \
@@ -274,6 +318,7 @@ PY
 
 EXPECTED_EDGES="$(printf '%s\n' \
   sdd.task.implement \
+  sdd.task.implement \
   sdd.task.spec_review \
   sdd.task.quality_review \
   sdd.premerge.test_review)"
@@ -292,26 +337,30 @@ EXPECTED_EDGES="$(printf '%s\n' \
 }
 
 python3 -I -B - \
-  "$RECEIPT_FILE" "$UBERDEV_CHILD_TEST_SOURCE" "$BUILDER_INPUTS_LOG" \
-  "$implement_json" "$spec_json" "$quality_json" "$premerge_json" <<'PY'
+  "$RECEIPT_FILE" "$UBERDEV_CHILD_TEST_SOURCE" \
+  "$BUILDER_INPUTS_LOG" "$VALIDATED_INPUTS_LOG" <<'PY'
 import copy
 import hashlib
 import json
 import os
 import re
 import sys
+from collections import defaultdict
 from pathlib import Path
 
-path, source, builder_inputs_path, *inputs_raw = sys.argv[1:]
+path, source, builder_inputs_path, validated_inputs_path = sys.argv[1:]
 rows = [json.loads(line) for line in Path(path).read_text().splitlines()]
 built_raw = Path(builder_inputs_path).read_text().splitlines()
+validated_raw = Path(validated_inputs_path).read_text().splitlines()
 cases = [
-    ("sdd.implement", "sdd.task.implement", "sdd-w1-t41-implement-a7"),
-    ("sdd.spec_review", "sdd.task.spec_review", "sdd-w1-t42-spec-review-a1"),
-    ("sdd.quality_review", "sdd.task.quality_review", "sdd-w1-t43-quality-review-a1"),
-    ("sdd.pre_merge_test_analysis", "sdd.premerge.test_review", "sdd-w1-t44-test-review-a1"),
+    ("sdd.implement.41", "sdd.task.implement", "sdd-w1-t41-implement-a7"),
+    ("sdd.implement.42", "sdd.task.implement", "sdd-w1-t42-implement-a7"),
+    ("sdd.spec_review", "sdd.task.spec_review", "sdd-w1-t43-spec-review-a1"),
+    ("sdd.quality_review", "sdd.task.quality_review", "sdd-w1-t44-quality-review-a1"),
+    ("sdd.pre_merge_test_analysis", "sdd.premerge.test_review", "sdd-w1-t45-test-review-a1"),
 ]
 assert len(built_raw) == len(cases), built_raw
+assert len(validated_raw) == len(cases), validated_raw
 
 def inputs_digest(raw):
     canonical = json.dumps(json.loads(raw), sort_keys=True, separators=(",", ":"))
@@ -334,49 +383,129 @@ def validate_shape(row):
 def validate_receipts(candidate_rows):
     for row in candidate_rows:
         validate_shape(row)
-    cursor = 0
-    for (name, edge_id, instance_id), built, validated in zip(cases, built_raw, inputs_raw):
-        built_digest = inputs_digest(built)
-        validated_digest = inputs_digest(validated)
+    expected = []
+    expected_by_edge = defaultdict(list)
+    for index, ((name, edge_id, instance_id), built, validated) in enumerate(
+        zip(cases, built_raw, validated_raw)
+    ):
+        item = {
+            "name": name,
+            "edge_id": edge_id,
+            "instance_id": instance_id,
+            "built_digest": inputs_digest(built),
+            "validated_digest": inputs_digest(validated),
+        }
         if edge_id == "sdd.premerge.test_review":
-            assert built_digest == validated_digest, f"{name}: unexpected input transformation"
+            assert item["built_digest"] == item["validated_digest"], (
+                f"{name}: unexpected input transformation"
+            )
         else:
-            assert built_digest != validated_digest, f"{name}: missing canonical input snapshot"
-        snapshots = []
-        while cursor < len(candidate_rows) and candidate_rows[cursor]["event"] == "build":
-            row = candidate_rows[cursor]
-            assert row["edge_id"] == edge_id, f"{name}: unmatched build edge: {row!r}"
-            snapshots.append(row["inputs_sha256"])
-            cursor += 1
-        assert len(snapshots) >= 2, f"{name}: incomplete build snapshot chain: {snapshots!r}"
-        expected_snapshots = {built_digest, validated_digest}
-        assert set(snapshots) == expected_snapshots, (
-            f"{name}: unknown build snapshot: expected={expected_snapshots!r} "
-            f"actual={set(snapshots)!r}"
-        )
-        terminal = []
-        for expected_event in ("handoff", "dispatch"):
-            assert cursor < len(candidate_rows), f"{name}: incomplete {expected_event} event"
-            row = candidate_rows[cursor]
-            assert row["event"] == expected_event, (
-                f"{name}: unknown receipt event order: expected={expected_event} actual={row!r}"
+            assert item["built_digest"] != item["validated_digest"], (
+                f"{name}: missing canonical input snapshot"
             )
-            assert row["edge_id"] == edge_id, f"{name}: unmatched terminal edge: {row!r}"
-            assert row["instance_id"] == instance_id, (
-                f"{name}: unmatched terminal instance: {row!r}"
-            )
-            assert row["inputs_sha256"] in snapshots, (
-                f"{name}: unmatched validated digest: {row['inputs_sha256']}"
-            )
-            assert row["inputs_sha256"] == validated_digest, (
-                f"{name}: terminal receipt did not use validated canonical inputs: {row!r}"
-            )
-            terminal.append(row["inputs_sha256"])
-            cursor += 1
-        assert terminal[0] == terminal[1], f"{name}: handoff/dispatch digest mismatch"
-    assert cursor == len(candidate_rows), f"unknown trailing receipt events: {candidate_rows[cursor:]!r}"
+        expected.append(item)
+        expected_by_edge[edge_id].append(index)
 
-validate_receipts(rows)
+    next_handoff = defaultdict(int)
+    pending_builds = defaultdict(list)
+    chains = {}
+    for event_index, row in enumerate(candidate_rows):
+        edge_id = row["edge_id"]
+        assert edge_id in expected_by_edge, f"unknown receipt edge: {row!r}"
+        if row["event"] == "build":
+            pending_builds[edge_id].append((event_index, row["inputs_sha256"]))
+            continue
+        if row["event"] == "handoff":
+            position = next_handoff[edge_id]
+            assert position < len(expected_by_edge[edge_id]), (
+                f"unmatched handoff event: {row!r}"
+            )
+            item = expected[expected_by_edge[edge_id][position]]
+            next_handoff[edge_id] += 1
+            assert row["instance_id"] == item["instance_id"], (
+                f"{item['name']}: unmatched handoff instance: {row!r}"
+            )
+            snapshots = pending_builds.pop(edge_id, [])
+            snapshot_digests = [digest for _, digest in snapshots]
+            assert snapshot_digests, (
+                f"{item['name']}: incomplete build snapshot chain: {snapshot_digests!r}"
+            )
+            assert snapshot_digests[-1] == item["validated_digest"], (
+                f"{item['name']}: final build snapshot is not canonical"
+            )
+            assert len(snapshot_digests) >= 2, (
+                f"{item['name']}: incomplete build snapshot chain: {snapshot_digests!r}"
+            )
+            assert snapshots[-1][0] == event_index - 1, (
+                f"{item['name']}: final build snapshot was not immediately before handoff"
+            )
+            if item["built_digest"] == item["validated_digest"]:
+                assert set(snapshot_digests) == {item["validated_digest"]}, (
+                    f"{item['name']}: unknown duplicate build snapshot"
+                )
+            else:
+                assert snapshot_digests[0] == item["built_digest"], (
+                    f"{item['name']}: first build snapshot is not constructor output"
+                )
+                first_validated = snapshot_digests.index(item["validated_digest"])
+                assert snapshot_digests == (
+                    [item["built_digest"]] * first_validated
+                    + [item["validated_digest"]] * (len(snapshot_digests) - first_validated)
+                ), f"{item['name']}: build snapshots are out of order"
+            assert row["inputs_sha256"] in snapshot_digests, (
+                f"{item['name']}: unmatched validated digest: {row['inputs_sha256']}"
+            )
+            assert row["inputs_sha256"] == item["validated_digest"], (
+                f"{item['name']}: handoff did not use validated canonical inputs"
+            )
+            chains[item["instance_id"]] = {
+                **item,
+                "snapshots": snapshot_digests,
+                "handoff_digest": row["inputs_sha256"],
+                "handoff_index": event_index,
+                "dispatch_index": None,
+            }
+            continue
+
+        instance_id = row["instance_id"]
+        assert instance_id in chains, f"unmatched dispatch event: {row!r}"
+        chain = chains[instance_id]
+        assert chain["dispatch_index"] is None, f"duplicate dispatch event: {row!r}"
+        assert edge_id == chain["edge_id"], f"{chain['name']}: dispatch edge mismatch"
+        assert row["inputs_sha256"] in chain["snapshots"], (
+            f"{chain['name']}: unmatched validated digest: {row['inputs_sha256']}"
+        )
+        assert row["inputs_sha256"] == chain["validated_digest"], (
+            f"{chain['name']}: dispatch did not use validated canonical inputs"
+        )
+        assert row["inputs_sha256"] == chain["handoff_digest"], (
+            f"{chain['name']}: handoff/dispatch digest mismatch"
+        )
+        chain["dispatch_index"] = event_index
+
+    for edge_id, indexes in expected_by_edge.items():
+        assert next_handoff[edge_id] == len(indexes), f"incomplete handoff events: {edge_id}"
+        assert not pending_builds[edge_id], f"late build snapshots: {edge_id}"
+    assert set(chains) == {item["instance_id"] for item in expected}, (
+        "incomplete receipt chains"
+    )
+    for chain in chains.values():
+        assert chain["dispatch_index"] is not None, (
+            f"{chain['name']}: incomplete dispatch event"
+        )
+        assert chain["handoff_index"] < chain["dispatch_index"], (
+            f"{chain['name']}: dispatch preceded handoff"
+        )
+    return chains
+
+chains = validate_receipts(rows)
+first_implement = chains["sdd-w1-t41-implement-a7"]
+second_implement = chains["sdd-w1-t42-implement-a7"]
+assert (
+    first_implement["handoff_index"]
+    < second_implement["handoff_index"]
+    < first_implement["dispatch_index"]
+), "two-task batch did not exercise non-contiguous dispatch correlation"
 
 additional_snapshot = copy.deepcopy(rows)
 first_handoff = next(
@@ -393,6 +522,25 @@ def assert_rejected(mutated, needle):
         assert needle in str(error), (needle, str(error))
     else:
         raise AssertionError(f"receipt mutation accepted: {needle}")
+
+swapped = copy.deepcopy(rows)
+implement_builds = [
+    index for index, row in enumerate(swapped)
+    if row["edge_id"] == "sdd.task.implement" and row["event"] == "build"
+]
+swapped[implement_builds[0]], swapped[implement_builds[1]] = (
+    swapped[implement_builds[1]], swapped[implement_builds[0]]
+)
+assert_rejected(swapped, "final build snapshot is not canonical")
+
+late = copy.deepcopy(rows)
+first_handoff = next(
+    index for index, row in enumerate(late)
+    if row.get("instance_id") == "sdd-w1-t41-implement-a7" and row["event"] == "handoff"
+)
+late_snapshot = late.pop(first_handoff - 1)
+late.insert(first_handoff, late_snapshot)
+assert_rejected(late, "final build snapshot is not canonical")
 
 unmatched = copy.deepcopy(rows)
 for row in unmatched:
@@ -412,7 +560,7 @@ missing_terminal = copy.deepcopy(rows[:-1])
 assert_rejected(missing_terminal, "incomplete dispatch event")
 
 raw_implement = json.loads(built_raw[0])
-validated_implement = json.loads(inputs_raw[0])
+validated_implement = json.loads(validated_raw[0])
 assert all(not os.path.isabs(path) for path in raw_implement["allowed_paths"])
 assert all(not os.path.isabs(path) for path in raw_implement["denied_paths"])
 assert all(os.path.isabs(path) for path in validated_implement["allowed_paths"])
@@ -424,12 +572,98 @@ PY
 
 [ "$(<"$PROVIDER_LOG")" = "$(printf '%s\n' \
   sdd-w1-t41-implement-a7 \
-  sdd-w1-t42-spec-review-a1 \
-  sdd-w1-t43-quality-review-a1 \
-  sdd-w1-t44-test-review-a1)" ] || {
+  sdd-w1-t42-implement-a7 \
+  sdd-w1-t43-spec-review-a1 \
+  sdd-w1-t44-quality-review-a1 \
+  sdd-w1-t45-test-review-a1)" ] || {
   printf 'SDD runtime provider seam was not crossed exactly once per constructor\n' >&2
   exit 1
 }
+
+STATE_DIR="$RUN_DIR/.agent-state-$(id -u)"
+python3 -I -B - \
+  "$PROVIDER_ARGS_LOG" "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR/semaphore-v1" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+provider_path, lifecycle_path, semaphore_path = map(Path, sys.argv[1:])
+provider_rows = [json.loads(line) for line in provider_path.read_text().splitlines()]
+lifecycle_rows = [json.loads(line) for line in lifecycle_path.read_text().splitlines()]
+expectations = {
+    "sdd-w1-t41-implement-a7": ("quality", "standard", "medium", "workspace-write", "implementation-worker", "implementation"),
+    "sdd-w1-t42-implement-a7": ("quality", "standard", "medium", "workspace-write", "implementation-worker", "implementation"),
+    "sdd-w1-t43-spec-review-a1": ("deep", "deep", "high", "read-only", "spec-compliance-reviewer", "implementation_review"),
+    "sdd-w1-t44-quality-review-a1": ("deep", "deep", "high", "read-only", "code-reviewer", "implementation_review"),
+    "sdd-w1-t45-test-review-a1": ("deep", "deep", "high", "read-only", "pr-test-analyzer", "implementation_review"),
+}
+assert [row["instance_id"] for row in provider_rows] == list(expectations), provider_rows
+decision_keys = {
+    "adaptive_fallback", "adaptive_proposal", "backend", "effective_policy",
+    "fallback_chain", "field_sources", "forced", "ignored_fields", "ignored_sources",
+    "logical_route", "minimum_route", "model", "policy_version", "reason_codes",
+    "reasoning_effort", "risk_scope", "risk_signals", "route_source", "routing_mode",
+    "sandbox", "schema_version", "service_tier",
+}
+provider_by_instance = {}
+for row in provider_rows:
+    assert set(row) == {
+        "instance_id", "backend", "issue", "tier", "prompt", "result", "status", "decision"
+    }, row
+    instance = row["instance_id"]
+    route, minimum, effort, sandbox, _, _ = expectations[instance]
+    assert (row["backend"], row["issue"], row["tier"]) == ("codex", 42, "large")
+    child = Path(row["prompt"]).parent
+    assert child.name == instance
+    assert Path(row["prompt"]).name == "prompt.txt" and Path(row["prompt"]).is_file()
+    assert Path(row["result"]).parent == child and Path(row["result"]).name == "result.md"
+    assert Path(row["status"]).parent == child and Path(row["status"]).name == "status.json"
+    assert Path(row["result"]).is_file() and Path(row["status"]).is_file()
+    decision = row["decision"]
+    assert set(decision) == decision_keys, decision
+    assert decision["schema_version"] == 1 and decision["backend"] == "codex"
+    assert decision["effective_policy"] == "adaptive" and decision["routing_mode"] == "adaptive"
+    assert decision["route_source"] == "role-policy" and decision["reason_codes"] == ["role-default"]
+    assert decision["logical_route"] == route and decision["minimum_route"] == minimum
+    assert decision["reasoning_effort"] == effort and decision["sandbox"] == sandbox
+    assert decision["risk_scope"] == "subtask" and decision["risk_signals"] == []
+    assert decision["service_tier"] == "default" and isinstance(decision["model"], str)
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", decision["policy_version"])
+    assert decision["adaptive_fallback"] is True and decision["adaptive_proposal"] is None
+    assert decision["fallback_chain"] == [] and decision["forced"] is False
+    assert decision["ignored_fields"] == [] and decision["ignored_sources"] == []
+    assert decision["field_sources"] == {
+        "model": "role-policy",
+        "reasoning_effort": "role-policy",
+        "sandbox": "parent-ceiling" if "-implement-" in instance else "role-policy",
+        "service_tier": "route-default",
+    }
+    provider_by_instance[instance] = row
+
+assert len(lifecycle_rows) == len(expectations) * 3, lifecycle_rows
+assert {row["run_id"] for row in lifecycle_rows} == set(expectations), lifecycle_rows
+for instance, (route, _, effort, sandbox, role, phase) in expectations.items():
+    events = [row for row in lifecycle_rows if row["run_id"] == instance]
+    assert [row["event"] for row in events] == ["route_decided", "agent_started", "completed"], events
+    for row in events:
+        assert row["agent_id"] == instance and row["backend"] == "codex"
+        assert row["workflow"] == "solve" and row["task_tier"] == "large"
+        assert row["parent_run_id"] == "sdd-receipt-root"
+        assert row["role"] == role and row["phase"] == phase
+        assert row["decision_logical_route"] == route
+        assert row["decision_reasoning_effort"] == effort
+        assert row["effective_logical_route"] == route
+        assert row["effective_reasoning_effort"] == effort
+        assert row["effective_sandbox"] == sandbox
+        assert row["effective_model"] == provider_by_instance[instance]["decision"]["model"]
+    assert events[1]["status_path"] == provider_by_instance[instance]["status"]
+    assert events[1]["timeout_s"] == 3600 and type(events[1]["owner_pid"]) is int
+    assert events[2]["terminal_status"] == "completed"
+
+leases = list(Path(semaphore_path).rglob("*.lease")) if Path(semaphore_path).exists() else []
+assert leases == [], leases
+PY
 
 unset UBERDEV_CHILD_TEST_SOURCE UBERDEV_CHILD_TEST_RECEIPT_FILE
 failure_path="$failure_fixture_path"
