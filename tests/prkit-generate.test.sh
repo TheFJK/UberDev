@@ -13,7 +13,12 @@ no(){ echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 echo "## prkit generate e2e (RFC 0014)"
 [ -r "$GEN" ] || { echo "  ABORT — generate.sh missing"; exit 99; }
 
-T1="$(mktemp -d)"; T2="$(mktemp -d)"; trap 'rm -rf "$T1" "$T2"' EXIT
+# T1's path deliberately CONTAINS A SPACE ("prkit tgt") — the real target lives at
+# "/Volumes/FJK SSD/Cursor/prkit", and an earlier verify.sh regression word-split on
+# that space. Keeping a spaced target here locks the fix in. T2 is space-free so G5
+# also proves the generated output is independent of the target path.
+_B1="$(mktemp -d)"; _B2="$(mktemp -d)"; T1="$_B1/prkit tgt"; T2="$_B2/out"
+mkdir -p "$T1" "$T2"; trap 'rm -rf "$_B1" "$_B2"' EXIT
 git -C "$T1" init -q; git -C "$T2" init -q
 
 # G1 — generate into a clean target succeeds and self-verifies

@@ -41,18 +41,20 @@ if [ -s /tmp/prkit-missing-skills.$$ ]; then fail "ref-int: skills missing:"; se
 else ok "ref-int: all invoked skills exist"; fi
 rm -f /tmp/prkit-missing-skills.$$
 
-# --- 5. Syntax: shell / python / json ---
+# --- 5. Syntax: shell / python / json (space-safe: NUL-delimited find + process
+# substitution so a target path containing spaces, e.g. "/Volumes/FJK SSD/...",
+# does not word-split; the loop stays in the current shell so *err flags persist) ---
 serr=0
-for f in $(find "$P" -name '*.sh' 2>/dev/null); do bash -n "$f" 2>/dev/null || { echo "         bash -n failed: $f"; serr=1; }; done
+while IFS= read -r -d '' f; do bash -n "$f" 2>/dev/null || { echo "         bash -n failed: $f"; serr=1; }; done < <(find "$P" -name '*.sh' -print0 2>/dev/null)
 [ "$serr" -eq 0 ] && ok "syntax: bash -n clean" || fail "syntax: shell errors"
 perr=0
 # ast.parse validates syntax WITHOUT emitting __pycache__/*.pyc — py_compile would
 # pollute the generated tree with non-deterministic bytecode (breaks determinism +
 # ships build artifacts). ast.parse is artifact-free and deterministic.
-for f in $(find "$P" -name '*.py' 2>/dev/null); do python3 -c 'import ast,sys; ast.parse(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1])' "$f" 2>/dev/null || { echo "         py syntax failed: $f"; perr=1; }; done
+while IFS= read -r -d '' f; do python3 -c 'import ast,sys; ast.parse(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1])' "$f" 2>/dev/null || { echo "         py syntax failed: $f"; perr=1; }; done < <(find "$P" -name '*.py' -print0 2>/dev/null)
 [ "$perr" -eq 0 ] && ok "syntax: python parse clean" || fail "syntax: python errors"
 jerr=0
-for f in $(find "$P" -name '*.json' 2>/dev/null); do jq empty "$f" 2>/dev/null || { echo "         jq failed: $f"; jerr=1; }; done
+while IFS= read -r -d '' f; do jq empty "$f" 2>/dev/null || { echo "         jq failed: $f"; jerr=1; }; done < <(find "$P" -name '*.json' -print0 2>/dev/null)
 [ "$jerr" -eq 0 ] && ok "syntax: jq clean" || fail "syntax: json errors"
 
 # --- 6. Required tree shape ---
