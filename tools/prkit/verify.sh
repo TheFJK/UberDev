@@ -124,10 +124,17 @@ if [ -d "$ROOT/codex" ]; then
              "codex/prkit-codex/skills/prkit-cmd-review-pr/SKILL.md" \
              "codex/prkit-codex/skills/prkit-cmd-simplify/SKILL.md" \
              "codex/prkit-codex/skills/prkit-cmd-merge/SKILL.md" \
+             "codex/prkit-codex/skills/prkit-post-impl-review/SKILL.md" \
+             "codex/prkit-codex/skills/prkit-merge-pipeline/SKILL.md" \
              "codex/install-codex.sh" "codex/README.md" "codex/AGENTS.md"; do
     [ -e "$ROOT/$req" ] || fail "shape: missing $req"
   done
-  ok "shape: codex required-file presence checked"
+  # Coexistence: NO un-prefixed skill dir may exist in the flat Codex skills space
+  # (would collide with an UberDev-for-Codex install in ~/.agents/skills/).
+  for bad in post-impl-review merge-pipeline; do
+    [ -e "$ROOT/codex/prkit-codex/skills/$bad" ] && fail "shape: un-prefixed codex skill dir '$bad' would collide"
+  done
+  ok "shape: codex required-file presence + prkit-prefixed skills checked"
 fi
 
 # --- 8. Root scaffold files (outside the SCAN roots) — present, non-empty, valid ---

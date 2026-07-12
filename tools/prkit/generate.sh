@@ -111,7 +111,13 @@ if [ -r "$MANIFEST_CODEX" ] && [ -d "$REPO_ROOT/codex" ]; then
     rel="${rel%$'\r'}"   # strip CR (Windows Git-Bash autocrlf checkout)
     case "$rel" in ''|\#*) continue;; esac
     cx_expected=$((cx_expected+1))
-    drel="$(printf '%s' "$rel" | sed 's/uberdev/prkit/g')"
+    # uberdev->prkit, PLUS prefix the two support-skill dirs: Codex installs skills
+    # into a FLAT ~/.agents/skills/, so plain post-impl-review / merge-pipeline would
+    # collide with an UberDev-for-Codex install. The command-skills (prkit-cmd-*) and
+    # agents (prkit-*.toml) are already namespaced.
+    drel="$(printf '%s' "$rel" | sed -e 's/uberdev/prkit/g' \
+              -e 's#/skills/post-impl-review/#/skills/prkit-post-impl-review/#' \
+              -e 's#/skills/merge-pipeline/#/skills/prkit-merge-pipeline/#')"
     dst="$TARGET/$drel"
     mkdir -p "$(dirname "$dst")"
     cp "$REPO_ROOT/$rel" "$dst" || { echo "generate: codex copy failed (source missing?): $rel" >&2; exit 1; }
@@ -124,6 +130,16 @@ if [ -r "$MANIFEST_CODEX" ] && [ -d "$REPO_ROOT/codex" ]; then
     prkit_apply_rewrites "$f" || { echo "generate: codex rewrite failed: $f" >&2; rw_rc=1; }
   done < <(find "$TARGET/codex" -type f -print0)
   [ "$rw_rc" -eq 0 ] || { echo "generate: codex rewrite pass had failures" >&2; exit 1; }
+  # Repoint references to the two prefixed support-skill dirs (codex tree only —
+  # the Claude tree keeps prkit:post-impl-review via plugin-scoping).
+  while IFS= read -r -d '' f; do
+    perl -0pi -e '
+      s{prkit:post-impl-review}{prkit-post-impl-review}g;
+      s{prkit:merge-pipeline}{prkit-merge-pipeline}g;
+      s{skills/post-impl-review}{skills/prkit-post-impl-review}g;
+      s{skills/merge-pipeline}{skills/prkit-merge-pipeline}g;
+    ' "$f" || { echo "generate: codex skill-prefix rewrite failed: $f" >&2; exit 1; }
+  done < <(find "$TARGET/codex" -type f -print0)
   # Scaffold codex-specific files from prkit-correct templates (authored, not
   # rewritten — so they don't inherit UberDev's stale counts). AFTER the rewrite
   # loop so they stay pristine.
