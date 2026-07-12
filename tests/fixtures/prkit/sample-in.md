@@ -8,3 +8,6 @@ _uberdev_config_read_load() { :; }
 config at .claude/uberdev.local.md
 path ${CLAUDE_PLUGIN_ROOT}/policy/model-routing-v1.json fallback ${PWD}/plugins/uberdev/policy/x.json
 label uberdev-approved and marker review-pr:pending
+clone https://github.com/TheFJK/UberDev then add TheFJK/uberdev to marketplace
+Related skills: uberdev:brainstorm, /uberdev:write-plan, and the UberDev toolkit primer
+inline: run `next: /uberdev:solve <URL>` then check the finding

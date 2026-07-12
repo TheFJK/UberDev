@@ -40,6 +40,19 @@ echo "$OUT" | grep -Eq '(prkit|uberdev):(goal|solve)|/(prkit|uberdev):(goal|solv
 # R7 — idempotent: second pass changes nothing
 cp "$TMP/f.md" "$TMP/g.md"; prkit_neutralize "$TMP/g.md"; prkit_apply_rewrites "$TMP/g.md"
 diff -q "$TMP/f.md" "$TMP/g.md" >/dev/null && ok "R7 rewrite is idempotent" || no "R7 not idempotent"
+# R8 — repo slug stays LOWERCASE prkit (not the CamelCase-mangled TheFJK/Prkit)
+echo "$OUT" | grep -q 'TheFJK/prkit' && ! echo "$OUT" | grep -q 'TheFJK/Prkit' \
+  && ok "R8 repo slug -> TheFJK/prkit (lowercase)" || no "R8 slug wrong-cased or missing"
+# R9 — OUT-OF-SET skills de-namespaced to bare prose (no dangling prkit:<name>);
+# in-set (code-fixer, post-impl-review) keep their prefix
+echo "$OUT" | grep -Eq 'prkit:(brainstorm|write-plan)' && no "R9 dangling out-of-set prkit:<skill> survived" \
+  || { echo "$OUT" | grep -q 'prkit:code-fixer' && echo "$OUT" | grep -q 'prkit:post-impl-review' \
+       && ok "R9 out-of-set de-namespaced, in-set kept" || no "R9 in-set ref lost"; }
+# R10 — the inline `next: /uberdev:solve <URL>` fragment keeps BALANCED backticks
+# (the site-494 mangling class: the neutralizer must not eat the trailing backtick)
+bt=$(echo "$OUT" | grep 'inline: run' | tr -cd '`' | wc -c | tr -d ' ')
+[ "$((bt % 2))" -eq 0 ] && [ "$bt" -gt 0 ] && ok "R10 inline-code backticks stay balanced ($bt)" \
+  || no "R10 backtick imbalance ($bt) — arg/backtick eaten"
 
 echo "  Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

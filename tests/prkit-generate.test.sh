@@ -27,9 +27,10 @@ if bash "$GEN" --target "$T1" --version 0.1.0 >/dev/null 2>&1; then ok "G1 gener
 # G2 — verify gate independently passes on the produced tree
 if bash "$VERIFY" "$T1" >/dev/null 2>&1; then ok "G2 verify passes on generated tree"; else no "G2 verify failed on generated tree"; fi
 
-# G3 — 31 source files landed under plugins/prkit
+# G3 — EXACTLY 32 source files landed under plugins/prkit (manifest count-lock;
+# -eq not -ge so a silently-dropped copy OR a stray extra file both fail)
 n=$(find "$T1/plugins/prkit/commands" "$T1/plugins/prkit/agents" "$T1/plugins/prkit/skills" "$T1/plugins/prkit/lib" "$T1/plugins/prkit/policy" -type f 2>/dev/null | wc -l | tr -d ' ')
-[ "$n" -ge 31 ] && ok "G3 >=31 copied files present ($n)" || no "G3 only $n copied files"
+[ "$n" -eq 32 ] && ok "G3 exactly 32 copied files present" || no "G3 copied $n files (expected 32)"
 
 # G4 — scaffold files exist with interpolated version
 grep -q '0.1.0' "$T1/plugins/prkit/.claude-plugin/plugin.json" && ok "G4 plugin.json version interpolated" || no "G4 plugin.json version missing"
@@ -54,6 +55,15 @@ if grep -rilE 'uberdev' "$T1/codex" >/dev/null 2>&1; then no "G7 uberdev token s
 
 # G8 — codex tree deterministic across the two generations (spaced vs plain path)
 if diff -r "$T1/codex" "$T2/codex" >/dev/null 2>&1; then ok "G8 codex deterministic (diff -r empty)"; else no "G8 codex non-deterministic"; fi
+
+# G9 — regeneration CLEANS stale files (the rm -rf clean stage). Plant strays in
+# both trees, regenerate into the SAME target, assert they are gone.
+printf 'stale\n' > "$T1/plugins/prkit/STALE_CLAUDE.txt"
+printf 'stale\n' > "$T1/codex/STALE_CODEX.txt"
+bash "$GEN" --target "$T1" --version 0.1.0 --force >/dev/null 2>&1
+if [ ! -e "$T1/plugins/prkit/STALE_CLAUDE.txt" ] && [ ! -e "$T1/codex/STALE_CODEX.txt" ]; then
+  ok "G9 regeneration removes stale files from both trees"
+else no "G9 stale files survived regeneration"; fi
 
 echo "  Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

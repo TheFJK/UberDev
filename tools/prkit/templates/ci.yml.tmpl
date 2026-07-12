@@ -11,16 +11,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install deps
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends jq
+      # NOTE: `find ... -exec cmd \;` returns 0 even when cmd fails, so an explicit
+      # `|| exit 1` is required for these to actually gate. codex/ is optional
+      # (only present when the Codex port is generated), hence the guarded root.
       - name: Syntax — shell
-        run: find plugins/prkit codex -name '*.sh' -exec bash -n {} \;
+        run: for f in $(find plugins/prkit $([ -d codex ] && echo codex) -name '*.sh'); do bash -n "$f" || exit 1; done
       - name: Syntax — python
-        run: find plugins/prkit codex -name '*.py' -exec python3 -m py_compile {} \;
+        run: for f in $(find plugins/prkit $([ -d codex ] && echo codex) -name '*.py'); do python3 -c 'import ast,sys; ast.parse(open(sys.argv[1],encoding="utf-8").read(), sys.argv[1])' "$f" || exit 1; done
       - name: Syntax — json
-        run: find plugins/prkit codex -name '*.json' -exec jq empty {} \;
+        run: for f in $(find plugins/prkit $([ -d codex ] && echo codex) -name '*.json'); do jq empty "$f" || exit 1; done
       - name: Syntax — toml
-        run: find plugins/prkit codex -name '*.toml' -exec python3 -c 'import tomllib,sys; tomllib.load(open(sys.argv[1],"rb"))' {} \;
+        run: for f in $(find plugins/prkit $([ -d codex ] && echo codex) -name '*.toml'); do python3 -c 'import tomllib,sys; tomllib.load(open(sys.argv[1],"rb"))' "$f" || exit 1; done
       - name: Namespace guard — no uberdev token survives (root NOTICE/LICENSE are out of scope)
         run: |
-          hits=$(grep -rilE 'uberdev' plugins/prkit codex || true)
+          hits=$(grep -rilE 'uberdev' plugins/prkit $([ -d codex ] && echo codex) || true)
           if [ -n "$hits" ]; then echo "surviving uberdev token:"; echo "$hits"; exit 1; fi
           echo "clean"

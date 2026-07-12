@@ -87,12 +87,12 @@ prkit/                                   # repo root
 │   ├── lib/       (11)
 │   └── policy/model-routing-v1.json
 ├── README.md  LICENSE  NOTICE  CHANGELOG.md  .gitignore
-└── .github/workflows/ci.yml            # shellcheck + py_compile + jq + verify.sh
+└── .github/workflows/ci.yml            # bash -n + ast.parse + jq + tomllib + inline uberdev grep
 ```
 
 Mirroring `plugins/prkit/` (vs. plugin-at-repo-root) keeps generator copy paths uniform (`plugins/uberdev/X` → `plugins/prkit/X`) and matches the marketplace `source: ./plugins/<name>` pattern already used in UberDev.
 
-### 5.3 Copy manifest (the PR-phase subgraph — ~31 files)
+### 5.3 Copy manifest (the PR-phase subgraph — 32 files)
 
 Source paths under `plugins/uberdev/`. Authoritative, verified copy set.
 
@@ -147,7 +147,7 @@ Runs at the end of every generation; non-zero exit fails the build. Also runnabl
 - **Token guard:** no `uberdev` (case-insensitive) or `UBERDEV_` survives under `plugins/prkit/`, except an explicit allowlist (LICENSE/NOTICE origin attribution).
 - **Referential integrity:** every `subagent_type: prkit:X` ↔ `agents/X.md`; every `Skill(prkit:X)` ↔ `skills/X/SKILL.md`; every `${CLAUDE_PLUGIN_ROOT}/lib/Y` and `/policy/Z` reference resolves to a copied file; **no** residual out-of-set ref (`prkit:goal`, `prkit:solve`).
 - **Syntax:** `bash -n` on every `.sh`; `python3 -m py_compile` on every `.py`; `jq empty` on every `.json`.
-- **Manifest agreement:** files present under `plugins/prkit/` equal manifest ∪ scaffold (no orphan, no missing).
+- **Manifest completeness** is enforced by `tests/prkit-manifest.test.sh` (count-lock + every source exists), not by `verify.sh`; verify's own non-vacuity + shape checks assert the generated tree is plausibly-sized and has the required files.
 
 ---
 
@@ -214,7 +214,7 @@ The verify gate's token guard + referential-integrity checks mechanically enforc
 
 - **Generator unit checks** (UberDev repo `tests/`): manifest completeness (every listed file exists in SSOT); rewrite applier maps each ruleset case on fixtures; neutralization removes the enumerated out-of-set sites.
 - **Verify-gate self-test:** deliberately-broken tree (surviving token / dangling ref / missing lib) must fail; clean tree must pass.
-- **prkit CI (`.github/workflows/ci.yml`):** `shellcheck` + `bash -n`, `python3 -m py_compile`, `jq empty`, and `verify.sh` on the committed tree.
+- **prkit CI (`.github/workflows/ci.yml`):** `bash -n`, `ast.parse` (artifact-free python syntax), `jq empty`, `tomllib`, and an inline `grep -rilE 'uberdev'` namespace guard on the committed tree — a subset of `verify.sh` (which runs only at generation time in UberDev, not in the prkit repo). Each `find` gate uses `|| exit 1` because `find -exec … \;` does not propagate failure.
 - **Smoke test (manual, documented):** install prkit locally, run `/prkit:review-pr` on a throwaway PR, confirm fanout dispatches `prkit:*` agents with no `uberdev:*` resolution; run `/prkit:merge` dry path.
 - **Determinism check:** generate twice into clean targets; `diff -r` empty.
 

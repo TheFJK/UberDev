@@ -32,7 +32,7 @@ count=$(grep -cvE '^\s*(#|$)' "$MANIFEST")
 for bad in lib/goal-state.sh policy/solve-run-tree-v1.json lib/aliases-sync.sh \
            hooks/session-start commands/install-aliases.md commands/solve.md \
            commands/goal.md; do
-  if grep -qxF "$bad" "$MANIFEST"; then no "M3 excluded file present: $bad"; FAIL=$((FAIL+1)); fi
+  if grep -qxF "$bad" "$MANIFEST"; then no "M3 excluded file present: $bad"; fi
 done
 [ "$FAIL" -eq 0 ] && ok "M3 no excluded files in manifest"
 
