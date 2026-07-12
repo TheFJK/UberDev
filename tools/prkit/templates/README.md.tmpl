@@ -1,0 +1,36 @@
+# prkit
+
+![Version](https://img.shields.io/badge/version-{{VERSION}}-blue)
+
+Standalone **PR-phase** toolkit for Claude Code — the review → fix → simplify → land
+pipeline extracted from [UberDev](https://github.com/TheFJK/UberDev). Namespaced
+`prkit:`, so it installs and runs **alongside** a full UberDev install with no collision.
+
+> Generated artifact — do not hand-edit. Source of truth is UberDev's `tools/prkit/`.
+> Regenerate with `tools/prkit/generate.sh --target <this-repo> --version X.Y.Z`.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `/prkit:review-pr` | Parallel-fanout post-implementation review + auto-fix + CI-failure routing |
+| `/prkit:simplify` | Reuse / quality / efficiency lens audit + fix |
+| `/prkit:merge` | Trust-trail check → strategy pick → conflict resolution → land |
+
+## Install
+
+Add this repo as a plugin marketplace in Claude Code, then install `prkit`:
+
+```
+/plugin marketplace add TheFJK/prkit
+/plugin install prkit
+```
+
+## Runtime requirements
+
+`git`, `gh` (authenticated), `jq`, `python3`. Optional: `gitleaks` (secret scan falls
+back to an inline regex scan if absent).
+
+## License
+
+MIT — see `LICENSE`. Origin attributions in `NOTICE`.
