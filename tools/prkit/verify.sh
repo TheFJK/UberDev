@@ -46,8 +46,11 @@ serr=0
 for f in $(find "$P" -name '*.sh' 2>/dev/null); do bash -n "$f" 2>/dev/null || { echo "         bash -n failed: $f"; serr=1; }; done
 [ "$serr" -eq 0 ] && ok "syntax: bash -n clean" || fail "syntax: shell errors"
 perr=0
-for f in $(find "$P" -name '*.py' 2>/dev/null); do python3 -m py_compile "$f" 2>/dev/null || { echo "         py_compile failed: $f"; perr=1; }; done
-[ "$perr" -eq 0 ] && ok "syntax: py_compile clean" || fail "syntax: python errors"
+# ast.parse validates syntax WITHOUT emitting __pycache__/*.pyc — py_compile would
+# pollute the generated tree with non-deterministic bytecode (breaks determinism +
+# ships build artifacts). ast.parse is artifact-free and deterministic.
+for f in $(find "$P" -name '*.py' 2>/dev/null); do python3 -c 'import ast,sys; ast.parse(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1])' "$f" 2>/dev/null || { echo "         py syntax failed: $f"; perr=1; }; done
+[ "$perr" -eq 0 ] && ok "syntax: python parse clean" || fail "syntax: python errors"
 jerr=0
 for f in $(find "$P" -name '*.json' 2>/dev/null); do jq empty "$f" 2>/dev/null || { echo "         jq failed: $f"; jerr=1; }; done
 [ "$jerr" -eq 0 ] && ok "syntax: jq clean" || fail "syntax: json errors"
