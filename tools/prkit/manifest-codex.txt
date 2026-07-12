@@ -1,0 +1,76 @@
+# tools/prkit/manifest-codex.txt — prkit CODEX-port PR-phase copy set (RFC 0014 Codex addendum).
+# Paths are relative to the UberDev REPO ROOT. Blank lines and #-comments ignored.
+# Dest paths are the source path with uberdev->prkit applied (so
+# codex/uberdev-codex -> codex/prkit-codex, uberdev-cmd- -> prkit-cmd-,
+# codex/agents/uberdev-<a>.toml -> codex/agents/prkit-<a>.toml). Content is then
+# rewritten by rewrite.sh (blanket uberdev->prkit + slug + neutralize).
+# The Codex manifest (.codex-plugin/plugin.json), README, and AGENTS.md primer are
+# NOT listed here — they are authored from templates with prkit-correct counts.
+# Count-locked at 51 by tests/prkit-codex-manifest.test.sh.
+
+# --- command-skills (3) — Codex equivalents of commands/{review-pr,simplify,merge}.md ---
+codex/uberdev-codex/skills/uberdev-cmd-review-pr/SKILL.md
+codex/uberdev-codex/skills/uberdev-cmd-simplify/SKILL.md
+codex/uberdev-codex/skills/uberdev-cmd-merge/SKILL.md
+
+# --- support/pipeline skills (3 files) ---
+codex/uberdev-codex/skills/post-impl-review/SKILL.md
+codex/uberdev-codex/skills/merge-pipeline/SKILL.md
+codex/uberdev-codex/skills/merge-pipeline/lib/discover.sh
+
+# --- agent runtime prompts (14 .md) ---
+codex/uberdev-codex/agents/code-reviewer.md
+codex/uberdev-codex/agents/silent-failure-hunter.md
+codex/uberdev-codex/agents/type-design-analyzer.md
+codex/uberdev-codex/agents/comment-analyzer.md
+codex/uberdev-codex/agents/pr-test-analyzer.md
+codex/uberdev-codex/agents/code-fixer.md
+codex/uberdev-codex/agents/code-simplifier.md
+codex/uberdev-codex/agents/ci-failure-classifier.md
+codex/uberdev-codex/agents/ci-code-fixer.md
+codex/uberdev-codex/agents/ci-rebase-handler.md
+codex/uberdev-codex/agents/trust-trail-evaluator.md
+codex/uberdev-codex/agents/merge-strategy-decider.md
+codex/uberdev-codex/agents/conflict-resolver.md
+codex/uberdev-codex/agents/findings-to-issues.md
+
+# --- lib (11 — shared dispatch/config chain) ---
+codex/uberdev-codex/lib/child-dispatch.sh
+codex/uberdev-codex/lib/agent-dispatch.sh
+codex/uberdev-codex/lib/dispatch.sh
+codex/uberdev-codex/lib/config-read.sh
+codex/uberdev-codex/lib/model_routing.py
+codex/uberdev-codex/lib/run_manifest.py
+codex/uberdev-codex/lib/live-semaphore.sh
+codex/uberdev-codex/lib/child-receipts.py
+codex/uberdev-codex/lib/child-inputs.py
+codex/uberdev-codex/lib/command-workspace.py
+codex/uberdev-codex/lib/secret-scan.sh
+
+# --- policy (1) ---
+codex/uberdev-codex/policy/model-routing-v1.json
+
+# --- plugin-runtime scaffold (3) ---
+codex/uberdev-codex/hooks/hooks.json
+codex/uberdev-codex/hooks/session-start
+codex/uberdev-codex/shared/document-reviewer-template.md
+
+# --- installable Codex subagents (14 .toml — reference artifacts) ---
+codex/agents/uberdev-code-reviewer.toml
+codex/agents/uberdev-silent-failure-hunter.toml
+codex/agents/uberdev-type-design-analyzer.toml
+codex/agents/uberdev-comment-analyzer.toml
+codex/agents/uberdev-pr-test-analyzer.toml
+codex/agents/uberdev-code-fixer.toml
+codex/agents/uberdev-code-simplifier.toml
+codex/agents/uberdev-ci-failure-classifier.toml
+codex/agents/uberdev-ci-code-fixer.toml
+codex/agents/uberdev-ci-rebase-handler.toml
+codex/agents/uberdev-trust-trail-evaluator.toml
+codex/agents/uberdev-merge-strategy-decider.toml
+codex/agents/uberdev-conflict-resolver.toml
+codex/agents/uberdev-findings-to-issues.toml
+
+# --- installer + converter (2 — the install-codex.sh one-liner path) ---
+codex/install-codex.sh
+codex/tools/convert-agents.py
