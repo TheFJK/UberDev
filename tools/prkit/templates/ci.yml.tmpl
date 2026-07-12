@@ -12,13 +12,15 @@ jobs:
       - name: Install deps
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends jq
       - name: Syntax — shell
-        run: for f in $(find plugins/prkit -name '*.sh'); do bash -n "$f"; done
+        run: find plugins/prkit codex -name '*.sh' -exec bash -n {} \;
       - name: Syntax — python
-        run: for f in $(find plugins/prkit -name '*.py'); do python3 -m py_compile "$f"; done
+        run: find plugins/prkit codex -name '*.py' -exec python3 -m py_compile {} \;
       - name: Syntax — json
-        run: for f in $(find plugins/prkit -name '*.json'); do jq empty "$f"; done
-      - name: Namespace guard — no uberdev token survives (allowlist: NOTICE)
+        run: find plugins/prkit codex -name '*.json' -exec jq empty {} \;
+      - name: Syntax — toml
+        run: find plugins/prkit codex -name '*.toml' -exec python3 -c 'import tomllib,sys; tomllib.load(open(sys.argv[1],"rb"))' {} \;
+      - name: Namespace guard — no uberdev token survives (root NOTICE/LICENSE are out of scope)
         run: |
-          hits=$(grep -rilE 'uberdev' plugins/prkit || true)
+          hits=$(grep -rilE 'uberdev' plugins/prkit codex || true)
           if [ -n "$hits" ]; then echo "surviving uberdev token:"; echo "$hits"; exit 1; fi
           echo "clean"
