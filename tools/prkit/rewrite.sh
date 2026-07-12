@@ -42,9 +42,11 @@ prkit_neutralize() {
 prkit_apply_rewrites() {
   local f="$1"
   perl -0pi -e '
+    s{TheFJK/UberDev}{TheFJK/prkit}g;  # repo slug: MUST stay lowercase "prkit"
+    s{TheFJK/uberdev}{TheFJK/prkit}g;  # (clone/marketplace URLs) — run before CamelCase
     s/UBERDEV/PRKIT/g;   # env vars, macros
     s/UberDev/Prkit/g;   # CamelCase product name in prose
     s/Uberdev/Prkit/g;   # sentence-case
-    s/uberdev/prkit/g;   # everything else: uberdev:, _uberdev_, paths, labels, files
+    s/uberdev/prkit/g;   # everything else: uberdev:, _uberdev_, uberdev-codex, uberdev-cmd-, paths, labels, files
   ' "$f"
 }

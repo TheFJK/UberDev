@@ -92,6 +92,7 @@ jobs:
           bash tests/review-pr.test.sh && \
           bash tests/review-pr-phase3-ci.test.sh && \
           bash tests/prkit-manifest.test.sh && \
+          bash tests/prkit-codex-manifest.test.sh && \
           bash tests/prkit-rewrite.test.sh && \
           bash tests/prkit-verify.test.sh && \
           bash tests/prkit-generate.test.sh && \
@@ -298,6 +299,7 @@ jobs:
           bash tests/audit-fixups.test.sh && \
           bash tests/review-pr.test.sh && \
           bash tests/prkit-manifest.test.sh && \
+          bash tests/prkit-codex-manifest.test.sh && \
           bash tests/cluster.test.sh && \
           bash tests/code-fixer-dispatch.test.sh && \
           bash tests/findings-to-issues.test.sh && \

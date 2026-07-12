@@ -5,6 +5,9 @@ All notable changes to prkit are documented here (Keep a Changelog 1.1.0; SemVer
 ## [{{VERSION}}] — {{DATE}}
 
 ### Added
-- Initial standalone PR-phase plugin extracted from UberDev: `/prkit:review-pr`,
-  `/prkit:simplify`, `/prkit:merge`, with their reviewer/fixer/CI/merge agents,
-  `post-impl-review` + `merge-pipeline` skills, and the shared dispatch/config lib.
+- Initial standalone PR-phase plugin: `/prkit:review-pr`, `/prkit:simplify`,
+  `/prkit:merge`, with their reviewer/fixer/CI/merge agents, `post-impl-review` +
+  `merge-pipeline` skills, and the shared dispatch/config lib.
+- Codex CLI port: `codex/prkit-codex/` native plugin + `codex/install-codex.sh`
+  one-liner. The three commands ship as `prkit-cmd-*` skills, the 14 subagents as
+  TOML, plus the Codex primer (`codex/AGENTS.md`).

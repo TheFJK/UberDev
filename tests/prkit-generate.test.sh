@@ -39,5 +39,21 @@ grep -q '0.1.0' "$T1/plugins/prkit/.claude-plugin/plugin.json" && ok "G4 plugin.
 bash "$GEN" --target "$T2" --version 0.1.0 >/dev/null 2>&1
 if diff -r "$T1/plugins/prkit" "$T2/plugins/prkit" >/dev/null 2>&1; then ok "G5 deterministic (diff -r empty)"; else no "G5 non-deterministic output"; fi
 
+# G6 — Codex port generated: prkit-cmd-* skills, renamed TOML, installer, manifest
+if [ -f "$T1/codex/prkit-codex/skills/prkit-cmd-review-pr/SKILL.md" ] \
+   && [ -f "$T1/codex/prkit-codex/skills/prkit-cmd-simplify/SKILL.md" ] \
+   && [ -f "$T1/codex/prkit-codex/skills/prkit-cmd-merge/SKILL.md" ] \
+   && [ -f "$T1/codex/agents/prkit-code-reviewer.toml" ] \
+   && [ -f "$T1/codex/install-codex.sh" ] \
+   && grep -q '"name": "prkit-codex"' "$T1/codex/prkit-codex/.codex-plugin/plugin.json"; then
+  ok "G6 codex port generated (prkit-cmd-* skills, prkit-*.toml, installer, manifest)"
+else no "G6 codex port incomplete"; fi
+
+# G7 — no uberdev token survives anywhere under codex/
+if grep -rilE 'uberdev' "$T1/codex" >/dev/null 2>&1; then no "G7 uberdev token survives under codex/"; else ok "G7 codex tree is uberdev-free"; fi
+
+# G8 — codex tree deterministic across the two generations (spaced vs plain path)
+if diff -r "$T1/codex" "$T2/codex" >/dev/null 2>&1; then ok "G8 codex deterministic (diff -r empty)"; else no "G8 codex non-deterministic"; fi
+
 echo "  Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

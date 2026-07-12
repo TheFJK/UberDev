@@ -77,12 +77,47 @@ render "$TEMPLATES/CHANGELOG.md.tmpl"      > "$TARGET/CHANGELOG.md"
 render "$TEMPLATES/gitignore.tmpl"        > "$TARGET/.gitignore"
 render "$TEMPLATES/ci.yml.tmpl"           > "$TARGET/.github/workflows/ci.yml"
 
-# --- 6. Verify (fail the whole run on any violation) ---
+# --- 5b. Codex port (present only when the codex/ SSOT + its manifest exist) ---
+MANIFEST_CODEX="$HERE/manifest-codex.txt"
+cx_copied=0
+if [ -r "$MANIFEST_CODEX" ] && [ -d "$REPO_ROOT/codex" ]; then
+  # The prkit repo's entire codex/ tree is generated — clean it for an
+  # idempotent regenerate (no stale files if the manifest shrinks).
+  rm -rf "$TARGET/codex"
+  # Copy each codex source to a dest path with uberdev->prkit applied
+  # (codex/uberdev-codex -> codex/prkit-codex, uberdev-cmd- -> prkit-cmd-,
+  #  codex/agents/uberdev-<a>.toml -> codex/agents/prkit-<a>.toml).
+  while IFS= read -r rel; do
+    case "$rel" in ''|\#*) continue;; esac
+    drel="$(printf '%s' "$rel" | sed 's/uberdev/prkit/g')"
+    dst="$TARGET/$drel"
+    mkdir -p "$(dirname "$dst")"
+    cp "$REPO_ROOT/$rel" "$dst"
+    cx_copied=$((cx_copied+1))
+  done < "$MANIFEST_CODEX"
+  # Rewrite content of every copied codex file (neutralize goal/solve, then blanket).
+  while IFS= read -r -d '' f; do
+    prkit_neutralize "$f"
+    prkit_apply_rewrites "$f"
+  done < <(find "$TARGET/codex" -type f -print0)
+  # Scaffold codex-specific files from prkit-correct templates (authored, not
+  # rewritten — so they don't inherit UberDev's stale counts). AFTER the rewrite
+  # loop so they stay pristine.
+  mkdir -p "$TARGET/codex/prkit-codex/.codex-plugin"
+  render "$TEMPLATES/codex-plugin.json.tmpl" > "$TARGET/codex/prkit-codex/.codex-plugin/plugin.json"
+  render "$TEMPLATES/codex-README.md.tmpl"   > "$TARGET/codex/README.md"
+  render "$TEMPLATES/codex-AGENTS.md.tmpl"    > "$TARGET/codex/AGENTS.md"
+  # Restore exec bits on the entry scripts (cp preserves mode, but be explicit).
+  [ -f "$TARGET/codex/install-codex.sh" ] && chmod +x "$TARGET/codex/install-codex.sh"
+  [ -f "$TARGET/codex/prkit-codex/hooks/session-start" ] && chmod +x "$TARGET/codex/prkit-codex/hooks/session-start"
+fi
+
+# --- 6. Verify (fail the whole run on any violation; covers both trees) ---
 if ! bash "$HERE/verify.sh" "$TARGET"; then
   echo "generate: VERIFY FAILED — output left in $TARGET for inspection" >&2
   exit 1
 fi
 
 # --- 7. Summary ---
-echo "generate: OK — copied $copied files, scaffolded 8, verified."
+echo "generate: OK — copied $copied claude + $cx_copied codex files, scaffolded 8+3, verified."
 echo "generate: next -> git -C '$TARGET' add -A && git -C '$TARGET' commit -m 'chore: regenerate prkit $VERSION'"

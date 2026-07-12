@@ -1,0 +1,70 @@
+# prkit for Codex
+
+prkit installs **5 skills** (in `~/.agents/skills/`) and **14 subagents** (in
+`~/.codex/agents/` as `prkit-<name>.toml`). It is the standalone PR phase —
+review → fix → simplify → land — namespaced `prkit` so it coexists with a full install.
+
+## Instruction priority
+
+1. The user's explicit instructions (AGENTS.md, direct requests) — highest.
+2. prkit skills — override default behavior where they conflict.
+3. Default behavior — lowest.
+
+## Commands became skills
+
+Codex has no slash-commands, so prkit's three commands ship as skills named
+`prkit-cmd-<name>`, invokable explicitly with `$prkit-cmd-<name>`:
+
+- `$prkit-cmd-review-pr` — parallel-fanout PR review + auto-fix + CI-failure routing
+- `$prkit-cmd-simplify` — reuse / quality / efficiency lens audit + fix
+- `$prkit-cmd-merge` — trust-trail check → strategy → conflict resolution → land
+
+A natural-language request like "review the current pull request" should invoke
+`prkit-cmd-review-pr` automatically. The two internal skills `post-impl-review`
+and `merge-pipeline` are used by those commands; you do not invoke them directly.
+
+## Tool mapping (Claude Code → Codex)
+
+The skill bodies are written for Claude Code. Translate as you read:
+
+| Claude Code | Codex |
+|---|---|
+| `Task(subagent_type=…)` | `spawn_agent(...)` + `wait_agent(...)` |
+| `TodoWrite` | `update_plan` |
+| `Skill(...)` | native skill invocation |
+| `Workflow(...)` | no equivalent — follow the skill's "No-Workflow fallback" |
+| `MultiEdit` / `Edit` | native edit |
+
+## Named-agent dispatch
+
+prkit's review/simplify/merge fanouts dispatch specific subagents. On Codex:
+
+```
+spawn_agent(agent_type="prkit-<name>")   # e.g. prkit-code-reviewer
+```
+
+If a Codex release does not support `agent_type`, fall back to a generic
+`worker` agent and pass the subagent's TOML `developer_instructions` as its
+prompt (the `.toml` files live in `~/.codex/agents/prkit-*.toml`). The 14
+subagents are: code-reviewer, silent-failure-hunter, type-design-analyzer,
+comment-analyzer, pr-test-analyzer, code-fixer, code-simplifier,
+ci-failure-classifier, ci-code-fixer, ci-rebase-handler, trust-trail-evaluator,
+merge-strategy-decider, conflict-resolver, findings-to-issues.
+
+## Sandbox / worktrees
+
+The review and merge flows run git. Under a `workspace-write` sandbox that is
+sufficient; the merge flow's `git checkout main` expects to run from the main
+checkout, not a pinned worktree.
+
+## Per-project config
+
+prkit reads optional per-project config from `.codex/prkit.local.md` (YAML
+frontmatter; env vars override file values). Keys follow the standard prkit
+config schema — see the `using-*` skill references if present.
+
+## Uninstall
+
+```bash
+./codex/install-codex.sh --uninstall
+```
