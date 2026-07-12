@@ -91,6 +91,10 @@ jobs:
           bash tests/audit-fixups.test.sh && \
           bash tests/review-pr.test.sh && \
           bash tests/review-pr-phase3-ci.test.sh && \
+          bash tests/prkit-manifest.test.sh && \
+          bash tests/prkit-rewrite.test.sh && \
+          bash tests/prkit-verify.test.sh && \
+          bash tests/prkit-generate.test.sh && \
           bash tests/cluster.test.sh && \
           bash tests/cluster-pipeline.test.sh && \
           bash tests/code-fixer-dispatch.test.sh && \
@@ -272,6 +276,9 @@ jobs:
         #   - dispatch-routing-parity.test.sh
         #   - orchestrator-plan-flatten.test.sh
         #   - sdd-routed-lifecycle.test.sh
+        #   - prkit-rewrite.test.sh
+        #   - prkit-verify.test.sh
+        #   - prkit-generate.test.sh
 #   - review-pr-phase3-ci.test.sh
 #   - review-child-handoff.test.sh
 #   - lib-assert-count.test.sh
@@ -290,6 +297,7 @@ jobs:
           bash tests/spec-reviewer-plan-aware.test.sh && \
           bash tests/audit-fixups.test.sh && \
           bash tests/review-pr.test.sh && \
+          bash tests/prkit-manifest.test.sh && \
           bash tests/cluster.test.sh && \
           bash tests/code-fixer-dispatch.test.sh && \
           bash tests/findings-to-issues.test.sh && \
