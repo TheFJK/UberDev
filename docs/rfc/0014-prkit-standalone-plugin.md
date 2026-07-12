@@ -243,3 +243,24 @@ The verify gate's token guard + referential-integrity checks mechanically enforc
 ## 13. Handoff
 
 Terminal step of brainstorm: invoke `uberdev:write-plan` to produce the wave-decomposed implementation plan for the generator + templates + verify gate + first prkit generation.
+
+---
+
+## 14. Codex port addendum (SHIPPED)
+
+UberDev supports **two runtimes**: Claude Code (`plugins/uberdev/`) and the OpenAI Codex CLI (`codex/uberdev-codex/` native plugin + `codex/install-codex.sh` one-liner). The Claude-only extraction above left prkit unusable on Codex, so the generator was extended to also emit a Codex port — same SSOT extract+rewrite model.
+
+### 14.1 Approach
+UberDev's Codex tree is already Codex-adapted (commands→`uberdev-cmd-*` command-skills, agents→TOML via `codex/tools/convert-agents.py`, paths fixed to `~/.codex`/`CODEX_HOME`/`.codex-plugin`). So prkit's Codex port is extracted **from `codex/uberdev-codex/`** (not re-transformed from scratch): a second manifest (`tools/prkit/manifest-codex.txt`, count-locked at **51**) drives a copy stage that rewrites both the **destination path** and the **content** with `uberdev`→`prkit`. The existing blanket rewrite already handles every Codex-specific literal — `uberdev-codex`→`prkit-codex`, `uberdev-cmd-`→`prkit-cmd-`, the TOML agent names, the `uberdev-codex-primer` sentinel.
+
+### 14.2 New rewrite rule (fixes both trees)
+Repo-slug rule, ordered before the CamelCase pass: `TheFJK/UberDev`→`TheFJK/prkit` (lowercase), so clone/marketplace URLs in `install-codex.sh` resolve. Without it the CamelCase rule would mangle the slug to `TheFJK/Prkit` (a nonexistent repo).
+
+### 14.3 Codex copy set (51) + scaffold
+`codex/prkit-codex/`: 3 `prkit-cmd-*` command-skills, 3 support-skill files (`post-impl-review`, `merge-pipeline` + `lib/discover.sh`), 14 agent `.md`, 11 lib, 1 policy, `.codex-plugin` manifest (templated), `hooks/` (2), `shared/` (1); `codex/agents/prkit-*.toml` (14, reference); `codex/install-codex.sh` + `codex/tools/convert-agents.py` (the installer path that carries the agents — required because the Codex plugin manifest has no `agents` field). Three scaffold docs are **authored templates** (`codex-plugin.json.tmpl`, `codex-README.md.tmpl`, `codex-AGENTS.md.tmpl`) with prkit-correct counts (3 commands, 14 agents, 5 skills) rather than extract+rewrite, so they don't inherit UberDev's stale "44 subagents".
+
+### 14.4 Verify + tests
+`verify.sh` now scans both trees (space-safe arrays), adds TOML validation (`tomllib`, skipped gracefully if absent) and a Codex shape check. Tests: `tests/prkit-codex-manifest.test.sh` (completeness + count-lock 51) + `prkit-generate.test.sh` G6–G8 (codex tree presence, uberdev-free, determinism). The verify gate caught 3 real gaps during bring-up (template `UberDev` mentions leaking into scanned `codex/`).
+
+### 14.5 Resolves open item §12
+The `config-read.sh` codex-fallback path (`uberdev-codex`→`prkit-codex`) is handled by the blanket rewrite (not dropped) — the composite `${CODEX_HOME}/plugins/prkit-codex/...` correctly points at prkit's Codex runtime dir.
