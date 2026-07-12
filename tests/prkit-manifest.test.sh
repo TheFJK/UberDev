@@ -17,6 +17,7 @@ echo "## prkit manifest (RFC 0014)"
 # M1 — every listed path exists under plugins/uberdev/
 missing=0
 while IFS= read -r line; do
+  line="${line%$'\r'}"   # strip CR — Git-Bash checks out with autocrlf on Windows
   case "$line" in ''|\#*) continue;; esac
   [ -e "$SRC/$line" ] || { echo "    missing: $line"; missing=$((missing+1)); }
 done < "$MANIFEST"

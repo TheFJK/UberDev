@@ -16,6 +16,7 @@ echo "## prkit codex manifest (RFC 0014 Codex addendum)"
 # C1 — every listed path exists under the repo root
 missing=0
 while IFS= read -r line; do
+  line="${line%$'\r'}"   # strip CR — Git-Bash checks out with autocrlf on Windows
   case "$line" in ''|\#*) continue;; esac
   [ -e "$REPO_ROOT/$line" ] || { echo "    missing: $line"; missing=$((missing+1)); }
 done < "$MANIFEST"

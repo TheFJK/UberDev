@@ -54,6 +54,7 @@ mkdir -p "$P"
 # lies. copied is asserted to equal the manifest entry count. ---
 copied=0; expected=0
 while IFS= read -r rel; do
+  rel="${rel%$'\r'}"   # strip CR (Windows Git-Bash autocrlf checkout)
   case "$rel" in ''|\#*) continue;; esac
   expected=$((expected+1))
   dst="$P/$rel"
@@ -107,6 +108,7 @@ if [ -r "$MANIFEST_CODEX" ] && [ -d "$REPO_ROOT/codex" ]; then
   #  codex/agents/uberdev-<a>.toml -> codex/agents/prkit-<a>.toml).
   cx_expected=0
   while IFS= read -r rel; do
+    rel="${rel%$'\r'}"   # strip CR (Windows Git-Bash autocrlf checkout)
     case "$rel" in ''|\#*) continue;; esac
     cx_expected=$((cx_expected+1))
     drel="$(printf '%s' "$rel" | sed 's/uberdev/prkit/g')"
