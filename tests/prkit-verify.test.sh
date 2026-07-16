@@ -43,6 +43,13 @@ expect_fail "V6 dangling out-of-set prkit:brainstorm fails" 'printf "see prkit:b
 expect_fail "V7 unrendered {{VERSION}} placeholder fails"   'printf "version {{VERSION}} here\n" >> "$d/README.md"'
 expect_fail "V8 empty marketplace.json fails"               ': > "$d/.claude-plugin/marketplace.json"'
 expect_fail "V9 removed all agents (non-vacuity/ref-int) fails" 'rm -rf "$d/plugins/prkit/agents"'
+expect_fail "V10 removed Claude reviewer contract fails" 'rm -f "$d/plugins/prkit/shared/phase1-reviewer-output-v1.md"'
+expect_fail "V11 removed Codex solve run tree fails" 'rm -f "$d/codex/prkit-codex/policy/solve-run-tree-v1.json"'
+expect_fail "V12 native reviewer missing canonical schema fails" 'python3 - "$d/codex/agents/prkit-code-reviewer.toml" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); value=p.read_text(); marker="## Phase 1 reviewer output contract (v1)"; p.write_text(value.replace(marker,"removed",1))
+PY'
 
 echo "  Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

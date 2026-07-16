@@ -759,7 +759,7 @@
         "emphasis"
       ],
       "required_input_types": {
-        "changed_paths": "path_array",
+        "changed_paths": "repo_path_array",
         "criteria_path": "path",
         "diff_path": "path",
         "emphasis": "string_array"
@@ -790,7 +790,7 @@
         "emphasis"
       ],
       "required_input_types": {
-        "changed_paths": "path_array",
+        "changed_paths": "repo_path_array",
         "criteria_path": "path",
         "diff_path": "path",
         "emphasis": "string_array"
@@ -822,7 +822,7 @@
         "lens"
       ],
       "required_input_types": {
-        "changed_paths": "path_array",
+        "changed_paths": "repo_path_array",
         "criteria_path": "path",
         "diff_path": "path",
         "emphasis": "string_array",
@@ -854,7 +854,7 @@
         "emphasis"
       ],
       "required_input_types": {
-        "changed_paths": "path_array",
+        "changed_paths": "repo_path_array",
         "criteria_path": "path",
         "diff_path": "path",
         "emphasis": "string_array"
@@ -885,7 +885,7 @@
         "emphasis"
       ],
       "required_input_types": {
-        "changed_paths": "path_array",
+        "changed_paths": "repo_path_array",
         "criteria_path": "path",
         "diff_path": "path",
         "emphasis": "string_array"
@@ -916,7 +916,7 @@
         "emphasis"
       ],
       "required_input_types": {
-        "changed_paths": "path_array",
+        "changed_paths": "repo_path_array",
         "criteria_path": "path",
         "diff_path": "path",
         "emphasis": "string_array"

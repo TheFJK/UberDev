@@ -19,6 +19,7 @@ SUPPORTED_TYPES = {
     "string_array",
     "path_array",
     "optional_path_array",
+    "repo_path_array",
 }
 
 
@@ -100,7 +101,7 @@ def validate_value(key: str, value: Any, kind: str) -> None:
         if not isinstance(value, str):
             fail(f"input {key} must be a string")
         return
-    if kind in {"string_array", "path_array", "optional_path_array"}:
+    if kind in {"string_array", "path_array", "optional_path_array", "repo_path_array"}:
         if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
             fail(f"input {key} must be an array of non-empty strings")
         return

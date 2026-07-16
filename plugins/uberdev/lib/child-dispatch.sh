@@ -186,6 +186,14 @@ def fail(code): print('uberdev child dispatch: '+code,file=sys.stderr); raise Sy
 def beneath(root,path):
  try:return os.path.commonpath((root,path))==root
  except ValueError:return False
+def repo_paths(value):
+ if not isinstance(value,list) or len(value)>128: fail('input_type_mismatch')
+ for path in value:
+  if (not isinstance(path,str) or not path or len(path)>4096 or path.startswith('/')
+      or '\\' in path or any(ord(c)<32 or ord(c)==127 for c in path)): fail('unsafe_repo_path')
+  parts=path.split('/')
+  if (any(part in {'','.','..'} for part in parts) or re.fullmatch(r'[A-Za-z]:',parts[0])
+      or os.path.normpath(path)!=path): fail('unsafe_repo_path')
 try:
  carrier=json.loads(carrier_raw); inputs=json.loads(inputs_raw); risks=json.loads(risks_raw)
  manifest=json.load(open(manifest_path))
@@ -212,6 +220,19 @@ if not isinstance(row.get('role'),str) or not isinstance(row.get('phase'),str) o
 allowed=row.get('allowed_workflows'); required=row.get('required_inputs'); optional=row.get('optional_inputs')
 if not isinstance(allowed,list) or carrier['workflow'] not in allowed: fail('workflow_not_allowed')
 if not isinstance(required,dict) or not isinstance(optional,dict) or set(required)&set(optional): fail('invalid_manifest_edge')
+contract_id=row.get('output_contract')
+if contract_id is not None:
+ contracts=manifest.get('output_contracts')
+ if not isinstance(contract_id,str) or not IDENT.fullmatch(contract_id) or not isinstance(contracts,dict): fail('invalid_output_contract')
+ contract_rel=contracts.get(contract_id)
+ if (not isinstance(contract_rel,str) or not contract_rel or contract_rel.startswith('/') or '\\' in contract_rel
+     or any(part in {'','.','..'} for part in contract_rel.split('/')) or os.path.normpath(contract_rel)!=contract_rel): fail('invalid_output_contract')
+ contract_path=os.path.join(plugin_root,*contract_rel.split('/'))
+ if not beneath(os.path.realpath(plugin_root),os.path.realpath(contract_path)): fail('invalid_output_contract')
+ try: contract_entry=os.lstat(contract_path)
+ except OSError: fail('invalid_output_contract')
+ if (stat.S_ISLNK(contract_entry.st_mode) or not stat.S_ISREG(contract_entry.st_mode) or contract_entry.st_uid!=os.geteuid()
+     or contract_entry.st_nlink!=1 or contract_entry.st_size<1 or contract_entry.st_size>65536): fail('invalid_output_contract')
 if not isinstance(inputs,dict) or not set(required)<=set(inputs) or not set(inputs)<=set(required)|set(optional): fail('input_schema_mismatch')
 run_risks=meta.get('risk_signals')
 if not isinstance(run_risks,list) or any(x not in RISKS for x in run_risks): fail('invalid_context_risk_signals')
@@ -234,6 +255,9 @@ def scalar(value,kind):
   return
  if kind=='string_array':
   if not isinstance(value,list) or len(value)>128 or any(not isinstance(x,str) or not x or len(x)>8192 or any(c in x for c in '\r\n\0') for x in value): fail('input_type_mismatch')
+  return
+ if kind=='repo_path_array':
+  repo_paths(value)
   return
  if kind in {'optional_path','optional_path_array'} and value in ('',[]): return
  values=value if kind in {'path_array','optional_path_array'} else [value]
@@ -294,6 +318,14 @@ def fail(code):
 def beneath(root,path):
     try:return os.path.commonpath((root,path))==root
     except ValueError:return False
+def repo_paths(value):
+    if not isinstance(value,list) or len(value)>128: fail('input_type_mismatch')
+    for path in value:
+        if (not isinstance(path,str) or not path or len(path)>4096 or path.startswith('/')
+            or '\\' in path or any(ord(c)<32 or ord(c)==127 for c in path)): fail('unsafe_repo_path')
+        parts=path.split('/')
+        if (any(part in {'','.','..'} for part in parts) or re.fullmatch(r'[A-Za-z]:',parts[0])
+            or os.path.normpath(path)!=path): fail('unsafe_repo_path')
 def safe_existing(path, regular=True, max_bytes=65536):
     if not os.path.isabs(path) or not os.path.lexists(path): fail('unsafe_path')
     entry=os.lstat(path)
@@ -359,6 +391,19 @@ if not isinstance(row,dict) or row.get('kind')!='provider': fail('undeclared_edg
 allowed=row.get('allowed_workflows'); required_inputs=row.get('required_inputs'); optional_inputs=row.get('optional_inputs')
 if not isinstance(allowed,list) or carrier['workflow'] not in allowed: fail('workflow_not_allowed')
 if not isinstance(required_inputs,dict) or not isinstance(optional_inputs,dict) or set(required_inputs)&set(optional_inputs): fail('invalid_manifest_edge')
+contract_raw=b''; contract_id=row.get('output_contract')
+if contract_id is not None:
+    contracts=manifest.get('output_contracts')
+    if not isinstance(contract_id,str) or not IDENT.fullmatch(contract_id) or not isinstance(contracts,dict): fail('invalid_output_contract')
+    contract_rel=contracts.get(contract_id)
+    if (not isinstance(contract_rel,str) or not contract_rel or contract_rel.startswith('/') or '\\' in contract_rel
+        or any(part in {'','.','..'} for part in contract_rel.split('/')) or os.path.normpath(contract_rel)!=contract_rel): fail('invalid_output_contract')
+    contract_path=os.path.join(plugin_root,*contract_rel.split('/'))
+    if not beneath(os.path.realpath(plugin_root),os.path.realpath(contract_path)): fail('invalid_output_contract')
+    safe_existing(contract_path,max_bytes=65536)
+    try: contract_raw=open(contract_path,'rb').read(65537)
+    except OSError: fail('invalid_output_contract')
+    if not contract_raw or len(contract_raw)>65536: fail('invalid_output_contract')
 if value.get('role')!=row.get('role'): fail('role_mismatch')
 if value.get('phase')!=row.get('phase'): fail('phase_mismatch')
 if value.get('risk_scope')!=row.get('risk_scope'): fail('risk_scope_mismatch')
@@ -380,6 +425,9 @@ def validate_typed(item,kind):
         return
     if kind=='string_array':
         if not isinstance(item,list) or len(item)>128 or any(not isinstance(x,str) or not x or len(x)>8192 or any(c in x for c in '\r\n\0') for x in item): fail('input_type_mismatch')
+        return
+    if kind=='repo_path_array':
+        repo_paths(item)
         return
     if kind in {'optional_path','optional_path_array'} and item in ('',[]): return
     values=item if kind in {'path_array','optional_path_array'} else [item]
@@ -446,7 +494,8 @@ try:
       + f'Routing context: {ctx}\nRouting context SHA-256: {digest}\n'.encode()
       + f'<uberdev-handoff-json file="{html.escape(os.path.join(child_dir,"handoff.v1.json"),quote=True)}" sha256="{handoff_digest}"/>\n'.encode()
       + b'Execute only the bounded role and inputs above. Return completed, blocked, or refused.\n')
-    create('prompt.txt',role_raw+directive)
+    contract_suffix=(b'\n\n'+contract_raw) if contract_raw else b''
+    create('prompt.txt',role_raw+contract_suffix+directive)
 except BaseException:
     for name in ('handoff.v1.json','prompt.txt','result.md','status.json'):
         try: os.unlink(name,dir_fd=childfd)

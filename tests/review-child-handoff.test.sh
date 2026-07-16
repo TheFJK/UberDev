@@ -32,15 +32,15 @@ simplify_context_out="$(uberdev_agent_context_create "$TMP/simplify-run" "$simpl
 simplify_ctx="$(jq -r .context_file <<<"$simplify_context_out")"; simplify_sha="$(jq -r .context_sha256 <<<"$simplify_context_out")"
 SIMPLIFY_CARRIER_JSON="$(jq -cn --arg ctx "$simplify_ctx" --arg sha "$simplify_sha" '{schema_version:1,run_id:"simplify-contract",workflow:"simplify",issue_num:0,context_file:$ctx,context_sha256:$sha}')"
 
-path="$TEST_REPO/README.md"; dir="$TEST_REPO"
+path="$TEST_REPO/README.md"; changed_path="README.md"; deleted_path="src/deleted-in-pr.ts"; dir="$TEST_REPO"
 declare -a edges inputs risks
 for lens in correctness silent_failures types comments tests; do
   edges+=("review_pr.review.$lens")
-  inputs+=("$(jq -cn --arg p "$path" '{changed_paths:[$p],diff_path:$p,criteria_path:$p,emphasis:[]}')")
+  inputs+=("$(jq -cn --arg changed "$changed_path" --arg deleted "$deleted_path" --arg p "$path" '{changed_paths:[$changed,$deleted],diff_path:$p,criteria_path:$p,emphasis:[]}')")
   risks+=('[]')
 done
 edges+=(review_pr.review.general)
-inputs+=("$(jq -cn --arg p "$path" '{changed_paths:[$p],diff_path:$p,criteria_path:$p,emphasis:[],lens:"general"}')")
+inputs+=("$(jq -cn --arg changed "$changed_path" --arg deleted "$deleted_path" --arg p "$path" '{changed_paths:[$changed,$deleted],diff_path:$p,criteria_path:$p,emphasis:[],lens:"general"}')")
 risks+=('[]')
 for edge in review_pr.fix.phase1 review_pr.fix.phase2; do
   edges+=("$edge")
@@ -83,6 +83,35 @@ for i in 0 1 2 3 4 5; do
   uberdev_create_child_handoff "${edges[$i]}" "review-contract-${i}-iter1-attempt02" "$retry" '[]' >/dev/null
   jq -e '.inputs.format_retry == true' "$UBERDEV_CHILD_HANDOFF" >/dev/null
 done
+
+# changed_paths is Git diff metadata, not an existing-file capability. Accept
+# normalized repo-relative entries (including deleted files), and reject every
+# spelling that could escape or ambiguously reinterpret the repository scope.
+base_review_input="$(jq -cn --arg p "$path" '{changed_paths:["src/deleted-in-pr.ts"],diff_path:$p,criteria_path:$p,emphasis:[]}')"
+uberdev_create_child_handoff review_pr.review.correctness review-relative-deleted-iter1-attempt01 "$base_review_input" '[]' >/dev/null
+jq -e '.inputs.changed_paths==["src/deleted-in-pr.ts"]' "$UBERDEV_CHILD_HANDOFF" >/dev/null
+for unsafe in "$path" '../outside.ts' 'src/../outside.ts' './src/file.ts' 'src//file.ts' 'src\file.ts' 'C:\repo\file.ts' 'C:/repo/file.ts' $'src/tab\tfile.ts'; do
+  unsafe_input="$(jq -cn --arg unsafe "$unsafe" --arg p "$path" '{changed_paths:[$unsafe],diff_path:$p,criteria_path:$p,emphasis:[]}')"
+  if uberdev_create_child_handoff review_pr.review.correctness "review-unsafe-$RANDOM-iter1-attempt01" "$unsafe_input" '[]' >/dev/null 2>&1; then
+    echo "unsafe changed_paths entry accepted: $unsafe" >&2
+    exit 1
+  fi
+done
+
+# Routed child prompt composition appends the exact shared contract immediately
+# before the immutable execution directive.
+contract="$ROOT/plugins/uberdev/shared/phase1-reviewer-output-v1.md"
+contract_input="$(jq -cn --arg p "$path" '{changed_paths:["README.md"],diff_path:$p,criteria_path:$p,emphasis:[]}')"
+uberdev_create_child_handoff review_pr.review.correctness review-contract-prompt-iter1-attempt01 "$contract_input" '[]' >/dev/null
+_uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null
+prompt="$(dirname "$UBERDEV_CHILD_RESULT")/prompt.txt"
+python3 -I -B - "$prompt" "$contract" <<'PY'
+import pathlib,sys
+prompt=pathlib.Path(sys.argv[1]).read_bytes(); contract=pathlib.Path(sys.argv[2]).read_bytes()
+needle=b'\n\n'+contract+b'\n\n## Immutable routed execution directive\n'
+assert prompt.count(contract)==1
+assert needle in prompt
+PY
 
 # A standalone simplify run may omit an additional focus hint.
 for lens in reuse quality efficiency; do

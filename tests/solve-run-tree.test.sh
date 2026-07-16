@@ -30,7 +30,7 @@ for edge_id,edge in edges.items():
         assert not set(required_inputs)&set(optional_inputs), edge_id
         assert set(required_inputs.values())|set(optional_inputs.values()) <= {
             'string','optional_string','integer','boolean','path','optional_path',
-            'directory','path_array','optional_path_array','string_array'
+            'directory','path_array','optional_path_array','repo_path_array','string_array'
         }, edge_id
         allowed=edge.get('allowed_workflows')
         assert isinstance(allowed,list) and allowed==sorted(set(allowed)), edge_id
@@ -60,13 +60,19 @@ assert {
 assert edges['brainstorm.research.prior_art']['role']=='research-patterns'
 assert edges['brainstorm.research.library']['role']=='research-prior-art'
 assert edges['orchestrator.plan.write']['retry']['verification']==2
-for edge_id in {
+review_edges={
  'review_pr.review.correctness','review_pr.review.silent_failures',
  'review_pr.review.types','review_pr.review.comments',
  'review_pr.review.tests','review_pr.review.general'
-}:
+}
+assert tree['output_contracts']=={
+    'phase1-reviewer-v1':'shared/phase1-reviewer-output-v1.md'
+}
+for edge_id in review_edges:
     assert edges[edge_id]['required'] is True, edge_id
     assert edges[edge_id]['retry']=={'format':1}, edge_id
+    assert edges[edge_id]['required_inputs']['changed_paths']=='repo_path_array', edge_id
+    assert edges[edge_id]['output_contract']=='phase1-reviewer-v1', edge_id
 assert policy['roles']['spec-compliance-reviewer']=={
  'route':'deep','risk_floor':'deep','sandbox_ceiling':'read-only',
  'delegation_mode':'leaf','risk_judgment':True

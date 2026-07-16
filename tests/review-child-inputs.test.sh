@@ -390,8 +390,11 @@ export UBERDEV_COMMAND_WORKSPACE_JSON="$REVIEW_WORKSPACE_JSON"
 
 HOSTILE_DIR="$RESEARCH_DIR_ABS"$'/review dir\nwith "quotes" and \\slashes *?[x]'
 mkdir -p "$HOSTILE_DIR"
-CHANGED_ONE="$HOSTILE_DIR"$'/changed "one" \\path*.ts'
-CHANGED_TWO="$HOSTILE_DIR"$'/changed two [x] \\path?.sh'
+# gh pr diff --name-only supplies normalized repository-relative names. These
+# deliberately do not exist to cover deleted paths while retaining hostile
+# shell metacharacters as inert JSON data.
+CHANGED_ONE='src/changed "one" path*.ts'
+CHANGED_TWO='tests/changed two [x] path?.sh'
 DIFF_PATH="$HOSTILE_DIR"$'/diff "quoted" \\path*?[x].md'
 CRITERIA_FIXTURE="$HOSTILE_DIR"$'/criteria "quoted" \\path*?[x].md'
 FORMAT_EXAMPLE="$HOSTILE_DIR"$'/format "quoted" \\path*?[x].yaml'
@@ -406,7 +409,7 @@ CI_REFUSED_AGGREGATE_PATH="$HOSTILE_DIR"$'/refused "aggregate" \\path*.md'
 CONFLICT_PATH="$HOSTILE_DIR"$'/conflict "quoted" \\path*.ts'
 
 for fixture in \
-  "$CHANGED_ONE" "$CHANGED_TWO" "$DIFF_PATH" "$CRITERIA_FIXTURE" "$FORMAT_EXAMPLE" \
+  "$DIFF_PATH" "$CRITERIA_FIXTURE" "$FORMAT_EXAMPLE" \
   "$POST_FINAL" "$SIMPLIFY_FINAL" "$COMMIT_RANGE_FIXTURE" \
   "$PHASE1_DISPOSITION_FIXTURE" "$PHASE2_DISPOSITION_FIXTURE" \
   "$CLASSIFICATION_PATH" "$CI_LOG_ARTIFACT_PATH" "$CI_REFUSED_AGGREGATE_PATH" \

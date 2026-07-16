@@ -56,6 +56,7 @@ def value(kind,run,key,index):
   path=run/'inputs'/f'{index}-{key}.txt'; path.parent.mkdir(exist_ok=True); path.write_text('fixture\n'); return str(path)
  if kind in {'path_array','optional_path_array'}:
   path=run/'inputs'/f'{index}-{key}.txt'; path.parent.mkdir(exist_ok=True); path.write_text('fixture\n'); return [str(path)]
+ if kind=='repo_path_array': return [f'src/deleted-{index}-{key}.ts']
  if kind=='string_array': return [f'value-{key}']
  raise AssertionError((key,kind))
 

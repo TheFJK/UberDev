@@ -7,7 +7,7 @@ LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
 python3 -I -B - "$TREE" <<'PY'
 import json,sys
 tree=json.load(open(sys.argv[1])); providers={k:v for k,v in tree['edges'].items() if v['kind']=='provider'}
-types={'integer','string','optional_string','boolean','path','optional_path','directory','string_array','path_array','optional_path_array'}
+types={'integer','string','optional_string','boolean','path','optional_path','directory','string_array','path_array','optional_path_array','repo_path_array'}
 assert providers
 for edge,row in providers.items():
     assert 'inputs' not in row and 'input_types' not in row, edge
@@ -32,10 +32,21 @@ for edge in ('review_pr.simplify.reuse','review_pr.simplify.quality','review_pr.
     assert 'focus' not in row['required_inputs'], edge
     assert row['optional_inputs'].get('focus')=='optional_string', edge
     assert 'additional_focus' not in row['optional_inputs'], edge
+review_edges={edge for edge in providers if edge.startswith('review_pr.review.')}
+assert len(review_edges)==6
+assert tree.get('output_contracts')=={'phase1-reviewer-v1':'shared/phase1-reviewer-output-v1.md'}
+for edge in review_edges:
+    row=providers[edge]
+    assert row['required_inputs']['changed_paths']=='repo_path_array', edge
+    assert row.get('output_contract')=='phase1-reviewer-v1', edge
 PY
 
 grep -q '^uberdev_preflight_child_batch()' "$LIB"
 grep -q '^uberdev_unwind_child()' "$LIB"
 cmp "$TREE" "$ROOT/codex/uberdev-codex/policy/solve-run-tree-v1.json"
 cmp "$LIB" "$ROOT/codex/uberdev-codex/lib/child-dispatch.sh"
+cmp "$ROOT/plugins/uberdev/lib/child-inputs.py" \
+  "$ROOT/codex/uberdev-codex/lib/child-inputs.py"
+cmp "$ROOT/plugins/uberdev/shared/phase1-reviewer-output-v1.md" \
+  "$ROOT/codex/uberdev-codex/shared/phase1-reviewer-output-v1.md"
 echo 'child-contract-v2: PASS'

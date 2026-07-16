@@ -27,10 +27,10 @@ if bash "$GEN" --target "$T1" --version 0.1.0 >/dev/null 2>&1; then ok "G1 gener
 # G2 — verify gate independently passes on the produced tree
 if bash "$VERIFY" "$T1" >/dev/null 2>&1; then ok "G2 verify passes on generated tree"; else no "G2 verify failed on generated tree"; fi
 
-# G3 — EXACTLY 32 source files landed under plugins/prkit (manifest count-lock;
+# G3 — EXACTLY 34 source files landed under plugins/prkit (manifest count-lock;
 # -eq not -ge so a silently-dropped copy OR a stray extra file both fail)
-n=$(find "$T1/plugins/prkit/commands" "$T1/plugins/prkit/agents" "$T1/plugins/prkit/skills" "$T1/plugins/prkit/lib" "$T1/plugins/prkit/policy" -type f 2>/dev/null | wc -l | tr -d ' ')
-[ "$n" -eq 32 ] && ok "G3 exactly 32 copied files present" || no "G3 copied $n files (expected 32)"
+n=$(find "$T1/plugins/prkit/commands" "$T1/plugins/prkit/agents" "$T1/plugins/prkit/skills" "$T1/plugins/prkit/lib" "$T1/plugins/prkit/policy" "$T1/plugins/prkit/shared" -type f 2>/dev/null | wc -l | tr -d ' ')
+[ "$n" -eq 34 ] && ok "G3 exactly 34 copied files present" || no "G3 copied $n files (expected 34)"
 
 # G4 — scaffold files exist with interpolated version
 grep -q '0.1.0' "$T1/plugins/prkit/.claude-plugin/plugin.json" && ok "G4 plugin.json version interpolated" || no "G4 plugin.json version missing"
@@ -55,6 +55,21 @@ if [ -f "$T1/codex/prkit-codex/skills/prkit-cmd-review-pr/SKILL.md" ] \
    && grep -q '"name": "prkit-codex"' "$T1/codex/prkit-codex/.codex-plugin/plugin.json"; then
   ok "G6 codex port generated (prkit-cmd-* + prkit-prefixed support skills, no flat collision)"
 else no "G6 codex port incomplete or has un-prefixed support skill"; fi
+
+# G6b — both standalone runtimes ship the manifest-declared reviewer contract,
+# and native Codex reviewer TOMLs embed the exact contract for direct dispatch.
+if [ -f "$T1/plugins/prkit/policy/solve-run-tree-v1.json" ] \
+   && [ -f "$T1/plugins/prkit/shared/phase1-reviewer-output-v1.md" ] \
+   && [ -f "$T1/codex/prkit-codex/policy/solve-run-tree-v1.json" ] \
+   && [ -f "$T1/codex/prkit-codex/shared/phase1-reviewer-output-v1.md" ] \
+   && python3 - "$T1" <<'PY'
+import pathlib,sys,tomllib
+root=pathlib.Path(sys.argv[1]); contract=(root/'codex/prkit-codex/shared/phase1-reviewer-output-v1.md').read_text()
+roles=('code-reviewer','silent-failure-hunter','type-design-analyzer','comment-analyzer','pr-test-analyzer')
+assert all(contract in tomllib.loads((root/f'codex/agents/prkit-{role}.toml').read_text())['developer_instructions'] for role in roles)
+PY
+then ok "G6b routed + native reviewer contracts packaged"
+else no "G6b routed/native reviewer contract packaging incomplete"; fi
 
 # G7 — no uberdev token survives anywhere under codex/
 if grep -rilE 'uberdev' "$T1/codex" >/dev/null 2>&1; then no "G7 uberdev token survives under codex/"; else ok "G7 codex tree is uberdev-free"; fi

@@ -115,7 +115,8 @@ fi
 # --- 7. Required tree shape ---
 for req in "commands/review-pr.md" "commands/simplify.md" "commands/merge.md" \
            "skills/post-impl-review/SKILL.md" "skills/merge-pipeline/SKILL.md" \
-           "policy/model-routing-v1.json" ".claude-plugin/plugin.json"; do
+           "policy/model-routing-v1.json" "policy/solve-run-tree-v1.json" \
+           "shared/phase1-reviewer-output-v1.md" ".claude-plugin/plugin.json"; do
   [ -e "$P/$req" ] || fail "shape: missing $req"
 done
 ok "shape: claude required-file presence checked"
@@ -126,6 +127,8 @@ if [ -d "$ROOT/codex" ]; then
              "codex/prkit-codex/skills/prkit-cmd-merge/SKILL.md" \
              "codex/prkit-codex/skills/prkit-post-impl-review/SKILL.md" \
              "codex/prkit-codex/skills/prkit-merge-pipeline/SKILL.md" \
+             "codex/prkit-codex/policy/solve-run-tree-v1.json" \
+             "codex/prkit-codex/shared/phase1-reviewer-output-v1.md" \
              "codex/install-codex.sh" "codex/README.md" "codex/AGENTS.md"; do
     [ -e "$ROOT/$req" ] || fail "shape: missing $req"
   done
@@ -136,6 +139,39 @@ if [ -d "$ROOT/codex" ]; then
   done
   ok "shape: codex required-file presence + prkit-prefixed skills checked"
 fi
+
+# --- 7b. Review contract integrity: the six routed edges share one manifest
+# contract, changed_paths is repository-relative metadata, both runtimes ship
+# byte-identical schema, and native Codex roles embed that exact schema. ---
+if python3 -I -B - "$ROOT" <<'PY'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+review_edges={
+    'review_pr.review.correctness','review_pr.review.silent_failures',
+    'review_pr.review.types','review_pr.review.comments',
+    'review_pr.review.tests','review_pr.review.general',
+}
+contract_rel='shared/phase1-reviewer-output-v1.md'
+def validate(plugin):
+    tree=json.loads((plugin/'policy/solve-run-tree-v1.json').read_text())
+    assert tree.get('output_contracts')=={'phase1-reviewer-v1':contract_rel}
+    for edge in review_edges:
+        row=tree['edges'][edge]
+        assert row.get('output_contract')=='phase1-reviewer-v1'
+        assert row['required_inputs'].get('changed_paths')=='repo_path_array'
+    return (plugin/contract_rel).read_text()
+claude=validate(root/'plugins/prkit')
+codex_plugin=root/'codex/prkit-codex'
+if codex_plugin.is_dir():
+    codex=validate(codex_plugin)
+    assert codex==claude
+    import tomllib
+    for role in ('code-reviewer','silent-failure-hunter','type-design-analyzer','comment-analyzer','pr-test-analyzer'):
+        data=tomllib.loads((root/f'codex/agents/prkit-{role}.toml').read_text())
+        assert data['developer_instructions'].count(codex)==1, role
+PY
+then ok "review-contract: routed manifests + native Codex prompts agree"
+else fail "review-contract: manifest/schema/native prompt drift"; fi
 
 # --- 8. Root scaffold files (outside the SCAN roots) — present, non-empty, valid ---
 for req in README.md LICENSE NOTICE CHANGELOG.md .gitignore \
