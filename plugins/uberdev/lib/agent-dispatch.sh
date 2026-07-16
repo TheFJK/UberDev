@@ -50,6 +50,23 @@ _uberdev_agent_error() {
   printf 'uberdev agent dispatch: %s\n' "$1" >&2
 }
 
+# Detached PR review/simplify children cannot service an interactive Claude
+# permission prompt. Require an explicit unattended opt-in before any route
+# event or capacity lease is created. Other workflows preserve their existing
+# interactive behavior, and an explicit claude-bg backend remains explicit --
+# this gate validates its execution posture rather than silently rerouting it.
+_uberdev_agent_claude_permissions_preflight() {
+  case "${1:-}" in
+    review-pr|simplify) ;;
+    *) return 0 ;;
+  esac
+  if [ "${SKIP_PERMISSIONS:-0}" = "1" ] || [ "${AUTO_PERMISSIONS:-0}" = "1" ]; then
+    return 0
+  fi
+  _uberdev_agent_error 'claude-bg review fanout requires unattended permissions; set AUTO_PERMISSIONS=1 or SKIP_PERMISSIONS=1, or select backend=codex'
+  return 2
+}
+
 _uberdev_agent_json_get() {
   local raw="$1" key="$2"
   python3 -I -B -c '
@@ -728,6 +745,11 @@ if not matched:
 if len(matched) != 1:
     raise SystemExit(2)
 status = str(matched[0].get("status") or "").strip().lower()
+state = str(matched[0].get("state") or "").strip().lower()
+reason = " ".join(str(matched[0].get(key) or "") for key in ("blockedReason", "reason", "message")).lower()
+if state == "blocked":
+    print("blocked:permission" if "permission" in reason else "blocked:provider", end="")
+    raise SystemExit(0)
 if status in {"busy", "running", "starting", "working", "queued"}:
     print("live", end="")
 elif status in {"failed", "error"}:
@@ -890,7 +912,7 @@ _uberdev_agent_start_watcher() {
   local manifest="$1" lease="$2" lease_identity="$3" status_file="$4" backend="$5" handle="$6" request_json="$7" decision="$8"
   local watcher_pid
   (
-    local terminal_event='' probe='' absent_count=0 event_json=''
+    local terminal_event='' probe='' absent_count=0 event_json='' error_class=''
     while [ -d "$(dirname "$status_file")" ]; do
       terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
       [ -z "$terminal_event" ] || break
@@ -899,6 +921,8 @@ _uberdev_agent_start_watcher() {
         case "$probe" in
           live) absent_count=0 ;;
           completed|failed|timed_out|cancelled) terminal_event="$probe"; break ;;
+          blocked:permission) terminal_event=failed; error_class=provider_permission_blocked; break ;;
+          blocked:provider) terminal_event=failed; error_class=provider_blocked; break ;;
           absent)
             absent_count=$((absent_count + 1))
             if [ "$absent_count" -ge 3 ]; then
@@ -927,8 +951,8 @@ _uberdev_agent_start_watcher() {
       sleep 1
     done
     [ -n "$terminal_event" ] || exit 0
-    local finalize_attempt=1 error_class=''
-    [ "$terminal_event" != failed ] || error_class=provider_execution_failed
+    local finalize_attempt=1
+    [ "$terminal_event" != failed ] || [ -n "$error_class" ] || error_class=provider_execution_failed
     while [ "$finalize_attempt" -le 3 ]; do
       if _uberdev_agent_finalize_terminal "$manifest" "$lease" "$lease_identity" "$status_file" \
           "$backend" "$handle" "$request_json" "$decision" "$terminal_event" "$error_class"; then
@@ -972,7 +996,7 @@ _uberdev_agent_abort_after_launch() {
 
 uberdev_agent_dispatch() {
   local request_json="${1:-}" prompt_requested="${2:-}" result_requested="${3:-}" status_requested="${4:-}"
-  local run_dir run_id repository_id backend issue_num tier capacity timeout_s
+  local run_dir run_id repository_id backend workflow issue_num tier capacity timeout_s
   local prompt_file result_file status_file state_dir manifest decision lease lease_identity event_json rc handle lease_handle terminal_event paths_json
   local context_file context_sha context_validation persisted_decision supplied_root supplied_parent context_run_id parent_run_id agent_id process_identity lease_generation
   [ "$#" -eq 4 ] || { _uberdev_agent_error 'expected REQUEST_JSON PROMPT_FILE RESULT_FILE STATUS_FILE'; return 2; }
@@ -998,6 +1022,10 @@ uberdev_agent_dispatch() {
   run_id="$(_uberdev_agent_json_get "$request_json" run_id)" || { _uberdev_agent_error 'invalid run_id'; return 2; }
   repository_id="$(_uberdev_agent_json_get "$request_json" repository_id)" || { _uberdev_agent_error 'invalid repository_id'; return 2; }
   backend="$(_uberdev_agent_json_get "$request_json" backend)" || { _uberdev_agent_error 'invalid backend'; return 2; }
+  workflow="$(_uberdev_agent_json_get "$request_json" workflow)" || { _uberdev_agent_error 'invalid workflow'; return 2; }
+  if [ "$backend" = claude-bg ]; then
+    _uberdev_agent_claude_permissions_preflight "$workflow" || return $?
+  fi
   tier="$(_uberdev_agent_json_get "$request_json" task_tier)" || { _uberdev_agent_error 'invalid task_tier'; return 2; }
   capacity="$(_uberdev_agent_json_get "$request_json" capacity)" || { _uberdev_agent_error 'invalid capacity'; return 2; }
   timeout_s="$(_uberdev_agent_json_get "$request_json" timeout_s)" || { _uberdev_agent_error 'invalid timeout_s'; return 2; }
@@ -1066,7 +1094,9 @@ uberdev_agent_dispatch() {
   UBERDEV_AGENT_DECISION_JSON="$decision"
   UBERDEV_AGENT_RESULT_FILE="$result_file"
   UBERDEV_AGENT_STATUS_FILE="$status_file"
-  export UBERDEV_AGENT_DECISION_JSON UBERDEV_AGENT_RESULT_FILE UBERDEV_AGENT_STATUS_FILE
+  agent_id="$(_uberdev_agent_json_get "$request_json" agent_id 2>/dev/null || true)"
+  UBERDEV_AGENT_INSTANCE_ID="${agent_id:-$run_id}"
+  export UBERDEV_AGENT_DECISION_JSON UBERDEV_AGENT_RESULT_FILE UBERDEV_AGENT_STATUS_FILE UBERDEV_AGENT_INSTANCE_ID
   if _uberdev_agent_dispatch_backend "$backend" "$issue_num" "$tier" "$prompt_file" "$result_file" "$status_file" "$decision"; then
     rc=0
   else

@@ -72,6 +72,40 @@ _uberdev_dispatch_python() {
   fi
 }
 
+# Return a private runtime root. The public /tmp directory is only a parent;
+# lifecycle files live in an EUID-owned, non-symlink directory locked to 0700.
+_uberdev_dispatch_runtime_root() {
+  local target
+  if [ -n "${UBERDEV_TMPDIR:-}" ]; then
+    target="$UBERDEV_TMPDIR"
+  else
+    target="${TMPDIR:-/tmp}/uberdev-$(id -u 2>/dev/null || printf '0')"
+  fi
+  _uberdev_dispatch_python -I -B - "$target" <<'PY'
+import os,stat,sys
+path=os.path.abspath(os.path.expanduser(sys.argv[1]))
+uid_fn=getattr(os,"geteuid",None); uid=uid_fn() if uid_fn else None
+try: os.mkdir(path,0o700)
+except FileExistsError: pass
+entry=os.lstat(path)
+if stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode) or (uid is not None and entry.st_uid!=uid): raise SystemExit(2)
+if os.name!="nt": os.chmod(path,0o700)
+print(os.path.realpath(path),end="")
+PY
+}
+
+# Stable, branch-safe child identity. The readable prefix preserves the fanout
+# instance at a glance; the digest prevents collisions after normalization or
+# truncation.
+_uberdev_dispatch_instance_slug() {
+  _uberdev_dispatch_python -I -B - "${UBERDEV_AGENT_INSTANCE_ID:-root}" <<'PY'
+import hashlib,re,sys
+raw=sys.argv[1]
+prefix=re.sub(r"[^A-Za-z0-9]+","-",raw).strip("-").lower()[:40] or "agent"
+print(f"{prefix}-{hashlib.sha256(raw.encode()).hexdigest()[:12]}",end="")
+PY
+}
+
 # The dispatch_backend enum — identical to the --backend= flag's accepted set.
 # `codex` is the OpenAI Codex CLI backend (RFC 0012 §3.4 codex-port): execs
 # `codex exec` headless + nohup-detached, PID-tracked like `background`.
@@ -394,11 +428,11 @@ _uberdev_agent_dispatch_backend() {
   esac
 }
 
-# Claude's current agent CLI exposes observation but no cancellation command.
-# Keep cancellation as an explicit provider capability seam so an integration
-# may opt in without fabricating a CLI operation in the production default.
 _uberdev_dispatch_cancel_claude_bg() {
-  return 2
+  local handle="${1:-}"
+  [ "${#handle}" -eq 8 ] || return 2
+  printf '%s\n' "$handle" | LC_ALL=C grep -Eq '^[0-9a-f]{8}$' || return 2
+  claude stop "$handle" >/dev/null 2>&1 || return 2
 }
 
 _uberdev_dispatch_group_live() {
@@ -642,8 +676,9 @@ uberdev_dispatch_one() {
     uberdev_dispatch_preflight || { DISPATCH_RC=1; return 1; }
   fi
   uberdev_read_model_routing >/dev/null || true
-  run_dir="${UBERDEV_TMPDIR:-/tmp}"
-  [ -d "$run_dir" ] || mkdir -p "$run_dir" || { DISPATCH_RC=1; return 1; }
+  run_dir="$(_uberdev_dispatch_runtime_root)" || { DISPATCH_RC=1; return 1; }
+  UBERDEV_TMPDIR="$run_dir"
+  export UBERDEV_TMPDIR
   case "$UBERDEV_RESOLVED_BACKEND" in
     codex)
       result_file="$run_dir/solve-codex-result-$ISSUE_NUM.md"
@@ -1227,8 +1262,10 @@ _uberdev_dispatch_codex() {
   local ISSUE_NUM="$1" TIER="$2" PROMPT_FILE="$3"
   DISPATCH_RC=0
   DISPATCH_ID=""
-  local WORKTREE_DIR=".claude/worktrees/solve-issue-$ISSUE_NUM"
-  local WORKTREE_BRANCH="worktree-solve-issue-$ISSUE_NUM"
+  local INSTANCE_SLUG
+  INSTANCE_SLUG="$(_uberdev_dispatch_instance_slug)" || { DISPATCH_RC=1; return 1; }
+  local WORKTREE_DIR=".claude/worktrees/solve-issue-$ISSUE_NUM-$INSTANCE_SLUG"
+  local WORKTREE_BRANCH="worktree-solve-issue-$ISSUE_NUM-$INSTANCE_SLUG"
   local LOG_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-codex-stdout-$ISSUE_NUM.log"
   local STATUS_FILE="${UBERDEV_AGENT_STATUS_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-codex-status-$ISSUE_NUM.json}"
   local RESULT_FILE="${UBERDEV_AGENT_RESULT_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-codex-result-$ISSUE_NUM.md}"

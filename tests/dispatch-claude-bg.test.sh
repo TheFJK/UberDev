@@ -831,6 +831,50 @@ else
   esac
 fi
 
+echo
+echo "== #335 Claude cancellation is exact and bounded =="
+(
+  set +u
+  CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+  CANCEL_TMP="$(mktemp -d)"
+  CANCEL_LOG="$CANCEL_TMP/claude.log"
+  CANCEL_STATE="$CANCEL_TMP/state"
+  printf 'live\n' > "$CANCEL_STATE"
+  claude() {
+    printf '%s\n' "$*" >> "$CANCEL_LOG"
+    if [ "${1:-}" = stop ]; then
+      printf 'cancelled\n' > "$CANCEL_STATE"
+      return 0
+    fi
+    if [ "${1:-}" = agents ] && [ "${2:-}" = --json ]; then
+      if [ "$(cat "$CANCEL_STATE")" = cancelled ]; then
+        printf '[{"sessionId":"abc12345-full","status":"cancelled"}]\n'
+      else
+        printf '[{"sessionId":"abc12345-full","status":"running"}]\n'
+      fi
+      return 0
+    fi
+    return 2
+  }
+  . "$DISPATCH_LIB"
+  _uberdev_dispatch_cancel_backend claude-bg abc12345 ''
+  valid_rc=$?
+  _uberdev_dispatch_cancel_claude_bg 'abc12345;touch-pwned' >/dev/null 2>&1
+  invalid_rc=$?
+  calls="$(cat "$CANCEL_LOG" 2>/dev/null)"
+  if [ "$valid_rc" -eq 0 ] && [ "$invalid_rc" -eq 2 ] \
+      && [ "$(grep -c '^stop abc12345$' "$CANCEL_LOG")" -eq 1 ] \
+      && [[ "$calls" != *touch-pwned* ]]; then
+    echo "  PASS  cancellation runs only exact claude stop <8hex> and confirms terminal state"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  exact Claude cancellation contract (valid=$valid_rc invalid=$invalid_rc calls=$calls)"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$CANCEL_TMP"
+  printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
+) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
+
 rm -f "$TALLY_FILE"
 
 echo

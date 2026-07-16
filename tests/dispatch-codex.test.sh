@@ -75,6 +75,32 @@ extract_function_body() {
   ' "$file"
 }
 
+echo "== Secure default runtime and unique Codex child identities =="
+RUNTIME_TMP="$(mktemp -d)"
+RUNTIME_ROOT="$(TMPDIR="$RUNTIME_TMP" bash -c 'unset UBERDEV_TMPDIR; . "$1"; _uberdev_dispatch_runtime_root' _ "$DISPATCH_LIB")"
+if python3 -I - "$RUNTIME_TMP" "$RUNTIME_ROOT" <<'PY'
+import os, pathlib, stat, sys
+base, root = map(pathlib.Path, sys.argv[1:])
+entry = root.stat()
+assert root.parent.resolve() == base.resolve()
+assert entry.st_uid == os.geteuid()
+assert stat.S_IMODE(entry.st_mode) == 0o700
+PY
+then
+  pass_msg "default runtime root is private, user-owned, and mode 0700"
+else
+  fail_msg "default runtime root is private, user-owned, and mode 0700" "$RUNTIME_ROOT"
+fi
+IDENTITY_A="$(UBERDEV_AGENT_INSTANCE_ID=review-code-a1 bash -c '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"
+IDENTITY_B="$(UBERDEV_AGENT_INSTANCE_ID=review-types-a1 bash -c '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"
+if [ -n "$IDENTITY_A" ] && [ -n "$IDENTITY_B" ] && [ "$IDENTITY_A" != "$IDENTITY_B" ] \
+    && [[ "$IDENTITY_A" == review-code-a1-* ]] && [[ "$IDENTITY_B" == review-types-a1-* ]]; then
+  pass_msg "Codex worktree identity is deterministically unique per fanout instance"
+else
+  fail_msg "Codex worktree identity is deterministically unique per fanout instance" "a=$IDENTITY_A b=$IDENTITY_B"
+fi
+rm -rf "$RUNTIME_TMP"
+
 echo "== Codex packaged runtime mirrors source libs =="
 if cmp -s "$DISPATCH_LIB" "$CODEX_DISPATCH_LIB"; then
   pass_msg "packaged Codex dispatch.sh is byte-identical to source runtime lib"
