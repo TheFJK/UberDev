@@ -152,6 +152,23 @@ def render_skill(name: str, fm: dict, body: str) -> str:
     description = codex_port_text(fm.get("description", "").strip())
     arg_hint = codex_port_text(fm.get("argument-hint", "").strip())
     body = codex_port_text(body)
+    if name == "review-pr":
+        setup_marker = "set -u\n"
+        if body.count(setup_marker) != 1:
+            raise ValueError(
+                "review-pr: expected exactly one executable setup nounset marker"
+            )
+        body = body.replace(
+            setup_marker,
+            setup_marker
+            + "# This entrypoint is executing inside Codex. Preserve that provider "
+              "provenance\n"
+            + "# through standalone carrier preparation unless the operator already "
+              "selected one.\n"
+            + 'UBERDEV_DISPATCH_BACKEND_REQUESTED="${UBERDEV_DISPATCH_BACKEND_REQUESTED:-codex}"\n'
+            + "export UBERDEV_DISPATCH_BACKEND_REQUESTED\n",
+            1,
+        )
     # Rewrite the description as a Codex trigger: "Use when …".
     # The original descriptions are already imperative ("Create a GitHub issue…")
     # so we prefix "Use when the user wants to " and lower-case the first char

@@ -90,6 +90,8 @@ jobs:
           bash tests/sdd-routed-lifecycle.test.sh && \
           bash tests/audit-fixups.test.sh && \
           bash tests/review-pr.test.sh && \
+          bash tests/review-pr-codex-entry.test.sh && \
+          bash tests/review-pr-codex-six-child.test.sh && \
           bash tests/review-pr-phase3-ci.test.sh && \
           bash tests/prkit-manifest.test.sh && \
           bash tests/prkit-codex-manifest.test.sh && \
@@ -268,6 +270,8 @@ jobs:
         #   - orchestrator-child-inputs.test.sh
         #   - sdd-child-inputs.test.sh
         #   - review-child-inputs.test.sh
+        #   - review-pr-codex-entry.test.sh
+        #   - review-pr-codex-six-child.test.sh
         #   - routed-provider-bypass.test.sh
         #   - run-tree-callsite-contract.test.sh
         #   - route-context.test.sh

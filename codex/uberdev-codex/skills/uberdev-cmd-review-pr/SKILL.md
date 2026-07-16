@@ -58,6 +58,10 @@ All provider calls in this command use the runtime-owned carrier and handoff bui
 
 ```bash uberdev-executable setup=review-pr
 set -u
+# This entrypoint is executing inside Codex. Preserve that provider provenance
+# through standalone carrier preparation unless the operator already selected one.
+UBERDEV_DISPATCH_BACKEND_REQUESTED="${UBERDEV_DISPATCH_BACKEND_REQUESTED:-codex}"
+export UBERDEV_DISPATCH_BACKEND_REQUESTED
 UBERDEV_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}"
 . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh"
 PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number)}"
@@ -270,7 +274,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    The locked marker is read by `/uberdev:goal` Phase 2b via `_uberdev_goal_locked_marker_for_pr_fresh "$pr_num" "$REVIEW_GRACE_SECS"` (lib/goal-state.sh). The contract is additive — `/review-pr` runs identically whether `/goal` is the caller or a human is. The trap fires on every exit path (success, failure, signal) so an orphaned marker is bounded by the natural EXIT signal — and even on SIGKILL the `/goal` reader's grace-window check (REVIEW_GRACE_SECS, default 3600s) bounds staleness without operator intervention. See RFC 0005 §9 D220b for the cross-component design rationale.
 
    Compute Phase 1 inputs from the PR:
-   - `changed_paths` — `gh pr diff <N> --name-only` (or `git diff <base>..HEAD --name-only` if invoked outside a PR context).
+   - `changed_paths` — normalized, non-empty POSIX repository-relative paths from `gh pr diff <N> --name-only` (or `git diff <base>..HEAD --name-only` outside a PR context). Preserve deleted or otherwise missing entries as path strings; absolute paths, traversal, dot components, backslashes, control characters, and unsafe names are rejected by the `repo_path_array` handoff contract before provider launch.
    - `commit_range` — `<base>..HEAD` where `<base>` is the PR base ref.
    - `tier` — passed through from `$ARGUMENTS` if present (forwarded by `finish-branch`'s chain), else default `medium`.
 
