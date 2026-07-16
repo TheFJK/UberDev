@@ -4,6 +4,21 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.40.2] — 2026-07-16
+
+### Fixed
+
+- Pinned Codex-originated review fanouts to the Codex backend, including clean environments without `CODEX_HOME`, while preserving explicit backend overrides.
+- Hardened detached Claude supervision with unattended-permission preflight, exact `claude stop` cancellation, blocked-session terminalization, and exact capacity-lease release.
+- Isolated routed runtime state under a private user-owned directory and gave every Codex reviewer a unique, ownership-verified worktree and branch with terminal cleanup.
+- Reconciled review `changed_paths` with a traversal-safe repository-relative contract that also supports deleted files.
+- Added one canonical machine-readable Phase 1 reviewer result schema to all routed and native Codex reviewer prompts.
+- Shipped the run-tree policy and reviewer schema in generated prkit Claude and Codex packages so clean installs no longer depend on stale runtime files.
+
+### Tests
+
+- Added a six-child Codex review integration fixture covering backend selection, non-interactive dispatch, unique worktrees, success and failure cleanup, terminal lifecycle receipts, and zero leaked leases.
+
 ## [0.40.1] — 2026-07-11
 
 ### Fixed
