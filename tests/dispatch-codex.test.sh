@@ -101,6 +101,75 @@ else
 fi
 rm -rf "$RUNTIME_TMP"
 
+echo "== Exact Codex child worktree cleanup preserves results =="
+CLEANUP_TMP="$(mktemp -d)"
+mkdir -p "$CLEANUP_TMP/repo" "$CLEANUP_TMP/runtime"
+(
+  cd "$CLEANUP_TMP/repo"
+  git init -q
+  git config user.name 'UberDev Test'
+  git config user.email 'uberdev-test@example.invalid'
+  printf 'base\n' > base.txt
+  git add base.txt
+  git commit -qm base
+)
+cleanup_failures=''
+for terminal_state in completed failed timed_out cancelled; do
+  instance="cleanup-$terminal_state-a1"
+  slug="$(UBERDEV_AGENT_INSTANCE_ID="$instance" bash -c '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"
+  relative=".claude/worktrees/solve-issue-335-$slug"
+  branch="worktree-solve-issue-335-$slug"
+  receipt="$CLEANUP_TMP/runtime/$terminal_state.owner.json"
+  token="$(bash -c '. "$1"; _uberdev_dispatch_create_codex_worktree_receipt "$2" "$3" "$4" "$5"' \
+    _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$relative" "$branch" "$receipt")" || {
+      cleanup_failures="$cleanup_failures receipt-create-$terminal_state"; continue;
+    }
+  git -C "$CLEANUP_TMP/repo" worktree add -q "$relative" -b "$branch" || {
+    cleanup_failures="$cleanup_failures worktree-add-$terminal_state"; continue;
+  }
+  result="$CLEANUP_TMP/runtime/$terminal_state-result.md"
+  printf 'preserved %s result\n' "$terminal_state" > "$result"
+  if ! bash -c '. "$1"; _uberdev_dispatch_cleanup_codex_worktree "$2" "$3" "$4" "$5" "$6" "$7"' \
+      _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$relative" "$branch" "$receipt" "$token" "$terminal_state"; then
+    cleanup_failures="$cleanup_failures cleanup-$terminal_state"
+  fi
+  [ ! -e "$CLEANUP_TMP/repo/$relative" ] || cleanup_failures="$cleanup_failures path-$terminal_state"
+  git -C "$CLEANUP_TMP/repo" show-ref --verify --quiet "refs/heads/$branch" \
+    && cleanup_failures="$cleanup_failures branch-$terminal_state"
+  [ ! -e "$receipt" ] || cleanup_failures="$cleanup_failures receipt-$terminal_state"
+  grep -q "preserved $terminal_state result" "$result" \
+    || cleanup_failures="$cleanup_failures result-$terminal_state"
+done
+if [ -z "$cleanup_failures" ]; then
+  pass_msg "completed/failed/timed_out/cancelled cleanup removes only the child worktree+branch and preserves results"
+else
+  fail_msg "completed/failed/timed_out/cancelled cleanup removes only the child worktree+branch and preserves results" "$cleanup_failures"
+fi
+
+dirty_slug="$(UBERDEV_AGENT_INSTANCE_ID=cleanup-dirty-a1 bash -c '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"
+dirty_relative=".claude/worktrees/solve-issue-335-$dirty_slug"
+dirty_branch="worktree-solve-issue-335-$dirty_slug"
+dirty_receipt="$CLEANUP_TMP/runtime/dirty.owner.json"
+dirty_token="$(bash -c '. "$1"; _uberdev_dispatch_create_codex_worktree_receipt "$2" "$3" "$4" "$5"' \
+  _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$dirty_relative" "$dirty_branch" "$dirty_receipt")"
+git -C "$CLEANUP_TMP/repo" worktree add -q "$dirty_relative" -b "$dirty_branch"
+printf 'dirty tracked change\n' > "$CLEANUP_TMP/repo/$dirty_relative/base.txt"
+if bash -c '. "$1"; _uberdev_dispatch_cleanup_codex_worktree "$2" "$3" "$4" "$5" "$6" completed' \
+    _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$dirty_relative" "$dirty_branch" "$dirty_receipt" "$dirty_token"; then
+  fail_msg "successful dirty child is preserved fail-closed" "cleanup silently discarded dirty worktree"
+elif [ -d "$CLEANUP_TMP/repo/$dirty_relative" ] \
+    && git -C "$CLEANUP_TMP/repo" show-ref --verify --quiet "refs/heads/$dirty_branch" \
+    && [ -f "$dirty_receipt" ]; then
+  pass_msg "successful dirty child is preserved fail-closed"
+else
+  fail_msg "successful dirty child is preserved fail-closed" "worktree, branch, or ownership receipt was lost"
+fi
+git -C "$CLEANUP_TMP/repo" worktree remove --force "$dirty_relative"
+git -C "$CLEANUP_TMP/repo" branch -D "$dirty_branch" >/dev/null
+bash -c '. "$1"; _uberdev_dispatch_discard_codex_worktree_receipt "$2" "$3"' \
+  _ "$DISPATCH_LIB" "$dirty_receipt" "$dirty_token"
+rm -rf "$CLEANUP_TMP"
+
 echo "== Codex packaged runtime mirrors source libs =="
 if cmp -s "$DISPATCH_LIB" "$CODEX_DISPATCH_LIB"; then
   pass_msg "packaged Codex dispatch.sh is byte-identical to source runtime lib"
@@ -479,8 +548,15 @@ BEH_TMP="$(mktemp -d)"
 mkdir -p "$BEH_TMP/bin" "$BEH_TMP/repo" "$BEH_TMP/tmp"
 cat > "$BEH_TMP/bin/git" <<'SH'
 #!/usr/bin/env bash
+if [ "$1" = "-C" ] && [ "$3" = "status" ]; then
+  exit 0
+fi
 if [ "$1" = "worktree" ] && [ "$2" = "add" ]; then
   mkdir -p "$3"
+  exit 0
+fi
+if [ "$1" = "worktree" ] && [ "$2" = "remove" ] && [ "$3" = "--force" ]; then
+  rm -rf "$4"
   exit 0
 fi
 echo "fake git: unsupported args: $*" >&2
@@ -512,6 +588,8 @@ BEH_OUT="$(
   cd "$BEH_TMP/repo" && \
   PATH="$BEH_TMP/bin:/usr/bin:/bin" \
   UBERDEV_TMPDIR="$BEH_TMP/tmp" \
+  UBERDEV_AGENT_CHILD_OWNED=1 \
+  UBERDEV_AGENT_INSTANCE_ID=review-code-a1 \
   AUTO_MODE=1 \
   CODEX_CAPTURE="$BEH_TMP/codex-capture.txt" \
   bash -c '
@@ -586,6 +664,7 @@ mkdir -p "$INHERIT_TMP/bin" "$INHERIT_TMP/repo" "$INHERIT_TMP/tmp"
 cat > "$INHERIT_TMP/bin/git" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = "worktree" ] && [ "$2" = "add" ]; then mkdir -p "$3"; exit 0; fi
+if [ "$1" = "worktree" ] && [ "$2" = "remove" ] && [ "$3" = "--force" ]; then rm -rf "$4"; exit 0; fi
 exit 1
 SH
 cat > "$INHERIT_TMP/bin/codex" <<'SH'
@@ -645,6 +724,10 @@ cp "$BEH_TMP/bin/git" "$FAIL_TMP/bin/git" 2>/dev/null || cat > "$FAIL_TMP/bin/gi
 #!/usr/bin/env bash
 if [ "$1" = "worktree" ] && [ "$2" = "add" ]; then
   mkdir -p "$3"
+  exit 0
+fi
+if [ "$1" = "worktree" ] && [ "$2" = "remove" ] && [ "$3" = "--force" ]; then
+  rm -rf "$4"
   exit 0
 fi
 exit 1
@@ -710,6 +793,7 @@ mkdir -p "$IMMEDIATE_TMP/bin" "$IMMEDIATE_TMP/repo" "$IMMEDIATE_TMP/tmp"
 cat > "$IMMEDIATE_TMP/bin/git" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = worktree ] && [ "$2" = add ]; then mkdir -p "$3"; exit 0; fi
+if [ "$1" = worktree ] && [ "$2" = remove ] && [ "$3" = --force ]; then rm -rf "$4"; exit 0; fi
 exit 1
 SH
 cat > "$IMMEDIATE_TMP/bin/codex" <<'SH'
@@ -791,6 +875,10 @@ cat > "$RACE_TMP/bin/git" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = "worktree" ] && [ "$2" = "add" ]; then
   mkdir -p "$3"
+  exit 0
+fi
+if [ "$1" = "worktree" ] && [ "$2" = "remove" ] && [ "$3" = "--force" ]; then
+  rm -rf "$4"
   exit 0
 fi
 exit 1

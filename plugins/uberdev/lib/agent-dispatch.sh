@@ -1096,7 +1096,9 @@ uberdev_agent_dispatch() {
   UBERDEV_AGENT_STATUS_FILE="$status_file"
   agent_id="$(_uberdev_agent_json_get "$request_json" agent_id 2>/dev/null || true)"
   UBERDEV_AGENT_INSTANCE_ID="${agent_id:-$run_id}"
-  export UBERDEV_AGENT_DECISION_JSON UBERDEV_AGENT_RESULT_FILE UBERDEV_AGENT_STATUS_FILE UBERDEV_AGENT_INSTANCE_ID
+  UBERDEV_AGENT_CHILD_OWNED=0
+  [ -z "$agent_id" ] || UBERDEV_AGENT_CHILD_OWNED=1
+  export UBERDEV_AGENT_DECISION_JSON UBERDEV_AGENT_RESULT_FILE UBERDEV_AGENT_STATUS_FILE UBERDEV_AGENT_INSTANCE_ID UBERDEV_AGENT_CHILD_OWNED
   if _uberdev_agent_dispatch_backend "$backend" "$issue_num" "$tier" "$prompt_file" "$result_file" "$status_file" "$decision"; then
     rc=0
   else
