@@ -25,6 +25,20 @@ printf '{"backend":"codex","state":"completed","exit_code":1,"pid":"321"}\n' >"$
 printf '{"backend":"codex","state":"failed","exit_code":1,"pid":"321"}\n' >"$STATUS"; terminal_manifest failed; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
 printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"; terminal_manifest failed; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
 
+# A detached watcher supervisory failure is actionable immediately. The
+# waiting caller receives the specific class while the provider lease remains
+# available for explicit recovery rather than timing out generically.
+printf '{"backend":"claude-bg","state":"running","exit_code":null,"pid":"abc12345"}\n' >"$STATUS"
+printf '{"schema_version":1,"error":"provider_probe_failed","backend":"claude-bg","handle":"abc12345","terminal":"provider_probe_failed","attempts":3}\n' >"$STATUS.watcher-error.json"
+chmod 600 "$STATUS.watcher-error.json"
+set +e
+WATCHER_WAIT_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
+WATCHER_WAIT_RC=$?
+set -e
+[ "$WATCHER_WAIT_RC" -eq 70 ]
+printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'provider supervision failed: provider_probe_failed'
+rm -f "$STATUS.watcher-error.json"
+
 # A running status without the exact lifecycle lease is not cancellation
 # authority: never signal or synthesize timed_out.
 ( trap 'exit 0' TERM; while :; do sleep 1; done ) & SLEEP_PID=$!

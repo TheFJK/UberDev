@@ -434,7 +434,7 @@ case=sys.argv[4]
 if case=='invalid': request['workspace_mode']='shared'
 elif case=='missing': request['workspace_mode']='caller'
 elif case=='mismatch': request.update(workspace_mode='caller',workspace_dir=sys.argv[2],repository_id=sys.argv[3])
-elif case=='unsupported': request.update(workspace_mode='caller',workspace_dir=sys.argv[3],repository_id=sys.argv[3],backend='claude-bg',routing_mode='inherit')
+elif case=='unsupported': request.update(workspace_mode='caller',workspace_dir=sys.argv[3],repository_id=sys.argv[3],backend='background',routing_mode='inherit')
 elif case=='unexpected': request.update(workspace_mode='isolated',workspace_dir=sys.argv[3])
 print(json.dumps(request,sort_keys=True,separators=(',',':')))
 PY
@@ -836,7 +836,7 @@ mkdir -p "$CROSS_BIN"
 cat > "$CROSS_BIN/claude" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = agents ] && [ "${2:-}" = --all ] && [ "${3:-}" = --json ]; then cat "$CROSS_CLAUDE_STATE"; exit 0; fi
-if [ "${1:-}" = stop ] && [ "${2:-}" = abc12345 ]; then
+if [ "${1:-}" = stop ] && [ "${2:-}" = abc12345-full ]; then
   count=0
   [ -z "${CROSS_CLAUDE_STOP_COUNT:-}" ] || [ ! -r "$CROSS_CLAUDE_STOP_COUNT" ] || read -r count < "$CROSS_CLAUDE_STOP_COUNT"
   count=$((count + 1))
@@ -874,6 +874,18 @@ BLOCKED_PROBE="$(CROSS_CLAUDE_STATE="$TMP/blocked-claude-status.json" PATH="$CRO
   echo "Claude watcher did not classify idle/blocked permission state: $BLOCKED_PROBE" >&2
   exit 1
 }
+printf '[{"sessionId":"abc12345-full","state":"idle"}]\n' > "$TMP/idle-claude-status.json"
+IDLE_PROBE="$(CROSS_CLAUDE_STATE="$TMP/idle-claude-status.json" PATH="$CROSS_BIN:$PATH" \
+  _uberdev_agent_claude_probe abc12345)"
+[ "$IDLE_PROBE" = 'blocked:permission' ] || {
+  echo "Claude watcher did not classify idle as an actionable permission block: $IDLE_PROBE" >&2
+  exit 1
+}
+if CROSS_CLAUDE_STATE="$TMP/ambiguous-claude-agents.json" PATH="$CROSS_BIN:$PATH" \
+    _uberdev_dispatch_cancel_claude_bg abc12345 >/dev/null 2>&1; then
+  echo 'Claude cancellation accepted a non-unique session prefix' >&2
+  exit 1
+fi
 
 cross_backend_case() {
   backend="$1"
@@ -971,6 +983,7 @@ claude_watcher_case() {
     initial-absent) printf '[]\n' > "$run/claude-agents.json" ;;
     live-then-absent|explicit-completed) printf '[{"sessionId":"abc12345-full","state":"running"}]\n' > "$run/claude-agents.json" ;;
     blocked) printf '[{"sessionId":"abc12345-full","state":"blocked","blockedReason":"Permission approval required"}]\n' > "$run/claude-agents.json" ;;
+    idle) printf '[{"sessionId":"abc12345-full","state":"idle"}]\n' > "$run/claude-agents.json" ;;
     ambiguous) printf '[{"sessionId":"abc12345-one","state":"running"},{"sessionId":"abc12345-two","state":"completed"}]\n' > "$run/claude-agents.json" ;;
     probe-error) printf '{not-json\n' > "$run/claude-agents.json" ;;
   esac
@@ -986,7 +999,7 @@ claude_watcher_case() {
         "$run/prompt.txt" "$run/result.md" "$run/status.json"
   )
   case "$mode" in
-    initial-absent|live-then-absent|explicit-completed|blocked)
+    initial-absent|live-then-absent|explicit-completed|blocked|idle)
       for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
         grep -Eq '"state":"(completed|failed)"' "$run/status.json" 2>/dev/null && break
         command sleep 0.1
@@ -1024,19 +1037,24 @@ PY
         echo "explicit Claude completion did not complete" >&2; return 1;
       }
       ;;
-    blocked)
+    blocked|idle)
       grep -q '"state":"failed"' "$run/status.json" || {
-        echo "blocked Claude session did not terminalize" >&2; return 1;
+        echo "$mode Claude session did not terminalize" >&2; return 1;
       }
-      wait_for_terminal_and_release "$state/agent-lifecycle.jsonl" "$state" claude-watch-blocked failed 80 0.1 || return 1
-      python3 -I - "$state/agent-lifecycle.jsonl" <<'PY'
+      wait_for_terminal_and_release "$state/agent-lifecycle.jsonl" "$state" "claude-watch-$mode" failed 80 0.1 || return 1
+      python3 -I - "$state/agent-lifecycle.jsonl" "$mode" <<'PY'
 import json, pathlib, sys
 events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
-terminal = [event for event in events if event.get("run_id") == "claude-watch-blocked" and event.get("event") == "failed"]
+terminal = [event for event in events if event.get("run_id") == "claude-watch-"+sys.argv[2] and event.get("event") == "failed"]
 assert len(terminal) == 1 and terminal[0].get("error_class") == "provider_permission_blocked", terminal
 PY
       ;;
     ambiguous|probe-error)
+      python3 -I - "$run/status.json.watcher-error.json" <<'PY'
+import json,sys
+row=json.load(open(sys.argv[1]))
+assert row['error']=='provider_probe_failed' and row['attempts']==3,row
+PY
       grep -q '"state":"running"' "$run/status.json" || {
         echo "$mode Claude probe did not remain nonterminal" >&2; return 1;
       }
@@ -1057,6 +1075,7 @@ claude_watcher_case initial-absent
 claude_watcher_case live-then-absent
 claude_watcher_case explicit-completed
 claude_watcher_case blocked
+claude_watcher_case idle
 claude_watcher_case ambiguous
 claude_watcher_case probe-error
 

@@ -212,7 +212,7 @@ rm -rf "$CLEANUP_TMP"
 
 echo "== Codex setup failures clean child-owned worktrees end to end =="
 SETUP_FAILURE_TMP="$(mktemp -d)"
-mkdir -p "$SETUP_FAILURE_TMP/repo" "$SETUP_FAILURE_TMP/runtime"
+mkdir -p "$SETUP_FAILURE_TMP/repo/nested/invocation" "$SETUP_FAILURE_TMP/runtime"
 (
   cd "$SETUP_FAILURE_TMP/repo"
   git init -q
@@ -234,7 +234,7 @@ for setup_failure in prompt_read python_launcher; do
   prompt="$SETUP_FAILURE_TMP/prompt.txt"
   [ "$setup_failure" != prompt_read ] || prompt="$SETUP_FAILURE_TMP/missing-prompt.txt"
   if (
-    cd "$SETUP_FAILURE_TMP/repo"
+    cd "$SETUP_FAILURE_TMP/repo/nested/invocation"
     UBERDEV_AGENT_STATUS_FILE="$status" UBERDEV_AGENT_RESULT_FILE="$result" \
       UBERDEV_AGENT_CHILD_OWNED=1 UBERDEV_AGENT_INSTANCE_ID="$instance" \
       bash -c '
@@ -259,6 +259,48 @@ if [ -z "$setup_failure_errors" ]; then
 else
   fail_msg "missing-prompt and launcher-resolution failures remove child worktree, branch, and receipt" "$setup_failure_errors"
 fi
+
+# A failed cleanup is a distinct supervisory failure. The absolute worktree
+# target, branch, and ownership receipt remain intact as recovery evidence even
+# when review-pr was invoked below the repository root.
+cleanup_instance='setup-cleanup-failure-a1'
+cleanup_slug="$(UBERDEV_AGENT_INSTANCE_ID="$cleanup_instance" bash -c '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"
+cleanup_relative=".claude/worktrees/solve-issue-335-$cleanup_slug"
+cleanup_branch="worktree-solve-issue-335-$cleanup_slug"
+cleanup_status="$SETUP_FAILURE_TMP/runtime/cleanup-failure-status.json"
+cleanup_repo_root="$(git -C "$SETUP_FAILURE_TMP/repo" rev-parse --show-toplevel)"
+set +e
+(
+  cd "$SETUP_FAILURE_TMP/repo/nested/invocation"
+  UBERDEV_AGENT_STATUS_FILE="$cleanup_status" \
+    UBERDEV_AGENT_RESULT_FILE="$SETUP_FAILURE_TMP/runtime/cleanup-failure-result.md" \
+    UBERDEV_AGENT_CHILD_OWNED=1 UBERDEV_AGENT_INSTANCE_ID="$cleanup_instance" \
+    bash -c '
+      . "$1"
+      _uberdev_dispatch_cleanup_codex_worktree() { return 2; }
+      _uberdev_dispatch_codex 335 small "$2"
+    ' _ "$DISPATCH_LIB" "$SETUP_FAILURE_TMP/missing-cleanup-prompt.txt"
+)
+cleanup_rc=$?
+set -e
+cleanup_failure_errors=''
+[ "$cleanup_rc" -eq 74 ] || cleanup_failure_errors="$cleanup_failure_errors rc-$cleanup_rc"
+[ -d "$SETUP_FAILURE_TMP/repo/$cleanup_relative" ] || cleanup_failure_errors="$cleanup_failure_errors missing-worktree"
+git -C "$SETUP_FAILURE_TMP/repo" show-ref --verify --quiet "refs/heads/$cleanup_branch" \
+  || cleanup_failure_errors="$cleanup_failure_errors missing-branch"
+[ -f "$cleanup_status.worktree-owner.json" ] || cleanup_failure_errors="$cleanup_failure_errors missing-receipt"
+grep -Fq "worktree=$cleanup_repo_root/$cleanup_relative" "$cleanup_status.log" \
+  || cleanup_failure_errors="$cleanup_failure_errors missing-diagnostic"
+if [ -z "$cleanup_failure_errors" ]; then
+  pass_msg "subdirectory setup-cleanup failure returns supervisory rc and preserves exact recovery evidence"
+else
+  fail_msg "subdirectory setup-cleanup failure returns supervisory rc and preserves exact recovery evidence" "$cleanup_failure_errors"
+fi
+git -C "$SETUP_FAILURE_TMP/repo" worktree remove --force "$cleanup_relative"
+git -C "$SETUP_FAILURE_TMP/repo" branch -D "$cleanup_branch" >/dev/null
+cleanup_token="$(python3 -I -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["token"],end="")' "$cleanup_status.worktree-owner.json")"
+bash -c '. "$1"; _uberdev_dispatch_discard_codex_worktree_receipt "$2" "$3"' \
+  _ "$DISPATCH_LIB" "$cleanup_status.worktree-owner.json" "$cleanup_token"
 rm -rf "$SETUP_FAILURE_TMP"
 
 echo "== Caller workspace mode commits in place without cleanup ownership =="
@@ -583,7 +625,7 @@ printf '%s\n' '{"issue":42,"backend":"codex","pid":"0"}' > "$TMPD/solve-codex-st
 PID_ZERO_OUT="$(
   UBERDEV_TMPDIR="$TMPD" UBERDEV_RESOLVED_BACKEND=codex bash -c \
     '. "$1"; . "$2"; _uberdev_goal_pid_for_issue 42' \
-    _ "$DISPATCH_LIB" "$GOAL_LIB" 2>/dev/null
+    _ "$DISPATCH_LIB" "$GOAL_LIB" 2>/dev/null || true
 )"
 if [ -z "$PID_ZERO_OUT" ]; then
   pass_msg "goal-state PID helper refuses pid 0"
@@ -596,7 +638,7 @@ printf '%s\n' '{"issue":42,"backend":"background","pid":"111111"}' > "$TMPD/solv
 PID_FALLBACK_OUT="$(
   UBERDEV_TMPDIR="$TMPD" UBERDEV_RESOLVED_BACKEND=codex bash -c \
     '. "$1"; . "$2"; _uberdev_goal_pid_for_issue 42' \
-    _ "$DISPATCH_LIB" "$GOAL_LIB" 2>/dev/null
+    _ "$DISPATCH_LIB" "$GOAL_LIB" 2>/dev/null || true
 )"
 if [ -z "$PID_FALLBACK_OUT" ]; then
   pass_msg "goal-state PID helper refuses cross-backend fallback status files"
@@ -608,7 +650,7 @@ printf '%s\n' '{"issue":42,"backend":"background","pid":"222222"}' > "$TMPD/solv
 PID_BACKEND_MISMATCH_OUT="$(
   UBERDEV_TMPDIR="$TMPD" UBERDEV_RESOLVED_BACKEND=codex bash -c \
     '. "$1"; . "$2"; _uberdev_goal_pid_for_issue 42' \
-    _ "$DISPATCH_LIB" "$GOAL_LIB" 2>/dev/null
+    _ "$DISPATCH_LIB" "$GOAL_LIB" 2>/dev/null || true
 )"
 if [ -z "$PID_BACKEND_MISMATCH_OUT" ]; then
   pass_msg "goal-state PID helper validates backend field before trusting pid"
@@ -730,7 +772,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 sleep "${CODEX_STUB_SLEEP:-1}"
-[ -n "$out" ] && printf 'codex final result\n' > "$out"
+[ "${CODEX_STUB_EMPTY:-0}" = 1 ] || { [ -n "$out" ] && printf 'codex final result\n' > "$out"; }
 exit "${CODEX_STUB_RC:-0}"
 SH
 chmod +x "$BEH_TMP/bin/git" "$BEH_TMP/bin/codex"
@@ -806,6 +848,42 @@ if printf '%s\n' "$BEH_OUT" | grep -Eq '"pid":"[0-9]+"'; then
   pass_msg "codex dispatch status pid is numeric"
 else
   fail_msg "codex dispatch status pid is numeric" "$BEH_OUT"
+fi
+
+EMPTY_INSTANCE=review-empty-result-a1
+EMPTY_SLUG="$(UBERDEV_AGENT_INSTANCE_ID="$EMPTY_INSTANCE" bash -c '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"
+EMPTY_OUT="$(
+  cd "$BEH_TMP/repo" && \
+  PATH="$BEH_TMP/bin:/usr/bin:/bin" \
+  UBERDEV_TMPDIR="$BEH_TMP/tmp" \
+  UBERDEV_AGENT_CHILD_OWNED=1 \
+  UBERDEV_AGENT_INSTANCE_ID="$EMPTY_INSTANCE" \
+  CODEX_STUB_EMPTY=1 CODEX_STUB_SLEEP=0 \
+  CODEX_CAPTURE="$BEH_TMP/codex-empty-capture.txt" \
+  bash -c '
+    . "$1"
+    _uberdev_dispatch_codex 46 small "$2"
+    rc=$?; pid="${DISPATCH_ID:-}"; status_file="$UBERDEV_TMPDIR/solve-codex-status-46.json"
+    i=0
+    while [ "$i" -lt 400 ]; do
+      terminal="$(cat "$status_file" 2>/dev/null)"
+      case "$terminal" in *\"state\":\"completed\"*|*\"state\":\"failed\"*) break ;; esac
+      sleep 0.025; i=$((i + 1))
+    done
+    i=0
+    while [ -n "$pid" ] && _uberdev_dispatch_wait_owned_session "$pid" && [ "$i" -lt 200 ]; do sleep 0.025; i=$((i + 1)); done
+    printf "rc=%s\nstatus=%s\n" "$rc" "$(cat "$status_file" 2>/dev/null)"
+  ' _ "$DISPATCH_LIB" "$BEH_TMP/prompt.txt"
+)"
+if printf '%s\n' "$EMPTY_OUT" | grep -Fq 'rc=0' \
+    && printf '%s\n' "$EMPTY_OUT" | grep -Fq '"state":"failed"' \
+    && printf '%s\n' "$EMPTY_OUT" | grep -Fq '"exit_code":65' \
+    && [ ! -s "$BEH_TMP/tmp/solve-codex-result-46.md" ] \
+    && [ ! -e "$BEH_TMP/repo/.claude/worktrees/solve-issue-46-$EMPTY_SLUG" ] \
+    && [ ! -e "$BEH_TMP/tmp/solve-codex-status-46.json.worktree-owner.json" ]; then
+  pass_msg "successful Codex exit with an empty result fails terminally and cleans child ownership"
+else
+  fail_msg "successful Codex exit with an empty result fails terminally and cleans child ownership" "$EMPTY_OUT"
 fi
 rm -rf "$BEH_TMP"
 

@@ -390,9 +390,9 @@ export UBERDEV_COMMAND_WORKSPACE_JSON="$REVIEW_WORKSPACE_JSON"
 
 HOSTILE_DIR="$RESEARCH_DIR_ABS"$'/review dir\nwith "quotes" and \\slashes *?[x]'
 mkdir -p "$HOSTILE_DIR"
-# gh pr diff --name-only supplies normalized repository-relative names. These
-# deliberately do not exist to cover deleted paths while retaining hostile
-# shell metacharacters as inert JSON data.
+# These fixtures are contract-accepted repository-relative paths after
+# validation. They deliberately do not exist to cover deleted paths while
+# retaining hostile shell metacharacters as inert JSON data.
 CHANGED_ONE='src/changed "one" path*.ts'
 CHANGED_TWO='tests/changed two [x] path?.sh'
 DIFF_PATH="$HOSTILE_DIR"$'/diff "quoted" \\path*?[x].md'
@@ -423,6 +423,28 @@ EMPHASIS_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1:
   $'tests "quoted" \\focus*?[x]\t' $'errors "quoted" \\focus*?[x]\t')"
 DIFF_ARTIFACT_PATH="$DIFF_PATH"
 CRITERIA_PATH="$CRITERIA_FIXTURE"
+
+# changed_paths represents the complete name-only diff. Its acceptance is
+# bounded by the handoff byte limit, not by an arbitrary file-count ceiling.
+LARGE_CHANGED_PATHS_JSON="$(python3 -I -B -c 'import json; print(json.dumps([f"src/large-pr-{i:03d}.ts" for i in range(129)],separators=(",",":")),end="")')"
+LARGE_REVIEW_INPUTS="$(uberdev_child_inputs_build review_pr.review.correctness \
+  changed_paths "$LARGE_CHANGED_PATHS_JSON" \
+  diff_path "$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1]),end="")' "$DIFF_PATH")" \
+  criteria_path "$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1]),end="")' "$CRITERIA_FIXTURE")" \
+  emphasis '[]')"
+[ "$(python3 -I -B -c 'import json,sys; print(len(json.loads(sys.argv[1])["changed_paths"]))' "$LARGE_REVIEW_INPUTS")" -eq 129 ] || {
+  echo 'review-child-inputs: complete 129-path PR diff was truncated or rejected' >&2
+  exit 1
+}
+if DRIVE_RELATIVE_INPUTS="$(python3 -I -B - "$LARGE_REVIEW_INPUTS" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1]); value['changed_paths']=['C:relative/path.ts']
+print(json.dumps(value,separators=(',',':')),end='')
+PY
+)" && uberdev_child_inputs_validate review_pr.review.correctness "$DRIVE_RELATIVE_INPUTS" >/dev/null 2>&1; then
+  echo 'review-child-inputs: Windows drive-relative path was accepted' >&2
+  exit 1
+fi
 
 # Canonical six-edge roster -> post_review_record -> post_review_fanout.
 . "$TMP/post-roster.sh"

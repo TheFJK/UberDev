@@ -188,12 +188,12 @@ def beneath(root,path):
  try:return os.path.commonpath((root,path))==root
  except ValueError:return False
 def repo_paths(value):
- if not isinstance(value,list) or len(value)>128: fail('input_type_mismatch')
+ if not isinstance(value,list): fail('input_type_mismatch')
  for path in value:
   if (not isinstance(path,str) or not path or len(path)>4096 or path.startswith('/')
       or '\\' in path or any(ord(c)<32 or ord(c)==127 for c in path)): fail('unsafe_repo_path')
   parts=path.split('/')
-  if (any(part in {'','.','..'} for part in parts) or re.fullmatch(r'[A-Za-z]:',parts[0])
+  if (any(part in {'','.','..'} for part in parts) or re.match(r'^[A-Za-z]:',path)
       or posixpath.normpath(path)!=path): fail('unsafe_repo_path')
 try:
  carrier=json.loads(carrier_raw); inputs=json.loads(inputs_raw); risks=json.loads(risks_raw)
@@ -328,12 +328,12 @@ def beneath(root,path):
     try:return os.path.commonpath((root,path))==root
     except ValueError:return False
 def repo_paths(value):
-    if not isinstance(value,list) or len(value)>128: fail('input_type_mismatch')
+    if not isinstance(value,list): fail('input_type_mismatch')
     for path in value:
         if (not isinstance(path,str) or not path or len(path)>4096 or path.startswith('/')
             or '\\' in path or any(ord(c)<32 or ord(c)==127 for c in path)): fail('unsafe_repo_path')
         parts=path.split('/')
-        if (any(part in {'','.','..'} for part in parts) or re.fullmatch(r'[A-Za-z]:',parts[0])
+        if (any(part in {'','.','..'} for part in parts) or re.match(r'^[A-Za-z]:',path)
             or posixpath.normpath(path)!=path): fail('unsafe_repo_path')
 def safe_existing(path, regular=True, max_bytes=65536):
     if not os.path.isabs(path) or not os.path.lexists(path): fail('unsafe_path')
@@ -667,6 +667,27 @@ except Exception: raise SystemExit(2)
 PY
 }
 
+_uberdev_child_watcher_error() {
+  python3 -I -B - "$1.watcher-error.json" <<'PY'
+import json,os,stat,sys
+path=sys.argv[1]
+try:
+ entry=os.lstat(path)
+except FileNotFoundError:
+ raise SystemExit(1)
+uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
+try:
+ if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1 or entry.st_size>65536 or (uid is not None and entry.st_uid!=uid): raise ValueError()
+ value=json.load(open(path,encoding='utf-8'))
+ if set(value)!={'schema_version','error','backend','handle','terminal','attempts'} or value.get('schema_version')!=1: raise ValueError()
+ error=value.get('error')
+ if error not in {'provider_probe_failed','provider_cancel_failed','terminal_finalize_failed','launch_finalize_failed'}: raise ValueError()
+ print(error,end='')
+except Exception:
+ raise SystemExit(2)
+PY
+}
+
 _uberdev_child_find_lease() {
   python3 -I -B - "$1" "$2" "$3" <<'PY'
 import os,stat,sys
@@ -767,7 +788,7 @@ uberdev_unwind_child() {
 }
 
 uberdev_wait_child() {
-  local status_file="${1:-}" result="${2:-}" timeout="${3:-}" start now probe state handle='' backend process_identity lease_generation snapshot child run_dir instance manifest terminal state_dir lease_info lease lease_identity cas rc
+  local status_file="${1:-}" result="${2:-}" timeout="${3:-}" start now probe state handle='' backend process_identity lease_generation snapshot child run_dir instance manifest terminal state_dir lease_info lease lease_identity cas rc watcher_error watcher_error_rc
   [ "$#" -eq 3 ] || return 2
   case "$timeout" in ''|*[!0-9]*) return 2 ;; esac
   [ "$timeout" -gt 0 ] || return 2
@@ -779,6 +800,13 @@ uberdev_wait_child() {
   state_dir="$run_dir/.agent-state-$(id -u)"
   start="$(date +%s)"
   while :; do
+    if watcher_error="$(_uberdev_child_watcher_error "$status_file" 2>/dev/null)"; then
+      _uberdev_child_error "provider supervision failed: $watcher_error"
+      return 70
+    else
+      watcher_error_rc=$?
+      [ "$watcher_error_rc" -eq 1 ] || return 2
+    fi
     if probe="$(_uberdev_child_wait_probe "$status_file" "$result" 2>/dev/null)"; then
       state="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["state"],end="")' "$probe")" || return 2
       handle="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["handle"],end="")' "$probe")" || return 2

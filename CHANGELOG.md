@@ -4,17 +4,7 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Fixed
-
-- Added manifest-declared caller workspace execution for the five review repair edges so their commits land in the validated review checkout, while other children retain isolated worktrees.
-- Scoped Codex child logs to their unique status artifacts and made cleanup failures terminal, observable failures without deleting unsafe evidence.
-- Hardened logical repository paths and ownership receipts for native Windows, including fail-closed Git probe errors.
-- Kept routed output contracts edge-local instead of promoting them into every native role invocation.
-- Rejected malformed CI classifier anchors before routing and kept CI-refusal aggregates inside the command-owned research directory.
-
-## [0.40.2] — 2026-07-16
+## [0.40.2] — 2026-07-23
 
 ### Fixed
 
@@ -26,10 +16,18 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Shipped the run-tree policy and reviewer schema in generated prkit Claude and Codex packages so clean installs no longer depend on stale runtime files.
 - Kept routed Codex workers leaf-only with the supported `features.multi_agent=false` setting instead of the rejected `agents.max_depth=0` override.
 - Scoped routed child allocation identities to each review run so preserved evidence from earlier runs does not reuse the same allocation identity.
+- Added manifest-declared caller workspace execution for the five review repair edges so their commits land in the validated review checkout, while other children retain isolated worktrees.
+- Scoped Codex child logs to their unique status artifacts and made cleanup failures terminal, observable failures without deleting unsafe evidence.
+- Hardened logical repository paths and ownership receipts for native Windows, including fail-closed Git probe errors.
+- Kept routed output contracts edge-local instead of promoting them into every native role invocation.
+- Rejected malformed CI classifier anchors before routing and kept CI-refusal aggregates inside the command-owned research directory.
+- Bounded indeterminate Claude probes, resolved full session IDs before cancellation, and made launch terminalization and exact lease release fail closed with durable supervisory evidence.
+- Preserved complete large-PR path sets, rejected Windows drive-relative paths, and restored Python 3.10-compatible standalone PRKit verification.
 
 ### Tests
 
 - Added a six-child Codex review integration fixture covering backend selection, non-interactive dispatch, unique worktrees, success and failure cleanup, terminal lifecycle receipts, and zero leaked leases.
+- Added regressions for Claude idle and ambiguous sessions, nested auto-permission propagation, subdirectory Codex cleanup, cleanup-failure recovery evidence, and large review diffs.
 
 ## [0.40.1] — 2026-07-11
 

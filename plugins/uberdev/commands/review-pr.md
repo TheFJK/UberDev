@@ -46,11 +46,9 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)}"
 uberdev_command_workspace_prepare review-pr "$PR_NUMBER" medium "$RISK_JSON" "$RUN_ID" "${WORKTREE_ROOT:-}" >/dev/null || {
   rc=$?; return "$rc" 2>/dev/null || exit "$rc"
 }
-if [ "$UBERDEV_CARRIER_BACKEND" = claude-bg ]; then
-  uberdev_dispatch_resolve_env claude-bg || {
-    rc=$?; return "$rc" 2>/dev/null || exit "$rc"
-  }
-fi
+uberdev_dispatch_preflight_backend "$UBERDEV_CARRIER_BACKEND" || {
+  rc=$?; return "$rc" 2>/dev/null || exit "$rc"
+}
 REVIEW_ITERATION="${REVIEW_ITERATION:-1}"
 REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"
 CI_FIX_LOOP_ITER="${CI_FIX_LOOP_ITER:-1}"

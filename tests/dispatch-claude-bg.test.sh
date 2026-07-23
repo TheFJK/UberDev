@@ -863,7 +863,7 @@ echo "== #335 Claude cancellation is exact and bounded =="
   invalid_rc=$?
   calls="$(cat "$CANCEL_LOG" 2>/dev/null)"
   if [ "$valid_rc" -eq 0 ] && [ "$invalid_rc" -eq 2 ] \
-      && [ "$(grep -c '^stop abc12345$' "$CANCEL_LOG")" -eq 1 ] \
+      && [ "$(grep -c '^stop abc12345-full$' "$CANCEL_LOG")" -eq 1 ] \
       && [[ "$calls" != *touch-pwned* ]]; then
     echo "  PASS  cancellation runs only exact claude stop <8hex> and confirms terminal state"
     PASS=$((PASS + 1))

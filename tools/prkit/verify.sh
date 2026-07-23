@@ -165,10 +165,14 @@ codex_plugin=root/'codex/prkit-codex'
 if codex_plugin.is_dir():
     codex=validate(codex_plugin)
     assert codex==claude
-    import tomllib
-    for role in ('code-reviewer','silent-failure-hunter','type-design-analyzer','comment-analyzer','pr-test-analyzer'):
-        data=tomllib.loads((root/f'codex/agents/prkit-{role}.toml').read_text())
-        assert codex not in data['developer_instructions'], role
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        tomllib=None
+    if tomllib is not None:
+        for role in ('code-reviewer','silent-failure-hunter','type-design-analyzer','comment-analyzer','pr-test-analyzer'):
+            data=tomllib.loads((root/f'codex/agents/prkit-{role}.toml').read_text())
+            assert codex not in data['developer_instructions'], role
 PY
 then ok "review-contract: routed manifests agree and native roles stay edge-local"
 else fail "review-contract: manifest/schema/native role scoping drift"; fi

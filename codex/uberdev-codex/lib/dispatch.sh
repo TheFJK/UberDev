@@ -72,10 +72,11 @@ _uberdev_dispatch_python() {
   fi
 }
 
-# Return a private runtime root. The public /tmp directory is only a parent.
-# POSIX lifecycle files live in an EUID-owned, non-symlink directory locked to
-# 0700; native Windows relies on the current-user ACL inherited from its temp
-# root because POSIX ownership and mode bits are not meaningful there.
+# Return a validated runtime root. The default lives below the platform temp
+# root; POSIX creates or validates an EUID-owned, non-symlink directory locked
+# to 0700, while native Windows relies on the current-user ACL inherited by a
+# newly created default directory. Caller-supplied Windows overrides are only
+# checked for directory/reparse safety and are not asserted private here.
 _uberdev_dispatch_runtime_root() {
   local target
   if [ -n "${UBERDEV_TMPDIR:-}" ]; then
@@ -551,6 +552,21 @@ uberdev_dispatch_resolve_env() {
   return 0
 }
 
+# Validate the selected provider environment before a governed workflow starts
+# constructing children. Native Codex needs no Claude CLI model, permission, or
+# timeout variables; every Claude-backed transport shares the resolver above.
+uberdev_dispatch_preflight_backend() {
+  local backend="${1:-}"
+  case "$backend" in
+    codex) return 0 ;;
+    claude-bg|wezterm|background) uberdev_dispatch_resolve_env "$backend" ;;
+    *)
+      echo "error: unsupported dispatch backend for workflow preflight: $backend" >&2
+      return 1
+      ;;
+  esac
+}
+
 # _uberdev_agent_dispatch_backend BACKEND ISSUE TIER PROMPT RESULT STATUS DECISION
 # Provider boundary consumed by agent-dispatch.sh. Exactly one case arm runs.
 _uberdev_agent_dispatch_backend() {
@@ -576,10 +592,20 @@ _uberdev_agent_dispatch_backend() {
 }
 
 _uberdev_dispatch_cancel_claude_bg() {
-  local handle="${1:-}"
+  local handle="${1:-}" resolved
   [ "${#handle}" -eq 8 ] || return 2
   printf '%s\n' "$handle" | LC_ALL=C grep -Eq '^[0-9a-f]{8}$' || return 2
-  claude stop "$handle" >/dev/null 2>&1 || return 2
+  resolved="$(claude agents --all --json 2>/dev/null | _uberdev_dispatch_python -I -B -c '
+import json,sys
+prefix=sys.argv[1]
+try: rows=json.load(sys.stdin)
+except Exception: raise SystemExit(2)
+matches=[row["sessionId"] for row in rows if isinstance(row,dict) and isinstance(row.get("sessionId"),str) and row["sessionId"].startswith(prefix)] if isinstance(rows,list) else []
+if len(matches)!=1: raise SystemExit(2)
+print(matches[0],end="")
+' "$handle")" || return 2
+  [ -n "$resolved" ] || return 2
+  claude stop "$resolved" >/dev/null 2>&1 || return 2
 }
 
 _uberdev_dispatch_group_live() {
@@ -1101,22 +1127,39 @@ _uberdev_dispatch_claude_bg() {
   local BG_TURBO_ENV=()
   [[ "${AUTO_MODE:-0}" == "1" ]] && BG_TURBO_ENV=( UBERDEV_TURBO=1 )
   [[ "${SKIP_PERMISSIONS:-0}" == "1" ]] && BG_TURBO_ENV+=( SKIP_PERMISSIONS=1 )
+  [[ "${AUTO_PERMISSIONS:-0}" == "1" ]] && BG_TURBO_ENV+=( AUTO_PERMISSIONS=1 )
+  local BG_WORKSPACE_MODE="${UBERDEV_AGENT_WORKSPACE_MODE:-isolated}"
+  local BG_EXECUTION_DIR BG_WORKTREE_ARGS=()
+  case "$BG_WORKSPACE_MODE" in
+    isolated)
+      BG_EXECUTION_DIR="$(pwd -P)" || return 3
+      BG_WORKTREE_ARGS=( --worktree "solve-issue-$ISSUE_NUM" )
+      ;;
+    caller)
+      BG_EXECUTION_DIR="${UBERDEV_AGENT_WORKSPACE_DIR:-}"
+      [ -n "$BG_EXECUTION_DIR" ] && [ -d "$BG_EXECUTION_DIR" ] || return 3
+      BG_EXECUTION_DIR="$(cd "$BG_EXECUTION_DIR" 2>/dev/null && pwd -P)" || return 3
+      ;;
+    *) return 3 ;;
+  esac
   local BG_PROMPT_MODE="${BG_PROMPT_MODE:-argv}"
   case "$BG_PROMPT_MODE" in
     file)
       # Trusted path arg; file contents never reach the shell as argv.
-      "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" env "${BG_TURBO_ENV[@]}" claude --bg \
-        --prompt-file "$PROMPT_FILE" \
-        --worktree "solve-issue-$ISSUE_NUM" \
-        --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" > "$BG_STDOUT_LOG" 2>&1
+      ( cd "$BG_EXECUTION_DIR" && \
+        "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" env "${BG_TURBO_ENV[@]}" claude --bg \
+          --prompt-file "$PROMPT_FILE" \
+          "${BG_WORKTREE_ARGS[@]}" \
+          --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" ) > "$BG_STDOUT_LOG" 2>&1
       DISPATCH_RC=$?
       ;;
     stdin)
       # File content streamed on FD 0; no argv quoting concern.
-      "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" env "${BG_TURBO_ENV[@]}" claude --bg \
-        --worktree "solve-issue-$ISSUE_NUM" \
-        --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" \
-        < "$PROMPT_FILE" > "$BG_STDOUT_LOG" 2>&1
+      ( cd "$BG_EXECUTION_DIR" && \
+        "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" env "${BG_TURBO_ENV[@]}" claude --bg \
+          "${BG_WORKTREE_ARGS[@]}" \
+          --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" \
+          < "$PROMPT_FILE" ) > "$BG_STDOUT_LOG" 2>&1
       DISPATCH_RC=$?
       ;;
     argv)
@@ -1135,10 +1178,9 @@ _uberdev_dispatch_claude_bg() {
         return 1
       fi
       local cmd=( "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" env "${BG_TURBO_ENV[@]}" claude --bg
-            --worktree "solve-issue-$ISSUE_NUM"
-            --model "$MODEL" )
+            "${BG_WORKTREE_ARGS[@]}" --model "$MODEL" )
       cmd+=( "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" -- "$PROMPT_BODY" )
-      "${cmd[@]}" > "$BG_STDOUT_LOG" 2>&1
+      ( cd "$BG_EXECUTION_DIR" && "${cmd[@]}" ) > "$BG_STDOUT_LOG" 2>&1
       DISPATCH_RC=$?
       ;;
     *)
@@ -1381,6 +1423,20 @@ finally:
   return "$DISPATCH_RC"
 }
 
+_uberdev_dispatch_report_codex_setup_cleanup_failure() {
+  local issue_num="$1" phase="$2" repo_root="$3" worktree_relative="$4"
+  local branch="$5" receipt="$6" token="$7" log_file="$8"
+  if _uberdev_dispatch_cleanup_codex_worktree "$repo_root" "$worktree_relative" "$branch" \
+      "$receipt" "$token" failed; then
+    return 0
+  fi
+  printf 'codex dispatch: setup cleanup failed after %s; worktree=%s branch=%s receipt=%s\n' \
+    "$phase" "$repo_root/$worktree_relative" "$branch" "$receipt" >>"$log_file"
+  _uberdev_dispatch_audit dispatch_cleanup_failed \
+    "{\"issue\":$issue_num,\"phase\":\"$phase\",\"backend\":\"codex\",\"rc\":74}"
+  return 74
+}
+
 # _uberdev_dispatch_codex ISSUE_NUM TIER PROMPT_FILE
 #
 # Codex CLI backend (RFC 0012 §3.4 codex-port). Structurally mirrors
@@ -1416,9 +1472,10 @@ _uberdev_dispatch_codex() {
   local RESULT_FILE="${UBERDEV_AGENT_RESULT_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-codex-result-$ISSUE_NUM.md}"
   local WORKSPACE_MODE="${UBERDEV_AGENT_WORKSPACE_MODE:-isolated}"
   local WORKSPACE_DIR="${UBERDEV_AGENT_WORKSPACE_DIR:-}"
-  local WORKTREE_DIR=".claude/worktrees/solve-issue-$ISSUE_NUM-$INSTANCE_SLUG"
+  local WORKTREE_RELATIVE=".claude/worktrees/solve-issue-$ISSUE_NUM-$INSTANCE_SLUG"
+  local WORKTREE_DIR=''
   local WORKTREE_BRANCH="worktree-solve-issue-$ISSUE_NUM-$INSTANCE_SLUG"
-  local EXECUTION_DIR="$WORKTREE_DIR"
+  local EXECUTION_DIR=''
   local ROUTE_MODEL="${UBERDEV_AGENT_ROUTE_MODEL:-gpt-5.6-sol}"
   local ROUTE_EFFORT="${UBERDEV_AGENT_ROUTE_EFFORT:-medium}"
   local ROUTE_SERVICE_TIER="${UBERDEV_AGENT_SERVICE_TIER:-default}"
@@ -1427,6 +1484,8 @@ _uberdev_dispatch_codex() {
   local REPOSITORY_ROOT WORKTREE_RECEIPT WORKTREE_TOKEN=''
   local CHILD_OWNED="${UBERDEV_AGENT_CHILD_OWNED:-0}"
   REPOSITORY_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)" || { DISPATCH_RC=1; return 1; }
+  WORKTREE_DIR="$REPOSITORY_ROOT/$WORKTREE_RELATIVE"
+  EXECUTION_DIR="$WORKTREE_DIR"
   case "$WORKSPACE_MODE" in
     isolated) [ -z "$WORKSPACE_DIR" ] || { DISPATCH_RC=3; return 3; } ;;
     caller)
@@ -1434,6 +1493,7 @@ _uberdev_dispatch_codex() {
       WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" 2>/dev/null && pwd -P)" || { DISPATCH_RC=3; return 3; }
       [ "$WORKSPACE_DIR" = "$REPOSITORY_ROOT" ] || { DISPATCH_RC=3; return 3; }
       EXECUTION_DIR="$WORKSPACE_DIR"
+      WORKTREE_RELATIVE=''
       WORKTREE_DIR=''
       WORKTREE_BRANCH=''
       ;;
@@ -1460,7 +1520,7 @@ _uberdev_dispatch_codex() {
   fi
   if [ "$WORKSPACE_MODE" = isolated ] && [ "$CHILD_OWNED" = "1" ]; then
     WORKTREE_TOKEN="$(_uberdev_dispatch_create_codex_worktree_receipt \
-      "$REPOSITORY_ROOT" "$WORKTREE_DIR" "$WORKTREE_BRANCH" "$WORKTREE_RECEIPT")" || {
+      "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$WORKTREE_RECEIPT")" || {
         DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3;
       }
   fi
@@ -1478,8 +1538,13 @@ _uberdev_dispatch_codex() {
   # Validate readability without copying prompt content into argv. Codex exec
   # accepts positional `-` and reads the instruction from stdin.
   if [ ! -f "$PROMPT_FILE" ] || [ ! -r "$PROMPT_FILE" ]; then
-    [ "$WORKSPACE_MODE" != isolated ] || [ "$CHILD_OWNED" != "1" ] || _uberdev_dispatch_cleanup_codex_worktree "$REPOSITORY_ROOT" "$WORKTREE_DIR" "$WORKTREE_BRANCH" \
-      "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" failed >/dev/null 2>&1 || true
+    if [ "$WORKSPACE_MODE" = isolated ] && [ "$CHILD_OWNED" = "1" ] && \
+        ! _uberdev_dispatch_report_codex_setup_cleanup_failure "$ISSUE_NUM" prompt_read \
+          "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" "$LOG_FILE"; then
+      DISPATCH_RC=74
+      DISPATCH_LOG="$LOG_FILE"
+      return 74
+    fi
     DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
     _uberdev_dispatch_audit dispatch_setup_failed \
@@ -1497,8 +1562,13 @@ _uberdev_dispatch_codex() {
   # and be overwritten back to "running". Track the wrapper PID, not the raw
   # codex child, so /goal can poll a process that owns the final status write.
   if ! _uberdev_dispatch_resolve_python; then
-    [ "$WORKSPACE_MODE" != isolated ] || [ "$CHILD_OWNED" != "1" ] || _uberdev_dispatch_cleanup_codex_worktree "$REPOSITORY_ROOT" "$WORKTREE_DIR" "$WORKTREE_BRANCH" \
-      "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" failed >/dev/null 2>&1 || true
+    if [ "$WORKSPACE_MODE" = isolated ] && [ "$CHILD_OWNED" = "1" ] && \
+        ! _uberdev_dispatch_report_codex_setup_cleanup_failure "$ISSUE_NUM" python_launcher \
+          "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" "$LOG_FILE"; then
+      DISPATCH_RC=74
+      DISPATCH_LOG="$LOG_FILE"
+      return 74
+    fi
     DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
     _uberdev_dispatch_audit dispatch_setup_failed \
@@ -1543,19 +1613,20 @@ os.execvp("bash",argv)' '
       RESULT_FILE="$4"
       LOG_FILE="$5"
       EXECUTION_DIR="$6"
-      WORKTREE_BRANCH="$7"
-      PROMPT_FILE="$8"
-      ROUTE_MODEL="$9"
-      ROUTE_EFFORT="${10}"
-      ROUTE_SERVICE_TIER="${11}"
-      ROUTE_SANDBOX="${12}"
-      REPOSITORY_ROOT="${13}"
-      WORKTREE_RECEIPT="${14}"
-      WORKTREE_TOKEN="${15}"
-      DISPATCH_LIB="${16}"
-      CHILD_OWNED="${17}"
-      WORKSPACE_MODE="${18}"
-      shift 18
+      WORKTREE_RELATIVE="$7"
+      WORKTREE_BRANCH="$8"
+      PROMPT_FILE="$9"
+      ROUTE_MODEL="${10}"
+      ROUTE_EFFORT="${11}"
+      ROUTE_SERVICE_TIER="${12}"
+      ROUTE_SANDBOX="${13}"
+      REPOSITORY_ROOT="${14}"
+      WORKTREE_RECEIPT="${15}"
+      WORKTREE_TOKEN="${16}"
+      DISPATCH_LIB="${17}"
+      CHILD_OWNED="${18}"
+      WORKSPACE_MODE="${19}"
+      shift 19
       WRAPPER_PID="${UBERDEV_WRAPPER_PID:-$$}"
       CLEANUP_DONE=0
       FINAL_STATUS_WRITTEN=0
@@ -1567,7 +1638,7 @@ os.execvp("bash",argv)' '
         if (
           cd "$REPOSITORY_ROOT" || exit 2
           . "$DISPATCH_LIB" || exit 2
-          _uberdev_dispatch_cleanup_codex_worktree "$REPOSITORY_ROOT" "$EXECUTION_DIR" "$WORKTREE_BRANCH" \
+          _uberdev_dispatch_cleanup_codex_worktree "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" \
             "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" "$TERMINAL_STATE"
         ); then
           CLEANUP_DONE=1
@@ -1659,7 +1730,7 @@ EOF_STATUS
       fi
       FINAL_STATUS_WRITTEN=1
       exit "$CODEX_RC"
-    ' _ "$ISSUE_NUM" "$TIER" "$STATUS_FILE" "$RESULT_FILE" "$LOG_FILE" "$EXECUTION_DIR" "$WORKTREE_BRANCH" "$PROMPT_FILE" \
+    ' _ "$ISSUE_NUM" "$TIER" "$STATUS_FILE" "$RESULT_FILE" "$LOG_FILE" "$EXECUTION_DIR" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$PROMPT_FILE" \
     "$ROUTE_MODEL" "$ROUTE_EFFORT" "$ROUTE_SERVICE_TIER" "$ROUTE_SANDBOX" \
     "$REPOSITORY_ROOT" "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" "$_UBERDEV_DISPATCH_FILE" "$CHILD_OWNED" "$WORKSPACE_MODE" "${BG_TURBO_ENV[@]}" \
     >"$LOG_FILE" 2>&1 &

@@ -104,7 +104,7 @@ def validate_value(key: str, value: Any, kind: str) -> None:
             fail(f"input {key} must be a string")
         return
     if kind == "repo_path_array":
-        if not isinstance(value, list) or len(value) > 128:
+        if not isinstance(value, list):
             fail(f"input {key} must be an array of repository-relative paths")
         for item in value:
             if (
@@ -119,7 +119,7 @@ def validate_value(key: str, value: Any, kind: str) -> None:
             parts = item.split("/")
             if (
                 any(part in {"", ".", ".."} for part in parts)
-                or re.fullmatch(r"[A-Za-z]:", parts[0])
+                or re.match(r"^[A-Za-z]:", item)
                 or posixpath.normpath(item) != item
             ):
                 fail(f"input {key} contains an unsafe repository path")

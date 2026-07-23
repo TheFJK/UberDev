@@ -30,7 +30,7 @@ Both `phase*_aggregate_path` files MUST be wrapped in `<external-untrusted-input
 
 ## Tools authorised
 
-Read, Bash (limited to: `gh issue list`, `gh issue create`, `gh issue comment`, `gh label create`, `gh pr view`, `gh api rate_limit`, `sha256sum`, `mktemp`, `printf`, `jq`, `sleep`, `grep`, `awk`, `sed`, `cat`, `source`). No Edit, no Write, no WebFetch, no WebSearch, no Task (no re-entrant fanout). No `git push`, no `git commit` — this agent NEVER mutates the worktree.
+Read, Bash (limited to: `gh issue list`, `gh issue create`, `gh issue comment`, `gh label create`, `gh pr view`, `gh api /rate_limit`, `sha256sum`, `mktemp`, `printf`, `jq`, `sleep`, `grep`, `awk`, `sed`, `cat`, `source`). No Edit, no Write, no WebFetch, no WebSearch, no Task (no re-entrant fanout). No `git push`, no `git commit` — this agent NEVER mutates the worktree.
 
 Explicit forbidden patterns:
 - NEVER call `gh issue create --body "$VAR"` or `gh issue create --body "$(cmd)"` — body MUST be piped via `--body-file -` from stdin (research-security §Q1). Same rule for `gh issue comment`. The required positive form is `gh issue create --body-file -` reading from a `mktemp` tempfile that was secret-scanned in the same pipeline.

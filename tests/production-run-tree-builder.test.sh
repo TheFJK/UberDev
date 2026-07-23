@@ -15,7 +15,7 @@ uberdev_child_inputs_build() {
 }
 
 CASE_BUILDER="$TMP/build-cases.py"
-build_case_fixture() { python3 -I -B "$CASE_BUILDER" "$TREE" "$1" "$2" "$(id -u)"; }
+build_case_fixture() { python3 -I -B "$CASE_BUILDER" "$TREE" "$1" "$2" "$(id -u)" "$ROOT"; }
 apply_case_fixture() { build_case_fixture "$1" "$2"; }
 coverage_is_complete() { [ "$(wc -l <"$1" | tr -d ' ')" -eq "$EXPECTED_COUNT" ]; }
 
@@ -23,7 +23,7 @@ python3 -I -B - "$CASE_BUILDER" <<'PY'
 import pathlib,sys
 pathlib.Path(sys.argv[1]).write_text(r'''import hashlib,json,pathlib,sys
 
-tree=json.load(open(sys.argv[1])); fixture=json.load(open(sys.argv[2])); root=pathlib.Path(sys.argv[3]); uid=sys.argv[4]
+tree=json.load(open(sys.argv[1])); fixture=json.load(open(sys.argv[2])); root=pathlib.Path(sys.argv[3]); uid=sys.argv[4]; repository=pathlib.Path(sys.argv[5]).resolve()
 edges=tree.get('edges'); contracts=fixture.get('contracts')
 assert fixture.get('schema_version')==1 and isinstance(edges,dict) and isinstance(contracts,list)
 contexts={}
@@ -39,7 +39,7 @@ def governed_source(edge):
 def context(workflow,issue):
  if workflow in contexts:return contexts[workflow]
  run=root/workflow; state=run/f'.agent-state-{uid}'; state.mkdir(parents=True); state.chmod(0o700)
- metadata={'run_id':f'root-{workflow}','repository_id':str(root),'workflow':workflow,'backend':'codex','issue_num':issue,'task_tier':'medium','risk_signals':['security']}
+ metadata={'run_id':f'root-{workflow}','repository_id':str(repository),'workflow':workflow,'backend':'codex','issue_num':issue,'task_tier':'medium','risk_signals':['security']}
  payload={'schema_version':1,'metadata':metadata,'routing_request':{},'root_decision':{}}
  raw=json.dumps(payload,sort_keys=True,separators=(',',':')).encode(); path=state/f'route-context-v1-root-{workflow}.json'
  path.write_bytes(raw); path.chmod(0o600)
@@ -86,7 +86,8 @@ for contract in contracts:
  for workflow in workflows:
   index+=1; issue=0 if workflow=='simplify' else 42
   run,carrier=context(workflow,issue)
-  inputs={key:value(fixture_types[key],run,key,index) for key in required+optional}
+  workspace_mode=row.get('workspace_mode','isolated')
+  inputs={key:value(fixture_types[key],repository if workspace_mode=='caller' and key=='working_dir' else run,key,index) for key in required+optional}
   argv_path=root/'argv'/f'{index:03d}.tsv'; argv_path.parent.mkdir(exist_ok=True)
   argv_path.write_text(''.join(f'{key}\t{json.dumps(inputs[key],separators=(",",":"))}\n' for key in required+optional))
   risks=None if risk_scope=='run' else []

@@ -44,7 +44,7 @@ Read only. Explicit denylist: Edit, Write, Bash, Task, WebFetch, WebSearch.
 
 ## Status / failure_class pairing rules (load-bearing)
 
-The two enum fields are NOT independent. Both fields appearing as type-permitted independently could otherwise emit a self-contradictory return like `{status: CLASSIFIED, failure_class: null}`. The pairing constraint below is contract-enforced — emitting an invalid pairing is a contract violation; the caller (`/review-pr` Phase 3) treats an invalid pairing as `status: REFUSED` with `rationale: "invalid-status-failure-class-pairing"` and emits `ci_classify_returned` with the refusal subreason rather than dispatching a fixer against a `null` class.
+The two enum fields are NOT independent. Both fields appearing as type-permitted independently could otherwise emit a self-contradictory return like `{status: CLASSIFIED, failure_class: null}`. The pairing constraint below is contract-enforced — emitting an invalid pairing is a contract violation; the caller (`/review-pr` Phase 3) records `contract_invalid`, emits `ci_classify_returned` with the validation subreason, and halts without reinterpreting the result or dispatching a fixer.
 
 | `status` | `failure_class` | Validity |
 |---|---|---|
@@ -66,9 +66,9 @@ You MUST NOT echo any log line verbatim in the YAML output. The `signal_anchor` 
 ```yaml
 status: CLASSIFIED | AMBIGUOUS | REFUSED
 failure_class: code_bug | billing_quota | platform_outage | flaky | env_drift | stale_base | null
-signal_anchor: "<file:line>" | "gh-run-<id>:<lineno>"
+signal_anchor: "<file:line>" | "gh-run-<id>:<lineno>" | null
 rationale: "<short, no log quotes>"
 risks: []
 ```
 
-For `status: CLASSIFIED`, `signal_anchor` is mandatory: the component before `:` must be non-empty and the line must be a positive integer. Never emit a blank anchor, `:<line>`, `<file>:0`, or an unsupported pointer shape.
+For `status: CLASSIFIED`, `signal_anchor` is mandatory: the component before `:` must be non-empty and the line must be a positive integer. For `AMBIGUOUS` and `REFUSED`, `failure_class` and `signal_anchor` MUST both be `null`. Never emit a blank anchor, `:<line>`, `<file>:0`, or an unsupported pointer shape.

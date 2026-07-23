@@ -20,7 +20,7 @@ for skill in "$GENERATED" "$CHECKED_IN"; do
   # shellcheck disable=SC2016 # The generated shell expression is matched literally.
   grep -q 'UBERDEV_DISPATCH_BACKEND_REQUESTED="${UBERDEV_DISPATCH_BACKEND_REQUESTED:-codex}"' "$skill"
   grep -q 'export UBERDEV_DISPATCH_BACKEND_REQUESTED' "$skill"
-  grep -q 'uberdev_dispatch_resolve_env claude-bg' "$skill"
+  grep -q 'uberdev_dispatch_preflight_backend "$UBERDEV_CARRIER_BACKEND"' "$skill"
 done
 if grep -q 'UBERDEV_DISPATCH_BACKEND_REQUESTED=.*codex' "$SOURCE"; then
   echo "canonical Claude review command must remain provider-neutral" >&2
