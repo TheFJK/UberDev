@@ -306,7 +306,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
      disposition_path "$(review_json_string "$PHASE1_DISPOSITION_PATH")")"
    # phase=phase1 commit_type_prefix=fix:
    # builder dispatch: uberdev_dispatch_child review_pr.fix.phase1
-   review_child_single review_pr.fix.phase1 "review-pr-fix-phase1-iter${REVIEW_ITERATION}-attempt01" "$PHASE1_INPUTS" null "$RESEARCH_DIR_ABS/phase1-fixer" "$REVIEW_PR_TIMEOUT"
+   review_child_single review_pr.fix.phase1 "review-pr-${RUN_ID}-fix-phase1-iter${REVIEW_ITERATION}-attempt01" "$PHASE1_INPUTS" null "$RESEARCH_DIR_ABS/phase1-fixer" "$REVIEW_PR_TIMEOUT"
    ```
 
    The agent applies edits + creates `fix:` / `refactor:` conventional commits autonomously, returning commit SHAs in its YAML. These are the **review-phase commits**, kept distinct from the Phase 2 simplify commit (separate-commit invariant — see `tests/review-pr.test.sh` for the assertion that locks this boundary). Capture the agent's `commits[].sha` for the final aggregation table's "Auto-applied" column. Surface every `findings_disposition` row where `disposition != APPLIED` in the aggregation table's "Advisory findings" column so they are never silently dropped.
@@ -336,7 +336,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    : >"$SIMPLIFY_RECORDS"
    for LENS in reuse quality efficiency; do
      EDGE_ID="review_pr.simplify.$LENS"
-     INSTANCE="review-pr-simplify-$LENS-iter${REVIEW_ITERATION}-attempt01"
+     INSTANCE="review-pr-${RUN_ID}-simplify-$LENS-iter${REVIEW_ITERATION}-attempt01"
      if [ -n "$FOCUS" ]; then
        INPUTS_JSON="$(uberdev_child_inputs_build "$EDGE_ID" \
          diff_path "$(review_json_string "$DIFF_ARTIFACT_PATH")" \
@@ -373,7 +373,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
      disposition_path "$(review_json_string "$PHASE2_DISPOSITION_PATH")")"
    # subagent_type: uberdev:code-fixer; phase=phase2 commit_type_prefix=refactor:
    # builder dispatch: uberdev_dispatch_child review_pr.fix.phase2
-   review_child_single review_pr.fix.phase2 "review-pr-fix-phase2-iter${REVIEW_ITERATION}-attempt01" "$PHASE2_INPUTS" null "$RESEARCH_DIR_ABS/phase2-fixer" "$REVIEW_PR_TIMEOUT"
+   review_child_single review_pr.fix.phase2 "review-pr-${RUN_ID}-fix-phase2-iter${REVIEW_ITERATION}-attempt01" "$PHASE2_INPUTS" null "$RESEARCH_DIR_ABS/phase2-fixer" "$REVIEW_PR_TIMEOUT"
    ```
 
    `PHASE2_HANDOFF` passes the already-enveloped `simplify-final.md` path; its
@@ -454,7 +454,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
       phase2_disposition_path "$(review_json_string "$PHASE2_DISPOSITION_PATH")" \
       working_dir "$(review_json_string "$WORKING_DIR_ABS")" \
       pr_number "$PR_NUMBER")"
-    review_child_single review_pr.defer.findings "review-pr-defer-findings-iter${REVIEW_ITERATION}-attempt01" "$DEFER_INPUTS" null "$RESEARCH_DIR_ABS/defer" "$REVIEW_PR_TIMEOUT"
+    review_child_single review_pr.defer.findings "review-pr-${RUN_ID}-defer-findings-iter${REVIEW_ITERATION}-attempt01" "$DEFER_INPUTS" null "$RESEARCH_DIR_ABS/defer" "$REVIEW_PR_TIMEOUT"
     ```
 
     **Capture the return YAML** into shell variables `CREATED_URLS_JSON`, `COMMENTED_URLS_JSON`, `SKIPPED_CLOSED_JSON`, `BLOCKED_BY_DEDUPE_JSON`, `OVERFLOW_COUNT`, `BY_SEVERITY_BLOCKER`, `BY_SEVERITY_CRITICAL`, `BY_SEVERITY_MAJOR`, `HALTED_DUE_TO_OVERFLOW`, `PHASE2_5_HALTED` for the Step 7 Final Aggregation table AND the new GREEN/YELLOW/RED predicate (Trust-Signal Emission section). Validate the YAML parses before treating the absence of arrays as "zero issues" — on parse failure or missing `status` key, log to stderr and treat the sub-phase as `BLOCKED` for aggregation purposes (the Phase 2.5 row in Step 7 records the parse failure rather than a misleading zero count) AND force `PHASE2_5_HALTED=false` so a malformed agent return cannot accidentally halt the run (fail-open on parse failure is intentional — the alternative silently fails GREEN, which is the bug Phase 2.5 exists to prevent; failing CLOSED on parse error would invert the design).
@@ -688,7 +688,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
       pr_number "$PR_NUMBER" \
       run_id "$(review_json_string "$CI_RUN_ID")" \
       log_path "$(review_json_string "$CI_LOG_ARTIFACT_PATH")")"
-    review_child_single review_pr.ci.classify "review-pr-ci-classify-iter${CI_FIX_LOOP_ITER:-1}-attempt01" "$CI_CLASSIFY_INPUTS" '[]' "$RESEARCH_DIR_ABS/ci-classify" "$REVIEW_PR_TIMEOUT"
+    review_child_single review_pr.ci.classify "review-pr-${RUN_ID}-ci-classify-iter${CI_FIX_LOOP_ITER:-1}-attempt01" "$CI_CLASSIFY_INPUTS" '[]' "$RESEARCH_DIR_ABS/ci-classify" "$REVIEW_PR_TIMEOUT"
     ```
 
     Audit `ci_classify_dispatched` on dispatch; `ci_classify_returned` on return (with `data.failure_class ∈ CI_FAILURE_CLASS_ENUM`).
@@ -711,8 +711,8 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
       head_sha "$(review_json_string "$CI_HEAD_SHA")" \
       base_sha "$(review_json_string "$CI_BASE_SHA")")"
     case $failure_class in
-      code_bug | env_drift)        review_child_single review_pr.ci.fix_code "review-pr-ci-fix-iter${CI_FIX_LOOP_ITER:-1}-attempt01" "$CI_FIX_INPUTS" null "$RESEARCH_DIR_ABS/ci-fix" "$REVIEW_PR_TIMEOUT" ;;
-      stale_base)                  review_child_single review_pr.ci.rebase "review-pr-ci-rebase-iter${CI_FIX_LOOP_ITER:-1}-attempt01" "$CI_REBASE_INPUTS" null "$RESEARCH_DIR_ABS/ci-rebase" "$REVIEW_PR_TIMEOUT" ;;
+      code_bug | env_drift)        review_child_single review_pr.ci.fix_code "review-pr-${RUN_ID}-ci-fix-iter${CI_FIX_LOOP_ITER:-1}-attempt01" "$CI_FIX_INPUTS" null "$RESEARCH_DIR_ABS/ci-fix" "$REVIEW_PR_TIMEOUT" ;;
+      stale_base)                  review_child_single review_pr.ci.rebase "review-pr-${RUN_ID}-ci-rebase-iter${CI_FIX_LOOP_ITER:-1}-attempt01" "$CI_REBASE_INPUTS" null "$RESEARCH_DIR_ABS/ci-rebase" "$REVIEW_PR_TIMEOUT" ;;
       flaky)                       if gh run rerun <run-id>; then
                                      audit ci_flaky_rerun_queued run_id=<run-id>
                                    else
@@ -765,7 +765,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
             phase1_path "$(review_json_string "$CI_REFUSED_AGGREGATE_PATH")" \
             working_dir "$(review_json_string "$WORKTREE_ROOT")" \
             pr_number "$PR_NUMBER")"
-          review_child_single review_pr.ci.defer_refusal "review-pr-ci-defer-refusal-iter${CI_FIX_LOOP_ITER:-1}-attempt01" "$CI_DEFER_INPUTS" null "$RESEARCH_DIR_ABS/ci-defer" "$REVIEW_PR_TIMEOUT"
+          review_child_single review_pr.ci.defer_refusal "review-pr-${RUN_ID}-ci-defer-refusal-iter${CI_FIX_LOOP_ITER:-1}-attempt01" "$CI_DEFER_INPUTS" null "$RESEARCH_DIR_ABS/ci-defer" "$REVIEW_PR_TIMEOUT"
           ```
 
           The `<tmp-synthetic-aggregate.md>` slot is a freshly-created `mktemp` file whose first 128 bytes contain the literal envelope marker shown above (source attribute `ci-refused-synthetic`).
@@ -842,7 +842,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
        CONFLICT_RECORDS="$RESEARCH_DIR_ABS/conflicts.records"; CONFLICT_DESCRIPTORS="$RESEARCH_DIR_ABS/conflicts.descriptors"; CONFLICT_LAUNCHED="$RESEARCH_DIR_ABS/conflicts.launched"; : >"$CONFLICT_RECORDS"
        CONFLICT_INDEX=0
        for CONFLICT_PATH in "${conflicted_files[@]}"; do
-         CONFLICT_INDEX=$((CONFLICT_INDEX + 1)); INSTANCE="review-pr-conflict-${CONFLICT_INDEX}-iter${CI_FIX_LOOP_ITER:-01}-attempt01"
+         CONFLICT_INDEX=$((CONFLICT_INDEX + 1)); INSTANCE="review-pr-${RUN_ID}-conflict-${CONFLICT_INDEX}-iter${CI_FIX_LOOP_ITER:-01}-attempt01"
          INPUTS_JSON="$(uberdev_child_inputs_build review_pr.ci.resolve_conflict \
            file_path "$(review_json_string "$CONFLICT_PATH")" \
            working_dir "$(review_json_string "$REPO_ROOT")" \

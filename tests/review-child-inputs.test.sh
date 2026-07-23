@@ -517,6 +517,7 @@ python3 -I -B - "$RECEIPTS" "$HANDOFFS" "$PROVIDER_CALLS" "$POST_SOURCE" "$REVIE
 import copy
 import hashlib
 import json
+import os
 import re
 import sys
 from collections import Counter
@@ -532,6 +533,7 @@ from pathlib import Path
     semaphore_root,
 ) = sys.argv[1:]
 expected = {}
+run_id = os.environ["RUN_ID"]
 
 def expect(source, edge, instance):
     if instance in expected:
@@ -547,24 +549,24 @@ post_edges = (
     "review_pr.review.general",
 )
 for index, edge in enumerate(post_edges, 1):
-    expect(post_source, edge, f"post-review-r{index}-iter7-attempt01")
-expect(post_source, "review_pr.review.types", "post-review-r3-iter7-attempt02")
+    expect(post_source, edge, f"post-review-{run_id}-r{index}-iter7-attempt01")
+expect(post_source, "review_pr.review.types", f"post-review-{run_id}-r3-iter7-attempt02")
 
 review_cases = (
-    ("review_pr.fix.phase1", "review-pr-fix-phase1-iter7-attempt01"),
-    ("review_pr.simplify.reuse", "review-pr-simplify-reuse-iter7-attempt01"),
-    ("review_pr.simplify.quality", "review-pr-simplify-quality-iter7-attempt01"),
-    ("review_pr.simplify.efficiency", "review-pr-simplify-efficiency-iter7-attempt01"),
-    ("review_pr.simplify.reuse", "review-pr-simplify-reuse-iter8-attempt01"),
-    ("review_pr.simplify.quality", "review-pr-simplify-quality-iter8-attempt01"),
-    ("review_pr.simplify.efficiency", "review-pr-simplify-efficiency-iter8-attempt01"),
-    ("review_pr.fix.phase2", "review-pr-fix-phase2-iter7-attempt01"),
-    ("review_pr.defer.findings", "review-pr-defer-findings-iter7-attempt01"),
-    ("review_pr.ci.classify", "review-pr-ci-classify-iter3-attempt01"),
-    ("review_pr.ci.fix_code", "review-pr-ci-fix-iter3-attempt01"),
-    ("review_pr.ci.rebase", "review-pr-ci-rebase-iter3-attempt01"),
-    ("review_pr.ci.defer_refusal", "review-pr-ci-defer-refusal-iter3-attempt01"),
-    ("review_pr.ci.resolve_conflict", "review-pr-conflict-1-iter3-attempt01"),
+    ("review_pr.fix.phase1", f"review-pr-{run_id}-fix-phase1-iter7-attempt01"),
+    ("review_pr.simplify.reuse", f"review-pr-{run_id}-simplify-reuse-iter7-attempt01"),
+    ("review_pr.simplify.quality", f"review-pr-{run_id}-simplify-quality-iter7-attempt01"),
+    ("review_pr.simplify.efficiency", f"review-pr-{run_id}-simplify-efficiency-iter7-attempt01"),
+    ("review_pr.simplify.reuse", f"review-pr-{run_id}-simplify-reuse-iter8-attempt01"),
+    ("review_pr.simplify.quality", f"review-pr-{run_id}-simplify-quality-iter8-attempt01"),
+    ("review_pr.simplify.efficiency", f"review-pr-{run_id}-simplify-efficiency-iter8-attempt01"),
+    ("review_pr.fix.phase2", f"review-pr-{run_id}-fix-phase2-iter7-attempt01"),
+    ("review_pr.defer.findings", f"review-pr-{run_id}-defer-findings-iter7-attempt01"),
+    ("review_pr.ci.classify", f"review-pr-{run_id}-ci-classify-iter3-attempt01"),
+    ("review_pr.ci.fix_code", f"review-pr-{run_id}-ci-fix-iter3-attempt01"),
+    ("review_pr.ci.rebase", f"review-pr-{run_id}-ci-rebase-iter3-attempt01"),
+    ("review_pr.ci.defer_refusal", f"review-pr-{run_id}-ci-defer-refusal-iter3-attempt01"),
+    ("review_pr.ci.resolve_conflict", f"review-pr-{run_id}-conflict-1-iter3-attempt01"),
 )
 for edge, instance in review_cases:
     expect(review_source, edge, instance)
@@ -799,6 +801,7 @@ from pathlib import Path
 
 env = os.environ
 handoff_root = Path(env["HANDOFFS"])
+run_id = env["RUN_ID"]
 
 def handoff(instance):
     path = handoff_root / f"{instance}.json"
@@ -830,9 +833,9 @@ for index, suffix in enumerate(post_edges, 1):
     expected = dict(review_base)
     if suffix == "general":
         expected["lens"] = "general"
-    exact(f"post-review-r{index}-iter7-attempt01", expected)
+    exact(f"post-review-{run_id}-r{index}-iter7-attempt01", expected)
 exact(
-    "post-review-r3-iter7-attempt02",
+    f"post-review-{run_id}-r3-iter7-attempt02",
     review_base | {
         "format_retry": True,
         "format_example_path": env["FORMAT_EXAMPLE"],
@@ -846,11 +849,11 @@ phase1 = {
     "pr_number": 73,
     "disposition_path": env["PHASE1_DISPOSITION_FIXTURE"],
 }
-exact("review-pr-fix-phase1-iter7-attempt01", phase1)
+exact(f"review-pr-{run_id}-fix-phase1-iter7-attempt01", phase1)
 
 for lens in ("reuse", "quality", "efficiency"):
     exact(
-        f"review-pr-simplify-{lens}-iter7-attempt01",
+        f"review-pr-{run_id}-simplify-{lens}-iter7-attempt01",
         {
             "diff_path": env["DIFF_PATH"],
             "lens": lens,
@@ -858,7 +861,7 @@ for lens in ("reuse", "quality", "efficiency"):
         },
     )
     exact(
-        f"review-pr-simplify-{lens}-iter8-attempt01",
+        f"review-pr-{run_id}-simplify-{lens}-iter8-attempt01",
         {
             "diff_path": env["DIFF_PATH"],
             "lens": lens,
@@ -866,14 +869,14 @@ for lens in ("reuse", "quality", "efficiency"):
     )
 
 exact(
-    "review-pr-fix-phase2-iter7-attempt01",
+    f"review-pr-{run_id}-fix-phase2-iter7-attempt01",
     phase1 | {
         "findings_path": env["SIMPLIFY_FINAL"],
         "disposition_path": env["PHASE2_DISPOSITION_FIXTURE"],
     },
 )
 exact(
-    "review-pr-defer-findings-iter7-attempt01",
+    f"review-pr-{run_id}-defer-findings-iter7-attempt01",
     {
         "phase1_path": env["POST_FINAL"],
         "phase2_path": env["SIMPLIFY_FINAL"],
@@ -884,7 +887,7 @@ exact(
     },
 )
 exact(
-    "review-pr-ci-classify-iter3-attempt01",
+    f"review-pr-{run_id}-ci-classify-iter3-attempt01",
     {
         "pr_number": 73,
         "run_id": env["CI_RUN_ID"],
@@ -892,7 +895,7 @@ exact(
     },
 )
 exact(
-    "review-pr-ci-fix-iter3-attempt01",
+    f"review-pr-{run_id}-ci-fix-iter3-attempt01",
     {
         "classification_path": env["CLASSIFICATION_PATH"],
         "log_path": env["CI_LOG_ARTIFACT_PATH"],
@@ -901,7 +904,7 @@ exact(
     },
 )
 exact(
-    "review-pr-ci-rebase-iter3-attempt01",
+    f"review-pr-{run_id}-ci-rebase-iter3-attempt01",
     {
         "working_dir": env["HOSTILE_DIR"],
         "pr_number": 73,
@@ -910,7 +913,7 @@ exact(
     },
 )
 exact(
-    "review-pr-ci-defer-refusal-iter3-attempt01",
+    f"review-pr-{run_id}-ci-defer-refusal-iter3-attempt01",
     {
         "phase1_path": env["CI_REFUSED_AGGREGATE_PATH"],
         "working_dir": env["HOSTILE_DIR"],
@@ -918,7 +921,7 @@ exact(
     },
 )
 exact(
-    "review-pr-conflict-1-iter3-attempt01",
+    f"review-pr-{run_id}-conflict-1-iter3-attempt01",
     {
         "file_path": env["CONFLICT_PATH"],
         "working_dir": env["HOSTILE_DIR"],

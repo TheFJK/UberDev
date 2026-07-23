@@ -206,7 +206,7 @@ REVIEW_LAUNCHED="$RESEARCH_DIR_ABS/post-review.launched"
 REVIEW_INDEX=0
 for EDGE_ID in "${REVIEW_EDGES[@]}"; do
   REVIEW_INDEX=$((REVIEW_INDEX + 1))
-  INSTANCE="post-review-r${REVIEW_INDEX}-iter${REVIEW_ITERATION}-attempt01"
+  INSTANCE="post-review-${RUN_ID}-r${REVIEW_INDEX}-iter${REVIEW_ITERATION}-attempt01"
   if [ "$EDGE_ID" = review_pr.review.general ]; then
     INPUTS_JSON="$(uberdev_child_inputs_build "$EDGE_ID" \
       changed_paths "$CHANGED_PATHS_JSON" \
@@ -286,7 +286,7 @@ Failure handling is fail-closed. A BLOCKED or unparseable reviewer gets exactly 
 FORMAT_EXAMPLE_PATH="${FORMAT_EXAMPLE_PATH:-$CRITERIA_PATH}"
 FAILED_REVIEW_INPUTS="$(jq -ce --arg edge "$FAILED_REVIEW_EDGE" 'select(.edge == $edge) | .inputs' "$REVIEW_RECORDS")"
 REPAIR_INPUTS="$(uberdev_child_inputs_format_retry "$FAILED_REVIEW_EDGE" "$FAILED_REVIEW_INPUTS" "$FORMAT_EXAMPLE_PATH")"
-REPAIR_INSTANCE="post-review-r${FAILED_REVIEW_INDEX}-iter${REVIEW_ITERATION}-attempt02"
+REPAIR_INSTANCE="post-review-${RUN_ID}-r${FAILED_REVIEW_INDEX}-iter${REVIEW_ITERATION}-attempt02"
 REPAIR_PREFIX="$RESEARCH_DIR_ABS/post-review-repair-r${FAILED_REVIEW_INDEX}"
 : >"$REPAIR_PREFIX.records"
 post_review_record "$FAILED_REVIEW_EDGE" "$REPAIR_INSTANCE" "$REPAIR_INPUTS" '[]' "$REPAIR_PREFIX.records"
