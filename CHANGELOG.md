@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Reconciled review `changed_paths` with a traversal-safe repository-relative contract that also supports deleted files.
 - Added one canonical machine-readable Phase 1 reviewer result schema to all routed and native Codex reviewer prompts.
 - Shipped the run-tree policy and reviewer schema in generated prkit Claude and Codex packages so clean installs no longer depend on stale runtime files.
+- Kept routed Codex workers leaf-only with the supported `features.multi_agent=false` setting instead of the rejected `agents.max_depth=0` override.
 
 ### Tests
 

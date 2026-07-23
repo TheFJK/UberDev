@@ -298,9 +298,9 @@ assert_grep "$DISPATCH_LIB" \
 assert_grep "$DISPATCH_LIB" \
   'features\.multi_agent=false' \
   "codex leaf dispatch disables descendant multi-agent fanout"
-assert_grep "$DISPATCH_LIB" \
+assert_grep_not "$DISPATCH_LIB" \
   'agents\.max_depth=0' \
-  "codex leaf dispatch pins agent depth to zero"
+  "codex leaf dispatch avoids the invalid zero-depth override"
 assert_grep "$DISPATCH_LIB" \
   '< "\$PROMPT_FILE"' \
   "codex backend redirects the validated prompt file to stdin"
@@ -641,7 +641,7 @@ if grep -Fq -- 'argv: [--ask-for-approval] [never] [exec]' "$BEH_TMP/codex-captu
    && grep -Fq -- '[-c] [model_reasoning_effort="medium"]' "$BEH_TMP/codex-capture.txt" \
    && grep -Fq -- '[-c] [service_tier="default"]' "$BEH_TMP/codex-capture.txt" \
    && grep -Fq -- '[-c] [features.multi_agent=false]' "$BEH_TMP/codex-capture.txt" \
-   && grep -Fq -- '[-c] [agents.max_depth=0]' "$BEH_TMP/codex-capture.txt" \
+   && ! grep -Fq -- '[-c] [agents.max_depth=0]' "$BEH_TMP/codex-capture.txt" \
    && grep -Fq -- '[--json] [-o]' "$BEH_TMP/codex-capture.txt" \
    && grep -Fq -- '[-]' "$BEH_TMP/codex-capture.txt" \
    && grep -Fq -- 'UBERDEV_TURBO=1' "$BEH_TMP/codex-capture.txt" \

@@ -1539,7 +1539,6 @@ EOF_STATUS
         "${CODEX_ROUTE_ARGS[@]}" \
         -c "service_tier=\"$ROUTE_SERVICE_TIER\"" \
         -c "features.multi_agent=false" \
-        -c "agents.max_depth=0" \
         --json \
         -o "$RESULT_FILE" \
         - < "$PROMPT_FILE"
