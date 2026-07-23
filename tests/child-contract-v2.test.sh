@@ -57,4 +57,25 @@ cmp "$ROOT/plugins/uberdev/lib/child-inputs.py" \
   "$ROOT/codex/uberdev-codex/lib/child-inputs.py"
 cmp "$ROOT/plugins/uberdev/shared/phase1-reviewer-output-v1.md" \
   "$ROOT/codex/uberdev-codex/shared/phase1-reviewer-output-v1.md"
+
+# The shared constructor must enforce RepoPathArray before the later handoff
+# boundary so a successful build always carries the same nominal invariant.
+INPUT_HELPER="$ROOT/plugins/uberdev/lib/child-inputs.py"
+python3 -I -B "$INPUT_HELPER" --manifest "$TREE" build review_pr.review.correctness \
+  changed_paths '["README.md","src/example.ts"]' \
+  diff_path '"/tmp/diff"' criteria_path '"/tmp/criteria"' emphasis '[]' >/dev/null
+for unsafe in \
+  '["/absolute"]' \
+  '["../traversal"]' \
+  '["src/./dot.ts"]' \
+  '["src\\windows.ts"]' \
+  '["src//empty.ts"]'
+do
+  if python3 -I -B "$INPUT_HELPER" --manifest "$TREE" build review_pr.review.correctness \
+      changed_paths "$unsafe" diff_path '"/tmp/diff"' criteria_path '"/tmp/criteria"' emphasis '[]' \
+      >/dev/null 2>&1; then
+    echo "child-contract-v2: unsafe RepoPathArray reached a successful construction boundary: $unsafe" >&2
+    exit 1
+  fi
+done
 echo 'child-contract-v2: PASS'

@@ -132,7 +132,7 @@ print(json.dumps({"schema_version":1,**{k:r[k] for k in keys}},sort_keys=True,se
 # Markdown callers receive only runtime-derived repository/artifact paths.
 uberdev_command_workspace_prepare() {
   local caller="${1:-}" subject="${2:-}" tier="${3:-}" risks="${4:-}" run_id="${5:-}" requested_root="${6:-}"
-  local parent_descriptor presets output helper context_file context_sha context_run
+  local parent_descriptor presets output helper context_file context_sha context_run validated_context
   [ "$#" -eq 6 ] || { _uberdev_child_error 'workspace expects CALLER SUBJECT TIER RISK_JSON RUN_ID REQUESTED_ROOT'; return 2; }
   case "$caller" in review-pr|simplify|post-impl-review) ;; *) _uberdev_child_error 'invalid workspace caller'; return 2 ;; esac
   if [ -z "${UBERDEV_RUN_CARRIER_JSON:-}" ]; then
@@ -145,7 +145,8 @@ uberdev_command_workspace_prepare() {
   context_file="$(_uberdev_agent_json_get "$UBERDEV_RUN_CARRIER_JSON" context_file)" || return 2
   context_sha="$(_uberdev_agent_json_get "$UBERDEV_RUN_CARRIER_JSON" context_sha256)" || return 2
   context_run="$(dirname "$(dirname "$context_file")")" || return 2
-  uberdev_agent_context_validate "$context_file" "$context_sha" "$context_run" >/dev/null || return 2
+  validated_context="$(uberdev_agent_context_validate "$context_file" "$context_sha" "$context_run")" || return 2
+  UBERDEV_CARRIER_BACKEND="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["root_decision"]["backend"],end="")' "$validated_context")" || return 2
   parent_descriptor="${UBERDEV_COMMAND_WORKSPACE_JSON:-}"
   [ "$caller" != post-impl-review ] || [ -n "$parent_descriptor" ] || { _uberdev_child_error 'post-impl-review requires parent workspace'; return 2; }
   presets="$(python3 -I -B -c 'import json,sys; keys=("WORKTREE_ROOT","RESEARCH_DIR_ABS","DIFF_ARTIFACT_PATH","CRITERIA_PATH","COMMIT_RANGE_PATH","PHASE1_DISPOSITION_PATH","PHASE2_DISPOSITION_PATH","AGG_PATH"); print(json.dumps(dict(zip(keys,sys.argv[1:])),sort_keys=True,separators=(",",":")),end="")' \
@@ -164,7 +165,7 @@ uberdev_command_workspace_prepare() {
   PHASE1_DISPOSITION_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("phase1_disposition",""),end="")' "$output")" || return 2
   PHASE2_DISPOSITION_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("phase2_disposition",""),end="")' "$output")" || return 2
   AGG_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("aggregate",""),end="")' "$output")" || return 2
-  export UBERDEV_COMMAND_WORKSPACE_JSON WORKTREE_ROOT UBERDEV_CARRIER_RUN_DIR RESEARCH_DIR_ABS
+  export UBERDEV_COMMAND_WORKSPACE_JSON UBERDEV_CARRIER_BACKEND WORKTREE_ROOT UBERDEV_CARRIER_RUN_DIR RESEARCH_DIR_ABS
   export DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH
   printf '%s' "$output"
 }

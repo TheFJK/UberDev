@@ -288,6 +288,36 @@ SKIP_PERMISSIONS=0 AUTO_PERMISSIONS=1 \
 SKIP_PERMISSIONS=0 AUTO_PERMISSIONS=0 \
   _uberdev_agent_claude_permissions_preflight solve
 
+# Exercise the public boundary, not only the helper: manual review mode must
+# fail before provider invocation, lifecycle publication, status, or capacity.
+PREFLIGHT_RUN="$TMP/preflight-review"
+mkdir -p "$PREFLIGHT_RUN"
+printf 'review preflight prompt\n' > "$PREFLIGHT_RUN/prompt.txt"
+PREFLIGHT_REQUEST="$(python3 -I -B - "$REQUEST" "$PREFLIGHT_RUN" <<'PY'
+import json,sys
+request=json.loads(sys.argv[1]); request.update({
+    'run_dir':sys.argv[2], 'run_id':'agent-dispatch-review-preflight',
+    'backend':'claude-bg', 'workflow':'review-pr', 'phase':'review',
+})
+print(json.dumps(request,sort_keys=True,separators=(',',':')))
+PY
+)"
+provider_before=0
+[ ! -r "$TMP/provider-count" ] || read -r provider_before < "$TMP/provider-count"
+if SKIP_PERMISSIONS=0 AUTO_PERMISSIONS=0 uberdev_agent_dispatch "$PREFLIGHT_REQUEST" \
+    "$PREFLIGHT_RUN/prompt.txt" "$PREFLIGHT_RUN/result.md" "$PREFLIGHT_RUN/status.json" >/dev/null 2>&1; then
+  echo "agent-dispatch public review preflight accepted manual Claude mode" >&2
+  exit 1
+fi
+provider_after=0
+[ ! -r "$TMP/provider-count" ] || read -r provider_after < "$TMP/provider-count"
+[ "$provider_after" -eq "$provider_before" ] || { echo "review preflight reached provider" >&2; exit 1; }
+[ ! -e "$PREFLIGHT_RUN/.agent-state-$(id -u)" ] \
+  && [ ! -e "$PREFLIGHT_RUN/status.json" ] \
+  && [ ! -e "$PREFLIGHT_RUN/result.md" ] || {
+    echo "review preflight published lifecycle state before refusing" >&2; exit 1;
+  }
+
 for dead_helper in \
   _uberdev_agent_default_catalog \
   _uberdev_agent_catalog \
@@ -757,6 +787,14 @@ failed = [event for event in events if event["run_id"] == "agent-dispatch-fail"]
 assert [event["event"] for event in failed] == ["route_decided", "agent_started", "failed"], failed
 assert failed[-1]["error_class"] == "provider_launch_failed"
 PY
+if grep -R -q 'run_id=agent-dispatch-fail' "$STATE_DIR/semaphore-v1" 2>/dev/null; then
+  echo "provider launch failure retained its capacity lease" >&2
+  exit 1
+fi
+FAIL_RELEASE_PROBE="$(uberdev_semaphore_acquire "$STATE_DIR" fixture-repository codex 20 provider-failure-release-probe 30)" || {
+  echo "provider launch failure capacity could not be reacquired" >&2; exit 1;
+}
+uberdev_semaphore_release "$FAIL_RELEASE_PROBE"
 
 # zsh NOMATCH must not explode the semaphore's empty `*.lease` loops, and the
 # adapter must restore both NOMATCH and NULL_GLOB on success and failure.
@@ -797,29 +835,38 @@ CROSS_BIN="$TMP/cross-bin"
 mkdir -p "$CROSS_BIN"
 cat > "$CROSS_BIN/claude" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = agents ] && [ "${2:-}" = --json ]; then cat "$CROSS_CLAUDE_STATE"; exit 0; fi
-if [ "${1:-}" = stop ] && [ "${2:-}" = abc12345 ]; then printf '[]\n' > "$CROSS_CLAUDE_STATE"; exit 0; fi
+if [ "${1:-}" = agents ] && [ "${2:-}" = --all ] && [ "${3:-}" = --json ]; then cat "$CROSS_CLAUDE_STATE"; exit 0; fi
+if [ "${1:-}" = stop ] && [ "${2:-}" = abc12345 ]; then
+  count=0
+  [ -z "${CROSS_CLAUDE_STOP_COUNT:-}" ] || [ ! -r "$CROSS_CLAUDE_STOP_COUNT" ] || read -r count < "$CROSS_CLAUDE_STOP_COUNT"
+  count=$((count + 1))
+  [ -z "${CROSS_CLAUDE_STOP_COUNT:-}" ] || printf '%s\n' "$count" > "$CROSS_CLAUDE_STOP_COUNT"
+  [ "${CROSS_CLAUDE_STOP_MODE:-}" != never ] || exit 2
+  if [ "${CROSS_CLAUDE_STOP_MODE:-}" = once ] && [ "$count" -eq 1 ]; then exit 2; fi
+  printf '[]\n' > "$CROSS_CLAUDE_STATE"
+  exit 0
+fi
 exit 2
 SH
 chmod +x "$CROSS_BIN/claude"
 
 # The short Claude handle must resolve to exactly one full session. A shared
 # prefix is ambiguous and must remain unknown instead of selecting row order.
-printf '[{"sessionId":"abc12345-one","status":"running"},{"sessionId":"abc12345-two","status":"completed"}]\n' \
+printf '[{"sessionId":"abc12345-one","state":"running"},{"sessionId":"abc12345-two","state":"completed"}]\n' \
   > "$TMP/ambiguous-claude-agents.json"
 if CROSS_CLAUDE_STATE="$TMP/ambiguous-claude-agents.json" PATH="$CROSS_BIN:$PATH" \
     _uberdev_agent_claude_probe abc12345 >/dev/null 2>&1; then
   echo "Claude watcher accepted an ambiguous session prefix" >&2
   exit 1
 fi
-printf '[{"sessionId":"abc12345-one","status":"future-state"}]\n' \
+printf '[{"sessionId":"abc12345-one","state":"future-state"}]\n' \
   > "$TMP/unknown-claude-status.json"
 if CROSS_CLAUDE_STATE="$TMP/unknown-claude-status.json" PATH="$CROSS_BIN:$PATH" \
     _uberdev_agent_claude_probe abc12345 >/dev/null 2>&1; then
   echo "Claude watcher treated an unknown status as completed" >&2
   exit 1
 fi
-printf '[{"sessionId":"abc12345-full","status":"idle","state":"blocked","blockedReason":"Permission approval required"}]\n' \
+printf '[{"sessionId":"abc12345-full","state":"blocked","blockedReason":"Permission approval required"}]\n' \
   > "$TMP/blocked-claude-status.json"
 BLOCKED_PROBE="$(CROSS_CLAUDE_STATE="$TMP/blocked-claude-status.json" PATH="$CROSS_BIN:$PATH" \
   _uberdev_agent_claude_probe abc12345)"
@@ -836,7 +883,7 @@ cross_backend_case() {
   request="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"cross-"+sys.argv[2],"repository_id":"cross-repository","backend":sys.argv[2],"workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":88,"issue_num":88,"capacity":1,"timeout_s":20},separators=(",",":")))' "$run" "$backend")"
   state="$run/.agent-state-$(id -u)"
   if [ "$backend" = claude-bg ]; then
-    printf '[{"sessionId":"abc12345-full","status":"running"}]\n' > "$run/claude-agents.json"
+    printf '[{"sessionId":"abc12345-full","state":"running"}]\n' > "$run/claude-agents.json"
   fi
   (
     CROSS_BACKEND="$backend" CROSS_RUN="$run" CROSS_CLAUDE_STATE="$run/claude-agents.json" \
@@ -854,7 +901,7 @@ cross_backend_case() {
   python3 -I "$ROOT/plugins/uberdev/lib/run_manifest.py" reconcile \
     --manifest "$state/agent-lifecycle.jsonl" >/dev/null
   if [ "$backend" = claude-bg ]; then
-    printf '[{"sessionId":"abc12345-full","status":"completed"}]\n' > "$run/claude-agents.json"
+    printf '[{"sessionId":"abc12345-full","state":"completed"}]\n' > "$run/claude-agents.json"
   else
     tmp_status="$run/status.json.tmp"
     if [ "$backend" = wezterm ]; then
@@ -893,7 +940,7 @@ _uberdev_agent_dispatch_backend() {
       if [ "${CROSS_CLAUDE_DROP_AFTER_LIVE:-0}" = 1 ]; then
         nohup bash -c 'sleep 0.5; printf "[]\\n" > "$1"' _ "$CROSS_CLAUDE_STATE" >/dev/null 2>&1 &
       elif [ -n "${CROSS_CLAUDE_TERMINAL_AFTER_LIVE:-}" ]; then
-        nohup bash -c 'sleep 0.5; printf "[{\"sessionId\":\"abc12345-full\",\"status\":\"%s\"}]\\n" "$2" > "$1"' \
+        nohup bash -c 'sleep 0.5; printf "[{\"sessionId\":\"abc12345-full\",\"state\":\"%s\"}]\\n" "$2" > "$1"' \
           _ "$CROSS_CLAUDE_STATE" "$CROSS_CLAUDE_TERMINAL_AFTER_LIVE" >/dev/null 2>&1 &
       fi
       ;;
@@ -922,9 +969,9 @@ claude_watcher_case() {
   request="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"claude-watch-"+sys.argv[2],"repository_id":"claude-watch-repository","backend":"claude-bg","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":89,"issue_num":89,"capacity":1,"timeout_s":1},separators=(",",":")))' "$run" "$mode")"
   case "$mode" in
     initial-absent) printf '[]\n' > "$run/claude-agents.json" ;;
-    live-then-absent|explicit-completed) printf '[{"sessionId":"abc12345-full","status":"running"}]\n' > "$run/claude-agents.json" ;;
-    blocked) printf '[{"sessionId":"abc12345-full","status":"idle","state":"blocked","blockedReason":"Permission approval required"}]\n' > "$run/claude-agents.json" ;;
-    ambiguous) printf '[{"sessionId":"abc12345-one","status":"running"},{"sessionId":"abc12345-two","status":"completed"}]\n' > "$run/claude-agents.json" ;;
+    live-then-absent|explicit-completed) printf '[{"sessionId":"abc12345-full","state":"running"}]\n' > "$run/claude-agents.json" ;;
+    blocked) printf '[{"sessionId":"abc12345-full","state":"blocked","blockedReason":"Permission approval required"}]\n' > "$run/claude-agents.json" ;;
+    ambiguous) printf '[{"sessionId":"abc12345-one","state":"running"},{"sessionId":"abc12345-two","state":"completed"}]\n' > "$run/claude-agents.json" ;;
     probe-error) printf '{not-json\n' > "$run/claude-agents.json" ;;
   esac
   (
@@ -1012,6 +1059,44 @@ claude_watcher_case explicit-completed
 claude_watcher_case blocked
 claude_watcher_case ambiguous
 claude_watcher_case probe-error
+
+claude_cancel_retry_case() {
+  mode="$1"
+  run="$TMP/claude-cancel-$mode"
+  mkdir -p "$run"
+  printf 'Claude cancellation retry prompt\n' > "$run/prompt.txt"
+  printf '[{"sessionId":"abc12345-full","state":"blocked","blockedReason":"Permission approval required"}]\n' > "$run/claude-agents.json"
+  request="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"claude-cancel-"+sys.argv[2],"repository_id":"claude-cancel-repository","backend":"claude-bg","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":94,"issue_num":94,"capacity":1,"timeout_s":20},separators=(",",":")))' "$run" "$mode")"
+  (
+    sleep() { command sleep 0.1; }
+    CROSS_CLAUDE_STATE="$run/claude-agents.json" \
+      CROSS_CLAUDE_STOP_MODE="$mode" CROSS_CLAUDE_STOP_COUNT="$run/stop-count" \
+      PATH="$CROSS_BIN:$PATH" uberdev_agent_dispatch "$request" \
+        "$run/prompt.txt" "$run/result.md" "$run/status.json"
+  )
+  state="$run/.agent-state-$(id -u)"
+  if [ "$mode" = once ]; then
+    wait_for_terminal_and_release "$state/agent-lifecycle.jsonl" "$state" claude-cancel-once failed 80 0.1 || return 1
+    [ "$(cat "$run/stop-count")" -ge 2 ] || { echo "transient Claude stop failure was not retried" >&2; return 1; }
+    return 0
+  fi
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [ -s "$run/status.json.watcher-error.json" ] && break
+    command sleep 0.1
+  done
+  python3 -I - "$run/status.json.watcher-error.json" <<'PY'
+import json,sys
+row=json.load(open(sys.argv[1]))
+assert row['error']=='provider_cancel_failed' and row['attempts']==3,row
+PY
+  grep -q '"state":"running"' "$run/status.json" || { echo "failed Claude stop fabricated a terminal" >&2; return 1; }
+  grep -R -q 'run_id=claude-cancel-never' "$state/semaphore-v1" || { echo "failed Claude stop abandoned its lease" >&2; return 1; }
+  rm -rf "$run"
+  command sleep 0.2
+}
+
+claude_cancel_retry_case once
+claude_cancel_retry_case never
 
 cross_backend_case codex
 cross_backend_case background

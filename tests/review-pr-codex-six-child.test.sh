@@ -31,7 +31,17 @@ done
 test -n "$result"
 printf '%s\t%s\t%s\n' "${UBERDEV_AGENT_INSTANCE_ID:-missing}" "$PWD" "$argv" >>"$CODEX_STUB_LOG"
 sleep 0.4
-printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings: []' '```' >"$result"
+case "${UBERDEV_AGENT_INSTANCE_ID:-}" in
+  *caller-fix*)
+    printf 'caller repair\n' >>README.md
+    git add README.md
+    git commit -qm 'fix: exercise caller repair edge'
+    printf '%s\n' '```yaml' 'status: APPLIED' 'commits:' "  - sha: $(git rev-parse HEAD)" 'findings_disposition: []' 'risks: []' '```' >"$result"
+    ;;
+  *)
+    printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings: []' '```' >"$result"
+    ;;
+esac
 if [ -n "${CODEX_STUB_FAIL_INSTANCE:-}" ] \
   && [ "${UBERDEV_AGENT_INSTANCE_ID:-}" = "$CODEX_STUB_FAIL_INSTANCE" ]; then
   exit 42
@@ -107,8 +117,34 @@ for i in "${!edges[@]}"; do
   fi
 done
 
+# Dispatch one mutating repair through the same routed stack. It must advance
+# the carrier-selected caller branch in place, without a disposable worktree,
+# ownership receipt, or retained capacity lease.
+FIX_FINDINGS="$RESEARCH_DIR_ABS/e2e-findings.md"
+FIX_RANGE="$RESEARCH_DIR_ABS/e2e-commit-range.txt"
+FIX_DISPOSITION="$RESEARCH_DIR_ABS/e2e-disposition.json"
+printf '<external-untrusted-input source="post-impl-review-aggregate">\n</external-untrusted-input>\n' >"$FIX_FINDINGS"
+printf 'HEAD^..HEAD\n' >"$FIX_RANGE"
+printf '{}\n' >"$FIX_DISPOSITION"
+repair_instance="review-pr-e2e-${case_name}-caller-fix-iter1-attempt01"
+before_repair="$(git rev-parse HEAD)"
+repair_inputs="$(uberdev_child_inputs_build review_pr.fix.phase1 \
+  findings_path "$(review_json_string "$FIX_FINDINGS")" \
+  commit_range_path "$(review_json_string "$FIX_RANGE")" \
+  working_dir "$(review_json_string "$repo")" \
+  pr_number "$PR_NUMBER" \
+  disposition_path "$(review_json_string "$FIX_DISPOSITION")")"
+uberdev_create_child_handoff review_pr.fix.phase1 "$repair_instance" "$repair_inputs" null >/dev/null
+repair_result="$UBERDEV_CHILD_RESULT"
+repair_status="$UBERDEV_CHILD_STATUS"
+uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF"
+uberdev_dispatch_child review_pr.fix.phase1 "$UBERDEV_CHILD_HANDOFF" "$repair_result" "$repair_status" >/dev/null
+uberdev_wait_child "$repair_status" "$repair_result" 20
+after_repair="$(git rev-parse HEAD)"
+[ "$after_repair" != "$before_repair" ] || { echo "caller repair did not advance the branch" >&2; exit 1; }
+
 python3 -I -B - "$UBERDEV_CARRIER_RUN_DIR" "$repo" "$CODEX_STUB_LOG" \
-  "$CLAUDE_STUB_LOG" "$fail_instance" "${instances[@]}" <<'PY'
+  "$CLAUDE_STUB_LOG" "$fail_instance" "$repair_instance" "$before_repair" "$after_repair" "${instances[@]}" <<'PY'
 import json
 import os
 import pathlib
@@ -120,14 +156,22 @@ repo = pathlib.Path(sys.argv[2])
 codex_log = pathlib.Path(sys.argv[3])
 claude_log = pathlib.Path(sys.argv[4])
 failed = sys.argv[5]
-instances = sys.argv[6:]
+repair = sys.argv[6]
+before_repair = sys.argv[7]
+after_repair = sys.argv[8]
+instances = sys.argv[9:]
 assert len(instances) == len(set(instances)) == 6, instances
+assert before_repair != after_repair
+assert subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip() == after_repair
 
 lines = codex_log.read_text().splitlines()
-assert len(lines) == 6, lines
+assert len(lines) == 7, lines
 launches = [line.split("\t", 2) for line in lines]
-assert {row[0] for row in launches} == set(instances), launches
-assert len({row[1] for row in launches}) == 6, launches
+assert {row[0] for row in launches} == set(instances) | {repair}, launches
+review_launches = [row for row in launches if row[0] != repair]
+repair_launches = [row for row in launches if row[0] == repair]
+assert len({row[1] for row in review_launches}) == 6, review_launches
+assert len(repair_launches) == 1 and pathlib.Path(repair_launches[0][1]).resolve() == repo.resolve(), repair_launches
 assert all("--ask-for-approval never" in row[2] for row in launches), launches
 assert all("permission-mode" not in row[2] and "dangerously-skip-permissions" not in row[2] for row in launches)
 assert not claude_log.exists() or not claude_log.read_text(), claude_log.read_text()
@@ -166,14 +210,21 @@ if failed:
 else:
     assert statuses == ["completed"] * 6, statuses
 
+repair_child = run_dir / "children" / repair
+repair_status = json.loads((repair_child / "status.json").read_text())
+assert repair_status["state"] == "completed" and repair_status["workspace_mode"] == "caller", repair_status
+assert pathlib.Path(repair_status["worktree"]).resolve() == repo.resolve(), repair_status
+assert repair_status["branch"] == "", repair_status
+assert not pathlib.Path(str(repair_child / "status.json") + ".worktree-owner.json").exists()
+
 uid_fn = getattr(os, "geteuid", None)
 state = run_dir / f".agent-state-{uid_fn() if uid_fn is not None else 0}"
 leases = list((state / "semaphore-v1").rglob("*.lease"))
 assert not leases, leases
 events = [json.loads(line) for line in (state / "agent-lifecycle.jsonl").read_text().splitlines() if line]
 terminals = [row for row in events if row.get("event") in {"completed", "failed", "timed_out", "cancelled", "abandoned"}]
-assert len(terminals) == 6, terminals
-assert {row["run_id"] for row in terminals} == set(instances), terminals
+assert len(terminals) == 7, terminals
+assert {row["run_id"] for row in terminals} == set(instances) | {repair}, terminals
 PY
 SH
 chmod +x "$TMP/run-case.sh"

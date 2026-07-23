@@ -72,8 +72,10 @@ _uberdev_dispatch_python() {
   fi
 }
 
-# Return a private runtime root. The public /tmp directory is only a parent;
-# lifecycle files live in an EUID-owned, non-symlink directory locked to 0700.
+# Return a private runtime root. The public /tmp directory is only a parent.
+# POSIX lifecycle files live in an EUID-owned, non-symlink directory locked to
+# 0700; native Windows relies on the current-user ACL inherited from its temp
+# root because POSIX ownership and mode bits are not meaningful there.
 _uberdev_dispatch_runtime_root() {
   local target
   if [ -n "${UBERDEV_TMPDIR:-}" ]; then
@@ -1494,7 +1496,15 @@ _uberdev_dispatch_codex() {
   # writes (running -> terminal) so a fast codex exit cannot race with the parent
   # and be overwritten back to "running". Track the wrapper PID, not the raw
   # codex child, so /goal can poll a process that owns the final status write.
-  _uberdev_dispatch_resolve_python || { DISPATCH_RC=1; DISPATCH_LOG="$LOG_FILE"; return 1; }
+  if ! _uberdev_dispatch_resolve_python; then
+    [ "$WORKSPACE_MODE" != isolated ] || [ "$CHILD_OWNED" != "1" ] || _uberdev_dispatch_cleanup_codex_worktree "$REPOSITORY_ROOT" "$WORKTREE_DIR" "$WORKTREE_BRANCH" \
+      "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" failed >/dev/null 2>&1 || true
+    DISPATCH_RC=1
+    DISPATCH_LOG="$LOG_FILE"
+    _uberdev_dispatch_audit dispatch_setup_failed \
+      "{\"issue\":$ISSUE_NUM,\"phase\":\"python_launcher\",\"backend\":\"codex\",\"rc\":1}"
+    return 1
+  fi
   local PYTHON_LAUNCH=( "$_UBERDEV_PYTHON_EXE" )
   [ -z "$_UBERDEV_PYTHON_PREFIX" ] || PYTHON_LAUNCH+=( "$_UBERDEV_PYTHON_PREFIX" )
   UBERDEV_SUPERVISOR_PID_FILE="$STATUS_FILE.pid" nohup "${PYTHON_LAUNCH[@]}" -I -c 'import os,shutil,stat,subprocess,sys,traceback

@@ -742,7 +742,10 @@ PY
 
 _uberdev_agent_claude_probe() {
   local handle="$1"
-  claude agents --json 2>/dev/null | python3 -I -c '
+  # Completed Claude sessions are omitted from the default view. Query the
+  # full provider inventory so a terminal child cannot look absent merely
+  # because it left the live-only list.
+  claude agents --all --json 2>/dev/null | python3 -I -c '
 import json, sys
 short_id = sys.argv[1]
 try:
@@ -763,15 +766,16 @@ reason = " ".join(str(matched[0].get(key) or "") for key in ("blockedReason", "r
 if state == "blocked":
     print("blocked:permission" if "permission" in reason else "blocked:provider", end="")
     raise SystemExit(0)
-if status in {"busy", "running", "starting", "working", "queued"}:
+lifecycle = state or status
+if lifecycle in {"busy", "running", "starting", "working", "queued", "idle"}:
     print("live", end="")
-elif status in {"failed", "error"}:
+elif lifecycle in {"failed", "error"}:
     print("failed", end="")
-elif status in {"timed_out", "timeout"}:
+elif lifecycle in {"timed_out", "timeout"}:
     print("timed_out", end="")
-elif status in {"cancelled", "canceled"}:
+elif lifecycle in {"cancelled", "canceled", "stopped"}:
     print("cancelled", end="")
-elif status in {"completed", "complete", "done", "finished"}:
+elif lifecycle in {"completed", "complete", "done", "finished"}:
     print("completed", end="")
 else:
     raise SystemExit(2)
@@ -907,7 +911,8 @@ parent=os.path.dirname(path)
 entry=os.stat(parent,follow_symlinks=False)
 uid_fn=getattr(os,"geteuid",None); uid=uid_fn() if uid_fn else None
 if not stat.S_ISDIR(entry.st_mode) or (uid is not None and entry.st_uid!=uid): raise SystemExit(2)
-payload={"schema_version":1,"error":"terminal_finalize_failed","backend":backend,"handle":handle,"terminal":terminal,"attempts":int(attempts)}
+error="provider_cancel_failed" if terminal.startswith("blocked:") else "terminal_finalize_failed"
+payload={"schema_version":1,"error":error,"backend":backend,"handle":handle,"terminal":terminal,"attempts":int(attempts)}
 fd,tmp=tempfile.mkstemp(prefix=".watcher-error.",dir=parent)
 try:
  if os.name!="nt": os.fchmod(fd,0o600)
@@ -925,7 +930,7 @@ _uberdev_agent_start_watcher() {
   local manifest="$1" lease="$2" lease_identity="$3" status_file="$4" backend="$5" handle="$6" request_json="$7" decision="$8"
   local watcher_pid
   (
-    local terminal_event='' probe='' absent_count=0 event_json='' error_class=''
+    local terminal_event='' probe='' absent_count=0 event_json='' error_class='' cancel_attempt=0
     while [ -d "$(dirname "$status_file")" ]; do
       terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
       [ -z "$terminal_event" ] || break
@@ -936,15 +941,22 @@ _uberdev_agent_start_watcher() {
           completed|failed|timed_out|cancelled) terminal_event="$probe"; break ;;
           blocked:permission|blocked:provider)
             # A blocked Claude session is still provider-owned live state. Stop
-            # it and require the backend cancellation probe to confirm absence
-            # before publishing terminal state or releasing its lease.
-            if _uberdev_dispatch_cancel_backend claude-bg "$handle" ''; then
-              terminal_event=failed
-              [ "$probe" = blocked:permission ] && error_class=provider_permission_blocked || error_class=provider_blocked
-              break
-            fi
-            _uberdev_agent_persist_watcher_error "$status_file" "$backend" "$handle" "$probe" 1 || true
-            exit 2
+            # it and require the backend cancellation probe to confirm that the
+            # handle is no longer live before terminalizing or releasing its
+            # lease. A transient stop failure is retried in-place; exhaustion
+            # remains visible while this watcher keeps supervising the lease.
+            cancel_attempt=1
+            while [ "$cancel_attempt" -le 3 ]; do
+              if _uberdev_dispatch_cancel_backend claude-bg "$handle" ''; then
+                terminal_event=failed
+                [ "$probe" = blocked:permission ] && error_class=provider_permission_blocked || error_class=provider_blocked
+                break
+              fi
+              [ "$cancel_attempt" -ge 3 ] || sleep 0.1
+              cancel_attempt=$((cancel_attempt + 1))
+            done
+            [ -z "$terminal_event" ] || break
+            _uberdev_agent_persist_watcher_error "$status_file" "$backend" "$handle" "$probe" 3 || true
             ;;
           absent)
             absent_count=$((absent_count + 1))
@@ -1047,6 +1059,12 @@ uberdev_agent_dispatch() {
   backend="$(_uberdev_agent_json_get "$request_json" backend)" || { _uberdev_agent_error 'invalid backend'; return 2; }
   workflow="$(_uberdev_agent_json_get "$request_json" workflow)" || { _uberdev_agent_error 'invalid workflow'; return 2; }
   if [ "$backend" = claude-bg ]; then
+    # Production child dispatch sources lib/dispatch.sh, whose resolver binds
+    # the model, timeout, permission, and effort argv consumed by claude-bg.
+    # Keep the adapter independently sourceable for provider-stub unit tests.
+    if command -v uberdev_dispatch_resolve_env >/dev/null 2>&1; then
+      uberdev_dispatch_resolve_env claude-bg || return $?
+    fi
     _uberdev_agent_claude_permissions_preflight "$workflow" || return $?
   fi
   tier="$(_uberdev_agent_json_get "$request_json" task_tier)" || { _uberdev_agent_error 'invalid task_tier'; return 2; }

@@ -846,11 +846,11 @@ echo "== #335 Claude cancellation is exact and bounded =="
       printf 'cancelled\n' > "$CANCEL_STATE"
       return 0
     fi
-    if [ "${1:-}" = agents ] && [ "${2:-}" = --json ]; then
+    if [ "${1:-}" = agents ] && [ "${2:-}" = --all ] && [ "${3:-}" = --json ]; then
       if [ "$(cat "$CANCEL_STATE")" = cancelled ]; then
-        printf '[{"sessionId":"abc12345-full","status":"cancelled"}]\n'
+        printf '[{"sessionId":"abc12345-full","state":"cancelled"}]\n'
       else
-        printf '[{"sessionId":"abc12345-full","status":"running"}]\n'
+        printf '[{"sessionId":"abc12345-full","state":"running"}]\n'
       fi
       return 0
     fi

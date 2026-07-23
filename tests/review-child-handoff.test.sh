@@ -113,8 +113,9 @@ assert prompt.count(contract)==1
 assert needle in prompt
 PY
 
-# Mutating review edges execute in the immutable caller repository. Reviewers
-# remain isolated, and a different working_dir is rejected before dispatch.
+# Mutating review edges execute against the carrier-selected caller repository
+# identity and workspace binding. Reviewers remain isolated, and a different
+# working_dir is rejected before dispatch.
 caller_input="$(jq -cn --arg p "$path" --arg d "$TEST_REPO" '{findings_path:$p,commit_range_path:$p,working_dir:$d,pr_number:1,disposition_path:$p}')"
 uberdev_create_child_handoff review_pr.fix.phase1 review-caller-mode-iter1-attempt01 "$caller_input" null >/dev/null
 caller_prepared="$(_uberdev_child_prepare review_pr.fix.phase1 "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch)"

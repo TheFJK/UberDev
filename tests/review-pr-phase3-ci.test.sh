@@ -203,6 +203,12 @@ assert_grep "$REVIEW_PR" 'CI_REFUSED_AGGREGATE_PATH.*RESEARCH_DIR_ABS/ci-refused
   "S10.9 — CI refusal aggregate stays inside the run research directory"
 assert_no_grep "$REVIEW_PR" 'tmp-synthetic-aggregate|freshly-created `mktemp`' \
   "S10.10 — CI refusal handoff no longer points at a system mktemp artifact"
+assert_grep "$REVIEW_PR" 'review_child_result_path.*ci-classify\.launched.*review_pr\.ci\.classify' \
+  "S10.10a — classifier validation resolves the routed child's canonical result ledger"
+assert_no_grep "$REVIEW_PR" 'CI_CLASSIFICATION_PATH="\$RESEARCH_DIR_ABS/ci-classification-' \
+  "S10.10b — classifier validation does not read an artifact no child writes"
+assert_grep "$REVIEW_PR" 'os\.write\(fd,payload\)' \
+  "S10.10c — refusal aggregate serializes a concrete envelope and finding row"
 
 CLASSIFY_HELPER="$(mktemp)"
 CLASSIFY_CASE="$(mktemp)"
@@ -211,30 +217,47 @@ awk '
   capture { print }
   capture && /^[[:space:]]*\}$/ { exit }
 ' "$REVIEW_PR" > "$CLASSIFY_HELPER"
-printf 'status: CLASSIFIED\nfailure_class: code_bug\nsignal_anchor: gh-run-123:42\n' > "$CLASSIFY_CASE"
-CLASSIFY_SPLIT="$(bash -c '. "$1"; IFS=$'\''\t'\'' read -r failure_class signal_anchor < <(review_validate_ci_classification "$2") || exit; printf "%s|%s" "$failure_class" "$signal_anchor"' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE")"
-if [ "$CLASSIFY_SPLIT" = 'code_bug|gh-run-123:42' ]; then
+printf 'status: CLASSIFIED\nfailure_class: code_bug\nsignal_anchor: README.md:42\n' > "$CLASSIFY_CASE"
+CLASSIFY_SPLIT="$(bash -c '. "$1"; review_validate_ci_classification "$2" "$3"' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT")"
+if [ "$CLASSIFY_SPLIT" = $'CLASSIFIED\tcode_bug\tREADME.md:42\t-' ]; then
   echo "  PASS  S10.11 — valid classifier output survives the controller read boundary"; PASS=$((PASS + 1))
 else
   echo "  FAIL  S10.11 — valid classifier output failed the controller read boundary: $CLASSIFY_SPLIT"; FAIL=$((FAIL + 1))
 fi
 CLASSIFY_INVALID=0
-for invalid_anchor in ':121' 'file:0' ''; do
+for invalid_anchor in ':121' 'file:0' '/absolute:1' '../README.md:1' 'missing.ts:1' ''; do
   printf 'status: CLASSIFIED\nfailure_class: code_bug\nsignal_anchor: %s\n' "$invalid_anchor" > "$CLASSIFY_CASE"
-  if bash -c '. "$1"; review_validate_ci_classification "$2" >/dev/null' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE"; then
+  if bash -c '. "$1"; review_validate_ci_classification "$2" "$3" >/dev/null' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT"; then
     CLASSIFY_INVALID=$((CLASSIFY_INVALID + 1))
   fi
 done
-printf 'status: CLASSIFIED\nfailure_class: unknown\nsignal_anchor: file.ts:12\n' > "$CLASSIFY_CASE"
-if bash -c '. "$1"; review_validate_ci_classification "$2" >/dev/null' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE"; then
+printf 'status: CLASSIFIED\nfailure_class: code_bug\nsignal_anchor: gh-run-123:42\n' > "$CLASSIFY_CASE"
+if bash -c '. "$1"; review_validate_ci_classification "$2" "$3" >/dev/null' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT"; then
   CLASSIFY_INVALID=$((CLASSIFY_INVALID + 1))
 fi
-rm -f "$CLASSIFY_HELPER" "$CLASSIFY_CASE"
+printf 'status: CLASSIFIED\nfailure_class: unknown\nsignal_anchor: file.ts:12\n' > "$CLASSIFY_CASE"
+if bash -c '. "$1"; review_validate_ci_classification "$2" "$3" >/dev/null' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT"; then
+  CLASSIFY_INVALID=$((CLASSIFY_INVALID + 1))
+fi
+printf 'status: AMBIGUOUS\nfailure_class: null\nsignal_anchor: null\n' > "$CLASSIFY_CASE"
+CLASSIFY_AMBIGUOUS="$(bash -c '. "$1"; review_validate_ci_classification "$2" "$3"' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT")"
+printf 'status: REFUSED\nfailure_class: null\nsignal_anchor: null\nrationale: input-malformed\n' > "$CLASSIFY_CASE"
+CLASSIFY_REFUSED="$(bash -c '. "$1"; review_validate_ci_classification "$2" "$3"' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT")"
+printf 'status: CLASSIFIED\nfailure_class: flaky\nsignal_anchor: gh-run-123:42\n' > "$CLASSIFY_CASE"
+CLASSIFY_TELEMETRY="$(bash -c '. "$1"; review_validate_ci_classification "$2" "$3"' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT")"
 if [ "$CLASSIFY_INVALID" -eq 0 ]; then
   echo "  PASS  S10.12 — blank, malformed, zero-line, and unknown classifier outputs fail closed"; PASS=$((PASS + 1))
 else
   echo "  FAIL  S10.12 — $CLASSIFY_INVALID invalid classifier outputs were accepted"; FAIL=$((FAIL + 1))
 fi
+if [ "$CLASSIFY_AMBIGUOUS" = $'AMBIGUOUS\tflaky\t-\t-' ] \
+    && [ "$CLASSIFY_REFUSED" = $'REFUSED\t-\t-\tinput-malformed' ] \
+    && [ "$CLASSIFY_TELEMETRY" = $'CLASSIFIED\tflaky\tgh-run-123:42\t-' ]; then
+  echo "  PASS  S10.13 — explicit ambiguous, refused, and telemetry-only variants preserve their invariants"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.13 — classifier union variants drifted: ambiguous=$CLASSIFY_AMBIGUOUS refused=$CLASSIFY_REFUSED telemetry=$CLASSIFY_TELEMETRY"; FAIL=$((FAIL + 1))
+fi
+rm -f "$CLASSIFY_HELPER" "$CLASSIFY_CASE"
 
 echo
 echo "== S11: ci-code-fixer agent shape =="

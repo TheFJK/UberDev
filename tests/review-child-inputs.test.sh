@@ -442,8 +442,13 @@ FAILED_REVIEW_EDGE=review_pr.review.types
 FAILED_REVIEW_INDEX=3
 FORMAT_EXAMPLE_PATH="$FORMAT_EXAMPLE"
 export UBERDEV_CHILD_TEST_SOURCE="$REVIEW_SOURCE"
-WORKTREE_ROOT="$HOSTILE_DIR"
-WORKING_DIR_ABS="$HOSTILE_DIR"
+# Caller-mode mutations are bound to the canonical repository root. Keep the
+# hostile fixture coverage on artifact paths, which remain untrusted inputs,
+# while exercising the production workspace boundary with a valid identity.
+MUTATION_WORKTREE="$ROOT"
+export MUTATION_WORKTREE
+WORKTREE_ROOT="$MUTATION_WORKTREE"
+WORKING_DIR_ABS="$MUTATION_WORKTREE"
 COMMIT_RANGE_PATH="$COMMIT_RANGE_FIXTURE"
 PHASE1_DISPOSITION_PATH="$PHASE1_DISPOSITION_FIXTURE"
 PHASE2_DISPOSITION_PATH="$PHASE2_DISPOSITION_FIXTURE"
@@ -490,7 +495,7 @@ CI_BASE_SHA=$'base "quoted" \\sha*?[x]\t'
 . "$TMP/review-ci-builders.sh"
 
 conflicted_files=("$CONFLICT_PATH")
-REPO_ROOT="$HOSTILE_DIR"
+REPO_ROOT="$MUTATION_WORKTREE"
 pr_head_branch=$'feature/"quoted"\\branch*?[x]\t'
 base_branch=$'main-"quoted"\\branch*?[x]\t'
 BASE_SHA=$'conflict-base-"quoted"\\sha*?[x]\t'
@@ -845,7 +850,7 @@ exact(
 phase1 = {
     "findings_path": env["POST_FINAL"],
     "commit_range_path": env["COMMIT_RANGE_FIXTURE"],
-    "working_dir": env["HOSTILE_DIR"],
+    "working_dir": env["MUTATION_WORKTREE"],
     "pr_number": 73,
     "disposition_path": env["PHASE1_DISPOSITION_FIXTURE"],
 }
@@ -882,7 +887,7 @@ exact(
         "phase2_path": env["SIMPLIFY_FINAL"],
         "phase1_disposition_path": env["PHASE1_DISPOSITION_FIXTURE"],
         "phase2_disposition_path": env["PHASE2_DISPOSITION_FIXTURE"],
-        "working_dir": env["HOSTILE_DIR"],
+        "working_dir": env["MUTATION_WORKTREE"],
         "pr_number": 73,
     },
 )
@@ -899,14 +904,14 @@ exact(
     {
         "classification_path": env["CLASSIFICATION_PATH"],
         "log_path": env["CI_LOG_ARTIFACT_PATH"],
-        "working_dir": env["HOSTILE_DIR"],
+        "working_dir": env["MUTATION_WORKTREE"],
         "pr_number": 73,
     },
 )
 exact(
     f"review-pr-{run_id}-ci-rebase-iter3-attempt01",
     {
-        "working_dir": env["HOSTILE_DIR"],
+        "working_dir": env["MUTATION_WORKTREE"],
         "pr_number": 73,
         "head_sha": env["CI_HEAD_SHA"],
         "base_sha": env["CI_BASE_SHA"],
@@ -915,8 +920,8 @@ exact(
 exact(
     f"review-pr-{run_id}-ci-defer-refusal-iter3-attempt01",
     {
-        "phase1_path": env["CI_REFUSED_AGGREGATE_PATH"],
-        "working_dir": env["HOSTILE_DIR"],
+        "phase1_path": str(Path(env["POST_FINAL"]).parent / "ci-refused-synthetic-3.md"),
+        "working_dir": env["MUTATION_WORKTREE"],
         "pr_number": 73,
     },
 )
@@ -924,7 +929,7 @@ exact(
     f"review-pr-{run_id}-conflict-1-iter3-attempt01",
     {
         "file_path": env["CONFLICT_PATH"],
-        "working_dir": env["HOSTILE_DIR"],
+        "working_dir": env["MUTATION_WORKTREE"],
         "pr_branch": env["pr_head_branch"],
         "integration_branch": env["base_branch"],
         "base_sha": env["BASE_SHA"],

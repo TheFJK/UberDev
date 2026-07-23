@@ -210,6 +210,57 @@ for failed_probe in status show-ref; do
 done
 rm -rf "$CLEANUP_TMP"
 
+echo "== Codex setup failures clean child-owned worktrees end to end =="
+SETUP_FAILURE_TMP="$(mktemp -d)"
+mkdir -p "$SETUP_FAILURE_TMP/repo" "$SETUP_FAILURE_TMP/runtime"
+(
+  cd "$SETUP_FAILURE_TMP/repo"
+  git init -q
+  git config user.name 'UberDev Test'
+  git config user.email 'uberdev-test@example.invalid'
+  printf 'base\n' > base.txt
+  git add base.txt
+  git commit -qm base
+)
+printf 'valid prompt\n' > "$SETUP_FAILURE_TMP/prompt.txt"
+setup_failure_errors=''
+for setup_failure in prompt_read python_launcher; do
+  instance="setup-$setup_failure-a1"
+  slug="$(UBERDEV_AGENT_INSTANCE_ID="$instance" bash -c '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"
+  relative=".claude/worktrees/solve-issue-335-$slug"
+  branch="worktree-solve-issue-335-$slug"
+  status="$SETUP_FAILURE_TMP/runtime/$setup_failure-status.json"
+  result="$SETUP_FAILURE_TMP/runtime/$setup_failure-result.md"
+  prompt="$SETUP_FAILURE_TMP/prompt.txt"
+  [ "$setup_failure" != prompt_read ] || prompt="$SETUP_FAILURE_TMP/missing-prompt.txt"
+  if (
+    cd "$SETUP_FAILURE_TMP/repo"
+    UBERDEV_AGENT_STATUS_FILE="$status" UBERDEV_AGENT_RESULT_FILE="$result" \
+      UBERDEV_AGENT_CHILD_OWNED=1 UBERDEV_AGENT_INSTANCE_ID="$instance" \
+      bash -c '
+        . "$1"
+        if [ "$3" = python_launcher ]; then
+          _uberdev_dispatch_resolve_python() { return 1; }
+        fi
+        _uberdev_dispatch_codex 335 small "$2"
+      ' _ "$DISPATCH_LIB" "$prompt" "$setup_failure"
+  ); then
+    setup_failure_errors="$setup_failure_errors unexpected-success-$setup_failure"
+  fi
+  [ ! -e "$SETUP_FAILURE_TMP/repo/$relative" ] \
+    || setup_failure_errors="$setup_failure_errors worktree-$setup_failure"
+  git -C "$SETUP_FAILURE_TMP/repo" show-ref --verify --quiet "refs/heads/$branch" \
+    && setup_failure_errors="$setup_failure_errors branch-$setup_failure"
+  [ ! -e "$status.worktree-owner.json" ] \
+    || setup_failure_errors="$setup_failure_errors receipt-$setup_failure"
+done
+if [ -z "$setup_failure_errors" ]; then
+  pass_msg "missing-prompt and launcher-resolution failures remove child worktree, branch, and receipt"
+else
+  fail_msg "missing-prompt and launcher-resolution failures remove child worktree, branch, and receipt" "$setup_failure_errors"
+fi
+rm -rf "$SETUP_FAILURE_TMP"
+
 echo "== Caller workspace mode commits in place without cleanup ownership =="
 CALLER_TMP="$(mktemp -d)"
 mkdir -p "$CALLER_TMP/bin" "$CALLER_TMP/repo" "$CALLER_TMP/runtime"

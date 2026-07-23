@@ -46,6 +46,11 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)}"
 uberdev_command_workspace_prepare review-pr "$PR_NUMBER" medium "$RISK_JSON" "$RUN_ID" "${WORKTREE_ROOT:-}" >/dev/null || {
   rc=$?; return "$rc" 2>/dev/null || exit "$rc"
 }
+if [ "$UBERDEV_CARRIER_BACKEND" = claude-bg ]; then
+  uberdev_dispatch_resolve_env claude-bg || {
+    rc=$?; return "$rc" 2>/dev/null || exit "$rc"
+  }
+fi
 REVIEW_ITERATION="${REVIEW_ITERATION:-1}"
 REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"
 CI_FIX_LOOP_ITER="${CI_FIX_LOOP_ITER:-1}"
@@ -142,6 +147,28 @@ review_child_wait_all() {
     return "$first_rc"
   fi
   return 0
+}
+review_child_result_path() {
+  local launched="$1" edge="$2"
+  python3 -I -B - "$launched" "$edge" <<'PY'
+import json,os,stat,sys
+ledger,edge=sys.argv[1:]
+try:
+    rows=[json.loads(line) for line in open(ledger,encoding='utf-8') if line.strip()]
+    matches=[row for row in rows if row.get('edge')==edge]
+    if len(matches)!=1: raise ValueError()
+    path=matches[0].get('result')
+    if not isinstance(path,str) or not os.path.isabs(path): raise ValueError()
+    entry=os.lstat(path)
+    uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
+    if (stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1
+            or (uid is not None and entry.st_uid!=uid) or entry.st_size<1 or entry.st_size>16777216
+            or os.path.basename(path)!='result.md' or os.path.basename(os.path.dirname(os.path.dirname(path)))!='children'):
+        raise ValueError()
+except (OSError,TypeError,ValueError,json.JSONDecodeError):
+    raise SystemExit(2)
+print(os.path.realpath(path),end='')
+PY
 }
 review_child_single() {
   local edge="$1" instance="$2" inputs="$3" risks="$4" prefix="$5" timeout_s="$6"
@@ -659,48 +686,89 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
     Dispatch the classifier:
 
     ```bash
-    CI_CLASSIFICATION_PATH="$RESEARCH_DIR_ABS/ci-classification-${CI_FIX_LOOP_ITER:-1}.yaml"
     CI_CLASSIFY_INPUTS="$(uberdev_child_inputs_build review_pr.ci.classify \
       pr_number "$PR_NUMBER" \
       run_id "$(review_json_string "$CI_RUN_ID")" \
       log_path "$(review_json_string "$CI_LOG_ARTIFACT_PATH")")"
     review_child_single review_pr.ci.classify "review-pr-${RUN_ID}-ci-classify-iter${CI_FIX_LOOP_ITER:-1}-attempt01" "$CI_CLASSIFY_INPUTS" '[]' "$RESEARCH_DIR_ABS/ci-classify" "$REVIEW_PR_TIMEOUT"
+    CI_CLASSIFICATION_PATH="$(review_child_result_path "$RESEARCH_DIR_ABS/ci-classify.launched" review_pr.ci.classify)" || {
+      audit ci_classify_returned subreason=classification_artifact_missing
+      OUTCOME=halted
+      exit 1
+    }
     ```
 
     Audit `ci_classify_dispatched` on dispatch; `ci_classify_returned` on return (with `data.failure_class ∈ CI_FAILURE_CLASS_ENUM`).
 
     The agent returns YAML — see `plugins/uberdev/agents/ci-failure-classifier.md` for the canonical contract. On `status: AMBIGUOUS` (no regex matched), caller falls back to treating it as `flaky` for routing purposes (re-run once, then halt). **Emit `ci_classify_ambiguous_routing_as_flaky` audit event when this fallback fires** — the original AMBIGUOUS state must surface in the post-mortem trail; conflating it with a known-transient `flaky` classification (without a distinct audit signal) loses root-cause context if the flaky re-run also fails.
 
-    Before ROUTE, validate the parsed controller fields fail-closed. A `CLASSIFIED` result requires `failure_class` to be one of the six `CI_FAILURE_CLASS_ENUM` values and `signal_anchor` to be a non-empty pointer whose path/run component is non-empty and whose line is a positive integer. In particular, `:121`, `file:0`, blank anchors, unknown classes, and duplicate controller fields are contract violations: emit `ci_classify_returned` with `data.subreason=contract_invalid`, set `OUTCOME=halted`, and exit 1. Never repair or reinterpret an invalid classifier result as `platform_outage` or `flaky`.
+    Before ROUTE, validate the parsed controller fields fail-closed as three explicit variants. `CLASSIFIED` requires one of the six `CI_FAILURE_CLASS_ENUM` values and a legal class/anchor pairing. `AMBIGUOUS` requires null class + null anchor and maps to flaky only after its dedicated audit event. `REFUSED` requires null class + null anchor plus a non-empty rationale and halts without being mislabeled `contract_invalid`. For `code_bug` / `env_drift`, the anchor must name an existing repository file; telemetry-only classes may use `gh-run-<id>:<line>`, where the run id is nonzero and the `signal_anchor` line is a positive integer. In particular, `:121`, `file:0`, absolute/traversal paths, blank anchors, unknown classes, and duplicate controller fields are contract violations. Never repair or reinterpret an invalid classifier result as `platform_outage` or `flaky`.
 
     ```bash
     review_validate_ci_classification() {
-      python3 -I -B - "$1" <<'PY'
+      python3 -I -B - "$1" "$2" <<'PY'
 import pathlib,re,sys
-raw=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+path,root=sys.argv[1:]
+raw=pathlib.Path(path).read_text(encoding='utf-8')
 if len(raw.encode())>65536: raise SystemExit(2)
 fields={}
 for line in raw.splitlines():
-    match=re.fullmatch(r'(status|failure_class|signal_anchor):[ \t]*(.*)',line)
+    match=re.fullmatch(r'(status|failure_class|signal_anchor|rationale):[ \t]*(.*)',line)
     if not match: continue
     key,value=match.groups()
     if key in fields: raise SystemExit(2)
     fields[key]=value.strip().strip('"').strip("'")
-if fields.get('status')=='AMBIGUOUS':
-    if fields.get('failure_class') not in {None,'','null'}: raise SystemExit(2)
-    print('flaky\t'); raise SystemExit(0)
+nulls={None,'','null'}
+status=fields.get('status')
+if status=='AMBIGUOUS':
+    if fields.get('failure_class') not in nulls or fields.get('signal_anchor') not in nulls: raise SystemExit(2)
+    print('AMBIGUOUS\tflaky\t-\t-'); raise SystemExit(0)
+if status=='REFUSED':
+    rationale=fields.get('rationale','')
+    if (fields.get('failure_class') not in nulls or fields.get('signal_anchor') not in nulls
+            or not re.fullmatch(r'[^\r\n\t]{1,256}',rationale)): raise SystemExit(2)
+    print('REFUSED\t-\t-\t'+rationale); raise SystemExit(0)
 classes={'code_bug','billing_quota','platform_outage','flaky','env_drift','stale_base'}
 anchor=fields.get('signal_anchor','')
-if fields.get('status')!='CLASSIFIED' or fields.get('failure_class') not in classes: raise SystemExit(2)
-if not re.fullmatch(r'(?:gh-run-[1-9][0-9]*|[A-Za-z0-9._/-]+):[1-9][0-9]*',anchor): raise SystemExit(2)
-print(fields['failure_class']+'\t'+anchor)
+failure_class=fields.get('failure_class')
+if status!='CLASSIFIED' or failure_class not in classes: raise SystemExit(2)
+match=re.fullmatch(r'(.+):([1-9][0-9]*)',anchor)
+if not match: raise SystemExit(2)
+component=match.group(1)
+is_run=bool(re.fullmatch(r'gh-run-[1-9][0-9]*',component))
+def repository_file(value):
+    if value.startswith('/') or '\\' in value: return False
+    parts=value.split('/')
+    if any(part in {'','.','..'} for part in parts): return False
+    try:
+        root_path=pathlib.Path(root).resolve(strict=True)
+        target=(root_path/value).resolve(strict=True)
+        return target.is_file() and (target.parent==root_path or root_path in target.parents)
+    except (OSError,RuntimeError):
+        return False
+is_repo=repository_file(component)
+if failure_class in {'code_bug','env_drift'}:
+    if not is_repo: raise SystemExit(2)
+elif not (is_run or is_repo):
+    raise SystemExit(2)
+print('CLASSIFIED\t'+failure_class+'\t'+anchor+'\t-')
 PY
     }
-    IFS=$'\t' read -r failure_class signal_anchor < <(review_validate_ci_classification "$CI_CLASSIFICATION_PATH") || {
+    IFS=$'\t' read -r classification_status failure_class signal_anchor classifier_rationale < <(review_validate_ci_classification "$CI_CLASSIFICATION_PATH" "$WORKTREE_ROOT") || {
       audit ci_classify_returned subreason=contract_invalid
       OUTCOME=halted
       exit 1
     }
+    case "$classification_status" in
+      AMBIGUOUS) audit ci_classify_ambiguous_routing_as_flaky original_status=AMBIGUOUS ;;
+      REFUSED)
+        audit ci_classify_returned subreason=classifier_refused rationale="$classifier_rationale"
+        OUTCOME=halted
+        exit 1
+        ;;
+      CLASSIFIED) ;;
+      *) audit ci_classify_returned subreason=contract_invalid; OUTCOME=halted; exit 1 ;;
+    esac
     ```
 
     ### 6c.4 ROUTE — failure_class → downstream agent
@@ -774,8 +842,40 @@ PY
             audit ci_phase_outcome data.outcome=halted data.subreason=ci_refused_aggregate_create_failed
             exit 1
           fi
-          # Write the ci-refused-synthetic envelope and finding row to the
-          # noclobber-created artifact before constructing the child request.
+          python3 -I -B - "$CI_REFUSED_AGGREGATE_PATH" "${failure_class:-unknown}" \
+            "${check_name:-unknown}" "${signal_anchor:-unknown:1}" "${rationale:-unspecified}" <<'PY'
+import json,os,stat,sys
+path,failure_class,check_name,signal_anchor,rationale=sys.argv[1:]
+if any(len(value)>8192 or any(char in value for char in '\r\n\0') for value in (failure_class,check_name,signal_anchor,rationale)):
+    raise SystemExit(2)
+entry=os.lstat(path); uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
+if (stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1
+        or (uid is not None and entry.st_uid!=uid) or entry.st_size!=0
+        or (os.name!='nt' and stat.S_IMODE(entry.st_mode)!=0o600)):
+    raise SystemExit(2)
+row={'severity':'critical','tier':'CRITICAL','agent_name':'ci-code-fixer',
+     'failure_class':failure_class,'check_name':check_name,'location':signal_anchor,
+     'summary':'CI fixer refused the classified failure','rationale':rationale,
+     'disposition':'REFUSED'}
+payload=('<external-untrusted-input source="ci-refused-synthetic">\n- '
+         +json.dumps(row,sort_keys=True,separators=(',',':'))
+         +'\n</external-untrusted-input>\n').encode('utf-8')
+fd=os.open(path,os.O_WRONLY|getattr(os,'O_NOFOLLOW',0))
+try:
+    opened=os.fstat(fd); current=os.lstat(path)
+    if (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino): raise SystemExit(2)
+    if os.write(fd,payload)!=len(payload): raise SystemExit(2)
+    os.fsync(fd)
+finally:
+    os.close(fd)
+with open(path,'rb') as stream:
+    if not stream.read(128).startswith(b'<external-untrusted-input source="ci-refused-synthetic">'):
+        raise SystemExit(2)
+PY
+          if [ "$?" -ne 0 ]; then
+            audit ci_phase_outcome data.outcome=halted data.subreason=ci_refused_aggregate_write_failed
+            exit 1
+          fi
           CI_DEFER_INPUTS="$(uberdev_child_inputs_build review_pr.ci.defer_refusal \
             phase1_path "$(review_json_string "$CI_REFUSED_AGGREGATE_PATH")" \
             working_dir "$(review_json_string "$WORKTREE_ROOT")" \

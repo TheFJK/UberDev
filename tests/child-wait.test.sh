@@ -93,10 +93,10 @@ PY
 
 # Opaque Claude sessions cancel through an explicit provider capability hook
 # and require an absent/terminal probe, never a fabricated local state.
-mkdir "$TMP/bin"; printf '[{"sessionId":"abc12345-full","status":"running"}]\n' >"$TMP/claude-state"
+mkdir "$TMP/bin"; printf '[{"sessionId":"abc12345-full","state":"running"}]\n' >"$TMP/claude-state"
 cat >"$TMP/bin/claude" <<'SH'
 #!/usr/bin/env bash
-if [ "$1 $2" = 'agents --json' ]; then cat "$CLAUDE_STATE"; exit 0; fi
+if [ "$1 $2 $3" = 'agents --all --json' ]; then cat "$CLAUDE_STATE"; exit 0; fi
 exit 2
 SH
 chmod +x "$TMP/bin/claude"
