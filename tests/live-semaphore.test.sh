@@ -121,6 +121,32 @@ capture uberdev_semaphore_acquire "$TMP/invalid-run" repo codex 1 '' 5
 capture uberdev_semaphore_acquire "$TMP/invalid-run-newline" repo codex 1 $'run\nowner_pid=1' 5
 [ "$CAPTURE_RC" -eq 2 ] && pass "lease-field newline injection is rejected" || fail "lease-field newline injection is rejected" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 
+ATOMIC_STATE="$TMP/atomic-identity"
+capture uberdev_semaphore_acquire "$ATOMIC_STATE" repo codex 1 atomic-run 5 exact-identity
+IFS=$'\t' read -r atomic_lease atomic_identity <<<"$CAPTURE_OUT"
+if [ "$CAPTURE_RC" -eq 0 ] && [ -f "$atomic_lease" ] \
+    && [[ "$atomic_identity" =~ ^[0-9]+:[0-9]+:[0-9a-f]{32}$ ]]; then
+  pass "acquisition returns the lease path and exact generation identity atomically"
+else
+  fail "acquisition returns the lease path and exact generation identity atomically" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+uberdev_semaphore_release "$atomic_lease" >/dev/null 2>&1 || true
+
+capture /bin/bash -c '
+  . "$1"
+  eval "$(declare -f _uberdev_semaphore_path_identity | sed '\''1s/_uberdev_semaphore_path_identity/_real_identity/'\'')"
+  _uberdev_semaphore_path_identity() {
+    case "$1" in *.lease) return 29 ;; *) _real_identity "$@" ;; esac
+  }
+  uberdev_semaphore_acquire "$2" repo codex 1 identity-failure 5 exact-identity
+' _ "$LIB" "$TMP/atomic-identity-failure"
+if [ "$CAPTURE_RC" -eq 2 ] \
+    && ! find "$TMP/atomic-identity-failure" -name '*.lease' -type f -print 2>/dev/null | grep -q .; then
+  pass "exact identity capture failure rolls back its acquired generation"
+else
+  fail "exact identity capture failure rolls back its acquired generation" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+
 # GNU stat accepts `-f` as filesystem-report mode and may print colon-bearing
 # output before rejecting the BSD format operand. The identity helper must try
 # GNU `-c` first and accept only one numeric device:inode pair.

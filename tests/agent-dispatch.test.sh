@@ -843,6 +843,7 @@ if [ "${1:-}" = stop ] && [ "${2:-}" = abc12345-full ]; then
   [ -z "${CROSS_CLAUDE_STOP_COUNT:-}" ] || printf '%s\n' "$count" > "$CROSS_CLAUDE_STOP_COUNT"
   [ "${CROSS_CLAUDE_STOP_MODE:-}" != never ] || exit 2
   if [ "${CROSS_CLAUDE_STOP_MODE:-}" = once ] && [ "$count" -eq 1 ]; then exit 2; fi
+  [ "${CROSS_CLAUDE_STOP_MODE:-}" != sticky ] || exit 0
   printf '[]\n' > "$CROSS_CLAUDE_STATE"
   exit 0
 fi
@@ -1099,23 +1100,25 @@ claude_cancel_retry_case() {
     [ "$(cat "$run/stop-count")" -ge 2 ] || { echo "transient Claude stop failure was not retried" >&2; return 1; }
     return 0
   fi
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do
     [ -s "$run/status.json.watcher-error.json" ] && break
     command sleep 0.1
   done
-  python3 -I - "$run/status.json.watcher-error.json" <<'PY'
+  python3 -I - "$run/status.json.watcher-error.json" "$mode" <<'PY'
 import json,sys
 row=json.load(open(sys.argv[1]))
-assert row['error']=='provider_cancel_failed' and row['attempts']==3,row
+expected='provider_stop_failed' if sys.argv[2]=='never' else 'provider_cancel_unconfirmed'
+assert row['error']=='provider_cancel_failed' and row['attempts']==3 and row['reason']==expected,row
 PY
   grep -q '"state":"running"' "$run/status.json" || { echo "failed Claude stop fabricated a terminal" >&2; return 1; }
-  grep -R -q 'run_id=claude-cancel-never' "$state/semaphore-v1" || { echo "failed Claude stop abandoned its lease" >&2; return 1; }
+  grep -R -q "run_id=claude-cancel-$mode" "$state/semaphore-v1" || { echo "failed Claude stop abandoned its lease" >&2; return 1; }
   rm -rf "$run"
   command sleep 0.2
 }
 
 claude_cancel_retry_case once
 claude_cancel_retry_case never
+claude_cancel_retry_case sticky
 
 cross_backend_case codex
 cross_backend_case background
@@ -1148,8 +1151,8 @@ assert len(terminal)==1 and terminal[0].get('error_class')=='provider_execution_
 PY
 ! grep -R -q 'run_id=adapter-dead-without-terminal' "$DEAD_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
 
-# Once launch succeeds, a failure to bind the exact handle must cancel that
-# provider and reconcile a terminal instead of returning an unowned child.
+# Before provider launch, exact-identity registration failure must reconcile a
+# terminal and release only the generation acquired for this request.
 . "$ROOT/plugins/uberdev/lib/dispatch.sh"
 PRE_RUN="$TMP/pre-launch-identity-failure"
 mkdir -p "$PRE_RUN"
@@ -1177,13 +1180,17 @@ uberdev_semaphore_release "$PRE_REACQUIRED"
 
 # Event construction and manifest persistence fail before provider launch. The
 # rollback must retry transient failures, publish one failed lifecycle, and
-# release only the exact captured lease identity. Persistent manifest failure
-# still releases capacity and leaves a bounded supervisory sidecar.
+# release only the exact captured lease identity. If that exact release also
+# fails, capacity stays fail-closed and sidecar persistence is retried.
 eval "$(declare -f _uberdev_agent_event_json | sed '1s/_uberdev_agent_event_json/_real_prelaunch_event_json/')"
 eval "$(declare -f _uberdev_agent_append_event | sed '1s/_uberdev_agent_append_event/_real_prelaunch_append_event/')"
+eval "$(declare -f _uberdev_agent_release_exact_lease | sed '1s/_uberdev_agent_release_exact_lease/_real_prelaunch_exact_release/')"
+eval "$(declare -f _uberdev_agent_persist_watcher_error | sed '1s/_uberdev_agent_persist_watcher_error/_real_prelaunch_persist_error/')"
 eval "$(declare -f uberdev_semaphore_release | sed '1s/uberdev_semaphore_release/_real_prelaunch_generic_release/')"
 PRE_EVENT_MODE=''
 PRE_EVENT_COUNTER=''
+PRE_RELEASE_COUNTER=''
+PRE_SIDECAR_COUNTER=''
 _uberdev_agent_event_json() {
   if [ "$PRE_EVENT_MODE" = event_json ] && [ "$1" = agent_started ] && [ ! -e "$PRE_EVENT_COUNTER" ]; then
     : >"$PRE_EVENT_COUNTER"
@@ -1197,10 +1204,29 @@ _uberdev_agent_append_event() {
     : >"$PRE_EVENT_COUNTER"
     return 29
   fi
-  if [ "$PRE_EVENT_MODE" = append_always ] && [[ "$2" == *'"event":"agent_started"'* ]]; then
+  if { [ "$PRE_EVENT_MODE" = append_always ] || [ "$PRE_EVENT_MODE" = append_release ]; } \
+      && [[ "$2" == *'"event":"agent_started"'* ]]; then
     return 29
   fi
   _real_prelaunch_append_event "$@"
+}
+_uberdev_agent_release_exact_lease() {
+  local count
+  if [ "$PRE_EVENT_MODE" = append_release ]; then
+    count=0; [ ! -r "$PRE_RELEASE_COUNTER" ] || read -r count < "$PRE_RELEASE_COUNTER"
+    printf '%s\n' $((count + 1)) > "$PRE_RELEASE_COUNTER"
+    return 29
+  fi
+  _real_prelaunch_exact_release "$@"
+}
+_uberdev_agent_persist_watcher_error() {
+  local count
+  if [ "$PRE_EVENT_MODE" = append_release ]; then
+    count=0; [ ! -r "$PRE_SIDECAR_COUNTER" ] || read -r count < "$PRE_SIDECAR_COUNTER"
+    count=$((count + 1)); printf '%s\n' "$count" > "$PRE_SIDECAR_COUNTER"
+    [ "$count" -ge 3 ] || return 29
+  fi
+  _real_prelaunch_persist_error "$@"
 }
 uberdev_semaphore_release() { return 88; }
 
@@ -1212,7 +1238,9 @@ prelaunch_event_failure_case() {
   request="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-prelaunch-event-"+sys.argv[2],"repository_id":"adapter-prelaunch-event-repository-"+sys.argv[2],"backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":96,"issue_num":96,"capacity":1,"timeout_s":20},separators=(",",":")))' "$run" "$suffix")"
   PRE_EVENT_MODE="$mode"
   PRE_EVENT_COUNTER="$run/failure-injected"
-  rm -f "$PRE_EVENT_COUNTER" "$run/provider-called"
+  PRE_RELEASE_COUNTER="$run/release-attempts"
+  PRE_SIDECAR_COUNTER="$run/sidecar-attempts"
+  rm -f "$PRE_EVENT_COUNTER" "$PRE_RELEASE_COUNTER" "$PRE_SIDECAR_COUNTER" "$run/provider-called"
   _uberdev_agent_dispatch_backend() { : >"$run/provider-called"; return 0; }
   set +e
   uberdev_agent_dispatch "$request" "$run/prompt.txt" "$run/result.md" "$run/status.json"
@@ -1223,8 +1251,14 @@ prelaunch_event_failure_case() {
   grep -q '"state":"failed"' "$run/status.json"
   state="$run/.agent-state-$(id -u)"
   manifest="$state/agent-lifecycle.jsonl"
-  ! grep -R -q "run_id=adapter-prelaunch-event-$suffix" "$state/semaphore-v1" 2>/dev/null
-  if [ "$mode" = append_always ]; then
+  if [ "$mode" = append_release ]; then
+    grep -R -q "run_id=adapter-prelaunch-event-$suffix" "$state/semaphore-v1"
+    [ "$(cat "$PRE_RELEASE_COUNTER")" -eq 3 ]
+    [ "$(cat "$PRE_SIDECAR_COUNTER")" -eq 3 ]
+  else
+    ! grep -R -q "run_id=adapter-prelaunch-event-$suffix" "$state/semaphore-v1" 2>/dev/null
+  fi
+  if [ "$mode" = append_always ] || [ "$mode" = append_release ]; then
     sidecar="$run/status.json.watcher-error.json"
     [ -f "$sidecar" ] || sidecar="$state/adapter-prelaunch-event-$suffix.watcher-error.json"
     python3 -I - "$sidecar" <<'PY'
@@ -1249,12 +1283,17 @@ PY
 prelaunch_event_failure_case event_json event-json
 prelaunch_event_failure_case append_once append-once
 prelaunch_event_failure_case append_always append-always
+prelaunch_event_failure_case append_release append-release
 eval "$(declare -f _real_prelaunch_event_json | sed '1s/_real_prelaunch_event_json/_uberdev_agent_event_json/')"
 eval "$(declare -f _real_prelaunch_append_event | sed '1s/_real_prelaunch_append_event/_uberdev_agent_append_event/')"
+eval "$(declare -f _real_prelaunch_exact_release | sed '1s/_real_prelaunch_exact_release/_uberdev_agent_release_exact_lease/')"
+eval "$(declare -f _real_prelaunch_persist_error | sed '1s/_real_prelaunch_persist_error/_uberdev_agent_persist_watcher_error/')"
 eval "$(declare -f _real_prelaunch_generic_release | sed '1s/_real_prelaunch_generic_release/uberdev_semaphore_release/')"
 PRE_EVENT_REACQUIRED="$(uberdev_semaphore_acquire "$TMP/pre-launch-event-append-always/.agent-state-$(id -u)" adapter-prelaunch-event-repository-append-always codex 1 adapter-prelaunch-event-reacquired 20)"
 uberdev_semaphore_release "$PRE_EVENT_REACQUIRED"
 
+# Once launch succeeds, a failure to bind the exact handle must cancel that
+# provider and reconcile a terminal instead of returning an unowned child.
 POST_RUN="$TMP/post-launch-setup-failure"
 mkdir -p "$POST_RUN"
 printf 'post-launch failure prompt\n' > "$POST_RUN/prompt.txt"

@@ -1,18 +1,22 @@
 # plugins/uberdev/lib/dispatch.sh
 #
-# Dispatch-backend abstraction for /solve and /turbo (RFC 0004).
+# Dispatch-backend abstraction for /solve, /turbo, and routed /review-pr children
+# (RFC 0004; review supervision extended by RFC 0012).
 # SOURCED, never executed. No shebang (sourced only); .sh extension (convention).
 #
 # Public surface (functions):
 #   uberdev_dispatch_preflight                        -> resolves auto -> concrete backend
+#   uberdev_dispatch_preflight_backend BACKEND FLOW   -> validates workflow/provider support
 #   uberdev_dispatch_resolve_env                      -> sets the 6 dispatch-env vars; call after preflight
 #   uberdev_dispatch_one  ISSUE_NUM TIER PROMPT_FILE  -> dispatch one issue
 # Internal:
-#   _uberdev_dispatch_claude_bg / _uberdev_dispatch_wezterm / _uberdev_dispatch_background
+#   _uberdev_dispatch_claude_bg / _uberdev_dispatch_wezterm /
+#   _uberdev_dispatch_background / _uberdev_dispatch_codex
 #
 # Sourced by:
-#   - skills/solve-pipeline/SKILL.md Step 5b'
+#   - skills/solve-pipeline/SKILL.md Step 5b
 #   - skills/goal-pipeline/SKILL.md Phase 0
+#   - commands/review-pr.md executable setup and routed child adapter
 #   - tests/dispatch-claude-bg.test.sh, dispatch-fallback.test.sh,
 #     dispatch-background.test.sh, dispatch-wezterm.test.sh
 #
@@ -624,9 +628,11 @@ _uberdev_agent_dispatch_backend() {
 }
 
 _uberdev_dispatch_cancel_claude_bg() {
-  local handle="${1:-}" resolved
-  [ "${#handle}" -eq 8 ] || return 2
-  printf '%s\n' "$handle" | LC_ALL=C grep -Eq '^[0-9a-f]{8}$' || return 2
+  local handle="${1:-}" resolved probe probe_rc attempts=0 absent_count=0 saw_valid=0
+  _UBERDEV_DISPATCH_CANCEL_REASON=''
+  [ "${#handle}" -eq 8 ] || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_session_resolution_failed; return 2; }
+  printf '%s\n' "$handle" | LC_ALL=C grep -Eq '^[0-9a-f]{8}$' \
+    || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_session_resolution_failed; return 2; }
   resolved="$(claude agents --all --json 2>/dev/null | _uberdev_dispatch_python -I -B -c '
 import json,sys
 prefix=sys.argv[1]
@@ -635,9 +641,36 @@ except Exception: raise SystemExit(2)
 matches=[row["sessionId"] for row in rows if isinstance(row,dict) and isinstance(row.get("sessionId"),str) and row["sessionId"].startswith(prefix)] if isinstance(rows,list) else []
 if len(matches)!=1: raise SystemExit(2)
 print(matches[0],end="")
-' "$handle")" || return 2
-  [ -n "$resolved" ] || return 2
-  claude stop "$resolved" >/dev/null 2>&1 || return 2
+' "$handle")" || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_session_resolution_failed; return 2; }
+  [ -n "$resolved" ] || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_session_resolution_failed; return 2; }
+  claude stop "$resolved" >/dev/null 2>&1 \
+    || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_stop_failed; return 2; }
+  while [ "$attempts" -lt 20 ]; do
+    if probe="$(_uberdev_agent_claude_probe "$resolved" exact 2>/dev/null)"; then
+      probe_rc=0; saw_valid=1
+    else
+      probe_rc=$?
+    fi
+    if [ "$probe_rc" -eq 0 ]; then
+      case "$probe" in
+        completed|failed|timed_out|cancelled) return 0 ;;
+        absent)
+          absent_count=$((absent_count + 1))
+          [ "$absent_count" -lt 3 ] || return 0
+          ;;
+        live|blocked:permission|blocked:provider) absent_count=0 ;;
+        *) saw_valid=0 ;;
+      esac
+    fi
+    sleep 0.05
+    attempts=$((attempts + 1))
+  done
+  if [ "$saw_valid" -eq 0 ]; then
+    _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_probe_failed
+    return 2
+  fi
+  _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed
+  return 1
 }
 
 _uberdev_dispatch_group_live() {
@@ -798,6 +831,7 @@ PY
 # prove the handle is no longer live before returning success.
 _uberdev_dispatch_cancel_backend() {
   local backend="$1" handle="$2" expected_identity="${3:-}" current pane probe attempts cancel_rc group_rc identity_pid identity_pgid identity_sid identity_started
+  _UBERDEV_DISPATCH_CANCEL_REASON=''
   case "$backend" in
     codex|background)
       case "$handle" in ''|*[!0-9]*) return 2 ;; esac
@@ -839,19 +873,7 @@ EOF_IDENTITY
       return 1
       ;;
     claude-bg)
-      if _uberdev_dispatch_cancel_claude_bg "$handle"; then
-        :
-      else
-        cancel_rc=$?
-        return "$cancel_rc"
-      fi
-      attempts=0
-      while [ "$attempts" -lt 20 ]; do
-        probe="$(_uberdev_agent_claude_probe "$handle" 2>/dev/null || true)"
-        case "$probe" in absent|completed|failed|timed_out|cancelled) return 0 ;; esac
-        sleep 0.05; attempts=$((attempts + 1))
-      done
-      return 1
+      _uberdev_dispatch_cancel_claude_bg "$handle"
       ;;
     wezterm)
       pane="${handle#pane:}"; case "$pane" in ''|*[!0-9]*) return 2 ;; esac
@@ -1484,14 +1506,15 @@ _uberdev_dispatch_report_codex_setup_cleanup_failure() {
 #
 # What's different from `background`:
 #   - execs `codex exec` instead of `claude -p` (Codex's headless non-interactive
-#     mode). --sandbox workspace-write grants autonomous edits without approval
-#     prompts (the documented non-interactive analog of "yolo"); the wrapper
-#     `cd`s into the worktree before invoking codex; --json streams progress to
-#     the log so the launcher can tail it; -o captures the agent's final message
-#     to a result file the user can inspect after the run.
-#   - --skip-git-repo-check is NOT passed: the dispatcher creates a real git
-#     worktree above, so codex's repo guard is satisfied and serves as a
-#     useful safety net (refuses to run in a non-repo CWD).
+#     mode). The wrapper `cd`s into the selected execution directory; --json
+#     streams progress to the log and -o captures the final message.
+#   - isolated mode creates a dispatcher-owned worktree and normally selects
+#     workspace-write. Caller mode creates no worktree, runs in the validated
+#     repository root, and uses the route-selected sandbox (reviewers may be
+#     read-only while fixer routes use workspace-write).
+#   - --skip-git-repo-check is NOT passed in either mode: both execution
+#     directories are validated git checkouts, so Codex's repo guard remains a
+#     useful safety net.
 #   - MODEL/PERM_FLAG/EFFORT_FLAG from the claude arms don't apply: codex
 #     selects model via -m / config.toml, and sandbox mode replaces the
 #     permission-flag mechanism. BG_TURBO_ENV still propagates UBERDEV_TURBO

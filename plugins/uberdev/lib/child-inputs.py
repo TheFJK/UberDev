@@ -104,8 +104,8 @@ def validate_value(key: str, value: Any, kind: str) -> None:
             fail(f"input {key} must be a string")
         return
     if kind == "repo_path_array":
-        if not isinstance(value, list):
-            fail(f"input {key} must be an array of repository-relative paths")
+        if not isinstance(value, list) or not value:
+            fail(f"input {key} must be a non-empty array of repository-relative paths")
         for item in value:
             if (
                 not isinstance(item, str)

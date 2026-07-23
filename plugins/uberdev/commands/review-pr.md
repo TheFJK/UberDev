@@ -151,20 +151,47 @@ review_child_result_path() {
   python3 -I -B - "$launched" "$edge" <<'PY'
 import json,os,stat,sys
 ledger,edge=sys.argv[1:]
+def fail(reason):
+    print(reason,end='')
+    raise SystemExit(2)
+try:
+    ledger_entry=os.lstat(ledger)
+except FileNotFoundError:
+    fail('classification_ledger_missing')
+except OSError:
+    fail('classification_ledger_unreadable')
+uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
+if (stat.S_ISLNK(ledger_entry.st_mode) or not stat.S_ISREG(ledger_entry.st_mode)
+        or ledger_entry.st_nlink!=1 or (uid is not None and ledger_entry.st_uid!=uid)
+        or ledger_entry.st_size<1 or ledger_entry.st_size>1048576):
+    fail('classification_ledger_unsafe')
 try:
     rows=[json.loads(line) for line in open(ledger,encoding='utf-8') if line.strip()]
-    matches=[row for row in rows if row.get('edge')==edge]
-    if len(matches)!=1: raise ValueError()
-    path=matches[0].get('result')
-    if not isinstance(path,str) or not os.path.isabs(path): raise ValueError()
+except (OSError,UnicodeError,json.JSONDecodeError):
+    fail('classification_ledger_malformed')
+if any(not isinstance(row,dict) for row in rows):
+    fail('classification_ledger_malformed')
+matches=[row for row in rows if row.get('edge')==edge]
+if not matches:
+    fail('classification_ledger_edge_missing')
+if len(matches)>1:
+    fail('classification_ledger_duplicate')
+path=matches[0].get('result')
+if (not isinstance(path,str) or not os.path.isabs(path)
+        or os.path.basename(path)!='result.md'
+        or os.path.basename(os.path.dirname(os.path.dirname(path)))!='children'):
+    fail('classification_result_path_invalid')
+try:
     entry=os.lstat(path)
-    uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
-    if (stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1
-            or (uid is not None and entry.st_uid!=uid) or entry.st_size<1 or entry.st_size>16777216
-            or os.path.basename(path)!='result.md' or os.path.basename(os.path.dirname(os.path.dirname(path)))!='children'):
-        raise ValueError()
-except (AttributeError,OSError,TypeError,ValueError,json.JSONDecodeError):
-    raise SystemExit(2)
+except FileNotFoundError:
+    fail('classification_artifact_missing')
+except OSError:
+    fail('classification_artifact_unreadable')
+if (stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1
+        or (uid is not None and entry.st_uid!=uid)):
+    fail('classification_artifact_unsafe')
+if entry.st_size<1 or entry.st_size>16777216:
+    fail('classification_artifact_size_invalid')
 print(os.path.realpath(path),end='')
 PY
 }
@@ -284,11 +311,36 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    diff artifact, and commit range bound to the same post-fix HEAD:
 
    ```bash
+   review_resolve_phase1_base() {
+     python3 -I -B - "$1" "$2" <<'PY'
+import json,re,subprocess,sys
+pr,root=sys.argv[1:]
+if re.fullmatch(r'[1-9][0-9]*',pr) is None: raise SystemExit(2)
+metadata=json.loads(subprocess.check_output(
+    ['gh','pr','view',pr,'--json','baseRefOid,baseRefName'],text=True))
+base_oid=metadata.get('baseRefOid'); base_name=metadata.get('baseRefName')
+if re.fullmatch(r'[0-9a-f]{40}',base_oid or '') is None or not isinstance(base_name,str) or not base_name:
+    raise SystemExit(2)
+try:
+    subprocess.run(['git','-C',root,'cat-file','-e',base_oid+'^{commit}'],check=True,
+                   stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+except subprocess.CalledProcessError:
+    subprocess.run(['git','-C',root,'fetch','--no-tags','origin',base_name],check=True)
+    subprocess.run(['git','-C',root,'cat-file','-e',base_oid+'^{commit}'],check=True,
+                   stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+head=subprocess.check_output(['git','-C',root,'rev-parse','HEAD'],text=True).strip()
+base=subprocess.check_output(['git','-C',root,'merge-base',head,base_oid],text=True).strip()
+if re.fullmatch(r'[0-9a-f]{40}',base) is None: raise SystemExit(2)
+print(base,end='')
+PY
+   }
    review_refresh_phase1_scope() {
      local base="$1"
      CHANGED_PATHS_JSON="$(python3 -I -B - "$WORKTREE_ROOT" "$base" "$DIFF_ARTIFACT_PATH" "$COMMIT_RANGE_PATH" <<'PY'
 import json,os,re,stat,subprocess,sys,tempfile
 root,base,diff_path,range_path=sys.argv[1:]
+MAX_DIFF_LINES=2000
+MAX_DIFF_BYTES=8*1024*1024
 if re.fullmatch(r'[0-9a-f]{40}',base) is None: raise SystemExit(2)
 head=subprocess.check_output(['git','-C',root,'rev-parse','HEAD'],text=True).strip()
 if re.fullmatch(r'[0-9a-f]{40}',head) is None: raise SystemExit(2)
@@ -301,7 +353,37 @@ for path in paths:
     if (path.startswith('/') or '\\' in path or any(part in ('','.','..') for part in parts)
             or any(ord(char)<32 or ord(char)==127 for char in path)):
         raise SystemExit(2)
-diff=subprocess.check_output(['git','-C',root,'diff','--binary','--no-ext-diff',f'{base}..{head}'])
+process=subprocess.Popen(['git','-C',root,'diff','--binary','--no-ext-diff',f'{base}..{head}'],stdout=subprocess.PIPE)
+diff_buffer=bytearray(); diff_lines=0; summarized=False
+while True:
+    chunk=process.stdout.read(65536)
+    if not chunk: break
+    diff_buffer.extend(chunk); diff_lines+=chunk.count(b'\n')
+    if len(diff_buffer)>MAX_DIFF_BYTES or diff_lines>MAX_DIFF_LINES:
+        summarized=True; process.kill(); break
+process.stdout.close(); process.wait()
+if not summarized and process.returncode!=0: raise SystemExit(2)
+if summarized:
+    summary=['[diff summarized: full binary diff exceeded the 2000-line or 8-MiB review artifact limit]']
+    stats=subprocess.Popen(['git','-C',root,'diff','--numstat','--no-renames',f'{base}..{head}'],
+                           stdout=subprocess.PIPE,text=True,encoding='utf-8',errors='strict')
+    summary_bytes=0; omitted=0
+    for line in stats.stdout:
+        fields=line.rstrip('\n').split('\t',2)
+        if len(fields)!=3: raise SystemExit(2)
+        added,deleted,path=fields
+        detail='binary change' if added==deleted=='-' else f'{added} additions, {deleted} deletions'
+        row=f'{path} — {detail}'
+        encoded=len(row.encode())+1
+        if summary_bytes+encoded>MAX_DIFF_BYTES:
+            omitted+=1
+            continue
+        summary.append(row); summary_bytes+=encoded
+    if stats.wait()!=0: raise SystemExit(2)
+    if omitted: summary.append(f'[{omitted} additional file summaries omitted to preserve the artifact limit]')
+    diff=('\n'.join(summary)+'\n').encode()
+else:
+    diff=bytes(diff_buffer)
 def replace_private(path,payload):
     parent=os.path.dirname(path) or '.'
     fd,tmp=tempfile.mkstemp(prefix='.review-scope.',dir=parent)
@@ -319,6 +401,7 @@ print(json.dumps(paths,separators=(',',':')),end='')
 PY
 )" || return 2
    }
+   BASE_SHA="$(review_resolve_phase1_base "$PR_NUMBER" "$WORKTREE_ROOT")" || return 2
    review_refresh_phase1_scope "$BASE_SHA"
    ```
 
@@ -733,7 +816,11 @@ PY
       log_path "$(review_json_string "$CI_LOG_ARTIFACT_PATH")")"
     review_child_single review_pr.ci.classify "$(uberdev_child_instance_id "review-pr-${RUN_ID}-ci-classify-iter${CI_FIX_LOOP_ITER:-1}-attempt01")" "$CI_CLASSIFY_INPUTS" '[]' "$RESEARCH_DIR_ABS/ci-classify" "$REVIEW_PR_TIMEOUT"
     CI_CLASSIFICATION_PATH="$(review_child_result_path "$RESEARCH_DIR_ABS/ci-classify.launched" review_pr.ci.classify)" || {
-      audit ci_classify_returned subreason=classification_artifact_missing
+      case "$CI_CLASSIFICATION_PATH" in
+        classification_ledger_missing|classification_ledger_unreadable|classification_ledger_unsafe|classification_ledger_malformed|classification_ledger_edge_missing|classification_ledger_duplicate|classification_result_path_invalid|classification_artifact_missing|classification_artifact_unreadable|classification_artifact_unsafe|classification_artifact_size_invalid) ;;
+        *) CI_CLASSIFICATION_PATH=classification_result_discovery_failed ;;
+      esac
+      audit ci_classify_returned subreason="$CI_CLASSIFICATION_PATH"
       OUTCOME=halted
       exit 1
     }
@@ -752,7 +839,7 @@ import ast,json,pathlib,re,sys
 path,root=sys.argv[1:]
 raw=pathlib.Path(path).read_text(encoding='utf-8')
 if len(raw.encode())>65536: raise SystemExit(2)
-document=re.fullmatch(r'```yaml\r?\n(.*?)\r?\n```\r?\n?',raw,re.DOTALL)
+document=re.search(r'(?:^|\n)```yaml\r?\n(.*?)\r?\n```\r?\n?\Z',raw,re.DOTALL)
 if document is None: raise SystemExit(2)
 fields={}
 for line in document.group(1).splitlines():

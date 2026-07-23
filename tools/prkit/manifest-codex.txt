@@ -51,7 +51,7 @@ codex/uberdev-codex/lib/secret-scan.sh
 codex/uberdev-codex/policy/model-routing-v1.json
 codex/uberdev-codex/policy/solve-run-tree-v1.json
 
-# --- plugin-runtime scaffold (3) ---
+# --- plugin-runtime scaffold (4) ---
 codex/uberdev-codex/hooks/hooks.json
 codex/uberdev-codex/hooks/session-start
 codex/uberdev-codex/shared/document-reviewer-template.md

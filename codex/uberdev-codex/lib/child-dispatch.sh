@@ -208,7 +208,7 @@ def beneath(root,path):
  try:return os.path.commonpath((root,path))==root
  except ValueError:return False
 def repo_paths(value):
- if not isinstance(value,list): fail('input_type_mismatch')
+ if not isinstance(value,list) or not value: fail('input_type_mismatch')
  for path in value:
   if (not isinstance(path,str) or not path or len(path)>4096 or path.startswith('/')
       or '\\' in path or any(ord(c)<32 or ord(c)==127 for c in path)): fail('unsafe_repo_path')
@@ -348,7 +348,7 @@ def beneath(root,path):
     try:return os.path.commonpath((root,path))==root
     except ValueError:return False
 def repo_paths(value):
-    if not isinstance(value,list): fail('input_type_mismatch')
+    if not isinstance(value,list) or not value: fail('input_type_mismatch')
     for path in value:
         if (not isinstance(path,str) or not path or len(path)>4096 or path.startswith('/')
             or '\\' in path or any(ord(c)<32 or ord(c)==127 for c in path)): fail('unsafe_repo_path')

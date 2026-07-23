@@ -62,22 +62,24 @@ run_setup() {
       UBERDEV_TMPDIR="$runtime" UBERDEV_DISPATCH_BACKEND_REQUESTED="$requested" \
       AUTO_PERMISSIONS=1 \
       RUN_ID=20260716-000000-abcdef0 PR_NUMBER=335 ARGUMENTS='' \
-      bash -c 'cd "$2"; . "$1"; python3 -I -B -c "import json,os,sys; print(json.dumps({\"requested\":os.environ[\"UBERDEV_DISPATCH_BACKEND_REQUESTED\"],\"backend\":json.loads(os.environ[\"UBERDEV_AGENT_PREPARED_REQUEST_JSON\"])[\"backend\"],\"model\":sys.argv[1],\"timeout\":sys.argv[2],\"permissions\":sys.argv[3],\"effort\":sys.argv[4]},sort_keys=True))" "${MODEL:-}" "${TIMEOUT_BIN:-}" "${PERM_FLAG[*]-}" "${EFFORT_FLAG[*]-}"' _ "$TMP/setup.sh" "$TMP/repo"
+      bash -c 'cd "$2"; . "$1"; python3 -I -B -c "import json,os,sys; request=json.loads(os.environ[\"UBERDEV_AGENT_PREPARED_REQUEST_JSON\"]); print(json.dumps({\"requested\":os.environ[\"UBERDEV_DISPATCH_BACKEND_REQUESTED\"],\"backend\":request[\"backend\"],\"run_dir\":request[\"run_dir\"],\"model\":sys.argv[1],\"timeout\":sys.argv[2],\"permissions\":sys.argv[3],\"effort\":sys.argv[4]},sort_keys=True))" "${MODEL:-}" "${TIMEOUT_BIN:-}" "${PERM_FLAG[*]-}" "${EFFORT_FLAG[*]-}"' _ "$TMP/setup.sh" "$TMP/repo"
   else
     # shellcheck disable=SC2016 # Positional parameters expand in the isolated child shell.
     env -i HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
       PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$TMP/repo" \
       UBERDEV_TMPDIR="$runtime" RUN_ID=20260716-000001-abcdef0 PR_NUMBER=335 ARGUMENTS='' \
-      bash -c 'cd "$2"; . "$1"; python3 -I -B -c "import json,os,sys; print(json.dumps({\"requested\":os.environ[\"UBERDEV_DISPATCH_BACKEND_REQUESTED\"],\"backend\":json.loads(os.environ[\"UBERDEV_AGENT_PREPARED_REQUEST_JSON\"])[\"backend\"],\"model\":sys.argv[1],\"timeout\":sys.argv[2],\"permissions\":sys.argv[3],\"effort\":sys.argv[4]},sort_keys=True))" "${MODEL:-}" "${TIMEOUT_BIN:-}" "${PERM_FLAG[*]-}" "${EFFORT_FLAG[*]-}"' _ "$TMP/setup.sh" "$TMP/repo"
+      bash -c 'cd "$2"; . "$1"; python3 -I -B -c "import json,os,sys; request=json.loads(os.environ[\"UBERDEV_AGENT_PREPARED_REQUEST_JSON\"]); print(json.dumps({\"requested\":os.environ[\"UBERDEV_DISPATCH_BACKEND_REQUESTED\"],\"backend\":request[\"backend\"],\"run_dir\":request[\"run_dir\"],\"model\":sys.argv[1],\"timeout\":sys.argv[2],\"permissions\":sys.argv[3],\"effort\":sys.argv[4]},sort_keys=True))" "${MODEL:-}" "${TIMEOUT_BIN:-}" "${PERM_FLAG[*]-}" "${EFFORT_FLAG[*]-}"' _ "$TMP/setup.sh" "$TMP/repo"
   fi
 }
 
 # CODEX_HOME is intentionally absent in both clean environments. The generated
 # Codex skill supplies the provenance signal before standalone carrier setup.
 default_result="$(run_setup "$TMP/runtime-default")"
-python3 -I -B - "$default_result" <<'PY'
+python3 -I -B - "$default_result" "$TMP/runtime-default" <<'PY'
 import json, sys
 value = json.loads(sys.argv[1])
+run_dir=value.pop("run_dir")
+assert run_dir==sys.argv[2],(run_dir,sys.argv[2])
 assert value == {"requested": "codex", "backend": "codex", "model": "", "timeout": "", "permissions": "", "effort": ""}, value
 PY
 
@@ -88,9 +90,31 @@ python3 -I -B - "$override_result" <<'PY'
 import json, sys
 value = json.loads(sys.argv[1])
 assert value["requested"] == value["backend"] == "claude-bg", value
+assert value["run_dir"], value
 assert value["model"] and value["timeout"], value
 assert value["permissions"] == "--dangerously-skip-permissions --permission-mode bypassPermissions", value
 assert value["effort"] == "--effort max", value
+PY
+
+# With UBERDEV_TMPDIR absent, standalone review must select the secure runtime
+# helper default beneath TMPDIR instead of falling back to an ambient /tmp path.
+PRIVATE_TMP="$TMP/private-tmp"
+mkdir -p "$PRIVATE_TMP"
+chmod 700 "$PRIVATE_TMP"
+private_result="$(
+  env -i HOME="$TMP/home" PATH="$TMP/bin:$PATH" TMPDIR="$PRIVATE_TMP" \
+    PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$TMP/repo" \
+    RUN_ID=20260716-000002-abcdef0 PR_NUMBER=335 ARGUMENTS='' \
+    bash -c 'cd "$2"; . "$1"; python3 -I -B -c "import json,os; request=json.loads(os.environ[\"UBERDEV_AGENT_PREPARED_REQUEST_JSON\"]); print(json.dumps({\"run_dir\":request[\"run_dir\"],\"backend\":request[\"backend\"]},sort_keys=True))"' \
+      _ "$TMP/setup.sh" "$TMP/repo"
+)"
+python3 -I -B - "$private_result" "$PRIVATE_TMP" <<'PY'
+import json,os,stat,sys
+value=json.loads(sys.argv[1]); expected=os.path.join(sys.argv[2],f'uberdev-{os.geteuid()}')
+assert value=={'backend':'codex','run_dir':expected},value
+entry=os.lstat(expected)
+assert stat.S_ISDIR(entry.st_mode) and not stat.S_ISLNK(entry.st_mode)
+assert entry.st_uid==os.geteuid() and stat.S_IMODE(entry.st_mode)==0o700
 PY
 
 echo "review-pr Codex entrypoint tests passed"

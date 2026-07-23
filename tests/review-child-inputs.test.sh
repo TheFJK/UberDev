@@ -441,13 +441,25 @@ printf 'base\n' >"$SCOPE_REPO/base.txt"
 git -C "$SCOPE_REPO" add base.txt
 git -C "$SCOPE_REPO" commit -qm 'test: create scope base'
 BASE_SHA="$(git -C "$SCOPE_REPO" rev-parse HEAD)"
+SCOPE_EXPECTED_BASE="$BASE_SHA"
+SCOPE_BIN="$TMP/scope-bin"
+mkdir -p "$SCOPE_BIN"
+cat >"$SCOPE_BIN/gh" <<'SH'
+#!/usr/bin/env bash
+printf '{"baseRefOid":"%s","baseRefName":"main"}\n' "$SCOPE_EXPECTED_BASE"
+SH
+chmod +x "$SCOPE_BIN/gh"
+export SCOPE_EXPECTED_BASE
 printf 'initial change\n' >>"$SCOPE_REPO/base.txt"
 git -C "$SCOPE_REPO" add base.txt
 git -C "$SCOPE_REPO" commit -qm 'test: create initial review change'
 (
+  PATH="$SCOPE_BIN:$PATH"
   WORKTREE_ROOT="$SCOPE_REPO"
   DIFF_ARTIFACT_PATH="$TMP/scope-diff.md"
   COMMIT_RANGE_PATH="$TMP/scope-range.txt"
+  PR_NUMBER=73
+  unset BASE_SHA
   . "$TMP/review-scope.sh"
   python3 -I -B - "$CHANGED_PATHS_JSON" "$DIFF_ARTIFACT_PATH" <<'PY'
 import json,sys
@@ -460,7 +472,7 @@ PY
   git -C "$SCOPE_REPO" add fixer-created.txt
   git -C "$SCOPE_REPO" commit -qm 'fix: simulate phase 1 fixer file'
   . "$TMP/review-scope.sh"
-  python3 -I -B - "$CHANGED_PATHS_JSON" "$DIFF_ARTIFACT_PATH" "$COMMIT_RANGE_PATH" "$BASE_SHA" <<'PY'
+  python3 -I -B - "$CHANGED_PATHS_JSON" "$DIFF_ARTIFACT_PATH" "$COMMIT_RANGE_PATH" "$SCOPE_EXPECTED_BASE" <<'PY'
 import json,sys
 paths=json.loads(sys.argv[1]); raw=open(sys.argv[2],encoding='utf-8').read()
 commit_range=open(sys.argv[3],encoding='utf-8').read().strip()
@@ -468,6 +480,33 @@ assert paths==['base.txt','fixer-created.txt'],paths
 assert 'fixer-created.txt' in raw
 base,head=commit_range.split('..',1)
 assert base==sys.argv[4] and len(head)==40 and all(ch in '0123456789abcdef' for ch in head)
+PY
+  python3 -I -B - "$SCOPE_REPO/substantial.bin" <<'PY'
+import random,sys
+open(sys.argv[1],'wb').write(random.Random(335).randbytes(7*1024*1024))
+PY
+  git -C "$SCOPE_REPO" add substantial.bin
+  git -C "$SCOPE_REPO" commit -qm 'test: add substantial binary review fixture'
+  . "$TMP/review-scope.sh"
+  python3 -I -B - "$DIFF_ARTIFACT_PATH" <<'PY'
+import os,sys
+raw=open(sys.argv[1],encoding='utf-8').read()
+assert '[diff summarized:' in raw,raw[:200]
+assert 'substantial.bin' in raw
+assert os.path.getsize(sys.argv[1]) < 16*1024*1024
+PY
+  python3 -I -B - "$SCOPE_REPO/large.txt" <<'PY'
+import sys
+open(sys.argv[1],'w',encoding='utf-8').writelines(f'line {index}\n' for index in range(2101))
+PY
+  git -C "$SCOPE_REPO" add large.txt
+  git -C "$SCOPE_REPO" commit -qm 'test: add large text review fixture'
+  . "$TMP/review-scope.sh"
+  python3 -I -B - "$DIFF_ARTIFACT_PATH" <<'PY'
+import os,sys
+raw=open(sys.argv[1],encoding='utf-8').read()
+assert '[diff summarized:' in raw and 'large.txt' in raw
+assert os.path.getsize(sys.argv[1]) < 16*1024*1024
 PY
 )
 
@@ -519,6 +558,14 @@ LARGE_REVIEW_INPUTS="$(uberdev_child_inputs_build review_pr.review.correctness \
   echo 'review-child-inputs: complete 129-path PR diff was truncated or rejected' >&2
   exit 1
 }
+if uberdev_child_inputs_build review_pr.review.correctness \
+    changed_paths '[]' \
+    diff_path "$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1]),end="")' "$DIFF_PATH")" \
+    criteria_path "$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1]),end="")' "$CRITERIA_FIXTURE")" \
+    emphasis '[]' >/dev/null 2>&1; then
+  echo 'review-child-inputs: empty changed_paths scope was accepted' >&2
+  exit 1
+fi
 if DRIVE_RELATIVE_INPUTS="$(python3 -I -B - "$LARGE_REVIEW_INPUTS" <<'PY'
 import json,sys
 value=json.loads(sys.argv[1]); value['changed_paths']=['C:relative/path.ts']

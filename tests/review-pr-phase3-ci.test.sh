@@ -229,6 +229,14 @@ if [ "$CLASSIFY_SPLIT" = $'CLASSIFIED\tcode_bug\tREADME.md:42\t-' ]; then
 else
   echo "  FAIL  S10.11 — valid classifier output failed the controller read boundary: $CLASSIFY_SPLIT"; FAIL=$((FAIL + 1))
 fi
+printf 'bounded classifier explanation\n' > "$CLASSIFY_CASE"
+printf '```yaml\nstatus: CLASSIFIED\nfailure_class: flaky\nsignal_anchor: "gh-run-123:42"\nrationale: "transient runner signal"\nrisks: []\n```\n' >> "$CLASSIFY_CASE"
+CLASSIFY_WITH_PREFIX="$(bash -c '. "$1"; review_validate_ci_classification "$2" "$3"' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT")"
+if [ "$CLASSIFY_WITH_PREFIX" = $'CLASSIFIED\tflaky\tgh-run-123:42\t-' ]; then
+  echo "  PASS  S10.11a — controller extracts the contract-permitted final fenced document"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.11a — controller rejected final fenced classifier output: $CLASSIFY_WITH_PREFIX"; FAIL=$((FAIL + 1))
+fi
 CLASSIFY_INVALID=0
 for invalid_anchor in ':121' 'file:0' '/absolute:1' '../README.md:1' 'missing.ts:1' ''; do
   write_classifier_case CLASSIFIED code_bug "\"$invalid_anchor\"" '"invalid anchor fixture"'
@@ -268,7 +276,7 @@ for malformed_document in \
   $'```yaml\nstatus: CLASSIFIED\nfailure_class: flaky\nsignal_anchor: "gh-run-123:42"\nrisks: []\n```\n' \
   $'```yaml\nstatus: CLASSIFIED\nfailure_class: flaky\nsignal_anchor: "gh-run-123:42"\nrationale: "fixture"\n```\n' \
   $'```yaml\nstatus: CLASSIFIED\nfailure_class: flaky\nsignal_anchor: "gh-run-123:42"\nrationale: "fixture"\nrisks: []\nunknown: value\n```\n' \
-  $'prefix\n```yaml\nstatus: CLASSIFIED\nfailure_class: flaky\nsignal_anchor: "gh-run-123:42"\nrationale: "fixture"\nrisks: []\n```\n' \
+  $'```yaml\nstatus: CLASSIFIED\nfailure_class: flaky\nsignal_anchor: "gh-run-123:42"\nrationale: "fixture"\nrisks: []\n```\ntrailing content\n' \
   $'```yaml\nstatus: CLASSIFIED\nstatus: AMBIGUOUS\nfailure_class: flaky\nsignal_anchor: "gh-run-123:42"\nrationale: "fixture"\nrisks: []\n```\n'; do
   printf '%s' "$malformed_document" > "$CLASSIFY_CASE"
   if bash -c '. "$1"; review_validate_ci_classification "$2" "$3" >/dev/null' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT"; then
@@ -276,7 +284,7 @@ for malformed_document in \
   fi
 done
 if [ "$CLASSIFY_STRICT_INVALID" -eq 0 ]; then
-  echo "  PASS  S10.14 — classifier rejects incomplete, duplicate, unknown, and out-of-fence content"; PASS=$((PASS + 1))
+  echo "  PASS  S10.14 — classifier rejects incomplete, duplicate, unknown, and trailing out-of-fence content"; PASS=$((PASS + 1))
 else
   echo "  FAIL  S10.14 — $CLASSIFY_STRICT_INVALID malformed classifier documents were accepted"; FAIL=$((FAIL + 1))
 fi
@@ -299,17 +307,21 @@ RESULT_PATH_INVALID=0
 [ "$RESULT_PATH_RESOLVED" = "$RESULT_PATH_EXPECTED" ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 printf '{"edge":"review_pr.ci.classify","result":"%s"}\n{"edge":"review_pr.ci.classify","result":"%s"}\n' \
   "$RESULT_PATH" "$RESULT_PATH" > "$RESULT_LEDGER"
-bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify >/dev/null' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" \
+RESULT_REASON="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \
   && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+[ "$RESULT_REASON" = classification_ledger_duplicate ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 printf '{bad json\n' > "$RESULT_LEDGER"
-bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify >/dev/null' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" \
+RESULT_REASON="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \
   && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+[ "$RESULT_REASON" = classification_ledger_malformed ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 printf '[]\n' > "$RESULT_LEDGER"
-bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify >/dev/null' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" \
+RESULT_REASON="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \
   && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
-printf '{"edge":"review_pr.ci.classify","result":"%s"}\n' "$RESULT_PATH_TMP/missing/result.md" > "$RESULT_LEDGER"
-bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify >/dev/null' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" \
+[ "$RESULT_REASON" = classification_ledger_malformed ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+printf '{"edge":"review_pr.ci.classify","result":"%s"}\n' "$RESULT_PATH_TMP/run/children/missing/result.md" > "$RESULT_LEDGER"
+RESULT_REASON="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \
   && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+[ "$RESULT_REASON" = classification_artifact_missing ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 mv "$RESULT_PATH" "$RESULT_PATH.real"
 ln -s "$RESULT_PATH.real" "$RESULT_PATH"
 printf '{"edge":"review_pr.ci.classify","result":"%s"}\n' "$RESULT_PATH" > "$RESULT_LEDGER"

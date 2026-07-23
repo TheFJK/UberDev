@@ -815,13 +815,16 @@ _uberdev_semaphore_remove_lease() {
 }
 
 uberdev_semaphore_acquire() {
-  local state_root repo_id backend cap run_id timeout_s scope lease active wait_tries wait_max mutex_rc duplicate_rc owner_pid
+  local state_root repo_id backend cap run_id timeout_s identity_mode scope lease active wait_tries wait_max mutex_rc duplicate_rc owner_pid
+  local generation path_identity exact_identity cleanup_rc
   state_root="${1-}"
   repo_id="${2-}"
   backend="${3-}"
   cap="${4-}"
   run_id="${5-}"
   timeout_s="${6-}"
+  identity_mode="${7-}"
+  case "$identity_mode" in ''|exact-identity) ;; *) return 2 ;; esac
 
   _uberdev_semaphore_is_positive_integer "$cap" || {
     _uberdev_semaphore_error 'CAP must be a positive integer'
@@ -880,13 +883,31 @@ uberdev_semaphore_acquire() {
         _uberdev_semaphore_error 'cannot publish lease'
         return 2
       fi
+      generation="$(basename "$lease" .lease | cut -c 1-32)"
+      exact_identity=''
+      if [ "$identity_mode" = exact-identity ]; then
+        path_identity="$(_uberdev_semaphore_path_identity "$lease")" || {
+          cleanup_rc=0
+          _uberdev_semaphore_remove_lease "$lease" "$generation" || cleanup_rc=2
+          _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || cleanup_rc=2
+          [ "$cleanup_rc" -eq 0 ] \
+            && _uberdev_semaphore_error 'cannot capture acquired lease identity' \
+            || _uberdev_semaphore_error 'cannot capture or roll back acquired lease identity'
+          return 2
+        }
+        exact_identity="$path_identity:$generation"
+      fi
       _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || {
         _uberdev_semaphore_remove_lease "$lease" \
-          "$(basename "$lease" .lease | cut -c 1-32)" >/dev/null 2>&1 || true
+          "$generation" >/dev/null 2>&1 || true
         _uberdev_semaphore_error 'cannot release acquisition mutex'
         return 2
       }
-      printf '%s\n' "$lease"
+      if [ "$identity_mode" = exact-identity ]; then
+        printf '%s\t%s\n' "$lease" "$exact_identity"
+      else
+        printf '%s\n' "$lease"
+      fi
       return 0
     fi
     _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || return 2
