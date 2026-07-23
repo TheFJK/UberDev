@@ -884,6 +884,23 @@ if terminals != [expected]:
 ' "$manifest" "$request_json" "$expected"
 }
 
+_uberdev_agent_manifest_started_matches() {
+  local manifest="$1" request_json="$2"
+  python3 -I -c '
+import json, pathlib, sys
+manifest, request_raw = sys.argv[1:]
+request = json.loads(request_raw)
+identity = (request["run_id"], request.get("agent_id"))
+started = []
+for line in pathlib.Path(manifest).read_text(encoding="utf-8").splitlines():
+    event = json.loads(line)
+    if (event.get("run_id"), event.get("agent_id")) == identity and event.get("event") == "agent_started":
+        started.append(event)
+if len(started) != 1:
+    raise SystemExit(1)
+' "$manifest" "$request_json"
+}
+
 _uberdev_agent_finalize_terminal() {
   local manifest="$1" lease="$2" lease_identity="$3" status_file="$4" backend="$5" handle="$6"
   local request_json="$7" decision="$8" terminal_event="$9" terminal_rc event_json
@@ -1084,44 +1101,59 @@ _uberdev_agent_finalize_launch_failure() {
 }
 
 _uberdev_agent_finalize_prelaunch_failure() {
-  local manifest="$1" lease="$2" status_file="$3" backend="$4" request_json="$5" decision="$6" reason="$7"
-  local event_json started_json outcome=0 attempt=1 persisted=0 released=0
-  started_json="$(_uberdev_agent_event_json agent_started "$request_json" "$decision" '' "$status_file" 2>/dev/null || true)"
-  if [ -z "$started_json" ] || ! _uberdev_agent_append_event "$manifest" "$started_json"; then
-    _uberdev_agent_error "failed to persist pre-launch lifecycle start: $reason"
-    return 2
-  fi
+  local manifest="$1" lease="$2" lease_identity="$3" status_file="$4" backend="$5"
+  local request_json="$6" decision="$7" reason="$8"
+  local event_json started_json attempt=1 started_persisted=0 status_persisted=0 terminal_persisted=0 released=0
+  local run_id fallback_file
+  run_id="$(_uberdev_agent_json_get "$request_json" run_id)" || return 2
+  fallback_file="$(dirname "$manifest")/$run_id.watcher-error.json"
+  while [ "$attempt" -le 3 ]; do
+    started_json="$(_uberdev_agent_event_json agent_started "$request_json" "$decision" '' "$status_file" 2>/dev/null || true)"
+    if [ -n "$started_json" ] && { _uberdev_agent_append_event "$manifest" "$started_json" || \
+        _uberdev_agent_manifest_started_matches "$manifest" "$request_json"; }; then
+      started_persisted=1
+      break
+    fi
+    [ "$attempt" -ge 3 ] || sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  attempt=1
   while [ "$attempt" -le 3 ]; do
     if _uberdev_agent_publish_status "$status_file" "$backend" '' failed 70 replace; then
-      persisted=1
+      status_persisted=1
       break
     fi
     [ "$attempt" -ge 3 ] || sleep 0.1
     attempt=$((attempt + 1))
   done
-  event_json="$(_uberdev_agent_event_json failed "$request_json" "$decision" '' "$status_file" 70 dispatch_setup_failed 2>/dev/null || true)"
-  attempt=1
-  while [ "$attempt" -le 3 ] && [ -n "$event_json" ]; do
-    if _uberdev_agent_append_event "$manifest" "$event_json" || \
-        _uberdev_agent_manifest_terminal_matches "$manifest" "$request_json" failed; then
-      break
-    fi
-    [ "$attempt" -ge 3 ] || sleep 0.1
-    attempt=$((attempt + 1))
-  done
-  [ "$attempt" -le 3 ] && [ -n "$event_json" ] || persisted=0
   attempt=1
   while [ "$attempt" -le 3 ]; do
-    if PYTHONPATH= PYTHONHOME= uberdev_semaphore_release "$lease" >/dev/null 2>&1; then
+    event_json="$(_uberdev_agent_event_json failed "$request_json" "$decision" '' "$status_file" 70 dispatch_setup_failed 2>/dev/null || true)"
+    if [ -n "$event_json" ] && { _uberdev_agent_append_event "$manifest" "$event_json" || \
+        _uberdev_agent_manifest_terminal_matches "$manifest" "$request_json" failed; }; then
+      terminal_persisted=1
+      break
+    fi
+    [ "$attempt" -ge 3 ] || sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  attempt=1
+  while [ "$attempt" -le 3 ]; do
+    if PYTHONPATH= PYTHONHOME= _uberdev_agent_release_exact_lease "$lease" "$lease_identity"; then
       released=1
       break
     fi
     [ "$attempt" -ge 3 ] || sleep 0.1
     attempt=$((attempt + 1))
   done
-  [ "$persisted" -eq 1 ] && [ "$released" -eq 1 ] || outcome=2
-  [ "$outcome" -eq 0 ] || _uberdev_agent_error "pre-launch finalization failed: $reason"
-  return "$outcome"
+  if [ "$started_persisted" -eq 1 ] && [ "$status_persisted" -eq 1 ] \
+      && [ "$terminal_persisted" -eq 1 ] && [ "$released" -eq 1 ]; then
+    return 0
+  fi
+  _uberdev_agent_persist_watcher_error_retry "$status_file" "$fallback_file" "$backend" '' "launch:$reason" 3 || \
+    _uberdev_agent_error "failed to persist pre-launch supervisory error: $reason"
+  _uberdev_agent_error "pre-launch finalization failed: $reason"
+  return 2
 }
 
 _uberdev_agent_abort_after_launch() {
@@ -1152,7 +1184,7 @@ _uberdev_agent_abort_after_launch() {
 uberdev_agent_dispatch() {
   local request_json="${1:-}" prompt_requested="${2:-}" result_requested="${3:-}" status_requested="${4:-}"
   local run_dir run_id repository_id backend workflow issue_num tier capacity timeout_s workspace_mode workspace_dir
-  local prompt_file result_file status_file state_dir manifest decision lease lease_identity event_json rc handle lease_handle terminal_event paths_json
+  local prompt_file result_file status_file state_dir manifest decision lease lease_identity registered_identity event_json rc handle lease_handle terminal_event paths_json
   local context_file context_sha context_validation persisted_decision supplied_root supplied_parent context_run_id parent_run_id agent_id process_identity lease_generation
   [ "$#" -eq 4 ] || { _uberdev_agent_error 'expected REQUEST_JSON PROMPT_FILE RESULT_FILE STATUS_FILE'; return 2; }
   if [ -n "${ZSH_VERSION:-}" ]; then
@@ -1234,30 +1266,41 @@ uberdev_agent_dispatch() {
     rc=$?
     return "$rc"
   }
+  lease_identity="$(_uberdev_agent_lease_identity "$lease")" || {
+    _uberdev_agent_persist_watcher_error "$status_file" "$backend" '' launch:lease_identity 3 || true
+    PYTHONPATH= PYTHONHOME= uberdev_semaphore_release "$lease" >/dev/null 2>&1 || true
+    DISPATCH_RC=2
+    return 2
+  }
 
   # Register the canonical status path before the launch boundary.  It may be
   # absent until an opaque provider publishes its first probe; absence is
   # intentionally "unknown", never synthetic evidence that a backend is live.
-  lease_identity="$(PYTHONPATH= PYTHONHOME= uberdev_semaphore_set_handle "$lease" '' "$status_file" exact-identity)" || {
+  registered_identity="$(PYTHONPATH= PYTHONHOME= uberdev_semaphore_set_handle "$lease" '' "$status_file" exact-identity)" || {
     rc=2
-    _uberdev_agent_finalize_prelaunch_failure "$manifest" "$lease" "$status_file" "$backend" \
+    _uberdev_agent_finalize_prelaunch_failure "$manifest" "$lease" "$lease_identity" "$status_file" "$backend" \
       "$request_json" "$decision" lease_identity || true
     DISPATCH_RC="$rc"
     return "$rc"
   }
-  if [ -z "$lease_identity" ]; then
-    _uberdev_agent_finalize_prelaunch_failure "$manifest" "$lease" "$status_file" "$backend" \
+  if [ -z "$registered_identity" ]; then
+    _uberdev_agent_finalize_prelaunch_failure "$manifest" "$lease" "$lease_identity" "$status_file" "$backend" \
       "$request_json" "$decision" lease_identity || true
     DISPATCH_RC=2
     return 2
   fi
+  lease_identity="$registered_identity"
 
   event_json="$(_uberdev_agent_event_json agent_started "$request_json" "$decision" '' "$status_file")" || {
-    PYTHONPATH= PYTHONHOME= uberdev_semaphore_release "$lease" >/dev/null 2>&1 || true
+    _uberdev_agent_finalize_prelaunch_failure "$manifest" "$lease" "$lease_identity" "$status_file" "$backend" \
+      "$request_json" "$decision" agent_started_event || true
+    DISPATCH_RC=2
     return 2
   }
   if ! _uberdev_agent_append_event "$manifest" "$event_json"; then
-    PYTHONPATH= PYTHONHOME= uberdev_semaphore_release "$lease" >/dev/null 2>&1 || true
+    _uberdev_agent_finalize_prelaunch_failure "$manifest" "$lease" "$lease_identity" "$status_file" "$backend" \
+      "$request_json" "$decision" agent_started_append || true
+    DISPATCH_RC=2
     return 2
   fi
 

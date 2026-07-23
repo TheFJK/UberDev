@@ -822,6 +822,7 @@ if [ "$1" = "worktree" ] && [ "$2" = "add" ]; then
   exit 0
 fi
 if [ "$1" = "worktree" ] && [ "$2" = "remove" ] && [ "$3" = "--force" ]; then
+  [ "${GIT_STUB_FAIL_REMOVE:-0}" != 1 ] || exit 96
   rm -rf "$4"
   exit 0
 fi
@@ -957,6 +958,43 @@ if printf '%s\n' "$EMPTY_OUT" | grep -Fq 'rc=0' \
   pass_msg "successful Codex exit with an empty result fails terminally and cleans child ownership"
 else
   fail_msg "successful Codex exit with an empty result fails terminally and cleans child ownership" "$EMPTY_OUT"
+fi
+
+COMBINED_INSTANCE=review-provider-and-cleanup-failure-a1
+COMBINED_SLUG="$(UBERDEV_AGENT_INSTANCE_ID="$COMBINED_INSTANCE" bash -c '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"
+COMBINED_OUT="$(
+  cd "$BEH_TMP/repo" && \
+  PATH="$BEH_TMP/bin:/usr/bin:/bin" \
+  UBERDEV_TMPDIR="$BEH_TMP/tmp" \
+  UBERDEV_AGENT_CHILD_OWNED=1 \
+  UBERDEV_AGENT_INSTANCE_ID="$COMBINED_INSTANCE" \
+  CODEX_STUB_RC=42 CODEX_STUB_SLEEP=0 GIT_STUB_FAIL_REMOVE=1 \
+  CODEX_CAPTURE="$BEH_TMP/codex-combined-capture.txt" \
+  bash -c '
+    . "$1"
+    _uberdev_dispatch_codex 47 small "$2"
+    rc=$?; pid="${DISPATCH_ID:-}"; status_file="$UBERDEV_TMPDIR/solve-codex-status-47.json"
+    i=0
+    while [ "$i" -lt 400 ]; do
+      terminal="$(cat "$status_file" 2>/dev/null)"
+      case "$terminal" in *\"state\":\"failed\"*) break ;; esac
+      sleep 0.025; i=$((i + 1))
+    done
+    i=0
+    while [ -n "$pid" ] && _uberdev_dispatch_wait_owned_session "$pid" && [ "$i" -lt 200 ]; do sleep 0.025; i=$((i + 1)); done
+    printf "rc=%s\nstatus=%s\n" "$rc" "$(cat "$status_file" 2>/dev/null)"
+  ' _ "$DISPATCH_LIB" "$BEH_TMP/prompt.txt"
+)"
+if printf '%s\n' "$COMBINED_OUT" | grep -Fq 'rc=0' \
+    && printf '%s\n' "$COMBINED_OUT" | grep -Fq '"state":"failed"' \
+    && printf '%s\n' "$COMBINED_OUT" | grep -Fq '"exit_code":74' \
+    && printf '%s\n' "$COMBINED_OUT" | grep -Fq '"provider_exit_code":42' \
+    && [ -d "$BEH_TMP/repo/.claude/worktrees/solve-issue-47-$COMBINED_SLUG" ] \
+    && [ -f "$BEH_TMP/tmp/solve-codex-status-47.json.worktree-owner.json" ] \
+    && grep -Fq 'failed to clean child worktree' "$BEH_TMP/tmp/solve-codex-status-47.json.log"; then
+  pass_msg "provider failure plus cleanup failure publishes cleanup rc with provider context and preserves evidence"
+else
+  fail_msg "provider failure plus cleanup failure remains durably distinguishable" "$COMBINED_OUT"
 fi
 rm -rf "$BEH_TMP"
 

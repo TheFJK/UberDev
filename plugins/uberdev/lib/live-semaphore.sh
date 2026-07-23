@@ -969,7 +969,11 @@ uberdev_semaphore_set_handle() {
     fi
   fi
   _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || {
-    [ "$publish_rc" -ne 0 ] || publish_rc=2
+    if [ "$publish_rc" -eq 0 ]; then
+      _uberdev_semaphore_remove_lease "$lease" "$expected_generation" >/dev/null 2>&1 || true
+      publish_rc=2
+      exact_identity=''
+    fi
   }
   [ "$publish_rc" -eq 0 ] || _uberdev_semaphore_error 'cannot update lease handle'
   [ "$publish_rc" -ne 0 ] || [ "$identity_mode" != exact-identity ] || printf '%s' "$exact_identity"

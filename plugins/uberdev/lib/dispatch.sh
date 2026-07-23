@@ -1476,10 +1476,11 @@ _uberdev_dispatch_report_codex_setup_cleanup_failure() {
 
 # _uberdev_dispatch_codex ISSUE_NUM TIER PROMPT_FILE
 #
-# Codex CLI backend (RFC 0012 §3.4 codex-port). Structurally mirrors
-# _uberdev_dispatch_background: dispatcher-controlled worktree, prompt read
-# from $PROMPT_FILE, nohup-detached headless run, PID captured into
-# DISPATCH_ID, per-issue status JSON for the launcher's liveness polling.
+# Codex CLI backend (RFC 0012 §3.4 codex-port). Isolated children use a
+# dispatcher-controlled worktree; caller-workspace children execute directly
+# in the validated repository and intentionally create no worktree. Both modes
+# read the prompt from $PROMPT_FILE, launch a detached headless process, capture
+# its PID in DISPATCH_ID, and publish status JSON for liveness polling.
 #
 # What's different from `background`:
 #   - execs `codex exec` instead of `claude -p` (Codex's headless non-interactive
@@ -1673,6 +1674,7 @@ os.execvp("bash",argv)' '
       CLEANUP_DONE=0
       FINAL_STATUS_WRITTEN=0
       TERMINAL_STATE=failed
+      CLEANUP_PROVIDER_RC=null
 
       cleanup_worktree() {
         [ "$CLEANUP_DONE" -eq 0 ] || return 0
@@ -1695,6 +1697,7 @@ os.execvp("bash",argv)' '
         _exit_state="$TERMINAL_STATE"
         if ! cleanup_worktree; then
           printf "codex dispatch: failed to clean child worktree %s (%s)\n" "$EXECUTION_DIR" "$WORKTREE_BRANCH" >&2
+          CLEANUP_PROVIDER_RC="$_exit_rc"
           _exit_rc=74
           _exit_state=failed
         elif [ "$_exit_state" = cancelled ]; then
@@ -1713,9 +1716,11 @@ os.execvp("bash",argv)' '
       write_status() {
         _state="$1"
         _exit_code="$2"
+        _provider_context=''
+        [ "$CLEANUP_PROVIDER_RC" = null ] || _provider_context=",\"provider_exit_code\":$CLEANUP_PROVIDER_RC"
         _status_tmp="$(umask 077; mktemp "${STATUS_FILE}.tmp.$$.XXXXXX")" || return 1
         cat > "$_status_tmp" <<EOF_STATUS
-{"issue":$ISSUE_NUM,"tier":"$TIER","backend":"codex","state":"$_state","exit_code":$_exit_code,"pid":"$WRAPPER_PID","log":"$LOG_FILE","result":"$RESULT_FILE","worktree":"$EXECUTION_DIR","branch":"$WORKTREE_BRANCH","workspace_mode":"$WORKSPACE_MODE"}
+{"issue":$ISSUE_NUM,"tier":"$TIER","backend":"codex","state":"$_state","exit_code":$_exit_code${_provider_context},"pid":"$WRAPPER_PID","log":"$LOG_FILE","result":"$RESULT_FILE","worktree":"$EXECUTION_DIR","branch":"$WORKTREE_BRANCH","workspace_mode":"$WORKSPACE_MODE"}
 EOF_STATUS
         _status_rc=$?
         if [ "$_status_rc" -ne 0 ]; then
@@ -1760,7 +1765,8 @@ EOF_STATUS
       TERMINAL_STATE="$CODEX_STATE"
       if ! cleanup_worktree; then
         printf "codex dispatch: failed to clean child worktree %s (%s)\n" "$EXECUTION_DIR" "$WORKTREE_BRANCH" >&2
-        [ "$CODEX_RC" -ne 0 ] || CODEX_RC=74
+        CLEANUP_PROVIDER_RC="$CODEX_RC"
+        CODEX_RC=74
         CODEX_STATE=failed
         TERMINAL_STATE=failed
       else

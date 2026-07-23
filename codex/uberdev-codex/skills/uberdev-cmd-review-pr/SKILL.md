@@ -303,6 +303,49 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    - `commit_range` — `<base>..HEAD` where `<base>` is the PR base ref.
    - `tier` — passed through from `$ARGUMENTS` if present (forwarded by `finish-branch`'s chain), else default `medium`.
 
+   Recompute the review scope from one fixed local base-to-HEAD snapshot on
+   every Phase 1 entry, including CI-fix re-entry. This keeps the path list,
+   diff artifact, and commit range bound to the same post-fix HEAD:
+
+   ```bash
+   review_refresh_phase1_scope() {
+     local base="$1"
+     CHANGED_PATHS_JSON="$(python3 -I -B - "$WORKTREE_ROOT" "$base" "$DIFF_ARTIFACT_PATH" "$COMMIT_RANGE_PATH" <<'PY'
+import json,os,re,stat,subprocess,sys,tempfile
+root,base,diff_path,range_path=sys.argv[1:]
+if re.fullmatch(r'[0-9a-f]{40}',base) is None: raise SystemExit(2)
+head=subprocess.check_output(['git','-C',root,'rev-parse','HEAD'],text=True).strip()
+if re.fullmatch(r'[0-9a-f]{40}',head) is None: raise SystemExit(2)
+subprocess.run(['git','-C',root,'merge-base','--is-ancestor',base,head],check=True)
+raw_paths=subprocess.check_output(['git','-C',root,'diff','--name-only','-z',f'{base}..{head}'])
+paths=[item.decode('utf-8','strict') for item in raw_paths.split(b'\0') if item]
+if not paths: raise SystemExit(2)
+for path in paths:
+    parts=path.split('/')
+    if (path.startswith('/') or '\\' in path or any(part in ('','.','..') for part in parts)
+            or any(ord(char)<32 or ord(char)==127 for char in path)):
+        raise SystemExit(2)
+diff=subprocess.check_output(['git','-C',root,'diff','--binary','--no-ext-diff',f'{base}..{head}'])
+def replace_private(path,payload):
+    parent=os.path.dirname(path) or '.'
+    fd,tmp=tempfile.mkstemp(prefix='.review-scope.',dir=parent)
+    try:
+        if os.name!='nt': os.fchmod(fd,0o600)
+        with os.fdopen(fd,'wb') as stream:
+            stream.write(payload); stream.flush(); os.fsync(stream.fileno())
+        os.replace(tmp,path)
+    finally:
+        try: os.unlink(tmp)
+        except FileNotFoundError: pass
+replace_private(diff_path,b'<external-untrusted-input source="pr-diff">\n'+diff+b'</external-untrusted-input>\n')
+replace_private(range_path,f'{base}..{head}\n'.encode())
+print(json.dumps(paths,separators=(',',':')),end='')
+PY
+)" || return 2
+   }
+   review_refresh_phase1_scope "$BASE_SHA"
+   ```
+
    Invoke the post-impl-review skill through the context-only run-tree edge
    `review_pr.post_impl_review` (skill handoff, never a provider dispatch):
 
@@ -331,7 +374,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
      disposition_path "$(review_json_string "$PHASE1_DISPOSITION_PATH")")"
    # phase=phase1 commit_type_prefix=fix:
    # builder dispatch: uberdev_dispatch_child review_pr.fix.phase1
-   review_child_single review_pr.fix.phase1 "review-pr-${RUN_ID}-fix-phase1-iter${REVIEW_ITERATION}-attempt01" "$PHASE1_INPUTS" null "$RESEARCH_DIR_ABS/phase1-fixer" "$REVIEW_PR_TIMEOUT"
+   review_child_single review_pr.fix.phase1 "$(uberdev_child_instance_id "review-pr-${RUN_ID}-fix-phase1-iter${REVIEW_ITERATION}-attempt01")" "$PHASE1_INPUTS" null "$RESEARCH_DIR_ABS/phase1-fixer" "$REVIEW_PR_TIMEOUT"
    ```
 
    The agent applies edits + creates `fix:` / `refactor:` conventional commits autonomously, returning commit SHAs in its YAML. These are the **review-phase commits**, kept distinct from the Phase 2 simplify commit (separate-commit invariant — see `tests/review-pr.test.sh` for the assertion that locks this boundary). Capture the agent's `commits[].sha` for the final aggregation table's "Auto-applied" column. Surface every `findings_disposition` row where `disposition != APPLIED` in the aggregation table's "Advisory findings" column so they are never silently dropped.
@@ -361,7 +404,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    : >"$SIMPLIFY_RECORDS"
    for LENS in reuse quality efficiency; do
      EDGE_ID="review_pr.simplify.$LENS"
-     INSTANCE="review-pr-${RUN_ID}-simplify-$LENS-iter${REVIEW_ITERATION}-attempt01"
+     INSTANCE="$(uberdev_child_instance_id "review-pr-${RUN_ID}-simplify-$LENS-iter${REVIEW_ITERATION}-attempt01")"
      if [ -n "$FOCUS" ]; then
        INPUTS_JSON="$(uberdev_child_inputs_build "$EDGE_ID" \
          diff_path "$(review_json_string "$DIFF_ARTIFACT_PATH")" \
@@ -398,7 +441,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
      disposition_path "$(review_json_string "$PHASE2_DISPOSITION_PATH")")"
    # subagent_type: uberdev:code-fixer; phase=phase2 commit_type_prefix=refactor:
    # builder dispatch: uberdev_dispatch_child review_pr.fix.phase2
-   review_child_single review_pr.fix.phase2 "review-pr-${RUN_ID}-fix-phase2-iter${REVIEW_ITERATION}-attempt01" "$PHASE2_INPUTS" null "$RESEARCH_DIR_ABS/phase2-fixer" "$REVIEW_PR_TIMEOUT"
+   review_child_single review_pr.fix.phase2 "$(uberdev_child_instance_id "review-pr-${RUN_ID}-fix-phase2-iter${REVIEW_ITERATION}-attempt01")" "$PHASE2_INPUTS" null "$RESEARCH_DIR_ABS/phase2-fixer" "$REVIEW_PR_TIMEOUT"
    ```
 
    `PHASE2_HANDOFF` passes the already-enveloped `simplify-final.md` path; its
@@ -479,7 +522,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
       phase2_disposition_path "$(review_json_string "$PHASE2_DISPOSITION_PATH")" \
       working_dir "$(review_json_string "$WORKING_DIR_ABS")" \
       pr_number "$PR_NUMBER")"
-    review_child_single review_pr.defer.findings "review-pr-${RUN_ID}-defer-findings-iter${REVIEW_ITERATION}-attempt01" "$DEFER_INPUTS" null "$RESEARCH_DIR_ABS/defer" "$REVIEW_PR_TIMEOUT"
+    review_child_single review_pr.defer.findings "$(uberdev_child_instance_id "review-pr-${RUN_ID}-defer-findings-iter${REVIEW_ITERATION}-attempt01")" "$DEFER_INPUTS" null "$RESEARCH_DIR_ABS/defer" "$REVIEW_PR_TIMEOUT"
     ```
 
     **Capture the return YAML** into shell variables `CREATED_URLS_JSON`, `COMMENTED_URLS_JSON`, `SKIPPED_CLOSED_JSON`, `BLOCKED_BY_DEDUPE_JSON`, `OVERFLOW_COUNT`, `BY_SEVERITY_BLOCKER`, `BY_SEVERITY_CRITICAL`, `BY_SEVERITY_MAJOR`, `HALTED_DUE_TO_OVERFLOW`, `PHASE2_5_HALTED` for the Step 7 Final Aggregation table AND the new GREEN/YELLOW/RED predicate (Trust-Signal Emission section). Validate the YAML parses before treating the absence of arrays as "zero issues" — on parse failure or missing `status` key, log to stderr and treat the sub-phase as `BLOCKED` for aggregation purposes (the Phase 2.5 row in Step 7 records the parse failure rather than a misleading zero count) AND force `PHASE2_5_HALTED=false` so a malformed agent return cannot accidentally halt the run (fail-open on parse failure is intentional — the alternative silently fails GREEN, which is the bug Phase 2.5 exists to prevent; failing CLOSED on parse error would invert the design).
@@ -712,7 +755,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
       pr_number "$PR_NUMBER" \
       run_id "$(review_json_string "$CI_RUN_ID")" \
       log_path "$(review_json_string "$CI_LOG_ARTIFACT_PATH")")"
-    review_child_single review_pr.ci.classify "review-pr-${RUN_ID}-ci-classify-iter${CI_FIX_LOOP_ITER:-1}-attempt01" "$CI_CLASSIFY_INPUTS" '[]' "$RESEARCH_DIR_ABS/ci-classify" "$REVIEW_PR_TIMEOUT"
+    review_child_single review_pr.ci.classify "$(uberdev_child_instance_id "review-pr-${RUN_ID}-ci-classify-iter${CI_FIX_LOOP_ITER:-1}-attempt01")" "$CI_CLASSIFY_INPUTS" '[]' "$RESEARCH_DIR_ABS/ci-classify" "$REVIEW_PR_TIMEOUT"
     CI_CLASSIFICATION_PATH="$(review_child_result_path "$RESEARCH_DIR_ABS/ci-classify.launched" review_pr.ci.classify)" || {
       audit ci_classify_returned subreason=classification_artifact_missing
       OUTCOME=halted
@@ -825,8 +868,8 @@ PY
       head_sha "$(review_json_string "$CI_HEAD_SHA")" \
       base_sha "$(review_json_string "$CI_BASE_SHA")")"
     case $failure_class in
-      code_bug | env_drift)        review_child_single review_pr.ci.fix_code "review-pr-${RUN_ID}-ci-fix-iter${CI_FIX_LOOP_ITER:-1}-attempt01" "$CI_FIX_INPUTS" null "$RESEARCH_DIR_ABS/ci-fix" "$REVIEW_PR_TIMEOUT" ;;
-      stale_base)                  review_child_single review_pr.ci.rebase "review-pr-${RUN_ID}-ci-rebase-iter${CI_FIX_LOOP_ITER:-1}-attempt01" "$CI_REBASE_INPUTS" null "$RESEARCH_DIR_ABS/ci-rebase" "$REVIEW_PR_TIMEOUT" ;;
+      code_bug | env_drift)        review_child_single review_pr.ci.fix_code "$(uberdev_child_instance_id "review-pr-${RUN_ID}-ci-fix-iter${CI_FIX_LOOP_ITER:-1}-attempt01")" "$CI_FIX_INPUTS" null "$RESEARCH_DIR_ABS/ci-fix" "$REVIEW_PR_TIMEOUT" ;;
+      stale_base)                  review_child_single review_pr.ci.rebase "$(uberdev_child_instance_id "review-pr-${RUN_ID}-ci-rebase-iter${CI_FIX_LOOP_ITER:-1}-attempt01")" "$CI_REBASE_INPUTS" null "$RESEARCH_DIR_ABS/ci-rebase" "$REVIEW_PR_TIMEOUT" ;;
       flaky)                       if gh run rerun <run-id>; then
                                      audit ci_flaky_rerun_queued run_id=<run-id>
                                    else
@@ -918,7 +961,7 @@ PY
             phase1_path "$(review_json_string "$CI_REFUSED_AGGREGATE_PATH")" \
             working_dir "$(review_json_string "$WORKTREE_ROOT")" \
             pr_number "$PR_NUMBER")"
-          review_child_single review_pr.ci.defer_refusal "review-pr-${RUN_ID}-ci-defer-refusal-iter${CI_FIX_LOOP_ITER:-1}-attempt01" "$CI_DEFER_INPUTS" null "$RESEARCH_DIR_ABS/ci-defer" "$REVIEW_PR_TIMEOUT"
+          review_child_single review_pr.ci.defer_refusal "$(uberdev_child_instance_id "review-pr-${RUN_ID}-ci-defer-refusal-iter${CI_FIX_LOOP_ITER:-1}-attempt01")" "$CI_DEFER_INPUTS" null "$RESEARCH_DIR_ABS/ci-defer" "$REVIEW_PR_TIMEOUT"
           ```
 
           `CI_REFUSED_AGGREGATE_PATH` is a fresh command-owned artifact at `$RESEARCH_DIR_ABS/ci-refused-synthetic-${CI_FIX_LOOP_ITER:-1}.md`, created with `umask 077` and noclobber before writing the envelope. It must remain beneath the canonical run research directory so the child handoff's `path` validation accepts it; do not use system `mktemp` or any path outside `$WORKTREE_ROOT`. Its first 128 bytes contain the literal envelope marker shown above (source attribute `ci-refused-synthetic`).
@@ -995,7 +1038,7 @@ PY
        CONFLICT_RECORDS="$RESEARCH_DIR_ABS/conflicts.records"; CONFLICT_DESCRIPTORS="$RESEARCH_DIR_ABS/conflicts.descriptors"; CONFLICT_LAUNCHED="$RESEARCH_DIR_ABS/conflicts.launched"; : >"$CONFLICT_RECORDS"
        CONFLICT_INDEX=0
        for CONFLICT_PATH in "${conflicted_files[@]}"; do
-         CONFLICT_INDEX=$((CONFLICT_INDEX + 1)); INSTANCE="review-pr-${RUN_ID}-conflict-${CONFLICT_INDEX}-iter${CI_FIX_LOOP_ITER:-01}-attempt01"
+         CONFLICT_INDEX=$((CONFLICT_INDEX + 1)); INSTANCE="$(uberdev_child_instance_id "review-pr-${RUN_ID}-conflict-${CONFLICT_INDEX}-iter${CI_FIX_LOOP_ITER:-01}-attempt01")"
          INPUTS_JSON="$(uberdev_child_inputs_build review_pr.ci.resolve_conflict \
            file_path "$(review_json_string "$CONFLICT_PATH")" \
            working_dir "$(review_json_string "$REPO_ROOT")" \

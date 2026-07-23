@@ -1175,6 +1175,86 @@ eval "$(declare -f _real_prelaunch_set_handle | sed '1s/_real_prelaunch_set_hand
 PRE_REACQUIRED="$(uberdev_semaphore_acquire "$PRE_RUN/.agent-state-$(id -u)" adapter-prelaunch-repository codex 1 adapter-prelaunch-reacquired 20)"
 uberdev_semaphore_release "$PRE_REACQUIRED"
 
+# Event construction and manifest persistence fail before provider launch. The
+# rollback must retry transient failures, publish one failed lifecycle, and
+# release only the exact captured lease identity. Persistent manifest failure
+# still releases capacity and leaves a bounded supervisory sidecar.
+eval "$(declare -f _uberdev_agent_event_json | sed '1s/_uberdev_agent_event_json/_real_prelaunch_event_json/')"
+eval "$(declare -f _uberdev_agent_append_event | sed '1s/_uberdev_agent_append_event/_real_prelaunch_append_event/')"
+eval "$(declare -f uberdev_semaphore_release | sed '1s/uberdev_semaphore_release/_real_prelaunch_generic_release/')"
+PRE_EVENT_MODE=''
+PRE_EVENT_COUNTER=''
+_uberdev_agent_event_json() {
+  if [ "$PRE_EVENT_MODE" = event_json ] && [ "$1" = agent_started ] && [ ! -e "$PRE_EVENT_COUNTER" ]; then
+    : >"$PRE_EVENT_COUNTER"
+    return 29
+  fi
+  _real_prelaunch_event_json "$@"
+}
+_uberdev_agent_append_event() {
+  if [ "$PRE_EVENT_MODE" = append_once ] && [[ "$2" == *'"event":"agent_started"'* ]] \
+      && [ ! -e "$PRE_EVENT_COUNTER" ]; then
+    : >"$PRE_EVENT_COUNTER"
+    return 29
+  fi
+  if [ "$PRE_EVENT_MODE" = append_always ] && [[ "$2" == *'"event":"agent_started"'* ]]; then
+    return 29
+  fi
+  _real_prelaunch_append_event "$@"
+}
+uberdev_semaphore_release() { return 88; }
+
+prelaunch_event_failure_case() {
+  local mode="$1" suffix="$2" run request rc state manifest sidecar terminals
+  run="$TMP/pre-launch-event-$suffix"
+  mkdir -p "$run"
+  printf 'pre-launch event failure prompt\n' >"$run/prompt.txt"
+  request="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-prelaunch-event-"+sys.argv[2],"repository_id":"adapter-prelaunch-event-repository-"+sys.argv[2],"backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":96,"issue_num":96,"capacity":1,"timeout_s":20},separators=(",",":")))' "$run" "$suffix")"
+  PRE_EVENT_MODE="$mode"
+  PRE_EVENT_COUNTER="$run/failure-injected"
+  rm -f "$PRE_EVENT_COUNTER" "$run/provider-called"
+  _uberdev_agent_dispatch_backend() { : >"$run/provider-called"; return 0; }
+  set +e
+  uberdev_agent_dispatch "$request" "$run/prompt.txt" "$run/result.md" "$run/status.json"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || { echo "pre-launch $mode failure returned rc=$rc" >&2; return 1; }
+  [ ! -e "$run/provider-called" ] || { echo "pre-launch $mode failure reached provider" >&2; return 1; }
+  grep -q '"state":"failed"' "$run/status.json"
+  state="$run/.agent-state-$(id -u)"
+  manifest="$state/agent-lifecycle.jsonl"
+  ! grep -R -q "run_id=adapter-prelaunch-event-$suffix" "$state/semaphore-v1" 2>/dev/null
+  if [ "$mode" = append_always ]; then
+    sidecar="$run/status.json.watcher-error.json"
+    [ -f "$sidecar" ] || sidecar="$state/adapter-prelaunch-event-$suffix.watcher-error.json"
+    python3 -I - "$sidecar" <<'PY'
+import json,sys
+row=json.load(open(sys.argv[1]))
+assert row['error']=='launch_finalize_failed' and row['handle']=='' and row['attempts']==3,row
+PY
+  else
+    terminals="$(python3 -I - "$manifest" "$suffix" <<'PY'
+import json,pathlib,sys
+rows=[json.loads(x) for x in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+run_id='adapter-prelaunch-event-'+sys.argv[2]
+events=[x.get('event') for x in rows if x.get('run_id')==run_id]
+assert events==['route_decided','agent_started','failed'],events
+print(events.count('failed'),end='')
+PY
+)"
+    [ "$terminals" = 1 ]
+  fi
+}
+
+prelaunch_event_failure_case event_json event-json
+prelaunch_event_failure_case append_once append-once
+prelaunch_event_failure_case append_always append-always
+eval "$(declare -f _real_prelaunch_event_json | sed '1s/_real_prelaunch_event_json/_uberdev_agent_event_json/')"
+eval "$(declare -f _real_prelaunch_append_event | sed '1s/_real_prelaunch_append_event/_uberdev_agent_append_event/')"
+eval "$(declare -f _real_prelaunch_generic_release | sed '1s/_real_prelaunch_generic_release/uberdev_semaphore_release/')"
+PRE_EVENT_REACQUIRED="$(uberdev_semaphore_acquire "$TMP/pre-launch-event-append-always/.agent-state-$(id -u)" adapter-prelaunch-event-repository-append-always codex 1 adapter-prelaunch-event-reacquired 20)"
+uberdev_semaphore_release "$PRE_EVENT_REACQUIRED"
+
 POST_RUN="$TMP/post-launch-setup-failure"
 mkdir -p "$POST_RUN"
 printf 'post-launch failure prompt\n' > "$POST_RUN/prompt.txt"

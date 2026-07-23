@@ -30,6 +30,10 @@ while [ "$#" -gt 0 ]; do
 done
 test -n "$result"
 printf '%s\t%s\t%s\n' "${UBERDEV_AGENT_INSTANCE_ID:-missing}" "$PWD" "$argv" >>"$CODEX_STUB_LOG"
+if [ -n "${CODEX_STUB_HANG_INSTANCE:-}" ] \
+    && [ "${UBERDEV_AGENT_INSTANCE_ID:-}" = "$CODEX_STUB_HANG_INSTANCE" ]; then
+  while :; do sleep 1; done
+fi
 sleep 0.4
 case "${UBERDEV_AGENT_INSTANCE_ID:-}" in
   *caller-fix*)
@@ -63,6 +67,7 @@ case_name="$1"
 repo="$2"
 setup="$3"
 fail_instance="${4-}"
+timeout_instance="${5-}"
 cd "$repo"
 . "$setup"
 
@@ -112,6 +117,13 @@ for i in "${!edges[@]}"; do
       echo "expected failed child to return non-zero: $fail_instance" >&2
       exit 1
     fi
+  elif [ -n "$timeout_instance" ] && [ "${instances[$i]}" = "$timeout_instance" ]; then
+    set +e
+    uberdev_wait_child "${statuses[$i]}" "${results[$i]}" 1
+    timeout_rc=$?
+    set -e
+    case "$timeout_rc" in 1|124) ;; *) echo "timeout child returned unexpected rc=$timeout_rc" >&2; exit 1 ;; esac
+    uberdev_unwind_child "${statuses[$i]}" "${results[$i]}" 20
   else
     uberdev_wait_child "${statuses[$i]}" "${results[$i]}" 20
   fi
@@ -144,7 +156,7 @@ after_repair="$(git rev-parse HEAD)"
 [ "$after_repair" != "$before_repair" ] || { echo "caller repair did not advance the branch" >&2; exit 1; }
 
 python3 -I -B - "$UBERDEV_CARRIER_RUN_DIR" "$repo" "$CODEX_STUB_LOG" \
-  "$CLAUDE_STUB_LOG" "$fail_instance" "$repair_instance" "$before_repair" "$after_repair" "${instances[@]}" <<'PY'
+  "$CLAUDE_STUB_LOG" "$fail_instance" "$timeout_instance" "$repair_instance" "$before_repair" "$after_repair" "${instances[@]}" <<'PY'
 import json
 import os
 import pathlib
@@ -156,10 +168,11 @@ repo = pathlib.Path(sys.argv[2])
 codex_log = pathlib.Path(sys.argv[3])
 claude_log = pathlib.Path(sys.argv[4])
 failed = sys.argv[5]
-repair = sys.argv[6]
-before_repair = sys.argv[7]
-after_repair = sys.argv[8]
-instances = sys.argv[9:]
+timed_out = sys.argv[6]
+repair = sys.argv[7]
+before_repair = sys.argv[8]
+after_repair = sys.argv[9]
+instances = sys.argv[10:]
 assert len(instances) == len(set(instances)) == 6, instances
 assert before_repair != after_repair
 assert subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip() == after_repair
@@ -207,6 +220,10 @@ for instance in instances:
 assert len(worktrees) == len(branches) == len(child_logs) == 6, (worktrees, branches, child_logs)
 if failed:
     assert statuses.count("failed") == 1 and statuses.count("completed") == 5, statuses
+elif timed_out:
+    terminal = json.loads((run_dir / "children" / timed_out / "status.json").read_text())["state"]
+    assert terminal in {"failed", "timed_out", "cancelled"}, terminal
+    assert statuses.count("completed") == 5, statuses
 else:
     assert statuses == ["completed"] * 6, statuses
 
@@ -241,7 +258,7 @@ make_repo() {
 }
 
 run_case() {
-  local name="$1" fail_instance="${2-}" repo runtime codex_log claude_log
+  local name="$1" fail_instance="${2-}" timeout_instance="${3-}" repo runtime codex_log claude_log
   repo="$TMP/repo-$name"; runtime="$TMP/runtime-$name"
   codex_log="$TMP/codex-$name.log"; claude_log="$TMP/claude-$name.log"
   make_repo "$repo"
@@ -249,12 +266,14 @@ run_case() {
   env -i HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
     PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$repo" \
     UBERDEV_TMPDIR="$runtime" CODEX_STUB_LOG="$codex_log" CLAUDE_STUB_LOG="$claude_log" \
-    CODEX_STUB_FAIL_INSTANCE="$fail_instance" RUN_ID="20260716-00000${name}-abcdef0" \
+    CODEX_STUB_FAIL_INSTANCE="$fail_instance" CODEX_STUB_HANG_INSTANCE="$timeout_instance" \
+    RUN_ID="20260716-00000${name}-abcdef0" \
     PR_NUMBER=335 ARGUMENTS='' SOLVE_TIMEOUT=20 UBERDEV_AGENT_CAPACITY=6 \
-    bash "$TMP/run-case.sh" "$name" "$repo" "$TMP/setup.sh" "$fail_instance"
+    bash "$TMP/run-case.sh" "$name" "$repo" "$TMP/setup.sh" "$fail_instance" "$timeout_instance"
 }
 
 run_case 1
 run_case 2 review-pr-e2e-2-types-iter1-attempt01
+run_case 3 '' review-pr-e2e-3-comments-iter1-attempt01
 
 echo "review-pr Codex six-child integration tests passed"

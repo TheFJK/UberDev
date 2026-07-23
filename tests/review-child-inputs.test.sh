@@ -126,6 +126,24 @@ write("post-prefix.sh", prefix)
 write("post-roster.sh", marker + roster)
 write("post-retry.sh", executable(post, ""))
 write("review-setup.sh", executable(review, "setup=review-pr"))
+write("review-scope.sh", containing(review, 'review_refresh_phase1_scope "$BASE_SHA"'))
+
+review_instance_lines = [
+    line for line in review.splitlines()
+    if 'review-pr-${RUN_ID}' in line
+]
+if not review_instance_lines or any(
+    'uberdev_child_instance_id' not in line for line in review_instance_lines
+):
+    raise SystemExit("every review child instance must use the shared bounded helper")
+post_instance_lines = [
+    line for line in post.splitlines()
+    if 'post-review-${RUN_ID}' in line
+]
+if not post_instance_lines or any(
+    'uberdev_child_instance_id' not in line for line in post_instance_lines
+):
+    raise SystemExit("every post-review child instance must use the shared bounded helper")
 
 builder_region = re.search(
     r"<!-- BEGIN review-child-builder-v1 -->\s*(.*?)\s*<!-- END review-child-builder-v1 -->",
@@ -389,16 +407,69 @@ export UBERDEV_COMMAND_WORKSPACE_JSON="$REVIEW_WORKSPACE_JSON"
 . "$TMP/post-prefix.sh"
 
 LONG_REVIEW_RUN_ID="$(python3 -I -B -c 'print("review-run-"+"x"*180,end="")')"
-LONG_REVIEW_CANDIDATE="post-review-${LONG_REVIEW_RUN_ID}-r6-iter7-attempt01"
-LONG_REVIEW_INSTANCE="$(post_review_instance_id "$LONG_REVIEW_CANDIDATE")"
-LONG_REVIEW_REPEAT="$(post_review_instance_id "$LONG_REVIEW_CANDIDATE")"
-if [ "$LONG_REVIEW_INSTANCE" != "$LONG_REVIEW_REPEAT" ] \
-    || [ "${#LONG_REVIEW_INSTANCE}" -gt 128 ] \
-    || ! [[ "$LONG_REVIEW_INSTANCE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] \
-    || ! [[ "$LONG_REVIEW_INSTANCE" =~ -[0-9a-f]{12}$ ]]; then
-  echo "review-child-inputs: long review run id did not produce one stable bounded child identity" >&2
-  exit 1
-fi
+for LONG_REVIEW_CANDIDATE in \
+  "post-review-${LONG_REVIEW_RUN_ID}-r6-iter7-attempt01" \
+  "review-pr-${LONG_REVIEW_RUN_ID}-fix-phase1-iter7-attempt01" \
+  "review-pr-${LONG_REVIEW_RUN_ID}-simplify-quality-iter7-attempt01" \
+  "review-pr-${LONG_REVIEW_RUN_ID}-fix-phase2-iter7-attempt01" \
+  "review-pr-${LONG_REVIEW_RUN_ID}-defer-findings-iter7-attempt01" \
+  "review-pr-${LONG_REVIEW_RUN_ID}-ci-classify-iter3-attempt01" \
+  "review-pr-${LONG_REVIEW_RUN_ID}-ci-fix-iter3-attempt01" \
+  "review-pr-${LONG_REVIEW_RUN_ID}-ci-rebase-iter3-attempt01" \
+  "review-pr-${LONG_REVIEW_RUN_ID}-ci-defer-refusal-iter3-attempt01" \
+  "review-pr-${LONG_REVIEW_RUN_ID}-conflict-99-iter3-attempt01"; do
+  LONG_REVIEW_INSTANCE="$(uberdev_child_instance_id "$LONG_REVIEW_CANDIDATE")"
+  LONG_REVIEW_REPEAT="$(uberdev_child_instance_id "$LONG_REVIEW_CANDIDATE")"
+  if [ "$LONG_REVIEW_INSTANCE" != "$LONG_REVIEW_REPEAT" ] \
+      || [ "${#LONG_REVIEW_INSTANCE}" -gt 128 ] \
+      || ! [[ "$LONG_REVIEW_INSTANCE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] \
+      || ! [[ "$LONG_REVIEW_INSTANCE" =~ -[0-9a-f]{12}$ ]]; then
+    echo "review-child-inputs: long review run id did not produce one stable bounded child identity" >&2
+    exit 1
+  fi
+done
+
+# Phase 1 re-entry materializes names and diff bytes from one fixed local
+# base-to-HEAD snapshot. A file introduced by a fixer must join the next review
+# handoff instead of inheriting the stale PR-server path list.
+SCOPE_REPO="$TMP/scope-repo"
+mkdir -p "$SCOPE_REPO"
+git -C "$SCOPE_REPO" init -q
+git -C "$SCOPE_REPO" config user.email test@example.com
+git -C "$SCOPE_REPO" config user.name Test
+printf 'base\n' >"$SCOPE_REPO/base.txt"
+git -C "$SCOPE_REPO" add base.txt
+git -C "$SCOPE_REPO" commit -qm 'test: create scope base'
+BASE_SHA="$(git -C "$SCOPE_REPO" rev-parse HEAD)"
+printf 'initial change\n' >>"$SCOPE_REPO/base.txt"
+git -C "$SCOPE_REPO" add base.txt
+git -C "$SCOPE_REPO" commit -qm 'test: create initial review change'
+(
+  WORKTREE_ROOT="$SCOPE_REPO"
+  DIFF_ARTIFACT_PATH="$TMP/scope-diff.md"
+  COMMIT_RANGE_PATH="$TMP/scope-range.txt"
+  . "$TMP/review-scope.sh"
+  python3 -I -B - "$CHANGED_PATHS_JSON" "$DIFF_ARTIFACT_PATH" <<'PY'
+import json,sys
+paths=json.loads(sys.argv[1]); raw=open(sys.argv[2],encoding='utf-8').read()
+assert paths==['base.txt'],paths
+assert raw.startswith('<external-untrusted-input source="pr-diff">\n')
+assert raw.endswith('</external-untrusted-input>\n')
+PY
+  printf 'fixer-created\n' >"$SCOPE_REPO/fixer-created.txt"
+  git -C "$SCOPE_REPO" add fixer-created.txt
+  git -C "$SCOPE_REPO" commit -qm 'fix: simulate phase 1 fixer file'
+  . "$TMP/review-scope.sh"
+  python3 -I -B - "$CHANGED_PATHS_JSON" "$DIFF_ARTIFACT_PATH" "$COMMIT_RANGE_PATH" "$BASE_SHA" <<'PY'
+import json,sys
+paths=json.loads(sys.argv[1]); raw=open(sys.argv[2],encoding='utf-8').read()
+commit_range=open(sys.argv[3],encoding='utf-8').read().strip()
+assert paths==['base.txt','fixer-created.txt'],paths
+assert 'fixer-created.txt' in raw
+base,head=commit_range.split('..',1)
+assert base==sys.argv[4] and len(head)==40 and all(ch in '0123456789abcdef' for ch in head)
+PY
+)
 
 HOSTILE_DIR="$RESEARCH_DIR_ABS"$'/review dir\nwith "quotes" and \\slashes *?[x]'
 mkdir -p "$HOSTILE_DIR"

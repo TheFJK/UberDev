@@ -59,12 +59,30 @@ for malformed_watcher_error in \
   '{"schema_version":1,"error":"provider_cancel_failed","backend":"claude-bg","handle":"abc12345","terminal":"provider_probe_failed","attempts":3}'; do
   printf '%s\n' "$malformed_watcher_error" >"$STATUS.watcher-error.json"
   chmod 600 "$STATUS.watcher-error.json"
-  if _uberdev_child_watcher_error "$STATUS" >/dev/null 2>&1; then
-    echo "child wait accepted malformed watcher-error union" >&2
+  set +e
+  INVALID_WATCHER_OUTPUT="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
+  INVALID_WATCHER_RC=$?
+  set -e
+  if [ "$INVALID_WATCHER_RC" -ne 2 ] \
+      || ! printf '%s\n' "$INVALID_WATCHER_OUTPUT" | grep -Fq 'invalid-supervisory-record' \
+      || ! printf '%s\n' "$INVALID_WATCHER_OUTPUT" | grep -Fq "$STATUS.watcher-error.json" \
+      || printf '%s\n' "$INVALID_WATCHER_OUTPUT" | grep -Fq 'schema_version'; then
+    echo "child wait did not surface a bounded invalid-supervisory-record diagnostic" >&2
     exit 1
   fi
 done
 rm -f "$STATUS.watcher-error.json"
+
+printf '{bad\n' >"$WATCHER_FALLBACK"
+chmod 600 "$WATCHER_FALLBACK"
+set +e
+INVALID_WATCHER_OUTPUT="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
+INVALID_WATCHER_RC=$?
+set -e
+[ "$INVALID_WATCHER_RC" -eq 2 ]
+printf '%s\n' "$INVALID_WATCHER_OUTPUT" | grep -Fq 'invalid-supervisory-record'
+printf '%s\n' "$INVALID_WATCHER_OUTPUT" | grep -Fq "$WATCHER_FALLBACK"
+rm -f "$WATCHER_FALLBACK"
 
 # A running status without the exact lifecycle lease is not cancellation
 # authority: never signal or synthesize timed_out.

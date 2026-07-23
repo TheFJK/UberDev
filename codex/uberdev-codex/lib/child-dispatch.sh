@@ -25,6 +25,26 @@ _UBERDEV_CHILD_DISPATCH_LOADED=1
 
 _uberdev_child_error() { printf 'uberdev child dispatch: %s\n' "$1" >&2; }
 
+# Stable child identity shared by every routed review edge. Preserve readable
+# names when they already fit the handoff schema; otherwise retain a readable
+# prefix and append a digest of the complete candidate.
+uberdev_child_instance_id() {
+  [ "$#" -eq 1 ] || return 2
+  python3 -I -B - "$1" <<'PY'
+import hashlib,re,sys
+raw=sys.argv[1]
+pattern=re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
+if pattern.fullmatch(raw):
+    print(raw,end=''); raise SystemExit(0)
+if not raw or not re.fullmatch(r'[A-Za-z0-9._-]+',raw): raise SystemExit(2)
+digest=hashlib.sha256(raw.encode()).hexdigest()[:12]
+prefix=raw[:115].rstrip('._-')
+bounded=f'{prefix}-{digest}'
+if not pattern.fullmatch(bounded): raise SystemExit(2)
+print(bounded,end='')
+PY
+}
+
 # Receipt collection is an explicit test-only seam. UBERDEV_CHILD_TEST_MODE is
 # also used by older manifest-fixture tests, so receipt-specific variables are
 # what request collection. Normal production and legacy test execution never
@@ -610,7 +630,7 @@ import hashlib,json,os,stat,sys
 edge,request_raw,result,status,provider_handle=sys.argv[1:]
 try:
  s=json.load(open(status)); r=json.loads(request_raw)
- allowed={'issue','tier','backend','state','exit_code','pid','log','result','worktree','branch','workspace_mode','process_identity','lease_generation'}
+ allowed={'issue','tier','backend','state','exit_code','provider_exit_code','pid','log','result','worktree','branch','workspace_mode','process_identity','lease_generation'}
  if not isinstance(s,dict) or set(s)-allowed or s.get('state') not in {'running','completed','failed'} or not isinstance(s.get('backend'),str): raise ValueError()
  state=s['state']; code=s.get('exit_code')
  if state=='running' and code is not None: raise ValueError()
@@ -654,7 +674,7 @@ try:
  for path in (status,):
   e=os.lstat(path)
   if stat.S_ISLNK(e.st_mode) or not stat.S_ISREG(e.st_mode) or e.st_nlink!=1 or e.st_uid!=os.geteuid() or e.st_size>65536: raise ValueError()
- s=json.load(open(status)); allowed={'issue','tier','backend','state','exit_code','pid','log','result','worktree','branch','workspace_mode','process_identity','lease_generation'}
+ s=json.load(open(status)); allowed={'issue','tier','backend','state','exit_code','provider_exit_code','pid','log','result','worktree','branch','workspace_mode','process_identity','lease_generation'}
  if not isinstance(s,dict) or set(s)-allowed or s.get('state') not in {'running','completed','failed','timed_out','cancelled'}: raise ValueError()
  state=s['state']; code=s.get('exit_code'); handle=s.get('pid')
  if state=='running' and code is not None: raise ValueError()
@@ -802,7 +822,7 @@ uberdev_unwind_child() {
 }
 
 uberdev_wait_child() {
-  local status_file="${1:-}" result="${2:-}" timeout="${3:-}" start now probe state handle='' backend process_identity lease_generation snapshot child run_dir instance manifest terminal state_dir lease_info lease lease_identity cas rc watcher_error watcher_error_rc
+  local status_file="${1:-}" result="${2:-}" timeout="${3:-}" start now probe state handle='' backend process_identity lease_generation snapshot child run_dir instance manifest terminal state_dir lease_info lease lease_identity cas rc watcher_error watcher_error_rc watcher_error_path
   [ "$#" -eq 3 ] || return 2
   case "$timeout" in ''|*[!0-9]*) return 2 ;; esac
   [ "$timeout" -gt 0 ] || return 2
@@ -819,7 +839,14 @@ uberdev_wait_child() {
       return 70
     else
       watcher_error_rc=$?
-      [ "$watcher_error_rc" -eq 1 ] || return 2
+      if [ "$watcher_error_rc" -ne 1 ]; then
+        watcher_error_path="$status_file.watcher-error.json"
+        if [ ! -e "$watcher_error_path" ] && [ ! -L "$watcher_error_path" ]; then
+          watcher_error_path="$state_dir/$instance.watcher-error.json"
+        fi
+        _uberdev_child_error "invalid-supervisory-record: $watcher_error_path"
+        return 2
+      fi
     fi
     if probe="$(_uberdev_child_wait_probe "$status_file" "$result" 2>/dev/null)"; then
       state="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["state"],end="")' "$probe")" || return 2
