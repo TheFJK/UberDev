@@ -83,8 +83,11 @@ import os, pathlib, stat, sys
 base, root = map(pathlib.Path, sys.argv[1:])
 entry = root.stat()
 assert root.parent.resolve() == base.resolve()
-assert entry.st_uid == os.geteuid()
-assert stat.S_IMODE(entry.st_mode) == 0o700
+uid_fn = getattr(os, "geteuid", None)
+if uid_fn is not None:
+    assert entry.st_uid == uid_fn()
+if os.name != "nt":
+    assert stat.S_IMODE(entry.st_mode) == 0o700
 PY
 then
   pass_msg "default runtime root is private, user-owned, and mode 0700"
@@ -168,7 +171,104 @@ git -C "$CLEANUP_TMP/repo" worktree remove --force "$dirty_relative"
 git -C "$CLEANUP_TMP/repo" branch -D "$dirty_branch" >/dev/null
 bash -c '. "$1"; _uberdev_dispatch_discard_codex_worktree_receipt "$2" "$3"' \
   _ "$DISPATCH_LIB" "$dirty_receipt" "$dirty_token"
+
+mkdir -p "$CLEANUP_TMP/bin"
+REAL_CLEANUP_GIT="$(command -v git)"
+cat > "$CLEANUP_TMP/bin/git" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = "${FAIL_GIT_PROBE:-}" ]; then
+    exit 2
+  fi
+done
+exec "$REAL_CLEANUP_GIT" "$@"
+SH
+chmod +x "$CLEANUP_TMP/bin/git"
+for failed_probe in status show-ref; do
+  probe_slug="$(UBERDEV_AGENT_INSTANCE_ID="cleanup-probe-$failed_probe-a1" bash -c '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"
+  probe_relative=".claude/worktrees/solve-issue-335-$probe_slug"
+  probe_branch="worktree-solve-issue-335-$probe_slug"
+  probe_receipt="$CLEANUP_TMP/runtime/probe-$failed_probe.owner.json"
+  probe_token="$(bash -c '. "$1"; _uberdev_dispatch_create_codex_worktree_receipt "$2" "$3" "$4" "$5"' \
+    _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$probe_relative" "$probe_branch" "$probe_receipt")"
+  git -C "$CLEANUP_TMP/repo" worktree add -q "$probe_relative" -b "$probe_branch"
+  if PATH="$CLEANUP_TMP/bin:$PATH" REAL_CLEANUP_GIT="$REAL_CLEANUP_GIT" FAIL_GIT_PROBE="$failed_probe" \
+      bash -c '. "$1"; _uberdev_dispatch_cleanup_codex_worktree "$2" "$3" "$4" "$5" "$6" completed' \
+        _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$probe_relative" "$probe_branch" "$probe_receipt" "$probe_token"; then
+    fail_msg "failed git $failed_probe probe preserves cleanup evidence" "cleanup returned success"
+  elif [ -d "$CLEANUP_TMP/repo/$probe_relative" ] \
+      && git -C "$CLEANUP_TMP/repo" show-ref --verify --quiet "refs/heads/$probe_branch" \
+      && [ -f "$probe_receipt" ]; then
+    pass_msg "failed git $failed_probe probe preserves cleanup evidence"
+  else
+    fail_msg "failed git $failed_probe probe preserves cleanup evidence" "worktree, branch, or ownership receipt was lost"
+  fi
+  git -C "$CLEANUP_TMP/repo" worktree remove --force "$probe_relative"
+  git -C "$CLEANUP_TMP/repo" branch -D "$probe_branch" >/dev/null
+  bash -c '. "$1"; _uberdev_dispatch_discard_codex_worktree_receipt "$2" "$3"' \
+    _ "$DISPATCH_LIB" "$probe_receipt" "$probe_token"
+done
 rm -rf "$CLEANUP_TMP"
+
+echo "== Caller workspace mode commits in place without cleanup ownership =="
+CALLER_TMP="$(mktemp -d)"
+mkdir -p "$CALLER_TMP/bin" "$CALLER_TMP/repo" "$CALLER_TMP/runtime"
+(
+  cd "$CALLER_TMP/repo"
+  git init -q
+  git config user.name 'UberDev Test'
+  git config user.email 'uberdev-test@example.invalid'
+  printf 'base\n' > base.txt
+  git add base.txt
+  git commit -qm base
+)
+CALLER_BEFORE="$(git -C "$CALLER_TMP/repo" rev-parse HEAD)"
+CALLER_GIT="$(command -v git)"
+cat > "$CALLER_TMP/bin/codex" <<'SH'
+#!/usr/bin/env bash
+out=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) out="$2"; shift 2 ;; *) shift ;; esac
+done
+cat >/dev/null
+printf 'caller child\n' > caller.txt
+"$CALLER_GIT" add caller.txt
+"$CALLER_GIT" commit -qm 'test: caller child commit'
+printf 'caller result\n' > "$out"
+SH
+chmod +x "$CALLER_TMP/bin/codex"
+printf 'caller prompt\n' > "$CALLER_TMP/prompt.txt"
+CALLER_STATUS="$CALLER_TMP/runtime/caller-status.json"
+(
+  cd "$CALLER_TMP/repo"
+  PATH="$CALLER_TMP/bin:/usr/bin:/bin" CALLER_GIT="$CALLER_GIT" \
+    UBERDEV_AGENT_STATUS_FILE="$CALLER_STATUS" \
+    UBERDEV_AGENT_RESULT_FILE="$CALLER_TMP/runtime/caller-result.md" \
+    UBERDEV_AGENT_WORKSPACE_MODE=caller UBERDEV_AGENT_WORKSPACE_DIR="$CALLER_TMP/repo" \
+    UBERDEV_AGENT_CHILD_OWNED=1 \
+    bash -c '. "$1"; _uberdev_dispatch_codex 335 small "$2"; i=0; while [ "$i" -lt 400 ]; do status="$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)"; case "$status" in *\"state\":\"completed\"*|*\"state\":\"failed\"*) break ;; esac; sleep 0.025; i=$((i+1)); done' \
+      _ "$DISPATCH_LIB" "$CALLER_TMP/prompt.txt"
+)
+CALLER_AFTER="$(git -C "$CALLER_TMP/repo" rev-parse HEAD)"
+caller_failures=''
+[ "$CALLER_BEFORE" != "$CALLER_AFTER" ] || caller_failures="$caller_failures no-commit"
+[ -f "$CALLER_TMP/repo/caller.txt" ] || caller_failures="$caller_failures missing-file"
+[ "$(git -C "$CALLER_TMP/repo" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ] || caller_failures="$caller_failures child-worktree"
+[ ! -e "$CALLER_STATUS.worktree-owner.json" ] || caller_failures="$caller_failures ownership-receipt"
+[ -d "$CALLER_TMP/repo" ] || caller_failures="$caller_failures caller-cleaned"
+python3 -I - "$CALLER_STATUS" <<'PY' || caller_failures="$caller_failures bad-status"
+import json,pathlib,sys
+status=json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert status['state']=='completed' and status['workspace_mode']=='caller'
+assert status['worktree']==str((pathlib.Path(sys.argv[1]).parents[1]/'repo').resolve())
+assert status['branch']=='' and status['log']==sys.argv[1]+'.log'
+PY
+if [ -z "$caller_failures" ]; then
+  pass_msg "caller mode advances the caller branch without child worktree, branch, receipt, or cleanup"
+else
+  fail_msg "caller mode advances the caller branch without child worktree, branch, receipt, or cleanup" "$caller_failures $(cat "$CALLER_STATUS" 2>/dev/null)"
+fi
+rm -rf "$CALLER_TMP"
 
 echo "== Codex packaged runtime mirrors source libs =="
 if cmp -s "$DISPATCH_LIB" "$CODEX_DISPATCH_LIB"; then

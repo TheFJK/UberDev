@@ -1,6 +1,6 @@
 ## Phase 1 reviewer output contract (v1)
 
-Emit exactly one fenced YAML block with this shape as the final content of your response. Do not add text after the closing fence.
+For this routed edge, this contract overrides any earlier role-level response formatting. Put role-specific analysis in `findings[].detail`. Emit exactly one fenced YAML document with this shape as the final content of your response; do not emit another fenced YAML document or add text after the closing fence.
 
 ```yaml
 verdict: APPROVE | REVISIONS_REQUIRED | REJECT

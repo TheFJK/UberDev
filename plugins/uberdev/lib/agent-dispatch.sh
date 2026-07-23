@@ -246,9 +246,22 @@ request_raw, policy_path, router_path, catalog_path = sys.argv[1:]
 try:
     request=json.loads(request_raw)
     if not isinstance(request,dict): raise ValueError("request_not_object")
-    allowed={"schema_version","run_dir","run_id","repository_id","backend","workflow","phase","role","task_tier","risk_scope","risk_signals","issue_or_pr","issue_num","capacity","timeout_s","routing_mode","explicit_route","explicit_model","explicit_effort","explicit_service_tier","fast","explicit_sandbox","parent_sandbox","environment","project_routing","project_config","parent_run","shadow","adaptive_fallback","parent_run_id","agent_id","context_file","context_sha256","root_decision","triage_decision"}
+    allowed={"schema_version","run_dir","run_id","repository_id","backend","workflow","phase","role","task_tier","risk_scope","risk_signals","issue_or_pr","issue_num","capacity","timeout_s","routing_mode","explicit_route","explicit_model","explicit_effort","explicit_service_tier","fast","explicit_sandbox","parent_sandbox","environment","project_routing","project_config","parent_run","shadow","adaptive_fallback","parent_run_id","agent_id","context_file","context_sha256","root_decision","triage_decision","workspace_mode","workspace_dir"}
     unknown=set(request)-allowed
     if unknown: raise ValueError("unknown_request_fields")
+    workspace_mode=request.get("workspace_mode","isolated")
+    workspace_dir=request.get("workspace_dir")
+    if workspace_mode not in {"isolated","caller"}: raise ValueError("invalid_workspace_mode")
+    if workspace_mode=="isolated":
+        if workspace_dir is not None: raise ValueError("unexpected_workspace_dir")
+    else:
+        repository_id=request.get("repository_id"); backend=request.get("backend","codex")
+        if backend!="codex": raise ValueError("workspace_mode_unsupported")
+        if not isinstance(workspace_dir,str) or not os.path.isabs(workspace_dir) or not os.path.isdir(workspace_dir): raise ValueError("invalid_workspace_dir")
+        entry=os.lstat(workspace_dir)
+        reparse=getattr(entry,"st_file_attributes",0)&getattr(stat,"FILE_ATTRIBUTE_REPARSE_POINT",0)
+        if stat.S_ISLNK(entry.st_mode) or reparse or os.path.realpath(workspace_dir)!=workspace_dir: raise ValueError("invalid_workspace_dir")
+        if not isinstance(repository_id,str) or os.path.realpath(repository_id)!=workspace_dir: raise ValueError("workspace_repository_mismatch")
     carriers={"routing_mode","explicit_route","explicit_model","explicit_effort","explicit_service_tier","explicit_sandbox","parent_sandbox"}
     if any(request.get(key)=="" for key in carriers): raise ValueError("empty_carrier")
     environment=request.get("environment",{})
@@ -282,7 +295,7 @@ try:
             if set(project)!={"model_routing"}: raise ValueError("unknown_project_config_fields")
             validate_project(project["model_routing"])
         else: validate_project(project)
-    routing={key:value for key,value in request.items() if key not in {"schema_version","run_dir","run_id","repository_id","issue_or_pr","issue_num","capacity","timeout_s","parent_run_id","agent_id","context_file","context_sha256","root_decision","triage_decision"}}
+    routing={key:value for key,value in request.items() if key not in {"schema_version","run_dir","run_id","repository_id","issue_or_pr","issue_num","capacity","timeout_s","parent_run_id","agent_id","context_file","context_sha256","root_decision","triage_decision","workspace_mode","workspace_dir"}}
     backend=routing.get("backend","codex")
     if backend!="codex":
         project=request.get("project_routing") or request.get("project_config") or {}
@@ -360,7 +373,7 @@ _uberdev_agent_context_schema_validate() {
 import json,os,re,sys
 mode=sys.argv[1]
 routing_allowed={"backend","workflow","phase","role","task_tier","risk_scope","risk_signals","routing_mode","explicit_route","explicit_model","explicit_effort","explicit_service_tier","fast","explicit_sandbox","parent_sandbox","environment","project_routing","project_config","parent_run","shadow","adaptive_fallback"}
-adapter_metadata={"schema_version","run_dir","run_id","repository_id","issue_or_pr","issue_num","capacity","timeout_s","parent_run_id","agent_id","context_file","context_sha256","root_decision","triage_decision"}
+adapter_metadata={"schema_version","run_dir","run_id","repository_id","issue_or_pr","issue_num","capacity","timeout_s","parent_run_id","agent_id","context_file","context_sha256","root_decision","triage_decision","workspace_mode","workspace_dir"}
 decision_allowed={"schema_version","policy_version","backend","service_tier","sandbox","field_sources","adaptive_fallback","risk_signals","risk_scope","minimum_route","fallback_chain","ignored_sources","ignored_fields","logical_route","model","reasoning_effort","routing_mode","effective_policy","route_source","forced","reason_codes","adaptive_proposal"}
 provenance_keys={"mode","service_tier","risk_escalation","adaptive_fallback","shadow","workflows","roles"}; sources={"env","project-codex","project-claude","explicit-config-file","default"}
 risks={"authentication","authorization","concurrency","cryptography","data-loss","destructive-operations","force-push","public-api-compatibility","release-infrastructure","schema-migration","security"}
@@ -921,8 +934,18 @@ _uberdev_agent_start_watcher() {
         case "$probe" in
           live) absent_count=0 ;;
           completed|failed|timed_out|cancelled) terminal_event="$probe"; break ;;
-          blocked:permission) terminal_event=failed; error_class=provider_permission_blocked; break ;;
-          blocked:provider) terminal_event=failed; error_class=provider_blocked; break ;;
+          blocked:permission|blocked:provider)
+            # A blocked Claude session is still provider-owned live state. Stop
+            # it and require the backend cancellation probe to confirm absence
+            # before publishing terminal state or releasing its lease.
+            if _uberdev_dispatch_cancel_backend claude-bg "$handle" ''; then
+              terminal_event=failed
+              [ "$probe" = blocked:permission ] && error_class=provider_permission_blocked || error_class=provider_blocked
+              break
+            fi
+            _uberdev_agent_persist_watcher_error "$status_file" "$backend" "$handle" "$probe" 1 || true
+            exit 2
+            ;;
           absent)
             absent_count=$((absent_count + 1))
             if [ "$absent_count" -ge 3 ]; then
@@ -996,7 +1019,7 @@ _uberdev_agent_abort_after_launch() {
 
 uberdev_agent_dispatch() {
   local request_json="${1:-}" prompt_requested="${2:-}" result_requested="${3:-}" status_requested="${4:-}"
-  local run_dir run_id repository_id backend workflow issue_num tier capacity timeout_s
+  local run_dir run_id repository_id backend workflow issue_num tier capacity timeout_s workspace_mode workspace_dir
   local prompt_file result_file status_file state_dir manifest decision lease lease_identity event_json rc handle lease_handle terminal_event paths_json
   local context_file context_sha context_validation persisted_decision supplied_root supplied_parent context_run_id parent_run_id agent_id process_identity lease_generation
   [ "$#" -eq 4 ] || { _uberdev_agent_error 'expected REQUEST_JSON PROMPT_FILE RESULT_FILE STATUS_FILE'; return 2; }
@@ -1029,6 +1052,8 @@ uberdev_agent_dispatch() {
   tier="$(_uberdev_agent_json_get "$request_json" task_tier)" || { _uberdev_agent_error 'invalid task_tier'; return 2; }
   capacity="$(_uberdev_agent_json_get "$request_json" capacity)" || { _uberdev_agent_error 'invalid capacity'; return 2; }
   timeout_s="$(_uberdev_agent_json_get "$request_json" timeout_s)" || { _uberdev_agent_error 'invalid timeout_s'; return 2; }
+  workspace_mode="$(_uberdev_agent_json_get "$request_json" workspace_mode 2>/dev/null || printf isolated)"
+  workspace_dir="$(_uberdev_agent_json_get "$request_json" workspace_dir 2>/dev/null || true)"
 
   decision="$(uberdev_agent_resolve_request "$request_json")" || return $?
   context_file="$(_uberdev_agent_json_get "$request_json" context_file 2>/dev/null || true)"
@@ -1098,7 +1123,10 @@ uberdev_agent_dispatch() {
   UBERDEV_AGENT_INSTANCE_ID="${agent_id:-$run_id}"
   UBERDEV_AGENT_CHILD_OWNED=0
   [ -z "$agent_id" ] || UBERDEV_AGENT_CHILD_OWNED=1
+  UBERDEV_AGENT_WORKSPACE_MODE="$workspace_mode"
+  UBERDEV_AGENT_WORKSPACE_DIR="$workspace_dir"
   export UBERDEV_AGENT_DECISION_JSON UBERDEV_AGENT_RESULT_FILE UBERDEV_AGENT_STATUS_FILE UBERDEV_AGENT_INSTANCE_ID UBERDEV_AGENT_CHILD_OWNED
+  export UBERDEV_AGENT_WORKSPACE_MODE UBERDEV_AGENT_WORKSPACE_DIR
   if _uberdev_agent_dispatch_backend "$backend" "$issue_num" "$tier" "$prompt_file" "$result_file" "$status_file" "$decision"; then
     rc=0
   else

@@ -177,7 +177,7 @@ uberdev_create_child_handoff() {
   [ "$#" -eq 4 ] || { _uberdev_child_error 'expected EDGE_ID INSTANCE_ID INPUTS_JSON RISK_JSON'; return 2; }
   local manifest_path; manifest_path="$(_uberdev_child_manifest_path)" || return 2
   output="$(python3 -I -B - "$UBERDEV_RUN_CARRIER_JSON" "$edge" "$instance" "$inputs_json" "$risks_json" "$_UBERDEV_CHILD_ROOT" "$manifest_path" <<'PY'
-import hashlib,json,os,re,stat,sys
+import hashlib,json,os,posixpath,re,stat,sys
 carrier_raw,edge,instance,inputs_raw,risks_raw,plugin_root,manifest_path=sys.argv[1:]
 IDENT=re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
 EDGE=re.compile(r'[a-z][a-z0-9_-]{0,31}(?:\.[a-z][a-z0-9_-]{0,31}){0,3}')
@@ -193,7 +193,7 @@ def repo_paths(value):
       or '\\' in path or any(ord(c)<32 or ord(c)==127 for c in path)): fail('unsafe_repo_path')
   parts=path.split('/')
   if (any(part in {'','.','..'} for part in parts) or re.fullmatch(r'[A-Za-z]:',parts[0])
-      or os.path.normpath(path)!=path): fail('unsafe_repo_path')
+      or posixpath.normpath(path)!=path): fail('unsafe_repo_path')
 try:
  carrier=json.loads(carrier_raw); inputs=json.loads(inputs_raw); risks=json.loads(risks_raw)
  manifest=json.load(open(manifest_path))
@@ -226,7 +226,7 @@ if contract_id is not None:
  if not isinstance(contract_id,str) or not IDENT.fullmatch(contract_id) or not isinstance(contracts,dict): fail('invalid_output_contract')
  contract_rel=contracts.get(contract_id)
  if (not isinstance(contract_rel,str) or not contract_rel or contract_rel.startswith('/') or '\\' in contract_rel
-     or any(part in {'','.','..'} for part in contract_rel.split('/')) or os.path.normpath(contract_rel)!=contract_rel): fail('invalid_output_contract')
+     or any(part in {'','.','..'} for part in contract_rel.split('/')) or posixpath.normpath(contract_rel)!=contract_rel): fail('invalid_output_contract')
  contract_path=os.path.join(plugin_root,*contract_rel.split('/'))
  if not beneath(os.path.realpath(plugin_root),os.path.realpath(contract_path)): fail('invalid_output_contract')
  try: contract_entry=os.lstat(contract_path)
@@ -234,6 +234,9 @@ if contract_id is not None:
  if (stat.S_ISLNK(contract_entry.st_mode) or not stat.S_ISREG(contract_entry.st_mode) or contract_entry.st_uid!=os.geteuid()
      or contract_entry.st_nlink!=1 or contract_entry.st_size<1 or contract_entry.st_size>65536): fail('invalid_output_contract')
 if not isinstance(inputs,dict) or not set(required)<=set(inputs) or not set(inputs)<=set(required)|set(optional): fail('input_schema_mismatch')
+workspace_mode=row.get('workspace_mode','isolated')
+if workspace_mode not in {'isolated','caller'}: fail('invalid_workspace_mode')
+if workspace_mode=='caller' and required.get('working_dir')!='directory': fail('invalid_workspace_mode')
 run_risks=meta.get('risk_signals')
 if not isinstance(run_risks,list) or any(x not in RISKS for x in run_risks): fail('invalid_context_risk_signals')
 run_risks=sorted(set(run_risks))
@@ -274,6 +277,11 @@ def scalar(value,kind):
   elif not stat.S_ISREG(pe.st_mode) or pe.st_nlink!=1 or pe.st_size>16777216: fail('input_type_mismatch')
 types={**required,**optional}
 for key,value in inputs.items(): scalar(value,types[key])
+if workspace_mode=='caller':
+ working_dir=inputs.get('working_dir'); repository_id=meta.get('repository_id')
+ if (not isinstance(working_dir,str) or not isinstance(repository_id,str)
+     or not os.path.isabs(repository_id) or not os.path.isdir(repository_id)
+     or os.path.realpath(working_dir)!=os.path.realpath(repository_id)): fail('workspace_repository_mismatch')
 handoff_dir=os.path.join(run_dir,'handoffs')
 try: os.mkdir(handoff_dir,0o700)
 except FileExistsError: pass
@@ -305,7 +313,7 @@ _uberdev_child_prepare() {
   local edge="$1" handoff="$2" result="$3" status_file="$4" mode="${5:-dispatch}" manifest_path
   manifest_path="$(_uberdev_child_manifest_path)" || return 2
   python3 -I -B - "$edge" "$handoff" "$result" "$status_file" "$_UBERDEV_CHILD_ROOT" "$manifest_path" "$mode" <<'PY'
-import hashlib,html,json,os,re,secrets,stat,sys
+import hashlib,html,json,os,posixpath,re,secrets,stat,sys
 edge,handoff_arg,result_arg,status_arg,plugin_root,manifest_path,mode=sys.argv[1:]
 FORBIDDEN={'command','commands','shell','model','route','effort','reasoning_effort','service','service_tier','sandbox','environment','env'}
 RISKS={'authentication','authorization','concurrency','cryptography','data-loss','destructive-operations','force-push','public-api-compatibility','release-infrastructure','schema-migration','security'}
@@ -325,7 +333,7 @@ def repo_paths(value):
             or '\\' in path or any(ord(c)<32 or ord(c)==127 for c in path)): fail('unsafe_repo_path')
         parts=path.split('/')
         if (any(part in {'','.','..'} for part in parts) or re.fullmatch(r'[A-Za-z]:',parts[0])
-            or os.path.normpath(path)!=path): fail('unsafe_repo_path')
+            or posixpath.normpath(path)!=path): fail('unsafe_repo_path')
 def safe_existing(path, regular=True, max_bytes=65536):
     if not os.path.isabs(path) or not os.path.lexists(path): fail('unsafe_path')
     entry=os.lstat(path)
@@ -391,13 +399,16 @@ if not isinstance(row,dict) or row.get('kind')!='provider': fail('undeclared_edg
 allowed=row.get('allowed_workflows'); required_inputs=row.get('required_inputs'); optional_inputs=row.get('optional_inputs')
 if not isinstance(allowed,list) or carrier['workflow'] not in allowed: fail('workflow_not_allowed')
 if not isinstance(required_inputs,dict) or not isinstance(optional_inputs,dict) or set(required_inputs)&set(optional_inputs): fail('invalid_manifest_edge')
+workspace_mode=row.get('workspace_mode','isolated')
+if workspace_mode not in {'isolated','caller'}: fail('invalid_workspace_mode')
+if workspace_mode=='caller' and required_inputs.get('working_dir')!='directory': fail('invalid_workspace_mode')
 contract_raw=b''; contract_id=row.get('output_contract')
 if contract_id is not None:
     contracts=manifest.get('output_contracts')
     if not isinstance(contract_id,str) or not IDENT.fullmatch(contract_id) or not isinstance(contracts,dict): fail('invalid_output_contract')
     contract_rel=contracts.get(contract_id)
     if (not isinstance(contract_rel,str) or not contract_rel or contract_rel.startswith('/') or '\\' in contract_rel
-        or any(part in {'','.','..'} for part in contract_rel.split('/')) or os.path.normpath(contract_rel)!=contract_rel): fail('invalid_output_contract')
+        or any(part in {'','.','..'} for part in contract_rel.split('/')) or posixpath.normpath(contract_rel)!=contract_rel): fail('invalid_output_contract')
     contract_path=os.path.join(plugin_root,*contract_rel.split('/'))
     if not beneath(os.path.realpath(plugin_root),os.path.realpath(contract_path)): fail('invalid_output_contract')
     safe_existing(contract_path,max_bytes=65536)
@@ -444,6 +455,12 @@ def validate_typed(item,kind):
         elif not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1 or entry.st_size>16777216: fail('input_type_mismatch')
 input_types={**required_inputs,**optional_inputs}
 for key,item in inputs.items(): validate_typed(item,input_types[key])
+workspace_dir=''
+if workspace_mode=='caller':
+    working_dir=inputs.get('working_dir')
+    if (not isinstance(working_dir,str) or not os.path.isabs(repo) or not os.path.isdir(repo)
+        or os.path.realpath(working_dir)!=os.path.realpath(repo)): fail('workspace_repository_mismatch')
+    workspace_dir=os.path.realpath(working_dir)
 role_path=os.path.join(plugin_root,'agents',value['role']+'.md')
 safe_existing(role_path,max_bytes=262144)
 children_name='children'; instance=value['instance_id']
@@ -507,6 +524,8 @@ except BaseException:
 else: os.close(childfd)
 root_request=context['routing_request'].copy(); root_decision=context['root_decision']; metadata=context['metadata']
 request={**root_request,'schema_version':1,'run_dir':run_real,'run_id':instance,'repository_id':repo,'backend':metadata['backend'],'workflow':carrier['workflow'],'phase':value['phase'],'role':value['role'],'task_tier':metadata['task_tier'],'risk_scope':value['risk_scope'],'risk_signals':risks,'issue_or_pr':carrier['issue_num'],'issue_num':carrier['issue_num'],'capacity':int(os.environ.get('UBERDEV_AGENT_CAPACITY','6')),'timeout_s':int(os.environ.get('SOLVE_TIMEOUT','3600')),'parent_run_id':value['parent_run_id'],'agent_id':instance,'context_file':ctx,'context_sha256':digest,'root_decision':root_decision,'parent_run':root_decision}
+request['workspace_mode']=workspace_mode
+if workspace_mode=='caller': request['workspace_dir']=workspace_dir
 # Descendants do not re-interpret root concrete CLI/environment carriers. A
 # forced root is propagated solely through parent_run; adaptive/inherit keep
 # their mode/config but discard exact root-only pins.
@@ -591,7 +610,7 @@ import hashlib,json,os,stat,sys
 edge,request_raw,result,status,provider_handle=sys.argv[1:]
 try:
  s=json.load(open(status)); r=json.loads(request_raw)
- allowed={'issue','tier','backend','state','exit_code','pid','log','result','worktree','branch','process_identity','lease_generation'}
+ allowed={'issue','tier','backend','state','exit_code','pid','log','result','worktree','branch','workspace_mode','process_identity','lease_generation'}
  if not isinstance(s,dict) or set(s)-allowed or s.get('state') not in {'running','completed','failed'} or not isinstance(s.get('backend'),str): raise ValueError()
  state=s['state']; code=s.get('exit_code')
  if state=='running' and code is not None: raise ValueError()
@@ -635,7 +654,7 @@ try:
  for path in (status,):
   e=os.lstat(path)
   if stat.S_ISLNK(e.st_mode) or not stat.S_ISREG(e.st_mode) or e.st_nlink!=1 or e.st_uid!=os.geteuid() or e.st_size>65536: raise ValueError()
- s=json.load(open(status)); allowed={'issue','tier','backend','state','exit_code','pid','log','result','worktree','branch','process_identity','lease_generation'}
+ s=json.load(open(status)); allowed={'issue','tier','backend','state','exit_code','pid','log','result','worktree','branch','workspace_mode','process_identity','lease_generation'}
  if not isinstance(s,dict) or set(s)-allowed or s.get('state') not in {'running','completed','failed','timed_out','cancelled'}: raise ValueError()
  state=s['state']; code=s.get('exit_code'); handle=s.get('pid')
  if state=='running' and code is not None: raise ValueError()

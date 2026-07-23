@@ -439,6 +439,13 @@ assert_no_grep "$AGENT_MD" \
   '`REMAINING < \(2 \* max_new \+ 50\)`' \
   'S16.3 — stale bare-REMAINING single-bucket threshold removed (#276)'
 
+assert_grep "$AGENT_MD" 'RATE_LIMIT_JSON=\$\(gh api /rate_limit' \
+  'S16.4 — one canonical rate-limit response feeds both bucket checks'
+assert_grep "$AGENT_MD" 'jq -er.*resources\.core\.remaining.*type == "number"' \
+  'S16.5 — core remaining is parsed locally as an integer'
+assert_grep "$AGENT_MD" 'jq -er.*resources\.search\.remaining.*type == "number"' \
+  'S16.6 — search remaining is parsed locally as an integer'
+
 echo
 echo "## Summary"
 echo "  PASS=$PASS  FAIL=$FAIL"

@@ -4,18 +4,28 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Added manifest-declared caller workspace execution for the five review repair edges so their commits land in the validated review checkout, while other children retain isolated worktrees.
+- Scoped Codex child logs to their unique status artifacts and made cleanup failures terminal, observable failures without deleting unsafe evidence.
+- Hardened logical repository paths and ownership receipts for native Windows, including fail-closed Git probe errors.
+- Kept routed output contracts edge-local instead of promoting them into every native role invocation.
+- Rejected malformed CI classifier anchors before routing and kept CI-refusal aggregates inside the command-owned research directory.
+
 ## [0.40.2] — 2026-07-16
 
 ### Fixed
 
 - Pinned Codex-originated review fanouts to the Codex backend, including clean environments without `CODEX_HOME`, while preserving explicit backend overrides.
 - Hardened detached Claude supervision with unattended-permission preflight, exact `claude stop` cancellation, blocked-session terminalization, and exact capacity-lease release.
-- Isolated routed runtime state under a private user-owned directory and gave every Codex reviewer a unique, ownership-verified worktree and branch with terminal cleanup.
+- Isolated routed runtime state under a private user-owned directory and derived each Codex reviewer worktree and branch from its run-scoped child identity with terminal cleanup.
 - Reconciled review `changed_paths` with a traversal-safe repository-relative contract that also supports deleted files.
 - Added one canonical machine-readable Phase 1 reviewer result schema to all routed and native Codex reviewer prompts.
 - Shipped the run-tree policy and reviewer schema in generated prkit Claude and Codex packages so clean installs no longer depend on stale runtime files.
 - Kept routed Codex workers leaf-only with the supported `features.multi_agent=false` setting instead of the rejected `agents.max_depth=0` override.
-- Scoped routed child allocation identities to each review run so repeated `/review-pr` executions cannot collide with preserved evidence from an earlier run.
+- Scoped routed child allocation identities to each review run so preserved evidence from earlier runs does not reuse the same allocation identity.
 
 ### Tests
 

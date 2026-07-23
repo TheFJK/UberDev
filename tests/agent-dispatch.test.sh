@@ -207,14 +207,15 @@ run_id = started[0]["run_id"]
 actual = [event["event"] for event in events if event["run_id"] == run_id]
 assert actual == ["route_decided", "agent_started"], actual
 PY
-  python3 - "$UBERDEV_TEST_CAPTURE" "$@" <<'PY'
+  python3 - "$UBERDEV_TEST_CAPTURE" "$UBERDEV_AGENT_WORKSPACE_MODE" "$UBERDEV_AGENT_WORKSPACE_DIR" "$@" <<'PY'
 import json, sys
-path, backend, issue, tier, prompt, result, status, decision = sys.argv[1:]
+path, workspace_mode, workspace_dir, backend, issue, tier, prompt, result, status, decision = sys.argv[1:]
 with open(path, "w", encoding="utf-8") as handle:
     json.dump({
         "backend": backend, "issue": issue, "tier": tier,
         "prompt": prompt, "result": result, "status": status,
         "decision": json.loads(decision),
+        "workspace_mode": workspace_mode, "workspace_dir": workspace_dir,
     }, handle, sort_keys=True)
 PY
   DISPATCH_RC=0
@@ -338,10 +339,11 @@ uberdev_agent_dispatch "$REQUEST" \
   "$TMP/run/prompt.txt" "$TMP/run/result.md" "$TMP/run/status.json"
 
 python3 - "$TMP/backend.json" "$STATE_DIR/agent-lifecycle.jsonl" "$TMP/run/status.json" "$$" <<'PY'
-import json, pathlib, stat, sys
+import json, os, pathlib, stat, sys
 capture = json.loads(pathlib.Path(sys.argv[1]).read_text())
 decision = capture["decision"]
 assert capture["backend"] == "codex"
+assert capture["workspace_mode"] == "isolated" and capture["workspace_dir"] == ""
 assert decision["logical_route"] == "quality", decision
 assert decision["model"] == "gpt-5.6-sol", decision
 assert decision["reasoning_effort"] == "medium", decision
@@ -353,7 +355,8 @@ assert events[0]["effective_model"] == "gpt-5.6-sol"
 assert "backend_handle" not in events[1]
 assert events[1]["status_path"] == str(pathlib.Path(sys.argv[3]).resolve())
 assert events[1]["owner_pid"] == int(sys.argv[4]), events[1]
-assert stat.S_IMODE(pathlib.Path(sys.argv[3]).stat().st_mode) == 0o600
+if os.name != "nt":
+    assert stat.S_IMODE(pathlib.Path(sys.argv[3]).stat().st_mode) == 0o600
 PY
 
 # Opaque handles remain live for reconciliation and retain their lease.
@@ -368,6 +371,50 @@ if grep -R -q 'run_id=agent-dispatch-test' "$STATE_DIR/semaphore-v1" 2>/dev/null
   echo "terminalized opaque fixture retained its lease" >&2
   exit 1
 fi
+
+# Caller workspace metadata reaches the provider adapter but is excluded from
+# the routing projection. Unsupported/mismatched workspace requests fail before
+# any lifecycle state or provider call.
+mkdir -p "$TMP/caller-repo"
+CALLER_REPO="$(cd "$TMP/caller-repo" && pwd -P)"
+CALLER_REQUEST="$(python3 -I - "$REQUEST" "$CALLER_REPO" <<'PY'
+import json,sys
+request=json.loads(sys.argv[1]); request['run_id']='agent-dispatch-caller'
+request['repository_id']=sys.argv[2]; request['workspace_mode']='caller'; request['workspace_dir']=sys.argv[2]
+print(json.dumps(request,sort_keys=True,separators=(',',':')))
+PY
+)"
+uberdev_agent_dispatch "$CALLER_REQUEST" "$TMP/run/prompt.txt" "$TMP/run/caller-result.md" "$TMP/run/caller-status.json"
+python3 -I - "$TMP/backend.json" "$CALLER_REPO" <<'PY'
+import json,pathlib,sys
+capture=json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert capture['workspace_mode']=='caller' and capture['workspace_dir']==sys.argv[2]
+assert 'workspace_mode' not in capture['decision'] and 'workspace_dir' not in capture['decision']
+PY
+printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$TMP/run/caller-status.json"
+wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-caller completed 80 0.1
+
+workspace_provider_before="$(cat "$TMP/provider-count")"
+for workspace_case in invalid missing mismatch unsupported unexpected; do
+  invalid_run="$TMP/workspace-invalid-$workspace_case"; mkdir -p "$invalid_run"; printf 'prompt\n' > "$invalid_run/prompt.txt"
+  invalid_request="$(python3 -I - "$REQUEST" "$invalid_run" "$CALLER_REPO" "$workspace_case" <<'PY'
+import json,sys
+request=json.loads(sys.argv[1]); request['run_dir']=sys.argv[2]; request['run_id']='workspace-invalid-'+sys.argv[4]
+case=sys.argv[4]
+if case=='invalid': request['workspace_mode']='shared'
+elif case=='missing': request['workspace_mode']='caller'
+elif case=='mismatch': request.update(workspace_mode='caller',workspace_dir=sys.argv[2],repository_id=sys.argv[3])
+elif case=='unsupported': request.update(workspace_mode='caller',workspace_dir=sys.argv[3],repository_id=sys.argv[3],backend='claude-bg',routing_mode='inherit')
+elif case=='unexpected': request.update(workspace_mode='isolated',workspace_dir=sys.argv[3])
+print(json.dumps(request,sort_keys=True,separators=(',',':')))
+PY
+)"
+  if uberdev_agent_dispatch "$invalid_request" "$invalid_run/prompt.txt" "$invalid_run/result.md" "$invalid_run/status.json" >/dev/null 2>&1; then
+    echo "invalid workspace request accepted: $workspace_case" >&2; exit 1
+  fi
+  [ ! -e "$invalid_run/.agent-state-$(id -u)" ] || { echo "invalid workspace request created state: $workspace_case" >&2; exit 1; }
+done
+[ "$(cat "$TMP/provider-count")" = "$workspace_provider_before" ] || { echo 'invalid workspace request reached provider' >&2; exit 1; }
 
 # Public issue identity is a canonical positive JSON integer and must agree
 # with issue_or_pr before any private state or provider boundary exists.
@@ -567,7 +614,8 @@ payload = path.read_text().replace(
 assert "run_id=replacement-generation-race\n" in payload
 descriptor, temporary = tempfile.mkstemp(prefix=".replacement-lease.", dir=path.parent)
 try:
-    os.fchmod(descriptor, 0o600)
+    if os.name != "nt":
+        os.fchmod(descriptor, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
         stream.write(payload)
         stream.flush()
@@ -744,12 +792,14 @@ zsh -f -c '
 # Owner-exit reconciliation is proven independently for every async backend.
 # A second process cannot take cap=1 while canonical status is live, can take
 # it after terminal, and run-manifest reconciliation never invents abandoned.
+. "$ROOT/plugins/uberdev/lib/dispatch.sh"
 CROSS_BIN="$TMP/cross-bin"
 mkdir -p "$CROSS_BIN"
 cat > "$CROSS_BIN/claude" <<'SH'
 #!/usr/bin/env bash
-[ "${1:-}" = agents ] && [ "${2:-}" = --json ] || exit 2
-cat "$CROSS_CLAUDE_STATE"
+if [ "${1:-}" = agents ] && [ "${2:-}" = --json ]; then cat "$CROSS_CLAUDE_STATE"; exit 0; fi
+if [ "${1:-}" = stop ] && [ "${2:-}" = abc12345 ]; then printf '[]\n' > "$CROSS_CLAUDE_STATE"; exit 0; fi
+exit 2
 SH
 chmod +x "$CROSS_BIN/claude"
 

@@ -10,6 +10,7 @@ tree=json.load(open(sys.argv[1])); providers={k:v for k,v in tree['edges'].items
 types={'integer','string','optional_string','boolean','path','optional_path','directory','string_array','path_array','optional_path_array','repo_path_array'}
 assert providers
 for edge,row in providers.items():
+    assert row.get('workspace_mode','isolated') in {'isolated','caller'}, edge
     assert 'inputs' not in row and 'input_types' not in row, edge
     assert isinstance(row.get('required_inputs'),dict), edge
     assert isinstance(row.get('optional_inputs'),dict), edge
@@ -39,6 +40,13 @@ for edge in review_edges:
     row=providers[edge]
     assert row['required_inputs']['changed_paths']=='repo_path_array', edge
     assert row.get('output_contract')=='phase1-reviewer-v1', edge
+caller_edges={
+ 'review_pr.fix.phase1','review_pr.fix.phase2','review_pr.ci.fix_code',
+ 'review_pr.ci.rebase','review_pr.ci.resolve_conflict'
+}
+assert {edge for edge,row in providers.items() if row.get('workspace_mode')=='caller'}==caller_edges
+for edge in caller_edges:
+    assert providers[edge]['required_inputs'].get('working_dir')=='directory', edge
 PY
 
 grep -q '^uberdev_preflight_child_batch()' "$LIB"

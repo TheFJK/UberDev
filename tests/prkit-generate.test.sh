@@ -57,7 +57,7 @@ if [ -f "$T1/codex/prkit-codex/skills/prkit-cmd-review-pr/SKILL.md" ] \
 else no "G6 codex port incomplete or has un-prefixed support skill"; fi
 
 # G6b — both standalone runtimes ship the manifest-declared reviewer contract,
-# and native Codex reviewer TOMLs embed the exact contract for direct dispatch.
+# while native Codex role TOMLs remain edge-agnostic.
 if [ -f "$T1/plugins/prkit/policy/solve-run-tree-v1.json" ] \
    && [ -f "$T1/plugins/prkit/shared/phase1-reviewer-output-v1.md" ] \
    && [ -f "$T1/codex/prkit-codex/policy/solve-run-tree-v1.json" ] \
@@ -66,10 +66,10 @@ if [ -f "$T1/plugins/prkit/policy/solve-run-tree-v1.json" ] \
 import pathlib,sys,tomllib
 root=pathlib.Path(sys.argv[1]); contract=(root/'codex/prkit-codex/shared/phase1-reviewer-output-v1.md').read_text()
 roles=('code-reviewer','silent-failure-hunter','type-design-analyzer','comment-analyzer','pr-test-analyzer')
-assert all(contract in tomllib.loads((root/f'codex/agents/prkit-{role}.toml').read_text())['developer_instructions'] for role in roles)
+assert all(contract not in tomllib.loads((root/f'codex/agents/prkit-{role}.toml').read_text())['developer_instructions'] for role in roles)
 PY
-then ok "G6b routed + native reviewer contracts packaged"
-else no "G6b routed/native reviewer contract packaging incomplete"; fi
+then ok "G6b routed reviewer contract packaged and absent from native roles"
+else no "G6b reviewer contract scope is incorrect"; fi
 
 # G7 — no uberdev token survives anywhere under codex/
 if grep -rilE 'uberdev' "$T1/codex" >/dev/null 2>&1; then no "G7 uberdev token survives under codex/"; else ok "G7 codex tree is uberdev-free"; fi

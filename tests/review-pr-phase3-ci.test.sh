@@ -193,6 +193,48 @@ assert_no_grep "$CLASSIFIER" '^.*data\.quote' \
   "S10.4 — no data.quote field in return contract (secret-leak guard)"
 assert_grep "$CLASSIFIER" 'CLASSIFIED.*AMBIGUOUS.*REFUSED|status: CLASSIFIED' \
   "S10.5 — refusal triggers + AMBIGUOUS path documented"
+assert_grep "$REVIEW_PR" 'review_validate_ci_classification' \
+  "S10.6 — controller validates classifier output before routing"
+assert_grep "$REVIEW_PR" 'ci_classify_returned.*contract_invalid' \
+  "S10.7 — invalid class/anchor fails closed with an audit event"
+assert_grep "$REVIEW_PR" 'gh-run-.*\[1-9\].*signal_anchor|signal_anchor.*positive integer' \
+  "S10.8 — blank and zero-line signal anchors are rejected"
+assert_grep "$REVIEW_PR" 'CI_REFUSED_AGGREGATE_PATH.*RESEARCH_DIR_ABS/ci-refused-synthetic' \
+  "S10.9 — CI refusal aggregate stays inside the run research directory"
+assert_no_grep "$REVIEW_PR" 'tmp-synthetic-aggregate|freshly-created `mktemp`' \
+  "S10.10 — CI refusal handoff no longer points at a system mktemp artifact"
+
+CLASSIFY_HELPER="$(mktemp)"
+CLASSIFY_CASE="$(mktemp)"
+awk '
+  /^[[:space:]]*review_validate_ci_classification\(\) \{/ { capture=1 }
+  capture { print }
+  capture && /^[[:space:]]*\}$/ { exit }
+' "$REVIEW_PR" > "$CLASSIFY_HELPER"
+printf 'status: CLASSIFIED\nfailure_class: code_bug\nsignal_anchor: gh-run-123:42\n' > "$CLASSIFY_CASE"
+CLASSIFY_SPLIT="$(bash -c '. "$1"; IFS=$'\''\t'\'' read -r failure_class signal_anchor < <(review_validate_ci_classification "$2") || exit; printf "%s|%s" "$failure_class" "$signal_anchor"' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE")"
+if [ "$CLASSIFY_SPLIT" = 'code_bug|gh-run-123:42' ]; then
+  echo "  PASS  S10.11 — valid classifier output survives the controller read boundary"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.11 — valid classifier output failed the controller read boundary: $CLASSIFY_SPLIT"; FAIL=$((FAIL + 1))
+fi
+CLASSIFY_INVALID=0
+for invalid_anchor in ':121' 'file:0' ''; do
+  printf 'status: CLASSIFIED\nfailure_class: code_bug\nsignal_anchor: %s\n' "$invalid_anchor" > "$CLASSIFY_CASE"
+  if bash -c '. "$1"; review_validate_ci_classification "$2" >/dev/null' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE"; then
+    CLASSIFY_INVALID=$((CLASSIFY_INVALID + 1))
+  fi
+done
+printf 'status: CLASSIFIED\nfailure_class: unknown\nsignal_anchor: file.ts:12\n' > "$CLASSIFY_CASE"
+if bash -c '. "$1"; review_validate_ci_classification "$2" >/dev/null' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE"; then
+  CLASSIFY_INVALID=$((CLASSIFY_INVALID + 1))
+fi
+rm -f "$CLASSIFY_HELPER" "$CLASSIFY_CASE"
+if [ "$CLASSIFY_INVALID" -eq 0 ]; then
+  echo "  PASS  S10.12 — blank, malformed, zero-line, and unknown classifier outputs fail closed"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.12 — $CLASSIFY_INVALID invalid classifier outputs were accepted"; FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== S11: ci-code-fixer agent shape =="

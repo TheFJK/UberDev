@@ -167,11 +167,11 @@ roles=('code-reviewer','silent-failure-hunter','type-design-analyzer','comment-a
 bad=[]
 for role in roles:
     value=tomllib.loads((pathlib.Path("$TMP/agents")/f'uberdev-{role}.toml').read_text())['developer_instructions']
-    if value.count(contract)!=1: bad.append(role)
+    if contract in value: bad.append(role)
 sys.exit(1 if bad else 0)
 PY
-[ $? -eq 0 ] && pass "native Phase 1 reviewer TOMLs embed one canonical output contract" \
-  || fail "native Phase 1 reviewer TOMLs missing/duplicate canonical output contract"
+[ $? -eq 0 ] && pass "edge-local reviewer contract is absent from native role TOMLs" \
+  || fail "native role TOMLs incorrectly embed the edge-local reviewer contract"
 if grep -RqlE '^model = "gpt-5\.4-mini"' "$TMP/agents" 2>/dev/null; then
   fail "generated profiles retain legacy Claude model mapping"
 else

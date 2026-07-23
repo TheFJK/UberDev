@@ -111,16 +111,16 @@ PY
 # or substituted path from being removed as if it belonged to this child.
 _uberdev_dispatch_create_codex_worktree_receipt() {
   _uberdev_dispatch_python -I -B - "$1" "$2" "$3" "$4" <<'PY'
-import json,os,secrets,stat,sys
+import json,os,posixpath,secrets,stat,sys
 repo_arg,relative,branch,receipt=sys.argv[1:]
 repo=os.path.realpath(repo_arg)
 if not os.path.isabs(repo_arg) or not os.path.isdir(repo) or os.path.isabs(relative): raise SystemExit(2)
-normalized=os.path.normpath(relative)
-basename=os.path.basename(normalized)
+normalized=posixpath.normpath(relative)
+basename=posixpath.basename(normalized)
 if (normalized!=relative or not normalized.startswith(".claude/worktrees/solve-issue-")
     or branch!="worktree-"+basename): raise SystemExit(2)
 root=os.path.join(repo,".claude","worktrees")
-target=os.path.abspath(os.path.join(repo,normalized))
+target=os.path.abspath(os.path.join(repo,*normalized.split('/')))
 if os.path.commonpath((root,target))!=root: raise SystemExit(2)
 receipt=os.path.abspath(receipt); parent=os.path.dirname(receipt)
 parent_entry=os.lstat(parent); uid_fn=getattr(os,"geteuid",None); uid=uid_fn() if uid_fn else None
@@ -143,6 +143,22 @@ _uberdev_dispatch_discard_codex_worktree_receipt() {
   _uberdev_dispatch_python -I -B - "$1" "$2" <<'PY'
 import json,os,stat,sys
 path,token=sys.argv[1:]; parent,name=os.path.dirname(path),os.path.basename(path)
+if os.name=="nt":
+ before=os.lstat(path)
+ if os.path.islink(path) or not stat.S_ISREG(before.st_mode) or before.st_nlink!=1: raise SystemExit(2)
+ descriptor=os.open(path,os.O_RDONLY|getattr(os,"O_BINARY",0)|getattr(os,"O_NOINHERIT",0))
+ try:
+  opened=os.fstat(descriptor); current=os.lstat(path)
+  if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1
+      or (opened.st_dev,opened.st_ino)!=(before.st_dev,before.st_ino)
+      or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)): raise SystemExit(2)
+  raw=os.read(descriptor,65537)
+  if len(raw)>65536 or json.loads(raw).get("token")!=token: raise SystemExit(2)
+  current=os.lstat(path)
+  if os.path.islink(path) or (current.st_dev,current.st_ino)!=(opened.st_dev,opened.st_ino): raise SystemExit(2)
+ finally: os.close(descriptor)
+ os.unlink(path)
+ raise SystemExit(0)
 parent_fd=os.open(parent,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0)); descriptor=None
 try:
  descriptor=os.open(name,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0),dir_fd=parent_fd)
@@ -169,6 +185,27 @@ _uberdev_dispatch_cleanup_codex_worktree() {
 import json,os,stat,sys
 repo_arg,relative,branch,path,token=sys.argv[1:]
 repo=os.path.realpath(repo_arg); parent,name=os.path.dirname(path),os.path.basename(path)
+if os.name=="nt":
+ before=os.lstat(path)
+ if os.path.islink(path) or not stat.S_ISREG(before.st_mode) or before.st_nlink!=1: raise SystemExit(2)
+ descriptor=os.open(path,os.O_RDONLY|getattr(os,"O_BINARY",0)|getattr(os,"O_NOINHERIT",0))
+ try:
+  opened=os.fstat(descriptor); current=os.lstat(path)
+  if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1
+      or (opened.st_dev,opened.st_ino)!=(before.st_dev,before.st_ino)
+      or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)): raise SystemExit(2)
+  raw=os.read(descriptor,65537)
+  if len(raw)>65536: raise SystemExit(2)
+  value=json.loads(raw)
+ finally: os.close(descriptor)
+ expected={"schema_version":1,"repo":repo,"relative":relative,"worktree":os.path.abspath(os.path.join(repo,*relative.split('/'))),"branch":branch,"token":token}
+ if value!=expected: raise SystemExit(2)
+ target=value["worktree"]; root=os.path.join(repo,".claude","worktrees")
+ if os.path.commonpath((root,target))!=root or branch!="worktree-"+relative.rsplit('/',1)[-1]: raise SystemExit(2)
+ entry=os.lstat(target)
+ if os.path.islink(target) or not stat.S_ISDIR(entry.st_mode): raise SystemExit(2)
+ print(target,end="")
+ raise SystemExit(0)
 parent_fd=os.open(parent,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0)); descriptor=None
 try:
  descriptor=os.open(name,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0),dir_fd=parent_fd)
@@ -194,11 +231,20 @@ PY
 )" || return 2
   (
     cd "$repo_root" || exit 2
-    [ -z "$(git -C "$target" status --porcelain --untracked-files=all)" ] || exit 3
+    branch_exists=0
+    if git show-ref --verify --quiet "refs/heads/$branch"; then
+      branch_exists=1
+    else
+      show_ref_rc=$?
+      [ "$show_ref_rc" -eq 1 ] || exit 2
+    fi
+    local_status="$(git -C "$target" status --porcelain --untracked-files=all)" || exit 2
+    [ -z "$local_status" ] || exit 3
     git worktree remove --force "$target" || exit 2
     [ ! -e "$target" ] || exit 2
-    if git show-ref --verify --quiet "refs/heads/$branch"; then
-      if git worktree list --porcelain | grep -Fqx "branch refs/heads/$branch"; then exit 2; fi
+    if [ "$branch_exists" -eq 1 ]; then
+      worktree_list="$(git worktree list --porcelain)" || exit 2
+      if printf '%s\n' "$worktree_list" | grep -Fqx "branch refs/heads/$branch"; then exit 2; fi
       git branch -D "$branch" >/dev/null || exit 2
     fi
   ) || return 2
@@ -639,7 +685,7 @@ def secure_read(path,limit):
   os.close(parent_fd)
 try:
  snapshot=json.loads(secure_read(status_path,65536))
- allowed={"issue","tier","backend","state","exit_code","pid","log","result","worktree","branch","process_identity","lease_generation"}
+ allowed={"issue","tier","backend","state","exit_code","pid","log","result","worktree","branch","workspace_mode","process_identity","lease_generation"}
  if not isinstance(snapshot,dict) or set(snapshot)-allowed: raise ValueError()
  if snapshot.get("backend")!=backend or str(snapshot.get("pid"))!=pid: raise ValueError()
  state=snapshot.get("state"); code=snapshot.get("exit_code")
@@ -1363,11 +1409,14 @@ _uberdev_dispatch_codex() {
   DISPATCH_ID=""
   local INSTANCE_SLUG
   INSTANCE_SLUG="$(_uberdev_dispatch_instance_slug)" || { DISPATCH_RC=1; return 1; }
+  local STATUS_FILE="${UBERDEV_AGENT_STATUS_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-codex-status-$ISSUE_NUM.json}"
+  local LOG_FILE="${STATUS_FILE}.log"
+  local RESULT_FILE="${UBERDEV_AGENT_RESULT_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-codex-result-$ISSUE_NUM.md}"
+  local WORKSPACE_MODE="${UBERDEV_AGENT_WORKSPACE_MODE:-isolated}"
+  local WORKSPACE_DIR="${UBERDEV_AGENT_WORKSPACE_DIR:-}"
   local WORKTREE_DIR=".claude/worktrees/solve-issue-$ISSUE_NUM-$INSTANCE_SLUG"
   local WORKTREE_BRANCH="worktree-solve-issue-$ISSUE_NUM-$INSTANCE_SLUG"
-  local LOG_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-codex-stdout-$ISSUE_NUM.log"
-  local STATUS_FILE="${UBERDEV_AGENT_STATUS_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-codex-status-$ISSUE_NUM.json}"
-  local RESULT_FILE="${UBERDEV_AGENT_RESULT_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-codex-result-$ISSUE_NUM.md}"
+  local EXECUTION_DIR="$WORKTREE_DIR"
   local ROUTE_MODEL="${UBERDEV_AGENT_ROUTE_MODEL:-gpt-5.6-sol}"
   local ROUTE_EFFORT="${UBERDEV_AGENT_ROUTE_EFFORT:-medium}"
   local ROUTE_SERVICE_TIER="${UBERDEV_AGENT_SERVICE_TIER:-default}"
@@ -1376,6 +1425,18 @@ _uberdev_dispatch_codex() {
   local REPOSITORY_ROOT WORKTREE_RECEIPT WORKTREE_TOKEN=''
   local CHILD_OWNED="${UBERDEV_AGENT_CHILD_OWNED:-0}"
   REPOSITORY_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)" || { DISPATCH_RC=1; return 1; }
+  case "$WORKSPACE_MODE" in
+    isolated) [ -z "$WORKSPACE_DIR" ] || { DISPATCH_RC=3; return 3; } ;;
+    caller)
+      [ -n "$WORKSPACE_DIR" ] && [ -d "$WORKSPACE_DIR" ] || { DISPATCH_RC=3; return 3; }
+      WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" 2>/dev/null && pwd -P)" || { DISPATCH_RC=3; return 3; }
+      [ "$WORKSPACE_DIR" = "$REPOSITORY_ROOT" ] || { DISPATCH_RC=3; return 3; }
+      EXECUTION_DIR="$WORKSPACE_DIR"
+      WORKTREE_DIR=''
+      WORKTREE_BRANCH=''
+      ;;
+    *) DISPATCH_RC=3; return 3 ;;
+  esac
   WORKTREE_RECEIPT="$STATUS_FILE.worktree-owner.json"
   if [ "$EFFECTIVE_POLICY" = inherit ]; then
     ROUTE_MODEL=""
@@ -1395,7 +1456,7 @@ _uberdev_dispatch_codex() {
   if ! _uberdev_dispatch_prepare_tmp_target "$RESULT_FILE" "$ISSUE_NUM" "codex"; then
     DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
   fi
-  if [ "$CHILD_OWNED" = "1" ]; then
+  if [ "$WORKSPACE_MODE" = isolated ] && [ "$CHILD_OWNED" = "1" ]; then
     WORKTREE_TOKEN="$(_uberdev_dispatch_create_codex_worktree_receipt \
       "$REPOSITORY_ROOT" "$WORKTREE_DIR" "$WORKTREE_BRANCH" "$WORKTREE_RECEIPT")" || {
         DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3;
@@ -1404,7 +1465,7 @@ _uberdev_dispatch_codex() {
   # Explicit dispatcher-controlled worktree (same rationale as the background
   # arm — sidesteps backend-specific worktree handling; MSYS_NO_PATHCONV for
   # Git Bash on Windows).
-  if ! MSYS_NO_PATHCONV=1 git worktree add "$WORKTREE_DIR" -b "$WORKTREE_BRANCH" >"$LOG_FILE" 2>&1; then
+  if [ "$WORKSPACE_MODE" = isolated ] && ! MSYS_NO_PATHCONV=1 git worktree add "$WORKTREE_DIR" -b "$WORKTREE_BRANCH" >"$LOG_FILE" 2>&1; then
     [ "$CHILD_OWNED" != "1" ] || _uberdev_dispatch_discard_codex_worktree_receipt "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" >/dev/null 2>&1 || true
     DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
@@ -1415,7 +1476,7 @@ _uberdev_dispatch_codex() {
   # Validate readability without copying prompt content into argv. Codex exec
   # accepts positional `-` and reads the instruction from stdin.
   if [ ! -f "$PROMPT_FILE" ] || [ ! -r "$PROMPT_FILE" ]; then
-    [ "$CHILD_OWNED" != "1" ] || _uberdev_dispatch_cleanup_codex_worktree "$REPOSITORY_ROOT" "$WORKTREE_DIR" "$WORKTREE_BRANCH" \
+    [ "$WORKSPACE_MODE" != isolated ] || [ "$CHILD_OWNED" != "1" ] || _uberdev_dispatch_cleanup_codex_worktree "$REPOSITORY_ROOT" "$WORKTREE_DIR" "$WORKTREE_BRANCH" \
       "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" failed >/dev/null 2>&1 || true
     DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
@@ -1471,7 +1532,7 @@ os.execvp("bash",argv)' '
       STATUS_FILE="$3"
       RESULT_FILE="$4"
       LOG_FILE="$5"
-      WORKTREE_DIR="$6"
+      EXECUTION_DIR="$6"
       WORKTREE_BRANCH="$7"
       PROMPT_FILE="$8"
       ROUTE_MODEL="$9"
@@ -1483,18 +1544,20 @@ os.execvp("bash",argv)' '
       WORKTREE_TOKEN="${15}"
       DISPATCH_LIB="${16}"
       CHILD_OWNED="${17}"
-      shift 17
+      WORKSPACE_MODE="${18}"
+      shift 18
       WRAPPER_PID="${UBERDEV_WRAPPER_PID:-$$}"
       CLEANUP_DONE=0
+      FINAL_STATUS_WRITTEN=0
       TERMINAL_STATE=failed
 
       cleanup_worktree() {
         [ "$CLEANUP_DONE" -eq 0 ] || return 0
-        if [ "$CHILD_OWNED" != "1" ]; then CLEANUP_DONE=1; return 0; fi
+        if [ "$WORKSPACE_MODE" = caller ] || [ "$CHILD_OWNED" != "1" ]; then CLEANUP_DONE=1; return 0; fi
         if (
           cd "$REPOSITORY_ROOT" || exit 2
           . "$DISPATCH_LIB" || exit 2
-          _uberdev_dispatch_cleanup_codex_worktree "$REPOSITORY_ROOT" "$WORKTREE_DIR" "$WORKTREE_BRANCH" \
+          _uberdev_dispatch_cleanup_codex_worktree "$REPOSITORY_ROOT" "$EXECUTION_DIR" "$WORKTREE_BRANCH" \
             "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" "$TERMINAL_STATE"
         ); then
           CLEANUP_DONE=1
@@ -1503,7 +1566,25 @@ os.execvp("bash",argv)' '
         return 2
       }
 
-      trap "cleanup_worktree >/dev/null 2>&1 || true" EXIT
+      finalize_on_exit() {
+        _exit_rc=$?
+        [ "$FINAL_STATUS_WRITTEN" -eq 0 ] || return 0
+        _exit_state="$TERMINAL_STATE"
+        if ! cleanup_worktree; then
+          printf "codex dispatch: failed to clean child worktree %s (%s)\n" "$EXECUTION_DIR" "$WORKTREE_BRANCH" >&2
+          _exit_rc=74
+          _exit_state=failed
+        elif [ "$_exit_state" = cancelled ]; then
+          _exit_rc=143
+        else
+          _exit_state=failed
+          [ "$_exit_rc" -ne 0 ] || _exit_rc=70
+        fi
+        write_status "$_exit_state" "$_exit_rc" || \
+          printf "codex dispatch: failed to write terminal status file: %s\n" "$STATUS_FILE" >&2
+      }
+
+      trap finalize_on_exit EXIT
       trap "TERMINAL_STATE=cancelled; exit 143" HUP INT TERM
 
       write_status() {
@@ -1511,7 +1592,7 @@ os.execvp("bash",argv)' '
         _exit_code="$2"
         _status_tmp="$(umask 077; mktemp "${STATUS_FILE}.tmp.$$.XXXXXX")" || return 1
         cat > "$_status_tmp" <<EOF_STATUS
-{"issue":$ISSUE_NUM,"tier":"$TIER","backend":"codex","state":"$_state","exit_code":$_exit_code,"pid":"$WRAPPER_PID","log":"$LOG_FILE","result":"$RESULT_FILE","worktree":"$WORKTREE_DIR","branch":"$WORKTREE_BRANCH"}
+{"issue":$ISSUE_NUM,"tier":"$TIER","backend":"codex","state":"$_state","exit_code":$_exit_code,"pid":"$WRAPPER_PID","log":"$LOG_FILE","result":"$RESULT_FILE","worktree":"$EXECUTION_DIR","branch":"$WORKTREE_BRANCH","workspace_mode":"$WORKSPACE_MODE"}
 EOF_STATUS
         _status_rc=$?
         if [ "$_status_rc" -ne 0 ]; then
@@ -1530,7 +1611,7 @@ EOF_STATUS
         exit 126
       fi
 
-      if cd "$WORKTREE_DIR"; then
+      if cd "$EXECUTION_DIR"; then
         CODEX_ROUTE_ARGS=()
         [ -z "$ROUTE_MODEL" ] || CODEX_ROUTE_ARGS+=( -m "$ROUTE_MODEL" )
         [ -z "$ROUTE_EFFORT" ] || CODEX_ROUTE_ARGS+=( -c "model_reasoning_effort=\"$ROUTE_EFFORT\"" )
@@ -1555,7 +1636,7 @@ EOF_STATUS
       fi
       TERMINAL_STATE="$CODEX_STATE"
       if ! cleanup_worktree; then
-        printf "codex dispatch: failed to clean child worktree %s (%s)\n" "$WORKTREE_DIR" "$WORKTREE_BRANCH" >&2
+        printf "codex dispatch: failed to clean child worktree %s (%s)\n" "$EXECUTION_DIR" "$WORKTREE_BRANCH" >&2
         [ "$CODEX_RC" -ne 0 ] || CODEX_RC=74
         CODEX_STATE=failed
         TERMINAL_STATE=failed
@@ -1566,10 +1647,11 @@ EOF_STATUS
         printf "codex dispatch: failed to write final status file: %s\n" "$STATUS_FILE" >&2
         exit 126
       fi
+      FINAL_STATUS_WRITTEN=1
       exit "$CODEX_RC"
-    ' _ "$ISSUE_NUM" "$TIER" "$STATUS_FILE" "$RESULT_FILE" "$LOG_FILE" "$WORKTREE_DIR" "$WORKTREE_BRANCH" "$PROMPT_FILE" \
+    ' _ "$ISSUE_NUM" "$TIER" "$STATUS_FILE" "$RESULT_FILE" "$LOG_FILE" "$EXECUTION_DIR" "$WORKTREE_BRANCH" "$PROMPT_FILE" \
     "$ROUTE_MODEL" "$ROUTE_EFFORT" "$ROUTE_SERVICE_TIER" "$ROUTE_SANDBOX" \
-    "$REPOSITORY_ROOT" "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" "$_UBERDEV_DISPATCH_FILE" "$CHILD_OWNED" "${BG_TURBO_ENV[@]}" \
+    "$REPOSITORY_ROOT" "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" "$_UBERDEV_DISPATCH_FILE" "$CHILD_OWNED" "$WORKSPACE_MODE" "${BG_TURBO_ENV[@]}" \
     >"$LOG_FILE" 2>&1 &
   DISPATCH_RC=$?
   local LAUNCH_PID="$!"

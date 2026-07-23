@@ -135,6 +135,7 @@ assert not claude_log.exists() or not claude_log.read_text(), claude_log.read_te
 statuses = []
 worktrees = set()
 branches = set()
+child_logs = set()
 for instance in instances:
     child = run_dir / "children" / instance
     handoff = json.loads((run_dir / "handoffs" / f"{instance}.json").read_text())
@@ -145,6 +146,9 @@ for instance in instances:
     assert status["backend"] == "codex", status
     worktrees.add(status["worktree"])
     branches.add(status["branch"])
+    child_logs.add(status["log"])
+    assert status["log"] == str(child / "status.json") + ".log", status
+    assert pathlib.Path(status["log"]).is_file(), status["log"]
     worktree = pathlib.Path(status["worktree"])
     if not worktree.is_absolute():
         worktree = repo / worktree
@@ -156,13 +160,14 @@ for instance in instances:
     )
     assert probe.returncode != 0, branch
 
-assert len(worktrees) == len(branches) == 6, (worktrees, branches)
+assert len(worktrees) == len(branches) == len(child_logs) == 6, (worktrees, branches, child_logs)
 if failed:
     assert statuses.count("failed") == 1 and statuses.count("completed") == 5, statuses
 else:
     assert statuses == ["completed"] * 6, statuses
 
-state = run_dir / f".agent-state-{os.geteuid()}"
+uid_fn = getattr(os, "geteuid", None)
+state = run_dir / f".agent-state-{uid_fn() if uid_fn is not None else 0}"
 leases = list((state / "semaphore-v1").rglob("*.lease"))
 assert not leases, leases
 events = [json.loads(line) for line in (state / "agent-lifecycle.jsonl").read_text().splitlines() if line]

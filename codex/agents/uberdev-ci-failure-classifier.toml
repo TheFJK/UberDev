@@ -74,4 +74,6 @@ signal_anchor: "<file:line>" | "gh-run-<id>:<lineno>"
 rationale: "<short, no log quotes>"
 risks: []
 ```
+
+For `status: CLASSIFIED`, `signal_anchor` is mandatory: the component before `:` must be non-empty and the line must be a positive integer. Never emit a blank anchor, `:<line>`, `<file>:0`, or an unsupported pointer shape.
 """

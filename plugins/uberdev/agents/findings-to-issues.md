@@ -41,10 +41,17 @@ Explicit forbidden patterns:
 
 1. **Validate inputs.** Verify `working_dir` resolves to an absolute path inside the current git worktree (`git -C "$working_dir" rev-parse --is-inside-work-tree`). For each non-empty `phase*_aggregate_path`, verify the file exists and its first 128 bytes contain the literal string `<external-untrusted-input source="post-impl-review-aggregate">` (or `simplify-aggregate` for phase 2, or `ci-refused-synthetic` for the CI-REFUSED single-row dispatch path added in #116 / O5 — see `commands/review-pr.md` Step 6c.5, or `uberscan-aggregate` for the `/uberscan` whole-codebase audit path, or `testers-aggregate` for the `/uberdev:testers` adversarial QA audit path, or `uberthink-aggregate` for the `/uberthink` ideation-engine deliver path). The accepted-source allow-list is the closed set `{post-impl-review-aggregate, simplify-aggregate, ci-refused-synthetic, uberscan-aggregate, ubersimplify-aggregate, testers-aggregate, uberthink-aggregate}`. The `/ubersimplify` whole-codebase fix command files its leftover (non-applied blocker) findings under `ubersimplify-aggregate`. The `/uberdev:testers` adversarial QA squad files its `verified: true` persona findings under `testers-aggregate` (`skills/testers-pipeline/report.py`). The `/uberthink` ideation engine files its top-ranked design candidate(s) under `uberthink-aggregate`. If either check fails OR both paths are empty, return `status: REFUSED` with `rationale: "input-malformed"`. Source the secret-scan library: `source "${CLAUDE_PLUGIN_ROOT}/lib/secret-scan.sh"` — refuse with `rationale: "secret-scan-lib-unavailable"` if the source returns non-zero.
 
-2. **Rate-limit pre-flight (two buckets).** Run BOTH probes:
+2. **Rate-limit pre-flight (two buckets).** Fetch one canonical response and parse both integers locally so shell quoting, `gh --jq` output, or a partial second request cannot turn a healthy API into two empty values:
    ```bash
-   CORE_REMAINING=$(gh api rate_limit --jq '.resources.core.remaining' 2>/dev/null)
-   SEARCH_REMAINING=$(gh api rate_limit --jq '.resources.search.remaining' 2>/dev/null)
+   RATE_LIMIT_JSON=$(gh api /rate_limit 2>&1)
+   RATE_LIMIT_RC=$?
+   if [ "$RATE_LIMIT_RC" -eq 0 ] && printf '%s' "$RATE_LIMIT_JSON" | jq -e '.resources | type == "object"' >/dev/null 2>&1; then
+     CORE_REMAINING=$(printf '%s' "$RATE_LIMIT_JSON" | jq -er '.resources.core.remaining | select(type == "number" and floor == .)') || CORE_REMAINING=""
+     SEARCH_REMAINING=$(printf '%s' "$RATE_LIMIT_JSON" | jq -er '.resources.search.remaining | select(type == "number" and floor == .)') || SEARCH_REMAINING=""
+   else
+     CORE_REMAINING=""
+     SEARCH_REMAINING=""
+   fi
    ```
    The core bucket funds `gh issue create` / `gh issue comment` / `gh label create` / `gh api`. The Search bucket (30 req/min, 1000/hr authenticated) funds the dedupe lookup `gh issue list --search "$FP in:body"` in Step 8b. They are separate budgets — checking only `core` is insufficient because Search exhaustion silently maps dedupe lookups into `blocked_by_dedupe[]` with no issues filed and no clear rate-limit signal to the operator.
 

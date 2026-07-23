@@ -671,6 +671,38 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
     The agent returns YAML — see `plugins/uberdev/agents/ci-failure-classifier.md` for the canonical contract. On `status: AMBIGUOUS` (no regex matched), caller falls back to treating it as `flaky` for routing purposes (re-run once, then halt). **Emit `ci_classify_ambiguous_routing_as_flaky` audit event when this fallback fires** — the original AMBIGUOUS state must surface in the post-mortem trail; conflating it with a known-transient `flaky` classification (without a distinct audit signal) loses root-cause context if the flaky re-run also fails.
 
+    Before ROUTE, validate the parsed controller fields fail-closed. A `CLASSIFIED` result requires `failure_class` to be one of the six `CI_FAILURE_CLASS_ENUM` values and `signal_anchor` to be a non-empty pointer whose path/run component is non-empty and whose line is a positive integer. In particular, `:121`, `file:0`, blank anchors, unknown classes, and duplicate controller fields are contract violations: emit `ci_classify_returned` with `data.subreason=contract_invalid`, set `OUTCOME=halted`, and exit 1. Never repair or reinterpret an invalid classifier result as `platform_outage` or `flaky`.
+
+    ```bash
+    review_validate_ci_classification() {
+      python3 -I -B - "$1" <<'PY'
+import pathlib,re,sys
+raw=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+if len(raw.encode())>65536: raise SystemExit(2)
+fields={}
+for line in raw.splitlines():
+    match=re.fullmatch(r'(status|failure_class|signal_anchor):[ \t]*(.*)',line)
+    if not match: continue
+    key,value=match.groups()
+    if key in fields: raise SystemExit(2)
+    fields[key]=value.strip().strip('"').strip("'")
+if fields.get('status')=='AMBIGUOUS':
+    if fields.get('failure_class') not in {None,'','null'}: raise SystemExit(2)
+    print('flaky\t'); raise SystemExit(0)
+classes={'code_bug','billing_quota','platform_outage','flaky','env_drift','stale_base'}
+anchor=fields.get('signal_anchor','')
+if fields.get('status')!='CLASSIFIED' or fields.get('failure_class') not in classes: raise SystemExit(2)
+if not re.fullmatch(r'(?:gh-run-[1-9][0-9]*|[A-Za-z0-9._/-]+):[1-9][0-9]*',anchor): raise SystemExit(2)
+print(fields['failure_class']+'\t'+anchor)
+PY
+    }
+    IFS=$'\t' read -r failure_class signal_anchor < <(review_validate_ci_classification "$CI_CLASSIFICATION_PATH") || {
+      audit ci_classify_returned subreason=contract_invalid
+      OUTCOME=halted
+      exit 1
+    }
+    ```
+
     ### 6c.4 ROUTE — failure_class → downstream agent
 
     ```bash
@@ -737,6 +769,13 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
           Construct a synthetic single-row aggregate wrapped in the `<external-untrusted-input source="ci-refused-synthetic">…</external-untrusted-input>` envelope (the receiving agent's Step 1 input validation recognises this source attribute — see `agents/findings-to-issues.md` Step 1 accepted-source allow-list). The aggregate carries one finding-row with `severity: critical`, `tier: CRITICAL`, `failure_class: <from-ci-code-fixer-return>`, `check_name: <from-ci-code-fixer-return>`, `signal_anchor: <from-ci-code-fixer-return>`, and `rationale: <from-ci-code-fixer-return>`. Title is built downstream by the agent using its existing CRITICAL-tier shape (`[finding] $file_path:$line — $summary`); labels and `--assignee` flag come from the agent's tier-aware bindings (`--label review-pr-finding`, `--assignee @<pr-author>`). The agent's return YAML's `created_urls[0].url` is captured into `CI_REFUSED_ISSUE_URL`.
 
           ```bash
+          CI_REFUSED_AGGREGATE_PATH="$RESEARCH_DIR_ABS/ci-refused-synthetic-${CI_FIX_LOOP_ITER:-1}.md"
+          if ! (umask 077; set -C; : >"$CI_REFUSED_AGGREGATE_PATH"); then
+            audit ci_phase_outcome data.outcome=halted data.subreason=ci_refused_aggregate_create_failed
+            exit 1
+          fi
+          # Write the ci-refused-synthetic envelope and finding row to the
+          # noclobber-created artifact before constructing the child request.
           CI_DEFER_INPUTS="$(uberdev_child_inputs_build review_pr.ci.defer_refusal \
             phase1_path "$(review_json_string "$CI_REFUSED_AGGREGATE_PATH")" \
             working_dir "$(review_json_string "$WORKTREE_ROOT")" \
@@ -744,7 +783,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
           review_child_single review_pr.ci.defer_refusal "review-pr-${RUN_ID}-ci-defer-refusal-iter${CI_FIX_LOOP_ITER:-1}-attempt01" "$CI_DEFER_INPUTS" null "$RESEARCH_DIR_ABS/ci-defer" "$REVIEW_PR_TIMEOUT"
           ```
 
-          The `<tmp-synthetic-aggregate.md>` slot is a freshly-created `mktemp` file whose first 128 bytes contain the literal envelope marker shown above (source attribute `ci-refused-synthetic`).
+          `CI_REFUSED_AGGREGATE_PATH` is a fresh command-owned artifact at `$RESEARCH_DIR_ABS/ci-refused-synthetic-${CI_FIX_LOOP_ITER:-1}.md`, created with `umask 077` and noclobber before writing the envelope. It must remain beneath the canonical run research directory so the child handoff's `path` validation accepts it; do not use system `mktemp` or any path outside `$WORKTREE_ROOT`. Its first 128 bytes contain the literal envelope marker shown above (source attribute `ci-refused-synthetic`).
 
           After dispatch returns, the caller captures TWO fields from the agent's YAML return: `CI_REFUSED_ISSUE_URL` from `created_urls[0].url` (empty string if missing) AND `$rationale` from the top-level `rationale` field (empty string if missing).
 

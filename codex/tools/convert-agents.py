@@ -34,9 +34,8 @@ from __future__ import annotations
 
 import re
 import importlib.util
-import json
 import sys
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 # NOTE: PyYAML is intentionally NOT used for frontmatter parsing. UberDev's
 # agent .md files use Claude-Code-style frontmatter, which is *lenient* about
@@ -47,7 +46,6 @@ from pathlib import Path, PurePosixPath
 
 
 POLICY_FILENAME = "model-routing-v1.json"
-RUN_TREE_FILENAME = "solve-run-tree-v1.json"
 
 FRONTMATTER_RE = re.compile(r"\A---[ \t]*\n(.*?)\n---[ \t]*(?:\n|\Z)(.*)\Z", re.DOTALL)
 
@@ -240,55 +238,6 @@ def load_routing_policy(path: Path) -> dict:
     return policy
 
 
-def load_role_output_contracts(plugin_root: Path) -> dict[str, str]:
-    """Resolve manifest-declared role output contracts from the plugin SSOT."""
-    manifest_path = plugin_root / "policy" / RUN_TREE_FILENAME
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError) as exc:
-        raise ValueError(f"cannot read output contracts from {manifest_path}: {type(exc).__name__}") from exc
-    edges = manifest.get("edges")
-    contracts = manifest.get("output_contracts")
-    if not isinstance(edges, dict) or not isinstance(contracts, dict):
-        raise ValueError(f"invalid output contract manifest: {manifest_path}")
-
-    root = plugin_root.resolve()
-    resolved_contracts: dict[str, str] = {}
-    role_contracts: dict[str, str] = {}
-    for edge_id, row in edges.items():
-        if not isinstance(row, dict) or "output_contract" not in row:
-            continue
-        role = row.get("role")
-        contract_id = row.get("output_contract")
-        relative = contracts.get(contract_id) if isinstance(contract_id, str) else None
-        if not isinstance(role, str) or not role or not isinstance(relative, str) or not relative:
-            raise ValueError(f"invalid output contract binding for edge {edge_id}")
-        pure = PurePosixPath(relative)
-        if (
-            pure.is_absolute()
-            or "\\" in relative
-            or any(part in {"", ".", ".."} for part in pure.parts)
-            or pure.as_posix() != relative
-        ):
-            raise ValueError(f"unsafe output contract path for edge {edge_id}")
-        if contract_id not in resolved_contracts:
-            path = (plugin_root / Path(*pure.parts)).resolve()
-            try:
-                path.relative_to(root)
-                contract_text = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeError, ValueError) as exc:
-                raise ValueError(f"cannot read output contract for edge {edge_id}") from exc
-            if not contract_text or len(contract_text.encode("utf-8")) > 65536:
-                raise ValueError(f"invalid output contract for edge {edge_id}")
-            resolved_contracts[contract_id] = contract_text
-        contract_text = resolved_contracts[contract_id]
-        previous = role_contracts.get(role)
-        if previous is not None and previous != contract_text:
-            raise ValueError(f"role {role} has conflicting output contracts")
-        role_contracts[role] = contract_text
-    return role_contracts
-
-
 def role_profile(policy: dict, role: str, source: str) -> tuple[str, str, str]:
     """Resolve one role's default model, effort, and sandbox from the policy."""
     role_policy = policy["roles"].get(role)
@@ -398,7 +347,6 @@ def render_toml(
     body: str,
     source: str,
     policy: dict,
-    output_contract: str | None = None,
 ) -> str:
     """Render the full Codex agent TOML document."""
     lines: list[str] = []
@@ -415,8 +363,6 @@ def render_toml(
     name = f"uberdev-{source_name}"
     description = codex_port_text(description)
     body = codex_port_text(body)
-    if output_contract is not None:
-        body = body.rstrip() + "\n\n" + output_contract
 
     lines.append(f"name = {toml_escape_scalar(name)}")
     lines.append(f"description = {toml_block(description)}")
@@ -457,7 +403,6 @@ def convert_dir(src_dir: Path, out_dir: Path) -> tuple[int, int]:
 
     try:
         policy = load_routing_policy(src_dir.parent / "policy" / POLICY_FILENAME)
-        role_output_contracts = load_role_output_contracts(src_dir.parent)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 0, 1
@@ -466,8 +411,7 @@ def convert_dir(src_dir: Path, out_dir: Path) -> tuple[int, int]:
         source_name = md_path.name
         try:
             fm, body = parse_agent(md_path)
-            output_contract = role_output_contracts.get(fm.get("name", ""))
-            toml_text = render_toml(fm, body, source_name, policy, output_contract)
+            toml_text = render_toml(fm, body, source_name, policy)
         except (ValueError, OSError) as e:
             print(f"error: {e}", file=sys.stderr)
             fail += 1

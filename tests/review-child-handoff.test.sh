@@ -113,6 +113,23 @@ assert prompt.count(contract)==1
 assert needle in prompt
 PY
 
+# Mutating review edges execute in the immutable caller repository. Reviewers
+# remain isolated, and a different working_dir is rejected before dispatch.
+caller_input="$(jq -cn --arg p "$path" --arg d "$TEST_REPO" '{findings_path:$p,commit_range_path:$p,working_dir:$d,pr_number:1,disposition_path:$p}')"
+uberdev_create_child_handoff review_pr.fix.phase1 review-caller-mode-iter1-attempt01 "$caller_input" null >/dev/null
+caller_prepared="$(_uberdev_child_prepare review_pr.fix.phase1 "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch)"
+jq -e --arg repo "$TEST_REPO" '.request.workspace_mode=="caller" and .request.workspace_dir==$repo' <<<"$caller_prepared" >/dev/null
+reviewer_input="$(jq -cn --arg p "$path" '{changed_paths:["README.md"],diff_path:$p,criteria_path:$p,emphasis:[]}')"
+uberdev_create_child_handoff review_pr.review.types review-isolated-mode-iter1-attempt01 "$reviewer_input" '[]' >/dev/null
+reviewer_prepared="$(_uberdev_child_prepare review_pr.review.types "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch)"
+jq -e '.request.workspace_mode=="isolated" and (.request|has("workspace_dir")|not)' <<<"$reviewer_prepared" >/dev/null
+OTHER_REPO="$TMP/other-repo"; mkdir -p "$OTHER_REPO"
+mismatch_input="$(jq -cn --arg p "$path" --arg d "$OTHER_REPO" '{findings_path:$p,commit_range_path:$p,working_dir:$d,pr_number:1,disposition_path:$p}')"
+if uberdev_create_child_handoff review_pr.fix.phase1 review-mismatch-mode-iter1-attempt01 "$mismatch_input" null >/dev/null 2>&1; then
+  echo 'caller workspace mismatch accepted' >&2
+  exit 1
+fi
+
 # A standalone simplify run may omit an additional focus hint.
 for lens in reuse quality efficiency; do
   edge="review_pr.simplify.$lens"

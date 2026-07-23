@@ -142,7 +142,7 @@ fi
 
 # --- 7b. Review contract integrity: the six routed edges share one manifest
 # contract, changed_paths is repository-relative metadata, both runtimes ship
-# byte-identical schema, and native Codex roles embed that exact schema. ---
+# byte-identical schema, and native Codex roles do not promote edge contracts. ---
 if python3 -I -B - "$ROOT" <<'PY'
 import json,pathlib,sys
 root=pathlib.Path(sys.argv[1])
@@ -168,10 +168,10 @@ if codex_plugin.is_dir():
     import tomllib
     for role in ('code-reviewer','silent-failure-hunter','type-design-analyzer','comment-analyzer','pr-test-analyzer'):
         data=tomllib.loads((root/f'codex/agents/prkit-{role}.toml').read_text())
-        assert data['developer_instructions'].count(codex)==1, role
+        assert codex not in data['developer_instructions'], role
 PY
-then ok "review-contract: routed manifests + native Codex prompts agree"
-else fail "review-contract: manifest/schema/native prompt drift"; fi
+then ok "review-contract: routed manifests agree and native roles stay edge-local"
+else fail "review-contract: manifest/schema/native role scoping drift"; fi
 
 # --- 8. Root scaffold files (outside the SCAN roots) — present, non-empty, valid ---
 for req in README.md LICENSE NOTICE CHANGELOG.md .gitignore \
