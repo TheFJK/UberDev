@@ -1151,14 +1151,41 @@ PY
 # Once launch succeeds, a failure to bind the exact handle must cancel that
 # provider and reconcile a terminal instead of returning an unowned child.
 . "$ROOT/plugins/uberdev/lib/dispatch.sh"
+PRE_RUN="$TMP/pre-launch-identity-failure"
+mkdir -p "$PRE_RUN"
+printf 'pre-launch failure prompt\n' > "$PRE_RUN/prompt.txt"
+PRE_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-pre-launch-identity-failure","repository_id":"adapter-prelaunch-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":95,"issue_num":95,"capacity":1,"timeout_s":20},separators=(",",":")))' "$PRE_RUN")"
+eval "$(declare -f uberdev_semaphore_set_handle | sed '1s/uberdev_semaphore_set_handle/_real_prelaunch_set_handle/')"
+uberdev_semaphore_set_handle() { return 23; }
+rm -f "$PRE_RUN/provider-called"
+_uberdev_agent_dispatch_backend() { : > "$PRE_RUN/provider-called"; return 0; }
+if uberdev_agent_dispatch "$PRE_REQUEST" "$PRE_RUN/prompt.txt" "$PRE_RUN/result.md" "$PRE_RUN/status.json"; then
+  echo "pre-launch identity failure was reported as success" >&2; exit 1
+fi
+[ ! -e "$PRE_RUN/provider-called" ] || { echo "pre-launch identity failure reached the provider seam" >&2; exit 1; }
+grep -q '"state":"failed"' "$PRE_RUN/status.json"
+python3 -I - "$PRE_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" <<'PY'
+import json,pathlib,sys
+rows=[json.loads(x) for x in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+terminal=[x for x in rows if x.get('run_id')=='adapter-pre-launch-identity-failure' and x.get('event')=='failed']
+assert len(terminal)==1 and terminal[0].get('error_class')=='dispatch_setup_failed',terminal
+PY
+! grep -R -q 'run_id=adapter-pre-launch-identity-failure' "$PRE_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
+eval "$(declare -f _real_prelaunch_set_handle | sed '1s/_real_prelaunch_set_handle/uberdev_semaphore_set_handle/')"
+PRE_REACQUIRED="$(uberdev_semaphore_acquire "$PRE_RUN/.agent-state-$(id -u)" adapter-prelaunch-repository codex 1 adapter-prelaunch-reacquired 20)"
+uberdev_semaphore_release "$PRE_REACQUIRED"
+
 POST_RUN="$TMP/post-launch-setup-failure"
 mkdir -p "$POST_RUN"
 printf 'post-launch failure prompt\n' > "$POST_RUN/prompt.txt"
 POST_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-post-launch-failure","repository_id":"adapter-postlaunch-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":92,"issue_num":92,"capacity":1,"timeout_s":20},separators=(",",":")))' "$POST_RUN")"
 eval "$(declare -f uberdev_semaphore_set_handle | sed '1s/uberdev_semaphore_set_handle/_real_postlaunch_set_handle/')"
-POST_SET_CALLS=0
+POST_SET_CALLS_FILE="$POST_RUN/set-handle-calls"
+printf '0\n' > "$POST_SET_CALLS_FILE"
 uberdev_semaphore_set_handle() {
+  POST_SET_CALLS="$(cat "$POST_SET_CALLS_FILE")"
   POST_SET_CALLS=$((POST_SET_CALLS + 1))
+  printf '%s\n' "$POST_SET_CALLS" > "$POST_SET_CALLS_FILE"
   [ "$POST_SET_CALLS" -ne 2 ] || return 23
   _real_postlaunch_set_handle "$@"
 }

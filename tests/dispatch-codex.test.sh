@@ -172,6 +172,31 @@ git -C "$CLEANUP_TMP/repo" branch -D "$dirty_branch" >/dev/null
 bash -c '. "$1"; _uberdev_dispatch_discard_codex_worktree_receipt "$2" "$3"' \
   _ "$DISPATCH_LIB" "$dirty_receipt" "$dirty_token"
 
+committed_slug="$(UBERDEV_AGENT_INSTANCE_ID=cleanup-committed-a1 bash -c '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"
+committed_relative=".claude/worktrees/solve-issue-335-$committed_slug"
+committed_branch="worktree-solve-issue-335-$committed_slug"
+committed_receipt="$CLEANUP_TMP/runtime/committed.owner.json"
+committed_token="$(bash -c '. "$1"; _uberdev_dispatch_create_codex_worktree_receipt "$2" "$3" "$4" "$5"' \
+  _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$committed_relative" "$committed_branch" "$committed_receipt")"
+git -C "$CLEANUP_TMP/repo" worktree add -q "$committed_relative" -b "$committed_branch"
+printf 'committed child change\n' > "$CLEANUP_TMP/repo/$committed_relative/child.txt"
+git -C "$CLEANUP_TMP/repo/$committed_relative" add child.txt
+git -C "$CLEANUP_TMP/repo/$committed_relative" commit -qm 'test: preserve committed child'
+if bash -c '. "$1"; _uberdev_dispatch_cleanup_codex_worktree "$2" "$3" "$4" "$5" "$6" completed' \
+    _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$committed_relative" "$committed_branch" "$committed_receipt" "$committed_token"; then
+  fail_msg "clean committed child is preserved fail-closed" "cleanup silently discarded the child commit"
+elif [ -d "$CLEANUP_TMP/repo/$committed_relative" ] \
+    && git -C "$CLEANUP_TMP/repo" show-ref --verify --quiet "refs/heads/$committed_branch" \
+    && [ -f "$committed_receipt" ]; then
+  pass_msg "clean committed child is preserved fail-closed"
+else
+  fail_msg "clean committed child is preserved fail-closed" "worktree, branch, or ownership receipt was lost"
+fi
+git -C "$CLEANUP_TMP/repo" worktree remove --force "$committed_relative"
+git -C "$CLEANUP_TMP/repo" branch -D "$committed_branch" >/dev/null
+bash -c '. "$1"; _uberdev_dispatch_discard_codex_worktree_receipt "$2" "$3"' \
+  _ "$DISPATCH_LIB" "$committed_receipt" "$committed_token"
+
 mkdir -p "$CLEANUP_TMP/bin"
 REAL_CLEANUP_GIT="$(command -v git)"
 cat > "$CLEANUP_TMP/bin/git" <<'SH'
@@ -258,6 +283,50 @@ if [ -z "$setup_failure_errors" ]; then
   pass_msg "missing-prompt and launcher-resolution failures remove child worktree, branch, and receipt"
 else
   fail_msg "missing-prompt and launcher-resolution failures remove child worktree, branch, and receipt" "$setup_failure_errors"
+fi
+
+# A nonzero `git worktree add` may still leave both the branch and directory
+# behind. The pre-created receipt remains authoritative until exact cleanup is
+# proven, so this partial-creation path cannot silently discard its evidence.
+PARTIAL_BIN="$SETUP_FAILURE_TMP/partial-bin"
+mkdir -p "$PARTIAL_BIN"
+PARTIAL_REAL_GIT="$(command -v git)"
+cat > "$PARTIAL_BIN/git" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = worktree ] && [ "$2" = add ]; then
+  "$PARTIAL_REAL_GIT" "$@" || exit $?
+  exit 1
+fi
+exec "$PARTIAL_REAL_GIT" "$@"
+SH
+chmod +x "$PARTIAL_BIN/git"
+partial_instance='setup-partial-worktree-a1'
+partial_slug="$(UBERDEV_AGENT_INSTANCE_ID="$partial_instance" bash -c '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"
+partial_relative=".claude/worktrees/solve-issue-335-$partial_slug"
+partial_branch="worktree-solve-issue-335-$partial_slug"
+partial_status="$SETUP_FAILURE_TMP/runtime/partial-status.json"
+set +e
+(
+  cd "$SETUP_FAILURE_TMP/repo/nested/invocation"
+  PATH="$PARTIAL_BIN:$PATH" PARTIAL_REAL_GIT="$PARTIAL_REAL_GIT" \
+    UBERDEV_AGENT_STATUS_FILE="$partial_status" \
+    UBERDEV_AGENT_RESULT_FILE="$SETUP_FAILURE_TMP/runtime/partial-result.md" \
+    UBERDEV_AGENT_CHILD_OWNED=1 UBERDEV_AGENT_INSTANCE_ID="$partial_instance" \
+    bash -c '. "$1"; _uberdev_dispatch_codex 335 small "$2"' \
+      _ "$DISPATCH_LIB" "$SETUP_FAILURE_TMP/prompt.txt"
+)
+partial_rc=$?
+set -e
+partial_errors=''
+[ "$partial_rc" -eq 1 ] || partial_errors="$partial_errors rc-$partial_rc"
+[ ! -e "$SETUP_FAILURE_TMP/repo/$partial_relative" ] || partial_errors="$partial_errors worktree"
+git -C "$SETUP_FAILURE_TMP/repo" show-ref --verify --quiet "refs/heads/$partial_branch" \
+  && partial_errors="$partial_errors branch"
+[ ! -e "$partial_status.worktree-owner.json" ] || partial_errors="$partial_errors receipt"
+if [ -z "$partial_errors" ]; then
+  pass_msg "partial worktree-add failure performs receipt-authorized cleanup"
+else
+  fail_msg "partial worktree-add failure performs receipt-authorized cleanup" "$partial_errors"
 fi
 
 # A failed cleanup is a distinct supervisory failure. The absolute worktree
@@ -742,6 +811,10 @@ mkdir -p "$BEH_TMP/bin" "$BEH_TMP/repo" "$BEH_TMP/tmp"
 cat > "$BEH_TMP/bin/git" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = "-C" ] && [ "$3" = "status" ]; then
+  exit 0
+fi
+if [ "$1" = "-C" ] && [ "$3" = "rev-parse" ] && [ "$4" = "HEAD" ]; then
+  printf '%040d\n' 1
   exit 0
 fi
 if [ "$1" = "worktree" ] && [ "$2" = "add" ]; then

@@ -388,6 +388,18 @@ export UBERDEV_CHILD_TEST_SOURCE="$POST_SOURCE"
 export UBERDEV_COMMAND_WORKSPACE_JSON="$REVIEW_WORKSPACE_JSON"
 . "$TMP/post-prefix.sh"
 
+LONG_REVIEW_RUN_ID="$(python3 -I -B -c 'print("review-run-"+"x"*180,end="")')"
+LONG_REVIEW_CANDIDATE="post-review-${LONG_REVIEW_RUN_ID}-r6-iter7-attempt01"
+LONG_REVIEW_INSTANCE="$(post_review_instance_id "$LONG_REVIEW_CANDIDATE")"
+LONG_REVIEW_REPEAT="$(post_review_instance_id "$LONG_REVIEW_CANDIDATE")"
+if [ "$LONG_REVIEW_INSTANCE" != "$LONG_REVIEW_REPEAT" ] \
+    || [ "${#LONG_REVIEW_INSTANCE}" -gt 128 ] \
+    || ! [[ "$LONG_REVIEW_INSTANCE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] \
+    || ! [[ "$LONG_REVIEW_INSTANCE" =~ -[0-9a-f]{12}$ ]]; then
+  echo "review-child-inputs: long review run id did not produce one stable bounded child identity" >&2
+  exit 1
+fi
+
 HOSTILE_DIR="$RESEARCH_DIR_ABS"$'/review dir\nwith "quotes" and \\slashes *?[x]'
 mkdir -p "$HOSTILE_DIR"
 # These fixtures are contract-accepted repository-relative paths after

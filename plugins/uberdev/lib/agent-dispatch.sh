@@ -906,7 +906,8 @@ _uberdev_agent_finalize_terminal() {
 
 _uberdev_agent_persist_watcher_error() {
   local status_file="$1" backend="$2" handle="$3" terminal="$4" attempts="$5"
-  python3 -I -B - "$status_file.watcher-error.json" "$backend" "$handle" "$terminal" "$attempts" <<'PY'
+  local target="${6:-$status_file.watcher-error.json}"
+  python3 -I -B - "$target" "$backend" "$handle" "$terminal" "$attempts" <<'PY'
 import json,os,stat,sys,tempfile
 path,backend,handle,terminal,attempts=sys.argv[1:]
 parent=os.path.dirname(path)
@@ -931,9 +932,28 @@ finally:
 PY
 }
 
+_uberdev_agent_persist_watcher_error_retry() {
+  local status_file="$1" fallback_file="$2" backend="$3" handle="$4" terminal="$5" attempts="$6"
+  local attempt=1
+  while [ "$attempt" -le 3 ]; do
+    _uberdev_agent_persist_watcher_error "$status_file" "$backend" "$handle" "$terminal" "$attempts" && return 0
+    [ "$attempt" -ge 3 ] || sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  attempt=1
+  while [ "$attempt" -le 3 ]; do
+    _uberdev_agent_persist_watcher_error "$status_file" "$backend" "$handle" "$terminal" "$attempts" "$fallback_file" && return 0
+    [ "$attempt" -ge 3 ] || sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  return 2
+}
+
 _uberdev_agent_start_watcher() {
   local manifest="$1" lease="$2" lease_identity="$3" status_file="$4" backend="$5" handle="$6" request_json="$7" decision="$8"
-  local watcher_pid
+  local watcher_pid watcher_instance watcher_fallback
+  watcher_instance="$(_uberdev_agent_json_get "$request_json" run_id)" || return 2
+  watcher_fallback="$(dirname "$manifest")/$watcher_instance.watcher-error.json"
   (
     local terminal_event='' probe='' absent_count=0 indeterminate_count=0 event_json='' error_class='' cancel_attempt=0
     while [ -d "$(dirname "$status_file")" ]; do
@@ -961,7 +981,10 @@ _uberdev_agent_start_watcher() {
               cancel_attempt=$((cancel_attempt + 1))
             done
             [ -z "$terminal_event" ] || break
-            _uberdev_agent_persist_watcher_error "$status_file" "$backend" "$handle" "$probe" 3 || true
+            if ! _uberdev_agent_persist_watcher_error_retry "$status_file" "$watcher_fallback" "$backend" "$handle" "$probe" 3; then
+              _uberdev_agent_error "failed to persist provider cancellation failure: $status_file"
+              exit 70
+            fi
             ;;
           absent)
             indeterminate_count=0
@@ -975,8 +998,8 @@ _uberdev_agent_start_watcher() {
             absent_count=0
             indeterminate_count=$((indeterminate_count + 1))
             if [ "$indeterminate_count" -ge 3 ]; then
-              _uberdev_agent_persist_watcher_error "$status_file" "$backend" "$handle" provider_probe_failed "$indeterminate_count" || \
-                printf 'uberdev agent dispatch: failed to persist provider probe failure for %s\n' "$status_file" >&2
+              _uberdev_agent_persist_watcher_error_retry "$status_file" "$watcher_fallback" "$backend" "$handle" provider_probe_failed "$indeterminate_count" || \
+                _uberdev_agent_error "failed to persist provider probe failure: $status_file"
               if _uberdev_dispatch_cancel_backend claude-bg "$handle" ''; then
                 terminal_event=failed
                 error_class=provider_probe_failed
@@ -1018,10 +1041,10 @@ _uberdev_agent_start_watcher() {
       [ "$finalize_attempt" -ge 3 ] || sleep 0.1
       finalize_attempt=$((finalize_attempt + 1))
     done
-    _uberdev_agent_persist_watcher_error "$status_file" "$backend" "$handle" "$terminal_event" 3 || \
-      printf 'uberdev agent dispatch: failed to persist watcher terminal failure for %s\n' "$status_file" >&2
+    _uberdev_agent_persist_watcher_error_retry "$status_file" "$watcher_fallback" "$backend" "$handle" "$terminal_event" 3 || \
+      _uberdev_agent_error "failed to persist watcher terminal failure: $status_file"
     exit 2
-  ) </dev/null >/dev/null 2>&1 &
+  ) </dev/null >/dev/null &
   watcher_pid="$!"
   disown "$watcher_pid" 2>/dev/null || true
 }
@@ -1058,6 +1081,47 @@ _uberdev_agent_finalize_launch_failure() {
   _uberdev_agent_persist_watcher_error "$status_file" "$backend" '' "launch:$reason" 3 || \
     _uberdev_agent_error "failed to persist launch finalization error: $reason"
   return 2
+}
+
+_uberdev_agent_finalize_prelaunch_failure() {
+  local manifest="$1" lease="$2" status_file="$3" backend="$4" request_json="$5" decision="$6" reason="$7"
+  local event_json started_json outcome=0 attempt=1 persisted=0 released=0
+  started_json="$(_uberdev_agent_event_json agent_started "$request_json" "$decision" '' "$status_file" 2>/dev/null || true)"
+  if [ -z "$started_json" ] || ! _uberdev_agent_append_event "$manifest" "$started_json"; then
+    _uberdev_agent_error "failed to persist pre-launch lifecycle start: $reason"
+    return 2
+  fi
+  while [ "$attempt" -le 3 ]; do
+    if _uberdev_agent_publish_status "$status_file" "$backend" '' failed 70 replace; then
+      persisted=1
+      break
+    fi
+    [ "$attempt" -ge 3 ] || sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  event_json="$(_uberdev_agent_event_json failed "$request_json" "$decision" '' "$status_file" 70 dispatch_setup_failed 2>/dev/null || true)"
+  attempt=1
+  while [ "$attempt" -le 3 ] && [ -n "$event_json" ]; do
+    if _uberdev_agent_append_event "$manifest" "$event_json" || \
+        _uberdev_agent_manifest_terminal_matches "$manifest" "$request_json" failed; then
+      break
+    fi
+    [ "$attempt" -ge 3 ] || sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  [ "$attempt" -le 3 ] && [ -n "$event_json" ] || persisted=0
+  attempt=1
+  while [ "$attempt" -le 3 ]; do
+    if PYTHONPATH= PYTHONHOME= uberdev_semaphore_release "$lease" >/dev/null 2>&1; then
+      released=1
+      break
+    fi
+    [ "$attempt" -ge 3 ] || sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  [ "$persisted" -eq 1 ] && [ "$released" -eq 1 ] || outcome=2
+  [ "$outcome" -eq 0 ] || _uberdev_agent_error "pre-launch finalization failed: $reason"
+  return "$outcome"
 }
 
 _uberdev_agent_abort_after_launch() {
@@ -1174,16 +1238,19 @@ uberdev_agent_dispatch() {
   # Register the canonical status path before the launch boundary.  It may be
   # absent until an opaque provider publishes its first probe; absence is
   # intentionally "unknown", never synthetic evidence that a backend is live.
-  if ! PYTHONPATH= PYTHONHOME= uberdev_semaphore_set_handle "$lease" '' "$status_file"; then
+  lease_identity="$(PYTHONPATH= PYTHONHOME= uberdev_semaphore_set_handle "$lease" '' "$status_file" exact-identity)" || {
     rc=2
-    PYTHONPATH= PYTHONHOME= uberdev_semaphore_release "$lease" >/dev/null 2>&1 || true
+    _uberdev_agent_finalize_prelaunch_failure "$manifest" "$lease" "$status_file" "$backend" \
+      "$request_json" "$decision" lease_identity || true
     DISPATCH_RC="$rc"
     return "$rc"
-  fi
-  lease_identity="$(_uberdev_agent_lease_identity "$lease")" || {
-    _uberdev_agent_persist_watcher_error "$status_file" "$backend" '' launch:lease_identity 1 || true
-    return 2
   }
+  if [ -z "$lease_identity" ]; then
+    _uberdev_agent_finalize_prelaunch_failure "$manifest" "$lease" "$status_file" "$backend" \
+      "$request_json" "$decision" lease_identity || true
+    DISPATCH_RC=2
+    return 2
+  fi
 
   event_json="$(_uberdev_agent_event_json agent_started "$request_json" "$decision" '' "$status_file")" || {
     PYTHONPATH= PYTHONHOME= uberdev_semaphore_release "$lease" >/dev/null 2>&1 || true
@@ -1225,16 +1292,16 @@ uberdev_agent_dispatch() {
   terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
   lease_handle="$handle"
   [ "$backend" != wezterm ] || lease_handle="pane:$handle"
-  if ! PYTHONPATH= PYTHONHOME= uberdev_semaphore_set_handle "$lease" "$lease_handle" "$status_file"; then
+  lease_identity="$(PYTHONPATH= PYTHONHOME= uberdev_semaphore_set_handle "$lease" "$lease_handle" "$status_file" exact-identity)" || {
     _uberdev_agent_abort_after_launch "$manifest" "$lease" "$status_file" "$result_file" \
       "$backend" "$handle" "$request_json" "$decision" lease_handle_update
     return $?
-  fi
-  lease_identity="$(_uberdev_agent_lease_identity "$lease")" || {
+  }
+  if [ -z "$lease_identity" ]; then
     _uberdev_agent_abort_after_launch "$manifest" "$lease" "$status_file" "$result_file" \
       "$backend" "$handle" "$request_json" "$decision" lease_identity
     return $?
-  }
+  fi
   lease_generation="${lease_identity##*:}"
   if [ -n "$terminal_event" ]; then
     _uberdev_agent_finalize_terminal "$manifest" "$lease" "$lease_identity" "$status_file" \

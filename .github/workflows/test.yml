@@ -260,7 +260,6 @@ jobs:
         #   - live-semaphore.test.sh
         #   - agent-dispatch.test.sh
         #   - child-dispatch.test.sh
-        #   - child-dispatch-receipts.test.sh
         #   - child-inputs.test.sh
         #   - child-wait.test.sh
         #   - child-contract-v2.test.sh
@@ -328,6 +327,7 @@ jobs:
           bash tests/dispatch-fallback.test.sh && \
           bash tests/dispatch-background.test.sh && \
           bash tests/dispatch-codex.test.sh && \
+          bash tests/child-dispatch-receipts.test.sh && \
           bash tests/dispatch-wezterm.test.sh && \
           bash tests/ubersimplify.test.sh && \
           bash tests/ubersimplify-aggregate.test.sh && \

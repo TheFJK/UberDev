@@ -194,6 +194,23 @@ post_review_wait_all() {
   return 0
 }
 
+post_review_instance_id() {
+  [ "$#" -eq 1 ] || return 2
+  python3 -I -B - "$1" <<'PY'
+import hashlib,re,sys
+raw=sys.argv[1]
+pattern=re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
+if pattern.fullmatch(raw):
+    print(raw,end=''); raise SystemExit(0)
+if not raw or not re.fullmatch(r'[A-Za-z0-9._-]+',raw): raise SystemExit(2)
+digest=hashlib.sha256(raw.encode()).hexdigest()[:12]
+prefix=raw[:115].rstrip('._-')
+bounded=f'{prefix}-{digest}'
+if not pattern.fullmatch(bounded): raise SystemExit(2)
+print(bounded,end='')
+PY
+}
+
 REVIEW_EDGES=(
   review_pr.review.correctness review_pr.review.silent_failures
   review_pr.review.types review_pr.review.comments
@@ -206,7 +223,7 @@ REVIEW_LAUNCHED="$RESEARCH_DIR_ABS/post-review.launched"
 REVIEW_INDEX=0
 for EDGE_ID in "${REVIEW_EDGES[@]}"; do
   REVIEW_INDEX=$((REVIEW_INDEX + 1))
-  INSTANCE="post-review-${RUN_ID}-r${REVIEW_INDEX}-iter${REVIEW_ITERATION}-attempt01"
+  INSTANCE="$(post_review_instance_id "post-review-${RUN_ID}-r${REVIEW_INDEX}-iter${REVIEW_ITERATION}-attempt01")" || exit 2
   if [ "$EDGE_ID" = review_pr.review.general ]; then
     INPUTS_JSON="$(uberdev_child_inputs_build "$EDGE_ID" \
       changed_paths "$CHANGED_PATHS_JSON" \
@@ -286,7 +303,7 @@ Failure handling is fail-closed. A BLOCKED or unparseable reviewer gets exactly 
 FORMAT_EXAMPLE_PATH="${FORMAT_EXAMPLE_PATH:-$CRITERIA_PATH}"
 FAILED_REVIEW_INPUTS="$(jq -ce --arg edge "$FAILED_REVIEW_EDGE" 'select(.edge == $edge) | .inputs' "$REVIEW_RECORDS")"
 REPAIR_INPUTS="$(uberdev_child_inputs_format_retry "$FAILED_REVIEW_EDGE" "$FAILED_REVIEW_INPUTS" "$FORMAT_EXAMPLE_PATH")"
-REPAIR_INSTANCE="post-review-${RUN_ID}-r${FAILED_REVIEW_INDEX}-iter${REVIEW_ITERATION}-attempt02"
+REPAIR_INSTANCE="$(post_review_instance_id "post-review-${RUN_ID}-r${FAILED_REVIEW_INDEX}-iter${REVIEW_ITERATION}-attempt02")" || exit 2
 REPAIR_PREFIX="$RESEARCH_DIR_ABS/post-review-repair-r${FAILED_REVIEW_INDEX}"
 : >"$REPAIR_PREFIX.records"
 post_review_record "$FAILED_REVIEW_EDGE" "$REPAIR_INSTANCE" "$REPAIR_INPUTS" '[]' "$REPAIR_PREFIX.records"

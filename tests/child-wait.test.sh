@@ -26,8 +26,7 @@ printf '{"backend":"codex","state":"failed","exit_code":1,"pid":"321"}\n' >"$STA
 printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"; terminal_manifest failed; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
 
 # A detached watcher supervisory failure is actionable immediately. The
-# waiting caller receives the specific class while the provider lease remains
-# available for explicit recovery rather than timing out generically.
+# waiting caller receives the specific class instead of timing out generically.
 printf '{"backend":"claude-bg","state":"running","exit_code":null,"pid":"abc12345"}\n' >"$STATUS"
 printf '{"schema_version":1,"error":"provider_probe_failed","backend":"claude-bg","handle":"abc12345","terminal":"provider_probe_failed","attempts":3}\n' >"$STATUS.watcher-error.json"
 chmod 600 "$STATUS.watcher-error.json"
@@ -37,6 +36,34 @@ WATCHER_WAIT_RC=$?
 set -e
 [ "$WATCHER_WAIT_RC" -eq 70 ]
 printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'provider supervision failed: provider_probe_failed'
+rm -f "$STATUS.watcher-error.json"
+
+# If the child status directory becomes unwritable, the detached watcher uses
+# the independently monitored controller-state fallback for the same union.
+WATCHER_FALLBACK="$TMP/run/.agent-state-$(id -u)/worker-0001.watcher-error.json"
+printf '{"schema_version":1,"error":"provider_probe_failed","backend":"claude-bg","handle":"abc12345","terminal":"provider_probe_failed","attempts":3}\n' >"$WATCHER_FALLBACK"
+chmod 600 "$WATCHER_FALLBACK"
+set +e
+WATCHER_WAIT_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
+WATCHER_WAIT_RC=$?
+set -e
+[ "$WATCHER_WAIT_RC" -eq 70 ]
+printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'provider supervision failed: provider_probe_failed'
+rm -f "$WATCHER_FALLBACK"
+
+for malformed_watcher_error in \
+  '{"schema_version":1,"error":"provider_probe_failed","backend":"unknown","handle":"abc12345","terminal":"provider_probe_failed","attempts":3}' \
+  '{"schema_version":1,"error":"provider_probe_failed","backend":"claude-bg","handle":"","terminal":"provider_probe_failed","attempts":3}' \
+  '{"schema_version":1,"error":"provider_probe_failed","backend":"claude-bg","handle":"abc12345","terminal":"provider_probe_failed","attempts":0}' \
+  '{"schema_version":1,"error":"provider_probe_failed","backend":"claude-bg","handle":"abc12345","terminal":"failed","attempts":3}' \
+  '{"schema_version":1,"error":"provider_cancel_failed","backend":"claude-bg","handle":"abc12345","terminal":"provider_probe_failed","attempts":3}'; do
+  printf '%s\n' "$malformed_watcher_error" >"$STATUS.watcher-error.json"
+  chmod 600 "$STATUS.watcher-error.json"
+  if _uberdev_child_watcher_error "$STATUS" >/dev/null 2>&1; then
+    echo "child wait accepted malformed watcher-error union" >&2
+    exit 1
+  fi
+done
 rm -f "$STATUS.watcher-error.json"
 
 # A running status without the exact lifecycle lease is not cancellation

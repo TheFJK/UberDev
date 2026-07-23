@@ -445,6 +445,12 @@ assert_grep "$AGENT_MD" 'jq -er.*resources\.core\.remaining.*type == "number"' \
   'S16.5 — core remaining is parsed locally as an integer'
 assert_grep "$AGENT_MD" 'jq -er.*resources\.search\.remaining.*type == "number"' \
   'S16.6 — search remaining is parsed locally as an integer'
+assert_in_section "$AGENT_MD" '^2\. \*\*Rate-limit pre-flight' '^3\. \*\*Parse aggregates' \
+  'rationale: "rate-limit-probe-failed"' \
+  'S16.7 — probe or parse failure has a distinct typed rationale'
+assert_in_section "$AGENT_MD" '^## Refusal triggers' '^## Failure-mode summary' \
+  'rate-limit-probe-failed.*probe.*empty/non-numeric' \
+  'S16.8 — refusal contract separates probe failure from low numeric budget'
 
 echo
 echo "## Summary"

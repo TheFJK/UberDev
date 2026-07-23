@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Hardened detached Claude supervision with unattended-permission preflight, exact `claude stop` cancellation, blocked-session terminalization, and exact capacity-lease release.
 - Isolated routed runtime state under a private user-owned directory and derived each Codex reviewer worktree and branch from its run-scoped child identity with terminal cleanup.
 - Reconciled review `changed_paths` with a traversal-safe repository-relative contract that also supports deleted files.
-- Added one canonical machine-readable Phase 1 reviewer result schema to all routed and native Codex reviewer prompts.
+- Added one canonical machine-readable Phase 1 reviewer result schema to manifest-routed reviewer prompts across the packaged Claude and Codex runtimes.
 - Shipped the run-tree policy and reviewer schema in generated prkit Claude and Codex packages so clean installs no longer depend on stale runtime files.
 - Kept routed Codex workers leaf-only with the supported `features.multi_agent=false` setting instead of the rejected `agents.max_depth=0` override.
 - Scoped routed child allocation identities to each review run so preserved evidence from earlier runs does not reuse the same allocation identity.

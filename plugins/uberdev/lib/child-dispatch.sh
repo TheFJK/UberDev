@@ -545,10 +545,9 @@ _uberdev_child_backend_cancellation_supported() {
   case "$1" in
     codex|background) return 0 ;;
     wezterm) command -v wezterm >/dev/null 2>&1 ;;
-    # Claude's background-session API is observable but currently has no
-    # cancellation verb. The adapter watcher is still a complete supervision
-    # path for healthy/terminal runs; timeout remains fail-closed without
-    # fabricating a terminal (child-wait.test.sh locks that behavior).
+    # Claude cancellation resolves the exact full session identifier from the
+    # provider inventory, invokes `claude stop`, and confirms terminal state.
+    # The adapter fails closed when exact cancellation cannot be proven.
     claude-bg)
       command -v _uberdev_agent_claude_probe >/dev/null 2>&1 \
         && command -v _uberdev_agent_start_watcher >/dev/null 2>&1
@@ -668,9 +667,11 @@ PY
 }
 
 _uberdev_child_watcher_error() {
-  python3 -I -B - "$1.watcher-error.json" <<'PY'
-import json,os,stat,sys
-path=sys.argv[1]
+  python3 -I -B - "$1.watcher-error.json" "${2:-}" <<'PY'
+import json,os,re,stat,sys
+primary,fallback=sys.argv[1:]
+path=primary if os.path.lexists(primary) else fallback
+if not path or not os.path.lexists(path): raise SystemExit(1)
 try:
  entry=os.lstat(path)
 except FileNotFoundError:
@@ -682,6 +683,19 @@ try:
  if set(value)!={'schema_version','error','backend','handle','terminal','attempts'} or value.get('schema_version')!=1: raise ValueError()
  error=value.get('error')
  if error not in {'provider_probe_failed','provider_cancel_failed','terminal_finalize_failed','launch_finalize_failed'}: raise ValueError()
+ backend=value.get('backend'); handle=value.get('handle'); terminal=value.get('terminal'); attempts=value.get('attempts')
+ if backend not in {'codex','claude-bg','background','wezterm'}: raise ValueError()
+ if type(attempts) is not int or attempts<1 or attempts>3: raise ValueError()
+ if not isinstance(handle,str) or len(handle)>256 or (handle and not all(ch.isalnum() or ch in '._:-' for ch in handle)): raise ValueError()
+ if not isinstance(terminal,str) or len(terminal)>128: raise ValueError()
+ if error=='provider_probe_failed':
+  if backend!='claude-bg' or not re.fullmatch(r'[0-9a-f]{8}',handle) or terminal!='provider_probe_failed' or attempts!=3: raise ValueError()
+ elif error=='provider_cancel_failed':
+  if backend!='claude-bg' or not re.fullmatch(r'[0-9a-f]{8}',handle) or terminal not in {'blocked:permission','blocked:provider'} or attempts!=3: raise ValueError()
+ elif error=='launch_finalize_failed':
+  if handle or not re.fullmatch(r'launch:[a-z][a-z0-9_]{0,63}',terminal) or attempts!=3: raise ValueError()
+ elif not handle or terminal not in {'completed','failed','timed_out','cancelled','abandoned'}:
+  raise ValueError()
  print(error,end='')
 except Exception:
  raise SystemExit(2)
@@ -800,7 +814,7 @@ uberdev_wait_child() {
   state_dir="$run_dir/.agent-state-$(id -u)"
   start="$(date +%s)"
   while :; do
-    if watcher_error="$(_uberdev_child_watcher_error "$status_file" 2>/dev/null)"; then
+    if watcher_error="$(_uberdev_child_watcher_error "$status_file" "$state_dir/$instance.watcher-error.json" 2>/dev/null)"; then
       _uberdev_child_error "provider supervision failed: $watcher_error"
       return 70
     else

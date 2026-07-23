@@ -70,7 +70,7 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)}"
 uberdev_command_workspace_prepare review-pr "$PR_NUMBER" medium "$RISK_JSON" "$RUN_ID" "${WORKTREE_ROOT:-}" >/dev/null || {
   rc=$?; return "$rc" 2>/dev/null || exit "$rc"
 }
-uberdev_dispatch_preflight_backend "$UBERDEV_CARRIER_BACKEND" || {
+uberdev_dispatch_preflight_backend "$UBERDEV_CARRIER_BACKEND" review-pr || {
   rc=$?; return "$rc" 2>/dev/null || exit "$rc"
 }
 REVIEW_ITERATION="${REVIEW_ITERATION:-1}"
@@ -187,7 +187,7 @@ try:
             or (uid is not None and entry.st_uid!=uid) or entry.st_size<1 or entry.st_size>16777216
             or os.path.basename(path)!='result.md' or os.path.basename(os.path.dirname(os.path.dirname(path)))!='children'):
         raise ValueError()
-except (OSError,TypeError,ValueError,json.JSONDecodeError):
+except (AttributeError,OSError,TypeError,ValueError,json.JSONDecodeError):
     raise SystemExit(2)
 print(os.path.realpath(path),end='')
 PY
@@ -729,31 +729,47 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
     ```bash
     review_validate_ci_classification() {
       python3 -I -B - "$1" "$2" <<'PY'
-import pathlib,re,sys
+import ast,json,pathlib,re,sys
 path,root=sys.argv[1:]
 raw=pathlib.Path(path).read_text(encoding='utf-8')
 if len(raw.encode())>65536: raise SystemExit(2)
+document=re.fullmatch(r'```yaml\r?\n(.*?)\r?\n```\r?\n?',raw,re.DOTALL)
+if document is None: raise SystemExit(2)
 fields={}
-for line in raw.splitlines():
-    match=re.fullmatch(r'(status|failure_class|signal_anchor|rationale):[ \t]*(.*)',line)
-    if not match: continue
+for line in document.group(1).splitlines():
+    match=re.fullmatch(r'([a-z_][a-z0-9_]*):[ \t]*(.*)',line)
+    if not match: raise SystemExit(2)
     key,value=match.groups()
     if key in fields: raise SystemExit(2)
-    fields[key]=value.strip().strip('"').strip("'")
-nulls={None,'','null'}
-status=fields.get('status')
+    fields[key]=value.strip()
+required={'status','failure_class','signal_anchor','rationale','risks'}
+if set(fields)!=required or fields['risks']!='[]': raise SystemExit(2)
+def scalar(key):
+    value=fields[key]
+    if value=='null': return None
+    try:
+        if value.startswith('"'): parsed=json.loads(value)
+        elif value.startswith("'"): parsed=ast.literal_eval(value)
+        elif re.fullmatch(r'[A-Za-z0-9_./:+ -]{1,256}',value): parsed=value
+        else: raise ValueError()
+    except (SyntaxError,ValueError,json.JSONDecodeError):
+        raise SystemExit(2)
+    if not isinstance(parsed,str) or not parsed or len(parsed)>256 or any(ch in parsed for ch in '\r\n\t'):
+        raise SystemExit(2)
+    return parsed
+status=scalar('status')
+failure_class=scalar('failure_class')
+anchor=scalar('signal_anchor')
+rationale=scalar('rationale')
 if status=='AMBIGUOUS':
-    if fields.get('failure_class') not in nulls or fields.get('signal_anchor') not in nulls: raise SystemExit(2)
+    if failure_class is not None or anchor is not None: raise SystemExit(2)
     print('AMBIGUOUS\tflaky\t-\t-'); raise SystemExit(0)
 if status=='REFUSED':
-    rationale=fields.get('rationale','')
-    if (fields.get('failure_class') not in nulls or fields.get('signal_anchor') not in nulls
-            or not re.fullmatch(r'[^\r\n\t]{1,256}',rationale)): raise SystemExit(2)
+    if failure_class is not None or anchor is not None: raise SystemExit(2)
     print('REFUSED\t-\t-\t'+rationale); raise SystemExit(0)
 classes={'code_bug','billing_quota','platform_outage','flaky','env_drift','stale_base'}
-anchor=fields.get('signal_anchor','')
-failure_class=fields.get('failure_class')
 if status!='CLASSIFIED' or failure_class not in classes: raise SystemExit(2)
+if anchor is None: raise SystemExit(2)
 match=re.fullmatch(r'(.+):([1-9][0-9]*)',anchor)
 if not match: raise SystemExit(2)
 component=match.group(1)

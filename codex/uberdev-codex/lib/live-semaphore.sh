@@ -898,10 +898,13 @@ uberdev_semaphore_acquire() {
 }
 
 uberdev_semaphore_set_handle() {
-  local lease backend_handle status_path scope mutex_rc publish_rc handle_kind
+  local lease backend_handle status_path identity_mode scope mutex_rc publish_rc handle_kind
+  local expected_generation exact_identity='' path_identity=''
   lease="${1-}"
   backend_handle="${2-}"
   status_path="${3-}"
+  identity_mode="${4-}"
+  case "$identity_mode" in ''|exact-identity) ;; *) return 2 ;; esac
   _uberdev_semaphore_validate_lease_path "$lease" || return 2
   [ -f "$lease" ] || {
     _uberdev_semaphore_error 'lease does not exist'
@@ -941,14 +944,35 @@ uberdev_semaphore_set_handle() {
     _uberdev_semaphore_error 'lease changed before handle update'
     return 2
   fi
+  expected_generation="$_UBERDEV_LEASE_GENERATION"
   _uberdev_semaphore_publish_lease "$scope" "$lease" "$_UBERDEV_LEASE_RUN_ID" \
     "$_UBERDEV_LEASE_OWNER_PID" "$backend_handle" "$_UBERDEV_LEASE_START_EPOCH" \
     "$_UBERDEV_LEASE_TIMEOUT_S" "$status_path"
   publish_rc=$?
+  if [ "$publish_rc" -eq 0 ] && [ "$identity_mode" = exact-identity ]; then
+    if _uberdev_semaphore_read_lease "$lease" \
+        && [ "$_UBERDEV_LEASE_GENERATION" = "$expected_generation" ] \
+        && [ "$_UBERDEV_LEASE_BACKEND_HANDLE" = "$backend_handle" ] \
+        && [ "$_UBERDEV_LEASE_STATUS_PATH" = "$status_path" ]; then
+      if path_identity="$(_uberdev_semaphore_path_identity "$lease")"; then
+        exact_identity="$path_identity:$expected_generation"
+      else
+        publish_rc=2
+      fi
+    else
+      publish_rc=2
+    fi
+    if [ "$publish_rc" -ne 0 ] || [ -z "$exact_identity" ]; then
+      _uberdev_semaphore_remove_lease "$lease" "$expected_generation" >/dev/null 2>&1 || true
+      publish_rc=2
+      exact_identity=''
+    fi
+  fi
   _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || {
     [ "$publish_rc" -ne 0 ] || publish_rc=2
   }
   [ "$publish_rc" -eq 0 ] || _uberdev_semaphore_error 'cannot update lease handle'
+  [ "$publish_rc" -ne 0 ] || [ "$identity_mode" != exact-identity ] || printf '%s' "$exact_identity"
   return "$publish_rc"
 }
 

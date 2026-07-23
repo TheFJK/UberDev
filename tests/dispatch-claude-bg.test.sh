@@ -11,6 +11,7 @@
 # the retired surface is ABSENT. This test asserts the new surface is PRESENT.
 
 set -u
+unset UBERDEV_AGENT_INSTANCE_ID
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
@@ -101,8 +102,8 @@ assert_grep "$DISPATCH_LIB" \
   '"\$\{cmd\[@\]\}"' \
   "claude-bg argv arm expands the array via \"\${cmd[@]}\""
 assert_grep "$DISPATCH_LIB" \
-  '\-\-worktree "solve-issue-\$ISSUE_NUM"' \
-  "claude-bg arm passes --worktree solve-issue-N for isolation"
+  '\-\-worktree "solve-issue-\$ISSUE_NUM\$INSTANCE_SUFFIX"' \
+  "claude-bg arm scopes each isolated worktree to the routed child instance"
 
 echo "== Positive: --effort=<level> threaded into claude --bg (v0.22.1) =="
 # Regression: prior to v0.22.1, /turbo and /solve dispatched `claude --bg`
@@ -423,6 +424,59 @@ assert_not_contains() {
   assert_not_contains "$joined" "dispatch_setup_failed" "happy path does NOT emit dispatch_setup_failed"
   assert_contains "$joined" '"tier":"medium"' "happy path agent_dispatched carries tier=medium"
   assert_contains "$joined" '"backend":"claude-bg"' "happy path agent_dispatched carries backend=claude-bg"
+  rm -rf "$UBERDEV_TMPDIR"
+  printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
+) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
+
+(
+  set +u
+  UBERDEV_TMPDIR="$(mktemp -d)"
+  CALL_LOG="$UBERDEV_TMPDIR/claude-calls.log"
+  : > "$CALL_LOG"
+  declare -a AUDIT_EVENTS=()
+  _uberdev_audit_emit() { AUDIT_EVENTS+=( "$1 $2" ); }
+  timeout() { shift; "$@"; }
+  env() { while [[ "$1" == *=* ]]; do shift; done; "$@"; }
+  claude() {
+    printf '%s|%s\n' "$UBERDEV_AGENT_INSTANCE_ID" "$*" >> "$CALL_LOG"
+    printf 'backgrounded · %08x\n' "$CLAUDE_CHILD_INDEX"
+  }
+  TIMEOUT_BIN="timeout"; SOLVE_TIMEOUT=1; MODEL="sonnet"
+  PERM_FLAG=(); EFFORT_FLAG=(); BG_PROMPT_MODE="file"
+  PROMPT_FILE="$UBERDEV_TMPDIR/prompt.txt"; printf 'review the change\n' > "$PROMPT_FILE"
+  DISPATCH_RC=0; DISPATCH_ID=""; DISPATCH_LOG=""
+  # shellcheck disable=SC1090
+  . "$DISPATCH_LIB"
+  fanout_errors=""
+  for CLAUDE_CHILD_INDEX in 1 2 3 4 5 6; do
+    UBERDEV_AGENT_INSTANCE_ID="post-review-six-child-r${CLAUDE_CHILD_INDEX}-iter1-attempt01"
+    export UBERDEV_AGENT_INSTANCE_ID CLAUDE_CHILD_INDEX
+    child_slug="$(_uberdev_dispatch_instance_slug)"
+    if ! _uberdev_dispatch_claude_bg 336 medium "$PROMPT_FILE"; then
+      fanout_errors="$fanout_errors dispatch-$CLAUDE_CHILD_INDEX"
+      continue
+    fi
+    expected_handle="$(printf '%08x' "$CLAUDE_CHILD_INDEX")"
+    expected_log="$UBERDEV_TMPDIR/solve-bg-stdout-336-$child_slug.log"
+    [ "$DISPATCH_ID" = "$expected_handle" ] || fanout_errors="$fanout_errors handle-$CLAUDE_CHILD_INDEX"
+    [ -s "$expected_log" ] || fanout_errors="$fanout_errors log-$CLAUDE_CHILD_INDEX"
+    grep -Fq -- "--worktree solve-issue-336-$child_slug" "$CALL_LOG" \
+      || fanout_errors="$fanout_errors worktree-$CLAUDE_CHILD_INDEX"
+  done
+  [ "$(wc -l < "$CALL_LOG" | tr -d ' ')" -eq 6 ] || fanout_errors="$fanout_errors call-count"
+  [ "$(find "$UBERDEV_TMPDIR" -name 'solve-bg-stdout-336-*.log' | wc -l | tr -d ' ')" -eq 6 ] \
+    || fanout_errors="$fanout_errors log-count"
+  if uberdev_dispatch_preflight_backend background review-pr >/dev/null 2>&1 \
+      || uberdev_dispatch_preflight_backend wezterm review-pr >/dev/null 2>&1; then
+    fanout_errors="$fanout_errors unsupported-review-backend"
+  fi
+  if [ -z "$fanout_errors" ]; then
+    echo "  PASS  six Claude reviewers receive unique worktrees and stdout logs before fanout"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  six Claude reviewer isolation:$fanout_errors"
+    FAIL=$((FAIL + 1))
+  fi
   rm -rf "$UBERDEV_TMPDIR"
   printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
 ) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"

@@ -75,8 +75,9 @@ _uberdev_dispatch_python() {
 # Return a validated runtime root. The default lives below the platform temp
 # root; POSIX creates or validates an EUID-owned, non-symlink directory locked
 # to 0700, while native Windows relies on the current-user ACL inherited by a
-# newly created default directory. Caller-supplied Windows overrides are only
-# checked for directory/reparse safety and are not asserted private here.
+# newly created default directory. Caller-supplied Windows overrides are
+# checked for directory and ordinary-link safety and are not asserted private
+# here; receipt-specific helpers perform the stronger reparse-point checks.
 _uberdev_dispatch_runtime_root() {
   local target
   if [ -n "${UBERDEV_TMPDIR:-}" ]; then
@@ -98,8 +99,8 @@ PY
 }
 
 # Stable, branch-safe child identity. The readable prefix preserves the fanout
-# instance at a glance; the digest prevents collisions after normalization or
-# truncation.
+# instance at a glance; the digest disambiguates normalized prefixes and makes
+# accidental collisions after truncation negligibly likely.
 _uberdev_dispatch_instance_slug() {
   _uberdev_dispatch_python -I -B - "${UBERDEV_AGENT_INSTANCE_ID:-root}" <<'PY'
 import hashlib,re,sys
@@ -113,11 +114,14 @@ PY
 # only the exact repo/path/branch/token tuple recorded here, preventing a stale
 # or substituted path from being removed as if it belonged to this child.
 _uberdev_dispatch_create_codex_worktree_receipt() {
-  _uberdev_dispatch_python -I -B - "$1" "$2" "$3" "$4" <<'PY'
-import json,os,posixpath,secrets,stat,sys
-repo_arg,relative,branch,receipt=sys.argv[1:]
+  local start_head
+  start_head="$(git -C "$1" rev-parse HEAD 2>/dev/null)" || return 2
+  _uberdev_dispatch_python -I -B - "$1" "$2" "$3" "$4" "$start_head" <<'PY'
+import json,os,posixpath,re,secrets,stat,sys
+repo_arg,relative,branch,receipt,start_head=sys.argv[1:]
 repo=os.path.realpath(repo_arg)
 if not os.path.isabs(repo_arg) or not os.path.isdir(repo) or os.path.isabs(relative): raise SystemExit(2)
+if not re.fullmatch(r'[0-9a-f]{40}',start_head): raise SystemExit(2)
 normalized=posixpath.normpath(relative)
 basename=posixpath.basename(normalized)
 if (normalized!=relative or not normalized.startswith(".claude/worktrees/solve-issue-")
@@ -128,8 +132,8 @@ if os.path.commonpath((root,target))!=root: raise SystemExit(2)
 receipt=os.path.abspath(receipt); parent=os.path.dirname(receipt)
 parent_entry=os.lstat(parent); uid_fn=getattr(os,"geteuid",None); uid=uid_fn() if uid_fn else None
 if stat.S_ISLNK(parent_entry.st_mode) or not stat.S_ISDIR(parent_entry.st_mode) or (uid is not None and parent_entry.st_uid!=uid): raise SystemExit(2)
-token=secrets.token_hex(16)
-payload={"schema_version":1,"repo":repo,"relative":normalized,"worktree":target,"branch":branch,"token":token}
+token=secrets.token_hex(16)+":"+start_head
+payload={"schema_version":1,"repo":repo,"relative":normalized,"worktree":target,"branch":branch,"start_head":start_head,"token":token}
 flags=os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0)
 descriptor=os.open(receipt,flags,0o600)
 try:
@@ -182,12 +186,16 @@ PY
 }
 
 _uberdev_dispatch_cleanup_codex_worktree() {
-  local repo_root="$1" relative="$2" branch="$3" receipt="$4" token="$5" terminal="$6" target
-  case "$terminal" in completed|failed|timed_out|cancelled) ;; *) return 2 ;; esac
-  target="$(_uberdev_dispatch_python -I -B - "$repo_root" "$relative" "$branch" "$receipt" "$token" <<'PY'
-import json,os,stat,sys
+  local repo_root="$1" relative="$2" branch="$3" receipt="$4" token="$5" terminal="$6"
+  local target_record target start_head
+  case "$terminal" in completed|failed|timed_out|cancelled|setup_failed) ;; *) return 2 ;; esac
+  target_record="$(_uberdev_dispatch_python -I -B - "$repo_root" "$relative" "$branch" "$receipt" "$token" <<'PY'
+import json,os,re,stat,sys
 repo_arg,relative,branch,path,token=sys.argv[1:]
 repo=os.path.realpath(repo_arg); parent,name=os.path.dirname(path),os.path.basename(path)
+try: token_start=token.rsplit(':',1)[1]
+except (AttributeError,IndexError): raise SystemExit(2)
+if not re.fullmatch(r'[0-9a-f]{40}',token_start): raise SystemExit(2)
 if os.name=="nt":
  before=os.lstat(path)
  if os.path.islink(path) or not stat.S_ISREG(before.st_mode) or before.st_nlink!=1: raise SystemExit(2)
@@ -201,13 +209,14 @@ if os.name=="nt":
   if len(raw)>65536: raise SystemExit(2)
   value=json.loads(raw)
  finally: os.close(descriptor)
- expected={"schema_version":1,"repo":repo,"relative":relative,"worktree":os.path.abspath(os.path.join(repo,*relative.split('/'))),"branch":branch,"token":token}
+ expected={"schema_version":1,"repo":repo,"relative":relative,"worktree":os.path.abspath(os.path.join(repo,*relative.split('/'))),"branch":branch,"start_head":token_start,"token":token}
  if value!=expected: raise SystemExit(2)
  target=value["worktree"]; root=os.path.join(repo,".claude","worktrees")
  if os.path.commonpath((root,target))!=root or branch!="worktree-"+relative.rsplit('/',1)[-1]: raise SystemExit(2)
- entry=os.lstat(target)
- if os.path.islink(target) or not stat.S_ISDIR(entry.st_mode): raise SystemExit(2)
- print(target,end="")
+ if os.path.lexists(target):
+  entry=os.lstat(target)
+  if os.path.islink(target) or not stat.S_ISDIR(entry.st_mode): raise SystemExit(2)
+ print(target+'\t'+token_start,end="")
  raise SystemExit(0)
 parent_fd=os.open(parent,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0)); descriptor=None
 try:
@@ -220,18 +229,22 @@ try:
  raw=os.read(descriptor,65537)
  if len(raw)>65536: raise SystemExit(2)
  value=json.loads(raw)
- expected={"schema_version":1,"repo":repo,"relative":relative,"worktree":os.path.abspath(os.path.join(repo,relative)),"branch":branch,"token":token}
+ expected={"schema_version":1,"repo":repo,"relative":relative,"worktree":os.path.abspath(os.path.join(repo,relative)),"branch":branch,"start_head":token_start,"token":token}
  if value!=expected: raise SystemExit(2)
  target=value["worktree"]; root=os.path.join(repo,".claude","worktrees")
  if os.path.commonpath((root,target))!=root or branch!="worktree-"+os.path.basename(relative): raise SystemExit(2)
- entry=os.lstat(target)
- if stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode) or (uid is not None and entry.st_uid!=uid): raise SystemExit(2)
- print(target,end="")
+ if os.path.lexists(target):
+  entry=os.lstat(target)
+  if stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode) or (uid is not None and entry.st_uid!=uid): raise SystemExit(2)
+ print(target+'\t'+token_start,end="")
 finally:
  if descriptor is not None: os.close(descriptor)
  os.close(parent_fd)
 PY
 )" || return 2
+  target="${target_record%%$'\t'*}"
+  start_head="${target_record#*$'\t'}"
+  [ -n "$target" ] && [ -n "$start_head" ] && [ "$target" != "$start_head" ] || return 2
   (
     cd "$repo_root" || exit 2
     branch_exists=0
@@ -241,11 +254,17 @@ PY
       show_ref_rc=$?
       [ "$show_ref_rc" -eq 1 ] || exit 2
     fi
-    local_status="$(git -C "$target" status --porcelain --untracked-files=all)" || exit 2
-    [ -z "$local_status" ] || exit 3
-    git worktree remove --force "$target" || exit 2
-    [ ! -e "$target" ] || exit 2
+    if [ -e "$target" ] || [ -L "$target" ]; then
+      local_status="$(git -C "$target" status --porcelain --untracked-files=all)" || exit 2
+      [ -z "$local_status" ] || exit 3
+      target_head="$(git -C "$target" rev-parse HEAD)" || exit 2
+      [ "$target_head" = "$start_head" ] || exit 3
+      git worktree remove --force "$target" || exit 2
+      [ ! -e "$target" ] && [ ! -L "$target" ] || exit 2
+    fi
     if [ "$branch_exists" -eq 1 ]; then
+      branch_head="$(git rev-parse "refs/heads/$branch")" || exit 2
+      [ "$branch_head" = "$start_head" ] || exit 3
       worktree_list="$(git worktree list --porcelain)" || exit 2
       if printf '%s\n' "$worktree_list" | grep -Fqx "branch refs/heads/$branch"; then exit 2; fi
       git branch -D "$branch" >/dev/null || exit 2
@@ -556,10 +575,23 @@ uberdev_dispatch_resolve_env() {
 # constructing children. Native Codex needs no Claude CLI model, permission, or
 # timeout variables; every Claude-backed transport shares the resolver above.
 uberdev_dispatch_preflight_backend() {
-  local backend="${1:-}"
+  local backend="${1:-}" workflow="${2:-}"
+  if [ "$workflow" = review-pr ]; then
+    case "$backend" in
+      codex|claude-bg) ;;
+      wezterm|background)
+        echo "error: review-pr requires a backend with caller-workspace repair support: $backend" >&2
+        return 1
+        ;;
+    esac
+  fi
   case "$backend" in
     codex) return 0 ;;
-    claude-bg|wezterm|background) uberdev_dispatch_resolve_env "$backend" ;;
+    claude-bg)
+      uberdev_dispatch_resolve_env "$backend" || return $?
+      [ -z "$workflow" ] || _uberdev_agent_claude_permissions_preflight "$workflow"
+      ;;
+    wezterm|background) uberdev_dispatch_resolve_env "$backend" ;;
     *)
       echo "error: unsupported dispatch backend for workflow preflight: $backend" >&2
       return 1
@@ -1105,7 +1137,12 @@ _uberdev_dispatch_claude_bg() {
   local ISSUE_NUM="$1" TIER="$2" PROMPT_FILE="$3"
   DISPATCH_RC=0
   DISPATCH_ID=""
-  local BG_STDOUT_LOG="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM.log"
+  local INSTANCE_SUFFIX='' INSTANCE_SLUG=''
+  if [ -n "${UBERDEV_AGENT_INSTANCE_ID:-}" ]; then
+    INSTANCE_SLUG="$(_uberdev_dispatch_instance_slug)" || return 3
+    INSTANCE_SUFFIX="-$INSTANCE_SLUG"
+  fi
+  local BG_STDOUT_LOG="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM$INSTANCE_SUFFIX.log"
   # TOCTOU hardening (#155): guard + 0600-create the predictable bg-stdout path
   # before any case arm redirects to it (3 redirect sites below).
   if ! _uberdev_dispatch_prepare_tmp_target "$BG_STDOUT_LOG" "$ISSUE_NUM" "claude-bg"; then
@@ -1133,7 +1170,7 @@ _uberdev_dispatch_claude_bg() {
   case "$BG_WORKSPACE_MODE" in
     isolated)
       BG_EXECUTION_DIR="$(pwd -P)" || return 3
-      BG_WORKTREE_ARGS=( --worktree "solve-issue-$ISSUE_NUM" )
+      BG_WORKTREE_ARGS=( --worktree "solve-issue-$ISSUE_NUM$INSTANCE_SUFFIX" )
       ;;
     caller)
       BG_EXECUTION_DIR="${UBERDEV_AGENT_WORKSPACE_DIR:-}"
@@ -1528,7 +1565,12 @@ _uberdev_dispatch_codex() {
   # arm — sidesteps backend-specific worktree handling; MSYS_NO_PATHCONV for
   # Git Bash on Windows).
   if [ "$WORKSPACE_MODE" = isolated ] && ! MSYS_NO_PATHCONV=1 git worktree add "$WORKTREE_DIR" -b "$WORKTREE_BRANCH" >"$LOG_FILE" 2>&1; then
-    [ "$CHILD_OWNED" != "1" ] || _uberdev_dispatch_discard_codex_worktree_receipt "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" >/dev/null 2>&1 || true
+    if [ "$CHILD_OWNED" = "1" ] && ! _uberdev_dispatch_report_codex_setup_cleanup_failure "$ISSUE_NUM" setup_failed \
+        "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" "$LOG_FILE"; then
+      DISPATCH_RC=74
+      DISPATCH_LOG="$LOG_FILE"
+      return 74
+    fi
     DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
     _uberdev_dispatch_audit dispatch_setup_failed \
