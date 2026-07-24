@@ -169,6 +169,9 @@ _IDENTIFIER_FIELDS = frozenset(
     }
 )
 _IDENTIFIER_PATTERN = re.compile(r"[A-Za-z0-9$][A-Za-z0-9$._:/@+\-]{0,255}")
+_PROCESS_IDENTITY_PATTERN = re.compile(
+    r"([1-9][0-9]*)\|([1-9][0-9]*)\|([1-9][0-9]*)\|([0-9a-f]{64})"
+)
 _SENSITIVE_VALUE_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
@@ -327,6 +330,25 @@ def _pid_handle(value: Any) -> bool:
     return numeric.isdigit() and int(numeric) > 0
 
 
+def _numeric_pid(value: Any) -> int | None:
+    if not _pid_handle(value):
+        return None
+    if isinstance(value, int):
+        return value
+    numeric = value[4:] if value.startswith("pid:") else value
+    return int(numeric)
+
+
+def _parse_process_identity(value: Any) -> tuple[int, int, int, str] | None:
+    if not isinstance(value, str):
+        return None
+    match = _PROCESS_IDENTITY_PATTERN.fullmatch(value)
+    if match is None:
+        return None
+    pid, pgid, sid, fingerprint = match.groups()
+    return int(pid), int(pgid), int(sid), fingerprint
+
+
 def _valid_identifier(value: Any) -> bool:
     return isinstance(value, str) and _IDENTIFIER_PATTERN.fullmatch(value) is not None
 
@@ -395,9 +417,13 @@ def _validate_event(event: Any) -> list[str]:
 
     if "owner_process_identity" in event and event["owner_process_identity"] is not None:
         identity = event["owner_process_identity"]
-        if not isinstance(identity, str) or re.fullmatch(
-            r"[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}", identity
-        ) is None:
+        parsed_identity = _parse_process_identity(identity)
+        owner_pid = event.get("owner_pid")
+        if (
+            parsed_identity is None
+            or not _is_plain_int(owner_pid)
+            or parsed_identity[0] != owner_pid
+        ):
             errors.append("invalid_owner_process_identity")
 
     if "backend_handle" in event and event["backend_handle"] is not None:
@@ -777,17 +803,15 @@ def _reject_symlinked_ancestors(path: str) -> None:
             raise ManifestRejected("manifest_symlinked_ancestor_rejected")
 
 
-def _process_identity(pid: Any) -> str | None:
-    if isinstance(pid, str):
-        text = pid[4:] if pid.startswith("pid:") else pid
-        if not text.isdigit():
-            return None
-        pid = int(text)
-    if not _is_plain_int(pid) or pid <= 0:
-        return None
+def _process_identity(pid: Any) -> tuple[str, str | None]:
+    numeric_pid = _numeric_pid(pid)
+    if numeric_pid is None:
+        return "absent", None
+    pid = numeric_pid
     try:
-        pgid = os.getpgid(pid)
-        sid = os.getsid(pid)
+        os.kill(pid, 0)
+        pgid = os.getpgid(pid) if hasattr(os, "getpgid") else pid
+        sid = os.getsid(pid) if hasattr(os, "getsid") else pid
         process_state = subprocess.check_output(
             ["ps", "-o", "stat=", "-p", str(pid)],
             text=True,
@@ -798,33 +822,50 @@ def _process_identity(pid: Any) -> str | None:
             text=True,
             stderr=subprocess.DEVNULL,
         ).strip()
-        if not process_state or process_state.startswith("Z") or not started:
-            return None
+        if process_state.startswith("Z"):
+            return "absent", None
+        if not process_state or not started:
+            return "unavailable", None
         digest = hashlib.sha256(started.encode()).hexdigest()
-        return f"{pid}|{pgid}|{sid}|{digest}"
+        return "captured", f"{pid}|{pgid}|{sid}|{digest}"
+    except ProcessLookupError:
+        return "absent", None
+    except subprocess.CalledProcessError:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return "absent", None
+        except OSError:
+            return "unavailable", None
+        return "unavailable", None
     except (AttributeError, OSError, subprocess.SubprocessError, ValueError):
-        return None
+        return "unavailable", None
 
 
-def _pid_live(pid: Any, expected_identity: str | None = None) -> bool:
-    if isinstance(pid, str):
-        text = pid[4:] if pid.startswith("pid:") else pid
-        if not text.isdigit():
-            return False
-        pid = int(text)
-    if not _is_plain_int(pid) or pid <= 0:
+def _pid_live(pid: Any, expected_identity: str | None = None) -> bool | None:
+    numeric_pid = _numeric_pid(pid)
+    if numeric_pid is None:
         return False
+    pid = numeric_pid
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True
+        return None
     except OSError:
-        return False
+        return None
     if expected_identity is None:
         return True
-    return _process_identity(pid) == expected_identity
+    parsed_identity = _parse_process_identity(expected_identity)
+    if parsed_identity is None or parsed_identity[0] != pid:
+        return False
+    probe_status, current_identity = _process_identity(pid)
+    if probe_status == "unavailable":
+        return None
+    if probe_status != "captured":
+        return False
+    return current_identity == expected_identity
 
 
 def _status_liveness(path: str) -> bool | None:
@@ -1135,14 +1176,8 @@ def _reconciliation_status(
     if reported_backend is not None and reported_backend != expected_backend:
         return None, None, None, None
     recovered_identity = snapshot.get("process_identity")
-    if recovered_identity is not None and (
-        not isinstance(recovered_identity, str)
-        or re.fullmatch(
-            r"[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}",
-            recovered_identity,
-        )
-        is None
-    ):
+    parsed_recovered_identity = _parse_process_identity(recovered_identity)
+    if recovered_identity is not None and parsed_recovered_identity is None:
         return None, None, None, None
     recovered_handle: str | None = None
     needs_numeric_recovery = (
@@ -1158,6 +1193,17 @@ def _reconciliation_status(
             if candidate is not None and candidate.isdigit():
                 recovered_handle = candidate
         if recovered_handle is None:
+            return None, None, None, None
+    if recovered_identity is not None:
+        identity_handle = recovered_handle
+        if identity_handle is None:
+            identity_handle = _canonical_backend_handle(started.get("backend_handle"))
+        if (
+            identity_handle is None
+            or not identity_handle.isdigit()
+            or parsed_recovered_identity is None
+            or parsed_recovered_identity[0] != int(identity_handle)
+        ):
             return None, None, None, None
     if verdict == "live":
         return True, None, recovered_handle, recovered_identity
@@ -1188,7 +1234,9 @@ def secure_write_lease(path: str, payload: bytes) -> tuple[int, int]:
 
     POSIX publication holds the parent directory descriptor across the atomic
     replace. The native-Windows branch uses validated absolute paths because
-    Python does not expose the required ``dir_fd`` operations there.
+    Python does not expose the required ``dir_fd`` operations there; its caller
+    must supply a private parent directory with an already-validated ACL because
+    this helper does not establish or audit that directory ACL.
     """
 
     if len(payload) > 16384 or not payload.endswith(b"\n"):
@@ -1328,7 +1376,7 @@ def _backend_live(
     *,
     status_known: bool = False,
     expected_identity: str | None = None,
-) -> bool:
+) -> bool | None:
     """Apply the shared backend-liveness matrix used by live-semaphore.sh.
 
     Terminal status is always dead. Status-only and opaque handles are live
@@ -1345,12 +1393,9 @@ def _backend_live(
     handle = started.get("backend_handle")
     if handle in (None, ""):
         return status is True
-    if _pid_live(handle, expected_identity):
-        return True
+    if _numeric_pid(handle) is not None:
+        return _pid_live(handle, expected_identity)
     if isinstance(handle, str):
-        numeric = handle[4:] if handle.startswith("pid:") else handle
-        if numeric.isdigit():
-            return False
         if handle.startswith("pid:"):
             return False
         if status is True:
@@ -1533,6 +1578,15 @@ def reconcile_manifest(path: str) -> dict[str, Any]:
                 status_known=True,
                 expected_identity=recovered_identity,
             )
+            unavailable = []
+            if owner_live is None:
+                unavailable.append("owner")
+            if backend_live is None:
+                unavailable.append("backend")
+            if unavailable:
+                raise ManifestRuntimeError(
+                    "process_identity_probe_unavailable: " + ",".join(unavailable)
+                )
             if owner_live or backend_live:
                 continue
             run_id, agent_id = identity

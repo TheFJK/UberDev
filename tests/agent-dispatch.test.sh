@@ -1458,6 +1458,58 @@ grep -q '"state":"failed"' "$POST_RUN/status.json"
 ! grep -R -q 'run_id=adapter-post-launch-failure' "$POST_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
 eval "$(declare -f _real_postlaunch_set_handle | sed '1s/_real_postlaunch_set_handle/uberdev_semaphore_set_handle/')"
 
+# A nonterminal numeric backend must not be registered without a verified
+# process identity. A transient capture failure fails dispatch and the cleanup
+# path retries the identity probe before cancelling the exact provider.
+IDENTITY_RUN="$TMP/post-launch-process-identity-failure"
+mkdir -p "$IDENTITY_RUN"
+printf 'process identity failure prompt\n' >"$IDENTITY_RUN/prompt.txt"
+IDENTITY_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-process-identity-failure","repository_id":"adapter-process-identity-failure-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":96,"issue_num":96,"capacity":1,"timeout_s":20},separators=(",",":")))' "$IDENTITY_RUN")"
+eval "$(declare -f _uberdev_agent_process_identity | sed '1s/_uberdev_agent_process_identity/_real_agent_process_identity/')"
+printf '0\n' >"$IDENTITY_RUN/identity-probes"
+_uberdev_agent_process_identity() {
+  identity_provider_pid="$(cat "$IDENTITY_RUN/provider.pid" 2>/dev/null || true)"
+  if [ -f "$IDENTITY_RUN/identity-capture-armed" ] \
+      && [ -n "$identity_provider_pid" ] && [ "$1" = "$identity_provider_pid" ]; then
+    identity_probes="$(cat "$IDENTITY_RUN/identity-probes")"
+    identity_probes=$((identity_probes + 1))
+    printf '%s\n' "$identity_probes" >"$IDENTITY_RUN/identity-probes"
+    [ "$identity_probes" -ne 1 ] || return 2
+  fi
+  _real_agent_process_identity "$@"
+}
+_uberdev_agent_dispatch_backend() {
+  nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(30)' >/dev/null 2>&1 &
+  DISPATCH_ID="$!"; DISPATCH_LOG=""
+  printf '%s\n' "$DISPATCH_ID" >"$IDENTITY_RUN/provider.pid"
+  _uberdev_dispatch_wait_owned_session "$DISPATCH_ID"
+  : >"$IDENTITY_RUN/identity-capture-armed"
+  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" >"$6"
+  chmod 600 "$6"
+}
+set +e
+uberdev_agent_dispatch "$IDENTITY_REQUEST" "$IDENTITY_RUN/prompt.txt" \
+  "$IDENTITY_RUN/result.md" "$IDENTITY_RUN/status.json"
+identity_dispatch_rc=$?
+set -e
+eval "$(declare -f _real_agent_process_identity | sed '1s/_real_agent_process_identity/_uberdev_agent_process_identity/')"
+IDENTITY_PID="$(cat "$IDENTITY_RUN/provider.pid")"
+if [ "$identity_dispatch_rc" -eq 0 ]; then
+  kill "$IDENTITY_PID" 2>/dev/null || true
+fi
+for _ in 1 2 3 4 5; do kill -0 "$IDENTITY_PID" 2>/dev/null || break; sleep .1; done
+wait "$IDENTITY_PID" 2>/dev/null || true
+if [ "$identity_dispatch_rc" -eq 0 ] || kill -0 "$IDENTITY_PID" 2>/dev/null \
+    || ! grep -q '"state":"failed"' "$IDENTITY_RUN/status.json" \
+    || grep -R -q 'run_id=adapter-process-identity-failure' "$IDENTITY_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null; then
+  identity_provider_live=0
+  kill -0 "$IDENTITY_PID" 2>/dev/null && identity_provider_live=1
+  identity_status="$(sed -n 's/.*"state":"\([^"]*\)".*/\1/p' "$IDENTITY_RUN/status.json" 2>/dev/null || true)"
+  identity_lease_count="$(find "$IDENTITY_RUN/.agent-state-$(id -u)/semaphore-v1" -name '*.lease' -type f 2>/dev/null | wc -l | tr -d ' ')"
+  echo "numeric backend identity-capture failure was not closed coherently: rc=$identity_dispatch_rc live=$identity_provider_live status=${identity_status:-missing} leases=$identity_lease_count probes=$(cat "$IDENTITY_RUN/identity-probes")" >&2
+  exit 1
+fi
+
 # A provider can return a handle and then exit before rollback samples process
 # identity. Proven absence still terminalizes the run and releases its lease.
 EXITED_RUN="$TMP/post-launch-provider-already-exited"

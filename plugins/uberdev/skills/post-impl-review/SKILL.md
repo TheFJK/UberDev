@@ -168,6 +168,30 @@ try:
 except Exception: raise SystemExit(2)
 PY
 }
+post_review_unwind_one() {
+  local edge="$1" status="$2" result="$3" timeout_s="$4" origin_edge="$5" origin_rc="$6" cleanup_rc
+  if uberdev_unwind_child "$status" "$result" "$timeout_s"; then
+    cleanup_rc=0
+  else
+    cleanup_rc=$?
+  fi
+  printf 'cleanup: edge=%s status=%s cleanup_rc=%s origin_edge=%s origin_rc=%s\n' \
+    "$edge" "$status" "$cleanup_rc" "$origin_edge" "$origin_rc" >&2
+  [ "$cleanup_rc" -eq 0 ]
+}
+post_review_unwind_ledger() {
+  local launched="$1" timeout_s="$2" origin_edge="$3" origin_rc="$4" row edge status result cleanup_failed=0
+  [ -f "$launched" ] || {
+    printf 'cleanup: ledger=%s cleanup_rc=70 origin_edge=%s origin_rc=%s\n' \
+      "$launched" "$origin_edge" "$origin_rc" >&2
+    return 70
+  }
+  while IFS= read -r row; do
+    edge="$(jq -r .edge <<<"$row")"; status="$(jq -r .status <<<"$row")"; result="$(jq -r .result <<<"$row")"
+    post_review_unwind_one "$edge" "$status" "$result" "$timeout_s" "$origin_edge" "$origin_rc" || cleanup_failed=1
+  done <"$launched"
+  [ "$cleanup_failed" -eq 0 ] || return 70
+}
 post_review_fanout() {
   local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff result status receipt dispatch_rc ledger_rc cleanup_rc
   local handoffs=()
@@ -188,9 +212,8 @@ post_review_fanout() {
     if receipt="$(uberdev_dispatch_child "$edge" "$handoff" "$result" "$status")"; then
       :
     else
-      dispatch_rc=$?; cleanup_rc=0
-      while IFS= read -r row; do uberdev_unwind_child "$(jq -r .status <<<"$row")" "$(jq -r .result <<<"$row")" "$timeout_s" || cleanup_rc=1; done <"$launched"
-      [ "$cleanup_rc" -eq 0 ] || echo "error: prior child cleanup failed after dispatch edge=$edge" >&2
+      dispatch_rc=$?
+      post_review_unwind_ledger "$launched" "$timeout_s" "$edge" "$dispatch_rc" || return 70
       return "$dispatch_rc"
     fi
     if jq -cn --arg edge "$edge" --arg receipt "$receipt" --arg result "$result" --arg status "$status" \
@@ -198,9 +221,9 @@ post_review_fanout() {
       :
     else
       ledger_rc=$?; cleanup_rc=0
-      uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
-      while IFS= read -r row; do uberdev_unwind_child "$(jq -r .status <<<"$row")" "$(jq -r .result <<<"$row")" "$timeout_s" || cleanup_rc=1; done <"$launched"
-      [ "$cleanup_rc" -eq 0 ] || echo "error: current child cleanup failed after receipt ledger write edge=$edge" >&2
+      post_review_unwind_one "$edge" "$status" "$result" "$timeout_s" "$edge" "$ledger_rc" || cleanup_rc=70
+      post_review_unwind_ledger "$launched" "$timeout_s" "$edge" "$ledger_rc" || cleanup_rc=70
+      [ "$cleanup_rc" -eq 0 ] || return 70
       return "$ledger_rc"
     fi
   done <"$descriptors"

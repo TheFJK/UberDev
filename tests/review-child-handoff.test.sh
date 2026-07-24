@@ -489,11 +489,22 @@ set +e
 "$fanout" "$run/records" "$run/descriptors" "$run/launched" 29 >"$run/stdout" 2>"$run/stderr"
 rc=$?
 set -e
-[ "$rc" -eq 73 ]
+if [ "$flavor" = post ]; then
+  [ "$rc" -eq 70 ]
+else
+  [ "$rc" -eq 73 ]
+fi
 [ "$(wc -l <"$log" | tr -d ' ')" -eq 2 ]
 [ "$(sed -n '1p' "$log")" = "$run/second.status	$run/second.result	29" ]
 [ "$(sed -n '2p' "$log")" = "$run/first.status	$run/first.result	29" ]
-grep -q 'current child cleanup failed' "$run/stderr"
+if [ "$flavor" = post ]; then
+  grep -Fq 'cleanup: edge=second.edge' "$run/stderr"
+  grep -Fq "status=$run/second.status" "$run/stderr"
+  grep -Fq 'origin_rc=73' "$run/stderr"
+  grep -Fq 'cleanup_rc=9' "$run/stderr"
+else
+  grep -q 'current child cleanup failed' "$run/stderr"
+fi
 SH
 bash "$TMP/ledger-failure.sh" "$TMP/builder.sh" review_child_fanout review "$TMP/ledger-review"
 bash "$TMP/ledger-failure.sh" "$TMP/simplify-builder.sh" review_child_fanout simplify "$TMP/ledger-simplify"

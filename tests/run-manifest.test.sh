@@ -124,6 +124,60 @@ else
   fail "agent_started requires a positive owner PID, not null" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 
+IDENTITY_PID_MISMATCH="$TMP/identity-pid-mismatch/events.jsonl"
+append_event "$IDENTITY_PID_MISMATCH" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00Z","run_id":"run-identity-pid-mismatch","backend":"codex"}' >/dev/null
+capture append_event "$IDENTITY_PID_MISMATCH" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:00:01Z\",\"run_id\":\"run-identity-pid-mismatch\",\"backend\":\"codex\",\"owner_pid\":$$,\"owner_process_identity\":\"$(( $$ + 1 ))|1|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+if [ "$CAPTURE_RC" -eq 2 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'invalid_owner_process_identity'; then
+  pass "owner process identity is bound to owner_pid"
+else
+  fail "owner process identity is bound to owner_pid" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+
+IDENTITY_PROBE_STATUS="$TMP/identity-probe-status.json"
+printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s","process_identity":"1|1|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n' \
+  "$$" >"$IDENTITY_PROBE_STATUS"
+capture python3 -I - "$MANIFEST" "$IDENTITY_PROBE_STATUS" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+manifest_path, status_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("run_manifest_probe_test", manifest_path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+expected = "4242|1|1|" + ("a" * 64)
+original_kill = module.os.kill
+original_getpgid = module.os.getpgid
+try:
+    def denied_kill(pid, signal):
+        raise PermissionError()
+
+    module.os.kill = denied_kill
+    assert module._pid_live(4242, expected) is None
+
+    module.os.kill = lambda pid, signal: None
+
+    def denied_getpgid(pid):
+        raise PermissionError()
+
+    module.os.getpgid = denied_getpgid
+    assert module._pid_live(4242, expected) is None
+finally:
+    module.os.kill = original_kill
+    module.os.getpgid = original_getpgid
+
+started = {"backend": "codex", "status_path": status_path}
+assert module._reconciliation_status(started) == (None, None, None, None)
+PY
+if [ "$CAPTURE_RC" -eq 0 ]; then
+  pass "identity permission failures and PID-mismatched recovery stay unavailable"
+else
+  fail "identity permission failures and PID-mismatched recovery stay unavailable" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+
 capture python3 "$MANIFEST" verify --manifest "$FIXTURES/policy-mismatch.jsonl"
 if [ "$CAPTURE_RC" -eq 1 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'decision_effective_route_mismatch'; then
   pass "adaptive decision and effective route metadata must agree"
@@ -1060,11 +1114,16 @@ fi
 PID_REUSE_STATUS="$TMP/pid-reuse/status.json"
 PID_REUSE_MANIFEST="$TMP/pid-reuse/events.jsonl"
 mkdir -p "$(dirname "$PID_REUSE_STATUS")"
-printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s","process_identity":"1|1|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n' \
+printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s","process_identity":"%s|1|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n' \
+  "$$" \
   "$$" >"$PID_REUSE_STATUS"
 append_event "$PID_REUSE_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:08:10Z","run_id":"run-pid-reuse","backend":"codex"}' >/dev/null
-append_event "$PID_REUSE_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:08:11Z\",\"run_id\":\"run-pid-reuse\",\"backend\":\"codex\",\"owner_pid\":$$,\"owner_process_identity\":\"1|1|1|bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"status_path\":\"$PID_REUSE_STATUS\"}" >/dev/null
-capture python3 "$MANIFEST" reconcile --manifest "$PID_REUSE_MANIFEST"
+append_event "$PID_REUSE_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:08:11Z\",\"run_id\":\"run-pid-reuse\",\"backend\":\"codex\",\"owner_pid\":$$,\"owner_process_identity\":\"$$|1|1|bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"status_path\":\"$PID_REUSE_STATUS\"}" >/dev/null
+PID_REUSE_BIN="$TMP/pid-reuse/bin"
+mkdir -p "$PID_REUSE_BIN"
+printf '#!/bin/sh\ncase "$2" in\n  stat=) printf "S\\n" ;;\n  lstart=) printf "Thu Jul 23 12:00:00 2026\\n" ;;\n  *) exit 2 ;;\nesac\n' >"$PID_REUSE_BIN/ps"
+chmod 700 "$PID_REUSE_BIN/ps"
+capture env PATH="$PID_REUSE_BIN:$PATH" python3 "$MANIFEST" reconcile --manifest "$PID_REUSE_MANIFEST"
 if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = '{"abandoned":1,"open":0,"status":"ok"}' ]; then
   pass "reconcile treats owner and backend PID identity mismatches as dead"
 else

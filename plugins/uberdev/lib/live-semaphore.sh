@@ -119,6 +119,7 @@ import sys
 
 pid = int(sys.argv[1])
 try:
+    os.kill(pid, 0)
     pgid = os.getpgid(pid) if hasattr(os, "getpgid") else pid
     sid = os.getsid(pid) if hasattr(os, "getsid") else pid
     state = subprocess.check_output(
@@ -131,15 +132,40 @@ try:
         text=True,
         stderr=subprocess.DEVNULL,
     ).strip()
-    if not state or state.startswith("Z") or not started:
-        raise ValueError()
+    if state.startswith("Z"):
+        raise ProcessLookupError()
+    if not state or not started:
+        raise OSError("process identity output unavailable")
     print(
         f"{pid}|{pgid}|{sid}|{hashlib.sha256(started.encode()).hexdigest()}",
         end="",
     )
-except Exception:
+except ProcessLookupError:
     raise SystemExit(1)
+except subprocess.CalledProcessError:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        raise SystemExit(1)
+    except OSError:
+        raise SystemExit(2)
+    raise SystemExit(2)
+except (AttributeError, OSError, subprocess.SubprocessError, ValueError):
+    raise SystemExit(2)
 PY
+}
+
+_uberdev_semaphore_process_identity_matches() {
+  local pid="${1-}" expected="${2-}" current probe_rc
+  if current="$(_uberdev_semaphore_process_identity "$pid")"; then
+    [ "$current" = "$expected" ]
+    return $?
+  else
+    probe_rc=$?
+  fi
+  [ "$probe_rc" -ne 1 ] || return 1
+  _uberdev_semaphore_error "process identity probe unavailable for pid $pid"
+  return 2
 }
 
 _uberdev_semaphore_write_process_identity() {
@@ -414,7 +440,7 @@ _uberdev_semaphore_mutex_release() {
 }
 
 _uberdev_semaphore_mutex_reclaim_dead() {
-  local scope mutex allow_reclaim owner owner_identity current_owner_identity observed identity current_identity
+  local scope mutex allow_reclaim owner owner_identity observed identity current_identity probe_rc
   scope="$1"
   allow_reclaim="${2:-0}"
   mutex="$scope/.mutex"
@@ -464,8 +490,12 @@ _uberdev_semaphore_mutex_reclaim_dead() {
     owner_identity=''
   fi
   if [ -n "$owner_identity" ]; then
-    current_owner_identity="$(_uberdev_semaphore_process_identity "$owner" 2>/dev/null || true)"
-    [ -z "$current_owner_identity" ] || [ "$current_owner_identity" != "$owner_identity" ] || return 1
+    if _uberdev_semaphore_process_identity_matches "$owner" "$owner_identity"; then
+      return 1
+    else
+      probe_rc=$?
+      [ "$probe_rc" -ne 2 ] || return 2
+    fi
   else
     _uberdev_semaphore_pid_live "$owner" && return 1
   fi
@@ -729,6 +759,7 @@ _uberdev_semaphore_read_lease() {
   if [ -n "$_UBERDEV_LEASE_OWNER_IDENTITY" ]; then
     printf '%s\n' "$_UBERDEV_LEASE_OWNER_IDENTITY" \
       | grep -Eq '^[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}$' || return 1
+    [ "${_UBERDEV_LEASE_OWNER_IDENTITY%%|*}" = "$_UBERDEV_LEASE_OWNER_PID" ] || return 1
   fi
   _uberdev_semaphore_is_positive_integer "$_UBERDEV_LEASE_START_EPOCH" || return 1
   _uberdev_semaphore_is_positive_integer "$_UBERDEV_LEASE_TIMEOUT_S" || return 1
@@ -770,7 +801,7 @@ _uberdev_semaphore_status_kind() {
 }
 
 _uberdev_semaphore_backend_live() {
-  local handle status_kind expected_identity handle_kind pid current_identity
+  local handle status_kind expected_identity handle_kind pid
   handle="${1-}"
   status_kind="${2-unknown}"
   expected_identity="${3-}"
@@ -787,8 +818,7 @@ _uberdev_semaphore_backend_live() {
     pid:*)
       pid="${handle_kind#pid:}"
       if [ -n "$expected_identity" ]; then
-        current_identity="$(_uberdev_semaphore_process_identity "$pid" 2>/dev/null || true)"
-        [ -n "$current_identity" ] && [ "$current_identity" = "$expected_identity" ]
+        _uberdev_semaphore_process_identity_matches "$pid" "$expected_identity"
       else
         _uberdev_semaphore_pid_live "$pid"
       fi
@@ -799,7 +829,7 @@ _uberdev_semaphore_backend_live() {
 }
 
 _uberdev_semaphore_reconcile_locked() {
-  local scope now lease status_kind age owner_live backend_live remove owner_identity
+  local scope now lease status_kind age owner_live backend_live remove probe_rc
   scope="$1"
   now="$(date +%s)"
   _UBERDEV_SEMAPHORE_REMOVED=0
@@ -821,13 +851,23 @@ _uberdev_semaphore_reconcile_locked() {
       owner_live=0
       backend_live=0
       if [ -n "$_UBERDEV_LEASE_OWNER_IDENTITY" ]; then
-        owner_identity="$(_uberdev_semaphore_process_identity "$_UBERDEV_LEASE_OWNER_PID" 2>/dev/null || true)"
-        [ -n "$owner_identity" ] && [ "$owner_identity" = "$_UBERDEV_LEASE_OWNER_IDENTITY" ] && owner_live=1
+        if _uberdev_semaphore_process_identity_matches "$_UBERDEV_LEASE_OWNER_PID" \
+            "$_UBERDEV_LEASE_OWNER_IDENTITY"; then
+          owner_live=1
+        else
+          probe_rc=$?
+          [ "$probe_rc" -ne 2 ] || return 2
+        fi
       else
         _uberdev_semaphore_pid_live "$_UBERDEV_LEASE_OWNER_PID" && owner_live=1
       fi
-      _uberdev_semaphore_backend_live "$_UBERDEV_LEASE_BACKEND_HANDLE" "$status_kind" \
-        "$_UBERDEV_LEASE_BACKEND_IDENTITY" && backend_live=1
+      if _uberdev_semaphore_backend_live "$_UBERDEV_LEASE_BACKEND_HANDLE" "$status_kind" \
+          "$_UBERDEV_LEASE_BACKEND_IDENTITY"; then
+        backend_live=1
+      else
+        probe_rc=$?
+        [ "$probe_rc" -ne 2 ] || return 2
+      fi
       age=$((now - _UBERDEV_LEASE_START_EPOCH))
       [ "$age" -ge 0 ] || age=0
       if [ "$owner_live" -eq 0 ] && [ "$backend_live" -eq 0 ]; then

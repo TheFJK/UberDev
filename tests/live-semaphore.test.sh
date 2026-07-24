@@ -108,6 +108,16 @@ if _uberdev_semaphore_read_lease "$windows_status_lease" \
 else
   fail "persisted native Windows status paths survive lease reread" "status=$_UBERDEV_LEASE_STATUS_PATH"
 fi
+mismatched_owner_generation="$(printf 'e%.0s' {1..32})"
+mismatched_owner_lease="$TMP/${mismatched_owner_generation}$(printf 'f%.0s' {1..32}).lease"
+printf 'version=1\ngeneration=%s\nrun_id=mismatched-owner-identity\nowner_pid=%s\nowner_identity=%s|1|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nbackend_handle=\nbackend_identity=\nstart_epoch=1\ntimeout_s=5\nstatus_path=\n' \
+  "$mismatched_owner_generation" "$$" "$(( $$ + 1 ))" >"$mismatched_owner_lease"
+capture _uberdev_semaphore_read_lease "$mismatched_owner_lease"
+if [ "$CAPTURE_RC" -eq 1 ]; then
+  pass "lease owner identity is bound to owner_pid"
+else
+  fail "lease owner identity is bound to owner_pid" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
 capture uberdev_semaphore_acquire "$TMP/invalid-cap" repo codex 0 run 5
 [ "$CAPTURE_RC" -eq 2 ] && pass "zero cap is rejected" || fail "zero cap is rejected" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 capture uberdev_semaphore_acquire "$TMP/invalid-cap-text" repo codex nope run 5
@@ -960,6 +970,60 @@ else
   fail "reused live PID does not preserve a stale mutex generation" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 eval "$(declare -f _real_semaphore_process_identity | sed '1s/_real_semaphore_process_identity/_uberdev_semaphore_process_identity/')"
+
+printf '== live semaphore: lifecycle lease PID reuse identity ==\n'
+LEASE_IDENTITY_STATE="$TMP/lease-pid-reuse-state"
+LEASE_IDENTITY_PATH_FILE="$TMP/lease-pid-reuse-path"
+sleep 30 & backend_pid=$!
+LEASE_BACKEND_IDENTITY="$(_uberdev_semaphore_process_identity "$backend_pid")"
+/bin/bash -c '
+  . "$1"
+  lease="$(uberdev_semaphore_acquire "$2" repo codex 1 lease-pid-reuse 30)" || exit 1
+  uberdev_semaphore_set_handle "$lease" "$3" "" exact-identity lease_identity "$4" || exit 1
+  printf "%s\n" "$lease" >"$5"
+' _ "$LIB" "$LEASE_IDENTITY_STATE" "$backend_pid" "$LEASE_BACKEND_IDENTITY" "$LEASE_IDENTITY_PATH_FILE"
+lease_identity_path="$(cat "$LEASE_IDENTITY_PATH_FILE")"
+capture uberdev_semaphore_reconcile "$LEASE_IDENTITY_STATE" repo codex
+if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = 0 ] && [ -f "$lease_identity_path" ]; then
+  pass "matching backend identity retains lifecycle capacity"
+else
+  fail "matching backend identity retains lifecycle capacity" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+eval "$(declare -f _uberdev_semaphore_process_identity | sed '1s/_uberdev_semaphore_process_identity/_real_lease_process_identity/')"
+_uberdev_semaphore_process_identity() {
+  if [ "$1" = "$backend_pid" ]; then return 2; fi
+  _real_lease_process_identity "$@"
+}
+capture uberdev_semaphore_reconcile "$LEASE_IDENTITY_STATE" repo codex
+if [ "$CAPTURE_RC" -eq 2 ] && [ -f "$lease_identity_path" ] \
+    && printf '%s' "$CAPTURE_OUT" | grep -q 'process identity probe unavailable'; then
+  pass "unavailable backend identity probe retains lifecycle capacity with an error"
+else
+  fail "unavailable backend identity probe retains lifecycle capacity with an error" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+_uberdev_semaphore_process_identity() {
+  if [ "$1" = "$backend_pid" ]; then
+    printf '%s\n' "$backend_pid|$backend_pid|$backend_pid|cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    return 0
+  fi
+  _real_lease_process_identity "$@"
+}
+if [ -f "$lease_identity_path" ]; then
+  capture uberdev_semaphore_reconcile "$LEASE_IDENTITY_STATE" repo codex
+  if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = 1 ] && [ ! -e "$lease_identity_path" ]; then
+    reacquired="$(uberdev_semaphore_acquire "$LEASE_IDENTITY_STATE" repo codex 1 lease-pid-reuse-reacquired 30)"
+    uberdev_semaphore_release "$reacquired" >/dev/null 2>&1 || true
+    pass "mismatched live backend identity releases the exact lifecycle lease"
+  else
+    fail "mismatched live backend identity releases the exact lifecycle lease" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+  fi
+else
+  fail "mismatched live backend identity releases the exact lifecycle lease" "lease was removed while identity evidence was unavailable"
+fi
+eval "$(declare -f _real_lease_process_identity | sed '1s/_real_lease_process_identity/_uberdev_semaphore_process_identity/')"
+kill "$backend_pid" 2>/dev/null || true
+wait "$backend_pid" 2>/dev/null || true
+backend_pid=""
 
 printf '== live semaphore: killed owner, stale timeout, and backend liveness ==\n'
 SUBSHELL_STATE="$TMP/subshell-killed-state"

@@ -811,14 +811,34 @@ _uberdev_agent_process_identity() {
 import hashlib,os,subprocess,sys
 pid=int(sys.argv[1])
 try:
+ os.kill(pid,0)
  pgid=os.getpgid(pid); sid=os.getsid(pid)
  process_state=subprocess.check_output(["ps","-o","stat=","-p",str(pid)],text=True,stderr=subprocess.DEVNULL).strip()
- if not process_state or process_state.startswith("Z"): raise ValueError()
+ if process_state.startswith("Z"): raise ProcessLookupError()
+ if not process_state: raise OSError("process state unavailable")
  started=subprocess.check_output(["ps","-o","lstart=","-p",str(pid)],text=True,stderr=subprocess.DEVNULL).strip()
- if not started: raise ValueError()
+ if not started: raise OSError("process start unavailable")
  print(f"{pid}|{pgid}|{sid}|{hashlib.sha256(started.encode()).hexdigest()}",end="")
-except Exception: raise SystemExit(1)
+except ProcessLookupError: raise SystemExit(1)
+except subprocess.CalledProcessError:
+ try: os.kill(pid,0)
+ except ProcessLookupError: raise SystemExit(1)
+ except OSError: raise SystemExit(2)
+ raise SystemExit(2)
+except (AttributeError,OSError,subprocess.SubprocessError,ValueError): raise SystemExit(2)
 PY
+}
+
+_uberdev_agent_process_identity_matches() {
+  local pid="$1" expected="$2" current probe_rc
+  if current="$(_uberdev_agent_process_identity "$pid")"; then
+    [ "$current" = "$expected" ]
+    return $?
+  else
+    probe_rc=$?
+  fi
+  [ "$probe_rc" -ne 1 ] || return 1
+  return 2
 }
 
 _uberdev_agent_claude_probe() {
@@ -1086,7 +1106,7 @@ _uberdev_agent_start_watcher() {
   watcher_instance="$(_uberdev_agent_json_get "$request_json" run_id)" || return 2
   watcher_fallback="$(dirname "$manifest")/$watcher_instance.watcher-error.json"
   (
-    local terminal_event='' probe='' absent_count=0 indeterminate_count=0 event_json='' error_class='' cancel_attempt=0 cancel_rc=0 cancel_reason='' supervision_reported=0 current_identity=''
+    local terminal_event='' probe='' absent_count=0 indeterminate_count=0 event_json='' error_class='' cancel_attempt=0 cancel_rc=0 cancel_reason='' supervision_reported=0 identity_probe_rc=0
     while [ -d "$(dirname "$status_file")" ]; do
       terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
       [ -z "$terminal_event" ] || break
@@ -1158,10 +1178,38 @@ _uberdev_agent_start_watcher() {
         case "$handle" in
           ''|*[!0-9]*) ;;
           *)
-            current_identity=''
-            [ -z "$process_identity" ] || current_identity="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
-            if { [ -n "$process_identity" ] && [ "$current_identity" != "$process_identity" ]; } \
-                || { [ -z "$process_identity" ] && ! kill -0 "$handle" 2>/dev/null; }; then
+            identity_probe_rc=0
+            if [ -n "$process_identity" ]; then
+              if _uberdev_agent_process_identity_matches "$handle" "$process_identity"; then
+                absent_count=0
+                indeterminate_count=0
+                sleep 1
+                continue
+              else
+                identity_probe_rc=$?
+              fi
+              if [ "$identity_probe_rc" -eq 2 ]; then
+                absent_count=0
+                indeterminate_count=$((indeterminate_count + 1))
+                if [ "$indeterminate_count" -ge 3 ]; then
+                  if ! _uberdev_agent_persist_watcher_error_retry "$status_file" "$watcher_fallback" \
+                      "$backend" "$handle" process_identity_probe_unavailable "$indeterminate_count"; then
+                    _uberdev_agent_error "failed to persist process identity probe failure: $status_file"
+                  fi
+                  _uberdev_agent_error "process identity probe unavailable for pid $handle"
+                  exit 70
+                fi
+                sleep 1
+                continue
+              fi
+            elif kill -0 "$handle" 2>/dev/null; then
+              absent_count=0
+              indeterminate_count=0
+              sleep 1
+              continue
+            fi
+            indeterminate_count=0
+            if [ "$identity_probe_rc" -eq 1 ] || [ -z "$process_identity" ]; then
               absent_count=$((absent_count + 1))
               if [ "$absent_count" -ge 3 ]; then
                 _UBERDEV_DISPATCH_CANCEL_REASON=''
@@ -1178,8 +1226,6 @@ _uberdev_agent_start_watcher() {
                 fi
                 exit 70
               fi
-            else
-              absent_count=0
             fi
             ;;
         esac
@@ -1350,7 +1396,7 @@ uberdev_agent_dispatch() {
   local request_json="${1:-}" prompt_requested="${2:-}" result_requested="${3:-}" status_requested="${4:-}"
   local run_dir run_id repository_id backend workflow issue_num tier capacity timeout_s workspace_mode workspace_dir
   local prompt_file result_file status_file state_dir manifest decision lease lease_record lease_identity registered_identity event_json rc handle lease_handle terminal_event paths_json lease_failure_reason cleanup_identity
-  local context_file context_sha context_validation persisted_decision supplied_root supplied_parent context_run_id parent_run_id agent_id process_identity lease_generation
+  local context_file context_sha context_validation persisted_decision supplied_root supplied_parent context_run_id parent_run_id agent_id process_identity lease_generation identity_probe_rc
   [ "$#" -eq 4 ] || { _uberdev_agent_error 'expected REQUEST_JSON PROMPT_FILE RESULT_FILE STATUS_FILE'; return 2; }
   if [ -n "${ZSH_VERSION:-}" ]; then
     setopt localoptions nullglob || return 2
@@ -1535,7 +1581,22 @@ uberdev_agent_dispatch() {
   process_identity=''
   if [ -z "$terminal_event" ]; then
     case "$backend" in
-      background|codex) process_identity="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)" ;;
+      background|codex)
+        case "$handle" in
+          ''|*[!0-9]*) ;;
+          *)
+            if process_identity="$(_uberdev_agent_process_identity "$handle")"; then
+              :
+            else
+              identity_probe_rc=$?
+              _uberdev_agent_error "cannot verify process identity for $backend pid $handle (probe rc=$identity_probe_rc)"
+              _uberdev_agent_abort_after_launch "$manifest" "$lease" "$lease_identity" "$status_file" "$result_file" \
+                "$backend" "$handle" "$request_json" "$decision" process_identity_capture
+              return $?
+            fi
+            ;;
+        esac
+        ;;
     esac
   fi
   lease_handle="$handle"

@@ -419,6 +419,52 @@ fi
 rm -rf "$POST_REVIEW_RUNTIME_TMP"
 
 echo
+echo "== Dispatch unwind failures return a distinct supervisory result =="
+POST_REVIEW_CLEANUP_TMP="$(mktemp -d)"
+POST_REVIEW_CLEANUP_FUNCTIONS="$POST_REVIEW_CLEANUP_TMP/functions.sh"
+awk '
+  /^post_review_init_ledger\(\)/ { active=1 }
+  active && /^post_review_wait_all\(\)/ { exit }
+  active { print }
+' "$POST_IMPL" >"$POST_REVIEW_CLEANUP_FUNCTIONS"
+if (
+  set -euo pipefail
+  . "$POST_REVIEW_CLEANUP_FUNCTIONS"
+  root="$POST_REVIEW_CLEANUP_TMP/runtime"
+  mkdir -p "$root"
+  printf '%s\n' \
+    '{"edge":"review.one","instance":"one","inputs":{},"risks":[]}' \
+    '{"edge":"review.two","instance":"two","inputs":{},"risks":[]}' >"$root/records"
+  uberdev_create_child_handoff() {
+    UBERDEV_CHILD_HANDOFF="$1.handoff"
+    UBERDEV_CHILD_RESULT="$1.result"
+    UBERDEV_CHILD_STATUS="$1.status"
+  }
+  uberdev_preflight_child_batch() { return 0; }
+  uberdev_dispatch_child() {
+    [ "$1" = review.one ] && { printf '%s\n' receipt-one; return 0; }
+    return 17
+  }
+  uberdev_unwind_child() { return 23; }
+  set +e
+  post_review_fanout "$root/records" "$root/descriptors" "$root/launched" 9 2>"$root/error.log"
+  rc=$?
+  set -e
+  [ "$rc" -eq 70 ]
+  grep -Fq 'edge=review.one' "$root/error.log"
+  grep -Fq 'status=review.one.status' "$root/error.log"
+  grep -Fq 'origin_rc=17' "$root/error.log"
+  grep -Fq 'cleanup_rc=23' "$root/error.log"
+); then
+  echo "  PASS  cleanup failure preserves per-child evidence and returns supervisory rc=70"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  cleanup failure was collapsed into the original dispatch result"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$POST_REVIEW_CLEANUP_TMP"
+
+echo
 echo "== Ledger initialization fails before stale descriptors can dispatch =="
 POST_REVIEW_LEDGER_TMP="$(mktemp -d)"
 POST_REVIEW_LEDGER_FUNCTIONS="$POST_REVIEW_LEDGER_TMP/functions.sh"
