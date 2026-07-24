@@ -162,6 +162,52 @@ else
   fail "exact identity capture failure rolls back its acquired generation" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 
+# The secure writer can publish a valid generation and still report failure
+# while delivering or validating its identity. Acquisition must roll that
+# generation back while the mutex is held instead of leaking capacity.
+capture /bin/bash -c '
+  . "$1"
+  eval "$(declare -f _uberdev_semaphore_publish_lease | sed '\''1s/_uberdev_semaphore_publish_lease/_real_publish_then_fail/'\'')"
+  _uberdev_semaphore_publish_lease() {
+    _real_publish_then_fail "$@" || return
+    return 29
+  }
+  replacement=""
+  uberdev_semaphore_acquire "$2" repo codex 1 publish-then-fail 30 exact-identity replacement
+  rc=$?
+  printf "rc=%s reason=%s replacement=%s\n" "$rc" "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}" "$replacement"
+  [ "$rc" -eq 2 ] && [ "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}" = lease_acquire_publish_failed ] \
+    && ! find "$2" -name '\''*.lease'\'' -type f -print 2>/dev/null | grep -q .
+' _ "$LIB" "$TMP/publish-then-fail"
+if [ "$CAPTURE_RC" -eq 0 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'reason=lease_acquire_publish_failed'; then
+  pass "post-publication writer failure rolls back the acquired generation"
+else
+  fail "post-publication writer failure rolls back the acquired generation" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+
+# If secure rollback itself fails, return the exact retained capability and
+# classify it distinctly so the dispatcher reports reserved capacity honestly.
+capture /bin/bash -c '
+  . "$1"
+  eval "$(declare -f _uberdev_semaphore_publish_lease | sed '\''1s/_uberdev_semaphore_publish_lease/_real_retained_publish/'\'')"
+  _uberdev_semaphore_publish_lease() {
+    _real_retained_publish "$@" || return
+    return 29
+  }
+  _uberdev_semaphore_remove_lease() { return 31; }
+  replacement=""
+  uberdev_semaphore_acquire "$2" repo codex 1 retained-publish 30 exact-identity replacement
+  rc=$?
+  printf "rc=%s reason=%s replacement=%s\n" "$rc" "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}" "$replacement"
+  [ "$rc" -eq 2 ] && [ "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}" = lease_acquire_rollback_failed ] \
+    && [[ "$replacement" =~ ^/.+\.lease$'\''\t'\''[0-9]+:[0-9]+:[0-9a-f]{32}$ ]]
+' _ "$LIB" "$TMP/publish-rollback-failure"
+if [ "$CAPTURE_RC" -eq 0 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'reason=lease_acquire_rollback_failed'; then
+  pass "failed post-publication rollback returns the retained lease capability"
+else
+  fail "failed post-publication rollback returns the retained lease capability" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+
 # If exact identity validation fails after atomic handle publication and the
 # rollback remove is fault-injected to fail, the replacement capability is
 # still returned so the caller can release that exact inode and generation.

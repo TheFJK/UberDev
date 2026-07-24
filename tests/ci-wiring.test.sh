@@ -31,6 +31,14 @@ THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$THIS_DIR/.." && pwd)"
 WORKFLOW="$REPO_ROOT/.github/workflows/test.yml"
 
+macos_supervision_block=$(awk '/^  supervision-smoke-macos:/,/^  shape-checks-windows:/' "$WORKFLOW")
+for required in review-pr-codex-entry.test.sh agent-dispatch.test.sh review-pr-codex-six-child.test.sh; do
+  if ! grep -q "bash tests/$required" <<<"$macos_supervision_block"; then
+    echo "  FAIL  macOS supervision smoke job is missing $required"
+    exit 1
+  fi
+done
+
 PASS=0; FAIL=0
 echo "## ci-wiring drift guard (#210)"
 

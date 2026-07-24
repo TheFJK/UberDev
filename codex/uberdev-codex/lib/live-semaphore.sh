@@ -910,13 +910,32 @@ uberdev_semaphore_acquire() {
         return 2
       }
       owner_pid="$_UBERDEV_SEMAPHORE_LEASE_OWNER_PID"
+      generation="$(basename "$lease" .lease | cut -c 1-32)"
       if ! _uberdev_semaphore_publish_lease "$scope" "$lease" "$run_id" "$owner_pid" '' "$(date +%s)" "$timeout_s" ''; then
-        _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true
-        _uberdev_semaphore_error 'cannot publish lease'
-        _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_publish_failed
+        cleanup_rc=0
+        exact_identity=''
+        if [ -e "$lease" ] || [ -L "$lease" ]; then
+          path_identity="$(_uberdev_semaphore_path_identity "$lease" 2>/dev/null || true)"
+          case "$path_identity" in
+            ''|*[!0-9:]*|:*|*:|*:*:*) ;;
+            *) exact_identity="$path_identity:$generation" ;;
+          esac
+          _uberdev_semaphore_remove_lease "$lease" "$generation" || cleanup_rc=2
+        fi
+        _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || cleanup_rc=2
+        if [ "$cleanup_rc" -eq 0 ]; then
+          _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_publish_failed
+          _uberdev_semaphore_error 'cannot publish lease'
+        else
+          _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_rollback_failed
+          _uberdev_semaphore_error 'cannot publish or roll back lease'
+          if [ -n "$exact_identity" ]; then
+            record="$lease"$'\t'"$exact_identity"
+            if [ -n "$output_variable" ]; then printf -v "$output_variable" '%s' "$record"; else printf '%s\n' "$record"; fi
+          fi
+        fi
         return 2
       fi
-      generation="$(basename "$lease" .lease | cut -c 1-32)"
       exact_identity=''
       if [ "$identity_mode" = exact-identity ]; then
         exact_identity="${_UBERDEV_SEMAPHORE_PUBLISHED_IDENTITY:-}:$generation"

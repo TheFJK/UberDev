@@ -137,6 +137,12 @@ uberdev_prepare_run_carrier() {
   case "$subject" in ''|*[!0-9]*) _uberdev_child_error 'subject id must be a non-negative integer'; return 2 ;; esac
   [ "$workflow" = simplify ] || [ "$subject" -gt 0 ] || { _uberdev_child_error 'review-pr requires a positive PR number'; return 2; }
   case "$tier" in trivial|small|medium|large) ;; *) _uberdev_child_error 'invalid task tier'; return 2 ;; esac
+  if [ "$workflow" = review-pr ]; then
+    if [ -z "${UBERDEV_RESOLVED_BACKEND:-}" ]; then
+      uberdev_dispatch_preflight review-pr || return $?
+    fi
+    uberdev_dispatch_preflight_backend "$UBERDEV_RESOLVED_BACKEND" review-pr || return $?
+  fi
   prepared="$(uberdev_dispatch_prepare_root "$subject" "$tier" "$risks" "$workflow" '')" || return $?
   carrier="$(python3 -I -B -c '
 import json,sys
@@ -826,7 +832,9 @@ try:
   if (file_name.startswith('/') or re.match(r'^[A-Za-z]:',file_name) or '\\' in file_name
       or any(ord(char)<32 or ord(char)==127 for char in file_name)
       or any(part in {'','.','..'} for part in file_name.split('/'))): raise ValueError()
- if verdict=='APPROVE' and any(row['severity']=='blocker' for row in findings): raise ValueError()
+ blockers=[row for row in findings if row['severity']=='blocker']
+ if verdict=='APPROVE' and blockers: raise ValueError()
+ if verdict in {'REVISIONS_REQUIRED','REJECT'} and not blockers: raise ValueError()
 except (OSError,UnicodeError,ValueError):
  raise SystemExit(2)
 PY

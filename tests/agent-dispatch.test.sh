@@ -1155,6 +1155,49 @@ claude_cancel_retry_case delayed
 claude_cancel_retry_case never
 claude_cancel_retry_case sticky
 
+# If both durable probe-error persistence and provider cancellation fail, the
+# watcher must retry both parent-observable operations instead of marking the
+# supervision failure as already reported after the first lost attempt.
+claude_probe_persistence_retry_case() {
+  local run="$TMP/claude-probe-persistence-retry" state request
+  mkdir -p "$run"
+  printf 'Claude probe persistence retry prompt\n' >"$run/prompt.txt"
+  printf '{not-json\n' >"$run/claude-agents.json"
+  request="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"claude-probe-persistence-retry","repository_id":"claude-probe-persistence-retry-repository","backend":"claude-bg","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":95,"issue_num":95,"capacity":1,"timeout_s":20},separators=(",",":")))' "$run")"
+  (
+    sleep() { command sleep 0.05; }
+    eval "$(declare -f _uberdev_agent_persist_watcher_error_retry | sed '1s/_uberdev_agent_persist_watcher_error_retry/_real_probe_persist_retry/')"
+    _uberdev_agent_persist_watcher_error_retry() {
+      local count=0
+      [ ! -r "$run/persist-count" ] || read -r count <"$run/persist-count"
+      count=$((count + 1)); printf '%s\n' "$count" >"$run/persist-count"
+      [ "$count" -ge 3 ] || return 29
+      _real_probe_persist_retry "$@"
+    }
+    _uberdev_dispatch_cancel_backend() {
+      local count=0
+      [ ! -r "$run/cancel-count" ] || read -r count <"$run/cancel-count"
+      printf '%s\n' $((count + 1)) >"$run/cancel-count"
+      return 31
+    }
+    CROSS_CLAUDE_STATE="$run/claude-agents.json" PATH="$CROSS_BIN:$PATH" \
+      uberdev_agent_dispatch "$request" "$run/prompt.txt" "$run/result.md" "$run/status.json"
+  )
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+    [ -s "$run/status.json.watcher-error.json" ] && break
+    command sleep 0.1
+  done
+  [ "$(cat "$run/persist-count")" -ge 3 ]
+  [ "$(cat "$run/cancel-count")" -ge 3 ]
+  grep -q '"state":"running"' "$run/status.json"
+  state="$run/.agent-state-$(id -u)"
+  grep -R -q 'run_id=claude-probe-persistence-retry' "$state/semaphore-v1"
+  rm -rf "$run"
+  command sleep 0.2
+}
+
+claude_probe_persistence_retry_case
+
 cross_backend_case codex
 cross_backend_case background
 cross_backend_case claude-bg

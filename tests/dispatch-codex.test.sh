@@ -22,6 +22,15 @@ CODEX_AGENT_DISPATCH_LIB="$PLUGIN_ROOT/lib/agent-dispatch.sh"
 CODEX_GOAL_LIB="$PLUGIN_ROOT/lib/goal-state.sh"
 CODEX_CONFIG_LIB="$PLUGIN_ROOT/lib/config-read.sh"
 
+grep -Fq 'child-receipts.py:is_link_or_reparse' "$DISPATCH_LIB" || {
+  echo 'dispatch runtime-root comment does not name the reparse-aware receipt helper' >&2
+  exit 1
+}
+grep -Fq 'run_manifest.py:_secure_open_regular' "$DISPATCH_LIB" || {
+  echo 'dispatch runtime-root comment does not name the reparse-aware manifest helper' >&2
+  exit 1
+}
+
 # Behavioral fixtures intentionally narrow PATH to stub git/codex. Preserve a
 # validated interpreter argv first so dispatch exercises the real portable
 # resolver contract instead of depending on which Python launcher survives in

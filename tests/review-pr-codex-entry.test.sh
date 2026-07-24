@@ -38,6 +38,12 @@ awk '
   active{print}
 ' "$GENERATED" >"$TMP/setup.sh"
 test -s "$TMP/setup.sh"
+awk '
+  /uberdev-executable setup=review-pr/{active=1; next}
+  active && /^```/{exit}
+  active{print}
+' "$SOURCE" >"$TMP/source-setup.sh"
+test -s "$TMP/source-setup.sh"
 
 mkdir -p "$TMP/bin" "$TMP/home" "$TMP/repo"
 git -C "$TMP/repo" init -q
@@ -51,6 +57,9 @@ for provider in codex claude; do
   printf '#!/usr/bin/env bash\nexit 0\n' >"$TMP/bin/$provider"
   chmod +x "$TMP/bin/$provider"
 done
+printf '#!/usr/bin/env bash\nexit 0\n' >"$TMP/bin/wezterm"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$TMP/bin/wezterm-mux-server"
+chmod +x "$TMP/bin/wezterm" "$TMP/bin/wezterm-mux-server"
 
 run_setup() {
   local runtime="$1" requested="${2-}"
@@ -95,6 +104,23 @@ assert value["model"] and value["timeout"], value
 assert value["permissions"] == "--dangerously-skip-permissions --permission-mode bypassPermissions", value
 assert value["effort"] == "--effort max", value
 PY
+
+# Canonical standalone review is provider-neutral, but auto resolution is
+# workflow-aware before carrier creation. A usable macOS WezTerm must not be
+# persisted when review-pr supports only Codex or claude-bg repair children.
+source_auto_result="$(
+  env -i HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
+    PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$TMP/repo" \
+    UBERDEV_TMPDIR="$TMP/runtime-source-auto" AUTO_PERMISSIONS=1 \
+    UBERDEV_DISPATCH_BACKEND_REQUESTED=auto \
+    RUN_ID=20260716-000003-abcdef0 PR_NUMBER=335 ARGUMENTS='' \
+    bash -c 'mkdir -p "$3"; cd "$2"; . "$1"; python3 -I -B -c "import json,os; request=json.loads(os.environ[\"UBERDEV_AGENT_PREPARED_REQUEST_JSON\"]); print(request[\"backend\"])"' \
+      _ "$TMP/source-setup.sh" "$TMP/repo" "$TMP/runtime-source-auto"
+)"
+[ "$source_auto_result" = claude-bg ] || {
+  echo "standalone review auto-selected unsupported backend: $source_auto_result" >&2
+  exit 1
+}
 
 # With UBERDEV_TMPDIR absent, standalone review must select the secure runtime
 # helper default beneath TMPDIR instead of falling back to an ambient /tmp path.

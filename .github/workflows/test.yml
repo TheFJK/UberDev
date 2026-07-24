@@ -184,6 +184,18 @@ jobs:
           bash tests/scan-fleet-workflow.test.sh && \
           bash tests/codex-port.test.sh
 
+  supervision-smoke-macos:
+    name: supervision-smoke-macos
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Run focused supervision smoke tests
+        run: |
+          bash tests/review-pr-codex-entry.test.sh && \
+          bash tests/agent-dispatch.test.sh && \
+          bash tests/review-pr-codex-six-child.test.sh
+
   shape-checks-windows:
     name: shape-checks-windows
     runs-on: windows-latest

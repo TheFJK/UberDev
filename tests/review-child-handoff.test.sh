@@ -12,6 +12,22 @@ mkdir -p "$TMP/run"
 TEST_REPO="$TMP/repo"; mkdir -p "$TEST_REPO"; TEST_REPO="$(cd "$TEST_REPO" && pwd -P)"
 git -C "$TEST_REPO" init -q
 printf 'fixture\n' >"$TEST_REPO/README.md"
+
+# Phase 1 verdicts and blocker severity form a closed invariant: APPROVE has
+# no blockers, while either red verdict must carry at least one blocker.
+printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'confidence: high' 'findings: []' '```' \
+  >"$TMP/revisions-empty.md"
+printf '%s\n' '```yaml' 'verdict: REJECT' 'confidence: high' 'findings:' \
+  '  - severity: suggestion' '    location: README.md:1' \
+  '    summary: advisory only' '    detail: no blocking evidence' '```' \
+  >"$TMP/reject-suggestion-only.md"
+printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'confidence: high' 'findings:' \
+  '  - severity: blocker' '    location: README.md:1' \
+  '    summary: blocking evidence' '    detail: requires a correction' '```' \
+  >"$TMP/revisions-blocker.md"
+! uberdev_child_validate_phase1_review_result "$TMP/revisions-empty.md"
+! uberdev_child_validate_phase1_review_result "$TMP/reject-suggestion-only.md"
+uberdev_child_validate_phase1_review_result "$TMP/revisions-blocker.md"
 request="$(jq -cn --arg run "$TMP/run" --arg repo "$TEST_REPO" '{schema_version:1,run_dir:$run,run_id:"review-contract",repository_id:$repo,backend:"codex",workflow:"review-pr",phase:"review",role:"lead",task_tier:"medium",risk_signals:["security"],issue_or_pr:1,issue_num:1,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
 decision="$(uberdev_agent_resolve_request "$request")"
 metadata="$(jq -cn --arg repo "$TEST_REPO" '{run_id:"review-contract",repository_id:$repo,workflow:"review-pr",backend:"codex",issue_num:1,task_tier:"medium",risk_signals:["security"]}')"
@@ -165,7 +181,10 @@ done
 # waves whose expected count is smaller than the full six-reviewer roster.
 awk '/^post_review_roster_complete\(\) \{/{active=1} active{print} active && /^\}/{exit}' \
   "$POST" >"$TMP/roster-runtime.sh"
+awk '/^post_review_require_complete_wave\(\) \{/{active=1} active{print} active && /^\}/{exit}' \
+  "$POST" >"$TMP/aggregate-gate-runtime.sh"
 . "$TMP/roster-runtime.sh"
+. "$TMP/aggregate-gate-runtime.sh"
 ROSTER_EDGES=(
   review_pr.review.correctness review_pr.review.silent_failures
   review_pr.review.types review_pr.review.comments
@@ -200,6 +219,38 @@ roster_must_block_aggregation "$TMP/roster-duplicate.records" 6
 roster_must_block_aggregation "$TMP/roster-unknown.records" 6
 head -1 "$ROSTER_VALID" >"$TMP/roster-truncated-repair.records"
 roster_must_block_aggregation "$TMP/roster-truncated-repair.records" 2
+
+# Provider and exhausted format-repair failures must leave the canonical
+# aggregate absent, so neither the fixer nor trust emission can run.
+aggregate_gate_must_block() {
+  local label="$1" blocked="$2" initial="$3" repaired="$4"
+  AGG_PATH="$TMP/$label/post-impl-review-final.md"
+  mkdir -p "$(dirname "$AGG_PATH")"
+  : >"$AGG_PATH"
+  REVIEW_WAVE_BLOCKED="$blocked"
+  REVIEW_INITIAL_VALID_COUNT="$initial"
+  REVIEW_REPAIR_VALID_COUNT="$repaired"
+  REVIEW_EXPECTED_COUNT=6
+  if post_review_require_complete_wave; then
+    : >"$TMP/$label/fixer-dispatched"
+    : >"$TMP/$label/trust-emitted"
+  fi
+  [ ! -e "$AGG_PATH" ]
+  [ ! -e "$TMP/$label/fixer-dispatched" ]
+  [ ! -e "$TMP/$label/trust-emitted" ]
+}
+aggregate_gate_must_block provider-failure 1 5 0
+aggregate_gate_must_block invalid-repair 1 5 0
+RESEARCH_DIR_ABS="$TMP/derived-aggregate"
+mkdir -p "$RESEARCH_DIR_ABS"
+: >"$RESEARCH_DIR_ABS/post-impl-review-final.md"
+unset AGG_PATH
+REVIEW_WAVE_BLOCKED=1
+REVIEW_INITIAL_VALID_COUNT=5
+REVIEW_REPAIR_VALID_COUNT=0
+REVIEW_EXPECTED_COUNT=6
+! post_review_require_complete_wave
+[ ! -e "$RESEARCH_DIR_ABS/post-impl-review-final.md" ]
 
 # Review and simplify execute with inherited carriers. Post-review attaches to
 # the exact descriptor exported by its parent review setup.

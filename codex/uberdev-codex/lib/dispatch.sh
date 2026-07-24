@@ -81,7 +81,9 @@ _uberdev_dispatch_python() {
 # to 0700. Native Windows relies on the current-user ACL only when this helper
 # creates the default directory; a pre-existing default or caller override is
 # checked for directory and ordinary-link safety but is not asserted private
-# here. Receipt-specific helpers perform stronger reparse-point checks.
+# here. The reparse-aware boundaries are child-receipts.py:is_link_or_reparse
+# and run_manifest.py:_secure_open_regular; the worktree receipt helpers below
+# check ordinary links plus stable file identity, not Windows reparse flags.
 _uberdev_dispatch_runtime_root() {
   local target
   if [ -n "${UBERDEV_TMPDIR:-}" ]; then
@@ -366,14 +368,16 @@ _uberdev_dispatch_codex_available() {
   command -v codex >/dev/null 2>&1
 }
 
-# uberdev_dispatch_preflight
+# uberdev_dispatch_preflight [WORKFLOW]
 # Resolves UBERDEV_DISPATCH_BACKEND_REQUESTED (auto|claude-bg|wezterm|background|codex)
 # to a concrete UBERDEV_RESOLVED_BACKEND, ONCE per invocation, committed for
 # the whole batch (no mid-fanout switch). Hard-errors (return 1) when an
-# explicit backend is unusable on this host. Emits dispatch_backend_resolved.
+# explicit backend is unusable on this host. Auto selection is workflow-aware
+# when review-pr is supplied because its mutating repair children require Codex
+# or claude-bg. Emits dispatch_backend_resolved.
 uberdev_dispatch_preflight() {
   local requested="${UBERDEV_DISPATCH_BACKEND_REQUESTED:-auto}"
-  local os_class reason resolved
+  local workflow="${1:-}" os_class reason resolved
   os_class="$(_uberdev_dispatch_os_class)"
   case "$requested" in
     claude-bg|background)
@@ -405,11 +409,27 @@ uberdev_dispatch_preflight() {
       fi
       resolved="wezterm"; reason="explicit" ;;
     auto)
+      if [ "$workflow" = review-pr ]; then
+        if [ "$os_class" = windows-native ]; then
+          resolved="claude-bg"; reason="auto-review-pr-windows"
+        elif [ -n "${CODEX_HOME:-}" ]; then
+          if _uberdev_dispatch_codex_available; then
+            resolved="codex"; reason="auto-review-pr-codex-env"
+          else
+            echo "error: CODEX_HOME is set but the 'codex' CLI is unavailable on PATH" >&2
+            echo "       Fix the Codex install/PATH, or explicitly choose --backend=claude-bg." >&2
+            return 1
+          fi
+        elif ! command -v claude >/dev/null 2>&1 && _uberdev_dispatch_codex_available; then
+          resolved="codex"; reason="auto-review-pr-no-claude"
+        else
+          resolved="claude-bg"; reason="auto-review-pr-claude"
+        fi
       # If we're running inside Codex itself (CODEX_HOME set), or claude is
       # absent but codex is present, the codex backend is the natural default —
       # dispatching a claude --bg session from inside Codex would be wrong.
       # Checked before the per-OS matrix below so it wins in auto mode.
-      if [ -n "${CODEX_HOME:-}" ]; then
+      elif [ -n "${CODEX_HOME:-}" ]; then
         if _uberdev_dispatch_codex_available; then
           resolved="codex"; reason="auto-codex-env"
         else

@@ -1030,14 +1030,16 @@ _uberdev_agent_start_watcher() {
             indeterminate_count=$((indeterminate_count + 1))
             if [ "$indeterminate_count" -ge 3 ]; then
               if [ "$supervision_reported" -eq 0 ]; then
-                _uberdev_agent_persist_watcher_error_retry "$status_file" "$watcher_fallback" "$backend" "$handle" provider_probe_failed "$indeterminate_count" || \
+                if _uberdev_agent_persist_watcher_error_retry "$status_file" "$watcher_fallback" "$backend" "$handle" provider_probe_failed "$indeterminate_count"; then
+                  supervision_reported=1
+                else
                   _uberdev_agent_error "failed to persist provider probe failure: $status_file"
+                fi
                 if _uberdev_dispatch_cancel_backend claude-bg "$handle" ''; then
                   terminal_event=failed
                   error_class=provider_probe_failed
                   break
                 fi
-                supervision_reported=1
               fi
               indeterminate_count=0
             fi
