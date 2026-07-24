@@ -612,10 +612,11 @@ print(json.dumps({"context_file":path,"context_sha256":digest,"run_id":value["me
 }
 
 _uberdev_agent_event_json() {
-  local event="$1" request="$2" decision="$3" handle="${4:-}" status_path="${5:-}" rc="${6:-}" error_class="${7:-}" owner_pid="$$"
+  local event="$1" request="$2" decision="$3" handle="${4:-}" status_path="${5:-}" rc="${6:-}" error_class="${7:-}" owner_pid="$$" owner_identity=''
+  [ "$event" != agent_started ] || owner_identity="$(_uberdev_agent_process_identity "$owner_pid" 2>/dev/null || true)"
   python3 -I -c '
 import json, sys
-event_name, request_raw, decision_raw, handle, status_path, rc, error_class, owner_pid = sys.argv[1:]
+event_name, request_raw, decision_raw, handle, status_path, rc, error_class, owner_pid, owner_identity = sys.argv[1:]
 request = json.loads(request_raw); decision = json.loads(decision_raw)
 routing = decision.get("routing_mode", "inherit")
 effective = decision.get("effective_policy", "inherit")
@@ -645,6 +646,7 @@ if request.get("parent_run_id") is not None: record["parent_run_id"] = request["
 if request.get("agent_id") is not None: record["agent_id"] = request["agent_id"]
 if event_name == "agent_started":
     record["owner_pid"] = int(owner_pid)
+    if owner_identity: record["owner_process_identity"] = owner_identity
     record["timeout_s"] = int(request["timeout_s"])
     if handle: record["backend_handle"] = int(handle) if handle.isdigit() else handle
     if status_path: record["status_path"] = status_path
@@ -652,7 +654,7 @@ if event_name in {"completed", "failed", "timed_out", "cancelled", "abandoned"}:
     record["terminal_status"] = event_name
     if event_name == "failed": record["error_class"] = error_class or "provider_launch_failed"
 print(json.dumps({key:value for key,value in record.items() if value is not None}, sort_keys=True, separators=(",", ":")))
-' "$event" "$request" "$decision" "$handle" "$status_path" "$rc" "$error_class" "$owner_pid"
+' "$event" "$request" "$decision" "$handle" "$status_path" "$rc" "$error_class" "$owner_pid" "$owner_identity"
 }
 
 _uberdev_agent_append_event() {
@@ -891,15 +893,22 @@ try:
     rows=dict(pairs)
 except (UnicodeError, ValueError):
     raise SystemExit(2)
-if len(pairs)!=8 or len(rows)!=8 or set(rows)!={"version","generation","run_id","owner_pid","backend_handle","start_epoch","timeout_s","status_path"}: raise SystemExit(2)
+if len(pairs)!=10 or len(rows)!=10 or set(rows)!={"version","generation","run_id","owner_pid","owner_identity","backend_handle","backend_identity","start_epoch","timeout_s","status_path"}: raise SystemExit(2)
 generation = rows.get("generation", "")
 if rows.get("version")!="1" or not re.fullmatch(r"[0-9a-f]{32}",generation): raise SystemExit(2)
 if not os.path.basename(path).startswith(generation) or not re.fullmatch(r"[0-9a-f]{64}\.lease",os.path.basename(path)): raise SystemExit(2)
 if not rows["run_id"] or any(ord(ch)<32 or ord(ch)==127 for ch in rows["run_id"]): raise SystemExit(2)
 for key in ("owner_pid","start_epoch","timeout_s"):
     if not rows[key].isdigit() or int(rows[key])<=0: raise SystemExit(2)
+identity_pattern=r"[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}"
+if re.fullmatch(identity_pattern,rows["owner_identity"]) is None: raise SystemExit(2)
 handle=rows["backend_handle"]
 if any(ord(ch)<32 or ord(ch)==127 for ch in handle): raise SystemExit(2)
+backend_identity=rows["backend_identity"]
+if backend_identity:
+    if re.fullmatch(identity_pattern,backend_identity) is None: raise SystemExit(2)
+    numeric=handle[4:] if handle.startswith("pid:") else handle
+    if not numeric.isdigit() or backend_identity.split("|",1)[0]!=numeric: raise SystemExit(2)
 status_path=rows["status_path"]
 if status_path and (not os.path.isabs(status_path) or any(ord(ch)<32 or ord(ch)==127 for ch in status_path)): raise SystemExit(2)
 if handle and not handle.isdigit() and not status_path: raise SystemExit(2)
@@ -1524,12 +1533,17 @@ uberdev_agent_dispatch() {
 
   terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
   process_identity=''
-  [ -n "$terminal_event" ] || process_identity="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
+  if [ -z "$terminal_event" ]; then
+    case "$backend" in
+      background|codex) process_identity="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)" ;;
+    esac
+  fi
   lease_handle="$handle"
   [ "$backend" != wezterm ] || lease_handle="pane:$handle"
   registered_identity="$lease_identity"
   lease_identity=''
-  if ! PYTHONPATH= PYTHONHOME= uberdev_semaphore_set_handle "$lease" "$lease_handle" "$status_file" exact-identity lease_identity; then
+  if ! PYTHONPATH= PYTHONHOME= uberdev_semaphore_set_handle "$lease" "$lease_handle" "$status_file" \
+      exact-identity lease_identity "$process_identity"; then
     cleanup_identity="${lease_identity:-$registered_identity}"
     _uberdev_agent_abort_after_launch "$manifest" "$lease" "$cleanup_identity" "$status_file" "$result_file" \
       "$backend" "$handle" "$request_json" "$decision" lease_handle_update

@@ -100,8 +100,8 @@ else
 fi
 windows_generation="$(printf 'c%.0s' {1..32})"
 windows_status_lease="$TMP/${windows_generation}$(printf 'd%.0s' {1..32}).lease"
-printf 'version=1\ngeneration=%s\nrun_id=windows-status-reread\nowner_pid=%s\nbackend_handle=\nstart_epoch=1\ntimeout_s=5\nstatus_path=C:\\state\\status.json\n' \
-  "$windows_generation" "$$" > "$windows_status_lease"
+printf 'version=1\ngeneration=%s\nrun_id=windows-status-reread\nowner_pid=%s\nowner_identity=%s\nbackend_handle=\nbackend_identity=\nstart_epoch=1\ntimeout_s=5\nstatus_path=C:\\state\\status.json\n' \
+  "$windows_generation" "$$" "$(_uberdev_semaphore_process_identity "$$")" > "$windows_status_lease"
 if _uberdev_semaphore_read_lease "$windows_status_lease" \
     && [ "$_UBERDEV_LEASE_STATUS_PATH" = 'C:\state\status.json' ]; then
   pass "persisted native Windows status paths survive lease reread"
@@ -431,7 +431,9 @@ if grep -q '^version=1$' "$lease_a" \
    && grep -Eq '^generation=[0-9a-f]{32}$' "$lease_a" \
    && grep -q '^run_id=run/a$' "$lease_a" \
    && grep -q '^owner_pid=[0-9][0-9]*$' "$lease_a" \
+   && grep -Eq '^owner_identity=[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}$' "$lease_a" \
    && grep -q '^backend_handle=$' "$lease_a" \
+   && grep -q '^backend_identity=$' "$lease_a" \
    && grep -q '^start_epoch=[0-9][0-9]*$' "$lease_a" \
    && grep -q '^timeout_s=5$' "$lease_a" \
    && grep -q '^status_path=$' "$lease_a"; then
@@ -590,7 +592,7 @@ exercise_malformed_lease() {
   fi
   rm -f "$structure_lease"
 }
-for lease_key in version generation run_id owner_pid backend_handle start_epoch timeout_s status_path; do
+for lease_key in version generation run_id owner_pid owner_identity backend_handle backend_identity start_epoch timeout_s status_path; do
   exercise_malformed_lease "missing-$lease_key" "$lease_key" missing
   exercise_malformed_lease "duplicate-$lease_key" "$lease_key" duplicate
 done
@@ -941,6 +943,23 @@ if [ "$replace_rc" -eq 0 ] && ! grep -q 'unsafe mutex owner path' "$replace_err"
 else
   fail "mutex generation replacement remains ordinary contention" "$(cat "$replace_err")"
 fi
+
+printf '== live semaphore: mutex PID reuse identity ==\n'
+PID_REUSE_SCOPE="$TMP/mutex-pid-reuse.scope"
+mkdir -p "$PID_REUSE_SCOPE/.mutex"
+printf '%s\n%s\n%s\n' "$$" '1|1|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  '11111111111111111111111111111111' >"$PID_REUSE_SCOPE/.mutex/owner_pid"
+eval "$(declare -f _uberdev_semaphore_process_identity | sed '1s/_uberdev_semaphore_process_identity/_real_semaphore_process_identity/')"
+_uberdev_semaphore_process_identity() {
+  printf '%s\n' "$$|$$|$$|bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}
+capture _uberdev_semaphore_mutex_reclaim_dead "$PID_REUSE_SCOPE" 1
+if [ "$CAPTURE_RC" -eq 0 ] && [ ! -e "$PID_REUSE_SCOPE/.mutex" ]; then
+  pass "reused live PID does not preserve a stale mutex generation"
+else
+  fail "reused live PID does not preserve a stale mutex generation" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+eval "$(declare -f _real_semaphore_process_identity | sed '1s/_real_semaphore_process_identity/_uberdev_semaphore_process_identity/')"
 
 printf '== live semaphore: killed owner, stale timeout, and backend liveness ==\n'
 SUBSHELL_STATE="$TMP/subshell-killed-state"

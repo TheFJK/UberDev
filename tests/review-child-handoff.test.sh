@@ -183,7 +183,7 @@ awk '/^post_review_roster_complete\(\) \{/{active=1} active{print} active && /^\
   "$POST" >"$TMP/roster-runtime.sh"
 awk '/^post_review_require_complete_wave\(\) \{/{active=1} active{print} active && /^\}/{exit}' \
   "$POST" >"$TMP/aggregate-gate-runtime.sh"
-awk '/^post_review_run_capped\(\) \{/{active=1} active{print} active && /^\}/{exit}' \
+awk '/^post_review_init_ledger\(\) \{/{active=1} active && /^REVIEW_EDGES=\(/{exit} active{print}' \
   "$POST" >"$TMP/capped-fanout-runtime.sh"
 awk '
   /^post_review_require_complete_wave\(\) \{/{active=1}
@@ -322,6 +322,22 @@ REVIEW_EXPECTED_COUNT=6
 ! post_review_require_complete_wave
 [ ! -e "$RESEARCH_DIR_ABS/post-impl-review-final.md" ]
 
+# Suppression itself is fail closed. A directory collision cannot be reported
+# as a successfully suppressed stale aggregate.
+AGG_PATH="$TMP/suppression-failure/post-impl-review-final.md"
+mkdir -p "$AGG_PATH"
+REVIEW_WAVE_BLOCKED=1
+REVIEW_INITIAL_VALID_COUNT=5
+REVIEW_REPAIR_VALID_COUNT=0
+REVIEW_EXPECTED_COUNT=6
+set +e
+SUPPRESSION_ERROR="$(post_review_require_complete_wave 2>&1)"
+SUPPRESSION_RC=$?
+set -e
+[ "$SUPPRESSION_RC" -eq 71 ]
+[ -d "$AGG_PATH" ]
+printf '%s\n' "$SUPPRESSION_ERROR" | grep -Fq 'failed to suppress stale post-impl-review aggregate'
+
 # Review and simplify execute with inherited carriers. Post-review attaches to
 # the exact descriptor exported by its parent review setup.
 REVIEW_RUN_ID=20260710-000000-abcdef0
@@ -336,7 +352,8 @@ env -i HOME="$HOME" PATH="$PATH" CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" \
 env -i HOME="$HOME" PATH="$PATH" CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" \
   CLAUDE_PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$TEST_REPO" \
   RUN_ID="$REVIEW_RUN_ID" PR_NUMBER=1 ARGUMENTS='' UBERDEV_RUN_CARRIER_JSON="$UBERDEV_RUN_CARRIER_JSON" \
-  UBERDEV_COMMAND_WORKSPACE_JSON="$REVIEW_DESCRIPTOR" bash "$TMP/setup-post-impl-review.sh"
+  UBERDEV_COMMAND_WORKSPACE_JSON="$REVIEW_DESCRIPTOR" CHANGED_PATHS_JSON='["README.md"]' \
+  bash "$TMP/setup-post-impl-review.sh"
 
 # Setup is a fail-closed validation boundary. Neither a standalone carrier
 # preparation failure nor an invalid/spoofed inherited carrier may create the
@@ -429,8 +446,10 @@ grep -Eq '^unwind .+ .+ 17$' "$TMP/lifecycle.log"
 # child, and preserve the serialization rc even when current cleanup fails.
 sed -n '/BEGIN review-child-builder-v1/,/END review-child-builder-v1/p' "$SIMPLIFY" \
   | sed '/BEGIN review-child-builder-v1/d;/END review-child-builder-v1/d;/^```/d' >"$TMP/simplify-builder.sh"
-awk '/^post_review_fanout\(\) \{/{active=1} active{print} active && /^\}/{exit}' "$POST" >"$TMP/post-builder.sh"
-awk '/^post_review_fanout\(\) \{/{active=1} active{print} /^post_review_wait_all\(\) \{/{wait_fn=1} active && wait_fn && /^\}/{exit}' "$POST" >"$TMP/post-runtime.sh"
+awk '/^post_review_init_ledger\(\) \{/{active=1} active && /^post_review_wait_all\(\) \{/{exit} active{print}' \
+  "$POST" >"$TMP/post-builder.sh"
+awk '/^post_review_init_ledger\(\) \{/{active=1} active{print} /^post_review_wait_all\(\) \{/{wait_fn=1} active && wait_fn && /^\}/{exit}' \
+  "$POST" >"$TMP/post-runtime.sh"
 cat >"$TMP/ledger-failure.sh" <<'SH'
 set -u
 runtime="$1"; fanout="$2"; flavor="$3"; run="$4"; mkdir -p "$run"

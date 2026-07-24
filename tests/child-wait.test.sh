@@ -8,7 +8,9 @@ mkdir -p "$TMP/run/children/worker-0001" "$TMP/run/.agent-state-$(id -u)"
 HANDOFF="$TMP/run/children/worker-0001/handoff.v1.json"
 printf '{"schema_version":1,"instance_id":"worker-0001"}\n' >"$HANDOFF"
 RESULT="$TMP/run/children/worker-0001/result.md"; STATUS="$TMP/run/children/worker-0001/status.json"
+STATUS_REAL="$(python3 -I -B -c 'import os,sys; print(os.path.realpath(sys.argv[1]),end="")' "$STATUS")"
 MANIFEST="$TMP/run/.agent-state-$(id -u)/agent-lifecycle.jsonl"
+TEST_OWNER_IDENTITY="$(_uberdev_agent_process_identity "$$")"
 terminal_manifest() {
   local terminal="$1"
   printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00.000Z","run_id":"worker-0001"}\n' >"$MANIFEST"
@@ -28,8 +30,8 @@ mkdir -p "$TERMINAL_LEASE_DIR"
 printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321","lease_generation":"%s"}\n' \
   "$TERMINAL_GENERATION" >"$STATUS"
 terminal_manifest completed
-printf 'version=1\ngeneration=%s\nrun_id=worker-0001\nowner_pid=%s\nbackend_handle=321\nstart_epoch=1\ntimeout_s=30\nstatus_path=%s\n' \
-  "$TERMINAL_GENERATION" "$$" "$STATUS" >"$TERMINAL_LEASE"
+printf 'version=1\ngeneration=%s\nrun_id=worker-0001\nowner_pid=%s\nowner_identity=%s\nbackend_handle=321\nbackend_identity=\nstart_epoch=1\ntimeout_s=30\nstatus_path=%s\n' \
+  "$TERMINAL_GENERATION" "$$" "$TEST_OWNER_IDENTITY" "$STATUS_REAL" >"$TERMINAL_LEASE"
 chmod 600 "$TERMINAL_LEASE"
 ( sleep .2; rm -f "$TERMINAL_LEASE" ) & TERMINAL_RELEASE_PID=$!
 set +e
@@ -179,6 +181,7 @@ NULL_FINDINGS_REVIEW="$TMP/run/children/worker-0001/null-findings-review.md"
 INVALID_SCALAR_REVIEW="$TMP/run/children/worker-0001/invalid-scalar-review.md"
 DRIVE_RELATIVE_REVIEW="$TMP/run/children/worker-0001/drive-relative-review.md"
 DRIVE_QUALIFIED_REVIEW="$TMP/run/children/worker-0001/drive-qualified-review.md"
+BLOCK_SCALAR_REVIEW="$TMP/run/children/worker-0001/block-scalar-review.md"
 printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
   '  - severity: blocker' '    location: tests/example.test.sh:1' \
   '    summary: bounded summary' '    detail: bounded detail' \
@@ -217,6 +220,11 @@ printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
   '  - severity: suggestion' '    location: C:/repo/path.ts:1' \
   '    summary: invalid drive-qualified location' '    detail: bounded detail' \
   'confidence: high' '```' >"$DRIVE_QUALIFIED_REVIEW"
+printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
+  '  - severity: blocker' '    location: tests/example.test.sh:1' \
+  '    summary: block scalar is outside the documented grammar' '    detail: |' \
+  '      multiple physical lines are rejected' \
+  'confidence: high' '```' >"$BLOCK_SCALAR_REVIEW"
 uberdev_child_validate_phase1_review_result "$VALID_REVIEW"
 uberdev_child_validate_phase1_review_result "$REJECT_REVIEW"
 uberdev_child_validate_phase1_review_result "$EMPTY_REVIEW"
@@ -227,6 +235,19 @@ uberdev_child_validate_phase1_review_result "$ADVISORY_MULTI_REVIEW"
 ! uberdev_child_validate_phase1_review_result "$INVALID_SCALAR_REVIEW"
 ! uberdev_child_validate_phase1_review_result "$DRIVE_RELATIVE_REVIEW"
 ! uberdev_child_validate_phase1_review_result "$DRIVE_QUALIFIED_REVIEW"
+! uberdev_child_validate_phase1_review_result "$BLOCK_SCALAR_REVIEW"
+
+# Workspace metadata is a closed union whenever a provider reports it. Caller
+# mode has one absolute execution directory and no branch; isolated mode has
+# one absolute worktree and a non-empty dispatcher branch.
+for malformed_workspace_status in \
+  '{"backend":"codex","state":"running","exit_code":null,"pid":"321","workspace_mode":"unknown","worktree":"/tmp/work","branch":"branch"}' \
+  '{"backend":"codex","state":"running","exit_code":null,"pid":"321","workspace_mode":"caller","worktree":"relative","branch":""}' \
+  '{"backend":"codex","state":"running","exit_code":null,"pid":"321","workspace_mode":"caller","worktree":"/tmp/work","branch":"unexpected"}' \
+  '{"backend":"codex","state":"running","exit_code":null,"pid":"321","workspace_mode":"isolated","worktree":"/tmp/work","branch":""}'; do
+  printf '%s\n' "$malformed_workspace_status" >"$STATUS"
+  ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
+done
 
 # A running status without the exact lifecycle lease is not cancellation
 # authority: never signal or synthesize timed_out.
@@ -346,22 +367,29 @@ CLAUDE_STATE="$TMP/claude-state" PATH="$TMP/bin:$PATH" _uberdev_dispatch_cancel_
 
 # An unavailable or failed Claude cancellation hook must make timeout handling
 # fail closed before mutating status, manifest, or the live lease.
-_uberdev_dispatch_cancel_claude_bg() { return 2; }
+_uberdev_dispatch_cancel_claude_bg() {
+  _UBERDEV_DISPATCH_CANCEL_REASON=provider_stop_failed
+  return 2
+}
 GENERATION=abcdef0123456789abcdef0123456789
 printf '{"backend":"claude-bg","state":"running","exit_code":null,"pid":"unsupported-session","lease_generation":"%s"}\n' "$GENERATION" >"$STATUS"
 printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00.000Z","run_id":"worker-0001"}\n{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001"}\n' >"$MANIFEST"
-LEASE_DIR="$TMP/run/.agent-state-$(id -u)/semaphore-v1/slots"; mkdir -p "$LEASE_DIR"
-LEASE="$LEASE_DIR/unsupported.lease"
-printf 'run_id=worker-0001\nstatus_path=%s\ngeneration=%s\n' "$STATUS" "$GENERATION" >"$LEASE"
+LEASE_DIR="$TMP/run/.agent-state-$(id -u)/semaphore-v1/$(printf '9%.0s' {1..64}).scope"; mkdir -p "$LEASE_DIR"
+LEASE="$LEASE_DIR/${GENERATION}$(printf '8%.0s' {1..32}).lease"
+printf 'version=1\ngeneration=%s\nrun_id=worker-0001\nowner_pid=%s\nowner_identity=%s\nbackend_handle=unsupported-session\nbackend_identity=\nstart_epoch=1\ntimeout_s=30\nstatus_path=%s\n' \
+  "$GENERATION" "$$" "$TEST_OWNER_IDENTITY" "$STATUS_REAL" >"$LEASE"
+chmod 600 "$LEASE"
 STATUS_SHA="$(shasum -a 256 "$STATUS" | awk '{print $1}')"
 MANIFEST_SHA="$(shasum -a 256 "$MANIFEST" | awk '{print $1}')"
 LEASE_SHA="$(shasum -a 256 "$LEASE" | awk '{print $1}')"
 set +e
-uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
+UNSUPPORTED_CANCEL_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 1 2>&1)"
 WAIT_RC=$?
 set -e
 [ "$WAIT_RC" -eq 2 ]
 [ "$WAIT_RC" -ne 124 ]
+printf '%s\n' "$UNSUPPORTED_CANCEL_ERROR" | grep -Fq \
+  'provider cancellation failed: backend=claude-bg handle=unsupported-session reason=provider_stop_failed capacity=retained'
 [ "$(shasum -a 256 "$STATUS" | awk '{print $1}')" = "$STATUS_SHA" ]
 [ "$(shasum -a 256 "$MANIFEST" | awk '{print $1}')" = "$MANIFEST_SHA" ]
 [ -f "$LEASE" ] && [ "$(shasum -a 256 "$LEASE" | awk '{print $1}')" = "$LEASE_SHA" ]
@@ -387,7 +415,6 @@ eval "$(declare -f _real_child_find_lease | sed '1s/_real_child_find_lease/_uber
 # obsolete lease.
 eval "$(declare -f _uberdev_agent_lease_identity | sed '1s/_uberdev_agent_lease_identity/_real_agent_lease_identity/')"
 eval "$(declare -f _uberdev_dispatch_cancel_backend | sed '1s/_uberdev_dispatch_cancel_backend/_real_dispatch_cancel_backend/')"
-STATUS_REAL="$(python3 -I -B -c 'import os,sys; print(os.path.realpath(sys.argv[1]),end="")' "$STATUS")"
 printf '{"backend":"codex","state":"running","exit_code":null,"pid":"778","lease_generation":"%s"}\n' "$GENERATION" >"$STATUS"
 printf 'run_id=worker-0001\nstatus_path=%s\ngeneration=%s\n' "$STATUS_REAL" "$GENERATION" >"$LEASE"
 printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00.000Z","run_id":"worker-0001"}\n{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001"}\n' >"$MANIFEST"
@@ -409,48 +436,51 @@ printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"777","lease_
 ! _uberdev_child_timeout_cas "$STATUS" "$OLD_SHA" 777 0123456789abcdef0123456789abcdef >/dev/null 2>&1
 grep -q '"state":"completed"' "$STATUS"
 
-# Competing timeout and provider completion transitions both use the production
-# writers. Exactly one terminal wins, and status, manifest, and lease state
-# remain coherent after the race.
+# Deterministically exercise both timeout/completion winner orderings through
+# the public wait path. Each winner must converge status, exactly one terminal
+# manifest event, and the exact lifecycle lease without test-side cleanup.
 RACE_GENERATION=0123456789abcdef0123456789abcdef
 RACE_SCOPE="$TMP/run/.agent-state-$(id -u)/semaphore-v1/$(printf 'c%.0s' {1..64}).scope"
 RACE_LEASE="$RACE_SCOPE/${RACE_GENERATION}$(printf 'd%.0s' {1..32}).lease"
 mkdir -p "$RACE_SCOPE"
-printf 'version=1\ngeneration=%s\nrun_id=worker-0001\nowner_pid=%s\nbackend_handle=779\nstart_epoch=1\ntimeout_s=30\nstatus_path=%s\n' \
-  "$RACE_GENERATION" "$$" "$STATUS_REAL" >"$RACE_LEASE"
-chmod 600 "$RACE_LEASE"
-RACE_LEASE_IDENTITY="$(_uberdev_agent_lease_identity "$RACE_LEASE")"
-printf '{"backend":"codex","state":"running","exit_code":null,"pid":"779","lease_generation":"%s"}\n' \
-  "$RACE_GENERATION" >"$STATUS"
-RACE_OLD_SHA="$(shasum -a 256 "$STATUS" | awk '{print $1}')"
-printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00.000Z","run_id":"worker-0001"}\n{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001"}\n' >"$MANIFEST"
-(
+eval "$(declare -f _uberdev_dispatch_cancel_backend | sed '1s/_uberdev_dispatch_cancel_backend/_race_real_cancel_backend/')"
+for RACE_WINNER in timeout completion; do
+  printf 'version=1\ngeneration=%s\nrun_id=worker-0001\nowner_pid=%s\nowner_identity=%s\nbackend_handle=779\nbackend_identity=\nstart_epoch=1\ntimeout_s=30\nstatus_path=%s\n' \
+    "$RACE_GENERATION" "$$" "$TEST_OWNER_IDENTITY" "$STATUS_REAL" >"$RACE_LEASE"
+  chmod 600 "$RACE_LEASE"
+  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"779","lease_generation":"%s"}\n' \
+    "$RACE_GENERATION" >"$STATUS"
+  printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00.000Z","run_id":"worker-0001","backend":"codex"}\n' >"$MANIFEST"
+  printf '{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001","backend":"codex","owner_pid":%s,"status_path":"%s","timeout_s":30}\n' \
+    "$$" "$STATUS_REAL" >>"$MANIFEST"
+  _uberdev_dispatch_cancel_backend() {
+    if [ "$RACE_WINNER" = completion ]; then
+      printf 'completed race result\n' >"$RESULT"
+      printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"779","lease_generation":"%s"}\n' \
+        "$RACE_GENERATION" >"$STATUS"
+      printf '{"schema_version":1,"event":"completed","timestamp":"2026-07-10T00:00:02.000Z","run_id":"worker-0001","backend":"codex","terminal_status":"completed"}\n' >>"$MANIFEST"
+      _uberdev_agent_release_exact_lease "$RACE_LEASE" "$(_uberdev_agent_lease_identity "$RACE_LEASE")"
+      return 2
+    fi
+    return 0
+  }
   set +e
-  _uberdev_child_timeout_cas "$STATUS" "$RACE_OLD_SHA" 779 "$RACE_GENERATION" >"$TMP/race-timeout.out" 2>/dev/null
-  printf '%s\n' "$?" >"$TMP/race-timeout.rc"
-) & RACE_TIMEOUT_PID=$!
-(
-  set +e
-  _uberdev_agent_finalize_terminal "$MANIFEST" "$RACE_LEASE" "$RACE_LEASE_IDENTITY" \
-    "$STATUS" codex 779 '{"run_id":"worker-0001"}' '{}' completed >"$TMP/race-completion.out" 2>/dev/null
-  printf '%s\n' "$?" >"$TMP/race-completion.rc"
-) & RACE_COMPLETION_PID=$!
-wait "$RACE_TIMEOUT_PID" "$RACE_COMPLETION_PID"
-python3 -I - "$STATUS" "$MANIFEST" "$RACE_LEASE" "$TMP/race-timeout.rc" "$TMP/race-completion.rc" <<'PY'
+  RACE_WAIT_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 1 2>&1)"
+  RACE_WAIT_RC=$?
+  set -e
+  if [ "$RACE_WINNER" = timeout ]; then [ "$RACE_WAIT_RC" -eq 124 ]; else [ "$RACE_WAIT_RC" -eq 0 ]; fi
+  python3 -I - "$STATUS" "$MANIFEST" "$RACE_LEASE" "$RACE_WINNER" <<'PY'
 import json,pathlib,sys
-status_path,manifest_path,lease_path,timeout_rc_path,completion_rc_path=sys.argv[1:]
+status_path,manifest_path,lease_path,winner=sys.argv[1:]
 status=json.load(open(status_path)); rows=[json.loads(line) for line in open(manifest_path) if line.strip()]
 terminals=[row['event'] for row in rows if row.get('run_id')=='worker-0001' and row.get('event') in {'completed','failed','timed_out','cancelled','abandoned'}]
-timeout_rc=int(pathlib.Path(timeout_rc_path).read_text()); completion_rc=int(pathlib.Path(completion_rc_path).read_text())
-assert status['state'] in {'completed','timed_out'},status
-assert len(terminals)<=1,terminals
-assert (timeout_rc==0) != (completion_rc==0),(timeout_rc,completion_rc)
-if completion_rc==0:
- assert status['state']=='completed' and terminals==['completed'] and not pathlib.Path(lease_path).exists()
-else:
- assert status['state']=='timed_out'
+assert status['state']==('timed_out' if winner=='timeout' else 'completed'),status
+assert terminals==[status['state']],terminals
+assert not pathlib.Path(lease_path).exists(),lease_path
 PY
-rm -f "$RACE_LEASE"; rmdir "$RACE_SCOPE"
+done
+eval "$(declare -f _race_real_cancel_backend | sed '1s/_race_real_cancel_backend/_uberdev_dispatch_cancel_backend/')"
+rmdir "$RACE_SCOPE"
 
 # zsh can source and execute the public wait API without colliding with its
 # readonly `status` special parameter.

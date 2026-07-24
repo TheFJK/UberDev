@@ -1033,7 +1033,7 @@ PY
 
           After dispatch returns, the caller captures TWO fields from the agent's YAML return: `CI_REFUSED_ISSUE_URL` from `created_urls[0].url` (empty string if missing) AND `$rationale` from the top-level `rationale` field (empty string if missing).
 
-          If the agent's return YAML contains `status: REFUSED`, the caller emits one explicit stderr line — parameterised on the agent's actual `rationale` so all four REFUSED classes (`input-malformed`, `rate-limit-budget-insufficient`, `secret-scan-lib-unavailable`, `aggregates-empty`) surface accurately — and proceeds to actions 2 + 3 with `CI_REFUSED_ISSUE_URL=""` (the halt prose still emits; the audit record still fires; the issue URL slot is just empty).
+          If the agent's return YAML contains `status: REFUSED`, the caller emits one explicit stderr line — parameterised on the agent's actual `rationale` so all four REFUSED classes (`input-malformed`, `rate-limit-probe-failed`, `rate-limit-budget-insufficient`, `secret-scan-lib-unavailable`) surface accurately — and proceeds to actions 2 + 3 with `CI_REFUSED_ISSUE_URL=""` (the halt prose still emits; the audit record still fires; the issue URL slot is just empty).
 
           The literal `warning:` text shape is the contract — the operator searches their run logs for the `warning: findings-to-issues dispatch REFUSED` prefix:
 

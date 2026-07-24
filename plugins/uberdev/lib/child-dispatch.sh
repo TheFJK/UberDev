@@ -658,6 +658,17 @@ try:
  if process_identity is not None and (not isinstance(process_identity,str) or not re.fullmatch(r'[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}',process_identity)): raise ValueError()
  lease_generation=s.get('lease_generation')
  if lease_generation is not None and (not isinstance(lease_generation,str) or not re.fullmatch(r'[0-9a-f]{32}',lease_generation)): raise ValueError()
+ workspace_keys={'workspace_mode','worktree','branch'}
+ reported_workspace=workspace_keys & set(s)
+ if reported_workspace:
+  if reported_workspace!=workspace_keys: raise ValueError()
+  workspace_mode=s['workspace_mode']; worktree=s['worktree']; branch=s['branch']
+  if workspace_mode!=r.get('workspace_mode','isolated') or not isinstance(worktree,str) or not os.path.isabs(worktree) or not isinstance(branch,str): raise ValueError()
+  if workspace_mode=='caller':
+   if branch or worktree!=r.get('workspace_dir'): raise ValueError()
+  elif workspace_mode=='isolated':
+   if not branch or any(ord(char)<32 or ord(char)==127 for char in branch): raise ValueError()
+  else: raise ValueError()
  state=s['state']; code=s.get('exit_code')
  if state=='running' and code is not None: raise ValueError()
  if state=='completed' and (type(code) is not int or code!=0): raise ValueError()
@@ -710,6 +721,17 @@ try:
  if process_identity is not None and (not isinstance(process_identity,str) or not re.fullmatch(r'[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}',process_identity)): raise ValueError()
  lease_generation=s.get('lease_generation')
  if lease_generation is not None and (not isinstance(lease_generation,str) or not re.fullmatch(r'[0-9a-f]{32}',lease_generation)): raise ValueError()
+ workspace_keys={'workspace_mode','worktree','branch'}
+ reported_workspace=workspace_keys & set(s)
+ if reported_workspace:
+  if reported_workspace!=workspace_keys: raise ValueError()
+  workspace_mode=s['workspace_mode']; worktree=s['worktree']; branch=s['branch']
+  if not isinstance(worktree,str) or not os.path.isabs(worktree) or not isinstance(branch,str): raise ValueError()
+  if workspace_mode=='caller':
+   if branch: raise ValueError()
+  elif workspace_mode=='isolated':
+   if not branch or any(ord(char)<32 or ord(char)==127 for char in branch): raise ValueError()
+  else: raise ValueError()
  state=s['state']; code=s.get('exit_code'); handle=s.get('pid')
  if state=='running' and code is not None: raise ValueError()
  if state=='completed' and (type(code) is not int or code!=0): raise ValueError()
@@ -1118,6 +1140,7 @@ PY
       elif _uberdev_child_status_snapshot_changed "$status_file" "$result" "$snapshot"; then
         continue
       else
+        _uberdev_child_error "provider cancellation failed: backend=$backend handle=$handle reason=${_UBERDEV_DISPATCH_CANCEL_REASON:-provider_cancel_unconfirmed} capacity=retained"
         return 2
       fi
       if [ "$backend" = background ]; then

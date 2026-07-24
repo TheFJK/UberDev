@@ -316,6 +316,7 @@ capture python3 - "$MANIFEST" "$TMP/windows-lock/events.jsonl" <<'PY'
 import builtins
 import glob
 import importlib.util
+import subprocess
 import sys
 import types
 
@@ -1054,6 +1055,20 @@ if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = '{"abandoned":1,"open":1,"statu
   pass "backend-live orphan is abandoned only after its handle dies"
 else
   fail "backend-live orphan is abandoned only after its handle dies" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+
+PID_REUSE_STATUS="$TMP/pid-reuse/status.json"
+PID_REUSE_MANIFEST="$TMP/pid-reuse/events.jsonl"
+mkdir -p "$(dirname "$PID_REUSE_STATUS")"
+printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s","process_identity":"1|1|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n' \
+  "$$" >"$PID_REUSE_STATUS"
+append_event "$PID_REUSE_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:08:10Z","run_id":"run-pid-reuse","backend":"codex"}' >/dev/null
+append_event "$PID_REUSE_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:08:11Z\",\"run_id\":\"run-pid-reuse\",\"backend\":\"codex\",\"owner_pid\":$$,\"owner_process_identity\":\"1|1|1|bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"status_path\":\"$PID_REUSE_STATUS\"}" >/dev/null
+capture python3 "$MANIFEST" reconcile --manifest "$PID_REUSE_MANIFEST"
+if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = '{"abandoned":1,"open":0,"status":"ok"}' ]; then
+  pass "reconcile treats owner and backend PID identity mismatches as dead"
+else
+  fail "reconcile treats owner and backend PID identity mismatches as dead" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 
 STALE_STATUS="$TMP/stale-running-status.json"

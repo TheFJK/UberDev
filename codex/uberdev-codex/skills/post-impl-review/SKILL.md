@@ -125,15 +125,35 @@ post_review_json_string() {
   python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "$1"
 }
 
+post_review_init_ledger() {
+  python3 -I -B - "$1" <<'PY'
+import os,stat,sys,tempfile
+path=os.path.abspath(sys.argv[1]); parent=os.path.dirname(path)
+descriptor,temporary=tempfile.mkstemp(prefix='.post-review-ledger.',dir=parent)
+try:
+ if os.name!='nt': os.fchmod(descriptor,0o600)
+ os.fsync(descriptor); os.close(descriptor); descriptor=None
+ os.replace(temporary,path)
+ current=os.lstat(path)
+ if stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode) or current.st_nlink!=1: raise ValueError()
+finally:
+ if descriptor is not None: os.close(descriptor)
+ try: os.unlink(temporary)
+ except FileNotFoundError: pass
+PY
+}
+
 post_review_record() {
   local edge="$1" instance="$2" inputs="$3" risks="$4" path="$5"
   if command -v uberdev_child_inputs_validate >/dev/null 2>&1; then
     inputs="$(uberdev_child_inputs_validate "$edge" "$inputs")" || return 2
   fi
   python3 -I -B - "$edge" "$instance" "$inputs" "$risks" "$path" <<'PY'
-import json,sys
+import json,os,sys
 edge,instance,inputs,risks,path=sys.argv[1:]
-with open(path,'a') as f:f.write(json.dumps({'edge':edge,'instance':instance,'inputs':json.loads(inputs),'risks':json.loads(risks)},sort_keys=True,separators=(',',':'))+'\n')
+with open(path,'a') as f:
+ f.write(json.dumps({'edge':edge,'instance':instance,'inputs':json.loads(inputs),'risks':json.loads(risks)},sort_keys=True,separators=(',',':'))+'\n')
+ f.flush(); os.fsync(f.fileno())
 PY
 }
 post_review_roster_complete() {
@@ -151,13 +171,14 @@ PY
 post_review_fanout() {
   local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff result status receipt dispatch_rc ledger_rc cleanup_rc
   local handoffs=()
-  : >"$descriptors"; : >"$launched"
+  post_review_init_ledger "$descriptors" || return 2
+  post_review_init_ledger "$launched" || return 2
   while IFS= read -r row; do
     edge="$(jq -r .edge <<<"$row")"; instance="$(jq -r .instance <<<"$row")"
     inputs="$(jq -c .inputs <<<"$row")"; risks="$(jq -c .risks <<<"$row")"
     uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks" >/dev/null || return $?
     jq -cn --arg edge "$edge" --arg handoff "$UBERDEV_CHILD_HANDOFF" --arg result "$UBERDEV_CHILD_RESULT" --arg status "$UBERDEV_CHILD_STATUS" \
-      '{edge:$edge,handoff:$handoff,result:$result,status:$status}' >>"$descriptors"
+      '{edge:$edge,handoff:$handoff,result:$result,status:$status}' >>"$descriptors" || return $?
     handoffs+=("$UBERDEV_CHILD_HANDOFF")
   done <"$records"
   uberdev_preflight_child_batch "${handoffs[@]}" || return $?
@@ -190,7 +211,7 @@ post_review_wait_all() {
   POST_REVIEW_VALID_COUNT=0
   POST_REVIEW_FORMAT_FAILURE_COUNT=0
   POST_REVIEW_INFRA_FAILURE=0
-  if [ -n "$failed_path" ] && ! : >"$failed_path"; then POST_REVIEW_INFRA_FAILURE=1; return 2; fi
+  if [ -n "$failed_path" ] && ! post_review_init_ledger "$failed_path"; then POST_REVIEW_INFRA_FAILURE=1; return 2; fi
   while IFS= read -r row; do
     index=$((index + 1))
     edge="$(jq -r .edge <<<"$row")"; status="$(jq -r .status <<<"$row")"; result="$(jq -r .result <<<"$row")"
@@ -263,7 +284,9 @@ post_review_run_capped() {
   POST_REVIEW_INFRA_FAILURE=0
   case "$expected:$cap" in *[!0-9:]*|:*|*:) return 2 ;; esac
   [ "$expected" -gt 0 ] && [ "$cap" -gt 0 ] || return 2
-  : >"$descriptors"; : >"$launched"; : >"$failed"
+  post_review_init_ledger "$descriptors" || return 2
+  post_review_init_ledger "$launched" || return 2
+  post_review_init_ledger "$failed" || return 2
   while [ "$offset" -lt "$expected" ]; do
     wave=$((wave + 1)); end=$((offset + cap))
     [ "$end" -le "$expected" ] || end="$expected"
@@ -321,7 +344,7 @@ REVIEW_EDGES=(
 REVIEW_RECORDS="$RESEARCH_DIR_ABS/post-review.records"
 REVIEW_DESCRIPTORS="$RESEARCH_DIR_ABS/post-review.descriptors"
 REVIEW_LAUNCHED="$RESEARCH_DIR_ABS/post-review.launched"
-: >"$REVIEW_RECORDS"
+post_review_init_ledger "$REVIEW_RECORDS" || exit 2
 REVIEW_INDEX=0
 for EDGE_ID in "${REVIEW_EDGES[@]}"; do
   REVIEW_INDEX=$((REVIEW_INDEX + 1))
@@ -340,7 +363,7 @@ for EDGE_ID in "${REVIEW_EDGES[@]}"; do
       criteria_path "$(post_review_json_string "$CRITERIA_PATH")" \
       emphasis "$EMPHASIS_JSON")"
   fi
-  post_review_record "$EDGE_ID" "$INSTANCE" "$INPUTS_JSON" '[]' "$REVIEW_RECORDS"
+  post_review_record "$EDGE_ID" "$INSTANCE" "$INPUTS_JSON" '[]' "$REVIEW_RECORDS" || exit 2
 done
 REVIEW_FAILED="$RESEARCH_DIR_ABS/post-review.failed"
 REVIEW_WAVE_BLOCKED=0
@@ -424,7 +447,7 @@ Failure handling is fail-closed. Only a malformed result from a child that reach
 ```bash uberdev-executable
 FORMAT_EXAMPLE_PATH="${FORMAT_EXAMPLE_PATH:-$CRITERIA_PATH}"
 REPAIR_PREFIX="$RESEARCH_DIR_ABS/post-review-repair"
-: >"$REPAIR_PREFIX.records"
+post_review_init_ledger "$REPAIR_PREFIX.records" || exit 2
 REVIEW_REPAIR_VALID_COUNT=0
 if [ "$REVIEW_WAVE_BLOCKED" -eq 0 ] && [ -s "$REVIEW_FAILED" ]; then
   while IFS= read -r FAILED_REVIEW_ROW; do
@@ -463,12 +486,23 @@ post_review_require_complete_wave() {
       && [ $((REVIEW_INITIAL_VALID_COUNT + REVIEW_REPAIR_VALID_COUNT)) -eq "$REVIEW_EXPECTED_COUNT" ]; then
     return 0
   fi
-  rm -f "$aggregate_path"
+  if { [ -e "$aggregate_path" ] || [ -L "$aggregate_path" ]; } \
+      && ! rm -f -- "$aggregate_path"; then
+    echo "error: failed to suppress stale post-impl-review aggregate: $aggregate_path" >&2
+    return 71
+  fi
+  if [ -e "$aggregate_path" ] || [ -L "$aggregate_path" ]; then
+    echo "error: failed to suppress stale post-impl-review aggregate: $aggregate_path" >&2
+    return 71
+  fi
   return 70
 }
-if ! post_review_require_complete_wave; then
+if post_review_require_complete_wave; then
+  :
+else
+  POST_REVIEW_GATE_RC=$?
   echo "error: post-impl-review evidence incomplete; aggregate suppressed" >&2
-  return 70 2>/dev/null || exit 70
+  return "$POST_REVIEW_GATE_RC" 2>/dev/null || exit "$POST_REVIEW_GATE_RC"
 fi
 ```
 

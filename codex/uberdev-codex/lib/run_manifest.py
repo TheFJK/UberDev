@@ -19,11 +19,13 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import errno
+import hashlib
 import json
 import os
 import re
 import secrets
 import stat
+import subprocess
 import sys
 import time
 from contextlib import contextmanager
@@ -93,6 +95,7 @@ ALLOWED_FIELDS = frozenset(
         "error_class",
         "quality_gate",
         "owner_pid",
+        "owner_process_identity",
         "backend_handle",
         "status_path",
         "timeout_s",
@@ -389,6 +392,13 @@ def _validate_event(event: Any) -> list[str]:
     if "owner_pid" in event and event["owner_pid"] is not None:
         if not _is_plain_int(event["owner_pid"]) or event["owner_pid"] <= 0:
             errors.append("invalid_owner_pid")
+
+    if "owner_process_identity" in event and event["owner_process_identity"] is not None:
+        identity = event["owner_process_identity"]
+        if not isinstance(identity, str) or re.fullmatch(
+            r"[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}", identity
+        ) is None:
+            errors.append("invalid_owner_process_identity")
 
     if "backend_handle" in event and event["backend_handle"] is not None:
         handle = event["backend_handle"]
@@ -767,7 +777,36 @@ def _reject_symlinked_ancestors(path: str) -> None:
             raise ManifestRejected("manifest_symlinked_ancestor_rejected")
 
 
-def _pid_live(pid: Any) -> bool:
+def _process_identity(pid: Any) -> str | None:
+    if isinstance(pid, str):
+        text = pid[4:] if pid.startswith("pid:") else pid
+        if not text.isdigit():
+            return None
+        pid = int(text)
+    if not _is_plain_int(pid) or pid <= 0:
+        return None
+    try:
+        pgid = os.getpgid(pid)
+        sid = os.getsid(pid)
+        process_state = subprocess.check_output(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        started = subprocess.check_output(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        if not process_state or process_state.startswith("Z") or not started:
+            return None
+        digest = hashlib.sha256(started.encode()).hexdigest()
+        return f"{pid}|{pgid}|{sid}|{digest}"
+    except (AttributeError, OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _pid_live(pid: Any, expected_identity: str | None = None) -> bool:
     if isinstance(pid, str):
         text = pid[4:] if pid.startswith("pid:") else pid
         if not text.isdigit():
@@ -783,7 +822,9 @@ def _pid_live(pid: Any) -> bool:
         return True
     except OSError:
         return False
-    return True
+    if expected_identity is None:
+        return True
+    return _process_identity(pid) == expected_identity
 
 
 def _status_liveness(path: str) -> bool | None:
@@ -1070,7 +1111,7 @@ def _canonical_terminal_truth(started: dict[str, Any]) -> str | None:
 
 def _reconciliation_status(
     started: dict[str, Any],
-) -> tuple[bool | None, str | None, str | None]:
+) -> tuple[bool | None, str | None, str | None, str | None]:
     """Classify one secure snapshot for reconciliation exactly once.
 
     Invalid, contradictory, missing, and unsafe snapshots are unavailable
@@ -1079,20 +1120,30 @@ def _reconciliation_status(
 
     status_path = started.get("status_path")
     if not isinstance(status_path, str):
-        return None, None, None
+        return None, None, None, None
     try:
         verdict, snapshot = _probe_status_snapshot(status_path)
     except (ManifestRejected, ManifestRuntimeError):
-        return None, None, None
+        return None, None, None, None
     terminal_truth = _terminal_truth_from_snapshot(started, verdict, snapshot)
     if terminal_truth is not None:
-        return False, terminal_truth, None
+        return False, terminal_truth, None, None
     if snapshot is None:
-        return None, None, None
+        return None, None, None, None
     expected_backend = started.get("backend")
     reported_backend = snapshot.get("backend")
     if reported_backend is not None and reported_backend != expected_backend:
-        return None, None, None
+        return None, None, None, None
+    recovered_identity = snapshot.get("process_identity")
+    if recovered_identity is not None and (
+        not isinstance(recovered_identity, str)
+        or re.fullmatch(
+            r"[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}",
+            recovered_identity,
+        )
+        is None
+    ):
+        return None, None, None, None
     recovered_handle: str | None = None
     needs_numeric_recovery = (
         started.get("backend_handle") in (None, "")
@@ -1100,17 +1151,17 @@ def _reconciliation_status(
     )
     if needs_numeric_recovery:
         if reported_backend != expected_backend:
-            return None, None, None
+            return None, None, None, None
         reported_keys = [key for key in ("pid", "backend_handle") if key in snapshot]
         if len(reported_keys) == 1:
             candidate = _canonical_backend_handle(snapshot[reported_keys[0]])
             if candidate is not None and candidate.isdigit():
                 recovered_handle = candidate
         if recovered_handle is None:
-            return None, None, None
+            return None, None, None, None
     if verdict == "live":
-        return True, None, recovered_handle
-    return None, None, recovered_handle
+        return True, None, recovered_handle, recovered_identity
+    return None, None, recovered_handle, recovered_identity
 
 
 def _lease_generation(payload: bytes) -> str:
@@ -1133,7 +1184,12 @@ def _read_bounded_descriptor(descriptor: int, limit: int = 16384) -> bytes:
 
 
 def secure_write_lease(path: str, payload: bytes) -> tuple[int, int]:
-    """Publish one private lease by temp-plus-rename within a held directory fd."""
+    """Publish a private lease and return its ``(device, inode)`` identity.
+
+    POSIX publication holds the parent directory descriptor across the atomic
+    replace. The native-Windows branch uses validated absolute paths because
+    Python does not expose the required ``dir_fd`` operations there.
+    """
 
     if len(payload) > 16384 or not payload.endswith(b"\n"):
         raise ManifestRejected("lease_payload_invalid")
@@ -1267,7 +1323,11 @@ def secure_remove_lease(path: str, generation: str) -> None:
 
 
 def _backend_live(
-    started: dict[str, Any], status: bool | None = None, *, status_known: bool = False
+    started: dict[str, Any],
+    status: bool | None = None,
+    *,
+    status_known: bool = False,
+    expected_identity: str | None = None,
 ) -> bool:
     """Apply the shared backend-liveness matrix used by live-semaphore.sh.
 
@@ -1285,7 +1345,7 @@ def _backend_live(
     handle = started.get("backend_handle")
     if handle in (None, ""):
         return status is True
-    if _pid_live(handle):
+    if _pid_live(handle, expected_identity):
         return True
     if isinstance(handle, str):
         numeric = handle[4:] if handle.startswith("pid:") else handle
@@ -1416,9 +1476,12 @@ def reconcile_manifest(path: str) -> dict[str, Any]:
             state = states[identity]
             if state.started is None or state.terminal is not None:
                 continue
-            status_liveness, terminal_truth, recovered_handle = _reconciliation_status(
-                state.started
-            )
+            (
+                status_liveness,
+                terminal_truth,
+                recovered_handle,
+                recovered_identity,
+            ) = _reconciliation_status(state.started)
             if terminal_truth is not None:
                 run_id, agent_id = identity
                 terminal: dict[str, Any] = {
@@ -1457,12 +1520,18 @@ def reconcile_manifest(path: str) -> dict[str, Any]:
                 _atomic_append(prepared, terminal, descriptor)
                 appended_count += 1
                 continue
-            owner_live = _pid_live(state.started.get("owner_pid"))
+            owner_live = _pid_live(
+                state.started.get("owner_pid"),
+                state.started.get("owner_process_identity"),
+            )
             backend_state = state.started
             if recovered_handle is not None:
                 backend_state = dict(state.started, backend_handle=recovered_handle)
             backend_live = _backend_live(
-                backend_state, status_liveness, status_known=True
+                backend_state,
+                status_liveness,
+                status_known=True,
+                expected_identity=recovered_identity,
             )
             if owner_live or backend_live:
                 continue

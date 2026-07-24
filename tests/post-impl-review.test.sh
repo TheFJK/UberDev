@@ -373,7 +373,7 @@ echo "== Post-launch bookkeeping failures unwind the active wave =="
 POST_REVIEW_RUNTIME_TMP="$(mktemp -d)"
 POST_REVIEW_FUNCTIONS="$POST_REVIEW_RUNTIME_TMP/functions.sh"
 awk '
-  /^post_review_roster_complete\(\)/ { active=1 }
+  /^post_review_init_ledger\(\)/ { active=1 }
   active && /^REVIEW_EDGES=\(/ { exit }
   active { print }
 ' "$POST_IMPL" >"$POST_REVIEW_FUNCTIONS"
@@ -417,6 +417,70 @@ else
   FAIL=$((FAIL + 1))
 fi
 rm -rf "$POST_REVIEW_RUNTIME_TMP"
+
+echo
+echo "== Ledger initialization fails before stale descriptors can dispatch =="
+POST_REVIEW_LEDGER_TMP="$(mktemp -d)"
+POST_REVIEW_LEDGER_FUNCTIONS="$POST_REVIEW_LEDGER_TMP/functions.sh"
+awk '
+  /^post_review_init_ledger\(\)/ { active=1 }
+  active && /^post_review_wait_all\(\)/ { exit }
+  active { print }
+' "$POST_IMPL" >"$POST_REVIEW_LEDGER_FUNCTIONS"
+if (
+  set -euo pipefail
+  . "$POST_REVIEW_LEDGER_FUNCTIONS"
+  root="$POST_REVIEW_LEDGER_TMP/runtime"
+  mkdir -p "$root/descriptors"
+  printf '%s\n' '{"edge":"stale.edge","handoff":"stale","result":"stale","status":"stale"}' >"$root/launched"
+  printf '%s\n' '{"edge":"review.edge","instance":"fresh","inputs":{},"risks":[]}' >"$root/records"
+  dispatched="$root/dispatched"
+  uberdev_create_child_handoff() { UBERDEV_CHILD_HANDOFF=h; UBERDEV_CHILD_RESULT=r; UBERDEV_CHILD_STATUS=s; }
+  uberdev_preflight_child_batch() { : >"$dispatched"; }
+  uberdev_dispatch_child() { : >"$dispatched"; }
+  ! post_review_fanout "$root/records" "$root/descriptors" "$root/launched" 10
+  [ ! -e "$dispatched" ]
+); then
+  echo "  PASS  failed atomic ledger initialization blocks preflight and dispatch"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  stale ledger state reached preflight or dispatch after initialization failure"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$POST_REVIEW_LEDGER_TMP"
+
+echo
+echo "== Descriptor append failures block preflight and dispatch =="
+POST_REVIEW_APPEND_TMP="$(mktemp -d)"
+POST_REVIEW_APPEND_FUNCTIONS="$POST_REVIEW_APPEND_TMP/functions.sh"
+awk '
+  /^post_review_init_ledger\(\)/ { active=1 }
+  active && /^post_review_wait_all\(\)/ { exit }
+  active { print }
+' "$POST_IMPL" >"$POST_REVIEW_APPEND_FUNCTIONS"
+if (
+  set -euo pipefail
+  . "$POST_REVIEW_APPEND_FUNCTIONS"
+  root="$POST_REVIEW_APPEND_TMP/runtime"
+  mkdir -p "$root"
+  printf '%s\n' '{"edge":"review.edge","instance":"fresh","inputs":{},"risks":[]}' >"$root/records"
+  dispatched="$root/dispatched"
+  uberdev_create_child_handoff() {
+    UBERDEV_CHILD_HANDOFF=h; UBERDEV_CHILD_RESULT=r; UBERDEV_CHILD_STATUS=s
+    rm -f "$root/descriptors"; mkdir "$root/descriptors"
+  }
+  uberdev_preflight_child_batch() { : >"$dispatched"; }
+  uberdev_dispatch_child() { : >"$dispatched"; }
+  ! post_review_fanout "$root/records" "$root/descriptors" "$root/launched" 10
+  [ ! -e "$dispatched" ]
+); then
+  echo "  PASS  failed descriptor append blocks preflight and dispatch"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  descriptor append failure reached preflight or dispatch"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$POST_REVIEW_APPEND_TMP"
 
 echo
 echo "== Summary =="
