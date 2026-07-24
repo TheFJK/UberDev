@@ -370,6 +370,18 @@ else
   fail "shell and manifest implement the same documented backend-liveness matrix" "$matrix_failures"
 fi
 
+# Process fingerprints come from the kernel's native creation identity, not
+# second-resolution `ps lstart` text. Both shell runtimes delegate to the same
+# manifest implementation and therefore must produce exactly the same value.
+semaphore_identity="$(_uberdev_semaphore_process_identity "$$")"
+manifest_identity="$(python3 -I -B "$MANIFEST" process-identity --pid "$$")"
+if [ "$semaphore_identity" = "$manifest_identity" ] \
+    && printf '%s' "$semaphore_identity" | grep -Eq "^$$\\|[0-9]+\\|[0-9]+\\|[0-9a-f]{64}$"; then
+  pass "semaphore and manifest share one kernel process identity"
+else
+  fail "shared kernel process identity" "semaphore=$semaphore_identity manifest=$manifest_identity"
+fi
+
 reserved_pid_failures=''
 reserved_pid_index=0
 for reserved_pid_handle in 'pid:' 'pid:0' 'pid:-1' 'pid:provider'; do

@@ -494,15 +494,6 @@ if [ "$REVIEW_WAVE_BLOCKED" -eq 0 ] && [ -s "$REVIEW_FAILED" ]; then
   fi
 fi
 if [ $((REVIEW_INITIAL_VALID_COUNT + REVIEW_REPAIR_VALID_COUNT)) -ne "$REVIEW_EXPECTED_COUNT" ]; then REVIEW_WAVE_BLOCKED=1; fi
-```
-
-### Step 4: Aggregate
-
-Gate the writer before interpreting any reviewer prose. A lifecycle failure or
-an exhausted format repair is not a review verdict and MUST NOT produce the
-ordinary six-row `Continue.` artifact:
-
-```bash uberdev-executable
 post_review_require_complete_wave() {
   local aggregate_path="${AGG_PATH:-$RESEARCH_DIR_ABS/post-impl-review-final.md}"
   if [ "${REVIEW_WAVE_BLOCKED:-1}" -eq 0 ] \
@@ -528,6 +519,12 @@ else
   return "$POST_REVIEW_GATE_RC" 2>/dev/null || exit "$POST_REVIEW_GATE_RC"
 fi
 ```
+
+### Step 4: Aggregate
+
+The executable boundary above gates the writer before interpreting any
+reviewer prose. A lifecycle failure or an exhausted format repair is not a
+review verdict and MUST NOT produce the ordinary six-row `Continue.` artifact.
 
 Aggregate the 6 returns into the table format below plus the bottom line `Aggregated: N blockers, M suggestions. Continue.`
 
@@ -576,7 +573,7 @@ Findings remain advisory, but missing reviewer evidence is not advisory: **the c
 ## Integration
 
 **Called by (the only live caller):**
-- **`/uberdev:review-pr` Phase 1** — invoked via the `Skill` tool. Inputs `changed_paths` and `commit_range` are computed by `/uberdev:review-pr` from one fixed local merge-base-to-reviewed-head-SHA snapshot of the pushed PR; `tier` is passed through separately. The 6 reviewer agents fan out in a single message inside `/uberdev:review-pr`'s context; their aggregated findings are written to the canonical path (see Step 4 above) and consumed by `/uberdev:review-pr`'s Phase 1 apply-loop.
+- **`/uberdev:review-pr` Phase 1** — invoked via the `Skill` tool. Inputs `changed_paths` and `commit_range` are computed by `/uberdev:review-pr` from one fixed local merge-base-to-reviewed-head-SHA snapshot of the pushed PR; `tier` is passed through separately. The 6 reviewer agents run in one or more cap-controlled waves, with every child in a wave dispatched before its first wait; their aggregated findings are written to the canonical path (see Step 4 above) and consumed by `/uberdev:review-pr`'s Phase 1 apply-loop.
 
 **Findings artifact contract:**
 - **Writer:** this skill (`uberdev:post-impl-review`), Step 4 — the `<external-untrusted-input source="post-impl-review-aggregate">…</external-untrusted-input>` envelope IS the file's leading/trailing bytes (see Step 4 "Envelope-as-file-bytes").

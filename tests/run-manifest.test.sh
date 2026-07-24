@@ -150,7 +150,7 @@ spec.loader.exec_module(module)
 
 expected = "4242|1|1|" + ("a" * 64)
 original_kill = module.os.kill
-original_getpgid = module.os.getpgid
+original_native_record = module._native_process_record
 try:
     def denied_kill(pid, signal):
         raise PermissionError()
@@ -160,14 +160,14 @@ try:
 
     module.os.kill = lambda pid, signal: None
 
-    def denied_getpgid(pid):
+    def denied_native_record(pid):
         raise PermissionError()
 
-    module.os.getpgid = denied_getpgid
+    module._native_process_record = denied_native_record
     assert module._pid_live(4242, expected) is None
 finally:
     module.os.kill = original_kill
-    module.os.getpgid = original_getpgid
+    module._native_process_record = original_native_record
 
 started = {"backend": "codex", "status_path": status_path}
 assert module._reconciliation_status(started) == (None, None, None, None)

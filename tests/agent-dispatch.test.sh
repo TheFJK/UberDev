@@ -287,6 +287,38 @@ export -f _uberdev_agent_dispatch_backend
 # shellcheck source=/dev/null
 . "$LIB"
 
+# Newly emitted starts require an owner creation identity. If that kernel probe
+# is unavailable, dispatch fails before provider launch and releases the exact
+# prelaunch lease instead of degrading the manifest to PID-only ownership.
+OWNER_IDENTITY_RUN="$TMP/owner-identity-unavailable"
+mkdir -p "$OWNER_IDENTITY_RUN"
+printf 'owner identity unavailable prompt\n' >"$OWNER_IDENTITY_RUN/prompt.txt"
+OWNER_IDENTITY_REQUEST="$(python3 -I -B - "$REQUEST" "$OWNER_IDENTITY_RUN" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1]); value.update(run_dir=sys.argv[2],run_id='owner-identity-unavailable')
+print(json.dumps(value,separators=(',',':')),end='')
+PY
+)"
+eval "$(declare -f _uberdev_agent_process_identity | sed '1s/_uberdev_agent_process_identity/_real_owner_process_identity/')"
+_uberdev_agent_process_identity() {
+  [ "$1" != "$$" ] || return 2
+  _real_owner_process_identity "$@"
+}
+owner_provider_before=0
+[ ! -r "$TMP/provider-count" ] || read -r owner_provider_before <"$TMP/provider-count"
+set +e
+uberdev_agent_dispatch "$OWNER_IDENTITY_REQUEST" "$OWNER_IDENTITY_RUN/prompt.txt" \
+  "$OWNER_IDENTITY_RUN/result.md" "$OWNER_IDENTITY_RUN/status.json" >/dev/null 2>&1
+owner_identity_rc=$?
+set -e
+owner_provider_after=0
+[ ! -r "$TMP/provider-count" ] || read -r owner_provider_after <"$TMP/provider-count"
+eval "$(declare -f _real_owner_process_identity | sed '1s/_real_owner_process_identity/_uberdev_agent_process_identity/')"
+[ "$owner_identity_rc" -eq 2 ]
+[ "$owner_provider_after" -eq "$owner_provider_before" ]
+grep -q '"state":"failed"' "$OWNER_IDENTITY_RUN/status.json"
+! find "$OWNER_IDENTITY_RUN/.agent-state-$(id -u)/semaphore-v1" -name '*.lease' -type f | grep -q .
+
 # Detached review fanout cannot rely on an interactive Claude permission
 # prompt. The adapter must reject manual mode before capacity or provider state
 # is created, while an explicit unattended opt-in remains accepted.

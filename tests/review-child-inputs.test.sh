@@ -343,7 +343,13 @@ for line in rows:
 if len(matches) != 1:
     raise SystemExit(f"provider seam reached without one correlated dispatch receipt: {matches!r}")
 PY
-  printf 'fixture result for %s\n' "$instance" >"$result"
+  case "$edge" in
+    review_pr.review.*)
+      printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings: []' \
+        'confidence: high' '```' >"$result"
+      ;;
+    *) printf 'fixture result for %s\n' "$instance" >"$result" ;;
+  esac
   chmod 600 "$result"
   DISPATCH_ID="fixture-$instance"
   printf '{"backend":"codex","state":"running","exit_code":null,"pid":"fixture-%s"}\n' "$instance" >"$status"

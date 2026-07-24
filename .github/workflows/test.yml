@@ -190,6 +190,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install GNU timeout
+        run: brew install coreutils
       - name: Run focused supervision smoke tests
         run: |
           bash tests/review-pr-codex-entry.test.sh && \

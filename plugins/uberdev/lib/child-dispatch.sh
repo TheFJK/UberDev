@@ -760,7 +760,7 @@ try:
  keys=frozenset(value)
  if keys not in {frozenset(base_keys),frozenset(base_keys|{'reason'})} or value.get('schema_version')!=1: raise ValueError()
  error=value.get('error')
- if error not in {'provider_probe_failed','provider_cancel_failed','terminal_finalize_failed','launch_finalize_failed'}: raise ValueError()
+ if error not in {'provider_probe_failed','process_identity_probe_failed','provider_cancel_failed','terminal_finalize_failed','launch_finalize_failed'}: raise ValueError()
  backend=value.get('backend'); handle=value.get('handle'); terminal=value.get('terminal'); attempts=value.get('attempts')
  reason=value.get('reason','')
  cancel_reasons={'provider_stop_failed','provider_session_resolution_failed','provider_cancel_probe_failed','provider_cancel_unconfirmed'}
@@ -772,6 +772,8 @@ try:
  if not isinstance(terminal,str) or len(terminal)>128: raise ValueError()
  if error=='provider_probe_failed':
   if backend!='claude-bg' or not re.fullmatch(r'[0-9a-f]{8}',handle) or terminal!='provider_probe_failed' or attempts!=3: raise ValueError()
+ elif error=='process_identity_probe_failed':
+  if backend not in {'codex','background'} or not handle.isdigit() or terminal!='process_identity_probe_unavailable' or attempts!=3: raise ValueError()
  elif error=='provider_cancel_failed':
   if backend!='claude-bg' or not re.fullmatch(r'[0-9a-f]{8}',handle) or terminal not in {'blocked:permission','blocked:provider'} or attempts!=3: raise ValueError()
   if reason and reason not in cancel_reasons|{'supervisory_failure'}: raise ValueError()
@@ -780,7 +782,7 @@ try:
   if reason and reason not in lease_reasons|{'supervisory_failure'}: raise ValueError()
  elif not handle or terminal not in {'completed','failed','timed_out','cancelled','abandoned'}:
   raise ValueError()
- retained=(error in {'provider_probe_failed','provider_cancel_failed','terminal_finalize_failed'}
+ retained=(error in {'provider_probe_failed','process_identity_probe_failed','provider_cancel_failed','terminal_finalize_failed'}
            or reason in {'lease_acquire_rollback_failed','lease_handle_rollback_failed'})
  if backend=='claude-bg':
   action='resolve the retained Claude session or retry with Codex'
@@ -803,10 +805,11 @@ import json,os,re,stat,sys
 path=sys.argv[1]
 def parse_scalar(raw):
  if not raw or raw.strip()!=raw or any(ord(char)<32 or ord(char)==127 for char in raw): raise ValueError()
- if raw.startswith('"'):
-  value=json.loads(raw)
-  if not isinstance(value,str) or not value: raise ValueError()
+ def validated(value):
+  if not isinstance(value,str) or not value or value.strip()!=value or any(ord(char)<32 or ord(char)==127 for char in value): raise ValueError()
   return value
+ if raw.startswith('"'):
+  return validated(json.loads(raw))
  if raw.startswith("'"):
   if len(raw)<2 or not raw.endswith("'"): raise ValueError()
   inner=raw[1:-1]; value=''; index=0
@@ -816,11 +819,10 @@ def parse_scalar(raw):
     value+="'"; index+=2
    else:
     value+=inner[index]; index+=1
-  if not value: raise ValueError()
-  return value
+  return validated(value)
  if raw[0] in '-?:,[]{}#&*!|>@`' or ': ' in raw or ' #' in raw: raise ValueError()
  if re.fullmatch(r'(?i:null|true|false|~|[-+]?(?:0|[1-9][0-9_]*)(?:\.[0-9_]+)?(?:e[-+]?[0-9]+)?|[-+]?\.(?:inf|nan))',raw): raise ValueError()
- return raw
+ return validated(raw)
 try:
  entry=os.lstat(path)
  if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1 or entry.st_size>1048576: raise ValueError()
@@ -1058,6 +1060,35 @@ uberdev_unwind_child() {
   return 0
 }
 
+_uberdev_child_timeout_intent_write() {
+  python3 -I -B - "$1.timeout-intent-v1" "$2" "$3" "$4" <<'PY'
+import json,os,sys,tempfile
+path,handle,lease,snapshot=sys.argv[1:]; parent=os.path.dirname(path)
+payload={'schema_version':1,'handle':handle,'lease_generation':lease,'snapshot_sha256':snapshot}
+fd,tmp=tempfile.mkstemp(prefix='.timeout-intent.',dir=parent)
+try:
+ if os.name!='nt': os.fchmod(fd,0o600)
+ with os.fdopen(fd,'w',encoding='utf-8') as stream:
+  fd=None; json.dump(payload,stream,sort_keys=True,separators=(',',':')); stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
+ os.replace(tmp,path)
+finally:
+ if fd is not None: os.close(fd)
+ if os.path.exists(tmp): os.unlink(tmp)
+PY
+}
+
+_uberdev_child_timeout_intent_remove() {
+  python3 -I -B - "$1.timeout-intent-v1" <<'PY'
+import os,stat,sys
+path=sys.argv[1]
+try: entry=os.lstat(path)
+except FileNotFoundError: raise SystemExit(0)
+uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
+if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1 or (uid is not None and entry.st_uid!=uid): raise SystemExit(2)
+os.unlink(path)
+PY
+}
+
 uberdev_wait_child() {
   local status_file="${1:-}" result="${2:-}" timeout="${3:-}" start now probe state handle='' backend process_identity lease_generation snapshot child run_dir instance manifest terminal state_dir lease_info lease lease_identity cas rc watcher_error watcher_error_rc watcher_error_path
   [ "$#" -eq 3 ] || return 2
@@ -1135,11 +1166,14 @@ PY
       lease="${lease_info%%	*}"; [ "$lease" != "$lease_info" ] || return 2
       [ "${lease_info#*	}" = "$lease_generation" ] && [ -n "$lease_generation" ] || return 2
       lease_identity="$(_uberdev_agent_lease_identity "$lease")" || return 2
+      _uberdev_child_timeout_intent_write "$status_file" "$handle" "$lease_generation" "$snapshot" || return 2
       if _uberdev_dispatch_cancel_backend "$backend" "$handle" "$process_identity"; then
         :
       elif _uberdev_child_status_snapshot_changed "$status_file" "$result" "$snapshot"; then
+        _uberdev_child_timeout_intent_remove "$status_file" || return 2
         continue
       else
+        _uberdev_child_timeout_intent_remove "$status_file" || return 2
         _uberdev_child_error "provider cancellation failed: backend=$backend handle=$handle reason=${_UBERDEV_DISPATCH_CANCEL_REASON:-provider_cancel_unconfirmed} capacity=retained"
         return 2
       fi
@@ -1147,10 +1181,20 @@ PY
         _uberdev_dispatch_cleanup_dead_partial_result "$result" "$handle" || return 2
       fi
       cas="$(_uberdev_child_timeout_cas "$status_file" "$snapshot" "$handle" "$lease_generation" 2>/dev/null)"; rc=$?
-      if [ "$rc" -eq 3 ]; then continue; fi
-      [ "$rc" -eq 0 ] && [ "$cas" = updated ] || return 2
-      python3 -I "$(_uberdev_semaphore_manifest_tool)" reconcile --manifest "$manifest" >/dev/null || return 2
-      _uberdev_agent_release_exact_lease "$lease" "$lease_identity" || return 2
+      if [ "$rc" -eq 3 ]; then _uberdev_child_timeout_intent_remove "$status_file" || return 2; continue; fi
+      if [ "$rc" -ne 0 ] || [ "$cas" != updated ]; then
+        _uberdev_child_timeout_intent_remove "$status_file" || true
+        return 2
+      fi
+      python3 -I "$(_uberdev_semaphore_manifest_tool)" reconcile --manifest "$manifest" >/dev/null || {
+        _uberdev_child_timeout_intent_remove "$status_file" || true
+        return 2
+      }
+      _uberdev_agent_release_exact_lease "$lease" "$lease_identity" || {
+        _uberdev_child_timeout_intent_remove "$status_file" || true
+        return 2
+      }
+      _uberdev_child_timeout_intent_remove "$status_file" || return 2
       terminal="$(_uberdev_child_manifest_terminal "$manifest" "$instance" 2>/dev/null || true)"
       [ "$terminal" = timed_out ] || return 2
       [ ! -e "$lease" ] || return 2

@@ -44,7 +44,7 @@ If a reviewer agent surfaces a finding that "we should re-plan", record it as a 
 ### Pre-flight: command_timeouts.review_pr (enforced per child)
 
 Before Step 1, read `command_timeouts.review_pr` from
-`.codex/uberdev.local.md` (env: `UBERDEV_REVIEW_PR_TIMEOUT`; default
+`.claude/uberdev.local.md` (env: `UBERDEV_REVIEW_PR_TIMEOUT`; default
 600s; range [60, 86400]). The resolved value is the enforced timeout for
 each routed child wait and bounded unwind. A configured wave therefore has no
 single aggregate wall-clock deadline: every launched child receives this same
@@ -54,7 +54,7 @@ with the configured value.
 
 ```bash
 # Pre-flight: read the enforced per-child timeout
-POST_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}"
+POST_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
 if [ -r "$POST_REVIEW_PLUGIN_ROOT/lib/config-read.sh" ]; then
   . "$POST_REVIEW_PLUGIN_ROOT/lib/config-read.sh"
   REVIEW_PR_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.review_pr UBERDEV_REVIEW_PR_TIMEOUT 60 86400 600)"
@@ -107,11 +107,11 @@ The brief is identical for all 6 reviewers — each agent's own system prompt na
 
 ### Routed execution contract (normative)
 
-Source `${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/child-dispatch.sh`. The caller propagates the immutable carrier through the context-only lineage edge `review_pr.post_impl_review`; this skill never resolves a model. Resolve the six provider edges from policy, create unique iteration/attempt instances with `uberdev_create_child_handoff`, and issue every dispatch within each configured wave before waiting on that wave:
+Source `${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}}/lib/child-dispatch.sh`. The caller propagates the immutable carrier through the context-only lineage edge `review_pr.post_impl_review`; this skill never resolves a model. Resolve the six provider edges from policy, create unique iteration/attempt instances with `uberdev_create_child_handoff`, and issue every dispatch within each configured wave before waiting on that wave:
 
 ```bash uberdev-executable setup=post-impl-review
 set -u
-UBERDEV_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}"
+UBERDEV_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
 . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh"
 : "${RUN_ID:?post-impl-review requires parent RUN_ID}"
 uberdev_command_workspace_prepare post-impl-review 0 medium '[]' "$RUN_ID" "${WORKTREE_ROOT:-}" >/dev/null || {
@@ -435,7 +435,7 @@ All six receive the same brief path and return their own reviewer YAML. All six 
 **Net change vs. pre-#73 fanout:** −`code-simplifier` (moved to Phase 2 of `/uberdev:review-pr` as the named lens dispatcher), +`pr-test-analyzer` (was documented in `/review-pr` `## Agent Descriptions` but never actually fanned out from this skill). 5 → 6 reviewers; composition changed.
 
 **Per-repo fanout cap.** Immediately before dispatching the 6 reviewer
-agents, the executable setup sources `${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/config-read.sh`
+agents, the executable setup sources `${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh`
 and resolves `POST_IMPL_REVIEW_CAP=$(uberdev_read_int_in_range fanout_concurrency.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 6)`.
 When `CAP < 6`, split the 6 routed calls into `ceil(6 / CAP)` sequential
 waves — each wave still obeys the dispatch-all-before-wait
@@ -494,15 +494,6 @@ if [ "$REVIEW_WAVE_BLOCKED" -eq 0 ] && [ -s "$REVIEW_FAILED" ]; then
   fi
 fi
 if [ $((REVIEW_INITIAL_VALID_COUNT + REVIEW_REPAIR_VALID_COUNT)) -ne "$REVIEW_EXPECTED_COUNT" ]; then REVIEW_WAVE_BLOCKED=1; fi
-```
-
-### Step 4: Aggregate
-
-Gate the writer before interpreting any reviewer prose. A lifecycle failure or
-an exhausted format repair is not a review verdict and MUST NOT produce the
-ordinary six-row `Continue.` artifact:
-
-```bash uberdev-executable
 post_review_require_complete_wave() {
   local aggregate_path="${AGG_PATH:-$RESEARCH_DIR_ABS/post-impl-review-final.md}"
   if [ "${REVIEW_WAVE_BLOCKED:-1}" -eq 0 ] \
@@ -528,6 +519,12 @@ else
   return "$POST_REVIEW_GATE_RC" 2>/dev/null || exit "$POST_REVIEW_GATE_RC"
 fi
 ```
+
+### Step 4: Aggregate
+
+The executable boundary above gates the writer before interpreting any
+reviewer prose. A lifecycle failure or an exhausted format repair is not a
+review verdict and MUST NOT produce the ordinary six-row `Continue.` artifact.
 
 Aggregate the 6 returns into the table format below plus the bottom line `Aggregated: N blockers, M suggestions. Continue.`
 
@@ -576,7 +573,7 @@ Findings remain advisory, but missing reviewer evidence is not advisory: **the c
 ## Integration
 
 **Called by (the only live caller):**
-- **`/uberdev:review-pr` Phase 1** — invoked via the `Skill` tool. Inputs `changed_paths` and `commit_range` are computed by `/uberdev:review-pr` from one fixed local merge-base-to-reviewed-head-SHA snapshot of the pushed PR; `tier` is passed through separately. The 6 reviewer agents fan out in a single message inside `/uberdev:review-pr`'s context; their aggregated findings are written to the canonical path (see Step 4 above) and consumed by `/uberdev:review-pr`'s Phase 1 apply-loop.
+- **`/uberdev:review-pr` Phase 1** — invoked via the `Skill` tool. Inputs `changed_paths` and `commit_range` are computed by `/uberdev:review-pr` from one fixed local merge-base-to-reviewed-head-SHA snapshot of the pushed PR; `tier` is passed through separately. The 6 reviewer agents run in one or more cap-controlled waves, with every child in a wave dispatched before its first wait; their aggregated findings are written to the canonical path (see Step 4 above) and consumed by `/uberdev:review-pr`'s Phase 1 apply-loop.
 
 **Findings artifact contract:**
 - **Writer:** this skill (`uberdev:post-impl-review`), Step 4 — the `<external-untrusted-input source="post-impl-review-aggregate">…</external-untrusted-input>` envelope IS the file's leading/trailing bytes (see Step 4 "Envelope-as-file-bytes").

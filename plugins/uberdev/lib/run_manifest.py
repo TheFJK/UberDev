@@ -17,6 +17,7 @@ made private before use, and direct symlink targets are rejected.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import datetime as dt
 import errno
 import hashlib
@@ -25,7 +26,6 @@ import os
 import re
 import secrets
 import stat
-import subprocess
 import sys
 import time
 from contextlib import contextmanager
@@ -803,43 +803,188 @@ def _reject_symlinked_ancestors(path: str) -> None:
             raise ManifestRejected("manifest_symlinked_ancestor_rejected")
 
 
+def _linux_process_record(pid: int) -> tuple[int, int, int, str]:
+    with open(f"/proc/{pid}/stat", encoding="ascii") as stream:
+        raw = stream.read()
+    end = raw.rfind(")")
+    if end < 0:
+        raise OSError("malformed proc stat")
+    fields = raw[end + 2 :].split()
+    if len(fields) < 20:
+        raise OSError("incomplete proc stat")
+    if fields[0] == "Z":
+        raise ProcessLookupError(pid)
+    with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as stream:
+        boot_id = stream.read().strip()
+    if not boot_id:
+        raise OSError("boot identity unavailable")
+    return int(fields[1]), int(fields[2]), int(fields[3]), f"linux:{boot_id}:{fields[19]}"
+
+
+class _DarwinProcBSDInfo(ctypes.Structure):
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32), ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32), ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32), ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32), ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32), ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32), ("pbi_rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16), ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32), ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32), ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32), ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+
+def _darwin_process_record(pid: int) -> tuple[int, int, int, str]:
+    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    libproc.proc_pidinfo.argtypes = [
+        ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int
+    ]
+    libproc.proc_pidinfo.restype = ctypes.c_int
+    info = _DarwinProcBSDInfo()
+    size = ctypes.sizeof(info)
+    if libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), size) != size:
+        error = ctypes.get_errno()
+        if error in {errno.ESRCH, errno.ENOENT}:
+            raise ProcessLookupError(pid)
+        raise OSError(error or errno.EIO, "proc_pidinfo failed")
+    if info.pbi_status == 5:
+        raise ProcessLookupError(pid)
+    sid = os.getsid(pid)
+    return (
+        int(info.pbi_ppid), int(info.pbi_pgid), int(sid),
+        f"darwin:{info.pbi_start_tvsec}:{info.pbi_start_tvusec}",
+    )
+
+
+def _windows_parent_pid(pid: int) -> int:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    class ProcessEntry32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.c_uint32), ("cntUsage", ctypes.c_uint32),
+            ("th32ProcessID", ctypes.c_uint32), ("th32DefaultHeapID", ctypes.c_void_p),
+            ("th32ModuleID", ctypes.c_uint32), ("cntThreads", ctypes.c_uint32),
+            ("th32ParentProcessID", ctypes.c_uint32), ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", ctypes.c_uint32), ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    kernel32.CreateToolhelp32Snapshot.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+    kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    kernel32.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ProcessEntry32)]
+    kernel32.Process32FirstW.restype = ctypes.c_int
+    kernel32.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ProcessEntry32)]
+    kernel32.Process32NextW.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+    invalid_handle = ctypes.c_void_p(-1).value
+    if snapshot == invalid_handle:
+        raise OSError(ctypes.get_last_error(), "CreateToolhelp32Snapshot failed")
+    try:
+        entry = ProcessEntry32()
+        entry.dwSize = ctypes.sizeof(entry)
+        found = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while found:
+            if int(entry.th32ProcessID) == pid:
+                return int(entry.th32ParentProcessID)
+            found = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    raise ProcessLookupError(pid)
+
+
+def _windows_process_record(pid: int) -> tuple[int, int, int, str]:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    class FileTime(ctypes.Structure):
+        _fields_ = [("low", ctypes.c_uint32), ("high", ctypes.c_uint32)]
+
+    kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+    kernel32.GetExitCodeProcess.restype = ctypes.c_int
+    kernel32.GetProcessTimes.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(FileTime), ctypes.POINTER(FileTime),
+        ctypes.POINTER(FileTime), ctypes.POINTER(FileTime),
+    ]
+    kernel32.GetProcessTimes.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    handle = kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        error = ctypes.get_last_error()
+        if error in {87, 1168}:
+            raise ProcessLookupError(pid)
+        raise OSError(error or errno.EIO, "OpenProcess failed")
+    try:
+        exit_code = ctypes.c_uint32()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            raise OSError(ctypes.get_last_error(), "GetExitCodeProcess failed")
+        if exit_code.value != 259:
+            raise ProcessLookupError(pid)
+        created, exited, kernel, user = FileTime(), FileTime(), FileTime(), FileTime()
+        if not kernel32.GetProcessTimes(
+            handle, ctypes.byref(created), ctypes.byref(exited),
+            ctypes.byref(kernel), ctypes.byref(user)
+        ):
+            raise OSError(ctypes.get_last_error(), "GetProcessTimes failed")
+        creation_ticks = (int(created.high) << 32) | int(created.low)
+        if creation_ticks <= 0:
+            raise OSError("process creation time unavailable")
+    finally:
+        kernel32.CloseHandle(handle)
+    # Windows has no POSIX process groups or sessions. The PID is retained in
+    # those schema slots while the kernel creation FILETIME provides the
+    # authoritative anti-reuse identity.
+    return _windows_parent_pid(pid), pid, pid, f"windows:{creation_ticks}"
+
+
+def _native_process_record(pid: int) -> tuple[int, int, int, str]:
+    if sys.platform.startswith("linux"):
+        return _linux_process_record(pid)
+    if sys.platform == "darwin":
+        return _darwin_process_record(pid)
+    if os.name == "nt":
+        return _windows_process_record(pid)
+    raise OSError("unsupported process identity platform")
+
+
 def _process_identity(pid: Any) -> tuple[str, str | None]:
     numeric_pid = _numeric_pid(pid)
     if numeric_pid is None:
         return "absent", None
     pid = numeric_pid
     try:
-        os.kill(pid, 0)
-        pgid = os.getpgid(pid) if hasattr(os, "getpgid") else pid
-        sid = os.getsid(pid) if hasattr(os, "getsid") else pid
-        process_state = subprocess.check_output(
-            ["ps", "-o", "stat=", "-p", str(pid)],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        ).strip()
-        started = subprocess.check_output(
-            ["ps", "-o", "lstart=", "-p", str(pid)],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        ).strip()
-        if process_state.startswith("Z"):
-            return "absent", None
-        if not process_state or not started:
-            return "unavailable", None
-        digest = hashlib.sha256(started.encode()).hexdigest()
+        _parent, pgid, sid, creation_identity = _native_process_record(pid)
+        digest = hashlib.sha256(creation_identity.encode()).hexdigest()
         return "captured", f"{pid}|{pgid}|{sid}|{digest}"
     except ProcessLookupError:
         return "absent", None
-    except subprocess.CalledProcessError:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return "absent", None
-        except OSError:
-            return "unavailable", None
+    except (AttributeError, OSError, ValueError):
         return "unavailable", None
-    except (AttributeError, OSError, subprocess.SubprocessError, ValueError):
-        return "unavailable", None
+
+
+def _write_process_identity(mode: str, destination: str) -> None:
+    self_pid = os.getppid()
+    if mode == "mutex":
+        owner_pid = self_pid
+    elif mode == "lease":
+        owner_pid = (
+            _native_process_record(self_pid)[0]
+            if stat.S_ISFIFO(os.fstat(1).st_mode)
+            else self_pid
+        )
+    else:
+        raise ManifestRejected("invalid_process_identity_mode")
+    status, identity = _process_identity(owner_pid)
+    if status != "captured" or identity is None:
+        raise ManifestRuntimeError(f"process_identity_{status}")
+    with open(destination, "w", encoding="ascii") as stream:
+        stream.write(f"{owner_pid}\n{identity}\n")
 
 
 def _pid_live(pid: Any, expected_identity: str | None = None) -> bool | None:
@@ -1654,6 +1799,13 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_parser.add_argument("--expected-backend", required=True)
     terminal_parser.add_argument("--expected-handle")
 
+    identity_parser = subparsers.add_parser("process-identity", help=argparse.SUPPRESS)
+    identity_parser.add_argument("--pid", required=True)
+
+    owner_parser = subparsers.add_parser("write-process-identity", help=argparse.SUPPRESS)
+    owner_parser.add_argument("--mode", choices=("mutex", "lease"), required=True)
+    owner_parser.add_argument("--destination", required=True)
+
     lease_write_parser = subparsers.add_parser(
         "secure-write-lease", help=argparse.SUPPRESS
     )
@@ -1690,6 +1842,15 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 or "unknown"
             )
+            return 0
+        if args.command == "process-identity":
+            status, identity = _process_identity(args.pid)
+            if status == "captured" and identity is not None:
+                print(identity, end="")
+                return 0
+            return 1 if status == "absent" else 2
+        if args.command == "write-process-identity":
+            _write_process_identity(args.mode, args.destination)
             return 0
         if args.command == "secure-write-lease":
             device, inode = secure_write_lease(

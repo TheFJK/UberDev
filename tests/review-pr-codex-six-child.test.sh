@@ -7,6 +7,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SKILL="$ROOT/codex/uberdev-codex/skills/uberdev-cmd-review-pr/SKILL.md"
+POST_SKILL="$ROOT/codex/uberdev-codex/skills/post-impl-review/SKILL.md"
 TMP="$(mktemp -d)"
 TMP="$(cd "$TMP" && pwd -P)"
 trap 'rm -rf "$TMP"' EXIT
@@ -17,6 +18,17 @@ awk '
   active{print}
 ' "$SKILL" >"$TMP/setup.sh"
 test -s "$TMP/setup.sh"
+python3 -I -B - "$POST_SKILL" "$TMP/post-setup.sh" "$TMP/post-boundary.sh" <<'PY'
+import pathlib,re,sys
+source=pathlib.Path(sys.argv[1]).read_text()
+def one(marker):
+    matches=re.findall(rf'^```bash {re.escape(marker)}\s*\n(.*?)^```\s*$',source,re.M|re.S)
+    assert len(matches)==1,(marker,len(matches))
+    return matches[0]
+setup=one('uberdev-executable setup=post-impl-review')
+pathlib.Path(sys.argv[2]).write_text(setup)
+pathlib.Path(sys.argv[3]).write_text(one('uberdev-executable'))
+PY
 
 mkdir -p "$TMP/bin" "$TMP/home"
 cat >"$TMP/bin/codex" <<'SH'
@@ -30,11 +42,16 @@ while [ "$#" -gt 0 ]; do
 done
 test -n "$result"
 printf '%s\t%s\t%s\n' "${UBERDEV_AGENT_INSTANCE_ID:-missing}" "$PWD" "$argv" >>"$CODEX_STUB_LOG"
+case "${UBERDEV_AGENT_INSTANCE_ID:-}" in
+  post-review-*-attempt01)
+    : >"$CODEX_STUB_READY_DIR/${UBERDEV_AGENT_INSTANCE_ID}"
+    while [ ! -e "$CODEX_STUB_RELEASE_DIR/${UBERDEV_AGENT_INSTANCE_ID}" ]; do sleep .05; done
+    ;;
+esac
 if [ -n "${CODEX_STUB_HANG_INSTANCE:-}" ] \
     && [ "${UBERDEV_AGENT_INSTANCE_ID:-}" = "$CODEX_STUB_HANG_INSTANCE" ]; then
   while :; do sleep 1; done
 fi
-sleep 0.4
 case "${UBERDEV_AGENT_INSTANCE_ID:-}" in
   *caller-fix*)
     printf 'caller repair\n' >>README.md
@@ -56,6 +73,18 @@ case "${UBERDEV_AGENT_INSTANCE_ID:-}" in
     printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings: []' 'confidence: high' '```' >"$result"
     ;;
 esac
+stub_run_dir="$(dirname "$(dirname "$(dirname "$UBERDEV_AGENT_STATUS_FILE")")")"
+while ! python3 -I -B - "$stub_run_dir" "$UBERDEV_AGENT_STATUS_FILE" <<'PY'
+import pathlib,sys
+root=pathlib.Path(sys.argv[1]); expected=f"status_path={sys.argv[2]}"
+for lease in root.glob('.agent-state-*/semaphore-v1/*.scope/*.lease'):
+    try: lines=lease.read_text().splitlines()
+    except OSError: continue
+    if expected in lines and any(line.startswith('backend_identity=') and line!='backend_identity=' for line in lines):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+do sleep .05; done
 if [ -n "${CODEX_STUB_FAIL_INSTANCE:-}" ] \
   && [ "${UBERDEV_AGENT_INSTANCE_ID:-}" = "$CODEX_STUB_FAIL_INSTANCE" ]; then
   exit 42
@@ -76,8 +105,10 @@ set -euo pipefail
 case_name="$1"
 repo="$2"
 setup="$3"
-fail_instance="${4-}"
-timeout_instance="${5-}"
+post_setup="$4"
+post_boundary="$5"
+fail_instance="${6-}"
+timeout_instance="${7-}"
 cd "$repo"
 . "$setup"
 
@@ -87,58 +118,59 @@ cd "$repo"
 printf 'diff fixture\n' >"$DIFF_ARTIFACT_PATH"
 printf 'review criteria\n' >"$CRITERIA_PATH"
 
+# Run the production review-wave executable boundary itself. A deterministic
+# provider barrier proves all six dispatches happen before the first wait.
+mkdir -p "$CODEX_STUB_READY_DIR" "$CODEX_STUB_RELEASE_DIR"
+(
+  while [ "$(find "$CODEX_STUB_READY_DIR" -type f | wc -l | tr -d ' ')" -lt 6 ]; do sleep .05; done
+  while [ "$(grep -l '^backend_identity=.' "$UBERDEV_CARRIER_RUN_DIR"/.agent-state-*/semaphore-v1/*.scope/*.lease 2>/dev/null | wc -l | tr -d ' ')" -lt 6 ]; do sleep .05; done
+  for ready in "$CODEX_STUB_READY_DIR"/*; do
+    ready_instance="$(basename "$ready")"
+    : >"$CODEX_STUB_RELEASE_DIR/$ready_instance"
+  done
+) & readiness_coordinator=$!
+CHANGED_PATHS_JSON='["README.md"]'
+EMPHASIS_JSON='[]'
+REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT_OVERRIDE:-10}"
+set +e
+. "$post_setup"
+post_setup_rc=$?
+if [ "$post_setup_rc" -eq 0 ]; then . "$post_boundary"; post_setup_rc=$?; fi
+set -e
+wait "$readiness_coordinator"
+if [ -n "$fail_instance$timeout_instance" ]; then
+  [ "$post_setup_rc" -eq 70 ]
+else
+  [ "$post_setup_rc" -eq 0 ]
+fi
+
 edges=(correctness silent_failures types comments tests general)
-handoffs=()
-results=()
-statuses=()
-instances=()
-for lens in "${edges[@]}"; do
-  edge="review_pr.review.$lens"
-  instance="review-pr-e2e-${case_name}-${lens}-iter1-attempt01"
-  instances+=("$instance")
-  if [ "$lens" = general ]; then
-    inputs="$(uberdev_child_inputs_build "$edge" \
-      changed_paths '["README.md"]' \
-      diff_path "$(review_json_string "$DIFF_ARTIFACT_PATH")" \
-      criteria_path "$(review_json_string "$CRITERIA_PATH")" \
-      emphasis '[]' lens '"general"')"
-  else
-    inputs="$(uberdev_child_inputs_build "$edge" \
-      changed_paths '["README.md"]' \
-      diff_path "$(review_json_string "$DIFF_ARTIFACT_PATH")" \
-      criteria_path "$(review_json_string "$CRITERIA_PATH")" \
-      emphasis '[]')"
-  fi
-  uberdev_create_child_handoff "$edge" "$instance" "$inputs" '[]' >/dev/null
-  handoffs+=("$UBERDEV_CHILD_HANDOFF")
-  results+=("$UBERDEV_CHILD_RESULT")
-  statuses+=("$UBERDEV_CHILD_STATUS")
-done
+instances=(); results=(); statuses=()
+while IFS= read -r row; do
+  statuses+=("$(jq -r .status <<<"$row")")
+  results+=("$(jq -r .result <<<"$row")")
+  instance_path="$(jq -r .status <<<"$row")"
+  instances+=("$(basename "$(dirname "$instance_path")")")
+done <"$REVIEW_LAUNCHED"
+[ "${#instances[@]}" -eq 6 ]
 
-uberdev_preflight_child_batch "${handoffs[@]}"
-for i in "${!edges[@]}"; do
-  uberdev_dispatch_child "review_pr.review.${edges[$i]}" \
-    "${handoffs[$i]}" "${results[$i]}" "${statuses[$i]}" >/dev/null
-done
-
-for i in "${!edges[@]}"; do
-  if [ -n "$fail_instance" ] && [ "${instances[$i]}" = "$fail_instance" ]; then
-    if uberdev_wait_child "${statuses[$i]}" "${results[$i]}" 20; then
-      echo "expected failed child to return non-zero: $fail_instance" >&2
-      exit 1
-    fi
-  elif [ -n "$timeout_instance" ] && [ "${instances[$i]}" = "$timeout_instance" ]; then
-    set +e
-    uberdev_wait_child "${statuses[$i]}" "${results[$i]}" 1
-    timeout_rc=$?
-    set -e
-    case "$timeout_rc" in 1|124) ;; *) echo "timeout child returned unexpected rc=$timeout_rc" >&2; exit 1 ;; esac
-    uberdev_unwind_child "${statuses[$i]}" "${results[$i]}" 20
-  else
-    uberdev_wait_child "${statuses[$i]}" "${results[$i]}" 20
-    uberdev_child_validate_phase1_review_result "${results[$i]}"
+if [ -n "$timeout_instance" ]; then
+  if [ "${REVIEW_WAIT_RC:-}" -ne 124 ]; then
+    echo "production review timeout returned rc=${REVIEW_WAIT_RC:-missing}, expected 124" >&2
+    while IFS= read -r timeout_row; do
+      echo "$(jq -r .edge <<<"$timeout_row") state=$(jq -r .state "$(jq -r .status <<<"$timeout_row")" 2>/dev/null || echo missing)" >&2
+    done <"$REVIEW_LAUNCHED"
+    exit 1
   fi
-done
+  timeout_index=-1
+  for i in "${!instances[@]}"; do [ "${instances[$i]}" != "$timeout_instance" ] || timeout_index="$i"; done
+  [ "$timeout_index" -ge 0 ] || { echo "timed-out instance missing from launch roster" >&2; exit 1; }
+  timeout_state="$(jq -r .state "${statuses[$timeout_index]}")"
+  [ "$timeout_state" = timed_out ] || { echo "timeout state was $timeout_state" >&2; exit 1; }
+  ! kill -0 "$(jq -r .pid "${statuses[$timeout_index]}")" 2>/dev/null || {
+    echo "timed-out provider remains live" >&2; exit 1;
+  }
+fi
 
 # Dispatch one mutating repair through the same routed stack. It must advance
 # the carrier-selected caller branch in place, without a disposable worktree,
@@ -212,6 +244,9 @@ for instance in instances:
     status = json.loads((child / "status.json").read_text())
     statuses.append(status["state"])
     assert status["backend"] == "codex", status
+    if instance == timed_out:
+        assert status["state"] == "timed_out" and status["exit_code"] == 124, status
+        continue
     worktrees.add(status["worktree"])
     branches.add(status["branch"])
     child_logs.add(status["log"])
@@ -228,12 +263,14 @@ for instance in instances:
     )
     assert probe.returncode != 0, branch
 
-assert len(worktrees) == len(branches) == len(child_logs) == 6, (worktrees, branches, child_logs)
+expected_workspace_records = 5 if timed_out else 6
+assert len(worktrees) == len(branches) == len(child_logs) == expected_workspace_records, (worktrees, branches, child_logs)
+assert not [path for path in (repo / ".claude" / "worktrees").glob("*") if path.exists()]
 if failed:
     assert statuses.count("failed") == 1 and statuses.count("completed") == 5, statuses
 elif timed_out:
     terminal = json.loads((run_dir / "children" / timed_out / "status.json").read_text())["state"]
-    assert terminal in {"failed", "timed_out", "cancelled"}, terminal
+    assert terminal == "timed_out", terminal
     assert statuses.count("completed") == 5, statuses
 else:
     assert statuses == ["completed"] * 6, statuses
@@ -369,17 +406,28 @@ run_case() {
   codex_log="$TMP/codex-$name.log"; claude_log="$TMP/claude-$name.log"
   make_repo "$repo"
   mkdir -p "$runtime"
+  ready_dir="$runtime/ready"; release_dir="$runtime/release"
   env -i HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
     PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$repo" \
     UBERDEV_TMPDIR="$runtime" CODEX_STUB_LOG="$codex_log" CLAUDE_STUB_LOG="$claude_log" \
+    CODEX_STUB_READY_DIR="$ready_dir" CODEX_STUB_RELEASE_DIR="$release_dir" \
     CODEX_STUB_FAIL_INSTANCE="$fail_instance" CODEX_STUB_HANG_INSTANCE="$timeout_instance" \
     RUN_ID="20260716-00000${name}-abcdef0" \
-    PR_NUMBER=335 ARGUMENTS='' SOLVE_TIMEOUT=20 UBERDEV_AGENT_CAPACITY=6 \
-    bash "$TMP/run-case.sh" "$name" "$repo" "$TMP/setup.sh" "$fail_instance" "$timeout_instance"
+    PR_NUMBER=335 ARGUMENTS='' SOLVE_TIMEOUT=120 UBERDEV_AGENT_CAPACITY=6 \
+    bash "$TMP/run-case.sh" "$name" "$repo" "$TMP/setup.sh" \
+      "$TMP/post-setup.sh" "$TMP/post-boundary.sh" "$fail_instance" "$timeout_instance"
 }
 
-run_case 1
-run_case 2 review-pr-e2e-2-types-iter1-attempt01
-run_case 3 '' review-pr-e2e-3-comments-iter1-attempt01
+case "${SIX_CHILD_CASE:-all}" in
+  1) run_case 1 ;;
+  2) run_case 2 post-review-20260716-000002-abcdef0-r3-iter1-attempt01 ;;
+  3) run_case 3 '' post-review-20260716-000003-abcdef0-r4-iter1-attempt01 ;;
+  all)
+    run_case 1
+    run_case 2 post-review-20260716-000002-abcdef0-r3-iter1-attempt01
+    run_case 3 '' post-review-20260716-000003-abcdef0-r4-iter1-attempt01
+    ;;
+  *) echo "unknown SIX_CHILD_CASE=$SIX_CHILD_CASE" >&2; exit 2 ;;
+esac
 
 echo "review-pr Codex six-child integration tests passed"

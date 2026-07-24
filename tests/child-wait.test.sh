@@ -102,6 +102,22 @@ printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'backend=claude-bg; capacity=reta
 printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'action=resolve the retained Claude session or retry with Codex'
 rm -f "$STATUS.watcher-error.json"
 
+# The detached numeric-process watcher emits a distinct durable record when
+# its kernel identity probe remains indeterminate. Exercise the producer and
+# the public waiter together so their closed schemas cannot drift apart.
+printf '{"backend":"codex","state":"running","exit_code":null,"pid":"321"}\n' >"$STATUS"
+_uberdev_agent_persist_watcher_error "$STATUS" codex 321 \
+  process_identity_probe_unavailable 3
+set +e
+WATCHER_WAIT_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
+WATCHER_WAIT_RC=$?
+set -e
+[ "$WATCHER_WAIT_RC" -eq 70 ]
+printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq \
+  'provider supervision failed: process_identity_probe_failed'
+printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'capacity=retained'
+rm -f "$STATUS.watcher-error.json"
+
 # Producer-shaped cancellation and lease-acquisition failures carry a bounded
 # reason. The child reports that reason without rejecting the closed schema.
 for watcher_reason in provider_cancel_unconfirmed lease_acquire_rollback_failed; do
@@ -182,6 +198,9 @@ INVALID_SCALAR_REVIEW="$TMP/run/children/worker-0001/invalid-scalar-review.md"
 DRIVE_RELATIVE_REVIEW="$TMP/run/children/worker-0001/drive-relative-review.md"
 DRIVE_QUALIFIED_REVIEW="$TMP/run/children/worker-0001/drive-qualified-review.md"
 BLOCK_SCALAR_REVIEW="$TMP/run/children/worker-0001/block-scalar-review.md"
+ESCAPED_NEWLINE_REVIEW="$TMP/run/children/worker-0001/escaped-newline-review.md"
+ESCAPED_NUL_REVIEW="$TMP/run/children/worker-0001/escaped-nul-review.md"
+QUOTED_LEADING_SPACE_REVIEW="$TMP/run/children/worker-0001/quoted-leading-space-review.md"
 printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
   '  - severity: blocker' '    location: tests/example.test.sh:1' \
   '    summary: bounded summary' '    detail: bounded detail' \
@@ -225,6 +244,18 @@ printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
   '    summary: block scalar is outside the documented grammar' '    detail: |' \
   '      multiple physical lines are rejected' \
   'confidence: high' '```' >"$BLOCK_SCALAR_REVIEW"
+printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings:' \
+  '  - severity: suggestion' '    location: tests/example.test.sh:1' \
+  '    summary: "escaped\nnewline"' '    detail: bounded detail' \
+  'confidence: high' '```' >"$ESCAPED_NEWLINE_REVIEW"
+printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings:' \
+  '  - severity: suggestion' '    location: tests/example.test.sh:1' \
+  '    summary: "escaped\u0000nul"' '    detail: bounded detail' \
+  'confidence: high' '```' >"$ESCAPED_NUL_REVIEW"
+printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings:' \
+  '  - severity: suggestion' '    location: tests/example.test.sh:1' \
+  '    summary: " leading space"' '    detail: bounded detail' \
+  'confidence: high' '```' >"$QUOTED_LEADING_SPACE_REVIEW"
 uberdev_child_validate_phase1_review_result "$VALID_REVIEW"
 uberdev_child_validate_phase1_review_result "$REJECT_REVIEW"
 uberdev_child_validate_phase1_review_result "$EMPTY_REVIEW"
@@ -236,6 +267,9 @@ uberdev_child_validate_phase1_review_result "$ADVISORY_MULTI_REVIEW"
 ! uberdev_child_validate_phase1_review_result "$DRIVE_RELATIVE_REVIEW"
 ! uberdev_child_validate_phase1_review_result "$DRIVE_QUALIFIED_REVIEW"
 ! uberdev_child_validate_phase1_review_result "$BLOCK_SCALAR_REVIEW"
+! uberdev_child_validate_phase1_review_result "$ESCAPED_NEWLINE_REVIEW"
+! uberdev_child_validate_phase1_review_result "$ESCAPED_NUL_REVIEW"
+! uberdev_child_validate_phase1_review_result "$QUOTED_LEADING_SPACE_REVIEW"
 
 # Workspace metadata is a closed union whenever a provider reports it. Caller
 # mode has one absolute execution directory and no branch; isolated mode has

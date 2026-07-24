@@ -109,50 +109,10 @@ _uberdev_semaphore_pid_live() {
 }
 
 _uberdev_semaphore_process_identity() {
-  local pid="${1-}"
+  local pid="${1-}" manifest_tool
   _uberdev_semaphore_is_positive_integer "$pid" || return 1
-  python3 -I -B - "$pid" <<'PY'
-import hashlib
-import os
-import subprocess
-import sys
-
-pid = int(sys.argv[1])
-try:
-    os.kill(pid, 0)
-    pgid = os.getpgid(pid) if hasattr(os, "getpgid") else pid
-    sid = os.getsid(pid) if hasattr(os, "getsid") else pid
-    state = subprocess.check_output(
-        ["ps", "-o", "stat=", "-p", str(pid)],
-        text=True,
-        stderr=subprocess.DEVNULL,
-    ).strip()
-    started = subprocess.check_output(
-        ["ps", "-o", "lstart=", "-p", str(pid)],
-        text=True,
-        stderr=subprocess.DEVNULL,
-    ).strip()
-    if state.startswith("Z"):
-        raise ProcessLookupError()
-    if not state or not started:
-        raise OSError("process identity output unavailable")
-    print(
-        f"{pid}|{pgid}|{sid}|{hashlib.sha256(started.encode()).hexdigest()}",
-        end="",
-    )
-except ProcessLookupError:
-    raise SystemExit(1)
-except subprocess.CalledProcessError:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        raise SystemExit(1)
-    except OSError:
-        raise SystemExit(2)
-    raise SystemExit(2)
-except (AttributeError, OSError, subprocess.SubprocessError, ValueError):
-    raise SystemExit(2)
-PY
+  manifest_tool="$(_uberdev_semaphore_manifest_tool)" || return 2
+  python3 -I -B "$manifest_tool" process-identity --pid "$pid"
 }
 
 _uberdev_semaphore_process_identity_matches() {
@@ -169,85 +129,11 @@ _uberdev_semaphore_process_identity_matches() {
 }
 
 _uberdev_semaphore_write_process_identity() {
-  local mode="$1" destination="$2"
+  local mode="$1" destination="$2" manifest_tool
   command -v python3 >/dev/null 2>&1 || return 2
-  python3 - "$mode" "$destination" <<'PY'
-import ctypes
-import hashlib
-import os
-import stat
-import subprocess
-import sys
-
-
-def parent_pid(pid: int) -> int:
-    if sys.platform.startswith("linux"):
-        with open(f"/proc/{pid}/stat", "r", encoding="ascii") as handle:
-            raw = handle.read()
-        tail = raw[raw.rfind(")") + 2 :].split()
-        return int(tail[1])
-    if sys.platform == "darwin":
-        class ProcBSDInfo(ctypes.Structure):
-            _fields_ = [
-                ("pbi_flags", ctypes.c_uint32), ("pbi_status", ctypes.c_uint32),
-                ("pbi_xstatus", ctypes.c_uint32), ("pbi_pid", ctypes.c_uint32),
-                ("pbi_ppid", ctypes.c_uint32), ("pbi_uid", ctypes.c_uint32),
-                ("pbi_gid", ctypes.c_uint32), ("pbi_ruid", ctypes.c_uint32),
-                ("pbi_rgid", ctypes.c_uint32), ("pbi_svuid", ctypes.c_uint32),
-                ("pbi_svgid", ctypes.c_uint32), ("pbi_rfu_1", ctypes.c_uint32),
-                ("pbi_comm", ctypes.c_char * 16), ("pbi_name", ctypes.c_char * 32),
-                ("pbi_nfiles", ctypes.c_uint32), ("pbi_pgid", ctypes.c_uint32),
-                ("pbi_pjobc", ctypes.c_uint32), ("e_tdev", ctypes.c_uint32),
-                ("e_tpgid", ctypes.c_uint32), ("pbi_nice", ctypes.c_int32),
-                ("pbi_start_tvsec", ctypes.c_uint64),
-                ("pbi_start_tvusec", ctypes.c_uint64),
-            ]
-        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
-        libproc.proc_pidinfo.argtypes = [
-            ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
-            ctypes.c_void_p, ctypes.c_int,
-        ]
-        info = ProcBSDInfo()
-        size = ctypes.sizeof(info)
-        if libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), size) != size:
-            raise OSError("proc_pidinfo failed")
-        return int(info.pbi_ppid)
-    raise OSError("unsupported process table")
-
-
-self_pid = os.getppid()
-mode = sys.argv[1]
-if mode == "mutex":
-    result = self_pid
-elif mode == "lease":
-    # The documented API returns through command substitution.  Its stdout is
-    # a pipe, so the logical owner is the shell one level above that helper.
-    result = parent_pid(self_pid) if stat.S_ISFIFO(os.fstat(1).st_mode) else self_pid
-else:
-    raise SystemExit(2)
-if result <= 0:
-    raise SystemExit(2)
-try:
-    pgid = os.getpgid(result) if hasattr(os, "getpgid") else result
-    sid = os.getsid(result) if hasattr(os, "getsid") else result
-    state = subprocess.check_output(
-        ["ps", "-o", "stat=", "-p", str(result)],
-        text=True,
-        stderr=subprocess.DEVNULL,
-    ).strip()
-    started = subprocess.check_output(
-        ["ps", "-o", "lstart=", "-p", str(result)],
-        text=True,
-        stderr=subprocess.DEVNULL,
-    ).strip()
-    if not state or state.startswith("Z") or not started:
-        raise ValueError()
-    identity = f"{result}|{pgid}|{sid}|{hashlib.sha256(started.encode()).hexdigest()}"
-except Exception:
-    raise SystemExit(2)
-with open(sys.argv[2], "w", encoding="ascii") as handle:
-    handle.write(f"{result}\n{identity}\n")
-PY
+  manifest_tool="$(_uberdev_semaphore_manifest_tool)" || return 2
+  python3 -I -B "$manifest_tool" write-process-identity \
+    --mode "$mode" --destination "$destination"
 }
 
 _uberdev_semaphore_capture_lease_owner() {

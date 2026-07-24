@@ -1574,6 +1574,19 @@ _uberdev_dispatch_report_codex_setup_cleanup_failure() {
 #   - Liveness is PID-based (kill -0), same as background — there is no
 #     `claude agents --json` equivalent to poll. The launcher's goal-state
 #     polling reuses the background path's kill -0 contract unchanged.
+_uberdev_dispatch_timeout_intent_matches() {
+  python3 -I -B - "$1.timeout-intent-v1" "$2" <<'PY'
+import json,os,stat,sys
+path,handle=sys.argv[1:]
+try:
+ entry=os.lstat(path); uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
+ if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1 or entry.st_size>4096 or (uid is not None and entry.st_uid!=uid): raise ValueError()
+ value=json.load(open(path,encoding='utf-8'))
+ if frozenset(value)!={'schema_version','handle','lease_generation','snapshot_sha256'} or value.get('schema_version')!=1 or value.get('handle')!=handle: raise ValueError()
+except Exception: raise SystemExit(1)
+PY
+}
+
 _uberdev_dispatch_codex() {
   local ISSUE_NUM="$1" TIER="$2" PROMPT_FILE="$3"
   DISPATCH_RC=0
@@ -1779,6 +1792,12 @@ os.execvp("bash",argv)' '
           _exit_state=failed
         elif [ "$_exit_state" = cancelled ]; then
           _exit_rc=143
+          if _uberdev_dispatch_timeout_intent_matches "$STATUS_FILE" "$WRAPPER_PID"; then
+            # The public waiter owns timeout classification after it has
+            # published an exact cancellation intent. Preserve the running
+            # snapshot so its compare-and-swap can write `timed_out`.
+            return 0
+          fi
         else
           _exit_state=failed
           [ "$_exit_rc" -ne 0 ] || _exit_rc=70

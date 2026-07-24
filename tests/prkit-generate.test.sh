@@ -63,10 +63,10 @@ if [ -f "$T1/plugins/prkit/policy/solve-run-tree-v1.json" ] \
    && [ -f "$T1/codex/prkit-codex/policy/solve-run-tree-v1.json" ] \
    && [ -f "$T1/codex/prkit-codex/shared/phase1-reviewer-output-v1.md" ] \
    && python3 - "$T1" <<'PY'
-import pathlib,sys,tomllib
+import pathlib,sys
 root=pathlib.Path(sys.argv[1]); contract=(root/'codex/prkit-codex/shared/phase1-reviewer-output-v1.md').read_text()
 roles=('code-reviewer','silent-failure-hunter','type-design-analyzer','comment-analyzer','pr-test-analyzer')
-assert all(contract not in tomllib.loads((root/f'codex/agents/prkit-{role}.toml').read_text())['developer_instructions'] for role in roles)
+assert all(contract not in (root/f'codex/agents/prkit-{role}.toml').read_text() for role in roles)
 PY
 then ok "G6b routed reviewer contract packaged and absent from native roles"
 else no "G6b reviewer contract scope is incorrect"; fi
