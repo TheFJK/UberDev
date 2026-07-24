@@ -66,6 +66,30 @@ if grep -qF '# 5 prkit skills' "$T1/codex/install-codex.sh" \
   ok "G6a standalone installer reports the manifest-true 5 skills / 14 agents"
 else no "G6a standalone installer retains full-UberDev fleet counts"; fi
 
+# G6aa — exercise the rewrite transaction itself against synthetic drift. A
+# traversal/count mismatch and a missing substitution anchor must both fail
+# before touching the installer.
+if python3 -I -B - "$GEN" <<'PY'
+import pathlib,subprocess,sys,tempfile
+source=pathlib.Path(sys.argv[1]).read_text()
+marker='  python3 -I -B - "$TARGET" <<\'PY\' || {'
+snippet=source.split(marker,1)[1].split('\nPY\n',1)[0]
+anchors='NOT the 44 agents\n# ~39 Prkit skills incl. command-skills\n# 44 prkit-*.toml subagents\n'
+def fixture(skills,installer_text):
+ root=pathlib.Path(tempfile.mkdtemp()); (root/'codex/prkit-codex/skills').mkdir(parents=True); (root/'codex/agents').mkdir()
+ for index in range(skills): (root/f'codex/prkit-codex/skills/s{index}').mkdir()
+ for index in range(14): (root/f'codex/agents/prkit-a{index}.toml').write_text('x')
+ target=root/'codex/install-codex.sh'; target.write_text(installer_text)
+ return root,target
+for root,target in (fixture(6,anchors),fixture(5,anchors.replace('NOT the 44 agents','anchor drift'))):
+ before=target.read_bytes()
+ result=subprocess.run([sys.executable,'-I','-B','-',str(root)],input=snippet,text=True,capture_output=True)
+ assert result.returncode!=0,result
+ assert target.read_bytes()==before
+PY
+then ok "G6aa count discovery and anchor drift fail closed without mutation"
+else no "G6aa generator count/anchor transaction accepted drift"; fi
+
 # G6b — both standalone runtimes ship the manifest-declared reviewer contract,
 # while native Codex role TOMLs remain edge-agnostic.
 if [ -f "$T1/plugins/prkit/policy/solve-run-tree-v1.json" ] \

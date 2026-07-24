@@ -1341,11 +1341,12 @@ else
   pass_msg "Codex fixtures await canonical terminal evidence portably"
 fi
 IMMEDIATE_ACCEPT_BODY="$(extract_function_body _uberdev_dispatch_accept_immediate_terminal "$DISPATCH_LIB")"
-if printf '%s\n' "$IMMEDIATE_ACCEPT_BODY" | grep -Fq 'if os.name=="nt"' \
-   && printf '%s\n' "$IMMEDIATE_ACCEPT_BODY" | grep -Fq 'os.kill(int(pid),0)'; then
-  pass_msg "immediate-terminal liveness uses native Windows PID probing"
+WAIT_OWNED_BODY="$(extract_function_body _uberdev_dispatch_wait_owned_session "$DISPATCH_LIB")"
+if printf '%s\n' "$IMMEDIATE_ACCEPT_BODY" | grep -Fq 'process-identity' \
+   && ! printf '%s\n%s\n' "$IMMEDIATE_ACCEPT_BODY" "$WAIT_OWNED_BODY" | grep -Fq 'os.kill'; then
+  pass_msg "Windows dispatch liveness uses the non-signaling native identity probe"
 else
-  fail_msg "immediate-terminal liveness uses native Windows PID probing"
+  fail_msg "Windows dispatch liveness uses the non-signaling native identity probe"
 fi
 IMMEDIATE_TMP="$(mktemp -d)"
 mkdir -p "$IMMEDIATE_TMP/bin" "$IMMEDIATE_TMP/repo" "$IMMEDIATE_TMP/tmp"

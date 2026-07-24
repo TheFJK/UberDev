@@ -43,7 +43,13 @@ except ImportError:  # pragma: no cover - unavailable on POSIX
     _msvcrt = None
 
 
-SCHEMA_VERSION = 1
+# v2 binds every new start to a kernel creation identity. v1 remains readable
+# solely for manifests written before that field existed: it is never upgraded
+# in place, never receives a synthesized identity, and reconciliation appends a
+# terminal using the original lifecycle version. The public append boundary
+# accepts only the current version, so compatibility cannot create new v1 data.
+SCHEMA_VERSION = 2
+READABLE_SCHEMA_VERSIONS = frozenset({1, SCHEMA_VERSION})
 TERMINAL_EVENTS = frozenset(
     {"completed", "failed", "timed_out", "cancelled", "abandoned"}
 )
@@ -370,9 +376,8 @@ def _validate_event(event: Any) -> list[str]:
         return [f"unknown_field: {field}" for field in unknown]
 
     errors: list[str] = []
-    if not _is_plain_int(event.get("schema_version")) or event.get(
-        "schema_version"
-    ) != SCHEMA_VERSION:
+    schema_version = event.get("schema_version")
+    if not _is_plain_int(schema_version) or schema_version not in READABLE_SCHEMA_VERSIONS:
         errors.append("invalid_schema_version")
 
     event_name = event.get("event")
@@ -514,7 +519,11 @@ def _validate_event(event: Any) -> list[str]:
         if "invalid_owner_pid" not in errors:
             errors.append("invalid_owner_pid")
 
-    if event_name == "agent_started":
+    if (
+        event_name == "agent_started"
+        and _is_plain_int(schema_version)
+        and schema_version >= 2
+    ):
         owner_pid = event.get("owner_pid")
         owner_identity = _parse_process_identity(event.get("owner_process_identity"))
         if (
@@ -1607,6 +1616,8 @@ def _normalized_append_event(raw: Any) -> dict[str, Any]:
         raise ManifestRejected("event_record_must_be_object")
     event = dict(raw)
     event.setdefault("schema_version", SCHEMA_VERSION)
+    if event.get("schema_version") != SCHEMA_VERSION:
+        raise ManifestRejected("append_requires_current_schema")
     event.setdefault("timestamp", _utc_now())
     if event.get("event") in TERMINAL_EVENTS:
         event.setdefault("terminal_status", event["event"])
@@ -1677,7 +1688,7 @@ def reconcile_manifest(path: str) -> dict[str, Any]:
             if terminal_truth is not None:
                 run_id, agent_id = identity
                 terminal: dict[str, Any] = {
-                    "schema_version": SCHEMA_VERSION,
+                    "schema_version": state.started["schema_version"],
                     "event": terminal_truth,
                     "timestamp": _utc_not_before(state.last_timestamp),
                     "run_id": run_id,
@@ -1738,7 +1749,7 @@ def reconcile_manifest(path: str) -> dict[str, Any]:
                 continue
             run_id, agent_id = identity
             terminal: dict[str, Any] = {
-                "schema_version": SCHEMA_VERSION,
+                "schema_version": state.started["schema_version"],
                 "event": "abandoned",
                 "timestamp": _utc_not_before(state.last_timestamp),
                 "run_id": run_id,

@@ -143,13 +143,13 @@ printf '{"backend":"codex","state":"running","exit_code":null,"pid":"321","lease
 INTENT_SNAPSHOT="$(shasum -a 256 "$STATUS" | awk '{print $1}')"
 _uberdev_child_timeout_intent_write "$STATUS" 321 "$INTENT_GENERATION" "$INTENT_SNAPSHOT"
 INTENT_PATH="$STATUS.timeout-intent-v1"
-python3 -I -B - "$INTENT_PATH" "$$" <<'PY'
+python3 -I -B - "$INTENT_PATH" <<'PY'
 import json,re,sys,time
 value=json.load(open(sys.argv[1]))
 assert set(value)=={'schema_version','handle','lease_generation','snapshot_sha256','waiter_pid','waiter_process_identity','expires_epoch'},value
 assert value['schema_version']==1 and value['handle']=='321'
-assert value['waiter_pid']==int(sys.argv[2])
 assert re.fullmatch(r'[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}',value['waiter_process_identity'])
+assert value['waiter_process_identity'].split('|',1)[0]==str(value['waiter_pid'])
 assert int(time.time()) < value['expires_epoch'] <= int(time.time())+60
 PY
 [ "$(_uberdev_agent_timeout_intent_probe "$STATUS" 321 "$INTENT_GENERATION")" = valid ]

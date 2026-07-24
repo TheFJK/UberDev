@@ -145,13 +145,44 @@ if [ -r "$MANIFEST_CODEX" ] && [ -d "$REPO_ROOT/codex" ]; then
   # a deliberately smaller manifest (5 skills / 14 agents); rewrite those
   # user-facing counts here so generated installation guidance cannot claim a
   # fleet that prkit does not ship.
-  prkit_skill_count="$(find "$TARGET/codex/prkit-codex/skills" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
-  prkit_agent_count="$(find "$TARGET/codex/agents" -maxdepth 1 -type f -name 'prkit-*.toml' | wc -l | tr -d ' ')"
-  PRKIT_SKILL_COUNT="$prkit_skill_count" PRKIT_AGENT_COUNT="$prkit_agent_count" perl -0pi -e '
-    s/NOT the 44 agents/NOT the $ENV{PRKIT_AGENT_COUNT} agents/g;
-    s/# ~39 Prkit skills incl\. command-skills/# $ENV{PRKIT_SKILL_COUNT} prkit skills/g;
-    s/# 44 prkit-\*\.toml subagents/# $ENV{PRKIT_AGENT_COUNT} prkit-*.toml subagents/g;
-  ' "$TARGET/codex/install-codex.sh" || { echo "generate: codex installer count rewrite failed" >&2; exit 1; }
+  python3 -I -B - "$TARGET" <<'PY' || {
+import os,pathlib,stat,sys,tempfile
+root=pathlib.Path(sys.argv[1])
+skills=root/'codex/prkit-codex/skills'; agents=root/'codex/agents'; installer=root/'codex/install-codex.sh'
+try:
+ skill_count=sum(1 for entry in skills.iterdir() if entry.is_dir())
+ agent_count=sum(1 for entry in agents.iterdir() if entry.is_file() and entry.name.startswith('prkit-') and entry.suffix=='.toml')
+except OSError as exc:
+ raise SystemExit(f'count discovery failed: {exc}')
+if (skill_count,agent_count)!=(5,14):
+ raise SystemExit(f'unexpected standalone fleet counts: skills={skill_count} agents={agent_count}')
+try: source=installer.read_text()
+except OSError as exc: raise SystemExit(f'installer read failed: {exc}')
+rewrites=(
+ ('NOT the 44 agents',f'NOT the {agent_count} agents'),
+ ('# ~39 Prkit skills incl. command-skills',f'# {skill_count} prkit skills'),
+ ('# 44 prkit-*.toml subagents',f'# {agent_count} prkit-*.toml subagents'),
+)
+for old,new in rewrites:
+ if source.count(old)!=1: raise SystemExit(f'installer rewrite anchor count is not one: {old}')
+ source=source.replace(old,new)
+if any(source.count(new)!=1 for _,new in rewrites):
+ raise SystemExit('installer rewrite verification failed')
+try:
+ mode=stat.S_IMODE(installer.stat().st_mode)
+ fd,temporary=tempfile.mkstemp(prefix='.install-codex.',dir=installer.parent)
+ with os.fdopen(fd,'w',encoding='utf-8') as stream:
+  stream.write(source); stream.flush(); os.fsync(stream.fileno())
+ os.chmod(temporary,mode)
+ os.replace(temporary,installer)
+except OSError as exc:
+ try: os.unlink(temporary)
+ except (NameError,OSError): pass
+ raise SystemExit(f'installer rewrite failed: {exc}')
+PY
+    echo "generate: codex installer count rewrite failed" >&2
+    exit 1
+  }
   # Scaffold codex-specific files from prkit-correct templates (authored, not
   # rewritten — so they don't inherit UberDev's stale counts). AFTER the rewrite
   # loop so they stay pristine.

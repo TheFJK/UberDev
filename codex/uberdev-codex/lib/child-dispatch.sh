@@ -1064,9 +1064,13 @@ uberdev_unwind_child() {
 }
 
 _uberdev_child_timeout_intent_write() {
-  local waiter_identity
-  waiter_identity="$(_uberdev_agent_process_identity "$$" 2>/dev/null)" || return 2
-  python3 -I -B - "$1.timeout-intent-v1" "$2" "$3" "$4" "$$" "$waiter_identity" <<'PY'
+  local waiter_record waiter_pid waiter_identity
+  waiter_record="$(_uberdev_agent_capture_owner_process_record "$(dirname "$1")" 2>/dev/null)" || return 2
+  case "$waiter_record" in
+    *$'\t'*) waiter_pid="${waiter_record%%$'\t'*}"; waiter_identity="${waiter_record#*$'\t'}" ;;
+    *) return 2 ;;
+  esac
+  python3 -I -B - "$1.timeout-intent-v1" "$2" "$3" "$4" "$waiter_pid" "$waiter_identity" <<'PY'
 import json,os,re,sys,tempfile,time
 path,handle,lease,snapshot,waiter_pid,waiter_identity=sys.argv[1:]; parent=os.path.dirname(path)
 if not waiter_pid.isdigit() or int(waiter_pid)<=0: raise SystemExit(2)

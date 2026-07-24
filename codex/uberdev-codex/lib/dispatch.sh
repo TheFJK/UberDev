@@ -738,6 +738,7 @@ for row in rows:
  if proc_pgid==pgid and not parts[2].startswith("Z"):
   try: proc_sid=os.getsid(proc_pid)
   except ProcessLookupError: continue
+  except OSError: raise SystemExit(2)
   live.append((proc_pid,proc_sid))
 if not live: raise SystemExit(1)
 if any(proc_sid!=sid for _,proc_sid in live): raise SystemExit(2)
@@ -745,15 +746,29 @@ raise SystemExit(0)
 PY
 }
 
+# Authorize signaling only while the recorded leader is either still the exact
+# launch-time process or is absent, and every surviving member of its recorded
+# process group remains in that same session. An unavailable identity probe or
+# a reused leader PID is never downgraded to group-only evidence.
+_uberdev_dispatch_owned_group_state() {
+  local handle="$1" expected_identity="$2" pgid="$3" sid="$4" current probe_rc group_rc
+  if current="$(_uberdev_agent_process_identity "$handle" 2>/dev/null)"; then
+    [ "$current" = "$expected_identity" ] || return 2
+  else
+    probe_rc=$?
+    [ "$probe_rc" -eq 1 ] || return 2
+  fi
+  if _uberdev_dispatch_group_owned_session "$pgid" "$sid"; then
+    return 0
+  else
+    group_rc=$?
+  fi
+  [ "$group_rc" -eq 1 ] && return 1
+  return 2
+}
+
 _uberdev_dispatch_wait_owned_session() {
   local pid="$1" identity identity_pid identity_pgid identity_sid identity_started attempts=0
-  if _uberdev_dispatch_python -I -B - "$pid" <<'PY' >/dev/null 2>&1
-import os,sys
-if os.name!="nt": raise SystemExit(2)
-try: os.kill(int(sys.argv[1]),0)
-except OSError: raise SystemExit(1)
-PY
-  then return 0; fi
   while [ "$attempts" -lt 40 ]; do
     identity="$(_uberdev_agent_process_identity "$pid" 2>/dev/null || true)"
     if [ -n "$identity" ]; then
@@ -776,14 +791,17 @@ EOF_IDENTITY
 # non-zombie PID is rejected because it may be reused or unisolated.
 _uberdev_dispatch_accept_immediate_terminal() {
   local backend="$1" pid="$2" status_file="$3" result_file="${4:-}"
-  _uberdev_dispatch_python -I -B - "$backend" "$pid" "$status_file" "$result_file" <<'PY'
+  _uberdev_dispatch_python -I -B - "$backend" "$pid" "$status_file" "$result_file" "$_UBERDEV_AGENT_MANIFEST_TOOL" <<'PY'
 import json,os,stat,subprocess,sys
-backend,pid,status_path,result_path=sys.argv[1:]
+backend,pid,status_path,result_path,manifest_tool=sys.argv[1:]
 if not pid.isdigit() or int(pid)<=0: raise SystemExit(2)
 if os.name=="nt":
- try: os.kill(int(pid),0)
- except OSError: pass
- else: raise SystemExit(1)
+ probe=subprocess.run(
+  [sys.executable,"-I","-B",manifest_tool,"process-identity","--pid",pid],
+  stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False,
+ )
+ if probe.returncode==0: raise SystemExit(1)
+ if probe.returncode!=1: raise SystemExit(2)
 else:
  try:
   process_state=subprocess.check_output(["ps","-o","stat=","-p",pid],text=True,stderr=subprocess.DEVNULL).strip()
@@ -868,7 +886,7 @@ PY
 # rejected before signaling. Opaque providers use their native handle API and
 # prove the handle is no longer live before returning success.
 _uberdev_dispatch_cancel_backend() {
-  local backend="$1" handle="$2" expected_identity="${3:-}" current pane probe attempts cancel_rc group_rc identity_probe_rc identity_pid identity_pgid identity_sid identity_started
+  local backend="$1" handle="$2" expected_identity="${3:-}" pane probe attempts cancel_rc group_rc identity_pid identity_pgid identity_sid identity_started
   _UBERDEV_DISPATCH_CANCEL_REASON=''
   case "$backend" in
     codex|background)
@@ -879,20 +897,14 @@ $expected_identity
 EOF_IDENTITY
       [ "$identity_pid" = "$handle" ] && [ "$identity_pgid" = "$handle" ] && [ "$identity_sid" = "$handle" ] && [ -n "$identity_started" ] \
         || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
-      if current="$(_uberdev_agent_process_identity "$handle" 2>/dev/null)"; then identity_probe_rc=0; else identity_probe_rc=$?; fi
-      if [ "$identity_probe_rc" -ne 0 ]; then
-        if _uberdev_dispatch_group_owned_session "$identity_pgid" "$identity_sid"; then group_rc=0; else group_rc=$?; fi
-        [ "$group_rc" -ne 1 ] || return 0
-        _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed
-        return 2
-      fi
-      [ "$current" = "$expected_identity" ] || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
-      if _uberdev_dispatch_group_owned_session "$identity_pgid" "$identity_sid"; then group_rc=0; else group_rc=$?; fi
+      if _uberdev_dispatch_owned_group_state "$handle" "$expected_identity" "$identity_pgid" "$identity_sid"; then group_rc=0; else group_rc=$?; fi
       [ "$group_rc" -ne 1 ] || return 0
       [ "$group_rc" -eq 0 ] || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
       if ! kill -TERM "-$identity_pgid" 2>/dev/null; then
-        _uberdev_dispatch_group_live "$identity_pgid" && { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
-        return 0
+        if _uberdev_dispatch_owned_group_state "$handle" "$expected_identity" "$identity_pgid" "$identity_sid"; then group_rc=0; else group_rc=$?; fi
+        [ "$group_rc" -eq 1 ] && return 0
+        _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed
+        return 2
       fi
       attempts=0
       while [ "$attempts" -lt 40 ]; do
@@ -901,14 +913,14 @@ EOF_IDENTITY
         [ "$group_rc" -eq 0 ] || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
         sleep 0.05; attempts=$((attempts + 1))
       done
-      if current="$(_uberdev_agent_process_identity "$handle" 2>/dev/null)"; then identity_probe_rc=0; else identity_probe_rc=$?; fi
-      [ "$identity_probe_rc" -eq 0 ] && [ "$current" = "$expected_identity" ] \
-        || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
-      _uberdev_dispatch_group_owned_session "$identity_pgid" "$identity_sid" \
-        || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
+      if _uberdev_dispatch_owned_group_state "$handle" "$expected_identity" "$identity_pgid" "$identity_sid"; then group_rc=0; else group_rc=$?; fi
+      [ "$group_rc" -ne 1 ] || return 0
+      [ "$group_rc" -eq 0 ] || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
       if ! kill -KILL "-$identity_pgid" 2>/dev/null; then
-        _uberdev_dispatch_group_live "$identity_pgid" && { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
-        return 0
+        if _uberdev_dispatch_owned_group_state "$handle" "$expected_identity" "$identity_pgid" "$identity_sid"; then group_rc=0; else group_rc=$?; fi
+        [ "$group_rc" -eq 1 ] && return 0
+        _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed
+        return 2
       fi
       attempts=0
       while [ "$attempts" -lt 40 ]; do

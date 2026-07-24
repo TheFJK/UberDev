@@ -612,12 +612,13 @@ print(json.dumps({"context_file":path,"context_sha256":digest,"run_id":value["me
 }
 
 _uberdev_agent_event_json() {
-  local event="$1" request="$2" decision="$3" handle="${4:-}" status_path="${5:-}" rc="${6:-}" error_class="${7:-}" owner_pid="$$" owner_identity=''
+  local event="$1" request="$2" decision="$3" handle="${4:-}" status_path="${5:-}" rc="${6:-}" error_class="${7:-}"
+  local owner_pid="${_UBERDEV_AGENT_OWNER_PID:-}" owner_identity="${_UBERDEV_AGENT_OWNER_IDENTITY:-}"
   if [ "$event" = agent_started ]; then
-    owner_identity="$(_uberdev_agent_process_identity "$owner_pid" 2>/dev/null)" || {
+    if [ -z "$owner_pid" ] || [ -z "$owner_identity" ]; then
       _uberdev_agent_error 'owner_process_identity_unavailable'
       return 2
-    }
+    fi
   fi
   python3 -I -c '
 import json, sys
@@ -629,7 +630,7 @@ proposal = decision.get("adaptive_proposal") if routing == "shadow" else decisio
 if not isinstance(proposal, dict):
     proposal = decision
 record = {
-    "schema_version": 1, "event": event_name,
+    "schema_version": 2, "event": event_name,
     "run_id": request["run_id"], "backend": request["backend"],
     "workflow": request.get("workflow"), "phase": request.get("phase"),
     "role": request.get("role"), "issue_or_pr": request.get("issue_or_pr"),
@@ -813,6 +814,29 @@ _uberdev_agent_process_identity() {
   local pid="$1"
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   python3 -I -B "$_UBERDEV_AGENT_MANIFEST_TOOL" process-identity --pid "$pid"
+}
+
+# Capture the native owner PID and its creation identity as one indivisible
+# record. The manifest bridge deliberately resolves through a command-
+# substitution subshell, which maps Git Bash's MSYS PID to the native parent
+# PID consumed by Win32 OpenProcess.
+_uberdev_agent_capture_owner_process_record() {
+  local directory="$1" probe owner identity old_umask
+  [ -d "$directory" ] || return 2
+  old_umask="$(umask)"
+  umask 077
+  probe="$(mktemp "$directory/.owner-process.XXXXXX")" || { umask "$old_umask"; return 2; }
+  umask "$old_umask"
+  if ! _uberdev_semaphore_write_process_identity lease "$probe"; then
+    rm -f "$probe" 2>/dev/null || true
+    return 2
+  fi
+  read -r owner <"$probe" || owner=''
+  identity="$(sed -n '2p' "$probe" 2>/dev/null || true)"
+  rm -f "$probe" 2>/dev/null || return 2
+  case "$owner" in ''|*[!0-9]*) return 2 ;; esac
+  [ "${identity%%|*}" = "$owner" ] || return 2
+  printf '%s\t%s\n' "$owner" "$identity"
 }
 
 _uberdev_agent_process_identity_matches() {
@@ -1055,7 +1079,7 @@ elif terminal == "timeout_intent_recovery_failed": error="timeout_intent_recover
 elif terminal.startswith("blocked:"): error="provider_cancel_failed"
 elif terminal.startswith("launch:"): error="launch_finalize_failed"
 else: error="terminal_finalize_failed"
-allowed_reasons={"provider_stop_failed","provider_session_resolution_failed","provider_cancel_probe_failed","provider_cancel_unconfirmed","timeout_intent_invalid","timeout_intent_identity_unavailable","timeout_intent_cleanup_failed","timeout_partial_result_cleanup_failed","lease_acquire_invalid_input","lease_acquire_runtime_state_failed","lease_acquire_mutex_failed","lease_acquire_reconcile_failed","lease_acquire_count_failed","lease_acquire_duplicate_check_failed","lease_acquire_allocate_failed","lease_acquire_owner_failed","lease_acquire_publish_failed","lease_acquire_identity_failed","lease_acquire_rollback_failed","lease_acquire_mutex_release_failed","lease_handle_rollback_failed"}
+allowed_reasons={"provider_stop_failed","provider_session_resolution_failed","provider_cancel_probe_failed","provider_cancel_unconfirmed","timeout_intent_invalid","timeout_intent_identity_unavailable","timeout_intent_cleanup_failed","timeout_partial_result_cleanup_failed","owner_process_identity_unavailable","lease_acquire_invalid_input","lease_acquire_runtime_state_failed","lease_acquire_mutex_failed","lease_acquire_reconcile_failed","lease_acquire_count_failed","lease_acquire_duplicate_check_failed","lease_acquire_allocate_failed","lease_acquire_owner_failed","lease_acquire_publish_failed","lease_acquire_identity_failed","lease_acquire_rollback_failed","lease_acquire_mutex_release_failed","lease_handle_rollback_failed"}
 payload={"schema_version":1,"error":error,"backend":backend,"handle":handle,"terminal":terminal,"attempts":int(attempts)}
 if reason: payload["reason"]=reason if reason in allowed_reasons else "supervisory_failure"
 fd,tmp=tempfile.mkstemp(prefix=".watcher-error.",dir=parent)
@@ -1086,6 +1110,13 @@ _uberdev_agent_persist_watcher_error_retry() {
     attempt=$((attempt + 1))
   done
   return 2
+}
+
+_uberdev_agent_fail_owner_capture() {
+  local status_file="$1" fallback_file="$2" backend="$3"
+  _uberdev_agent_publish_status "$status_file" "$backend" '' failed 70 replace || return 2
+  _uberdev_agent_persist_watcher_error_retry "$status_file" "$fallback_file" \
+    "$backend" '' launch:owner_process_identity 1 owner_process_identity_unavailable
 }
 
 _uberdev_agent_timeout_intent_probe() {
@@ -1496,7 +1527,8 @@ uberdev_agent_dispatch() {
   local request_json="${1:-}" prompt_requested="${2:-}" result_requested="${3:-}" status_requested="${4:-}"
   local run_dir run_id repository_id backend workflow issue_num tier capacity timeout_s workspace_mode workspace_dir
   local prompt_file result_file status_file state_dir manifest decision lease lease_record lease_identity registered_identity event_json rc handle lease_handle terminal_event paths_json lease_failure_reason cleanup_identity
-  local context_file context_sha context_validation persisted_decision supplied_root supplied_parent context_run_id parent_run_id agent_id process_identity lease_generation identity_probe_rc
+  local context_file context_sha context_validation persisted_decision supplied_root supplied_parent context_run_id parent_run_id agent_id process_identity lease_generation identity_probe_rc owner_record
+  local _UBERDEV_AGENT_OWNER_PID='' _UBERDEV_AGENT_OWNER_IDENTITY=''
   [ "$#" -eq 4 ] || { _uberdev_agent_error 'expected REQUEST_JSON PROMPT_FILE RESULT_FILE STATUS_FILE'; return 2; }
   if [ -n "${ZSH_VERSION:-}" ]; then
     setopt localoptions nullglob || return 2
@@ -1570,11 +1602,26 @@ uberdev_agent_dispatch() {
   }
   manifest="$state_dir/agent-lifecycle.jsonl"
 
+  owner_record="$(_uberdev_agent_capture_owner_process_record "$state_dir")" || {
+    _uberdev_agent_fail_owner_capture "$status_file" "$state_dir/$run_id.watcher-error.json" "$backend" || true
+    _uberdev_agent_error 'owner_process_identity_unavailable'; return 2;
+  }
+  case "$owner_record" in
+    *$'\t'*)
+      _UBERDEV_AGENT_OWNER_PID="${owner_record%%$'\t'*}"
+      _UBERDEV_AGENT_OWNER_IDENTITY="${owner_record#*$'\t'}"
+      ;;
+    *)
+      _uberdev_agent_fail_owner_capture "$status_file" "$state_dir/$run_id.watcher-error.json" "$backend" || true
+      _uberdev_agent_error 'owner_process_identity_unavailable'; return 2
+      ;;
+  esac
+
   event_json="$(_uberdev_agent_event_json route_decided "$request_json" "$decision")" || return 2
   _uberdev_agent_append_event "$manifest" "$event_json" || return 2
 
   lease_record=''
-  if UBERDEV_SEMAPHORE_OWNER_PID=$$ PYTHONPATH= PYTHONHOME= uberdev_semaphore_acquire \
+  if UBERDEV_SEMAPHORE_OWNER_PID="$_UBERDEV_AGENT_OWNER_PID" PYTHONPATH= PYTHONHOME= uberdev_semaphore_acquire \
       "$state_dir" "$repository_id" "$backend" "$capacity" "$run_id" "$timeout_s" \
       exact-identity lease_record; then
     :

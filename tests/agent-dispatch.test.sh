@@ -299,11 +299,8 @@ value=json.loads(sys.argv[1]); value.update(run_dir=sys.argv[2],run_id='owner-id
 print(json.dumps(value,separators=(',',':')),end='')
 PY
 )"
-eval "$(declare -f _uberdev_agent_process_identity | sed '1s/_uberdev_agent_process_identity/_real_owner_process_identity/')"
-_uberdev_agent_process_identity() {
-  [ "$1" != "$$" ] || return 2
-  _real_owner_process_identity "$@"
-}
+eval "$(declare -f _uberdev_agent_capture_owner_process_record | sed '1s/_uberdev_agent_capture_owner_process_record/_real_owner_process_record/')"
+_uberdev_agent_capture_owner_process_record() { return 2; }
 owner_provider_before=0
 [ ! -r "$TMP/provider-count" ] || read -r owner_provider_before <"$TMP/provider-count"
 set +e
@@ -313,11 +310,15 @@ owner_identity_rc=$?
 set -e
 owner_provider_after=0
 [ ! -r "$TMP/provider-count" ] || read -r owner_provider_after <"$TMP/provider-count"
-eval "$(declare -f _real_owner_process_identity | sed '1s/_real_owner_process_identity/_uberdev_agent_process_identity/')"
+eval "$(declare -f _real_owner_process_record | sed '1s/_real_owner_process_record/_uberdev_agent_capture_owner_process_record/')"
 [ "$owner_identity_rc" -eq 2 ]
 [ "$owner_provider_after" -eq "$owner_provider_before" ]
 grep -q '"state":"failed"' "$OWNER_IDENTITY_RUN/status.json"
-! find "$OWNER_IDENTITY_RUN/.agent-state-$(id -u)/semaphore-v1" -name '*.lease' -type f | grep -q .
+grep -q '"exit_code":70' "$OWNER_IDENTITY_RUN/status.json"
+grep -q '"reason":"owner_process_identity_unavailable"' "$OWNER_IDENTITY_RUN/status.json.watcher-error.json"
+! grep -q '"event":"agent_started"' "$OWNER_IDENTITY_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" 2>/dev/null
+[ ! -d "$OWNER_IDENTITY_RUN/.agent-state-$(id -u)/semaphore-v1" ] \
+  || ! find "$OWNER_IDENTITY_RUN/.agent-state-$(id -u)/semaphore-v1" -name '*.lease' -type f | grep -q .
 
 # Detached review fanout cannot rely on an interactive Claude permission
 # prompt. The adapter must reject manual mode before capacity or provider state
@@ -373,8 +374,8 @@ do
   fi
 done
 
-grep -Fq 'UBERDEV_SEMAPHORE_OWNER_PID=$$ PYTHONPATH= PYTHONHOME= uberdev_semaphore_acquire' "$LIB" || {
-  echo "agent-dispatch: known shell owner is not supplied to semaphore acquisition" >&2
+grep -Fq 'UBERDEV_SEMAPHORE_OWNER_PID="$_UBERDEV_AGENT_OWNER_PID" PYTHONPATH= PYTHONHOME= uberdev_semaphore_acquire' "$LIB" || {
+  echo "agent-dispatch: captured native owner is not supplied to semaphore acquisition" >&2
   exit 1
 }
 
@@ -412,7 +413,7 @@ PY
 uberdev_agent_dispatch "$REQUEST" \
   "$TMP/run/prompt.txt" "$TMP/run/result.md" "$TMP/run/status.json"
 
-python3 - "$TMP/backend.json" "$STATE_DIR/agent-lifecycle.jsonl" "$TMP/run/status.json" "$$" <<'PY'
+python3 - "$TMP/backend.json" "$STATE_DIR/agent-lifecycle.jsonl" "$TMP/run/status.json" "$STATE_DIR" <<'PY'
 import json, os, pathlib, stat, sys
 capture = json.loads(pathlib.Path(sys.argv[1]).read_text())
 decision = capture["decision"]
@@ -425,10 +426,16 @@ assert decision["service_tier"] == "default", decision
 assert decision["sandbox"] == "read-only", decision
 events = [json.loads(line) for line in pathlib.Path(sys.argv[2]).read_text().splitlines()]
 assert [event["event"] for event in events] == ["route_decided", "agent_started"], events
+assert {event["schema_version"] for event in events} == {2}, events
 assert events[0]["effective_model"] == "gpt-5.6-sol"
 assert "backend_handle" not in events[1]
 assert events[1]["status_path"] == str(pathlib.Path(sys.argv[3]).resolve())
-assert events[1]["owner_pid"] == int(sys.argv[4]), events[1]
+assert events[1]["owner_process_identity"].split("|",1)[0] == str(events[1]["owner_pid"]), events[1]
+leases=list(pathlib.Path(sys.argv[4]).glob("semaphore-v1/*.scope/*.lease"))
+assert len(leases)==1,leases
+lease=dict(line.split("=",1) for line in leases[0].read_text().splitlines())
+assert int(lease["owner_pid"])==events[1]["owner_pid"]
+assert lease["owner_identity"]==events[1]["owner_process_identity"]
 if os.name != "nt":
     assert stat.S_IMODE(pathlib.Path(sys.argv[3]).stat().st_mode) == 0o600
 PY
@@ -1314,6 +1321,24 @@ assert [row.get('event') for row in events]==['route_decided','agent_started','f
 assert events[-1].get('error_class')=='provider_execution_failed',events[-1]
 PY
 ! grep -R -q 'run_id=adapter-wrapper-death' "$ORPHAN_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
+
+# The same orphan-group proof remains sufficient when a surviving provider
+# ignores TERM: cancellation revalidates the absent leader plus owned session
+# before escalating to KILL, then proves the group is gone.
+KILL_RUN="$TMP/wrapper-death-term-resistant"
+mkdir -p "$KILL_RUN"
+nohup python3 -I -B -c 'import os,sys; os.setsid(); os.execvp("bash",["bash","-c","trap \"\" HUP; (trap \"\" TERM HUP; while :; do sleep 1; done) & echo $! > \"$1/child.pid\"; while [ ! -e \"$1/release\" ]; do sleep .05; done; exit 0","_",sys.argv[1]])' "$KILL_RUN" >/dev/null 2>&1 &
+KILL_LEADER=$!
+_uberdev_dispatch_wait_owned_session "$KILL_LEADER"
+KILL_IDENTITY="$(_uberdev_agent_process_identity "$KILL_LEADER")"
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$KILL_RUN/child.pid" ] && break; sleep .1; done
+KILL_CHILD="$(cat "$KILL_RUN/child.pid")"
+: >"$KILL_RUN/release"
+wait "$KILL_LEADER"
+_uberdev_dispatch_group_live "$KILL_LEADER"
+_uberdev_dispatch_cancel_backend codex "$KILL_LEADER" "$KILL_IDENTITY"
+! _uberdev_dispatch_group_live "$KILL_LEADER"
+! kill -0 "$KILL_CHILD" 2>/dev/null
 
 # Before provider launch, exact-identity registration failure must reconcile a
 # terminal and release only the generation acquired for this request.

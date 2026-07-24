@@ -222,6 +222,49 @@ echo "== run manifest: Windows reconciliation uses a non-signaling native probe 
 
 if python3 -I -B -c 'import os; raise SystemExit(0 if os.name=="nt" else 1)'; then
   WINDOWS_PROBE_TMP="$(mktemp -d)"
+  WINDOWS_BRIDGE_ROOT="$(cygpath -m "$WINDOWS_PROBE_TMP")"
+  if (
+    . "$REPO_ROOT/plugins/uberdev/lib/child-dispatch.sh"
+    mkdir -p "$WINDOWS_BRIDGE_ROOT/state"
+    native_record="$(_uberdev_agent_capture_owner_process_record "$WINDOWS_BRIDGE_ROOT")"
+    native_pid="${native_record%%$'\t'*}"
+    native_identity="${native_record#*$'\t'}"
+    lease_record=''
+    UBERDEV_SEMAPHORE_OWNER_PID="$native_pid" uberdev_semaphore_acquire \
+      "$WINDOWS_BRIDGE_ROOT/state" windows-native-repo codex 1 windows-native-owner 30 \
+      exact-identity lease_record
+    lease="${lease_record%%$'\t'*}"
+    _UBERDEV_AGENT_OWNER_PID="$native_pid"
+    _UBERDEV_AGENT_OWNER_IDENTITY="$native_identity"
+    request='{"run_id":"windows-native-owner","backend":"codex","timeout_s":30}'
+    decision='{"routing_mode":"inherit","effective_policy":"inherit"}'
+    event="$(_uberdev_agent_event_json agent_started "$request" "$decision" '' "$WINDOWS_BRIDGE_ROOT/status.json")"
+    generation=1234567890abcdef1234567890abcdef
+    printf '{"backend":"codex","state":"running","exit_code":null,"pid":"321","lease_generation":"%s"}\n' \
+      "$generation" >"$WINDOWS_BRIDGE_ROOT/status.json"
+    snapshot="$(shasum -a 256 "$WINDOWS_BRIDGE_ROOT/status.json" | awk '{print $1}')"
+    _uberdev_child_timeout_intent_write "$WINDOWS_BRIDGE_ROOT/status.json" 321 "$generation" "$snapshot"
+    python3 -I -B - "$native_pid" "$native_identity" "$lease" "$event" \
+      "$WINDOWS_BRIDGE_ROOT/status.json.timeout-intent-v1" \
+      "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" <<'PY'
+import json,pathlib,subprocess,sys
+pid,identity,lease_path,event_raw,intent_path,tool=sys.argv[1:]
+lease=dict(line.split('=',1) for line in pathlib.Path(lease_path).read_text().splitlines())
+event=json.loads(event_raw); intent=json.loads(pathlib.Path(intent_path).read_text())
+assert lease['owner_pid']==pid and lease['owner_identity']==identity
+assert str(event['owner_pid'])==pid and event['owner_process_identity']==identity
+assert str(intent['waiter_pid'])==pid and intent['waiter_process_identity']==identity
+probe=subprocess.run([sys.executable,'-I','-B',tool,'process-identity','--pid',pid],capture_output=True,text=True)
+assert probe.returncode==0 and probe.stdout==identity
+PY
+    uberdev_semaphore_release "$lease"
+  ); then
+    echo "  PASS  native Windows owner bridge binds lease, manifest, and timeout waiter without signaling"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  native Windows owner bridge did not preserve one live native identity"
+    FAIL=$((FAIL + 1))
+  fi
   if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" "$WINDOWS_PROBE_TMP" <<'PY'
 import importlib.util,pathlib,subprocess,sys,time
 tool,tmp=sys.argv[1:]
@@ -233,8 +276,8 @@ try:
  status,identity=module._process_identity(child.pid)
  assert status=='captured' and identity
  manifest=str(pathlib.Path(tmp)/'events.jsonl')
- module.append_event(manifest,{'schema_version':1,'event':'route_decided','timestamp':'2026-07-10T00:00:00Z','run_id':'windows-native-probe','backend':'codex'})
- module.append_event(manifest,{'schema_version':1,'event':'agent_started','timestamp':'2026-07-10T00:00:01Z','run_id':'windows-native-probe','backend':'codex','owner_pid':child.pid,'owner_process_identity':identity,'backend_handle':child.pid})
+ module.append_event(manifest,{'schema_version':2,'event':'route_decided','timestamp':'2026-07-10T00:00:00Z','run_id':'windows-native-probe','backend':'codex'})
+ module.append_event(manifest,{'schema_version':2,'event':'agent_started','timestamp':'2026-07-10T00:00:01Z','run_id':'windows-native-probe','backend':'codex','owner_pid':child.pid,'owner_process_identity':identity,'backend_handle':child.pid})
  result=module.reconcile_manifest(manifest)
  assert result=={'abandoned':0,'open':1,'status':'ok'},result
  assert child.poll() is None,'liveness reconciliation terminated the process'

@@ -140,13 +140,12 @@ _uberdev_semaphore_capture_lease_owner() {
   local scope="$1" probe old_umask owner identity
   if [ -n "${UBERDEV_SEMAPHORE_OWNER_PID:-}" ]; then
     owner="$UBERDEV_SEMAPHORE_OWNER_PID"
-    if ! _uberdev_semaphore_is_positive_integer "$owner" \
-        || ! _uberdev_semaphore_pid_live "$owner"; then
-      _uberdev_semaphore_error 'UBERDEV_SEMAPHORE_OWNER_PID is not a live process'
+    if ! _uberdev_semaphore_is_positive_integer "$owner"; then
+      _uberdev_semaphore_error 'UBERDEV_SEMAPHORE_OWNER_PID is invalid'
       return 2
     fi
     identity="$(_uberdev_semaphore_process_identity "$owner")" || {
-      _uberdev_semaphore_error 'UBERDEV_SEMAPHORE_OWNER_PID identity is unavailable'
+      _uberdev_semaphore_error 'UBERDEV_SEMAPHORE_OWNER_PID is absent or its identity is unavailable'
       return 2
     }
     _UBERDEV_SEMAPHORE_LEASE_OWNER_PID="$owner"
