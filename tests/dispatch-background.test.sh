@@ -66,12 +66,26 @@ echo "== Positive: status-file writes + audit payload =="
 assert_grep "$DISPATCH_LIB" \
   'DISPATCH_RC' \
   "background backend sets the DISPATCH_RC per-issue result var"
-assert_grep "$DISPATCH_LIB" \
-  '"backend":"background"' \
-  "agent_dispatched payload carries backend=background"
-assert_grep "$DISPATCH_LIB" \
-  '"pid":' \
-  "agent_dispatched payload carries the detached pid"
+if python3 -I -B - "$DISPATCH_LIB" <<'PY'
+import json,re,sys
+source=open(sys.argv[1],encoding='utf-8').read()
+body=source.split('_uberdev_dispatch_background() {',1)[1].split('\n}',1)[0]
+match=re.search(r'_uberdev_dispatch_audit agent_dispatched\s+\\\n\s+"((?:\\.|[^"\\])*)"',body)
+assert match
+template=bytes(match.group(1),'utf-8').decode('unicode_escape')
+for token,value in {
+    '$ISSUE_NUM':'90','$TIER':'small','$DISPATCH_ID':'12345','$LOG_FILE':'dispatch.log'
+}.items(): template=template.replace(token,value)
+payload=json.loads(template)
+assert payload['backend']=='background'
+assert payload['pid']=='12345'
+PY
+then
+  echo "  PASS  agent_dispatched payload carries backend=background"; PASS=$((PASS + 1))
+  echo "  PASS  agent_dispatched payload carries the detached pid"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  agent_dispatched payload is not valid semantic background/PID JSON"; FAIL=$((FAIL + 2))
+fi
 assert_grep "$DISPATCH_LIB" \
   'solve-bg-status-|status' \
   "background backend writes a per-issue status file"
@@ -164,8 +178,8 @@ else
 fi
 detached_resolver_count="$(grep -Fc 'nohup "${PYTHON_LAUNCH[@]}"' "$DISPATCH_LIB")"
 if [ "$detached_resolver_count" -eq 2 ] \
-    && grep -Fq 'PYTHON_EXE="$1"; PYTHON_PREFIX="$2"; shift 2' "$DISPATCH_LIB" \
-    && grep -Fq '"$PYTHON_EXE" "$PYTHON_PREFIX" "$@"' "$DISPATCH_LIB"; then
+    && grep -Fq 'PYTHON_EXE="$1"; PYTHON_PREFIX="$2"; DISPATCH_LIB="$3"; shift 3' "$DISPATCH_LIB" \
+    && grep -Fq 'if [ -n "$PYTHON_PREFIX" ]; then "$PYTHON_EXE" "$PYTHON_PREFIX" "$@"; else "$PYTHON_EXE" "$@"; fi' "$DISPATCH_LIB"; then
   echo "  PASS  detached and nested dispatch preserve the py -3 argv prefix"; PASS=$((PASS + 1))
 else
   echo "  FAIL  detached and nested dispatch preserve the py -3 argv prefix"; FAIL=$((FAIL + 1))
@@ -258,6 +272,16 @@ IMMEDIATE_OUT="$(
       printf "mismatch issue=%s outcome=%s check=%s rc=%s dispatch_id=%q status=%q result=%q mode=%q partials=%q child_log=%q\n" \
         "$issue" "$outcome" "$1" "$rc" "${DISPATCH_ID:-}" "$status" "$result" "$mode" "$partials" "$child_log"
     }
+    status_contract_matches() {
+      _uberdev_dispatch_python -I -B -c '\''import json,sys
+s=json.loads(sys.argv[1]); issue=int(sys.argv[2]); outcome=sys.argv[3]
+expected={"issue":issue,"tier":"small","backend":"background","state":outcome,"exit_code":0 if outcome=="completed" else 29,"pid":sys.argv[4]}
+raise SystemExit(0 if s==expected else 1)'\'' "$status" "$issue" "$outcome" "$DISPATCH_ID"
+    }
+    status_pid_matches() {
+      _uberdev_dispatch_python -I -B -c '\''import json,sys; raise SystemExit(0 if json.loads(sys.argv[1]).get("pid")==sys.argv[2] else 1)'\'' \
+        "$status" "$DISPATCH_ID"
+    }
     probe_mode() {
       local candidate
       candidate="$(stat -c %a "$1" 2>/dev/null)"
@@ -280,8 +304,9 @@ IMMEDIATE_OUT="$(
       mode="$(probe_mode "$UBERDEV_AGENT_RESULT_FILE")"
       partials="$(find "$UBERDEV_TMPDIR" -maxdepth 1 \( -name "result-$issue.md.partial.*" -o -name "result-$issue.md.tmp.*" \) -print)"
       child_log="$(cat "$UBERDEV_TMPDIR/solve-bg-stdout-$issue.log" 2>/dev/null)"
-      case "$outcome:$rc:$DISPATCH_ID:$status" in
-        completed:0:*:*\"state\":\"completed\"*\"exit_code\":0*)
+      if [ "$rc" -eq 0 ] && [ -n "${DISPATCH_ID:-}" ] && status_contract_matches; then
+        case "$outcome" in
+        completed)
           [ "$result" = "immediate completed result" ] || record_failure completed_result
           # Git Bash reports synthesized POSIX bits over native Windows ACLs;
           # require a validated octal probe there, and exact 0600 on POSIX.
@@ -290,14 +315,16 @@ IMMEDIATE_OUT="$(
             *) [ "$mode" = 600 ] || record_failure completed_result_mode ;;
           esac
           ;;
-        failed:0:*:*\"state\":\"failed\"*\"exit_code\":29*)
+        failed)
           [ ! -s "$UBERDEV_AGENT_RESULT_FILE" ] || record_failure failed_result_empty
           ;;
-        *) record_failure terminal_contract ;;
-      esac
+        esac
+      else
+        record_failure terminal_contract
+      fi
       [ -z "$partials" ] || record_failure partial_cleanup
       [ -n "${DISPATCH_ID:-}" ] || record_failure dispatch_id
-      [[ "$status" == *\"pid\":\"$DISPATCH_ID\"* ]] || record_failure terminal_pid_identity
+      status_pid_matches || record_failure terminal_pid_identity
     done
     for fixture_pid in "${fixture_pids[@]}"; do
       wait "$fixture_pid" 2>/dev/null || true
@@ -357,10 +384,20 @@ DELAYED_OUT="$(
 )"
 delayed_pid="$(printf '%s\n' "$DELAYED_OUT" | sed -n 's/^pid=//p')"
 if [ -n "$delayed_pid" ] \
-    && printf '%s\n' "$DELAYED_OUT" | grep -Fq 'rc=0' \
-    && printf '%s\n' "$DELAYED_OUT" | grep -Fq "running={\"issue\":90,\"tier\":\"small\",\"backend\":\"background\",\"state\":\"running\",\"exit_code\":null,\"pid\":\"$delayed_pid\"}" \
-    && printf '%s\n' "$DELAYED_OUT" | grep -Fq "terminal={\"issue\":90,\"tier\":\"small\",\"backend\":\"background\",\"state\":\"completed\",\"exit_code\":0,\"pid\":\"$delayed_pid\"}" \
-    && printf '%s\n' "$DELAYED_OUT" | grep -Fq 'result=delayed background result'; then
+    && python3 -I -B - "$DELAYED_OUT" "$delayed_pid" <<'PY'
+import json,sys
+lines=dict(line.split('=',1) for line in sys.argv[1].splitlines())
+pid=sys.argv[2]
+assert lines['rc']=='0' and lines['pid']==pid
+assert json.loads(lines['running'])=={
+    'issue':90,'tier':'small','backend':'background','state':'running','exit_code':None,'pid':pid,
+}
+assert json.loads(lines['terminal'])=={
+    'issue':90,'tier':'small','backend':'background','state':'completed','exit_code':0,'pid':pid,
+}
+assert lines['result']=='delayed background result'
+PY
+then
   echo "  PASS  delayed background running and terminal receipts retain the dispatch PID"; PASS=$((PASS + 1))
 else
   echo "  FAIL  delayed background running and terminal receipts retain the dispatch PID: $DELAYED_OUT"; FAIL=$((FAIL + 1))
