@@ -278,10 +278,10 @@ assert_grep "$REVIEW_PR" \
   'RUN_ID="\$\(date \+%Y%m%d-%H%M%S\)-\$\(git rev-parse --short HEAD\)"' \
   "R8.4 — Phase 1 mints its own RUN_ID per the canonical /review-pr Run-ID format"
 
-# R8.5 — fallback prose: missing/empty artifact → log warning + continue to Phase 2
+# R8.5 — missing reviewer evidence is supervisory failure, never an empty review
 assert_grep "$REVIEW_PR" \
-  '[Mm]issing or empty.*[Pp]hase 2|all [0-9]+ reviewers returned .BLOCKED.|continue to Phase 2 with' \
-  "R8.5 — Phase 1 falls back to Phase 2 with zero auto-applied fixes when artifact is missing/empty"
+  '[Mm]issing or empty.*terminate|terminate .review-pr. immediately|Do NOT dispatch the fixer, enter Phase 2' \
+  "R8.5 — Phase 1 fails closed before fixer/Phase 2 when the aggregate is missing or empty"
 
 # R8.6 — separate-commit invariant preserved (Phase 1 fix: vs Phase 2 refactor:)
 assert_grep "$REVIEW_PR" \

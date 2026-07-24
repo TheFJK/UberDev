@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Issue #335: the generated Codex review entrypoint must preserve its provider
-# provenance even when CODEX_HOME is absent, without overriding an explicit
-# provider selection. The canonical Claude command remains provider-neutral.
+# provenance even when CODEX_HOME is absent, while rejecting explicit
+# providers that cannot satisfy the governed result contract. The canonical
+# Claude command remains provider-neutral.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONVERTER="$ROOT/codex/tools/convert-commands.py"
 SOURCE="$ROOT/plugins/uberdev/commands/review-pr.md"
+SIMPLIFY_SOURCE="$ROOT/plugins/uberdev/commands/simplify.md"
 TMP="$(mktemp -d)"
 TMP="$(cd "$TMP" && pwd -P)"
 trap 'rm -rf "$TMP"' EXIT
@@ -44,6 +46,12 @@ awk '
   active{print}
 ' "$SOURCE" >"$TMP/source-setup.sh"
 test -s "$TMP/source-setup.sh"
+awk '
+  /uberdev-executable setup=simplify/{active=1; next}
+  active && /^```/{exit}
+  active{print}
+' "$SIMPLIFY_SOURCE" >"$TMP/simplify-setup.sh"
+test -s "$TMP/simplify-setup.sh"
 
 mkdir -p "$TMP/bin" "$TMP/home" "$TMP/repo"
 git -C "$TMP/repo" init -q
@@ -92,22 +100,17 @@ assert run_dir==sys.argv[2],(run_dir,sys.argv[2])
 assert value == {"requested": "codex", "backend": "codex", "model": "", "timeout": "", "permissions": "", "effort": ""}, value
 PY
 
-# An explicit operator selection remains higher precedence than entrypoint
-# provenance and is the exact backend persisted into the immutable context.
-override_result="$(run_setup "$TMP/runtime-override" claude-bg)"
-python3 -I -B - "$override_result" <<'PY'
-import json, sys
-value = json.loads(sys.argv[1])
-assert value["requested"] == value["backend"] == "claude-bg", value
-assert value["run_dir"], value
-assert value["model"] and value["timeout"], value
-assert value["permissions"] == "--dangerously-skip-permissions --permission-mode bypassPermissions", value
-assert value["effort"] == "--effort max", value
-PY
+# claude-bg cannot publish the required result.md artifact for governed review
+# children, so explicit selection now fails during workflow preflight.
+if run_setup "$TMP/runtime-override" claude-bg >"$TMP/claude-override.out" 2>"$TMP/claude-override.err"; then
+  echo "standalone review accepted claude-bg without a result artifact" >&2
+  exit 1
+fi
+grep -q 'does not export a supervised result artifact' "$TMP/claude-override.err"
 
 # Canonical standalone review is provider-neutral, but auto resolution is
-# workflow-aware before carrier creation. A usable macOS WezTerm must not be
-# persisted when review-pr supports only Codex or claude-bg repair children.
+# workflow-aware before carrier creation. A usable macOS WezTerm or ambient
+# Claude install must not displace the result-producing Codex backend.
 source_auto_result="$(
   env -i HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
     PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$TMP/repo" \
@@ -117,10 +120,51 @@ source_auto_result="$(
     bash -c 'mkdir -p "$3"; cd "$2"; . "$1"; python3 -I -B -c "import json,os; request=json.loads(os.environ[\"UBERDEV_AGENT_PREPARED_REQUEST_JSON\"]); print(request[\"backend\"])"' \
       _ "$TMP/source-setup.sh" "$TMP/repo" "$TMP/runtime-source-auto"
 )"
-[ "$source_auto_result" = claude-bg ] || {
+[ "$source_auto_result" = codex ] || {
   echo "standalone review auto-selected unsupported backend: $source_auto_result" >&2
   exit 1
 }
+
+# A new standalone carrier re-resolves from the requested provider even when a
+# reused shell exports a conflicting backend from an earlier invocation.
+stale_result="$(
+  env -i HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
+    PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$TMP/repo" \
+    UBERDEV_TMPDIR="$TMP/runtime-stale" UBERDEV_DISPATCH_BACKEND_REQUESTED=codex \
+    UBERDEV_RESOLVED_BACKEND=claude-bg \
+    RUN_ID=20260716-000004-abcdef0 PR_NUMBER=335 ARGUMENTS='' \
+    bash -c 'mkdir -p "$3"; cd "$2"; . "$1"; python3 -I -B -c "import json,os; print(json.loads(os.environ[\"UBERDEV_AGENT_PREPARED_REQUEST_JSON\"])[\"backend\"])"' \
+      _ "$TMP/source-setup.sh" "$TMP/repo" "$TMP/runtime-stale"
+)"
+[ "$stale_result" = codex ]
+
+# Standalone simplify uses the same workflow-aware boundary. This covers the
+# complete setup-to-fixer handoff contract: auto/stale routing resolves Codex,
+# and the phase-two fixer is prepared in the caller workspace.
+simplify_fixer_result="$(
+  env -i HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
+    PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$TMP/repo" \
+    UBERDEV_TMPDIR="$TMP/runtime-simplify" UBERDEV_DISPATCH_BACKEND_REQUESTED=auto \
+    UBERDEV_RESOLVED_BACKEND=background \
+    RUN_ID=20260716-000005-abcdef0 PR_NUMBER=0 ARGUMENTS='' \
+    bash -c '
+      mkdir -p "$3"; cd "$2"; . "$1"
+      printf "<external-untrusted-input source=\"simplify-aggregate\">\n</external-untrusted-input>\n" >"$AGG_PATH"
+      printf "HEAD^..HEAD\n" >"$COMMIT_RANGE_PATH"
+      : >"$PHASE2_DISPOSITION_PATH"
+      json_string() { python3 -I -B -c '\''import json,sys; print(json.dumps(sys.argv[1]),end="")'\'' "$1"; }
+      inputs="$(uberdev_child_inputs_build review_pr.fix.phase2 \
+        findings_path "$(json_string "$AGG_PATH")" \
+        commit_range_path "$(json_string "$COMMIT_RANGE_PATH")" \
+        working_dir "$(json_string "$WORKTREE_ROOT")" \
+        pr_number 0 \
+        disposition_path "$(json_string "$PHASE2_DISPOSITION_PATH")")"
+      uberdev_create_child_handoff review_pr.fix.phase2 simplify-fixer-iter1-attempt01 "$inputs" null >/dev/null
+      prepared="$(_uberdev_child_prepare review_pr.fix.phase2 "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch)"
+      python3 -I -B -c '\''import json,sys; v=json.loads(sys.argv[1]); print(v["request"]["backend"]+":"+v["request"]["workspace_mode"]+":"+v["request"]["workspace_dir"],end="")'\'' "$prepared"
+    ' _ "$TMP/simplify-setup.sh" "$TMP/repo" "$TMP/runtime-simplify"
+)"
+[ "$simplify_fixer_result" = "codex:caller:$TMP/repo" ]
 
 # With UBERDEV_TMPDIR absent, standalone review must select the secure runtime
 # helper default beneath TMPDIR instead of falling back to an ambient /tmp path.

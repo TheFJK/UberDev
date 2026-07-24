@@ -183,6 +183,13 @@ awk '/^post_review_roster_complete\(\) \{/{active=1} active{print} active && /^\
   "$POST" >"$TMP/roster-runtime.sh"
 awk '/^post_review_require_complete_wave\(\) \{/{active=1} active{print} active && /^\}/{exit}' \
   "$POST" >"$TMP/aggregate-gate-runtime.sh"
+awk '/^post_review_run_capped\(\) \{/{active=1} active{print} active && /^\}/{exit}' \
+  "$POST" >"$TMP/capped-fanout-runtime.sh"
+awk '
+  /^post_review_require_complete_wave\(\) \{/{active=1}
+  active && /^```/{exit}
+  active{print}
+' "$POST" >"$TMP/aggregate-gate-production.sh"
 . "$TMP/roster-runtime.sh"
 . "$TMP/aggregate-gate-runtime.sh"
 ROSTER_EDGES=(
@@ -220,6 +227,45 @@ roster_must_block_aggregation "$TMP/roster-unknown.records" 6
 head -1 "$ROSTER_VALID" >"$TMP/roster-truncated-repair.records"
 roster_must_block_aggregation "$TMP/roster-truncated-repair.records" 2
 
+# The configured cap is enforced by the production wave runner, not merely
+# mentioned in prose. Cap one and cap two both wait before the next launch
+# wave, and preserve global result indices for later format repair.
+(
+  . "$TMP/capped-fanout-runtime.sh"
+  REVIEW_EDGES=(one two three four five six)
+  post_review_roster_complete() { [ "$(wc -l <"$1" | tr -d ' ')" -eq "$2" ]; }
+  post_review_fanout() {
+    local count
+    count="$(wc -l <"$1" | tr -d ' ')"
+    printf 'dispatch:%s\n' "$count" >>"$CAP_EVENTS"
+    cp "$1" "$2"; cp "$1" "$3"
+  }
+  post_review_wait_all() {
+    local count
+    count="$(wc -l <"$1" | tr -d ' ')"
+    printf 'wait:%s:%s\n' "$count" "${4:-0}" >>"$CAP_EVENTS"
+    : >"$3"
+    POST_REVIEW_VALID_COUNT="$count"
+    POST_REVIEW_FORMAT_FAILURE_COUNT=0
+    POST_REVIEW_INFRA_FAILURE=0
+  }
+  CAP_RECORDS="$TMP/cap.records"
+  for edge in "${REVIEW_EDGES[@]}"; do printf '{"edge":"%s"}\n' "$edge"; done >"$CAP_RECORDS"
+  for cap in 1 2; do
+    CAP_EVENTS="$TMP/cap-$cap.events"; : >"$CAP_EVENTS"
+    post_review_run_capped "$CAP_RECORDS" 6 "$cap" "$TMP/cap-$cap.descriptors" \
+      "$TMP/cap-$cap.launched" "$TMP/cap-$cap.failed" 10 "$TMP/cap-$cap"
+    if [ "$cap" -eq 1 ]; then
+      printf '%s\n' dispatch:1 wait:1:0 dispatch:1 wait:1:1 dispatch:1 wait:1:2 \
+        dispatch:1 wait:1:3 dispatch:1 wait:1:4 dispatch:1 wait:1:5 >"$TMP/cap.expected"
+    else
+      printf '%s\n' dispatch:2 wait:2:0 dispatch:2 wait:2:2 dispatch:2 wait:2:4 >"$TMP/cap.expected"
+    fi
+    cmp "$TMP/cap.expected" "$CAP_EVENTS"
+    [ "$POST_REVIEW_VALID_COUNT" -eq 6 ]
+  done
+)
+
 # Provider and exhausted format-repair failures must leave the canonical
 # aggregate absent, so neither the fixer nor trust emission can run.
 aggregate_gate_must_block() {
@@ -241,6 +287,30 @@ aggregate_gate_must_block() {
 }
 aggregate_gate_must_block provider-failure 1 5 0
 aggregate_gate_must_block invalid-repair 1 5 0
+
+# Execute the production Step 4 fence, including its invocation. Incomplete
+# evidence must remove a pre-existing aggregate and return before any
+# downstream consumer marker can be reached.
+PRODUCTION_AGG="$TMP/production-gate/post-impl-review-final.md"
+PRODUCTION_DOWNSTREAM="$TMP/production-gate/downstream-reached"
+mkdir -p "$(dirname "$PRODUCTION_AGG")"; : >"$PRODUCTION_AGG"
+set +e
+(
+  set -e
+  AGG_PATH="$PRODUCTION_AGG"
+  REVIEW_WAVE_BLOCKED=1
+  REVIEW_INITIAL_VALID_COUNT=5
+  REVIEW_REPAIR_VALID_COUNT=0
+  REVIEW_EXPECTED_COUNT=6
+  . "$TMP/aggregate-gate-production.sh"
+  : >"$PRODUCTION_DOWNSTREAM"
+)
+PRODUCTION_GATE_RC=$?
+set -e
+[ "$PRODUCTION_GATE_RC" -eq 70 ]
+[ ! -e "$PRODUCTION_AGG" ]
+[ ! -e "$PRODUCTION_DOWNSTREAM" ]
+
 RESEARCH_DIR_ABS="$TMP/derived-aggregate"
 mkdir -p "$RESEARCH_DIR_ABS"
 : >"$RESEARCH_DIR_ABS/post-impl-review-final.md"
@@ -510,7 +580,7 @@ grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$REVIEW"
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$SIMPLIFY"
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$POST"
 grep -q 'REVIEW_WAIT_RC.*-ne 1' "$POST"
-[ "$(grep -c '! post_review_fanout' "$POST")" -eq 2 ]
+[ "$(grep -c 'post_review_run_capped "' "$POST")" -eq 2 ]
 grep -q 'post_review_roster_complete "$REVIEW_LAUNCHED" "$REVIEW_EXPECTED_COUNT"' "$POST"
 ! grep -En "wait_child .* 0|IFS='\\|'|additional_focus|brief_path|lens_index" "$REVIEW" "$SIMPLIFY" "$POST"
 ! grep -En 'format_repair' "$POST"

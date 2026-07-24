@@ -12,7 +12,7 @@ findings:
 confidence: low | medium | high
 ```
 
-Use `findings: []` when there are no findings. One or more blocker findings require `REVISIONS_REQUIRED` or `REJECT`; suggestions alone remain advisory and permit `APPROVE`.
+Use `findings: []` when there are no findings. Verdict and severity form a two-way invariant: one or more blocker findings require `REVISIONS_REQUIRED` or `REJECT`, while zero blocker findings require `APPROVE`. Suggestions alone are advisory and therefore MUST use `APPROVE`.
 
-Every result is validated by the canonical `uberdev_child_validate_phase1_review_result` boundary before aggregation. A malformed document or `APPROVE` result containing a blocker is routed through the existing single format-retry path and blocks green if the retry remains invalid.
+Every result is validated by the canonical `uberdev_child_validate_phase1_review_result` boundary before aggregation. A malformed document, `APPROVE` result containing a blocker, or red verdict without a blocker is routed through the existing single format-retry path and blocks green if the retry remains invalid.
 Absolute, Windows drive-qualified or drive-relative, traversal, dot-component, backslash, and control-character location paths are malformed.

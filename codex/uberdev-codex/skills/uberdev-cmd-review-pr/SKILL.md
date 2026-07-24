@@ -327,7 +327,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
    Compute Phase 1 inputs from the PR:
    - `changed_paths` — normalized, non-empty POSIX repository-relative paths from the same fixed local `git diff <merge-base>..<head> --name-only` snapshot used for the Phase 1 diff artifact and commit range. The GitHub server-side path list is not authoritative on entry or re-entry. Preserve deleted or otherwise missing entries as path strings; absolute paths, traversal, dot components, backslashes, control characters, and unsafe names are rejected by the `repo_path_array` handoff contract before provider launch.
-   - `commit_range` — `<merge-base>..HEAD`, where `<merge-base>` is the computed merge-base commit between the PR base ref and the reviewed head.
+   - `commit_range` — `<merge-base>..<reviewed-head-sha>`, where `<merge-base>` is the computed merge-base commit between the PR base ref and the captured reviewed head. Never substitute moving `HEAD` after this snapshot is captured.
    - `tier` — passed through from `$ARGUMENTS` if present (forwarded by `finish-branch`'s chain), else default `medium`.
 
    Recompute the review scope from one fixed local base-to-HEAD snapshot on
@@ -464,7 +464,7 @@ PY
 
    The agent applies edits + creates `fix:` / `refactor:` conventional commits autonomously, returning commit SHAs in its YAML. These are the **review-phase commits**, kept distinct from the Phase 2 simplify commit (separate-commit invariant — see `tests/review-pr.test.sh` for the assertion that locks this boundary). Capture the agent's `commits[].sha` for the final aggregation table's "Auto-applied" column. Surface every `findings_disposition` row where `disposition != APPLIED` in the aggregation table's "Advisory findings" column so they are never silently dropped.
 
-   **Fallback:** if the artifact file is missing or empty (e.g., all 6 reviewers returned `BLOCKED`, or the skill itself crashed), log a warning, do NOT dispatch the fixer (`code-fixer` would refuse with `refused-empty-aggregate` anyway), and proceed to Phase 2 with **zero auto-applied fixes**. Phase 1's verdict in that case is `BLOCKED`-equivalent for trust-signal purposes — Phase 1 contributes APPROVE only when the artifact exists, parses cleanly, the fixer returns `status: APPLIED` (or `NO_FIXES_NEEDED`), and the post-apply re-aggregation yields APPROVE.
+   **Fail-closed boundary:** if the artifact file is missing or empty (e.g., a reviewer remained `BLOCKED`, supervision failed, or the skill crashed), record a supervisory failure and terminate `/review-pr` immediately. Do NOT dispatch the fixer, enter Phase 2, defer findings, or emit trust. The ordinary aggregate is produced only after all six reviewer slots have valid evidence; a missing aggregate is therefore infrastructure failure, never a zero-finding review result.
 
    If `code-fixer` returns `status: REFUSED`, log the rationale, continue to Phase 2 with zero auto-applied Phase 1 fixes (Phase 1 verdict remains as reviewers reported, independent of fixer status). The aggregation table notes "Phase 1 fixer refused: <reason>" in the Advisory findings column.
 

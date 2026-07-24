@@ -137,12 +137,12 @@ uberdev_prepare_run_carrier() {
   case "$subject" in ''|*[!0-9]*) _uberdev_child_error 'subject id must be a non-negative integer'; return 2 ;; esac
   [ "$workflow" = simplify ] || [ "$subject" -gt 0 ] || { _uberdev_child_error 'review-pr requires a positive PR number'; return 2; }
   case "$tier" in trivial|small|medium|large) ;; *) _uberdev_child_error 'invalid task tier'; return 2 ;; esac
-  if [ "$workflow" = review-pr ]; then
-    if [ -z "${UBERDEV_RESOLVED_BACKEND:-}" ]; then
-      uberdev_dispatch_preflight review-pr || return $?
-    fi
-    uberdev_dispatch_preflight_backend "$UBERDEV_RESOLVED_BACKEND" review-pr || return $?
-  fi
+  # A new standalone carrier owns a new routing decision. Never inherit the
+  # exported resolved backend from an earlier shell invocation; inherited
+  # decisions arrive only through UBERDEV_RUN_CARRIER_JSON and bypass this
+  # constructor altogether.
+  uberdev_dispatch_preflight "$workflow" || return $?
+  uberdev_dispatch_preflight_backend "$UBERDEV_RESOLVED_BACKEND" "$workflow" || return $?
   prepared="$(uberdev_dispatch_prepare_root "$subject" "$tier" "$risks" "$workflow" '')" || return $?
   carrier="$(python3 -I -B -c '
 import json,sys
@@ -645,12 +645,18 @@ uberdev_dispatch_child() {
   if uberdev_agent_dispatch "$request" "$prompt" "$result" "$status_file"; then rc=0; else rc=$?; return "$rc"; fi
   provider_handle="${DISPATCH_ID:-}"
   if receipt="$(python3 -I -B - "$edge" "$request" "$result" "$status_file" "$provider_handle" <<'PY'
-import hashlib,json,os,stat,sys
+import hashlib,json,os,re,stat,sys
 edge,request_raw,result,status,provider_handle=sys.argv[1:]
 try:
  s=json.load(open(status)); r=json.loads(request_raw)
  allowed={'issue','tier','backend','state','exit_code','provider_exit_code','pid','log','result','worktree','branch','workspace_mode','process_identity','lease_generation'}
- if not isinstance(s,dict) or set(s)-allowed or s.get('state') not in {'running','completed','failed'} or not isinstance(s.get('backend'),str): raise ValueError()
+ if not isinstance(s,dict) or set(s)-allowed or s.get('state') not in {'running','completed','failed'}: raise ValueError()
+ backend=s.get('backend')
+ if backend not in {'codex','claude-bg','background','wezterm'}: raise ValueError()
+ process_identity=s.get('process_identity')
+ if process_identity is not None and (not isinstance(process_identity,str) or not re.fullmatch(r'[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}',process_identity)): raise ValueError()
+ lease_generation=s.get('lease_generation')
+ if lease_generation is not None and (not isinstance(lease_generation,str) or not re.fullmatch(r'[0-9a-f]{32}',lease_generation)): raise ValueError()
  state=s['state']; code=s.get('exit_code')
  if state=='running' and code is not None: raise ValueError()
  if state=='completed' and (type(code) is not int or code!=0): raise ValueError()
@@ -684,7 +690,7 @@ PY
 
 _uberdev_child_wait_probe() {
   python3 -I -B - "$1" "$2" <<'PY'
-import hashlib,json,os,stat,sys
+import hashlib,json,os,re,stat,sys
 status,result=sys.argv[1:]
 try:
  if not os.path.isabs(status) or not os.path.isabs(result): raise ValueError()
@@ -695,12 +701,18 @@ try:
   if stat.S_ISLNK(e.st_mode) or not stat.S_ISREG(e.st_mode) or e.st_nlink!=1 or e.st_uid!=os.geteuid() or e.st_size>65536: raise ValueError()
  s=json.load(open(status)); allowed={'issue','tier','backend','state','exit_code','provider_exit_code','pid','log','result','worktree','branch','workspace_mode','process_identity','lease_generation'}
  if not isinstance(s,dict) or set(s)-allowed or s.get('state') not in {'running','completed','failed','timed_out','cancelled'}: raise ValueError()
+ backend=s.get('backend')
+ if backend not in {'codex','claude-bg','background','wezterm'}: raise ValueError()
+ process_identity=s.get('process_identity')
+ if process_identity is not None and (not isinstance(process_identity,str) or not re.fullmatch(r'[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}',process_identity)): raise ValueError()
+ lease_generation=s.get('lease_generation')
+ if lease_generation is not None and (not isinstance(lease_generation,str) or not re.fullmatch(r'[0-9a-f]{32}',lease_generation)): raise ValueError()
  state=s['state']; code=s.get('exit_code'); handle=s.get('pid')
  if state=='running' and code is not None: raise ValueError()
  if state=='completed' and (type(code) is not int or code!=0): raise ValueError()
  if state in {'failed','timed_out','cancelled'} and (type(code) is not int or code==0): raise ValueError()
  raw=open(status,'rb').read()
- print(json.dumps({'state':state,'backend':s.get('backend'),'handle':str(handle) if handle is not None else '','process_identity':s.get('process_identity') or '','lease_generation':s.get('lease_generation') or '','snapshot_sha256':hashlib.sha256(raw).hexdigest()},separators=(',',':')),end='')
+ print(json.dumps({'state':state,'backend':backend,'handle':str(handle) if handle is not None else '','process_identity':process_identity or '','lease_generation':lease_generation or '','snapshot_sha256':hashlib.sha256(raw).hexdigest()},separators=(',',':')),end='')
 except Exception: raise SystemExit(2)
 PY
 }

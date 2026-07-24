@@ -47,6 +47,25 @@ printf '{"backend":"codex","state":"completed","exit_code":1,"pid":"321"}\n' >"$
 printf '{"backend":"codex","state":"failed","exit_code":1,"pid":"321"}\n' >"$STATUS"; terminal_manifest failed; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
 printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"; terminal_manifest failed; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
 
+# The status boundary has a closed backend enum and validates optional process
+# identity / lease-generation fields before timeout or cancellation logic.
+for malformed_status in \
+  '{"backend":"unknown","state":"running","exit_code":null,"pid":"321"}' \
+  '{"backend":"codex","state":"running","exit_code":null,"pid":"321","process_identity":7}' \
+  '{"backend":"codex","state":"running","exit_code":null,"pid":"321","process_identity":"321|321|321|short"}' \
+  '{"backend":"codex","state":"running","exit_code":null,"pid":"321","lease_generation":9}' \
+  '{"backend":"codex","state":"running","exit_code":null,"pid":"321","lease_generation":"xyz"}'; do
+  printf '%s\n' "$malformed_status" >"$STATUS"
+  set +e
+  uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
+  MALFORMED_STATUS_RC=$?
+  set -e
+  [ "$MALFORMED_STATUS_RC" -eq 2 ]
+done
+printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321","process_identity":"321|321|321|0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$STATUS"
+terminal_manifest completed
+uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null
+
 # A detached watcher supervisory failure is actionable immediately. The
 # waiting caller receives the specific class instead of timing out generically.
 printf '{"backend":"claude-bg","state":"running","exit_code":null,"pid":"abc12345"}\n' >"$STATUS"
@@ -134,6 +153,8 @@ rm -f "$WATCHER_FALLBACK"
 VALID_REVIEW="$TMP/run/children/worker-0001/valid-review.md"
 INVALID_REVIEW="$TMP/run/children/worker-0001/invalid-review.md"
 EMPTY_REVIEW="$TMP/run/children/worker-0001/empty-review.md"
+ADVISORY_ONE_REVIEW="$TMP/run/children/worker-0001/advisory-one-review.md"
+ADVISORY_MULTI_REVIEW="$TMP/run/children/worker-0001/advisory-multi-review.md"
 NULL_FINDINGS_REVIEW="$TMP/run/children/worker-0001/null-findings-review.md"
 INVALID_SCALAR_REVIEW="$TMP/run/children/worker-0001/invalid-scalar-review.md"
 DRIVE_RELATIVE_REVIEW="$TMP/run/children/worker-0001/drive-relative-review.md"
@@ -148,6 +169,16 @@ printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings:' \
   'confidence: high' '```' >"$INVALID_REVIEW"
 printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings: []' \
   'confidence: high' '```' >"$EMPTY_REVIEW"
+printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings:' \
+  '  - severity: suggestion' '    location: tests/example.test.sh:1' \
+  '    summary: one advisory finding' '    detail: bounded advisory detail' \
+  'confidence: high' '```' >"$ADVISORY_ONE_REVIEW"
+printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings:' \
+  '  - severity: suggestion' '    location: tests/example.test.sh:1' \
+  '    summary: first advisory finding' '    detail: first bounded detail' \
+  '  - severity: suggestion' '    location: tests/example.test.sh:2' \
+  '    summary: second advisory finding' '    detail: second bounded detail' \
+  'confidence: medium' '```' >"$ADVISORY_MULTI_REVIEW"
 printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings:' \
   'confidence: high' '```' >"$NULL_FINDINGS_REVIEW"
 printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
@@ -164,6 +195,8 @@ printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
   'confidence: high' '```' >"$DRIVE_QUALIFIED_REVIEW"
 uberdev_child_validate_phase1_review_result "$VALID_REVIEW"
 uberdev_child_validate_phase1_review_result "$EMPTY_REVIEW"
+uberdev_child_validate_phase1_review_result "$ADVISORY_ONE_REVIEW"
+uberdev_child_validate_phase1_review_result "$ADVISORY_MULTI_REVIEW"
 ! uberdev_child_validate_phase1_review_result "$INVALID_REVIEW"
 ! uberdev_child_validate_phase1_review_result "$NULL_FINDINGS_REVIEW"
 ! uberdev_child_validate_phase1_review_result "$INVALID_SCALAR_REVIEW"
@@ -337,4 +370,4 @@ grep -q '"state":"completed"' "$STATUS"
 # Paths must be the canonical owned child pair.
 ! uberdev_wait_child "$TMP/outside-status" "$RESULT" 1 >/dev/null 2>&1
 ! uberdev_wait_child "$STATUS" "$TMP/outside-result" 1 >/dev/null 2>&1
-echo 'child-wait: 47 checks passed'
+echo 'child-wait tests passed'

@@ -373,8 +373,9 @@ _uberdev_dispatch_codex_available() {
 # to a concrete UBERDEV_RESOLVED_BACKEND, ONCE per invocation, committed for
 # the whole batch (no mid-fanout switch). Hard-errors (return 1) when an
 # explicit backend is unusable on this host. Auto selection is workflow-aware
-# when review-pr is supplied because its mutating repair children require Codex
-# or claude-bg. Emits dispatch_backend_resolved.
+# for review-pr and simplify because their governed children require an atomic
+# result artifact and caller-workspace repair support. Emits
+# dispatch_backend_resolved.
 uberdev_dispatch_preflight() {
   local requested="${UBERDEV_DISPATCH_BACKEND_REQUESTED:-auto}"
   local workflow="${1:-}" os_class reason resolved
@@ -409,21 +410,13 @@ uberdev_dispatch_preflight() {
       fi
       resolved="wezterm"; reason="explicit" ;;
     auto)
-      if [ "$workflow" = review-pr ]; then
-        if [ "$os_class" = windows-native ]; then
-          resolved="claude-bg"; reason="auto-review-pr-windows"
-        elif [ -n "${CODEX_HOME:-}" ]; then
-          if _uberdev_dispatch_codex_available; then
-            resolved="codex"; reason="auto-review-pr-codex-env"
-          else
-            echo "error: CODEX_HOME is set but the 'codex' CLI is unavailable on PATH" >&2
-            echo "       Fix the Codex install/PATH, or explicitly choose --backend=claude-bg." >&2
-            return 1
-          fi
-        elif ! command -v claude >/dev/null 2>&1 && _uberdev_dispatch_codex_available; then
-          resolved="codex"; reason="auto-review-pr-no-claude"
+      if [ "$workflow" = review-pr ] || [ "$workflow" = simplify ]; then
+        if _uberdev_dispatch_codex_available; then
+          resolved="codex"; reason="auto-${workflow}-result-artifact"
         else
-          resolved="claude-bg"; reason="auto-review-pr-claude"
+          echo "error: $workflow requires the 'codex' CLI for supervised child result artifacts" >&2
+          echo "       Install Codex or explicitly run this workflow from a supported Codex host." >&2
+          return 1
         fi
       # If we're running inside Codex itself (CODEX_HOME set), or claude is
       # absent but codex is present, the codex backend is the natural default —
@@ -613,20 +606,25 @@ uberdev_dispatch_resolve_env() {
 # timeout variables; every Claude-backed transport shares the resolver above.
 uberdev_dispatch_preflight_backend() {
   local backend="${1:-}" workflow="${2:-}"
-  if [ "$workflow" = review-pr ]; then
+  if [ "$workflow" = review-pr ] || [ "$workflow" = simplify ]; then
     case "$backend" in
-      codex|claude-bg) ;;
+      codex) ;;
+      claude-bg)
+        echo "error: $workflow cannot use claude-bg because it does not export a supervised result artifact" >&2
+        return 1
+        ;;
       wezterm|background)
-        echo "error: review-pr requires a backend with caller-workspace repair support: $backend" >&2
+        echo "error: $workflow requires a backend with result-artifact and caller-workspace repair support: $backend" >&2
         return 1
         ;;
     esac
   fi
   case "$backend" in
     codex)
-      if [ "$workflow" = review-pr ] && [ "$(_uberdev_dispatch_os_class)" = windows-native ]; then
-        echo "error: review-pr cannot supervise native Windows Codex process trees" >&2
-        echo "       use --backend=claude-bg from a shell with exact provider cancellation support" >&2
+      if { [ "$workflow" = review-pr ] || [ "$workflow" = simplify ]; } \
+          && [ "$(_uberdev_dispatch_os_class)" = windows-native ]; then
+        echo "error: $workflow cannot supervise native Windows Codex process trees" >&2
+        echo "       run from a POSIX Codex host with exact process-tree supervision" >&2
         return 1
       fi
       return 0
