@@ -47,6 +47,12 @@ assert_grep "$DISPATCH_LIB" \
   'windows-native\)' \
   "resolver has a windows-native branch"
 assert_grep "$DISPATCH_LIB" \
+  '_uberdev_dispatch_numeric_supervision_supported' \
+  "resolver shares the native-Windows numeric supervision capability gate"
+assert_grep_not "$DISPATCH_LIB" \
+  'resolved="background"; reason="auto-windows-fallback"' \
+  "native Windows auto-resolution never falls back to an unsupervisable numeric backend"
+assert_grep "$DISPATCH_LIB" \
   'wsl2\)' \
   "resolver has a wsl2 branch"
 assert_grep "$DISPATCH_LIB" \

@@ -102,6 +102,22 @@ printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'backend=claude-bg; capacity=reta
 printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'action=resolve the retained Claude session or retry with Codex'
 rm -f "$STATUS.watcher-error.json"
 
+# Owner identity capture is a launch-time supervisory failure with no reserved
+# capacity. Exercise the exact producer helper and public waiter together so
+# the writer and reader cannot silently drift on reason or attempt count.
+rm -f "$STATUS" "$STATUS.watcher-error.json"
+OWNER_CAPTURE_FALLBACK="$TMP/run/.agent-state-$(id -u)/worker-0001.watcher-error.json"
+_uberdev_agent_fail_owner_capture "$STATUS" "$OWNER_CAPTURE_FALLBACK" codex
+set +e
+WATCHER_WAIT_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
+WATCHER_WAIT_RC=$?
+set -e
+[ "$WATCHER_WAIT_RC" -eq 70 ]
+printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq \
+  'provider supervision failed: owner_process_identity_unavailable'
+printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'backend=codex; capacity=not-reserved'
+rm -f "$STATUS.watcher-error.json"
+
 # The detached numeric-process watcher emits a distinct durable record when
 # its kernel identity probe remains indeterminate. Exercise the producer and
 # the public waiter together so their closed schemas cannot drift apart.
@@ -229,6 +245,7 @@ for malformed_watcher_error in \
   '{"schema_version":1,"error":"provider_probe_failed","backend":"claude-bg","handle":"abc12345","terminal":"provider_probe_failed","attempts":0}' \
   '{"schema_version":1,"error":"provider_probe_failed","backend":"claude-bg","handle":"abc12345","terminal":"failed","attempts":3}' \
   '{"schema_version":1,"error":"provider_cancel_failed","backend":"claude-bg","handle":"abc12345","terminal":"provider_probe_failed","attempts":3}' \
+  '{"schema_version":1,"error":"terminal_finalize_failed","backend":"codex","handle":"321","terminal":"failed","attempts":1,"reason":"owner_process_identity_unavailable"}' \
   '{"schema_version":1,"error":"provider_cancel_failed","backend":"claude-bg","handle":"abc12345","terminal":"blocked:permission","attempts":3,"reason":"not-in-the-closed-enum"}'; do
   printf '%s\n' "$malformed_watcher_error" >"$STATUS.watcher-error.json"
   chmod 600 "$STATUS.watcher-error.json"
@@ -367,6 +384,25 @@ import json,sys
 s=json.load(open(sys.argv[1])); assert s['state']=='running' and s['exit_code'] is None
 PY
 kill -TERM "$SLEEP_PID"; wait "$SLEEP_PID" 2>/dev/null || true
+
+# Native Windows numeric identities do not carry verifiable POSIX process
+# group/session authority. Model that OS class on every CI host and prove
+# cancellation fails before even consulting the POSIX ownership probe.
+eval "$(declare -f _uberdev_dispatch_os_class | sed '1s/_uberdev_dispatch_os_class/_real_cancel_os_class/')"
+eval "$(declare -f _uberdev_dispatch_owned_group_state | sed '1s/_uberdev_dispatch_owned_group_state/_real_cancel_owned_group_state/')"
+WINDOWS_CANCEL_PROBE="$TMP/windows-cancel-posix-probe"
+_uberdev_dispatch_os_class() { printf 'windows-native'; }
+_uberdev_dispatch_owned_group_state() { : >"$WINDOWS_CANCEL_PROBE"; return 1; }
+set +e
+_uberdev_dispatch_cancel_backend background 4242 \
+  '4242|4242|4242|0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+WINDOWS_CANCEL_RC=$?
+set -e
+[ "$WINDOWS_CANCEL_RC" -eq 2 ]
+[ "$_UBERDEV_DISPATCH_CANCEL_REASON" = provider_cancel_unconfirmed ]
+[ ! -e "$WINDOWS_CANCEL_PROBE" ]
+eval "$(declare -f _real_cancel_os_class | sed '1s/_real_cancel_os_class/_uberdev_dispatch_os_class/')"
+eval "$(declare -f _real_cancel_owned_group_state | sed '1s/_real_cancel_owned_group_state/_uberdev_dispatch_owned_group_state/')"
 
 # PID/group reuse defense: launch an owned session whose wrapper has a live
 # provider child. Wrong identity is rejected; exact cancellation proves the

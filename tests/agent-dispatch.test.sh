@@ -320,6 +320,80 @@ grep -q '"reason":"owner_process_identity_unavailable"' "$OWNER_IDENTITY_RUN/sta
 [ ! -d "$OWNER_IDENTITY_RUN/.agent-state-$(id -u)/semaphore-v1" ] \
   || ! find "$OWNER_IDENTITY_RUN/.agent-state-$(id -u)/semaphore-v1" -name '*.lease' -type f | grep -q .
 
+# Owner-capture failure reporting uses two independent durable channels. Fault
+# inject each channel through the public dispatcher: the other channel must
+# still be attempted, no provider or lease may be created, and stderr must say
+# exactly which fallback channel failed.
+eval "$(declare -f _uberdev_agent_publish_status | sed '1s/_uberdev_agent_publish_status/_real_owner_failure_publish_status/')"
+eval "$(declare -f _uberdev_agent_persist_watcher_error_retry | sed '1s/_uberdev_agent_persist_watcher_error_retry/_real_owner_failure_persist_watcher_error_retry/')"
+_uberdev_agent_capture_owner_process_record() { return 2; }
+owner_fault_request() {
+  python3 -I -B - "$REQUEST" "$1" "$2" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1]); value.update(run_dir=sys.argv[2],run_id=sys.argv[3])
+print(json.dumps(value,separators=(',',':')),end='')
+PY
+}
+
+OWNER_STATUS_FAULT_RUN="$TMP/owner-status-publication-fault"
+mkdir -p "$OWNER_STATUS_FAULT_RUN"
+printf 'owner status publication fault prompt\n' >"$OWNER_STATUS_FAULT_RUN/prompt.txt"
+OWNER_STATUS_FAULT_REQUEST="$(owner_fault_request "$OWNER_STATUS_FAULT_RUN" owner-status-publication-fault)"
+OWNER_FAILURE_CALLS="$TMP/owner-failure-calls"
+_uberdev_agent_publish_status() { printf 'publish\n' >>"$OWNER_FAILURE_CALLS"; return 2; }
+_uberdev_agent_persist_watcher_error_retry() {
+  printf 'diagnostic\n' >>"$OWNER_FAILURE_CALLS"
+  _real_owner_failure_persist_watcher_error_retry "$@"
+}
+owner_provider_before=0
+[ ! -r "$TMP/provider-count" ] || read -r owner_provider_before <"$TMP/provider-count"
+set +e
+OWNER_FAILURE_ERROR="$(uberdev_agent_dispatch "$OWNER_STATUS_FAULT_REQUEST" \
+  "$OWNER_STATUS_FAULT_RUN/prompt.txt" "$OWNER_STATUS_FAULT_RUN/result.md" \
+  "$OWNER_STATUS_FAULT_RUN/status.json" 2>&1 >/dev/null)"
+OWNER_FAILURE_RC=$?
+set -e
+owner_provider_after=0
+[ ! -r "$TMP/provider-count" ] || read -r owner_provider_after <"$TMP/provider-count"
+[ "$OWNER_FAILURE_RC" -eq 2 ]
+[ "$owner_provider_after" -eq "$owner_provider_before" ]
+[ "$(cat "$OWNER_FAILURE_CALLS")" = $'publish\ndiagnostic' ]
+[ ! -e "$OWNER_STATUS_FAULT_RUN/status.json" ]
+grep -q '"reason":"owner_process_identity_unavailable"' \
+  "$OWNER_STATUS_FAULT_RUN/status.json.watcher-error.json"
+printf '%s\n' "$OWNER_FAILURE_ERROR" | grep -Fq 'owner_process_identity_status_publication_failed'
+[ ! -d "$OWNER_STATUS_FAULT_RUN/.agent-state-$(id -u)/semaphore-v1" ]
+
+OWNER_DIAGNOSTIC_FAULT_RUN="$TMP/owner-diagnostic-persistence-fault"
+mkdir -p "$OWNER_DIAGNOSTIC_FAULT_RUN"
+printf 'owner diagnostic persistence fault prompt\n' >"$OWNER_DIAGNOSTIC_FAULT_RUN/prompt.txt"
+OWNER_DIAGNOSTIC_FAULT_REQUEST="$(owner_fault_request "$OWNER_DIAGNOSTIC_FAULT_RUN" owner-diagnostic-persistence-fault)"
+: >"$OWNER_FAILURE_CALLS"
+_uberdev_agent_publish_status() {
+  printf 'publish\n' >>"$OWNER_FAILURE_CALLS"
+  _real_owner_failure_publish_status "$@"
+}
+_uberdev_agent_persist_watcher_error_retry() { printf 'diagnostic\n' >>"$OWNER_FAILURE_CALLS"; return 2; }
+set +e
+OWNER_FAILURE_ERROR="$(uberdev_agent_dispatch "$OWNER_DIAGNOSTIC_FAULT_REQUEST" \
+  "$OWNER_DIAGNOSTIC_FAULT_RUN/prompt.txt" "$OWNER_DIAGNOSTIC_FAULT_RUN/result.md" \
+  "$OWNER_DIAGNOSTIC_FAULT_RUN/status.json" 2>&1 >/dev/null)"
+OWNER_FAILURE_RC=$?
+set -e
+owner_provider_after=0
+[ ! -r "$TMP/provider-count" ] || read -r owner_provider_after <"$TMP/provider-count"
+[ "$OWNER_FAILURE_RC" -eq 2 ]
+[ "$owner_provider_after" -eq "$owner_provider_before" ]
+[ "$(cat "$OWNER_FAILURE_CALLS")" = $'publish\ndiagnostic' ]
+grep -q '"state":"failed"' "$OWNER_DIAGNOSTIC_FAULT_RUN/status.json"
+[ ! -e "$OWNER_DIAGNOSTIC_FAULT_RUN/status.json.watcher-error.json" ]
+printf '%s\n' "$OWNER_FAILURE_ERROR" | grep -Fq 'owner_process_identity_diagnostic_persistence_failed'
+[ ! -d "$OWNER_DIAGNOSTIC_FAULT_RUN/.agent-state-$(id -u)/semaphore-v1" ]
+
+eval "$(declare -f _real_owner_failure_publish_status | sed '1s/_real_owner_failure_publish_status/_uberdev_agent_publish_status/')"
+eval "$(declare -f _real_owner_failure_persist_watcher_error_retry | sed '1s/_real_owner_failure_persist_watcher_error_retry/_uberdev_agent_persist_watcher_error_retry/')"
+eval "$(declare -f _real_owner_process_record | sed '1s/_real_owner_process_record/_uberdev_agent_capture_owner_process_record/')"
+
 # Detached review fanout cannot rely on an interactive Claude permission
 # prompt. The adapter must reject manual mode before capacity or provider state
 # is created, while an explicit unattended opt-in remains accepted.

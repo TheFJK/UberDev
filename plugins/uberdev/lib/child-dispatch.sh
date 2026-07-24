@@ -570,10 +570,7 @@ PY
 
 _uberdev_child_backend_cancellation_supported() {
   case "$1" in
-    codex)
-      [ "$(_uberdev_dispatch_os_class)" != windows-native ]
-      ;;
-    background) return 0 ;;
+    codex|background) _uberdev_dispatch_numeric_supervision_supported "$1" ;;
     wezterm) command -v wezterm >/dev/null 2>&1 ;;
     # Claude cancellation resolves the exact full session identifier from the
     # provider inventory, invokes `claude stop`, and confirms terminal state.
@@ -766,11 +763,15 @@ try:
  cancel_reasons={'provider_stop_failed','provider_session_resolution_failed','provider_cancel_probe_failed','provider_cancel_unconfirmed'}
  lease_reasons={'lease_acquire_invalid_input','lease_acquire_runtime_state_failed','lease_acquire_mutex_failed','lease_acquire_reconcile_failed','lease_acquire_count_failed','lease_acquire_duplicate_check_failed','lease_acquire_allocate_failed','lease_acquire_owner_failed','lease_acquire_publish_failed','lease_acquire_identity_failed','lease_acquire_rollback_failed','lease_acquire_mutex_release_failed','lease_handle_rollback_failed'}
  timeout_reasons={'timeout_intent_invalid','timeout_intent_identity_unavailable','timeout_intent_cleanup_failed','timeout_partial_result_cleanup_failed'}
- if reason and reason not in cancel_reasons|timeout_reasons|lease_reasons|{'supervisory_failure'}: raise ValueError()
+ owner_capture_reasons={'owner_process_identity_unavailable'}
+ if reason and reason not in cancel_reasons|timeout_reasons|lease_reasons|owner_capture_reasons|{'supervisory_failure'}: raise ValueError()
  if backend not in {'codex','claude-bg','background','wezterm'}: raise ValueError()
  if type(attempts) is not int or attempts<1 or attempts>3: raise ValueError()
  if not isinstance(handle,str) or len(handle)>256 or (handle and not all(ch.isalnum() or ch in '._:-' for ch in handle)): raise ValueError()
  if not isinstance(terminal,str) or len(terminal)>128: raise ValueError()
+ if reason in owner_capture_reasons and not (
+     error=='launch_finalize_failed' and not handle
+     and terminal=='launch:owner_process_identity' and attempts==1): raise ValueError()
  if error=='provider_probe_failed':
   if backend!='claude-bg' or not re.fullmatch(r'[0-9a-f]{8}',handle) or terminal!='provider_probe_failed' or attempts!=3: raise ValueError()
  elif error=='process_identity_probe_failed':
@@ -781,8 +782,10 @@ try:
   if backend!='claude-bg' or not re.fullmatch(r'[0-9a-f]{8}',handle) or terminal not in {'blocked:permission','blocked:provider'} or attempts!=3: raise ValueError()
   if reason and reason not in cancel_reasons|{'supervisory_failure'}: raise ValueError()
  elif error=='launch_finalize_failed':
-  if handle or not re.fullmatch(r'launch:[a-z][a-z0-9_]{0,63}',terminal) or attempts!=3: raise ValueError()
-  if reason and reason not in lease_reasons|{'supervisory_failure'}: raise ValueError()
+  if handle or not re.fullmatch(r'launch:[a-z][a-z0-9_]{0,63}',terminal): raise ValueError()
+  if terminal=='launch:owner_process_identity':
+   if attempts!=1 or reason!='owner_process_identity_unavailable': raise ValueError()
+  elif attempts!=3 or (reason and reason not in lease_reasons|{'supervisory_failure'}): raise ValueError()
  elif not handle or terminal not in {'completed','failed','timed_out','cancelled','abandoned'}:
   raise ValueError()
  retained=(error in {'provider_probe_failed','process_identity_probe_failed','timeout_intent_recovery_failed','provider_cancel_failed','terminal_finalize_failed'}

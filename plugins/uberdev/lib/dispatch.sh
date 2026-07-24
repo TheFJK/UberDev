@@ -318,6 +318,18 @@ _uberdev_dispatch_os_class() {
   printf 'linux'
 }
 
+# Numeric backends are supervised through POSIX process-group/session
+# semantics. Native Windows identities intentionally do not pretend to supply
+# those semantics: until a verifiable Win32 tree primitive exists, reject the
+# backend before launch or cancellation. WSL remains POSIX-supervisable.
+_uberdev_dispatch_numeric_supervision_supported() {
+  case "${1:-}" in
+    codex|background) [ "$(_uberdev_dispatch_os_class)" != windows-native ] ;;
+    claude-bg|wezterm) return 0 ;;
+    *) return 2 ;;
+  esac
+}
+
 # _uberdev_dispatch_audit EVENT JSON
 # Delegate to the SKILL.md-defined _uberdev_audit_emit when present; else no-op.
 # Keeps lib/dispatch.sh independently sourceable in tests.
@@ -439,7 +451,11 @@ uberdev_dispatch_preflight() {
           else resolved="claude-bg"; reason="auto-macos-fallback"; fi ;;
         windows-native)
           if _uberdev_dispatch_wezterm_available; then resolved="wezterm"; reason="auto-windows-wezterm"
-          else resolved="background"; reason="auto-windows-fallback"; fi ;;
+          else
+            echo "error: native Windows requires WezTerm for verifiable child supervision" >&2
+            echo "       install/start WezTerm, or run from WSL2 or another POSIX host" >&2
+            return 1
+          fi ;;
         wsl2)
           resolved="claude-bg"; reason="auto-wsl2" ;;
         *)
@@ -450,6 +466,11 @@ uberdev_dispatch_preflight() {
       echo "error: dispatch backend '$requested' not in {$_UBERDEV_DISPATCH_BACKEND_ENUM}" >&2
       return 1 ;;
   esac
+  if ! _uberdev_dispatch_numeric_supervision_supported "$resolved"; then
+    echo "error: backend '$resolved' lacks verifiable process-tree supervision on native Windows" >&2
+    echo "       use WezTerm, WSL2, or another POSIX host" >&2
+    return 1
+  fi
   export UBERDEV_RESOLVED_BACKEND="$resolved"
   _uberdev_dispatch_audit dispatch_backend_resolved \
     "{\"requested\":\"$requested\",\"resolved\":\"$resolved\",\"os_class\":\"$os_class\",\"reason\":\"$reason\"}"
@@ -605,7 +626,17 @@ uberdev_dispatch_resolve_env() {
 # constructing children. Native Codex needs no Claude CLI model, permission, or
 # timeout variables; every Claude-backed transport shares the resolver above.
 uberdev_dispatch_preflight_backend() {
-  local backend="${1:-}" workflow="${2:-}"
+  local backend="${1:-}" workflow="${2:-}" backend_label
+  case "$backend" in
+    codex|claude-bg|background|wezterm)
+      if ! _uberdev_dispatch_numeric_supervision_supported "$backend"; then
+        backend_label="$backend"; [ "$backend" != codex ] || backend_label=Codex
+        echo "error: $workflow cannot supervise native Windows $backend_label process trees" >&2
+        echo "       use WezTerm, WSL2, or another POSIX host" >&2
+        return 1
+      fi
+      ;;
+  esac
   if [ "$workflow" = review-pr ] || [ "$workflow" = simplify ]; then
     case "$backend" in
       codex) ;;
@@ -621,12 +652,6 @@ uberdev_dispatch_preflight_backend() {
   fi
   case "$backend" in
     codex)
-      if { [ "$workflow" = review-pr ] || [ "$workflow" = simplify ]; } \
-          && [ "$(_uberdev_dispatch_os_class)" = windows-native ]; then
-        echo "error: $workflow cannot supervise native Windows Codex process trees" >&2
-        echo "       run from a POSIX Codex host with exact process-tree supervision" >&2
-        return 1
-      fi
       return 0
       ;;
     claude-bg)
@@ -890,6 +915,10 @@ _uberdev_dispatch_cancel_backend() {
   _UBERDEV_DISPATCH_CANCEL_REASON=''
   case "$backend" in
     codex|background)
+      _uberdev_dispatch_numeric_supervision_supported "$backend" || {
+        _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed
+        return 2
+      }
       case "$handle" in ''|*[!0-9]*) _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2 ;; esac
       [ -n "$expected_identity" ] || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
       IFS='|' read -r identity_pid identity_pgid identity_sid identity_started <<EOF_IDENTITY

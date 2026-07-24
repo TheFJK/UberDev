@@ -225,6 +225,16 @@ if python3 -I -B -c 'import os; raise SystemExit(0 if os.name=="nt" else 1)'; th
   WINDOWS_BRIDGE_ROOT="$(cygpath -m "$WINDOWS_PROBE_TMP")"
   if (
     . "$REPO_ROOT/plugins/uberdev/lib/child-dispatch.sh"
+    set -e
+    windows_child_controller=''
+    windows_child_stop="$WINDOWS_BRIDGE_ROOT/child-stop"
+    cleanup_windows_child() {
+      if [ -n "$windows_child_controller" ]; then
+        : >"$windows_child_stop"
+        wait "$windows_child_controller" 2>/dev/null || true
+      fi
+    }
+    trap cleanup_windows_child EXIT
     mkdir -p "$WINDOWS_BRIDGE_ROOT/state"
     native_record="$(_uberdev_agent_capture_owner_process_record "$WINDOWS_BRIDGE_ROOT")"
     native_pid="${native_record%%$'\t'*}"
@@ -257,9 +267,62 @@ assert str(intent['waiter_pid'])==pid and intent['waiter_process_identity']==ide
 probe=subprocess.run([sys.executable,'-I','-B',tool,'process-identity','--pid',pid],capture_output=True,text=True)
 assert probe.returncode==0 and probe.stdout==identity
 PY
+    windows_child_pid_file="$WINDOWS_BRIDGE_ROOT/child-pid"
+    python3 -I -B - "$windows_child_pid_file" "$windows_child_stop" <<'PY' &
+import pathlib,subprocess,sys,time
+pid_path,stop_path=map(pathlib.Path,sys.argv[1:])
+child=subprocess.Popen([sys.executable,'-I','-B','-c','import time; time.sleep(30)'])
+try:
+ pid_path.write_text(str(child.pid),encoding='ascii')
+ while not stop_path.exists() and child.poll() is None: time.sleep(0.05)
+finally:
+ if child.poll() is None: child.terminate()
+ child.wait(timeout=10)
+PY
+    windows_child_controller=$!
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      [ ! -s "$windows_child_pid_file" ] || break
+      sleep 0.1
+    done
+    windows_child_pid="$(cat "$windows_child_pid_file")"
+    windows_child_identity="$(python3 -I -B \
+      "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" process-identity --pid "$windows_child_pid")"
+    cancel_calls="$WINDOWS_BRIDGE_ROOT/cancel-calls"
+    _uberdev_dispatch_owned_group_state() { printf 'owned-group\n' >>"$cancel_calls"; return 1; }
+    _uberdev_dispatch_group_owned_session() { printf 'group-session\n' >>"$cancel_calls"; return 1; }
+    kill() { printf 'signal\n' >>"$cancel_calls"; return 0; }
+    set +e
+    _uberdev_dispatch_cancel_backend background "$windows_child_pid" "$windows_child_identity"
+    cancel_rc=$?
+    set -e
+    [ "$cancel_rc" -eq 2 ]
+    [ "$_UBERDEV_DISPATCH_CANCEL_REASON" = provider_cancel_unconfirmed ]
+    [ ! -e "$cancel_calls" ]
+    ! _uberdev_dispatch_numeric_supervision_supported codex
+    ! _uberdev_dispatch_numeric_supervision_supported background
+    _uberdev_dispatch_numeric_supervision_supported claude-bg
+    _uberdev_dispatch_numeric_supervision_supported wezterm
+    _uberdev_dispatch_codex_available() { return 0; }
+    for rejected_backend in codex background; do
+      unset UBERDEV_RESOLVED_BACKEND
+      UBERDEV_DISPATCH_BACKEND_REQUESTED="$rejected_backend"
+      export UBERDEV_DISPATCH_BACKEND_REQUESTED
+      ! uberdev_dispatch_preflight solve >/dev/null 2>&1
+      [ -z "${UBERDEV_RESOLVED_BACKEND+x}" ]
+    done
+    unset CODEX_HOME UBERDEV_RESOLVED_BACKEND
+    UBERDEV_DISPATCH_BACKEND_REQUESTED=auto
+    export UBERDEV_DISPATCH_BACKEND_REQUESTED
+    _uberdev_dispatch_wezterm_available() { return 1; }
+    claude() { return 0; }
+    ! uberdev_dispatch_preflight solve >/dev/null 2>&1
+    [ -z "${UBERDEV_RESOLVED_BACKEND+x}" ]
     uberdev_semaphore_release "$lease"
+    cleanup_windows_child
+    windows_child_controller=''
+    trap - EXIT
   ); then
-    echo "  PASS  native Windows owner bridge binds lease, manifest, and timeout waiter without signaling"
+    echo "  PASS  native Windows owner bridge binds identity and rejects unverifiable numeric cancellation"
     PASS=$((PASS + 1))
   else
     echo "  FAIL  native Windows owner bridge did not preserve one live native identity"

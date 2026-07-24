@@ -1113,10 +1113,17 @@ _uberdev_agent_persist_watcher_error_retry() {
 }
 
 _uberdev_agent_fail_owner_capture() {
-  local status_file="$1" fallback_file="$2" backend="$3"
-  _uberdev_agent_publish_status "$status_file" "$backend" '' failed 70 replace || return 2
+  local status_file="$1" fallback_file="$2" backend="$3" status_rc=0 diagnostic_rc=0
+  _uberdev_agent_publish_status "$status_file" "$backend" '' failed 70 replace || status_rc=$?
   _uberdev_agent_persist_watcher_error_retry "$status_file" "$fallback_file" \
-    "$backend" '' launch:owner_process_identity 1 owner_process_identity_unavailable
+    "$backend" '' launch:owner_process_identity 1 owner_process_identity_unavailable || diagnostic_rc=$?
+  if [ "$status_rc" -ne 0 ]; then
+    _uberdev_agent_error 'owner_process_identity_status_publication_failed'
+  fi
+  if [ "$diagnostic_rc" -ne 0 ]; then
+    _uberdev_agent_error 'owner_process_identity_diagnostic_persistence_failed'
+  fi
+  [ "$status_rc" -eq 0 ] && [ "$diagnostic_rc" -eq 0 ]
 }
 
 _uberdev_agent_timeout_intent_probe() {
@@ -1603,7 +1610,9 @@ uberdev_agent_dispatch() {
   manifest="$state_dir/agent-lifecycle.jsonl"
 
   owner_record="$(_uberdev_agent_capture_owner_process_record "$state_dir")" || {
-    _uberdev_agent_fail_owner_capture "$status_file" "$state_dir/$run_id.watcher-error.json" "$backend" || true
+    if ! _uberdev_agent_fail_owner_capture "$status_file" "$state_dir/$run_id.watcher-error.json" "$backend"; then
+      _uberdev_agent_error 'owner_process_identity_failure_persistence_incomplete'
+    fi
     _uberdev_agent_error 'owner_process_identity_unavailable'; return 2;
   }
   case "$owner_record" in
@@ -1612,7 +1621,9 @@ uberdev_agent_dispatch() {
       _UBERDEV_AGENT_OWNER_IDENTITY="${owner_record#*$'\t'}"
       ;;
     *)
-      _uberdev_agent_fail_owner_capture "$status_file" "$state_dir/$run_id.watcher-error.json" "$backend" || true
+      if ! _uberdev_agent_fail_owner_capture "$status_file" "$state_dir/$run_id.watcher-error.json" "$backend"; then
+        _uberdev_agent_error 'owner_process_identity_failure_persistence_incomplete'
+      fi
       _uberdev_agent_error 'owner_process_identity_unavailable'; return 2
       ;;
   esac

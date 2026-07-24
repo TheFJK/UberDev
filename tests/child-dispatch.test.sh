@@ -168,7 +168,16 @@ set -e
 printf '%s\n' "$WINDOWS_CODEX_ERROR" | grep -Fq 'backend lacks lifecycle supervision: codex'
 [ "$WINDOWS_REVIEW_RC" -eq 1 ]
 printf '%s\n' "$WINDOWS_REVIEW_ERROR" | grep -Fq 'cannot supervise native Windows Codex process trees'
-uberdev_dispatch_preflight_backend codex solve
+for WINDOWS_NUMERIC_BACKEND in codex background; do
+  set +e
+  WINDOWS_NUMERIC_ERROR="$(uberdev_dispatch_preflight_backend "$WINDOWS_NUMERIC_BACKEND" solve 2>&1)"
+  WINDOWS_NUMERIC_RC=$?
+  set -e
+  [ "$WINDOWS_NUMERIC_RC" -eq 1 ]
+  printf '%s\n' "$WINDOWS_NUMERIC_ERROR" | grep -Fq 'cannot supervise native Windows'
+done
+_uberdev_dispatch_numeric_supervision_supported claude-bg
+_uberdev_dispatch_numeric_supervision_supported wezterm
 eval "$(declare -f _real_dispatch_os_class | sed '1s/_real_dispatch_os_class/_uberdev_dispatch_os_class/')"
 
 # Production manifest enforcement happens before child allocation/provider use.
