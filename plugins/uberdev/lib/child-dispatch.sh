@@ -564,7 +564,10 @@ PY
 
 _uberdev_child_backend_cancellation_supported() {
   case "$1" in
-    codex|background) return 0 ;;
+    codex)
+      [ "$(_uberdev_dispatch_os_class)" != windows-native ]
+      ;;
+    background) return 0 ;;
     wezterm) command -v wezterm >/dev/null 2>&1 ;;
     # Claude cancellation resolves the exact full session identifier from the
     # provider inventory, invokes `claude stop`, and confirms terminal state.
@@ -978,6 +981,12 @@ uberdev_wait_child() {
         completed|failed|timed_out|cancelled)
           terminal="$(_uberdev_child_manifest_terminal "$manifest" "$instance" 2>/dev/null || true)"
           if [ "$terminal" != "$state" ]; then
+            now="$(date +%s)"
+            [ $((now - start)) -lt "$timeout" ] || return 1
+            sleep 1
+            continue
+          fi
+          if ! _uberdev_child_terminal_lease_proof "$status_file"; then
             now="$(date +%s)"
             [ $((now - start)) -lt "$timeout" ] || return 1
             sleep 1

@@ -1172,24 +1172,45 @@ _uberdev_agent_finalize_prelaunch_failure() {
 
 _uberdev_agent_abort_after_launch() {
   local manifest="$1" lease="$2" lease_identity="$3" status_file="$4" result_file="$5" backend="$6" handle="$7" request_json="$8" decision="$9" reason="${10}"
-  local process_identity event_json cleanup_rc=0 fallback_file run_id
-  process_identity="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
+  local process_identity terminal_event cleanup_rc=0 fallback_file run_id provider_gone=0 cancel_rc=0
   run_id="$(_uberdev_agent_json_get "$request_json" run_id 2>/dev/null || true)"
   fallback_file="$(dirname "$manifest")/${run_id:-post-launch}.watcher-error.json"
-  if ! _uberdev_dispatch_cancel_backend "$backend" "$handle" "$process_identity"; then
+  _UBERDEV_DISPATCH_CANCEL_REASON=''
+  terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
+  if [ -n "$terminal_event" ]; then
+    if ! _uberdev_agent_finalize_terminal "$manifest" "$lease" "$lease_identity" "$status_file" \
+        "$backend" "$handle" "$request_json" "$decision" "$terminal_event" dispatch_setup_failed; then
+      _uberdev_agent_persist_watcher_error_retry "$status_file" "$fallback_file" "$backend" "$handle" "$terminal_event" 1 || \
+        _uberdev_agent_error "failed to persist post-launch terminal finalization error: $reason"
+    fi
+    _uberdev_agent_error "post-launch setup failed after provider terminal: $reason"
+    return 2
+  fi
+  process_identity="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
+  case "$backend" in
+    codex|background)
+      if [ -n "$process_identity" ]; then
+        _uberdev_dispatch_cancel_backend "$backend" "$handle" "$process_identity" || cancel_rc=$?
+      else
+        case "$handle" in
+          ''|*[!0-9]*) cancel_rc=2 ;;
+          *) kill -0 "$handle" 2>/dev/null && cancel_rc=2 || provider_gone=1 ;;
+        esac
+      fi
+      ;;
+    *) _uberdev_dispatch_cancel_backend "$backend" "$handle" "$process_identity" || cancel_rc=$? ;;
+  esac
+  if [ "$cancel_rc" -ne 0 ]; then
     _uberdev_agent_persist_watcher_error_retry "$status_file" "$fallback_file" "$backend" "$handle" failed 1 \
       "${_UBERDEV_DISPATCH_CANCEL_REASON:-provider_cancel_unconfirmed}" || \
       _uberdev_agent_error "failed to persist post-launch cancellation error: $reason"
     return 2
   fi
-  if [ "$backend" = background ]; then
+  if [ "$backend" = background ] && { [ "$provider_gone" -eq 1 ] || [ -n "$process_identity" ]; }; then
     _uberdev_dispatch_cleanup_dead_partial_result "$result_file" "$handle" || cleanup_rc=2
   fi
-  _uberdev_agent_publish_status "$status_file" "$backend" "$handle" failed 70 replace "$process_identity" || cleanup_rc=2
-  event_json="$(_uberdev_agent_event_json failed "$request_json" "$decision" "$handle" "$status_file" 70 dispatch_setup_failed)" || cleanup_rc=2
-  [ -z "$event_json" ] || _uberdev_agent_append_event "$manifest" "$event_json" || cleanup_rc=2
-  [ -n "$lease_identity" ] \
-    && PYTHONPATH= PYTHONHOME= _uberdev_agent_release_exact_lease "$lease" "$lease_identity" || cleanup_rc=2
+  _uberdev_agent_finalize_terminal "$manifest" "$lease" "$lease_identity" "$status_file" \
+    "$backend" "$handle" "$request_json" "$decision" failed dispatch_setup_failed || cleanup_rc=2
   if [ "$cleanup_rc" -ne 0 ]; then
     _uberdev_agent_persist_watcher_error_retry "$status_file" "$fallback_file" "$backend" "$handle" failed 1 || \
       _uberdev_agent_error "failed to persist post-launch cleanup error: $reason"

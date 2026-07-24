@@ -153,6 +153,24 @@ set -e
 printf '%s\n' "$CLAUDE_PREFLIGHT_ERROR" | grep -Fq 'backend lacks lifecycle supervision: claude-bg'
 UBERDEV_RUN_CARRIER_JSON="$SAVED_CARRIER"
 
+# Native Windows Codex has no verifiable process-tree cancellation primitive.
+# Both workflow and child-batch preflight reject it before allocating a child.
+uberdev_create_child_handoff sdd.task.implement windows-codex-preflight-a1 "$BUILDER_INPUTS" '[]' >/dev/null
+eval "$(declare -f _uberdev_dispatch_os_class | sed '1s/_uberdev_dispatch_os_class/_real_dispatch_os_class/')"
+_uberdev_dispatch_os_class() { printf 'windows-native'; }
+set +e
+WINDOWS_CODEX_ERROR="$(uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" 2>&1)"
+WINDOWS_CODEX_RC=$?
+WINDOWS_REVIEW_ERROR="$(uberdev_dispatch_preflight_backend codex review-pr 2>&1)"
+WINDOWS_REVIEW_RC=$?
+set -e
+[ "$WINDOWS_CODEX_RC" -eq 2 ]
+printf '%s\n' "$WINDOWS_CODEX_ERROR" | grep -Fq 'backend lacks lifecycle supervision: codex'
+[ "$WINDOWS_REVIEW_RC" -eq 1 ]
+printf '%s\n' "$WINDOWS_REVIEW_ERROR" | grep -Fq 'cannot supervise native Windows Codex process trees'
+uberdev_dispatch_preflight_backend codex solve
+eval "$(declare -f _real_dispatch_os_class | sed '1s/_real_dispatch_os_class/_uberdev_dispatch_os_class/')"
+
 # Production manifest enforcement happens before child allocation/provider use.
 (
   unset UBERDEV_CHILD_TEST_MODE UBERDEV_CHILD_MANIFEST_PATH

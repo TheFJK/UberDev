@@ -19,6 +19,28 @@ printf 'completed result\n' >"$RESULT"; printf '{"backend":"codex","state":"comp
 uberdev_wait_child "$STATUS" "$RESULT" 2 >/dev/null
 uberdev_unwind_child "$STATUS" "$RESULT" 2
 
+# A terminal manifest event is not sufficient success evidence while the exact
+# lifecycle lease remains present. Wait until watcher finalization releases it.
+TERMINAL_GENERATION=11111111111111111111111111111111
+TERMINAL_LEASE_DIR="$TMP/run/.agent-state-$(id -u)/semaphore-v1/slots"
+TERMINAL_LEASE="$TERMINAL_LEASE_DIR/terminal-release.lease"
+mkdir -p "$TERMINAL_LEASE_DIR"
+printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321","lease_generation":"%s"}\n' \
+  "$TERMINAL_GENERATION" >"$STATUS"
+terminal_manifest completed
+printf 'run_id=worker-0001\nstatus_path=%s\ngeneration=%s\n' \
+  "$STATUS" "$TERMINAL_GENERATION" >"$TERMINAL_LEASE"
+( sleep .2; rm -f "$TERMINAL_LEASE" ) & TERMINAL_RELEASE_PID=$!
+set +e
+uberdev_wait_child "$STATUS" "$RESULT" 2 >/dev/null
+TERMINAL_WAIT_RC=$?
+[ -e "$TERMINAL_LEASE" ]
+TERMINAL_LEASE_RETAINED=$?
+wait "$TERMINAL_RELEASE_PID"
+set -e
+[ "$TERMINAL_WAIT_RC" -eq 0 ]
+[ "$TERMINAL_LEASE_RETAINED" -ne 0 ]
+
 : >"$RESULT"; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
 printf x >"$RESULT"; printf '{bad\n' >"$STATUS"; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
 printf '{"backend":"codex","state":"completed","exit_code":1,"pid":"321"}\n' >"$STATUS"; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
@@ -226,8 +248,8 @@ chmod +x "$TMP/bin/claude"
 _uberdev_dispatch_cancel_claude_bg() { printf '[]\n' >"$CLAUDE_STATE"; }
 CLAUDE_STATE="$TMP/claude-state" PATH="$TMP/bin:$PATH" _uberdev_dispatch_cancel_backend claude-bg abc12345 ''
 
-# The production Claude provider has no cancellation capability. A timeout
-# therefore fails closed before mutating status, manifest, or the live lease.
+# An unavailable or failed Claude cancellation hook must make timeout handling
+# fail closed before mutating status, manifest, or the live lease.
 _uberdev_dispatch_cancel_claude_bg() { return 2; }
 GENERATION=abcdef0123456789abcdef0123456789
 printf '{"backend":"claude-bg","state":"running","exit_code":null,"pid":"unsupported-session","lease_generation":"%s"}\n' "$GENERATION" >"$STATUS"

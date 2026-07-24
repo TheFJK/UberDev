@@ -93,11 +93,21 @@ _uberdev_dispatch_runtime_root() {
 import os,stat,sys
 path=os.path.abspath(os.path.expanduser(sys.argv[1]))
 uid_fn=getattr(os,"geteuid",None); uid=uid_fn() if uid_fn else None
+display=repr(path[:512]+("..." if len(path)>512 else ""))
+def reject(reason):
+ print(f"error: unsafe runtime root ({reason}): {display}",file=sys.stderr)
+ raise SystemExit(2)
 try: os.mkdir(path,0o700)
 except FileExistsError: pass
-entry=os.lstat(path)
-if stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode) or (uid is not None and entry.st_uid!=uid): raise SystemExit(2)
-if os.name!="nt": os.chmod(path,0o700)
+except OSError: reject("create-failed")
+try: entry=os.lstat(path)
+except OSError: reject("inspect-failed")
+if stat.S_ISLNK(entry.st_mode): reject("symlink")
+if not stat.S_ISDIR(entry.st_mode): reject("not-directory")
+if uid is not None and entry.st_uid!=uid: reject("owner-mismatch")
+if os.name!="nt":
+ try: os.chmod(path,0o700)
+ except OSError: reject("permission-update-failed")
 print(os.path.realpath(path),end="")
 PY
 }
@@ -593,7 +603,14 @@ uberdev_dispatch_preflight_backend() {
     esac
   fi
   case "$backend" in
-    codex) return 0 ;;
+    codex)
+      if [ "$workflow" = review-pr ] && [ "$(_uberdev_dispatch_os_class)" = windows-native ]; then
+        echo "error: review-pr cannot supervise native Windows Codex process trees" >&2
+        echo "       use --backend=claude-bg from a shell with exact provider cancellation support" >&2
+        return 1
+      fi
+      return 0
+      ;;
     claude-bg)
       uberdev_dispatch_resolve_env "$backend" || return $?
       [ -z "$workflow" ] || _uberdev_agent_claude_permissions_preflight "$workflow"
@@ -906,7 +923,12 @@ uberdev_dispatch_one() {
     uberdev_dispatch_preflight || { DISPATCH_RC=1; return 1; }
   fi
   uberdev_read_model_routing >/dev/null || true
-  run_dir="$(_uberdev_dispatch_runtime_root)" || { DISPATCH_RC=1; return 1; }
+  if ! run_dir="$(_uberdev_dispatch_runtime_root)"; then
+    DISPATCH_RC=1
+    _uberdev_dispatch_audit dispatch_setup_failed \
+      "{\"issue\":$ISSUE_NUM,\"phase\":\"runtime_root\",\"backend\":\"$UBERDEV_RESOLVED_BACKEND\",\"rc\":1}"
+    return 1
+  fi
   UBERDEV_TMPDIR="$run_dir"
   export UBERDEV_TMPDIR
   case "$UBERDEV_RESOLVED_BACKEND" in
@@ -1030,13 +1052,15 @@ uberdev_dispatch_prepare_root() {
 }
 
 # _uberdev_dispatch_claude_bg ISSUE_NUM TIER PROMPT_FILE
-# Extract of the v0.22.0 inline `claude --bg` dispatch. Sets DISPATCH_RC and
-# DISPATCH_ID (the bg session id) for the caller. No behaviour change.
+# Launch the Claude background provider under the current routed lifecycle and
+# capacity contract. Sets DISPATCH_RC and DISPATCH_ID for the caller.
 # --- TOCTOU symlink-swap / pre-creation guard for predictable tmp paths (#155) ---
-# $UBERDEV_TMPDIR is world-writable (default /tmp) and the bg-stdout / status
-# paths are intentionally PREDICTABLE so the /goal watcher can poll them by name
-# — mktemp-randomisation would break that discovery contract. Instead, guard
-# every predictable redirect target before writing: reject a symlink (an
+# Standard dispatch sets $UBERDEV_TMPDIR to a private EUID-owned directory.
+# Caller overrides and legacy direct invocation can still select shared roots,
+# while bg-stdout / status paths remain intentionally PREDICTABLE so the /goal
+# watcher can poll them by name — mktemp-randomisation would break that discovery
+# contract. Guard every predictable redirect target before writing: reject a
+# symlink (an
 # attacker can point it at a victim file so our `>` clobbers it, or so the
 # DISPATCH_ID extraction reads attacker-chosen bytes) and reject an entry NOT
 # owned by the current EUID (pre-creation in a non-sticky dir) or one that is

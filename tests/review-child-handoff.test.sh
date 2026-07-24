@@ -161,6 +161,46 @@ for spec in "$REVIEW:review-pr" "$SIMPLIFY:simplify" "$POST:post-impl-review"; d
   [ -s "$setup" ]
 done
 
+# Roster validation is a behavioral pre-aggregation gate, including repair
+# waves whose expected count is smaller than the full six-reviewer roster.
+awk '/^post_review_roster_complete\(\) \{/{active=1} active{print} active && /^\}/{exit}' \
+  "$POST" >"$TMP/roster-runtime.sh"
+. "$TMP/roster-runtime.sh"
+ROSTER_EDGES=(
+  review_pr.review.correctness review_pr.review.silent_failures
+  review_pr.review.types review_pr.review.comments
+  review_pr.review.tests review_pr.review.general
+)
+roster_row() { printf '{"edge":"%s"}\n' "$1"; }
+roster_must_block_aggregation() {
+  local records expected aggregate
+  records="$1"
+  expected="$2"
+  aggregate="$records.aggregate"
+  rm -f "$aggregate"
+  if post_review_roster_complete "$records" "$expected" "${ROSTER_EDGES[@]}"; then
+    : >"$aggregate"
+  fi
+  [ ! -e "$aggregate" ]
+}
+ROSTER_VALID="$TMP/roster-valid.records"
+for edge in "${ROSTER_EDGES[@]}"; do roster_row "$edge"; done >"$ROSTER_VALID"
+post_review_roster_complete "$ROSTER_VALID" 6 "${ROSTER_EDGES[@]}"
+sed '$d' "$ROSTER_VALID" >"$TMP/roster-missing.records"
+roster_must_block_aggregation "$TMP/roster-missing.records" 6
+{
+  sed '$d' "$ROSTER_VALID"
+  roster_row review_pr.review.correctness
+} >"$TMP/roster-duplicate.records"
+roster_must_block_aggregation "$TMP/roster-duplicate.records" 6
+{
+  sed '$d' "$ROSTER_VALID"
+  roster_row review_pr.review.unknown
+} >"$TMP/roster-unknown.records"
+roster_must_block_aggregation "$TMP/roster-unknown.records" 6
+head -1 "$ROSTER_VALID" >"$TMP/roster-truncated-repair.records"
+roster_must_block_aggregation "$TMP/roster-truncated-repair.records" 2
+
 # Review and simplify execute with inherited carriers. Post-review attaches to
 # the exact descriptor exported by its parent review setup.
 REVIEW_RUN_ID=20260710-000000-abcdef0

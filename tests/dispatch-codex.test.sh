@@ -116,6 +116,35 @@ else
 fi
 rm -rf "$RUNTIME_LINK_TMP"
 
+RUNTIME_FILE_TMP="$(mktemp -d)"
+RUNTIME_FILE="$RUNTIME_FILE_TMP/not-a-directory"
+printf 'occupied\n' >"$RUNTIME_FILE"
+set +e
+RUNTIME_FILE_ERROR="$(UBERDEV_TMPDIR="$RUNTIME_FILE" bash -c \
+  '. "$1"; _uberdev_dispatch_runtime_root' _ "$DISPATCH_LIB" 2>&1)"
+RUNTIME_FILE_RC=$?
+RUNTIME_AUDIT="$RUNTIME_FILE_TMP/audit.log"
+RUNTIME_DISPATCH_ERROR="$(UBERDEV_TMPDIR="$RUNTIME_FILE" bash -c '
+  . "$1"
+  AUDIT_CAPTURE="$2"
+  _uberdev_audit_emit() { printf "%s\t%s\n" "$1" "$2" >"$AUDIT_CAPTURE"; }
+  UBERDEV_RESOLVED_BACKEND=codex
+  uberdev_dispatch_one 335 small /dev/null
+' _ "$DISPATCH_LIB" "$RUNTIME_AUDIT" 2>&1)"
+RUNTIME_DISPATCH_RC=$?
+set -e
+if [ "$RUNTIME_FILE_RC" -ne 0 ] \
+    && printf '%s\n' "$RUNTIME_FILE_ERROR" | grep -Fq 'unsafe runtime root (not-directory)' \
+    && [ "$RUNTIME_DISPATCH_RC" -ne 0 ] \
+    && printf '%s\n' "$RUNTIME_DISPATCH_ERROR" | grep -Fq 'unsafe runtime root (not-directory)' \
+    && grep -Fq $'dispatch_setup_failed\t' "$RUNTIME_AUDIT" \
+    && grep -Fq '"phase":"runtime_root"' "$RUNTIME_AUDIT"; then
+  pass_msg "runtime-root rejection is actionable and records dispatch setup failure"
+else
+  fail_msg "runtime-root rejection is actionable and audited" "$RUNTIME_FILE_ERROR $RUNTIME_DISPATCH_ERROR"
+fi
+rm -rf "$RUNTIME_FILE_TMP"
+
 # Exercise the actual platform fallback rather than an injected TMPDIR. On
 # macOS /tmp is commonly a symlink to a root-owned platform directory; on
 # Linux it is normally root-owned directly. In either case only the EUID-owned

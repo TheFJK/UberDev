@@ -1361,6 +1361,33 @@ grep -q '"state":"failed"' "$POST_RUN/status.json"
 ! grep -R -q 'run_id=adapter-post-launch-failure' "$POST_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
 eval "$(declare -f _real_postlaunch_set_handle | sed '1s/_real_postlaunch_set_handle/uberdev_semaphore_set_handle/')"
 
+# A provider can return a handle and then exit before rollback samples process
+# identity. Proven absence still terminalizes the run and releases its lease.
+EXITED_RUN="$TMP/post-launch-provider-already-exited"
+mkdir -p "$EXITED_RUN"
+printf 'already exited provider prompt\n' >"$EXITED_RUN/prompt.txt"
+EXITED_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-postlaunch-provider-already-exited","repository_id":"adapter-postlaunch-provider-already-exited-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":98,"issue_num":98,"capacity":1,"timeout_s":20},separators=(",",":")))' "$EXITED_RUN")"
+_uberdev_agent_dispatch_backend() {
+  python3 -I -c 'import os; os.setsid()' >/dev/null 2>&1 &
+  DISPATCH_ID="$!"; DISPATCH_LOG=""
+  wait "$DISPATCH_ID"
+  return 19
+}
+if uberdev_agent_dispatch "$EXITED_REQUEST" "$EXITED_RUN/prompt.txt" \
+    "$EXITED_RUN/result.md" "$EXITED_RUN/status.json"; then
+  echo "already-exited post-launch provider was reported as success" >&2; exit 1
+fi
+grep -q '"state":"failed"' "$EXITED_RUN/status.json"
+python3 -I - "$EXITED_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" <<'PY'
+import json,pathlib,sys
+rows=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+events=[row for row in rows if row.get('run_id')=='adapter-postlaunch-provider-already-exited']
+assert [row.get('event') for row in events]==['route_decided','agent_started','failed'],events
+assert events[-1].get('error_class')=='dispatch_setup_failed',events[-1]
+PY
+! grep -R -q 'run_id=adapter-postlaunch-provider-already-exited' \
+  "$EXITED_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
+
 # Exercise the real atomic handle replacement failure path. The semaphore
 # publishes a replacement inode, exact-identity validation then fails, and the
 # injected rollback removal fails once. Dispatcher cleanup must consume the
