@@ -139,6 +139,18 @@ edge,instance,inputs,risks,path=sys.argv[1:]
 with open(path,'a') as f:f.write(json.dumps({'edge':edge,'instance':instance,'inputs':json.loads(inputs),'risks':json.loads(risks)},sort_keys=True,separators=(',',':'))+'\n')
 PY
 }
+post_review_roster_complete() {
+  local path="$1" expected="$2"; shift 2
+  python3 -I -B - "$path" "$expected" "$@" <<'PY'
+import json,sys
+path,expected,*allowed=sys.argv[1:]
+try:
+ expected=int(expected); rows=[json.loads(line) for line in open(path,encoding='utf-8') if line.strip()]
+ edges=[row['edge'] for row in rows]
+ if expected<0 or len(rows)!=expected or len(set(edges))!=expected or any(edge not in allowed for edge in edges): raise ValueError()
+except Exception: raise SystemExit(2)
+PY
+}
 post_review_fanout() {
   local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff result status receipt dispatch_rc ledger_rc cleanup_rc
   local handoffs=()
@@ -176,33 +188,57 @@ post_review_fanout() {
   done <"$descriptors"
 }
 post_review_wait_all() {
-  local launched="$1" timeout_s="$2" failed_path="${3:-}" row edge status result wait_rc ledger_rc first_rc=0 cleanup_rc=0 index=0
-  [ -z "$failed_path" ] || : >"$failed_path"
+  local launched="$1" timeout_s="$2" failed_path="${3:-}" row edge status result wait_rc validation_rc ledger_rc unwind_rc first_rc=0 index=0 valid_count=0 format_failures=0
+  POST_REVIEW_VALID_COUNT=0
+  POST_REVIEW_FORMAT_FAILURE_COUNT=0
+  POST_REVIEW_INFRA_FAILURE=0
+  if [ -n "$failed_path" ] && ! : >"$failed_path"; then POST_REVIEW_INFRA_FAILURE=1; return 2; fi
   while IFS= read -r row; do
     index=$((index + 1))
     edge="$(jq -r .edge <<<"$row")"; status="$(jq -r .status <<<"$row")"; result="$(jq -r .result <<<"$row")"
-    if uberdev_wait_child "$status" "$result" "$timeout_s" \
-        && uberdev_child_validate_phase1_review_result "$result"; then
+    if uberdev_wait_child "$status" "$result" "$timeout_s"; then
+      if uberdev_child_validate_phase1_review_result "$result"; then
+        valid_count=$((valid_count + 1))
+        continue
+      else
+        validation_rc=$?
+      fi
+      if uberdev_unwind_child "$status" "$result" "$timeout_s"; then
+        :
+      else
+        unwind_rc=$?
+        POST_REVIEW_INFRA_FAILURE=1
+        [ "$first_rc" -ne 0 ] || first_rc="$unwind_rc"
+        echo "error: cleanup failed after invalid reviewer result edge=$edge" >&2
+        continue
+      fi
+      if [ -z "$failed_path" ]; then
+        POST_REVIEW_INFRA_FAILURE=1
+        [ "$first_rc" -ne 0 ] || first_rc="${validation_rc:-2}"
+        continue
+      fi
+      if jq -cn --arg edge "$edge" --argjson index "$index" --arg status "$status" --arg result "$result" \
+          '{edge:$edge,index:$index,status:$status,result:$result}' >>"$failed_path"; then
+        format_failures=$((format_failures + 1))
+      else
+        ledger_rc=$?
+        POST_REVIEW_INFRA_FAILURE=1
+        [ "$first_rc" -ne 0 ] || first_rc="$ledger_rc"
+      fi
       continue
     else
       wait_rc=$?
     fi
     [ "$first_rc" -ne 0 ] || first_rc="$wait_rc"
-    if [ -n "$failed_path" ]; then
-      if jq -cn --arg edge "$edge" --argjson index "$index" --arg status "$status" --arg result "$result" \
-          '{edge:$edge,index:$index,status:$status,result:$result}' >>"$failed_path"; then
-        :
-      else
-        ledger_rc=$?
-        [ "$first_rc" -ne 0 ] || first_rc="$ledger_rc"
-      fi
+    POST_REVIEW_INFRA_FAILURE=1
+    if ! uberdev_unwind_child "$status" "$result" "$timeout_s"; then
+      echo "error: cleanup failed after child wait edge=$edge" >&2
     fi
-    uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
   done <"$launched"
-  if [ "$first_rc" -ne 0 ]; then
-    [ "$cleanup_rc" -eq 0 ] || echo "error: cleanup failed after child wait" >&2
-    return "$first_rc"
-  fi
+  POST_REVIEW_VALID_COUNT="$valid_count"
+  POST_REVIEW_FORMAT_FAILURE_COUNT="$format_failures"
+  [ "$first_rc" -eq 0 ] || return "$first_rc"
+  [ "$format_failures" -eq 0 ] || return 1
   return 0
 }
 
@@ -235,13 +271,27 @@ for EDGE_ID in "${REVIEW_EDGES[@]}"; do
   fi
   post_review_record "$EDGE_ID" "$INSTANCE" "$INPUTS_JSON" '[]' "$REVIEW_RECORDS"
 done
-post_review_fanout "$REVIEW_RECORDS" "$REVIEW_DESCRIPTORS" "$REVIEW_LAUNCHED" "$REVIEW_PR_TIMEOUT"
 REVIEW_FAILED="$RESEARCH_DIR_ABS/post-review.failed"
 REVIEW_WAVE_BLOCKED=0
-if post_review_wait_all "$REVIEW_LAUNCHED" "$REVIEW_PR_TIMEOUT" "$REVIEW_FAILED"; then
-  :
-elif [ ! -s "$REVIEW_FAILED" ]; then
+REVIEW_EXPECTED_COUNT="${#REVIEW_EDGES[@]}"
+REVIEW_INITIAL_VALID_COUNT=0
+REVIEW_FORMAT_FAILURE_COUNT=0
+if ! post_review_roster_complete "$REVIEW_RECORDS" "$REVIEW_EXPECTED_COUNT" "${REVIEW_EDGES[@]}"; then
   REVIEW_WAVE_BLOCKED=1
+elif ! post_review_fanout "$REVIEW_RECORDS" "$REVIEW_DESCRIPTORS" "$REVIEW_LAUNCHED" "$REVIEW_PR_TIMEOUT"; then
+  REVIEW_WAVE_BLOCKED=1
+elif ! post_review_roster_complete "$REVIEW_LAUNCHED" "$REVIEW_EXPECTED_COUNT" "${REVIEW_EDGES[@]}"; then
+  REVIEW_WAVE_BLOCKED=1
+else
+  if post_review_wait_all "$REVIEW_LAUNCHED" "$REVIEW_PR_TIMEOUT" "$REVIEW_FAILED"; then
+    :
+  else
+    REVIEW_WAIT_RC=$?
+    if [ "$REVIEW_WAIT_RC" -ne 1 ] || [ "$POST_REVIEW_INFRA_FAILURE" -ne 0 ] || [ ! -s "$REVIEW_FAILED" ]; then REVIEW_WAVE_BLOCKED=1; fi
+  fi
+  REVIEW_INITIAL_VALID_COUNT="$POST_REVIEW_VALID_COUNT"
+  REVIEW_FORMAT_FAILURE_COUNT="$POST_REVIEW_FORMAT_FAILURE_COUNT"
+  if [ $((REVIEW_INITIAL_VALID_COUNT + REVIEW_FORMAT_FAILURE_COUNT)) -ne "$REVIEW_EXPECTED_COUNT" ]; then REVIEW_WAVE_BLOCKED=1; fi
 fi
 ```
 
@@ -300,12 +350,13 @@ Wait until all 6 routed calls have returned. Parse each YAML block through
 `uberdev_child_validate_phase1_review_result`, the canonical runtime boundary
 that rejects malformed fields and APPROVE-with-blocker contradictions.
 
-Failure handling is fail-closed. Every BLOCKED or unparseable reviewer is recorded by stable edge and roster index, then gets exactly one format-repair retry using the same edge and a fresh `attempt02` instance whose inputs add `format_retry: true`. If any repaired return is still BLOCKED or unparseable, the aggregate verdict is BLOCKED and `/review-pr` cannot emit a green trust signal. Never drop a reviewer and continue with N-1 evidence.
+Failure handling is fail-closed. Only a malformed result from a child that reached a proven terminal state with no retained lease is recorded by stable edge and roster index for one format-repair retry using the same edge and a fresh `attempt02` instance whose inputs add `format_retry: true`. Dispatch, wait, supervision, failure-ledger, or unwind failures block the wave immediately and are never retried as formatting defects. If any repaired return is still BLOCKED or unparseable, the aggregate verdict is BLOCKED and `/review-pr` cannot emit a green trust signal. Never drop a reviewer and continue with N-1 evidence.
 
 ```bash uberdev-executable
 FORMAT_EXAMPLE_PATH="${FORMAT_EXAMPLE_PATH:-$CRITERIA_PATH}"
 REPAIR_PREFIX="$RESEARCH_DIR_ABS/post-review-repair"
 : >"$REPAIR_PREFIX.records"
+REVIEW_REPAIR_VALID_COUNT=0
 if [ "$REVIEW_WAVE_BLOCKED" -eq 0 ] && [ -s "$REVIEW_FAILED" ]; then
   while IFS= read -r FAILED_REVIEW_ROW; do
     FAILED_REVIEW_EDGE="$(jq -r .edge <<<"$FAILED_REVIEW_ROW")"
@@ -313,12 +364,22 @@ if [ "$REVIEW_WAVE_BLOCKED" -eq 0 ] && [ -s "$REVIEW_FAILED" ]; then
     FAILED_REVIEW_INPUTS="$(jq -ce --arg edge "$FAILED_REVIEW_EDGE" 'select(.edge == $edge) | .inputs' "$REVIEW_RECORDS")"
     REPAIR_INPUTS="$(uberdev_child_inputs_format_retry "$FAILED_REVIEW_EDGE" "$FAILED_REVIEW_INPUTS" "$FORMAT_EXAMPLE_PATH")"
     REPAIR_INSTANCE="$(uberdev_child_instance_id "post-review-${RUN_ID}-r${FAILED_REVIEW_INDEX}-iter${REVIEW_ITERATION}-attempt02")" || exit 2
-    post_review_record "$FAILED_REVIEW_EDGE" "$REPAIR_INSTANCE" "$REPAIR_INPUTS" '[]' "$REPAIR_PREFIX.records"
+    post_review_record "$FAILED_REVIEW_EDGE" "$REPAIR_INSTANCE" "$REPAIR_INPUTS" '[]' "$REPAIR_PREFIX.records" || { REVIEW_WAVE_BLOCKED=1; break; }
   done <"$REVIEW_FAILED"
-  post_review_fanout "$REPAIR_PREFIX.records" "$REPAIR_PREFIX.descriptors" "$REPAIR_PREFIX.launched" "$REVIEW_PR_TIMEOUT"
-  REVIEW_REPAIR_FAILED="$RESEARCH_DIR_ABS/post-review-repair.failed"
-  post_review_wait_all "$REPAIR_PREFIX.launched" "$REVIEW_PR_TIMEOUT" "$REVIEW_REPAIR_FAILED" || REVIEW_WAVE_BLOCKED=1
+  if [ "$REVIEW_WAVE_BLOCKED" -eq 0 ] && ! post_review_roster_complete "$REPAIR_PREFIX.records" "$REVIEW_FORMAT_FAILURE_COUNT" "${REVIEW_EDGES[@]}"; then
+    REVIEW_WAVE_BLOCKED=1
+  elif [ "$REVIEW_WAVE_BLOCKED" -eq 0 ] && ! post_review_fanout "$REPAIR_PREFIX.records" "$REPAIR_PREFIX.descriptors" "$REPAIR_PREFIX.launched" "$REVIEW_PR_TIMEOUT"; then
+    REVIEW_WAVE_BLOCKED=1
+  elif [ "$REVIEW_WAVE_BLOCKED" -eq 0 ] && ! post_review_roster_complete "$REPAIR_PREFIX.launched" "$REVIEW_FORMAT_FAILURE_COUNT" "${REVIEW_EDGES[@]}"; then
+    REVIEW_WAVE_BLOCKED=1
+  elif [ "$REVIEW_WAVE_BLOCKED" -eq 0 ]; then
+    REVIEW_REPAIR_FAILED="$RESEARCH_DIR_ABS/post-review-repair.failed"
+    post_review_wait_all "$REPAIR_PREFIX.launched" "$REVIEW_PR_TIMEOUT" "$REVIEW_REPAIR_FAILED" || REVIEW_WAVE_BLOCKED=1
+    REVIEW_REPAIR_VALID_COUNT="$POST_REVIEW_VALID_COUNT"
+    if [ "$REVIEW_REPAIR_VALID_COUNT" -ne "$REVIEW_FORMAT_FAILURE_COUNT" ]; then REVIEW_WAVE_BLOCKED=1; fi
+  fi
 fi
+if [ $((REVIEW_INITIAL_VALID_COUNT + REVIEW_REPAIR_VALID_COUNT)) -ne "$REVIEW_EXPECTED_COUNT" ]; then REVIEW_WAVE_BLOCKED=1; fi
 ```
 
 ### Step 4: Aggregate

@@ -508,6 +508,14 @@ raw=open(sys.argv[1],encoding='utf-8').read()
 assert '[diff summarized:' in raw and 'large.txt' in raw
 assert os.path.getsize(sys.argv[1]) < 16*1024*1024
 PY
+  STALE_RANGE_PATH="$COMMIT_RANGE_PATH"
+  mkdir "$TMP/scope-range-blocked"
+  COMMIT_RANGE_PATH="$TMP/scope-range-blocked"
+  if . "$TMP/review-scope.sh"; then
+    echo 'review-child-inputs: failed Phase 1 scope refresh reused stale artifacts' >&2
+    exit 1
+  fi
+  COMMIT_RANGE_PATH="$STALE_RANGE_PATH"
 )
 
 HOSTILE_DIR="$RESEARCH_DIR_ABS"$'/review dir\nwith "quotes" and \\slashes *?[x]'
@@ -593,6 +601,9 @@ chmod 600 "$BASE_REVIEW_RECORDS"
 printf '%s\n' \
   '{"edge":"review_pr.review.types","index":3,"status":"fixture.status","result":"fixture.result"}' \
   >"$REVIEW_FAILED"
+REVIEW_EXPECTED_COUNT=6
+REVIEW_INITIAL_VALID_COUNT=5
+REVIEW_FORMAT_FAILURE_COUNT=1
 unset FAILED_REVIEW_EDGE FAILED_REVIEW_INDEX
 FORMAT_EXAMPLE_PATH="$FORMAT_EXAMPLE"
 export UBERDEV_CHILD_TEST_SOURCE="$REVIEW_SOURCE"

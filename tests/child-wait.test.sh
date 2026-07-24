@@ -114,6 +114,8 @@ INVALID_REVIEW="$TMP/run/children/worker-0001/invalid-review.md"
 EMPTY_REVIEW="$TMP/run/children/worker-0001/empty-review.md"
 NULL_FINDINGS_REVIEW="$TMP/run/children/worker-0001/null-findings-review.md"
 INVALID_SCALAR_REVIEW="$TMP/run/children/worker-0001/invalid-scalar-review.md"
+DRIVE_RELATIVE_REVIEW="$TMP/run/children/worker-0001/drive-relative-review.md"
+DRIVE_QUALIFIED_REVIEW="$TMP/run/children/worker-0001/drive-qualified-review.md"
 printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
   '  - severity: blocker' '    location: tests/example.test.sh:1' \
   '    summary: bounded summary' '    detail: bounded detail' \
@@ -130,11 +132,21 @@ printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
   '  - severity: suggestion' '    location: tests/example.test.sh:1' \
   '    summary: invalid: plain scalar' '    detail: bounded detail' \
   'confidence: high' '```' >"$INVALID_SCALAR_REVIEW"
+printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
+  '  - severity: suggestion' '    location: C:relative/path.ts:1' \
+  '    summary: invalid drive-relative location' '    detail: bounded detail' \
+  'confidence: high' '```' >"$DRIVE_RELATIVE_REVIEW"
+printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
+  '  - severity: suggestion' '    location: C:/repo/path.ts:1' \
+  '    summary: invalid drive-qualified location' '    detail: bounded detail' \
+  'confidence: high' '```' >"$DRIVE_QUALIFIED_REVIEW"
 uberdev_child_validate_phase1_review_result "$VALID_REVIEW"
 uberdev_child_validate_phase1_review_result "$EMPTY_REVIEW"
 ! uberdev_child_validate_phase1_review_result "$INVALID_REVIEW"
 ! uberdev_child_validate_phase1_review_result "$NULL_FINDINGS_REVIEW"
 ! uberdev_child_validate_phase1_review_result "$INVALID_SCALAR_REVIEW"
+! uberdev_child_validate_phase1_review_result "$DRIVE_RELATIVE_REVIEW"
+! uberdev_child_validate_phase1_review_result "$DRIVE_QUALIFIED_REVIEW"
 
 # A running status without the exact lifecycle lease is not cancellation
 # authority: never signal or synthesize timed_out.
@@ -235,6 +247,42 @@ set -e
 [ "$(shasum -a 256 "$STATUS" | awk '{print $1}')" = "$STATUS_SHA" ]
 [ "$(shasum -a 256 "$MANIFEST" | awk '{print $1}')" = "$MANIFEST_SHA" ]
 [ -f "$LEASE" ] && [ "$(shasum -a 256 "$LEASE" | awk '{print $1}')" = "$LEASE_SHA" ]
+
+# Provider completion may win after the running snapshot but before the timeout
+# path can find its lease. Re-probing the changed snapshot must observe the real
+# terminal instead of reporting a supervisory failure.
+eval "$(declare -f _uberdev_child_find_lease | sed '1s/_uberdev_child_find_lease/_real_child_find_lease/')"
+printf 'race result\n' >"$RESULT"
+printf '{"backend":"codex","state":"running","exit_code":null,"pid":"777","lease_generation":"%s"}\n' "$GENERATION" >"$STATUS"
+printf 'run_id=worker-0001\nstatus_path=%s\ngeneration=%s\n' "$STATUS" "$GENERATION" >"$LEASE"
+_uberdev_child_find_lease() {
+  printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"777","lease_generation":"%s"}\n' "$GENERATION" >"$STATUS"
+  terminal_manifest completed
+  rm -f "$LEASE"
+  return 2
+}
+uberdev_wait_child "$STATUS" "$RESULT" 1
+eval "$(declare -f _real_child_find_lease | sed '1s/_real_child_find_lease/_uberdev_child_find_lease/')"
+
+# The same completion race can land while cancellation is being attempted.
+# A changed status snapshot wins; timeout must not overwrite it or retain the
+# obsolete lease.
+eval "$(declare -f _uberdev_agent_lease_identity | sed '1s/_uberdev_agent_lease_identity/_real_agent_lease_identity/')"
+eval "$(declare -f _uberdev_dispatch_cancel_backend | sed '1s/_uberdev_dispatch_cancel_backend/_real_dispatch_cancel_backend/')"
+STATUS_REAL="$(python3 -I -B -c 'import os,sys; print(os.path.realpath(sys.argv[1]),end="")' "$STATUS")"
+printf '{"backend":"codex","state":"running","exit_code":null,"pid":"778","lease_generation":"%s"}\n' "$GENERATION" >"$STATUS"
+printf 'run_id=worker-0001\nstatus_path=%s\ngeneration=%s\n' "$STATUS_REAL" "$GENERATION" >"$LEASE"
+printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00.000Z","run_id":"worker-0001"}\n{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001"}\n' >"$MANIFEST"
+_uberdev_agent_lease_identity() { printf 'fixture-identity'; }
+_uberdev_dispatch_cancel_backend() {
+  printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"778","lease_generation":"%s"}\n' "$GENERATION" >"$STATUS"
+  terminal_manifest completed
+  rm -f "$LEASE"
+  return 2
+}
+uberdev_wait_child "$STATUS" "$RESULT" 1
+eval "$(declare -f _real_agent_lease_identity | sed '1s/_real_agent_lease_identity/_uberdev_agent_lease_identity/')"
+eval "$(declare -f _real_dispatch_cancel_backend | sed '1s/_real_dispatch_cancel_backend/_uberdev_dispatch_cancel_backend/')"
 
 # CAS cannot overwrite a provider completion that wins the timeout race.
 printf '{"backend":"codex","state":"running","exit_code":null,"pid":"777","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$STATUS"

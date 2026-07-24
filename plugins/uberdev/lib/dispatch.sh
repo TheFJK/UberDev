@@ -121,7 +121,7 @@ _uberdev_dispatch_create_codex_worktree_receipt() {
   local start_head
   start_head="$(git -C "$1" rev-parse HEAD 2>/dev/null)" || return 2
   _uberdev_dispatch_python -I -B - "$1" "$2" "$3" "$4" "$start_head" <<'PY'
-import json,os,posixpath,re,secrets,stat,sys
+import json,os,posixpath,re,secrets,stat,subprocess,sys
 repo_arg,relative,branch,receipt,start_head=sys.argv[1:]
 repo=os.path.realpath(repo_arg)
 if not os.path.isabs(repo_arg) or not os.path.isdir(repo) or os.path.isabs(relative): raise SystemExit(2)
@@ -133,11 +133,14 @@ if (normalized!=relative or not normalized.startswith(".claude/worktrees/solve-i
 root=os.path.join(repo,".claude","worktrees")
 target=os.path.abspath(os.path.join(repo,*normalized.split('/')))
 if os.path.commonpath((root,target))!=root: raise SystemExit(2)
+if os.path.lexists(target): raise SystemExit(2)
+branch_probe=subprocess.run(['git','-C',repo,'show-ref','--verify','--quiet','refs/heads/'+branch])
+if branch_probe.returncode!=1: raise SystemExit(2)
 receipt=os.path.abspath(receipt); parent=os.path.dirname(receipt)
 parent_entry=os.lstat(parent); uid_fn=getattr(os,"geteuid",None); uid=uid_fn() if uid_fn else None
 if stat.S_ISLNK(parent_entry.st_mode) or not stat.S_ISDIR(parent_entry.st_mode) or (uid is not None and parent_entry.st_uid!=uid): raise SystemExit(2)
 token=secrets.token_hex(16)+":"+start_head
-payload={"schema_version":1,"repo":repo,"relative":normalized,"worktree":target,"branch":branch,"start_head":start_head,"token":token}
+payload={"schema_version":1,"repo":repo,"relative":normalized,"worktree":target,"branch":branch,"start_head":start_head,"token":token,"path_absent_at_receipt":True,"branch_absent_at_receipt":True}
 flags=os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0)
 descriptor=os.open(receipt,flags,0o600)
 try:
@@ -213,7 +216,7 @@ if os.name=="nt":
   if len(raw)>65536: raise SystemExit(2)
   value=json.loads(raw)
  finally: os.close(descriptor)
- expected={"schema_version":1,"repo":repo,"relative":relative,"worktree":os.path.abspath(os.path.join(repo,*relative.split('/'))),"branch":branch,"start_head":token_start,"token":token}
+ expected={"schema_version":1,"repo":repo,"relative":relative,"worktree":os.path.abspath(os.path.join(repo,*relative.split('/'))),"branch":branch,"start_head":token_start,"token":token,"path_absent_at_receipt":True,"branch_absent_at_receipt":True}
  if value!=expected: raise SystemExit(2)
  target=value["worktree"]; root=os.path.join(repo,".claude","worktrees")
  if os.path.commonpath((root,target))!=root or branch!="worktree-"+relative.rsplit('/',1)[-1]: raise SystemExit(2)
@@ -233,7 +236,7 @@ try:
  raw=os.read(descriptor,65537)
  if len(raw)>65536: raise SystemExit(2)
  value=json.loads(raw)
- expected={"schema_version":1,"repo":repo,"relative":relative,"worktree":os.path.abspath(os.path.join(repo,relative)),"branch":branch,"start_head":token_start,"token":token}
+ expected={"schema_version":1,"repo":repo,"relative":relative,"worktree":os.path.abspath(os.path.join(repo,relative)),"branch":branch,"start_head":token_start,"token":token,"path_absent_at_receipt":True,"branch_absent_at_receipt":True}
  if value!=expected: raise SystemExit(2)
  target=value["worktree"]; root=os.path.join(repo,".claude","worktrees")
  if os.path.commonpath((root,target))!=root or branch!="worktree-"+os.path.basename(relative): raise SystemExit(2)
@@ -1542,7 +1545,7 @@ _uberdev_dispatch_codex() {
   local ROUTE_SERVICE_TIER="${UBERDEV_AGENT_SERVICE_TIER:-default}"
   local ROUTE_SANDBOX="${UBERDEV_AGENT_SANDBOX:-workspace-write}"
   local EFFECTIVE_POLICY="${UBERDEV_AGENT_EFFECTIVE_POLICY:-${UBERDEV_AGENT_ROUTING_MODE:-adaptive}}"
-  local REPOSITORY_ROOT WORKTREE_RECEIPT WORKTREE_TOKEN=''
+  local REPOSITORY_ROOT WORKTREE_RECEIPT WORKTREE_TOKEN='' ABORT_PID ABORT_CANDIDATE
   local CHILD_OWNED="${UBERDEV_AGENT_CHILD_OWNED:-0}"
   REPOSITORY_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)" || { DISPATCH_RC=1; return 1; }
   WORKTREE_DIR="$REPOSITORY_ROOT/$WORKTREE_RELATIVE"
@@ -1809,7 +1812,12 @@ EOF_STATUS
   local LAUNCH_PID="$!"
   disown 2>/dev/null || true
   if ! DISPATCH_ID="$(_uberdev_dispatch_capture_supervisor_pid "$LAUNCH_PID" "$STATUS_FILE.pid")"; then
-    kill -TERM "$LAUNCH_PID" 2>/dev/null || true
+    ABORT_PID="$LAUNCH_PID"
+    if [ "$(_uberdev_dispatch_os_class)" = windows-native ]; then
+      ABORT_CANDIDATE="$(_uberdev_dispatch_read_secure_pid_file "$STATUS_FILE.pid" 2>/dev/null || true)"
+      [ -z "$ABORT_CANDIDATE" ] || ABORT_PID="$ABORT_CANDIDATE"
+    fi
+    case "$ABORT_PID" in ''|*[!0-9]*|0) kill -TERM "$LAUNCH_PID" 2>/dev/null || true ;; *) DISPATCH_ID="$ABORT_PID" ;; esac
     DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"
     _uberdev_dispatch_audit dispatch_setup_failed \
       "{\"issue\":$ISSUE_NUM,\"phase\":\"pid_capture\",\"backend\":\"codex\",\"rc\":3}"

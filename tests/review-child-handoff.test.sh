@@ -357,20 +357,70 @@ set -e
 [ "$(sed -n '2p' "$unwind_log")" = "$run/wait-fail-second.status	$run/wait-fail-second.result	31" ]
 grep -q 'cleanup failed after child wait' "$run/stderr"
 if [ "$flavor" = post ]; then
-  python3 -I -B - "$run/failed" <<'PY'
-import json,sys
-rows=[json.loads(line) for line in open(sys.argv[1],encoding='utf-8') if line.strip()]
-assert [(row['edge'],row['index']) for row in rows]==[('second.edge',2),('third.edge',3)],rows
-PY
+  [ ! -s "$run/failed" ]
 fi
 SH
 bash "$TMP/wait-ledger-failure.sh" "$TMP/builder.sh" review_child_wait_all "$TMP/wait-review" review
 bash "$TMP/wait-ledger-failure.sh" "$TMP/simplify-builder.sh" review_child_wait_all "$TMP/wait-simplify" simplify
 bash "$TMP/wait-ledger-failure.sh" "$TMP/post-runtime.sh" post_review_wait_all "$TMP/wait-post" post
 
+# Only invalid output from a successfully terminal-and-unwound child enters the
+# format-repair ledger. Lifecycle failures above remain unrepairable even when
+# another failed row could otherwise make the ledger nonempty.
+cat >"$TMP/format-repair-ledger.sh" <<'SH'
+set -u
+runtime="$1"; run="$2"; mkdir -p "$run"
+. "$runtime"
+uberdev_wait_child() { return 0; }
+uberdev_child_validate_phase1_review_result() { case "$1" in *invalid.result) return 2 ;; *) return 0 ;; esac; }
+uberdev_unwind_child() { return 0; }
+printf '%s\n' \
+  "{\"edge\":\"first.edge\",\"status\":\"$run/first.status\",\"result\":\"$run/first.result\"}" \
+  "{\"edge\":\"second.edge\",\"status\":\"$run/second.status\",\"result\":\"$run/invalid.result\"}" \
+  "{\"edge\":\"third.edge\",\"status\":\"$run/third.status\",\"result\":\"$run/third.result\"}" >"$run/launched"
+set +e
+post_review_wait_all "$run/launched" 31 "$run/failed"
+rc=$?
+set -e
+[ "$rc" -eq 1 ]
+[ "$POST_REVIEW_VALID_COUNT" -eq 2 ]
+[ "$POST_REVIEW_FORMAT_FAILURE_COUNT" -eq 1 ]
+python3 -I -B - "$run/failed" <<'PY'
+import json,sys
+rows=[json.loads(line) for line in open(sys.argv[1],encoding='utf-8') if line.strip()]
+assert [(row['edge'],row['index']) for row in rows]==[('second.edge',2)],rows
+PY
+
+real_jq="$(command -v jq)"; ledger_writes=0
+jq() {
+  case " $* " in
+    *' --argjson index '*)
+      ledger_writes=$((ledger_writes + 1))
+      [ "$ledger_writes" -ne 2 ] || return 1
+      ;;
+  esac
+  command "$real_jq" "$@"
+}
+uberdev_child_validate_phase1_review_result() { return 2; }
+printf '%s\n' \
+  "{\"edge\":\"first.edge\",\"status\":\"$run/first.status\",\"result\":\"$run/first.result\"}" \
+  "{\"edge\":\"second.edge\",\"status\":\"$run/second.status\",\"result\":\"$run/second.result\"}" >"$run/ledger-failure.launched"
+set +e
+post_review_wait_all "$run/ledger-failure.launched" 31 "$run/ledger-failure.failed"
+rc=$?
+set -e
+[ "$rc" -eq 1 ]
+[ "$POST_REVIEW_INFRA_FAILURE" -eq 1 ]
+[ "$(wc -l <"$run/ledger-failure.failed" | tr -d ' ')" -eq 1 ]
+SH
+bash "$TMP/format-repair-ledger.sh" "$TMP/post-runtime.sh" "$TMP/format-repair-post"
+
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$REVIEW"
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$SIMPLIFY"
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$POST"
+grep -q 'REVIEW_WAIT_RC.*-ne 1' "$POST"
+[ "$(grep -c '! post_review_fanout' "$POST")" -eq 2 ]
+grep -q 'post_review_roster_complete "$REVIEW_LAUNCHED" "$REVIEW_EXPECTED_COUNT"' "$POST"
 ! grep -En "wait_child .* 0|IFS='\\|'|additional_focus|brief_path|lens_index" "$REVIEW" "$SIMPLIFY" "$POST"
 ! grep -En 'format_repair' "$POST"
 grep -Eq 'format_retry' "$POST"

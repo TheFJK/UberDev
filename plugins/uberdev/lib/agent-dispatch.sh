@@ -1369,6 +1369,11 @@ uberdev_agent_dispatch() {
   handle="${DISPATCH_ID:-}"
   if [ "$rc" -ne 0 ] || [ -z "$handle" ]; then
     [ "$rc" -ne 0 ] || rc=1
+    if [ -n "$handle" ]; then
+      _uberdev_agent_abort_after_launch "$manifest" "$lease" "$lease_identity" "$status_file" "$result_file" \
+        "$backend" "$handle" "$request_json" "$decision" provider_launch
+      return $?
+    fi
     if ! _uberdev_agent_finalize_launch_failure "$manifest" "$lease" "$lease_identity" "$status_file" \
         "$backend" "$request_json" "$decision" "$rc" provider_launch; then
       DISPATCH_RC=2

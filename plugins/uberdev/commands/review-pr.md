@@ -303,7 +303,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
    Compute Phase 1 inputs from the PR:
    - `changed_paths` — normalized, non-empty POSIX repository-relative paths from the same fixed local `git diff <merge-base>..<head> --name-only` snapshot used for the Phase 1 diff artifact and commit range. The GitHub server-side path list is not authoritative on entry or re-entry. Preserve deleted or otherwise missing entries as path strings; absolute paths, traversal, dot components, backslashes, control characters, and unsafe names are rejected by the `repo_path_array` handoff contract before provider launch.
-   - `commit_range` — `<base>..HEAD` where `<base>` is the PR base ref.
+   - `commit_range` — `<merge-base>..HEAD`, where `<merge-base>` is the computed merge-base commit between the PR base ref and the reviewed head.
    - `tier` — passed through from `$ARGUMENTS` if present (forwarded by `finish-branch`'s chain), else default `medium`.
 
    Recompute the review scope from one fixed local base-to-HEAD snapshot on
@@ -396,13 +396,15 @@ def replace_private(path,payload):
         try: os.unlink(tmp)
         except FileNotFoundError: pass
 replace_private(diff_path,b'<external-untrusted-input source="pr-diff">\n'+diff+b'</external-untrusted-input>\n')
-replace_private(range_path,f'{base}..{head}\n'.encode())
+expected_range=f'{base}..{head}\n'.encode()
+replace_private(range_path,expected_range)
+if open(range_path,'rb').read()!=expected_range: raise SystemExit(2)
 print(json.dumps(paths,separators=(',',':')),end='')
 PY
 )" || return 2
    }
    BASE_SHA="$(review_resolve_phase1_base "$PR_NUMBER" "$WORKTREE_ROOT")" || return 2
-   review_refresh_phase1_scope "$BASE_SHA"
+   review_refresh_phase1_scope "$BASE_SHA" || return 2
    ```
 
    Invoke the post-impl-review skill through the context-only run-tree edge

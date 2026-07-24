@@ -820,7 +820,7 @@ try:
   location=finding['location']
   if not re.fullmatch(r'.+:[1-9][0-9]*',location): raise ValueError()
   file_name=location.rsplit(':',1)[0]
-  if (file_name.startswith('/') or '\\' in file_name
+  if (file_name.startswith('/') or re.match(r'^[A-Za-z]:',file_name) or '\\' in file_name
       or any(ord(char)<32 or ord(char)==127 for char in file_name)
       or any(part in {'','.','..'} for part in file_name.split('/'))): raise ValueError()
  if verdict=='APPROVE' and any(row['severity']=='blocker' for row in findings): raise ValueError()
@@ -871,6 +871,18 @@ try:
 finally:
  if os.path.exists(tmp): os.unlink(tmp)
 PY
+}
+
+# Return success only when the immutable status snapshot observed before a
+# timeout-side operation is no longer current. Provider completion may publish
+# terminal state and release its lease between the running probe and either
+# lease lookup or cancellation; callers must re-enter the main probe loop in
+# that case instead of reporting a supervisory failure for the losing timeout.
+_uberdev_child_status_snapshot_changed() {
+  local probe current
+  probe="$(_uberdev_child_wait_probe "$1" "$2" 2>/dev/null)" || return 2
+  current="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["snapshot_sha256"],end="")' "$probe")" || return 2
+  [ "$current" != "$3" ]
 }
 
 _uberdev_child_manifest_terminal() {
@@ -989,11 +1001,23 @@ PY
     fi
     now="$(date +%s)"
     if [ $((now - start)) -ge "$timeout" ]; then
-      lease_info="$(_uberdev_child_find_lease "$state_dir" "$instance" "$status_file" 2>/dev/null)" || return 2
+      if lease_info="$(_uberdev_child_find_lease "$state_dir" "$instance" "$status_file" 2>/dev/null)"; then
+        :
+      elif _uberdev_child_status_snapshot_changed "$status_file" "$result" "$snapshot"; then
+        continue
+      else
+        return 2
+      fi
       lease="${lease_info%%	*}"; [ "$lease" != "$lease_info" ] || return 2
       [ "${lease_info#*	}" = "$lease_generation" ] && [ -n "$lease_generation" ] || return 2
       lease_identity="$(_uberdev_agent_lease_identity "$lease")" || return 2
-      _uberdev_dispatch_cancel_backend "$backend" "$handle" "$process_identity" || return 2
+      if _uberdev_dispatch_cancel_backend "$backend" "$handle" "$process_identity"; then
+        :
+      elif _uberdev_child_status_snapshot_changed "$status_file" "$result" "$snapshot"; then
+        continue
+      else
+        return 2
+      fi
       if [ "$backend" = background ]; then
         _uberdev_dispatch_cleanup_dead_partial_result "$result" "$handle" || return 2
       fi

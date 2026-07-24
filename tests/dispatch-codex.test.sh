@@ -154,6 +154,47 @@ mkdir -p "$CLEANUP_TMP/repo" "$CLEANUP_TMP/runtime"
   git add base.txt
   git commit -qm base
 )
+
+# A receipt is creation authority only when both the target path and branch
+# were absent before launch. Pre-existing clean artifacts at the starting commit
+# must remain untouched instead of becoming eligible for force cleanup.
+collision_instance='cleanup-preexisting-worktree-a1'
+collision_slug="$(UBERDEV_AGENT_INSTANCE_ID="$collision_instance" bash -c '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"
+collision_relative=".claude/worktrees/solve-issue-335-$collision_slug"
+collision_branch="worktree-solve-issue-335-$collision_slug"
+collision_receipt="$CLEANUP_TMP/runtime/preexisting-worktree.owner.json"
+git -C "$CLEANUP_TMP/repo" worktree add -q "$collision_relative" -b "$collision_branch"
+if bash -c '. "$1"; _uberdev_dispatch_create_codex_worktree_receipt "$2" "$3" "$4" "$5"' \
+    _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$collision_relative" "$collision_branch" "$collision_receipt" >/dev/null 2>&1; then
+  fail_msg "pre-existing clean worktree cannot mint cleanup authority" "receipt creation succeeded"
+elif [ -d "$CLEANUP_TMP/repo/$collision_relative" ] \
+    && git -C "$CLEANUP_TMP/repo" show-ref --verify --quiet "refs/heads/$collision_branch" \
+    && [ ! -e "$collision_receipt" ]; then
+  pass_msg "pre-existing clean worktree cannot mint cleanup authority"
+else
+  fail_msg "pre-existing clean worktree remains untouched" "path, branch, or receipt state changed"
+fi
+git -C "$CLEANUP_TMP/repo" worktree remove --force "$collision_relative"
+git -C "$CLEANUP_TMP/repo" branch -D "$collision_branch" >/dev/null
+
+branch_collision_instance='cleanup-preexisting-branch-a1'
+branch_collision_slug="$(UBERDEV_AGENT_INSTANCE_ID="$branch_collision_instance" bash -c '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"
+branch_collision_relative=".claude/worktrees/solve-issue-335-$branch_collision_slug"
+branch_collision_branch="worktree-solve-issue-335-$branch_collision_slug"
+branch_collision_receipt="$CLEANUP_TMP/runtime/preexisting-branch.owner.json"
+git -C "$CLEANUP_TMP/repo" branch "$branch_collision_branch"
+if bash -c '. "$1"; _uberdev_dispatch_create_codex_worktree_receipt "$2" "$3" "$4" "$5"' \
+    _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$branch_collision_relative" "$branch_collision_branch" "$branch_collision_receipt" >/dev/null 2>&1; then
+  fail_msg "pre-existing branch cannot mint cleanup authority" "receipt creation succeeded"
+elif git -C "$CLEANUP_TMP/repo" show-ref --verify --quiet "refs/heads/$branch_collision_branch" \
+    && [ ! -e "$CLEANUP_TMP/repo/$branch_collision_relative" ] \
+    && [ ! -e "$branch_collision_receipt" ]; then
+  pass_msg "pre-existing branch cannot mint cleanup authority"
+else
+  fail_msg "pre-existing branch remains untouched" "path, branch, or receipt state changed"
+fi
+git -C "$CLEANUP_TMP/repo" branch -D "$branch_collision_branch" >/dev/null
+
 cleanup_failures=''
 for terminal_state in completed failed timed_out cancelled; do
   instance="cleanup-$terminal_state-a1"
@@ -409,6 +450,104 @@ cleanup_token="$(python3 -I -B -c 'import json,sys; print(json.load(open(sys.arg
 bash -c '. "$1"; _uberdev_dispatch_discard_codex_worktree_receipt "$2" "$3"' \
   _ "$DISPATCH_LIB" "$cleanup_status.worktree-owner.json" "$cleanup_token"
 rm -rf "$SETUP_FAILURE_TMP"
+
+echo "== Codex supervisor PID-capture failure is fully unwound =="
+PID_CAPTURE_TMP="$(mktemp -d)"
+mkdir -p "$PID_CAPTURE_TMP/repo" "$PID_CAPTURE_TMP/run" "$PID_CAPTURE_TMP/bin" "$PID_CAPTURE_TMP/tmp"
+(
+  cd "$PID_CAPTURE_TMP/repo"
+  git init -q
+  git config user.name 'UberDev Test'
+  git config user.email 'uberdev-test@example.invalid'
+  printf 'base\n' > base.txt
+  git add base.txt
+  git commit -qm base
+)
+printf 'pid capture prompt\n' >"$PID_CAPTURE_TMP/run/prompt.txt"
+cat >"$PID_CAPTURE_TMP/bin/codex" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" >"$PID_CAPTURE_PROVIDER_PID_FILE"
+trap 'exit 143' HUP INT TERM
+while :; do sleep 1; done
+SH
+chmod +x "$PID_CAPTURE_TMP/bin/codex"
+PID_CAPTURE_REQUEST="$(python3 -I -B - "$PID_CAPTURE_TMP/run" "$PID_CAPTURE_TMP/repo" <<'PY'
+import json,sys
+run,repo=sys.argv[1:]
+print(json.dumps({
+ 'schema_version':1,'run_dir':run,'run_id':'codex-pid-capture-failure',
+ 'repository_id':repo,'backend':'codex','workflow':'review-pr','phase':'review',
+ 'role':'code-reviewer','task_tier':'small','risk_signals':[],
+ 'routing_mode':'inherit','issue_or_pr':335,'issue_num':335,'capacity':1,
+ 'timeout_s':30,'workspace_mode':'isolated'
+},sort_keys=True,separators=(',',':')))
+PY
+)"
+PID_CAPTURE_INSTANCE=codex-pid-capture-failure
+PID_CAPTURE_SLUG="$(UBERDEV_AGENT_INSTANCE_ID="$PID_CAPTURE_INSTANCE" bash -c '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"
+PID_CAPTURE_OUT="$(
+  cd "$PID_CAPTURE_TMP/repo"
+  PATH="$PID_CAPTURE_TMP/bin:$PATH" UBERDEV_TMPDIR="$PID_CAPTURE_TMP/tmp" \
+    PID_CAPTURE_PROVIDER_PID_FILE="$PID_CAPTURE_TMP/provider.pid" \
+    bash -c '
+      . "$1"
+      _uberdev_agent_dispatch_backend() {
+        UBERDEV_AGENT_ROUTING_MODE=inherit
+        UBERDEV_AGENT_EFFECTIVE_POLICY=inherit
+        UBERDEV_AGENT_ROUTE_MODEL=
+        UBERDEV_AGENT_ROUTE_EFFORT=
+        UBERDEV_AGENT_SERVICE_TIER=default
+        UBERDEV_AGENT_SANDBOX=workspace-write
+        UBERDEV_AGENT_RESULT_FILE="$5"
+        UBERDEV_AGENT_STATUS_FILE="$6"
+        UBERDEV_AGENT_CHILD_OWNED=1
+        export UBERDEV_AGENT_ROUTING_MODE UBERDEV_AGENT_EFFECTIVE_POLICY UBERDEV_AGENT_ROUTE_MODEL UBERDEV_AGENT_ROUTE_EFFORT
+        export UBERDEV_AGENT_SERVICE_TIER UBERDEV_AGENT_SANDBOX UBERDEV_AGENT_RESULT_FILE UBERDEV_AGENT_STATUS_FILE UBERDEV_AGENT_CHILD_OWNED
+        _uberdev_dispatch_codex "$2" "$3" "$4"
+      }
+      _uberdev_dispatch_capture_supervisor_pid() {
+        i=0
+        while [ ! -s "$PID_CAPTURE_PROVIDER_PID_FILE" ] && [ "$i" -lt 200 ]; do sleep 0.025; i=$((i + 1)); done
+        [ -s "$PID_CAPTURE_PROVIDER_PID_FILE" ] || return 2
+        return 1
+      }
+      set +e
+      uberdev_agent_dispatch "$2" "$3/prompt.txt" "$3/result.md" "$3/status.json"
+      rc=$?
+      set -e
+      provider_pid="$(cat "$PID_CAPTURE_PROVIDER_PID_FILE" 2>/dev/null)"
+      provider_live=0
+      if [ -n "$provider_pid" ] && kill -0 "$provider_pid" 2>/dev/null; then provider_live=1; fi
+      printf "rc=%s\\nprovider_pid=%s\\nprovider_live=%s\\nstatus=%s\\n" \
+        "$rc" "$provider_pid" "$provider_live" "$(cat "$3/status.json" 2>/dev/null)"
+    ' _ "$DISPATCH_LIB" "$PID_CAPTURE_REQUEST" "$PID_CAPTURE_TMP/run"
+)"
+PID_CAPTURE_ERRORS=''
+printf '%s\n' "$PID_CAPTURE_OUT" | grep -Fq 'rc=2' || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS rc"
+printf '%s\n' "$PID_CAPTURE_OUT" | grep -Fq 'provider_live=0' || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS provider-live"
+printf '%s\n' "$PID_CAPTURE_OUT" | grep -Fq '"state":"failed"' || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS terminal-status"
+[ ! -e "$PID_CAPTURE_TMP/repo/.claude/worktrees/solve-issue-335-$PID_CAPTURE_SLUG" ] || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS worktree"
+git -C "$PID_CAPTURE_TMP/repo" show-ref --verify --quiet "refs/heads/worktree-solve-issue-335-$PID_CAPTURE_SLUG" \
+  && PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS branch"
+[ ! -e "$PID_CAPTURE_TMP/run/status.json.worktree-owner.json" ] || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS receipt"
+grep -R -q 'run_id=codex-pid-capture-failure' "$PID_CAPTURE_TMP/run/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null \
+  && PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS lease"
+if ! python3 -I -B - "$PID_CAPTURE_TMP/run/.agent-state-$(id -u)/agent-lifecycle.jsonl" <<'PY'
+import json,sys
+rows=[json.loads(line) for line in open(sys.argv[1],encoding='utf-8')]
+events=[row for row in rows if row.get('run_id')=='codex-pid-capture-failure']
+assert [row.get('event') for row in events]==['route_decided','agent_started','failed'],events
+assert events[-1].get('error_class')=='dispatch_setup_failed',events[-1]
+PY
+then
+  PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS lifecycle"
+fi
+if [ -z "$PID_CAPTURE_ERRORS" ]; then
+  pass_msg "PID-capture failure cancels the provider, emits terminal lifecycle, releases the exact lease, and removes child artifacts"
+else
+  fail_msg "PID-capture failure is fully supervised" "$PID_CAPTURE_ERRORS $PID_CAPTURE_OUT"
+fi
+rm -rf "$PID_CAPTURE_TMP"
 
 echo "== Caller workspace mode commits in place without cleanup ownership =="
 CALLER_TMP="$(mktemp -d)"

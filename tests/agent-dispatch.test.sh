@@ -816,6 +816,11 @@ zsh -f -c '
     DISPATCH_RC=0
     return 0
   }
+  cancel_count=0
+  _uberdev_dispatch_cancel_backend() {
+    cancel_count=$((cancel_count + 1))
+    return 0
+  }
   before_nomatch=$options[nomatch]; before_null=$options[nullglob]
   request=$(make_request "$2" zsh-success)
   uberdev_agent_dispatch "$request" "$2/prompt.txt" "$2/result.md" "$2/status.json" || exit 91
@@ -823,7 +828,7 @@ zsh -f -c '
   request=$(make_request "$2" zsh-failure)
   ZSH_FAIL_PROVIDER=1 uberdev_agent_dispatch "$request" "$2/prompt.txt" "$2/fail.md" "$2/fail.json"
   rc=$?
-  [ "$rc" -eq 17 ]
+  [ "$rc" -eq 2 ] && [ "$cancel_count" -eq 1 ]
   [ "$options[nomatch]" = "$before_nomatch" ] && [ "$options[nullglob]" = "$before_null" ]
 ' _ "$LIB" "$ZRUN"
 
@@ -835,7 +840,20 @@ CROSS_BIN="$TMP/cross-bin"
 mkdir -p "$CROSS_BIN"
 cat > "$CROSS_BIN/claude" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = agents ] && [ "${2:-}" = --all ] && [ "${3:-}" = --json ]; then cat "$CROSS_CLAUDE_STATE"; exit 0; fi
+if [ "${1:-}" = agents ] && [ "${2:-}" = --all ] && [ "${3:-}" = --json ]; then
+  if [ "${CROSS_CLAUDE_STOP_MODE:-}" = delayed ] && [ -r "${CROSS_CLAUDE_STOP_COUNT:-}" ]; then
+    probes=0
+    [ -z "${CROSS_CLAUDE_PROBE_COUNT:-}" ] || [ ! -r "$CROSS_CLAUDE_PROBE_COUNT" ] || read -r probes < "$CROSS_CLAUDE_PROBE_COUNT"
+    probes=$((probes + 1))
+    [ -z "${CROSS_CLAUDE_PROBE_COUNT:-}" ] || printf '%s\n' "$probes" > "$CROSS_CLAUDE_PROBE_COUNT"
+    if [ "$probes" -ge 21 ]; then
+      printf '[{"sessionId":"abc12345-full","state":"cancelled"}]\n'
+      exit 0
+    fi
+  fi
+  cat "$CROSS_CLAUDE_STATE"
+  exit 0
+fi
 if [ "${1:-}" = stop ] && [ "${2:-}" = abc12345-full ]; then
   count=0
   [ -z "${CROSS_CLAUDE_STOP_COUNT:-}" ] || [ ! -r "$CROSS_CLAUDE_STOP_COUNT" ] || read -r count < "$CROSS_CLAUDE_STOP_COUNT"
@@ -845,8 +863,6 @@ if [ "${1:-}" = stop ] && [ "${2:-}" = abc12345-full ]; then
   if [ "${CROSS_CLAUDE_STOP_MODE:-}" = once ] && [ "$count" -eq 1 ]; then exit 2; fi
   [ "${CROSS_CLAUDE_STOP_MODE:-}" != sticky ] || exit 0
   if [ "${CROSS_CLAUDE_STOP_MODE:-}" = delayed ]; then
-    nohup bash -c 'sleep 2.5; printf '\''[{"sessionId":"abc12345-full","state":"cancelled"}]\n'\'' > "$1"' \
-      _ "$CROSS_CLAUDE_STATE" >/dev/null 2>&1 &
     exit 0
   fi
   printf '[]\n' > "$CROSS_CLAUDE_STATE"
@@ -1096,6 +1112,7 @@ claude_cancel_retry_case() {
     sleep() { command sleep 0.1; }
     CROSS_CLAUDE_STATE="$run/claude-agents.json" \
       CROSS_CLAUDE_STOP_MODE="$mode" CROSS_CLAUDE_STOP_COUNT="$run/stop-count" \
+      CROSS_CLAUDE_PROBE_COUNT="$run/probe-count" \
       PATH="$CROSS_BIN:$PATH" uberdev_agent_dispatch "$request" \
         "$run/prompt.txt" "$run/result.md" "$run/status.json"
   )
