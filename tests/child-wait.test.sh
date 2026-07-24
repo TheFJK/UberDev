@@ -118,6 +118,78 @@ printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq \
 printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'capacity=retained'
 rm -f "$STATUS.watcher-error.json"
 
+# Timeout-capability recovery failures use their own closed supervisory phase.
+# The waiter must surface them as retained-capacity failures rather than a
+# generic terminal-finalization error.
+_uberdev_agent_persist_watcher_error "$STATUS" codex 321 \
+  timeout_intent_recovery_failed 1 '' timeout_intent_identity_unavailable
+set +e
+WATCHER_WAIT_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
+WATCHER_WAIT_RC=$?
+set -e
+[ "$WATCHER_WAIT_RC" -eq 70 ]
+printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq \
+  'provider supervision failed: timeout_intent_identity_unavailable'
+printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'capacity=retained'
+rm -f "$STATUS.watcher-error.json"
+
+# Timeout coordination is a short-lived waiter capability, not a same-handle
+# flag. The marker binds the exact status snapshot and lease generation to one
+# live waiter identity, and stale variants are classified without suppressing
+# provider terminalization.
+INTENT_GENERATION=1234567890abcdef1234567890abcdef
+printf '{"backend":"codex","state":"running","exit_code":null,"pid":"321","lease_generation":"%s"}\n' \
+  "$INTENT_GENERATION" >"$STATUS"
+INTENT_SNAPSHOT="$(shasum -a 256 "$STATUS" | awk '{print $1}')"
+_uberdev_child_timeout_intent_write "$STATUS" 321 "$INTENT_GENERATION" "$INTENT_SNAPSHOT"
+INTENT_PATH="$STATUS.timeout-intent-v1"
+python3 -I -B - "$INTENT_PATH" "$$" <<'PY'
+import json,re,sys,time
+value=json.load(open(sys.argv[1]))
+assert set(value)=={'schema_version','handle','lease_generation','snapshot_sha256','waiter_pid','waiter_process_identity','expires_epoch'},value
+assert value['schema_version']==1 and value['handle']=='321'
+assert value['waiter_pid']==int(sys.argv[2])
+assert re.fullmatch(r'[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}',value['waiter_process_identity'])
+assert int(time.time()) < value['expires_epoch'] <= int(time.time())+60
+PY
+[ "$(_uberdev_agent_timeout_intent_probe "$STATUS" 321 "$INTENT_GENERATION")" = valid ]
+
+intent_mutate() {
+  python3 -I -B - "$INTENT_PATH" "$1" <<'PY'
+import json,sys
+path,mode=sys.argv[1:]
+value=json.load(open(path))
+if mode=='expired': value['expires_epoch']=1
+elif mode=='generation': value['lease_generation']='f'*32
+elif mode=='snapshot': value['snapshot_sha256']='e'*64
+elif mode=='orphan':
+ value['waiter_pid']=999999
+ value['waiter_process_identity']='999999|999999|999999|'+'d'*64
+elif mode=='stale': value['waiter_process_identity']=value['waiter_process_identity'][:-64]+'c'*64
+else: raise AssertionError(mode)
+with open(path,'w') as stream: json.dump(value,stream,separators=(',',':'))
+PY
+}
+for INTENT_STALE_CASE in expired generation snapshot orphan stale; do
+  _uberdev_child_timeout_intent_remove "$STATUS"
+  _uberdev_child_timeout_intent_write "$STATUS" 321 "$INTENT_GENERATION" "$INTENT_SNAPSHOT"
+  intent_mutate "$INTENT_STALE_CASE"
+  set +e
+  INTENT_STALE_RESULT="$(_uberdev_agent_timeout_intent_probe "$STATUS" 321 "$INTENT_GENERATION")"
+  INTENT_STALE_RC=$?
+  set -e
+  [ "$INTENT_STALE_RC" -eq 3 ]
+  [ "$INTENT_STALE_RESULT" = "$INTENT_STALE_CASE" ]
+done
+printf '{bad\n' >"$INTENT_PATH"
+set +e
+INTENT_INVALID_RESULT="$(_uberdev_agent_timeout_intent_probe "$STATUS" 321 "$INTENT_GENERATION")"
+INTENT_INVALID_RC=$?
+set -e
+[ "$INTENT_INVALID_RC" -eq 2 ]
+[ "$INTENT_INVALID_RESULT" = invalid ]
+rm -f "$INTENT_PATH"
+
 # Producer-shaped cancellation and lease-acquisition failures carry a bounded
 # reason. The child reports that reason without rejecting the closed schema.
 for watcher_reason in provider_cancel_unconfirmed lease_acquire_rollback_failed; do
@@ -326,6 +398,26 @@ _uberdev_dispatch_cancel_backend background "$TERM_GUARD" "$TERM_IDENTITY"
 ! kill -0 "$TERM_GUARD" 2>/dev/null
 ! kill -0 "$TERM_CHILD" 2>/dev/null
 
+# Kernel identity uncertainty is not equivalent to proven process absence.
+# Even if a numeric process group appears live, cancellation must fail closed
+# before invoking TERM or KILL when the exact creation identity cannot be read.
+eval "$(declare -f _uberdev_agent_process_identity | sed '1s/_uberdev_agent_process_identity/_real_unavailable_cancel_identity/')"
+eval "$(declare -f _uberdev_dispatch_group_owned_session | sed '1s/_uberdev_dispatch_group_owned_session/_real_unavailable_cancel_group/')"
+UNAVAILABLE_CANCEL_SIGNAL="$TMP/unavailable-cancel-signal"
+_uberdev_agent_process_identity() { return 2; }
+_uberdev_dispatch_group_owned_session() { return 0; }
+kill() { : >"$UNAVAILABLE_CANCEL_SIGNAL"; return 0; }
+set +e
+_uberdev_dispatch_cancel_backend codex 4242 \
+  '4242|4242|4242|0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+UNAVAILABLE_CANCEL_RC=$?
+set -e
+unset -f kill
+eval "$(declare -f _real_unavailable_cancel_identity | sed '1s/_real_unavailable_cancel_identity/_uberdev_agent_process_identity/')"
+eval "$(declare -f _real_unavailable_cancel_group | sed '1s/_real_unavailable_cancel_group/_uberdev_dispatch_group_owned_session/')"
+[ "$UNAVAILABLE_CANCEL_RC" -eq 2 ]
+[ ! -e "$UNAVAILABLE_CANCEL_SIGNAL" ]
+
 # Exact post-death partial cleanup never follows or removes attacker-controlled
 # symlink/hardlink targets. It fails closed without globbing sibling files.
 printf 'victim\n' >"$TMP/victim"
@@ -478,6 +570,33 @@ RACE_SCOPE="$TMP/run/.agent-state-$(id -u)/semaphore-v1/$(printf 'c%.0s' {1..64}
 RACE_LEASE="$RACE_SCOPE/${RACE_GENERATION}$(printf 'd%.0s' {1..32}).lease"
 mkdir -p "$RACE_SCOPE"
 eval "$(declare -f _uberdev_dispatch_cancel_backend | sed '1s/_uberdev_dispatch_cancel_backend/_race_real_cancel_backend/')"
+eval "$(declare -f _uberdev_dispatch_cleanup_dead_partial_result | sed '1s/_uberdev_dispatch_cleanup_dead_partial_result/_race_real_partial_cleanup/')"
+
+# Once timeout intent is public, a later recovery failure must revoke the
+# capability before returning and persist the exact failed phase. A failed
+# background partial-result cleanup therefore cannot leave an intent that a
+# detached watcher could honor indefinitely.
+printf 'version=1\ngeneration=%s\nrun_id=worker-0001\nowner_pid=%s\nowner_identity=%s\nbackend_handle=780\nbackend_identity=\nstart_epoch=1\ntimeout_s=30\nstatus_path=%s\n' \
+  "$RACE_GENERATION" "$$" "$TEST_OWNER_IDENTITY" "$STATUS_REAL" >"$RACE_LEASE"
+chmod 600 "$RACE_LEASE"
+printf '{"backend":"background","state":"running","exit_code":null,"pid":"780","lease_generation":"%s","process_identity":"780|780|780|0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}\n' \
+  "$RACE_GENERATION" >"$STATUS"
+printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00.000Z","run_id":"worker-0001","backend":"background"}\n' >"$MANIFEST"
+printf '{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001","backend":"background","owner_pid":%s,"owner_process_identity":"%s","status_path":"%s","timeout_s":30}\n' \
+  "$$" "$TEST_OWNER_IDENTITY" "$STATUS_REAL" >>"$MANIFEST"
+_uberdev_dispatch_cancel_backend() { return 0; }
+_uberdev_dispatch_cleanup_dead_partial_result() { return 2; }
+set +e
+CLEANUP_FAILED_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 1 2>&1)"
+CLEANUP_FAILED_RC=$?
+set -e
+[ "$CLEANUP_FAILED_RC" -eq 2 ]
+[ ! -e "$STATUS.timeout-intent-v1" ]
+[ -e "$RACE_LEASE" ]
+[ "$(_uberdev_child_watcher_error "$STATUS" "$TMP/run/.agent-state-$(id -u)/worker-0001.watcher-error.json")" = \
+  'timeout_partial_result_cleanup_failed; backend=background; capacity=retained; action=resolve the retained lifecycle lease before retrying' ]
+rm -f "$STATUS.watcher-error.json" "$RACE_LEASE"
+
 for RACE_WINNER in timeout completion; do
   printf 'version=1\ngeneration=%s\nrun_id=worker-0001\nowner_pid=%s\nowner_identity=%s\nbackend_handle=779\nbackend_identity=\nstart_epoch=1\ntimeout_s=30\nstatus_path=%s\n' \
     "$RACE_GENERATION" "$$" "$TEST_OWNER_IDENTITY" "$STATUS_REAL" >"$RACE_LEASE"
@@ -485,8 +604,8 @@ for RACE_WINNER in timeout completion; do
   printf '{"backend":"codex","state":"running","exit_code":null,"pid":"779","lease_generation":"%s"}\n' \
     "$RACE_GENERATION" >"$STATUS"
   printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00.000Z","run_id":"worker-0001","backend":"codex"}\n' >"$MANIFEST"
-  printf '{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001","backend":"codex","owner_pid":%s,"status_path":"%s","timeout_s":30}\n' \
-    "$$" "$STATUS_REAL" >>"$MANIFEST"
+  printf '{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001","backend":"codex","owner_pid":%s,"owner_process_identity":"%s","status_path":"%s","timeout_s":30}\n' \
+    "$$" "$TEST_OWNER_IDENTITY" "$STATUS_REAL" >>"$MANIFEST"
   _uberdev_dispatch_cancel_backend() {
     if [ "$RACE_WINNER" = completion ]; then
       printf 'completed race result\n' >"$RESULT"
@@ -514,6 +633,7 @@ assert not pathlib.Path(lease_path).exists(),lease_path
 PY
 done
 eval "$(declare -f _race_real_cancel_backend | sed '1s/_race_real_cancel_backend/_uberdev_dispatch_cancel_backend/')"
+eval "$(declare -f _race_real_partial_cleanup | sed '1s/_race_real_partial_cleanup/_uberdev_dispatch_cleanup_dead_partial_result/')"
 rmdir "$RACE_SCOPE"
 
 # zsh can source and execute the public wait API without colliding with its

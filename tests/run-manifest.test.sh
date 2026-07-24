@@ -21,6 +21,9 @@ capture() {
 append_event() {
   python3 "$MANIFEST" append --manifest "$1" --event-json "$2"
 }
+identity_for_pid() {
+  printf '%s|%s|%s|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$1" "$1" "$1"
+}
 mode_of() {
   local value
   value="$(stat -f '%Lp' "$1" 2>/dev/null || true)"
@@ -35,6 +38,7 @@ if [ ! -f "$MANIFEST" ]; then
   printf '  FAIL  run_manifest.py is missing: %s\n' "$MANIFEST"
   exit 1
 fi
+SELF_IDENTITY="$(python3 "$MANIFEST" process-identity --pid "$$")" || exit 1
 
 printf '== run manifest: fixture verification ==\n'
 capture python3 "$MANIFEST" verify --manifest "$FIXTURES/valid.jsonl" --strict
@@ -124,6 +128,15 @@ else
   fail "agent_started requires a positive owner PID, not null" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 
+MISSING_OWNER_IDENTITY="$TMP/missing-owner-identity/events.jsonl"
+append_event "$MISSING_OWNER_IDENTITY" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00Z","run_id":"run-missing-owner-identity","backend":"codex"}' >/dev/null
+capture append_event "$MISSING_OWNER_IDENTITY" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:00:01Z\",\"run_id\":\"run-missing-owner-identity\",\"backend\":\"codex\",\"owner_pid\":$$}"
+if [ "$CAPTURE_RC" -eq 2 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'invalid_owner_process_identity'; then
+  pass "current agent_started records require owner process identity"
+else
+  fail "current agent_started records require owner process identity" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+
 IDENTITY_PID_MISMATCH="$TMP/identity-pid-mismatch/events.jsonl"
 append_event "$IDENTITY_PID_MISMATCH" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00Z","run_id":"run-identity-pid-mismatch","backend":"codex"}' >/dev/null
 capture append_event "$IDENTITY_PID_MISMATCH" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:00:01Z\",\"run_id\":\"run-identity-pid-mismatch\",\"backend\":\"codex\",\"owner_pid\":$$,\"owner_process_identity\":\"$(( $$ + 1 ))|1|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
@@ -152,13 +165,13 @@ expected = "4242|1|1|" + ("a" * 64)
 original_kill = module.os.kill
 original_native_record = module._native_process_record
 try:
-    def denied_kill(pid, signal):
-        raise PermissionError()
+    def forbidden_kill(pid, signal):
+        raise AssertionError("liveness probe attempted to signal a process")
 
-    module.os.kill = denied_kill
-    assert module._pid_live(4242, expected) is None
-
-    module.os.kill = lambda pid, signal: None
+    module.os.kill = forbidden_kill
+    module._native_process_record = lambda pid: (1, 1, 1, "fixture")
+    captured = module.hashlib.sha256(b"fixture").hexdigest()
+    assert module._pid_live(4242, f"4242|1|1|{captured}") is True
 
     def denied_native_record(pid):
         raise PermissionError()
@@ -173,9 +186,9 @@ started = {"backend": "codex", "status_path": status_path}
 assert module._reconciliation_status(started) == (None, None, None, None)
 PY
 if [ "$CAPTURE_RC" -eq 0 ]; then
-  pass "identity permission failures and PID-mismatched recovery stay unavailable"
+  pass "native identity liveness never signals and probe failures stay unavailable"
 else
-  fail "identity permission failures and PID-mismatched recovery stay unavailable" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+  fail "native identity liveness never signals and probe failures stay unavailable" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 
 capture python3 "$MANIFEST" verify --manifest "$FIXTURES/policy-mismatch.jsonl"
@@ -196,7 +209,7 @@ printf '== run manifest: append schema, lifecycle, privacy, and atomicity ==\n'
 APPEND_DIR="$TMP/private-manifest"
 APPEND_PATH="$APPEND_DIR/events.jsonl"
 ROUTE='{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:01:00Z","run_id":"run-append","agent_id":"agent-append","backend":"codex","decision_source":"role-policy","usage_source":"provider","input_tokens":0}'
-START="{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:01:01Z\",\"run_id\":\"run-append\",\"agent_id\":\"agent-append\",\"backend\":\"codex\",\"owner_pid\":$$,\"backend_handle\":null,\"timeout_s\":5}"
+START="{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:01:01Z\",\"run_id\":\"run-append\",\"agent_id\":\"agent-append\",\"backend\":\"codex\",\"owner_pid\":$$,\"owner_process_identity\":\"$SELF_IDENTITY\",\"backend_handle\":null,\"timeout_s\":5}"
 DONE='{"schema_version":1,"event":"completed","timestamp":"2026-07-10T00:01:02Z","run_id":"run-append","agent_id":"agent-append","backend":"codex","terminal_status":"completed"}'
 
 capture append_event "$APPEND_PATH" "$ROUTE"
@@ -228,7 +241,7 @@ else
   fail "append rejects a second terminal without mutating the file" "rc=$CAPTURE_RC lines=$before_lines/$after_lines out=$CAPTURE_OUT"
 fi
 
-capture append_event "$TMP/no-route/events.jsonl" '{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:02:00Z","run_id":"run-no-route","backend":"codex","owner_pid":1}'
+capture append_event "$TMP/no-route/events.jsonl" '{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:02:00Z","run_id":"run-no-route","backend":"codex","owner_pid":1,"owner_process_identity":"1|1|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
 if [ "$CAPTURE_RC" -eq 2 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'agent_started_before_route_decided'; then
   pass "append validates lifecycle transitions"
 else
@@ -295,7 +308,7 @@ OPAQUE_PAYLOAD_STATUS="$TMP/payload-smuggling-handle/status.json"
 mkdir -p "$(dirname "$OPAQUE_PAYLOAD_STATUS")"
 printf '{"state":"running"}\n' > "$OPAQUE_PAYLOAD_STATUS"
 append_event "$OPAQUE_PAYLOAD_PATH" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:04:02Z","run_id":"run-smuggling-handle","backend":"codex"}' >/dev/null
-capture append_event "$OPAQUE_PAYLOAD_PATH" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:04:03Z\",\"run_id\":\"run-smuggling-handle\",\"backend\":\"codex\",\"owner_pid\":$$,\"backend_handle\":\"function steal(){return document.cookie}\",\"status_path\":\"$OPAQUE_PAYLOAD_STATUS\"}"
+capture append_event "$OPAQUE_PAYLOAD_PATH" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:04:03Z\",\"run_id\":\"run-smuggling-handle\",\"backend\":\"codex\",\"owner_pid\":$$,\"owner_process_identity\":\"$SELF_IDENTITY\",\"backend_handle\":\"function steal(){return document.cookie}\",\"status_path\":\"$OPAQUE_PAYLOAD_STATUS\"}"
 if [ "$CAPTURE_RC" -eq 2 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'invalid_backend_handle'; then
   pass "opaque backend handles are identifiers rather than payload channels"
 else
@@ -304,7 +317,7 @@ fi
 
 INVALID_PID_HANDLE_PATH="$TMP/invalid-pid-handle/events.jsonl"
 append_event "$INVALID_PID_HANDLE_PATH" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:04:02Z","run_id":"run-invalid-pid-handle","backend":"codex"}' >/dev/null
-capture append_event "$INVALID_PID_HANDLE_PATH" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:04:03Z\",\"run_id\":\"run-invalid-pid-handle\",\"backend\":\"codex\",\"owner_pid\":$$,\"backend_handle\":0,\"status_path\":\"$OPAQUE_PAYLOAD_STATUS\"}"
+capture append_event "$INVALID_PID_HANDLE_PATH" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:04:03Z\",\"run_id\":\"run-invalid-pid-handle\",\"backend\":\"codex\",\"owner_pid\":$$,\"owner_process_identity\":\"$SELF_IDENTITY\",\"backend_handle\":0,\"status_path\":\"$OPAQUE_PAYLOAD_STATUS\"}"
 if [ "$CAPTURE_RC" -eq 2 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'invalid_backend_handle'; then
   pass "numeric backend handles must be positive process IDs"
 else
@@ -317,7 +330,7 @@ for reserved_pid_handle in 'pid:' 'pid:0' 'pid:-1' 'pid:provider'; do
   reserved_pid_index=$((reserved_pid_index + 1))
   reserved_append_path="$TMP/reserved-pid-append-$reserved_pid_index/events.jsonl"
   reserved_route="{\"schema_version\":1,\"event\":\"route_decided\",\"timestamp\":\"2026-07-10T00:04:10Z\",\"run_id\":\"run-reserved-$reserved_pid_index\",\"backend\":\"codex\"}"
-  reserved_start="{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:04:11Z\",\"run_id\":\"run-reserved-$reserved_pid_index\",\"backend\":\"codex\",\"owner_pid\":$$,\"backend_handle\":\"$reserved_pid_handle\",\"status_path\":\"$OPAQUE_PAYLOAD_STATUS\"}"
+  reserved_start="{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:04:11Z\",\"run_id\":\"run-reserved-$reserved_pid_index\",\"backend\":\"codex\",\"owner_pid\":$$,\"owner_process_identity\":\"$SELF_IDENTITY\",\"backend_handle\":\"$reserved_pid_handle\",\"status_path\":\"$OPAQUE_PAYLOAD_STATUS\"}"
   append_event "$reserved_append_path" "$reserved_route" >/dev/null
   capture append_event "$reserved_append_path" "$reserved_start"
   append_reserved_rc="$CAPTURE_RC"
@@ -789,9 +802,10 @@ fi
 printf '== run manifest: conservative orphan reconciliation ==\n'
 sleep 0.01 & dead_pid=$!
 wait "$dead_pid"
+dead_identity="$(identity_for_pid "$dead_pid")"
 ORPHAN="$TMP/orphan/events.jsonl"
 append_event "$ORPHAN" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:07:00Z","run_id":"run-orphan","backend":"codex"}' >/dev/null
-append_event "$ORPHAN" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:01Z\",\"run_id\":\"run-orphan\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"backend_handle\":\"$dead_pid\"}" >/dev/null
+append_event "$ORPHAN" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:01Z\",\"run_id\":\"run-orphan\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"owner_process_identity\":\"$dead_identity\",\"backend_handle\":\"$dead_pid\"}" >/dev/null
 capture python3 "$MANIFEST" reconcile --manifest "$ORPHAN"
 if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = '{"abandoned":1,"open":0,"status":"ok"}' ]; then
   pass "reconcile abandons when owner and backend handle are both dead"
@@ -814,7 +828,7 @@ TRUE_COMPLETED_MANIFEST="$TMP/true-completed/events.jsonl"
 mkdir -p "$(dirname "$TRUE_COMPLETED_STATUS")"
 printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"%s","ignored":"not-manifest-data"}\n' "$dead_pid" > "$TRUE_COMPLETED_STATUS"
 append_event "$TRUE_COMPLETED_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:07:10Z","run_id":"run-true-completed","backend":"codex"}' >/dev/null
-append_event "$TRUE_COMPLETED_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:11Z\",\"run_id\":\"run-true-completed\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"backend_handle\":\"$dead_pid\",\"status_path\":\"$TRUE_COMPLETED_STATUS\"}" >/dev/null
+append_event "$TRUE_COMPLETED_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:11Z\",\"run_id\":\"run-true-completed\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"owner_process_identity\":\"$dead_identity\",\"backend_handle\":\"$dead_pid\",\"status_path\":\"$TRUE_COMPLETED_STATUS\"}" >/dev/null
 capture python3 "$MANIFEST" reconcile --manifest "$TRUE_COMPLETED_MANIFEST"
 completed_reconcile_rc="$CAPTURE_RC"
 completed_reconcile_out="$CAPTURE_OUT"
@@ -833,7 +847,7 @@ TRUE_FAILED_MANIFEST="$TMP/true-failed/events.jsonl"
 mkdir -p "$(dirname "$TRUE_FAILED_STATUS")"
 printf '{"backend":"codex","state":"failed","exit_code":17,"pid":"%s"}\n' "$dead_pid" > "$TRUE_FAILED_STATUS"
 append_event "$TRUE_FAILED_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:07:20Z","run_id":"run-true-failed","backend":"codex"}' >/dev/null
-append_event "$TRUE_FAILED_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:21Z\",\"run_id\":\"run-true-failed\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"backend_handle\":\"$dead_pid\",\"status_path\":\"$TRUE_FAILED_STATUS\"}" >/dev/null
+append_event "$TRUE_FAILED_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:21Z\",\"run_id\":\"run-true-failed\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"owner_process_identity\":\"$dead_identity\",\"backend_handle\":\"$dead_pid\",\"status_path\":\"$TRUE_FAILED_STATUS\"}" >/dev/null
 capture python3 "$MANIFEST" reconcile --manifest "$TRUE_FAILED_MANIFEST"
 failed_reconcile_rc="$CAPTURE_RC"
 failed_reconcile_out="$CAPTURE_OUT"
@@ -917,7 +931,7 @@ INVALID_BACKEND_MANIFEST="$TMP/invalid-terminal-backend/events.jsonl"
 mkdir -p "$(dirname "$INVALID_BACKEND_STATUS")"
 printf '{"backend":"background","state":"completed","exit_code":0,"pid":"%s"}\n' "$invalid_terminal_backend" > "$INVALID_BACKEND_STATUS"
 append_event "$INVALID_BACKEND_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:07:25Z","run_id":"run-invalid-terminal-backend","backend":"codex"}' >/dev/null
-append_event "$INVALID_BACKEND_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:26Z\",\"run_id\":\"run-invalid-terminal-backend\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"backend_handle\":\"$invalid_terminal_backend\",\"status_path\":\"$INVALID_BACKEND_STATUS\"}" >/dev/null
+append_event "$INVALID_BACKEND_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:26Z\",\"run_id\":\"run-invalid-terminal-backend\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"owner_process_identity\":\"$dead_identity\",\"backend_handle\":\"$invalid_terminal_backend\",\"status_path\":\"$INVALID_BACKEND_STATUS\"}" >/dev/null
 capture python3 "$MANIFEST" reconcile --manifest "$INVALID_BACKEND_MANIFEST"
 invalid_backend_live_rc="$CAPTURE_RC"
 invalid_backend_live_out="$CAPTURE_OUT"
@@ -935,7 +949,7 @@ INVALID_EXIT_MANIFEST="$TMP/invalid-terminal-exit/events.jsonl"
 mkdir -p "$(dirname "$INVALID_EXIT_STATUS")"
 printf '{"backend":"codex","state":"completed","exit_code":9,"pid":"%s"}\n' "$invalid_terminal_backend" > "$INVALID_EXIT_STATUS"
 append_event "$INVALID_EXIT_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:07:27Z","run_id":"run-invalid-terminal-exit","backend":"codex"}' >/dev/null
-append_event "$INVALID_EXIT_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:28Z\",\"run_id\":\"run-invalid-terminal-exit\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"backend_handle\":\"$invalid_terminal_backend\",\"status_path\":\"$INVALID_EXIT_STATUS\"}" >/dev/null
+append_event "$INVALID_EXIT_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:28Z\",\"run_id\":\"run-invalid-terminal-exit\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"owner_process_identity\":\"$dead_identity\",\"backend_handle\":\"$invalid_terminal_backend\",\"status_path\":\"$INVALID_EXIT_STATUS\"}" >/dev/null
 capture python3 "$MANIFEST" reconcile --manifest "$INVALID_EXIT_MANIFEST"
 invalid_exit_live_rc="$CAPTURE_RC"
 invalid_exit_live_out="$CAPTURE_OUT"
@@ -972,7 +986,7 @@ RECOVERED_LIVE_MANIFEST="$TMP/recovered-live/events.jsonl"
 mkdir -p "$(dirname "$RECOVERED_LIVE_STATUS")"
 printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$recovered_live_pid" > "$RECOVERED_LIVE_STATUS"
 append_event "$RECOVERED_LIVE_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:07:50Z","run_id":"run-recovered-live","backend":"codex"}' >/dev/null
-append_event "$RECOVERED_LIVE_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:51Z\",\"run_id\":\"run-recovered-live\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"status_path\":\"$RECOVERED_LIVE_STATUS\"}" >/dev/null
+append_event "$RECOVERED_LIVE_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:51Z\",\"run_id\":\"run-recovered-live\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"owner_process_identity\":\"$dead_identity\",\"status_path\":\"$RECOVERED_LIVE_STATUS\"}" >/dev/null
 capture python3 "$MANIFEST" reconcile --manifest "$RECOVERED_LIVE_MANIFEST"
 if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = '{"abandoned":0,"open":1,"status":"ok"}' ]; then
   pass "canonical numeric status handle keeps a live wrapper open"
@@ -985,7 +999,7 @@ RECOVERED_DEAD_MANIFEST="$TMP/recovered-dead/events.jsonl"
 mkdir -p "$(dirname "$RECOVERED_DEAD_STATUS")"
 printf '{"backend":"background","state":"running","exit_code":null,"pid":"%s"}\n' "$dead_pid" > "$RECOVERED_DEAD_STATUS"
 append_event "$RECOVERED_DEAD_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:07:52Z","run_id":"run-recovered-dead","backend":"background"}' >/dev/null
-append_event "$RECOVERED_DEAD_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:53Z\",\"run_id\":\"run-recovered-dead\",\"backend\":\"background\",\"owner_pid\":$dead_pid,\"status_path\":\"$RECOVERED_DEAD_STATUS\"}" >/dev/null
+append_event "$RECOVERED_DEAD_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:53Z\",\"run_id\":\"run-recovered-dead\",\"backend\":\"background\",\"owner_pid\":$dead_pid,\"owner_process_identity\":\"$dead_identity\",\"status_path\":\"$RECOVERED_DEAD_STATUS\"}" >/dev/null
 capture python3 "$MANIFEST" reconcile --manifest "$RECOVERED_DEAD_MANIFEST"
 if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = '{"abandoned":1,"open":0,"status":"ok"}' ]; then
   pass "stale running status with a dead recovered wrapper is abandoned"
@@ -998,7 +1012,7 @@ RECOVERED_MISMATCH_MANIFEST="$TMP/recovered-mismatch/events.jsonl"
 mkdir -p "$(dirname "$RECOVERED_MISMATCH_STATUS")"
 printf '{"backend":"background","state":"running","exit_code":null,"pid":"%s"}\n' "$recovered_live_pid" > "$RECOVERED_MISMATCH_STATUS"
 append_event "$RECOVERED_MISMATCH_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:07:54Z","run_id":"run-recovered-mismatch","backend":"codex"}' >/dev/null
-append_event "$RECOVERED_MISMATCH_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:55Z\",\"run_id\":\"run-recovered-mismatch\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"status_path\":\"$RECOVERED_MISMATCH_STATUS\"}" >/dev/null
+append_event "$RECOVERED_MISMATCH_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:55Z\",\"run_id\":\"run-recovered-mismatch\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"owner_process_identity\":\"$dead_identity\",\"status_path\":\"$RECOVERED_MISMATCH_STATUS\"}" >/dev/null
 capture python3 "$MANIFEST" reconcile --manifest "$RECOVERED_MISMATCH_MANIFEST"
 mismatch_handle_out="$CAPTURE_OUT"
 
@@ -1007,7 +1021,7 @@ RECOVERED_MALFORMED_MANIFEST="$TMP/recovered-malformed/events.jsonl"
 mkdir -p "$(dirname "$RECOVERED_MALFORMED_STATUS")"
 printf '{"backend":"codex","state":"running","exit_code":null,"pid":true}\n' > "$RECOVERED_MALFORMED_STATUS"
 append_event "$RECOVERED_MALFORMED_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:07:56Z","run_id":"run-recovered-malformed","backend":"codex"}' >/dev/null
-append_event "$RECOVERED_MALFORMED_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:57Z\",\"run_id\":\"run-recovered-malformed\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"status_path\":\"$RECOVERED_MALFORMED_STATUS\"}" >/dev/null
+append_event "$RECOVERED_MALFORMED_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:57Z\",\"run_id\":\"run-recovered-malformed\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"owner_process_identity\":\"$dead_identity\",\"status_path\":\"$RECOVERED_MALFORMED_STATUS\"}" >/dev/null
 capture python3 "$MANIFEST" reconcile --manifest "$RECOVERED_MALFORMED_MANIFEST"
 malformed_handle_out="$CAPTURE_OUT"
 if [ "$mismatch_handle_out" = '{"abandoned":1,"open":0,"status":"ok"}' ] \
@@ -1034,7 +1048,7 @@ MALFORMED_TRUTH_MANIFEST="$TMP/malformed-truth/events.jsonl"
 mkdir -p "$(dirname "$MALFORMED_TRUTH_STATUS")"
 printf '{not-json\n' > "$MALFORMED_TRUTH_STATUS"
 append_event "$MALFORMED_TRUTH_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:07:30Z","run_id":"run-malformed-truth","backend":"codex"}' >/dev/null
-append_event "$MALFORMED_TRUTH_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:31Z\",\"run_id\":\"run-malformed-truth\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"backend_handle\":\"$dead_pid\",\"status_path\":\"$MALFORMED_TRUTH_STATUS\"}" >/dev/null
+append_event "$MALFORMED_TRUTH_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:31Z\",\"run_id\":\"run-malformed-truth\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"owner_process_identity\":\"$dead_identity\",\"backend_handle\":\"$dead_pid\",\"status_path\":\"$MALFORMED_TRUTH_STATUS\"}" >/dev/null
 malformed_lines_before="$(wc -l < "$MALFORMED_TRUTH_MANIFEST" | tr -d ' ')"
 capture python3 "$MANIFEST" reconcile --manifest "$MALFORMED_TRUTH_MANIFEST"
 malformed_rc="$CAPTURE_RC"
@@ -1046,7 +1060,7 @@ UNKNOWN_TRUTH_MANIFEST="$TMP/unknown-truth/events.jsonl"
 mkdir -p "$(dirname "$UNKNOWN_TRUTH_STATUS")"
 printf '{"backend":"codex","state":"future-state","exit_code":0}\n' > "$UNKNOWN_TRUTH_STATUS"
 append_event "$UNKNOWN_TRUTH_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:07:40Z","run_id":"run-unknown-truth","backend":"codex"}' >/dev/null
-append_event "$UNKNOWN_TRUTH_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:41Z\",\"run_id\":\"run-unknown-truth\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"backend_handle\":\"$dead_pid\",\"status_path\":\"$UNKNOWN_TRUTH_STATUS\"}" >/dev/null
+append_event "$UNKNOWN_TRUTH_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:07:41Z\",\"run_id\":\"run-unknown-truth\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"owner_process_identity\":\"$dead_identity\",\"backend_handle\":\"$dead_pid\",\"status_path\":\"$UNKNOWN_TRUTH_STATUS\"}" >/dev/null
 capture python3 "$MANIFEST" reconcile --manifest "$UNKNOWN_TRUTH_MANIFEST"
 unknown_terminal="$(tail -n 1 "$UNKNOWN_TRUTH_MANIFEST")"
 if [ "$malformed_rc" -eq 0 ] \
@@ -1063,7 +1077,7 @@ FUTURE_TRUE_MANIFEST="$TMP/future-true/events.jsonl"
 mkdir -p "$(dirname "$FUTURE_TRUE_STATUS")"
 printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"%s"}\n' "$dead_pid" > "$FUTURE_TRUE_STATUS"
 append_event "$FUTURE_TRUE_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2099-01-01T00:00:10Z","run_id":"run-future-true","backend":"codex"}' >/dev/null
-append_event "$FUTURE_TRUE_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2099-01-01T00:00:11.999999Z\",\"run_id\":\"run-future-true\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"backend_handle\":\"$dead_pid\",\"status_path\":\"$FUTURE_TRUE_STATUS\"}" >/dev/null
+append_event "$FUTURE_TRUE_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2099-01-01T00:00:11.999999Z\",\"run_id\":\"run-future-true\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"owner_process_identity\":\"$dead_identity\",\"backend_handle\":\"$dead_pid\",\"status_path\":\"$FUTURE_TRUE_STATUS\"}" >/dev/null
 capture python3 "$MANIFEST" reconcile --manifest "$FUTURE_TRUE_MANIFEST"
 future_true_rc="$CAPTURE_RC"
 capture python3 "$MANIFEST" verify --manifest "$FUTURE_TRUE_MANIFEST" --strict
@@ -1077,7 +1091,7 @@ fi
 
 FUTURE_ORPHAN="$TMP/future-orphan/events.jsonl"
 append_event "$FUTURE_ORPHAN" '{"schema_version":1,"event":"route_decided","timestamp":"2099-01-01T00:00:00Z","run_id":"run-future-orphan","backend":"codex"}' >/dev/null
-append_event "$FUTURE_ORPHAN" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2099-01-01T00:00:01.999999Z\",\"run_id\":\"run-future-orphan\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"backend_handle\":\"$dead_pid\"}" >/dev/null
+append_event "$FUTURE_ORPHAN" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2099-01-01T00:00:01.999999Z\",\"run_id\":\"run-future-orphan\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"owner_process_identity\":\"$dead_identity\",\"backend_handle\":\"$dead_pid\"}" >/dev/null
 capture python3 "$MANIFEST" reconcile --manifest "$FUTURE_ORPHAN"
 future_reconcile_rc="$CAPTURE_RC"
 future_reconcile_out="$CAPTURE_OUT"
@@ -1093,9 +1107,9 @@ fi
 CONSERVATIVE="$TMP/conservative/events.jsonl"
 sleep 5 & live_backend=$!
 append_event "$CONSERVATIVE" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:08:00Z","run_id":"run-owner-live","backend":"codex"}' >/dev/null
-append_event "$CONSERVATIVE" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:08:01Z\",\"run_id\":\"run-owner-live\",\"backend\":\"codex\",\"owner_pid\":$$,\"backend_handle\":\"$dead_pid\"}" >/dev/null
+append_event "$CONSERVATIVE" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:08:01Z\",\"run_id\":\"run-owner-live\",\"backend\":\"codex\",\"owner_pid\":$$,\"owner_process_identity\":\"$SELF_IDENTITY\",\"backend_handle\":\"$dead_pid\"}" >/dev/null
 append_event "$CONSERVATIVE" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:08:02Z","run_id":"run-backend-live","backend":"codex"}' >/dev/null
-append_event "$CONSERVATIVE" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:08:03Z\",\"run_id\":\"run-backend-live\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"backend_handle\":\"$live_backend\"}" >/dev/null
+append_event "$CONSERVATIVE" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:08:03Z\",\"run_id\":\"run-backend-live\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"owner_process_identity\":\"$dead_identity\",\"backend_handle\":\"$live_backend\"}" >/dev/null
 capture python3 "$MANIFEST" reconcile --manifest "$CONSERVATIVE"
 if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = '{"abandoned":0,"open":2,"status":"ok"}' ]; then
   pass "reconcile preserves a run when either owner or backend is live"
@@ -1134,7 +1148,7 @@ STALE_STATUS="$TMP/stale-running-status.json"
 printf '{"state":"running"}\n' > "$STALE_STATUS"
 STALE_STATUS_MANIFEST="$TMP/stale-status/events.jsonl"
 append_event "$STALE_STATUS_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:09:00Z","run_id":"run-stale-status","backend":"codex"}' >/dev/null
-append_event "$STALE_STATUS_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:09:01Z\",\"run_id\":\"run-stale-status\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"backend_handle\":\"$dead_pid\",\"status_path\":\"$STALE_STATUS\"}" >/dev/null
+append_event "$STALE_STATUS_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:09:01Z\",\"run_id\":\"run-stale-status\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"owner_process_identity\":\"$dead_identity\",\"backend_handle\":\"$dead_pid\",\"status_path\":\"$STALE_STATUS\"}" >/dev/null
 capture python3 "$MANIFEST" reconcile --manifest "$STALE_STATUS_MANIFEST"
 if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = '{"abandoned":1,"open":0,"status":"ok"}' ]; then
   pass "stale running status cannot override failed owner and backend-handle probes"
@@ -1146,7 +1160,7 @@ DELETED_STATUS="$TMP/deleted-status.json"
 printf '{"state":"running"}\n' > "$DELETED_STATUS"
 DELETED_STATUS_MANIFEST="$TMP/deleted-status/events.jsonl"
 append_event "$DELETED_STATUS_MANIFEST" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:10:00Z","run_id":"run-deleted-status","backend":"codex"}' >/dev/null
-append_event "$DELETED_STATUS_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:10:01Z\",\"run_id\":\"run-deleted-status\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"backend_handle\":\"provider-job-123\",\"status_path\":\"$DELETED_STATUS\"}" >/dev/null
+append_event "$DELETED_STATUS_MANIFEST" "{\"schema_version\":1,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:10:01Z\",\"run_id\":\"run-deleted-status\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"owner_process_identity\":\"$dead_identity\",\"backend_handle\":\"provider-job-123\",\"status_path\":\"$DELETED_STATUS\"}" >/dev/null
 rm -f "$DELETED_STATUS"
 capture python3 "$MANIFEST" reconcile --manifest "$DELETED_STATUS_MANIFEST"
 deleted_reconcile_rc="$CAPTURE_RC"

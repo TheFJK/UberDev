@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Shape + mechanism checks for the two cross-platform shell-portability fixes
-# in issue #274 (disjoint file-set, one PR):
+# Shape + mechanism checks for cross-platform shell/runtime portability:
 #
 #   1. plugins/uberdev/hooks/run-hook.cmd — the Windows cmd.exe arm must forward
 #      args via a SHIFT-based loop (mirroring the Unix `exec bash … "$@"`),
@@ -17,6 +16,10 @@
 #      is gone, the portable `tr` strip is present, prove the live pipeline
 #      extracts a non-empty id, and prove (deterministically, on any platform)
 #      that a literal-\x strip mis-extracts while the tr-based strip succeeds.
+#
+#   3. plugins/uberdev/lib/run_manifest.py — Windows reconciliation must use
+#      the native process-record probe; os.kill(pid, 0) terminates the target
+#      under CPython on Windows instead of performing a POSIX liveness check.
 #
 # Portable grep-and-assert + runtime model — runs green on ubuntu (GNU sed),
 # windows-latest Git Bash (GNU sed), and macOS (BSD sed) alike.
@@ -213,6 +216,43 @@ esc_before="$(printf '%s' "$probe_out" | LC_ALL=C tr -cd '\033' | wc -c | tr -d 
 esc_after="$(printf '%s' "$probe_out" | tr -d '\033' | LC_ALL=C tr -cd '\033' | wc -c | tr -d ' ')"
 assert_eq "$esc_before" "2" "fixture carries 2 ESC bytes pre-strip"
 assert_eq "$esc_after" "0" "tr -d '\\033' removes all ESC bytes (platform-independent)"
+
+echo
+echo "== run manifest: Windows reconciliation uses a non-signaling native probe =="
+
+if python3 -I -B -c 'import os; raise SystemExit(0 if os.name=="nt" else 1)'; then
+  WINDOWS_PROBE_TMP="$(mktemp -d)"
+  if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" "$WINDOWS_PROBE_TMP" <<'PY'
+import importlib.util,pathlib,subprocess,sys,time
+tool,tmp=sys.argv[1:]
+spec=importlib.util.spec_from_file_location('run_manifest_windows_runtime',tool)
+module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module
+assert spec.loader is not None; spec.loader.exec_module(module)
+child=subprocess.Popen([sys.executable,'-I','-B','-c','import time; time.sleep(30)'])
+try:
+ status,identity=module._process_identity(child.pid)
+ assert status=='captured' and identity
+ manifest=str(pathlib.Path(tmp)/'events.jsonl')
+ module.append_event(manifest,{'schema_version':1,'event':'route_decided','timestamp':'2026-07-10T00:00:00Z','run_id':'windows-native-probe','backend':'codex'})
+ module.append_event(manifest,{'schema_version':1,'event':'agent_started','timestamp':'2026-07-10T00:00:01Z','run_id':'windows-native-probe','backend':'codex','owner_pid':child.pid,'owner_process_identity':identity,'backend_handle':child.pid})
+ result=module.reconcile_manifest(manifest)
+ assert result=={'abandoned':0,'open':1,'status':'ok'},result
+ assert child.poll() is None,'liveness reconciliation terminated the process'
+finally:
+ if child.poll() is None: child.terminate()
+ child.wait(timeout=10)
+PY
+  then
+    echo "  PASS  native Windows reconciliation leaves its live owner process untouched"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  native Windows reconciliation signaled or abandoned a live owner"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$WINDOWS_PROBE_TMP"
+else
+  echo "  SKIP  native Windows reconciliation runtime (non-Windows host)"
+fi
 
 echo
 echo "== Summary =="

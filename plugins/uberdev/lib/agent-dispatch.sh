@@ -1051,10 +1051,11 @@ uid_fn=getattr(os,"geteuid",None); uid=uid_fn() if uid_fn else None
 if not stat.S_ISDIR(entry.st_mode) or (uid is not None and entry.st_uid!=uid): raise SystemExit(2)
 if terminal == "provider_probe_failed": error="provider_probe_failed"
 elif terminal == "process_identity_probe_unavailable": error="process_identity_probe_failed"
+elif terminal == "timeout_intent_recovery_failed": error="timeout_intent_recovery_failed"
 elif terminal.startswith("blocked:"): error="provider_cancel_failed"
 elif terminal.startswith("launch:"): error="launch_finalize_failed"
 else: error="terminal_finalize_failed"
-allowed_reasons={"provider_stop_failed","provider_session_resolution_failed","provider_cancel_probe_failed","provider_cancel_unconfirmed","lease_acquire_invalid_input","lease_acquire_runtime_state_failed","lease_acquire_mutex_failed","lease_acquire_reconcile_failed","lease_acquire_count_failed","lease_acquire_duplicate_check_failed","lease_acquire_allocate_failed","lease_acquire_owner_failed","lease_acquire_publish_failed","lease_acquire_identity_failed","lease_acquire_rollback_failed","lease_acquire_mutex_release_failed","lease_handle_rollback_failed"}
+allowed_reasons={"provider_stop_failed","provider_session_resolution_failed","provider_cancel_probe_failed","provider_cancel_unconfirmed","timeout_intent_invalid","timeout_intent_identity_unavailable","timeout_intent_cleanup_failed","timeout_partial_result_cleanup_failed","lease_acquire_invalid_input","lease_acquire_runtime_state_failed","lease_acquire_mutex_failed","lease_acquire_reconcile_failed","lease_acquire_count_failed","lease_acquire_duplicate_check_failed","lease_acquire_allocate_failed","lease_acquire_owner_failed","lease_acquire_publish_failed","lease_acquire_identity_failed","lease_acquire_rollback_failed","lease_acquire_mutex_release_failed","lease_handle_rollback_failed"}
 payload={"schema_version":1,"error":error,"backend":backend,"handle":handle,"terminal":terminal,"attempts":int(attempts)}
 if reason: payload["reason"]=reason if reason in allowed_reasons else "supervisory_failure"
 fd,tmp=tempfile.mkstemp(prefix=".watcher-error.",dir=parent)
@@ -1087,19 +1088,79 @@ _uberdev_agent_persist_watcher_error_retry() {
   return 2
 }
 
-_uberdev_agent_timeout_intent_matches() {
-  python3 -I -B - "$1.timeout-intent-v1" "$2" <<'PY'
-import json,os,stat,sys
-path,handle=sys.argv[1:]
+_uberdev_agent_timeout_intent_probe() {
+  python3 -I -B - "$1.timeout-intent-v1" "$1" "$2" "${3:-}" "$_UBERDEV_AGENT_MANIFEST_TOOL" <<'PY'
+import hashlib,json,os,re,stat,subprocess,sys,time
+path,status_path,expected_handle,expected_generation,manifest_tool=sys.argv[1:]
+def finish(token,code):
+ print(token,end=''); raise SystemExit(code)
+def secure_read(candidate,limit):
+ try: before=os.lstat(candidate)
+ except FileNotFoundError: raise
+ uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
+ if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or before.st_size>limit or (uid is not None and before.st_uid!=uid): raise ValueError()
+ fd=os.open(candidate,os.O_RDONLY|getattr(os,'O_BINARY',0)|getattr(os,'O_NOFOLLOW',0))
+ try:
+  opened=os.fstat(fd); after=os.lstat(candidate)
+  if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1
+      or (uid is not None and opened.st_uid!=uid)
+      or (opened.st_dev,opened.st_ino)!=(after.st_dev,after.st_ino)): raise ValueError()
+  raw=os.read(fd,limit+1)
+  if len(raw)>limit: raise ValueError()
+  return raw
+ finally: os.close(fd)
 try:
- entry=os.lstat(path); uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
- if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1 or entry.st_size>4096 or (uid is not None and entry.st_uid!=uid): raise ValueError()
- value=json.load(open(path,encoding='utf-8'))
- if frozenset(value)!={'schema_version','handle','lease_generation','snapshot_sha256'} or value.get('schema_version')!=1 or value.get('handle')!=handle: raise ValueError()
- lease=value.get('lease_generation'); snapshot=value.get('snapshot_sha256')
- if not isinstance(lease,str) or len(lease)!=32 or any(c not in '0123456789abcdef' for c in lease): raise ValueError()
- if not isinstance(snapshot,str) or len(snapshot)!=64 or any(c not in '0123456789abcdef' for c in snapshot): raise ValueError()
-except Exception: raise SystemExit(1)
+ marker_raw=secure_read(path,4096)
+except FileNotFoundError: finish('absent',1)
+except (OSError,ValueError): finish('invalid',2)
+try:
+ value=json.loads(marker_raw)
+ keys={'schema_version','handle','lease_generation','snapshot_sha256','waiter_pid','waiter_process_identity','expires_epoch'}
+ if frozenset(value)!=keys or value.get('schema_version')!=1: raise ValueError()
+ handle=value.get('handle'); generation=value.get('lease_generation'); snapshot=value.get('snapshot_sha256')
+ waiter_pid=value.get('waiter_pid'); waiter_identity=value.get('waiter_process_identity'); expires=value.get('expires_epoch')
+ if handle!=expected_handle: finish('handle',3)
+ if not isinstance(generation,str) or re.fullmatch(r'[0-9a-f]{32}',generation) is None: raise ValueError()
+ if not isinstance(snapshot,str) or re.fullmatch(r'[0-9a-f]{64}',snapshot) is None: raise ValueError()
+ if type(waiter_pid) is not int or waiter_pid<=0: raise ValueError()
+ identity_match=re.fullmatch(r'([1-9][0-9]*)\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}',waiter_identity or '')
+ if identity_match is None or int(identity_match.group(1))!=waiter_pid: raise ValueError()
+ if type(expires) is not int: raise ValueError()
+ now=int(time.time())
+ if expires<=now or expires>now+60: finish('expired',3)
+ status_raw=secure_read(status_path,65536); status=json.loads(status_raw)
+ status_generation=status.get('lease_generation')
+ if expected_generation and generation!=expected_generation: finish('generation',3)
+ if generation!=status_generation: finish('generation',3)
+ if hashlib.sha256(status_raw).hexdigest()!=snapshot: finish('snapshot',3)
+except (OSError,ValueError,TypeError,json.JSONDecodeError): finish('invalid',2)
+probe=subprocess.run(
+ [sys.executable,'-I','-B',manifest_tool,'process-identity','--pid',str(waiter_pid)],
+ stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,check=False,
+)
+if probe.returncode==2: finish('identity_unavailable',2)
+if probe.returncode!=0: finish('orphan',3)
+if probe.stdout!=waiter_identity: finish('stale',3)
+finish('valid',0)
+PY
+}
+
+_uberdev_agent_timeout_intent_remove() {
+  python3 -I -B - "$1.timeout-intent-v1" <<'PY'
+import os,stat,sys
+path=sys.argv[1]
+try: before=os.lstat(path)
+except FileNotFoundError: raise SystemExit(0)
+uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
+if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or (uid is not None and before.st_uid!=uid): raise SystemExit(2)
+fd=os.open(path,os.O_RDONLY|getattr(os,'O_BINARY',0)|getattr(os,'O_NOFOLLOW',0))
+try:
+ opened=os.fstat(fd); current=os.lstat(path)
+ if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1
+     or (uid is not None and opened.st_uid!=uid)
+     or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)): raise SystemExit(2)
+ os.unlink(path)
+finally: os.close(fd)
 PY
 }
 
@@ -1110,6 +1171,7 @@ _uberdev_agent_start_watcher() {
   watcher_fallback="$(dirname "$manifest")/$watcher_instance.watcher-error.json"
   (
     local terminal_event='' probe='' absent_count=0 indeterminate_count=0 event_json='' error_class='' cancel_attempt=0 cancel_rc=0 cancel_reason='' supervision_reported=0 identity_probe_rc=0
+    local timeout_intent_result='' timeout_intent_rc=0 timeout_intent_ignored=0 timeout_intent_reason='' lease_generation="${lease_identity##*:}"
     while [ -d "$(dirname "$status_file")" ]; do
       terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
       [ -z "$terminal_event" ] || break
@@ -1213,10 +1275,40 @@ _uberdev_agent_start_watcher() {
             fi
             indeterminate_count=0
             if [ "$identity_probe_rc" -eq 1 ] || [ -z "$process_identity" ]; then
-              if _uberdev_agent_timeout_intent_matches "$status_file" "$handle"; then
-                absent_count=0
-                sleep 0.1
-                continue
+              if [ "$timeout_intent_ignored" -eq 0 ]; then
+                if timeout_intent_result="$(_uberdev_agent_timeout_intent_probe "$status_file" "$handle" "$lease_generation" 2>/dev/null)"; then
+                  timeout_intent_rc=0
+                else
+                  timeout_intent_rc=$?
+                fi
+                if [ "$timeout_intent_rc" -eq 0 ] && [ "$timeout_intent_result" = valid ]; then
+                  absent_count=0
+                  sleep 0.1
+                  continue
+                fi
+                case "$timeout_intent_rc:$timeout_intent_result" in
+                  1:absent) ;;
+                  3:*)
+                    if ! _uberdev_agent_timeout_intent_remove "$status_file"; then
+                      _uberdev_agent_persist_watcher_error_retry "$status_file" "$watcher_fallback" \
+                        "$backend" "$handle" timeout_intent_recovery_failed 1 timeout_intent_cleanup_failed || \
+                        _uberdev_agent_error "failed to persist timeout intent cleanup failure: $status_file"
+                    fi
+                    timeout_intent_ignored=1
+                    ;;
+                  *)
+                    [ "$timeout_intent_result" != identity_unavailable ] \
+                      && timeout_intent_reason=timeout_intent_invalid \
+                      || timeout_intent_reason=timeout_intent_identity_unavailable
+                    if ! _uberdev_agent_timeout_intent_remove "$status_file"; then
+                      timeout_intent_reason=timeout_intent_cleanup_failed
+                    fi
+                    _uberdev_agent_persist_watcher_error_retry "$status_file" "$watcher_fallback" \
+                      "$backend" "$handle" timeout_intent_recovery_failed 1 "$timeout_intent_reason" || \
+                      _uberdev_agent_error "failed to persist timeout intent recovery failure: $status_file"
+                    timeout_intent_ignored=1
+                    ;;
+                esac
               fi
               absent_count=$((absent_count + 1))
               if [ "$absent_count" -ge 3 ]; then

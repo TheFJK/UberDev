@@ -140,6 +140,18 @@ if [ -r "$MANIFEST_CODEX" ] && [ -d "$REPO_ROOT/codex" ]; then
       s{skills/merge-pipeline}{skills/prkit-merge-pipeline}g;
     ' "$f" || { echo "generate: codex skill-prefix rewrite failed: $f" >&2; exit 1; }
   done < <(find "$TARGET/codex" -type f -print0)
+  # install-codex.sh is shared SSOT with full UberDev, whose comments and
+  # verification hints describe the full fleet. The standalone extraction has
+  # a deliberately smaller manifest (5 skills / 14 agents); rewrite those
+  # user-facing counts here so generated installation guidance cannot claim a
+  # fleet that prkit does not ship.
+  prkit_skill_count="$(find "$TARGET/codex/prkit-codex/skills" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+  prkit_agent_count="$(find "$TARGET/codex/agents" -maxdepth 1 -type f -name 'prkit-*.toml' | wc -l | tr -d ' ')"
+  PRKIT_SKILL_COUNT="$prkit_skill_count" PRKIT_AGENT_COUNT="$prkit_agent_count" perl -0pi -e '
+    s/NOT the 44 agents/NOT the $ENV{PRKIT_AGENT_COUNT} agents/g;
+    s/# ~39 Prkit skills incl\. command-skills/# $ENV{PRKIT_SKILL_COUNT} prkit skills/g;
+    s/# 44 prkit-\*\.toml subagents/# $ENV{PRKIT_AGENT_COUNT} prkit-*.toml subagents/g;
+  ' "$TARGET/codex/install-codex.sh" || { echo "generate: codex installer count rewrite failed" >&2; exit 1; }
   # Scaffold codex-specific files from prkit-correct templates (authored, not
   # rewritten — so they don't inherit UberDev's stale counts). AFTER the rewrite
   # loop so they stay pristine.

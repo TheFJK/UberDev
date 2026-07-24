@@ -868,22 +868,25 @@ PY
 # rejected before signaling. Opaque providers use their native handle API and
 # prove the handle is no longer live before returning success.
 _uberdev_dispatch_cancel_backend() {
-  local backend="$1" handle="$2" expected_identity="${3:-}" current pane probe attempts cancel_rc group_rc identity_pid identity_pgid identity_sid identity_started
+  local backend="$1" handle="$2" expected_identity="${3:-}" current pane probe attempts cancel_rc group_rc identity_probe_rc identity_pid identity_pgid identity_sid identity_started
   _UBERDEV_DISPATCH_CANCEL_REASON=''
   case "$backend" in
     codex|background)
       case "$handle" in ''|*[!0-9]*) _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2 ;; esac
       [ -n "$expected_identity" ] || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
-      current="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
       IFS='|' read -r identity_pid identity_pgid identity_sid identity_started <<EOF_IDENTITY
 $expected_identity
 EOF_IDENTITY
       [ "$identity_pid" = "$handle" ] && [ "$identity_pgid" = "$handle" ] && [ "$identity_sid" = "$handle" ] && [ -n "$identity_started" ] \
         || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
-      if [ -n "$current" ] && [ "$current" != "$expected_identity" ]; then
+      if current="$(_uberdev_agent_process_identity "$handle" 2>/dev/null)"; then identity_probe_rc=0; else identity_probe_rc=$?; fi
+      if [ "$identity_probe_rc" -ne 0 ]; then
+        if _uberdev_dispatch_group_owned_session "$identity_pgid" "$identity_sid"; then group_rc=0; else group_rc=$?; fi
+        [ "$group_rc" -ne 1 ] || return 0
         _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed
         return 2
       fi
+      [ "$current" = "$expected_identity" ] || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
       if _uberdev_dispatch_group_owned_session "$identity_pgid" "$identity_sid"; then group_rc=0; else group_rc=$?; fi
       [ "$group_rc" -ne 1 ] || return 0
       [ "$group_rc" -eq 0 ] || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
@@ -893,15 +896,14 @@ EOF_IDENTITY
       fi
       attempts=0
       while [ "$attempts" -lt 40 ]; do
-        current="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
-        if [ -n "$current" ] && [ "$current" != "$expected_identity" ]; then _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; fi
         if _uberdev_dispatch_group_owned_session "$identity_pgid" "$identity_sid"; then group_rc=0; else group_rc=$?; fi
         [ "$group_rc" -ne 1 ] || return 0
         [ "$group_rc" -eq 0 ] || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
         sleep 0.05; attempts=$((attempts + 1))
       done
-      current="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
-      if [ -n "$current" ] && [ "$current" != "$expected_identity" ]; then _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; fi
+      if current="$(_uberdev_agent_process_identity "$handle" 2>/dev/null)"; then identity_probe_rc=0; else identity_probe_rc=$?; fi
+      [ "$identity_probe_rc" -eq 0 ] && [ "$current" = "$expected_identity" ] \
+        || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
       _uberdev_dispatch_group_owned_session "$identity_pgid" "$identity_sid" \
         || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
       if ! kill -KILL "-$identity_pgid" 2>/dev/null; then
@@ -1575,16 +1577,9 @@ _uberdev_dispatch_report_codex_setup_cleanup_failure() {
 #     `claude agents --json` equivalent to poll. The launcher's goal-state
 #     polling reuses the background path's kill -0 contract unchanged.
 _uberdev_dispatch_timeout_intent_matches() {
-  python3 -I -B - "$1.timeout-intent-v1" "$2" <<'PY'
-import json,os,stat,sys
-path,handle=sys.argv[1:]
-try:
- entry=os.lstat(path); uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
- if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1 or entry.st_size>4096 or (uid is not None and entry.st_uid!=uid): raise ValueError()
- value=json.load(open(path,encoding='utf-8'))
- if frozenset(value)!={'schema_version','handle','lease_generation','snapshot_sha256'} or value.get('schema_version')!=1 or value.get('handle')!=handle: raise ValueError()
-except Exception: raise SystemExit(1)
-PY
+  local probe
+  probe="$(_uberdev_agent_timeout_intent_probe "$1" "$2" 2>/dev/null)" || return 1
+  [ "$probe" = valid ]
 }
 
 _uberdev_dispatch_codex() {

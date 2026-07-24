@@ -56,6 +56,16 @@ if [ -f "$T1/codex/prkit-codex/skills/prkit-cmd-review-pr/SKILL.md" ] \
   ok "G6 codex port generated (prkit-cmd-* + prkit-prefixed support skills, no flat collision)"
 else no "G6 codex port incomplete or has un-prefixed support skill"; fi
 
+# G6a — the copied full-UberDev installer is rewritten to the standalone
+# manifest's actual fleet size. These hints are user-facing verification, so a
+# successful install must not claim the full 39/44 fleet.
+if grep -qF '# 5 prkit skills' "$T1/codex/install-codex.sh" \
+   && grep -qF '# 14 prkit-*.toml subagents' "$T1/codex/install-codex.sh" \
+   && grep -qF 'NOT the 14 agents' "$T1/codex/install-codex.sh" \
+   && ! grep -Eq '(^|[^0-9])(39|44)([^0-9]|$)' "$T1/codex/install-codex.sh"; then
+  ok "G6a standalone installer reports the manifest-true 5 skills / 14 agents"
+else no "G6a standalone installer retains full-UberDev fleet counts"; fi
+
 # G6b — both standalone runtimes ship the manifest-declared reviewer contract,
 # while native Codex role TOMLs remain edge-agnostic.
 if [ -f "$T1/plugins/prkit/policy/solve-run-tree-v1.json" ] \

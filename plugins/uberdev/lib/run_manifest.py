@@ -515,6 +515,17 @@ def _validate_event(event: Any) -> list[str]:
             errors.append("invalid_owner_pid")
 
     if event_name == "agent_started":
+        owner_pid = event.get("owner_pid")
+        owner_identity = _parse_process_identity(event.get("owner_process_identity"))
+        if (
+            owner_identity is None
+            or not _is_plain_int(owner_pid)
+            or owner_identity[0] != owner_pid
+        ):
+            if "invalid_owner_process_identity" not in errors:
+                errors.append("invalid_owner_process_identity")
+
+    if event_name == "agent_started":
         status_path = event.get("status_path")
         if status_path is not None and (
             not isinstance(status_path, str) or not os.path.isabs(status_path)
@@ -992,25 +1003,16 @@ def _pid_live(pid: Any, expected_identity: str | None = None) -> bool | None:
     if numeric_pid is None:
         return False
     pid = numeric_pid
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return None
-    except OSError:
-        return None
-    if expected_identity is None:
-        return True
-    parsed_identity = _parse_process_identity(expected_identity)
-    if parsed_identity is None or parsed_identity[0] != pid:
-        return False
+    if expected_identity is not None:
+        parsed_identity = _parse_process_identity(expected_identity)
+        if parsed_identity is None or parsed_identity[0] != pid:
+            return False
     probe_status, current_identity = _process_identity(pid)
     if probe_status == "unavailable":
         return None
     if probe_status != "captured":
         return False
-    return current_identity == expected_identity
+    return expected_identity is None or current_identity == expected_identity
 
 
 def _status_liveness(path: str) -> bool | None:
