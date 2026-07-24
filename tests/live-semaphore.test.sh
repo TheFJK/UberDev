@@ -208,6 +208,32 @@ else
   fail "failed post-publication rollback returns the retained lease capability" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 
+# Primary acquisition failures must not swallow a secondary mutex-release
+# failure or persist the primary reason after the lock itself remains held.
+for release_stage in count allocation owner; do
+  capture /bin/bash -c '
+    . "$1"
+    case "$3" in
+      count) _uberdev_semaphore_count_locked() { return 29; } ;;
+      allocation) _uberdev_semaphore_new_lease_path_locked() { return 29; } ;;
+      owner) _uberdev_semaphore_capture_lease_owner() { return 29; } ;;
+    esac
+    _uberdev_semaphore_mutex_release() { return 31; }
+    uberdev_semaphore_acquire "$2" repo codex 1 "release-$3" 30
+    rc=$?
+    printf "rc=%s reason=%s\n" "$rc" "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}"
+    [ "$rc" -eq 2 ] \
+      && [ "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}" = lease_acquire_mutex_release_failed ]
+  ' _ "$LIB" "$TMP/release-failure-$release_stage" "$release_stage"
+  if [ "$CAPTURE_RC" -eq 0 ] \
+      && printf '%s' "$CAPTURE_OUT" | grep -q 'cannot release acquisition mutex' \
+      && printf '%s' "$CAPTURE_OUT" | grep -q 'reason=lease_acquire_mutex_release_failed'; then
+    pass "$release_stage failure preserves the mutex-release diagnostic and reason"
+  else
+    fail "$release_stage failure preserves the mutex-release diagnostic and reason" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+  fi
+done
+
 # If exact identity validation fails after atomic handle publication and the
 # rollback remove is fault-injected to fail, the replacement capability is
 # still returned so the caller can release that exact inode and generation.

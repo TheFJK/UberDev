@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Asserts that uberdev:post-impl-review skill exists as a Phase 1 post-PR-push
-# reviewer fanout, dispatches all 6 reviewer agents in a single message
+# reviewer fanout, dispatches each configured wave before waiting
 # (5 distinct files; code-reviewer dispatched twice — general lens + correctness
 # lens), and that deprecated pre-push call sites have been removed per #67.
 
@@ -52,7 +52,7 @@ echo "== post-impl-review skill exists with frontmatter =="
 assert_grep "$POST_IMPL" '^name: post-impl-review' "frontmatter has name: post-impl-review"
 
 echo
-echo "== 6 reviewer agents named in single message =="
+echo "== 6 reviewer agents named with dispatch-before-wait waves =="
 assert_grep "$POST_IMPL" 'code-reviewer' "code-reviewer named"
 assert_grep "$POST_IMPL" 'pr-test-analyzer' "pr-test-analyzer named (6th reviewer per #73)"
 assert_grep "$POST_IMPL" 'silent-failure-hunter' "silent-failure-hunter named"
@@ -74,10 +74,10 @@ fi
 assert_count "$POST_IMPL" '^### Step 2: ' '^### Step 3: ' '^\| .code-[a-z-]+.[^|]*\||^\| .pr-test-analyzer.[^|]*\||^\| .silent-failure-hunter.[^|]*\||^\| .type-design-analyzer.[^|]*\||^\| .comment-analyzer.[^|]*\|' \
   6 \
   "Step 2 dispatch table has exactly 6 reviewer rows (one per dispatch slot, including 2 code-reviewer rows)"
-assert_grep "$POST_IMPL" 'single message|SINGLE message|one assistant turn|ONE assistant turn' \
-  "single-message-fanout invariant documented"
-assert_grep "$POST_IMPL" '6 Task\(\) calls.*ONE assistant turn|MUST be in ONE assistant turn' \
-  "6 Task() calls / single-message invariant documented"
+assert_grep "$POST_IMPL" 'dispatch-all-before-wait|dispatch.*before waiting' \
+  "dispatch-before-wait invariant documented"
+assert_grep "$POST_IMPL" 'configured wave|each wave|within.*wave' \
+  "fanout invariant is scoped to each configured wave"
 
 echo
 echo "== Aspect emphasis input + Step 1 brief assembly (#73) =="
@@ -95,9 +95,11 @@ assert_grep "$POST_IMPL" 'POST_IMPL_REVIEW_CAP=6' \
   "fanout cap fallback assignment is 6 (was 5)"
 
 echo
-echo "== pr-test-analyzer YAML migration-window fallback (#73) =="
-assert_grep "$POST_IMPL" 'Migration-window fallback for .pr-test-analyzer.' \
-  "Step 4 documents transient fallback parser for legacy free-form pr-test-analyzer output"
+echo "== canonical reviewer YAML boundary =="
+assert_no_grep "$POST_IMPL" 'Migration-window fallback for .pr-test-analyzer.' \
+  "obsolete free-form pr-test-analyzer fallback is removed"
+assert_grep "$POST_IMPL" 'manifest-declared shared output contract' \
+  "YAML shape is attributed to the manifest-declared shared output contract"
 
 echo
 echo "== Anti-regression: pre-push call sites removed (#67) =="
@@ -365,6 +367,56 @@ assert_no_grep "$POST_IMPL" '\(haiku\)' \
   "M1.2 — Step 2 dispatch table carries no (haiku) annotation"
 assert_grep "$POST_IMPL" 'model: inherit' \
   "M1.3 — prose states reviewer agents carry model: inherit"
+
+echo
+echo "== Post-launch bookkeeping failures unwind the active wave =="
+POST_REVIEW_RUNTIME_TMP="$(mktemp -d)"
+POST_REVIEW_FUNCTIONS="$POST_REVIEW_RUNTIME_TMP/functions.sh"
+awk '
+  /^post_review_roster_complete\(\)/ { active=1 }
+  active && /^REVIEW_EDGES=\(/ { exit }
+  active { print }
+' "$POST_IMPL" >"$POST_REVIEW_FUNCTIONS"
+if (
+  set -euo pipefail
+  . "$POST_REVIEW_FUNCTIONS"
+  REVIEW_EDGES=(review.edge)
+  run_failure_case() {
+    local mode="$1" root="$POST_REVIEW_RUNTIME_TMP/$1" rc
+    mkdir -p "$root"
+    printf '%s\n' '{"edge":"review.edge"}' >"$root/records"
+    : >"$root/unwind.log"
+    TEST_AGGREGATE_LAUNCHED="$root/launched"
+    post_review_fanout() {
+      printf '%s\n' '{"edge":"review.edge","handoff":"h","result":"r","status":"s"}' >"$2"
+      if [ "$mode" = roster ]; then
+        printf '%s\n' '{"edge":"wrong.edge","receipt":"x","result":"r","status":"s"}' >"$3"
+      else
+        printf '%s\n' '{"edge":"review.edge","receipt":"x","result":"r","status":"s"}' >"$3"
+      fi
+      [ "$mode" != descriptors ] || rm -f "$2"
+      if [ "$mode" = launched ]; then rm -f "$TEST_AGGREGATE_LAUNCHED"; mkdir "$TEST_AGGREGATE_LAUNCHED"; fi
+    }
+    post_review_wait_all() { return 0; }
+    uberdev_unwind_child() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$root/unwind.log"; }
+    set +e
+    post_review_run_capped "$root/records" 1 1 "$root/descriptors" "$root/launched" "$root/failed" 9 "$root/wave"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ]
+    grep -Fq $'s\tr\t9' "$root/unwind.log"
+  }
+  run_failure_case roster
+  run_failure_case descriptors
+  run_failure_case launched
+); then
+  echo "  PASS  roster and aggregate-ledger failures boundedly unwind launched children"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  post-launch bookkeeping failure left an active wave without bounded unwind"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$POST_REVIEW_RUNTIME_TMP"
 
 echo
 echo "== Summary =="

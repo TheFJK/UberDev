@@ -1005,6 +1005,7 @@ claude_watcher_case() {
     initial-absent) printf '[]\n' > "$run/claude-agents.json" ;;
     live-then-absent|explicit-completed) printf '[{"sessionId":"abc12345-full","state":"running"}]\n' > "$run/claude-agents.json" ;;
     blocked) printf '[{"sessionId":"abc12345-full","state":"blocked","blockedReason":"Permission approval required"}]\n' > "$run/claude-agents.json" ;;
+    provider-blocked) printf '[{"sessionId":"abc12345-full","state":"blocked","blockedReason":"Provider queue is paused"}]\n' > "$run/claude-agents.json" ;;
     idle) printf '[{"sessionId":"abc12345-full","state":"idle"}]\n' > "$run/claude-agents.json" ;;
     ambiguous) printf '[{"sessionId":"abc12345-one","state":"running"},{"sessionId":"abc12345-two","state":"completed"}]\n' > "$run/claude-agents.json" ;;
     probe-error) printf '{not-json\n' > "$run/claude-agents.json" ;;
@@ -1021,7 +1022,7 @@ claude_watcher_case() {
         "$run/prompt.txt" "$run/result.md" "$run/status.json"
   )
   case "$mode" in
-    initial-absent|live-then-absent|explicit-completed|blocked|idle)
+    initial-absent|live-then-absent|explicit-completed|blocked|provider-blocked|idle)
       for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
         grep -Eq '"state":"(completed|failed)"' "$run/status.json" 2>/dev/null && break
         command sleep 0.1
@@ -1059,7 +1060,7 @@ PY
         echo "explicit Claude completion did not complete" >&2; return 1;
       }
       ;;
-    blocked|idle)
+    blocked|provider-blocked|idle)
       grep -q '"state":"failed"' "$run/status.json" || {
         echo "$mode Claude session did not terminalize" >&2; return 1;
       }
@@ -1068,7 +1069,8 @@ PY
 import json, pathlib, sys
 events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
 terminal = [event for event in events if event.get("run_id") == "claude-watch-"+sys.argv[2] and event.get("event") == "failed"]
-assert len(terminal) == 1 and terminal[0].get("error_class") == "provider_permission_blocked", terminal
+expected = "provider_blocked" if sys.argv[2] == "provider-blocked" else "provider_permission_blocked"
+assert len(terminal) == 1 and terminal[0].get("error_class") == expected, terminal
 PY
       ;;
     ambiguous|probe-error)
@@ -1097,6 +1099,7 @@ claude_watcher_case initial-absent
 claude_watcher_case live-then-absent
 claude_watcher_case explicit-completed
 claude_watcher_case blocked
+claude_watcher_case provider-blocked
 claude_watcher_case idle
 claude_watcher_case ambiguous
 claude_watcher_case probe-error

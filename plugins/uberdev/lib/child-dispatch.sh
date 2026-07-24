@@ -666,6 +666,8 @@ try:
   if not provider_handle.isascii() or not provider_handle.isdecimal() or int(provider_handle)<=0: raise ValueError()
   handle='pane:'+provider_handle
  if not isinstance(handle,(str,int)) or isinstance(handle,bool) or not str(handle): raise ValueError()
+ if state=='running':
+  if lease_generation is None: raise ValueError()
  value={'schema_version':1,'edge_id':edge,'instance_id':r['run_id'],'backend':s['backend'],'handle':str(handle),'state':state,'result_file':os.path.abspath(result),'status_file':os.path.abspath(status)}
  print(json.dumps(value,sort_keys=True,separators=(',',':')),end='')
 except Exception: raise SystemExit(2)
@@ -739,7 +741,7 @@ try:
  backend=value.get('backend'); handle=value.get('handle'); terminal=value.get('terminal'); attempts=value.get('attempts')
  reason=value.get('reason','')
  cancel_reasons={'provider_stop_failed','provider_session_resolution_failed','provider_cancel_probe_failed','provider_cancel_unconfirmed'}
- lease_reasons={'lease_acquire_invalid_input','lease_acquire_runtime_state_failed','lease_acquire_mutex_failed','lease_acquire_reconcile_failed','lease_acquire_duplicate_check_failed','lease_acquire_allocate_failed','lease_acquire_owner_failed','lease_acquire_publish_failed','lease_acquire_identity_failed','lease_acquire_rollback_failed','lease_acquire_mutex_release_failed','lease_handle_rollback_failed'}
+ lease_reasons={'lease_acquire_invalid_input','lease_acquire_runtime_state_failed','lease_acquire_mutex_failed','lease_acquire_reconcile_failed','lease_acquire_count_failed','lease_acquire_duplicate_check_failed','lease_acquire_allocate_failed','lease_acquire_owner_failed','lease_acquire_publish_failed','lease_acquire_identity_failed','lease_acquire_rollback_failed','lease_acquire_mutex_release_failed','lease_handle_rollback_failed'}
  if reason and reason not in cancel_reasons|lease_reasons|{'supervisory_failure'}: raise ValueError()
  if backend not in {'codex','claude-bg','background','wezterm'}: raise ValueError()
  if type(attempts) is not int or attempts<1 or attempts>3: raise ValueError()
@@ -872,27 +874,37 @@ PY
 
 _uberdev_child_timeout_cas() {
   python3 -I -B - "$1" "$2" "$3" "$4" <<'PY'
-import hashlib,json,os,stat,sys,tempfile
+import hashlib,json,os,stat,sys,tempfile,time
 path,expected_sha,expected_handle,expected_generation=sys.argv[1:]
-parent=os.path.dirname(path); fd=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
+parent=os.path.dirname(path); lock=path+'.transition-lock'; acquired=False
+for _ in range(300):
+ try:
+  os.mkdir(lock,0o700); acquired=True; break
+ except FileExistsError: time.sleep(.01)
+if not acquired: raise SystemExit(2)
 try:
- e=os.fstat(fd); raw=os.read(fd,65537)
- if not stat.S_ISREG(e.st_mode) or e.st_nlink!=1 or len(raw)>65536: raise SystemExit(2)
-finally: os.close(fd)
-try: current=json.loads(raw)
-except Exception: raise SystemExit(2)
-if hashlib.sha256(raw).hexdigest()!=expected_sha or current.get('state')!='running' or str(current.get('pid'))!=expected_handle or current.get('lease_generation')!=expected_generation:
- print('changed',end=''); raise SystemExit(3)
-current['state']='timed_out'; current['exit_code']=124
-out=json.dumps(current,sort_keys=True,separators=(',',':')).encode()+b'\n'
-fd,tmp=tempfile.mkstemp(prefix='.child-timeout.',dir=parent); os.fchmod(fd,0o600)
-try:
- with os.fdopen(fd,'wb') as stream: stream.write(out); stream.flush(); os.fsync(stream.fileno())
- now=os.stat(path,follow_symlinks=False)
- if (now.st_dev,now.st_ino)!=(e.st_dev,e.st_ino): raise SystemExit(3)
- os.replace(tmp,path); print('updated',end='')
+ fd=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
+ try:
+  e=os.fstat(fd); raw=os.read(fd,65537)
+  if not stat.S_ISREG(e.st_mode) or e.st_nlink!=1 or len(raw)>65536: raise SystemExit(2)
+ finally: os.close(fd)
+ try: current=json.loads(raw)
+ except Exception: raise SystemExit(2)
+ if hashlib.sha256(raw).hexdigest()!=expected_sha or current.get('state')!='running' or str(current.get('pid'))!=expected_handle or current.get('lease_generation')!=expected_generation:
+  print('changed',end=''); raise SystemExit(3)
+ current['state']='timed_out'; current['exit_code']=124
+ out=json.dumps(current,sort_keys=True,separators=(',',':')).encode()+b'\n'
+ fd,tmp=tempfile.mkstemp(prefix='.child-timeout.',dir=parent); os.fchmod(fd,0o600)
+ try:
+  with os.fdopen(fd,'wb') as stream: stream.write(out); stream.flush(); os.fsync(stream.fileno())
+  now=os.stat(path,follow_symlinks=False)
+  if (now.st_dev,now.st_ino)!=(e.st_dev,e.st_ino): raise SystemExit(3)
+  os.replace(tmp,path); print('updated',end='')
+ finally:
+  if os.path.exists(tmp): os.unlink(tmp)
 finally:
- if os.path.exists(tmp): os.unlink(tmp)
+ try: os.rmdir(lock)
+ except FileNotFoundError: pass
 PY
 }
 

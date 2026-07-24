@@ -151,6 +151,7 @@ rm -f "$WATCHER_FALLBACK"
 # Reviewer results are validated at one deterministic boundary. In particular,
 # a parseable APPROVE document may not carry blocker evidence.
 VALID_REVIEW="$TMP/run/children/worker-0001/valid-review.md"
+REJECT_REVIEW="$TMP/run/children/worker-0001/reject-review.md"
 INVALID_REVIEW="$TMP/run/children/worker-0001/invalid-review.md"
 EMPTY_REVIEW="$TMP/run/children/worker-0001/empty-review.md"
 ADVISORY_ONE_REVIEW="$TMP/run/children/worker-0001/advisory-one-review.md"
@@ -163,6 +164,10 @@ printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
   '  - severity: blocker' '    location: tests/example.test.sh:1' \
   '    summary: bounded summary' '    detail: bounded detail' \
   'confidence: high' '```' >"$VALID_REVIEW"
+printf '%s\n' '```yaml' 'verdict: REJECT' 'findings:' \
+  '  - severity: blocker' '    location: tests/example.test.sh:1' \
+  '    summary: bounded rejection' '    detail: bounded blocker detail' \
+  'confidence: high' '```' >"$REJECT_REVIEW"
 printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings:' \
   '  - severity: blocker' '    location: tests/example.test.sh:1' \
   '    summary: contradictory summary' '    detail: contradictory detail' \
@@ -194,6 +199,7 @@ printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
   '    summary: invalid drive-qualified location' '    detail: bounded detail' \
   'confidence: high' '```' >"$DRIVE_QUALIFIED_REVIEW"
 uberdev_child_validate_phase1_review_result "$VALID_REVIEW"
+uberdev_child_validate_phase1_review_result "$REJECT_REVIEW"
 uberdev_child_validate_phase1_review_result "$EMPTY_REVIEW"
 uberdev_child_validate_phase1_review_result "$ADVISORY_ONE_REVIEW"
 uberdev_child_validate_phase1_review_result "$ADVISORY_MULTI_REVIEW"
@@ -344,6 +350,23 @@ printf '{"backend":"codex","state":"running","exit_code":null,"pid":"777","lease
 OLD_SHA="$(shasum -a 256 "$STATUS" | awk '{print $1}')"
 printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"777","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$STATUS"
 ! _uberdev_child_timeout_cas "$STATUS" "$OLD_SHA" 777 0123456789abcdef0123456789abcdef >/dev/null 2>&1
+grep -q '"state":"completed"' "$STATUS"
+
+# The terminal-state serialization lock closes the interleaving where timeout
+# has started but a provider publishes completion before timeout can commit.
+printf '{"backend":"codex","state":"running","exit_code":null,"pid":"779","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$STATUS"
+LOCKED_OLD_SHA="$(shasum -a 256 "$STATUS" | awk '{print $1}')"
+mkdir "$STATUS.transition-lock"
+(
+  set +e
+  _uberdev_child_timeout_cas "$STATUS" "$LOCKED_OLD_SHA" 779 0123456789abcdef0123456789abcdef >"$TMP/locked-cas.out" 2>/dev/null
+  printf '%s\n' "$?" >"$TMP/locked-cas.rc"
+) & LOCKED_CAS_PID=$!
+sleep .1
+printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"779","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$STATUS"
+rmdir "$STATUS.transition-lock"
+wait "$LOCKED_CAS_PID"
+[ "$(cat "$TMP/locked-cas.rc")" -eq 3 ]
 grep -q '"state":"completed"' "$STATUS"
 
 # zsh can source and execute the public wait API without colliding with its

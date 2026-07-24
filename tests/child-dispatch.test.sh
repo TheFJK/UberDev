@@ -221,7 +221,7 @@ PY
 _capture_dispatch() {
   printf '%s' "$1" >"$TMP/request.json"
   cp "$2" "$TMP/prompt.txt"
-  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"12345"}\n' >"$4"
+  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"12345","process_identity":"12345|12345|12345|0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$4"
   chmod 600 "$4"
   DISPATCH_ID=12345
   return 0
@@ -253,6 +253,27 @@ for f in handoff.v1.json prompt.txt status.json; do
   [ "$(file_mode "$TMP/run/children/implementation-0001/$f")" = 600 ]
 done
 cmp "$HANDOFF" "$TMP/run/children/implementation-0001/handoff.v1.json"
+
+# Every running receipt is a lifecycle capability and therefore needs the
+# exact lease generation used for terminal release.
+eval "$(declare -f uberdev_unwind_child | sed '1s/uberdev_unwind_child/_receipt_variant_unwind/')"
+uberdev_unwind_child() { return 0; }
+receipt_variant=missing-generation
+python3 - "$HANDOFF" "$TMP/$receipt_variant.json" "$receipt_variant" <<'PY'
+import json,sys
+source,target,variant=sys.argv[1:]
+value=json.load(open(source)); value['instance_id']='receipt-'+variant
+json.dump(value,open(target,'w'),separators=(',',':'))
+PY
+uberdev_agent_dispatch() {
+  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"12345","process_identity":"12345|12345|12345|0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}\n' >"$4"
+  chmod 600 "$4"; DISPATCH_ID=12345; return 0
+}
+! uberdev_dispatch_child implementation "$TMP/$receipt_variant.json" \
+  "$TMP/run/children/receipt-$receipt_variant/result.md" \
+  "$TMP/run/children/receipt-$receipt_variant/status.json" >/dev/null 2>&1
+eval "$(declare -f _receipt_variant_unwind | sed '1s/_receipt_variant_unwind/uberdev_unwind_child/')"
+uberdev_agent_dispatch() { _capture_dispatch "$@"; }
 
 # A provider may launch successfully but publish a status that cannot be
 # serialized into the closed dispatch receipt. The central boundary must

@@ -6,6 +6,7 @@ THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$THIS_DIR/.." && pwd)"
 FIX="$THIS_DIR/fixtures/findings-to-issues"
 AGENT_MD="$REPO_ROOT/plugins/uberdev/agents/findings-to-issues.md"
+PACKAGED_AGENT_TOML="$REPO_ROOT/codex/agents/uberdev-findings-to-issues.toml"
 REVIEW_PR_MD="$REPO_ROOT/plugins/uberdev/commands/review-pr.md"
 SIMPLIFY_MD="$REPO_ROOT/plugins/uberdev/commands/simplify.md"
 
@@ -451,6 +452,10 @@ assert_in_section "$AGENT_MD" '^2\. \*\*Rate-limit pre-flight' '^3\. \*\*Parse a
 assert_in_section "$AGENT_MD" '^## Refusal triggers' '^## Failure-mode summary' \
   'rate-limit-probe-failed.*probe.*empty/non-numeric' \
   'S16.8 — refusal contract separates probe failure from low numeric budget'
+assert_no_grep "$AGENT_MD" 'Search bucket \(30 req/min, 1000/hr authenticated\)' \
+  'S16.9 — Search prose does not conflate the separate code-search hourly limit'
+assert_no_grep "$PACKAGED_AGENT_TOML" 'Search bucket \(30 req/min, 1000/hr authenticated\)' \
+  'S16.10 — packaged Codex agent preserves the corrected Search-bucket contract'
 
 echo
 echo "## Summary"

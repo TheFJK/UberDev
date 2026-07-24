@@ -893,20 +893,32 @@ uberdev_semaphore_acquire() {
         ;;
     esac
     active="$(_uberdev_semaphore_count_locked "$scope")" || {
-      _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true
-      _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_reconcile_failed
+      if ! _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1; then
+        _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_mutex_release_failed
+        _uberdev_semaphore_error 'cannot release acquisition mutex'
+      else
+        _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_count_failed
+      fi
       return 2
     }
     if [ "$active" -lt "$cap" ]; then
       lease="$(_uberdev_semaphore_new_lease_path_locked "$scope" "$run_id")" || {
-        _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true
-        _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_allocate_failed
+        if ! _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1; then
+          _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_mutex_release_failed
+          _uberdev_semaphore_error 'cannot release acquisition mutex'
+        else
+          _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_allocate_failed
+        fi
         return 2
       }
       _uberdev_semaphore_capture_lease_owner "$scope" || {
-        _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true
         _uberdev_semaphore_error 'cannot resolve lease owner process'
-        _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_owner_failed
+        if ! _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1; then
+          _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_mutex_release_failed
+          _uberdev_semaphore_error 'cannot release acquisition mutex'
+        else
+          _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_owner_failed
+        fi
         return 2
       }
       owner_pid="$_UBERDEV_SEMAPHORE_LEASE_OWNER_PID"

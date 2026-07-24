@@ -1,13 +1,13 @@
 ---
 name: post-impl-review
-description: Shared post-implementation review fanout — dispatches 6 advisory reviewer agents (code-reviewer, silent-failure-hunter, type-design-analyzer, comment-analyzer, pr-test-analyzer, plus one general code-quality reviewer) IN A SINGLE MESSAGE and aggregates findings. Use exclusively from /uberdev:review-pr Phase 1, after PR push. Pre-push call sites in /solve and subagent-driven-dev have been retired.
+description: Shared post-implementation review fanout — dispatches 6 advisory reviewer agents (code-reviewer, silent-failure-hunter, type-design-analyzer, comment-analyzer, pr-test-analyzer, plus one general code-quality reviewer) in dispatch-before-wait waves and aggregates findings. Use exclusively from /uberdev:review-pr Phase 1, after PR push. Pre-push call sites in /solve and subagent-driven-dev have been retired.
 ---
 
 # Post-Implementation Review
 
 ## Overview
 
-6 reviewer agents fire in PARALLEL inside a single assistant turn; their findings are aggregated into a single non-blocking summary returned to the caller. The reviewers are advisory — at this layer the caller continues regardless of `REVISIONS_REQUIRED` verdicts. This keeps wall-clock cost low (one round-trip for six perspectives) while still applying multi-axis scrutiny to the pushed-PR diff (the only live caller is `/uberdev:review-pr` Phase 1 — see "When to invoke" below).
+6 reviewer agents run in configured waves; every child in a wave is dispatched before that wave is waited. Their findings are aggregated into a single non-blocking summary returned to the caller. The reviewers are advisory — at this layer the caller continues regardless of `REVISIONS_REQUIRED` verdicts while lifecycle failures remain fail-closed (the only live caller is `/uberdev:review-pr` Phase 1 — see "When to invoke" below).
 
 **Announce at start:** "I'm using the post-impl-review skill to fan out the 6 reviewer agents."
 
@@ -17,11 +17,9 @@ description: Shared post-implementation review fanout — dispatches 6 advisory 
 
 > **Pre-push callers retired (PR #67 / spec a7d9db4f):** `uberdev:subagent-driven-dev` end-of-issue and `/solve` trivial/small inline prompts no longer invoke this skill before PR push. `/solve` and `/turbo` for every tier reach this skill exclusively via the post-PR-push `/uberdev:review-pr` chain established by `finish-branch` (PR #25). The `finish-branch --interactive` Options 1 (local merge), 3 (keep), and 4 (discard) bypass `/uberdev:review-pr` entirely — see the "Pre-push bypass (documented opt-out)" subsection under Integration below.
 
-## Critical invariant — single-message fanout
+## Critical invariant — dispatch-before-wait waves
 
-Quote from `~/.codex/AGENTS.md`: *"Parallelize independent work — single message, multiple Agent tool calls."*
-
-The 6 routed child calls calls below MUST be in ONE assistant turn. Splitting across messages defeats parallelism and regresses the design contract — six sequential round-trips would multiply wall-clock cost and break the "one round-trip for six perspectives" guarantee that the rest of the pipeline relies on.
+Within each configured wave, issue every routed child dispatch before waiting for any child in that wave. `POST_IMPL_REVIEW_CAP` determines whether the six reviewers form one wave or several sequential waves; the dispatch-all-before-wait invariant applies independently to every wave.
 
 ## Critical invariant — no skill re-entry
 
@@ -91,7 +89,7 @@ Assemble a single brief that all 6 reviewers will receive verbatim:
    - errors
    ```
 
-The brief is identical for all 6 reviewers — each agent's own system prompt narrows the lens. If `aspect_emphasis` is set, the same `## Emphasis` section is included verbatim in every reviewer's brief — emphasis is uniform across reviewers, never per-reviewer (single-message-fanout invariant: aspect filters never gate dispatch).
+The brief is identical for all 6 reviewers — each agent's own system prompt narrows the lens. If `aspect_emphasis` is set, the same `## Emphasis` section is included verbatim in every reviewer's brief — emphasis is uniform across reviewers, never per-reviewer (per-wave dispatch-before-wait invariant: aspect filters never gate dispatch).
 
 ### Step 2: Dispatch 6 required routed reviewers
 
@@ -110,7 +108,7 @@ The brief is identical for all 6 reviewers — each agent's own system prompt na
 
 ### Routed execution contract (normative)
 
-Source `${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/child-dispatch.sh`. The caller propagates the immutable carrier through the context-only lineage edge `review_pr.post_impl_review`; this skill never resolves a model. Resolve the six provider edges from policy, create unique iteration/attempt instances with `uberdev_create_child_handoff`, and issue every dispatch before waiting:
+Source `${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/child-dispatch.sh`. The caller propagates the immutable carrier through the context-only lineage edge `review_pr.post_impl_review`; this skill never resolves a model. Resolve the six provider edges from policy, create unique iteration/attempt instances with `uberdev_create_child_handoff`, and issue every dispatch within each configured wave before waiting on that wave:
 
 ```bash uberdev-executable setup=post-impl-review
 set -u
@@ -243,12 +241,23 @@ post_review_wait_all() {
   return 0
 }
 
+# Any failure after a wave has launched but before its normal wait boundary
+# must boundedly collect every child recorded for that wave.
+post_review_fail_after_wave_launch() {
+  local launched="$1" timeout_s="$2" reason="$3" original_rc="$4" row cleanup_rc=0
+  while IFS= read -r row; do
+    uberdev_unwind_child "$(jq -r .status <<<"$row")" "$(jq -r .result <<<"$row")" "$timeout_s" || cleanup_rc=1
+  done <"$launched"
+  [ "$cleanup_rc" -eq 0 ] || echo "error: wave cleanup failed after $reason" >&2
+  return "$original_rc"
+}
+
 # Dispatch at most CAP children, wait for that complete wave, then advance.
 # Aggregate ledgers preserve global roster order so format-repair instance IDs
 # remain unique when cap-one/cap-two execution creates multiple waves.
 post_review_run_capped() {
   local records="$1" expected="$2" cap="$3" descriptors="$4" launched="$5" failed="$6" timeout_s="$7" prefix="$8"
-  local offset=0 end wave=0 wave_expected wave_records wave_descriptors wave_launched wave_failed wave_rc
+  local offset=0 end wave=0 wave_expected wave_records wave_descriptors wave_launched wave_failed wave_rc post_launch_rc
   local total_valid=0 total_format=0 any_infra=0
   POST_REVIEW_VALID_COUNT=0
   POST_REVIEW_FORMAT_FAILURE_COUNT=0
@@ -267,9 +276,24 @@ post_review_run_capped() {
     awk -v first="$((offset + 1))" -v last="$end" 'NR >= first && NR <= last' "$records" >"$wave_records" || return 2
     post_review_roster_complete "$wave_records" "$wave_expected" "${REVIEW_EDGES[@]}" || return 2
     post_review_fanout "$wave_records" "$wave_descriptors" "$wave_launched" "$timeout_s" || return $?
-    post_review_roster_complete "$wave_launched" "$wave_expected" "${REVIEW_EDGES[@]}" || return 2
-    cat "$wave_descriptors" >>"$descriptors" || return 2
-    cat "$wave_launched" >>"$launched" || return 2
+    post_review_roster_complete "$wave_launched" "$wave_expected" "${REVIEW_EDGES[@]}"
+    post_launch_rc=$?
+    if [ "$post_launch_rc" -ne 0 ]; then
+      post_review_fail_after_wave_launch "$wave_launched" "$timeout_s" 'launched roster validation' "$post_launch_rc"
+      return $?
+    fi
+    cat "$wave_descriptors" >>"$descriptors"
+    post_launch_rc=$?
+    if [ "$post_launch_rc" -ne 0 ]; then
+      post_review_fail_after_wave_launch "$wave_launched" "$timeout_s" 'descriptor ledger append' "$post_launch_rc"
+      return $?
+    fi
+    cat "$wave_launched" >>"$launched"
+    post_launch_rc=$?
+    if [ "$post_launch_rc" -ne 0 ]; then
+      post_review_fail_after_wave_launch "$wave_launched" "$timeout_s" 'launch ledger append' "$post_launch_rc"
+      return $?
+    fi
     wave_rc=0
     post_review_wait_all "$wave_launched" "$timeout_s" "$wave_failed" "$offset" || wave_rc=$?
     [ ! -s "$wave_failed" ] || cat "$wave_failed" >>"$failed" || return 2
@@ -374,7 +398,7 @@ invariant. When `CAP >= 6` (default), dispatch all 6 in one wave
 (today's behaviour, unchanged). Default 6, range [1, 50],
 precedence env > config > default.
 
-Each return MUST be in this YAML shape (each agent's own frontmatter codifies it):
+Each return MUST match the manifest-declared shared output contract in this YAML shape:
 
 ```yaml
 verdict: APPROVE | REVISIONS_REQUIRED | REJECT
@@ -478,8 +502,6 @@ Counting rules:
 - "suggestions" = sum of `severity: suggestion` findings across all 6 returns.
 - The trailing `Continue.` is fixed text — this skill is non-blocking and audit-only by design. To apply simplifier findings (or any other reviewer's findings), invoke `/uberdev:simplify` or `/uberdev:review-pr` Phase 2 — those commands own the apply-and-commit loop.
 
-**Migration-window fallback for `pr-test-analyzer` (transient, removable in v0.20+):** if `pr-test-analyzer`'s return is the legacy free-form Markdown (sections "Critical Gaps", "Important Improvements", "Test Quality Issues") instead of the standard YAML, the aggregator parses each "Critical Gaps" entry as `severity: blocker` and each other entry as `severity: suggestion`, and synthesises `verdict: REVISIONS_REQUIRED` if any blocker entries exist (else `APPROVE`). This fallback exists ONLY because the agent's output contract was migrated alongside the Step 2 dispatch-table swap; once `pr-test-analyzer.md` ships with the YAML contract (see `agents/pr-test-analyzer.md` Output Format section), the fallback can be removed in a follow-up minor version.
-
 ## Output (returned to caller, NOT a YAML block)
 
 Return a prose summary of the aggregation table above to the caller. Example:
@@ -492,7 +514,8 @@ Findings remain advisory, but missing reviewer evidence is not advisory: **the c
 
 | Symptom | Action |
 |---|---|
-| Any reviewer returns `BLOCKED` or malformed YAML | Retry that edge once with a fresh `attempt02`; if still invalid, suppress the ordinary aggregate, return blocked, and prevent fixer/trust dispatch. |
+| Reviewer supervision is blocked | Suppress the ordinary aggregate immediately, return blocked, and prevent fixer/trust dispatch. |
+| A terminal reviewer returns malformed YAML | Retry that edge once with a fresh `attempt02`; if still malformed, suppress the ordinary aggregate, return blocked, and prevent fixer/trust dispatch. |
 
 ## Integration
 
@@ -515,4 +538,4 @@ Findings remain advisory, but missing reviewer evidence is not advisory: **the c
 - `uberdev:subagent-driven-dev` (would loop into self via the parent caller chain)
 
 **Pairs with:**
-- `agents/code-reviewer.md`, `agents/silent-failure-hunter.md`, `agents/type-design-analyzer.md`, `agents/comment-analyzer.md`, `agents/pr-test-analyzer.md` — the 5 distinct reviewer agent definitions whose frontmatter codifies the YAML return contract. `code-reviewer` is dispatched twice (general lens + correctness lens) to round out 6 fanout slots; the agent file is reused but the prompt brief differentiates the lens.
+- `agents/code-reviewer.md`, `agents/silent-failure-hunter.md`, `agents/type-design-analyzer.md`, `agents/comment-analyzer.md`, `agents/pr-test-analyzer.md` — the 5 distinct reviewer agent definitions governed by the manifest-declared shared YAML output contract. `code-reviewer` is dispatched twice (general lens + correctness lens) to round out 6 fanout slots; the agent file is reused but the prompt brief differentiates the lens.

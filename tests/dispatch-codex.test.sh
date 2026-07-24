@@ -563,7 +563,7 @@ PID_CAPTURE_OUT="$(
 PID_CAPTURE_ERRORS=''
 printf '%s\n' "$PID_CAPTURE_OUT" | grep -Fq 'rc=2' || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS rc"
 printf '%s\n' "$PID_CAPTURE_OUT" | grep -Fq 'provider_live=0' || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS provider-live"
-printf '%s\n' "$PID_CAPTURE_OUT" | grep -Fq '"state":"failed"' || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS terminal-status"
+printf '%s\n' "$PID_CAPTURE_OUT" | grep -Fq '"state":"cancelled"' || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS terminal-status"
 [ ! -e "$PID_CAPTURE_TMP/repo/.claude/worktrees/solve-issue-335-$PID_CAPTURE_SLUG" ] || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS worktree"
 git -C "$PID_CAPTURE_TMP/repo" show-ref --verify --quiet "refs/heads/worktree-solve-issue-335-$PID_CAPTURE_SLUG" \
   && PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS branch"
@@ -574,8 +574,7 @@ if ! python3 -I -B - "$PID_CAPTURE_TMP/run/.agent-state-$(id -u)/agent-lifecycle
 import json,sys
 rows=[json.loads(line) for line in open(sys.argv[1],encoding='utf-8')]
 events=[row for row in rows if row.get('run_id')=='codex-pid-capture-failure']
-assert [row.get('event') for row in events]==['route_decided','agent_started','failed'],events
-assert events[-1].get('error_class')=='dispatch_setup_failed',events[-1]
+assert [row.get('event') for row in events]==['route_decided','agent_started','cancelled'],events
 PY
 then
   PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS lifecycle"
