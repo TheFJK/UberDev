@@ -13,3 +13,5 @@ confidence: low | medium | high
 ```
 
 Use `findings: []` when there are no findings. One or more blocker findings require `REVISIONS_REQUIRED` or `REJECT`; suggestions alone remain advisory and permit `APPROVE`.
+
+Every result is validated by the canonical `uberdev_child_validate_phase1_review_result` boundary before aggregation. A malformed document or `APPROVE` result containing a blocker is routed through the existing single format-retry path and blocks green if the retry remains invalid.

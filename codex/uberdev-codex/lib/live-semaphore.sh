@@ -787,7 +787,7 @@ _uberdev_semaphore_new_lease_path_locked() {
 }
 
 _uberdev_semaphore_publish_lease() {
-  local scope lease generation run_id owner_pid backend_handle start_epoch timeout_s status_path manifest_tool
+  local scope lease generation run_id owner_pid backend_handle start_epoch timeout_s status_path manifest_tool published_identity
   scope="$1"
   lease="$2"
   generation="$(basename "$lease" .lease | cut -c 1-32)"
@@ -798,9 +798,11 @@ _uberdev_semaphore_publish_lease() {
   timeout_s="$7"
   status_path="$8"
   manifest_tool="$(_uberdev_semaphore_manifest_tool)" || return 2
-  printf 'version=1\ngeneration=%s\nrun_id=%s\nowner_pid=%s\nbackend_handle=%s\nstart_epoch=%s\ntimeout_s=%s\nstatus_path=%s\n' \
+  published_identity="$(printf 'version=1\ngeneration=%s\nrun_id=%s\nowner_pid=%s\nbackend_handle=%s\nstart_epoch=%s\ntimeout_s=%s\nstatus_path=%s\n' \
     "$generation" "$run_id" "$owner_pid" "$backend_handle" "$start_epoch" "$timeout_s" "$status_path" \
-    | python3 "$manifest_tool" secure-write-lease --lease-path "$lease" >/dev/null
+    | python3 "$manifest_tool" secure-write-lease --lease-path "$lease")" || return 2
+  case "$published_identity" in *[!0-9:]*|:*|*:|*:*:*) return 2 ;; esac
+  _UBERDEV_SEMAPHORE_PUBLISHED_IDENTITY="$published_identity"
 }
 
 _uberdev_semaphore_remove_lease() {
@@ -815,8 +817,9 @@ _uberdev_semaphore_remove_lease() {
 }
 
 uberdev_semaphore_acquire() {
-  local state_root repo_id backend cap run_id timeout_s identity_mode scope lease active wait_tries wait_max mutex_rc duplicate_rc owner_pid
-  local generation path_identity exact_identity cleanup_rc
+  local state_root repo_id backend cap run_id timeout_s identity_mode output_variable scope lease active wait_tries wait_max mutex_rc duplicate_rc owner_pid
+  local generation path_identity exact_identity cleanup_rc record
+  _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=''
   state_root="${1-}"
   repo_id="${2-}"
   backend="${3-}"
@@ -824,21 +827,30 @@ uberdev_semaphore_acquire() {
   run_id="${5-}"
   timeout_s="${6-}"
   identity_mode="${7-}"
-  case "$identity_mode" in ''|exact-identity) ;; *) return 2 ;; esac
+  output_variable="${8-}"
+  case "$identity_mode" in ''|exact-identity) ;; *) _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_invalid_input; return 2 ;; esac
+  case "$output_variable" in ''|[A-Za-z_]*) ;; *) _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_invalid_input; return 2 ;; esac
+  case "$output_variable" in *[!A-Za-z0-9_]*) _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_invalid_input; return 2 ;; esac
 
   _uberdev_semaphore_is_positive_integer "$cap" || {
     _uberdev_semaphore_error 'CAP must be a positive integer'
+    _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_invalid_input
     return 2
   }
   _uberdev_semaphore_is_positive_integer "$timeout_s" || {
     _uberdev_semaphore_error 'TIMEOUT_S must be a positive integer'
+    _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_invalid_input
     return 2
   }
   _uberdev_semaphore_safe_text "$run_id" || {
     _uberdev_semaphore_error 'RUN_ID must be non-empty single-line text'
+    _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_invalid_input
     return 2
   }
-  scope="$(_uberdev_semaphore_prepare_scope "$state_root" "$repo_id" "$backend")" || return $?
+  scope="$(_uberdev_semaphore_prepare_scope "$state_root" "$repo_id" "$backend")" || {
+    _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_runtime_state_failed
+    return 2
+  }
   wait_tries=0
   wait_max="${UBERDEV_SEMAPHORE_ACQUIRE_MAX_TRIES:-30000}"
   _uberdev_semaphore_is_positive_integer "$wait_max" || wait_max=30000
@@ -846,71 +858,106 @@ uberdev_semaphore_acquire() {
   while [ "$wait_tries" -lt "$wait_max" ]; do
     _uberdev_semaphore_mutex_acquire "$scope"
     mutex_rc=$?
-    [ "$mutex_rc" -eq 0 ] || return "$mutex_rc"
+    [ "$mutex_rc" -eq 0 ] || {
+      [ "$mutex_rc" -ne 2 ] || _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_mutex_failed
+      return "$mutex_rc"
+    }
     if ! _uberdev_semaphore_reconcile_locked "$scope"; then
-      _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true
+      if ! _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1; then
+        _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_mutex_release_failed
+      else
+        _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_reconcile_failed
+      fi
       return 2
     fi
     _uberdev_semaphore_run_exists_locked "$scope" "$run_id"
     duplicate_rc=$?
     case "$duplicate_rc" in
       0)
-        _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true
+        if ! _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1; then
+          _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_mutex_release_failed
+          return 2
+        fi
         _uberdev_semaphore_error 'RUN_ID already owns a live lease'
         return 73
         ;;
       1) ;;
       *)
-        _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true
+        _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || {
+          _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_mutex_release_failed
+          return 2
+        }
         _uberdev_semaphore_error 'cannot validate leases for duplicate RUN_ID'
+        _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_duplicate_check_failed
         return 2
         ;;
     esac
-    active="$(_uberdev_semaphore_count_locked "$scope")"
+    active="$(_uberdev_semaphore_count_locked "$scope")" || {
+      _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true
+      _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_reconcile_failed
+      return 2
+    }
     if [ "$active" -lt "$cap" ]; then
       lease="$(_uberdev_semaphore_new_lease_path_locked "$scope" "$run_id")" || {
         _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true
+        _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_allocate_failed
         return 2
       }
       _uberdev_semaphore_capture_lease_owner "$scope" || {
         _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true
         _uberdev_semaphore_error 'cannot resolve lease owner process'
+        _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_owner_failed
         return 2
       }
       owner_pid="$_UBERDEV_SEMAPHORE_LEASE_OWNER_PID"
       if ! _uberdev_semaphore_publish_lease "$scope" "$lease" "$run_id" "$owner_pid" '' "$(date +%s)" "$timeout_s" ''; then
         _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true
         _uberdev_semaphore_error 'cannot publish lease'
+        _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_publish_failed
         return 2
       fi
       generation="$(basename "$lease" .lease | cut -c 1-32)"
       exact_identity=''
       if [ "$identity_mode" = exact-identity ]; then
-        path_identity="$(_uberdev_semaphore_path_identity "$lease")" || {
+        exact_identity="${_UBERDEV_SEMAPHORE_PUBLISHED_IDENTITY:-}:$generation"
+        path_identity="$(_uberdev_semaphore_path_identity "$lease" 2>/dev/null || true)"
+        if [ "$path_identity:$generation" != "$exact_identity" ]; then
           cleanup_rc=0
           _uberdev_semaphore_remove_lease "$lease" "$generation" || cleanup_rc=2
           _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || cleanup_rc=2
-          [ "$cleanup_rc" -eq 0 ] \
-            && _uberdev_semaphore_error 'cannot capture acquired lease identity' \
-            || _uberdev_semaphore_error 'cannot capture or roll back acquired lease identity'
+          if [ "$cleanup_rc" -eq 0 ]; then
+            _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_identity_failed
+            _uberdev_semaphore_error 'cannot capture acquired lease identity'
+          else
+            _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_rollback_failed
+            _uberdev_semaphore_error 'cannot capture or roll back acquired lease identity'
+            record="$lease"$'\t'"$exact_identity"
+            if [ -n "$output_variable" ]; then printf -v "$output_variable" '%s' "$record"; else printf '%s\n' "$record"; fi
+          fi
           return 2
-        }
-        exact_identity="$path_identity:$generation"
+        fi
       fi
-      _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || {
-        _uberdev_semaphore_remove_lease "$lease" \
-          "$generation" >/dev/null 2>&1 || true
+      if ! _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1; then
+        cleanup_rc=0
+        _uberdev_semaphore_remove_lease "$lease" "$generation" >/dev/null 2>&1 || cleanup_rc=2
+        if [ "$cleanup_rc" -eq 0 ]; then
+          _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_mutex_release_failed
+        else
+          _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_rollback_failed
+          record="$lease"$'\t'"$exact_identity"
+          if [ -n "$output_variable" ]; then printf -v "$output_variable" '%s' "$record"; else printf '%s\n' "$record"; fi
+        fi
         _uberdev_semaphore_error 'cannot release acquisition mutex'
         return 2
-      }
-      if [ "$identity_mode" = exact-identity ]; then
-        printf '%s\t%s\n' "$lease" "$exact_identity"
-      else
-        printf '%s\n' "$lease"
       fi
+      if [ "$identity_mode" = exact-identity ]; then record="$lease"$'\t'"$exact_identity"; else record="$lease"; fi
+      if [ -n "$output_variable" ]; then printf -v "$output_variable" '%s' "$record"; else printf '%s\n' "$record"; fi
       return 0
     fi
-    _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || return 2
+    _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || {
+      _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_mutex_release_failed
+      return 2
+    }
     wait_tries=$((wait_tries + 1))
     [ "$wait_tries" -ge "$wait_max" ] || sleep 0.02
   done
@@ -919,13 +966,17 @@ uberdev_semaphore_acquire() {
 }
 
 uberdev_semaphore_set_handle() {
-  local lease backend_handle status_path identity_mode scope mutex_rc publish_rc handle_kind
-  local expected_generation exact_identity='' path_identity=''
+  local lease backend_handle status_path identity_mode output_variable scope mutex_rc publish_rc handle_kind
+  local expected_generation exact_identity='' path_identity='' rollback_rc=0
+  _UBERDEV_SEMAPHORE_SET_HANDLE_FAILURE_REASON=''
   lease="${1-}"
   backend_handle="${2-}"
   status_path="${3-}"
   identity_mode="${4-}"
+  output_variable="${5-}"
   case "$identity_mode" in ''|exact-identity) ;; *) return 2 ;; esac
+  case "$output_variable" in ''|[A-Za-z_]*) ;; *) return 2 ;; esac
+  case "$output_variable" in *[!A-Za-z0-9_]*) return 2 ;; esac
   _uberdev_semaphore_validate_lease_path "$lease" || return 2
   [ -f "$lease" ] || {
     _uberdev_semaphore_error 'lease does not exist'
@@ -971,12 +1022,13 @@ uberdev_semaphore_set_handle() {
     "$_UBERDEV_LEASE_TIMEOUT_S" "$status_path"
   publish_rc=$?
   if [ "$publish_rc" -eq 0 ] && [ "$identity_mode" = exact-identity ]; then
+    exact_identity="${_UBERDEV_SEMAPHORE_PUBLISHED_IDENTITY:-}:$expected_generation"
     if _uberdev_semaphore_read_lease "$lease" \
         && [ "$_UBERDEV_LEASE_GENERATION" = "$expected_generation" ] \
         && [ "$_UBERDEV_LEASE_BACKEND_HANDLE" = "$backend_handle" ] \
         && [ "$_UBERDEV_LEASE_STATUS_PATH" = "$status_path" ]; then
       if path_identity="$(_uberdev_semaphore_path_identity "$lease")"; then
-        exact_identity="$path_identity:$expected_generation"
+        [ "$path_identity:$expected_generation" = "$exact_identity" ] || publish_rc=2
       else
         publish_rc=2
       fi
@@ -984,20 +1036,36 @@ uberdev_semaphore_set_handle() {
       publish_rc=2
     fi
     if [ "$publish_rc" -ne 0 ] || [ -z "$exact_identity" ]; then
-      _uberdev_semaphore_remove_lease "$lease" "$expected_generation" >/dev/null 2>&1 || true
+      rollback_rc=0
+      _uberdev_semaphore_remove_lease "$lease" "$expected_generation" >/dev/null 2>&1 || rollback_rc=2
       publish_rc=2
-      exact_identity=''
+      if [ "$rollback_rc" -eq 0 ]; then
+        exact_identity=''
+        _UBERDEV_SEMAPHORE_SET_HANDLE_FAILURE_REASON=lease_handle_validation_failed
+      else
+        _UBERDEV_SEMAPHORE_SET_HANDLE_FAILURE_REASON=lease_handle_rollback_failed
+      fi
     fi
+  elif [ "$publish_rc" -ne 0 ]; then
+    _UBERDEV_SEMAPHORE_SET_HANDLE_FAILURE_REASON=lease_handle_publish_failed
   fi
   _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || {
     if [ "$publish_rc" -eq 0 ]; then
-      _uberdev_semaphore_remove_lease "$lease" "$expected_generation" >/dev/null 2>&1 || true
+      rollback_rc=0
+      _uberdev_semaphore_remove_lease "$lease" "$expected_generation" >/dev/null 2>&1 || rollback_rc=2
       publish_rc=2
-      exact_identity=''
+      if [ "$rollback_rc" -eq 0 ]; then
+        exact_identity=''
+        _UBERDEV_SEMAPHORE_SET_HANDLE_FAILURE_REASON=lease_handle_mutex_release_failed
+      else
+        _UBERDEV_SEMAPHORE_SET_HANDLE_FAILURE_REASON=lease_handle_rollback_failed
+      fi
     fi
   }
   [ "$publish_rc" -eq 0 ] || _uberdev_semaphore_error 'cannot update lease handle'
-  [ "$publish_rc" -ne 0 ] || [ "$identity_mode" != exact-identity ] || printf '%s' "$exact_identity"
+  if [ "$identity_mode" = exact-identity ] && [ -n "$exact_identity" ]; then
+    if [ -n "$output_variable" ]; then printf -v "$output_variable" '%s' "$exact_identity"; else printf '%s' "$exact_identity"; fi
+  fi
   return "$publish_rc"
 }
 

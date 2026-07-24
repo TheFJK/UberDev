@@ -179,7 +179,8 @@ post_review_wait_all() {
   local launched="$1" timeout_s="$2" row status result wait_rc first_rc=0 cleanup_rc=0
   while IFS= read -r row; do
     status="$(jq -r .status <<<"$row")"; result="$(jq -r .result <<<"$row")"
-    if uberdev_wait_child "$status" "$result" "$timeout_s"; then
+    if uberdev_wait_child "$status" "$result" "$timeout_s" \
+        && uberdev_child_validate_phase1_review_result "$result"; then
       continue
     else
       wait_rc=$?
@@ -278,7 +279,9 @@ confidence: low | medium | high
 
 ### Step 3: Wait for all 6 returns; parse each YAML
 
-Wait until all 6 routed calls have returned. Parse each YAML block.
+Wait until all 6 routed calls have returned. Parse each YAML block through
+`uberdev_child_validate_phase1_review_result`, the canonical runtime boundary
+that rejects malformed fields and APPROVE-with-blocker contradictions.
 
 Failure handling is fail-closed. A BLOCKED or unparseable reviewer gets exactly one format-repair retry using the same stable edge and a fresh `attempt02` instance whose inputs add `format_retry: true`. If the repaired return is still BLOCKED or unparseable, the aggregate verdict is BLOCKED and `/review-pr` cannot emit a green trust signal. Never drop a reviewer and continue with N-1 evidence.
 

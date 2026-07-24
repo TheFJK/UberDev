@@ -78,10 +78,10 @@ _uberdev_dispatch_python() {
 
 # Return a validated runtime root. The default lives below the platform temp
 # root; POSIX creates or validates an EUID-owned, non-symlink directory locked
-# to 0700, while native Windows relies on the current-user ACL inherited by a
-# newly created default directory. Caller-supplied Windows overrides are
-# checked for directory and ordinary-link safety and are not asserted private
-# here; receipt-specific helpers perform the stronger reparse-point checks.
+# to 0700. Native Windows relies on the current-user ACL only when this helper
+# creates the default directory; a pre-existing default or caller override is
+# checked for directory and ordinary-link safety but is not asserted private
+# here. Receipt-specific helpers perform stronger reparse-point checks.
 _uberdev_dispatch_runtime_root() {
   local target
   if [ -n "${UBERDEV_TMPDIR:-}" ]; then

@@ -26,8 +26,9 @@ _UBERDEV_CHILD_DISPATCH_LOADED=1
 _uberdev_child_error() { printf 'uberdev child dispatch: %s\n' "$1" >&2; }
 
 # Stable child identity shared by every routed review edge. Preserve readable
-# names when they already fit the handoff schema; otherwise retain a readable
-# prefix and append a digest of the complete candidate.
+# names when they already fit the handoff schema. Overlength candidates made
+# only from permitted characters retain a readable prefix plus a digest;
+# candidates containing unsupported characters are rejected, not sanitized.
 uberdev_child_instance_id() {
   [ "$#" -eq 1 ] || return 2
   python3 -I -B - "$1" <<'PY'
@@ -700,10 +701,16 @@ uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
 try:
  if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1 or entry.st_size>65536 or (uid is not None and entry.st_uid!=uid): raise ValueError()
  value=json.load(open(path,encoding='utf-8'))
- if set(value)!={'schema_version','error','backend','handle','terminal','attempts'} or value.get('schema_version')!=1: raise ValueError()
+ base_keys={'schema_version','error','backend','handle','terminal','attempts'}
+ keys=frozenset(value)
+ if keys not in {frozenset(base_keys),frozenset(base_keys|{'reason'})} or value.get('schema_version')!=1: raise ValueError()
  error=value.get('error')
  if error not in {'provider_probe_failed','provider_cancel_failed','terminal_finalize_failed','launch_finalize_failed'}: raise ValueError()
  backend=value.get('backend'); handle=value.get('handle'); terminal=value.get('terminal'); attempts=value.get('attempts')
+ reason=value.get('reason','')
+ cancel_reasons={'provider_stop_failed','provider_session_resolution_failed','provider_cancel_probe_failed','provider_cancel_unconfirmed'}
+ lease_reasons={'lease_acquire_invalid_input','lease_acquire_runtime_state_failed','lease_acquire_mutex_failed','lease_acquire_reconcile_failed','lease_acquire_duplicate_check_failed','lease_acquire_allocate_failed','lease_acquire_owner_failed','lease_acquire_publish_failed','lease_acquire_identity_failed','lease_acquire_rollback_failed','lease_acquire_mutex_release_failed','lease_handle_rollback_failed'}
+ if reason and reason not in cancel_reasons|lease_reasons|{'supervisory_failure'}: raise ValueError()
  if backend not in {'codex','claude-bg','background','wezterm'}: raise ValueError()
  if type(attempts) is not int or attempts<1 or attempts>3: raise ValueError()
  if not isinstance(handle,str) or len(handle)>256 or (handle and not all(ch.isalnum() or ch in '._:-' for ch in handle)): raise ValueError()
@@ -712,12 +719,74 @@ try:
   if backend!='claude-bg' or not re.fullmatch(r'[0-9a-f]{8}',handle) or terminal!='provider_probe_failed' or attempts!=3: raise ValueError()
  elif error=='provider_cancel_failed':
   if backend!='claude-bg' or not re.fullmatch(r'[0-9a-f]{8}',handle) or terminal not in {'blocked:permission','blocked:provider'} or attempts!=3: raise ValueError()
+  if reason and reason not in cancel_reasons|{'supervisory_failure'}: raise ValueError()
  elif error=='launch_finalize_failed':
   if handle or not re.fullmatch(r'launch:[a-z][a-z0-9_]{0,63}',terminal) or attempts!=3: raise ValueError()
+  if reason and reason not in lease_reasons|{'supervisory_failure'}: raise ValueError()
  elif not handle or terminal not in {'completed','failed','timed_out','cancelled','abandoned'}:
   raise ValueError()
- print(error,end='')
+ print(reason or error,end='')
 except Exception:
+ raise SystemExit(2)
+PY
+}
+
+# Canonical boundary for the deliberately small Phase 1 reviewer YAML schema.
+# This rejects parseable-but-illegal APPROVE-with-blocker results before they
+# can reach aggregation or trust-signal evaluation.
+uberdev_child_validate_phase1_review_result() {
+  python3 -I -B - "$1" <<'PY'
+import os,re,stat,sys
+path=sys.argv[1]
+try:
+ entry=os.lstat(path)
+ if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1 or entry.st_size>1048576: raise ValueError()
+ raw=open(path,encoding='utf-8').read()
+ match=re.fullmatch(r'\s*```yaml[ \t]*\r?\n(.*?)\r?\n```[ \t]*\s*',raw,re.S)
+ if not match: raise ValueError()
+ verdict=None; confidence=None; findings_mode=None; findings=[]; current=None
+ for line in match.group(1).splitlines():
+  if not line.strip(): continue
+  top=re.fullmatch(r'(verdict|confidence):[ \t]*(\S(?:.*\S)?)',line)
+  if top:
+   key,value=top.groups()
+   if key=='verdict':
+    if verdict is not None or value not in {'APPROVE','REVISIONS_REQUIRED','REJECT'}: raise ValueError()
+    verdict=value
+   else:
+    if confidence is not None or value not in {'low','medium','high'}: raise ValueError()
+    confidence=value
+   continue
+  found=re.fullmatch(r'findings:[ \t]*(\[\])?',line)
+  if found:
+   if findings_mode is not None: raise ValueError()
+   findings_mode='empty' if found.group(1) else 'rows'
+   continue
+  severity=re.fullmatch(r'  - severity:[ \t]*(blocker|suggestion)',line)
+  if severity and findings_mode=='rows':
+   if current is not None: findings.append(current)
+   current={'severity':severity.group(1)}
+   continue
+  field=re.fullmatch(r'    (location|summary|detail):[ \t]*(\S(?:.*\S)?)',line)
+  if field and findings_mode=='rows' and current is not None:
+   key,value=field.groups()
+   if key in current: raise ValueError()
+   current[key]=value
+   continue
+  raise ValueError()
+ if current is not None: findings.append(current)
+ if verdict is None or confidence is None or findings_mode is None: raise ValueError()
+ if findings_mode=='empty' and findings: raise ValueError()
+ for finding in findings:
+  if set(finding)!={'severity','location','summary','detail'}: raise ValueError()
+  location=finding['location']
+  if not re.fullmatch(r'.+:[1-9][0-9]*',location): raise ValueError()
+  file_name=location.rsplit(':',1)[0]
+  if (file_name.startswith('/') or '\\' in file_name
+      or any(ord(char)<32 or ord(char)==127 for char in file_name)
+      or any(part in {'','.','..'} for part in file_name.split('/'))): raise ValueError()
+ if verdict=='APPROVE' and any(row['severity']=='blocker' for row in findings): raise ValueError()
+except (OSError,UnicodeError,ValueError):
  raise SystemExit(2)
 PY
 }

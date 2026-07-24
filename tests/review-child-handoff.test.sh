@@ -330,6 +330,9 @@ uberdev_wait_child() {
   printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$wait_log"
   case "$1" in *wait-fail-first.status) return 7 ;; *wait-fail-second.status) return 8 ;; *) return 0 ;; esac
 }
+# This fixture exercises wait-drain ordering only; reviewer-result validation
+# has its own behavioral coverage in the six-child integration test.
+uberdev_child_validate_phase1_review_result() { return 0; }
 uberdev_unwind_child() {
   printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$unwind_log"
   case "$1" in *wait-fail-first.status) return 9 ;; *) return 0 ;; esac

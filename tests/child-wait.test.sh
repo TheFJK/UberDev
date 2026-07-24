@@ -38,6 +38,25 @@ set -e
 printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'provider supervision failed: provider_probe_failed'
 rm -f "$STATUS.watcher-error.json"
 
+# Producer-shaped cancellation and lease-acquisition failures carry a bounded
+# reason. The child reports that reason without rejecting the closed schema.
+for watcher_reason in provider_cancel_unconfirmed lease_acquire_rollback_failed; do
+  if [ "$watcher_reason" = provider_cancel_unconfirmed ]; then
+    watcher_payload="{\"schema_version\":1,\"error\":\"provider_cancel_failed\",\"backend\":\"claude-bg\",\"handle\":\"abc12345\",\"terminal\":\"blocked:permission\",\"attempts\":3,\"reason\":\"$watcher_reason\"}"
+  else
+    watcher_payload="{\"schema_version\":1,\"error\":\"launch_finalize_failed\",\"backend\":\"codex\",\"handle\":\"\",\"terminal\":\"launch:lease_identity\",\"attempts\":3,\"reason\":\"$watcher_reason\"}"
+  fi
+  printf '%s\n' "$watcher_payload" >"$STATUS.watcher-error.json"
+  chmod 600 "$STATUS.watcher-error.json"
+  set +e
+  WATCHER_WAIT_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
+  WATCHER_WAIT_RC=$?
+  set -e
+  [ "$WATCHER_WAIT_RC" -eq 70 ]
+  printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq "provider supervision failed: ${watcher_reason}"
+done
+rm -f "$STATUS.watcher-error.json"
+
 # If the child status directory becomes unwritable, the detached watcher uses
 # the independently monitored controller-state fallback for the same union.
 WATCHER_FALLBACK="$TMP/run/.agent-state-$(id -u)/worker-0001.watcher-error.json"
@@ -56,7 +75,8 @@ for malformed_watcher_error in \
   '{"schema_version":1,"error":"provider_probe_failed","backend":"claude-bg","handle":"","terminal":"provider_probe_failed","attempts":3}' \
   '{"schema_version":1,"error":"provider_probe_failed","backend":"claude-bg","handle":"abc12345","terminal":"provider_probe_failed","attempts":0}' \
   '{"schema_version":1,"error":"provider_probe_failed","backend":"claude-bg","handle":"abc12345","terminal":"failed","attempts":3}' \
-  '{"schema_version":1,"error":"provider_cancel_failed","backend":"claude-bg","handle":"abc12345","terminal":"provider_probe_failed","attempts":3}'; do
+  '{"schema_version":1,"error":"provider_cancel_failed","backend":"claude-bg","handle":"abc12345","terminal":"provider_probe_failed","attempts":3}' \
+  '{"schema_version":1,"error":"provider_cancel_failed","backend":"claude-bg","handle":"abc12345","terminal":"blocked:permission","attempts":3,"reason":"not-in-the-closed-enum"}'; do
   printf '%s\n' "$malformed_watcher_error" >"$STATUS.watcher-error.json"
   chmod 600 "$STATUS.watcher-error.json"
   set +e
@@ -83,6 +103,21 @@ set -e
 printf '%s\n' "$INVALID_WATCHER_OUTPUT" | grep -Fq 'invalid-supervisory-record'
 printf '%s\n' "$INVALID_WATCHER_OUTPUT" | grep -Fq "$WATCHER_FALLBACK"
 rm -f "$WATCHER_FALLBACK"
+
+# Reviewer results are validated at one deterministic boundary. In particular,
+# a parseable APPROVE document may not carry blocker evidence.
+VALID_REVIEW="$TMP/run/children/worker-0001/valid-review.md"
+INVALID_REVIEW="$TMP/run/children/worker-0001/invalid-review.md"
+printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
+  '  - severity: blocker' '    location: tests/example.test.sh:1' \
+  '    summary: bounded summary' '    detail: bounded detail' \
+  'confidence: high' '```' >"$VALID_REVIEW"
+printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings:' \
+  '  - severity: blocker' '    location: tests/example.test.sh:1' \
+  '    summary: contradictory summary' '    detail: contradictory detail' \
+  'confidence: high' '```' >"$INVALID_REVIEW"
+uberdev_child_validate_phase1_review_result "$VALID_REVIEW"
+! uberdev_child_validate_phase1_review_result "$INVALID_REVIEW"
 
 # A running status without the exact lifecycle lease is not cancellation
 # authority: never signal or synthesize timed_out.

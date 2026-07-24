@@ -1132,7 +1132,7 @@ def _read_bounded_descriptor(descriptor: int, limit: int = 16384) -> bytes:
     return payload
 
 
-def secure_write_lease(path: str, payload: bytes) -> None:
+def secure_write_lease(path: str, payload: bytes) -> tuple[int, int]:
     """Publish one private lease by temp-plus-rename within a held directory fd."""
 
     if len(payload) > 16384 or not payload.endswith(b"\n"):
@@ -1165,7 +1165,10 @@ def secure_write_lease(path: str, payload: bytes) -> None:
             os.close(descriptor)
             descriptor = None
             os.replace(temporary_path, absolute)
-            return
+            published = os.stat(absolute, follow_symlinks=False)
+            if not stat.S_ISREG(published.st_mode):
+                raise ManifestRejected("lease_not_regular")
+            return published.st_dev, published.st_ino
         finally:
             if descriptor is not None:
                 os.close(descriptor)
@@ -1204,6 +1207,7 @@ def secure_write_lease(path: str, payload: bytes) -> None:
             os.fchmod(descriptor, 0o600)
         if os.write(descriptor, payload) != len(payload):
             raise ManifestRuntimeError("lease_short_write")
+        published = os.fstat(descriptor)
         os.close(descriptor)
         descriptor = None
         os.replace(
@@ -1212,6 +1216,10 @@ def secure_write_lease(path: str, payload: bytes) -> None:
             src_dir_fd=parent_descriptor,
             dst_dir_fd=parent_descriptor,
         )
+        current = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (published.st_dev, published.st_ino):
+            raise ManifestRejected("lease_replaced_after_publish")
+        return published.st_dev, published.st_ino
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -1561,7 +1569,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         if args.command == "secure-write-lease":
-            secure_write_lease(args.lease_path, sys.stdin.buffer.read(16385))
+            device, inode = secure_write_lease(
+                args.lease_path, sys.stdin.buffer.read(16385)
+            )
+            print(f"{device}:{inode}", end="")
             return 0
         if args.command == "secure-remove-lease":
             secure_remove_lease(args.lease_path, args.generation)

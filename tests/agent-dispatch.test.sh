@@ -1110,6 +1110,11 @@ row=json.load(open(sys.argv[1]))
 expected='provider_stop_failed' if sys.argv[2]=='never' else 'provider_cancel_unconfirmed'
 assert row['error']=='provider_cancel_failed' and row['attempts']==3 and row['reason']==expected,row
 PY
+  stop_count="$(cat "$run/stop-count")"
+  command sleep 0.5
+  [ "$(cat "$run/stop-count")" = "$stop_count" ] || {
+    echo "durable Claude cancellation failure reissued provider stop" >&2; return 1;
+  }
   grep -q '"state":"running"' "$run/status.json" || { echo "failed Claude stop fabricated a terminal" >&2; return 1; }
   grep -R -q "run_id=claude-cancel-$mode" "$state/semaphore-v1" || { echo "failed Claude stop abandoned its lease" >&2; return 1; }
   rm -rf "$run"

@@ -938,7 +938,7 @@ if terminal == "provider_probe_failed": error="provider_probe_failed"
 elif terminal.startswith("blocked:"): error="provider_cancel_failed"
 elif terminal.startswith("launch:"): error="launch_finalize_failed"
 else: error="terminal_finalize_failed"
-allowed_reasons={"provider_stop_failed","provider_session_resolution_failed","provider_cancel_probe_failed","provider_cancel_unconfirmed","lease_acquire_identity_failed"}
+allowed_reasons={"provider_stop_failed","provider_session_resolution_failed","provider_cancel_probe_failed","provider_cancel_unconfirmed","lease_acquire_invalid_input","lease_acquire_runtime_state_failed","lease_acquire_mutex_failed","lease_acquire_reconcile_failed","lease_acquire_duplicate_check_failed","lease_acquire_allocate_failed","lease_acquire_owner_failed","lease_acquire_publish_failed","lease_acquire_identity_failed","lease_acquire_rollback_failed","lease_acquire_mutex_release_failed","lease_handle_rollback_failed"}
 payload={"schema_version":1,"error":error,"backend":backend,"handle":handle,"terminal":terminal,"attempts":int(attempts)}
 if reason: payload["reason"]=reason if reason in allowed_reasons else "supervisory_failure"
 fd,tmp=tempfile.mkstemp(prefix=".watcher-error.",dir=parent)
@@ -991,7 +991,7 @@ _uberdev_agent_start_watcher() {
             # it and require the backend cancellation probe to confirm that the
             # handle is no longer live before terminalizing or releasing its
             # lease. A transient stop failure is retried in-place; exhaustion
-            # remains visible while this watcher keeps supervising the lease.
+            # publishes one durable error and ends this watcher fail-closed.
             cancel_attempt=1
             while [ "$cancel_attempt" -le 3 ]; do
               if _uberdev_dispatch_cancel_backend claude-bg "$handle" ''; then
@@ -1015,6 +1015,7 @@ _uberdev_agent_start_watcher() {
               _uberdev_agent_error "failed to persist provider cancellation failure: $status_file"
               exit 70
             fi
+            exit 70
             ;;
           absent)
             indeterminate_count=0
@@ -1200,7 +1201,7 @@ _uberdev_agent_abort_after_launch() {
 uberdev_agent_dispatch() {
   local request_json="${1:-}" prompt_requested="${2:-}" result_requested="${3:-}" status_requested="${4:-}"
   local run_dir run_id repository_id backend workflow issue_num tier capacity timeout_s workspace_mode workspace_dir
-  local prompt_file result_file status_file state_dir manifest decision lease lease_record lease_identity registered_identity event_json rc handle lease_handle terminal_event paths_json
+  local prompt_file result_file status_file state_dir manifest decision lease lease_record lease_identity registered_identity event_json rc handle lease_handle terminal_event paths_json lease_failure_reason cleanup_identity
   local context_file context_sha context_validation persisted_decision supplied_root supplied_parent context_run_id parent_run_id agent_id process_identity lease_generation
   [ "$#" -eq 4 ] || { _uberdev_agent_error 'expected REQUEST_JSON PROMPT_FILE RESULT_FILE STATUS_FILE'; return 2; }
   if [ -n "${ZSH_VERSION:-}" ]; then
@@ -1278,15 +1279,32 @@ uberdev_agent_dispatch() {
   event_json="$(_uberdev_agent_event_json route_decided "$request_json" "$decision")" || return 2
   _uberdev_agent_append_event "$manifest" "$event_json" || return 2
 
-  lease_record="$(UBERDEV_SEMAPHORE_OWNER_PID=$$ PYTHONPATH= PYTHONHOME= uberdev_semaphore_acquire "$state_dir" "$repository_id" "$backend" "$capacity" "$run_id" "$timeout_s" exact-identity)" || {
+  lease_record=''
+  if UBERDEV_SEMAPHORE_OWNER_PID=$$ PYTHONPATH= PYTHONHOME= uberdev_semaphore_acquire \
+      "$state_dir" "$repository_id" "$backend" "$capacity" "$run_id" "$timeout_s" \
+      exact-identity lease_record; then
+    :
+  else
     rc=$?
     if [ "$rc" -eq 2 ]; then
+      lease_failure_reason="${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-lease_acquire_identity_failed}"
+      case "$lease_failure_reason" in
+        lease_acquire_invalid_input|lease_acquire_runtime_state_failed|lease_acquire_mutex_failed|lease_acquire_reconcile_failed|lease_acquire_duplicate_check_failed|lease_acquire_allocate_failed|lease_acquire_owner_failed|lease_acquire_publish_failed|lease_acquire_identity_failed|lease_acquire_rollback_failed|lease_acquire_mutex_release_failed) ;;
+        *) lease_failure_reason=lease_acquire_identity_failed ;;
+      esac
       _uberdev_agent_persist_watcher_error_retry "$status_file" "$state_dir/$run_id.watcher-error.json" \
-        "$backend" '' launch:lease_identity 3 lease_acquire_identity_failed || \
+        "$backend" '' launch:lease_identity 3 "$lease_failure_reason" || \
         _uberdev_agent_error 'failed to persist lease acquisition identity error'
+      case "$lease_record" in
+        *$'\t'*)
+          lease="${lease_record%%$'\t'*}"
+          lease_identity="${lease_record#*$'\t'}"
+          PYTHONPATH= PYTHONHOME= _uberdev_agent_release_exact_lease "$lease" "$lease_identity" >/dev/null 2>&1 || true
+          ;;
+      esac
     fi
     return "$rc"
-  }
+  fi
   case "$lease_record" in
     *$'\t'*) lease="${lease_record%%$'\t'*}"; lease_identity="${lease_record#*$'\t'}" ;;
     *) lease=''; lease_identity='' ;;
@@ -1302,13 +1320,15 @@ uberdev_agent_dispatch() {
   # Register the canonical status path before the launch boundary.  It may be
   # absent until an opaque provider publishes its first probe; absence is
   # intentionally "unknown", never synthetic evidence that a backend is live.
-  registered_identity="$(PYTHONPATH= PYTHONHOME= uberdev_semaphore_set_handle "$lease" '' "$status_file" exact-identity)" || {
+  registered_identity=''
+  if ! PYTHONPATH= PYTHONHOME= uberdev_semaphore_set_handle "$lease" '' "$status_file" exact-identity registered_identity; then
     rc=2
-    _uberdev_agent_finalize_prelaunch_failure "$manifest" "$lease" "$lease_identity" "$status_file" "$backend" \
+    cleanup_identity="${registered_identity:-$lease_identity}"
+    _uberdev_agent_finalize_prelaunch_failure "$manifest" "$lease" "$cleanup_identity" "$status_file" "$backend" \
       "$request_json" "$decision" lease_identity || true
     DISPATCH_RC="$rc"
     return "$rc"
-  }
+  fi
   if [ -z "$registered_identity" ]; then
     _uberdev_agent_finalize_prelaunch_failure "$manifest" "$lease" "$lease_identity" "$status_file" "$backend" \
       "$request_json" "$decision" lease_identity || true
@@ -1362,11 +1382,13 @@ uberdev_agent_dispatch() {
   lease_handle="$handle"
   [ "$backend" != wezterm ] || lease_handle="pane:$handle"
   registered_identity="$lease_identity"
-  lease_identity="$(PYTHONPATH= PYTHONHOME= uberdev_semaphore_set_handle "$lease" "$lease_handle" "$status_file" exact-identity)" || {
-    _uberdev_agent_abort_after_launch "$manifest" "$lease" "$registered_identity" "$status_file" "$result_file" \
+  lease_identity=''
+  if ! PYTHONPATH= PYTHONHOME= uberdev_semaphore_set_handle "$lease" "$lease_handle" "$status_file" exact-identity lease_identity; then
+    cleanup_identity="${lease_identity:-$registered_identity}"
+    _uberdev_agent_abort_after_launch "$manifest" "$lease" "$cleanup_identity" "$status_file" "$result_file" \
       "$backend" "$handle" "$request_json" "$decision" lease_handle_update
     return $?
-  }
+  fi
   if [ -z "$lease_identity" ]; then
     _uberdev_agent_abort_after_launch "$manifest" "$lease" "$registered_identity" "$status_file" "$result_file" \
       "$backend" "$handle" "$request_json" "$decision" lease_identity

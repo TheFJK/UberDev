@@ -121,6 +121,21 @@ capture uberdev_semaphore_acquire "$TMP/invalid-run" repo codex 1 '' 5
 capture uberdev_semaphore_acquire "$TMP/invalid-run-newline" repo codex 1 $'run\nowner_pid=1' 5
 [ "$CAPTURE_RC" -eq 2 ] && pass "lease-field newline injection is rejected" || fail "lease-field newline injection is rejected" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 
+capture /bin/bash -c '
+  . "$1"
+  _uberdev_semaphore_prepare_scope() { return 2; }
+  record=""
+  uberdev_semaphore_acquire "$2" repo codex 1 reason-probe 5 exact-identity record
+  rc=$?
+  printf "rc=%s reason=%s\n" "$rc" "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}"
+  [ "$rc" -eq 2 ] && [ "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}" = lease_acquire_runtime_state_failed ]
+' _ "$LIB" "$TMP/reason-probe"
+if [ "$CAPTURE_RC" -eq 0 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'reason=lease_acquire_runtime_state_failed'; then
+  pass "acquisition exports a bounded runtime-state failure reason"
+else
+  fail "acquisition exports a bounded runtime-state failure reason" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+
 ATOMIC_STATE="$TMP/atomic-identity"
 capture uberdev_semaphore_acquire "$ATOMIC_STATE" repo codex 1 atomic-run 5 exact-identity
 IFS=$'\t' read -r atomic_lease atomic_identity <<<"$CAPTURE_OUT"
@@ -145,6 +160,40 @@ if [ "$CAPTURE_RC" -eq 2 ] \
   pass "exact identity capture failure rolls back its acquired generation"
 else
   fail "exact identity capture failure rolls back its acquired generation" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+
+# If exact identity validation fails after atomic handle publication and the
+# rollback remove is fault-injected to fail, the replacement capability is
+# still returned so the caller can release that exact inode and generation.
+capture /bin/bash -c '
+  . "$1"
+  lease="$(uberdev_semaphore_acquire "$2" repo codex 1 rollback-capability 30)" || exit
+  eval "$(declare -f _uberdev_semaphore_path_identity | sed '\''1s/_uberdev_semaphore_path_identity/_real_set_identity/'\'')"
+  eval "$(declare -f _uberdev_semaphore_remove_lease | sed '\''1s/_uberdev_semaphore_remove_lease/_real_set_remove/'\'')"
+  identity_marker="$2/identity-failure-marker"
+  _uberdev_semaphore_path_identity() {
+    case "$1" in
+      *.lease)
+        if [ ! -e "$identity_marker" ]; then
+          : > "$identity_marker"
+          return 29
+        fi
+        ;;
+    esac
+    _real_set_identity "$@"
+  }
+  _uberdev_semaphore_remove_lease() { return 31; }
+  replacement=""
+  uberdev_semaphore_set_handle "$lease" "$$" "$3" exact-identity replacement
+  rc=$?
+  printf "rc=%s lease=%s identity=%s reason=%s\n" "$rc" "$lease" "$replacement" "${_UBERDEV_SEMAPHORE_SET_HANDLE_FAILURE_REASON:-}"
+  [ "$rc" -eq 2 ] && [ -f "$lease" ] && [ -n "$replacement" ] \
+    && [ "${_UBERDEV_SEMAPHORE_SET_HANDLE_FAILURE_REASON:-}" = lease_handle_rollback_failed ]
+' _ "$LIB" "$TMP/set-handle-rollback-capability" "$FIXTURES/running-status.json"
+if [ "$CAPTURE_RC" -eq 0 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'reason=lease_handle_rollback_failed'; then
+  pass "failed handle rollback preserves the replacement lease capability"
+else
+  fail "failed handle rollback preserves the replacement lease capability" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 
 # GNU stat accepts `-f` as filesystem-report mode and may print colon-bearing

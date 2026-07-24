@@ -42,8 +42,14 @@ case "${UBERDEV_AGENT_INSTANCE_ID:-}" in
     git commit -qm 'fix: exercise caller repair edge'
     printf '%s\n' '```yaml' 'status: APPLIED' 'commits:' "  - sha: $(git rev-parse HEAD)" 'findings_disposition: []' 'risks: []' '```' >"$result"
     ;;
+  *format-retry-valid-attempt01*|*format-retry-invalid*)
+    printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings:' \
+      '  - severity: blocker' '    location: tests/example.test.sh:1' \
+      '    summary: contradictory fixture' '    detail: malformed on purpose' \
+      'confidence: high' '```' >"$result"
+    ;;
   *)
-    printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings: []' '```' >"$result"
+    printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings: []' 'confidence: high' '```' >"$result"
     ;;
 esac
 if [ -n "${CODEX_STUB_FAIL_INSTANCE:-}" ] \
@@ -126,6 +132,7 @@ for i in "${!edges[@]}"; do
     uberdev_unwind_child "${statuses[$i]}" "${results[$i]}" 20
   else
     uberdev_wait_child "${statuses[$i]}" "${results[$i]}" 20
+    uberdev_child_validate_phase1_review_result "${results[$i]}"
   fi
 done
 
@@ -242,6 +249,101 @@ events = [json.loads(line) for line in (state / "agent-lifecycle.jsonl").read_te
 terminals = [row for row in events if row.get("event") in {"completed", "failed", "timed_out", "cancelled", "abandoned"}]
 assert len(terminals) == 7, terminals
 assert {row["run_id"] for row in terminals} == set(instances) | {repair}, terminals
+PY
+
+# The canonical reviewer boundary drives the existing one-shot format-retry
+# edge. A repaired result is accepted; two contradictory documents remain
+# fail-closed instead of reaching aggregation.
+format_retry_case() {
+  local outcome="$1" edge=review_pr.review.correctness inputs first_instance repair_instance
+  local first_result first_status repair_inputs repair_result repair_status
+  inputs="$(uberdev_child_inputs_build "$edge" \
+    changed_paths '["README.md"]' \
+    diff_path "$(review_json_string "$DIFF_ARTIFACT_PATH")" \
+    criteria_path "$(review_json_string "$CRITERIA_PATH")" emphasis '[]')"
+  first_instance="review-pr-e2e-${case_name}-format-retry-${outcome}-attempt01"
+  uberdev_create_child_handoff "$edge" "$first_instance" "$inputs" '[]' >/dev/null
+  first_result="$UBERDEV_CHILD_RESULT"; first_status="$UBERDEV_CHILD_STATUS"
+  uberdev_dispatch_child "$edge" "$UBERDEV_CHILD_HANDOFF" "$first_result" "$first_status" >/dev/null
+  uberdev_wait_child "$first_status" "$first_result" 20
+  ! uberdev_child_validate_phase1_review_result "$first_result"
+
+  repair_inputs="$(uberdev_child_inputs_format_retry "$edge" "$inputs" "$CRITERIA_PATH")"
+  repair_instance="review-pr-e2e-${case_name}-format-retry-${outcome}-attempt02"
+  uberdev_create_child_handoff "$edge" "$repair_instance" "$repair_inputs" '[]' >/dev/null
+  repair_result="$UBERDEV_CHILD_RESULT"; repair_status="$UBERDEV_CHILD_STATUS"
+  uberdev_dispatch_child "$edge" "$UBERDEV_CHILD_HANDOFF" "$repair_result" "$repair_status" >/dev/null
+  uberdev_wait_child "$repair_status" "$repair_result" 20
+  if [ "$outcome" = valid ]; then
+    uberdev_child_validate_phase1_review_result "$repair_result"
+  else
+    ! uberdev_child_validate_phase1_review_result "$repair_result"
+  fi
+}
+format_retry_case valid
+format_retry_case invalid
+
+# Preflight a complete six-reviewer wave, then fail the third child before any
+# provider handle is published. The caller unwinds the two already-launched
+# siblings and proves the batch leaves no lease, worktree, branch, or owner
+# receipt behind.
+eval "$(declare -f _uberdev_agent_dispatch_backend | sed '1s/_uberdev_agent_dispatch_backend/_real_prehandle_dispatch_backend/')"
+_uberdev_agent_dispatch_backend() {
+  case "${UBERDEV_AGENT_INSTANCE_ID:-}" in
+    *prehandle-types*) DISPATCH_ID=''; DISPATCH_RC=86; return 86 ;;
+    *) _real_prehandle_dispatch_backend "$@" ;;
+  esac
+}
+pre_handoffs=(); pre_results=(); pre_statuses=(); pre_instances=()
+for lens in "${edges[@]}"; do
+  edge="review_pr.review.$lens"
+  instance="review-pr-e2e-${case_name}-prehandle-${lens}-attempt01"
+  pre_instances+=("$instance")
+  if [ "$lens" = general ]; then
+    inputs="$(uberdev_child_inputs_build "$edge" changed_paths '["README.md"]' \
+      diff_path "$(review_json_string "$DIFF_ARTIFACT_PATH")" \
+      criteria_path "$(review_json_string "$CRITERIA_PATH")" emphasis '[]' lens '"general"')"
+  else
+    inputs="$(uberdev_child_inputs_build "$edge" changed_paths '["README.md"]' \
+      diff_path "$(review_json_string "$DIFF_ARTIFACT_PATH")" \
+      criteria_path "$(review_json_string "$CRITERIA_PATH")" emphasis '[]')"
+  fi
+  uberdev_create_child_handoff "$edge" "$instance" "$inputs" '[]' >/dev/null
+  pre_handoffs+=("$UBERDEV_CHILD_HANDOFF"); pre_results+=("$UBERDEV_CHILD_RESULT"); pre_statuses+=("$UBERDEV_CHILD_STATUS")
+done
+uberdev_preflight_child_batch "${pre_handoffs[@]}"
+launched_count=0
+for i in "${!edges[@]}"; do
+  if uberdev_dispatch_child "review_pr.review.${edges[$i]}" \
+      "${pre_handoffs[$i]}" "${pre_results[$i]}" "${pre_statuses[$i]}" >/dev/null; then
+    launched_count=$((launched_count + 1))
+    continue
+  else
+    prehandle_rc=$?
+  fi
+  [ "${edges[$i]}" = types ] && [ "$prehandle_rc" -eq 86 ]
+  break
+done
+[ "$launched_count" -eq 2 ]
+for ((i=0; i<launched_count; i++)); do
+  uberdev_unwind_child "${pre_statuses[$i]}" "${pre_results[$i]}" 20
+done
+eval "$(declare -f _real_prehandle_dispatch_backend | sed '1s/_real_prehandle_dispatch_backend/_uberdev_agent_dispatch_backend/')"
+python3 -I -B - "$UBERDEV_CARRIER_RUN_DIR" "$repo" "${pre_statuses[2]}" <<'PY'
+import json,os,pathlib,subprocess,sys
+run_dir=pathlib.Path(sys.argv[1]); repo=pathlib.Path(sys.argv[2]); failed_status=pathlib.Path(sys.argv[3])
+# A provider failure before handle publication has no canonical provider status
+# snapshot; its durable terminal evidence is the lifecycle manifest below.
+assert not failed_status.exists(),failed_status
+state=run_dir/f".agent-state-{os.geteuid() if hasattr(os,'geteuid') else 0}"
+assert not list((state/"semaphore-v1").rglob("*.lease"))
+assert not list(repo.rglob("*.worktree-owner.json"))
+assert not [path for path in (repo/".claude/worktrees").glob("*") if path.exists()]
+branches=subprocess.check_output(["git","-C",str(repo),"branch","--format=%(refname:short)"],text=True).splitlines()
+assert not [branch for branch in branches if "prehandle-" in branch],branches
+events=[json.loads(line) for line in (state/"agent-lifecycle.jsonl").read_text().splitlines() if line]
+failed=[row for row in events if row.get("run_id","").endswith("prehandle-types-attempt01") and row.get("event")=="failed"]
+assert len(failed)==1,failed
 PY
 SH
 chmod +x "$TMP/run-case.sh"

@@ -104,6 +104,18 @@ else
 fi
 rm -rf "$RUNTIME_TMP"
 
+RUNTIME_LINK_TMP="$(mktemp -d)"
+printf 'do-not-touch\n' >"$RUNTIME_LINK_TMP/target"
+ln -s "$RUNTIME_LINK_TMP/target" "$RUNTIME_LINK_TMP/uberdev-$(id -u)"
+if TMPDIR="$RUNTIME_LINK_TMP" bash -c 'unset UBERDEV_TMPDIR; . "$1"; _uberdev_dispatch_runtime_root' _ "$DISPATCH_LIB" >/dev/null 2>&1; then
+  fail_msg "default runtime root rejects a pre-created symlink" "symlink was accepted"
+elif [ "$(cat "$RUNTIME_LINK_TMP/target")" = do-not-touch ]; then
+  pass_msg "default runtime root rejects a pre-created symlink without modifying its target"
+else
+  fail_msg "default runtime root rejects a pre-created symlink" "symlink target was modified"
+fi
+rm -rf "$RUNTIME_LINK_TMP"
+
 echo "== Exact Codex child worktree cleanup preserves results =="
 CLEANUP_TMP="$(mktemp -d)"
 mkdir -p "$CLEANUP_TMP/repo" "$CLEANUP_TMP/runtime"
