@@ -590,8 +590,10 @@ chmod 600 "$BASE_REVIEW_RECORDS"
 # The remaining independent callsites run in two bounded test waves. Each
 # subshell still executes the extracted production wrapper and the real
 # dispatch lifecycle; overlap keeps this closure test below the CI time budget.
-FAILED_REVIEW_EDGE=review_pr.review.types
-FAILED_REVIEW_INDEX=3
+printf '%s\n' \
+  '{"edge":"review_pr.review.types","index":3,"status":"fixture.status","result":"fixture.result"}' \
+  >"$REVIEW_FAILED"
+unset FAILED_REVIEW_EDGE FAILED_REVIEW_INDEX
 FORMAT_EXAMPLE_PATH="$FORMAT_EXAMPLE"
 export UBERDEV_CHILD_TEST_SOURCE="$REVIEW_SOURCE"
 # Caller-mode mutations are bound to the canonical repository root. Keep the

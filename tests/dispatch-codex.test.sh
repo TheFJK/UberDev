@@ -116,6 +116,32 @@ else
 fi
 rm -rf "$RUNTIME_LINK_TMP"
 
+# Exercise the actual platform fallback rather than an injected TMPDIR. On
+# macOS /tmp is commonly a symlink to a root-owned platform directory; on
+# Linux it is normally root-owned directly. In either case only the EUID-owned
+# 0700 child is accepted as the runtime root.
+PLATFORM_RUNTIME_ROOT="$(env -u TMPDIR -u UBERDEV_TMPDIR bash -c \
+  '. "$1"; _uberdev_dispatch_runtime_root' _ "$DISPATCH_LIB")"
+PLATFORM_TEMP_ROOT="$(env -u TMPDIR -u UBERDEV_TMPDIR python3 -I -c \
+  'import os,tempfile; print(os.path.realpath(tempfile.gettempdir()),end="")')"
+if python3 -I - "$PLATFORM_RUNTIME_ROOT" "$PLATFORM_TEMP_ROOT" <<'PY'
+import os, pathlib, stat, sys
+root = pathlib.Path(sys.argv[1])
+platform = pathlib.Path(sys.argv[2])
+entry = root.stat()
+assert root.parent.resolve() == platform.resolve(), (root, platform)
+uid_fn = getattr(os, "geteuid", None)
+if uid_fn is not None:
+    assert entry.st_uid == uid_fn()
+if os.name != "nt":
+    assert stat.S_IMODE(entry.st_mode) == 0o700
+PY
+then
+  pass_msg "no-TMPDIR fallback creates a private child under the platform temporary root"
+else
+  fail_msg "no-TMPDIR fallback creates a private child under the platform temporary root" "$PLATFORM_RUNTIME_ROOT"
+fi
+
 echo "== Exact Codex child worktree cleanup preserves results =="
 CLEANUP_TMP="$(mktemp -d)"
 mkdir -p "$CLEANUP_TMP/repo" "$CLEANUP_TMP/runtime"

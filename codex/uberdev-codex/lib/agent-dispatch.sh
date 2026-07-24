@@ -977,7 +977,7 @@ _uberdev_agent_start_watcher() {
   watcher_instance="$(_uberdev_agent_json_get "$request_json" run_id)" || return 2
   watcher_fallback="$(dirname "$manifest")/$watcher_instance.watcher-error.json"
   (
-    local terminal_event='' probe='' absent_count=0 indeterminate_count=0 event_json='' error_class='' cancel_attempt=0 cancel_rc=0 cancel_reason=''
+    local terminal_event='' probe='' absent_count=0 indeterminate_count=0 event_json='' error_class='' cancel_attempt=0 cancel_rc=0 cancel_reason='' supervision_reported=0
     while [ -d "$(dirname "$status_file")" ]; do
       terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
       [ -z "$terminal_event" ] || break
@@ -991,31 +991,31 @@ _uberdev_agent_start_watcher() {
             # it and require the backend cancellation probe to confirm that the
             # handle is no longer live before terminalizing or releasing its
             # lease. A transient stop failure is retried in-place; exhaustion
-            # publishes one durable error and ends this watcher fail-closed.
-            cancel_attempt=1
-            while [ "$cancel_attempt" -le 3 ]; do
-              if _uberdev_dispatch_cancel_backend claude-bg "$handle" ''; then
-                terminal_event=failed
-                [ "$probe" = blocked:permission ] && error_class=provider_permission_blocked || error_class=provider_blocked
-                break
-              else
-                cancel_rc=$?
+            # publishes one durable error, then this watcher keeps passively
+            # probing without reissuing stop so delayed provider convergence can
+            # still finalize the lifecycle and release exact capacity.
+            if [ "$supervision_reported" -eq 0 ]; then
+              cancel_attempt=1
+              while [ "$cancel_attempt" -le 3 ]; do
+                if _uberdev_dispatch_cancel_backend claude-bg "$handle" ''; then
+                  terminal_event=failed
+                  [ "$probe" = blocked:permission ] && error_class=provider_permission_blocked || error_class=provider_blocked
+                  break
+                else
+                  cancel_rc=$?
+                fi
+                cancel_reason="${_UBERDEV_DISPATCH_CANCEL_REASON:-provider_cancel_unconfirmed}"
+                [ "$cancel_rc" -eq 2 ] && [ "$cancel_reason" = provider_stop_failed ] || break
+                [ "$cancel_attempt" -ge 3 ] || sleep 0.1
+                cancel_attempt=$((cancel_attempt + 1))
+              done
+              [ -z "$terminal_event" ] || break
+              if ! _uberdev_agent_persist_watcher_error_retry "$status_file" "$watcher_fallback" "$backend" "$handle" "$probe" 3 "$cancel_reason"; then
+                _uberdev_agent_error "failed to persist provider cancellation failure: $status_file"
+                exit 70
               fi
-              cancel_reason="${_UBERDEV_DISPATCH_CANCEL_REASON:-provider_cancel_unconfirmed}"
-              # Retry transient stop failures. Once the provider accepted the
-              # stop but exact terminal confirmation was exhausted, retain the
-              # lease and publish that supervisory failure without issuing the
-              # same stop repeatedly.
-              [ "$cancel_rc" -eq 2 ] && [ "$cancel_reason" = provider_stop_failed ] || break
-              [ "$cancel_attempt" -ge 3 ] || sleep 0.1
-              cancel_attempt=$((cancel_attempt + 1))
-            done
-            [ -z "$terminal_event" ] || break
-            if ! _uberdev_agent_persist_watcher_error_retry "$status_file" "$watcher_fallback" "$backend" "$handle" "$probe" 3 "$cancel_reason"; then
-              _uberdev_agent_error "failed to persist provider cancellation failure: $status_file"
-              exit 70
+              supervision_reported=1
             fi
-            exit 70
             ;;
           absent)
             indeterminate_count=0
@@ -1029,17 +1029,17 @@ _uberdev_agent_start_watcher() {
             absent_count=0
             indeterminate_count=$((indeterminate_count + 1))
             if [ "$indeterminate_count" -ge 3 ]; then
-              _uberdev_agent_persist_watcher_error_retry "$status_file" "$watcher_fallback" "$backend" "$handle" provider_probe_failed "$indeterminate_count" || \
-                _uberdev_agent_error "failed to persist provider probe failure: $status_file"
-              if _uberdev_dispatch_cancel_backend claude-bg "$handle" ''; then
-                terminal_event=failed
-                error_class=provider_probe_failed
-                break
+              if [ "$supervision_reported" -eq 0 ]; then
+                _uberdev_agent_persist_watcher_error_retry "$status_file" "$watcher_fallback" "$backend" "$handle" provider_probe_failed "$indeterminate_count" || \
+                  _uberdev_agent_error "failed to persist provider probe failure: $status_file"
+                if _uberdev_dispatch_cancel_backend claude-bg "$handle" ''; then
+                  terminal_event=failed
+                  error_class=provider_probe_failed
+                  break
+                fi
+                supervision_reported=1
               fi
-              # Exact cancellation could not be proven. Retain the capacity
-              # lease fail-closed and let the waiting caller consume the
-              # durable supervisory error instead of polling forever.
-              exit 70
+              indeterminate_count=0
             fi
             ;;
         esac

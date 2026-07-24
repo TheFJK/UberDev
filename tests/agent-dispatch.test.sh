@@ -844,6 +844,11 @@ if [ "${1:-}" = stop ] && [ "${2:-}" = abc12345-full ]; then
   [ "${CROSS_CLAUDE_STOP_MODE:-}" != never ] || exit 2
   if [ "${CROSS_CLAUDE_STOP_MODE:-}" = once ] && [ "$count" -eq 1 ]; then exit 2; fi
   [ "${CROSS_CLAUDE_STOP_MODE:-}" != sticky ] || exit 0
+  if [ "${CROSS_CLAUDE_STOP_MODE:-}" = delayed ]; then
+    nohup bash -c 'sleep 2.5; printf '\''[{"sessionId":"abc12345-full","state":"cancelled"}]\n'\'' > "$1"' \
+      _ "$CROSS_CLAUDE_STATE" >/dev/null 2>&1 &
+    exit 0
+  fi
   printf '[]\n' > "$CROSS_CLAUDE_STATE"
   exit 0
 fi
@@ -1110,6 +1115,13 @@ row=json.load(open(sys.argv[1]))
 expected='provider_stop_failed' if sys.argv[2]=='never' else 'provider_cancel_unconfirmed'
 assert row['error']=='provider_cancel_failed' and row['attempts']==3 and row['reason']==expected,row
 PY
+  if [ "$mode" = delayed ]; then
+    wait_for_terminal_and_release "$state/agent-lifecycle.jsonl" "$state" claude-cancel-delayed cancelled 80 0.1 || return 1
+    [ "$(cat "$run/stop-count")" -eq 1 ] || {
+      echo "delayed Claude convergence reissued provider stop" >&2; return 1;
+    }
+    return 0
+  fi
   stop_count="$(cat "$run/stop-count")"
   command sleep 0.5
   [ "$(cat "$run/stop-count")" = "$stop_count" ] || {
@@ -1122,6 +1134,7 @@ PY
 }
 
 claude_cancel_retry_case once
+claude_cancel_retry_case delayed
 claude_cancel_retry_case never
 claude_cancel_retry_case sticky
 
@@ -1330,6 +1343,63 @@ kill -0 "$POST_PID" 2>/dev/null && { echo "post-launch setup failure orphaned pr
 grep -q '"state":"failed"' "$POST_RUN/status.json"
 ! grep -R -q 'run_id=adapter-post-launch-failure' "$POST_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
 eval "$(declare -f _real_postlaunch_set_handle | sed '1s/_real_postlaunch_set_handle/uberdev_semaphore_set_handle/')"
+
+# Exercise the real atomic handle replacement failure path. The semaphore
+# publishes a replacement inode, exact-identity validation then fails, and the
+# injected rollback removal fails once. Dispatcher cleanup must consume the
+# returned replacement capability, cancel the provider, and make cap=1
+# immediately reacquirable.
+REPLACEMENT_RUN="$TMP/post-launch-replacement-capability"
+mkdir -p "$REPLACEMENT_RUN"
+printf 'replacement capability prompt\n' > "$REPLACEMENT_RUN/prompt.txt"
+REPLACEMENT_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-postlaunch-replacement","repository_id":"adapter-postlaunch-replacement-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":97,"issue_num":97,"capacity":1,"timeout_s":20},separators=(",",":")))' "$REPLACEMENT_RUN")"
+eval "$(declare -f _uberdev_semaphore_path_identity | sed '1s/_uberdev_semaphore_path_identity/_real_replacement_path_identity/')"
+eval "$(declare -f _uberdev_semaphore_remove_lease | sed '1s/_uberdev_semaphore_remove_lease/_real_replacement_remove_lease/')"
+_uberdev_semaphore_path_identity() {
+  case "$1" in
+    *.lease)
+      if [ -e "$REPLACEMENT_RUN/provider-launched" ] && [ ! -e "$REPLACEMENT_RUN/identity-failed" ]; then
+        : > "$REPLACEMENT_RUN/identity-failed"
+        return 29
+      fi
+      ;;
+  esac
+  _real_replacement_path_identity "$@"
+}
+_uberdev_semaphore_remove_lease() {
+  if [ -e "$REPLACEMENT_RUN/identity-failed" ] && [ ! -e "$REPLACEMENT_RUN/rollback-failed" ]; then
+    : > "$REPLACEMENT_RUN/rollback-failed"
+    return 31
+  fi
+  _real_replacement_remove_lease "$@"
+}
+_uberdev_agent_dispatch_backend() {
+  nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(30)' >/dev/null 2>&1 &
+  DISPATCH_ID="$!"; DISPATCH_LOG=""
+  printf '%s\n' "$DISPATCH_ID" > "$REPLACEMENT_RUN/provider.pid"
+  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" > "$6"
+  chmod 600 "$6"
+  : > "$REPLACEMENT_RUN/provider-launched"
+}
+if uberdev_agent_dispatch "$REPLACEMENT_REQUEST" "$REPLACEMENT_RUN/prompt.txt" \
+    "$REPLACEMENT_RUN/result.md" "$REPLACEMENT_RUN/status.json"; then
+  echo "replacement-capability failure was reported as success" >&2; exit 1
+fi
+REPLACEMENT_PID="$(cat "$REPLACEMENT_RUN/provider.pid")"
+for _ in 1 2 3 4 5; do kill -0 "$REPLACEMENT_PID" 2>/dev/null || break; sleep .1; done
+wait "$REPLACEMENT_PID" 2>/dev/null || true
+kill -0 "$REPLACEMENT_PID" 2>/dev/null && {
+  echo "replacement-capability cleanup orphaned provider $REPLACEMENT_PID" >&2; exit 1;
+}
+[ -e "$REPLACEMENT_RUN/identity-failed" ] && [ -e "$REPLACEMENT_RUN/rollback-failed" ]
+! grep -R -q 'run_id=adapter-postlaunch-replacement' \
+  "$REPLACEMENT_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
+REPLACEMENT_REACQUIRED="$(uberdev_semaphore_acquire \
+  "$REPLACEMENT_RUN/.agent-state-$(id -u)" adapter-postlaunch-replacement-repository \
+  codex 1 adapter-postlaunch-replacement-reacquired 20)"
+uberdev_semaphore_release "$REPLACEMENT_REACQUIRED"
+eval "$(declare -f _real_replacement_path_identity | sed '1s/_real_replacement_path_identity/_uberdev_semaphore_path_identity/')"
+eval "$(declare -f _real_replacement_remove_lease | sed '1s/_real_replacement_remove_lease/_uberdev_semaphore_remove_lease/')"
 
 # A detached watcher finalization failure is durable and visible; it may not be
 # redirected away while the lease silently remains live.

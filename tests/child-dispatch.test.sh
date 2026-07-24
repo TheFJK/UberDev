@@ -106,9 +106,8 @@ PY
 ! uberdev_create_child_handoff run-risk run-risk-explicit-mismatch "$RISK_INPUTS" '[]' >/dev/null 2>&1
 UBERDEV_RUN_CARRIER_JSON="$SAVED_CARRIER"
 
-# Observable providers without cancellation remain eligible for supervised
-# execution. Timeout still fails closed (covered by child-wait.test.sh), but a
-# healthy Claude-backed workflow must not be disabled before its first child.
+# Claude-backed children are eligible only when the installed provider exposes
+# both the inventory and exact-stop operations used by supervision.
 CLAUDE_OUT="$(make_context "$TMP/claude-preflight" inherit root-claude-preflight claude-bg)"
 CLAUDE_CTX="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_file"])' "$CLAUDE_OUT")"
 CLAUDE_SHA="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_sha256"])' "$CLAUDE_OUT")"
@@ -124,20 +123,34 @@ print(json.dumps({'task_path':sys.argv[1],'working_dir':sys.argv[2],'allowed_pat
 PY
 )"
 uberdev_create_child_handoff sdd.task.implement claude-preflight-a1 "$CLAUDE_INPUTS" '[]' >/dev/null
-# The root provider already proved Claude availability before creating this
-# carrier. Descendant supervision is a loaded adapter capability, not an
-# ambient PATH probe. Lock that implementation contract without replacing the
-# runner's command environment; the real preflight below exercises the loaded
-# probe/watcher functions end to end.
+CLAUDE_CAP_BIN="$TMP/claude-cap-bin"
+mkdir -p "$CLAUDE_CAP_BIN"
+cat >"$CLAUDE_CAP_BIN/claude" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  'agents --all --json') printf '[]\n'; exit 0 ;;
+  'stop --help') [ "${CLAUDE_CAP_MODE:-supported}" = supported ]; exit ;;
+esac
+exit 2
+SH
+chmod +x "$CLAUDE_CAP_BIN/claude"
 CLAUDE_CAPABILITY_BODY="$(declare -f _uberdev_child_backend_cancellation_supported)"
 case "$CLAUDE_CAPABILITY_BODY" in
-  *'command -v claude'*)
-    echo 'child-dispatch: Claude supervision regressed to an ambient binary probe' >&2
+  *'["claude","agents","--all","--json"]'*'["claude","stop","--help"]'*) ;;
+  *)
+    echo 'child-dispatch: Claude lifecycle capability probes are missing' >&2
     exit 1
     ;;
 esac
-uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" >/dev/null
+PATH="$CLAUDE_CAP_BIN:$PATH" uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" >/dev/null
 [ ! -e "$TMP/claude-preflight/children/claude-preflight-a1" ]
+set +e
+CLAUDE_PREFLIGHT_ERROR="$(CLAUDE_CAP_MODE=no-stop PATH="$CLAUDE_CAP_BIN:$PATH" \
+  uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" 2>&1)"
+CLAUDE_PREFLIGHT_RC=$?
+set -e
+[ "$CLAUDE_PREFLIGHT_RC" -eq 2 ]
+printf '%s\n' "$CLAUDE_PREFLIGHT_ERROR" | grep -Fq 'backend lacks lifecycle supervision: claude-bg'
 UBERDEV_RUN_CARRIER_JSON="$SAVED_CARRIER"
 
 # Production manifest enforcement happens before child allocation/provider use.

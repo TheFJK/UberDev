@@ -36,6 +36,8 @@ WATCHER_WAIT_RC=$?
 set -e
 [ "$WATCHER_WAIT_RC" -eq 70 ]
 printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'provider supervision failed: provider_probe_failed'
+printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'backend=claude-bg; capacity=retained'
+printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'action=resolve the retained Claude session or retry with Codex'
 rm -f "$STATUS.watcher-error.json"
 
 # Producer-shaped cancellation and lease-acquisition failures carry a bounded
@@ -54,6 +56,7 @@ for watcher_reason in provider_cancel_unconfirmed lease_acquire_rollback_failed;
   set -e
   [ "$WATCHER_WAIT_RC" -eq 70 ]
   printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq "provider supervision failed: ${watcher_reason}"
+  printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'capacity=retained'
 done
 rm -f "$STATUS.watcher-error.json"
 
@@ -108,6 +111,9 @@ rm -f "$WATCHER_FALLBACK"
 # a parseable APPROVE document may not carry blocker evidence.
 VALID_REVIEW="$TMP/run/children/worker-0001/valid-review.md"
 INVALID_REVIEW="$TMP/run/children/worker-0001/invalid-review.md"
+EMPTY_REVIEW="$TMP/run/children/worker-0001/empty-review.md"
+NULL_FINDINGS_REVIEW="$TMP/run/children/worker-0001/null-findings-review.md"
+INVALID_SCALAR_REVIEW="$TMP/run/children/worker-0001/invalid-scalar-review.md"
 printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
   '  - severity: blocker' '    location: tests/example.test.sh:1' \
   '    summary: bounded summary' '    detail: bounded detail' \
@@ -116,8 +122,19 @@ printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings:' \
   '  - severity: blocker' '    location: tests/example.test.sh:1' \
   '    summary: contradictory summary' '    detail: contradictory detail' \
   'confidence: high' '```' >"$INVALID_REVIEW"
+printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings: []' \
+  'confidence: high' '```' >"$EMPTY_REVIEW"
+printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings:' \
+  'confidence: high' '```' >"$NULL_FINDINGS_REVIEW"
+printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
+  '  - severity: suggestion' '    location: tests/example.test.sh:1' \
+  '    summary: invalid: plain scalar' '    detail: bounded detail' \
+  'confidence: high' '```' >"$INVALID_SCALAR_REVIEW"
 uberdev_child_validate_phase1_review_result "$VALID_REVIEW"
+uberdev_child_validate_phase1_review_result "$EMPTY_REVIEW"
 ! uberdev_child_validate_phase1_review_result "$INVALID_REVIEW"
+! uberdev_child_validate_phase1_review_result "$NULL_FINDINGS_REVIEW"
+! uberdev_child_validate_phase1_review_result "$INVALID_SCALAR_REVIEW"
 
 # A running status without the exact lifecycle lease is not cancellation
 # authority: never signal or synthesize timed_out.

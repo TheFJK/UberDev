@@ -571,7 +571,16 @@ _uberdev_child_backend_cancellation_supported() {
     # The adapter fails closed when exact cancellation cannot be proven.
     claude-bg)
       command -v _uberdev_agent_claude_probe >/dev/null 2>&1 \
-        && command -v _uberdev_agent_start_watcher >/dev/null 2>&1
+        && command -v _uberdev_agent_start_watcher >/dev/null 2>&1 \
+        && command -v claude >/dev/null 2>&1 \
+        && python3 -I -B -c '
+import json,subprocess
+try:
+ inventory=subprocess.run(["claude","agents","--all","--json"],capture_output=True,text=True,timeout=10,check=True)
+ if not isinstance(json.loads(inventory.stdout),list): raise ValueError()
+ subprocess.run(["claude","stop","--help"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10,check=True)
+except (OSError,ValueError,subprocess.SubprocessError): raise SystemExit(2)
+'
       ;;
     *) return 2 ;;
   esac
@@ -725,7 +734,15 @@ try:
   if reason and reason not in lease_reasons|{'supervisory_failure'}: raise ValueError()
  elif not handle or terminal not in {'completed','failed','timed_out','cancelled','abandoned'}:
   raise ValueError()
- print(reason or error,end='')
+ retained=(error in {'provider_probe_failed','provider_cancel_failed','terminal_finalize_failed'}
+           or reason in {'lease_acquire_rollback_failed','lease_handle_rollback_failed'})
+ if backend=='claude-bg':
+  action='resolve the retained Claude session or retry with Codex'
+ elif retained:
+  action='resolve the retained lifecycle lease before retrying'
+ else:
+  action='fix the backend lifecycle incompatibility and retry'
+ print(f"{reason or error}; backend={backend}; capacity={'retained' if retained else 'not-reserved'}; action={action}",end='')
 except Exception:
  raise SystemExit(2)
 PY
@@ -736,8 +753,28 @@ PY
 # can reach aggregation or trust-signal evaluation.
 uberdev_child_validate_phase1_review_result() {
   python3 -I -B - "$1" <<'PY'
-import os,re,stat,sys
+import json,os,re,stat,sys
 path=sys.argv[1]
+def parse_scalar(raw):
+ if not raw or raw.strip()!=raw or any(ord(char)<32 or ord(char)==127 for char in raw): raise ValueError()
+ if raw.startswith('"'):
+  value=json.loads(raw)
+  if not isinstance(value,str) or not value: raise ValueError()
+  return value
+ if raw.startswith("'"):
+  if len(raw)<2 or not raw.endswith("'"): raise ValueError()
+  inner=raw[1:-1]; value=''; index=0
+  while index<len(inner):
+   if inner[index]=="'":
+    if index+1>=len(inner) or inner[index+1]!="'": raise ValueError()
+    value+="'"; index+=2
+   else:
+    value+=inner[index]; index+=1
+  if not value: raise ValueError()
+  return value
+ if raw[0] in '-?:,[]{}#&*!|>@`' or ': ' in raw or ' #' in raw: raise ValueError()
+ if re.fullmatch(r'(?i:null|true|false|~|[-+]?(?:0|[1-9][0-9_]*)(?:\.[0-9_]+)?(?:e[-+]?[0-9]+)?|[-+]?\.(?:inf|nan))',raw): raise ValueError()
+ return raw
 try:
  entry=os.lstat(path)
  if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1 or entry.st_size>1048576: raise ValueError()
@@ -749,7 +786,7 @@ try:
   if not line.strip(): continue
   top=re.fullmatch(r'(verdict|confidence):[ \t]*(\S(?:.*\S)?)',line)
   if top:
-   key,value=top.groups()
+   key,value=top.groups(); value=parse_scalar(value)
    if key=='verdict':
     if verdict is not None or value not in {'APPROVE','REVISIONS_REQUIRED','REJECT'}: raise ValueError()
     verdict=value
@@ -769,7 +806,7 @@ try:
    continue
   field=re.fullmatch(r'    (location|summary|detail):[ \t]*(\S(?:.*\S)?)',line)
   if field and findings_mode=='rows' and current is not None:
-   key,value=field.groups()
+   key,value=field.groups(); value=parse_scalar(value)
    if key in current: raise ValueError()
    current[key]=value
    continue
@@ -777,6 +814,7 @@ try:
  if current is not None: findings.append(current)
  if verdict is None or confidence is None or findings_mode is None: raise ValueError()
  if findings_mode=='empty' and findings: raise ValueError()
+ if findings_mode=='rows' and not findings: raise ValueError()
  for finding in findings:
   if set(finding)!={'severity','location','summary','detail'}: raise ValueError()
   location=finding['location']

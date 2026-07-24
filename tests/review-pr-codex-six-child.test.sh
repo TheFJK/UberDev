@@ -42,7 +42,11 @@ case "${UBERDEV_AGENT_INSTANCE_ID:-}" in
     git commit -qm 'fix: exercise caller repair edge'
     printf '%s\n' '```yaml' 'status: APPLIED' 'commits:' "  - sha: $(git rev-parse HEAD)" 'findings_disposition: []' 'risks: []' '```' >"$result"
     ;;
-  *format-retry-valid-attempt01*|*format-retry-invalid*)
+  *format-retry-valid-attempt01*)
+    printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings:' \
+      'confidence: high' '```' >"$result"
+    ;;
+  *format-retry-invalid*)
     printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings:' \
       '  - severity: blocker' '    location: tests/example.test.sh:1' \
       '    summary: contradictory fixture' '    detail: malformed on purpose' \

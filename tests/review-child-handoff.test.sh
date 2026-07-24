@@ -323,7 +323,7 @@ bash "$TMP/ledger-failure.sh" "$TMP/post-builder.sh" post_review_fanout post "$T
 # receipts. Preserve the first wait rc even when a cleanup fails.
 cat >"$TMP/wait-ledger-failure.sh" <<'SH'
 set -u
-runtime="$1"; wait_all="$2"; run="$3"; mkdir -p "$run"
+runtime="$1"; wait_all="$2"; run="$3"; flavor="$4"; mkdir -p "$run"
 wait_log="$run/wait.log"; unwind_log="$run/unwind.log"; : >"$wait_log"; : >"$unwind_log"
 . "$runtime"
 uberdev_wait_child() {
@@ -338,11 +338,16 @@ uberdev_unwind_child() {
   case "$1" in *wait-fail-first.status) return 9 ;; *) return 0 ;; esac
 }
 printf '%s\n' \
-  "{\"status\":\"$run/ok.status\",\"result\":\"$run/ok.result\"}" \
-  "{\"status\":\"$run/wait-fail-first.status\",\"result\":\"$run/wait-fail-first.result\"}" \
-  "{\"status\":\"$run/wait-fail-second.status\",\"result\":\"$run/wait-fail-second.result\"}" >"$run/launched"
+  "{\"edge\":\"first.edge\",\"status\":\"$run/ok.status\",\"result\":\"$run/ok.result\"}" \
+  "{\"edge\":\"second.edge\",\"status\":\"$run/wait-fail-first.status\",\"result\":\"$run/wait-fail-first.result\"}" \
+  "{\"edge\":\"third.edge\",\"status\":\"$run/wait-fail-second.status\",\"result\":\"$run/wait-fail-second.result\"}" >"$run/launched"
+unset FAILED_REVIEW_EDGE FAILED_REVIEW_INDEX
 set +e
-"$wait_all" "$run/launched" 31 >"$run/stdout" 2>"$run/stderr"
+if [ "$flavor" = post ]; then
+  "$wait_all" "$run/launched" 31 "$run/failed" >"$run/stdout" 2>"$run/stderr"
+else
+  "$wait_all" "$run/launched" 31 >"$run/stdout" 2>"$run/stderr"
+fi
 rc=$?
 set -e
 [ "$rc" -eq 7 ]
@@ -351,10 +356,17 @@ set -e
 [ "$(sed -n '1p' "$unwind_log")" = "$run/wait-fail-first.status	$run/wait-fail-first.result	31" ]
 [ "$(sed -n '2p' "$unwind_log")" = "$run/wait-fail-second.status	$run/wait-fail-second.result	31" ]
 grep -q 'cleanup failed after child wait' "$run/stderr"
+if [ "$flavor" = post ]; then
+  python3 -I -B - "$run/failed" <<'PY'
+import json,sys
+rows=[json.loads(line) for line in open(sys.argv[1],encoding='utf-8') if line.strip()]
+assert [(row['edge'],row['index']) for row in rows]==[('second.edge',2),('third.edge',3)],rows
+PY
+fi
 SH
-bash "$TMP/wait-ledger-failure.sh" "$TMP/builder.sh" review_child_wait_all "$TMP/wait-review"
-bash "$TMP/wait-ledger-failure.sh" "$TMP/simplify-builder.sh" review_child_wait_all "$TMP/wait-simplify"
-bash "$TMP/wait-ledger-failure.sh" "$TMP/post-runtime.sh" post_review_wait_all "$TMP/wait-post"
+bash "$TMP/wait-ledger-failure.sh" "$TMP/builder.sh" review_child_wait_all "$TMP/wait-review" review
+bash "$TMP/wait-ledger-failure.sh" "$TMP/simplify-builder.sh" review_child_wait_all "$TMP/wait-simplify" simplify
+bash "$TMP/wait-ledger-failure.sh" "$TMP/post-runtime.sh" post_review_wait_all "$TMP/wait-post" post
 
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$REVIEW"
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$SIMPLIFY"

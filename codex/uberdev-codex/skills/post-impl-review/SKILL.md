@@ -36,7 +36,7 @@ If a reviewer agent surfaces a finding that "we should re-plan", record it as a 
 
 ## Inputs (passed by caller)
 
-- `changed_paths` — list of files modified by the implementation (e.g. `gh pr diff <N> --name-only` output from `/uberdev:review-pr` Phase 1).
+- `changed_paths` — list of files modified by the implementation, computed by `/uberdev:review-pr` from the same fixed local merge-base-to-HEAD snapshot as `commit_range` and the diff artifact.
 - `commit_range` — git rev range for diff context, e.g. `<base>..HEAD` where `<base>` is the PR base ref.
 - `tier` — one of `trivial` / `small` / `medium` / `large`. Accepted for caller compatibility but **dead for model selection** (RFC 0012 §5): all 6 reviewer agents carry `model: inherit` in their frontmatter (the former lightweight-lens Haiku pins are retired — blocker verdicts feed an auto-fixer, so every judgment lens inherits the session model).
 - `aspect_emphasis` — optional list of aspect-token strings (e.g. `["tests", "errors"]`) forwarded from `/uberdev:review-pr` Step 1's `ASPECT_LIST`. Default: empty list. When non-empty, Step 1 below appends a `## Emphasis` subsection to the shared brief listing each token. The emphasis section is identical across all 6 reviewers — emphasis is uniform, never per-reviewer.
@@ -176,9 +176,11 @@ post_review_fanout() {
   done <"$descriptors"
 }
 post_review_wait_all() {
-  local launched="$1" timeout_s="$2" row status result wait_rc first_rc=0 cleanup_rc=0
+  local launched="$1" timeout_s="$2" failed_path="${3:-}" row edge status result wait_rc ledger_rc first_rc=0 cleanup_rc=0 index=0
+  [ -z "$failed_path" ] || : >"$failed_path"
   while IFS= read -r row; do
-    status="$(jq -r .status <<<"$row")"; result="$(jq -r .result <<<"$row")"
+    index=$((index + 1))
+    edge="$(jq -r .edge <<<"$row")"; status="$(jq -r .status <<<"$row")"; result="$(jq -r .result <<<"$row")"
     if uberdev_wait_child "$status" "$result" "$timeout_s" \
         && uberdev_child_validate_phase1_review_result "$result"; then
       continue
@@ -186,6 +188,15 @@ post_review_wait_all() {
       wait_rc=$?
     fi
     [ "$first_rc" -ne 0 ] || first_rc="$wait_rc"
+    if [ -n "$failed_path" ]; then
+      if jq -cn --arg edge "$edge" --argjson index "$index" --arg status "$status" --arg result "$result" \
+          '{edge:$edge,index:$index,status:$status,result:$result}' >>"$failed_path"; then
+        :
+      else
+        ledger_rc=$?
+        [ "$first_rc" -ne 0 ] || first_rc="$ledger_rc"
+      fi
+    fi
     uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
   done <"$launched"
   if [ "$first_rc" -ne 0 ]; then
@@ -225,7 +236,13 @@ for EDGE_ID in "${REVIEW_EDGES[@]}"; do
   post_review_record "$EDGE_ID" "$INSTANCE" "$INPUTS_JSON" '[]' "$REVIEW_RECORDS"
 done
 post_review_fanout "$REVIEW_RECORDS" "$REVIEW_DESCRIPTORS" "$REVIEW_LAUNCHED" "$REVIEW_PR_TIMEOUT"
-post_review_wait_all "$REVIEW_LAUNCHED" "$REVIEW_PR_TIMEOUT" || REVIEW_WAVE_BLOCKED=1
+REVIEW_FAILED="$RESEARCH_DIR_ABS/post-review.failed"
+REVIEW_WAVE_BLOCKED=0
+if post_review_wait_all "$REVIEW_LAUNCHED" "$REVIEW_PR_TIMEOUT" "$REVIEW_FAILED"; then
+  :
+elif [ ! -s "$REVIEW_FAILED" ]; then
+  REVIEW_WAVE_BLOCKED=1
+fi
 ```
 
 The handoff carries paths and bounded scalar metadata only; never inline the
@@ -283,18 +300,25 @@ Wait until all 6 routed calls have returned. Parse each YAML block through
 `uberdev_child_validate_phase1_review_result`, the canonical runtime boundary
 that rejects malformed fields and APPROVE-with-blocker contradictions.
 
-Failure handling is fail-closed. A BLOCKED or unparseable reviewer gets exactly one format-repair retry using the same stable edge and a fresh `attempt02` instance whose inputs add `format_retry: true`. If the repaired return is still BLOCKED or unparseable, the aggregate verdict is BLOCKED and `/review-pr` cannot emit a green trust signal. Never drop a reviewer and continue with N-1 evidence.
+Failure handling is fail-closed. Every BLOCKED or unparseable reviewer is recorded by stable edge and roster index, then gets exactly one format-repair retry using the same edge and a fresh `attempt02` instance whose inputs add `format_retry: true`. If any repaired return is still BLOCKED or unparseable, the aggregate verdict is BLOCKED and `/review-pr` cannot emit a green trust signal. Never drop a reviewer and continue with N-1 evidence.
 
 ```bash uberdev-executable
 FORMAT_EXAMPLE_PATH="${FORMAT_EXAMPLE_PATH:-$CRITERIA_PATH}"
-FAILED_REVIEW_INPUTS="$(jq -ce --arg edge "$FAILED_REVIEW_EDGE" 'select(.edge == $edge) | .inputs' "$REVIEW_RECORDS")"
-REPAIR_INPUTS="$(uberdev_child_inputs_format_retry "$FAILED_REVIEW_EDGE" "$FAILED_REVIEW_INPUTS" "$FORMAT_EXAMPLE_PATH")"
-REPAIR_INSTANCE="$(uberdev_child_instance_id "post-review-${RUN_ID}-r${FAILED_REVIEW_INDEX}-iter${REVIEW_ITERATION}-attempt02")" || exit 2
-REPAIR_PREFIX="$RESEARCH_DIR_ABS/post-review-repair-r${FAILED_REVIEW_INDEX}"
+REPAIR_PREFIX="$RESEARCH_DIR_ABS/post-review-repair"
 : >"$REPAIR_PREFIX.records"
-post_review_record "$FAILED_REVIEW_EDGE" "$REPAIR_INSTANCE" "$REPAIR_INPUTS" '[]' "$REPAIR_PREFIX.records"
-post_review_fanout "$REPAIR_PREFIX.records" "$REPAIR_PREFIX.descriptors" "$REPAIR_PREFIX.launched" "$REVIEW_PR_TIMEOUT"
-post_review_wait_all "$REPAIR_PREFIX.launched" "$REVIEW_PR_TIMEOUT" || REVIEW_WAVE_BLOCKED=1
+if [ "$REVIEW_WAVE_BLOCKED" -eq 0 ] && [ -s "$REVIEW_FAILED" ]; then
+  while IFS= read -r FAILED_REVIEW_ROW; do
+    FAILED_REVIEW_EDGE="$(jq -r .edge <<<"$FAILED_REVIEW_ROW")"
+    FAILED_REVIEW_INDEX="$(jq -r .index <<<"$FAILED_REVIEW_ROW")"
+    FAILED_REVIEW_INPUTS="$(jq -ce --arg edge "$FAILED_REVIEW_EDGE" 'select(.edge == $edge) | .inputs' "$REVIEW_RECORDS")"
+    REPAIR_INPUTS="$(uberdev_child_inputs_format_retry "$FAILED_REVIEW_EDGE" "$FAILED_REVIEW_INPUTS" "$FORMAT_EXAMPLE_PATH")"
+    REPAIR_INSTANCE="$(uberdev_child_instance_id "post-review-${RUN_ID}-r${FAILED_REVIEW_INDEX}-iter${REVIEW_ITERATION}-attempt02")" || exit 2
+    post_review_record "$FAILED_REVIEW_EDGE" "$REPAIR_INSTANCE" "$REPAIR_INPUTS" '[]' "$REPAIR_PREFIX.records"
+  done <"$REVIEW_FAILED"
+  post_review_fanout "$REPAIR_PREFIX.records" "$REPAIR_PREFIX.descriptors" "$REPAIR_PREFIX.launched" "$REVIEW_PR_TIMEOUT"
+  REVIEW_REPAIR_FAILED="$RESEARCH_DIR_ABS/post-review-repair.failed"
+  post_review_wait_all "$REPAIR_PREFIX.launched" "$REVIEW_PR_TIMEOUT" "$REVIEW_REPAIR_FAILED" || REVIEW_WAVE_BLOCKED=1
+fi
 ```
 
 ### Step 4: Aggregate
@@ -347,7 +371,7 @@ Findings remain advisory, but missing reviewer evidence is not advisory: **the c
 ## Integration
 
 **Called by (the only live caller):**
-- **`/uberdev:review-pr` Phase 1** — invoked via the `Skill` tool. Inputs `changed_paths`, `commit_range`, `tier` are computed by `/uberdev:review-pr` against the pushed PR (`gh pr diff` / `git rev-parse` against the PR base ref). The 6 reviewer agents fan out in a single message inside `/uberdev:review-pr`'s context; their aggregated findings are written to the canonical path (see Step 4 above) and consumed by `/uberdev:review-pr`'s Phase 1 apply-loop.
+- **`/uberdev:review-pr` Phase 1** — invoked via the `Skill` tool. Inputs `changed_paths` and `commit_range` are computed by `/uberdev:review-pr` from one fixed local merge-base-to-HEAD snapshot of the pushed PR; `tier` is passed through separately. The 6 reviewer agents fan out in a single message inside `/uberdev:review-pr`'s context; their aggregated findings are written to the canonical path (see Step 4 above) and consumed by `/uberdev:review-pr`'s Phase 1 apply-loop.
 
 **Findings artifact contract:**
 - **Writer:** this skill (`uberdev:post-impl-review`), Step 4 — the `<external-untrusted-input source="post-impl-review-aggregate">…</external-untrusted-input>` envelope IS the file's leading/trailing bytes (see Step 4 "Envelope-as-file-bytes").
