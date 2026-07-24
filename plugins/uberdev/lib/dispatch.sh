@@ -422,7 +422,15 @@ uberdev_dispatch_preflight() {
       fi
       resolved="wezterm"; reason="explicit" ;;
     auto)
-      if [ "$workflow" = review-pr ] || [ "$workflow" = simplify ]; then
+      if [ "$os_class" = windows-native ]; then
+        if _uberdev_dispatch_wezterm_available; then
+          resolved="wezterm"; reason="auto-windows-wezterm"
+        else
+          echo "error: native Windows requires WezTerm for verifiable child supervision" >&2
+          echo "       install/start WezTerm, or run from WSL2 or another POSIX host" >&2
+          return 1
+        fi
+      elif [ "$workflow" = review-pr ] || [ "$workflow" = simplify ]; then
         if _uberdev_dispatch_codex_available; then
           resolved="codex"; reason="auto-${workflow}-result-artifact"
         else
@@ -449,13 +457,7 @@ uberdev_dispatch_preflight() {
         macos)
           if _uberdev_dispatch_wezterm_available; then resolved="wezterm"; reason="auto-macos-wezterm"
           else resolved="claude-bg"; reason="auto-macos-fallback"; fi ;;
-        windows-native)
-          if _uberdev_dispatch_wezterm_available; then resolved="wezterm"; reason="auto-windows-wezterm"
-          else
-            echo "error: native Windows requires WezTerm for verifiable child supervision" >&2
-            echo "       install/start WezTerm, or run from WSL2 or another POSIX host" >&2
-            return 1
-          fi ;;
+        windows-native) return 2 ;;
         wsl2)
           resolved="claude-bg"; reason="auto-wsl2" ;;
         *)

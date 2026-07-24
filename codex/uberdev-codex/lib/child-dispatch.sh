@@ -790,12 +790,12 @@ try:
   raise ValueError()
  retained=(error in {'provider_probe_failed','process_identity_probe_failed','timeout_intent_recovery_failed','provider_cancel_failed','terminal_finalize_failed'}
            or reason in {'lease_acquire_rollback_failed','lease_handle_rollback_failed'})
- if backend=='claude-bg':
+ if backend=='claude-bg' and retained:
   action='resolve the retained Claude session or retry with Codex'
  elif retained:
   action='resolve the retained lifecycle lease before retrying'
  else:
-  action='fix the backend lifecycle incompatibility and retry'
+  action='fix the prelaunch supervisory failure and retry'
  print(f"{reason or error}; backend={backend}; capacity={'retained' if retained else 'not-reserved'}; action={action}",end='')
 except Exception:
  raise SystemExit(2)

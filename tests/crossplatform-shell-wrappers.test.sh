@@ -220,10 +220,28 @@ assert_eq "$esc_after" "0" "tr -d '\\033' removes all ESC bytes (platform-indepe
 echo
 echo "== run manifest: Windows reconciliation uses a non-signaling native probe =="
 
+if python3 -I -B - "$0" <<'PY'
+import pathlib,sys
+source=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+block=source.split("if python3 -I -B -c 'import os; raise SystemExit(0 if os.name==\"nt\" else 1)'; then",1)[1]
+block=block.split("if python3 -I -B - \"$REPO_ROOT/plugins/uberdev/lib/run_manifest.py\"",1)[0]
+assert '\n  (\n' in block
+assert '\n  WINDOWS_RUNTIME_RC=$?\n' in block
+assert 'if (\n' not in block
+assert 'if [ "$WINDOWS_RUNTIME_RC" -eq 0 ]; then' in block
+PY
+then
+  echo "  PASS  native Windows assertion block reports its own failing status"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  native Windows assertion block can hide a failed assertion"
+  FAIL=$((FAIL + 1))
+fi
+
 if python3 -I -B -c 'import os; raise SystemExit(0 if os.name=="nt" else 1)'; then
   WINDOWS_PROBE_TMP="$(mktemp -d)"
   WINDOWS_BRIDGE_ROOT="$(cygpath -m "$WINDOWS_PROBE_TMP")"
-  if (
+  (
     . "$REPO_ROOT/plugins/uberdev/lib/child-dispatch.sh"
     set -e
     windows_child_controller=''
@@ -321,7 +339,9 @@ PY
     cleanup_windows_child
     windows_child_controller=''
     trap - EXIT
-  ); then
+  )
+  WINDOWS_RUNTIME_RC=$?
+  if [ "$WINDOWS_RUNTIME_RC" -eq 0 ]; then
     echo "  PASS  native Windows owner bridge binds identity and rejects unverifiable numeric cancellation"
     PASS=$((PASS + 1))
   else

@@ -62,6 +62,41 @@ assert_grep "$DISPATCH_LIB" \
   'dispatch_backend_resolved' \
   "preflight emits the dispatch_backend_resolved audit event"
 
+echo "== Functional: native Windows auto uses only supervised backends =="
+if WINDOWS_AUTO_BACKEND="$(/bin/bash -c '
+  . "$1"
+  _uberdev_dispatch_os_class() { printf windows-native; }
+  _uberdev_dispatch_wezterm_available() { return 0; }
+  _uberdev_dispatch_codex_available() { return 0; }
+  CODEX_HOME=/tmp/codex UBERDEV_DISPATCH_BACKEND_REQUESTED=auto
+  uberdev_dispatch_preflight solve >/dev/null || exit
+  printf "%s" "$UBERDEV_RESOLVED_BACKEND"
+' _ "$DISPATCH_LIB")" && [ "$WINDOWS_AUTO_BACKEND" = wezterm ]; then
+  echo "  PASS  native Windows auto prefers supervised WezTerm over a Codex environment"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  native Windows auto did not resolve available WezTerm: $WINDOWS_AUTO_BACKEND"
+  FAIL=$((FAIL + 1))
+fi
+if WINDOWS_AUTO_ERROR="$(/bin/bash -c '
+  . "$1"
+  _uberdev_dispatch_os_class() { printf windows-native; }
+  _uberdev_dispatch_wezterm_available() { return 1; }
+  _uberdev_dispatch_codex_available() { return 0; }
+  claude() { return 0; }
+  unset CODEX_HOME UBERDEV_RESOLVED_BACKEND
+  UBERDEV_DISPATCH_BACKEND_REQUESTED=auto
+  ! uberdev_dispatch_preflight solve
+  [ -z "${UBERDEV_RESOLVED_BACKEND+x}" ]
+' _ "$DISPATCH_LIB" 2>&1)" \
+    && printf '%s\n' "$WINDOWS_AUTO_ERROR" | grep -Fq 'native Windows requires WezTerm'; then
+  echo "  PASS  native Windows auto fails loudly when no supervised backend exists"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  native Windows auto did not fail closed without WezTerm: $WINDOWS_AUTO_ERROR"
+  FAIL=$((FAIL + 1))
+fi
+
 echo "== Positive: WSL2 same-OS mux guard + single resolution =="
 assert_grep "$DISPATCH_LIB" \
   'wezterm-mux-server|list-clients' \

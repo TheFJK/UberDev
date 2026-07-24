@@ -118,6 +118,22 @@ printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq \
 printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'backend=codex; capacity=not-reserved'
 rm -f "$STATUS.watcher-error.json"
 
+# The same prelaunch record for claude-bg has no session and no capacity. Its
+# remediation must not tell the operator to resolve a retained Claude session.
+rm -f "$STATUS" "$STATUS.watcher-error.json"
+_uberdev_agent_fail_owner_capture "$STATUS" "$OWNER_CAPTURE_FALLBACK" claude-bg
+set +e
+WATCHER_WAIT_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
+WATCHER_WAIT_RC=$?
+set -e
+[ "$WATCHER_WAIT_RC" -eq 70 ]
+printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq \
+  'owner_process_identity_unavailable; backend=claude-bg; capacity=not-reserved'
+printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq \
+  'action=fix the prelaunch supervisory failure and retry'
+! printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'resolve the retained Claude session'
+rm -f "$STATUS.watcher-error.json"
+
 # The detached numeric-process watcher emits a distinct durable record when
 # its kernel identity probe remains indeterminate. Exercise the producer and
 # the public waiter together so their closed schemas cannot drift apart.
