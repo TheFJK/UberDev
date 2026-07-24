@@ -795,15 +795,18 @@ assert_grep "$DISPATCH_LIB" \
 assert_grep "$DISPATCH_LIB" \
   'write_status "\$CODEX_STATE" "\$CODEX_RC"' \
   "codex wrapper records codex exec exit code in the status file"
-assert_grep "$DISPATCH_LIB" \
-  'mktemp "\$\{STATUS_FILE\}\.tmp\.\$\$\.XXXXXX"' \
-  "codex wrapper stages status JSON in a same-directory temp file"
-assert_grep "$DISPATCH_LIB" \
-  'mv -f "\$_status_tmp" "\$STATUS_FILE"' \
-  "codex wrapper publishes status JSON atomically"
-assert_grep "$DISPATCH_LIB" \
-  '"backend":"codex"' \
-  "codex backend status-file + audit payload carries backend=codex"
+assert_grep "$AGENT_DISPATCH_LIB" \
+  "tempfile\.mkstemp\(prefix='\.agent-status\.',dir=parent\)" \
+  "shared status writer stages status JSON in the destination directory"
+assert_grep "$AGENT_DISPATCH_LIB" \
+  'os\.replace\(temporary,path\)' \
+  "shared status writer publishes status JSON atomically"
+if grep -Fq '_uberdev_agent_publish_status_record "$STATUS_FILE" provider codex' "$DISPATCH_LIB" \
+   && grep -Fq '\"backend\":\"codex\"' "$DISPATCH_LIB"; then
+  pass_msg "codex backend status-file + audit payload carries backend=codex"
+else
+  fail_msg "codex backend status-file + audit payload carries backend=codex"
+fi
 assert_grep "$DISPATCH_LIB" \
   'WRAPPER_PID="\$\{UBERDEV_WRAPPER_PID:-\$\$\}"' \
   "codex wrapper status uses the detached supervisor PID with a shell-PID fallback"
@@ -1320,12 +1323,14 @@ FAIL_OUT="$(
     printf "rc=%s\nstatus=%s\nresult=%s\n" "$rc" "$(cat "$UBERDEV_TMPDIR/solve-codex-status-42.json" 2>/dev/null)" "$(cat "$UBERDEV_TMPDIR/solve-codex-result-42.md" 2>/dev/null)"
   ' _ "$DISPATCH_LIB" "$FAIL_TMP/prompt.txt"
 )"
-case "$FAIL_OUT" in
-  *'rc=0'*'"state":"failed"'*'"exit_code":17'*'result=codex refused'*)
-    pass_msg "codex dispatch records failed child status without treating dispatch as failed" ;;
-  *)
-    fail_msg "codex dispatch records failed child status without treating dispatch as failed" "$FAIL_OUT" ;;
-esac
+if printf '%s\n' "$FAIL_OUT" | grep -Fq 'rc=0' \
+   && printf '%s\n' "$FAIL_OUT" | grep -Fq '"state":"failed"' \
+   && printf '%s\n' "$FAIL_OUT" | grep -Fq '"exit_code":17' \
+   && printf '%s\n' "$FAIL_OUT" | grep -Fq 'result=codex refused'; then
+  pass_msg "codex dispatch records failed child status without treating dispatch as failed"
+else
+  fail_msg "codex dispatch records failed child status without treating dispatch as failed" "$FAIL_OUT"
+fi
 rm -rf "$FAIL_TMP"
 
 echo "== _uberdev_dispatch_codex immediate terminal handoff =="
@@ -1388,9 +1393,11 @@ IMMEDIATE_OUT="$(
       _uberdev_dispatch_codex "$issue" small "$UBERDEV_TMPDIR/prompt-$issue.txt"
       rc=$?
       status="$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)"
-      case "$outcome:$rc:$DISPATCH_ID:$status" in
-        completed:0:*:*\"state\":\"completed\"*\"exit_code\":0*) ;;
-        failed:0:*:*\"state\":\"failed\"*\"exit_code\":19*) ;;
+      case "$outcome:$rc:$status" in
+        completed:0:*\"state\":\"completed\"*)
+          [[ "$status" == *\"exit_code\":0* ]] || failures=$((failures + 1)) ;;
+        failed:0:*\"state\":\"failed\"*)
+          [[ "$status" == *\"exit_code\":19* ]] || failures=$((failures + 1)) ;;
         *) failures=$((failures + 1)); details="$details outcome=$outcome rc=$rc pid=${DISPATCH_ID:-none} status=$status" ;;
       esac
       [ -n "${DISPATCH_ID:-}" ] || failures=$((failures + 1))
@@ -1484,12 +1491,14 @@ RACE_OUT="$(
     printf "rc=%s\npid=%s\nstatus=%s\nresult=%s\n" "$rc" "$pid" "$(cat "$UBERDEV_TMPDIR/solve-codex-status-42.json" 2>/dev/null)" "$(cat "$UBERDEV_TMPDIR/solve-codex-result-42.md" 2>/dev/null)"
   ' _ "$DISPATCH_LIB" "$RACE_TMP/prompt.txt"
 )"
-case "$RACE_OUT" in
-  *'rc=0'*'"state":"failed"'*'"exit_code":23'*'result=fast failed codex result'*)
-    pass_msg "codex dispatch never overwrites terminal child status with stale running status" ;;
-  *)
-    fail_msg "codex dispatch never overwrites terminal child status with stale running status" "$RACE_OUT" ;;
-esac
+if printf '%s\n' "$RACE_OUT" | grep -Fq 'rc=0' \
+   && printf '%s\n' "$RACE_OUT" | grep -Fq '"state":"failed"' \
+   && printf '%s\n' "$RACE_OUT" | grep -Fq '"exit_code":23' \
+   && printf '%s\n' "$RACE_OUT" | grep -Fq 'result=fast failed codex result'; then
+  pass_msg "codex dispatch never overwrites terminal child status with stale running status"
+else
+  fail_msg "codex dispatch never overwrites terminal child status with stale running status" "$RACE_OUT"
+fi
 rm -rf "$RACE_TMP"
 
 echo "== Codex plugin package is self-contained =="

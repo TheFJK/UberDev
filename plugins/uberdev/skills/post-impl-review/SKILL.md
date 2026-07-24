@@ -41,27 +41,26 @@ If a reviewer agent surfaces a finding that "we should re-plan", record it as a 
 
 ## Process
 
-### Pre-flight: command_timeouts.review_pr (advisory-only)
+### Pre-flight: command_timeouts.review_pr (enforced per child)
 
 Before Step 1, read `command_timeouts.review_pr` from
 `.claude/uberdev.local.md` (env: `UBERDEV_REVIEW_PR_TIMEOUT`; default
-900s; range [60, 86400]). The value is **advisory in v1** — this skill
-does NOT enforce a wall-clock kill (the 6 routed child calls reviewers run inside
-the caller's Claude turn; enforcing kill semantics there would require
-deeper orchestrator-loop changes, which is out of scope per Q1
-auto-pick). The resolved value is recorded in the audit log under
-`uberdev_config_read` so post-run forensics can correlate slow runs
-with the configured value. v2 issue can extend.
+600s; range [60, 86400]). The resolved value is the enforced timeout for
+each routed child wait and bounded unwind. A configured wave therefore has no
+single aggregate wall-clock deadline: every launched child receives this same
+per-child supervision bound. The resolved value is recorded in the audit log
+under `uberdev_config_read` so post-run forensics can correlate timeout events
+with the configured value.
 
 ```bash
-# Pre-flight: read advisory timeout
+# Pre-flight: read the enforced per-child timeout
 POST_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
 if [ -r "$POST_REVIEW_PLUGIN_ROOT/lib/config-read.sh" ]; then
   . "$POST_REVIEW_PLUGIN_ROOT/lib/config-read.sh"
-  REVIEW_PR_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.review_pr UBERDEV_REVIEW_PR_TIMEOUT 60 86400 900)"
-  # Record the advisory value to the run audit (no kill).
+  REVIEW_PR_TIMEOUT="$(uberdev_read_int_in_range command_timeouts.review_pr UBERDEV_REVIEW_PR_TIMEOUT 60 86400 600)"
+  # Record the same value passed to every wait/unwind boundary below.
   if [ -d ".uberdev" ]; then
-    printf '{"event":"uberdev_config_read","key":"command_timeouts.review_pr","value":"%s","enforcement":"advisory"}\n' \
+    printf '{"event":"uberdev_config_read","key":"command_timeouts.review_pr","value":"%s","enforcement":"per-child"}\n' \
       "$REVIEW_PR_TIMEOUT" >> ".uberdev/audit.jsonl" 2>/dev/null || true
   fi
 fi

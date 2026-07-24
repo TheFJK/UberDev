@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Fixed
 
-- Pinned Codex-originated review fanouts to the Codex backend, including clean environments without `CODEX_HOME`, while preserving explicit backend overrides.
+- Pinned Codex-originated review fanouts to the Codex backend, including clean environments without `CODEX_HOME`; explicit backend requests remain visible to governed preflight and are rejected when incompatible rather than silently accepted or rerouted.
 - Hardened detached Claude supervision with unattended-permission preflight, exact `claude stop` cancellation, blocked-session terminalization, and exact capacity-lease release.
 - Isolated routed runtime state under a private user-owned directory and derived each Codex reviewer worktree and branch from its run-scoped child identity with terminal cleanup.
 - Reconciled review `changed_paths` with a traversal-safe repository-relative contract that also supports deleted files.

@@ -671,82 +671,135 @@ _uberdev_agent_status_terminal_event() {
   esac
 }
 
+_uberdev_agent_publish_status_record() {
+  [ "$#" -eq 17 ] || return 2
+  python3 -I -B - "$@" <<'PY'
+import errno,json,os,re,stat,sys,tempfile,time
+(path,mode,backend,state,exit_raw,pid,process_identity,lease_generation,
+ issue,tier,provider_exit_raw,log,result,worktree,branch,workspace_mode,
+ include_context)=sys.argv[1:]
+terminal_states={'completed','failed','timed_out','cancelled'}
+if mode not in {'create','replace','provider'} or state not in terminal_states|{'running'}: raise SystemExit(2)
+try: exit_code=None if exit_raw in {'','null'} else int(exit_raw)
+except ValueError: raise SystemExit(2)
+if state=='running' and exit_code is not None: raise SystemExit(2)
+if state=='completed' and exit_code!=0: raise SystemExit(2)
+if state in terminal_states-{'completed'} and (exit_code is None or exit_code==0): raise SystemExit(2)
+if process_identity and not re.fullmatch(r'[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}',process_identity): raise SystemExit(2)
+if lease_generation and not re.fullmatch(r'[0-9a-f]{32}',lease_generation): raise SystemExit(2)
+parent=os.path.dirname(path)
+parent_entry=os.stat(parent,follow_symlinks=False)
+uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
+if not stat.S_ISDIR(parent_entry.st_mode) or (uid is not None and parent_entry.st_uid!=uid): raise SystemExit(2)
+payload={'backend':backend,'state':state,'exit_code':exit_code}
+if pid: payload['pid']=pid
+if process_identity: payload['process_identity']=process_identity
+if lease_generation: payload['lease_generation']=lease_generation
+if issue:
+ try: payload['issue']=int(issue)
+ except ValueError: raise SystemExit(2)
+if tier: payload['tier']=tier
+if provider_exit_raw not in {'','null'}:
+ try: payload['provider_exit_code']=int(provider_exit_raw)
+ except ValueError: raise SystemExit(2)
+if include_context=='1':
+ payload.update(log=log,result=result,worktree=worktree,branch=branch,workspace_mode=workspace_mode)
+elif include_context!='0': raise SystemExit(2)
+lock_path=path+'.transition-lock-v2'
+lock_flags=os.O_RDWR|os.O_CREAT|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_BINARY',0)
+lock_fd=os.open(lock_path,lock_flags,0o600); acquired=False
+def lock_entry():
+ opened=os.fstat(lock_fd); current=os.lstat(lock_path)
+ if (stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1
+     or (uid is not None and opened.st_uid!=uid) or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)
+     or (os.name!='nt' and stat.S_IMODE(opened.st_mode)!=0o600)): raise SystemExit(2)
+ return opened
+def acquire():
+ global acquired
+ if os.name=='nt':
+  import msvcrt
+  if os.fstat(lock_fd).st_size==0:
+   os.write(lock_fd,b'0'); os.fsync(lock_fd)
+  for _ in range(300):
+   try: os.lseek(lock_fd,0,os.SEEK_SET); msvcrt.locking(lock_fd,msvcrt.LK_NBLCK,1); acquired=True; return
+   except OSError as error:
+    if error.errno not in {errno.EACCES,errno.EAGAIN,errno.EDEADLK}: raise
+    time.sleep(.01)
+ else:
+  import fcntl
+  for _ in range(300):
+   try: fcntl.flock(lock_fd,fcntl.LOCK_EX|fcntl.LOCK_NB); acquired=True; return
+   except OSError as error:
+    if error.errno not in {errno.EACCES,errno.EAGAIN}: raise
+    time.sleep(.01)
+ raise SystemExit(2)
+def release():
+ global acquired
+ if not acquired: return
+ if os.name=='nt':
+  import msvcrt
+  os.lseek(lock_fd,0,os.SEEK_SET); msvcrt.locking(lock_fd,msvcrt.LK_UNLCK,1)
+ else:
+  import fcntl
+  fcntl.flock(lock_fd,fcntl.LOCK_UN)
+ acquired=False
+def read_current():
+ try: entry=os.lstat(path)
+ except FileNotFoundError: return None,None
+ if (stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1
+     or (uid is not None and entry.st_uid!=uid) or (os.name!='nt' and stat.S_IMODE(entry.st_mode)!=0o600)
+     or entry.st_size>65536): raise SystemExit(2)
+ descriptor=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_BINARY',0))
+ try:
+  opened=os.fstat(descriptor); raw=os.read(descriptor,65537); current=os.stat(path,follow_symlinks=False)
+  if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1 or len(raw)>65536
+      or (opened.st_dev,opened.st_ino)!=(entry.st_dev,entry.st_ino)
+      or (current.st_dev,current.st_ino)!=(entry.st_dev,entry.st_ino)): raise SystemExit(2)
+ finally: os.close(descriptor)
+ if not raw: return entry,None
+ try: value=json.loads(raw)
+ except (UnicodeError,ValueError,json.JSONDecodeError): raise SystemExit(2)
+ if not isinstance(value,dict): raise SystemExit(2)
+ return entry,value
+try:
+ lock_entry(); acquire(); lock_entry()
+ entry,existing=read_current(); replace=True
+ if mode=='provider' and existing is not None:
+  for key in ('process_identity','lease_generation'):
+   if key in existing and key not in payload: payload[key]=existing[key]
+ if existing is not None and existing.get('state') in terminal_states:
+  if mode in {'create','provider'} or existing.get('state')==state: replace=False
+  else: raise SystemExit(3)
+ elif mode=='create' and existing is not None:
+  candidate_pid=int(pid) if pid.isdigit() else pid
+  replace=(existing.get('state')=='running' and existing.get('backend')==backend
+           and existing.get('pid') in (None,'',pid,candidate_pid))
+ if replace:
+  descriptor,temporary=tempfile.mkstemp(prefix='.agent-status.',dir=parent)
+  try:
+   if os.name!='nt': os.fchmod(descriptor,0o600)
+   with os.fdopen(descriptor,'w',encoding='utf-8') as stream:
+    descriptor=None; json.dump(payload,stream,sort_keys=True,separators=(',',':'))
+    stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
+   if entry is None:
+    if os.path.lexists(path): raise SystemExit(2)
+   else:
+    current=os.stat(path,follow_symlinks=False)
+    if (current.st_dev,current.st_ino)!=(entry.st_dev,entry.st_ino): raise SystemExit(2)
+   os.replace(temporary,path)
+  finally:
+   if descriptor is not None: os.close(descriptor)
+   if os.path.exists(temporary): os.unlink(temporary)
+finally:
+ try: release()
+ finally: os.close(lock_fd)
+PY
+}
+
 _uberdev_agent_publish_status() {
   local status_path="$1" backend="$2" handle="$3" state="$4" exit_code="${5:-}" mode="${6:-replace}" process_identity="${7:-}" lease_generation="${8:-}"
-  python3 -I -c '
-import json, os, stat, sys, tempfile, time
-path, backend, handle, state, exit_code, mode, process_identity, lease_generation = sys.argv[1:]
-parent = os.path.dirname(path)
-if not os.path.isdir(parent):
-    raise SystemExit(2)
-payload = {"backend": backend, "state": state, "exit_code": int(exit_code) if exit_code else None, "pid": handle}
-if process_identity: payload["process_identity"] = process_identity
-if lease_generation: payload["lease_generation"] = lease_generation
-lock = path + ".transition-lock"
-acquired = False
-for _ in range(300):
-    try:
-        os.mkdir(lock, 0o700)
-        acquired = True
-        break
-    except FileExistsError:
-        time.sleep(0.01)
-if not acquired:
-    raise SystemExit(2)
-try:
-    fd, temporary = tempfile.mkstemp(prefix=".agent-status.", dir=parent)
-    try:
-        if os.name != "nt":
-            os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            fd = None
-            json.dump(payload, stream, sort_keys=True, separators=(",", ":"))
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        if mode == "create":
-            try:
-                os.link(temporary, path, follow_symlinks=False)
-            except FileExistsError:
-                entry = os.lstat(path)
-                if (stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode)
-                        or (getattr(os,"geteuid",None) is not None and entry.st_uid != getattr(os,"geteuid")()) or entry.st_nlink != 1
-                        or (os.name != "nt" and stat.S_IMODE(entry.st_mode) != 0o600)):
-                    raise SystemExit(2)
-                replace = entry.st_size == 0
-                if not replace:
-                    with open(path, "r", encoding="utf-8") as existing_stream:
-                        existing = json.load(existing_stream)
-                    replace = (existing.get("state") == "running"
-                               and existing.get("backend") == backend
-                               and existing.get("pid") in (None, "", handle, int(handle) if handle.isdigit() else handle))
-                current = os.stat(path, follow_symlinks=False)
-                if (current.st_dev, current.st_ino) != (entry.st_dev, entry.st_ino):
-                    raise SystemExit(2)
-                if replace:
-                    os.replace(temporary, path)
-        else:
-            if os.path.lexists(path) and stat.S_ISLNK(os.lstat(path).st_mode):
-                raise SystemExit(2)
-            if os.path.lexists(path):
-                with open(path, "r", encoding="utf-8") as existing_stream:
-                    existing = json.load(existing_stream)
-                if existing.get("state") in {"completed", "failed", "timed_out", "cancelled"}:
-                    if existing.get("state") != state:
-                        raise SystemExit(3)
-                    raise SystemExit(0)
-            os.replace(temporary, path)
-    finally:
-        if fd is not None:
-            os.close(fd)
-        if os.path.exists(temporary):
-            os.unlink(temporary)
-finally:
-    try:
-        os.rmdir(lock)
-    except FileNotFoundError:
-        pass
-' "$status_path" "$backend" "$handle" "$state" "$exit_code" "$mode" "$process_identity" "$lease_generation"
+  _uberdev_agent_publish_status_record "$status_path" "$mode" "$backend" "$state" "$exit_code" "$handle" \
+    "$process_identity" "$lease_generation" '' '' '' '' '' '' '' '' 0
 }
 
 _uberdev_agent_process_identity() {
@@ -757,6 +810,8 @@ import hashlib,os,subprocess,sys
 pid=int(sys.argv[1])
 try:
  pgid=os.getpgid(pid); sid=os.getsid(pid)
+ process_state=subprocess.check_output(["ps","-o","stat=","-p",str(pid)],text=True,stderr=subprocess.DEVNULL).strip()
+ if not process_state or process_state.startswith("Z"): raise ValueError()
  started=subprocess.check_output(["ps","-o","lstart=","-p",str(pid)],text=True,stderr=subprocess.DEVNULL).strip()
  if not started: raise ValueError()
  print(f"{pid}|{pgid}|{sid}|{hashlib.sha256(started.encode()).hexdigest()}",end="")
@@ -810,17 +865,20 @@ else:
 ' "$handle" "$match_mode"
 }
 
-_uberdev_agent_lease_identity() {
+_uberdev_agent_lease_record() {
   local lease="$1"
   python3 -I -c '
-import os, stat, sys
+import json,os,re,stat,sys
 path = sys.argv[1]
 flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
 descriptor = os.open(path, flags)
 try:
     opened = os.fstat(descriptor)
     current = os.stat(path, follow_symlinks=False)
-    if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+    uid_fn=getattr(os,"geteuid",None); uid=uid_fn() if uid_fn else None
+    if (not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+            or opened.st_nlink != 1 or (uid is not None and opened.st_uid != uid)
+            or (os.name != "nt" and stat.S_IMODE(opened.st_mode) != 0o600)):
         raise SystemExit(2)
     payload = os.read(descriptor, 65537)
     if len(payload) > 65536:
@@ -828,14 +886,32 @@ try:
 finally:
     os.close(descriptor)
 try:
-    rows = dict(line.split("=", 1) for line in payload.decode("utf-8").splitlines())
+    pairs=[line.split("=",1) for line in payload.decode("utf-8").splitlines()]
+    if any(len(pair)!=2 for pair in pairs): raise ValueError()
+    rows=dict(pairs)
 except (UnicodeError, ValueError):
     raise SystemExit(2)
+if len(pairs)!=8 or len(rows)!=8 or set(rows)!={"version","generation","run_id","owner_pid","backend_handle","start_epoch","timeout_s","status_path"}: raise SystemExit(2)
 generation = rows.get("generation", "")
-if len(generation) != 32 or any(ch not in "0123456789abcdef" for ch in generation):
-    raise SystemExit(2)
-print(f"{opened.st_dev}:{opened.st_ino}:{generation}", end="")
+if rows.get("version")!="1" or not re.fullmatch(r"[0-9a-f]{32}",generation): raise SystemExit(2)
+if not os.path.basename(path).startswith(generation) or not re.fullmatch(r"[0-9a-f]{64}\.lease",os.path.basename(path)): raise SystemExit(2)
+if not rows["run_id"] or any(ord(ch)<32 or ord(ch)==127 for ch in rows["run_id"]): raise SystemExit(2)
+for key in ("owner_pid","start_epoch","timeout_s"):
+    if not rows[key].isdigit() or int(rows[key])<=0: raise SystemExit(2)
+handle=rows["backend_handle"]
+if any(ord(ch)<32 or ord(ch)==127 for ch in handle): raise SystemExit(2)
+status_path=rows["status_path"]
+if status_path and (not os.path.isabs(status_path) or any(ord(ch)<32 or ord(ch)==127 for ch in status_path)): raise SystemExit(2)
+if handle and not handle.isdigit() and not status_path: raise SystemExit(2)
+identity=f"{opened.st_dev}:{opened.st_ino}:{generation}"
+print(json.dumps({"identity":identity,"generation":generation,"run_id":rows["run_id"],"status_path":status_path},sort_keys=True,separators=(",",":")),end="")
 ' "$lease"
+}
+
+_uberdev_agent_lease_identity() {
+  local record
+  record="$(_uberdev_agent_lease_record "$1")" || return 2
+  _uberdev_agent_json_get "$record" identity
 }
 
 _uberdev_agent_release_exact_lease() {
@@ -997,11 +1073,11 @@ _uberdev_agent_persist_watcher_error_retry() {
 
 _uberdev_agent_start_watcher() {
   local manifest="$1" lease="$2" lease_identity="$3" status_file="$4" backend="$5" handle="$6" request_json="$7" decision="$8"
-  local watcher_pid watcher_instance watcher_fallback
+  local process_identity="${9:-}" watcher_pid watcher_instance watcher_fallback
   watcher_instance="$(_uberdev_agent_json_get "$request_json" run_id)" || return 2
   watcher_fallback="$(dirname "$manifest")/$watcher_instance.watcher-error.json"
   (
-    local terminal_event='' probe='' absent_count=0 indeterminate_count=0 event_json='' error_class='' cancel_attempt=0 cancel_rc=0 cancel_reason='' supervision_reported=0
+    local terminal_event='' probe='' absent_count=0 indeterminate_count=0 event_json='' error_class='' cancel_attempt=0 cancel_rc=0 cancel_reason='' supervision_reported=0 current_identity=''
     while [ -d "$(dirname "$status_file")" ]; do
       terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
       [ -z "$terminal_event" ] || break
@@ -1073,11 +1149,25 @@ _uberdev_agent_start_watcher() {
         case "$handle" in
           ''|*[!0-9]*) ;;
           *)
-            if ! kill -0 "$handle" 2>/dev/null; then
+            current_identity=''
+            [ -z "$process_identity" ] || current_identity="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
+            if { [ -n "$process_identity" ] && [ "$current_identity" != "$process_identity" ]; } \
+                || { [ -z "$process_identity" ] && ! kill -0 "$handle" 2>/dev/null; }; then
               absent_count=$((absent_count + 1))
               if [ "$absent_count" -ge 3 ]; then
-                terminal_event=failed
-                break
+                _UBERDEV_DISPATCH_CANCEL_REASON=''
+                if [ -n "$process_identity" ] \
+                    && _uberdev_dispatch_cancel_backend "$backend" "$handle" "$process_identity"; then
+                  terminal_event=failed
+                  error_class=provider_execution_failed
+                  break
+                fi
+                cancel_reason="${_UBERDEV_DISPATCH_CANCEL_REASON:-provider_cancel_unconfirmed}"
+                if ! _uberdev_agent_persist_watcher_error_retry "$status_file" "$watcher_fallback" \
+                    "$backend" "$handle" failed 3 "$cancel_reason"; then
+                  _uberdev_agent_error "failed to persist wrapper-death supervision failure: $status_file"
+                fi
+                exit 70
               fi
             else
               absent_count=0
@@ -1433,6 +1523,8 @@ uberdev_agent_dispatch() {
   fi
 
   terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
+  process_identity=''
+  [ -n "$terminal_event" ] || process_identity="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
   lease_handle="$handle"
   [ "$backend" != wezterm ] || lease_handle="pane:$handle"
   registered_identity="$lease_identity"
@@ -1453,13 +1545,12 @@ uberdev_agent_dispatch() {
     _uberdev_agent_finalize_terminal "$manifest" "$lease" "$lease_identity" "$status_file" \
       "$backend" "$handle" "$request_json" "$decision" "$terminal_event" || return 2
   else
-    process_identity="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
     _uberdev_agent_publish_status "$status_file" "$backend" "$lease_handle" running '' create "$process_identity" "$lease_generation" || {
       _uberdev_agent_abort_after_launch "$manifest" "$lease" "$lease_identity" "$status_file" "$result_file" \
         "$backend" "$handle" "$request_json" "$decision" status_publication
       return $?
     }
-    _uberdev_agent_start_watcher "$manifest" "$lease" "$lease_identity" "$status_file" "$backend" "$lease_handle" "$request_json" "$decision"
+    _uberdev_agent_start_watcher "$manifest" "$lease" "$lease_identity" "$status_file" "$backend" "$lease_handle" "$request_json" "$decision" "$process_identity"
   fi
   DISPATCH_RC=0
   return 0

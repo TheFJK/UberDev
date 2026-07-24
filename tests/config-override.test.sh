@@ -407,11 +407,11 @@ assert_grep_in "$CONFIG_REF" \
   'post_impl_review:[[:space:]]+6[[:space:]]+# int \[1, 50\]; post-impl-review reviewer fanout cap; default 6;' \
   "I4b2: config reference documents post_impl_review default 6"
 assert_grep_in "$SKILL_DIR/post-impl-review/SKILL.md" \
-  'uberdev_read_int_in_range command_timeouts.review_pr[[:space:]]+UBERDEV_REVIEW_PR_TIMEOUT[[:space:]]+60[[:space:]]+86400[[:space:]]+900' \
-  "I4c: post-impl-review reads command_timeouts.review_pr with bounds [60,86400] default 900"
+  'uberdev_read_int_in_range command_timeouts.review_pr[[:space:]]+UBERDEV_REVIEW_PR_TIMEOUT[[:space:]]+60[[:space:]]+86400[[:space:]]+600' \
+  "I4c: post-impl-review reads command_timeouts.review_pr with bounds [60,86400] default 600"
 assert_grep_in "$SKILL_DIR/post-impl-review/SKILL.md" \
-  'advisory' \
-  "I4d: post-impl-review documents advisory-only enforcement"
+  'per-child' \
+  "I4d: post-impl-review documents enforced per-child deadlines"
 
 echo
 echo "== I5: merge fanout caps + advisory + Constants update (Task 5) =="

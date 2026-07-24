@@ -345,6 +345,32 @@ python3 - "$IMMEDIATE" <<'PY'
 import json,sys
 r=json.loads(sys.argv[1]); assert r['state']=='completed' and r['handle']=='456'
 PY
+
+# Canonical dispatch receipts preserve every valid terminal state. Timeout and
+# cancellation are first-class lifecycle outcomes, not malformed failures at
+# the receipt boundary.
+for terminal_state in timed_out cancelled; do
+  python3 - "$HANDOFF" "$TMP/immediate-$terminal_state.json" "$terminal_state" <<'PY'
+import json,sys
+source,target,state=sys.argv[1:]
+value=json.load(open(source)); value['instance_id']='immediate-'+state
+json.dump(value,open(target,'w'),separators=(',',':'))
+PY
+  uberdev_agent_dispatch() {
+    terminal_code=124; [ "$terminal_state" != cancelled ] || terminal_code=143
+    printf '{"backend":"codex","state":"%s","exit_code":%s,"pid":"456"}\n' \
+      "$terminal_state" "$terminal_code" >"$4"
+    chmod 600 "$4"; DISPATCH_ID=456; return 0
+  }
+  TERMINAL_RECEIPT="$(uberdev_dispatch_child implementation "$TMP/immediate-$terminal_state.json" \
+    "$TMP/run/children/immediate-$terminal_state/result.md" \
+    "$TMP/run/children/immediate-$terminal_state/status.json")"
+  python3 - "$TERMINAL_RECEIPT" "$terminal_state" <<'PY'
+import json,sys
+receipt=json.loads(sys.argv[1]); expected=sys.argv[2]
+assert receipt['state']==expected and receipt['handle']=='456',receipt
+PY
+done
 uberdev_agent_dispatch() { _capture_dispatch "$@"; }
 
 # Forced Sol Ultra is copied exactly to the child request and resolver.

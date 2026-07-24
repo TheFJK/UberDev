@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Asserts that /uberdev:review-pr names all 6 Phase 1 reviewer dispatch slots
 # (5 distinct agent files; code-reviewer is dispatched twice — general lens +
-# correctness lens), dispatches them in parallel (single message), exposes the
+# correctness lens), dispatches them in capped parallel waves, exposes the
 # documented aspect arguments, plumbs aspect_emphasis + sequential env-var,
 # dispatches code-fixer for fix application in both Phase 1 + Phase 2, and
 # that each of the 5 distinct agent files contains the no-quoting output rule
@@ -92,9 +92,9 @@ assert_in_section "$REVIEW_PR" '^## Agent Descriptions' '^## Tips' \
   'code-fixer' "code-fixer named in Agent Descriptions (apply-loop fixer)"
 
 echo
-echo "== Parallel-default invariant documented =="
-assert_grep "$REVIEW_PR" 'single message|SINGLE message|one assistant turn|ONE assistant turn|single assistant turn' \
-  "parallel-fanout invariant documented"
+echo "== Capped-wave parallel invariant documented =="
+assert_grep "$REVIEW_PR" 'configured waves.*dispatch-before-wait|dispatch-before-wait.*configured waves' \
+  "capped-wave dispatch-before-wait invariant documented"
 
 echo
 echo "== Aspect arguments listed in Available Review Aspects =="

@@ -22,14 +22,15 @@ uberdev_unwind_child "$STATUS" "$RESULT" 2
 # A terminal manifest event is not sufficient success evidence while the exact
 # lifecycle lease remains present. Wait until watcher finalization releases it.
 TERMINAL_GENERATION=11111111111111111111111111111111
-TERMINAL_LEASE_DIR="$TMP/run/.agent-state-$(id -u)/semaphore-v1/slots"
-TERMINAL_LEASE="$TERMINAL_LEASE_DIR/terminal-release.lease"
+TERMINAL_LEASE_DIR="$TMP/run/.agent-state-$(id -u)/semaphore-v1/$(printf 'e%.0s' {1..64}).scope"
+TERMINAL_LEASE="$TERMINAL_LEASE_DIR/${TERMINAL_GENERATION}$(printf 'f%.0s' {1..32}).lease"
 mkdir -p "$TERMINAL_LEASE_DIR"
 printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321","lease_generation":"%s"}\n' \
   "$TERMINAL_GENERATION" >"$STATUS"
 terminal_manifest completed
-printf 'run_id=worker-0001\nstatus_path=%s\ngeneration=%s\n' \
-  "$STATUS" "$TERMINAL_GENERATION" >"$TERMINAL_LEASE"
+printf 'version=1\ngeneration=%s\nrun_id=worker-0001\nowner_pid=%s\nbackend_handle=321\nstart_epoch=1\ntimeout_s=30\nstatus_path=%s\n' \
+  "$TERMINAL_GENERATION" "$$" "$STATUS" >"$TERMINAL_LEASE"
+chmod 600 "$TERMINAL_LEASE"
 ( sleep .2; rm -f "$TERMINAL_LEASE" ) & TERMINAL_RELEASE_PID=$!
 set +e
 uberdev_wait_child "$STATUS" "$RESULT" 2 >/dev/null
@@ -40,6 +41,24 @@ wait "$TERMINAL_RELEASE_PID"
 set -e
 [ "$TERMINAL_WAIT_RC" -eq 0 ]
 [ "$TERMINAL_LEASE_RETAINED" -ne 0 ]
+rmdir "$TERMINAL_LEASE_DIR"
+
+# Terminal proof fails closed on a malformed lease entry instead of skipping it
+# and reporting capacity as released. The diagnostic names only the bounded
+# lease path; it never echoes attacker-controlled lease bytes.
+MALFORMED_SCOPE="$TMP/run/.agent-state-$(id -u)/semaphore-v1/$(printf 'a%.0s' {1..64}).scope"
+MALFORMED_LEASE="$MALFORMED_SCOPE/$(printf 'b%.0s' {1..64}).lease"
+MALFORMED_LEASE_REAL="$(python3 -I -B -c 'import os,sys; print(os.path.realpath(sys.argv[1]),end="")' "$MALFORMED_LEASE")"
+mkdir -p "$MALFORMED_SCOPE"
+printf 'run_id=worker-0001\nstatus_path=%s\ngeneration=bad\n' "$STATUS" >"$MALFORMED_LEASE"
+set +e
+MALFORMED_LEASE_ERROR="$(_uberdev_child_terminal_lease_proof "$STATUS" 2>&1)"
+MALFORMED_LEASE_RC=$?
+set -e
+[ "$MALFORMED_LEASE_RC" -ne 0 ]
+printf '%s\n' "$MALFORMED_LEASE_ERROR" | grep -Fq "invalid lifecycle lease: $MALFORMED_LEASE_REAL"
+! printf '%s\n' "$MALFORMED_LEASE_ERROR" | grep -Fq 'generation=bad'
+rm -f "$MALFORMED_LEASE"; rmdir "$MALFORMED_SCOPE"
 
 : >"$RESULT"; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
 printf x >"$RESULT"; printf '{bad\n' >"$STATUS"; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
@@ -268,12 +287,50 @@ rm -f "${RESULT}.partial.992"
 # race and must be atomically canonicalized, not parsed as malformed JSON.
 ZERO_STATUS="$TMP/run/children/worker-0001/zero-status.json"
 ( umask 077; : >"$ZERO_STATUS" )
-_uberdev_agent_publish_status "$ZERO_STATUS" codex 999 running '' create '999|999|999|fixture' 0123456789abcdef0123456789abcdef
+_uberdev_agent_publish_status "$ZERO_STATUS" codex 999 running '' create \
+  '999|999|999|0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' \
+  0123456789abcdef0123456789abcdef
 python3 - "$ZERO_STATUS" <<'PY'
 import json,stat,os,sys
 s=json.load(open(sys.argv[1])); assert s['state']=='running' and s['pid']=='999' and s['lease_generation']=='0123456789abcdef0123456789abcdef'
 assert stat.S_IMODE(os.stat(sys.argv[1]).st_mode)==0o600
 PY
+
+# A crashed transition owner cannot orphan the kernel-released status lock.
+# The production writer blocks while the owner is live, then completes after
+# the owner dies without deleting or repairing the persistent lock file.
+LOCK_READY="$TMP/transition-lock.ready"
+LOCK_RESULT="$TMP/transition-lock.writer-rc"
+python3 -I -B - "$ZERO_STATUS.transition-lock-v2" "$LOCK_READY" <<'PY' &
+import fcntl,os,sys,time
+lock_path,ready_path=sys.argv[1:]
+descriptor=os.open(lock_path,os.O_RDWR|os.O_CREAT,0o600)
+fcntl.flock(descriptor,fcntl.LOCK_EX)
+with open(ready_path,'w',encoding='utf-8') as ready:
+ ready.write('ready\n'); ready.flush(); os.fsync(ready.fileno())
+while True: time.sleep(60)
+PY
+LOCK_OWNER_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$LOCK_READY" ] && break; sleep .1; done
+[ -s "$LOCK_READY" ]
+(
+  set +e
+  _uberdev_agent_publish_status "$ZERO_STATUS" codex 999 completed 0 replace \
+    '999|999|999|0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' \
+    0123456789abcdef0123456789abcdef
+  printf '%s\n' "$?" >"$LOCK_RESULT"
+) & LOCK_WRITER_PID=$!
+sleep .1
+[ ! -e "$LOCK_RESULT" ]
+kill -KILL "$LOCK_OWNER_PID"
+set +e
+wait "$LOCK_OWNER_PID"
+LOCK_OWNER_RC=$?
+set -e
+[ "$LOCK_OWNER_RC" -ne 0 ]
+wait "$LOCK_WRITER_PID"
+[ "$(cat "$LOCK_RESULT")" -eq 0 ]
+grep -q '"state":"completed"' "$ZERO_STATUS"
 
 # Opaque Claude sessions cancel through an explicit provider capability hook
 # and require an absent/terminal probe, never a fabricated local state.
@@ -352,22 +409,48 @@ printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"777","lease_
 ! _uberdev_child_timeout_cas "$STATUS" "$OLD_SHA" 777 0123456789abcdef0123456789abcdef >/dev/null 2>&1
 grep -q '"state":"completed"' "$STATUS"
 
-# The terminal-state serialization lock closes the interleaving where timeout
-# has started but a provider publishes completion before timeout can commit.
-printf '{"backend":"codex","state":"running","exit_code":null,"pid":"779","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$STATUS"
-LOCKED_OLD_SHA="$(shasum -a 256 "$STATUS" | awk '{print $1}')"
-mkdir "$STATUS.transition-lock"
+# Competing timeout and provider completion transitions both use the production
+# writers. Exactly one terminal wins, and status, manifest, and lease state
+# remain coherent after the race.
+RACE_GENERATION=0123456789abcdef0123456789abcdef
+RACE_SCOPE="$TMP/run/.agent-state-$(id -u)/semaphore-v1/$(printf 'c%.0s' {1..64}).scope"
+RACE_LEASE="$RACE_SCOPE/${RACE_GENERATION}$(printf 'd%.0s' {1..32}).lease"
+mkdir -p "$RACE_SCOPE"
+printf 'version=1\ngeneration=%s\nrun_id=worker-0001\nowner_pid=%s\nbackend_handle=779\nstart_epoch=1\ntimeout_s=30\nstatus_path=%s\n' \
+  "$RACE_GENERATION" "$$" "$STATUS_REAL" >"$RACE_LEASE"
+chmod 600 "$RACE_LEASE"
+RACE_LEASE_IDENTITY="$(_uberdev_agent_lease_identity "$RACE_LEASE")"
+printf '{"backend":"codex","state":"running","exit_code":null,"pid":"779","lease_generation":"%s"}\n' \
+  "$RACE_GENERATION" >"$STATUS"
+RACE_OLD_SHA="$(shasum -a 256 "$STATUS" | awk '{print $1}')"
+printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00.000Z","run_id":"worker-0001"}\n{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001"}\n' >"$MANIFEST"
 (
   set +e
-  _uberdev_child_timeout_cas "$STATUS" "$LOCKED_OLD_SHA" 779 0123456789abcdef0123456789abcdef >"$TMP/locked-cas.out" 2>/dev/null
-  printf '%s\n' "$?" >"$TMP/locked-cas.rc"
-) & LOCKED_CAS_PID=$!
-sleep .1
-printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"779","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$STATUS"
-rmdir "$STATUS.transition-lock"
-wait "$LOCKED_CAS_PID"
-[ "$(cat "$TMP/locked-cas.rc")" -eq 3 ]
-grep -q '"state":"completed"' "$STATUS"
+  _uberdev_child_timeout_cas "$STATUS" "$RACE_OLD_SHA" 779 "$RACE_GENERATION" >"$TMP/race-timeout.out" 2>/dev/null
+  printf '%s\n' "$?" >"$TMP/race-timeout.rc"
+) & RACE_TIMEOUT_PID=$!
+(
+  set +e
+  _uberdev_agent_finalize_terminal "$MANIFEST" "$RACE_LEASE" "$RACE_LEASE_IDENTITY" \
+    "$STATUS" codex 779 '{"run_id":"worker-0001"}' '{}' completed >"$TMP/race-completion.out" 2>/dev/null
+  printf '%s\n' "$?" >"$TMP/race-completion.rc"
+) & RACE_COMPLETION_PID=$!
+wait "$RACE_TIMEOUT_PID" "$RACE_COMPLETION_PID"
+python3 -I - "$STATUS" "$MANIFEST" "$RACE_LEASE" "$TMP/race-timeout.rc" "$TMP/race-completion.rc" <<'PY'
+import json,pathlib,sys
+status_path,manifest_path,lease_path,timeout_rc_path,completion_rc_path=sys.argv[1:]
+status=json.load(open(status_path)); rows=[json.loads(line) for line in open(manifest_path) if line.strip()]
+terminals=[row['event'] for row in rows if row.get('run_id')=='worker-0001' and row.get('event') in {'completed','failed','timed_out','cancelled','abandoned'}]
+timeout_rc=int(pathlib.Path(timeout_rc_path).read_text()); completion_rc=int(pathlib.Path(completion_rc_path).read_text())
+assert status['state'] in {'completed','timed_out'},status
+assert len(terminals)<=1,terminals
+assert (timeout_rc==0) != (completion_rc==0),(timeout_rc,completion_rc)
+if completion_rc==0:
+ assert status['state']=='completed' and terminals==['completed'] and not pathlib.Path(lease_path).exists()
+else:
+ assert status['state']=='timed_out'
+PY
+rm -f "$RACE_LEASE"; rmdir "$RACE_SCOPE"
 
 # zsh can source and execute the public wait API without colliding with its
 # readonly `status` special parameter.

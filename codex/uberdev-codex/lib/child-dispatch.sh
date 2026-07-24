@@ -650,7 +650,8 @@ edge,request_raw,result,status,provider_handle=sys.argv[1:]
 try:
  s=json.load(open(status)); r=json.loads(request_raw)
  allowed={'issue','tier','backend','state','exit_code','provider_exit_code','pid','log','result','worktree','branch','workspace_mode','process_identity','lease_generation'}
- if not isinstance(s,dict) or set(s)-allowed or s.get('state') not in {'running','completed','failed'}: raise ValueError()
+ terminal_states={'completed','failed','timed_out','cancelled'}; states=terminal_states|{'running'}
+ if not isinstance(s,dict) or set(s)-allowed or s.get('state') not in states: raise ValueError()
  backend=s.get('backend')
  if backend not in {'codex','claude-bg','background','wezterm'}: raise ValueError()
  process_identity=s.get('process_identity')
@@ -660,9 +661,9 @@ try:
  state=s['state']; code=s.get('exit_code')
  if state=='running' and code is not None: raise ValueError()
  if state=='completed' and (type(code) is not int or code!=0): raise ValueError()
- if state=='failed' and (type(code) is not int or code==0): raise ValueError()
+ if state in terminal_states-{'completed'} and (type(code) is not int or code==0): raise ValueError()
  handle=s.get('pid')
- if handle is None and state in {'completed','failed'} and s['backend']=='wezterm':
+ if handle is None and state in terminal_states and s['backend']=='wezterm':
   if not provider_handle.isascii() or not provider_handle.isdecimal() or int(provider_handle)<=0: raise ValueError()
   handle='pane:'+provider_handle
  if not isinstance(handle,(str,int)) or isinstance(handle,bool) or not str(handle): raise ValueError()
@@ -874,15 +875,46 @@ PY
 
 _uberdev_child_timeout_cas() {
   python3 -I -B - "$1" "$2" "$3" "$4" <<'PY'
-import hashlib,json,os,stat,sys,tempfile,time
+import errno,hashlib,json,os,stat,sys,tempfile,time
 path,expected_sha,expected_handle,expected_generation=sys.argv[1:]
-parent=os.path.dirname(path); lock=path+'.transition-lock'; acquired=False
-for _ in range(300):
- try:
-  os.mkdir(lock,0o700); acquired=True; break
- except FileExistsError: time.sleep(.01)
-if not acquired: raise SystemExit(2)
+parent=os.path.dirname(path); lock=path+'.transition-lock-v2'; acquired=False
+uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
+lock_fd=os.open(lock,os.O_RDWR|os.O_CREAT|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_BINARY',0),0o600)
+def validate_lock():
+ opened=os.fstat(lock_fd); current=os.lstat(lock)
+ if (stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1
+     or (uid is not None and opened.st_uid!=uid) or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)
+     or (os.name!='nt' and stat.S_IMODE(opened.st_mode)!=0o600)): raise SystemExit(2)
+def acquire_lock():
+ global acquired
+ if os.name=='nt':
+  import msvcrt
+  if os.fstat(lock_fd).st_size==0: os.write(lock_fd,b'0'); os.fsync(lock_fd)
+  for _ in range(300):
+   try: os.lseek(lock_fd,0,os.SEEK_SET); msvcrt.locking(lock_fd,msvcrt.LK_NBLCK,1); acquired=True; return
+   except OSError as error:
+    if error.errno not in {errno.EACCES,errno.EAGAIN,errno.EDEADLK}: raise
+    time.sleep(.01)
+ else:
+  import fcntl
+  for _ in range(300):
+   try: fcntl.flock(lock_fd,fcntl.LOCK_EX|fcntl.LOCK_NB); acquired=True; return
+   except OSError as error:
+    if error.errno not in {errno.EACCES,errno.EAGAIN}: raise
+    time.sleep(.01)
+ raise SystemExit(2)
+def release_lock():
+ global acquired
+ if not acquired: return
+ if os.name=='nt':
+  import msvcrt
+  os.lseek(lock_fd,0,os.SEEK_SET); msvcrt.locking(lock_fd,msvcrt.LK_UNLCK,1)
+ else:
+  import fcntl
+  fcntl.flock(lock_fd,fcntl.LOCK_UN)
+ acquired=False
 try:
+ validate_lock(); acquire_lock(); validate_lock()
  fd=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
  try:
   e=os.fstat(fd); raw=os.read(fd,65537)
@@ -903,8 +935,8 @@ try:
  finally:
   if os.path.exists(tmp): os.unlink(tmp)
 finally:
- try: os.rmdir(lock)
- except FileNotFoundError: pass
+ try: release_lock()
+ finally: os.close(lock_fd)
 PY
 }
 
@@ -934,28 +966,57 @@ PY
 }
 
 _uberdev_child_terminal_lease_proof() {
-  python3 -I -B - "$1" <<'PY'
-import json,os,stat,sys
-status=os.path.realpath(sys.argv[1]); child=os.path.dirname(status)
-run_dir=os.path.dirname(os.path.dirname(child)); instance=os.path.basename(child)
-state=os.path.join(run_dir,f'.agent-state-{os.geteuid()}')
+  local status_path status_real child run_dir instance state lease_paths lease record lease_run lease_status
+  status_path="$1"
+  status_real="$(python3 -I -B -c 'import os,sys;print(os.path.realpath(sys.argv[1]),end="")' "$status_path")" || return 1
+  child="$(dirname "$status_real")"; run_dir="$(dirname "$(dirname "$child")")"; instance="$(basename "$child")"
+  state="$run_dir/.agent-state-$(id -u)"
+  python3 -I -B - "$status_real" "$state/agent-lifecycle.jsonl" "$instance" <<'PY' || return 1
+import json,sys
+status,manifest,instance=sys.argv[1:]
 try:
- s=json.load(open(status)); terminal=s['state']
+ value=json.load(open(status)); terminal=value['state']
  if terminal not in {'completed','failed','timed_out','cancelled'}: raise ValueError()
- rows=[json.loads(x) for x in open(os.path.join(state,'agent-lifecycle.jsonl')) if x.strip()]
- events=[r.get('event') for r in rows if r.get('run_id')==instance and r.get('event') in {'completed','failed','timed_out','cancelled','abandoned'}]
+ rows=[json.loads(line) for line in open(manifest) if line.strip()]
+ events=[row.get('event') for row in rows if row.get('run_id')==instance and row.get('event') in {'completed','failed','timed_out','cancelled','abandoned'}]
  if events!=[terminal]: raise ValueError()
- for root,dirs,files in os.walk(os.path.join(state,'semaphore-v1')):
-  dirs[:]=[d for d in dirs if not os.path.islink(os.path.join(root,d))]
-  for name in files:
-   if not name.endswith('.lease'): continue
-   path=os.path.join(root,name); e=os.lstat(path)
-   if stat.S_ISLNK(e.st_mode) or not stat.S_ISREG(e.st_mode): continue
-   try: lease=dict(line.split('=',1) for line in open(path).read().splitlines())
-   except Exception: continue
-   if lease.get('run_id')==instance and lease.get('status_path')==status: raise ValueError()
 except Exception: raise SystemExit(1)
 PY
+  lease_paths="$(python3 -I -B - "$state/semaphore-v1" <<'PY'
+import os,stat,sys
+root=sys.argv[1]
+try: scopes=list(os.scandir(root))
+except FileNotFoundError: scopes=[]
+except OSError: raise SystemExit(2)
+for scope in scopes:
+ if not scope.name.endswith('.scope'): continue
+ try: entry=scope.stat(follow_symlinks=False)
+ except OSError: raise SystemExit(2)
+ if scope.is_symlink() or not stat.S_ISDIR(entry.st_mode): raise SystemExit(2)
+ try: children=list(os.scandir(scope.path))
+ except OSError: raise SystemExit(2)
+ for child in children:
+  if child.name.endswith('.lease'): print(child.path)
+PY
+)" || { _uberdev_child_error "unsafe lifecycle lease directory: $state/semaphore-v1"; return 1; }
+  [ -z "$lease_paths" ] && return 0
+  while IFS= read -r lease; do
+    [ -n "$lease" ] || continue
+    if ! _uberdev_semaphore_validate_lease_path "$lease" >/dev/null 2>&1 \
+        || ! record="$(_uberdev_agent_lease_record "$lease" 2>/dev/null)"; then
+      _uberdev_child_error "invalid lifecycle lease: $lease"
+      return 1
+    fi
+    lease_run="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["run_id"],end="")' "$record")" || return 1
+    lease_status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status_path"],end="")' "$record")" || return 1
+    if [ "$lease_run" = "$instance" ] && [ "$lease_status" = "$status_real" ]; then
+      _uberdev_child_error "lifecycle lease still active: $lease"
+      return 1
+    fi
+  done <<EOF_LEASES
+$lease_paths
+EOF_LEASES
+  return 0
 }
 
 # Bounded cleanup for a previously launched child. A failed/timed-out/cancelled

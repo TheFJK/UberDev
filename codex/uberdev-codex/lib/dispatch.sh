@@ -872,42 +872,50 @@ _uberdev_dispatch_cancel_backend() {
   _UBERDEV_DISPATCH_CANCEL_REASON=''
   case "$backend" in
     codex|background)
-      case "$handle" in ''|*[!0-9]*) return 2 ;; esac
-      [ -n "$expected_identity" ] || return 2
+      case "$handle" in ''|*[!0-9]*) _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2 ;; esac
+      [ -n "$expected_identity" ] || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
       current="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
-      [ "$current" = "$expected_identity" ] || return 2
       IFS='|' read -r identity_pid identity_pgid identity_sid identity_started <<EOF_IDENTITY
 $expected_identity
 EOF_IDENTITY
-      [ "$identity_pid" = "$handle" ] && [ "$identity_pgid" = "$handle" ] && [ "$identity_sid" = "$handle" ] && [ -n "$identity_started" ] || return 2
-      _uberdev_dispatch_group_owned_session "$identity_pgid" "$identity_sid" || return 2
+      [ "$identity_pid" = "$handle" ] && [ "$identity_pgid" = "$handle" ] && [ "$identity_sid" = "$handle" ] && [ -n "$identity_started" ] \
+        || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
+      if [ -n "$current" ] && [ "$current" != "$expected_identity" ]; then
+        _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed
+        return 2
+      fi
+      if _uberdev_dispatch_group_owned_session "$identity_pgid" "$identity_sid"; then group_rc=0; else group_rc=$?; fi
+      [ "$group_rc" -ne 1 ] || return 0
+      [ "$group_rc" -eq 0 ] || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
       if ! kill -TERM "-$identity_pgid" 2>/dev/null; then
-        _uberdev_dispatch_group_live "$identity_pgid" && return 2
+        _uberdev_dispatch_group_live "$identity_pgid" && { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
         return 0
       fi
       attempts=0
       while [ "$attempts" -lt 40 ]; do
         current="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
-        if [ -n "$current" ] && [ "$current" != "$expected_identity" ]; then return 2; fi
+        if [ -n "$current" ] && [ "$current" != "$expected_identity" ]; then _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; fi
         if _uberdev_dispatch_group_owned_session "$identity_pgid" "$identity_sid"; then group_rc=0; else group_rc=$?; fi
         [ "$group_rc" -ne 1 ] || return 0
-        [ "$group_rc" -eq 0 ] || return 2
+        [ "$group_rc" -eq 0 ] || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
         sleep 0.05; attempts=$((attempts + 1))
       done
       current="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
-      if [ -n "$current" ] && [ "$current" != "$expected_identity" ]; then return 2; fi
-      _uberdev_dispatch_group_owned_session "$identity_pgid" "$identity_sid" || return 2
+      if [ -n "$current" ] && [ "$current" != "$expected_identity" ]; then _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; fi
+      _uberdev_dispatch_group_owned_session "$identity_pgid" "$identity_sid" \
+        || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
       if ! kill -KILL "-$identity_pgid" 2>/dev/null; then
-        _uberdev_dispatch_group_live "$identity_pgid" && return 2
+        _uberdev_dispatch_group_live "$identity_pgid" && { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
         return 0
       fi
       attempts=0
       while [ "$attempts" -lt 40 ]; do
         if _uberdev_dispatch_group_owned_session "$identity_pgid" "$identity_sid"; then group_rc=0; else group_rc=$?; fi
         [ "$group_rc" -ne 1 ] || return 0
-        [ "$group_rc" -eq 0 ] || return 2
+        [ "$group_rc" -eq 0 ] || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed; return 2; }
         sleep 0.05; attempts=$((attempts + 1))
       done
+      _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed
       return 1
       ;;
     claude-bg)
@@ -1435,27 +1443,19 @@ if os.name=="nt":
  raise SystemExit(rc)
 os.setsid()
 os.execvp("bash",argv)' '
-    PYTHON_EXE="$1"; PYTHON_PREFIX="$2"; shift 2
+    PYTHON_EXE="$1"; PYTHON_PREFIX="$2"; DISPATCH_LIB="$3"; shift 3
     run_python() {
       if [ -n "$PYTHON_PREFIX" ]; then "$PYTHON_EXE" "$PYTHON_PREFIX" "$@"; else "$PYTHON_EXE" "$@"; fi
     }
     WORKTREE_DIR="$1"; STATUS_FILE="$2"; RESULT_FILE="$3"; ISSUE_NUM="$4"; TIER="$5"; shift 5
+    . "$DISPATCH_LIB" || exit 126
     WRAPPER_PID="${UBERDEV_WRAPPER_PID:-$$}"
-    write_status() (
-      STATE="$1"; EXIT_CODE="$2"; STATUS_LOCK="${STATUS_FILE}.transition-lock"; STATUS_LOCK_TRIES=0
-      until mkdir "$STATUS_LOCK" 2>/dev/null; do
-        STATUS_LOCK_TRIES=$((STATUS_LOCK_TRIES + 1)); [ "$STATUS_LOCK_TRIES" -lt 300 ] || return 1; sleep 0.01
-      done
-      release_status_lock() { rmdir "$STATUS_LOCK" 2>/dev/null || true; }
-      trap release_status_lock EXIT
-      if [ -r "$STATUS_FILE" ] && grep -Eq '\''"state":"(completed|failed|timed_out|cancelled)"'\'' "$STATUS_FILE"; then return 0; fi
-      TMP_STATUS="$(mktemp "${STATUS_FILE}.tmp.XXXXXX")" || return 1
-      if [ "$EXIT_CODE" = null ]; then EXIT_JSON=null; else EXIT_JSON="$EXIT_CODE"; fi
-      chmod 600 "$TMP_STATUS" || { rm -f "$TMP_STATUS"; return 1; }
-      printf '\''{"issue":%s,"tier":"%s","backend":"background","state":"%s","exit_code":%s,"pid":"%s"}\n'\'' \
-          "$ISSUE_NUM" "$TIER" "$STATE" "$EXIT_JSON" "$WRAPPER_PID" > "$TMP_STATUS" || { rm -f "$TMP_STATUS"; return 1; }
-      mv -f "$TMP_STATUS" "$STATUS_FILE"
-    )
+    EMPTY_VALUE=
+    write_status() {
+      _uberdev_agent_publish_status_record "$STATUS_FILE" provider background "$1" "$2" "$WRAPPER_PID" \
+        "$EMPTY_VALUE" "$EMPTY_VALUE" "$ISSUE_NUM" "$TIER" \
+        "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" 0
+    }
     write_status running null || exit 126
     cd "$WORKTREE_DIR" || { write_status failed 127; exit 127; }
     TMP_RESULT="${RESULT_FILE}.partial.${WRAPPER_PID}"
@@ -1496,7 +1496,7 @@ finally:
     trap - EXIT HUP INT TERM
     write_status "$STATE" "$PROVIDER_RC" || exit 126
     exit "$PROVIDER_RC"
-  ' _ "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$WORKTREE_DIR" "$STATUS_FILE" "$RESULT_FILE" "$ISSUE_NUM" "$TIER" "${PROVIDER_CMD[@]}" \
+  ' _ "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$_UBERDEV_DISPATCH_FILE" "$WORKTREE_DIR" "$STATUS_FILE" "$RESULT_FILE" "$ISSUE_NUM" "$TIER" "${PROVIDER_CMD[@]}" \
     >"$LOG_FILE" 2>&1 &
   DISPATCH_RC=$?
   local LAUNCH_PID="$!"
@@ -1745,7 +1745,9 @@ os.execvp("bash",argv)' '
       CHILD_OWNED="${18}"
       WORKSPACE_MODE="${19}"
       shift 19
+      . "$DISPATCH_LIB" || exit 126
       WRAPPER_PID="${UBERDEV_WRAPPER_PID:-$$}"
+      EMPTY_VALUE=
       CLEANUP_DONE=0
       FINAL_STATUS_WRITTEN=0
       TERMINAL_STATE=failed
@@ -1788,34 +1790,11 @@ os.execvp("bash",argv)' '
       trap finalize_on_exit EXIT
       trap "TERMINAL_STATE=cancelled; exit 143" HUP INT TERM
 
-      write_status() (
-        _state="$1"
-        _exit_code="$2"
-        _provider_context=''
-        [ "$CLEANUP_PROVIDER_RC" = null ] || _provider_context=",\"provider_exit_code\":$CLEANUP_PROVIDER_RC"
-        _status_lock="${STATUS_FILE}.transition-lock"
-        _status_lock_tries=0
-        until mkdir "$_status_lock" 2>/dev/null; do
-          _status_lock_tries=$((_status_lock_tries + 1)); [ "$_status_lock_tries" -lt 300 ] || return 1; sleep 0.01
-        done
-        _release_status_lock() { rmdir "$_status_lock" 2>/dev/null || true; }
-        trap _release_status_lock EXIT
-        if [ -r "$STATUS_FILE" ] && grep -Eq '\''"state":"(completed|failed|timed_out|cancelled)"'\'' "$STATUS_FILE"; then return 0; fi
-        _status_tmp="$(umask 077; mktemp "${STATUS_FILE}.tmp.$$.XXXXXX")" || return 1
-        cat > "$_status_tmp" <<EOF_STATUS
-{"issue":$ISSUE_NUM,"tier":"$TIER","backend":"codex","state":"$_state","exit_code":$_exit_code${_provider_context},"pid":"$WRAPPER_PID","log":"$LOG_FILE","result":"$RESULT_FILE","worktree":"$EXECUTION_DIR","branch":"$WORKTREE_BRANCH","workspace_mode":"$WORKSPACE_MODE"}
-EOF_STATUS
-        _status_rc=$?
-        if [ "$_status_rc" -ne 0 ]; then
-          rm -f "$_status_tmp" 2>/dev/null || true
-          return "$_status_rc"
-        fi
-        mv -f "$_status_tmp" "$STATUS_FILE" || {
-          _status_rc=$?
-          rm -f "$_status_tmp" 2>/dev/null || true
-          return "$_status_rc"
-        }
-      )
+      write_status() {
+        _uberdev_agent_publish_status_record "$STATUS_FILE" provider codex "$1" "$2" "$WRAPPER_PID" \
+          "$EMPTY_VALUE" "$EMPTY_VALUE" "$ISSUE_NUM" "$TIER" "$CLEANUP_PROVIDER_RC" "$LOG_FILE" "$RESULT_FILE" \
+          "$EXECUTION_DIR" "$WORKTREE_BRANCH" "$WORKSPACE_MODE" 1
+      }
 
       if ! write_status running null; then
         printf "codex dispatch: failed to write running status file: %s\n" "$STATUS_FILE" >&2
@@ -2023,30 +2002,22 @@ _uberdev_dispatch_wezterm() {
   DISPATCH_ID="$(MSYS2_ARG_CONV_EXCL='*' wezterm cli spawn \
     --domain-name uberdev --cwd "$WORKTREE_ABS" -- \
     bash -c '
-      STATUS_FILE="$1"; ISSUE_NUM="$2"; TIER="$3"; shift 3
+      STATUS_FILE="$1"; ISSUE_NUM="$2"; TIER="$3"; DISPATCH_LIB="$4"; shift 4
+      . "$DISPATCH_LIB" || exit 126
       WRAPPER_PID="$$"
-      write_status() (
-        STATE="$1"; EXIT_CODE="$2"; STATUS_LOCK="${STATUS_FILE}.transition-lock"; STATUS_LOCK_TRIES=0
-        until mkdir "$STATUS_LOCK" 2>/dev/null; do
-          STATUS_LOCK_TRIES=$((STATUS_LOCK_TRIES + 1)); [ "$STATUS_LOCK_TRIES" -lt 300 ] || return 1; sleep 0.01
-        done
-        release_status_lock() { rmdir "$STATUS_LOCK" 2>/dev/null || true; }
-        trap release_status_lock EXIT
-        if [ -r "$STATUS_FILE" ] && grep -Eq '\''"state":"(completed|failed|timed_out|cancelled)"'\'' "$STATUS_FILE"; then return 0; fi
-        TMP_STATUS="$(mktemp "${STATUS_FILE}.tmp.XXXXXX")" || return 1
-        if [ "$EXIT_CODE" = null ]; then EXIT_JSON=null; else EXIT_JSON="$EXIT_CODE"; fi
-        chmod 600 "$TMP_STATUS" || { rm -f "$TMP_STATUS"; return 1; }
-        printf "{\"issue\":%s,\"tier\":\"%s\",\"backend\":\"wezterm\",\"state\":\"%s\",\"exit_code\":%s}\n" \
-            "$ISSUE_NUM" "$TIER" "$STATE" "$EXIT_JSON" > "$TMP_STATUS" || { rm -f "$TMP_STATUS"; return 1; }
-        mv -f "$TMP_STATUS" "$STATUS_FILE"
-      )
+      EMPTY_VALUE=
+      write_status() {
+        _uberdev_agent_publish_status_record "$STATUS_FILE" provider wezterm "$1" "$2" \
+          "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" "$ISSUE_NUM" "$TIER" \
+          "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" 0
+      }
       write_status running null || exit 126
       "$@"
       PROVIDER_RC=$?
       if [ "$PROVIDER_RC" -eq 0 ]; then STATE=completed; else STATE=failed; fi
       write_status "$STATE" "$PROVIDER_RC" || exit 126
       exit "$PROVIDER_RC"
-    ' _ "$STATUS_FILE" "$ISSUE_NUM" "$TIER" "${PROVIDER_CMD[@]}" \
+    ' _ "$STATUS_FILE" "$ISSUE_NUM" "$TIER" "$_UBERDEV_DISPATCH_FILE" "${PROVIDER_CMD[@]}" \
     2> >(tee -a "$LOG_FILE" >&2))"
   SPAWN_RC=$?
   if [[ "$SPAWN_RC" -ne 0 || -z "$DISPATCH_ID" ]]; then
