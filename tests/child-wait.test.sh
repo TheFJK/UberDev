@@ -4,6 +4,16 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"; LIB="$ROOT/plugins/uberdev/lib/child-d
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 [ -r "$LIB" ] || { echo "RED: child wait runtime missing" >&2; exit 1; }
 . "$LIB"
+
+# The one-second polling loop has one canonical Python projection boundary.
+# It must not regress to one validated probe plus per-field Python decoders.
+WAIT_BODY="$(declare -f uberdev_wait_child)"
+grep -q '_uberdev_child_wait_projection' <<<"$WAIT_BODY"
+! grep -q 'json.loads(sys.argv\[1\])\["state"\]' <<<"$WAIT_BODY"
+! grep -q 'json.loads(sys.argv\[1\])\["handle"\]' <<<"$WAIT_BODY"
+PROJECTION_BODY="$(declare -f _uberdev_child_wait_projection)"
+[ "$(grep -c 'python3 -I -B -' <<<"$PROJECTION_BODY")" -eq 1 ]
+
 mkdir -p "$TMP/run/children/worker-0001" "$TMP/run/.agent-state-$(id -u)"
 HANDOFF="$TMP/run/children/worker-0001/handoff.v1.json"
 printf '{"schema_version":1,"instance_id":"worker-0001"}\n' >"$HANDOFF"

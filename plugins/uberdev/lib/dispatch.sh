@@ -457,7 +457,6 @@ uberdev_dispatch_preflight() {
         macos)
           if _uberdev_dispatch_wezterm_available; then resolved="wezterm"; reason="auto-macos-wezterm"
           else resolved="claude-bg"; reason="auto-macos-fallback"; fi ;;
-        windows-native) return 2 ;;
         wsl2)
           resolved="claude-bg"; reason="auto-wsl2" ;;
         *)

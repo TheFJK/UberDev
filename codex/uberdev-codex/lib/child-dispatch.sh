@@ -214,6 +214,9 @@ def fail(code): print('uberdev child dispatch: '+code,file=sys.stderr); raise Sy
 def beneath(root,path):
  try:return os.path.commonpath((root,path))==root
  except ValueError:return False
+# Deliberately boundary-local: importing the construction-time child-inputs
+# helper here would make immutable handoff acceptance depend on a mutable file
+# between build and publish. This boundary preserves its own closed error map.
 def repo_paths(value):
  if not isinstance(value,list) or not value: fail('input_type_mismatch')
  for path in value:
@@ -354,6 +357,8 @@ def fail(code):
 def beneath(root,path):
     try:return os.path.commonpath((root,path))==root
     except ValueError:return False
+# Deliberately boundary-local and independent of the construction boundary:
+# dispatch revalidates the immutable handoff with its own closed error map.
 def repo_paths(value):
     if not isinstance(value,list) or not value: fail('input_type_mismatch')
     for path in value:
@@ -699,79 +704,33 @@ PY
   fi
 }
 
-_uberdev_child_wait_probe() {
-  python3 -I -B - "$1" "$2" <<'PY'
+_uberdev_child_wait_projection() {
+  python3 -I -B - "$1" "$2" "${3:-}" "${4:-wait}" <<'PY'
 import hashlib,json,os,re,stat,sys
-status,result=sys.argv[1:]
-try:
- if not os.path.isabs(status) or not os.path.isabs(result): raise ValueError()
- child=os.path.dirname(status)
- if os.path.dirname(result)!=child or os.path.basename(status)!='status.json' or os.path.basename(result)!='result.md' or os.path.basename(os.path.dirname(child))!='children': raise ValueError()
- for path in (status,):
-  e=os.lstat(path)
-  if stat.S_ISLNK(e.st_mode) or not stat.S_ISREG(e.st_mode) or e.st_nlink!=1 or e.st_uid!=os.geteuid() or e.st_size>65536: raise ValueError()
- s=json.load(open(status)); allowed={'issue','tier','backend','state','exit_code','provider_exit_code','pid','log','result','worktree','branch','workspace_mode','process_identity','lease_generation'}
- if not isinstance(s,dict) or set(s)-allowed or s.get('state') not in {'running','completed','failed','timed_out','cancelled'}: raise ValueError()
- backend=s.get('backend')
- if backend not in {'codex','claude-bg','background','wezterm'}: raise ValueError()
- process_identity=s.get('process_identity')
- if process_identity is not None and (not isinstance(process_identity,str) or not re.fullmatch(r'[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}',process_identity)): raise ValueError()
- lease_generation=s.get('lease_generation')
- if lease_generation is not None and (not isinstance(lease_generation,str) or not re.fullmatch(r'[0-9a-f]{32}',lease_generation)): raise ValueError()
- workspace_keys={'workspace_mode','worktree','branch'}
- reported_workspace=workspace_keys & set(s)
- if reported_workspace:
-  if reported_workspace!=workspace_keys: raise ValueError()
-  workspace_mode=s['workspace_mode']; worktree=s['worktree']; branch=s['branch']
-  if not isinstance(worktree,str) or not os.path.isabs(worktree) or not isinstance(branch,str): raise ValueError()
-  if workspace_mode=='caller':
-   if branch: raise ValueError()
-  elif workspace_mode=='isolated':
-   if not branch or any(ord(char)<32 or ord(char)==127 for char in branch): raise ValueError()
-  else: raise ValueError()
- state=s['state']; code=s.get('exit_code'); handle=s.get('pid')
- if state=='running' and code is not None: raise ValueError()
- if state=='completed' and (type(code) is not int or code!=0): raise ValueError()
- if state in {'failed','timed_out','cancelled'} and (type(code) is not int or code==0): raise ValueError()
- raw=open(status,'rb').read()
- print(json.dumps({'state':state,'backend':backend,'handle':str(handle) if handle is not None else '','process_identity':process_identity or '','lease_generation':lease_generation or '','snapshot_sha256':hashlib.sha256(raw).hexdigest()},separators=(',',':')),end='')
-except Exception: raise SystemExit(2)
-PY
-}
-
-_uberdev_child_watcher_error() {
-  python3 -I -B - "$1.watcher-error.json" "${2:-}" <<'PY'
-import json,os,re,stat,sys
-primary,fallback=sys.argv[1:]
-path=primary if os.path.lexists(primary) else fallback
-if not path or not os.path.lexists(path): raise SystemExit(1)
-try:
- entry=os.lstat(path)
-except FileNotFoundError:
- raise SystemExit(1)
-uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
-try:
+status,result,fallback,mode=sys.argv[1:]
+separator='\x1f'
+def emit(*fields):
+ values=[str(field) for field in fields]
+ if any(any(ord(char)<32 or ord(char)==127 for char in value) for value in values): raise ValueError()
+ print(separator.join(values),end='')
+def watcher_message(path):
+ entry=os.lstat(path); uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
  if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1 or entry.st_size>65536 or (uid is not None and entry.st_uid!=uid): raise ValueError()
- value=json.load(open(path,encoding='utf-8'))
- base_keys={'schema_version','error','backend','handle','terminal','attempts'}
- keys=frozenset(value)
+ with open(path,encoding='utf-8') as stream: value=json.load(stream)
+ base_keys={'schema_version','error','backend','handle','terminal','attempts'}; keys=frozenset(value)
  if keys not in {frozenset(base_keys),frozenset(base_keys|{'reason'})} or value.get('schema_version')!=1: raise ValueError()
  error=value.get('error')
  if error not in {'provider_probe_failed','process_identity_probe_failed','timeout_intent_recovery_failed','provider_cancel_failed','terminal_finalize_failed','launch_finalize_failed'}: raise ValueError()
- backend=value.get('backend'); handle=value.get('handle'); terminal=value.get('terminal'); attempts=value.get('attempts')
- reason=value.get('reason','')
+ backend=value.get('backend'); handle=value.get('handle'); terminal=value.get('terminal'); attempts=value.get('attempts'); reason=value.get('reason','')
  cancel_reasons={'provider_stop_failed','provider_session_resolution_failed','provider_cancel_probe_failed','provider_cancel_unconfirmed'}
  lease_reasons={'lease_acquire_invalid_input','lease_acquire_runtime_state_failed','lease_acquire_mutex_failed','lease_acquire_reconcile_failed','lease_acquire_count_failed','lease_acquire_duplicate_check_failed','lease_acquire_allocate_failed','lease_acquire_owner_failed','lease_acquire_publish_failed','lease_acquire_identity_failed','lease_acquire_rollback_failed','lease_acquire_mutex_release_failed','lease_handle_rollback_failed'}
  timeout_reasons={'timeout_intent_invalid','timeout_intent_identity_unavailable','timeout_intent_cleanup_failed','timeout_partial_result_cleanup_failed'}
  owner_capture_reasons={'owner_process_identity_unavailable'}
  if reason and reason not in cancel_reasons|timeout_reasons|lease_reasons|owner_capture_reasons|{'supervisory_failure'}: raise ValueError()
- if backend not in {'codex','claude-bg','background','wezterm'}: raise ValueError()
- if type(attempts) is not int or attempts<1 or attempts>3: raise ValueError()
+ if backend not in {'codex','claude-bg','background','wezterm'} or type(attempts) is not int or attempts<1 or attempts>3: raise ValueError()
  if not isinstance(handle,str) or len(handle)>256 or (handle and not all(ch.isalnum() or ch in '._:-' for ch in handle)): raise ValueError()
  if not isinstance(terminal,str) or len(terminal)>128: raise ValueError()
- if reason in owner_capture_reasons and not (
-     error=='launch_finalize_failed' and not handle
-     and terminal=='launch:owner_process_identity' and attempts==1): raise ValueError()
+ if reason in owner_capture_reasons and not (error=='launch_finalize_failed' and not handle and terminal=='launch:owner_process_identity' and attempts==1): raise ValueError()
  if error=='provider_probe_failed':
   if backend!='claude-bg' or not re.fullmatch(r'[0-9a-f]{8}',handle) or terminal!='provider_probe_failed' or attempts!=3: raise ValueError()
  elif error=='process_identity_probe_failed':
@@ -786,20 +745,62 @@ try:
   if terminal=='launch:owner_process_identity':
    if attempts!=1 or reason!='owner_process_identity_unavailable': raise ValueError()
   elif attempts!=3 or (reason and reason not in lease_reasons|{'supervisory_failure'}): raise ValueError()
- elif not handle or terminal not in {'completed','failed','timed_out','cancelled','abandoned'}:
-  raise ValueError()
- retained=(error in {'provider_probe_failed','process_identity_probe_failed','timeout_intent_recovery_failed','provider_cancel_failed','terminal_finalize_failed'}
-           or reason in {'lease_acquire_rollback_failed','lease_handle_rollback_failed'})
- if backend=='claude-bg' and retained:
-  action='resolve the retained Claude session or retry with Codex'
- elif retained:
-  action='resolve the retained lifecycle lease before retrying'
- else:
-  action='fix the prelaunch supervisory failure and retry'
- print(f"{reason or error}; backend={backend}; capacity={'retained' if retained else 'not-reserved'}; action={action}",end='')
-except Exception:
- raise SystemExit(2)
+ elif not handle or terminal not in {'completed','failed','timed_out','cancelled','abandoned'}: raise ValueError()
+ retained=(error in {'provider_probe_failed','process_identity_probe_failed','timeout_intent_recovery_failed','provider_cancel_failed','terminal_finalize_failed'} or reason in {'lease_acquire_rollback_failed','lease_handle_rollback_failed'})
+ if backend=='claude-bg' and retained: action='resolve the retained Claude session or retry with Codex'
+ elif retained: action='resolve the retained lifecycle lease before retrying'
+ else: action='fix the prelaunch supervisory failure and retry'
+ return f"{reason or error}; backend={backend}; capacity={'retained' if retained else 'not-reserved'}; action={action}"
+primary=status+'.watcher-error.json'; watcher=primary if os.path.lexists(primary) else fallback
+if watcher and os.path.lexists(watcher):
+ try: emit('watcher',watcher_message(watcher))
+ except Exception: emit('invalid_watcher')
+ raise SystemExit(0)
+if mode=='watcher': raise SystemExit(1)
+try:
+ if mode!='wait' or not os.path.isabs(status) or not os.path.isabs(result): raise ValueError()
+ child=os.path.dirname(status)
+ if os.path.dirname(result)!=child or os.path.basename(status)!='status.json' or os.path.basename(result)!='result.md' or os.path.basename(os.path.dirname(child))!='children': raise ValueError()
+ entry=os.lstat(status); uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
+ if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1 or entry.st_size>65536 or (uid is not None and entry.st_uid!=uid): raise ValueError()
+ with open(status,'rb') as stream: raw=stream.read(65537)
+ if len(raw)>65536: raise ValueError()
+ value=json.loads(raw); allowed={'issue','tier','backend','state','exit_code','provider_exit_code','pid','log','result','worktree','branch','workspace_mode','process_identity','lease_generation'}
+ if not isinstance(value,dict) or set(value)-allowed or value.get('state') not in {'running','completed','failed','timed_out','cancelled'}: raise ValueError()
+ backend=value.get('backend')
+ if backend not in {'codex','claude-bg','background','wezterm'}: raise ValueError()
+ process_identity=value.get('process_identity')
+ if process_identity is not None and (not isinstance(process_identity,str) or not re.fullmatch(r'[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}',process_identity)): raise ValueError()
+ lease_generation=value.get('lease_generation')
+ if lease_generation is not None and (not isinstance(lease_generation,str) or not re.fullmatch(r'[0-9a-f]{32}',lease_generation)): raise ValueError()
+ workspace_keys={'workspace_mode','worktree','branch'}; reported_workspace=workspace_keys & set(value)
+ if reported_workspace:
+  if reported_workspace!=workspace_keys: raise ValueError()
+  workspace_mode=value['workspace_mode']; worktree=value['worktree']; branch=value['branch']
+  if not isinstance(worktree,str) or not os.path.isabs(worktree) or not isinstance(branch,str): raise ValueError()
+  if workspace_mode=='caller':
+   if branch: raise ValueError()
+  elif workspace_mode=='isolated':
+   if not branch or any(ord(char)<32 or ord(char)==127 for char in branch): raise ValueError()
+  else: raise ValueError()
+ state=value['state']; code=value.get('exit_code'); handle=value.get('pid')
+ if handle is not None and (not isinstance(handle,(str,int)) or isinstance(handle,bool) or any(ord(char)<32 or ord(char)==127 for char in str(handle))): raise ValueError()
+ if state=='running' and code is not None: raise ValueError()
+ if state=='completed' and (type(code) is not int or code!=0): raise ValueError()
+ if state in {'failed','timed_out','cancelled'} and (type(code) is not int or code==0): raise ValueError()
+ emit('status',state,backend,str(handle) if handle is not None else '',process_identity or '',lease_generation or '',hashlib.sha256(raw).hexdigest())
+except Exception: raise SystemExit(2)
 PY
+}
+
+_uberdev_child_watcher_error() {
+  local projection kind message
+  projection="$(_uberdev_child_wait_projection "$1" '' "${2:-}" watcher)" || return $?
+  IFS=$'\x1f' read -r kind message <<EOF_PROJECTION
+$projection
+EOF_PROJECTION
+  [ "$kind" = watcher ] || return 2
+  printf '%s' "$message"
 }
 
 # Canonical boundary for the deliberately small Phase 1 reviewer YAML schema.
@@ -976,9 +977,12 @@ PY
 # lease lookup or cancellation; callers must re-enter the main probe loop in
 # that case instead of reporting a supervisory failure for the losing timeout.
 _uberdev_child_status_snapshot_changed() {
-  local probe current
-  probe="$(_uberdev_child_wait_probe "$1" "$2" 2>/dev/null)" || return 2
-  current="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["snapshot_sha256"],end="")' "$probe")" || return 2
+  local projection kind state backend handle process_identity lease_generation current
+  projection="$(_uberdev_child_wait_projection "$1" "$2" '' wait 2>/dev/null)" || return 2
+  IFS=$'\x1f' read -r kind state backend handle process_identity lease_generation current <<EOF_PROJECTION
+$projection
+EOF_PROJECTION
+  [ "$kind" = status ] || return 2
   [ "$current" != "$3" ]
 }
 
@@ -1107,7 +1111,7 @@ _uberdev_child_timeout_intent_finish() {
 }
 
 uberdev_wait_child() {
-  local status_file="${1:-}" result="${2:-}" timeout="${3:-}" start now probe state handle='' backend process_identity lease_generation snapshot child run_dir instance manifest terminal state_dir lease_info lease lease_identity cas rc watcher_error watcher_error_rc watcher_error_path
+  local status_file="${1:-}" result="${2:-}" timeout="${3:-}" start now projection projection_kind state handle='' backend process_identity lease_generation snapshot child run_dir instance manifest terminal state_dir lease_info lease lease_identity cas rc watcher_error watcher_error_path
   [ "$#" -eq 3 ] || return 2
   case "$timeout" in ''|*[!0-9]*) return 2 ;; esac
   [ "$timeout" -gt 0 ] || return 2
@@ -1119,27 +1123,28 @@ uberdev_wait_child() {
   state_dir="$run_dir/.agent-state-$(id -u)"
   start="$(date +%s)"
   while :; do
-    if watcher_error="$(_uberdev_child_watcher_error "$status_file" "$state_dir/$instance.watcher-error.json" 2>/dev/null)"; then
-      _uberdev_child_error "provider supervision failed: $watcher_error"
-      return 70
-    else
-      watcher_error_rc=$?
-      if [ "$watcher_error_rc" -ne 1 ]; then
+    projection="$(_uberdev_child_wait_projection "$status_file" "$result" "$state_dir/$instance.watcher-error.json" wait 2>/dev/null)" || return 2
+    IFS=$'\x1f' read -r projection_kind state backend handle process_identity lease_generation snapshot <<EOF_PROJECTION
+$projection
+EOF_PROJECTION
+    case "$projection_kind" in
+      watcher)
+        watcher_error="$state"
+        _uberdev_child_error "provider supervision failed: $watcher_error"
+        return 70
+        ;;
+      invalid_watcher)
         watcher_error_path="$status_file.watcher-error.json"
         if [ ! -e "$watcher_error_path" ] && [ ! -L "$watcher_error_path" ]; then
           watcher_error_path="$state_dir/$instance.watcher-error.json"
         fi
         _uberdev_child_error "invalid-supervisory-record: $watcher_error_path"
         return 2
-      fi
-    fi
-    if probe="$(_uberdev_child_wait_probe "$status_file" "$result" 2>/dev/null)"; then
-      state="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["state"],end="")' "$probe")" || return 2
-      handle="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["handle"],end="")' "$probe")" || return 2
-      backend="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["backend"],end="")' "$probe")" || return 2
-      process_identity="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["process_identity"],end="")' "$probe")" || return 2
-      lease_generation="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["lease_generation"],end="")' "$probe")" || return 2
-      snapshot="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["snapshot_sha256"],end="")' "$probe")" || return 2
+        ;;
+      status) ;;
+      *) return 2 ;;
+    esac
+    if [ "$projection_kind" = status ]; then
       case "$state" in
         completed|failed|timed_out|cancelled)
           terminal="$(_uberdev_child_manifest_terminal "$manifest" "$instance" 2>/dev/null || true)"
@@ -1168,8 +1173,6 @@ PY
           return 1
           ;;
       esac
-    else
-      return 2
     fi
     now="$(date +%s)"
     if [ $((now - start)) -ge "$timeout" ]; then

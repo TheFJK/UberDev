@@ -6,28 +6,36 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SKILL="$ROOT/codex/uberdev-codex/skills/uberdev-cmd-review-pr/SKILL.md"
-POST_SKILL="$ROOT/codex/uberdev-codex/skills/post-impl-review/SKILL.md"
+RUNTIME_ROOT="${SIX_CHILD_RUNTIME_ROOT:-$ROOT/codex/uberdev-codex}"
+RUNTIME_NAMESPACE="${SIX_CHILD_RUNTIME_NAMESPACE:-uberdev}"
+case "$RUNTIME_NAMESPACE" in
+  uberdev) COMMAND_SKILL=uberdev-cmd-review-pr; POST_SKILL_DIR=post-impl-review ;;
+  prkit) COMMAND_SKILL=prkit-cmd-review-pr; POST_SKILL_DIR=prkit-post-impl-review ;;
+  *) echo "unknown SIX_CHILD_RUNTIME_NAMESPACE=$RUNTIME_NAMESPACE" >&2; exit 2 ;;
+esac
+SKILL="$RUNTIME_ROOT/skills/$COMMAND_SKILL/SKILL.md"
+POST_SKILL="$RUNTIME_ROOT/skills/$POST_SKILL_DIR/SKILL.md"
 TMP="$(mktemp -d)"
 TMP="$(cd "$TMP" && pwd -P)"
 trap 'rm -rf "$TMP"' EXIT
 
-awk '
-  /uberdev-executable setup=review-pr/{active=1; next}
+awk -v marker="$RUNTIME_NAMESPACE-executable setup=review-pr" '
+  index($0,marker){active=1; next}
   active && /^```/{exit}
   active{print}
 ' "$SKILL" >"$TMP/setup.sh"
 test -s "$TMP/setup.sh"
-python3 -I -B - "$POST_SKILL" "$TMP/post-setup.sh" "$TMP/post-boundary.sh" <<'PY'
+python3 -I -B - "$POST_SKILL" "$TMP/post-setup.sh" "$TMP/post-boundary.sh" "$RUNTIME_NAMESPACE" <<'PY'
 import pathlib,re,sys
 source=pathlib.Path(sys.argv[1]).read_text()
+namespace=sys.argv[4]
 def one(marker):
     matches=re.findall(rf'^```bash {re.escape(marker)}\s*\n(.*?)^```\s*$',source,re.M|re.S)
     assert len(matches)==1,(marker,len(matches))
     return matches[0]
-setup=one('uberdev-executable setup=post-impl-review')
+setup=one(f'{namespace}-executable setup=post-impl-review')
 pathlib.Path(sys.argv[2]).write_text(setup)
-pathlib.Path(sys.argv[3]).write_text(one('uberdev-executable'))
+pathlib.Path(sys.argv[3]).write_text(one(f'{namespace}-executable'))
 PY
 
 mkdir -p "$TMP/bin" "$TMP/home"
@@ -41,18 +49,20 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 test -n "$result"
-printf '%s\t%s\t%s\n' "${UBERDEV_AGENT_INSTANCE_ID:-missing}" "$PWD" "$argv" >>"$CODEX_STUB_LOG"
-case "${UBERDEV_AGENT_INSTANCE_ID:-}" in
+agent_instance="${UBERDEV_AGENT_INSTANCE_ID:-${PRKIT_AGENT_INSTANCE_ID:-missing}}"
+agent_status_file="${UBERDEV_AGENT_STATUS_FILE:-${PRKIT_AGENT_STATUS_FILE:-}}"
+printf '%s\t%s\t%s\n' "$agent_instance" "$PWD" "$argv" >>"$CODEX_STUB_LOG"
+case "$agent_instance" in
   post-review-*-attempt01)
-    : >"$CODEX_STUB_READY_DIR/${UBERDEV_AGENT_INSTANCE_ID}"
-    while [ ! -e "$CODEX_STUB_RELEASE_DIR/${UBERDEV_AGENT_INSTANCE_ID}" ]; do sleep .05; done
+    : >"$CODEX_STUB_READY_DIR/$agent_instance"
+    while [ ! -e "$CODEX_STUB_RELEASE_DIR/$agent_instance" ]; do sleep .05; done
     ;;
 esac
 if [ -n "${CODEX_STUB_HANG_INSTANCE:-}" ] \
-    && [ "${UBERDEV_AGENT_INSTANCE_ID:-}" = "$CODEX_STUB_HANG_INSTANCE" ]; then
+    && [ "$agent_instance" = "$CODEX_STUB_HANG_INSTANCE" ]; then
   while :; do sleep 1; done
 fi
-case "${UBERDEV_AGENT_INSTANCE_ID:-}" in
+case "$agent_instance" in
   *caller-fix*)
     printf 'caller repair\n' >>README.md
     git add README.md
@@ -73,8 +83,8 @@ case "${UBERDEV_AGENT_INSTANCE_ID:-}" in
     printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings: []' 'confidence: high' '```' >"$result"
     ;;
 esac
-stub_run_dir="$(dirname "$(dirname "$(dirname "$UBERDEV_AGENT_STATUS_FILE")")")"
-while ! python3 -I -B - "$stub_run_dir" "$UBERDEV_AGENT_STATUS_FILE" <<'PY'
+stub_run_dir="$(dirname "$(dirname "$(dirname "$agent_status_file")")")"
+while ! python3 -I -B - "$stub_run_dir" "$agent_status_file" <<'PY'
 import pathlib,sys
 root=pathlib.Path(sys.argv[1]); expected=f"status_path={sys.argv[2]}"
 for lease in root.glob('.agent-state-*/semaphore-v1/*.scope/*.lease'):
@@ -86,7 +96,7 @@ raise SystemExit(1)
 PY
 do sleep .05; done
 if [ -n "${CODEX_STUB_FAIL_INSTANCE:-}" ] \
-  && [ "${UBERDEV_AGENT_INSTANCE_ID:-}" = "$CODEX_STUB_FAIL_INSTANCE" ]; then
+  && [ "$agent_instance" = "$CODEX_STUB_FAIL_INSTANCE" ]; then
   exit 42
 fi
 exit 0
@@ -295,6 +305,7 @@ PY
 # The canonical reviewer boundary drives the existing one-shot format-retry
 # edge. A repaired result is accepted; two contradictory documents remain
 # fail-closed instead of reaching aggregation.
+if [ "$case_name" = 1 ]; then
 format_retry_case() {
   local outcome="$1" edge=review_pr.review.correctness inputs first_instance repair_instance
   local first_result first_status repair_inputs repair_result repair_status
@@ -386,8 +397,22 @@ events=[json.loads(line) for line in (state/"agent-lifecycle.jsonl").read_text()
 failed=[row for row in events if row.get("run_id","").endswith("prehandle-types-attempt01") and row.get("event")=="failed"]
 assert len(failed)==1,failed
 PY
+fi
+
+expected_provider_launches=7
+if [ "$case_name" = 1 ]; then expected_provider_launches=13; fi
+[ "$(wc -l <"$CODEX_STUB_LOG" | tr -d ' ')" -eq "$expected_provider_launches" ] || {
+  echo "case $case_name launched an unexpected number of providers" >&2
+  exit 1
+}
 SH
-chmod +x "$TMP/run-case.sh"
+RUN_CASE_SCRIPT="$TMP/run-case.sh"
+if [ "$RUNTIME_NAMESPACE" = prkit ]; then
+  RUN_CASE_SCRIPT="$TMP/run-case-prkit.sh"
+  sed -e 's/uberdev_/prkit_/g' -e 's/UBERDEV_/PRKIT_/g' \
+    "$TMP/run-case.sh" >"$RUN_CASE_SCRIPT"
+fi
+chmod +x "$RUN_CASE_SCRIPT"
 
 make_repo() {
   local repo="$1"
@@ -408,13 +433,14 @@ run_case() {
   mkdir -p "$runtime"
   ready_dir="$runtime/ready"; release_dir="$runtime/release"
   env -i HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
-    PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$repo" \
-    UBERDEV_TMPDIR="$runtime" CODEX_STUB_LOG="$codex_log" CLAUDE_STUB_LOG="$claude_log" \
+    PLUGIN_ROOT="$RUNTIME_ROOT" WORKTREE_ROOT="$repo" \
+    UBERDEV_TMPDIR="$runtime" PRKIT_TMPDIR="$runtime" \
+    CODEX_STUB_LOG="$codex_log" CLAUDE_STUB_LOG="$claude_log" \
     CODEX_STUB_READY_DIR="$ready_dir" CODEX_STUB_RELEASE_DIR="$release_dir" \
     CODEX_STUB_FAIL_INSTANCE="$fail_instance" CODEX_STUB_HANG_INSTANCE="$timeout_instance" \
     RUN_ID="20260716-00000${name}-abcdef0" \
-    PR_NUMBER=335 ARGUMENTS='' SOLVE_TIMEOUT=120 UBERDEV_AGENT_CAPACITY=6 \
-    bash "$TMP/run-case.sh" "$name" "$repo" "$TMP/setup.sh" \
+    PR_NUMBER=335 ARGUMENTS='' SOLVE_TIMEOUT=120 UBERDEV_AGENT_CAPACITY=6 PRKIT_AGENT_CAPACITY=6 \
+    bash "$RUN_CASE_SCRIPT" "$name" "$repo" "$TMP/setup.sh" \
       "$TMP/post-setup.sh" "$TMP/post-boundary.sh" "$fail_instance" "$timeout_instance"
 }
 

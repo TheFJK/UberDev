@@ -1041,7 +1041,7 @@ After Phase 5 (`subagent-driven-dev`) returns control:
 1. **`uberdev:subagent-driven-dev`** hands off to `uberdev:finish-branch` with no flag args — unattended mode travels ONLY via the inherited `UBERDEV_TURBO=1` environment variable (per Phase 5 above; `finish-branch/SKILL.md` Step 3 is the authoritative owner of the chain's mode-signal contract and no longer parses a `--turbo` argument).
 2. **`uberdev:finish-branch`** pushes the branch, creates the PR via `gh pr create`, then invokes `uberdev:review-pr` via the `Skill` tool with the captured PR URL. This is the "always-PR path" — default mode and `--turbo` both auto-select it; only the `--interactive` flag with Options 1/3/4 bypasses the chain.
 3. **`/uberdev:review-pr`** runs its two-phase pipeline:
-   - **Phase 1 — Review + Fix loop** (6 advisory reviewer agents dispatched in a single message via `uberdev:post-impl-review`, then `code-fixer` auto-apply loop on findings).
+   - **Phase 1 — Review + Fix loop** (6 advisory reviewer agents run in one or more cap-controlled waves, with every child in each wave dispatched before its first wait via `uberdev:post-impl-review`, then `code-fixer` auto-apply loop on findings).
    - **Phase 2 — Mandatory Simplify Pass** (3 `uberdev:code-simplifier` lenses — Reuse / Quality / Efficiency — dispatched in a single message, then `code-fixer` auto-apply on findings).
 
    Findings are advisory at the `finish-branch` boundary — `finish-branch` does NOT block on `REVISIONS_REQUIRED`. `/uberdev:review-pr` writes the trust trail directly to the PR.

@@ -93,8 +93,23 @@ assert_in_section "$REVIEW_PR" '^## Agent Descriptions' '^## Tips' \
 
 echo
 echo "== Capped-wave parallel invariant documented =="
-assert_grep "$REVIEW_PR" 'configured waves.*dispatch-before-wait|dispatch-before-wait.*configured waves' \
+assert_grep "$REVIEW_PR" 'cap-controlled waves.*dispatched before its first wait|dispatch-before-wait.*cap-controlled waves' \
   "capped-wave dispatch-before-wait invariant documented"
+assert_no_grep "$REVIEW_PR" '6 reviewer agents in a single message|single-message-fanout invariant' \
+  "review command does not promise an impossible single wave when the cap is below six"
+
+echo
+echo "== Canonical cap-controlled-wave wording is synchronized =="
+CAP_WAVE_PATTERN='one or more cap-controlled waves.*every child in (each|a) wave dispatched before (its|the) first wait'
+for cap_wave_doc in \
+  "$REPO_ROOT/README.md" \
+  "$REPO_ROOT/plugins/uberdev/docs/testing.md" \
+  "$REPO_ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md" \
+  "$REPO_ROOT/codex/uberdev-codex/skills/post-impl-review/SKILL.md" \
+  "$REPO_ROOT/codex/uberdev-codex/skills/uberdev-cmd-review-pr/SKILL.md"; do
+  assert_grep "$cap_wave_doc" "$CAP_WAVE_PATTERN" \
+    "$(basename "$cap_wave_doc"): cap-controlled dispatch-before-wait wording"
+done
 
 echo
 echo "== Aspect arguments listed in Available Review Aspects =="
@@ -455,7 +470,7 @@ assert_grep "$REVIEW_PR" 'aspect_emphasis=\$ASPECT_LIST|aspect_emphasis: \$ASPEC
 assert_grep "$REVIEW_PR" '## Emphasis|## Additional Focus|aspect_emphasis' \
   "R11.3 — emphasis subsection plumbing prose present"
 # R11.4 — single-message-fanout invariant explicitly preserved (aspect filters never gate)
-assert_grep "$REVIEW_PR" 'always fan out|single-message-fanout invariant.*emphasis is advisory|emphasis is advisory, never gating' \
+assert_grep "$REVIEW_PR" 'always fan out|emphasis is advisory(,| and) never gat' \
   "R11.4 — invariant preserved: aspect filters never gate dispatch"
 
 echo

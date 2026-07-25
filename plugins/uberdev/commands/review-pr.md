@@ -205,7 +205,7 @@ review_child_single() {
 ```
 <!-- END review-child-builder-v1 -->
 
-- **Phase 1 — Review + Fix loop**: invoke `Skill(uberdev:post-impl-review)` to dispatch the 6 reviewer agents in a single message, read the resulting findings aggregate from `.uberdev/research/<RUN_ID>/post-impl-review-final.md`, then dispatch a fresh `code-fixer` subagent to auto-apply fixes from the findings.
+- **Phase 1 — Review + Fix loop**: invoke `Skill(uberdev:post-impl-review)` to run the 6 reviewer agents in one or more cap-controlled waves, with every child in each wave dispatched before its first wait; read the resulting findings aggregate from `.uberdev/research/<RUN_ID>/post-impl-review-final.md`, then dispatch a fresh `code-fixer` subagent to auto-apply fixes from the findings.
 - **Phase 2 — Simplify pass**: parallel fanout of the three simplify lenses (reuse / quality / efficiency) defined in `/uberdev:simplify`, with auto-applied edits committed separately. Single-message dispatch per the `uberdev:post-impl-review` contract.
 
 Pass `--no-simplify` (anywhere in the arguments) to skip Phase 2 and preserve the legacy single-pass behavior. Cost trade-off: Phase 2 adds three extra agent invocations per run; opt out for fast feedback loops on iterative review (e.g. when you've already run `/uberdev:simplify` separately).
@@ -237,7 +237,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
      echo "notice: running post-impl-review sequentially via UBERDEV_FANOUT_POST_IMPL_REVIEW=1" >&2
      export UBERDEV_FANOUT_POST_IMPL_REVIEW=1
      ```
-     The skill's Step 2 fanout cap reads `UBERDEV_FANOUT_POST_IMPL_REVIEW` via `uberdev_read_int_in_range`, so a value of `1` yields `ceil(6/1) = 6` sequential single-message waves. The single-message-fanout invariant is preserved within each wave.
+     The skill's Step 2 fanout cap reads `UBERDEV_FANOUT_POST_IMPL_REVIEW` via `uberdev_read_int_in_range`, so a value of `1` yields `ceil(6/1) = 6` sequential one-child waves. The dispatch-before-wait invariant is preserved within each wave.
 
    ### Argument Parsing Summary
 
@@ -260,7 +260,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    - **simplify** - Simplify code for clarity and maintainability
    - **all** - Run all applicable reviews (default)
 
-   Note: aspect filters are captured into `ASPECT_LIST` in Step 1 and passed to `Skill(uberdev:post-impl-review)` as the `aspect_emphasis` input (Step 4). The skill appends a `## Emphasis` section to every reviewer's brief, listing the requested aspects verbatim. The 6 agents always fan out (single-message-fanout invariant); emphasis is advisory, never gating. `/uberdev:review-pr tests` produces a measurably different brief from `/uberdev:review-pr all` — the former includes `## Emphasis: tests`, the latter omits the section entirely.
+   Note: aspect filters are captured into `ASPECT_LIST` in Step 1 and passed to `Skill(uberdev:post-impl-review)` as the `aspect_emphasis` input (Step 4). The skill appends a `## Emphasis` section to every reviewer's brief, listing the requested aspects verbatim. The 6 agents always run; cap-controlled wave membership is independent of emphasis, so emphasis is advisory and never gates dispatch. `/uberdev:review-pr tests` produces a measurably different brief from `/uberdev:review-pr all` — the former includes `## Emphasis: tests`, the latter omits the section entirely.
 
 3. **Identify Changed Files**
    - Run `git diff --name-only` to see modified files
@@ -412,9 +412,9 @@ PY
 
    > Invoke `uberdev:post-impl-review` via the `Skill` tool with `changed_paths`, `commit_range`, `tier`, `RUN_ID`, and `aspect_emphasis=$ASPECT_LIST` (so the skill writes to the same `RUN_ID`-keyed directory `/review-pr` will read, and the brief includes the emphasis section when aspects were requested).
 
-   The skill dispatches its 6 reviewer agents in configured waves using a **dispatch-before-wait** contract: issue every child in a wave before waiting on that wave — see `plugins/uberdev/skills/post-impl-review/SKILL.md` for the canonical agent list, cap, and YAML return contract. The skill is the single source of truth for which agents fan out; this prose deliberately does not enumerate them.
+   The skill runs its 6 reviewer agents in one or more cap-controlled waves, with every child in each wave dispatched before its first wait — see `plugins/uberdev/skills/post-impl-review/SKILL.md` for the canonical agent list, cap, and YAML return contract. The skill is the single source of truth for which agents fan out; this prose deliberately does not enumerate them.
 
-   **Sequential mode** (only when explicitly requested via the `sequential` argument): if `SEQUENTIAL=1` was set in Step 1, the user-visible stderr notice has already been emitted (`notice: running post-impl-review sequentially via UBERDEV_FANOUT_POST_IMPL_REVIEW=1`) and `UBERDEV_FANOUT_POST_IMPL_REVIEW=1` has been exported. The skill's Step 2 fanout cap inherits the env var and splits the 6-agent fanout into `ceil(6/1) = 6` sequential single-message waves per its existing fanout-cap logic. No skill change is needed; only `/review-pr` parses the `sequential` flag and exports. The warning surface is the user's terminal — never `/dev/null`, never an internal log file — so the override is visible. After the `Skill()` call returns, the env var falls out of scope at end of Step 4 (or `unset UBERDEV_FANOUT_POST_IMPL_REVIEW` if a later Skill() invocation in the same run might depend on the default).
+   **Sequential mode** (only when explicitly requested via the `sequential` argument): if `SEQUENTIAL=1` was set in Step 1, the user-visible stderr notice has already been emitted (`notice: running post-impl-review sequentially via UBERDEV_FANOUT_POST_IMPL_REVIEW=1`) and `UBERDEV_FANOUT_POST_IMPL_REVIEW=1` has been exported. The skill's Step 2 fanout cap inherits the env var and splits the 6-agent fanout into `ceil(6/1) = 6` sequential one-child waves per its existing fanout-cap logic. No skill change is needed; only `/review-pr` parses the `sequential` flag and exports. The warning surface is the user's terminal — never `/dev/null`, never an internal log file — so the override is visible. After the `Skill()` call returns, the env var falls out of scope at end of Step 4 (or `unset UBERDEV_FANOUT_POST_IMPL_REVIEW` if a later Skill() invocation in the same run might depend on the default).
 
 5. **Apply Phase 1 Fixes — dispatch `code-fixer` subagent**
 

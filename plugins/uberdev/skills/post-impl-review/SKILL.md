@@ -559,7 +559,7 @@ Counting rules:
 
 Return a prose summary of the aggregation table above to the caller. Example:
 
-> Post-impl review for issue #11 complete (post-PR-push, /review-pr Phase 1). 6 reviewers ran in parallel. Aggregated: 0 blockers, 2 suggestions (pr-test-analyzer flagged a missing edge-case test in `foo.test.ts`; comment-analyzer flagged a stale TODO in `bar.ts`). Full table at `.uberdev/research/$RUN_ID/post-impl-review-final.md`. Continue.
+> Post-impl review for issue #11 complete (post-PR-push, /review-pr Phase 1). 6 reviewers ran in one or more cap-controlled waves, with every child in each wave dispatched before its first wait. Aggregated: 0 blockers, 2 suggestions (pr-test-analyzer flagged a missing edge-case test in `foo.test.ts`; comment-analyzer flagged a stale TODO in `bar.ts`). Full table at `.uberdev/research/$RUN_ID/post-impl-review-final.md`. Continue.
 
 Findings remain advisory, but missing reviewer evidence is not advisory: **the caller blocks green trust on BLOCKED/unparseable after the one repair retry**.
 

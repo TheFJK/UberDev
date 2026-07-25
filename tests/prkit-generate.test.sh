@@ -105,6 +105,14 @@ PY
 then ok "G6b routed reviewer contract packaged and absent from native roles"
 else no "G6b reviewer contract scope is incorrect"; fi
 
+# G6c — the generated standalone Codex runtime must execute the focused
+# six-reviewer happy path, not merely pass structural namespace scans.
+if SIX_CHILD_RUNTIME_ROOT="$T1/codex/prkit-codex" \
+   SIX_CHILD_RUNTIME_NAMESPACE=prkit SIX_CHILD_CASE=1 \
+   bash "$REPO_ROOT/tests/review-pr-codex-six-child.test.sh" >/dev/null 2>&1; then
+  ok "G6c generated standalone prkit executes six-child review path"
+else no "G6c generated standalone prkit six-child runtime failed"; fi
+
 # G7 — no uberdev token survives anywhere under codex/
 if grep -rilE 'uberdev' "$T1/codex" >/dev/null 2>&1; then no "G7 uberdev token survives under codex/"; else ok "G7 codex tree is uberdev-free"; fi
 
