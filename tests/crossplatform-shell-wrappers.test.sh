@@ -220,6 +220,41 @@ assert_eq "$esc_after" "0" "tr -d '\\033' removes all ESC bytes (platform-indepe
 echo
 echo "== run manifest: Windows reconciliation uses a non-signaling native probe =="
 
+if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" <<'PY'
+import importlib.util,pathlib,stat,sys,tempfile,types
+tool=sys.argv[1]
+source=pathlib.Path(tool).read_text(encoding='utf-8')
+assert 'owner_depth = {"mutex": 0, "lease": 1}.get(mode)' in source
+assert 'stat.S_ISFIFO(os.fstat(1).st_mode)' not in source
+spec=importlib.util.spec_from_file_location('run_manifest_owner_depth_model',tool)
+module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module
+assert spec.loader is not None; spec.loader.exec_module(module)
+module.os.getppid=lambda: 41
+records={41:(73,41,41,'child'),73:(1,73,73,'owner')}
+module._native_process_record=lambda pid: records[pid]
+module._process_identity=lambda pid: ('captured',f'{pid}|{pid}|{pid}|'+('a'*64))
+with tempfile.TemporaryDirectory() as temporary:
+ root=pathlib.Path(temporary)
+ direct=root/'direct'
+ lease=root/'lease'
+ original_fstat=module.os.fstat
+ try:
+  module.os.fstat=lambda _descriptor: types.SimpleNamespace(st_mode=stat.S_IFREG)
+  module._write_process_identity('mutex',str(direct))
+  module._write_process_identity('lease',str(lease))
+ finally:
+  module.os.fstat=original_fstat
+ assert direct.read_text(encoding='ascii').splitlines()[0]=='41'
+ assert lease.read_text(encoding='ascii').splitlines()[0]=='73'
+PY
+then
+  echo "  PASS  owner mode explicitly selects direct or one-native-parent identity"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  owner mode still depends on stdout file-type inference"
+  FAIL=$((FAIL + 1))
+fi
+
 if python3 -I -B - "$0" <<'PY'
 import pathlib,sys
 source=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')

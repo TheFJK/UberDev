@@ -990,16 +990,15 @@ def _process_identity(pid: Any) -> tuple[str, str | None]:
 
 def _write_process_identity(mode: str, destination: str) -> None:
     self_pid = os.getppid()
-    if mode == "mutex":
-        owner_pid = self_pid
-    elif mode == "lease":
-        owner_pid = (
-            _native_process_record(self_pid)[0]
-            if stat.S_ISFIFO(os.fstat(1).st_mode)
-            else self_pid
-        )
-    else:
+    # The mode is an explicit native-parent depth contract.  Do not infer the
+    # lease caller from stdout: MSYS pipes are not reliably reported as FIFOs
+    # to native Windows Python.
+    owner_depth = {"mutex": 0, "lease": 1}.get(mode)
+    if owner_depth is None:
         raise ManifestRejected("invalid_process_identity_mode")
+    owner_pid = self_pid
+    for _ in range(owner_depth):
+        owner_pid = _native_process_record(owner_pid)[0]
     status, identity = _process_identity(owner_pid)
     if status != "captured" or identity is None:
         raise ManifestRuntimeError(f"process_identity_{status}")
