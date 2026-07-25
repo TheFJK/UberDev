@@ -265,9 +265,14 @@ with tempfile.TemporaryDirectory() as temporary:
   expected=f'{pid}\n{pid}|{pid}|{pid}|'+('a'*64)+'\n'
   payload=(root/name).read_bytes()
   assert payload==expected.encode('ascii') and b'\r' not in payload
- with mock.patch('builtins.open',mock.mock_open()) as opened:
-  module.os.getppid=lambda: 41
-  module._write_process_identity('direct',str(root/'mock-open-contract'))
+ original_os_name=module.os.name
+ try:
+  module.os.name='posix'
+  with mock.patch('builtins.open',mock.mock_open()) as opened:
+   module.os.getppid=lambda: 41
+   module._write_process_identity('direct',str(root/'mock-open-contract'))
+ finally:
+  module.os.name=original_os_name
  opened.assert_called_once_with(str(root/'mock-open-contract'),'w',encoding='ascii',newline='\n')
  module.os.getppid=lambda: 51
  module._native_process_record=lambda _pid: (_ for _ in ()).throw(ProcessLookupError())
@@ -284,6 +289,106 @@ then
   PASS=$((PASS + 1))
 else
   echo "  FAIL  owner mode still depends on stdout file-type inference"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== run manifest: lease capabilities use one native-Python identity namespace =="
+
+if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" \
+    "$REPO_ROOT/plugins/uberdev/lib/live-semaphore.sh" <<'PY'
+import importlib.util,ntpath,os,pathlib,stat,sys,tempfile,types
+from unittest import mock
+tool,semaphore=sys.argv[1:]
+semaphore_source=pathlib.Path(semaphore).read_text(encoding='utf-8')
+assert '_uberdev_semaphore_path_identity "$lease"' not in semaphore_source
+assert semaphore_source.count('_uberdev_semaphore_lease_identity "$lease"')>=3
+assert 'secure-remove-lease --lease-path "$lease"' in semaphore_source
+assert '--generation "$generation" --identity "$identity"' in semaphore_source
+spec=importlib.util.spec_from_file_location('run_manifest_lease_identity_contract',tool)
+module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module
+assert spec.loader is not None; spec.loader.exec_module(module)
+generation='a'*32
+lease_name=generation+'b'*32+'.lease'
+mixed_windows_path='C:/Users/test/AppData/Local/uberdev/'+lease_name
+canonical_windows_path=ntpath.abspath(mixed_windows_path)
+fallback_uid=4242
+assert getattr(types.SimpleNamespace(),'geteuid',lambda:fallback_uid)()==fallback_uid
+fixture_uid=getattr(os,'geteuid',lambda:fallback_uid)()
+fake_parent=types.SimpleNamespace(st_mode=stat.S_IFDIR|0o700,st_uid=fixture_uid)
+with mock.patch.object(module.os,'path',ntpath), \
+     mock.patch.object(module,'_reject_symlinked_ancestors'), \
+     mock.patch.object(module.os,'lstat',return_value=fake_parent):
+ canonical,name=module._validated_lease_capability_path(mixed_windows_path,generation)
+ assert canonical==canonical_windows_path and name==lease_name
+ for unsafe in (
+  'C:/Users/test/../'+lease_name,
+  'C:\\Users\\test\\..\\'+lease_name,
+  'C:/Users/test/./'+lease_name,
+  'C:\\Users\\test\\.\\'+lease_name,
+ ):
+  try:
+   module._validated_lease_capability_path(unsafe,generation)
+  except module.ManifestRejected as error:
+   assert str(error)=='lease_path_traversal_rejected'
+  else:
+   raise AssertionError('lease traversal component was accepted')
+with tempfile.TemporaryDirectory() as temporary:
+ root=pathlib.Path(temporary)
+ lease=root/(generation+'b'*32+'.lease')
+ payload=f'generation={generation}\nrun_id=windows-contract\n'.encode('ascii')
+ original_os_name=module.os.name
+ try:
+  module.os.name='nt'
+  published=module.secure_write_lease(str(lease),payload)
+  observed=module.secure_lease_identity(str(lease),generation)
+  assert observed==published
+  identity=f'{published[0]}:{published[1]}'
+  try:
+   module.secure_remove_lease(str(lease),generation,f'{published[0]}:{published[1]+1}')
+  except module.ManifestRejected as error:
+   assert str(error)=='lease_identity_mismatch'
+  else:
+   raise AssertionError('mismatched lease identity did not fail closed')
+  assert lease.read_bytes()==payload
+  module.secure_remove_lease(str(lease),generation,identity)
+  assert not lease.exists()
+  victim=root/'victim.txt'; victim.write_text('keep',encoding='ascii')
+  try:
+   module.secure_remove_lease(str(victim),generation,identity)
+  except module.ManifestRejected:
+   pass
+  else:
+   raise AssertionError('unsafe lease filename was accepted')
+  assert victim.read_text(encoding='ascii')=='keep'
+  try:
+   module.secure_lease_identity(lease.name,generation)
+  except module.ManifestRejected as error:
+   assert str(error)=='lease_path_must_be_absolute'
+  else:
+   raise AssertionError('relative lease identity path was accepted')
+ finally:
+  module.os.name=original_os_name
+ args=module._build_parser().parse_args([
+  'secure-lease-identity','--lease-path',str(lease),'--generation',generation,
+ ])
+ assert vars(args)=={
+  'command':'secure-lease-identity','lease_path':str(lease),'generation':generation,
+ }
+ remove_args=module._build_parser().parse_args([
+  'secure-remove-lease','--lease-path',str(lease),'--generation',generation,
+  '--identity','1:2',
+ ])
+ assert vars(remove_args)=={
+  'command':'secure-remove-lease','lease_path':str(lease),'generation':generation,
+  'identity':'1:2',
+ }
+PY
+then
+  echo "  PASS  native Python publishes, identifies, and removes one exact lease capability"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  native Python lease identity/removal contract is incomplete"
   FAIL=$((FAIL + 1))
 fi
 
@@ -528,6 +633,22 @@ PY
       false
     fi
     lease="${lease_record%%$'\t'*}"
+    lease_capability="${lease_record#*$'\t'}"
+    lease_generation="${lease_capability##*:}"
+    lease_expected_identity="${lease_capability%:*}"
+    windows_stage=lease-identity
+    if lease_observed_identity="$(_uberdev_semaphore_lease_identity "$lease" "$lease_generation" 2>/dev/null)"; then
+      windows_stage_rc=0
+    else
+      windows_stage_rc=$?
+      windows_stage_raw='{"error":"lease_identity_probe_failed"}'
+      false
+    fi
+    if [ "$lease_observed_identity" != "$lease_expected_identity" ]; then
+      windows_stage_rc=1
+      windows_stage_raw='{"error":"lease_identity_mismatch"}'
+      false
+    fi
     _UBERDEV_AGENT_OWNER_PID="$native_pid"
     _UBERDEV_AGENT_OWNER_IDENTITY="$native_identity"
     request='{"run_id":"windows-native-owner","backend":"codex","timeout_s":30}'
@@ -623,7 +744,9 @@ PY
     claude() { return 0; }
     ! uberdev_dispatch_preflight solve >/dev/null 2>&1
     [ -z "${UBERDEV_RESOLVED_BACKEND+x}" ]
+    windows_stage=lease-remove
     uberdev_semaphore_release "$lease"
+    [ ! -e "$lease" ] && [ ! -L "$lease" ]
     cleanup_windows_child
     windows_child_controller=''
     trap - EXIT

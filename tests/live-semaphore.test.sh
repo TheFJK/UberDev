@@ -182,8 +182,8 @@ uberdev_semaphore_release "$direct_owner_lease" >/dev/null 2>&1 || true
 
 capture /bin/bash -c '
   . "$1"
-  eval "$(declare -f _uberdev_semaphore_path_identity | sed '\''1s/_uberdev_semaphore_path_identity/_real_identity/'\'')"
-  _uberdev_semaphore_path_identity() {
+  eval "$(declare -f _uberdev_semaphore_lease_identity | sed '\''1s/_uberdev_semaphore_lease_identity/_real_identity/'\'')"
+  _uberdev_semaphore_lease_identity() {
     case "$1" in *.lease) return 29 ;; *) _real_identity "$@" ;; esac
   }
   uberdev_semaphore_acquire "$2" repo codex 1 identity-failure 5 exact-identity
@@ -273,10 +273,10 @@ done
 capture /bin/bash -c '
   . "$1"
   lease="$(uberdev_semaphore_acquire "$2" repo codex 1 rollback-capability 30)" || exit
-  eval "$(declare -f _uberdev_semaphore_path_identity | sed '\''1s/_uberdev_semaphore_path_identity/_real_set_identity/'\'')"
+  eval "$(declare -f _uberdev_semaphore_lease_identity | sed '\''1s/_uberdev_semaphore_lease_identity/_real_set_identity/'\'')"
   eval "$(declare -f _uberdev_semaphore_remove_lease | sed '\''1s/_uberdev_semaphore_remove_lease/_real_set_remove/'\'')"
   identity_marker="$2/identity-failure-marker"
-  _uberdev_semaphore_path_identity() {
+  _uberdev_semaphore_lease_identity() {
     case "$1" in
       *.lease)
         if [ ! -e "$identity_marker" ]; then

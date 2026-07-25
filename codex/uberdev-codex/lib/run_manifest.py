@@ -178,6 +178,9 @@ _IDENTIFIER_PATTERN = re.compile(r"[A-Za-z0-9$][A-Za-z0-9$._:/@+\-]{0,255}")
 _PROCESS_IDENTITY_PATTERN = re.compile(
     r"([1-9][0-9]*)\|([1-9][0-9]*)\|([1-9][0-9]*)\|([0-9a-f]{64})"
 )
+_LEASE_IDENTITY_PATTERN = re.compile(
+    r"(0|[1-9][0-9]{0,19}):(0|[1-9][0-9]{0,19})"
+)
 _SENSITIVE_VALUE_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
@@ -1390,6 +1393,93 @@ def _read_bounded_descriptor(descriptor: int, limit: int = 16384) -> bytes:
     return payload
 
 
+def _validated_lease_capability_path(path: str, generation: str) -> tuple[str, str]:
+    if (
+        not isinstance(path, str)
+        or not os.path.isabs(path)
+        or any(character in path for character in ("\x00", "\n", "\r"))
+    ):
+        raise ManifestRejected("lease_path_must_be_absolute")
+    if any(component in {".", ".."} for component in re.split(r"[\\/]", path)):
+        raise ManifestRejected("lease_path_traversal_rejected")
+    absolute = os.path.abspath(path)
+    if not os.path.isabs(absolute):
+        raise ManifestRejected("lease_path_must_be_absolute")
+    name = os.path.basename(absolute)
+    if (
+        re.fullmatch(r"[0-9a-f]{64}\.lease", name) is None
+        or re.fullmatch(r"[0-9a-f]{32}", generation) is None
+        or not name.startswith(generation)
+    ):
+        raise ManifestRejected("lease_generation_mismatch")
+    parent = os.path.dirname(absolute)
+    _reject_symlinked_ancestors(parent)
+    try:
+        parent_entry = os.lstat(parent)
+    except OSError as exc:
+        raise ManifestRuntimeError("lease_parent_unavailable") from exc
+    if stat.S_ISLNK(parent_entry.st_mode) or not stat.S_ISDIR(parent_entry.st_mode):
+        raise ManifestRejected("lease_parent_not_directory")
+    if hasattr(os, "geteuid") and parent_entry.st_uid != os.geteuid():
+        raise ManifestRejected("lease_parent_not_owned_by_user")
+    return absolute, name
+
+
+def _parse_lease_identity(identity: str) -> tuple[int, int]:
+    if not isinstance(identity, str):
+        raise ManifestRejected("lease_identity_invalid")
+    matched = _LEASE_IDENTITY_PATTERN.fullmatch(identity)
+    if matched is None:
+        raise ManifestRejected("lease_identity_invalid")
+    device, inode = (int(value) for value in matched.groups())
+    if device > (1 << 64) - 1 or inode > (1 << 64) - 1:
+        raise ManifestRejected("lease_identity_invalid")
+    return device, inode
+
+
+def secure_lease_identity(path: str, generation: str) -> tuple[int, int]:
+    """Return one native-Python identity for an exact capability lease."""
+
+    absolute, name = _validated_lease_capability_path(path, generation)
+    parent_descriptor: int | None = None
+    descriptor: int | None = None
+    try:
+        if os.name == "nt":
+            if not os.path.lexists(absolute):
+                raise ManifestRuntimeError("lease_missing")
+            descriptor = _secure_open_regular(absolute, os.O_RDONLY)
+            current = os.lstat(absolute)
+        else:
+            parent_descriptor = _open_directory_fd(os.path.dirname(absolute))
+            try:
+                descriptor = os.open(
+                    name,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_descriptor,
+                )
+            except FileNotFoundError as exc:
+                raise ManifestRuntimeError("lease_missing") from exc
+            current = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(current.st_mode):
+            raise ManifestRejected("lease_not_regular")
+        if _lease_generation(_read_bounded_descriptor(descriptor)) != generation:
+            raise ManifestRejected("lease_generation_mismatch")
+        identity = (opened.st_dev, opened.st_ino)
+        if (current.st_dev, current.st_ino) != identity:
+            raise ManifestRejected("lease_replaced_during_identity")
+        return identity
+    except (ManifestRejected, ManifestRuntimeError):
+        raise
+    except OSError as exc:
+        raise ManifestRuntimeError("lease_identity_unavailable") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if parent_descriptor is not None:
+            os.close(parent_descriptor)
+
+
 def secure_write_lease(path: str, payload: bytes) -> tuple[int, int]:
     """Publish a private lease and return its ``(device, inode)`` identity.
 
@@ -1495,17 +1585,50 @@ def secure_write_lease(path: str, payload: bytes) -> tuple[int, int]:
         os.close(parent_descriptor)
 
 
-def secure_remove_lease(path: str, generation: str) -> None:
+def secure_remove_lease(path: str, generation: str, identity: str) -> None:
     """Remove only the exact generation named by a capability lease path."""
 
-    name = os.path.basename(path)
-    if (
-        re.fullmatch(r"[0-9a-f]{64}\.lease", name) is None
-        or re.fullmatch(r"[0-9a-f]{32}", generation) is None
-        or not name.startswith(generation)
-    ):
-        raise ManifestRejected("lease_generation_mismatch")
-    parent_descriptor = _open_directory_fd(os.path.dirname(os.path.abspath(path)))
+    absolute, name = _validated_lease_capability_path(path, generation)
+    expected_identity = _parse_lease_identity(identity)
+    if os.name == "nt":
+        if not os.path.lexists(absolute):
+            return
+        descriptor: int | None = None
+        try:
+            descriptor = _secure_open_regular(absolute, os.O_RDONLY)
+            target = os.fstat(descriptor)
+            if not stat.S_ISREG(target.st_mode):
+                raise ManifestRejected("lease_not_regular")
+            if (target.st_dev, target.st_ino) != expected_identity:
+                raise ManifestRejected("lease_identity_mismatch")
+            if _lease_generation(_read_bounded_descriptor(descriptor)) != generation:
+                raise ManifestRejected("lease_generation_mismatch")
+            current = os.lstat(absolute)
+            if (
+                not stat.S_ISREG(current.st_mode)
+                or (current.st_dev, current.st_ino) != expected_identity
+            ):
+                raise ManifestRejected("lease_replaced_before_remove")
+            os.close(descriptor)
+            descriptor = None
+            current = os.lstat(absolute)
+            if (
+                not stat.S_ISREG(current.st_mode)
+                or (current.st_dev, current.st_ino) != expected_identity
+            ):
+                raise ManifestRejected("lease_replaced_before_remove")
+            os.unlink(absolute)
+            return
+        except FileNotFoundError:
+            return
+        except (ManifestRejected, ManifestRuntimeError):
+            raise
+        except OSError as exc:
+            raise ManifestRuntimeError("lease_remove_failed") from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+    parent_descriptor = _open_directory_fd(os.path.dirname(absolute))
     descriptor: int | None = None
     try:
         try:
@@ -1519,10 +1642,12 @@ def secure_remove_lease(path: str, generation: str) -> None:
         target = os.fstat(descriptor)
         if not stat.S_ISREG(target.st_mode):
             raise ManifestRejected("lease_not_regular")
+        if (target.st_dev, target.st_ino) != expected_identity:
+            raise ManifestRejected("lease_identity_mismatch")
         if _lease_generation(_read_bounded_descriptor(descriptor)) != generation:
             raise ManifestRejected("lease_generation_mismatch")
         current = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
-        if (current.st_dev, current.st_ino) != (target.st_dev, target.st_ino):
+        if (current.st_dev, current.st_ino) != expected_identity:
             raise ManifestRejected("lease_replaced_before_remove")
         os.unlink(name, dir_fd=parent_descriptor)
     finally:
@@ -1829,11 +1954,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     lease_write_parser.add_argument("--lease-path", required=True)
 
+    lease_identity_parser = subparsers.add_parser(
+        "secure-lease-identity", help=argparse.SUPPRESS
+    )
+    lease_identity_parser.add_argument("--lease-path", required=True)
+    lease_identity_parser.add_argument("--generation", required=True)
+
     lease_remove_parser = subparsers.add_parser(
         "secure-remove-lease", help=argparse.SUPPRESS
     )
     lease_remove_parser.add_argument("--lease-path", required=True)
     lease_remove_parser.add_argument("--generation", required=True)
+    lease_remove_parser.add_argument("--identity", required=True)
 
     verify_parser = subparsers.add_parser("verify", help="validate JSONL and lifecycle transitions")
     verify_parser.add_argument("--manifest", "--path", dest="manifest", required=True)
@@ -1876,8 +2008,12 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"{device}:{inode}", end="")
             return 0
+        if args.command == "secure-lease-identity":
+            device, inode = secure_lease_identity(args.lease_path, args.generation)
+            print(f"{device}:{inode}", end="")
+            return 0
         if args.command == "secure-remove-lease":
-            secure_remove_lease(args.lease_path, args.generation)
+            secure_remove_lease(args.lease_path, args.generation, args.identity)
             return 0
         result, return_code = verify_manifest(args.manifest, strict=args.strict)
         _emit(result)

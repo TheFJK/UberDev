@@ -1677,9 +1677,9 @@ REPLACEMENT_RUN="$TMP/post-launch-replacement-capability"
 mkdir -p "$REPLACEMENT_RUN"
 printf 'replacement capability prompt\n' > "$REPLACEMENT_RUN/prompt.txt"
 REPLACEMENT_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-postlaunch-replacement","repository_id":"adapter-postlaunch-replacement-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":97,"issue_num":97,"capacity":1,"timeout_s":20},separators=(",",":")))' "$REPLACEMENT_RUN")"
-eval "$(declare -f _uberdev_semaphore_path_identity | sed '1s/_uberdev_semaphore_path_identity/_real_replacement_path_identity/')"
+eval "$(declare -f _uberdev_semaphore_lease_identity | sed '1s/_uberdev_semaphore_lease_identity/_real_replacement_lease_identity/')"
 eval "$(declare -f _uberdev_semaphore_remove_lease | sed '1s/_uberdev_semaphore_remove_lease/_real_replacement_remove_lease/')"
-_uberdev_semaphore_path_identity() {
+_uberdev_semaphore_lease_identity() {
   case "$1" in
     *.lease)
       if [ -e "$REPLACEMENT_RUN/provider-launched" ] && [ ! -e "$REPLACEMENT_RUN/identity-failed" ]; then
@@ -1688,7 +1688,7 @@ _uberdev_semaphore_path_identity() {
       fi
       ;;
   esac
-  _real_replacement_path_identity "$@"
+  _real_replacement_lease_identity "$@"
 }
 _uberdev_semaphore_remove_lease() {
   if [ -e "$REPLACEMENT_RUN/identity-failed" ] && [ ! -e "$REPLACEMENT_RUN/rollback-failed" ]; then
@@ -1722,7 +1722,7 @@ REPLACEMENT_REACQUIRED="$(uberdev_semaphore_acquire \
   "$REPLACEMENT_RUN/.agent-state-$(id -u)" adapter-postlaunch-replacement-repository \
   codex 1 adapter-postlaunch-replacement-reacquired 20)"
 uberdev_semaphore_release "$REPLACEMENT_REACQUIRED"
-eval "$(declare -f _real_replacement_path_identity | sed '1s/_real_replacement_path_identity/_uberdev_semaphore_path_identity/')"
+eval "$(declare -f _real_replacement_lease_identity | sed '1s/_real_replacement_lease_identity/_uberdev_semaphore_lease_identity/')"
 eval "$(declare -f _real_replacement_remove_lease | sed '1s/_real_replacement_remove_lease/_uberdev_semaphore_remove_lease/')"
 
 # A detached watcher finalization failure is durable and visible; it may not be

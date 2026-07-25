@@ -280,6 +280,18 @@ _uberdev_semaphore_path_identity() {
   esac
 }
 
+_uberdev_semaphore_lease_identity() {
+  local lease="$1" generation="$2" manifest_tool value
+  manifest_tool="$(_uberdev_semaphore_manifest_tool)" || return 2
+  value="$(python3 -I -B "$manifest_tool" secure-lease-identity \
+    --lease-path "$lease" --generation "$generation")" || return 2
+  case "$value" in
+    ''|*[!0-9:]*|:*|*:|*:*:*) return 2 ;;
+    *:*) printf '%s\n' "$value" ;;
+    *) return 2 ;;
+  esac
+}
+
 _uberdev_semaphore_quarantine_mutex() {
   local scope="$1" expected_identity="$2" mutex token_file token quarantine actual entry
   mutex="$scope/.mutex"
@@ -832,6 +844,7 @@ _uberdev_semaphore_publish_lease() {
   start_epoch="$8"
   timeout_s="$9"
   status_path="${10}"
+  _UBERDEV_SEMAPHORE_PUBLISHED_IDENTITY=''
   manifest_tool="$(_uberdev_semaphore_manifest_tool)" || return 2
   published_identity="$(printf 'version=1\ngeneration=%s\nrun_id=%s\nowner_pid=%s\nowner_identity=%s\nbackend_handle=%s\nbackend_identity=%s\nstart_epoch=%s\ntimeout_s=%s\nstatus_path=%s\n' \
     "$generation" "$run_id" "$owner_pid" "$owner_identity" "$backend_handle" "$backend_identity" \
@@ -842,14 +855,21 @@ _uberdev_semaphore_publish_lease() {
 }
 
 _uberdev_semaphore_remove_lease() {
-  local lease="$1" generation="${2-}" manifest_tool
+  local lease="$1" generation="${2-}" identity="${3-}" manifest_tool
   if [ -z "$generation" ]; then
     _uberdev_semaphore_read_lease "$lease" || return 2
     generation="$_UBERDEV_LEASE_GENERATION"
   fi
+  if [ -z "$identity" ]; then
+    identity="$(_uberdev_semaphore_lease_identity "$lease" "$generation")" || {
+      [ ! -e "$lease" ] && [ ! -L "$lease" ] && return 0
+      return 2
+    }
+  fi
+  case "$identity" in ''|*[!0-9:]*|:*|*:|*:*:*) return 2 ;; esac
   manifest_tool="$(_uberdev_semaphore_manifest_tool)" || return 2
-  python3 "$manifest_tool" secure-remove-lease --lease-path "$lease" \
-    --generation "$generation" >/dev/null
+  python3 -I -B "$manifest_tool" secure-remove-lease --lease-path "$lease" \
+    --generation "$generation" --identity "$identity" >/dev/null
 }
 
 uberdev_semaphore_acquire() {
@@ -966,12 +986,13 @@ uberdev_semaphore_acquire() {
         cleanup_rc=0
         exact_identity=''
         if [ -e "$lease" ] || [ -L "$lease" ]; then
-          path_identity="$(_uberdev_semaphore_path_identity "$lease" 2>/dev/null || true)"
+          path_identity="$(_uberdev_semaphore_lease_identity "$lease" "$generation" 2>/dev/null || true)"
           case "$path_identity" in
             ''|*[!0-9:]*|:*|*:|*:*:*) ;;
             *) exact_identity="$path_identity:$generation" ;;
           esac
-          _uberdev_semaphore_remove_lease "$lease" "$generation" || cleanup_rc=2
+          _uberdev_semaphore_remove_lease "$lease" "$generation" \
+            "${_UBERDEV_SEMAPHORE_PUBLISHED_IDENTITY:-}" || cleanup_rc=2
         fi
         _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || cleanup_rc=2
         if [ "$cleanup_rc" -eq 0 ]; then
@@ -990,10 +1011,11 @@ uberdev_semaphore_acquire() {
       exact_identity=''
       if [ "$identity_mode" = exact-identity ]; then
         exact_identity="${_UBERDEV_SEMAPHORE_PUBLISHED_IDENTITY:-}:$generation"
-        path_identity="$(_uberdev_semaphore_path_identity "$lease" 2>/dev/null || true)"
+        path_identity="$(_uberdev_semaphore_lease_identity "$lease" "$generation" 2>/dev/null || true)"
         if [ "$path_identity:$generation" != "$exact_identity" ]; then
           cleanup_rc=0
-          _uberdev_semaphore_remove_lease "$lease" "$generation" || cleanup_rc=2
+          _uberdev_semaphore_remove_lease "$lease" "$generation" \
+            "${_UBERDEV_SEMAPHORE_PUBLISHED_IDENTITY:-}" || cleanup_rc=2
           _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || cleanup_rc=2
           if [ "$cleanup_rc" -eq 0 ]; then
             _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_identity_failed
@@ -1009,7 +1031,8 @@ uberdev_semaphore_acquire() {
       fi
       if ! _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1; then
         cleanup_rc=0
-        _uberdev_semaphore_remove_lease "$lease" "$generation" >/dev/null 2>&1 || cleanup_rc=2
+        _uberdev_semaphore_remove_lease "$lease" "$generation" \
+          "${_UBERDEV_SEMAPHORE_PUBLISHED_IDENTITY:-}" >/dev/null 2>&1 || cleanup_rc=2
         if [ "$cleanup_rc" -eq 0 ]; then
           _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_mutex_release_failed
         else
@@ -1105,7 +1128,7 @@ uberdev_semaphore_set_handle() {
         && [ "$_UBERDEV_LEASE_BACKEND_HANDLE" = "$backend_handle" ] \
         && [ "$_UBERDEV_LEASE_BACKEND_IDENTITY" = "$backend_identity" ] \
         && [ "$_UBERDEV_LEASE_STATUS_PATH" = "$status_path" ]; then
-      if path_identity="$(_uberdev_semaphore_path_identity "$lease")"; then
+      if path_identity="$(_uberdev_semaphore_lease_identity "$lease" "$expected_generation")"; then
         [ "$path_identity:$expected_generation" = "$exact_identity" ] || publish_rc=2
       else
         publish_rc=2
@@ -1115,7 +1138,8 @@ uberdev_semaphore_set_handle() {
     fi
     if [ "$publish_rc" -ne 0 ] || [ -z "$exact_identity" ]; then
       rollback_rc=0
-      _uberdev_semaphore_remove_lease "$lease" "$expected_generation" >/dev/null 2>&1 || rollback_rc=2
+      _uberdev_semaphore_remove_lease "$lease" "$expected_generation" \
+        "${_UBERDEV_SEMAPHORE_PUBLISHED_IDENTITY:-}" >/dev/null 2>&1 || rollback_rc=2
       publish_rc=2
       if [ "$rollback_rc" -eq 0 ]; then
         exact_identity=''
@@ -1130,7 +1154,8 @@ uberdev_semaphore_set_handle() {
   _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || {
     if [ "$publish_rc" -eq 0 ]; then
       rollback_rc=0
-      _uberdev_semaphore_remove_lease "$lease" "$expected_generation" >/dev/null 2>&1 || rollback_rc=2
+      _uberdev_semaphore_remove_lease "$lease" "$expected_generation" \
+        "${_UBERDEV_SEMAPHORE_PUBLISHED_IDENTITY:-}" >/dev/null 2>&1 || rollback_rc=2
       publish_rc=2
       if [ "$rollback_rc" -eq 0 ]; then
         exact_identity=''
