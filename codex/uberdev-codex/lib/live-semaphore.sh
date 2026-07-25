@@ -137,7 +137,7 @@ _uberdev_semaphore_write_process_identity() {
 }
 
 _uberdev_semaphore_capture_lease_owner() {
-  local scope="$1" probe old_umask owner identity
+  local scope="$1" owner_mode="$2" probe old_umask owner identity
   if [ -n "${UBERDEV_SEMAPHORE_OWNER_PID:-}" ]; then
     owner="$UBERDEV_SEMAPHORE_OWNER_PID"
     if ! _uberdev_semaphore_is_positive_integer "$owner"; then
@@ -159,7 +159,7 @@ _uberdev_semaphore_capture_lease_owner() {
     return 2
   }
   umask "$old_umask"
-  if ! _uberdev_semaphore_write_process_identity lease "$probe"; then
+  if ! _uberdev_semaphore_write_process_identity "$owner_mode" "$probe"; then
     rm -f "$probe" 2>/dev/null || true
     return 2
   fi
@@ -411,7 +411,7 @@ _uberdev_semaphore_mutex_acquire() {
       _uberdev_semaphore_error 'cannot create mutex owner candidate'
       return 2
     }
-    if ! _uberdev_semaphore_write_process_identity mutex "$candidate"; then
+    if ! _uberdev_semaphore_write_process_identity direct "$candidate"; then
       umask "$old_umask"
       rm -f "$candidate" 2>/dev/null || true
       _uberdev_semaphore_error 'cannot record mutex owner'
@@ -854,7 +854,7 @@ _uberdev_semaphore_remove_lease() {
 
 uberdev_semaphore_acquire() {
   local state_root repo_id backend cap run_id timeout_s identity_mode output_variable scope lease active wait_tries wait_max mutex_rc duplicate_rc owner_pid
-  local generation path_identity exact_identity cleanup_rc record owner_identity
+  local generation path_identity exact_identity cleanup_rc record owner_identity owner_mode
   _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=''
   state_root="${1-}"
   repo_id="${2-}"
@@ -867,6 +867,7 @@ uberdev_semaphore_acquire() {
   case "$identity_mode" in ''|exact-identity) ;; *) _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_invalid_input; return 2 ;; esac
   case "$output_variable" in ''|[A-Za-z_]*) ;; *) _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_invalid_input; return 2 ;; esac
   case "$output_variable" in *[!A-Za-z0-9_]*) _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_invalid_input; return 2 ;; esac
+  if [ -n "$output_variable" ]; then owner_mode=direct; else owner_mode=parent; fi
 
   _uberdev_semaphore_is_positive_integer "$cap" || {
     _uberdev_semaphore_error 'CAP must be a positive integer'
@@ -947,7 +948,7 @@ uberdev_semaphore_acquire() {
         fi
         return 2
       }
-      _uberdev_semaphore_capture_lease_owner "$scope" || {
+      _uberdev_semaphore_capture_lease_owner "$scope" "$owner_mode" || {
         _uberdev_semaphore_error 'cannot resolve lease owner process'
         if ! _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1; then
           _UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=lease_acquire_mutex_release_failed

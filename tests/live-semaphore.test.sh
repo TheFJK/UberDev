@@ -149,13 +149,36 @@ fi
 ATOMIC_STATE="$TMP/atomic-identity"
 capture uberdev_semaphore_acquire "$ATOMIC_STATE" repo codex 1 atomic-run 5 exact-identity
 IFS=$'\t' read -r atomic_lease atomic_identity <<<"$CAPTURE_OUT"
+atomic_owner="$(sed -n 's/^owner_pid=//p' "$atomic_lease" 2>/dev/null || true)"
 if [ "$CAPTURE_RC" -eq 0 ] && [ -f "$atomic_lease" ] \
-    && [[ "$atomic_identity" =~ ^[0-9]+:[0-9]+:[0-9a-f]{32}$ ]]; then
-  pass "acquisition returns the lease path and exact generation identity atomically"
+    && [[ "$atomic_identity" =~ ^[0-9]+:[0-9]+:[0-9a-f]{32}$ ]] \
+    && [ "$atomic_owner" = "$$" ]; then
+  pass "command-substitution acquisition binds the live outer shell owner"
 else
-  fail "acquisition returns the lease path and exact generation identity atomically" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+  fail "command-substitution acquisition binds the live outer shell owner" \
+    "shell=$$ owner=$atomic_owner rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 uberdev_semaphore_release "$atomic_lease" >/dev/null 2>&1 || true
+
+DIRECT_OWNER_STATE="$TMP/direct-owner"
+direct_owner_record=''
+if uberdev_semaphore_acquire "$DIRECT_OWNER_STATE" repo codex 1 direct-owner 5 \
+    exact-identity direct_owner_record; then
+  direct_owner_rc=0
+else
+  direct_owner_rc=$?
+fi
+IFS=$'\t' read -r direct_owner_lease direct_owner_identity <<<"$direct_owner_record"
+direct_recorded_owner="$(sed -n 's/^owner_pid=//p' "$direct_owner_lease" 2>/dev/null || true)"
+if [ "$direct_owner_rc" -eq 0 ] && [ -f "$direct_owner_lease" ] \
+    && [[ "$direct_owner_identity" =~ ^[0-9]+:[0-9]+:[0-9a-f]{32}$ ]] \
+    && [ "$direct_recorded_owner" = "$$" ]; then
+  pass "output-variable acquisition binds the direct acquiring shell owner"
+else
+  fail "output-variable acquisition binds the direct acquiring shell owner" \
+    "shell=$$ owner=$direct_recorded_owner rc=$direct_owner_rc record=$direct_owner_record"
+fi
+uberdev_semaphore_release "$direct_owner_lease" >/dev/null 2>&1 || true
 
 capture /bin/bash -c '
   . "$1"

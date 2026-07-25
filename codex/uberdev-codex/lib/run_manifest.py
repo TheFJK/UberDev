@@ -990,10 +990,9 @@ def _process_identity(pid: Any) -> tuple[str, str | None]:
 
 def _write_process_identity(mode: str, destination: str) -> None:
     self_pid = os.getppid()
-    # The mode is an explicit native-parent depth contract.  Do not infer the
-    # lease caller from stdout: MSYS pipes are not reliably reported as FIFOs
-    # to native Windows Python.
-    owner_depth = {"mutex": 0, "lease": 1}.get(mode)
+    # The caller explicitly selects native-parent depth.  Do not infer it from
+    # stdout: MSYS pipes are not reliably reported as FIFOs to native Python.
+    owner_depth = {"direct": 0, "parent": 1}.get(mode)
     if owner_depth is None:
         raise ManifestRejected("invalid_process_identity_mode")
     owner_pid = self_pid
@@ -1815,7 +1814,7 @@ def _build_parser() -> argparse.ArgumentParser:
     identity_parser.add_argument("--pid", required=True)
 
     owner_parser = subparsers.add_parser("write-process-identity", help=argparse.SUPPRESS)
-    owner_parser.add_argument("--mode", choices=("mutex", "lease"), required=True)
+    owner_parser.add_argument("--mode", choices=("direct", "parent"), required=True)
     owner_parser.add_argument("--destination", required=True)
 
     lease_write_parser = subparsers.add_parser(

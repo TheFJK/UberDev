@@ -220,12 +220,20 @@ assert_eq "$esc_after" "0" "tr -d '\\033' removes all ESC bytes (platform-indepe
 echo
 echo "== run manifest: Windows reconciliation uses a non-signaling native probe =="
 
-if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" <<'PY'
+if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" \
+    "$REPO_ROOT/plugins/uberdev/lib/live-semaphore.sh" \
+    "$REPO_ROOT/plugins/uberdev/lib/agent-dispatch.sh" <<'PY'
 import importlib.util,pathlib,stat,sys,tempfile,types
-tool=sys.argv[1]
+tool,semaphore,agent=sys.argv[1:]
 source=pathlib.Path(tool).read_text(encoding='utf-8')
-assert 'owner_depth = {"mutex": 0, "lease": 1}.get(mode)' in source
+semaphore_source=pathlib.Path(semaphore).read_text(encoding='utf-8')
+agent_source=pathlib.Path(agent).read_text(encoding='utf-8')
+assert 'owner_depth = {"direct": 0, "parent": 1}.get(mode)' in source
 assert 'stat.S_ISFIFO(os.fstat(1).st_mode)' not in source
+assert '_uberdev_semaphore_write_process_identity direct "$candidate"' in semaphore_source
+assert '_uberdev_semaphore_write_process_identity "$owner_mode" "$probe"' in semaphore_source
+assert 'if [ -n "$output_variable" ]; then owner_mode=direct; else owner_mode=parent; fi' in semaphore_source
+assert '_uberdev_semaphore_write_process_identity parent "$probe"' in agent_source
 spec=importlib.util.spec_from_file_location('run_manifest_owner_depth_model',tool)
 module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module
 assert spec.loader is not None; spec.loader.exec_module(module)
@@ -240,8 +248,8 @@ with tempfile.TemporaryDirectory() as temporary:
  original_fstat=module.os.fstat
  try:
   module.os.fstat=lambda _descriptor: types.SimpleNamespace(st_mode=stat.S_IFREG)
-  module._write_process_identity('mutex',str(direct))
-  module._write_process_identity('lease',str(lease))
+  module._write_process_identity('direct',str(direct))
+  module._write_process_identity('parent',str(lease))
  finally:
   module.os.fstat=original_fstat
  assert direct.read_text(encoding='ascii').splitlines()[0]=='41'

@@ -827,7 +827,7 @@ _uberdev_agent_capture_owner_process_record() {
   umask 077
   probe="$(mktemp "$directory/.owner-process.XXXXXX")" || { umask "$old_umask"; return 2; }
   umask "$old_umask"
-  if ! _uberdev_semaphore_write_process_identity lease "$probe"; then
+  if ! _uberdev_semaphore_write_process_identity parent "$probe"; then
     rm -f "$probe" 2>/dev/null || true
     return 2
   fi
