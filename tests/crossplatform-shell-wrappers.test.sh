@@ -296,15 +296,20 @@ echo
 echo "== run manifest: lease capabilities use one native-Python identity namespace =="
 
 if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" \
-    "$REPO_ROOT/plugins/uberdev/lib/live-semaphore.sh" <<'PY'
+    "$REPO_ROOT/plugins/uberdev/lib/live-semaphore.sh" \
+    "$REPO_ROOT/plugins/uberdev/lib/agent-dispatch.sh" <<'PY'
 import importlib.util,ntpath,os,pathlib,stat,sys,tempfile,types
 from unittest import mock
-tool,semaphore=sys.argv[1:]
+tool,semaphore,agent=sys.argv[1:]
 semaphore_source=pathlib.Path(semaphore).read_text(encoding='utf-8')
+agent_source=pathlib.Path(agent).read_text(encoding='utf-8')
 assert '_uberdev_semaphore_path_identity "$lease"' not in semaphore_source
 assert semaphore_source.count('_uberdev_semaphore_lease_identity "$lease"')>=3
 assert 'secure-remove-lease --lease-path "$lease"' in semaphore_source
 assert '--generation "$generation" --identity "$identity"' in semaphore_source
+release=agent_source.split('_uberdev_agent_release_exact_lease() {',1)[1].split('\n}',1)[0]
+assert '_uberdev_semaphore_remove_lease "$lease" "$generation" "$native_identity"' in release
+assert 'os.O_DIRECTORY' not in release and 'dir_fd=' not in release and 'rm -f' not in release
 spec=importlib.util.spec_from_file_location('run_manifest_lease_identity_contract',tool)
 module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module
 assert spec.loader is not None; spec.loader.exec_module(module)
@@ -768,8 +773,37 @@ PY
     claude() { return 0; }
     ! uberdev_dispatch_preflight solve >/dev/null 2>&1
     [ -z "${UBERDEV_RESOLVED_BACKEND+x}" ]
-    windows_stage=lease-remove
-    uberdev_semaphore_release "$lease"
+    windows_stage=lease-release-wrong-identity
+    release_identity="$(_uberdev_agent_lease_identity "$lease")"
+    release_native_identity="${release_identity%:*}"
+    release_device="${release_native_identity%%:*}"
+    release_inode="${release_native_identity#*:}"
+    if [ "$release_inode" = 0 ]; then wrong_release_inode=1; else wrong_release_inode=0; fi
+    ! _uberdev_agent_release_exact_lease "$lease" \
+      "$release_device:$wrong_release_inode:$lease_generation" >/dev/null 2>&1
+    [ -f "$lease" ] && [ ! -L "$lease" ]
+    windows_stage=lease-release-wrong-generation
+    wrong_release_generation=00000000000000000000000000000000
+    [ "$wrong_release_generation" != "$lease_generation" ] \
+      || wrong_release_generation=11111111111111111111111111111111
+    ! _uberdev_agent_release_exact_lease "$lease" \
+      "$release_native_identity:$wrong_release_generation" >/dev/null 2>&1
+    [ -f "$lease" ] && [ ! -L "$lease" ]
+    windows_stage=lease-release-replacement
+    replacement_lease="$(dirname "$lease")/${lease_generation}eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.lease"
+    [ "$replacement_lease" != "$lease" ] \
+      || replacement_lease="$(dirname "$lease")/${lease_generation}ffffffffffffffffffffffffffffffff.lease"
+    _uberdev_semaphore_publish_lease "$(dirname "$lease")" "$replacement_lease" \
+      windows-native-replacement "$native_pid" "$native_identity" '' '' \
+      "$(date +%s)" 30 "$WINDOWS_BRIDGE_ROOT/status.json"
+    python3 -I -B -c 'import os,sys;os.replace(sys.argv[1],sys.argv[2])' \
+      "$replacement_lease" "$lease"
+    replacement_identity="$(_uberdev_agent_lease_identity "$lease")"
+    [ "$replacement_identity" != "$release_identity" ]
+    ! _uberdev_agent_release_exact_lease "$lease" "$release_identity" >/dev/null 2>&1
+    [ -f "$lease" ] && [ ! -L "$lease" ]
+    windows_stage=lease-release-exact
+    _uberdev_agent_release_exact_lease "$lease" "$replacement_identity"
     [ ! -e "$lease" ] && [ ! -L "$lease" ]
     cleanup_windows_child
     windows_child_controller=''

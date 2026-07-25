@@ -1027,51 +1027,17 @@ _uberdev_agent_lease_identity() {
 }
 
 _uberdev_agent_release_exact_lease() {
-  local lease="$1" identity="$2" scope rc
+  local lease="$1" identity="$2" scope rc generation native_identity
   _uberdev_semaphore_validate_lease_path "$lease" || return 2
+  generation="${identity##*:}"
+  native_identity="${identity%:*}"
+  [ "$native_identity" != "$identity" ] || return 2
+  case "$generation" in ''|*[!0-9a-f]*) return 2 ;; esac
+  [ "${#generation}" -eq 32 ] || return 2
+  case "$native_identity" in ''|*[!0-9:]*|:*|*:|*:*:*) return 2 ;; esac
   scope="$(dirname "$lease")"
   _uberdev_semaphore_mutex_acquire "$scope" || return $?
-  python3 -I -c '
-import os, stat, sys
-path, identity = sys.argv[1:]
-try:
-    expected_device, expected_inode, expected_generation = identity.split(":", 2)
-    expected = (int(expected_device), int(expected_inode))
-except (TypeError, ValueError):
-    raise SystemExit(2)
-parent, name = os.path.dirname(path), os.path.basename(path)
-parent_descriptor = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-descriptor = None
-try:
-    try:
-        descriptor = os.open(
-            name,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-            dir_fd=parent_descriptor,
-        )
-    except FileNotFoundError:
-        raise SystemExit(0)
-    opened = os.fstat(descriptor)
-    if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != expected:
-        raise SystemExit(3)
-    payload = os.read(descriptor, 65537)
-    if len(payload) > 65536:
-        raise SystemExit(2)
-    try:
-        rows = dict(line.split("=", 1) for line in payload.decode("utf-8").splitlines())
-    except (UnicodeError, ValueError):
-        raise SystemExit(2)
-    if rows.get("generation") != expected_generation:
-        raise SystemExit(3)
-    current = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
-    if (current.st_dev, current.st_ino) != expected:
-        raise SystemExit(3)
-    os.unlink(name, dir_fd=parent_descriptor)
-finally:
-    if descriptor is not None:
-        os.close(descriptor)
-    os.close(parent_descriptor)
-' "$lease" "$identity"
+  PYTHONPATH= PYTHONHOME= _uberdev_semaphore_remove_lease "$lease" "$generation" "$native_identity"
   rc=$?
   _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || {
     [ "$rc" -ne 0 ] || rc=2

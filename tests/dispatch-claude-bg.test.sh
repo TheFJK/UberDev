@@ -271,15 +271,22 @@ case "$1 $2" in
   *) exit 3 ;;
 esac
 SH
-chmod +x "$ULTRA_TMP/bin/gh"
-if PATH="$ULTRA_TMP/bin:$PATH" ULTRA_GH_LOG="$ULTRA_TMP/gh.log" TMPDIR="$ULTRA_TMP" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
-  bash "$SOLVE_PIPELINE" --auto-mode=0 -- 91 --backend=background --effort=ultra >"$ULTRA_TMP/out" 2>&1; then
+cat >"$ULTRA_TMP/bin/claude" <<'SH'
+#!/usr/bin/env bash
+echo "$*" >>"$ULTRA_CLAUDE_LOG"
+exit 99
+SH
+chmod +x "$ULTRA_TMP/bin/gh" "$ULTRA_TMP/bin/claude"
+if PATH="$ULTRA_TMP/bin:$PATH" ULTRA_GH_LOG="$ULTRA_TMP/gh.log" ULTRA_CLAUDE_LOG="$ULTRA_TMP/claude.log" \
+  TMPDIR="$ULTRA_TMP" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  bash "$SOLVE_PIPELINE" --auto-mode=0 -- 91 --backend=claude-bg --effort=ultra >"$ULTRA_TMP/out" 2>&1; then
   ULTRA_RC=0
 else
   ULTRA_RC=$?
 fi
-if [ "$ULTRA_RC" -ne 0 ] && grep -q 'ultra is Codex-only' "$ULTRA_TMP/out" && ! grep -q '^label create' "$ULTRA_TMP/gh.log"; then
-  echo "  PASS  Claude Ultra fails behaviorally before claim mutation"
+if [ "$ULTRA_RC" -ne 0 ] && grep -q 'ultra is Codex-only' "$ULTRA_TMP/out" \
+    && ! grep -q '^label create' "$ULTRA_TMP/gh.log" && [ ! -e "$ULTRA_TMP/claude.log" ]; then
+  echo "  PASS  Claude Ultra fails behaviorally before claim or dispatch mutation"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  Claude Ultra must fail before claims (rc=$ULTRA_RC output=$(cat "$ULTRA_TMP/out"))"
