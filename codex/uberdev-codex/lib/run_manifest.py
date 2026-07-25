@@ -996,12 +996,17 @@ def _write_process_identity(mode: str, destination: str) -> None:
     if owner_depth is None:
         raise ManifestRejected("invalid_process_identity_mode")
     owner_pid = self_pid
-    for _ in range(owner_depth):
-        owner_pid = _native_process_record(owner_pid)[0]
+    try:
+        for _ in range(owner_depth):
+            owner_pid = _native_process_record(owner_pid)[0]
+    except ProcessLookupError as exc:
+        raise ManifestRuntimeError("process_identity_parent_absent") from exc
+    except (AttributeError, OSError, ValueError) as exc:
+        raise ManifestRuntimeError("process_identity_parent_unavailable") from exc
     status, identity = _process_identity(owner_pid)
     if status != "captured" or identity is None:
         raise ManifestRuntimeError(f"process_identity_{status}")
-    with open(destination, "w", encoding="ascii") as stream:
+    with open(destination, "w", encoding="ascii", newline="\n") as stream:
         stream.write(f"{owner_pid}\n{identity}\n")
 
 

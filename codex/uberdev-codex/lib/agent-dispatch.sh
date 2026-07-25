@@ -821,21 +821,94 @@ _uberdev_agent_process_identity() {
 # substitution subshell, which maps Git Bash's MSYS PID to the native parent
 # PID consumed by Win32 OpenProcess.
 _uberdev_agent_capture_owner_process_record() {
-  local directory="$1" probe owner identity old_umask
+  local directory="$1" probe writer_output_file owner identity old_umask writer_output writer_error writer_rc
   [ -d "$directory" ] || return 2
   old_umask="$(umask)"
   umask 077
   probe="$(mktemp "$directory/.owner-process.XXXXXX")" || { umask "$old_umask"; return 2; }
-  umask "$old_umask"
-  if ! _uberdev_semaphore_write_process_identity parent "$probe"; then
+  writer_output_file="$(mktemp "$directory/.owner-process-output.XXXXXX")" || {
+    umask "$old_umask"
     rm -f "$probe" 2>/dev/null || true
+    return 2
+  }
+  umask "$old_umask"
+  if _uberdev_semaphore_write_process_identity parent "$probe" \
+      >"$writer_output_file" 2>/dev/null; then
+    writer_rc=0
+  else
+    writer_rc=$?
+  fi
+  if writer_output="$(python3 -I -B - "$writer_output_file" <<'PY'
+import os,stat,sys
+path=sys.argv[1]
+entry=os.lstat(path)
+if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1 or entry.st_size>4096: raise SystemExit(2)
+with open(path,encoding='utf-8') as stream: print(stream.read(),end='')
+PY
+)"; then
+    :
+  else
+    rm -f "$writer_output_file" "$probe" 2>/dev/null || true
+    printf '%s\n' '{"error":"owner_process_identity_writer_protocol_failed","status":"error"}'
+    return 2
+  fi
+  if ! rm -f "$writer_output_file" 2>/dev/null; then
+    rm -f "$probe" 2>/dev/null || true
+    printf '%s\n' '{"error":"owner_process_record_cleanup_failed","status":"error"}'
+    return 2
+  fi
+  if [ "$writer_rc" -ne 0 ]; then
+    if ! rm -f "$probe" 2>/dev/null; then
+      printf '%s\n' '{"error":"owner_process_record_cleanup_failed","status":"error"}'
+      return 2
+    fi
+    if writer_error="$(python3 -I -B - "$writer_output" <<'PY'
+import json,sys
+allowed={
+ 'invalid_process_identity_mode','process_identity_absent',
+ 'process_identity_parent_absent','process_identity_parent_unavailable',
+ 'process_identity_unavailable',
+}
+try:
+ raw=sys.argv[1]
+ if len(raw)>4096: raise ValueError()
+ value=json.loads(raw)
+ if set(value)!={'error','status'} or value['error'] not in allowed: raise ValueError()
+ if value['status'] not in {'error','rejected'}: raise ValueError()
+ print(json.dumps(value,sort_keys=True,separators=(',',':')),end='')
+except (TypeError,ValueError,json.JSONDecodeError): raise SystemExit(2)
+PY
+)"; then
+      printf '%s\n' "$writer_error"
+    else
+      printf '%s\n' '{"error":"owner_process_identity_writer_failed","status":"error"}'
+    fi
+    return "$writer_rc"
+  fi
+  if [ -n "$writer_output" ]; then
+    rm -f "$probe" 2>/dev/null || {
+      printf '%s\n' '{"error":"owner_process_record_cleanup_failed","status":"error"}'
+      return 2
+    }
+    printf '%s\n' '{"error":"owner_process_identity_writer_protocol_failed","status":"error"}'
     return 2
   fi
   read -r owner <"$probe" || owner=''
   identity="$(sed -n '2p' "$probe" 2>/dev/null || true)"
-  rm -f "$probe" 2>/dev/null || return 2
-  case "$owner" in ''|*[!0-9]*) return 2 ;; esac
-  [ "${identity%%|*}" = "$owner" ] || return 2
+  if ! rm -f "$probe" 2>/dev/null; then
+    printf '%s\n' '{"error":"owner_process_record_cleanup_failed","status":"error"}'
+    return 2
+  fi
+  if ! python3 -I -B - "$owner" "$identity" <<'PY'
+import re,sys
+owner,identity=sys.argv[1:]
+if not owner.isdigit() or int(owner)<=0: raise SystemExit(2)
+if not re.fullmatch(re.escape(owner)+r'\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}',identity): raise SystemExit(2)
+PY
+  then
+    printf '%s\n' '{"error":"owner_process_record_malformed","status":"error"}'
+    return 2
+  fi
   printf '%s\t%s\n' "$owner" "$identity"
 }
 

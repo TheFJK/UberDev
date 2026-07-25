@@ -224,6 +224,7 @@ if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" \
     "$REPO_ROOT/plugins/uberdev/lib/live-semaphore.sh" \
     "$REPO_ROOT/plugins/uberdev/lib/agent-dispatch.sh" <<'PY'
 import importlib.util,pathlib,sys,tempfile
+from unittest import mock
 tool,semaphore,agent=sys.argv[1:]
 source=pathlib.Path(tool).read_text(encoding='utf-8')
 semaphore_source=pathlib.Path(semaphore).read_text(encoding='utf-8')
@@ -234,6 +235,7 @@ assert '_uberdev_semaphore_write_process_identity direct "$candidate"' in semaph
 assert '_uberdev_semaphore_write_process_identity "$owner_mode" "$probe"' in semaphore_source
 assert 'if [ -n "$output_variable" ]; then owner_mode=direct; else owner_mode=parent; fi' in semaphore_source
 assert '_uberdev_semaphore_write_process_identity parent "$probe"' in agent_source
+assert 'open(destination, "w", encoding="ascii", newline="\\n")' in source
 spec=importlib.util.spec_from_file_location('run_manifest_owner_depth_model',tool)
 module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module
 assert spec.loader is not None; spec.loader.exec_module(module)
@@ -258,10 +260,23 @@ with tempfile.TemporaryDirectory() as temporary:
   module._write_process_identity('parent',str(root/'windows-parent'))
  finally:
   module.os.name=original_os_name
- assert (root/'posix-direct').read_text(encoding='ascii').splitlines()[0]=='41'
- assert (root/'posix-parent').read_text(encoding='ascii').splitlines()[0]=='73'
- assert (root/'windows-direct').read_text(encoding='ascii').splitlines()[0]=='51'
- assert (root/'windows-parent').read_text(encoding='ascii').splitlines()[0]=='61'
+ for name,pid in (('posix-direct',41),('posix-parent',73),('windows-direct',51),('windows-parent',61)):
+  expected=f'{pid}\n{pid}|{pid}|{pid}|'+('a'*64)+'\n'
+  payload=(root/name).read_bytes()
+  assert payload==expected.encode('ascii') and b'\r' not in payload
+ with mock.patch('builtins.open',mock.mock_open()) as opened:
+  module.os.getppid=lambda: 41
+  module._write_process_identity('direct',str(root/'mock-open-contract'))
+ opened.assert_called_once_with(str(root/'mock-open-contract'),'w',encoding='ascii',newline='\n')
+ module.os.getppid=lambda: 51
+ module._native_process_record=lambda _pid: (_ for _ in ()).throw(ProcessLookupError())
+ try: module._write_process_identity('parent',str(root/'absent-parent'))
+ except module.ManifestRuntimeError as error: assert str(error)=='process_identity_parent_absent'
+ else: raise AssertionError('absent parent did not fail closed')
+ module._native_process_record=lambda _pid: (_ for _ in ()).throw(OSError())
+ try: module._write_process_identity('parent',str(root/'unavailable-parent'))
+ except module.ManifestRuntimeError as error: assert str(error)=='process_identity_parent_unavailable'
+ else: raise AssertionError('unavailable parent did not fail closed')
 PY
 then
   echo "  PASS  owner mode explicitly selects direct or one-native-parent identity"
@@ -309,6 +324,50 @@ if [ "$manifest_error_rendered" = '{"error":"process_identity_unavailable","stat
 else
   echo "  FAIL  diagnostic sanitizer accepted malformed or discarded valid manifest evidence"
   FAIL=$((FAIL + 1))
+fi
+
+owner_bridge_contract_tmp="$(mktemp -d)"
+if (
+  trap 'rm -rf "$owner_bridge_contract_tmp"' EXIT
+  . "$REPO_ROOT/plugins/uberdev/lib/child-dispatch.sh"
+  bridge_writer_case=closed
+  _uberdev_semaphore_write_process_identity() {
+    case "$bridge_writer_case" in
+      closed) printf '%s\n' '{"status":"error","error":"process_identity_parent_absent"}'; return 1 ;;
+      extra) printf '%s\n' '{"status":"error","error":"process_identity_parent_absent","detail":"unsafe"}'; return 1 ;;
+      crlf) printf '41\r\n41|41|41|%064d\r\n' 0 >"$2"; return 0 ;;
+      *) return 2 ;;
+    esac
+  }
+  set +e
+  closed_output="$(_uberdev_agent_capture_owner_process_record "$owner_bridge_contract_tmp")"
+  closed_rc=$?
+  bridge_writer_case=extra
+  extra_output="$(_uberdev_agent_capture_owner_process_record "$owner_bridge_contract_tmp")"
+  extra_rc=$?
+  bridge_writer_case=crlf
+  crlf_output="$(_uberdev_agent_capture_owner_process_record "$owner_bridge_contract_tmp")"
+  crlf_rc=$?
+  set -e
+  remaining_probe=''
+  for candidate in "$owner_bridge_contract_tmp"/.owner-process.* \
+      "$owner_bridge_contract_tmp"/.owner-process-output.*; do
+    [ ! -e "$candidate" ] || remaining_probe="$candidate"
+  done
+  [ "$closed_rc" -eq 1 ] \
+    && [ "$closed_output" = '{"error":"process_identity_parent_absent","status":"error"}' ] \
+    && [ "$extra_rc" -eq 1 ] \
+    && [ "$extra_output" = '{"error":"owner_process_identity_writer_failed","status":"error"}' ] \
+    && [ "$crlf_rc" -eq 2 ] \
+    && [ "$crlf_output" = '{"error":"owner_process_record_malformed","status":"error"}' ] \
+    && [ -z "$remaining_probe" ]
+); then
+  echo "  PASS  owner bridge preserves safe writer failures and rejects CRLF or untrusted records"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  owner bridge leaked, rewrote status, or retained an unsafe probe"
+  FAIL=$((FAIL + 1))
+  rm -rf "$owner_bridge_contract_tmp"
 fi
 
 if python3 -I -B - "$0" <<'PY'
