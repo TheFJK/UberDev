@@ -271,6 +271,46 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+windows_bridge_safe_error() {
+  python3 -I -B - "$1" <<'PY'
+import json,re,sys
+raw=sys.argv[1]
+pattern=re.compile(r'[a-z][a-z0-9_.:-]{0,127}')
+try:
+ if len(raw)>4096: raise ValueError()
+ value=json.loads(raw)
+ if not isinstance(value,dict) or 'error' not in value or set(value)-{'error','reason','status'}: raise ValueError()
+ if any(not isinstance(item,str) for item in value.values()): raise ValueError()
+ if not pattern.fullmatch(value['error']): raise ValueError()
+ if 'reason' in value and not pattern.fullmatch(value['reason']): raise ValueError()
+ if 'status' in value and value['status'] not in {'error','rejected'}: raise ValueError()
+ print(json.dumps(value,sort_keys=True,separators=(',',':')),end='')
+except (TypeError,ValueError,json.JSONDecodeError):
+ print('<unavailable>',end='')
+PY
+}
+
+manifest_error='{"status":"error","error":"process_identity_unavailable"}'
+manifest_error_rendered="$(windows_bridge_safe_error "$manifest_error")"
+manifest_rejected_rendered="$(windows_bridge_safe_error '{"error":"invalid_process_identity_mode","status":"rejected"}')"
+extra_error_rendered="$(windows_bridge_safe_error '{"error":"process_identity_unavailable","status":"error","detail":"sensitive"}')"
+nonstr_error_rendered="$(windows_bridge_safe_error '{"error":7,"status":"error"}')"
+invalid_status_rendered="$(windows_bridge_safe_error '{"error":"process_identity_unavailable","status":"warning"}')"
+oversize_error="$(python3 -I -B -c 'import json;print(json.dumps({"error":"a"*4097,"status":"error"}),end="")')"
+oversize_error_rendered="$(windows_bridge_safe_error "$oversize_error")"
+if [ "$manifest_error_rendered" = '{"error":"process_identity_unavailable","status":"error"}' ] \
+    && [ "$manifest_rejected_rendered" = '{"error":"invalid_process_identity_mode","status":"rejected"}' ] \
+    && [ "$extra_error_rendered" = '<unavailable>' ] \
+    && [ "$nonstr_error_rendered" = '<unavailable>' ] \
+    && [ "$invalid_status_rendered" = '<unavailable>' ] \
+    && [ "$oversize_error_rendered" = '<unavailable>' ]; then
+  echo "  PASS  diagnostic sanitizer retains closed manifest errors and rejects untrusted fields"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  diagnostic sanitizer accepted malformed or discarded valid manifest evidence"
+  FAIL=$((FAIL + 1))
+fi
+
 if python3 -I -B - "$0" <<'PY'
 import pathlib,sys
 source=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
@@ -320,28 +360,21 @@ if python3 -I -B -c 'import os; raise SystemExit(0 if os.name=="nt" else 1)'; th
       set +e
       if [ "$windows_bridge_rc" -ne 0 ]; then
         [ "$windows_stage_rc" -ne 0 ] || windows_stage_rc=$windows_bridge_rc
-        python3 -I -B - "$windows_stage" "$windows_stage_rc" "$windows_stage_raw" \
+        windows_stage_safe_raw="$(windows_bridge_safe_error "$windows_stage_raw" 2>/dev/null)" \
+          || windows_stage_safe_raw='<unavailable>'
+        python3 -I -B - "$windows_stage" "$windows_stage_rc" "$windows_stage_safe_raw" \
           "$native_pid" "$native_identity" "$lease" "$event" "$windows_intent_path" \
           "$probe_rc" "$probe_output" >>"$WINDOWS_BRIDGE_DIAGNOSTIC" <<'PY'
 import json,pathlib,re,sys
-stage,stage_rc,stage_raw,owner_pid,owner_identity,lease_path,event_raw,intent_path,probe_rc,probe_output=sys.argv[1:]
+stage,stage_rc,stage_safe_raw,owner_pid,owner_identity,lease_path,event_raw,intent_path,probe_rc,probe_output=sys.argv[1:]
 identity_pattern=re.compile(r'[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}')
 stage_pattern=re.compile(r'[a-z][a-z0-9-]{0,31}')
-error_pattern=re.compile(r'[a-z][a-z0-9_.:-]{0,127}')
 def safe_pid(value):
  value=str(value)
  return value if value.isdigit() and int(value)>0 else '<unavailable>'
 def safe_identity(value):
  value=str(value)
  return value if identity_pattern.fullmatch(value) else '<unavailable>'
-def safe_error(raw):
- try:
-  if len(raw)>4096: return '<unavailable>'
-  value=json.loads(raw)
-  if not isinstance(value,dict) or not value or set(value)-{'error','reason'}: return '<unavailable>'
-  if any(not isinstance(item,str) or not error_pattern.fullmatch(item) for item in value.values()): return '<unavailable>'
-  return json.dumps(value,sort_keys=True,separators=(',',':'))
- except (TypeError,ValueError,json.JSONDecodeError): return '<unavailable>'
 def read_pairs(path):
  try:
   entry=pathlib.Path(path)
@@ -362,7 +395,7 @@ event=read_json(raw=event_raw)
 intent=read_json(path=intent_path)
 print(f'stage={stage if stage_pattern.fullmatch(stage) else "<unavailable>"}')
 print(f'rc={stage_rc if stage_rc.isdigit() else "<unavailable>"}')
-print(f'raw={safe_error(stage_raw)}')
+print(f'raw={stage_safe_raw}')
 print(f'owner pid={safe_pid(owner_pid)} identity={safe_identity(owner_identity)}')
 print(f'lease pid={safe_pid(lease.get("owner_pid",""))} identity={safe_identity(lease.get("owner_identity",""))}')
 print(f'event pid={safe_pid(event.get("owner_pid",""))} identity={safe_identity(event.get("owner_process_identity",""))}')
