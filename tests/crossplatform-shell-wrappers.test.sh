@@ -487,6 +487,8 @@ assert 'if (\n' not in block
 assert 'if [ "$WINDOWS_RUNTIME_RC" -eq 0 ]; then' in block
 assert 'shasum -a 256 "$WINDOWS_BRIDGE_ROOT/status.json"' not in block
 assert 'hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()' in block
+assert '$(_uberdev_child_timeout_intent_write' not in block
+assert 'if _uberdev_child_timeout_intent_write "$WINDOWS_BRIDGE_ROOT/status.json" 321 "$generation" "$snapshot" 2>/dev/null; then' in block
 PY
 then
   echo "  PASS  native Windows assertion block reports its own failing status"
@@ -680,25 +682,33 @@ PY
       "$generation" >"$WINDOWS_BRIDGE_ROOT/status.json"
     snapshot="$(python3 -I -B -c 'import hashlib,pathlib,sys;print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest(),end="")' "$WINDOWS_BRIDGE_ROOT/status.json")"
     windows_stage=intent
-    intent_output=''
-    if intent_output="$(_uberdev_child_timeout_intent_write "$WINDOWS_BRIDGE_ROOT/status.json" 321 "$generation" "$snapshot" 2>/dev/null)"; then
+    if _uberdev_child_timeout_intent_write "$WINDOWS_BRIDGE_ROOT/status.json" 321 "$generation" "$snapshot" 2>/dev/null; then
       windows_stage_rc=0
     else
       windows_stage_rc=$?
-      windows_stage_raw="$intent_output"
+      windows_stage_raw='{"error":"timeout_intent_write_failed"}'
       false
     fi
-    windows_stage=probe
-    if python3 -I -B - "$native_pid" "$native_identity" "$lease" "$event" \
-      "$windows_intent_path" \
-      "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" <<'PY'
+    windows_stage=intent-probe
+    intent_probe_output=''
+    if intent_probe_output="$(_uberdev_agent_timeout_intent_probe "$WINDOWS_BRIDGE_ROOT/status.json" 321 "$generation" 2>/dev/null)"; then
+      windows_stage_rc=0
+    else
+      windows_stage_rc=$?
+    fi
+    if [ "$windows_stage_rc" -ne 0 ] || [ "$intent_probe_output" != valid ]; then
+      [ "$windows_stage_rc" -ne 0 ] || windows_stage_rc=1
+      windows_stage_raw='{"error":"timeout_intent_probe_failed"}'
+      false
+    fi
+    windows_stage=owner-evidence
+    if python3 -I -B - "$native_pid" "$native_identity" "$lease" "$event" <<'PY'
 import json,pathlib,sys
-pid,identity,lease_path,event_raw,intent_path,tool=sys.argv[1:]
+pid,identity,lease_path,event_raw=sys.argv[1:]
 lease=dict(line.split('=',1) for line in pathlib.Path(lease_path).read_text().splitlines())
-event=json.loads(event_raw); intent=json.loads(pathlib.Path(intent_path).read_text())
+event=json.loads(event_raw)
 assert lease['owner_pid']==pid and lease['owner_identity']==identity
 assert str(event['owner_pid'])==pid and event['owner_process_identity']==identity
-assert str(intent['waiter_pid'])==pid and intent['waiter_process_identity']==identity
 PY
     then
       windows_stage_rc=0
