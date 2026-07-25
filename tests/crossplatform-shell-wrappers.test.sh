@@ -485,12 +485,26 @@ assert '\n  (\n' in block
 assert '\n  WINDOWS_RUNTIME_RC=$?\n' in block
 assert 'if (\n' not in block
 assert 'if [ "$WINDOWS_RUNTIME_RC" -eq 0 ]; then' in block
+assert 'shasum -a 256 "$WINDOWS_BRIDGE_ROOT/status.json"' not in block
+assert 'hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()' in block
 PY
 then
   echo "  PASS  native Windows assertion block reports its own failing status"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  native Windows assertion block can hide a failed assertion"
+  FAIL=$((FAIL + 1))
+fi
+
+snapshot_contract_file="$(mktemp)"
+printf 'abc' >"$snapshot_contract_file"
+snapshot_contract_hash="$(python3 -I -B -c 'import hashlib,pathlib,sys;print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest(),end="")' "$snapshot_contract_file")"
+rm -f "$snapshot_contract_file"
+if [ "$snapshot_contract_hash" = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad ]; then
+  echo "  PASS  snapshot hashing uses portable Python hashlib with exact file bytes"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  portable snapshot hashing produced the wrong digest"
   FAIL=$((FAIL + 1))
 fi
 
@@ -664,7 +678,7 @@ PY
     generation=1234567890abcdef1234567890abcdef
     printf '{"backend":"codex","state":"running","exit_code":null,"pid":"321","lease_generation":"%s"}\n' \
       "$generation" >"$WINDOWS_BRIDGE_ROOT/status.json"
-    snapshot="$(shasum -a 256 "$WINDOWS_BRIDGE_ROOT/status.json" | awk '{print $1}')"
+    snapshot="$(python3 -I -B -c 'import hashlib,pathlib,sys;print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest(),end="")' "$WINDOWS_BRIDGE_ROOT/status.json")"
     windows_stage=intent
     intent_output=''
     if intent_output="$(_uberdev_child_timeout_intent_write "$WINDOWS_BRIDGE_ROOT/status.json" 321 "$generation" "$snapshot" 2>/dev/null)"; then
