@@ -995,8 +995,6 @@ def _write_process_identity(mode: str, destination: str) -> None:
     owner_depth = {"direct": 0, "parent": 1}.get(mode)
     if owner_depth is None:
         raise ManifestRejected("invalid_process_identity_mode")
-    if os.name == "nt":
-        owner_depth += 1
     owner_pid = self_pid
     for _ in range(owner_depth):
         owner_pid = _native_process_record(owner_pid)[0]

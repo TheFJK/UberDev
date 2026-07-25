@@ -234,7 +234,6 @@ assert '_uberdev_semaphore_write_process_identity direct "$candidate"' in semaph
 assert '_uberdev_semaphore_write_process_identity "$owner_mode" "$probe"' in semaphore_source
 assert 'if [ -n "$output_variable" ]; then owner_mode=direct; else owner_mode=parent; fi' in semaphore_source
 assert '_uberdev_semaphore_write_process_identity parent "$probe"' in agent_source
-assert 'if os.name == "nt":\n        owner_depth += 1' in source
 spec=importlib.util.spec_from_file_location('run_manifest_owner_depth_model',tool)
 module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module
 assert spec.loader is not None; spec.loader.exec_module(module)
@@ -261,8 +260,8 @@ with tempfile.TemporaryDirectory() as temporary:
   module.os.name=original_os_name
  assert (root/'posix-direct').read_text(encoding='ascii').splitlines()[0]=='41'
  assert (root/'posix-parent').read_text(encoding='ascii').splitlines()[0]=='73'
- assert (root/'windows-direct').read_text(encoding='ascii').splitlines()[0]=='61'
- assert (root/'windows-parent').read_text(encoding='ascii').splitlines()[0]=='71'
+ assert (root/'windows-direct').read_text(encoding='ascii').splitlines()[0]=='51'
+ assert (root/'windows-parent').read_text(encoding='ascii').splitlines()[0]=='61'
 PY
 then
   echo "  PASS  owner mode explicitly selects direct or one-native-parent identity"
@@ -304,6 +303,11 @@ if python3 -I -B -c 'import os; raise SystemExit(0 if os.name=="nt" else 1)'; th
     native_identity=''
     lease=''
     event=''
+    probe_output=''
+    probe_rc=''
+    windows_stage=owner
+    windows_stage_rc=0
+    windows_stage_raw=''
     cleanup_windows_child() {
       if [ -n "$windows_child_controller" ]; then
         : >"$windows_child_stop"
@@ -315,18 +319,29 @@ if python3 -I -B -c 'import os; raise SystemExit(0 if os.name=="nt" else 1)'; th
       trap - EXIT
       set +e
       if [ "$windows_bridge_rc" -ne 0 ]; then
-        python3 -I -B - "$native_pid" "$native_identity" "$lease" "$event" \
-          "$windows_intent_path" "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" \
-          >"$WINDOWS_BRIDGE_DIAGNOSTIC" <<'PY'
-import json,pathlib,re,subprocess,sys
-owner_pid,owner_identity,lease_path,event_raw,intent_path,tool=sys.argv[1:]
+        [ "$windows_stage_rc" -ne 0 ] || windows_stage_rc=$windows_bridge_rc
+        python3 -I -B - "$windows_stage" "$windows_stage_rc" "$windows_stage_raw" \
+          "$native_pid" "$native_identity" "$lease" "$event" "$windows_intent_path" \
+          "$probe_rc" "$probe_output" >>"$WINDOWS_BRIDGE_DIAGNOSTIC" <<'PY'
+import json,pathlib,re,sys
+stage,stage_rc,stage_raw,owner_pid,owner_identity,lease_path,event_raw,intent_path,probe_rc,probe_output=sys.argv[1:]
 identity_pattern=re.compile(r'[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}')
+stage_pattern=re.compile(r'[a-z][a-z0-9-]{0,31}')
+error_pattern=re.compile(r'[a-z][a-z0-9_.:-]{0,127}')
 def safe_pid(value):
  value=str(value)
  return value if value.isdigit() and int(value)>0 else '<unavailable>'
 def safe_identity(value):
  value=str(value)
  return value if identity_pattern.fullmatch(value) else '<unavailable>'
+def safe_error(raw):
+ try:
+  if len(raw)>4096: return '<unavailable>'
+  value=json.loads(raw)
+  if not isinstance(value,dict) or not value or set(value)-{'error','reason'}: return '<unavailable>'
+  if any(not isinstance(item,str) or not error_pattern.fullmatch(item) for item in value.values()): return '<unavailable>'
+  return json.dumps(value,sort_keys=True,separators=(',',':'))
+ except (TypeError,ValueError,json.JSONDecodeError): return '<unavailable>'
 def read_pairs(path):
  try:
   entry=pathlib.Path(path)
@@ -345,17 +360,14 @@ def read_json(raw='',path=''):
 lease=read_pairs(lease_path)
 event=read_json(raw=event_raw)
 intent=read_json(path=intent_path)
-probe_rc='<unavailable>'
-if safe_pid(owner_pid)!='<unavailable>':
- try:
-  probe=subprocess.run([sys.executable,'-I','-B',tool,'process-identity','--pid',owner_pid],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
-  probe_rc=str(probe.returncode)
- except (OSError,subprocess.SubprocessError): probe_rc='<probe-error>'
+print(f'stage={stage if stage_pattern.fullmatch(stage) else "<unavailable>"}')
+print(f'rc={stage_rc if stage_rc.isdigit() else "<unavailable>"}')
+print(f'raw={safe_error(stage_raw)}')
 print(f'owner pid={safe_pid(owner_pid)} identity={safe_identity(owner_identity)}')
 print(f'lease pid={safe_pid(lease.get("owner_pid",""))} identity={safe_identity(lease.get("owner_identity",""))}')
 print(f'event pid={safe_pid(event.get("owner_pid",""))} identity={safe_identity(event.get("owner_process_identity",""))}')
 print(f'intent pid={safe_pid(intent.get("waiter_pid",""))} identity={safe_identity(intent.get("waiter_process_identity",""))}')
-print(f'process-identity probe rc={probe_rc}')
+print(f'process-identity probe rc={probe_rc if probe_rc.isdigit() else "<unavailable>"} identity={safe_identity(probe_output)}')
 PY
       fi
       cleanup_windows_child
@@ -363,37 +375,88 @@ PY
     }
     trap windows_bridge_exit EXIT
     mkdir -p "$WINDOWS_BRIDGE_ROOT/state"
-    native_record="$(_uberdev_agent_capture_owner_process_record "$WINDOWS_BRIDGE_ROOT")"
+    if native_record="$(_uberdev_agent_capture_owner_process_record "$WINDOWS_BRIDGE_ROOT" 2>/dev/null)"; then
+      windows_stage_rc=0
+    else
+      windows_stage_rc=$?
+      windows_stage_raw="$native_record"
+      false
+    fi
     native_pid="${native_record%%$'\t'*}"
     native_identity="${native_record#*$'\t'}"
+    case "$native_pid:$native_identity" in
+      *[!0-9\|a-f:]*) windows_stage_rc=2; windows_stage_raw='{"error":"owner_record_malformed"}'; false ;;
+    esac
     lease_record=''
-    UBERDEV_SEMAPHORE_OWNER_PID="$native_pid" uberdev_semaphore_acquire \
-      "$WINDOWS_BRIDGE_ROOT/state" windows-native-repo codex 1 windows-native-owner 30 \
-      exact-identity lease_record
+    windows_stage=lease
+    if UBERDEV_SEMAPHORE_OWNER_PID="$native_pid" uberdev_semaphore_acquire \
+        "$WINDOWS_BRIDGE_ROOT/state" windows-native-repo codex 1 windows-native-owner 30 \
+        exact-identity lease_record 2>/dev/null; then
+      windows_stage_rc=0
+    else
+      windows_stage_rc=$?
+      windows_stage_raw="{\"error\":\"${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-lease_acquire_failed}\"}"
+      false
+    fi
     lease="${lease_record%%$'\t'*}"
     _UBERDEV_AGENT_OWNER_PID="$native_pid"
     _UBERDEV_AGENT_OWNER_IDENTITY="$native_identity"
     request='{"run_id":"windows-native-owner","backend":"codex","timeout_s":30}'
     decision='{"routing_mode":"inherit","effective_policy":"inherit"}'
-    event="$(_uberdev_agent_event_json agent_started "$request" "$decision" '' "$WINDOWS_BRIDGE_ROOT/status.json")"
+    windows_stage=event
+    if event="$(_uberdev_agent_event_json agent_started "$request" "$decision" '' "$WINDOWS_BRIDGE_ROOT/status.json" 2>/dev/null)"; then
+      windows_stage_rc=0
+    else
+      windows_stage_rc=$?
+      windows_stage_raw="$event"
+      false
+    fi
     generation=1234567890abcdef1234567890abcdef
     printf '{"backend":"codex","state":"running","exit_code":null,"pid":"321","lease_generation":"%s"}\n' \
       "$generation" >"$WINDOWS_BRIDGE_ROOT/status.json"
     snapshot="$(shasum -a 256 "$WINDOWS_BRIDGE_ROOT/status.json" | awk '{print $1}')"
-    _uberdev_child_timeout_intent_write "$WINDOWS_BRIDGE_ROOT/status.json" 321 "$generation" "$snapshot"
-    python3 -I -B - "$native_pid" "$native_identity" "$lease" "$event" \
+    windows_stage=intent
+    intent_output=''
+    if intent_output="$(_uberdev_child_timeout_intent_write "$WINDOWS_BRIDGE_ROOT/status.json" 321 "$generation" "$snapshot" 2>/dev/null)"; then
+      windows_stage_rc=0
+    else
+      windows_stage_rc=$?
+      windows_stage_raw="$intent_output"
+      false
+    fi
+    windows_stage=probe
+    if probe_output="$(python3 -I -B "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" process-identity --pid "$native_pid" 2>/dev/null)"; then
+      probe_rc=0
+    else
+      probe_rc=$?
+      windows_stage_rc=$probe_rc
+      windows_stage_raw="$probe_output"
+      false
+    fi
+    if [ "$probe_output" != "$native_identity" ]; then
+      windows_stage_rc=1
+      windows_stage_raw='{"error":"process_identity_mismatch"}'
+      false
+    fi
+    if python3 -I -B - "$native_pid" "$native_identity" "$lease" "$event" \
       "$windows_intent_path" \
       "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" <<'PY'
-import json,pathlib,subprocess,sys
+import json,pathlib,sys
 pid,identity,lease_path,event_raw,intent_path,tool=sys.argv[1:]
 lease=dict(line.split('=',1) for line in pathlib.Path(lease_path).read_text().splitlines())
 event=json.loads(event_raw); intent=json.loads(pathlib.Path(intent_path).read_text())
 assert lease['owner_pid']==pid and lease['owner_identity']==identity
 assert str(event['owner_pid'])==pid and event['owner_process_identity']==identity
 assert str(intent['waiter_pid'])==pid and intent['waiter_process_identity']==identity
-probe=subprocess.run([sys.executable,'-I','-B',tool,'process-identity','--pid',pid],capture_output=True,text=True)
-assert probe.returncode==0 and probe.stdout==identity
 PY
+    then
+      windows_stage_rc=0
+    else
+      windows_stage_rc=$?
+      windows_stage_raw='{"error":"identity_evidence_mismatch"}'
+      false
+    fi
+    windows_stage=runtime-assertion
     windows_child_pid_file="$WINDOWS_BRIDGE_ROOT/child-pid"
     python3 -I -B - "$windows_child_pid_file" "$windows_child_stop" <<'PY' &
 import pathlib,subprocess,sys,time
@@ -458,7 +521,7 @@ PY
     if [ -f "$WINDOWS_BRIDGE_DIAGNOSTIC" ]; then
       windows_diagnostic_lines=0
       while IFS= read -r windows_diagnostic_line \
-          && [ "$windows_diagnostic_lines" -lt 5 ]; do
+          && [ "$windows_diagnostic_lines" -lt 8 ]; do
         printf '        %s\n' "$windows_diagnostic_line"
         windows_diagnostic_lines=$((windows_diagnostic_lines + 1))
       done <"$WINDOWS_BRIDGE_DIAGNOSTIC"
