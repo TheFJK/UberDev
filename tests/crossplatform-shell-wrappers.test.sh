@@ -236,6 +236,7 @@ assert '_uberdev_semaphore_write_process_identity "$owner_mode" "$probe"' in sem
 assert 'if [ -n "$output_variable" ]; then owner_mode=direct; else owner_mode=parent; fi' in semaphore_source
 assert '_uberdev_semaphore_write_process_identity parent "$probe"' in agent_source
 assert 'open(destination, "w", encoding="ascii", newline="\\n")' in source
+assert 'if os.name == "nt":\n        owner_depth += 1' in source
 spec=importlib.util.spec_from_file_location('run_manifest_owner_depth_model',tool)
 module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module
 assert spec.loader is not None; spec.loader.exec_module(module)
@@ -260,7 +261,7 @@ with tempfile.TemporaryDirectory() as temporary:
   module._write_process_identity('parent',str(root/'windows-parent'))
  finally:
   module.os.name=original_os_name
- for name,pid in (('posix-direct',41),('posix-parent',73),('windows-direct',51),('windows-parent',61)):
+ for name,pid in (('posix-direct',41),('posix-parent',73),('windows-direct',61),('windows-parent',71)):
   expected=f'{pid}\n{pid}|{pid}|{pid}|'+('a'*64)+'\n'
   payload=(root/name).read_bytes()
   assert payload==expected.encode('ascii') and b'\r' not in payload
@@ -400,6 +401,9 @@ if python3 -I -B -c 'import os; raise SystemExit(0 if os.name=="nt" else 1)'; th
     windows_intent_path="$WINDOWS_BRIDGE_ROOT/status.json.timeout-intent-v1"
     native_pid=''
     native_identity=''
+    direct_pid=''
+    direct_identity=''
+    direct_raw=''
     lease=''
     event=''
     probe_output=''
@@ -479,6 +483,39 @@ PY
     case "$native_pid:$native_identity" in
       *[!0-9\|a-f:]*) windows_stage_rc=2; windows_stage_raw='{"error":"owner_record_malformed"}'; false ;;
     esac
+    windows_stage=owner-direct
+    direct_probe="$WINDOWS_BRIDGE_ROOT/direct-owner-record"
+    direct_output="$WINDOWS_BRIDGE_ROOT/direct-owner-output"
+    if _uberdev_semaphore_write_process_identity direct "$direct_probe" \
+        >"$direct_output" 2>/dev/null; then
+      windows_stage_rc=0
+    else
+      windows_stage_rc=$?
+      if direct_raw="$(python3 -I -B -c 'import pathlib,sys;path=pathlib.Path(sys.argv[1]);print(path.read_text(encoding="utf-8") if path.is_file() and path.stat().st_size<=4096 else "",end="")' "$direct_output" 2>/dev/null)"; then :; else direct_raw=''; fi
+      windows_stage_raw="$direct_raw"
+      false
+    fi
+    read -r direct_pid <"$direct_probe" || direct_pid=''
+    direct_identity="$(sed -n '2p' "$direct_probe" 2>/dev/null || true)"
+    if [ "$direct_pid" != "$native_pid" ] || [ "$direct_identity" != "$native_identity" ]; then
+      windows_stage_rc=1
+      windows_stage_raw='{"error":"owner_bridge_identity_mismatch"}'
+      false
+    fi
+    windows_stage=probe
+    if probe_output="$(python3 -I -B "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" process-identity --pid "$native_pid" 2>/dev/null)"; then
+      probe_rc=0
+    else
+      probe_rc=$?
+      windows_stage_rc=$probe_rc
+      windows_stage_raw="$probe_output"
+      false
+    fi
+    if [ "$probe_output" != "$native_identity" ]; then
+      windows_stage_rc=1
+      windows_stage_raw='{"error":"process_identity_mismatch"}'
+      false
+    fi
     lease_record=''
     windows_stage=lease
     if UBERDEV_SEMAPHORE_OWNER_PID="$native_pid" uberdev_semaphore_acquire \
@@ -517,19 +554,6 @@ PY
       false
     fi
     windows_stage=probe
-    if probe_output="$(python3 -I -B "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" process-identity --pid "$native_pid" 2>/dev/null)"; then
-      probe_rc=0
-    else
-      probe_rc=$?
-      windows_stage_rc=$probe_rc
-      windows_stage_raw="$probe_output"
-      false
-    fi
-    if [ "$probe_output" != "$native_identity" ]; then
-      windows_stage_rc=1
-      windows_stage_raw='{"error":"process_identity_mismatch"}'
-      false
-    fi
     if python3 -I -B - "$native_pid" "$native_identity" "$lease" "$event" \
       "$windows_intent_path" \
       "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" <<'PY'
