@@ -244,6 +244,13 @@ if [ "$CLASSIFY_SINGLE_QUOTED" = $'REFUSED\t-\t-\tcan\'t reproduce runner failur
 else
   echo "  FAIL  S10.11b — YAML single-quoted scalar was corrupted: $CLASSIFY_SINGLE_QUOTED"; FAIL=$((FAIL + 1))
 fi
+write_classifier_case CLASSIFIED code_bug "'tests/review-pr-phase3-ci.test.sh:42'" "'repository test failure'"
+CLASSIFY_SINGLE_QUOTED_ANCHOR="$(bash -c '. "$1"; review_validate_ci_classification "$2" "$3"' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT")"
+if [ "$CLASSIFY_SINGLE_QUOTED_ANCHOR" = $'CLASSIFIED\tcode_bug\ttests/review-pr-phase3-ci.test.sh:42\t-' ]; then
+  echo "  PASS  S10.11b-anchor — YAML single-quoted signal anchor decodes exactly"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.11b-anchor — YAML single-quoted signal anchor was corrupted: $CLASSIFY_SINGLE_QUOTED_ANCHOR"; FAIL=$((FAIL + 1))
+fi
 CLASSIFY_SINGLE_QUOTE_INVALID=0
 for malformed_rationale in "'unterminated" "'can't reproduce runner failure'"; do
   write_classifier_case REFUSED null null "$malformed_rationale"
