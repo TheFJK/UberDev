@@ -10,7 +10,16 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
 . "$LIB"
 
+# Native Windows Git and Git Bash can spell the same directory differently.
+# The Windows-path fixture must compare shell-canonical paths rather than inode
+# identity through two incompatible path syntaxes.
+if grep -q -- '-''ef' "$0"; then
+  echo 'review-child-handoff: native Windows path fixture uses a non-portable file-identity assertion' >&2
+  exit 1
+fi
+
 if [ "${1:-}" = --windows-path-only ]; then
+  windows_shell_directory() { (cd "$1" && pwd -P); }
   WINDOWS_REPO="$TMP/windows-repo"; mkdir -p "$WINDOWS_REPO"
   git -C "$WINDOWS_REPO" init -q
   git -C "$WINDOWS_REPO" config user.email fixture@example.invalid
@@ -19,8 +28,8 @@ if [ "${1:-}" = --windows-path-only ]; then
   git -C "$WINDOWS_REPO" add README.md
   git -C "$WINDOWS_REPO" commit -qm fixture
   WINDOWS_REPO_ID="$(git -C "$WINDOWS_REPO" rev-parse --show-toplevel)"
-  WINDOWS_SHELL_ID="$(cd "$WINDOWS_REPO" && pwd -P)"
-  [ "$WINDOWS_REPO_ID" -ef "$WINDOWS_SHELL_ID" ]
+  WINDOWS_SHELL_ID="$(windows_shell_directory "$WINDOWS_REPO")"
+  [ "$(windows_shell_directory "$WINDOWS_REPO_ID")" = "$WINDOWS_SHELL_ID" ]
 
   WINDOWS_RUN="$WINDOWS_REPO_ID/.uberdev/runs/windows-review-carrier"; mkdir -p "$WINDOWS_RUN"
   WINDOWS_REQUEST="$(jq -cn --arg run "$WINDOWS_RUN" --arg repo "$WINDOWS_REPO_ID" \
@@ -39,7 +48,7 @@ if [ "${1:-}" = --windows-path-only ]; then
   WINDOWS_WORKSPACE="$(uberdev_command_workspace_prepare review-pr 91 medium '[]' 20260726-010203-abcdef0 "$WINDOWS_REPO_ID")"
   jq -e '.caller=="review-pr"' <<<"$WINDOWS_WORKSPACE" >/dev/null
   WINDOWS_WORKSPACE_ROOT="$(jq -r .repository_root <<<"$WINDOWS_WORKSPACE")"
-  [ "$WINDOWS_WORKSPACE_ROOT" -ef "$WINDOWS_REPO_ID" ]
+  [ "$(windows_shell_directory "$WINDOWS_WORKSPACE_ROOT")" = "$WINDOWS_SHELL_ID" ]
 
   WINDOWS_REVIEW_INPUT="$(jq -cn --arg p "$WINDOWS_REPO_ID/README.md" \
     '{changed_paths:["README.md"],diff_path:$p,criteria_path:$p,emphasis:[]}')"
@@ -62,7 +71,7 @@ if [ "${1:-}" = --windows-path-only ]; then
   WINDOWS_FIX_PREPARED="$(_uberdev_child_prepare review_pr.fix.phase1 "$WINDOWS_FIX_HANDOFF" "$WINDOWS_FIX_RESULT" "$WINDOWS_FIX_STATUS" dispatch)"
   jq -e '.request.workspace_mode=="caller"' <<<"$WINDOWS_FIX_PREPARED" >/dev/null
   WINDOWS_FIX_ROOT="$(jq -r .request.workspace_dir <<<"$WINDOWS_FIX_PREPARED")"
-  [ "$WINDOWS_FIX_ROOT" -ef "$WINDOWS_REPO_ID" ]
+  [ "$(windows_shell_directory "$WINDOWS_FIX_ROOT")" = "$WINDOWS_SHELL_ID" ]
 
   serialized_context="$(_uberdev_agent_json_get "$UBERDEV_RUN_CARRIER_JSON" context_file)"
   [ "$serialized_context" = "$WINDOWS_CONTEXT" ]
