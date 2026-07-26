@@ -237,6 +237,25 @@ if [ "$CLASSIFY_WITH_PREFIX" = $'CLASSIFIED\tflaky\tgh-run-123:42\t-' ]; then
 else
   echo "  FAIL  S10.11a — controller rejected final fenced classifier output: $CLASSIFY_WITH_PREFIX"; FAIL=$((FAIL + 1))
 fi
+write_classifier_case REFUSED null null "'can''t reproduce runner failure'"
+CLASSIFY_SINGLE_QUOTED="$(bash -c '. "$1"; review_validate_ci_classification "$2" "$3"' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT")"
+if [ "$CLASSIFY_SINGLE_QUOTED" = $'REFUSED\t-\t-\tcan\'t reproduce runner failure' ]; then
+  echo "  PASS  S10.11b — YAML doubled apostrophe decodes exactly in a single-quoted scalar"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.11b — YAML single-quoted scalar was corrupted: $CLASSIFY_SINGLE_QUOTED"; FAIL=$((FAIL + 1))
+fi
+CLASSIFY_SINGLE_QUOTE_INVALID=0
+for malformed_rationale in "'unterminated" "'can't reproduce runner failure'"; do
+  write_classifier_case REFUSED null null "$malformed_rationale"
+  if bash -c '. "$1"; review_validate_ci_classification "$2" "$3" >/dev/null' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT"; then
+    CLASSIFY_SINGLE_QUOTE_INVALID=$((CLASSIFY_SINGLE_QUOTE_INVALID + 1))
+  fi
+done
+if [ "$CLASSIFY_SINGLE_QUOTE_INVALID" -eq 0 ]; then
+  echo "  PASS  S10.11c — unterminated and unpaired YAML single quotes fail closed"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.11c — $CLASSIFY_SINGLE_QUOTE_INVALID malformed YAML single-quoted scalars were accepted"; FAIL=$((FAIL + 1))
+fi
 CLASSIFY_INVALID=0
 for invalid_anchor in ':121' 'file:0' '/absolute:1' '../README.md:1' 'missing.ts:1' ''; do
   write_classifier_case CLASSIFIED code_bug "\"$invalid_anchor\"" '"invalid anchor fixture"'

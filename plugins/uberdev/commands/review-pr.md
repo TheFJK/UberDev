@@ -837,7 +837,7 @@ PY
     ```bash
     review_validate_ci_classification() {
       python3 -I -B - "$1" "$2" <<'PY'
-import ast,json,pathlib,re,sys
+import json,pathlib,re,sys
 path,root=sys.argv[1:]
 raw=pathlib.Path(path).read_text(encoding='utf-8')
 if len(raw.encode())>65536: raise SystemExit(2)
@@ -857,10 +857,10 @@ def scalar(key):
     if value=='null': return None
     try:
         if value.startswith('"'): parsed=json.loads(value)
-        elif value.startswith("'"): parsed=ast.literal_eval(value)
+        elif re.fullmatch(r"'(?:[^']|'')*'",value): parsed=value[1:-1].replace("''","'")
         elif re.fullmatch(r'[A-Za-z0-9_./:+ -]{1,256}',value): parsed=value
         else: raise ValueError()
-    except (SyntaxError,ValueError,json.JSONDecodeError):
+    except (ValueError,json.JSONDecodeError):
         raise SystemExit(2)
     if not isinstance(parsed,str) or not parsed or len(parsed)>256 or any(ch in parsed for ch in '\r\n\t'):
         raise SystemExit(2)
