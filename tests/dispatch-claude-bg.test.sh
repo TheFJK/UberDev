@@ -834,15 +834,44 @@ echo "== #246 D-precedence: SKIP_PERMISSIONS=1 + AUTO_PERMISSIONS=1 -> both yiel
 
 echo
 echo "== #175 D-regression: goal-pipeline preflight->resolve_env->dispatch is NOT rc=126 =="
+if python3 -I -B - "$0" <<'PY'
+import pathlib,sys
+source=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+marker=source.index('\necho "== #175 D-regression:')
+start=source.index('\n(\n  set +u\n  UBERDEV_TMPDIR="$(mktemp -d)"',marker)
+end=source.index('\n) ; read -r dP dF < "$TALLY_FILE"',start)
+block=source[start:end]
+assert 'claude() {' not in block
+assert 'cat >"$UBERDEV_TMPDIR/bin/claude"' in block
+assert 'PATH="$UBERDEV_TMPDIR/bin:$PATH"' in block
+assert 'TIMEOUT_BIN="timeout"' not in block
+PY
+then
+  echo "  PASS  D-regression crosses the real timeout/env exec boundary with an executable Claude stub"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  D-regression still depends on shell-only timeout/env/Claude mocks"
+  FAIL=$((FAIL + 1))
+fi
 (
   set +u
   UBERDEV_TMPDIR="$(mktemp -d)"
+  mkdir -p "$UBERDEV_TMPDIR/bin"
+  cat >"$UBERDEV_TMPDIR/bin/claude" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf '2.1.152\n' ;;
+  --bg) printf 'backgrounded · def67890\n' ;;
+  agents) printf '[{"sessionId":"def67890-full","state":"completed"}]\n' ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$UBERDEV_TMPDIR/bin/claude"
+  PATH="$UBERDEV_TMPDIR/bin:$PATH"
+  export PATH
   printf 'Agent starting...\nbackgrounded · def67890\n' > "$UBERDEV_TMPDIR/solve-bg-stdout-42.log"
   CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
   declare -a AUDIT_EVENTS=(); _uberdev_audit_emit() { AUDIT_EVENTS+=( "$1 $2" ); }
-  timeout() { shift; "$@"; }
-  env() { while [[ "$1" == *=* ]]; do shift; done; "$@"; }
-  claude() { printf 'backgrounded · def67890\n'; return 0; }
   DISPATCH_RC=0; DISPATCH_ID=""; DISPATCH_LOG=""
   # shellcheck disable=SC1090
   . "$DISPATCH_LIB"
@@ -852,18 +881,33 @@ echo "== #175 D-regression: goal-pipeline preflight->resolve_env->dispatch is NO
   UBERDEV_DISPATCH_BACKEND_REQUESTED=claude-bg uberdev_dispatch_preflight
   uberdev_dispatch_resolve_env
   # Prove the #175 root cause (empty TIMEOUT_BIN) is fixed HERE too, not only in
-  # D-iso: resolve_env must populate TIMEOUT_BIN before any override below.
-  [[ -n "$TIMEOUT_BIN" ]] && { echo "  PASS  D-regression resolve_env set TIMEOUT_BIN non-empty before override"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-regression resolve_env left TIMEOUT_BIN empty"; FAIL=$((FAIL + 1)); }
-  # Override swaps in an equivalent valid binary for the bare-word `timeout()`
-  # mock above; absolute /usr/bin/timeout (resolve_env's first choice on this
-  # host) would bypass the function mock. The empty-TIMEOUT_BIN root cause of
-  # #175 is asserted just above — this line is mock plumbing, not the guard.
-  TIMEOUT_BIN="timeout"
-  # Fixture: synthetic dispatch-plumbing input. claude() is mocked above; the prompt body never reaches a real agent. Pre-#235 bare-slash shape preserved here intentionally (this fixture exercises TIMEOUT_BIN, NOT the canonical prompt shape — see plugins/uberdev/lib/goal-state.sh and the goal-pipeline SKILL for the canonical post-#235 wrapper).
+  # D-iso: resolve_env must select the real timeout binary used below.
+  [[ -n "$TIMEOUT_BIN" ]] && { echo "  PASS  D-regression resolve_env selected a real timeout binary"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-regression resolve_env left TIMEOUT_BIN empty"; FAIL=$((FAIL + 1)); }
+  # Fixture: synthetic dispatch-plumbing input. The executable Claude stub
+  # crosses the real timeout -> env -> exec boundary; the prompt body never
+  # reaches a real agent. Pre-#235 bare-slash shape is preserved intentionally
+  # because this fixture exercises TIMEOUT_BIN, not canonical prompt shape.
   PROMPT_FILE="$UBERDEV_TMPDIR/solve-prompt-42.txt"; printf '/uberdev:orchestrator --turbo solve GH issue #42\n' > "$PROMPT_FILE"
   uberdev_dispatch_one 42 small "$PROMPT_FILE"; rc=$?
   [[ "$rc" -ne 126 ]] && { echo "  PASS  D-regression dispatch rc != 126 (got $rc) — #175 fixed"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-regression dispatch rc=126 — #175 NOT fixed"; FAIL=$((FAIL + 1)); }
   [[ "$rc" -eq 0 ]] && { echo "  PASS  D-regression happy-path rc=0"; PASS=$((PASS + 1)); } || { echo "  FAIL  D-regression happy-path rc=$rc"; FAIL=$((FAIL + 1)); }
+  D_REGRESSION_STATUS="$UBERDEV_TMPDIR/solve-bg-status-42.json"
+  D_REGRESSION_STATE="$UBERDEV_TMPDIR/.agent-state-$(id -u)"
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do
+    grep -q '"state":"completed"' "$D_REGRESSION_STATUS" 2>/dev/null \
+      && ! grep -R -q 'run_id=solve-claude-bg-42-' "$D_REGRESSION_STATE/semaphore-v1" 2>/dev/null \
+      && break
+    command sleep 0.1
+  done
+  if grep -q '"state":"completed"' "$D_REGRESSION_STATUS" 2>/dev/null \
+      && [ ! -e "$D_REGRESSION_STATUS.watcher-error.json" ] \
+      && ! grep -R -q 'run_id=solve-claude-bg-42-' "$D_REGRESSION_STATE/semaphore-v1" 2>/dev/null; then
+    echo "  PASS  D-regression adapter supervision terminalizes and releases its exact lease"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  D-regression adapter supervision retained status error or lease state"
+    FAIL=$((FAIL + 1))
+  fi
   rm -rf "$UBERDEV_TMPDIR"
   printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
 ) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"

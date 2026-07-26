@@ -6,6 +6,27 @@ LIB="$ROOT/plugins/uberdev/lib/agent-dispatch.sh"
 
 [ -r "$LIB" ] || { echo "agent-dispatch: missing $LIB" >&2; exit 1; }
 
+if python3 -I -B - "$0" <<'PY'
+import pathlib,sys
+source=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+provider=source.split('\n_uberdev_agent_dispatch_backend() {',1)[1].split('export -f _uberdev_agent_dispatch_backend',1)[0]
+default=provider.split('    *)',1)[1].split('      ;;',1)[0]
+assert '"backend":"%s"' in default and '"$1" > "$6"' in default
+claude=source.split('\nCLAUDE_REQUEST="$(variant_request agent-dispatch-claude claude)"',1)[1].split('# An opaque provider',1)[0]
+assert 'wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-claude completed' in claude
+assert '[ ! -e "$TMP/run/claude.json.watcher-error.json" ]' in claude
+watcher=source.split('\nclaude_watcher_case() {',1)[1].split('claude_watcher_case initial-absent',1)[0]
+ambiguous=watcher.rsplit('    ambiguous)',1)[1].split('    probe-error)',1)[0]
+assert 'command sleep 0.6' not in ambiguous
+assert '[ -s "$run/status.json.watcher-error.json" ] && break' in ambiguous
+PY
+then
+  echo "agent-dispatch: portable fixture source contracts present"
+else
+  echo "agent-dispatch: fixture source contracts are not portable" >&2
+  exit 1
+fi
+
 # Windows Python does not expose os.geteuid(). Every embedded ownership/state
 # expression must use the same deterministic portable fallback.
 python3 -I - "$LIB" <<'PY'
@@ -273,7 +294,7 @@ PY
       printf '{"backend":"codex","state":"running","exit_code":null,"pid":"opaque:test-handle"}\n' > "$6"
       ;;
     *)
-      printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
+      printf '{"backend":"%s","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' "$1" > "$6"
       ;;
   esac
   # Provider status is a private lifecycle record. Production provider arms
@@ -722,6 +743,9 @@ PY
 
 CLAUDE_REQUEST="$(variant_request agent-dispatch-claude claude)"
 uberdev_agent_dispatch "$CLAUDE_REQUEST" "$TMP/run/prompt.txt" "$TMP/run/claude.md" "$TMP/run/claude.json"
+wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-claude completed 80 0.1
+[ ! -e "$TMP/run/claude.json.watcher-error.json" ]
+! grep -R -q 'run_id=agent-dispatch-claude' "$STATE_DIR/semaphore-v1" 2>/dev/null
 python3 - "$TMP/backend.json" <<'PY'
 import json, pathlib, sys
 capture = json.loads(pathlib.Path(sys.argv[1]).read_text())
@@ -1154,7 +1178,14 @@ claude_watcher_case() {
       done
       ;;
     ambiguous)
-      command sleep 0.6
+      for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do
+        [ -s "$run/status.json.watcher-error.json" ] && break
+        command sleep 0.1
+      done
+      [ -s "$run/status.json.watcher-error.json" ] || {
+        echo "ambiguous Claude probe did not persist its bounded watcher error" >&2
+        return 1
+      }
       ;;
     probe-error)
       # Exceed request timeout_s. Unknown probe evidence must still retain the
@@ -1202,7 +1233,10 @@ PY
       python3 -I - "$run/status.json.watcher-error.json" <<'PY'
 import json,sys
 row=json.load(open(sys.argv[1]))
-assert row['error']=='provider_probe_failed' and row['attempts']==3,row
+assert row=={
+ 'schema_version':1,'error':'provider_probe_failed','backend':'claude-bg',
+ 'handle':'abc12345','terminal':'provider_probe_failed','attempts':3,
+},row
 PY
       grep -q '"state":"running"' "$run/status.json" || {
         echo "$mode Claude probe did not remain nonterminal" >&2; return 1;
