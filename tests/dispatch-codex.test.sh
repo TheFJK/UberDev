@@ -1082,13 +1082,14 @@ else
 fi
 SH
 chmod +x "$BEH_TMP/bin/py"
-for runtime_command in bash env nohup cat sleep rm uname grep stat id ps basename dirname mkdir; do
+for runtime_command in env nohup cat sleep rm uname grep stat id ps basename dirname mkdir; do
   ln -s "$(command -v "$runtime_command")" "$BEH_TMP/bin/$runtime_command"
 done
+BEH_RUNTIME_PATH="$BEH_TMP/bin:/usr/bin:/bin"
 printf 'prompt body for codex' > "$BEH_TMP/prompt.txt"
 BEH_OUT="$(
   cd "$BEH_TMP/repo" && \
-  PATH="$BEH_TMP/bin" \
+  PATH="$BEH_RUNTIME_PATH" \
   UBERDEV_TMPDIR="$BEH_TMP/tmp" \
   UBERDEV_AGENT_CHILD_OWNED=1 \
   UBERDEV_AGENT_INSTANCE_ID=review-code-a1 \
@@ -1137,7 +1138,7 @@ BEH_OUT="$(
     printf "rc=%s\npid=%s\nresolved=%s\nrunning=%s\n" "$rc" "$pid" "$resolved_python" "$running"
     printf "status=%s\n" "$(cat "$UBERDEV_TMPDIR/solve-codex-status-42.json" 2>/dev/null)"
     printf "result=%s\n" "$(cat "$UBERDEV_TMPDIR/solve-codex-result-42.md" 2>/dev/null)"
-  ' _ "$DISPATCH_LIB" "$BEH_TMP/prompt.txt" "$BEH_TMP/bin"
+  ' _ "$DISPATCH_LIB" "$BEH_TMP/prompt.txt" "$BEH_RUNTIME_PATH"
 )"
 beh_pid="$(printf '%s\n' "$BEH_OUT" | sed -n 's/^pid=//p')"
 BEH_SLUG="$(UBERDEV_AGENT_INSTANCE_ID=review-code-a1 bash -c '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"

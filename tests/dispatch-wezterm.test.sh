@@ -214,15 +214,16 @@ printf '731\n'
 exit 0
 SH
 chmod +x "$WEZ_RUNTIME_TMP/bin/py" "$WEZ_RUNTIME_TMP/bin/git" "$WEZ_RUNTIME_TMP/bin/claude" "$WEZ_RUNTIME_TMP/bin/wezterm"
-for runtime_command in bash env cat sleep rm uname grep stat id awk mv tee mkdir basename dirname; do
+for runtime_command in env cat sleep rm uname grep stat id awk mv tee mkdir basename dirname; do
   ln -s "$(command -v "$runtime_command")" "$WEZ_RUNTIME_TMP/bin/$runtime_command"
 done
+WEZ_RUNTIME_PATH="$WEZ_RUNTIME_TMP/bin:/usr/bin:/bin"
 printf 'wezterm portable python prompt\n' > "$WEZ_RUNTIME_TMP/prompt.txt"
 WEZ_STATUS_FILE="$WEZ_RUNTIME_TMP/tmp/wezterm-clean-status.json"
 WEZ_PROVIDER_CAPTURE="$WEZ_RUNTIME_TMP/clean-provider-capture.txt"
 WEZ_RUNTIME_OUT="$(
   cd "$WEZ_RUNTIME_TMP/repo" && \
-  PATH="$WEZ_RUNTIME_TMP/bin" HOME="$WEZ_RUNTIME_TMP/home" UBERDEV_TMPDIR="$WEZ_RUNTIME_TMP/tmp" \
+  PATH="$WEZ_RUNTIME_PATH" HOME="$WEZ_RUNTIME_TMP/home" UBERDEV_TMPDIR="$WEZ_RUNTIME_TMP/tmp" \
   UBERDEV_AGENT_STATUS_FILE="$WEZ_STATUS_FILE" WEZ_STATUS_FILE="$WEZ_STATUS_FILE" \
   WEZ_PROVIDER_CAPTURE="$WEZ_PROVIDER_CAPTURE" \
   /bin/bash -c '
@@ -236,13 +237,13 @@ WEZ_RUNTIME_OUT="$(
     _uberdev_dispatch_wezterm 92 small "$2"
     printf "rc=%s\npane=%s\nresolved=%s\nstatus=%s\nprovider=%s\n" "$?" "${DISPATCH_ID:-}" "$resolved_python" \
       "$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)" "$(cat "$WEZ_PROVIDER_CAPTURE" 2>/dev/null)"
-  ' _ "$DISPATCH_LIB" "$WEZ_RUNTIME_TMP/prompt.txt" "$WEZ_RUNTIME_TMP/bin"
+  ' _ "$DISPATCH_LIB" "$WEZ_RUNTIME_TMP/prompt.txt" "$WEZ_RUNTIME_PATH"
 )"
 WEZ_HOSTILE_STATUS_FILE="$WEZ_RUNTIME_TMP/tmp/wezterm-hostile-status.json"
 WEZ_HOSTILE_PROVIDER_CAPTURE="$WEZ_RUNTIME_TMP/hostile-provider-capture.txt"
 WEZ_HOSTILE_OUT="$(
   cd "$WEZ_RUNTIME_TMP/repo" && \
-  PATH="$WEZ_RUNTIME_TMP/bin" HOME="$WEZ_RUNTIME_TMP/home" UBERDEV_TMPDIR="$WEZ_RUNTIME_TMP/tmp" \
+  PATH="$WEZ_RUNTIME_PATH" HOME="$WEZ_RUNTIME_TMP/home" UBERDEV_TMPDIR="$WEZ_RUNTIME_TMP/tmp" \
   UBERDEV_AGENT_STATUS_FILE="$WEZ_HOSTILE_STATUS_FILE" WEZ_STATUS_FILE="$WEZ_HOSTILE_STATUS_FILE" \
   WEZ_PROVIDER_CAPTURE="$WEZ_HOSTILE_PROVIDER_CAPTURE" \
   /bin/bash -c '
@@ -265,7 +266,7 @@ WEZ_HOSTILE_OUT="$(
     _uberdev_dispatch_wezterm 93 small "$2"
     printf "rc=%s\npane=%s\nresolved=%s\nstatus=%s\nprovider=%s\n" "$?" "${DISPATCH_ID:-}" "$resolved_python" \
       "$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)" "$(cat "$WEZ_PROVIDER_CAPTURE" 2>/dev/null)"
-  ' _ "$DISPATCH_LIB" "$WEZ_RUNTIME_TMP/prompt.txt" "$WEZ_RUNTIME_TMP/bin"
+  ' _ "$DISPATCH_LIB" "$WEZ_RUNTIME_TMP/prompt.txt" "$WEZ_RUNTIME_PATH"
 )"
 WT_RUNTIME_BODY="$(awk '/^_uberdev_dispatch_wezterm\(\)/{f=1} f{print} f&&/^}/{exit}' "$DISPATCH_LIB")"
 WEZ_PYTHON_EXPECTED="$(cd "$WEZ_RUNTIME_TMP/bin" && pwd -P)/py"

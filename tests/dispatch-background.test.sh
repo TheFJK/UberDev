@@ -274,12 +274,25 @@ printf 'immediate %s result\n' "$body"
 case "$body" in *failed*) exit 29 ;; *) exit 0 ;; esac
 SH
 chmod +x "$IMMEDIATE_TMP/bin/git" "$IMMEDIATE_TMP/bin/claude"
-for runtime_command in bash env nohup cat sleep rm uname grep stat id ps find basename dirname mkdir; do
+for runtime_command in env nohup cat sleep rm uname grep stat id ps find basename dirname mkdir; do
   ln -s "$(command -v "$runtime_command")" "$IMMEDIATE_TMP/bin/$runtime_command"
 done
+IMMEDIATE_RUNTIME_PATH="$IMMEDIATE_TMP/bin:/usr/bin:/bin"
+NATIVE_BASH_PROBE="$(PATH="$IMMEDIATE_RUNTIME_PATH" "$REAL_PYTHON" -I -B -c \
+  'import shutil; print(shutil.which("bash") or "", end="")')"
+case "$NATIVE_BASH_PROBE" in
+  ''|"$IMMEDIATE_TMP/bin/"*)
+    echo "  FAIL  detached native Python resolves a real Git Bash executable outside the synthetic fixture bin: $NATIVE_BASH_PROBE"
+    FAIL=$((FAIL + 1))
+    ;;
+  *)
+    echo "  PASS  detached native Python resolves a real Git Bash executable outside the synthetic fixture bin"
+    PASS=$((PASS + 1))
+    ;;
+esac
 IMMEDIATE_OUT="$(
   cd "$IMMEDIATE_TMP/repo" &&
-  PATH="$IMMEDIATE_TMP/bin" UBERDEV_TMPDIR="$IMMEDIATE_TMP/tmp" \
+  PATH="$IMMEDIATE_RUNTIME_PATH" UBERDEV_TMPDIR="$IMMEDIATE_TMP/tmp" \
   _UBERDEV_PYTHON_EXE="$REAL_PYTHON" _UBERDEV_PYTHON_PREFIX='' \
   /bin/bash -c '
     . "$1"
@@ -413,13 +426,14 @@ shift
 exec "$REAL_PYTHON" "\$@"
 SH
 chmod +x "$DELAYED_TMP/bin/py"
-for runtime_command in bash env nohup cat sleep rm uname grep stat id ps basename dirname mkdir; do
+for runtime_command in env nohup cat sleep rm uname grep stat id ps basename dirname mkdir; do
   ln -s "$(command -v "$runtime_command")" "$DELAYED_TMP/bin/$runtime_command"
 done
+DELAYED_RUNTIME_PATH="$DELAYED_TMP/bin:/usr/bin:/bin"
 printf 'delayed' > "$DELAYED_TMP/prompt.txt"
 DELAYED_OUT="$(
   cd "$DELAYED_TMP/repo" &&
-  PATH="$DELAYED_TMP/bin" UBERDEV_TMPDIR="$DELAYED_TMP/tmp" \
+  PATH="$DELAYED_RUNTIME_PATH" UBERDEV_TMPDIR="$DELAYED_TMP/tmp" \
   /bin/bash -c '
     . "$1"
     PATH=../bin
@@ -447,7 +461,7 @@ DELAYED_OUT="$(
     done
     printf "rc=%s\npid=%s\nresolved=%s\nrunning=%s\nterminal=%s\nresult=%s\n" \
       "$rc" "$pid" "$resolved_python" "$running" "$terminal" "$(cat "$UBERDEV_TMPDIR/solve-bg-result-90.md" 2>/dev/null)"
-  ' _ "$DISPATCH_LIB" "$DELAYED_TMP/prompt.txt" "$DELAYED_TMP/bin"
+  ' _ "$DISPATCH_LIB" "$DELAYED_TMP/prompt.txt" "$DELAYED_RUNTIME_PATH"
 )"
 delayed_pid="$(printf '%s\n' "$DELAYED_OUT" | sed -n 's/^pid=//p')"
 delayed_python_expected="$(cd "$DELAYED_TMP/bin" && pwd -P)/py"
