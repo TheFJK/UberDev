@@ -1,1 +1,1 @@
-{"backend":"codex","event":"agent_started","owner_pid":999999,"run_id":"run-transition","schema_version":1,"timestamp":"2026-07-10T00:00:00Z"}
+{"backend":"codex","event":"agent_started","owner_pid":999999,"owner_process_identity":"999999|999999|999999|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","run_id":"run-transition","schema_version":1,"timestamp":"2026-07-10T00:00:00Z"}

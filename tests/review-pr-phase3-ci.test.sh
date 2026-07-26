@@ -193,6 +193,152 @@ assert_no_grep "$CLASSIFIER" '^.*data\.quote' \
   "S10.4 — no data.quote field in return contract (secret-leak guard)"
 assert_grep "$CLASSIFIER" 'CLASSIFIED.*AMBIGUOUS.*REFUSED|status: CLASSIFIED' \
   "S10.5 — refusal triggers + AMBIGUOUS path documented"
+assert_grep "$REVIEW_PR" 'review_validate_ci_classification' \
+  "S10.6 — controller validates classifier output before routing"
+assert_grep "$REVIEW_PR" 'ci_classify_returned.*contract_invalid' \
+  "S10.7 — invalid class/anchor fails closed with an audit event"
+assert_grep "$REVIEW_PR" 'gh-run-.*\[1-9\].*signal_anchor|signal_anchor.*positive integer' \
+  "S10.8 — blank and zero-line signal anchors are rejected"
+assert_grep "$REVIEW_PR" 'CI_REFUSED_AGGREGATE_PATH.*RESEARCH_DIR_ABS/ci-refused-synthetic' \
+  "S10.9 — CI refusal aggregate stays inside the run research directory"
+assert_no_grep "$REVIEW_PR" 'tmp-synthetic-aggregate|freshly-created `mktemp`' \
+  "S10.10 — CI refusal handoff no longer points at a system mktemp artifact"
+assert_grep "$REVIEW_PR" 'review_child_result_path.*ci-classify\.launched.*review_pr\.ci\.classify' \
+  "S10.10a — classifier validation resolves the routed child's canonical result ledger"
+assert_no_grep "$REVIEW_PR" 'CI_CLASSIFICATION_PATH="\$RESEARCH_DIR_ABS/ci-classification-' \
+  "S10.10b — classifier validation does not read an artifact no child writes"
+assert_grep "$REVIEW_PR" 'os\.write\(fd,payload\)' \
+  "S10.10c — refusal aggregate serializes a concrete envelope and finding row"
+
+CLASSIFY_HELPER="$(mktemp)"
+CLASSIFY_CASE="$(mktemp)"
+awk '
+  /^[[:space:]]*review_validate_ci_classification\(\) \{/ { capture=1 }
+  capture { print }
+  capture && /^[[:space:]]*\}$/ { exit }
+' "$REVIEW_PR" > "$CLASSIFY_HELPER"
+write_classifier_case() {
+  local status="$1" failure_class="$2" signal_anchor="$3" rationale="$4"
+  printf '```yaml\nstatus: %s\nfailure_class: %s\nsignal_anchor: %s\nrationale: %s\nrisks: []\n```\n' \
+    "$status" "$failure_class" "$signal_anchor" "$rationale" > "$CLASSIFY_CASE"
+}
+write_classifier_case CLASSIFIED code_bug '"README.md:42"' '"repository test failure"'
+CLASSIFY_SPLIT="$(bash -c '. "$1"; review_validate_ci_classification "$2" "$3"' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT")"
+if [ "$CLASSIFY_SPLIT" = $'CLASSIFIED\tcode_bug\tREADME.md:42\t-' ]; then
+  echo "  PASS  S10.11 — valid classifier output survives the controller read boundary"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.11 — valid classifier output failed the controller read boundary: $CLASSIFY_SPLIT"; FAIL=$((FAIL + 1))
+fi
+printf 'bounded classifier explanation\n' > "$CLASSIFY_CASE"
+printf '```yaml\nstatus: CLASSIFIED\nfailure_class: flaky\nsignal_anchor: "gh-run-123:42"\nrationale: "transient runner signal"\nrisks: []\n```\n' >> "$CLASSIFY_CASE"
+CLASSIFY_WITH_PREFIX="$(bash -c '. "$1"; review_validate_ci_classification "$2" "$3"' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT")"
+if [ "$CLASSIFY_WITH_PREFIX" = $'CLASSIFIED\tflaky\tgh-run-123:42\t-' ]; then
+  echo "  PASS  S10.11a — controller extracts the contract-permitted final fenced document"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.11a — controller rejected final fenced classifier output: $CLASSIFY_WITH_PREFIX"; FAIL=$((FAIL + 1))
+fi
+CLASSIFY_INVALID=0
+for invalid_anchor in ':121' 'file:0' '/absolute:1' '../README.md:1' 'missing.ts:1' ''; do
+  write_classifier_case CLASSIFIED code_bug "\"$invalid_anchor\"" '"invalid anchor fixture"'
+  if bash -c '. "$1"; review_validate_ci_classification "$2" "$3" >/dev/null' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT"; then
+    CLASSIFY_INVALID=$((CLASSIFY_INVALID + 1))
+  fi
+done
+write_classifier_case CLASSIFIED code_bug '"gh-run-123:42"' '"invalid repository anchor fixture"'
+if bash -c '. "$1"; review_validate_ci_classification "$2" "$3" >/dev/null' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT"; then
+  CLASSIFY_INVALID=$((CLASSIFY_INVALID + 1))
+fi
+write_classifier_case CLASSIFIED unknown '"file.ts:12"' '"unknown class fixture"'
+if bash -c '. "$1"; review_validate_ci_classification "$2" "$3" >/dev/null' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT"; then
+  CLASSIFY_INVALID=$((CLASSIFY_INVALID + 1))
+fi
+write_classifier_case AMBIGUOUS null null '"no supported signal"'
+CLASSIFY_AMBIGUOUS="$(bash -c '. "$1"; review_validate_ci_classification "$2" "$3"' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT")"
+write_classifier_case REFUSED null null '"input-malformed"'
+CLASSIFY_REFUSED="$(bash -c '. "$1"; review_validate_ci_classification "$2" "$3"' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT")"
+write_classifier_case CLASSIFIED flaky '"gh-run-123:42"' '"transient runner signal"'
+CLASSIFY_TELEMETRY="$(bash -c '. "$1"; review_validate_ci_classification "$2" "$3"' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT")"
+if [ "$CLASSIFY_INVALID" -eq 0 ]; then
+  echo "  PASS  S10.12 — blank, malformed, zero-line, and unknown classifier outputs fail closed"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.12 — $CLASSIFY_INVALID invalid classifier outputs were accepted"; FAIL=$((FAIL + 1))
+fi
+if [ "$CLASSIFY_AMBIGUOUS" = $'AMBIGUOUS\tflaky\t-\t-' ] \
+    && [ "$CLASSIFY_REFUSED" = $'REFUSED\t-\t-\tinput-malformed' ] \
+    && [ "$CLASSIFY_TELEMETRY" = $'CLASSIFIED\tflaky\tgh-run-123:42\t-' ]; then
+  echo "  PASS  S10.13 — explicit ambiguous, refused, and telemetry-only variants preserve their invariants"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.13 — classifier union variants drifted: ambiguous=$CLASSIFY_AMBIGUOUS refused=$CLASSIFY_REFUSED telemetry=$CLASSIFY_TELEMETRY"; FAIL=$((FAIL + 1))
+fi
+
+CLASSIFY_STRICT_INVALID=0
+for malformed_document in \
+  $'```yaml\nstatus: CLASSIFIED\nfailure_class: flaky\nsignal_anchor: "gh-run-123:42"\nrisks: []\n```\n' \
+  $'```yaml\nstatus: CLASSIFIED\nfailure_class: flaky\nsignal_anchor: "gh-run-123:42"\nrationale: "fixture"\n```\n' \
+  $'```yaml\nstatus: CLASSIFIED\nfailure_class: flaky\nsignal_anchor: "gh-run-123:42"\nrationale: "fixture"\nrisks: []\nunknown: value\n```\n' \
+  $'```yaml\nstatus: CLASSIFIED\nfailure_class: flaky\nsignal_anchor: "gh-run-123:42"\nrationale: "fixture"\nrisks: []\n```\ntrailing content\n' \
+  $'```yaml\nstatus: CLASSIFIED\nstatus: AMBIGUOUS\nfailure_class: flaky\nsignal_anchor: "gh-run-123:42"\nrationale: "fixture"\nrisks: []\n```\n'; do
+  printf '%s' "$malformed_document" > "$CLASSIFY_CASE"
+  if bash -c '. "$1"; review_validate_ci_classification "$2" "$3" >/dev/null' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT"; then
+    CLASSIFY_STRICT_INVALID=$((CLASSIFY_STRICT_INVALID + 1))
+  fi
+done
+if [ "$CLASSIFY_STRICT_INVALID" -eq 0 ]; then
+  echo "  PASS  S10.14 — classifier rejects incomplete, duplicate, unknown, and trailing out-of-fence content"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.14 — $CLASSIFY_STRICT_INVALID malformed classifier documents were accepted"; FAIL=$((FAIL + 1))
+fi
+
+RESULT_PATH_HELPER="$(mktemp)"
+RESULT_PATH_TMP="$(mktemp -d)"
+awk '
+  /^review_child_result_path\(\) \{/ { capture=1 }
+  capture { print }
+  capture && /^\}$/ { exit }
+' "$REVIEW_PR" > "$RESULT_PATH_HELPER"
+mkdir -p "$RESULT_PATH_TMP/run/children/classifier"
+RESULT_PATH="$RESULT_PATH_TMP/run/children/classifier/result.md"
+RESULT_LEDGER="$RESULT_PATH_TMP/classifier.launched"
+printf 'classifier result\n' > "$RESULT_PATH"
+printf '{"edge":"review_pr.ci.classify","result":"%s"}\n' "$RESULT_PATH" > "$RESULT_LEDGER"
+RESULT_PATH_RESOLVED="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER")"
+RESULT_PATH_EXPECTED="$(python3 -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]),end="")' "$RESULT_PATH")"
+RESULT_PATH_INVALID=0
+[ "$RESULT_PATH_RESOLVED" = "$RESULT_PATH_EXPECTED" ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+printf '{"edge":"review_pr.ci.classify","result":"%s"}\n{"edge":"review_pr.ci.classify","result":"%s"}\n' \
+  "$RESULT_PATH" "$RESULT_PATH" > "$RESULT_LEDGER"
+RESULT_REASON="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \
+  && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+[ "$RESULT_REASON" = classification_ledger_duplicate ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+printf '{bad json\n' > "$RESULT_LEDGER"
+RESULT_REASON="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \
+  && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+[ "$RESULT_REASON" = classification_ledger_malformed ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+printf '[]\n' > "$RESULT_LEDGER"
+RESULT_REASON="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \
+  && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+[ "$RESULT_REASON" = classification_ledger_malformed ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+printf '{"edge":"review_pr.ci.classify","result":"%s"}\n' "$RESULT_PATH_TMP/run/children/missing/result.md" > "$RESULT_LEDGER"
+RESULT_REASON="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \
+  && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+[ "$RESULT_REASON" = classification_artifact_missing ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+mv "$RESULT_PATH" "$RESULT_PATH.real"
+ln -s "$RESULT_PATH.real" "$RESULT_PATH"
+printf '{"edge":"review_pr.ci.classify","result":"%s"}\n' "$RESULT_PATH" > "$RESULT_LEDGER"
+bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify >/dev/null' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" \
+  && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+rm -f "$RESULT_PATH"
+ln "$RESULT_PATH.real" "$RESULT_PATH"
+bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify >/dev/null' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" \
+  && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+if [ "$RESULT_PATH_INVALID" -eq 0 ]; then
+  echo "  PASS  S10.15 — classifier result ledger accepts one canonical result and rejects duplicate, malformed, missing, symlink, and hard-link artifacts"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.15 — classifier result-path boundary accepted $RESULT_PATH_INVALID invalid cases"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$RESULT_PATH_TMP"
+rm -f "$RESULT_PATH_HELPER"
+rm -f "$CLASSIFY_HELPER" "$CLASSIFY_CASE"
 
 echo
 echo "== S11: ci-code-fixer agent shape =="

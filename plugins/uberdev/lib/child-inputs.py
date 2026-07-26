@@ -3,6 +3,8 @@
 
 import argparse
 import json
+import posixpath
+import re
 import sys
 from pathlib import Path
 from typing import Any, NoReturn
@@ -19,6 +21,7 @@ SUPPORTED_TYPES = {
     "string_array",
     "path_array",
     "optional_path_array",
+    "repo_path_array",
 }
 
 
@@ -99,6 +102,27 @@ def validate_value(key: str, value: Any, kind: str) -> None:
     if kind in {"optional_string", "optional_path"}:
         if not isinstance(value, str):
             fail(f"input {key} must be a string")
+        return
+    if kind == "repo_path_array":
+        if not isinstance(value, list) or not value:
+            fail(f"input {key} must be a non-empty array of repository-relative paths")
+        for item in value:
+            if (
+                not isinstance(item, str)
+                or not item
+                or len(item) > 4096
+                or item.startswith("/")
+                or "\\" in item
+                or any(ord(char) < 32 or ord(char) == 127 for char in item)
+            ):
+                fail(f"input {key} contains an unsafe repository path")
+            parts = item.split("/")
+            if (
+                any(part in {"", ".", ".."} for part in parts)
+                or re.match(r"^[A-Za-z]:", item)
+                or posixpath.normpath(item) != item
+            ):
+                fail(f"input {key} contains an unsafe repository path")
         return
     if kind in {"string_array", "path_array", "optional_path_array"}:
         if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):

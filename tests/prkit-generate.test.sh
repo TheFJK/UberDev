@@ -27,10 +27,10 @@ if bash "$GEN" --target "$T1" --version 0.1.0 >/dev/null 2>&1; then ok "G1 gener
 # G2 — verify gate independently passes on the produced tree
 if bash "$VERIFY" "$T1" >/dev/null 2>&1; then ok "G2 verify passes on generated tree"; else no "G2 verify failed on generated tree"; fi
 
-# G3 — EXACTLY 32 source files landed under plugins/prkit (manifest count-lock;
+# G3 — EXACTLY 34 source files landed under plugins/prkit (manifest count-lock;
 # -eq not -ge so a silently-dropped copy OR a stray extra file both fail)
-n=$(find "$T1/plugins/prkit/commands" "$T1/plugins/prkit/agents" "$T1/plugins/prkit/skills" "$T1/plugins/prkit/lib" "$T1/plugins/prkit/policy" -type f 2>/dev/null | wc -l | tr -d ' ')
-[ "$n" -eq 32 ] && ok "G3 exactly 32 copied files present" || no "G3 copied $n files (expected 32)"
+n=$(find "$T1/plugins/prkit/commands" "$T1/plugins/prkit/agents" "$T1/plugins/prkit/skills" "$T1/plugins/prkit/lib" "$T1/plugins/prkit/policy" "$T1/plugins/prkit/shared" -type f 2>/dev/null | wc -l | tr -d ' ')
+[ "$n" -eq 34 ] && ok "G3 exactly 34 copied files present" || no "G3 copied $n files (expected 34)"
 
 # G4 — scaffold files exist with interpolated version
 grep -q '0.1.0' "$T1/plugins/prkit/.claude-plugin/plugin.json" && ok "G4 plugin.json version interpolated" || no "G4 plugin.json version missing"
@@ -55,6 +55,63 @@ if [ -f "$T1/codex/prkit-codex/skills/prkit-cmd-review-pr/SKILL.md" ] \
    && grep -q '"name": "prkit-codex"' "$T1/codex/prkit-codex/.codex-plugin/plugin.json"; then
   ok "G6 codex port generated (prkit-cmd-* + prkit-prefixed support skills, no flat collision)"
 else no "G6 codex port incomplete or has un-prefixed support skill"; fi
+
+# G6a — the copied full-UberDev installer is rewritten to the standalone
+# manifest's actual fleet size. These hints are user-facing verification, so a
+# successful install must not claim the full 39/44 fleet.
+if grep -qF '# 5 prkit skills' "$T1/codex/install-codex.sh" \
+   && grep -qF '# 14 prkit-*.toml subagents' "$T1/codex/install-codex.sh" \
+   && grep -qF 'NOT the 14 agents' "$T1/codex/install-codex.sh" \
+   && ! grep -Eq '(^|[^0-9])(39|44)([^0-9]|$)' "$T1/codex/install-codex.sh"; then
+  ok "G6a standalone installer reports the manifest-true 5 skills / 14 agents"
+else no "G6a standalone installer retains full-UberDev fleet counts"; fi
+
+# G6aa — exercise the rewrite transaction itself against synthetic drift. A
+# traversal/count mismatch and a missing substitution anchor must both fail
+# before touching the installer.
+if python3 -I -B - "$GEN" <<'PY'
+import pathlib,subprocess,sys,tempfile
+source=pathlib.Path(sys.argv[1]).read_text()
+marker='  python3 -I -B - "$TARGET" <<\'PY\' || {'
+snippet=source.split(marker,1)[1].split('\nPY\n',1)[0]
+anchors='NOT the 44 agents\n# ~39 Prkit skills incl. command-skills\n# 44 prkit-*.toml subagents\n'
+def fixture(skills,installer_text):
+ root=pathlib.Path(tempfile.mkdtemp()); (root/'codex/prkit-codex/skills').mkdir(parents=True); (root/'codex/agents').mkdir()
+ for index in range(skills): (root/f'codex/prkit-codex/skills/s{index}').mkdir()
+ for index in range(14): (root/f'codex/agents/prkit-a{index}.toml').write_text('x')
+ target=root/'codex/install-codex.sh'; target.write_text(installer_text)
+ return root,target
+for root,target in (fixture(6,anchors),fixture(5,anchors.replace('NOT the 44 agents','anchor drift'))):
+ before=target.read_bytes()
+ result=subprocess.run([sys.executable,'-I','-B','-',str(root)],input=snippet,text=True,capture_output=True)
+ assert result.returncode!=0,result
+ assert target.read_bytes()==before
+PY
+then ok "G6aa count discovery and anchor drift fail closed without mutation"
+else no "G6aa generator count/anchor transaction accepted drift"; fi
+
+# G6b — both standalone runtimes ship the manifest-declared reviewer contract,
+# while native Codex role TOMLs remain edge-agnostic.
+if [ -f "$T1/plugins/prkit/policy/solve-run-tree-v1.json" ] \
+   && [ -f "$T1/plugins/prkit/shared/phase1-reviewer-output-v1.md" ] \
+   && [ -f "$T1/codex/prkit-codex/policy/solve-run-tree-v1.json" ] \
+   && [ -f "$T1/codex/prkit-codex/shared/phase1-reviewer-output-v1.md" ] \
+   && python3 - "$T1" <<'PY'
+import pathlib,sys
+root=pathlib.Path(sys.argv[1]); contract=(root/'codex/prkit-codex/shared/phase1-reviewer-output-v1.md').read_text()
+roles=('code-reviewer','silent-failure-hunter','type-design-analyzer','comment-analyzer','pr-test-analyzer')
+assert all(contract not in (root/f'codex/agents/prkit-{role}.toml').read_text() for role in roles)
+PY
+then ok "G6b routed reviewer contract packaged and absent from native roles"
+else no "G6b reviewer contract scope is incorrect"; fi
+
+# G6c — the generated standalone Codex runtime must execute the focused
+# six-reviewer happy path, not merely pass structural namespace scans.
+if SIX_CHILD_RUNTIME_ROOT="$T1/codex/prkit-codex" \
+   SIX_CHILD_RUNTIME_NAMESPACE=prkit SIX_CHILD_CASE=1 \
+   bash "$REPO_ROOT/tests/review-pr-codex-six-child.test.sh" >/dev/null 2>&1; then
+  ok "G6c generated standalone prkit executes six-child review path"
+else no "G6c generated standalone prkit six-child runtime failed"; fi
 
 # G7 — no uberdev token survives anywhere under codex/
 if grep -rilE 'uberdev' "$T1/codex" >/dev/null 2>&1; then no "G7 uberdev token survives under codex/"; else ok "G7 codex tree is uberdev-free"; fi

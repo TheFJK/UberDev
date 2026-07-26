@@ -1,6 +1,6 @@
 # tools/prkit/manifest.txt — prkit PR-phase copy set (RFC 0014 §5.3).
 # Paths are relative to plugins/uberdev/. Blank lines and #-comments ignored.
-# Keep in sync with tests/prkit-manifest.test.sh (count-locked at 32).
+# Keep in sync with tests/prkit-manifest.test.sh (count-locked at 34).
 
 # --- commands (3) ---
 commands/review-pr.md
@@ -41,5 +41,9 @@ lib/child-inputs.py
 lib/command-workspace.py
 lib/secret-scan.sh
 
-# --- policy (1 — routing policy data file) ---
+# --- policy (2 — routing + child run-tree data files) ---
 policy/model-routing-v1.json
+policy/solve-run-tree-v1.json
+
+# --- shared output contracts (1) ---
+shared/phase1-reviewer-output-v1.md

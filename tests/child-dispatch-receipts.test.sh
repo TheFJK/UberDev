@@ -4,6 +4,75 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
 HELPER="$ROOT/plugins/uberdev/lib/child-receipts.py"
+
+if [ "${OS:-}" = Windows_NT ]; then
+  HELPER_NATIVE="$(cygpath -w "$HELPER")"
+  python3 -I -B - "$HELPER_NATIVE" <<'PY'
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+import tempfile
+
+helper_path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("child_receipts", helper_path)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+def rejected(callable_):
+    try:
+        callable_()
+    except module.ReceiptFailure:
+        return
+    raise AssertionError("unsafe Windows receipt path was accepted")
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = pathlib.Path(temporary)
+    receipt = root / "receipts.jsonl"
+    receipt.touch()
+    config = module.ReceiptConfig(
+        source="plugins/uberdev/skills/subagent-driven-dev/SKILL.md",
+        path=str(receipt),
+    )
+    record = module.build_record(config, "build", "receipt.windows", None, {"value": 1})
+    module.append_record(str(receipt), record)
+    row = json.loads(receipt.read_text(encoding="utf-8"))
+    assert row["event"] == "build" and row["edge_id"] == "receipt.windows"
+
+    handoff = root / "handoff.json"
+    handoff.write_text(
+        '{"edge_id":"receipt.windows","instance_id":"worker-1","inputs":{"value":1}}\n',
+        encoding="utf-8",
+    )
+    assert module.safe_handoff(str(handoff))["instance_id"] == "worker-1"
+
+    receipt_link = root / "receipt-link.jsonl"
+    os.symlink(receipt, receipt_link)
+    rejected(lambda: module.append_record(str(receipt_link), record))
+
+    handoff_link = root / "handoff-link.json"
+    os.symlink(handoff, handoff_link)
+    rejected(lambda: module.safe_handoff(str(handoff_link)))
+
+    real_parent = root / "real-parent"
+    real_parent.mkdir()
+    (real_parent / "receipts.jsonl").touch()
+    linked_parent = root / "linked-parent"
+    os.symlink(real_parent, linked_parent, target_is_directory=True)
+    rejected(lambda: module.append_record(str(linked_parent / "receipts.jsonl"), record))
+
+    hardlink = root / "receipt-hardlink.jsonl"
+    os.link(receipt, hardlink)
+    rejected(lambda: module.append_record(str(hardlink), record))
+
+print("child-dispatch-receipts: Windows append, handoff, link, and reparse checks passed")
+PY
+  exit 0
+fi
+
 TMP="$(mktemp -d "$ROOT/tests/_fixtures/child-dispatch-receipts.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 umask 077
@@ -299,7 +368,7 @@ import json,pathlib,sys
 last=json.loads(pathlib.Path(sys.argv[1]).read_text().splitlines()[-1])
 assert last['event']=='dispatch' and last['source']==sys.argv[2] and last['instance_id']==sys.argv[3]
 PY
-  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"receipt-provider"}\n' >"$4"
+  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"receipt-provider","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$4"
   chmod 600 "$4"
 }
 

@@ -342,7 +342,12 @@ def toml_block(value: str) -> str:
     return f'"""{escaped}"""'
 
 
-def render_toml(fm: dict, body: str, source: str, policy: dict) -> str:
+def render_toml(
+    fm: dict,
+    body: str,
+    source: str,
+    policy: dict,
+) -> str:
     """Render the full Codex agent TOML document."""
     lines: list[str] = []
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Asserts that /uberdev:review-pr names all 6 Phase 1 reviewer dispatch slots
 # (5 distinct agent files; code-reviewer is dispatched twice — general lens +
-# correctness lens), dispatches them in parallel (single message), exposes the
+# correctness lens), dispatches them in capped parallel waves, exposes the
 # documented aspect arguments, plumbs aspect_emphasis + sequential env-var,
 # dispatches code-fixer for fix application in both Phase 1 + Phase 2, and
 # that each of the 5 distinct agent files contains the no-quoting output rule
@@ -92,9 +92,24 @@ assert_in_section "$REVIEW_PR" '^## Agent Descriptions' '^## Tips' \
   'code-fixer' "code-fixer named in Agent Descriptions (apply-loop fixer)"
 
 echo
-echo "== Parallel-default invariant documented =="
-assert_grep "$REVIEW_PR" 'single message|SINGLE message|one assistant turn|ONE assistant turn|single assistant turn' \
-  "parallel-fanout invariant documented"
+echo "== Capped-wave parallel invariant documented =="
+assert_grep "$REVIEW_PR" 'cap-controlled waves.*dispatched before its first wait|dispatch-before-wait.*cap-controlled waves' \
+  "capped-wave dispatch-before-wait invariant documented"
+assert_no_grep "$REVIEW_PR" '6 reviewer agents in a single message|single-message-fanout invariant' \
+  "review command does not promise an impossible single wave when the cap is below six"
+
+echo
+echo "== Canonical cap-controlled-wave wording is synchronized =="
+CAP_WAVE_PATTERN='one or more cap-controlled waves.*every child in (each|a) wave dispatched before (its|the) first wait'
+for cap_wave_doc in \
+  "$REPO_ROOT/README.md" \
+  "$REPO_ROOT/plugins/uberdev/docs/testing.md" \
+  "$REPO_ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md" \
+  "$REPO_ROOT/codex/uberdev-codex/skills/post-impl-review/SKILL.md" \
+  "$REPO_ROOT/codex/uberdev-codex/skills/uberdev-cmd-review-pr/SKILL.md"; do
+  assert_grep "$cap_wave_doc" "$CAP_WAVE_PATTERN" \
+    "$(basename "$cap_wave_doc"): cap-controlled dispatch-before-wait wording"
+done
 
 echo
 echo "== Aspect arguments listed in Available Review Aspects =="
@@ -278,10 +293,10 @@ assert_grep "$REVIEW_PR" \
   'RUN_ID="\$\(date \+%Y%m%d-%H%M%S\)-\$\(git rev-parse --short HEAD\)"' \
   "R8.4 — Phase 1 mints its own RUN_ID per the canonical /review-pr Run-ID format"
 
-# R8.5 — fallback prose: missing/empty artifact → log warning + continue to Phase 2
+# R8.5 — missing reviewer evidence is supervisory failure, never an empty review
 assert_grep "$REVIEW_PR" \
-  '[Mm]issing or empty.*[Pp]hase 2|all [0-9]+ reviewers returned .BLOCKED.|continue to Phase 2 with' \
-  "R8.5 — Phase 1 falls back to Phase 2 with zero auto-applied fixes when artifact is missing/empty"
+  '[Mm]issing or empty.*terminate|terminate .review-pr. immediately|Do NOT dispatch the fixer, enter Phase 2' \
+  "R8.5 — Phase 1 fails closed before fixer/Phase 2 when the aggregate is missing or empty"
 
 # R8.6 — separate-commit invariant preserved (Phase 1 fix: vs Phase 2 refactor:)
 assert_grep "$REVIEW_PR" \
@@ -455,7 +470,7 @@ assert_grep "$REVIEW_PR" 'aspect_emphasis=\$ASPECT_LIST|aspect_emphasis: \$ASPEC
 assert_grep "$REVIEW_PR" '## Emphasis|## Additional Focus|aspect_emphasis' \
   "R11.3 — emphasis subsection plumbing prose present"
 # R11.4 — single-message-fanout invariant explicitly preserved (aspect filters never gate)
-assert_grep "$REVIEW_PR" 'always fan out|single-message-fanout invariant.*emphasis is advisory|emphasis is advisory, never gating' \
+assert_grep "$REVIEW_PR" 'always fan out|emphasis is advisory(,| and) never gat' \
   "R11.4 — invariant preserved: aspect filters never gate dispatch"
 
 echo

@@ -100,13 +100,23 @@ else
 fi
 windows_generation="$(printf 'c%.0s' {1..32})"
 windows_status_lease="$TMP/${windows_generation}$(printf 'd%.0s' {1..32}).lease"
-printf 'version=1\ngeneration=%s\nrun_id=windows-status-reread\nowner_pid=%s\nbackend_handle=\nstart_epoch=1\ntimeout_s=5\nstatus_path=C:\\state\\status.json\n' \
-  "$windows_generation" "$$" > "$windows_status_lease"
+printf 'version=1\ngeneration=%s\nrun_id=windows-status-reread\nowner_pid=%s\nowner_identity=%s\nbackend_handle=\nbackend_identity=\nstart_epoch=1\ntimeout_s=5\nstatus_path=C:\\state\\status.json\n' \
+  "$windows_generation" "$$" "$(_uberdev_semaphore_process_identity "$$")" > "$windows_status_lease"
 if _uberdev_semaphore_read_lease "$windows_status_lease" \
     && [ "$_UBERDEV_LEASE_STATUS_PATH" = 'C:\state\status.json' ]; then
   pass "persisted native Windows status paths survive lease reread"
 else
   fail "persisted native Windows status paths survive lease reread" "status=$_UBERDEV_LEASE_STATUS_PATH"
+fi
+mismatched_owner_generation="$(printf 'e%.0s' {1..32})"
+mismatched_owner_lease="$TMP/${mismatched_owner_generation}$(printf 'f%.0s' {1..32}).lease"
+printf 'version=1\ngeneration=%s\nrun_id=mismatched-owner-identity\nowner_pid=%s\nowner_identity=%s|1|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nbackend_handle=\nbackend_identity=\nstart_epoch=1\ntimeout_s=5\nstatus_path=\n' \
+  "$mismatched_owner_generation" "$$" "$(( $$ + 1 ))" >"$mismatched_owner_lease"
+capture _uberdev_semaphore_read_lease "$mismatched_owner_lease"
+if [ "$CAPTURE_RC" -eq 1 ]; then
+  pass "lease owner identity is bound to owner_pid"
+else
+  fail "lease owner identity is bound to owner_pid" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 capture uberdev_semaphore_acquire "$TMP/invalid-cap" repo codex 0 run 5
 [ "$CAPTURE_RC" -eq 2 ] && pass "zero cap is rejected" || fail "zero cap is rejected" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -120,6 +130,176 @@ capture uberdev_semaphore_acquire "$TMP/invalid-run" repo codex 1 '' 5
 [ "$CAPTURE_RC" -eq 2 ] && pass "empty run id is rejected" || fail "empty run id is rejected" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 capture uberdev_semaphore_acquire "$TMP/invalid-run-newline" repo codex 1 $'run\nowner_pid=1' 5
 [ "$CAPTURE_RC" -eq 2 ] && pass "lease-field newline injection is rejected" || fail "lease-field newline injection is rejected" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+
+capture /bin/bash -c '
+  . "$1"
+  _uberdev_semaphore_prepare_scope() { return 2; }
+  record=""
+  uberdev_semaphore_acquire "$2" repo codex 1 reason-probe 5 exact-identity record
+  rc=$?
+  printf "rc=%s reason=%s\n" "$rc" "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}"
+  [ "$rc" -eq 2 ] && [ "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}" = lease_acquire_runtime_state_failed ]
+' _ "$LIB" "$TMP/reason-probe"
+if [ "$CAPTURE_RC" -eq 0 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'reason=lease_acquire_runtime_state_failed'; then
+  pass "acquisition exports a bounded runtime-state failure reason"
+else
+  fail "acquisition exports a bounded runtime-state failure reason" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+
+ATOMIC_STATE="$TMP/atomic-identity"
+capture uberdev_semaphore_acquire "$ATOMIC_STATE" repo codex 1 atomic-run 5 exact-identity
+IFS=$'\t' read -r atomic_lease atomic_identity <<<"$CAPTURE_OUT"
+atomic_owner="$(sed -n 's/^owner_pid=//p' "$atomic_lease" 2>/dev/null || true)"
+if [ "$CAPTURE_RC" -eq 0 ] && [ -f "$atomic_lease" ] \
+    && [[ "$atomic_identity" =~ ^[0-9]+:[0-9]+:[0-9a-f]{32}$ ]] \
+    && [ "$atomic_owner" = "$$" ]; then
+  pass "command-substitution acquisition binds the live outer shell owner"
+else
+  fail "command-substitution acquisition binds the live outer shell owner" \
+    "shell=$$ owner=$atomic_owner rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+uberdev_semaphore_release "$atomic_lease" >/dev/null 2>&1 || true
+
+DIRECT_OWNER_STATE="$TMP/direct-owner"
+direct_owner_record=''
+if uberdev_semaphore_acquire "$DIRECT_OWNER_STATE" repo codex 1 direct-owner 5 \
+    exact-identity direct_owner_record; then
+  direct_owner_rc=0
+else
+  direct_owner_rc=$?
+fi
+IFS=$'\t' read -r direct_owner_lease direct_owner_identity <<<"$direct_owner_record"
+direct_recorded_owner="$(sed -n 's/^owner_pid=//p' "$direct_owner_lease" 2>/dev/null || true)"
+if [ "$direct_owner_rc" -eq 0 ] && [ -f "$direct_owner_lease" ] \
+    && [[ "$direct_owner_identity" =~ ^[0-9]+:[0-9]+:[0-9a-f]{32}$ ]] \
+    && [ "$direct_recorded_owner" = "$$" ]; then
+  pass "output-variable acquisition binds the direct acquiring shell owner"
+else
+  fail "output-variable acquisition binds the direct acquiring shell owner" \
+    "shell=$$ owner=$direct_recorded_owner rc=$direct_owner_rc record=$direct_owner_record"
+fi
+uberdev_semaphore_release "$direct_owner_lease" >/dev/null 2>&1 || true
+
+capture /bin/bash -c '
+  . "$1"
+  eval "$(declare -f _uberdev_semaphore_lease_identity | sed '\''1s/_uberdev_semaphore_lease_identity/_real_identity/'\'')"
+  _uberdev_semaphore_lease_identity() {
+    case "$1" in *.lease) return 29 ;; *) _real_identity "$@" ;; esac
+  }
+  uberdev_semaphore_acquire "$2" repo codex 1 identity-failure 5 exact-identity
+' _ "$LIB" "$TMP/atomic-identity-failure"
+if [ "$CAPTURE_RC" -eq 2 ] \
+    && ! find "$TMP/atomic-identity-failure" -name '*.lease' -type f -print 2>/dev/null | grep -q .; then
+  pass "exact identity capture failure rolls back its acquired generation"
+else
+  fail "exact identity capture failure rolls back its acquired generation" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+
+# The secure writer can publish a valid generation and still report failure
+# while delivering or validating its identity. Acquisition must roll that
+# generation back while the mutex is held instead of leaking capacity.
+capture /bin/bash -c '
+  . "$1"
+  eval "$(declare -f _uberdev_semaphore_publish_lease | sed '\''1s/_uberdev_semaphore_publish_lease/_real_publish_then_fail/'\'')"
+  _uberdev_semaphore_publish_lease() {
+    _real_publish_then_fail "$@" || return
+    return 29
+  }
+  replacement=""
+  uberdev_semaphore_acquire "$2" repo codex 1 publish-then-fail 30 exact-identity replacement
+  rc=$?
+  printf "rc=%s reason=%s replacement=%s\n" "$rc" "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}" "$replacement"
+  [ "$rc" -eq 2 ] && [ "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}" = lease_acquire_publish_failed ] \
+    && ! find "$2" -name '\''*.lease'\'' -type f -print 2>/dev/null | grep -q .
+' _ "$LIB" "$TMP/publish-then-fail"
+if [ "$CAPTURE_RC" -eq 0 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'reason=lease_acquire_publish_failed'; then
+  pass "post-publication writer failure rolls back the acquired generation"
+else
+  fail "post-publication writer failure rolls back the acquired generation" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+
+# If secure rollback itself fails, return the exact retained capability and
+# classify it distinctly so the dispatcher reports reserved capacity honestly.
+capture /bin/bash -c '
+  . "$1"
+  eval "$(declare -f _uberdev_semaphore_publish_lease | sed '\''1s/_uberdev_semaphore_publish_lease/_real_retained_publish/'\'')"
+  _uberdev_semaphore_publish_lease() {
+    _real_retained_publish "$@" || return
+    return 29
+  }
+  _uberdev_semaphore_remove_lease() { return 31; }
+  replacement=""
+  uberdev_semaphore_acquire "$2" repo codex 1 retained-publish 30 exact-identity replacement
+  rc=$?
+  printf "rc=%s reason=%s replacement=%s\n" "$rc" "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}" "$replacement"
+  [ "$rc" -eq 2 ] && [ "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}" = lease_acquire_rollback_failed ] \
+    && [[ "$replacement" =~ ^/.+\.lease$'\''\t'\''[0-9]+:[0-9]+:[0-9a-f]{32}$ ]]
+' _ "$LIB" "$TMP/publish-rollback-failure"
+if [ "$CAPTURE_RC" -eq 0 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'reason=lease_acquire_rollback_failed'; then
+  pass "failed post-publication rollback returns the retained lease capability"
+else
+  fail "failed post-publication rollback returns the retained lease capability" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+
+# Primary acquisition failures must not swallow a secondary mutex-release
+# failure or persist the primary reason after the lock itself remains held.
+for release_stage in count allocation owner; do
+  capture /bin/bash -c '
+    . "$1"
+    case "$3" in
+      count) _uberdev_semaphore_count_locked() { return 29; } ;;
+      allocation) _uberdev_semaphore_new_lease_path_locked() { return 29; } ;;
+      owner) _uberdev_semaphore_capture_lease_owner() { return 29; } ;;
+    esac
+    _uberdev_semaphore_mutex_release() { return 31; }
+    uberdev_semaphore_acquire "$2" repo codex 1 "release-$3" 30
+    rc=$?
+    printf "rc=%s reason=%s\n" "$rc" "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}"
+    [ "$rc" -eq 2 ] \
+      && [ "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}" = lease_acquire_mutex_release_failed ]
+  ' _ "$LIB" "$TMP/release-failure-$release_stage" "$release_stage"
+  if [ "$CAPTURE_RC" -eq 0 ] \
+      && printf '%s' "$CAPTURE_OUT" | grep -q 'cannot release acquisition mutex' \
+      && printf '%s' "$CAPTURE_OUT" | grep -q 'reason=lease_acquire_mutex_release_failed'; then
+    pass "$release_stage failure preserves the mutex-release diagnostic and reason"
+  else
+    fail "$release_stage failure preserves the mutex-release diagnostic and reason" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+  fi
+done
+
+# If exact identity validation fails after atomic handle publication and the
+# rollback remove is fault-injected to fail, the replacement capability is
+# still returned so the caller can release that exact inode and generation.
+capture /bin/bash -c '
+  . "$1"
+  lease="$(uberdev_semaphore_acquire "$2" repo codex 1 rollback-capability 30)" || exit
+  eval "$(declare -f _uberdev_semaphore_lease_identity | sed '\''1s/_uberdev_semaphore_lease_identity/_real_set_identity/'\'')"
+  eval "$(declare -f _uberdev_semaphore_remove_lease | sed '\''1s/_uberdev_semaphore_remove_lease/_real_set_remove/'\'')"
+  identity_marker="$2/identity-failure-marker"
+  _uberdev_semaphore_lease_identity() {
+    case "$1" in
+      *.lease)
+        if [ ! -e "$identity_marker" ]; then
+          : > "$identity_marker"
+          return 29
+        fi
+        ;;
+    esac
+    _real_set_identity "$@"
+  }
+  _uberdev_semaphore_remove_lease() { return 31; }
+  replacement=""
+  uberdev_semaphore_set_handle "$lease" "$$" "$3" exact-identity replacement
+  rc=$?
+  printf "rc=%s lease=%s identity=%s reason=%s\n" "$rc" "$lease" "$replacement" "${_UBERDEV_SEMAPHORE_SET_HANDLE_FAILURE_REASON:-}"
+  [ "$rc" -eq 2 ] && [ -f "$lease" ] && [ -n "$replacement" ] \
+    && [ "${_UBERDEV_SEMAPHORE_SET_HANDLE_FAILURE_REASON:-}" = lease_handle_rollback_failed ]
+' _ "$LIB" "$TMP/set-handle-rollback-capability" "$FIXTURES/running-status.json"
+if [ "$CAPTURE_RC" -eq 0 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'reason=lease_handle_rollback_failed'; then
+  pass "failed handle rollback preserves the replacement lease capability"
+else
+  fail "failed handle rollback preserves the replacement lease capability" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
 
 # GNU stat accepts `-f` as filesystem-report mode and may print colon-bearing
 # output before rejecting the BSD format operand. The identity helper must try
@@ -213,6 +393,18 @@ else
   fail "shell and manifest implement the same documented backend-liveness matrix" "$matrix_failures"
 fi
 
+# Process fingerprints come from the kernel's native creation identity, not
+# second-resolution `ps lstart` text. Both shell runtimes delegate to the same
+# manifest implementation and therefore must produce exactly the same value.
+semaphore_identity="$(_uberdev_semaphore_process_identity "$$")"
+manifest_identity="$(python3 -I -B "$MANIFEST" process-identity --pid "$$")"
+if [ "$semaphore_identity" = "$manifest_identity" ] \
+    && printf '%s' "$semaphore_identity" | grep -Eq "^$$\\|[0-9]+\\|[0-9]+\\|[0-9a-f]{64}$"; then
+  pass "semaphore and manifest share one kernel process identity"
+else
+  fail "shared kernel process identity" "semaphore=$semaphore_identity manifest=$manifest_identity"
+fi
+
 reserved_pid_failures=''
 reserved_pid_index=0
 for reserved_pid_handle in 'pid:' 'pid:0' 'pid:-1' 'pid:provider'; do
@@ -284,7 +476,9 @@ if grep -q '^version=1$' "$lease_a" \
    && grep -Eq '^generation=[0-9a-f]{32}$' "$lease_a" \
    && grep -q '^run_id=run/a$' "$lease_a" \
    && grep -q '^owner_pid=[0-9][0-9]*$' "$lease_a" \
+   && grep -Eq '^owner_identity=[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}$' "$lease_a" \
    && grep -q '^backend_handle=$' "$lease_a" \
+   && grep -q '^backend_identity=$' "$lease_a" \
    && grep -q '^start_epoch=[0-9][0-9]*$' "$lease_a" \
    && grep -q '^timeout_s=5$' "$lease_a" \
    && grep -q '^status_path=$' "$lease_a"; then
@@ -443,7 +637,7 @@ exercise_malformed_lease() {
   fi
   rm -f "$structure_lease"
 }
-for lease_key in version generation run_id owner_pid backend_handle start_epoch timeout_s status_path; do
+for lease_key in version generation run_id owner_pid owner_identity backend_handle backend_identity start_epoch timeout_s status_path; do
   exercise_malformed_lease "missing-$lease_key" "$lease_key" missing
   exercise_malformed_lease "duplicate-$lease_key" "$lease_key" duplicate
 done
@@ -460,7 +654,8 @@ WRITER_SPY_STATE="$TMP/secure-writer-spy"
 WRITER_SPY_MARKER="$TMP/secure-writer-called"
 capture /bin/bash -c '
   SPY_MARKER="$3"
-  python3() {
+  . "$1"
+  _uberdev_semaphore_python() {
     case " $* " in
       *" secure-write-lease "*)
         printf "called\n" > "$SPY_MARKER"
@@ -470,7 +665,6 @@ capture /bin/bash -c '
     esac
     command python3 "$@"
   }
-  . "$1"
   uberdev_semaphore_acquire "$2" repo codex 1 writer-spy 30
 ' _ "$LIB" "$WRITER_SPY_STATE" "$WRITER_SPY_MARKER"
 if [ "$CAPTURE_RC" -eq 2 ] && [ "$(cat "$WRITER_SPY_MARKER" 2>/dev/null)" = called ] \
@@ -795,6 +989,77 @@ else
   fail "mutex generation replacement remains ordinary contention" "$(cat "$replace_err")"
 fi
 
+printf '== live semaphore: mutex PID reuse identity ==\n'
+PID_REUSE_SCOPE="$TMP/mutex-pid-reuse.scope"
+mkdir -p "$PID_REUSE_SCOPE/.mutex"
+printf '%s\n%s\n%s\n' "$$" '1|1|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  '11111111111111111111111111111111' >"$PID_REUSE_SCOPE/.mutex/owner_pid"
+eval "$(declare -f _uberdev_semaphore_process_identity | sed '1s/_uberdev_semaphore_process_identity/_real_semaphore_process_identity/')"
+_uberdev_semaphore_process_identity() {
+  printf '%s\n' "$$|$$|$$|bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}
+capture _uberdev_semaphore_mutex_reclaim_dead "$PID_REUSE_SCOPE" 1
+if [ "$CAPTURE_RC" -eq 0 ] && [ ! -e "$PID_REUSE_SCOPE/.mutex" ]; then
+  pass "reused live PID does not preserve a stale mutex generation"
+else
+  fail "reused live PID does not preserve a stale mutex generation" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+eval "$(declare -f _real_semaphore_process_identity | sed '1s/_real_semaphore_process_identity/_uberdev_semaphore_process_identity/')"
+
+printf '== live semaphore: lifecycle lease PID reuse identity ==\n'
+LEASE_IDENTITY_STATE="$TMP/lease-pid-reuse-state"
+LEASE_IDENTITY_PATH_FILE="$TMP/lease-pid-reuse-path"
+sleep 30 & backend_pid=$!
+LEASE_BACKEND_IDENTITY="$(_uberdev_semaphore_process_identity "$backend_pid")"
+/bin/bash -c '
+  . "$1"
+  lease="$(uberdev_semaphore_acquire "$2" repo codex 1 lease-pid-reuse 30)" || exit 1
+  uberdev_semaphore_set_handle "$lease" "$3" "" exact-identity lease_identity "$4" || exit 1
+  printf "%s\n" "$lease" >"$5"
+' _ "$LIB" "$LEASE_IDENTITY_STATE" "$backend_pid" "$LEASE_BACKEND_IDENTITY" "$LEASE_IDENTITY_PATH_FILE"
+lease_identity_path="$(cat "$LEASE_IDENTITY_PATH_FILE")"
+capture uberdev_semaphore_reconcile "$LEASE_IDENTITY_STATE" repo codex
+if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = 0 ] && [ -f "$lease_identity_path" ]; then
+  pass "matching backend identity retains lifecycle capacity"
+else
+  fail "matching backend identity retains lifecycle capacity" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+eval "$(declare -f _uberdev_semaphore_process_identity | sed '1s/_uberdev_semaphore_process_identity/_real_lease_process_identity/')"
+_uberdev_semaphore_process_identity() {
+  if [ "$1" = "$backend_pid" ]; then return 2; fi
+  _real_lease_process_identity "$@"
+}
+capture uberdev_semaphore_reconcile "$LEASE_IDENTITY_STATE" repo codex
+if [ "$CAPTURE_RC" -eq 2 ] && [ -f "$lease_identity_path" ] \
+    && printf '%s' "$CAPTURE_OUT" | grep -q 'process identity probe unavailable'; then
+  pass "unavailable backend identity probe retains lifecycle capacity with an error"
+else
+  fail "unavailable backend identity probe retains lifecycle capacity with an error" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+_uberdev_semaphore_process_identity() {
+  if [ "$1" = "$backend_pid" ]; then
+    printf '%s\n' "$backend_pid|$backend_pid|$backend_pid|cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    return 0
+  fi
+  _real_lease_process_identity "$@"
+}
+if [ -f "$lease_identity_path" ]; then
+  capture uberdev_semaphore_reconcile "$LEASE_IDENTITY_STATE" repo codex
+  if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = 1 ] && [ ! -e "$lease_identity_path" ]; then
+    reacquired="$(uberdev_semaphore_acquire "$LEASE_IDENTITY_STATE" repo codex 1 lease-pid-reuse-reacquired 30)"
+    uberdev_semaphore_release "$reacquired" >/dev/null 2>&1 || true
+    pass "mismatched live backend identity releases the exact lifecycle lease"
+  else
+    fail "mismatched live backend identity releases the exact lifecycle lease" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+  fi
+else
+  fail "mismatched live backend identity releases the exact lifecycle lease" "lease was removed while identity evidence was unavailable"
+fi
+eval "$(declare -f _real_lease_process_identity | sed '1s/_real_lease_process_identity/_uberdev_semaphore_process_identity/')"
+kill "$backend_pid" 2>/dev/null || true
+wait "$backend_pid" 2>/dev/null || true
+backend_pid=""
+
 printf '== live semaphore: killed owner, stale timeout, and backend liveness ==\n'
 SUBSHELL_STATE="$TMP/subshell-killed-state"
 SUBSHELL_PATH_FILE="$TMP/subshell-killed-lease-path"
@@ -958,6 +1223,120 @@ if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = "1" ] && [ ! -e "$terminal_leas
 else
   fail "terminal status releases a lease even when its process still exists" "rc=$CAPTURE_RC removed=$CAPTURE_OUT"
 fi
+
+printf '== live semaphore: terminal pre-handle reconciliation ==\n'
+PREHANDLE_STATE="$TMP/terminal-prehandle-state"
+prehandle_status="$TMP/terminal-prehandle-status.json"
+cp "$FIXTURES/terminal-status.json" "$prehandle_status"
+prehandle_record=''
+uberdev_semaphore_acquire "$PREHANDLE_STATE" repo codex 1 terminal-prehandle-live 30 \
+  exact-identity prehandle_record || fail "acquire live terminal pre-handle lease" "acquisition failed"
+IFS=$'\t' read -r prehandle_lease prehandle_identity <<EOF_PREHANDLE
+$prehandle_record
+EOF_PREHANDLE
+prehandle_registered_identity=''
+uberdev_semaphore_set_handle "$prehandle_lease" '' "$prehandle_status" \
+  exact-identity prehandle_registered_identity \
+  || fail "register live terminal pre-handle status" "registration failed"
+capture uberdev_semaphore_reconcile "$PREHANDLE_STATE" repo codex
+prehandle_live_rc="$CAPTURE_RC"
+prehandle_live_out="$CAPTURE_OUT"
+prehandle_bound_identity=''
+if uberdev_semaphore_set_handle "$prehandle_lease" 'opaque:terminal-prehandle' "$prehandle_status" \
+    exact-identity prehandle_bound_identity; then
+  prehandle_bind_rc=0
+else
+  prehandle_bind_rc=$?
+fi
+capture uberdev_semaphore_reconcile "$PREHANDLE_STATE" repo codex
+if [ "$prehandle_live_rc" -eq 0 ] && [ "$prehandle_live_out" = 0 ] \
+    && [ "$prehandle_bind_rc" -eq 0 ] && [ -n "$prehandle_bound_identity" ] \
+    && [ "${prehandle_identity##*:}" = "${prehandle_registered_identity##*:}" ] \
+    && [ "${prehandle_identity##*:}" = "${prehandle_bound_identity##*:}" ] \
+    && [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = 1 ] && [ ! -e "$prehandle_lease" ]; then
+  pass "live unexpired terminal pre-handle survives reconciliation until its handle binds"
+else
+  fail "live unexpired terminal pre-handle survives reconciliation until its handle binds" \
+    "reconcile=$prehandle_live_rc/$prehandle_live_out bind=$prehandle_bind_rc final=$CAPTURE_RC/$CAPTURE_OUT lease=$(test -e "$prehandle_lease" && printf present || printf absent)"
+fi
+
+PREHANDLE_DEAD_STATE="$TMP/terminal-prehandle-dead-state"
+prehandle_dead_path_file="$TMP/terminal-prehandle-dead-path"
+/bin/bash -c '
+  . "$1"
+  owner_pid="${BASHPID:-$$}"
+  lease="$(UBERDEV_SEMAPHORE_OWNER_PID="$owner_pid" \
+    uberdev_semaphore_acquire "$2" repo codex 1 terminal-prehandle-dead 1)" || exit 1
+  uberdev_semaphore_set_handle "$lease" "" "$3" || exit 1
+  printf "%s\n" "$lease" >"$4"
+' _ "$LIB" "$PREHANDLE_DEAD_STATE" "$prehandle_status" "$prehandle_dead_path_file"
+prehandle_dead_lease="$(cat "$prehandle_dead_path_file")"
+capture uberdev_semaphore_reconcile "$PREHANDLE_DEAD_STATE" repo codex
+prehandle_dead_fresh_rc="$CAPTURE_RC"
+prehandle_dead_fresh_out="$CAPTURE_OUT"
+prehandle_dead_fresh_present=0
+[ ! -f "$prehandle_dead_lease" ] || prehandle_dead_fresh_present=1
+sleep 2
+capture uberdev_semaphore_reconcile "$PREHANDLE_DEAD_STATE" repo codex
+if [ -n "$prehandle_dead_lease" ] && [ "$prehandle_dead_fresh_rc" -eq 0 ] \
+    && [ "$prehandle_dead_fresh_out" = 0 ] && [ "$prehandle_dead_fresh_present" -eq 1 ] \
+    && [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = 1 ] && [ ! -e "$prehandle_dead_lease" ]; then
+  pass "dead-owner terminal pre-handle is retained only until its deadline"
+else
+  fail "dead-owner terminal pre-handle is retained only until its deadline" \
+    "fresh=$prehandle_dead_fresh_rc/$prehandle_dead_fresh_out/$prehandle_dead_fresh_present expired=$CAPTURE_RC/$CAPTURE_OUT lease=$(test -e "$prehandle_dead_lease" && printf present || printf absent)"
+fi
+
+PREHANDLE_EXPIRED_STATE="$TMP/terminal-prehandle-expired-state"
+prehandle_expired_record=''
+uberdev_semaphore_acquire "$PREHANDLE_EXPIRED_STATE" repo codex 1 terminal-prehandle-expired 1 \
+  exact-identity prehandle_expired_record || fail "acquire expiring terminal pre-handle lease" "acquisition failed"
+IFS=$'\t' read -r prehandle_expired_lease _ <<EOF_EXPIRED
+$prehandle_expired_record
+EOF_EXPIRED
+uberdev_semaphore_set_handle "$prehandle_expired_lease" '' "$prehandle_status" >/dev/null \
+  || fail "register expiring terminal pre-handle status" "registration failed"
+sleep 2
+capture uberdev_semaphore_reconcile "$PREHANDLE_EXPIRED_STATE" repo codex
+if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = 1 ] && [ ! -e "$prehandle_expired_lease" ]; then
+  pass "expired terminal pre-handle is reclaimed even while its owner is live"
+else
+  fail "expired terminal pre-handle is reclaimed even while its owner is live" \
+    "rc=$CAPTURE_RC removed=$CAPTURE_OUT lease=$(test -e "$prehandle_expired_lease" && printf present || printf absent)"
+fi
+
+PREHANDLE_UNKNOWN_STATE="$TMP/terminal-prehandle-unknown-state"
+prehandle_probe_sentinel="$TMP/terminal-prehandle-owner-probe-called"
+prehandle_unknown_record=''
+uberdev_semaphore_acquire "$PREHANDLE_UNKNOWN_STATE" repo codex 1 terminal-prehandle-unknown 30 \
+  exact-identity prehandle_unknown_record || fail "acquire unknown-owner terminal pre-handle lease" "acquisition failed"
+IFS=$'\t' read -r prehandle_unknown_lease _ <<EOF_UNKNOWN
+$prehandle_unknown_record
+EOF_UNKNOWN
+uberdev_semaphore_set_handle "$prehandle_unknown_lease" '' "$prehandle_status" >/dev/null \
+  || fail "register unknown-owner terminal pre-handle status" "registration failed"
+capture /bin/bash -c '
+  . "$1"
+  probe_sentinel="$3"
+  lease_owner="$(sed -n "s/^owner_pid=//p" "$4")"
+  _uberdev_semaphore_process_identity() {
+    if [ "$1" = "$lease_owner" ]; then
+      printf "called\n" >"$probe_sentinel"
+      return 2
+    fi
+    manifest_tool="$(_uberdev_semaphore_manifest_tool)" || return 2
+    _uberdev_semaphore_python -I -B "$manifest_tool" process-identity --pid "$1"
+  }
+  uberdev_semaphore_reconcile "$2" repo codex
+' _ "$LIB" "$PREHANDLE_UNKNOWN_STATE" "$prehandle_probe_sentinel" "$prehandle_unknown_lease"
+if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = 0 ] \
+    && [ -f "$prehandle_unknown_lease" ] && [ ! -e "$prehandle_probe_sentinel" ]; then
+  pass "fresh terminal pre-handle retention does not consult owner liveness"
+else
+  fail "fresh terminal pre-handle retention does not consult owner liveness" \
+    "rc=$CAPTURE_RC out=$CAPTURE_OUT probe=$(test -e "$prehandle_probe_sentinel" && printf called || printf untouched) lease=$(test -e "$prehandle_unknown_lease" && printf present || printf absent)"
+fi
+uberdev_semaphore_release "$prehandle_unknown_lease" >/dev/null 2>&1 || true
 
 printf '== live semaphore: bounded and recoverable mutex ==\n'
 MUTEX_STATE="$TMP/mutex-state"

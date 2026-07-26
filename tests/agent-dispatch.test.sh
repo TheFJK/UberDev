@@ -6,6 +6,38 @@ LIB="$ROOT/plugins/uberdev/lib/agent-dispatch.sh"
 
 [ -r "$LIB" ] || { echo "agent-dispatch: missing $LIB" >&2; exit 1; }
 
+if python3 -I -B - "$0" <<'PY'
+import pathlib,sys
+source=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+provider=source.split('\n_uberdev_agent_dispatch_backend() {',1)[1].split('export -f _uberdev_agent_dispatch_backend',1)[0]
+default=provider.split('    *)',1)[1].split('      ;;',1)[0]
+assert '"backend":"%s"' in default and '"$1" > "$6"' in default
+claude=source.split('\nCLAUDE_REQUEST="$(variant_request agent-dispatch-claude claude)"',1)[1].split('# An opaque provider',1)[0]
+assert 'wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-claude completed' in claude
+assert '[ ! -e "$TMP/run/claude.json.watcher-error.json" ]' in claude
+sync=source.split('\nSYNC_REQUEST="$(variant_request agent-dispatch-sync inherit)"',1)[1].split('\n# Every file argument',1)[0]
+assert 'wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-sync completed 80 0.1 "$TMP/run/sync-status.json"' in sync
+dead=source.split('\nDEAD_RUN="$TMP/dead-without-terminal"',1)[1].split('\n# Killing only the detached wrapper',1)[0]
+assert 'wait_for_terminal_and_release "$DEAD_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$DEAD_RUN/.agent-state-$(id -u)" adapter-dead-without-terminal failed 80 0.1 "$DEAD_RUN/status.json" provider_execution_failed' in dead
+orphan=source.split('\nORPHAN_RUN="$TMP/wrapper-death-with-live-provider"',1)[1].split('\n# The same orphan-group proof',1)[0]
+assert 'wait_for_terminal_and_release "$ORPHAN_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$ORPHAN_RUN/.agent-state-$(id -u)" adapter-wrapper-death failed 80 0.1 "$ORPHAN_RUN/status.json" provider_execution_failed' in orphan
+watcher=source.split('\nclaude_watcher_case() {',1)[1].split('claude_watcher_case initial-absent',1)[0]
+ambiguous=watcher.rsplit('    ambiguous)',1)[1].split('    probe-error)',1)[0]
+assert 'command sleep 0.6' not in ambiguous
+assert '[ -s "$run/status.json.watcher-error.json" ] && break' in ambiguous
+for helper in (
+    '_uberdev_agent_capture_owner_process_record', '_real_owner_process_record',
+    '_uberdev_agent_persist_watcher_error', '_real_prelaunch_persist_error',
+):
+    assert f'declare -f {helper} |' not in source, helper
+PY
+then
+  echo "agent-dispatch: portable fixture source contracts present"
+else
+  echo "agent-dispatch: fixture source contracts are not portable" >&2
+  exit 1
+fi
+
 # Windows Python does not expose os.geteuid(). Every embedded ownership/state
 # expression must use the same deterministic portable fallback.
 python3 -I - "$LIB" <<'PY'
@@ -39,6 +71,7 @@ import os
 import stat
 import sys
 import tempfile
+import types
 
 source_path, output_path = sys.argv[1:]
 with open(source_path, encoding="utf-8") as handle:
@@ -73,31 +106,42 @@ import os
 import stat
 import sys
 import tempfile
+import types
 
 source_path, output_path = sys.argv[1:]
 with open(source_path, encoding="utf-8") as handle:
     source = handle.read()
-function = source.index("_uberdev_agent_publish_status() {")
-prefix = "python3 -I -c '\n"
+function = source.index("_uberdev_agent_publish_status_record() {")
+prefix = "python3 -I -B - \"$@\" <<'PY'\n"
 start = source.index(prefix, function) + len(prefix)
-end = source.index("\n' \"$status_path\"", start)
+end = source.index("\nPY\n}", start)
 snippet = source[start:end]
 original_name = os.name
 original_fchmod = getattr(os, "fchmod", None)
+original_msvcrt = sys.modules.get("msvcrt")
 os.name = "nt"
 if original_fchmod is not None:
     del os.fchmod
+sys.modules["msvcrt"] = types.SimpleNamespace(
+    LK_NBLCK=1,
+    LK_UNLCK=2,
+    locking=lambda descriptor, mode, size: None,
+)
 try:
-    sys.argv = ["agent-status", output_path, "codex", "handle-1", "running", "", "create", "", ""]
+    sys.argv = ["agent-status", output_path, "create", "codex", "running", "", "handle-1", "", "", "", "", "", "", "", "", "", "", "0"]
     exec(compile(snippet, "agent-status-publisher", "exec"), {})
-    sys.argv = ["agent-status", output_path, "codex", "handle-1", "running", "", "create", "", ""]
+    sys.argv = ["agent-status", output_path, "create", "codex", "running", "", "handle-1", "", "", "", "", "", "", "", "", "", "", "0"]
     exec(compile(snippet, "agent-status-publisher", "exec"), {})
-    sys.argv = ["agent-status", output_path, "codex", "handle-1", "completed", "0", "replace", "", ""]
+    sys.argv = ["agent-status", output_path, "replace", "codex", "completed", "0", "handle-1", "", "", "", "", "", "", "", "", "", "", "0"]
     exec(compile(snippet, "agent-status-publisher", "exec"), {})
 finally:
     os.name = original_name
     if original_fchmod is not None:
         os.fchmod = original_fchmod
+    if original_msvcrt is None:
+        del sys.modules["msvcrt"]
+    else:
+        sys.modules["msvcrt"] = original_msvcrt
 with open(output_path, encoding="utf-8") as handle:
     payload = json.load(handle)
 assert payload["state"] == "completed" and payload["exit_code"] == 0
@@ -207,20 +251,33 @@ run_id = started[0]["run_id"]
 actual = [event["event"] for event in events if event["run_id"] == run_id]
 assert actual == ["route_decided", "agent_started"], actual
 PY
-  python3 - "$UBERDEV_TEST_CAPTURE" "$@" <<'PY'
+  python3 - "$UBERDEV_TEST_CAPTURE" "$UBERDEV_AGENT_WORKSPACE_MODE" "$UBERDEV_AGENT_WORKSPACE_DIR" "$@" <<'PY'
 import json, sys
-path, backend, issue, tier, prompt, result, status, decision = sys.argv[1:]
+path, workspace_mode, workspace_dir, backend, issue, tier, prompt, result, status, decision = sys.argv[1:]
 with open(path, "w", encoding="utf-8") as handle:
     json.dump({
         "backend": backend, "issue": issue, "tier": tier,
         "prompt": prompt, "result": result, "status": status,
         "decision": json.loads(decision),
+        "workspace_mode": workspace_mode, "workspace_dir": workspace_dir,
     }, handle, sort_keys=True)
 PY
   DISPATCH_RC=0
   DISPATCH_ID="opaque:test-handle"
   DISPATCH_LOG=""
   case "$5" in
+    *fast-terminal-race.md)
+      printf 'fast terminal result\n' > "$5"
+      printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
+      chmod 600 "$6"
+      printf 'ready\n' > "$FAST_TERMINAL_READY"
+      fast_terminal_wait=0
+      while [ ! -e "$FAST_TERMINAL_RESUME" ] && [ "$fast_terminal_wait" -lt 500 ]; do
+        command sleep 0.01
+        fast_terminal_wait=$((fast_terminal_wait + 1))
+      done
+      [ -e "$FAST_TERMINAL_RESUME" ] || return 98
+      ;;
     *sync-result.md)
       printf 'synchronous result\n' > "$5"
       printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
@@ -260,7 +317,7 @@ PY
       printf '{"backend":"codex","state":"running","exit_code":null,"pid":"opaque:test-handle"}\n' > "$6"
       ;;
     *)
-      printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
+      printf '{"backend":"%s","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' "$1" > "$6"
       ;;
   esac
   # Provider status is a private lifecycle record. Production provider arms
@@ -274,6 +331,149 @@ export -f _uberdev_agent_dispatch_backend
 # shellcheck source=/dev/null
 . "$LIB"
 
+# Newly emitted starts require an owner creation identity. If that kernel probe
+# is unavailable, dispatch fails before provider launch and releases the exact
+# prelaunch lease instead of degrading the manifest to PID-only ownership.
+OWNER_IDENTITY_RUN="$TMP/owner-identity-unavailable"
+mkdir -p "$OWNER_IDENTITY_RUN"
+printf 'owner identity unavailable prompt\n' >"$OWNER_IDENTITY_RUN/prompt.txt"
+OWNER_IDENTITY_REQUEST="$(python3 -I -B - "$REQUEST" "$OWNER_IDENTITY_RUN" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1]); value.update(run_dir=sys.argv[2],run_id='owner-identity-unavailable')
+print(json.dumps(value,separators=(',',':')),end='')
+PY
+)"
+(
+_uberdev_agent_capture_owner_process_record() { return 2; }
+owner_provider_before=0
+[ ! -r "$TMP/provider-count" ] || read -r owner_provider_before <"$TMP/provider-count"
+set +e
+uberdev_agent_dispatch "$OWNER_IDENTITY_REQUEST" "$OWNER_IDENTITY_RUN/prompt.txt" \
+  "$OWNER_IDENTITY_RUN/result.md" "$OWNER_IDENTITY_RUN/status.json" >/dev/null 2>&1
+owner_identity_rc=$?
+set -e
+owner_provider_after=0
+[ ! -r "$TMP/provider-count" ] || read -r owner_provider_after <"$TMP/provider-count"
+[ "$owner_identity_rc" -eq 2 ]
+[ "$owner_provider_after" -eq "$owner_provider_before" ]
+grep -q '"state":"failed"' "$OWNER_IDENTITY_RUN/status.json"
+grep -q '"exit_code":70' "$OWNER_IDENTITY_RUN/status.json"
+grep -q '"reason":"owner_process_identity_unavailable"' "$OWNER_IDENTITY_RUN/status.json.watcher-error.json"
+! grep -q '"event":"agent_started"' "$OWNER_IDENTITY_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" 2>/dev/null
+[ ! -d "$OWNER_IDENTITY_RUN/.agent-state-$(id -u)/semaphore-v1" ] \
+  || ! find "$OWNER_IDENTITY_RUN/.agent-state-$(id -u)/semaphore-v1" -name '*.lease' -type f | grep -q .
+)
+
+# Owner-capture failure reporting uses two independent durable channels. Fault
+# inject each channel through the public dispatcher: the other channel must
+# still be attempted, no provider or lease may be created, and stderr must say
+# exactly which fallback channel failed.
+owner_fault_request() {
+  python3 -I -B - "$REQUEST" "$1" "$2" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1]); value.update(run_dir=sys.argv[2],run_id=sys.argv[3])
+print(json.dumps(value,separators=(',',':')),end='')
+PY
+}
+
+OWNER_STATUS_FAULT_RUN="$TMP/owner-status-publication-fault"
+mkdir -p "$OWNER_STATUS_FAULT_RUN"
+printf 'owner status publication fault prompt\n' >"$OWNER_STATUS_FAULT_RUN/prompt.txt"
+OWNER_STATUS_FAULT_REQUEST="$(owner_fault_request "$OWNER_STATUS_FAULT_RUN" owner-status-publication-fault)"
+OWNER_FAILURE_CALLS="$TMP/owner-failure-calls"
+(
+_uberdev_agent_capture_owner_process_record() { return 2; }
+_uberdev_agent_publish_status() { printf 'publish\n' >>"$OWNER_FAILURE_CALLS"; return 2; }
+owner_provider_before=0
+[ ! -r "$TMP/provider-count" ] || read -r owner_provider_before <"$TMP/provider-count"
+set +e
+OWNER_FAILURE_ERROR="$(uberdev_agent_dispatch "$OWNER_STATUS_FAULT_REQUEST" \
+  "$OWNER_STATUS_FAULT_RUN/prompt.txt" "$OWNER_STATUS_FAULT_RUN/result.md" \
+  "$OWNER_STATUS_FAULT_RUN/status.json" 2>&1 >/dev/null)"
+OWNER_FAILURE_RC=$?
+set -e
+owner_provider_after=0
+[ ! -r "$TMP/provider-count" ] || read -r owner_provider_after <"$TMP/provider-count"
+[ "$OWNER_FAILURE_RC" -eq 2 ]
+[ "$owner_provider_after" -eq "$owner_provider_before" ]
+[ "$(cat "$OWNER_FAILURE_CALLS")" = publish ]
+[ ! -e "$OWNER_STATUS_FAULT_RUN/status.json" ]
+grep -q '"reason":"owner_process_identity_unavailable"' \
+  "$OWNER_STATUS_FAULT_RUN/status.json.watcher-error.json"
+printf '%s\n' "$OWNER_FAILURE_ERROR" | grep -Fq 'owner_process_identity_status_publication_failed'
+[ ! -d "$OWNER_STATUS_FAULT_RUN/.agent-state-$(id -u)/semaphore-v1" ]
+)
+
+OWNER_DIAGNOSTIC_FAULT_RUN="$TMP/owner-diagnostic-persistence-fault"
+mkdir -p "$OWNER_DIAGNOSTIC_FAULT_RUN"
+printf 'owner diagnostic persistence fault prompt\n' >"$OWNER_DIAGNOSTIC_FAULT_RUN/prompt.txt"
+OWNER_DIAGNOSTIC_FAULT_REQUEST="$(owner_fault_request "$OWNER_DIAGNOSTIC_FAULT_RUN" owner-diagnostic-persistence-fault)"
+: >"$OWNER_FAILURE_CALLS"
+(
+_uberdev_agent_capture_owner_process_record() { return 2; }
+_uberdev_agent_persist_watcher_error_retry() { printf 'diagnostic\n' >>"$OWNER_FAILURE_CALLS"; return 2; }
+owner_provider_before=0
+[ ! -r "$TMP/provider-count" ] || read -r owner_provider_before <"$TMP/provider-count"
+set +e
+OWNER_FAILURE_ERROR="$(uberdev_agent_dispatch "$OWNER_DIAGNOSTIC_FAULT_REQUEST" \
+  "$OWNER_DIAGNOSTIC_FAULT_RUN/prompt.txt" "$OWNER_DIAGNOSTIC_FAULT_RUN/result.md" \
+  "$OWNER_DIAGNOSTIC_FAULT_RUN/status.json" 2>&1 >/dev/null)"
+OWNER_FAILURE_RC=$?
+set -e
+owner_provider_after=0
+[ ! -r "$TMP/provider-count" ] || read -r owner_provider_after <"$TMP/provider-count"
+[ "$OWNER_FAILURE_RC" -eq 2 ]
+[ "$owner_provider_after" -eq "$owner_provider_before" ]
+[ "$(cat "$OWNER_FAILURE_CALLS")" = diagnostic ]
+grep -q '"state":"failed"' "$OWNER_DIAGNOSTIC_FAULT_RUN/status.json"
+[ ! -e "$OWNER_DIAGNOSTIC_FAULT_RUN/status.json.watcher-error.json" ]
+printf '%s\n' "$OWNER_FAILURE_ERROR" | grep -Fq 'owner_process_identity_diagnostic_persistence_failed'
+[ ! -d "$OWNER_DIAGNOSTIC_FAULT_RUN/.agent-state-$(id -u)/semaphore-v1" ]
+)
+
+# Detached review fanout cannot rely on an interactive Claude permission
+# prompt. The adapter must reject manual mode before capacity or provider state
+# is created, while an explicit unattended opt-in remains accepted.
+if SKIP_PERMISSIONS=0 AUTO_PERMISSIONS=0 \
+    _uberdev_agent_claude_permissions_preflight review-pr >/dev/null 2>&1; then
+  echo "agent-dispatch: Claude review permission preflight accepted manual mode" >&2
+  exit 1
+fi
+SKIP_PERMISSIONS=0 AUTO_PERMISSIONS=1 \
+  _uberdev_agent_claude_permissions_preflight review-pr
+SKIP_PERMISSIONS=0 AUTO_PERMISSIONS=0 \
+  _uberdev_agent_claude_permissions_preflight solve
+
+# Exercise the public boundary, not only the helper: manual review mode must
+# fail before provider invocation, lifecycle publication, status, or capacity.
+PREFLIGHT_RUN="$TMP/preflight-review"
+mkdir -p "$PREFLIGHT_RUN"
+printf 'review preflight prompt\n' > "$PREFLIGHT_RUN/prompt.txt"
+PREFLIGHT_REQUEST="$(python3 -I -B - "$REQUEST" "$PREFLIGHT_RUN" <<'PY'
+import json,sys
+request=json.loads(sys.argv[1]); request.update({
+    'run_dir':sys.argv[2], 'run_id':'agent-dispatch-review-preflight',
+    'backend':'claude-bg', 'workflow':'review-pr', 'phase':'review',
+})
+print(json.dumps(request,sort_keys=True,separators=(',',':')))
+PY
+)"
+provider_before=0
+[ ! -r "$TMP/provider-count" ] || read -r provider_before < "$TMP/provider-count"
+if SKIP_PERMISSIONS=0 AUTO_PERMISSIONS=0 uberdev_agent_dispatch "$PREFLIGHT_REQUEST" \
+    "$PREFLIGHT_RUN/prompt.txt" "$PREFLIGHT_RUN/result.md" "$PREFLIGHT_RUN/status.json" >/dev/null 2>&1; then
+  echo "agent-dispatch public review preflight accepted manual Claude mode" >&2
+  exit 1
+fi
+provider_after=0
+[ ! -r "$TMP/provider-count" ] || read -r provider_after < "$TMP/provider-count"
+[ "$provider_after" -eq "$provider_before" ] || { echo "review preflight reached provider" >&2; exit 1; }
+[ ! -e "$PREFLIGHT_RUN/.agent-state-$(id -u)" ] \
+  && [ ! -e "$PREFLIGHT_RUN/status.json" ] \
+  && [ ! -e "$PREFLIGHT_RUN/result.md" ] || {
+    echo "review preflight published lifecycle state before refusing" >&2; exit 1;
+  }
+
 for dead_helper in \
   _uberdev_agent_default_catalog \
   _uberdev_agent_catalog \
@@ -285,50 +485,127 @@ do
   fi
 done
 
-grep -Fq 'UBERDEV_SEMAPHORE_OWNER_PID=$$ PYTHONPATH= PYTHONHOME= uberdev_semaphore_acquire' "$LIB" || {
-  echo "agent-dispatch: known shell owner is not supplied to semaphore acquisition" >&2
+grep -Fq 'UBERDEV_SEMAPHORE_OWNER_PID="$_UBERDEV_AGENT_OWNER_PID" PYTHONPATH= PYTHONHOME= uberdev_semaphore_acquire' "$LIB" || {
+  echo "agent-dispatch: captured native owner is not supplied to semaphore acquisition" >&2
   exit 1
 }
 
 wait_for_terminal_and_release() {
-  local manifest="$1" state_dir="$2" run_id="$3" terminal="$4" attempts="${5:-80}" delay="${6:-0.1}" actual
+  local manifest="$1" state_dir="$2" run_id="$3" terminal="$4" attempts="${5:-80}" delay="${6:-0.1}"
+  local status_file="${7:-}" error_class="${8:-}" actual lease watcher_error
   for _ in $(seq 1 "$attempts"); do
-    if python3 -I - "$manifest" "$run_id" "$terminal" <<'PY'
+    if python3 -I - "$manifest" "$run_id" "$terminal" "$status_file" "$error_class" <<'PY'
 import json, pathlib, sys
-path, run_id, terminal = sys.argv[1:]
+path, run_id, terminal, status_path, error_class = sys.argv[1:]
 try:
     events = [json.loads(line) for line in pathlib.Path(path).read_text().splitlines()]
 except (FileNotFoundError, ValueError):
     raise SystemExit(1)
-actual = [event.get("event") for event in events if event.get("run_id") == run_id]
-raise SystemExit(0 if actual == ["route_decided", "agent_started", terminal] else 1)
+run_events = [event for event in events if event.get("run_id") == run_id]
+actual = [event.get("event") for event in run_events]
+if actual != ["route_decided", "agent_started", terminal]:
+    raise SystemExit(1)
+if error_class and run_events[-1].get("error_class") != error_class:
+    raise SystemExit(1)
+if status_path:
+    try:
+        status = json.loads(pathlib.Path(status_path).read_text())
+    except (FileNotFoundError, ValueError):
+        raise SystemExit(1)
+    if status.get("state") != terminal:
+        raise SystemExit(1)
 PY
     then
-      if ! grep -R -q "run_id=$run_id" "$state_dir/semaphore-v1" 2>/dev/null; then
+      if ! grep -R -F -x -q -- "run_id=$run_id" "$state_dir/semaphore-v1" 2>/dev/null; then
         return 0
       fi
     fi
     command sleep "$delay"
   done
-  actual="$(python3 -I - "$manifest" "$run_id" <<'PY'
+  actual="$(python3 -I - "$manifest" "$run_id" "$status_file" <<'PY'
 import json, pathlib, sys
-try: events=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
-except Exception: events=[]
-print([event.get("event") for event in events if event.get("run_id")==sys.argv[2]])
+observed={"manifest_events":[],"terminal_error_class":None,"status":None}
+try:
+ events=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+ run_events=[event for event in events if event.get("run_id")==sys.argv[2]]
+ observed["manifest_events"]=[event.get("event") for event in run_events]
+ if run_events: observed["terminal_error_class"]=run_events[-1].get("error_class")
+except Exception as exc: observed["manifest_error"]=type(exc).__name__
+if sys.argv[3]:
+ try: observed["status"]=json.loads(pathlib.Path(sys.argv[3]).read_text())
+ except Exception as exc: observed["status_error"]=type(exc).__name__
+print(json.dumps(observed,sort_keys=True,separators=(",",":")))
 PY
 )"
-  echo "terminal invariant timeout: run_id=$run_id expected=$terminal actual=$actual lease=$(grep -R -l "run_id=$run_id" "$state_dir/semaphore-v1" 2>/dev/null | head -1)" >&2
+  lease="$({ grep -R -F -x -l -- "run_id=$run_id" "$state_dir/semaphore-v1" 2>/dev/null | head -1; } || true)"
+  watcher_error=''
+  if [ -n "$status_file" ] && [ -s "$status_file.watcher-error.json" ]; then
+    watcher_error="$status_file.watcher-error.json"
+  fi
+  echo "terminal invariant timeout: run_id=$run_id expected=$terminal error_class=${error_class:-any} observed=$actual lease=${lease:-none} watcher_error=${watcher_error:-none}" >&2
   return 1
 }
+
+# A negative tuple with no matching live lease must return through the helper's
+# explicit timeout path. Under global errexit/pipefail, an empty diagnostic
+# lease lookup must not abort before the structured evidence is emitted.
+HELPER_NEGATIVE_RUN="$TMP/helper-negative"
+HELPER_NEGATIVE_STATE="$HELPER_NEGATIVE_RUN/.agent-state-$(id -u)"
+mkdir -p "$HELPER_NEGATIVE_STATE/semaphore-v1/prefix.scope"
+printf '%s\n' \
+  '{"run_id":"helper-negative","event":"route_decided"}' \
+  '{"run_id":"helper-negative","event":"agent_started"}' \
+  '{"run_id":"helper-negative","event":"failed","error_class":"wrong_error_class"}' \
+  >"$HELPER_NEGATIVE_STATE/agent-lifecycle.jsonl"
+printf '%s\n' '{"state":"failed"}' >"$HELPER_NEGATIVE_RUN/status.json"
+printf '%s\n' 'run_id=helper-negative-extra' \
+  >"$HELPER_NEGATIVE_STATE/semaphore-v1/prefix.scope/prefix.lease"
+set +e
+(
+  set -euo pipefail
+  wait_for_terminal_and_release \
+    "$HELPER_NEGATIVE_STATE/agent-lifecycle.jsonl" "$HELPER_NEGATIVE_STATE" \
+    helper-negative failed 1 0 "$HELPER_NEGATIVE_RUN/status.json" provider_execution_failed
+) 2>"$HELPER_NEGATIVE_RUN/stderr"
+HELPER_NEGATIVE_RC=$?
+set -e
+[ "$HELPER_NEGATIVE_RC" -eq 1 ] || {
+  echo "negative terminal tuple returned rc=$HELPER_NEGATIVE_RC instead of 1" >&2
+  exit 1
+}
+grep -Fq 'terminal invariant timeout: run_id=helper-negative expected=failed error_class=provider_execution_failed observed={"manifest_events":["route_decided","agent_started","failed"],"status":{"state":"failed"},"terminal_error_class":"wrong_error_class"} lease=none watcher_error=none' \
+  "$HELPER_NEGATIVE_RUN/stderr" || {
+    echo "negative terminal tuple did not emit structured timeout evidence" >&2
+    sed -n '1,5p' "$HELPER_NEGATIVE_RUN/stderr" >&2
+    exit 1
+  }
+
+# Exact run matching must ignore a live lease owned by a prefixed run ID in
+# both the success poll and timeout evidence paths.
+printf '%s\n' \
+  '{"run_id":"helper-exact","event":"route_decided"}' \
+  '{"run_id":"helper-exact","event":"agent_started"}' \
+  '{"run_id":"helper-exact","event":"completed"}' \
+  >>"$HELPER_NEGATIVE_STATE/agent-lifecycle.jsonl"
+printf '%s\n' '{"state":"completed"}' >"$HELPER_NEGATIVE_RUN/exact-status.json"
+printf '%s\n' 'run_id=helper-exact-extra' \
+  >"$HELPER_NEGATIVE_STATE/semaphore-v1/prefix.scope/exact-prefix.lease"
+if ! wait_for_terminal_and_release \
+    "$HELPER_NEGATIVE_STATE/agent-lifecycle.jsonl" "$HELPER_NEGATIVE_STATE" \
+    helper-exact completed 1 0 "$HELPER_NEGATIVE_RUN/exact-status.json"; then
+  echo "exact terminal tuple was blocked by a prefixed run lease" >&2
+  exit 1
+fi
 
 uberdev_agent_dispatch "$REQUEST" \
   "$TMP/run/prompt.txt" "$TMP/run/result.md" "$TMP/run/status.json"
 
-python3 - "$TMP/backend.json" "$STATE_DIR/agent-lifecycle.jsonl" "$TMP/run/status.json" "$$" <<'PY'
-import json, pathlib, stat, sys
+python3 - "$TMP/backend.json" "$STATE_DIR/agent-lifecycle.jsonl" "$TMP/run/status.json" "$STATE_DIR" <<'PY'
+import json, os, pathlib, stat, sys
 capture = json.loads(pathlib.Path(sys.argv[1]).read_text())
 decision = capture["decision"]
 assert capture["backend"] == "codex"
+assert capture["workspace_mode"] == "isolated" and capture["workspace_dir"] == ""
 assert decision["logical_route"] == "quality", decision
 assert decision["model"] == "gpt-5.6-sol", decision
 assert decision["reasoning_effort"] == "medium", decision
@@ -336,11 +613,18 @@ assert decision["service_tier"] == "default", decision
 assert decision["sandbox"] == "read-only", decision
 events = [json.loads(line) for line in pathlib.Path(sys.argv[2]).read_text().splitlines()]
 assert [event["event"] for event in events] == ["route_decided", "agent_started"], events
+assert {event["schema_version"] for event in events} == {2}, events
 assert events[0]["effective_model"] == "gpt-5.6-sol"
 assert "backend_handle" not in events[1]
 assert events[1]["status_path"] == str(pathlib.Path(sys.argv[3]).resolve())
-assert events[1]["owner_pid"] == int(sys.argv[4]), events[1]
-assert stat.S_IMODE(pathlib.Path(sys.argv[3]).stat().st_mode) == 0o600
+assert events[1]["owner_process_identity"].split("|",1)[0] == str(events[1]["owner_pid"]), events[1]
+leases=list(pathlib.Path(sys.argv[4]).glob("semaphore-v1/*.scope/*.lease"))
+assert len(leases)==1,leases
+lease=dict(line.split("=",1) for line in leases[0].read_text().splitlines())
+assert int(lease["owner_pid"])==events[1]["owner_pid"]
+assert lease["owner_identity"]==events[1]["owner_process_identity"]
+if os.name != "nt":
+    assert stat.S_IMODE(pathlib.Path(sys.argv[3]).stat().st_mode) == 0o600
 PY
 
 # Opaque handles remain live for reconciliation and retain their lease.
@@ -355,6 +639,50 @@ if grep -R -q 'run_id=agent-dispatch-test' "$STATE_DIR/semaphore-v1" 2>/dev/null
   echo "terminalized opaque fixture retained its lease" >&2
   exit 1
 fi
+
+# Caller workspace metadata reaches the provider adapter but is excluded from
+# the routing projection. Unsupported/mismatched workspace requests fail before
+# any lifecycle state or provider call.
+mkdir -p "$TMP/caller-repo"
+CALLER_REPO="$(cd "$TMP/caller-repo" && pwd -P)"
+CALLER_REQUEST="$(python3 -I - "$REQUEST" "$CALLER_REPO" <<'PY'
+import json,sys
+request=json.loads(sys.argv[1]); request['run_id']='agent-dispatch-caller'
+request['repository_id']=sys.argv[2]; request['workspace_mode']='caller'; request['workspace_dir']=sys.argv[2]
+print(json.dumps(request,sort_keys=True,separators=(',',':')))
+PY
+)"
+uberdev_agent_dispatch "$CALLER_REQUEST" "$TMP/run/prompt.txt" "$TMP/run/caller-result.md" "$TMP/run/caller-status.json"
+python3 -I - "$TMP/backend.json" "$CALLER_REPO" <<'PY'
+import json,pathlib,sys
+capture=json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert capture['workspace_mode']=='caller' and capture['workspace_dir']==sys.argv[2]
+assert 'workspace_mode' not in capture['decision'] and 'workspace_dir' not in capture['decision']
+PY
+printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$TMP/run/caller-status.json"
+wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-caller completed 80 0.1
+
+workspace_provider_before="$(cat "$TMP/provider-count")"
+for workspace_case in invalid missing mismatch unsupported unexpected; do
+  invalid_run="$TMP/workspace-invalid-$workspace_case"; mkdir -p "$invalid_run"; printf 'prompt\n' > "$invalid_run/prompt.txt"
+  invalid_request="$(python3 -I - "$REQUEST" "$invalid_run" "$CALLER_REPO" "$workspace_case" <<'PY'
+import json,sys
+request=json.loads(sys.argv[1]); request['run_dir']=sys.argv[2]; request['run_id']='workspace-invalid-'+sys.argv[4]
+case=sys.argv[4]
+if case=='invalid': request['workspace_mode']='shared'
+elif case=='missing': request['workspace_mode']='caller'
+elif case=='mismatch': request.update(workspace_mode='caller',workspace_dir=sys.argv[2],repository_id=sys.argv[3])
+elif case=='unsupported': request.update(workspace_mode='caller',workspace_dir=sys.argv[3],repository_id=sys.argv[3],backend='background',routing_mode='inherit')
+elif case=='unexpected': request.update(workspace_mode='isolated',workspace_dir=sys.argv[3])
+print(json.dumps(request,sort_keys=True,separators=(',',':')))
+PY
+)"
+  if uberdev_agent_dispatch "$invalid_request" "$invalid_run/prompt.txt" "$invalid_run/result.md" "$invalid_run/status.json" >/dev/null 2>&1; then
+    echo "invalid workspace request accepted: $workspace_case" >&2; exit 1
+  fi
+  [ ! -e "$invalid_run/.agent-state-$(id -u)" ] || { echo "invalid workspace request created state: $workspace_case" >&2; exit 1; }
+done
+[ "$(cat "$TMP/provider-count")" = "$workspace_provider_before" ] || { echo 'invalid workspace request reached provider' >&2; exit 1; }
 
 # Public issue identity is a canonical positive JSON integer and must agree
 # with issue_or_pr before any private state or provider boundary exists.
@@ -507,6 +835,9 @@ PY
 
 CLAUDE_REQUEST="$(variant_request agent-dispatch-claude claude)"
 uberdev_agent_dispatch "$CLAUDE_REQUEST" "$TMP/run/prompt.txt" "$TMP/run/claude.md" "$TMP/run/claude.json"
+wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-claude completed 80 0.1
+[ ! -e "$TMP/run/claude.json.watcher-error.json" ]
+! grep -R -q 'run_id=agent-dispatch-claude' "$STATE_DIR/semaphore-v1" 2>/dev/null
 python3 - "$TMP/backend.json" <<'PY'
 import json, pathlib, sys
 capture = json.loads(pathlib.Path(sys.argv[1]).read_text())
@@ -554,7 +885,8 @@ payload = path.read_text().replace(
 assert "run_id=replacement-generation-race\n" in payload
 descriptor, temporary = tempfile.mkstemp(prefix=".replacement-lease.", dir=path.parent)
 try:
-    os.fchmod(descriptor, 0o600)
+    if os.name != "nt":
+        os.fchmod(descriptor, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
         stream.write(payload)
         stream.flush()
@@ -649,6 +981,7 @@ fi
 # released immediately instead of being left for reconciliation.
 SYNC_REQUEST="$(variant_request agent-dispatch-sync inherit)"
 uberdev_agent_dispatch "$SYNC_REQUEST" "$TMP/run/prompt.txt" "$TMP/run/sync-result.md" "$TMP/run/sync-status.json"
+wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-sync completed 80 0.1 "$TMP/run/sync-status.json"
 python3 - "$STATE_DIR/agent-lifecycle.jsonl" <<'PY'
 import json, pathlib, sys
 events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
@@ -657,6 +990,99 @@ assert [event["event"] for event in sync] == ["route_decided", "agent_started", 
 PY
 if grep -R -q 'run_id=agent-dispatch-sync' "$STATE_DIR/semaphore-v1" 2>/dev/null; then
   echo "synchronously completed dispatch retained its lease" >&2
+  exit 1
+fi
+
+# A provider may publish terminal status before the adapter binds its handle.
+# Force a sibling acquisition to reconcile during that exact window: the
+# unexpired pre-handle generation must survive, bind, and finalize exactly once.
+FAST_TERMINAL_READY="$TMP/run/fast-terminal-ready"
+FAST_TERMINAL_RESUME="$TMP/run/fast-terminal-resume"
+export FAST_TERMINAL_READY FAST_TERMINAL_RESUME
+FAST_TERMINAL_REQUEST="$(variant_request agent-dispatch-fast-terminal-prehandle inherit)"
+(fast_terminal_output="$(uberdev_agent_dispatch "$FAST_TERMINAL_REQUEST" "$TMP/run/prompt.txt" \
+  "$TMP/run/fast-terminal-race.md" "$TMP/run/fast-terminal-race.json")"; \
+  printf '%s' "$fast_terminal_output") \
+  >"$TMP/run/fast-terminal-race.out" 2>"$TMP/run/fast-terminal-race.err" &
+fast_terminal_pid=$!
+fast_terminal_ready_tries=0
+while [ ! -s "$FAST_TERMINAL_READY" ] && [ "$fast_terminal_ready_tries" -lt 500 ]; do
+  command sleep 0.01
+  fast_terminal_ready_tries=$((fast_terminal_ready_tries + 1))
+done
+[ -s "$FAST_TERMINAL_READY" ] || {
+  echo "fast-terminal provider did not reach the pre-handle pause" >&2
+  kill "$fast_terminal_pid" 2>/dev/null || true
+  wait "$fast_terminal_pid" 2>/dev/null || true
+  exit 1
+}
+fast_terminal_lease="$({ grep -R -F -x -l -- \
+  'run_id=agent-dispatch-fast-terminal-prehandle' "$STATE_DIR/semaphore-v1" 2>/dev/null | head -1; } || true)"
+[ -n "$fast_terminal_lease" ] && grep -q '^backend_handle=$' "$fast_terminal_lease" || {
+  echo "fast-terminal fixture was not paused with an unbound lease" >&2
+  : >"$FAST_TERMINAL_RESUME"
+  wait "$fast_terminal_pid" 2>/dev/null || true
+  exit 1
+}
+fast_terminal_generation="$(sed -n 's/^generation=//p' "$fast_terminal_lease")"
+# Stock Bash 3.2 review wrappers can publish a waitable owner that exits while
+# the outer dispatcher is still paused here. Recreate that exact durable state
+# without weakening the real mutex, secure writer, generation, or CAS path.
+command sleep 30 & fast_terminal_transient_owner=$!
+fast_terminal_transient_identity="$(_uberdev_semaphore_process_identity \
+  "$fast_terminal_transient_owner")"
+kill "$fast_terminal_transient_owner"
+wait "$fast_terminal_transient_owner" 2>/dev/null || true
+fast_terminal_scope="$(dirname "$fast_terminal_lease")"
+_uberdev_semaphore_mutex_acquire "$fast_terminal_scope"
+_uberdev_semaphore_read_lease "$fast_terminal_lease"
+_uberdev_semaphore_publish_lease "$fast_terminal_scope" "$fast_terminal_lease" \
+  "$_UBERDEV_LEASE_RUN_ID" "$fast_terminal_transient_owner" \
+  "$fast_terminal_transient_identity" '' '' "$_UBERDEV_LEASE_START_EPOCH" \
+  "$_UBERDEV_LEASE_TIMEOUT_S" "$_UBERDEV_LEASE_STATUS_PATH"
+_uberdev_semaphore_mutex_release "$fast_terminal_scope"
+if kill -0 "$fast_terminal_transient_owner" 2>/dev/null \
+    || [ "$(sed -n 's/^owner_pid=//p' "$fast_terminal_lease")" != "$fast_terminal_transient_owner" ]; then
+  echo "fast-terminal fixture did not publish an exact absent owner" >&2
+  : >"$FAST_TERMINAL_RESUME"
+  wait "$fast_terminal_pid" 2>/dev/null || true
+  exit 1
+fi
+fast_terminal_sibling="$(uberdev_semaphore_acquire "$STATE_DIR" fixture-repository codex 20 \
+  agent-dispatch-fast-terminal-sibling 30)"
+if [ -f "$fast_terminal_lease" ] \
+    && [ "$(sed -n 's/^generation=//p' "$fast_terminal_lease")" = "$fast_terminal_generation" ]; then
+  fast_terminal_survived=1
+else
+  fast_terminal_survived=0
+fi
+uberdev_semaphore_release "$fast_terminal_sibling"
+: >"$FAST_TERMINAL_RESUME"
+if wait "$fast_terminal_pid"; then
+  fast_terminal_rc=0
+else
+  fast_terminal_rc=$?
+fi
+if [ "$fast_terminal_survived" -ne 1 ]; then
+  echo "sibling reconciliation reclaimed a live terminal pre-handle lease" >&2
+  exit 1
+fi
+if [ "$fast_terminal_rc" -ne 0 ]; then
+  echo "fast-terminal dispatch failed after sibling reconciliation: rc=$fast_terminal_rc" >&2
+  sed -n '1,80p' "$TMP/run/fast-terminal-race.err" >&2
+  exit 1
+fi
+wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" \
+  agent-dispatch-fast-terminal-prehandle completed 80 0.1 "$TMP/run/fast-terminal-race.json"
+python3 -I -B - "$STATE_DIR/agent-lifecycle.jsonl" <<'PY'
+import json, pathlib, sys
+events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+actual = [event["event"] for event in events if event["run_id"] == "agent-dispatch-fast-terminal-prehandle"]
+assert actual == ["route_decided", "agent_started", "completed"], actual
+PY
+if grep -R -F -x -q -- 'run_id=agent-dispatch-fast-terminal-prehandle' \
+    "$STATE_DIR/semaphore-v1" 2>/dev/null; then
+  echo "fast-terminal dispatch retained its lease after exact finalization" >&2
   exit 1
 fi
 
@@ -696,6 +1122,14 @@ failed = [event for event in events if event["run_id"] == "agent-dispatch-fail"]
 assert [event["event"] for event in failed] == ["route_decided", "agent_started", "failed"], failed
 assert failed[-1]["error_class"] == "provider_launch_failed"
 PY
+if grep -R -q 'run_id=agent-dispatch-fail' "$STATE_DIR/semaphore-v1" 2>/dev/null; then
+  echo "provider launch failure retained its capacity lease" >&2
+  exit 1
+fi
+FAIL_RELEASE_PROBE="$(uberdev_semaphore_acquire "$STATE_DIR" fixture-repository codex 20 provider-failure-release-probe 30)" || {
+  echo "provider launch failure capacity could not be reacquired" >&2; exit 1;
+}
+uberdev_semaphore_release "$FAIL_RELEASE_PROBE"
 
 # zsh NOMATCH must not explode the semaphore's empty `*.lease` loops, and the
 # adapter must restore both NOMATCH and NULL_GLOB on success and failure.
@@ -717,6 +1151,11 @@ zsh -f -c '
     DISPATCH_RC=0
     return 0
   }
+  cancel_count=0
+  _uberdev_dispatch_cancel_backend() {
+    cancel_count=$((cancel_count + 1))
+    return 0
+  }
   before_nomatch=$options[nomatch]; before_null=$options[nullglob]
   request=$(make_request "$2" zsh-success)
   uberdev_agent_dispatch "$request" "$2/prompt.txt" "$2/result.md" "$2/status.json" || exit 91
@@ -724,36 +1163,84 @@ zsh -f -c '
   request=$(make_request "$2" zsh-failure)
   ZSH_FAIL_PROVIDER=1 uberdev_agent_dispatch "$request" "$2/prompt.txt" "$2/fail.md" "$2/fail.json"
   rc=$?
-  [ "$rc" -eq 17 ]
+  [ "$rc" -eq 2 ] && [ "$cancel_count" -eq 1 ]
   [ "$options[nomatch]" = "$before_nomatch" ] && [ "$options[nullglob]" = "$before_null" ]
 ' _ "$LIB" "$ZRUN"
 
 # Owner-exit reconciliation is proven independently for every async backend.
 # A second process cannot take cap=1 while canonical status is live, can take
 # it after terminal, and run-manifest reconciliation never invents abandoned.
+. "$ROOT/plugins/uberdev/lib/dispatch.sh"
 CROSS_BIN="$TMP/cross-bin"
 mkdir -p "$CROSS_BIN"
 cat > "$CROSS_BIN/claude" <<'SH'
 #!/usr/bin/env bash
-[ "${1:-}" = agents ] && [ "${2:-}" = --json ] || exit 2
-cat "$CROSS_CLAUDE_STATE"
+if [ "${1:-}" = agents ] && [ "${2:-}" = --all ] && [ "${3:-}" = --json ]; then
+  if [ "${CROSS_CLAUDE_STOP_MODE:-}" = delayed ] && [ -r "${CROSS_CLAUDE_STOP_COUNT:-}" ]; then
+    probes=0
+    [ -z "${CROSS_CLAUDE_PROBE_COUNT:-}" ] || [ ! -r "$CROSS_CLAUDE_PROBE_COUNT" ] || read -r probes < "$CROSS_CLAUDE_PROBE_COUNT"
+    probes=$((probes + 1))
+    [ -z "${CROSS_CLAUDE_PROBE_COUNT:-}" ] || printf '%s\n' "$probes" > "$CROSS_CLAUDE_PROBE_COUNT"
+    if [ "$probes" -ge 21 ]; then
+      printf '[{"sessionId":"abc12345-full","state":"cancelled"}]\n'
+      exit 0
+    fi
+  fi
+  cat "$CROSS_CLAUDE_STATE"
+  exit 0
+fi
+if [ "${1:-}" = stop ] && [ "${2:-}" = abc12345-full ]; then
+  count=0
+  [ -z "${CROSS_CLAUDE_STOP_COUNT:-}" ] || [ ! -r "$CROSS_CLAUDE_STOP_COUNT" ] || read -r count < "$CROSS_CLAUDE_STOP_COUNT"
+  count=$((count + 1))
+  [ -z "${CROSS_CLAUDE_STOP_COUNT:-}" ] || printf '%s\n' "$count" > "$CROSS_CLAUDE_STOP_COUNT"
+  [ "${CROSS_CLAUDE_STOP_MODE:-}" != never ] || exit 2
+  if [ "${CROSS_CLAUDE_STOP_MODE:-}" = once ] && [ "$count" -eq 1 ]; then exit 2; fi
+  [ "${CROSS_CLAUDE_STOP_MODE:-}" != sticky ] || exit 0
+  if [ "${CROSS_CLAUDE_STOP_MODE:-}" = delayed ]; then
+    exit 0
+  fi
+  printf '[]\n' > "$CROSS_CLAUDE_STATE"
+  exit 0
+fi
+exit 2
 SH
 chmod +x "$CROSS_BIN/claude"
 
 # The short Claude handle must resolve to exactly one full session. A shared
 # prefix is ambiguous and must remain unknown instead of selecting row order.
-printf '[{"sessionId":"abc12345-one","status":"running"},{"sessionId":"abc12345-two","status":"completed"}]\n' \
+printf '[{"sessionId":"abc12345-one","state":"running"},{"sessionId":"abc12345-two","state":"completed"}]\n' \
   > "$TMP/ambiguous-claude-agents.json"
 if CROSS_CLAUDE_STATE="$TMP/ambiguous-claude-agents.json" PATH="$CROSS_BIN:$PATH" \
     _uberdev_agent_claude_probe abc12345 >/dev/null 2>&1; then
   echo "Claude watcher accepted an ambiguous session prefix" >&2
   exit 1
 fi
-printf '[{"sessionId":"abc12345-one","status":"future-state"}]\n' \
+printf '[{"sessionId":"abc12345-one","state":"future-state"}]\n' \
   > "$TMP/unknown-claude-status.json"
 if CROSS_CLAUDE_STATE="$TMP/unknown-claude-status.json" PATH="$CROSS_BIN:$PATH" \
     _uberdev_agent_claude_probe abc12345 >/dev/null 2>&1; then
   echo "Claude watcher treated an unknown status as completed" >&2
+  exit 1
+fi
+printf '[{"sessionId":"abc12345-full","state":"blocked","blockedReason":"Permission approval required"}]\n' \
+  > "$TMP/blocked-claude-status.json"
+BLOCKED_PROBE="$(CROSS_CLAUDE_STATE="$TMP/blocked-claude-status.json" PATH="$CROSS_BIN:$PATH" \
+  _uberdev_agent_claude_probe abc12345)"
+[ "$BLOCKED_PROBE" = 'blocked:permission' ] || {
+  echo "Claude watcher did not classify idle/blocked permission state: $BLOCKED_PROBE" >&2
+  exit 1
+}
+printf '[{"sessionId":"abc12345-full","state":"idle"}]\n' > "$TMP/idle-claude-status.json"
+IDLE_PROBE="$(CROSS_CLAUDE_STATE="$TMP/idle-claude-status.json" PATH="$CROSS_BIN:$PATH" \
+  _uberdev_agent_claude_probe abc12345)"
+[ "$IDLE_PROBE" = 'blocked:permission' ] || {
+  echo "Claude watcher did not classify idle as an actionable permission block: $IDLE_PROBE" >&2
+  exit 1
+}
+if CROSS_CLAUDE_STATE="$TMP/ambiguous-claude-agents.json" PATH="$CROSS_BIN:$PATH" \
+    _uberdev_dispatch_cancel_claude_bg abc12345 >/dev/null 2>&1; then
+  echo 'Claude cancellation accepted a non-unique session prefix' >&2
   exit 1
 fi
 
@@ -765,7 +1252,7 @@ cross_backend_case() {
   request="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"cross-"+sys.argv[2],"repository_id":"cross-repository","backend":sys.argv[2],"workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":88,"issue_num":88,"capacity":1,"timeout_s":20},separators=(",",":")))' "$run" "$backend")"
   state="$run/.agent-state-$(id -u)"
   if [ "$backend" = claude-bg ]; then
-    printf '[{"sessionId":"abc12345-full","status":"running"}]\n' > "$run/claude-agents.json"
+    printf '[{"sessionId":"abc12345-full","state":"running"}]\n' > "$run/claude-agents.json"
   fi
   (
     CROSS_BACKEND="$backend" CROSS_RUN="$run" CROSS_CLAUDE_STATE="$run/claude-agents.json" \
@@ -783,7 +1270,7 @@ cross_backend_case() {
   python3 -I "$ROOT/plugins/uberdev/lib/run_manifest.py" reconcile \
     --manifest "$state/agent-lifecycle.jsonl" >/dev/null
   if [ "$backend" = claude-bg ]; then
-    printf '[{"sessionId":"abc12345-full","status":"completed"}]\n' > "$run/claude-agents.json"
+    printf '[{"sessionId":"abc12345-full","state":"completed"}]\n' > "$run/claude-agents.json"
   else
     tmp_status="$run/status.json.tmp"
     if [ "$backend" = wezterm ]; then
@@ -822,7 +1309,7 @@ _uberdev_agent_dispatch_backend() {
       if [ "${CROSS_CLAUDE_DROP_AFTER_LIVE:-0}" = 1 ]; then
         nohup bash -c 'sleep 0.5; printf "[]\\n" > "$1"' _ "$CROSS_CLAUDE_STATE" >/dev/null 2>&1 &
       elif [ -n "${CROSS_CLAUDE_TERMINAL_AFTER_LIVE:-}" ]; then
-        nohup bash -c 'sleep 0.5; printf "[{\"sessionId\":\"abc12345-full\",\"status\":\"%s\"}]\\n" "$2" > "$1"' \
+        nohup bash -c 'sleep 0.5; printf "[{\"sessionId\":\"abc12345-full\",\"state\":\"%s\"}]\\n" "$2" > "$1"' \
           _ "$CROSS_CLAUDE_STATE" "$CROSS_CLAUDE_TERMINAL_AFTER_LIVE" >/dev/null 2>&1 &
       fi
       ;;
@@ -851,8 +1338,11 @@ claude_watcher_case() {
   request="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"claude-watch-"+sys.argv[2],"repository_id":"claude-watch-repository","backend":"claude-bg","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":89,"issue_num":89,"capacity":1,"timeout_s":1},separators=(",",":")))' "$run" "$mode")"
   case "$mode" in
     initial-absent) printf '[]\n' > "$run/claude-agents.json" ;;
-    live-then-absent|explicit-completed) printf '[{"sessionId":"abc12345-full","status":"running"}]\n' > "$run/claude-agents.json" ;;
-    ambiguous) printf '[{"sessionId":"abc12345-one","status":"running"},{"sessionId":"abc12345-two","status":"completed"}]\n' > "$run/claude-agents.json" ;;
+    live-then-absent|explicit-completed) printf '[{"sessionId":"abc12345-full","state":"running"}]\n' > "$run/claude-agents.json" ;;
+    blocked) printf '[{"sessionId":"abc12345-full","state":"blocked","blockedReason":"Permission approval required"}]\n' > "$run/claude-agents.json" ;;
+    provider-blocked) printf '[{"sessionId":"abc12345-full","state":"blocked","blockedReason":"Provider queue is paused"}]\n' > "$run/claude-agents.json" ;;
+    idle) printf '[{"sessionId":"abc12345-full","state":"idle"}]\n' > "$run/claude-agents.json" ;;
+    ambiguous) printf '[{"sessionId":"abc12345-one","state":"running"},{"sessionId":"abc12345-two","state":"completed"}]\n' > "$run/claude-agents.json" ;;
     probe-error) printf '{not-json\n' > "$run/claude-agents.json" ;;
   esac
   (
@@ -867,14 +1357,21 @@ claude_watcher_case() {
         "$run/prompt.txt" "$run/result.md" "$run/status.json"
   )
   case "$mode" in
-    initial-absent|live-then-absent|explicit-completed)
+    initial-absent|live-then-absent|explicit-completed|blocked|provider-blocked|idle)
       for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
         grep -Eq '"state":"(completed|failed)"' "$run/status.json" 2>/dev/null && break
         command sleep 0.1
       done
       ;;
     ambiguous)
-      command sleep 0.6
+      for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do
+        [ -s "$run/status.json.watcher-error.json" ] && break
+        command sleep 0.1
+      done
+      [ -s "$run/status.json.watcher-error.json" ] || {
+        echo "ambiguous Claude probe did not persist its bounded watcher error" >&2
+        return 1
+      }
       ;;
     probe-error)
       # Exceed request timeout_s. Unknown probe evidence must still retain the
@@ -905,7 +1402,28 @@ PY
         echo "explicit Claude completion did not complete" >&2; return 1;
       }
       ;;
+    blocked|provider-blocked|idle)
+      grep -q '"state":"failed"' "$run/status.json" || {
+        echo "$mode Claude session did not terminalize" >&2; return 1;
+      }
+      wait_for_terminal_and_release "$state/agent-lifecycle.jsonl" "$state" "claude-watch-$mode" failed 80 0.1 || return 1
+      python3 -I - "$state/agent-lifecycle.jsonl" "$mode" <<'PY'
+import json, pathlib, sys
+events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+terminal = [event for event in events if event.get("run_id") == "claude-watch-"+sys.argv[2] and event.get("event") == "failed"]
+expected = "provider_blocked" if sys.argv[2] == "provider-blocked" else "provider_permission_blocked"
+assert len(terminal) == 1 and terminal[0].get("error_class") == expected, terminal
+PY
+      ;;
     ambiguous|probe-error)
+      python3 -I - "$run/status.json.watcher-error.json" <<'PY'
+import json,sys
+row=json.load(open(sys.argv[1]))
+assert row=={
+ 'schema_version':1,'error':'provider_probe_failed','backend':'claude-bg',
+ 'handle':'abc12345','terminal':'provider_probe_failed','attempts':3,
+},row
+PY
       grep -q '"state":"running"' "$run/status.json" || {
         echo "$mode Claude probe did not remain nonterminal" >&2; return 1;
       }
@@ -925,8 +1443,108 @@ PY
 claude_watcher_case initial-absent
 claude_watcher_case live-then-absent
 claude_watcher_case explicit-completed
+claude_watcher_case blocked
+claude_watcher_case provider-blocked
+claude_watcher_case idle
 claude_watcher_case ambiguous
 claude_watcher_case probe-error
+
+claude_cancel_retry_case() {
+  mode="$1"
+  run="$TMP/claude-cancel-$mode"
+  mkdir -p "$run"
+  printf 'Claude cancellation retry prompt\n' > "$run/prompt.txt"
+  printf '[{"sessionId":"abc12345-full","state":"blocked","blockedReason":"Permission approval required"}]\n' > "$run/claude-agents.json"
+  request="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"claude-cancel-"+sys.argv[2],"repository_id":"claude-cancel-repository","backend":"claude-bg","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":94,"issue_num":94,"capacity":1,"timeout_s":20},separators=(",",":")))' "$run" "$mode")"
+  (
+    sleep() { command sleep 0.1; }
+    CROSS_CLAUDE_STATE="$run/claude-agents.json" \
+      CROSS_CLAUDE_STOP_MODE="$mode" CROSS_CLAUDE_STOP_COUNT="$run/stop-count" \
+      CROSS_CLAUDE_PROBE_COUNT="$run/probe-count" \
+      PATH="$CROSS_BIN:$PATH" uberdev_agent_dispatch "$request" \
+        "$run/prompt.txt" "$run/result.md" "$run/status.json"
+  )
+  state="$run/.agent-state-$(id -u)"
+  if [ "$mode" = once ]; then
+    wait_for_terminal_and_release "$state/agent-lifecycle.jsonl" "$state" claude-cancel-once failed 80 0.1 || return 1
+    [ "$(cat "$run/stop-count")" -ge 2 ] || { echo "transient Claude stop failure was not retried" >&2; return 1; }
+    return 0
+  fi
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do
+    [ -s "$run/status.json.watcher-error.json" ] && break
+    command sleep 0.1
+  done
+  python3 -I - "$run/status.json.watcher-error.json" "$mode" <<'PY'
+import json,sys
+row=json.load(open(sys.argv[1]))
+expected='provider_stop_failed' if sys.argv[2]=='never' else 'provider_cancel_unconfirmed'
+assert row['error']=='provider_cancel_failed' and row['attempts']==3 and row['reason']==expected,row
+PY
+  if [ "$mode" = delayed ]; then
+    wait_for_terminal_and_release "$state/agent-lifecycle.jsonl" "$state" claude-cancel-delayed cancelled 80 0.1 || return 1
+    [ "$(cat "$run/stop-count")" -eq 1 ] || {
+      echo "delayed Claude convergence reissued provider stop" >&2; return 1;
+    }
+    return 0
+  fi
+  stop_count="$(cat "$run/stop-count")"
+  command sleep 0.5
+  [ "$(cat "$run/stop-count")" = "$stop_count" ] || {
+    echo "durable Claude cancellation failure reissued provider stop" >&2; return 1;
+  }
+  grep -q '"state":"running"' "$run/status.json" || { echo "failed Claude stop fabricated a terminal" >&2; return 1; }
+  grep -R -q "run_id=claude-cancel-$mode" "$state/semaphore-v1" || { echo "failed Claude stop abandoned its lease" >&2; return 1; }
+  rm -rf "$run"
+  command sleep 0.2
+}
+
+claude_cancel_retry_case once
+claude_cancel_retry_case delayed
+claude_cancel_retry_case never
+claude_cancel_retry_case sticky
+
+# If both durable probe-error persistence and provider cancellation fail, the
+# watcher must retry both parent-observable operations instead of marking the
+# supervision failure as already reported after the first lost attempt.
+claude_probe_persistence_retry_case() {
+  local run="$TMP/claude-probe-persistence-retry" state request
+  mkdir -p "$run"
+  printf 'Claude probe persistence retry prompt\n' >"$run/prompt.txt"
+  printf '{not-json\n' >"$run/claude-agents.json"
+  request="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"claude-probe-persistence-retry","repository_id":"claude-probe-persistence-retry-repository","backend":"claude-bg","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":95,"issue_num":95,"capacity":1,"timeout_s":20},separators=(",",":")))' "$run")"
+  (
+    sleep() { command sleep 0.05; }
+    eval "$(declare -f _uberdev_agent_persist_watcher_error_retry | sed '1s/_uberdev_agent_persist_watcher_error_retry/_real_probe_persist_retry/')"
+    _uberdev_agent_persist_watcher_error_retry() {
+      local count=0
+      [ ! -r "$run/persist-count" ] || read -r count <"$run/persist-count"
+      count=$((count + 1)); printf '%s\n' "$count" >"$run/persist-count"
+      [ "$count" -ge 3 ] || return 29
+      _real_probe_persist_retry "$@"
+    }
+    _uberdev_dispatch_cancel_backend() {
+      local count=0
+      [ ! -r "$run/cancel-count" ] || read -r count <"$run/cancel-count"
+      printf '%s\n' $((count + 1)) >"$run/cancel-count"
+      return 31
+    }
+    CROSS_CLAUDE_STATE="$run/claude-agents.json" PATH="$CROSS_BIN:$PATH" \
+      uberdev_agent_dispatch "$request" "$run/prompt.txt" "$run/result.md" "$run/status.json"
+  )
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+    [ -s "$run/status.json.watcher-error.json" ] && break
+    command sleep 0.1
+  done
+  [ "$(cat "$run/persist-count")" -ge 3 ]
+  [ "$(cat "$run/cancel-count")" -ge 3 ]
+  grep -q '"state":"running"' "$run/status.json"
+  state="$run/.agent-state-$(id -u)"
+  grep -R -q 'run_id=claude-probe-persistence-retry' "$state/semaphore-v1"
+  rm -rf "$run"
+  command sleep 0.2
+}
+
+claude_probe_persistence_retry_case
 
 cross_backend_case codex
 cross_backend_case background
@@ -940,16 +1558,14 @@ mkdir -p "$DEAD_RUN"
 printf 'dead provider prompt\n' > "$DEAD_RUN/prompt.txt"
 DEAD_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-dead-without-terminal","repository_id":"adapter-death-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":91,"issue_num":91,"capacity":1,"timeout_s":20},separators=(",",":")))' "$DEAD_RUN")"
 _uberdev_agent_dispatch_backend() {
-  nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(.2)' >/dev/null 2>&1 &
+  nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(1)' >/dev/null 2>&1 &
   DISPATCH_ID="$!"; DISPATCH_LOG=""
+  _uberdev_dispatch_wait_owned_session "$DISPATCH_ID"
   printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" > "$6"
   chmod 600 "$6"
 }
 uberdev_agent_dispatch "$DEAD_REQUEST" "$DEAD_RUN/prompt.txt" "$DEAD_RUN/result.md" "$DEAD_RUN/status.json"
-for _ in 1 2 3 4 5 6; do
-  grep -q '"state":"failed"' "$DEAD_RUN/status.json" 2>/dev/null && break
-  sleep 1
-done
+wait_for_terminal_and_release "$DEAD_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$DEAD_RUN/.agent-state-$(id -u)" adapter-dead-without-terminal failed 80 0.1 "$DEAD_RUN/status.json" provider_execution_failed
 grep -q '"state":"failed"' "$DEAD_RUN/status.json" || { echo "dead provider retained running status" >&2; exit 1; }
 python3 -I - "$DEAD_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" <<'PY'
 import json,pathlib,sys
@@ -959,17 +1575,210 @@ assert len(terminal)==1 and terminal[0].get('error_class')=='provider_execution_
 PY
 ! grep -R -q 'run_id=adapter-dead-without-terminal' "$DEAD_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
 
+# Killing only the detached wrapper must not orphan its provider descendant or
+# release capacity. The watcher preserves launch identity, terminates the exact
+# owned process group, then publishes one failed lifecycle and releases the
+# exact lease.
+ORPHAN_RUN="$TMP/wrapper-death-with-live-provider"
+mkdir -p "$ORPHAN_RUN"
+printf 'wrapper death prompt\n' >"$ORPHAN_RUN/prompt.txt"
+ORPHAN_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-wrapper-death","repository_id":"adapter-wrapper-death-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":99,"issue_num":99,"capacity":1,"timeout_s":20},separators=(",",":")))' "$ORPHAN_RUN")"
+_uberdev_agent_dispatch_backend() {
+  nohup python3 -I -c 'import os,sys; os.setsid(); os.execvp("bash",["bash","-c","sleep 30 & echo $! > \"$1\"; wait","_",sys.argv[1]])' \
+    "$ORPHAN_RUN/provider-child.pid" >/dev/null 2>&1 &
+  DISPATCH_ID="$!"; DISPATCH_LOG=""
+  _uberdev_dispatch_wait_owned_session "$DISPATCH_ID"
+  printf '%s\n' "$DISPATCH_ID" >"$ORPHAN_RUN/wrapper.pid"
+  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" >"$6"
+  chmod 600 "$6"
+}
+uberdev_agent_dispatch "$ORPHAN_REQUEST" "$ORPHAN_RUN/prompt.txt" "$ORPHAN_RUN/result.md" "$ORPHAN_RUN/status.json"
+ORPHAN_WRAPPER="$(cat "$ORPHAN_RUN/wrapper.pid")"
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$ORPHAN_RUN/provider-child.pid" ] && break; sleep .1; done
+ORPHAN_CHILD="$(cat "$ORPHAN_RUN/provider-child.pid")"
+kill -KILL "$ORPHAN_WRAPPER"
+wait_for_terminal_and_release "$ORPHAN_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$ORPHAN_RUN/.agent-state-$(id -u)" adapter-wrapper-death failed 80 0.1 "$ORPHAN_RUN/status.json" provider_execution_failed
+grep -q '"state":"failed"' "$ORPHAN_RUN/status.json"
+! _uberdev_dispatch_group_live "$ORPHAN_WRAPPER"
+! kill -0 "$ORPHAN_CHILD" 2>/dev/null
+python3 -I - "$ORPHAN_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" <<'PY'
+import json,pathlib,sys
+rows=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+events=[row for row in rows if row.get('run_id')=='adapter-wrapper-death']
+assert [row.get('event') for row in events]==['route_decided','agent_started','failed'],events
+assert events[-1].get('error_class')=='provider_execution_failed',events[-1]
+PY
+! grep -R -q 'run_id=adapter-wrapper-death' "$ORPHAN_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
+
+# The same orphan-group proof remains sufficient when a surviving provider
+# ignores TERM: cancellation revalidates the absent leader plus owned session
+# before escalating to KILL, then proves the group is gone.
+KILL_RUN="$TMP/wrapper-death-term-resistant"
+mkdir -p "$KILL_RUN"
+nohup python3 -I -B -c 'import os,sys; os.setsid(); os.execvp("bash",["bash","-c","trap \"\" HUP; (trap \"\" TERM HUP; while :; do sleep 1; done) & echo $! > \"$1/child.pid\"; while [ ! -e \"$1/release\" ]; do sleep .05; done; exit 0","_",sys.argv[1]])' "$KILL_RUN" >/dev/null 2>&1 &
+KILL_LEADER=$!
+_uberdev_dispatch_wait_owned_session "$KILL_LEADER"
+KILL_IDENTITY="$(_uberdev_agent_process_identity "$KILL_LEADER")"
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$KILL_RUN/child.pid" ] && break; sleep .1; done
+KILL_CHILD="$(cat "$KILL_RUN/child.pid")"
+: >"$KILL_RUN/release"
+wait "$KILL_LEADER"
+_uberdev_dispatch_group_live "$KILL_LEADER"
+_uberdev_dispatch_cancel_backend codex "$KILL_LEADER" "$KILL_IDENTITY"
+! _uberdev_dispatch_group_live "$KILL_LEADER"
+! kill -0 "$KILL_CHILD" 2>/dev/null
+
+# Before provider launch, exact-identity registration failure must reconcile a
+# terminal and release only the generation acquired for this request.
+. "$ROOT/plugins/uberdev/lib/dispatch.sh"
+PRE_RUN="$TMP/pre-launch-identity-failure"
+mkdir -p "$PRE_RUN"
+printf 'pre-launch failure prompt\n' > "$PRE_RUN/prompt.txt"
+PRE_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-pre-launch-identity-failure","repository_id":"adapter-prelaunch-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":95,"issue_num":95,"capacity":1,"timeout_s":20},separators=(",",":")))' "$PRE_RUN")"
+eval "$(declare -f uberdev_semaphore_set_handle | sed '1s/uberdev_semaphore_set_handle/_real_prelaunch_set_handle/')"
+uberdev_semaphore_set_handle() { return 23; }
+rm -f "$PRE_RUN/provider-called"
+_uberdev_agent_dispatch_backend() { : > "$PRE_RUN/provider-called"; return 0; }
+if uberdev_agent_dispatch "$PRE_REQUEST" "$PRE_RUN/prompt.txt" "$PRE_RUN/result.md" "$PRE_RUN/status.json"; then
+  echo "pre-launch identity failure was reported as success" >&2; exit 1
+fi
+[ ! -e "$PRE_RUN/provider-called" ] || { echo "pre-launch identity failure reached the provider seam" >&2; exit 1; }
+grep -q '"state":"failed"' "$PRE_RUN/status.json"
+python3 -I - "$PRE_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" <<'PY'
+import json,pathlib,sys
+rows=[json.loads(x) for x in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+terminal=[x for x in rows if x.get('run_id')=='adapter-pre-launch-identity-failure' and x.get('event')=='failed']
+assert len(terminal)==1 and terminal[0].get('error_class')=='dispatch_setup_failed',terminal
+PY
+! grep -R -q 'run_id=adapter-pre-launch-identity-failure' "$PRE_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
+eval "$(declare -f _real_prelaunch_set_handle | sed '1s/_real_prelaunch_set_handle/uberdev_semaphore_set_handle/')"
+PRE_REACQUIRED="$(uberdev_semaphore_acquire "$PRE_RUN/.agent-state-$(id -u)" adapter-prelaunch-repository codex 1 adapter-prelaunch-reacquired 20)"
+uberdev_semaphore_release "$PRE_REACQUIRED"
+
+# Event construction and manifest persistence fail before provider launch. The
+# rollback must retry transient failures, publish one failed lifecycle, and
+# release only the exact captured lease identity. If that exact release also
+# fails, capacity stays fail-closed and sidecar persistence is retried.
+(
+eval "$(declare -f _uberdev_agent_event_json | sed '1s/_uberdev_agent_event_json/_real_prelaunch_event_json/')"
+eval "$(declare -f _uberdev_agent_append_event | sed '1s/_uberdev_agent_append_event/_real_prelaunch_append_event/')"
+eval "$(declare -f _uberdev_agent_release_exact_lease | sed '1s/_uberdev_agent_release_exact_lease/_real_prelaunch_exact_release/')"
+eval "$(declare -f uberdev_semaphore_release | sed '1s/uberdev_semaphore_release/_real_prelaunch_generic_release/')"
+PRE_EVENT_MODE=''
+PRE_EVENT_COUNTER=''
+PRE_RELEASE_COUNTER=''
+PRE_SIDECAR_COUNTER=''
+_uberdev_agent_event_json() {
+  if [ "$PRE_EVENT_MODE" = event_json ] && [ "$1" = agent_started ] && [ ! -e "$PRE_EVENT_COUNTER" ]; then
+    : >"$PRE_EVENT_COUNTER"
+    return 29
+  fi
+  _real_prelaunch_event_json "$@"
+}
+_uberdev_agent_append_event() {
+  if [ "$PRE_EVENT_MODE" = append_once ] && [[ "$2" == *'"event":"agent_started"'* ]] \
+      && [ ! -e "$PRE_EVENT_COUNTER" ]; then
+    : >"$PRE_EVENT_COUNTER"
+    return 29
+  fi
+  if { [ "$PRE_EVENT_MODE" = append_always ] || [ "$PRE_EVENT_MODE" = append_release ]; } \
+      && [[ "$2" == *'"event":"agent_started"'* ]]; then
+    return 29
+  fi
+  _real_prelaunch_append_event "$@"
+}
+_uberdev_agent_release_exact_lease() {
+  local count
+  if [ "$PRE_EVENT_MODE" = append_release ]; then
+    count=0; [ ! -r "$PRE_RELEASE_COUNTER" ] || read -r count < "$PRE_RELEASE_COUNTER"
+    printf '%s\n' $((count + 1)) > "$PRE_RELEASE_COUNTER"
+    return 29
+  fi
+  _real_prelaunch_exact_release "$@"
+}
+_uberdev_agent_persist_watcher_error() {
+  local count
+  if [ "$PRE_EVENT_MODE" = append_release ]; then
+    count=0; [ ! -r "$PRE_SIDECAR_COUNTER" ] || read -r count < "$PRE_SIDECAR_COUNTER"
+    count=$((count + 1)); printf '%s\n' "$count" > "$PRE_SIDECAR_COUNTER"
+    [ "$count" -ge 3 ] || return 29
+  fi
+  "$BASH" -c 'unset _UBERDEV_AGENT_DISPATCH_LOADED; . "$1"; shift; _uberdev_agent_persist_watcher_error "$@"' \
+    _ "$LIB" "$@"
+}
+uberdev_semaphore_release() { return 88; }
+
+prelaunch_event_failure_case() {
+  local mode="$1" suffix="$2" run request rc state manifest sidecar terminals
+  run="$TMP/pre-launch-event-$suffix"
+  mkdir -p "$run"
+  printf 'pre-launch event failure prompt\n' >"$run/prompt.txt"
+  request="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-prelaunch-event-"+sys.argv[2],"repository_id":"adapter-prelaunch-event-repository-"+sys.argv[2],"backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":96,"issue_num":96,"capacity":1,"timeout_s":20},separators=(",",":")))' "$run" "$suffix")"
+  PRE_EVENT_MODE="$mode"
+  PRE_EVENT_COUNTER="$run/failure-injected"
+  PRE_RELEASE_COUNTER="$run/release-attempts"
+  PRE_SIDECAR_COUNTER="$run/sidecar-attempts"
+  rm -f "$PRE_EVENT_COUNTER" "$PRE_RELEASE_COUNTER" "$PRE_SIDECAR_COUNTER" "$run/provider-called"
+  _uberdev_agent_dispatch_backend() { : >"$run/provider-called"; return 0; }
+  set +e
+  uberdev_agent_dispatch "$request" "$run/prompt.txt" "$run/result.md" "$run/status.json"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || { echo "pre-launch $mode failure returned rc=$rc" >&2; return 1; }
+  [ ! -e "$run/provider-called" ] || { echo "pre-launch $mode failure reached provider" >&2; return 1; }
+  grep -q '"state":"failed"' "$run/status.json"
+  state="$run/.agent-state-$(id -u)"
+  manifest="$state/agent-lifecycle.jsonl"
+  if [ "$mode" = append_release ]; then
+    grep -R -q "run_id=adapter-prelaunch-event-$suffix" "$state/semaphore-v1"
+    [ "$(cat "$PRE_RELEASE_COUNTER")" -eq 3 ]
+    [ "$(cat "$PRE_SIDECAR_COUNTER")" -eq 3 ]
+  else
+    ! grep -R -q "run_id=adapter-prelaunch-event-$suffix" "$state/semaphore-v1" 2>/dev/null
+  fi
+  if [ "$mode" = append_always ] || [ "$mode" = append_release ]; then
+    sidecar="$run/status.json.watcher-error.json"
+    [ -f "$sidecar" ] || sidecar="$state/adapter-prelaunch-event-$suffix.watcher-error.json"
+    python3 -I - "$sidecar" <<'PY'
+import json,sys
+row=json.load(open(sys.argv[1]))
+assert row['error']=='launch_finalize_failed' and row['handle']=='' and row['attempts']==3,row
+PY
+  else
+    terminals="$(python3 -I - "$manifest" "$suffix" <<'PY'
+import json,pathlib,sys
+rows=[json.loads(x) for x in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+run_id='adapter-prelaunch-event-'+sys.argv[2]
+events=[x.get('event') for x in rows if x.get('run_id')==run_id]
+assert events==['route_decided','agent_started','failed'],events
+print(events.count('failed'),end='')
+PY
+)"
+    [ "$terminals" = 1 ]
+  fi
+}
+
+prelaunch_event_failure_case event_json event-json
+prelaunch_event_failure_case append_once append-once
+prelaunch_event_failure_case append_always append-always
+prelaunch_event_failure_case append_release append-release
+)
+PRE_EVENT_REACQUIRED="$(uberdev_semaphore_acquire "$TMP/pre-launch-event-append-always/.agent-state-$(id -u)" adapter-prelaunch-event-repository-append-always codex 1 adapter-prelaunch-event-reacquired 20)"
+uberdev_semaphore_release "$PRE_EVENT_REACQUIRED"
+
 # Once launch succeeds, a failure to bind the exact handle must cancel that
 # provider and reconcile a terminal instead of returning an unowned child.
-. "$ROOT/plugins/uberdev/lib/dispatch.sh"
 POST_RUN="$TMP/post-launch-setup-failure"
 mkdir -p "$POST_RUN"
 printf 'post-launch failure prompt\n' > "$POST_RUN/prompt.txt"
 POST_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-post-launch-failure","repository_id":"adapter-postlaunch-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":92,"issue_num":92,"capacity":1,"timeout_s":20},separators=(",",":")))' "$POST_RUN")"
 eval "$(declare -f uberdev_semaphore_set_handle | sed '1s/uberdev_semaphore_set_handle/_real_postlaunch_set_handle/')"
-POST_SET_CALLS=0
+POST_SET_CALLS_FILE="$POST_RUN/set-handle-calls"
+printf '0\n' > "$POST_SET_CALLS_FILE"
 uberdev_semaphore_set_handle() {
+  POST_SET_CALLS="$(cat "$POST_SET_CALLS_FILE")"
   POST_SET_CALLS=$((POST_SET_CALLS + 1))
+  printf '%s\n' "$POST_SET_CALLS" > "$POST_SET_CALLS_FILE"
   [ "$POST_SET_CALLS" -ne 2 ] || return 23
   _real_postlaunch_set_handle "$@"
 }
@@ -990,6 +1799,183 @@ kill -0 "$POST_PID" 2>/dev/null && { echo "post-launch setup failure orphaned pr
 grep -q '"state":"failed"' "$POST_RUN/status.json"
 ! grep -R -q 'run_id=adapter-post-launch-failure' "$POST_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
 eval "$(declare -f _real_postlaunch_set_handle | sed '1s/_real_postlaunch_set_handle/uberdev_semaphore_set_handle/')"
+
+# A nonterminal numeric backend must not be registered without a verified
+# process identity. A transient capture failure fails dispatch and the cleanup
+# path retries the identity probe before cancelling the exact provider.
+IDENTITY_RUN="$TMP/post-launch-process-identity-failure"
+mkdir -p "$IDENTITY_RUN"
+printf 'process identity failure prompt\n' >"$IDENTITY_RUN/prompt.txt"
+IDENTITY_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-process-identity-failure","repository_id":"adapter-process-identity-failure-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":96,"issue_num":96,"capacity":1,"timeout_s":20},separators=(",",":")))' "$IDENTITY_RUN")"
+eval "$(declare -f _uberdev_agent_process_identity | sed '1s/_uberdev_agent_process_identity/_real_agent_process_identity/')"
+printf '0\n' >"$IDENTITY_RUN/identity-probes"
+_uberdev_agent_process_identity() {
+  identity_provider_pid="$(cat "$IDENTITY_RUN/provider.pid" 2>/dev/null || true)"
+  if [ -f "$IDENTITY_RUN/identity-capture-armed" ] \
+      && [ -n "$identity_provider_pid" ] && [ "$1" = "$identity_provider_pid" ]; then
+    identity_probes="$(cat "$IDENTITY_RUN/identity-probes")"
+    identity_probes=$((identity_probes + 1))
+    printf '%s\n' "$identity_probes" >"$IDENTITY_RUN/identity-probes"
+    [ "$identity_probes" -ne 1 ] || return 2
+  fi
+  _real_agent_process_identity "$@"
+}
+_uberdev_agent_dispatch_backend() {
+  nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(30)' >/dev/null 2>&1 &
+  DISPATCH_ID="$!"; DISPATCH_LOG=""
+  printf '%s\n' "$DISPATCH_ID" >"$IDENTITY_RUN/provider.pid"
+  _uberdev_dispatch_wait_owned_session "$DISPATCH_ID"
+  : >"$IDENTITY_RUN/identity-capture-armed"
+  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" >"$6"
+  chmod 600 "$6"
+}
+set +e
+uberdev_agent_dispatch "$IDENTITY_REQUEST" "$IDENTITY_RUN/prompt.txt" \
+  "$IDENTITY_RUN/result.md" "$IDENTITY_RUN/status.json"
+identity_dispatch_rc=$?
+set -e
+eval "$(declare -f _real_agent_process_identity | sed '1s/_real_agent_process_identity/_uberdev_agent_process_identity/')"
+IDENTITY_PID="$(cat "$IDENTITY_RUN/provider.pid")"
+if [ "$identity_dispatch_rc" -eq 0 ]; then
+  kill "$IDENTITY_PID" 2>/dev/null || true
+fi
+for _ in 1 2 3 4 5; do kill -0 "$IDENTITY_PID" 2>/dev/null || break; sleep .1; done
+wait "$IDENTITY_PID" 2>/dev/null || true
+if [ "$identity_dispatch_rc" -eq 0 ] || kill -0 "$IDENTITY_PID" 2>/dev/null \
+    || ! grep -q '"state":"failed"' "$IDENTITY_RUN/status.json" \
+    || grep -R -q 'run_id=adapter-process-identity-failure' "$IDENTITY_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null; then
+  identity_provider_live=0
+  kill -0 "$IDENTITY_PID" 2>/dev/null && identity_provider_live=1
+  identity_status="$(sed -n 's/.*"state":"\([^"]*\)".*/\1/p' "$IDENTITY_RUN/status.json" 2>/dev/null || true)"
+  identity_lease_count="$(find "$IDENTITY_RUN/.agent-state-$(id -u)/semaphore-v1" -name '*.lease' -type f 2>/dev/null | wc -l | tr -d ' ')"
+  echo "numeric backend identity-capture failure was not closed coherently: rc=$identity_dispatch_rc live=$identity_provider_live status=${identity_status:-missing} leases=$identity_lease_count probes=$(cat "$IDENTITY_RUN/identity-probes")" >&2
+  exit 1
+fi
+
+# An immediate-exit provider can publish a canonical terminal after the first
+# terminal probe but before native identity capture reports the PID absent.
+# That terminal is authoritative and must complete normal registration instead
+# of being rewritten as a process_identity_capture supervisory failure.
+IDENTITY_TERMINAL_RUN="$TMP/post-launch-identity-absent-terminal"
+mkdir -p "$IDENTITY_TERMINAL_RUN"
+printf 'identity absent terminal prompt\n' >"$IDENTITY_TERMINAL_RUN/prompt.txt"
+IDENTITY_TERMINAL_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-identity-absent-terminal","repository_id":"adapter-identity-absent-terminal-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":99,"issue_num":99,"capacity":1,"timeout_s":20},separators=(",",":")))' "$IDENTITY_TERMINAL_RUN")"
+(
+_uberdev_agent_process_identity() {
+  [ -f "$IDENTITY_TERMINAL_RUN/provider.pid" ] \
+    && [ "$1" = "$(cat "$IDENTITY_TERMINAL_RUN/provider.pid")" ] || return 2
+  printf 'terminal result\n' >"$IDENTITY_TERMINAL_RUN/result.md"
+  printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"%s"}\n' "$1" \
+    >"$IDENTITY_TERMINAL_RUN/status.json"
+  chmod 600 "$IDENTITY_TERMINAL_RUN/status.json"
+  : >"$IDENTITY_TERMINAL_RUN/terminal-published-during-identity"
+  return 1
+}
+_uberdev_agent_dispatch_backend() {
+  python3 -I -c 'pass' >/dev/null 2>&1 &
+  DISPATCH_ID="$!"; DISPATCH_LOG=""
+  printf '%s\n' "$DISPATCH_ID" >"$IDENTITY_TERMINAL_RUN/provider.pid"
+  wait "$DISPATCH_ID"
+  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" >"$6"
+  chmod 600 "$6"
+}
+uberdev_agent_dispatch "$IDENTITY_TERMINAL_REQUEST" "$IDENTITY_TERMINAL_RUN/prompt.txt" \
+  "$IDENTITY_TERMINAL_RUN/result.md" "$IDENTITY_TERMINAL_RUN/status.json"
+[ -e "$IDENTITY_TERMINAL_RUN/terminal-published-during-identity" ]
+grep -q '"state":"completed"' "$IDENTITY_TERMINAL_RUN/status.json"
+python3 -I - "$IDENTITY_TERMINAL_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" <<'PY'
+import json,pathlib,sys
+rows=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+events=[row for row in rows if row.get('run_id')=='adapter-identity-absent-terminal']
+assert [row.get('event') for row in events]==['route_decided','agent_started','completed'],events
+PY
+! grep -R -q 'run_id=adapter-identity-absent-terminal' \
+  "$IDENTITY_TERMINAL_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
+)
+
+# A provider can return a handle and then exit before rollback samples process
+# identity. Proven absence still terminalizes the run and releases its lease.
+EXITED_RUN="$TMP/post-launch-provider-already-exited"
+mkdir -p "$EXITED_RUN"
+printf 'already exited provider prompt\n' >"$EXITED_RUN/prompt.txt"
+EXITED_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-postlaunch-provider-already-exited","repository_id":"adapter-postlaunch-provider-already-exited-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":98,"issue_num":98,"capacity":1,"timeout_s":20},separators=(",",":")))' "$EXITED_RUN")"
+_uberdev_agent_dispatch_backend() {
+  python3 -I -c 'import os; os.setsid()' >/dev/null 2>&1 &
+  DISPATCH_ID="$!"; DISPATCH_LOG=""
+  wait "$DISPATCH_ID"
+  return 19
+}
+if uberdev_agent_dispatch "$EXITED_REQUEST" "$EXITED_RUN/prompt.txt" \
+    "$EXITED_RUN/result.md" "$EXITED_RUN/status.json"; then
+  echo "already-exited post-launch provider was reported as success" >&2; exit 1
+fi
+grep -q '"state":"failed"' "$EXITED_RUN/status.json"
+python3 -I - "$EXITED_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" <<'PY'
+import json,pathlib,sys
+rows=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+events=[row for row in rows if row.get('run_id')=='adapter-postlaunch-provider-already-exited']
+assert [row.get('event') for row in events]==['route_decided','agent_started','failed'],events
+assert events[-1].get('error_class')=='dispatch_setup_failed',events[-1]
+PY
+! grep -R -q 'run_id=adapter-postlaunch-provider-already-exited' \
+  "$EXITED_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
+
+# Exercise the real atomic handle replacement failure path. The semaphore
+# publishes a replacement inode, exact-identity validation then fails, and the
+# injected rollback removal fails once. Dispatcher cleanup must consume the
+# returned replacement capability, cancel the provider, and make cap=1
+# immediately reacquirable.
+REPLACEMENT_RUN="$TMP/post-launch-replacement-capability"
+mkdir -p "$REPLACEMENT_RUN"
+printf 'replacement capability prompt\n' > "$REPLACEMENT_RUN/prompt.txt"
+REPLACEMENT_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-postlaunch-replacement","repository_id":"adapter-postlaunch-replacement-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":97,"issue_num":97,"capacity":1,"timeout_s":20},separators=(",",":")))' "$REPLACEMENT_RUN")"
+eval "$(declare -f _uberdev_semaphore_lease_identity | sed '1s/_uberdev_semaphore_lease_identity/_real_replacement_lease_identity/')"
+eval "$(declare -f _uberdev_semaphore_remove_lease | sed '1s/_uberdev_semaphore_remove_lease/_real_replacement_remove_lease/')"
+_uberdev_semaphore_lease_identity() {
+  case "$1" in
+    *.lease)
+      if [ -e "$REPLACEMENT_RUN/provider-launched" ] && [ ! -e "$REPLACEMENT_RUN/identity-failed" ]; then
+        : > "$REPLACEMENT_RUN/identity-failed"
+        return 29
+      fi
+      ;;
+  esac
+  _real_replacement_lease_identity "$@"
+}
+_uberdev_semaphore_remove_lease() {
+  if [ -e "$REPLACEMENT_RUN/identity-failed" ] && [ ! -e "$REPLACEMENT_RUN/rollback-failed" ]; then
+    : > "$REPLACEMENT_RUN/rollback-failed"
+    return 31
+  fi
+  _real_replacement_remove_lease "$@"
+}
+_uberdev_agent_dispatch_backend() {
+  nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(30)' >/dev/null 2>&1 &
+  DISPATCH_ID="$!"; DISPATCH_LOG=""
+  printf '%s\n' "$DISPATCH_ID" > "$REPLACEMENT_RUN/provider.pid"
+  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" > "$6"
+  chmod 600 "$6"
+  : > "$REPLACEMENT_RUN/provider-launched"
+}
+if uberdev_agent_dispatch "$REPLACEMENT_REQUEST" "$REPLACEMENT_RUN/prompt.txt" \
+    "$REPLACEMENT_RUN/result.md" "$REPLACEMENT_RUN/status.json"; then
+  echo "replacement-capability failure was reported as success" >&2; exit 1
+fi
+REPLACEMENT_PID="$(cat "$REPLACEMENT_RUN/provider.pid")"
+for _ in 1 2 3 4 5; do kill -0 "$REPLACEMENT_PID" 2>/dev/null || break; sleep .1; done
+wait "$REPLACEMENT_PID" 2>/dev/null || true
+kill -0 "$REPLACEMENT_PID" 2>/dev/null && {
+  echo "replacement-capability cleanup orphaned provider $REPLACEMENT_PID" >&2; exit 1;
+}
+[ -e "$REPLACEMENT_RUN/identity-failed" ] && [ -e "$REPLACEMENT_RUN/rollback-failed" ]
+! grep -R -q 'run_id=adapter-postlaunch-replacement' \
+  "$REPLACEMENT_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
+REPLACEMENT_REACQUIRED="$(uberdev_semaphore_acquire \
+  "$REPLACEMENT_RUN/.agent-state-$(id -u)" adapter-postlaunch-replacement-repository \
+  codex 1 adapter-postlaunch-replacement-reacquired 20)"
+uberdev_semaphore_release "$REPLACEMENT_REACQUIRED"
+eval "$(declare -f _real_replacement_lease_identity | sed '1s/_real_replacement_lease_identity/_uberdev_semaphore_lease_identity/')"
+eval "$(declare -f _real_replacement_remove_lease | sed '1s/_real_replacement_remove_lease/_uberdev_semaphore_remove_lease/')"
 
 # A detached watcher finalization failure is durable and visible; it may not be
 # redirected away while the lease silently remains live.

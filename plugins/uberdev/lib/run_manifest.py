@@ -17,8 +17,10 @@ made private before use, and direct symlink targets are rejected.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import datetime as dt
 import errno
+import hashlib
 import json
 import os
 import re
@@ -41,7 +43,13 @@ except ImportError:  # pragma: no cover - unavailable on POSIX
     _msvcrt = None
 
 
-SCHEMA_VERSION = 1
+# v2 binds every new start to a kernel creation identity. v1 remains readable
+# solely for manifests written before that field existed: it is never upgraded
+# in place, never receives a synthesized identity, and reconciliation appends a
+# terminal using the original lifecycle version. The public append boundary
+# accepts only the current version, so compatibility cannot create new v1 data.
+SCHEMA_VERSION = 2
+READABLE_SCHEMA_VERSIONS = frozenset({1, SCHEMA_VERSION})
 TERMINAL_EVENTS = frozenset(
     {"completed", "failed", "timed_out", "cancelled", "abandoned"}
 )
@@ -93,6 +101,7 @@ ALLOWED_FIELDS = frozenset(
         "error_class",
         "quality_gate",
         "owner_pid",
+        "owner_process_identity",
         "backend_handle",
         "status_path",
         "timeout_s",
@@ -166,6 +175,12 @@ _IDENTIFIER_FIELDS = frozenset(
     }
 )
 _IDENTIFIER_PATTERN = re.compile(r"[A-Za-z0-9$][A-Za-z0-9$._:/@+\-]{0,255}")
+_PROCESS_IDENTITY_PATTERN = re.compile(
+    r"([1-9][0-9]*)\|([1-9][0-9]*)\|([1-9][0-9]*)\|([0-9a-f]{64})"
+)
+_LEASE_IDENTITY_PATTERN = re.compile(
+    r"(0|[1-9][0-9]{0,19}):(0|[1-9][0-9]{0,19})"
+)
 _SENSITIVE_VALUE_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
@@ -324,6 +339,25 @@ def _pid_handle(value: Any) -> bool:
     return numeric.isdigit() and int(numeric) > 0
 
 
+def _numeric_pid(value: Any) -> int | None:
+    if not _pid_handle(value):
+        return None
+    if isinstance(value, int):
+        return value
+    numeric = value[4:] if value.startswith("pid:") else value
+    return int(numeric)
+
+
+def _parse_process_identity(value: Any) -> tuple[int, int, int, str] | None:
+    if not isinstance(value, str):
+        return None
+    match = _PROCESS_IDENTITY_PATTERN.fullmatch(value)
+    if match is None:
+        return None
+    pid, pgid, sid, fingerprint = match.groups()
+    return int(pid), int(pgid), int(sid), fingerprint
+
+
 def _valid_identifier(value: Any) -> bool:
     return isinstance(value, str) and _IDENTIFIER_PATTERN.fullmatch(value) is not None
 
@@ -345,9 +379,8 @@ def _validate_event(event: Any) -> list[str]:
         return [f"unknown_field: {field}" for field in unknown]
 
     errors: list[str] = []
-    if not _is_plain_int(event.get("schema_version")) or event.get(
-        "schema_version"
-    ) != SCHEMA_VERSION:
+    schema_version = event.get("schema_version")
+    if not _is_plain_int(schema_version) or schema_version not in READABLE_SCHEMA_VERSIONS:
         errors.append("invalid_schema_version")
 
     event_name = event.get("event")
@@ -389,6 +422,17 @@ def _validate_event(event: Any) -> list[str]:
     if "owner_pid" in event and event["owner_pid"] is not None:
         if not _is_plain_int(event["owner_pid"]) or event["owner_pid"] <= 0:
             errors.append("invalid_owner_pid")
+
+    if "owner_process_identity" in event and event["owner_process_identity"] is not None:
+        identity = event["owner_process_identity"]
+        parsed_identity = _parse_process_identity(identity)
+        owner_pid = event.get("owner_pid")
+        if (
+            parsed_identity is None
+            or not _is_plain_int(owner_pid)
+            or parsed_identity[0] != owner_pid
+        ):
+            errors.append("invalid_owner_process_identity")
 
     if "backend_handle" in event and event["backend_handle"] is not None:
         handle = event["backend_handle"]
@@ -477,6 +521,21 @@ def _validate_event(event: Any) -> list[str]:
     ):
         if "invalid_owner_pid" not in errors:
             errors.append("invalid_owner_pid")
+
+    if (
+        event_name == "agent_started"
+        and _is_plain_int(schema_version)
+        and schema_version >= 2
+    ):
+        owner_pid = event.get("owner_pid")
+        owner_identity = _parse_process_identity(event.get("owner_process_identity"))
+        if (
+            owner_identity is None
+            or not _is_plain_int(owner_pid)
+            or owner_identity[0] != owner_pid
+        ):
+            if "invalid_owner_process_identity" not in errors:
+                errors.append("invalid_owner_process_identity")
 
     if event_name == "agent_started":
         status_path = event.get("status_path")
@@ -767,23 +826,213 @@ def _reject_symlinked_ancestors(path: str) -> None:
             raise ManifestRejected("manifest_symlinked_ancestor_rejected")
 
 
-def _pid_live(pid: Any) -> bool:
-    if isinstance(pid, str):
-        text = pid[4:] if pid.startswith("pid:") else pid
-        if not text.isdigit():
-            return False
-        pid = int(text)
-    if not _is_plain_int(pid) or pid <= 0:
-        return False
+def _linux_process_record(pid: int) -> tuple[int, int, int, str]:
     try:
-        os.kill(pid, 0)
+        with open(f"/proc/{pid}/stat", encoding="ascii") as stream:
+            raw = stream.read()
+    except FileNotFoundError as exc:
+        raise ProcessLookupError(pid) from exc
+    end = raw.rfind(")")
+    if end < 0:
+        raise OSError("malformed proc stat")
+    fields = raw[end + 2 :].split()
+    if len(fields) < 20:
+        raise OSError("incomplete proc stat")
+    if fields[0] == "Z":
+        raise ProcessLookupError(pid)
+    with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as stream:
+        boot_id = stream.read().strip()
+    if not boot_id:
+        raise OSError("boot identity unavailable")
+    return int(fields[1]), int(fields[2]), int(fields[3]), f"linux:{boot_id}:{fields[19]}"
+
+
+class _DarwinProcBSDInfo(ctypes.Structure):
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32), ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32), ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32), ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32), ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32), ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32), ("pbi_rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16), ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32), ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32), ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32), ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+
+def _darwin_process_record(pid: int) -> tuple[int, int, int, str]:
+    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    libproc.proc_pidinfo.argtypes = [
+        ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int
+    ]
+    libproc.proc_pidinfo.restype = ctypes.c_int
+    info = _DarwinProcBSDInfo()
+    size = ctypes.sizeof(info)
+    if libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), size) != size:
+        error = ctypes.get_errno()
+        if error in {errno.ESRCH, errno.ENOENT}:
+            raise ProcessLookupError(pid)
+        raise OSError(error or errno.EIO, "proc_pidinfo failed")
+    if info.pbi_status == 5:
+        raise ProcessLookupError(pid)
+    sid = os.getsid(pid)
+    return (
+        int(info.pbi_ppid), int(info.pbi_pgid), int(sid),
+        f"darwin:{info.pbi_start_tvsec}:{info.pbi_start_tvusec}",
+    )
+
+
+def _windows_parent_pid(pid: int) -> int:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    class ProcessEntry32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.c_uint32), ("cntUsage", ctypes.c_uint32),
+            ("th32ProcessID", ctypes.c_uint32), ("th32DefaultHeapID", ctypes.c_void_p),
+            ("th32ModuleID", ctypes.c_uint32), ("cntThreads", ctypes.c_uint32),
+            ("th32ParentProcessID", ctypes.c_uint32), ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", ctypes.c_uint32), ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    kernel32.CreateToolhelp32Snapshot.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+    kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    kernel32.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ProcessEntry32)]
+    kernel32.Process32FirstW.restype = ctypes.c_int
+    kernel32.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ProcessEntry32)]
+    kernel32.Process32NextW.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+    invalid_handle = ctypes.c_void_p(-1).value
+    if snapshot == invalid_handle:
+        raise OSError(ctypes.get_last_error(), "CreateToolhelp32Snapshot failed")
+    try:
+        entry = ProcessEntry32()
+        entry.dwSize = ctypes.sizeof(entry)
+        found = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while found:
+            if int(entry.th32ProcessID) == pid:
+                return int(entry.th32ParentProcessID)
+            found = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    raise ProcessLookupError(pid)
+
+
+def _windows_process_record(pid: int) -> tuple[int, int, int, str]:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    class FileTime(ctypes.Structure):
+        _fields_ = [("low", ctypes.c_uint32), ("high", ctypes.c_uint32)]
+
+    kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+    kernel32.GetExitCodeProcess.restype = ctypes.c_int
+    kernel32.GetProcessTimes.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(FileTime), ctypes.POINTER(FileTime),
+        ctypes.POINTER(FileTime), ctypes.POINTER(FileTime),
+    ]
+    kernel32.GetProcessTimes.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    handle = kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        error = ctypes.get_last_error()
+        if error in {87, 1168}:
+            raise ProcessLookupError(pid)
+        raise OSError(error or errno.EIO, "OpenProcess failed")
+    try:
+        exit_code = ctypes.c_uint32()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            raise OSError(ctypes.get_last_error(), "GetExitCodeProcess failed")
+        if exit_code.value != 259:
+            raise ProcessLookupError(pid)
+        created, exited, kernel, user = FileTime(), FileTime(), FileTime(), FileTime()
+        if not kernel32.GetProcessTimes(
+            handle, ctypes.byref(created), ctypes.byref(exited),
+            ctypes.byref(kernel), ctypes.byref(user)
+        ):
+            raise OSError(ctypes.get_last_error(), "GetProcessTimes failed")
+        creation_ticks = (int(created.high) << 32) | int(created.low)
+        if creation_ticks <= 0:
+            raise OSError("process creation time unavailable")
+    finally:
+        kernel32.CloseHandle(handle)
+    # Windows has no POSIX process groups or sessions. The PID is retained in
+    # those schema slots while the kernel creation FILETIME provides the
+    # authoritative anti-reuse identity.
+    return _windows_parent_pid(pid), pid, pid, f"windows:{creation_ticks}"
+
+
+def _native_process_record(pid: int) -> tuple[int, int, int, str]:
+    if sys.platform.startswith("linux"):
+        return _linux_process_record(pid)
+    if sys.platform == "darwin":
+        return _darwin_process_record(pid)
+    if os.name == "nt":
+        return _windows_process_record(pid)
+    raise OSError("unsupported process identity platform")
+
+
+def _process_identity(pid: Any) -> tuple[str, str | None]:
+    numeric_pid = _numeric_pid(pid)
+    if numeric_pid is None:
+        return "absent", None
+    pid = numeric_pid
+    try:
+        _parent, pgid, sid, creation_identity = _native_process_record(pid)
+        digest = hashlib.sha256(creation_identity.encode()).hexdigest()
+        return "captured", f"{pid}|{pgid}|{sid}|{digest}"
     except ProcessLookupError:
+        return "absent", None
+    except (AttributeError, OSError, ValueError):
+        return "unavailable", None
+
+
+def _write_process_identity(mode: str, destination: str) -> None:
+    self_pid = os.getppid()
+    # The caller explicitly selects native-parent depth.  Do not infer it from
+    # stdout: MSYS pipes are not reliably reported as FIFOs to native Python.
+    owner_depth = {"direct": 0, "parent": 1}.get(mode)
+    if owner_depth is None:
+        raise ManifestRejected("invalid_process_identity_mode")
+    if os.name == "nt":
+        owner_depth += 1
+    owner_pid = self_pid
+    try:
+        for _ in range(owner_depth):
+            owner_pid = _native_process_record(owner_pid)[0]
+    except ProcessLookupError as exc:
+        raise ManifestRuntimeError("process_identity_parent_absent") from exc
+    except (AttributeError, OSError, ValueError) as exc:
+        raise ManifestRuntimeError("process_identity_parent_unavailable") from exc
+    status, identity = _process_identity(owner_pid)
+    if status != "captured" or identity is None:
+        raise ManifestRuntimeError(f"process_identity_{status}")
+    with open(destination, "w", encoding="ascii", newline="\n") as stream:
+        stream.write(f"{owner_pid}\n{identity}\n")
+
+
+def _pid_live(pid: Any, expected_identity: str | None = None) -> bool | None:
+    numeric_pid = _numeric_pid(pid)
+    if numeric_pid is None:
         return False
-    except PermissionError:
-        return True
-    except OSError:
+    pid = numeric_pid
+    if expected_identity is not None:
+        parsed_identity = _parse_process_identity(expected_identity)
+        if parsed_identity is None or parsed_identity[0] != pid:
+            return False
+    probe_status, current_identity = _process_identity(pid)
+    if probe_status == "unavailable":
+        return None
+    if probe_status != "captured":
         return False
-    return True
+    return expected_identity is None or current_identity == expected_identity
 
 
 def _status_liveness(path: str) -> bool | None:
@@ -1070,7 +1319,7 @@ def _canonical_terminal_truth(started: dict[str, Any]) -> str | None:
 
 def _reconciliation_status(
     started: dict[str, Any],
-) -> tuple[bool | None, str | None, str | None]:
+) -> tuple[bool | None, str | None, str | None, str | None]:
     """Classify one secure snapshot for reconciliation exactly once.
 
     Invalid, contradictory, missing, and unsafe snapshots are unavailable
@@ -1079,20 +1328,24 @@ def _reconciliation_status(
 
     status_path = started.get("status_path")
     if not isinstance(status_path, str):
-        return None, None, None
+        return None, None, None, None
     try:
         verdict, snapshot = _probe_status_snapshot(status_path)
     except (ManifestRejected, ManifestRuntimeError):
-        return None, None, None
+        return None, None, None, None
     terminal_truth = _terminal_truth_from_snapshot(started, verdict, snapshot)
     if terminal_truth is not None:
-        return False, terminal_truth, None
+        return False, terminal_truth, None, None
     if snapshot is None:
-        return None, None, None
+        return None, None, None, None
     expected_backend = started.get("backend")
     reported_backend = snapshot.get("backend")
     if reported_backend is not None and reported_backend != expected_backend:
-        return None, None, None
+        return None, None, None, None
+    recovered_identity = snapshot.get("process_identity")
+    parsed_recovered_identity = _parse_process_identity(recovered_identity)
+    if recovered_identity is not None and parsed_recovered_identity is None:
+        return None, None, None, None
     recovered_handle: str | None = None
     needs_numeric_recovery = (
         started.get("backend_handle") in (None, "")
@@ -1100,17 +1353,28 @@ def _reconciliation_status(
     )
     if needs_numeric_recovery:
         if reported_backend != expected_backend:
-            return None, None, None
+            return None, None, None, None
         reported_keys = [key for key in ("pid", "backend_handle") if key in snapshot]
         if len(reported_keys) == 1:
             candidate = _canonical_backend_handle(snapshot[reported_keys[0]])
             if candidate is not None and candidate.isdigit():
                 recovered_handle = candidate
         if recovered_handle is None:
-            return None, None, None
+            return None, None, None, None
+    if recovered_identity is not None:
+        identity_handle = recovered_handle
+        if identity_handle is None:
+            identity_handle = _canonical_backend_handle(started.get("backend_handle"))
+        if (
+            identity_handle is None
+            or not identity_handle.isdigit()
+            or parsed_recovered_identity is None
+            or parsed_recovered_identity[0] != int(identity_handle)
+        ):
+            return None, None, None, None
     if verdict == "live":
-        return True, None, recovered_handle
-    return None, None, recovered_handle
+        return True, None, recovered_handle, recovered_identity
+    return None, None, recovered_handle, recovered_identity
 
 
 def _lease_generation(payload: bytes) -> str:
@@ -1132,8 +1396,102 @@ def _read_bounded_descriptor(descriptor: int, limit: int = 16384) -> bytes:
     return payload
 
 
-def secure_write_lease(path: str, payload: bytes) -> None:
-    """Publish one private lease by temp-plus-rename within a held directory fd."""
+def _validated_lease_capability_path(path: str, generation: str) -> tuple[str, str]:
+    if (
+        not isinstance(path, str)
+        or not os.path.isabs(path)
+        or any(character in path for character in ("\x00", "\n", "\r"))
+    ):
+        raise ManifestRejected("lease_path_must_be_absolute")
+    if any(component in {".", ".."} for component in re.split(r"[\\/]", path)):
+        raise ManifestRejected("lease_path_traversal_rejected")
+    absolute = os.path.abspath(path)
+    if not os.path.isabs(absolute):
+        raise ManifestRejected("lease_path_must_be_absolute")
+    name = os.path.basename(absolute)
+    if (
+        re.fullmatch(r"[0-9a-f]{64}\.lease", name) is None
+        or re.fullmatch(r"[0-9a-f]{32}", generation) is None
+        or not name.startswith(generation)
+    ):
+        raise ManifestRejected("lease_generation_mismatch")
+    parent = os.path.dirname(absolute)
+    _reject_symlinked_ancestors(parent)
+    try:
+        parent_entry = os.lstat(parent)
+    except OSError as exc:
+        raise ManifestRuntimeError("lease_parent_unavailable") from exc
+    if stat.S_ISLNK(parent_entry.st_mode) or not stat.S_ISDIR(parent_entry.st_mode):
+        raise ManifestRejected("lease_parent_not_directory")
+    if hasattr(os, "geteuid") and parent_entry.st_uid != os.geteuid():
+        raise ManifestRejected("lease_parent_not_owned_by_user")
+    return absolute, name
+
+
+def _parse_lease_identity(identity: str) -> tuple[int, int]:
+    if not isinstance(identity, str):
+        raise ManifestRejected("lease_identity_invalid")
+    matched = _LEASE_IDENTITY_PATTERN.fullmatch(identity)
+    if matched is None:
+        raise ManifestRejected("lease_identity_invalid")
+    device, inode = (int(value) for value in matched.groups())
+    if device > (1 << 64) - 1 or inode > (1 << 64) - 1:
+        raise ManifestRejected("lease_identity_invalid")
+    return device, inode
+
+
+def secure_lease_identity(path: str, generation: str) -> tuple[int, int]:
+    """Return one native-Python identity for an exact capability lease."""
+
+    absolute, name = _validated_lease_capability_path(path, generation)
+    parent_descriptor: int | None = None
+    descriptor: int | None = None
+    try:
+        if os.name == "nt":
+            if not os.path.lexists(absolute):
+                raise ManifestRuntimeError("lease_missing")
+            descriptor = _secure_open_regular(absolute, os.O_RDONLY)
+            current = os.lstat(absolute)
+        else:
+            parent_descriptor = _open_directory_fd(os.path.dirname(absolute))
+            try:
+                descriptor = os.open(
+                    name,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_descriptor,
+                )
+            except FileNotFoundError as exc:
+                raise ManifestRuntimeError("lease_missing") from exc
+            current = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(current.st_mode):
+            raise ManifestRejected("lease_not_regular")
+        if _lease_generation(_read_bounded_descriptor(descriptor)) != generation:
+            raise ManifestRejected("lease_generation_mismatch")
+        identity = (opened.st_dev, opened.st_ino)
+        if (current.st_dev, current.st_ino) != identity:
+            raise ManifestRejected("lease_replaced_during_identity")
+        return identity
+    except (ManifestRejected, ManifestRuntimeError):
+        raise
+    except OSError as exc:
+        raise ManifestRuntimeError("lease_identity_unavailable") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if parent_descriptor is not None:
+            os.close(parent_descriptor)
+
+
+def secure_write_lease(path: str, payload: bytes) -> tuple[int, int]:
+    """Publish a private lease and return its ``(device, inode)`` identity.
+
+    POSIX publication holds the parent directory descriptor across the atomic
+    replace. The native-Windows branch uses validated absolute paths because
+    Python does not expose the required ``dir_fd`` operations there; its caller
+    must supply a private parent directory with an already-validated ACL because
+    this helper does not establish or audit that directory ACL.
+    """
 
     if len(payload) > 16384 or not payload.endswith(b"\n"):
         raise ManifestRejected("lease_payload_invalid")
@@ -1165,7 +1523,10 @@ def secure_write_lease(path: str, payload: bytes) -> None:
             os.close(descriptor)
             descriptor = None
             os.replace(temporary_path, absolute)
-            return
+            published = os.stat(absolute, follow_symlinks=False)
+            if not stat.S_ISREG(published.st_mode):
+                raise ManifestRejected("lease_not_regular")
+            return published.st_dev, published.st_ino
         finally:
             if descriptor is not None:
                 os.close(descriptor)
@@ -1204,6 +1565,7 @@ def secure_write_lease(path: str, payload: bytes) -> None:
             os.fchmod(descriptor, 0o600)
         if os.write(descriptor, payload) != len(payload):
             raise ManifestRuntimeError("lease_short_write")
+        published = os.fstat(descriptor)
         os.close(descriptor)
         descriptor = None
         os.replace(
@@ -1212,6 +1574,10 @@ def secure_write_lease(path: str, payload: bytes) -> None:
             src_dir_fd=parent_descriptor,
             dst_dir_fd=parent_descriptor,
         )
+        current = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (published.st_dev, published.st_ino):
+            raise ManifestRejected("lease_replaced_after_publish")
+        return published.st_dev, published.st_ino
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -1222,17 +1588,50 @@ def secure_write_lease(path: str, payload: bytes) -> None:
         os.close(parent_descriptor)
 
 
-def secure_remove_lease(path: str, generation: str) -> None:
+def secure_remove_lease(path: str, generation: str, identity: str) -> None:
     """Remove only the exact generation named by a capability lease path."""
 
-    name = os.path.basename(path)
-    if (
-        re.fullmatch(r"[0-9a-f]{64}\.lease", name) is None
-        or re.fullmatch(r"[0-9a-f]{32}", generation) is None
-        or not name.startswith(generation)
-    ):
-        raise ManifestRejected("lease_generation_mismatch")
-    parent_descriptor = _open_directory_fd(os.path.dirname(os.path.abspath(path)))
+    absolute, name = _validated_lease_capability_path(path, generation)
+    expected_identity = _parse_lease_identity(identity)
+    if os.name == "nt":
+        if not os.path.lexists(absolute):
+            return
+        descriptor: int | None = None
+        try:
+            descriptor = _secure_open_regular(absolute, os.O_RDONLY)
+            target = os.fstat(descriptor)
+            if not stat.S_ISREG(target.st_mode):
+                raise ManifestRejected("lease_not_regular")
+            if (target.st_dev, target.st_ino) != expected_identity:
+                raise ManifestRejected("lease_identity_mismatch")
+            if _lease_generation(_read_bounded_descriptor(descriptor)) != generation:
+                raise ManifestRejected("lease_generation_mismatch")
+            current = os.lstat(absolute)
+            if (
+                not stat.S_ISREG(current.st_mode)
+                or (current.st_dev, current.st_ino) != expected_identity
+            ):
+                raise ManifestRejected("lease_replaced_before_remove")
+            os.close(descriptor)
+            descriptor = None
+            current = os.lstat(absolute)
+            if (
+                not stat.S_ISREG(current.st_mode)
+                or (current.st_dev, current.st_ino) != expected_identity
+            ):
+                raise ManifestRejected("lease_replaced_before_remove")
+            os.unlink(absolute)
+            return
+        except FileNotFoundError:
+            return
+        except (ManifestRejected, ManifestRuntimeError):
+            raise
+        except OSError as exc:
+            raise ManifestRuntimeError("lease_remove_failed") from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+    parent_descriptor = _open_directory_fd(os.path.dirname(absolute))
     descriptor: int | None = None
     try:
         try:
@@ -1246,10 +1645,12 @@ def secure_remove_lease(path: str, generation: str) -> None:
         target = os.fstat(descriptor)
         if not stat.S_ISREG(target.st_mode):
             raise ManifestRejected("lease_not_regular")
+        if (target.st_dev, target.st_ino) != expected_identity:
+            raise ManifestRejected("lease_identity_mismatch")
         if _lease_generation(_read_bounded_descriptor(descriptor)) != generation:
             raise ManifestRejected("lease_generation_mismatch")
         current = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
-        if (current.st_dev, current.st_ino) != (target.st_dev, target.st_ino):
+        if (current.st_dev, current.st_ino) != expected_identity:
             raise ManifestRejected("lease_replaced_before_remove")
         os.unlink(name, dir_fd=parent_descriptor)
     finally:
@@ -1259,8 +1660,12 @@ def secure_remove_lease(path: str, generation: str) -> None:
 
 
 def _backend_live(
-    started: dict[str, Any], status: bool | None = None, *, status_known: bool = False
-) -> bool:
+    started: dict[str, Any],
+    status: bool | None = None,
+    *,
+    status_known: bool = False,
+    expected_identity: str | None = None,
+) -> bool | None:
     """Apply the shared backend-liveness matrix used by live-semaphore.sh.
 
     Terminal status is always dead. Status-only and opaque handles are live
@@ -1277,12 +1682,9 @@ def _backend_live(
     handle = started.get("backend_handle")
     if handle in (None, ""):
         return status is True
-    if _pid_live(handle):
-        return True
+    if _numeric_pid(handle) is not None:
+        return _pid_live(handle, expected_identity)
     if isinstance(handle, str):
-        numeric = handle[4:] if handle.startswith("pid:") else handle
-        if numeric.isdigit():
-            return False
         if handle.startswith("pid:"):
             return False
         if status is True:
@@ -1347,6 +1749,8 @@ def _normalized_append_event(raw: Any) -> dict[str, Any]:
         raise ManifestRejected("event_record_must_be_object")
     event = dict(raw)
     event.setdefault("schema_version", SCHEMA_VERSION)
+    if event.get("schema_version") != SCHEMA_VERSION:
+        raise ManifestRejected("append_requires_current_schema")
     event.setdefault("timestamp", _utc_now())
     if event.get("event") in TERMINAL_EVENTS:
         event.setdefault("terminal_status", event["event"])
@@ -1408,13 +1812,16 @@ def reconcile_manifest(path: str) -> dict[str, Any]:
             state = states[identity]
             if state.started is None or state.terminal is not None:
                 continue
-            status_liveness, terminal_truth, recovered_handle = _reconciliation_status(
-                state.started
-            )
+            (
+                status_liveness,
+                terminal_truth,
+                recovered_handle,
+                recovered_identity,
+            ) = _reconciliation_status(state.started)
             if terminal_truth is not None:
                 run_id, agent_id = identity
                 terminal: dict[str, Any] = {
-                    "schema_version": SCHEMA_VERSION,
+                    "schema_version": state.started["schema_version"],
                     "event": terminal_truth,
                     "timestamp": _utc_not_before(state.last_timestamp),
                     "run_id": run_id,
@@ -1449,18 +1856,33 @@ def reconcile_manifest(path: str) -> dict[str, Any]:
                 _atomic_append(prepared, terminal, descriptor)
                 appended_count += 1
                 continue
-            owner_live = _pid_live(state.started.get("owner_pid"))
+            owner_live = _pid_live(
+                state.started.get("owner_pid"),
+                state.started.get("owner_process_identity"),
+            )
             backend_state = state.started
             if recovered_handle is not None:
                 backend_state = dict(state.started, backend_handle=recovered_handle)
             backend_live = _backend_live(
-                backend_state, status_liveness, status_known=True
+                backend_state,
+                status_liveness,
+                status_known=True,
+                expected_identity=recovered_identity,
             )
+            unavailable = []
+            if owner_live is None:
+                unavailable.append("owner")
+            if backend_live is None:
+                unavailable.append("backend")
+            if unavailable:
+                raise ManifestRuntimeError(
+                    "process_identity_probe_unavailable: " + ",".join(unavailable)
+                )
             if owner_live or backend_live:
                 continue
             run_id, agent_id = identity
             terminal: dict[str, Any] = {
-                "schema_version": SCHEMA_VERSION,
+                "schema_version": state.started["schema_version"],
                 "event": "abandoned",
                 "timestamp": _utc_not_before(state.last_timestamp),
                 "run_id": run_id,
@@ -1523,16 +1945,30 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal_parser.add_argument("--expected-backend", required=True)
     terminal_parser.add_argument("--expected-handle")
 
+    identity_parser = subparsers.add_parser("process-identity", help=argparse.SUPPRESS)
+    identity_parser.add_argument("--pid", required=True)
+
+    owner_parser = subparsers.add_parser("write-process-identity", help=argparse.SUPPRESS)
+    owner_parser.add_argument("--mode", choices=("direct", "parent"), required=True)
+    owner_parser.add_argument("--destination", required=True)
+
     lease_write_parser = subparsers.add_parser(
         "secure-write-lease", help=argparse.SUPPRESS
     )
     lease_write_parser.add_argument("--lease-path", required=True)
+
+    lease_identity_parser = subparsers.add_parser(
+        "secure-lease-identity", help=argparse.SUPPRESS
+    )
+    lease_identity_parser.add_argument("--lease-path", required=True)
+    lease_identity_parser.add_argument("--generation", required=True)
 
     lease_remove_parser = subparsers.add_parser(
         "secure-remove-lease", help=argparse.SUPPRESS
     )
     lease_remove_parser.add_argument("--lease-path", required=True)
     lease_remove_parser.add_argument("--generation", required=True)
+    lease_remove_parser.add_argument("--identity", required=True)
 
     verify_parser = subparsers.add_parser("verify", help="validate JSONL and lifecycle transitions")
     verify_parser.add_argument("--manifest", "--path", dest="manifest", required=True)
@@ -1560,11 +1996,27 @@ def main(argv: list[str] | None = None) -> int:
                 or "unknown"
             )
             return 0
+        if args.command == "process-identity":
+            status, identity = _process_identity(args.pid)
+            if status == "captured" and identity is not None:
+                print(identity, end="")
+                return 0
+            return 1 if status == "absent" else 2
+        if args.command == "write-process-identity":
+            _write_process_identity(args.mode, args.destination)
+            return 0
         if args.command == "secure-write-lease":
-            secure_write_lease(args.lease_path, sys.stdin.buffer.read(16385))
+            device, inode = secure_write_lease(
+                args.lease_path, sys.stdin.buffer.read(16385)
+            )
+            print(f"{device}:{inode}", end="")
+            return 0
+        if args.command == "secure-lease-identity":
+            device, inode = secure_lease_identity(args.lease_path, args.generation)
+            print(f"{device}:{inode}", end="")
             return 0
         if args.command == "secure-remove-lease":
-            secure_remove_lease(args.lease_path, args.generation)
+            secure_remove_lease(args.lease_path, args.generation, args.identity)
             return 0
         result, return_code = verify_manifest(args.manifest, strict=args.strict)
         _emit(result)

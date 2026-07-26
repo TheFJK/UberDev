@@ -37,6 +37,7 @@ INPUT_TYPES = {
     "optional_string",
     "path",
     "path_array",
+    "repo_path_array",
     "string",
     "string_array",
 }

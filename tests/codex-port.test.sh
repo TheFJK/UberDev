@@ -158,6 +158,20 @@ else
   fail "checked-in role TOMLs drift from converter output"
   cat /tmp/codex-agent-drift
 fi
+
+python3 - <<PY
+import pathlib,sys,tomllib
+root=pathlib.Path("$REPO_ROOT")
+contract=(root/'plugins/uberdev/shared/phase1-reviewer-output-v1.md').read_text()
+roles=('code-reviewer','silent-failure-hunter','type-design-analyzer','comment-analyzer','pr-test-analyzer')
+bad=[]
+for role in roles:
+    value=tomllib.loads((pathlib.Path("$TMP/agents")/f'uberdev-{role}.toml').read_text())['developer_instructions']
+    if contract in value: bad.append(role)
+sys.exit(1 if bad else 0)
+PY
+[ $? -eq 0 ] && pass "edge-local reviewer contract is absent from native role TOMLs" \
+  || fail "native role TOMLs incorrectly embed the edge-local reviewer contract"
 if grep -RqlE '^model = "gpt-5\.4-mini"' "$TMP/agents" 2>/dev/null; then
   fail "generated profiles retain legacy Claude model mapping"
 else

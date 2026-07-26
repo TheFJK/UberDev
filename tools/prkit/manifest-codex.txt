@@ -6,7 +6,7 @@
 # rewritten by rewrite.sh (blanket uberdev->prkit + slug + neutralize).
 # The Codex manifest (.codex-plugin/plugin.json), README, and AGENTS.md primer are
 # NOT listed here — they are authored from templates with prkit-correct counts.
-# Count-locked at 51 by tests/prkit-codex-manifest.test.sh.
+# Count-locked at 53 by tests/prkit-codex-manifest.test.sh.
 
 # --- command-skills (3) — Codex equivalents of commands/{review-pr,simplify,merge}.md ---
 codex/uberdev-codex/skills/uberdev-cmd-review-pr/SKILL.md
@@ -47,13 +47,15 @@ codex/uberdev-codex/lib/child-inputs.py
 codex/uberdev-codex/lib/command-workspace.py
 codex/uberdev-codex/lib/secret-scan.sh
 
-# --- policy (1) ---
+# --- policy (2) ---
 codex/uberdev-codex/policy/model-routing-v1.json
+codex/uberdev-codex/policy/solve-run-tree-v1.json
 
-# --- plugin-runtime scaffold (3) ---
+# --- plugin-runtime scaffold (4) ---
 codex/uberdev-codex/hooks/hooks.json
 codex/uberdev-codex/hooks/session-start
 codex/uberdev-codex/shared/document-reviewer-template.md
+codex/uberdev-codex/shared/phase1-reviewer-output-v1.md
 
 # --- installable Codex subagents (14 .toml — reference artifacts) ---
 codex/agents/uberdev-code-reviewer.toml

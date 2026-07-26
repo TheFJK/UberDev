@@ -68,6 +68,22 @@ def fail(message: str) -> NoReturn:
     raise ReceiptFailure(closed)
 
 
+def current_uid() -> int | None:
+    uid_fn = getattr(os, "geteuid", None)
+    return uid_fn() if uid_fn is not None else None
+
+
+def owned(entry: os.stat_result) -> bool:
+    uid = current_uid()
+    return uid is None or entry.st_uid == uid
+
+
+def is_link_or_reparse(path: str, entry: os.stat_result) -> bool:
+    attributes = getattr(entry, "st_file_attributes", 0)
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return os.path.islink(path) or stat.S_ISLNK(entry.st_mode) or bool(attributes & reparse)
+
+
 class ClosedArgumentParser(argparse.ArgumentParser):
     """Argparse boundary that never echoes hostile argument content."""
 
@@ -224,14 +240,68 @@ def require_private_directory(fd: int, error: str) -> os.stat_result:
     opened = os.fstat(fd)
     if (
         not stat.S_ISDIR(opened.st_mode)
-        or opened.st_uid != os.geteuid()
+        or not owned(opened)
         or stat.S_IMODE(opened.st_mode) & 0o077
     ):
         fail(error)
     return opened
 
 
+def private_parent_path(path: str, file_error: str, directory_error: str) -> str:
+    """Validate an absolute Windows parent without relying on dir_fd support."""
+
+    if not os.path.isabs(path) or os.path.abspath(path) != path or os.path.normpath(path) != path:
+        fail(file_error)
+    parent = os.path.dirname(path)
+    if not parent or not os.path.basename(path):
+        fail(file_error)
+    try:
+        entry = os.lstat(parent)
+    except OSError:
+        fail(directory_error)
+    if is_link_or_reparse(parent, entry) or not stat.S_ISDIR(entry.st_mode) or not owned(entry):
+        fail(directory_error)
+    return parent
+
+
+def secure_windows_open(path: str, flags: int, file_error: str) -> tuple[int, os.stat_result]:
+    """Open an existing Windows file and prove lstat/fstat identity."""
+
+    try:
+        before = os.lstat(path)
+        if is_link_or_reparse(path, before) or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not owned(before):
+            fail(file_error)
+        descriptor = os.open(path, flags | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0))
+        opened = os.fstat(descriptor)
+    except ReceiptFailure:
+        raise
+    except OSError:
+        fail(file_error)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_nlink != 1
+        or not owned(opened)
+        or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+    ):
+        os.close(descriptor)
+        fail(file_error)
+    return descriptor, opened
+
+
 def append_record(path: str, record: bytes) -> None:
+    if os.name == "nt":
+        private_parent_path(path, "unsafe receipt file", "unsafe receipt directory")
+        file_fd, opened = secure_windows_open(path, os.O_WRONLY | os.O_APPEND, "unsafe receipt file")
+        try:
+            current = os.lstat(path)
+            if is_link_or_reparse(path, current) or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+                fail("unsafe receipt file")
+            written = os.write(file_fd, record)
+            if written != len(record):
+                fail("incomplete receipt append")
+        finally:
+            os.close(file_fd)
+        return
     directory_fd = private_parent_fd(
         path,
         "unsafe receipt file",
@@ -263,7 +333,7 @@ def append_record(path: str, record: bytes) -> None:
             or not stat.S_ISREG(opened.st_mode)
             or before.st_dev != opened.st_dev
             or before.st_ino != opened.st_ino
-            or opened.st_uid != os.geteuid()
+            or not owned(opened)
             or opened.st_nlink != 1
             or stat.S_IMODE(opened.st_mode) & 0o077
         ):
@@ -279,6 +349,27 @@ def append_record(path: str, record: bytes) -> None:
 
 
 def safe_handoff(path: str) -> dict[str, Any]:
+    if os.name == "nt":
+        private_parent_path(path, "unsafe handoff file", "unsafe handoff directory")
+        file_fd, opened = secure_windows_open(path, os.O_RDONLY, "unsafe handoff file")
+        try:
+            if opened.st_size > MAX_HANDOFF_BYTES:
+                fail("unsafe handoff file")
+            raw = os.read(file_fd, MAX_HANDOFF_BYTES + 1)
+            after = os.fstat(file_fd)
+            current = os.lstat(path)
+            if (
+                is_link_or_reparse(path, current)
+                or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+                or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            ):
+                fail("unsafe handoff file")
+        finally:
+            os.close(file_fd)
+        if len(raw) > MAX_HANDOFF_BYTES:
+            fail("unsafe handoff file")
+        return parse_handoff_json(raw)
     directory_fd = private_parent_fd(
         path,
         "unsafe handoff file",
@@ -307,7 +398,7 @@ def safe_handoff(path: str) -> dict[str, Any]:
             or not stat.S_ISREG(opened.st_mode)
             or before.st_dev != opened.st_dev
             or before.st_ino != opened.st_ino
-            or opened.st_uid != os.geteuid()
+            or not owned(opened)
             or opened.st_nlink != 1
             or stat.S_IMODE(opened.st_mode) & 0o077
             or opened.st_size > MAX_HANDOFF_BYTES
@@ -337,12 +428,12 @@ def safe_handoff(path: str) -> dict[str, Any]:
         os.close(directory_fd)
     if len(raw) > MAX_HANDOFF_BYTES:
         fail("unsafe handoff file")
+    return parse_handoff_json(raw)
+
+
+def parse_handoff_json(raw: bytes) -> dict[str, Any]:
     try:
-        value = json.loads(
-            raw.decode("utf-8"),
-            object_pairs_hook=unique_object,
-            parse_constant=reject_constant,
-        )
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object, parse_constant=reject_constant)
     except ReceiptFailure:
         fail("invalid handoff JSON")
     except (TypeError, ValueError, UnicodeError, RecursionError):

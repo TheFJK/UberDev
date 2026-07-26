@@ -6,6 +6,7 @@ THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$THIS_DIR/.." && pwd)"
 FIX="$THIS_DIR/fixtures/findings-to-issues"
 AGENT_MD="$REPO_ROOT/plugins/uberdev/agents/findings-to-issues.md"
+PACKAGED_AGENT_TOML="$REPO_ROOT/codex/agents/uberdev-findings-to-issues.toml"
 REVIEW_PR_MD="$REPO_ROOT/plugins/uberdev/commands/review-pr.md"
 SIMPLIFY_MD="$REPO_ROOT/plugins/uberdev/commands/simplify.md"
 
@@ -438,6 +439,23 @@ assert_in_section "$AGENT_MD" '^## Refusal triggers' '^## Failure-mode summary' 
 assert_no_grep "$AGENT_MD" \
   '`REMAINING < \(2 \* max_new \+ 50\)`' \
   'S16.3 — stale bare-REMAINING single-bucket threshold removed (#276)'
+
+assert_grep "$AGENT_MD" 'RATE_LIMIT_JSON=\$\(gh api /rate_limit' \
+  'S16.4 — one canonical rate-limit response feeds both bucket checks'
+assert_grep "$AGENT_MD" 'jq -er.*resources\.core\.remaining.*type == "number"' \
+  'S16.5 — core remaining is parsed locally as an integer'
+assert_grep "$AGENT_MD" 'jq -er.*resources\.search\.remaining.*type == "number"' \
+  'S16.6 — search remaining is parsed locally as an integer'
+assert_in_section "$AGENT_MD" '^2\. \*\*Rate-limit pre-flight' '^3\. \*\*Parse aggregates' \
+  'rationale: "rate-limit-probe-failed"' \
+  'S16.7 — probe or parse failure has a distinct typed rationale'
+assert_in_section "$AGENT_MD" '^## Refusal triggers' '^## Failure-mode summary' \
+  'rate-limit-probe-failed.*probe.*empty/non-numeric' \
+  'S16.8 — refusal contract separates probe failure from low numeric budget'
+assert_no_grep "$AGENT_MD" 'Search bucket \(30 req/min, 1000/hr authenticated\)' \
+  'S16.9 — Search prose does not conflate the separate code-search hourly limit'
+assert_no_grep "$PACKAGED_AGENT_TOML" 'Search bucket \(30 req/min, 1000/hr authenticated\)' \
+  'S16.10 — packaged Codex agent preserves the corrected Search-bucket contract'
 
 echo
 echo "## Summary"

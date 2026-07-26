@@ -127,6 +127,11 @@ BAD_ROOT="$TMP/bad-context"; mkdir "$BAD_ROOT"; chmod 700 "$BAD_ROOT"
 [ ! -e "$BAD_ROOT/.agent-state-$(id -u)" ]; PASS=$((PASS+1))
 
 cmp "$ROOT/plugins/uberdev/lib/dispatch.sh" "$ROOT/codex/uberdev-codex/lib/dispatch.sh"
+if sed -n '/^[[:space:]]*case "\$os_class" in/,/^[[:space:]]*esac/p' "$ROOT/plugins/uberdev/lib/dispatch.sh" \
+    | grep -q 'windows-native) return 2'; then
+  echo 'solve-routing: unreachable nested windows-native auto arm remains' >&2
+  exit 1
+fi
 cmp "$ROOT/plugins/uberdev/lib/solve-launcher.sh" "$ROOT/codex/uberdev-codex/lib/solve-launcher.sh"
 cmp "$ROOT/plugins/uberdev/lib/solve_triage.py" "$ROOT/codex/uberdev-codex/lib/solve_triage.py"
 PASS=$((PASS+3))

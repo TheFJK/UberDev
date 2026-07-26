@@ -12,6 +12,9 @@
     "file_path",
     "attempt"
   ],
+  "output_contracts": {
+    "phase1-reviewer-v1": "shared/phase1-reviewer-output-v1.md"
+  },
   "edges": {
     "solve.issue.lead": {
       "kind": "provider",
@@ -685,6 +688,7 @@
       "cardinality": "one_per_review_iteration",
       "required": true,
       "risk_scope": "subtask",
+      "output_contract": "phase1-reviewer-v1",
       "retry": {
         "format": 1
       },
@@ -694,7 +698,7 @@
         "turbo"
       ],
       "required_inputs": {
-        "changed_paths": "path_array",
+        "changed_paths": "repo_path_array",
         "diff_path": "path",
         "criteria_path": "path",
         "emphasis": "string_array"
@@ -712,6 +716,7 @@
       "cardinality": "one_per_review_iteration",
       "required": true,
       "risk_scope": "subtask",
+      "output_contract": "phase1-reviewer-v1",
       "retry": {
         "format": 1
       },
@@ -721,7 +726,7 @@
         "turbo"
       ],
       "required_inputs": {
-        "changed_paths": "path_array",
+        "changed_paths": "repo_path_array",
         "diff_path": "path",
         "criteria_path": "path",
         "emphasis": "string_array"
@@ -739,6 +744,7 @@
       "cardinality": "one_per_review_iteration",
       "required": true,
       "risk_scope": "subtask",
+      "output_contract": "phase1-reviewer-v1",
       "retry": {
         "format": 1
       },
@@ -748,7 +754,7 @@
         "turbo"
       ],
       "required_inputs": {
-        "changed_paths": "path_array",
+        "changed_paths": "repo_path_array",
         "diff_path": "path",
         "criteria_path": "path",
         "emphasis": "string_array"
@@ -766,6 +772,7 @@
       "cardinality": "one_per_review_iteration",
       "required": true,
       "risk_scope": "subtask",
+      "output_contract": "phase1-reviewer-v1",
       "retry": {
         "format": 1
       },
@@ -775,7 +782,7 @@
         "turbo"
       ],
       "required_inputs": {
-        "changed_paths": "path_array",
+        "changed_paths": "repo_path_array",
         "diff_path": "path",
         "criteria_path": "path",
         "emphasis": "string_array"
@@ -793,6 +800,7 @@
       "cardinality": "one_per_review_iteration",
       "required": true,
       "risk_scope": "subtask",
+      "output_contract": "phase1-reviewer-v1",
       "retry": {
         "format": 1
       },
@@ -802,7 +810,7 @@
         "turbo"
       ],
       "required_inputs": {
-        "changed_paths": "path_array",
+        "changed_paths": "repo_path_array",
         "diff_path": "path",
         "criteria_path": "path",
         "emphasis": "string_array"
@@ -820,6 +828,7 @@
       "cardinality": "one_per_review_iteration",
       "required": true,
       "risk_scope": "subtask",
+      "output_contract": "phase1-reviewer-v1",
       "retry": {
         "format": 1
       },
@@ -829,7 +838,7 @@
         "turbo"
       ],
       "required_inputs": {
-        "changed_paths": "path_array",
+        "changed_paths": "repo_path_array",
         "diff_path": "path",
         "criteria_path": "path",
         "emphasis": "string_array",
@@ -842,6 +851,7 @@
     },
     "review_pr.fix.phase1": {
       "kind": "provider",
+      "workspace_mode": "caller",
       "source": "plugins/uberdev/commands/review-pr.md",
       "role": "code-fixer",
       "phase": "review_fix",
@@ -930,6 +940,7 @@
     },
     "review_pr.fix.phase2": {
       "kind": "provider",
+      "workspace_mode": "caller",
       "source": "plugins/uberdev/commands/review-pr.md",
       "role": "code-fixer",
       "phase": "simplify_fix",
@@ -997,6 +1008,7 @@
     },
     "review_pr.ci.fix_code": {
       "kind": "provider",
+      "workspace_mode": "caller",
       "source": "plugins/uberdev/commands/review-pr.md",
       "role": "ci-code-fixer",
       "phase": "ci_fix",
@@ -1018,6 +1030,7 @@
     },
     "review_pr.ci.rebase": {
       "kind": "provider",
+      "workspace_mode": "caller",
       "source": "plugins/uberdev/commands/review-pr.md",
       "role": "ci-rebase-handler",
       "phase": "ci_fix",
@@ -1059,6 +1072,7 @@
     },
     "review_pr.ci.resolve_conflict": {
       "kind": "provider",
+      "workspace_mode": "caller",
       "source": "plugins/uberdev/commands/review-pr.md",
       "role": "conflict-resolver",
       "phase": "conflict_resolution",

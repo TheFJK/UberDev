@@ -30,7 +30,7 @@ Both `phase*_aggregate_path` files MUST be wrapped in `<external-untrusted-input
 
 ## Tools authorised
 
-Read, Bash (limited to: `gh issue list`, `gh issue create`, `gh issue comment`, `gh label create`, `gh pr view`, `gh api rate_limit`, `sha256sum`, `mktemp`, `printf`, `jq`, `sleep`, `grep`, `awk`, `sed`, `cat`, `source`). No Edit, no Write, no WebFetch, no WebSearch, no Task (no re-entrant fanout). No `git push`, no `git commit` — this agent NEVER mutates the worktree.
+Read, Bash (limited to: `gh issue list`, `gh issue create`, `gh issue comment`, `gh label create`, `gh pr view`, `gh api /rate_limit`, `sha256sum`, `mktemp`, `printf`, `jq`, `sleep`, `grep`, `awk`, `sed`, `cat`, `source`). No Edit, no Write, no WebFetch, no WebSearch, no Task (no re-entrant fanout). No `git push`, no `git commit` — this agent NEVER mutates the worktree.
 
 Explicit forbidden patterns:
 - NEVER call `gh issue create --body "$VAR"` or `gh issue create --body "$(cmd)"` — body MUST be piped via `--body-file -` from stdin (research-security §Q1). Same rule for `gh issue comment`. The required positive form is `gh issue create --body-file -` reading from a `mktemp` tempfile that was secret-scanned in the same pipeline.
@@ -41,14 +41,21 @@ Explicit forbidden patterns:
 
 1. **Validate inputs.** Verify `working_dir` resolves to an absolute path inside the current git worktree (`git -C "$working_dir" rev-parse --is-inside-work-tree`). For each non-empty `phase*_aggregate_path`, verify the file exists and its first 128 bytes contain the literal string `<external-untrusted-input source="post-impl-review-aggregate">` (or `simplify-aggregate` for phase 2, or `ci-refused-synthetic` for the CI-REFUSED single-row dispatch path added in #116 / O5 — see `commands/review-pr.md` Step 6c.5, or `uberscan-aggregate` for the `/uberscan` whole-codebase audit path, or `testers-aggregate` for the `/uberdev:testers` adversarial QA audit path, or `uberthink-aggregate` for the `/uberthink` ideation-engine deliver path). The accepted-source allow-list is the closed set `{post-impl-review-aggregate, simplify-aggregate, ci-refused-synthetic, uberscan-aggregate, ubersimplify-aggregate, testers-aggregate, uberthink-aggregate}`. The `/ubersimplify` whole-codebase fix command files its leftover (non-applied blocker) findings under `ubersimplify-aggregate`. The `/uberdev:testers` adversarial QA squad files its `verified: true` persona findings under `testers-aggregate` (`skills/testers-pipeline/report.py`). The `/uberthink` ideation engine files its top-ranked design candidate(s) under `uberthink-aggregate`. If either check fails OR both paths are empty, return `status: REFUSED` with `rationale: "input-malformed"`. Source the secret-scan library: `source "${CLAUDE_PLUGIN_ROOT}/lib/secret-scan.sh"` — refuse with `rationale: "secret-scan-lib-unavailable"` if the source returns non-zero.
 
-2. **Rate-limit pre-flight (two buckets).** Run BOTH probes:
+2. **Rate-limit pre-flight (two buckets).** Fetch one canonical response and parse both integers locally so shell quoting, `gh --jq` output, or a partial second request cannot turn a healthy API into two empty values:
    ```bash
-   CORE_REMAINING=$(gh api rate_limit --jq '.resources.core.remaining' 2>/dev/null)
-   SEARCH_REMAINING=$(gh api rate_limit --jq '.resources.search.remaining' 2>/dev/null)
+   RATE_LIMIT_JSON=$(gh api /rate_limit 2>&1)
+   RATE_LIMIT_RC=$?
+   if [ "$RATE_LIMIT_RC" -eq 0 ] && printf '%s' "$RATE_LIMIT_JSON" | jq -e '.resources | type == "object"' >/dev/null 2>&1; then
+     CORE_REMAINING=$(printf '%s' "$RATE_LIMIT_JSON" | jq -er '.resources.core.remaining | select(type == "number" and floor == .)') || CORE_REMAINING=""
+     SEARCH_REMAINING=$(printf '%s' "$RATE_LIMIT_JSON" | jq -er '.resources.search.remaining | select(type == "number" and floor == .)') || SEARCH_REMAINING=""
+   else
+     CORE_REMAINING=""
+     SEARCH_REMAINING=""
+   fi
    ```
-   The core bucket funds `gh issue create` / `gh issue comment` / `gh label create` / `gh api`. The Search bucket (30 req/min, 1000/hr authenticated) funds the dedupe lookup `gh issue list --search "$FP in:body"` in Step 8b. They are separate budgets — checking only `core` is insufficient because Search exhaustion silently maps dedupe lookups into `blocked_by_dedupe[]` with no issues filed and no clear rate-limit signal to the operator.
+   The core bucket funds `gh issue create` / `gh issue comment` / `gh label create` / `gh api`. The Search bucket funds the dedupe lookup `gh issue list --search "$FP in:body"` in Step 8b. Treat `.resources.search` as its own rolling-minute budget; the separate code-search hourly resource is unrelated. Checking only `core` is insufficient because Search exhaustion silently maps dedupe lookups into `blocked_by_dedupe[]` with no issues filed and no clear rate-limit signal to the operator.
 
-   If either probe returns empty or non-numeric, OR if `CORE_REMAINING < (2 * max_new + 50)`, OR if `SEARCH_REMAINING < (max_new + 5)`, return `status: REFUSED` with `rationale: "rate-limit-budget-insufficient"`. The double-bucket guard prevents the silent-skip pathological case where parallel runs exhaust Search ahead of dispatch. Pattern shape mirrors the Step 6c.1 PROBE in `commands/review-pr.md` (the canonical rate-limit-floor pattern), extended to cover both buckets.
+   If either probe returns empty or non-numeric, emit one bounded diagnostic containing only `RATE_LIMIT_RC` plus the fixed class `request-failed` or `response-invalid`, then return `status: REFUSED` with `rationale: "rate-limit-probe-failed"`. Never include the response body in the diagnostic. Only successfully parsed integers may reach the budget comparison. If `CORE_REMAINING < (2 * max_new + 50)` OR `SEARCH_REMAINING < (max_new + 5)`, return `status: REFUSED` with `rationale: "rate-limit-budget-insufficient"`. The double-bucket guard prevents the silent-skip pathological case where parallel runs exhaust Search ahead of dispatch. Pattern shape mirrors the Step 6c.1 PROBE in `commands/review-pr.md` (the canonical rate-limit-floor pattern), extended to cover both buckets.
 
 3. **Parse aggregates.** For each non-empty aggregate path, extract `(file_path, line, summary, severity, disposition, agent_name, deferral_reason)` rows. Cross-reference each row's `(file_path, line, agent_name)` triple against the matching disposition YAML to determine the final `disposition` value (default `DEFERRED` if not present in disposition YAML). Wrap interpolation of aggregate content in the `<external-untrusted-input>` envelope when constructing any LLM prompt — but this agent does no further LLM dispatch, so envelope is verified at read time, not re-emitted.
 
@@ -299,7 +306,8 @@ Empty arrays are emitted as `[]`. `rationale` is empty string `""` on non-REFUSE
 Return `status: REFUSED` with the matching rationale string when:
 
 - `input-malformed` — `working_dir` not a git worktree, OR both aggregate paths empty, OR envelope marker missing in aggregate file leading bytes.
-- `rate-limit-budget-insufficient` — fail CLOSED if EITHER bucket probe (Step 2) is empty/non-numeric OR under floor: `CORE_REMAINING < (2 * max_new + 50)` (funds `gh issue create`/`comment`/`label`/`api`) OR `SEARCH_REMAINING < (max_new + 5)` (funds the `gh issue list --search` dedupe in Step 8b). Checking only the core bucket is insufficient — Search exhaustion silently maps every dedupe lookup into `blocked_by_dedupe[]` with no issues filed (`:49`).
+- `rate-limit-probe-failed` — fail CLOSED when the Step 2 probe request fails or either parsed bucket is empty/non-numeric; report only the bounded request/response class, never the response body.
+- `rate-limit-budget-insufficient` — fail CLOSED only after both probes parse as integers and either is under floor: `CORE_REMAINING < (2 * max_new + 50)` (funds `gh issue create`/`comment`/`label`/`api`) OR `SEARCH_REMAINING < (max_new + 5)` (funds the `gh issue list --search` dedupe in Step 8b). Checking only the core bucket is insufficient — Search exhaustion silently maps every dedupe lookup into `blocked_by_dedupe[]` with no issues filed (`:49`).
 - `secret-scan-lib-unavailable` — `source "${CLAUDE_PLUGIN_ROOT}/lib/secret-scan.sh"` returns non-zero.
 
 ## Failure-mode summary (NOT REFUSAL)

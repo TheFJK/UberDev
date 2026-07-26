@@ -370,9 +370,23 @@ assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" \
 assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" \
   'command -v gtimeout' \
   "I2c: launcher probes gtimeout fallback (Homebrew coreutils installs the macOS binary as gtimeout, not timeout)"
-assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" \
-  '"\$TIMEOUT_BIN" "\$SOLVE_TIMEOUT" env "\${BG_TURBO_ENV\[@\]}" claude --bg' \
-  "I2d: bg dispatch wraps claude --bg in timeout(1)/gtimeout with env(1)-mediated zsh-safe BG_TURBO_ENV[@] inline-prefix (#97 — env(1) is required because timeout(1) sits between the shell and the env-prefix slot and would otherwise consume the KEY=value tokens as argv; array form preserves zsh SH_WORD_SPLIT=off compatibility)"
+CLAUDE_BG_BODY="$(awk '
+  /^_uberdev_dispatch_claude_bg\(\) \{$/ { in_function = 1 }
+  in_function { print }
+  in_function && /^}$/ { exit }
+' "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh")"
+if printf '%s\n' "$CLAUDE_BG_BODY" | awk '
+  /^[[:space:]]*local cmd=\( "\$TIMEOUT_BIN" "\$BG_BOOTSTRAP_TIMEOUT" env \)[[:space:]]*$/ {
+    if (getline <= 0 || $0 !~ /^[[:space:]]*\[ "\$\{#BG_TURBO_ENV\[@\]\}" -eq 0 \] \|\| cmd\+=\( "\$\{BG_TURBO_ENV\[@\]\}" \)[[:space:]]*$/) next
+    if (getline <= 0 || $0 !~ /^[[:space:]]*cmd\+=\( claude --bg \)[[:space:]]*$/) next
+    found = 1
+  }
+  END { exit(found ? 0 : 1) }
+'; then
+  pass "I2d: _uberdev_dispatch_claude_bg builds timeout/env base, length-gated BG_TURBO_ENV append, then claude --bg in exact order"
+else
+  fail "I2d: _uberdev_dispatch_claude_bg MUST build timeout/env base, length-gated BG_TURBO_ENV append, then claude --bg in exact order"
+fi
 assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" \
   'brew install coreutils' \
   "I2e: missing-timeout warning includes remediation pointer"
@@ -407,11 +421,11 @@ assert_grep_in "$CONFIG_REF" \
   'post_impl_review:[[:space:]]+6[[:space:]]+# int \[1, 50\]; post-impl-review reviewer fanout cap; default 6;' \
   "I4b2: config reference documents post_impl_review default 6"
 assert_grep_in "$SKILL_DIR/post-impl-review/SKILL.md" \
-  'uberdev_read_int_in_range command_timeouts.review_pr[[:space:]]+UBERDEV_REVIEW_PR_TIMEOUT[[:space:]]+60[[:space:]]+86400[[:space:]]+900' \
-  "I4c: post-impl-review reads command_timeouts.review_pr with bounds [60,86400] default 900"
+  'uberdev_read_int_in_range command_timeouts.review_pr[[:space:]]+UBERDEV_REVIEW_PR_TIMEOUT[[:space:]]+60[[:space:]]+86400[[:space:]]+600' \
+  "I4c: post-impl-review reads command_timeouts.review_pr with bounds [60,86400] default 600"
 assert_grep_in "$SKILL_DIR/post-impl-review/SKILL.md" \
-  'advisory' \
-  "I4d: post-impl-review documents advisory-only enforcement"
+  'per-child' \
+  "I4d: post-impl-review documents enforced per-child deadlines"
 
 echo
 echo "== I5: merge fanout caps + advisory + Constants update (Task 5) =="

@@ -711,7 +711,7 @@ merging N PRs in order: #A #B #C ... #W
 
 It is NOT a `[y/N]` prompt and NOT abortable — the autopilot contract from Step 1.0 (no prompts, no halts) is unconditional. Single-PR mode (Q1 fast path from Step 1.0.5) does NOT emit this line — preserving today's single-PR UX.
 
-**Fanout dispatch.** Dispatch ALL `merge-strategy-decider` Task() calls for the in-scope PR set in ONE assistant turn — the single-message Task() invariant (mirrors `uberdev:post-impl-review` and the conflict-resolver fanout shape).
+**Fanout dispatch.** Dispatch ALL `merge-strategy-decider` Task() calls for the in-scope PR set in ONE assistant turn — the single-message Task() invariant for this merge wave (analogous to one cap-controlled `uberdev:post-impl-review` wave and the conflict-resolver fanout shape).
 
 **Fanout chunking.** For queues with more than `MAX_PARALLEL_AGENTS` PRs (default `10` — see Constants), split the fanout into `ceil(N / MAX_PARALLEL_AGENTS)` sequential single-message waves; each wave still obeys the single-message invariant within its slice.
 
@@ -822,7 +822,7 @@ files now chunk into multiple waves) — matches the precedent set by
 `MAX_PARALLEL_AGENTS` in Phase 2.2 and is intentional behavioural
 change. Default 10, range [1, 50], precedence env > config > default.
 
-This is the critical invariant. All Task() calls for this PR's conflict set MUST be in ONE assistant turn — splitting across messages defeats parallelism (mirrors `uberdev:post-impl-review` SKILL.md fanout shape). Each Task() invokes `agents/conflict-resolver.md` with `file_path`, `pr_branch=<headRefName>`, `integration_branch`, `base_sha=<merge-base>`, `working_dir=<scratch worktree root>`.
+This is the critical invariant. All Task() calls for this PR's conflict set MUST be in ONE assistant turn — splitting across messages defeats parallelism (analogous to the dispatch-before-wait rule inside one `uberdev:post-impl-review` wave). Each Task() invokes `agents/conflict-resolver.md` with `file_path`, `pr_branch=<headRefName>`, `integration_branch`, `base_sha=<merge-base>`, `working_dir=<scratch worktree root>`.
 
 **Sequential degradation (Q1):** for same-file PR pairs flagged in Phase 1.5, the per-file fanout proceeds normally — same-file collisions only matter ACROSS PRs (PR-A's resolution must land first; PR-B re-probes against new tip). Within a single PR's resolution, all Task() agents own disjoint files by construction.
 
@@ -1094,7 +1094,7 @@ Refuse signals — abort or skip the PR with clear handoff:
 **Pairs with:**
 - `uberdev:finish-branch` — `/merge` is the post-review successor to `finish-branch` Option 2 in the lifecycle `/issue → /solve → push → /review-pr → /merge`.
 - `uberdev:using-git-worktrees` — Phase 3 scratch worktree creation and Phase 4 teardown follow this skill's protocol verbatim.
-- `uberdev:dispatching-parallel-agents` — Phase 3 conflict-resolver fanout obeys the single-message invariant; same shape as `uberdev:post-impl-review`.
+- `uberdev:dispatching-parallel-agents` — Phase 3 conflict-resolver fanout obeys its single-message invariant; it shares the dispatch-before-wait principle used inside each `uberdev:post-impl-review` wave.
 
 ## Audit log JSONL schema (D15)
 

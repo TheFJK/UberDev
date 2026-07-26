@@ -106,9 +106,8 @@ PY
 ! uberdev_create_child_handoff run-risk run-risk-explicit-mismatch "$RISK_INPUTS" '[]' >/dev/null 2>&1
 UBERDEV_RUN_CARRIER_JSON="$SAVED_CARRIER"
 
-# Observable providers without cancellation remain eligible for supervised
-# execution. Timeout still fails closed (covered by child-wait.test.sh), but a
-# healthy Claude-backed workflow must not be disabled before its first child.
+# Claude-backed children are eligible only when the installed provider exposes
+# both the inventory and exact-stop operations used by supervision.
 CLAUDE_OUT="$(make_context "$TMP/claude-preflight" inherit root-claude-preflight claude-bg)"
 CLAUDE_CTX="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_file"])' "$CLAUDE_OUT")"
 CLAUDE_SHA="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_sha256"])' "$CLAUDE_OUT")"
@@ -124,21 +123,62 @@ print(json.dumps({'task_path':sys.argv[1],'working_dir':sys.argv[2],'allowed_pat
 PY
 )"
 uberdev_create_child_handoff sdd.task.implement claude-preflight-a1 "$CLAUDE_INPUTS" '[]' >/dev/null
-# The root provider already proved Claude availability before creating this
-# carrier. Descendant supervision is a loaded adapter capability, not an
-# ambient PATH probe. Lock that implementation contract without replacing the
-# runner's command environment; the real preflight below exercises the loaded
-# probe/watcher functions end to end.
+CLAUDE_CAP_BIN="$TMP/claude-cap-bin"
+mkdir -p "$CLAUDE_CAP_BIN"
+cat >"$CLAUDE_CAP_BIN/claude" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  'agents --all --json') printf '[]\n'; exit 0 ;;
+  'stop --help') [ "${CLAUDE_CAP_MODE:-supported}" = supported ]; exit ;;
+esac
+exit 2
+SH
+chmod +x "$CLAUDE_CAP_BIN/claude"
 CLAUDE_CAPABILITY_BODY="$(declare -f _uberdev_child_backend_cancellation_supported)"
 case "$CLAUDE_CAPABILITY_BODY" in
-  *'command -v claude'*)
-    echo 'child-dispatch: Claude supervision regressed to an ambient binary probe' >&2
+  *'["claude","agents","--all","--json"]'*'["claude","stop","--help"]'*) ;;
+  *)
+    echo 'child-dispatch: Claude lifecycle capability probes are missing' >&2
     exit 1
     ;;
 esac
-uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" >/dev/null
+PATH="$CLAUDE_CAP_BIN:$PATH" uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" >/dev/null
 [ ! -e "$TMP/claude-preflight/children/claude-preflight-a1" ]
+set +e
+CLAUDE_PREFLIGHT_ERROR="$(CLAUDE_CAP_MODE=no-stop PATH="$CLAUDE_CAP_BIN:$PATH" \
+  uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" 2>&1)"
+CLAUDE_PREFLIGHT_RC=$?
+set -e
+[ "$CLAUDE_PREFLIGHT_RC" -eq 2 ]
+printf '%s\n' "$CLAUDE_PREFLIGHT_ERROR" | grep -Fq 'backend lacks lifecycle supervision: claude-bg'
 UBERDEV_RUN_CARRIER_JSON="$SAVED_CARRIER"
+
+# Native Windows Codex has no verifiable process-tree cancellation primitive.
+# Both workflow and child-batch preflight reject it before allocating a child.
+uberdev_create_child_handoff sdd.task.implement windows-codex-preflight-a1 "$BUILDER_INPUTS" '[]' >/dev/null
+eval "$(declare -f _uberdev_dispatch_os_class | sed '1s/_uberdev_dispatch_os_class/_real_dispatch_os_class/')"
+_uberdev_dispatch_os_class() { printf 'windows-native'; }
+set +e
+WINDOWS_CODEX_ERROR="$(uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" 2>&1)"
+WINDOWS_CODEX_RC=$?
+WINDOWS_REVIEW_ERROR="$(uberdev_dispatch_preflight_backend codex review-pr 2>&1)"
+WINDOWS_REVIEW_RC=$?
+set -e
+[ "$WINDOWS_CODEX_RC" -eq 2 ]
+printf '%s\n' "$WINDOWS_CODEX_ERROR" | grep -Fq 'backend lacks lifecycle supervision: codex'
+[ "$WINDOWS_REVIEW_RC" -eq 1 ]
+printf '%s\n' "$WINDOWS_REVIEW_ERROR" | grep -Fq 'cannot supervise native Windows Codex process trees'
+for WINDOWS_NUMERIC_BACKEND in codex background; do
+  set +e
+  WINDOWS_NUMERIC_ERROR="$(uberdev_dispatch_preflight_backend "$WINDOWS_NUMERIC_BACKEND" solve 2>&1)"
+  WINDOWS_NUMERIC_RC=$?
+  set -e
+  [ "$WINDOWS_NUMERIC_RC" -eq 1 ]
+  printf '%s\n' "$WINDOWS_NUMERIC_ERROR" | grep -Fq 'cannot supervise native Windows'
+done
+_uberdev_dispatch_numeric_supervision_supported claude-bg
+_uberdev_dispatch_numeric_supervision_supported wezterm
+eval "$(declare -f _real_dispatch_os_class | sed '1s/_real_dispatch_os_class/_uberdev_dispatch_os_class/')"
 
 # Production manifest enforcement happens before child allocation/provider use.
 (
@@ -163,19 +203,60 @@ PY
   [ ! -e "$TMP/run/children/prod-role-mismatch" ]
 )
 
-# Standalone simplify uses an honest workflow carrier with subject 0.
+# Standalone simplify still fails closed before context allocation when its
+# required supervised provider is unavailable.
+(
+  unset UBERDEV_CHILD_TEST_MODE UBERDEV_CHILD_MANIFEST_PATH UBERDEV_RUN_CARRIER_JSON \
+    UBERDEV_AGENT_PREPARED_REQUEST_JSON UBERDEV_RESOLVED_BACKEND
+  mkdir -p "$TMP/standalone-unavailable"
+  UBERDEV_TMPDIR="$TMP/standalone-unavailable"
+  UBERDEV_DISPATCH_BACKEND_REQUESTED=auto
+  export UBERDEV_TMPDIR UBERDEV_DISPATCH_BACKEND_REQUESTED
+  _uberdev_dispatch_codex_available() { return 1; }
+  set +e
+  STANDALONE_UNAVAILABLE_ERROR="$(uberdev_prepare_run_carrier simplify 0 medium '[]' 2>&1)"
+  STANDALONE_UNAVAILABLE_RC=$?
+  set -e
+  [ "$STANDALONE_UNAVAILABLE_RC" -eq 1 ]
+  printf '%s\n' "$STANDALONE_UNAVAILABLE_ERROR" | grep -Fq "simplify requires the 'codex' CLI"
+  [ "$UBERDEV_DISPATCH_BACKEND_REQUESTED" = auto ]
+  [ -z "${UBERDEV_RUN_CARRIER_JSON:-}" ]
+  [ -z "${UBERDEV_AGENT_PREPARED_REQUEST_JSON:-}" ]
+  [ -z "$(find "$TMP/standalone-unavailable" -mindepth 1 -print -quit)" ]
+)
+
+# Standalone simplify uses an honest workflow carrier with subject 0. This
+# fixture provides only the CLI capability probe; provider execution here is a
+# test failure because carrier preparation must not launch Codex.
 (
   unset UBERDEV_CHILD_TEST_MODE UBERDEV_CHILD_MANIFEST_PATH UBERDEV_RUN_CARRIER_JSON UBERDEV_AGENT_PREPARED_REQUEST_JSON
   mkdir -p "$TMP/standalone"
-  UBERDEV_TMPDIR="$TMP/standalone" UBERDEV_RESOLVED_BACKEND=codex
-  export UBERDEV_TMPDIR UBERDEV_RESOLVED_BACKEND
+  STANDALONE_BIN="$TMP/standalone-bin"
+  STANDALONE_CODEX_INVOKED="$TMP/standalone-codex-invoked"
+  mkdir -p "$STANDALONE_BIN"
+  cat >"$STANDALONE_BIN/codex" <<'SH'
+#!/bin/sh
+: >"${STANDALONE_CODEX_INVOKED:?}"
+exit 97
+SH
+  chmod +x "$STANDALONE_BIN/codex"
+  UBERDEV_TMPDIR="$TMP/standalone"
+  UBERDEV_DISPATCH_BACKEND_REQUESTED=auto
+  UBERDEV_RESOLVED_BACKEND=background
+  PATH="$STANDALONE_BIN:$PATH"
+  export UBERDEV_TMPDIR UBERDEV_DISPATCH_BACKEND_REQUESTED UBERDEV_RESOLVED_BACKEND PATH STANDALONE_CODEX_INVOKED
   uberdev_prepare_run_carrier simplify 0 medium '[]' >"$TMP/standalone-carrier.json"
   CARRIER="$(cat "$TMP/standalone-carrier.json")"
+  [ "$UBERDEV_DISPATCH_BACKEND_REQUESTED" = auto ]
+  [ "$UBERDEV_RESOLVED_BACKEND" = codex ]
   [ "$UBERDEV_RUN_CARRIER_JSON" = "$CARRIER" ]
   [ -n "$UBERDEV_AGENT_PREPARED_REQUEST_JSON" ]
-  python3 - "$CARRIER" <<'PY'
+  [ ! -e "$STANDALONE_CODEX_INVOKED" ]
+  python3 - "$CARRIER" "$UBERDEV_AGENT_PREPARED_REQUEST_JSON" <<'PY'
 import json,sys
-v=json.loads(sys.argv[1]); assert v['workflow']=='simplify' and v['issue_num']==0
+carrier=json.loads(sys.argv[1]); prepared=json.loads(sys.argv[2])
+assert carrier['workflow']=='simplify' and carrier['issue_num']==0
+assert prepared['backend']=='codex' and prepared['root_decision']['backend']=='codex'
 PY
   ! uberdev_create_child_handoff sdd.task.implement simplify-forbidden "$BUILDER_INPUTS" '[]' >/dev/null 2>&1
 )
@@ -190,7 +271,7 @@ PY
 _capture_dispatch() {
   printf '%s' "$1" >"$TMP/request.json"
   cp "$2" "$TMP/prompt.txt"
-  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"12345"}\n' >"$4"
+  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"12345","process_identity":"12345|12345|12345|0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$4"
   chmod 600 "$4"
   DISPATCH_ID=12345
   return 0
@@ -222,6 +303,27 @@ for f in handoff.v1.json prompt.txt status.json; do
   [ "$(file_mode "$TMP/run/children/implementation-0001/$f")" = 600 ]
 done
 cmp "$HANDOFF" "$TMP/run/children/implementation-0001/handoff.v1.json"
+
+# Every running receipt is a lifecycle capability and therefore needs the
+# exact lease generation used for terminal release.
+eval "$(declare -f uberdev_unwind_child | sed '1s/uberdev_unwind_child/_receipt_variant_unwind/')"
+uberdev_unwind_child() { return 0; }
+receipt_variant=missing-generation
+python3 - "$HANDOFF" "$TMP/$receipt_variant.json" "$receipt_variant" <<'PY'
+import json,sys
+source,target,variant=sys.argv[1:]
+value=json.load(open(source)); value['instance_id']='receipt-'+variant
+json.dump(value,open(target,'w'),separators=(',',':'))
+PY
+uberdev_agent_dispatch() {
+  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"12345","process_identity":"12345|12345|12345|0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}\n' >"$4"
+  chmod 600 "$4"; DISPATCH_ID=12345; return 0
+}
+! uberdev_dispatch_child implementation "$TMP/$receipt_variant.json" \
+  "$TMP/run/children/receipt-$receipt_variant/result.md" \
+  "$TMP/run/children/receipt-$receipt_variant/status.json" >/dev/null 2>&1
+eval "$(declare -f _receipt_variant_unwind | sed '1s/_receipt_variant_unwind/uberdev_unwind_child/')"
+uberdev_agent_dispatch() { _capture_dispatch "$@"; }
 
 # A provider may launch successfully but publish a status that cannot be
 # serialized into the closed dispatch receipt. The central boundary must
@@ -293,6 +395,32 @@ python3 - "$IMMEDIATE" <<'PY'
 import json,sys
 r=json.loads(sys.argv[1]); assert r['state']=='completed' and r['handle']=='456'
 PY
+
+# Canonical dispatch receipts preserve every valid terminal state. Timeout and
+# cancellation are first-class lifecycle outcomes, not malformed failures at
+# the receipt boundary.
+for terminal_state in timed_out cancelled; do
+  python3 - "$HANDOFF" "$TMP/immediate-$terminal_state.json" "$terminal_state" <<'PY'
+import json,sys
+source,target,state=sys.argv[1:]
+value=json.load(open(source)); value['instance_id']='immediate-'+state
+json.dump(value,open(target,'w'),separators=(',',':'))
+PY
+  uberdev_agent_dispatch() {
+    terminal_code=124; [ "$terminal_state" != cancelled ] || terminal_code=143
+    printf '{"backend":"codex","state":"%s","exit_code":%s,"pid":"456"}\n' \
+      "$terminal_state" "$terminal_code" >"$4"
+    chmod 600 "$4"; DISPATCH_ID=456; return 0
+  }
+  TERMINAL_RECEIPT="$(uberdev_dispatch_child implementation "$TMP/immediate-$terminal_state.json" \
+    "$TMP/run/children/immediate-$terminal_state/result.md" \
+    "$TMP/run/children/immediate-$terminal_state/status.json")"
+  python3 - "$TERMINAL_RECEIPT" "$terminal_state" <<'PY'
+import json,sys
+receipt=json.loads(sys.argv[1]); expected=sys.argv[2]
+assert receipt['state']==expected and receipt['handle']=='456',receipt
+PY
+done
 uberdev_agent_dispatch() { _capture_dispatch "$@"; }
 
 # Forced Sol Ultra is copied exactly to the child request and resolver.
@@ -377,7 +505,8 @@ grep -q '"event":"timed_out".*"run_id":"timeout-0003"' "$TMP/run/.agent-state-$(
 BG_OUT="$(make_context "$TMP/background-timeout-run" inherit root-background-timeout background)"
 BG_CTX="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["context_file"])' "$BG_OUT")"
 BG_SHA="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["context_sha256"])' "$BG_OUT")"
-mkdir -p "$TMP/background-timeout-run/inputs" "$TMP/background-timeout-bin" "$TMP/background-timeout-repo"
+mkdir -p "$TMP/background-timeout-run/inputs" "$TMP/background-timeout-bin" \
+  "$TMP/background-timeout-repo/.git"
 printf 'background timeout input\n' >"$TMP/background-timeout-run/inputs/task.md"
 python3 - "$TMP/background-timeout-handoff.json" "$BG_CTX" "$BG_SHA" "$TMP/background-timeout-run/inputs/task.md" <<'PY'
 import json,sys
@@ -386,6 +515,11 @@ json.dump({'schema_version':1,'carrier':{'schema_version':1,'run_id':'root-backg
 PY
 cat >"$TMP/background-timeout-bin/git" <<'SH'
 #!/usr/bin/env bash
+if [ "$1" = rev-parse ] && [ "$2" = --show-toplevel ]; then pwd -P; exit 0; fi
+if [ "$1" = -C ] && [ "$3" = rev-parse ] && [ "$4" = --git-common-dir ]; then
+  printf '.git\n'
+  exit 0
+fi
 if [ "$1" = worktree ] && [ "$2" = add ]; then mkdir -p "$3"; exit 0; fi
 exit 1
 SH
@@ -426,7 +560,7 @@ grep -q '"event":"timed_out".*"run_id":"background-timeout-0004"' "$TMP/backgrou
 WEZ_OUT="$(make_context "$TMP/wez-run" inherit root-wezterm wezterm)"
 WEZ_CTX="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["context_file"])' "$WEZ_OUT")"
 WEZ_SHA="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["context_sha256"])' "$WEZ_OUT")"
-mkdir -p "$TMP/wez-run/inputs" "$TMP/wez-bin" "$TMP/wez-home" "$TMP/wez-repo"
+mkdir -p "$TMP/wez-run/inputs" "$TMP/wez-bin" "$TMP/wez-home" "$TMP/wez-repo/.git"
 printf wez >"$TMP/wez-run/inputs/task.md"
 python3 - "$TMP/wez-handoff.json" "$WEZ_CTX" "$WEZ_SHA" "$TMP/wez-run/inputs/task.md" <<'PY'
 import json,sys
@@ -435,6 +569,11 @@ json.dump({'schema_version':1,'carrier':{'schema_version':1,'run_id':'root-wezte
 PY
 cat >"$TMP/wez-bin/git" <<'SH'
 #!/usr/bin/env bash
+if [ "$1" = rev-parse ] && [ "$2" = --show-toplevel ]; then pwd -P; exit 0; fi
+if [ "$1" = -C ] && [ "$3" = rev-parse ] && [ "$4" = --git-common-dir ]; then
+  printf '.git\n'
+  exit 0
+fi
 if [ "$1 $2" = 'worktree add' ]; then mkdir -p "$3"; exit 0; fi
 exit 2
 SH

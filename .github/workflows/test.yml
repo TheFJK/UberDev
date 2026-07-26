@@ -36,11 +36,11 @@ jobs:
     runs-on: ubuntu-latest
     # Routed lifecycle, semaphore-race, and provider-contract fixtures now make
     # the complete Linux suite legitimately exceed ten minutes on hosted runners.
-    # Fifteen minutes preserves the hang guard while leaving room for the real runtime checks
+    # Twenty-five minutes preserves the hang guard while leaving room for the real runtime checks
     # wired below (ci-wiring.test.sh keeps that list complete).
     # Caps the default 360-min budget so a hung test from a fork PR can't burn
     # the public-repo Actions allowance. Bump if the suite legitimately grows.
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install zsh
@@ -90,6 +90,8 @@ jobs:
           bash tests/sdd-routed-lifecycle.test.sh && \
           bash tests/audit-fixups.test.sh && \
           bash tests/review-pr.test.sh && \
+          bash tests/review-pr-codex-entry.test.sh && \
+          bash tests/review-pr-codex-six-child.test.sh && \
           bash tests/review-pr-phase3-ci.test.sh && \
           bash tests/prkit-manifest.test.sh && \
           bash tests/prkit-codex-manifest.test.sh && \
@@ -182,14 +184,28 @@ jobs:
           bash tests/scan-fleet-workflow.test.sh && \
           bash tests/codex-port.test.sh
 
+  supervision-smoke-macos:
+    name: supervision-smoke-macos
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install GNU timeout
+        run: brew install coreutils
+      - name: Run focused supervision smoke tests
+        run: |
+          bash tests/review-pr-codex-entry.test.sh && \
+          bash tests/agent-dispatch.test.sh && \
+          bash tests/review-pr-codex-six-child.test.sh
+
   shape-checks-windows:
     name: shape-checks-windows
     runs-on: windows-latest
     # Proves the shape-check harness and routed dispatch lifecycle are portable
-    # on native Windows/Git Bash. Real detached-process fixtures now run close
-    # to five minutes; ten minutes preserves a bounded hang guard across hosted
-    # runner variance.
-    timeout-minutes: 10
+    # on native Windows/Git Bash. A recent full run took 9.5 minutes, while the
+    # current suite reached its final minute at the old ten-minute cap. Fifteen
+    # minutes leaves about four minutes of headroom and retains a bounded guard.
+    timeout-minutes: 15
     defaults:
       run:
         # Force every `run:` step into Git Bash, not PowerShell or cmd.
@@ -258,7 +274,6 @@ jobs:
         #   - live-semaphore.test.sh
         #   - agent-dispatch.test.sh
         #   - child-dispatch.test.sh
-        #   - child-dispatch-receipts.test.sh
         #   - child-inputs.test.sh
         #   - child-wait.test.sh
         #   - child-contract-v2.test.sh
@@ -268,6 +283,8 @@ jobs:
         #   - orchestrator-child-inputs.test.sh
         #   - sdd-child-inputs.test.sh
         #   - review-child-inputs.test.sh
+        #   - review-pr-codex-entry.test.sh
+        #   - review-pr-codex-six-child.test.sh
         #   - routed-provider-bypass.test.sh
         #   - run-tree-callsite-contract.test.sh
         #   - route-context.test.sh
@@ -324,6 +341,7 @@ jobs:
           bash tests/dispatch-fallback.test.sh && \
           bash tests/dispatch-background.test.sh && \
           bash tests/dispatch-codex.test.sh && \
+          bash tests/child-dispatch-receipts.test.sh && \
           bash tests/dispatch-wezterm.test.sh && \
           bash tests/ubersimplify.test.sh && \
           bash tests/ubersimplify-aggregate.test.sh && \

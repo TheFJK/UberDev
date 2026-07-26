@@ -126,6 +126,24 @@ write("post-prefix.sh", prefix)
 write("post-roster.sh", marker + roster)
 write("post-retry.sh", executable(post, ""))
 write("review-setup.sh", executable(review, "setup=review-pr"))
+write("review-scope.sh", containing(review, 'review_refresh_phase1_scope "$BASE_SHA"'))
+
+review_instance_lines = [
+    line for line in review.splitlines()
+    if 'review-pr-${RUN_ID}' in line
+]
+if not review_instance_lines or any(
+    'uberdev_child_instance_id' not in line for line in review_instance_lines
+):
+    raise SystemExit("every review child instance must use the shared bounded helper")
+post_instance_lines = [
+    line for line in post.splitlines()
+    if 'post-review-${RUN_ID}' in line
+]
+if not post_instance_lines or any(
+    'uberdev_child_instance_id' not in line for line in post_instance_lines
+):
+    raise SystemExit("every post-review child instance must use the shared bounded helper")
 
 builder_region = re.search(
     r"<!-- BEGIN review-child-builder-v1 -->\s*(.*?)\s*<!-- END review-child-builder-v1 -->",
@@ -325,44 +343,15 @@ for line in rows:
 if len(matches) != 1:
     raise SystemExit(f"provider seam reached without one correlated dispatch receipt: {matches!r}")
 PY
-  printf 'fixture result for %s\n' "$instance" >"$result"
+  case "$edge" in
+    review_pr.review.*)
+      printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings: []' \
+        'confidence: high' '```' >"$result"
+      ;;
+    *) printf 'fixture result for %s\n' "$instance" >"$result" ;;
+  esac
   chmod 600 "$result"
   DISPATCH_ID="fixture-$instance"
-  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"fixture-%s"}\n' "$instance" >"$status"
-  chmod 600 "$status"
-  python3 -I -B - "$status" <<'PY' &
-import json
-import os
-import tempfile
-import time
-import sys
-
-path = sys.argv[1]
-for _attempt in range(500):
-    try:
-        value = json.load(open(path, encoding="utf-8"))
-    except (OSError, ValueError):
-        value = {}
-    if value.get("state") == "running" and value.get("lease_generation"):
-        break
-    time.sleep(0.01)
-else:
-    raise SystemExit("adapter did not publish lease generation")
-value["state"] = "completed"
-value["exit_code"] = 0
-descriptor, temporary = tempfile.mkstemp(prefix=".fixture-complete.", dir=os.path.dirname(path))
-try:
-    os.fchmod(descriptor, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-        json.dump(value, stream, sort_keys=True, separators=(",", ":"))
-        stream.write("\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temporary, path)
-finally:
-    if os.path.exists(temporary):
-        os.unlink(temporary)
-PY
   python3 -I -B - "$PROVIDER_CALLS" "$UBERDEV_CHILD_TEST_SOURCE" "$edge" "$instance" \
     "$UBERDEV_AGENT_DECISION_JSON" "$@" <<'PY'
 import json
@@ -379,6 +368,7 @@ row = {
 with open(path, "a", encoding="utf-8") as stream:
     stream.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
 PY
+  _uberdev_agent_publish_status "$status" "$backend" "$DISPATCH_ID" completed 0 create
 }
 
 # Source the production post-review setup/record/fanout definitions against the
@@ -388,10 +378,125 @@ export UBERDEV_CHILD_TEST_SOURCE="$POST_SOURCE"
 export UBERDEV_COMMAND_WORKSPACE_JSON="$REVIEW_WORKSPACE_JSON"
 . "$TMP/post-prefix.sh"
 
+LONG_REVIEW_RUN_ID="$(python3 -I -B -c 'print("review-run-"+"x"*180,end="")')"
+for LONG_REVIEW_CANDIDATE in \
+  "post-review-${LONG_REVIEW_RUN_ID}-r6-iter7-attempt01" \
+  "review-pr-${LONG_REVIEW_RUN_ID}-fix-phase1-iter7-attempt01" \
+  "review-pr-${LONG_REVIEW_RUN_ID}-simplify-quality-iter7-attempt01" \
+  "review-pr-${LONG_REVIEW_RUN_ID}-fix-phase2-iter7-attempt01" \
+  "review-pr-${LONG_REVIEW_RUN_ID}-defer-findings-iter7-attempt01" \
+  "review-pr-${LONG_REVIEW_RUN_ID}-ci-classify-iter3-attempt01" \
+  "review-pr-${LONG_REVIEW_RUN_ID}-ci-fix-iter3-attempt01" \
+  "review-pr-${LONG_REVIEW_RUN_ID}-ci-rebase-iter3-attempt01" \
+  "review-pr-${LONG_REVIEW_RUN_ID}-ci-defer-refusal-iter3-attempt01" \
+  "review-pr-${LONG_REVIEW_RUN_ID}-conflict-99-iter3-attempt01"; do
+  LONG_REVIEW_INSTANCE="$(uberdev_child_instance_id "$LONG_REVIEW_CANDIDATE")"
+  LONG_REVIEW_REPEAT="$(uberdev_child_instance_id "$LONG_REVIEW_CANDIDATE")"
+  if [ "$LONG_REVIEW_INSTANCE" != "$LONG_REVIEW_REPEAT" ] \
+      || [ "${#LONG_REVIEW_INSTANCE}" -gt 128 ] \
+      || ! [[ "$LONG_REVIEW_INSTANCE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] \
+      || ! [[ "$LONG_REVIEW_INSTANCE" =~ -[0-9a-f]{12}$ ]]; then
+    echo "review-child-inputs: long review run id did not produce one stable bounded child identity" >&2
+    exit 1
+  fi
+done
+
+# Phase 1 re-entry materializes names and diff bytes from one fixed local
+# base-to-HEAD snapshot. A file introduced by a fixer must join the next review
+# handoff instead of inheriting the stale PR-server path list.
+SCOPE_REPO="$TMP/scope-repo"
+mkdir -p "$SCOPE_REPO"
+git -C "$SCOPE_REPO" init -q
+git -C "$SCOPE_REPO" config user.email test@example.com
+git -C "$SCOPE_REPO" config user.name Test
+printf 'base\n' >"$SCOPE_REPO/base.txt"
+git -C "$SCOPE_REPO" add base.txt
+git -C "$SCOPE_REPO" commit -qm 'test: create scope base'
+BASE_SHA="$(git -C "$SCOPE_REPO" rev-parse HEAD)"
+SCOPE_EXPECTED_BASE="$BASE_SHA"
+SCOPE_BIN="$TMP/scope-bin"
+mkdir -p "$SCOPE_BIN"
+cat >"$SCOPE_BIN/gh" <<'SH'
+#!/usr/bin/env bash
+printf '{"baseRefOid":"%s","baseRefName":"main"}\n' "$SCOPE_EXPECTED_BASE"
+SH
+chmod +x "$SCOPE_BIN/gh"
+export SCOPE_EXPECTED_BASE
+printf 'initial change\n' >>"$SCOPE_REPO/base.txt"
+git -C "$SCOPE_REPO" add base.txt
+git -C "$SCOPE_REPO" commit -qm 'test: create initial review change'
+(
+  PATH="$SCOPE_BIN:$PATH"
+  WORKTREE_ROOT="$SCOPE_REPO"
+  DIFF_ARTIFACT_PATH="$TMP/scope-diff.md"
+  COMMIT_RANGE_PATH="$TMP/scope-range.txt"
+  PR_NUMBER=73
+  unset BASE_SHA
+  . "$TMP/review-scope.sh"
+  python3 -I -B - "$CHANGED_PATHS_JSON" "$DIFF_ARTIFACT_PATH" <<'PY'
+import json,sys
+paths=json.loads(sys.argv[1]); raw=open(sys.argv[2],encoding='utf-8').read()
+assert paths==['base.txt'],paths
+assert raw.startswith('<external-untrusted-input source="pr-diff">\n')
+assert raw.endswith('</external-untrusted-input>\n')
+PY
+  printf 'fixer-created\n' >"$SCOPE_REPO/fixer-created.txt"
+  git -C "$SCOPE_REPO" add fixer-created.txt
+  git -C "$SCOPE_REPO" commit -qm 'fix: simulate phase 1 fixer file'
+  . "$TMP/review-scope.sh"
+  python3 -I -B - "$CHANGED_PATHS_JSON" "$DIFF_ARTIFACT_PATH" "$COMMIT_RANGE_PATH" "$SCOPE_EXPECTED_BASE" <<'PY'
+import json,sys
+paths=json.loads(sys.argv[1]); raw=open(sys.argv[2],encoding='utf-8').read()
+commit_range=open(sys.argv[3],encoding='utf-8').read().strip()
+assert paths==['base.txt','fixer-created.txt'],paths
+assert 'fixer-created.txt' in raw
+base,head=commit_range.split('..',1)
+assert base==sys.argv[4] and len(head)==40 and all(ch in '0123456789abcdef' for ch in head)
+PY
+  python3 -I -B - "$SCOPE_REPO/substantial.bin" <<'PY'
+import random,sys
+open(sys.argv[1],'wb').write(random.Random(335).randbytes(7*1024*1024))
+PY
+  git -C "$SCOPE_REPO" add substantial.bin
+  git -C "$SCOPE_REPO" commit -qm 'test: add substantial binary review fixture'
+  . "$TMP/review-scope.sh"
+  python3 -I -B - "$DIFF_ARTIFACT_PATH" <<'PY'
+import os,sys
+raw=open(sys.argv[1],encoding='utf-8').read()
+assert '[diff summarized:' in raw,raw[:200]
+assert 'substantial.bin' in raw
+assert os.path.getsize(sys.argv[1]) < 16*1024*1024
+PY
+  python3 -I -B - "$SCOPE_REPO/large.txt" <<'PY'
+import sys
+open(sys.argv[1],'w',encoding='utf-8').writelines(f'line {index}\n' for index in range(2101))
+PY
+  git -C "$SCOPE_REPO" add large.txt
+  git -C "$SCOPE_REPO" commit -qm 'test: add large text review fixture'
+  . "$TMP/review-scope.sh"
+  python3 -I -B - "$DIFF_ARTIFACT_PATH" <<'PY'
+import os,sys
+raw=open(sys.argv[1],encoding='utf-8').read()
+assert '[diff summarized:' in raw and 'large.txt' in raw
+assert os.path.getsize(sys.argv[1]) < 16*1024*1024
+PY
+  STALE_RANGE_PATH="$COMMIT_RANGE_PATH"
+  mkdir "$TMP/scope-range-blocked"
+  COMMIT_RANGE_PATH="$TMP/scope-range-blocked"
+  if . "$TMP/review-scope.sh"; then
+    echo 'review-child-inputs: failed Phase 1 scope refresh reused stale artifacts' >&2
+    exit 1
+  fi
+  COMMIT_RANGE_PATH="$STALE_RANGE_PATH"
+)
+
 HOSTILE_DIR="$RESEARCH_DIR_ABS"$'/review dir\nwith "quotes" and \\slashes *?[x]'
 mkdir -p "$HOSTILE_DIR"
-CHANGED_ONE="$HOSTILE_DIR"$'/changed "one" \\path*.ts'
-CHANGED_TWO="$HOSTILE_DIR"$'/changed two [x] \\path?.sh'
+# These fixtures are contract-accepted repository-relative paths after
+# validation. They deliberately do not exist to cover deleted paths while
+# retaining hostile shell metacharacters as inert JSON data.
+CHANGED_ONE='src/changed "one" path*.ts'
+CHANGED_TWO='tests/changed two [x] path?.sh'
 DIFF_PATH="$HOSTILE_DIR"$'/diff "quoted" \\path*?[x].md'
 CRITERIA_FIXTURE="$HOSTILE_DIR"$'/criteria "quoted" \\path*?[x].md'
 FORMAT_EXAMPLE="$HOSTILE_DIR"$'/format "quoted" \\path*?[x].yaml'
@@ -406,7 +511,7 @@ CI_REFUSED_AGGREGATE_PATH="$HOSTILE_DIR"$'/refused "aggregate" \\path*.md'
 CONFLICT_PATH="$HOSTILE_DIR"$'/conflict "quoted" \\path*.ts'
 
 for fixture in \
-  "$CHANGED_ONE" "$CHANGED_TWO" "$DIFF_PATH" "$CRITERIA_FIXTURE" "$FORMAT_EXAMPLE" \
+  "$DIFF_PATH" "$CRITERIA_FIXTURE" "$FORMAT_EXAMPLE" \
   "$POST_FINAL" "$SIMPLIFY_FINAL" "$COMMIT_RANGE_FIXTURE" \
   "$PHASE1_DISPOSITION_FIXTURE" "$PHASE2_DISPOSITION_FIXTURE" \
   "$CLASSIFICATION_PATH" "$CI_LOG_ARTIFACT_PATH" "$CI_REFUSED_AGGREGATE_PATH" \
@@ -420,6 +525,36 @@ EMPHASIS_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1:
   $'tests "quoted" \\focus*?[x]\t' $'errors "quoted" \\focus*?[x]\t')"
 DIFF_ARTIFACT_PATH="$DIFF_PATH"
 CRITERIA_PATH="$CRITERIA_FIXTURE"
+
+# changed_paths represents the complete name-only diff. Its acceptance is
+# bounded by the handoff byte limit, not by an arbitrary file-count ceiling.
+LARGE_CHANGED_PATHS_JSON="$(python3 -I -B -c 'import json; print(json.dumps([f"src/large-pr-{i:03d}.ts" for i in range(129)],separators=(",",":")),end="")')"
+LARGE_REVIEW_INPUTS="$(uberdev_child_inputs_build review_pr.review.correctness \
+  changed_paths "$LARGE_CHANGED_PATHS_JSON" \
+  diff_path "$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1]),end="")' "$DIFF_PATH")" \
+  criteria_path "$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1]),end="")' "$CRITERIA_FIXTURE")" \
+  emphasis '[]')"
+[ "$(python3 -I -B -c 'import json,sys; print(len(json.loads(sys.argv[1])["changed_paths"]))' "$LARGE_REVIEW_INPUTS")" -eq 129 ] || {
+  echo 'review-child-inputs: complete 129-path PR diff was truncated or rejected' >&2
+  exit 1
+}
+if uberdev_child_inputs_build review_pr.review.correctness \
+    changed_paths '[]' \
+    diff_path "$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1]),end="")' "$DIFF_PATH")" \
+    criteria_path "$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1]),end="")' "$CRITERIA_FIXTURE")" \
+    emphasis '[]' >/dev/null 2>&1; then
+  echo 'review-child-inputs: empty changed_paths scope was accepted' >&2
+  exit 1
+fi
+if DRIVE_RELATIVE_INPUTS="$(python3 -I -B - "$LARGE_REVIEW_INPUTS" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1]); value['changed_paths']=['C:relative/path.ts']
+print(json.dumps(value,separators=(',',':')),end='')
+PY
+)" && uberdev_child_inputs_validate review_pr.review.correctness "$DRIVE_RELATIVE_INPUTS" >/dev/null 2>&1; then
+  echo 'review-child-inputs: Windows drive-relative path was accepted' >&2
+  exit 1
+fi
 
 # Canonical six-edge roster -> post_review_record -> post_review_fanout.
 . "$TMP/post-roster.sh"
@@ -435,12 +570,22 @@ chmod 600 "$BASE_REVIEW_RECORDS"
 # The remaining independent callsites run in two bounded test waves. Each
 # subshell still executes the extracted production wrapper and the real
 # dispatch lifecycle; overlap keeps this closure test below the CI time budget.
-FAILED_REVIEW_EDGE=review_pr.review.types
-FAILED_REVIEW_INDEX=3
+printf '%s\n' \
+  '{"edge":"review_pr.review.types","index":3,"status":"fixture.status","result":"fixture.result"}' \
+  >"$REVIEW_FAILED"
+REVIEW_EXPECTED_COUNT=6
+REVIEW_INITIAL_VALID_COUNT=5
+REVIEW_FORMAT_FAILURE_COUNT=1
+unset FAILED_REVIEW_EDGE FAILED_REVIEW_INDEX
 FORMAT_EXAMPLE_PATH="$FORMAT_EXAMPLE"
 export UBERDEV_CHILD_TEST_SOURCE="$REVIEW_SOURCE"
-WORKTREE_ROOT="$HOSTILE_DIR"
-WORKING_DIR_ABS="$HOSTILE_DIR"
+# Caller-mode mutations are bound to the canonical repository root. Keep the
+# hostile fixture coverage on artifact paths, which remain untrusted inputs,
+# while exercising the production workspace boundary with a valid identity.
+MUTATION_WORKTREE="$ROOT"
+export MUTATION_WORKTREE
+WORKTREE_ROOT="$MUTATION_WORKTREE"
+WORKING_DIR_ABS="$MUTATION_WORKTREE"
 COMMIT_RANGE_PATH="$COMMIT_RANGE_FIXTURE"
 PHASE1_DISPOSITION_PATH="$PHASE1_DISPOSITION_FIXTURE"
 PHASE2_DISPOSITION_PATH="$PHASE2_DISPOSITION_FIXTURE"
@@ -487,7 +632,7 @@ CI_BASE_SHA=$'base "quoted" \\sha*?[x]\t'
 . "$TMP/review-ci-builders.sh"
 
 conflicted_files=("$CONFLICT_PATH")
-REPO_ROOT="$HOSTILE_DIR"
+REPO_ROOT="$MUTATION_WORKTREE"
 pr_head_branch=$'feature/"quoted"\\branch*?[x]\t'
 base_branch=$'main-"quoted"\\branch*?[x]\t'
 BASE_SHA=$'conflict-base-"quoted"\\sha*?[x]\t'
@@ -514,6 +659,7 @@ python3 -I -B - "$RECEIPTS" "$HANDOFFS" "$PROVIDER_CALLS" "$POST_SOURCE" "$REVIE
 import copy
 import hashlib
 import json
+import os
 import re
 import sys
 from collections import Counter
@@ -529,6 +675,7 @@ from pathlib import Path
     semaphore_root,
 ) = sys.argv[1:]
 expected = {}
+run_id = os.environ["RUN_ID"]
 
 def expect(source, edge, instance):
     if instance in expected:
@@ -544,24 +691,24 @@ post_edges = (
     "review_pr.review.general",
 )
 for index, edge in enumerate(post_edges, 1):
-    expect(post_source, edge, f"post-review-r{index}-iter7-attempt01")
-expect(post_source, "review_pr.review.types", "post-review-r3-iter7-attempt02")
+    expect(post_source, edge, f"post-review-{run_id}-r{index}-iter7-attempt01")
+expect(post_source, "review_pr.review.types", f"post-review-{run_id}-r3-iter7-attempt02")
 
 review_cases = (
-    ("review_pr.fix.phase1", "review-pr-fix-phase1-iter7-attempt01"),
-    ("review_pr.simplify.reuse", "review-pr-simplify-reuse-iter7-attempt01"),
-    ("review_pr.simplify.quality", "review-pr-simplify-quality-iter7-attempt01"),
-    ("review_pr.simplify.efficiency", "review-pr-simplify-efficiency-iter7-attempt01"),
-    ("review_pr.simplify.reuse", "review-pr-simplify-reuse-iter8-attempt01"),
-    ("review_pr.simplify.quality", "review-pr-simplify-quality-iter8-attempt01"),
-    ("review_pr.simplify.efficiency", "review-pr-simplify-efficiency-iter8-attempt01"),
-    ("review_pr.fix.phase2", "review-pr-fix-phase2-iter7-attempt01"),
-    ("review_pr.defer.findings", "review-pr-defer-findings-iter7-attempt01"),
-    ("review_pr.ci.classify", "review-pr-ci-classify-iter3-attempt01"),
-    ("review_pr.ci.fix_code", "review-pr-ci-fix-iter3-attempt01"),
-    ("review_pr.ci.rebase", "review-pr-ci-rebase-iter3-attempt01"),
-    ("review_pr.ci.defer_refusal", "review-pr-ci-defer-refusal-iter3-attempt01"),
-    ("review_pr.ci.resolve_conflict", "review-pr-conflict-1-iter3-attempt01"),
+    ("review_pr.fix.phase1", f"review-pr-{run_id}-fix-phase1-iter7-attempt01"),
+    ("review_pr.simplify.reuse", f"review-pr-{run_id}-simplify-reuse-iter7-attempt01"),
+    ("review_pr.simplify.quality", f"review-pr-{run_id}-simplify-quality-iter7-attempt01"),
+    ("review_pr.simplify.efficiency", f"review-pr-{run_id}-simplify-efficiency-iter7-attempt01"),
+    ("review_pr.simplify.reuse", f"review-pr-{run_id}-simplify-reuse-iter8-attempt01"),
+    ("review_pr.simplify.quality", f"review-pr-{run_id}-simplify-quality-iter8-attempt01"),
+    ("review_pr.simplify.efficiency", f"review-pr-{run_id}-simplify-efficiency-iter8-attempt01"),
+    ("review_pr.fix.phase2", f"review-pr-{run_id}-fix-phase2-iter7-attempt01"),
+    ("review_pr.defer.findings", f"review-pr-{run_id}-defer-findings-iter7-attempt01"),
+    ("review_pr.ci.classify", f"review-pr-{run_id}-ci-classify-iter3-attempt01"),
+    ("review_pr.ci.fix_code", f"review-pr-{run_id}-ci-fix-iter3-attempt01"),
+    ("review_pr.ci.rebase", f"review-pr-{run_id}-ci-rebase-iter3-attempt01"),
+    ("review_pr.ci.defer_refusal", f"review-pr-{run_id}-ci-defer-refusal-iter3-attempt01"),
+    ("review_pr.ci.resolve_conflict", f"review-pr-{run_id}-conflict-1-iter3-attempt01"),
 )
 for edge, instance in review_cases:
     expect(review_source, edge, instance)
@@ -796,6 +943,7 @@ from pathlib import Path
 
 env = os.environ
 handoff_root = Path(env["HANDOFFS"])
+run_id = env["RUN_ID"]
 
 def handoff(instance):
     path = handoff_root / f"{instance}.json"
@@ -827,9 +975,9 @@ for index, suffix in enumerate(post_edges, 1):
     expected = dict(review_base)
     if suffix == "general":
         expected["lens"] = "general"
-    exact(f"post-review-r{index}-iter7-attempt01", expected)
+    exact(f"post-review-{run_id}-r{index}-iter7-attempt01", expected)
 exact(
-    "post-review-r3-iter7-attempt02",
+    f"post-review-{run_id}-r3-iter7-attempt02",
     review_base | {
         "format_retry": True,
         "format_example_path": env["FORMAT_EXAMPLE"],
@@ -839,15 +987,15 @@ exact(
 phase1 = {
     "findings_path": env["POST_FINAL"],
     "commit_range_path": env["COMMIT_RANGE_FIXTURE"],
-    "working_dir": env["HOSTILE_DIR"],
+    "working_dir": env["MUTATION_WORKTREE"],
     "pr_number": 73,
     "disposition_path": env["PHASE1_DISPOSITION_FIXTURE"],
 }
-exact("review-pr-fix-phase1-iter7-attempt01", phase1)
+exact(f"review-pr-{run_id}-fix-phase1-iter7-attempt01", phase1)
 
 for lens in ("reuse", "quality", "efficiency"):
     exact(
-        f"review-pr-simplify-{lens}-iter7-attempt01",
+        f"review-pr-{run_id}-simplify-{lens}-iter7-attempt01",
         {
             "diff_path": env["DIFF_PATH"],
             "lens": lens,
@@ -855,7 +1003,7 @@ for lens in ("reuse", "quality", "efficiency"):
         },
     )
     exact(
-        f"review-pr-simplify-{lens}-iter8-attempt01",
+        f"review-pr-{run_id}-simplify-{lens}-iter8-attempt01",
         {
             "diff_path": env["DIFF_PATH"],
             "lens": lens,
@@ -863,25 +1011,25 @@ for lens in ("reuse", "quality", "efficiency"):
     )
 
 exact(
-    "review-pr-fix-phase2-iter7-attempt01",
+    f"review-pr-{run_id}-fix-phase2-iter7-attempt01",
     phase1 | {
         "findings_path": env["SIMPLIFY_FINAL"],
         "disposition_path": env["PHASE2_DISPOSITION_FIXTURE"],
     },
 )
 exact(
-    "review-pr-defer-findings-iter7-attempt01",
+    f"review-pr-{run_id}-defer-findings-iter7-attempt01",
     {
         "phase1_path": env["POST_FINAL"],
         "phase2_path": env["SIMPLIFY_FINAL"],
         "phase1_disposition_path": env["PHASE1_DISPOSITION_FIXTURE"],
         "phase2_disposition_path": env["PHASE2_DISPOSITION_FIXTURE"],
-        "working_dir": env["HOSTILE_DIR"],
+        "working_dir": env["MUTATION_WORKTREE"],
         "pr_number": 73,
     },
 )
 exact(
-    "review-pr-ci-classify-iter3-attempt01",
+    f"review-pr-{run_id}-ci-classify-iter3-attempt01",
     {
         "pr_number": 73,
         "run_id": env["CI_RUN_ID"],
@@ -889,36 +1037,36 @@ exact(
     },
 )
 exact(
-    "review-pr-ci-fix-iter3-attempt01",
+    f"review-pr-{run_id}-ci-fix-iter3-attempt01",
     {
         "classification_path": env["CLASSIFICATION_PATH"],
         "log_path": env["CI_LOG_ARTIFACT_PATH"],
-        "working_dir": env["HOSTILE_DIR"],
+        "working_dir": env["MUTATION_WORKTREE"],
         "pr_number": 73,
     },
 )
 exact(
-    "review-pr-ci-rebase-iter3-attempt01",
+    f"review-pr-{run_id}-ci-rebase-iter3-attempt01",
     {
-        "working_dir": env["HOSTILE_DIR"],
+        "working_dir": env["MUTATION_WORKTREE"],
         "pr_number": 73,
         "head_sha": env["CI_HEAD_SHA"],
         "base_sha": env["CI_BASE_SHA"],
     },
 )
 exact(
-    "review-pr-ci-defer-refusal-iter3-attempt01",
+    f"review-pr-{run_id}-ci-defer-refusal-iter3-attempt01",
     {
-        "phase1_path": env["CI_REFUSED_AGGREGATE_PATH"],
-        "working_dir": env["HOSTILE_DIR"],
+        "phase1_path": str(Path(env["POST_FINAL"]).parent / "ci-refused-synthetic-3.md"),
+        "working_dir": env["MUTATION_WORKTREE"],
         "pr_number": 73,
     },
 )
 exact(
-    "review-pr-conflict-1-iter3-attempt01",
+    f"review-pr-{run_id}-conflict-1-iter3-attempt01",
     {
         "file_path": env["CONFLICT_PATH"],
-        "working_dir": env["HOSTILE_DIR"],
+        "working_dir": env["MUTATION_WORKTREE"],
         "pr_branch": env["pr_head_branch"],
         "integration_branch": env["base_branch"],
         "base_sha": env["BASE_SHA"],

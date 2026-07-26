@@ -50,6 +50,23 @@ _uberdev_agent_error() {
   printf 'uberdev agent dispatch: %s\n' "$1" >&2
 }
 
+# Detached PR review/simplify children cannot service an interactive Claude
+# permission prompt. Require an explicit unattended opt-in before any route
+# event or capacity lease is created. Other workflows preserve their existing
+# interactive behavior, and an explicit claude-bg backend remains explicit --
+# this gate validates its execution posture rather than silently rerouting it.
+_uberdev_agent_claude_permissions_preflight() {
+  case "${1:-}" in
+    review-pr|simplify) ;;
+    *) return 0 ;;
+  esac
+  if [ "${SKIP_PERMISSIONS:-0}" = "1" ] || [ "${AUTO_PERMISSIONS:-0}" = "1" ]; then
+    return 0
+  fi
+  _uberdev_agent_error 'claude-bg review fanout requires unattended permissions; set AUTO_PERMISSIONS=1 or SKIP_PERMISSIONS=1, or select backend=codex'
+  return 2
+}
+
 _uberdev_agent_json_get() {
   local raw="$1" key="$2"
   python3 -I -B -c '
@@ -229,9 +246,22 @@ request_raw, policy_path, router_path, catalog_path = sys.argv[1:]
 try:
     request=json.loads(request_raw)
     if not isinstance(request,dict): raise ValueError("request_not_object")
-    allowed={"schema_version","run_dir","run_id","repository_id","backend","workflow","phase","role","task_tier","risk_scope","risk_signals","issue_or_pr","issue_num","capacity","timeout_s","routing_mode","explicit_route","explicit_model","explicit_effort","explicit_service_tier","fast","explicit_sandbox","parent_sandbox","environment","project_routing","project_config","parent_run","shadow","adaptive_fallback","parent_run_id","agent_id","context_file","context_sha256","root_decision","triage_decision"}
+    allowed={"schema_version","run_dir","run_id","repository_id","backend","workflow","phase","role","task_tier","risk_scope","risk_signals","issue_or_pr","issue_num","capacity","timeout_s","routing_mode","explicit_route","explicit_model","explicit_effort","explicit_service_tier","fast","explicit_sandbox","parent_sandbox","environment","project_routing","project_config","parent_run","shadow","adaptive_fallback","parent_run_id","agent_id","context_file","context_sha256","root_decision","triage_decision","workspace_mode","workspace_dir"}
     unknown=set(request)-allowed
     if unknown: raise ValueError("unknown_request_fields")
+    workspace_mode=request.get("workspace_mode","isolated")
+    workspace_dir=request.get("workspace_dir")
+    if workspace_mode not in {"isolated","caller"}: raise ValueError("invalid_workspace_mode")
+    if workspace_mode=="isolated":
+        if workspace_dir is not None: raise ValueError("unexpected_workspace_dir")
+    else:
+        repository_id=request.get("repository_id"); backend=request.get("backend","codex")
+        if backend not in {"codex","claude-bg"}: raise ValueError("workspace_mode_unsupported")
+        if not isinstance(workspace_dir,str) or not os.path.isabs(workspace_dir) or not os.path.isdir(workspace_dir): raise ValueError("invalid_workspace_dir")
+        entry=os.lstat(workspace_dir)
+        reparse=getattr(entry,"st_file_attributes",0)&getattr(stat,"FILE_ATTRIBUTE_REPARSE_POINT",0)
+        if stat.S_ISLNK(entry.st_mode) or reparse or os.path.realpath(workspace_dir)!=workspace_dir: raise ValueError("invalid_workspace_dir")
+        if not isinstance(repository_id,str) or os.path.realpath(repository_id)!=workspace_dir: raise ValueError("workspace_repository_mismatch")
     carriers={"routing_mode","explicit_route","explicit_model","explicit_effort","explicit_service_tier","explicit_sandbox","parent_sandbox"}
     if any(request.get(key)=="" for key in carriers): raise ValueError("empty_carrier")
     environment=request.get("environment",{})
@@ -265,7 +295,7 @@ try:
             if set(project)!={"model_routing"}: raise ValueError("unknown_project_config_fields")
             validate_project(project["model_routing"])
         else: validate_project(project)
-    routing={key:value for key,value in request.items() if key not in {"schema_version","run_dir","run_id","repository_id","issue_or_pr","issue_num","capacity","timeout_s","parent_run_id","agent_id","context_file","context_sha256","root_decision","triage_decision"}}
+    routing={key:value for key,value in request.items() if key not in {"schema_version","run_dir","run_id","repository_id","issue_or_pr","issue_num","capacity","timeout_s","parent_run_id","agent_id","context_file","context_sha256","root_decision","triage_decision","workspace_mode","workspace_dir"}}
     backend=routing.get("backend","codex")
     if backend!="codex":
         project=request.get("project_routing") or request.get("project_config") or {}
@@ -343,7 +373,7 @@ _uberdev_agent_context_schema_validate() {
 import json,os,re,sys
 mode=sys.argv[1]
 routing_allowed={"backend","workflow","phase","role","task_tier","risk_scope","risk_signals","routing_mode","explicit_route","explicit_model","explicit_effort","explicit_service_tier","fast","explicit_sandbox","parent_sandbox","environment","project_routing","project_config","parent_run","shadow","adaptive_fallback"}
-adapter_metadata={"schema_version","run_dir","run_id","repository_id","issue_or_pr","issue_num","capacity","timeout_s","parent_run_id","agent_id","context_file","context_sha256","root_decision","triage_decision"}
+adapter_metadata={"schema_version","run_dir","run_id","repository_id","issue_or_pr","issue_num","capacity","timeout_s","parent_run_id","agent_id","context_file","context_sha256","root_decision","triage_decision","workspace_mode","workspace_dir"}
 decision_allowed={"schema_version","policy_version","backend","service_tier","sandbox","field_sources","adaptive_fallback","risk_signals","risk_scope","minimum_route","fallback_chain","ignored_sources","ignored_fields","logical_route","model","reasoning_effort","routing_mode","effective_policy","route_source","forced","reason_codes","adaptive_proposal"}
 provenance_keys={"mode","service_tier","risk_escalation","adaptive_fallback","shadow","workflows","roles"}; sources={"env","project-codex","project-claude","explicit-config-file","default"}
 risks={"authentication","authorization","concurrency","cryptography","data-loss","destructive-operations","force-push","public-api-compatibility","release-infrastructure","schema-migration","security"}
@@ -582,10 +612,17 @@ print(json.dumps({"context_file":path,"context_sha256":digest,"run_id":value["me
 }
 
 _uberdev_agent_event_json() {
-  local event="$1" request="$2" decision="$3" handle="${4:-}" status_path="${5:-}" rc="${6:-}" error_class="${7:-}" owner_pid="$$"
+  local event="$1" request="$2" decision="$3" handle="${4:-}" status_path="${5:-}" rc="${6:-}" error_class="${7:-}"
+  local owner_pid="${_UBERDEV_AGENT_OWNER_PID:-}" owner_identity="${_UBERDEV_AGENT_OWNER_IDENTITY:-}"
+  if [ "$event" = agent_started ]; then
+    if [ -z "$owner_pid" ] || [ -z "$owner_identity" ]; then
+      _uberdev_agent_error 'owner_process_identity_unavailable'
+      return 2
+    fi
+  fi
   python3 -I -c '
 import json, sys
-event_name, request_raw, decision_raw, handle, status_path, rc, error_class, owner_pid = sys.argv[1:]
+event_name, request_raw, decision_raw, handle, status_path, rc, error_class, owner_pid, owner_identity = sys.argv[1:]
 request = json.loads(request_raw); decision = json.loads(decision_raw)
 routing = decision.get("routing_mode", "inherit")
 effective = decision.get("effective_policy", "inherit")
@@ -593,7 +630,7 @@ proposal = decision.get("adaptive_proposal") if routing == "shadow" else decisio
 if not isinstance(proposal, dict):
     proposal = decision
 record = {
-    "schema_version": 1, "event": event_name,
+    "schema_version": 2, "event": event_name,
     "run_id": request["run_id"], "backend": request["backend"],
     "workflow": request.get("workflow"), "phase": request.get("phase"),
     "role": request.get("role"), "issue_or_pr": request.get("issue_or_pr"),
@@ -615,6 +652,7 @@ if request.get("parent_run_id") is not None: record["parent_run_id"] = request["
 if request.get("agent_id") is not None: record["agent_id"] = request["agent_id"]
 if event_name == "agent_started":
     record["owner_pid"] = int(owner_pid)
+    if owner_identity: record["owner_process_identity"] = owner_identity
     record["timeout_s"] = int(request["timeout_s"])
     if handle: record["backend_handle"] = int(handle) if handle.isdigit() else handle
     if status_path: record["status_path"] = status_path
@@ -622,7 +660,7 @@ if event_name in {"completed", "failed", "timed_out", "cancelled", "abandoned"}:
     record["terminal_status"] = event_name
     if event_name == "failed": record["error_class"] = error_class or "provider_launch_failed"
 print(json.dumps({key:value for key,value in record.items() if value is not None}, sort_keys=True, separators=(",", ":")))
-' "$event" "$request" "$decision" "$handle" "$status_path" "$rc" "$error_class" "$owner_pid"
+' "$event" "$request" "$decision" "$handle" "$status_path" "$rc" "$error_class" "$owner_pid" "$owner_identity"
 }
 
 _uberdev_agent_append_event() {
@@ -641,119 +679,311 @@ _uberdev_agent_status_terminal_event() {
   esac
 }
 
+_uberdev_agent_publish_status_record() {
+  [ "$#" -eq 17 ] || return 2
+  python3 -I -B - "$@" <<'PY'
+import errno,json,os,re,stat,sys,tempfile,time
+(path,mode,backend,state,exit_raw,pid,process_identity,lease_generation,
+ issue,tier,provider_exit_raw,log,result,worktree,branch,workspace_mode,
+ include_context)=sys.argv[1:]
+terminal_states={'completed','failed','timed_out','cancelled'}
+if mode not in {'create','replace','provider'} or state not in terminal_states|{'running'}: raise SystemExit(2)
+try: exit_code=None if exit_raw in {'','null'} else int(exit_raw)
+except ValueError: raise SystemExit(2)
+if state=='running' and exit_code is not None: raise SystemExit(2)
+if state=='completed' and exit_code!=0: raise SystemExit(2)
+if state in terminal_states-{'completed'} and (exit_code is None or exit_code==0): raise SystemExit(2)
+if process_identity and not re.fullmatch(r'[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}',process_identity): raise SystemExit(2)
+if lease_generation and not re.fullmatch(r'[0-9a-f]{32}',lease_generation): raise SystemExit(2)
+parent=os.path.dirname(path)
+parent_entry=os.stat(parent,follow_symlinks=False)
+uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
+if not stat.S_ISDIR(parent_entry.st_mode) or (uid is not None and parent_entry.st_uid!=uid): raise SystemExit(2)
+payload={'backend':backend,'state':state,'exit_code':exit_code}
+if pid: payload['pid']=pid
+if process_identity: payload['process_identity']=process_identity
+if lease_generation: payload['lease_generation']=lease_generation
+if issue:
+ try: payload['issue']=int(issue)
+ except ValueError: raise SystemExit(2)
+if tier: payload['tier']=tier
+if provider_exit_raw not in {'','null'}:
+ try: payload['provider_exit_code']=int(provider_exit_raw)
+ except ValueError: raise SystemExit(2)
+if include_context=='1':
+ payload.update(log=log,result=result,worktree=worktree,branch=branch,workspace_mode=workspace_mode)
+elif include_context!='0': raise SystemExit(2)
+lock_path=path+'.transition-lock-v2'
+lock_flags=os.O_RDWR|os.O_CREAT|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_BINARY',0)
+lock_fd=os.open(lock_path,lock_flags,0o600); acquired=False
+def lock_entry():
+ opened=os.fstat(lock_fd); current=os.lstat(lock_path)
+ if (stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1
+     or (uid is not None and opened.st_uid!=uid) or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)
+     or (os.name!='nt' and stat.S_IMODE(opened.st_mode)!=0o600)): raise SystemExit(2)
+ return opened
+def acquire():
+ global acquired
+ if os.name=='nt':
+  import msvcrt
+  if os.fstat(lock_fd).st_size==0:
+   os.write(lock_fd,b'0'); os.fsync(lock_fd)
+  for _ in range(300):
+   try: os.lseek(lock_fd,0,os.SEEK_SET); msvcrt.locking(lock_fd,msvcrt.LK_NBLCK,1); acquired=True; return
+   except OSError as error:
+    if error.errno not in {errno.EACCES,errno.EAGAIN,errno.EDEADLK}: raise
+    time.sleep(.01)
+ else:
+  import fcntl
+  for _ in range(300):
+   try: fcntl.flock(lock_fd,fcntl.LOCK_EX|fcntl.LOCK_NB); acquired=True; return
+   except OSError as error:
+    if error.errno not in {errno.EACCES,errno.EAGAIN}: raise
+    time.sleep(.01)
+ raise SystemExit(2)
+def release():
+ global acquired
+ if not acquired: return
+ if os.name=='nt':
+  import msvcrt
+  os.lseek(lock_fd,0,os.SEEK_SET); msvcrt.locking(lock_fd,msvcrt.LK_UNLCK,1)
+ else:
+  import fcntl
+  fcntl.flock(lock_fd,fcntl.LOCK_UN)
+ acquired=False
+def read_current():
+ try: entry=os.lstat(path)
+ except FileNotFoundError: return None,None
+ if (stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1
+     or (uid is not None and entry.st_uid!=uid) or (os.name!='nt' and stat.S_IMODE(entry.st_mode)!=0o600)
+     or entry.st_size>65536): raise SystemExit(2)
+ descriptor=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_BINARY',0))
+ try:
+  opened=os.fstat(descriptor); raw=os.read(descriptor,65537); current=os.stat(path,follow_symlinks=False)
+  if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1 or len(raw)>65536
+      or (opened.st_dev,opened.st_ino)!=(entry.st_dev,entry.st_ino)
+      or (current.st_dev,current.st_ino)!=(entry.st_dev,entry.st_ino)): raise SystemExit(2)
+ finally: os.close(descriptor)
+ if not raw: return entry,None
+ try: value=json.loads(raw)
+ except (UnicodeError,ValueError,json.JSONDecodeError): raise SystemExit(2)
+ if not isinstance(value,dict): raise SystemExit(2)
+ return entry,value
+try:
+ lock_entry(); acquire(); lock_entry()
+ entry,existing=read_current(); replace=True
+ if mode=='provider' and existing is not None:
+  for key in ('process_identity','lease_generation'):
+   if key in existing and key not in payload: payload[key]=existing[key]
+ if existing is not None and existing.get('state') in terminal_states:
+  if mode in {'create','provider'} or existing.get('state')==state: replace=False
+  else: raise SystemExit(3)
+ elif mode=='create' and existing is not None:
+  candidate_pid=int(pid) if pid.isdigit() else pid
+  replace=(existing.get('state')=='running' and existing.get('backend')==backend
+           and existing.get('pid') in (None,'',pid,candidate_pid))
+ if replace:
+  descriptor,temporary=tempfile.mkstemp(prefix='.agent-status.',dir=parent)
+  try:
+   if os.name!='nt': os.fchmod(descriptor,0o600)
+   with os.fdopen(descriptor,'w',encoding='utf-8') as stream:
+    descriptor=None; json.dump(payload,stream,sort_keys=True,separators=(',',':'))
+    stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
+   if entry is None:
+    if os.path.lexists(path): raise SystemExit(2)
+   else:
+    current=os.stat(path,follow_symlinks=False)
+    if (current.st_dev,current.st_ino)!=(entry.st_dev,entry.st_ino): raise SystemExit(2)
+   os.replace(temporary,path)
+  finally:
+   if descriptor is not None: os.close(descriptor)
+   if os.path.exists(temporary): os.unlink(temporary)
+finally:
+ try: release()
+ finally: os.close(lock_fd)
+PY
+}
+
 _uberdev_agent_publish_status() {
   local status_path="$1" backend="$2" handle="$3" state="$4" exit_code="${5:-}" mode="${6:-replace}" process_identity="${7:-}" lease_generation="${8:-}"
-  python3 -I -c '
-import json, os, stat, sys, tempfile
-path, backend, handle, state, exit_code, mode, process_identity, lease_generation = sys.argv[1:]
-parent = os.path.dirname(path)
-if not os.path.isdir(parent):
-    raise SystemExit(2)
-payload = {"backend": backend, "state": state, "exit_code": int(exit_code) if exit_code else None, "pid": handle}
-if process_identity: payload["process_identity"] = process_identity
-if lease_generation: payload["lease_generation"] = lease_generation
-fd, temporary = tempfile.mkstemp(prefix=".agent-status.", dir=parent)
-try:
-    if os.name != "nt":
-        os.fchmod(fd, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        fd = None
-        json.dump(payload, stream, sort_keys=True, separators=(",", ":"))
-        stream.write("\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    if mode == "create":
-        try:
-            os.link(temporary, path, follow_symlinks=False)
-        except FileExistsError:
-            entry = os.lstat(path)
-            if (stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode)
-                    or (getattr(os,"geteuid",None) is not None and entry.st_uid != getattr(os,"geteuid")()) or entry.st_nlink != 1
-                    or (os.name != "nt" and stat.S_IMODE(entry.st_mode) != 0o600)):
-                raise SystemExit(2)
-            replace = entry.st_size == 0
-            if not replace:
-                with open(path, "r", encoding="utf-8") as existing_stream:
-                    existing = json.load(existing_stream)
-                replace = (existing.get("state") == "running"
-                           and existing.get("backend") == backend
-                           and existing.get("pid") in (None, "", handle, int(handle) if handle.isdigit() else handle))
-            current = os.stat(path, follow_symlinks=False)
-            if (current.st_dev, current.st_ino) != (entry.st_dev, entry.st_ino):
-                raise SystemExit(2)
-            if replace:
-                os.replace(temporary, path)
-    else:
-        if os.path.lexists(path) and stat.S_ISLNK(os.lstat(path).st_mode):
-            raise SystemExit(2)
-        os.replace(temporary, path)
-finally:
-    if fd is not None:
-        os.close(fd)
-    if os.path.exists(temporary):
-        os.unlink(temporary)
-' "$status_path" "$backend" "$handle" "$state" "$exit_code" "$mode" "$process_identity" "$lease_generation"
+  _uberdev_agent_publish_status_record "$status_path" "$mode" "$backend" "$state" "$exit_code" "$handle" \
+    "$process_identity" "$lease_generation" '' '' '' '' '' '' '' '' 0
 }
 
 _uberdev_agent_process_identity() {
   local pid="$1"
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  python3 -I -B - "$pid" <<'PY'
-import hashlib,os,subprocess,sys
-pid=int(sys.argv[1])
-try:
- pgid=os.getpgid(pid); sid=os.getsid(pid)
- started=subprocess.check_output(["ps","-o","lstart=","-p",str(pid)],text=True,stderr=subprocess.DEVNULL).strip()
- if not started: raise ValueError()
- print(f"{pid}|{pgid}|{sid}|{hashlib.sha256(started.encode()).hexdigest()}",end="")
-except Exception: raise SystemExit(1)
+  python3 -I -B "$_UBERDEV_AGENT_MANIFEST_TOOL" process-identity --pid "$pid"
+}
+
+# Capture the native owner PID and its creation identity as one indivisible
+# record. The manifest bridge deliberately resolves through a command-
+# substitution subshell, which maps Git Bash's MSYS PID to the native parent
+# PID consumed by Win32 OpenProcess.
+_uberdev_agent_capture_owner_process_record() {
+  local directory="$1" probe writer_output_file owner identity old_umask writer_output writer_error writer_rc
+  [ -d "$directory" ] || return 2
+  old_umask="$(umask)"
+  umask 077
+  probe="$(mktemp "$directory/.owner-process.XXXXXX")" || { umask "$old_umask"; return 2; }
+  writer_output_file="$(mktemp "$directory/.owner-process-output.XXXXXX")" || {
+    umask "$old_umask"
+    rm -f "$probe" 2>/dev/null || true
+    return 2
+  }
+  umask "$old_umask"
+  if _uberdev_semaphore_write_process_identity parent "$probe" \
+      >"$writer_output_file" 2>/dev/null; then
+    writer_rc=0
+  else
+    writer_rc=$?
+  fi
+  if writer_output="$(python3 -I -B - "$writer_output_file" <<'PY'
+import os,stat,sys
+path=sys.argv[1]
+entry=os.lstat(path)
+if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1 or entry.st_size>4096: raise SystemExit(2)
+with open(path,encoding='utf-8') as stream: print(stream.read(),end='')
 PY
+)"; then
+    :
+  else
+    rm -f "$writer_output_file" "$probe" 2>/dev/null || true
+    printf '%s\n' '{"error":"owner_process_identity_writer_protocol_failed","status":"error"}'
+    return 2
+  fi
+  if ! rm -f "$writer_output_file" 2>/dev/null; then
+    rm -f "$probe" 2>/dev/null || true
+    printf '%s\n' '{"error":"owner_process_record_cleanup_failed","status":"error"}'
+    return 2
+  fi
+  if [ "$writer_rc" -ne 0 ]; then
+    if ! rm -f "$probe" 2>/dev/null; then
+      printf '%s\n' '{"error":"owner_process_record_cleanup_failed","status":"error"}'
+      return 2
+    fi
+    if writer_error="$(python3 -I -B - "$writer_output" <<'PY'
+import json,sys
+allowed={
+ 'invalid_process_identity_mode','process_identity_absent',
+ 'process_identity_parent_absent','process_identity_parent_unavailable',
+ 'process_identity_unavailable',
+}
+try:
+ raw=sys.argv[1]
+ if len(raw)>4096: raise ValueError()
+ value=json.loads(raw)
+ if set(value)!={'error','status'} or value['error'] not in allowed: raise ValueError()
+ if value['status'] not in {'error','rejected'}: raise ValueError()
+ print(json.dumps(value,sort_keys=True,separators=(',',':')),end='')
+except (TypeError,ValueError,json.JSONDecodeError): raise SystemExit(2)
+PY
+)"; then
+      printf '%s\n' "$writer_error"
+    else
+      printf '%s\n' '{"error":"owner_process_identity_writer_failed","status":"error"}'
+    fi
+    return "$writer_rc"
+  fi
+  if [ -n "$writer_output" ]; then
+    rm -f "$probe" 2>/dev/null || {
+      printf '%s\n' '{"error":"owner_process_record_cleanup_failed","status":"error"}'
+      return 2
+    }
+    printf '%s\n' '{"error":"owner_process_identity_writer_protocol_failed","status":"error"}'
+    return 2
+  fi
+  read -r owner <"$probe" || owner=''
+  identity="$(sed -n '2p' "$probe" 2>/dev/null || true)"
+  if ! rm -f "$probe" 2>/dev/null; then
+    printf '%s\n' '{"error":"owner_process_record_cleanup_failed","status":"error"}'
+    return 2
+  fi
+  if ! python3 -I -B - "$owner" "$identity" <<'PY'
+import re,sys
+owner,identity=sys.argv[1:]
+if not owner.isdigit() or int(owner)<=0: raise SystemExit(2)
+if not re.fullmatch(re.escape(owner)+r'\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}',identity): raise SystemExit(2)
+PY
+  then
+    printf '%s\n' '{"error":"owner_process_record_malformed","status":"error"}'
+    return 2
+  fi
+  printf '%s\t%s\n' "$owner" "$identity"
+}
+
+_uberdev_agent_process_identity_matches() {
+  local pid="$1" expected="$2" current probe_rc
+  if current="$(_uberdev_agent_process_identity "$pid")"; then
+    [ "$current" = "$expected" ]
+    return $?
+  else
+    probe_rc=$?
+  fi
+  [ "$probe_rc" -ne 1 ] || return 1
+  return 2
 }
 
 _uberdev_agent_claude_probe() {
-  local handle="$1"
-  claude agents --json 2>/dev/null | python3 -I -c '
+  local handle="$1" match_mode="${2:-prefix}"
+  case "$match_mode" in prefix|exact) ;; *) return 2 ;; esac
+  # Completed Claude sessions are omitted from the default view. Query the
+  # full provider inventory so a terminal child cannot look absent merely
+  # because it left the live-only list.
+  claude agents --all --json 2>/dev/null | python3 -I -c '
 import json, sys
-short_id = sys.argv[1]
+session_id,match_mode = sys.argv[1:]
 try:
     rows = json.load(sys.stdin)
 except (ValueError, UnicodeError):
     raise SystemExit(2)
 if not isinstance(rows, list):
     raise SystemExit(2)
-matched = [row for row in rows if isinstance(row, dict) and isinstance(row.get("sessionId"), str) and row["sessionId"].startswith(short_id)]
+matched = [row for row in rows if isinstance(row, dict) and isinstance(row.get("sessionId"), str)
+           and (row["sessionId"] == session_id if match_mode == "exact" else row["sessionId"].startswith(session_id))]
 if not matched:
     print("absent", end="")
     raise SystemExit(0)
 if len(matched) != 1:
     raise SystemExit(2)
 status = str(matched[0].get("status") or "").strip().lower()
-if status in {"busy", "running", "starting", "working", "queued"}:
+state = str(matched[0].get("state") or "").strip().lower()
+reason = " ".join(str(matched[0].get(key) or "") for key in ("blockedReason", "reason", "message")).lower()
+if state == "blocked":
+    print("blocked:permission" if "permission" in reason else "blocked:provider", end="")
+    raise SystemExit(0)
+lifecycle = state or status
+if lifecycle == "idle":
+    print("blocked:permission", end="")
+elif lifecycle in {"busy", "running", "starting", "working", "queued"}:
     print("live", end="")
-elif status in {"failed", "error"}:
+elif lifecycle in {"failed", "error"}:
     print("failed", end="")
-elif status in {"timed_out", "timeout"}:
+elif lifecycle in {"timed_out", "timeout"}:
     print("timed_out", end="")
-elif status in {"cancelled", "canceled"}:
+elif lifecycle in {"cancelled", "canceled", "stopped"}:
     print("cancelled", end="")
-elif status in {"completed", "complete", "done", "finished"}:
+elif lifecycle in {"completed", "complete", "done", "finished"}:
     print("completed", end="")
 else:
     raise SystemExit(2)
-' "$handle"
+' "$handle" "$match_mode"
 }
 
-_uberdev_agent_lease_identity() {
+_uberdev_agent_lease_record() {
   local lease="$1"
   python3 -I -c '
-import os, stat, sys
+import json,os,re,stat,sys
 path = sys.argv[1]
 flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
 descriptor = os.open(path, flags)
 try:
     opened = os.fstat(descriptor)
     current = os.stat(path, follow_symlinks=False)
-    if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+    uid_fn=getattr(os,"geteuid",None); uid=uid_fn() if uid_fn else None
+    if (not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+            or opened.st_nlink != 1 or (uid is not None and opened.st_uid != uid)
+            or (os.name != "nt" and stat.S_IMODE(opened.st_mode) != 0o600)):
         raise SystemExit(2)
     payload = os.read(descriptor, 65537)
     if len(payload) > 65536:
@@ -761,62 +991,53 @@ try:
 finally:
     os.close(descriptor)
 try:
-    rows = dict(line.split("=", 1) for line in payload.decode("utf-8").splitlines())
+    pairs=[line.split("=",1) for line in payload.decode("utf-8").splitlines()]
+    if any(len(pair)!=2 for pair in pairs): raise ValueError()
+    rows=dict(pairs)
 except (UnicodeError, ValueError):
     raise SystemExit(2)
+if len(pairs)!=10 or len(rows)!=10 or set(rows)!={"version","generation","run_id","owner_pid","owner_identity","backend_handle","backend_identity","start_epoch","timeout_s","status_path"}: raise SystemExit(2)
 generation = rows.get("generation", "")
-if len(generation) != 32 or any(ch not in "0123456789abcdef" for ch in generation):
-    raise SystemExit(2)
-print(f"{opened.st_dev}:{opened.st_ino}:{generation}", end="")
+if rows.get("version")!="1" or not re.fullmatch(r"[0-9a-f]{32}",generation): raise SystemExit(2)
+if not os.path.basename(path).startswith(generation) or not re.fullmatch(r"[0-9a-f]{64}\.lease",os.path.basename(path)): raise SystemExit(2)
+if not rows["run_id"] or any(ord(ch)<32 or ord(ch)==127 for ch in rows["run_id"]): raise SystemExit(2)
+for key in ("owner_pid","start_epoch","timeout_s"):
+    if not rows[key].isdigit() or int(rows[key])<=0: raise SystemExit(2)
+identity_pattern=r"[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}"
+if re.fullmatch(identity_pattern,rows["owner_identity"]) is None: raise SystemExit(2)
+handle=rows["backend_handle"]
+if any(ord(ch)<32 or ord(ch)==127 for ch in handle): raise SystemExit(2)
+backend_identity=rows["backend_identity"]
+if backend_identity:
+    if re.fullmatch(identity_pattern,backend_identity) is None: raise SystemExit(2)
+    numeric=handle[4:] if handle.startswith("pid:") else handle
+    if not numeric.isdigit() or backend_identity.split("|",1)[0]!=numeric: raise SystemExit(2)
+status_path=rows["status_path"]
+if status_path and (not os.path.isabs(status_path) or any(ord(ch)<32 or ord(ch)==127 for ch in status_path)): raise SystemExit(2)
+if handle and not handle.isdigit() and not status_path: raise SystemExit(2)
+identity=f"{opened.st_dev}:{opened.st_ino}:{generation}"
+print(json.dumps({"identity":identity,"generation":generation,"run_id":rows["run_id"],"status_path":status_path},sort_keys=True,separators=(",",":")),end="")
 ' "$lease"
 }
 
+_uberdev_agent_lease_identity() {
+  local record
+  record="$(_uberdev_agent_lease_record "$1")" || return 2
+  _uberdev_agent_json_get "$record" identity
+}
+
 _uberdev_agent_release_exact_lease() {
-  local lease="$1" identity="$2" scope rc
+  local lease="$1" identity="$2" scope rc generation native_identity
   _uberdev_semaphore_validate_lease_path "$lease" || return 2
+  generation="${identity##*:}"
+  native_identity="${identity%:*}"
+  [ "$native_identity" != "$identity" ] || return 2
+  case "$generation" in ''|*[!0-9a-f]*) return 2 ;; esac
+  [ "${#generation}" -eq 32 ] || return 2
+  case "$native_identity" in ''|*[!0-9:]*|:*|*:|*:*:*) return 2 ;; esac
   scope="$(dirname "$lease")"
   _uberdev_semaphore_mutex_acquire "$scope" || return $?
-  python3 -I -c '
-import os, stat, sys
-path, identity = sys.argv[1:]
-try:
-    expected_device, expected_inode, expected_generation = identity.split(":", 2)
-    expected = (int(expected_device), int(expected_inode))
-except (TypeError, ValueError):
-    raise SystemExit(2)
-parent, name = os.path.dirname(path), os.path.basename(path)
-parent_descriptor = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-descriptor = None
-try:
-    try:
-        descriptor = os.open(
-            name,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-            dir_fd=parent_descriptor,
-        )
-    except FileNotFoundError:
-        raise SystemExit(0)
-    opened = os.fstat(descriptor)
-    if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != expected:
-        raise SystemExit(3)
-    payload = os.read(descriptor, 65537)
-    if len(payload) > 65536:
-        raise SystemExit(2)
-    try:
-        rows = dict(line.split("=", 1) for line in payload.decode("utf-8").splitlines())
-    except (UnicodeError, ValueError):
-        raise SystemExit(2)
-    if rows.get("generation") != expected_generation:
-        raise SystemExit(3)
-    current = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
-    if (current.st_dev, current.st_ino) != expected:
-        raise SystemExit(3)
-    os.unlink(name, dir_fd=parent_descriptor)
-finally:
-    if descriptor is not None:
-        os.close(descriptor)
-    os.close(parent_descriptor)
-' "$lease" "$identity"
+  PYTHONPATH= PYTHONHOME= _uberdev_semaphore_remove_lease "$lease" "$generation" "$native_identity"
   rc=$?
   _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || {
     [ "$rc" -ne 0 ] || rc=2
@@ -843,6 +1064,23 @@ if terminals != [expected]:
 ' "$manifest" "$request_json" "$expected"
 }
 
+_uberdev_agent_manifest_started_matches() {
+  local manifest="$1" request_json="$2"
+  python3 -I -c '
+import json, pathlib, sys
+manifest, request_raw = sys.argv[1:]
+request = json.loads(request_raw)
+identity = (request["run_id"], request.get("agent_id"))
+started = []
+for line in pathlib.Path(manifest).read_text(encoding="utf-8").splitlines():
+    event = json.loads(line)
+    if (event.get("run_id"), event.get("agent_id")) == identity and event.get("event") == "agent_started":
+        started.append(event)
+if len(started) != 1:
+    raise SystemExit(1)
+' "$manifest" "$request_json"
+}
+
 _uberdev_agent_finalize_terminal() {
   local manifest="$1" lease="$2" lease_identity="$3" status_file="$4" backend="$5" handle="$6"
   local request_json="$7" decision="$8" terminal_event="$9" terminal_rc event_json
@@ -865,14 +1103,24 @@ _uberdev_agent_finalize_terminal() {
 
 _uberdev_agent_persist_watcher_error() {
   local status_file="$1" backend="$2" handle="$3" terminal="$4" attempts="$5"
-  python3 -I -B - "$status_file.watcher-error.json" "$backend" "$handle" "$terminal" "$attempts" <<'PY'
+  local target="${6:-$status_file.watcher-error.json}" reason="${7:-}"
+  python3 -I -B - "$target" "$backend" "$handle" "$terminal" "$attempts" "$reason" <<'PY'
 import json,os,stat,sys,tempfile
-path,backend,handle,terminal,attempts=sys.argv[1:]
+path,backend,handle,terminal,attempts,*optional_reason=sys.argv[1:]
+reason=optional_reason[0] if optional_reason else ''
 parent=os.path.dirname(path)
 entry=os.stat(parent,follow_symlinks=False)
 uid_fn=getattr(os,"geteuid",None); uid=uid_fn() if uid_fn else None
 if not stat.S_ISDIR(entry.st_mode) or (uid is not None and entry.st_uid!=uid): raise SystemExit(2)
-payload={"schema_version":1,"error":"terminal_finalize_failed","backend":backend,"handle":handle,"terminal":terminal,"attempts":int(attempts)}
+if terminal == "provider_probe_failed": error="provider_probe_failed"
+elif terminal == "process_identity_probe_unavailable": error="process_identity_probe_failed"
+elif terminal == "timeout_intent_recovery_failed": error="timeout_intent_recovery_failed"
+elif terminal.startswith("blocked:"): error="provider_cancel_failed"
+elif terminal.startswith("launch:"): error="launch_finalize_failed"
+else: error="terminal_finalize_failed"
+allowed_reasons={"provider_stop_failed","provider_session_resolution_failed","provider_cancel_probe_failed","provider_cancel_unconfirmed","timeout_intent_invalid","timeout_intent_identity_unavailable","timeout_intent_cleanup_failed","timeout_partial_result_cleanup_failed","owner_process_identity_unavailable","lease_acquire_invalid_input","lease_acquire_runtime_state_failed","lease_acquire_mutex_failed","lease_acquire_reconcile_failed","lease_acquire_count_failed","lease_acquire_duplicate_check_failed","lease_acquire_allocate_failed","lease_acquire_owner_failed","lease_acquire_publish_failed","lease_acquire_identity_failed","lease_acquire_rollback_failed","lease_acquire_mutex_release_failed","lease_handle_rollback_failed"}
+payload={"schema_version":1,"error":error,"backend":backend,"handle":handle,"terminal":terminal,"attempts":int(attempts)}
+if reason: payload["reason"]=reason if reason in allowed_reasons else "supervisory_failure"
 fd,tmp=tempfile.mkstemp(prefix=".watcher-error.",dir=parent)
 try:
  if os.name!="nt": os.fchmod(fd,0o600)
@@ -886,40 +1134,275 @@ finally:
 PY
 }
 
+_uberdev_agent_persist_watcher_error_retry() {
+  local status_file="$1" fallback_file="$2" backend="$3" handle="$4" terminal="$5" attempts="$6"
+  local reason="${7:-}" attempt=1
+  while [ "$attempt" -le 3 ]; do
+    _uberdev_agent_persist_watcher_error "$status_file" "$backend" "$handle" "$terminal" "$attempts" '' "$reason" && return 0
+    [ "$attempt" -ge 3 ] || sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  attempt=1
+  while [ "$attempt" -le 3 ]; do
+    _uberdev_agent_persist_watcher_error "$status_file" "$backend" "$handle" "$terminal" "$attempts" "$fallback_file" "$reason" && return 0
+    [ "$attempt" -ge 3 ] || sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  return 2
+}
+
+_uberdev_agent_fail_owner_capture() {
+  local status_file="$1" fallback_file="$2" backend="$3" status_rc=0 diagnostic_rc=0
+  _uberdev_agent_publish_status "$status_file" "$backend" '' failed 70 replace || status_rc=$?
+  _uberdev_agent_persist_watcher_error_retry "$status_file" "$fallback_file" \
+    "$backend" '' launch:owner_process_identity 1 owner_process_identity_unavailable || diagnostic_rc=$?
+  if [ "$status_rc" -ne 0 ]; then
+    _uberdev_agent_error 'owner_process_identity_status_publication_failed'
+  fi
+  if [ "$diagnostic_rc" -ne 0 ]; then
+    _uberdev_agent_error 'owner_process_identity_diagnostic_persistence_failed'
+  fi
+  [ "$status_rc" -eq 0 ] && [ "$diagnostic_rc" -eq 0 ]
+}
+
+_uberdev_agent_timeout_intent_probe() {
+  python3 -I -B - "$1.timeout-intent-v1" "$1" "$2" "${3:-}" "$_UBERDEV_AGENT_MANIFEST_TOOL" <<'PY'
+import hashlib,json,os,re,stat,subprocess,sys,time
+path,status_path,expected_handle,expected_generation,manifest_tool=sys.argv[1:]
+def finish(token,code):
+ print(token,end=''); raise SystemExit(code)
+def secure_read(candidate,limit):
+ try: before=os.lstat(candidate)
+ except FileNotFoundError: raise
+ uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
+ if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or before.st_size>limit or (uid is not None and before.st_uid!=uid): raise ValueError()
+ fd=os.open(candidate,os.O_RDONLY|getattr(os,'O_BINARY',0)|getattr(os,'O_NOFOLLOW',0))
+ try:
+  opened=os.fstat(fd); after=os.lstat(candidate)
+  if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1
+      or (uid is not None and opened.st_uid!=uid)
+      or (opened.st_dev,opened.st_ino)!=(after.st_dev,after.st_ino)): raise ValueError()
+  raw=os.read(fd,limit+1)
+  if len(raw)>limit: raise ValueError()
+  return raw
+ finally: os.close(fd)
+try:
+ marker_raw=secure_read(path,4096)
+except FileNotFoundError: finish('absent',1)
+except (OSError,ValueError): finish('invalid',2)
+try:
+ value=json.loads(marker_raw)
+ keys={'schema_version','handle','lease_generation','snapshot_sha256','waiter_pid','waiter_process_identity','expires_epoch'}
+ if frozenset(value)!=keys or value.get('schema_version')!=1: raise ValueError()
+ handle=value.get('handle'); generation=value.get('lease_generation'); snapshot=value.get('snapshot_sha256')
+ waiter_pid=value.get('waiter_pid'); waiter_identity=value.get('waiter_process_identity'); expires=value.get('expires_epoch')
+ if handle!=expected_handle: finish('handle',3)
+ if not isinstance(generation,str) or re.fullmatch(r'[0-9a-f]{32}',generation) is None: raise ValueError()
+ if not isinstance(snapshot,str) or re.fullmatch(r'[0-9a-f]{64}',snapshot) is None: raise ValueError()
+ if type(waiter_pid) is not int or waiter_pid<=0: raise ValueError()
+ identity_match=re.fullmatch(r'([1-9][0-9]*)\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}',waiter_identity or '')
+ if identity_match is None or int(identity_match.group(1))!=waiter_pid: raise ValueError()
+ if type(expires) is not int: raise ValueError()
+ now=int(time.time())
+ if expires<=now or expires>now+60: finish('expired',3)
+ status_raw=secure_read(status_path,65536); status=json.loads(status_raw)
+ status_generation=status.get('lease_generation')
+ if expected_generation and generation!=expected_generation: finish('generation',3)
+ if generation!=status_generation: finish('generation',3)
+ if hashlib.sha256(status_raw).hexdigest()!=snapshot: finish('snapshot',3)
+except (OSError,ValueError,TypeError,json.JSONDecodeError): finish('invalid',2)
+probe=subprocess.run(
+ [sys.executable,'-I','-B',manifest_tool,'process-identity','--pid',str(waiter_pid)],
+ stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,check=False,
+)
+if probe.returncode==2: finish('identity_unavailable',2)
+if probe.returncode!=0: finish('orphan',3)
+if probe.stdout!=waiter_identity: finish('stale',3)
+finish('valid',0)
+PY
+}
+
+_uberdev_agent_timeout_intent_remove() {
+  python3 -I -B - "$1.timeout-intent-v1" <<'PY'
+import os,stat,sys
+path=sys.argv[1]
+try: before=os.lstat(path)
+except FileNotFoundError: raise SystemExit(0)
+uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
+if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or (uid is not None and before.st_uid!=uid): raise SystemExit(2)
+fd=os.open(path,os.O_RDONLY|getattr(os,'O_BINARY',0)|getattr(os,'O_NOFOLLOW',0))
+try:
+ opened=os.fstat(fd); current=os.lstat(path)
+ if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1
+     or (uid is not None and opened.st_uid!=uid)
+     or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)): raise SystemExit(2)
+ os.unlink(path)
+finally: os.close(fd)
+PY
+}
+
 _uberdev_agent_start_watcher() {
   local manifest="$1" lease="$2" lease_identity="$3" status_file="$4" backend="$5" handle="$6" request_json="$7" decision="$8"
-  local watcher_pid
+  local process_identity="${9:-}" watcher_pid watcher_instance watcher_fallback
+  watcher_instance="$(_uberdev_agent_json_get "$request_json" run_id)" || return 2
+  watcher_fallback="$(dirname "$manifest")/$watcher_instance.watcher-error.json"
   (
-    local terminal_event='' probe='' absent_count=0 event_json=''
+    local terminal_event='' probe='' absent_count=0 indeterminate_count=0 event_json='' error_class='' cancel_attempt=0 cancel_rc=0 cancel_reason='' supervision_reported=0 identity_probe_rc=0
+    local timeout_intent_result='' timeout_intent_rc=0 timeout_intent_ignored=0 timeout_intent_reason='' lease_generation="${lease_identity##*:}"
     while [ -d "$(dirname "$status_file")" ]; do
       terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
       [ -z "$terminal_event" ] || break
       if [ "$backend" = claude-bg ]; then
         probe="$(_uberdev_agent_claude_probe "$handle" 2>/dev/null || true)"
         case "$probe" in
-          live) absent_count=0 ;;
+          live) absent_count=0; indeterminate_count=0 ;;
           completed|failed|timed_out|cancelled) terminal_event="$probe"; break ;;
+          blocked:permission|blocked:provider)
+            # A blocked Claude session is still provider-owned live state. Stop
+            # it and require the backend cancellation probe to confirm that the
+            # handle is no longer live before terminalizing or releasing its
+            # lease. A transient stop failure is retried in-place; exhaustion
+            # publishes one durable error, then this watcher keeps passively
+            # probing without reissuing stop so delayed provider convergence can
+            # still finalize the lifecycle and release exact capacity.
+            if [ "$supervision_reported" -eq 0 ]; then
+              cancel_attempt=1
+              while [ "$cancel_attempt" -le 3 ]; do
+                if _uberdev_dispatch_cancel_backend claude-bg "$handle" ''; then
+                  terminal_event=failed
+                  [ "$probe" = blocked:permission ] && error_class=provider_permission_blocked || error_class=provider_blocked
+                  break
+                else
+                  cancel_rc=$?
+                fi
+                cancel_reason="${_UBERDEV_DISPATCH_CANCEL_REASON:-provider_cancel_unconfirmed}"
+                [ "$cancel_rc" -eq 2 ] && [ "$cancel_reason" = provider_stop_failed ] || break
+                [ "$cancel_attempt" -ge 3 ] || sleep 0.1
+                cancel_attempt=$((cancel_attempt + 1))
+              done
+              [ -z "$terminal_event" ] || break
+              if ! _uberdev_agent_persist_watcher_error_retry "$status_file" "$watcher_fallback" "$backend" "$handle" "$probe" 3 "$cancel_reason"; then
+                _uberdev_agent_error "failed to persist provider cancellation failure: $status_file"
+                exit 70
+              fi
+              supervision_reported=1
+            fi
+            ;;
           absent)
+            indeterminate_count=0
             absent_count=$((absent_count + 1))
             if [ "$absent_count" -ge 3 ]; then
               terminal_event=failed
               break
             fi
             ;;
-          *) absent_count=0 ;;
+          *)
+            absent_count=0
+            indeterminate_count=$((indeterminate_count + 1))
+            if [ "$indeterminate_count" -ge 3 ]; then
+              if [ "$supervision_reported" -eq 0 ]; then
+                if _uberdev_agent_persist_watcher_error_retry "$status_file" "$watcher_fallback" "$backend" "$handle" provider_probe_failed "$indeterminate_count"; then
+                  supervision_reported=1
+                else
+                  _uberdev_agent_error "failed to persist provider probe failure: $status_file"
+                fi
+                if _uberdev_dispatch_cancel_backend claude-bg "$handle" ''; then
+                  terminal_event=failed
+                  error_class=provider_probe_failed
+                  break
+                fi
+              fi
+              indeterminate_count=0
+            fi
+            ;;
         esac
       else
         case "$handle" in
           ''|*[!0-9]*) ;;
           *)
-            if ! kill -0 "$handle" 2>/dev/null; then
+            identity_probe_rc=0
+            if [ -n "$process_identity" ]; then
+              if _uberdev_agent_process_identity_matches "$handle" "$process_identity"; then
+                absent_count=0
+                indeterminate_count=0
+                sleep 1
+                continue
+              else
+                identity_probe_rc=$?
+              fi
+              if [ "$identity_probe_rc" -eq 2 ]; then
+                absent_count=0
+                indeterminate_count=$((indeterminate_count + 1))
+                if [ "$indeterminate_count" -ge 3 ]; then
+                  if ! _uberdev_agent_persist_watcher_error_retry "$status_file" "$watcher_fallback" \
+                      "$backend" "$handle" process_identity_probe_unavailable "$indeterminate_count"; then
+                    _uberdev_agent_error "failed to persist process identity probe failure: $status_file"
+                  fi
+                  _uberdev_agent_error "process identity probe unavailable for pid $handle"
+                  exit 70
+                fi
+                sleep 1
+                continue
+              fi
+            elif kill -0 "$handle" 2>/dev/null; then
+              absent_count=0
+              indeterminate_count=0
+              sleep 1
+              continue
+            fi
+            indeterminate_count=0
+            if [ "$identity_probe_rc" -eq 1 ] || [ -z "$process_identity" ]; then
+              if [ "$timeout_intent_ignored" -eq 0 ]; then
+                if timeout_intent_result="$(_uberdev_agent_timeout_intent_probe "$status_file" "$handle" "$lease_generation" 2>/dev/null)"; then
+                  timeout_intent_rc=0
+                else
+                  timeout_intent_rc=$?
+                fi
+                if [ "$timeout_intent_rc" -eq 0 ] && [ "$timeout_intent_result" = valid ]; then
+                  absent_count=0
+                  sleep 0.1
+                  continue
+                fi
+                case "$timeout_intent_rc:$timeout_intent_result" in
+                  1:absent) ;;
+                  3:*)
+                    if ! _uberdev_agent_timeout_intent_remove "$status_file"; then
+                      _uberdev_agent_persist_watcher_error_retry "$status_file" "$watcher_fallback" \
+                        "$backend" "$handle" timeout_intent_recovery_failed 1 timeout_intent_cleanup_failed || \
+                        _uberdev_agent_error "failed to persist timeout intent cleanup failure: $status_file"
+                    fi
+                    timeout_intent_ignored=1
+                    ;;
+                  *)
+                    [ "$timeout_intent_result" != identity_unavailable ] \
+                      && timeout_intent_reason=timeout_intent_invalid \
+                      || timeout_intent_reason=timeout_intent_identity_unavailable
+                    if ! _uberdev_agent_timeout_intent_remove "$status_file"; then
+                      timeout_intent_reason=timeout_intent_cleanup_failed
+                    fi
+                    _uberdev_agent_persist_watcher_error_retry "$status_file" "$watcher_fallback" \
+                      "$backend" "$handle" timeout_intent_recovery_failed 1 "$timeout_intent_reason" || \
+                      _uberdev_agent_error "failed to persist timeout intent recovery failure: $status_file"
+                    timeout_intent_ignored=1
+                    ;;
+                esac
+              fi
               absent_count=$((absent_count + 1))
               if [ "$absent_count" -ge 3 ]; then
-                terminal_event=failed
-                break
+                _UBERDEV_DISPATCH_CANCEL_REASON=''
+                if [ -n "$process_identity" ] \
+                    && _uberdev_dispatch_cancel_backend "$backend" "$handle" "$process_identity"; then
+                  terminal_event=failed
+                  error_class=provider_execution_failed
+                  break
+                fi
+                cancel_reason="${_UBERDEV_DISPATCH_CANCEL_REASON:-provider_cancel_unconfirmed}"
+                if ! _uberdev_agent_persist_watcher_error_retry "$status_file" "$watcher_fallback" \
+                    "$backend" "$handle" failed 3 "$cancel_reason"; then
+                  _uberdev_agent_error "failed to persist wrapper-death supervision failure: $status_file"
+                fi
+                exit 70
               fi
-            else
-              absent_count=0
             fi
             ;;
         esac
@@ -927,8 +1410,8 @@ _uberdev_agent_start_watcher() {
       sleep 1
     done
     [ -n "$terminal_event" ] || exit 0
-    local finalize_attempt=1 error_class=''
-    [ "$terminal_event" != failed ] || error_class=provider_execution_failed
+    local finalize_attempt=1
+    [ "$terminal_event" != failed ] || [ -n "$error_class" ] || error_class=provider_execution_failed
     while [ "$finalize_attempt" -le 3 ]; do
       if _uberdev_agent_finalize_terminal "$manifest" "$lease" "$lease_identity" "$status_file" \
           "$backend" "$handle" "$request_json" "$decision" "$terminal_event" "$error_class"; then
@@ -937,44 +1420,161 @@ _uberdev_agent_start_watcher() {
       [ "$finalize_attempt" -ge 3 ] || sleep 0.1
       finalize_attempt=$((finalize_attempt + 1))
     done
-    _uberdev_agent_persist_watcher_error "$status_file" "$backend" "$handle" "$terminal_event" 3 || \
-      printf 'uberdev agent dispatch: failed to persist watcher terminal failure for %s\n' "$status_file" >&2
+    _uberdev_agent_persist_watcher_error_retry "$status_file" "$watcher_fallback" "$backend" "$handle" "$terminal_event" 3 || \
+      _uberdev_agent_error "failed to persist watcher terminal failure: $status_file"
     exit 2
-  ) </dev/null >/dev/null 2>&1 &
+  ) </dev/null >/dev/null &
   watcher_pid="$!"
   disown "$watcher_pid" 2>/dev/null || true
 }
 
+_uberdev_agent_finalize_launch_failure() {
+  local manifest="$1" lease="$2" lease_identity="$3" status_file="$4" backend="$5"
+  local request_json="$6" decision="$7" rc="$8" reason="$9"
+  local attempt=1 event_json persisted=0 released=0 error_class=dispatch_setup_failed
+  [ "$reason" != provider_launch ] || error_class=provider_launch_failed
+  while [ "$attempt" -le 3 ]; do
+    event_json="$(_uberdev_agent_event_json failed "$request_json" "$decision" '' "$status_file" "$rc" "$error_class" 2>/dev/null || true)"
+    if [ -n "$event_json" ] && { _uberdev_agent_append_event "$manifest" "$event_json" || \
+        _uberdev_agent_manifest_terminal_matches "$manifest" "$request_json" failed; }; then
+      persisted=1
+      break
+    fi
+    [ "$attempt" -ge 3 ] || sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  if [ "$persisted" -eq 1 ]; then
+    attempt=1
+    while [ "$attempt" -le 3 ]; do
+      if PYTHONPATH= PYTHONHOME= _uberdev_agent_release_exact_lease "$lease" "$lease_identity"; then
+        released=1
+        break
+      fi
+      [ "$attempt" -ge 3 ] || sleep 0.1
+      attempt=$((attempt + 1))
+    done
+  fi
+  if [ "$persisted" -eq 1 ] && [ "$released" -eq 1 ]; then
+    return 0
+  fi
+  _uberdev_agent_persist_watcher_error "$status_file" "$backend" '' "launch:$reason" 3 || \
+    _uberdev_agent_error "failed to persist launch finalization error: $reason"
+  return 2
+}
+
+_uberdev_agent_finalize_prelaunch_failure() {
+  local manifest="$1" lease="$2" lease_identity="$3" status_file="$4" backend="$5"
+  local request_json="$6" decision="$7" reason="$8"
+  local event_json started_json attempt=1 started_persisted=0 status_persisted=0 terminal_persisted=0 released=0
+  local run_id fallback_file
+  run_id="$(_uberdev_agent_json_get "$request_json" run_id)" || return 2
+  fallback_file="$(dirname "$manifest")/$run_id.watcher-error.json"
+  while [ "$attempt" -le 3 ]; do
+    started_json="$(_uberdev_agent_event_json agent_started "$request_json" "$decision" '' "$status_file" 2>/dev/null || true)"
+    if [ -n "$started_json" ] && { _uberdev_agent_append_event "$manifest" "$started_json" || \
+        _uberdev_agent_manifest_started_matches "$manifest" "$request_json"; }; then
+      started_persisted=1
+      break
+    fi
+    [ "$attempt" -ge 3 ] || sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  attempt=1
+  while [ "$attempt" -le 3 ]; do
+    if _uberdev_agent_publish_status "$status_file" "$backend" '' failed 70 replace; then
+      status_persisted=1
+      break
+    fi
+    [ "$attempt" -ge 3 ] || sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  attempt=1
+  while [ "$attempt" -le 3 ]; do
+    event_json="$(_uberdev_agent_event_json failed "$request_json" "$decision" '' "$status_file" 70 dispatch_setup_failed 2>/dev/null || true)"
+    if [ -n "$event_json" ] && { _uberdev_agent_append_event "$manifest" "$event_json" || \
+        _uberdev_agent_manifest_terminal_matches "$manifest" "$request_json" failed; }; then
+      terminal_persisted=1
+      break
+    fi
+    [ "$attempt" -ge 3 ] || sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  attempt=1
+  while [ "$attempt" -le 3 ]; do
+    if PYTHONPATH= PYTHONHOME= _uberdev_agent_release_exact_lease "$lease" "$lease_identity"; then
+      released=1
+      break
+    fi
+    [ "$attempt" -ge 3 ] || sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  if [ "$started_persisted" -eq 1 ] && [ "$status_persisted" -eq 1 ] \
+      && [ "$terminal_persisted" -eq 1 ] && [ "$released" -eq 1 ]; then
+    return 0
+  fi
+  _uberdev_agent_persist_watcher_error_retry "$status_file" "$fallback_file" "$backend" '' "launch:$reason" 3 || \
+    _uberdev_agent_error "failed to persist pre-launch supervisory error: $reason"
+  _uberdev_agent_error "pre-launch finalization failed: $reason"
+  return 2
+}
+
 _uberdev_agent_abort_after_launch() {
-  local manifest="$1" lease="$2" status_file="$3" result_file="$4" backend="$5" handle="$6" request_json="$7" decision="$8" reason="$9"
-  local process_identity lease_identity event_json cleanup_rc=0
-  process_identity="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
-  lease_identity="$(_uberdev_agent_lease_identity "$lease" 2>/dev/null || true)"
-  if ! _uberdev_dispatch_cancel_backend "$backend" "$handle" "$process_identity"; then
-    _uberdev_agent_persist_watcher_error "$status_file" "$backend" "$handle" failed 1 || true
+  local manifest="$1" lease="$2" lease_identity="$3" status_file="$4" result_file="$5" backend="$6" handle="$7" request_json="$8" decision="$9" reason="${10}"
+  local process_identity terminal_event cleanup_rc=0 fallback_file run_id provider_gone=0 cancel_rc=0
+  run_id="$(_uberdev_agent_json_get "$request_json" run_id 2>/dev/null || true)"
+  fallback_file="$(dirname "$manifest")/${run_id:-post-launch}.watcher-error.json"
+  _UBERDEV_DISPATCH_CANCEL_REASON=''
+  terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
+  if [ -n "$terminal_event" ]; then
+    if ! _uberdev_agent_finalize_terminal "$manifest" "$lease" "$lease_identity" "$status_file" \
+        "$backend" "$handle" "$request_json" "$decision" "$terminal_event" dispatch_setup_failed; then
+      _uberdev_agent_persist_watcher_error_retry "$status_file" "$fallback_file" "$backend" "$handle" "$terminal_event" 1 || \
+        _uberdev_agent_error "failed to persist post-launch terminal finalization error: $reason"
+    fi
+    _uberdev_agent_error "post-launch setup failed after provider terminal: $reason"
     return 2
   fi
-  if [ "$backend" = background ]; then
+  process_identity="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
+  case "$backend" in
+    codex|background)
+      if [ -n "$process_identity" ]; then
+        _uberdev_dispatch_cancel_backend "$backend" "$handle" "$process_identity" || cancel_rc=$?
+      else
+        case "$handle" in
+          ''|*[!0-9]*) cancel_rc=2 ;;
+          *) kill -0 "$handle" 2>/dev/null && cancel_rc=2 || provider_gone=1 ;;
+        esac
+      fi
+      ;;
+    *) _uberdev_dispatch_cancel_backend "$backend" "$handle" "$process_identity" || cancel_rc=$? ;;
+  esac
+  if [ "$cancel_rc" -ne 0 ]; then
+    _uberdev_agent_persist_watcher_error_retry "$status_file" "$fallback_file" "$backend" "$handle" failed 1 \
+      "${_UBERDEV_DISPATCH_CANCEL_REASON:-provider_cancel_unconfirmed}" || \
+      _uberdev_agent_error "failed to persist post-launch cancellation error: $reason"
+    return 2
+  fi
+  if [ "$backend" = background ] && { [ "$provider_gone" -eq 1 ] || [ -n "$process_identity" ]; }; then
     _uberdev_dispatch_cleanup_dead_partial_result "$result_file" "$handle" || cleanup_rc=2
   fi
-  _uberdev_agent_publish_status "$status_file" "$backend" "$handle" failed 70 replace "$process_identity" || cleanup_rc=2
-  event_json="$(_uberdev_agent_event_json failed "$request_json" "$decision" "$handle" "$status_file" 70 dispatch_setup_failed)" || cleanup_rc=2
-  [ -z "$event_json" ] || _uberdev_agent_append_event "$manifest" "$event_json" || cleanup_rc=2
-  if [ -n "$lease_identity" ]; then
-    PYTHONPATH= PYTHONHOME= _uberdev_agent_release_exact_lease "$lease" "$lease_identity" || cleanup_rc=2
-  else
-    cleanup_rc=2
+  terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
+  case "$terminal_event" in completed|failed|timed_out|cancelled) ;; *) terminal_event=failed ;; esac
+  _uberdev_agent_finalize_terminal "$manifest" "$lease" "$lease_identity" "$status_file" \
+    "$backend" "$handle" "$request_json" "$decision" "$terminal_event" dispatch_setup_failed || cleanup_rc=2
+  if [ "$cleanup_rc" -ne 0 ]; then
+    _uberdev_agent_persist_watcher_error_retry "$status_file" "$fallback_file" "$backend" "$handle" "$terminal_event" 1 || \
+      _uberdev_agent_error "failed to persist post-launch cleanup error: $reason"
   fi
-  [ "$cleanup_rc" -eq 0 ] || _uberdev_agent_persist_watcher_error "$status_file" "$backend" "$handle" failed 1 || true
   _uberdev_agent_error "post-launch setup failed: $reason"
   return 2
 }
 
 uberdev_agent_dispatch() {
   local request_json="${1:-}" prompt_requested="${2:-}" result_requested="${3:-}" status_requested="${4:-}"
-  local run_dir run_id repository_id backend issue_num tier capacity timeout_s
-  local prompt_file result_file status_file state_dir manifest decision lease lease_identity event_json rc handle lease_handle terminal_event paths_json
-  local context_file context_sha context_validation persisted_decision supplied_root supplied_parent context_run_id parent_run_id agent_id process_identity lease_generation
+  local run_dir run_id repository_id backend workflow issue_num tier capacity timeout_s workspace_mode workspace_dir
+  local prompt_file result_file status_file state_dir manifest decision lease lease_record lease_identity registered_identity event_json rc handle lease_handle terminal_event paths_json lease_failure_reason cleanup_identity
+  local context_file context_sha context_validation persisted_decision supplied_root supplied_parent context_run_id parent_run_id agent_id process_identity lease_generation identity_probe_rc owner_record
+  local _UBERDEV_AGENT_OWNER_PID='' _UBERDEV_AGENT_OWNER_IDENTITY=''
   [ "$#" -eq 4 ] || { _uberdev_agent_error 'expected REQUEST_JSON PROMPT_FILE RESULT_FILE STATUS_FILE'; return 2; }
   if [ -n "${ZSH_VERSION:-}" ]; then
     setopt localoptions nullglob || return 2
@@ -998,9 +1598,21 @@ uberdev_agent_dispatch() {
   run_id="$(_uberdev_agent_json_get "$request_json" run_id)" || { _uberdev_agent_error 'invalid run_id'; return 2; }
   repository_id="$(_uberdev_agent_json_get "$request_json" repository_id)" || { _uberdev_agent_error 'invalid repository_id'; return 2; }
   backend="$(_uberdev_agent_json_get "$request_json" backend)" || { _uberdev_agent_error 'invalid backend'; return 2; }
+  workflow="$(_uberdev_agent_json_get "$request_json" workflow)" || { _uberdev_agent_error 'invalid workflow'; return 2; }
+  if [ "$backend" = claude-bg ]; then
+    # Production child dispatch sources lib/dispatch.sh, whose resolver binds
+    # the model, timeout, permission, and effort argv consumed by claude-bg.
+    # Keep the adapter independently sourceable for provider-stub unit tests.
+    if command -v uberdev_dispatch_resolve_env >/dev/null 2>&1; then
+      uberdev_dispatch_resolve_env claude-bg || return $?
+    fi
+    _uberdev_agent_claude_permissions_preflight "$workflow" || return $?
+  fi
   tier="$(_uberdev_agent_json_get "$request_json" task_tier)" || { _uberdev_agent_error 'invalid task_tier'; return 2; }
   capacity="$(_uberdev_agent_json_get "$request_json" capacity)" || { _uberdev_agent_error 'invalid capacity'; return 2; }
   timeout_s="$(_uberdev_agent_json_get "$request_json" timeout_s)" || { _uberdev_agent_error 'invalid timeout_s'; return 2; }
+  workspace_mode="$(_uberdev_agent_json_get "$request_json" workspace_mode 2>/dev/null || printf isolated)"
+  workspace_dir="$(_uberdev_agent_json_get "$request_json" workspace_dir 2>/dev/null || true)"
 
   decision="$(uberdev_agent_resolve_request "$request_json")" || return $?
   context_file="$(_uberdev_agent_json_get "$request_json" context_file 2>/dev/null || true)"
@@ -1036,37 +1648,115 @@ uberdev_agent_dispatch() {
   }
   manifest="$state_dir/agent-lifecycle.jsonl"
 
+  owner_record="$(_uberdev_agent_capture_owner_process_record "$state_dir")" || {
+    if ! _uberdev_agent_fail_owner_capture "$status_file" "$state_dir/$run_id.watcher-error.json" "$backend"; then
+      _uberdev_agent_error 'owner_process_identity_failure_persistence_incomplete'
+    fi
+    _uberdev_agent_error 'owner_process_identity_unavailable'; return 2;
+  }
+  case "$owner_record" in
+    *$'\t'*)
+      _UBERDEV_AGENT_OWNER_PID="${owner_record%%$'\t'*}"
+      _UBERDEV_AGENT_OWNER_IDENTITY="${owner_record#*$'\t'}"
+      ;;
+    *)
+      if ! _uberdev_agent_fail_owner_capture "$status_file" "$state_dir/$run_id.watcher-error.json" "$backend"; then
+        _uberdev_agent_error 'owner_process_identity_failure_persistence_incomplete'
+      fi
+      _uberdev_agent_error 'owner_process_identity_unavailable'; return 2
+      ;;
+  esac
+
   event_json="$(_uberdev_agent_event_json route_decided "$request_json" "$decision")" || return 2
   _uberdev_agent_append_event "$manifest" "$event_json" || return 2
 
-  lease="$(UBERDEV_SEMAPHORE_OWNER_PID=$$ PYTHONPATH= PYTHONHOME= uberdev_semaphore_acquire "$state_dir" "$repository_id" "$backend" "$capacity" "$run_id" "$timeout_s")" || {
+  lease_record=''
+  if UBERDEV_SEMAPHORE_OWNER_PID="$_UBERDEV_AGENT_OWNER_PID" PYTHONPATH= PYTHONHOME= uberdev_semaphore_acquire \
+      "$state_dir" "$repository_id" "$backend" "$capacity" "$run_id" "$timeout_s" \
+      exact-identity lease_record; then
+    :
+  else
     rc=$?
+    if [ "$rc" -eq 2 ]; then
+      lease_failure_reason="${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-lease_acquire_identity_failed}"
+      case "$lease_failure_reason" in
+        lease_acquire_invalid_input|lease_acquire_runtime_state_failed|lease_acquire_mutex_failed|lease_acquire_reconcile_failed|lease_acquire_count_failed|lease_acquire_duplicate_check_failed|lease_acquire_allocate_failed|lease_acquire_owner_failed|lease_acquire_publish_failed|lease_acquire_identity_failed|lease_acquire_rollback_failed|lease_acquire_mutex_release_failed) ;;
+        *) lease_failure_reason=lease_acquire_identity_failed ;;
+      esac
+      case "$lease_record" in
+        *$'\t'*)
+          lease="${lease_record%%$'\t'*}"
+          lease_identity="${lease_record#*$'\t'}"
+          if PYTHONPATH= PYTHONHOME= _uberdev_agent_release_exact_lease "$lease" "$lease_identity" >/dev/null 2>&1; then
+            [ "$lease_failure_reason" != lease_acquire_rollback_failed ] || \
+              lease_failure_reason=lease_acquire_identity_failed
+          else
+            lease_failure_reason=lease_acquire_rollback_failed
+          fi
+          ;;
+      esac
+      _uberdev_agent_persist_watcher_error_retry "$status_file" "$state_dir/$run_id.watcher-error.json" \
+        "$backend" '' launch:lease_identity 3 "$lease_failure_reason" || \
+        _uberdev_agent_error 'failed to persist lease acquisition identity error'
+    fi
     return "$rc"
-  }
+  fi
+  case "$lease_record" in
+    *$'\t'*) lease="${lease_record%%$'\t'*}"; lease_identity="${lease_record#*$'\t'}" ;;
+    *) lease=''; lease_identity='' ;;
+  esac
+  if [ -z "$lease" ] || [ -z "$lease_identity" ]; then
+    _uberdev_agent_persist_watcher_error_retry "$status_file" "$state_dir/$run_id.watcher-error.json" \
+      "$backend" '' launch:lease_identity 3 lease_acquire_identity_failed || \
+      _uberdev_agent_error 'failed to persist malformed lease acquisition identity'
+    DISPATCH_RC=2
+    return 2
+  fi
 
   # Register the canonical status path before the launch boundary.  It may be
   # absent until an opaque provider publishes its first probe; absence is
   # intentionally "unknown", never synthetic evidence that a backend is live.
-  if ! PYTHONPATH= PYTHONHOME= uberdev_semaphore_set_handle "$lease" '' "$status_file"; then
+  registered_identity=''
+  if ! PYTHONPATH= PYTHONHOME= uberdev_semaphore_set_handle "$lease" '' "$status_file" exact-identity registered_identity; then
     rc=2
-    PYTHONPATH= PYTHONHOME= uberdev_semaphore_release "$lease" >/dev/null 2>&1 || true
+    cleanup_identity="${registered_identity:-$lease_identity}"
+    _uberdev_agent_finalize_prelaunch_failure "$manifest" "$lease" "$cleanup_identity" "$status_file" "$backend" \
+      "$request_json" "$decision" lease_identity || true
     DISPATCH_RC="$rc"
     return "$rc"
   fi
+  if [ -z "$registered_identity" ]; then
+    _uberdev_agent_finalize_prelaunch_failure "$manifest" "$lease" "$lease_identity" "$status_file" "$backend" \
+      "$request_json" "$decision" lease_identity || true
+    DISPATCH_RC=2
+    return 2
+  fi
+  lease_identity="$registered_identity"
 
   event_json="$(_uberdev_agent_event_json agent_started "$request_json" "$decision" '' "$status_file")" || {
-    PYTHONPATH= PYTHONHOME= uberdev_semaphore_release "$lease" >/dev/null 2>&1 || true
+    _uberdev_agent_finalize_prelaunch_failure "$manifest" "$lease" "$lease_identity" "$status_file" "$backend" \
+      "$request_json" "$decision" agent_started_event || true
+    DISPATCH_RC=2
     return 2
   }
   if ! _uberdev_agent_append_event "$manifest" "$event_json"; then
-    PYTHONPATH= PYTHONHOME= uberdev_semaphore_release "$lease" >/dev/null 2>&1 || true
+    _uberdev_agent_finalize_prelaunch_failure "$manifest" "$lease" "$lease_identity" "$status_file" "$backend" \
+      "$request_json" "$decision" agent_started_append || true
+    DISPATCH_RC=2
     return 2
   fi
 
   UBERDEV_AGENT_DECISION_JSON="$decision"
   UBERDEV_AGENT_RESULT_FILE="$result_file"
   UBERDEV_AGENT_STATUS_FILE="$status_file"
-  export UBERDEV_AGENT_DECISION_JSON UBERDEV_AGENT_RESULT_FILE UBERDEV_AGENT_STATUS_FILE
+  agent_id="$(_uberdev_agent_json_get "$request_json" agent_id 2>/dev/null || true)"
+  UBERDEV_AGENT_INSTANCE_ID="${agent_id:-$run_id}"
+  UBERDEV_AGENT_CHILD_OWNED=0
+  [ -z "$agent_id" ] || UBERDEV_AGENT_CHILD_OWNED=1
+  UBERDEV_AGENT_WORKSPACE_MODE="$workspace_mode"
+  UBERDEV_AGENT_WORKSPACE_DIR="$workspace_dir"
+  export UBERDEV_AGENT_DECISION_JSON UBERDEV_AGENT_RESULT_FILE UBERDEV_AGENT_STATUS_FILE UBERDEV_AGENT_INSTANCE_ID UBERDEV_AGENT_CHILD_OWNED
+  export UBERDEV_AGENT_WORKSPACE_MODE UBERDEV_AGENT_WORKSPACE_DIR
   if _uberdev_agent_dispatch_backend "$backend" "$issue_num" "$tier" "$prompt_file" "$result_file" "$status_file" "$decision"; then
     rc=0
   else
@@ -1075,38 +1765,76 @@ uberdev_agent_dispatch() {
   handle="${DISPATCH_ID:-}"
   if [ "$rc" -ne 0 ] || [ -z "$handle" ]; then
     [ "$rc" -ne 0 ] || rc=1
-    event_json="$(_uberdev_agent_event_json failed "$request_json" "$decision" '' "$status_file" "$rc")" || true
-    [ -z "$event_json" ] || _uberdev_agent_append_event "$manifest" "$event_json" >/dev/null 2>&1 || true
-    PYTHONPATH= PYTHONHOME= uberdev_semaphore_release "$lease" >/dev/null 2>&1 || true
+    if [ -n "$handle" ]; then
+      _uberdev_agent_abort_after_launch "$manifest" "$lease" "$lease_identity" "$status_file" "$result_file" \
+        "$backend" "$handle" "$request_json" "$decision" provider_launch
+      return $?
+    fi
+    if ! _uberdev_agent_finalize_launch_failure "$manifest" "$lease" "$lease_identity" "$status_file" \
+        "$backend" "$request_json" "$decision" "$rc" provider_launch; then
+      DISPATCH_RC=2
+      return 2
+    fi
     DISPATCH_RC="$rc"
     return "$rc"
   fi
 
   terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
+  process_identity=''
+  if [ -z "$terminal_event" ]; then
+    case "$backend" in
+      background|codex)
+        case "$handle" in
+          ''|*[!0-9]*) ;;
+          *)
+            if process_identity="$(_uberdev_agent_process_identity "$handle")"; then
+              :
+            else
+              identity_probe_rc=$?
+              if [ "$identity_probe_rc" -eq 1 ]; then
+                # The provider may have terminalized after the pre-capture probe.
+                terminal_event="$(_uberdev_agent_status_terminal_event \
+                  "$status_file" "$backend" "$handle" 2>/dev/null || true)"
+              fi
+              if [ -z "$terminal_event" ]; then
+                _uberdev_agent_error "cannot verify process identity for $backend pid $handle (probe rc=$identity_probe_rc)"
+                _uberdev_agent_abort_after_launch "$manifest" "$lease" "$lease_identity" "$status_file" "$result_file" \
+                  "$backend" "$handle" "$request_json" "$decision" process_identity_capture
+                return $?
+              fi
+            fi
+            ;;
+        esac
+        ;;
+    esac
+  fi
   lease_handle="$handle"
   [ "$backend" != wezterm ] || lease_handle="pane:$handle"
-  if ! PYTHONPATH= PYTHONHOME= uberdev_semaphore_set_handle "$lease" "$lease_handle" "$status_file"; then
-    _uberdev_agent_abort_after_launch "$manifest" "$lease" "$status_file" "$result_file" \
+  registered_identity="$lease_identity"
+  lease_identity=''
+  if ! PYTHONPATH= PYTHONHOME= uberdev_semaphore_set_handle "$lease" "$lease_handle" "$status_file" \
+      exact-identity lease_identity "$process_identity"; then
+    cleanup_identity="${lease_identity:-$registered_identity}"
+    _uberdev_agent_abort_after_launch "$manifest" "$lease" "$cleanup_identity" "$status_file" "$result_file" \
       "$backend" "$handle" "$request_json" "$decision" lease_handle_update
     return $?
   fi
-  lease_identity="$(_uberdev_agent_lease_identity "$lease")" || {
-    _uberdev_agent_abort_after_launch "$manifest" "$lease" "$status_file" "$result_file" \
+  if [ -z "$lease_identity" ]; then
+    _uberdev_agent_abort_after_launch "$manifest" "$lease" "$registered_identity" "$status_file" "$result_file" \
       "$backend" "$handle" "$request_json" "$decision" lease_identity
     return $?
-  }
+  fi
   lease_generation="${lease_identity##*:}"
   if [ -n "$terminal_event" ]; then
     _uberdev_agent_finalize_terminal "$manifest" "$lease" "$lease_identity" "$status_file" \
       "$backend" "$handle" "$request_json" "$decision" "$terminal_event" || return 2
   else
-    process_identity="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
     _uberdev_agent_publish_status "$status_file" "$backend" "$lease_handle" running '' create "$process_identity" "$lease_generation" || {
-      _uberdev_agent_abort_after_launch "$manifest" "$lease" "$status_file" "$result_file" \
+      _uberdev_agent_abort_after_launch "$manifest" "$lease" "$lease_identity" "$status_file" "$result_file" \
         "$backend" "$handle" "$request_json" "$decision" status_publication
       return $?
     }
-    _uberdev_agent_start_watcher "$manifest" "$lease" "$lease_identity" "$status_file" "$backend" "$lease_handle" "$request_json" "$decision"
+    _uberdev_agent_start_watcher "$manifest" "$lease" "$lease_identity" "$status_file" "$backend" "$lease_handle" "$request_json" "$decision" "$process_identity"
   fi
   DISPATCH_RC=0
   return 0
