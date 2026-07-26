@@ -236,7 +236,7 @@ post_review_fanout() {
   done <"$descriptors"
 }
 post_review_wait_all() {
-  local launched="$1" timeout_s="$2" failed_path="${3:-}" index_offset="${4:-0}" row edge index instance status result wait_rc validation_rc ledger_rc unwind_rc first_rc=0 valid_count=0 format_failures=0
+  local launched="$1" timeout_s="$2" failed_path="${3:-}" row edge index instance status result wait_rc validation_rc ledger_rc unwind_rc first_rc=0 valid_count=0 format_failures=0
   local validated_result validation_digest
   POST_REVIEW_VALID_COUNT=0
   POST_REVIEW_FORMAT_FAILURE_COUNT=0
@@ -361,7 +361,7 @@ post_review_run_capped() {
       return $?
     fi
     wave_rc=0
-    post_review_wait_all "$wave_launched" "$timeout_s" "$wave_failed" "$offset" || wave_rc=$?
+    post_review_wait_all "$wave_launched" "$timeout_s" "$wave_failed" || wave_rc=$?
     [ ! -s "$wave_failed" ] || cat "$wave_failed" >>"$failed" || return 2
     total_valid=$((total_valid + POST_REVIEW_VALID_COUNT))
     total_format=$((total_format + POST_REVIEW_FORMAT_FAILURE_COUNT))
