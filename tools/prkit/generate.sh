@@ -103,19 +103,28 @@ expected_roles = {
     'type-design-analyzer',
 }
 allowed_workflows = ('review-pr', 'simplify')
-structural_edges = {'review_pr.post_impl_review'}
-provider_edges = {
-    'review_pr.review.correctness', 'review_pr.review.silent_failures',
-    'review_pr.review.types', 'review_pr.review.comments',
-    'review_pr.review.tests', 'review_pr.review.general',
-    'review_pr.fix.phase1', 'review_pr.simplify.reuse',
-    'review_pr.simplify.quality', 'review_pr.simplify.efficiency',
-    'review_pr.fix.phase2', 'review_pr.defer.findings',
-    'review_pr.ci.classify', 'review_pr.ci.fix_code',
-    'review_pr.ci.rebase', 'review_pr.ci.defer_refusal',
-    'review_pr.ci.resolve_conflict',
+review_contract = 'phase1-reviewer-v1'
+edge_semantics = {
+    'review_pr.post_impl_review': ('skill', None, None, None),
+    'review_pr.review.correctness': ('provider', 'code-reviewer', ('review-pr',), review_contract),
+    'review_pr.review.silent_failures': ('provider', 'silent-failure-hunter', ('review-pr',), review_contract),
+    'review_pr.review.types': ('provider', 'type-design-analyzer', ('review-pr',), review_contract),
+    'review_pr.review.comments': ('provider', 'comment-analyzer', ('review-pr',), review_contract),
+    'review_pr.review.tests': ('provider', 'pr-test-analyzer', ('review-pr',), review_contract),
+    'review_pr.review.general': ('provider', 'code-reviewer', ('review-pr',), review_contract),
+    'review_pr.fix.phase1': ('provider', 'code-fixer', ('review-pr',), None),
+    'review_pr.simplify.reuse': ('provider', 'code-simplifier', ('review-pr', 'simplify'), None),
+    'review_pr.simplify.quality': ('provider', 'code-simplifier', ('review-pr', 'simplify'), None),
+    'review_pr.simplify.efficiency': ('provider', 'code-simplifier', ('review-pr', 'simplify'), None),
+    'review_pr.fix.phase2': ('provider', 'code-fixer', ('review-pr', 'simplify'), None),
+    'review_pr.defer.findings': ('provider', 'findings-to-issues', ('review-pr', 'simplify'), None),
+    'review_pr.ci.classify': ('provider', 'ci-failure-classifier', ('review-pr',), None),
+    'review_pr.ci.fix_code': ('provider', 'ci-code-fixer', ('review-pr',), None),
+    'review_pr.ci.rebase': ('provider', 'ci-rebase-handler', ('review-pr',), None),
+    'review_pr.ci.defer_refusal': ('provider', 'findings-to-issues', ('review-pr',), None),
+    'review_pr.ci.resolve_conflict': ('provider', 'conflict-resolver', ('review-pr',), None),
 }
-expected_edges = structural_edges | provider_edges
+expected_edges = set(edge_semantics)
 
 def reject_pairs(pairs):
     result = {}
@@ -176,21 +185,26 @@ for edge_id in sorted(expected_edges):
     if not isinstance(original, dict):
         raise SystemExit(f'policy edge must be an object: {edge_id}')
     edge = dict(original)
-    expected_kind = 'skill' if edge_id in structural_edges else 'provider'
+    expected_kind, expected_role, expected_workflows, expected_contract = edge_semantics[edge_id]
     if edge.get('kind') != expected_kind:
         raise SystemExit(f'policy edge kind mismatch: {edge_id}')
     if expected_kind == 'provider':
         role = edge.get('role')
-        if not isinstance(role, str) or role not in shipped_roles:
-            raise SystemExit(f'policy edge uses an unshipped provider role: {edge_id}')
+        if role != expected_role or role not in shipped_roles:
+            raise SystemExit(f'policy edge role mismatch: {edge_id}')
         workflows = edge['allowed_workflows']
         if not isinstance(workflows, list) or not all(isinstance(item, str) for item in workflows):
             raise SystemExit(f'policy edge workflows must be a string array: {edge_id}')
         edge['allowed_workflows'] = [
             workflow for workflow in allowed_workflows if workflow in workflows
         ]
-        if not edge['allowed_workflows']:
-            raise SystemExit(f'policy edge has no standalone workflow: {edge_id}')
+        if tuple(edge['allowed_workflows']) != expected_workflows:
+            raise SystemExit(f'policy edge workflow mismatch: {edge_id}')
+    elif edge.get('role') is not None or edge.get('allowed_workflows') is not None:
+        raise SystemExit(f'policy structural edge semantics mismatch: {edge_id}')
+    actual_contract = edge.get('output_contract')
+    if actual_contract != expected_contract or (expected_contract is None and 'output_contract' in edge):
+        raise SystemExit(f'policy edge output contract mismatch: {edge_id}')
     edges[edge_id] = edge
 
 contract_ids = {
@@ -236,6 +250,8 @@ try:
         stream.flush()
         os.fsync(stream.fileno())
     os.chmod(temporary, mode)
+    if os.environ.get('PRKIT_GENERATOR_TEST_MODE') == '1' and os.environ.get('PRKIT_TEST_POLICY_PUBLISH_FAIL') == '1':
+        raise OSError('injected policy publication failure')
     os.replace(temporary, policy)
 except OSError as exc:
     if temporary is not None:
@@ -248,8 +264,8 @@ PY
 }
 
 # --- 4. Project the copied canonical policy, then rewrite every copied file.
-# The one JSON data file (model-routing-v1.json) has no uberdev token, so perl
-# is a byte-preserving no-op on it; every copied file is text. ---
+# JSON policy files contain no uberdev token, so perl is a byte-preserving
+# no-op on them; every copied file is text. ---
 project_review_policy "$P/policy/solve-run-tree-v1.json" "$P/agents" "" ".md" \
   || { echo "generate: Claude policy projection failed" >&2; exit 1; }
 rw_rc=0

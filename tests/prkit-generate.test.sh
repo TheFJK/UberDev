@@ -90,6 +90,53 @@ PY
 then ok "G6aa count discovery and anchor drift fail closed without mutation"
 else no "G6aa generator count/anchor transaction accepted drift"; fi
 
+# G6ab — projection accepts only the canonical edge semantics and publishes
+# atomically. Relationship drift must fail before mutation; an injected replace
+# failure must preserve the copied policy and remove its temporary artifact.
+if python3 -I -B - "$GEN" "$REPO_ROOT/plugins/uberdev/policy/solve-run-tree-v1.json" <<'PY'
+import json,os,pathlib,subprocess,sys,tempfile
+generator=pathlib.Path(sys.argv[1]).read_text()
+canonical=pathlib.Path(sys.argv[2]).read_bytes()
+marker='  python3 -I -B - "$policy" "$roles_dir" "$role_prefix" "$role_suffix" <<\'PY\' || return 1\n'
+snippet=generator.split(marker,1)[1].split('\nPY\n',1)[0]
+roles={
+ 'ci-code-fixer','ci-failure-classifier','ci-rebase-handler','code-fixer',
+ 'code-reviewer','code-simplifier','comment-analyzer','conflict-resolver',
+ 'findings-to-issues','merge-strategy-decider','pr-test-analyzer',
+ 'silent-failure-hunter','trust-trail-evaluator','type-design-analyzer',
+}
+def fixture():
+ root=pathlib.Path(tempfile.mkdtemp())
+ policy=root/'solve-run-tree-v1.json'; policy.write_bytes(canonical)
+ agents=root/'agents'; agents.mkdir()
+ for role in roles: (agents/f'{role}.md').write_text('fixture\n')
+ return root,policy,agents
+def reject_mutation(mutate):
+ root,policy,agents=fixture(); tree=json.loads(policy.read_text()); mutate(tree)
+ policy.write_text(json.dumps(tree,sort_keys=True,indent=2)+'\n'); before=policy.read_bytes()
+ result=subprocess.run([sys.executable,'-I','-B','-',str(policy),str(agents),'','.md'],input=snippet,text=True,capture_output=True)
+ assert result.returncode!=0,result
+ assert policy.read_bytes()==before
+ assert not list(root.glob('.solve-run-tree.*'))
+def swap_roles(tree):
+ left=tree['edges']['review_pr.review.correctness']; right=tree['edges']['review_pr.review.comments']
+ left['role'],right['role']=right['role'],left['role']
+def swap_workflows(tree):
+ left=tree['edges']['review_pr.fix.phase1']; right=tree['edges']['review_pr.fix.phase2']
+ left['allowed_workflows'],right['allowed_workflows']=right['allowed_workflows'],left['allowed_workflows']
+def attach_contract(tree):
+ tree['edges']['review_pr.fix.phase1']['output_contract']='phase1-reviewer-v1'
+for mutation in (swap_roles,swap_workflows,attach_contract): reject_mutation(mutation)
+root,policy,agents=fixture(); before=policy.read_bytes(); env=os.environ.copy()
+env['PRKIT_GENERATOR_TEST_MODE']='1'; env['PRKIT_TEST_POLICY_PUBLISH_FAIL']='1'
+result=subprocess.run([sys.executable,'-I','-B','-',str(policy),str(agents),'','.md'],input=snippet,text=True,capture_output=True,env=env)
+assert result.returncode!=0,result
+assert policy.read_bytes()==before
+assert not list(root.glob('.solve-run-tree.*'))
+PY
+then ok "G6ab policy projection enforces canonical edge semantics and atomic failure cleanup"
+else no "G6ab policy projection accepted relationship drift or leaked partial publication"; fi
+
 # G6b — both standalone runtimes ship one byte-identical, review-only policy
 # projection and the manifest-declared reviewer contract, while native Codex
 # role TOMLs remain edge-agnostic.

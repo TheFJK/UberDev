@@ -153,24 +153,29 @@ expected_roles={
     'silent-failure-hunter','trust-trail-evaluator','type-design-analyzer',
 }
 allowed_workflows={'review-pr','simplify'}
-review_edges={
-    'review_pr.review.correctness','review_pr.review.silent_failures',
-    'review_pr.review.types','review_pr.review.comments',
-    'review_pr.review.tests','review_pr.review.general',
-}
 contract_rel='shared/phase1-reviewer-output-v1.md'
-structural_edges={'review_pr.post_impl_review'}
-provider_edges={
-    'review_pr.review.correctness','review_pr.review.silent_failures',
-    'review_pr.review.types','review_pr.review.comments',
-    'review_pr.review.tests','review_pr.review.general',
-    'review_pr.fix.phase1','review_pr.simplify.reuse',
-    'review_pr.simplify.quality','review_pr.simplify.efficiency',
-    'review_pr.fix.phase2','review_pr.defer.findings','review_pr.ci.classify',
-    'review_pr.ci.fix_code','review_pr.ci.rebase','review_pr.ci.defer_refusal',
-    'review_pr.ci.resolve_conflict',
+review_contract='phase1-reviewer-v1'
+edge_semantics={
+    'review_pr.post_impl_review':('skill',None,None,None),
+    'review_pr.review.correctness':('provider','code-reviewer',('review-pr',),review_contract),
+    'review_pr.review.silent_failures':('provider','silent-failure-hunter',('review-pr',),review_contract),
+    'review_pr.review.types':('provider','type-design-analyzer',('review-pr',),review_contract),
+    'review_pr.review.comments':('provider','comment-analyzer',('review-pr',),review_contract),
+    'review_pr.review.tests':('provider','pr-test-analyzer',('review-pr',),review_contract),
+    'review_pr.review.general':('provider','code-reviewer',('review-pr',),review_contract),
+    'review_pr.fix.phase1':('provider','code-fixer',('review-pr',),None),
+    'review_pr.simplify.reuse':('provider','code-simplifier',('review-pr','simplify'),None),
+    'review_pr.simplify.quality':('provider','code-simplifier',('review-pr','simplify'),None),
+    'review_pr.simplify.efficiency':('provider','code-simplifier',('review-pr','simplify'),None),
+    'review_pr.fix.phase2':('provider','code-fixer',('review-pr','simplify'),None),
+    'review_pr.defer.findings':('provider','findings-to-issues',('review-pr','simplify'),None),
+    'review_pr.ci.classify':('provider','ci-failure-classifier',('review-pr',),None),
+    'review_pr.ci.fix_code':('provider','ci-code-fixer',('review-pr',),None),
+    'review_pr.ci.rebase':('provider','ci-rebase-handler',('review-pr',),None),
+    'review_pr.ci.defer_refusal':('provider','findings-to-issues',('review-pr',),None),
+    'review_pr.ci.resolve_conflict':('provider','conflict-resolver',('review-pr',),None),
 }
-expected_edges=structural_edges|provider_edges
+expected_edges=set(edge_semantics)
 
 claude_roles={path.stem for path in (root/'plugins/prkit/agents').glob('*.md')}
 codex_roles={
@@ -212,23 +217,21 @@ def validate(plugin):
     edges=tree.get('edges')
     assert isinstance(edges,dict) and edges
     assert set(edges)==expected_edges
-    assert all(edges[edge_id].get('kind')=='skill' for edge_id in structural_edges)
-    assert all(edges[edge_id].get('kind')=='provider' for edge_id in provider_edges)
     referenced_contracts=set()
     for edge_id,edge in edges.items():
         assert isinstance(edge,dict), edge_id
-        role=edge.get('role')
-        if role is not None: assert role in shipped_roles, edge_id
+        expected_kind,expected_role,expected_workflows,expected_contract=edge_semantics[edge_id]
+        assert edge.get('kind')==expected_kind, edge_id
+        assert edge.get('role')==expected_role, edge_id
         workflows=edge.get('allowed_workflows')
-        if workflows is not None:
-            assert isinstance(workflows,list) and workflows, edge_id
-            assert all(isinstance(workflow,str) and workflow in allowed_workflows for workflow in workflows), edge_id
-            assert workflows==[workflow for workflow in ('review-pr','simplify') if workflow in workflows], edge_id
-        if edge.get('kind')=='provider':
-            assert role in shipped_roles, edge_id
-            assert workflows, edge_id
-        if 'output_contract' in edge:
-            contract_id=edge['output_contract']
+        assert (tuple(workflows) if isinstance(workflows,list) else workflows)==expected_workflows, edge_id
+        assert edge.get('output_contract')==expected_contract, edge_id
+        assert expected_contract is not None or 'output_contract' not in edge, edge_id
+        if expected_kind=='provider':
+            assert expected_role in shipped_roles and expected_workflows, edge_id
+            assert all(workflow in allowed_workflows for workflow in expected_workflows), edge_id
+        if expected_contract is not None:
+            contract_id=expected_contract
             assert isinstance(contract_id,str) and contract_id
             referenced_contracts.add(contract_id)
     contracts=tree.get('output_contracts')
@@ -239,7 +242,7 @@ def validate(plugin):
         assert isinstance(contract_path,str) and contract_path
         assert (plugin/contract_path).is_file(), contract_path
     assert contracts=={'phase1-reviewer-v1':contract_rel}
-    for edge in review_edges:
+    for edge in (edge_id for edge_id,semantics in edge_semantics.items() if semantics[3]==review_contract):
         row=edges[edge]
         assert row.get('output_contract')=='phase1-reviewer-v1'
         assert row['required_inputs'].get('changed_paths')=='repo_path_array'

@@ -25,6 +25,21 @@ _UBERDEV_CHILD_DISPATCH_LOADED=1
 
 _uberdev_child_error() { printf 'uberdev child dispatch: %s\n' "$1" >&2; }
 
+_uberdev_child_context_run_dir() {
+  [ "$#" -eq 1 ] || return 2
+  python3 -I -B - "$1" <<'PY'
+import ntpath,os,re,sys
+path=sys.argv[1]
+if not path or any(ord(char)<32 or ord(char)==127 for char in path): raise SystemExit(2)
+path_module=ntpath if os.name=='nt' or re.match(r'^[A-Za-z]:[\\/]',path) or path.startswith(('\\\\','//')) else os.path
+if not path_module.isabs(path) or any(part in {'.','..'} for part in re.split(r'[\\/]',path)): raise SystemExit(2)
+state_dir=path_module.dirname(path)
+run_dir=path_module.dirname(state_dir)
+if not state_dir or not run_dir or run_dir==state_dir: raise SystemExit(2)
+print(run_dir,end='')
+PY
+}
+
 # Stable child identity shared by every routed review edge. Preserve readable
 # names when they already fit the handoff schema. Overlength candidates made
 # only from permitted characters retain a readable prefix plus a digest;
@@ -177,7 +192,7 @@ uberdev_command_workspace_prepare() {
   fi
   context_file="$(_uberdev_agent_json_get "$UBERDEV_RUN_CARRIER_JSON" context_file)" || return 2
   context_sha="$(_uberdev_agent_json_get "$UBERDEV_RUN_CARRIER_JSON" context_sha256)" || return 2
-  context_run="$(dirname "$(dirname "$context_file")")" || return 2
+  context_run="$(_uberdev_child_context_run_dir "$context_file")" || return 2
   validated_context="$(uberdev_agent_context_validate "$context_file" "$context_sha" "$context_run")" || return 2
   UBERDEV_CARRIER_BACKEND="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["root_decision"]["backend"],end="")' "$validated_context")" || return 2
   parent_descriptor="${UBERDEV_COMMAND_WORKSPACE_JSON:-}"
@@ -211,7 +226,7 @@ uberdev_create_child_handoff() {
   [ "$#" -eq 4 ] || { _uberdev_child_error 'expected EDGE_ID INSTANCE_ID INPUTS_JSON RISK_JSON'; return 2; }
   local manifest_path; manifest_path="$(_uberdev_child_manifest_path)" || return 2
   output="$(python3 -I -B - "$UBERDEV_RUN_CARRIER_JSON" "$edge" "$instance" "$inputs_json" "$risks_json" "$_UBERDEV_CHILD_ROOT" "$manifest_path" <<'PY'
-import hashlib,json,os,posixpath,re,stat,sys
+import errno,hashlib,json,os,posixpath,re,stat,sys
 carrier_raw,edge,instance,inputs_raw,risks_raw,plugin_root,manifest_path=sys.argv[1:]
 IDENT=re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
 EDGE=re.compile(r'[a-z][a-z0-9_-]{0,31}(?:\.[a-z][a-z0-9_-]{0,31}){0,3}')
@@ -392,35 +407,49 @@ handoff=os.path.join(handoff_dir,handoff_name)
 value={'schema_version':1,'carrier':carrier,'edge_id':edge,'instance_id':instance,'parent_run_id':carrier['run_id'],'role':row['role'],'phase':row['phase'],'risk_scope':row['risk_scope'],'risk_signals':risks,'inputs':inputs}
 raw=json.dumps(value,sort_keys=True,separators=(',',':')).encode()+b'\n'
 opened=None
-publication_failed=False
+def publication_reason(error):
+ if isinstance(error,FileExistsError): return 'instance_exists'
+ if isinstance(error,PermissionError): return 'publication_permission_denied'
+ if isinstance(error,InterruptedError) or isinstance(error,KeyboardInterrupt): return 'publication_interrupted'
+ if isinstance(error,OSError):
+  if error.errno==errno.ENOSPC: return 'publication_no_space'
+  if error.errno==errno.EIO: return 'publication_io_failed'
+  if error.errno==errno.EINTR: return 'publication_interrupted'
+  return 'publication_os_error'
+ if isinstance(error,ValueError): return 'publication_integrity_failed'
+ return 'publication_failed'
+def rollback_handoff():
+ if opened is None: return True
+ try: current=os.lstat(handoff_name)
+ except FileNotFoundError: return True
+ except OSError: return False
+ if not valid_created(opened,current): return False
+ try: os.unlink(handoff_name)
+ except OSError: return False
+ return True
+def report_publication_failure(primary,rollback_failed=False):
+ print('uberdev child dispatch: '+primary,file=sys.stderr)
+ if rollback_failed: print('uberdev child dispatch: rollback_failed',file=sys.stderr)
+ raise SystemExit(2)
 try:
  if not valid_handoff_dir(): raise ValueError()
  fd=os.open(handoff_name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),0o600)
+ opened=os.fstat(fd)
  with os.fdopen(fd,'wb') as stream:
-  opened=os.fstat(stream.fileno())
   if not valid_created(opened,os.lstat(handoff_name)) or not valid_handoff_dir(): raise ValueError()
   stream.write(raw); stream.flush(); os.fsync(stream.fileno())
   final_opened=os.fstat(stream.fileno())
   if (not same_stat(opened,final_opened) or not valid_created(final_opened,os.lstat(handoff_name))
       or not valid_handoff_dir()): raise ValueError()
-except BaseException:
- publication_failed=True
-if publication_failed:
- if opened is not None:
-  try:
-   current=os.lstat(handoff_name)
-   if valid_created(opened,current): os.unlink(handoff_name)
-  except Exception: pass
+except BaseException as error:
+ primary=publication_reason(error)
+ rollback_failed=not rollback_handoff()
  try: os.chdir(previous_dir)
- except Exception: pass
- fail('instance_exists')
+ except BaseException: rollback_failed=True
+ report_publication_failure(primary,rollback_failed)
 try: os.chdir(previous_dir)
-except BaseException:
- try:
-  current=os.lstat(handoff_name)
-  if opened is not None and valid_created(opened,current): os.unlink(handoff_name)
- except Exception: pass
- fail('instance_exists')
+except BaseException as error:
+ report_publication_failure(publication_reason(error),not rollback_handoff())
 child=os.path.join(run_dir,'children',instance)
 print(json.dumps({'edge_id':edge,'instance_id':instance,'required':row['required'],'handoff_file':handoff,'result_file':os.path.join(child,'result.md'),'status_file':os.path.join(child,'status.json')},sort_keys=True,separators=(',',':')),end='')
 PY
@@ -684,7 +713,10 @@ if descriptor_relative:
             stream.write(data); stream.flush(); os.fsync(stream.fileno())
             final_opened=os.fstat(stream.fileno()); final_current=os.stat(name,dir_fd=childfd,follow_symlinks=False)
             if not same_stat(opened,final_opened) or not valid_created(final_opened,final_current): fail('unsafe_child_dir')
-    def remove(name): os.unlink(name,dir_fd=childfd)
+    def remove(name):
+        try: os.unlink(name,dir_fd=childfd)
+        except FileNotFoundError: return True
+        return True
 else:
     children_dir=os.path.join(run_real,children_name)
     try: os.mkdir(children_dir,0o700)
@@ -750,10 +782,14 @@ else:
             fail('unsafe_child_dir')
     def remove(name):
         expected=created_files.get(name)
-        if expected is None or not bound_child_valid(): return
+        if expected is None: return True
+        if not bound_child_valid(): return False
         try: current=os.lstat(name)
-        except OSError: return
-        if valid_created(expected,current): os.unlink(name)
+        except FileNotFoundError: return True
+        except OSError: return False
+        if not valid_created(expected,current): return False
+        os.unlink(name)
+        return True
     def cleanup_child_dir(bound_location):
         try: current=os.lstat(child_dir)
         except OSError: current=None
@@ -774,10 +810,14 @@ try:
     contract_suffix=(b'\n\n'+contract_raw) if contract_raw else b''
     create('prompt.txt',role_raw+contract_suffix+directive)
 except BaseException:
+    rollback_failed=False
     for name in ('handoff.v1.json','prompt.txt','result.md','status.json'):
-        try: remove(name)
-        except Exception: pass
-    if childfd is not None: os.close(childfd)
+        try:
+            if remove(name) is False: rollback_failed=True
+        except Exception: rollback_failed=True
+    if childfd is not None:
+        try: os.close(childfd)
+        except Exception: rollback_failed=True
     try:
         if descriptor_relative: os.rmdir(child_dir)
         else:
@@ -785,7 +825,8 @@ except BaseException:
             except OSError: bound_location=child_dir
             os.chdir(previous_dir)
             cleanup_child_dir(bound_location)
-    except Exception: pass
+    except Exception: rollback_failed=True
+    if rollback_failed: print('uberdev child dispatch: rollback_failed',file=sys.stderr)
     raise
 else:
     if childfd is not None: os.close(childfd)
@@ -850,7 +891,7 @@ PY
     edge="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["edge"],end="")' "$info")" || return 2
     instance="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["instance"],end="")' "$info")" || return 2
     context="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["context"],end="")' "$info")" || return 2
-    run_dir="$(dirname "$(dirname "$context")")"
+    run_dir="$(_uberdev_child_context_run_dir "$context")" || return 2
     result="$run_dir/children/$instance/result.md"; status="$run_dir/children/$instance/status.json"
     prepared="$(_uberdev_child_prepare "$edge" "$handoff" "$result" "$status" preflight)" || return $?
     case "$seen" in *"|$instance|"*) _uberdev_child_error 'duplicate batch instance'; return 2 ;; esac

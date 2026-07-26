@@ -886,7 +886,7 @@ def scalar(key):
         else: raise ValueError()
     except (ValueError,json.JSONDecodeError):
         raise SystemExit(2)
-    if not isinstance(parsed,str) or not parsed or len(parsed)>256 or any(ch in parsed for ch in '\r\n\t'):
+    if not isinstance(parsed,str) or not parsed or len(parsed)>256 or any(ord(ch)<32 or ord(ch)==127 for ch in parsed):
         raise SystemExit(2)
     return parsed
 status=scalar('status')

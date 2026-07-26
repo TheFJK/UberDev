@@ -8,6 +8,18 @@ POST="$ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
 . "$LIB"
+
+if [ "${1:-}" = --windows-path-only ]; then
+  windows_context='C:\repo\.uberdev\runs\review-1\state\context.json'
+  windows_carrier="$(python3 -I -B -c 'import json,sys; print(json.dumps({"context_file":sys.argv[1]}),end="")' "$windows_context")"
+  serialized_context="$(_uberdev_agent_json_get "$windows_carrier" context_file)"
+  [ "$serialized_context" = "$windows_context" ]
+  [ "$(_uberdev_child_context_run_dir "$serialized_context")" = 'C:\repo\.uberdev\runs\review-1' ]
+  ! _uberdev_child_context_run_dir 'C:\repo\.uberdev\runs\review-1\state\..\context.json' >/dev/null 2>&1
+  echo 'review-child-handoff windows path: PASS'
+  exit 0
+fi
+
 mkdir -p "$TMP/run"
 TEST_REPO="$TMP/repo"; mkdir -p "$TEST_REPO"; TEST_REPO="$(cd "$TEST_REPO" && pwd -P)"
 git -C "$TEST_REPO" init -q
@@ -57,7 +69,7 @@ SIMPLIFY_CARRIER_JSON="$(jq -cn --arg ctx "$simplify_ctx" --arg sha "$simplify_s
     if [ "${1:-}" = -I ] && [ "${2:-}" = -B ] && [ "${3:-}" = - ]; then
       shift 3
       command "$REAL_PORTABLE_PYTHON" -I -B -c '
-import builtins,os,runpy,stat,sys,tempfile
+import builtins,errno,os,runpy,stat,sys,tempfile
 source=sys.stdin.read()
 if hasattr(os,"geteuid"): del os.geteuid
 if hasattr(os,"getuid"): del os.getuid
@@ -66,6 +78,8 @@ os.supports_dir_fd=set()
 real_open=os.open
 real_read=os.read
 real_lstat=os.lstat
+real_fsync=os.fsync
+real_unlink=os.unlink
 swap_path=os.environ.get("UBERDEV_TEST_PORTABLE_SWAP_PATH")
 swap_with=os.environ.get("UBERDEV_TEST_PORTABLE_SWAP_WITH")
 swap_after_read_path=os.environ.get("UBERDEV_TEST_PORTABLE_SWAP_AFTER_READ_PATH")
@@ -82,6 +96,9 @@ after_open_parent_swap_path=os.environ.get("UBERDEV_TEST_PORTABLE_AFTER_OPEN_PAR
 after_open_parent_swap_with=os.environ.get("UBERDEV_TEST_PORTABLE_AFTER_OPEN_PARENT_SWAP_WITH")
 after_open_parent_swap_original=os.environ.get("UBERDEV_TEST_PORTABLE_AFTER_OPEN_PARENT_SWAP_ORIGINAL")
 after_open_parent_swap_on_name=os.environ.get("UBERDEV_TEST_PORTABLE_AFTER_OPEN_PARENT_SWAP_ON_NAME")
+publication_fail_name=os.environ.get("UBERDEV_TEST_PORTABLE_PUBLICATION_FAIL_NAME")
+publication_errno=int(os.environ.get("UBERDEV_TEST_PORTABLE_PUBLICATION_ERRNO","0"))
+unlink_fail_name=os.environ.get("UBERDEV_TEST_PORTABLE_UNLINK_FAIL_NAME")
 if os.environ.get("UBERDEV_TEST_PORTABLE_SAMESTAT_FAIL") == "1":
  def failing_samestat(left,right): raise OSError("samestat unavailable")
  os.path.samestat=failing_samestat
@@ -152,9 +169,19 @@ def portable_lstat(path,*args,**kwargs):
    def __getattr__(self,name): return getattr(entry,name)
   return ReparseEntry()
  return entry
+def portable_fsync(fd):
+ if publication_fail_name and os.path.basename(fd_paths.get(fd,""))==publication_fail_name:
+  raise OSError(publication_errno,"injected publication failure")
+ return real_fsync(fd)
+def portable_unlink(path,*args,**kwargs):
+ if unlink_fail_name and isinstance(path,str) and os.path.basename(path)==unlink_fail_name:
+  raise PermissionError(errno.EACCES,"injected rollback failure")
+ return real_unlink(path,*args,**kwargs)
 os.open=portable_open
 os.read=portable_read
 os.lstat=portable_lstat
+os.fsync=portable_fsync
+os.unlink=portable_unlink
 builtins.open=portable_builtin_open
 sys.argv=["-"]+sys.argv[1:]
 source_fd,source_path=tempfile.mkstemp(prefix="portable-child-dispatch-",suffix=".py")
@@ -207,6 +234,42 @@ finally:
   UBERDEV_RUN_CARRIER_JSON="$(jq -cn --arg ctx "$portable_ctx" --arg sha "$portable_sha" '{schema_version:1,run_id:"portable-review",workflow:"review-pr",issue_num:1,context_file:$ctx,context_sha256:$sha}')"
   export UBERDEV_RUN_CARRIER_JSON
   portable_input="$(jq -cn --arg p "$TEST_REPO/README.md" '{changed_paths:["README.md"],diff_path:$p,criteria_path:$p,emphasis:[]}')"
+
+  uberdev_create_child_handoff review_pr.review.correctness portable-duplicate-iter1-attempt01 "$portable_input" '[]' >/dev/null
+  duplicate_error="$(uberdev_create_child_handoff review_pr.review.correctness portable-duplicate-iter1-attempt01 "$portable_input" '[]' 2>&1)" \
+    && { echo 'duplicate handoff identity was accepted' >&2; exit 1; }
+  grep -q 'instance_exists' <<<"$duplicate_error"
+
+  for publication_case in '13:publication_permission_denied' '28:publication_no_space' '5:publication_io_failed' '4:publication_interrupted'; do
+    publication_errno_value="${publication_case%%:*}"
+    publication_reason="${publication_case#*:}"
+    publication_name="portable-publication-${publication_errno_value}-iter1-attempt01.json"
+    publication_error="$(UBERDEV_TEST_PORTABLE_PUBLICATION_FAIL_NAME="$publication_name" \
+      UBERDEV_TEST_PORTABLE_PUBLICATION_ERRNO="$publication_errno_value" \
+      uberdev_create_child_handoff review_pr.review.correctness "${publication_name%.json}" "$portable_input" '[]' 2>&1)" \
+      && { echo "publication errno $publication_errno_value was accepted" >&2; exit 1; }
+    grep -q "$publication_reason" <<<"$publication_error"
+    [ ! -e "$portable_run/handoffs/$publication_name" ]
+  done
+
+  rollback_name='portable-rollback-failed-iter1-attempt01.json'
+  rollback_error="$(UBERDEV_TEST_PORTABLE_PUBLICATION_FAIL_NAME="$rollback_name" \
+    UBERDEV_TEST_PORTABLE_PUBLICATION_ERRNO=28 UBERDEV_TEST_PORTABLE_UNLINK_FAIL_NAME="$rollback_name" \
+    uberdev_create_child_handoff review_pr.review.correctness "${rollback_name%.json}" "$portable_input" '[]' 2>&1)" \
+    && { echo 'publication with rollback failure was accepted' >&2; exit 1; }
+  grep -q 'publication_no_space' <<<"$rollback_error"
+  grep -q 'rollback_failed' <<<"$rollback_error"
+  [ -e "$portable_run/handoffs/$rollback_name" ]
+  rm -f "$portable_run/handoffs/$rollback_name"
+
+  uberdev_create_child_handoff review_pr.review.correctness portable-prepare-rollback-iter1-attempt01 "$portable_input" '[]' >/dev/null
+  prepare_rollback_error="$(UBERDEV_TEST_PORTABLE_PUBLICATION_FAIL_NAME=prompt.txt \
+    UBERDEV_TEST_PORTABLE_PUBLICATION_ERRNO=28 UBERDEV_TEST_PORTABLE_UNLINK_FAIL_NAME=prompt.txt \
+    _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch 2>&1)" \
+    && { echo 'child prepare with rollback failure was accepted' >&2; exit 1; }
+  grep -q 'unsafe_child_dir' <<<"$prepare_rollback_error"
+  grep -q 'rollback_failed' <<<"$prepare_rollback_error"
+  rm -rf "$portable_run/children/portable-prepare-rollback-iter1-attempt01"
 
   cp "$portable_manifest" "$portable_manifest_swap"
   if UBERDEV_CHILD_TEST_MODE=1 UBERDEV_CHILD_MANIFEST_PATH="$portable_manifest" \
