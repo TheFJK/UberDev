@@ -490,6 +490,12 @@ assert_no_grep "$AGENT_MD" '\[ -n "\$pr_number" \]' \
   'S17.5 — PR-only body branches do not treat standalone zero as a PR'
 assert_grep "$AGENT_MD" '\[ "\$pr_number" -gt 0 \]' \
   'S17.6 — PR-only body branches require pr_number greater than zero'
+assert_grep "$AGENT_MD" '/\*\|\[A-Za-z\]:\[\\\\/\]\*' \
+  'S17.6a — origin validation accepts POSIX and Windows drive-root worktree paths'
+assert_grep "$AGENT_MD" '"\$git_root" -ef "\$canonical_root"' \
+  'S17.6b — origin validation compares worktree roots by file identity instead of path spelling'
+assert_no_grep "$AGENT_MD" 'realpath "\$git_root".*canonical_root' \
+  'S17.6c — origin validation does not compare platform-specific canonical root strings'
 
 ORIGIN_TMP="$(mktemp -d)"
 ORIGIN_REPO="$ORIGIN_TMP/repo"

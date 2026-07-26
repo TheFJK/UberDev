@@ -49,14 +49,17 @@ Reject every other edge/field combination. The fixed review defaults are
 findings_derive_review_origin() {
   local working_dir="$1" pr_number="$2" run_id="$3" repo_slug="$4"
   local canonical_root git_root local_head pr_commit_sha source_ref origin_kind
-  case "$working_dir" in /*) ;; *) return 2 ;; esac
+  case "$working_dir" in
+    /*|[A-Za-z]:[\\\\/]*) ;;
+    *) return 2 ;;
+  esac
   [[ "$run_id" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]] || return 2
   [[ "$repo_slug" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 2
   case "$pr_number" in ''|*[!0-9]*) return 2 ;; esac
-  canonical_root="$(realpath "$working_dir")" || return 2
+  canonical_root="$(cd "$working_dir" 2>/dev/null && pwd -P)" || return 2
   [ "$(git -C "$canonical_root" rev-parse --is-inside-work-tree 2>/dev/null)" = true ] || return 2
   git_root="$(git -C "$canonical_root" rev-parse --show-toplevel 2>/dev/null)" || return 2
-  [ "$(realpath "$git_root")" = "$canonical_root" ] || return 2
+  [ -d "$git_root" ] && [ "$git_root" -ef "$canonical_root" ] || return 2
   local_head="$(git -C "$canonical_root" rev-parse HEAD 2>/dev/null)" || return 2
   [[ "$local_head" =~ ^[0-9a-f]{40}$ ]] || return 2
   if [ "$pr_number" -eq 0 ]; then
