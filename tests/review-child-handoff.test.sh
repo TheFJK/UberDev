@@ -48,6 +48,94 @@ simplify_context_out="$(uberdev_agent_context_create "$TMP/simplify-run" "$simpl
 simplify_ctx="$(jq -r .context_file <<<"$simplify_context_out")"; simplify_sha="$(jq -r .context_sha256 <<<"$simplify_context_out")"
 SIMPLIFY_CARRIER_JSON="$(jq -cn --arg ctx "$simplify_ctx" --arg sha "$simplify_sha" '{schema_version:1,run_id:"simplify-contract",workflow:"simplify",issue_num:0,context_file:$ctx,context_sha256:$sha}')"
 
+# Native Windows Python has neither getuid/geteuid nor descriptor-relative
+# filesystem operations. Exercise the real carrier -> handoff -> prepare path
+# through that capability profile, including replacement/tamper rejection.
+(
+  REAL_PORTABLE_PYTHON="$(command -v python3)"
+  python3() {
+    if [ "${1:-}" = -I ] && [ "${2:-}" = -B ] && [ "${3:-}" = - ]; then
+      shift 3
+      command "$REAL_PORTABLE_PYTHON" -I -B -c '
+import os,sys,tempfile
+source=sys.stdin.read()
+if hasattr(os,"geteuid"): del os.geteuid
+if hasattr(os,"getuid"): del os.getuid
+os.supports_dir_fd=set()
+real_open=os.open
+swap_path=os.environ.get("UBERDEV_TEST_PORTABLE_SWAP_PATH")
+swap_with=os.environ.get("UBERDEV_TEST_PORTABLE_SWAP_WITH")
+swapped=False
+def portable_open(path,flags,*args,**kwargs):
+ global swapped
+ fd=real_open(path,flags,*args,**kwargs)
+ if (not swapped and swap_path and swap_with and isinstance(path,str)
+     and os.path.abspath(path)==os.path.abspath(swap_path)
+     and flags & os.O_ACCMODE == os.O_RDONLY):
+  swapped=True
+  os.replace(swap_with,swap_path)
+ return fd
+os.open=portable_open
+sys.argv=["-"]+sys.argv[1:]
+exec(compile(source,"<portable-child-dispatch>","exec"),{"__name__":"__main__"})
+' "$@"
+    elif [ "${1:-}" = -I ] && [ "${2:-}" = -B ] && [ "${3:-}" = -c ]; then
+      local portable_source="$4"; shift 4
+      command "$REAL_PORTABLE_PYTHON" -I -B -c '
+import os,sys,tempfile
+source=sys.argv[1]
+if hasattr(os,"geteuid"): del os.geteuid
+if hasattr(os,"getuid"): del os.getuid
+sys.argv=["-c"]+sys.argv[2:]
+exec(compile(source,"<portable-carrier>","exec"),{"__name__":"__main__"})
+' "$portable_source" "$@"
+    else
+      command "$REAL_PORTABLE_PYTHON" "$@"
+    fi
+  }
+
+  portable_run="$TMP/portable-run"; mkdir -p "$portable_run"
+  portable_request="$(jq -cn --arg run "$portable_run" --arg repo "$TEST_REPO" '{schema_version:1,run_dir:$run,run_id:"portable-review",repository_id:$repo,backend:"codex",workflow:"review-pr",phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:1,issue_num:1,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
+  portable_decision="$(uberdev_agent_resolve_request "$portable_request")"
+  portable_metadata="$(jq -cn --arg repo "$TEST_REPO" '{run_id:"portable-review",repository_id:$repo,workflow:"review-pr",backend:"codex",issue_num:1,task_tier:"medium",risk_signals:[]}')"
+  portable_context_out="$(uberdev_agent_context_create "$portable_run" "$portable_request" "$portable_decision" \
+    '{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}' \
+    "$portable_metadata" '2026-07-10T00:00:00Z')"
+  portable_ctx="$(jq -r .context_file <<<"$portable_context_out")"
+  portable_sha="$(jq -r .context_sha256 <<<"$portable_context_out")"
+  UBERDEV_RUN_CARRIER_JSON="$(jq -cn --arg ctx "$portable_ctx" --arg sha "$portable_sha" '{schema_version:1,run_id:"portable-review",workflow:"review-pr",issue_num:1,context_file:$ctx,context_sha256:$sha}')"
+  export UBERDEV_RUN_CARRIER_JSON
+  portable_input="$(jq -cn --arg p "$TEST_REPO/README.md" '{changed_paths:["README.md"],diff_path:$p,criteria_path:$p,emphasis:[]}')"
+
+  uberdev_create_child_handoff review_pr.review.correctness portable-valid-iter1-attempt01 "$portable_input" '[]' >/dev/null
+  _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null
+  [ -s "$portable_run/children/portable-valid-iter1-attempt01/handoff.v1.json" ]
+  [ -s "$portable_run/children/portable-valid-iter1-attempt01/prompt.txt" ]
+
+  uberdev_create_child_handoff review_pr.review.correctness portable-symlink-iter1-attempt01 "$portable_input" '[]' >/dev/null
+  symlink_handoff="$UBERDEV_CHILD_HANDOFF"; mv "$symlink_handoff" "$symlink_handoff.real"; ln -s "$symlink_handoff.real" "$symlink_handoff"
+  ! _uberdev_child_prepare review_pr.review.correctness "$symlink_handoff" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+  [ ! -e "$portable_run/children/portable-symlink-iter1-attempt01" ]
+
+  uberdev_create_child_handoff review_pr.review.correctness portable-replaced-iter1-attempt01 "$portable_input" '[]' >/dev/null
+  replaced_handoff="$UBERDEV_CHILD_HANDOFF"; cp "$replaced_handoff" "$replaced_handoff.swap"
+  ! UBERDEV_TEST_PORTABLE_SWAP_PATH="$replaced_handoff" UBERDEV_TEST_PORTABLE_SWAP_WITH="$replaced_handoff.swap" \
+    _uberdev_child_prepare review_pr.review.correctness "$replaced_handoff" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+  [ ! -e "$portable_run/children/portable-replaced-iter1-attempt01" ]
+
+  uberdev_create_child_handoff review_pr.review.correctness portable-tampered-iter1-attempt01 "$portable_input" '[]' >/dev/null
+  tampered_handoff="$UBERDEV_CHILD_HANDOFF"
+  command "$REAL_PORTABLE_PYTHON" - "$tampered_handoff" <<'PY'
+import json,sys
+path=sys.argv[1]
+with open(path,encoding='utf-8') as stream: value=json.load(stream)
+value['edge_id']='review_pr.review.types'
+with open(path,'w',encoding='utf-8') as stream: json.dump(value,stream,separators=(',',':'))
+PY
+  ! _uberdev_child_prepare review_pr.review.correctness "$tampered_handoff" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+  [ ! -e "$portable_run/children/portable-tampered-iter1-attempt01" ]
+)
+
 path="$TEST_REPO/README.md"; changed_path="README.md"; deleted_path="src/deleted-in-pr.ts"; dir="$TEST_REPO"
 declare -a edges inputs risks
 for lens in correctness silent_failures types comments tests; do
