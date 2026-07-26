@@ -260,6 +260,44 @@ echo
 echo "== Portable Python command resolution =="
 PYTHON_RESOLVER_TMP="$(mktemp -d)"
 REAL_PYTHON="$(command -v python3)"
+
+_dispatch_test_resolve_tool() {
+  local tool_name="$1" candidate
+  candidate="$(command -v "$tool_name" 2>/dev/null)" || return 1
+  case "$candidate" in
+    /*|[A-Za-z]:[\\/]*) ;;
+    *) return 1 ;;
+  esac
+  [ -f "$candidate" ] && [ -x "$candidate" ] || return 1
+  printf '%s\n' "$candidate"
+}
+
+_dispatch_test_populate_mutex_tools() {
+  local destination="$1" runtime_command tool_path hash_tool hash_tool_path os_name
+  for runtime_command in basename chmod cut dirname grep ln mkdir mktemp mv ps rm rmdir sed sleep stat tr uname; do
+    tool_path="$(_dispatch_test_resolve_tool "$runtime_command")" || return 1
+    [ -e "$destination/$runtime_command" ] \
+      || ln -s "$tool_path" "$destination/$runtime_command" || return 1
+  done
+  if hash_tool_path="$(_dispatch_test_resolve_tool shasum 2>/dev/null)"; then
+    hash_tool=shasum
+  elif hash_tool_path="$(_dispatch_test_resolve_tool sha256sum 2>/dev/null)"; then
+    hash_tool=sha256sum
+  else
+    return 1
+  fi
+  [ -e "$destination/$hash_tool" ] \
+    || ln -s "$hash_tool_path" "$destination/$hash_tool" || return 1
+  os_name="$(uname -s 2>/dev/null)" || return 1
+  case "$os_name" in
+    MINGW*|MSYS*|CYGWIN*)
+      tool_path="$(_dispatch_test_resolve_tool cygpath)" || return 1
+      [ -e "$destination/cygpath" ] \
+        || ln -s "$tool_path" "$destination/cygpath" || return 1
+      ;;
+  esac
+}
+
 cat > "$PYTHON_RESOLVER_TMP/python" <<SH
 #!/bin/sh
 exec "$REAL_PYTHON" "\$@"
@@ -355,9 +393,10 @@ echo "== Git metadata mutex uses the validated Python argv and records its live 
 MUTEX_OWNER_TMP="$(mktemp -d)"
 MUTEX_OWNER_BASH="$(command -v bash)"
 mkdir -p "$MUTEX_OWNER_TMP/tools"
-for runtime_command in basename chmod cut dirname grep ln mkdir mktemp mv ps rm rmdir sed shasum sleep stat tr uname; do
-  ln -s "$(command -v "$runtime_command")" "$MUTEX_OWNER_TMP/tools/$runtime_command"
-done
+_dispatch_test_populate_mutex_tools "$MUTEX_OWNER_TMP/tools" || {
+  echo "  FAIL  portable mutex fixture tools are unavailable"
+  exit 1
+}
 mutex_resolver_failures=''
 for resolver in python3 python py; do
   resolver_dir="$MUTEX_OWNER_TMP/$resolver"
@@ -446,10 +485,10 @@ fi
 exit 95
 SH
 chmod +x "$MUTEX_CONCURRENT_TMP/bin/py" "$MUTEX_CONCURRENT_TMP/bin/git"
-for runtime_command in basename chmod cut dirname grep ln mkdir mktemp mv ps rm rmdir sed shasum sleep stat tr uname; do
-  [ -e "$MUTEX_CONCURRENT_TMP/bin/$runtime_command" ] \
-    || ln -s "$(command -v "$runtime_command")" "$MUTEX_CONCURRENT_TMP/bin/$runtime_command"
-done
+_dispatch_test_populate_mutex_tools "$MUTEX_CONCURRENT_TMP/bin" || {
+  echo "  FAIL  portable concurrent mutex fixture tools are unavailable"
+  exit 1
+}
 for contender in one two; do
   MUTEX_TEST_GUARD="$MUTEX_CONCURRENT_TMP/state/critical" \
   MUTEX_TEST_OVERLAP="$MUTEX_CONCURRENT_TMP/state/overlap" \
