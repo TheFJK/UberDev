@@ -509,6 +509,73 @@ trap 'exit 143' HUP INT TERM
 while :; do sleep 1; done
 SH
 chmod +x "$PID_CAPTURE_TMP/bin/codex"
+pid_capture_emergency_cleanup() {
+  local provider_pid attempts=0
+  provider_pid="$(cat "$PID_CAPTURE_TMP/provider.pid" 2>/dev/null)"
+  case "$provider_pid" in ''|*[!0-9]*|0) return 0 ;; esac
+  kill -0 "$provider_pid" 2>/dev/null || return 0
+  kill -TERM "$provider_pid" 2>/dev/null || true
+  while kill -0 "$provider_pid" 2>/dev/null && [ "$attempts" -lt 40 ]; do
+    sleep 0.05
+    attempts=$((attempts + 1))
+  done
+  if kill -0 "$provider_pid" 2>/dev/null; then
+    kill -KILL "$provider_pid" 2>/dev/null || true
+    attempts=0
+    while kill -0 "$provider_pid" 2>/dev/null && [ "$attempts" -lt 40 ]; do
+      sleep 0.05
+      attempts=$((attempts + 1))
+    done
+  fi
+  ! kill -0 "$provider_pid" 2>/dev/null
+}
+PID_CAPTURE_NUMERIC_SUPPORTED=0
+if bash -c '. "$1"; _uberdev_dispatch_numeric_supervision_supported codex' \
+    _ "$DISPATCH_LIB"; then
+  PID_CAPTURE_NUMERIC_SUPPORTED=1
+fi
+if [ "$PID_CAPTURE_NUMERIC_SUPPORTED" -eq 0 ]; then
+  # Native Windows numeric backends are rejected by the public preflight
+  # because the adapter cannot yet prove process-tree cancellation there.
+  # Do not bypass that contract and then require the unsupported cancellation
+  # layer to unwind the detached test provider.
+  PID_CAPTURE_UNSUPPORTED_ERRORS=''
+  if PID_CAPTURE_PREFLIGHT_OUT="$(
+    cd "$PID_CAPTURE_TMP/repo"
+    PATH="$PID_CAPTURE_TMP/bin:$PATH" UBERDEV_DISPATCH_BACKEND_REQUESTED=codex \
+      bash -c '
+        . "$1"
+        unset UBERDEV_RESOLVED_BACKEND
+        ! uberdev_dispatch_preflight review-pr || exit 1
+        [ -z "${UBERDEV_RESOLVED_BACKEND+x}" ]
+      ' _ "$DISPATCH_LIB" 2>&1
+  )"; then
+    printf '%s\n' "$PID_CAPTURE_PREFLIGHT_OUT" | grep -Fq \
+      "lacks verifiable process-tree supervision on native Windows" \
+      || PID_CAPTURE_UNSUPPORTED_ERRORS="$PID_CAPTURE_UNSUPPORTED_ERRORS preflight-reason"
+  else
+    PID_CAPTURE_UNSUPPORTED_ERRORS="$PID_CAPTURE_UNSUPPORTED_ERRORS preflight"
+  fi
+  [ ! -e "$PID_CAPTURE_TMP/provider.pid" ] || PID_CAPTURE_UNSUPPORTED_ERRORS="$PID_CAPTURE_UNSUPPORTED_ERRORS provider"
+  [ ! -e "$PID_CAPTURE_TMP/run/status.json" ] || PID_CAPTURE_UNSUPPORTED_ERRORS="$PID_CAPTURE_UNSUPPORTED_ERRORS status"
+  [ ! -e "$PID_CAPTURE_TMP/run/result.md" ] || PID_CAPTURE_UNSUPPORTED_ERRORS="$PID_CAPTURE_UNSUPPORTED_ERRORS result"
+  [ ! -e "$PID_CAPTURE_TMP/run/status.json.worktree-owner.json" ] \
+    || PID_CAPTURE_UNSUPPORTED_ERRORS="$PID_CAPTURE_UNSUPPORTED_ERRORS receipt"
+  PID_CAPTURE_STATE_GLOB=( "$PID_CAPTURE_TMP/run"/.agent-state-* )
+  [ ! -e "${PID_CAPTURE_STATE_GLOB[0]}" ] || PID_CAPTURE_UNSUPPORTED_ERRORS="$PID_CAPTURE_UNSUPPORTED_ERRORS lifecycle"
+  [ ! -d "$PID_CAPTURE_TMP/repo/.claude/worktrees" ] \
+    || PID_CAPTURE_UNSUPPORTED_ERRORS="$PID_CAPTURE_UNSUPPORTED_ERRORS worktree"
+  git -C "$PID_CAPTURE_TMP/repo" show-ref | grep -Fq 'refs/heads/worktree-solve-issue-335-' \
+    && PID_CAPTURE_UNSUPPORTED_ERRORS="$PID_CAPTURE_UNSUPPORTED_ERRORS branch"
+  pid_capture_emergency_cleanup \
+    || PID_CAPTURE_UNSUPPORTED_ERRORS="$PID_CAPTURE_UNSUPPORTED_ERRORS emergency-cleanup"
+  if [ -z "$PID_CAPTURE_UNSUPPORTED_ERRORS" ]; then
+    pass_msg "native Windows rejects unsupported Codex supervision before launch"
+  else
+    fail_msg "native Windows rejects unsupported Codex supervision before launch" \
+      "$PID_CAPTURE_UNSUPPORTED_ERRORS $PID_CAPTURE_PREFLIGHT_OUT"
+  fi
+else
 PID_CAPTURE_REQUEST="$(python3 -I -B - "$PID_CAPTURE_TMP/run" "$PID_CAPTURE_TMP/repo" <<'PY'
 import json,sys
 run,repo=sys.argv[1:]
@@ -561,6 +628,11 @@ PID_CAPTURE_OUT="$(
     ' _ "$DISPATCH_LIB" "$PID_CAPTURE_REQUEST" "$PID_CAPTURE_TMP/run"
 )"
 PID_CAPTURE_ERRORS=''
+PID_CAPTURE_STATE_DIR=''
+PID_CAPTURE_STATE_DIR="$(bash -c '. "$1"; _uberdev_agent_prepare_state_dir "$2"' \
+  _ "$DISPATCH_LIB" "$PID_CAPTURE_TMP/run")" \
+  || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS state-dir"
+pid_capture_emergency_cleanup || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS emergency-cleanup"
 printf '%s\n' "$PID_CAPTURE_OUT" | grep -Fq 'rc=2' || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS rc"
 printf '%s\n' "$PID_CAPTURE_OUT" | grep -Fq 'provider_live=0' || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS provider-live"
 printf '%s\n' "$PID_CAPTURE_OUT" | grep -Fq '"state":"cancelled"' || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS terminal-status"
@@ -568,9 +640,9 @@ printf '%s\n' "$PID_CAPTURE_OUT" | grep -Fq '"state":"cancelled"' || PID_CAPTURE
 git -C "$PID_CAPTURE_TMP/repo" show-ref --verify --quiet "refs/heads/worktree-solve-issue-335-$PID_CAPTURE_SLUG" \
   && PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS branch"
 [ ! -e "$PID_CAPTURE_TMP/run/status.json.worktree-owner.json" ] || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS receipt"
-grep -R -q 'run_id=codex-pid-capture-failure' "$PID_CAPTURE_TMP/run/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null \
+grep -R -q 'run_id=codex-pid-capture-failure' "$PID_CAPTURE_STATE_DIR/semaphore-v1" 2>/dev/null \
   && PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS lease"
-if ! python3 -I -B - "$PID_CAPTURE_TMP/run/.agent-state-$(id -u)/agent-lifecycle.jsonl" <<'PY'
+if ! python3 -I -B - "$PID_CAPTURE_STATE_DIR/agent-lifecycle.jsonl" <<'PY'
 import json,sys
 rows=[json.loads(line) for line in open(sys.argv[1],encoding='utf-8')]
 events=[row for row in rows if row.get('run_id')=='codex-pid-capture-failure']
@@ -583,6 +655,7 @@ if [ -z "$PID_CAPTURE_ERRORS" ]; then
   pass_msg "PID-capture failure cancels the provider, emits terminal lifecycle, releases the exact lease, and removes child artifacts"
 else
   fail_msg "PID-capture failure is fully supervised" "$PID_CAPTURE_ERRORS $PID_CAPTURE_OUT"
+fi
 fi
 rm -rf "$PID_CAPTURE_TMP"
 
@@ -1220,13 +1293,15 @@ fi
 
 COMBINED_INSTANCE=review-provider-and-cleanup-failure-a1
 COMBINED_SLUG="$(UBERDEV_AGENT_INSTANCE_ID="$COMBINED_INSTANCE" bash -c '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"
+# This fixture tests dual-failure provenance, not immediate-terminal handoff;
+# keep the provider alive long enough for the detached session to register.
 COMBINED_OUT="$(
   cd "$BEH_TMP/repo" && \
   PATH="$BEH_TMP/bin:/usr/bin:/bin" \
   UBERDEV_TMPDIR="$BEH_TMP/tmp" \
   UBERDEV_AGENT_CHILD_OWNED=1 \
   UBERDEV_AGENT_INSTANCE_ID="$COMBINED_INSTANCE" \
-  CODEX_STUB_RC=42 CODEX_STUB_SLEEP=0 GIT_STUB_FAIL_REMOVE=1 \
+  CODEX_STUB_RC=42 CODEX_STUB_SLEEP=0.25 GIT_STUB_FAIL_REMOVE=1 \
   CODEX_CAPTURE="$BEH_TMP/codex-combined-capture.txt" \
   bash -c '
     . "$1"
