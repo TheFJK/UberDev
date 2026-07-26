@@ -878,20 +878,25 @@ except (OSError,ValueError,subprocess.SubprocessError): raise SystemExit(2)
 # Usage: uberdev_preflight_child_batch HANDOFF_JSON_FILE [...]
 uberdev_preflight_child_batch() {
   [ "$#" -gt 0 ] || { _uberdev_child_error 'expected at least one HANDOFF_JSON_FILE'; return 2; }
-  local handoff info edge instance context run_dir result status prepared backend seen='|'
+  local handoff info edge instance run_dir result status prepared backend seen='|'
   for handoff in "$@"; do
     info="$(python3 -I -B - "$handoff" <<'PY'
-import json,os,sys
+import json,ntpath,os,re,sys
 try:
  v=json.load(open(sys.argv[1])); carrier=v['carrier']
- print(json.dumps({'edge':v['edge_id'],'instance':v['instance_id'],'context':carrier['context_file']},sort_keys=True,separators=(',',':')),end='')
+ path=carrier['context_file']
+ if not path or any(ord(char)<32 or ord(char)==127 for char in path): raise ValueError()
+ path_module=ntpath if os.name=='nt' or re.match(r'^[A-Za-z]:[\\/]',path) or path.startswith(('\\\\','//')) else os.path
+ if not path_module.isabs(path) or any(part in {'.','..'} for part in re.split(r'[\\/]',path)): raise ValueError()
+ state_dir=path_module.dirname(path); run_dir=path_module.dirname(state_dir)
+ if not state_dir or not run_dir or run_dir==state_dir: raise ValueError()
+ print(json.dumps({'edge':v['edge_id'],'instance':v['instance_id'],'run_dir':run_dir},sort_keys=True,separators=(',',':')),end='')
 except Exception: raise SystemExit(2)
 PY
 )" || return 2
     edge="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["edge"],end="")' "$info")" || return 2
     instance="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["instance"],end="")' "$info")" || return 2
-    context="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["context"],end="")' "$info")" || return 2
-    run_dir="$(_uberdev_child_context_run_dir "$context")" || return 2
+    run_dir="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["run_dir"],end="")' "$info")" || return 2
     result="$run_dir/children/$instance/result.md"; status="$run_dir/children/$instance/status.json"
     prepared="$(_uberdev_child_prepare "$edge" "$handoff" "$result" "$status" preflight)" || return $?
     case "$seen" in *"|$instance|"*) _uberdev_child_error 'duplicate batch instance'; return 2 ;; esac

@@ -81,6 +81,15 @@ h=json.load(open(v['handoff_file'])); assert h['role']=='implementation-worker' 
 PY
 uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF"
 [ ! -e "$TMP/run/children/sdd-w1-t1-implement-a1" ]
+
+# Batch preflight derives the run directory while it parses the handoff. It
+# must not launch the standalone context-path helper for every child.
+eval "$(declare -f _uberdev_child_context_run_dir | sed '1s/_uberdev_child_context_run_dir/_saved_child_context_run_dir/')"
+_uberdev_child_context_run_dir() { return 97; }
+uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF"
+eval "$(declare -f _saved_child_context_run_dir | sed '1s/_saved_child_context_run_dir/_uberdev_child_context_run_dir/')"
+unset -f _saved_child_context_run_dir
+
 ! uberdev_create_child_handoff run-risk run-risk-mismatch \
   "$(python3 -c 'import json,sys;print(json.dumps({"paths":[sys.argv[1]]}))' "$TMP/run/inputs/task.md")" \
   '["security"]' >/dev/null 2>&1
