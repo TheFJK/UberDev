@@ -118,6 +118,44 @@ rm -rf "$BG_ROOT_TMP"
 echo "== Empty optional argv is nounset-safe in the actual background provider =="
 BG_NOUNSET_TMP="$(mktemp -d)"
 mkdir -p "$BG_NOUNSET_TMP/bin" "$BG_NOUNSET_TMP/runtime"
+BG_NOUNSET_TERMINAL_EVIDENCE_BUDGET_S=30
+_dispatch_test_wait_background_terminal() {
+  local runtime_dir="$1" provider_log_file="$2" budget_s="$3"
+  local status_file="$runtime_dir/status.json" result_file="$runtime_dir/result.md"
+  local child_log_file="$runtime_dir/solve-bg-stdout-346.log"
+  local started=$SECONDS status='' result provider_log child_log reason=timeout
+  while [ $((SECONDS - started)) -lt "$budget_s" ]; do
+    status="$(cat "$status_file" 2>/dev/null)"
+    case "$status" in
+      *\"state\":\"completed\"*) return 0 ;;
+      *\"state\":\"failed\"*) reason=unexpected_terminal; break ;;
+    esac
+    sleep 0.025
+  done
+  result="$(cat "$result_file" 2>/dev/null)"
+  provider_log="$(tail -n 20 "$provider_log_file" 2>/dev/null | tr '\n' ';')"
+  child_log="$(tail -n 20 "$child_log_file" 2>/dev/null | tr '\n' ';')"
+  printf 'background terminal evidence failure: reason=%s budget_s=%s status_file=%s status=%s result_file=%s result=%s provider_log_file=%s provider_log=%s child_log_file=%s child_log=%s\n' \
+    "$reason" "$budget_s" "$status_file" "${status:-missing}" "$result_file" "${result:-missing}" \
+    "$provider_log_file" "${provider_log:-empty}" "$child_log_file" "${child_log:-empty}" >&2
+  return 1
+}
+if BG_NOUNSET_TIMEOUT_DIAGNOSTIC="$(_dispatch_test_wait_background_terminal \
+    "$BG_NOUNSET_TMP/missing-runtime" "$BG_NOUNSET_TMP/missing-provider.log" 0 2>&1)"; then
+  echo "  FAIL  background terminal observer fails closed with bounded evidence diagnostics"
+  FAIL=$((FAIL + 1))
+else
+  case "$BG_NOUNSET_TIMEOUT_DIAGNOSTIC" in
+    *"reason=timeout"*"budget_s=0"*"status=missing"*"result=missing"*"provider_log=empty"*"child_log=empty"*)
+      echo "  PASS  background terminal observer fails closed with bounded evidence diagnostics"
+      PASS=$((PASS + 1))
+      ;;
+    *)
+      echo "  FAIL  background terminal observer timeout diagnostic: $BG_NOUNSET_TIMEOUT_DIAGNOSTIC"
+      FAIL=$((FAIL + 1))
+      ;;
+  esac
+fi
 printf 'background nounset\n' >"$BG_NOUNSET_TMP/prompt.txt"
 cat >"$BG_NOUNSET_TMP/bin/claude" <<'SH'
 #!/usr/bin/env bash
@@ -162,21 +200,24 @@ for BG_TEST_BASH in /bin/bash "$(command -v bash)"; do
       ' _ "$DISPATCH_LIB" "$BG_NOUNSET_RUNTIME" "$BG_NOUNSET_TMP/prompt.txt"
   } 2>&1)"
   BG_NOUNSET_RC=$?
-  BG_NOUNSET_TRIES=0
-  while ! grep -Fq '"state":"completed"' "$BG_NOUNSET_RUNTIME/status.json" 2>/dev/null \
-      && [ "$BG_NOUNSET_TRIES" -lt 200 ]; do
-    BG_NOUNSET_TRIES=$((BG_NOUNSET_TRIES + 1))
-    sleep 0.025
-  done
+  BG_NOUNSET_TERMINAL_DIAGNOSTIC=''
+  if BG_NOUNSET_TERMINAL_DIAGNOSTIC="$(_dispatch_test_wait_background_terminal \
+      "$BG_NOUNSET_RUNTIME" "$BG_NOUNSET_PROVIDER_LOG" \
+      "$BG_NOUNSET_TERMINAL_EVIDENCE_BUDGET_S" 2>&1)"; then
+    BG_NOUNSET_TERMINAL_RC=0
+  else
+    BG_NOUNSET_TERMINAL_RC=1
+  fi
   BG_NOUNSET_VERSION="$($BG_TEST_BASH --version | head -1)"
   if [ "$BG_NOUNSET_RC" -eq 0 ] \
+      && [ "$BG_NOUNSET_TERMINAL_RC" -eq 0 ] \
       && grep -Fq '"state":"completed"' "$BG_NOUNSET_RUNTIME/status.json" \
       && grep -Fq 'background nounset result' "$BG_NOUNSET_RUNTIME/result.md" \
       && [ "$(wc -l <"$BG_NOUNSET_PROVIDER_LOG" | tr -d ' ')" -eq 1 ]; then
     echo "  PASS  background accepts empty optional argv under set -u on $BG_NOUNSET_VERSION"
     PASS=$((PASS + 1))
   else
-    echo "  FAIL  background nounset provider contract on $BG_NOUNSET_VERSION: rc=$BG_NOUNSET_RC out=$BG_NOUNSET_OUT"
+    echo "  FAIL  background nounset provider contract on $BG_NOUNSET_VERSION: rc=$BG_NOUNSET_RC out=$BG_NOUNSET_OUT terminal=$BG_NOUNSET_TERMINAL_DIAGNOSTIC"
     FAIL=$((FAIL + 1))
   fi
 done
