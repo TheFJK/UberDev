@@ -19,6 +19,11 @@ watcher=source.split('\nclaude_watcher_case() {',1)[1].split('claude_watcher_cas
 ambiguous=watcher.rsplit('    ambiguous)',1)[1].split('    probe-error)',1)[0]
 assert 'command sleep 0.6' not in ambiguous
 assert '[ -s "$run/status.json.watcher-error.json" ] && break' in ambiguous
+for helper in (
+    '_uberdev_agent_capture_owner_process_record', '_real_owner_process_record',
+    '_uberdev_agent_persist_watcher_error', '_real_prelaunch_persist_error',
+):
+    assert f'declare -f {helper} |' not in source, helper
 PY
 then
   echo "agent-dispatch: portable fixture source contracts present"
@@ -320,7 +325,7 @@ value=json.loads(sys.argv[1]); value.update(run_dir=sys.argv[2],run_id='owner-id
 print(json.dumps(value,separators=(',',':')),end='')
 PY
 )"
-eval "$(declare -f _uberdev_agent_capture_owner_process_record | sed '1s/_uberdev_agent_capture_owner_process_record/_real_owner_process_record/')"
+(
 _uberdev_agent_capture_owner_process_record() { return 2; }
 owner_provider_before=0
 [ ! -r "$TMP/provider-count" ] || read -r owner_provider_before <"$TMP/provider-count"
@@ -331,7 +336,6 @@ owner_identity_rc=$?
 set -e
 owner_provider_after=0
 [ ! -r "$TMP/provider-count" ] || read -r owner_provider_after <"$TMP/provider-count"
-eval "$(declare -f _real_owner_process_record | sed '1s/_real_owner_process_record/_uberdev_agent_capture_owner_process_record/')"
 [ "$owner_identity_rc" -eq 2 ]
 [ "$owner_provider_after" -eq "$owner_provider_before" ]
 grep -q '"state":"failed"' "$OWNER_IDENTITY_RUN/status.json"
@@ -340,14 +344,12 @@ grep -q '"reason":"owner_process_identity_unavailable"' "$OWNER_IDENTITY_RUN/sta
 ! grep -q '"event":"agent_started"' "$OWNER_IDENTITY_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" 2>/dev/null
 [ ! -d "$OWNER_IDENTITY_RUN/.agent-state-$(id -u)/semaphore-v1" ] \
   || ! find "$OWNER_IDENTITY_RUN/.agent-state-$(id -u)/semaphore-v1" -name '*.lease' -type f | grep -q .
+)
 
 # Owner-capture failure reporting uses two independent durable channels. Fault
 # inject each channel through the public dispatcher: the other channel must
 # still be attempted, no provider or lease may be created, and stderr must say
 # exactly which fallback channel failed.
-eval "$(declare -f _uberdev_agent_publish_status | sed '1s/_uberdev_agent_publish_status/_real_owner_failure_publish_status/')"
-eval "$(declare -f _uberdev_agent_persist_watcher_error_retry | sed '1s/_uberdev_agent_persist_watcher_error_retry/_real_owner_failure_persist_watcher_error_retry/')"
-_uberdev_agent_capture_owner_process_record() { return 2; }
 owner_fault_request() {
   python3 -I -B - "$REQUEST" "$1" "$2" <<'PY'
 import json,sys
@@ -361,11 +363,9 @@ mkdir -p "$OWNER_STATUS_FAULT_RUN"
 printf 'owner status publication fault prompt\n' >"$OWNER_STATUS_FAULT_RUN/prompt.txt"
 OWNER_STATUS_FAULT_REQUEST="$(owner_fault_request "$OWNER_STATUS_FAULT_RUN" owner-status-publication-fault)"
 OWNER_FAILURE_CALLS="$TMP/owner-failure-calls"
+(
+_uberdev_agent_capture_owner_process_record() { return 2; }
 _uberdev_agent_publish_status() { printf 'publish\n' >>"$OWNER_FAILURE_CALLS"; return 2; }
-_uberdev_agent_persist_watcher_error_retry() {
-  printf 'diagnostic\n' >>"$OWNER_FAILURE_CALLS"
-  _real_owner_failure_persist_watcher_error_retry "$@"
-}
 owner_provider_before=0
 [ ! -r "$TMP/provider-count" ] || read -r owner_provider_before <"$TMP/provider-count"
 set +e
@@ -378,23 +378,24 @@ owner_provider_after=0
 [ ! -r "$TMP/provider-count" ] || read -r owner_provider_after <"$TMP/provider-count"
 [ "$OWNER_FAILURE_RC" -eq 2 ]
 [ "$owner_provider_after" -eq "$owner_provider_before" ]
-[ "$(cat "$OWNER_FAILURE_CALLS")" = $'publish\ndiagnostic' ]
+[ "$(cat "$OWNER_FAILURE_CALLS")" = publish ]
 [ ! -e "$OWNER_STATUS_FAULT_RUN/status.json" ]
 grep -q '"reason":"owner_process_identity_unavailable"' \
   "$OWNER_STATUS_FAULT_RUN/status.json.watcher-error.json"
 printf '%s\n' "$OWNER_FAILURE_ERROR" | grep -Fq 'owner_process_identity_status_publication_failed'
 [ ! -d "$OWNER_STATUS_FAULT_RUN/.agent-state-$(id -u)/semaphore-v1" ]
+)
 
 OWNER_DIAGNOSTIC_FAULT_RUN="$TMP/owner-diagnostic-persistence-fault"
 mkdir -p "$OWNER_DIAGNOSTIC_FAULT_RUN"
 printf 'owner diagnostic persistence fault prompt\n' >"$OWNER_DIAGNOSTIC_FAULT_RUN/prompt.txt"
 OWNER_DIAGNOSTIC_FAULT_REQUEST="$(owner_fault_request "$OWNER_DIAGNOSTIC_FAULT_RUN" owner-diagnostic-persistence-fault)"
 : >"$OWNER_FAILURE_CALLS"
-_uberdev_agent_publish_status() {
-  printf 'publish\n' >>"$OWNER_FAILURE_CALLS"
-  _real_owner_failure_publish_status "$@"
-}
+(
+_uberdev_agent_capture_owner_process_record() { return 2; }
 _uberdev_agent_persist_watcher_error_retry() { printf 'diagnostic\n' >>"$OWNER_FAILURE_CALLS"; return 2; }
+owner_provider_before=0
+[ ! -r "$TMP/provider-count" ] || read -r owner_provider_before <"$TMP/provider-count"
 set +e
 OWNER_FAILURE_ERROR="$(uberdev_agent_dispatch "$OWNER_DIAGNOSTIC_FAULT_REQUEST" \
   "$OWNER_DIAGNOSTIC_FAULT_RUN/prompt.txt" "$OWNER_DIAGNOSTIC_FAULT_RUN/result.md" \
@@ -405,15 +406,12 @@ owner_provider_after=0
 [ ! -r "$TMP/provider-count" ] || read -r owner_provider_after <"$TMP/provider-count"
 [ "$OWNER_FAILURE_RC" -eq 2 ]
 [ "$owner_provider_after" -eq "$owner_provider_before" ]
-[ "$(cat "$OWNER_FAILURE_CALLS")" = $'publish\ndiagnostic' ]
+[ "$(cat "$OWNER_FAILURE_CALLS")" = diagnostic ]
 grep -q '"state":"failed"' "$OWNER_DIAGNOSTIC_FAULT_RUN/status.json"
 [ ! -e "$OWNER_DIAGNOSTIC_FAULT_RUN/status.json.watcher-error.json" ]
 printf '%s\n' "$OWNER_FAILURE_ERROR" | grep -Fq 'owner_process_identity_diagnostic_persistence_failed'
 [ ! -d "$OWNER_DIAGNOSTIC_FAULT_RUN/.agent-state-$(id -u)/semaphore-v1" ]
-
-eval "$(declare -f _real_owner_failure_publish_status | sed '1s/_real_owner_failure_publish_status/_uberdev_agent_publish_status/')"
-eval "$(declare -f _real_owner_failure_persist_watcher_error_retry | sed '1s/_real_owner_failure_persist_watcher_error_retry/_uberdev_agent_persist_watcher_error_retry/')"
-eval "$(declare -f _real_owner_process_record | sed '1s/_real_owner_process_record/_uberdev_agent_capture_owner_process_record/')"
+)
 
 # Detached review fanout cannot rely on an interactive Claude permission
 # prompt. The adapter must reject manual mode before capacity or provider state
@@ -1479,10 +1477,10 @@ uberdev_semaphore_release "$PRE_REACQUIRED"
 # rollback must retry transient failures, publish one failed lifecycle, and
 # release only the exact captured lease identity. If that exact release also
 # fails, capacity stays fail-closed and sidecar persistence is retried.
+(
 eval "$(declare -f _uberdev_agent_event_json | sed '1s/_uberdev_agent_event_json/_real_prelaunch_event_json/')"
 eval "$(declare -f _uberdev_agent_append_event | sed '1s/_uberdev_agent_append_event/_real_prelaunch_append_event/')"
 eval "$(declare -f _uberdev_agent_release_exact_lease | sed '1s/_uberdev_agent_release_exact_lease/_real_prelaunch_exact_release/')"
-eval "$(declare -f _uberdev_agent_persist_watcher_error | sed '1s/_uberdev_agent_persist_watcher_error/_real_prelaunch_persist_error/')"
 eval "$(declare -f uberdev_semaphore_release | sed '1s/uberdev_semaphore_release/_real_prelaunch_generic_release/')"
 PRE_EVENT_MODE=''
 PRE_EVENT_COUNTER=''
@@ -1523,7 +1521,8 @@ _uberdev_agent_persist_watcher_error() {
     count=$((count + 1)); printf '%s\n' "$count" > "$PRE_SIDECAR_COUNTER"
     [ "$count" -ge 3 ] || return 29
   fi
-  _real_prelaunch_persist_error "$@"
+  "$BASH" -c 'unset _UBERDEV_AGENT_DISPATCH_LOADED; . "$1"; shift; _uberdev_agent_persist_watcher_error "$@"' \
+    _ "$LIB" "$@"
 }
 uberdev_semaphore_release() { return 88; }
 
@@ -1581,11 +1580,7 @@ prelaunch_event_failure_case event_json event-json
 prelaunch_event_failure_case append_once append-once
 prelaunch_event_failure_case append_always append-always
 prelaunch_event_failure_case append_release append-release
-eval "$(declare -f _real_prelaunch_event_json | sed '1s/_real_prelaunch_event_json/_uberdev_agent_event_json/')"
-eval "$(declare -f _real_prelaunch_append_event | sed '1s/_real_prelaunch_append_event/_uberdev_agent_append_event/')"
-eval "$(declare -f _real_prelaunch_exact_release | sed '1s/_real_prelaunch_exact_release/_uberdev_agent_release_exact_lease/')"
-eval "$(declare -f _real_prelaunch_persist_error | sed '1s/_real_prelaunch_persist_error/_uberdev_agent_persist_watcher_error/')"
-eval "$(declare -f _real_prelaunch_generic_release | sed '1s/_real_prelaunch_generic_release/uberdev_semaphore_release/')"
+)
 PRE_EVENT_REACQUIRED="$(uberdev_semaphore_acquire "$TMP/pre-launch-event-append-always/.agent-state-$(id -u)" adapter-prelaunch-event-repository-append-always codex 1 adapter-prelaunch-event-reacquired 20)"
 uberdev_semaphore_release "$PRE_EVENT_REACQUIRED"
 
@@ -1683,18 +1678,16 @@ IDENTITY_TERMINAL_RUN="$TMP/post-launch-identity-absent-terminal"
 mkdir -p "$IDENTITY_TERMINAL_RUN"
 printf 'identity absent terminal prompt\n' >"$IDENTITY_TERMINAL_RUN/prompt.txt"
 IDENTITY_TERMINAL_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-identity-absent-terminal","repository_id":"adapter-identity-absent-terminal-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":99,"issue_num":99,"capacity":1,"timeout_s":20},separators=(",",":")))' "$IDENTITY_TERMINAL_RUN")"
-eval "$(declare -f _uberdev_agent_process_identity | sed '1s/_uberdev_agent_process_identity/_real_identity_terminal_process_identity/')"
+(
 _uberdev_agent_process_identity() {
-  if [ -f "$IDENTITY_TERMINAL_RUN/provider.pid" ] \
-      && [ "$1" = "$(cat "$IDENTITY_TERMINAL_RUN/provider.pid")" ]; then
-    printf 'terminal result\n' >"$IDENTITY_TERMINAL_RUN/result.md"
-    printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"%s"}\n' "$1" \
-      >"$IDENTITY_TERMINAL_RUN/status.json"
-    chmod 600 "$IDENTITY_TERMINAL_RUN/status.json"
-    : >"$IDENTITY_TERMINAL_RUN/terminal-published-during-identity"
-    return 1
-  fi
-  _real_identity_terminal_process_identity "$@"
+  [ -f "$IDENTITY_TERMINAL_RUN/provider.pid" ] \
+    && [ "$1" = "$(cat "$IDENTITY_TERMINAL_RUN/provider.pid")" ] || return 2
+  printf 'terminal result\n' >"$IDENTITY_TERMINAL_RUN/result.md"
+  printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"%s"}\n' "$1" \
+    >"$IDENTITY_TERMINAL_RUN/status.json"
+  chmod 600 "$IDENTITY_TERMINAL_RUN/status.json"
+  : >"$IDENTITY_TERMINAL_RUN/terminal-published-during-identity"
+  return 1
 }
 _uberdev_agent_dispatch_backend() {
   python3 -I -c 'pass' >/dev/null 2>&1 &
@@ -1706,7 +1699,6 @@ _uberdev_agent_dispatch_backend() {
 }
 uberdev_agent_dispatch "$IDENTITY_TERMINAL_REQUEST" "$IDENTITY_TERMINAL_RUN/prompt.txt" \
   "$IDENTITY_TERMINAL_RUN/result.md" "$IDENTITY_TERMINAL_RUN/status.json"
-eval "$(declare -f _real_identity_terminal_process_identity | sed '1s/_real_identity_terminal_process_identity/_uberdev_agent_process_identity/')"
 [ -e "$IDENTITY_TERMINAL_RUN/terminal-published-during-identity" ]
 grep -q '"state":"completed"' "$IDENTITY_TERMINAL_RUN/status.json"
 python3 -I - "$IDENTITY_TERMINAL_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" <<'PY'
@@ -1717,6 +1709,7 @@ assert [row.get('event') for row in events]==['route_decided','agent_started','c
 PY
 ! grep -R -q 'run_id=adapter-identity-absent-terminal' \
   "$IDENTITY_TERMINAL_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
+)
 
 # A provider can return a handle and then exit before rollback samples process
 # identity. Proven absence still terminalizes the run and releases its lease.
