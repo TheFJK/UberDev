@@ -57,7 +57,7 @@ SIMPLIFY_CARRIER_JSON="$(jq -cn --arg ctx "$simplify_ctx" --arg sha "$simplify_s
     if [ "${1:-}" = -I ] && [ "${2:-}" = -B ] && [ "${3:-}" = - ]; then
       shift 3
       command "$REAL_PORTABLE_PYTHON" -I -B -c '
-import os,stat,sys,tempfile
+import os,runpy,stat,sys,tempfile
 source=sys.stdin.read()
 if hasattr(os,"geteuid"): del os.geteuid
 if hasattr(os,"getuid"): del os.getuid
@@ -72,6 +72,9 @@ swap_after_read_path=os.environ.get("UBERDEV_TEST_PORTABLE_SWAP_AFTER_READ_PATH"
 swap_after_read_with=os.environ.get("UBERDEV_TEST_PORTABLE_SWAP_AFTER_READ_WITH")
 replace_created_name=os.environ.get("UBERDEV_TEST_PORTABLE_REPLACE_CREATED_NAME")
 reparse_path=os.environ.get("UBERDEV_TEST_PORTABLE_REPARSE_PATH")
+if os.environ.get("UBERDEV_TEST_PORTABLE_SAMESTAT_FAIL") == "1":
+ def failing_samestat(left,right): raise OSError("samestat unavailable")
+ os.path.samestat=failing_samestat
 swapped=False
 fd_paths={}
 def portable_open(path,flags,*args,**kwargs):
@@ -109,17 +112,29 @@ os.open=portable_open
 os.read=portable_read
 os.lstat=portable_lstat
 sys.argv=["-"]+sys.argv[1:]
-exec(compile(source,"<portable-child-dispatch>","exec"),{"__name__":"__main__"})
+source_fd,source_path=tempfile.mkstemp(prefix="portable-child-dispatch-",suffix=".py")
+try:
+ with os.fdopen(source_fd,"w",encoding="utf-8") as stream: stream.write(source)
+ runpy.run_path(source_path,run_name="__main__")
+finally:
+ try: os.unlink(source_path)
+ except FileNotFoundError: pass
 ' "$@"
     elif [ "${1:-}" = -I ] && [ "${2:-}" = -B ] && [ "${3:-}" = -c ]; then
       local portable_source="$4"; shift 4
       command "$REAL_PORTABLE_PYTHON" -I -B -c '
-import os,sys,tempfile
+import os,runpy,sys,tempfile
 source=sys.argv[1]
 if hasattr(os,"geteuid"): del os.geteuid
 if hasattr(os,"getuid"): del os.getuid
 sys.argv=["-c"]+sys.argv[2:]
-exec(compile(source,"<portable-carrier>","exec"),{"__name__":"__main__"})
+source_fd,source_path=tempfile.mkstemp(prefix="portable-carrier-",suffix=".py")
+try:
+ with os.fdopen(source_fd,"w",encoding="utf-8") as stream: stream.write(source)
+ runpy.run_path(source_path,run_name="__main__")
+finally:
+ try: os.unlink(source_path)
+ except FileNotFoundError: pass
 ' "$portable_source" "$@"
     else
       command "$REAL_PORTABLE_PYTHON" "$@"
@@ -146,7 +161,8 @@ exec(compile(source,"<portable-carrier>","exec"),{"__name__":"__main__"})
   portable_input="$(jq -cn --arg p "$TEST_REPO/README.md" '{changed_paths:["README.md"],diff_path:$p,criteria_path:$p,emphasis:[]}')"
 
   uberdev_create_child_handoff review_pr.review.correctness portable-valid-iter1-attempt01 "$portable_input" '[]' >/dev/null
-  _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null
+  UBERDEV_TEST_PORTABLE_SAMESTAT_FAIL=1 \
+    _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null
   [ -s "$portable_run/children/portable-valid-iter1-attempt01/handoff.v1.json" ]
   [ -s "$portable_run/children/portable-valid-iter1-attempt01/prompt.txt" ]
 

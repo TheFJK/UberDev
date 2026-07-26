@@ -229,7 +229,10 @@ def linked(entry):
 def owned(entry): return not HAS_EUID or not hasattr(entry,'st_uid') or entry.st_uid==uid
 def same_stat(left,right):
  comparator=getattr(os.path,'samestat',None)
- return comparator(left,right) if comparator else (left.st_dev,left.st_ino)==(right.st_dev,right.st_ino)
+ if comparator:
+  try:return comparator(left,right)
+  except (AttributeError,OSError): pass
+ return (left.st_dev,left.st_ino)==(right.st_dev,right.st_ino)
 def valid_created(opened,current):
  return (not linked(current) and stat.S_ISREG(opened.st_mode) and stat.S_ISREG(current.st_mode)
   and owned(opened) and owned(current) and opened.st_nlink==1 and current.st_nlink==1
@@ -408,7 +411,10 @@ def linked(entry):
 def owned(entry): return not HAS_EUID or not hasattr(entry,'st_uid') or entry.st_uid==uid
 def same_stat(left,right):
     comparator=getattr(os.path,'samestat',None)
-    return comparator(left,right) if comparator else (left.st_dev,left.st_ino)==(right.st_dev,right.st_ino)
+    if comparator:
+        try:return comparator(left,right)
+        except (AttributeError,OSError): pass
+    return (left.st_dev,left.st_ino)==(right.st_dev,right.st_ino)
 def valid_created(opened,current):
     return (not linked(current) and stat.S_ISREG(opened.st_mode) and stat.S_ISREG(current.st_mode)
         and owned(opened) and owned(current) and opened.st_nlink==1 and current.st_nlink==1
