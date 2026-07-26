@@ -545,14 +545,16 @@ for CLAUDE_SHELL in "${CLAUDE_SHELLS[@]}"; do
   CLAUDE_SEEN_SHELLS="$CLAUDE_SEEN_SHELLS $CLAUDE_SHELL_REAL"
   CLAUDE_SHELL_INDEX=$((CLAUDE_SHELL_INDEX + 1))
   CLAUDE_SHELL_LABEL="$($CLAUDE_SHELL --version | head -1)"
-  for CLAUDE_STDIN_CASE in missing unreadable; do
+  for CLAUDE_STDIN_CASE in missing redirection-failure; do
     CASE_DIR="$CLAUDE_STDIN_TMP/${CLAUDE_STDIN_CASE}-$CLAUDE_SHELL_INDEX"
     mkdir -p "$CASE_DIR/runtime"
     : >"$CASE_DIR/provider.log"
     PROMPT_CASE="$CASE_DIR/prompt.txt"
-    if [ "$CLAUDE_STDIN_CASE" = unreadable ]; then
-      printf 'unreadable\n' >"$PROMPT_CASE"
-      chmod 000 "$PROMPT_CASE"
+    if [ "$CLAUDE_STDIN_CASE" = redirection-failure ]; then
+      # chmod 000 is advisory on Git Bash/Windows and can leave the file
+      # readable. FD 9 is inherited write-only, so reopening /dev/fd/9 for
+      # stdin fails deterministically on Bash 3.2, Bash 5, and Git Bash.
+      PROMPT_CASE=/dev/fd/9
     fi
     set +e
     CLAUDE_STDIN_RESULT="$($CLAUDE_SHELL -c '
@@ -581,10 +583,10 @@ for CLAUDE_SHELL in "${CLAUDE_SHELLS[@]}"; do
         "$(wc -l <"$PROVIDER_LOG" 2>/dev/null || printf 0)" \
         "$([ -e "$MUTEX_SENTINEL" ] && printf held || printf clear)"
       [ "$rc" -ne 0 ] && [ ! -s "$PROVIDER_LOG" ] && [ ! -e "$MUTEX_SENTINEL" ]
-    ' _ "$DISPATCH_LIB" "$CASE_DIR" "$PROMPT_CASE" 2>&1)"
+    ' _ "$DISPATCH_LIB" "$CASE_DIR" "$PROMPT_CASE" \
+      9>"$CASE_DIR/write-only-prompt-fd" 2>&1)"
     CLAUDE_STDIN_RC=$?
     set +e
-    chmod 600 "$PROMPT_CASE" 2>/dev/null || true
     if [ "$CLAUDE_STDIN_RC" -eq 0 ]; then
       echo "  PASS  $CLAUDE_STDIN_CASE stdin is terminal before provider/mutex leak on $CLAUDE_SHELL_LABEL"
       PASS=$((PASS + 1))
@@ -696,6 +698,31 @@ if [ "$CLAUDE_OWNERLESS_TURNOVER" = 'vanished=1 absent=1 present=2 retained=1' ]
   PASS=$((PASS + 1))
 else
   echo "  FAIL  ownerless vanish-before-identity turnover: $CLAUDE_OWNERLESS_TURNOVER"
+  FAIL=$((FAIL + 1))
+fi
+CLAUDE_OWNERLESS_PROBE_CHURN="$(/bin/bash -c '
+  set -u
+  . "$1"
+  root="$(mktemp -d)"
+  mkdir -p "$root/.mutex"
+  chmod 700 "$root/.mutex"
+  identity_writes=0
+  _uberdev_semaphore_write_process_identity() {
+    identity_writes=$((identity_writes + 1))
+    return 2
+  }
+  UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=1 UBERDEV_SEMAPHORE_MUTEX_QUIET_BUSY=1 \
+    UBERDEV_SEMAPHORE_MUTEX_PROBE_ONLY=1 \
+    _uberdev_semaphore_mutex_acquire "$root"
+  rc=$?
+  printf "rc=%s writes=%s state=%s" "$rc" "$identity_writes" \
+    "${_UBERDEV_SEMAPHORE_MUTEX_OBSERVED_STATE:-unknown}"
+' _ "$DISPATCH_LIB")"
+if [ "$CLAUDE_OWNERLESS_PROBE_CHURN" = 'rc=75 writes=0 state=ownerless' ]; then
+  echo "  PASS  busy Claude probe observes ownerless state without preparing a contender identity"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  busy Claude probe performed contender churn: $CLAUDE_OWNERLESS_PROBE_CHURN"
   FAIL=$((FAIL + 1))
 fi
 CLAUDE_SLOW_PROBE_TMP="$(mktemp -d)"
@@ -975,6 +1002,12 @@ set +e
     /bin/bash -c '
       set -u
       . "$1"
+      eval "$(declare -f _uberdev_semaphore_write_process_identity \
+        | sed "1s/_uberdev_semaphore_write_process_identity/_uberdev_semaphore_write_process_identity_without_delay/")"
+      _uberdev_semaphore_write_process_identity() {
+        command sleep 0.25
+        _uberdev_semaphore_write_process_identity_without_delay "$@"
+      }
       TIMEOUT_BIN="$2"; SOLVE_TIMEOUT=4; MODEL=sonnet
       PERM_FLAG=(); EFFORT_FLAG=(); BG_PROMPT_MODE=file
       DISPATCH_RC=0; DISPATCH_ID=""; DISPATCH_LOG=""

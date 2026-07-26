@@ -15,6 +15,12 @@ assert '"backend":"%s"' in default and '"$1" > "$6"' in default
 claude=source.split('\nCLAUDE_REQUEST="$(variant_request agent-dispatch-claude claude)"',1)[1].split('# An opaque provider',1)[0]
 assert 'wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-claude completed' in claude
 assert '[ ! -e "$TMP/run/claude.json.watcher-error.json" ]' in claude
+sync=source.split('\nSYNC_REQUEST="$(variant_request agent-dispatch-sync inherit)"',1)[1].split('\n# Every file argument',1)[0]
+assert 'wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-sync completed 80 0.1 "$TMP/run/sync-status.json"' in sync
+dead=source.split('\nDEAD_RUN="$TMP/dead-without-terminal"',1)[1].split('\n# Killing only the detached wrapper',1)[0]
+assert 'wait_for_terminal_and_release "$DEAD_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$DEAD_RUN/.agent-state-$(id -u)" adapter-dead-without-terminal failed 80 0.1 "$DEAD_RUN/status.json" provider_execution_failed' in dead
+orphan=source.split('\nORPHAN_RUN="$TMP/wrapper-death-with-live-provider"',1)[1].split('\n# The same orphan-group proof',1)[0]
+assert 'wait_for_terminal_and_release "$ORPHAN_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$ORPHAN_RUN/.agent-state-$(id -u)" adapter-wrapper-death failed 80 0.1 "$ORPHAN_RUN/status.json" provider_execution_failed' in orphan
 watcher=source.split('\nclaude_watcher_case() {',1)[1].split('claude_watcher_case initial-absent',1)[0]
 ambiguous=watcher.rsplit('    ambiguous)',1)[1].split('    probe-error)',1)[0]
 assert 'command sleep 0.6' not in ambiguous
@@ -473,35 +479,111 @@ grep -Fq 'UBERDEV_SEMAPHORE_OWNER_PID="$_UBERDEV_AGENT_OWNER_PID" PYTHONPATH= PY
 }
 
 wait_for_terminal_and_release() {
-  local manifest="$1" state_dir="$2" run_id="$3" terminal="$4" attempts="${5:-80}" delay="${6:-0.1}" actual
+  local manifest="$1" state_dir="$2" run_id="$3" terminal="$4" attempts="${5:-80}" delay="${6:-0.1}"
+  local status_file="${7:-}" error_class="${8:-}" actual lease watcher_error
   for _ in $(seq 1 "$attempts"); do
-    if python3 -I - "$manifest" "$run_id" "$terminal" <<'PY'
+    if python3 -I - "$manifest" "$run_id" "$terminal" "$status_file" "$error_class" <<'PY'
 import json, pathlib, sys
-path, run_id, terminal = sys.argv[1:]
+path, run_id, terminal, status_path, error_class = sys.argv[1:]
 try:
     events = [json.loads(line) for line in pathlib.Path(path).read_text().splitlines()]
 except (FileNotFoundError, ValueError):
     raise SystemExit(1)
-actual = [event.get("event") for event in events if event.get("run_id") == run_id]
-raise SystemExit(0 if actual == ["route_decided", "agent_started", terminal] else 1)
+run_events = [event for event in events if event.get("run_id") == run_id]
+actual = [event.get("event") for event in run_events]
+if actual != ["route_decided", "agent_started", terminal]:
+    raise SystemExit(1)
+if error_class and run_events[-1].get("error_class") != error_class:
+    raise SystemExit(1)
+if status_path:
+    try:
+        status = json.loads(pathlib.Path(status_path).read_text())
+    except (FileNotFoundError, ValueError):
+        raise SystemExit(1)
+    if status.get("state") != terminal:
+        raise SystemExit(1)
 PY
     then
-      if ! grep -R -q "run_id=$run_id" "$state_dir/semaphore-v1" 2>/dev/null; then
+      if ! grep -R -F -x -q -- "run_id=$run_id" "$state_dir/semaphore-v1" 2>/dev/null; then
         return 0
       fi
     fi
     command sleep "$delay"
   done
-  actual="$(python3 -I - "$manifest" "$run_id" <<'PY'
+  actual="$(python3 -I - "$manifest" "$run_id" "$status_file" <<'PY'
 import json, pathlib, sys
-try: events=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
-except Exception: events=[]
-print([event.get("event") for event in events if event.get("run_id")==sys.argv[2]])
+observed={"manifest_events":[],"terminal_error_class":None,"status":None}
+try:
+ events=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+ run_events=[event for event in events if event.get("run_id")==sys.argv[2]]
+ observed["manifest_events"]=[event.get("event") for event in run_events]
+ if run_events: observed["terminal_error_class"]=run_events[-1].get("error_class")
+except Exception as exc: observed["manifest_error"]=type(exc).__name__
+if sys.argv[3]:
+ try: observed["status"]=json.loads(pathlib.Path(sys.argv[3]).read_text())
+ except Exception as exc: observed["status_error"]=type(exc).__name__
+print(json.dumps(observed,sort_keys=True,separators=(",",":")))
 PY
 )"
-  echo "terminal invariant timeout: run_id=$run_id expected=$terminal actual=$actual lease=$(grep -R -l "run_id=$run_id" "$state_dir/semaphore-v1" 2>/dev/null | head -1)" >&2
+  lease="$({ grep -R -F -x -l -- "run_id=$run_id" "$state_dir/semaphore-v1" 2>/dev/null | head -1; } || true)"
+  watcher_error=''
+  if [ -n "$status_file" ] && [ -s "$status_file.watcher-error.json" ]; then
+    watcher_error="$status_file.watcher-error.json"
+  fi
+  echo "terminal invariant timeout: run_id=$run_id expected=$terminal error_class=${error_class:-any} observed=$actual lease=${lease:-none} watcher_error=${watcher_error:-none}" >&2
   return 1
 }
+
+# A negative tuple with no matching live lease must return through the helper's
+# explicit timeout path. Under global errexit/pipefail, an empty diagnostic
+# lease lookup must not abort before the structured evidence is emitted.
+HELPER_NEGATIVE_RUN="$TMP/helper-negative"
+HELPER_NEGATIVE_STATE="$HELPER_NEGATIVE_RUN/.agent-state-$(id -u)"
+mkdir -p "$HELPER_NEGATIVE_STATE/semaphore-v1/prefix.scope"
+printf '%s\n' \
+  '{"run_id":"helper-negative","event":"route_decided"}' \
+  '{"run_id":"helper-negative","event":"agent_started"}' \
+  '{"run_id":"helper-negative","event":"failed","error_class":"wrong_error_class"}' \
+  >"$HELPER_NEGATIVE_STATE/agent-lifecycle.jsonl"
+printf '%s\n' '{"state":"failed"}' >"$HELPER_NEGATIVE_RUN/status.json"
+printf '%s\n' 'run_id=helper-negative-extra' \
+  >"$HELPER_NEGATIVE_STATE/semaphore-v1/prefix.scope/prefix.lease"
+set +e
+(
+  set -euo pipefail
+  wait_for_terminal_and_release \
+    "$HELPER_NEGATIVE_STATE/agent-lifecycle.jsonl" "$HELPER_NEGATIVE_STATE" \
+    helper-negative failed 1 0 "$HELPER_NEGATIVE_RUN/status.json" provider_execution_failed
+) 2>"$HELPER_NEGATIVE_RUN/stderr"
+HELPER_NEGATIVE_RC=$?
+set -e
+[ "$HELPER_NEGATIVE_RC" -eq 1 ] || {
+  echo "negative terminal tuple returned rc=$HELPER_NEGATIVE_RC instead of 1" >&2
+  exit 1
+}
+grep -Fq 'terminal invariant timeout: run_id=helper-negative expected=failed error_class=provider_execution_failed observed={"manifest_events":["route_decided","agent_started","failed"],"status":{"state":"failed"},"terminal_error_class":"wrong_error_class"} lease=none watcher_error=none' \
+  "$HELPER_NEGATIVE_RUN/stderr" || {
+    echo "negative terminal tuple did not emit structured timeout evidence" >&2
+    sed -n '1,5p' "$HELPER_NEGATIVE_RUN/stderr" >&2
+    exit 1
+  }
+
+# Exact run matching must ignore a live lease owned by a prefixed run ID in
+# both the success poll and timeout evidence paths.
+printf '%s\n' \
+  '{"run_id":"helper-exact","event":"route_decided"}' \
+  '{"run_id":"helper-exact","event":"agent_started"}' \
+  '{"run_id":"helper-exact","event":"completed"}' \
+  >>"$HELPER_NEGATIVE_STATE/agent-lifecycle.jsonl"
+printf '%s\n' '{"state":"completed"}' >"$HELPER_NEGATIVE_RUN/exact-status.json"
+printf '%s\n' 'run_id=helper-exact-extra' \
+  >"$HELPER_NEGATIVE_STATE/semaphore-v1/prefix.scope/exact-prefix.lease"
+if ! wait_for_terminal_and_release \
+    "$HELPER_NEGATIVE_STATE/agent-lifecycle.jsonl" "$HELPER_NEGATIVE_STATE" \
+    helper-exact completed 1 0 "$HELPER_NEGATIVE_RUN/exact-status.json"; then
+  echo "exact terminal tuple was blocked by a prefixed run lease" >&2
+  exit 1
+fi
 
 uberdev_agent_dispatch "$REQUEST" \
   "$TMP/run/prompt.txt" "$TMP/run/result.md" "$TMP/run/status.json"
@@ -887,6 +969,7 @@ fi
 # released immediately instead of being left for reconciliation.
 SYNC_REQUEST="$(variant_request agent-dispatch-sync inherit)"
 uberdev_agent_dispatch "$SYNC_REQUEST" "$TMP/run/prompt.txt" "$TMP/run/sync-result.md" "$TMP/run/sync-status.json"
+wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-sync completed 80 0.1 "$TMP/run/sync-status.json"
 python3 - "$STATE_DIR/agent-lifecycle.jsonl" <<'PY'
 import json, pathlib, sys
 events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
@@ -1377,10 +1460,7 @@ _uberdev_agent_dispatch_backend() {
   chmod 600 "$6"
 }
 uberdev_agent_dispatch "$DEAD_REQUEST" "$DEAD_RUN/prompt.txt" "$DEAD_RUN/result.md" "$DEAD_RUN/status.json"
-for _ in 1 2 3 4 5 6; do
-  grep -q '"state":"failed"' "$DEAD_RUN/status.json" 2>/dev/null && break
-  sleep 1
-done
+wait_for_terminal_and_release "$DEAD_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$DEAD_RUN/.agent-state-$(id -u)" adapter-dead-without-terminal failed 80 0.1 "$DEAD_RUN/status.json" provider_execution_failed
 grep -q '"state":"failed"' "$DEAD_RUN/status.json" || { echo "dead provider retained running status" >&2; exit 1; }
 python3 -I - "$DEAD_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" <<'PY'
 import json,pathlib,sys
@@ -1412,10 +1492,7 @@ ORPHAN_WRAPPER="$(cat "$ORPHAN_RUN/wrapper.pid")"
 for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$ORPHAN_RUN/provider-child.pid" ] && break; sleep .1; done
 ORPHAN_CHILD="$(cat "$ORPHAN_RUN/provider-child.pid")"
 kill -KILL "$ORPHAN_WRAPPER"
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  grep -q '"state":"failed"' "$ORPHAN_RUN/status.json" 2>/dev/null && break
-  sleep 1
-done
+wait_for_terminal_and_release "$ORPHAN_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$ORPHAN_RUN/.agent-state-$(id -u)" adapter-wrapper-death failed 80 0.1 "$ORPHAN_RUN/status.json" provider_execution_failed
 grep -q '"state":"failed"' "$ORPHAN_RUN/status.json"
 ! _uberdev_dispatch_group_live "$ORPHAN_WRAPPER"
 ! kill -0 "$ORPHAN_CHILD" 2>/dev/null

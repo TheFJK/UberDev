@@ -461,6 +461,24 @@ _uberdev_semaphore_mutex_acquire() {
   _uberdev_semaphore_is_positive_integer "$maximum" || maximum=500
   tries=0
   while [ "$tries" -lt "$maximum" ]; do
+    # Claude's bounded probe loop asks for exactly one observation per poll.
+    # When a mutex generation already exists, inspect that generation before
+    # preparing a contender: native Windows process-identity capture and SHA
+    # setup are expensive, and doing them on every busy poll can consume the
+    # wall budget before the publication-grace ticks elapse. The existing
+    # generation remains authoritative; only an absent/reclaimed path falls
+    # through to contender preparation.
+    if [ "$maximum" -eq 1 ] \
+        && [ "${UBERDEV_SEMAPHORE_MUTEX_PROBE_ONLY:-0}" = 1 ] \
+        && { [ -e "$mutex" ] || [ -L "$mutex" ]; }; then
+      _uberdev_semaphore_mutex_reclaim_dead "$scope" published
+      reclaim_rc=$?
+      [ "$reclaim_rc" -ne 2 ] || return 2
+      [ "$reclaim_rc" -eq 0 ] && continue
+      [ "${UBERDEV_SEMAPHORE_MUTEX_QUIET_BUSY:-0}" = 1 ] || \
+        _uberdev_semaphore_error 'mutex retry limit exceeded'
+      return 75
+    fi
     old_umask="$(umask)"
     umask 077
     candidate="$(mktemp "$scope/.mutex-candidate.XXXXXX")" || {
