@@ -100,6 +100,23 @@ _uberdev_dispatch_python() {
   fi
 }
 
+# Convert one absolute shell path only when it crosses from Git Bash into a
+# native Windows consumer. Keep all other pane argv in POSIX spelling: the
+# spawned Git Bash owns those arguments and understands them directly.
+_uberdev_dispatch_native_cli_path() {
+  local path="$1"
+  case "${MSYSTEM:-}:$(uname -s 2>/dev/null)" in
+    MINGW*:*|MSYS*:*|CYGWIN*:*|*:MINGW*|*:MSYS*|*:CYGWIN*)
+      if ! command -v cygpath >/dev/null 2>&1; then
+        echo 'error: cygpath is required to normalize a native-Windows dispatch path' >&2
+        return 127
+      fi
+      cygpath -m "$path"
+      ;;
+    *) printf '%s' "$path" ;;
+  esac
+}
+
 # Return a validated runtime root. The default lives below the platform temp
 # root; POSIX creates or validates an EUID-owned, non-symlink directory locked
 # to 0700. Native Windows relies on the current-user ACL only when this helper
@@ -2069,8 +2086,16 @@ _uberdev_dispatch_wezterm() {
       '{"issue":'"$ISSUE_NUM"',"phase":"worktree","backend":"wezterm","rc":1}'
     return 1
   fi
-  local WORKTREE_ABS
-  WORKTREE_ABS="$(cd "$WORKTREE_DIR" && pwd)"
+  local WORKTREE_ABS WORKTREE_NATIVE STATUS_FILE_NATIVE
+  WORKTREE_ABS="$(cd "$WORKTREE_DIR" && pwd -P)"
+  if ! WORKTREE_NATIVE="$(_uberdev_dispatch_native_cli_path "$WORKTREE_ABS")" \
+      || ! STATUS_FILE_NATIVE="$(_uberdev_dispatch_native_cli_path "$STATUS_FILE")"; then
+    DISPATCH_RC=1
+    DISPATCH_LOG="$LOG_FILE"
+    _uberdev_dispatch_audit dispatch_setup_failed \
+      '{"issue":'"$ISSUE_NUM"',"phase":"native_path","backend":"wezterm","rc":1}'
+    return 1
+  fi
   local PROMPT_BODY
   # B5 fix (prompt-read), mirrored from the `background` backend: an
   # unreadable $PROMPT_FILE would otherwise leave PROMPT_BODY="" and spawn
@@ -2093,8 +2118,9 @@ _uberdev_dispatch_wezterm() {
   fi
   # wezterm cli spawn into the pinned uberdev domain. Foreground claude -p
   # (headless print mode streaming into the pane) — detaching would empty the
-  # pane. MSYS2_ARG_CONV_EXCL stops Git Bash mangling the --cwd path arg
-  # before it reaches wezterm.
+  # pane. MSYS2_ARG_CONV_EXCL prevents blanket rewriting of child Bash argv;
+  # only the native wezterm cwd and native-Python status path were normalized
+  # explicitly above.
   #
   # B4 fix: capture the spawn rc IMMEDIATELY after the `$(...)` close. Before
   # this change the only gate was `[ -z "$DISPATCH_ID" ]`, which missed the
@@ -2104,7 +2130,7 @@ _uberdev_dispatch_wezterm() {
   local SPAWN_RC
   local PROVIDER_CMD=( claude -p "$PROMPT_BODY" --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" )
   DISPATCH_ID="$(MSYS2_ARG_CONV_EXCL='*' wezterm cli spawn \
-    --domain-name uberdev --cwd "$WORKTREE_ABS" -- \
+    --domain-name uberdev --cwd "$WORKTREE_NATIVE" -- \
     bash -c '
       PYTHON_EXE="$1"; PYTHON_PREFIX="$2"; DISPATCH_LIB="$3"; shift 3
       case "$PYTHON_PREFIX" in ""|-3) ;; *) exit 126 ;; esac
@@ -2130,7 +2156,7 @@ _uberdev_dispatch_wezterm() {
       if [ "$PROVIDER_RC" -eq 0 ]; then STATE=completed; else STATE=failed; fi
       write_status "$STATE" "$PROVIDER_RC" || exit 126
       exit "$PROVIDER_RC"
-    ' _ "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$_UBERDEV_DISPATCH_FILE" "$STATUS_FILE" "$ISSUE_NUM" "$TIER" "${PROVIDER_CMD[@]}" \
+    ' _ "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$_UBERDEV_DISPATCH_FILE" "$STATUS_FILE_NATIVE" "$ISSUE_NUM" "$TIER" "${PROVIDER_CMD[@]}" \
     2> >(tee -a "$LOG_FILE" >&2))"
   SPAWN_RC=$?
   if [[ "$SPAWN_RC" -ne 0 || -z "$DISPATCH_ID" ]]; then
