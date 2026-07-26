@@ -231,7 +231,23 @@ semaphore_source=pathlib.Path(semaphore).read_text(encoding='utf-8')
 agent_source=pathlib.Path(agent).read_text(encoding='utf-8')
 assert 'owner_depth = {"direct": 0, "parent": 1}.get(mode)' in source
 assert 'stat.S_ISFIFO(os.fstat(1).st_mode)' not in source
-assert '_uberdev_semaphore_write_process_identity direct "$candidate"' in semaphore_source
+candidate_helper=semaphore_source.split('_uberdev_semaphore_mutex_prepare_candidate() {',1)[1].split('\n}',1)[0]
+mutex_acquire=semaphore_source.split('_uberdev_semaphore_mutex_acquire() {',1)[1].split('\n}',1)[0]
+assert '_uberdev_semaphore_write_process_identity parent "$candidate"' in candidate_helper
+assert 'token="$(_uberdev_semaphore_mutex_prepare_candidate "$candidate")"' in mutex_acquire
+assert '[ "${#token}" -eq 32 ] || return 2' in candidate_helper
+assert 'case "$token" in *[!0-9a-f]*) return 2 ;; esac' in candidate_helper
+assert 'candidate_rc=$?' in mutex_acquire and 'return "$candidate_rc"' in mutex_acquire
+caller_length_guard='if [ "${#token}" -ne 32 ]; then'
+caller_hex_guard='*[!0-9a-f]*)'
+publication='if mkdir "$mutex" 2>/dev/null; then'
+assert caller_length_guard in mutex_acquire and caller_hex_guard in mutex_acquire
+assert 'mutex owner candidate returned malformed token' in mutex_acquire
+assert mutex_acquire.index('token="$(_uberdev_semaphore_mutex_prepare_candidate "$candidate")"') \
+    < mutex_acquire.index(caller_length_guard) \
+    < mutex_acquire.index(caller_hex_guard) \
+    < mutex_acquire.index(publication)
+assert '_uberdev_semaphore_write_process_identity direct "$candidate"' not in mutex_acquire
 assert '_uberdev_semaphore_write_process_identity "$owner_mode" "$probe"' in semaphore_source
 assert 'if [ -n "$output_variable" ]; then owner_mode=direct; else owner_mode=parent; fi' in semaphore_source
 assert '_uberdev_semaphore_write_process_identity parent "$probe"' in agent_source
@@ -285,10 +301,10 @@ with tempfile.TemporaryDirectory() as temporary:
  else: raise AssertionError('unavailable parent did not fail closed')
 PY
 then
-  echo "  PASS  owner mode explicitly selects direct or one-native-parent identity"
+  echo "  PASS  owner mode and mutex candidate bridge select the live native parent identity"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  owner mode still depends on stdout file-type inference"
+  echo "  FAIL  owner mode or mutex candidate bridge can select a transient process identity"
   FAIL=$((FAIL + 1))
 fi
 

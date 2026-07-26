@@ -450,8 +450,29 @@ _uberdev_semaphore_mutex_reclaim_ownerless_generation() {
   _uberdev_semaphore_quarantine_mutex "$scope" "$expected_identity"
 }
 
+_uberdev_semaphore_mutex_prepare_candidate() {
+  local candidate="$1" candidate_name token
+  # This helper is called through command substitution. That bridge gives the
+  # owner writer one explicit shell-parent boundary on every platform; native
+  # Windows additionally crosses the MSYS launcher in run_manifest.py. The
+  # resulting parent-depth record names the outer mutex holder, not either
+  # short-lived bridge process.
+  _uberdev_semaphore_write_process_identity parent "$candidate" || return 2
+  candidate_name="$(basename "$candidate")" || return 2
+  token="$(_uberdev_semaphore_hash "mutex:${#candidate_name}:$candidate_name")" || return 2
+  token="$(printf '%s' "$token" | cut -c 1-32)"
+  [ "${#token}" -eq 32 ] || return 2
+  case "$token" in *[!0-9a-f]*) return 2 ;; esac
+  printf '%s\n' "$token" >> "$candidate" || return 2
+  chmod 600 "$candidate" 2>/dev/null || {
+    _uberdev_semaphore_error 'cannot protect mutex owner candidate'
+    return 2
+  }
+  printf '%s\n' "$token"
+}
+
 _uberdev_semaphore_mutex_acquire() {
-  local scope mutex maximum tries old_umask reclaim_rc candidate candidate_name token pause_tries
+  local scope mutex maximum tries old_umask reclaim_rc candidate candidate_rc token pause_tries
   local identity current_identity observed_token
   scope="$1"
   mutex="$scope/.mutex"
@@ -486,30 +507,31 @@ _uberdev_semaphore_mutex_acquire() {
       _uberdev_semaphore_error 'cannot create mutex owner candidate'
       return 2
     }
-    if ! _uberdev_semaphore_write_process_identity direct "$candidate"; then
+    if token="$(_uberdev_semaphore_mutex_prepare_candidate "$candidate")"; then
+      candidate_rc=0
+    else
+      candidate_rc=$?
+    fi
+    if [ "$candidate_rc" -ne 0 ]; then
       umask "$old_umask"
       rm -f "$candidate" 2>/dev/null || true
       _uberdev_semaphore_error 'cannot record mutex owner'
+      return "$candidate_rc"
+    fi
+    if [ "${#token}" -ne 32 ]; then
+      umask "$old_umask"
+      rm -f "$candidate" 2>/dev/null || true
+      _uberdev_semaphore_error 'mutex owner candidate returned malformed token'
       return 2
     fi
-    candidate_name="$(basename "$candidate")"
-    token="$(_uberdev_semaphore_hash "mutex:${#candidate_name}:$candidate_name")" || {
-      umask "$old_umask"
-      rm -f "$candidate" 2>/dev/null || true
-      return 2
-    }
-    token="$(printf '%s' "$token" | cut -c 1-32)"
-    printf '%s\n' "$token" >> "$candidate" || {
-      umask "$old_umask"
-      rm -f "$candidate" 2>/dev/null || true
-      return 2
-    }
-    chmod 600 "$candidate" 2>/dev/null || {
-      umask "$old_umask"
-      rm -f "$candidate" 2>/dev/null || true
-      _uberdev_semaphore_error 'cannot protect mutex owner candidate'
-      return 2
-    }
+    case "$token" in
+      *[!0-9a-f]*)
+        umask "$old_umask"
+        rm -f "$candidate" 2>/dev/null || true
+        _uberdev_semaphore_error 'mutex owner candidate returned malformed token'
+        return 2
+        ;;
+    esac
     if mkdir "$mutex" 2>/dev/null; then
       identity="$(_uberdev_semaphore_path_identity "$mutex")" || {
         umask "$old_umask"

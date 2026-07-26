@@ -349,6 +349,73 @@ if grep -Eq 'export[[:space:]]+-f[[:space:]]+python3|eval[[:space:]].*PYTHON|BAS
 else
   echo "  PASS  portable Python bridge remains local and avoids eval/function export"; PASS=$((PASS + 1))
 fi
+
+echo
+echo "== Git metadata mutex candidate binds the outer holder across its owner bridge =="
+MUTEX_OWNER_TMP="$(mktemp -d)"
+MUTEX_OWNER_BASH="$(command -v bash)"
+if MUTEX_OWNER_OUT="$("$MUTEX_OWNER_BASH" -c '
+  . "$1"
+  holder_pid="$BASHPID"
+  scope="$(_uberdev_semaphore_prepare_scope "$2/state" bridge-repository git-worktree-metadata)" || exit 1
+  _uberdev_semaphore_write_process_identity() {
+    mode="$1"; destination="$2"
+    # Native Windows Python crosses an MSYS launcher and a command-substitution
+    # bridge. The parent-depth mode must run in that bridge so it resolves back
+    # to the still-live mutex holder, never the short-lived bridge process.
+    [ "$mode" = parent ] && [ "$BASHPID" != "$holder_pid" ] || return 91
+    printf "%s\n%s|%s|%s|%064d\n" \
+      "$holder_pid" "$holder_pid" "$holder_pid" "$holder_pid" 0 >"$destination"
+  }
+  _uberdev_semaphore_mutex_acquire "$scope" || exit $?
+  recorded_pid="$(sed -n "1p" "$scope/.mutex/owner_pid")"
+  kill -0 "$recorded_pid" 2>/dev/null || exit 92
+  _uberdev_semaphore_mutex_release "$scope" || exit $?
+  printf "holder=%s recorded=%s\n" "$holder_pid" "$recorded_pid"
+' _ "$DISPATCH_LIB" "$MUTEX_OWNER_TMP" 2>&1)" \
+    && printf '%s\n' "$MUTEX_OWNER_OUT" | grep -Eq '^holder=([1-9][0-9]*) recorded=\1$'; then
+  echo "  PASS  metadata mutex candidate records its live outer holder through the parent-depth bridge"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  metadata mutex candidate records a direct or short-lived owner: $MUTEX_OWNER_OUT"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$MUTEX_OWNER_TMP"
+
+echo
+echo "== Git metadata mutex rejects polluted candidate token output before publication =="
+MUTEX_POLLUTION_TMP="$(mktemp -d)"
+if MUTEX_POLLUTION_OUT="$("$MUTEX_OWNER_BASH" -c '
+  . "$1"
+  scope="$(_uberdev_semaphore_prepare_scope "$2/state" polluted-repository git-worktree-metadata)" || exit 1
+  _uberdev_semaphore_write_process_identity() {
+    mode="$1"; destination="$2"
+    [ "$mode" = parent ] || return 91
+    printf "%s\n%s|%s|%s|%064d\n" \
+      "$BASHPID" "$BASHPID" "$BASHPID" "$BASHPID" 0 >"$destination" || return 92
+    printf "noise\n"
+  }
+  _uberdev_semaphore_mutex_acquire "$scope"
+  acquire_rc=$?
+  remaining=""
+  for path in "$scope/.mutex" "$scope"/.mutex-candidate.*; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      remaining="$remaining ${path##*/}"
+    fi
+  done
+  printf "rc=%s\nremaining=%s\n" "$acquire_rc" "$remaining"
+' _ "$DISPATCH_LIB" "$MUTEX_POLLUTION_TMP" 2>&1)" \
+    && printf '%s\n' "$MUTEX_POLLUTION_OUT" | grep -Fxq 'uberdev semaphore: mutex owner candidate returned malformed token' \
+    && printf '%s\n' "$MUTEX_POLLUTION_OUT" | grep -Fxq 'rc=2' \
+    && printf '%s\n' "$MUTEX_POLLUTION_OUT" | grep -Fxq 'remaining='; then
+  echo "  PASS  polluted candidate output fails closed without publishing mutex state"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  polluted candidate output was trusted or left partial mutex state: $MUTEX_POLLUTION_OUT"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$MUTEX_POLLUTION_TMP"
+
 windows_detach_count="$(grep -Fc 'subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS' "$DISPATCH_LIB")"
 posix_setsid_count="$(grep -Fc 'os.setsid()' "$DISPATCH_LIB")"
 wrapper_pid_bridge_count="$(grep -Fc 'os.environ["UBERDEV_WRAPPER_PID"]=str(os.getpid())' "$DISPATCH_LIB")"
