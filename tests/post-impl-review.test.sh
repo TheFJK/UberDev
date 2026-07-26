@@ -100,6 +100,12 @@ assert_no_grep "$POST_IMPL" 'Migration-window fallback for .pr-test-analyzer.' \
   "obsolete free-form pr-test-analyzer fallback is removed"
 assert_grep "$POST_IMPL" 'manifest-declared shared output contract' \
   "YAML shape is attributed to the manifest-declared shared output contract"
+assert_grep "$POST_IMPL" 'post-review\.validated' \
+  "validated reviewer bytes are recorded in a dedicated canonical ledger"
+assert_grep "$POST_IMPL" 'sha256|SHA-256' \
+  "aggregation binds canonical reviewer artifacts to their validated digest"
+assert_grep "$POST_IMPL" 'aggregate only|aggregation.*only.*validated|only.*validated.*artifact' \
+  "Step 4 aggregates only the validated canonical artifacts"
 
 echo
 echo "== Anti-regression: pre-push call sites removed (#67) =="

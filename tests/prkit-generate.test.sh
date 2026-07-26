@@ -189,11 +189,23 @@ assert all(edges[edge_id].get('kind')=='skill' for edge_id in structural_edges)
 assert all(edges[edge_id].get('kind')=='provider' for edge_id in provider_edges)
 for edge in edges.values():
  workflows=edge.get('allowed_workflows',[])
- assert all(workflow in {'review-pr','simplify'} for workflow in workflows)
- assert 'solve' not in workflows and 'turbo' not in workflows
+ assert all(workflow in {'review-pr','simplify','solve','turbo'} for workflow in workflows)
  if edge.get('kind')=='provider':
   assert workflows
   assert edge.get('role') in claude_roles
+for edge_id in (
+ 'review_pr.review.correctness','review_pr.review.silent_failures',
+ 'review_pr.review.types','review_pr.review.comments','review_pr.review.tests',
+ 'review_pr.review.general','review_pr.fix.phase1','review_pr.ci.classify',
+ 'review_pr.ci.fix_code','review_pr.ci.rebase','review_pr.ci.defer_refusal',
+ 'review_pr.ci.resolve_conflict',
+):
+ assert edges[edge_id]['allowed_workflows']==['review-pr','solve','turbo'], edge_id
+for edge_id in (
+ 'review_pr.simplify.reuse','review_pr.simplify.quality',
+ 'review_pr.simplify.efficiency','review_pr.fix.phase2','review_pr.defer.findings',
+):
+ assert edges[edge_id]['allowed_workflows']==['review-pr','simplify','solve','turbo'], edge_id
 referenced={edge['output_contract'] for edge in edges.values() if 'output_contract' in edge}
 assert set(tree.get('output_contracts',{}))==referenced
 contract=(root/'codex/prkit-codex/shared/phase1-reviewer-output-v1.md').read_text()

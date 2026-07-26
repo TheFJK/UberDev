@@ -124,6 +124,22 @@ assert_in_section "$REVIEW_PR_MD" 'Phase 2.5|findings-to-issues' 'Phase 3|Final 
 assert_in_section "$REVIEW_PR_MD" 'Phase 2.5|findings-to-issues' 'Phase 3|Final Aggregation' \
   'effective.*enabled|both.*ON|CLI.*AND.*config' \
   'C2 effective-enabled gate is AND of CLI flag and config key'
+assert_in_section "$REVIEW_PR_MD" 'Phase 2.5|findings-to-issues' 'Phase 3|Final Aggregation' \
+  'blocker.*critical.*important.*major|blocker.*critical.*major.*important' \
+  'C2b Phase 2.5 documents every issue-eligible severity'
+assert_in_section "$REVIEW_PR_MD" 'Phase 2.5|findings-to-issues' 'Phase 3|Final Aggregation' \
+  'blocker.*halt|halt.*blocker' \
+  'C2c Phase 2.5 documents blocker-driven parent halt'
+assert_in_section "$REVIEW_PR_MD" 'Phase 2.5|findings-to-issues' 'Phase 3|Final Aggregation' \
+  'critical/blocker overflow|overflow.*BLOCKER/CRITICAL|BLOCKER/CRITICAL.*overflow' \
+  'C2d Phase 2.5 documents the critical/blocker overflow halt'
+
+assert_in_section "$AGENT_MD" '^## Inputs' '^## Tools authorised' \
+  'review_pr\.defer\.findings.*exact|exact.*review_pr\.defer\.findings' \
+  'C2e findings agent declares the exact routed review input contract'
+assert_in_section "$AGENT_MD" '^## Inputs' '^## Tools authorised' \
+  'derive.*repo_slug|repo_slug.*derive' \
+  'C2f findings agent derives repository identity instead of trusting absent handoff fields'
 
 # Runtime smoke: source lib/config-read.sh in fixture context with key absent, then with key=false.
 if [[ -f "$REPO_ROOT/plugins/uberdev/lib/config-read.sh" ]]; then

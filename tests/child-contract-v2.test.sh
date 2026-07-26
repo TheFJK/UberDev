@@ -78,4 +78,18 @@ do
     exit 1
   fi
 done
+
+# A successful constructor result must fit inside the dispatcher's immutable
+# 64-KiB handoff after the fixed carrier/schema overhead is added.
+OVERSIZED_PATHS="$(python3 -I -B - <<'PY'
+import json
+print(json.dumps([f"src/generated/{index:05d}-{'x' * 80}.ts" for index in range(700)],separators=(',',':')))
+PY
+)"
+if python3 -I -B "$INPUT_HELPER" --manifest "$TREE" build review_pr.review.correctness \
+    changed_paths "$OVERSIZED_PATHS" diff_path '"/tmp/diff"' \
+    criteria_path '"/tmp/criteria"' emphasis '[]' >/dev/null 2>&1; then
+  echo "child-contract-v2: oversized RepoPathArray crossed the construction boundary" >&2
+  exit 1
+fi
 echo 'child-contract-v2: PASS'

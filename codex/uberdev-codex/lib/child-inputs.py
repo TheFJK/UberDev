@@ -24,6 +24,10 @@ SUPPORTED_TYPES = {
     "repo_path_array",
 }
 
+# Leave deterministic headroom for carrier, identity, routing, and risk fields
+# inside child-dispatch.sh's 64-KiB immutable handoff ceiling.
+MAX_INPUT_BYTES = 49_152
+
 
 class InputFailure(Exception):
     """A closed input-contract violation safe to report to shell callers."""
@@ -145,6 +149,8 @@ def validate_inputs(manifest: dict[str, Any], edge_id: str, inputs: Any) -> dict
     schema = {**required, **optional}
     for key, value in inputs.items():
         validate_value(key, value, schema[key])
+    if len(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode("utf-8")) > MAX_INPUT_BYTES:
+        fail("child inputs exceed immutable handoff budget")
     return inputs
 
 

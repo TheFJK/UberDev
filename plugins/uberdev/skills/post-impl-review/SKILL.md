@@ -230,6 +230,7 @@ post_review_fanout() {
 }
 post_review_wait_all() {
   local launched="$1" timeout_s="$2" failed_path="${3:-}" index_offset="${4:-0}" row edge status result wait_rc validation_rc ledger_rc unwind_rc first_rc=0 valid_count=0 format_failures=0
+  local validated_result validation_digest
   local index="$index_offset"
   POST_REVIEW_VALID_COUNT=0
   POST_REVIEW_FORMAT_FAILURE_COUNT=0
@@ -239,9 +240,15 @@ post_review_wait_all() {
     index=$((index + 1))
     edge="$(jq -r .edge <<<"$row")"; status="$(jq -r .status <<<"$row")"; result="$(jq -r .result <<<"$row")"
     if uberdev_wait_child "$status" "$result" "$timeout_s"; then
-      if uberdev_child_validate_phase1_review_result "$result"; then
-        valid_count=$((valid_count + 1))
-        continue
+      validated_result="$(dirname "$result")/validated-result.md"
+      if validation_digest="$(uberdev_child_validate_phase1_review_result "$result" "$CHANGED_PATHS_JSON" "$validated_result")"; then
+        if [[ "$validation_digest" =~ ^[0-9a-f]{64}$ ]] \
+            && jq -cn --arg edge "$edge" --argjson index "$index" --arg result "$validated_result" --arg sha256 "$validation_digest" \
+              '{edge:$edge,index:$index,result:$result,sha256:$sha256}' >>"$POST_REVIEW_VALIDATED_LEDGER"; then
+          valid_count=$((valid_count + 1))
+          continue
+        fi
+        validation_rc=2
       else
         validation_rc=$?
       fi
@@ -367,7 +374,9 @@ REVIEW_EDGES=(
 REVIEW_RECORDS="$RESEARCH_DIR_ABS/post-review.records"
 REVIEW_DESCRIPTORS="$RESEARCH_DIR_ABS/post-review.descriptors"
 REVIEW_LAUNCHED="$RESEARCH_DIR_ABS/post-review.launched"
+POST_REVIEW_VALIDATED_LEDGER="$RESEARCH_DIR_ABS/post-review.validated"
 post_review_init_ledger "$REVIEW_RECORDS" || exit 2
+post_review_init_ledger "$POST_REVIEW_VALIDATED_LEDGER" || exit 2
 REVIEW_INDEX=0
 for EDGE_ID in "${REVIEW_EDGES[@]}"; do
   REVIEW_INDEX=$((REVIEW_INDEX + 1))
@@ -494,6 +503,27 @@ if [ "$REVIEW_WAVE_BLOCKED" -eq 0 ] && [ -s "$REVIEW_FAILED" ]; then
   fi
 fi
 if [ $((REVIEW_INITIAL_VALID_COUNT + REVIEW_REPAIR_VALID_COUNT)) -ne "$REVIEW_EXPECTED_COUNT" ]; then REVIEW_WAVE_BLOCKED=1; fi
+post_review_validated_evidence_complete() {
+  python3 -I -B - "$1" "$2" "${REVIEW_EDGES[@]}" <<'PY'
+import hashlib,json,os,re,stat,sys
+ledger,expected,*allowed=sys.argv[1:]; expected=int(expected)
+try:
+ rows=[json.loads(line) for line in open(ledger,encoding='utf-8') if line.strip()]
+ if len(rows)!=expected or len({row.get('edge') for row in rows})!=expected: raise ValueError()
+ if {row.get('edge') for row in rows}!={edge for edge in allowed}: raise ValueError()
+ for row in rows:
+  if set(row)!={'edge','index','result','sha256'} or type(row['index']) is not int: raise ValueError()
+  path=row['result']; digest=row['sha256']; entry=os.lstat(path)
+  if (not os.path.isabs(path) or os.path.basename(path)!='validated-result.md'
+      or not re.fullmatch(r'[0-9a-f]{64}',digest or '') or stat.S_ISLNK(entry.st_mode)
+      or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1
+      or (os.name!='nt' and stat.S_IMODE(entry.st_mode)!=0o400)): raise ValueError()
+  with open(path,'rb') as stream: payload=stream.read(1048577)
+  if len(payload)>1048576 or hashlib.sha256(payload).hexdigest()!=digest: raise ValueError()
+except (OSError,UnicodeError,ValueError,json.JSONDecodeError): raise SystemExit(2)
+PY
+}
+if ! post_review_validated_evidence_complete "$POST_REVIEW_VALIDATED_LEDGER" "$REVIEW_EXPECTED_COUNT"; then REVIEW_WAVE_BLOCKED=1; fi
 post_review_require_complete_wave() {
   local aggregate_path="${AGG_PATH:-$RESEARCH_DIR_ABS/post-impl-review-final.md}"
   if [ "${REVIEW_WAVE_BLOCKED:-1}" -eq 0 ] \
@@ -525,6 +555,9 @@ fi
 The executable boundary above gates the writer before interpreting any
 reviewer prose. A lifecycle failure or an exhausted format repair is not a
 review verdict and MUST NOT produce the ordinary six-row `Continue.` artifact.
+Aggregate only the byte-identical `validated-result.md` artifacts listed in
+`post-review.validated`; verify each recorded SHA-256 immediately before its
+artifact is read. Never re-read a provider-owned `result.md` during aggregation.
 
 Aggregate the 6 returns into the table format below plus the bottom line `Aggregated: N blockers, M suggestions. Continue.`
 

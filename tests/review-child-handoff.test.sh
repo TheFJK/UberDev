@@ -468,7 +468,45 @@ prompt=pathlib.Path(sys.argv[1]).read_bytes(); contract=pathlib.Path(sys.argv[2]
 needle=b'\n\n'+contract+b'\n\n## Immutable routed execution directive\n'
 assert prompt.count(contract)==1
 assert needle in prompt
+assert b'Return only a response matching the output contract above.' in prompt
+assert b'Return completed, blocked, or refused.' not in prompt
 PY
+
+# Reviewer validation is bound to the exact changed-path snapshot and emits a
+# byte-identical, digest-addressed canonical artifact for aggregation.
+VALID_RESULT="$TMP/reviewer-valid.md"
+OUT_OF_SCOPE_RESULT="$TMP/reviewer-out-of-scope.md"
+VALIDATED_RESULT="$TMP/reviewer-validated.md"
+cat >"$VALID_RESULT" <<'EOF_RESULT'
+```yaml
+verdict: REVISIONS_REQUIRED
+findings:
+  - severity: blocker
+    location: README.md:1
+    summary: bounded finding
+    detail: bounded detail
+confidence: high
+```
+EOF_RESULT
+cat >"$OUT_OF_SCOPE_RESULT" <<'EOF_RESULT'
+```yaml
+verdict: REVISIONS_REQUIRED
+findings:
+  - severity: blocker
+    location: src/outside.ts:1
+    summary: out of scope
+    detail: out of scope detail
+confidence: high
+```
+EOF_RESULT
+if uberdev_child_validate_phase1_review_result "$OUT_OF_SCOPE_RESULT" '["README.md"]' "$VALIDATED_RESULT" >/dev/null 2>&1; then
+  echo 'phase1 validator accepted a finding outside the reviewed path snapshot' >&2
+  exit 1
+fi
+VALIDATED_DIGEST="$(uberdev_child_validate_phase1_review_result "$VALID_RESULT" '["README.md"]' "$VALIDATED_RESULT")"
+[[ "$VALIDATED_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+cmp "$VALID_RESULT" "$VALIDATED_RESULT"
+[ "$(stat -f '%Lp' "$VALIDATED_RESULT" 2>/dev/null || stat -c '%a' "$VALIDATED_RESULT")" = 400 ]
 
 # Mutating review edges execute against the carrier-selected caller repository
 # identity and workspace binding. Reviewers remain isolated, and a different
@@ -853,13 +891,21 @@ set -u
 runtime="$1"; wait_all="$2"; run="$3"; flavor="$4"; mkdir -p "$run"
 wait_log="$run/wait.log"; unwind_log="$run/unwind.log"; : >"$wait_log"; : >"$unwind_log"
 . "$runtime"
+if [ "$flavor" = post ]; then
+  CHANGED_PATHS_JSON='["README.md"]'
+  POST_REVIEW_VALIDATED_LEDGER="$run/validated"
+  : >"$POST_REVIEW_VALIDATED_LEDGER"
+fi
 uberdev_wait_child() {
   printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$wait_log"
   case "$1" in *wait-fail-first.status) return 7 ;; *wait-fail-second.status) return 8 ;; *) return 0 ;; esac
 }
 # This fixture exercises wait-drain ordering only; reviewer-result validation
 # has its own behavioral coverage in the six-child integration test.
-uberdev_child_validate_phase1_review_result() { return 0; }
+uberdev_child_validate_phase1_review_result() {
+  if [ -n "${3:-}" ]; then rm -f "$3"; printf 'validated fixture\n' >"$3"; chmod 400 "$3"; printf '%064d' 0; fi
+  return 0
+}
 uberdev_unwind_child() {
   printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$unwind_log"
   case "$1" in *wait-fail-first.status) return 9 ;; *) return 0 ;; esac
@@ -898,8 +944,14 @@ cat >"$TMP/format-repair-ledger.sh" <<'SH'
 set -u
 runtime="$1"; run="$2"; mkdir -p "$run"
 . "$runtime"
+CHANGED_PATHS_JSON='["README.md"]'
+POST_REVIEW_VALIDATED_LEDGER="$run/validated"
+: >"$POST_REVIEW_VALIDATED_LEDGER"
 uberdev_wait_child() { return 0; }
-uberdev_child_validate_phase1_review_result() { case "$1" in *invalid.result) return 2 ;; *) return 0 ;; esac; }
+uberdev_child_validate_phase1_review_result() {
+  case "$1" in *invalid.result) return 2 ;; esac
+  rm -f "$3"; printf 'validated fixture\n' >"$3"; chmod 400 "$3"; printf '%064d' 0
+}
 uberdev_unwind_child() { return 0; }
 printf '%s\n' \
   "{\"edge\":\"first.edge\",\"status\":\"$run/first.status\",\"result\":\"$run/first.result\"}" \

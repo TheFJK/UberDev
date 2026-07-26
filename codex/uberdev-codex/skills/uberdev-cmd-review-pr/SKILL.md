@@ -201,10 +201,27 @@ if not matches:
 if len(matches)>1:
     fail('classification_ledger_duplicate')
 path=matches[0].get('result')
+status=matches[0].get('status')
 if (not isinstance(path,str) or not os.path.isabs(path)
         or os.path.basename(path)!='result.md'
         or os.path.basename(os.path.dirname(os.path.dirname(path)))!='children'):
     fail('classification_result_path_invalid')
+if (not isinstance(status,str) or not os.path.isabs(status)
+        or os.path.basename(status)!='status.json'
+        or os.path.dirname(status)!=os.path.dirname(path)):
+    fail('classification_status_path_invalid')
+try:
+    status_entry=os.lstat(status)
+    if (stat.S_ISLNK(status_entry.st_mode) or not stat.S_ISREG(status_entry.st_mode)
+            or status_entry.st_nlink!=1 or (uid is not None and status_entry.st_uid!=uid)
+            or status_entry.st_size<1 or status_entry.st_size>65536):
+        fail('classification_status_unsafe')
+    status_value=json.loads(open(status,encoding='utf-8').read())
+except (OSError,UnicodeError,json.JSONDecodeError):
+    fail('classification_status_unreadable')
+if (not isinstance(status_value,dict) or status_value.get('state')!='completed'
+        or type(status_value.get('exit_code')) is not int or status_value['exit_code']!=0):
+    fail('classification_child_not_completed_zero')
 try:
     entry=os.lstat(path)
 except FileNotFoundError:
@@ -408,6 +425,13 @@ if summarized:
     diff=('\n'.join(summary)+'\n').encode()
 else:
     diff=bytes(diff_buffer)
+def wrap_untrusted_diff(payload):
+    escaped=payload.replace(b'&',b'&amp;').replace(b'<',b'&lt;')
+    opening=b'<external-untrusted-input source="pr-diff">'
+    closing=b'</external-untrusted-input>'
+    wrapped=opening+b'\n'+escaped+closing+b'\n'
+    if wrapped.count(opening)!=1 or wrapped.count(closing)!=1: raise ValueError()
+    return wrapped
 def replace_private(path,payload):
     parent=os.path.dirname(path) or '.'
     fd,tmp=tempfile.mkstemp(prefix='.review-scope.',dir=parent)
@@ -419,7 +443,7 @@ def replace_private(path,payload):
     finally:
         try: os.unlink(tmp)
         except FileNotFoundError: pass
-replace_private(diff_path,b'<external-untrusted-input source="pr-diff">\n'+diff+b'</external-untrusted-input>\n')
+replace_private(diff_path,wrap_untrusted_diff(diff))
 expected_range=f'{base}..{head}\n'.encode()
 replace_private(range_path,expected_range)
 if open(range_path,'rb').read()!=expected_range: raise SystemExit(2)
@@ -566,7 +590,7 @@ PY
 
 6b. **Phase 2.5 — Findings-to-Issues sub-phase** (skip iff `DEFER_ISSUES_PHASE=0` OR `defer_issues_enabled=false`)
 
-    Reads the run aggregate artifacts produced by Phase 1 (`post-impl-review-final.md`) and Phase 2 (`simplify-final.md`), filters to deferred-critical rows (`severity ∈ {blocker, critical} AND disposition != APPLIED`), and persists them as durable GitHub issues with HTML-comment fingerprint dedupe. Default-on. Never fails the parent run.
+    Reads the run aggregate artifacts produced by Phase 1 (`post-impl-review-final.md`) and Phase 2 (`simplify-final.md`), filters all issue-eligible deferred rows (`severity ∈ {blocker, critical, important, major} AND disposition != APPLIED`), maps them to BLOCKER / CRITICAL / MAJOR tiers, and persists them as durable GitHub issues with HTML-comment fingerprint dedupe. Default-on. The parent halts only when at least one BLOCKER is deferred or when the `MAX_NEW` cap truncates a BLOCKER/CRITICAL row; major/important filings and non-overflow critical filings remain non-halting.
 
     **Effective-enabled gate:** the sub-phase runs only when BOTH the CLI flag AND the config key are ON. Either knob disables (CLI flag `DEFER_ISSUES_PHASE=1` AND config `DEFER_ISSUES_CONFIG=true`).
 
@@ -840,10 +864,17 @@ PY
       pr_number "$PR_NUMBER" \
       run_id "$(review_json_string "$CI_RUN_ID")" \
       log_path "$(review_json_string "$CI_LOG_ARTIFACT_PATH")")"
-    review_child_single review_pr.ci.classify "$(uberdev_child_instance_id "review-pr-${RUN_ID}-ci-classify-iter${CI_FIX_LOOP_ITER:-1}-attempt01")" "$CI_CLASSIFY_INPUTS" '[]' "$RESEARCH_DIR_ABS/ci-classify" "$REVIEW_PR_TIMEOUT"
+    if review_child_single review_pr.ci.classify "$(uberdev_child_instance_id "review-pr-${RUN_ID}-ci-classify-iter${CI_FIX_LOOP_ITER:-1}-attempt01")" "$CI_CLASSIFY_INPUTS" '[]' "$RESEARCH_DIR_ABS/ci-classify" "$REVIEW_PR_TIMEOUT"; then
+      :
+    else
+      CI_CLASSIFY_CHILD_RC=$?
+      audit ci_classify_returned subreason=classifier_child_failed exit_code="$CI_CLASSIFY_CHILD_RC"
+      OUTCOME=halted
+      exit 1
+    fi
     CI_CLASSIFICATION_PATH="$(review_child_result_path "$RESEARCH_DIR_ABS/ci-classify.launched" review_pr.ci.classify)" || {
       case "$CI_CLASSIFICATION_PATH" in
-        classification_ledger_missing|classification_ledger_unreadable|classification_ledger_unsafe|classification_ledger_malformed|classification_ledger_edge_missing|classification_ledger_duplicate|classification_result_path_invalid|classification_artifact_missing|classification_artifact_unreadable|classification_artifact_unsafe|classification_artifact_size_invalid) ;;
+        classification_ledger_missing|classification_ledger_unreadable|classification_ledger_unsafe|classification_ledger_malformed|classification_ledger_edge_missing|classification_ledger_duplicate|classification_result_path_invalid|classification_status_path_invalid|classification_status_unsafe|classification_status_unreadable|classification_child_not_completed_zero|classification_artifact_missing|classification_artifact_unreadable|classification_artifact_unsafe|classification_artifact_size_invalid) ;;
         *) CI_CLASSIFICATION_PATH=classification_result_discovery_failed ;;
       esac
       audit ci_classify_returned subreason="$CI_CLASSIFICATION_PATH"

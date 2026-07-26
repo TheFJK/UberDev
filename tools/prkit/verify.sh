@@ -152,28 +152,28 @@ expected_roles={
     'findings-to-issues','merge-strategy-decider','pr-test-analyzer',
     'silent-failure-hunter','trust-trail-evaluator','type-design-analyzer',
 }
-allowed_workflows={'review-pr','simplify'}
+allowed_workflows={'review-pr','simplify','solve','turbo'}
 contract_rel='shared/phase1-reviewer-output-v1.md'
 review_contract='phase1-reviewer-v1'
 edge_semantics={
     'review_pr.post_impl_review':('skill',None,None,None),
-    'review_pr.review.correctness':('provider','code-reviewer',('review-pr',),review_contract),
-    'review_pr.review.silent_failures':('provider','silent-failure-hunter',('review-pr',),review_contract),
-    'review_pr.review.types':('provider','type-design-analyzer',('review-pr',),review_contract),
-    'review_pr.review.comments':('provider','comment-analyzer',('review-pr',),review_contract),
-    'review_pr.review.tests':('provider','pr-test-analyzer',('review-pr',),review_contract),
-    'review_pr.review.general':('provider','code-reviewer',('review-pr',),review_contract),
-    'review_pr.fix.phase1':('provider','code-fixer',('review-pr',),None),
-    'review_pr.simplify.reuse':('provider','code-simplifier',('review-pr','simplify'),None),
-    'review_pr.simplify.quality':('provider','code-simplifier',('review-pr','simplify'),None),
-    'review_pr.simplify.efficiency':('provider','code-simplifier',('review-pr','simplify'),None),
-    'review_pr.fix.phase2':('provider','code-fixer',('review-pr','simplify'),None),
-    'review_pr.defer.findings':('provider','findings-to-issues',('review-pr','simplify'),None),
-    'review_pr.ci.classify':('provider','ci-failure-classifier',('review-pr',),None),
-    'review_pr.ci.fix_code':('provider','ci-code-fixer',('review-pr',),None),
-    'review_pr.ci.rebase':('provider','ci-rebase-handler',('review-pr',),None),
-    'review_pr.ci.defer_refusal':('provider','findings-to-issues',('review-pr',),None),
-    'review_pr.ci.resolve_conflict':('provider','conflict-resolver',('review-pr',),None),
+    'review_pr.review.correctness':('provider','code-reviewer',('review-pr','solve','turbo'),review_contract),
+    'review_pr.review.silent_failures':('provider','silent-failure-hunter',('review-pr','solve','turbo'),review_contract),
+    'review_pr.review.types':('provider','type-design-analyzer',('review-pr','solve','turbo'),review_contract),
+    'review_pr.review.comments':('provider','comment-analyzer',('review-pr','solve','turbo'),review_contract),
+    'review_pr.review.tests':('provider','pr-test-analyzer',('review-pr','solve','turbo'),review_contract),
+    'review_pr.review.general':('provider','code-reviewer',('review-pr','solve','turbo'),review_contract),
+    'review_pr.fix.phase1':('provider','code-fixer',('review-pr','solve','turbo'),None),
+    'review_pr.simplify.reuse':('provider','code-simplifier',('review-pr','simplify','solve','turbo'),None),
+    'review_pr.simplify.quality':('provider','code-simplifier',('review-pr','simplify','solve','turbo'),None),
+    'review_pr.simplify.efficiency':('provider','code-simplifier',('review-pr','simplify','solve','turbo'),None),
+    'review_pr.fix.phase2':('provider','code-fixer',('review-pr','simplify','solve','turbo'),None),
+    'review_pr.defer.findings':('provider','findings-to-issues',('review-pr','simplify','solve','turbo'),None),
+    'review_pr.ci.classify':('provider','ci-failure-classifier',('review-pr','solve','turbo'),None),
+    'review_pr.ci.fix_code':('provider','ci-code-fixer',('review-pr','solve','turbo'),None),
+    'review_pr.ci.rebase':('provider','ci-rebase-handler',('review-pr','solve','turbo'),None),
+    'review_pr.ci.defer_refusal':('provider','findings-to-issues',('review-pr','solve','turbo'),None),
+    'review_pr.ci.resolve_conflict':('provider','conflict-resolver',('review-pr','solve','turbo'),None),
 }
 expected_edges=set(edge_semantics)
 

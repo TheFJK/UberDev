@@ -205,6 +205,10 @@ assert_no_grep "$REVIEW_PR" 'tmp-synthetic-aggregate|freshly-created `mktemp`' \
   "S10.10 — CI refusal handoff no longer points at a system mktemp artifact"
 assert_grep "$REVIEW_PR" 'review_child_result_path.*ci-classify\.launched.*review_pr\.ci\.classify' \
   "S10.10a — classifier validation resolves the routed child's canonical result ledger"
+assert_grep "$REVIEW_PR" 'if review_child_single review_pr\.ci\.classify' \
+  "S10.10a1 — classifier lifecycle failure is checked before artifact discovery"
+assert_grep "$REVIEW_PR" 'classifier_child_failed' \
+  "S10.10a2 — classifier lifecycle failure is audited and halts routing"
 assert_no_grep "$REVIEW_PR" 'CI_CLASSIFICATION_PATH="\$RESEARCH_DIR_ABS/ci-classification-' \
   "S10.10b — classifier validation does not read an artifact no child writes"
 assert_grep "$REVIEW_PR" 'os\.write\(fd,payload\)' \
@@ -395,15 +399,17 @@ awk '
 ' "$REVIEW_PR" > "$RESULT_PATH_HELPER"
 mkdir -p "$RESULT_PATH_TMP/run/children/classifier"
 RESULT_PATH="$RESULT_PATH_TMP/run/children/classifier/result.md"
+RESULT_STATUS="$RESULT_PATH_TMP/run/children/classifier/status.json"
 RESULT_LEDGER="$RESULT_PATH_TMP/classifier.launched"
 printf 'classifier result\n' > "$RESULT_PATH"
-printf '{"edge":"review_pr.ci.classify","result":"%s"}\n' "$RESULT_PATH" > "$RESULT_LEDGER"
+printf '{"state":"completed","exit_code":0}\n' > "$RESULT_STATUS"
+printf '{"edge":"review_pr.ci.classify","result":"%s","status":"%s"}\n' "$RESULT_PATH" "$RESULT_STATUS" > "$RESULT_LEDGER"
 RESULT_PATH_RESOLVED="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER")"
 RESULT_PATH_EXPECTED="$(python3 -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]),end="")' "$RESULT_PATH")"
 RESULT_PATH_INVALID=0
 [ "$RESULT_PATH_RESOLVED" = "$RESULT_PATH_EXPECTED" ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
-printf '{"edge":"review_pr.ci.classify","result":"%s"}\n{"edge":"review_pr.ci.classify","result":"%s"}\n' \
-  "$RESULT_PATH" "$RESULT_PATH" > "$RESULT_LEDGER"
+printf '{"edge":"review_pr.ci.classify","result":"%s","status":"%s"}\n{"edge":"review_pr.ci.classify","result":"%s","status":"%s"}\n' \
+  "$RESULT_PATH" "$RESULT_STATUS" "$RESULT_PATH" "$RESULT_STATUS" > "$RESULT_LEDGER"
 RESULT_REASON="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \
   && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 [ "$RESULT_REASON" = classification_ledger_duplicate ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
@@ -415,21 +421,32 @@ printf '[]\n' > "$RESULT_LEDGER"
 RESULT_REASON="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \
   && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 [ "$RESULT_REASON" = classification_ledger_malformed ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
-printf '{"edge":"review_pr.ci.classify","result":"%s"}\n' "$RESULT_PATH_TMP/run/children/missing/result.md" > "$RESULT_LEDGER"
+mkdir -p "$RESULT_PATH_TMP/run/children/missing"
+MISSING_STATUS="$RESULT_PATH_TMP/run/children/missing/status.json"
+printf '{"state":"completed","exit_code":0}\n' > "$MISSING_STATUS"
+printf '{"edge":"review_pr.ci.classify","result":"%s","status":"%s"}\n' "$RESULT_PATH_TMP/run/children/missing/result.md" "$MISSING_STATUS" > "$RESULT_LEDGER"
 RESULT_REASON="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \
   && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 [ "$RESULT_REASON" = classification_artifact_missing ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 mv "$RESULT_PATH" "$RESULT_PATH.real"
 ln -s "$RESULT_PATH.real" "$RESULT_PATH"
-printf '{"edge":"review_pr.ci.classify","result":"%s"}\n' "$RESULT_PATH" > "$RESULT_LEDGER"
+printf '{"edge":"review_pr.ci.classify","result":"%s","status":"%s"}\n' "$RESULT_PATH" "$RESULT_STATUS" > "$RESULT_LEDGER"
 bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify >/dev/null' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" \
   && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 rm -f "$RESULT_PATH"
 ln "$RESULT_PATH.real" "$RESULT_PATH"
 bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify >/dev/null' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" \
   && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+rm -f "$RESULT_PATH"
+cp "$RESULT_PATH.real" "$RESULT_PATH"
+printf '{"state":"failed","exit_code":9}\n' > "$RESULT_STATUS"
+bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify >/dev/null' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" \
+  && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+printf '{"state":"completed","exit_code":7}\n' > "$RESULT_STATUS"
+bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify >/dev/null' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" \
+  && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 if [ "$RESULT_PATH_INVALID" -eq 0 ]; then
-  echo "  PASS  S10.15 — classifier result ledger accepts one canonical result and rejects duplicate, malformed, missing, symlink, and hard-link artifacts"; PASS=$((PASS + 1))
+  echo "  PASS  S10.15 — classifier result ledger requires one canonical completed-zero child and rejects unsafe artifacts"; PASS=$((PASS + 1))
 else
   echo "  FAIL  S10.15 — classifier result-path boundary accepted $RESULT_PATH_INVALID invalid cases"; FAIL=$((FAIL + 1))
 fi
