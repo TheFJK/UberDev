@@ -146,7 +146,7 @@ fi
 if python3 -I -B - "$ROOT" <<'PY'
 import json,pathlib,sys
 root=pathlib.Path(sys.argv[1])
-shipped_roles={
+expected_roles={
     'ci-code-fixer','ci-failure-classifier','ci-rebase-handler','code-fixer',
     'code-reviewer','code-simplifier','comment-analyzer','conflict-resolver',
     'findings-to-issues','merge-strategy-decider','pr-test-analyzer',
@@ -159,6 +159,28 @@ review_edges={
     'review_pr.review.tests','review_pr.review.general',
 }
 contract_rel='shared/phase1-reviewer-output-v1.md'
+structural_edges={'review_pr.post_impl_review'}
+provider_edges={
+    'review_pr.review.correctness','review_pr.review.silent_failures',
+    'review_pr.review.types','review_pr.review.comments',
+    'review_pr.review.tests','review_pr.review.general',
+    'review_pr.fix.phase1','review_pr.simplify.reuse',
+    'review_pr.simplify.quality','review_pr.simplify.efficiency',
+    'review_pr.fix.phase2','review_pr.defer.findings','review_pr.ci.classify',
+    'review_pr.ci.fix_code','review_pr.ci.rebase','review_pr.ci.defer_refusal',
+    'review_pr.ci.resolve_conflict',
+}
+expected_edges=structural_edges|provider_edges
+
+claude_roles={path.stem for path in (root/'plugins/prkit/agents').glob('*.md')}
+codex_roles={
+    path.name.removeprefix('prkit-').removesuffix('.toml')
+    for path in (root/'codex/agents').glob('prkit-*.toml')
+}
+assert claude_roles==expected_roles, ('claude role fleet',sorted(claude_roles))
+assert codex_roles==expected_roles, ('codex role fleet',sorted(codex_roles))
+assert claude_roles==codex_roles
+shipped_roles=claude_roles
 
 def reject_pairs(pairs):
     result={}
@@ -183,12 +205,15 @@ def validate(plugin):
     tree=strict_load(raw)
     canonical=(json.dumps(tree,sort_keys=True,allow_nan=False,indent=2)+'\n').encode()
     assert raw==canonical, f'non-deterministic policy serialization: {policy}'
+    assert set(tree)=={'schema_version','tree_id','root_edge_id','output_contracts','edges'}
+    assert tree.get('schema_version')==1
     assert tree.get('tree_id')=='review-pr-run-tree-v1'
     assert tree.get('root_edge_id')=='review_pr.post_impl_review'
     edges=tree.get('edges')
     assert isinstance(edges,dict) and edges
-    assert all(isinstance(edge_id,str) and edge_id.startswith('review_pr.') for edge_id in edges)
-    assert edges.get('review_pr.post_impl_review',{}).get('kind')=='skill'
+    assert set(edges)==expected_edges
+    assert all(edges[edge_id].get('kind')=='skill' for edge_id in structural_edges)
+    assert all(edges[edge_id].get('kind')=='provider' for edge_id in provider_edges)
     referenced_contracts=set()
     for edge_id,edge in edges.items():
         assert isinstance(edge,dict), edge_id

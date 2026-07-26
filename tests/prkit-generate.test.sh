@@ -103,21 +103,50 @@ root=pathlib.Path(sys.argv[1])
 claude_path=root/'plugins/prkit/policy/solve-run-tree-v1.json'
 codex_path=root/'codex/prkit-codex/policy/solve-run-tree-v1.json'
 assert claude_path.read_bytes()==codex_path.read_bytes()
-tree=json.loads(claude_path.read_text())
+
+def reject_pairs(pairs):
+ result={}
+ for key,value in pairs:
+  if key in result: raise ValueError(f'duplicate JSON key: {key}')
+  result[key]=value
+ return result
+
+tree=json.loads(
+ claude_path.read_text(),
+ object_pairs_hook=reject_pairs,
+ parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f'non-finite JSON constant: {value}')),
+)
+assert set(tree)=={'schema_version','tree_id','root_edge_id','output_contracts','edges'}
 edges=tree['edges']; assert edges
-assert all(edge_id.startswith('review_pr.') for edge_id in edges)
-assert 'review_pr.post_impl_review' in edges
-shipped_roles={
+expected_roles={
  'ci-code-fixer','ci-failure-classifier','ci-rebase-handler','code-fixer',
  'code-reviewer','code-simplifier','comment-analyzer','conflict-resolver',
  'findings-to-issues','merge-strategy-decider','pr-test-analyzer',
  'silent-failure-hunter','trust-trail-evaluator','type-design-analyzer',
 }
+claude_roles={path.stem for path in (root/'plugins/prkit/agents').glob('*.md')}
+codex_roles={path.name.removeprefix('prkit-').removesuffix('.toml') for path in (root/'codex/agents').glob('prkit-*.toml')}
+assert claude_roles==codex_roles==expected_roles
+structural_edges={'review_pr.post_impl_review'}
+provider_edges={
+ 'review_pr.review.correctness','review_pr.review.silent_failures',
+ 'review_pr.review.types','review_pr.review.comments','review_pr.review.tests',
+ 'review_pr.review.general','review_pr.fix.phase1','review_pr.simplify.reuse',
+ 'review_pr.simplify.quality','review_pr.simplify.efficiency',
+ 'review_pr.fix.phase2','review_pr.defer.findings','review_pr.ci.classify',
+ 'review_pr.ci.fix_code','review_pr.ci.rebase','review_pr.ci.defer_refusal',
+ 'review_pr.ci.resolve_conflict',
+}
+assert set(edges)==structural_edges|provider_edges
+assert all(edges[edge_id].get('kind')=='skill' for edge_id in structural_edges)
+assert all(edges[edge_id].get('kind')=='provider' for edge_id in provider_edges)
 for edge in edges.values():
  workflows=edge.get('allowed_workflows',[])
  assert all(workflow in {'review-pr','simplify'} for workflow in workflows)
  assert 'solve' not in workflows and 'turbo' not in workflows
- if edge.get('kind')=='provider': assert edge.get('role') in shipped_roles
+ if edge.get('kind')=='provider':
+  assert workflows
+  assert edge.get('role') in claude_roles
 referenced={edge['output_contract'] for edge in edges.values() if 'output_contract' in edge}
 assert set(tree.get('output_contracts',{}))==referenced
 contract=(root/'codex/prkit-codex/shared/phase1-reviewer-output-v1.md').read_text()
