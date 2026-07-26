@@ -266,6 +266,18 @@ PY
   DISPATCH_ID="opaque:test-handle"
   DISPATCH_LOG=""
   case "$5" in
+    *fast-terminal-race.md)
+      printf 'fast terminal result\n' > "$5"
+      printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
+      chmod 600 "$6"
+      printf 'ready\n' > "$FAST_TERMINAL_READY"
+      fast_terminal_wait=0
+      while [ ! -e "$FAST_TERMINAL_RESUME" ] && [ "$fast_terminal_wait" -lt 500 ]; do
+        command sleep 0.01
+        fast_terminal_wait=$((fast_terminal_wait + 1))
+      done
+      [ -e "$FAST_TERMINAL_RESUME" ] || return 98
+      ;;
     *sync-result.md)
       printf 'synchronous result\n' > "$5"
       printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
@@ -978,6 +990,99 @@ assert [event["event"] for event in sync] == ["route_decided", "agent_started", 
 PY
 if grep -R -q 'run_id=agent-dispatch-sync' "$STATE_DIR/semaphore-v1" 2>/dev/null; then
   echo "synchronously completed dispatch retained its lease" >&2
+  exit 1
+fi
+
+# A provider may publish terminal status before the adapter binds its handle.
+# Force a sibling acquisition to reconcile during that exact window: the
+# unexpired pre-handle generation must survive, bind, and finalize exactly once.
+FAST_TERMINAL_READY="$TMP/run/fast-terminal-ready"
+FAST_TERMINAL_RESUME="$TMP/run/fast-terminal-resume"
+export FAST_TERMINAL_READY FAST_TERMINAL_RESUME
+FAST_TERMINAL_REQUEST="$(variant_request agent-dispatch-fast-terminal-prehandle inherit)"
+(fast_terminal_output="$(uberdev_agent_dispatch "$FAST_TERMINAL_REQUEST" "$TMP/run/prompt.txt" \
+  "$TMP/run/fast-terminal-race.md" "$TMP/run/fast-terminal-race.json")"; \
+  printf '%s' "$fast_terminal_output") \
+  >"$TMP/run/fast-terminal-race.out" 2>"$TMP/run/fast-terminal-race.err" &
+fast_terminal_pid=$!
+fast_terminal_ready_tries=0
+while [ ! -s "$FAST_TERMINAL_READY" ] && [ "$fast_terminal_ready_tries" -lt 500 ]; do
+  command sleep 0.01
+  fast_terminal_ready_tries=$((fast_terminal_ready_tries + 1))
+done
+[ -s "$FAST_TERMINAL_READY" ] || {
+  echo "fast-terminal provider did not reach the pre-handle pause" >&2
+  kill "$fast_terminal_pid" 2>/dev/null || true
+  wait "$fast_terminal_pid" 2>/dev/null || true
+  exit 1
+}
+fast_terminal_lease="$({ grep -R -F -x -l -- \
+  'run_id=agent-dispatch-fast-terminal-prehandle' "$STATE_DIR/semaphore-v1" 2>/dev/null | head -1; } || true)"
+[ -n "$fast_terminal_lease" ] && grep -q '^backend_handle=$' "$fast_terminal_lease" || {
+  echo "fast-terminal fixture was not paused with an unbound lease" >&2
+  : >"$FAST_TERMINAL_RESUME"
+  wait "$fast_terminal_pid" 2>/dev/null || true
+  exit 1
+}
+fast_terminal_generation="$(sed -n 's/^generation=//p' "$fast_terminal_lease")"
+# Stock Bash 3.2 review wrappers can publish a waitable owner that exits while
+# the outer dispatcher is still paused here. Recreate that exact durable state
+# without weakening the real mutex, secure writer, generation, or CAS path.
+command sleep 30 & fast_terminal_transient_owner=$!
+fast_terminal_transient_identity="$(_uberdev_semaphore_process_identity \
+  "$fast_terminal_transient_owner")"
+kill "$fast_terminal_transient_owner"
+wait "$fast_terminal_transient_owner" 2>/dev/null || true
+fast_terminal_scope="$(dirname "$fast_terminal_lease")"
+_uberdev_semaphore_mutex_acquire "$fast_terminal_scope"
+_uberdev_semaphore_read_lease "$fast_terminal_lease"
+_uberdev_semaphore_publish_lease "$fast_terminal_scope" "$fast_terminal_lease" \
+  "$_UBERDEV_LEASE_RUN_ID" "$fast_terminal_transient_owner" \
+  "$fast_terminal_transient_identity" '' '' "$_UBERDEV_LEASE_START_EPOCH" \
+  "$_UBERDEV_LEASE_TIMEOUT_S" "$_UBERDEV_LEASE_STATUS_PATH"
+_uberdev_semaphore_mutex_release "$fast_terminal_scope"
+if kill -0 "$fast_terminal_transient_owner" 2>/dev/null \
+    || [ "$(sed -n 's/^owner_pid=//p' "$fast_terminal_lease")" != "$fast_terminal_transient_owner" ]; then
+  echo "fast-terminal fixture did not publish an exact absent owner" >&2
+  : >"$FAST_TERMINAL_RESUME"
+  wait "$fast_terminal_pid" 2>/dev/null || true
+  exit 1
+fi
+fast_terminal_sibling="$(uberdev_semaphore_acquire "$STATE_DIR" fixture-repository codex 20 \
+  agent-dispatch-fast-terminal-sibling 30)"
+if [ -f "$fast_terminal_lease" ] \
+    && [ "$(sed -n 's/^generation=//p' "$fast_terminal_lease")" = "$fast_terminal_generation" ]; then
+  fast_terminal_survived=1
+else
+  fast_terminal_survived=0
+fi
+uberdev_semaphore_release "$fast_terminal_sibling"
+: >"$FAST_TERMINAL_RESUME"
+if wait "$fast_terminal_pid"; then
+  fast_terminal_rc=0
+else
+  fast_terminal_rc=$?
+fi
+if [ "$fast_terminal_survived" -ne 1 ]; then
+  echo "sibling reconciliation reclaimed a live terminal pre-handle lease" >&2
+  exit 1
+fi
+if [ "$fast_terminal_rc" -ne 0 ]; then
+  echo "fast-terminal dispatch failed after sibling reconciliation: rc=$fast_terminal_rc" >&2
+  sed -n '1,80p' "$TMP/run/fast-terminal-race.err" >&2
+  exit 1
+fi
+wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" \
+  agent-dispatch-fast-terminal-prehandle completed 80 0.1 "$TMP/run/fast-terminal-race.json"
+python3 -I -B - "$STATE_DIR/agent-lifecycle.jsonl" <<'PY'
+import json, pathlib, sys
+events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+actual = [event["event"] for event in events if event["run_id"] == "agent-dispatch-fast-terminal-prehandle"]
+assert actual == ["route_decided", "agent_started", "completed"], actual
+PY
+if grep -R -F -x -q -- 'run_id=agent-dispatch-fast-terminal-prehandle' \
+    "$STATE_DIR/semaphore-v1" 2>/dev/null; then
+  echo "fast-terminal dispatch retained its lease after exact finalization" >&2
   exit 1
 fi
 

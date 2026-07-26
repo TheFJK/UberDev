@@ -831,9 +831,19 @@ _uberdev_semaphore_reconcile_locked() {
       return 2
     fi
     status_kind="$(_uberdev_semaphore_status_kind "$_UBERDEV_LEASE_STATUS_PATH")" || return 2
+    age=$((now - _UBERDEV_LEASE_START_EPOCH))
+    [ "$age" -ge 0 ] || age=0
     remove=0
     if [ "$status_kind" = 'terminal' ]; then
-      remove=1
+      # Provider status can terminalize before the dispatcher binds its handle.
+      # Owner liveness is non-authoritative in that bounded pre-handle window:
+      # Bash 3.2 may expose an already-exited waitable wrapper while the outer
+      # dispatcher is still running and able to bind the provider handle.
+      if [ -n "$_UBERDEV_LEASE_BACKEND_HANDLE" ]; then
+        remove=1
+      elif [ "$age" -gt "$_UBERDEV_LEASE_TIMEOUT_S" ]; then
+        remove=1
+      fi
     else
       owner_live=0
       backend_live=0
@@ -855,8 +865,6 @@ _uberdev_semaphore_reconcile_locked() {
         probe_rc=$?
         [ "$probe_rc" -ne 2 ] || return 2
       fi
-      age=$((now - _UBERDEV_LEASE_START_EPOCH))
-      [ "$age" -ge 0 ] || age=0
       if [ "$owner_live" -eq 0 ] && [ "$backend_live" -eq 0 ]; then
         remove=1
       elif [ "$age" -gt "$_UBERDEV_LEASE_TIMEOUT_S" ] && [ "$backend_live" -eq 0 ]; then

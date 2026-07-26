@@ -1224,6 +1224,112 @@ else
   fail "terminal status releases a lease even when its process still exists" "rc=$CAPTURE_RC removed=$CAPTURE_OUT"
 fi
 
+printf '== live semaphore: terminal pre-handle reconciliation ==\n'
+PREHANDLE_STATE="$TMP/terminal-prehandle-state"
+prehandle_status="$TMP/terminal-prehandle-status.json"
+cp "$FIXTURES/terminal-status.json" "$prehandle_status"
+prehandle_record=''
+uberdev_semaphore_acquire "$PREHANDLE_STATE" repo codex 1 terminal-prehandle-live 30 \
+  exact-identity prehandle_record || fail "acquire live terminal pre-handle lease" "acquisition failed"
+IFS=$'\t' read -r prehandle_lease prehandle_identity <<EOF_PREHANDLE
+$prehandle_record
+EOF_PREHANDLE
+prehandle_registered_identity=''
+uberdev_semaphore_set_handle "$prehandle_lease" '' "$prehandle_status" \
+  exact-identity prehandle_registered_identity \
+  || fail "register live terminal pre-handle status" "registration failed"
+capture uberdev_semaphore_reconcile "$PREHANDLE_STATE" repo codex
+prehandle_live_rc="$CAPTURE_RC"
+prehandle_live_out="$CAPTURE_OUT"
+prehandle_bound_identity=''
+if uberdev_semaphore_set_handle "$prehandle_lease" 'opaque:terminal-prehandle' "$prehandle_status" \
+    exact-identity prehandle_bound_identity; then
+  prehandle_bind_rc=0
+else
+  prehandle_bind_rc=$?
+fi
+capture uberdev_semaphore_reconcile "$PREHANDLE_STATE" repo codex
+if [ "$prehandle_live_rc" -eq 0 ] && [ "$prehandle_live_out" = 0 ] \
+    && [ "$prehandle_bind_rc" -eq 0 ] && [ -n "$prehandle_bound_identity" ] \
+    && [ "${prehandle_identity##*:}" = "${prehandle_registered_identity##*:}" ] \
+    && [ "${prehandle_identity##*:}" = "${prehandle_bound_identity##*:}" ] \
+    && [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = 1 ] && [ ! -e "$prehandle_lease" ]; then
+  pass "live unexpired terminal pre-handle survives reconciliation until its handle binds"
+else
+  fail "live unexpired terminal pre-handle survives reconciliation until its handle binds" \
+    "reconcile=$prehandle_live_rc/$prehandle_live_out bind=$prehandle_bind_rc final=$CAPTURE_RC/$CAPTURE_OUT lease=$(test -e "$prehandle_lease" && printf present || printf absent)"
+fi
+
+PREHANDLE_DEAD_STATE="$TMP/terminal-prehandle-dead-state"
+prehandle_dead_path_file="$TMP/terminal-prehandle-dead-path"
+/bin/bash -c '
+  . "$1"
+  owner_pid="${BASHPID:-$$}"
+  lease="$(UBERDEV_SEMAPHORE_OWNER_PID="$owner_pid" \
+    uberdev_semaphore_acquire "$2" repo codex 1 terminal-prehandle-dead 1)" || exit 1
+  uberdev_semaphore_set_handle "$lease" "" "$3" || exit 1
+  printf "%s\n" "$lease" >"$4"
+' _ "$LIB" "$PREHANDLE_DEAD_STATE" "$prehandle_status" "$prehandle_dead_path_file"
+prehandle_dead_lease="$(cat "$prehandle_dead_path_file")"
+capture uberdev_semaphore_reconcile "$PREHANDLE_DEAD_STATE" repo codex
+prehandle_dead_fresh_rc="$CAPTURE_RC"
+prehandle_dead_fresh_out="$CAPTURE_OUT"
+prehandle_dead_fresh_present=0
+[ ! -f "$prehandle_dead_lease" ] || prehandle_dead_fresh_present=1
+sleep 2
+capture uberdev_semaphore_reconcile "$PREHANDLE_DEAD_STATE" repo codex
+if [ -n "$prehandle_dead_lease" ] && [ "$prehandle_dead_fresh_rc" -eq 0 ] \
+    && [ "$prehandle_dead_fresh_out" = 0 ] && [ "$prehandle_dead_fresh_present" -eq 1 ] \
+    && [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = 1 ] && [ ! -e "$prehandle_dead_lease" ]; then
+  pass "dead-owner terminal pre-handle is retained only until its deadline"
+else
+  fail "dead-owner terminal pre-handle is retained only until its deadline" \
+    "fresh=$prehandle_dead_fresh_rc/$prehandle_dead_fresh_out/$prehandle_dead_fresh_present expired=$CAPTURE_RC/$CAPTURE_OUT lease=$(test -e "$prehandle_dead_lease" && printf present || printf absent)"
+fi
+
+PREHANDLE_EXPIRED_STATE="$TMP/terminal-prehandle-expired-state"
+prehandle_expired_record=''
+uberdev_semaphore_acquire "$PREHANDLE_EXPIRED_STATE" repo codex 1 terminal-prehandle-expired 1 \
+  exact-identity prehandle_expired_record || fail "acquire expiring terminal pre-handle lease" "acquisition failed"
+IFS=$'\t' read -r prehandle_expired_lease _ <<EOF_EXPIRED
+$prehandle_expired_record
+EOF_EXPIRED
+uberdev_semaphore_set_handle "$prehandle_expired_lease" '' "$prehandle_status" >/dev/null \
+  || fail "register expiring terminal pre-handle status" "registration failed"
+sleep 2
+capture uberdev_semaphore_reconcile "$PREHANDLE_EXPIRED_STATE" repo codex
+if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = 1 ] && [ ! -e "$prehandle_expired_lease" ]; then
+  pass "expired terminal pre-handle is reclaimed even while its owner is live"
+else
+  fail "expired terminal pre-handle is reclaimed even while its owner is live" \
+    "rc=$CAPTURE_RC removed=$CAPTURE_OUT lease=$(test -e "$prehandle_expired_lease" && printf present || printf absent)"
+fi
+
+PREHANDLE_UNKNOWN_STATE="$TMP/terminal-prehandle-unknown-state"
+prehandle_probe_sentinel="$TMP/terminal-prehandle-owner-probe-called"
+prehandle_unknown_record=''
+uberdev_semaphore_acquire "$PREHANDLE_UNKNOWN_STATE" repo codex 1 terminal-prehandle-unknown 30 \
+  exact-identity prehandle_unknown_record || fail "acquire unknown-owner terminal pre-handle lease" "acquisition failed"
+IFS=$'\t' read -r prehandle_unknown_lease _ <<EOF_UNKNOWN
+$prehandle_unknown_record
+EOF_UNKNOWN
+uberdev_semaphore_set_handle "$prehandle_unknown_lease" '' "$prehandle_status" >/dev/null \
+  || fail "register unknown-owner terminal pre-handle status" "registration failed"
+capture /bin/bash -c '
+  . "$1"
+  probe_sentinel="$3"
+  _uberdev_semaphore_process_identity() { printf "called\n" >"$probe_sentinel"; return 2; }
+  uberdev_semaphore_reconcile "$2" repo codex
+' _ "$LIB" "$PREHANDLE_UNKNOWN_STATE" "$prehandle_probe_sentinel"
+if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = 0 ] \
+    && [ -f "$prehandle_unknown_lease" ] && [ ! -e "$prehandle_probe_sentinel" ]; then
+  pass "fresh terminal pre-handle retention does not consult owner liveness"
+else
+  fail "fresh terminal pre-handle retention does not consult owner liveness" \
+    "rc=$CAPTURE_RC out=$CAPTURE_OUT probe=$(test -e "$prehandle_probe_sentinel" && printf called || printf untouched) lease=$(test -e "$prehandle_unknown_lease" && printf present || printf absent)"
+fi
+uberdev_semaphore_release "$prehandle_unknown_lease" >/dev/null 2>&1 || true
+
 printf '== live semaphore: bounded and recoverable mutex ==\n'
 MUTEX_STATE="$TMP/mutex-state"
 mutex_lease="$(uberdev_semaphore_acquire "$MUTEX_STATE" repo codex 1 seed 5)"
