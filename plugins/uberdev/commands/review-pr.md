@@ -281,8 +281,38 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
 3. **Identify Changed Files**
    - Run `git diff --name-only` to see modified files
-   - Check if PR already exists: `gh pr view`
+   - Resolve the selected PR explicitly in the current repository; never rely
+     on branch inference from a bare `gh pr view`.
    - Identify file types and what reviews apply
+
+   ```bash uberdev-executable origin=review-pr
+   review_assert_selected_pr_head() {
+     local repo_slug="$1" pr_number="$2" expected_head="$3" worktree_root="$4"
+     local live_head local_head
+     [[ "$repo_slug" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 2
+     [[ "$pr_number" =~ ^[1-9][0-9]*$ ]] || return 2
+     [[ "$expected_head" =~ ^[0-9a-f]{40}$ ]] || return 2
+     live_head="$(gh pr view "$pr_number" --repo "$repo_slug" --json headRefOid --jq .headRefOid 2>/dev/null)" || return 2
+     local_head="$(git -C "$worktree_root" rev-parse HEAD 2>/dev/null)" || return 2
+     [ "$live_head" = "$expected_head" ] && [ "$local_head" = "$expected_head" ]
+   }
+   REVIEW_REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
+   REVIEW_PR_METADATA="$(gh pr view "$PR_NUMBER" --repo "$REVIEW_REPO_SLUG" \
+     --json number,baseRefOid,baseRefName,headRefOid)"
+   REVIEWED_HEAD_SHA="$(printf '%s' "$REVIEW_PR_METADATA" | jq -er '.headRefOid')"
+   review_assert_selected_pr_head "$REVIEW_REPO_SLUG" "$PR_NUMBER" \
+     "$REVIEWED_HEAD_SHA" "$WORKTREE_ROOT" || {
+       echo "error: selected PR head does not equal local HEAD; refusing review dispatch" >&2
+       OUTCOME=halted
+       exit 2
+     }
+   ```
+
+   This assertion runs before the first Phase 1 dispatch. On every Phase 1
+   re-entry, re-read the live `headRefOid` with the same explicit repository and
+   PR number, require it to equal local HEAD, then replace
+   `REVIEWED_HEAD_SHA`. A mismatch halts before reviewer/fixer dispatch, push,
+   or trust emission.
 
 4. **Phase 1 — Dispatch `Skill(uberdev:post-impl-review)`**
 
@@ -329,12 +359,12 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
    ```bash
    review_resolve_phase1_base() {
-     python3 -I -B - "$1" "$2" <<'PY'
+     python3 -I -B - "$1" "$2" "$3" <<'PY'
 import json,re,subprocess,sys
-pr,root=sys.argv[1:]
+pr,root,repo=sys.argv[1:]
 if re.fullmatch(r'[1-9][0-9]*',pr) is None: raise SystemExit(2)
 metadata=json.loads(subprocess.check_output(
-    ['gh','pr','view',pr,'--json','baseRefOid,baseRefName'],text=True))
+    ['gh','pr','view',pr,'--repo',repo,'--json','baseRefOid,baseRefName'],text=True))
 base_oid=metadata.get('baseRefOid'); base_name=metadata.get('baseRefName')
 if re.fullmatch(r'[0-9a-f]{40}',base_oid or '') is None or not isinstance(base_name,str) or not base_name:
     raise SystemExit(2)
@@ -427,7 +457,10 @@ print(json.dumps(paths,separators=(',',':')),end='')
 PY
 )" || return 2
    }
-   BASE_SHA="$(review_resolve_phase1_base "$PR_NUMBER" "$WORKTREE_ROOT")" || return 2
+   BASE_SHA="$(review_resolve_phase1_base "$PR_NUMBER" "$WORKTREE_ROOT" "$REVIEW_REPO_SLUG")" || return 2
+   REENTRY_HEAD_SHA="$(gh pr view "$PR_NUMBER" --repo "$REVIEW_REPO_SLUG" --json headRefOid --jq .headRefOid)" || return 2
+   review_assert_selected_pr_head "$REVIEW_REPO_SLUG" "$PR_NUMBER" "$REENTRY_HEAD_SHA" "$WORKTREE_ROOT" || return 2
+   REVIEWED_HEAD_SHA="$REENTRY_HEAD_SHA"
    review_refresh_phase1_scope "$BASE_SHA" || return 2
    ```
 
@@ -464,9 +497,33 @@ PY
 
    The agent applies edits + creates `fix:` / `refactor:` conventional commits autonomously, returning commit SHAs in its YAML. These are the **review-phase commits**, kept distinct from the Phase 2 simplify commit (separate-commit invariant — see `tests/review-pr.test.sh` for the assertion that locks this boundary). Capture the agent's `commits[].sha` for the final aggregation table's "Auto-applied" column. Surface every `findings_disposition` row where `disposition != APPLIED` in the aggregation table's "Advisory findings" column so they are never silently dropped.
 
+   Capture `FIXER_HEAD_BEFORE` immediately before dispatch and
+   `FIXER_HEAD_AFTER` immediately after return. The controller applies:
+
+   ```bash uberdev-executable origin=review-pr
+   review_validate_fixer_mutation_status() {
+     local status="$1" before="$2" after="$3"
+     [[ "$before" =~ ^[0-9a-f]{40}$ && "$after" =~ ^[0-9a-f]{40}$ ]] || return 2
+     case "$status" in
+       APPLIED) return 0 ;;
+       NO_FIXES_NEEDED|REFUSED) [ "$before" = "$after" ] || return 75 ;;
+       *) return 2 ;;
+     esac
+   }
+   ```
+
+   A returned `REFUSED` is publishable only when HEAD is unchanged. If the
+   defensive gate observes mutation, normalize the state to
+   `MUTATED_BLOCKED`, retain the exact post-return SHA, halt ordinary refusal
+   publication, and re-enter Phase 1 against that SHA. Never emit trust or a
+   terminal refusal for unreviewed mutated history.
+
    **Fail-closed boundary:** if the artifact file is missing or empty (e.g., a reviewer remained `BLOCKED`, supervision failed, or the skill crashed), record a supervisory failure and terminate `/review-pr` immediately. Do NOT dispatch the fixer, enter Phase 2, defer findings, or emit trust. The ordinary aggregate is produced only after all six reviewer slots have valid evidence; a missing aggregate is therefore infrastructure failure, never a zero-finding review result.
 
-   If `code-fixer` returns `status: REFUSED`, log the rationale, continue to Phase 2 with zero auto-applied Phase 1 fixes (Phase 1 verdict remains as reviewers reported, independent of fixer status). The aggregation table notes "Phase 1 fixer refused: <reason>" in the Advisory findings column.
+   If `code-fixer` returns `status: REFUSED` and the mutation gate confirms
+   HEAD is unchanged, log the rationale and continue to Phase 2 with zero
+   auto-applied Phase 1 fixes. The aggregation table notes "Phase 1 fixer
+   refused: <reason>" in the Advisory findings column.
 
    **Green-run predicate (Phase 1 contribution):** Phase 1 contributes to a green run iff after auto-apply convergence the verdict is `APPROVE`. `REVISIONS_REQUIRED` and `REJECT` end Phase 1 with no trust-signal emission and `/review-pr` exits with code 1 (see step 8 exit-code contract). The full green predicate combines this with Phase 2's status (defined in step 6) — only `(Phase 1 == APPROVE) AND (Phase 2 status ∈ {ran/APPROVE, skipped})` triggers trust-signal emission.
 
@@ -605,9 +662,42 @@ PY
     review_child_single review_pr.defer.findings "$(uberdev_child_instance_id "review-pr-${RUN_ID}-defer-findings-iter${REVIEW_ITERATION}-attempt01")" "$DEFER_INPUTS" null "$RESEARCH_DIR_ABS/defer" "$REVIEW_PR_TIMEOUT"
     ```
 
-    **Capture the return YAML** into shell variables `CREATED_URLS_JSON`, `COMMENTED_URLS_JSON`, `SKIPPED_CLOSED_JSON`, `BLOCKED_BY_DEDUPE_JSON`, `OVERFLOW_COUNT`, `BY_SEVERITY_BLOCKER`, `BY_SEVERITY_CRITICAL`, `BY_SEVERITY_MAJOR`, `HALTED_DUE_TO_OVERFLOW`, `PHASE2_5_HALTED` for the Step 7 Final Aggregation table AND the new GREEN/YELLOW/RED predicate (Trust-Signal Emission section). Validate the YAML parses before treating the absence of arrays as "zero issues" — on parse failure or missing `status` key, log to stderr and treat the sub-phase as `BLOCKED` for aggregation purposes (the Phase 2.5 row in Step 7 records the parse failure rather than a misleading zero count) AND force `PHASE2_5_HALTED=false` so a malformed agent return cannot accidentally halt the run (fail-open on parse failure is intentional — the alternative silently fails GREEN, which is the bug Phase 2.5 exists to prevent; failing CLOSED on parse error would invert the design).
+    **Capture the return YAML** into shell variables `CREATED_URLS_JSON`, `COMMENTED_URLS_JSON`, `SKIPPED_CLOSED_JSON`, `BLOCKED_BY_DEDUPE_JSON`, `OVERFLOW_COUNT`, `BY_SEVERITY_BLOCKER`, `BY_SEVERITY_CRITICAL`, `BY_SEVERITY_MAJOR`, `HALTED_DUE_TO_OVERFLOW`, `PHASE2_5_HALTED` for the Step 7 Final Aggregation table AND the new GREEN/YELLOW/RED predicate (Trust-Signal Emission section). Validate the YAML before treating absent arrays as zero issues.
 
-    **Exit-code discipline (RFC 0002 §3.3.5 — supersedes prior "NEVER halts" contract).** Regardless of agent `status` (`DONE`, `DONE_WITH_CONCERNS`, `REFUSED`), the parent `/review-pr` continues to the post-dispatch halt-check below. A `REFUSED` is information for the final summary, not a parent-process halt. A `DONE_WITH_CONCERNS` return with `halted: false` is also non-halting (silent file path). Only `halted: true` in the agent's return contract triggers the halt-handling block.
+    Publication/origin/parse failures are infrastructure failures, not a
+    zero-finding result. The controller applies this executable status gate:
+
+    ```bash uberdev-executable origin=review-pr
+    review_apply_phase2_5_status() {
+      local status="$1"
+      case "$status" in
+        DONE|DONE_WITH_CONCERNS) return 0 ;;
+        REFUSED)
+          PHASE2_5_STATUS=blocked
+          PHASE2_5_HALTED=true
+          PHASE2_5_INFRA_FAILURE=true
+          OUTCOME=halted
+          PHASE2_5_FAILURE_REASON=findings_to_issues_refused
+          return 74
+          ;;
+        MALFORMED)
+          PHASE2_5_STATUS=blocked
+          PHASE2_5_HALTED=true
+          PHASE2_5_INFRA_FAILURE=true
+          OUTCOME=halted
+          PHASE2_5_FAILURE_REASON=findings_to_issues_malformed
+          return 74
+          ;;
+        *) return 2 ;;
+      esac
+    }
+    ```
+
+    A malformed return is normalized to `MALFORMED`. If
+    `review_apply_phase2_5_status` returns non-zero, record the blocked Phase
+    2.5 row and terminate with exit 2 before any trust-trail anchor, label, or
+    audit approval artifact. `REFUSED` cannot be overridden interactively.
+    Only a configured skip is non-halting and GREEN-eligible.
 
     ### 6b.1 Phase 2.5 halt handling (RFC 0002 §3.5)
 
@@ -926,21 +1016,32 @@ elif not (is_run or is_repo):
 print('CLASSIFIED\t'+failure_class+'\t'+anchor+'\t-')
 PY
     }
+    review_apply_ci_classification_status() {
+      local status="$1" rationale="${2:-}"
+      case "$status" in
+        AMBIGUOUS)
+          audit ci_classify_ambiguous_routing_as_flaky original_status=AMBIGUOUS
+          return 0
+          ;;
+        REFUSED)
+          audit ci_classify_returned subreason=classifier_refused rationale="$rationale"
+          OUTCOME=halted
+          return 78
+          ;;
+        CLASSIFIED) return 0 ;;
+        *)
+          audit ci_classify_returned subreason=contract_invalid
+          OUTCOME=halted
+          return 79
+          ;;
+      esac
+    }
     IFS=$'\t' read -r classification_status failure_class signal_anchor classifier_rationale < <(review_validate_ci_classification "$CI_CLASSIFICATION_PATH" "$WORKTREE_ROOT") || {
       audit ci_classify_returned subreason=contract_invalid
       OUTCOME=halted
       exit 1
     }
-    case "$classification_status" in
-      AMBIGUOUS) audit ci_classify_ambiguous_routing_as_flaky original_status=AMBIGUOUS ;;
-      REFUSED)
-        audit ci_classify_returned subreason=classifier_refused rationale="$classifier_rationale"
-        OUTCOME=halted
-        exit 1
-        ;;
-      CLASSIFIED) ;;
-      *) audit ci_classify_returned subreason=contract_invalid; OUTCOME=halted; exit 1 ;;
-    esac
+    review_apply_ci_classification_status "$classification_status" "$classifier_rationale" || exit 1
     ```
 
     ### 6c.4 ROUTE — failure_class → downstream agent
@@ -1374,6 +1475,16 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
    **State assignment (RFC 0002 §3.4 — must run BEFORE the three case statements below).** Compute `TRUST_TRAIL_STATE` from the predicate; the three downstream case statements in artifacts 1 and 2 read this single source-of-truth variable:
 
    ```bash
+   # Final anti-race gate: the reviewed snapshot must still be both local HEAD
+   # and the selected PR's live head before any anchor, label, or audit trust
+   # artifact is emitted.
+   review_assert_selected_pr_head "$REVIEW_REPO_SLUG" "$PR_NUMBER" \
+     "$REVIEWED_HEAD_SHA" "$WORKTREE_ROOT" || {
+       echo "error: PR head changed after review; suppressing trust emission" >&2
+       OUTCOME=halted
+       exit 2
+     }
+
    # Evaluate the GREEN predicate first; YELLOW is a strict sub-case
    # ("all GREEN preconditions met AND critical>0"); RED is everything else.
    # OVERRIDE_GREEN flips RED→GREEN when PHASE2_5_HALT_CHOICE == "override"

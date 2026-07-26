@@ -341,6 +341,26 @@ assert_in_section "$CODE_FIXER" '^## Process' '^## Refusal triggers' \
   "E4.3 — code-fixer Step 1 still refuses non-member sources (input-malformed)"
 
 echo
+echo "== E5: standalone deferred-findings handoff is Phase-2-only =="
+DEFER_LINE="$(grep '^DEFER_INPUTS=' "$SIMPLIFY" | head -n1)"
+AGG_PATH="/repo/.uberdev/research/20260726-010203-abcdef0/simplify-final.md"
+PHASE2_DISPOSITION_PATH="/repo/.uberdev/research/20260726-010203-abcdef0/phase2-disposition.json"
+WORKING_DIR_ABS="/repo"
+PR_NUMBER=0
+eval "$DEFER_LINE"
+if printf '%s' "$DEFER_INPUTS" | jq -e \
+  '.phase1_path=="" and .phase1_disposition_path=="" and
+   (.phase2_path|endswith("/simplify-final.md"))' >/dev/null 2>&1 \
+   && printf '%s' "$DEFER_INPUTS" | jq -e \
+  '.phase2_disposition_path|endswith("/phase2-disposition.json")' >/dev/null 2>&1; then
+  echo "  PASS  E5 — standalone /simplify carries only Phase 2 aggregate/disposition evidence"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  E5 — standalone /simplify duplicated or mislabeled Phase 2 evidence"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

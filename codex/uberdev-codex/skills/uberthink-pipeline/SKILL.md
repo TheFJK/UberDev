@@ -1466,6 +1466,7 @@ if [ "$NO_ISSUES" != "1" ] && [ -r "$RUN_DIR/ranked.yaml" ]; then
   # DISPATCH POINT — findings-to-issues (single Task, single message)
   #
   # DISPATCH: findings-to-issues
+  #   variant=legacy.uberthink
   #   run_id=$RUN_ID
   #   working_dir=$WORKING_DIR_ABS          (REQUIRED — refuses without an absolute path inside the worktree)
   #   repo_slug=$REPO_SLUG
@@ -1481,7 +1482,7 @@ if [ "$NO_ISSUES" != "1" ] && [ -r "$RUN_DIR/ranked.yaml" ]; then
   #   max_new=$MAX_NEW
   # ===========================================================================
   if [ "$DISPATCH_OK" = "1" ]; then
-    echo "DISPATCH: findings-to-issues with run_id=$RUN_ID, working_dir=$WORKING_DIR_ABS, repo_slug=$REPO_SLUG, pr_commit_sha=$HEAD_SHA, phase1_aggregate_path=$RUN_DIR/f2i-aggregate.md, finding_label=uberthink-idea, finding_marker_slug=uberthink, source_ref=/uberthink run $RUN_ID, max_new=$MAX_NEW"
+    echo "DISPATCH: findings-to-issues with variant=legacy.uberthink, run_id=$RUN_ID, working_dir=$WORKING_DIR_ABS, repo_slug=$REPO_SLUG, pr_commit_sha=$HEAD_SHA, phase1_aggregate_path=$RUN_DIR/f2i-aggregate.md, finding_label=uberthink-idea, finding_marker_slug=uberthink, source_ref=/uberthink run $RUN_ID, max_new=$MAX_NEW"
   fi
 elif [ "$NO_ISSUES" = "1" ]; then
   echo "[uberthink] --no-issues: skipping findings-to-issues dispatch"

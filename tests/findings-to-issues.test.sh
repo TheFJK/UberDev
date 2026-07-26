@@ -537,15 +537,15 @@ for helper in "$ORIGIN_TMP/canonical.sh" "$ORIGIN_TMP/packaged.sh"; do
           malformed) printf "not-a-sha\n" ;;
         esac
       }
-      findings_derive_review_origin "$2" 7 20260726-010203-abcdef0 owner/repo
+      findings_derive_review_origin "$2" 7 20260726-010203-abcdef0 owner/repo review-pr 7 review_pr.defer.findings
     ' _ "$helper" "$ORIGIN_REPO"
   )"
   ORIGIN_MATCH_RC=$?
   ORIGIN_MODE=mismatch ORIGIN_HEAD="$ORIGIN_HEAD" ORIGIN_GH_LOG="$ORIGIN_GH_LOG" \
-    bash -c '. "$1"; gh(){ printf "%s\n" "$*" >>"$ORIGIN_GH_LOG"; printf "%040d\n" 0; }; findings_derive_review_origin "$2" 7 20260726-010203-abcdef0 owner/repo' _ "$helper" "$ORIGIN_REPO"
+    bash -c '. "$1"; gh(){ printf "%s\n" "$*" >>"$ORIGIN_GH_LOG"; printf "%040d\n" 0; }; findings_derive_review_origin "$2" 7 20260726-010203-abcdef0 owner/repo review-pr 7 review_pr.defer.findings' _ "$helper" "$ORIGIN_REPO"
   ORIGIN_MISMATCH_RC=$?
   ORIGIN_MODE=malformed ORIGIN_HEAD="$ORIGIN_HEAD" ORIGIN_GH_LOG="$ORIGIN_GH_LOG" \
-    bash -c '. "$1"; gh(){ printf "%s\n" "$*" >>"$ORIGIN_GH_LOG"; printf "not-a-sha\n"; }; findings_derive_review_origin "$2" 7 20260726-010203-abcdef0 owner/repo' _ "$helper" "$ORIGIN_REPO"
+    bash -c '. "$1"; gh(){ printf "%s\n" "$*" >>"$ORIGIN_GH_LOG"; printf "not-a-sha\n"; }; findings_derive_review_origin "$2" 7 20260726-010203-abcdef0 owner/repo review-pr 7 review_pr.defer.findings' _ "$helper" "$ORIGIN_REPO"
   ORIGIN_MALFORMED_RC=$?
   set +e
   printf '%s' "$ORIGIN_OUTPUT" | jq -e --arg sha "$ORIGIN_HEAD" \
@@ -563,6 +563,50 @@ if [ "$ORIGIN_RUNTIME_FAILURES" -eq 0 ]; then
   echo "  PASS  S17.7 — canonical and generated origins accept exact head, reject mismatch/malformed, and perform no writes"; PASS=$((PASS + 1))
 else
   echo "  FAIL  S17.7 — origin runtime failures=$ORIGIN_RUNTIME_FAILURES"; FAIL=$((FAIL + 1))
+fi
+
+ORIGIN_MATRIX_FAILURES=0
+for helper in "$ORIGIN_TMP/canonical.sh" "$ORIGIN_TMP/packaged.sh"; do
+  for row in \
+    '0 simplify 0 review_pr.defer.findings standalone' \
+    '7 review-pr 7 review_pr.defer.findings pr' \
+    '7 solve 7 review_pr.defer.findings pr' \
+    '7 turbo 7 review_pr.ci.defer_refusal pr' \
+    '0 legacy-uberscan 0 legacy.uberscan standalone' \
+    '0 legacy-ubersimplify 0 legacy.ubersimplify standalone' \
+    '7 legacy-ubersimplify 7 legacy.ubersimplify pr' \
+    '0 legacy-testers 0 legacy.testers standalone' \
+    '0 legacy-uberthink 0 legacy.uberthink standalone'; do
+    read -r matrix_pr matrix_workflow matrix_issue matrix_edge matrix_kind <<<"$row"
+    MATRIX_OUTPUT="$(ORIGIN_HEAD="$ORIGIN_HEAD" bash -c '
+      . "$1"
+      gh(){ printf "%s\n" "$ORIGIN_HEAD"; }
+      findings_derive_review_origin "$2" "$3" 20260726-010203-abcdef0 owner/repo "$4" "$5" "$6"
+    ' _ "$helper" "$ORIGIN_REPO" "$matrix_pr" "$matrix_workflow" "$matrix_issue" "$matrix_edge")"
+    MATRIX_RC=$?
+    [ "$MATRIX_RC" -eq 0 ] || ORIGIN_MATRIX_FAILURES=$((ORIGIN_MATRIX_FAILURES + 1))
+    printf '%s' "$MATRIX_OUTPUT" | jq -e --arg kind "$matrix_kind" '.origin_kind==$kind' >/dev/null 2>&1 \
+      || ORIGIN_MATRIX_FAILURES=$((ORIGIN_MATRIX_FAILURES + 1))
+  done
+  for bad_row in \
+    '7 simplify 0 review_pr.defer.findings' \
+    '0 review-pr 7 review_pr.defer.findings' \
+    '8 solve 7 review_pr.defer.findings' \
+    '7 simplify 7 review_pr.ci.defer_refusal' \
+    '0 legacy-testers 0 review_pr.defer.findings'; do
+    read -r matrix_pr matrix_workflow matrix_issue matrix_edge <<<"$bad_row"
+    if ORIGIN_HEAD="$ORIGIN_HEAD" bash -c '
+      . "$1"; gh(){ printf "%s\n" "$ORIGIN_HEAD"; }
+      findings_derive_review_origin "$2" "$3" 20260726-010203-abcdef0 owner/repo "$4" "$5" "$6"
+    ' _ "$helper" "$ORIGIN_REPO" "$matrix_pr" "$matrix_workflow" "$matrix_issue" "$matrix_edge" >/dev/null 2>&1; then
+      ORIGIN_MATRIX_FAILURES=$((ORIGIN_MATRIX_FAILURES + 1))
+    fi
+  done
+done
+if [ "$ORIGIN_MATRIX_FAILURES" -eq 0 ]; then
+  echo "  PASS  S17.8 — review, simplify, CI, and all four legacy origin variants are carrier-bound; mixed variants refuse"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S17.8 — carrier origin matrix failures=$ORIGIN_MATRIX_FAILURES"; FAIL=$((FAIL + 1))
 fi
 rm -rf "$ORIGIN_TMP"
 
@@ -590,6 +634,21 @@ assert_in_section "$AGENT_MD" '^3\. \*\*Parse aggregates' '^4\. \*\*Route by sev
 assert_in_section "$AGENT_MD" '^3\. \*\*Parse aggregates' '^4\. \*\*Route by severity' \
   'never re-read|already validated in-memory bytes' \
   'S18.5 — validated aggregate/disposition bytes are not re-read mutably'
+
+echo
+echo "### Suite 19: legacy fleet callers select explicit variants"
+assert_grep "$REPO_ROOT/plugins/uberdev/skills/scan-fleet/workflow.js" \
+  'variant=legacy\..*ubersimplify.*uberscan|variant=legacy\.' \
+  'S19.1 — scan fleet selects explicit uberscan/ubersimplify variants'
+assert_grep "$REPO_ROOT/plugins/uberdev/skills/testers-pipeline/workflow.js" \
+  'variant=legacy\.testers' \
+  'S19.2 — testers selects the legacy.testers variant'
+assert_grep "$REPO_ROOT/plugins/uberdev/skills/ubersimplify-pipeline/SKILL.md" \
+  'variant=legacy\.ubersimplify' \
+  'S19.3 — standalone ubersimplify selects its explicit variant'
+assert_grep "$REPO_ROOT/plugins/uberdev/skills/uberthink-pipeline/SKILL.md" \
+  'variant=legacy\.uberthink' \
+  'S19.4 — uberthink selects the legacy.uberthink variant'
 
 echo
 echo "## Summary"

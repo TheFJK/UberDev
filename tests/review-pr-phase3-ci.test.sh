@@ -837,6 +837,37 @@ else
 fi
 
 echo
+echo "== S17-RUNTIME: classifier REFUSED is terminal before routing =="
+CLASSIFIER_STATUS_FIXTURE="$(mktemp)"
+awk '/^[[:space:]]*review_apply_ci_classification_status\(\) \{/{active=1} active{print} active && /^[[:space:]]*\}/{exit}' \
+  "$REVIEW_PR" >"$CLASSIFIER_STATUS_FIXTURE"
+CLASSIFIER_STATUS_LOG="$(mktemp)"
+CLASSIFIER_STATUS_OUTPUT="$(
+  CLASSIFIER_STATUS_LOG="$CLASSIFIER_STATUS_LOG" bash -c '
+    . "$1"
+    audit(){ printf "audit:%s\n" "$*" >>"$CLASSIFIER_STATUS_LOG"; }
+    route(){ printf "route\n" >>"$CLASSIFIER_STATUS_LOG"; }
+    push(){ printf "push\n" >>"$CLASSIFIER_STATUS_LOG"; }
+    trust(){ printf "trust\n" >>"$CLASSIFIER_STATUS_LOG"; }
+    OUTCOME=unknown
+    if review_apply_ci_classification_status REFUSED "bounded refusal"; then
+      route; push; trust
+    fi
+    printf "%s" "$OUTCOME"
+  ' _ "$CLASSIFIER_STATUS_FIXTURE"
+)"
+if [ "$CLASSIFIER_STATUS_OUTPUT" = halted ] \
+  && grep -q 'subreason=classifier_refused' "$CLASSIFIER_STATUS_LOG" \
+  && ! grep -Eq '^(route|push|trust)$' "$CLASSIFIER_STATUS_LOG"; then
+  echo "  PASS  S17-RT — valid classifier REFUSED halts with audit and no route/push/trust"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S17-RT — classifier REFUSED crossed the terminal controller gate"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$CLASSIFIER_STATUS_FIXTURE" "$CLASSIFIER_STATUS_LOG"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

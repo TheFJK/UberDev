@@ -890,6 +890,76 @@ for f in "${AGENT_FILES[@]}"; do
 done
 
 echo
+echo "== R28: selected PR head is bound before dispatch and trust =="
+HEAD_GATE_FIXTURE="$(mktemp)"
+awk '/^[[:space:]]*review_assert_selected_pr_head\(\) \{/{active=1} active{print} active && /^[[:space:]]*\}/{exit}' \
+  "$REVIEW_PR" >"$HEAD_GATE_FIXTURE"
+HEAD_GATE_LOG="$(mktemp)"
+EXPECTED_HEAD="$(printf 'a%.0s' {1..40})"
+REMOTE_OTHER="$(printf 'b%.0s' {1..40})"
+LOCAL_OTHER="$(printf 'c%.0s' {1..40})"
+run_head_gate() {
+  local remote="$1" local_sha="$2"
+  HEAD_GATE_LOG="$HEAD_GATE_LOG" REMOTE_SHA="$remote" LOCAL_SHA="$local_sha" \
+    bash -c '
+      . "$1"
+      gh(){ printf "gh:%s\n" "$*" >>"$HEAD_GATE_LOG"; printf "%s\n" "$REMOTE_SHA"; }
+      git(){ printf "%s\n" "$LOCAL_SHA"; }
+      dispatch(){ printf "dispatch\n" >>"$HEAD_GATE_LOG"; }
+      push(){ printf "push\n" >>"$HEAD_GATE_LOG"; }
+      trust(){ printf "trust\n" >>"$HEAD_GATE_LOG"; }
+      if review_assert_selected_pr_head owner/repo 338 "$2" /repo; then
+        dispatch; push; trust
+      fi
+    ' _ "$HEAD_GATE_FIXTURE" "$EXPECTED_HEAD"
+}
+: >"$HEAD_GATE_LOG"; run_head_gate "$REMOTE_OTHER" "$EXPECTED_HEAD"
+REMOTE_GATE_OK=1
+grep -q 'gh:pr view 338 --repo owner/repo --json headRefOid --jq .headRefOid' "$HEAD_GATE_LOG" || REMOTE_GATE_OK=0
+grep -Eq '^(dispatch|push|trust)$' "$HEAD_GATE_LOG" && REMOTE_GATE_OK=0
+: >"$HEAD_GATE_LOG"; run_head_gate "$EXPECTED_HEAD" "$LOCAL_OTHER"
+LOCAL_GATE_OK=1
+grep -Eq '^(dispatch|push|trust)$' "$HEAD_GATE_LOG" && LOCAL_GATE_OK=0
+if [ "$REMOTE_GATE_OK" -eq 1 ] && [ "$LOCAL_GATE_OK" -eq 1 ]; then
+  echo "  PASS  R28 — remote/local mismatch suppresses dispatch, push, and trust"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R28 — selected PR identity mismatch crossed a controller boundary"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$HEAD_GATE_FIXTURE" "$HEAD_GATE_LOG"
+
+echo
+echo "== R29: Phase 2.5 refusal/publication failure is fail-closed =="
+PHASE25_FIXTURE="$(mktemp)"
+awk '/^[[:space:]]*review_apply_phase2_5_status\(\) \{/{active=1} active{print} active && /^[[:space:]]*\}/{exit}' \
+  "$REVIEW_PR" >"$PHASE25_FIXTURE"
+PHASE25_FAILURES=0
+for status in REFUSED MALFORMED; do
+  PHASE25_LOG="$(mktemp)"
+  PHASE25_OUTPUT="$(
+    PHASE25_LOG="$PHASE25_LOG" bash -c '
+      . "$1"
+      OUTCOME=unknown; PHASE2_5_HALTED=false
+      trust(){ printf "trust\n" >>"$PHASE25_LOG"; }
+      if review_apply_phase2_5_status "$2"; then trust; fi
+      printf "%s|%s|%s|%s" "$OUTCOME" "$PHASE2_5_STATUS" "$PHASE2_5_HALTED" "$PHASE2_5_INFRA_FAILURE"
+    ' _ "$PHASE25_FIXTURE" "$status"
+  )"
+  [ "$PHASE25_OUTPUT" = 'halted|blocked|true|true' ] || PHASE25_FAILURES=$((PHASE25_FAILURES + 1))
+  [ ! -s "$PHASE25_LOG" ] || PHASE25_FAILURES=$((PHASE25_FAILURES + 1))
+  rm -f "$PHASE25_LOG"
+done
+if [ "$PHASE25_FAILURES" -eq 0 ]; then
+  echo "  PASS  R29 — REFUSED and malformed findings publication cannot produce trust"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R29 — Phase 2.5 fail-closed runtime failures=$PHASE25_FAILURES"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$PHASE25_FIXTURE"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

@@ -10,11 +10,61 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 . "$LIB"
 
 if [ "${1:-}" = --windows-path-only ]; then
-  windows_context='C:\repo\.uberdev\runs\review-1\state\context.json'
-  windows_carrier="$(python3 -I -B -c 'import json,sys; print(json.dumps({"context_file":sys.argv[1]}),end="")' "$windows_context")"
-  serialized_context="$(_uberdev_agent_json_get "$windows_carrier" context_file)"
-  [ "$serialized_context" = "$windows_context" ]
-  [ "$(_uberdev_child_context_run_dir "$serialized_context")" = 'C:\repo\.uberdev\runs\review-1' ]
+  WINDOWS_REPO="$TMP/windows-repo"; mkdir -p "$WINDOWS_REPO"
+  git -C "$WINDOWS_REPO" init -q
+  git -C "$WINDOWS_REPO" config user.email fixture@example.invalid
+  git -C "$WINDOWS_REPO" config user.name Fixture
+  printf 'fixture\n' >"$WINDOWS_REPO/README.md"
+  git -C "$WINDOWS_REPO" add README.md
+  git -C "$WINDOWS_REPO" commit -qm fixture
+  WINDOWS_REPO_ID="$(git -C "$WINDOWS_REPO" rev-parse --show-toplevel)"
+  WINDOWS_SHELL_ID="$(cd "$WINDOWS_REPO" && pwd -P)"
+  [ "$WINDOWS_REPO_ID" -ef "$WINDOWS_SHELL_ID" ]
+
+  WINDOWS_RUN="$WINDOWS_REPO_ID/.uberdev/runs/windows-review-carrier"; mkdir -p "$WINDOWS_RUN"
+  WINDOWS_REQUEST="$(jq -cn --arg run "$WINDOWS_RUN" --arg repo "$WINDOWS_REPO_ID" \
+    '{schema_version:1,run_dir:$run,run_id:"windows-review-carrier",repository_id:$repo,backend:"codex",workflow:"review-pr",phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:91,issue_num:91,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
+  WINDOWS_DECISION="$(uberdev_agent_resolve_request "$WINDOWS_REQUEST")"
+  WINDOWS_METADATA="$(jq -cn --arg repo "$WINDOWS_REPO_ID" \
+    '{run_id:"windows-review-carrier",repository_id:$repo,workflow:"review-pr",backend:"codex",issue_num:91,task_tier:"medium",risk_signals:[]}')"
+  WINDOWS_CONTEXT_OUT="$(uberdev_agent_context_create "$WINDOWS_RUN" "$WINDOWS_REQUEST" "$WINDOWS_DECISION" \
+    '{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}' \
+    "$WINDOWS_METADATA" '2026-07-26T00:00:00Z')"
+  WINDOWS_CONTEXT="$(jq -r .context_file <<<"$WINDOWS_CONTEXT_OUT")"
+  WINDOWS_CONTEXT_SHA="$(jq -r .context_sha256 <<<"$WINDOWS_CONTEXT_OUT")"
+  UBERDEV_RUN_CARRIER_JSON="$(jq -cn --arg context "$WINDOWS_CONTEXT" --arg sha "$WINDOWS_CONTEXT_SHA" \
+    '{schema_version:1,run_id:"windows-review-carrier",workflow:"review-pr",issue_num:91,context_file:$context,context_sha256:$sha}')"
+  export UBERDEV_RUN_CARRIER_JSON
+  WINDOWS_WORKSPACE="$(uberdev_command_workspace_prepare review-pr 91 medium '[]' 20260726-010203-abcdef0 "$WINDOWS_REPO_ID")"
+  jq -e '.caller=="review-pr"' <<<"$WINDOWS_WORKSPACE" >/dev/null
+  WINDOWS_WORKSPACE_ROOT="$(jq -r .repository_root <<<"$WINDOWS_WORKSPACE")"
+  [ "$WINDOWS_WORKSPACE_ROOT" -ef "$WINDOWS_REPO_ID" ]
+
+  WINDOWS_REVIEW_INPUT="$(jq -cn --arg p "$WINDOWS_REPO_ID/README.md" \
+    '{changed_paths:["README.md"],diff_path:$p,criteria_path:$p,emphasis:[]}')"
+  uberdev_create_child_handoff review_pr.review.correctness windows-reviewer-iter1-attempt01 "$WINDOWS_REVIEW_INPUT" '[]' >/dev/null
+  WINDOWS_REVIEW_HANDOFF="$UBERDEV_CHILD_HANDOFF"; WINDOWS_REVIEW_RESULT="$UBERDEV_CHILD_RESULT"; WINDOWS_REVIEW_STATUS="$UBERDEV_CHILD_STATUS"
+  _uberdev_child_backend_cancellation_supported() { return 0; }
+  uberdev_preflight_child_batch "$WINDOWS_REVIEW_HANDOFF"
+  _uberdev_child_prepare review_pr.review.correctness "$WINDOWS_REVIEW_HANDOFF" "$WINDOWS_REVIEW_RESULT" "$WINDOWS_REVIEW_STATUS" dispatch >/dev/null
+  printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings: []' 'confidence: high' '```' >"$WINDOWS_REVIEW_RESULT"
+  WINDOWS_VALIDATED="$(dirname "$WINDOWS_REVIEW_RESULT")/validated-result.md"
+  WINDOWS_DIGEST="$(uberdev_child_validate_phase1_review_result "$WINDOWS_REVIEW_RESULT" '["README.md"]' "$WINDOWS_VALIDATED")"
+  [[ "$WINDOWS_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+  cmp "$WINDOWS_REVIEW_RESULT" "$WINDOWS_VALIDATED"
+
+  WINDOWS_FIX_INPUT="$(jq -cn --arg p "$WINDOWS_REPO_ID/README.md" --arg d "$WINDOWS_REPO_ID" \
+    '{findings_path:$p,commit_range_path:$p,working_dir:$d,pr_number:91,disposition_path:$p}')"
+  uberdev_create_child_handoff review_pr.fix.phase1 windows-fixer-iter1-attempt01 "$WINDOWS_FIX_INPUT" null >/dev/null
+  WINDOWS_FIX_HANDOFF="$UBERDEV_CHILD_HANDOFF"; WINDOWS_FIX_RESULT="$UBERDEV_CHILD_RESULT"; WINDOWS_FIX_STATUS="$UBERDEV_CHILD_STATUS"
+  uberdev_preflight_child_batch "$WINDOWS_FIX_HANDOFF"
+  WINDOWS_FIX_PREPARED="$(_uberdev_child_prepare review_pr.fix.phase1 "$WINDOWS_FIX_HANDOFF" "$WINDOWS_FIX_RESULT" "$WINDOWS_FIX_STATUS" dispatch)"
+  jq -e '.request.workspace_mode=="caller"' <<<"$WINDOWS_FIX_PREPARED" >/dev/null
+  WINDOWS_FIX_ROOT="$(jq -r .request.workspace_dir <<<"$WINDOWS_FIX_PREPARED")"
+  [ "$WINDOWS_FIX_ROOT" -ef "$WINDOWS_REPO_ID" ]
+
+  serialized_context="$(_uberdev_agent_json_get "$UBERDEV_RUN_CARRIER_JSON" context_file)"
+  [ "$serialized_context" = "$WINDOWS_CONTEXT" ]
   ! _uberdev_child_context_run_dir 'C:\repo\.uberdev\runs\review-1\state\..\context.json' >/dev/null 2>&1
   echo 'review-child-handoff windows path: PASS'
   exit 0
@@ -49,6 +99,7 @@ context_out="$(uberdev_agent_context_create "$TMP/run" "$request" "$decision" \
 ctx="$(jq -r .context_file <<<"$context_out")"; sha="$(jq -r .context_sha256 <<<"$context_out")"
 UBERDEV_RUN_CARRIER_JSON="$(jq -cn --arg ctx "$ctx" --arg sha "$sha" '{schema_version:1,run_id:"review-contract",workflow:"review-pr",issue_num:1,context_file:$ctx,context_sha256:$sha}')"
 export UBERDEV_RUN_CARRIER_JSON
+REVIEW_CARRIER_JSON="$UBERDEV_RUN_CARRIER_JSON"
 
 mkdir -p "$TMP/simplify-run"
 simplify_request="$(jq -cn --arg run "$TMP/simplify-run" --arg repo "$TEST_REPO" '{schema_version:1,run_dir:$run,run_id:"simplify-contract",repository_id:$repo,backend:"codex",workflow:"simplify",phase:"simplify",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:0,issue_num:0,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
@@ -527,6 +578,20 @@ VALIDATED_DIGEST="$(uberdev_child_validate_phase1_review_result "$VALID_RESULT" 
 [[ "$VALIDATED_DIGEST" =~ ^[0-9a-f]{64}$ ]]
 cmp "$VALID_RESULT" "$VALIDATED_RESULT"
 [ "$(stat -c '%a' "$VALIDATED_RESULT" 2>/dev/null || stat -f '%Lp' "$VALIDATED_RESULT")" = 400 ]
+for publication_stage in create write sync harden readback; do
+  publication_target="$TMP/reviewer-publication-$publication_stage.md"
+  set +e
+  UBERDEV_CHILD_TEST_MODE=1 UBERDEV_TEST_VALIDATED_PUBLICATION_FAILURE="$publication_stage" \
+    uberdev_child_validate_phase1_review_result "$VALID_RESULT" '["README.md"]' "$publication_target" \
+      >"$TMP/reviewer-publication-$publication_stage.stdout" \
+      2>"$TMP/reviewer-publication-$publication_stage.stderr"
+  publication_rc=$?
+  set -e
+  [ "$publication_rc" -eq 74 ]
+  [ ! -e "$publication_target" ]
+  [ ! -s "$TMP/reviewer-publication-$publication_stage.stdout" ]
+  grep -qx 'review_result_publication_failed' "$TMP/reviewer-publication-$publication_stage.stderr"
+done
 
 # Mutating review edges execute against the carrier-selected caller repository
 # identity and workspace binding. Reviewers remain isolated, and a different
@@ -545,6 +610,68 @@ if uberdev_create_child_handoff review_pr.fix.phase1 review-mismatch-mode-iter1-
   echo 'caller workspace mismatch accepted' >&2
   exit 1
 fi
+
+# /solve and /turbo inherit the same immutable carrier through the actual
+# reviewer, caller-workspace fixer, and deferred-findings edge lifecycles.
+exercise_parent_review_carrier() {
+  local workflow="$1" issue="$2" suffix="$3" parent_run
+  parent_run="$TMP/$workflow-parent"
+  local request decision metadata context_out context_file context_sha carrier workspace
+  local reviewer_handoff reviewer_result reviewer_status reviewer_prepared
+  local fixer_handoff fixer_result fixer_status fixer_prepared
+  local defer_handoff defer_result defer_status defer_prepared
+  mkdir -p "$parent_run"
+  request="$(jq -cn --arg run "$parent_run" --arg repo "$TEST_REPO" --arg workflow "$workflow" --arg run_id "parent-$workflow" --argjson issue "$issue" \
+    '{schema_version:1,run_dir:$run,run_id:$run_id,repository_id:$repo,backend:"codex",workflow:$workflow,phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:$issue,issue_num:$issue,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
+  decision="$(uberdev_agent_resolve_request "$request")"
+  metadata="$(jq -cn --arg repo "$TEST_REPO" --arg workflow "$workflow" --arg run_id "parent-$workflow" --argjson issue "$issue" \
+    '{run_id:$run_id,repository_id:$repo,workflow:$workflow,backend:"codex",issue_num:$issue,task_tier:"medium",risk_signals:[]}')"
+  context_out="$(uberdev_agent_context_create "$parent_run" "$request" "$decision" \
+    '{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}' \
+    "$metadata" '2026-07-26T00:00:00Z')"
+  context_file="$(jq -r .context_file <<<"$context_out")"
+  context_sha="$(jq -r .context_sha256 <<<"$context_out")"
+  carrier="$(jq -cn --arg workflow "$workflow" --arg run_id "parent-$workflow" --arg context "$context_file" --arg sha "$context_sha" --argjson issue "$issue" \
+    '{schema_version:1,run_id:$run_id,workflow:$workflow,issue_num:$issue,context_file:$context,context_sha256:$sha}')"
+  UBERDEV_RUN_CARRIER_JSON="$carrier"; export UBERDEV_RUN_CARRIER_JSON
+  unset UBERDEV_COMMAND_WORKSPACE_JSON
+  workspace="$(uberdev_command_workspace_prepare review-pr "$issue" medium '[]' "20260726-01020${suffix}-abcdef0" "$TEST_REPO")"
+  jq -e --arg workflow "$workflow" --arg repo "$TEST_REPO" \
+    '.caller=="review-pr" and .carrier_workflow==$workflow and .repository_root==$repo' <<<"$workspace" >/dev/null
+
+  reviewer_input="$(jq -cn --arg p "$path" '{changed_paths:["README.md"],diff_path:$p,criteria_path:$p,emphasis:[]}')"
+  uberdev_create_child_handoff review_pr.review.correctness "$workflow-reviewer-iter1-attempt01" "$reviewer_input" '[]' >/dev/null
+  reviewer_handoff="$UBERDEV_CHILD_HANDOFF"; reviewer_result="$UBERDEV_CHILD_RESULT"; reviewer_status="$UBERDEV_CHILD_STATUS"
+  _uberdev_child_backend_cancellation_supported() { return 0; }
+  uberdev_preflight_child_batch "$reviewer_handoff"
+  reviewer_prepared="$(_uberdev_child_prepare review_pr.review.correctness "$reviewer_handoff" "$reviewer_result" "$reviewer_status" dispatch)"
+  jq -e --arg workflow "$workflow" --argjson issue "$issue" \
+    '.carrier.workflow==$workflow and .carrier.issue_num==$issue and .edge_id=="review_pr.review.correctness"' "$reviewer_handoff" >/dev/null
+  jq -e '.request.workspace_mode=="isolated"' <<<"$reviewer_prepared" >/dev/null
+
+  fixer_input="$(jq -cn --arg p "$path" --arg d "$TEST_REPO" --argjson pr "$issue" \
+    '{findings_path:$p,commit_range_path:$p,working_dir:$d,pr_number:$pr,disposition_path:$p}')"
+  uberdev_create_child_handoff review_pr.fix.phase1 "$workflow-fixer-iter1-attempt01" "$fixer_input" null >/dev/null
+  fixer_handoff="$UBERDEV_CHILD_HANDOFF"; fixer_result="$UBERDEV_CHILD_RESULT"; fixer_status="$UBERDEV_CHILD_STATUS"
+  uberdev_preflight_child_batch "$fixer_handoff"
+  fixer_prepared="$(_uberdev_child_prepare review_pr.fix.phase1 "$fixer_handoff" "$fixer_result" "$fixer_status" dispatch)"
+  jq -e --arg workflow "$workflow" --arg context "$context_file" --arg sha "$context_sha" \
+    '.carrier.workflow==$workflow and .carrier.context_file==$context and .carrier.context_sha256==$sha and .edge_id=="review_pr.fix.phase1"' "$fixer_handoff" >/dev/null
+  jq -e --arg repo "$TEST_REPO" '.request.workspace_mode=="caller" and .request.workspace_dir==$repo' <<<"$fixer_prepared" >/dev/null
+
+  defer_input="$(jq -cn --arg p "$path" --arg d "$TEST_REPO" --argjson pr "$issue" \
+    '{phase1_path:$p,phase2_path:"",phase1_disposition_path:$p,phase2_disposition_path:"",working_dir:$d,pr_number:$pr}')"
+  uberdev_create_child_handoff review_pr.defer.findings "$workflow-defer-iter1-attempt01" "$defer_input" null >/dev/null
+  defer_handoff="$UBERDEV_CHILD_HANDOFF"; defer_result="$UBERDEV_CHILD_RESULT"; defer_status="$UBERDEV_CHILD_STATUS"
+  uberdev_preflight_child_batch "$defer_handoff"
+  defer_prepared="$(_uberdev_child_prepare review_pr.defer.findings "$defer_handoff" "$defer_result" "$defer_status" dispatch)"
+  jq -e --arg workflow "$workflow" --arg context "$context_file" --arg sha "$context_sha" \
+    '.carrier.workflow==$workflow and .carrier.context_file==$context and .carrier.context_sha256==$sha and .edge_id=="review_pr.defer.findings"' "$defer_handoff" >/dev/null
+  jq -e '.request.workspace_mode=="isolated"' <<<"$defer_prepared" >/dev/null
+}
+exercise_parent_review_carrier solve 81 1
+exercise_parent_review_carrier turbo 82 2
+UBERDEV_RUN_CARRIER_JSON="$REVIEW_CARRIER_JSON"; export UBERDEV_RUN_CARRIER_JSON
 
 # A standalone simplify run may omit an additional focus hint.
 for lens in reuse quality efficiency; do
@@ -643,6 +770,7 @@ mkdir -p "$EVIDENCE_ROOT"
 python3 -I -B - "$EVIDENCE_ROOT" <<'PY'
 import hashlib,json,os,pathlib,sys
 root=pathlib.Path(os.path.realpath(sys.argv[1]))
+children=root/"children"; children.mkdir()
 edges=[
  "review_pr.review.correctness","review_pr.review.silent_failures",
  "review_pr.review.types","review_pr.review.comments",
@@ -650,11 +778,12 @@ edges=[
 ]
 launched=[]; validated=[]
 for index,edge in enumerate(edges,1):
- child=root/f"child-{index}"; child.mkdir()
+ child=children/f"review-{index}-attempt01"; child.mkdir()
  provider=child/"result.md"; provider.write_text("provider-owned\n")
  canonical=child/"validated-result.md"; payload=f"validated-{index}\n".encode()
  canonical.write_bytes(payload); canonical.chmod(0o400)
  instance=f"review-{index}-attempt01"
+ (child/"status.json").write_text('{"state":"completed","exit_code":0}\n')
  launched.append({"edge":edge,"index":index,"instance":instance,"receipt":"fixture",
                   "result":str(provider),"status":str(child/"status.json")})
  validated.append({"edge":edge,"index":index,"instance":instance,
@@ -666,12 +795,13 @@ PY
 POST_REVIEW_VALIDATED_LEDGER="$EVIDENCE_ROOT/validated"
 REVIEW_LAUNCHED="$EVIDENCE_ROOT/initial"
 REPAIR_LAUNCHED="$EVIDENCE_ROOT/repair"
-post_review_validated_evidence_complete "$POST_REVIEW_VALIDATED_LEDGER" 6 "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED"
+post_review_validated_evidence_complete "$POST_REVIEW_VALIDATED_LEDGER" 6 \
+  "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED" "$EVIDENCE_ROOT"
 
 evidence_must_fail() {
   local label="$1" ledger="$2" initial="$3" repair="$4" expected_class="$5"
   local diagnostic="$EVIDENCE_ROOT/$label.stderr"
-  if post_review_validated_evidence_complete "$ledger" 6 "$initial" "$repair" 2>"$diagnostic"; then
+  if post_review_validated_evidence_complete "$ledger" 6 "$initial" "$repair" "$EVIDENCE_ROOT" 2>"$diagnostic"; then
     echo "evidence fixture unexpectedly passed: $label" >&2
     return 1
   fi
@@ -679,7 +809,7 @@ evidence_must_fail() {
 }
 
 python3 -I -B - "$EVIDENCE_ROOT" <<'PY'
-import json,pathlib,sys
+import hashlib,json,pathlib,sys
 root=pathlib.Path(sys.argv[1])
 def rows(name): return [json.loads(line) for line in (root/name).read_text().splitlines()]
 def write(name,value): (root/name).write_text("".join(json.dumps(row,separators=(",",":"))+"\n" for row in value))
@@ -689,21 +819,34 @@ value=rows("validated"); value[-1]["sha256"]="0"*64; write("bad-digest",value)
 initial=rows("initial"); value=rows("validated")
 initial[-1]["result"]=initial[0]["result"]; value[-1]["result"]=value[0]["result"]
 write("duplicate-path-initial",initial); write("duplicate-path",value)
+
+foreign=root/"foreign"; foreign.mkdir()
+child=foreign/"children"/value[-1]["instance"]; child.mkdir(parents=True)
+provider=child/"result.md"; provider.write_text("foreign provider\n")
+canonical=child/"validated-result.md"; payload=b"foreign validated\n"
+canonical.write_bytes(payload); canonical.chmod(0o400)
+(child/"status.json").write_text('{"state":"completed","exit_code":0}\n')
+initial=rows("initial"); value=rows("validated")
+initial[-1]["result"]=str(provider); initial[-1]["status"]=str(child/"status.json")
+value[-1]["result"]=str(canonical); value[-1]["sha256"]=hashlib.sha256(payload).hexdigest()
+write("foreign-path-initial",initial); write("foreign-path",value)
 PY
 evidence_must_fail duplicate-index "$EVIDENCE_ROOT/duplicate-index" "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED" malformed-ledger
 evidence_must_fail foreign-instance "$EVIDENCE_ROOT/foreign-instance" "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED" roster-mismatch
 evidence_must_fail bad-digest "$EVIDENCE_ROOT/bad-digest" "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED" digest-mismatch
 evidence_must_fail duplicate-path "$EVIDENCE_ROOT/duplicate-path" "$EVIDENCE_ROOT/duplicate-path-initial" "$REPAIR_LAUNCHED" duplicate-artifact
+evidence_must_fail foreign-path "$EVIDENCE_ROOT/foreign-path" "$EVIDENCE_ROOT/foreign-path-initial" "$REPAIR_LAUNCHED" unsafe-artifact
 
 python3 -I -B - "$EVIDENCE_ROOT" <<'PY'
 import hashlib,json,os,pathlib,sys
 root=pathlib.Path(os.path.realpath(sys.argv[1])); index=3
 rows=[json.loads(line) for line in (root/"validated").read_text().splitlines()]
-child=root/f"repair-{index}"; child.mkdir()
+child=root/"children"/"review-3-attempt02"; child.mkdir()
 provider=child/"result.md"; provider.write_text("provider-owned repair\n")
 canonical=child/"validated-result.md"; payload=b"validated-repair-3\n"
 canonical.write_bytes(payload); canonical.chmod(0o400)
 instance="review-3-attempt02"
+(child/"status.json").write_text('{"state":"completed","exit_code":0}\n')
 repair={"edge":rows[index-1]["edge"],"index":index,"instance":instance,"receipt":"fixture",
         "result":str(provider),"status":str(child/"status.json")}
 (root/"repair-valid").write_text(json.dumps(repair,separators=(",",":"))+"\n")
@@ -712,7 +855,7 @@ rows[index-1]={"edge":repair["edge"],"index":index,"instance":instance,
 (root/"validated-repair").write_text("".join(json.dumps(row,separators=(",",":"))+"\n" for row in rows))
 PY
 post_review_validated_evidence_complete "$EVIDENCE_ROOT/validated-repair" 6 \
-  "$REVIEW_LAUNCHED" "$EVIDENCE_ROOT/repair-valid"
+  "$REVIEW_LAUNCHED" "$EVIDENCE_ROOT/repair-valid" "$EVIDENCE_ROOT"
 
 # The configured cap is enforced by the production wave runner, not merely
 # mentioned in prose. Cap one and cap two both wait before the next launch
@@ -742,16 +885,19 @@ post_review_validated_evidence_complete "$EVIDENCE_ROOT/validated-repair" 6 \
   for index in "${!REVIEW_EDGES[@]}"; do
     printf '{"edge":"%s","index":%d}\n' "${REVIEW_EDGES[$index]}" "$((index + 1))"
   done >"$CAP_RECORDS"
-  for cap in 1 2; do
+  for cap in 1 2 4; do
     CAP_EVENTS="$TMP/cap-$cap.events"; : >"$CAP_EVENTS"
     post_review_run_capped "$CAP_RECORDS" 6 "$cap" "$TMP/cap-$cap.descriptors" \
       "$TMP/cap-$cap.launched" "$TMP/cap-$cap.failed" 10 "$TMP/cap-$cap"
     if [ "$cap" -eq 1 ]; then
       printf '%s\n' dispatch:1 wait:1:1 dispatch:1 wait:1:2 dispatch:1 wait:1:3 \
         dispatch:1 wait:1:4 dispatch:1 wait:1:5 dispatch:1 wait:1:6 >"$TMP/cap.expected"
-    else
+    elif [ "$cap" -eq 2 ]; then
       printf '%s\n' dispatch:2 wait:2:1,2 dispatch:2 wait:2:3,4 \
         dispatch:2 wait:2:5,6 >"$TMP/cap.expected"
+    else
+      printf '%s\n' dispatch:4 wait:4:1,2,3,4 dispatch:2 wait:2:5,6 \
+        >"$TMP/cap.expected"
     fi
     cmp "$TMP/cap.expected" "$CAP_EVENTS"
     [ "$POST_REVIEW_VALID_COUNT" -eq 6 ]
@@ -1154,6 +1300,34 @@ set -e
 [ "$(wc -l <"$unwind_log" | tr -d ' ')" -eq 1 ]
 SH
 bash "$TMP/validated-ledger-failure.sh" "$TMP/post-runtime.sh" "$TMP/validated-ledger-post"
+
+# A validated-result publication I/O failure is also infrastructure failure,
+# not malformed reviewer output eligible for a format repair.
+cat >"$TMP/validated-publication-failure.sh" <<'SH'
+set -u
+runtime="$1"; run="$2"; mkdir -p "$run"
+. "$runtime"
+CHANGED_PATHS_JSON='["README.md"]'
+POST_REVIEW_VALIDATED_LEDGER="$run/validated"; : >"$POST_REVIEW_VALIDATED_LEDGER"
+unwind_log="$run/unwind"; : >"$unwind_log"
+uberdev_wait_child() { return 0; }
+uberdev_child_validate_phase1_review_result() { return 74; }
+uberdev_unwind_child() { printf '%s\n' "$1" >>"$unwind_log"; return 0; }
+printf '%s\n' \
+  "{\"edge\":\"first.edge\",\"index\":1,\"instance\":\"first\",\"status\":\"$run/first.status\",\"result\":\"$run/first.result\"}" \
+  >"$run/launched"
+set +e
+post_review_wait_all "$run/launched" 31 "$run/failed"
+rc=$?
+set -e
+[ "$rc" -eq 74 ]
+[ "$POST_REVIEW_INFRA_FAILURE" -eq 1 ]
+[ "$POST_REVIEW_VALID_COUNT" -eq 0 ]
+[ "$POST_REVIEW_FORMAT_FAILURE_COUNT" -eq 0 ]
+[ ! -s "$run/failed" ]
+[ "$(wc -l <"$unwind_log" | tr -d ' ')" -eq 1 ]
+SH
+bash "$TMP/validated-publication-failure.sh" "$TMP/post-runtime.sh" "$TMP/validated-publication-post"
 
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$REVIEW"
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$SIMPLIFY"

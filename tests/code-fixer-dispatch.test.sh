@@ -190,6 +190,31 @@ assert_grep "$SIMPLIFY" 'commit_type_prefix=refactor:' \
   "simplify.md Phase 3 dispatch carries commit_type_prefix=refactor:"
 
 echo
+echo "== Executable disposition-before-commit gate =="
+GATE_FIXTURE="$(mktemp)"
+awk '/^[[:space:]]*code_fixer_require_valid_disposition\(\) \{/{active=1} active{sub(/^[[:space:]]+/,""); print} active && /^[[:space:]]*\}/{exit}' \
+  "$CODE_FIXER" >"$GATE_FIXTURE"
+GATE_LOG="$(mktemp)"
+GATE_LOG="$GATE_LOG" bash -c '
+  . "$1"
+  git() { printf "git:%s\n" "$*" >>"$GATE_LOG"; }
+  push_or_trust() { printf "trust\n" >>"$GATE_LOG"; }
+  if code_fixer_require_valid_disposition failed; then
+    git commit -m forbidden
+    push_or_trust
+  fi
+' _ "$GATE_FIXTURE"
+GATE_RC=$?
+if [ "$GATE_RC" -eq 0 ] && [ -s "$GATE_FIXTURE" ] && [ ! -s "$GATE_LOG" ]; then
+  echo "  PASS  disposition publication failure prevents commit, push, and trust markers"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  disposition publication failure crossed the commit boundary"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$GATE_FIXTURE" "$GATE_LOG"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

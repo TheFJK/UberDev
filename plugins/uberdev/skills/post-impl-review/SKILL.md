@@ -275,6 +275,12 @@ post_review_wait_all() {
         echo "error: cleanup failed after invalid reviewer result edge=$edge" >&2
         continue
       fi
+      if [ "${validation_rc:-2}" -ne 2 ]; then
+        POST_REVIEW_INFRA_FAILURE=1
+        [ "$first_rc" -ne 0 ] || first_rc="${validation_rc:-74}"
+        echo "error: reviewer evidence publication failed edge=$edge" >&2
+        continue
+      fi
       if [ -z "$failed_path" ]; then
         POST_REVIEW_INFRA_FAILURE=1
         [ "$first_rc" -ne 0 ] || first_rc="${validation_rc:-2}"
@@ -528,15 +534,18 @@ if [ "$REVIEW_WAVE_BLOCKED" -eq 0 ] && [ -s "$REVIEW_FAILED" ]; then
 fi
 if [ $((REVIEW_INITIAL_VALID_COUNT + REVIEW_REPAIR_VALID_COUNT)) -ne "$REVIEW_EXPECTED_COUNT" ]; then REVIEW_WAVE_BLOCKED=1; fi
 post_review_validated_evidence_complete() {
-  python3 -I -B - "$1" "$2" "$3" "$4" "${REVIEW_EDGES[@]}" <<'PY'
+  python3 -I -B - "$1" "$2" "$3" "$4" "$5" "${REVIEW_EDGES[@]}" <<'PY'
 import hashlib,json,os,re,stat,sys
-ledger,expected,initial_ledger,repair_ledger,*allowed=sys.argv[1:]; expected=int(expected)
+ledger,expected,initial_ledger,repair_ledger,carrier_run_dir,*allowed=sys.argv[1:]; expected=int(expected)
 def fail(reason,row=None):
  edge=(row or {}).get('edge','unknown')
  index=(row or {}).get('index','unknown')
  print(f'post_review_evidence_failure class={reason} edge={edge} index={index}',file=sys.stderr)
  raise SystemExit(2)
 try:
+ carrier_run=os.path.realpath(carrier_run_dir)
+ if not os.path.isabs(carrier_run_dir) or not os.path.isdir(carrier_run): fail('unsafe-artifact')
+ children_root=os.path.join(carrier_run,'children')
  rows=[json.loads(line) for line in open(ledger,encoding='utf-8') if line.strip()]
  launched=[]
  for source in (initial_ledger,repair_ledger):
@@ -547,7 +556,7 @@ try:
      or len({row.get('index') for row in rows})!=expected
      or {(row.get('edge'),row.get('index')) for row in rows}!=allowed_pairs):
   fail('malformed-ledger')
- seen_paths=set(); seen_inodes=set()
+ seen_provider_paths=set(); seen_paths=set(); seen_inodes=set()
  for row in rows:
   if set(row)!={'edge','index','instance','result','sha256'} or type(row['index']) is not int:
    fail('malformed-ledger',row)
@@ -556,10 +565,25 @@ try:
            and candidate.get('index')==row['index']
            and candidate.get('instance')==row['instance']]
   if len(matches)!=1: fail('roster-mismatch',row)
-  launched_result=matches[0].get('result')
-  if not isinstance(launched_result,str) or not os.path.isabs(launched_result):
+  launch=matches[0]; launched_result=launch.get('result'); launched_status=launch.get('status')
+  if isinstance(launched_result,str) and launched_result in seen_provider_paths:
+   fail('duplicate-artifact',row)
+  if isinstance(launched_result,str): seen_provider_paths.add(launched_result)
+  expected_child=os.path.join(children_root,row['instance'])
+  expected_provider=os.path.join(expected_child,'result.md')
+  expected_status=os.path.join(expected_child,'status.json')
+  if (not isinstance(launched_result,str) or not os.path.isabs(launched_result)
+      or not isinstance(launched_status,str) or not os.path.isabs(launched_status)
+      or launched_result!=expected_provider or launched_status!=expected_status
+      or os.path.realpath(os.path.dirname(launched_result))!=expected_child):
    fail('unsafe-artifact',row)
-  expected_result=os.path.join(os.path.dirname(launched_result),'validated-result.md')
+  status_entry=os.lstat(launched_status)
+  with open(launched_status,encoding='utf-8') as stream: status_value=json.load(stream)
+  if (stat.S_ISLNK(status_entry.st_mode) or not stat.S_ISREG(status_entry.st_mode)
+      or status_entry.st_nlink!=1 or status_value.get('state')!='completed'
+      or type(status_value.get('exit_code')) is not int or status_value['exit_code']!=0):
+   fail('roster-mismatch',row)
+  expected_result=os.path.join(expected_child,'validated-result.md')
   path=row['result']; digest=row['sha256']; entry=os.lstat(path)
   canonical_path=os.path.realpath(path)
   inode=(entry.st_dev,entry.st_ino)
@@ -579,7 +603,7 @@ except (OSError,UnicodeError,ValueError,TypeError,json.JSONDecodeError):
 PY
 }
 if ! post_review_validated_evidence_complete "$POST_REVIEW_VALIDATED_LEDGER" "$REVIEW_EXPECTED_COUNT" \
-    "$REVIEW_LAUNCHED" "$REPAIR_PREFIX.launched"; then REVIEW_WAVE_BLOCKED=1; fi
+    "$REVIEW_LAUNCHED" "$REPAIR_PREFIX.launched" "$UBERDEV_CARRIER_RUN_DIR"; then REVIEW_WAVE_BLOCKED=1; fi
 post_review_require_complete_wave() {
   local aggregate_path="${AGG_PATH:-$RESEARCH_DIR_ABS/post-impl-review-final.md}"
   if [ "${REVIEW_WAVE_BLOCKED:-1}" -eq 0 ] \

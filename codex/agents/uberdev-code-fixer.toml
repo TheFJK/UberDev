@@ -55,26 +55,17 @@ Explicit denylist (never call): WebFetch, WebSearch, Write (Edit-only — no new
    d. Read the file. Apply the minimal edit that addresses the finding's `summary` + `detail`. Preserve behavior unless the finding explicitly calls for a behavior change (e.g., re-throwing a swallowed error). Tag each fix `[preserve]` or `[change]` in the commit body.
    e. If the fix would introduce a new file: refuse this finding (`disposition: REFUSED, reason: "fix-creates-new-file"`).
    f. If the fix is genuinely a false positive: record `disposition: SKIPPED` with `reason: "false-positive"` plus a 1-line rationale.
-4. **Stage and commit.** Run `git add` on the touched files (NEVER `git add -A`/`-a` to avoid sweeping unrelated work). Build the commit message via heredoc:
-   ```bash
-   git commit -m "$(cat <<'EOF'
-   <commit_type_prefix> address /review-pr <phase> findings
+4. **Stage only.** Run `git add` on the touched files. NEVER `git add -A` or
+   `git add -a`, because either can sweep unrelated work. Do not invoke
+   `git commit` yet.
+   A disposition artifact must be durably published and revalidated before the
+   first repository mutation.
 
-   - [preserve] file.ts:42 — short summary
-   - [change]   other.ts:18 — short summary
-   - [skipped]  third.ts:99 — false positive: existing test covers this
-
-   <Lens emphasis: Reuse | Quality | Efficiency>  (Phase 2 only)
-   EOF
-   )"
-   ```
-   The single-quoted heredoc delimiter (`<<'EOF'`) prevents shell expansion of any `$`/backtick inside reviewer prose. This is the load-bearing defense against second-order command injection.
-5. **Capture the commit SHA.** Run `git rev-parse HEAD` and record. If the apply loop addressed multiple findings, you MAY split into multiple commits (still all `<commit_type_prefix>` typed). Phase 2 specifically: ONE `refactor:` commit only — do NOT split, because R8.6's separate-commit invariant is locked to one `refactor:` per Phase 2 run.
-6. **Persist the aggregate-bound disposition artifact.** Validate
-   `disposition_path` is the expected phase basename, has the same canonical
-   parent as `findings_path`, and is the pre-created non-symlink regular file
-   with link count one. Edit that existing file to one JSON object with exact
-   top-level keys:
+5. **Persist the aggregate-bound disposition artifact before committing.**
+   Validate `disposition_path` is the expected phase basename, has the same
+   canonical parent as `findings_path`, and is the pre-created non-symlink
+   regular file with link count one. Edit that existing file to one JSON object
+   with exact top-level keys:
 
    ```json
    {
@@ -98,12 +89,47 @@ Explicit denylist (never call): WebFetch, WebSearch, Write (Edit-only — no new
    `(finding_index, location, summary_sha256)` triple is the immutable join key
    used downstream; never synthesize, omit, reorder, or copy a triple from
    reviewer prose. Re-read the just-written bounded JSON and verify its exact
-   schema and aggregate digest before returning. If the path identity changed,
-   the write/validation fails, or any triple is incomplete, return
-   `status: REFUSED`, `rationale: "disposition-artifact-invalid"` and do not
-   claim any disposition was persisted.
+   schema and aggregate digest. If the path identity changed, the write or
+   validation fails, or any triple is incomplete, return `status: REFUSED`,
+   `rationale: "disposition-artifact-invalid"` **before `git commit`**. Staged
+   edits may remain, but repository `HEAD` must remain unchanged.
 
-7. **No git operations beyond add+commit.** Do NOT push, fetch, reset, or rebase. The caller (`/review-pr`'s main turn) handles push and the trust-trail-anchor commit at end-of-run. The disposition artifact remains untracked run evidence and is never staged.
+   The executable commit gate used by the controller contract is:
+
+   ```bash uberdev-executable origin=code-fixer
+   code_fixer_require_valid_disposition() {
+     [ "$1" = "validated" ] || return 74
+   }
+   ```
+
+6. **Commit only after Step 5 succeeded.** First call
+   `code_fixer_require_valid_disposition validated`; any non-zero result is a
+   pre-commit refusal. Then build the commit message via heredoc:
+   ```bash
+   git commit -m "$(cat <<'EOF'
+   <commit_type_prefix> address /review-pr <phase> findings
+
+   - [preserve] file.ts:42 — short summary
+   - [change]   other.ts:18 — short summary
+   - [skipped]  third.ts:99 — false positive: existing test covers this
+
+   <Lens emphasis: Reuse | Quality | Efficiency>  (Phase 2 only)
+   EOF
+   )"
+   ```
+   The single-quoted heredoc delimiter (`<<'EOF'`) prevents shell expansion of any `$`/backtick inside reviewer prose. This is the load-bearing defense against second-order command injection.
+   Immediately run `git rev-parse HEAD` and record the commit SHA. If the apply
+   loop addressed multiple findings, you MAY split into multiple commits (still
+   all `<commit_type_prefix>` typed). Phase 2 specifically: ONE `refactor:`
+   commit only — do NOT split, because R8.6's separate-commit invariant is
+   locked to one `refactor:` per Phase 2 run. After the first successful commit
+   there are no fallible evidence writes and no ordinary `REFUSED` return path:
+   the already-validated artifact and the captured SHA are the final evidence.
+
+7. **No git operations beyond add+commit.** Do NOT push, fetch, reset, or rebase.
+   The caller (`/review-pr`'s main turn) handles push and the
+   trust-trail-anchor commit at end-of-run. The disposition artifact remains
+   untracked run evidence and is never staged.
 
 ## Refusal triggers
 
@@ -114,7 +140,9 @@ Return overall `status: REFUSED` with `rationale: "<reason>"` if:
 - Every finding refuses individually (cumulative refusal — surface so the caller knows zero edits landed).
 - The findings aggregate contains zero parseable findings (`refused-empty-aggregate`) — caller treats this as `disposition: NO_FIXES_NEEDED`, exit cleanly.
 - The pre-created disposition artifact is foreign, replaced, malformed, or
-  cannot be updated and verified (`disposition-artifact-invalid`).
+  cannot be updated and verified (`disposition-artifact-invalid`). This refusal
+  is reachable only before `git commit`; an agent must never report ordinary
+  `REFUSED` after mutating repository history.
 
 ## Return contract (last lines of your reply, fenced YAML)
 

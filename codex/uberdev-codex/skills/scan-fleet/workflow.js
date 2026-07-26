@@ -432,6 +432,7 @@ function f2iPrompt(aggregatePathAbs, sourceTag, prNumber) {
     + sourceTag + ", validated at read): " + aggregatePathAbs + "\n\n"
     + "Resolve working_dir via `git rev-parse --show-toplevel` (REQUIRED — the agent refuses without an "
     + "absolute working_dir), repo_slug + pr_commit_sha via git/gh. "
+    + "variant=legacy." + (mode === "simplify" ? "ubersimplify" : "uberscan") + ", "
     + "finding_label=" + (mode === "simplify" ? "ubersimplify" : "uberscan") + "-finding, "
     + "finding_marker_slug=" + (mode === "simplify" ? "ubersimplify" : "uberscan") + ", "
     + "source_ref=/" + (mode === "simplify" ? "ubersimplify" : "uberscan") + " run " + runId + ", "

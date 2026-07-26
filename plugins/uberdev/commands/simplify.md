@@ -257,11 +257,13 @@ RESEARCH_DIR_ABS="$WORKING_DIR_ABS/.uberdev/research/$RUN_ID"
 **Dispatch one routed findings child; phase1 path is empty because `/simplify` runs standalone:**
 
 ```bash
-DEFER_INPUTS="$(jq -cn --arg phase1_path "$AGG_PATH" --arg phase2_path "$AGG_PATH" --arg phase1_disposition_path "$PHASE1_DISPOSITION_PATH" --arg phase2_disposition_path "$PHASE2_DISPOSITION_PATH" --arg working_dir "$WORKING_DIR_ABS" --arg pr "$PR_NUMBER" '{phase1_path:$phase1_path,phase2_path:$phase2_path,phase1_disposition_path:$phase1_disposition_path,phase2_disposition_path:$phase2_disposition_path,working_dir:$working_dir,pr_number:($pr|tonumber)}')"
+DEFER_INPUTS="$(jq -cn --arg phase2_path "$AGG_PATH" --arg phase2_disposition_path "$PHASE2_DISPOSITION_PATH" --arg working_dir "$WORKING_DIR_ABS" --arg pr "$PR_NUMBER" '{phase1_path:"",phase2_path:$phase2_path,phase1_disposition_path:"",phase2_disposition_path:$phase2_disposition_path,working_dir:$working_dir,pr_number:($pr|tonumber)}')"
 review_child_single review_pr.defer.findings simplify-defer-findings-iter01-attempt01 "$DEFER_INPUTS" null "$RESEARCH_DIR_ABS/defer" "$REVIEW_PR_TIMEOUT"
 ```
 
-The standalone path supplies the Phase 2 aggregate in both required aggregate slots; disposition artifacts remain distinct.
+The standalone path supplies only the Phase 2 aggregate and its Phase 2
+disposition. Phase 1 paths are empty because no post-implementation review ran;
+duplicating the simplify envelope into the Phase 1 slot is malformed.
 
 **Skip-path behaviour** (when `DEFER_ISSUES_EFFECTIVE=0`):
 - Do NOT call `routed child (subagent_type: uberdev:findings-to-issues, …)`.
