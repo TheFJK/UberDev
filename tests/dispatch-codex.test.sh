@@ -705,12 +705,12 @@ caller_failures=''
 [ "$(git -C "$CALLER_TMP/repo" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ] || caller_failures="$caller_failures child-worktree"
 [ ! -e "$CALLER_STATUS.worktree-owner.json" ] || caller_failures="$caller_failures ownership-receipt"
 [ -d "$CALLER_TMP/repo" ] || caller_failures="$caller_failures caller-cleaned"
-python3 -I - "$CALLER_STATUS" <<'PY' || caller_failures="$caller_failures bad-status"
-import json,pathlib,sys
+python3 -I - "$CALLER_STATUS" "$CALLER_TMP/repo" <<'PY' || caller_failures="$caller_failures bad-status"
+import json,os,pathlib,sys
 status=json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert status['state']=='completed' and status['workspace_mode']=='caller'
-assert status['worktree']==str((pathlib.Path(sys.argv[1]).parents[1]/'repo').resolve())
-assert status['branch']=='' and status['log']==sys.argv[1]+'.log'
+assert os.path.samefile(status['worktree'],sys.argv[2])
+assert status['branch']=='' and os.path.samefile(status['log'],sys.argv[1]+'.log')
 PY
 if [ -z "$caller_failures" ]; then
   pass_msg "caller mode advances the caller branch without child worktree, branch, receipt, or cleanup"
@@ -807,10 +807,15 @@ CODEX_MISSING_OUT="$(mktemp)"
 if CODEX_HOME=/tmp/codex-home PATH=/usr/bin:/bin UBERDEV_DISPATCH_BACKEND_REQUESTED=auto bash -c \
   '. "$1"; uberdev_dispatch_preflight' _ "$DISPATCH_LIB" >"$CODEX_MISSING_OUT" 2>&1; then
   fail_msg "auto preflight fails loudly when CODEX_HOME is set but codex is absent" "preflight returned success"
-elif grep -q "CODEX_HOME" "$CODEX_MISSING_OUT" && grep -q "codex" "$CODEX_MISSING_OUT"; then
+elif [ "$PID_CAPTURE_NUMERIC_SUPPORTED" -eq 0 ] \
+    && grep -q "native Windows requires WezTerm" "$CODEX_MISSING_OUT"; then
+  pass_msg "auto preflight fails on the native-Windows supervision capability gate"
+elif [ "$PID_CAPTURE_NUMERIC_SUPPORTED" -eq 1 ] \
+    && grep -q "CODEX_HOME" "$CODEX_MISSING_OUT" \
+    && grep -q "codex" "$CODEX_MISSING_OUT"; then
   pass_msg "auto preflight fails loudly when CODEX_HOME is set but codex is absent"
 else
-  fail_msg "auto preflight failure names CODEX_HOME and codex" "$(cat "$CODEX_MISSING_OUT")"
+  fail_msg "auto preflight failure matches the host supervision capability" "$(cat "$CODEX_MISSING_OUT")"
 fi
 rm -f "$CODEX_MISSING_OUT"
 
@@ -1095,30 +1100,20 @@ else
 fi
 rm -rf "$TMPD"
 
-echo "== _uberdev_dispatch_codex behavior with stubbed git/codex =="
+echo "== _uberdev_dispatch_codex behavior with real git and stubbed codex =="
 BEH_TMP="$(mktemp -d)"
 mkdir -p "$BEH_TMP/bin" "$BEH_TMP/repo" "$BEH_TMP/tmp"
-cat > "$BEH_TMP/bin/git" <<'SH'
-#!/usr/bin/env bash
-if [ "$1" = "-C" ] && [ "$3" = "status" ]; then
-  exit 0
-fi
-if [ "$1" = "-C" ] && [ "$3" = "rev-parse" ] && [ "$4" = "HEAD" ]; then
-  printf '%040d\n' 1
-  exit 0
-fi
-if [ "$1" = "worktree" ] && [ "$2" = "add" ]; then
-  mkdir -p "$3"
-  exit 0
-fi
-if [ "$1" = "worktree" ] && [ "$2" = "remove" ] && [ "$3" = "--force" ]; then
-  [ "${GIT_STUB_FAIL_REMOVE:-0}" != 1 ] || exit 96
-  rm -rf "$4"
-  exit 0
-fi
-echo "fake git: unsupported args: $*" >&2
-exit 1
-SH
+BEH_GIT="$(command -v git)"
+BEH_GIT_DIR="$(dirname "$BEH_GIT")"
+(
+  cd "$BEH_TMP/repo"
+  "$BEH_GIT" init -q
+  "$BEH_GIT" config user.name 'UberDev Test'
+  "$BEH_GIT" config user.email 'uberdev-test@example.invalid'
+  printf 'base\n' > base.txt
+  "$BEH_GIT" add base.txt
+  "$BEH_GIT" commit -qm base
+)
 cat > "$BEH_TMP/bin/codex" <<'SH'
 #!/usr/bin/env bash
 out=""
@@ -1140,10 +1135,11 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 sleep "${CODEX_STUB_SLEEP:-1}"
+[ "${CODEX_STUB_DIRTY:-0}" != 1 ] || printf 'preserve cleanup evidence\n' > codex-dirty.txt
 [ "${CODEX_STUB_EMPTY:-0}" = 1 ] || { [ -n "$out" ] && printf 'codex final result\n' > "$out"; }
 exit "${CODEX_STUB_RC:-0}"
 SH
-chmod +x "$BEH_TMP/bin/git" "$BEH_TMP/bin/codex"
+chmod +x "$BEH_TMP/bin/codex"
 cat > "$BEH_TMP/bin/py" <<SH
 #!/bin/sh
 [ "\$1" = -3 ] || exit 97
@@ -1158,7 +1154,7 @@ chmod +x "$BEH_TMP/bin/py"
 for runtime_command in env nohup cat sleep rm uname grep stat id ps basename dirname mkdir; do
   ln -s "$(command -v "$runtime_command")" "$BEH_TMP/bin/$runtime_command"
 done
-BEH_RUNTIME_PATH="$BEH_TMP/bin:/usr/bin:/bin"
+BEH_RUNTIME_PATH="$BEH_TMP/bin:$BEH_GIT_DIR:/usr/bin:/bin"
 printf 'prompt body for codex' > "$BEH_TMP/prompt.txt"
 BEH_OUT="$(
   cd "$BEH_TMP/repo" && \
@@ -1259,7 +1255,7 @@ EMPTY_INSTANCE=review-empty-result-a1
 EMPTY_SLUG="$(UBERDEV_AGENT_INSTANCE_ID="$EMPTY_INSTANCE" bash -c '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"
 EMPTY_OUT="$(
   cd "$BEH_TMP/repo" && \
-  PATH="$BEH_TMP/bin:/usr/bin:/bin" \
+  PATH="$BEH_RUNTIME_PATH" \
   UBERDEV_TMPDIR="$BEH_TMP/tmp" \
   UBERDEV_AGENT_CHILD_OWNED=1 \
   UBERDEV_AGENT_INSTANCE_ID="$EMPTY_INSTANCE" \
@@ -1297,11 +1293,11 @@ COMBINED_SLUG="$(UBERDEV_AGENT_INSTANCE_ID="$COMBINED_INSTANCE" bash -c '. "$1";
 # keep the provider alive long enough for the detached session to register.
 COMBINED_OUT="$(
   cd "$BEH_TMP/repo" && \
-  PATH="$BEH_TMP/bin:/usr/bin:/bin" \
+  PATH="$BEH_RUNTIME_PATH" \
   UBERDEV_TMPDIR="$BEH_TMP/tmp" \
   UBERDEV_AGENT_CHILD_OWNED=1 \
   UBERDEV_AGENT_INSTANCE_ID="$COMBINED_INSTANCE" \
-  CODEX_STUB_RC=42 CODEX_STUB_SLEEP=0.25 GIT_STUB_FAIL_REMOVE=1 \
+  CODEX_STUB_RC=42 CODEX_STUB_SLEEP=0.25 CODEX_STUB_DIRTY=1 \
   CODEX_CAPTURE="$BEH_TMP/codex-combined-capture.txt" \
   bash -c '
     . "$1"
