@@ -272,12 +272,20 @@ _dispatch_test_resolve_tool() {
   printf '%s\n' "$candidate"
 }
 
+_dispatch_test_install_tool() {
+  local destination="$1" tool_name="$2" tool_path="$3" escaped_path
+  [ ! -e "$destination/$tool_name" ] || return 0
+  escaped_path="$(printf '%q' "$tool_path")" || return 1
+  printf '#!/bin/bash\nexec %s "$@"\n' "$escaped_path" >"$destination/$tool_name" \
+    || return 1
+  chmod +x "$destination/$tool_name"
+}
+
 _dispatch_test_populate_mutex_tools() {
   local destination="$1" runtime_command tool_path hash_tool hash_tool_path os_name
-  for runtime_command in basename chmod cut dirname grep ln mkdir mktemp mv ps rm rmdir sed sleep stat tr uname; do
+  for runtime_command in basename cat chmod cut dirname grep ln mkdir mktemp mv ps rm rmdir sed sleep stat tr uname; do
     tool_path="$(_dispatch_test_resolve_tool "$runtime_command")" || return 1
-    [ -e "$destination/$runtime_command" ] \
-      || ln -s "$tool_path" "$destination/$runtime_command" || return 1
+    _dispatch_test_install_tool "$destination" "$runtime_command" "$tool_path" || return 1
   done
   if hash_tool_path="$(_dispatch_test_resolve_tool shasum 2>/dev/null)"; then
     hash_tool=shasum
@@ -286,16 +294,39 @@ _dispatch_test_populate_mutex_tools() {
   else
     return 1
   fi
-  [ -e "$destination/$hash_tool" ] \
-    || ln -s "$hash_tool_path" "$destination/$hash_tool" || return 1
+  _dispatch_test_install_tool "$destination" "$hash_tool" "$hash_tool_path" || return 1
   os_name="$(uname -s 2>/dev/null)" || return 1
   case "$os_name" in
     MINGW*|MSYS*|CYGWIN*)
       tool_path="$(_dispatch_test_resolve_tool cygpath)" || return 1
-      [ -e "$destination/cygpath" ] \
-        || ln -s "$tool_path" "$destination/cygpath" || return 1
+      _dispatch_test_install_tool "$destination" cygpath "$tool_path" || return 1
       ;;
   esac
+}
+
+_dispatch_test_verify_mutex_tools() {
+  local destination="$1" sanitized raw digest os_name windows_path
+  (
+    PATH="$destination"
+    sanitized="$(printf 'fixture-text' | tr -d '\r\n')" || exit 11
+    [ "$sanitized" = fixture-text ] || exit 12
+    if command -v shasum >/dev/null 2>&1; then
+      raw="$(printf 'fixture-hash' | shasum -a 256)" || exit 13
+    elif command -v sha256sum >/dev/null 2>&1; then
+      raw="$(printf 'fixture-hash' | sha256sum)" || exit 13
+    else
+      exit 14
+    fi
+    digest="${raw%%[[:space:]]*}"
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || exit 15
+    os_name="$(uname -s 2>/dev/null)" || exit 16
+    case "$os_name" in
+      MINGW*|MSYS*|CYGWIN*)
+        windows_path="$(cygpath -u 'C:/Windows' 2>/dev/null)" || exit 17
+        case "$windows_path" in /*) ;; *) exit 18 ;; esac
+        ;;
+    esac
+  )
 }
 
 cat > "$PYTHON_RESOLVER_TMP/python" <<SH
@@ -397,6 +428,13 @@ _dispatch_test_populate_mutex_tools "$MUTEX_OWNER_TMP/tools" || {
   echo "  FAIL  portable mutex fixture tools are unavailable"
   exit 1
 }
+if _dispatch_test_verify_mutex_tools "$MUTEX_OWNER_TMP/tools"; then
+  :
+else
+  fixture_tools_rc=$?
+  echo "  FAIL  portable mutex fixture dependency probe failed (rc=$fixture_tools_rc)"
+  exit 1
+fi
 mutex_resolver_failures=''
 for resolver in python3 python py; do
   resolver_dir="$MUTEX_OWNER_TMP/$resolver"
@@ -489,6 +527,13 @@ _dispatch_test_populate_mutex_tools "$MUTEX_CONCURRENT_TMP/bin" || {
   echo "  FAIL  portable concurrent mutex fixture tools are unavailable"
   exit 1
 }
+if _dispatch_test_verify_mutex_tools "$MUTEX_CONCURRENT_TMP/bin"; then
+  :
+else
+  fixture_tools_rc=$?
+  echo "  FAIL  portable concurrent mutex fixture dependency probe failed (rc=$fixture_tools_rc)"
+  exit 1
+fi
 for contender in one two; do
   MUTEX_TEST_GUARD="$MUTEX_CONCURRENT_TMP/state/critical" \
   MUTEX_TEST_OVERLAP="$MUTEX_CONCURRENT_TMP/state/overlap" \
