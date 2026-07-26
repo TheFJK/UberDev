@@ -352,41 +352,6 @@ PY
   esac
   chmod 600 "$result"
   DISPATCH_ID="fixture-$instance"
-  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"fixture-%s"}\n' "$instance" >"$status"
-  chmod 600 "$status"
-  python3 -I -B - "$status" <<'PY' &
-import json
-import os
-import tempfile
-import time
-import sys
-
-path = sys.argv[1]
-for _attempt in range(500):
-    try:
-        value = json.load(open(path, encoding="utf-8"))
-    except (OSError, ValueError):
-        value = {}
-    if value.get("state") == "running" and value.get("lease_generation"):
-        break
-    time.sleep(0.01)
-else:
-    raise SystemExit("adapter did not publish lease generation")
-value["state"] = "completed"
-value["exit_code"] = 0
-descriptor, temporary = tempfile.mkstemp(prefix=".fixture-complete.", dir=os.path.dirname(path))
-try:
-    os.fchmod(descriptor, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-        json.dump(value, stream, sort_keys=True, separators=(",", ":"))
-        stream.write("\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temporary, path)
-finally:
-    if os.path.exists(temporary):
-        os.unlink(temporary)
-PY
   python3 -I -B - "$PROVIDER_CALLS" "$UBERDEV_CHILD_TEST_SOURCE" "$edge" "$instance" \
     "$UBERDEV_AGENT_DECISION_JSON" "$@" <<'PY'
 import json
@@ -403,6 +368,7 @@ row = {
 with open(path, "a", encoding="utf-8") as stream:
     stream.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
 PY
+  _uberdev_agent_publish_status "$status" "$backend" "$DISPATCH_ID" completed 0 create
 }
 
 # Source the production post-review setup/record/fanout definitions against the

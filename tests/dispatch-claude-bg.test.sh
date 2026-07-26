@@ -848,8 +848,8 @@ fi
 # after the first releases it.
 CLAUDE_SERIAL_LOG="$CLAUDE_BOOT_TMP/serial.log"
 CLAUDE_SERIAL_SENTINEL="$CLAUDE_BOOT_TMP/serial-owner"
+CLAUDE_SERIAL_READY_DEADLINE_S=5
 : >"$CLAUDE_SERIAL_LOG"
-CLAUDE_SERIAL_START="$(python3 -I -B -c 'import time; print(time.monotonic())')"
 (
   cd "$CLAUDE_BOOT_TMP/repo" || exit 1
   PATH="$CLAUDE_BOOT_TMP/bin:$PATH" CLAUDE_PROVIDER_MODE=serial \
@@ -869,48 +869,69 @@ CLAUDE_SERIAL_START="$(python3 -I -B -c 'import time; print(time.monotonic())')"
     ' _ "$DISPATCH_LIB" "$CLAUDE_TIMEOUT_BIN" "$CLAUDE_BOOT_TMP/prompt.txt"
 ) >"$CLAUDE_BOOT_TMP/serial-first.out" 2>&1 &
 CLAUDE_SERIAL_FIRST_PID=$!
-CLAUDE_SERIAL_READY_TRIES=0
-while [ ! -d "$CLAUDE_SERIAL_SENTINEL" ] && [ "$CLAUDE_SERIAL_READY_TRIES" -lt 100 ]; do
-  CLAUDE_SERIAL_READY_TRIES=$((CLAUDE_SERIAL_READY_TRIES + 1))
+CLAUDE_SERIAL_READY=0
+CLAUDE_SERIAL_READY_REASON=deadline
+CLAUDE_SERIAL_READY_STARTED="$SECONDS"
+while [ ! -d "$CLAUDE_SERIAL_SENTINEL" ] \
+    && [ $((SECONDS - CLAUDE_SERIAL_READY_STARTED)) -lt "$CLAUDE_SERIAL_READY_DEADLINE_S" ]; do
+  if ! kill -0 "$CLAUDE_SERIAL_FIRST_PID" 2>/dev/null; then
+    CLAUDE_SERIAL_READY_REASON=first-exited
+    break
+  fi
   sleep 0.01
 done
-(
-  cd "$CLAUDE_BOOT_TMP/repo" || exit 1
-  PATH="$CLAUDE_BOOT_TMP/bin:$PATH" CLAUDE_PROVIDER_MODE=serial \
-    CLAUDE_SERIAL_LOG="$CLAUDE_SERIAL_LOG" CLAUDE_SERIAL_SENTINEL="$CLAUDE_SERIAL_SENTINEL" \
-    UBERDEV_AGENT_INSTANCE_ID=serial-second UBERDEV_TMPDIR="$CLAUDE_BOOT_TMP/runtime-serial-second" \
-    UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT=2 UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=1 \
-    POST_IMPL_REVIEW_CAP=2 REVIEW_EXPECTED_COUNT=2 \
-    /bin/bash -c '
-      set -u
-      . "$1"
-      TIMEOUT_BIN="$2"; SOLVE_TIMEOUT=4; MODEL=sonnet
-      PERM_FLAG=(); EFFORT_FLAG=(); BG_PROMPT_MODE=file
-      DISPATCH_RC=0; DISPATCH_ID=""; DISPATCH_LOG=""
-      _uberdev_dispatch_claude_bg 348 medium "$3"
-      rc=$?
-      [ "$rc" -eq 0 ] && [ "$DISPATCH_ID" = 22222222 ]
-    ' _ "$DISPATCH_LIB" "$CLAUDE_TIMEOUT_BIN" "$CLAUDE_BOOT_TMP/prompt.txt"
-) >"$CLAUDE_BOOT_TMP/serial-second.out" 2>&1 &
-CLAUDE_SERIAL_SECOND_PID=$!
+if [ -d "$CLAUDE_SERIAL_SENTINEL" ] && kill -0 "$CLAUDE_SERIAL_FIRST_PID" 2>/dev/null; then
+  CLAUDE_SERIAL_READY=1
+  CLAUDE_SERIAL_READY_REASON=ready
+  (
+    cd "$CLAUDE_BOOT_TMP/repo" || exit 1
+    PATH="$CLAUDE_BOOT_TMP/bin:$PATH" CLAUDE_PROVIDER_MODE=serial \
+      CLAUDE_SERIAL_LOG="$CLAUDE_SERIAL_LOG" CLAUDE_SERIAL_SENTINEL="$CLAUDE_SERIAL_SENTINEL" \
+      UBERDEV_AGENT_INSTANCE_ID=serial-second UBERDEV_TMPDIR="$CLAUDE_BOOT_TMP/runtime-serial-second" \
+      UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT=2 UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=1 \
+      POST_IMPL_REVIEW_CAP=2 REVIEW_EXPECTED_COUNT=2 \
+      /bin/bash -c '
+        set -u
+        . "$1"
+        TIMEOUT_BIN="$2"; SOLVE_TIMEOUT=4; MODEL=sonnet
+        PERM_FLAG=(); EFFORT_FLAG=(); BG_PROMPT_MODE=file
+        DISPATCH_RC=0; DISPATCH_ID=""; DISPATCH_LOG=""
+        _uberdev_dispatch_claude_bg 348 medium "$3"
+        rc=$?
+        [ "$rc" -eq 0 ] && [ "$DISPATCH_ID" = 22222222 ]
+      ' _ "$DISPATCH_LIB" "$CLAUDE_TIMEOUT_BIN" "$CLAUDE_BOOT_TMP/prompt.txt"
+  ) >"$CLAUDE_BOOT_TMP/serial-second.out" 2>&1 &
+  CLAUDE_SERIAL_SECOND_PID=$!
+fi
+CLAUDE_SERIAL_READY_ELAPSED_S=$((SECONDS - CLAUDE_SERIAL_READY_STARTED))
 wait "$CLAUDE_SERIAL_FIRST_PID"; CLAUDE_SERIAL_FIRST_RC=$?
-wait "$CLAUDE_SERIAL_SECOND_PID"; CLAUDE_SERIAL_SECOND_RC=$?
-CLAUDE_SERIAL_END="$(python3 -I -B -c 'import time; print(time.monotonic())')"
+if [ "$CLAUDE_SERIAL_READY" -eq 1 ]; then
+  wait "$CLAUDE_SERIAL_SECOND_PID"; CLAUDE_SERIAL_SECOND_RC=$?
+else
+  CLAUDE_SERIAL_SECOND_RC=not-launched
+fi
 CLAUDE_SERIAL_SCOPE="$(bash -c '. "$1"; _uberdev_dispatch_git_metadata_mutex_scope "$2"' \
   _ "$DISPATCH_LIB" "$CLAUDE_BOOT_TMP/repo")"
-if [ "$CLAUDE_SERIAL_FIRST_RC" -eq 0 ] && [ "$CLAUDE_SERIAL_SECOND_RC" -eq 0 ] \
+CLAUDE_SERIAL_SCOPE_DEBRIS=0
+for CLAUDE_SERIAL_DEBRIS_PATH in \
+    "$CLAUDE_SERIAL_SCOPE"/.mutex-candidate.* "$CLAUDE_SERIAL_SCOPE"/.mutex.quarantine.*; do
+  if [ -e "$CLAUDE_SERIAL_DEBRIS_PATH" ] || [ -L "$CLAUDE_SERIAL_DEBRIS_PATH" ]; then
+    CLAUDE_SERIAL_SCOPE_DEBRIS=1
+  fi
+done
+if [ "$CLAUDE_SERIAL_READY" -ne 1 ]; then
+  echo "  FAIL  concurrent Claude fixture readiness (reason=$CLAUDE_SERIAL_READY_REASON deadline=${CLAUDE_SERIAL_READY_DEADLINE_S}s waited=${CLAUDE_SERIAL_READY_ELAPSED_S}s first=$CLAUDE_SERIAL_FIRST_RC second=$CLAUDE_SERIAL_SECOND_RC)"
+  FAIL=$((FAIL + 1))
+elif [ "$CLAUDE_SERIAL_FIRST_RC" -eq 0 ] && [ "$CLAUDE_SERIAL_SECOND_RC" -eq 0 ] \
     && [ "$(cat "$CLAUDE_SERIAL_LOG")" = $'enter serial-first\nexit serial-first\nenter serial-second\nexit serial-second' ] \
     && [ ! -e "$CLAUDE_SERIAL_SCOPE/.mutex" ] \
-    && python3 -I -B - "$CLAUDE_SERIAL_START" "$CLAUDE_SERIAL_END" <<'PY'
-import sys
-elapsed=float(sys.argv[2])-float(sys.argv[1])
-assert 0.6 <= elapsed < 4.0, elapsed
-PY
+    && [ ! -e "$CLAUDE_SERIAL_SENTINEL" ] \
+    && [ "$CLAUDE_SERIAL_SCOPE_DEBRIS" -eq 0 ]
 then
   echo "  PASS  concurrent slow Claude bootstraps wait within the enforced wave budget without split ownership"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  concurrent Claude bootstrap serialization (first=$CLAUDE_SERIAL_FIRST_RC second=$CLAUDE_SERIAL_SECOND_RC log=$(tr '\n' '|' <"$CLAUDE_SERIAL_LOG"))"
+  echo "  FAIL  concurrent Claude bootstrap serialization (first=$CLAUDE_SERIAL_FIRST_RC second=$CLAUDE_SERIAL_SECOND_RC sentinel=$(test -e "$CLAUDE_SERIAL_SENTINEL" && printf present || printf absent) debris=$CLAUDE_SERIAL_SCOPE_DEBRIS log=$(tr '\n' '|' <"$CLAUDE_SERIAL_LOG"))"
   FAIL=$((FAIL + 1))
 fi
 
@@ -994,6 +1015,24 @@ fi
 # same generation to remain stable through the publication grace window before
 # reclaiming it; this prevents permanent deadlock without weakening the race
 # protection above.
+CLAUDE_ABANDONED_OPERATION_TIMEOUT_S=1
+CLAUDE_ABANDONED_QUEUE_SLOTS=1
+CLAUDE_ABANDONED_PUBLICATION_GRACE_S=1
+CLAUDE_ABANDONED_WALL_PROBE_ALLOWANCE_S=2
+# The runtime's acquisition wall budget ends before candidate preparation and
+# provider bootstrap. Allow those phases, the deliberate identity-write delay,
+# and Windows scheduler variance three additional seconds in this whole-call
+# watchdog; cadence instrumentation below proves the grace policy itself.
+CLAUDE_ABANDONED_WHOLE_CALL_MARGIN_S=3
+CLAUDE_ABANDONED_ACQUISITION_WALL_BUDGET_S=$((
+  CLAUDE_ABANDONED_OPERATION_TIMEOUT_S * CLAUDE_ABANDONED_QUEUE_SLOTS
+  + CLAUDE_ABANDONED_PUBLICATION_GRACE_S
+  + CLAUDE_ABANDONED_WALL_PROBE_ALLOWANCE_S
+))
+CLAUDE_ABANDONED_WATCHDOG_S=$((
+  CLAUDE_ABANDONED_ACQUISITION_WALL_BUDGET_S + CLAUDE_ABANDONED_WHOLE_CALL_MARGIN_S
+))
+CLAUDE_ABANDONED_CADENCE_LOG="$CLAUDE_BOOT_TMP/abandoned-cadence.log"
 mkdir "$CLAUDE_PUBLISH_SCOPE/.mutex"
 chmod 700 "$CLAUDE_PUBLISH_SCOPE/.mutex"
 CLAUDE_ABANDONED_START="$(python3 -I -B -c 'import time; print(time.monotonic())')"
@@ -1001,9 +1040,12 @@ set +e
 (
   cd "$CLAUDE_BOOT_TMP/repo" || exit 1
   PATH="$CLAUDE_BOOT_TMP/bin:$PATH" CLAUDE_PROVIDER_LOG="$CLAUDE_BOOT_TMP/abandoned-provider.log" \
+    CLAUDE_ABANDONED_CADENCE_LOG="$CLAUDE_ABANDONED_CADENCE_LOG" \
     CLAUDE_PROVIDER_MODE=marker UBERDEV_AGENT_INSTANCE_ID=abandoned-waiter \
-    UBERDEV_TMPDIR="$CLAUDE_BOOT_TMP/runtime-abandoned" UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT=1 \
-    UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=1 POST_IMPL_REVIEW_CAP=1 REVIEW_EXPECTED_COUNT=1 \
+    UBERDEV_TMPDIR="$CLAUDE_BOOT_TMP/runtime-abandoned" \
+    UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT="$CLAUDE_ABANDONED_OPERATION_TIMEOUT_S" \
+    UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=1 POST_IMPL_REVIEW_CAP="$CLAUDE_ABANDONED_QUEUE_SLOTS" \
+    REVIEW_EXPECTED_COUNT="$CLAUDE_ABANDONED_QUEUE_SLOTS" \
     /bin/bash -c '
       set -u
       . "$1"
@@ -1012,6 +1054,10 @@ set +e
       _uberdev_semaphore_write_process_identity() {
         command sleep 0.25
         _uberdev_semaphore_write_process_identity_without_delay "$@"
+      }
+      sleep() {
+        printf "%s\n" "$1" >>"$CLAUDE_ABANDONED_CADENCE_LOG" || return 2
+        command sleep "$@"
       }
       TIMEOUT_BIN="$2"; SOLVE_TIMEOUT=4; MODEL=sonnet
       PERM_FLAG=(); EFFORT_FLAG=(); BG_PROMPT_MODE=file
@@ -1024,18 +1070,40 @@ set +e
 CLAUDE_ABANDONED_RC=$?
 set +e
 CLAUDE_ABANDONED_END="$(python3 -I -B -c 'import time; print(time.monotonic())')"
-if [ "$CLAUDE_ABANDONED_RC" -eq 0 ] && [ ! -e "$CLAUDE_PUBLISH_SCOPE/.mutex" ] \
-    && [ "$(wc -l <"$CLAUDE_BOOT_TMP/abandoned-provider.log" | tr -d ' ')" -eq 1 ] \
-    && python3 -I -B - "$CLAUDE_ABANDONED_START" "$CLAUDE_ABANDONED_END" <<'PY'
+CLAUDE_ABANDONED_POLICY_OK=0
+if python3 -I -B - "$CLAUDE_ABANDONED_START" "$CLAUDE_ABANDONED_END" \
+    "$CLAUDE_ABANDONED_WATCHDOG_S" "$CLAUDE_ABANDONED_CADENCE_LOG" <<'PY'
 import sys
-elapsed=float(sys.argv[2])-float(sys.argv[1])
-assert 0.8 <= elapsed < 4.0, elapsed
+
+(started, ended, watchdog, path) = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    observed = stream.read().splitlines()
+# Eight 50ms/one-tick waits plus six 100ms/two-tick waits reach the configured
+# 20-tick publication grace without relying on scheduler wall time.
+assert observed == ["0.05"] * 8 + ["0.10"] * 6, observed
+assert 8 * 1 + 6 * 2 == 1 * 20
+elapsed=float(ended)-float(started)
+assert elapsed < float(watchdog), elapsed
 PY
+then
+  CLAUDE_ABANDONED_POLICY_OK=1
+fi
+CLAUDE_ABANDONED_SCOPE_DEBRIS=0
+for CLAUDE_ABANDONED_DEBRIS_PATH in \
+    "$CLAUDE_PUBLISH_SCOPE"/.mutex-candidate.* "$CLAUDE_PUBLISH_SCOPE"/.mutex.quarantine.*; do
+  if [ -e "$CLAUDE_ABANDONED_DEBRIS_PATH" ] || [ -L "$CLAUDE_ABANDONED_DEBRIS_PATH" ]; then
+    CLAUDE_ABANDONED_SCOPE_DEBRIS=1
+  fi
+done
+if [ "$CLAUDE_ABANDONED_RC" -eq 0 ] && [ ! -e "$CLAUDE_PUBLISH_SCOPE/.mutex" ] \
+    && [ "$CLAUDE_ABANDONED_SCOPE_DEBRIS" -eq 0 ] \
+    && [ "$(wc -l <"$CLAUDE_BOOT_TMP/abandoned-provider.log" | tr -d ' ')" -eq 1 ] \
+    && [ "$CLAUDE_ABANDONED_POLICY_OK" -eq 1 ]
 then
   echo "  PASS  stable abandoned ownerless mutex is reclaimed only after publication grace"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  abandoned ownerless mutex recovery (rc=$CLAUDE_ABANDONED_RC elapsed=$(python3 -I -B -c "print(float('$CLAUDE_ABANDONED_END')-float('$CLAUDE_ABANDONED_START'))"))"
+  echo "  FAIL  abandoned ownerless mutex recovery (rc=$CLAUDE_ABANDONED_RC policy=$CLAUDE_ABANDONED_POLICY_OK debris=$CLAUDE_ABANDONED_SCOPE_DEBRIS watchdog=$CLAUDE_ABANDONED_WATCHDOG_S elapsed=$(python3 -I -B -c "print(float('$CLAUDE_ABANDONED_END')-float('$CLAUDE_ABANDONED_START'))"))"
   FAIL=$((FAIL + 1))
 fi
 
