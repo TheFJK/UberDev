@@ -759,10 +759,13 @@ run_add_cleanup_round() {
       CONCURRENT_GIT_PREACQUIRE_DIR="$pre" CONCURRENT_GIT_EVENT_LOG="$events" \
       CONCURRENT_GIT_COLLISION_LOG="$collisions" CONCURRENT_GIT_EXPECT_COLLISION=1 \
       bash -c '
-        git -C "$1" rev-parse --git-common-dir >/dev/null || exit $?
-        cd "$1" || exit 2
-        MSYS_NO_PATHCONV=1 git worktree add "$2" -b "$3" >"$4" 2>&1
-      ' _ "$CLEANUP_TMP/repo" "$CLEANUP_TMP/repo/$add_relative" "$add_branch" "$add_log" &
+        . "$1"
+        git -C "$2" rev-parse --git-common-dir >/dev/null || exit $?
+        native_target="$(_uberdev_dispatch_native_cli_path "$3")" || exit $?
+        cd "$2" || exit 2
+        MSYS_NO_PATHCONV=1 git worktree add "$native_target" -b "$4" >"$5" 2>&1
+      ' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$CLEANUP_TMP/repo/$add_relative" \
+        "$add_branch" "$add_log" &
     add_pid=$!
     PATH="$CONCURRENT_BIN:$PATH" CONCURRENT_REAL_GIT="$REAL_CLEANUP_GIT" \
       CONCURRENT_GIT_PREACQUIRE_DIR="$pre" CONCURRENT_GIT_EVENT_LOG="$events" \
