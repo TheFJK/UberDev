@@ -236,8 +236,12 @@ fi
 SH
 cat > "$WEZ_RUNTIME_TMP/bin/cygpath" <<'SH'
 #!/usr/bin/env bash
-[ "$#" -eq 2 ] && [ "$1" = -m ] || exit 97
-printf '%s\n' "${2##*/}" >> "$WEZ_CYGPATH_CAPTURE"
+[ "$#" -eq 2 ] || exit 97
+case "$1" in
+  -m) printf '%s\n' "${2##*/}" >> "$WEZ_CYGPATH_CAPTURE" ;;
+  -u) ;;
+  *) exit 97 ;;
+esac
 if [ -n "${WEZ_REAL_CYGPATH:-}" ]; then exec "$WEZ_REAL_CYGPATH" "$@"; fi
 printf '%s\n' "$2"
 SH
@@ -290,6 +294,7 @@ printf '731\n'
 exit 0
 SH
 chmod +x "$WEZ_RUNTIME_TMP/bin/py" "$WEZ_RUNTIME_TMP/bin/cygpath" "$WEZ_RUNTIME_TMP/bin/git" "$WEZ_RUNTIME_TMP/bin/claude" "$WEZ_RUNTIME_TMP/bin/wezterm"
+WEZ_CYGPATH_U_PROBE="$(WEZ_REAL_CYGPATH='' "$WEZ_RUNTIME_TMP/bin/cygpath" -u 'C:/fixture/path')"
 for runtime_command in env cat sleep rm uname grep stat id awk mv tee mkdir basename dirname; do
   ln -s "$(command -v "$runtime_command")" "$WEZ_RUNTIME_TMP/bin/$runtime_command"
 done
@@ -390,12 +395,13 @@ if printf '%s\n' "$WEZ_RUNTIME_OUT" | grep -Fq 'rc=0' \
     && printf '%s\n' "$WEZ_RUNTIME_OUT" | grep -Fq 'pane=731' \
     && printf '%s\n' "$WEZ_HOSTILE_OUT" | grep -Fq 'rc=0' \
     && printf '%s\n' "$WEZ_HOSTILE_OUT" | grep -Fq 'pane=731' \
+    && [ "$WEZ_CYGPATH_U_PROBE" = 'C:/fixture/path' ] \
     && [ "$WEZ_VERIFY_RC" -eq 0 ] \
     && printf '%s\n' "$WT_RUNTIME_BODY" | grep -Fq '_uberdev_dispatch_resolve_python'; then
   echo "  PASS  clean and hostile WezTerm py -3 panes retain launchers, cwd, status, and non-exported bridges"; PASS=$((PASS + 1))
 else
   echo "  FAIL  clean and hostile WezTerm py -3 panes retain launchers, cwd, status, and non-exported bridges"
-  echo "        clean=$WEZ_RUNTIME_OUT hostile=$WEZ_HOSTILE_OUT verifier=$WEZ_VERIFY_OUT"
+  echo "        clean=$WEZ_RUNTIME_OUT hostile=$WEZ_HOSTILE_OUT cygpath_u=$WEZ_CYGPATH_U_PROBE verifier=$WEZ_VERIFY_OUT"
   FAIL=$((FAIL + 1))
 fi
 rm -rf "$WEZ_RUNTIME_TMP"
