@@ -76,10 +76,16 @@ _uberdev_child_manifest_path() {
 import os,stat,sys
 def fail():
  print('uberdev child dispatch: unsafe child manifest override',file=sys.stderr); raise SystemExit(2)
+HAS_EUID=callable(getattr(os,'geteuid',None))
+uid=os.geteuid() if HAS_EUID else None
+REPARSE_POINT=getattr(stat,'FILE_ATTRIBUTE_REPARSE_POINT',0x400)
+def linked(entry):
+ return stat.S_ISLNK(entry.st_mode) or bool(getattr(entry,'st_file_attributes',0)&REPARSE_POINT)
+def owned(entry): return not HAS_EUID or not hasattr(entry,'st_uid') or entry.st_uid==uid
 candidate=os.path.abspath(sys.argv[1]); root=os.path.realpath(sys.argv[2])
 try: e=os.lstat(candidate)
 except OSError: fail()
-if stat.S_ISLNK(e.st_mode) or not stat.S_ISREG(e.st_mode) or e.st_uid!=os.geteuid() or e.st_nlink!=1: fail()
+if linked(e) or not stat.S_ISREG(e.st_mode) or not owned(e) or e.st_nlink!=1: fail()
 path=os.path.realpath(candidate)
 try: contained=os.path.commonpath((root,path))==root
 except ValueError: contained=False
@@ -210,15 +216,25 @@ carrier_raw,edge,instance,inputs_raw,risks_raw,plugin_root,manifest_path=sys.arg
 IDENT=re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
 EDGE=re.compile(r'[a-z][a-z0-9_-]{0,31}(?:\.[a-z][a-z0-9_-]{0,31}){0,3}')
 RISKS={'authentication','authorization','concurrency','cryptography','data-loss','destructive-operations','force-push','public-api-compatibility','release-infrastructure','schema-migration','security'}
-uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
-mode_checks=uid is not None and os.name!='nt'
+HAS_EUID=callable(getattr(os,'geteuid',None))
+uid=os.geteuid() if HAS_EUID else None
+mode_checks=HAS_EUID
+REPARSE_POINT=getattr(stat,'FILE_ATTRIBUTE_REPARSE_POINT',0x400)
 def fail(code): print('uberdev child dispatch: '+code,file=sys.stderr); raise SystemExit(2)
 def beneath(root,path):
  try:return os.path.commonpath((root,path))==root
  except ValueError:return False
 def linked(entry):
- return stat.S_ISLNK(entry.st_mode) or bool(getattr(entry,'st_file_attributes',0)&getattr(stat,'FILE_ATTRIBUTE_REPARSE_POINT',0))
-def owned(entry): return uid is None or entry.st_uid==uid
+ return stat.S_ISLNK(entry.st_mode) or bool(getattr(entry,'st_file_attributes',0)&REPARSE_POINT)
+def owned(entry): return not HAS_EUID or not hasattr(entry,'st_uid') or entry.st_uid==uid
+def same_stat(left,right):
+ comparator=getattr(os.path,'samestat',None)
+ return comparator(left,right) if comparator else (left.st_dev,left.st_ino)==(right.st_dev,right.st_ino)
+def valid_created(opened,current):
+ return (not linked(current) and stat.S_ISREG(opened.st_mode) and stat.S_ISREG(current.st_mode)
+  and owned(opened) and owned(current) and opened.st_nlink==1 and current.st_nlink==1
+  and (not mode_checks or (stat.S_IMODE(opened.st_mode)==0o600 and stat.S_IMODE(current.st_mode)==0o600))
+  and same_stat(opened,current))
 # Deliberately boundary-local: importing the construction-time child-inputs
 # helper here would make immutable handoff acceptance depend on a mutable file
 # between build and publish. This boundary preserves its own closed error map.
@@ -248,9 +264,11 @@ try:
  fd=os.open(ctx,os.O_RDONLY|getattr(os,'O_BINARY',0)|getattr(os,'O_NOFOLLOW',0))
  try:
   opened=os.fstat(fd); current=os.lstat(ctx)
-  same=getattr(os.path,'samestat',lambda a,b:(a.st_dev,a.st_ino)==(b.st_dev,b.st_ino))
-  if linked(current) or not stat.S_ISREG(opened.st_mode) or not owned(opened) or opened.st_nlink!=1 or not same(e,opened) or not same(opened,current): raise ValueError()
+  if linked(current) or not stat.S_ISREG(opened.st_mode) or not owned(opened) or opened.st_nlink!=1 or not same_stat(e,opened) or not same_stat(opened,current): raise ValueError()
   raw=os.read(fd,1048577)
+  final_opened=os.fstat(fd); final_current=os.lstat(ctx)
+  if (linked(final_current) or not stat.S_ISREG(final_current.st_mode)
+      or not same_stat(opened,final_opened) or not same_stat(final_opened,final_current)): raise ValueError()
  finally: os.close(fd)
  context=json.loads(raw)
 except Exception: fail('invalid_context_path')
@@ -336,7 +354,15 @@ value={'schema_version':1,'carrier':carrier,'edge_id':edge,'instance_id':instanc
 raw=json.dumps(value,sort_keys=True,separators=(',',':')).encode()+b'\n'
 try: fd=os.open(handoff,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),0o600)
 except OSError: fail('instance_exists')
-with os.fdopen(fd,'wb') as stream: stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+try:
+ with os.fdopen(fd,'wb') as stream:
+  if not valid_created(os.fstat(stream.fileno()),os.lstat(handoff)): raise ValueError()
+  stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+  if not valid_created(os.fstat(stream.fileno()),os.lstat(handoff)): raise ValueError()
+except BaseException:
+ try: os.unlink(handoff)
+ except OSError: pass
+ fail('instance_exists')
 child=os.path.join(run_dir,'children',instance)
 print(json.dumps({'edge_id':edge,'instance_id':instance,'required':row['required'],'handoff_file':handoff,'result_file':os.path.join(child,'result.md'),'status_file':os.path.join(child,'status.json')},sort_keys=True,separators=(',',':')),end='')
 PY
@@ -363,11 +389,14 @@ RISKS={'authentication','authorization','concurrency','cryptography','data-loss'
 IDENT=re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
 EDGE=re.compile(r'[a-z][a-z0-9_-]{0,31}(?:\.[a-z][a-z0-9_-]{0,31}){0,3}')
 TOKEN=re.compile(r'[a-z][a-z0-9_-]{0,63}')
-uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
-mode_checks=uid is not None and os.name!='nt'
+HAS_EUID=callable(getattr(os,'geteuid',None))
+uid=os.geteuid() if HAS_EUID else None
+mode_checks=HAS_EUID
 dir_fd_functions=getattr(os,'supports_dir_fd',set())
-descriptor_relative=(uid is not None and hasattr(os,'O_DIRECTORY')
+HAS_DIR_FD=(hasattr(os,'O_DIRECTORY')
     and all(function in dir_fd_functions for function in (os.open,os.stat,os.mkdir,os.unlink,os.rmdir)))
+descriptor_relative=HAS_DIR_FD
+REPARSE_POINT=getattr(stat,'FILE_ATTRIBUTE_REPARSE_POINT',0x400)
 
 def fail(code):
     print('uberdev child dispatch: '+code,file=sys.stderr); raise SystemExit(2)
@@ -375,11 +404,16 @@ def beneath(root,path):
     try:return os.path.commonpath((root,path))==root
     except ValueError:return False
 def linked(entry):
-    return stat.S_ISLNK(entry.st_mode) or bool(getattr(entry,'st_file_attributes',0)&getattr(stat,'FILE_ATTRIBUTE_REPARSE_POINT',0))
-def owned(entry): return uid is None or entry.st_uid==uid
+    return stat.S_ISLNK(entry.st_mode) or bool(getattr(entry,'st_file_attributes',0)&REPARSE_POINT)
+def owned(entry): return not HAS_EUID or not hasattr(entry,'st_uid') or entry.st_uid==uid
 def same_stat(left,right):
     comparator=getattr(os.path,'samestat',None)
     return comparator(left,right) if comparator else (left.st_dev,left.st_ino)==(right.st_dev,right.st_ino)
+def valid_created(opened,current):
+    return (not linked(current) and stat.S_ISREG(opened.st_mode) and stat.S_ISREG(current.st_mode)
+        and owned(opened) and owned(current) and opened.st_nlink==1 and current.st_nlink==1
+        and (not mode_checks or (stat.S_IMODE(opened.st_mode)==0o600 and stat.S_IMODE(current.st_mode)==0o600))
+        and same_stat(opened,current))
 # Deliberately boundary-local and independent of the construction boundary:
 # dispatch revalidates the immutable handoff with its own closed error map.
 def repo_paths(value):
@@ -411,6 +445,12 @@ def read_regular_once(path,max_bytes,code,exact_mode=None,nonempty=False):
             or (mode_checks and exact_mode is not None and stat.S_IMODE(opened.st_mode)!=exact_mode)
             or not same_stat(entry,opened) or not same_stat(opened,current)): fail(code)
         raw=os.read(descriptor,max_bytes+1)
+        final_opened=os.fstat(descriptor); final_current=os.lstat(path)
+        if (linked(final_current) or not stat.S_ISREG(final_opened.st_mode) or not stat.S_ISREG(final_current.st_mode)
+            or not owned(final_opened) or not owned(final_current)
+            or final_opened.st_nlink!=1 or final_current.st_nlink!=1
+            or (mode_checks and exact_mode is not None and (stat.S_IMODE(final_opened.st_mode)!=exact_mode or stat.S_IMODE(final_current.st_mode)!=exact_mode))
+            or not same_stat(opened,final_opened) or not same_stat(final_opened,final_current)): fail(code)
     except OSError: fail(code)
     finally: os.close(descriptor)
     if len(raw)>max_bytes or (nonempty and not raw): fail(code)
@@ -458,7 +498,13 @@ if descriptor_relative:
      ctxfd=os.open(os.path.basename(ctx),os.O_RDONLY|getattr(os,'O_NOFOLLOW',0),dir_fd=statefd)
      ce=os.fstat(ctxfd); current=os.stat(os.path.basename(ctx),dir_fd=statefd,follow_symlinks=False)
      if not stat.S_ISREG(ce.st_mode) or not owned(ce) or ce.st_nlink!=1 or (mode_checks and stat.S_IMODE(ce.st_mode)!=0o600) or not same_stat(ce,current): fail('invalid_context_path')
-     ctx_raw=os.read(ctxfd,1048577); os.close(ctxfd)
+     ctx_raw=os.read(ctxfd,1048577)
+     final_ce=os.fstat(ctxfd); final_current=os.stat(os.path.basename(ctx),dir_fd=statefd,follow_symlinks=False)
+     if (linked(final_current) or not stat.S_ISREG(final_ce.st_mode) or not stat.S_ISREG(final_current.st_mode)
+         or not owned(final_ce) or not owned(final_current) or final_ce.st_nlink!=1 or final_current.st_nlink!=1
+         or (mode_checks and (stat.S_IMODE(final_ce.st_mode)!=0o600 or stat.S_IMODE(final_current.st_mode)!=0o600))
+         or not same_stat(ce,final_ce) or not same_stat(final_ce,final_current)): fail('invalid_context_path')
+     os.close(ctxfd)
     finally: os.close(statefd)
 else:
     ctx_raw=read_regular_once(ctx,1048576,'invalid_context_path',exact_mode=0o600)
@@ -571,7 +617,12 @@ if descriptor_relative:
     if mode_checks: os.fchmod(childfd,0o700)
     def create(name,data):
         fd=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),0o600,dir_fd=childfd)
-        with os.fdopen(fd,'wb') as stream: stream.write(data); stream.flush(); os.fsync(stream.fileno())
+        with os.fdopen(fd,'wb') as stream:
+            opened=os.fstat(stream.fileno()); current=os.stat(name,dir_fd=childfd,follow_symlinks=False)
+            if not valid_created(opened,current): fail('unsafe_child_dir')
+            stream.write(data); stream.flush(); os.fsync(stream.fileno())
+            final_opened=os.fstat(stream.fileno()); final_current=os.stat(name,dir_fd=childfd,follow_symlinks=False)
+            if not same_stat(opened,final_opened) or not valid_created(final_opened,final_current): fail('unsafe_child_dir')
     def remove(name): os.unlink(name,dir_fd=childfd)
 else:
     children_dir=os.path.join(run_real,children_name)
@@ -591,7 +642,12 @@ else:
     def create(name,data):
         path=os.path.join(child_dir,name)
         fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_BINARY',0),0o600)
-        with os.fdopen(fd,'wb') as stream: stream.write(data); stream.flush(); os.fsync(stream.fileno())
+        with os.fdopen(fd,'wb') as stream:
+            opened=os.fstat(stream.fileno()); current=os.lstat(path)
+            if not valid_created(opened,current): fail('unsafe_child_dir')
+            stream.write(data); stream.flush(); os.fsync(stream.fileno())
+            final_opened=os.fstat(stream.fileno()); final_current=os.lstat(path)
+            if not same_stat(opened,final_opened) or not valid_created(final_opened,final_current): fail('unsafe_child_dir')
     def remove(name): os.unlink(os.path.join(child_dir,name))
 try:
     create('handoff.v1.json',raw)

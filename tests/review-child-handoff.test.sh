@@ -57,25 +57,57 @@ SIMPLIFY_CARRIER_JSON="$(jq -cn --arg ctx "$simplify_ctx" --arg sha "$simplify_s
     if [ "${1:-}" = -I ] && [ "${2:-}" = -B ] && [ "${3:-}" = - ]; then
       shift 3
       command "$REAL_PORTABLE_PYTHON" -I -B -c '
-import os,sys,tempfile
+import os,stat,sys,tempfile
 source=sys.stdin.read()
 if hasattr(os,"geteuid"): del os.geteuid
 if hasattr(os,"getuid"): del os.getuid
+if hasattr(stat,"FILE_ATTRIBUTE_REPARSE_POINT"): del stat.FILE_ATTRIBUTE_REPARSE_POINT
 os.supports_dir_fd=set()
 real_open=os.open
+real_read=os.read
+real_lstat=os.lstat
 swap_path=os.environ.get("UBERDEV_TEST_PORTABLE_SWAP_PATH")
 swap_with=os.environ.get("UBERDEV_TEST_PORTABLE_SWAP_WITH")
+swap_after_read_path=os.environ.get("UBERDEV_TEST_PORTABLE_SWAP_AFTER_READ_PATH")
+swap_after_read_with=os.environ.get("UBERDEV_TEST_PORTABLE_SWAP_AFTER_READ_WITH")
+replace_created_name=os.environ.get("UBERDEV_TEST_PORTABLE_REPLACE_CREATED_NAME")
+reparse_path=os.environ.get("UBERDEV_TEST_PORTABLE_REPARSE_PATH")
 swapped=False
+fd_paths={}
 def portable_open(path,flags,*args,**kwargs):
  global swapped
  fd=real_open(path,flags,*args,**kwargs)
+ if isinstance(path,str): fd_paths[fd]=os.path.abspath(path)
  if (not swapped and swap_path and swap_with and isinstance(path,str)
      and os.path.abspath(path)==os.path.abspath(swap_path)
      and flags & os.O_ACCMODE == os.O_RDONLY):
   swapped=True
   os.replace(swap_with,swap_path)
+ if (replace_created_name and isinstance(path,str) and os.path.basename(path)==replace_created_name
+     and flags & os.O_EXCL):
+  replacement=path+".replacement"
+  with open(replacement,"wb") as stream: stream.write(b"replaced")
+  os.replace(replacement,path)
  return fd
+def portable_read(fd,size):
+ global swapped
+ data=real_read(fd,size)
+ if (not swapped and swap_after_read_path and swap_after_read_with
+     and fd_paths.get(fd)==os.path.abspath(swap_after_read_path)):
+  swapped=True
+  os.replace(swap_after_read_with,swap_after_read_path)
+ return data
+def portable_lstat(path,*args,**kwargs):
+ entry=real_lstat(path,*args,**kwargs)
+ if reparse_path and isinstance(path,str) and os.path.abspath(path)==os.path.abspath(reparse_path):
+  class ReparseEntry:
+   st_file_attributes=0x400
+   def __getattr__(self,name): return getattr(entry,name)
+  return ReparseEntry()
+ return entry
 os.open=portable_open
+os.read=portable_read
+os.lstat=portable_lstat
 sys.argv=["-"]+sys.argv[1:]
 exec(compile(source,"<portable-child-dispatch>","exec"),{"__name__":"__main__"})
 ' "$@"
@@ -93,6 +125,12 @@ exec(compile(source,"<portable-carrier>","exec"),{"__name__":"__main__"})
       command "$REAL_PORTABLE_PYTHON" "$@"
     fi
   }
+
+  portable_manifest="$ROOT/tests/_fixtures/child-run-tree-v1.json"
+  portable_manifest_real="$(cd "$(dirname "$portable_manifest")" && pwd -P)/$(basename "$portable_manifest")"
+  [ "$(UBERDEV_CHILD_TEST_MODE=1 UBERDEV_CHILD_MANIFEST_PATH="$portable_manifest" _uberdev_child_manifest_path)" = "$portable_manifest_real" ]
+  ! UBERDEV_CHILD_TEST_MODE=1 UBERDEV_CHILD_MANIFEST_PATH="$portable_manifest" \
+    UBERDEV_TEST_PORTABLE_REPARSE_PATH="$portable_manifest" _uberdev_child_manifest_path >/dev/null 2>&1
 
   portable_run="$TMP/portable-run"; mkdir -p "$portable_run"
   portable_request="$(jq -cn --arg run "$portable_run" --arg repo "$TEST_REPO" '{schema_version:1,run_dir:$run,run_id:"portable-review",repository_id:$repo,backend:"codex",workflow:"review-pr",phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:1,issue_num:1,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
@@ -122,6 +160,17 @@ exec(compile(source,"<portable-carrier>","exec"),{"__name__":"__main__"})
   ! UBERDEV_TEST_PORTABLE_SWAP_PATH="$replaced_handoff" UBERDEV_TEST_PORTABLE_SWAP_WITH="$replaced_handoff.swap" \
     _uberdev_child_prepare review_pr.review.correctness "$replaced_handoff" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
   [ ! -e "$portable_run/children/portable-replaced-iter1-attempt01" ]
+
+  uberdev_create_child_handoff review_pr.review.correctness portable-post-read-replaced-iter1-attempt01 "$portable_input" '[]' >/dev/null
+  post_read_handoff="$UBERDEV_CHILD_HANDOFF"; cp "$post_read_handoff" "$post_read_handoff.swap"
+  ! UBERDEV_TEST_PORTABLE_SWAP_AFTER_READ_PATH="$post_read_handoff" UBERDEV_TEST_PORTABLE_SWAP_AFTER_READ_WITH="$post_read_handoff.swap" \
+    _uberdev_child_prepare review_pr.review.correctness "$post_read_handoff" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+  [ ! -e "$portable_run/children/portable-post-read-replaced-iter1-attempt01" ]
+
+  uberdev_create_child_handoff review_pr.review.correctness portable-created-replaced-iter1-attempt01 "$portable_input" '[]' >/dev/null
+  ! UBERDEV_TEST_PORTABLE_REPLACE_CREATED_NAME=handoff.v1.json \
+    _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+  [ ! -e "$portable_run/children/portable-created-replaced-iter1-attempt01" ]
 
   uberdev_create_child_handoff review_pr.review.correctness portable-tampered-iter1-attempt01 "$portable_input" '[]' >/dev/null
   tampered_handoff="$UBERDEV_CHILD_HANDOFF"
