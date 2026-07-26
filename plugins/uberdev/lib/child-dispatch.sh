@@ -238,6 +238,25 @@ def valid_created(opened,current):
   and owned(opened) and owned(current) and opened.st_nlink==1 and current.st_nlink==1
   and (not mode_checks or (stat.S_IMODE(opened.st_mode)==0o600 and stat.S_IMODE(current.st_mode)==0o600))
   and same_stat(opened,current))
+def read_regular_once(path,max_bytes,code):
+ try:
+  entry=os.lstat(path)
+  if linked(entry) or not stat.S_ISREG(entry.st_mode) or not owned(entry) or entry.st_nlink!=1 or entry.st_size>max_bytes: raise ValueError()
+  descriptor=os.open(path,os.O_RDONLY|getattr(os,'O_BINARY',0)|getattr(os,'O_NOFOLLOW',0))
+  try:
+   opened=os.fstat(descriptor); current=os.lstat(path)
+   if (linked(current) or not stat.S_ISREG(opened.st_mode) or not owned(opened)
+       or opened.st_nlink!=1 or opened.st_size>max_bytes
+       or not same_stat(entry,opened) or not same_stat(opened,current)): raise ValueError()
+   data=os.read(descriptor,max_bytes+1)
+   final_opened=os.fstat(descriptor); final_current=os.lstat(path)
+   if (linked(final_current) or not stat.S_ISREG(final_opened.st_mode) or not stat.S_ISREG(final_current.st_mode)
+       or not owned(final_opened) or not owned(final_current)
+       or final_opened.st_nlink!=1 or final_current.st_nlink!=1 or len(data)>max_bytes
+       or not same_stat(opened,final_opened) or not same_stat(final_opened,final_current)): raise ValueError()
+  finally: os.close(descriptor)
+  return data
+ except Exception: fail(code)
 # Deliberately boundary-local: importing the construction-time child-inputs
 # helper here would make immutable handoff acceptance depend on a mutable file
 # between build and publish. This boundary preserves its own closed error map.
@@ -251,7 +270,7 @@ def repo_paths(value):
       or posixpath.normpath(path)!=path): fail('unsafe_repo_path')
 try:
  carrier=json.loads(carrier_raw); inputs=json.loads(inputs_raw); risks=json.loads(risks_raw)
- manifest=json.load(open(manifest_path))
+ manifest=json.loads(read_regular_once(manifest_path,1048576,'invalid_builder_input'))
 except Exception: fail('invalid_builder_input')
 if not EDGE.fullmatch(edge) or not IDENT.fullmatch(instance): fail('invalid_identity')
 if set(carrier)!={'schema_version','run_id','workflow','issue_num','context_file','context_sha256'} or carrier.get('schema_version')!=1: fail('invalid_carrier_schema')
@@ -352,19 +371,55 @@ except FileExistsError: pass
 de=os.lstat(handoff_dir)
 if linked(de) or not stat.S_ISDIR(de.st_mode) or not owned(de): fail('unsafe_handoff_dir')
 if mode_checks: os.chmod(handoff_dir,0o700)
-handoff=os.path.join(handoff_dir,instance+'.json')
+previous_dir=os.getcwd()
+try:
+ os.chdir(handoff_dir)
+ bound_de=os.lstat('.')
+ if (linked(bound_de) or not stat.S_ISDIR(bound_de.st_mode) or not owned(bound_de)
+     or not same_stat(de,bound_de)): raise ValueError()
+except BaseException:
+ try: os.chdir(previous_dir)
+ except Exception: pass
+ fail('unsafe_handoff_dir')
+def valid_handoff_dir():
+ try: current=os.lstat(handoff_dir); bound_current=os.lstat('.')
+ except OSError: return False
+ return (not linked(current) and stat.S_ISDIR(current.st_mode) and owned(current) and same_stat(de,current)
+     and not linked(bound_current) and stat.S_ISDIR(bound_current.st_mode) and owned(bound_current)
+     and same_stat(bound_de,bound_current))
+handoff_name=instance+'.json'
+handoff=os.path.join(handoff_dir,handoff_name)
 value={'schema_version':1,'carrier':carrier,'edge_id':edge,'instance_id':instance,'parent_run_id':carrier['run_id'],'role':row['role'],'phase':row['phase'],'risk_scope':row['risk_scope'],'risk_signals':risks,'inputs':inputs}
 raw=json.dumps(value,sort_keys=True,separators=(',',':')).encode()+b'\n'
-try: fd=os.open(handoff,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),0o600)
-except OSError: fail('instance_exists')
+opened=None
+publication_failed=False
 try:
+ if not valid_handoff_dir(): raise ValueError()
+ fd=os.open(handoff_name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),0o600)
  with os.fdopen(fd,'wb') as stream:
-  if not valid_created(os.fstat(stream.fileno()),os.lstat(handoff)): raise ValueError()
+  opened=os.fstat(stream.fileno())
+  if not valid_created(opened,os.lstat(handoff_name)) or not valid_handoff_dir(): raise ValueError()
   stream.write(raw); stream.flush(); os.fsync(stream.fileno())
-  if not valid_created(os.fstat(stream.fileno()),os.lstat(handoff)): raise ValueError()
+  final_opened=os.fstat(stream.fileno())
+  if (not same_stat(opened,final_opened) or not valid_created(final_opened,os.lstat(handoff_name))
+      or not valid_handoff_dir()): raise ValueError()
 except BaseException:
- try: os.unlink(handoff)
- except OSError: pass
+ publication_failed=True
+if publication_failed:
+ if opened is not None:
+  try:
+   current=os.lstat(handoff_name)
+   if valid_created(opened,current): os.unlink(handoff_name)
+  except Exception: pass
+ try: os.chdir(previous_dir)
+ except Exception: pass
+ fail('instance_exists')
+try: os.chdir(previous_dir)
+except BaseException:
+ try:
+  current=os.lstat(handoff_name)
+  if opened is not None and valid_created(opened,current): os.unlink(handoff_name)
+ except Exception: pass
  fail('instance_exists')
 child=os.path.join(run_dir,'children',instance)
 print(json.dumps({'edge_id':edge,'instance_id':instance,'required':row['required'],'handoff_file':handoff,'result_file':os.path.join(child,'result.md'),'status_file':os.path.join(child,'status.json')},sort_keys=True,separators=(',',':')),end='')
@@ -522,7 +577,7 @@ repo=context.get('metadata',{}).get('repository_id')
 if not isinstance(repo,str) or not repo: fail('invalid_repository')
 repo_root=os.path.realpath(repo) if os.path.isabs(repo) and os.path.isdir(repo) else run_dir
 run_real=os.path.realpath(run_dir)
-try: manifest=json.load(open(manifest_path))
+try: manifest=json.loads(read_regular_once(manifest_path,1048576,'invalid_run_tree_manifest'))
 except Exception: fail('invalid_run_tree_manifest')
 row=manifest.get('edges',{}).get(edge)
 if not isinstance(row,dict) or row.get('kind')!='provider': fail('undeclared_edge')
@@ -645,16 +700,69 @@ else:
         except Exception: pass
         fail('unsafe_child_dir')
     if mode_checks: os.chmod(child_dir,0o700)
+    previous_dir=os.getcwd()
+    try:
+        os.chdir(child_dir)
+        bound_child_entry=os.lstat('.')
+        if (linked(bound_child_entry) or not stat.S_ISDIR(bound_child_entry.st_mode)
+            or not owned(bound_child_entry) or not same_stat(child_entry,bound_child_entry)): raise ValueError()
+    except BaseException:
+        try: os.chdir(previous_dir)
+        except Exception: pass
+        try: os.rmdir(child_dir)
+        except Exception: pass
+        fail('unsafe_child_dir')
+    created_files={}
+    def bound_child_valid():
+        try: current=os.lstat('.')
+        except OSError: return False
+        return (not linked(current) and stat.S_ISDIR(current.st_mode) and owned(current)
+            and same_stat(bound_child_entry,current))
+    def portable_dirs_valid():
+        try: current_children=os.lstat(children_dir); current_child=os.lstat(child_dir)
+        except OSError: return False
+        return (not linked(current_children) and not linked(current_child)
+            and stat.S_ISDIR(current_children.st_mode) and stat.S_ISDIR(current_child.st_mode)
+            and owned(current_children) and owned(current_child)
+            and same_stat(children_entry,current_children) and same_stat(child_entry,current_child)
+            and bound_child_valid())
     def create(name,data):
-        path=os.path.join(child_dir,name)
-        fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_BINARY',0),0o600)
-        with os.fdopen(fd,'wb') as stream:
-            opened=os.fstat(stream.fileno()); current=os.lstat(path)
-            if not valid_created(opened,current): fail('unsafe_child_dir')
-            stream.write(data); stream.flush(); os.fsync(stream.fileno())
-            final_opened=os.fstat(stream.fileno()); final_current=os.lstat(path)
-            if not same_stat(opened,final_opened) or not valid_created(final_opened,final_current): fail('unsafe_child_dir')
-    def remove(name): os.unlink(os.path.join(child_dir,name))
+        path=name
+        opened=None
+        try:
+            if not portable_dirs_valid(): raise ValueError()
+            fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_BINARY',0),0o600)
+            with os.fdopen(fd,'wb') as stream:
+                opened=os.fstat(stream.fileno()); current=os.lstat(path)
+                if not valid_created(opened,current) or not portable_dirs_valid(): raise ValueError()
+                stream.write(data); stream.flush(); os.fsync(stream.fileno())
+                final_opened=os.fstat(stream.fileno()); final_current=os.lstat(path)
+                if (not same_stat(opened,final_opened) or not valid_created(final_opened,final_current)
+                    or not portable_dirs_valid()): raise ValueError()
+                created_files[name]=final_opened
+        except BaseException:
+            if opened is not None:
+                try:
+                    current=os.lstat(path)
+                    if (valid_created(opened,current) or (bound_child_valid() and not linked(current)
+                        and stat.S_ISREG(current.st_mode) and owned(current) and current.st_nlink==1)): os.unlink(path)
+                except Exception: pass
+            fail('unsafe_child_dir')
+    def remove(name):
+        expected=created_files.get(name)
+        if expected is None or not bound_child_valid(): return
+        try: current=os.lstat(name)
+        except OSError: return
+        if valid_created(expected,current): os.unlink(name)
+    def cleanup_child_dir(bound_location):
+        try: current=os.lstat(child_dir)
+        except OSError: current=None
+        if current is not None and linked(current): os.unlink(child_dir)
+        for candidate in dict.fromkeys((bound_location,child_dir)):
+            try: entry=os.lstat(candidate)
+            except OSError: continue
+            if (not linked(entry) and stat.S_ISDIR(entry.st_mode) and owned(entry)
+                and same_stat(child_entry,entry)): os.rmdir(candidate)
 try:
     create('handoff.v1.json',raw)
     handoff_digest=hashlib.sha256(raw).hexdigest()
@@ -670,11 +778,18 @@ except BaseException:
         try: remove(name)
         except Exception: pass
     if childfd is not None: os.close(childfd)
-    try: os.rmdir(child_dir)
+    try:
+        if descriptor_relative: os.rmdir(child_dir)
+        else:
+            try: bound_location=os.getcwd()
+            except OSError: bound_location=child_dir
+            os.chdir(previous_dir)
+            cleanup_child_dir(bound_location)
     except Exception: pass
     raise
 else:
     if childfd is not None: os.close(childfd)
+    elif not descriptor_relative: os.chdir(previous_dir)
 root_request=context['routing_request'].copy(); root_decision=context['root_decision']; metadata=context['metadata']
 request={**root_request,'schema_version':1,'run_dir':run_real,'run_id':instance,'repository_id':repo,'backend':metadata['backend'],'workflow':carrier['workflow'],'phase':value['phase'],'role':value['role'],'task_tier':metadata['task_tier'],'risk_scope':value['risk_scope'],'risk_signals':risks,'issue_or_pr':carrier['issue_num'],'issue_num':carrier['issue_num'],'capacity':int(os.environ.get('UBERDEV_AGENT_CAPACITY','6')),'timeout_s':int(os.environ.get('SOLVE_TIMEOUT','3600')),'parent_run_id':value['parent_run_id'],'agent_id':instance,'context_file':ctx,'context_sha256':digest,'root_decision':root_decision,'parent_run':root_decision}
 request['workspace_mode']=workspace_mode
