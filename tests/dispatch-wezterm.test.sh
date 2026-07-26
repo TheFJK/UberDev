@@ -377,8 +377,8 @@ for provider_path in (clean_provider_path,hostile_provider_path):
 for marker_path in (clean_marker_path,hostile_marker_path):
     assert pathlib.Path(marker_path).read_text()=='pane-cwd-observed\n'
 assert pathlib.Path(cygpath_capture).read_text().splitlines()==[
-    'solve-issue-92','wezterm-clean-status.json',
-    'solve-issue-93','wezterm-hostile-status.json',
+    'solve-issue-92','solve-issue-92','wezterm-clean-status.json',
+    'solve-issue-93','solve-issue-93','wezterm-hostile-status.json',
 ]
 PY
 )"; then

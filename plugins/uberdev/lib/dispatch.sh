@@ -1101,7 +1101,7 @@ PY
 # a reused leader PID is never downgraded to group-only evidence.
 _uberdev_dispatch_owned_group_state() {
   local handle="$1" expected_identity="$2" pgid="$3" sid="$4" current probe_rc group_rc
-  if current="$(_uberdev_agent_process_identity "$handle" 2>/dev/null)"; then
+  if current="$(_uberdev_dispatch_process_identity "$handle" 2>/dev/null)"; then
     [ "$current" = "$expected_identity" ] || return 2
   else
     probe_rc=$?
@@ -1116,10 +1116,16 @@ _uberdev_dispatch_owned_group_state() {
   return 2
 }
 
+_uberdev_dispatch_process_identity() {
+  local pid="$1"
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  _uberdev_dispatch_python -I -B "$_UBERDEV_AGENT_MANIFEST_TOOL" process-identity --pid "$pid"
+}
+
 _uberdev_dispatch_wait_owned_session() {
   local pid="$1" identity identity_pid identity_pgid identity_sid identity_started attempts=0
   while [ "$attempts" -lt 40 ]; do
-    identity="$(_uberdev_agent_process_identity "$pid" 2>/dev/null || true)"
+    identity="$(_uberdev_dispatch_process_identity "$pid" 2>/dev/null || true)"
     if [ -n "$identity" ]; then
       IFS='|' read -r identity_pid identity_pgid identity_sid identity_started <<EOF_IDENTITY
 $identity

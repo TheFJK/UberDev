@@ -2072,12 +2072,46 @@ else
 fi
 IMMEDIATE_ACCEPT_BODY="$(extract_function_body _uberdev_dispatch_accept_immediate_terminal "$DISPATCH_LIB")"
 WAIT_OWNED_BODY="$(extract_function_body _uberdev_dispatch_wait_owned_session "$DISPATCH_LIB")"
+DISPATCH_PROCESS_IDENTITY_BODY="$(extract_function_body _uberdev_dispatch_process_identity "$DISPATCH_LIB")"
+RESOLVED_IDENTITY_TMP="$(mktemp -d)"
+ln -s "$(command -v basename)" "$RESOLVED_IDENTITY_TMP/basename"
+ln -s "$(command -v dirname)" "$RESOLVED_IDENTITY_TMP/dirname"
+RESOLVED_IDENTITY_OUT="$(
+  PATH="$RESOLVED_IDENTITY_TMP" /bin/bash -c '
+    . "$1"
+    pid_file="$2/native.pid"
+    _uberdev_dispatch_python -I -B -c '\''import os,pathlib,sys,time
+if hasattr(os,"setsid"): os.setsid()
+path=pathlib.Path(sys.argv[1]); path.write_text(str(os.getpid()),encoding="ascii")
+time.sleep(30)'\'' "$pid_file" >/dev/null 2>&1 &
+    launch_pid=$!
+    i=0
+    while [ ! -s "$pid_file" ] && [ "$i" -lt 200 ]; do
+      _uberdev_dispatch_python -I -B -c '\''import time; time.sleep(0.025)'\''
+      i=$((i + 1))
+    done
+    native_pid=""
+    [ ! -s "$pid_file" ] || read -r native_pid <"$pid_file"
+    identity="$(_uberdev_dispatch_process_identity "$native_pid" 2>/dev/null || true)"
+    _uberdev_dispatch_python -I -B -c '\''import os,signal,sys; os.kill(int(sys.argv[1]),signal.SIGTERM)'\'' \
+      "$native_pid" 2>/dev/null || true
+    wait "$launch_pid" 2>/dev/null || true
+    printf "%s\n%s\n" "$native_pid" "$identity"
+  ' _ "$DISPATCH_LIB" "$RESOLVED_IDENTITY_TMP"
+)"
+RESOLVED_IDENTITY_PID="$(printf '%s\n' "$RESOLVED_IDENTITY_OUT" | sed -n '1p')"
+RESOLVED_IDENTITY_VALUE="$(printf '%s\n' "$RESOLVED_IDENTITY_OUT" | sed -n '2p')"
 if printf '%s\n' "$IMMEDIATE_ACCEPT_BODY" | grep -Fq 'process-identity' \
+   && printf '%s\n' "$DISPATCH_PROCESS_IDENTITY_BODY" | grep -Fq '_uberdev_dispatch_python' \
+   && printf '%s\n' "$WAIT_OWNED_BODY" | grep -Fq '_uberdev_dispatch_process_identity' \
+   && [[ "$RESOLVED_IDENTITY_VALUE" == "$RESOLVED_IDENTITY_PID|$RESOLVED_IDENTITY_PID|$RESOLVED_IDENTITY_PID|"* ]] \
    && ! printf '%s\n%s\n' "$IMMEDIATE_ACCEPT_BODY" "$WAIT_OWNED_BODY" | grep -Fq 'os.kill'; then
   pass_msg "Windows dispatch liveness uses the non-signaling native identity probe"
 else
-  fail_msg "Windows dispatch liveness uses the non-signaling native identity probe"
+  fail_msg "Windows dispatch liveness uses the non-signaling native identity probe" \
+    "pid=$RESOLVED_IDENTITY_PID identity=$RESOLVED_IDENTITY_VALUE"
 fi
+rm -rf "$RESOLVED_IDENTITY_TMP"
 IMMEDIATE_DUAL_TMP="$(mktemp -d)"
 printf 'terminal result\n' > "$IMMEDIATE_DUAL_TMP/result.md"
 immediate_dual_probe() {
