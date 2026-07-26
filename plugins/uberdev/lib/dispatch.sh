@@ -52,19 +52,43 @@ _UBERDEV_DISPATCH_LIB_DIR="$(cd "$_UBERDEV_DISPATCH_LIB_DIR" 2>/dev/null && pwd 
 _UBERDEV_DISPATCH_LOADED=1
 
 _uberdev_dispatch_resolve_python() {
-  if [ -n "${_UBERDEV_PYTHON_EXE:-}" ] && [ -x "$_UBERDEV_PYTHON_EXE" ]; then
-    case "${_UBERDEV_PYTHON_PREFIX:-}" in ''|-3) return 0 ;; esac
+  local candidate='' prefix='' candidate_dir candidate_base
+  if [ -n "${_UBERDEV_PYTHON_EXE:-}" ]; then
+    case "${_UBERDEV_PYTHON_PREFIX:-}" in
+      ''|-3) candidate="$_UBERDEV_PYTHON_EXE"; prefix="${_UBERDEV_PYTHON_PREFIX:-}" ;;
+    esac
   fi
-  if command -v python3 >/dev/null 2>&1; then
-    _UBERDEV_PYTHON_EXE="$(command -v python3)"; _UBERDEV_PYTHON_PREFIX=''
-  elif command -v python >/dev/null 2>&1; then
-    _UBERDEV_PYTHON_EXE="$(command -v python)"; _UBERDEV_PYTHON_PREFIX=''
-  elif command -v py >/dev/null 2>&1; then
-    _UBERDEV_PYTHON_EXE="$(command -v py)"; _UBERDEV_PYTHON_PREFIX='-3'
-  else
-    echo 'error: Python 3 is required (tried python3, python, and py -3)' >&2
+  if [ -z "$candidate" ]; then
+    if command -v python3 >/dev/null 2>&1; then
+      candidate="$(command -v python3)"; prefix=''
+    elif command -v python >/dev/null 2>&1; then
+      candidate="$(command -v python)"; prefix=''
+    elif command -v py >/dev/null 2>&1; then
+      candidate="$(command -v py)"; prefix='-3'
+    else
+      echo 'error: Python 3 is required (tried python3, python, and py -3)' >&2
+      return 127
+    fi
+  fi
+  case "$candidate" in
+    /*|[A-Za-z]:[\\/]*) ;;
+    *)
+      candidate_dir="${candidate%/*}"
+      [ "$candidate_dir" != "$candidate" ] || candidate_dir='.'
+      candidate_base="${candidate##*/}"
+      candidate_dir="$(cd "$candidate_dir" 2>/dev/null && pwd -P)" || {
+        echo 'error: resolved Python launcher directory is unavailable' >&2
+        return 127
+      }
+      candidate="$candidate_dir/$candidate_base"
+      ;;
+  esac
+  if [ ! -f "$candidate" ] || [ ! -x "$candidate" ]; then
+    echo 'error: resolved Python launcher is not an executable file' >&2
     return 127
   fi
+  _UBERDEV_PYTHON_EXE="$candidate"
+  _UBERDEV_PYTHON_PREFIX="$prefix"
 }
 
 _uberdev_dispatch_python() {
@@ -1488,9 +1512,14 @@ if os.name=="nt":
 os.setsid()
 os.execvp("bash",argv)' '
     PYTHON_EXE="$1"; PYTHON_PREFIX="$2"; DISPATCH_LIB="$3"; shift 3
+    case "$PYTHON_PREFIX" in ""|-3) ;; *) exit 126 ;; esac
+    [ -n "$PYTHON_EXE" ] && [ -x "$PYTHON_EXE" ] || exit 126
+    _UBERDEV_PYTHON_EXE="$PYTHON_EXE"; _UBERDEV_PYTHON_PREFIX="$PYTHON_PREFIX"
     run_python() {
-      if [ -n "$PYTHON_PREFIX" ]; then "$PYTHON_EXE" "$PYTHON_PREFIX" "$@"; else "$PYTHON_EXE" "$@"; fi
+      if [ -n "$PYTHON_PREFIX" ]; then command "$PYTHON_EXE" "$PYTHON_PREFIX" "$@"; else command "$PYTHON_EXE" "$@"; fi
     }
+    python3() { run_python "$@"; }
+    export -n -f run_python python3 2>/dev/null || exit 126
     WORKTREE_DIR="$1"; STATUS_FILE="$2"; RESULT_FILE="$3"; ISSUE_NUM="$4"; TIER="$5"; shift 5
     . "$DISPATCH_LIB" || exit 126
     WRAPPER_PID="${UBERDEV_WRAPPER_PID:-$$}"
@@ -1775,6 +1804,15 @@ if os.name=="nt":
  raise SystemExit(rc)
 os.setsid()
 os.execvp("bash",argv)' '
+      PYTHON_EXE="$1"; PYTHON_PREFIX="$2"; DISPATCH_LIB="$3"; shift 3
+      case "$PYTHON_PREFIX" in ""|-3) ;; *) exit 126 ;; esac
+      [ -n "$PYTHON_EXE" ] && [ -x "$PYTHON_EXE" ] || exit 126
+      _UBERDEV_PYTHON_EXE="$PYTHON_EXE"; _UBERDEV_PYTHON_PREFIX="$PYTHON_PREFIX"
+      run_python() {
+        if [ -n "$PYTHON_PREFIX" ]; then command "$PYTHON_EXE" "$PYTHON_PREFIX" "$@"; else command "$PYTHON_EXE" "$@"; fi
+      }
+      python3() { run_python "$@"; }
+      export -n -f run_python python3 2>/dev/null || exit 126
       ISSUE_NUM="$1"
       TIER="$2"
       STATUS_FILE="$3"
@@ -1791,10 +1829,9 @@ os.execvp("bash",argv)' '
       REPOSITORY_ROOT="${14}"
       WORKTREE_RECEIPT="${15}"
       WORKTREE_TOKEN="${16}"
-      DISPATCH_LIB="${17}"
-      CHILD_OWNED="${18}"
-      WORKSPACE_MODE="${19}"
-      shift 19
+      CHILD_OWNED="${17}"
+      WORKSPACE_MODE="${18}"
+      shift 18
       . "$DISPATCH_LIB" || exit 126
       WRAPPER_PID="${UBERDEV_WRAPPER_PID:-$$}"
       EMPTY_VALUE=
@@ -1896,9 +1933,9 @@ os.execvp("bash",argv)' '
       fi
       FINAL_STATUS_WRITTEN=1
       exit "$CODEX_RC"
-    ' _ "$ISSUE_NUM" "$TIER" "$STATUS_FILE" "$RESULT_FILE" "$LOG_FILE" "$EXECUTION_DIR" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$PROMPT_FILE" \
+    ' _ "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$_UBERDEV_DISPATCH_FILE" "$ISSUE_NUM" "$TIER" "$STATUS_FILE" "$RESULT_FILE" "$LOG_FILE" "$EXECUTION_DIR" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$PROMPT_FILE" \
     "$ROUTE_MODEL" "$ROUTE_EFFORT" "$ROUTE_SERVICE_TIER" "$ROUTE_SANDBOX" \
-    "$REPOSITORY_ROOT" "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" "$_UBERDEV_DISPATCH_FILE" "$CHILD_OWNED" "$WORKSPACE_MODE" "${BG_TURBO_ENV[@]}" \
+    "$REPOSITORY_ROOT" "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" "$CHILD_OWNED" "$WORKSPACE_MODE" "${BG_TURBO_ENV[@]}" \
     >"$LOG_FILE" 2>&1 &
   DISPATCH_RC=$?
   local LAUNCH_PID="$!"
@@ -2043,6 +2080,13 @@ _uberdev_dispatch_wezterm() {
       '{"issue":'"$ISSUE_NUM"',"phase":"prompt_read","backend":"wezterm","rc":1}'
     return 1
   fi
+  if ! _uberdev_dispatch_resolve_python; then
+    DISPATCH_RC=1
+    DISPATCH_LOG="$LOG_FILE"
+    _uberdev_dispatch_audit dispatch_setup_failed \
+      '{"issue":'"$ISSUE_NUM"',"phase":"python_launcher","backend":"wezterm","rc":1}'
+    return 1
+  fi
   # wezterm cli spawn into the pinned uberdev domain. Foreground claude -p
   # (headless print mode streaming into the pane) — detaching would empty the
   # pane. MSYS2_ARG_CONV_EXCL stops Git Bash mangling the --cwd path arg
@@ -2058,7 +2102,16 @@ _uberdev_dispatch_wezterm() {
   DISPATCH_ID="$(MSYS2_ARG_CONV_EXCL='*' wezterm cli spawn \
     --domain-name uberdev --cwd "$WORKTREE_ABS" -- \
     bash -c '
-      STATUS_FILE="$1"; ISSUE_NUM="$2"; TIER="$3"; DISPATCH_LIB="$4"; shift 4
+      PYTHON_EXE="$1"; PYTHON_PREFIX="$2"; DISPATCH_LIB="$3"; shift 3
+      case "$PYTHON_PREFIX" in ""|-3) ;; *) exit 126 ;; esac
+      [ -n "$PYTHON_EXE" ] && [ -x "$PYTHON_EXE" ] || exit 126
+      _UBERDEV_PYTHON_EXE="$PYTHON_EXE"; _UBERDEV_PYTHON_PREFIX="$PYTHON_PREFIX"
+      run_python() {
+        if [ -n "$PYTHON_PREFIX" ]; then command "$PYTHON_EXE" "$PYTHON_PREFIX" "$@"; else command "$PYTHON_EXE" "$@"; fi
+      }
+      python3() { run_python "$@"; }
+      export -n -f run_python python3 2>/dev/null || exit 126
+      STATUS_FILE="$1"; ISSUE_NUM="$2"; TIER="$3"; shift 3
       . "$DISPATCH_LIB" || exit 126
       WRAPPER_PID="$$"
       EMPTY_VALUE=
@@ -2073,7 +2126,7 @@ _uberdev_dispatch_wezterm() {
       if [ "$PROVIDER_RC" -eq 0 ]; then STATE=completed; else STATE=failed; fi
       write_status "$STATE" "$PROVIDER_RC" || exit 126
       exit "$PROVIDER_RC"
-    ' _ "$STATUS_FILE" "$ISSUE_NUM" "$TIER" "$_UBERDEV_DISPATCH_FILE" "${PROVIDER_CMD[@]}" \
+    ' _ "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$_UBERDEV_DISPATCH_FILE" "$STATUS_FILE" "$ISSUE_NUM" "$TIER" "${PROVIDER_CMD[@]}" \
     2> >(tee -a "$LOG_FILE" >&2))"
   SPAWN_RC=$?
   if [[ "$SPAWN_RC" -ne 0 || -z "$DISPATCH_ID" ]]; then

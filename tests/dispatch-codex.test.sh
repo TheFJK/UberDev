@@ -1049,6 +1049,10 @@ SH
 cat > "$BEH_TMP/bin/codex" <<'SH'
 #!/usr/bin/env bash
 out=""
+if /usr/bin/env | /usr/bin/grep -Eq '^BASH_FUNC_(python3|run_python)%%='; then
+  printf 'exported-python-bridge\n' >> "$CODEX_CAPTURE"
+  exit 98
+fi
 {
   printf 'argv:'
   for arg in "$@"; do printf ' [%s]' "$arg"; done
@@ -1067,10 +1071,24 @@ sleep "${CODEX_STUB_SLEEP:-1}"
 exit "${CODEX_STUB_RC:-0}"
 SH
 chmod +x "$BEH_TMP/bin/git" "$BEH_TMP/bin/codex"
+cat > "$BEH_TMP/bin/py" <<SH
+#!/bin/sh
+[ "\$1" = -3 ] || exit 97
+shift
+if [ -n "$_UBERDEV_PYTHON_PREFIX" ]; then
+  exec "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "\$@"
+else
+  exec "$_UBERDEV_PYTHON_EXE" "\$@"
+fi
+SH
+chmod +x "$BEH_TMP/bin/py"
+for runtime_command in bash env nohup cat sleep rm uname grep stat id ps basename dirname mkdir; do
+  ln -s "$(command -v "$runtime_command")" "$BEH_TMP/bin/$runtime_command"
+done
 printf 'prompt body for codex' > "$BEH_TMP/prompt.txt"
 BEH_OUT="$(
   cd "$BEH_TMP/repo" && \
-  PATH="$BEH_TMP/bin:/usr/bin:/bin" \
+  PATH="$BEH_TMP/bin" \
   UBERDEV_TMPDIR="$BEH_TMP/tmp" \
   UBERDEV_AGENT_CHILD_OWNED=1 \
   UBERDEV_AGENT_INSTANCE_ID=review-code-a1 \
@@ -1078,6 +1096,22 @@ BEH_OUT="$(
   CODEX_CAPTURE="$BEH_TMP/codex-capture.txt" \
   bash -c '
     . "$1"
+    PATH=../bin
+    unset _UBERDEV_PYTHON_EXE _UBERDEV_PYTHON_PREFIX
+    _uberdev_dispatch_resolve_python || exit 1
+    resolved_python="$_UBERDEV_PYTHON_EXE"
+    PATH="$3"; export PATH
+    run_python() {
+      if [ -n "$_UBERDEV_PYTHON_PREFIX" ]; then
+        command "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$@"
+      else
+        command "$_UBERDEV_PYTHON_EXE" "$@"
+      fi
+    }
+    python3() {
+      run_python "$@"
+    }
+    export -f run_python python3
     _uberdev_dispatch_codex 42 small "$2"
     rc=$?
     pid="${DISPATCH_ID:-}"
@@ -1100,24 +1134,30 @@ BEH_OUT="$(
     while [ -n "$pid" ] && _uberdev_dispatch_wait_owned_session "$pid" && [ "$i" -lt 200 ]; do
       sleep 0.025; i=$((i + 1))
     done
-    printf "rc=%s\npid=%s\nrunning=%s\n" "$rc" "$pid" "$running"
+    printf "rc=%s\npid=%s\nresolved=%s\nrunning=%s\n" "$rc" "$pid" "$resolved_python" "$running"
     printf "status=%s\n" "$(cat "$UBERDEV_TMPDIR/solve-codex-status-42.json" 2>/dev/null)"
     printf "result=%s\n" "$(cat "$UBERDEV_TMPDIR/solve-codex-result-42.md" 2>/dev/null)"
-  ' _ "$DISPATCH_LIB" "$BEH_TMP/prompt.txt"
+  ' _ "$DISPATCH_LIB" "$BEH_TMP/prompt.txt" "$BEH_TMP/bin"
 )"
 beh_pid="$(printf '%s\n' "$BEH_OUT" | sed -n 's/^pid=//p')"
+BEH_SLUG="$(UBERDEV_AGENT_INSTANCE_ID=review-code-a1 bash -c '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"
+BEH_PYTHON_EXPECTED="$(cd "$BEH_TMP/bin" && pwd -P)/py"
 if [ -n "$beh_pid" ] \
     && printf '%s\n' "$BEH_OUT" | grep -Fq 'rc=0' \
+    && printf '%s\n' "$BEH_OUT" | grep -Fq "resolved=$BEH_PYTHON_EXPECTED" \
     && printf '%s\n' "$BEH_OUT" | grep -Fq 'running=' \
     && printf '%s\n' "$BEH_OUT" | grep -Fq '"state":"running"' \
     && printf '%s\n' "$BEH_OUT" | grep -Fq "\"pid\":\"$beh_pid\"" \
     && printf '%s\n' "$BEH_OUT" | grep -Fq 'status=' \
     && printf '%s\n' "$BEH_OUT" | grep -Fq '"state":"completed"' \
     && printf '%s\n' "$BEH_OUT" | grep -Fq '"exit_code":0' \
-    && printf '%s\n' "$BEH_OUT" | grep -Fq 'result=codex final result'; then
-  pass_msg "codex delayed running and terminal receipts retain the dispatch PID"
+    && printf '%s\n' "$BEH_OUT" | grep -Fq 'result=codex final result' \
+    && ! grep -Fq 'exported-python-bridge' "$BEH_TMP/codex-capture.txt" \
+    && [ ! -e "$BEH_TMP/repo/.claude/worktrees/solve-issue-42-$BEH_SLUG" ] \
+    && [ ! -e "$BEH_TMP/tmp/solve-codex-status-42.json.worktree-owner.json" ]; then
+  pass_msg "codex py -3 wrapper publishes running/result/terminal receipts and cleans ownership without exporting its bridge"
 else
-  fail_msg "codex dispatch publishes running then completed status and result" "$BEH_OUT"
+  fail_msg "codex py -3 wrapper publishes running/result/terminal receipts and cleans ownership without exporting its bridge" "$BEH_OUT"
 fi
 if grep -Fq -- 'argv: [--ask-for-approval] [never] [exec]' "$BEH_TMP/codex-capture.txt" \
    && grep -Fq -- '--sandbox] [workspace-write]' "$BEH_TMP/codex-capture.txt" \

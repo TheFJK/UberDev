@@ -170,6 +170,34 @@ if CACHED_PYTHON_OUT="$(/bin/bash -c '. "$1"; _uberdev_dispatch_resolve_python; 
 else
   echo "  FAIL  resolved absolute Python argv survives later PATH narrowing: $CACHED_PYTHON_OUT"; FAIL=$((FAIL + 1))
 fi
+RELATIVE_RESOLVER_TMP="$(mktemp -d)"
+mkdir -p "$RELATIVE_RESOLVER_TMP/repo/relative-bin"
+cat > "$RELATIVE_RESOLVER_TMP/repo/relative-bin/py" <<SH
+#!/bin/sh
+[ "\$1" = -3 ] || exit 97
+shift
+exec "$REAL_PYTHON" "\$@"
+SH
+chmod +x "$RELATIVE_RESOLVER_TMP/repo/relative-bin/py"
+RELATIVE_EXPECTED="$(cd "$RELATIVE_RESOLVER_TMP/repo/relative-bin" && pwd -P)/py"
+RELATIVE_RESOLVER_OUT="$(/bin/bash -c '
+  . "$1"
+  cd "$2" || exit 1
+  PATH=relative-bin
+  unset _UBERDEV_PYTHON_EXE _UBERDEV_PYTHON_PREFIX
+  _uberdev_dispatch_resolve_python || exit 1
+  cached="$_UBERDEV_PYTHON_EXE"
+  cd / || exit 1
+  value="$(_uberdev_dispatch_python -c "print(\"relative-cache\")")" || exit 1
+  printf "cached=%s\nvalue=%s\n" "$cached" "$value"
+' _ "$DISPATCH_LIB" "$RELATIVE_RESOLVER_TMP/repo" 2>&1)"
+if printf '%s\n' "$RELATIVE_RESOLVER_OUT" | grep -Fq "cached=$RELATIVE_EXPECTED" \
+    && printf '%s\n' "$RELATIVE_RESOLVER_OUT" | grep -Fq 'value=relative-cache'; then
+  echo "  PASS  relative PATH launcher is cached as a cwd-independent absolute executable"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  relative PATH launcher is cached as a cwd-independent absolute executable: $RELATIVE_RESOLVER_OUT"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$RELATIVE_RESOLVER_TMP"
 rm -rf "$PYTHON_RESOLVER_TMP"
 if grep -Eq '(^|[[:space:]|(&])python3[[:space:]]+-' "$DISPATCH_LIB"; then
   echo "  FAIL  dispatch.sh retains a literal python3 invocation"; FAIL=$((FAIL + 1))
@@ -177,12 +205,29 @@ else
   echo "  PASS  all dispatch Python calls use the portable resolver"; PASS=$((PASS + 1))
 fi
 detached_resolver_count="$(grep -Fc 'nohup "${PYTHON_LAUNCH[@]}"' "$DISPATCH_LIB")"
+nested_bridge_count="$(grep -Fc 'python3() { run_python "$@"; }' "$DISPATCH_LIB")"
+nested_command_count="$(grep -Fc 'then command "$PYTHON_EXE" "$PYTHON_PREFIX" "$@"; else command "$PYTHON_EXE" "$@"; fi' "$DISPATCH_LIB")"
+nested_cache_count="$(grep -Fc '_UBERDEV_PYTHON_EXE="$PYTHON_EXE"; _UBERDEV_PYTHON_PREFIX="$PYTHON_PREFIX"' "$DISPATCH_LIB")"
+nested_prefix_guard_count="$(grep -Fc 'case "$PYTHON_PREFIX" in ""|-3) ;; *) exit 126 ;; esac' "$DISPATCH_LIB")"
+nested_argv_count="$(grep -Fc '"$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$_UBERDEV_DISPATCH_FILE"' "$DISPATCH_LIB")"
+nested_unexport_count="$(grep -Fc 'export -n -f run_python python3 2>/dev/null || exit 126' "$DISPATCH_LIB")"
 if [ "$detached_resolver_count" -eq 2 ] \
-    && grep -Fq 'PYTHON_EXE="$1"; PYTHON_PREFIX="$2"; DISPATCH_LIB="$3"; shift 3' "$DISPATCH_LIB" \
-    && grep -Fq 'if [ -n "$PYTHON_PREFIX" ]; then "$PYTHON_EXE" "$PYTHON_PREFIX" "$@"; else "$PYTHON_EXE" "$@"; fi' "$DISPATCH_LIB"; then
-  echo "  PASS  detached and nested dispatch preserve the py -3 argv prefix"; PASS=$((PASS + 1))
+    && [ "$nested_bridge_count" -eq 3 ] \
+    && [ "$nested_command_count" -eq 3 ] \
+    && [ "$nested_cache_count" -eq 3 ] \
+    && [ "$nested_prefix_guard_count" -eq 3 ] \
+    && [ "$nested_argv_count" -eq 3 ] \
+    && [ "$nested_unexport_count" -eq 3 ]; then
+  echo "  PASS  all three process-separated wrappers preserve validated Python executable/prefix argv and install recursion-safe local bridges"; PASS=$((PASS + 1))
 else
-  echo "  FAIL  detached and nested dispatch preserve the py -3 argv prefix"; FAIL=$((FAIL + 1))
+  echo "  FAIL  all three process-separated wrappers preserve validated Python executable/prefix argv and install recursion-safe local bridges"
+  echo "        detached=$detached_resolver_count bridge=$nested_bridge_count command=$nested_command_count cache=$nested_cache_count prefix_guard=$nested_prefix_guard_count argv=$nested_argv_count unexport=$nested_unexport_count"
+  FAIL=$((FAIL + 1))
+fi
+if grep -Eq 'export[[:space:]]+-f[[:space:]]+python3|eval[[:space:]].*PYTHON|BASH_FUNC_python3' "$DISPATCH_LIB"; then
+  echo "  FAIL  portable Python bridge is exported, eval-based, or environment-injected"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  portable Python bridge remains local and avoids eval/function export"; PASS=$((PASS + 1))
 fi
 windows_detach_count="$(grep -Fc 'subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS' "$DISPATCH_LIB")"
 posix_setsid_count="$(grep -Fc 'os.setsid()' "$DISPATCH_LIB")"
@@ -222,15 +267,19 @@ exit 1
 SH
 cat > "$IMMEDIATE_TMP/bin/claude" <<'SH'
 #!/usr/bin/env bash
+if /usr/bin/env | /usr/bin/grep -Eq '^BASH_FUNC_(python3|run_python)%%='; then exit 98; fi
 body="$2"
 sleep 0.05
 printf 'immediate %s result\n' "$body"
 case "$body" in *failed*) exit 29 ;; *) exit 0 ;; esac
 SH
 chmod +x "$IMMEDIATE_TMP/bin/git" "$IMMEDIATE_TMP/bin/claude"
+for runtime_command in bash env nohup cat sleep rm uname grep stat id ps find basename dirname mkdir; do
+  ln -s "$(command -v "$runtime_command")" "$IMMEDIATE_TMP/bin/$runtime_command"
+done
 IMMEDIATE_OUT="$(
   cd "$IMMEDIATE_TMP/repo" &&
-  PATH="$IMMEDIATE_TMP/bin:/usr/bin:/bin" UBERDEV_TMPDIR="$IMMEDIATE_TMP/tmp" \
+  PATH="$IMMEDIATE_TMP/bin" UBERDEV_TMPDIR="$IMMEDIATE_TMP/tmp" \
   _UBERDEV_PYTHON_EXE="$REAL_PYTHON" _UBERDEV_PYTHON_PREFIX='' \
   /bin/bash -c '
     . "$1"
@@ -352,17 +401,35 @@ exit 1
 SH
 cat > "$DELAYED_TMP/bin/claude" <<'SH'
 #!/usr/bin/env bash
+if /usr/bin/env | /usr/bin/grep -Eq '^BASH_FUNC_(python3|run_python)%%='; then exit 98; fi
 sleep 1
 printf 'delayed background result\n'
 SH
 chmod +x "$DELAYED_TMP/bin/git" "$DELAYED_TMP/bin/claude"
+cat > "$DELAYED_TMP/bin/py" <<SH
+#!/bin/sh
+[ "\$1" = -3 ] || exit 97
+shift
+exec "$REAL_PYTHON" "\$@"
+SH
+chmod +x "$DELAYED_TMP/bin/py"
+for runtime_command in bash env nohup cat sleep rm uname grep stat id ps basename dirname mkdir; do
+  ln -s "$(command -v "$runtime_command")" "$DELAYED_TMP/bin/$runtime_command"
+done
 printf 'delayed' > "$DELAYED_TMP/prompt.txt"
 DELAYED_OUT="$(
   cd "$DELAYED_TMP/repo" &&
-  PATH="$DELAYED_TMP/bin:/usr/bin:/bin" UBERDEV_TMPDIR="$DELAYED_TMP/tmp" \
-  _UBERDEV_PYTHON_EXE="$REAL_PYTHON" _UBERDEV_PYTHON_PREFIX='' \
+  PATH="$DELAYED_TMP/bin" UBERDEV_TMPDIR="$DELAYED_TMP/tmp" \
   /bin/bash -c '
     . "$1"
+    PATH=../bin
+    unset _UBERDEV_PYTHON_EXE _UBERDEV_PYTHON_PREFIX
+    _uberdev_dispatch_resolve_python || exit 1
+    resolved_python="$_UBERDEV_PYTHON_EXE"
+    PATH="$3"; export PATH
+    run_python() { command "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$@"; }
+    python3() { run_python "$@"; }
+    export -f run_python python3
     MODEL=sonnet; PERM_FLAG=(); EFFORT_FLAG=()
     _uberdev_dispatch_background 90 small "$2"
     rc=$?; pid="${DISPATCH_ID:-}"; status_file="$UBERDEV_TMPDIR/solve-bg-status-90.json"
@@ -378,17 +445,19 @@ DELAYED_OUT="$(
       [[ "$terminal" == *\"state\":\"completed\"* ]] && break
       sleep 0.025; attempts=$((attempts + 1))
     done
-    printf "rc=%s\npid=%s\nrunning=%s\nterminal=%s\nresult=%s\n" \
-      "$rc" "$pid" "$running" "$terminal" "$(cat "$UBERDEV_TMPDIR/solve-bg-result-90.md" 2>/dev/null)"
-  ' _ "$DISPATCH_LIB" "$DELAYED_TMP/prompt.txt"
+    printf "rc=%s\npid=%s\nresolved=%s\nrunning=%s\nterminal=%s\nresult=%s\n" \
+      "$rc" "$pid" "$resolved_python" "$running" "$terminal" "$(cat "$UBERDEV_TMPDIR/solve-bg-result-90.md" 2>/dev/null)"
+  ' _ "$DISPATCH_LIB" "$DELAYED_TMP/prompt.txt" "$DELAYED_TMP/bin"
 )"
 delayed_pid="$(printf '%s\n' "$DELAYED_OUT" | sed -n 's/^pid=//p')"
+delayed_python_expected="$(cd "$DELAYED_TMP/bin" && pwd -P)/py"
 if [ -n "$delayed_pid" ] \
-    && python3 -I -B - "$DELAYED_OUT" "$delayed_pid" <<'PY'
+    && python3 -I -B - "$DELAYED_OUT" "$delayed_pid" "$delayed_python_expected" <<'PY'
 import json,sys
 lines=dict(line.split('=',1) for line in sys.argv[1].splitlines())
 pid=sys.argv[2]
 assert lines['rc']=='0' and lines['pid']==pid
+assert lines['resolved']==sys.argv[3]
 assert json.loads(lines['running'])=={
     'issue':90,'tier':'small','backend':'background','state':'running','exit_code':None,'pid':pid,
 }

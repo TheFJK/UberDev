@@ -154,6 +154,143 @@ echo "== #246 D-skip: SKIP_PERMISSIONS=1 yields --dangerously-skip-permissions -
 rm -f "$TALLY_FILE"
 
 echo
+echo "== Process-separated WezTerm pane retains portable Python after PATH narrowing =="
+WEZ_RUNTIME_TMP="$(mktemp -d)"
+mkdir -p "$WEZ_RUNTIME_TMP/bin" "$WEZ_RUNTIME_TMP/repo" "$WEZ_RUNTIME_TMP/tmp" "$WEZ_RUNTIME_TMP/home"
+if REAL_PYTHON_EXE="$(command -v python3 2>/dev/null)" && [ -n "$REAL_PYTHON_EXE" ]; then
+  REAL_PYTHON_PREFIX=''
+elif REAL_PYTHON_EXE="$(command -v python 2>/dev/null)" && [ -n "$REAL_PYTHON_EXE" ]; then
+  REAL_PYTHON_PREFIX=''
+elif REAL_PYTHON_EXE="$(command -v py 2>/dev/null)" && [ -n "$REAL_PYTHON_EXE" ]; then
+  REAL_PYTHON_PREFIX='-3'
+else
+  echo "error: Python 3 is required for dispatch-wezterm fixtures" >&2
+  exit 1
+fi
+cat > "$WEZ_RUNTIME_TMP/bin/py" <<SH
+#!/bin/sh
+[ "\$1" = -3 ] || exit 97
+shift
+if [ -n "$REAL_PYTHON_PREFIX" ]; then
+  exec "$REAL_PYTHON_EXE" "$REAL_PYTHON_PREFIX" "\$@"
+else
+  exec "$REAL_PYTHON_EXE" "\$@"
+fi
+SH
+cat > "$WEZ_RUNTIME_TMP/bin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = worktree ] && [ "$2" = add ]; then mkdir -p "$3"; exit 0; fi
+exit 1
+SH
+cat > "$WEZ_RUNTIME_TMP/bin/claude" <<'SH'
+#!/usr/bin/env bash
+if /usr/bin/env | /usr/bin/grep -Eq '^BASH_FUNC_(python3|run_python)%%='; then
+  printf 'exported-python-bridge\n' > "$WEZ_PROVIDER_CAPTURE"
+  exit 98
+fi
+i=0
+while [ "$i" -lt 200 ]; do
+  if /usr/bin/grep -Fq '"state":"running"' "$WEZ_STATUS_FILE" 2>/dev/null; then
+    printf 'running-observed-no-export\n' > "$WEZ_PROVIDER_CAPTURE"
+    exit 0
+  fi
+  sleep 0.01
+  i=$((i + 1))
+done
+printf 'running-not-observed\n' > "$WEZ_PROVIDER_CAPTURE"
+exit 99
+SH
+cat > "$WEZ_RUNTIME_TMP/bin/wezterm" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = cli ] && [ "$2" = spawn ] || exit 95
+pane_cwd=''
+while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+  if [ "$1" = --cwd ]; then pane_cwd="$2"; shift 2; else shift; fi
+done
+[ "${1:-}" = -- ] || exit 96
+shift
+( cd "$pane_cwd" && "$@" )
+printf '731\n'
+exit 0
+SH
+chmod +x "$WEZ_RUNTIME_TMP/bin/py" "$WEZ_RUNTIME_TMP/bin/git" "$WEZ_RUNTIME_TMP/bin/claude" "$WEZ_RUNTIME_TMP/bin/wezterm"
+for runtime_command in bash env cat sleep rm uname grep stat id awk mv tee mkdir basename dirname; do
+  ln -s "$(command -v "$runtime_command")" "$WEZ_RUNTIME_TMP/bin/$runtime_command"
+done
+printf 'wezterm portable python prompt\n' > "$WEZ_RUNTIME_TMP/prompt.txt"
+WEZ_STATUS_FILE="$WEZ_RUNTIME_TMP/tmp/wezterm-clean-status.json"
+WEZ_PROVIDER_CAPTURE="$WEZ_RUNTIME_TMP/clean-provider-capture.txt"
+WEZ_RUNTIME_OUT="$(
+  cd "$WEZ_RUNTIME_TMP/repo" && \
+  PATH="$WEZ_RUNTIME_TMP/bin" HOME="$WEZ_RUNTIME_TMP/home" UBERDEV_TMPDIR="$WEZ_RUNTIME_TMP/tmp" \
+  UBERDEV_AGENT_STATUS_FILE="$WEZ_STATUS_FILE" WEZ_STATUS_FILE="$WEZ_STATUS_FILE" \
+  WEZ_PROVIDER_CAPTURE="$WEZ_PROVIDER_CAPTURE" \
+  /bin/bash -c '
+    . "$1"
+    PATH=../bin
+    unset _UBERDEV_PYTHON_EXE _UBERDEV_PYTHON_PREFIX
+    _uberdev_dispatch_resolve_python || exit 1
+    resolved_python="$_UBERDEV_PYTHON_EXE"
+    PATH="$3"; export PATH
+    MODEL=sonnet; PERM_FLAG=(); EFFORT_FLAG=()
+    _uberdev_dispatch_wezterm 92 small "$2"
+    printf "rc=%s\npane=%s\nresolved=%s\nstatus=%s\nprovider=%s\n" "$?" "${DISPATCH_ID:-}" "$resolved_python" \
+      "$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)" "$(cat "$WEZ_PROVIDER_CAPTURE" 2>/dev/null)"
+  ' _ "$DISPATCH_LIB" "$WEZ_RUNTIME_TMP/prompt.txt" "$WEZ_RUNTIME_TMP/bin"
+)"
+WEZ_HOSTILE_STATUS_FILE="$WEZ_RUNTIME_TMP/tmp/wezterm-hostile-status.json"
+WEZ_HOSTILE_PROVIDER_CAPTURE="$WEZ_RUNTIME_TMP/hostile-provider-capture.txt"
+WEZ_HOSTILE_OUT="$(
+  cd "$WEZ_RUNTIME_TMP/repo" && \
+  PATH="$WEZ_RUNTIME_TMP/bin" HOME="$WEZ_RUNTIME_TMP/home" UBERDEV_TMPDIR="$WEZ_RUNTIME_TMP/tmp" \
+  UBERDEV_AGENT_STATUS_FILE="$WEZ_HOSTILE_STATUS_FILE" WEZ_STATUS_FILE="$WEZ_HOSTILE_STATUS_FILE" \
+  WEZ_PROVIDER_CAPTURE="$WEZ_HOSTILE_PROVIDER_CAPTURE" \
+  /bin/bash -c '
+    . "$1"
+    PATH=../bin
+    unset _UBERDEV_PYTHON_EXE _UBERDEV_PYTHON_PREFIX
+    _uberdev_dispatch_resolve_python || exit 1
+    resolved_python="$_UBERDEV_PYTHON_EXE"
+    PATH="$3"; export PATH
+    run_python() {
+      if [ -n "$_UBERDEV_PYTHON_PREFIX" ]; then
+        command "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$@"
+      else
+        command "$_UBERDEV_PYTHON_EXE" "$@"
+      fi
+    }
+    python3() { run_python "$@"; }
+    export -f run_python python3
+    MODEL=sonnet; PERM_FLAG=(); EFFORT_FLAG=()
+    _uberdev_dispatch_wezterm 93 small "$2"
+    printf "rc=%s\npane=%s\nresolved=%s\nstatus=%s\nprovider=%s\n" "$?" "${DISPATCH_ID:-}" "$resolved_python" \
+      "$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)" "$(cat "$WEZ_PROVIDER_CAPTURE" 2>/dev/null)"
+  ' _ "$DISPATCH_LIB" "$WEZ_RUNTIME_TMP/prompt.txt" "$WEZ_RUNTIME_TMP/bin"
+)"
+WT_RUNTIME_BODY="$(awk '/^_uberdev_dispatch_wezterm\(\)/{f=1} f{print} f&&/^}/{exit}' "$DISPATCH_LIB")"
+WEZ_PYTHON_EXPECTED="$(cd "$WEZ_RUNTIME_TMP/bin" && pwd -P)/py"
+if printf '%s\n' "$WEZ_RUNTIME_OUT" | grep -Fq 'rc=0' \
+    && printf '%s\n' "$WEZ_RUNTIME_OUT" | grep -Fq 'pane=731' \
+    && printf '%s\n' "$WEZ_RUNTIME_OUT" | grep -Fq "resolved=$WEZ_PYTHON_EXPECTED" \
+    && printf '%s\n' "$WEZ_RUNTIME_OUT" | grep -Fq '"state":"completed"' \
+    && printf '%s\n' "$WEZ_RUNTIME_OUT" | grep -Fq '"exit_code":0' \
+    && printf '%s\n' "$WEZ_RUNTIME_OUT" | grep -Fq 'provider=running-observed-no-export' \
+    && printf '%s\n' "$WEZ_HOSTILE_OUT" | grep -Fq 'rc=0' \
+    && printf '%s\n' "$WEZ_HOSTILE_OUT" | grep -Fq 'pane=731' \
+    && printf '%s\n' "$WEZ_HOSTILE_OUT" | grep -Fq "resolved=$WEZ_PYTHON_EXPECTED" \
+    && printf '%s\n' "$WEZ_HOSTILE_OUT" | grep -Fq '"state":"completed"' \
+    && printf '%s\n' "$WEZ_HOSTILE_OUT" | grep -Fq '"exit_code":0' \
+    && printf '%s\n' "$WEZ_HOSTILE_OUT" | grep -Fq 'provider=running-observed-no-export' \
+    && printf '%s\n' "$WT_RUNTIME_BODY" | grep -Fq '_uberdev_dispatch_resolve_python'; then
+  echo "  PASS  clean and hostile WezTerm py -3 panes retain absolute launchers and never export bridge functions"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  clean and hostile WezTerm py -3 panes retain absolute launchers and never export bridge functions"
+  echo "        clean=$WEZ_RUNTIME_OUT hostile=$WEZ_HOSTILE_OUT"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$WEZ_RUNTIME_TMP"
+
+echo
 echo "== Anti-pattern: wezterm backend never uses claude --bg =="
 # Scope the check to the _uberdev_dispatch_wezterm function body — sibling
 # backends in the same file legitimately use `claude --bg`.
