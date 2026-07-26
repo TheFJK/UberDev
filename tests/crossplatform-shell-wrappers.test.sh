@@ -218,6 +218,76 @@ assert_eq "$esc_before" "2" "fixture carries 2 ESC bytes pre-strip"
 assert_eq "$esc_after" "0" "tr -d '\\033' removes all ESC bytes (platform-independent)"
 
 echo
+echo "== live semaphore: MSYS shell PID maps to its validated native WINPID =="
+
+if native_pid_out="$(/bin/bash -c '
+  . "$1"
+  ps() {
+    exit 97
+  }
+  UBERDEV_SEMAPHORE_TESTING=1
+  listing="PID PPID PGID WINPID TTY UID STIME COMMAND
+41 7 41 610 pty0 1000 12:00:00 /usr/bin/bash"
+  _uberdev_semaphore_windows_native_pid 41 "$listing"
+' _ "$REPO_ROOT/plugins/uberdev/lib/live-semaphore.sh")" \
+    && [ "$native_pid_out" = 610 ]; then
+  echo "  PASS  native owner mapping selects WINPID only from the exact shell PID row"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  native owner mapping did not select the exact shell WINPID: $native_pid_out"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== live semaphore: zsh mutex owner capture does not depend on BASH or PATH bash =="
+
+if ! command -v zsh >/dev/null 2>&1; then
+  echo "  SKIP  zsh mutex owner capture (zsh not on PATH)"
+else
+  zsh_mutex_tmp="$(mktemp -d)"
+  zsh_mutex_tmp="$(cd "$zsh_mutex_tmp" && pwd -P)"
+  mkdir -p "$zsh_mutex_tmp/shadow-bin"
+  cat >"$zsh_mutex_tmp/shadow-bin/bash" <<'EOF_ZSH_SHADOW_BASH'
+#!/bin/sh
+exit 97
+EOF_ZSH_SHADOW_BASH
+  chmod +x "$zsh_mutex_tmp/shadow-bin/bash"
+  cat >"$zsh_mutex_tmp/bash-env" <<'EOF_ZSH_BASH_ENV'
+exit 96
+EOF_ZSH_BASH_ENV
+  if zsh_mutex_output="$(zsh -c '
+      unset BASH
+      . "$1"
+      PATH="$2/shadow-bin:$PATH"
+      BASH_ENV="$2/bash-env"
+      export PATH
+      export BASH_ENV
+      holder_pid="$$"
+      scope="$(_uberdev_semaphore_prepare_scope "$2/state" zsh-owner-probe codex)" || exit 11
+      _uberdev_semaphore_mutex_acquire "$scope" || exit 12
+      owner_pid="$(sed -n "1p" "$scope/.mutex/owner_pid")"
+      owner_identity="$(sed -n "2p" "$scope/.mutex/owner_pid")"
+      [ "$owner_pid" = "$holder_pid" ] || exit 13
+      _uberdev_semaphore_process_identity_matches "$owner_pid" "$owner_identity" || exit 14
+      _uberdev_semaphore_mutex_release "$scope" || exit 15
+      [ ! -e "$scope/.mutex" ] && [ ! -L "$scope/.mutex" ] || exit 16
+      printf "owner=%s live=yes residue=no\n" "$owner_pid"
+    ' _ "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" "$zsh_mutex_tmp" 2>"$zsh_mutex_tmp/stderr")" \
+      && case "$zsh_mutex_output" in
+      owner=[0-9]*' live=yes residue=no') true ;;
+      *) false ;;
+      esac; then
+    echo "  PASS  real zsh holder publishes its live identity and releases without residue"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  real zsh holder could not publish/release its live identity: ${zsh_mutex_output:-<empty>}"
+    sed -n '1,8p' "$zsh_mutex_tmp/stderr" 2>/dev/null | sed 's/^/        /'
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$zsh_mutex_tmp"
+fi
+
+echo
 echo "== run manifest: Windows reconciliation uses a non-signaling native probe =="
 
 if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" \
@@ -233,7 +303,16 @@ assert 'owner_depth = {"direct": 0, "parent": 1}.get(mode)' in source
 assert 'stat.S_ISFIFO(os.fstat(1).st_mode)' not in source
 candidate_helper=semaphore_source.split('_uberdev_semaphore_mutex_prepare_candidate() {',1)[1].split('\n}',1)[0]
 mutex_acquire=semaphore_source.split('_uberdev_semaphore_mutex_acquire() {',1)[1].split('\n}',1)[0]
-assert '_uberdev_semaphore_write_process_identity parent "$candidate"' in candidate_helper
+mutex_owner=semaphore_source.split('_uberdev_semaphore_capture_mutex_owner() {',1)[1].split('\n}',1)[0]
+native_pid=semaphore_source.split('_uberdev_semaphore_windows_native_pid() {',1)[1].split('\n}',1)[0]
+assert '_uberdev_semaphore_write_process_identity' not in candidate_helper
+assert '_uberdev_semaphore_process_identity "$owner"' in mutex_owner
+assert 'helper_shell="$(_uberdev_semaphore_bash_executable)"' in mutex_owner
+assert "BASH_ENV='' ENV='' \"$helper_shell\" --noprofile --norc -p" in mutex_owner
+assert 'command -v bash' not in semaphore_source
+assert '/usr/bin/ps.exe /usr/bin/ps /bin/ps' in native_pid
+assert 'listing="$(ps ' not in native_pid
+assert 'mutex_owner_process_identity_unavailable' in mutex_owner
 assert 'token="$(_uberdev_semaphore_mutex_prepare_candidate "$candidate")"' in mutex_acquire
 assert '[ "${#token}" -eq 32 ] || return 2' in candidate_helper
 assert 'case "$token" in *[!0-9a-f]*) return 2 ;; esac' in candidate_helper
@@ -243,11 +322,11 @@ caller_hex_guard='*[!0-9a-f]*)'
 publication='if mkdir "$mutex" 2>/dev/null; then'
 assert caller_length_guard in mutex_acquire and caller_hex_guard in mutex_acquire
 assert 'mutex owner candidate returned malformed token' in mutex_acquire
-assert mutex_acquire.index('token="$(_uberdev_semaphore_mutex_prepare_candidate "$candidate")"') \
+assert mutex_acquire.index('_uberdev_semaphore_capture_mutex_owner "$candidate"') \
+    < mutex_acquire.index('token="$(_uberdev_semaphore_mutex_prepare_candidate "$candidate")"') \
     < mutex_acquire.index(caller_length_guard) \
     < mutex_acquire.index(caller_hex_guard) \
     < mutex_acquire.index(publication)
-assert '_uberdev_semaphore_write_process_identity direct "$candidate"' not in mutex_acquire
 assert '_uberdev_semaphore_write_process_identity "$owner_mode" "$probe"' in semaphore_source
 assert 'if [ -n "$output_variable" ]; then owner_mode=direct; else owner_mode=parent; fi' in semaphore_source
 assert '_uberdev_semaphore_write_process_identity parent "$probe"' in agent_source

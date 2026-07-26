@@ -8,6 +8,12 @@ _uberdev_semaphore_error() {
   printf 'uberdev semaphore: %s\n' "$1" >&2
 }
 
+# Standalone callers use the conventional Python 3 entrypoint. Dispatch owns a
+# stricter resolver and replaces this seam with its validated executable argv.
+_uberdev_semaphore_python() {
+  command python3 "$@"
+}
+
 _uberdev_semaphore_is_positive_integer() {
   case "${1-}" in
     ''|*[!0-9]*) return 1 ;;
@@ -112,7 +118,7 @@ _uberdev_semaphore_process_identity() {
   local pid="${1-}" manifest_tool
   _uberdev_semaphore_is_positive_integer "$pid" || return 1
   manifest_tool="$(_uberdev_semaphore_manifest_tool)" || return 2
-  python3 -I -B "$manifest_tool" process-identity --pid "$pid"
+  _uberdev_semaphore_python -I -B "$manifest_tool" process-identity --pid "$pid"
 }
 
 _uberdev_semaphore_process_identity_matches() {
@@ -130,9 +136,8 @@ _uberdev_semaphore_process_identity_matches() {
 
 _uberdev_semaphore_write_process_identity() {
   local mode="$1" destination="$2" manifest_tool
-  command -v python3 >/dev/null 2>&1 || return 2
   manifest_tool="$(_uberdev_semaphore_manifest_tool)" || return 2
-  python3 -I -B "$manifest_tool" write-process-identity \
+  _uberdev_semaphore_python -I -B "$manifest_tool" write-process-identity \
     --mode "$mode" --destination "$destination"
 }
 
@@ -283,7 +288,7 @@ _uberdev_semaphore_path_identity() {
 _uberdev_semaphore_lease_identity() {
   local lease="$1" generation="$2" manifest_tool value
   manifest_tool="$(_uberdev_semaphore_manifest_tool)" || return 2
-  value="$(python3 -I -B "$manifest_tool" secure-lease-identity \
+  value="$(_uberdev_semaphore_python -I -B "$manifest_tool" secure-lease-identity \
     --lease-path "$lease" --generation "$generation")" || return 2
   case "$value" in
     ''|*[!0-9:]*|:*|*:|*:*:*) return 2 ;;
@@ -293,7 +298,7 @@ _uberdev_semaphore_lease_identity() {
 }
 
 _uberdev_semaphore_quarantine_mutex() {
-  local scope="$1" expected_identity="$2" mutex token_file token quarantine actual entry
+  local scope="$1" expected_identity="$2" mutex token_file token quarantine actual owner_path
   mutex="$scope/.mutex"
   token_file="$(mktemp "$scope/.quarantine-id.XXXXXX")" || return 2
   token="$(basename "$token_file")"
@@ -303,11 +308,13 @@ _uberdev_semaphore_quarantine_mutex() {
   [ ! -L "$quarantine" ] && [ -d "$quarantine" ] || return 2
   actual="$(_uberdev_semaphore_path_identity "$quarantine")" || return 2
   [ "$actual" = "$expected_identity" ] || return 2
-  for entry in "$quarantine"/* "$quarantine"/.[!.]* "$quarantine"/..?*; do
-    [ -e "$entry" ] || [ -L "$entry" ] || continue
-    [ "$(basename "$entry")" = owner_pid ] && [ -f "$entry" ] && [ ! -L "$entry" ] || return 2
-    rm -f "$entry" 2>/dev/null || return 2
-  done
+  owner_path="$quarantine/owner_pid"
+  if [ -e "$owner_path" ] || [ -L "$owner_path" ]; then
+    [ -f "$owner_path" ] && [ ! -L "$owner_path" ] || return 2
+    rm -f "$owner_path" 2>/dev/null || return 2
+  fi
+  # rmdir is the fail-closed inventory check: any unexpected visible or hidden
+  # entry keeps the quarantined generation intact for operator inspection.
   rmdir "$quarantine" 2>/dev/null
 }
 
@@ -452,12 +459,6 @@ _uberdev_semaphore_mutex_reclaim_ownerless_generation() {
 
 _uberdev_semaphore_mutex_prepare_candidate() {
   local candidate="$1" candidate_name token
-  # This helper is called through command substitution. That bridge gives the
-  # owner writer one explicit shell-parent boundary on every platform; native
-  # Windows additionally crosses the MSYS launcher in run_manifest.py. The
-  # resulting parent-depth record names the outer mutex holder, not either
-  # short-lived bridge process.
-  _uberdev_semaphore_write_process_identity parent "$candidate" || return 2
   candidate_name="$(basename "$candidate")" || return 2
   token="$(_uberdev_semaphore_hash "mutex:${#candidate_name}:$candidate_name")" || return 2
   token="$(printf '%s' "$token" | cut -c 1-32)"
@@ -469,6 +470,136 @@ _uberdev_semaphore_mutex_prepare_candidate() {
     return 2
   }
   printf '%s\n' "$token"
+}
+
+_uberdev_semaphore_mutex_owner_diagnostic() {
+  case "${1-}" in
+    mutex_owner_shell_pid_unavailable|mutex_owner_native_pid_unavailable|mutex_owner_process_identity_unavailable) ;;
+    *) return 2 ;;
+  esac
+  printf '{"error":"%s","status":"error"}\n' "$1" >&2
+}
+
+_uberdev_semaphore_bash_executable() {
+  local candidate candidate_dir candidate_base canonical_dir
+  # Do not consult PATH: mutex ownership is security-sensitive, and a sourced
+  # zsh caller has no BASH variable to identify an already-running Bash.
+  for candidate in /bin/bash /usr/bin/bash "${BASH:-}"; do
+    [ -n "$candidate" ] || continue
+    _uberdev_semaphore_safe_text "$candidate" || continue
+    _uberdev_semaphore_is_absolute_path "$candidate" || continue
+    candidate_dir="${candidate%/*}"
+    candidate_base="${candidate##*/}"
+    [ "$candidate_dir" != "$candidate" ] || continue
+    case "$candidate_base" in bash|bash.exe) ;; *) continue ;; esac
+    canonical_dir="$(unset CDPATH; cd "$candidate_dir" 2>/dev/null && pwd -P)" || continue
+    candidate="$canonical_dir/$candidate_base"
+    [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 2
+}
+
+_uberdev_semaphore_windows_native_pid() {
+  local shell_pid="$1" fixture_listing="${2-}" ps_executable listing header record field position pid_position=0 winpid_position=0
+  local recorded_pid='' native_pid=''
+  if [ "${UBERDEV_SEMAPHORE_TESTING:-0}" = 1 ] && [ -n "$fixture_listing" ]; then
+    listing="$fixture_listing"
+  else
+    ps_executable=''
+    for ps_executable in /usr/bin/ps.exe /usr/bin/ps /bin/ps; do
+      [ -f "$ps_executable" ] && [ -x "$ps_executable" ] && break
+      ps_executable=''
+    done
+    [ -n "$ps_executable" ] || return 2
+    listing="$("$ps_executable" -l -p "$shell_pid" 2>/dev/null)" || return 2
+  fi
+  header="$(printf '%s\n' "$listing" | sed -n '1p')"
+  record="$(printf '%s\n' "$listing" | sed -n '2p')"
+  [ -n "$header" ] && [ -n "$record" ] || return 2
+  position=0
+  for field in $header; do
+    position=$((position + 1))
+    case "$field" in
+      PID) [ "$pid_position" -eq 0 ] || return 2; pid_position="$position" ;;
+      WINPID) [ "$winpid_position" -eq 0 ] || return 2; winpid_position="$position" ;;
+    esac
+  done
+  [ "$pid_position" -gt 0 ] && [ "$winpid_position" -gt 0 ] || return 2
+  position=0
+  for field in $record; do
+    position=$((position + 1))
+    [ "$position" -ne "$pid_position" ] || recorded_pid="$field"
+    [ "$position" -ne "$winpid_position" ] || native_pid="$field"
+  done
+  [ "$recorded_pid" = "$shell_pid" ] || return 2
+  _uberdev_semaphore_is_positive_integer "$native_pid" || return 2
+  printf '%s\n' "$native_pid"
+}
+
+_uberdev_semaphore_capture_mutex_owner() {
+  local candidate="$1" helper_shell shell_pid owner os_name identity
+  local identity_pid identity_pgid identity_sid identity_digest identity_extra
+  helper_shell="$(_uberdev_semaphore_bash_executable)" || {
+      _uberdev_semaphore_mutex_owner_diagnostic mutex_owner_shell_pid_unavailable
+      return 2
+    }
+  # Bash 3.2 has no BASHPID and $$ remains the outer shell inside a subshell.
+  # A directly-invoked child observes the exact shell holding this critical
+  # section as its PPID and writes it without a command-substitution bridge.
+  # The child, not this shell, expands PPID.
+  # shellcheck disable=SC2016
+  if ! BASH_ENV='' ENV='' "$helper_shell" --noprofile --norc -p \
+      -c 'builtin printf "%s\n" "$PPID"' \
+      >"$candidate" 2>/dev/null; then
+    _uberdev_semaphore_mutex_owner_diagnostic mutex_owner_shell_pid_unavailable
+    return 2
+  fi
+  read -r shell_pid <"$candidate" || shell_pid=''
+  _uberdev_semaphore_is_positive_integer "$shell_pid" || {
+    _uberdev_semaphore_mutex_owner_diagnostic mutex_owner_shell_pid_unavailable
+    return 2
+  }
+  owner="$shell_pid"
+  os_name="$(uname -s 2>/dev/null)" || {
+    _uberdev_semaphore_mutex_owner_diagnostic mutex_owner_native_pid_unavailable
+    return 2
+  }
+  case "$os_name" in
+    MINGW*|MSYS*|CYGWIN*)
+      owner="$(_uberdev_semaphore_windows_native_pid "$shell_pid")" || {
+        _uberdev_semaphore_mutex_owner_diagnostic mutex_owner_native_pid_unavailable
+        return 2
+      }
+      ;;
+  esac
+  identity="$(_uberdev_semaphore_process_identity "$owner" 2>/dev/null)" || {
+    _uberdev_semaphore_mutex_owner_diagnostic mutex_owner_process_identity_unavailable
+    return 2
+  }
+  _uberdev_semaphore_safe_text "$identity" || {
+    _uberdev_semaphore_mutex_owner_diagnostic mutex_owner_process_identity_unavailable
+    return 2
+  }
+  IFS='|' read -r identity_pid identity_pgid identity_sid identity_digest identity_extra <<EOF_MUTEX_IDENTITY
+$identity
+EOF_MUTEX_IDENTITY
+  _uberdev_semaphore_is_positive_integer "$identity_pid" \
+    && _uberdev_semaphore_is_positive_integer "$identity_pgid" \
+    && _uberdev_semaphore_is_positive_integer "$identity_sid" \
+    && [ "$identity_pid" = "$owner" ] \
+    && [ -z "$identity_extra" ] \
+    && [ "${#identity_digest}" -eq 64 ] || {
+      _uberdev_semaphore_mutex_owner_diagnostic mutex_owner_process_identity_unavailable
+      return 2
+    }
+  case "$identity_digest" in *[!0-9a-f]*)
+    _uberdev_semaphore_mutex_owner_diagnostic mutex_owner_process_identity_unavailable
+    return 2
+  esac
+  printf '%s\n%s\n' "$owner" "$identity" >"$candidate" || return 2
+  chmod 600 "$candidate" 2>/dev/null || return 2
 }
 
 _uberdev_semaphore_mutex_acquire() {
@@ -507,8 +638,12 @@ _uberdev_semaphore_mutex_acquire() {
       _uberdev_semaphore_error 'cannot create mutex owner candidate'
       return 2
     }
-    if token="$(_uberdev_semaphore_mutex_prepare_candidate "$candidate")"; then
-      candidate_rc=0
+    if _uberdev_semaphore_capture_mutex_owner "$candidate"; then
+      if token="$(_uberdev_semaphore_mutex_prepare_candidate "$candidate")"; then
+        candidate_rc=0
+      else
+        candidate_rc=$?
+      fi
     else
       candidate_rc=$?
     fi
@@ -775,9 +910,8 @@ _uberdev_semaphore_status_kind() {
   local status_path manifest_tool output
   status_path="${1-}"
   [ -n "$status_path" ] || { printf '%s\n' unknown; return 0; }
-  command -v python3 >/dev/null 2>&1 || return 2
   manifest_tool="$(_uberdev_semaphore_manifest_tool)" || return 2
-  output="$(python3 "$manifest_tool" probe-status --status-path "$status_path" 2>/dev/null)" || {
+  output="$(_uberdev_semaphore_python "$manifest_tool" probe-status --status-path "$status_path" 2>/dev/null)" || {
     _uberdev_semaphore_error 'backend status is malformed, ambiguous, or unsafe'
     return 2
   }
@@ -947,7 +1081,7 @@ _uberdev_semaphore_publish_lease() {
   published_identity="$(printf 'version=1\ngeneration=%s\nrun_id=%s\nowner_pid=%s\nowner_identity=%s\nbackend_handle=%s\nbackend_identity=%s\nstart_epoch=%s\ntimeout_s=%s\nstatus_path=%s\n' \
     "$generation" "$run_id" "$owner_pid" "$owner_identity" "$backend_handle" "$backend_identity" \
     "$start_epoch" "$timeout_s" "$status_path" \
-    | python3 "$manifest_tool" secure-write-lease --lease-path "$lease")" || return 2
+    | _uberdev_semaphore_python "$manifest_tool" secure-write-lease --lease-path "$lease")" || return 2
   case "$published_identity" in *[!0-9:]*|:*|*:|*:*:*) return 2 ;; esac
   _UBERDEV_SEMAPHORE_PUBLISHED_IDENTITY="$published_identity"
 }
@@ -966,7 +1100,7 @@ _uberdev_semaphore_remove_lease() {
   fi
   case "$identity" in ''|*[!0-9:]*|:*|*:|*:*:*) return 2 ;; esac
   manifest_tool="$(_uberdev_semaphore_manifest_tool)" || return 2
-  python3 -I -B "$manifest_tool" secure-remove-lease --lease-path "$lease" \
+  _uberdev_semaphore_python -I -B "$manifest_tool" secure-remove-lease --lease-path "$lease" \
     --generation "$generation" --identity "$identity" >/dev/null
 }
 

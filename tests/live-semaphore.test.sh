@@ -654,7 +654,8 @@ WRITER_SPY_STATE="$TMP/secure-writer-spy"
 WRITER_SPY_MARKER="$TMP/secure-writer-called"
 capture /bin/bash -c '
   SPY_MARKER="$3"
-  python3() {
+  . "$1"
+  _uberdev_semaphore_python() {
     case " $* " in
       *" secure-write-lease "*)
         printf "called\n" > "$SPY_MARKER"
@@ -664,7 +665,6 @@ capture /bin/bash -c '
     esac
     command python3 "$@"
   }
-  . "$1"
   uberdev_semaphore_acquire "$2" repo codex 1 writer-spy 30
 ' _ "$LIB" "$WRITER_SPY_STATE" "$WRITER_SPY_MARKER"
 if [ "$CAPTURE_RC" -eq 2 ] && [ "$(cat "$WRITER_SPY_MARKER" 2>/dev/null)" = called ] \
@@ -1318,9 +1318,17 @@ uberdev_semaphore_set_handle "$prehandle_unknown_lease" '' "$prehandle_status" >
 capture /bin/bash -c '
   . "$1"
   probe_sentinel="$3"
-  _uberdev_semaphore_process_identity() { printf "called\n" >"$probe_sentinel"; return 2; }
+  lease_owner="$(sed -n "s/^owner_pid=//p" "$4")"
+  _uberdev_semaphore_process_identity() {
+    if [ "$1" = "$lease_owner" ]; then
+      printf "called\n" >"$probe_sentinel"
+      return 2
+    fi
+    manifest_tool="$(_uberdev_semaphore_manifest_tool)" || return 2
+    _uberdev_semaphore_python -I -B "$manifest_tool" process-identity --pid "$1"
+  }
   uberdev_semaphore_reconcile "$2" repo codex
-' _ "$LIB" "$PREHANDLE_UNKNOWN_STATE" "$prehandle_probe_sentinel"
+' _ "$LIB" "$PREHANDLE_UNKNOWN_STATE" "$prehandle_probe_sentinel" "$prehandle_unknown_lease"
 if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = 0 ] \
     && [ -f "$prehandle_unknown_lease" ] && [ ! -e "$prehandle_probe_sentinel" ]; then
   pass "fresh terminal pre-handle retention does not consult owner liveness"

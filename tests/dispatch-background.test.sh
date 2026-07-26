@@ -351,36 +351,143 @@ else
 fi
 
 echo
-echo "== Git metadata mutex candidate binds the outer holder across its owner bridge =="
+echo "== Git metadata mutex uses the validated Python argv and records its live holder =="
 MUTEX_OWNER_TMP="$(mktemp -d)"
 MUTEX_OWNER_BASH="$(command -v bash)"
-if MUTEX_OWNER_OUT="$("$MUTEX_OWNER_BASH" -c '
-  . "$1"
-  holder_pid="$BASHPID"
-  scope="$(_uberdev_semaphore_prepare_scope "$2/state" bridge-repository git-worktree-metadata)" || exit 1
-  _uberdev_semaphore_write_process_identity() {
-    mode="$1"; destination="$2"
-    # Native Windows Python crosses an MSYS launcher and a command-substitution
-    # bridge. The parent-depth mode must run in that bridge so it resolves back
-    # to the still-live mutex holder, never the short-lived bridge process.
-    [ "$mode" = parent ] && [ "$BASHPID" != "$holder_pid" ] || return 91
-    printf "%s\n%s|%s|%s|%064d\n" \
-      "$holder_pid" "$holder_pid" "$holder_pid" "$holder_pid" 0 >"$destination"
-  }
-  _uberdev_semaphore_mutex_acquire "$scope" || exit $?
-  recorded_pid="$(sed -n "1p" "$scope/.mutex/owner_pid")"
-  kill -0 "$recorded_pid" 2>/dev/null || exit 92
-  _uberdev_semaphore_mutex_release "$scope" || exit $?
-  printf "holder=%s recorded=%s\n" "$holder_pid" "$recorded_pid"
-' _ "$DISPATCH_LIB" "$MUTEX_OWNER_TMP" 2>&1)" \
-    && printf '%s\n' "$MUTEX_OWNER_OUT" | grep -Eq '^holder=([1-9][0-9]*) recorded=\1$'; then
-  echo "  PASS  metadata mutex candidate records its live outer holder through the parent-depth bridge"
+mkdir -p "$MUTEX_OWNER_TMP/tools"
+for runtime_command in basename chmod cut dirname grep ln mkdir mktemp mv ps rm rmdir sed shasum sleep stat tr uname; do
+  ln -s "$(command -v "$runtime_command")" "$MUTEX_OWNER_TMP/tools/$runtime_command"
+done
+mutex_resolver_failures=''
+for resolver in python3 python py; do
+  resolver_dir="$MUTEX_OWNER_TMP/$resolver"
+  mkdir -p "$resolver_dir"
+  if [ "$resolver" = py ]; then
+    cat >"$resolver_dir/$resolver" <<SH
+#!/bin/sh
+[ "\$1" = -3 ] || exit 97
+shift
+exec "$REAL_PYTHON" "\$@"
+SH
+  else
+    cat >"$resolver_dir/$resolver" <<SH
+#!/bin/sh
+exec "$REAL_PYTHON" "\$@"
+SH
+  fi
+  chmod +x "$resolver_dir/$resolver"
+  if MUTEX_OWNER_OUT="$("$MUTEX_OWNER_BASH" -c '
+    . "$1"
+    PATH="$2:$3"
+    unset _UBERDEV_PYTHON_EXE _UBERDEV_PYTHON_PREFIX
+    _uberdev_dispatch_resolve_python || exit 90
+    holder_pid="$BASHPID"
+    expected_pid="$holder_pid"
+    case "$(uname -s 2>/dev/null)" in
+      MINGW*|MSYS*|CYGWIN*)
+        expected_pid="$(_uberdev_semaphore_windows_native_pid "$holder_pid")" || exit 95
+        ;;
+    esac
+    scope="$(_uberdev_semaphore_prepare_scope "$4/state" resolver-repository git-worktree-metadata)" || exit 91
+    _uberdev_semaphore_mutex_acquire "$scope" || exit $?
+    recorded_pid="$(sed -n "1p" "$scope/.mutex/owner_pid")"
+    recorded_identity="$(sed -n "2p" "$scope/.mutex/owner_pid")"
+    [ "$recorded_pid" = "$expected_pid" ] || exit 92
+    _uberdev_semaphore_process_identity_matches "$recorded_pid" "$recorded_identity" || exit 93
+    _uberdev_semaphore_mutex_release "$scope" || exit $?
+    remaining=""
+    for path in "$scope/.mutex" "$scope"/.mutex-candidate.*; do
+      [ ! -e "$path" ] && [ ! -L "$path" ] || remaining="$remaining ${path##*/}"
+    done
+    [ -z "$remaining" ] || exit 94
+    printf "holder=%s expected=%s recorded=%s match=yes\n" "$holder_pid" "$expected_pid" "$recorded_pid"
+  ' _ "$DISPATCH_LIB" "$resolver_dir" "$MUTEX_OWNER_TMP/tools" "$resolver_dir" 2>&1)" \
+      && printf '%s\n' "$MUTEX_OWNER_OUT" | grep -Eq '^holder=[1-9][0-9]* expected=[1-9][0-9]* recorded=[1-9][0-9]* match=yes$'; then
+    :
+  else
+    mutex_resolver_failures="$mutex_resolver_failures $resolver=[$MUTEX_OWNER_OUT]"
+  fi
+done
+if [ -z "$mutex_resolver_failures" ]; then
+  echo "  PASS  python3, python, and py -3 acquire with narrowed PATH and record the live holder"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  metadata mutex candidate records a direct or short-lived owner: $MUTEX_OWNER_OUT"
+  echo "  FAIL  portable resolver mutex acquisition: $mutex_resolver_failures"
   FAIL=$((FAIL + 1))
 fi
 rm -rf "$MUTEX_OWNER_TMP"
+
+echo
+echo "== Concurrent worktree additions serialize through one portable metadata mutex =="
+MUTEX_CONCURRENT_TMP="$(mktemp -d)"
+mkdir -p "$MUTEX_CONCURRENT_TMP/bin" "$MUTEX_CONCURRENT_TMP/repo/.git" "$MUTEX_CONCURRENT_TMP/state"
+cat >"$MUTEX_CONCURRENT_TMP/bin/py" <<SH
+#!/bin/sh
+[ "\$1" = -3 ] || exit 97
+shift
+exec "$REAL_PYTHON" "\$@"
+SH
+cat >"$MUTEX_CONCURRENT_TMP/bin/git" <<'SH'
+#!/bin/sh
+if [ "$1" = -C ] && [ "$3" = rev-parse ] && [ "$4" = --git-common-dir ]; then
+  printf '.git\n'
+  exit 0
+fi
+if [ "$1" = worktree ] && [ "$2" = add ]; then
+  if ! mkdir "$MUTEX_TEST_GUARD" 2>/dev/null; then
+    printf 'overlap\n' >"$MUTEX_TEST_OVERLAP"
+    exit 96
+  fi
+  sleep 0.15
+  mkdir -p "$3"
+  rmdir "$MUTEX_TEST_GUARD"
+  exit 0
+fi
+exit 95
+SH
+chmod +x "$MUTEX_CONCURRENT_TMP/bin/py" "$MUTEX_CONCURRENT_TMP/bin/git"
+for runtime_command in basename chmod cut dirname grep ln mkdir mktemp mv ps rm rmdir sed shasum sleep stat tr uname; do
+  [ -e "$MUTEX_CONCURRENT_TMP/bin/$runtime_command" ] \
+    || ln -s "$(command -v "$runtime_command")" "$MUTEX_CONCURRENT_TMP/bin/$runtime_command"
+done
+for contender in one two; do
+  MUTEX_TEST_GUARD="$MUTEX_CONCURRENT_TMP/state/critical" \
+  MUTEX_TEST_OVERLAP="$MUTEX_CONCURRENT_TMP/state/overlap" \
+  "$MUTEX_OWNER_BASH" -c '
+    . "$1"
+    PATH="$2"
+    export PATH MUTEX_TEST_GUARD MUTEX_TEST_OVERLAP
+    unset _UBERDEV_PYTHON_EXE _UBERDEV_PYTHON_PREFIX
+    _uberdev_dispatch_resolve_python || exit 90
+    _uberdev_dispatch_git_worktree_add "$3" "$4" "$5" "$6"
+  ' _ "$DISPATCH_LIB" "$MUTEX_CONCURRENT_TMP/bin" "$MUTEX_CONCURRENT_TMP/repo" \
+    "$MUTEX_CONCURRENT_TMP/worktree-$contender" "branch-$contender" \
+    "$MUTEX_CONCURRENT_TMP/$contender.log" &
+  case "$contender" in
+    one) mutex_concurrent_one_pid=$! ;;
+    two) mutex_concurrent_two_pid=$! ;;
+  esac
+done
+wait "$mutex_concurrent_one_pid"; mutex_concurrent_one_rc=$?
+wait "$mutex_concurrent_two_pid"; mutex_concurrent_two_rc=$?
+mutex_concurrent_residue=''
+for residue in "$MUTEX_CONCURRENT_TMP/repo/.git/.uberdev-worktree-metadata-locks"/semaphore-v1/*.scope/.mutex \
+    "$MUTEX_CONCURRENT_TMP/repo/.git/.uberdev-worktree-metadata-locks"/semaphore-v1/*.scope/.mutex-candidate.*; do
+  [ ! -e "$residue" ] && [ ! -L "$residue" ] || mutex_concurrent_residue="$mutex_concurrent_residue ${residue##*/}"
+done
+if [ "$mutex_concurrent_one_rc" -eq 0 ] && [ "$mutex_concurrent_two_rc" -eq 0 ] \
+    && [ -d "$MUTEX_CONCURRENT_TMP/worktree-one" ] \
+    && [ -d "$MUTEX_CONCURRENT_TMP/worktree-two" ] \
+    && [ ! -e "$MUTEX_CONCURRENT_TMP/state/overlap" ] \
+    && [ -z "$mutex_concurrent_residue" ]; then
+  echo "  PASS  two worktree additions serialize and leave no mutex candidate residue"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  concurrent metadata critical sections overlapped or leaked state"
+  echo "        one=$mutex_concurrent_one_rc two=$mutex_concurrent_two_rc overlap=$(test -e "$MUTEX_CONCURRENT_TMP/state/overlap" && printf yes || printf no) residue=$mutex_concurrent_residue"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$MUTEX_CONCURRENT_TMP"
 
 echo
 echo "== Git metadata mutex rejects polluted candidate token output before publication =="
@@ -388,12 +495,10 @@ MUTEX_POLLUTION_TMP="$(mktemp -d)"
 if MUTEX_POLLUTION_OUT="$("$MUTEX_OWNER_BASH" -c '
   . "$1"
   scope="$(_uberdev_semaphore_prepare_scope "$2/state" polluted-repository git-worktree-metadata)" || exit 1
-  _uberdev_semaphore_write_process_identity() {
-    mode="$1"; destination="$2"
-    [ "$mode" = parent ] || return 91
-    printf "%s\n%s|%s|%s|%064d\n" \
-      "$BASHPID" "$BASHPID" "$BASHPID" "$BASHPID" 0 >"$destination" || return 92
-    printf "noise\n"
+  _uberdev_semaphore_mutex_prepare_candidate() {
+    candidate="$1"
+    printf "%032d\nnoise\n" 0
+    printf "%032d\n" 0 >>"$candidate"
   }
   _uberdev_semaphore_mutex_acquire "$scope"
   acquire_rc=$?
@@ -415,6 +520,35 @@ else
   FAIL=$((FAIL + 1))
 fi
 rm -rf "$MUTEX_POLLUTION_TMP"
+
+echo
+echo "== Git metadata mutex preserves a bounded owner-capture diagnostic before cleanup =="
+MUTEX_DIAGNOSTIC_TMP="$(mktemp -d)"
+MUTEX_DIAGNOSTIC_OUT="$("$MUTEX_OWNER_BASH" -c '
+  . "$1"
+  scope="$(_uberdev_semaphore_prepare_scope "$2/state" diagnostic-repository git-worktree-metadata)" || exit 1
+  _uberdev_semaphore_bash_executable() { return 2; }
+  _uberdev_semaphore_mutex_acquire "$scope"
+  acquire_rc=$?
+  remaining=""
+  for path in "$scope/.mutex" "$scope"/.mutex-candidate.*; do
+    [ ! -e "$path" ] && [ ! -L "$path" ] || remaining="$remaining ${path##*/}"
+  done
+  printf "rc=%s\nremaining=%s\n" "$acquire_rc" "$remaining"
+' _ "$DISPATCH_LIB" "$MUTEX_DIAGNOSTIC_TMP" 2>&1)"
+if printf '%s\n' "$MUTEX_DIAGNOSTIC_OUT" \
+      | grep -Fxq '{"error":"mutex_owner_shell_pid_unavailable","status":"error"}' \
+    && printf '%s\n' "$MUTEX_DIAGNOSTIC_OUT" | grep -Fxq 'uberdev semaphore: cannot record mutex owner' \
+    && printf '%s\n' "$MUTEX_DIAGNOSTIC_OUT" | grep -Fxq 'rc=2' \
+    && printf '%s\n' "$MUTEX_DIAGNOSTIC_OUT" | grep -Fxq 'remaining=' \
+    && ! printf '%s\n' "$MUTEX_DIAGNOSTIC_OUT" | grep -Fq 'Traceback'; then
+  echo "  PASS  owner-capture failure preserves bounded JSON evidence and cleans its candidate"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  owner-capture failure lost diagnostics, leaked state, or exposed a traceback: $MUTEX_DIAGNOSTIC_OUT"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$MUTEX_DIAGNOSTIC_TMP"
 
 windows_detach_count="$(grep -Fc 'subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS' "$DISPATCH_LIB")"
 posix_setsid_count="$(grep -Fc 'os.setsid()' "$DISPATCH_LIB")"

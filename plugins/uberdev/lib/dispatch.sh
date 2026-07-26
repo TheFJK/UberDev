@@ -122,6 +122,12 @@ _uberdev_dispatch_python() {
   fi
 }
 
+# live-semaphore.sh also serves standalone callers. Inside dispatch, route every
+# semaphore Python operation through the already-validated executable argv.
+_uberdev_semaphore_python() {
+  _uberdev_dispatch_python "$@"
+}
+
 # Convert one absolute shell path only when it crosses from Git Bash into a
 # native Windows consumer. Keep all other pane argv in POSIX spelling: the
 # spawned Git Bash owns those arguments and understands them directly.
