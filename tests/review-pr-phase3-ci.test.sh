@@ -237,6 +237,103 @@ if [ "$CLASSIFY_WITH_PREFIX" = $'CLASSIFIED\tflaky\tgh-run-123:42\t-' ]; then
 else
   echo "  FAIL  S10.11a — controller rejected final fenced classifier output: $CLASSIFY_WITH_PREFIX"; FAIL=$((FAIL + 1))
 fi
+write_classifier_case REFUSED null null "'can''t reproduce runner failure'"
+CLASSIFY_SINGLE_QUOTED="$(bash -c '. "$1"; review_validate_ci_classification "$2" "$3"' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT")"
+if [ "$CLASSIFY_SINGLE_QUOTED" = $'REFUSED\t-\t-\tcan\'t reproduce runner failure' ]; then
+  echo "  PASS  S10.11b — YAML doubled apostrophe decodes exactly in a single-quoted scalar"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.11b — YAML single-quoted scalar was corrupted: $CLASSIFY_SINGLE_QUOTED"; FAIL=$((FAIL + 1))
+fi
+write_classifier_case CLASSIFIED code_bug "'tests/review-pr-phase3-ci.test.sh:42'" "'repository test failure'"
+CLASSIFY_SINGLE_QUOTED_ANCHOR="$(bash -c '. "$1"; review_validate_ci_classification "$2" "$3"' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT")"
+if [ "$CLASSIFY_SINGLE_QUOTED_ANCHOR" = $'CLASSIFIED\tcode_bug\ttests/review-pr-phase3-ci.test.sh:42\t-' ]; then
+  echo "  PASS  S10.11b-anchor — YAML single-quoted signal anchor decodes exactly"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.11b-anchor — YAML single-quoted signal anchor was corrupted: $CLASSIFY_SINGLE_QUOTED_ANCHOR"; FAIL=$((FAIL + 1))
+fi
+CLASSIFY_SINGLE_QUOTE_INVALID=0
+for malformed_rationale in "'unterminated" "'can't reproduce runner failure'"; do
+  write_classifier_case REFUSED null null "$malformed_rationale"
+  if bash -c '. "$1"; review_validate_ci_classification "$2" "$3" >/dev/null' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT"; then
+    CLASSIFY_SINGLE_QUOTE_INVALID=$((CLASSIFY_SINGLE_QUOTE_INVALID + 1))
+  fi
+done
+if [ "$CLASSIFY_SINGLE_QUOTE_INVALID" -eq 0 ]; then
+  echo "  PASS  S10.11c — unterminated and unpaired YAML single quotes fail closed"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.11c — $CLASSIFY_SINGLE_QUOTE_INVALID malformed YAML single-quoted scalars were accepted"; FAIL=$((FAIL + 1))
+fi
+CLASSIFY_CONTROL_INVALID=0
+for scalar_style in json single; do
+  for control_code in 0 1 31 127; do
+    python3 -I -B - "$CLASSIFY_CASE" "$scalar_style" "$control_code" <<'PY'
+import json,pathlib,sys
+path,style,code=sys.argv[1:]
+value='bounded'+chr(int(code))+'rationale'
+encoded=json.dumps(value) if style=='json' else "'"+value.replace("'","''")+"'"
+pathlib.Path(path).write_text(
+    '```yaml\nstatus: REFUSED\nfailure_class: null\nsignal_anchor: null\n'
+    f'rationale: {encoded}\nrisks: []\n```\n', encoding='utf-8')
+PY
+    if bash -c '. "$1"; review_validate_ci_classification "$2" "$3" >/dev/null' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT"; then
+      CLASSIFY_CONTROL_INVALID=$((CLASSIFY_CONTROL_INVALID + 1))
+    fi
+  done
+done
+if [ "$CLASSIFY_CONTROL_INVALID" -eq 0 ]; then
+  echo "  PASS  S10.11d — decoded JSON and single-quoted C0/DEL controls fail closed"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.11d — $CLASSIFY_CONTROL_INVALID decoded control scalars were accepted"; FAIL=$((FAIL + 1))
+fi
+
+python3 -I -B - "$CLASSIFY_CASE" 256 <<'PY'
+import json,pathlib,sys
+path,size=sys.argv[1],int(sys.argv[2])
+pathlib.Path(path).write_text(
+    '```yaml\nstatus: REFUSED\nfailure_class: null\nsignal_anchor: null\n'
+    f'rationale: {json.dumps("x"*size)}\nrisks: []\n```\n', encoding='utf-8')
+PY
+if bash -c '. "$1"; review_validate_ci_classification "$2" "$3" >/dev/null' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT"; then
+  echo "  PASS  S10.11e — exact 256-character scalar is accepted"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.11e — exact 256-character scalar was rejected"; FAIL=$((FAIL + 1))
+fi
+python3 -I -B - "$CLASSIFY_CASE" 257 <<'PY'
+import json,pathlib,sys
+path,size=sys.argv[1],int(sys.argv[2])
+pathlib.Path(path).write_text(
+    '```yaml\nstatus: REFUSED\nfailure_class: null\nsignal_anchor: null\n'
+    f'rationale: {json.dumps("x"*size)}\nrisks: []\n```\n', encoding='utf-8')
+PY
+if bash -c '. "$1"; review_validate_ci_classification "$2" "$3" >/dev/null' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT"; then
+  echo "  FAIL  S10.11f — 257-character scalar was accepted"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S10.11f — 257-character scalar is rejected"; PASS=$((PASS + 1))
+fi
+
+CLASSIFY_DOCUMENT_INVALID=0
+for document_size in 65536 65537; do
+  python3 -I -B - "$CLASSIFY_CASE" "$document_size" <<'PY'
+import pathlib,sys
+path,size=sys.argv[1],int(sys.argv[2])
+document=('```yaml\nstatus: REFUSED\nfailure_class: null\nsignal_anchor: null\n'
+          'rationale: bounded\nrisks: []\n```\n')
+prefix='x'*(size-len(document)-1)+'\n'
+raw=(prefix+document).encode()
+assert len(raw)==size
+pathlib.Path(path).write_bytes(raw)
+PY
+  if bash -c '. "$1"; review_validate_ci_classification "$2" "$3" >/dev/null' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT"; then
+    [ "$document_size" -eq 65536 ] || CLASSIFY_DOCUMENT_INVALID=$((CLASSIFY_DOCUMENT_INVALID + 1))
+  else
+    [ "$document_size" -eq 65537 ] || CLASSIFY_DOCUMENT_INVALID=$((CLASSIFY_DOCUMENT_INVALID + 1))
+  fi
+done
+if [ "$CLASSIFY_DOCUMENT_INVALID" -eq 0 ]; then
+  echo "  PASS  S10.11g — 65536-byte document is accepted and 65537 bytes is rejected"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.11g — classifier document byte boundary drifted"; FAIL=$((FAIL + 1))
+fi
 CLASSIFY_INVALID=0
 for invalid_anchor in ':121' 'file:0' '/absolute:1' '../README.md:1' 'missing.ts:1' ''; do
   write_classifier_case CLASSIFIED code_bug "\"$invalid_anchor\"" '"invalid anchor fixture"'

@@ -140,31 +140,119 @@ if [ -d "$ROOT/codex" ]; then
   ok "shape: codex required-file presence + prkit-prefixed skills checked"
 fi
 
-# --- 7b. Review contract integrity: the six routed edges share one manifest
-# contract, changed_paths is repository-relative metadata, both runtimes ship
-# byte-identical schema, and native Codex roles do not promote edge contracts. ---
+# --- 7b. Standalone review-policy integrity: strict JSON, review-only closure,
+# shipped provider roles/workflows/contracts, deterministic serialization, and
+# byte equality across Claude/Codex. Native Codex roles stay edge-local. ---
 if python3 -I -B - "$ROOT" <<'PY'
 import json,pathlib,sys
 root=pathlib.Path(sys.argv[1])
-review_edges={
-    'review_pr.review.correctness','review_pr.review.silent_failures',
-    'review_pr.review.types','review_pr.review.comments',
-    'review_pr.review.tests','review_pr.review.general',
+expected_roles={
+    'ci-code-fixer','ci-failure-classifier','ci-rebase-handler','code-fixer',
+    'code-reviewer','code-simplifier','comment-analyzer','conflict-resolver',
+    'findings-to-issues','merge-strategy-decider','pr-test-analyzer',
+    'silent-failure-hunter','trust-trail-evaluator','type-design-analyzer',
 }
+allowed_workflows={'review-pr','simplify'}
 contract_rel='shared/phase1-reviewer-output-v1.md'
+review_contract='phase1-reviewer-v1'
+edge_semantics={
+    'review_pr.post_impl_review':('skill',None,None,None),
+    'review_pr.review.correctness':('provider','code-reviewer',('review-pr',),review_contract),
+    'review_pr.review.silent_failures':('provider','silent-failure-hunter',('review-pr',),review_contract),
+    'review_pr.review.types':('provider','type-design-analyzer',('review-pr',),review_contract),
+    'review_pr.review.comments':('provider','comment-analyzer',('review-pr',),review_contract),
+    'review_pr.review.tests':('provider','pr-test-analyzer',('review-pr',),review_contract),
+    'review_pr.review.general':('provider','code-reviewer',('review-pr',),review_contract),
+    'review_pr.fix.phase1':('provider','code-fixer',('review-pr',),None),
+    'review_pr.simplify.reuse':('provider','code-simplifier',('review-pr','simplify'),None),
+    'review_pr.simplify.quality':('provider','code-simplifier',('review-pr','simplify'),None),
+    'review_pr.simplify.efficiency':('provider','code-simplifier',('review-pr','simplify'),None),
+    'review_pr.fix.phase2':('provider','code-fixer',('review-pr','simplify'),None),
+    'review_pr.defer.findings':('provider','findings-to-issues',('review-pr','simplify'),None),
+    'review_pr.ci.classify':('provider','ci-failure-classifier',('review-pr',),None),
+    'review_pr.ci.fix_code':('provider','ci-code-fixer',('review-pr',),None),
+    'review_pr.ci.rebase':('provider','ci-rebase-handler',('review-pr',),None),
+    'review_pr.ci.defer_refusal':('provider','findings-to-issues',('review-pr',),None),
+    'review_pr.ci.resolve_conflict':('provider','conflict-resolver',('review-pr',),None),
+}
+expected_edges=set(edge_semantics)
+
+claude_roles={path.stem for path in (root/'plugins/prkit/agents').glob('*.md')}
+codex_roles={
+    path.name.removeprefix('prkit-').removesuffix('.toml')
+    for path in (root/'codex/agents').glob('prkit-*.toml')
+}
+assert claude_roles==expected_roles, ('claude role fleet',sorted(claude_roles))
+assert codex_roles==expected_roles, ('codex role fleet',sorted(codex_roles))
+assert claude_roles==codex_roles
+shipped_roles=claude_roles
+
+def reject_pairs(pairs):
+    result={}
+    for key,value in pairs:
+        if key in result: raise ValueError(f'duplicate JSON key: {key}')
+        result[key]=value
+    return result
+
+def reject_constant(value):
+    raise ValueError(f'non-finite JSON constant: {value}')
+
+def strict_load(raw):
+    return json.loads(
+        raw.decode('utf-8'),
+        object_pairs_hook=reject_pairs,
+        parse_constant=reject_constant,
+    )
+
 def validate(plugin):
-    tree=json.loads((plugin/'policy/solve-run-tree-v1.json').read_text())
-    assert tree.get('output_contracts')=={'phase1-reviewer-v1':contract_rel}
-    for edge in review_edges:
-        row=tree['edges'][edge]
+    policy=plugin/'policy/solve-run-tree-v1.json'
+    raw=policy.read_bytes()
+    tree=strict_load(raw)
+    canonical=(json.dumps(tree,sort_keys=True,allow_nan=False,indent=2)+'\n').encode()
+    assert raw==canonical, f'non-deterministic policy serialization: {policy}'
+    assert set(tree)=={'schema_version','tree_id','root_edge_id','output_contracts','edges'}
+    assert tree.get('schema_version')==1
+    assert tree.get('tree_id')=='review-pr-run-tree-v1'
+    assert tree.get('root_edge_id')=='review_pr.post_impl_review'
+    edges=tree.get('edges')
+    assert isinstance(edges,dict) and edges
+    assert set(edges)==expected_edges
+    referenced_contracts=set()
+    for edge_id,edge in edges.items():
+        assert isinstance(edge,dict), edge_id
+        expected_kind,expected_role,expected_workflows,expected_contract=edge_semantics[edge_id]
+        assert edge.get('kind')==expected_kind, edge_id
+        assert edge.get('role')==expected_role, edge_id
+        workflows=edge.get('allowed_workflows')
+        assert (tuple(workflows) if isinstance(workflows,list) else workflows)==expected_workflows, edge_id
+        assert edge.get('output_contract')==expected_contract, edge_id
+        assert expected_contract is not None or 'output_contract' not in edge, edge_id
+        if expected_kind=='provider':
+            assert expected_role in shipped_roles and expected_workflows, edge_id
+            assert all(workflow in allowed_workflows for workflow in expected_workflows), edge_id
+        if expected_contract is not None:
+            contract_id=expected_contract
+            assert isinstance(contract_id,str) and contract_id
+            referenced_contracts.add(contract_id)
+    contracts=tree.get('output_contracts')
+    assert isinstance(contracts,dict)
+    assert set(contracts)==referenced_contracts
+    for contract_id,contract_path in contracts.items():
+        assert isinstance(contract_id,str) and contract_id
+        assert isinstance(contract_path,str) and contract_path
+        assert (plugin/contract_path).is_file(), contract_path
+    assert contracts=={'phase1-reviewer-v1':contract_rel}
+    for edge in (edge_id for edge_id,semantics in edge_semantics.items() if semantics[3]==review_contract):
+        row=edges[edge]
         assert row.get('output_contract')=='phase1-reviewer-v1'
         assert row['required_inputs'].get('changed_paths')=='repo_path_array'
-    return (plugin/contract_rel).read_text()
-claude=validate(root/'plugins/prkit')
+    return raw,(plugin/contract_rel).read_text()
+claude_policy,claude_contract=validate(root/'plugins/prkit')
 codex_plugin=root/'codex/prkit-codex'
 if codex_plugin.is_dir():
-    codex=validate(codex_plugin)
-    assert codex==claude
+    codex_policy,codex_contract=validate(codex_plugin)
+    assert codex_policy==claude_policy
+    assert codex_contract==claude_contract
     try:
         import tomllib
     except ModuleNotFoundError:
@@ -172,10 +260,10 @@ if codex_plugin.is_dir():
     if tomllib is not None:
         for role in ('code-reviewer','silent-failure-hunter','type-design-analyzer','comment-analyzer','pr-test-analyzer'):
             data=tomllib.loads((root/f'codex/agents/prkit-{role}.toml').read_text())
-            assert codex not in data['developer_instructions'], role
+            assert codex_contract not in data['developer_instructions'], role
 PY
-then ok "review-contract: routed manifests agree and native roles stay edge-local"
-else fail "review-contract: manifest/schema/native role scoping drift"; fi
+then ok "review-policy: strict deterministic closure, shipped roles/workflows/contracts, runtime parity"
+else fail "review-policy: projection, strict JSON, runtime parity, or contract scoping drift"; fi
 
 # --- 8. Root scaffold files (outside the SCAN roots) — present, non-empty, valid ---
 for req in README.md LICENSE NOTICE CHANGELOG.md .gitignore \

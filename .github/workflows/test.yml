@@ -298,13 +298,15 @@ jobs:
         #   - prkit-verify.test.sh
         #   - prkit-generate.test.sh
 #   - review-pr-phase3-ci.test.sh
-#   - review-child-handoff.test.sh
 #   - lib-assert-count.test.sh
 #   - codex-port.test.sh                  (python3 -c + mktemp -d path-translation
 #                                         issue on Git Bash, same as uberscan/
 #                                         uberthink; also calls rsync which isn't
 #                                         on windows-latest's Git Bash)
 # === END ci-wiring windows-skip-list ===
+        # review-child-handoff uses a bounded native-Windows mode for carrier
+        # serialization, parent derivation, and lexical tamper rejection; its
+        # full Unix race fixture remains in shape-checks above.
         run: |
           bash tests/ci-wiring.test.sh && \
           bash tests/turbo-flow.test.sh && \
@@ -342,6 +344,7 @@ jobs:
           bash tests/dispatch-background.test.sh && \
           bash tests/dispatch-codex.test.sh && \
           bash tests/child-dispatch-receipts.test.sh && \
+          bash tests/review-child-handoff.test.sh --windows-path-only && \
           bash tests/dispatch-wezterm.test.sh && \
           bash tests/ubersimplify.test.sh && \
           bash tests/ubersimplify-aggregate.test.sh && \

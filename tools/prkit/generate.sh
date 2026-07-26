@@ -64,16 +64,6 @@ while IFS= read -r rel; do
 done < "$MANIFEST"
 [ "$copied" -eq "$expected" ] || { echo "generate: copied $copied of $expected manifest files" >&2; exit 1; }
 
-# --- 4. Rewrite every copied file. The one JSON data file (model-routing-v1.json)
-# has no uberdev token, so perl -0pi is a byte-preserving no-op on it; every copied
-# file is text, so nothing is skipped. rw_rc surfaces a perl failure. ---
-rw_rc=0
-while IFS= read -r -d '' f; do
-  prkit_neutralize "$f" || { echo "generate: neutralize failed: $f" >&2; rw_rc=1; }
-  prkit_apply_rewrites "$f" || { echo "generate: rewrite failed: $f" >&2; rw_rc=1; }
-done < <(find "$P" -type f -print0)
-[ "$rw_rc" -eq 0 ] || { echo "generate: rewrite pass had failures" >&2; exit 1; }
-
 # --- 5. Scaffold standalone-only files from templates ---
 # render fails loudly: a missing template or a sed error must not silently ship a
 # zero-byte scaffold (a bare `> out` redirect truncates out before sed runs, and
@@ -86,6 +76,205 @@ render(){
     || { echo "generate: render produced empty/failed output: $tmpl" >&2; rm -f "$tmp"; exit 1; }
   mv "$tmp" "$out"
 }
+
+# Project the canonical UberDev run tree down to the review-only closure shipped
+# by standalone prkit. Parse and publish fail closed: duplicate keys and Python's
+# otherwise-accepted NaN/Infinity constants are rejected, and the exact
+# deterministic bytes are reparsed before the atomic replace.
+project_review_policy(){
+  local policy="$1" roles_dir="$2" role_prefix="$3" role_suffix="$4"
+  python3 -I -B - "$policy" "$roles_dir" "$role_prefix" "$role_suffix" <<'PY' || return 1
+import json
+import os
+import pathlib
+import stat
+import sys
+import tempfile
+
+policy = pathlib.Path(sys.argv[1])
+roles_dir = pathlib.Path(sys.argv[2])
+role_prefix = sys.argv[3]
+role_suffix = sys.argv[4]
+expected_roles = {
+    'ci-code-fixer', 'ci-failure-classifier', 'ci-rebase-handler',
+    'code-fixer', 'code-reviewer', 'code-simplifier', 'comment-analyzer',
+    'conflict-resolver', 'findings-to-issues', 'merge-strategy-decider',
+    'pr-test-analyzer', 'silent-failure-hunter', 'trust-trail-evaluator',
+    'type-design-analyzer',
+}
+allowed_workflows = ('review-pr', 'simplify')
+review_contract = 'phase1-reviewer-v1'
+edge_semantics = {
+    'review_pr.post_impl_review': ('skill', None, None, None),
+    'review_pr.review.correctness': ('provider', 'code-reviewer', ('review-pr',), review_contract),
+    'review_pr.review.silent_failures': ('provider', 'silent-failure-hunter', ('review-pr',), review_contract),
+    'review_pr.review.types': ('provider', 'type-design-analyzer', ('review-pr',), review_contract),
+    'review_pr.review.comments': ('provider', 'comment-analyzer', ('review-pr',), review_contract),
+    'review_pr.review.tests': ('provider', 'pr-test-analyzer', ('review-pr',), review_contract),
+    'review_pr.review.general': ('provider', 'code-reviewer', ('review-pr',), review_contract),
+    'review_pr.fix.phase1': ('provider', 'code-fixer', ('review-pr',), None),
+    'review_pr.simplify.reuse': ('provider', 'code-simplifier', ('review-pr', 'simplify'), None),
+    'review_pr.simplify.quality': ('provider', 'code-simplifier', ('review-pr', 'simplify'), None),
+    'review_pr.simplify.efficiency': ('provider', 'code-simplifier', ('review-pr', 'simplify'), None),
+    'review_pr.fix.phase2': ('provider', 'code-fixer', ('review-pr', 'simplify'), None),
+    'review_pr.defer.findings': ('provider', 'findings-to-issues', ('review-pr', 'simplify'), None),
+    'review_pr.ci.classify': ('provider', 'ci-failure-classifier', ('review-pr',), None),
+    'review_pr.ci.fix_code': ('provider', 'ci-code-fixer', ('review-pr',), None),
+    'review_pr.ci.rebase': ('provider', 'ci-rebase-handler', ('review-pr',), None),
+    'review_pr.ci.defer_refusal': ('provider', 'findings-to-issues', ('review-pr',), None),
+    'review_pr.ci.resolve_conflict': ('provider', 'conflict-resolver', ('review-pr',), None),
+}
+expected_edges = set(edge_semantics)
+
+def reject_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f'duplicate JSON key: {key}')
+        result[key] = value
+    return result
+
+def reject_constant(value):
+    raise ValueError(f'non-finite JSON constant: {value}')
+
+def strict_load(text):
+    return json.loads(
+        text,
+        object_pairs_hook=reject_pairs,
+        parse_constant=reject_constant,
+    )
+
+try:
+    source = strict_load(policy.read_text(encoding='utf-8'))
+    schema_version = source['schema_version']
+    source_edges = source['edges']
+    source_contracts = source['output_contracts']
+except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+    raise SystemExit(f'policy source parse failed: {exc}')
+if not isinstance(source_edges, dict) or not isinstance(source_contracts, dict):
+    raise SystemExit('policy source edges/output_contracts must be objects')
+if schema_version != 1:
+    raise SystemExit(f'unsupported policy schema_version: {schema_version!r}')
+try:
+    shipped_roles = {
+        entry.name[len(role_prefix):-len(role_suffix)]
+        for entry in roles_dir.iterdir()
+        if entry.is_file()
+        and entry.name.startswith(role_prefix)
+        and entry.name.endswith(role_suffix)
+    }
+except OSError as exc:
+    raise SystemExit(f'policy shipped-role discovery failed: {exc}')
+if shipped_roles != expected_roles:
+    raise SystemExit(f'policy shipped-role set mismatch: {sorted(shipped_roles)}')
+
+selected_edge_ids = {
+    edge_id for edge_id in source_edges
+    if isinstance(edge_id, str) and edge_id.startswith('review_pr.')
+}
+if selected_edge_ids != expected_edges:
+    raise SystemExit(
+        'policy review edge grammar mismatch: '
+        f'missing={sorted(expected_edges - selected_edge_ids)} '
+        f'unexpected={sorted(selected_edge_ids - expected_edges)}'
+    )
+
+edges = {}
+for edge_id in sorted(expected_edges):
+    original = source_edges[edge_id]
+    if not isinstance(original, dict):
+        raise SystemExit(f'policy edge must be an object: {edge_id}')
+    edge = dict(original)
+    expected_kind, expected_role, expected_workflows, expected_contract = edge_semantics[edge_id]
+    if edge.get('kind') != expected_kind:
+        raise SystemExit(f'policy edge kind mismatch: {edge_id}')
+    if expected_kind == 'provider':
+        role = edge.get('role')
+        if role != expected_role or role not in shipped_roles:
+            raise SystemExit(f'policy edge role mismatch: {edge_id}')
+        workflows = edge['allowed_workflows']
+        if not isinstance(workflows, list) or not all(isinstance(item, str) for item in workflows):
+            raise SystemExit(f'policy edge workflows must be a string array: {edge_id}')
+        edge['allowed_workflows'] = [
+            workflow for workflow in allowed_workflows if workflow in workflows
+        ]
+        if tuple(edge['allowed_workflows']) != expected_workflows:
+            raise SystemExit(f'policy edge workflow mismatch: {edge_id}')
+    elif edge.get('role') is not None or edge.get('allowed_workflows') is not None:
+        raise SystemExit(f'policy structural edge semantics mismatch: {edge_id}')
+    actual_contract = edge.get('output_contract')
+    if actual_contract != expected_contract or (expected_contract is None and 'output_contract' in edge):
+        raise SystemExit(f'policy edge output contract mismatch: {edge_id}')
+    edges[edge_id] = edge
+
+contract_ids = {
+    edge['output_contract']
+    for edge in edges.values()
+    if 'output_contract' in edge
+}
+if not all(isinstance(contract_id, str) for contract_id in contract_ids):
+    raise SystemExit('policy output_contract references must be strings')
+missing_contracts = contract_ids.difference(source_contracts)
+if missing_contracts:
+    raise SystemExit(f'policy projection references missing contracts: {sorted(missing_contracts)}')
+
+projected = {
+    'schema_version': schema_version,
+    'tree_id': 'review-pr-run-tree-v1',
+    'root_edge_id': 'review_pr.post_impl_review',
+    'output_contracts': {
+        contract_id: source_contracts[contract_id]
+        for contract_id in sorted(contract_ids)
+    },
+    'edges': edges,
+}
+try:
+    serialized = (json.dumps(
+        projected,
+        sort_keys=True,
+        allow_nan=False,
+        indent=2,
+    ) + '\n').encode('utf-8')
+    reparsed = strict_load(serialized.decode('utf-8'))
+except (TypeError, ValueError, json.JSONDecodeError) as exc:
+    raise SystemExit(f'policy projection serialization failed: {exc}')
+if reparsed != projected:
+    raise SystemExit('policy projection changed during deterministic reparse')
+
+temporary = None
+try:
+    mode = stat.S_IMODE(policy.stat().st_mode)
+    fd, temporary = tempfile.mkstemp(prefix='.solve-run-tree.', dir=policy.parent)
+    with os.fdopen(fd, 'wb') as stream:
+        stream.write(serialized)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.chmod(temporary, mode)
+    if os.environ.get('PRKIT_GENERATOR_TEST_MODE') == '1' and os.environ.get('PRKIT_TEST_POLICY_PUBLISH_FAIL') == '1':
+        raise OSError('injected policy publication failure')
+    os.replace(temporary, policy)
+except OSError as exc:
+    if temporary is not None:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+    raise SystemExit(f'policy projection publish failed: {exc}')
+PY
+}
+
+# --- 4. Project the copied canonical policy, then rewrite every copied file.
+# JSON policy files contain no uberdev token, so perl is a byte-preserving
+# no-op on them; every copied file is text. ---
+project_review_policy "$P/policy/solve-run-tree-v1.json" "$P/agents" "" ".md" \
+  || { echo "generate: Claude policy projection failed" >&2; exit 1; }
+rw_rc=0
+while IFS= read -r -d '' f; do
+  prkit_neutralize "$f" || { echo "generate: neutralize failed: $f" >&2; rw_rc=1; }
+  prkit_apply_rewrites "$f" || { echo "generate: rewrite failed: $f" >&2; rw_rc=1; }
+done < <(find "$P" -type f -print0)
+[ "$rw_rc" -eq 0 ] || { echo "generate: rewrite pass had failures" >&2; exit 1; }
+
 mkdir -p "$P/.claude-plugin" "$TARGET/.claude-plugin" "$TARGET/.github/workflows"
 render "$TEMPLATES/plugin.json.tmpl"       "$P/.claude-plugin/plugin.json"
 render "$TEMPLATES/marketplace.json.tmpl"  "$TARGET/.claude-plugin/marketplace.json"
@@ -124,6 +313,9 @@ if [ -r "$MANIFEST_CODEX" ] && [ -d "$REPO_ROOT/codex" ]; then
     cx_copied=$((cx_copied+1))
   done < "$MANIFEST_CODEX"
   [ "$cx_copied" -eq "$cx_expected" ] || { echo "generate: codex copied $cx_copied of $cx_expected files" >&2; exit 1; }
+  project_review_policy "$TARGET/codex/prkit-codex/policy/solve-run-tree-v1.json" \
+    "$TARGET/codex/agents" "prkit-" ".toml" \
+    || { echo "generate: Codex policy projection failed" >&2; exit 1; }
   # Rewrite content of every copied codex file (neutralize out-of-set, then blanket).
   while IFS= read -r -d '' f; do
     prkit_neutralize "$f" || { echo "generate: codex neutralize failed: $f" >&2; rw_rc=1; }
@@ -139,7 +331,8 @@ if [ -r "$MANIFEST_CODEX" ] && [ -d "$REPO_ROOT/codex" ]; then
       s{skills/post-impl-review}{skills/prkit-post-impl-review}g;
       s{skills/merge-pipeline}{skills/prkit-merge-pipeline}g;
     ' "$f" || { echo "generate: codex skill-prefix rewrite failed: $f" >&2; exit 1; }
-  done < <(find "$TARGET/codex" -type f -print0)
+  done < <(find "$TARGET/codex" -type f \
+    ! -path "$TARGET/codex/prkit-codex/policy/solve-run-tree-v1.json" -print0)
   # install-codex.sh is shared SSOT with full UberDev, whose comments and
   # verification hints describe the full fleet. The standalone extraction has
   # a deliberately smaller manifest (5 skills / 14 agents); rewrite those

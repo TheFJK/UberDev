@@ -8,6 +8,18 @@ POST="$ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
 . "$LIB"
+
+if [ "${1:-}" = --windows-path-only ]; then
+  windows_context='C:\repo\.uberdev\runs\review-1\state\context.json'
+  windows_carrier="$(python3 -I -B -c 'import json,sys; print(json.dumps({"context_file":sys.argv[1]}),end="")' "$windows_context")"
+  serialized_context="$(_uberdev_agent_json_get "$windows_carrier" context_file)"
+  [ "$serialized_context" = "$windows_context" ]
+  [ "$(_uberdev_child_context_run_dir "$serialized_context")" = 'C:\repo\.uberdev\runs\review-1' ]
+  ! _uberdev_child_context_run_dir 'C:\repo\.uberdev\runs\review-1\state\..\context.json' >/dev/null 2>&1
+  echo 'review-child-handoff windows path: PASS'
+  exit 0
+fi
+
 mkdir -p "$TMP/run"
 TEST_REPO="$TMP/repo"; mkdir -p "$TEST_REPO"; TEST_REPO="$(cd "$TEST_REPO" && pwd -P)"
 git -C "$TEST_REPO" init -q
@@ -47,6 +59,330 @@ simplify_context_out="$(uberdev_agent_context_create "$TMP/simplify-run" "$simpl
   "$simplify_metadata" '2026-07-10T00:00:00Z')"
 simplify_ctx="$(jq -r .context_file <<<"$simplify_context_out")"; simplify_sha="$(jq -r .context_sha256 <<<"$simplify_context_out")"
 SIMPLIFY_CARRIER_JSON="$(jq -cn --arg ctx "$simplify_ctx" --arg sha "$simplify_sha" '{schema_version:1,run_id:"simplify-contract",workflow:"simplify",issue_num:0,context_file:$ctx,context_sha256:$sha}')"
+
+# Native Windows Python has neither getuid/geteuid nor descriptor-relative
+# filesystem operations. Exercise the real carrier -> handoff -> prepare path
+# through that capability profile, including replacement/tamper rejection.
+(
+  REAL_PORTABLE_PYTHON="$(command -v python3)"
+  python3() {
+    if [ "${1:-}" = -I ] && [ "${2:-}" = -B ] && [ "${3:-}" = - ]; then
+      shift 3
+      command "$REAL_PORTABLE_PYTHON" -I -B -c '
+import builtins,errno,os,runpy,stat,sys,tempfile
+source=sys.stdin.read()
+if hasattr(os,"geteuid"): del os.geteuid
+if hasattr(os,"getuid"): del os.getuid
+if hasattr(stat,"FILE_ATTRIBUTE_REPARSE_POINT"): del stat.FILE_ATTRIBUTE_REPARSE_POINT
+os.supports_dir_fd=set()
+real_open=os.open
+real_read=os.read
+real_lstat=os.lstat
+real_fsync=os.fsync
+real_unlink=os.unlink
+swap_path=os.environ.get("UBERDEV_TEST_PORTABLE_SWAP_PATH")
+swap_with=os.environ.get("UBERDEV_TEST_PORTABLE_SWAP_WITH")
+swap_after_read_path=os.environ.get("UBERDEV_TEST_PORTABLE_SWAP_AFTER_READ_PATH")
+swap_after_read_with=os.environ.get("UBERDEV_TEST_PORTABLE_SWAP_AFTER_READ_WITH")
+replace_created_name=os.environ.get("UBERDEV_TEST_PORTABLE_REPLACE_CREATED_NAME")
+reparse_path=os.environ.get("UBERDEV_TEST_PORTABLE_REPARSE_PATH")
+manifest_swap_path=os.environ.get("UBERDEV_TEST_PORTABLE_MANIFEST_SWAP_PATH")
+manifest_swap_with=os.environ.get("UBERDEV_TEST_PORTABLE_MANIFEST_SWAP_WITH")
+parent_swap_path=os.environ.get("UBERDEV_TEST_PORTABLE_PARENT_SWAP_PATH")
+parent_swap_with=os.environ.get("UBERDEV_TEST_PORTABLE_PARENT_SWAP_WITH")
+parent_swap_original=os.environ.get("UBERDEV_TEST_PORTABLE_PARENT_SWAP_ORIGINAL")
+parent_swap_on_name=os.environ.get("UBERDEV_TEST_PORTABLE_PARENT_SWAP_ON_NAME")
+after_open_parent_swap_path=os.environ.get("UBERDEV_TEST_PORTABLE_AFTER_OPEN_PARENT_SWAP_PATH")
+after_open_parent_swap_with=os.environ.get("UBERDEV_TEST_PORTABLE_AFTER_OPEN_PARENT_SWAP_WITH")
+after_open_parent_swap_original=os.environ.get("UBERDEV_TEST_PORTABLE_AFTER_OPEN_PARENT_SWAP_ORIGINAL")
+after_open_parent_swap_on_name=os.environ.get("UBERDEV_TEST_PORTABLE_AFTER_OPEN_PARENT_SWAP_ON_NAME")
+publication_fail_name=os.environ.get("UBERDEV_TEST_PORTABLE_PUBLICATION_FAIL_NAME")
+publication_errno=int(os.environ.get("UBERDEV_TEST_PORTABLE_PUBLICATION_ERRNO","0"))
+unlink_fail_name=os.environ.get("UBERDEV_TEST_PORTABLE_UNLINK_FAIL_NAME")
+if os.environ.get("UBERDEV_TEST_PORTABLE_SAMESTAT_FAIL") == "1":
+ def failing_samestat(left,right): raise OSError("samestat unavailable")
+ os.path.samestat=failing_samestat
+swapped=False
+manifest_swapped=False
+parent_swapped=False
+after_open_parent_swapped=False
+fd_paths={}
+def portable_open(path,flags,*args,**kwargs):
+ global swapped,manifest_swapped,parent_swapped,after_open_parent_swapped
+ if (not parent_swapped and parent_swap_path and parent_swap_with and isinstance(path,str)
+     and os.path.dirname(os.path.abspath(path))==os.path.abspath(parent_swap_path)
+     and (not parent_swap_on_name or os.path.basename(path)==parent_swap_on_name)
+     and flags & os.O_EXCL):
+  parent_swapped=True
+  if parent_swap_original: os.rename(parent_swap_path,parent_swap_original)
+  else: os.rmdir(parent_swap_path)
+  os.symlink(parent_swap_with,parent_swap_path)
+ fd=real_open(path,flags,*args,**kwargs)
+ if isinstance(path,str): fd_paths[fd]=os.path.abspath(path)
+ if (not after_open_parent_swapped and after_open_parent_swap_path and after_open_parent_swap_with
+     and isinstance(path,str) and os.path.dirname(os.path.abspath(path))==os.path.abspath(after_open_parent_swap_path)
+     and (not after_open_parent_swap_on_name or os.path.basename(path)==after_open_parent_swap_on_name)
+     and flags & os.O_EXCL):
+  after_open_parent_swapped=True
+  if after_open_parent_swap_original: os.rename(after_open_parent_swap_path,after_open_parent_swap_original)
+  else: os.rmdir(after_open_parent_swap_path)
+  os.symlink(after_open_parent_swap_with,after_open_parent_swap_path)
+ if (not manifest_swapped and manifest_swap_path and manifest_swap_with and isinstance(path,str)
+     and os.path.abspath(path)==os.path.abspath(manifest_swap_path)
+     and flags & os.O_ACCMODE == os.O_RDONLY):
+  manifest_swapped=True
+  os.replace(manifest_swap_with,manifest_swap_path)
+ if (not swapped and swap_path and swap_with and isinstance(path,str)
+     and os.path.abspath(path)==os.path.abspath(swap_path)
+     and flags & os.O_ACCMODE == os.O_RDONLY):
+  swapped=True
+  os.replace(swap_with,swap_path)
+ if (replace_created_name and isinstance(path,str) and os.path.basename(path)==replace_created_name
+     and flags & os.O_EXCL):
+  replacement=path+".replacement"
+  with open(replacement,"wb") as stream: stream.write(b"replaced")
+  os.replace(replacement,path)
+ return fd
+real_builtin_open=builtins.open
+def portable_builtin_open(path,*args,**kwargs):
+ global manifest_swapped
+ stream=real_builtin_open(path,*args,**kwargs)
+ mode=kwargs.get("mode",args[0] if args else "r")
+ if (not manifest_swapped and manifest_swap_path and manifest_swap_with and isinstance(path,str)
+     and os.path.abspath(path)==os.path.abspath(manifest_swap_path) and "r" in mode):
+  manifest_swapped=True
+  os.replace(manifest_swap_with,manifest_swap_path)
+ return stream
+def portable_read(fd,size):
+ global swapped
+ data=real_read(fd,size)
+ if (not swapped and swap_after_read_path and swap_after_read_with
+     and fd_paths.get(fd)==os.path.abspath(swap_after_read_path)):
+  swapped=True
+  os.replace(swap_after_read_with,swap_after_read_path)
+ return data
+def portable_lstat(path,*args,**kwargs):
+ entry=real_lstat(path,*args,**kwargs)
+ if reparse_path and isinstance(path,str) and os.path.abspath(path)==os.path.abspath(reparse_path):
+  class ReparseEntry:
+   st_file_attributes=0x400
+   def __getattr__(self,name): return getattr(entry,name)
+  return ReparseEntry()
+ return entry
+def portable_fsync(fd):
+ if publication_fail_name and os.path.basename(fd_paths.get(fd,""))==publication_fail_name:
+  raise OSError(publication_errno,"injected publication failure")
+ return real_fsync(fd)
+def portable_unlink(path,*args,**kwargs):
+ if unlink_fail_name and isinstance(path,str) and os.path.basename(path)==unlink_fail_name:
+  raise PermissionError(errno.EACCES,"injected rollback failure")
+ return real_unlink(path,*args,**kwargs)
+os.open=portable_open
+os.read=portable_read
+os.lstat=portable_lstat
+os.fsync=portable_fsync
+os.unlink=portable_unlink
+builtins.open=portable_builtin_open
+sys.argv=["-"]+sys.argv[1:]
+source_fd,source_path=tempfile.mkstemp(prefix="portable-child-dispatch-",suffix=".py")
+try:
+ with os.fdopen(source_fd,"w",encoding="utf-8") as stream: stream.write(source)
+ runpy.run_path(source_path,run_name="__main__")
+finally:
+ try: os.unlink(source_path)
+ except FileNotFoundError: pass
+' "$@"
+    elif [ "${1:-}" = -I ] && [ "${2:-}" = -B ] && [ "${3:-}" = -c ]; then
+      local portable_source="$4"; shift 4
+      command "$REAL_PORTABLE_PYTHON" -I -B -c '
+import os,runpy,sys,tempfile
+source=sys.argv[1]
+if hasattr(os,"geteuid"): del os.geteuid
+if hasattr(os,"getuid"): del os.getuid
+sys.argv=["-c"]+sys.argv[2:]
+source_fd,source_path=tempfile.mkstemp(prefix="portable-carrier-",suffix=".py")
+try:
+ with os.fdopen(source_fd,"w",encoding="utf-8") as stream: stream.write(source)
+ runpy.run_path(source_path,run_name="__main__")
+finally:
+ try: os.unlink(source_path)
+ except FileNotFoundError: pass
+' "$portable_source" "$@"
+    else
+      command "$REAL_PORTABLE_PYTHON" "$@"
+    fi
+  }
+
+  portable_manifest="$ROOT/tests/_fixtures/.portable-child-run-tree-$$.json"
+  portable_manifest_swap="$portable_manifest.swap"
+  cp "$ROOT/plugins/uberdev/policy/solve-run-tree-v1.json" "$portable_manifest"
+  trap 'rm -f "$portable_manifest" "$portable_manifest_swap"' EXIT
+  portable_manifest_real="$(cd "$(dirname "$portable_manifest")" && pwd -P)/$(basename "$portable_manifest")"
+  [ "$(UBERDEV_CHILD_TEST_MODE=1 UBERDEV_CHILD_MANIFEST_PATH="$portable_manifest" _uberdev_child_manifest_path)" = "$portable_manifest_real" ]
+  ! UBERDEV_CHILD_TEST_MODE=1 UBERDEV_CHILD_MANIFEST_PATH="$portable_manifest" \
+    UBERDEV_TEST_PORTABLE_REPARSE_PATH="$portable_manifest" _uberdev_child_manifest_path >/dev/null 2>&1
+
+  portable_run="$TMP/portable-run"; mkdir -p "$portable_run"; portable_run="$(cd "$portable_run" && pwd -P)"
+  portable_request="$(jq -cn --arg run "$portable_run" --arg repo "$TEST_REPO" '{schema_version:1,run_dir:$run,run_id:"portable-review",repository_id:$repo,backend:"codex",workflow:"review-pr",phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:1,issue_num:1,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
+  portable_decision="$(uberdev_agent_resolve_request "$portable_request")"
+  portable_metadata="$(jq -cn --arg repo "$TEST_REPO" '{run_id:"portable-review",repository_id:$repo,workflow:"review-pr",backend:"codex",issue_num:1,task_tier:"medium",risk_signals:[]}')"
+  portable_context_out="$(uberdev_agent_context_create "$portable_run" "$portable_request" "$portable_decision" \
+    '{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}' \
+    "$portable_metadata" '2026-07-10T00:00:00Z')"
+  portable_ctx="$(jq -r .context_file <<<"$portable_context_out")"
+  portable_sha="$(jq -r .context_sha256 <<<"$portable_context_out")"
+  UBERDEV_RUN_CARRIER_JSON="$(jq -cn --arg ctx "$portable_ctx" --arg sha "$portable_sha" '{schema_version:1,run_id:"portable-review",workflow:"review-pr",issue_num:1,context_file:$ctx,context_sha256:$sha}')"
+  export UBERDEV_RUN_CARRIER_JSON
+  portable_input="$(jq -cn --arg p "$TEST_REPO/README.md" '{changed_paths:["README.md"],diff_path:$p,criteria_path:$p,emphasis:[]}')"
+
+  uberdev_create_child_handoff review_pr.review.correctness portable-duplicate-iter1-attempt01 "$portable_input" '[]' >/dev/null
+  duplicate_error="$(uberdev_create_child_handoff review_pr.review.correctness portable-duplicate-iter1-attempt01 "$portable_input" '[]' 2>&1)" \
+    && { echo 'duplicate handoff identity was accepted' >&2; exit 1; }
+  grep -q 'instance_exists' <<<"$duplicate_error"
+
+  for publication_case in '13:publication_permission_denied' '28:publication_no_space' '5:publication_io_failed' '4:publication_interrupted'; do
+    publication_errno_value="${publication_case%%:*}"
+    publication_reason="${publication_case#*:}"
+    publication_name="portable-publication-${publication_errno_value}-iter1-attempt01.json"
+    publication_error="$(UBERDEV_TEST_PORTABLE_PUBLICATION_FAIL_NAME="$publication_name" \
+      UBERDEV_TEST_PORTABLE_PUBLICATION_ERRNO="$publication_errno_value" \
+      uberdev_create_child_handoff review_pr.review.correctness "${publication_name%.json}" "$portable_input" '[]' 2>&1)" \
+      && { echo "publication errno $publication_errno_value was accepted" >&2; exit 1; }
+    grep -q "$publication_reason" <<<"$publication_error"
+    [ ! -e "$portable_run/handoffs/$publication_name" ]
+  done
+
+  rollback_name='portable-rollback-failed-iter1-attempt01.json'
+  rollback_error="$(UBERDEV_TEST_PORTABLE_PUBLICATION_FAIL_NAME="$rollback_name" \
+    UBERDEV_TEST_PORTABLE_PUBLICATION_ERRNO=28 UBERDEV_TEST_PORTABLE_UNLINK_FAIL_NAME="$rollback_name" \
+    uberdev_create_child_handoff review_pr.review.correctness "${rollback_name%.json}" "$portable_input" '[]' 2>&1)" \
+    && { echo 'publication with rollback failure was accepted' >&2; exit 1; }
+  grep -q 'publication_no_space' <<<"$rollback_error"
+  grep -q 'rollback_failed' <<<"$rollback_error"
+  [ -e "$portable_run/handoffs/$rollback_name" ]
+  rm -f "$portable_run/handoffs/$rollback_name"
+
+  uberdev_create_child_handoff review_pr.review.correctness portable-prepare-rollback-iter1-attempt01 "$portable_input" '[]' >/dev/null
+  prepare_rollback_error="$(UBERDEV_TEST_PORTABLE_PUBLICATION_FAIL_NAME=prompt.txt \
+    UBERDEV_TEST_PORTABLE_PUBLICATION_ERRNO=28 UBERDEV_TEST_PORTABLE_UNLINK_FAIL_NAME=prompt.txt \
+    _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch 2>&1)" \
+    && { echo 'child prepare with rollback failure was accepted' >&2; exit 1; }
+  grep -q 'unsafe_child_dir' <<<"$prepare_rollback_error"
+  grep -q 'rollback_failed' <<<"$prepare_rollback_error"
+  rm -rf "$portable_run/children/portable-prepare-rollback-iter1-attempt01"
+
+  cp "$portable_manifest" "$portable_manifest_swap"
+  if UBERDEV_CHILD_TEST_MODE=1 UBERDEV_CHILD_MANIFEST_PATH="$portable_manifest" \
+    UBERDEV_TEST_PORTABLE_MANIFEST_SWAP_PATH="$portable_manifest" UBERDEV_TEST_PORTABLE_MANIFEST_SWAP_WITH="$portable_manifest_swap" \
+    uberdev_create_child_handoff review_pr.review.correctness portable-manifest-build-swap-iter1-attempt01 "$portable_input" '[]' >/dev/null 2>&1; then
+    echo 'manifest replacement accepted during handoff construction' >&2
+    exit 1
+  fi
+  [ ! -e "$portable_run/handoffs/portable-manifest-build-swap-iter1-attempt01.json" ]
+
+  UBERDEV_CHILD_TEST_MODE=1 UBERDEV_CHILD_MANIFEST_PATH="$portable_manifest" \
+    uberdev_create_child_handoff review_pr.review.correctness portable-manifest-prepare-swap-iter1-attempt01 "$portable_input" '[]' >/dev/null
+  cp "$portable_manifest" "$portable_manifest_swap"
+  ! UBERDEV_CHILD_TEST_MODE=1 UBERDEV_CHILD_MANIFEST_PATH="$portable_manifest" \
+    UBERDEV_TEST_PORTABLE_MANIFEST_SWAP_PATH="$portable_manifest" UBERDEV_TEST_PORTABLE_MANIFEST_SWAP_WITH="$portable_manifest_swap" \
+    _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+  [ ! -e "$portable_run/children/portable-manifest-prepare-swap-iter1-attempt01" ]
+
+  handoff_parent="$portable_run/handoffs"
+  handoff_parent_original="$TMP/portable-handoffs-original"
+  handoff_parent_replacement="$TMP/portable-handoffs-replacement"; mkdir "$handoff_parent_replacement"
+  if UBERDEV_TEST_PORTABLE_PARENT_SWAP_PATH="$handoff_parent" UBERDEV_TEST_PORTABLE_PARENT_SWAP_WITH="$handoff_parent_replacement" \
+    UBERDEV_TEST_PORTABLE_PARENT_SWAP_ORIGINAL="$handoff_parent_original" \
+    uberdev_create_child_handoff review_pr.review.correctness portable-handoff-parent-swap-iter1-attempt01 "$portable_input" '[]' >/dev/null 2>&1; then
+    echo 'handoff parent replacement accepted during exclusive publication' >&2
+    exit 1
+  fi
+  [ ! -e "$handoff_parent_original/portable-handoff-parent-swap-iter1-attempt01.json" ]
+  [ ! -e "$handoff_parent_replacement/portable-handoff-parent-swap-iter1-attempt01.json" ]
+  [ -L "$handoff_parent" ] && rm "$handoff_parent"
+  mv "$handoff_parent_original" "$handoff_parent"
+
+  handoff_after_open_original="$TMP/portable-handoffs-after-open-original"
+  handoff_after_open_replacement="$TMP/portable-handoffs-after-open-replacement"; mkdir "$handoff_after_open_replacement"
+  if UBERDEV_TEST_PORTABLE_AFTER_OPEN_PARENT_SWAP_PATH="$handoff_parent" \
+    UBERDEV_TEST_PORTABLE_AFTER_OPEN_PARENT_SWAP_WITH="$handoff_after_open_replacement" \
+    UBERDEV_TEST_PORTABLE_AFTER_OPEN_PARENT_SWAP_ORIGINAL="$handoff_after_open_original" \
+    UBERDEV_TEST_PORTABLE_AFTER_OPEN_PARENT_SWAP_ON_NAME=portable-handoff-parent-after-open-swap-iter1-attempt01.json \
+    uberdev_create_child_handoff review_pr.review.correctness portable-handoff-parent-after-open-swap-iter1-attempt01 "$portable_input" '[]' >/dev/null 2>&1; then
+    echo 'handoff parent replacement accepted after exclusive open' >&2
+    exit 1
+  fi
+  if [ -e "$handoff_after_open_original/portable-handoff-parent-after-open-swap-iter1-attempt01.json" ]; then
+    echo 'handoff publication stranded an artifact in the renamed original parent' >&2
+    exit 1
+  fi
+  [ ! -e "$handoff_after_open_replacement/portable-handoff-parent-after-open-swap-iter1-attempt01.json" ]
+  [ -L "$handoff_parent" ] && rm "$handoff_parent"
+  mv "$handoff_after_open_original" "$handoff_parent"
+
+  uberdev_create_child_handoff review_pr.review.correctness portable-valid-iter1-attempt01 "$portable_input" '[]' >/dev/null
+  UBERDEV_TEST_PORTABLE_SAMESTAT_FAIL=1 \
+    _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null
+  [ -s "$portable_run/children/portable-valid-iter1-attempt01/handoff.v1.json" ]
+  [ -s "$portable_run/children/portable-valid-iter1-attempt01/prompt.txt" ]
+
+  uberdev_create_child_handoff review_pr.review.correctness portable-symlink-iter1-attempt01 "$portable_input" '[]' >/dev/null
+  symlink_handoff="$UBERDEV_CHILD_HANDOFF"; mv "$symlink_handoff" "$symlink_handoff.real"; ln -s "$symlink_handoff.real" "$symlink_handoff"
+  ! _uberdev_child_prepare review_pr.review.correctness "$symlink_handoff" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+  [ ! -e "$portable_run/children/portable-symlink-iter1-attempt01" ]
+
+  uberdev_create_child_handoff review_pr.review.correctness portable-replaced-iter1-attempt01 "$portable_input" '[]' >/dev/null
+  replaced_handoff="$UBERDEV_CHILD_HANDOFF"; cp "$replaced_handoff" "$replaced_handoff.swap"
+  ! UBERDEV_TEST_PORTABLE_SWAP_PATH="$replaced_handoff" UBERDEV_TEST_PORTABLE_SWAP_WITH="$replaced_handoff.swap" \
+    _uberdev_child_prepare review_pr.review.correctness "$replaced_handoff" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+  [ ! -e "$portable_run/children/portable-replaced-iter1-attempt01" ]
+
+  uberdev_create_child_handoff review_pr.review.correctness portable-post-read-replaced-iter1-attempt01 "$portable_input" '[]' >/dev/null
+  post_read_handoff="$UBERDEV_CHILD_HANDOFF"; cp "$post_read_handoff" "$post_read_handoff.swap"
+  ! UBERDEV_TEST_PORTABLE_SWAP_AFTER_READ_PATH="$post_read_handoff" UBERDEV_TEST_PORTABLE_SWAP_AFTER_READ_WITH="$post_read_handoff.swap" \
+    _uberdev_child_prepare review_pr.review.correctness "$post_read_handoff" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+  [ ! -e "$portable_run/children/portable-post-read-replaced-iter1-attempt01" ]
+
+  uberdev_create_child_handoff review_pr.review.correctness portable-created-replaced-iter1-attempt01 "$portable_input" '[]' >/dev/null
+  ! UBERDEV_TEST_PORTABLE_REPLACE_CREATED_NAME=handoff.v1.json \
+    _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+  [ ! -e "$portable_run/children/portable-created-replaced-iter1-attempt01" ]
+
+  uberdev_create_child_handoff review_pr.review.correctness portable-parent-replaced-iter1-attempt01 "$portable_input" '[]' >/dev/null
+  parent_replacement="$TMP/portable-parent-replacement"; mkdir "$parent_replacement"
+  portable_child_dir="$portable_run/children/portable-parent-replaced-iter1-attempt01"
+  ! UBERDEV_TEST_PORTABLE_PARENT_SWAP_PATH="$portable_child_dir" UBERDEV_TEST_PORTABLE_PARENT_SWAP_WITH="$parent_replacement" \
+    _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+  [ ! -e "$parent_replacement/handoff.v1.json" ]
+  [ ! -e "$parent_replacement/prompt.txt" ]
+  [ ! -e "$portable_child_dir" ]
+
+  uberdev_create_child_handoff review_pr.review.correctness portable-prompt-parent-replaced-iter1-attempt01 "$portable_input" '[]' >/dev/null
+  prompt_parent_replacement="$TMP/portable-prompt-parent-replacement"; mkdir "$prompt_parent_replacement"
+  prompt_parent_original="$TMP/portable-prompt-parent-original"
+  portable_prompt_child="$portable_run/children/portable-prompt-parent-replaced-iter1-attempt01"
+  ! UBERDEV_TEST_PORTABLE_PARENT_SWAP_PATH="$portable_prompt_child" UBERDEV_TEST_PORTABLE_PARENT_SWAP_WITH="$prompt_parent_replacement" \
+    UBERDEV_TEST_PORTABLE_PARENT_SWAP_ORIGINAL="$prompt_parent_original" UBERDEV_TEST_PORTABLE_PARENT_SWAP_ON_NAME=prompt.txt \
+    _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+  [ ! -e "$prompt_parent_replacement/handoff.v1.json" ]
+  [ ! -e "$prompt_parent_replacement/prompt.txt" ]
+  [ ! -e "$prompt_parent_original/handoff.v1.json" ]
+  [ ! -e "$prompt_parent_original/prompt.txt" ]
+  [ ! -e "$portable_prompt_child" ]
+  [ ! -e "$prompt_parent_original" ]
+
+  uberdev_create_child_handoff review_pr.review.correctness portable-tampered-iter1-attempt01 "$portable_input" '[]' >/dev/null
+  tampered_handoff="$UBERDEV_CHILD_HANDOFF"
+  command "$REAL_PORTABLE_PYTHON" - "$tampered_handoff" <<'PY'
+import json,sys
+path=sys.argv[1]
+with open(path,encoding='utf-8') as stream: value=json.load(stream)
+value['edge_id']='review_pr.review.types'
+with open(path,'w',encoding='utf-8') as stream: json.dump(value,stream,separators=(',',':'))
+PY
+  ! _uberdev_child_prepare review_pr.review.correctness "$tampered_handoff" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+  [ ! -e "$portable_run/children/portable-tampered-iter1-attempt01" ]
+)
 
 path="$TEST_REPO/README.md"; changed_path="README.md"; deleted_path="src/deleted-in-pr.ts"; dir="$TEST_REPO"
 declare -a edges inputs risks

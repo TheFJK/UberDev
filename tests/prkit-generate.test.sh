@@ -90,20 +90,118 @@ PY
 then ok "G6aa count discovery and anchor drift fail closed without mutation"
 else no "G6aa generator count/anchor transaction accepted drift"; fi
 
-# G6b — both standalone runtimes ship the manifest-declared reviewer contract,
-# while native Codex role TOMLs remain edge-agnostic.
+# G6ab — projection accepts only the canonical edge semantics and publishes
+# atomically. Relationship drift must fail before mutation; an injected replace
+# failure must preserve the copied policy and remove its temporary artifact.
+if python3 -I -B - "$GEN" "$REPO_ROOT/plugins/uberdev/policy/solve-run-tree-v1.json" <<'PY'
+import json,os,pathlib,subprocess,sys,tempfile
+generator=pathlib.Path(sys.argv[1]).read_text()
+canonical=pathlib.Path(sys.argv[2]).read_bytes()
+marker='  python3 -I -B - "$policy" "$roles_dir" "$role_prefix" "$role_suffix" <<\'PY\' || return 1\n'
+snippet=generator.split(marker,1)[1].split('\nPY\n',1)[0]
+roles={
+ 'ci-code-fixer','ci-failure-classifier','ci-rebase-handler','code-fixer',
+ 'code-reviewer','code-simplifier','comment-analyzer','conflict-resolver',
+ 'findings-to-issues','merge-strategy-decider','pr-test-analyzer',
+ 'silent-failure-hunter','trust-trail-evaluator','type-design-analyzer',
+}
+def fixture():
+ root=pathlib.Path(tempfile.mkdtemp())
+ policy=root/'solve-run-tree-v1.json'; policy.write_bytes(canonical)
+ agents=root/'agents'; agents.mkdir()
+ for role in roles: (agents/f'{role}.md').write_text('fixture\n')
+ return root,policy,agents
+def reject_mutation(mutate):
+ root,policy,agents=fixture(); tree=json.loads(policy.read_text()); mutate(tree)
+ policy.write_text(json.dumps(tree,sort_keys=True,indent=2)+'\n'); before=policy.read_bytes()
+ result=subprocess.run([sys.executable,'-I','-B','-',str(policy),str(agents),'','.md'],input=snippet,text=True,capture_output=True)
+ assert result.returncode!=0,result
+ assert policy.read_bytes()==before
+ assert not list(root.glob('.solve-run-tree.*'))
+def swap_roles(tree):
+ left=tree['edges']['review_pr.review.correctness']; right=tree['edges']['review_pr.review.comments']
+ left['role'],right['role']=right['role'],left['role']
+def swap_workflows(tree):
+ left=tree['edges']['review_pr.fix.phase1']; right=tree['edges']['review_pr.fix.phase2']
+ left['allowed_workflows'],right['allowed_workflows']=right['allowed_workflows'],left['allowed_workflows']
+def attach_contract(tree):
+ tree['edges']['review_pr.fix.phase1']['output_contract']='phase1-reviewer-v1'
+for mutation in (swap_roles,swap_workflows,attach_contract): reject_mutation(mutation)
+root,policy,agents=fixture(); before=policy.read_bytes(); env=os.environ.copy()
+env['PRKIT_GENERATOR_TEST_MODE']='1'; env['PRKIT_TEST_POLICY_PUBLISH_FAIL']='1'
+result=subprocess.run([sys.executable,'-I','-B','-',str(policy),str(agents),'','.md'],input=snippet,text=True,capture_output=True,env=env)
+assert result.returncode!=0,result
+assert policy.read_bytes()==before
+assert not list(root.glob('.solve-run-tree.*'))
+PY
+then ok "G6ab policy projection enforces canonical edge semantics and atomic failure cleanup"
+else no "G6ab policy projection accepted relationship drift or leaked partial publication"; fi
+
+# G6b — both standalone runtimes ship one byte-identical, review-only policy
+# projection and the manifest-declared reviewer contract, while native Codex
+# role TOMLs remain edge-agnostic.
 if [ -f "$T1/plugins/prkit/policy/solve-run-tree-v1.json" ] \
    && [ -f "$T1/plugins/prkit/shared/phase1-reviewer-output-v1.md" ] \
    && [ -f "$T1/codex/prkit-codex/policy/solve-run-tree-v1.json" ] \
    && [ -f "$T1/codex/prkit-codex/shared/phase1-reviewer-output-v1.md" ] \
-   && python3 - "$T1" <<'PY'
-import pathlib,sys
-root=pathlib.Path(sys.argv[1]); contract=(root/'codex/prkit-codex/shared/phase1-reviewer-output-v1.md').read_text()
+   && python3 -I -B - "$T1" <<'PY'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+claude_path=root/'plugins/prkit/policy/solve-run-tree-v1.json'
+codex_path=root/'codex/prkit-codex/policy/solve-run-tree-v1.json'
+assert claude_path.read_bytes()==codex_path.read_bytes()
+
+def reject_pairs(pairs):
+ result={}
+ for key,value in pairs:
+  if key in result: raise ValueError(f'duplicate JSON key: {key}')
+  result[key]=value
+ return result
+
+tree=json.loads(
+ claude_path.read_text(),
+ object_pairs_hook=reject_pairs,
+ parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f'non-finite JSON constant: {value}')),
+)
+assert set(tree)=={'schema_version','tree_id','root_edge_id','output_contracts','edges'}
+edges=tree['edges']; assert edges
+expected_roles={
+ 'ci-code-fixer','ci-failure-classifier','ci-rebase-handler','code-fixer',
+ 'code-reviewer','code-simplifier','comment-analyzer','conflict-resolver',
+ 'findings-to-issues','merge-strategy-decider','pr-test-analyzer',
+ 'silent-failure-hunter','trust-trail-evaluator','type-design-analyzer',
+}
+claude_roles={path.stem for path in (root/'plugins/prkit/agents').glob('*.md')}
+codex_roles={path.name.removeprefix('prkit-').removesuffix('.toml') for path in (root/'codex/agents').glob('prkit-*.toml')}
+assert claude_roles==codex_roles==expected_roles
+structural_edges={'review_pr.post_impl_review'}
+provider_edges={
+ 'review_pr.review.correctness','review_pr.review.silent_failures',
+ 'review_pr.review.types','review_pr.review.comments','review_pr.review.tests',
+ 'review_pr.review.general','review_pr.fix.phase1','review_pr.simplify.reuse',
+ 'review_pr.simplify.quality','review_pr.simplify.efficiency',
+ 'review_pr.fix.phase2','review_pr.defer.findings','review_pr.ci.classify',
+ 'review_pr.ci.fix_code','review_pr.ci.rebase','review_pr.ci.defer_refusal',
+ 'review_pr.ci.resolve_conflict',
+}
+assert set(edges)==structural_edges|provider_edges
+assert all(edges[edge_id].get('kind')=='skill' for edge_id in structural_edges)
+assert all(edges[edge_id].get('kind')=='provider' for edge_id in provider_edges)
+for edge in edges.values():
+ workflows=edge.get('allowed_workflows',[])
+ assert all(workflow in {'review-pr','simplify'} for workflow in workflows)
+ assert 'solve' not in workflows and 'turbo' not in workflows
+ if edge.get('kind')=='provider':
+  assert workflows
+  assert edge.get('role') in claude_roles
+referenced={edge['output_contract'] for edge in edges.values() if 'output_contract' in edge}
+assert set(tree.get('output_contracts',{}))==referenced
+contract=(root/'codex/prkit-codex/shared/phase1-reviewer-output-v1.md').read_text()
 roles=('code-reviewer','silent-failure-hunter','type-design-analyzer','comment-analyzer','pr-test-analyzer')
 assert all(contract not in (root/f'codex/agents/prkit-{role}.toml').read_text() for role in roles)
 PY
-then ok "G6b routed reviewer contract packaged and absent from native roles"
-else no "G6b reviewer contract scope is incorrect"; fi
+then ok "G6b review-only policy is identical, closed, and contract-scoped across runtimes"
+else no "G6b standalone policy projection or reviewer contract scope is incorrect"; fi
 
 # G6c — the generated standalone Codex runtime must execute the focused
 # six-reviewer happy path, not merely pass structural namespace scans.

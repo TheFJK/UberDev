@@ -44,13 +44,14 @@ done
 grep -qxF commands/review-pr.md "$MANIFEST" && grep -qxF commands/merge.md "$MANIFEST" \
   && ok "M4 all three entry commands present"
 
-# M5 — routed review validation data is part of the standalone package.
+# M5 — the canonical policy projection source and routed review validation
+# data are part of the standalone package.
 for req in policy/solve-run-tree-v1.json shared/phase1-reviewer-output-v1.md; do
   grep -qxF "$req" "$MANIFEST" || no "M5 missing runtime contract: $req"
 done
 grep -qxF policy/solve-run-tree-v1.json "$MANIFEST" \
   && grep -qxF shared/phase1-reviewer-output-v1.md "$MANIFEST" \
-  && ok "M5 solve run tree + reviewer output contract present"
+  && ok "M5 canonical policy projection source + reviewer output contract present"
 
 echo "  Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
