@@ -463,10 +463,10 @@ _uberdev_dispatch_cancel_backend background "$TERM_GUARD" "$TERM_IDENTITY"
 # Kernel identity uncertainty is not equivalent to proven process absence.
 # Even if a numeric process group appears live, cancellation must fail closed
 # before invoking TERM or KILL when the exact creation identity cannot be read.
-eval "$(declare -f _uberdev_agent_process_identity | sed '1s/_uberdev_agent_process_identity/_real_unavailable_cancel_identity/')"
+eval "$(declare -f _uberdev_dispatch_process_identity | sed '1s/_uberdev_dispatch_process_identity/_real_unavailable_cancel_identity/')"
 eval "$(declare -f _uberdev_dispatch_group_owned_session | sed '1s/_uberdev_dispatch_group_owned_session/_real_unavailable_cancel_group/')"
 UNAVAILABLE_CANCEL_SIGNAL="$TMP/unavailable-cancel-signal"
-_uberdev_agent_process_identity() { return 2; }
+_uberdev_dispatch_process_identity() { return 2; }
 _uberdev_dispatch_group_owned_session() { return 0; }
 kill() { : >"$UNAVAILABLE_CANCEL_SIGNAL"; return 0; }
 set +e
@@ -475,7 +475,7 @@ _uberdev_dispatch_cancel_backend codex 4242 \
 UNAVAILABLE_CANCEL_RC=$?
 set -e
 unset -f kill
-eval "$(declare -f _real_unavailable_cancel_identity | sed '1s/_real_unavailable_cancel_identity/_uberdev_agent_process_identity/')"
+eval "$(declare -f _real_unavailable_cancel_identity | sed '1s/_real_unavailable_cancel_identity/_uberdev_dispatch_process_identity/')"
 eval "$(declare -f _real_unavailable_cancel_group | sed '1s/_real_unavailable_cancel_group/_uberdev_dispatch_group_owned_session/')"
 [ "$UNAVAILABLE_CANCEL_RC" -eq 2 ]
 [ ! -e "$UNAVAILABLE_CANCEL_SIGNAL" ]
