@@ -44,8 +44,8 @@ assert_grep "$DISPATCH_LIB" \
   'macos\)' \
   "resolver has a macos branch"
 assert_grep "$DISPATCH_LIB" \
-  'windows-native\)' \
-  "resolver has a windows-native branch"
+  'if[[:space:]]+\[[[:space:]]+"\$os_class"[[:space:]]+=[[:space:]]+windows-native[[:space:]]+\][[:space:]]*;[[:space:]]*then' \
+  "resolver has an explicit windows-native equality branch"
 assert_grep "$DISPATCH_LIB" \
   '_uberdev_dispatch_numeric_supervision_supported' \
   "resolver shares the native-Windows numeric supervision capability gate"
