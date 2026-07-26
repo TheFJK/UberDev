@@ -464,14 +464,22 @@ DELAYED_OUT="$(
   ' _ "$DISPATCH_LIB" "$DELAYED_TMP/prompt.txt" "$DELAYED_RUNTIME_PATH"
 )"
 delayed_pid="$(printf '%s\n' "$DELAYED_OUT" | sed -n 's/^pid=//p')"
+delayed_python_resolved="$(printf '%s\n' "$DELAYED_OUT" | sed -n 's/^resolved=//p')"
 delayed_python_expected="$(cd "$DELAYED_TMP/bin" && pwd -P)/py"
+if grep -Fq "assert lines['resolved']""==sys.argv[3]" "$0"; then
+  echo "  FAIL  delayed fixture compares its POSIX launcher path before native-Python argv conversion"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  delayed fixture compares its POSIX launcher path before native-Python argv conversion"
+  PASS=$((PASS + 1))
+fi
 if [ -n "$delayed_pid" ] \
-    && python3 -I -B - "$DELAYED_OUT" "$delayed_pid" "$delayed_python_expected" <<'PY'
+    && [ "$delayed_python_resolved" = "$delayed_python_expected" ] \
+    && python3 -I -B - "$DELAYED_OUT" "$delayed_pid" <<'PY'
 import json,sys
 lines=dict(line.split('=',1) for line in sys.argv[1].splitlines())
 pid=sys.argv[2]
 assert lines['rc']=='0' and lines['pid']==pid
-assert lines['resolved']==sys.argv[3]
 assert json.loads(lines['running'])=={
     'issue':90,'tier':'small','backend':'background','state':'running','exit_code':None,'pid':pid,
 }
