@@ -235,20 +235,22 @@ subprocess.run(['git','-C',str(repo),'config','user.name','prkit test'],check=Tr
 subprocess.run(['git','-C',str(repo),'add','tracked'],check=True)
 subprocess.run(['git','-C',str(repo),'commit','-qm','test: fixture'],check=True)
 head=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
-shell='set -eu\n'+script+'\nfindings_derive_review_origin "$1" "$2" "$3"\n'
+shell='set -eu\n'+script+'\nfindings_derive_review_origin "$1" "$2" "$3" "$4"\n'
 result=subprocess.run(
- ['bash','-c',shell,'origin-test',str(repo),'0','20260726-120000-abc123'],
+ ['bash','-c',shell,'origin-test',str(repo),'0','20260726-120000-abc123','owner/repo'],
  text=True,capture_output=True,
  env={'PATH':'/usr/bin:/bin:/usr/sbin:/sbin'},
 )
 assert result.returncode==0,result
 origin=json.loads(result.stdout)
 assert origin=={
+ 'origin_kind':'standalone',
+ 'repo_slug':'owner/repo',
  'pr_commit_sha':head,
  'source_ref':'/simplify run 20260726-120000-abc123',
 },origin
 bad=subprocess.run(
- ['bash','-c',shell,'origin-test',str(repo),'-1','20260726-120000-abc123'],
+ ['bash','-c',shell,'origin-test',str(repo),'-1','20260726-120000-abc123','owner/repo'],
  text=True,capture_output=True,
  env={'PATH':'/usr/bin:/bin:/usr/sbin:/sbin'},
 )

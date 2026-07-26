@@ -60,6 +60,26 @@ simplify_context_out="$(uberdev_agent_context_create "$TMP/simplify-run" "$simpl
 simplify_ctx="$(jq -r .context_file <<<"$simplify_context_out")"; simplify_sha="$(jq -r .context_sha256 <<<"$simplify_context_out")"
 SIMPLIFY_CARRIER_JSON="$(jq -cn --arg ctx "$simplify_ctx" --arg sha "$simplify_sha" '{schema_version:1,run_id:"simplify-contract",workflow:"simplify",issue_num:0,context_file:$ctx,context_sha256:$sha}')"
 
+# The constructor and dispatcher share the exact 49,152-byte input ceiling,
+# while the complete immutable handoff remains below the 65,536-byte reader
+# ceiling at the accepted maximum.
+printf 'diff\n' >"$TEST_REPO/max-input.diff"
+MAX_INPUTS="$(python3 -I -B - "$TEST_REPO/max-input.diff" <<'PY'
+import json,sys
+paths=[f"src/p{index:02d}-"+("x"*2990)+".ts" for index in range(16)]
+base={"changed_paths":paths,"diff_path":sys.argv[1],"criteria_path":sys.argv[1],"emphasis":[]}
+current=len(json.dumps(base,sort_keys=True,separators=(",",":")).encode())
+base["changed_paths"][-1]=base["changed_paths"][-1][:-3]+("x"*(49152-current))+".ts"
+payload=json.dumps(base,sort_keys=True,separators=(",",":"))
+assert len(payload.encode())==49152
+assert max(map(len,base["changed_paths"]))<=4096
+print(payload,end="")
+PY
+)"
+uberdev_create_child_handoff review_pr.review.correctness review-max-input-iter1-attempt01 "$MAX_INPUTS" '[]' >/dev/null
+[ "$(wc -c <"$UBERDEV_CHILD_HANDOFF" | tr -d ' ')" -lt 65536 ]
+_uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null
+
 # Native Windows Python has neither getuid/geteuid nor descriptor-relative
 # filesystem operations. Exercise the real carrier -> handoff -> prepare path
 # through that capability profile, including replacement/tamper rejection.
@@ -506,7 +526,7 @@ fi
 VALIDATED_DIGEST="$(uberdev_child_validate_phase1_review_result "$VALID_RESULT" '["README.md"]' "$VALIDATED_RESULT")"
 [[ "$VALIDATED_DIGEST" =~ ^[0-9a-f]{64}$ ]]
 cmp "$VALID_RESULT" "$VALIDATED_RESULT"
-[ "$(stat -f '%Lp' "$VALIDATED_RESULT" 2>/dev/null || stat -c '%a' "$VALIDATED_RESULT")" = 400 ]
+[ "$(stat -c '%a' "$VALIDATED_RESULT" 2>/dev/null || stat -f '%Lp' "$VALIDATED_RESULT")" = 400 ]
 
 # Mutating review edges execute against the carrier-selected caller repository
 # identity and workspace binding. Reviewers remain isolated, and a different
@@ -571,7 +591,16 @@ ROSTER_EDGES=(
   review_pr.review.types review_pr.review.comments
   review_pr.review.tests review_pr.review.general
 )
-roster_row() { printf '{"edge":"%s"}\n' "$1"; }
+roster_row() {
+  local edge="$1" index
+  for index in "${!ROSTER_EDGES[@]}"; do
+    if [ "${ROSTER_EDGES[$index]}" = "$edge" ]; then
+      printf '{"edge":"%s","index":%s}\n' "$edge" "$((index + 1))"
+      return 0
+    fi
+  done
+  printf '{"edge":"%s","index":999}\n' "$edge"
+}
 roster_must_block_aggregation() {
   local records expected aggregate
   records="$1"
@@ -600,6 +629,90 @@ roster_must_block_aggregation "$TMP/roster-duplicate.records" 6
 roster_must_block_aggregation "$TMP/roster-unknown.records" 6
 head -1 "$ROSTER_VALID" >"$TMP/roster-truncated-repair.records"
 roster_must_block_aggregation "$TMP/roster-truncated-repair.records" 2
+
+# Validated evidence is independently bound to the exact launched roster.
+# Duplicate indices, impersonated instances, reused canonical artifacts, and
+# digest replacement must all fail before aggregation. A format repair keeps
+# the original edge/index but may prove itself with the fresh launched instance.
+awk '/^post_review_validated_evidence_complete\(\) \{/{active=1} active{print} active && /^\}/{exit}' \
+  "$POST" >"$TMP/evidence-runtime.sh"
+. "$TMP/evidence-runtime.sh"
+REVIEW_EDGES=("${ROSTER_EDGES[@]}")
+EVIDENCE_ROOT="$TMP/evidence"
+mkdir -p "$EVIDENCE_ROOT"
+python3 -I -B - "$EVIDENCE_ROOT" <<'PY'
+import hashlib,json,os,pathlib,sys
+root=pathlib.Path(os.path.realpath(sys.argv[1]))
+edges=[
+ "review_pr.review.correctness","review_pr.review.silent_failures",
+ "review_pr.review.types","review_pr.review.comments",
+ "review_pr.review.tests","review_pr.review.general",
+]
+launched=[]; validated=[]
+for index,edge in enumerate(edges,1):
+ child=root/f"child-{index}"; child.mkdir()
+ provider=child/"result.md"; provider.write_text("provider-owned\n")
+ canonical=child/"validated-result.md"; payload=f"validated-{index}\n".encode()
+ canonical.write_bytes(payload); canonical.chmod(0o400)
+ instance=f"review-{index}-attempt01"
+ launched.append({"edge":edge,"index":index,"instance":instance,"receipt":"fixture",
+                  "result":str(provider),"status":str(child/"status.json")})
+ validated.append({"edge":edge,"index":index,"instance":instance,
+                   "result":str(canonical),"sha256":hashlib.sha256(payload).hexdigest()})
+for name,rows in (("initial",launched),("validated",validated)):
+ (root/name).write_text("".join(json.dumps(row,separators=(",",":"))+"\n" for row in rows))
+(root/"repair").write_text("")
+PY
+POST_REVIEW_VALIDATED_LEDGER="$EVIDENCE_ROOT/validated"
+REVIEW_LAUNCHED="$EVIDENCE_ROOT/initial"
+REPAIR_LAUNCHED="$EVIDENCE_ROOT/repair"
+post_review_validated_evidence_complete "$POST_REVIEW_VALIDATED_LEDGER" 6 "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED"
+
+evidence_must_fail() {
+  local label="$1" ledger="$2" initial="$3" repair="$4" expected_class="$5"
+  local diagnostic="$EVIDENCE_ROOT/$label.stderr"
+  if post_review_validated_evidence_complete "$ledger" 6 "$initial" "$repair" 2>"$diagnostic"; then
+    echo "evidence fixture unexpectedly passed: $label" >&2
+    return 1
+  fi
+  grep -q "class=$expected_class" "$diagnostic"
+}
+
+python3 -I -B - "$EVIDENCE_ROOT" <<'PY'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+def rows(name): return [json.loads(line) for line in (root/name).read_text().splitlines()]
+def write(name,value): (root/name).write_text("".join(json.dumps(row,separators=(",",":"))+"\n" for row in value))
+value=rows("validated"); value[-1]["index"]=1; write("duplicate-index",value)
+value=rows("validated"); value[-1]["instance"]="foreign-attempt"; write("foreign-instance",value)
+value=rows("validated"); value[-1]["sha256"]="0"*64; write("bad-digest",value)
+initial=rows("initial"); value=rows("validated")
+initial[-1]["result"]=initial[0]["result"]; value[-1]["result"]=value[0]["result"]
+write("duplicate-path-initial",initial); write("duplicate-path",value)
+PY
+evidence_must_fail duplicate-index "$EVIDENCE_ROOT/duplicate-index" "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED" malformed-ledger
+evidence_must_fail foreign-instance "$EVIDENCE_ROOT/foreign-instance" "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED" roster-mismatch
+evidence_must_fail bad-digest "$EVIDENCE_ROOT/bad-digest" "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED" digest-mismatch
+evidence_must_fail duplicate-path "$EVIDENCE_ROOT/duplicate-path" "$EVIDENCE_ROOT/duplicate-path-initial" "$REPAIR_LAUNCHED" duplicate-artifact
+
+python3 -I -B - "$EVIDENCE_ROOT" <<'PY'
+import hashlib,json,os,pathlib,sys
+root=pathlib.Path(os.path.realpath(sys.argv[1])); index=3
+rows=[json.loads(line) for line in (root/"validated").read_text().splitlines()]
+child=root/f"repair-{index}"; child.mkdir()
+provider=child/"result.md"; provider.write_text("provider-owned repair\n")
+canonical=child/"validated-result.md"; payload=b"validated-repair-3\n"
+canonical.write_bytes(payload); canonical.chmod(0o400)
+instance="review-3-attempt02"
+repair={"edge":rows[index-1]["edge"],"index":index,"instance":instance,"receipt":"fixture",
+        "result":str(provider),"status":str(child/"status.json")}
+(root/"repair-valid").write_text(json.dumps(repair,separators=(",",":"))+"\n")
+rows[index-1]={"edge":repair["edge"],"index":index,"instance":instance,
+               "result":str(canonical),"sha256":hashlib.sha256(payload).hexdigest()}
+(root/"validated-repair").write_text("".join(json.dumps(row,separators=(",",":"))+"\n" for row in rows))
+PY
+post_review_validated_evidence_complete "$EVIDENCE_ROOT/validated-repair" 6 \
+  "$REVIEW_LAUNCHED" "$EVIDENCE_ROOT/repair-valid"
 
 # The configured cap is enforced by the production wave runner, not merely
 # mentioned in prose. Cap one and cap two both wait before the next launch
@@ -857,8 +970,8 @@ uberdev_unwind_child() {
   case "$1" in *second.status) return 9 ;; *) return 0 ;; esac
 }
 printf '%s\n' \
-  '{"edge":"first.edge","instance":"first","inputs":{},"risks":[]}' \
-  '{"edge":"second.edge","instance":"second","inputs":{},"risks":[]}' >"$run/records"
+  '{"edge":"first.edge","index":1,"instance":"first","inputs":{},"risks":[]}' \
+  '{"edge":"second.edge","index":2,"instance":"second","inputs":{},"risks":[]}' >"$run/records"
 set +e
 "$fanout" "$run/records" "$run/descriptors" "$run/launched" 29 >"$run/stdout" 2>"$run/stderr"
 rc=$?
@@ -911,9 +1024,9 @@ uberdev_unwind_child() {
   case "$1" in *wait-fail-first.status) return 9 ;; *) return 0 ;; esac
 }
 printf '%s\n' \
-  "{\"edge\":\"first.edge\",\"status\":\"$run/ok.status\",\"result\":\"$run/ok.result\"}" \
-  "{\"edge\":\"second.edge\",\"status\":\"$run/wait-fail-first.status\",\"result\":\"$run/wait-fail-first.result\"}" \
-  "{\"edge\":\"third.edge\",\"status\":\"$run/wait-fail-second.status\",\"result\":\"$run/wait-fail-second.result\"}" >"$run/launched"
+  "{\"edge\":\"first.edge\",\"index\":1,\"instance\":\"first\",\"status\":\"$run/ok.status\",\"result\":\"$run/ok.result\"}" \
+  "{\"edge\":\"second.edge\",\"index\":2,\"instance\":\"second\",\"status\":\"$run/wait-fail-first.status\",\"result\":\"$run/wait-fail-first.result\"}" \
+  "{\"edge\":\"third.edge\",\"index\":3,\"instance\":\"third\",\"status\":\"$run/wait-fail-second.status\",\"result\":\"$run/wait-fail-second.result\"}" >"$run/launched"
 unset FAILED_REVIEW_EDGE FAILED_REVIEW_INDEX
 set +e
 if [ "$flavor" = post ]; then
@@ -954,9 +1067,9 @@ uberdev_child_validate_phase1_review_result() {
 }
 uberdev_unwind_child() { return 0; }
 printf '%s\n' \
-  "{\"edge\":\"first.edge\",\"status\":\"$run/first.status\",\"result\":\"$run/first.result\"}" \
-  "{\"edge\":\"second.edge\",\"status\":\"$run/second.status\",\"result\":\"$run/invalid.result\"}" \
-  "{\"edge\":\"third.edge\",\"status\":\"$run/third.status\",\"result\":\"$run/third.result\"}" >"$run/launched"
+  "{\"edge\":\"first.edge\",\"index\":1,\"instance\":\"first\",\"status\":\"$run/first.status\",\"result\":\"$run/first.result\"}" \
+  "{\"edge\":\"second.edge\",\"index\":2,\"instance\":\"second\",\"status\":\"$run/second.status\",\"result\":\"$run/invalid.result\"}" \
+  "{\"edge\":\"third.edge\",\"index\":3,\"instance\":\"third\",\"status\":\"$run/third.status\",\"result\":\"$run/third.result\"}" >"$run/launched"
 set +e
 post_review_wait_all "$run/launched" 31 "$run/failed"
 rc=$?
@@ -982,8 +1095,8 @@ jq() {
 }
 uberdev_child_validate_phase1_review_result() { return 2; }
 printf '%s\n' \
-  "{\"edge\":\"first.edge\",\"status\":\"$run/first.status\",\"result\":\"$run/first.result\"}" \
-  "{\"edge\":\"second.edge\",\"status\":\"$run/second.status\",\"result\":\"$run/second.result\"}" >"$run/ledger-failure.launched"
+  "{\"edge\":\"first.edge\",\"index\":1,\"instance\":\"first\",\"status\":\"$run/first.status\",\"result\":\"$run/first.result\"}" \
+  "{\"edge\":\"second.edge\",\"index\":2,\"instance\":\"second\",\"status\":\"$run/second.status\",\"result\":\"$run/second.result\"}" >"$run/ledger-failure.launched"
 set +e
 post_review_wait_all "$run/ledger-failure.launched" 31 "$run/ledger-failure.failed"
 rc=$?
@@ -1022,7 +1135,7 @@ jq() {
   command "$real_jq" "$@"
 }
 printf '%s\n' \
-  "{\"edge\":\"first.edge\",\"status\":\"$run/first.status\",\"result\":\"$run/first.result\"}" \
+  "{\"edge\":\"first.edge\",\"index\":1,\"instance\":\"first\",\"status\":\"$run/first.status\",\"result\":\"$run/first.result\"}" \
   >"$run/launched"
 set +e
 post_review_wait_all "$run/launched" 31 "$run/failed"

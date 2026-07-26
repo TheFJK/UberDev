@@ -260,7 +260,7 @@ assert_in_section "$AGENT_MD" '^## Return contract' '^## Refusal triggers' \
 
 # O2.2 — integer regex guard on $pr_number (defence-in-depth per security Note A)
 assert_grep "$AGENT_MD" \
-  'pr_number.*=~.*\^\[0-9\]\+\$|=~ \^\[0-9\]\+\$' \
+  'pr_number.*=~.*\^\[1-9\]\[0-9\]\*\$|=~ \^\[1-9\]\[0-9\]\*\$' \
   'O2.2 — agent enforces integer regex guard on $pr_number before gh pr view (security Note A)'
 
 # O4.1 — return contract documents is_transient on blocked_by_dedupe[] entries
@@ -472,6 +472,118 @@ assert_no_grep "$AGENT_MD" 'Search bucket \(30 req/min, 1000/hr authenticated\)'
   'S16.9 — Search prose does not conflate the separate code-search hourly limit'
 assert_no_grep "$PACKAGED_AGENT_TOML" 'Search bucket \(30 req/min, 1000/hr authenticated\)' \
   'S16.10 — packaged Codex agent preserves the corrected Search-bucket contract'
+
+### Suite 17: routed origin variants + exact PR binding ----------
+echo
+echo "### Suite 17: routed origin variants and exact PR binding"
+assert_in_section "$AGENT_MD" '^## Inputs' '^## Tools authorised' \
+  'review_pr\.ci\.defer_refusal.*exact three-field|exact three-field.*review_pr\.ci\.defer_refusal' \
+  'S17.1 — CI-refusal dispatch has a discriminated exact input contract'
+assert_in_section "$AGENT_MD" '^## Inputs' '^## Tools authorised' \
+  'review_pr\.defer\.findings.*review_pr\.ci\.defer_refusal|discriminated union' \
+  'S17.2 — normal and CI-refusal inputs share one discriminated origin contract'
+assert_grep "$AGENT_MD" 'gh pr view.*--repo.*repo_slug.*headRefOid' \
+  'S17.3 — live PR head lookup is explicitly repository-bound'
+assert_grep "$AGENT_MD" 'pr_commit_sha.*=.*local_head|local_head.*pr_commit_sha' \
+  'S17.4 — live PR head must equal reviewed local HEAD'
+assert_no_grep "$AGENT_MD" '\[ -n "\$pr_number" \]' \
+  'S17.5 — PR-only body branches do not treat standalone zero as a PR'
+assert_grep "$AGENT_MD" '\[ "\$pr_number" -gt 0 \]' \
+  'S17.6 — PR-only body branches require pr_number greater than zero'
+
+ORIGIN_TMP="$(mktemp -d)"
+ORIGIN_REPO="$ORIGIN_TMP/repo"
+mkdir -p "$ORIGIN_REPO"
+git -C "$ORIGIN_REPO" init -q
+git -C "$ORIGIN_REPO" config user.email fixture@example.invalid
+git -C "$ORIGIN_REPO" config user.name Fixture
+printf 'fixture\n' >"$ORIGIN_REPO/file"
+git -C "$ORIGIN_REPO" add file
+git -C "$ORIGIN_REPO" commit -qm fixture
+ORIGIN_HEAD="$(git -C "$ORIGIN_REPO" rev-parse HEAD)"
+
+extract_origin_helper() {
+  local source="$1" output="$2"
+  awk '/^findings_derive_review_origin\(\) \{/{active=1} active{print} active && /^\}/{exit}' "$source" >"$output"
+}
+extract_origin_helper "$AGENT_MD" "$ORIGIN_TMP/canonical.sh"
+python3 -I -B - "$PACKAGED_AGENT_TOML" "$ORIGIN_TMP/packaged.md" <<'PY'
+import pathlib,sys,tomllib
+source=tomllib.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+pathlib.Path(sys.argv[2]).write_text(source['developer_instructions'],encoding='utf-8')
+PY
+extract_origin_helper "$ORIGIN_TMP/packaged.md" "$ORIGIN_TMP/packaged.sh"
+
+ORIGIN_RUNTIME_FAILURES=0
+for helper in "$ORIGIN_TMP/canonical.sh" "$ORIGIN_TMP/packaged.sh"; do
+  ORIGIN_GH_LOG="$ORIGIN_TMP/$(basename "$helper").gh"
+  : >"$ORIGIN_GH_LOG"
+  set +e
+  ORIGIN_OUTPUT="$(
+    ORIGIN_HEAD="$ORIGIN_HEAD" ORIGIN_GH_LOG="$ORIGIN_GH_LOG" \
+    bash -c '
+      . "$1"
+      gh() {
+        printf "%s\n" "$*" >>"$ORIGIN_GH_LOG"
+        case "${ORIGIN_MODE:-match}" in
+          match) printf "%s\n" "$ORIGIN_HEAD" ;;
+          mismatch) printf "%040d\n" 0 ;;
+          malformed) printf "not-a-sha\n" ;;
+        esac
+      }
+      findings_derive_review_origin "$2" 7 20260726-010203-abcdef0 owner/repo
+    ' _ "$helper" "$ORIGIN_REPO"
+  )"
+  ORIGIN_MATCH_RC=$?
+  ORIGIN_MODE=mismatch ORIGIN_HEAD="$ORIGIN_HEAD" ORIGIN_GH_LOG="$ORIGIN_GH_LOG" \
+    bash -c '. "$1"; gh(){ printf "%s\n" "$*" >>"$ORIGIN_GH_LOG"; printf "%040d\n" 0; }; findings_derive_review_origin "$2" 7 20260726-010203-abcdef0 owner/repo' _ "$helper" "$ORIGIN_REPO"
+  ORIGIN_MISMATCH_RC=$?
+  ORIGIN_MODE=malformed ORIGIN_HEAD="$ORIGIN_HEAD" ORIGIN_GH_LOG="$ORIGIN_GH_LOG" \
+    bash -c '. "$1"; gh(){ printf "%s\n" "$*" >>"$ORIGIN_GH_LOG"; printf "not-a-sha\n"; }; findings_derive_review_origin "$2" 7 20260726-010203-abcdef0 owner/repo' _ "$helper" "$ORIGIN_REPO"
+  ORIGIN_MALFORMED_RC=$?
+  set +e
+  printf '%s' "$ORIGIN_OUTPUT" | jq -e --arg sha "$ORIGIN_HEAD" \
+    '.origin_kind=="pr" and .repo_slug=="owner/repo" and .pr_commit_sha==$sha and .source_ref==""' >/dev/null \
+    || ORIGIN_RUNTIME_FAILURES=$((ORIGIN_RUNTIME_FAILURES + 1))
+  [ "$ORIGIN_MATCH_RC" -eq 0 ] || ORIGIN_RUNTIME_FAILURES=$((ORIGIN_RUNTIME_FAILURES + 1))
+  [ "$ORIGIN_MISMATCH_RC" -ne 0 ] || ORIGIN_RUNTIME_FAILURES=$((ORIGIN_RUNTIME_FAILURES + 1))
+  [ "$ORIGIN_MALFORMED_RC" -ne 0 ] || ORIGIN_RUNTIME_FAILURES=$((ORIGIN_RUNTIME_FAILURES + 1))
+  grep -q 'pr view 7 --repo owner/repo --json headRefOid --jq .headRefOid' "$ORIGIN_GH_LOG" \
+    || ORIGIN_RUNTIME_FAILURES=$((ORIGIN_RUNTIME_FAILURES + 1))
+  ! grep -Eq 'issue (create|comment)|label create' "$ORIGIN_GH_LOG" \
+    || ORIGIN_RUNTIME_FAILURES=$((ORIGIN_RUNTIME_FAILURES + 1))
+done
+if [ "$ORIGIN_RUNTIME_FAILURES" -eq 0 ]; then
+  echo "  PASS  S17.7 — canonical and generated origins accept exact head, reject mismatch/malformed, and perform no writes"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S17.7 — origin runtime failures=$ORIGIN_RUNTIME_FAILURES"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$ORIGIN_TMP"
+
+### Suite 18: disposition artifacts are aggregate-bound ----------
+echo
+echo "### Suite 18: disposition artifact binding"
+assert_in_section "$AGENT_MD" '^3\. \*\*Parse aggregates' '^4\. \*\*Route by severity' \
+  'same canonical run directory|same canonical run' \
+  'S18.1 — disposition path is constrained to the aggregate run directory'
+assert_in_section "$AGENT_MD" '^3\. \*\*Parse aggregates' '^4\. \*\*Route by severity' \
+  'phase1-disposition\.json' \
+  'S18.2 — disposition basenames are phase-specific'
+assert_in_section "$AGENT_MD" '^3\. \*\*Parse aggregates' '^4\. \*\*Route by severity' \
+  'phase2-disposition\.json' \
+  'S18.2b — phase-2 disposition basename is fixed'
+assert_in_section "$AGENT_MD" '^3\. \*\*Parse aggregates' '^4\. \*\*Route by severity' \
+  'aggregate_sha256' \
+  'S18.3 — disposition schema binds digest and finding triples'
+assert_in_section "$AGENT_MD" '^3\. \*\*Parse aggregates' '^4\. \*\*Route by severity' \
+  'finding_index.*location.*summary_sha256' \
+  'S18.3b — disposition join triple is explicit'
+assert_in_section "$AGENT_MD" '^3\. \*\*Parse aggregates' '^4\. \*\*Route by severity' \
+  'device,inode,size,mtime_ns|device.*inode.*size.*mtime' \
+  'S18.4 — replacement is rejected by stable file identity'
+assert_in_section "$AGENT_MD" '^3\. \*\*Parse aggregates' '^4\. \*\*Route by severity' \
+  'never re-read|already validated in-memory bytes' \
+  'S18.5 — validated aggregate/disposition bytes are not re-read mutably'
 
 echo
 echo "## Summary"

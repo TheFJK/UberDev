@@ -214,6 +214,45 @@ assert_no_grep "$REVIEW_PR" 'CI_CLASSIFICATION_PATH="\$RESEARCH_DIR_ABS/ci-class
 assert_grep "$REVIEW_PR" 'os\.write\(fd,payload\)' \
   "S10.10c — refusal aggregate serializes a concrete envelope and finding row"
 
+CLASSIFY_LIFECYCLE_FIXTURE="$(mktemp)"
+CLASSIFY_LIFECYCLE_LOG="$(mktemp)"
+awk '
+  /^[[:space:]]*CI_CLASSIFY_INPUTS="/ { capture=1 }
+  capture && /^[[:space:]]*CI_CLASSIFICATION_PATH="/ { exit }
+  capture { sub(/^[[:space:]]{4}/,""); print }
+' "$REVIEW_PR" >"$CLASSIFY_LIFECYCLE_FIXTURE"
+cat >>"$CLASSIFY_LIFECYCLE_FIXTURE" <<'SH'
+review_child_result_path() { printf 'result-discovery\n' >>"$CLASSIFY_LIFECYCLE_LOG"; }
+route_classifier() { printf 'routing\n' >>"$CLASSIFY_LIFECYCLE_LOG"; }
+dispatch_fixer() { printf 'fixer\n' >>"$CLASSIFY_LIFECYCLE_LOG"; }
+review_child_result_path
+route_classifier
+dispatch_fixer
+SH
+set +e
+CLASSIFY_LIFECYCLE_LOG="$CLASSIFY_LIFECYCLE_LOG" \
+PR_NUMBER=1 CI_RUN_ID=123 CI_LOG_ARTIFACT_PATH=/tmp/log RUN_ID=fixture \
+CI_FIX_LOOP_ITER=2 RESEARCH_DIR_ABS=/tmp/research REVIEW_PR_TIMEOUT=9 \
+bash -c '
+  review_json_string() { printf "\"%s\"" "$1"; }
+  uberdev_child_inputs_build() { printf "{}"; }
+  uberdev_child_instance_id() { printf "%s" "$1"; }
+  review_child_single() { printf "child\n" >>"$CLASSIFY_LIFECYCLE_LOG"; return 37; }
+  audit() { printf "audit:%s:%s:%s\n" "$1" "$2" "$3" >>"$CLASSIFY_LIFECYCLE_LOG"; }
+  . "$1"
+' _ "$CLASSIFY_LIFECYCLE_FIXTURE"
+CLASSIFY_LIFECYCLE_RC=$?
+set +e
+if [ "$CLASSIFY_LIFECYCLE_RC" -eq 1 ] \
+    && grep -q '^child$' "$CLASSIFY_LIFECYCLE_LOG" \
+    && grep -q 'classifier_child_failed.*exit_code=37' "$CLASSIFY_LIFECYCLE_LOG" \
+    && ! grep -Eq 'result-discovery|routing|fixer' "$CLASSIFY_LIFECYCLE_LOG"; then
+  echo "  PASS  S10.10a3 — classifier lifecycle failure records rc=37 and blocks discovery, routing, and fixer"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.10a3 — classifier lifecycle failure reached a downstream canary"; FAIL=$((FAIL + 1))
+fi
+rm -f "$CLASSIFY_LIFECYCLE_FIXTURE" "$CLASSIFY_LIFECYCLE_LOG"
+
 CLASSIFY_HELPER="$(mktemp)"
 CLASSIFY_CASE="$(mktemp)"
 awk '

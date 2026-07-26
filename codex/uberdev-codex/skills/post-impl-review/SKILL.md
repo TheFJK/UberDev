@@ -144,15 +144,17 @@ PY
 }
 
 post_review_record() {
-  local edge="$1" instance="$2" inputs="$3" risks="$4" path="$5"
+  local edge="$1" instance="$2" inputs="$3" risks="$4" path="$5" roster_index="$6"
   if command -v uberdev_child_inputs_validate >/dev/null 2>&1; then
     inputs="$(uberdev_child_inputs_validate "$edge" "$inputs")" || return 2
   fi
-  python3 -I -B - "$edge" "$instance" "$inputs" "$risks" "$path" <<'PY'
+  python3 -I -B - "$edge" "$instance" "$inputs" "$risks" "$path" "$roster_index" <<'PY'
 import json,os,sys
-edge,instance,inputs,risks,path=sys.argv[1:]
+edge,instance,inputs,risks,path,index=sys.argv[1:]
+index=int(index)
+if index < 1: raise SystemExit(2)
 with open(path,'a') as f:
- f.write(json.dumps({'edge':edge,'instance':instance,'inputs':json.loads(inputs),'risks':json.loads(risks)},sort_keys=True,separators=(',',':'))+'\n')
+ f.write(json.dumps({'edge':edge,'index':index,'instance':instance,'inputs':json.loads(inputs),'risks':json.loads(risks)},sort_keys=True,separators=(',',':'))+'\n')
  f.flush(); os.fsync(f.fileno())
 PY
 }
@@ -163,8 +165,13 @@ import json,sys
 path,expected,*allowed=sys.argv[1:]
 try:
  expected=int(expected); rows=[json.loads(line) for line in open(path,encoding='utf-8') if line.strip()]
- edges=[row['edge'] for row in rows]
- if expected<0 or len(rows)!=expected or len(set(edges))!=expected or any(edge not in allowed for edge in edges): raise ValueError()
+ pairs=[(row['edge'],row['index']) for row in rows]
+ allowed_pairs={(edge,index) for index,edge in enumerate(allowed,1)}
+ if (expected<0 or len(rows)!=expected or len(set(pairs))!=expected
+     or len({row['edge'] for row in rows})!=expected
+     or len({row['index'] for row in rows})!=expected
+     or any(type(row['index']) is not int or (row['edge'],row['index']) not in allowed_pairs for row in rows)):
+  raise ValueError()
 except Exception: raise SystemExit(2)
 PY
 }
@@ -193,21 +200,21 @@ post_review_unwind_ledger() {
   [ "$cleanup_failed" -eq 0 ] || return 70
 }
 post_review_fanout() {
-  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff result status receipt dispatch_rc ledger_rc cleanup_rc
+  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge index instance inputs risks handoff result status receipt dispatch_rc ledger_rc cleanup_rc
   local handoffs=()
   post_review_init_ledger "$descriptors" || return 2
   post_review_init_ledger "$launched" || return 2
   while IFS= read -r row; do
-    edge="$(jq -r .edge <<<"$row")"; instance="$(jq -r .instance <<<"$row")"
+    edge="$(jq -r .edge <<<"$row")"; index="$(jq -r .index <<<"$row")"; instance="$(jq -r .instance <<<"$row")"
     inputs="$(jq -c .inputs <<<"$row")"; risks="$(jq -c .risks <<<"$row")"
     uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks" >/dev/null || return $?
-    jq -cn --arg edge "$edge" --arg handoff "$UBERDEV_CHILD_HANDOFF" --arg result "$UBERDEV_CHILD_RESULT" --arg status "$UBERDEV_CHILD_STATUS" \
-      '{edge:$edge,handoff:$handoff,result:$result,status:$status}' >>"$descriptors" || return $?
+    jq -cn --arg edge "$edge" --argjson index "$index" --arg instance "$instance" --arg handoff "$UBERDEV_CHILD_HANDOFF" --arg result "$UBERDEV_CHILD_RESULT" --arg status "$UBERDEV_CHILD_STATUS" \
+      '{edge:$edge,index:$index,instance:$instance,handoff:$handoff,result:$result,status:$status}' >>"$descriptors" || return $?
     handoffs+=("$UBERDEV_CHILD_HANDOFF")
   done <"$records"
   uberdev_preflight_child_batch "${handoffs[@]}" || return $?
   while IFS= read -r row; do
-    edge="$(jq -r .edge <<<"$row")"; handoff="$(jq -r .handoff <<<"$row")"
+    edge="$(jq -r .edge <<<"$row")"; index="$(jq -r .index <<<"$row")"; instance="$(jq -r .instance <<<"$row")"; handoff="$(jq -r .handoff <<<"$row")"
     result="$(jq -r .result <<<"$row")"; status="$(jq -r .status <<<"$row")"
     if receipt="$(uberdev_dispatch_child "$edge" "$handoff" "$result" "$status")"; then
       :
@@ -216,8 +223,8 @@ post_review_fanout() {
       post_review_unwind_ledger "$launched" "$timeout_s" "$edge" "$dispatch_rc" || return 70
       return "$dispatch_rc"
     fi
-    if jq -cn --arg edge "$edge" --arg receipt "$receipt" --arg result "$result" --arg status "$status" \
-      '{edge:$edge,receipt:$receipt,result:$result,status:$status}' >>"$launched"; then
+    if jq -cn --arg edge "$edge" --argjson index "$index" --arg instance "$instance" --arg receipt "$receipt" --arg result "$result" --arg status "$status" \
+      '{edge:$edge,index:$index,instance:$instance,receipt:$receipt,result:$result,status:$status}' >>"$launched"; then
       :
     else
       ledger_rc=$?; cleanup_rc=0
@@ -229,23 +236,22 @@ post_review_fanout() {
   done <"$descriptors"
 }
 post_review_wait_all() {
-  local launched="$1" timeout_s="$2" failed_path="${3:-}" index_offset="${4:-0}" row edge status result wait_rc validation_rc ledger_rc unwind_rc first_rc=0 valid_count=0 format_failures=0
+  local launched="$1" timeout_s="$2" failed_path="${3:-}" index_offset="${4:-0}" row edge index instance status result wait_rc validation_rc ledger_rc unwind_rc first_rc=0 valid_count=0 format_failures=0
   local validated_result validation_digest
-  local index="$index_offset"
   POST_REVIEW_VALID_COUNT=0
   POST_REVIEW_FORMAT_FAILURE_COUNT=0
   POST_REVIEW_INFRA_FAILURE=0
   if [ -n "$failed_path" ] && ! post_review_init_ledger "$failed_path"; then POST_REVIEW_INFRA_FAILURE=1; return 2; fi
   while IFS= read -r row; do
-    index=$((index + 1))
-    edge="$(jq -r .edge <<<"$row")"; status="$(jq -r .status <<<"$row")"; result="$(jq -r .result <<<"$row")"
+    edge="$(jq -r .edge <<<"$row")"; index="$(jq -r .index <<<"$row")"; instance="$(jq -r .instance <<<"$row")"
+    status="$(jq -r .status <<<"$row")"; result="$(jq -r .result <<<"$row")"
     if uberdev_wait_child "$status" "$result" "$timeout_s"; then
       validated_result="$(dirname "$result")/validated-result.md"
       if validation_digest="$(uberdev_child_validate_phase1_review_result "$result" "$CHANGED_PATHS_JSON" "$validated_result")"; then
         if ! [[ "$validation_digest" =~ ^[0-9a-f]{64}$ ]]; then
           validation_rc=2
-        elif jq -cn --arg edge "$edge" --argjson index "$index" --arg result "$validated_result" --arg sha256 "$validation_digest" \
-            '{edge:$edge,index:$index,result:$result,sha256:$sha256}' >>"$POST_REVIEW_VALIDATED_LEDGER"; then
+        elif jq -cn --arg edge "$edge" --argjson index "$index" --arg instance "$instance" --arg result "$validated_result" --arg sha256 "$validation_digest" \
+            '{edge:$edge,index:$index,instance:$instance,result:$result,sha256:$sha256}' >>"$POST_REVIEW_VALIDATED_LEDGER"; then
           valid_count=$((valid_count + 1))
           continue
         else
@@ -274,8 +280,8 @@ post_review_wait_all() {
         [ "$first_rc" -ne 0 ] || first_rc="${validation_rc:-2}"
         continue
       fi
-      if jq -cn --arg edge "$edge" --argjson index "$index" --arg status "$status" --arg result "$result" \
-          '{edge:$edge,index:$index,status:$status,result:$result}' >>"$failed_path"; then
+      if jq -cn --arg edge "$edge" --argjson index "$index" --arg instance "$instance" --arg status "$status" --arg result "$result" \
+          '{edge:$edge,index:$index,instance:$instance,status:$status,result:$result}' >>"$failed_path"; then
         format_failures=$((format_failures + 1))
       else
         ledger_rc=$?
@@ -403,7 +409,7 @@ for EDGE_ID in "${REVIEW_EDGES[@]}"; do
       criteria_path "$(post_review_json_string "$CRITERIA_PATH")" \
       emphasis "$EMPHASIS_JSON")"
   fi
-  post_review_record "$EDGE_ID" "$INSTANCE" "$INPUTS_JSON" '[]' "$REVIEW_RECORDS" || exit 2
+  post_review_record "$EDGE_ID" "$INSTANCE" "$INPUTS_JSON" '[]' "$REVIEW_RECORDS" "$REVIEW_INDEX" || exit 2
 done
 REVIEW_FAILED="$RESEARCH_DIR_ABS/post-review.failed"
 REVIEW_WAVE_BLOCKED=0
@@ -484,6 +490,16 @@ that rejects malformed fields and APPROVE-with-blocker contradictions.
 
 Failure handling is fail-closed. Only a malformed result from a child that reached a proven terminal state with no retained lease is recorded by stable edge and roster index for one format-repair retry using the same edge and a fresh `attempt02` instance whose inputs add `format_retry: true`. Dispatch, wait, supervision, failure-ledger, or unwind failures block the wave immediately and are never retried as formatting defects. If any repaired return is still BLOCKED or unparseable, suppress the ordinary aggregate and terminate `/review-pr` before fixer, Phase 2, deferred-finding, or trust dispatch. Never drop a reviewer and continue with N-1 evidence.
 
+The evidence ledger is independently roster-bound. Every row carries the
+stable edge, its original index in `REVIEW_EDGES`, the exact launched child
+instance, the child-owned `validated-result.md` path derived from that
+instance's launched provider-result directory, and the validated digest.
+Repair attempts retain the failed row's original edge/index while minting a
+fresh instance. The final gate requires the exact edge/index roster, one
+matching launched instance per row, and unique canonical paths and file
+identities; duplicate indices, duplicate/hard-linked artifacts, foreign paths,
+and digest replacement all fail closed.
+
 ```bash uberdev-executable
 FORMAT_EXAMPLE_PATH="${FORMAT_EXAMPLE_PATH:-$CRITERIA_PATH}"
 REPAIR_PREFIX="$RESEARCH_DIR_ABS/post-review-repair"
@@ -493,10 +509,10 @@ if [ "$REVIEW_WAVE_BLOCKED" -eq 0 ] && [ -s "$REVIEW_FAILED" ]; then
   while IFS= read -r FAILED_REVIEW_ROW; do
     FAILED_REVIEW_EDGE="$(jq -r .edge <<<"$FAILED_REVIEW_ROW")"
     FAILED_REVIEW_INDEX="$(jq -r .index <<<"$FAILED_REVIEW_ROW")"
-    FAILED_REVIEW_INPUTS="$(jq -ce --arg edge "$FAILED_REVIEW_EDGE" 'select(.edge == $edge) | .inputs' "$REVIEW_RECORDS")"
+    FAILED_REVIEW_INPUTS="$(jq -ce --arg edge "$FAILED_REVIEW_EDGE" --argjson index "$FAILED_REVIEW_INDEX" 'select(.edge == $edge and .index == $index) | .inputs' "$REVIEW_RECORDS")"
     REPAIR_INPUTS="$(uberdev_child_inputs_format_retry "$FAILED_REVIEW_EDGE" "$FAILED_REVIEW_INPUTS" "$FORMAT_EXAMPLE_PATH")"
     REPAIR_INSTANCE="$(uberdev_child_instance_id "post-review-${RUN_ID}-r${FAILED_REVIEW_INDEX}-iter${REVIEW_ITERATION}-attempt02")" || exit 2
-    post_review_record "$FAILED_REVIEW_EDGE" "$REPAIR_INSTANCE" "$REPAIR_INPUTS" '[]' "$REPAIR_PREFIX.records" || { REVIEW_WAVE_BLOCKED=1; break; }
+    post_review_record "$FAILED_REVIEW_EDGE" "$REPAIR_INSTANCE" "$REPAIR_INPUTS" '[]' "$REPAIR_PREFIX.records" "$FAILED_REVIEW_INDEX" || { REVIEW_WAVE_BLOCKED=1; break; }
   done <"$REVIEW_FAILED"
   if [ "$REVIEW_WAVE_BLOCKED" -eq 0 ] && ! post_review_roster_complete "$REPAIR_PREFIX.records" "$REVIEW_FORMAT_FAILURE_COUNT" "${REVIEW_EDGES[@]}"; then
     REVIEW_WAVE_BLOCKED=1
@@ -512,26 +528,58 @@ if [ "$REVIEW_WAVE_BLOCKED" -eq 0 ] && [ -s "$REVIEW_FAILED" ]; then
 fi
 if [ $((REVIEW_INITIAL_VALID_COUNT + REVIEW_REPAIR_VALID_COUNT)) -ne "$REVIEW_EXPECTED_COUNT" ]; then REVIEW_WAVE_BLOCKED=1; fi
 post_review_validated_evidence_complete() {
-  python3 -I -B - "$1" "$2" "${REVIEW_EDGES[@]}" <<'PY'
+  python3 -I -B - "$1" "$2" "$3" "$4" "${REVIEW_EDGES[@]}" <<'PY'
 import hashlib,json,os,re,stat,sys
-ledger,expected,*allowed=sys.argv[1:]; expected=int(expected)
+ledger,expected,initial_ledger,repair_ledger,*allowed=sys.argv[1:]; expected=int(expected)
+def fail(reason,row=None):
+ edge=(row or {}).get('edge','unknown')
+ index=(row or {}).get('index','unknown')
+ print(f'post_review_evidence_failure class={reason} edge={edge} index={index}',file=sys.stderr)
+ raise SystemExit(2)
 try:
  rows=[json.loads(line) for line in open(ledger,encoding='utf-8') if line.strip()]
- if len(rows)!=expected or len({row.get('edge') for row in rows})!=expected: raise ValueError()
- if {row.get('edge') for row in rows}!={edge for edge in allowed}: raise ValueError()
+ launched=[]
+ for source in (initial_ledger,repair_ledger):
+  if source and os.path.exists(source):
+   launched.extend(json.loads(line) for line in open(source,encoding='utf-8') if line.strip())
+ allowed_pairs={(edge,index) for index,edge in enumerate(allowed,1)}
+ if (len(rows)!=expected or len({row.get('edge') for row in rows})!=expected
+     or len({row.get('index') for row in rows})!=expected
+     or {(row.get('edge'),row.get('index')) for row in rows}!=allowed_pairs):
+  fail('malformed-ledger')
+ seen_paths=set(); seen_inodes=set()
  for row in rows:
-  if set(row)!={'edge','index','result','sha256'} or type(row['index']) is not int: raise ValueError()
+  if set(row)!={'edge','index','instance','result','sha256'} or type(row['index']) is not int:
+   fail('malformed-ledger',row)
+  matches=[candidate for candidate in launched
+           if candidate.get('edge')==row['edge']
+           and candidate.get('index')==row['index']
+           and candidate.get('instance')==row['instance']]
+  if len(matches)!=1: fail('roster-mismatch',row)
+  launched_result=matches[0].get('result')
+  if not isinstance(launched_result,str) or not os.path.isabs(launched_result):
+   fail('unsafe-artifact',row)
+  expected_result=os.path.join(os.path.dirname(launched_result),'validated-result.md')
   path=row['result']; digest=row['sha256']; entry=os.lstat(path)
-  if (not os.path.isabs(path) or os.path.basename(path)!='validated-result.md'
+  canonical_path=os.path.realpath(path)
+  inode=(entry.st_dev,entry.st_ino)
+  if (not os.path.isabs(path) or path!=expected_result or canonical_path!=path
       or not re.fullmatch(r'[0-9a-f]{64}',digest or '') or stat.S_ISLNK(entry.st_mode)
       or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1
-      or (os.name!='nt' and stat.S_IMODE(entry.st_mode)!=0o400)): raise ValueError()
+      or (os.name!='nt' and stat.S_IMODE(entry.st_mode)!=0o400)):
+   fail('unsafe-artifact',row)
+  if canonical_path in seen_paths or inode in seen_inodes: fail('duplicate-artifact',row)
+  seen_paths.add(canonical_path); seen_inodes.add(inode)
   with open(path,'rb') as stream: payload=stream.read(1048577)
-  if len(payload)>1048576 or hashlib.sha256(payload).hexdigest()!=digest: raise ValueError()
-except (OSError,UnicodeError,ValueError,json.JSONDecodeError): raise SystemExit(2)
+  if len(payload)>1048576 or hashlib.sha256(payload).hexdigest()!=digest:
+   fail('digest-mismatch',row)
+except SystemExit: raise
+except (OSError,UnicodeError,ValueError,TypeError,json.JSONDecodeError):
+ fail('malformed-ledger')
 PY
 }
-if ! post_review_validated_evidence_complete "$POST_REVIEW_VALIDATED_LEDGER" "$REVIEW_EXPECTED_COUNT"; then REVIEW_WAVE_BLOCKED=1; fi
+if ! post_review_validated_evidence_complete "$POST_REVIEW_VALIDATED_LEDGER" "$REVIEW_EXPECTED_COUNT" \
+    "$REVIEW_LAUNCHED" "$REPAIR_PREFIX.launched"; then REVIEW_WAVE_BLOCKED=1; fi
 post_review_require_complete_wave() {
   local aggregate_path="${AGG_PATH:-$RESEARCH_DIR_ABS/post-impl-review-final.md}"
   if [ "${REVIEW_WAVE_BLOCKED:-1}" -eq 0 ] \
@@ -563,9 +611,13 @@ fi
 The executable boundary above gates the writer before interpreting any
 reviewer prose. A lifecycle failure or an exhausted format repair is not a
 review verdict and MUST NOT produce the ordinary six-row `Continue.` artifact.
-Aggregate only the byte-identical `validated-result.md` artifacts listed in
-`post-review.validated`; verify each recorded SHA-256 immediately before its
-artifact is read. Never re-read a provider-owned `result.md` during aggregation.
+Aggregate only the byte-identical, roster-bound `validated-result.md` artifacts
+listed in `post-review.validated`; verify each recorded SHA-256 immediately
+before its artifact is read. Never re-read a provider-owned `result.md` during
+aggregation. Evidence failures emit only the stable class
+`malformed-ledger`, `roster-mismatch`, `unsafe-artifact`,
+`duplicate-artifact`, or `digest-mismatch` plus the bounded edge/index (never a
+path or reviewer content).
 
 Aggregate the 6 returns into the table format below plus the bottom line `Aggregated: N blockers, M suggestions. Continue.`
 

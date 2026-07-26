@@ -92,4 +92,31 @@ if python3 -I -B "$INPUT_HELPER" --manifest "$TREE" build review_pr.review.corre
   echo "child-contract-v2: oversized RepoPathArray crossed the construction boundary" >&2
   exit 1
 fi
+
+# Exact immutable-input boundary: 49,152 serialized bytes are accepted and
+# 49,153 are rejected by the constructor (the dispatcher independently
+# enforces the same boundary).
+python3 -I -B - "$INPUT_HELPER" "$TREE" <<'PY'
+import importlib.util,json,pathlib,sys
+helper_path,manifest_path=sys.argv[1:]
+spec=importlib.util.spec_from_file_location("child_inputs",helper_path)
+module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+manifest=json.loads(pathlib.Path(manifest_path).read_text())
+paths=[f"src/p{index:02d}-"+("x"*2990)+".ts" for index in range(16)]
+accepted={"changed_paths":paths,"diff_path":"/tmp/diff","criteria_path":"/tmp/criteria","emphasis":[]}
+current=len(json.dumps(accepted,sort_keys=True,separators=(",",":")).encode())
+accepted["changed_paths"][-1]=accepted["changed_paths"][-1][:-3]+("x"*(49152-current))+".ts"
+rejected=json.loads(json.dumps(accepted))
+rejected["changed_paths"][-1]=rejected["changed_paths"][-1][:-3]+"x.ts"
+assert len(json.dumps(accepted,sort_keys=True,separators=(",",":")).encode())==49152
+assert len(json.dumps(rejected,sort_keys=True,separators=(",",":")).encode())==49153
+assert max(map(len,accepted["changed_paths"]))<=4096
+module.validate_inputs(manifest,"review_pr.review.correctness",accepted)
+try:
+    module.validate_inputs(manifest,"review_pr.review.correctness",rejected)
+except module.InputFailure:
+    pass
+else:
+    raise AssertionError("49,153-byte inputs crossed the constructor boundary")
+PY
 echo 'child-contract-v2: PASS'

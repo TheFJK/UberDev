@@ -11,7 +11,9 @@ You read run-aggregate artifacts produced by `uberdev:post-impl-review` (Phase 1
 
 ## Inputs (passed in your dispatch prompt)
 
-The `review_pr.defer.findings` routed edge has this exact six-field input contract:
+The routed input is a discriminated union selected by the manifest edge:
+
+`review_pr.defer.findings` has this exact six-field input contract:
 
 - `phase1_path` — post-impl-review aggregate path, or an empty string.
 - `phase2_path` — simplify aggregate path, or an empty string.
@@ -20,27 +22,52 @@ The `review_pr.defer.findings` routed edge has this exact six-field input contra
 - `working_dir` — absolute worktree root.
 - `pr_number` — non-negative integer PR number (`0` outside PR context).
 
-For this routed review edge, derive `run_id` from the validated aggregate parent directory and `repo_slug` from `gh repo view`. Derive the origin with `findings_derive_review_origin`: a positive `pr_number` binds `pr_commit_sha` to the live PR head and leaves `source_ref` empty; `pr_number=0` binds `pr_commit_sha` to the validated `working_dir` HEAD and sets `source_ref` to the validated standalone reference `/simplify run <run_id>`. Reject every other value. The fixed review defaults are `finding_label=review-pr-finding`, `finding_marker_slug=review-pr`, and `max_new=10`. Do not treat absent metadata as trusted handoff input.
+`review_pr.ci.defer_refusal` has this exact three-field input contract:
+
+- `phase1_path` — the command-owned `ci-refused-synthetic` aggregate.
+- `working_dir` — absolute worktree root.
+- `pr_number` — positive integer PR number.
+
+For either variant, derive `run_id` from the validated aggregate parent
+directory and derive `repo_slug` from `gh repo view`. Derive the origin with
+the same `findings_derive_review_origin` helper. A positive `pr_number` binds
+the validated repository slug, local `working_dir` HEAD, and the live PR
+`headRefOid`; all three must agree before any GitHub write. `pr_number=0` is
+accepted only for `review_pr.defer.findings`, binds `pr_commit_sha` to local
+HEAD, and sets `source_ref` to `/simplify run <run_id>`.
+`review_pr.ci.defer_refusal` derives the absent phase-2 and disposition inputs
+as empty strings and otherwise follows the same validation/write pipeline.
+Reject every other edge/field combination. The fixed review defaults are
+`finding_label=review-pr-finding`, `finding_marker_slug=review-pr`, and
+`max_new=10`. Do not treat absent metadata as trusted handoff input.
 
 ```bash uberdev-executable origin=findings-to-issues
 findings_derive_review_origin() {
-  local working_dir="$1" pr_number="$2" run_id="$3" canonical_root git_root pr_commit_sha source_ref
+  local working_dir="$1" pr_number="$2" run_id="$3" repo_slug="$4"
+  local canonical_root git_root local_head pr_commit_sha source_ref origin_kind
   case "$working_dir" in /*) ;; *) return 2 ;; esac
   [[ "$run_id" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]] || return 2
+  [[ "$repo_slug" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 2
   case "$pr_number" in ''|*[!0-9]*) return 2 ;; esac
   canonical_root="$(realpath "$working_dir")" || return 2
   [ "$(git -C "$canonical_root" rev-parse --is-inside-work-tree 2>/dev/null)" = true ] || return 2
   git_root="$(git -C "$canonical_root" rev-parse --show-toplevel 2>/dev/null)" || return 2
   [ "$(realpath "$git_root")" = "$canonical_root" ] || return 2
+  local_head="$(git -C "$canonical_root" rev-parse HEAD 2>/dev/null)" || return 2
+  [[ "$local_head" =~ ^[0-9a-f]{40}$ ]] || return 2
   if [ "$pr_number" -eq 0 ]; then
-    pr_commit_sha="$(git -C "$canonical_root" rev-parse HEAD 2>/dev/null)" || return 2
+    pr_commit_sha="$local_head"
     source_ref="/simplify run $run_id"
+    origin_kind=standalone
   else
-    pr_commit_sha="$(gh pr view "$pr_number" --json headRefOid --jq .headRefOid 2>/dev/null)" || return 2
+    pr_commit_sha="$(gh pr view "$pr_number" --repo "$repo_slug" --json headRefOid --jq .headRefOid 2>/dev/null)" || return 2
+    [ "$pr_commit_sha" = "$local_head" ] || return 2
     source_ref=""
+    origin_kind=pr
   fi
   [[ "$pr_commit_sha" =~ ^[0-9a-f]{40}$ ]] || return 2
-  printf '{"pr_commit_sha":"%s","source_ref":"%s"}\n' "$pr_commit_sha" "$source_ref"
+  printf '{"origin_kind":"%s","repo_slug":"%s","pr_commit_sha":"%s","source_ref":"%s"}\n' \
+    "$origin_kind" "$repo_slug" "$pr_commit_sha" "$source_ref"
 }
 ```
 
@@ -59,7 +86,43 @@ Explicit forbidden patterns:
 
 ## Process
 
-1. **Validate inputs and derive review metadata.** Verify `working_dir` resolves to an absolute path at the current git worktree root (`git -C "$working_dir" rev-parse --is-inside-work-tree` plus `--show-toplevel`). For each non-empty `phase*_path`, verify the file exists, resolves beneath `$working_dir/.uberdev/research/<RUN_ID>/`, and its first 128 bytes contain the literal string `<external-untrusted-input source="post-impl-review-aggregate">` (or `simplify-aggregate` for phase 2, or `ci-refused-synthetic` for the CI-REFUSED single-row dispatch path added in #116 / O5 — see `commands/review-pr.md` Step 6c.5, or `uberscan-aggregate` for the `/uberscan` whole-codebase audit path, or `testers-aggregate` for the `/uberdev:testers` adversarial QA audit path, or `uberthink-aggregate` for the `/uberthink` ideation-engine deliver path). All non-empty aggregate paths must share that exact parent; derive `run_id` from it and validate `^[0-9]{8}-[0-9]{6}-[a-f0-9]+$`. The accepted-source allow-list is the closed set `{post-impl-review-aggregate, simplify-aggregate, ci-refused-synthetic, uberscan-aggregate, ubersimplify-aggregate, testers-aggregate, uberthink-aggregate}`. The `/ubersimplify` whole-codebase fix command files its leftover (non-applied blocker) findings under `ubersimplify-aggregate`. The `/uberdev:testers` adversarial QA squad files its `verified: true` persona findings under `testers-aggregate` (`skills/testers-pipeline/report.py`). The `/uberthink` ideation engine files its top-ranked design candidate(s) under `uberthink-aggregate`. If either check fails OR both paths are empty, return `status: REFUSED` with `rationale: "input-malformed"`. On `review_pr.defer.findings`, derive and validate `repo_slug`, then call `findings_derive_review_origin "$working_dir" "$pr_number" "$run_id"` and parse only its exact JSON keys `pr_commit_sha` and `source_ref`; any derivation or parse failure is `status: REFUSED`, `rationale: "input-malformed"`, before any GitHub write. Source the secret-scan library: `source "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/secret-scan.sh"` — refuse with `rationale: "secret-scan-lib-unavailable"` if the source returns non-zero.
+1. **Validate the discriminated input and derive review metadata.** Accept only
+   the two exact variants in `## Inputs`; unknown or surplus fields are
+   malformed. For `review_pr.ci.defer_refusal`, require positive `pr_number`,
+   require the phase-1 envelope source to be `ci-refused-synthetic`, and derive
+   `phase2_path`, `phase1_disposition_path`, and
+   `phase2_disposition_path` as empty strings. Verify `working_dir` resolves to
+   an absolute path at the current git worktree root
+   (`git -C "$working_dir" rev-parse --is-inside-work-tree` plus
+   `--show-toplevel`). For each non-empty `phase*_path`, verify the file exists,
+   resolves beneath `$working_dir/.uberdev/research/<RUN_ID>/`, and its first
+   128 bytes contain the literal string
+   `<external-untrusted-input source="post-impl-review-aggregate">` (or
+   `simplify-aggregate` for phase 2, `ci-refused-synthetic` for the CI-REFUSED
+   variant, `uberscan-aggregate` for `/uberscan`, `testers-aggregate` for
+   `/uberdev:testers`, or `uberthink-aggregate` for `/uberthink`). All non-empty
+   aggregate paths must share that exact parent; derive `run_id` from it and
+   validate `^[0-9]{8}-[0-9]{6}-[a-f0-9]+$`. The accepted-source allow-list is
+   the closed set `{post-impl-review-aggregate, simplify-aggregate, ci-refused-synthetic, uberscan-aggregate, ubersimplify-aggregate, testers-aggregate, uberthink-aggregate}`.
+   The `/ubersimplify` whole-codebase fix command files its leftover
+   (non-applied blocker) findings under `ubersimplify-aggregate`. The
+   `/uberdev:testers` adversarial QA squad files its `verified: true` persona
+   findings under `testers-aggregate` (`skills/testers-pipeline/report.py`).
+   The `/uberthink` ideation engine files its top-ranked design candidate(s)
+   under `uberthink-aggregate`. If validation fails or both aggregate paths are
+   empty, return `status: REFUSED` with `rationale: "input-malformed"`.
+
+   Derive and validate `repo_slug` with
+   `gh repo view --json nameWithOwner --jq .nameWithOwner`, then call
+   `findings_derive_review_origin "$working_dir" "$pr_number" "$run_id" "$repo_slug"`.
+   Parse only its exact JSON keys `origin_kind`, `repo_slug`,
+   `pr_commit_sha`, and `source_ref`. The explicit `--repo "$repo_slug"` PR
+   lookup and local-HEAD equality check are mandatory; any derivation,
+   malformed output, repository mismatch, or remote-head mismatch is
+   `status: REFUSED`, `rationale: "input-malformed"`, before rate-limit, label,
+   issue, comment, author, or any other GitHub write. Source the secret-scan
+   library: `source "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/secret-scan.sh"` — refuse with
+   `rationale: "secret-scan-lib-unavailable"` if the source returns non-zero.
 
 2. **Rate-limit pre-flight (two buckets).** Fetch one canonical response and parse both integers locally so shell quoting, `gh --jq` output, or a partial second request cannot turn a healthy API into two empty values:
    ```bash
@@ -77,7 +140,43 @@ Explicit forbidden patterns:
 
    If either probe returns empty or non-numeric, emit one bounded diagnostic containing only `RATE_LIMIT_RC` plus the fixed class `request-failed` or `response-invalid`, then return `status: REFUSED` with `rationale: "rate-limit-probe-failed"`. Never include the response body in the diagnostic. Only successfully parsed integers may reach the budget comparison. If `CORE_REMAINING < (2 * max_new + 50)` OR `SEARCH_REMAINING < (max_new + 5)`, return `status: REFUSED` with `rationale: "rate-limit-budget-insufficient"`. The double-bucket guard prevents the silent-skip pathological case where parallel runs exhaust Search ahead of dispatch. Pattern shape mirrors the Step 6c.1 PROBE in `commands/review-pr.md` (the canonical rate-limit-floor pattern), extended to cover both buckets.
 
-3. **Parse aggregates.** For each non-empty aggregate path, extract `(file_path, line, summary, severity, disposition, agent_name, deferral_reason)` rows. Cross-reference each row's `(file_path, line, agent_name)` triple against the matching disposition YAML to determine the final `disposition` value (default `DEFERRED` if not present in disposition YAML). Wrap interpolation of aggregate content in the `<external-untrusted-input>` envelope when constructing any LLM prompt — but this agent does no further LLM dispatch, so envelope is verified at read time, not re-emitted.
+3. **Parse aggregates and bind disposition artifacts.** For each non-empty
+   aggregate path, read its bytes once and extract ordered
+   `(finding_index, file_path, line, summary, severity, disposition,
+   agent_name, deferral_reason)` rows. Compute
+   `summary_sha256=sha256(summary bytes)` for each row.
+
+   A non-empty disposition path is accepted only when all of these hold:
+
+   - its canonical parent is the same canonical run directory as its matching
+     aggregate, its basename is exactly `phase1-disposition.json` or
+     `phase2-disposition.json`, and `lstat` proves a non-symlink regular file
+     with link count one;
+   - its bounded bytes parse as one JSON object with exact top-level keys
+     `schema_version`, `phase`, `aggregate_sha256`, and
+     `findings_disposition`; `schema_version` is `1`, `phase` matches, and
+     `aggregate_sha256` equals the digest of the already-read aggregate bytes;
+   - each disposition row has exactly `finding_index`, `location`,
+     `summary_sha256`, `disposition`, `behavior_tag`, and `reason`; indices are
+     unique positive integers, enums are valid, and every
+     `(finding_index, location, summary_sha256)` triple exactly matches the
+     corresponding parsed aggregate row.
+
+   Snapshot `(device,inode,size,mtime_ns)` for aggregate and disposition files
+   before parsing, then re-check those identities immediately before the first
+   GitHub write. Replacement, hard-linking, schema drift, duplicate/foreign
+   triples, filename/parent mismatch, or digest mismatch is
+   `status: REFUSED`, `rationale: "input-malformed"`. Keep using the already
+   validated in-memory bytes; never re-read either file. An empty disposition
+   path means all matching rows default to `DEFERRED`; a non-empty invalid path
+   never silently falls back to `DEFERRED`.
+
+   Cross-reference each row by its validated
+   `(finding_index, location, summary_sha256)` triple to determine final
+   disposition. Wrap interpolation of aggregate content in the
+   `<external-untrusted-input>` envelope when constructing any LLM prompt — but
+   this agent does no further LLM dispatch, so the envelope is verified at read
+   time, not re-emitted.
 
 4. **Route by severity (RFC 0002 §3.1).** Apply the helper:
 
@@ -145,14 +244,14 @@ Explicit forbidden patterns:
           # failed-lookup-PR_AUTHOR so flaky auth does not retrigger N gh calls
           # across N BLOCKER findings.
           if [ "${PR_AUTHOR_RESOLVED:-0}" -eq 0 ]; then
-            if [[ ! "$pr_number" =~ ^[0-9]+$ ]]; then
+            if [[ ! "$pr_number" =~ ^[1-9][0-9]*$ ]]; then
               # security Note A — see Refusal triggers below.
               PR_AUTHOR=""
               author_lookup_failed=true
             else
               # Capture stderr alongside stdout; the diagnostic is part of the
               # return contract when rc != 0.
-              PR_AUTHOR_OUT=$(gh pr view "$pr_number" --json author --jq .author.login 2>&1)
+              PR_AUTHOR_OUT=$(gh pr view "$pr_number" --repo "$repo_slug" --json author --jq .author.login 2>&1)
               rc=$?
               if [ "$rc" -ne 0 ]; then
                 # Truncate the diagnostic to 200 chars (security Note B parity
@@ -183,7 +282,7 @@ Explicit forbidden patterns:
             mention_line=""
             assignee_args=()
           fi
-          if [ -n "$pr_number" ]; then
+          if [ "$pr_number" -gt 0 ]; then
             backref_line="Blocks: #${pr_number}"
           else
             backref_line=""
@@ -192,7 +291,7 @@ Explicit forbidden patterns:
         MAJOR)
           mention_line=""
           assignee_args=()
-          if [ -n "$pr_number" ]; then
+          if [ "$pr_number" -gt 0 ]; then
             backref_line="Related: PR #${pr_number}"
           else
             backref_line=""
