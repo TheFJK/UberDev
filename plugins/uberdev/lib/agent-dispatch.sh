@@ -1791,10 +1791,17 @@ uberdev_agent_dispatch() {
               :
             else
               identity_probe_rc=$?
-              _uberdev_agent_error "cannot verify process identity for $backend pid $handle (probe rc=$identity_probe_rc)"
-              _uberdev_agent_abort_after_launch "$manifest" "$lease" "$lease_identity" "$status_file" "$result_file" \
-                "$backend" "$handle" "$request_json" "$decision" process_identity_capture
-              return $?
+              if [ "$identity_probe_rc" -eq 1 ]; then
+                # The provider may have terminalized after the pre-capture probe.
+                terminal_event="$(_uberdev_agent_status_terminal_event \
+                  "$status_file" "$backend" "$handle" 2>/dev/null || true)"
+              fi
+              if [ -z "$terminal_event" ]; then
+                _uberdev_agent_error "cannot verify process identity for $backend pid $handle (probe rc=$identity_probe_rc)"
+                _uberdev_agent_abort_after_launch "$manifest" "$lease" "$lease_identity" "$status_file" "$result_file" \
+                  "$backend" "$handle" "$request_json" "$decision" process_identity_capture
+                return $?
+              fi
             fi
             ;;
         esac

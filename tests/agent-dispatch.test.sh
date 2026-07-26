@@ -1675,6 +1675,49 @@ if [ "$identity_dispatch_rc" -eq 0 ] || kill -0 "$IDENTITY_PID" 2>/dev/null \
   exit 1
 fi
 
+# An immediate-exit provider can publish a canonical terminal after the first
+# terminal probe but before native identity capture reports the PID absent.
+# That terminal is authoritative and must complete normal registration instead
+# of being rewritten as a process_identity_capture supervisory failure.
+IDENTITY_TERMINAL_RUN="$TMP/post-launch-identity-absent-terminal"
+mkdir -p "$IDENTITY_TERMINAL_RUN"
+printf 'identity absent terminal prompt\n' >"$IDENTITY_TERMINAL_RUN/prompt.txt"
+IDENTITY_TERMINAL_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-identity-absent-terminal","repository_id":"adapter-identity-absent-terminal-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":99,"issue_num":99,"capacity":1,"timeout_s":20},separators=(",",":")))' "$IDENTITY_TERMINAL_RUN")"
+eval "$(declare -f _uberdev_agent_process_identity | sed '1s/_uberdev_agent_process_identity/_real_identity_terminal_process_identity/')"
+_uberdev_agent_process_identity() {
+  if [ -f "$IDENTITY_TERMINAL_RUN/provider.pid" ] \
+      && [ "$1" = "$(cat "$IDENTITY_TERMINAL_RUN/provider.pid")" ]; then
+    printf 'terminal result\n' >"$IDENTITY_TERMINAL_RUN/result.md"
+    printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"%s"}\n' "$1" \
+      >"$IDENTITY_TERMINAL_RUN/status.json"
+    chmod 600 "$IDENTITY_TERMINAL_RUN/status.json"
+    : >"$IDENTITY_TERMINAL_RUN/terminal-published-during-identity"
+    return 1
+  fi
+  _real_identity_terminal_process_identity "$@"
+}
+_uberdev_agent_dispatch_backend() {
+  python3 -I -c 'pass' >/dev/null 2>&1 &
+  DISPATCH_ID="$!"; DISPATCH_LOG=""
+  printf '%s\n' "$DISPATCH_ID" >"$IDENTITY_TERMINAL_RUN/provider.pid"
+  wait "$DISPATCH_ID"
+  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" >"$6"
+  chmod 600 "$6"
+}
+uberdev_agent_dispatch "$IDENTITY_TERMINAL_REQUEST" "$IDENTITY_TERMINAL_RUN/prompt.txt" \
+  "$IDENTITY_TERMINAL_RUN/result.md" "$IDENTITY_TERMINAL_RUN/status.json"
+eval "$(declare -f _real_identity_terminal_process_identity | sed '1s/_real_identity_terminal_process_identity/_uberdev_agent_process_identity/')"
+[ -e "$IDENTITY_TERMINAL_RUN/terminal-published-during-identity" ]
+grep -q '"state":"completed"' "$IDENTITY_TERMINAL_RUN/status.json"
+python3 -I - "$IDENTITY_TERMINAL_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" <<'PY'
+import json,pathlib,sys
+rows=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+events=[row for row in rows if row.get('run_id')=='adapter-identity-absent-terminal']
+assert [row.get('event') for row in events]==['route_decided','agent_started','completed'],events
+PY
+! grep -R -q 'run_id=adapter-identity-absent-terminal' \
+  "$IDENTITY_TERMINAL_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
+
 # A provider can return a handle and then exit before rollback samples process
 # identity. Proven absence still terminalizes the run and releases its lease.
 EXITED_RUN="$TMP/post-launch-provider-already-exited"
