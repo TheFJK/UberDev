@@ -884,11 +884,15 @@ def secure_read(path,limit):
   os.close(parent_fd)
 try:
  snapshot=json.loads(secure_read(status_path,65536))
- allowed={"issue","tier","backend","state","exit_code","pid","log","result","worktree","branch","workspace_mode","process_identity","lease_generation"}
+ allowed={"issue","tier","backend","state","exit_code","pid","log","result","worktree","branch","workspace_mode","provider_exit_code","process_identity","lease_generation"}
  if not isinstance(snapshot,dict) or set(snapshot)-allowed: raise ValueError()
  if snapshot.get("backend")!=backend or str(snapshot.get("pid"))!=pid: raise ValueError()
  state=snapshot.get("state"); code=snapshot.get("exit_code")
  if isinstance(code,bool) or not isinstance(code,int): raise ValueError()
+ if "provider_exit_code" in snapshot:
+  provider_code=snapshot["provider_exit_code"]
+  if isinstance(provider_code,bool) or not isinstance(provider_code,int): raise ValueError()
+  if state!="failed" or code!=74: raise ValueError()
  if state=="completed":
   if code!=0 or not result_path or len(secure_read(result_path,16*1024*1024))==0: raise ValueError()
  elif state=="failed":

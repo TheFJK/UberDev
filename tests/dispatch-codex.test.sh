@@ -1289,15 +1289,15 @@ fi
 
 COMBINED_INSTANCE=review-provider-and-cleanup-failure-a1
 COMBINED_SLUG="$(UBERDEV_AGENT_INSTANCE_ID="$COMBINED_INSTANCE" bash -c '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"
-# This fixture tests dual-failure provenance, not immediate-terminal handoff;
-# keep the provider alive long enough for the detached session to register.
+# Keep the provider immediate so the launcher must accept the canonical
+# provider-plus-cleanup terminal receipt instead of relying on process timing.
 COMBINED_OUT="$(
   cd "$BEH_TMP/repo" && \
   PATH="$BEH_RUNTIME_PATH" \
   UBERDEV_TMPDIR="$BEH_TMP/tmp" \
   UBERDEV_AGENT_CHILD_OWNED=1 \
   UBERDEV_AGENT_INSTANCE_ID="$COMBINED_INSTANCE" \
-  CODEX_STUB_RC=42 CODEX_STUB_SLEEP=0.25 CODEX_STUB_DIRTY=1 \
+  CODEX_STUB_RC=42 CODEX_STUB_SLEEP=0 CODEX_STUB_DIRTY=1 \
   CODEX_CAPTURE="$BEH_TMP/codex-combined-capture.txt" \
   bash -c '
     . "$1"
@@ -1314,16 +1314,47 @@ COMBINED_OUT="$(
     printf "rc=%s\nstatus=%s\n" "$rc" "$(cat "$status_file" 2>/dev/null)"
   ' _ "$DISPATCH_LIB" "$BEH_TMP/prompt.txt"
 )"
-if printf '%s\n' "$COMBINED_OUT" | grep -Fq 'rc=0' \
-    && printf '%s\n' "$COMBINED_OUT" | grep -Fq '"state":"failed"' \
-    && printf '%s\n' "$COMBINED_OUT" | grep -Fq '"exit_code":74' \
-    && printf '%s\n' "$COMBINED_OUT" | grep -Fq '"provider_exit_code":42' \
-    && [ -d "$BEH_TMP/repo/.claude/worktrees/solve-issue-47-$COMBINED_SLUG" ] \
-    && [ -f "$BEH_TMP/tmp/solve-codex-status-47.json.worktree-owner.json" ] \
-    && grep -Fq 'failed to clean child worktree' "$BEH_TMP/tmp/solve-codex-status-47.json.log"; then
+COMBINED_STATUS="$BEH_TMP/tmp/solve-codex-status-47.json"
+COMBINED_RESULT="$BEH_TMP/tmp/solve-codex-result-47.md"
+COMBINED_LOG="$COMBINED_STATUS.log"
+COMBINED_RECEIPT="$COMBINED_STATUS.worktree-owner.json"
+COMBINED_WORKTREE="$BEH_TMP/repo/.claude/worktrees/solve-issue-47-$COMBINED_SLUG"
+COMBINED_DISPATCH_RC="$(printf '%s\n' "$COMBINED_OUT" | sed -n 's/^rc=//p')"
+COMBINED_ERRORS=''
+case "$COMBINED_DISPATCH_RC" in
+  0) ;;
+  *) COMBINED_ERRORS="$COMBINED_ERRORS dispatch-rc-$COMBINED_DISPATCH_RC" ;;
+esac
+if ! COMBINED_VERIFY_OUT="$(python3 -I - "$COMBINED_STATUS" "$COMBINED_RESULT" "$COMBINED_LOG" \
+    "$COMBINED_RECEIPT" "$COMBINED_WORKTREE" "$BEH_TMP/repo" "$COMBINED_SLUG" 2>&1 <<'PY'
+import json,os,pathlib,sys
+status_path,result_path,log_path,receipt_path,worktree_path,repo_path,slug=sys.argv[1:]
+status=json.loads(pathlib.Path(status_path).read_text())
+receipt=json.loads(pathlib.Path(receipt_path).read_text())
+assert status['state']=='failed' and status['exit_code']==74 and status['provider_exit_code']==42
+assert status['branch']==f'worktree-solve-issue-47-{slug}' and status['workspace_mode']=='isolated'
+assert receipt['branch']==status['branch'] and receipt['relative']==f'.claude/worktrees/solve-issue-47-{slug}'
+for actual,expected in (
+    (status['worktree'],worktree_path),
+    (status['log'],log_path),
+    (status['result'],result_path),
+    (receipt['worktree'],worktree_path),
+    (receipt['repo'],repo_path),
+):
+    assert os.path.samefile(actual,expected),(actual,expected)
+assert 'failed to clean child worktree' in pathlib.Path(log_path).read_text()
+PY
+)"; then
+  COMBINED_ERRORS="$COMBINED_ERRORS verifier:$COMBINED_VERIFY_OUT"
+fi
+git -C "$BEH_TMP/repo" show-ref --verify --quiet \
+  "refs/heads/worktree-solve-issue-47-$COMBINED_SLUG" \
+  || COMBINED_ERRORS="$COMBINED_ERRORS branch"
+if [ -z "$COMBINED_ERRORS" ]; then
   pass_msg "provider failure plus cleanup failure publishes cleanup rc with provider context and preserves evidence"
 else
-  fail_msg "provider failure plus cleanup failure remains durably distinguishable" "$COMBINED_OUT"
+  fail_msg "provider failure plus cleanup failure remains durably distinguishable" \
+    "$COMBINED_ERRORS $COMBINED_OUT"
 fi
 rm -rf "$BEH_TMP"
 
@@ -1460,6 +1491,38 @@ if printf '%s\n' "$IMMEDIATE_ACCEPT_BODY" | grep -Fq 'process-identity' \
 else
   fail_msg "Windows dispatch liveness uses the non-signaling native identity probe"
 fi
+IMMEDIATE_DUAL_TMP="$(mktemp -d)"
+printf 'terminal result\n' > "$IMMEDIATE_DUAL_TMP/result.md"
+immediate_dual_probe() {
+  bash -c '. "$1"; _uberdev_dispatch_accept_immediate_terminal codex 99999999 "$2" "$3" >/dev/null' \
+    _ "$DISPATCH_LIB" "$1" "$IMMEDIATE_DUAL_TMP/result.md"
+}
+immediate_dual_failures=''
+for provider_rc in 0 42; do
+  printf '{"backend":"codex","state":"failed","exit_code":74,"pid":"99999999","provider_exit_code":%s}\n' \
+    "$provider_rc" > "$IMMEDIATE_DUAL_TMP/status.json"
+  immediate_dual_probe "$IMMEDIATE_DUAL_TMP/status.json" \
+    || immediate_dual_failures="$immediate_dual_failures rejected-$provider_rc"
+done
+printf '%s\n' '{"backend":"codex","state":"failed","exit_code":74,"pid":"99999999"}' \
+  > "$IMMEDIATE_DUAL_TMP/status.json"
+immediate_dual_probe "$IMMEDIATE_DUAL_TMP/status.json" \
+  || immediate_dual_failures="$immediate_dual_failures rejected-legacy"
+for invalid_status in \
+  '{"backend":"codex","state":"failed","exit_code":74,"pid":"99999999","provider_exit_code":true}' \
+  '{"backend":"codex","state":"failed","exit_code":73,"pid":"99999999","provider_exit_code":0}' \
+  '{"backend":"codex","state":"completed","exit_code":0,"pid":"99999999","provider_exit_code":0}'
+do
+  printf '%s\n' "$invalid_status" > "$IMMEDIATE_DUAL_TMP/status.json"
+  ! immediate_dual_probe "$IMMEDIATE_DUAL_TMP/status.json" \
+    || immediate_dual_failures="$immediate_dual_failures accepted-invalid"
+done
+if [ -z "$immediate_dual_failures" ]; then
+  pass_msg "immediate dual-failure receipts accept exact provider exit codes under the cleanup invariant"
+else
+  fail_msg "immediate dual-failure receipt schema is strict and complete" "$immediate_dual_failures"
+fi
+rm -rf "$IMMEDIATE_DUAL_TMP"
 IMMEDIATE_TMP="$(mktemp -d)"
 mkdir -p "$IMMEDIATE_TMP/bin" "$IMMEDIATE_TMP/repo" "$IMMEDIATE_TMP/tmp"
 cat > "$IMMEDIATE_TMP/bin/git" <<'SH'
