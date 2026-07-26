@@ -121,9 +121,9 @@ simplify_context_out="$(uberdev_agent_context_create "$TMP/simplify-run" "$simpl
 simplify_ctx="$(jq -r .context_file <<<"$simplify_context_out")"; simplify_sha="$(jq -r .context_sha256 <<<"$simplify_context_out")"
 SIMPLIFY_CARRIER_JSON="$(jq -cn --arg ctx "$simplify_ctx" --arg sha "$simplify_sha" '{schema_version:1,run_id:"simplify-contract",workflow:"simplify",issue_num:0,context_file:$ctx,context_sha256:$sha}')"
 
-# The constructor and dispatcher consume the exact shared manifest input ceiling,
-# while the complete immutable handoff remains below the 65,536-byte reader
-# ceiling at the accepted maximum.
+# The accepted input boundary comes from the shared manifest, and the complete
+# immutable handoff remains below the 65,536-byte reader ceiling at that
+# maximum.
 printf 'diff\n' >"$TEST_REPO/max-input.diff"
 MAX_INPUTS="$(python3 -I -B - "$TEST_REPO/max-input.diff" "$TREE" <<'PY'
 import json,sys
@@ -142,9 +142,23 @@ uberdev_create_child_handoff review_pr.review.correctness review-max-input-iter1
 [ "$(wc -c <"$UBERDEV_CHILD_HANDOFF" | tr -d ' ')" -lt 65536 ]
 _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null
 
-# The constructor already rejected limit-plus-one above. Tamper a valid handoff
-# after construction to prove the dispatcher independently enforces the same
-# shared limit rather than trusting the constructor.
+# Derive a limit-plus-one input from that same manifest boundary and prove the
+# constructor rejects it before publishing a child directory.
+MAX_PLUS_ONE_INPUTS="$(python3 -I -B - "$MAX_INPUTS" "$TREE" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1])
+limit=json.load(open(sys.argv[2]))['input_limits']['max_serialized_bytes']
+value["changed_paths"][-1]=value["changed_paths"][-1][:-3]+"x.ts"
+payload=json.dumps(value,sort_keys=True,separators=(",",":"))
+assert len(payload.encode())==limit+1
+print(payload,end="")
+PY
+)"
+! uberdev_create_child_handoff review_pr.review.correctness review-constructor-plus-one-iter1-attempt01 "$MAX_PLUS_ONE_INPUTS" '[]' >/dev/null 2>&1
+[ ! -e "$TMP/run/children/review-constructor-plus-one-iter1-attempt01" ]
+
+# Independently tamper a valid maximum-sized handoff after construction to prove
+# the dispatcher enforces the shared limit instead of trusting the constructor.
 uberdev_create_child_handoff review_pr.review.correctness review-max-input-plus-one-iter1-attempt01 "$MAX_INPUTS" '[]' >/dev/null
 MAX_PLUS_ONE_HANDOFF="$UBERDEV_CHILD_HANDOFF"
 python3 -I -B - "$MAX_PLUS_ONE_HANDOFF" "$TREE" <<'PY'
