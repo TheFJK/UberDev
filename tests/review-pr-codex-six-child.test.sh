@@ -52,10 +52,16 @@ test -n "$result"
 agent_instance="${UBERDEV_AGENT_INSTANCE_ID:-${PRKIT_AGENT_INSTANCE_ID:-missing}}"
 agent_status_file="${UBERDEV_AGENT_STATUS_FILE:-${PRKIT_AGENT_STATUS_FILE:-}}"
 printf '%s\t%s\t%s\n' "$agent_instance" "$PWD" "$argv" >>"$CODEX_STUB_LOG"
+if [ -n "${CODEX_STUB_PRE_READY_FAIL_INSTANCE:-}" ] \
+    && [ "$agent_instance" = "$CODEX_STUB_PRE_READY_FAIL_INSTANCE" ]; then
+  exit 42
+fi
 case "$agent_instance" in
   post-review-*-attempt01)
-    : >"$CODEX_STUB_READY_DIR/$agent_instance"
-    while [ ! -e "$CODEX_STUB_RELEASE_DIR/$agent_instance" ]; do sleep .05; done
+    if [ "$agent_instance" != "${CODEX_STUB_SKIP_READY_INSTANCE:-}" ]; then
+      : >"$CODEX_STUB_READY_DIR/$agent_instance"
+    fi
+    while [ ! -e "$CODEX_STUB_RELEASE_DIR/.all" ]; do sleep .05; done
     ;;
 esac
 if [ -n "${CODEX_STUB_HANG_INSTANCE:-}" ] \
@@ -119,6 +125,8 @@ post_setup="$4"
 post_boundary="$5"
 fail_instance="${6-}"
 timeout_instance="${7-}"
+skip_ready_instance="${8-}"
+pre_ready_fail_instance="${9-}"
 cd "$repo"
 . "$setup"
 
@@ -132,12 +140,49 @@ printf 'review criteria\n' >"$CRITERIA_PATH"
 # provider barrier proves all six dispatches happen before the first wait.
 mkdir -p "$CODEX_STUB_READY_DIR" "$CODEX_STUB_RELEASE_DIR"
 (
-  while [ "$(find "$CODEX_STUB_READY_DIR" -type f | wc -l | tr -d ' ')" -lt 6 ]; do sleep .05; done
-  while [ "$(grep -l '^backend_identity=.' "$UBERDEV_CARRIER_RUN_DIR"/.agent-state-*/semaphore-v1/*.scope/*.lease 2>/dev/null | wc -l | tr -d ' ')" -lt 6 ]; do sleep .05; done
-  for ready in "$CODEX_STUB_READY_DIR"/*; do
-    ready_instance="$(basename "$ready")"
-    : >"$CODEX_STUB_RELEASE_DIR/$ready_instance"
+  barrier_timeout="${REVIEW_BARRIER_TIMEOUT_OVERRIDE:-60}"
+  startup_timeout="${REVIEW_BARRIER_STARTUP_TIMEOUT_OVERRIDE:-60}"
+  case "$barrier_timeout:$startup_timeout" in *[!0-9:]*|0:*|*:0) exit 2 ;; esac
+  barrier_release() { : >"$CODEX_STUB_RELEASE_DIR/.all"; }
+  trap barrier_release EXIT
+  barrier_deadline=$(( $(date +%s) + startup_timeout ))
+  fully_dispatched=0
+  barrier_rc=0; barrier_reason=ready; ready_count=0; lease_count=0
+  while :; do
+    ready_count="$(find "$CODEX_STUB_READY_DIR" -type f | wc -l | tr -d ' ')"
+    lease_count=0
+    while IFS= read -r lease; do
+      if grep -q '^backend_identity=.' "$lease" 2>/dev/null; then
+        lease_count=$((lease_count + 1))
+      fi
+    done < <(find "$UBERDEV_CARRIER_RUN_DIR" -path '*/semaphore-v1/*.scope/*.lease' -type f 2>/dev/null)
+    if [ "$ready_count" -eq 6 ] && [ "$lease_count" -eq 6 ]; then break; fi
+    terminal=0
+    while IFS= read -r status; do
+      case "$status" in *.watcher-error.json) terminal=1; break ;; esac
+      if grep -Eq '"state"[[:space:]]*:[[:space:]]*"(completed|failed|timed_out|cancelled)"' "$status"; then
+        terminal=1; break
+      fi
+    done < <(find "$UBERDEV_CARRIER_RUN_DIR/children" -type f \
+      \( -name status.json -o -name '*.watcher-error.json' \) 2>/dev/null)
+    lifecycle="$UBERDEV_CARRIER_RUN_DIR/.agent-state-$(id -u)/agent-lifecycle.jsonl"
+    if [ "$terminal" -eq 0 ] && [ -f "$lifecycle" ] && \
+        grep -Eq '"event":"(failed|timed_out|cancelled|abandoned)".*"run_id":"post-review-' "$lifecycle"; then
+      terminal=1
+    fi
+    if [ "$terminal" -eq 1 ]; then barrier_rc=70; barrier_reason=terminal-before-readiness; break; fi
+    barrier_now="$(date +%s)"
+    if [ "$lease_count" -eq 6 ] && [ "$fully_dispatched" -eq 0 ]; then
+      barrier_deadline=$((barrier_now + barrier_timeout)); fully_dispatched=1
+    fi
+    if [ "$barrier_now" -ge "$barrier_deadline" ]; then
+      barrier_rc=124; barrier_reason=readiness-timeout; break
+    fi
+    sleep .05
   done
+  printf 'rc=%s reason=%s ready=%s leases=%s\n' \
+    "$barrier_rc" "$barrier_reason" "$ready_count" "$lease_count" >"$CODEX_STUB_BARRIER_REPORT"
+  exit "$barrier_rc"
 ) & readiness_coordinator=$!
 CHANGED_PATHS_JSON='["README.md"]'
 EMPHASIS_JSON='[]'
@@ -147,8 +192,20 @@ set +e
 post_setup_rc=$?
 if [ "$post_setup_rc" -eq 0 ]; then . "$post_boundary"; post_setup_rc=$?; fi
 set -e
-wait "$readiness_coordinator"
-if [ -n "$fail_instance$timeout_instance" ]; then
+if wait "$readiness_coordinator"; then readiness_rc=0; else readiness_rc=$?; fi
+if [ "$readiness_rc" -ne 0 ]; then
+  printf 'readiness coordinator: %s\n' "$(cat "$CODEX_STUB_BARRIER_REPORT" 2>/dev/null || printf 'missing report')" >&2
+fi
+if [ -n "$pre_ready_fail_instance" ]; then
+  [ "$readiness_rc" -eq 70 ]
+  grep -Fq 'reason=terminal-before-readiness' "$CODEX_STUB_BARRIER_REPORT"
+elif [ -n "$skip_ready_instance" ]; then
+  [ "$readiness_rc" -eq 124 ]
+  grep -Fq 'reason=readiness-timeout ready=5' "$CODEX_STUB_BARRIER_REPORT"
+else
+  [ "$readiness_rc" -eq 0 ]
+fi
+if [ -n "$fail_instance$timeout_instance$pre_ready_fail_instance" ]; then
   [ "$post_setup_rc" -eq 70 ]
 else
   [ "$post_setup_rc" -eq 0 ]
@@ -209,7 +266,7 @@ after_repair="$(git rev-parse HEAD)"
 [ "$after_repair" != "$before_repair" ] || { echo "caller repair did not advance the branch" >&2; exit 1; }
 
 python3 -I -B - "$UBERDEV_CARRIER_RUN_DIR" "$repo" "$CODEX_STUB_LOG" \
-  "$CLAUDE_STUB_LOG" "$fail_instance" "$timeout_instance" "$repair_instance" "$before_repair" "$after_repair" "${instances[@]}" <<'PY'
+  "$CLAUDE_STUB_LOG" "${fail_instance:-$pre_ready_fail_instance}" "$timeout_instance" "$repair_instance" "$before_repair" "$after_repair" "${instances[@]}" <<'PY'
 import json
 import os
 import pathlib
@@ -426,32 +483,43 @@ make_repo() {
 }
 
 run_case() {
-  local name="$1" fail_instance="${2-}" timeout_instance="${3-}" repo runtime codex_log claude_log
+  local name="$1" fail_instance="${2-}" timeout_instance="${3-}" skip_ready_instance="${4-}" pre_ready_fail_instance="${5-}"
+  local repo runtime codex_log claude_log barrier_timeout=60
   repo="$TMP/repo-$name"; runtime="$TMP/runtime-$name"
   codex_log="$TMP/codex-$name.log"; claude_log="$TMP/claude-$name.log"
   make_repo "$repo"
   mkdir -p "$runtime"
   ready_dir="$runtime/ready"; release_dir="$runtime/release"
+  [ -z "$skip_ready_instance" ] || barrier_timeout=2
   env -i HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
     PLUGIN_ROOT="$RUNTIME_ROOT" WORKTREE_ROOT="$repo" \
     UBERDEV_TMPDIR="$runtime" PRKIT_TMPDIR="$runtime" \
     CODEX_STUB_LOG="$codex_log" CLAUDE_STUB_LOG="$claude_log" \
     CODEX_STUB_READY_DIR="$ready_dir" CODEX_STUB_RELEASE_DIR="$release_dir" \
+    CODEX_STUB_BARRIER_REPORT="$runtime/readiness-report.txt" \
     CODEX_STUB_FAIL_INSTANCE="$fail_instance" CODEX_STUB_HANG_INSTANCE="$timeout_instance" \
+    CODEX_STUB_SKIP_READY_INSTANCE="$skip_ready_instance" \
+    CODEX_STUB_PRE_READY_FAIL_INSTANCE="$pre_ready_fail_instance" \
+    REVIEW_BARRIER_TIMEOUT_OVERRIDE="$barrier_timeout" \
     RUN_ID="20260716-00000${name}-abcdef0" \
     PR_NUMBER=335 ARGUMENTS='' SOLVE_TIMEOUT=120 UBERDEV_AGENT_CAPACITY=6 PRKIT_AGENT_CAPACITY=6 \
     bash "$RUN_CASE_SCRIPT" "$name" "$repo" "$TMP/setup.sh" \
-      "$TMP/post-setup.sh" "$TMP/post-boundary.sh" "$fail_instance" "$timeout_instance"
+      "$TMP/post-setup.sh" "$TMP/post-boundary.sh" "$fail_instance" "$timeout_instance" \
+      "$skip_ready_instance" "$pre_ready_fail_instance"
 }
 
 case "${SIX_CHILD_CASE:-all}" in
   1) run_case 1 ;;
   2) run_case 2 post-review-20260716-000002-abcdef0-r3-iter1-attempt01 ;;
   3) run_case 3 '' post-review-20260716-000003-abcdef0-r4-iter1-attempt01 ;;
+  4) run_case 4 '' '' post-review-20260716-000004-abcdef0-r2-iter1-attempt01 ;;
+  5) run_case 5 '' '' '' post-review-20260716-000005-abcdef0-r5-iter1-attempt01 ;;
   all)
     run_case 1
     run_case 2 post-review-20260716-000002-abcdef0-r3-iter1-attempt01
     run_case 3 '' post-review-20260716-000003-abcdef0-r4-iter1-attempt01
+    run_case 4 '' '' post-review-20260716-000004-abcdef0-r2-iter1-attempt01
+    run_case 5 '' '' '' post-review-20260716-000005-abcdef0-r5-iter1-attempt01
     ;;
   *) echo "unknown SIX_CHILD_CASE=$SIX_CHILD_CASE" >&2; exit 2 ;;
 esac

@@ -84,6 +84,15 @@ extract_function_body() {
   ' "$file"
 }
 
+for codex_dispatch_mirror in "$DISPATCH_LIB" "$CODEX_DISPATCH_LIB"; do
+  if extract_function_body _uberdev_dispatch_codex "$codex_dispatch_mirror" \
+      | grep -Fq '${BG_TURBO_ENV[@]+"${BG_TURBO_ENV[@]}"}'; then
+    pass_msg "Codex optional turbo env is safe under Bash 3.2 nounset ($(basename "$(dirname "$(dirname "$codex_dispatch_mirror")")"))"
+  else
+    fail_msg "Codex optional turbo env is safe under Bash 3.2 nounset" "$codex_dispatch_mirror"
+  fi
+done
+
 echo "== Secure default runtime and unique Codex child identities =="
 RUNTIME_TMP="$(mktemp -d)"
 RUNTIME_ROOT="$(TMPDIR="$RUNTIME_TMP" bash -c 'unset UBERDEV_TMPDIR; . "$1"; _uberdev_dispatch_runtime_root' _ "$DISPATCH_LIB")"

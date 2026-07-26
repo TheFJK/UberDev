@@ -40,6 +40,51 @@ if [ ! -f "$MANIFEST" ]; then
 fi
 SELF_IDENTITY="$(python3 "$MANIFEST" process-identity --pid "$$")" || exit 1
 
+LINUX_IDENTITY_CLASSIFICATION="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
+import builtins
+import errno
+import importlib.util
+import io
+import pathlib
+import sys
+from unittest import mock
+
+for index, module_path in enumerate(sys.argv[1:]):
+    spec = importlib.util.spec_from_file_location(f"run_manifest_linux_identity_{index}", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    module._native_process_record = module._linux_process_record
+
+    def missing_stat(path, *args, **kwargs):
+        if pathlib.Path(path) == pathlib.Path("/proc/424242/stat"):
+            raise FileNotFoundError(errno.ENOENT, "vanished process", path)
+        raise AssertionError(path)
+
+    with mock.patch.object(builtins, "open", missing_stat):
+        missing = module._process_identity(424242)[0]
+
+    stat_fields = ["S", "1", "2", "3", *(["0"] * 15), "99"]
+    stat_record = f"424242 (fixture) {' '.join(stat_fields)}"
+    def failed_boot_id(path, *args, **kwargs):
+        if pathlib.Path(path) == pathlib.Path("/proc/424242/stat"):
+            return io.StringIO(stat_record)
+        if pathlib.Path(path) == pathlib.Path("/proc/sys/kernel/random/boot_id"):
+            raise OSError(errno.EIO, "boot id read failed")
+        raise AssertionError(path)
+
+    with mock.patch.object(builtins, "open", failed_boot_id):
+        unavailable = module._process_identity(424242)[0]
+    print(f"{missing}/{unavailable}")
+PY
+)"
+if [ "$LINUX_IDENTITY_CLASSIFICATION" = $'absent/unavailable\nabsent/unavailable' ]; then
+  pass "Linux vanished PIDs are absent while other identity I/O failures stay unavailable in both mirrors"
+else
+  fail "Linux process identity error classification" "$LINUX_IDENTITY_CLASSIFICATION"
+fi
+
 printf '== run manifest: fixture verification ==\n'
 capture python3 "$MANIFEST" verify --manifest "$FIXTURES/valid.jsonl" --strict
 if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = '{"events":3,"runs":1,"status":"ok"}' ]; then

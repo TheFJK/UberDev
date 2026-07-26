@@ -827,8 +827,11 @@ def _reject_symlinked_ancestors(path: str) -> None:
 
 
 def _linux_process_record(pid: int) -> tuple[int, int, int, str]:
-    with open(f"/proc/{pid}/stat", encoding="ascii") as stream:
-        raw = stream.read()
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii") as stream:
+            raw = stream.read()
+    except FileNotFoundError as exc:
+        raise ProcessLookupError(pid) from exc
     end = raw.rfind(")")
     if end < 0:
         raise OSError("malformed proc stat")
