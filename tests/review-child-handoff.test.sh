@@ -728,25 +728,30 @@ post_review_validated_evidence_complete "$EVIDENCE_ROOT/validated-repair" 6 \
     cp "$1" "$2"; cp "$1" "$3"
   }
   post_review_wait_all() {
-    local count
+    local count indices
+    [ "$#" -eq 3 ]
     count="$(wc -l <"$1" | tr -d ' ')"
-    printf 'wait:%s:%s\n' "$count" "${4:-0}" >>"$CAP_EVENTS"
+    indices="$(jq -sr 'map(.index) | join(",")' "$1")"
+    printf 'wait:%s:%s\n' "$count" "$indices" >>"$CAP_EVENTS"
     : >"$3"
     POST_REVIEW_VALID_COUNT="$count"
     POST_REVIEW_FORMAT_FAILURE_COUNT=0
     POST_REVIEW_INFRA_FAILURE=0
   }
   CAP_RECORDS="$TMP/cap.records"
-  for edge in "${REVIEW_EDGES[@]}"; do printf '{"edge":"%s"}\n' "$edge"; done >"$CAP_RECORDS"
+  for index in "${!REVIEW_EDGES[@]}"; do
+    printf '{"edge":"%s","index":%d}\n' "${REVIEW_EDGES[$index]}" "$((index + 1))"
+  done >"$CAP_RECORDS"
   for cap in 1 2; do
     CAP_EVENTS="$TMP/cap-$cap.events"; : >"$CAP_EVENTS"
     post_review_run_capped "$CAP_RECORDS" 6 "$cap" "$TMP/cap-$cap.descriptors" \
       "$TMP/cap-$cap.launched" "$TMP/cap-$cap.failed" 10 "$TMP/cap-$cap"
     if [ "$cap" -eq 1 ]; then
-      printf '%s\n' dispatch:1 wait:1:0 dispatch:1 wait:1:1 dispatch:1 wait:1:2 \
-        dispatch:1 wait:1:3 dispatch:1 wait:1:4 dispatch:1 wait:1:5 >"$TMP/cap.expected"
+      printf '%s\n' dispatch:1 wait:1:1 dispatch:1 wait:1:2 dispatch:1 wait:1:3 \
+        dispatch:1 wait:1:4 dispatch:1 wait:1:5 dispatch:1 wait:1:6 >"$TMP/cap.expected"
     else
-      printf '%s\n' dispatch:2 wait:2:0 dispatch:2 wait:2:2 dispatch:2 wait:2:4 >"$TMP/cap.expected"
+      printf '%s\n' dispatch:2 wait:2:1,2 dispatch:2 wait:2:3,4 \
+        dispatch:2 wait:2:5,6 >"$TMP/cap.expected"
     fi
     cmp "$TMP/cap.expected" "$CAP_EVENTS"
     [ "$POST_REVIEW_VALID_COUNT" -eq 6 ]
