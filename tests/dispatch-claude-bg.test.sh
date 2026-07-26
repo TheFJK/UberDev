@@ -801,6 +801,10 @@ SH
 chmod +x "$CLAUDE_BOOT_TMP/bin/claude"
 CLAUDE_TIMEOUT_BIN="$(command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null)"
 printf 'bootstrap bound\n' >"$CLAUDE_BOOT_TMP/prompt.txt"
+# Exit 124 proves the dedicated provider timeout fired. Keep elapsed time as a
+# whole-call hang watchdog only: native Windows may spend additional time
+# tearing down the timed-out Cygwin process tree after the one-second deadline.
+CLAUDE_BOUND_WATCHDOG_S=7
 CLAUDE_BOUND_START="$(python3 -I -B -c 'import time; print(time.monotonic())')"
 set +e
 (
@@ -821,22 +825,22 @@ set +e
 CLAUDE_BOUND_END="$(python3 -I -B -c 'import time; print(time.monotonic())')"
 CLAUDE_BOUND_SCOPE="$(bash -c '. "$1"; _uberdev_dispatch_git_metadata_mutex_scope "$2"' \
   _ "$DISPATCH_LIB" "$CLAUDE_BOOT_TMP/repo")"
-if python3 -I -B - "$CLAUDE_BOUND_START" "$CLAUDE_BOUND_END" <<'PY'
+if python3 -I -B - "$CLAUDE_BOUND_START" "$CLAUDE_BOUND_END" "$CLAUDE_BOUND_WATCHDOG_S" <<'PY'
 import sys
-assert float(sys.argv[2])-float(sys.argv[1]) < 3.0
+assert float(sys.argv[2])-float(sys.argv[1]) < float(sys.argv[3])
 PY
 then
   CLAUDE_BOUND_ELAPSED_OK=1
 else
   CLAUDE_BOUND_ELAPSED_OK=0
 fi
-if [ "$CLAUDE_BOUND_RC" -ne 0 ] && [ "$CLAUDE_BOUND_ELAPSED_OK" -eq 1 ] \
+if [ "$CLAUDE_BOUND_RC" -eq 124 ] && [ "$CLAUDE_BOUND_ELAPSED_OK" -eq 1 ] \
     && [ -s "$CLAUDE_BOOT_TMP/bound-provider.log" ] \
     && [ ! -e "$CLAUDE_BOUND_SCOPE/.mutex" ]; then
   echo "  PASS  hung Claude bootstrap is bounded by its dedicated timeout and releases the mutex"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  Claude bootstrap bound (rc=$CLAUDE_BOUND_RC elapsed=$(python3 -I -B -c "print(float('$CLAUDE_BOUND_END')-float('$CLAUDE_BOUND_START'))"))"
+  echo "  FAIL  Claude bootstrap bound (rc=$CLAUDE_BOUND_RC watchdog=$CLAUDE_BOUND_WATCHDOG_S elapsed=$(python3 -I -B -c "print(float('$CLAUDE_BOUND_END')-float('$CLAUDE_BOUND_START'))"))"
   FAIL=$((FAIL + 1))
 fi
 
