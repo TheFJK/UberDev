@@ -41,7 +41,7 @@ from pathlib import Path
 # agent .md files use Claude-Code-style frontmatter, which is *lenient* about
 # unquoted scalar values containing colons (e.g. a description containing
 # `user: "..."` or `/uberdev:issue`). Strict YAML reads those as nested
-# mappings and fails ("mapping values are not allowed here"). 8 of 42 agents
+# mappings and fails ("mapping values are not allowed here"). 8 of 44 agents
 # trip this. The parser below mirrors Claude's lenient reading instead.
 
 
