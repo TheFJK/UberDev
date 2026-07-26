@@ -567,6 +567,30 @@ else
     "command_rc=$GENERIC_DEAD_RC reclaim_rc=$GENERIC_RECLAIM_RC stderr=$(cat "$GENERIC_DEAD_STDERR")"
 fi
 
+NATIVE_ADD_CAPTURE="$CLEANUP_TMP/runtime/native-add-target.capture"
+NATIVE_ADD_POSIX='/tmp/runner-temp/repo/.claude/worktrees/native-add-target'
+NATIVE_ADD_EXPECTED='C:/Users/runner/AppData/Local/Temp/repo/.claude/worktrees/native-add-target'
+if MSYSTEM=MINGW64 NATIVE_ADD_CAPTURE="$NATIVE_ADD_CAPTURE" \
+    NATIVE_ADD_POSIX="$NATIVE_ADD_POSIX" NATIVE_ADD_EXPECTED="$NATIVE_ADD_EXPECTED" \
+    bash -c '
+      . "$1"
+      cygpath() {
+        [ "$1" = -m ] && [ "$2" = "$NATIVE_ADD_POSIX" ] || return 91
+        printf "%s\n" "$NATIVE_ADD_EXPECTED"
+      }
+      git() {
+        printf "pathconv=%s\nargv=%s\n" "${MSYS_NO_PATHCONV:-}" "$*" >"$NATIVE_ADD_CAPTURE"
+      }
+      _uberdev_dispatch_git_worktree_add_locked "$3" "$NATIVE_ADD_POSIX" native-add-branch "$2"
+    ' _ "$DISPATCH_LIB" "$CLEANUP_TMP/runtime/native-add-target.git.log" "$CLEANUP_TMP/repo" \
+    && grep -Fxq 'pathconv=1' "$NATIVE_ADD_CAPTURE" \
+    && grep -Fxq "argv=worktree add $NATIVE_ADD_EXPECTED -b native-add-branch" "$NATIVE_ADD_CAPTURE"; then
+  pass_msg "native Git worktree add receives one normalized Windows target"
+else
+  fail_msg "native Git worktree add receives one normalized Windows target" \
+    "capture=$(tr '\n' ';' <"$NATIVE_ADD_CAPTURE" 2>/dev/null)"
+fi
+
 for RELEASE_ADD_KIND in child nonchild; do
   RELEASE_ADD_RELATIVE=".claude/worktrees/solve-issue-335-release-failure-$RELEASE_ADD_KIND"
   RELEASE_ADD_TARGET="$CLEANUP_TMP/repo/$RELEASE_ADD_RELATIVE"

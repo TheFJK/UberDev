@@ -380,9 +380,10 @@ _uberdev_dispatch_with_git_metadata_mutex() {
 }
 
 _uberdev_dispatch_git_worktree_add_locked() {
-  local repo_root="$1" target="$2" branch="$3" log_file="$4"
+  local repo_root="$1" target="$2" branch="$3" log_file="$4" native_target
+  native_target="$(_uberdev_dispatch_native_cli_path "$target")" || return $?
   cd "$repo_root" || return 2
-  MSYS_NO_PATHCONV=1 git worktree add "$target" -b "$branch" >"$log_file" 2>&1
+  MSYS_NO_PATHCONV=1 git worktree add "$native_target" -b "$branch" >"$log_file" 2>&1
 }
 
 _uberdev_dispatch_git_worktree_add() {
