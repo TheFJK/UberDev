@@ -7,6 +7,7 @@ LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
 python3 -I -B - "$TREE" <<'PY'
 import json,sys
 tree=json.load(open(sys.argv[1])); providers={k:v for k,v in tree['edges'].items() if v['kind']=='provider'}
+assert tree.get('input_limits')=={'max_serialized_bytes':49152}
 types={'integer','string','optional_string','boolean','path','optional_path','directory','string_array','path_array','optional_path_array','repo_path_array'}
 assert providers
 for edge,row in providers.items():
@@ -61,6 +62,9 @@ cmp "$ROOT/plugins/uberdev/shared/phase1-reviewer-output-v1.md" \
 # The shared constructor must enforce RepoPathArray before the later handoff
 # boundary so a successful build always carries the same nominal invariant.
 INPUT_HELPER="$ROOT/plugins/uberdev/lib/child-inputs.py"
+! grep -q 'MAX_INPUT_BYTES[[:space:]]*=' "$INPUT_HELPER"
+grep -q "input_limits" "$INPUT_HELPER"
+grep -q "input_limits" "$LIB"
 python3 -I -B "$INPUT_HELPER" --manifest "$TREE" build review_pr.review.correctness \
   changed_paths '["README.md","src/example.ts"]' \
   diff_path '"/tmp/diff"' criteria_path '"/tmp/criteria"' emphasis '[]' >/dev/null
@@ -93,23 +97,23 @@ if python3 -I -B "$INPUT_HELPER" --manifest "$TREE" build review_pr.review.corre
   exit 1
 fi
 
-# Exact immutable-input boundary: 49,152 serialized bytes are accepted and
-# 49,153 are rejected by the constructor (the dispatcher independently
-# enforces the same boundary).
+# Exact immutable-input boundary from the shared manifest contract: the limit is
+# accepted and limit-plus-one is rejected by the constructor.
 python3 -I -B - "$INPUT_HELPER" "$TREE" <<'PY'
 import importlib.util,json,pathlib,sys
 helper_path,manifest_path=sys.argv[1:]
 spec=importlib.util.spec_from_file_location("child_inputs",helper_path)
 module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 manifest=json.loads(pathlib.Path(manifest_path).read_text())
+limit=manifest['input_limits']['max_serialized_bytes']
 paths=[f"src/p{index:02d}-"+("x"*2990)+".ts" for index in range(16)]
 accepted={"changed_paths":paths,"diff_path":"/tmp/diff","criteria_path":"/tmp/criteria","emphasis":[]}
 current=len(json.dumps(accepted,sort_keys=True,separators=(",",":")).encode())
-accepted["changed_paths"][-1]=accepted["changed_paths"][-1][:-3]+("x"*(49152-current))+".ts"
+accepted["changed_paths"][-1]=accepted["changed_paths"][-1][:-3]+("x"*(limit-current))+".ts"
 rejected=json.loads(json.dumps(accepted))
 rejected["changed_paths"][-1]=rejected["changed_paths"][-1][:-3]+"x.ts"
-assert len(json.dumps(accepted,sort_keys=True,separators=(",",":")).encode())==49152
-assert len(json.dumps(rejected,sort_keys=True,separators=(",",":")).encode())==49153
+assert len(json.dumps(accepted,sort_keys=True,separators=(",",":")).encode())==limit
+assert len(json.dumps(rejected,sort_keys=True,separators=(",",":")).encode())==limit+1
 assert max(map(len,accepted["changed_paths"]))<=4096
 module.validate_inputs(manifest,"review_pr.review.correctness",accepted)
 try:
@@ -117,6 +121,6 @@ try:
 except module.InputFailure:
     pass
 else:
-    raise AssertionError("49,153-byte inputs crossed the constructor boundary")
+    raise AssertionError("limit-plus-one inputs crossed the constructor boundary")
 PY
 echo 'child-contract-v2: PASS'

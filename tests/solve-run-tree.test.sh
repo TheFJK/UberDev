@@ -13,6 +13,7 @@ assert tree_path.is_file(), "solve run-tree manifest missing"
 tree=json.loads(tree_path.read_text()); policy=json.loads(policy_path.read_text())
 assert tree['schema_version']==1 and tree['tree_id']=='solve-run-tree-v1'
 assert tree['root_edge_id']=='solve.issue.lead'
+assert tree['input_limits']=={'max_serialized_bytes':49152}
 edges=tree['edges']; assert isinstance(edges,dict) and edges
 edge_re=re.compile(r'[a-z][a-z0-9_-]{0,31}(?:\.[a-z][a-z0-9_-]{0,31}){0,3}$')
 for edge_id,edge in edges.items():

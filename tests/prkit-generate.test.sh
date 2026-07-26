@@ -163,7 +163,10 @@ tree=json.loads(
  object_pairs_hook=reject_pairs,
  parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f'non-finite JSON constant: {value}')),
 )
-assert set(tree)=={'schema_version','tree_id','root_edge_id','output_contracts','edges'}
+assert set(tree)=={
+ 'schema_version','tree_id','root_edge_id','input_limits','output_contracts','edges'
+}
+assert tree['input_limits']=={'max_serialized_bytes':49152}
 edges=tree['edges']; assert edges
 expected_roles={
  'ci-code-fixer','ci-failure-classifier','ci-rebase-handler','code-fixer',

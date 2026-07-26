@@ -6,6 +6,7 @@ THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$THIS_DIR/.." && pwd)"
 FIX="$THIS_DIR/fixtures/findings-to-issues"
 AGENT_MD="$REPO_ROOT/plugins/uberdev/agents/findings-to-issues.md"
+RUNTIME_AGENT_MD="$REPO_ROOT/codex/uberdev-codex/agents/findings-to-issues.md"
 PACKAGED_AGENT_TOML="$REPO_ROOT/codex/agents/uberdev-findings-to-issues.toml"
 REVIEW_PR_MD="$REPO_ROOT/plugins/uberdev/commands/review-pr.md"
 SIMPLIFY_MD="$REPO_ROOT/plugins/uberdev/commands/simplify.md"
@@ -649,6 +650,20 @@ assert_grep "$REPO_ROOT/plugins/uberdev/skills/ubersimplify-pipeline/SKILL.md" \
 assert_grep "$REPO_ROOT/plugins/uberdev/skills/uberthink-pipeline/SKILL.md" \
   'variant=legacy\.uberthink' \
   'S19.4 — uberthink selects the legacy.uberthink variant'
+
+echo
+echo "### Suite 20: findings publication refusal is fail-closed in every executor contract"
+for contract in "$AGENT_MD" "$RUNTIME_AGENT_MD" "$PACKAGED_AGENT_TOML"; do
+  assert_grep "$contract" \
+    'REFUSED.*infrastructure failure|infrastructure failure.*REFUSED' \
+    "S20.1 — $(basename "$contract") classifies REFUSED publication as infrastructure failure"
+  assert_grep "$contract" \
+    'terminate.*before.*trust|before.*trust.*terminate' \
+    "S20.2 — $(basename "$contract") terminates before trust on REFUSED/malformed publication"
+  assert_no_grep "$contract" \
+    'REFUSED.*information for the final summary.*not a parent-process halt' \
+    "S20.3 — $(basename "$contract") contains no stale fail-open REFUSED rule"
+done
 
 echo
 echo "## Summary"

@@ -548,6 +548,12 @@ def read_regular_once(path,max_bytes,code,exact_mode=None,nonempty=False):
 if not EDGE.fullmatch(edge): fail('invalid_edge_id')
 handoff=os.path.abspath(handoff_arg)
 try:
+    manifest=json.loads(read_regular_once(manifest_path,1048576,'invalid_run_tree_manifest'))
+except Exception: fail('invalid_run_tree_manifest')
+input_limits=manifest.get('input_limits')
+max_input_bytes=input_limits.get('max_serialized_bytes') if isinstance(input_limits,dict) else None
+if type(max_input_bytes) is not int or not 0<max_input_bytes<65536: fail('invalid_run_tree_manifest')
+try:
     raw=read_regular_once(handoff,65536,'invalid_handoff')
     value=json.loads(raw)
 except Exception: fail('invalid_handoff')
@@ -569,7 +575,7 @@ risks=value.get('risk_signals')
 if not isinstance(risks,list) or risks!=sorted(set(risks)) or any(x not in RISKS for x in risks): fail('invalid_risk_signals')
 inputs=value.get('inputs')
 if not isinstance(inputs,dict) or len(inputs)>64: fail('invalid_inputs')
-if len(json.dumps(inputs,sort_keys=True,separators=(',',':')).encode())>49152: fail('invalid_inputs')
+if len(json.dumps(inputs,sort_keys=True,separators=(',',':')).encode())>max_input_bytes: fail('invalid_inputs')
 def forbidden_key(key):
     normalized=re.sub(r'[^a-z0-9]','',key.lower())
     return (key.lower() in FORBIDDEN or any(part in normalized for part in ('command','shell','model','route','effort','service','sandbox','environment','token','password','secret','credential','apikey')))
@@ -607,8 +613,6 @@ repo=context.get('metadata',{}).get('repository_id')
 if not isinstance(repo,str) or not repo: fail('invalid_repository')
 repo_root=os.path.realpath(repo) if os.path.isabs(repo) and os.path.isdir(repo) else run_dir
 run_real=os.path.realpath(run_dir)
-try: manifest=json.loads(read_regular_once(manifest_path,1048576,'invalid_run_tree_manifest'))
-except Exception: fail('invalid_run_tree_manifest')
 row=manifest.get('edges',{}).get(edge)
 if not isinstance(row,dict) or row.get('kind')!='provider': fail('undeclared_edge')
 allowed=row.get('allowed_workflows'); required_inputs=row.get('required_inputs'); optional_inputs=row.get('optional_inputs')

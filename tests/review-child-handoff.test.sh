@@ -2,6 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
+TREE="$ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
 REVIEW="$ROOT/plugins/uberdev/commands/review-pr.md"
 SIMPLIFY="$ROOT/plugins/uberdev/commands/simplify.md"
 POST="$ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md"
@@ -111,18 +112,19 @@ simplify_context_out="$(uberdev_agent_context_create "$TMP/simplify-run" "$simpl
 simplify_ctx="$(jq -r .context_file <<<"$simplify_context_out")"; simplify_sha="$(jq -r .context_sha256 <<<"$simplify_context_out")"
 SIMPLIFY_CARRIER_JSON="$(jq -cn --arg ctx "$simplify_ctx" --arg sha "$simplify_sha" '{schema_version:1,run_id:"simplify-contract",workflow:"simplify",issue_num:0,context_file:$ctx,context_sha256:$sha}')"
 
-# The constructor and dispatcher share the exact 49,152-byte input ceiling,
+# The constructor and dispatcher consume the exact shared manifest input ceiling,
 # while the complete immutable handoff remains below the 65,536-byte reader
 # ceiling at the accepted maximum.
 printf 'diff\n' >"$TEST_REPO/max-input.diff"
-MAX_INPUTS="$(python3 -I -B - "$TEST_REPO/max-input.diff" <<'PY'
+MAX_INPUTS="$(python3 -I -B - "$TEST_REPO/max-input.diff" "$TREE" <<'PY'
 import json,sys
+limit=json.load(open(sys.argv[2]))['input_limits']['max_serialized_bytes']
 paths=[f"src/p{index:02d}-"+("x"*2990)+".ts" for index in range(16)]
 base={"changed_paths":paths,"diff_path":sys.argv[1],"criteria_path":sys.argv[1],"emphasis":[]}
 current=len(json.dumps(base,sort_keys=True,separators=(",",":")).encode())
-base["changed_paths"][-1]=base["changed_paths"][-1][:-3]+("x"*(49152-current))+".ts"
+base["changed_paths"][-1]=base["changed_paths"][-1][:-3]+("x"*(limit-current))+".ts"
 payload=json.dumps(base,sort_keys=True,separators=(",",":"))
-assert len(payload.encode())==49152
+assert len(payload.encode())==limit
 assert max(map(len,base["changed_paths"]))<=4096
 print(payload,end="")
 PY
@@ -130,6 +132,26 @@ PY
 uberdev_create_child_handoff review_pr.review.correctness review-max-input-iter1-attempt01 "$MAX_INPUTS" '[]' >/dev/null
 [ "$(wc -c <"$UBERDEV_CHILD_HANDOFF" | tr -d ' ')" -lt 65536 ]
 _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null
+
+# The constructor already rejected limit-plus-one above. Tamper a valid handoff
+# after construction to prove the dispatcher independently enforces the same
+# shared limit rather than trusting the constructor.
+uberdev_create_child_handoff review_pr.review.correctness review-max-input-plus-one-iter1-attempt01 "$MAX_INPUTS" '[]' >/dev/null
+MAX_PLUS_ONE_HANDOFF="$UBERDEV_CHILD_HANDOFF"
+python3 -I -B - "$MAX_PLUS_ONE_HANDOFF" "$TREE" <<'PY'
+import json,sys
+path,manifest_path=sys.argv[1:]
+limit=json.load(open(manifest_path))['input_limits']['max_serialized_bytes']
+with open(path,encoding='utf-8') as stream:
+    value=json.load(stream)
+value['inputs']['changed_paths'][-1]=value['inputs']['changed_paths'][-1][:-3]+'x.ts'
+serialized=json.dumps(value['inputs'],sort_keys=True,separators=(',',':')).encode()
+assert len(serialized)==limit+1
+with open(path,'w',encoding='utf-8') as stream:
+    json.dump(value,stream,separators=(',',':'))
+PY
+! _uberdev_child_prepare review_pr.review.correctness "$MAX_PLUS_ONE_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+[ ! -e "$TMP/run/children/review-max-input-plus-one-iter1-attempt01" ]
 
 # Native Windows Python has neither getuid/geteuid nor descriptor-relative
 # filesystem operations. Exercise the real carrier -> handoff -> prepare path

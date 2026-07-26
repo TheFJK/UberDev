@@ -478,9 +478,15 @@ Return `status: REFUSED` with the matching rationale string when:
 - Secret-scan hit on candidate body → append to `blocked_by_dedupe[]` with `reason: "secret-scan-hit"`, skip the row, set `DONE_WITH_CONCERNS`. Body is NEVER written even partially.
 - `MAX_NEW=10` exceeded → process first 10, set `overflow_count` to the remainder, set `DONE_WITH_CONCERNS`. **Broken-feature overflow guard (RFC 0002 §3.3.4):** if any truncated row is BLOCKER/CRITICAL tier, additionally set `halted_due_to_overflow=true` AND `halted=true` — the parent halts and surfaces the cliff to the user. Pure-MAJOR overflow does not halt (silent truncation as before).
 
-**Halt semantics (RFC 0002 §3.3.5 — supersedes the pre-v0.26.0 "NEVER halts" clause).** The sub-phase halts the parent run iff the return contract has `halted: true`. Otherwise `/review-pr` and `/simplify` proceed to trust-signal emission with no behaviour change from the pre-v0.26.0 contract. `halted` is set only when:
+**Halt semantics (RFC 0002 §3.3.5 — supersedes the pre-v0.26.0 "NEVER halts" clause).** A well-formed `DONE` or `DONE_WITH_CONCERNS` result halts the parent run iff the return contract has `halted: true`. The child-owned `halted` field records finding-driven policy stops and is set only when:
 
 - a `BLOCKER`-tier row was filed or commented this run (`by_severity.blocker > 0`), OR
 - the broken-feature overflow guard fired (`halted_due_to_overflow == true` — `overflow_count > 0` AND at least one truncated row had tier BLOCKER or CRITICAL).
 
-`MAJOR`-tier rows (mapped from Phase 1 `major` + Phase 2 `important`) NEVER halt the parent; they file silently and the parent emits GREEN as before. `CRITICAL`-tier rows that fit under `MAX_NEW` ALSO do not halt — they trigger the YELLOW state in the parent (see `commands/review-pr.md` Trust-Signal Emission section), not RED. A `REFUSED` status from this agent (pre-flight failure, input malformed) is information for the final summary table, not a parent-process halt.
+`MAJOR`-tier rows (mapped from Phase 1 `major` + Phase 2 `important`) NEVER halt the parent; they file silently and the parent emits GREEN as before. `CRITICAL`-tier rows that fit under `MAX_NEW` ALSO do not halt — they trigger the YELLOW state in the parent (see `commands/review-pr.md` Trust-Signal Emission section), not RED.
+
+A `REFUSED` status is an infrastructure failure, not a finding-driven
+`halted` value and never a zero-result success. The controller normalizes
+malformed publication output to the same fail-closed class. Either outcome
+must terminate the parent before any trust anchor, label, or approval audit is
+emitted; only `DONE` and `DONE_WITH_CONCERNS` may consult `halted` and continue.

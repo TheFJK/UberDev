@@ -210,10 +210,11 @@ def validate(plugin):
     tree=strict_load(raw)
     canonical=(json.dumps(tree,sort_keys=True,allow_nan=False,indent=2)+'\n').encode()
     assert raw==canonical, f'non-deterministic policy serialization: {policy}'
-    assert set(tree)=={'schema_version','tree_id','root_edge_id','output_contracts','edges'}
+    assert set(tree)=={'schema_version','tree_id','root_edge_id','input_limits','output_contracts','edges'}
     assert tree.get('schema_version')==1
     assert tree.get('tree_id')=='review-pr-run-tree-v1'
     assert tree.get('root_edge_id')=='review_pr.post_impl_review'
+    assert tree.get('input_limits')=={'max_serialized_bytes':49152}
     edges=tree.get('edges')
     assert isinstance(edges,dict) and edges
     assert set(edges)==expected_edges

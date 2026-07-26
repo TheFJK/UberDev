@@ -960,6 +960,56 @@ fi
 rm -f "$PHASE25_FIXTURE"
 
 echo
+echo "== R30: validated fixer heads become the reviewed trust target only after publication =="
+FIXER_HEAD_FIXTURE="$(mktemp)"
+awk '/^[[:space:]]*review_track_validated_fixer_head\(\) \{/{active=1} active{print} active && /^[[:space:]]*\}/{exit}' \
+  "$REVIEW_PR" >"$FIXER_HEAD_FIXTURE"
+FIXER_HEAD_LOG="$(mktemp)"
+PRE_FIX_HEAD="$(printf 'd%.0s' {1..40})"
+PHASE1_FIX_HEAD="$(printf 'e%.0s' {1..40})"
+PHASE2_FIX_HEAD="$(printf 'f%.0s' {1..40})"
+UNEXPECTED_HEAD="$(printf '9%.0s' {1..40})"
+FIXER_HEAD_OUTPUT="$(
+  FIXER_HEAD_LOG="$FIXER_HEAD_LOG" bash -c '
+    . "$1"
+    WORKTREE_ROOT=/repo
+    git(){
+      [ "$3" = merge-base ] && [ "$4" = --is-ancestor ] && return 0
+      return 2
+    }
+    VALIDATED_FIXER_HEAD_SHA="$2"
+    review_track_validated_fixer_head APPLIED "$2" "$3" "$3"
+    review_track_validated_fixer_head APPLIED "$3" "$4" "$4"
+    printf "%s" "$VALIDATED_FIXER_HEAD_SHA"
+  ' _ "$FIXER_HEAD_FIXTURE" "$PRE_FIX_HEAD" "$PHASE1_FIX_HEAD" "$PHASE2_FIX_HEAD"
+)"
+FIXER_CHAIN_OK=1
+[ "$FIXER_HEAD_OUTPUT" = "$PHASE2_FIX_HEAD" ] || FIXER_CHAIN_OK=0
+if VALIDATED_FIXER_HEAD_SHA="$PHASE2_FIX_HEAD" WORKTREE_ROOT=/repo bash -c '
+  . "$1"
+  git(){ return 0; }
+  review_track_validated_fixer_head REFUSED "$2" "$3" "$3"
+' _ "$FIXER_HEAD_FIXTURE" "$PHASE2_FIX_HEAD" "$UNEXPECTED_HEAD" >/dev/null 2>&1; then
+  FIXER_CHAIN_OK=0
+fi
+
+PROMOTION_REGION="$(awk '/^[[:space:]]*6a\. \*\*Post-fixer push/{active=1} active{print} /^[[:space:]]*6b\. \*\*Phase 2\.5/{exit}' "$REVIEW_PR")"
+grep -qF 'review_assert_selected_pr_head "$REVIEW_REPO_SLUG" "$PR_NUMBER" \' <<<"$PROMOTION_REGION" \
+  || FIXER_CHAIN_OK=0
+grep -qF '"$VALIDATED_FIXER_HEAD_SHA" "$WORKTREE_ROOT"' <<<"$PROMOTION_REGION" \
+  || FIXER_CHAIN_OK=0
+grep -qF 'REVIEWED_HEAD_SHA="$VALIDATED_FIXER_HEAD_SHA"' <<<"$PROMOTION_REGION" \
+  || FIXER_CHAIN_OK=0
+if [ "$FIXER_CHAIN_OK" -eq 1 ]; then
+  echo "  PASS  R30 — only validated, published fixer ancestry advances the final trust target"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R30 — fixed-head trust lifecycle is stale or fail-open"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$FIXER_HEAD_FIXTURE" "$FIXER_HEAD_LOG"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

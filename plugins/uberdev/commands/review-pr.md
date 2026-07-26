@@ -461,6 +461,7 @@ PY
    REENTRY_HEAD_SHA="$(gh pr view "$PR_NUMBER" --repo "$REVIEW_REPO_SLUG" --json headRefOid --jq .headRefOid)" || return 2
    review_assert_selected_pr_head "$REVIEW_REPO_SLUG" "$PR_NUMBER" "$REENTRY_HEAD_SHA" "$WORKTREE_ROOT" || return 2
    REVIEWED_HEAD_SHA="$REENTRY_HEAD_SHA"
+   VALIDATED_FIXER_HEAD_SHA="$REVIEWED_HEAD_SHA"
    review_refresh_phase1_scope "$BASE_SHA" || return 2
    ```
 
@@ -497,20 +498,38 @@ PY
 
    The agent applies edits + creates `fix:` / `refactor:` conventional commits autonomously, returning commit SHAs in its YAML. These are the **review-phase commits**, kept distinct from the Phase 2 simplify commit (separate-commit invariant — see `tests/review-pr.test.sh` for the assertion that locks this boundary). Capture the agent's `commits[].sha` for the final aggregation table's "Auto-applied" column. Surface every `findings_disposition` row where `disposition != APPLIED` in the aggregation table's "Advisory findings" column so they are never silently dropped.
 
-   Capture `FIXER_HEAD_BEFORE` immediately before dispatch and
-   `FIXER_HEAD_AFTER` immediately after return. The controller applies:
+   Capture `FIXER_HEAD_BEFORE` immediately before dispatch,
+   `FIXER_HEAD_AFTER` immediately after return, and the final declared
+   `commits[].sha` as `FIXER_DECLARED_TIP`. The controller applies:
 
    ```bash uberdev-executable origin=review-pr
-   review_validate_fixer_mutation_status() {
-     local status="$1" before="$2" after="$3"
+   review_track_validated_fixer_head() {
+     local status="$1" before="$2" after="$3" declared_tip="${4:-}"
      [[ "$before" =~ ^[0-9a-f]{40}$ && "$after" =~ ^[0-9a-f]{40}$ ]] || return 2
+     [ "$before" = "${VALIDATED_FIXER_HEAD_SHA:-}" ] || return 76
      case "$status" in
-       APPLIED) return 0 ;;
-       NO_FIXES_NEEDED|REFUSED) [ "$before" = "$after" ] || return 75 ;;
+       APPLIED)
+         [ "$before" != "$after" ] || return 77
+         [ "$declared_tip" = "$after" ] || return 77
+         git -C "$WORKTREE_ROOT" merge-base --is-ancestor "$before" "$after" || return 78
+         VALIDATED_FIXER_HEAD_SHA="$after"
+         ;;
+       NO_FIXES_NEEDED|REFUSED)
+         [ -z "$declared_tip" ] && [ "$before" = "$after" ] || return 75
+         ;;
        *) return 2 ;;
      esac
    }
    ```
+
+   Initialize `VALIDATED_FIXER_HEAD_SHA="$REVIEWED_HEAD_SHA"` on every Phase 1
+   entry, including mandatory CI-fix re-entry. Call
+   `review_track_validated_fixer_head` after each Phase 1 and Phase 2 fixer
+   return. Any status/head/declaration/ancestry mismatch is
+   `MUTATED_BLOCKED`: stop before publication and re-enter Phase 1 only after
+   the unexpected history is resolved. A CI fixer never advances this variable
+   directly; its successful push must take the mandatory Phase 1 re-entry path,
+   which rebinds both head variables from the live/local equality gate.
 
    A returned `REFUSED` is publishable only when HEAD is unchanged. If the
    defensive gate observes mutation, normalize the state to
@@ -591,6 +610,11 @@ PY
 
    The agent creates ONE `refactor:` commit (R8.6 separate-commit invariant locks Phase 2 to a single `refactor:` per run; the agent's contract enforces this on the apply side, the test enforces it on the prose side). Reviewers must be able to tell "review fixes" apart from "simplify pass" by commit boundary alone — this distinct commit boundary is mandatory, not stylistic. Capture the agent's `commits[0].sha` for the final aggregation table's "Auto-applied" column for the Phase 2 row.
 
+   Capture the Phase 2 `FIXER_HEAD_BEFORE`, `FIXER_HEAD_AFTER`, and declared
+   `commits[0].sha`, then pass them through
+   `review_track_validated_fixer_head`. Phase 2 uses the same fail-closed
+   mutation and ancestry rules as Phase 1; a refusal is non-mutating or blocked.
+
    If `code-fixer` returns `status: REFUSED` for Phase 2, log the rationale, continue to trust-signal evaluation (the Phase 2 row in the aggregation table reads `Auto-applied: ∅` and "Phase 2 fixer refused: <reason>" surfaces in Advisory findings). Phase 2 status is `blocked` if and only if the lens fanout itself failed (timeout / parse error / aggregator crash); a fixer refusal does NOT make Phase 2 `blocked` — the lenses' findings are advisory.
 
    **On green Phase 2 (status ∈ {ran/APPROVE, skipped}), defer trust-signal emission to the dedicated end-of-run step** (see "Trust-Signal Emission" below). Phase 2's simplify commit body itself does **NOT** carry the `Reviewed-by:` trailer — the trailer is emitted as a separate trust-trail-anchor empty commit at the very end of `/review-pr`. This guarantees the trailer's referenced SHA always anchors the actual end-of-run HEAD regardless of how many Phase 1 / Phase 2 commits land, sidestepping the parent-vs-self SHA-mismatch class of bugs that per-simplify-commit-trailer patterns produce when Phase 2 makes a real commit on top of Phase 1's last commit. The trailer payload format is unchanged — `Reviewed-by: uberdev/review-pr@<40-char-sha>` — only the carrier-commit choice changes (anchor commit, not simplify commit).
@@ -613,13 +637,31 @@ PY
    # a silently-failed push here would let Phase 3 probe a stale remote SHA and
    # emit a trust signal for code CI never ran on. exit 2 = blocked-equivalent
    # per the artifact-emission-failure prose (trust-signal contract broken).
+   POST_FIXER_HEAD_SHA="$(git rev-parse HEAD)" || exit 2
+   if [ "$POST_FIXER_HEAD_SHA" != "${VALIDATED_FIXER_HEAD_SHA:-}" ]; then
+     echo "error: HEAD changed outside the validated review fixers; refusing publication" >&2
+     exit 2
+   fi
    if ! git push origin HEAD; then
      echo "error: post-fixer push failed (git push origin HEAD exited non-zero) — Phase 3 would probe a stale remote SHA. Re-run /review-pr after resolving." >&2
      exit 2
    fi
+   review_assert_selected_pr_head "$REVIEW_REPO_SLUG" "$PR_NUMBER" \
+     "$VALIDATED_FIXER_HEAD_SHA" "$WORKTREE_ROOT" || {
+       echo "error: post-fixer publication did not produce exact remote/local head equality" >&2
+       exit 2
+     }
+   REVIEWED_HEAD_SHA="$VALIDATED_FIXER_HEAD_SHA"
    ```
 
-   When neither fixer produced a commit, the push is an `Everything up-to-date` no-op (exit 0) — the guard only trips on real transport/auth/hook/non-fast-forward failures. On Phase 1 re-entry iterations (6c.5) this step re-runs after the re-entered Step 5/6b fixers — still exactly one push per iteration. This step is NOT gated by `SIMPLIFY_PHASE`, `CI_FIX_PHASE`, or `DEFER_ISSUES_PHASE` — it runs on every path that reaches Phase 2.5/Phase 3.
+   Only after the guarded push and exact live/local equality assertion does the
+   controller promote `REVIEWED_HEAD_SHA` to the validated fixer tip. When
+   neither fixer produced a commit, the candidate remains the entry snapshot
+   and the push is an `Everything up-to-date` no-op (exit 0). On Phase 1
+   re-entry iterations (6c.5) this full tracking/publication sequence re-runs
+   after the re-entered Step 5/6b fixers — still exactly one push per iteration.
+   This step is NOT gated by `SIMPLIFY_PHASE`, `CI_FIX_PHASE`, or
+   `DEFER_ISSUES_PHASE` — it runs on every path that reaches Phase 2.5/Phase 3.
 
 6b. **Phase 2.5 — Findings-to-Issues sub-phase** (skip iff `DEFER_ISSUES_PHASE=0` OR `defer_issues_enabled=false`)
 

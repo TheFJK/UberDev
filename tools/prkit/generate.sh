@@ -147,6 +147,7 @@ def strict_load(text):
 try:
     source = strict_load(policy.read_text(encoding='utf-8'))
     schema_version = source['schema_version']
+    input_limits = source['input_limits']
     source_edges = source['edges']
     source_contracts = source['output_contracts']
 except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -155,6 +156,8 @@ if not isinstance(source_edges, dict) or not isinstance(source_contracts, dict):
     raise SystemExit('policy source edges/output_contracts must be objects')
 if schema_version != 1:
     raise SystemExit(f'unsupported policy schema_version: {schema_version!r}')
+if input_limits != {'max_serialized_bytes': 49152}:
+    raise SystemExit(f'invalid input limit contract: {input_limits!r}')
 try:
     shipped_roles = {
         entry.name[len(role_prefix):-len(role_suffix)]
@@ -222,6 +225,7 @@ projected = {
     'schema_version': schema_version,
     'tree_id': 'review-pr-run-tree-v1',
     'root_edge_id': 'review_pr.post_impl_review',
+    'input_limits': input_limits,
     'output_contracts': {
         contract_id: source_contracts[contract_id]
         for contract_id in sorted(contract_ids)
