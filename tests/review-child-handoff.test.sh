@@ -994,6 +994,49 @@ set -e
 SH
 bash "$TMP/format-repair-ledger.sh" "$TMP/post-runtime.sh" "$TMP/format-repair-post"
 
+# Once reviewer output has passed validation, failure to persist its digest is
+# infrastructure failure. It must unwind the child without entering the
+# format-repair ledger or incrementing the format-failure count.
+cat >"$TMP/validated-ledger-failure.sh" <<'SH'
+set -u
+runtime="$1"; run="$2"; mkdir -p "$run"
+. "$runtime"
+CHANGED_PATHS_JSON='["README.md"]'
+POST_REVIEW_VALIDATED_LEDGER="$run/validated"
+: >"$POST_REVIEW_VALIDATED_LEDGER"
+unwind_log="$run/unwind"
+: >"$unwind_log"
+uberdev_wait_child() { return 0; }
+uberdev_child_validate_phase1_review_result() {
+  rm -f "$3"; printf 'validated fixture\n' >"$3"; chmod 400 "$3"; printf '%064d' 0
+}
+uberdev_unwind_child() {
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$unwind_log"
+  return 0
+}
+real_jq="$(command -v jq)"
+jq() {
+  case " $* " in
+    *' --arg sha256 '*) return 73 ;;
+  esac
+  command "$real_jq" "$@"
+}
+printf '%s\n' \
+  "{\"edge\":\"first.edge\",\"status\":\"$run/first.status\",\"result\":\"$run/first.result\"}" \
+  >"$run/launched"
+set +e
+post_review_wait_all "$run/launched" 31 "$run/failed"
+rc=$?
+set -e
+[ "$rc" -eq 73 ]
+[ "$POST_REVIEW_INFRA_FAILURE" -eq 1 ]
+[ "$POST_REVIEW_VALID_COUNT" -eq 0 ]
+[ "$POST_REVIEW_FORMAT_FAILURE_COUNT" -eq 0 ]
+[ ! -s "$run/failed" ]
+[ "$(wc -l <"$unwind_log" | tr -d ' ')" -eq 1 ]
+SH
+bash "$TMP/validated-ledger-failure.sh" "$TMP/post-runtime.sh" "$TMP/validated-ledger-post"
+
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$REVIEW"
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$SIMPLIFY"
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$POST"

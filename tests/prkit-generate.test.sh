@@ -215,6 +215,48 @@ PY
 then ok "G6b review-only policy is identical, closed, and contract-scoped across runtimes"
 else no "G6b standalone policy projection or reviewer contract scope is incorrect"; fi
 
+# G6bc — standalone /simplify uses PR_NUMBER=0. Execute the origin-derivation
+# helper from the generated prkit agent and prove it binds the source to the
+# validated worktree HEAD without probing a nonexistent PR.
+if python3 -I -B - "$T1/plugins/prkit/agents/findings-to-issues.md" "$_B1" <<'PY'
+import json,pathlib,subprocess,sys
+agent=pathlib.Path(sys.argv[1]).read_text()
+base=pathlib.Path(sys.argv[2])
+marker='```bash prkit-executable origin=findings-to-issues\n'
+assert 'pr_number is 0 AND source_ref non-empty' in agent
+assert 'pr_number empty' not in agent
+script=agent.split(marker,1)[1].split('\n```',1)[0]
+repo=base/'standalone-origin'
+repo.mkdir()
+subprocess.run(['git','-C',str(repo),'init','-q'],check=True)
+subprocess.run(['git','-C',str(repo),'config','user.email','prkit-test@example.invalid'],check=True)
+subprocess.run(['git','-C',str(repo),'config','user.name','prkit test'],check=True)
+(repo/'tracked').write_text('fixture\n')
+subprocess.run(['git','-C',str(repo),'add','tracked'],check=True)
+subprocess.run(['git','-C',str(repo),'commit','-qm','test: fixture'],check=True)
+head=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
+shell='set -eu\n'+script+'\nfindings_derive_review_origin "$1" "$2" "$3"\n'
+result=subprocess.run(
+ ['bash','-c',shell,'origin-test',str(repo),'0','20260726-120000-abc123'],
+ text=True,capture_output=True,
+ env={'PATH':'/usr/bin:/bin:/usr/sbin:/sbin'},
+)
+assert result.returncode==0,result
+origin=json.loads(result.stdout)
+assert origin=={
+ 'pr_commit_sha':head,
+ 'source_ref':'/simplify run 20260726-120000-abc123',
+},origin
+bad=subprocess.run(
+ ['bash','-c',shell,'origin-test',str(repo),'-1','20260726-120000-abc123'],
+ text=True,capture_output=True,
+ env={'PATH':'/usr/bin:/bin:/usr/sbin:/sbin'},
+)
+assert bad.returncode!=0,bad
+PY
+then ok "G6bc generated standalone prkit derives PR_NUMBER=0 origin from validated HEAD"
+else no "G6bc generated standalone prkit PR_NUMBER=0 origin derivation failed"; fi
+
 # G6c — the generated standalone Codex runtime must execute the focused
 # six-reviewer happy path, not merely pass structural namespace scans.
 if SIX_CHILD_RUNTIME_ROOT="$T1/codex/prkit-codex" \

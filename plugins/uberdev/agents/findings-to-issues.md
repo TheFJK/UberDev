@@ -21,7 +21,29 @@ The `review_pr.defer.findings` routed edge has this exact six-field input contra
 - `working_dir` — absolute worktree root.
 - `pr_number` — non-negative integer PR number (`0` outside PR context).
 
-For this routed review edge, derive `run_id` from the validated aggregate parent directory, derive `repo_slug` from `gh repo view`, and derive `pr_commit_sha` from `gh pr view "$pr_number" --json headRefOid`; validate each derived value before use. The fixed review defaults are `finding_label=review-pr-finding`, `finding_marker_slug=review-pr`, `source_ref=""`, and `max_new=10`. Do not treat absent metadata as trusted handoff input.
+For this routed review edge, derive `run_id` from the validated aggregate parent directory and `repo_slug` from `gh repo view`. Derive the origin with `findings_derive_review_origin`: a positive `pr_number` binds `pr_commit_sha` to the live PR head and leaves `source_ref` empty; `pr_number=0` binds `pr_commit_sha` to the validated `working_dir` HEAD and sets `source_ref` to the validated standalone reference `/simplify run <run_id>`. Reject every other value. The fixed review defaults are `finding_label=review-pr-finding`, `finding_marker_slug=review-pr`, and `max_new=10`. Do not treat absent metadata as trusted handoff input.
+
+```bash uberdev-executable origin=findings-to-issues
+findings_derive_review_origin() {
+  local working_dir="$1" pr_number="$2" run_id="$3" canonical_root git_root pr_commit_sha source_ref
+  case "$working_dir" in /*) ;; *) return 2 ;; esac
+  [[ "$run_id" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]] || return 2
+  case "$pr_number" in ''|*[!0-9]*) return 2 ;; esac
+  canonical_root="$(realpath "$working_dir")" || return 2
+  [ "$(git -C "$canonical_root" rev-parse --is-inside-work-tree 2>/dev/null)" = true ] || return 2
+  git_root="$(git -C "$canonical_root" rev-parse --show-toplevel 2>/dev/null)" || return 2
+  [ "$(realpath "$git_root")" = "$canonical_root" ] || return 2
+  if [ "$pr_number" -eq 0 ]; then
+    pr_commit_sha="$(git -C "$canonical_root" rev-parse HEAD 2>/dev/null)" || return 2
+    source_ref="/simplify run $run_id"
+  else
+    pr_commit_sha="$(gh pr view "$pr_number" --json headRefOid --jq .headRefOid 2>/dev/null)" || return 2
+    source_ref=""
+  fi
+  [[ "$pr_commit_sha" =~ ^[0-9a-f]{40}$ ]] || return 2
+  printf '{"pr_commit_sha":"%s","source_ref":"%s"}\n' "$pr_commit_sha" "$source_ref"
+}
+```
 
 Non-review fleet callers may supply their documented label/marker/source/cap overrides through their own caller contract; those extensions are not members of `review_pr.defer.findings`.
 
@@ -29,7 +51,7 @@ Both `phase*_path` files MUST be wrapped in `<external-untrusted-input source="p
 
 ## Tools authorised
 
-Read, Bash (limited to: `gh issue list`, `gh issue create`, `gh issue comment`, `gh label create`, `gh pr view`, `gh api /rate_limit`, `sha256sum`, `mktemp`, `printf`, `jq`, `sleep`, `grep`, `awk`, `sed`, `cat`, `source`). No Edit, no Write, no WebFetch, no WebSearch, no Task (no re-entrant fanout). No `git push`, no `git commit` — this agent NEVER mutates the worktree.
+Read, Bash (limited to: `gh issue list`, `gh issue create`, `gh issue comment`, `gh label create`, `gh repo view`, `gh pr view`, `gh api /rate_limit`, `git rev-parse`, `realpath`, `sha256sum`, `mktemp`, `printf`, `jq`, `sleep`, `grep`, `awk`, `sed`, `cat`, `source`). No Edit, no Write, no WebFetch, no WebSearch, no Task (no re-entrant fanout). No `git push`, no `git commit` — this agent NEVER mutates the worktree.
 
 Explicit forbidden patterns:
 - NEVER call `gh issue create --body "$VAR"` or `gh issue create --body "$(cmd)"` — body MUST be piped via `--body-file -` from stdin (research-security §Q1). Same rule for `gh issue comment`. The required positive form is `gh issue create --body-file -` reading from a `mktemp` tempfile that was secret-scanned in the same pipeline.
@@ -38,7 +60,7 @@ Explicit forbidden patterns:
 
 ## Process
 
-1. **Validate inputs and derive review metadata.** Verify `working_dir` resolves to an absolute path inside the current git worktree (`git -C "$working_dir" rev-parse --is-inside-work-tree`). For each non-empty `phase*_path`, verify the file exists and its first 128 bytes contain the literal string `<external-untrusted-input source="post-impl-review-aggregate">` (or `simplify-aggregate` for phase 2, or `ci-refused-synthetic` for the CI-REFUSED single-row dispatch path added in #116 / O5 — see `commands/review-pr.md` Step 6c.5, or `uberscan-aggregate` for the `/uberscan` whole-codebase audit path, or `testers-aggregate` for the `/uberdev:testers` adversarial QA audit path, or `uberthink-aggregate` for the `/uberthink` ideation-engine deliver path). The accepted-source allow-list is the closed set `{post-impl-review-aggregate, simplify-aggregate, ci-refused-synthetic, uberscan-aggregate, ubersimplify-aggregate, testers-aggregate, uberthink-aggregate}`. The `/ubersimplify` whole-codebase fix command files its leftover (non-applied blocker) findings under `ubersimplify-aggregate`. The `/uberdev:testers` adversarial QA squad files its `verified: true` persona findings under `testers-aggregate` (`skills/testers-pipeline/report.py`). The `/uberthink` ideation engine files its top-ranked design candidate(s) under `uberthink-aggregate`. If either check fails OR both paths are empty, return `status: REFUSED` with `rationale: "input-malformed"`. On `review_pr.defer.findings`, derive and validate `run_id`, `repo_slug`, and `pr_commit_sha` exactly as specified in Inputs before any GitHub write. Source the secret-scan library: `source "${CLAUDE_PLUGIN_ROOT}/lib/secret-scan.sh"` — refuse with `rationale: "secret-scan-lib-unavailable"` if the source returns non-zero.
+1. **Validate inputs and derive review metadata.** Verify `working_dir` resolves to an absolute path at the current git worktree root (`git -C "$working_dir" rev-parse --is-inside-work-tree` plus `--show-toplevel`). For each non-empty `phase*_path`, verify the file exists, resolves beneath `$working_dir/.uberdev/research/<RUN_ID>/`, and its first 128 bytes contain the literal string `<external-untrusted-input source="post-impl-review-aggregate">` (or `simplify-aggregate` for phase 2, or `ci-refused-synthetic` for the CI-REFUSED single-row dispatch path added in #116 / O5 — see `commands/review-pr.md` Step 6c.5, or `uberscan-aggregate` for the `/uberscan` whole-codebase audit path, or `testers-aggregate` for the `/uberdev:testers` adversarial QA audit path, or `uberthink-aggregate` for the `/uberthink` ideation-engine deliver path). All non-empty aggregate paths must share that exact parent; derive `run_id` from it and validate `^[0-9]{8}-[0-9]{6}-[a-f0-9]+$`. The accepted-source allow-list is the closed set `{post-impl-review-aggregate, simplify-aggregate, ci-refused-synthetic, uberscan-aggregate, ubersimplify-aggregate, testers-aggregate, uberthink-aggregate}`. The `/ubersimplify` whole-codebase fix command files its leftover (non-applied blocker) findings under `ubersimplify-aggregate`. The `/uberdev:testers` adversarial QA squad files its `verified: true` persona findings under `testers-aggregate` (`skills/testers-pipeline/report.py`). The `/uberthink` ideation engine files its top-ranked design candidate(s) under `uberthink-aggregate`. If either check fails OR both paths are empty, return `status: REFUSED` with `rationale: "input-malformed"`. On `review_pr.defer.findings`, derive and validate `repo_slug`, then call `findings_derive_review_origin "$working_dir" "$pr_number" "$run_id"` and parse only its exact JSON keys `pr_commit_sha` and `source_ref`; any derivation or parse failure is `status: REFUSED`, `rationale: "input-malformed"`, before any GitHub write. Source the secret-scan library: `source "${CLAUDE_PLUGIN_ROOT}/lib/secret-scan.sh"` — refuse with `rationale: "secret-scan-lib-unavailable"` if the source returns non-zero.
 
 2. **Rate-limit pre-flight (two buckets).** Fetch one canonical response and parse both integers locally so shell quoting, `gh --jq` output, or a partial second request cannot turn a healthy API into two empty values:
    ```bash
@@ -228,8 +250,8 @@ Explicit forbidden patterns:
 **Severity:** {severity} (Phase {1|2})
 **Disposition:** {disposition} ({deferral_reason})
 **Tier:** {BLOCKER | CRITICAL | MAJOR}
-{backref_line — "Blocks: #N" for BLOCKER/CRITICAL, "Related: PR #N" for MAJOR; omitted entirely when pr_number is empty}
-{source_line — "**Source:** <source_ref>" when pr_number empty AND source_ref non-empty; omitted otherwise}
+{backref_line — "Blocks: #N" for BLOCKER/CRITICAL, "Related: PR #N" for MAJOR; omitted entirely when pr_number is 0}
+{source_line — "**Source:** <source_ref>" when pr_number is 0 AND source_ref non-empty; omitted otherwise}
 
 ````finding
 {sanitised finding prose}
@@ -257,7 +279,7 @@ The `{mention_line}` (when present) and `{backref_line}` placeholders are tier-d
 When an existing open issue is found, the agent appends a comment (not a new issue body). The comment body inserts only:
 
 ```text
-Also flagged on commit [`{pr_commit_sha}`](https://github.com/{repo_slug}/commit/{pr_commit_sha}) (PR #{pr_number_if_known}) at `{file_path}:{line}`.
+Also flagged on commit [`{pr_commit_sha}`](https://github.com/{repo_slug}/commit/{pr_commit_sha}) {origin_context — "(PR #N)" when pr_number is positive, "(<source_ref>)" when pr_number is 0} at `{file_path}:{line}`.
 
 Agent: {agent_name} — Severity: {severity} (Phase {1|2}) — Disposition: {disposition}
 ```

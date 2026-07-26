@@ -242,13 +242,21 @@ post_review_wait_all() {
     if uberdev_wait_child "$status" "$result" "$timeout_s"; then
       validated_result="$(dirname "$result")/validated-result.md"
       if validation_digest="$(uberdev_child_validate_phase1_review_result "$result" "$CHANGED_PATHS_JSON" "$validated_result")"; then
-        if [[ "$validation_digest" =~ ^[0-9a-f]{64}$ ]] \
-            && jq -cn --arg edge "$edge" --argjson index "$index" --arg result "$validated_result" --arg sha256 "$validation_digest" \
-              '{edge:$edge,index:$index,result:$result,sha256:$sha256}' >>"$POST_REVIEW_VALIDATED_LEDGER"; then
+        if ! [[ "$validation_digest" =~ ^[0-9a-f]{64}$ ]]; then
+          validation_rc=2
+        elif jq -cn --arg edge "$edge" --argjson index "$index" --arg result "$validated_result" --arg sha256 "$validation_digest" \
+            '{edge:$edge,index:$index,result:$result,sha256:$sha256}' >>"$POST_REVIEW_VALIDATED_LEDGER"; then
           valid_count=$((valid_count + 1))
           continue
+        else
+          validation_rc=$?
         fi
-        validation_rc=2
+        POST_REVIEW_INFRA_FAILURE=1
+        [ "$first_rc" -ne 0 ] || first_rc="${validation_rc:-2}"
+        if ! uberdev_unwind_child "$status" "$result" "$timeout_s"; then
+          echo "error: cleanup failed after validated reviewer evidence persistence edge=$edge" >&2
+        fi
+        continue
       else
         validation_rc=$?
       fi
