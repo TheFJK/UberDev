@@ -95,9 +95,22 @@ echo "== lib/dispatch.sh inline-prefix UBERDEV_TURBO=1 on claude --bg (AUTO_MODE
 assert_grep "$DISPATCH_LIB" \
   'BG_TURBO_ENV=\( UBERDEV_TURBO=1 \)' \
   "lib/dispatch.sh declares BG_TURBO_ENV array under AUTO_MODE=1 (#97)"
-assert_grep "$DISPATCH_LIB" \
-  'env "\$\{BG_TURBO_ENV\[@\]\}" claude --bg' \
-  "lib/dispatch.sh expands BG_TURBO_ENV[@] left of claude --bg via env(1)-mediated inline-prefix exec (#97 — timeout(1) eats raw KEY=value as argv, env(1) consumes them as env)"
+if python3 -I -B - "$DISPATCH_LIB" <<'PY'
+import sys
+source=open(sys.argv[1],encoding="utf-8").read()
+body=source.split("_uberdev_dispatch_claude_bg() {",1)[1].split("\n}",1)[0]
+base='local cmd=( "$TIMEOUT_BIN" "$BG_BOOTSTRAP_TIMEOUT" env )'
+turbo='[ "${#BG_TURBO_ENV[@]}" -eq 0 ] || cmd+=( "${BG_TURBO_ENV[@]}" )'
+provider='cmd+=( claude --bg )'
+assert body.index(base) < body.index(turbo) < body.index(provider),body
+PY
+then
+  echo "  PASS  lib/dispatch.sh appends BG_TURBO_ENV before claude --bg with a nounset-safe length guard"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  lib/dispatch.sh must append BG_TURBO_ENV before claude --bg with a nounset-safe length guard"
+  FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== Anchor pre-check: solve-pipeline must contain exactly 2 'if AUTO_MODE==1' anchors (#97 simplify-lens E2 forward-guard) =="
