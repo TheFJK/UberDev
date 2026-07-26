@@ -368,7 +368,7 @@ import json,pathlib,sys
 last=json.loads(pathlib.Path(sys.argv[1]).read_text().splitlines()[-1])
 assert last['event']=='dispatch' and last['source']==sys.argv[2] and last['instance_id']==sys.argv[3]
 PY
-  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"receipt-provider"}\n' >"$4"
+  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"receipt-provider","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$4"
   chmod 600 "$4"
 }
 

@@ -39,6 +39,21 @@ pathlib.Path(sys.argv[2]).write_text(setup)
 pathlib.Path(sys.argv[3]).write_text(one(f'{namespace}-executable'))
 PY
 
+# Keep the exact Bash 3.2-sensitive cleanup shape in scope: remove is direct,
+# while list runs in command substitution before branch deletion. The runtime
+# assertions below prove all three Git processes resolve one mutex generation.
+python3 -I -B - "$RUNTIME_ROOT/lib/dispatch.sh" <<'PY'
+import pathlib,sys
+source=pathlib.Path(sys.argv[1]).read_text()
+start=source.index("_dispatch_cleanup_codex_worktree_locked()")
+end=source.index("_dispatch_cleanup_codex_worktree()",start)
+cleanup=source[start:end]
+remove=cleanup.index('git worktree remove --force "$target"')
+listing=cleanup.index('worktree_list="$(git worktree list --porcelain)"')
+branch=cleanup.index('git branch -D "$branch"')
+assert remove < listing < branch,(remove,listing,branch)
+PY
+
 mkdir -p "$TMP/bin" "$TMP/home"
 cat >"$TMP/bin/git" <<'SH'
 #!/usr/bin/env bash
@@ -92,27 +107,107 @@ case "$common_dir" in /*) ;; *) common_dir="$PWD/$common_dir" ;; esac
 common_dir="$(cd "$common_dir" && pwd -P)"
 sentinel="$common_dir/.uberdev-six-child-git-critical"
 owner_file="$sentinel/owner"
+transaction_owner=''
 
 collision() {
+  reason="$1"
+  shift
   actual="$(cat "$owner_file" 2>/dev/null || printf missing)"
-  printf 'overlap\towner=%s\tactual=%s\tphase=%s\targv=%s\n' \
-    "$PPID" "$actual" "$phase" "$*" >>"$SIX_CHILD_GIT_COLLISION_LOG"
+  printf 'overlap\treason=%s\towner=%s\tactual=%s\tphase=%s\targv=%s\n' \
+    "$reason" "${transaction_owner:-unprotected-pid:$PPID}" "$actual" "$phase" "$*" \
+    >>"$SIX_CHILD_GIT_COLLISION_LOG"
   exit 89
 }
 
+# The production mutex publishes one three-line owner record for the whole
+# multi-command cleanup transaction. Its random token identifies the exact
+# generation, unlike Bash 3.2's PPID (which changes inside command
+# substitution). Bind that generation to this Git process by requiring the
+# recorded mutex holder to be an actual ancestor; an unrelated process cannot
+# borrow a live token merely by reading the common directory.
+owner_candidates=(
+  "$common_dir"/.uberdev-worktree-metadata-locks/semaphore-v1/*.scope/.mutex/owner_pid
+)
+[ "${#owner_candidates[@]}" -eq 1 ] || collision no-owner "$@"
+mutex_owner_record="${owner_candidates[0]}"
+[ -f "$mutex_owner_record" ] && [ ! -L "$mutex_owner_record" ] \
+  || collision no-owner "$@"
+[ -d "$(dirname "$mutex_owner_record")" ] && [ ! -L "$(dirname "$mutex_owner_record")" ] \
+  || collision invalid-owner "$@"
+mutex_record="$(cat "$mutex_owner_record")" || collision invalid-owner "$@"
+mutex_owner_pid="$(printf '%s\n' "$mutex_record" | sed -n '1p')"
+mutex_owner_identity="$(printf '%s\n' "$mutex_record" | sed -n '2p')"
+mutex_generation="$(printf '%s\n' "$mutex_record" | sed -n '3p')"
+mutex_extra="$(printf '%s\n' "$mutex_record" | sed -n '4p')"
+case "$mutex_owner_pid" in ''|*[!0-9]*) collision invalid-owner "$@" ;; esac
+case "$mutex_owner_identity" in "$mutex_owner_pid"'|'*) ;; *) collision invalid-owner "$@" ;; esac
+case "$mutex_generation" in
+  ????????????????????????????????) ;;
+  *) collision invalid-owner "$@" ;;
+esac
+case "$mutex_generation" in *[!0-9a-f]*) collision invalid-owner "$@" ;; esac
+[ -z "$mutex_extra" ] || collision invalid-owner "$@"
+
+ancestor="$PPID"
+owner_is_ancestor=0
+ancestor_depth=0
+while [ "$ancestor_depth" -lt 64 ]; do
+  if [ "$ancestor" = "$mutex_owner_pid" ]; then owner_is_ancestor=1; break; fi
+  case "$ancestor" in ''|0|1|*[!0-9]*) break ;; esac
+  ancestor="$(ps -o ppid= -p "$ancestor" 2>/dev/null | tr -d '[:space:]')"
+  ancestor_depth=$((ancestor_depth + 1))
+done
+[ "$owner_is_ancestor" -eq 1 ] || collision unprotected-owner "$@"
+[ "$(cat "$mutex_owner_record" 2>/dev/null || true)" = "$mutex_record" ] \
+  || collision changed-owner "$@"
+transaction_owner="$mutex_owner_pid:$mutex_generation"
+
 if [ "$phase" = remove ]; then
-  if ! mkdir "$sentinel" 2>/dev/null; then collision "$@"; fi
+  if ! mkdir "$sentinel" 2>/dev/null; then collision sentinel-overlap "$@"; fi
   chmod 700 "$sentinel"
-  printf '%s\n' "$PPID" >"$owner_file"
+  printf '%s\n' "$transaction_owner" >"$owner_file"
 else
-  [ -f "$owner_file" ] || collision "$@"
-  [ "$(cat "$owner_file")" = "$PPID" ] || collision "$@"
+  [ -f "$owner_file" ] || collision missing-sentinel "$@"
+  [ "$(cat "$owner_file")" = "$transaction_owner" ] || collision changed-generation "$@"
 fi
-printf 'critical\towner=%s\tphase=%s\n' "$PPID" "$phase" >>"$SIX_CHILD_GIT_ARRIVAL_LOG"
+printf 'critical\towner=%s\tphase=%s\n' "$transaction_owner" "$phase" >>"$SIX_CHILD_GIT_ARRIVAL_LOG"
+
+# Case 3 launches one unrelated worktree-list probe after the first protected
+# remove enters. Hold that generation until the probe records its fail-loud
+# result, removing scheduler luck from the negative collision assertion.
+if [ "$phase" = remove ] && [ "${SIX_CHILD_GIT_EXPECT_UNPROTECTED_PROBE:-0}" = 1 ]; then
+  if [ ! -e "$SIX_CHILD_GIT_NEGATIVE_RESULT" ]; then
+    python3 -I -B - "$0" "$SIX_CHILD_GIT_NEGATIVE_RESULT" "$PWD" <<'PY'
+import os,pathlib,subprocess,sys,time
+wrapper,result,cwd=sys.argv[1:]
+first=os.fork()
+if first:
+    os.waitpid(first,0)
+    raise SystemExit(0)
+os.setsid()
+second=os.fork()
+if second:
+    os._exit(0)
+time.sleep(0.05)
+devnull=os.open(os.devnull,os.O_RDWR)
+for descriptor in (0,1,2):
+    os.dup2(devnull,descriptor)
+completed=subprocess.run([wrapper,"worktree","list","--porcelain"],cwd=cwd,env=os.environ)
+pathlib.Path(result).write_text(f"rc={completed.returncode}\n")
+os._exit(0)
+PY
+  fi
+  tries=0
+  while [ ! -s "$SIX_CHILD_GIT_NEGATIVE_RESULT" ] && [ "$tries" -lt 1000 ]; do
+    tries=$((tries + 1))
+    sleep 0.01
+  done
+  [ -s "$SIX_CHILD_GIT_NEGATIVE_RESULT" ] || collision negative-probe-timeout "$@"
+fi
 
 if "$SIX_CHILD_REAL_GIT" "$@"; then rc=0; else rc=$?; fi
 if [ "$phase" = branch ]; then
-  printf 'critical\towner=%s\tphase=release\n' "$PPID" >>"$SIX_CHILD_GIT_ARRIVAL_LOG"
+  printf 'critical\towner=%s\tphase=release\n' "$transaction_owner" >>"$SIX_CHILD_GIT_ARRIVAL_LOG"
   rm -f "$owner_file"
   rmdir "$sentinel"
 fi
@@ -263,6 +358,7 @@ mkdir -p "$CODEX_STUB_READY_DIR" "$CODEX_STUB_RELEASE_DIR"
     "$barrier_rc" "$barrier_reason" "$ready_count" "$lease_count" >"$CODEX_STUB_BARRIER_REPORT"
   exit "$barrier_rc"
 ) & readiness_coordinator=$!
+
 CHANGED_PATHS_JSON='["README.md"]'
 EMPHASIS_JSON='[]'
 REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT_OVERRIDE:-10}"
@@ -272,6 +368,26 @@ post_setup_rc=$?
 if [ "$post_setup_rc" -eq 0 ]; then . "$post_boundary"; post_setup_rc=$?; fi
 set -e
 if wait "$readiness_coordinator"; then readiness_rc=0; else readiness_rc=$?; fi
+
+dump_git_mutation_diagnostics() {
+  if [ -s "$SIX_CHILD_GIT_COLLISION_LOG" ]; then
+    echo "git metadata collision log:" >&2
+    cat "$SIX_CHILD_GIT_COLLISION_LOG" >&2
+  fi
+  if [ -d "$repo/.git/.uberdev-six-child-git-critical" ]; then
+    echo "leaked git critical sentinel:" >&2
+    ls -la "$repo/.git/.uberdev-six-child-git-critical" >&2
+    [ ! -f "$repo/.git/.uberdev-six-child-git-critical/owner" ] \
+      || cat "$repo/.git/.uberdev-six-child-git-critical/owner" >&2
+  fi
+  for mutex_owner in \
+      "$repo"/.git/.uberdev-worktree-metadata-locks/semaphore-v1/*.scope/.mutex/owner_pid; do
+    [ -f "$mutex_owner" ] || continue
+    echo "live production mutex owner: $mutex_owner" >&2
+    cat "$mutex_owner" >&2
+  done
+}
+
 if [ "$readiness_rc" -ne 0 ]; then
   printf 'readiness coordinator: %s\n' "$(cat "$CODEX_STUB_BARRIER_REPORT" 2>/dev/null || printf 'missing report')" >&2
 fi
@@ -303,6 +419,7 @@ done <"$REVIEW_LAUNCHED"
 if [ -n "$timeout_instance" ]; then
   if [ "${REVIEW_WAIT_RC:-}" -ne 124 ]; then
     echo "production review timeout returned rc=${REVIEW_WAIT_RC:-missing}, expected 124" >&2
+    dump_git_mutation_diagnostics
     while IFS= read -r timeout_row; do
       timeout_status="$(jq -r .status <<<"$timeout_row")"
       echo "$(jq -r .edge <<<"$timeout_row") state=$(jq -r .state "$timeout_status" 2>/dev/null || echo missing)" >&2
@@ -312,6 +429,11 @@ if [ -n "$timeout_instance" ]; then
     done <"$REVIEW_LAUNCHED"
     exit 1
   fi
+  [ "$(cat "$SIX_CHILD_GIT_NEGATIVE_RESULT" 2>/dev/null || true)" = 'rc=89' ] || {
+    echo "unprotected Git probe did not fail loud as expected" >&2
+    dump_git_mutation_diagnostics
+    exit 1
+  }
   timeout_index=-1
   for i in "${!instances[@]}"; do [ "${instances[$i]}" != "$timeout_instance" ] || timeout_index="$i"; done
   [ "$timeout_index" -ge 0 ] || { echo "timed-out instance missing from launch roster" >&2; exit 1; }
@@ -446,14 +568,10 @@ terminals = [row for row in events if row.get("event") in {"completed", "failed"
 assert len(terminals) == 7, terminals
 assert {row["run_id"] for row in terminals} == set(instances) | {repair}, terminals
 PY
-[ ! -s "$SIX_CHILD_GIT_COLLISION_LOG" ] || {
-  echo "concurrent git metadata mutations escaped dispatch serialization:" >&2
-  cat "$SIX_CHILD_GIT_COLLISION_LOG" >&2
-  exit 1
-}
 if [ "${SIX_CHILD_GIT_MUTATION_STRESS:-0}" = 1 ]; then
-  python3 -I -B - "$SIX_CHILD_GIT_ARRIVAL_LOG" <<'PY'
-import collections,pathlib,sys
+  python3 -I -B - "$SIX_CHILD_GIT_ARRIVAL_LOG" "$SIX_CHILD_GIT_COLLISION_LOG" \
+    "$SIX_CHILD_GIT_NEGATIVE_RESULT" <<'PY'
+import collections,pathlib,re,sys
 lines=pathlib.Path(sys.argv[1]).read_text().splitlines()
 pending=[line.split("owner=",1)[1] for line in lines if line.startswith("pending\towner=")]
 assert len(pending)==len(set(pending))==6,pending
@@ -466,8 +584,21 @@ for line in lines:
     events[fields["owner"]].append(fields["phase"])
 assert len(events)==6,events
 assert all(phases==["remove","list","branch","release"] for phases in events.values()),events
+assert all(re.fullmatch(r"[1-9][0-9]*:[0-9a-f]{32}",owner) for owner in events),events
+
+collisions=pathlib.Path(sys.argv[2]).read_text().splitlines()
+assert len(collisions)==1,collisions
+fields=dict(field.split("=",1) for field in collisions[0].split("\t")[1:])
+assert fields["reason"]=="unprotected-owner" and fields["phase"]=="list",fields
+assert re.fullmatch(r"unprotected-pid:[1-9][0-9]*",fields["owner"]),fields
+assert re.fullmatch(r"[1-9][0-9]*:[0-9a-f]{32}",fields["actual"]),fields
+assert pathlib.Path(sys.argv[3]).read_text()=="rc=89\n"
 PY
   [ ! -e "$repo/.git/.uberdev-six-child-git-critical" ]
+elif [ -s "$SIX_CHILD_GIT_COLLISION_LOG" ]; then
+  echo "concurrent git metadata mutations escaped dispatch serialization:" >&2
+  cat "$SIX_CHILD_GIT_COLLISION_LOG" >&2
+  exit 1
 fi
 
 # The canonical reviewer boundary drives the existing one-shot format-retry
@@ -595,19 +726,24 @@ make_repo() {
 
 run_case() {
   local name="$1" fail_instance="${2-}" timeout_instance="${3-}" skip_ready_instance="${4-}" pre_ready_fail_instance="${5-}"
-  local repo runtime codex_log claude_log barrier_timeout=60 git_mutation_stress=0
+  local repo runtime codex_log claude_log barrier_timeout=60 git_mutation_stress=0 expect_unprotected_probe=0
   repo="$TMP/repo-$name"; runtime="$TMP/runtime-$name"
   codex_log="$TMP/codex-$name.log"; claude_log="$TMP/claude-$name.log"
   make_repo "$repo"
   mkdir -p "$runtime" "$runtime/git-preacquire"
   ready_dir="$runtime/ready"; release_dir="$runtime/release"
   [ -z "$skip_ready_instance" ] || barrier_timeout=2
-  [ "$name" != 3 ] || git_mutation_stress=1
+  if [ "$name" = 3 ]; then
+    git_mutation_stress=1
+    expect_unprotected_probe=1
+  fi
   env -i HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
     SIX_CHILD_REAL_GIT="$REAL_GIT" SIX_CHILD_GIT_COLLISION_LOG="$runtime/git-collisions.log" \
     SIX_CHILD_GIT_ARRIVAL_LOG="$runtime/git-arrivals.log" \
     SIX_CHILD_GIT_PREACQUIRE_DIR="$runtime/git-preacquire" \
     SIX_CHILD_GIT_MUTATION_STRESS="$git_mutation_stress" \
+    SIX_CHILD_GIT_EXPECT_UNPROTECTED_PROBE="$expect_unprotected_probe" \
+    SIX_CHILD_GIT_NEGATIVE_RESULT="$runtime/unprotected-probe.result" \
     PLUGIN_ROOT="$RUNTIME_ROOT" WORKTREE_ROOT="$repo" \
     UBERDEV_TMPDIR="$runtime" PRKIT_TMPDIR="$runtime" \
     CODEX_STUB_LOG="$codex_log" CLAUDE_STUB_LOG="$claude_log" \
