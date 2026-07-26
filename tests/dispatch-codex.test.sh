@@ -2169,17 +2169,24 @@ IMMEDIATE_OUT="$(
   PATH="$IMMEDIATE_TMP/bin:/usr/bin:/bin" UBERDEV_TMPDIR="$IMMEDIATE_TMP/tmp" \
   /bin/bash -c '
     . "$1"
+    IMMEDIATE_TERMINAL_EVIDENCE_BUDGET_S=30
     # Force the real launcher into the already-terminal branch without an
     # artificial sleep: wait reaps the exact wrapper before reporting that its
-    # owned session can no longer be observed.
+    # owned session can no longer be observed. Native Windows detached Bash
+    # startup can be slow under runner load, so wait on a named bounded budget;
+    # expiry is a diagnostic failure, never evidence that the session is owned.
     _uberdev_dispatch_wait_owned_session() {
-      local status i=0
-      while [ "$i" -lt 400 ]; do
+      local status log_tail started=$SECONDS
+      while [ $((SECONDS - started)) -lt "$IMMEDIATE_TERMINAL_EVIDENCE_BUDGET_S" ]; do
         status="$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)"
         case "$status" in *\"state\":\"completed\"*|*\"state\":\"failed\"*) return 1 ;; esac
-        sleep 0.025; i=$((i + 1))
+        sleep 0.025
       done
-      return 0
+      log_tail="$(tail -n 20 "$UBERDEV_AGENT_STATUS_FILE.log" 2>/dev/null | tr "\n" ";")"
+      printf "immediate terminal evidence timeout: budget_s=%s pid=%s status_file=%s status=%s log_tail=%s\n" \
+        "$IMMEDIATE_TERMINAL_EVIDENCE_BUDGET_S" "${DISPATCH_ID:-none}" \
+        "$UBERDEV_AGENT_STATUS_FILE" "${status:-missing}" "${log_tail:-empty}" >&2
+      return 1
     }
     failures=0; details=""
     for outcome in completed failed completed failed completed failed; do
@@ -2204,6 +2211,17 @@ IMMEDIATE_OUT="$(
     terminal_pid="$DISPATCH_ID"
     ! _uberdev_dispatch_accept_immediate_terminal background "$terminal_pid" "$UBERDEV_AGENT_STATUS_FILE" "$UBERDEV_AGENT_RESULT_FILE" >/dev/null 2>&1 || failures=$((failures + 1))
     ! _uberdev_dispatch_accept_immediate_terminal codex "$((terminal_pid + 1))" "$UBERDEV_AGENT_STATUS_FILE" "$UBERDEV_AGENT_RESULT_FILE" >/dev/null 2>&1 || failures=$((failures + 1))
+    terminal_status_file="$UBERDEV_AGENT_STATUS_FILE"
+    IMMEDIATE_TERMINAL_EVIDENCE_BUDGET_S=0
+    UBERDEV_AGENT_STATUS_FILE="$UBERDEV_TMPDIR/status-timeout-diagnostic.json"
+    timeout_diagnostic="$(_uberdev_dispatch_wait_owned_session 2>&1)"
+    timeout_rc=$?
+    IMMEDIATE_TERMINAL_EVIDENCE_BUDGET_S=30
+    UBERDEV_AGENT_STATUS_FILE="$terminal_status_file"
+    case "$timeout_rc:$timeout_diagnostic" in
+      1:*"budget_s=0"*"status=missing"*"log_tail=empty"*) ;;
+      *) failures=$((failures + 1)); details="$details timeout-rc=$timeout_rc timeout-diagnostic=$timeout_diagnostic" ;;
+    esac
     # Publish the native process PID explicitly. On Git Bash, `$!` is an MSYS
     # namespace handle while the production liveness probe uses native Windows
     # PIDs, so a plain `sleep &` would test the wrong namespace.
