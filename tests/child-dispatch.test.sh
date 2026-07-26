@@ -203,19 +203,60 @@ PY
   [ ! -e "$TMP/run/children/prod-role-mismatch" ]
 )
 
-# Standalone simplify uses an honest workflow carrier with subject 0.
+# Standalone simplify still fails closed before context allocation when its
+# required supervised provider is unavailable.
+(
+  unset UBERDEV_CHILD_TEST_MODE UBERDEV_CHILD_MANIFEST_PATH UBERDEV_RUN_CARRIER_JSON \
+    UBERDEV_AGENT_PREPARED_REQUEST_JSON UBERDEV_RESOLVED_BACKEND
+  mkdir -p "$TMP/standalone-unavailable"
+  UBERDEV_TMPDIR="$TMP/standalone-unavailable"
+  UBERDEV_DISPATCH_BACKEND_REQUESTED=auto
+  export UBERDEV_TMPDIR UBERDEV_DISPATCH_BACKEND_REQUESTED
+  _uberdev_dispatch_codex_available() { return 1; }
+  set +e
+  STANDALONE_UNAVAILABLE_ERROR="$(uberdev_prepare_run_carrier simplify 0 medium '[]' 2>&1)"
+  STANDALONE_UNAVAILABLE_RC=$?
+  set -e
+  [ "$STANDALONE_UNAVAILABLE_RC" -eq 1 ]
+  printf '%s\n' "$STANDALONE_UNAVAILABLE_ERROR" | grep -Fq "simplify requires the 'codex' CLI"
+  [ "$UBERDEV_DISPATCH_BACKEND_REQUESTED" = auto ]
+  [ -z "${UBERDEV_RUN_CARRIER_JSON:-}" ]
+  [ -z "${UBERDEV_AGENT_PREPARED_REQUEST_JSON:-}" ]
+  [ -z "$(find "$TMP/standalone-unavailable" -mindepth 1 -print -quit)" ]
+)
+
+# Standalone simplify uses an honest workflow carrier with subject 0. This
+# fixture provides only the CLI capability probe; provider execution here is a
+# test failure because carrier preparation must not launch Codex.
 (
   unset UBERDEV_CHILD_TEST_MODE UBERDEV_CHILD_MANIFEST_PATH UBERDEV_RUN_CARRIER_JSON UBERDEV_AGENT_PREPARED_REQUEST_JSON
   mkdir -p "$TMP/standalone"
-  UBERDEV_TMPDIR="$TMP/standalone" UBERDEV_RESOLVED_BACKEND=codex
-  export UBERDEV_TMPDIR UBERDEV_RESOLVED_BACKEND
+  STANDALONE_BIN="$TMP/standalone-bin"
+  STANDALONE_CODEX_INVOKED="$TMP/standalone-codex-invoked"
+  mkdir -p "$STANDALONE_BIN"
+  cat >"$STANDALONE_BIN/codex" <<'SH'
+#!/bin/sh
+: >"${STANDALONE_CODEX_INVOKED:?}"
+exit 97
+SH
+  chmod +x "$STANDALONE_BIN/codex"
+  UBERDEV_TMPDIR="$TMP/standalone"
+  UBERDEV_DISPATCH_BACKEND_REQUESTED=auto
+  UBERDEV_RESOLVED_BACKEND=background
+  PATH="$STANDALONE_BIN:$PATH"
+  export UBERDEV_TMPDIR UBERDEV_DISPATCH_BACKEND_REQUESTED UBERDEV_RESOLVED_BACKEND PATH STANDALONE_CODEX_INVOKED
   uberdev_prepare_run_carrier simplify 0 medium '[]' >"$TMP/standalone-carrier.json"
   CARRIER="$(cat "$TMP/standalone-carrier.json")"
+  [ "$UBERDEV_DISPATCH_BACKEND_REQUESTED" = auto ]
+  [ "$UBERDEV_RESOLVED_BACKEND" = codex ]
   [ "$UBERDEV_RUN_CARRIER_JSON" = "$CARRIER" ]
   [ -n "$UBERDEV_AGENT_PREPARED_REQUEST_JSON" ]
-  python3 - "$CARRIER" <<'PY'
+  [ ! -e "$STANDALONE_CODEX_INVOKED" ]
+  python3 - "$CARRIER" "$UBERDEV_AGENT_PREPARED_REQUEST_JSON" <<'PY'
 import json,sys
-v=json.loads(sys.argv[1]); assert v['workflow']=='simplify' and v['issue_num']==0
+carrier=json.loads(sys.argv[1]); prepared=json.loads(sys.argv[2])
+assert carrier['workflow']=='simplify' and carrier['issue_num']==0
+assert prepared['backend']=='codex' and prepared['root_decision']['backend']=='codex'
 PY
   ! uberdev_create_child_handoff sdd.task.implement simplify-forbidden "$BUILDER_INPUTS" '[]' >/dev/null 2>&1
 )
