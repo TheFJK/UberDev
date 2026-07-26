@@ -551,10 +551,16 @@ for CLAUDE_SHELL in "${CLAUDE_SHELLS[@]}"; do
     : >"$CASE_DIR/provider.log"
     PROMPT_CASE="$CASE_DIR/prompt.txt"
     if [ "$CLAUDE_STDIN_CASE" = redirection-failure ]; then
-      # chmod 000 is advisory on Git Bash/Windows and can leave the file
-      # readable. FD 9 is inherited write-only, so reopening /dev/fd/9 for
-      # stdin fails deterministically on Bash 3.2, Bash 5, and Git Bash.
+      # chmod 000 is advisory on Git Bash/Windows, and Cygwin can reopen a
+      # write-only descriptor through /dev/fd with read access. A closed FD
+      # has no backing handle to reopen, so this is a deterministic shell-level
+      # redirection-open failure on Bash 3.2, Bash 5, and Git Bash.
       PROMPT_CASE=/dev/fd/9
+      if "$CLAUDE_SHELL" -c 'exec < /dev/fd/9' 9>&- >/dev/null 2>&1; then
+        echo "  FAIL  redirection-failure fixture unexpectedly opened a closed FD on $CLAUDE_SHELL_LABEL"
+        FAIL=$((FAIL + 1))
+        continue
+      fi
     fi
     set +e
     CLAUDE_STDIN_RESULT="$($CLAUDE_SHELL -c '
@@ -583,8 +589,7 @@ for CLAUDE_SHELL in "${CLAUDE_SHELLS[@]}"; do
         "$(wc -l <"$PROVIDER_LOG" 2>/dev/null || printf 0)" \
         "$([ -e "$MUTEX_SENTINEL" ] && printf held || printf clear)"
       [ "$rc" -ne 0 ] && [ ! -s "$PROVIDER_LOG" ] && [ ! -e "$MUTEX_SENTINEL" ]
-    ' _ "$DISPATCH_LIB" "$CASE_DIR" "$PROMPT_CASE" \
-      9>"$CASE_DIR/write-only-prompt-fd" 2>&1)"
+    ' _ "$DISPATCH_LIB" "$CASE_DIR" "$PROMPT_CASE" 9>&- 2>&1)"
     CLAUDE_STDIN_RC=$?
     set +e
     if [ "$CLAUDE_STDIN_RC" -eq 0 ]; then
