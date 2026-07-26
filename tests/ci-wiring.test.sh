@@ -20,6 +20,7 @@
 #         Unix-only fixture cannot be added to ubuntu without also being
 #         declared in the marker block, and the marker block cannot drift
 #         from the actual skip set.
+#   W5  — the Windows job retains its evidence-based 15-minute hang guard.
 #
 # Portable: bash + awk + grep + sed + sort + comm. Runs on ubuntu-latest
 # (native bash) and windows-latest (Git Bash) without any extra deps.
@@ -48,6 +49,13 @@ fi
 if [ ! -d "$REPO_ROOT/tests" ]; then
   echo "  ABORT — tests/ directory missing: $REPO_ROOT/tests"; exit 99
 fi
+
+WINDOWS_TIMEOUT_MINUTES=15
+windows_job_block=$(awk '
+  /^  shape-checks-windows:[[:space:]]*$/ { in_job=1; next }
+  in_job && /^  [[:alnum:]_-]+:[[:space:]]*$/ { exit }
+  in_job { print }
+' "$WORKFLOW")
 
 on_disk=$(cd "$REPO_ROOT" && ls tests/*.test.sh 2>/dev/null | sed 's#tests/##' | sort -u)
 if [ -z "$on_disk" ]; then
@@ -142,6 +150,20 @@ else
   echo "         Marker block lives in .github/workflows/test.yml between"
   echo "           # === BEGIN ci-wiring windows-skip-list ==="
   echo "           # === END ci-wiring windows-skip-list ==="
+  FAIL=$((FAIL+1))
+fi
+
+# W5 — observed timing projects about eleven minutes for the complete portable
+# suite; keep enough hosted-runner headroom without falling back to Actions'
+# 360-minute default or weakening the Linux/macOS job-specific guards.
+windows_timeout_rows=$(printf '%s\n' "$windows_job_block" \
+  | sed -n 's/^    timeout-minutes:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p')
+if [ "$windows_timeout_rows" = "$WINDOWS_TIMEOUT_MINUTES" ]; then
+  echo "  PASS  W5 the windows job timeout is ${WINDOWS_TIMEOUT_MINUTES} minutes"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  W5 the windows job must have exactly one ${WINDOWS_TIMEOUT_MINUTES}-minute timeout"
+  echo "         observed timeout rows: ${windows_timeout_rows:-<none>}"
   FAIL=$((FAIL+1))
 fi
 
