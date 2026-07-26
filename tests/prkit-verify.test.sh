@@ -50,6 +50,32 @@ from pathlib import Path
 import sys
 p=Path(sys.argv[1]); contract=Path(sys.argv[2]).read_text(); p.write_text(p.read_text()+"\n"+contract)
 PY'
+expect_fail "V13 out-of-scope policy edge fails" 'python3 - "$d/plugins/prkit/policy/solve-run-tree-v1.json" <<'PY'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); tree=json.loads(p.read_text()); tree["edges"]["solve.issue.lead"]={"kind":"skill"}; p.write_text(json.dumps(tree))
+PY'
+expect_fail "V14 unshipped provider role fails" 'python3 - "$d/plugins/prkit/policy/solve-run-tree-v1.json" <<'PY'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); tree=json.loads(p.read_text()); next(edge for edge in tree["edges"].values() if edge.get("kind")=="provider")["role"]="ghost-agent"; p.write_text(json.dumps(tree))
+PY'
+expect_fail "V15 turbo workflow in policy fails" 'python3 - "$d/plugins/prkit/policy/solve-run-tree-v1.json" <<'PY'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); tree=json.loads(p.read_text()); next(edge for edge in tree["edges"].values() if edge.get("kind")=="provider")["allowed_workflows"].append("turbo"); p.write_text(json.dumps(tree))
+PY'
+expect_fail "V16 cross-runtime policy byte divergence fails" 'printf " " >> "$d/codex/prkit-codex/policy/solve-run-tree-v1.json"'
+expect_fail "V17 duplicate policy JSON key fails" 'python3 - "$d/plugins/prkit/policy/solve-run-tree-v1.json" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); text=p.read_text(); p.write_text(text.replace("{", "{\n  \"schema_version\": 1,", 1))
+PY'
+expect_fail "V18 non-finite policy JSON constant fails" 'python3 - "$d/plugins/prkit/policy/solve-run-tree-v1.json" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); text=p.read_text(); p.write_text(text.replace("{", "{\n  \"non_finite\": NaN,", 1))
+PY'
 
 echo "  Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

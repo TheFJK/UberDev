@@ -45,14 +45,15 @@ for req in codex/uberdev-codex/skills/uberdev-cmd-review-pr/SKILL.md \
 done
 grep -qxF codex/install-codex.sh "$MANIFEST" && ok "C4 command-skills + installer + converter present"
 
-# C5 — native Codex packaging includes the routed manifest and its output schema.
+# C5 — native Codex packaging includes the canonical policy projection source
+# and its output schema.
 for req in codex/uberdev-codex/policy/solve-run-tree-v1.json \
            codex/uberdev-codex/shared/phase1-reviewer-output-v1.md; do
   grep -qxF "$req" "$MANIFEST" || no "C5 missing runtime contract: $req"
 done
 grep -qxF codex/uberdev-codex/policy/solve-run-tree-v1.json "$MANIFEST" \
   && grep -qxF codex/uberdev-codex/shared/phase1-reviewer-output-v1.md "$MANIFEST" \
-  && ok "C5 solve run tree + reviewer output contract present"
+  && ok "C5 canonical policy projection source + reviewer output contract present"
 
 echo "  Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

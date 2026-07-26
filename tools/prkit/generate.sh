@@ -64,16 +64,6 @@ while IFS= read -r rel; do
 done < "$MANIFEST"
 [ "$copied" -eq "$expected" ] || { echo "generate: copied $copied of $expected manifest files" >&2; exit 1; }
 
-# --- 4. Rewrite every copied file. The one JSON data file (model-routing-v1.json)
-# has no uberdev token, so perl -0pi is a byte-preserving no-op on it; every copied
-# file is text, so nothing is skipped. rw_rc surfaces a perl failure. ---
-rw_rc=0
-while IFS= read -r -d '' f; do
-  prkit_neutralize "$f" || { echo "generate: neutralize failed: $f" >&2; rw_rc=1; }
-  prkit_apply_rewrites "$f" || { echo "generate: rewrite failed: $f" >&2; rw_rc=1; }
-done < <(find "$P" -type f -print0)
-[ "$rw_rc" -eq 0 ] || { echo "generate: rewrite pass had failures" >&2; exit 1; }
-
 # --- 5. Scaffold standalone-only files from templates ---
 # render fails loudly: a missing template or a sed error must not silently ship a
 # zero-byte scaffold (a bare `> out` redirect truncates out before sed runs, and
@@ -86,6 +76,144 @@ render(){
     || { echo "generate: render produced empty/failed output: $tmpl" >&2; rm -f "$tmp"; exit 1; }
   mv "$tmp" "$out"
 }
+
+# Project the canonical UberDev run tree down to the review-only closure shipped
+# by standalone prkit. Parse and publish fail closed: duplicate keys and Python's
+# otherwise-accepted NaN/Infinity constants are rejected, and the exact
+# deterministic bytes are reparsed before the atomic replace.
+project_review_policy(){
+  local policy="$1"
+  python3 -I -B - "$policy" <<'PY' || return 1
+import json
+import os
+import pathlib
+import stat
+import sys
+import tempfile
+
+policy = pathlib.Path(sys.argv[1])
+shipped_roles = {
+    'ci-code-fixer', 'ci-failure-classifier', 'ci-rebase-handler',
+    'code-fixer', 'code-reviewer', 'code-simplifier', 'comment-analyzer',
+    'conflict-resolver', 'findings-to-issues', 'merge-strategy-decider',
+    'pr-test-analyzer', 'silent-failure-hunter', 'trust-trail-evaluator',
+    'type-design-analyzer',
+}
+allowed_workflows = ('review-pr', 'simplify')
+
+def reject_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f'duplicate JSON key: {key}')
+        result[key] = value
+    return result
+
+def reject_constant(value):
+    raise ValueError(f'non-finite JSON constant: {value}')
+
+def strict_load(text):
+    return json.loads(
+        text,
+        object_pairs_hook=reject_pairs,
+        parse_constant=reject_constant,
+    )
+
+try:
+    source = strict_load(policy.read_text(encoding='utf-8'))
+    source_edges = source['edges']
+    source_contracts = source['output_contracts']
+except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+    raise SystemExit(f'policy source parse failed: {exc}')
+if not isinstance(source_edges, dict) or not isinstance(source_contracts, dict):
+    raise SystemExit('policy source edges/output_contracts must be objects')
+
+edges = {}
+for edge_id, original in source_edges.items():
+    if not isinstance(edge_id, str) or not edge_id.startswith('review_pr.'):
+        continue
+    if not isinstance(original, dict):
+        raise SystemExit(f'policy edge must be an object: {edge_id}')
+    edge = dict(original)
+    if 'allowed_workflows' in edge:
+        workflows = edge['allowed_workflows']
+        if not isinstance(workflows, list) or not all(isinstance(item, str) for item in workflows):
+            raise SystemExit(f'policy edge workflows must be a string array: {edge_id}')
+        edge['allowed_workflows'] = [
+            workflow for workflow in allowed_workflows if workflow in workflows
+        ]
+    if edge.get('kind') == 'provider' and edge.get('role') not in shipped_roles:
+        raise SystemExit(f'policy edge uses an unshipped provider role: {edge_id}')
+    edges[edge_id] = edge
+if not edges:
+    raise SystemExit('policy projection selected zero review_pr edges')
+if edges.get('review_pr.post_impl_review', {}).get('kind') != 'skill':
+    raise SystemExit('policy projection is missing structural review skill edge')
+
+contract_ids = {
+    edge['output_contract']
+    for edge in edges.values()
+    if 'output_contract' in edge
+}
+if not all(isinstance(contract_id, str) for contract_id in contract_ids):
+    raise SystemExit('policy output_contract references must be strings')
+missing_contracts = contract_ids.difference(source_contracts)
+if missing_contracts:
+    raise SystemExit(f'policy projection references missing contracts: {sorted(missing_contracts)}')
+
+projected = dict(source)
+projected['tree_id'] = 'review-pr-run-tree-v1'
+projected['root_edge_id'] = 'review_pr.post_impl_review'
+projected['output_contracts'] = {
+    contract_id: source_contracts[contract_id]
+    for contract_id in sorted(contract_ids)
+}
+projected['edges'] = edges
+try:
+    serialized = (json.dumps(
+        projected,
+        sort_keys=True,
+        allow_nan=False,
+        indent=2,
+    ) + '\n').encode('utf-8')
+    reparsed = strict_load(serialized.decode('utf-8'))
+except (TypeError, ValueError, json.JSONDecodeError) as exc:
+    raise SystemExit(f'policy projection serialization failed: {exc}')
+if reparsed != projected:
+    raise SystemExit('policy projection changed during deterministic reparse')
+
+temporary = None
+try:
+    mode = stat.S_IMODE(policy.stat().st_mode)
+    fd, temporary = tempfile.mkstemp(prefix='.solve-run-tree.', dir=policy.parent)
+    with os.fdopen(fd, 'wb') as stream:
+        stream.write(serialized)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.chmod(temporary, mode)
+    os.replace(temporary, policy)
+except OSError as exc:
+    if temporary is not None:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+    raise SystemExit(f'policy projection publish failed: {exc}')
+PY
+}
+
+# --- 4. Project the copied canonical policy, then rewrite every copied file.
+# The one JSON data file (model-routing-v1.json) has no uberdev token, so perl
+# is a byte-preserving no-op on it; every copied file is text. ---
+project_review_policy "$P/policy/solve-run-tree-v1.json" \
+  || { echo "generate: Claude policy projection failed" >&2; exit 1; }
+rw_rc=0
+while IFS= read -r -d '' f; do
+  prkit_neutralize "$f" || { echo "generate: neutralize failed: $f" >&2; rw_rc=1; }
+  prkit_apply_rewrites "$f" || { echo "generate: rewrite failed: $f" >&2; rw_rc=1; }
+done < <(find "$P" -type f -print0)
+[ "$rw_rc" -eq 0 ] || { echo "generate: rewrite pass had failures" >&2; exit 1; }
+
 mkdir -p "$P/.claude-plugin" "$TARGET/.claude-plugin" "$TARGET/.github/workflows"
 render "$TEMPLATES/plugin.json.tmpl"       "$P/.claude-plugin/plugin.json"
 render "$TEMPLATES/marketplace.json.tmpl"  "$TARGET/.claude-plugin/marketplace.json"
@@ -124,6 +252,8 @@ if [ -r "$MANIFEST_CODEX" ] && [ -d "$REPO_ROOT/codex" ]; then
     cx_copied=$((cx_copied+1))
   done < "$MANIFEST_CODEX"
   [ "$cx_copied" -eq "$cx_expected" ] || { echo "generate: codex copied $cx_copied of $cx_expected files" >&2; exit 1; }
+  project_review_policy "$TARGET/codex/prkit-codex/policy/solve-run-tree-v1.json" \
+    || { echo "generate: Codex policy projection failed" >&2; exit 1; }
   # Rewrite content of every copied codex file (neutralize out-of-set, then blanket).
   while IFS= read -r -d '' f; do
     prkit_neutralize "$f" || { echo "generate: codex neutralize failed: $f" >&2; rw_rc=1; }
@@ -139,7 +269,8 @@ if [ -r "$MANIFEST_CODEX" ] && [ -d "$REPO_ROOT/codex" ]; then
       s{skills/post-impl-review}{skills/prkit-post-impl-review}g;
       s{skills/merge-pipeline}{skills/prkit-merge-pipeline}g;
     ' "$f" || { echo "generate: codex skill-prefix rewrite failed: $f" >&2; exit 1; }
-  done < <(find "$TARGET/codex" -type f -print0)
+  done < <(find "$TARGET/codex" -type f \
+    ! -path "$TARGET/codex/prkit-codex/policy/solve-run-tree-v1.json" -print0)
   # install-codex.sh is shared SSOT with full UberDev, whose comments and
   # verification hints describe the full fleet. The standalone extraction has
   # a deliberately smaller manifest (5 skills / 14 agents); rewrite those

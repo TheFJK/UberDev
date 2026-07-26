@@ -90,20 +90,42 @@ PY
 then ok "G6aa count discovery and anchor drift fail closed without mutation"
 else no "G6aa generator count/anchor transaction accepted drift"; fi
 
-# G6b — both standalone runtimes ship the manifest-declared reviewer contract,
-# while native Codex role TOMLs remain edge-agnostic.
+# G6b — both standalone runtimes ship one byte-identical, review-only policy
+# projection and the manifest-declared reviewer contract, while native Codex
+# role TOMLs remain edge-agnostic.
 if [ -f "$T1/plugins/prkit/policy/solve-run-tree-v1.json" ] \
    && [ -f "$T1/plugins/prkit/shared/phase1-reviewer-output-v1.md" ] \
    && [ -f "$T1/codex/prkit-codex/policy/solve-run-tree-v1.json" ] \
    && [ -f "$T1/codex/prkit-codex/shared/phase1-reviewer-output-v1.md" ] \
-   && python3 - "$T1" <<'PY'
-import pathlib,sys
-root=pathlib.Path(sys.argv[1]); contract=(root/'codex/prkit-codex/shared/phase1-reviewer-output-v1.md').read_text()
+   && python3 -I -B - "$T1" <<'PY'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+claude_path=root/'plugins/prkit/policy/solve-run-tree-v1.json'
+codex_path=root/'codex/prkit-codex/policy/solve-run-tree-v1.json'
+assert claude_path.read_bytes()==codex_path.read_bytes()
+tree=json.loads(claude_path.read_text())
+edges=tree['edges']; assert edges
+assert all(edge_id.startswith('review_pr.') for edge_id in edges)
+assert 'review_pr.post_impl_review' in edges
+shipped_roles={
+ 'ci-code-fixer','ci-failure-classifier','ci-rebase-handler','code-fixer',
+ 'code-reviewer','code-simplifier','comment-analyzer','conflict-resolver',
+ 'findings-to-issues','merge-strategy-decider','pr-test-analyzer',
+ 'silent-failure-hunter','trust-trail-evaluator','type-design-analyzer',
+}
+for edge in edges.values():
+ workflows=edge.get('allowed_workflows',[])
+ assert all(workflow in {'review-pr','simplify'} for workflow in workflows)
+ assert 'solve' not in workflows and 'turbo' not in workflows
+ if edge.get('kind')=='provider': assert edge.get('role') in shipped_roles
+referenced={edge['output_contract'] for edge in edges.values() if 'output_contract' in edge}
+assert set(tree.get('output_contracts',{}))==referenced
+contract=(root/'codex/prkit-codex/shared/phase1-reviewer-output-v1.md').read_text()
 roles=('code-reviewer','silent-failure-hunter','type-design-analyzer','comment-analyzer','pr-test-analyzer')
 assert all(contract not in (root/f'codex/agents/prkit-{role}.toml').read_text() for role in roles)
 PY
-then ok "G6b routed reviewer contract packaged and absent from native roles"
-else no "G6b reviewer contract scope is incorrect"; fi
+then ok "G6b review-only policy is identical, closed, and contract-scoped across runtimes"
+else no "G6b standalone policy projection or reviewer contract scope is incorrect"; fi
 
 # G6c — the generated standalone Codex runtime must execute the focused
 # six-reviewer happy path, not merely pass structural namespace scans.
