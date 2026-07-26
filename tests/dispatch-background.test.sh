@@ -41,8 +41,14 @@ assert_grep "$DISPATCH_LIB" \
   '_uberdev_dispatch_background\(\)' \
   "lib/dispatch.sh defines the _uberdev_dispatch_background function"
 assert_grep "$DISPATCH_LIB" \
-  'git worktree add' \
-  "background backend runs explicit git worktree add (sidesteps #40164)"
+  '_uberdev_dispatch_git_worktree_add' \
+  "background backend serializes explicit worktree add (sidesteps #40164)"
+BG_WORKTREE_BODY="$(awk '/^_uberdev_dispatch_background\(\)/{f=1} f{print} f&&/^}/{exit}' "$DISPATCH_LIB")"
+if printf '%s\n' "$BG_WORKTREE_BODY" | grep -Fq 'MSYS_NO_PATHCONV=1 git worktree add'; then
+  echo "  FAIL  background backend bypasses the repository Git metadata mutex"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  background backend has no direct worktree-add bypass"; PASS=$((PASS + 1))
+fi
 assert_grep "$DISPATCH_LIB" \
   'claude -p' \
   "background backend launches headless claude -p (print mode)"
@@ -61,6 +67,120 @@ assert_grep "$DISPATCH_LIB" \
 assert_grep "$DISPATCH_LIB" \
   'BG_TURBO_ENV\+=\( SKIP_PERMISSIONS=1 \)' \
   "BG_TURBO_ENV propagates SKIP_PERMISSIONS to background dispatch arm (#241)"
+
+echo "== Repository-root worktree placement from a subdirectory =="
+BG_ROOT_TMP="$(mktemp -d)"
+git init -q "$BG_ROOT_TMP/repo"
+mkdir -p "$BG_ROOT_TMP/repo/nested/deep" "$BG_ROOT_TMP/runtime" "$BG_ROOT_TMP/outside"
+printf 'root placement\n' >"$BG_ROOT_TMP/prompt.txt"
+(
+  cd "$BG_ROOT_TMP/repo/nested/deep" || exit 1
+  UBERDEV_TMPDIR="$BG_ROOT_TMP/runtime" CAPTURE="$BG_ROOT_TMP/capture" \
+    /bin/bash -c '
+      . "$1"
+      _uberdev_dispatch_git_worktree_add() {
+        printf "repo=%s\ntarget=%s\n" "$1" "$2" >"$CAPTURE"
+        return 77
+      }
+      _uberdev_dispatch_background 335 medium "$2" >/dev/null 2>&1
+      [ "$?" -eq 1 ]
+    ' _ "$DISPATCH_LIB" "$BG_ROOT_TMP/prompt.txt"
+)
+BG_EXPECTED_ROOT="$(cd "$BG_ROOT_TMP/repo" && pwd -P)"
+if grep -Fqx "repo=$BG_EXPECTED_ROOT" "$BG_ROOT_TMP/capture" 2>/dev/null \
+    && grep -Fqx "target=$BG_EXPECTED_ROOT/.claude/worktrees/solve-issue-335" \
+      "$BG_ROOT_TMP/capture"; then
+  echo "  PASS  background resolves repository root and passes an absolute worktree target"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  background subdirectory placement: $(tr '\n' ' ' <"$BG_ROOT_TMP/capture" 2>/dev/null)"
+  FAIL=$((FAIL + 1))
+fi
+(
+  cd "$BG_ROOT_TMP/outside" || exit 1
+  UBERDEV_TMPDIR="$BG_ROOT_TMP/runtime" CAPTURE="$BG_ROOT_TMP/outside-called" \
+    /bin/bash -c '
+      . "$1"
+      _uberdev_dispatch_git_worktree_add() { : >"$CAPTURE"; return 0; }
+      _uberdev_dispatch_background 336 medium "$2" >/dev/null 2>&1
+      [ "$?" -eq 1 ] && [ ! -e "$CAPTURE" ]
+    ' _ "$DISPATCH_LIB" "$BG_ROOT_TMP/prompt.txt"
+)
+if [ "$?" -eq 0 ]; then
+  echo "  PASS  background fails closed outside a Git worktree before mutation"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  background attempted worktree mutation outside a Git repository"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$BG_ROOT_TMP"
+
+echo "== Empty optional argv is nounset-safe in the actual background provider =="
+BG_NOUNSET_TMP="$(mktemp -d)"
+mkdir -p "$BG_NOUNSET_TMP/bin" "$BG_NOUNSET_TMP/runtime"
+printf 'background nounset\n' >"$BG_NOUNSET_TMP/prompt.txt"
+cat >"$BG_NOUNSET_TMP/bin/claude" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >"$BG_NOUNSET_PROVIDER_LOG"
+printf 'background nounset result\n'
+SH
+chmod +x "$BG_NOUNSET_TMP/bin/claude"
+BG_NOUNSET_SEEN=''
+BG_NOUNSET_INDEX=0
+for BG_TEST_BASH in /bin/bash "$(command -v bash)"; do
+  case " $BG_NOUNSET_SEEN " in *" $BG_TEST_BASH "*) continue ;; esac
+  BG_NOUNSET_SEEN="$BG_NOUNSET_SEEN $BG_TEST_BASH"
+  BG_NOUNSET_INDEX=$((BG_NOUNSET_INDEX + 1))
+  BG_NOUNSET_REPO="$BG_NOUNSET_TMP/repo-$BG_NOUNSET_INDEX"
+  BG_NOUNSET_RUNTIME="$BG_NOUNSET_TMP/runtime-$BG_NOUNSET_INDEX"
+  BG_NOUNSET_PROVIDER_LOG="$BG_NOUNSET_TMP/provider-$BG_NOUNSET_INDEX.log"
+  mkdir -p "$BG_NOUNSET_RUNTIME"
+  git init -q "$BG_NOUNSET_REPO"
+  BG_NOUNSET_OUT="$({
+    cd "$BG_NOUNSET_REPO" || exit 1
+    PATH="$BG_NOUNSET_TMP/bin:$PATH" BG_NOUNSET_PROVIDER_LOG="$BG_NOUNSET_PROVIDER_LOG" \
+      "$BG_TEST_BASH" -c '
+        set -u
+        . "$1"
+        _uberdev_dispatch_git_worktree_add() { mkdir -p "$2"; return 0; }
+        _uberdev_dispatch_wait_owned_session() { return 0; }
+        MODEL=sonnet
+        AUTO_MODE=0
+        SKIP_PERMISSIONS=0
+        PERM_FLAG=()
+        EFFORT_FLAG=()
+        UBERDEV_TMPDIR="$2"
+        UBERDEV_AGENT_STATUS_FILE="$2/status.json"
+        UBERDEV_AGENT_RESULT_FILE="$2/result.md"
+        DISPATCH_RC=0
+        DISPATCH_ID=""
+        DISPATCH_LOG=""
+        _uberdev_dispatch_background 346 medium "$3"
+        rc=$?
+        printf "rc=%s id=%s\n" "$rc" "$DISPATCH_ID"
+        [ "$rc" -eq 0 ] && [ -n "$DISPATCH_ID" ]
+      ' _ "$DISPATCH_LIB" "$BG_NOUNSET_RUNTIME" "$BG_NOUNSET_TMP/prompt.txt"
+  } 2>&1)"
+  BG_NOUNSET_RC=$?
+  BG_NOUNSET_TRIES=0
+  while ! grep -Fq '"state":"completed"' "$BG_NOUNSET_RUNTIME/status.json" 2>/dev/null \
+      && [ "$BG_NOUNSET_TRIES" -lt 200 ]; do
+    BG_NOUNSET_TRIES=$((BG_NOUNSET_TRIES + 1))
+    sleep 0.025
+  done
+  BG_NOUNSET_VERSION="$($BG_TEST_BASH --version | head -1)"
+  if [ "$BG_NOUNSET_RC" -eq 0 ] \
+      && grep -Fq '"state":"completed"' "$BG_NOUNSET_RUNTIME/status.json" \
+      && grep -Fq 'background nounset result' "$BG_NOUNSET_RUNTIME/result.md" \
+      && [ "$(wc -l <"$BG_NOUNSET_PROVIDER_LOG" | tr -d ' ')" -eq 1 ]; then
+    echo "  PASS  background accepts empty optional argv under set -u on $BG_NOUNSET_VERSION"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  background nounset provider contract on $BG_NOUNSET_VERSION: rc=$BG_NOUNSET_RC out=$BG_NOUNSET_OUT"
+    FAIL=$((FAIL + 1))
+  fi
+done
+rm -rf "$BG_NOUNSET_TMP"
 
 echo "== Positive: status-file writes + audit payload =="
 assert_grep "$DISPATCH_LIB" \
@@ -259,9 +379,11 @@ else
   echo "  FAIL  immediate fixture waits on bounded canonical terminal evidence"; FAIL=$((FAIL + 1))
 fi
 IMMEDIATE_TMP="$(mktemp -d)"
-mkdir -p "$IMMEDIATE_TMP/bin" "$IMMEDIATE_TMP/repo" "$IMMEDIATE_TMP/tmp"
+mkdir -p "$IMMEDIATE_TMP/bin" "$IMMEDIATE_TMP/repo/.git" "$IMMEDIATE_TMP/tmp"
 cat > "$IMMEDIATE_TMP/bin/git" <<'SH'
 #!/usr/bin/env bash
+if [ "$1" = rev-parse ] && [ "$2" = --show-toplevel ]; then pwd -P; exit 0; fi
+if [ "$1" = -C ] && [ "$3" = rev-parse ] && [ "$4" = --git-common-dir ]; then printf '.git\n'; exit 0; fi
 if [ "$1" = worktree ] && [ "$2" = add ]; then mkdir -p "$3"; exit 0; fi
 exit 1
 SH
@@ -406,9 +528,11 @@ rm -rf "$IMMEDIATE_TMP"
 echo
 echo "== Delayed background wrapper registers one PID through running and terminal state =="
 DELAYED_TMP="$(mktemp -d)"
-mkdir -p "$DELAYED_TMP/bin" "$DELAYED_TMP/repo" "$DELAYED_TMP/tmp"
+mkdir -p "$DELAYED_TMP/bin" "$DELAYED_TMP/repo/.git" "$DELAYED_TMP/tmp"
 cat > "$DELAYED_TMP/bin/git" <<'SH'
 #!/usr/bin/env bash
+if [ "$1" = rev-parse ] && [ "$2" = --show-toplevel ]; then pwd -P; exit 0; fi
+if [ "$1" = -C ] && [ "$3" = rev-parse ] && [ "$4" = --git-common-dir ]; then printf '.git\n'; exit 0; fi
 if [ "$1" = worktree ] && [ "$2" = add ]; then mkdir -p "$3"; exit 0; fi
 exit 1
 SH

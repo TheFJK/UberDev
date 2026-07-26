@@ -78,8 +78,64 @@ assert_grep_not "$DISPATCH_LIB" \
   'export WEZTERM_UNIX_SOCKET' \
   "no tautological export WEZTERM_UNIX_SOCKET=… (B1 regression guard — real pin is --domain-name uberdev)"
 assert_grep "$DISPATCH_LIB" \
-  'git worktree add' \
-  "wezterm backend runs git worktree add itself (no native --worktree)"
+  '_uberdev_dispatch_git_worktree_add' \
+  "wezterm backend serializes its own worktree add (no native --worktree)"
+WT_WORKTREE_BODY="$(awk '/^_uberdev_dispatch_wezterm\(\)/{f=1} f{print} f&&/^}/{exit}' "$DISPATCH_LIB")"
+if printf '%s\n' "$WT_WORKTREE_BODY" | grep -Fq 'MSYS_NO_PATHCONV=1 git worktree add'; then
+  echo "  FAIL  wezterm backend bypasses the repository Git metadata mutex"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  wezterm backend has no direct worktree-add bypass"; PASS=$((PASS + 1))
+fi
+
+echo "== Repository-root worktree placement from a subdirectory =="
+WEZ_ROOT_TMP="$(mktemp -d)"
+git init -q "$WEZ_ROOT_TMP/repo"
+mkdir -p "$WEZ_ROOT_TMP/repo/nested/deep" "$WEZ_ROOT_TMP/runtime" \
+  "$WEZ_ROOT_TMP/home" "$WEZ_ROOT_TMP/outside"
+printf 'root placement\n' >"$WEZ_ROOT_TMP/prompt.txt"
+(
+  cd "$WEZ_ROOT_TMP/repo/nested/deep" || exit 1
+  HOME="$WEZ_ROOT_TMP/home" UBERDEV_TMPDIR="$WEZ_ROOT_TMP/runtime" CAPTURE="$WEZ_ROOT_TMP/capture" \
+    /bin/bash -c '
+      . "$1"
+      _uberdev_dispatch_wezterm_config() { return 0; }
+      _uberdev_dispatch_git_worktree_add() {
+        printf "repo=%s\ntarget=%s\n" "$1" "$2" >"$CAPTURE"
+        return 77
+      }
+      _uberdev_dispatch_wezterm 335 medium "$2" >/dev/null 2>&1
+      [ "$?" -eq 1 ]
+    ' _ "$DISPATCH_LIB" "$WEZ_ROOT_TMP/prompt.txt"
+)
+WEZ_EXPECTED_ROOT="$(cd "$WEZ_ROOT_TMP/repo" && pwd -P)"
+if grep -Fqx "repo=$WEZ_EXPECTED_ROOT" "$WEZ_ROOT_TMP/capture" 2>/dev/null \
+    && grep -Fqx "target=$WEZ_EXPECTED_ROOT/.claude/worktrees/solve-issue-335" \
+      "$WEZ_ROOT_TMP/capture"; then
+  echo "  PASS  WezTerm resolves repository root and passes an absolute worktree target"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  WezTerm subdirectory placement: $(tr '\n' ' ' <"$WEZ_ROOT_TMP/capture" 2>/dev/null)"
+  FAIL=$((FAIL + 1))
+fi
+(
+  cd "$WEZ_ROOT_TMP/outside" || exit 1
+  HOME="$WEZ_ROOT_TMP/home" UBERDEV_TMPDIR="$WEZ_ROOT_TMP/runtime" \
+    CAPTURE="$WEZ_ROOT_TMP/outside-called" /bin/bash -c '
+      . "$1"
+      _uberdev_dispatch_wezterm_config() { return 0; }
+      _uberdev_dispatch_git_worktree_add() { : >"$CAPTURE"; return 0; }
+      _uberdev_dispatch_wezterm 336 medium "$2" >/dev/null 2>&1
+      [ "$?" -eq 1 ] && [ ! -e "$CAPTURE" ]
+    ' _ "$DISPATCH_LIB" "$WEZ_ROOT_TMP/prompt.txt"
+)
+if [ "$?" -eq 0 ]; then
+  echo "  PASS  WezTerm fails closed outside a Git worktree before mutation"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  WezTerm attempted worktree mutation outside a Git repository"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$WEZ_ROOT_TMP"
 
 echo "== Positive: mux preflight + .wezterm.lua managed block =="
 assert_grep "$DISPATCH_LIB" \
@@ -156,7 +212,7 @@ rm -f "$TALLY_FILE"
 echo
 echo "== Process-separated WezTerm pane retains portable Python after PATH narrowing =="
 WEZ_RUNTIME_TMP="$(mktemp -d)"
-mkdir -p "$WEZ_RUNTIME_TMP/bin" "$WEZ_RUNTIME_TMP/repo" "$WEZ_RUNTIME_TMP/tmp" "$WEZ_RUNTIME_TMP/home"
+mkdir -p "$WEZ_RUNTIME_TMP/bin" "$WEZ_RUNTIME_TMP/repo/.git" "$WEZ_RUNTIME_TMP/tmp" "$WEZ_RUNTIME_TMP/home"
 if REAL_PYTHON_EXE="$(command -v python3 2>/dev/null)" && [ -n "$REAL_PYTHON_EXE" ]; then
   REAL_PYTHON_PREFIX=''
 elif REAL_PYTHON_EXE="$(command -v python 2>/dev/null)" && [ -n "$REAL_PYTHON_EXE" ]; then
@@ -187,6 +243,8 @@ printf '%s\n' "$2"
 SH
 cat > "$WEZ_RUNTIME_TMP/bin/git" <<'SH'
 #!/usr/bin/env bash
+if [ "$1" = rev-parse ] && [ "$2" = --show-toplevel ]; then pwd -P; exit 0; fi
+if [ "$1" = -C ] && [ "$3" = rev-parse ] && [ "$4" = --git-common-dir ]; then printf '.git\n'; exit 0; fi
 if [ "$1" = worktree ] && [ "$2" = add ]; then mkdir -p "$3"; exit 0; fi
 exit 1
 SH

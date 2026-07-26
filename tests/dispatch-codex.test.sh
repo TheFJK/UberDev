@@ -359,6 +359,548 @@ for failed_probe in status show-ref; do
   bash -c '. "$1"; _uberdev_dispatch_discard_codex_worktree_receipt "$2" "$3"' \
     _ "$DISPATCH_LIB" "$probe_receipt" "$probe_token"
 done
+
+make_mutex_cleanup_fixture() {
+  local label="$1"
+  MUTEX_SLUG="$(UBERDEV_AGENT_INSTANCE_ID="cleanup-mutex-$label-a1" bash -c \
+    '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"
+  MUTEX_RELATIVE=".claude/worktrees/solve-issue-335-$MUTEX_SLUG"
+  MUTEX_BRANCH="worktree-solve-issue-335-$MUTEX_SLUG"
+  MUTEX_RECEIPT="$CLEANUP_TMP/runtime/mutex-$label.owner.json"
+  MUTEX_TOKEN="$(bash -c '. "$1"; _uberdev_dispatch_create_codex_worktree_receipt "$2" "$3" "$4" "$5"' \
+    _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$MUTEX_RELATIVE" "$MUTEX_BRANCH" "$MUTEX_RECEIPT")"
+  git -C "$CLEANUP_TMP/repo" worktree add -q "$MUTEX_RELATIVE" -b "$MUTEX_BRANCH"
+}
+
+retry_mutex_cleanup() {
+  UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=3 bash -c \
+    '. "$1"; _uberdev_dispatch_cleanup_codex_worktree "$2" "$3" "$4" "$5" "$6" completed' \
+    _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$MUTEX_RELATIVE" "$MUTEX_BRANCH" "$MUTEX_RECEIPT" "$MUTEX_TOKEN"
+}
+
+make_mutex_cleanup_fixture acquire-failure
+set +e
+bash -c '
+  . "$1"
+  _uberdev_semaphore_mutex_acquire() { return 75; }
+  _uberdev_dispatch_cleanup_codex_worktree "$2" "$3" "$4" "$5" "$6" completed
+' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$MUTEX_RELATIVE" "$MUTEX_BRANCH" "$MUTEX_RECEIPT" "$MUTEX_TOKEN"
+MUTEX_ACQUIRE_RC=$?
+set -e
+if [ "$MUTEX_ACQUIRE_RC" -eq 75 ] \
+    && [ -d "$CLEANUP_TMP/repo/$MUTEX_RELATIVE" ] \
+    && git -C "$CLEANUP_TMP/repo" show-ref --verify --quiet "refs/heads/$MUTEX_BRANCH" \
+    && [ -f "$MUTEX_RECEIPT" ]; then
+  pass_msg "git metadata mutex acquisition failure preserves exact cleanup evidence"
+else
+  fail_msg "git metadata mutex acquisition failure preserves exact cleanup evidence" "rc=$MUTEX_ACQUIRE_RC"
+fi
+retry_mutex_cleanup
+
+make_mutex_cleanup_fixture release-failure
+set +e
+bash -c '
+  . "$1"
+  _uberdev_semaphore_mutex_release() { return 31; }
+  _uberdev_dispatch_cleanup_codex_worktree "$2" "$3" "$4" "$5" "$6" completed
+' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$MUTEX_RELATIVE" "$MUTEX_BRANCH" "$MUTEX_RECEIPT" "$MUTEX_TOKEN"
+MUTEX_RELEASE_RC=$?
+set -e
+if [ "$MUTEX_RELEASE_RC" -eq 2 ] \
+    && [ ! -e "$CLEANUP_TMP/repo/$MUTEX_RELATIVE" ] \
+    && ! git -C "$CLEANUP_TMP/repo" show-ref --verify --quiet "refs/heads/$MUTEX_BRANCH" \
+    && [ -f "$MUTEX_RECEIPT" ]; then
+  pass_msg "git metadata mutex release failure preserves the ownership receipt"
+else
+  fail_msg "git metadata mutex release failure preserves recovery evidence" "rc=$MUTEX_RELEASE_RC"
+fi
+if retry_mutex_cleanup && [ ! -e "$MUTEX_RECEIPT" ]; then
+  pass_msg "cleanup retry reclaims a dead mutex and commits the retained receipt"
+else
+  fail_msg "cleanup retry reclaims a dead mutex and commits the retained receipt"
+fi
+
+make_mutex_cleanup_fixture receipt-failure
+set +e
+bash -c '
+  . "$1"
+  _uberdev_dispatch_discard_codex_worktree_receipt() { return 29; }
+  _uberdev_dispatch_cleanup_codex_worktree "$2" "$3" "$4" "$5" "$6" completed
+' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$MUTEX_RELATIVE" "$MUTEX_BRANCH" "$MUTEX_RECEIPT" "$MUTEX_TOKEN"
+MUTEX_RECEIPT_RC=$?
+set -e
+if [ "$MUTEX_RECEIPT_RC" -eq 2 ] \
+    && [ ! -e "$CLEANUP_TMP/repo/$MUTEX_RELATIVE" ] \
+    && ! git -C "$CLEANUP_TMP/repo" show-ref --verify --quiet "refs/heads/$MUTEX_BRANCH" \
+    && [ -f "$MUTEX_RECEIPT" ]; then
+  pass_msg "receipt commit failure is surfaced with recovery evidence retained"
+else
+  fail_msg "receipt commit failure is surfaced with recovery evidence retained" "rc=$MUTEX_RECEIPT_RC"
+fi
+retry_mutex_cleanup
+
+make_mutex_cleanup_fixture transient-retry
+set +e
+bash -c '
+  . "$1"
+  eval "$(declare -f _uberdev_dispatch_cleanup_codex_worktree_locked | sed "1s/_uberdev_dispatch_cleanup_codex_worktree_locked/_uberdev_dispatch_cleanup_codex_worktree_locked_real/")"
+  retry_count=0
+  _uberdev_dispatch_cleanup_codex_worktree_locked() {
+    retry_count=$((retry_count + 1))
+    printf "%s\n" "$retry_count" >>"$7"
+    [ "$retry_count" -gt 1 ] || return 2
+    _uberdev_dispatch_cleanup_codex_worktree_locked_real "$1" "$2" "$3" "$4" "$5" "$6"
+  }
+  _uberdev_dispatch_cleanup_codex_worktree "$2" "$3" "$4" "$5" "$6" completed "$7"
+' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$MUTEX_RELATIVE" "$MUTEX_BRANCH" "$MUTEX_RECEIPT" "$MUTEX_TOKEN" \
+  "$CLEANUP_TMP/runtime/transient-retry.attempts"
+MUTEX_TRANSIENT_RC=$?
+set -e
+if [ "$MUTEX_TRANSIENT_RC" -eq 0 ] \
+    && [ "$(wc -l <"$CLEANUP_TMP/runtime/transient-retry.attempts" | tr -d ' ')" -eq 2 ] \
+    && [ ! -e "$CLEANUP_TMP/repo/$MUTEX_RELATIVE" ] \
+    && [ ! -e "$MUTEX_RECEIPT" ]; then
+  pass_msg "transient rc2 cleanup retries under one mutex then commits the receipt"
+else
+  fail_msg "transient rc2 cleanup retries under one mutex then commits the receipt" \
+    "rc=$MUTEX_TRANSIENT_RC attempts=$(cat "$CLEANUP_TMP/runtime/transient-retry.attempts" 2>/dev/null)"
+fi
+
+make_mutex_cleanup_fixture exhausted-retry
+set +e
+bash -c '
+  . "$1"
+  _uberdev_dispatch_cleanup_codex_worktree_locked() { printf "attempt\n" >>"$7"; return 2; }
+  _uberdev_dispatch_cleanup_codex_worktree "$2" "$3" "$4" "$5" "$6" completed "$7"
+' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$MUTEX_RELATIVE" "$MUTEX_BRANCH" "$MUTEX_RECEIPT" "$MUTEX_TOKEN" \
+  "$CLEANUP_TMP/runtime/exhausted-retry.attempts"
+MUTEX_EXHAUSTED_RC=$?
+set -e
+if [ "$MUTEX_EXHAUSTED_RC" -eq 2 ] \
+    && [ "$(wc -l <"$CLEANUP_TMP/runtime/exhausted-retry.attempts" | tr -d ' ')" -eq 3 ] \
+    && [ -d "$CLEANUP_TMP/repo/$MUTEX_RELATIVE" ] && [ -f "$MUTEX_RECEIPT" ]; then
+  pass_msg "exhausted transient cleanup retries preserve exact recovery evidence"
+else
+  fail_msg "exhausted transient cleanup retries preserve exact recovery evidence" \
+    "rc=$MUTEX_EXHAUSTED_RC attempts=$(cat "$CLEANUP_TMP/runtime/exhausted-retry.attempts" 2>/dev/null)"
+fi
+retry_mutex_cleanup
+
+make_mutex_cleanup_fixture preservation-stop
+set +e
+bash -c '
+  . "$1"
+  _uberdev_dispatch_cleanup_codex_worktree_locked() { printf "attempt\n" >>"$7"; return 3; }
+  _uberdev_dispatch_cleanup_codex_worktree "$2" "$3" "$4" "$5" "$6" completed "$7"
+' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$MUTEX_RELATIVE" "$MUTEX_BRANCH" "$MUTEX_RECEIPT" "$MUTEX_TOKEN" \
+  "$CLEANUP_TMP/runtime/preservation-stop.attempts"
+MUTEX_PRESERVATION_RC=$?
+set -e
+if [ "$MUTEX_PRESERVATION_RC" -eq 3 ] \
+    && [ "$(wc -l <"$CLEANUP_TMP/runtime/preservation-stop.attempts" | tr -d ' ')" -eq 1 ] \
+    && [ -d "$CLEANUP_TMP/repo/$MUTEX_RELATIVE" ] && [ -f "$MUTEX_RECEIPT" ]; then
+  pass_msg "dirty or advanced preservation rc3 is never retried"
+else
+  fail_msg "dirty or advanced preservation rc3 is never retried" \
+    "rc=$MUTEX_PRESERVATION_RC attempts=$(cat "$CLEANUP_TMP/runtime/preservation-stop.attempts" 2>/dev/null)"
+fi
+retry_mutex_cleanup
+
+generic_mutex_errors=''
+for generic_provider_rc in 0 42; do
+  GENERIC_RELEASE_LOG="$CLEANUP_TMP/runtime/generic-release-$generic_provider_rc.log"
+  set +e
+  GENERIC_MUTEX_OUT="$(bash -c '
+    . "$1"
+    _uberdev_dispatch_git_metadata_mutex_scope() { printf "%s" "$2"; }
+    _uberdev_semaphore_mutex_acquire() { return 0; }
+    generic_release_log="$4"
+    _uberdev_semaphore_mutex_release() { printf "release\\n" >>"$generic_release_log"; return 31; }
+    _uberdev_dispatch_with_git_metadata_mutex /unused generic-test bash -c \
+      '\''printf "provider-output-%s\\n" "$1"; exit "$1"'\'' _ "$3"
+  ' _ "$DISPATCH_LIB" "$CLEANUP_TMP/runtime/generic-scope" "$generic_provider_rc" \
+    "$GENERIC_RELEASE_LOG" 2>"$CLEANUP_TMP/runtime/generic-stderr-$generic_provider_rc.log")"
+  GENERIC_MUTEX_RC=$?
+  set -e
+  expected_generic_rc="$generic_provider_rc"
+  [ "$GENERIC_MUTEX_RC" -eq "$expected_generic_rc" ] \
+    || generic_mutex_errors="$generic_mutex_errors rc-$generic_provider_rc-$GENERIC_MUTEX_RC"
+  printf '%s\n' "$GENERIC_MUTEX_OUT" | grep -Fq "provider-output-$generic_provider_rc" \
+    || generic_mutex_errors="$generic_mutex_errors output-$generic_provider_rc"
+  grep -Fq 'git metadata mutex: release failed after generic-test (rc=31)' \
+    "$CLEANUP_TMP/runtime/generic-stderr-$generic_provider_rc.log" \
+    || generic_mutex_errors="$generic_mutex_errors release-log-$generic_provider_rc"
+  [ "$(wc -l <"$GENERIC_RELEASE_LOG" | tr -d ' ')" -eq 2 ] \
+    || generic_mutex_errors="$generic_mutex_errors exit-retry-$generic_provider_rc"
+done
+if [ -z "$generic_mutex_errors" ]; then
+  pass_msg "generic Git metadata mutex preserves provider rc/output and surfaces release failure"
+else
+  fail_msg "generic Git metadata mutex preserves provider rc/output and surfaces release failure" "$generic_mutex_errors"
+fi
+
+GENERIC_DEAD_STDERR="$CLEANUP_TMP/runtime/generic-dead-owner.stderr"
+set +e
+bash -c '
+  . "$1"
+  _uberdev_semaphore_mutex_release() { return 31; }
+  _uberdev_dispatch_with_git_metadata_mutex "$2" release-reclaim sh -c '\''printf command-ok'\''
+' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" >"$CLEANUP_TMP/runtime/generic-dead-owner.stdout" \
+  2>"$GENERIC_DEAD_STDERR"
+GENERIC_DEAD_RC=$?
+set -e
+GENERIC_DEAD_SCOPE="$(bash -c '. "$1"; _uberdev_dispatch_git_metadata_mutex_scope "$2"' \
+  _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo")"
+set +e
+UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=1 bash -c \
+  '. "$1"; _uberdev_semaphore_mutex_acquire "$2" && _uberdev_semaphore_mutex_release "$2"' \
+  _ "$DISPATCH_LIB" "$GENERIC_DEAD_SCOPE"
+GENERIC_RECLAIM_RC=$?
+set -e
+if [ "$GENERIC_DEAD_RC" -eq 0 ] \
+    && [ "$(cat "$CLEANUP_TMP/runtime/generic-dead-owner.stdout")" = command-ok ] \
+    && grep -Fq 'release failed after release-reclaim (rc=31)' "$GENERIC_DEAD_STDERR" \
+    && [ "$GENERIC_RECLAIM_RC" -eq 0 ] && [ ! -e "$GENERIC_DEAD_SCOPE/.mutex" ]; then
+  pass_msg "command-authoritative release failure is loud and its dead owner is reclaimed"
+else
+  fail_msg "command-authoritative release failure is loud and its dead owner is reclaimed" \
+    "command_rc=$GENERIC_DEAD_RC reclaim_rc=$GENERIC_RECLAIM_RC stderr=$(cat "$GENERIC_DEAD_STDERR")"
+fi
+
+for RELEASE_ADD_KIND in child nonchild; do
+  RELEASE_ADD_RELATIVE=".claude/worktrees/solve-issue-335-release-failure-$RELEASE_ADD_KIND"
+  RELEASE_ADD_TARGET="$CLEANUP_TMP/repo/$RELEASE_ADD_RELATIVE"
+  RELEASE_ADD_BRANCH="worktree-solve-issue-335-release-failure-$RELEASE_ADD_KIND"
+  RELEASE_ADD_LOG="$CLEANUP_TMP/runtime/release-failure-$RELEASE_ADD_KIND.git.log"
+  RELEASE_ADD_STDERR="$CLEANUP_TMP/runtime/release-failure-$RELEASE_ADD_KIND.stderr"
+  RELEASE_ADD_RECEIPT="$CLEANUP_TMP/runtime/release-failure-$RELEASE_ADD_KIND.owner.json"
+  RELEASE_ADD_TOKEN=''
+  if [ "$RELEASE_ADD_KIND" = child ]; then
+    RELEASE_ADD_TOKEN="$(bash -c \
+      '. "$1"; _uberdev_dispatch_create_codex_worktree_receipt "$2" "$3" "$4" "$5"' \
+      _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$RELEASE_ADD_RELATIVE" \
+      "$RELEASE_ADD_BRANCH" "$RELEASE_ADD_RECEIPT")"
+  fi
+  set +e
+  bash -c '
+    . "$1"
+    _uberdev_semaphore_mutex_release() { return 31; }
+    _uberdev_dispatch_git_worktree_add "$2" "$3" "$4" "$5"
+  ' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$RELEASE_ADD_TARGET" \
+    "$RELEASE_ADD_BRANCH" "$RELEASE_ADD_LOG" 2>"$RELEASE_ADD_STDERR"
+  RELEASE_ADD_RC=$?
+  set -e
+  RELEASE_ADD_RECOVERY_RC=0
+  if [ "$RELEASE_ADD_KIND" = child ]; then
+    UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=1 bash -c '
+      . "$1"
+      _uberdev_dispatch_cleanup_codex_worktree "$2" "$3" "$4" "$5" "$6" completed
+    ' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$RELEASE_ADD_RELATIVE" \
+      "$RELEASE_ADD_BRANCH" "$RELEASE_ADD_RECEIPT" "$RELEASE_ADD_TOKEN" \
+      || RELEASE_ADD_RECOVERY_RC=$?
+  else
+    UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=1 bash -c '
+      . "$1"
+      _uberdev_dispatch_with_git_metadata_mutex "$2" release-recovery bash -c '\''
+        cd "$1" || exit 2
+        git worktree remove --force "$2" || exit $?
+        git branch -D "$3" >/dev/null
+      '\'' _ "$2" "$3" "$4"
+    ' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$RELEASE_ADD_TARGET" "$RELEASE_ADD_BRANCH" \
+      || RELEASE_ADD_RECOVERY_RC=$?
+  fi
+  if [ "$RELEASE_ADD_RC" -eq 0 ] \
+      && grep -Fq 'release failed after worktree-add (rc=31)' "$RELEASE_ADD_STDERR" \
+      && [ "$RELEASE_ADD_RECOVERY_RC" -eq 0 ] \
+      && [ ! -e "$RELEASE_ADD_TARGET" ] \
+      && ! git -C "$CLEANUP_TMP/repo" show-ref --verify --quiet "refs/heads/$RELEASE_ADD_BRANCH" \
+      && { [ "$RELEASE_ADD_KIND" = nonchild ] || [ ! -e "$RELEASE_ADD_RECEIPT" ]; }; then
+    pass_msg "$RELEASE_ADD_KIND add stays tracked across release failure and exact recovery"
+  else
+    fail_msg "$RELEASE_ADD_KIND add stays tracked across release failure and exact recovery" \
+      "add_rc=$RELEASE_ADD_RC recovery_rc=$RELEASE_ADD_RECOVERY_RC stderr=$(cat "$RELEASE_ADD_STDERR")"
+  fi
+done
+
+echo "== Non-child add and child cleanup share one Git metadata transaction =="
+CONCURRENT_BIN="$CLEANUP_TMP/concurrent-bin"
+mkdir -p "$CONCURRENT_BIN"
+cat >"$CONCURRENT_BIN/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+
+if [ "${1:-}" = -C ] && [ "${3:-}" = rev-parse ] && [ "${4:-}" = --git-common-dir ]; then
+  pre="$CONCURRENT_GIT_PREACQUIRE_DIR"
+  mkdir -p "$pre"
+  mkdir "$pre/arrival-$PPID" 2>/dev/null || true
+  printf 'pending\towner=%s\n' "$PPID" >>"$CONCURRENT_GIT_EVENT_LOG"
+  count="$(find "$pre" -mindepth 1 -maxdepth 1 -type d -name 'arrival-*' | wc -l | tr -d ' ')"
+  if [ "$count" -ge 2 ] && mkdir "$pre/released" 2>/dev/null; then
+    printf 'barrier-release\tcount=%s\n' "$count" >>"$CONCURRENT_GIT_EVENT_LOG"
+  fi
+  tries=0
+  while [ ! -d "$pre/released" ] && [ "$tries" -lt 1000 ]; do
+    tries=$((tries + 1))
+    sleep 0.01
+  done
+  if [ ! -d "$pre/released" ]; then
+    printf 'barrier-timeout\towner=%s\tcount=%s\n' "$PPID" "$count" \
+      >>"$CONCURRENT_GIT_COLLISION_LOG"
+    exit 88
+  fi
+  exec "$CONCURRENT_REAL_GIT" "$@"
+fi
+
+phase=''
+case "${1:-}:${2:-}" in
+  worktree:add) phase=add ;;
+  worktree:remove) phase=remove ;;
+  worktree:list) phase=list ;;
+  branch:-D) phase=branch ;;
+esac
+[ -n "$phase" ] || exec "$CONCURRENT_REAL_GIT" "$@"
+
+common_dir="$("$CONCURRENT_REAL_GIT" rev-parse --git-common-dir)"
+case "$common_dir" in /*) ;; *) common_dir="$PWD/$common_dir" ;; esac
+common_dir="$(cd "$common_dir" && pwd -P)"
+sentinel="$common_dir/.uberdev-add-cleanup-critical"
+owner_file="$sentinel/owner"
+collision() {
+  actual="$(cat "$owner_file" 2>/dev/null || printf missing)"
+  printf 'overlap\towner=%s\tactual=%s\tphase=%s\targv=%s\n' \
+    "$PPID" "$actual" "$phase" "$*" >>"$CONCURRENT_GIT_COLLISION_LOG"
+  exit 89
+}
+
+case "$phase" in
+  add|remove)
+    if ! mkdir "$sentinel" 2>/dev/null; then collision "$@"; fi
+    chmod 700 "$sentinel"
+    printf '%s\n' "$PPID" >"$owner_file"
+    ;;
+  *)
+    [ -f "$owner_file" ] || collision "$@"
+    [ "$(cat "$owner_file")" = "$PPID" ] || collision "$@"
+    ;;
+esac
+printf 'critical\towner=%s\tphase=%s\n' "$PPID" "$phase" >>"$CONCURRENT_GIT_EVENT_LOG"
+
+# The bypass round deliberately holds its first entrant until the second has
+# attempted entry, proving this detector observes overlap instead of passing by
+# scheduler luck. Production rounds never use this test-only control.
+if [ "${CONCURRENT_GIT_EXPECT_COLLISION:-0}" = 1 ] && { [ "$phase" = add ] || [ "$phase" = remove ]; }; then
+  tries=0
+  while ! grep -q '^overlap' "$CONCURRENT_GIT_COLLISION_LOG" 2>/dev/null \
+      && [ "$tries" -lt 1000 ]; do
+    tries=$((tries + 1))
+    sleep 0.01
+  done
+fi
+
+if "$CONCURRENT_REAL_GIT" "$@"; then rc=0; else rc=$?; fi
+if [ "$phase" = add ] || [ "$phase" = branch ]; then
+  printf 'critical\towner=%s\tphase=release\n' "$PPID" >>"$CONCURRENT_GIT_EVENT_LOG"
+  rm -f "$owner_file"
+  rmdir "$sentinel"
+fi
+exit "$rc"
+SH
+chmod +x "$CONCURRENT_BIN/git"
+
+run_add_cleanup_round() {
+  local mode="$1" label="$2" child_relative child_branch child_receipt child_token
+  local add_relative add_branch add_log pre events collisions add_pid cleanup_pid add_rc cleanup_rc
+  local provider_started provider_held provider_released provider_pid provider_ok=1
+  child_relative=".claude/worktrees/solve-issue-335-concurrent-child-$label"
+  child_branch="worktree-solve-issue-335-concurrent-child-$label"
+  child_receipt="$CLEANUP_TMP/runtime/concurrent-child-$label.owner.json"
+  child_token="$(bash -c '. "$1"; _uberdev_dispatch_create_codex_worktree_receipt "$2" "$3" "$4" "$5"' \
+    _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$child_relative" "$child_branch" "$child_receipt")"
+  git -C "$CLEANUP_TMP/repo" worktree add -q "$child_relative" -b "$child_branch"
+  add_relative=".claude/worktrees/concurrent-add-$label"
+  add_branch="worktree-concurrent-add-$label"
+  add_log="$CLEANUP_TMP/runtime/concurrent-add-$label.log"
+  pre="$CLEANUP_TMP/runtime/concurrent-$label-pre"
+  events="$CLEANUP_TMP/runtime/concurrent-$label-events.log"
+  collisions="$CLEANUP_TMP/runtime/concurrent-$label-collisions.log"
+  provider_started="$CLEANUP_TMP/runtime/concurrent-$label-provider-started"
+  provider_held="$CLEANUP_TMP/runtime/concurrent-$label-provider-held"
+  provider_released="$CLEANUP_TMP/runtime/concurrent-$label-provider-released"
+  provider_pid="$CLEANUP_TMP/runtime/concurrent-$label-provider-pid"
+  mkdir -p "$pre"
+  : >"$events"; : >"$collisions"
+
+  if [ "$mode" = bypass ]; then
+    PATH="$CONCURRENT_BIN:$PATH" CONCURRENT_REAL_GIT="$REAL_CLEANUP_GIT" \
+      CONCURRENT_GIT_PREACQUIRE_DIR="$pre" CONCURRENT_GIT_EVENT_LOG="$events" \
+      CONCURRENT_GIT_COLLISION_LOG="$collisions" CONCURRENT_GIT_EXPECT_COLLISION=1 \
+      bash -c '
+        git -C "$1" rev-parse --git-common-dir >/dev/null || exit $?
+        cd "$1" || exit 2
+        MSYS_NO_PATHCONV=1 git worktree add "$2" -b "$3" >"$4" 2>&1
+      ' _ "$CLEANUP_TMP/repo" "$CLEANUP_TMP/repo/$add_relative" "$add_branch" "$add_log" &
+    add_pid=$!
+    PATH="$CONCURRENT_BIN:$PATH" CONCURRENT_REAL_GIT="$REAL_CLEANUP_GIT" \
+      CONCURRENT_GIT_PREACQUIRE_DIR="$pre" CONCURRENT_GIT_EVENT_LOG="$events" \
+      CONCURRENT_GIT_COLLISION_LOG="$collisions" CONCURRENT_GIT_EXPECT_COLLISION=1 \
+      bash -c '
+        . "$1"
+        git -C "$2" rev-parse --git-common-dir >/dev/null || exit $?
+        _uberdev_dispatch_cleanup_codex_worktree_locked "$2" "$3" "$4" "$5" "$6" completed
+      ' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$child_relative" "$child_branch" "$child_receipt" "$child_token" &
+    cleanup_pid=$!
+  else
+    PATH="$CONCURRENT_BIN:$PATH" CONCURRENT_REAL_GIT="$REAL_CLEANUP_GIT" \
+      CONCURRENT_GIT_PREACQUIRE_DIR="$pre" CONCURRENT_GIT_EVENT_LOG="$events" \
+      CONCURRENT_GIT_COLLISION_LOG="$collisions" \
+      bash -c '
+        . "$1"
+        if [ "$6" = claude ]; then
+          _uberdev_dispatch_with_git_metadata_mutex "$2" claude-bootstrap-test bash -c \
+            '\''
+              cd "$1" || exit 2
+              git worktree add "$2" -b "$3" >"$4" 2>&1 || exit $?
+              (
+                printf "%s\\n" "$BASHPID" >"$8"
+                locks="$1/.git/.uberdev-worktree-metadata-locks"
+                if find "$locks" -name .mutex -print 2>/dev/null | grep -q .; then
+                  printf "held\\n" >"$6"
+                else
+                  printf "missing\\n" >"$6"
+                fi
+                printf "started\\n" >"$5"
+                tries=0
+                while find "$locks" -name .mutex -print 2>/dev/null | grep -q . \
+                    && [ "$tries" -lt 1000 ]; do
+                  tries=$((tries + 1)); sleep 0.01
+                done
+                [ "$tries" -lt 1000 ] || exit 88
+                printf "released\\n" >"$7"
+                sleep 5
+              ) </dev/null >/dev/null 2>&1 &
+              tries=0
+              while [ ! -e "$5" ] && [ "$tries" -lt 1000 ]; do
+                tries=$((tries + 1)); sleep 0.01
+              done
+              [ -e "$5" ]
+            '\'' _ "$2" "$3" "$4" "$5" "$7" "$8" "$9" "${10}"
+        else
+          _uberdev_dispatch_git_worktree_add "$2" "$3" "$4" "$5"
+        fi
+      ' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$CLEANUP_TMP/repo/$add_relative" "$add_branch" "$add_log" "$label" \
+        "$provider_started" "$provider_held" "$provider_released" "$provider_pid" &
+    add_pid=$!
+    PATH="$CONCURRENT_BIN:$PATH" CONCURRENT_REAL_GIT="$REAL_CLEANUP_GIT" \
+      CONCURRENT_GIT_PREACQUIRE_DIR="$pre" CONCURRENT_GIT_EVENT_LOG="$events" \
+      CONCURRENT_GIT_COLLISION_LOG="$collisions" \
+      bash -c '. "$1"; _uberdev_dispatch_cleanup_codex_worktree "$2" "$3" "$4" "$5" "$6" completed' \
+        _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$child_relative" "$child_branch" "$child_receipt" "$child_token" &
+    cleanup_pid=$!
+  fi
+  set +e
+  wait "$add_pid"; add_rc=$?
+  wait "$cleanup_pid"; cleanup_rc=$?
+  set -e
+
+  if [ "$mode" = mutex ] && [ "$label" = claude ]; then
+    tries=0
+    while [ ! -e "$provider_released" ] && [ "$tries" -lt 1000 ]; do
+      tries=$((tries + 1)); sleep 0.01
+    done
+    live_provider_pid="$(cat "$provider_pid" 2>/dev/null)"
+    if [ "$(cat "$provider_held" 2>/dev/null)" != held ] \
+        || [ "$(cat "$provider_released" 2>/dev/null)" != released ] \
+        || ! kill -0 "$live_provider_pid" 2>/dev/null; then
+      provider_ok=0
+    fi
+    case "$live_provider_pid" in ''|*[!0-9]*) ;; *) kill "$live_provider_pid" 2>/dev/null || true ;; esac
+  fi
+
+  if [ "$mode" = bypass ]; then
+    if { [ "$add_rc" -ne 0 ] || [ "$cleanup_rc" -ne 0 ]; } \
+        && grep -q '^overlap' "$collisions" \
+        && ! grep -q '^barrier-timeout' "$collisions" \
+        && python3 -I -B - "$events" <<'PY'
+import pathlib,sys
+lines=pathlib.Path(sys.argv[1]).read_text().splitlines()
+pending=[line.split("owner=",1)[1] for line in lines if line.startswith("pending\towner=")]
+assert len(pending)==len(set(pending))==2,pending
+assert [line for line in lines if line.startswith("barrier-release\t")]==["barrier-release\tcount=2"],lines
+PY
+    then
+      pass_msg "add-vs-cleanup detector rejects an unprotected overlap"
+    else
+      fail_msg "add-vs-cleanup detector rejects an unprotected overlap" \
+        "add_rc=$add_rc cleanup_rc=$cleanup_rc events=$(tr '\n' ';' <"$events") collisions=$(cat "$collisions")"
+    fi
+  elif python3 -I -B - "$events" "$collisions" <<'PY'
+import collections,pathlib,sys
+lines=pathlib.Path(sys.argv[1]).read_text().splitlines()
+assert not pathlib.Path(sys.argv[2]).read_text(),pathlib.Path(sys.argv[2]).read_text()
+pending=[line.split("owner=",1)[1] for line in lines if line.startswith("pending\towner=")]
+assert len(pending)==len(set(pending))==2,pending
+assert [line for line in lines if line.startswith("barrier-release\t")]==["barrier-release\tcount=2"],lines
+events=collections.defaultdict(list)
+for line in lines:
+    if not line.startswith("critical\t"): continue
+    fields=dict(field.split("=",1) for field in line.split("\t")[1:])
+    events[fields["owner"]].append(fields["phase"])
+assert sorted(events.values())==sorted([["add","release"],["remove","list","branch","release"]]),events
+PY
+  then
+    if [ "$add_rc" -eq 0 ] && [ "$cleanup_rc" -eq 0 ] \
+        && [ -d "$CLEANUP_TMP/repo/$add_relative" ] \
+        && [ ! -e "$CLEANUP_TMP/repo/$child_relative" ] \
+        && [ ! -e "$child_receipt" ] && [ "$provider_ok" -eq 1 ]; then
+      pass_msg "$label worktree add and Codex cleanup serialize across concurrent workflows"
+    else
+      fail_msg "$label worktree add and Codex cleanup serialize across concurrent workflows" \
+        "add_rc=$add_rc cleanup_rc=$cleanup_rc events=$(tr '\n' ';' <"$events") collisions=$(cat "$collisions")"
+    fi
+  else
+    fail_msg "$label worktree add and Codex cleanup serialize across concurrent workflows" \
+      "event contract failed: $(tr '\n' ';' <"$events") collisions=$(cat "$collisions")"
+  fi
+
+  # Exact fixture recovery between the negative and positive rounds.
+  rm -rf "$CLEANUP_TMP/repo/.git/.uberdev-add-cleanup-critical"
+  if [ -d "$CLEANUP_TMP/repo/$child_relative" ]; then
+    git -C "$CLEANUP_TMP/repo" worktree remove --force "$child_relative"
+  fi
+  git -C "$CLEANUP_TMP/repo" show-ref --verify --quiet "refs/heads/$child_branch" \
+    && git -C "$CLEANUP_TMP/repo" branch -D "$child_branch" >/dev/null
+  if [ -f "$child_receipt" ]; then
+    bash -c '. "$1"; _uberdev_dispatch_discard_codex_worktree_receipt "$2" "$3"' \
+      _ "$DISPATCH_LIB" "$child_receipt" "$child_token"
+  fi
+  if [ -d "$CLEANUP_TMP/repo/$add_relative" ]; then
+    git -C "$CLEANUP_TMP/repo" worktree remove --force "$add_relative"
+  fi
+  git -C "$CLEANUP_TMP/repo" show-ref --verify --quiet "refs/heads/$add_branch" \
+    && git -C "$CLEANUP_TMP/repo" branch -D "$add_branch" >/dev/null
+}
+
+run_add_cleanup_round bypass negative
+run_add_cleanup_round mutex codex
+run_add_cleanup_round mutex background
+run_add_cleanup_round mutex wezterm
+run_add_cleanup_round mutex claude
+
+MUTEX_SCOPE="$(bash -c '. "$1"; _uberdev_dispatch_git_metadata_mutex_scope "$2"' \
+  _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo")"
+if python3 -I -B - "$MUTEX_SCOPE" <<'PY'
+import os,pathlib,stat,sys
+scope=pathlib.Path(sys.argv[1]); entry=scope.stat()
+uid_fn=getattr(os,"geteuid",None)
+if uid_fn is not None: assert entry.st_uid==uid_fn()
+if os.name!="nt": assert stat.S_IMODE(entry.st_mode)==0o700
+assert not (scope/".mutex").exists()
+PY
+then
+  pass_msg "git metadata mutex scope is private and has no live generation after cleanup"
+else
+  fail_msg "git metadata mutex scope is private and has no live generation after cleanup" "$MUTEX_SCOPE"
+fi
 rm -rf "$CLEANUP_TMP"
 
 echo "== Codex setup failures clean child-owned worktrees end to end =="
@@ -838,8 +1380,15 @@ assert_grep "$DISPATCH_LIB" \
   '_uberdev_dispatch_codex\(\)' \
   "_uberdev_dispatch_codex function is defined"
 assert_grep "$DISPATCH_LIB" \
-  'git worktree add' \
-  "codex backend runs explicit git worktree add (same as background)"
+  '_uberdev_dispatch_git_worktree_add "\$REPOSITORY_ROOT"' \
+  "codex backend serializes every isolated worktree add through the repository mutex"
+CODEX_DISPATCH_BODY="$(extract_function_body _uberdev_dispatch_codex "$DISPATCH_LIB")"
+if printf '%s\n' "$CODEX_DISPATCH_BODY" | grep -Fq 'MSYS_NO_PATHCONV=1 git worktree add'; then
+  fail_msg "codex backend has no direct non-child worktree-add bypass" \
+    "_uberdev_dispatch_codex still invokes git worktree add directly"
+else
+  pass_msg "codex backend has no direct non-child worktree-add bypass"
+fi
 assert_grep "$DISPATCH_LIB" \
   'codex --ask-for-approval never exec' \
   "codex backend launches headless codex exec with top-level approval policy (NOT claude -p)"
@@ -1369,9 +1918,10 @@ rm -rf "$BEH_TMP"
 
 echo "== Codex inherit carrier omits model and effort pins =="
 INHERIT_TMP="$(mktemp -d)"
-mkdir -p "$INHERIT_TMP/bin" "$INHERIT_TMP/repo" "$INHERIT_TMP/tmp"
+mkdir -p "$INHERIT_TMP/bin" "$INHERIT_TMP/repo/.git" "$INHERIT_TMP/tmp"
 cat > "$INHERIT_TMP/bin/git" <<'SH'
 #!/usr/bin/env bash
+if [ "$1" = "-C" ] && [ "$3" = "rev-parse" ] && [ "$4" = "--git-common-dir" ]; then printf '.git\n'; exit 0; fi
 if [ "$1" = "worktree" ] && [ "$2" = "add" ]; then mkdir -p "$3"; exit 0; fi
 if [ "$1" = "worktree" ] && [ "$2" = "remove" ] && [ "$3" = "--force" ]; then rm -rf "$4"; exit 0; fi
 exit 1
@@ -1428,9 +1978,10 @@ rm -rf "$INHERIT_TMP"
 
 echo "== _uberdev_dispatch_codex failure and delayed-wrapper behavior =="
 FAIL_TMP="$(mktemp -d)"
-mkdir -p "$FAIL_TMP/bin" "$FAIL_TMP/repo" "$FAIL_TMP/tmp"
+mkdir -p "$FAIL_TMP/bin" "$FAIL_TMP/repo/.git" "$FAIL_TMP/tmp"
 cp "$BEH_TMP/bin/git" "$FAIL_TMP/bin/git" 2>/dev/null || cat > "$FAIL_TMP/bin/git" <<'SH'
 #!/usr/bin/env bash
+if [ "$1" = "-C" ] && [ "$3" = "rev-parse" ] && [ "$4" = "--git-common-dir" ]; then printf '.git\n'; exit 0; fi
 if [ "$1" = "worktree" ] && [ "$2" = "add" ]; then
   mkdir -p "$3"
   exit 0
@@ -1533,9 +2084,10 @@ else
 fi
 rm -rf "$IMMEDIATE_DUAL_TMP"
 IMMEDIATE_TMP="$(mktemp -d)"
-mkdir -p "$IMMEDIATE_TMP/bin" "$IMMEDIATE_TMP/repo" "$IMMEDIATE_TMP/tmp"
+mkdir -p "$IMMEDIATE_TMP/bin" "$IMMEDIATE_TMP/repo/.git" "$IMMEDIATE_TMP/tmp"
 cat > "$IMMEDIATE_TMP/bin/git" <<'SH'
 #!/usr/bin/env bash
+if [ "$1" = -C ] && [ "$3" = rev-parse ] && [ "$4" = --git-common-dir ]; then printf '.git\n'; exit 0; fi
 if [ "$1" = worktree ] && [ "$2" = add ]; then mkdir -p "$3"; exit 0; fi
 if [ "$1" = worktree ] && [ "$2" = remove ] && [ "$3" = --force ]; then rm -rf "$4"; exit 0; fi
 exit 1
@@ -1616,9 +2168,10 @@ esac
 rm -rf "$IMMEDIATE_TMP"
 
 RACE_TMP="$(mktemp -d)"
-mkdir -p "$RACE_TMP/bin" "$RACE_TMP/repo" "$RACE_TMP/tmp"
+mkdir -p "$RACE_TMP/bin" "$RACE_TMP/repo/.git" "$RACE_TMP/tmp"
 cat > "$RACE_TMP/bin/git" <<'SH'
 #!/usr/bin/env bash
+if [ "$1" = "-C" ] && [ "$3" = "rev-parse" ] && [ "$4" = "--git-common-dir" ]; then printf '.git\n'; exit 0; fi
 if [ "$1" = "worktree" ] && [ "$2" = "add" ]; then
   mkdir -p "$3"
   exit 0

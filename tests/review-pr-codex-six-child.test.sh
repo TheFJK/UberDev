@@ -6,6 +6,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REAL_GIT="$(command -v git)"
 RUNTIME_ROOT="${SIX_CHILD_RUNTIME_ROOT:-$ROOT/codex/uberdev-codex}"
 RUNTIME_NAMESPACE="${SIX_CHILD_RUNTIME_NAMESPACE:-uberdev}"
 case "$RUNTIME_NAMESPACE" in
@@ -39,6 +40,84 @@ pathlib.Path(sys.argv[3]).write_text(one(f'{namespace}-executable'))
 PY
 
 mkdir -p "$TMP/bin" "$TMP/home"
+cat >"$TMP/bin/git" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+stress="${SIX_CHILD_GIT_MUTATION_STRESS:-0}"
+is_common_probe=0
+if [ "${1:-}" = -C ] && [ "${3:-}" = rev-parse ] && [ "${4:-}" = --git-common-dir ]; then
+  is_common_probe=1
+fi
+
+# Hold cleanup immediately before mutex acquisition. Five non-timeout siblings
+# must all be pending before any may proceed; the timed-out sixth arrives later.
+# This proves genuine concurrent demand without widening the protected section.
+if [ "$stress" = 1 ] && [ "$is_common_probe" -eq 1 ] \
+    && [ -e "$CODEX_STUB_RELEASE_DIR/.all" ]; then
+  pre="$SIX_CHILD_GIT_PREACQUIRE_DIR"
+  mkdir -p "$pre"
+  mkdir "$pre/arrival-$PPID" 2>/dev/null || true
+  printf 'pending\towner=%s\n' "$PPID" >>"$SIX_CHILD_GIT_ARRIVAL_LOG"
+  arrivals="$(find "$pre" -mindepth 1 -maxdepth 1 -type d -name 'arrival-*' | wc -l | tr -d ' ')"
+  if [ "$arrivals" -ge 5 ] && mkdir "$pre/released" 2>/dev/null; then
+    printf 'barrier-release\tcount=%s\n' "$arrivals" >>"$SIX_CHILD_GIT_ARRIVAL_LOG"
+  fi
+  tries=0
+  while [ ! -d "$pre/released" ] && [ "$tries" -lt 2000 ]; do
+    tries=$((tries + 1))
+    sleep 0.01
+  done
+  if [ ! -d "$pre/released" ]; then
+    printf 'barrier-timeout\towner=%s\tarrivals=%s\n' "$PPID" "$arrivals" \
+      >>"$SIX_CHILD_GIT_COLLISION_LOG"
+    exit 88
+  fi
+fi
+
+if [ "$stress" != 1 ]; then
+  exec "$SIX_CHILD_REAL_GIT" "$@"
+fi
+
+phase=''
+case "${1:-}:${2:-}" in
+  worktree:remove) phase=remove ;;
+  worktree:list) phase=list ;;
+  branch:-D) phase=branch ;;
+esac
+[ -n "$phase" ] || exec "$SIX_CHILD_REAL_GIT" "$@"
+
+common_dir="$("$SIX_CHILD_REAL_GIT" rev-parse --git-common-dir)"
+case "$common_dir" in /*) ;; *) common_dir="$PWD/$common_dir" ;; esac
+common_dir="$(cd "$common_dir" && pwd -P)"
+sentinel="$common_dir/.uberdev-six-child-git-critical"
+owner_file="$sentinel/owner"
+
+collision() {
+  actual="$(cat "$owner_file" 2>/dev/null || printf missing)"
+  printf 'overlap\towner=%s\tactual=%s\tphase=%s\targv=%s\n' \
+    "$PPID" "$actual" "$phase" "$*" >>"$SIX_CHILD_GIT_COLLISION_LOG"
+  exit 89
+}
+
+if [ "$phase" = remove ]; then
+  if ! mkdir "$sentinel" 2>/dev/null; then collision "$@"; fi
+  chmod 700 "$sentinel"
+  printf '%s\n' "$PPID" >"$owner_file"
+else
+  [ -f "$owner_file" ] || collision "$@"
+  [ "$(cat "$owner_file")" = "$PPID" ] || collision "$@"
+fi
+printf 'critical\towner=%s\tphase=%s\n' "$PPID" "$phase" >>"$SIX_CHILD_GIT_ARRIVAL_LOG"
+
+if "$SIX_CHILD_REAL_GIT" "$@"; then rc=0; else rc=$?; fi
+if [ "$phase" = branch ]; then
+  printf 'critical\towner=%s\tphase=release\n' "$PPID" >>"$SIX_CHILD_GIT_ARRIVAL_LOG"
+  rm -f "$owner_file"
+  rmdir "$sentinel"
+fi
+exit "$rc"
+SH
 cat >"$TMP/bin/codex" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -112,7 +191,7 @@ cat >"$TMP/bin/claude" <<'SH'
 printf '%s\n' "$*" >>"$CLAUDE_STUB_LOG"
 exit 97
 SH
-chmod +x "$TMP/bin/codex" "$TMP/bin/claude"
+chmod +x "$TMP/bin/git" "$TMP/bin/codex" "$TMP/bin/claude"
 
 cat >"$TMP/run-case.sh" <<'SH'
 #!/usr/bin/env bash
@@ -225,7 +304,11 @@ if [ -n "$timeout_instance" ]; then
   if [ "${REVIEW_WAIT_RC:-}" -ne 124 ]; then
     echo "production review timeout returned rc=${REVIEW_WAIT_RC:-missing}, expected 124" >&2
     while IFS= read -r timeout_row; do
-      echo "$(jq -r .edge <<<"$timeout_row") state=$(jq -r .state "$(jq -r .status <<<"$timeout_row")" 2>/dev/null || echo missing)" >&2
+      timeout_status="$(jq -r .status <<<"$timeout_row")"
+      echo "$(jq -r .edge <<<"$timeout_row") state=$(jq -r .state "$timeout_status" 2>/dev/null || echo missing)" >&2
+      [ ! -f "$timeout_status" ] || cat "$timeout_status" >&2
+      timeout_log="$(jq -r '.log // empty' "$timeout_status" 2>/dev/null || true)"
+      [ -z "$timeout_log" ] || [ ! -f "$timeout_log" ] || cat "$timeout_log" >&2
     done <"$REVIEW_LAUNCHED"
     exit 1
   fi
@@ -322,7 +405,12 @@ for instance in instances:
     worktree = pathlib.Path(status["worktree"])
     if not worktree.is_absolute():
         worktree = repo / worktree
-    assert not worktree.exists(), worktree
+    if worktree.exists():
+        print(f"leaked child status: {json.dumps(status, sort_keys=True)}", file=sys.stderr)
+        log = pathlib.Path(status["log"])
+        if log.is_file():
+            print(f"leaked child log ({log}):\n{log.read_text()}", file=sys.stderr)
+        raise AssertionError(worktree)
     branch = status["branch"]
     probe = subprocess.run(
         ["git", "-C", str(repo), "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
@@ -358,6 +446,29 @@ terminals = [row for row in events if row.get("event") in {"completed", "failed"
 assert len(terminals) == 7, terminals
 assert {row["run_id"] for row in terminals} == set(instances) | {repair}, terminals
 PY
+[ ! -s "$SIX_CHILD_GIT_COLLISION_LOG" ] || {
+  echo "concurrent git metadata mutations escaped dispatch serialization:" >&2
+  cat "$SIX_CHILD_GIT_COLLISION_LOG" >&2
+  exit 1
+}
+if [ "${SIX_CHILD_GIT_MUTATION_STRESS:-0}" = 1 ]; then
+  python3 -I -B - "$SIX_CHILD_GIT_ARRIVAL_LOG" <<'PY'
+import collections,pathlib,sys
+lines=pathlib.Path(sys.argv[1]).read_text().splitlines()
+pending=[line.split("owner=",1)[1] for line in lines if line.startswith("pending\towner=")]
+assert len(pending)==len(set(pending))==6,pending
+releases=[line for line in lines if line.startswith("barrier-release\tcount=")]
+assert releases==["barrier-release\tcount=5"],releases
+events=collections.defaultdict(list)
+for line in lines:
+    if not line.startswith("critical\t"): continue
+    fields=dict(field.split("=",1) for field in line.split("\t")[1:])
+    events[fields["owner"]].append(fields["phase"])
+assert len(events)==6,events
+assert all(phases==["remove","list","branch","release"] for phases in events.values()),events
+PY
+  [ ! -e "$repo/.git/.uberdev-six-child-git-critical" ]
+fi
 
 # The canonical reviewer boundary drives the existing one-shot format-retry
 # edge. A repaired result is accepted; two contradictory documents remain
@@ -484,14 +595,19 @@ make_repo() {
 
 run_case() {
   local name="$1" fail_instance="${2-}" timeout_instance="${3-}" skip_ready_instance="${4-}" pre_ready_fail_instance="${5-}"
-  local repo runtime codex_log claude_log barrier_timeout=60
+  local repo runtime codex_log claude_log barrier_timeout=60 git_mutation_stress=0
   repo="$TMP/repo-$name"; runtime="$TMP/runtime-$name"
   codex_log="$TMP/codex-$name.log"; claude_log="$TMP/claude-$name.log"
   make_repo "$repo"
-  mkdir -p "$runtime"
+  mkdir -p "$runtime" "$runtime/git-preacquire"
   ready_dir="$runtime/ready"; release_dir="$runtime/release"
   [ -z "$skip_ready_instance" ] || barrier_timeout=2
+  [ "$name" != 3 ] || git_mutation_stress=1
   env -i HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
+    SIX_CHILD_REAL_GIT="$REAL_GIT" SIX_CHILD_GIT_COLLISION_LOG="$runtime/git-collisions.log" \
+    SIX_CHILD_GIT_ARRIVAL_LOG="$runtime/git-arrivals.log" \
+    SIX_CHILD_GIT_PREACQUIRE_DIR="$runtime/git-preacquire" \
+    SIX_CHILD_GIT_MUTATION_STRESS="$git_mutation_stress" \
     PLUGIN_ROOT="$RUNTIME_ROOT" WORKTREE_ROOT="$repo" \
     UBERDEV_TMPDIR="$runtime" PRKIT_TMPDIR="$runtime" \
     CODEX_STUB_LOG="$codex_log" CLAUDE_STUB_LOG="$claude_log" \

@@ -87,8 +87,8 @@ assert_grep "$DISPATCH_LIB" \
   'case "\$BG_PROMPT_MODE" in' \
   "_uberdev_dispatch_claude_bg contains BG_PROMPT_MODE case-switch"
 assert_grep "$DISPATCH_LIB" \
-  'claude --bg \\?$|claude --bg --prompt-file' \
-  "_uberdev_dispatch_claude_bg contains claude --bg invocation (file arm)"
+  'cmd\+?=\( claude --bg \)' \
+  "_uberdev_dispatch_claude_bg builds the shared claude --bg invocation"
 assert_grep "$DISPATCH_LIB" \
   '\-\-prompt-file "\$PROMPT_FILE"' \
   "claude-bg file arm reads \$PROMPT_FILE via --prompt-file"
@@ -104,6 +104,31 @@ assert_grep "$DISPATCH_LIB" \
 assert_grep "$DISPATCH_LIB" \
   '\-\-worktree "solve-issue-\$ISSUE_NUM\$INSTANCE_SUFFIX"' \
   "claude-bg arm scopes each isolated worktree to the routed child instance"
+CLAUDE_BG_BODY="$(awk '/^_uberdev_dispatch_claude_bg\(\)/{f=1} f{print} f&&/^}/{exit}' "$DISPATCH_LIB")"
+if printf '%s\n' "$CLAUDE_BG_BODY" | grep -Fq '_uberdev_dispatch_with_git_metadata_mutex' \
+    && printf '%s\n' "$CLAUDE_BG_BODY" | grep -Fq '[ "$BG_WORKSPACE_MODE" = isolated ]'; then
+  echo "  PASS  isolated Claude bootstrap is mutex-scoped while caller mode remains provider-direct"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  Claude --bg --worktree bootstrap bypasses or overextends the Git metadata mutex"
+  FAIL=$((FAIL + 1))
+fi
+if python3 -I -B - "$DISPATCH_LIB" <<'PY'
+import sys
+source=open(sys.argv[1],encoding="utf-8").read()
+body=source.split("_uberdev_dispatch_claude_bg() {",1)[1].split("\n}",1)[0]
+case=body.split('case "$BG_PROMPT_MODE" in',1)[1]
+launch=case.rsplit('if [[ "$DISPATCH_RC" -eq 0 ]]',1)[0]
+assert launch.count("_uberdev_dispatch_with_git_metadata_mutex")==1,launch
+assert launch.index("_uberdev_dispatch_with_git_metadata_mutex") > launch.index("esac")
+PY
+then
+  echo "  PASS  all three Claude prompt modes converge on one bounded bootstrap mutex"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  Claude prompt modes do not converge on one bounded bootstrap mutex"
+  FAIL=$((FAIL + 1))
+fi
 
 echo "== Positive: --effort=<level> threaded into claude --bg (v0.22.1) =="
 # Regression: prior to v0.22.1, /turbo and /solve dispatched `claude --bg`
@@ -293,20 +318,28 @@ else
   FAIL=$((FAIL + 1))
 fi
 rm -rf "$ULTRA_TMP"
-# Each of the three case-statement arms threads ${EFFORT_FLAG[@]} immediately
-# after ${PERM_FLAG[@]}. The literal `"${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}"`
-# token-pair must appear at least three times (file arm, stdin arm, argv arm).
-# A future edit that drops the flag from any one arm would regress to silent
-# default-effort dispatch for that mode. The array-quoted form (not the prior
-# unquoted `$PERM_FLAG $EFFORT_FLAG` scalar form) is mandatory under zsh —
-# scalar word-split is OFF by default and would collapse `--effort max` into
-# one argv slot, which `claude --bg` rejects loudly.
-EFFORT_ARMS_COUNT=$(grep -cE '"\$\{PERM_FLAG\[@\]\}" "\$\{EFFORT_FLAG\[@\]\}"' "$DISPATCH_LIB" 2>/dev/null || echo "0")
-if [[ "$EFFORT_ARMS_COUNT" -ge 3 ]]; then
-  echo "  PASS  all three dispatch arms thread \"\${EFFORT_FLAG[@]}\" after \"\${PERM_FLAG[@]}\" (count=$EFFORT_ARMS_COUNT)"
+# All three prompt modes converge after `esac`, where the optional permission
+# and effort arrays are appended with explicit length guards. This both keeps
+# every mode on one flag path and avoids Bash 3.2 `set -u` aborts when an array
+# is empty. The array-quoted form (not the prior unquoted scalar form) remains
+# mandatory under zsh.
+if python3 -I -B - "$DISPATCH_LIB" <<'PY'
+import sys
+source=open(sys.argv[1],encoding="utf-8").read()
+body=source.split("_uberdev_dispatch_claude_bg() {",1)[1].split("\n}",1)[0]
+case=body.split('case "$BG_PROMPT_MODE" in',1)[1]
+after=case.split("esac",1)[1]
+perm='[ "${#PERM_FLAG[@]}" -eq 0 ] || cmd+=( "${PERM_FLAG[@]}" )'
+effort='[ "${#EFFORT_FLAG[@]}" -eq 0 ] || cmd+=( "${EFFORT_FLAG[@]}" )'
+assert body.count(perm)==1,body
+assert body.count(effort)==1,body
+assert after.index(perm) < after.index(effort),after
+PY
+then
+  echo "  PASS  all three dispatch arms converge on nounset-safe permission and effort argv"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  expected \"\${PERM_FLAG[@]}\" \"\${EFFORT_FLAG[@]}\" token-pair in all 3 case arms (file/stdin/argv); count=$EFFORT_ARMS_COUNT"
+  echo "  FAIL  Claude prompt arms do not converge on nounset-safe permission and effort argv"
   FAIL=$((FAIL + 1))
 fi
 # Tombstone: the v0.22.1 scalar form `$PERM_FLAG $EFFORT_FLAG` (no braces,
@@ -431,6 +464,626 @@ assert_not_contains() {
   assert_not_contains "$joined" "dispatch_setup_failed" "happy path does NOT emit dispatch_setup_failed"
   assert_contains "$joined" '"tier":"medium"' "happy path agent_dispatched carries tier=medium"
   assert_contains "$joined" '"backend":"claude-bg"' "happy path agent_dispatched carries backend=claude-bg"
+  rm -rf "$UBERDEV_TMPDIR"
+  printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
+) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
+
+echo "== Empty optional argv is nounset-safe in actual Claude providers =="
+CLAUDE_NOUNSET_TMP="$(mktemp -d)"
+mkdir -p "$CLAUDE_NOUNSET_TMP/caller"
+printf 'nounset provider prompt\n' >"$CLAUDE_NOUNSET_TMP/prompt.txt"
+CLAUDE_NOUNSET_SHELLS=( /bin/bash "$(command -v bash)" )
+CLAUDE_NOUNSET_SEEN=''
+CLAUDE_NOUNSET_INDEX=0
+for CLAUDE_NOUNSET_SHELL in "${CLAUDE_NOUNSET_SHELLS[@]}"; do
+  [ -x "$CLAUDE_NOUNSET_SHELL" ] || continue
+  CLAUDE_NOUNSET_REAL="$(cd "$(dirname "$CLAUDE_NOUNSET_SHELL")" && pwd -P)/$(basename "$CLAUDE_NOUNSET_SHELL")"
+  case " $CLAUDE_NOUNSET_SEEN " in *" $CLAUDE_NOUNSET_REAL "*) continue ;; esac
+  CLAUDE_NOUNSET_SEEN="$CLAUDE_NOUNSET_SEEN $CLAUDE_NOUNSET_REAL"
+  CLAUDE_NOUNSET_INDEX=$((CLAUDE_NOUNSET_INDEX + 1))
+  CLAUDE_NOUNSET_VERSION="$($CLAUDE_NOUNSET_SHELL --version | head -1)"
+  for CLAUDE_NOUNSET_MODE in file stdin argv; do
+    case "$CLAUDE_NOUNSET_MODE" in file) CLAUDE_NOUNSET_ISSUE=343 ;; stdin) CLAUDE_NOUNSET_ISSUE=344 ;; *) CLAUDE_NOUNSET_ISSUE=345 ;; esac
+    CLAUDE_NOUNSET_CASE="$CLAUDE_NOUNSET_TMP/$CLAUDE_NOUNSET_INDEX-$CLAUDE_NOUNSET_MODE"
+    mkdir -p "$CLAUDE_NOUNSET_CASE/runtime"
+    : >"$CLAUDE_NOUNSET_CASE/provider.log"
+    set +e
+    CLAUDE_NOUNSET_OUT="$($CLAUDE_NOUNSET_SHELL -c '
+      set -u
+      timeout() { shift; "$@"; }
+      env() { while [[ "${1:-}" == *=* ]]; do shift; done; "$@"; }
+      claude() {
+        printf "%s\n" "$*" >>"$PROVIDER_LOG"
+        printf "backgrounded · a11ce335\n"
+      }
+      . "$1"
+      TIMEOUT_BIN=timeout
+      SOLVE_TIMEOUT=9
+      MODEL=sonnet
+      AUTO_MODE=0
+      SKIP_PERMISSIONS=0
+      AUTO_PERMISSIONS=0
+      PERM_FLAG=()
+      EFFORT_FLAG=()
+      BG_PROMPT_MODE="$2"
+      UBERDEV_AGENT_WORKSPACE_MODE=caller
+      UBERDEV_AGENT_WORKSPACE_DIR="$3"
+      UBERDEV_TMPDIR="$4"
+      PROVIDER_LOG="$5"
+      DISPATCH_RC=0
+      DISPATCH_ID=""
+      DISPATCH_LOG=""
+      _uberdev_dispatch_claude_bg "$6" medium "$7"
+      rc=$?
+      [ "$rc" -eq 0 ] && [ "$DISPATCH_ID" = a11ce335 ] \
+        && [ "$(wc -l <"$PROVIDER_LOG" | tr -d " ")" -eq 1 ]
+    ' _ "$DISPATCH_LIB" "$CLAUDE_NOUNSET_MODE" "$CLAUDE_NOUNSET_TMP/caller" \
+      "$CLAUDE_NOUNSET_CASE/runtime" "$CLAUDE_NOUNSET_CASE/provider.log" \
+      "$CLAUDE_NOUNSET_ISSUE" "$CLAUDE_NOUNSET_TMP/prompt.txt" 2>&1)"
+    CLAUDE_NOUNSET_RC=$?
+    set +e
+    if [ "$CLAUDE_NOUNSET_RC" -eq 0 ]; then
+      echo "  PASS  Claude $CLAUDE_NOUNSET_MODE mode accepts empty optional argv under set -u on $CLAUDE_NOUNSET_VERSION"
+      PASS=$((PASS + 1))
+    else
+      echo "  FAIL  Claude $CLAUDE_NOUNSET_MODE nounset contract on $CLAUDE_NOUNSET_VERSION: $CLAUDE_NOUNSET_OUT"
+      FAIL=$((FAIL + 1))
+    fi
+  done
+done
+rm -rf "$CLAUDE_NOUNSET_TMP"
+
+echo "== Claude stdin fail-closed contract on Bash 3.2 and Bash 5 =="
+CLAUDE_STDIN_TMP="$(mktemp -d)"
+CLAUDE_SHELLS=( /bin/bash "$(command -v bash)" )
+CLAUDE_SEEN_SHELLS=''
+CLAUDE_SHELL_INDEX=0
+for CLAUDE_SHELL in "${CLAUDE_SHELLS[@]}"; do
+  [ -x "$CLAUDE_SHELL" ] || continue
+  CLAUDE_SHELL_REAL="$(cd "$(dirname "$CLAUDE_SHELL")" && pwd -P)/$(basename "$CLAUDE_SHELL")"
+  case " $CLAUDE_SEEN_SHELLS " in *" $CLAUDE_SHELL_REAL "*) continue ;; esac
+  CLAUDE_SEEN_SHELLS="$CLAUDE_SEEN_SHELLS $CLAUDE_SHELL_REAL"
+  CLAUDE_SHELL_INDEX=$((CLAUDE_SHELL_INDEX + 1))
+  CLAUDE_SHELL_LABEL="$($CLAUDE_SHELL --version | head -1)"
+  for CLAUDE_STDIN_CASE in missing unreadable; do
+    CASE_DIR="$CLAUDE_STDIN_TMP/${CLAUDE_STDIN_CASE}-$CLAUDE_SHELL_INDEX"
+    mkdir -p "$CASE_DIR/runtime"
+    : >"$CASE_DIR/provider.log"
+    PROMPT_CASE="$CASE_DIR/prompt.txt"
+    if [ "$CLAUDE_STDIN_CASE" = unreadable ]; then
+      printf 'unreadable\n' >"$PROMPT_CASE"
+      chmod 000 "$PROMPT_CASE"
+    fi
+    set +e
+    CLAUDE_STDIN_RESULT="$($CLAUDE_SHELL -c '
+      set +u
+      UBERDEV_TMPDIR="$2/runtime"
+      PROVIDER_LOG="$2/provider.log"
+      MUTEX_SENTINEL="$2/mutex-held"
+      timeout() { shift; "$@"; }
+      env() { while [[ "${1:-}" == *=* ]]; do shift; done; "$@"; }
+      claude() { printf "provider-launched\n" >>"$PROVIDER_LOG"; printf "backgrounded · bad00001\n"; }
+      TIMEOUT_BIN=timeout; SOLVE_TIMEOUT=9; MODEL=sonnet
+      PERM_FLAG=( --permission-mode default ); EFFORT_FLAG=( --effort medium )
+      BG_PROMPT_MODE=stdin; DISPATCH_RC=0; DISPATCH_ID=""; DISPATCH_LOG=""
+      . "$1"
+      _uberdev_dispatch_with_git_metadata_mutex() {
+        shift
+        [ "${1:-}" = claude-bootstrap ] && shift
+        : >"$MUTEX_SENTINEL"
+        "$@"; mutex_command_rc=$?
+        rm -f "$MUTEX_SENTINEL"
+        return "$mutex_command_rc"
+      }
+      _uberdev_dispatch_claude_bg 337 medium "$3"
+      rc=$?
+      printf "rc=%s provider=%s mutex=%s\n" "$rc" \
+        "$(wc -l <"$PROVIDER_LOG" 2>/dev/null || printf 0)" \
+        "$([ -e "$MUTEX_SENTINEL" ] && printf held || printf clear)"
+      [ "$rc" -ne 0 ] && [ ! -s "$PROVIDER_LOG" ] && [ ! -e "$MUTEX_SENTINEL" ]
+    ' _ "$DISPATCH_LIB" "$CASE_DIR" "$PROMPT_CASE" 2>&1)"
+    CLAUDE_STDIN_RC=$?
+    set +e
+    chmod 600 "$PROMPT_CASE" 2>/dev/null || true
+    if [ "$CLAUDE_STDIN_RC" -eq 0 ]; then
+      echo "  PASS  $CLAUDE_STDIN_CASE stdin is terminal before provider/mutex leak on $CLAUDE_SHELL_LABEL"
+      PASS=$((PASS + 1))
+    else
+      echo "  FAIL  $CLAUDE_STDIN_CASE stdin contract on $CLAUDE_SHELL_LABEL: $CLAUDE_STDIN_RESULT"
+      FAIL=$((FAIL + 1))
+    fi
+  done
+done
+rm -rf "$CLAUDE_STDIN_TMP"
+
+echo "== Claude bootstrap timeout and release-failure handle preservation =="
+CLAUDE_TIMEOUT_CONTRACT="$(bash -c '
+  . "$1"
+  unset UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT
+  printf "default=%s capped=%s " \
+    "$(_uberdev_dispatch_claude_bootstrap_timeout 120)" \
+    "$(_uberdev_dispatch_claude_bootstrap_timeout 20)"
+  UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT=7
+  printf "configured=%s" "$(_uberdev_dispatch_claude_bootstrap_timeout 120)"
+' _ "$DISPATCH_LIB")"
+if [ "$CLAUDE_TIMEOUT_CONTRACT" = 'default=60 capped=20 configured=7' ]; then
+  echo "  PASS  Claude bootstrap timeout defaults to 60s, caps to solve timeout, and accepts a shorter override"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  Claude bootstrap timeout resolution: $CLAUDE_TIMEOUT_CONTRACT"
+  FAIL=$((FAIL + 1))
+fi
+CLAUDE_TIMEOUT_VALIDATION_ERRORS=''
+for CLAUDE_TIMEOUT_SHELL in /bin/bash "$(command -v bash)"; do
+  [ -x "$CLAUDE_TIMEOUT_SHELL" ] || continue
+  CLAUDE_TIMEOUT_MATRIX="$($CLAUDE_TIMEOUT_SHELL -c '
+    set -u
+    . "$1"
+    huge=999999999999999999999999999999999999999999999999999999999999
+    UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT="$huge"
+    huge_config="$(_uberdev_dispatch_claude_bootstrap_timeout 86400)" || exit 10
+    unset UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT
+    huge_solve="$(_uberdev_dispatch_claude_bootstrap_timeout "$huge")" || exit 11
+    UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT=0
+    _uberdev_dispatch_claude_bootstrap_timeout 100 >/dev/null 2>&1; zero_rc=$?
+    UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT=not-a-number
+    _uberdev_dispatch_claude_bootstrap_timeout 100 >/dev/null 2>&1; invalid_rc=$?
+    printf "huge_config=%s huge_solve=%s zero=%s invalid=%s" \
+      "$huge_config" "$huge_solve" "$zero_rc" "$invalid_rc"
+  ' _ "$DISPATCH_LIB" 2>&1)"
+  [ "$CLAUDE_TIMEOUT_MATRIX" = 'huge_config=300 huge_solve=60 zero=2 invalid=2' ] \
+    || CLAUDE_TIMEOUT_VALIDATION_ERRORS="$CLAUDE_TIMEOUT_VALIDATION_ERRORS [$CLAUDE_TIMEOUT_SHELL:$CLAUDE_TIMEOUT_MATRIX]"
+done
+if [ -z "$CLAUDE_TIMEOUT_VALIDATION_ERRORS" ]; then
+  echo "  PASS  bootstrap timeout rejects invalid/zero and safely caps huge decimals on Bash 3.2 and Bash 5"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  bootstrap timeout overflow contract:$CLAUDE_TIMEOUT_VALIDATION_ERRORS"
+  FAIL=$((FAIL + 1))
+fi
+CLAUDE_QUARANTINE_FAILURES="$(/bin/bash -c '
+  set -u
+  . "$1"
+  _uberdev_semaphore_quarantine_mutex() { return 37; }
+  root="$(mktemp -d)"
+
+  ownerless="$root/ownerless"; mkdir -p "$ownerless/.mutex"; chmod 700 "$ownerless/.mutex"
+  _uberdev_semaphore_mutex_reclaim_dead "$ownerless" 1; ownerless_rc=$?
+
+  invalid="$root/invalid"; mkdir -p "$invalid/.mutex"; chmod 700 "$invalid/.mutex"
+  printf "invalid\n\nnot-a-token\n" >"$invalid/.mutex/owner_pid"; chmod 600 "$invalid/.mutex/owner_pid"
+  _uberdev_semaphore_mutex_reclaim_dead "$invalid" 1; invalid_rc=$?
+
+  published="$root/published"; mkdir -p "$published/.mutex"; chmod 700 "$published/.mutex"
+  printf "99999999\n\ndead-token\n" >"$published/.mutex/owner_pid"; chmod 600 "$published/.mutex/owner_pid"
+  _uberdev_semaphore_mutex_reclaim_dead "$published" published; published_rc=$?
+  printf "ownerless=%s invalid=%s published=%s" "$ownerless_rc" "$invalid_rc" "$published_rc"
+' _ "$DISPATCH_LIB")"
+if [ "$CLAUDE_QUARANTINE_FAILURES" = 'ownerless=37 invalid=37 published=37' ]; then
+  echo "  PASS  ownerless, invalid-owner, and published-dead reclaim preserve quarantine failure rc"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  quarantine failure rc preservation: $CLAUDE_QUARANTINE_FAILURES"
+  FAIL=$((FAIL + 1))
+fi
+CLAUDE_OWNERLESS_TURNOVER="$(/bin/bash -c '
+  set -u
+  . "$1"
+  root="$(mktemp -d)"
+  vanished="$root/vanished"
+  mkdir -p "$vanished/.mutex"
+  chmod 700 "$vanished/.mutex"
+  _uberdev_semaphore_path_identity() {
+    rmdir "$1" || return 2
+    return 2
+  }
+  _uberdev_semaphore_mutex_reclaim_ownerless_generation "$vanished" "1:1"
+  vanished_rc=$?
+  if [ ! -e "$vanished/.mutex" ] && [ ! -L "$vanished/.mutex" ]; then absent=1; else absent=0; fi
+
+  present="$root/present"
+  mkdir -p "$present/.mutex"
+  chmod 700 "$present/.mutex"
+  _uberdev_semaphore_path_identity() { return 2; }
+  _uberdev_semaphore_mutex_reclaim_ownerless_generation "$present" "1:1"
+  present_rc=$?
+  if [ -d "$present/.mutex" ] && [ ! -L "$present/.mutex" ]; then retained=1; else retained=0; fi
+  printf "vanished=%s absent=%s present=%s retained=%s" \
+    "$vanished_rc" "$absent" "$present_rc" "$retained"
+' _ "$DISPATCH_LIB")"
+if [ "$CLAUDE_OWNERLESS_TURNOVER" = 'vanished=1 absent=1 present=2 retained=1' ]; then
+  echo "  PASS  ownerless exact-generation reclaim distinguishes benign turnover from an unstatable live path"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  ownerless vanish-before-identity turnover: $CLAUDE_OWNERLESS_TURNOVER"
+  FAIL=$((FAIL + 1))
+fi
+CLAUDE_SLOW_PROBE_TMP="$(mktemp -d)"
+CLAUDE_SLOW_PROBE_START="$(python3 -I -B -c 'import time; print(time.monotonic())')"
+set +e
+CLAUDE_SLOW_PROBE_OUT="$(/bin/bash -c '
+  set -u
+  . "$1"
+  POST_IMPL_REVIEW_CAP=1; REVIEW_EXPECTED_COUNT=1
+  SLOW_ROOT="$2"
+  _UBERDEV_GIT_METADATA_MUTEX_PUBLICATION_GRACE_S=0
+  _UBERDEV_GIT_METADATA_MUTEX_WALL_PROBE_ALLOWANCE_S=0
+  _uberdev_semaphore_mutex_acquire() {
+    calls="$(cat "$SLOW_ROOT/calls" 2>/dev/null || printf 0)"
+    calls=$((calls + 1)); printf "%s\n" "$calls" >"$SLOW_ROOT/calls"
+    command sleep 0.25
+    _UBERDEV_SEMAPHORE_MUTEX_OBSERVED_STATE=published-live
+    _UBERDEV_SEMAPHORE_MUTEX_OBSERVED_IDENTITY=fixture
+    return 75
+  }
+  sleep() { return 0; }
+  _uberdev_dispatch_git_metadata_mutex_acquire "$2/scope" claude-bootstrap 1
+' _ "$DISPATCH_LIB" "$CLAUDE_SLOW_PROBE_TMP" 2>&1)"
+CLAUDE_SLOW_PROBE_RC=$?
+set +e
+CLAUDE_SLOW_PROBE_END="$(python3 -I -B -c 'import time; print(time.monotonic())')"
+CLAUDE_SLOW_PROBE_CALLS="$(cat "$CLAUDE_SLOW_PROBE_TMP/calls" 2>/dev/null || printf 0)"
+if [ "$CLAUDE_SLOW_PROBE_RC" -eq 75 ] && [ "$CLAUDE_SLOW_PROBE_CALLS" -le 10 ] \
+    && [[ "$CLAUDE_SLOW_PROBE_OUT" == *'acquisition timed out for claude-bootstrap'* ]] \
+    && python3 -I -B - "$CLAUDE_SLOW_PROBE_START" "$CLAUDE_SLOW_PROBE_END" <<'PY'
+import sys
+elapsed=float(sys.argv[2])-float(sys.argv[1])
+assert 1.0 <= elapsed < 3.2, elapsed
+PY
+then
+  echo "  PASS  slow probe overhead is bounded independently of scheduled publication-grace ticks"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  slow-probe wall bound (rc=$CLAUDE_SLOW_PROBE_RC calls=$CLAUDE_SLOW_PROBE_CALLS elapsed=$(python3 -I -B -c "print(float('$CLAUDE_SLOW_PROBE_END')-float('$CLAUDE_SLOW_PROBE_START'))") out=$CLAUDE_SLOW_PROBE_OUT)"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$CLAUDE_SLOW_PROBE_TMP"
+CLAUDE_BOOT_TMP="$(mktemp -d)"
+git init -q "$CLAUDE_BOOT_TMP/repo"
+mkdir -p "$CLAUDE_BOOT_TMP/bin" "$CLAUDE_BOOT_TMP/runtime-bound" "$CLAUDE_BOOT_TMP/runtime-release" \
+  "$CLAUDE_BOOT_TMP/runtime-serial-first" "$CLAUDE_BOOT_TMP/runtime-serial-second" \
+  "$CLAUDE_BOOT_TMP/runtime-publish-waiter" "$CLAUDE_BOOT_TMP/runtime-abandoned"
+cat >"$CLAUDE_BOOT_TMP/bin/claude" <<'SH'
+#!/usr/bin/env bash
+printf 'started\n' >>"$CLAUDE_PROVIDER_LOG"
+case "${CLAUDE_PROVIDER_MODE:-hang}" in
+  marker) printf 'backgrounded · c0de335a\n' ;;
+  serial)
+    if ! mkdir "$CLAUDE_SERIAL_SENTINEL" 2>/dev/null; then
+      printf 'split-owner %s\n' "$UBERDEV_AGENT_INSTANCE_ID" >>"$CLAUDE_SERIAL_LOG"
+      exit 91
+    fi
+    trap 'rmdir "$CLAUDE_SERIAL_SENTINEL"' EXIT
+    printf 'enter %s\n' "$UBERDEV_AGENT_INSTANCE_ID" >>"$CLAUDE_SERIAL_LOG"
+    sleep 0.35
+    printf 'exit %s\n' "$UBERDEV_AGENT_INSTANCE_ID" >>"$CLAUDE_SERIAL_LOG"
+    case "$UBERDEV_AGENT_INSTANCE_ID" in
+      serial-first) printf 'backgrounded · 11111111\n' ;;
+      serial-second) printf 'backgrounded · 22222222\n' ;;
+      *) exit 92 ;;
+    esac
+    ;;
+  *) sleep 30 ;;
+esac
+SH
+chmod +x "$CLAUDE_BOOT_TMP/bin/claude"
+CLAUDE_TIMEOUT_BIN="$(command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null)"
+printf 'bootstrap bound\n' >"$CLAUDE_BOOT_TMP/prompt.txt"
+CLAUDE_BOUND_START="$(python3 -I -B -c 'import time; print(time.monotonic())')"
+set +e
+(
+  cd "$CLAUDE_BOOT_TMP/repo" || exit 1
+  PATH="$CLAUDE_BOOT_TMP/bin:$PATH" CLAUDE_PROVIDER_LOG="$CLAUDE_BOOT_TMP/bound-provider.log" \
+    UBERDEV_TMPDIR="$CLAUDE_BOOT_TMP/runtime-bound" UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT=1 \
+    bash -c '
+      set +u
+      . "$1"
+      TIMEOUT_BIN="$2"; SOLVE_TIMEOUT=4; MODEL=sonnet
+      PERM_FLAG=( --permission-mode default ); EFFORT_FLAG=( --effort medium )
+      BG_PROMPT_MODE=file; DISPATCH_RC=0; DISPATCH_ID=""; DISPATCH_LOG=""
+      _uberdev_dispatch_claude_bg 338 medium "$3"
+    ' _ "$DISPATCH_LIB" "$CLAUDE_TIMEOUT_BIN" "$CLAUDE_BOOT_TMP/prompt.txt"
+)
+CLAUDE_BOUND_RC=$?
+set +e
+CLAUDE_BOUND_END="$(python3 -I -B -c 'import time; print(time.monotonic())')"
+CLAUDE_BOUND_SCOPE="$(bash -c '. "$1"; _uberdev_dispatch_git_metadata_mutex_scope "$2"' \
+  _ "$DISPATCH_LIB" "$CLAUDE_BOOT_TMP/repo")"
+if python3 -I -B - "$CLAUDE_BOUND_START" "$CLAUDE_BOUND_END" <<'PY'
+import sys
+assert float(sys.argv[2])-float(sys.argv[1]) < 3.0
+PY
+then
+  CLAUDE_BOUND_ELAPSED_OK=1
+else
+  CLAUDE_BOUND_ELAPSED_OK=0
+fi
+if [ "$CLAUDE_BOUND_RC" -ne 0 ] && [ "$CLAUDE_BOUND_ELAPSED_OK" -eq 1 ] \
+    && [ -s "$CLAUDE_BOOT_TMP/bound-provider.log" ] \
+    && [ ! -e "$CLAUDE_BOUND_SCOPE/.mutex" ]; then
+  echo "  PASS  hung Claude bootstrap is bounded by its dedicated timeout and releases the mutex"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  Claude bootstrap bound (rc=$CLAUDE_BOUND_RC elapsed=$(python3 -I -B -c "print(float('$CLAUDE_BOUND_END')-float('$CLAUDE_BOUND_START'))"))"
+  FAIL=$((FAIL + 1))
+fi
+
+# Reproduce the production starvation shape without a five-second fixture:
+# shorten the generic mutex policy to one ownership-safe attempt, then hold the first
+# real Claude provider bootstrap for 350ms. The Claude-specific policy must use
+# the actual enforced two-child wave size, wait outside the provider critical
+# section, and let the second dispatch acquire the same mutex generation only
+# after the first releases it.
+CLAUDE_SERIAL_LOG="$CLAUDE_BOOT_TMP/serial.log"
+CLAUDE_SERIAL_SENTINEL="$CLAUDE_BOOT_TMP/serial-owner"
+: >"$CLAUDE_SERIAL_LOG"
+CLAUDE_SERIAL_START="$(python3 -I -B -c 'import time; print(time.monotonic())')"
+(
+  cd "$CLAUDE_BOOT_TMP/repo" || exit 1
+  PATH="$CLAUDE_BOOT_TMP/bin:$PATH" CLAUDE_PROVIDER_MODE=serial \
+    CLAUDE_SERIAL_LOG="$CLAUDE_SERIAL_LOG" CLAUDE_SERIAL_SENTINEL="$CLAUDE_SERIAL_SENTINEL" \
+    UBERDEV_AGENT_INSTANCE_ID=serial-first UBERDEV_TMPDIR="$CLAUDE_BOOT_TMP/runtime-serial-first" \
+    UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT=2 UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=1 \
+    POST_IMPL_REVIEW_CAP=2 REVIEW_EXPECTED_COUNT=2 \
+    /bin/bash -c '
+      set -u
+      . "$1"
+      TIMEOUT_BIN="$2"; SOLVE_TIMEOUT=4; MODEL=sonnet
+      PERM_FLAG=(); EFFORT_FLAG=(); BG_PROMPT_MODE=file
+      DISPATCH_RC=0; DISPATCH_ID=""; DISPATCH_LOG=""
+      _uberdev_dispatch_claude_bg 347 medium "$3"
+      rc=$?
+      [ "$rc" -eq 0 ] && [ "$DISPATCH_ID" = 11111111 ]
+    ' _ "$DISPATCH_LIB" "$CLAUDE_TIMEOUT_BIN" "$CLAUDE_BOOT_TMP/prompt.txt"
+) >"$CLAUDE_BOOT_TMP/serial-first.out" 2>&1 &
+CLAUDE_SERIAL_FIRST_PID=$!
+CLAUDE_SERIAL_READY_TRIES=0
+while [ ! -d "$CLAUDE_SERIAL_SENTINEL" ] && [ "$CLAUDE_SERIAL_READY_TRIES" -lt 100 ]; do
+  CLAUDE_SERIAL_READY_TRIES=$((CLAUDE_SERIAL_READY_TRIES + 1))
+  sleep 0.01
+done
+(
+  cd "$CLAUDE_BOOT_TMP/repo" || exit 1
+  PATH="$CLAUDE_BOOT_TMP/bin:$PATH" CLAUDE_PROVIDER_MODE=serial \
+    CLAUDE_SERIAL_LOG="$CLAUDE_SERIAL_LOG" CLAUDE_SERIAL_SENTINEL="$CLAUDE_SERIAL_SENTINEL" \
+    UBERDEV_AGENT_INSTANCE_ID=serial-second UBERDEV_TMPDIR="$CLAUDE_BOOT_TMP/runtime-serial-second" \
+    UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT=2 UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=1 \
+    POST_IMPL_REVIEW_CAP=2 REVIEW_EXPECTED_COUNT=2 \
+    /bin/bash -c '
+      set -u
+      . "$1"
+      TIMEOUT_BIN="$2"; SOLVE_TIMEOUT=4; MODEL=sonnet
+      PERM_FLAG=(); EFFORT_FLAG=(); BG_PROMPT_MODE=file
+      DISPATCH_RC=0; DISPATCH_ID=""; DISPATCH_LOG=""
+      _uberdev_dispatch_claude_bg 348 medium "$3"
+      rc=$?
+      [ "$rc" -eq 0 ] && [ "$DISPATCH_ID" = 22222222 ]
+    ' _ "$DISPATCH_LIB" "$CLAUDE_TIMEOUT_BIN" "$CLAUDE_BOOT_TMP/prompt.txt"
+) >"$CLAUDE_BOOT_TMP/serial-second.out" 2>&1 &
+CLAUDE_SERIAL_SECOND_PID=$!
+wait "$CLAUDE_SERIAL_FIRST_PID"; CLAUDE_SERIAL_FIRST_RC=$?
+wait "$CLAUDE_SERIAL_SECOND_PID"; CLAUDE_SERIAL_SECOND_RC=$?
+CLAUDE_SERIAL_END="$(python3 -I -B -c 'import time; print(time.monotonic())')"
+CLAUDE_SERIAL_SCOPE="$(bash -c '. "$1"; _uberdev_dispatch_git_metadata_mutex_scope "$2"' \
+  _ "$DISPATCH_LIB" "$CLAUDE_BOOT_TMP/repo")"
+if [ "$CLAUDE_SERIAL_FIRST_RC" -eq 0 ] && [ "$CLAUDE_SERIAL_SECOND_RC" -eq 0 ] \
+    && [ "$(cat "$CLAUDE_SERIAL_LOG")" = $'enter serial-first\nexit serial-first\nenter serial-second\nexit serial-second' ] \
+    && [ ! -e "$CLAUDE_SERIAL_SCOPE/.mutex" ] \
+    && python3 -I -B - "$CLAUDE_SERIAL_START" "$CLAUDE_SERIAL_END" <<'PY'
+import sys
+elapsed=float(sys.argv[2])-float(sys.argv[1])
+assert 0.6 <= elapsed < 4.0, elapsed
+PY
+then
+  echo "  PASS  concurrent slow Claude bootstraps wait within the enforced wave budget without split ownership"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  concurrent Claude bootstrap serialization (first=$CLAUDE_SERIAL_FIRST_RC second=$CLAUDE_SERIAL_SECOND_RC log=$(tr '\n' '|' <"$CLAUDE_SERIAL_LOG"))"
+  FAIL=$((FAIL + 1))
+fi
+
+# Deterministic publication-race regression. The original owner pauses after
+# creating `.mutex` but before atomically linking `owner_pid`. A Claude waiter
+# must observe that exact unpublished generation without quarantining it or
+# launching the provider. Once publication/release completes, the same waiter
+# proceeds normally.
+CLAUDE_PUBLISH_SCOPE="$(bash -c '. "$1"; _uberdev_dispatch_git_metadata_mutex_scope "$2"' \
+  _ "$DISPATCH_LIB" "$CLAUDE_BOOT_TMP/repo")"
+CLAUDE_PUBLISH_PAUSED="$CLAUDE_BOOT_TMP/publish-paused"
+CLAUDE_PUBLISH_CONTINUE="$CLAUDE_BOOT_TMP/publish-continue"
+CLAUDE_PUBLISH_ACQUIRED="$CLAUDE_BOOT_TMP/publish-acquired"
+CLAUDE_PUBLISH_PROVIDER_LOG="$CLAUDE_BOOT_TMP/publish-provider.log"
+UBERDEV_SEMAPHORE_TESTING=1 \
+  UBERDEV_SEMAPHORE_TEST_PAUSE_AFTER_MKDIR="$CLAUDE_PUBLISH_PAUSED" \
+  UBERDEV_SEMAPHORE_TEST_CONTINUE_FILE="$CLAUDE_PUBLISH_CONTINUE" \
+  /bin/bash -c '
+    set -u
+    . "$1"
+    _uberdev_semaphore_mutex_acquire "$2" || exit $?
+    printf "acquired\n" >"$3"
+    sleep 0.20
+    _uberdev_semaphore_mutex_release "$2"
+  ' _ "$DISPATCH_LIB" "$CLAUDE_PUBLISH_SCOPE" "$CLAUDE_PUBLISH_ACQUIRED" \
+  >"$CLAUDE_BOOT_TMP/publish-holder.out" 2>&1 &
+CLAUDE_PUBLISH_HOLDER_PID=$!
+CLAUDE_PUBLISH_READY_TRIES=0
+while [ ! -s "$CLAUDE_PUBLISH_PAUSED" ] && [ "$CLAUDE_PUBLISH_READY_TRIES" -lt 200 ]; do
+  CLAUDE_PUBLISH_READY_TRIES=$((CLAUDE_PUBLISH_READY_TRIES + 1))
+  sleep 0.01
+done
+CLAUDE_PUBLISH_IDENTITY_BEFORE="$(bash -c '. "$1"; _uberdev_semaphore_path_identity "$2/.mutex"' \
+  _ "$DISPATCH_LIB" "$CLAUDE_PUBLISH_SCOPE" 2>/dev/null || true)"
+(
+  cd "$CLAUDE_BOOT_TMP/repo" || exit 1
+  PATH="$CLAUDE_BOOT_TMP/bin:$PATH" CLAUDE_PROVIDER_LOG="$CLAUDE_PUBLISH_PROVIDER_LOG" \
+    CLAUDE_PROVIDER_MODE=marker UBERDEV_AGENT_INSTANCE_ID=publish-waiter \
+    UBERDEV_TMPDIR="$CLAUDE_BOOT_TMP/runtime-publish-waiter" \
+    UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT=2 UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=1 \
+    POST_IMPL_REVIEW_CAP=1 REVIEW_EXPECTED_COUNT=1 \
+    /bin/bash -c '
+      set -u
+      . "$1"
+      TIMEOUT_BIN="$2"; SOLVE_TIMEOUT=4; MODEL=sonnet
+      PERM_FLAG=(); EFFORT_FLAG=(); BG_PROMPT_MODE=file
+      DISPATCH_RC=0; DISPATCH_ID=""; DISPATCH_LOG=""
+      _uberdev_dispatch_claude_bg 349 medium "$3"
+      rc=$?
+      [ "$rc" -eq 0 ] && [ "$DISPATCH_ID" = c0de335a ]
+    ' _ "$DISPATCH_LIB" "$CLAUDE_TIMEOUT_BIN" "$CLAUDE_BOOT_TMP/prompt.txt"
+) >"$CLAUDE_BOOT_TMP/publish-waiter.out" 2>&1 &
+CLAUDE_PUBLISH_WAITER_PID=$!
+sleep 0.30
+CLAUDE_PUBLISH_IDENTITY_DURING="$(bash -c '. "$1"; _uberdev_semaphore_path_identity "$2/.mutex"' \
+  _ "$DISPATCH_LIB" "$CLAUDE_PUBLISH_SCOPE" 2>/dev/null || true)"
+CLAUDE_PUBLISH_NOT_STOLEN=0
+if [ -n "$CLAUDE_PUBLISH_IDENTITY_BEFORE" ] \
+    && [ "$CLAUDE_PUBLISH_IDENTITY_DURING" = "$CLAUDE_PUBLISH_IDENTITY_BEFORE" ] \
+    && [ ! -s "$CLAUDE_PUBLISH_PROVIDER_LOG" ] \
+    && kill -0 "$CLAUDE_PUBLISH_WAITER_PID" 2>/dev/null; then
+  CLAUDE_PUBLISH_NOT_STOLEN=1
+fi
+: >"$CLAUDE_PUBLISH_CONTINUE"
+wait "$CLAUDE_PUBLISH_HOLDER_PID"; CLAUDE_PUBLISH_HOLDER_RC=$?
+wait "$CLAUDE_PUBLISH_WAITER_PID"; CLAUDE_PUBLISH_WAITER_RC=$?
+if [ "$CLAUDE_PUBLISH_NOT_STOLEN" -eq 1 ] \
+    && [ "$CLAUDE_PUBLISH_HOLDER_RC" -eq 0 ] && [ "$CLAUDE_PUBLISH_WAITER_RC" -eq 0 ] \
+    && [ -s "$CLAUDE_PUBLISH_ACQUIRED" ] \
+    && [ "$(wc -l <"$CLAUDE_PUBLISH_PROVIDER_LOG" | tr -d ' ')" -eq 1 ] \
+    && [ ! -e "$CLAUDE_PUBLISH_SCOPE/.mutex" ]; then
+  echo "  PASS  Claude waiter preserves an in-flight unpublished mutex generation then proceeds after release"
+  PASS=$((PASS + 1))
+else
+  CLAUDE_PUBLISH_INTERNAL_LOG="$(find "$CLAUDE_BOOT_TMP/runtime-publish-waiter" -name 'solve-bg-stdout-349-*.log' -type f -print | head -1)"
+  echo "  FAIL  Claude waiter stole or stalled the publish window (safe=$CLAUDE_PUBLISH_NOT_STOLEN holder=$CLAUDE_PUBLISH_HOLDER_RC waiter=$CLAUDE_PUBLISH_WAITER_RC before=$CLAUDE_PUBLISH_IDENTITY_BEFORE during=$CLAUDE_PUBLISH_IDENTITY_DURING waiter_out=$(tr '\n' '|' <"$CLAUDE_BOOT_TMP/publish-waiter.out") provider=$(test ! -e "$CLAUDE_PUBLISH_PROVIDER_LOG" || tr '\n' '|' <"$CLAUDE_PUBLISH_PROVIDER_LOG") internal=$(test -z "$CLAUDE_PUBLISH_INTERNAL_LOG" || tr '\n' '|' <"$CLAUDE_PUBLISH_INTERNAL_LOG"))"
+  FAIL=$((FAIL + 1))
+fi
+
+# An ownerless generation can also be genuinely abandoned. Require the exact
+# same generation to remain stable through the publication grace window before
+# reclaiming it; this prevents permanent deadlock without weakening the race
+# protection above.
+mkdir "$CLAUDE_PUBLISH_SCOPE/.mutex"
+chmod 700 "$CLAUDE_PUBLISH_SCOPE/.mutex"
+CLAUDE_ABANDONED_START="$(python3 -I -B -c 'import time; print(time.monotonic())')"
+set +e
+(
+  cd "$CLAUDE_BOOT_TMP/repo" || exit 1
+  PATH="$CLAUDE_BOOT_TMP/bin:$PATH" CLAUDE_PROVIDER_LOG="$CLAUDE_BOOT_TMP/abandoned-provider.log" \
+    CLAUDE_PROVIDER_MODE=marker UBERDEV_AGENT_INSTANCE_ID=abandoned-waiter \
+    UBERDEV_TMPDIR="$CLAUDE_BOOT_TMP/runtime-abandoned" UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT=1 \
+    UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=1 POST_IMPL_REVIEW_CAP=1 REVIEW_EXPECTED_COUNT=1 \
+    /bin/bash -c '
+      set -u
+      . "$1"
+      TIMEOUT_BIN="$2"; SOLVE_TIMEOUT=4; MODEL=sonnet
+      PERM_FLAG=(); EFFORT_FLAG=(); BG_PROMPT_MODE=file
+      DISPATCH_RC=0; DISPATCH_ID=""; DISPATCH_LOG=""
+      _uberdev_dispatch_claude_bg 350 medium "$3"
+      rc=$?
+      [ "$rc" -eq 0 ] && [ "$DISPATCH_ID" = c0de335a ]
+    ' _ "$DISPATCH_LIB" "$CLAUDE_TIMEOUT_BIN" "$CLAUDE_BOOT_TMP/prompt.txt"
+)
+CLAUDE_ABANDONED_RC=$?
+set +e
+CLAUDE_ABANDONED_END="$(python3 -I -B -c 'import time; print(time.monotonic())')"
+if [ "$CLAUDE_ABANDONED_RC" -eq 0 ] && [ ! -e "$CLAUDE_PUBLISH_SCOPE/.mutex" ] \
+    && [ "$(wc -l <"$CLAUDE_BOOT_TMP/abandoned-provider.log" | tr -d ' ')" -eq 1 ] \
+    && python3 -I -B - "$CLAUDE_ABANDONED_START" "$CLAUDE_ABANDONED_END" <<'PY'
+import sys
+elapsed=float(sys.argv[2])-float(sys.argv[1])
+assert 0.8 <= elapsed < 4.0, elapsed
+PY
+then
+  echo "  PASS  stable abandoned ownerless mutex is reclaimed only after publication grace"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  abandoned ownerless mutex recovery (rc=$CLAUDE_ABANDONED_RC elapsed=$(python3 -I -B -c "print(float('$CLAUDE_ABANDONED_END')-float('$CLAUDE_ABANDONED_START'))"))"
+  FAIL=$((FAIL + 1))
+fi
+
+set +e
+CLAUDE_RELEASE_RESULT="$({
+  cd "$CLAUDE_BOOT_TMP/repo" || exit 1
+  PATH="$CLAUDE_BOOT_TMP/bin:$PATH" CLAUDE_PROVIDER_LOG="$CLAUDE_BOOT_TMP/release-provider.log" \
+    CLAUDE_PROVIDER_MODE=marker UBERDEV_TMPDIR="$CLAUDE_BOOT_TMP/runtime-release" \
+    bash -c '
+      set +u
+      . "$1"
+      _uberdev_semaphore_mutex_release() { return 31; }
+      TIMEOUT_BIN="$2"; SOLVE_TIMEOUT=4; MODEL=sonnet
+      PERM_FLAG=( --permission-mode default ); EFFORT_FLAG=( --effort medium )
+      BG_PROMPT_MODE=file; DISPATCH_RC=0; DISPATCH_ID=""; DISPATCH_LOG=""
+      _uberdev_dispatch_claude_bg 339 medium "$3"
+      printf "rc=%s id=%s\n" "$?" "$DISPATCH_ID"
+    ' _ "$DISPATCH_LIB" "$CLAUDE_TIMEOUT_BIN" "$CLAUDE_BOOT_TMP/prompt.txt"
+} 2>&1)"
+CLAUDE_RELEASE_COMMAND_RC=$?
+set +e
+CLAUDE_RELEASE_SCOPE="$(bash -c '. "$1"; _uberdev_dispatch_git_metadata_mutex_scope "$2"' \
+  _ "$DISPATCH_LIB" "$CLAUDE_BOOT_TMP/repo")"
+set +e
+UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=1 bash -c \
+  '. "$1"; POST_IMPL_REVIEW_CAP=1; REVIEW_EXPECTED_COUNT=1; _uberdev_dispatch_git_metadata_mutex_acquire "$2" claude-bootstrap 1 && _uberdev_semaphore_mutex_release "$2"' \
+  _ "$DISPATCH_LIB" "$CLAUDE_RELEASE_SCOPE"
+CLAUDE_RELEASE_RECLAIM_RC=$?
+set +e
+if [ "$CLAUDE_RELEASE_COMMAND_RC" -eq 0 ] \
+    && [[ "$CLAUDE_RELEASE_RESULT" == *'rc=0 id=c0de335a'* ]] \
+    && grep -Fq 'release failed after claude-bootstrap (rc=31)' \
+      "$CLAUDE_BOOT_TMP/runtime-release/solve-bg-stdout-339.log" \
+    && [ "$(wc -l <"$CLAUDE_BOOT_TMP/release-provider.log" | tr -d ' ')" -eq 1 ] \
+    && [ "$CLAUDE_RELEASE_RECLAIM_RC" -eq 0 ] \
+    && [ ! -e "$CLAUDE_RELEASE_SCOPE/.mutex" ]; then
+  echo "  PASS  Claude release failure preserves the strict marker handle and dead-owner reclaim"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  Claude release-failure handle contract: result=$CLAUDE_RELEASE_RESULT reclaim=$CLAUDE_RELEASE_RECLAIM_RC"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$CLAUDE_BOOT_TMP"
+
+(
+  set +u
+  UBERDEV_TMPDIR="$(mktemp -d)"
+  CALLER_DIR="$UBERDEV_TMPDIR/caller"
+  CALL_LOG="$UBERDEV_TMPDIR/claude-calls.log"
+  MUTEX_LOG="$UBERDEV_TMPDIR/mutex-calls.log"
+  mkdir -p "$CALLER_DIR"
+  : > "$CALL_LOG"
+  : > "$MUTEX_LOG"
+  declare -a AUDIT_EVENTS=()
+  _uberdev_audit_emit() { AUDIT_EVENTS+=( "$1 $2" ); }
+  timeout() { shift; "$@"; }
+  env() { while [[ "$1" == *=* ]]; do shift; done; "$@"; }
+  claude() {
+    printf '%s\n' "$*" >> "$CALL_LOG"
+    printf 'backgrounded · c011ab1e\n'
+    return 0
+  }
+  TIMEOUT_BIN="timeout"; SOLVE_TIMEOUT=1; MODEL="sonnet"
+  PERM_FLAG=(); EFFORT_FLAG=(); BG_PROMPT_MODE="file"
+  PROMPT_FILE="$UBERDEV_TMPDIR/prompt.txt"; printf 'use caller workspace\n' > "$PROMPT_FILE"
+  UBERDEV_AGENT_WORKSPACE_MODE=caller
+  UBERDEV_AGENT_WORKSPACE_DIR="$CALLER_DIR"
+  DISPATCH_RC=0; DISPATCH_ID=""; DISPATCH_LOG=""
+  # shellcheck disable=SC1090
+  . "$DISPATCH_LIB"
+  _uberdev_dispatch_with_git_metadata_mutex() {
+    printf 'unexpected\n' >> "$MUTEX_LOG"
+    return 99
+  }
+  _uberdev_dispatch_claude_bg 335 medium "$PROMPT_FILE"
+  rc=$?
+  calls="$(cat "$CALL_LOG")"
+  if [ "$rc" -eq 0 ] && [ "$DISPATCH_ID" = c011ab1e ] \
+      && [ ! -s "$MUTEX_LOG" ] \
+      && [[ "$calls" != *--worktree* ]]; then
+    echo "  PASS  caller-mode Claude dispatch bypasses metadata mutex and provider worktree creation"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  caller-mode Claude dispatch contract (rc=$rc id=$DISPATCH_ID calls=$calls)"
+    FAIL=$((FAIL + 1))
+  fi
   rm -rf "$UBERDEV_TMPDIR"
   printf '%s %s\n' "$PASS" "$FAIL" > "$TALLY_FILE"
 ) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"

@@ -51,6 +51,28 @@ _UBERDEV_DISPATCH_LIB_DIR="$(cd "$_UBERDEV_DISPATCH_LIB_DIR" 2>/dev/null && pwd 
 . "$_UBERDEV_DISPATCH_LIB_DIR/config-read.sh" || return 1
 _UBERDEV_DISPATCH_LOADED=1
 
+# A provider-managed worktree may finish its final git worktree unlock at the
+# same time as the Codex supervisor starts cleanup. Retry only transient Git
+# metadata/probe failures (rc2); preservation decisions (rc3) are terminal.
+_UBERDEV_CODEX_CLEANUP_MAX_ATTEMPTS=3
+_UBERDEV_CODEX_CLEANUP_RETRY_DELAY_1_S=0.05
+_UBERDEV_CODEX_CLEANUP_RETRY_DELAY_2_S=0.10
+_UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT_DEFAULT_S=60
+_UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT_MAX_S=300
+_UBERDEV_GIT_METADATA_MUTEX_FAST_POLLS=8
+_UBERDEV_GIT_METADATA_MUTEX_MEDIUM_POLLS=8
+_UBERDEV_GIT_METADATA_MUTEX_STEADY_POLLS_PER_SECOND=4
+_UBERDEV_GIT_METADATA_MUTEX_FAST_DELAY_S=0.05
+_UBERDEV_GIT_METADATA_MUTEX_MEDIUM_DELAY_S=0.10
+_UBERDEV_GIT_METADATA_MUTEX_STEADY_DELAY_S=0.25
+_UBERDEV_GIT_METADATA_MUTEX_WAIT_TICKS_PER_SECOND=20
+_UBERDEV_GIT_METADATA_MUTEX_FAST_DELAY_TICKS=1
+_UBERDEV_GIT_METADATA_MUTEX_MEDIUM_DELAY_TICKS=2
+_UBERDEV_GIT_METADATA_MUTEX_STEADY_DELAY_TICKS=5
+_UBERDEV_GIT_METADATA_MUTEX_PUBLICATION_GRACE_S=1
+_UBERDEV_GIT_METADATA_MUTEX_WALL_PROBE_ALLOWANCE_S=2
+_UBERDEV_GIT_METADATA_MUTEX_OWNERLESS_CONFIRMATIONS=3
+
 _uberdev_dispatch_resolve_python() {
   local candidate='' prefix='' candidate_dir candidate_base
   if [ -n "${_UBERDEV_PYTHON_EXE:-}" ]; then
@@ -167,6 +189,229 @@ print(f"{prefix}-{hashlib.sha256(raw.encode()).hexdigest()[:12]}",end="")
 PY
 }
 
+# All worktrees of one repository share the same Git metadata directory. Git
+# protects individual files, but sibling add/remove/branch-delete sequences are
+# multi-command transactions and must not interleave. Keep one ownership-safe,
+# process-reclaimable mutex below the canonical common directory so separate
+# review runs and linked worktrees serialize the same metadata surface.
+_uberdev_dispatch_git_metadata_mutex_scope() {
+  local repo_root="$1" common_arg common_dir
+  common_arg="$(git -C "$repo_root" rev-parse --git-common-dir 2>/dev/null)" || return 2
+  common_dir="$(_uberdev_dispatch_python -I -B - "$repo_root" "$common_arg" <<'PY'
+import os,stat,sys
+repo,common=sys.argv[1:]
+candidate=common if os.path.isabs(common) else os.path.join(repo,common)
+path=os.path.realpath(candidate)
+try: entry=os.lstat(path)
+except OSError: raise SystemExit(2)
+uid_fn=getattr(os,"geteuid",None); uid=uid_fn() if uid_fn else None
+if not stat.S_ISDIR(entry.st_mode) or (uid is not None and entry.st_uid!=uid): raise SystemExit(2)
+print(path,end="")
+PY
+)" || return 2
+  _uberdev_semaphore_prepare_scope "$common_dir/.uberdev-worktree-metadata-locks" \
+    "$common_dir" git-worktree-metadata
+}
+
+_uberdev_dispatch_claude_bootstrap_queue_slots() {
+  local slots expected
+  if [ -n "${POST_IMPL_REVIEW_CAP:-}" ]; then
+    slots="$POST_IMPL_REVIEW_CAP"
+    expected="${REVIEW_EXPECTED_COUNT:-}"
+  elif [ -n "${MAX_PARALLEL_BG_AGENTS:-}" ]; then
+    slots="$MAX_PARALLEL_BG_AGENTS"
+    expected="${TOTAL_ISSUES:-}"
+  else
+    slots=1
+    expected=''
+  fi
+  case "$slots" in [1-9]|[1-4][0-9]|50) ;; *) return 2 ;; esac
+  if [ -n "$expected" ]; then
+    case "$expected" in [1-9]|[1-4][0-9]|50) ;; *) return 2 ;; esac
+    [ "$expected" -ge "$slots" ] || slots="$expected"
+  fi
+  printf '%s\n' "$slots"
+}
+
+# Claude's synchronous `--bg --worktree` bootstrap may legitimately own the
+# repository mutex for its full provider timeout. Poll it at a low frequency
+# with backoff, one ownership-safe acquisition attempt per poll. The wait
+# budget is derived from the actual enforced fanout wave, so ordinary Git
+# add/cleanup callers retain the semaphore's short default policy.
+_uberdev_dispatch_git_metadata_mutex_acquire() {
+  local scope="$1" phase="$2" operation_timeout="${3:-}" queue_slots provider_wait_seconds
+  local scheduled_wait_seconds wall_wait_seconds
+  local wait_tick_limit grace_ticks max_polls polls=0 waited_ticks=0 delay delay_ticks acquire_rc
+  local wall_started wall_elapsed
+  local observed_state observed_identity ownerless_identity='' ownerless_first_tick=0 ownerless_confirmations=0
+  local stable_ticks reclaim_rc
+  if [ "$phase" != claude-bootstrap ] || [ -z "$operation_timeout" ]; then
+    _uberdev_semaphore_mutex_acquire "$scope"
+    return $?
+  fi
+  case "$operation_timeout" in
+    [1-9]|[1-9][0-9]|[12][0-9][0-9]|300) ;;
+    *) return 2 ;;
+  esac
+  queue_slots="$(_uberdev_dispatch_claude_bootstrap_queue_slots)" || return 2
+  provider_wait_seconds=$((operation_timeout * queue_slots))
+  scheduled_wait_seconds=$((provider_wait_seconds + _UBERDEV_GIT_METADATA_MUTEX_PUBLICATION_GRACE_S))
+  wall_wait_seconds=$((scheduled_wait_seconds + _UBERDEV_GIT_METADATA_MUTEX_WALL_PROBE_ALLOWANCE_S))
+  wait_tick_limit=$((scheduled_wait_seconds * _UBERDEV_GIT_METADATA_MUTEX_WAIT_TICKS_PER_SECOND))
+  grace_ticks=$((_UBERDEV_GIT_METADATA_MUTEX_PUBLICATION_GRACE_S * _UBERDEV_GIT_METADATA_MUTEX_WAIT_TICKS_PER_SECOND))
+  max_polls=$((wait_tick_limit \
+    + _UBERDEV_GIT_METADATA_MUTEX_FAST_POLLS + _UBERDEV_GIT_METADATA_MUTEX_MEDIUM_POLLS))
+  wall_started="$SECONDS"
+  while [ "$polls" -lt "$max_polls" ]; do
+    wall_elapsed=$((SECONDS - wall_started))
+    if [ "$wall_elapsed" -gt "$wall_wait_seconds" ]; then
+      printf 'uberdev git metadata mutex: acquisition timed out for %s after %ss (queue_slots=%s)\n' \
+        "$phase" "$wall_wait_seconds" "$queue_slots" >&2
+      return 75
+    fi
+    if UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=1 UBERDEV_SEMAPHORE_MUTEX_QUIET_BUSY=1 \
+        UBERDEV_SEMAPHORE_MUTEX_PROBE_ONLY=1 \
+        _uberdev_semaphore_mutex_acquire "$scope"; then
+      return 0
+    else
+      acquire_rc=$?
+    fi
+    [ "$acquire_rc" -eq 75 ] || {
+      printf 'uberdev git metadata mutex: acquisition failed for %s (rc=%s)\n' \
+        "$phase" "$acquire_rc" >&2
+      return "$acquire_rc"
+    }
+    polls=$((polls + 1))
+    wall_elapsed=$((SECONDS - wall_started))
+    if [ "$wall_elapsed" -gt "$wall_wait_seconds" ]; then
+      printf 'uberdev git metadata mutex: acquisition timed out for %s after %ss (queue_slots=%s)\n' \
+        "$phase" "$wall_wait_seconds" "$queue_slots" >&2
+      return 75
+    fi
+    observed_state="${_UBERDEV_SEMAPHORE_MUTEX_OBSERVED_STATE:-unknown}"
+    observed_identity="${_UBERDEV_SEMAPHORE_MUTEX_OBSERVED_IDENTITY:-}"
+    case "$observed_state" in
+      ownerless)
+        [ -n "$observed_identity" ] || return 2
+        if [ "$observed_identity" = "$ownerless_identity" ]; then
+          ownerless_confirmations=$((ownerless_confirmations + 1))
+        else
+          ownerless_identity="$observed_identity"
+          ownerless_first_tick="$waited_ticks"
+          ownerless_confirmations=1
+        fi
+        stable_ticks=$((waited_ticks - ownerless_first_tick))
+        if [ "$stable_ticks" -ge "$grace_ticks" ] \
+            && [ "$ownerless_confirmations" -ge "$_UBERDEV_GIT_METADATA_MUTEX_OWNERLESS_CONFIRMATIONS" ]; then
+          if _uberdev_semaphore_mutex_reclaim_ownerless_generation "$scope" "$ownerless_identity"; then
+            ownerless_identity=''; ownerless_confirmations=0; ownerless_first_tick="$waited_ticks"
+            continue
+          else
+            reclaim_rc=$?
+          fi
+          if [ "$reclaim_rc" -eq 1 ]; then
+            ownerless_identity=''; ownerless_confirmations=0; ownerless_first_tick="$waited_ticks"
+          else
+            printf 'uberdev git metadata mutex: ownerless reclaim failed for %s (rc=%s)\n' \
+              "$phase" "$reclaim_rc" >&2
+            return "$reclaim_rc"
+          fi
+        fi
+        ;;
+      published-live|published-dead|absent)
+        ownerless_identity=''; ownerless_confirmations=0; ownerless_first_tick="$waited_ticks"
+        ;;
+      *)
+        printf 'uberdev git metadata mutex: unsafe probe state for %s (%s)\n' \
+          "$phase" "$observed_state" >&2
+        return 2
+        ;;
+    esac
+    if [ "$waited_ticks" -ge "$wait_tick_limit" ] || [ "$polls" -ge "$max_polls" ]; then
+      printf 'uberdev git metadata mutex: acquisition timed out for %s after %ss (queue_slots=%s)\n' \
+        "$phase" "$scheduled_wait_seconds" "$queue_slots" >&2
+      return 75
+    fi
+    if [ "$polls" -le "$_UBERDEV_GIT_METADATA_MUTEX_FAST_POLLS" ]; then
+      delay="$_UBERDEV_GIT_METADATA_MUTEX_FAST_DELAY_S"
+      delay_ticks="$_UBERDEV_GIT_METADATA_MUTEX_FAST_DELAY_TICKS"
+    elif [ "$polls" -le $((_UBERDEV_GIT_METADATA_MUTEX_FAST_POLLS + _UBERDEV_GIT_METADATA_MUTEX_MEDIUM_POLLS)) ]; then
+      delay="$_UBERDEV_GIT_METADATA_MUTEX_MEDIUM_DELAY_S"
+      delay_ticks="$_UBERDEV_GIT_METADATA_MUTEX_MEDIUM_DELAY_TICKS"
+    else
+      delay="$_UBERDEV_GIT_METADATA_MUTEX_STEADY_DELAY_S"
+      delay_ticks="$_UBERDEV_GIT_METADATA_MUTEX_STEADY_DELAY_TICKS"
+    fi
+    sleep "$delay" || {
+      printf 'uberdev git metadata mutex: acquisition wait interrupted for %s\n' "$phase" >&2
+      return 2
+    }
+    waited_ticks=$((waited_ticks + delay_ticks))
+  done
+  return 75
+}
+
+_uberdev_dispatch_with_git_metadata_mutex() {
+  local repo_root="$1" phase="$2" scope rc release_rc
+  local operation_timeout="${_UBERDEV_GIT_METADATA_MUTEX_OPERATION_TIMEOUT:-}"
+  shift 2
+  [ "$#" -gt 0 ] || return 2
+  case "$phase" in ''|*[!A-Za-z0-9._-]*) return 2 ;; esac
+  scope="$(_uberdev_dispatch_git_metadata_mutex_scope "$repo_root")" || return 2
+  (
+    _uberdev_dispatch_git_metadata_mutex_acquire "$scope" "$phase" "$operation_timeout" || exit $?
+    trap '_uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true' EXIT
+    "$@"
+    rc=$?
+    _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1
+    release_rc=$?
+    [ "$release_rc" -eq 0 ] || printf \
+      'uberdev git metadata mutex: release failed after %s (rc=%s); command rc=%s remains authoritative\n' \
+      "$phase" "$release_rc" "$rc" >&2
+    [ "$release_rc" -ne 0 ] || trap - EXIT
+    exit "$rc"
+  )
+}
+
+_uberdev_dispatch_git_worktree_add_locked() {
+  local repo_root="$1" target="$2" branch="$3" log_file="$4"
+  cd "$repo_root" || return 2
+  MSYS_NO_PATHCONV=1 git worktree add "$target" -b "$branch" >"$log_file" 2>&1
+}
+
+_uberdev_dispatch_git_worktree_add() {
+  local repo_root="$1"
+  _uberdev_dispatch_with_git_metadata_mutex "$repo_root" worktree-add \
+    _uberdev_dispatch_git_worktree_add_locked "$@"
+}
+
+_uberdev_dispatch_claude_bootstrap_timeout() {
+  local solve_timeout="$1" configured="${UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT:-$_UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT_DEFAULT_S}"
+  _uberdev_dispatch_python -I -B - "$solve_timeout" "$configured" \
+    "$_UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT_MAX_S" <<'PY'
+import sys
+
+solve_raw, configured_raw, maximum = sys.argv[1:]
+
+def bounded_decimal(raw):
+    if not raw or not raw.isascii() or not raw.isdecimal():
+        raise SystemExit(2)
+    value = raw.lstrip("0")
+    if not value:
+        raise SystemExit(2)
+    if len(value) > len(maximum) or (len(value) == len(maximum) and value > maximum):
+        return maximum
+    return value
+
+solve = bounded_decimal(solve_raw)
+configured = bounded_decimal(configured_raw)
+if len(configured) < len(solve) or (len(configured) == len(solve) and configured < solve):
+    print(configured)
+else:
+    print(solve)
+PY
+}
+
 # Create a private ownership receipt before `git worktree add`. Cleanup accepts
 # only the exact repo/path/branch/token tuple recorded here, preventing a stale
 # or substituted path from being removed as if it belonged to this child.
@@ -245,7 +490,7 @@ finally:
 PY
 }
 
-_uberdev_dispatch_cleanup_codex_worktree() {
+_uberdev_dispatch_cleanup_codex_worktree_locked() {
   local repo_root="$1" relative="$2" branch="$3" receipt="$4" token="$5" terminal="$6"
   local target_record target start_head
   case "$terminal" in completed|failed|timed_out|cancelled|setup_failed) ;; *) return 2 ;; esac
@@ -329,8 +574,38 @@ PY
       if printf '%s\n' "$worktree_list" | grep -Fqx "branch refs/heads/$branch"; then exit 2; fi
       git branch -D "$branch" >/dev/null || exit 2
     fi
-  ) || return 2
-  _uberdev_dispatch_discard_codex_worktree_receipt "$receipt" "$token"
+  )
+  return $?
+}
+
+_uberdev_dispatch_cleanup_codex_worktree() {
+  local repo_root="$1" receipt="$4" token="$5" scope rc release_rc attempt=1 retry_delay
+  scope="$(_uberdev_dispatch_git_metadata_mutex_scope "$repo_root")" || return 2
+  (
+    _uberdev_semaphore_mutex_acquire "$scope" || exit $?
+    trap '_uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true' EXIT
+    while :; do
+      if _uberdev_dispatch_cleanup_codex_worktree_locked "$@"; then rc=0; else rc=$?; fi
+      if [ "$rc" -ne 2 ] || [ "$attempt" -ge "$_UBERDEV_CODEX_CLEANUP_MAX_ATTEMPTS" ]; then
+        break
+      fi
+      case "$attempt" in
+        1) retry_delay="$_UBERDEV_CODEX_CLEANUP_RETRY_DELAY_1_S" ;;
+        2) retry_delay="$_UBERDEV_CODEX_CLEANUP_RETRY_DELAY_2_S" ;;
+        *) rc=2; break ;;
+      esac
+      printf 'uberdev codex cleanup: transient attempt %s/%s; retrying in %ss\n' \
+        "$attempt" "$_UBERDEV_CODEX_CLEANUP_MAX_ATTEMPTS" "$retry_delay" >&2
+      sleep "$retry_delay" || { rc=2; break; }
+      attempt=$((attempt + 1))
+    done
+    _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1
+    release_rc=$?
+    [ "$release_rc" -eq 0 ] || [ "$rc" -ne 0 ] || rc=2
+    [ "$release_rc" -ne 0 ] || trap - EXIT
+    [ "$rc" -eq 0 ] || exit "$rc"
+    _uberdev_dispatch_discard_codex_worktree_receipt "$receipt" "$token" || exit 2
+  )
 }
 
 # The dispatch_backend enum — identical to the --backend= flag's accepted set.
@@ -1343,29 +1618,32 @@ _uberdev_dispatch_claude_bg() {
       ;;
     *) return 3 ;;
   esac
-  local BG_PROMPT_MODE="${BG_PROMPT_MODE:-argv}"
+  local BG_PROMPT_MODE="${BG_PROMPT_MODE:-argv}" BG_STDIN_FILE='' PROMPT_BODY BG_BOOTSTRAP_TIMEOUT
+  if ! BG_BOOTSTRAP_TIMEOUT="$(_uberdev_dispatch_claude_bootstrap_timeout "$SOLVE_TIMEOUT")"; then
+    DISPATCH_RC=3
+    DISPATCH_LOG="$BG_STDOUT_LOG"
+    _uberdev_dispatch_audit dispatch_setup_failed \
+      "{\"issue\":$ISSUE_NUM,\"phase\":\"bootstrap_timeout\",\"backend\":\"claude-bg\",\"rc\":3}"
+    return 3
+  fi
+  local cmd=( "$TIMEOUT_BIN" "$BG_BOOTSTRAP_TIMEOUT" env )
+  [ "${#BG_TURBO_ENV[@]}" -eq 0 ] || cmd+=( "${BG_TURBO_ENV[@]}" )
+  cmd+=( claude --bg )
   case "$BG_PROMPT_MODE" in
     file)
       # Trusted path arg; file contents never reach the shell as argv.
-      ( cd "$BG_EXECUTION_DIR" && \
-        "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" env "${BG_TURBO_ENV[@]}" claude --bg \
-          --prompt-file "$PROMPT_FILE" \
-          "${BG_WORKTREE_ARGS[@]}" \
-          --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" ) > "$BG_STDOUT_LOG" 2>&1
-      DISPATCH_RC=$?
+      cmd+=( --prompt-file "$PROMPT_FILE" )
+      [ "${#BG_WORKTREE_ARGS[@]}" -eq 0 ] || cmd+=( "${BG_WORKTREE_ARGS[@]}" )
+      cmd+=( --model "$MODEL" )
       ;;
     stdin)
       # File content streamed on FD 0; no argv quoting concern.
-      ( cd "$BG_EXECUTION_DIR" && \
-        "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" env "${BG_TURBO_ENV[@]}" claude --bg \
-          "${BG_WORKTREE_ARGS[@]}" \
-          --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" \
-          < "$PROMPT_FILE" ) > "$BG_STDOUT_LOG" 2>&1
-      DISPATCH_RC=$?
+      [ "${#BG_WORKTREE_ARGS[@]}" -eq 0 ] || cmd+=( "${BG_WORKTREE_ARGS[@]}" )
+      cmd+=( --model "$MODEL" )
+      BG_STDIN_FILE="$PROMPT_FILE"
       ;;
     argv)
       # Bash array form (spec-reviewer finding 1) — single argv slot, no eval.
-      local PROMPT_BODY
       # B5 fix (prompt-read), mirrored from the `background` backend: an
       # unreadable $PROMPT_FILE would otherwise leave PROMPT_BODY="" and
       # dispatch `claude --bg … -- ""` (garbage agent), with the audit event
@@ -1378,11 +1656,8 @@ _uberdev_dispatch_claude_bg() {
           "{\"issue\":$ISSUE_NUM,\"phase\":\"prompt_read\",\"backend\":\"claude-bg\",\"rc\":1}"
         return 1
       fi
-      local cmd=( "$TIMEOUT_BIN" "$SOLVE_TIMEOUT" env "${BG_TURBO_ENV[@]}" claude --bg
-            "${BG_WORKTREE_ARGS[@]}" --model "$MODEL" )
-      cmd+=( "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" -- "$PROMPT_BODY" )
-      ( cd "$BG_EXECUTION_DIR" && "${cmd[@]}" ) > "$BG_STDOUT_LOG" 2>&1
-      DISPATCH_RC=$?
+      [ "${#BG_WORKTREE_ARGS[@]}" -eq 0 ] || cmd+=( "${BG_WORKTREE_ARGS[@]}" )
+      cmd+=( --model "$MODEL" )
       ;;
     *)
       # Defensive default arm (silent-failure-hunter finding B2) — rc=127
@@ -1391,6 +1666,25 @@ _uberdev_dispatch_claude_bg() {
       DISPATCH_RC=127
       ;;
   esac
+  if [ "$DISPATCH_RC" -eq 0 ]; then
+    [ "${#PERM_FLAG[@]}" -eq 0 ] || cmd+=( "${PERM_FLAG[@]}" )
+    [ "${#EFFORT_FLAG[@]}" -eq 0 ] || cmd+=( "${EFFORT_FLAG[@]}" )
+    [ "$BG_PROMPT_MODE" != argv ] || cmd+=( -- "$PROMPT_BODY" )
+    # Claude owns its --worktree semantics (hooks, base ref, session cleanup).
+    # Serialize only the synchronous bootstrap that creates and locks the
+    # worktree. The mutex is released before handle parsing and detached work.
+    (
+      cd "$BG_EXECUTION_DIR" || exit 3
+      if [ -n "$BG_STDIN_FILE" ]; then exec < "$BG_STDIN_FILE" || exit 1; fi
+      if [ "$BG_WORKSPACE_MODE" = isolated ]; then
+        _UBERDEV_GIT_METADATA_MUTEX_OPERATION_TIMEOUT="$BG_BOOTSTRAP_TIMEOUT" \
+          _uberdev_dispatch_with_git_metadata_mutex "$BG_EXECUTION_DIR" claude-bootstrap "${cmd[@]}"
+      else
+        "${cmd[@]}"
+      fi
+    ) > "$BG_STDOUT_LOG" 2>&1
+    DISPATCH_RC=$?
+  fi
   if [[ "$DISPATCH_RC" -eq 0 ]]; then
     # Combined #143 (ANSI-strip + line-anchor + hex-validate) + #154 (capture
     # grep's OWN rc to tell a retryable pipeline error from non-retryable marker
@@ -1448,11 +1742,20 @@ _uberdev_dispatch_background() {
   local ISSUE_NUM="$1" TIER="$2" PROMPT_FILE="$3"
   DISPATCH_RC=0
   DISPATCH_ID=""
-  local WORKTREE_DIR=".claude/worktrees/solve-issue-$ISSUE_NUM"
+  local WORKTREE_RELATIVE=".claude/worktrees/solve-issue-$ISSUE_NUM"
   local WORKTREE_BRANCH="worktree-solve-issue-$ISSUE_NUM"
   local LOG_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM.log"
   local STATUS_FILE="${UBERDEV_AGENT_STATUS_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-bg-status-$ISSUE_NUM.json}"
   local RESULT_FILE="${UBERDEV_AGENT_RESULT_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-bg-result-$ISSUE_NUM.md}"
+  local REPOSITORY_ROOT WORKTREE_DIR
+  REPOSITORY_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+    DISPATCH_RC=1
+    _uberdev_dispatch_audit dispatch_setup_failed \
+      "{\"issue\":$ISSUE_NUM,\"phase\":\"repository\",\"backend\":\"background\",\"rc\":1}"
+    return 1
+  }
+  REPOSITORY_ROOT="$(cd "$REPOSITORY_ROOT" 2>/dev/null && pwd -P)" || { DISPATCH_RC=1; return 1; }
+  WORKTREE_DIR="$REPOSITORY_ROOT/$WORKTREE_RELATIVE"
   # TOCTOU hardening (#155): guard + 0600-create the predictable log + pid
   # paths before any redirect writes to them (world-writable $UBERDEV_TMPDIR).
   if ! _uberdev_dispatch_prepare_tmp_target "$LOG_FILE" "$ISSUE_NUM" "background"; then
@@ -1470,7 +1773,8 @@ _uberdev_dispatch_background() {
   # Explicit dispatcher-controlled worktree — sidesteps the Windows
   # worktree-isolation bug #40164 in the --bg backend's own --worktree path
   # handling. MSYS_NO_PATHCONV stops Git Bash rewriting the POSIX path.
-  if ! MSYS_NO_PATHCONV=1 git worktree add "$WORKTREE_DIR" -b "$WORKTREE_BRANCH" >"$LOG_FILE" 2>&1; then
+  if ! _uberdev_dispatch_git_worktree_add \
+      "$REPOSITORY_ROOT" "$WORKTREE_DIR" "$WORKTREE_BRANCH" "$LOG_FILE"; then
     DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
     _uberdev_dispatch_audit dispatch_setup_failed \
@@ -1497,8 +1801,11 @@ _uberdev_dispatch_background() {
   # maintaining the canonical running/terminal status consumed by lifecycle
   # reconciliation. DISPATCH_ID is the wrapper PID, so kill -0 and status
   # describe the same lifetime.
-  local PROVIDER_CMD=( env "${BG_TURBO_ENV[@]}" claude -p "$PROMPT_BODY"
-    --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" )
+  local PROVIDER_CMD=( env )
+  [ "${#BG_TURBO_ENV[@]}" -eq 0 ] || PROVIDER_CMD+=( "${BG_TURBO_ENV[@]}" )
+  PROVIDER_CMD+=( claude -p "$PROMPT_BODY" --model "$MODEL" )
+  [ "${#PERM_FLAG[@]}" -eq 0 ] || PROVIDER_CMD+=( "${PERM_FLAG[@]}" )
+  [ "${#EFFORT_FLAG[@]}" -eq 0 ] || PROVIDER_CMD+=( "${EFFORT_FLAG[@]}" )
   _uberdev_dispatch_resolve_python || { DISPATCH_RC=1; DISPATCH_LOG="$LOG_FILE"; return 1; }
   local PYTHON_LAUNCH=( "$_UBERDEV_PYTHON_EXE" )
   [ -z "$_UBERDEV_PYTHON_PREFIX" ] || PYTHON_LAUNCH+=( "$_UBERDEV_PYTHON_PREFIX" )
@@ -1694,7 +2001,7 @@ _uberdev_dispatch_codex() {
   local ROUTE_SERVICE_TIER="${UBERDEV_AGENT_SERVICE_TIER:-default}"
   local ROUTE_SANDBOX="${UBERDEV_AGENT_SANDBOX:-workspace-write}"
   local EFFECTIVE_POLICY="${UBERDEV_AGENT_EFFECTIVE_POLICY:-${UBERDEV_AGENT_ROUTING_MODE:-adaptive}}"
-  local REPOSITORY_ROOT WORKTREE_RECEIPT WORKTREE_TOKEN='' ABORT_PID ABORT_CANDIDATE
+  local REPOSITORY_ROOT WORKTREE_RECEIPT WORKTREE_TOKEN='' ABORT_PID ABORT_CANDIDATE WORKTREE_ADD_RC=0
   local CHILD_OWNED="${UBERDEV_AGENT_CHILD_OWNED:-0}"
   REPOSITORY_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)" || { DISPATCH_RC=1; return 1; }
   WORKTREE_DIR="$REPOSITORY_ROOT/$WORKTREE_RELATIVE"
@@ -1740,7 +2047,11 @@ _uberdev_dispatch_codex() {
   # Explicit dispatcher-controlled worktree (same rationale as the background
   # arm — sidesteps backend-specific worktree handling; MSYS_NO_PATHCONV for
   # Git Bash on Windows).
-  if [ "$WORKSPACE_MODE" = isolated ] && ! MSYS_NO_PATHCONV=1 git worktree add "$WORKTREE_DIR" -b "$WORKTREE_BRANCH" >"$LOG_FILE" 2>&1; then
+  if [ "$WORKSPACE_MODE" = isolated ]; then
+    _uberdev_dispatch_git_worktree_add "$REPOSITORY_ROOT" "$WORKTREE_DIR" "$WORKTREE_BRANCH" "$LOG_FILE" \
+      || WORKTREE_ADD_RC=$?
+  fi
+  if [ "$WORKTREE_ADD_RC" -ne 0 ]; then
     if [ "$CHILD_OWNED" = "1" ] && ! _uberdev_dispatch_report_codex_setup_cleanup_failure "$ISSUE_NUM" setup_failed \
         "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" "$LOG_FILE"; then
       DISPATCH_RC=74
@@ -2063,10 +2374,19 @@ _uberdev_dispatch_wezterm() {
   # and the spawn below). That flag — not any env-var pin — is the actual
   # mechanism that keeps fan-out on one mux. No socket-env-var export is
   # used or needed; the domain flag fully determines the target mux.
-  local WORKTREE_DIR=".claude/worktrees/solve-issue-$ISSUE_NUM"
+  local WORKTREE_RELATIVE=".claude/worktrees/solve-issue-$ISSUE_NUM"
   local WORKTREE_BRANCH="worktree-solve-issue-$ISSUE_NUM"
   local LOG_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM.log"
   local STATUS_FILE="${UBERDEV_AGENT_STATUS_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-bg-status-$ISSUE_NUM.json}"
+  local REPOSITORY_ROOT WORKTREE_DIR
+  REPOSITORY_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+    DISPATCH_RC=1
+    _uberdev_dispatch_audit dispatch_setup_failed \
+      '{"issue":'"$ISSUE_NUM"',"phase":"repository","backend":"wezterm","rc":1}'
+    return 1
+  }
+  REPOSITORY_ROOT="$(cd "$REPOSITORY_ROOT" 2>/dev/null && pwd -P)" || { DISPATCH_RC=1; return 1; }
+  WORKTREE_DIR="$REPOSITORY_ROOT/$WORKTREE_RELATIVE"
   # TOCTOU hardening (#155): guard + 0600-create the predictable log path
   # before the worktree-add redirect below — the wezterm backend writes the
   # SAME world-writable path the claude-bg / background backends harden, so it
@@ -2080,7 +2400,8 @@ _uberdev_dispatch_wezterm() {
   # The backend runs its own worktree add — a pane's `claude -p` does not get
   # native --worktree. Absolute path, quoted (repo path may contain spaces).
   # MSYS_NO_PATHCONV stops Git Bash rewriting the path.
-  if ! MSYS_NO_PATHCONV=1 git worktree add "$WORKTREE_DIR" -b "$WORKTREE_BRANCH" >"$LOG_FILE" 2>&1; then
+  if ! _uberdev_dispatch_git_worktree_add \
+      "$REPOSITORY_ROOT" "$WORKTREE_DIR" "$WORKTREE_BRANCH" "$LOG_FILE"; then
     DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
     _uberdev_dispatch_audit dispatch_setup_failed \
@@ -2088,7 +2409,7 @@ _uberdev_dispatch_wezterm() {
     return 1
   fi
   local WORKTREE_ABS WORKTREE_NATIVE STATUS_FILE_NATIVE
-  WORKTREE_ABS="$(cd "$WORKTREE_DIR" && pwd -P)"
+  WORKTREE_ABS="$(cd "$WORKTREE_DIR" && pwd -P)" || { DISPATCH_RC=1; return 1; }
   if ! WORKTREE_NATIVE="$(_uberdev_dispatch_native_cli_path "$WORKTREE_ABS")" \
       || ! STATUS_FILE_NATIVE="$(_uberdev_dispatch_native_cli_path "$STATUS_FILE")"; then
     DISPATCH_RC=1
@@ -2129,7 +2450,9 @@ _uberdev_dispatch_wezterm() {
   # to stdout — the partial string was then treated as a valid pane id. AND-
   # gating SPAWN_RC=0 with the non-empty check covers both failure shapes.
   local SPAWN_RC
-  local PROVIDER_CMD=( claude -p "$PROMPT_BODY" --model "$MODEL" "${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}" )
+  local PROVIDER_CMD=( claude -p "$PROMPT_BODY" --model "$MODEL" )
+  [ "${#PERM_FLAG[@]}" -eq 0 ] || PROVIDER_CMD+=( "${PERM_FLAG[@]}" )
+  [ "${#EFFORT_FLAG[@]}" -eq 0 ] || PROVIDER_CMD+=( "${EFFORT_FLAG[@]}" )
   DISPATCH_ID="$(MSYS2_ARG_CONV_EXCL='*' wezterm cli spawn \
     --domain-name uberdev --cwd "$WORKTREE_NATIVE" -- \
     bash -c '

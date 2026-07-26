@@ -340,6 +340,9 @@ _uberdev_semaphore_mutex_reclaim_dead() {
   local scope mutex allow_reclaim owner owner_identity observed identity current_identity probe_rc
   scope="$1"
   allow_reclaim="${2:-0}"
+  case "$allow_reclaim" in 0|1|published) ;; *) return 2 ;; esac
+  _UBERDEV_SEMAPHORE_MUTEX_OBSERVED_STATE='absent'
+  _UBERDEV_SEMAPHORE_MUTEX_OBSERVED_IDENTITY=''
   mutex="$scope/.mutex"
   [ -e "$mutex" ] || [ -L "$mutex" ] || return 1
   if [ -L "$mutex" ]; then
@@ -353,14 +356,20 @@ _uberdev_semaphore_mutex_reclaim_dead() {
     return 2
   fi
   identity="$(_uberdev_semaphore_path_identity "$mutex")" || return 1
+  _UBERDEV_SEMAPHORE_MUTEX_OBSERVED_IDENTITY="$identity"
   [ ! -L "$mutex/owner_pid" ] || {
     _uberdev_semaphore_error 'unsafe mutex owner path'
     return 2
   }
   if [ ! -e "$mutex/owner_pid" ]; then
-    [ "$allow_reclaim" -eq 1 ] || return 1
-    _uberdev_semaphore_quarantine_mutex "$scope" "$identity"
-    return $?
+    _UBERDEV_SEMAPHORE_MUTEX_OBSERVED_STATE='ownerless'
+    [ "$allow_reclaim" = 1 ] || return 1
+    if _uberdev_semaphore_quarantine_mutex "$scope" "$identity"; then
+      _UBERDEV_SEMAPHORE_MUTEX_OBSERVED_STATE='reclaimed-ownerless'
+      return 0
+    else
+      return $?
+    fi
   fi
   if [ ! -f "$mutex/owner_pid" ]; then
     # A legitimate holder may atomically quarantine this mutex while a new
@@ -378,9 +387,14 @@ _uberdev_semaphore_mutex_reclaim_dead() {
   owner="$(sed -n '1p' "$mutex/owner_pid" 2>/dev/null || true)"
   owner_identity="$(sed -n '2p' "$mutex/owner_pid" 2>/dev/null || true)"
   if ! _uberdev_semaphore_is_positive_integer "$owner"; then
-    [ "$allow_reclaim" -eq 1 ] || return 1
-    _uberdev_semaphore_quarantine_mutex "$scope" "$identity"
-    return $?
+    _UBERDEV_SEMAPHORE_MUTEX_OBSERVED_STATE='invalid-owner'
+    [ "$allow_reclaim" = 1 ] || return 1
+    if _uberdev_semaphore_quarantine_mutex "$scope" "$identity"; then
+      _UBERDEV_SEMAPHORE_MUTEX_OBSERVED_STATE='reclaimed-invalid-owner'
+      return 0
+    else
+      return $?
+    fi
   fi
   if [ -z "$(sed -n '3p' "$mutex/owner_pid" 2>/dev/null || true)" ] \
       && printf '%s\n' "$owner_identity" | grep -Eq '^[0-9a-f]{32}$'; then
@@ -388,15 +402,20 @@ _uberdev_semaphore_mutex_reclaim_dead() {
   fi
   if [ -n "$owner_identity" ]; then
     if _uberdev_semaphore_process_identity_matches "$owner" "$owner_identity"; then
+      _UBERDEV_SEMAPHORE_MUTEX_OBSERVED_STATE='published-live'
       return 1
     else
       probe_rc=$?
       [ "$probe_rc" -ne 2 ] || return 2
     fi
   else
-    _uberdev_semaphore_pid_live "$owner" && return 1
+    if _uberdev_semaphore_pid_live "$owner"; then
+      _UBERDEV_SEMAPHORE_MUTEX_OBSERVED_STATE='published-live'
+      return 1
+    fi
   fi
-  [ "$allow_reclaim" -eq 1 ] || return 1
+  _UBERDEV_SEMAPHORE_MUTEX_OBSERVED_STATE='published-dead'
+  [ "$allow_reclaim" = 1 ] || [ "$allow_reclaim" = published ] || return 1
 
   # Re-read before removal so a changed owner is never reclaimed.
   observed="$(cat "$mutex/owner_pid" 2>/dev/null || true)"
@@ -404,7 +423,31 @@ _uberdev_semaphore_mutex_reclaim_dead() {
   if [ -n "$owner_identity" ]; then
     [ "$(printf '%s\n' "$observed" | sed -n '2p')" = "$owner_identity" ] || return 1
   fi
-  _uberdev_semaphore_quarantine_mutex "$scope" "$identity"
+  if _uberdev_semaphore_quarantine_mutex "$scope" "$identity"; then
+    _UBERDEV_SEMAPHORE_MUTEX_OBSERVED_STATE='reclaimed-published-dead'
+    return 0
+  else
+    return $?
+  fi
+}
+
+_uberdev_semaphore_mutex_reclaim_ownerless_generation() {
+  local scope="$1" expected_identity="$2" mutex identity
+  mutex="$scope/.mutex"
+  [ -n "$expected_identity" ] || return 2
+  [ ! -L "$mutex" ] || return 2
+  [ -d "$mutex" ] || { [ ! -e "$mutex" ] && return 1; return 2; }
+  identity="$(_uberdev_semaphore_path_identity "$mutex")" || {
+    # The observed ownerless generation may have been released or reclaimed
+    # after the directory check. Treat confirmed absence as ordinary turnover;
+    # a path that still exists but cannot be identified remains fail-closed.
+    [ ! -e "$mutex" ] && [ ! -L "$mutex" ] && return 1
+    return 2
+  }
+  [ "$identity" = "$expected_identity" ] || return 1
+  [ ! -L "$mutex/owner_pid" ] || return 2
+  [ ! -e "$mutex/owner_pid" ] || return 1
+  _uberdev_semaphore_quarantine_mutex "$scope" "$expected_identity"
 }
 
 _uberdev_semaphore_mutex_acquire() {
@@ -412,6 +455,8 @@ _uberdev_semaphore_mutex_acquire() {
   local identity current_identity observed_token
   scope="$1"
   mutex="$scope/.mutex"
+  _UBERDEV_SEMAPHORE_MUTEX_OBSERVED_STATE='unknown'
+  _UBERDEV_SEMAPHORE_MUTEX_OBSERVED_IDENTITY=''
   maximum="${UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES:-500}"
   _uberdev_semaphore_is_positive_integer "$maximum" || maximum=500
   tries=0
@@ -502,7 +547,11 @@ _uberdev_semaphore_mutex_acquire() {
     fi
     tries=$((tries + 1))
     if [ "$tries" -ge "$maximum" ]; then
-      _uberdev_semaphore_mutex_reclaim_dead "$scope" 1
+      if [ "${UBERDEV_SEMAPHORE_MUTEX_PROBE_ONLY:-0}" = 1 ]; then
+        _uberdev_semaphore_mutex_reclaim_dead "$scope" published
+      else
+        _uberdev_semaphore_mutex_reclaim_dead "$scope" 1
+      fi
       reclaim_rc=$?
       [ "$reclaim_rc" -ne 2 ] || return 2
       if [ "$reclaim_rc" -eq 0 ]; then
@@ -512,7 +561,8 @@ _uberdev_semaphore_mutex_acquire() {
     fi
     [ "$tries" -ge "$maximum" ] || sleep 0.01
   done
-  _uberdev_semaphore_error 'mutex retry limit exceeded'
+  [ "${UBERDEV_SEMAPHORE_MUTEX_QUIET_BUSY:-0}" = 1 ] || \
+    _uberdev_semaphore_error 'mutex retry limit exceeded'
   return 75
 }
 

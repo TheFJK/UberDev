@@ -505,7 +505,8 @@ grep -q '"event":"timed_out".*"run_id":"timeout-0003"' "$TMP/run/.agent-state-$(
 BG_OUT="$(make_context "$TMP/background-timeout-run" inherit root-background-timeout background)"
 BG_CTX="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["context_file"])' "$BG_OUT")"
 BG_SHA="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["context_sha256"])' "$BG_OUT")"
-mkdir -p "$TMP/background-timeout-run/inputs" "$TMP/background-timeout-bin" "$TMP/background-timeout-repo"
+mkdir -p "$TMP/background-timeout-run/inputs" "$TMP/background-timeout-bin" \
+  "$TMP/background-timeout-repo/.git"
 printf 'background timeout input\n' >"$TMP/background-timeout-run/inputs/task.md"
 python3 - "$TMP/background-timeout-handoff.json" "$BG_CTX" "$BG_SHA" "$TMP/background-timeout-run/inputs/task.md" <<'PY'
 import json,sys
@@ -514,6 +515,11 @@ json.dump({'schema_version':1,'carrier':{'schema_version':1,'run_id':'root-backg
 PY
 cat >"$TMP/background-timeout-bin/git" <<'SH'
 #!/usr/bin/env bash
+if [ "$1" = rev-parse ] && [ "$2" = --show-toplevel ]; then pwd -P; exit 0; fi
+if [ "$1" = -C ] && [ "$3" = rev-parse ] && [ "$4" = --git-common-dir ]; then
+  printf '.git\n'
+  exit 0
+fi
 if [ "$1" = worktree ] && [ "$2" = add ]; then mkdir -p "$3"; exit 0; fi
 exit 1
 SH
@@ -554,7 +560,7 @@ grep -q '"event":"timed_out".*"run_id":"background-timeout-0004"' "$TMP/backgrou
 WEZ_OUT="$(make_context "$TMP/wez-run" inherit root-wezterm wezterm)"
 WEZ_CTX="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["context_file"])' "$WEZ_OUT")"
 WEZ_SHA="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["context_sha256"])' "$WEZ_OUT")"
-mkdir -p "$TMP/wez-run/inputs" "$TMP/wez-bin" "$TMP/wez-home" "$TMP/wez-repo"
+mkdir -p "$TMP/wez-run/inputs" "$TMP/wez-bin" "$TMP/wez-home" "$TMP/wez-repo/.git"
 printf wez >"$TMP/wez-run/inputs/task.md"
 python3 - "$TMP/wez-handoff.json" "$WEZ_CTX" "$WEZ_SHA" "$TMP/wez-run/inputs/task.md" <<'PY'
 import json,sys
@@ -563,6 +569,11 @@ json.dump({'schema_version':1,'carrier':{'schema_version':1,'run_id':'root-wezte
 PY
 cat >"$TMP/wez-bin/git" <<'SH'
 #!/usr/bin/env bash
+if [ "$1" = rev-parse ] && [ "$2" = --show-toplevel ]; then pwd -P; exit 0; fi
+if [ "$1" = -C ] && [ "$3" = rev-parse ] && [ "$4" = --git-common-dir ]; then
+  printf '.git\n'
+  exit 0
+fi
 if [ "$1 $2" = 'worktree add' ]; then mkdir -p "$3"; exit 0; fi
 exit 2
 SH
