@@ -1883,7 +1883,10 @@ for index,module_path in enumerate(sys.argv[1:3]):
             os.replace(replacement,path)
         except PermissionError:
             if os.name=="nt":
-                return descriptor
+                os.close(descriptor)
+                os.replace(replacement,path)
+                replacement_completed[0]=True
+                return original_open(path,flags,mode)
             os.close(descriptor)
             raise
         replacement_completed[0]=True
@@ -2010,6 +2013,38 @@ for index,module_path in enumerate(sys.argv[1:3]):
     if reserved_target.read_bytes()!=b"unrelated replacement\n":
         failures.append("unrelated deterministic replacement was modified")
 
+    close_target=root/"primary-plus-close-failure"
+    original_publication_open=module._open_publication_attempt
+    publication_descriptor=[None]
+    real_close=module.os.close
+    def capture_publication_descriptor(requested_path,digest):
+        candidate,descriptor=original_publication_open(requested_path,digest)
+        publication_descriptor[0]=descriptor
+        return candidate,descriptor
+    def fail_publication_close(descriptor):
+        if descriptor==publication_descriptor[0]:
+            raise OSError("deterministic publication close failure")
+        return real_close(descriptor)
+    primary_failure=module.ManifestRuntimeError("primary_publication_failure")
+    caught_failure=None
+    cleanup_diagnostic=None
+    try:
+        try:
+            with mock.patch.object(module,"_open_publication_attempt",capture_publication_descriptor), \
+                 mock.patch.object(module.os,"write",side_effect=primary_failure), \
+                 mock.patch.object(module.os,"close",fail_publication_close):
+                module.secure_publish_captured(str(close_target),b"failed publication\n")
+        except module.ManifestRuntimeError as error:
+            caught_failure=error
+            cleanup_diagnostic=module._cleanup_diagnostic(error)
+    finally:
+        if publication_descriptor[0] is not None:
+            real_close(publication_descriptor[0])
+    if caught_failure is not primary_failure:
+        failures.append("publication close failure masked the primary failure")
+    if cleanup_diagnostic!={"code":"artifact_snapshot_close_failed"}:
+        failures.append("publication close failure diagnostic was discarded")
+
     short_target=root/"short-write"
     real_unlink=module.os.unlink
     def windows_read_only_unlink_failure(path):
@@ -2029,8 +2064,10 @@ for index,module_path in enumerate(sys.argv[1:3]):
         short_retry_path=short_retry[0] if len(short_retry)==3 else str(short_target)
         if pathlib.Path(short_retry_path)==short_target:
             failures.append("short-write retry reused the failed pathname")
-    except (module.ManifestRejected,module.ManifestRuntimeError):
-        failures.append("short-write retry remained wedged")
+    except (module.ManifestRejected,module.ManifestRuntimeError) as error:
+        failures.append(
+            f"short-write retry remained wedged ({type(error).__name__}: {error})"
+        )
 
     fsync_target=root/"fsync-failure"
     with mock.patch.object(module.os,"fsync",side_effect=OSError("deterministic fsync failure")), \
@@ -2047,8 +2084,10 @@ for index,module_path in enumerate(sys.argv[1:3]):
         fsync_retry_path=fsync_retry[0] if len(fsync_retry)==3 else str(fsync_target)
         if pathlib.Path(fsync_retry_path)==fsync_target:
             failures.append("fsync retry reused the failed pathname")
-    except (module.ManifestRejected,module.ManifestRuntimeError):
-        failures.append("fsync retry remained wedged")
+    except (module.ManifestRejected,module.ManifestRuntimeError) as error:
+        failures.append(
+            f"fsync retry remained wedged ({type(error).__name__}: {error})"
+        )
 
     for failed in list(root.glob("short-write.attempt-*"))+list(root.glob("fsync-failure.attempt-*")):
         successful_retries={pathlib.Path(path) for path in (short_retry_path,fsync_retry_path) if path}

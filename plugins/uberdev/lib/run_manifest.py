@@ -231,7 +231,9 @@ class ManifestRuntimeError(RuntimeError):
 
 
 _CLEANUP_DIAGNOSTIC_ATTRIBUTE = "_uberdev_manifest_cleanup_code"
-_CLEANUP_DIAGNOSTIC_CODES = frozenset({"windows_handle_close_failed"})
+_CLEANUP_DIAGNOSTIC_CODES = frozenset(
+    {"artifact_snapshot_close_failed", "windows_handle_close_failed"}
+)
 
 
 def _record_cleanup_diagnostic(primary: BaseException, code: str) -> None:
@@ -1613,6 +1615,10 @@ def secure_publish_captured(
                 if failure is None:
                     failure = ManifestRuntimeError("artifact_snapshot_close_failed")
                     failure.__cause__ = exc
+                else:
+                    _record_cleanup_diagnostic(
+                        failure, "artifact_snapshot_close_failed"
+                    )
     if failure is not None:
         raise failure
     if candidate is None or published_identity is None:
