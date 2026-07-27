@@ -330,7 +330,9 @@ assert mutex_acquire.index('_uberdev_semaphore_capture_mutex_owner "$candidate"'
 assert '_uberdev_semaphore_write_process_identity "$owner_mode" "$probe"' in semaphore_source
 assert 'if [ -n "$output_variable" ]; then owner_mode=direct; else owner_mode=parent; fi' in semaphore_source
 assert '_uberdev_semaphore_write_process_identity parent "$probe"' in agent_source
-assert 'open(destination, "w", encoding="ascii", newline="\\n")' in source
+assert '_secure_open_regular(destination, os.O_WRONLY, 0o600)' in source
+assert 'open(destination, "w", encoding="ascii", newline="\\n")' not in source
+assert 'owner_pid = _native_parent_pid(owner_pid)' in source
 assert 'if os.name == "nt":\n        owner_depth += 1' in source
 spec=importlib.util.spec_from_file_location('run_manifest_owner_depth_model',tool)
 module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module
@@ -340,18 +342,16 @@ with tempfile.TemporaryDirectory() as temporary:
  root=pathlib.Path(temporary)
  original_os_name=module.os.name
  try:
+  for name in ('posix-direct','posix-parent','windows-direct','windows-parent'):
+   (root/name).touch(mode=0o600)
   module.os.name='posix'
   module.os.getppid=lambda: 41
-  module._native_process_record=lambda pid: {41:(73,41,41,'bash'),73:(1,73,73,'outer')}[pid]
+  module._native_parent_pid=lambda pid: {41:73,73:1}[pid]
   module._write_process_identity('direct',str(root/'posix-direct'))
   module._write_process_identity('parent',str(root/'posix-parent'))
   module.os.name='nt'
   module.os.getppid=lambda: 51
-  module._native_process_record=lambda pid: {
-   51:(61,51,51,'msys-stub'),
-   61:(71,61,61,'bash'),
-   71:(1,71,71,'outer'),
-  }[pid]
+  module._native_parent_pid=lambda pid: {51:61,61:71,71:1}[pid]
   module._write_process_identity('direct',str(root/'windows-direct'))
   module._write_process_identity('parent',str(root/'windows-parent'))
  finally:
@@ -363,18 +363,20 @@ with tempfile.TemporaryDirectory() as temporary:
  original_os_name=module.os.name
  try:
   module.os.name='posix'
-  with mock.patch('builtins.open',mock.mock_open()) as opened:
+  candidate=root/'secure-open-contract'
+  candidate.touch(mode=0o600)
+  with mock.patch.object(module,'_secure_open_regular',wraps=module._secure_open_regular) as opened:
    module.os.getppid=lambda: 41
-   module._write_process_identity('direct',str(root/'mock-open-contract'))
+   module._write_process_identity('direct',str(candidate))
  finally:
   module.os.name=original_os_name
- opened.assert_called_once_with(str(root/'mock-open-contract'),'w',encoding='ascii',newline='\n')
+ opened.assert_called_once_with(str(candidate),module.os.O_WRONLY,0o600)
  module.os.getppid=lambda: 51
- module._native_process_record=lambda _pid: (_ for _ in ()).throw(ProcessLookupError())
+ module._native_parent_pid=lambda _pid: (_ for _ in ()).throw(ProcessLookupError())
  try: module._write_process_identity('parent',str(root/'absent-parent'))
  except module.ManifestRuntimeError as error: assert str(error)=='process_identity_parent_absent'
  else: raise AssertionError('absent parent did not fail closed')
- module._native_process_record=lambda _pid: (_ for _ in ()).throw(OSError())
+ module._native_parent_pid=lambda _pid: (_ for _ in ()).throw(OSError())
  try: module._write_process_identity('parent',str(root/'unavailable-parent'))
  except module.ManifestRuntimeError as error: assert str(error)=='process_identity_parent_unavailable'
  else: raise AssertionError('unavailable parent did not fail closed')

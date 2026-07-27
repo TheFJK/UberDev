@@ -381,7 +381,7 @@ Personal brand. Marketplace and repo are `UberDev`; the plugin inside is `uberde
 <details>
 <summary><strong>Will <code>/solve</code> work outside macOS?</strong></summary>
 
-Yes — `/solve` and `/turbo` now dispatch via `claude --bg` (Agent View), which is platform-agnostic. Monitor running sessions with `claude agents`. Requires Claude Code >= 2.1.139.
+Yes — `/solve` and `/turbo` support Linux, macOS, and native Windows. Process-identity reconciliation is supported on Linux, macOS, and native Windows; other kernels fail closed instead of using a degraded PID fingerprint. Monitor `claude --bg` sessions with `claude agents`. Requires Claude Code >= 2.1.139.
 
 </details>
 

@@ -85,7 +85,7 @@ else
   fail "Linux process identity error classification" "$LINUX_IDENTITY_CLASSIFICATION"
 fi
 
-WINDOWS_LIVE_SNAPSHOT_MISS="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
+WINDOWS_PARENT_PROBE_SPLIT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
 import importlib.util
 import sys
 
@@ -100,12 +100,18 @@ class Function:
 
 class Kernel32:
     def __init__(self):
+        self.next_handle = 72
+        self.open_handles = set()
         self.closed = []
-        self.parent_observed_open = False
-        self.OpenProcess = Function(lambda _access, _inherit, _pid: 73)
+        self.OpenProcess = Function(self.open_process)
         self.GetExitCodeProcess = Function(self.get_exit_code)
         self.GetProcessTimes = Function(self.get_process_times)
         self.CloseHandle = Function(self.close_handle)
+
+    def open_process(self, _access, _inherit, _pid):
+        self.next_handle += 1
+        self.open_handles.add(self.next_handle)
+        return self.next_handle
 
     @staticmethod
     def get_exit_code(_handle, exit_code):
@@ -119,38 +125,179 @@ class Kernel32:
         return 1
 
     def close_handle(self, handle):
+        assert handle in self.open_handles, handle
+        self.open_handles.remove(handle)
         self.closed.append(handle)
         return 1
 
 
 for index, module_path in enumerate(sys.argv[1:]):
-    spec = importlib.util.spec_from_file_location(f"run_manifest_windows_identity_{index}", module_path)
+    spec = importlib.util.spec_from_file_location(f"run_manifest_windows_parent_split_{index}", module_path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     kernel32 = Kernel32()
     module.ctypes.WinDLL = lambda *_args, **_kwargs: kernel32
+    parent_calls = []
 
-    def snapshot_miss(_pid):
-        kernel32.parent_observed_open = not kernel32.closed
-        raise ProcessLookupError("transient Toolhelp snapshot miss")
+    def snapshot_parent(pid):
+        assert kernel32.open_handles, "parent snapshot ran without a live process handle"
+        parent_calls.append(pid)
+        return 17
 
-    module._windows_parent_pid = snapshot_miss
+    module._windows_parent_pid = snapshot_parent
     module._native_process_record = module._windows_process_record
-    classification = module._process_identity(424242)[0]
-    assert classification == "unavailable", (
-        f"confirmed-live Windows PID snapshot miss classified as {classification}"
-    )
-    assert kernel32.parent_observed_open, "process handle closed before parent snapshot completed"
-    assert kernel32.closed == [73], f"process handle close mismatch: {kernel32.closed}"
-    print(classification)
+    classification, identity = module._process_identity(424242)
+    assert classification == "captured" and identity is not None, classification
+    assert parent_calls == [], f"normal identity probe took a process-table snapshot: {parent_calls}"
+
+    original_platform = module.sys.platform
+    original_os_name = module.os.name
+    try:
+        module.sys.platform = "win32"
+        module.os.name = "nt"
+        parent = module._native_parent_pid(424242)
+    finally:
+        module.sys.platform = original_platform
+        module.os.name = original_os_name
+    assert parent == 17, parent
+    assert parent_calls == [424242], parent_calls
+    assert not kernel32.open_handles, kernel32.open_handles
+    assert kernel32.closed == [73, 74], kernel32.closed
+    print("captured/guarded-parent")
 PY
 )"
-if [ "$WINDOWS_LIVE_SNAPSHOT_MISS" = $'unavailable\nunavailable' ]; then
-  pass "confirmed-live Windows PIDs stay unavailable across transient parent snapshot misses in both mirrors"
+if [ "$WINDOWS_PARENT_PROBE_SPLIT" = $'captured/guarded-parent\ncaptured/guarded-parent' ]; then
+  pass "Windows liveness avoids snapshots while parent lookup holds a live process handle"
 else
-  fail "Windows live process parent snapshot miss classification" "$WINDOWS_LIVE_SNAPSHOT_MISS"
+  fail "Windows process identity/parent lookup split" "$WINDOWS_PARENT_PROBE_SPLIT"
+fi
+
+SUPPORTED_PLATFORM_POLICY="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
+import importlib.util
+import sys
+
+for index, module_path in enumerate(sys.argv[1:]):
+    spec = importlib.util.spec_from_file_location(f"run_manifest_supported_platforms_{index}", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    assert module.SUPPORTED_PROCESS_IDENTITY_PLATFORMS == (
+        "linux", "darwin", "windows"
+    )
+    original_platform = module.sys.platform
+    original_os_name = module.os.name
+    try:
+        module.sys.platform = "freebsd14"
+        module.os.name = "posix"
+        try:
+            module._native_process_record(424242)
+        except OSError as error:
+            assert str(error) == (
+                "unsupported process identity platform; "
+                "supported platforms: linux, darwin, windows"
+            ), str(error)
+        else:
+            raise AssertionError("unsupported POSIX received a degraded identity")
+        assert module._process_identity(424242) == ("unavailable", None)
+    finally:
+        module.sys.platform = original_platform
+        module.os.name = original_os_name
+    print(",".join(module.SUPPORTED_PROCESS_IDENTITY_PLATFORMS))
+PY
+)"
+if [ "$SUPPORTED_PLATFORM_POLICY" = $'linux,darwin,windows\nlinux,darwin,windows' ]; then
+  pass "process identity explicitly supports only Linux, macOS, and Windows"
+else
+  fail "process identity supported-platform policy" "$SUPPORTED_PLATFORM_POLICY"
+fi
+if grep -Fq \
+    'Process-identity reconciliation is supported on Linux, macOS, and native Windows' \
+    "$ROOT/README.md"; then
+  pass "README states the process-identity supported-platform contract"
+else
+  fail "README process-identity supported-platform contract" "supported trio is undocumented"
+fi
+
+PROCESS_IDENTITY_CANDIDATE_SECURITY="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
+import importlib.util
+import pathlib
+import sys
+import tempfile
+
+for index, module_path in enumerate(sys.argv[1:]):
+    spec = importlib.util.spec_from_file_location(f"run_manifest_identity_candidate_{index}", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    module.os.getppid = lambda: 41
+    module._process_identity = lambda pid: (
+        "captured", f"{pid}|{pid}|{pid}|" + ("a" * 64)
+    )
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        candidate = root / "owner-candidate"
+        victim = root / "victim"
+        victim.write_bytes(b"unchanged")
+        candidate.symlink_to(victim)
+        try:
+            module._write_process_identity("direct", str(candidate))
+        except (module.ManifestRejected, module.ManifestRuntimeError):
+            pass
+        else:
+            raise AssertionError("symlinked process-identity candidate was accepted")
+        assert victim.read_bytes() == b"unchanged"
+
+        candidate.unlink()
+        candidate.touch(mode=0o600)
+        real_write = module.os.write
+
+        def replace_during_write(descriptor, payload):
+            candidate.unlink()
+            candidate.symlink_to(victim)
+            return real_write(descriptor, payload)
+
+        module.os.write = replace_during_write
+        try:
+            try:
+                module._write_process_identity("direct", str(candidate))
+            except module.ManifestRejected as error:
+                assert str(error) == "process_identity_candidate_replaced", str(error)
+            else:
+                raise AssertionError("replaced process-identity candidate was accepted")
+        finally:
+            module.os.write = real_write
+        assert victim.read_bytes() == b"unchanged"
+
+        candidate.unlink()
+        candidate.touch(mode=0o600)
+        real_write = module.os.write
+
+        def short_write(descriptor, payload):
+            return real_write(descriptor, payload[:1])
+
+        module.os.write = short_write
+        try:
+            try:
+                module._write_process_identity("direct", str(candidate))
+            except module.ManifestRuntimeError as error:
+                assert str(error) == "process_identity_short_write", str(error)
+            else:
+                raise AssertionError("short process-identity write succeeded")
+        finally:
+            module.os.write = real_write
+        assert candidate.read_bytes() == b""
+    print("candidate-secure")
+PY
+)"
+if [ "$PROCESS_IDENTITY_CANDIDATE_SECURITY" = $'candidate-secure\ncandidate-secure' ]; then
+  pass "process identity securely binds, verifies, and rolls back its pre-created candidate"
+else
+  fail "process identity candidate security" "$PROCESS_IDENTITY_CANDIDATE_SECURITY"
 fi
 
 printf '== run manifest: fixture verification ==\n'

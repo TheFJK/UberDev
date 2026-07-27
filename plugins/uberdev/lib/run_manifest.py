@@ -12,6 +12,8 @@ The public CLI intentionally has three small operations:
 
 Only the Python standard library is used.  Manifest directories and files are
 made private before use, and direct symlink targets are rejected.
+Kernel creation identities are supported on Linux, macOS, and native Windows;
+other platforms fail closed instead of synthesizing a degraded fingerprint.
 """
 
 from __future__ import annotations
@@ -54,6 +56,7 @@ TERMINAL_EVENTS = frozenset(
     {"completed", "failed", "timed_out", "cancelled", "abandoned"}
 )
 LIFECYCLE_EVENTS = frozenset({"route_decided", "agent_started"}) | TERMINAL_EVENTS
+SUPPORTED_PROCESS_IDENTITY_PLATFORMS = ("linux", "darwin", "windows")
 
 # RFC 0013 section 13 fields plus the minimal process metadata required to
 # reconcile an interrupted agent_started event.  This is deliberately closed:
@@ -923,7 +926,10 @@ def _windows_parent_pid(pid: int) -> int:
     raise ProcessLookupError(pid)
 
 
-def _windows_process_record(pid: int) -> tuple[int, int, int, str]:
+@contextmanager
+def _windows_live_process(pid: int) -> Iterable[int]:
+    """Hold a validated live process handle while its identity is consumed."""
+
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
     class FileTime(ctypes.Structure):
@@ -961,31 +967,70 @@ def _windows_process_record(pid: int) -> tuple[int, int, int, str]:
         creation_ticks = (int(created.high) << 32) | int(created.low)
         if creation_ticks <= 0:
             raise OSError("process creation time unavailable")
-        try:
-            parent_pid = _windows_parent_pid(pid)
-        except ProcessLookupError as exc:
-            # Earlier OpenProcess, STILL_ACTIVE, and creation-time checks
-            # observed the process live. If it exits before this later
-            # Toolhelp snapshot, classify the miss unavailable (fail-closed).
-            raise OSError(
-                errno.EAGAIN, "live process missing from Toolhelp snapshot"
-            ) from exc
+        yield creation_ticks
     finally:
         kernel32.CloseHandle(handle)
+
+
+def _windows_process_record(pid: int) -> tuple[int, int, int, str]:
+    with _windows_live_process(pid) as creation_ticks:
+        pass
     # Windows has no POSIX process groups or sessions. The PID is retained in
     # those schema slots while the kernel creation FILETIME provides the
     # authoritative anti-reuse identity.
-    return parent_pid, pid, pid, f"windows:{creation_ticks}"
+    return pid, pid, pid, f"windows:{creation_ticks}"
+
+
+def _windows_guarded_parent_pid(pid: int) -> int:
+    with _windows_live_process(pid):
+        try:
+            return _windows_parent_pid(pid)
+        except ProcessLookupError as exc:
+            # The process handle, STILL_ACTIVE state, and creation time were
+            # validated before the snapshot. A later miss is unavailable
+            # evidence rather than proof that the process is absent.
+            raise OSError(
+                errno.EAGAIN, "live process missing from Toolhelp snapshot"
+            ) from exc
+
+
+def _process_identity_platform() -> str | None:
+    if sys.platform.startswith("linux"):
+        return "linux"
+    if sys.platform == "darwin":
+        return "darwin"
+    if os.name == "nt":
+        return "windows"
+    return None
+
+
+def _unsupported_process_identity_platform() -> OSError:
+    supported = ", ".join(SUPPORTED_PROCESS_IDENTITY_PLATFORMS)
+    return OSError(
+        f"unsupported process identity platform; supported platforms: {supported}"
+    )
 
 
 def _native_process_record(pid: int) -> tuple[int, int, int, str]:
-    if sys.platform.startswith("linux"):
+    platform = _process_identity_platform()
+    if platform == "linux":
         return _linux_process_record(pid)
-    if sys.platform == "darwin":
+    if platform == "darwin":
         return _darwin_process_record(pid)
-    if os.name == "nt":
+    if platform == "windows":
         return _windows_process_record(pid)
-    raise OSError("unsupported process identity platform")
+    raise _unsupported_process_identity_platform()
+
+
+def _native_parent_pid(pid: int) -> int:
+    platform = _process_identity_platform()
+    if platform == "linux":
+        return _linux_process_record(pid)[0]
+    if platform == "darwin":
+        return _darwin_process_record(pid)[0]
+    if platform == "windows":
+        return _windows_guarded_parent_pid(pid)
+    raise _unsupported_process_identity_platform()
 
 
 def _process_identity(pid: Any) -> tuple[str, str | None]:
@@ -1015,7 +1060,7 @@ def _write_process_identity(mode: str, destination: str) -> None:
     owner_pid = self_pid
     try:
         for _ in range(owner_depth):
-            owner_pid = _native_process_record(owner_pid)[0]
+            owner_pid = _native_parent_pid(owner_pid)
     except ProcessLookupError as exc:
         raise ManifestRuntimeError("process_identity_parent_absent") from exc
     except (AttributeError, OSError, ValueError) as exc:
@@ -1023,8 +1068,51 @@ def _write_process_identity(mode: str, destination: str) -> None:
     status, identity = _process_identity(owner_pid)
     if status != "captured" or identity is None:
         raise ManifestRuntimeError(f"process_identity_{status}")
-    with open(destination, "w", encoding="ascii", newline="\n") as stream:
-        stream.write(f"{owner_pid}\n{identity}\n")
+    destination = os.path.abspath(destination)
+    payload = f"{owner_pid}\n{identity}\n".encode("ascii")
+    descriptor = _secure_open_regular(destination, os.O_WRONLY, 0o600)
+    try:
+        opened = os.fstat(descriptor)
+        if opened.st_nlink != 1 or opened.st_size != 0:
+            raise ManifestRejected("process_identity_candidate_invalid")
+        if hasattr(os, "geteuid") and opened.st_uid != os.geteuid():
+            raise ManifestRejected("process_identity_candidate_not_owned")
+        if os.name != "nt":
+            os.fchmod(descriptor, 0o600)
+
+        def rollback() -> None:
+            try:
+                os.ftruncate(descriptor, 0)
+            except OSError as exc:
+                raise ManifestRuntimeError(
+                    "process_identity_rollback_failed"
+                ) from exc
+
+        try:
+            written = os.write(descriptor, payload)
+        except OSError as exc:
+            rollback()
+            raise ManifestRuntimeError("process_identity_short_write") from exc
+        if written != len(payload):
+            rollback()
+            raise ManifestRuntimeError("process_identity_short_write")
+        try:
+            current = os.lstat(destination)
+        except OSError as exc:
+            rollback()
+            raise ManifestRejected(
+                "process_identity_candidate_replaced"
+            ) from exc
+        if (
+            stat.S_ISLNK(current.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or current.st_nlink != 1
+            or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            rollback()
+            raise ManifestRejected("process_identity_candidate_replaced")
+    finally:
+        os.close(descriptor)
 
 
 def _pid_live(pid: Any, expected_identity: str | None = None) -> bool | None:
