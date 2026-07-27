@@ -8,7 +8,8 @@
 #
 #   RUNTIME (S15): exercises the Phase-3 6c.1 PROBE bucket-classification
 #     contract for real. It prepends tests/_fixtures/fake-gh to PATH, sets
-#     FAKE_GH_MODE per scenario, runs `gh pr checks ... --json name,state,bucket`
+#     FAKE_GH_MODE per scenario, runs
+#     `gh pr checks ... --json name,state,bucket,link,event,workflow`
 #     exactly as review-pr.md specifies, then applies the *prose's own* jq
 #     verdict expression (extracted live from review-pr.md, so the test can
 #     never drift from the documented logic) and asserts the resulting verdict.
@@ -727,11 +728,11 @@ else
 fi
 
 echo
-echo "== S15: field-contract structural guard — probe reads name,state,bucket (NOT status,conclusion) =="
+echo "== S15: field-contract structural guard — probe reads state + immutable run metadata =="
 # Lock the gh >= 2.83.1 field contract in the prose so a future edit can't
 # silently regress the probe back to the removed status,conclusion fields.
-assert_grep "$REVIEW_PR" 'gh pr checks "\$PR_NUMBER" --json name,state,bucket' \
-  "S15.1 — PROBE call reads --json name,state,bucket"
+assert_grep "$REVIEW_PR" 'gh pr checks "\$PR_NUMBER" --json name,state,bucket,link,event,workflow' \
+  "S15.1 — PROBE call reads state plus immutable run-selection metadata"
 assert_grep "$REVIEW_PR" 'gh pr checks "\$PR_NUMBER" --watch --interval 30$' \
   "S15.2 — MONITOR --watch call takes NO --json (gh forbids --watch with --json)"
 # S15.2b — gh 2.83.1 rejects `--watch` together with `--json`
@@ -784,13 +785,13 @@ if [ ! -x "$FAKE_GH_DIR/gh" ]; then
 fi
 
 # Run the PROBE exactly as Phase 3 6c.1 specifies: fake gh on PATH, FAKE_GH_MODE
-# set, `gh pr checks <n> --json name,state,bucket`. Echo the raw probe JSON on
+# set, `gh pr checks <n> --json name,state,bucket,link,event,workflow`. Echo the raw probe JSON on
 # stdout so callers capture it in their own scope (a global set inside the $(...)
 # command-substitution subshell would NOT propagate back to the caller).
 _run_probe() {
   local mode="$1"
   PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_MODE="$mode" \
-    gh pr checks 999 --json name,state,bucket 2>/dev/null
+    gh pr checks 999 --json name,state,bucket,link,event,workflow 2>/dev/null
 }
 
 assert_verdict() {
@@ -820,13 +821,13 @@ assert_verdict ci-checks-red     red     "S15-RT.3 — any bucket fail → red (
 assert_verdict ci-checks-mixed   red     "S15-RT.4 — fail+pending mix → red (red outranks pending)"
 
 # S15-RT.5 — gh >= 2.83.1 field contract: the probe JSON the stub emits MUST
-# carry name/state/bucket on every entry and NEVER the removed status/conclusion
-# fields. This is the regression that the issue's "verified live" diagnosis pins.
+# carry state plus immutable run-selection metadata on every entry and NEVER the
+# removed status/conclusion fields.
 GREEN_PROBE="$(_run_probe ci-checks-green)"
-if printf '%s' "$GREEN_PROBE" | jq -e 'type=="array" and length>0 and all(.[]; has("name") and has("state") and has("bucket"))' >/dev/null 2>&1; then
-  echo "  PASS  S15-RT.5a — stub probe entries carry name/state/bucket"; PASS=$((PASS + 1))
+if printf '%s' "$GREEN_PROBE" | jq -e 'type=="array" and length>0 and all(.[]; has("name") and has("state") and has("bucket") and has("link") and has("event") and has("workflow"))' >/dev/null 2>&1; then
+  echo "  PASS  S15-RT.5a — stub probe entries carry state plus immutable run metadata"; PASS=$((PASS + 1))
 else
-  echo "  FAIL  S15-RT.5a — stub probe entries missing name/state/bucket: $GREEN_PROBE"; FAIL=$((FAIL + 1))
+  echo "  FAIL  S15-RT.5a — stub probe entries missing run-selection metadata: $GREEN_PROBE"; FAIL=$((FAIL + 1))
 fi
 if printf '%s' "$GREEN_PROBE" | jq -e 'all(.[]; (has("status")|not) and (has("conclusion")|not))' >/dev/null 2>&1; then
   echo "  PASS  S15-RT.5b — stub probe entries carry NO removed status/conclusion fields"; PASS=$((PASS + 1))
@@ -977,95 +978,179 @@ fi
 rm -f "$CLASSIFIER_STATUS_FIXTURE" "$CLASSIFIER_STATUS_LOG"
 
 echo
-echo "== S18-RUNTIME: classifier authority stays bound to one immutable head =="
-CLASSIFIER_HEAD_FIXTURE="$(mktemp)"
-awk '/^    review_capture_ci_classification_head\(\) \{/{active=1} active{print} active && /^    \}/{exit}' \
-  "$REVIEW_PR" >"$CLASSIFIER_HEAD_FIXTURE"
-run_classifier_head_scenario() {
-  local scenario="$1" expected_reason="$2" expect_classifier="$3"
-  local scenario_log scenario_output classifier_ok=no
-  scenario_log="$(mktemp)"
-  scenario_output="$(
-    CLASSIFIER_HEAD_SCENARIO="$scenario" CLASSIFIER_HEAD_LOG="$scenario_log" \
+echo "== S18: selected Actions run is derived, event-bound, and refreshed =="
+assert_no_grep "$REVIEW_PR" 'CI_RUN_ID="\$\{CI_RUN_ID:-0\}"' \
+  "S18.1 — setup never treats sentinel run id 0 as authority"
+assert_grep "$REVIEW_PR" 'review_select_failed_ci_run' \
+  "S18.2 — failed Actions run is selected from check metadata"
+assert_grep "$REVIEW_PR" 'review_clear_ci_run_selection' \
+  "S18.3 — run selection has an explicit clear operation"
+assert_grep "$REVIEW_PR" 'actions/runs/\$CI_RUN_ID|actions/runs/\$\{CI_RUN_ID\}' \
+  "S18.4 — controller reads immutable Actions run metadata"
+assert_grep "$REVIEW_PR" 'pull_requests.*PR_NUMBER|PR_NUMBER.*pull_requests' \
+  "S18.5 — pull_request authority is bound through PR association"
+S18_CLEAR_CALLS="$(grep -c 'review_clear_ci_run_selection' "$REVIEW_PR" || true)"
+if [ "$S18_CLEAR_CALLS" -ge 3 ]; then
+  echo "  PASS  S18.6 — run selection is cleared at definition, probe, and head-changing re-entry"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S18.6 — run selection clear is not wired at both probe and re-entry (count=$S18_CLEAR_CALLS)"; FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== S18-RUNTIME: synthetic merge SHA, unset id, unrelated run, and reselection fixtures =="
+CI_AUTHORITY_FIXTURE="$(mktemp)"
+for function_name in review_clear_ci_run_selection review_select_failed_ci_run review_capture_ci_classification_head; do
+  awk -v wanted="$function_name" '
+    $0 ~ "^[[:space:]]*" wanted "\\(\\) \\{" { active=1 }
+    active { print }
+    active && /^    \}$/ { exit }
+  ' "$REVIEW_PR" >>"$CI_AUTHORITY_FIXTURE"
+done
+
+if ! grep -q '^    review_clear_ci_run_selection() {' "$CI_AUTHORITY_FIXTURE" \
+    || ! grep -q '^    review_select_failed_ci_run() {' "$CI_AUTHORITY_FIXTURE" \
+    || ! grep -q '^    review_capture_ci_classification_head() {' "$CI_AUTHORITY_FIXTURE"; then
+  echo "  FAIL  S18-RT.0 — could not extract all CI authority helpers from review-pr.md"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S18-RT.0 — extracted CI authority helpers from review-pr.md"
+  PASS=$((PASS + 1))
+
+  # Default/unset CI_RUN_ID is non-authoritative: the failed check's exact
+  # Actions URL supplies the positive run id and event.
+  SELECTION_PROBE="$(_run_probe ci-checks-red)"
+  unset CI_RUN_ID
+  IFS=$'\t' read -r CI_RUN_ID CI_RUN_EVENT CI_RUN_CHECK_LINK < <(
+    bash -c '. "$1"; review_select_failed_ci_run "$2" owner/repo' \
+      _ "$CI_AUTHORITY_FIXTURE" "$SELECTION_PROBE"
+  )
+  if [ "$CI_RUN_ID" = 991 ] && [ "$CI_RUN_EVENT" = pull_request ] \
+      && [ "$CI_RUN_CHECK_LINK" = "https://github.com/owner/repo/actions/runs/991/job/1012" ]; then
+    echo "  PASS  S18-RT.1 — unset run id is derived from the selected failed check"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S18-RT.1 — unset run id was not derived exactly (id=$CI_RUN_ID event=$CI_RUN_EVENT link=$CI_RUN_CHECK_LINK)"; FAIL=$((FAIL + 1))
+  fi
+  CI_RUN_ID=0
+  IFS=$'\t' read -r CI_RUN_ID CI_RUN_EVENT CI_RUN_CHECK_LINK < <(
+    bash -c '. "$1"; review_select_failed_ci_run "$2" owner/repo' \
+      _ "$CI_AUTHORITY_FIXTURE" "$SELECTION_PROBE"
+  )
+  if [ "$CI_RUN_ID" = 991 ]; then
+    echo "  PASS  S18-RT.2 — sentinel run id 0 is replaced by check metadata"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S18-RT.2 — sentinel run id survived selection (id=$CI_RUN_ID)"; FAIL=$((FAIL + 1))
+  fi
+
+  # A failed check URL from another repository is never accepted as the current
+  # PR's Actions authority.
+  UNRELATED_PROBE='[{"name":"test","state":"FAILURE","bucket":"fail","event":"pull_request","link":"https://github.com/other/repo/actions/runs/777/job/1","workflow":"Tests"}]'
+  if bash -c '. "$1"; review_select_failed_ci_run "$2" owner/repo' \
+      _ "$CI_AUTHORITY_FIXTURE" "$UNRELATED_PROBE" >/dev/null 2>&1; then
+    echo "  FAIL  S18-RT.3 — unrelated repository run was selected"; FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  S18-RT.3 — unrelated repository run fails closed"; PASS=$((PASS + 1))
+  fi
+
+  run_capture_fixture() {
+    local run_event="$1" run_json="$2" expected_head="${3:-}"
+    local local_head="${4:-0123456789012345678901234567890123456789}"
+    local live_head="${5:-$local_head}"
+    CI_CAPTURE_RUN_EVENT="$run_event" CI_CAPTURE_RUN_JSON="$run_json" \
+      CI_CAPTURE_EXPECTED_HEAD="$expected_head" CI_CAPTURE_LOCAL_HEAD="$local_head" \
+      CI_CAPTURE_LIVE_HEAD="$live_head" \
       bash -c '
         . "$1"
         PR_NUMBER=73
         REVIEW_REPO_SLUG=owner/repo
-        CI_RUN_ID=991
         WORKTREE_ROOT=/worktree
-        ORIGINAL_HEAD=0123456789012345678901234567890123456789
-        MOVED_HEAD=abcdefabcdefabcdefabcdefabcdefabcdefabcd
-        LOCAL_HEAD="$ORIGINAL_HEAD"
-        LIVE_HEAD="$ORIGINAL_HEAD"
-        RUN_HEAD="$ORIGINAL_HEAD"
-        [ "$CLASSIFIER_HEAD_SCENARIO" = run_mismatch ] && RUN_HEAD="$MOVED_HEAD"
+        CI_RUN_ID=991
+        CI_RUN_EVENT="$CI_CAPTURE_RUN_EVENT"
+        LOCAL_HEAD="$CI_CAPTURE_LOCAL_HEAD"
+        LIVE_HEAD="$CI_CAPTURE_LIVE_HEAD"
+        LIVE_BRANCH=feature/current
         git() {
           [ "$1" = -C ] && [ "$2" = "$WORKTREE_ROOT" ] \
             && [ "$3" = rev-parse ] && [ "$4" = HEAD ] || return 2
           printf "%s\n" "$LOCAL_HEAD"
         }
         gh() {
-          if [ "$1" = pr ] && [ "$2" = view ] && [ "$3" = "$PR_NUMBER" ] \
-              && [ "$4" = --repo ] && [ "$5" = "$REVIEW_REPO_SLUG" ] \
-              && [ "$6" = --json ] && [ "$7" = headRefOid ] \
-              && [ "$8" = --jq ] && [ "$9" = .headRefOid ]; then
-            printf "%s\n" "$LIVE_HEAD"
+          if [ "$1" = pr ] && [ "$2" = view ]; then
+            printf "%s\t%s\n" "$LIVE_HEAD" "$LIVE_BRANCH"
             return 0
           fi
-          if [ "$1" = run ] && [ "$2" = view ] && [ "$3" = "$CI_RUN_ID" ] \
-              && [ "$4" = --repo ] && [ "$5" = "$REVIEW_REPO_SLUG" ] \
-              && [ "$6" = --json ] && [ "$7" = headSha ] \
-              && [ "$8" = --jq ] && [ "$9" = .headSha ]; then
-            printf "%s\n" "$RUN_HEAD"
+          if [ "$1" = api ] && [ "$2" = "repos/$REVIEW_REPO_SLUG/actions/runs/$CI_RUN_ID" ]; then
+            printf "%s\n" "$CI_CAPTURE_RUN_JSON"
             return 0
           fi
           return 2
         }
-        if CI_CLASSIFICATION_HEAD_SHA="$(review_capture_ci_classification_head)"; then
-          printf "classifier\n" >>"$CLASSIFIER_HEAD_LOG"
-        else
-          printf "capture:%s" "$CI_CLASSIFICATION_HEAD_SHA"
-          exit 0
-        fi
-        case "$CLASSIFIER_HEAD_SCENARIO" in
-          local_move) LOCAL_HEAD="$MOVED_HEAD" ;;
-          live_move) LIVE_HEAD="$MOVED_HEAD" ;;
-          run_move) RUN_HEAD="$MOVED_HEAD" ;;
-        esac
-        if ROUTE_HEAD="$(review_capture_ci_classification_head "$CI_CLASSIFICATION_HEAD_SHA")"; then
-          printf "fixer\ntrust\n" >>"$CLASSIFIER_HEAD_LOG"
-          printf "route:%s" "$ROUTE_HEAD"
-        else
-          printf "route:%s" "$ROUTE_HEAD"
-        fi
-      ' _ "$CLASSIFIER_HEAD_FIXTURE"
-  )"
-  if { [ "$expect_classifier" = yes ] && grep -qxF classifier "$scenario_log"; } \
-      || { [ "$expect_classifier" = no ] && ! grep -qxF classifier "$scenario_log"; }; then
-    classifier_ok=yes
-  fi
-  if [ "$scenario_output" = "$expected_reason" ] \
-      && ! grep -Eq '^(fixer|trust)$' "$scenario_log" \
-      && [ "$classifier_ok" = yes ]; then
-    echo "  PASS  S18.$scenario — immutable head gate returns $expected_reason without fixer/trust"
-    PASS=$((PASS + 1))
+        review_capture_ci_classification_head "$CI_CAPTURE_EXPECTED_HEAD"
+      ' _ "$CI_AUTHORITY_FIXTURE"
+  }
+
+  SYNTHETIC_MERGE_JSON='{"id":991,"event":"pull_request","head_sha":"abcdefabcdefabcdefabcdefabcdefabcdefabcd","head_branch":"feature/current","repository":{"full_name":"owner/repo"},"pull_requests":[{"number":73,"head":{"sha":"0123456789012345678901234567890123456789","ref":"feature/current"}}]}'
+  SYNTHETIC_RESULT="$(run_capture_fixture pull_request "$SYNTHETIC_MERGE_JSON")"
+  if [ "$SYNTHETIC_RESULT" = 0123456789012345678901234567890123456789 ]; then
+    echo "  PASS  S18-RT.4 — authoritative pull_request accepts synthetic merge headSha via PR association"; PASS=$((PASS + 1))
   else
-    echo "  FAIL  S18.$scenario — classifier head gate did not fail closed"
-    echo "        output: $scenario_output"
-    echo "        log: $(tr '\n' ',' <"$scenario_log")"
-    FAIL=$((FAIL + 1))
+    echo "  FAIL  S18-RT.4 — synthetic merge headSha was rejected ($SYNTHETIC_RESULT)"; FAIL=$((FAIL + 1))
   fi
-  rm -f "$scenario_log"
-}
-run_classifier_head_scenario local_move \
-  route:classification_local_head_moved yes
-run_classifier_head_scenario live_move \
-  route:classification_live_head_moved yes
-run_classifier_head_scenario run_move \
-  route:classification_run_head_moved yes
-run_classifier_head_scenario run_mismatch \
-  capture:classification_run_head_mismatch no
-rm -f "$CLASSIFIER_HEAD_FIXTURE"
+
+  UNRELATED_RUN_JSON='{"id":991,"event":"pull_request","head_sha":"abcdefabcdefabcdefabcdefabcdefabcdefabcd","head_branch":"feature/other","repository":{"full_name":"owner/repo"},"pull_requests":[{"number":74,"head":{"sha":"0123456789012345678901234567890123456789","ref":"feature/other"}}]}'
+  set +e
+  UNRELATED_RESULT="$(run_capture_fixture pull_request "$UNRELATED_RUN_JSON")"
+  UNRELATED_RC=$?
+  if [ "$UNRELATED_RC" -ne 0 ] && [ "$UNRELATED_RESULT" = classification_run_pr_mismatch ]; then
+    echo "  PASS  S18-RT.5 — unrelated pull_request run fails closed"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S18-RT.5 — unrelated pull_request run crossed the authority gate (rc=$UNRELATED_RC result=$UNRELATED_RESULT)"; FAIL=$((FAIL + 1))
+  fi
+
+  PUSH_STALE_JSON='{"id":991,"event":"push","head_sha":"abcdefabcdefabcdefabcdefabcdefabcdefabcd","head_branch":"feature/current","repository":{"full_name":"owner/repo"},"pull_requests":[]}'
+  set +e
+  PUSH_STALE_RESULT="$(run_capture_fixture push "$PUSH_STALE_JSON")"
+  PUSH_STALE_RC=$?
+  if [ "$PUSH_STALE_RC" -ne 0 ] && [ "$PUSH_STALE_RESULT" = classification_run_head_mismatch ]; then
+    echo "  PASS  S18-RT.6 — stale push run still requires direct branch-SHA equality"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S18-RT.6 — stale push run crossed the direct equality gate (rc=$PUSH_STALE_RC result=$PUSH_STALE_RESULT)"; FAIL=$((FAIL + 1))
+  fi
+
+  ORIGINAL_HEAD=0123456789012345678901234567890123456789
+  MOVED_HEAD=abcdefabcdefabcdefabcdefabcdefabcdefabcd
+  LOCAL_MOVE_RESULT="$(run_capture_fixture pull_request "$SYNTHETIC_MERGE_JSON" "$ORIGINAL_HEAD" "$MOVED_HEAD" "$ORIGINAL_HEAD")"
+  LIVE_MOVE_RESULT="$(run_capture_fixture pull_request "$SYNTHETIC_MERGE_JSON" "$ORIGINAL_HEAD" "$ORIGINAL_HEAD" "$MOVED_HEAD")"
+  MOVED_ASSOCIATION_JSON='{"id":991,"event":"pull_request","head_sha":"abcdefabcdefabcdefabcdefabcdefabcdefabcd","head_branch":"feature/current","repository":{"full_name":"owner/repo"},"pull_requests":[{"number":73,"head":{"sha":"abcdefabcdefabcdefabcdefabcdefabcdefabcd","ref":"feature/current"}}]}'
+  ASSOCIATION_MOVE_RESULT="$(run_capture_fixture pull_request "$MOVED_ASSOCIATION_JSON" "$ORIGINAL_HEAD")"
+  if [ "$LOCAL_MOVE_RESULT" = classification_local_head_moved ] \
+      && [ "$LIVE_MOVE_RESULT" = classification_live_head_moved ] \
+      && [ "$ASSOCIATION_MOVE_RESULT" = classification_run_pr_moved ]; then
+    echo "  PASS  S18-RT.7 — route-time local, live, and PR-association moves remain fail-closed"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S18-RT.7 — route-time authority move escaped (local=$LOCAL_MOVE_RESULT live=$LIVE_MOVE_RESULT association=$ASSOCIATION_MOVE_RESULT)"; FAIL=$((FAIL + 1))
+  fi
+
+  # A head-changing push clears the old tuple, and the next probe selects the
+  # new run rather than recycling the prior id.
+  RESELECT_PROBE='[{"name":"test","state":"FAILURE","bucket":"fail","event":"pull_request","link":"https://github.com/owner/repo/actions/runs/992/job/1022","workflow":"Tests"}]'
+  RESELECT_RESULT="$(
+    bash -c '
+      . "$1"
+      CI_RUN_ID=991
+      CI_RUN_EVENT=pull_request
+      CI_RUN_CHECK_LINK=https://github.com/owner/repo/actions/runs/991/job/1012
+      review_clear_ci_run_selection
+      [ -z "$CI_RUN_ID$CI_RUN_EVENT$CI_RUN_CHECK_LINK" ] || exit 3
+      review_select_failed_ci_run "$2" owner/repo
+    ' _ "$CI_AUTHORITY_FIXTURE" "$RESELECT_PROBE"
+  )"
+  if [ "$RESELECT_RESULT" = $'992\tpull_request\thttps://github.com/owner/repo/actions/runs/992/job/1022' ]; then
+    echo "  PASS  S18-RT.8 — post-push re-entry clears and reselects the new run"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S18-RT.8 — post-push selection reused stale authority ($RESELECT_RESULT)"; FAIL=$((FAIL + 1))
+  fi
+fi
+rm -f "$CI_AUTHORITY_FIXTURE"
 
 echo
 echo "== Summary =="

@@ -31,7 +31,7 @@
 #   ci-checks-no-checks  : gh pr checks output simulating "no checks reported on the
 #                          'main' branch" — Phase 3 PROBE → skipped_no_checks fast path.
 #                          stderr: 'no checks reported on the ...'; stdout empty array.
-#   ci-checks-pending    : gh pr checks --json name,state,bucket output where every entry
+#   ci-checks-pending    : gh pr checks --json name,state,bucket,link,event,workflow output where every entry
 #                          has bucket: pending (drives Phase 3 PROBE → MONITOR transition).
 #   ci-checks-green      : all entries bucket ∈ {pass, skipping}; PROBE fast-path → green.
 #   ci-checks-red        : at least one entry bucket: fail; drives PROBE → MONITOR
@@ -43,7 +43,8 @@
 #   ci-rate-limit-low    : gh api rate_limit response with .resources.core.remaining=42
 #                          (below the 200 floor — exercises pre-flight skip).
 #
-# gh field contract (gh >= 2.83.1): `gh pr checks --json` exposes name,state,bucket —
+# gh field contract (gh >= 2.83.1): `gh pr checks --json` exposes
+# name,state,bucket,link,event,workflow —
 # NOT status/conclusion (removed upstream). `bucket` is gh's own state→category fold:
 # SUCCESS→pass; SKIPPED|NEUTRAL→skipping; ERROR|FAILURE|TIMED_OUT|ACTION_REQUIRED→fail;
 # CANCELLED→cancel; everything still running (QUEUED|IN_PROGRESS|PENDING|...)→pending.
@@ -182,8 +183,8 @@ JSON
     # gh >= 2.83.1 shape: {name,state,bucket}. IN_PROGRESS folds to bucket=pending.
     cat <<'JSON'
 [
-  {"name": "build", "state": "IN_PROGRESS", "bucket": "pending"},
-  {"name": "test",  "state": "QUEUED",      "bucket": "pending"}
+  {"name": "build", "state": "IN_PROGRESS", "bucket": "pending", "event": "pull_request", "link": "https://github.com/owner/repo/actions/runs/990/job/1001", "workflow": "Tests"},
+  {"name": "test",  "state": "QUEUED",      "bucket": "pending", "event": "pull_request", "link": "https://github.com/owner/repo/actions/runs/990/job/1002", "workflow": "Tests"}
 ]
 JSON
     exit 0
@@ -194,9 +195,9 @@ JSON
     # SUCCESS -> bucket=pass; SKIPPED -> bucket=skipping (both green-eligible).
     cat <<'JSON'
 [
-  {"name": "build", "state": "SUCCESS", "bucket": "pass"},
-  {"name": "test",  "state": "SUCCESS", "bucket": "pass"},
-  {"name": "lint",  "state": "SKIPPED", "bucket": "skipping"}
+  {"name": "build", "state": "SUCCESS", "bucket": "pass",     "event": "pull_request", "link": "https://github.com/owner/repo/actions/runs/990/job/1001", "workflow": "Tests"},
+  {"name": "test",  "state": "SUCCESS", "bucket": "pass",     "event": "pull_request", "link": "https://github.com/owner/repo/actions/runs/990/job/1002", "workflow": "Tests"},
+  {"name": "lint",  "state": "SKIPPED", "bucket": "skipping", "event": "pull_request", "link": "https://github.com/owner/repo/actions/runs/990/job/1003", "workflow": "Tests"}
 ]
 JSON
     exit 0
@@ -207,8 +208,8 @@ JSON
     # FAILURE -> bucket=fail.
     cat <<'JSON'
 [
-  {"name": "build", "state": "SUCCESS", "bucket": "pass"},
-  {"name": "test",  "state": "FAILURE", "bucket": "fail"}
+  {"name": "build", "state": "SUCCESS", "bucket": "pass", "event": "pull_request", "link": "https://github.com/owner/repo/actions/runs/991/job/1011", "workflow": "Tests"},
+  {"name": "test",  "state": "FAILURE", "bucket": "fail", "event": "pull_request", "link": "https://github.com/owner/repo/actions/runs/991/job/1012", "workflow": "Tests"}
 ]
 JSON
     exit 0
@@ -219,9 +220,9 @@ JSON
     # red (fail bucket) MUST outrank pending in the PROBE verdict.
     cat <<'JSON'
 [
-  {"name": "build", "state": "SUCCESS",     "bucket": "pass"},
-  {"name": "test",  "state": "FAILURE",     "bucket": "fail"},
-  {"name": "lint",  "state": "IN_PROGRESS", "bucket": "pending"}
+  {"name": "build", "state": "SUCCESS",     "bucket": "pass",    "event": "pull_request", "link": "https://github.com/owner/repo/actions/runs/994/job/1041", "workflow": "Tests"},
+  {"name": "test",  "state": "FAILURE",     "bucket": "fail",    "event": "pull_request", "link": "https://github.com/owner/repo/actions/runs/994/job/1042", "workflow": "Tests"},
+  {"name": "lint",  "state": "IN_PROGRESS", "bucket": "pending", "event": "pull_request", "link": "https://github.com/owner/repo/actions/runs/994/job/1043", "workflow": "Tests"}
 ]
 JSON
     exit 0

@@ -52,7 +52,12 @@ uberdev_dispatch_preflight_backend "$UBERDEV_CARRIER_BACKEND" review-pr || {
 REVIEW_ITERATION="${REVIEW_ITERATION:-1}"
 REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"
 CI_FIX_LOOP_ITER="${CI_FIX_LOOP_ITER:-1}"
-CI_RUN_ID="${CI_RUN_ID:-0}"
+# Phase 3 derives run authority from the selected failed check's immutable
+# metadata. Setup has no sentinel default; 6c.1 clears any inherited tuple
+# before every probe so caller state can never become classification authority.
+CI_RUN_ID="${CI_RUN_ID:-}"
+CI_RUN_EVENT="${CI_RUN_EVENT:-}"
+CI_RUN_CHECK_LINK="${CI_RUN_CHECK_LINK:-}"
 FOCUS="${FOCUS:-${ARGUMENTS:-}}"
 review_json_string() {
   python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "$1"
@@ -856,6 +861,82 @@ PY
 
     ### 6c.1 PROBE — gh pr checks JSON probe
 
+    Run authority is iteration-local. The caller never supplies `CI_RUN_ID`;
+    each red probe selects it from the failed check row's immutable `link` and
+    `event` fields. The selector applies the same drop-only-cancel grouping as
+    `PROBE_VERDICT`, accepts only positive GitHub Actions run IDs for the current
+    repository, prefers the PR-associated `pull_request` run over a same-head
+    `push` sibling, and fails closed on an unknown event, external check, or
+    cross-repository link.
+
+    ```bash
+    review_clear_ci_run_selection() {
+      CI_RUN_ID=
+      CI_RUN_EVENT=
+      CI_RUN_CHECK_LINK=
+      unset CI_CLASSIFICATION_HEAD_SHA CI_ROUTE_HEAD_SHA
+    }
+    review_select_failed_ci_run() {
+      local probe_json="${1:-}" repo_slug="${2:-}"
+      python3 -I -B - "$repo_slug" 3<<<"$probe_json" <<'PY'
+import json,os,re,sys
+from urllib.parse import urlsplit
+
+repo_slug=sys.argv[1]
+try:
+    rows=json.load(os.fdopen(3))
+except (json.JSONDecodeError,UnicodeDecodeError):
+    raise SystemExit(2)
+if not isinstance(rows,list) or not rows or not re.fullmatch(r'[^/\s]+/[^/\s]+',repo_slug):
+    raise SystemExit(2)
+known_buckets={'pass','skipping','pending','fail','cancel'}
+groups={}
+for row in rows:
+    if not isinstance(row,dict):
+        raise SystemExit(2)
+    name=row.get('name')
+    bucket=row.get('bucket')
+    if not isinstance(name,str) or not name or not isinstance(bucket,str) or bucket not in known_buckets:
+        raise SystemExit(2)
+    groups.setdefault(name,[]).append(row)
+kept=[]
+for group in groups.values():
+    kept.extend(
+        [row for row in group if row['bucket']!='cancel']
+        if any(row['bucket']!='cancel' for row in group)
+        else group
+    )
+failed=[row for row in kept if row['bucket'] in {'fail','cancel'}]
+if not failed:
+    raise SystemExit(2)
+candidates=[]
+link_pattern=re.compile(r'^/([^/]+)/([^/]+)/actions/runs/([1-9][0-9]*)(?:/job/[1-9][0-9]*)?/?$')
+for row in failed:
+    event=row.get('event')
+    link=row.get('link')
+    workflow=row.get('workflow')
+    if event not in {'pull_request','push'} or not isinstance(link,str) or not link:
+        raise SystemExit(2)
+    if not isinstance(workflow,str) or any(ord(char)<32 or ord(char)==127 for char in event+link+workflow):
+        raise SystemExit(2)
+    parsed=urlsplit(link)
+    match=link_pattern.fullmatch(parsed.path)
+    if parsed.scheme!='https' or parsed.netloc.lower()!='github.com' or match is None:
+        raise SystemExit(2)
+    linked_slug=f'{match.group(1)}/{match.group(2)}'
+    if linked_slug.lower()!=repo_slug.lower():
+        raise SystemExit(2)
+    run_id=match.group(3)
+    candidates.append((0 if event=='pull_request' else 1,workflow,row['name'],int(run_id),event,link))
+if not candidates:
+    raise SystemExit(2)
+_,_,_,run_id,event,link=min(candidates)
+print(f'{run_id}\t{event}\t{link}')
+PY
+    }
+    review_clear_ci_run_selection
+    ```
+
     **Pre-flight rate-limit check:** the floor `200` below is `CI_PROBE_RATE_LIMIT_FLOOR` (declared in `merge-pipeline/SKILL.md` Constants — kept numeric inline because bash does not dereference markdown constants).
 
     ```bash
@@ -881,7 +962,7 @@ PY
 
     **Probe call:**
 
-    **Field contract (gh ≥ 2.83.1):** `gh pr checks --json` exposes `name`, `state`, and `bucket` — there is **no** `status` and **no** `conclusion` field (those were removed upstream; reading them errors `unknown JSON field`). `bucket` is gh's own canonical categorization of `state` and is the field this probe keys off:
+    **Field contract (gh ≥ 2.83.1):** `gh pr checks --json` exposes `name`, `state`, `bucket`, `link`, `event`, and `workflow` — there is **no** `status` and **no** `conclusion` field (those were removed upstream; reading them errors `unknown JSON field`). `bucket` is gh's own canonical categorization of `state`; `link` and `event` are the immutable controller inputs used to identify the exact Actions run when classification is required:
 
     | `bucket` | `state` values folded into it (gh `aggregateChecks`) | meaning here |
     |---|---|---|
@@ -892,7 +973,7 @@ PY
     | `cancel` | `CANCELLED` | red |
 
     ```bash
-    PROBE_JSON="$(gh pr checks "$PR_NUMBER" --json name,state,bucket 2>&1)" || PROBE_RC=$?
+    PROBE_JSON="$(gh pr checks "$PR_NUMBER" --json name,state,bucket,link,event,workflow 2>&1)" || PROBE_RC=$?
     # Validate PROBE_JSON is parseable JSON BEFORE the terminal-mapping
     # branches below try to interpret it. On gh failure (non-zero exit),
     # PROBE_JSON contains stderr text; jq parsing would silently produce
@@ -989,36 +1070,77 @@ PY
     timeout 1200 gh pr checks "$PR_NUMBER" --watch --interval 30
     ```
 
-    **`--watch` takes NO `--json`:** gh refuses `--watch` together with `--json` (`cannot use --watch with --json flag`, verified live on gh 2.83.1) — that is why the field list is absent here even though 6c.1 PROBE reads `--json name,state,bucket`. MONITOR keys off the **exit code** (gh's documented `gh pr checks` contract), not parsed JSON, so it needs no field projection. Wall-clock cap: **20 minutes** (`timeout 1200` = `CI_MONITOR_TIMEOUT_SEC`). The watch terminates on its own once every check leaves the `pending` bucket. On exit code 0 → all green → `OUTCOME=green` → audit `ci_monitor_green`. Exit 8 (still pending after watch terminates — `gh pr checks` exit code 8 = "Checks pending", per `gh pr checks --help`) → `ci_monitor_timeout` audit; halt loop iteration with `OUTCOME=halted` (carry differentiation in audit `data.subreason=monitor_timeout`; `halted` is the canonical CI_OUTCOME_ENUM member, not a `halted_timeout` synthetic). Non-zero non-8 → at least one check failed → audit `ci_monitor_red`; proceed to CLASSIFY.
+    **`--watch` takes NO `--json`:** gh refuses `--watch` together with `--json` (`cannot use --watch with --json flag`, verified live on gh 2.83.1) — that is why the field list is absent here even though 6c.1 PROBE reads `--json name,state,bucket,link,event,workflow`. MONITOR keys off the **exit code** (gh's documented `gh pr checks` contract), not parsed JSON, so it needs no field projection. Wall-clock cap: **20 minutes** (`timeout 1200` = `CI_MONITOR_TIMEOUT_SEC`). The watch terminates on its own once every check leaves the `pending` bucket. On exit code 0 → all green → `OUTCOME=green` → audit `ci_monitor_green`. Exit 8 (still pending after watch terminates — `gh pr checks` exit code 8 = "Checks pending", per `gh pr checks --help`) → `ci_monitor_timeout` audit; halt loop iteration with `OUTCOME=halted` (carry differentiation in audit `data.subreason=monitor_timeout`; `halted` is the canonical CI_OUTCOME_ENUM member, not a `halted_timeout` synthetic). Non-zero non-8 → at least one check failed → audit `ci_monitor_red`; proceed to CLASSIFY.
 
     `--fail-fast` is **NOT** used (the classifier needs the complete failure picture). The 30-second `--interval` floor (`CI_WATCH_INTERVAL_SEC`) is intentional (rate-limit guard).
 
+    On a non-zero, non-8 MONITOR exit, refresh the check projection before
+    CLASSIFY. A pending-only initial probe can become red while `--watch` is
+    running; retaining the pre-watch JSON would leave no failed row from which
+    to derive the authoritative run. The refreshed projection uses the exact
+    6c.1 field set and replaces (never appends to) `PROBE_JSON`:
+
+    ```bash
+    unset PROBE_RC
+    PROBE_JSON="$(gh pr checks "$PR_NUMBER" --json name,state,bucket,link,event,workflow 2>&1)" || PROBE_RC=$?
+    if [ "${PROBE_RC:-0}" -ne 0 ] && ! jq empty <<<"$PROBE_JSON" 2>/dev/null; then
+      audit ci_probe_unreachable subreason=post_monitor_refresh_failed
+      # phases.phase3 omitted; skip to Step 7 under the existing carve-out
+    fi
+    ```
+
     ### 6c.3 CLASSIFY — routed ci-failure-classifier
 
-    Bind the classifier to one immutable commit before reading the selected
-    run's log or dispatching the child. The local worktree HEAD, live PR head,
-    and selected workflow-run head must all identify the same full SHA.
-    `review_capture_ci_classification_head` emits only that SHA on success or
-    one stable bounded failure class on failure; it never relays `git`/`gh`
-    diagnostics.
+    First derive the exact failed Actions run from the refreshed check
+    projection. `CI_RUN_ID` is never accepted from setup/environment state:
+
+    ```bash
+    if IFS=$'\t' read -r CI_RUN_ID CI_RUN_EVENT CI_RUN_CHECK_LINK < <(
+        review_select_failed_ci_run "$PROBE_JSON" "$REVIEW_REPO_SLUG"
+      ) && [[ "$CI_RUN_ID" =~ ^[1-9][0-9]*$ ]] \
+        && [[ "$CI_RUN_EVENT" =~ ^(pull_request|push)$ ]] \
+        && [ -n "$CI_RUN_CHECK_LINK" ]; then
+      :
+    else
+      review_clear_ci_run_selection
+      audit ci_phase_outcome outcome=halted subreason=classification_run_selection_invalid
+      OUTCOME=halted
+      exit 1
+    fi
+    ```
+
+    Then bind the classifier to one immutable PR-head identity before reading
+    the selected run's log or dispatching the child. The local worktree HEAD and
+    live PR head must always identify the same full SHA. Run identity is
+    **event-aware**:
+
+    - `push`: the selected run's repository, branch, event, and `head_sha` must
+      directly equal the live PR-head identity.
+    - `pull_request`: GitHub may report a synthetic merge `head_sha`; do not
+      compare it directly to the branch SHA. Instead, require the run's
+      `pull_requests` metadata to contain `PR_NUMBER` with the exact live
+      `head.sha` and `head.ref`, plus matching repository/event/branch fields.
+
+    An unknown event, stale association, different PR/repository, or moved
+    local/live head fails closed. `review_capture_ci_classification_head` emits
+    only the branch-head SHA on success or one stable bounded failure class on
+    failure; it never relays `git`/`gh` diagnostics.
 
     ```bash
     review_capture_ci_classification_head() {
-      local expected_head="${1:-}" local_head live_head run_head
+      local expected_head="${1:-}" local_head live_identity live_head live_branch
+      local target_head run_json run_failure
       local_head="$(git -C "$WORKTREE_ROOT" rev-parse HEAD 2>/dev/null)" || {
         printf 'classification_local_head_query_failed'
         return 1
       }
-      live_head="$(gh pr view "$PR_NUMBER" --repo "$REVIEW_REPO_SLUG" \
-        --json headRefOid --jq .headRefOid 2>/dev/null)" || {
+      live_identity="$(gh pr view "$PR_NUMBER" --repo "$REVIEW_REPO_SLUG" \
+        --json headRefOid,headRefName \
+        --jq '"\(.headRefOid)\t\(.headRefName)"' 2>/dev/null)" || {
         printf 'classification_live_head_query_failed'
         return 1
       }
-      run_head="$(gh run view "$CI_RUN_ID" --repo "$REVIEW_REPO_SLUG" \
-        --json headSha --jq .headSha 2>/dev/null)" || {
-        printf 'classification_run_head_query_failed'
-        return 1
-      }
+      IFS=$'\t' read -r live_head live_branch <<<"$live_identity"
       if [[ ! "$local_head" =~ ^[0-9a-f]{40}$ ]]; then
         printf 'classification_local_head_malformed'
         return 1
@@ -1027,8 +1149,16 @@ PY
         printf 'classification_live_head_malformed'
         return 1
       fi
-      if [[ ! "$run_head" =~ ^[0-9a-f]{40}$ ]]; then
-        printf 'classification_run_head_malformed'
+      if [ -z "$live_branch" ]; then
+        printf 'classification_live_branch_malformed'
+        return 1
+      fi
+      if [[ ! "$CI_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+        printf 'classification_run_id_malformed'
+        return 1
+      fi
+      if [[ ! "$CI_RUN_EVENT" =~ ^(pull_request|push)$ ]]; then
+        printf 'classification_run_event_malformed'
         return 1
       fi
       if [ -n "$expected_head" ]; then
@@ -1044,19 +1174,72 @@ PY
           printf 'classification_live_head_moved'
           return 1
         fi
-        if [ "$run_head" != "$expected_head" ]; then
-          printf 'classification_run_head_moved'
-          return 1
-        fi
+        target_head="$expected_head"
       else
         if [ "$live_head" != "$local_head" ]; then
           printf 'classification_live_head_mismatch'
           return 1
         fi
-        if [ "$run_head" != "$local_head" ]; then
-          printf 'classification_run_head_mismatch'
-          return 1
-        fi
+        target_head="$local_head"
+      fi
+      run_json="$(gh api "repos/$REVIEW_REPO_SLUG/actions/runs/$CI_RUN_ID" 2>/dev/null)" || {
+        printf 'classification_run_metadata_query_failed'
+        return 1
+      }
+      if run_failure="$(
+        python3 -I -B - "$REVIEW_REPO_SLUG" "$PR_NUMBER" "$CI_RUN_ID" \
+          "$CI_RUN_EVENT" "$target_head" "$live_branch" \
+          "$([ -n "$expected_head" ] && printf moved || printf mismatch)" \
+          3<<<"$run_json" 2>/dev/null <<'PY'
+import json,os,re,sys
+repo_slug,pr_number,run_id,selected_event,target_head,live_branch,phase=sys.argv[1:]
+def fail(reason):
+    print(reason,end='')
+    raise SystemExit(2)
+try:
+    value=json.load(os.fdopen(3))
+except (json.JSONDecodeError,UnicodeDecodeError,OSError):
+    fail('classification_run_metadata_malformed')
+if not isinstance(value,dict):
+    fail('classification_run_metadata_malformed')
+if value.get('id')!=int(run_id):
+    fail('classification_run_id_mismatch')
+repository=value.get('repository')
+if not isinstance(repository,dict) or str(repository.get('full_name','')).lower()!=repo_slug.lower():
+    fail('classification_run_repository_mismatch')
+if value.get('event')!=selected_event:
+    fail('classification_run_event_mismatch')
+run_head=value.get('head_sha')
+run_branch=value.get('head_branch')
+if not isinstance(run_head,str) or re.fullmatch(r'[0-9a-f]{40}',run_head) is None:
+    fail('classification_run_head_malformed')
+suffix='moved' if phase=='moved' else 'mismatch'
+if selected_event=='push':
+    if run_branch!=live_branch or run_head!=target_head:
+        fail(f'classification_run_head_{suffix}')
+elif selected_event=='pull_request':
+    # pull_requests must contain PR_NUMBER at the exact live branch-head.
+    associations=value.get('pull_requests')
+    if not isinstance(associations,list):
+        fail('classification_run_metadata_malformed')
+    matched=False
+    for association in associations:
+        if not isinstance(association,dict) or association.get('number')!=int(pr_number):
+            continue
+        head=association.get('head')
+        if isinstance(head,dict) and head.get('sha')==target_head and head.get('ref')==live_branch:
+            matched=True
+            break
+    if run_branch!=live_branch or not matched:
+        fail(f'classification_run_pr_{suffix}')
+else:
+    fail('classification_run_event_mismatch')
+PY
+      )"; then
+        :
+      else
+        printf '%s' "${run_failure:-classification_run_metadata_malformed}"
+        return 1
       fi
       printf '%s' "$local_head"
     }
@@ -1507,6 +1690,14 @@ PY
     After a fixer pushes a remediation commit, the new HEAD MUST re-enter the **per-push trust-trail flow** — i.e., Phase 1 (post-impl-review fanout) and Phase 2 (simplify fanout) re-run on the post-fix diff before Phase 3 re-probes. The trust-trail anchor commit is always the **absolute last** step. This guarantees the trailer's referenced SHA covers reviewed code only.
 
     Implementation: rather than a re-entrant skill call, the orchestrator decrements the loop counter and re-enters at Step 4 (Phase 1 dispatch). Step 1 argument parsing has already run, so `RUN_ID` is preserved. The `phases.phase1` and `phases.phase2` fields in audit JSON are **rewritten** on each iteration (not appended to) — only `phases.phase3.iterations` and `phases.phase3.fix_pushes` accumulate.
+
+    Before that re-entry, discard the complete selected-run tuple. This call is
+    mandatory after every head-changing fixer/rebase/conflict-resolution push;
+    the next 6c.1 probe must derive a new run ID from that new head's checks:
+
+    ```bash
+    review_clear_ci_run_selection
+    ```
 
     Audit `ci_fix_pushed` (with `data.commit_sha` full 40-hex) when fixer push lands. On Phase 1 re-entry returning APPROVE → loop to 6c.1 (counts toward `CI_FIX_LOOP_CAP`). On Phase 1 re-entry rejecting → exit 1 with `OUTCOME=halted` (carry differentiation in audit `data.subreason=post_fix_review_rejected`).
 
