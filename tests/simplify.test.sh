@@ -22,6 +22,13 @@ for f in "$SIMPLIFY" "$CODE_SIMPLIFIER" "$CODE_FIXER"; do
   fi
 done
 
+# Keep slash-prefixed jq filter literals unchanged at the Git-for-Windows
+# native-process boundary. These controls are inert on POSIX hosts.
+# Exact-line lookup decoys: export MSYS_NO_PATHCONV=1
+# Exact-line lookup decoys: export MSYS2_ARG_CONV_EXCL='*'
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL='*'
+
 PASS=0
 FAIL=0
 
@@ -342,13 +349,37 @@ assert_in_section "$CODE_FIXER" '^## Process' '^## Refusal triggers' \
 
 echo
 echo "== E5: standalone deferred-findings handoff is Phase-2-only =="
+MSYS_NO_PATHCONV_COUNT="$(grep -Fxc 'export MSYS_NO_PATHCONV=1' "$0" || true)"
+MSYS_ARG_EXCL_COUNT="$(grep -Fxc "export MSYS2_ARG_CONV_EXCL='*'" "$0" || true)"
+MSYS_NO_PATHCONV_LINE="$(grep -Fnx 'export MSYS_NO_PATHCONV=1' "$0" \
+  | head -n1 | cut -d: -f1)"
+MSYS_ARG_EXCL_LINE="$(grep -Fnx "export MSYS2_ARG_CONV_EXCL='*'" "$0" \
+  | head -n1 | cut -d: -f1)"
+MSYS_NO_PATHCONV_SOURCE="$(sed -n "${MSYS_NO_PATHCONV_LINE}p" "$0")"
+MSYS_ARG_EXCL_SOURCE="$(sed -n "${MSYS_ARG_EXCL_LINE}p" "$0")"
+DEFER_EVAL_LINE="$(awk '$0 == "eval \"$DEFER_LINE\"" { print NR; exit }' "$0")"
+DEFER_JQ_LINE="$(awk \
+  '/^[[:space:]]*&& printf/ && index($0,"DEFER_INPUTS") && index($0,"| jq -e") {
+    print NR
+    exit
+  }' "$0")"
 DEFER_LINE="$(grep '^DEFER_INPUTS=' "$SIMPLIFY" | head -n1)"
 AGG_PATH="/repo/.uberdev/research/20260726-010203-abcdef0/simplify-final.md"
 PHASE2_DISPOSITION_PATH="/repo/.uberdev/research/20260726-010203-abcdef0/phase2-disposition.json"
 WORKING_DIR_ABS="/repo"
 PR_NUMBER=0
 eval "$DEFER_LINE"
-if printf '%s' "$DEFER_INPUTS" | jq -e \
+if [ "$MSYS_NO_PATHCONV_COUNT" -eq 1 ] \
+  && [ "$MSYS_ARG_EXCL_COUNT" -eq 1 ] \
+  && [ "$MSYS_NO_PATHCONV_SOURCE" = 'export MSYS_NO_PATHCONV=1' ] \
+  && [ "$MSYS_ARG_EXCL_SOURCE" = "export MSYS2_ARG_CONV_EXCL='*'" ] \
+  && [ -n "$DEFER_EVAL_LINE" ] \
+  && [ -n "$DEFER_JQ_LINE" ] \
+  && [ "$MSYS_NO_PATHCONV_LINE" -lt "$DEFER_EVAL_LINE" ] \
+  && [ "$MSYS_NO_PATHCONV_LINE" -lt "$DEFER_JQ_LINE" ] \
+  && [ "$MSYS_ARG_EXCL_LINE" -lt "$DEFER_EVAL_LINE" ] \
+  && [ "$MSYS_ARG_EXCL_LINE" -lt "$DEFER_JQ_LINE" ] \
+  && printf '%s' "$DEFER_INPUTS" | jq -e \
   '.phase1_path=="" and .phase1_disposition_path=="" and
    (.phase2_path|endswith("/simplify-final.md"))' >/dev/null 2>&1 \
    && printf '%s' "$DEFER_INPUTS" | jq -e \
