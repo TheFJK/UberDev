@@ -109,6 +109,207 @@ PY
   WINDOWS_REPO_ID="$(git -C "$WINDOWS_REPO" rev-parse --show-toplevel)"
   WINDOWS_SHELL_ID="$(windows_shell_directory "$WINDOWS_REPO")"
   [ "$(windows_shell_directory "$WINDOWS_REPO_ID")" = "$WINDOWS_SHELL_ID" ]
+  python3 -I -B - "$ROOT/plugins/uberdev/lib/command-workspace.py" "$WINDOWS_REPO_ID" <<'PY'
+import importlib.util,os,sys
+helper,repo=sys.argv[1:]
+if os.name!="nt":
+    raise SystemExit(0)
+spec=importlib.util.spec_from_file_location("windows_binding_probe",helper)
+module=importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+root_binding=module.portable_bind_existing_directory(repo,"repository_changed")
+child_binding=None
+probe=os.path.join(repo,".command-workspace-binding-probe")
+try:
+    child_binding,created=module.portable_bind_or_create_child(
+        root_binding,repo,".command-workspace-binding-probe"
+    )
+    assert created
+    try:
+        os.replace(probe,probe+"-replacement")
+    except OSError:
+        pass
+    else:
+        raise AssertionError("bound directory was replaceable")
+    assert module.windows_binding_matches_path(
+        probe,child_binding,"unsafe_directory"
+    )
+    module.windows_mark_directory_for_deletion(
+        child_binding,"unsafe_directory"
+    )
+finally:
+    if child_binding is not None:
+        module.close_directory_binding(child_binding)
+    module.close_directory_binding(root_binding)
+assert not os.path.lexists(probe)
+assert not os.path.lexists(probe+"-replacement")
+
+concurrent_probe=os.path.join(repo,".command-workspace-concurrency-probe")
+first_root=module.portable_bind_existing_directory(repo,"repository_changed")
+second_root=module.portable_bind_existing_directory(repo,"repository_changed")
+first_child=None
+second_child=None
+real_sleep=module.time.sleep
+sleep_calls=[]
+try:
+    first_child,first_created=module.portable_bind_or_create_child(
+        first_root,repo,".command-workspace-concurrency-probe"
+    )
+    assert first_created
+    expected_identity=first_child.handle_identity
+    def release_creator(delay):
+        sleep_calls.append(delay)
+        module.close_directory_binding(first_child)
+    module.time.sleep=release_creator
+    second_child,second_created=module.portable_bind_or_create_child(
+        second_root,repo,".command-workspace-concurrency-probe"
+    )
+    assert not second_created
+    assert sleep_calls
+    assert expected_identity==second_child.handle_identity
+    for operation in (
+        lambda: os.replace(concurrent_probe,concurrent_probe+"-replacement"),
+        lambda: os.rmdir(concurrent_probe),
+    ):
+        try:
+            operation()
+        except OSError:
+            pass
+        else:
+            raise AssertionError("fallback guard did not block rename/delete")
+finally:
+    module.time.sleep=real_sleep
+    if second_child is not None:
+        module.close_directory_binding(second_child)
+    if first_child is not None:
+        module.close_directory_binding(first_child)
+    module.close_directory_binding(second_root)
+    module.close_directory_binding(first_root)
+os.rmdir(concurrent_probe)
+assert not os.path.lexists(concurrent_probe+"-replacement")
+
+existing_probe=os.path.join(repo,".command-workspace-existing-probe")
+os.mkdir(existing_probe)
+existing_root=module.portable_bind_existing_directory(repo,"repository_changed")
+existing_child=None
+try:
+    existing_child,existing_created=module.portable_bind_or_create_child(
+        existing_root,repo,".command-workspace-existing-probe"
+    )
+    assert not existing_created
+    for operation in (
+        lambda: os.replace(existing_probe,existing_probe+"-replacement"),
+        lambda: os.rmdir(existing_probe),
+    ):
+        try:
+            operation()
+        except OSError:
+            pass
+        else:
+            raise AssertionError("fallback-only binding was replaceable")
+finally:
+    if existing_child is not None:
+        module.close_directory_binding(existing_child)
+    module.close_directory_binding(existing_root)
+os.rmdir(existing_probe)
+assert not os.path.lexists(existing_probe+"-replacement")
+
+mismatch_probe=os.path.join(repo,".command-workspace-mismatch-probe")
+mismatch_original=mismatch_probe+"-original"
+mismatch_creator_root=module.portable_bind_existing_directory(
+    repo,"repository_changed"
+)
+mismatch_waiter_root=module.portable_bind_existing_directory(
+    repo,"repository_changed"
+)
+mismatch_creator=None
+real_sleep=module.time.sleep
+try:
+    mismatch_creator,mismatch_created=module.portable_bind_or_create_child(
+        mismatch_creator_root,repo,".command-workspace-mismatch-probe"
+    )
+    assert mismatch_created
+    def replace_during_handoff(_delay):
+        module.close_directory_binding(mismatch_creator)
+        os.replace(mismatch_probe,mismatch_original)
+        os.mkdir(mismatch_probe)
+        with open(os.path.join(mismatch_probe,"attacker-marker"),"wb") as stream:
+            stream.write(b"replacement-must-survive")
+    module.time.sleep=replace_during_handoff
+    try:
+        module.portable_bind_or_create_child(
+            mismatch_waiter_root,repo,".command-workspace-mismatch-probe"
+        )
+    except module.Failure as error:
+        assert str(error)=="unsafe_directory"
+    else:
+        raise AssertionError("tracker-to-guard identity mismatch was accepted")
+finally:
+    module.time.sleep=real_sleep
+    if mismatch_creator is not None:
+        module.close_directory_binding(mismatch_creator)
+    module.close_directory_binding(mismatch_waiter_root)
+    module.close_directory_binding(mismatch_creator_root)
+with open(os.path.join(mismatch_probe,"attacker-marker"),"rb") as stream:
+    assert stream.read()==b"replacement-must-survive"
+os.unlink(os.path.join(mismatch_probe,"attacker-marker"))
+os.rmdir(mismatch_probe)
+os.rmdir(mismatch_original)
+
+timeout_probe=os.path.join(repo,".command-workspace-timeout-probe")
+timeout_creator_root=module.portable_bind_existing_directory(
+    repo,"repository_changed"
+)
+timeout_waiter_root=module.portable_bind_existing_directory(
+    repo,"repository_changed"
+)
+timeout_creator=None
+real_monotonic=module.time.monotonic
+try:
+    timeout_creator,timeout_created=module.portable_bind_or_create_child(
+        timeout_creator_root,repo,".command-workspace-timeout-probe"
+    )
+    assert timeout_created
+    ticks=iter((0.0,module.WINDOWS_DIRECTORY_BIND_TIMEOUT_SECONDS))
+    module.time.monotonic=lambda: next(ticks)
+    try:
+        module.portable_bind_or_create_child(
+            timeout_waiter_root,repo,".command-workspace-timeout-probe"
+        )
+    except module.Failure as error:
+        assert str(error)=="unsafe_directory"
+    else:
+        raise AssertionError("sharing timeout was accepted")
+    assert os.path.isdir(timeout_probe)
+    module.windows_mark_directory_for_deletion(
+        timeout_creator,"unsafe_directory"
+    )
+finally:
+    module.time.monotonic=real_monotonic
+    if timeout_creator is not None:
+        module.close_directory_binding(timeout_creator)
+    module.close_directory_binding(timeout_waiter_root)
+    module.close_directory_binding(timeout_creator_root)
+assert not os.path.lexists(timeout_probe)
+PY
+  WINDOWS_REQUESTED_ROOT="$(python3 -I -B - "$WINDOWS_REPO_ID" <<'PY'
+import os,sys
+path=sys.argv[1]
+if os.name=="nt":
+    characters=list(path)
+    for index,character in enumerate(characters):
+        if character.isalpha():
+            characters[index]=character.swapcase()
+    variant="".join(characters)
+    assert variant!=path
+    assert os.path.normcase(os.path.abspath(variant))==os.path.normcase(os.path.abspath(path))
+    assert os.path.samefile(variant,path)
+    print(variant,end="")
+else:
+    print(path,end="")
+PY
+)"
 
   WINDOWS_RUN="$WINDOWS_REPO_ID/.uberdev/runs/windows-review-carrier"; mkdir -p "$WINDOWS_RUN"
   WINDOWS_REQUEST="$(jq -cn --arg run "$WINDOWS_RUN" --arg repo "$WINDOWS_REPO_ID" \
@@ -366,10 +567,53 @@ PY
   UBERDEV_RUN_CARRIER_JSON="$(jq -cn --arg context "$WINDOWS_CONTEXT" --arg sha "$WINDOWS_CONTEXT_SHA" \
     '{schema_version:1,run_id:"windows-review-carrier",workflow:"review-pr",issue_num:91,context_file:$context,context_sha256:$sha}')"
   export UBERDEV_RUN_CARRIER_JSON
-  WINDOWS_WORKSPACE="$(uberdev_command_workspace_prepare review-pr 91 medium '[]' 20260726-010203-abcdef0 "$WINDOWS_REPO_ID")"
+  WINDOWS_WORKSPACE_JUNCTION_TARGET="$TMP/windows-workspace-junction-target"
+  WINDOWS_WORKSPACE_JUNCTION="$WINDOWS_REPO_ID/.uberdev/research"
+  mkdir -p "$WINDOWS_WORKSPACE_JUNCTION_TARGET"
+  windows_create_verified_junction \
+    "$WINDOWS_REPO_ID/.uberdev" "$WINDOWS_WORKSPACE_JUNCTION_TARGET" \
+    "$WINDOWS_WORKSPACE_JUNCTION"
+  if uberdev_command_workspace_prepare \
+      review-pr 91 medium '[]' 20260726-010203-abcdeef "$WINDOWS_REPO_ID" \
+      >/dev/null 2>&1; then
+    echo 'review-child-handoff: workspace research junction was accepted' >&2
+    exit 1
+  fi
+  python3 -I -B - "$WINDOWS_WORKSPACE_JUNCTION" "$WINDOWS_WORKSPACE_JUNCTION_TARGET" <<'PY'
+import os,sys
+junction,target=sys.argv[1:]
+if os.name=="nt":
+    os.rmdir(junction)
+else:
+    os.unlink(junction)
+os.rmdir(target)
+PY
+  WINDOWS_WORKSPACE="$(uberdev_command_workspace_prepare review-pr 91 medium '[]' 20260726-010203-abcdef0 "$WINDOWS_REQUESTED_ROOT")"
   jq -e '.caller=="review-pr"' <<<"$WINDOWS_WORKSPACE" >/dev/null
   WINDOWS_WORKSPACE_ROOT="$(jq -r .repository_root <<<"$WINDOWS_WORKSPACE")"
   [ "$(windows_shell_directory "$WINDOWS_WORKSPACE_ROOT")" = "$WINDOWS_SHELL_ID" ]
+  python3 -I -B - "$WINDOWS_WORKSPACE" <<'PY'
+import json,os,stat,sys
+descriptor=json.loads(sys.argv[1])
+workspace=descriptor["research_dir"]
+expected={
+    "diff":b'<external-untrusted-input source="pr-diff">\n</external-untrusted-input>\n',
+    "criteria":b"",
+    "commit_range":b"",
+    "phase1_disposition":b"{}\n",
+    "phase2_disposition":b"{}\n",
+}
+assert set(descriptor["artifacts"])==set(expected)
+reparse=getattr(stat,"FILE_ATTRIBUTE_REPARSE_POINT",0x400)
+for key,path in descriptor["artifacts"].items():
+    assert os.path.normcase(os.path.commonpath((workspace,path)))==os.path.normcase(workspace)
+    entry=os.lstat(path)
+    assert stat.S_ISREG(entry.st_mode) and entry.st_nlink==1
+    assert not stat.S_ISLNK(entry.st_mode)
+    assert not bool(getattr(entry,"st_file_attributes",0)&reparse)
+    with open(path,"rb") as stream:
+        assert stream.read()==expected[key]
+PY
 
   WINDOWS_REVIEW_INPUT="$(jq -cn --arg p "$WINDOWS_REPO_ID/README.md" \
     '{changed_paths:["README.md"],diff_path:$p,criteria_path:$p,emphasis:[]}')"

@@ -29,6 +29,403 @@ file_link_count() {
   fi
 }
 
+# Exercise the complete no-dir-fd path on the host filesystem. Native Windows
+# runs the same production branch again through review-child-handoff's wired
+# --windows-path-only mode.
+python3 -I -B - "$HELPER" "$ROOT/codex/uberdev-codex/lib/command-workspace.py" "$TMP/portable" <<'PY'
+import hashlib
+import importlib.util
+import json
+import ntpath
+import os
+import pathlib
+import subprocess
+import sys
+
+
+module_paths = sys.argv[1:3]
+fixture_root = pathlib.Path(sys.argv[3])
+
+
+def expect_failure(module, code, operation):
+    try:
+        operation()
+    except module.Failure as error:
+        assert str(error) == code, (str(error), code)
+    else:
+        raise AssertionError(f"{code} was accepted")
+
+
+def fixture(module, name):
+    root = fixture_root / name
+    repo = root / "repo"
+    run = root / "run"
+    state = run / ".agent-state-0"
+    repo.mkdir(parents=True)
+    state.mkdir(parents=True)
+    subprocess.run(["git", "-C", repo, "init", "-q"], check=True)
+    context = state / f"route-context-v1-{name}.json"
+    payload = json.dumps(
+        {
+            "metadata": {
+                "run_id": f"root-{name}",
+                "workflow": "review-pr",
+                "issue_num": 91,
+                "repository_id": str(repo.resolve()),
+            }
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    context.write_bytes(payload)
+    os.chmod(state, 0o700)
+    os.chmod(context, 0o600)
+    carrier = {
+        "schema_version": 1,
+        "run_id": f"root-{name}",
+        "workflow": "review-pr",
+        "issue_num": 91,
+        "context_file": str(context.resolve()),
+        "context_sha256": hashlib.sha256(payload).hexdigest(),
+    }
+    return root, repo.resolve(), state.resolve(), context.resolve(), carrier
+
+
+for index, module_path in enumerate(module_paths):
+    spec = importlib.util.spec_from_file_location(
+        f"command_workspace_portable_{index}", module_path
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    module.native_windows = lambda: True
+    module.effective_uid = lambda: None
+    assert module.filesystem_mode() == "portable_windows"
+    assert module.state_directory_name() == ".agent-state-0"
+    assert module.windows_directory_access(2) == (
+        0x00010000 | 0x00000080 | 0x00100000,
+        0x00000001 | 0x00000002,
+    )
+    assert module.windows_directory_access(1) == (
+        0x00000080 | 0x00100000,
+        0x00000001 | 0x00000002,
+    )
+    assert module.windows_tracker_access() == (
+        0x00000080 | 0x00100000,
+        0x00000001 | 0x00000002 | 0x00000004,
+    )
+    assert module.windows_verifier_access(True) == (
+        0x00000080 | 0x00100000,
+        0x00000001 | 0x00000002 | 0x00000004,
+    )
+    assert module.windows_verifier_access(False) == (
+        0x00000080 | 0x00100000,
+        0x00000001 | 0x00000002,
+    )
+    assert module.WINDOWS_STATUS_OBJECT_NAME_COLLISION == 0xC0000035
+    assert module.WINDOWS_STATUS_SHARING_VIOLATION == 0xC0000043
+    assert (
+        0
+        < module.WINDOWS_DIRECTORY_BIND_RETRY_INTERVAL_SECONDS
+        < module.WINDOWS_DIRECTORY_BIND_TIMEOUT_SECONDS
+        <= 5
+    )
+    assert module.windows_retry_delay(2.0, 1.0) == min(
+        module.WINDOWS_DIRECTORY_BIND_RETRY_INTERVAL_SECONDS, 1.0
+    )
+    assert module.windows_retry_delay(2.0, 1.999) > 0
+    expect_failure(
+        module,
+        "unsafe_directory",
+        lambda: module.windows_retry_delay(2.0, 2.0),
+    )
+    expect_failure(
+        module,
+        "unsafe_directory",
+        lambda: module.windows_directory_access(3),
+    )
+
+    root, repo, _state, context, carrier = fixture(module, f"valid-{index}")
+    real_normcase = module.os.path.normcase
+    module.os.path.normcase = ntpath.normcase
+    try:
+        assert module.same_portable_path(str(repo).swapcase(), str(repo))
+    finally:
+        module.os.path.normcase = real_normcase
+    loaded = module.load_carrier(
+        json.dumps(carrier, separators=(",", ":")), "review-pr"
+    )
+    module.validate_requested_root(
+        str(repo), str(repo), loaded[4], "portable_windows"
+    )
+    expect_failure(
+        module,
+        "repository_mismatch",
+        lambda: module.validate_requested_root(
+            str(repo), str(repo), (loaded[4][0], loaded[4][1] + 1),
+            "portable_windows",
+        ),
+    )
+    workspace, artifacts = module.allocate_workspace(
+        str(repo),
+        f"20260727-01020{index}-abcdef0",
+        module.CALLERS["review-pr"]["artifacts"],
+        loaded[4],
+    )
+    assert pathlib.Path(workspace).is_dir()
+    assert set(artifacts) == set(module.CALLERS["review-pr"]["artifacts"])
+    assert all(pathlib.Path(path).is_file() for path in artifacts.values())
+    assert all(
+        os.path.commonpath((str(repo), path)) == str(repo)
+        for path in artifacts.values()
+    )
+
+    _root, repo, _state, _context, mkdir_race_carrier = fixture(
+        module, f"mkdir-replacement-{index}"
+    )
+    loaded = module.load_carrier(
+        json.dumps(mkdir_race_carrier, separators=(",", ":")), "review-pr"
+    )
+    mkdir_race_run = f"20260727-01024{index}-abcdef0"
+    replacement_root = repo / ".uberdev"
+    displaced_root = repo / ".uberdev-created-by-helper"
+    real_bind_child = module.portable_bind_or_create_child
+
+    def replace_created_directory(parent_binding, parent, name):
+        binding, created = real_bind_child(parent_binding, parent, name)
+        if name == ".uberdev" and created:
+            os.replace(replacement_root, displaced_root)
+            replacement_root.mkdir()
+            (replacement_root / "attacker-marker").write_bytes(
+                b"replacement-must-not-receive-artifacts"
+            )
+        return binding, created
+
+    module.portable_bind_or_create_child = replace_created_directory
+    try:
+        expect_failure(
+            module,
+            "unsafe_directory",
+            lambda: module.allocate_workspace(
+                str(repo),
+                mkdir_race_run,
+                module.CALLERS["review-pr"]["artifacts"],
+                loaded[4],
+            ),
+        )
+    finally:
+        module.portable_bind_or_create_child = real_bind_child
+    assert (replacement_root / "attacker-marker").read_bytes() == (
+        b"replacement-must-not-receive-artifacts"
+    )
+    assert not (replacement_root / "research").exists()
+
+    module.native_windows = lambda: False
+    assert not module.owned_by_current_user(os.stat(repo))
+    expect_failure(module, "unsupported_platform", module.filesystem_mode)
+    module.effective_uid = lambda: 501
+    module.secure_dir_fd_available = lambda: False
+    expect_failure(module, "unsupported_platform", module.filesystem_mode)
+    module.native_windows = lambda: True
+    module.effective_uid = lambda: None
+
+    _root, _repo, _state, _context, bad_name = fixture(
+        module, f"bad-name-{index}"
+    )
+    bad_name["context_file"] = bad_name["context_file"].replace(
+        ".agent-state-0", ".agent-state-999999"
+    )
+    expect_failure(
+        module,
+        "invalid_context",
+        lambda: module.load_carrier(
+            json.dumps(bad_name, separators=(",", ":")), "review-pr"
+        ),
+    )
+
+    _root, _repo, state, context, noncanonical = fixture(
+        module, f"noncanonical-{index}"
+    )
+    noncanonical["context_file"] = os.path.join(
+        state, "..", state.name, context.name
+    )
+    expect_failure(
+        module,
+        "invalid_context",
+        lambda: module.load_carrier(
+            json.dumps(noncanonical, separators=(",", ":")), "review-pr"
+        ),
+    )
+
+    _root, _repo, _state, context, hardlinked = fixture(
+        module, f"hardlink-{index}"
+    )
+    os.link(context, context.with_name("context-hardlink"))
+    expect_failure(
+        module,
+        "invalid_context",
+        lambda: module.load_carrier(
+            json.dumps(hardlinked, separators=(",", ":")), "review-pr"
+        ),
+    )
+
+    _root, _repo, _state, context, symlinked = fixture(
+        module, f"symlink-{index}"
+    )
+    backing = context.with_name("context-backing")
+    os.replace(context, backing)
+    os.symlink(backing, context)
+    expect_failure(
+        module,
+        "invalid_context",
+        lambda: module.load_carrier(
+            json.dumps(symlinked, separators=(",", ":")), "review-pr"
+        ),
+    )
+
+    _root, _repo, state, context, linked_state = fixture(
+        module, f"linked-state-{index}"
+    )
+    state_backing = state.with_name("state-backing")
+    os.replace(state, state_backing)
+    os.symlink(state_backing, state, target_is_directory=True)
+    expect_failure(
+        module,
+        "invalid_context",
+        lambda: module.load_carrier(
+            json.dumps(linked_state, separators=(",", ":")), "review-pr"
+        ),
+    )
+
+    _root, _repo, _state, context, oversized = fixture(
+        module, f"oversized-{index}"
+    )
+    oversized_payload = b"x" * 1048577
+    context.write_bytes(oversized_payload)
+    oversized["context_sha256"] = hashlib.sha256(oversized_payload).hexdigest()
+    expect_failure(
+        module,
+        "invalid_context",
+        lambda: module.load_carrier(
+            json.dumps(oversized, separators=(",", ":")), "review-pr"
+        ),
+    )
+
+    _root, _repo, _state, context, replaced = fixture(
+        module, f"replacement-{index}"
+    )
+    replacement = context.with_name("context-replacement")
+    replacement.write_bytes(context.read_bytes())
+    os.chmod(replacement, 0o600)
+    real_open = module.os.open
+
+    def replacing_open(path, flags, *args, **kwargs):
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if os.path.normcase(os.path.abspath(path)) == os.path.normcase(
+            os.path.abspath(context)
+        ):
+            os.replace(replacement, context)
+        return descriptor
+
+    module.os.open = replacing_open
+    try:
+        expect_failure(
+            module,
+            "invalid_context",
+            lambda: module.load_carrier(
+                json.dumps(replaced, separators=(",", ":")), "review-pr"
+            ),
+        )
+    finally:
+        module.os.open = real_open
+
+    for kind in ("hardlink", "symlink"):
+        _root, repo, _state, _context, artifact_carrier = fixture(
+            module, f"artifact-{kind}-{index}"
+        )
+        loaded = module.load_carrier(
+            json.dumps(artifact_carrier, separators=(",", ":")), "review-pr"
+        )
+        run_id = f"20260727-01021{index}-{kind[:6]}"
+        workspace = repo / ".uberdev" / "research" / run_id
+        workspace.mkdir(parents=True)
+        artifact = workspace / "pr-diff.md"
+        target = workspace / "artifact-target"
+        target.write_bytes(b"fixture")
+        if kind == "hardlink":
+            os.link(target, artifact)
+        else:
+            os.symlink(target, artifact)
+        expect_failure(
+            module,
+            "unsafe_artifact",
+            lambda: module.allocate_workspace(
+                str(repo),
+                run_id,
+                module.CALLERS["review-pr"]["artifacts"],
+                loaded[4],
+            ),
+        )
+
+    _root, repo, _state, _context, rollback_carrier = fixture(
+        module, f"rollback-replacement-{index}"
+    )
+    loaded = module.load_carrier(
+        json.dumps(rollback_carrier, separators=(",", ":")), "review-pr"
+    )
+    rollback_run = f"20260727-01023{index}-abcdef0"
+    rollback_artifact = (
+        repo / ".uberdev" / "research" / rollback_run / "pr-diff.md"
+    )
+    real_write = module.os.write
+
+    def replace_then_fail(descriptor, data):
+        if rollback_artifact.exists():
+            original = rollback_artifact.with_name("created-original")
+            replacement = rollback_artifact.with_name("attacker-replacement")
+            os.replace(rollback_artifact, original)
+            replacement.write_bytes(b"replacement-must-survive")
+            os.replace(replacement, rollback_artifact)
+            raise OSError("injected write failure after replacement")
+        return real_write(descriptor, data)
+
+    module.os.write = replace_then_fail
+    try:
+        expect_failure(
+            module,
+            "unsafe_artifact",
+            lambda: module.allocate_workspace(
+                str(repo),
+                rollback_run,
+                module.CALLERS["review-pr"]["artifacts"],
+                loaded[4],
+            ),
+        )
+    finally:
+        module.os.write = real_write
+    assert rollback_artifact.read_bytes() == b"replacement-must-survive"
+
+    _root, repo, _state, _context, directory_carrier = fixture(
+        module, f"directory-link-{index}"
+    )
+    loaded = module.load_carrier(
+        json.dumps(directory_carrier, separators=(",", ":")), "review-pr"
+    )
+    outside = repo.parent / "outside-workspace"
+    outside.mkdir()
+    os.symlink(outside, repo / ".uberdev", target_is_directory=True)
+    expect_failure(
+        module,
+        "unsafe_directory",
+        lambda: module.allocate_workspace(
+            str(repo),
+            f"20260727-01022{index}-abcdef0",
+            module.CALLERS["review-pr"]["artifacts"],
+            loaded[4],
+        ),
+    )
+PY
+
 make_carrier() {
   local workflow="$1" issue="$2" repo="$3" run="$4" request decision metadata context_out context sha
   mkdir -p "$run"
