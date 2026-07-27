@@ -172,9 +172,32 @@ for index, module_path in enumerate(module_paths):
             close_binding, primary=primary_close_error
         )
         assert close_binding.handle == 73
-        assert getattr(primary_close_error, "__notes__", []) == [
-            'workspace_rollback_failed:{"artifact_classes":["directory_handle"]}'
-        ]
+        assert module.cleanup_diagnostic(primary_close_error) == {
+            "artifact_classes": ["directory_handle"],
+            "code": "workspace_rollback_failed",
+        }
+
+        verifier_binding = module.DirectoryBinding(79, (1, 3), (1, 3))
+        real_disposition = module.windows_mark_directory_for_deletion
+        module.windows_mark_directory_for_deletion = (
+            lambda _binding, reason: module.fail(reason)
+        )
+        try:
+            try:
+                module.reject_windows_verifier_open(
+                    verifier_binding, created=True, reason="unsafe_directory"
+                )
+            except module.Failure as error:
+                assert str(error) == "unsafe_directory", str(error)
+                assert module.cleanup_diagnostic(error) == {
+                    "artifact_classes": ["directory", "directory_handle"],
+                    "code": "workspace_rollback_failed",
+                }
+            else:
+                raise AssertionError("verifier cleanup failures replaced the primary")
+        finally:
+            module.windows_mark_directory_for_deletion = real_disposition
+        assert verifier_binding.handle == 79
     finally:
         if had_windll:
             ctypes.WinDLL = original_windll
@@ -497,14 +520,10 @@ for index, module_path in enumerate(module_paths):
                 )
             except module.Failure as error:
                 assert error is primary, (error, primary)
-                assert getattr(error, "__notes__", []) == [
-                    "workspace_rollback_failed:"
-                    + json.dumps(
-                        {"artifact_classes": expected_classes},
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                ]
+                assert module.cleanup_diagnostic(error) == {
+                    "artifact_classes": expected_classes,
+                    "code": "workspace_rollback_failed",
+                }
             else:
                 raise AssertionError(f"{kind} rollback failure was hidden")
         finally:
@@ -538,6 +557,52 @@ for index, module_path in enumerate(module_paths):
             loaded[4],
         ),
     )
+PY
+
+python3 -I -B - "$HELPER" "$ROOT/codex/uberdev-codex/lib/command-workspace.py" <<'PY'
+import importlib.util
+import pathlib
+import subprocess
+import sys
+import textwrap
+
+for index, module_path in enumerate(sys.argv[1:]):
+    raw = pathlib.Path(module_path).read_text(encoding="utf-8")
+    assert ".add_note(" not in raw
+    assert "sys.exception(" not in raw
+    program = textwrap.dedent(
+        """
+        import importlib.util
+        import sys
+
+        module_path = sys.argv[1]
+        spec = importlib.util.spec_from_file_location("command_workspace_cli", module_path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        primary = module.Failure("unsafe_artifact")
+        module.add_cleanup_diagnostic(primary, {"file"})
+        def injected_main():
+            raise primary
+        module.main = injected_main
+        raise SystemExit(module.cli())
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", program, module_path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        text=True,
+    )
+    assert completed.returncode == 2, (index, completed.returncode)
+    assert completed.stdout == "", (index, completed.stdout)
+    assert completed.stderr == (
+        "uberdev command workspace: unsafe_artifact\n"
+        'uberdev command workspace cleanup: '
+        '{"artifact_classes":["file"],"code":"workspace_rollback_failed"}\n'
+    ), (index, completed.stderr)
+print("command-workspace-cli-cleanup-diagnostic-ok")
 PY
 
 make_carrier() {

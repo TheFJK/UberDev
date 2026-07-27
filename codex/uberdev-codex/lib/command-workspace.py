@@ -61,6 +61,10 @@ WINDOWS_STATUS_OBJECT_NAME_COLLISION = 0xC0000035
 WINDOWS_STATUS_SHARING_VIOLATION = 0xC0000043
 WINDOWS_DIRECTORY_BIND_TIMEOUT_SECONDS = 2.0
 WINDOWS_DIRECTORY_BIND_RETRY_INTERVAL_SECONDS = 0.01
+_CLEANUP_ARTIFACT_CLASSES = frozenset(
+    {"directory", "directory_handle", "file"}
+)
+_CLEANUP_DIAGNOSTIC_ATTRIBUTE = "_uberdev_workspace_cleanup_artifact_classes"
 
 
 class Failure(Exception):
@@ -70,17 +74,26 @@ class Failure(Exception):
 def add_cleanup_diagnostic(
     primary: BaseException, artifact_classes: set[str] | tuple[str, ...]
 ) -> None:
-    classes = sorted(set(artifact_classes))
-    if not classes:
-        return
-    primary.add_note(
-        "workspace_rollback_failed:"
-        + json.dumps(
-            {"artifact_classes": classes},
-            sort_keys=True,
-            separators=(",", ":"),
+    existing = getattr(primary, _CLEANUP_DIAGNOSTIC_ATTRIBUTE, ())
+    classes = tuple(
+        sorted(
+            (set(existing) | set(artifact_classes))
+            & _CLEANUP_ARTIFACT_CLASSES
         )
     )
+    if not classes:
+        return
+    setattr(primary, _CLEANUP_DIAGNOSTIC_ATTRIBUTE, classes)
+
+
+def cleanup_diagnostic(primary: BaseException) -> dict[str, Any] | None:
+    classes = getattr(primary, _CLEANUP_DIAGNOSTIC_ATTRIBUTE, ())
+    if not classes:
+        return None
+    return {
+        "artifact_classes": list(classes),
+        "code": "workspace_rollback_failed",
+    }
 
 
 class DirectoryBinding:
@@ -519,7 +532,7 @@ def windows_create_or_open_child(
             bound_binding = guard
             handle = guard_handle
         finally:
-            close_directory_binding(tracker, primary=sys.exception())
+            close_directory_binding(tracker, primary=sys.exc_info()[1])
     else:
         if handle == 0:
             fail(reason)
@@ -539,13 +552,7 @@ def windows_create_or_open_child(
     verify_access, verify_share = windows_verifier_access(created)
     verify_status, verify_handle = invoke(1, verify_access, verify_share)
     if verify_status < 0 or verify_handle == 0:
-        if created:
-            try:
-                windows_mark_directory_for_deletion(bound_binding, reason)
-            except Failure:
-                pass
-        close_directory_binding(bound_binding)
-        fail(reason)
+        reject_windows_verifier_open(bound_binding, created, reason)
     try:
         if windows_handle_identity(verify_handle, reason) != identity:
             fail(reason)
@@ -562,7 +569,7 @@ def windows_create_or_open_child(
     finally:
         close_directory_binding(
             DirectoryBinding(verify_handle, identity, (0, 0)),
-            primary=sys.exception(),
+            primary=sys.exc_info()[1],
         )
     return handle, identity, created
 
@@ -597,6 +604,21 @@ def windows_mark_directory_for_deletion(
         fail(reason)
 
 
+def reject_windows_verifier_open(
+    binding: DirectoryBinding, created: bool, reason: str
+) -> None:
+    primary = Failure(reason)
+    cleanup_failures: set[str] = set()
+    if created:
+        try:
+            windows_mark_directory_for_deletion(binding, reason)
+        except Failure:
+            cleanup_failures.add("directory")
+    close_directory_binding(binding, primary=primary)
+    add_cleanup_diagnostic(primary, cleanup_failures)
+    raise primary
+
+
 def windows_binding_matches_path(
     path: str, binding: DirectoryBinding, reason: str
 ) -> bool:
@@ -607,7 +629,7 @@ def windows_binding_matches_path(
     try:
         return identity == binding.handle_identity
     finally:
-        close_directory_binding(verifier, primary=sys.exception())
+        close_directory_binding(verifier, primary=sys.exc_info()[1])
 
 
 def portable_bind_existing_directory(path: str, reason: str) -> DirectoryBinding:
@@ -1177,7 +1199,7 @@ def allocate_workspace_portable(
         add_cleanup_diagnostic(error, cleanup_failures)
         raise
     finally:
-        primary = sys.exception()
+        primary = sys.exc_info()[1]
         for binding in reversed(bindings):
             close_directory_binding(binding, primary=primary)
 
@@ -1360,9 +1382,24 @@ def main() -> int:
     return 0
 
 
-if __name__ == "__main__":
+def cli() -> int:
     try:
-        raise SystemExit(main())
+        return main()
     except Failure as error:
         print(f"uberdev command workspace: {error}", file=sys.stderr)
-        raise SystemExit(2)
+        diagnostic = cleanup_diagnostic(error)
+        if diagnostic is not None:
+            print(
+                "uberdev command workspace cleanup: "
+                + json.dumps(
+                    diagnostic,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                file=sys.stderr,
+            )
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli())

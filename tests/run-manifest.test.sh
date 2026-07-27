@@ -88,7 +88,11 @@ fi
 WINDOWS_PARENT_PROBE_SPLIT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
 import errno
 import importlib.util
+import json
+import pathlib
+import subprocess
 import sys
+import textwrap
 
 
 class Function:
@@ -295,11 +299,50 @@ for index, module_path in enumerate(sys.argv[1:]):
             raise primary_close_error
     except ProcessLookupError as error:
         assert error is primary_close_error, (error, primary_close_error)
-        assert getattr(error, "__notes__", []) == [
-            "windows_handle_close_failed"
-        ]
+        assert module._cleanup_diagnostic(error) == {
+            "code": "windows_handle_close_failed"
+        }
     else:
         raise AssertionError("CloseHandle replaced the primary exception")
+
+    raw = pathlib.Path(module_path).read_text(encoding="utf-8")
+    assert ".add_note(" not in raw
+    assert "sys.exception(" not in raw
+    program = textwrap.dedent(
+        """
+        import importlib.util
+        import sys
+
+        module_path = sys.argv[1]
+        spec = importlib.util.spec_from_file_location("run_manifest_cli", module_path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        primary = ProcessLookupError(424242)
+        module._record_cleanup_diagnostic(
+            primary, "windows_handle_close_failed"
+        )
+        def injected_record(_pid):
+            raise primary
+        module._native_process_record = injected_record
+        raise SystemExit(module.main(["process-identity", "--pid", "424242"]))
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", program, module_path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        text=True,
+    )
+    assert completed.returncode == 1, (index, completed.returncode)
+    assert completed.stdout == "", (index, completed.stdout)
+    assert json.loads(completed.stderr) == {
+        "cleanup_diagnostic": {"code": "windows_handle_close_failed"},
+        "process_identity_status": "absent",
+        "status": "warning",
+    }, (index, completed.stderr)
 
     print(
         "captured/signaled-259-rejected/"

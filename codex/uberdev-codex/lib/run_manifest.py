@@ -230,6 +230,22 @@ class ManifestRuntimeError(RuntimeError):
     """The private manifest could not be safely read or written."""
 
 
+_CLEANUP_DIAGNOSTIC_ATTRIBUTE = "_uberdev_manifest_cleanup_code"
+_CLEANUP_DIAGNOSTIC_CODES = frozenset({"windows_handle_close_failed"})
+
+
+def _record_cleanup_diagnostic(primary: BaseException, code: str) -> None:
+    if code in _CLEANUP_DIAGNOSTIC_CODES:
+        setattr(primary, _CLEANUP_DIAGNOSTIC_ATTRIBUTE, code)
+
+
+def _cleanup_diagnostic(primary: BaseException) -> dict[str, str] | None:
+    code = getattr(primary, _CLEANUP_DIAGNOSTIC_ATTRIBUTE, None)
+    if code not in _CLEANUP_DIAGNOSTIC_CODES:
+        return None
+    return {"code": code}
+
+
 def _close_windows_handle(
     kernel32: Any,
     handle: Any,
@@ -238,7 +254,7 @@ def _close_windows_handle(
     if kernel32.CloseHandle(handle):
         return True
     if primary is not None:
-        primary.add_note("windows_handle_close_failed")
+        _record_cleanup_diagnostic(primary, "windows_handle_close_failed")
         return False
     raise ManifestRuntimeError("windows_handle_close_failed")
 
@@ -943,7 +959,7 @@ def _windows_parent_pid(pid: int) -> int:
                 return int(entry.th32ParentProcessID)
             found = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
     finally:
-        _close_windows_handle(kernel32, snapshot, primary=sys.exception())
+        _close_windows_handle(kernel32, snapshot, primary=sys.exc_info()[1])
     raise ProcessLookupError(pid)
 
 
@@ -1008,7 +1024,7 @@ def _windows_live_process(
         # open. Refuse its result if the handle was signaled in that window.
         require_still_active()
     finally:
-        _close_windows_handle(kernel32, handle, primary=sys.exception())
+        _close_windows_handle(kernel32, handle, primary=sys.exc_info()[1])
 
 
 def _windows_process_record(pid: int) -> tuple[int, int, int, str]:
@@ -1124,7 +1140,10 @@ def _format_process_identity(
     return f"{pid}|{pgid}|{sid}|{digest}"
 
 
-def _process_identity(pid: Any) -> tuple[str, str | None]:
+def _process_identity(
+    pid: Any,
+    cleanup_diagnostics: list[dict[str, str]] | None = None,
+) -> tuple[str, str | None]:
     numeric_pid = _numeric_pid(pid)
     if numeric_pid is None:
         return "absent", None
@@ -1134,9 +1153,15 @@ def _process_identity(pid: Any) -> tuple[str, str | None]:
         return "captured", _format_process_identity(
             pid, pgid, sid, creation_identity
         )
-    except ProcessLookupError:
+    except ProcessLookupError as exc:
+        diagnostic = _cleanup_diagnostic(exc)
+        if diagnostic is not None and cleanup_diagnostics is not None:
+            cleanup_diagnostics.append(diagnostic)
         return "absent", None
-    except (AttributeError, OSError, ValueError):
+    except (AttributeError, OSError, ValueError) as exc:
+        diagnostic = _cleanup_diagnostic(exc)
+        if diagnostic is not None and cleanup_diagnostics is not None:
+            cleanup_diagnostics.append(diagnostic)
         return "unavailable", None
 
 
@@ -2206,7 +2231,21 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         if args.command == "process-identity":
-            status, identity = _process_identity(args.pid)
+            cleanup_diagnostics: list[dict[str, str]] = []
+            status, identity = _process_identity(
+                args.pid, cleanup_diagnostics=cleanup_diagnostics
+            )
+            if cleanup_diagnostics:
+                print(
+                    _compact_json(
+                        {
+                            "cleanup_diagnostic": cleanup_diagnostics[0],
+                            "process_identity_status": status,
+                            "status": "warning",
+                        }
+                    ),
+                    file=sys.stderr,
+                )
             if status == "captured" and identity is not None:
                 print(identity, end="")
                 return 0
@@ -2231,10 +2270,18 @@ def main(argv: list[str] | None = None) -> int:
         _emit(result)
         return return_code
     except ManifestRejected as exc:
-        _emit({"error": str(exc), "status": "rejected"})
+        payload: dict[str, Any] = {"error": str(exc), "status": "rejected"}
+        diagnostic = _cleanup_diagnostic(exc)
+        if diagnostic is not None:
+            payload["cleanup_diagnostic"] = diagnostic
+        _emit(payload)
         return 2
     except ManifestRuntimeError as exc:
-        _emit({"error": str(exc), "status": "error"})
+        payload = {"error": str(exc), "status": "error"}
+        diagnostic = _cleanup_diagnostic(exc)
+        if diagnostic is not None:
+            payload["cleanup_diagnostic"] = diagnostic
+        _emit(payload)
         return 1
 
 
