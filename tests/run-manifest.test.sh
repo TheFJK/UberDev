@@ -103,24 +103,40 @@ class Kernel32:
     def __init__(self):
         self.next_handle = 72
         self.open_handles = set()
+        self.open_access = []
         self.closed = []
-        self.live = True
+        self.signaled = False
+        self.wait_result = None
         self.exit_checks = []
+        self.wait_checks = []
         self.OpenProcess = Function(self.open_process)
         self.GetExitCodeProcess = Function(self.get_exit_code)
+        self.WaitForSingleObject = Function(self.wait_for_single_object)
         self.GetProcessTimes = Function(self.get_process_times)
         self.CloseHandle = Function(self.close_handle)
 
-    def open_process(self, _access, _inherit, _pid):
+    def open_process(self, access, _inherit, _pid):
         self.next_handle += 1
         self.open_handles.add(self.next_handle)
+        self.open_access.append(access)
         return self.next_handle
 
     def get_exit_code(self, handle, exit_code):
         assert handle in self.open_handles, handle
-        self.exit_checks.append(self.live)
-        exit_code._obj.value = 259 if self.live else 0
+        self.exit_checks.append(handle)
+        exit_code._obj.value = 259
         return 1
+
+    def wait_for_single_object(self, handle, timeout):
+        assert handle in self.open_handles, handle
+        assert timeout == 0, timeout
+        result = (
+            self.wait_result
+            if self.wait_result is not None
+            else (0 if self.signaled else 258)
+        )
+        self.wait_checks.append(result)
+        return result
 
     @staticmethod
     def get_process_times(_handle, created, _exited, _kernel, _user):
@@ -172,13 +188,14 @@ for index, module_path in enumerate(sys.argv[1:]):
     assert parent_calls == [424242], parent_calls
     assert not kernel32.open_handles, kernel32.open_handles
     assert kernel32.closed == [73, 75, 74], kernel32.closed
+    assert kernel32.open_access == [0x101000] * 3, kernel32.open_access
 
     race_kernel32 = Kernel32()
     module.ctypes.WinDLL = lambda *_args, **_kwargs: race_kernel32
 
     def exiting_snapshot(pid):
         assert race_kernel32.open_handles, "snapshot ran without a live process handle"
-        race_kernel32.live = False
+        race_kernel32.signaled = True
         return 23
 
     module._windows_parent_pid = exiting_snapshot
@@ -194,7 +211,9 @@ for index, module_path in enumerate(sys.argv[1:]):
     finally:
         module.sys.platform = original_platform
         module.os.name = original_os_name
-    assert race_kernel32.exit_checks == [True, False], race_kernel32.exit_checks
+    assert race_kernel32.wait_checks == [258, 0], race_kernel32.wait_checks
+    assert race_kernel32.exit_checks == [], race_kernel32.exit_checks
+    assert race_kernel32.open_access == [0x101000], race_kernel32.open_access
     assert not race_kernel32.open_handles, race_kernel32.open_handles
     assert race_kernel32.closed == [73], race_kernel32.closed
 
@@ -219,15 +238,49 @@ for index, module_path in enumerate(sys.argv[1:]):
     finally:
         module.sys.platform = original_platform
         module.os.name = original_os_name
-    assert missing_kernel32.exit_checks == [True], missing_kernel32.exit_checks
+    assert missing_kernel32.wait_checks == [258], missing_kernel32.wait_checks
+    assert missing_kernel32.exit_checks == [], missing_kernel32.exit_checks
     assert not missing_kernel32.open_handles, missing_kernel32.open_handles
     assert missing_kernel32.closed == [73], missing_kernel32.closed
     assert missing_kernel32.closed.count(73) == 1, missing_kernel32.closed
-    print("captured/guarded-parent/rechecked/snapshot-unavailable")
+
+    had_get_last_error = hasattr(module.ctypes, "get_last_error")
+    original_get_last_error = getattr(module.ctypes, "get_last_error", None)
+    module.ctypes.get_last_error = lambda: 5
+    try:
+        for wait_result in (0xFFFFFFFF, 7):
+            unavailable_kernel32 = Kernel32()
+            unavailable_kernel32.wait_result = wait_result
+            module.ctypes.WinDLL = lambda *_args, **_kwargs: unavailable_kernel32
+            classification, identity = module._process_identity(424242)
+            assert classification == "unavailable" and identity is None, (
+                wait_result, classification, identity
+            )
+            assert unavailable_kernel32.wait_checks == [wait_result], (
+                unavailable_kernel32.wait_checks
+            )
+            assert unavailable_kernel32.exit_checks == [], (
+                unavailable_kernel32.exit_checks
+            )
+            assert unavailable_kernel32.open_access == [0x101000], (
+                unavailable_kernel32.open_access
+            )
+            assert unavailable_kernel32.closed == [73], (
+                unavailable_kernel32.closed
+            )
+    finally:
+        if had_get_last_error:
+            module.ctypes.get_last_error = original_get_last_error
+        else:
+            del module.ctypes.get_last_error
+    print(
+        "captured/signaled-259-rejected/"
+        "snapshot-unavailable/wait-errors-unavailable"
+    )
 PY
 )"
-if [ "$WINDOWS_PARENT_PROBE_SPLIT" = $'captured/guarded-parent/rechecked/snapshot-unavailable\ncaptured/guarded-parent/rechecked/snapshot-unavailable' ]; then
-  pass "Windows parent lookup rechecks liveness and closes snapshot misses exactly once"
+if [ "$WINDOWS_PARENT_PROBE_SPLIT" = $'captured/signaled-259-rejected/snapshot-unavailable/wait-errors-unavailable\ncaptured/signaled-259-rejected/snapshot-unavailable/wait-errors-unavailable' ]; then
+  pass "Windows liveness rejects signaled handles even when exit code is 259"
 else
   fail "Windows process identity/parent lookup split" "$WINDOWS_PARENT_PROBE_SPLIT"
 fi
@@ -260,10 +313,12 @@ class Kernel32:
         self.snapshot_calls = []
         self.OpenProcess = Function(self.open_process)
         self.GetExitCodeProcess = Function(self.get_exit_code)
+        self.WaitForSingleObject = Function(self.wait_for_single_object)
         self.GetProcessTimes = Function(self.get_process_times)
         self.CloseHandle = Function(self.close_handle)
 
-    def open_process(self, _access, _inherit, pid):
+    def open_process(self, access, _inherit, pid):
+        assert access == 0x101000, access
         self.next_handle += 1
         self.open_handles[self.next_handle] = pid
         self.open_calls.append(pid)
@@ -273,6 +328,11 @@ class Kernel32:
         assert handle in self.open_handles, handle
         exit_code._obj.value = 259
         return 1
+
+    def wait_for_single_object(self, handle, timeout):
+        assert handle in self.open_handles, handle
+        assert timeout == 0, timeout
+        return 258
 
     def get_process_times(self, handle, created, _exited, _kernel, _user):
         pid = self.open_handles[handle]

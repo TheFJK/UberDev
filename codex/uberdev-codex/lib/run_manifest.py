@@ -57,6 +57,14 @@ TERMINAL_EVENTS = frozenset(
 )
 LIFECYCLE_EVENTS = frozenset({"route_decided", "agent_started"}) | TERMINAL_EVENTS
 SUPPORTED_PROCESS_IDENTITY_PLATFORMS = ("linux", "darwin", "windows")
+_WINDOWS_PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000
+_WINDOWS_SYNCHRONIZE = 0x00100000
+_WINDOWS_PROCESS_LIVENESS_ACCESS = (
+    _WINDOWS_PROCESS_QUERY_LIMITED_INFORMATION | _WINDOWS_SYNCHRONIZE
+)
+_WINDOWS_WAIT_OBJECT_0 = 0x00000000
+_WINDOWS_WAIT_TIMEOUT = 0x00000102
+_WINDOWS_WAIT_FAILED = 0xFFFFFFFF
 
 # RFC 0013 section 13 fields plus the minimal process metadata required to
 # reconcile an interrupted agent_started event.  This is deliberately closed:
@@ -939,8 +947,8 @@ def _windows_live_process(
 
     kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
     kernel32.OpenProcess.restype = ctypes.c_void_p
-    kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
-    kernel32.GetExitCodeProcess.restype = ctypes.c_int
+    kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel32.WaitForSingleObject.restype = ctypes.c_uint32
     kernel32.GetProcessTimes.argtypes = [
         ctypes.c_void_p, ctypes.POINTER(FileTime), ctypes.POINTER(FileTime),
         ctypes.POINTER(FileTime), ctypes.POINTER(FileTime),
@@ -948,7 +956,9 @@ def _windows_live_process(
     kernel32.GetProcessTimes.restype = ctypes.c_int
     kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
     kernel32.CloseHandle.restype = ctypes.c_int
-    handle = kernel32.OpenProcess(0x1000, False, pid)
+    handle = kernel32.OpenProcess(
+        _WINDOWS_PROCESS_LIVENESS_ACCESS, False, pid
+    )
     if not handle:
         error = ctypes.get_last_error()
         if error in {87, 1168}:
@@ -956,11 +966,19 @@ def _windows_live_process(
         raise OSError(error or errno.EIO, "OpenProcess failed")
     try:
         def require_still_active() -> None:
-            exit_code = ctypes.c_uint32()
-            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-                raise OSError(ctypes.get_last_error(), "GetExitCodeProcess failed")
-            if exit_code.value != 259:
+            wait_result = int(kernel32.WaitForSingleObject(handle, 0))
+            if wait_result == _WINDOWS_WAIT_TIMEOUT:
+                return
+            if wait_result == _WINDOWS_WAIT_OBJECT_0:
                 raise ProcessLookupError(pid)
+            if wait_result == _WINDOWS_WAIT_FAILED:
+                raise OSError(
+                    ctypes.get_last_error() or errno.EIO,
+                    "WaitForSingleObject failed",
+                )
+            raise OSError(
+                errno.EIO, "WaitForSingleObject returned an unexpected status"
+            )
 
         require_still_active()
         created, exited, kernel, user = FileTime(), FileTime(), FileTime(), FileTime()
@@ -974,7 +992,7 @@ def _windows_live_process(
             raise OSError("process creation time unavailable")
         yield creation_ticks, require_still_active
         # Consumers may perform a process-table snapshot while this handle is
-        # open. Refuse its result if the guarded process exited in that window.
+        # open. Refuse its result if the handle was signaled in that window.
         require_still_active()
     finally:
         kernel32.CloseHandle(handle)
@@ -1005,7 +1023,7 @@ def _windows_guarded_parent_record(
         try:
             parent_pid = _windows_parent_pid(pid)
         except ProcessLookupError as exc:
-            # The process handle, STILL_ACTIVE state, and creation time were
+            # The process handle, nonsignaled state, and creation time were
             # validated before the snapshot. A later miss is unavailable
             # evidence rather than proof that the process is absent.
             raise OSError(
