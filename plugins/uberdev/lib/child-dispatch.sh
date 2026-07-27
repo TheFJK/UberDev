@@ -514,12 +514,6 @@ def repo_paths(value):
         parts=path.split('/')
         if (any(part in {'','.','..'} for part in parts) or re.match(r'^[A-Za-z]:',path)
             or posixpath.normpath(path)!=path): fail('unsafe_repo_path')
-def safe_existing(path, regular=True, max_bytes=65536):
-    if not os.path.isabs(path) or not os.path.lexists(path): fail('unsafe_path')
-    entry=os.lstat(path)
-    if linked(entry) or not owned(entry): fail('unsafe_path')
-    if regular and (not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1 or entry.st_size>max_bytes): fail('unsafe_path')
-    return entry
 def read_regular_once(path,max_bytes,code,exact_mode=None,nonempty=False):
     if not os.path.isabs(path) or not os.path.lexists(path): fail(code)
     entry=os.lstat(path)
@@ -1098,6 +1092,15 @@ uberdev_child_validate_phase1_review_result() {
   python3 -I -B - "$1" "${2:-}" "${3:-}" <<'PY'
 import hashlib,json,os,re,stat,sys
 path,allowed_raw,validated_path=sys.argv[1:]
+uid_fn=getattr(os,'geteuid',None)
+uid=uid_fn() if callable(uid_fn) else None
+reparse_point=getattr(stat,'FILE_ATTRIBUTE_REPARSE_POINT',0x400)
+def linked(entry):
+ return stat.S_ISLNK(entry.st_mode) or bool(getattr(entry,'st_file_attributes',0)&reparse_point)
+def owned(entry):
+ return uid is None or not hasattr(entry,'st_uid') or entry.st_uid==uid
+def stable(entry):
+ return (entry.st_dev,entry.st_ino,entry.st_size,entry.st_mtime_ns,entry.st_ctime_ns)
 def parse_scalar(raw):
  if not raw or raw.strip()!=raw or any(ord(char)<32 or ord(char)==127 for char in raw): raise ValueError()
  def validated(value):
@@ -1126,11 +1129,26 @@ try:
   if (not isinstance(allowed,list) or not allowed or len(allowed)!=len(set(allowed))
       or any(not isinstance(item,str) or not item for item in allowed)): raise ValueError()
  entry=os.lstat(path)
- if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1 or entry.st_size>1048576: raise ValueError()
- with open(path,'rb') as stream:
-  opened=os.fstat(stream.fileno()); raw_bytes=stream.read(1048577); final=os.fstat(stream.fileno())
- if (len(raw_bytes)>1048576 or (opened.st_dev,opened.st_ino,opened.st_size)!=(entry.st_dev,entry.st_ino,entry.st_size)
-     or (final.st_dev,final.st_ino,final.st_size)!=(opened.st_dev,opened.st_ino,opened.st_size)): raise ValueError()
+ if (linked(entry) or not stat.S_ISREG(entry.st_mode) or not owned(entry)
+     or entry.st_nlink!=1 or entry.st_size>1048576): raise ValueError()
+ descriptor=None
+ try:
+  descriptor=os.open(path,os.O_RDONLY|getattr(os,'O_BINARY',0)|getattr(os,'O_NOFOLLOW',0))
+  opened=os.fstat(descriptor); chunks=[]; remaining=1048577
+  while remaining:
+   chunk=os.read(descriptor,remaining)
+   if not chunk: break
+   chunks.append(chunk); remaining-=len(chunk)
+  raw_bytes=b''.join(chunks)
+  final=os.fstat(descriptor); current=os.lstat(path)
+ except OSError as error:
+  raise ValueError() from error
+ finally:
+  if descriptor is not None: os.close(descriptor)
+ if (len(raw_bytes)>1048576 or any(linked(item) or not stat.S_ISREG(item.st_mode)
+      or not owned(item) or item.st_nlink!=1 for item in (opened,final,current))
+     or stable(opened)!=stable(entry) or stable(final)!=stable(opened)
+     or stable(current)!=stable(final)): raise ValueError()
  raw=raw_bytes.decode('utf-8')
  match=re.fullmatch(r'\s*```yaml[ \t]*\r?\n(.*?)\r?\n```[ \t]*\s*',raw,re.S)
  if not match: raise ValueError()

@@ -5,6 +5,111 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
 HELPER="$ROOT/plugins/uberdev/lib/child-receipts.py"
 
+python3 -I -B - "$HELPER" <<'PY'
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+import tempfile
+
+helper_path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("child_receipts_portable_contract", helper_path)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+failures = []
+
+# A successful os.open followed by a failed fstat still transfers descriptor
+# ownership to secure_windows_open; the failure path must close it.
+with tempfile.TemporaryDirectory() as temporary:
+    target = pathlib.Path(temporary) / "receipt.jsonl"
+    target.touch()
+    opened_descriptors = []
+    closed_descriptors = []
+    original_open = module.os.open
+    original_fstat = module.os.fstat
+    original_close = module.os.close
+
+    def tracked_open(*args, **kwargs):
+        descriptor = original_open(*args, **kwargs)
+        opened_descriptors.append(descriptor)
+        return descriptor
+
+    def failing_fstat(_descriptor):
+        raise OSError("injected fstat failure")
+
+    def tracked_close(descriptor):
+        closed_descriptors.append(descriptor)
+        return original_close(descriptor)
+
+    module.os.open = tracked_open
+    module.os.fstat = failing_fstat
+    module.os.close = tracked_close
+    try:
+        try:
+            module.secure_windows_open(
+                str(target), os.O_RDONLY, "unsafe receipt file"
+            )
+        except module.ReceiptFailure:
+            pass
+        else:
+            failures.append("secure_windows_open accepted an injected fstat failure")
+    finally:
+        module.os.open = original_open
+        module.os.fstat = original_fstat
+        module.os.close = original_close
+        for descriptor in opened_descriptors:
+            if descriptor not in closed_descriptors:
+                original_close(descriptor)
+    if len(opened_descriptors) != 1 or closed_descriptors != opened_descriptors:
+        failures.append("secure_windows_open leaked its descriptor after fstat failure")
+
+# A regular-file read is allowed to return short chunks. The Windows boundary
+# must accumulate until EOF instead of parsing the first partial chunk.
+with tempfile.TemporaryDirectory() as temporary:
+    target = pathlib.Path(temporary) / "handoff.json"
+    payload = (
+        json.dumps(
+            {
+                "edge_id": "receipt.windows-short-read",
+                "instance_id": "worker-1",
+                "inputs": {"value": 1},
+            },
+            separators=(",", ":"),
+        ).encode()
+        + b"\n"
+    )
+    target.write_bytes(payload)
+    chunks = [payload[:11], payload[11:37], payload[37:], b""]
+    original_name = module.os.name
+    original_read = module.os.read
+
+    def short_read(_descriptor, count):
+        chunk = chunks.pop(0)
+        assert len(chunk) <= count
+        return chunk
+
+    module.os.name = "nt"
+    module.os.read = short_read
+    try:
+        try:
+            value = module.safe_handoff(str(target))
+        except module.ReceiptFailure:
+            failures.append("Windows handoff boundary rejected valid short reads")
+        else:
+            if value.get("instance_id") != "worker-1" or chunks:
+                failures.append("Windows handoff boundary did not consume through EOF")
+    finally:
+        module.os.name = original_name
+        module.os.read = original_read
+
+if failures:
+    raise AssertionError("; ".join(failures))
+PY
+
 if [ "${OS:-}" = Windows_NT ]; then
   HELPER_NATIVE="$(cygpath -w "$HELPER")"
   python3 -I -B - "$HELPER_NATIVE" <<'PY'

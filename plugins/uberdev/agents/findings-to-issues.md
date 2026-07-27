@@ -167,6 +167,7 @@ Explicit forbidden patterns:
    `rationale: "secret-scan-lib-unavailable"` if the source returns non-zero.
 
 2. **Rate-limit pre-flight (two buckets).** Fetch one canonical response and parse both integers locally so shell quoting, `gh --jq` output, or a partial second request cannot turn a healthy API into two empty values:
+
    ```bash
    RATE_LIMIT_JSON=$(gh api /rate_limit 2>&1)
    RATE_LIMIT_RC=$?
@@ -178,6 +179,7 @@ Explicit forbidden patterns:
      SEARCH_REMAINING=""
    fi
    ```
+
    The core bucket funds `gh issue create` / `gh issue comment` / `gh label create` / `gh api`. The Search bucket funds the dedupe lookup `gh issue list --search "$FP in:body"` in Step 8b. Treat `.resources.search` as its own rolling-minute budget; the separate code-search hourly resource is unrelated. Checking only `core` is insufficient because Search exhaustion silently maps dedupe lookups into `blocked_by_dedupe[]` with no issues filed and no clear rate-limit signal to the operator.
 
    If either probe returns empty or non-numeric, emit one bounded diagnostic containing only `RATE_LIMIT_RC` plus the fixed class `request-failed` or `response-invalid`, then return `status: REFUSED` with `rationale: "rate-limit-probe-failed"`. Never include the response body in the diagnostic. Only successfully parsed integers may reach the budget comparison. If `CORE_REMAINING < (2 * max_new + 50)` OR `SEARCH_REMAINING < (max_new + 5)`, return `status: REFUSED` with `rationale: "rate-limit-budget-insufficient"`. The double-bucket guard prevents the silent-skip pathological case where parallel runs exhaust Search ahead of dispatch. Pattern shape mirrors the Step 6c.1 PROBE in `commands/review-pr.md` (the canonical rate-limit-floor pattern), extended to cover both buckets.

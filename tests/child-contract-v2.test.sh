@@ -3,6 +3,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TREE="$ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
 LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
+LIB_MIRROR="$ROOT/codex/uberdev-codex/lib/child-dispatch.sh"
+CONTRACT="$ROOT/plugins/uberdev/shared/phase1-reviewer-output-v1.md"
+CONTRACT_MIRROR="$ROOT/codex/uberdev-codex/shared/phase1-reviewer-output-v1.md"
+FINDINGS_AGENT="$ROOT/plugins/uberdev/agents/findings-to-issues.md"
+FINDINGS_AGENT_MIRROR="$ROOT/codex/uberdev-codex/agents/findings-to-issues.md"
 
 python3 -I -B - "$TREE" <<'PY'
 import json,sys
@@ -56,8 +61,96 @@ cmp "$TREE" "$ROOT/codex/uberdev-codex/policy/solve-run-tree-v1.json"
 cmp "$LIB" "$ROOT/codex/uberdev-codex/lib/child-dispatch.sh"
 cmp "$ROOT/plugins/uberdev/lib/child-inputs.py" \
   "$ROOT/codex/uberdev-codex/lib/child-inputs.py"
-cmp "$ROOT/plugins/uberdev/shared/phase1-reviewer-output-v1.md" \
-  "$ROOT/codex/uberdev-codex/shared/phase1-reviewer-output-v1.md"
+cmp "$CONTRACT" "$CONTRACT_MIRROR"
+
+python3 -I -B - \
+  "$LIB" "$LIB_MIRROR" "$CONTRACT" "$CONTRACT_MIRROR" \
+  "$FINDINGS_AGENT" "$FINDINGS_AGENT_MIRROR" <<'PY'
+import os
+import pathlib
+import sys
+import tempfile
+
+lib_path,lib_mirror_path,contract_path,contract_mirror_path,*agent_paths=sys.argv[1:]
+lib=pathlib.Path(lib_path).read_text()
+lib_mirror=pathlib.Path(lib_mirror_path).read_text()
+contract=pathlib.Path(contract_path).read_text()
+contract_mirror=pathlib.Path(contract_mirror_path).read_text()
+failures=[]
+
+if "def safe_existing(" in lib or "def safe_existing(" in lib_mirror:
+    failures.append("unused safe_existing helper remains")
+if contract != contract_mirror:
+    failures.append("reviewer contract mirrors drift")
+if "`` -?:,[]{}#&*!|>@` ``; contain" not in contract:
+    failures.append("literal-backtick grammar does not use a safe code-span delimiter")
+
+for agent_path in agent_paths:
+    value=pathlib.Path(agent_path).read_text()
+    if (
+        "partial second request cannot turn a healthy API into two empty values:\n\n"
+        "   ```bash\n"
+    ) not in value:
+        failures.append(f"{agent_path}: rate-limit fence lacks a leading blank line")
+    if (
+        '     SEARCH_REMAINING=""\n'
+        "   fi\n"
+        "   ```\n\n"
+        "   The core bucket funds"
+    ) not in value:
+        failures.append(f"{agent_path}: rate-limit fence lacks a trailing blank line")
+
+function_start=lib.index("uberdev_child_validate_phase1_review_result() {")
+snippet_start=lib.index("<<'PY'\n",function_start)+len("<<'PY'\n")
+snippet_end=lib.index("\nPY\n}",snippet_start)
+snippet=lib[snippet_start:snippet_end]
+
+with tempfile.TemporaryDirectory() as temporary:
+    result=pathlib.Path(temporary)/"result.md"
+    result.write_text(
+        "```yaml\nverdict: APPROVE\nfindings: []\nconfidence: high\n```\n",
+        encoding="utf-8",
+    )
+    original_argv=sys.argv
+    original_open=os.open
+    original_geteuid=getattr(os,"geteuid",None)
+
+    def execute():
+        sys.argv=["phase1-validator",str(result),"",""]
+        try:
+            exec(compile(snippet,"phase1-validator","exec"),{})
+        except SystemExit as error:
+            return error.code
+        return 0
+
+    if callable(original_geteuid):
+        os.geteuid=lambda: original_geteuid()+1
+        try:
+            if execute()!=2:
+                failures.append("phase1 validator accepted a foreign-owned result")
+        finally:
+            os.geteuid=original_geteuid
+
+    observed_flags=[]
+    def tracked_open(path,flags,*args,**kwargs):
+        observed_flags.append(flags)
+        return original_open(path,flags,*args,**kwargs)
+    os.open=tracked_open
+    try:
+        if execute()!=0:
+            failures.append("phase1 validator rejected a caller-owned valid result")
+    finally:
+        os.open=original_open
+        sys.argv=original_argv
+    if not observed_flags:
+        failures.append("phase1 validator did not use descriptor-pinned os.open")
+    nofollow=getattr(os,"O_NOFOLLOW",0)
+    if nofollow and observed_flags and not observed_flags[0]&nofollow:
+        failures.append("phase1 validator omitted O_NOFOLLOW")
+
+if failures:
+    raise AssertionError("; ".join(failures))
+PY
 
 # The shared constructor must enforce RepoPathArray before the later handoff
 # boundary so a successful build always carries the same nominal invariant.
