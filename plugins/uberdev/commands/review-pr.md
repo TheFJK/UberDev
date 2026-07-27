@@ -82,16 +82,17 @@ review_child_fanout() {
     inputs="$(python3 -I -B -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["inputs"],separators=(",",":")))' "$row")"
     risks="$(python3 -I -B -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["risks"],separators=(",",":")))' "$row")"
     uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks" >/dev/null || return $?
-    python3 -I -B - "$edge" "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" "$descriptors" <<'PY'
+    python3 -I -B - "$edge" "$instance" "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" "$descriptors" <<'PY'
 import json,sys
-edge,handoff,result,status,path=sys.argv[1:]
-with open(path,'a') as f:f.write(json.dumps({'edge':edge,'handoff':handoff,'result':result,'status':status},sort_keys=True,separators=(',',':'))+'\n')
+edge,instance,handoff,result,status,path=sys.argv[1:]
+with open(path,'a') as f:f.write(json.dumps({'edge':edge,'instance':instance,'handoff':handoff,'result':result,'status':status},sort_keys=True,separators=(',',':'))+'\n')
 PY
     handoffs+=("$UBERDEV_CHILD_HANDOFF")
   done <"$records"
   uberdev_preflight_child_batch "${handoffs[@]}" || return $?
   while IFS= read -r row; do
     edge="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["edge"])' "$row")"
+    instance="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["instance"])' "$row")"
     handoff="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["handoff"])' "$row")"
     result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
     status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
@@ -107,10 +108,10 @@ PY
       [ "$cleanup_rc" -eq 0 ] || echo "error: prior child cleanup failed after dispatch edge=$edge" >&2
       return "$dispatch_rc"
     fi
-    if python3 -I -B - "$edge" "$receipt" "$result" "$status" "$launched" <<'PY'
+    if python3 -I -B - "$edge" "$instance" "$receipt" "$result" "$status" "$launched" <<'PY'
 import json,sys
-edge,receipt,result,status,path=sys.argv[1:]
-with open(path,'a') as f:f.write(json.dumps({'edge':edge,'receipt':receipt,'result':result,'status':status},sort_keys=True,separators=(',',':'))+'\n')
+edge,instance,receipt,result,status,path=sys.argv[1:]
+with open(path,'a') as f:f.write(json.dumps({'edge':edge,'instance':instance,'receipt':receipt,'result':result,'status':status},sort_keys=True,separators=(',',':'))+'\n')
 PY
     then
       :
@@ -148,26 +149,22 @@ review_child_wait_all() {
 }
 review_child_result_path() {
   local launched="$1" edge="$2"
-  python3 -I -B - "$launched" "$edge" <<'PY'
-import json,os,stat,sys
-ledger,edge=sys.argv[1:]
+  python3 -I -B - "$launched" "$edge" "$UBERDEV_REVIEW_PLUGIN_ROOT" "$UBERDEV_CARRIER_RUN_DIR" <<'PY'
+import hashlib,importlib.util,json,os,stat,sys
+ledger,edge,plugin_root,carrier_run_dir=sys.argv[1:]
 def fail(reason):
     print(reason,end='')
     raise SystemExit(2)
+spec=importlib.util.spec_from_file_location('uberdev_review_artifacts',os.path.join(plugin_root,'lib','run_manifest.py'))
+if spec is None or spec.loader is None: fail('classification_ledger_unreadable')
+artifacts=importlib.util.module_from_spec(spec); sys.modules[spec.name]=artifacts
+try: spec.loader.exec_module(artifacts)
+except Exception: fail('classification_ledger_unreadable')
+if not os.path.lexists(ledger): fail('classification_ledger_missing')
 try:
-    ledger_entry=os.lstat(ledger)
-except FileNotFoundError:
-    fail('classification_ledger_missing')
-except OSError:
-    fail('classification_ledger_unreadable')
-uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
-if (stat.S_ISLNK(ledger_entry.st_mode) or not stat.S_ISREG(ledger_entry.st_mode)
-        or ledger_entry.st_nlink!=1 or (uid is not None and ledger_entry.st_uid!=uid)
-        or ledger_entry.st_size<1 or ledger_entry.st_size>1048576):
-    fail('classification_ledger_unsafe')
-try:
-    rows=[json.loads(line) for line in open(ledger,encoding='utf-8') if line.strip()]
-except (OSError,UnicodeError,json.JSONDecodeError):
+    ledger_bytes,_=artifacts.secure_capture_regular(ledger,1,1048576)
+    rows=[json.loads(line) for line in ledger_bytes.decode('utf-8').splitlines() if line.strip()]
+except Exception:
     fail('classification_ledger_malformed')
 if any(not isinstance(row,dict) for row in rows):
     fail('classification_ledger_malformed')
@@ -176,40 +173,67 @@ if not matches:
     fail('classification_ledger_edge_missing')
 if len(matches)>1:
     fail('classification_ledger_duplicate')
-path=matches[0].get('result')
-status=matches[0].get('status')
-if (not isinstance(path,str) or not os.path.isabs(path)
+row=matches[0]
+if set(row)!={'edge','instance','receipt','result','status'}:
+    fail('classification_ledger_malformed')
+path=row.get('result'); status=row.get('status'); instance=row.get('instance')
+expected_child=os.path.join(os.path.realpath(carrier_run_dir),'children',instance) if isinstance(instance,str) else ''
+if (not os.path.isabs(carrier_run_dir) or os.path.realpath(carrier_run_dir)!=carrier_run_dir
+        or not isinstance(path,str) or not os.path.isabs(path)
         or os.path.basename(path)!='result.md'
-        or os.path.basename(os.path.dirname(os.path.dirname(path)))!='children'):
+        or not isinstance(instance,str) or os.path.basename(os.path.dirname(path))!=instance
+        or os.path.dirname(path)!=expected_child):
     fail('classification_result_path_invalid')
 if (not isinstance(status,str) or not os.path.isabs(status)
         or os.path.basename(status)!='status.json'
         or os.path.dirname(status)!=os.path.dirname(path)):
     fail('classification_status_path_invalid')
 try:
-    status_entry=os.lstat(status)
-    if (stat.S_ISLNK(status_entry.st_mode) or not stat.S_ISREG(status_entry.st_mode)
-            or status_entry.st_nlink!=1 or (uid is not None and status_entry.st_uid!=uid)
-            or status_entry.st_size<1 or status_entry.st_size>65536):
-        fail('classification_status_unsafe')
-    status_value=json.loads(open(status,encoding='utf-8').read())
-except (OSError,UnicodeError,json.JSONDecodeError):
+    receipt=json.loads(row['receipt'])
+except (TypeError,json.JSONDecodeError):
+    fail('classification_receipt_malformed')
+receipt_keys={'schema_version','edge_id','instance_id','backend','handle','state','result_file','status_file'}
+if (not isinstance(receipt,dict) or set(receipt)!=receipt_keys or receipt.get('schema_version')!=1
+        or receipt.get('edge_id')!=edge or receipt.get('instance_id')!=instance
+        or receipt.get('result_file')!=path or receipt.get('status_file')!=status
+        or receipt.get('backend') not in {'codex','claude-bg','background','wezterm'}
+        or not isinstance(receipt.get('handle'),str) or not receipt['handle']
+        or receipt.get('state') not in {'running','completed'}):
+    fail('classification_receipt_mismatch')
+try:
+    status_bytes,_=artifacts.secure_capture_regular(status,1,65536)
+    status_value=json.loads(status_bytes.decode('utf-8'))
+except Exception:
     fail('classification_status_unreadable')
 if (not isinstance(status_value,dict) or status_value.get('state')!='completed'
-        or type(status_value.get('exit_code')) is not int or status_value['exit_code']!=0):
+        or type(status_value.get('exit_code')) is not int or status_value['exit_code']!=0
+        or status_value.get('backend')!=receipt['backend']):
     fail('classification_child_not_completed_zero')
+status_handle=status_value.get('pid')
+if (status_handle is None or receipt['handle'] not in {str(status_handle),'pane:'+str(status_handle)}):
+    fail('classification_receipt_mismatch')
+if not os.path.lexists(path): fail('classification_artifact_missing')
 try:
-    entry=os.lstat(path)
-except FileNotFoundError:
-    fail('classification_artifact_missing')
-except OSError:
-    fail('classification_artifact_unreadable')
-if (stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1
-        or (uid is not None and entry.st_uid!=uid)):
+    payload,_=artifacts.secure_capture_regular(path,1,16777216)
+except artifacts.ManifestRejected:
     fail('classification_artifact_unsafe')
-if entry.st_size<1 or entry.st_size>16777216:
-    fail('classification_artifact_size_invalid')
-print(os.path.realpath(path),end='')
+except Exception:
+    fail('classification_artifact_unreadable')
+digest=hashlib.sha256(payload).hexdigest()
+instance_digest=hashlib.sha256(instance.encode()).hexdigest()[:16]
+snapshot=os.path.join(os.path.dirname(os.path.abspath(ledger)),f'ci-classification-{instance_digest}-{digest}.trusted.md')
+try:
+    parent=os.lstat(os.path.dirname(snapshot))
+    uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
+    if (stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode)
+            or (uid is not None and parent.st_uid!=uid)):
+        fail('classification_snapshot_failed')
+    artifacts.secure_publish_immutable(snapshot,payload)
+except SystemExit:
+    raise
+except Exception:
+    fail('classification_snapshot_failed')
+print(snapshot,end='')
 PY
 }
 review_child_single() {
@@ -993,7 +1017,7 @@ PY
     fi
     CI_CLASSIFICATION_PATH="$(review_child_result_path "$RESEARCH_DIR_ABS/ci-classify.launched" review_pr.ci.classify)" || {
       case "$CI_CLASSIFICATION_PATH" in
-        classification_ledger_missing|classification_ledger_unreadable|classification_ledger_unsafe|classification_ledger_malformed|classification_ledger_edge_missing|classification_ledger_duplicate|classification_result_path_invalid|classification_status_path_invalid|classification_status_unsafe|classification_status_unreadable|classification_child_not_completed_zero|classification_artifact_missing|classification_artifact_unreadable|classification_artifact_unsafe|classification_artifact_size_invalid) ;;
+        classification_ledger_missing|classification_ledger_unreadable|classification_ledger_unsafe|classification_ledger_malformed|classification_ledger_edge_missing|classification_ledger_duplicate|classification_result_path_invalid|classification_status_path_invalid|classification_status_unsafe|classification_status_unreadable|classification_child_not_completed_zero|classification_receipt_malformed|classification_receipt_mismatch|classification_carrier_mismatch|classification_artifact_missing|classification_artifact_unreadable|classification_artifact_unsafe|classification_artifact_size_invalid|classification_snapshot_failed) ;;
         *) CI_CLASSIFICATION_PATH=classification_result_discovery_failed ;;
       esac
       audit ci_classify_returned subreason="$CI_CLASSIFICATION_PATH"
@@ -1010,11 +1034,23 @@ PY
 
     ```bash
     review_validate_ci_classification() {
-      python3 -I -B - "$1" "$2" <<'PY'
-import json,pathlib,re,sys
-path,root=sys.argv[1:]
-raw=pathlib.Path(path).read_text(encoding='utf-8')
-if len(raw.encode())>65536: raise SystemExit(2)
+      local helper_root="${3:-${UBERDEV_REVIEW_PLUGIN_ROOT:-$2/plugins/uberdev}}"
+      python3 -I -B - "$1" "$2" "$helper_root" <<'PY'
+import hashlib,importlib.util,json,os,pathlib,re,sys
+path,root,helper_root=sys.argv[1:]
+spec=importlib.util.spec_from_file_location('uberdev_classifier_artifacts',os.path.join(helper_root,'lib','run_manifest.py'))
+if spec is None or spec.loader is None: raise SystemExit(2)
+artifacts=importlib.util.module_from_spec(spec); sys.modules[spec.name]=artifacts
+try:
+    spec.loader.exec_module(artifacts)
+    raw_bytes,_=artifacts.secure_capture_regular(path,1,65536)
+    raw=raw_bytes.decode('utf-8')
+except Exception:
+    raise SystemExit(2)
+trusted_name=re.fullmatch(r'ci-classification-[0-9a-f]{16}-([0-9a-f]{64})\.trusted\.md',os.path.basename(path))
+if os.path.basename(path).endswith('.trusted.md'):
+    if trusted_name is None or hashlib.sha256(raw_bytes).hexdigest()!=trusted_name.group(1):
+        raise SystemExit(2)
 document=re.search(r'(?:^|\n)```yaml\r?\n(.*?)\r?\n```\r?\n?\Z',raw,re.DOTALL)
 if document is None: raise SystemExit(2)
 fields={}

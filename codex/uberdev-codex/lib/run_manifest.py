@@ -1361,6 +1361,127 @@ def _secure_open_regular(path: str, flags: int, mode: int = 0o600) -> int:
     return descriptor
 
 
+def _artifact_identity(entry: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        entry.st_dev,
+        entry.st_ino,
+        entry.st_size,
+        getattr(entry, "st_mtime_ns", int(entry.st_mtime * 1_000_000_000)),
+        getattr(entry, "st_ctime_ns", int(entry.st_ctime * 1_000_000_000)),
+        entry.st_mode,
+    )
+
+
+def secure_capture_regular(
+    path: str, minimum_size: int, maximum_size: int
+) -> tuple[bytes, tuple[int, int, int, int, int, int]]:
+    """Capture bounded bytes while proving one owned regular-file identity."""
+
+    if (
+        not isinstance(minimum_size, int)
+        or isinstance(minimum_size, bool)
+        or not isinstance(maximum_size, int)
+        or isinstance(maximum_size, bool)
+        or minimum_size < 0
+        or maximum_size < minimum_size
+    ):
+        raise ManifestRejected("artifact_size_policy_invalid")
+    absolute = os.path.abspath(path)
+    try:
+        before = os.lstat(absolute)
+    except OSError as exc:
+        raise ManifestRuntimeError("artifact_inspect_failed") from exc
+    descriptor: int | None = None
+    try:
+        descriptor = _secure_open_regular(absolute, os.O_RDONLY)
+        opened = os.fstat(descriptor)
+        current = os.lstat(absolute)
+        uid_fn = getattr(os, "geteuid", None)
+        uid = uid_fn() if uid_fn is not None else None
+        identity = _artifact_identity(opened)
+        if _artifact_identity(before) != identity or _artifact_identity(current) != identity:
+            raise ManifestRejected("artifact_replaced_during_capture")
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or before.st_nlink != 1
+            or opened.st_nlink != 1
+            or current.st_nlink != 1
+            or (uid is not None and opened.st_uid != uid)
+        ):
+            raise ManifestRejected("artifact_not_owned_regular")
+        if opened.st_size < minimum_size or opened.st_size > maximum_size:
+            raise ManifestRejected("artifact_size_invalid")
+        chunks: list[bytes] = []
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 65536))
+            if not chunk:
+                raise ManifestRejected("artifact_short_read")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        after_open = os.fstat(descriptor)
+        after_path = os.lstat(absolute)
+        if (
+            _artifact_identity(after_open) != identity
+            or _artifact_identity(after_path) != identity
+        ):
+            raise ManifestRejected("artifact_replaced_during_capture")
+        return payload, identity
+    except (ManifestRejected, ManifestRuntimeError):
+        raise
+    except OSError as exc:
+        raise ManifestRuntimeError("artifact_capture_failed") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def secure_publish_immutable(
+    path: str, payload: bytes
+) -> tuple[int, int, int, int, int, int]:
+    """Create one no-follow, owner-only immutable evidence snapshot."""
+
+    if not isinstance(payload, bytes):
+        raise ManifestRejected("artifact_payload_invalid")
+    descriptor: int | None = None
+    try:
+        descriptor = _secure_open_regular(
+            os.path.abspath(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400
+        )
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise ManifestRuntimeError("artifact_snapshot_short_write")
+            offset += written
+        os.fsync(descriptor)
+        if os.name != "nt":
+            os.fchmod(descriptor, 0o400)
+        opened = os.fstat(descriptor)
+        uid_fn = getattr(os, "geteuid", None)
+        uid = uid_fn() if uid_fn is not None else None
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or opened.st_size != len(payload)
+            or (uid is not None and opened.st_uid != uid)
+        ):
+            raise ManifestRejected("artifact_snapshot_invalid")
+        return _artifact_identity(opened)
+    except FileExistsError as exc:
+        raise ManifestRejected("artifact_snapshot_exists") from exc
+    except (ManifestRejected, ManifestRuntimeError):
+        raise
+    except OSError as exc:
+        raise ManifestRuntimeError("artifact_snapshot_failed") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 def _lock_manifest_descriptor(descriptor: int) -> None:
     if _fcntl is not None:
         _fcntl.flock(descriptor, _fcntl.LOCK_EX)

@@ -431,6 +431,9 @@ fi
 
 RESULT_PATH_HELPER="$(mktemp)"
 RESULT_PATH_TMP="$(mktemp -d)"
+RESULT_PATH_TMP="$(cd "$RESULT_PATH_TMP" && pwd -P)"
+export UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+export UBERDEV_CARRIER_RUN_DIR="$RESULT_PATH_TMP/run"
 awk '
   /^review_child_result_path\(\) \{/ { capture=1 }
   capture { print }
@@ -440,13 +443,74 @@ mkdir -p "$RESULT_PATH_TMP/run/children/classifier"
 RESULT_PATH="$RESULT_PATH_TMP/run/children/classifier/result.md"
 RESULT_STATUS="$RESULT_PATH_TMP/run/children/classifier/status.json"
 RESULT_LEDGER="$RESULT_PATH_TMP/classifier.launched"
-printf 'classifier result\n' > "$RESULT_PATH"
-printf '{"state":"completed","exit_code":0}\n' > "$RESULT_STATUS"
+write_classifier_case CLASSIFIED code_bug '"README.md:42"' '"repository test failure"'
+cp "$CLASSIFY_CASE" "$RESULT_PATH"
+printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"4242"}\n' > "$RESULT_STATUS"
 printf '{"edge":"review_pr.ci.classify","result":"%s","status":"%s"}\n' "$RESULT_PATH" "$RESULT_STATUS" > "$RESULT_LEDGER"
-RESULT_PATH_RESOLVED="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER")"
-RESULT_PATH_EXPECTED="$(python3 -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]),end="")' "$RESULT_PATH")"
 RESULT_PATH_INVALID=0
-[ "$RESULT_PATH_RESOLVED" = "$RESULT_PATH_EXPECTED" ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+if bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify >/dev/null' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER"; then
+  RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+fi
+python3 -I -B - "$RESULT_LEDGER" "$RESULT_PATH" "$RESULT_STATUS" <<'PY'
+import json,pathlib,sys
+ledger,result,status=sys.argv[1:]
+receipt={
+ "schema_version":1,"edge_id":"review_pr.ci.classify","instance_id":"classifier",
+ "backend":"codex","handle":"4242","state":"running",
+ "result_file":result,"status_file":status,
+}
+row={
+ "edge":"review_pr.ci.classify","instance":"classifier",
+ "receipt":json.dumps(receipt,sort_keys=True,separators=(",",":")),
+ "result":result,"status":status,
+}
+pathlib.Path(ledger).write_text(json.dumps(row,separators=(",",":"))+"\n")
+PY
+RESULT_PATH_RESOLVED="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER")"
+[ "$RESULT_PATH_RESOLVED" != "$RESULT_PATH" ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+[ -f "$RESULT_PATH_RESOLVED" ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+cmp "$RESULT_PATH" "$RESULT_PATH_RESOLVED" >/dev/null || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+SNAPSHOT_CLASSIFICATION="$(bash -c '. "$1"; review_validate_ci_classification "$2" "$3"' _ "$CLASSIFY_HELPER" "$RESULT_PATH_RESOLVED" "$REPO_ROOT")"
+[ "$SNAPSHOT_CLASSIFICATION" = $'CLASSIFIED\tcode_bug\tREADME.md:42\t-' ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+chmod 600 "$RESULT_PATH_RESOLVED"
+write_classifier_case AMBIGUOUS null null '"replacement after discovery"'
+cp "$CLASSIFY_CASE" "$RESULT_PATH_RESOLVED"
+if bash -c '. "$1"; review_validate_ci_classification "$2" "$3" >/dev/null' _ "$CLASSIFY_HELPER" "$RESULT_PATH_RESOLVED" "$REPO_ROOT"; then
+  RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+fi
+python3 -I -B - "$RESULT_LEDGER" "$RESULT_PATH" "$RESULT_STATUS" <<'PY'
+import json,pathlib,sys
+ledger,result,status=sys.argv[1:]
+receipt={"schema_version":1,"edge_id":"review_pr.ci.classify","instance_id":"foreign-instance",
+         "backend":"codex","handle":"4242","state":"running",
+         "result_file":result,"status_file":status}
+row={"edge":"review_pr.ci.classify","instance":"classifier",
+     "receipt":json.dumps(receipt,sort_keys=True,separators=(",",":")),
+     "result":result,"status":status}
+pathlib.Path(ledger).write_text(json.dumps(row,separators=(",",":"))+"\n")
+PY
+if bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify >/dev/null' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER"; then
+  RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+fi
+FOREIGN_RESULT="$RESULT_PATH_TMP/foreign/children/classifier/result.md"
+FOREIGN_STATUS="$RESULT_PATH_TMP/foreign/children/classifier/status.json"
+mkdir -p "$(dirname "$FOREIGN_RESULT")"
+cp "$RESULT_PATH" "$FOREIGN_RESULT"
+cp "$RESULT_STATUS" "$FOREIGN_STATUS"
+python3 -I -B - "$RESULT_LEDGER" "$FOREIGN_RESULT" "$FOREIGN_STATUS" <<'PY'
+import json,pathlib,sys
+ledger,result,status=sys.argv[1:]
+receipt={"schema_version":1,"edge_id":"review_pr.ci.classify","instance_id":"classifier",
+         "backend":"codex","handle":"4242","state":"running",
+         "result_file":result,"status_file":status}
+row={"edge":"review_pr.ci.classify","instance":"classifier",
+     "receipt":json.dumps(receipt,sort_keys=True,separators=(",",":")),
+     "result":result,"status":status}
+pathlib.Path(ledger).write_text(json.dumps(row,separators=(",",":"))+"\n")
+PY
+if bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify >/dev/null' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER"; then
+  RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+fi
 printf '{"edge":"review_pr.ci.classify","result":"%s","status":"%s"}\n{"edge":"review_pr.ci.classify","result":"%s","status":"%s"}\n' \
   "$RESULT_PATH" "$RESULT_STATUS" "$RESULT_PATH" "$RESULT_STATUS" > "$RESULT_LEDGER"
 RESULT_REASON="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \
@@ -462,8 +526,18 @@ RESULT_REASON="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.cla
 [ "$RESULT_REASON" = classification_ledger_malformed ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 mkdir -p "$RESULT_PATH_TMP/run/children/missing"
 MISSING_STATUS="$RESULT_PATH_TMP/run/children/missing/status.json"
-printf '{"state":"completed","exit_code":0}\n' > "$MISSING_STATUS"
-printf '{"edge":"review_pr.ci.classify","result":"%s","status":"%s"}\n' "$RESULT_PATH_TMP/run/children/missing/result.md" "$MISSING_STATUS" > "$RESULT_LEDGER"
+printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"4242"}\n' > "$MISSING_STATUS"
+python3 -I -B - "$RESULT_LEDGER" "$RESULT_PATH_TMP/run/children/missing/result.md" "$MISSING_STATUS" <<'PY'
+import json,pathlib,sys
+ledger,result,status=sys.argv[1:]
+receipt={"schema_version":1,"edge_id":"review_pr.ci.classify","instance_id":"missing",
+         "backend":"codex","handle":"4242","state":"running",
+         "result_file":result,"status_file":status}
+row={"edge":"review_pr.ci.classify","instance":"missing",
+     "receipt":json.dumps(receipt,sort_keys=True,separators=(",",":")),
+     "result":result,"status":status}
+pathlib.Path(ledger).write_text(json.dumps(row,separators=(",",":"))+"\n")
+PY
 RESULT_REASON="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \
   && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 [ "$RESULT_REASON" = classification_artifact_missing ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))

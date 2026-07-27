@@ -1504,6 +1504,7 @@ roster_must_block_aggregation "$TMP/roster-truncated-repair.records" 2
 awk '/^post_review_validated_evidence_complete\(\) \{/{active=1} active{print} active && /^\}/{exit}' \
   "$POST" >"$TMP/evidence-runtime.sh"
 . "$TMP/evidence-runtime.sh"
+UBERDEV_REVIEW_PLUGIN_ROOT="$ROOT/plugins/uberdev"
 REVIEW_EDGES=("${ROSTER_EDGES[@]}")
 EVIDENCE_ROOT="$TMP/evidence"
 mkdir -p "$EVIDENCE_ROOT"
@@ -1523,8 +1524,14 @@ for index,edge in enumerate(edges,1):
  canonical=child/"validated-result.md"; payload=f"validated-{index}\n".encode()
  canonical.write_bytes(payload); canonical.chmod(0o400)
  instance=f"review-{index}-attempt01"
- (child/"status.json").write_text('{"state":"completed","exit_code":0}\n')
- launched.append({"edge":edge,"index":index,"instance":instance,"receipt":"fixture",
+ status=child/"status.json"
+ status.write_text('{"backend":"codex","state":"completed","exit_code":0,"pid":"4242"}\n')
+ receipt=json.dumps({
+  "schema_version":1,"edge_id":edge,"instance_id":instance,
+  "backend":"codex","handle":"4242","state":"running",
+  "result_file":str(provider),"status_file":str(status),
+ },sort_keys=True,separators=(",",":"))
+ launched.append({"edge":edge,"index":index,"instance":instance,"receipt":receipt,
                   "result":str(provider),"status":str(child/"status.json")})
  validated.append({"edge":edge,"index":index,"instance":instance,
                    "result":str(canonical),"sha256":hashlib.sha256(payload).hexdigest()})
@@ -1535,8 +1542,15 @@ PY
 POST_REVIEW_VALIDATED_LEDGER="$EVIDENCE_ROOT/validated"
 REVIEW_LAUNCHED="$EVIDENCE_ROOT/initial"
 REPAIR_LAUNCHED="$EVIDENCE_ROOT/repair"
-post_review_validated_evidence_complete "$POST_REVIEW_VALIDATED_LEDGER" 6 \
-  "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED" "$EVIDENCE_ROOT"
+TRUSTED_EVIDENCE_LEDGER="$(post_review_validated_evidence_complete "$POST_REVIEW_VALIDATED_LEDGER" 6 \
+  "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED" "$EVIDENCE_ROOT")"
+[ -f "$TRUSTED_EVIDENCE_LEDGER" ]
+TRUSTED_FIRST_RESULT="$(jq -r 'select(.index == 1) | .result' "$TRUSTED_EVIDENCE_LEDGER")"
+chmod 600 "$EVIDENCE_ROOT/children/review-1-attempt01/validated-result.md"
+printf 'replacement after evidence capture\n' >"$EVIDENCE_ROOT/children/review-1-attempt01/validated-result.md"
+printf 'validated-1\n' | cmp - "$TRUSTED_FIRST_RESULT"
+printf 'validated-1\n' >"$EVIDENCE_ROOT/children/review-1-attempt01/validated-result.md"
+chmod 400 "$EVIDENCE_ROOT/children/review-1-attempt01/validated-result.md"
 
 evidence_must_fail() {
   local label="$1" ledger="$2" initial="$3" repair="$4" expected_class="$5"
@@ -1556,6 +1570,11 @@ def write(name,value): (root/name).write_text("".join(json.dumps(row,separators=
 value=rows("validated"); value[-1]["index"]=1; write("duplicate-index",value)
 value=rows("validated"); value[-1]["instance"]="foreign-attempt"; write("foreign-instance",value)
 value=rows("validated"); value[-1]["sha256"]="0"*64; write("bad-digest",value)
+initial=rows("initial"); initial[-1]["receipt"]="fixture"; write("noncanonical-receipt",initial)
+initial=rows("initial"); receipt=json.loads(initial[-1]["receipt"])
+receipt["handle"]="foreign-handle"
+initial[-1]["receipt"]=json.dumps(receipt,sort_keys=True,separators=(",",":"))
+write("mismatched-receipt",initial)
 initial=rows("initial"); value=rows("validated")
 initial[-1]["result"]=initial[0]["result"]; value[-1]["result"]=value[0]["result"]
 write("duplicate-path-initial",initial); write("duplicate-path",value)
@@ -1565,15 +1584,20 @@ child=foreign/"children"/value[-1]["instance"]; child.mkdir(parents=True)
 provider=child/"result.md"; provider.write_text("foreign provider\n")
 canonical=child/"validated-result.md"; payload=b"foreign validated\n"
 canonical.write_bytes(payload); canonical.chmod(0o400)
-(child/"status.json").write_text('{"state":"completed","exit_code":0}\n')
+(child/"status.json").write_text('{"backend":"codex","state":"completed","exit_code":0,"pid":"4242"}\n')
 initial=rows("initial"); value=rows("validated")
 initial[-1]["result"]=str(provider); initial[-1]["status"]=str(child/"status.json")
+receipt=json.loads(initial[-1]["receipt"])
+receipt["result_file"]=str(provider); receipt["status_file"]=str(child/"status.json")
+initial[-1]["receipt"]=json.dumps(receipt,sort_keys=True,separators=(",",":"))
 value[-1]["result"]=str(canonical); value[-1]["sha256"]=hashlib.sha256(payload).hexdigest()
 write("foreign-path-initial",initial); write("foreign-path",value)
 PY
 evidence_must_fail duplicate-index "$EVIDENCE_ROOT/duplicate-index" "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED" malformed-ledger
 evidence_must_fail foreign-instance "$EVIDENCE_ROOT/foreign-instance" "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED" roster-mismatch
 evidence_must_fail bad-digest "$EVIDENCE_ROOT/bad-digest" "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED" digest-mismatch
+evidence_must_fail noncanonical-receipt "$POST_REVIEW_VALIDATED_LEDGER" "$EVIDENCE_ROOT/noncanonical-receipt" "$REPAIR_LAUNCHED" roster-mismatch
+evidence_must_fail mismatched-receipt "$POST_REVIEW_VALIDATED_LEDGER" "$EVIDENCE_ROOT/mismatched-receipt" "$REPAIR_LAUNCHED" roster-mismatch
 evidence_must_fail duplicate-path "$EVIDENCE_ROOT/duplicate-path" "$EVIDENCE_ROOT/duplicate-path-initial" "$REPAIR_LAUNCHED" duplicate-artifact
 evidence_must_fail foreign-path "$EVIDENCE_ROOT/foreign-path" "$EVIDENCE_ROOT/foreign-path-initial" "$REPAIR_LAUNCHED" unsafe-artifact
 
@@ -1586,8 +1610,14 @@ provider=child/"result.md"; provider.write_text("provider-owned repair\n")
 canonical=child/"validated-result.md"; payload=b"validated-repair-3\n"
 canonical.write_bytes(payload); canonical.chmod(0o400)
 instance="review-3-attempt02"
-(child/"status.json").write_text('{"state":"completed","exit_code":0}\n')
-repair={"edge":rows[index-1]["edge"],"index":index,"instance":instance,"receipt":"fixture",
+status=child/"status.json"
+status.write_text('{"backend":"codex","state":"completed","exit_code":0,"pid":"4242"}\n')
+receipt=json.dumps({
+ "schema_version":1,"edge_id":rows[index-1]["edge"],"instance_id":instance,
+ "backend":"codex","handle":"4242","state":"running",
+ "result_file":str(provider),"status_file":str(status),
+},sort_keys=True,separators=(",",":"))
+repair={"edge":rows[index-1]["edge"],"index":index,"instance":instance,"receipt":receipt,
         "result":str(provider),"status":str(child/"status.json")}
 (root/"repair-valid").write_text(json.dumps(repair,separators=(",",":"))+"\n")
 rows[index-1]={"edge":repair["edge"],"index":index,"instance":instance,
@@ -1595,7 +1625,7 @@ rows[index-1]={"edge":repair["edge"],"index":index,"instance":instance,
 (root/"validated-repair").write_text("".join(json.dumps(row,separators=(",",":"))+"\n" for row in rows))
 PY
 post_review_validated_evidence_complete "$EVIDENCE_ROOT/validated-repair" 6 \
-  "$REVIEW_LAUNCHED" "$EVIDENCE_ROOT/repair-valid" "$EVIDENCE_ROOT"
+  "$REVIEW_LAUNCHED" "$EVIDENCE_ROOT/repair-valid" "$EVIDENCE_ROOT" >/dev/null
 
 # The configured cap is enforced by the production wave runner, not merely
 # mentioned in prose. Cap one and cap two both wait before the next launch

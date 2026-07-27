@@ -534,29 +534,55 @@ if [ "$REVIEW_WAVE_BLOCKED" -eq 0 ] && [ -s "$REVIEW_FAILED" ]; then
 fi
 if [ $((REVIEW_INITIAL_VALID_COUNT + REVIEW_REPAIR_VALID_COUNT)) -ne "$REVIEW_EXPECTED_COUNT" ]; then REVIEW_WAVE_BLOCKED=1; fi
 post_review_validated_evidence_complete() {
-  python3 -I -B - "$1" "$2" "$3" "$4" "$5" "${REVIEW_EDGES[@]}" <<'PY'
-import hashlib,json,os,re,stat,sys
-ledger,expected,initial_ledger,repair_ledger,carrier_run_dir,*allowed=sys.argv[1:]; expected=int(expected)
+  python3 -I -B - "$1" "$2" "$3" "$4" "$5" "$UBERDEV_REVIEW_PLUGIN_ROOT" "${REVIEW_EDGES[@]}" <<'PY'
+import hashlib,importlib.util,json,os,re,stat,sys
+ledger,expected,initial_ledger,repair_ledger,carrier_run_dir,plugin_root,*allowed=sys.argv[1:]; expected=int(expected)
 def fail(reason,row=None):
  edge=(row or {}).get('edge','unknown')
  index=(row or {}).get('index','unknown')
  print(f'post_review_evidence_failure class={reason} edge={edge} index={index}',file=sys.stderr)
  raise SystemExit(2)
+def load_helper():
+ spec=importlib.util.spec_from_file_location('uberdev_post_review_artifacts',os.path.join(plugin_root,'lib','run_manifest.py'))
+ if spec is None or spec.loader is None: fail('unsafe-artifact')
+ module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module
+ try: spec.loader.exec_module(module)
+ except Exception: fail('unsafe-artifact')
+ return module
+def capture(module,path,minimum,maximum,reason,row=None):
+ try: return module.secure_capture_regular(path,minimum,maximum)
+ except Exception: fail(reason,row)
+def json_lines(payload):
+ return [json.loads(line) for line in payload.decode('utf-8').splitlines() if line.strip()]
 try:
+ artifacts=load_helper()
  carrier_run=os.path.realpath(carrier_run_dir)
  if not os.path.isabs(carrier_run_dir) or not os.path.isdir(carrier_run): fail('unsafe-artifact')
+ carrier_entry=os.lstat(carrier_run)
+ uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
+ if (stat.S_ISLNK(carrier_entry.st_mode) or not stat.S_ISDIR(carrier_entry.st_mode)
+     or (uid is not None and carrier_entry.st_uid!=uid)): fail('unsafe-artifact')
  children_root=os.path.join(carrier_run,'children')
- rows=[json.loads(line) for line in open(ledger,encoding='utf-8') if line.strip()]
- launched=[]
+ ledger_payload=capture(artifacts,ledger,1,1048576,'malformed-ledger')[0]
+ rows=json_lines(ledger_payload)
+ launched=[]; launch_payloads=[]
  for source in (initial_ledger,repair_ledger):
-  if source and os.path.exists(source):
-   launched.extend(json.loads(line) for line in open(source,encoding='utf-8') if line.strip())
+  if source and os.path.lexists(source):
+   source_payload=capture(artifacts,source,0,1048576,'malformed-ledger')[0]
+   launch_payloads.append(source_payload); launched.extend(json_lines(source_payload))
  allowed_pairs={(edge,index) for index,edge in enumerate(allowed,1)}
  if (len(rows)!=expected or len({row.get('edge') for row in rows})!=expected
      or len({row.get('index') for row in rows})!=expected
      or {(row.get('edge'),row.get('index')) for row in rows}!=allowed_pairs):
   fail('malformed-ledger')
- seen_provider_paths=set(); seen_paths=set(); seen_inodes=set()
+ context=hashlib.sha256(ledger_payload+b'\0'+b'\0'.join(launch_payloads)).hexdigest()[:16]
+ trusted_dir=os.path.abspath(ledger)+'.trusted-artifacts-'+context
+ trusted_ledger=os.path.abspath(ledger)+'.trusted-'+context+'.jsonl'
+ os.mkdir(trusted_dir,0o700)
+ trusted_dir_entry=os.lstat(trusted_dir)
+ if (stat.S_ISLNK(trusted_dir_entry.st_mode) or not stat.S_ISDIR(trusted_dir_entry.st_mode)
+     or (uid is not None and trusted_dir_entry.st_uid!=uid)): fail('unsafe-artifact')
+ seen_provider_paths=set(); seen_paths=set(); seen_evidence=set(); trusted_rows=[]
  for row in rows:
   if set(row)!={'edge','index','instance','result','sha256'} or type(row['index']) is not int:
    fail('malformed-ledger',row)
@@ -566,6 +592,8 @@ try:
            and candidate.get('instance')==row['instance']]
   if len(matches)!=1: fail('roster-mismatch',row)
   launch=matches[0]; launched_result=launch.get('result'); launched_status=launch.get('status')
+  if set(launch)!={'edge','index','instance','receipt','result','status'}:
+   fail('roster-mismatch',row)
   if isinstance(launched_result,str) and launched_result in seen_provider_paths:
    fail('duplicate-artifact',row)
   if isinstance(launched_result,str): seen_provider_paths.add(launched_result)
@@ -577,33 +605,60 @@ try:
       or launched_result!=expected_provider or launched_status!=expected_status
       or os.path.realpath(os.path.dirname(launched_result))!=expected_child):
    fail('unsafe-artifact',row)
-  status_entry=os.lstat(launched_status)
-  with open(launched_status,encoding='utf-8') as stream: status_value=json.load(stream)
-  if (stat.S_ISLNK(status_entry.st_mode) or not stat.S_ISREG(status_entry.st_mode)
-      or status_entry.st_nlink!=1 or status_value.get('state')!='completed'
-      or type(status_value.get('exit_code')) is not int or status_value['exit_code']!=0):
+  try: receipt=json.loads(launch['receipt'])
+  except (TypeError,json.JSONDecodeError): fail('roster-mismatch',row)
+  receipt_keys={'schema_version','edge_id','instance_id','backend','handle','state','result_file','status_file'}
+  if (not isinstance(receipt,dict) or set(receipt)!=receipt_keys or receipt.get('schema_version')!=1
+      or receipt.get('edge_id')!=row['edge'] or receipt.get('instance_id')!=row['instance']
+      or receipt.get('result_file')!=launched_result or receipt.get('status_file')!=launched_status
+      or receipt.get('backend') not in {'codex','claude-bg','background','wezterm'}
+      or not isinstance(receipt.get('handle'),str) or not receipt['handle']
+      or receipt.get('state') not in {'running','completed'}):
+   fail('roster-mismatch',row)
+  status_payload,status_identity=capture(artifacts,launched_status,1,65536,'roster-mismatch',row)
+  provider_payload,provider_identity=capture(artifacts,launched_result,1,16777216,'unsafe-artifact',row)
+  status_value=json.loads(status_payload.decode('utf-8'))
+  status_handle=status_value.get('pid')
+  if (status_value.get('state')!='completed'
+      or type(status_value.get('exit_code')) is not int or status_value['exit_code']!=0
+      or status_value.get('backend')!=receipt['backend'] or status_handle is None
+      or receipt['handle'] not in {str(status_handle),'pane:'+str(status_handle)}):
    fail('roster-mismatch',row)
   expected_result=os.path.join(expected_child,'validated-result.md')
-  path=row['result']; digest=row['sha256']; entry=os.lstat(path)
+  path=row['result']; digest=row['sha256']
   canonical_path=os.path.realpath(path)
-  inode=(entry.st_dev,entry.st_ino)
   if (not os.path.isabs(path) or path!=expected_result or canonical_path!=path
-      or not re.fullmatch(r'[0-9a-f]{64}',digest or '') or stat.S_ISLNK(entry.st_mode)
-      or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1
-      or (os.name!='nt' and stat.S_IMODE(entry.st_mode)!=0o400)):
+      or not re.fullmatch(r'[0-9a-f]{64}',digest or '')):
    fail('unsafe-artifact',row)
-  if canonical_path in seen_paths or inode in seen_inodes: fail('duplicate-artifact',row)
-  seen_paths.add(canonical_path); seen_inodes.add(inode)
-  with open(path,'rb') as stream: payload=stream.read(1048577)
-  if len(payload)>1048576 or hashlib.sha256(payload).hexdigest()!=digest:
+  payload,identity=capture(artifacts,path,1,1048576,'unsafe-artifact',row)
+  if os.name!='nt' and stat.S_IMODE(identity[5])!=0o400: fail('unsafe-artifact',row)
+  evidence_key=(identity,hashlib.sha256(payload).hexdigest())
+  provider_key=(provider_identity,hashlib.sha256(provider_payload).hexdigest())
+  status_key=(status_identity,hashlib.sha256(status_payload).hexdigest())
+  if canonical_path in seen_paths or any(key in seen_evidence for key in (evidence_key,provider_key,status_key)):
+   fail('duplicate-artifact',row)
+  seen_paths.add(canonical_path); seen_evidence.update((evidence_key,provider_key,status_key))
+  if evidence_key[1]!=digest:
    fail('digest-mismatch',row)
+  snapshot=os.path.join(trusted_dir,f"{row['index']:02d}-{digest}.md")
+  artifacts.secure_publish_immutable(snapshot,payload)
+  trusted_rows.append({'edge':row['edge'],'index':row['index'],'instance':row['instance'],
+                       'result':snapshot,'sha256':digest})
+ trusted_payload=(''.join(json.dumps(row,sort_keys=True,separators=(',',':'))+'\n'
+                          for row in trusted_rows)).encode('utf-8')
+ artifacts.secure_publish_immutable(trusted_ledger,trusted_payload)
+ print(trusted_ledger,end='')
 except SystemExit: raise
 except (OSError,UnicodeError,ValueError,TypeError,json.JSONDecodeError):
  fail('malformed-ledger')
 PY
 }
-if ! post_review_validated_evidence_complete "$POST_REVIEW_VALIDATED_LEDGER" "$REVIEW_EXPECTED_COUNT" \
-    "$REVIEW_LAUNCHED" "$REPAIR_PREFIX.launched" "$UBERDEV_CARRIER_RUN_DIR"; then REVIEW_WAVE_BLOCKED=1; fi
+if POST_REVIEW_TRUSTED_LEDGER="$(post_review_validated_evidence_complete "$POST_REVIEW_VALIDATED_LEDGER" "$REVIEW_EXPECTED_COUNT" \
+    "$REVIEW_LAUNCHED" "$REPAIR_PREFIX.launched" "$UBERDEV_CARRIER_RUN_DIR")"; then
+  POST_REVIEW_VALIDATED_LEDGER="$POST_REVIEW_TRUSTED_LEDGER"
+else
+  REVIEW_WAVE_BLOCKED=1
+fi
 post_review_require_complete_wave() {
   local aggregate_path="${AGG_PATH:-$RESEARCH_DIR_ABS/post-impl-review-final.md}"
   if [ "${REVIEW_WAVE_BLOCKED:-1}" -eq 0 ] \
@@ -635,10 +690,13 @@ fi
 The executable boundary above gates the writer before interpreting any
 reviewer prose. A lifecycle failure or an exhausted format repair is not a
 review verdict and MUST NOT produce the ordinary six-row `Continue.` artifact.
-Aggregate only the byte-identical, roster-bound `validated-result.md` artifacts
-listed in `post-review.validated`; verify each recorded SHA-256 immediately
-before its artifact is read. Never re-read a provider-owned `result.md` during
-aggregation. Evidence failures emit only the stable class
+The gate replaces `POST_REVIEW_VALIDATED_LEDGER` with its parent-owned
+`.trusted-<context>.jsonl` receipt and copies the exact descriptor-captured
+reviewer bytes into the paired `.trusted-artifacts-<context>/` directory.
+Aggregate only those digest-bound paths from the trusted ledger; never reopen
+a child-owned `validated-result.md` or provider-owned `result.md` during
+aggregation. In other words, aggregation consumes only validated artifacts
+whose captured bytes were copied by the gate. Evidence failures emit only the stable class
 `malformed-ledger`, `roster-mismatch`, `unsafe-artifact`,
 `duplicate-artifact`, or `digest-mismatch` plus the bounded edge/index (never a
 path or reviewer content).

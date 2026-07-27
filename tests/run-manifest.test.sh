@@ -1853,5 +1853,44 @@ else
   fail "deleted opaque-backend status is unavailable evidence, not a recovery wedge" "reconcile=$deleted_reconcile_rc/$deleted_reconcile_out verify=$CAPTURE_RC/$CAPTURE_OUT"
 fi
 
+SECURE_CAPTURE_RESULT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" "$TMP" <<'PY'
+import importlib.util
+import os
+import pathlib
+import sys
+from unittest import mock
+
+for index,module_path in enumerate(sys.argv[1:3]):
+    spec=importlib.util.spec_from_file_location(f"run_manifest_capture_{index}",module_path)
+    module=importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name]=module
+    spec.loader.exec_module(module)
+    root=pathlib.Path(sys.argv[3])/f"capture-{index}"; root.mkdir()
+    artifact=root/"artifact"; artifact.write_bytes(b"verified bytes\n")
+    payload,identity=module.secure_capture_regular(str(artifact),1,1024)
+    assert payload==b"verified bytes\n" and len(identity)==6
+    replacement=root/"replacement"; replacement.write_bytes(b"replacement\n")
+    original_open=module._secure_open_regular
+    def replace_after_open(path,flags,mode=0o600):
+        descriptor=original_open(path,flags,mode)
+        os.replace(replacement,path)
+        return descriptor
+    with mock.patch.object(module,"_secure_open_regular",replace_after_open):
+        try:
+            module.secure_capture_regular(str(artifact),1,1024)
+        except module.ManifestRejected as error:
+            assert str(error)=="artifact_replaced_during_capture"
+        else:
+            raise AssertionError("replacement accepted")
+print("ok",end="")
+PY
+)"
+if [ "$SECURE_CAPTURE_RESULT" = ok ]; then
+  pass "secure artifact capture pins descriptor bytes and rejects deterministic path replacement"
+else
+  fail "secure artifact capture pins descriptor bytes and rejects deterministic path replacement" "$SECURE_CAPTURE_RESULT"
+fi
+
 printf '\nrun-manifest: PASS=%s FAIL=%s\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
