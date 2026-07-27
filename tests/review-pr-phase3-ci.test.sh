@@ -217,6 +217,10 @@ assert_grep "$REVIEW_PR" 'os\.write\(fd,payload\)' \
   "S10.10c — refusal aggregate serializes a concrete envelope and finding row"
 assert_no_grep "$REVIEW_PR" 'review_pr\.ci\.classify.*log_path|log_path.*review_pr\.ci\.classify' \
   "S10.10d — classifier handoff carries no mutable log pathname"
+assert_no_grep "$REVIEW_PR" 'CI_LOG_TRUNCATE_LINES|ci-log-run-|capture_path|capture_receipt|created_identity' \
+  "S10.10d1 — classifier authority uses no named raw staging or producer receipt"
+assert_grep "$REVIEW_PR" 'gh run view "\$CI_RUN_ID".*--log-failed' \
+  "S10.10d2 — classifier authority streams only failed-job logs into its transformer"
 assert_grep "$REVIEW_PR" 'review_pr\.ci\.classify.*log_content|log_content.*CI_LOG_AUTHORITY_JSON' \
   "S10.10e — classifier handoff carries the captured log bytes inline"
 assert_grep "$REVIEW_PR" 'review_pr\.ci\.classify.*log_sha256|log_sha256.*CI_LOG_AUTHORITY_JSON' \
@@ -1237,115 +1241,119 @@ fi
 rm -f "$POST_MONITOR_REFRESH_FIXTURE" "$POST_MONITOR_REFRESH_LOG"
 
 echo
-echo "== S20-RUNTIME: failed log capture cleans its private partial artifact =="
-CI_LOG_CAPTURE_FIXTURE="$(mktemp)"
+echo "== S20-RUNTIME: direct bounded classifier-log stream =="
+CI_LOG_STREAM_FIXTURE="$(mktemp)"
 awk -v wanted="review_capture_ci_log_authority" '
   $0 ~ "^[[:space:]]*" wanted "\\(\\) \\{" { active=1 }
+  active && /^    if CI_LOG_AUTHORITY_JSON=/ { exit }
   active { print }
-  active && /^PY$/ { heredoc_done=1 }
-  active && heredoc_done && /^    \}$/ { exit }
-' "$REVIEW_PR" >"$CI_LOG_CAPTURE_FIXTURE"
-CI_LOG_CAPTURE_DIR="$(mktemp -d)"
-set +e
-CI_LOG_CAPTURE_RESULT="$(
-  CI_LOG_CAPTURE_DIR="$CI_LOG_CAPTURE_DIR" ROOT="$REPO_ROOT" bash -c '
+' "$REVIEW_PR" >"$CI_LOG_STREAM_FIXTURE"
+
+run_ci_log_stream_fixture() {
+  local mode="$1"
+  CI_LOG_STREAM_MODE="$mode" bash -c '
     . "$1"
-    RESEARCH_DIR_ABS="$CI_LOG_CAPTURE_DIR"
     REVIEW_REPO_SLUG=owner/repo
     PR_NUMBER=73
     CI_RUN_ID=991
-    CI_FIX_LOOP_ITER=2
     CI_CLASSIFICATION_HEAD_SHA=0123456789abcdef0123456789abcdef01234567
-    UBERDEV_REVIEW_PLUGIN_ROOT="$ROOT/plugins/uberdev"
     gh() {
-      printf "partial failed log\n"
-      return 1
+      [ "$#" -eq 6 ] \
+        && [ "$1" = run ] \
+        && [ "$2" = view ] \
+        && [ "$3" = "$CI_RUN_ID" ] \
+        && [ "$4" = --repo ] \
+        && [ "$5" = "$REVIEW_REPO_SLUG" ] \
+        && [ "$6" = --log-failed ] || return 97
+      case "$CI_LOG_STREAM_MODE" in
+        valid) printf "original & <failed assertion>\n" ;;
+        gh-error) printf "partial failed log\n"; return 1 ;;
+        invalid-utf8) printf "\377" ;;
+        oversize) python3 -I -B -c '\''import sys; sys.stdout.write("x"*49153)'\'' ;;
+        *) return 98 ;;
+      esac
     }
     review_capture_ci_log_authority
-  ' _ "$CI_LOG_CAPTURE_FIXTURE"
-)"
-CI_LOG_CAPTURE_RC=$?
-set -e
-if [ "$CI_LOG_CAPTURE_RC" -ne 0 ] \
-    && [ "$CI_LOG_CAPTURE_RESULT" = classification_log_capture_failed ] \
-    && [ ! -e "$CI_LOG_CAPTURE_DIR/ci-log-run-991-iter2.raw" ]; then
-  echo "  PASS  S20-RT — failed capture is terminal and removes the partial raw log"
+  ' _ "$CI_LOG_STREAM_FIXTURE"
+}
+
+if ! grep -Eq 'capture_path|capture_receipt|created_identity|secure_capture_regular|os\.(open|lstat)' \
+      "$CI_LOG_STREAM_FIXTURE" \
+    && grep -q -- '--log-failed' "$CI_LOG_STREAM_FIXTURE" \
+    && grep -q 'set -o pipefail' "$CI_LOG_STREAM_FIXTURE"; then
+  echo "  PASS  S20-RT.1 — one pipefail-protected transformer has no named producer identity to mutate"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  S20-RT — failed capture stranded or misreported its partial raw log"
-  echo "        rc: $CI_LOG_CAPTURE_RC"
-  echo "        result: $CI_LOG_CAPTURE_RESULT"
+  echo "  FAIL  S20-RT.1 — classifier capture still exposes a named mutable producer boundary"
+  FAIL=$((FAIL + 1))
+fi
+
+if ! grep -Eq 'os\.unlink|unlink\(' "$CI_LOG_STREAM_FIXTURE"; then
+  echo "  PASS  S20-RT.2 — classifier capture has no pathname unlink replacement race"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S20-RT.2 — classifier capture still deletes through a mutable pathname"
   FAIL=$((FAIL + 1))
 fi
 
 set +e
-CI_LOG_OVERSIZE_RESULT="$(
-  CI_LOG_CAPTURE_DIR="$CI_LOG_CAPTURE_DIR" ROOT="$REPO_ROOT" bash -c '
-    . "$1"
-    RESEARCH_DIR_ABS="$CI_LOG_CAPTURE_DIR"
-    REVIEW_REPO_SLUG=owner/repo
-    PR_NUMBER=73
-    CI_RUN_ID=992
-    CI_FIX_LOOP_ITER=2
-    CI_CLASSIFICATION_HEAD_SHA=0123456789abcdef0123456789abcdef01234567
-    UBERDEV_REVIEW_PLUGIN_ROOT="$ROOT/plugins/uberdev"
-    gh() {
-      python3 -I -B -c '\''import sys; sys.stdout.write("x"*49153)'\''
-    }
-    review_capture_ci_log_authority
-  ' _ "$CI_LOG_CAPTURE_FIXTURE"
-)"
+CI_LOG_VALID_RESULT="$(run_ci_log_stream_fixture valid)"
+CI_LOG_VALID_RC=$?
+set -e
+if [ "$CI_LOG_VALID_RC" -eq 0 ] && python3 -I -B - "$CI_LOG_VALID_RESULT" <<'PY'
+import hashlib,json,sys
+value=json.loads(sys.argv[1])
+expected='<external-untrusted-input source="github-actions-log-pr-73-run-991">\noriginal &amp; &lt;failed assertion>\n</external-untrusted-input>\n'
+assert value=={
+    'head_sha':'0123456789abcdef0123456789abcdef01234567',
+    'log_content':expected,
+    'log_sha256':hashlib.sha256(expected.encode()).hexdigest(),
+    'pr_number':73,
+    'run_id':'991',
+}
+assert len(json.dumps(value,sort_keys=True,separators=(',',':')).encode())<=49152
+PY
+then
+  echo "  PASS  S20-RT.3 — transformer emits exact canonical identity, envelope bytes, and digest"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S20-RT.3 — valid failed-log stream did not produce canonical authority JSON"
+  echo "        rc: $CI_LOG_VALID_RC"
+  FAIL=$((FAIL + 1))
+fi
+
+set +e
+CI_LOG_GH_ERROR_RESULT="$(run_ci_log_stream_fixture gh-error)"
+CI_LOG_GH_ERROR_RC=$?
+CI_LOG_UTF8_RESULT="$(run_ci_log_stream_fixture invalid-utf8)"
+CI_LOG_UTF8_RC=$?
+CI_LOG_OVERSIZE_RESULT="$(run_ci_log_stream_fixture oversize)"
 CI_LOG_OVERSIZE_RC=$?
 set -e
+if [ "$CI_LOG_GH_ERROR_RC" -ne 0 ]; then
+  echo "  PASS  S20-RT.4 — upstream gh failure fails the pipe closed"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S20-RT.4 — upstream gh failure produced accepted authority"
+  FAIL=$((FAIL + 1))
+fi
+if [ "$CI_LOG_UTF8_RC" -ne 0 ] \
+    && [ "$CI_LOG_UTF8_RESULT" = classification_log_capture_invalid ]; then
+  echo "  PASS  S20-RT.5 — invalid UTF-8 stream fails closed"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S20-RT.5 — invalid UTF-8 stream escaped the transformer"
+  FAIL=$((FAIL + 1))
+fi
 if [ "$CI_LOG_OVERSIZE_RC" -ne 0 ] \
-    && [ "$CI_LOG_OVERSIZE_RESULT" = classification_log_input_oversize ] \
-    && [ ! -e "$CI_LOG_CAPTURE_DIR/ci-log-run-992-iter2.raw" ]; then
-  echo "  PASS  S20-RT.2 — oversized raw capture is rejected and removed"
+    && [ "$CI_LOG_OVERSIZE_RESULT" = classification_log_input_oversize ]; then
+  echo "  PASS  S20-RT.6 — oversized stream fails before authority publication"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  S20-RT.2 — oversized raw capture survived or was accepted"
-  echo "        rc: $CI_LOG_OVERSIZE_RC"
-  echo "        result: $CI_LOG_OVERSIZE_RESULT"
+  echo "  FAIL  S20-RT.6 — oversized stream escaped the immutable input ceiling"
   FAIL=$((FAIL + 1))
 fi
-
-CI_LOG_PREEXISTING_PATH="$CI_LOG_CAPTURE_DIR/ci-log-run-993-iter2.raw"
-CI_LOG_PREEXISTING_EXPECTED="$CI_LOG_CAPTURE_DIR/preexisting.expected"
-printf 'pre-existing controller artifact\n' >"$CI_LOG_PREEXISTING_PATH"
-cp "$CI_LOG_PREEXISTING_PATH" "$CI_LOG_PREEXISTING_EXPECTED"
-chmod 600 "$CI_LOG_PREEXISTING_PATH" "$CI_LOG_PREEXISTING_EXPECTED"
-set +e
-CI_LOG_PREEXISTING_RESULT="$(
-  CI_LOG_CAPTURE_DIR="$CI_LOG_CAPTURE_DIR" ROOT="$REPO_ROOT" bash -c '
-    . "$1"
-    RESEARCH_DIR_ABS="$CI_LOG_CAPTURE_DIR"
-    REVIEW_REPO_SLUG=owner/repo
-    PR_NUMBER=73
-    CI_RUN_ID=993
-    CI_FIX_LOOP_ITER=2
-    CI_CLASSIFICATION_HEAD_SHA=0123456789abcdef0123456789abcdef01234567
-    UBERDEV_REVIEW_PLUGIN_ROOT="$ROOT/plugins/uberdev"
-    gh() {
-      printf "replacement failed log\n"
-    }
-    review_capture_ci_log_authority
-  ' _ "$CI_LOG_CAPTURE_FIXTURE"
-)"
-CI_LOG_PREEXISTING_RC=$?
-set -e
-if [ "$CI_LOG_PREEXISTING_RC" -ne 0 ] \
-    && [ "$CI_LOG_PREEXISTING_RESULT" = classification_log_cleanup_failed ] \
-    && cmp -s "$CI_LOG_PREEXISTING_PATH" "$CI_LOG_PREEXISTING_EXPECTED"; then
-  echo "  PASS  S20-RT.3 — failed exclusive creation preserves a pre-existing path byte-for-byte"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL  S20-RT.3 — failed exclusive creation deleted or changed a pre-existing path"
-  echo "        rc: $CI_LOG_PREEXISTING_RC"
-  echo "        result: $CI_LOG_PREEXISTING_RESULT"
-  FAIL=$((FAIL + 1))
-fi
-rm -f "$CI_LOG_CAPTURE_FIXTURE"
-rm -rf "$CI_LOG_CAPTURE_DIR"
+rm -f "$CI_LOG_STREAM_FIXTURE"
 
 echo
 echo "== Summary =="

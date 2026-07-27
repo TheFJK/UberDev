@@ -575,7 +575,7 @@ gh() {
     && [ "$3" = "$CI_RUN_ID" ] \
     && [ "$4" = --repo ] \
     && [ "$5" = "$REVIEW_REPO_SLUG" ] \
-    && [ "$6" = --log ] || return 2
+    && [ "$6" = --log-failed ] || return 2
   cat "$CI_LOG_SOURCE_PATH"
 }
 
@@ -701,10 +701,10 @@ wave=()
 (. "$TMP/review-defer.sh") & wave+=("$!")
 (. "$TMP/review-classify.sh") & wave+=("$!")
 review_wait_jobs "${wave[@]}"
-[ ! -e "$RESEARCH_DIR_ABS/ci-log-run-${CI_RUN_ID}-iter${CI_FIX_LOOP_ITER}.raw" ] || {
-  echo 'review-child-inputs: controller raw CI log capture survived inline handoff construction' >&2
+if find "$RESEARCH_DIR_ABS" -maxdepth 1 -name 'ci-log-run-*.raw' -print -quit | grep -q .; then
+  echo 'review-child-inputs: controller created a mutable raw CI log staging file' >&2
   exit 1
-}
+fi
 
 # Replacing the controller-only source after dispatch cannot change the inline
 # bytes already published in the immutable classifier handoff.
