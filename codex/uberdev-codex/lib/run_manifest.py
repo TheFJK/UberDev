@@ -1439,6 +1439,64 @@ def secure_capture_regular(
             os.close(descriptor)
 
 
+def _artifact_inode_matches(
+    entry: os.stat_result, identity: tuple[int, int, int, int, int, int]
+) -> bool:
+    return entry.st_dev == identity[0] and entry.st_ino == identity[1]
+
+
+def secure_remove_published_regular(
+    path: str, identity: tuple[int, int, int, int, int, int]
+) -> bool:
+    """Remove a failed publication only while its exact inode remains named."""
+
+    absolute = os.path.abspath(path)
+    try:
+        current = os.lstat(absolute)
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        raise ManifestRuntimeError("artifact_cleanup_inspect_failed") from exc
+    if (
+        not stat.S_ISREG(current.st_mode)
+        or current.st_nlink != 1
+        or not _artifact_inode_matches(current, identity)
+    ):
+        return False
+    try:
+        os.unlink(absolute)
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        raise ManifestRuntimeError("artifact_cleanup_unlink_failed") from exc
+    return not os.path.lexists(absolute)
+
+
+def secure_remove_published_directory(
+    path: str, identity: tuple[int, int, int, int, int, int]
+) -> bool:
+    """Remove an empty failed-attempt directory only at its original inode."""
+
+    absolute = os.path.abspath(path)
+    try:
+        current = os.lstat(absolute)
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        raise ManifestRuntimeError("artifact_cleanup_inspect_failed") from exc
+    if not stat.S_ISDIR(current.st_mode) or not _artifact_inode_matches(
+        current, identity
+    ):
+        return False
+    try:
+        os.rmdir(absolute)
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        raise ManifestRuntimeError("artifact_cleanup_rmdir_failed") from exc
+    return not os.path.lexists(absolute)
+
+
 def secure_publish_immutable(
     path: str, payload: bytes
 ) -> tuple[int, int, int, int, int, int]:
@@ -1446,11 +1504,16 @@ def secure_publish_immutable(
 
     if not isinstance(payload, bytes):
         raise ManifestRejected("artifact_payload_invalid")
+    absolute = os.path.abspath(path)
     descriptor: int | None = None
+    created_identity: tuple[int, int, int, int, int, int] | None = None
+    published_identity: tuple[int, int, int, int, int, int] | None = None
+    failure: BaseException | None = None
     try:
         descriptor = _secure_open_regular(
-            os.path.abspath(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400
+            absolute, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400
         )
+        created_identity = _artifact_identity(os.fstat(descriptor))
         offset = 0
         while offset < len(payload):
             written = os.write(descriptor, payload[offset:])
@@ -1461,25 +1524,57 @@ def secure_publish_immutable(
         if os.name != "nt":
             os.fchmod(descriptor, 0o400)
         opened = os.fstat(descriptor)
+        current = os.lstat(absolute)
         uid_fn = getattr(os, "geteuid", None)
         uid = uid_fn() if uid_fn is not None else None
+        published_identity = _artifact_identity(opened)
+        if _artifact_identity(current) != published_identity:
+            raise ManifestRejected("artifact_snapshot_identity_changed")
         if (
             not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(current.st_mode)
             or opened.st_nlink != 1
+            or current.st_nlink != 1
             or opened.st_size != len(payload)
+            or current.st_size != len(payload)
             or (uid is not None and opened.st_uid != uid)
+            or (uid is not None and current.st_uid != uid)
+            or (
+                os.name != "nt"
+                and (
+                    stat.S_IMODE(opened.st_mode) != 0o400
+                    or stat.S_IMODE(current.st_mode) != 0o400
+                )
+            )
         ):
             raise ManifestRejected("artifact_snapshot_invalid")
-        return _artifact_identity(opened)
     except FileExistsError as exc:
         raise ManifestRejected("artifact_snapshot_exists") from exc
-    except (ManifestRejected, ManifestRuntimeError):
-        raise
+    except (ManifestRejected, ManifestRuntimeError) as exc:
+        failure = exc
     except OSError as exc:
-        raise ManifestRuntimeError("artifact_snapshot_failed") from exc
+        failure = ManifestRuntimeError("artifact_snapshot_failed")
+        failure.__cause__ = exc
     finally:
         if descriptor is not None:
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                if failure is None:
+                    failure = ManifestRuntimeError("artifact_snapshot_close_failed")
+                    failure.__cause__ = exc
+    if failure is not None:
+        if created_identity is not None:
+            try:
+                secure_remove_published_regular(absolute, created_identity)
+            except ManifestRuntimeError as cleanup_error:
+                raise ManifestRuntimeError(
+                    "artifact_snapshot_cleanup_failed"
+                ) from cleanup_error
+        raise failure
+    if published_identity is None:
+        raise ManifestRuntimeError("artifact_snapshot_failed")
+    return published_identity
 
 
 def _lock_manifest_descriptor(descriptor: int) -> None:

@@ -1571,6 +1571,7 @@ value=rows("validated"); value[-1]["index"]=1; write("duplicate-index",value)
 value=rows("validated"); value[-1]["instance"]="foreign-attempt"; write("foreign-instance",value)
 value=rows("validated"); value[-1]["sha256"]="0"*64; write("bad-digest",value)
 initial=rows("initial"); initial[-1]["receipt"]="fixture"; write("noncanonical-receipt",initial)
+initial=rows("initial"); initial[1]["receipt"]="fixture"; write("mid-roster-receipt",initial)
 initial=rows("initial"); receipt=json.loads(initial[-1]["receipt"])
 receipt["handle"]="foreign-handle"
 initial[-1]["receipt"]=json.dumps(receipt,sort_keys=True,separators=(",",":"))
@@ -1600,6 +1601,19 @@ evidence_must_fail noncanonical-receipt "$POST_REVIEW_VALIDATED_LEDGER" "$EVIDEN
 evidence_must_fail mismatched-receipt "$POST_REVIEW_VALIDATED_LEDGER" "$EVIDENCE_ROOT/mismatched-receipt" "$REPAIR_LAUNCHED" roster-mismatch
 evidence_must_fail duplicate-path "$EVIDENCE_ROOT/duplicate-path" "$EVIDENCE_ROOT/duplicate-path-initial" "$REPAIR_LAUNCHED" duplicate-artifact
 evidence_must_fail foreign-path "$EVIDENCE_ROOT/foreign-path" "$EVIDENCE_ROOT/foreign-path-initial" "$REPAIR_LAUNCHED" unsafe-artifact
+
+MID_ROSTER_LEDGER="$EVIDENCE_ROOT/mid-roster-validated"
+cp "$POST_REVIEW_VALIDATED_LEDGER" "$MID_ROSTER_LEDGER"
+evidence_must_fail mid-roster-cleanup "$MID_ROSTER_LEDGER" "$EVIDENCE_ROOT/mid-roster-receipt" "$REPAIR_LAUNCHED" roster-mismatch
+if find "$EVIDENCE_ROOT" -maxdepth 1 \
+    \( -name 'mid-roster-validated.trusted-*' -o -name 'mid-roster-validated.trusted-artifacts-*' \) \
+    -print | grep -q .; then
+  echo "failed evidence gate retained trusted publication artifacts" >&2
+  exit 1
+fi
+MID_ROSTER_RETRY_LEDGER="$(post_review_validated_evidence_complete "$MID_ROSTER_LEDGER" 6 \
+  "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED" "$EVIDENCE_ROOT")"
+[ -f "$MID_ROSTER_RETRY_LEDGER" ]
 
 python3 -I -B - "$EVIDENCE_ROOT" <<'PY'
 import hashlib,json,os,pathlib,sys

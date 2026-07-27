@@ -554,6 +554,21 @@ def capture(module,path,minimum,maximum,reason,row=None):
  except Exception: fail(reason,row)
 def json_lines(payload):
  return [json.loads(line) for line in payload.decode('utf-8').splitlines() if line.strip()]
+artifacts=None; created_regular=[]; trusted_dir=None; trusted_dir_identity=None; gate_complete=False
+def cleanup_failed_attempt():
+ cleanup_ok=True
+ if artifacts is None: return cleanup_ok
+ for path,identity in reversed(created_regular):
+  try:
+   if not artifacts.secure_remove_published_regular(path,identity): cleanup_ok=False
+  except Exception:
+   cleanup_ok=False
+ if trusted_dir is not None and trusted_dir_identity is not None:
+  try:
+   if not artifacts.secure_remove_published_directory(trusted_dir,trusted_dir_identity): cleanup_ok=False
+  except Exception:
+   cleanup_ok=False
+ return cleanup_ok
 try:
  artifacts=load_helper()
  carrier_run=os.path.realpath(carrier_run_dir)
@@ -582,6 +597,7 @@ try:
  trusted_dir_entry=os.lstat(trusted_dir)
  if (stat.S_ISLNK(trusted_dir_entry.st_mode) or not stat.S_ISDIR(trusted_dir_entry.st_mode)
      or (uid is not None and trusted_dir_entry.st_uid!=uid)): fail('unsafe-artifact')
+ trusted_dir_identity=artifacts._artifact_identity(trusted_dir_entry)
  seen_provider_paths=set(); seen_paths=set(); seen_evidence=set(); trusted_rows=[]
  for row in rows:
   if set(row)!={'edge','index','instance','result','sha256'} or type(row['index']) is not int:
@@ -641,16 +657,24 @@ try:
   if evidence_key[1]!=digest:
    fail('digest-mismatch',row)
   snapshot=os.path.join(trusted_dir,f"{row['index']:02d}-{digest}.md")
-  artifacts.secure_publish_immutable(snapshot,payload)
+  snapshot_identity=artifacts.secure_publish_immutable(snapshot,payload)
+  created_regular.append((snapshot,snapshot_identity))
   trusted_rows.append({'edge':row['edge'],'index':row['index'],'instance':row['instance'],
                        'result':snapshot,'sha256':digest})
  trusted_payload=(''.join(json.dumps(row,sort_keys=True,separators=(',',':'))+'\n'
                           for row in trusted_rows)).encode('utf-8')
- artifacts.secure_publish_immutable(trusted_ledger,trusted_payload)
+ trusted_ledger_identity=artifacts.secure_publish_immutable(trusted_ledger,trusted_payload)
+ created_regular.append((trusted_ledger,trusted_ledger_identity))
+ gate_complete=True
  print(trusted_ledger,end='')
 except SystemExit: raise
 except (OSError,UnicodeError,ValueError,TypeError,json.JSONDecodeError):
  fail('malformed-ledger')
+except Exception:
+ fail('unsafe-artifact')
+finally:
+ if not gate_complete and not cleanup_failed_attempt():
+  print('post_review_evidence_failure class=cleanup-failed edge=unknown index=unknown',file=sys.stderr)
 PY
 }
 if POST_REVIEW_TRUSTED_LEDGER="$(post_review_validated_evidence_complete "$POST_REVIEW_VALIDATED_LEDGER" "$REVIEW_EXPECTED_COUNT" \

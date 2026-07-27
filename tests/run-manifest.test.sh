@@ -1883,13 +1883,61 @@ for index,module_path in enumerate(sys.argv[1:3]):
             assert str(error)=="artifact_replaced_during_capture"
         else:
             raise AssertionError("replacement accepted")
+
+    identity_target=root/"identity-target"
+    identity_replacement=root/"identity-replacement"
+    identity_replacement.write_bytes(b"replacement must survive\n")
+    real_fstat=module.os.fstat
+    def replace_after_final_descriptor_snapshot(descriptor):
+        entry=real_fstat(descriptor)
+        if entry.st_size==len(b"trusted publication\n"):
+            os.replace(identity_replacement,identity_target)
+        return entry
+    with mock.patch.object(module.os,"fstat",replace_after_final_descriptor_snapshot):
+        try:
+            module.secure_publish_immutable(str(identity_target),b"trusted publication\n")
+        except module.ManifestRejected as error:
+            assert str(error)=="artifact_snapshot_identity_changed"
+        else:
+            raise AssertionError("pathname replacement accepted")
+    assert identity_target.read_bytes()==b"replacement must survive\n"
+
+    short_target=root/"short-write"
+    real_write=module.os.write
+    write_calls=[0]
+    def fail_after_short_write(descriptor,payload):
+        write_calls[0]+=1
+        if write_calls[0]==1:
+            return real_write(descriptor,payload[:1])
+        raise OSError("deterministic short-write failure")
+    with mock.patch.object(module.os,"write",fail_after_short_write):
+        try:
+            module.secure_publish_immutable(str(short_target),b"complete publication\n")
+        except module.ManifestRuntimeError:
+            pass
+        else:
+            raise AssertionError("short write accepted")
+    assert not os.path.lexists(short_target)
+    module.secure_publish_immutable(str(short_target),b"complete publication\n")
+
+    fsync_target=root/"fsync-failure"
+    with mock.patch.object(module.os,"fsync",side_effect=OSError("deterministic fsync failure")):
+        try:
+            module.secure_publish_immutable(str(fsync_target),b"durable publication\n")
+        except module.ManifestRuntimeError:
+            pass
+        else:
+            raise AssertionError("fsync failure accepted")
+    assert not os.path.lexists(fsync_target)
+    module.secure_publish_immutable(str(fsync_target),b"durable publication\n")
+
 print("ok",end="")
 PY
 )"
 if [ "$SECURE_CAPTURE_RESULT" = ok ]; then
-  pass "secure artifact capture pins descriptor bytes and rejects deterministic path replacement"
+  pass "secure artifact capture and publication pin identities and clean failed exact inodes"
 else
-  fail "secure artifact capture pins descriptor bytes and rejects deterministic path replacement" "$SECURE_CAPTURE_RESULT"
+  fail "secure artifact capture and publication pin identities and clean failed exact inodes" "$SECURE_CAPTURE_RESULT"
 fi
 
 printf '\nrun-manifest: PASS=%s FAIL=%s\n' "$PASS" "$FAIL"
