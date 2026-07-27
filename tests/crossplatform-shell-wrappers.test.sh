@@ -390,6 +390,61 @@ else
 fi
 
 echo
+echo "== run manifest: native Windows filesystem routing ignores mutable owner-depth models =="
+
+if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" \
+    "$REPO_ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
+import importlib.util,pathlib,sys,tempfile
+from unittest import mock
+
+for index,module_path in enumerate(sys.argv[1:]):
+ spec=importlib.util.spec_from_file_location(f'run_manifest_windows_filesystem_{index}',module_path)
+ module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module
+ assert spec.loader is not None; spec.loader.exec_module(module)
+ with tempfile.TemporaryDirectory() as temporary:
+  candidate=pathlib.Path(temporary).resolve()/'owner-candidate'
+  candidate.touch(mode=0o600)
+  original_platform=module.sys.platform
+  original_os_name=module.os.name
+  original_platform_probe=module._process_identity_platform
+  original_getppid=module.os.getppid
+  original_process_identity=module._process_identity
+  try:
+   module.sys.platform='win32'
+   module.os.name='posix'
+   module._process_identity_platform=lambda: None
+   module.os.getppid=lambda: 41
+   module._process_identity=lambda pid: (
+    'captured',f'{pid}|{pid}|{pid}|'+('a'*64)
+   )
+   with mock.patch.object(
+    module,'_open_directory_fd',
+    side_effect=AssertionError('native Windows entered the POSIX dir_fd walk')
+   ), mock.patch.object(
+    module.os,'fchmod',
+    side_effect=AssertionError('native Windows attempted POSIX fchmod'),
+    create=True
+   ):
+    module._write_process_identity('direct',str(candidate))
+  finally:
+   module.sys.platform=original_platform
+   module.os.name=original_os_name
+   module._process_identity_platform=original_platform_probe
+   module.os.getppid=original_getppid
+   module._process_identity=original_process_identity
+  expected='41\n41|41|41|'+('a'*64)+'\n'
+  assert candidate.read_bytes()==expected.encode('ascii')
+ print('native-windows-filesystem-bound')
+PY
+then
+  echo "  PASS  native Windows filesystem routing cannot enter POSIX dir_fd operations"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  native Windows filesystem routing followed a mutable owner-depth model"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
 echo "== run manifest: lease capabilities use one native-Python identity namespace =="
 
 if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" \
@@ -709,6 +764,7 @@ PY
     windows_stage=owner-direct
     direct_probe="$WINDOWS_BRIDGE_ROOT/direct-owner-record"
     direct_output="$WINDOWS_BRIDGE_ROOT/direct-owner-output"
+    (umask 077; : >"$direct_probe")
     if _uberdev_semaphore_write_process_identity direct "$direct_probe" \
         >"$direct_output" 2>/dev/null; then
       windows_stage_rc=0

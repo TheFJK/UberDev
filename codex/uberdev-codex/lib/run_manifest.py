@@ -1039,6 +1039,18 @@ def _process_identity_platform() -> str | None:
     return None
 
 
+def _uses_native_windows_filesystem() -> bool:
+    """Return whether this interpreter requires native-Windows file APIs.
+
+    Owner-depth model tests deliberately vary ``os.name``.  The interpreter's
+    native platform remains authoritative for filesystem capabilities, so a
+    Windows process must never enter the POSIX ``dir_fd`` walk while that model
+    is active.
+    """
+
+    return os.name == "nt" or sys.platform == "win32"
+
+
 def _unsupported_process_identity_platform() -> OSError:
     supported = ", ".join(SUPPORTED_PROCESS_IDENTITY_PLATFORMS)
     return OSError(
@@ -1146,7 +1158,7 @@ def _write_process_identity(mode: str, destination: str) -> None:
             raise ManifestRejected("process_identity_candidate_invalid")
         if hasattr(os, "geteuid") and opened.st_uid != os.geteuid():
             raise ManifestRejected("process_identity_candidate_not_owned")
-        if os.name != "nt":
+        if not _uses_native_windows_filesystem():
             os.fchmod(descriptor, 0o600)
 
         def rollback() -> None:
@@ -1250,7 +1262,7 @@ def _secure_open_regular(path: str, flags: int, mode: int = 0o600) -> int:
     """Open a regular file relative to a no-follow parent directory handle."""
 
     absolute = os.path.abspath(path)
-    if os.name == "nt":
+    if _uses_native_windows_filesystem():
         # Native Windows has no dir_fd/O_NOFOLLOW support.  Reject reparse-point
         # ancestors before opening, then bind the opened handle to the lstat
         # identity.  The containing user temp/state directory supplies the ACL.
