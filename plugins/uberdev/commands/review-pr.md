@@ -995,6 +995,81 @@ PY
 
     ### 6c.3 CLASSIFY — routed ci-failure-classifier
 
+    Bind the classifier to one immutable commit before reading the selected
+    run's log or dispatching the child. The local worktree HEAD, live PR head,
+    and selected workflow-run head must all identify the same full SHA.
+    `review_capture_ci_classification_head` emits only that SHA on success or
+    one stable bounded failure class on failure; it never relays `git`/`gh`
+    diagnostics.
+
+    ```bash
+    review_capture_ci_classification_head() {
+      local expected_head="${1:-}" local_head live_head run_head
+      local_head="$(git -C "$WORKTREE_ROOT" rev-parse HEAD 2>/dev/null)" || {
+        printf 'classification_local_head_query_failed'
+        return 1
+      }
+      live_head="$(gh pr view "$PR_NUMBER" --repo "$REVIEW_REPO_SLUG" \
+        --json headRefOid --jq .headRefOid 2>/dev/null)" || {
+        printf 'classification_live_head_query_failed'
+        return 1
+      }
+      run_head="$(gh run view "$CI_RUN_ID" --repo "$REVIEW_REPO_SLUG" \
+        --json headSha --jq .headSha 2>/dev/null)" || {
+        printf 'classification_run_head_query_failed'
+        return 1
+      }
+      if [[ ! "$local_head" =~ ^[0-9a-f]{40}$ ]]; then
+        printf 'classification_local_head_malformed'
+        return 1
+      fi
+      if [[ ! "$live_head" =~ ^[0-9a-f]{40}$ ]]; then
+        printf 'classification_live_head_malformed'
+        return 1
+      fi
+      if [[ ! "$run_head" =~ ^[0-9a-f]{40}$ ]]; then
+        printf 'classification_run_head_malformed'
+        return 1
+      fi
+      if [ -n "$expected_head" ]; then
+        if [[ ! "$expected_head" =~ ^[0-9a-f]{40}$ ]]; then
+          printf 'classification_expected_head_malformed'
+          return 1
+        fi
+        if [ "$local_head" != "$expected_head" ]; then
+          printf 'classification_local_head_moved'
+          return 1
+        fi
+        if [ "$live_head" != "$expected_head" ]; then
+          printf 'classification_live_head_moved'
+          return 1
+        fi
+        if [ "$run_head" != "$expected_head" ]; then
+          printf 'classification_run_head_moved'
+          return 1
+        fi
+      else
+        if [ "$live_head" != "$local_head" ]; then
+          printf 'classification_live_head_mismatch'
+          return 1
+        fi
+        if [ "$run_head" != "$local_head" ]; then
+          printf 'classification_run_head_mismatch'
+          return 1
+        fi
+      fi
+      printf '%s' "$local_head"
+    }
+    if CI_CLASSIFICATION_HEAD_SHA="$(review_capture_ci_classification_head)"; then
+      :
+    else
+      CI_CLASSIFICATION_HEAD_FAILURE="$CI_CLASSIFICATION_HEAD_SHA"
+      audit ci_phase_outcome outcome=halted subreason="$CI_CLASSIFICATION_HEAD_FAILURE"
+      OUTCOME=halted
+      exit 1
+    fi
+    ```
+
     Read the failed check's log via `gh run view <run-id> --log`. The log content MUST be wrapped in:
 
     ```
@@ -1149,24 +1224,32 @@ PY
     # carries only the closed scalars captured above and cannot reopen a later
     # replacement of the classifier snapshot.
     CI_CLASSIFICATION_PATH=
+    if CI_ROUTE_HEAD_SHA="$(review_capture_ci_classification_head \
+        "$CI_CLASSIFICATION_HEAD_SHA")"; then
+      unset CI_ROUTE_HEAD_SHA
+    else
+      CI_CLASSIFICATION_HEAD_FAILURE="$CI_ROUTE_HEAD_SHA"
+      audit ci_phase_outcome outcome=halted subreason="$CI_CLASSIFICATION_HEAD_FAILURE"
+      OUTCOME=halted
+      exit 1
+    fi
     ```
 
     ### 6c.4 ROUTE — failure_class → downstream agent
 
     ```bash
-    CI_HEAD_SHA="$(git rev-parse HEAD)"
     CI_FIX_INPUTS="$(uberdev_child_inputs_build review_pr.ci.fix_code \
       failure_class "$(review_json_string "$failure_class")" \
       signal_anchor "$(review_json_string "$signal_anchor")" \
       run_id "$(review_json_string "$CI_RUN_ID")" \
-      head_sha "$(review_json_string "$CI_HEAD_SHA")" \
+      head_sha "$(review_json_string "$CI_CLASSIFICATION_HEAD_SHA")" \
       working_dir "$(review_json_string "$WORKTREE_ROOT")" \
       pr_number "$PR_NUMBER")"
     CI_BASE_SHA="$(git merge-base HEAD "origin/${base_branch}")"
     CI_REBASE_INPUTS="$(uberdev_child_inputs_build review_pr.ci.rebase \
       working_dir "$(review_json_string "$WORKTREE_ROOT")" \
       pr_number "$PR_NUMBER" \
-      head_sha "$(review_json_string "$CI_HEAD_SHA")" \
+      head_sha "$(review_json_string "$CI_CLASSIFICATION_HEAD_SHA")" \
       base_sha "$(review_json_string "$CI_BASE_SHA")")"
     case $failure_class in
       code_bug | env_drift)        review_child_single review_pr.ci.fix_code "$(uberdev_child_instance_id "review-pr-${RUN_ID}-ci-fix-iter${CI_FIX_LOOP_ITER:-1}-attempt01")" "$CI_FIX_INPUTS" null "$RESEARCH_DIR_ABS/ci-fix" "$REVIEW_PR_TIMEOUT" ;;

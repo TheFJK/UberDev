@@ -698,7 +698,7 @@ signal_anchor=README.md:1
 printf 'replacement classifier says env_drift at package-lock.json:1\n' \
   >"$CI_CLASSIFICATION_PATH"
 
-CI_HEAD_SHA="$(git rev-parse HEAD)"
+CI_CLASSIFICATION_HEAD_SHA="$(git rev-parse HEAD)"
 CI_BASE_SHA=$'base "quoted" \\sha*?[x]\t'
 . "$TMP/review-ci-builders.sh"
 
@@ -1003,7 +1003,7 @@ export HOSTILE_DIR POST_FINAL SIMPLIFY_FINAL COMMIT_RANGE_FIXTURE
 export PHASE1_DISPOSITION_FIXTURE PHASE2_DISPOSITION_FIXTURE
 export CLASSIFICATION_PATH CI_LOG_ARTIFACT_PATH CI_REFUSED_AGGREGATE_PATH CONFLICT_PATH
 export failure_class signal_anchor
-export CI_RUN_ID FOCUS CI_HEAD_SHA CI_BASE_SHA pr_head_branch base_branch BASE_SHA
+export CI_RUN_ID FOCUS CI_CLASSIFICATION_HEAD_SHA CI_BASE_SHA pr_head_branch base_branch BASE_SHA
 
 # Exact payload assertions catch wrong callsite variable mappings while retaining
 # hostile quotes, whitespace, backslashes, globs, arrays, dynamic simplify
@@ -1114,7 +1114,7 @@ exact(
         "failure_class": env["failure_class"],
         "signal_anchor": env["signal_anchor"],
         "run_id": env["CI_RUN_ID"],
-        "head_sha": env["CI_HEAD_SHA"],
+        "head_sha": env["CI_CLASSIFICATION_HEAD_SHA"],
         "working_dir": env["MUTATION_WORKTREE"],
         "pr_number": 73,
     },
@@ -1124,7 +1124,7 @@ exact(
     {
         "working_dir": env["MUTATION_WORKTREE"],
         "pr_number": 73,
-        "head_sha": env["CI_HEAD_SHA"],
+        "head_sha": env["CI_CLASSIFICATION_HEAD_SHA"],
         "base_sha": env["CI_BASE_SHA"],
     },
 )

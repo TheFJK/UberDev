@@ -586,6 +586,12 @@ assert_grep "$REVIEW_PR" 'CI_FIX_INPUTS=.*failure_class|failure_class.*review_js
   "S11.7 — fixer handoff carries the controller-validated failure class"
 assert_grep "$REVIEW_PR" 'CI_FIX_INPUTS=.*signal_anchor|signal_anchor.*review_json_string' \
   "S11.8 — fixer handoff carries the controller-validated signal anchor"
+assert_grep "$REVIEW_PR" 'CI_CLASSIFICATION_HEAD_SHA=.*review_capture_ci_classification_head' \
+  "S11.9 — controller binds classifier authority before dispatch"
+assert_grep "$REVIEW_PR" 'head_sha.*CI_CLASSIFICATION_HEAD_SHA' \
+  "S11.10 — fixer handoff carries the original classification-bound head"
+assert_no_grep "$REVIEW_PR" 'CI_HEAD_SHA="\$\(git rev-parse HEAD\)"' \
+  "S11.11 — ROUTE never substitutes a freshly recaptured local head"
 python3 -I -B - "$RUN_TREE" <<'PY'
 import json,sys
 edge=json.load(open(sys.argv[1],encoding="utf-8"))["edges"]["review_pr.ci.fix_code"]
@@ -602,10 +608,10 @@ if required!=expected or "classification_path" in required or "log_path" in requ
     raise SystemExit("ci fixer policy does not bind the validated scalar contract")
 PY
 if [ "$?" -eq 0 ]; then
-  echo "  PASS  S11.9 — policy binds only validated classifier scalars and exact run/head metadata"
+  echo "  PASS  S11.12 — policy binds only validated classifier scalars and exact run/head metadata"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  S11.9 — policy binds only validated classifier scalars and exact run/head metadata"
+  echo "  FAIL  S11.12 — policy binds only validated classifier scalars and exact run/head metadata"
   FAIL=$((FAIL + 1))
 fi
 
@@ -969,6 +975,97 @@ else
   FAIL=$((FAIL + 1))
 fi
 rm -f "$CLASSIFIER_STATUS_FIXTURE" "$CLASSIFIER_STATUS_LOG"
+
+echo
+echo "== S18-RUNTIME: classifier authority stays bound to one immutable head =="
+CLASSIFIER_HEAD_FIXTURE="$(mktemp)"
+awk '/^    review_capture_ci_classification_head\(\) \{/{active=1} active{print} active && /^    \}/{exit}' \
+  "$REVIEW_PR" >"$CLASSIFIER_HEAD_FIXTURE"
+run_classifier_head_scenario() {
+  local scenario="$1" expected_reason="$2" expect_classifier="$3"
+  local scenario_log scenario_output classifier_ok=no
+  scenario_log="$(mktemp)"
+  scenario_output="$(
+    CLASSIFIER_HEAD_SCENARIO="$scenario" CLASSIFIER_HEAD_LOG="$scenario_log" \
+      bash -c '
+        . "$1"
+        PR_NUMBER=73
+        REVIEW_REPO_SLUG=owner/repo
+        CI_RUN_ID=991
+        WORKTREE_ROOT=/worktree
+        ORIGINAL_HEAD=0123456789012345678901234567890123456789
+        MOVED_HEAD=abcdefabcdefabcdefabcdefabcdefabcdefabcd
+        LOCAL_HEAD="$ORIGINAL_HEAD"
+        LIVE_HEAD="$ORIGINAL_HEAD"
+        RUN_HEAD="$ORIGINAL_HEAD"
+        [ "$CLASSIFIER_HEAD_SCENARIO" = run_mismatch ] && RUN_HEAD="$MOVED_HEAD"
+        git() {
+          [ "$1" = -C ] && [ "$2" = "$WORKTREE_ROOT" ] \
+            && [ "$3" = rev-parse ] && [ "$4" = HEAD ] || return 2
+          printf "%s\n" "$LOCAL_HEAD"
+        }
+        gh() {
+          if [ "$1" = pr ] && [ "$2" = view ] && [ "$3" = "$PR_NUMBER" ] \
+              && [ "$4" = --repo ] && [ "$5" = "$REVIEW_REPO_SLUG" ] \
+              && [ "$6" = --json ] && [ "$7" = headRefOid ] \
+              && [ "$8" = --jq ] && [ "$9" = .headRefOid ]; then
+            printf "%s\n" "$LIVE_HEAD"
+            return 0
+          fi
+          if [ "$1" = run ] && [ "$2" = view ] && [ "$3" = "$CI_RUN_ID" ] \
+              && [ "$4" = --repo ] && [ "$5" = "$REVIEW_REPO_SLUG" ] \
+              && [ "$6" = --json ] && [ "$7" = headSha ] \
+              && [ "$8" = --jq ] && [ "$9" = .headSha ]; then
+            printf "%s\n" "$RUN_HEAD"
+            return 0
+          fi
+          return 2
+        }
+        if CI_CLASSIFICATION_HEAD_SHA="$(review_capture_ci_classification_head)"; then
+          printf "classifier\n" >>"$CLASSIFIER_HEAD_LOG"
+        else
+          printf "capture:%s" "$CI_CLASSIFICATION_HEAD_SHA"
+          exit 0
+        fi
+        case "$CLASSIFIER_HEAD_SCENARIO" in
+          local_move) LOCAL_HEAD="$MOVED_HEAD" ;;
+          live_move) LIVE_HEAD="$MOVED_HEAD" ;;
+          run_move) RUN_HEAD="$MOVED_HEAD" ;;
+        esac
+        if ROUTE_HEAD="$(review_capture_ci_classification_head "$CI_CLASSIFICATION_HEAD_SHA")"; then
+          printf "fixer\ntrust\n" >>"$CLASSIFIER_HEAD_LOG"
+          printf "route:%s" "$ROUTE_HEAD"
+        else
+          printf "route:%s" "$ROUTE_HEAD"
+        fi
+      ' _ "$CLASSIFIER_HEAD_FIXTURE"
+  )"
+  if { [ "$expect_classifier" = yes ] && grep -qxF classifier "$scenario_log"; } \
+      || { [ "$expect_classifier" = no ] && ! grep -qxF classifier "$scenario_log"; }; then
+    classifier_ok=yes
+  fi
+  if [ "$scenario_output" = "$expected_reason" ] \
+      && ! grep -Eq '^(fixer|trust)$' "$scenario_log" \
+      && [ "$classifier_ok" = yes ]; then
+    echo "  PASS  S18.$scenario — immutable head gate returns $expected_reason without fixer/trust"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S18.$scenario — classifier head gate did not fail closed"
+    echo "        output: $scenario_output"
+    echo "        log: $(tr '\n' ',' <"$scenario_log")"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -f "$scenario_log"
+}
+run_classifier_head_scenario local_move \
+  route:classification_local_head_moved yes
+run_classifier_head_scenario live_move \
+  route:classification_live_head_moved yes
+run_classifier_head_scenario run_move \
+  route:classification_run_head_moved yes
+run_classifier_head_scenario run_mismatch \
+  capture:classification_run_head_mismatch no
+rm -f "$CLASSIFIER_HEAD_FIXTURE"
 
 echo
 echo "== Summary =="
