@@ -535,7 +535,7 @@ fi
 if [ $((REVIEW_INITIAL_VALID_COUNT + REVIEW_REPAIR_VALID_COUNT)) -ne "$REVIEW_EXPECTED_COUNT" ]; then REVIEW_WAVE_BLOCKED=1; fi
 post_review_validated_evidence_complete() {
   python3 -I -B - "$1" "$2" "$3" "$4" "$5" "$UBERDEV_REVIEW_PLUGIN_ROOT" "${REVIEW_EDGES[@]}" <<'PY'
-import hashlib,importlib.util,json,os,re,stat,sys
+import hashlib,importlib.util,json,os,re,stat,sys,tempfile
 ledger,expected,initial_ledger,repair_ledger,carrier_run_dir,plugin_root,*allowed=sys.argv[1:]; expected=int(expected)
 def fail(reason,row=None):
  edge=(row or {}).get('edge','unknown')
@@ -554,21 +554,6 @@ def capture(module,path,minimum,maximum,reason,row=None):
  except Exception: fail(reason,row)
 def json_lines(payload):
  return [json.loads(line) for line in payload.decode('utf-8').splitlines() if line.strip()]
-artifacts=None; created_regular=[]; trusted_dir=None; trusted_dir_identity=None; gate_complete=False
-def cleanup_failed_attempt():
- cleanup_ok=True
- if artifacts is None: return cleanup_ok
- for path,identity in reversed(created_regular):
-  try:
-   if not artifacts.secure_remove_published_regular(path,identity): cleanup_ok=False
-  except Exception:
-   cleanup_ok=False
- if trusted_dir is not None and trusted_dir_identity is not None:
-  try:
-   if not artifacts.secure_remove_published_directory(trusted_dir,trusted_dir_identity): cleanup_ok=False
-  except Exception:
-   cleanup_ok=False
- return cleanup_ok
 try:
  artifacts=load_helper()
  carrier_run=os.path.realpath(carrier_run_dir)
@@ -591,13 +576,13 @@ try:
      or {(row.get('edge'),row.get('index')) for row in rows}!=allowed_pairs):
   fail('malformed-ledger')
  context=hashlib.sha256(ledger_payload+b'\0'+b'\0'.join(launch_payloads)).hexdigest()[:16]
- trusted_dir=os.path.abspath(ledger)+'.trusted-artifacts-'+context
- trusted_ledger=os.path.abspath(ledger)+'.trusted-'+context+'.jsonl'
- os.mkdir(trusted_dir,0o700)
+ trusted_dir_base=os.path.abspath(ledger)+'.trusted-artifacts-'+context
+ trusted_dir=tempfile.mkdtemp(prefix=os.path.basename(trusted_dir_base)+'.attempt-',
+                              dir=os.path.dirname(trusted_dir_base))
+ trusted_ledger_base=os.path.join(trusted_dir,'trusted-ledger.jsonl')
  trusted_dir_entry=os.lstat(trusted_dir)
  if (stat.S_ISLNK(trusted_dir_entry.st_mode) or not stat.S_ISDIR(trusted_dir_entry.st_mode)
      or (uid is not None and trusted_dir_entry.st_uid!=uid)): fail('unsafe-artifact')
- trusted_dir_identity=artifacts._artifact_identity(trusted_dir_entry)
  seen_provider_paths=set(); seen_paths=set(); seen_evidence=set(); trusted_rows=[]
  for row in rows:
   if set(row)!={'edge','index','instance','result','sha256'} or type(row['index']) is not int:
@@ -656,25 +641,27 @@ try:
   seen_paths.add(canonical_path); seen_evidence.update((evidence_key,provider_key,status_key))
   if evidence_key[1]!=digest:
    fail('digest-mismatch',row)
-  snapshot=os.path.join(trusted_dir,f"{row['index']:02d}-{digest}.md")
-  snapshot_identity=artifacts.secure_publish_immutable(snapshot,payload)
-  created_regular.append((snapshot,snapshot_identity))
+  snapshot_base=os.path.join(trusted_dir,f"{row['index']:02d}-{digest}.md")
+  snapshot,snapshot_identity,snapshot_digest=artifacts.secure_publish_captured(snapshot_base,payload)
+  captured_snapshot,captured_identity=artifacts.secure_capture_published(snapshot,digest,1,1048576)
+  if (snapshot_digest!=digest or captured_snapshot!=payload
+      or captured_identity!=snapshot_identity): fail('digest-mismatch',row)
   trusted_rows.append({'edge':row['edge'],'index':row['index'],'instance':row['instance'],
                        'result':snapshot,'sha256':digest})
  trusted_payload=(''.join(json.dumps(row,sort_keys=True,separators=(',',':'))+'\n'
                           for row in trusted_rows)).encode('utf-8')
- trusted_ledger_identity=artifacts.secure_publish_immutable(trusted_ledger,trusted_payload)
- created_regular.append((trusted_ledger,trusted_ledger_identity))
- gate_complete=True
+ trusted_ledger,trusted_ledger_identity,trusted_ledger_digest=artifacts.secure_publish_captured(
+     trusted_ledger_base,trusted_payload)
+ captured_ledger,captured_ledger_identity=artifacts.secure_capture_published(
+     trusted_ledger,trusted_ledger_digest,1,1048576)
+ if captured_ledger!=trusted_payload or captured_ledger_identity!=trusted_ledger_identity:
+  fail('digest-mismatch')
  print(trusted_ledger,end='')
 except SystemExit: raise
 except (OSError,UnicodeError,ValueError,TypeError,json.JSONDecodeError):
  fail('malformed-ledger')
 except Exception:
  fail('unsafe-artifact')
-finally:
- if not gate_complete and not cleanup_failed_attempt():
-  print('post_review_evidence_failure class=cleanup-failed edge=unknown index=unknown',file=sys.stderr)
 PY
 }
 if POST_REVIEW_TRUSTED_LEDGER="$(post_review_validated_evidence_complete "$POST_REVIEW_VALIDATED_LEDGER" "$REVIEW_EXPECTED_COUNT" \
@@ -714,13 +701,16 @@ fi
 The executable boundary above gates the writer before interpreting any
 reviewer prose. A lifecycle failure or an exhausted format repair is not a
 review verdict and MUST NOT produce the ordinary six-row `Continue.` artifact.
-The gate replaces `POST_REVIEW_VALIDATED_LEDGER` with its parent-owned
-`.trusted-<context>.jsonl` receipt and copies the exact descriptor-captured
-reviewer bytes into the paired `.trusted-artifacts-<context>/` directory.
-Aggregate only those digest-bound paths from the trusted ledger; never reopen
-a child-owned `validated-result.md` or provider-owned `result.md` during
-aggregation. In other words, aggregation consumes only validated artifacts
-whose captured bytes were copied by the gate. Evidence failures emit only the stable class
+The gate replaces `POST_REVIEW_VALIDATED_LEDGER` with a parent-owned,
+digest-qualified publication inside a unique
+`.trusted-artifacts-<context>.attempt-*` directory. A published pathname is
+only a carrier: aggregation MUST call `secure_capture_published` with each
+recorded SHA-256 and interpret only the returned captured bytes. Aggregation
+consumes only validated artifacts returned by that capture. Never reopen a
+child-owned `validated-result.md` or provider-owned `result.md` during
+aggregation. Failed attempts remain isolated under their unique attempt
+identity; retries create a fresh identity and never unlink or remove a
+pathname after a separate identity check. Evidence failures emit only the stable class
 `malformed-ledger`, `roster-mismatch`, `unsafe-artifact`,
 `duplicate-artifact`, or `digest-mismatch` plus the bounded edge/index (never a
 path or reviewer content).

@@ -38,6 +38,7 @@ if [ ! -f "$MANIFEST" ]; then
   printf '  FAIL  run_manifest.py is missing: %s\n' "$MANIFEST"
   exit 1
 fi
+if [ "${1:-}" != "--artifact-publication-only" ]; then
 SELF_IDENTITY="$(python3 "$MANIFEST" process-identity --pid "$$")" || exit 1
 
 LINUX_IDENTITY_CLASSIFICATION="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
@@ -1852,11 +1853,14 @@ if [ "$deleted_reconcile_rc" -eq 0 ] \
 else
   fail "deleted opaque-backend status is unavailable evidence, not a recovery wedge" "reconcile=$deleted_reconcile_rc/$deleted_reconcile_out verify=$CAPTURE_RC/$CAPTURE_OUT"
 fi
+fi
 
 SECURE_CAPTURE_RESULT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" "$TMP" <<'PY'
+import hashlib
 import importlib.util
 import os
 import pathlib
+import stat
 import sys
 from unittest import mock
 
@@ -1884,25 +1888,10 @@ for index,module_path in enumerate(sys.argv[1:3]):
         else:
             raise AssertionError("replacement accepted")
 
-    identity_target=root/"identity-target"
-    identity_replacement=root/"identity-replacement"
-    identity_replacement.write_bytes(b"replacement must survive\n")
-    real_fstat=module.os.fstat
-    def replace_after_final_descriptor_snapshot(descriptor):
-        entry=real_fstat(descriptor)
-        if entry.st_size==len(b"trusted publication\n"):
-            os.replace(identity_replacement,identity_target)
-        return entry
-    with mock.patch.object(module.os,"fstat",replace_after_final_descriptor_snapshot):
-        try:
-            module.secure_publish_immutable(str(identity_target),b"trusted publication\n")
-        except module.ManifestRejected as error:
-            assert str(error)=="artifact_snapshot_identity_changed"
-        else:
-            raise AssertionError("pathname replacement accepted")
-    assert identity_target.read_bytes()==b"replacement must survive\n"
-
-    short_target=root/"short-write"
+    failures=[]
+    unlink_target=root/"pre-unlink"
+    unlink_replacement=root/"pre-unlink-replacement"
+    unlink_replacement.write_bytes(b"pre-unlink replacement\n")
     real_write=module.os.write
     write_calls=[0]
     def fail_after_short_write(descriptor,payload):
@@ -1910,34 +1899,162 @@ for index,module_path in enumerate(sys.argv[1:3]):
         if write_calls[0]==1:
             return real_write(descriptor,payload[:1])
         raise OSError("deterministic short-write failure")
-    with mock.patch.object(module.os,"write",fail_after_short_write):
+    real_unlink=module.os.unlink
+    unlink_calls=[]
+    def swap_immediately_before_unlink(path):
+        unlink_calls.append(path)
+        os.replace(unlink_replacement,path)
+        return real_unlink(path)
+    with mock.patch.object(module.os,"write",fail_after_short_write), \
+         mock.patch.object(module.os,"unlink",swap_immediately_before_unlink):
         try:
-            module.secure_publish_immutable(str(short_target),b"complete publication\n")
+            module.secure_publish_captured(str(unlink_target),b"failed publication\n")
         except module.ManifestRuntimeError:
             pass
         else:
             raise AssertionError("short write accepted")
-    assert not os.path.lexists(short_target)
-    module.secure_publish_immutable(str(short_target),b"complete publication\n")
+    if unlink_calls:
+        failures.append("rollback attempted pathname unlink after validation")
+    if not unlink_replacement.exists():
+        failures.append("pre-unlink replacement was removed")
 
-    fsync_target=root/"fsync-failure"
-    with mock.patch.object(module.os,"fsync",side_effect=OSError("deterministic fsync failure")):
+    cleanup_dir=root/"pre-rmdir"
+    cleanup_dir.mkdir()
+    cleanup_identity=module._artifact_identity(os.lstat(cleanup_dir))
+    rmdir_replacement=root/"pre-rmdir-replacement"
+    rmdir_replacement.mkdir()
+    moved_original=root/"pre-rmdir-original"
+    real_rmdir=module.os.rmdir
+    rmdir_calls=[]
+    def swap_immediately_before_rmdir(path):
+        rmdir_calls.append(path)
+        os.rename(path,moved_original)
+        os.replace(rmdir_replacement,path)
+        return real_rmdir(path)
+    with mock.patch.object(module.os,"rmdir",swap_immediately_before_rmdir):
+        module.secure_remove_published_directory(str(cleanup_dir),cleanup_identity)
+    if rmdir_calls:
+        failures.append("rollback attempted pathname rmdir after validation")
+    if not rmdir_replacement.exists():
+        failures.append("pre-rmdir replacement was removed")
+
+    identity_target=root/"identity-target"
+    identity_replacement=root/"identity-replacement"
+    identity_replacement.write_bytes(b"replacement must survive\n")
+    trusted_payload=b"trusted publication\n"
+    trusted_digest=hashlib.sha256(trusted_payload).hexdigest()
+    real_lstat=module.os.lstat
+    swapped_paths=[]
+    swap_blocked=[False]
+    def replace_after_final_path_snapshot(path):
+        entry=real_lstat(path)
+        candidate=pathlib.Path(path)
+        if (candidate==identity_target or candidate.name.startswith(identity_target.name+".attempt-")) \
+                and entry.st_size==len(trusted_payload) and not swapped_paths:
+            try:
+                os.replace(identity_replacement,candidate)
+                swapped_paths.append(str(candidate))
+            except PermissionError:
+                if os.name!="nt":
+                    raise
+                swap_blocked[0]=True
+        return entry
+    try:
+        with mock.patch.object(module.os,"lstat",replace_after_final_path_snapshot):
+            publication=module.secure_publish_captured(str(identity_target),trusted_payload)
+        published_path=publication[0] if len(publication)==3 and isinstance(publication[0],str) else str(identity_target)
+        capture_published=getattr(module,"secure_capture_published",None)
+        if capture_published is None:
+            failures.append("digest-bound trusted reopen is unavailable")
+        elif swapped_paths:
+            try:
+                capture_published(published_path,trusted_digest,1,1024)
+            except module.ManifestRejected:
+                pass
+            else:
+                failures.append("post-snapshot replacement was reported trusted")
+        else:
+            captured,_=capture_published(published_path,trusted_digest,1,1024)
+            if not swap_blocked[0] or captured!=trusted_payload:
+                failures.append("post-snapshot replacement was neither blocked nor rejected")
+    except (module.ManifestRejected,module.ManifestRuntimeError):
+        published_path=swapped_paths[0] if swapped_paths else str(identity_target)
+    if swapped_paths:
+        if not pathlib.Path(published_path).exists() \
+                or pathlib.Path(published_path).read_bytes()!=b"replacement must survive\n":
+            failures.append("post-snapshot replacement was not preserved")
+    elif not identity_replacement.exists():
+        failures.append("blocked post-snapshot replacement was not preserved")
+
+    reserved_target=root/"reserved-target"
+    reserved_target.write_bytes(b"unrelated replacement\n")
+    try:
+        reserved_publication=module.secure_publish_captured(
+            str(reserved_target),b"independent trusted bytes\n"
+        )
+        reserved_path=reserved_publication[0] if len(reserved_publication)==3 else str(reserved_target)
+        if pathlib.Path(reserved_path)==reserved_target:
+            failures.append("publication reused the caller's deterministic pathname")
+    except (module.ManifestRejected,module.ManifestRuntimeError):
+        failures.append("unrelated deterministic pathname wedged a safe retry")
+    if reserved_target.read_bytes()!=b"unrelated replacement\n":
+        failures.append("unrelated deterministic replacement was modified")
+
+    short_target=root/"short-write"
+    real_unlink=module.os.unlink
+    def windows_read_only_unlink_failure(path):
+        raise PermissionError("simulated native Windows read-only cleanup failure")
+    write_calls[0]=0
+    with mock.patch.object(module.os,"write",fail_after_short_write), \
+         mock.patch.object(module.os,"unlink",windows_read_only_unlink_failure):
         try:
-            module.secure_publish_immutable(str(fsync_target),b"durable publication\n")
+            module.secure_publish_captured(str(short_target),b"complete publication\n")
         except module.ManifestRuntimeError:
             pass
         else:
-            raise AssertionError("fsync failure accepted")
-    assert not os.path.lexists(fsync_target)
-    module.secure_publish_immutable(str(fsync_target),b"durable publication\n")
+            failures.append("short write accepted")
+    short_retry_path=""
+    try:
+        short_retry=module.secure_publish_captured(str(short_target),b"complete publication\n")
+        short_retry_path=short_retry[0] if len(short_retry)==3 else str(short_target)
+        if pathlib.Path(short_retry_path)==short_target:
+            failures.append("short-write retry reused the failed pathname")
+    except (module.ManifestRejected,module.ManifestRuntimeError):
+        failures.append("short-write retry remained wedged")
+
+    fsync_target=root/"fsync-failure"
+    with mock.patch.object(module.os,"fsync",side_effect=OSError("deterministic fsync failure")), \
+         mock.patch.object(module.os,"unlink",windows_read_only_unlink_failure):
+        try:
+            module.secure_publish_captured(str(fsync_target),b"durable publication\n")
+        except module.ManifestRuntimeError:
+            pass
+        else:
+            failures.append("fsync failure accepted")
+    fsync_retry_path=""
+    try:
+        fsync_retry=module.secure_publish_captured(str(fsync_target),b"durable publication\n")
+        fsync_retry_path=fsync_retry[0] if len(fsync_retry)==3 else str(fsync_target)
+        if pathlib.Path(fsync_retry_path)==fsync_target:
+            failures.append("fsync retry reused the failed pathname")
+    except (module.ManifestRejected,module.ManifestRuntimeError):
+        failures.append("fsync retry remained wedged")
+
+    for failed in list(root.glob("short-write.attempt-*"))+list(root.glob("fsync-failure.attempt-*")):
+        successful_retries={pathlib.Path(path) for path in (short_retry_path,fsync_retry_path) if path}
+        if failed not in successful_retries \
+                and not (failed.stat().st_mode & stat.S_IWUSR):
+            failures.append("failed attempt was made read-only before publication")
+    if failures:
+        raise AssertionError("; ".join(failures))
 
 print("ok",end="")
 PY
 )"
 if [ "$SECURE_CAPTURE_RESULT" = ok ]; then
-  pass "secure artifact capture and publication pin identities and clean failed exact inodes"
+  pass "artifact publication isolates retries and never pathname-deletes replacements"
 else
-  fail "secure artifact capture and publication pin identities and clean failed exact inodes" "$SECURE_CAPTURE_RESULT"
+  fail "artifact publication isolates retries and never pathname-deletes replacements" "$SECURE_CAPTURE_RESULT"
 fi
 
 printf '\nrun-manifest: PASS=%s FAIL=%s\n' "$PASS" "$FAIL"

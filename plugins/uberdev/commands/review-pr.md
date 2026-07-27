@@ -228,12 +228,15 @@ try:
     if (stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode)
             or (uid is not None and parent.st_uid!=uid)):
         fail('classification_snapshot_failed')
-    artifacts.secure_publish_immutable(snapshot,payload)
+    published,_,published_digest=artifacts.secure_publish_captured(snapshot,payload)
+    captured,_=artifacts.secure_capture_published(published,published_digest,1,16777216)
+    if captured!=payload or published_digest!=digest:
+        fail('classification_snapshot_failed')
 except SystemExit:
     raise
 except Exception:
     fail('classification_snapshot_failed')
-print(snapshot,end='')
+print(published,end='')
 PY
 }
 review_child_single() {
@@ -1041,16 +1044,22 @@ path,root,helper_root=sys.argv[1:]
 spec=importlib.util.spec_from_file_location('uberdev_classifier_artifacts',os.path.join(helper_root,'lib','run_manifest.py'))
 if spec is None or spec.loader is None: raise SystemExit(2)
 artifacts=importlib.util.module_from_spec(spec); sys.modules[spec.name]=artifacts
+trusted_name=re.fullmatch(
+    r'ci-classification-[0-9a-f]{16}-([0-9a-f]{64})\.trusted\.md'
+    r'\.attempt-[0-9a-f]{32}-([0-9a-f]{64})',
+    os.path.basename(path),
+)
 try:
     spec.loader.exec_module(artifacts)
-    raw_bytes,_=artifacts.secure_capture_regular(path,1,65536)
+    if '.trusted.md.attempt-' in os.path.basename(path):
+        if trusted_name is None or trusted_name.group(1)!=trusted_name.group(2):
+            raise ValueError()
+        raw_bytes,_=artifacts.secure_capture_published(path,trusted_name.group(2),1,65536)
+    else:
+        raw_bytes,_=artifacts.secure_capture_regular(path,1,65536)
     raw=raw_bytes.decode('utf-8')
 except Exception:
     raise SystemExit(2)
-trusted_name=re.fullmatch(r'ci-classification-[0-9a-f]{16}-([0-9a-f]{64})\.trusted\.md',os.path.basename(path))
-if os.path.basename(path).endswith('.trusted.md'):
-    if trusted_name is None or hashlib.sha256(raw_bytes).hexdigest()!=trusted_name.group(1):
-        raise SystemExit(2)
 document=re.search(r'(?:^|\n)```yaml\r?\n(.*?)\r?\n```\r?\n?\Z',raw,re.DOTALL)
 if document is None: raise SystemExit(2)
 fields={}

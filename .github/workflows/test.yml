@@ -270,7 +270,6 @@ jobs:
         #   - model-routing.test.sh
         #   - model-routing-config.test.sh
         #   - plan-writer-routing.test.sh
-        #   - run-manifest.test.sh
         #   - live-semaphore.test.sh
         #   - agent-dispatch.test.sh
         #   - child-dispatch.test.sh
@@ -304,11 +303,12 @@ jobs:
 #                                         uberthink; also calls rsync which isn't
 #                                         on windows-latest's Git Bash)
 # === END ci-wiring windows-skip-list ===
-        # review-child-handoff uses a bounded native-Windows mode for carrier
-        # serialization, parent derivation, and lexical tamper rejection; its
-        # full Unix race fixture remains in shape-checks above.
+        # review-child-handoff and run-manifest use bounded native-Windows
+        # modes for carrier/path serialization and captured publication retry;
+        # their full Unix race fixtures remain in shape-checks above.
         run: |
           bash tests/ci-wiring.test.sh && \
+          bash tests/run-manifest.test.sh --artifact-publication-only && \
           bash tests/turbo-flow.test.sh && \
           bash tests/issue-causal-fanout.test.sh && \
           bash tests/post-impl-review.test.sh && \

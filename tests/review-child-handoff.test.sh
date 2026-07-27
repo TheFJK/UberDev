@@ -1605,15 +1605,23 @@ evidence_must_fail foreign-path "$EVIDENCE_ROOT/foreign-path" "$EVIDENCE_ROOT/fo
 MID_ROSTER_LEDGER="$EVIDENCE_ROOT/mid-roster-validated"
 cp "$POST_REVIEW_VALIDATED_LEDGER" "$MID_ROSTER_LEDGER"
 evidence_must_fail mid-roster-cleanup "$MID_ROSTER_LEDGER" "$EVIDENCE_ROOT/mid-roster-receipt" "$REPAIR_LAUNCHED" roster-mismatch
-if find "$EVIDENCE_ROOT" -maxdepth 1 \
-    \( -name 'mid-roster-validated.trusted-*' -o -name 'mid-roster-validated.trusted-artifacts-*' \) \
-    -print | grep -q .; then
-  echo "failed evidence gate retained trusted publication artifacts" >&2
+mapfile -t MID_ROSTER_FAILED_ATTEMPTS < <(
+  find "$EVIDENCE_ROOT" -maxdepth 1 -type d \
+    -name 'mid-roster-validated.trusted-artifacts-*.attempt-*' -print
+)
+if [ "${#MID_ROSTER_FAILED_ATTEMPTS[@]}" -ne 1 ]; then
+  echo "failed evidence gate did not preserve exactly one isolated attempt" >&2
   exit 1
 fi
 MID_ROSTER_RETRY_LEDGER="$(post_review_validated_evidence_complete "$MID_ROSTER_LEDGER" 6 \
   "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED" "$EVIDENCE_ROOT")"
 [ -f "$MID_ROSTER_RETRY_LEDGER" ]
+case "$MID_ROSTER_RETRY_LEDGER" in
+  "${MID_ROSTER_FAILED_ATTEMPTS[0]}"/*)
+    echo "retry reused the failed evidence attempt" >&2
+    exit 1
+    ;;
+esac
 
 python3 -I -B - "$EVIDENCE_ROOT" <<'PY'
 import hashlib,json,os,pathlib,sys

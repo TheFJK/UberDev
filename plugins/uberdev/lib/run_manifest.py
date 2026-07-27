@@ -1448,7 +1448,7 @@ def _artifact_inode_matches(
 def secure_remove_published_regular(
     path: str, identity: tuple[int, int, int, int, int, int]
 ) -> bool:
-    """Remove a failed publication only while its exact inode remains named."""
+    """Refuse pathname-only rollback even when a snapshot still matches."""
 
     absolute = os.path.abspath(path)
     try:
@@ -1463,19 +1463,17 @@ def secure_remove_published_regular(
         or not _artifact_inode_matches(current, identity)
     ):
         return False
-    try:
-        os.unlink(absolute)
-    except FileNotFoundError:
-        return True
-    except OSError as exc:
-        raise ManifestRuntimeError("artifact_cleanup_unlink_failed") from exc
-    return not os.path.lexists(absolute)
+    # POSIX and native Windows do not expose one portable primitive that means
+    # "unlink this pathname iff it still names this descriptor."  A separate
+    # unlink would re-open the check/use race.  Failed publications therefore
+    # remain isolated under a unique attempt name and are never consumed.
+    return False
 
 
 def secure_remove_published_directory(
     path: str, identity: tuple[int, int, int, int, int, int]
 ) -> bool:
-    """Remove an empty failed-attempt directory only at its original inode."""
+    """Refuse pathname-only directory rollback even after an identity match."""
 
     absolute = os.path.abspath(path)
     try:
@@ -1488,32 +1486,63 @@ def secure_remove_published_directory(
         current, identity
     ):
         return False
-    try:
-        os.rmdir(absolute)
-    except FileNotFoundError:
-        return True
-    except OSError as exc:
-        raise ManifestRuntimeError("artifact_cleanup_rmdir_failed") from exc
-    return not os.path.lexists(absolute)
+    return False
 
 
-def secure_publish_immutable(
+def secure_capture_published(
+    path: str,
+    expected_digest: str,
+    minimum_size: int,
+    maximum_size: int,
+) -> tuple[bytes, tuple[int, int, int, int, int, int]]:
+    """Capture published bytes and bind them to the caller's SHA-256 receipt."""
+
+    if re.fullmatch(r"[0-9a-f]{64}", expected_digest or "") is None:
+        raise ManifestRejected("artifact_digest_invalid")
+    payload, identity = secure_capture_regular(path, minimum_size, maximum_size)
+    if hashlib.sha256(payload).hexdigest() != expected_digest:
+        raise ManifestRejected("artifact_digest_mismatch")
+    return payload, identity
+
+
+def _open_publication_attempt(
+    requested_path: str, digest: str
+) -> tuple[str, int]:
+    for _ in range(16):
+        token = secrets.token_hex(16)
+        candidate = f"{requested_path}.attempt-{token}-{digest}"
+        try:
+            descriptor = _secure_open_regular(
+                candidate, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600
+            )
+            return candidate, descriptor
+        except ManifestRuntimeError as exc:
+            if isinstance(exc.__cause__, FileExistsError):
+                continue
+            raise
+    raise ManifestRuntimeError("artifact_attempt_collision")
+
+
+def secure_publish_captured(
     path: str, payload: bytes
-) -> tuple[int, int, int, int, int, int]:
-    """Create one no-follow, owner-only immutable evidence snapshot."""
+) -> tuple[str, tuple[int, int, int, int, int, int], str]:
+    """Publish captured bytes under a unique, digest-qualified attempt path.
+
+    The returned pathname is a carrier, not an immutable trust primitive.
+    Every consumer must call ``secure_capture_published`` with the returned
+    digest before interpreting its bytes.
+    """
 
     if not isinstance(payload, bytes):
         raise ManifestRejected("artifact_payload_invalid")
     absolute = os.path.abspath(path)
+    digest = hashlib.sha256(payload).hexdigest()
+    candidate: str | None = None
     descriptor: int | None = None
-    created_identity: tuple[int, int, int, int, int, int] | None = None
     published_identity: tuple[int, int, int, int, int, int] | None = None
     failure: BaseException | None = None
     try:
-        descriptor = _secure_open_regular(
-            absolute, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400
-        )
-        created_identity = _artifact_identity(os.fstat(descriptor))
+        candidate, descriptor = _open_publication_attempt(absolute, digest)
         offset = 0
         while offset < len(payload):
             written = os.write(descriptor, payload[offset:])
@@ -1521,35 +1550,56 @@ def secure_publish_immutable(
                 raise ManifestRuntimeError("artifact_snapshot_short_write")
             offset += written
         os.fsync(descriptor)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or opened.st_size != len(payload)
+        ):
+            raise ManifestRejected("artifact_snapshot_invalid")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        captured_chunks: list[bytes] = []
+        remaining = len(payload)
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 65536))
+            if not chunk:
+                raise ManifestRejected("artifact_snapshot_short_read")
+            captured_chunks.append(chunk)
+            remaining -= len(chunk)
+        captured = b"".join(captured_chunks)
+        if hashlib.sha256(captured).hexdigest() != digest:
+            raise ManifestRejected("artifact_snapshot_digest_mismatch")
+        # Native Windows keeps the successful carrier writable: trust comes
+        # from descriptor capture plus the digest receipt, not a pathname
+        # attribute.  Crucially, failed attempts were created writable too, so
+        # Windows retries can never be wedged by a read-only partial target.
         if os.name != "nt":
             os.fchmod(descriptor, 0o400)
-        opened = os.fstat(descriptor)
-        current = os.lstat(absolute)
+        finalized = os.fstat(descriptor)
+        current = os.lstat(candidate)
         uid_fn = getattr(os, "geteuid", None)
         uid = uid_fn() if uid_fn is not None else None
-        published_identity = _artifact_identity(opened)
+        published_identity = _artifact_identity(finalized)
         if _artifact_identity(current) != published_identity:
             raise ManifestRejected("artifact_snapshot_identity_changed")
         if (
-            not stat.S_ISREG(opened.st_mode)
+            not stat.S_ISREG(finalized.st_mode)
             or not stat.S_ISREG(current.st_mode)
-            or opened.st_nlink != 1
+            or finalized.st_nlink != 1
             or current.st_nlink != 1
-            or opened.st_size != len(payload)
+            or finalized.st_size != len(payload)
             or current.st_size != len(payload)
-            or (uid is not None and opened.st_uid != uid)
+            or (uid is not None and finalized.st_uid != uid)
             or (uid is not None and current.st_uid != uid)
             or (
                 os.name != "nt"
                 and (
-                    stat.S_IMODE(opened.st_mode) != 0o400
+                    stat.S_IMODE(finalized.st_mode) != 0o400
                     or stat.S_IMODE(current.st_mode) != 0o400
                 )
             )
         ):
             raise ManifestRejected("artifact_snapshot_invalid")
-    except FileExistsError as exc:
-        raise ManifestRejected("artifact_snapshot_exists") from exc
     except (ManifestRejected, ManifestRuntimeError) as exc:
         failure = exc
     except OSError as exc:
@@ -1564,17 +1614,10 @@ def secure_publish_immutable(
                     failure = ManifestRuntimeError("artifact_snapshot_close_failed")
                     failure.__cause__ = exc
     if failure is not None:
-        if created_identity is not None:
-            try:
-                secure_remove_published_regular(absolute, created_identity)
-            except ManifestRuntimeError as cleanup_error:
-                raise ManifestRuntimeError(
-                    "artifact_snapshot_cleanup_failed"
-                ) from cleanup_error
         raise failure
-    if published_identity is None:
+    if candidate is None or published_identity is None:
         raise ManifestRuntimeError("artifact_snapshot_failed")
-    return published_identity
+    return candidate, published_identity, digest
 
 
 def _lock_manifest_descriptor(descriptor: int) -> None:
