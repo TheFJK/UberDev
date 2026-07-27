@@ -1084,8 +1084,12 @@ PY
     unset PROBE_RC
     PROBE_JSON="$(gh pr checks "$PR_NUMBER" --json name,state,bucket,link,event,workflow 2>&1)" || PROBE_RC=$?
     if [ "${PROBE_RC:-0}" -ne 0 ] && ! jq empty <<<"$PROBE_JSON" 2>/dev/null; then
-      audit ci_probe_unreachable subreason=post_monitor_refresh_failed
-      # phases.phase3 omitted; skip to Step 7 under the existing carve-out
+      # MONITOR has already established red CI. That evidence is monotonic:
+      # a later metadata outage cannot reuse the initial-probe unreachable
+      # carve-out or omit Phase 3. Preserve status=ran with a halted outcome.
+      OUTCOME=halted
+      audit ci_phase_outcome outcome=halted subreason=post_monitor_refresh_failed
+      exit 1
     fi
     ```
 

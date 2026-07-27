@@ -1153,6 +1153,52 @@ fi
 rm -f "$CI_AUTHORITY_FIXTURE"
 
 echo
+echo "== S19-RUNTIME: post-MONITOR refresh failure cannot downgrade observed red =="
+POST_MONITOR_REFRESH_FIXTURE="$(mktemp)"
+awk '
+  /^    On a non-zero, non-8 MONITOR exit,/ { section=1 }
+  section && /^    ```bash$/ { code=1; next }
+  code && /^    ```$/ { exit }
+  code {
+    sub(/^    /, "")
+    print
+  }
+' "$REVIEW_PR" >"$POST_MONITOR_REFRESH_FIXTURE"
+POST_MONITOR_REFRESH_LOG="$(mktemp)"
+POST_MONITOR_REFRESH_OUTPUT="$(
+  POST_MONITOR_REFRESH_LOG="$POST_MONITOR_REFRESH_LOG" bash -c '
+    audit(){ printf "%s\n" "$*" >>"$POST_MONITOR_REFRESH_LOG"; }
+    gh(){
+      printf "post-monitor metadata refresh unavailable\n" >&2
+      return 1
+    }
+    PR_NUMBER=73
+    OUTCOME=red
+    trap '\''printf "outcome=%s\n" "$OUTCOME" >>"$POST_MONITOR_REFRESH_LOG"'\'' EXIT
+    . "$1"
+    printf "continued\n" >>"$POST_MONITOR_REFRESH_LOG"
+  ' _ "$POST_MONITOR_REFRESH_FIXTURE"
+)"
+POST_MONITOR_REFRESH_RC=$?
+if grep -q '^unset PROBE_RC$' "$POST_MONITOR_REFRESH_FIXTURE" \
+    && [ "$POST_MONITOR_REFRESH_RC" -ne 0 ] \
+    && grep -qxF 'ci_phase_outcome outcome=halted subreason=post_monitor_refresh_failed' \
+      "$POST_MONITOR_REFRESH_LOG" \
+    && grep -qxF 'outcome=halted' "$POST_MONITOR_REFRESH_LOG" \
+    && ! grep -q 'ci_probe_unreachable' "$POST_MONITOR_REFRESH_LOG" \
+    && ! grep -qxF 'continued' "$POST_MONITOR_REFRESH_LOG"; then
+  echo "  PASS  S19-RT — post-MONITOR refresh failure preserves red as terminal halted"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S19-RT — post-MONITOR refresh failure downgraded observed red"
+  echo "        rc: $POST_MONITOR_REFRESH_RC"
+  echo "        output: $POST_MONITOR_REFRESH_OUTPUT"
+  echo "        log: $(tr '\n' ' ' <"$POST_MONITOR_REFRESH_LOG")"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$POST_MONITOR_REFRESH_FIXTURE" "$POST_MONITOR_REFRESH_LOG"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
