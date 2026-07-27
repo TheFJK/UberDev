@@ -30,29 +30,60 @@ def fail(reason):
     print(f"review-child-handoff: junction {reason}",file=sys.stderr)
     raise SystemExit(1)
 
-def run_junction_command(command):
+def run_junction_command(command,environment=None):
     if driver=="launch-oserror":
         raise OSError("injected launch failure")
     if driver=="nonzero-exit":
         return subprocess.CompletedProcess(command,1)
+    if driver=="command-contract":
+        expected_command=[
+            "powershell.exe","-NoLogo","-NoProfile","-NonInteractive","-Command",
+            "$ErrorActionPreference='Stop';"
+            "New-Item -ItemType Junction "
+            "-Path $env:UBERDEV_JUNCTION_PATH "
+            "-Target $env:UBERDEV_JUNCTION_TARGET | Out-Null",
+        ]
+        expected_environment={
+            "UBERDEV_JUNCTION_PATH":junction,
+            "UBERDEV_JUNCTION_TARGET":target,
+        }
+        if command != expected_command or environment is None or any(
+            environment.get(key) != value
+            for key,value in expected_environment.items()
+        ):
+            fail("command contract failed")
+        return subprocess.CompletedProcess(command,0)
     if driver!="native":
         fail("invalid test driver")
     return subprocess.run(
-        command,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False,
+        command,env=environment,stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,check=False,
     )
 
 try:
+    root,target,junction=map(os.path.abspath,(root,target,junction))
     os.makedirs(root,exist_ok=True)
 except (OSError,ValueError):
     fail("fixture setup failed")
 if os.name=="nt" or driver!="native":
-    command=["cmd.exe","/d","/s","/c",f'mklink /J "{junction}" "{target}"']
+    environment=os.environ.copy()
+    environment["UBERDEV_JUNCTION_PATH"]=junction
+    environment["UBERDEV_JUNCTION_TARGET"]=target
+    command=[
+        "powershell.exe","-NoLogo","-NoProfile","-NonInteractive","-Command",
+        "$ErrorActionPreference='Stop';"
+        "New-Item -ItemType Junction "
+        "-Path $env:UBERDEV_JUNCTION_PATH "
+        "-Target $env:UBERDEV_JUNCTION_TARGET | Out-Null",
+    ]
     try:
-        completed=run_junction_command(command)
+        completed=run_junction_command(command,environment)
     except (OSError,ValueError,subprocess.SubprocessError):
         fail("command launch failed")
     if completed.returncode != 0:
         fail("command failed")
+    if driver=="command-contract":
+        raise SystemExit(0)
 else:
     try:
         os.symlink(target,junction,target_is_directory=True)
@@ -99,6 +130,13 @@ PY
       exit 1
     fi
   done
+  WINDOWS_JUNCTION_CONTRACT_ROOT="$TMP/junction-command-contract"
+  WINDOWS_JUNCTION_CONTRACT_TARGET="$TMP/junction target & | ^ % ! (target)"
+  WINDOWS_JUNCTION_CONTRACT_PATH="$WINDOWS_JUNCTION_CONTRACT_ROOT/state & | ^ % ! (link)"
+  mkdir -p "$WINDOWS_JUNCTION_CONTRACT_TARGET"
+  windows_create_verified_junction \
+    "$WINDOWS_JUNCTION_CONTRACT_ROOT" "$WINDOWS_JUNCTION_CONTRACT_TARGET" \
+    "$WINDOWS_JUNCTION_CONTRACT_PATH" command-contract
   WINDOWS_REPO="$TMP/windows-repo"; mkdir -p "$WINDOWS_REPO"
   git -C "$WINDOWS_REPO" init -q
   git -C "$WINDOWS_REPO" config user.email fixture@example.invalid
