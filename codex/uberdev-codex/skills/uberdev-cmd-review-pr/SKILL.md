@@ -425,8 +425,10 @@ for path in paths:
     if (path.startswith('/') or '\\' in path or any(part in ('','.','..') for part in parts)
             or any(ord(char)<32 or ord(char)==127 for char in path)):
         raise SystemExit(2)
+def escape_untrusted_diff_payload(payload):
+    return payload.replace(b'&',b'&amp;').replace(b'<',b'&lt;')
 def wrap_untrusted_diff(payload):
-    escaped=payload.replace(b'&',b'&amp;').replace(b'<',b'&lt;')
+    escaped=escape_untrusted_diff_payload(payload)
     opening=b'<external-untrusted-input source="pr-diff">'
     closing=b'</external-untrusted-input>'
     wrapped=opening+b'\n'+escaped+closing+b'\n'
@@ -447,7 +449,7 @@ def build_diff_summary():
         detail='binary change' if added==deleted=='-' else f'{added} additions, {deleted} deletions'
         row=f'{path} — {detail}'
         encoded=(row+'\n').encode()
-        escaped_size=len(encoded)+4*encoded.count(b'&')+3*encoded.count(b'<')
+        escaped_size=len(escape_untrusted_diff_payload(encoded))
         if (summary_bytes+len(encoded)>MAX_DIFF_BYTES
                 or summary_wrapped_bytes+escaped_size+omission_reserve>MAX_WRAPPED_DIFF_BYTES):
             omitted+=1

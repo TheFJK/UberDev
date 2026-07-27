@@ -61,6 +61,18 @@ WINDOWS_STATUS_OBJECT_NAME_COLLISION = 0xC0000035
 WINDOWS_STATUS_SHARING_VIOLATION = 0xC0000043
 WINDOWS_DIRECTORY_BIND_TIMEOUT_SECONDS = 2.0
 WINDOWS_DIRECTORY_BIND_RETRY_INTERVAL_SECONDS = 0.01
+WINDOWS_BOUND_DIRECTORY_ACCESS = (
+    0x00010000 | 0x00000080 | 0x00100000
+)  # DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE
+WINDOWS_BOUND_DIRECTORY_SHARE = (
+    0x00000001 | 0x00000002
+)  # FILE_SHARE_READ | FILE_SHARE_WRITE
+WINDOWS_OBSERVER_DIRECTORY_ACCESS = (
+    0x00000080 | 0x00100000
+)  # FILE_READ_ATTRIBUTES | SYNCHRONIZE
+WINDOWS_OBSERVER_DIRECTORY_SHARE = (
+    0x00000001 | 0x00000002 | 0x00000004
+)  # FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
 _CLEANUP_ARTIFACT_CLASSES = frozenset(
     {"directory", "directory_handle", "file"}
 )
@@ -348,41 +360,24 @@ def windows_open_directory(
 
 
 def windows_directory_access(disposition: int) -> tuple[int, int]:
-    share_access = 0x00000001 | 0x00000002  # FILE_SHARE_READ | FILE_SHARE_WRITE
-    if disposition == 2:  # FILE_CREATE
-        return (
-            0x00010000
-            | 0x00000080
-            | 0x00100000,  # DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE
-            share_access,
-        )
-    if disposition == 1:  # FILE_OPEN
-        # Request DELETE so a creator that omitted FILE_SHARE_DELETE
-        # deterministically holds the waiter in the sharing-violation loop.
-        return (
-            0x00010000
-            | 0x00000080
-            | 0x00100000,  # DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE
-            share_access,
-        )
-    fail("unsafe_directory")
+    if disposition not in (1, 2):  # FILE_OPEN | FILE_CREATE
+        fail("unsafe_directory")
+    # DELETE access plus no FILE_SHARE_DELETE makes the creator's handle the
+    # synchronization signal that keeps a waiter in the sharing-violation loop.
+    return WINDOWS_BOUND_DIRECTORY_ACCESS, WINDOWS_BOUND_DIRECTORY_SHARE
 
 
 def windows_tracker_access() -> tuple[int, int]:
     return (
-        0x00000080 | 0x00100000,  # FILE_READ_ATTRIBUTES | SYNCHRONIZE
-        0x00000001 | 0x00000002 | 0x00000004,  # FILE_SHARE_READ|WRITE|DELETE
+        WINDOWS_OBSERVER_DIRECTORY_ACCESS,
+        WINDOWS_OBSERVER_DIRECTORY_SHARE,
     )
 
 
-def windows_verifier_access(created: bool) -> tuple[int, int]:
-    return (
-        0x00000080 | 0x00100000,  # FILE_READ_ATTRIBUTES | SYNCHRONIZE
-        # The verifier must coexist with the DELETE-capable bound guard.
-        0x00000001
-        | 0x00000002
-        | 0x00000004,  # FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
-    )
+def windows_verifier_access() -> tuple[int, int]:
+    # The verifier and tracker are both observers that must coexist with the
+    # DELETE-capable bound guard.
+    return windows_tracker_access()
 
 
 def windows_retry_delay(deadline: float, now: float) -> float:
@@ -549,14 +544,18 @@ def windows_create_or_open_child(
             add_cleanup_diagnostic(error, cleanup_failures)
             raise
         bound_binding.handle_identity = identity
-    verify_access, verify_share = windows_verifier_access(created)
+    verify_access, verify_share = windows_verifier_access()
     verify_status, verify_handle = invoke(1, verify_access, verify_share)
     if verify_status < 0 or verify_handle == 0:
         reject_windows_verifier_open(bound_binding, created, reason)
+    verifier_binding = DirectoryBinding(
+        verify_handle, identity, (0, 0)
+    )
     try:
         if windows_handle_identity(verify_handle, reason) != identity:
             fail(reason)
     except Exception as error:
+        close_directory_binding(verifier_binding, primary=error)
         cleanup_failures: set[str] = set()
         if created:
             try:
@@ -566,11 +565,19 @@ def windows_create_or_open_child(
         close_directory_binding(bound_binding, primary=error)
         add_cleanup_diagnostic(error, cleanup_failures)
         raise
-    finally:
-        close_directory_binding(
-            DirectoryBinding(verify_handle, identity, (0, 0)),
-            primary=sys.exc_info()[1],
-        )
+    try:
+        close_directory_binding(verifier_binding)
+    except Failure as error:
+        add_cleanup_diagnostic(error, ("directory_handle",))
+        cleanup_failures = set()
+        if created:
+            try:
+                windows_mark_directory_for_deletion(bound_binding, reason)
+            except Failure:
+                cleanup_failures.add("directory")
+        close_directory_binding(bound_binding, primary=error)
+        add_cleanup_diagnostic(error, cleanup_failures)
+        raise
     return handle, identity, created
 
 

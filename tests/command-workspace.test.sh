@@ -115,14 +115,16 @@ for index, module_path in enumerate(module_paths):
         0x00000080 | 0x00100000,
         0x00000001 | 0x00000002 | 0x00000004,
     )
-    assert module.windows_verifier_access(True) == (
+    assert module.windows_verifier_access() == (
         0x00000080 | 0x00100000,
         0x00000001 | 0x00000002 | 0x00000004,
     )
-    assert module.windows_verifier_access(False) == (
-        0x00000080 | 0x00100000,
-        0x00000001 | 0x00000002 | 0x00000004,
-    )
+    try:
+        module.windows_verifier_access(True)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("verifier access retained unused created-state input")
     assert module.WINDOWS_STATUS_OBJECT_NAME_COLLISION == 0xC0000035
     assert module.WINDOWS_STATUS_SHARING_VIOLATION == 0xC0000043
     assert (
@@ -145,6 +147,77 @@ for index, module_path in enumerate(module_paths):
         "unsafe_directory",
         lambda: module.windows_directory_access(3),
     )
+
+    class SuccessfulCreateAndVerify:
+        argtypes = None
+        restype = None
+
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, handle_pointer, *_args):
+            self.calls += 1
+            handle_pointer._obj.value = 101 if self.calls == 1 else 202
+            return 0
+
+    class FailVerifierClose:
+        argtypes = None
+        restype = None
+
+        def __init__(self):
+            self.handles = []
+
+        def __call__(self, handle):
+            numeric = int(handle.value)
+            self.handles.append(numeric)
+            return 0 if numeric == 202 else 1
+
+    create_and_verify = SuccessfulCreateAndVerify()
+    selective_close = FailVerifierClose()
+
+    class CreateAndVerifyNtdll:
+        NtCreateFile = create_and_verify
+
+    class SelectiveCloseKernel:
+        CloseHandle = selective_close
+
+    had_windll = hasattr(ctypes, "WinDLL")
+    original_windll = getattr(ctypes, "WinDLL", None)
+    ctypes.WinDLL = (
+        lambda name, **_kwargs:
+        CreateAndVerifyNtdll() if name == "ntdll" else SelectiveCloseKernel()
+    )
+    real_identity = module.windows_handle_identity
+    real_disposition = module.windows_mark_directory_for_deletion
+    dispositions = []
+    module.windows_handle_identity = lambda _handle, _reason: (7, 9)
+    module.windows_mark_directory_for_deletion = (
+        lambda binding, _reason: dispositions.append(binding.handle)
+    )
+    try:
+        try:
+            module.windows_create_or_open_child(
+                module.DirectoryBinding(55, (1, 1), (1, 1)),
+                "child",
+                "unsafe_directory",
+            )
+        except module.Failure as error:
+            assert str(error) == "directory_handle_close_failed", str(error)
+            assert module.cleanup_diagnostic(error) == {
+                "artifact_classes": ["directory_handle"],
+                "code": "workspace_rollback_failed",
+            }
+        else:
+            raise AssertionError("verifier close failure was accepted")
+        assert selective_close.handles == [202, 101], selective_close.handles
+        assert dispositions == [101], dispositions
+    finally:
+        module.windows_handle_identity = real_identity
+        module.windows_mark_directory_for_deletion = real_disposition
+        if had_windll:
+            ctypes.WinDLL = original_windll
+        else:
+            del ctypes.WinDLL
 
     class FalseClose:
         argtypes = None
