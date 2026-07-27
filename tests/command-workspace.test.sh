@@ -41,6 +41,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import ctypes
 
 
 module_paths = sys.argv[1:3]
@@ -107,7 +108,7 @@ for index, module_path in enumerate(module_paths):
         0x00000001 | 0x00000002,
     )
     assert module.windows_directory_access(1) == (
-        0x00000080 | 0x00100000,
+        0x00010000 | 0x00000080 | 0x00100000,
         0x00000001 | 0x00000002,
     )
     assert module.windows_tracker_access() == (
@@ -120,7 +121,7 @@ for index, module_path in enumerate(module_paths):
     )
     assert module.windows_verifier_access(False) == (
         0x00000080 | 0x00100000,
-        0x00000001 | 0x00000002,
+        0x00000001 | 0x00000002 | 0x00000004,
     )
     assert module.WINDOWS_STATUS_OBJECT_NAME_COLLISION == 0xC0000035
     assert module.WINDOWS_STATUS_SHARING_VIOLATION == 0xC0000043
@@ -144,6 +145,41 @@ for index, module_path in enumerate(module_paths):
         "unsafe_directory",
         lambda: module.windows_directory_access(3),
     )
+
+    class FalseClose:
+        argtypes = None
+        restype = None
+
+        def __call__(self, _handle):
+            return 0
+
+    class FalseCloseKernel:
+        CloseHandle = FalseClose()
+
+    had_windll = hasattr(ctypes, "WinDLL")
+    original_windll = getattr(ctypes, "WinDLL", None)
+    ctypes.WinDLL = lambda *_args, **_kwargs: FalseCloseKernel()
+    close_binding = module.DirectoryBinding(73, (1, 2), (1, 2))
+    try:
+        expect_failure(
+            module,
+            "directory_handle_close_failed",
+            lambda: module.close_directory_binding(close_binding),
+        )
+        assert close_binding.handle == 73
+        primary_close_error = module.Failure("unsafe_artifact")
+        assert not module.close_directory_binding(
+            close_binding, primary=primary_close_error
+        )
+        assert close_binding.handle == 73
+        assert getattr(primary_close_error, "__notes__", []) == [
+            'workspace_rollback_failed:{"artifact_classes":["directory_handle"]}'
+        ]
+    finally:
+        if had_windll:
+            ctypes.WinDLL = original_windll
+        else:
+            del ctypes.WinDLL
 
     root, repo, _state, context, carrier = fixture(module, f"valid-{index}")
     real_normcase = module.os.path.normcase
@@ -404,6 +440,84 @@ for index, module_path in enumerate(module_paths):
     finally:
         module.os.write = real_write
     assert rollback_artifact.read_bytes() == b"replacement-must-survive"
+
+    def assert_rollback_cleanup_diagnostic(kind, expected_classes):
+        _root, cleanup_repo, _state, _context, cleanup_carrier = fixture(
+            module, f"rollback-{kind}-{index}"
+        )
+        cleanup_loaded = module.load_carrier(
+            json.dumps(cleanup_carrier, separators=(",", ":")), "review-pr"
+        )
+        cleanup_run = f"20260727-01025{index}-{kind[:7]}"
+        real_create = module.portable_create_or_validate_file
+        real_unlink = module.os.unlink
+        real_rmdir = module.os.rmdir
+        real_name = module.os.name
+        real_matches = module.windows_binding_matches_path
+        real_disposition = module.windows_mark_directory_for_deletion
+        calls = 0
+        rollback_started = False
+        primary = module.Failure("unsafe_artifact")
+
+        def fail_after_first_artifact(*args, **kwargs):
+            nonlocal calls, rollback_started
+            calls += 1
+            if calls == 2:
+                rollback_started = True
+                if kind == "disposition":
+                    module.os.name = "nt"
+                raise primary
+            return real_create(*args, **kwargs)
+
+        def injected_unlink(*args, **kwargs):
+            if rollback_started and kind == "unlink":
+                raise OSError("injected unlink failure")
+            return real_unlink(*args, **kwargs)
+
+        def injected_rmdir(*args, **kwargs):
+            if rollback_started and kind == "rmdir":
+                raise OSError("injected rmdir failure")
+            return real_rmdir(*args, **kwargs)
+
+        def injected_disposition(_binding, _reason):
+            raise module.Failure("unsafe_directory")
+
+        module.portable_create_or_validate_file = fail_after_first_artifact
+        module.os.unlink = injected_unlink
+        module.os.rmdir = injected_rmdir
+        module.windows_binding_matches_path = lambda *_args: True
+        module.windows_mark_directory_for_deletion = injected_disposition
+        try:
+            try:
+                module.allocate_workspace(
+                    str(cleanup_repo),
+                    cleanup_run,
+                    module.CALLERS["review-pr"]["artifacts"],
+                    cleanup_loaded[4],
+                )
+            except module.Failure as error:
+                assert error is primary, (error, primary)
+                assert getattr(error, "__notes__", []) == [
+                    "workspace_rollback_failed:"
+                    + json.dumps(
+                        {"artifact_classes": expected_classes},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                ]
+            else:
+                raise AssertionError(f"{kind} rollback failure was hidden")
+        finally:
+            module.portable_create_or_validate_file = real_create
+            module.os.unlink = real_unlink
+            module.os.rmdir = real_rmdir
+            module.os.name = real_name
+            module.windows_binding_matches_path = real_matches
+            module.windows_mark_directory_for_deletion = real_disposition
+
+    assert_rollback_cleanup_diagnostic("unlink", ["directory", "file"])
+    assert_rollback_cleanup_diagnostic("rmdir", ["directory"])
+    assert_rollback_cleanup_diagnostic("disposition", ["directory"])
 
     _root, repo, _state, _context, directory_carrier = fixture(
         module, f"directory-link-{index}"

@@ -230,6 +230,19 @@ class ManifestRuntimeError(RuntimeError):
     """The private manifest could not be safely read or written."""
 
 
+def _close_windows_handle(
+    kernel32: Any,
+    handle: Any,
+    primary: BaseException | None = None,
+) -> bool:
+    if kernel32.CloseHandle(handle):
+        return True
+    if primary is not None:
+        primary.add_note("windows_handle_close_failed")
+        return False
+    raise ManifestRuntimeError("windows_handle_close_failed")
+
+
 @dataclass
 class RunState:
     route: dict[str, Any] | None = None
@@ -930,7 +943,7 @@ def _windows_parent_pid(pid: int) -> int:
                 return int(entry.th32ParentProcessID)
             found = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
     finally:
-        kernel32.CloseHandle(snapshot)
+        _close_windows_handle(kernel32, snapshot, primary=sys.exception())
     raise ProcessLookupError(pid)
 
 
@@ -995,7 +1008,7 @@ def _windows_live_process(
         # open. Refuse its result if the handle was signaled in that window.
         require_still_active()
     finally:
-        kernel32.CloseHandle(handle)
+        _close_windows_handle(kernel32, handle, primary=sys.exception())
 
 
 def _windows_process_record(pid: int) -> tuple[int, int, int, str]:

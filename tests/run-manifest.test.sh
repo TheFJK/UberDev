@@ -273,13 +273,41 @@ for index, module_path in enumerate(sys.argv[1:]):
             module.ctypes.get_last_error = original_get_last_error
         else:
             del module.ctypes.get_last_error
+
+    close_failure_kernel32 = Kernel32()
+
+    def false_close(handle):
+        assert handle in close_failure_kernel32.open_handles, handle
+        return 0
+
+    close_failure_kernel32.CloseHandle = Function(false_close)
+    module.ctypes.WinDLL = lambda *_args, **_kwargs: close_failure_kernel32
+    try:
+        with module._windows_live_process(424242):
+            pass
+    except module.ManifestRuntimeError as error:
+        assert str(error) == "windows_handle_close_failed", str(error)
+    else:
+        raise AssertionError("false CloseHandle result was accepted")
+    primary_close_error = ProcessLookupError(424242)
+    try:
+        with module._windows_live_process(424242):
+            raise primary_close_error
+    except ProcessLookupError as error:
+        assert error is primary_close_error, (error, primary_close_error)
+        assert getattr(error, "__notes__", []) == [
+            "windows_handle_close_failed"
+        ]
+    else:
+        raise AssertionError("CloseHandle replaced the primary exception")
+
     print(
         "captured/signaled-259-rejected/"
-        "snapshot-unavailable/wait-errors-unavailable"
+        "snapshot-unavailable/wait-errors-unavailable/close-failures-visible"
     )
 PY
 )"
-if [ "$WINDOWS_PARENT_PROBE_SPLIT" = $'captured/signaled-259-rejected/snapshot-unavailable/wait-errors-unavailable\ncaptured/signaled-259-rejected/snapshot-unavailable/wait-errors-unavailable' ]; then
+if [ "$WINDOWS_PARENT_PROBE_SPLIT" = $'captured/signaled-259-rejected/snapshot-unavailable/wait-errors-unavailable/close-failures-visible\ncaptured/signaled-259-rejected/snapshot-unavailable/wait-errors-unavailable/close-failures-visible' ]; then
   pass "Windows liveness rejects signaled handles even when exit code is 259"
 else
   fail "Windows process identity/parent lookup split" "$WINDOWS_PARENT_PROBE_SPLIT"

@@ -67,6 +67,22 @@ class Failure(Exception):
     pass
 
 
+def add_cleanup_diagnostic(
+    primary: BaseException, artifact_classes: set[str] | tuple[str, ...]
+) -> None:
+    classes = sorted(set(artifact_classes))
+    if not classes:
+        return
+    primary.add_note(
+        "workspace_rollback_failed:"
+        + json.dumps(
+            {"artifact_classes": classes},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+
+
 class DirectoryBinding:
     __slots__ = ("handle", "handle_identity", "path_identity")
 
@@ -253,9 +269,11 @@ def windows_handle_identity(handle: int, reason: str) -> tuple[int, int]:
     return int(identity.volume_serial_number), file_index
 
 
-def close_directory_binding(binding: DirectoryBinding) -> None:
+def close_directory_binding(
+    binding: DirectoryBinding, primary: BaseException | None = None
+) -> bool:
     if binding.handle is None:
-        return
+        return True
     import ctypes
     from ctypes import wintypes
 
@@ -263,8 +281,13 @@ def close_directory_binding(binding: DirectoryBinding) -> None:
     close_handle = kernel32.CloseHandle
     close_handle.argtypes = [wintypes.HANDLE]
     close_handle.restype = wintypes.BOOL
-    close_handle(wintypes.HANDLE(binding.handle))
+    if not close_handle(wintypes.HANDLE(binding.handle)):
+        if primary is not None:
+            add_cleanup_diagnostic(primary, ("directory_handle",))
+            return False
+        fail("directory_handle_close_failed")
     binding.handle = None
+    return True
 
 
 def windows_open_directory(
@@ -302,9 +325,10 @@ def windows_open_directory(
     numeric_handle = int(handle)
     try:
         identity = windows_handle_identity(numeric_handle, reason)
-    except Exception:
+    except Exception as error:
         close_directory_binding(
-            DirectoryBinding(numeric_handle, (0, 0), (0, 0))
+            DirectoryBinding(numeric_handle, (0, 0), (0, 0)),
+            primary=error,
         )
         raise
     return numeric_handle, identity
@@ -320,8 +344,12 @@ def windows_directory_access(disposition: int) -> tuple[int, int]:
             share_access,
         )
     if disposition == 1:  # FILE_OPEN
+        # Request DELETE so a creator that omitted FILE_SHARE_DELETE
+        # deterministically holds the waiter in the sharing-violation loop.
         return (
-            0x00000080 | 0x00100000,  # FILE_READ_ATTRIBUTES | SYNCHRONIZE
+            0x00010000
+            | 0x00000080
+            | 0x00100000,  # DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE
             share_access,
         )
     fail("unsafe_directory")
@@ -337,9 +365,10 @@ def windows_tracker_access() -> tuple[int, int]:
 def windows_verifier_access(created: bool) -> tuple[int, int]:
     return (
         0x00000080 | 0x00100000,  # FILE_READ_ATTRIBUTES | SYNCHRONIZE
+        # The verifier must coexist with the DELETE-capable bound guard.
         0x00000001
         | 0x00000002
-        | (0x00000004 if created else 0),  # FILE_SHARE_READ|WRITE[|DELETE]
+        | 0x00000004,  # FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
     )
 
 
@@ -484,25 +513,27 @@ def windows_create_or_open_child(
                 guard.handle_identity = identity
                 if identity != tracker_identity:
                     fail(reason)
-            except Exception:
-                close_directory_binding(guard)
+            except Exception as error:
+                close_directory_binding(guard, primary=error)
                 raise
             bound_binding = guard
             handle = guard_handle
         finally:
-            close_directory_binding(tracker)
+            close_directory_binding(tracker, primary=sys.exception())
     else:
         if handle == 0:
             fail(reason)
         bound_binding = DirectoryBinding(handle, (0, 0), (0, 0))
         try:
             identity = windows_handle_identity(handle, reason)
-        except Exception:
+        except Exception as error:
+            cleanup_failures: set[str] = set()
             try:
                 windows_mark_directory_for_deletion(bound_binding, reason)
             except Failure:
-                pass
-            close_directory_binding(bound_binding)
+                cleanup_failures.add("directory")
+            close_directory_binding(bound_binding, primary=error)
+            add_cleanup_diagnostic(error, cleanup_failures)
             raise
         bound_binding.handle_identity = identity
     verify_access, verify_share = windows_verifier_access(created)
@@ -518,17 +549,20 @@ def windows_create_or_open_child(
     try:
         if windows_handle_identity(verify_handle, reason) != identity:
             fail(reason)
-    except Exception:
+    except Exception as error:
+        cleanup_failures: set[str] = set()
         if created:
             try:
                 windows_mark_directory_for_deletion(bound_binding, reason)
             except Failure:
-                pass
-        close_directory_binding(bound_binding)
+                cleanup_failures.add("directory")
+        close_directory_binding(bound_binding, primary=error)
+        add_cleanup_diagnostic(error, cleanup_failures)
         raise
     finally:
         close_directory_binding(
-            DirectoryBinding(verify_handle, identity, (0, 0))
+            DirectoryBinding(verify_handle, identity, (0, 0)),
+            primary=sys.exception(),
         )
     return handle, identity, created
 
@@ -573,7 +607,7 @@ def windows_binding_matches_path(
     try:
         return identity == binding.handle_identity
     finally:
-        close_directory_binding(verifier)
+        close_directory_binding(verifier, primary=sys.exception())
 
 
 def portable_bind_existing_directory(path: str, reason: str) -> DirectoryBinding:
@@ -582,9 +616,10 @@ def portable_bind_existing_directory(path: str, reason: str) -> DirectoryBinding
         try:
             _canonical, entry = portable_directory(path, reason)
             path_identity = file_identity(entry, reason)
-        except Exception:
+        except Exception as error:
             close_directory_binding(
-                DirectoryBinding(handle, handle_identity, (0, 0))
+                DirectoryBinding(handle, handle_identity, (0, 0)),
+                primary=error,
             )
             raise
         return DirectoryBinding(handle, handle_identity, path_identity)
@@ -611,7 +646,8 @@ def portable_bind_or_create_child(
         try:
             _canonical, entry = portable_directory(path, "unsafe_directory")
             path_identity = file_identity(entry, "unsafe_directory")
-        except Exception:
+        except Exception as error:
+            cleanup_failures: set[str] = set()
             binding = DirectoryBinding(handle, handle_identity, (0, 0))
             if created:
                 try:
@@ -619,8 +655,9 @@ def portable_bind_or_create_child(
                         binding, "unsafe_directory"
                     )
                 except Failure:
-                    pass
-            close_directory_binding(binding)
+                    cleanup_failures.add("directory")
+            close_directory_binding(binding, primary=error)
+            add_cleanup_diagnostic(error, cleanup_failures)
             raise
         return DirectoryBinding(handle, handle_identity, path_identity), created
     created = False
@@ -897,8 +934,9 @@ def portable_open_or_create_dir(
             fail("unsafe_directory")
         portable_parent_unchanged(parent, parent_entry, "unsafe_directory")
         return canonical, entry, binding, created
-    except Exception:
+    except Exception as error:
         if binding is not None:
+            cleanup_failures: set[str] = set()
             expected = binding.path_identity
             if created and os.name == "nt":
                 try:
@@ -906,8 +944,8 @@ def portable_open_or_create_dir(
                         binding, "unsafe_directory"
                     )
                 except Failure:
-                    pass
-            close_directory_binding(binding)
+                    cleanup_failures.add("directory")
+            close_directory_binding(binding, primary=error)
             if created and os.name != "nt":
                 try:
                     current = os.lstat(path)
@@ -917,8 +955,11 @@ def portable_open_or_create_dir(
                         and file_identity(current, "unsafe_directory") == expected
                     ):
                         os.rmdir(path)
-                except (Failure, OSError):
+                except FileNotFoundError:
                     pass
+                except (Failure, OSError):
+                    cleanup_failures.add("directory")
+            add_cleanup_diagnostic(error, cleanup_failures)
         raise
 
 
@@ -1093,7 +1134,8 @@ def allocate_workspace_portable(
             ):
                 fail("unsafe_directory")
         return workspace, paths
-    except Exception:
+    except Exception as error:
+        cleanup_failures: set[str] = set()
         for path, expected in reversed(created_files):
             try:
                 current = os.lstat(path)
@@ -1103,8 +1145,10 @@ def allocate_workspace_portable(
                     and file_identity(current, "unsafe_artifact") == expected
                 ):
                     os.unlink(path)
-            except (Failure, OSError):
+            except FileNotFoundError:
                 pass
+            except (Failure, OSError):
+                cleanup_failures.add("file")
         if os.name == "nt":
             for path, _expected, binding in reversed(created_dirs):
                 try:
@@ -1115,8 +1159,7 @@ def allocate_workspace_portable(
                             binding, "unsafe_directory"
                         )
                 except Failure:
-                    pass
-                close_directory_binding(binding)
+                    cleanup_failures.add("directory")
         else:
             for path, expected, _binding in reversed(created_dirs):
                 try:
@@ -1127,12 +1170,16 @@ def allocate_workspace_portable(
                         and file_identity(current, "unsafe_directory") == expected
                     ):
                         os.rmdir(path)
-                except (Failure, OSError):
+                except FileNotFoundError:
                     pass
+                except (Failure, OSError):
+                    cleanup_failures.add("directory")
+        add_cleanup_diagnostic(error, cleanup_failures)
         raise
     finally:
+        primary = sys.exception()
         for binding in reversed(bindings):
-            close_directory_binding(binding)
+            close_directory_binding(binding, primary=primary)
 
 
 def allocate_workspace(
