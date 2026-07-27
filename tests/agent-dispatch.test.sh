@@ -206,6 +206,171 @@ finally:
         os.fchmod = original_fchmod
 PY
 
+python3 -I - "$LIB" "$TMP/windows-context-validation" <<'PY'
+import contextlib
+import hashlib
+import io
+import os
+import stat
+import sys
+
+source_path, run_root = sys.argv[1:]
+with open(source_path, encoding="utf-8") as handle:
+    source = handle.read()
+function = source.index("uberdev_agent_context_validate() {")
+prefix = "payload=\"$(python3 -I -B -c '\n"
+start = source.index(prefix, function) + len(prefix)
+end = source.index("\n' \"$1\" \"$2\" \"$3\")\"", start)
+snippet = source[start:end]
+
+run_root = os.path.realpath(run_root)
+state = os.path.join(run_root, ".agent-state-0")
+os.makedirs(state)
+context_path = os.path.join(state, "route-context-v1-windows-validator.json")
+payload = b'{"metadata":{"run_id":"windows-validator","workflow":"review-pr"}}'
+digest = hashlib.sha256(payload).hexdigest()
+with open(context_path, "wb") as handle:
+    handle.write(payload)
+# POSIX permission bits are not a meaningful native-Windows signal, so the
+# Windows branch intentionally does not enforce the 0600 POSIX mode gate.
+os.chmod(context_path, 0o644)
+
+real_open = os.open
+real_stat = os.stat
+real_lstat = os.lstat
+original_name = os.name
+original_normcase = os.path.normcase
+original_geteuid = getattr(os, "geteuid", None)
+original_supports_dir_fd = os.supports_dir_fd
+replacement_after_open = None
+case_only_lexical = None
+case_only_backing = None
+
+def absolute_open(path, flags, *args, **kwargs):
+    global replacement_after_open
+    assert "dir_fd" not in kwargs, "Windows validator used descriptor-relative os.open"
+    assert os.path.isabs(path), f"Windows validator opened a relative path: {path!r}"
+    actual_path = (
+        case_only_backing
+        if case_only_lexical is not None and os.path.abspath(path) == case_only_lexical
+        else path
+    )
+    descriptor = real_open(actual_path, flags, *args, **kwargs)
+    if (
+        replacement_after_open is not None
+        and os.path.normcase(os.path.abspath(path))
+        == os.path.normcase(os.path.abspath(context_path))
+        and flags & os.O_ACCMODE == os.O_RDONLY
+    ):
+        os.replace(replacement_after_open, context_path)
+        replacement_after_open = None
+    return descriptor
+
+def absolute_stat(path, *args, **kwargs):
+    assert "dir_fd" not in kwargs, "Windows validator used descriptor-relative os.stat"
+    assert os.path.isabs(path), f"Windows validator statted a relative path: {path!r}"
+    return real_stat(path, *args, **kwargs)
+
+def absolute_lstat(path, *args, **kwargs):
+    assert os.path.isabs(path), f"Windows validator lstatted a relative path: {path!r}"
+    absolute = os.path.abspath(path)
+    if case_only_lexical is not None:
+        if absolute == case_only_lexical:
+            path = case_only_backing
+        elif absolute == os.path.dirname(case_only_lexical):
+            path = os.path.dirname(case_only_backing)
+    return real_lstat(path, *args, **kwargs)
+
+def validate(candidate=context_path, expected=digest, expected_rc=0):
+    sys.argv = ["route-context-validator", candidate, expected, run_root]
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    rc = 0
+    try:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            exec(compile(snippet, "route-context-validator", "exec"), {})
+    except SystemExit as exc:
+        rc = exc.code
+    assert rc == expected_rc, (rc, stdout.getvalue(), stderr.getvalue())
+    if expected_rc == 0:
+        assert stdout.getvalue().encode() == payload
+        assert stderr.getvalue() == ""
+    else:
+        assert stderr.getvalue() == (
+            "uberdev agent dispatch: route_context_validation_failed\n"
+        )
+
+os.name = "nt"
+os.path.normcase = lambda value: original_normcase(value).casefold()
+os.supports_dir_fd = set()
+os.open = absolute_open
+os.stat = absolute_stat
+os.lstat = absolute_lstat
+if original_geteuid is not None:
+    del os.geteuid
+try:
+    validate()
+
+    with open(context_path, "wb") as handle:
+        handle.write(b"tampered")
+    validate(expected_rc=2)
+    with open(context_path, "wb") as handle:
+        handle.write(payload)
+
+    hardlink_path = os.path.join(run_root, "context-hardlink")
+    os.link(context_path, hardlink_path)
+    validate(expected_rc=2)
+    os.unlink(hardlink_path)
+
+    backing_path = os.path.join(run_root, "context-backing")
+    os.replace(context_path, backing_path)
+    os.symlink(backing_path, context_path)
+    validate(expected_rc=2)
+    os.unlink(context_path)
+    os.replace(backing_path, context_path)
+
+    escaped_path = os.path.join(
+        run_root, "route-context-v1-windows-validator-escaped.json"
+    )
+    with open(escaped_path, "wb") as handle:
+        handle.write(payload)
+    validate(candidate=escaped_path, expected_rc=2)
+
+    # Emulate native Windows path resolution even when this test runs on macOS.
+    # Alternate casing of the real state directory must remain valid, while the
+    # same case-folded spelling backed by a distinct directory inode must fail.
+    case_only_lexical = os.path.join(
+        run_root, ".AGENT-STATE-0", "route-context-v1-windows-validator.json"
+    )
+    case_only_backing = context_path
+    validate(candidate=case_only_lexical)
+
+    case_only_backing = os.path.join(
+        run_root, ".case-sensitive-sibling", "route-context-v1-windows-validator.json"
+    )
+    os.makedirs(os.path.dirname(case_only_backing))
+    with open(case_only_backing, "wb") as handle:
+        handle.write(payload)
+    validate(candidate=case_only_lexical, expected_rc=2)
+    case_only_lexical = None
+    case_only_backing = None
+
+    replacement_path = os.path.join(run_root, "context-replacement")
+    with open(replacement_path, "wb") as handle:
+        handle.write(b"replacement")
+    replacement_after_open = replacement_path
+    validate(expected_rc=2)
+finally:
+    os.name = original_name
+    os.path.normcase = original_normcase
+    os.supports_dir_fd = original_supports_dir_fd
+    os.open = real_open
+    os.stat = real_stat
+    os.lstat = real_lstat
+    if original_geteuid is not None:
+        os.geteuid = original_geteuid
+PY
+
 REQUEST="$(python3 - "$TMP/run" <<'PY'
 import json, sys
 run = sys.argv[1]
@@ -1989,14 +2154,72 @@ _uberdev_agent_dispatch_backend() {
   nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(5)' >/dev/null 2>&1 &
   DISPATCH_ID="$!"; DISPATCH_LOG=""
   printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" > "$6"; chmod 600 "$6"
-  nohup bash -c 'sleep 1; printf '\''{"backend":"codex","state":"completed","exit_code":0,"pid":"%s"}\\n'\'' "$1" > "$2"; chmod 600 "$2"' _ "$DISPATCH_ID" "$6" >/dev/null 2>&1 &
 }
 uberdev_agent_dispatch "$WATCH_REQUEST" "$WATCH_RUN/prompt.txt" "$WATCH_RUN/result.md" "$WATCH_RUN/status.json"
-for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$WATCH_RUN/status.json.watcher-error.json" ] && break; sleep 1; done
+WATCH_LEASE="$(python3 -I - "$WATCH_RUN/.agent-state-$(id -u)/semaphore-v1" <<'PY'
+import pathlib,sys
+root=pathlib.Path(sys.argv[1])
+matches=[]
+for path in sorted(root.glob("*.scope/*.lease")):
+    try:
+        fields=dict(line.split("=",1) for line in path.read_text().splitlines())
+    except (OSError,ValueError):
+        continue
+    if fields.get("run_id")=="adapter-watcher-finalize-failure":
+        matches.append(path)
+if len(matches)!=1:
+    candidates=[str(path.relative_to(root)) for path in sorted(root.glob("*.scope/*.lease"))[:5]]
+    raise SystemExit(f"watcher-finalize-failure lease resolution failed: matches={len(matches)} candidates={candidates}")
+print(matches[0])
+PY
+)"
+read -r WATCH_PROCESS_IDENTITY WATCH_LEASE_GENERATION < <(
+  python3 -I - "$WATCH_RUN/status.json" "$WATCH_LEASE" <<'PY'
+import json,pathlib,sys
+status=json.loads(pathlib.Path(sys.argv[1]).read_text())
+lease=dict(line.split("=",1) for line in pathlib.Path(sys.argv[2]).read_text().splitlines())
+assert status.get("state")=="running",status
+process_identity=status.get("process_identity")
+lease_generation=status.get("lease_generation")
+assert process_identity and lease_generation,status
+assert lease.get("run_id")=="adapter-watcher-finalize-failure",lease
+assert lease.get("generation")==lease_generation,(lease.get("generation"),lease_generation)
+print(process_identity,lease_generation)
+PY
+)
+WATCH_LEASE_NATIVE_IDENTITY="$(_uberdev_semaphore_lease_identity \
+  "$WATCH_LEASE" "$WATCH_LEASE_GENERATION")" || {
+  echo "watcher-finalize-failure exact lease identity capture failed: path=$WATCH_LEASE generation=$WATCH_LEASE_GENERATION" >&2
+  exit 1
+}
+_uberdev_agent_publish_status "$WATCH_RUN/status.json" codex "$DISPATCH_ID" completed 0 provider
+for _ in $(seq 1 100); do [ -s "$WATCH_RUN/status.json.watcher-error.json" ] && break; sleep 0.1; done
 python3 -I - "$WATCH_RUN/status.json.watcher-error.json" <<'PY'
 import json,sys
 row=json.load(open(sys.argv[1]))
 assert row['error']=='terminal_finalize_failed' and row['attempts']==3,row
+PY
+WATCH_LEASE_AFTER_IDENTITY="$(_uberdev_semaphore_lease_identity \
+  "$WATCH_LEASE" "$WATCH_LEASE_GENERATION")" || {
+  echo "watcher-finalize-failure exact lease did not remain live: path=$WATCH_LEASE generation=$WATCH_LEASE_GENERATION" >&2
+  exit 1
+}
+python3 -I - "$WATCH_RUN/status.json" "$WATCH_LEASE" \
+  "$WATCH_PROCESS_IDENTITY" "$WATCH_LEASE_GENERATION" \
+  "$WATCH_LEASE_NATIVE_IDENTITY" "$WATCH_LEASE_AFTER_IDENTITY" <<'PY'
+import json,pathlib,sys
+status_path,lease_path,process_identity,generation,before_identity,after_identity=sys.argv[1:]
+status=json.loads(pathlib.Path(status_path).read_text())
+lease=dict(line.split("=",1) for line in pathlib.Path(lease_path).read_text().splitlines())
+observed={key:status.get(key) for key in ("state","process_identity","lease_generation")}
+assert observed=={
+    "state":"completed",
+    "process_identity":process_identity,
+    "lease_generation":generation,
+},observed
+assert lease.get("run_id")=="adapter-watcher-finalize-failure",lease
+assert lease.get("generation")==generation,(lease.get("generation"),generation)
+assert after_identity==before_identity,(before_identity,after_identity)
 PY
 eval "$(declare -f _real_watcher_finalize_terminal | sed '1s/_real_watcher_finalize_terminal/_uberdev_agent_finalize_terminal/')"
 

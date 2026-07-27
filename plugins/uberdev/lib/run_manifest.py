@@ -961,12 +961,21 @@ def _windows_process_record(pid: int) -> tuple[int, int, int, str]:
         creation_ticks = (int(created.high) << 32) | int(created.low)
         if creation_ticks <= 0:
             raise OSError("process creation time unavailable")
+        try:
+            parent_pid = _windows_parent_pid(pid)
+        except ProcessLookupError as exc:
+            # Earlier OpenProcess, STILL_ACTIVE, and creation-time checks
+            # observed the process live. If it exits before this later
+            # Toolhelp snapshot, classify the miss unavailable (fail-closed).
+            raise OSError(
+                errno.EAGAIN, "live process missing from Toolhelp snapshot"
+            ) from exc
     finally:
         kernel32.CloseHandle(handle)
     # Windows has no POSIX process groups or sessions. The PID is retained in
     # those schema slots while the kernel creation FILETIME provides the
     # authoritative anti-reuse identity.
-    return _windows_parent_pid(pid), pid, pid, f"windows:{creation_ticks}"
+    return parent_pid, pid, pid, f"windows:{creation_ticks}"
 
 
 def _native_process_record(pid: int) -> tuple[int, int, int, str]:

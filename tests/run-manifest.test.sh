@@ -85,6 +85,74 @@ else
   fail "Linux process identity error classification" "$LINUX_IDENTITY_CLASSIFICATION"
 fi
 
+WINDOWS_LIVE_SNAPSHOT_MISS="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
+import importlib.util
+import sys
+
+
+class Function:
+    def __init__(self, implementation):
+        self.implementation = implementation
+
+    def __call__(self, *args):
+        return self.implementation(*args)
+
+
+class Kernel32:
+    def __init__(self):
+        self.closed = []
+        self.parent_observed_open = False
+        self.OpenProcess = Function(lambda _access, _inherit, _pid: 73)
+        self.GetExitCodeProcess = Function(self.get_exit_code)
+        self.GetProcessTimes = Function(self.get_process_times)
+        self.CloseHandle = Function(self.close_handle)
+
+    @staticmethod
+    def get_exit_code(_handle, exit_code):
+        exit_code._obj.value = 259
+        return 1
+
+    @staticmethod
+    def get_process_times(_handle, created, _exited, _kernel, _user):
+        created._obj.low = 41
+        created._obj.high = 1
+        return 1
+
+    def close_handle(self, handle):
+        self.closed.append(handle)
+        return 1
+
+
+for index, module_path in enumerate(sys.argv[1:]):
+    spec = importlib.util.spec_from_file_location(f"run_manifest_windows_identity_{index}", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    kernel32 = Kernel32()
+    module.ctypes.WinDLL = lambda *_args, **_kwargs: kernel32
+
+    def snapshot_miss(_pid):
+        kernel32.parent_observed_open = not kernel32.closed
+        raise ProcessLookupError("transient Toolhelp snapshot miss")
+
+    module._windows_parent_pid = snapshot_miss
+    module._native_process_record = module._windows_process_record
+    classification = module._process_identity(424242)[0]
+    assert classification == "unavailable", (
+        f"confirmed-live Windows PID snapshot miss classified as {classification}"
+    )
+    assert kernel32.parent_observed_open, "process handle closed before parent snapshot completed"
+    assert kernel32.closed == [73], f"process handle close mismatch: {kernel32.closed}"
+    print(classification)
+PY
+)"
+if [ "$WINDOWS_LIVE_SNAPSHOT_MISS" = $'unavailable\nunavailable' ]; then
+  pass "confirmed-live Windows PIDs stay unavailable across transient parent snapshot misses in both mirrors"
+else
+  fail "Windows live process parent snapshot miss classification" "$WINDOWS_LIVE_SNAPSHOT_MISS"
+fi
+
 printf '== run manifest: fixture verification ==\n'
 capture python3 "$MANIFEST" verify --manifest "$FIXTURES/valid.jsonl" --strict
 if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = '{"events":3,"runs":1,"status":"ok"}' ]; then

@@ -20,6 +20,85 @@ fi
 
 if [ "${1:-}" = --windows-path-only ]; then
   windows_shell_directory() { (cd "$1" && pwd -P); }
+  windows_create_verified_junction() {
+    local root="$1" target="$2" junction="$3" driver="${4:-native}"
+    python3 -I -B - "$root" "$target" "$junction" "$driver" <<'PY'
+import os,stat,subprocess,sys
+root,target,junction,driver=sys.argv[1:]
+
+def fail(reason):
+    print(f"review-child-handoff: junction {reason}",file=sys.stderr)
+    raise SystemExit(1)
+
+def run_junction_command(command):
+    if driver=="launch-oserror":
+        raise OSError("injected launch failure")
+    if driver=="nonzero-exit":
+        return subprocess.CompletedProcess(command,1)
+    if driver!="native":
+        fail("invalid test driver")
+    return subprocess.run(
+        command,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False,
+    )
+
+try:
+    os.makedirs(root,exist_ok=True)
+except (OSError,ValueError):
+    fail("fixture setup failed")
+if os.name=="nt" or driver!="native":
+    command=["cmd.exe","/d","/s","/c",f'mklink /J "{junction}" "{target}"']
+    try:
+        completed=run_junction_command(command)
+    except (OSError,ValueError,subprocess.SubprocessError):
+        fail("command launch failed")
+    if completed.returncode != 0:
+        fail("command failed")
+else:
+    try:
+        os.symlink(target,junction,target_is_directory=True)
+    except (NotImplementedError,OSError,ValueError):
+        fail("creation failed")
+try:
+    entry=os.lstat(junction)
+    reparse=getattr(stat,"FILE_ATTRIBUTE_REPARSE_POINT",0x400)
+    is_reparse=stat.S_ISLNK(entry.st_mode) or bool(
+        getattr(entry,"st_file_attributes",0)&reparse
+    )
+    reaches_target=(
+        os.path.normcase(os.path.realpath(junction))
+        == os.path.normcase(os.path.realpath(target))
+    )
+except (OSError,ValueError):
+    fail("verification failed")
+if not is_reparse or not reaches_target:
+    fail("verification failed")
+PY
+  }
+  for WINDOWS_JUNCTION_FAILURE_CASE in \
+    'launch-oserror:command launch failed' 'nonzero-exit:command failed'; do
+    WINDOWS_JUNCTION_DRIVER="${WINDOWS_JUNCTION_FAILURE_CASE%%:*}"
+    WINDOWS_JUNCTION_REASON="${WINDOWS_JUNCTION_FAILURE_CASE#*:}"
+    WINDOWS_JUNCTION_TEST_ROOT="$TMP/junction-$WINDOWS_JUNCTION_DRIVER"
+    WINDOWS_JUNCTION_TEST_TARGET="$TMP/junction-$WINDOWS_JUNCTION_DRIVER-target"
+    WINDOWS_JUNCTION_TEST_PATH="$WINDOWS_JUNCTION_TEST_ROOT/state"
+    WINDOWS_JUNCTION_TEST_STDOUT="$TMP/junction-$WINDOWS_JUNCTION_DRIVER.stdout"
+    WINDOWS_JUNCTION_TEST_STDERR="$TMP/junction-$WINDOWS_JUNCTION_DRIVER.stderr"
+    set +e
+    windows_create_verified_junction \
+      "$WINDOWS_JUNCTION_TEST_ROOT" "$WINDOWS_JUNCTION_TEST_TARGET" \
+      "$WINDOWS_JUNCTION_TEST_PATH" "$WINDOWS_JUNCTION_DRIVER" \
+      >"$WINDOWS_JUNCTION_TEST_STDOUT" 2>"$WINDOWS_JUNCTION_TEST_STDERR"
+    WINDOWS_JUNCTION_TEST_RC=$?
+    set -e
+    if [ "$WINDOWS_JUNCTION_TEST_RC" -ne 1 ] \
+      || [ -s "$WINDOWS_JUNCTION_TEST_STDOUT" ] \
+      || [ "$(<"$WINDOWS_JUNCTION_TEST_STDERR")" != \
+        "review-child-handoff: junction $WINDOWS_JUNCTION_REASON" ] \
+      || [ "$(wc -c <"$WINDOWS_JUNCTION_TEST_STDERR" | tr -d ' ')" -gt 96 ]; then
+      echo "review-child-handoff: junction $WINDOWS_JUNCTION_DRIVER was not rejected with a bounded path-free diagnostic" >&2
+      exit 1
+    fi
+  done
   WINDOWS_REPO="$TMP/windows-repo"; mkdir -p "$WINDOWS_REPO"
   git -C "$WINDOWS_REPO" init -q
   git -C "$WINDOWS_REPO" config user.email fixture@example.invalid
@@ -42,6 +121,248 @@ if [ "${1:-}" = --windows-path-only ]; then
     "$WINDOWS_METADATA" '2026-07-26T00:00:00Z')"
   WINDOWS_CONTEXT="$(jq -r .context_file <<<"$WINDOWS_CONTEXT_OUT")"
   WINDOWS_CONTEXT_SHA="$(jq -r .context_sha256 <<<"$WINDOWS_CONTEXT_OUT")"
+
+  windows_context_validation_must_reject() {
+    local label="$1" candidate="$2" expected="$3" run_root="$4"
+    local stdout_file="$TMP/windows-context-$label.stdout"
+    local stderr_file="$TMP/windows-context-$label.stderr"
+    local rc
+    set +e
+    uberdev_agent_context_validate "$candidate" "$expected" "$run_root" \
+      >"$stdout_file" 2>"$stderr_file"
+    rc=$?
+    set -e
+    if [ "$rc" -ne 2 ] || [ -s "$stdout_file" ] \
+      || ! grep -qx 'uberdev agent dispatch: route_context_validation_failed' "$stderr_file"; then
+      echo "review-child-handoff: route context $label was not rejected fail-closed (rc=$rc)" >&2
+      exit 1
+    fi
+  }
+
+  # This is the production validator, not a copied/extracted Python branch.
+  # On windows-latest the paths below are native drive paths returned across
+  # the Git Bash -> native Python boundary.
+  WINDOWS_CONTEXT_VALIDATION_STDERR="$TMP/windows-context-valid.stderr"
+  if ! WINDOWS_CONTEXT_VALIDATION="$(
+    uberdev_agent_context_validate "$WINDOWS_CONTEXT" "$WINDOWS_CONTEXT_SHA" "$WINDOWS_RUN" \
+      2>"$WINDOWS_CONTEXT_VALIDATION_STDERR"
+  )"; then
+    echo 'review-child-handoff: valid native route context was rejected' >&2
+    exit 1
+  fi
+  [ ! -s "$WINDOWS_CONTEXT_VALIDATION_STDERR" ]
+  jq -e --arg context "$WINDOWS_CONTEXT" --arg sha "$WINDOWS_CONTEXT_SHA" \
+    '.context_file==$context and .context_sha256==$sha and
+     .run_id=="windows-review-carrier" and .workflow=="review-pr"' \
+    <<<"$WINDOWS_CONTEXT_VALIDATION" >/dev/null
+  WINDOWS_NATIVE_PATHS="$(python3 -I -B - "$WINDOWS_CONTEXT" "$WINDOWS_RUN" <<'PY'
+import os,sys
+for path in sys.argv[1:]:
+    assert os.path.isabs(path), path
+    if os.name == "nt":
+        drive, _ = os.path.splitdrive(os.path.abspath(path))
+        assert drive, path
+print("1" if os.name == "nt" else "0", end="")
+PY
+)"
+  WINDOWS_REPARSE_REJECTIONS=0
+
+  # A same-file content mutation must be diagnosed only by the stable,
+  # non-secret validation error. Restore the exact bytes before later link
+  # identity probes.
+  WINDOWS_CONTEXT_BACKUP="$TMP/windows-route-context-original.json"
+  python3 -I -B - "$WINDOWS_CONTEXT" "$WINDOWS_CONTEXT_BACKUP" <<'PY'
+import json,pathlib,sys
+context,backup=map(pathlib.Path,sys.argv[1:])
+raw=context.read_bytes()
+assert raw
+backup.write_bytes(raw)
+tampered=json.loads(raw)
+tampered["metadata"]["run_id"] += "-tampered"
+context.write_text(
+    json.dumps(tampered,sort_keys=True,separators=(",",":")),
+    encoding="utf-8",
+)
+PY
+  windows_context_validation_must_reject \
+    digest-tamper "$WINDOWS_CONTEXT" "$WINDOWS_CONTEXT_SHA" "$WINDOWS_RUN"
+  python3 -I -B - "$WINDOWS_CONTEXT" "$WINDOWS_CONTEXT_BACKUP" <<'PY'
+import pathlib,sys
+path,backup=map(pathlib.Path,sys.argv[1:])
+path.write_bytes(backup.read_bytes())
+PY
+
+  WINDOWS_CONTEXT_STATE="$(python3 -I -B -c \
+    'import os,sys; print(os.path.dirname(sys.argv[1]),end="")' "$WINDOWS_CONTEXT")"
+  WINDOWS_CONTEXT_NAME="$(python3 -I -B -c \
+    'import os,sys; print(os.path.basename(sys.argv[1]),end="")' "$WINDOWS_CONTEXT")"
+
+  # Hard-link creation is filesystem-dependent, but a link that is actually
+  # created may never be skipped: prove the native link count changed, then
+  # require the production validator to reject the candidate.
+  WINDOWS_CONTEXT_HARDLINK="$(python3 -I -B -c \
+    'import os,sys; print(os.path.join(sys.argv[1],"route-context-v1-hardlink.json"),end="")' \
+    "$WINDOWS_CONTEXT_STATE")"
+  set +e
+  python3 -I -B - "$WINDOWS_CONTEXT" "$WINDOWS_CONTEXT_HARDLINK" <<'PY'
+import errno,os,sys
+source,candidate=sys.argv[1:]
+unsupported_errno={
+    value for value in (
+        getattr(errno,"EACCES",None),getattr(errno,"EPERM",None),
+        getattr(errno,"ENOSYS",None),getattr(errno,"ENOTSUP",None),
+        getattr(errno,"EOPNOTSUPP",None),getattr(errno,"EXDEV",None),
+    ) if value is not None
+}
+try:
+    os.link(source,candidate)
+except OSError as error:
+    if error.errno in unsupported_errno or getattr(error,"winerror",None) in {1,5,50,1314}:
+        raise SystemExit(77)
+    raise
+assert os.path.samefile(source,candidate)
+assert os.stat(source).st_nlink >= 2
+PY
+  WINDOWS_HARDLINK_RC=$?
+  set -e
+  case "$WINDOWS_HARDLINK_RC" in
+    0)
+      windows_context_validation_must_reject \
+        hardlink "$WINDOWS_CONTEXT_HARDLINK" "$WINDOWS_CONTEXT_SHA" "$WINDOWS_RUN"
+      python3 -I -B -c 'import os,sys; os.unlink(sys.argv[1])' "$WINDOWS_CONTEXT_HARDLINK"
+      ;;
+    77)
+      echo 'review-child-handoff windows path: hardlink capability unavailable (SKIP)' >&2
+      ;;
+    *)
+      echo "review-child-handoff: hardlink fixture failed (rc=$WINDOWS_HARDLINK_RC)" >&2
+      exit 1
+      ;;
+  esac
+
+  # Prefer a native file symlink/reparse point. If Windows policy forbids
+  # symlink creation, try an unprivileged directory junction and validate a
+  # context path through that reparse ancestor instead.
+  WINDOWS_CONTEXT_SYMLINK="$(python3 -I -B -c \
+    'import os,sys; print(os.path.join(sys.argv[1],"route-context-v1-symlink.json"),end="")' \
+    "$WINDOWS_CONTEXT_STATE")"
+  set +e
+  python3 -I -B - "$WINDOWS_CONTEXT" "$WINDOWS_CONTEXT_SYMLINK" <<'PY'
+import errno,os,stat,sys
+source,candidate=sys.argv[1:]
+unsupported_errno={
+    value for value in (
+        getattr(errno,"EACCES",None),getattr(errno,"EPERM",None),
+        getattr(errno,"ENOSYS",None),getattr(errno,"ENOTSUP",None),
+        getattr(errno,"EOPNOTSUPP",None),
+    ) if value is not None
+}
+try:
+    os.symlink(source,candidate,target_is_directory=False)
+except (NotImplementedError,OSError) as error:
+    if isinstance(error,NotImplementedError) or error.errno in unsupported_errno \
+       or getattr(error,"winerror",None) in {1,5,50,1314}:
+        raise SystemExit(77)
+    raise
+entry=os.lstat(candidate)
+reparse=getattr(stat,"FILE_ATTRIBUTE_REPARSE_POINT",0x400)
+assert stat.S_ISLNK(entry.st_mode) or bool(getattr(entry,"st_file_attributes",0)&reparse)
+PY
+  WINDOWS_SYMLINK_RC=$?
+  set -e
+  case "$WINDOWS_SYMLINK_RC" in
+    0)
+      windows_context_validation_must_reject \
+        symlink-reparse "$WINDOWS_CONTEXT_SYMLINK" "$WINDOWS_CONTEXT_SHA" "$WINDOWS_RUN"
+      WINDOWS_REPARSE_REJECTIONS=$((WINDOWS_REPARSE_REJECTIONS + 1))
+      python3 -I -B -c 'import os,sys; os.unlink(sys.argv[1])' "$WINDOWS_CONTEXT_SYMLINK"
+      ;;
+    77)
+      WINDOWS_JUNCTION_RUN="$(python3 -I -B -c \
+        'import os,sys; print(os.path.join(sys.argv[1],"windows-context-junction"),end="")' \
+        "$WINDOWS_RUN")"
+      WINDOWS_JUNCTION_STATE="$(python3 -I -B -c \
+        'import os,sys; print(os.path.join(sys.argv[1],sys.argv[2]),end="")' \
+        "$WINDOWS_JUNCTION_RUN" "$(python3 -I -B -c \
+          'import os,sys; print(os.path.basename(sys.argv[1]),end="")' "$WINDOWS_CONTEXT_STATE")")"
+      WINDOWS_JUNCTION_CONTEXT="$(python3 -I -B -c \
+        'import os,sys; print(os.path.join(sys.argv[1],sys.argv[2]),end="")' \
+        "$WINDOWS_JUNCTION_STATE" "$WINDOWS_CONTEXT_NAME")"
+      set +e
+      windows_create_verified_junction \
+        "$WINDOWS_JUNCTION_RUN" "$WINDOWS_CONTEXT_STATE" "$WINDOWS_JUNCTION_STATE"
+      WINDOWS_JUNCTION_RC=$?
+      set -e
+      case "$WINDOWS_JUNCTION_RC" in
+        0)
+          windows_context_validation_must_reject \
+            junction-reparse "$WINDOWS_JUNCTION_CONTEXT" "$WINDOWS_CONTEXT_SHA" "$WINDOWS_JUNCTION_RUN"
+          WINDOWS_REPARSE_REJECTIONS=$((WINDOWS_REPARSE_REJECTIONS + 1))
+          python3 -I -B - "$WINDOWS_JUNCTION_RUN" "$WINDOWS_JUNCTION_STATE" <<'PY'
+import os,sys
+root,junction=sys.argv[1:]
+if os.name=="nt":
+    os.rmdir(junction)
+else:
+    os.unlink(junction)
+os.rmdir(root)
+PY
+          ;;
+        *)
+          echo "review-child-handoff: junction fixture failed (rc=$WINDOWS_JUNCTION_RC)" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+    *)
+      echo "review-child-handoff: symlink fixture failed (rc=$WINDOWS_SYMLINK_RC)" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$WINDOWS_NATIVE_PATHS" = 1 ] && [ "$WINDOWS_REPARSE_REJECTIONS" -lt 1 ]; then
+    echo 'review-child-handoff: no native symlink or junction rejection assertion executed' >&2
+    exit 1
+  fi
+
+  # Reject an existing context-shaped file reached through an escaped path.
+  # On native Windows also reject a noncanonical spelling of the valid file
+  # itself, which specifically exercises the drive-path lexical equality gate.
+  WINDOWS_ESCAPED_CONTEXT="$(python3 -I -B - "$WINDOWS_CONTEXT_STATE" "$WINDOWS_RUN" <<'PY'
+import os,pathlib,sys
+state,root=sys.argv[1:]
+outside=os.path.join(root,"route-context-v1-escaped.json")
+pathlib.Path(outside).write_bytes(b'{"escaped":true}')
+candidate=os.path.join(state,"..",os.path.basename(outside))
+assert os.path.normcase(os.path.abspath(candidate))==os.path.normcase(os.path.abspath(outside))
+assert os.path.normcase(candidate)!=os.path.normcase(os.path.abspath(candidate))
+print(candidate,end="")
+PY
+)"
+  WINDOWS_ESCAPED_SHA="$(python3 -I -B -c \
+    'import hashlib,os,sys; print(hashlib.sha256(open(os.path.abspath(sys.argv[1]),"rb").read()).hexdigest(),end="")' \
+    "$WINDOWS_ESCAPED_CONTEXT")"
+  windows_context_validation_must_reject \
+    escaped-path "$WINDOWS_ESCAPED_CONTEXT" "$WINDOWS_ESCAPED_SHA" "$WINDOWS_RUN"
+  python3 -I -B -c \
+    'import os,sys; os.unlink(os.path.abspath(sys.argv[1]))' "$WINDOWS_ESCAPED_CONTEXT"
+  if [ "$WINDOWS_NATIVE_PATHS" = 1 ]; then
+    WINDOWS_NONCANONICAL_CONTEXT="$(python3 -I -B - "$WINDOWS_CONTEXT" <<'PY'
+import os,sys
+path=sys.argv[1]
+state=os.path.dirname(path)
+candidate=os.path.join(state,"..",os.path.basename(state),os.path.basename(path))
+assert os.path.normcase(os.path.abspath(candidate))==os.path.normcase(os.path.abspath(path))
+assert os.path.normcase(candidate)!=os.path.normcase(os.path.abspath(candidate))
+print(candidate,end="")
+PY
+)"
+    windows_context_validation_must_reject \
+      noncanonical-drive-path "$WINDOWS_NONCANONICAL_CONTEXT" "$WINDOWS_CONTEXT_SHA" "$WINDOWS_RUN"
+  fi
+
+  # The context remains usable after every rejected candidate.
+  uberdev_agent_context_validate \
+    "$WINDOWS_CONTEXT" "$WINDOWS_CONTEXT_SHA" "$WINDOWS_RUN" >/dev/null
   UBERDEV_RUN_CARRIER_JSON="$(jq -cn --arg context "$WINDOWS_CONTEXT" --arg sha "$WINDOWS_CONTEXT_SHA" \
     '{schema_version:1,run_id:"windows-review-carrier",workflow:"review-pr",issue_num:91,context_file:$context,context_sha256:$sha}')"
   export UBERDEV_RUN_CARRIER_JSON

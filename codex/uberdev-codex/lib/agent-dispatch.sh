@@ -582,7 +582,42 @@ try:
  if not os.path.isabs(path) or not os.path.isabs(root): raise ValueError()
  root=os.path.realpath(root)
  uid_fn=getattr(os,"geteuid",None); uid=uid_fn() if uid_fn else None; state=os.path.join(root,f".agent-state-{uid if uid is not None else 0}"); lexical=os.path.abspath(path); name=os.path.basename(lexical)
- if os.path.dirname(lexical)!=state or not name.startswith("route-context-v1-"): raise ValueError()
+ if not name.startswith("route-context-v1-"): raise ValueError()
+ dir_fd_support=getattr(os,"supports_dir_fd",set())
+ if os.name=="nt" or os.open not in dir_fd_support or os.stat not in dir_fd_support:
+  windows=os.name=="nt"
+  norm=os.path.normcase; parent=os.path.dirname(lexical)
+  if norm(path)!=norm(lexical) or norm(parent)!=norm(state) or norm(os.path.realpath(state))!=norm(state): raise ValueError()
+  reparse=getattr(stat,"FILE_ATTRIBUTE_REPARSE_POINT",0x400)
+  def linked(entry): return stat.S_ISLNK(entry.st_mode) or bool(getattr(entry,"st_file_attributes",0)&reparse)
+  def identity(entry): return (entry.st_dev,entry.st_ino)
+  state_entry=os.lstat(state)
+  parent_entry=os.lstat(parent)
+  file_entry=os.lstat(lexical)
+  if linked(state_entry) or not stat.S_ISDIR(state_entry.st_mode) or (uid is not None and state_entry.st_uid!=uid): raise ValueError()
+  if linked(parent_entry) or not stat.S_ISDIR(parent_entry.st_mode) or identity(parent_entry)!=identity(state_entry): raise ValueError()
+  if linked(file_entry) or not stat.S_ISREG(file_entry.st_mode) or file_entry.st_nlink!=1: raise ValueError()
+  flags=os.O_RDONLY|getattr(os,"O_BINARY",0); fd=os.open(lexical,flags)
+  try:
+   opened=os.fstat(fd)
+   if not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1 or (uid is not None and opened.st_uid!=uid) or (not windows and stat.S_IMODE(opened.st_mode)!=0o600) or opened.st_size>1048576: raise ValueError()
+   chunks=[]; total=0
+   while total<=1048576:
+    chunk=os.read(fd,min(65536,1048577-total))
+    if not chunk: break
+    chunks.append(chunk); total+=len(chunk)
+   raw=b"".join(chunks)
+   current=os.lstat(lexical)
+   if len(raw)>1048576 or linked(current) or not stat.S_ISREG(current.st_mode) or current.st_nlink!=1 or identity(file_entry)!=identity(opened) or identity(opened)!=identity(current): raise ValueError()
+  finally: os.close(fd)
+  parent_current=os.lstat(parent); state_current=os.lstat(state)
+  if linked(parent_current) or not stat.S_ISDIR(parent_current.st_mode) or identity(parent_current)!=identity(parent_entry): raise ValueError()
+  if linked(state_current) or not stat.S_ISDIR(state_current.st_mode) or identity(state_current)!=identity(state_entry) or identity(parent_current)!=identity(state_current): raise ValueError()
+  digest=hashlib.sha256(raw).hexdigest()
+  if digest!=expected or len(expected)!=64 or expected.lower()!=expected: raise ValueError()
+  print(raw.decode("utf-8"),end="")
+  raise SystemExit(0)
+ if os.path.dirname(lexical)!=state: raise ValueError()
  if stat.S_ISLNK(os.lstat(state).st_mode): raise ValueError()
  statefd=os.open(state,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0))
  state_entry=os.fstat(statefd)
@@ -597,7 +632,8 @@ try:
  digest=hashlib.sha256(raw).hexdigest()
  if digest!=expected or len(expected)!=64 or expected.lower()!=expected: raise ValueError()
  print(raw.decode("utf-8"),end="")
-except Exception: raise SystemExit(2)
+except Exception:
+ print("uberdev agent dispatch: route_context_validation_failed",file=sys.stderr); raise SystemExit(2)
 ' "$1" "$2" "$3")" || return 2
   validated="$(_uberdev_agent_context_schema_validate payload "$payload" 2>/dev/null)" || return 2
   routing_request="$(python3 -I -B -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["routing_request"],sort_keys=True,separators=(",",":")),end="")' "$validated")" || return 2

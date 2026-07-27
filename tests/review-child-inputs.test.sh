@@ -113,6 +113,21 @@ def containing(text, token):
         raise SystemExit(f"expected one bash fence containing {token!r}, found {len(found)}")
     return found[0]
 
+def function_definition(text, name):
+    block = containing(text, f"{name}()")
+    pattern = re.compile(
+        rf"^(?P<indent>[ \t]*){re.escape(name)}\(\)[ \t]*\{{[ \t]*\n"
+        rf"(?:(?P=indent)(?:[ \t]+.*)?\n)*"
+        rf"(?P=indent)\}}[ \t]*$",
+        re.MULTILINE,
+    )
+    found = [match.group(0) for match in pattern.finditer(block)]
+    if len(found) != 1:
+        raise SystemExit(
+            f"expected one executable function definition {name!r}, found {len(found)}"
+        )
+    return found[0]
+
 def write(name, body):
     path = out_dir / name
     path.write_text(body.rstrip() + "\n", encoding="utf-8")
@@ -126,6 +141,10 @@ write("post-prefix.sh", prefix)
 write("post-roster.sh", marker + roster)
 write("post-retry.sh", executable(post, ""))
 write("review-setup.sh", executable(review, "setup=review-pr"))
+write(
+    "review-head-assert.sh",
+    function_definition(review, "review_assert_selected_pr_head"),
+)
 write("review-scope.sh", containing(review, 'review_refresh_phase1_scope "$BASE_SHA"'))
 
 review_instance_lines = [
@@ -414,14 +433,35 @@ git -C "$SCOPE_REPO" add base.txt
 git -C "$SCOPE_REPO" commit -qm 'test: create scope base'
 BASE_SHA="$(git -C "$SCOPE_REPO" rev-parse HEAD)"
 SCOPE_EXPECTED_BASE="$BASE_SHA"
+SCOPE_EXPECTED_REPO_SLUG=test-owner/test-repo
 SCOPE_BIN="$TMP/scope-bin"
 mkdir -p "$SCOPE_BIN"
 cat >"$SCOPE_BIN/gh" <<'SH'
 #!/usr/bin/env bash
-printf '{"baseRefOid":"%s","baseRefName":"main"}\n' "$SCOPE_EXPECTED_BASE"
+set -euo pipefail
+[ "$#" -ge 7 ] \
+  && [ "$1" = pr ] \
+  && [ "$2" = view ] \
+  && [ "$3" = 73 ] \
+  && [ "$4" = --repo ] \
+  && [ "$5" = "$SCOPE_EXPECTED_REPO_SLUG" ] \
+  && [ "$6" = --json ] || exit 2
+case "$7" in
+  baseRefOid,baseRefName)
+    [ "$#" -eq 7 ] || exit 2
+    printf '{"baseRefOid":"%s","baseRefName":"main"}\n' "$SCOPE_EXPECTED_BASE"
+    ;;
+  headRefOid)
+    [ "$#" -eq 9 ] && [ "$8" = --jq ] && [ "$9" = .headRefOid ] || exit 2
+    git -C "$SCOPE_REPO" rev-parse HEAD
+    ;;
+  *)
+    exit 2
+    ;;
+esac
 SH
 chmod +x "$SCOPE_BIN/gh"
-export SCOPE_EXPECTED_BASE
+export SCOPE_EXPECTED_BASE SCOPE_EXPECTED_REPO_SLUG SCOPE_REPO
 printf 'initial change\n' >>"$SCOPE_REPO/base.txt"
 git -C "$SCOPE_REPO" add base.txt
 git -C "$SCOPE_REPO" commit -qm 'test: create initial review change'
@@ -431,6 +471,9 @@ git -C "$SCOPE_REPO" commit -qm 'test: create initial review change'
   DIFF_ARTIFACT_PATH="$TMP/scope-diff.md"
   COMMIT_RANGE_PATH="$TMP/scope-range.txt"
   PR_NUMBER=73
+  REVIEW_REPO_SLUG="$SCOPE_EXPECTED_REPO_SLUG"
+  [[ "$REVIEW_REPO_SLUG" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+  . "$TMP/review-head-assert.sh"
   unset BASE_SHA
   . "$TMP/review-scope.sh"
   python3 -I -B - "$CHANGED_PATHS_JSON" "$DIFF_ARTIFACT_PATH" <<'PY'
@@ -573,6 +616,27 @@ chmod 600 "$BASE_REVIEW_RECORDS"
 printf '%s\n' \
   '{"edge":"review_pr.review.types","index":3,"status":"fixture.status","result":"fixture.result"}' \
   >"$REVIEW_FAILED"
+# The baseline fanout produced six valid evidence rows. Model the declared
+# reviewer-format failure completely: production would not persist that
+# reviewer's validated row before dispatching its format-repair attempt.
+python3 -I -B - "$POST_REVIEW_VALIDATED_LEDGER" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    rows = [json.loads(line) for line in stream if line.strip()]
+failed_pair = ("review_pr.review.types", 3)
+kept = [
+    row for row in rows
+    if (row.get("edge"), row.get("index")) != failed_pair
+]
+if len(rows) != 6 or len(kept) != 5:
+    raise SystemExit("format-failure fixture did not remove exactly one validated row")
+with open(path, "w", encoding="utf-8") as stream:
+    for row in kept:
+        stream.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+PY
 REVIEW_EXPECTED_COUNT=6
 REVIEW_INITIAL_VALID_COUNT=5
 REVIEW_FORMAT_FAILURE_COUNT=1
