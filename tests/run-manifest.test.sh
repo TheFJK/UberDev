@@ -1882,7 +1882,10 @@ for index,module_path in enumerate(sys.argv[1:3]):
         try:
             os.replace(replacement,path)
         except PermissionError:
-            return descriptor
+            if os.name=="nt":
+                return descriptor
+            os.close(descriptor)
+            raise
         replacement_completed[0]=True
         return descriptor
     with mock.patch.object(module,"_secure_open_regular",replace_after_open):
