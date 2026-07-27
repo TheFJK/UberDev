@@ -66,6 +66,7 @@ cmp "$CONTRACT" "$CONTRACT_MIRROR"
 python3 -I -B - \
   "$LIB" "$LIB_MIRROR" "$CONTRACT" "$CONTRACT_MIRROR" \
   "$FINDINGS_AGENT" "$FINDINGS_AGENT_MIRROR" <<'PY'
+import errno
 import os
 import pathlib
 import sys
@@ -111,17 +112,45 @@ with tempfile.TemporaryDirectory() as temporary:
         "```yaml\nverdict: APPROVE\nfindings: []\nconfidence: high\n```\n",
         encoding="utf-8",
     )
-    original_argv=sys.argv
     original_open=os.open
+    original_read=os.read
+    original_fstat=os.fstat
+    original_close=os.close
     original_geteuid=getattr(os,"geteuid",None)
 
     def execute():
+        previous_argv=sys.argv
         sys.argv=["phase1-validator",str(result),"",""]
         try:
-            exec(compile(snippet,"phase1-validator","exec"),{})
-        except SystemExit as error:
-            return error.code
-        return 0
+            try:
+                exec(compile(snippet,"phase1-validator","exec"),{})
+            except SystemExit as error:
+                return error.code
+            return 0
+        finally:
+            sys.argv=previous_argv
+
+    def execute_with_io(*,read_hook=None,fstat_hook=None):
+        opened_descriptors=[]
+        closed_descriptors=[]
+        def tracked_open(path,flags,*args,**kwargs):
+            descriptor=original_open(path,flags,*args,**kwargs)
+            opened_descriptors.append(descriptor)
+            return descriptor
+        def tracked_close(descriptor):
+            closed_descriptors.append(descriptor)
+            return original_close(descriptor)
+        os.open=tracked_open
+        os.read=read_hook or original_read
+        os.fstat=fstat_hook or original_fstat
+        os.close=tracked_close
+        try:
+            return execute(),opened_descriptors,closed_descriptors
+        finally:
+            os.open=original_open
+            os.read=original_read
+            os.fstat=original_fstat
+            os.close=original_close
 
     if callable(original_geteuid):
         os.geteuid=lambda: original_geteuid()+1
@@ -141,12 +170,74 @@ with tempfile.TemporaryDirectory() as temporary:
             failures.append("phase1 validator rejected a caller-owned valid result")
     finally:
         os.open=original_open
-        sys.argv=original_argv
     if not observed_flags:
         failures.append("phase1 validator did not use descriptor-pinned os.open")
     nofollow=getattr(os,"O_NOFOLLOW",0)
     if nofollow and observed_flags and not observed_flags[0]&nofollow:
         failures.append("phase1 validator omitted O_NOFOLLOW")
+
+    short_reads=[]
+    def short_read(descriptor,maximum):
+        chunk=original_read(descriptor,min(maximum,7))
+        short_reads.append((maximum,len(chunk)))
+        return chunk
+    short_rc,short_opened,short_closed=execute_with_io(read_hook=short_read)
+    bounded_chunks=all(
+        next_maximum==maximum-size
+        for (maximum,size),(next_maximum,_) in zip(short_reads,short_reads[1:])
+    )
+    if (
+        short_rc!=0
+        or sum(size>0 for _,size in short_reads)<2
+        or not short_reads
+        or short_reads[0][0]!=1048577
+        or not bounded_chunks
+        or not short_opened
+        or short_opened!=short_closed
+    ):
+        failures.append(
+            "phase1 validator did not consume multiple bounded short reads "
+            f"with descriptor cleanup: rc={short_rc} reads={short_reads} "
+            f"opened={short_opened} closed={short_closed}"
+        )
+
+    read_failure_calls=[0]
+    def failing_read(descriptor,maximum):
+        read_failure_calls[0]+=1
+        if read_failure_calls[0]==2:
+            raise OSError(errno.EIO,"injected phase1 read failure")
+        return original_read(descriptor,min(maximum,7))
+    read_rc,read_opened,read_closed=execute_with_io(read_hook=failing_read)
+    if (
+        read_rc!=2
+        or read_failure_calls[0]!=2
+        or not read_opened
+        or read_opened!=read_closed
+    ):
+        failures.append(
+            "phase1 validator did not fail closed and clean its descriptor "
+            f"after read OSError: rc={read_rc} calls={read_failure_calls[0]} "
+            f"opened={read_opened} closed={read_closed}"
+        )
+
+    fstat_failure_calls=[0]
+    def failing_final_fstat(descriptor):
+        fstat_failure_calls[0]+=1
+        if fstat_failure_calls[0]==2:
+            raise OSError(errno.EIO,"injected phase1 final fstat failure")
+        return original_fstat(descriptor)
+    fstat_rc,fstat_opened,fstat_closed=execute_with_io(fstat_hook=failing_final_fstat)
+    if (
+        fstat_rc!=2
+        or fstat_failure_calls[0]!=2
+        or not fstat_opened
+        or fstat_opened!=fstat_closed
+    ):
+        failures.append(
+            "phase1 validator did not fail closed and clean its descriptor "
+            f"after fstat OSError: rc={fstat_rc} calls={fstat_failure_calls[0]} "
+            f"opened={fstat_opened} closed={fstat_closed}"
+        )
 
 if failures:
     raise AssertionError("; ".join(failures))

@@ -678,6 +678,7 @@ PYTHON_ISOLATION_CALLS="$TMP/python-isolation-calls"
 capture /bin/bash -c '
   . "$1"
   calls="$2"
+  release_state="$3"
   lease="/tmp/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.lease"
   writer_mode=empty
   _uberdev_semaphore_manifest_tool() {
@@ -695,6 +696,14 @@ capture /bin/bash -c '
         [ "$writer_mode" != colonless ] || printf "%s\n" 123
         return 0
         ;;
+      *" secure-lease-identity "*)
+        printf "%s\n" 17:29
+        return 0
+        ;;
+      *" secure-remove-lease "*)
+        rm -f "$release_lease"
+        return 0
+        ;;
     esac
     return 99
   }
@@ -705,25 +714,43 @@ capture /bin/bash -c '
   writer_mode=colonless
   _uberdev_semaphore_publish_lease /tmp/scope "$lease" run 1 owner "" "" 1 5 ""
   colonless_rc=$?
+  release_generation=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  release_scope="$release_state/semaphore-v1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.scope"
+  release_lease="$release_scope/${release_generation}cccccccccccccccccccccccccccccccc.lease"
+  mkdir -p "$release_scope"
+  printf "version=1\ngeneration=%s\nrun_id=release-isolation\nowner_pid=%s\nowner_identity=\nbackend_handle=\nbackend_identity=\nstart_epoch=1\ntimeout_s=5\nstatus_path=\n" \
+    "$release_generation" "$$" >"$release_lease"
+  chmod 700 "$release_state" "$release_state/semaphore-v1" "$release_scope"
+  chmod 600 "$release_lease"
+  _uberdev_semaphore_mutex_acquire() { return 0; }
+  _uberdev_semaphore_mutex_release() { return 0; }
+  uberdev_semaphore_release "$release_lease"
+  release_rc=$?
   first_call="$(sed -n "1p" "$calls")"
   second_call="$(sed -n "2p" "$calls")"
   third_call="$(sed -n "3p" "$calls")"
-  printf "status=%s status_rc=%s empty_rc=%s colonless_rc=%s identity=%s first=%s second=%s third=%s\n" \
-    "$status" "$status_rc" "$empty_rc" "$colonless_rc" \
-    "${_UBERDEV_SEMAPHORE_PUBLISHED_IDENTITY:-}" "$first_call" "$second_call" "$third_call"
+  fourth_call="$(sed -n "4p" "$calls")"
+  fifth_call="$(sed -n "5p" "$calls")"
+  printf "status=%s status_rc=%s empty_rc=%s colonless_rc=%s release_rc=%s identity=%s first=%s second=%s third=%s fourth=%s fifth=%s\n" \
+    "$status" "$status_rc" "$empty_rc" "$colonless_rc" "$release_rc" \
+    "${_UBERDEV_SEMAPHORE_PUBLISHED_IDENTITY:-}" "$first_call" "$second_call" "$third_call" "$fourth_call" "$fifth_call"
   [ "$status" = terminal ] \
     && [ "$status_rc" -eq 0 ] \
     && [ "$empty_rc" -eq 2 ] \
     && [ "$colonless_rc" -eq 2 ] \
+    && [ "$release_rc" -eq 0 ] \
+    && [ ! -e "$release_lease" ] \
     && [ -z "${_UBERDEV_SEMAPHORE_PUBLISHED_IDENTITY:-}" ] \
     && [ "$first_call" = "-I -B /fixture/run_manifest.py probe-status --status-path /abs/status.json" ] \
     && [ "$second_call" = "-I -B /fixture/run_manifest.py secure-write-lease --lease-path $lease" ] \
-    && [ "$third_call" = "$second_call" ]
-' _ "$LIB" "$PYTHON_ISOLATION_CALLS"
+    && [ "$third_call" = "$second_call" ] \
+    && [ "$fourth_call" = "-I -B /fixture/run_manifest.py secure-lease-identity --lease-path $release_lease --generation $release_generation" ] \
+    && [ "$fifth_call" = "-I -B /fixture/run_manifest.py secure-remove-lease --lease-path $release_lease --generation $release_generation --identity 17:29" ]
+' _ "$LIB" "$PYTHON_ISOLATION_CALLS" "$TMP/python-isolation-release"
 if [ "$CAPTURE_RC" -eq 0 ]; then
-  pass "status and lease publication isolate Python and require a canonical identity"
+  pass "status, lease publication, and release isolate Python with exact identity-bound commands"
 else
-  fail "status and lease publication isolate Python and require a canonical identity" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+  fail "status, lease publication, and release isolate Python with exact identity-bound commands" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 
 printf '== live semaphore: path and symlink attacks ==\n'
