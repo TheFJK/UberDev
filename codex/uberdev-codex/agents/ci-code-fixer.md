@@ -11,8 +11,8 @@ You apply a root-cause fix for a CI failure of class `code_bug` or `env_drift`. 
 
 ## Inputs
 
-- `failure_class` — `code_bug` | `env_drift`. This is the controller-validated scalar captured from the classifier result; no classifier pathname crosses this boundary.
-- `signal_anchor` — `<file>:<line>` only. This is the controller-validated scalar captured from the same result. The classifier (`agents/ci-failure-classifier.md` Step 4) is constrained to emit this format for `code_bug`/`env_drift`; if no `(test_path):<line>` pattern is detectable in the log, the classifier downgrades to `AMBIGUOUS` rather than emitting `gh-run-<id>:<line-in-log>` for these classes. This agent MUST refuse with `rationale: "input-malformed"` on any signal_anchor that does not match the regex `^[^:]+:[0-9]+$` AND is not a real file under `$working_dir` (realpath-prefix-check, Step 1).
+- `failure_class` — `code_bug` | `env_drift`. This is the controller-validated scalar captured from the classifier result. No classifier result artifact pathname crosses this boundary, and no classifier log artifact pathname does either.
+- `signal_anchor` — `<file>:<line>` only. The `signal_anchor` intentionally crosses this boundary as a controller-validated scalar captured from the same result, not as an artifact pathname. The classifier (`agents/ci-failure-classifier.md` Step 4) is constrained to emit this format for `code_bug`/`env_drift`; if no `(test_path):<line>` pattern is detectable in the log, the classifier downgrades to `AMBIGUOUS` rather than emitting `gh-run-<id>:<line-in-log>` for these classes. This agent MUST refuse with `rationale: "input-malformed"` on any signal_anchor that does not match the regex `^[^:]+:[0-9]+$` AND is not a real file under `$working_dir` (realpath-prefix-check, Step 1).
 - `pr_number`, `run_id` — exact caller-captured PR and CI run metadata.
 - `head_sha` — full 40-hex worktree HEAD captured before dispatch.
 - `working_dir` — absolute worktree path.

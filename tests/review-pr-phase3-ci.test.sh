@@ -583,6 +583,12 @@ assert_no_grep "$CODE_FIXER_CI" 'git push' \
   "S11.5 — agent never pushes (caller handles)"
 assert_no_grep "$REVIEW_PR" 'CI_FIX_INPUTS=.*classification_path|classification_path.*CI_CLASSIFICATION_PATH' \
   "S11.6 — fixer handoff never carries the mutable classifier pathname"
+assert_no_grep "$CODE_FIXER_CI" 'no classifier pathname crosses this boundary' \
+  "S11.6a — fixer contract does not deny its validated classifier-derived signal anchor"
+assert_grep "$CODE_FIXER_CI" '[Nn]o classifier (result|log) artifact pathname crosses this boundary' \
+  "S11.6b — fixer contract excludes classifier result/log artifact pathnames specifically"
+assert_grep "$CODE_FIXER_CI" 'signal_anchor.*intentionally crosses.*validated scalar' \
+  "S11.6c — fixer contract names signal_anchor as the intentional validated scalar handoff"
 assert_grep "$REVIEW_PR" 'CI_FIX_INPUTS=.*failure_class|failure_class.*review_json_string' \
   "S11.7 — fixer handoff carries the controller-validated failure class"
 assert_grep "$REVIEW_PR" 'CI_FIX_INPUTS=.*signal_anchor|signal_anchor.*review_json_string' \
