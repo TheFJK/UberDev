@@ -32,7 +32,7 @@ import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 try:
     import fcntl as _fcntl
@@ -927,7 +927,9 @@ def _windows_parent_pid(pid: int) -> int:
 
 
 @contextmanager
-def _windows_live_process(pid: int) -> Iterable[int]:
+def _windows_live_process(
+    pid: int,
+) -> Iterable[tuple[int, Callable[[], None]]]:
     """Hold a validated live process handle while its identity is consumed."""
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -970,7 +972,7 @@ def _windows_live_process(pid: int) -> Iterable[int]:
         creation_ticks = (int(created.high) << 32) | int(created.low)
         if creation_ticks <= 0:
             raise OSError("process creation time unavailable")
-        yield creation_ticks
+        yield creation_ticks, require_still_active
         # Consumers may perform a process-table snapshot while this handle is
         # open. Refuse its result if the guarded process exited in that window.
         require_still_active()
@@ -979,7 +981,7 @@ def _windows_live_process(pid: int) -> Iterable[int]:
 
 
 def _windows_process_record(pid: int) -> tuple[int, int, int, str]:
-    with _windows_live_process(pid) as creation_ticks:
+    with _windows_live_process(pid) as (creation_ticks, _require_still_active):
         pass
     # Windows has no POSIX process groups or sessions. The PID is retained in
     # those schema slots while the kernel creation FILETIME provides the
@@ -987,10 +989,21 @@ def _windows_process_record(pid: int) -> tuple[int, int, int, str]:
     return pid, pid, pid, f"windows:{creation_ticks}"
 
 
-def _windows_guarded_parent_pid(pid: int) -> int:
-    with _windows_live_process(pid):
+def _windows_guarded_parent_record(
+    pid: int,
+    expected_creation_ticks: int | None = None,
+) -> tuple[int, int]:
+    with _windows_live_process(pid) as (
+        child_creation_ticks,
+        require_child_still_active,
+    ):
+        if (
+            expected_creation_ticks is not None
+            and child_creation_ticks != expected_creation_ticks
+        ):
+            raise ProcessLookupError(pid)
         try:
-            return _windows_parent_pid(pid)
+            parent_pid = _windows_parent_pid(pid)
         except ProcessLookupError as exc:
             # The process handle, STILL_ACTIVE state, and creation time were
             # validated before the snapshot. A later miss is unavailable
@@ -998,6 +1011,22 @@ def _windows_guarded_parent_pid(pid: int) -> int:
             raise OSError(
                 errno.EAGAIN, "live process missing from Toolhelp snapshot"
             ) from exc
+        require_child_still_active()
+        try:
+            with _windows_live_process(parent_pid) as (
+                parent_creation_ticks,
+                _require_parent_still_active,
+            ):
+                if parent_creation_ticks > child_creation_ticks:
+                    raise OSError(
+                        errno.EAGAIN,
+                        "snapshot parent was created after its child",
+                    )
+        except ProcessLookupError as exc:
+            raise OSError(
+                errno.EAGAIN, "snapshot parent identity unavailable"
+            ) from exc
+        return parent_pid, parent_creation_ticks
 
 
 def _process_identity_platform() -> str | None:
@@ -1035,8 +1064,21 @@ def _native_parent_pid(pid: int) -> int:
     if platform == "darwin":
         return _darwin_process_record(pid)[0]
     if platform == "windows":
-        return _windows_guarded_parent_pid(pid)
+        raise OSError(
+            errno.ENOTSUP,
+            "Windows parent traversal requires a bound creation identity",
+        )
     raise _unsupported_process_identity_platform()
+
+
+def _format_process_identity(
+    pid: int,
+    pgid: int,
+    sid: int,
+    creation_identity: str,
+) -> str:
+    digest = hashlib.sha256(creation_identity.encode()).hexdigest()
+    return f"{pid}|{pgid}|{sid}|{digest}"
 
 
 def _process_identity(pid: Any) -> tuple[str, str | None]:
@@ -1046,8 +1088,9 @@ def _process_identity(pid: Any) -> tuple[str, str | None]:
     pid = numeric_pid
     try:
         _parent, pgid, sid, creation_identity = _native_process_record(pid)
-        digest = hashlib.sha256(creation_identity.encode()).hexdigest()
-        return "captured", f"{pid}|{pgid}|{sid}|{digest}"
+        return "captured", _format_process_identity(
+            pid, pgid, sid, creation_identity
+        )
     except ProcessLookupError:
         return "absent", None
     except (AttributeError, OSError, ValueError):
@@ -1064,16 +1107,36 @@ def _write_process_identity(mode: str, destination: str) -> None:
     if os.name == "nt":
         owner_depth += 1
     owner_pid = self_pid
+    platform = _process_identity_platform()
+    owner_creation_ticks: int | None = None
     try:
-        for _ in range(owner_depth):
-            owner_pid = _native_parent_pid(owner_pid)
+        if platform == "windows":
+            for _ in range(owner_depth):
+                owner_pid, owner_creation_ticks = (
+                    _windows_guarded_parent_record(
+                        owner_pid, owner_creation_ticks
+                    )
+                )
+        else:
+            for _ in range(owner_depth):
+                owner_pid = _native_parent_pid(owner_pid)
     except ProcessLookupError as exc:
         raise ManifestRuntimeError("process_identity_parent_absent") from exc
     except (AttributeError, OSError, ValueError) as exc:
         raise ManifestRuntimeError("process_identity_parent_unavailable") from exc
-    status, identity = _process_identity(owner_pid)
-    if status != "captured" or identity is None:
-        raise ManifestRuntimeError(f"process_identity_{status}")
+    if platform == "windows":
+        if owner_creation_ticks is None:
+            raise ManifestRuntimeError("process_identity_parent_unavailable")
+        identity = _format_process_identity(
+            owner_pid,
+            owner_pid,
+            owner_pid,
+            f"windows:{owner_creation_ticks}",
+        )
+    else:
+        status, identity = _process_identity(owner_pid)
+        if status != "captured" or identity is None:
+            raise ManifestRuntimeError(f"process_identity_{status}")
     destination = os.path.abspath(destination)
     payload = f"{owner_pid}\n{identity}\n".encode("ascii")
     descriptor = _secure_open_regular(destination, os.O_WRONLY, 0o600)

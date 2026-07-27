@@ -161,14 +161,17 @@ for index, module_path in enumerate(sys.argv[1:]):
     try:
         module.sys.platform = "win32"
         module.os.name = "nt"
-        parent = module._native_parent_pid(424242)
+        parent, parent_creation_ticks = (
+            module._windows_guarded_parent_record(424242)
+        )
     finally:
         module.sys.platform = original_platform
         module.os.name = original_os_name
     assert parent == 17, parent
+    assert parent_creation_ticks == (1 << 32) | 41, parent_creation_ticks
     assert parent_calls == [424242], parent_calls
     assert not kernel32.open_handles, kernel32.open_handles
-    assert kernel32.closed == [73, 74], kernel32.closed
+    assert kernel32.closed == [73, 75, 74], kernel32.closed
 
     race_kernel32 = Kernel32()
     module.ctypes.WinDLL = lambda *_args, **_kwargs: race_kernel32
@@ -183,7 +186,7 @@ for index, module_path in enumerate(sys.argv[1:]):
         module.sys.platform = "win32"
         module.os.name = "nt"
         try:
-            module._native_parent_pid(424242)
+            module._windows_guarded_parent_record(424242)
         except ProcessLookupError:
             pass
         else:
@@ -207,7 +210,7 @@ for index, module_path in enumerate(sys.argv[1:]):
         module.sys.platform = "win32"
         module.os.name = "nt"
         try:
-            module._native_parent_pid(424242)
+            module._windows_guarded_parent_record(424242)
         except OSError as error:
             assert not isinstance(error, ProcessLookupError), type(error)
             assert error.errno == errno.EAGAIN, error
@@ -227,6 +230,167 @@ if [ "$WINDOWS_PARENT_PROBE_SPLIT" = $'captured/guarded-parent/rechecked/snapsho
   pass "Windows parent lookup rechecks liveness and closes snapshot misses exactly once"
 else
   fail "Windows process identity/parent lookup split" "$WINDOWS_PARENT_PROBE_SPLIT"
+fi
+
+WINDOWS_PARENT_GENERATION_BINDING="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
+import hashlib
+import importlib.util
+import pathlib
+import sys
+import tempfile
+
+
+class Function:
+    def __init__(self, implementation):
+        self.implementation = implementation
+
+    def __call__(self, *args):
+        return self.implementation(*args)
+
+
+class Kernel32:
+    def __init__(self, generations, parents, recycle_on_close=None):
+        self.generations = dict(generations)
+        self.parents = dict(parents)
+        self.recycle_on_close = dict(recycle_on_close or {})
+        self.next_handle = 72
+        self.open_handles = {}
+        self.open_calls = []
+        self.closed = []
+        self.snapshot_calls = []
+        self.OpenProcess = Function(self.open_process)
+        self.GetExitCodeProcess = Function(self.get_exit_code)
+        self.GetProcessTimes = Function(self.get_process_times)
+        self.CloseHandle = Function(self.close_handle)
+
+    def open_process(self, _access, _inherit, pid):
+        self.next_handle += 1
+        self.open_handles[self.next_handle] = pid
+        self.open_calls.append(pid)
+        return self.next_handle
+
+    def get_exit_code(self, handle, exit_code):
+        assert handle in self.open_handles, handle
+        exit_code._obj.value = 259
+        return 1
+
+    def get_process_times(self, handle, created, _exited, _kernel, _user):
+        pid = self.open_handles[handle]
+        ticks = self.generations[pid]
+        created._obj.low = ticks & 0xFFFFFFFF
+        created._obj.high = ticks >> 32
+        return 1
+
+    def close_handle(self, handle):
+        pid = self.open_handles.pop(handle)
+        self.closed.append(handle)
+        replacement = self.recycle_on_close.get(pid)
+        if replacement is not None:
+            replacement_pid, replacement_ticks = replacement
+            self.generations[replacement_pid] = replacement_ticks
+        return 1
+
+    def snapshot_parent(self, pid):
+        assert pid in self.open_handles.values(), (
+            "parent snapshot ran without the guarded child handle"
+        )
+        self.snapshot_calls.append(pid)
+        return self.parents[pid]
+
+
+def expected_identity(pid, creation_ticks):
+    digest = hashlib.sha256(f"windows:{creation_ticks}".encode()).hexdigest()
+    return f"{pid}|{pid}|{pid}|{digest}"
+
+
+for index, module_path in enumerate(sys.argv[1:]):
+    spec = importlib.util.spec_from_file_location(
+        f"run_manifest_windows_parent_generation_{index}", module_path
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    original_platform = module.sys.platform
+    original_os_name = module.os.name
+    original_getppid = module.os.getppid
+    had_windll = hasattr(module.ctypes, "WinDLL")
+    original_windll = getattr(module.ctypes, "WinDLL", None)
+    try:
+        temporary_parent = pathlib.Path(tempfile.gettempdir()).resolve()
+        with tempfile.TemporaryDirectory(dir=temporary_parent) as temporary:
+            root = pathlib.Path(temporary)
+            direct = root / "direct"
+            parent = root / "parent"
+            newer = root / "newer"
+            direct.touch(mode=0o600)
+            parent.touch(mode=0o600)
+            newer.touch(mode=0o600)
+
+            module.sys.platform = "win32"
+            module.os.name = "nt"
+            module.os.getppid = lambda: 100
+            direct_kernel = Kernel32(
+                {100: 300, 200: 200},
+                {100: 200},
+                {100: (200, 400)},
+            )
+            module.ctypes.WinDLL = lambda *_args, **_kwargs: direct_kernel
+            module._windows_parent_pid = direct_kernel.snapshot_parent
+            module._write_process_identity("direct", str(direct))
+            expected = f"200\n{expected_identity(200, 200)}\n".encode()
+            assert direct.read_bytes() == expected, direct.read_bytes()
+            assert direct_kernel.open_calls == [100, 200], direct_kernel.open_calls
+            assert direct_kernel.closed == [74, 73], direct_kernel.closed
+
+            parent_kernel = Kernel32(
+                {100: 300, 200: 200, 300: 100},
+                {100: 200, 200: 300},
+                {100: (200, 400)},
+            )
+            module.ctypes.WinDLL = lambda *_args, **_kwargs: parent_kernel
+            module._windows_parent_pid = parent_kernel.snapshot_parent
+            try:
+                module._write_process_identity("parent", str(parent))
+            except module.ManifestRuntimeError as error:
+                assert str(error) == "process_identity_parent_absent", str(error)
+            else:
+                raise AssertionError("recycled parent generation was traversed")
+            assert parent.read_bytes() == b""
+            assert parent_kernel.snapshot_calls == [100], parent_kernel.snapshot_calls
+            assert parent_kernel.open_calls == [100, 200, 200], parent_kernel.open_calls
+            assert parent_kernel.closed == [74, 73, 75], parent_kernel.closed
+
+            newer_kernel = Kernel32(
+                {100: 300, 200: 400},
+                {100: 200},
+            )
+            module.ctypes.WinDLL = lambda *_args, **_kwargs: newer_kernel
+            module._windows_parent_pid = newer_kernel.snapshot_parent
+            try:
+                module._write_process_identity("direct", str(newer))
+            except module.ManifestRuntimeError as error:
+                assert str(error) == "process_identity_parent_unavailable", str(error)
+            else:
+                raise AssertionError("parent created after child was accepted")
+            assert newer.read_bytes() == b""
+            assert newer_kernel.open_calls == [100, 200], newer_kernel.open_calls
+            assert newer_kernel.closed == [74, 73], newer_kernel.closed
+    finally:
+        module.sys.platform = original_platform
+        module.os.name = original_os_name
+        module.os.getppid = original_getppid
+        if had_windll:
+            module.ctypes.WinDLL = original_windll
+        elif hasattr(module.ctypes, "WinDLL"):
+            del module.ctypes.WinDLL
+    print("bound/recycled-rejected/newer-rejected")
+PY
+)"
+if [ "$WINDOWS_PARENT_GENERATION_BINDING" = $'bound/recycled-rejected/newer-rejected\nbound/recycled-rejected/newer-rejected' ]; then
+  pass "Windows parent traversal carries and validates bound process generations"
+else
+  fail "Windows parent generation binding" "$WINDOWS_PARENT_GENERATION_BINDING"
 fi
 
 SUPPORTED_PLATFORM_POLICY="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
