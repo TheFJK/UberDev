@@ -980,7 +980,9 @@ uberdev_dispatch_preflight_backend() {
       ;;
     claude-bg)
       uberdev_dispatch_resolve_env "$backend" || return $?
-      [ -z "$workflow" ] || _uberdev_agent_claude_permissions_preflight "$workflow"
+      if [ -n "$workflow" ] && command -v _uberdev_agent_claude_permissions_preflight >/dev/null 2>&1; then
+        _uberdev_agent_claude_permissions_preflight "$workflow" || return $?
+      fi
       ;;
     wezterm|background) uberdev_dispatch_resolve_env "$backend" ;;
     *)
@@ -1245,7 +1247,7 @@ PY
 # rejected before signaling. Opaque providers use their native handle API and
 # prove the handle is no longer live before returning success.
 _uberdev_dispatch_cancel_backend() {
-  local backend="$1" handle="$2" expected_identity="${3:-}" pane probe attempts cancel_rc group_rc identity_pid identity_pgid identity_sid identity_started
+  local backend="$1" handle="$2" expected_identity="${3:-}" pane attempts group_rc identity_pid identity_pgid identity_sid identity_started
   _UBERDEV_DISPATCH_CANCEL_REASON=''
   case "$backend" in
     codex|background)
