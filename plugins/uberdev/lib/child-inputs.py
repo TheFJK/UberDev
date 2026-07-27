@@ -24,7 +24,6 @@ SUPPORTED_TYPES = {
     "repo_path_array",
 }
 
-
 class InputFailure(Exception):
     """A closed input-contract violation safe to report to shell callers."""
 
@@ -68,6 +67,14 @@ def load_manifest(path: str) -> dict[str, Any]:
     if not isinstance(manifest, dict) or not isinstance(manifest.get("edges"), dict):
         fail("invalid child manifest")
     return manifest
+
+
+def input_byte_limit(manifest: dict[str, Any]) -> int:
+    limits = manifest.get("input_limits")
+    limit = limits.get("max_serialized_bytes") if isinstance(limits, dict) else None
+    if type(limit) is not int or not 0 < limit < 65_536:
+        fail("invalid child input limit contract")
+    return limit
 
 
 def edge_schema(manifest: dict[str, Any], edge_id: str) -> tuple[dict[str, str], dict[str, str], dict[str, Any]]:
@@ -145,6 +152,8 @@ def validate_inputs(manifest: dict[str, Any], edge_id: str, inputs: Any) -> dict
     schema = {**required, **optional}
     for key, value in inputs.items():
         validate_value(key, value, schema[key])
+    if len(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode("utf-8")) > input_byte_limit(manifest):
+        fail("child inputs exceed immutable handoff budget")
     return inputs
 
 

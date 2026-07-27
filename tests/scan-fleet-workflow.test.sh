@@ -203,6 +203,16 @@ function modelsHaiku(record, pred) {
   out.aAreaInherit = modelsNull(recA, function (c) { return c.label && c.label.indexOf("scan-area-") === 0; });
   out.aRelaysHaiku = modelsHaiku(recA, function (c) { return c.label === "area-pack" || c.label === "global-pass" || c.label === "scan-aggregate"; });
   out.aF2iInherit = modelsNull(recA, function (c) { return c.label === "findings-to-issues"; });
+  const aF2i = recA.agentCalls.find(function (c) { return c.label === "findings-to-issues"; });
+  out.aF2iNumericZero = !!(aF2i && aF2i.prompt.indexOf("pr_number=0") >= 0);
+  out.aF2iAcceptedFields = !!(aF2i
+    && aF2i.prompt.indexOf("aggregate_path=" + RD_SCAN + "/f2i-aggregate.md") >= 0
+    && aF2i.prompt.indexOf("working_dir=/r") >= 0
+    && aF2i.prompt.indexOf("finding_label=uberscan-finding") >= 0
+    && aF2i.prompt.indexOf("finding_marker_slug=uberscan") >= 0
+    && aF2i.prompt.indexOf("max_new=15") >= 0);
+  out.aF2iNoSurplusFields = !!(aF2i
+    && !/(?:run_id|repo_slug|pr_commit_sha|source_ref|phase1_aggregate_path)=/.test(aF2i.prompt));
   out.aMode = resA ? resA.mode : null;
   out.aAreaCount = resA ? resA.areaCount : null;
   out.aTotalFindings = resA ? resA.totalFindings : null;
@@ -352,6 +362,9 @@ else
   check aAreaInherit true "A.9 scan area reviewers OMIT model (judgment inherits flagship, RFC §5)"
   check aRelaysHaiku true "A.10 pack/global/aggregate relays pin haiku (mechanical)"
   check aF2iInherit true "A.11 findings-to-issues OMITs model (judgment inherits)"
+  check aF2iNumericZero true "A.11a standalone findings contract sends numeric pr_number=0"
+  check aF2iAcceptedFields true "A.11b standalone findings contract sends only accepted caller-owned values"
+  check aF2iNoSurplusFields true "A.11c standalone findings contract omits agent-derived and legacy path fields"
   check aMode '"scan"' "A.12 return.mode == scan"
   check aAreaCount 2 "A.13 return.areaCount == 2"
   check aTotalFindings 5 "A.14 totalFindings reflects the deduped report.py count (aggregate override)"

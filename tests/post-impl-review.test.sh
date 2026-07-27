@@ -100,6 +100,12 @@ assert_no_grep "$POST_IMPL" 'Migration-window fallback for .pr-test-analyzer.' \
   "obsolete free-form pr-test-analyzer fallback is removed"
 assert_grep "$POST_IMPL" 'manifest-declared shared output contract' \
   "YAML shape is attributed to the manifest-declared shared output contract"
+assert_grep "$POST_IMPL" 'post-review\.validated' \
+  "validated reviewer bytes are recorded in a dedicated canonical ledger"
+assert_grep "$POST_IMPL" 'sha256|SHA-256' \
+  "aggregation binds canonical reviewer artifacts to their validated digest"
+assert_grep "$POST_IMPL" 'aggregate only|aggregation.*only.*validated|only.*validated.*artifact' \
+  "Step 4 aggregates only the validated canonical artifacts"
 
 echo
 echo "== Anti-regression: pre-push call sites removed (#67) =="
@@ -384,15 +390,15 @@ if (
   run_failure_case() {
     local mode="$1" root="$POST_REVIEW_RUNTIME_TMP/$1" rc
     mkdir -p "$root"
-    printf '%s\n' '{"edge":"review.edge"}' >"$root/records"
+    printf '%s\n' '{"edge":"review.edge","index":1}' >"$root/records"
     : >"$root/unwind.log"
     TEST_AGGREGATE_LAUNCHED="$root/launched"
     post_review_fanout() {
-      printf '%s\n' '{"edge":"review.edge","handoff":"h","result":"r","status":"s"}' >"$2"
+      printf '%s\n' '{"edge":"review.edge","index":1,"instance":"fixture","handoff":"h","result":"r","status":"s"}' >"$2"
       if [ "$mode" = roster ]; then
-        printf '%s\n' '{"edge":"wrong.edge","receipt":"x","result":"r","status":"s"}' >"$3"
+        printf '%s\n' '{"edge":"wrong.edge","index":1,"instance":"fixture","receipt":"x","result":"r","status":"s"}' >"$3"
       else
-        printf '%s\n' '{"edge":"review.edge","receipt":"x","result":"r","status":"s"}' >"$3"
+        printf '%s\n' '{"edge":"review.edge","index":1,"instance":"fixture","receipt":"x","result":"r","status":"s"}' >"$3"
       fi
       [ "$mode" != descriptors ] || rm -f "$2"
       if [ "$mode" = launched ]; then rm -f "$TEST_AGGREGATE_LAUNCHED"; mkdir "$TEST_AGGREGATE_LAUNCHED"; fi
@@ -433,8 +439,8 @@ if (
   root="$POST_REVIEW_CLEANUP_TMP/runtime"
   mkdir -p "$root"
   printf '%s\n' \
-    '{"edge":"review.one","instance":"one","inputs":{},"risks":[]}' \
-    '{"edge":"review.two","instance":"two","inputs":{},"risks":[]}' >"$root/records"
+    '{"edge":"review.one","index":1,"instance":"one","inputs":{},"risks":[]}' \
+    '{"edge":"review.two","index":2,"instance":"two","inputs":{},"risks":[]}' >"$root/records"
   uberdev_create_child_handoff() {
     UBERDEV_CHILD_HANDOFF="$1.handoff"
     UBERDEV_CHILD_RESULT="$1.result"
@@ -479,7 +485,7 @@ if (
   root="$POST_REVIEW_LEDGER_TMP/runtime"
   mkdir -p "$root/descriptors"
   printf '%s\n' '{"edge":"stale.edge","handoff":"stale","result":"stale","status":"stale"}' >"$root/launched"
-  printf '%s\n' '{"edge":"review.edge","instance":"fresh","inputs":{},"risks":[]}' >"$root/records"
+  printf '%s\n' '{"edge":"review.edge","index":1,"instance":"fresh","inputs":{},"risks":[]}' >"$root/records"
   dispatched="$root/dispatched"
   uberdev_create_child_handoff() { UBERDEV_CHILD_HANDOFF=h; UBERDEV_CHILD_RESULT=r; UBERDEV_CHILD_STATUS=s; }
   uberdev_preflight_child_batch() { : >"$dispatched"; }
@@ -509,7 +515,7 @@ if (
   . "$POST_REVIEW_APPEND_FUNCTIONS"
   root="$POST_REVIEW_APPEND_TMP/runtime"
   mkdir -p "$root"
-  printf '%s\n' '{"edge":"review.edge","instance":"fresh","inputs":{},"risks":[]}' >"$root/records"
+  printf '%s\n' '{"edge":"review.edge","index":1,"instance":"fresh","inputs":{},"risks":[]}' >"$root/records"
   dispatched="$root/dispatched"
   uberdev_create_child_handoff() {
     UBERDEV_CHILD_HANDOFF=h; UBERDEV_CHILD_RESULT=r; UBERDEV_CHILD_STATUS=s

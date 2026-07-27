@@ -3,10 +3,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TREE="$ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
 LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
+LIB_MIRROR="$ROOT/codex/uberdev-codex/lib/child-dispatch.sh"
+CONTRACT="$ROOT/plugins/uberdev/shared/phase1-reviewer-output-v1.md"
+CONTRACT_MIRROR="$ROOT/codex/uberdev-codex/shared/phase1-reviewer-output-v1.md"
+FINDINGS_AGENT="$ROOT/plugins/uberdev/agents/findings-to-issues.md"
+FINDINGS_AGENT_MIRROR="$ROOT/codex/uberdev-codex/agents/findings-to-issues.md"
 
 python3 -I -B - "$TREE" <<'PY'
 import json,sys
 tree=json.load(open(sys.argv[1])); providers={k:v for k,v in tree['edges'].items() if v['kind']=='provider'}
+assert tree.get('input_limits')=={'max_serialized_bytes':49152}
 types={'integer','string','optional_string','boolean','path','optional_path','directory','string_array','path_array','optional_path_array','repo_path_array'}
 assert providers
 for edge,row in providers.items():
@@ -55,12 +61,194 @@ cmp "$TREE" "$ROOT/codex/uberdev-codex/policy/solve-run-tree-v1.json"
 cmp "$LIB" "$ROOT/codex/uberdev-codex/lib/child-dispatch.sh"
 cmp "$ROOT/plugins/uberdev/lib/child-inputs.py" \
   "$ROOT/codex/uberdev-codex/lib/child-inputs.py"
-cmp "$ROOT/plugins/uberdev/shared/phase1-reviewer-output-v1.md" \
-  "$ROOT/codex/uberdev-codex/shared/phase1-reviewer-output-v1.md"
+cmp "$CONTRACT" "$CONTRACT_MIRROR"
+
+python3 -I -B - \
+  "$LIB" "$LIB_MIRROR" "$CONTRACT" "$CONTRACT_MIRROR" \
+  "$FINDINGS_AGENT" "$FINDINGS_AGENT_MIRROR" <<'PY'
+import errno
+import os
+import pathlib
+import sys
+import tempfile
+
+lib_path,lib_mirror_path,contract_path,contract_mirror_path,*agent_paths=sys.argv[1:]
+lib=pathlib.Path(lib_path).read_text()
+lib_mirror=pathlib.Path(lib_mirror_path).read_text()
+contract=pathlib.Path(contract_path).read_text()
+contract_mirror=pathlib.Path(contract_mirror_path).read_text()
+failures=[]
+
+if "def safe_existing(" in lib or "def safe_existing(" in lib_mirror:
+    failures.append("unused safe_existing helper remains")
+if contract != contract_mirror:
+    failures.append("reviewer contract mirrors drift")
+if "`` -?:,[]{}#&*!|>@` ``; contain" not in contract:
+    failures.append("literal-backtick grammar does not use a safe code-span delimiter")
+
+for agent_path in agent_paths:
+    value=pathlib.Path(agent_path).read_text()
+    if (
+        "partial second request cannot turn a healthy API into two empty values:\n\n"
+        "   ```bash\n"
+    ) not in value:
+        failures.append(f"{agent_path}: rate-limit fence lacks a leading blank line")
+    if (
+        '     SEARCH_REMAINING=""\n'
+        "   fi\n"
+        "   ```\n\n"
+        "   The core bucket funds"
+    ) not in value:
+        failures.append(f"{agent_path}: rate-limit fence lacks a trailing blank line")
+
+function_start=lib.index("uberdev_child_validate_phase1_review_result() {")
+snippet_start=lib.index("<<'PY'\n",function_start)+len("<<'PY'\n")
+snippet_end=lib.index("\nPY\n}",snippet_start)
+snippet=lib[snippet_start:snippet_end]
+
+with tempfile.TemporaryDirectory() as temporary:
+    result=pathlib.Path(temporary)/"result.md"
+    result.write_text(
+        "```yaml\nverdict: APPROVE\nfindings: []\nconfidence: high\n```\n",
+        encoding="utf-8",
+    )
+    original_open=os.open
+    original_read=os.read
+    original_fstat=os.fstat
+    original_close=os.close
+    original_geteuid=getattr(os,"geteuid",None)
+
+    def execute():
+        previous_argv=sys.argv
+        sys.argv=["phase1-validator",str(result),"",""]
+        try:
+            try:
+                exec(compile(snippet,"phase1-validator","exec"),{})
+            except SystemExit as error:
+                return error.code
+            return 0
+        finally:
+            sys.argv=previous_argv
+
+    def execute_with_io(*,read_hook=None,fstat_hook=None):
+        opened_descriptors=[]
+        closed_descriptors=[]
+        def tracked_open(path,flags,*args,**kwargs):
+            descriptor=original_open(path,flags,*args,**kwargs)
+            opened_descriptors.append(descriptor)
+            return descriptor
+        def tracked_close(descriptor):
+            closed_descriptors.append(descriptor)
+            return original_close(descriptor)
+        os.open=tracked_open
+        os.read=read_hook or original_read
+        os.fstat=fstat_hook or original_fstat
+        os.close=tracked_close
+        try:
+            return execute(),opened_descriptors,closed_descriptors
+        finally:
+            os.open=original_open
+            os.read=original_read
+            os.fstat=original_fstat
+            os.close=original_close
+
+    if callable(original_geteuid):
+        os.geteuid=lambda: original_geteuid()+1
+        try:
+            if execute()!=2:
+                failures.append("phase1 validator accepted a foreign-owned result")
+        finally:
+            os.geteuid=original_geteuid
+
+    observed_flags=[]
+    def tracked_open(path,flags,*args,**kwargs):
+        observed_flags.append(flags)
+        return original_open(path,flags,*args,**kwargs)
+    os.open=tracked_open
+    try:
+        if execute()!=0:
+            failures.append("phase1 validator rejected a caller-owned valid result")
+    finally:
+        os.open=original_open
+    if not observed_flags:
+        failures.append("phase1 validator did not use descriptor-pinned os.open")
+    nofollow=getattr(os,"O_NOFOLLOW",0)
+    if nofollow and observed_flags and not observed_flags[0]&nofollow:
+        failures.append("phase1 validator omitted O_NOFOLLOW")
+
+    short_reads=[]
+    def short_read(descriptor,maximum):
+        chunk=original_read(descriptor,min(maximum,7))
+        short_reads.append((maximum,len(chunk)))
+        return chunk
+    short_rc,short_opened,short_closed=execute_with_io(read_hook=short_read)
+    bounded_chunks=all(
+        next_maximum==maximum-size
+        for (maximum,size),(next_maximum,_) in zip(short_reads,short_reads[1:])
+    )
+    if (
+        short_rc!=0
+        or sum(size>0 for _,size in short_reads)<2
+        or not short_reads
+        or short_reads[0][0]!=1048577
+        or not bounded_chunks
+        or not short_opened
+        or short_opened!=short_closed
+    ):
+        failures.append(
+            "phase1 validator did not consume multiple bounded short reads "
+            f"with descriptor cleanup: rc={short_rc} reads={short_reads} "
+            f"opened={short_opened} closed={short_closed}"
+        )
+
+    read_failure_calls=[0]
+    def failing_read(descriptor,maximum):
+        read_failure_calls[0]+=1
+        if read_failure_calls[0]==2:
+            raise OSError(errno.EIO,"injected phase1 read failure")
+        return original_read(descriptor,min(maximum,7))
+    read_rc,read_opened,read_closed=execute_with_io(read_hook=failing_read)
+    if (
+        read_rc!=2
+        or read_failure_calls[0]!=2
+        or not read_opened
+        or read_opened!=read_closed
+    ):
+        failures.append(
+            "phase1 validator did not fail closed and clean its descriptor "
+            f"after read OSError: rc={read_rc} calls={read_failure_calls[0]} "
+            f"opened={read_opened} closed={read_closed}"
+        )
+
+    fstat_failure_calls=[0]
+    def failing_final_fstat(descriptor):
+        fstat_failure_calls[0]+=1
+        if fstat_failure_calls[0]==2:
+            raise OSError(errno.EIO,"injected phase1 final fstat failure")
+        return original_fstat(descriptor)
+    fstat_rc,fstat_opened,fstat_closed=execute_with_io(fstat_hook=failing_final_fstat)
+    if (
+        fstat_rc!=2
+        or fstat_failure_calls[0]!=2
+        or not fstat_opened
+        or fstat_opened!=fstat_closed
+    ):
+        failures.append(
+            "phase1 validator did not fail closed and clean its descriptor "
+            f"after fstat OSError: rc={fstat_rc} calls={fstat_failure_calls[0]} "
+            f"opened={fstat_opened} closed={fstat_closed}"
+        )
+
+if failures:
+    raise AssertionError("; ".join(failures))
+PY
 
 # The shared constructor must enforce RepoPathArray before the later handoff
 # boundary so a successful build always carries the same nominal invariant.
 INPUT_HELPER="$ROOT/plugins/uberdev/lib/child-inputs.py"
+! grep -q 'MAX_INPUT_BYTES[[:space:]]*=' "$INPUT_HELPER"
+grep -q "input_limits" "$INPUT_HELPER"
+grep -q "input_limits" "$LIB"
 python3 -I -B "$INPUT_HELPER" --manifest "$TREE" build review_pr.review.correctness \
   changed_paths '["README.md","src/example.ts"]' \
   diff_path '"/tmp/diff"' criteria_path '"/tmp/criteria"' emphasis '[]' >/dev/null
@@ -78,4 +266,45 @@ do
     exit 1
   fi
 done
+
+# A successful constructor result must fit inside the dispatcher's immutable
+# 64-KiB handoff after the fixed carrier/schema overhead is added.
+OVERSIZED_PATHS="$(python3 -I -B - <<'PY'
+import json
+print(json.dumps([f"src/generated/{index:05d}-{'x' * 80}.ts" for index in range(700)],separators=(',',':')))
+PY
+)"
+if python3 -I -B "$INPUT_HELPER" --manifest "$TREE" build review_pr.review.correctness \
+    changed_paths "$OVERSIZED_PATHS" diff_path '"/tmp/diff"' \
+    criteria_path '"/tmp/criteria"' emphasis '[]' >/dev/null 2>&1; then
+  echo "child-contract-v2: oversized RepoPathArray crossed the construction boundary" >&2
+  exit 1
+fi
+
+# Exact immutable-input boundary from the shared manifest contract: the limit is
+# accepted and limit-plus-one is rejected by the constructor.
+python3 -I -B - "$INPUT_HELPER" "$TREE" <<'PY'
+import importlib.util,json,pathlib,sys
+helper_path,manifest_path=sys.argv[1:]
+spec=importlib.util.spec_from_file_location("child_inputs",helper_path)
+module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+manifest=json.loads(pathlib.Path(manifest_path).read_text())
+limit=manifest['input_limits']['max_serialized_bytes']
+paths=[f"src/p{index:02d}-"+("x"*2990)+".ts" for index in range(16)]
+accepted={"changed_paths":paths,"diff_path":"/tmp/diff","criteria_path":"/tmp/criteria","emphasis":[]}
+current=len(json.dumps(accepted,sort_keys=True,separators=(",",":")).encode())
+accepted["changed_paths"][-1]=accepted["changed_paths"][-1][:-3]+("x"*(limit-current))+".ts"
+rejected=json.loads(json.dumps(accepted))
+rejected["changed_paths"][-1]=rejected["changed_paths"][-1][:-3]+"x.ts"
+assert len(json.dumps(accepted,sort_keys=True,separators=(",",":")).encode())==limit
+assert len(json.dumps(rejected,sort_keys=True,separators=(",",":")).encode())==limit+1
+assert max(map(len,accepted["changed_paths"]))<=4096
+module.validate_inputs(manifest,"review_pr.review.correctness",accepted)
+try:
+    module.validate_inputs(manifest,"review_pr.review.correctness",rejected)
+except module.InputFailure:
+    pass
+else:
+    raise AssertionError("limit-plus-one inputs crossed the constructor boundary")
+PY
 echo 'child-contract-v2: PASS'

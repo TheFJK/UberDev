@@ -60,10 +60,10 @@ import json,sys
 from pathlib import Path
 p=Path(sys.argv[1]); tree=json.loads(p.read_text()); next(edge for edge in tree["edges"].values() if edge.get("kind")=="provider")["role"]="ghost-agent"; p.write_text(json.dumps(tree,sort_keys=True,indent=2)+"\n")
 PY'
-expect_fail "V15 turbo workflow in policy fails" 'python3 - "$d/plugins/prkit/policy/solve-run-tree-v1.json" <<'PY'
+expect_fail "V15 unknown workflow in policy fails" 'python3 - "$d/plugins/prkit/policy/solve-run-tree-v1.json" <<'PY'
 import json,sys
 from pathlib import Path
-p=Path(sys.argv[1]); tree=json.loads(p.read_text()); next(edge for edge in tree["edges"].values() if edge.get("kind")=="provider")["allowed_workflows"].append("turbo"); p.write_text(json.dumps(tree,sort_keys=True,indent=2)+"\n")
+p=Path(sys.argv[1]); tree=json.loads(p.read_text()); next(edge for edge in tree["edges"].values() if edge.get("kind")=="provider")["allowed_workflows"].append("unknown"); p.write_text(json.dumps(tree,sort_keys=True,indent=2)+"\n")
 PY'
 expect_fail "V16 cross-runtime policy byte divergence fails" 'python3 - "$d/codex/prkit-codex/policy/solve-run-tree-v1.json" <<'PY'
 import json,sys

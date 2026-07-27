@@ -267,6 +267,7 @@ def private_parent_path(path: str, file_error: str, directory_error: str) -> str
 def secure_windows_open(path: str, flags: int, file_error: str) -> tuple[int, os.stat_result]:
     """Open an existing Windows file and prove lstat/fstat identity."""
 
+    descriptor: int | None = None
     try:
         before = os.lstat(path)
         if is_link_or_reparse(path, before) or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not owned(before):
@@ -274,8 +275,12 @@ def secure_windows_open(path: str, flags: int, file_error: str) -> tuple[int, os
         descriptor = os.open(path, flags | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0))
         opened = os.fstat(descriptor)
     except ReceiptFailure:
+        if descriptor is not None:
+            os.close(descriptor)
         raise
     except OSError:
+        if descriptor is not None:
+            os.close(descriptor)
         fail(file_error)
     if (
         not stat.S_ISREG(opened.st_mode)
@@ -355,7 +360,15 @@ def safe_handoff(path: str) -> dict[str, Any]:
         try:
             if opened.st_size > MAX_HANDOFF_BYTES:
                 fail("unsafe handoff file")
-            raw = os.read(file_fd, MAX_HANDOFF_BYTES + 1)
+            chunks: list[bytes] = []
+            remaining = MAX_HANDOFF_BYTES + 1
+            while remaining:
+                chunk = os.read(file_fd, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
             after = os.fstat(file_fd)
             current = os.lstat(path)
             if (

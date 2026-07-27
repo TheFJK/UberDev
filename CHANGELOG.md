@@ -4,7 +4,7 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.40.2] — 2026-07-25
+## [0.40.2] — 2026-07-26
 
 ### Fixed
 
@@ -23,11 +23,14 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Rejected malformed CI classifier anchors before routing and kept CI-refusal aggregates inside the command-owned research directory.
 - Bounded indeterminate Claude probes, resolved full session IDs before cancellation, and made launch terminalization and exact lease release fail closed with durable supervisory evidence.
 - Preserved complete large-PR path sets, rejected Windows drive-relative paths, and restored Python 3.10-compatible standalone PRKit verification.
+- Made reviewer-evidence and deferred-findings publication/refusal paths fail closed, preventing malformed or unpublished artifacts from reaching fixers or trust emission.
+- Bound review evidence and re-entry snapshots to immutable run-carrier lineage plus current local/remote PR heads, and required validated fixer mutations and disposition artifacts before the lifecycle can advance.
 
 ### Tests
 
 - Added a six-child Codex review integration fixture covering backend selection, non-interactive dispatch, unique worktrees, success and failure cleanup, terminal lifecycle receipts, and zero leaked leases.
 - Added regressions for Claude idle and ambiguous sessions, nested auto-permission propagation, subdirectory Codex cleanup, cleanup-failure recovery evidence, and large review diffs.
+- Added regressions for publication failures and refusals, PR-head drift, carrier lineage, evidence-ledger completeness, and fixer/disposition re-entry gates.
 
 ## [0.40.1] — 2026-07-11
 

@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
+TREE="$ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
 TMP="$(mktemp -d "$ROOT/tests/_fixtures/child-inputs.XXXXXX")"
 FIXTURE="$TMP/manifest.json"
 MALFORMED_FIXTURE="$TMP/malformed.json"
@@ -10,8 +11,20 @@ INVALID_UTF8_FIXTURE="$TMP/invalid-encoding.json"
 SYMLINK_FIXTURE="$FIXTURE.link"
 trap 'rm -rf "$TMP"' EXIT
 
-cat >"$FIXTURE" <<'JSON'
-{"edges":{"all.types":{"kind":"provider","retry":{"format":1},"required_inputs":{"attempt":"integer","enabled":"boolean","name":"string","file":"path","workdir":"directory","tags":"string_array","files":"path_array"},"optional_inputs":{"note":"optional_string","maybe_file":"optional_path","maybe_files":"optional_path_array","format_retry":"boolean","format_example_path":"path"}},"no.retry":{"kind":"provider","required_inputs":{},"optional_inputs":{"format_retry":"boolean","format_example_path":"path"}},"bad.retry.keys":{"kind":"provider","retry":{"format":1},"required_inputs":{},"optional_inputs":{"format_retry":"boolean"}},"skill.edge":{"kind":"skill","required_inputs":{},"optional_inputs":{}}}}
+MAX_SERIALIZED_BYTES="$(python3 -I -B - "$TREE" <<'PY'
+import json,sys
+with open(sys.argv[1],encoding="utf-8") as stream:
+    manifest=json.load(stream)
+limits=manifest.get("input_limits")
+limit=limits.get("max_serialized_bytes") if isinstance(limits,dict) else None
+if type(limit) is not int or not 0 < limit < 65_536:
+    raise SystemExit("child-inputs: invalid canonical input limit contract")
+print(limit,end="")
+PY
+)"
+
+cat >"$FIXTURE" <<JSON
+{"input_limits":{"max_serialized_bytes":${MAX_SERIALIZED_BYTES}},"edges":{"all.types":{"kind":"provider","retry":{"format":1},"required_inputs":{"attempt":"integer","enabled":"boolean","name":"string","file":"path","workdir":"directory","tags":"string_array","files":"path_array"},"optional_inputs":{"note":"optional_string","maybe_file":"optional_path","maybe_files":"optional_path_array","format_retry":"boolean","format_example_path":"path"}},"no.retry":{"kind":"provider","required_inputs":{},"optional_inputs":{"format_retry":"boolean","format_example_path":"path"}},"bad.retry.keys":{"kind":"provider","retry":{"format":1},"required_inputs":{},"optional_inputs":{"format_retry":"boolean"}},"skill.edge":{"kind":"skill","required_inputs":{},"optional_inputs":{}}}}
 JSON
 
 export UBERDEV_CHILD_TEST_MODE=1 UBERDEV_CHILD_MANIFEST_PATH="$FIXTURE"

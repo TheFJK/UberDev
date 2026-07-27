@@ -1,7 +1,7 @@
 {
   "name": "uberdev-codex",
   "version": "0.40.2",
-  "description": "UberDev workflow toolkit for Codex: brainstorm/plan/execute, TDD, systematic-debugging, parallel-fanout PR review, autonomous GitHub issue triage and resolution. Skills ship here; the 42 subagents install separately via codex/install-codex.sh (Codex plugin manifest has no agents field).",
+  "description": "UberDev workflow toolkit for Codex: brainstorm/plan/execute, TDD, systematic-debugging, parallel-fanout PR review, autonomous GitHub issue triage and resolution. Skills ship here; the 44 subagents install separately via codex/install-codex.sh (Codex plugin manifest has no agents field).",
   "author": {
     "name": "TheFJK",
     "url": "https://github.com/TheFJK"

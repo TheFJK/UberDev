@@ -29,6 +29,655 @@ file_link_count() {
   fi
 }
 
+# Exercise the complete no-dir-fd path on the host filesystem. Native Windows
+# runs the same production branch again through review-child-handoff's wired
+# --windows-path-only mode.
+python3 -I -B - "$HELPER" "$ROOT/codex/uberdev-codex/lib/command-workspace.py" "$TMP/portable" <<'PY'
+import hashlib
+import importlib.util
+import json
+import ntpath
+import os
+import pathlib
+import subprocess
+import sys
+import ctypes
+
+
+module_paths = sys.argv[1:3]
+fixture_root = pathlib.Path(sys.argv[3])
+
+
+def expect_failure(module, code, operation):
+    try:
+        operation()
+    except module.Failure as error:
+        assert str(error) == code, (str(error), code)
+    else:
+        raise AssertionError(f"{code} was accepted")
+
+
+def fixture(module, name):
+    root = fixture_root / name
+    repo = root / "repo"
+    run = root / "run"
+    state = run / ".agent-state-0"
+    repo.mkdir(parents=True)
+    state.mkdir(parents=True)
+    subprocess.run(["git", "-C", repo, "init", "-q"], check=True)
+    context = state / f"route-context-v1-{name}.json"
+    payload = json.dumps(
+        {
+            "metadata": {
+                "run_id": f"root-{name}",
+                "workflow": "review-pr",
+                "issue_num": 91,
+                "repository_id": str(repo.resolve()),
+            }
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    context.write_bytes(payload)
+    os.chmod(state, 0o700)
+    os.chmod(context, 0o600)
+    carrier = {
+        "schema_version": 1,
+        "run_id": f"root-{name}",
+        "workflow": "review-pr",
+        "issue_num": 91,
+        "context_file": str(context.resolve()),
+        "context_sha256": hashlib.sha256(payload).hexdigest(),
+    }
+    return root, repo.resolve(), state.resolve(), context.resolve(), carrier
+
+
+for index, module_path in enumerate(module_paths):
+    spec = importlib.util.spec_from_file_location(
+        f"command_workspace_portable_{index}", module_path
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    module.native_windows = lambda: True
+    module.effective_uid = lambda: None
+    assert module.filesystem_mode() == "portable_windows"
+    assert module.state_directory_name() == ".agent-state-0"
+    assert module.windows_directory_access(2) == (
+        0x00010000 | 0x00000080 | 0x00100000,
+        0x00000001 | 0x00000002,
+    )
+    assert module.windows_directory_access(1) == (
+        0x00010000 | 0x00000080 | 0x00100000,
+        0x00000001 | 0x00000002,
+    )
+    assert module.windows_tracker_access() == (
+        0x00000080 | 0x00100000,
+        0x00000001 | 0x00000002 | 0x00000004,
+    )
+    assert module.windows_verifier_access() == (
+        0x00000080 | 0x00100000,
+        0x00000001 | 0x00000002 | 0x00000004,
+    )
+    try:
+        module.windows_verifier_access(True)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("verifier access retained unused created-state input")
+    assert module.WINDOWS_STATUS_OBJECT_NAME_COLLISION == 0xC0000035
+    assert module.WINDOWS_STATUS_SHARING_VIOLATION == 0xC0000043
+    assert (
+        0
+        < module.WINDOWS_DIRECTORY_BIND_RETRY_INTERVAL_SECONDS
+        < module.WINDOWS_DIRECTORY_BIND_TIMEOUT_SECONDS
+        <= 5
+    )
+    assert module.windows_retry_delay(2.0, 1.0) == min(
+        module.WINDOWS_DIRECTORY_BIND_RETRY_INTERVAL_SECONDS, 1.0
+    )
+    assert module.windows_retry_delay(2.0, 1.999) > 0
+    expect_failure(
+        module,
+        "unsafe_directory",
+        lambda: module.windows_retry_delay(2.0, 2.0),
+    )
+    expect_failure(
+        module,
+        "unsafe_directory",
+        lambda: module.windows_directory_access(3),
+    )
+
+    class SuccessfulCreateAndVerify:
+        argtypes = None
+        restype = None
+
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, handle_pointer, *_args):
+            self.calls += 1
+            handle_pointer._obj.value = 101 if self.calls == 1 else 202
+            return 0
+
+    class FailVerifierClose:
+        argtypes = None
+        restype = None
+
+        def __init__(self):
+            self.handles = []
+
+        def __call__(self, handle):
+            numeric = int(handle.value)
+            self.handles.append(numeric)
+            return 0 if numeric == 202 else 1
+
+    create_and_verify = SuccessfulCreateAndVerify()
+    selective_close = FailVerifierClose()
+
+    class CreateAndVerifyNtdll:
+        NtCreateFile = create_and_verify
+
+    class SelectiveCloseKernel:
+        CloseHandle = selective_close
+
+    had_windll = hasattr(ctypes, "WinDLL")
+    original_windll = getattr(ctypes, "WinDLL", None)
+    ctypes.WinDLL = (
+        lambda name, **_kwargs:
+        CreateAndVerifyNtdll() if name == "ntdll" else SelectiveCloseKernel()
+    )
+    real_identity = module.windows_handle_identity
+    real_disposition = module.windows_mark_directory_for_deletion
+    dispositions = []
+    module.windows_handle_identity = lambda _handle, _reason: (7, 9)
+    module.windows_mark_directory_for_deletion = (
+        lambda binding, _reason: dispositions.append(binding.handle)
+    )
+    try:
+        try:
+            module.windows_create_or_open_child(
+                module.DirectoryBinding(55, (1, 1), (1, 1)),
+                "child",
+                "unsafe_directory",
+            )
+        except module.Failure as error:
+            assert str(error) == "directory_handle_close_failed", str(error)
+            assert module.cleanup_diagnostic(error) == {
+                "artifact_classes": ["directory_handle"],
+                "code": "workspace_rollback_failed",
+            }
+        else:
+            raise AssertionError("verifier close failure was accepted")
+        assert selective_close.handles == [202, 101], selective_close.handles
+        assert dispositions == [101], dispositions
+    finally:
+        module.windows_handle_identity = real_identity
+        module.windows_mark_directory_for_deletion = real_disposition
+        if had_windll:
+            ctypes.WinDLL = original_windll
+        else:
+            del ctypes.WinDLL
+
+    class FalseClose:
+        argtypes = None
+        restype = None
+
+        def __call__(self, _handle):
+            return 0
+
+    class FalseCloseKernel:
+        CloseHandle = FalseClose()
+
+    had_windll = hasattr(ctypes, "WinDLL")
+    original_windll = getattr(ctypes, "WinDLL", None)
+    ctypes.WinDLL = lambda *_args, **_kwargs: FalseCloseKernel()
+    close_binding = module.DirectoryBinding(73, (1, 2), (1, 2))
+    try:
+        expect_failure(
+            module,
+            "directory_handle_close_failed",
+            lambda: module.close_directory_binding(close_binding),
+        )
+        assert close_binding.handle == 73
+        primary_close_error = module.Failure("unsafe_artifact")
+        assert not module.close_directory_binding(
+            close_binding, primary=primary_close_error
+        )
+        assert close_binding.handle == 73
+        assert module.cleanup_diagnostic(primary_close_error) == {
+            "artifact_classes": ["directory_handle"],
+            "code": "workspace_rollback_failed",
+        }
+
+        verifier_binding = module.DirectoryBinding(79, (1, 3), (1, 3))
+        real_disposition = module.windows_mark_directory_for_deletion
+        module.windows_mark_directory_for_deletion = (
+            lambda _binding, reason: module.fail(reason)
+        )
+        try:
+            try:
+                module.reject_windows_verifier_open(
+                    verifier_binding, created=True, reason="unsafe_directory"
+                )
+            except module.Failure as error:
+                assert str(error) == "unsafe_directory", str(error)
+                assert module.cleanup_diagnostic(error) == {
+                    "artifact_classes": ["directory", "directory_handle"],
+                    "code": "workspace_rollback_failed",
+                }
+            else:
+                raise AssertionError("verifier cleanup failures replaced the primary")
+        finally:
+            module.windows_mark_directory_for_deletion = real_disposition
+        assert verifier_binding.handle == 79
+    finally:
+        if had_windll:
+            ctypes.WinDLL = original_windll
+        else:
+            del ctypes.WinDLL
+
+    root, repo, _state, context, carrier = fixture(module, f"valid-{index}")
+    real_normcase = module.os.path.normcase
+    module.os.path.normcase = ntpath.normcase
+    try:
+        assert module.same_portable_path(str(repo).swapcase(), str(repo))
+    finally:
+        module.os.path.normcase = real_normcase
+    loaded = module.load_carrier(
+        json.dumps(carrier, separators=(",", ":")), "review-pr"
+    )
+    module.validate_requested_root(
+        str(repo), str(repo), loaded[4], "portable_windows"
+    )
+    expect_failure(
+        module,
+        "repository_mismatch",
+        lambda: module.validate_requested_root(
+            str(repo), str(repo), (loaded[4][0], loaded[4][1] + 1),
+            "portable_windows",
+        ),
+    )
+    workspace, artifacts = module.allocate_workspace(
+        str(repo),
+        f"20260727-01020{index}-abcdef0",
+        module.CALLERS["review-pr"]["artifacts"],
+        loaded[4],
+    )
+    assert pathlib.Path(workspace).is_dir()
+    assert set(artifacts) == set(module.CALLERS["review-pr"]["artifacts"])
+    assert all(pathlib.Path(path).is_file() for path in artifacts.values())
+    assert all(
+        os.path.commonpath((str(repo), path)) == str(repo)
+        for path in artifacts.values()
+    )
+
+    _root, repo, _state, _context, mkdir_race_carrier = fixture(
+        module, f"mkdir-replacement-{index}"
+    )
+    loaded = module.load_carrier(
+        json.dumps(mkdir_race_carrier, separators=(",", ":")), "review-pr"
+    )
+    mkdir_race_run = f"20260727-01024{index}-abcdef0"
+    replacement_root = repo / ".uberdev"
+    displaced_root = repo / ".uberdev-created-by-helper"
+    real_bind_child = module.portable_bind_or_create_child
+
+    def replace_created_directory(parent_binding, parent, name):
+        binding, created = real_bind_child(parent_binding, parent, name)
+        if name == ".uberdev" and created:
+            os.replace(replacement_root, displaced_root)
+            replacement_root.mkdir()
+            (replacement_root / "attacker-marker").write_bytes(
+                b"replacement-must-not-receive-artifacts"
+            )
+        return binding, created
+
+    module.portable_bind_or_create_child = replace_created_directory
+    try:
+        expect_failure(
+            module,
+            "unsafe_directory",
+            lambda: module.allocate_workspace(
+                str(repo),
+                mkdir_race_run,
+                module.CALLERS["review-pr"]["artifacts"],
+                loaded[4],
+            ),
+        )
+    finally:
+        module.portable_bind_or_create_child = real_bind_child
+    assert (replacement_root / "attacker-marker").read_bytes() == (
+        b"replacement-must-not-receive-artifacts"
+    )
+    assert not (replacement_root / "research").exists()
+
+    module.native_windows = lambda: False
+    assert not module.owned_by_current_user(os.stat(repo))
+    expect_failure(module, "unsupported_platform", module.filesystem_mode)
+    module.effective_uid = lambda: 501
+    module.secure_dir_fd_available = lambda: False
+    expect_failure(module, "unsupported_platform", module.filesystem_mode)
+    module.native_windows = lambda: True
+    module.effective_uid = lambda: None
+
+    _root, _repo, _state, _context, bad_name = fixture(
+        module, f"bad-name-{index}"
+    )
+    bad_name["context_file"] = bad_name["context_file"].replace(
+        ".agent-state-0", ".agent-state-999999"
+    )
+    expect_failure(
+        module,
+        "invalid_context",
+        lambda: module.load_carrier(
+            json.dumps(bad_name, separators=(",", ":")), "review-pr"
+        ),
+    )
+
+    _root, _repo, state, context, noncanonical = fixture(
+        module, f"noncanonical-{index}"
+    )
+    noncanonical["context_file"] = os.path.join(
+        state, "..", state.name, context.name
+    )
+    expect_failure(
+        module,
+        "invalid_context",
+        lambda: module.load_carrier(
+            json.dumps(noncanonical, separators=(",", ":")), "review-pr"
+        ),
+    )
+
+    _root, _repo, _state, context, hardlinked = fixture(
+        module, f"hardlink-{index}"
+    )
+    os.link(context, context.with_name("context-hardlink"))
+    expect_failure(
+        module,
+        "invalid_context",
+        lambda: module.load_carrier(
+            json.dumps(hardlinked, separators=(",", ":")), "review-pr"
+        ),
+    )
+
+    _root, _repo, _state, context, symlinked = fixture(
+        module, f"symlink-{index}"
+    )
+    backing = context.with_name("context-backing")
+    os.replace(context, backing)
+    os.symlink(backing, context)
+    expect_failure(
+        module,
+        "invalid_context",
+        lambda: module.load_carrier(
+            json.dumps(symlinked, separators=(",", ":")), "review-pr"
+        ),
+    )
+
+    _root, _repo, state, context, linked_state = fixture(
+        module, f"linked-state-{index}"
+    )
+    state_backing = state.with_name("state-backing")
+    os.replace(state, state_backing)
+    os.symlink(state_backing, state, target_is_directory=True)
+    expect_failure(
+        module,
+        "invalid_context",
+        lambda: module.load_carrier(
+            json.dumps(linked_state, separators=(",", ":")), "review-pr"
+        ),
+    )
+
+    _root, _repo, _state, context, oversized = fixture(
+        module, f"oversized-{index}"
+    )
+    oversized_payload = b"x" * 1048577
+    context.write_bytes(oversized_payload)
+    oversized["context_sha256"] = hashlib.sha256(oversized_payload).hexdigest()
+    expect_failure(
+        module,
+        "invalid_context",
+        lambda: module.load_carrier(
+            json.dumps(oversized, separators=(",", ":")), "review-pr"
+        ),
+    )
+
+    _root, _repo, _state, context, replaced = fixture(
+        module, f"replacement-{index}"
+    )
+    replacement = context.with_name("context-replacement")
+    replacement.write_bytes(context.read_bytes())
+    os.chmod(replacement, 0o600)
+    real_open = module.os.open
+
+    def replacing_open(path, flags, *args, **kwargs):
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if os.path.normcase(os.path.abspath(path)) == os.path.normcase(
+            os.path.abspath(context)
+        ):
+            os.replace(replacement, context)
+        return descriptor
+
+    module.os.open = replacing_open
+    try:
+        expect_failure(
+            module,
+            "invalid_context",
+            lambda: module.load_carrier(
+                json.dumps(replaced, separators=(",", ":")), "review-pr"
+            ),
+        )
+    finally:
+        module.os.open = real_open
+
+    for kind in ("hardlink", "symlink"):
+        _root, repo, _state, _context, artifact_carrier = fixture(
+            module, f"artifact-{kind}-{index}"
+        )
+        loaded = module.load_carrier(
+            json.dumps(artifact_carrier, separators=(",", ":")), "review-pr"
+        )
+        run_id = f"20260727-01021{index}-{kind[:6]}"
+        workspace = repo / ".uberdev" / "research" / run_id
+        workspace.mkdir(parents=True)
+        artifact = workspace / "pr-diff.md"
+        target = workspace / "artifact-target"
+        target.write_bytes(b"fixture")
+        if kind == "hardlink":
+            os.link(target, artifact)
+        else:
+            os.symlink(target, artifact)
+        expect_failure(
+            module,
+            "unsafe_artifact",
+            lambda: module.allocate_workspace(
+                str(repo),
+                run_id,
+                module.CALLERS["review-pr"]["artifacts"],
+                loaded[4],
+            ),
+        )
+
+    _root, repo, _state, _context, rollback_carrier = fixture(
+        module, f"rollback-replacement-{index}"
+    )
+    loaded = module.load_carrier(
+        json.dumps(rollback_carrier, separators=(",", ":")), "review-pr"
+    )
+    rollback_run = f"20260727-01023{index}-abcdef0"
+    rollback_artifact = (
+        repo / ".uberdev" / "research" / rollback_run / "pr-diff.md"
+    )
+    real_write = module.os.write
+
+    def replace_then_fail(descriptor, data):
+        if rollback_artifact.exists():
+            original = rollback_artifact.with_name("created-original")
+            replacement = rollback_artifact.with_name("attacker-replacement")
+            os.replace(rollback_artifact, original)
+            replacement.write_bytes(b"replacement-must-survive")
+            os.replace(replacement, rollback_artifact)
+            raise OSError("injected write failure after replacement")
+        return real_write(descriptor, data)
+
+    module.os.write = replace_then_fail
+    try:
+        expect_failure(
+            module,
+            "unsafe_artifact",
+            lambda: module.allocate_workspace(
+                str(repo),
+                rollback_run,
+                module.CALLERS["review-pr"]["artifacts"],
+                loaded[4],
+            ),
+        )
+    finally:
+        module.os.write = real_write
+    assert rollback_artifact.read_bytes() == b"replacement-must-survive"
+
+    def assert_rollback_cleanup_diagnostic(kind, expected_classes):
+        _root, cleanup_repo, _state, _context, cleanup_carrier = fixture(
+            module, f"rollback-{kind}-{index}"
+        )
+        cleanup_loaded = module.load_carrier(
+            json.dumps(cleanup_carrier, separators=(",", ":")), "review-pr"
+        )
+        cleanup_run = f"20260727-01025{index}-{kind[:7]}"
+        real_create = module.portable_create_or_validate_file
+        real_unlink = module.os.unlink
+        real_rmdir = module.os.rmdir
+        real_name = module.os.name
+        real_matches = module.windows_binding_matches_path
+        real_disposition = module.windows_mark_directory_for_deletion
+        calls = 0
+        rollback_started = False
+        primary = module.Failure("unsafe_artifact")
+
+        def fail_after_first_artifact(*args, **kwargs):
+            nonlocal calls, rollback_started
+            calls += 1
+            if calls == 2:
+                rollback_started = True
+                if kind == "disposition":
+                    module.os.name = "nt"
+                raise primary
+            return real_create(*args, **kwargs)
+
+        def injected_unlink(*args, **kwargs):
+            if rollback_started and kind == "unlink":
+                raise OSError("injected unlink failure")
+            return real_unlink(*args, **kwargs)
+
+        def injected_rmdir(*args, **kwargs):
+            if rollback_started and kind == "rmdir":
+                raise OSError("injected rmdir failure")
+            return real_rmdir(*args, **kwargs)
+
+        def injected_disposition(_binding, _reason):
+            raise module.Failure("unsafe_directory")
+
+        module.portable_create_or_validate_file = fail_after_first_artifact
+        module.os.unlink = injected_unlink
+        module.os.rmdir = injected_rmdir
+        module.windows_binding_matches_path = lambda *_args: True
+        module.windows_mark_directory_for_deletion = injected_disposition
+        try:
+            try:
+                module.allocate_workspace(
+                    str(cleanup_repo),
+                    cleanup_run,
+                    module.CALLERS["review-pr"]["artifacts"],
+                    cleanup_loaded[4],
+                )
+            except module.Failure as error:
+                assert error is primary, (error, primary)
+                assert module.cleanup_diagnostic(error) == {
+                    "artifact_classes": expected_classes,
+                    "code": "workspace_rollback_failed",
+                }
+            else:
+                raise AssertionError(f"{kind} rollback failure was hidden")
+        finally:
+            module.portable_create_or_validate_file = real_create
+            module.os.unlink = real_unlink
+            module.os.rmdir = real_rmdir
+            module.os.name = real_name
+            module.windows_binding_matches_path = real_matches
+            module.windows_mark_directory_for_deletion = real_disposition
+
+    assert_rollback_cleanup_diagnostic("unlink", ["directory", "file"])
+    assert_rollback_cleanup_diagnostic("rmdir", ["directory"])
+    assert_rollback_cleanup_diagnostic("disposition", ["directory"])
+
+    _root, repo, _state, _context, directory_carrier = fixture(
+        module, f"directory-link-{index}"
+    )
+    loaded = module.load_carrier(
+        json.dumps(directory_carrier, separators=(",", ":")), "review-pr"
+    )
+    outside = repo.parent / "outside-workspace"
+    outside.mkdir()
+    os.symlink(outside, repo / ".uberdev", target_is_directory=True)
+    expect_failure(
+        module,
+        "unsafe_directory",
+        lambda: module.allocate_workspace(
+            str(repo),
+            f"20260727-01022{index}-abcdef0",
+            module.CALLERS["review-pr"]["artifacts"],
+            loaded[4],
+        ),
+    )
+PY
+
+python3 -I -B - "$HELPER" "$ROOT/codex/uberdev-codex/lib/command-workspace.py" <<'PY'
+import importlib.util
+import pathlib
+import subprocess
+import sys
+import textwrap
+
+for index, module_path in enumerate(sys.argv[1:]):
+    raw = pathlib.Path(module_path).read_text(encoding="utf-8")
+    assert ".add_note(" not in raw
+    assert "sys.exception(" not in raw
+    program = textwrap.dedent(
+        """
+        import importlib.util
+        import sys
+
+        module_path = sys.argv[1]
+        spec = importlib.util.spec_from_file_location("command_workspace_cli", module_path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        primary = module.Failure("unsafe_artifact")
+        module.add_cleanup_diagnostic(primary, {"file"})
+        def injected_main():
+            raise primary
+        module.main = injected_main
+        raise SystemExit(module.cli())
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", program, module_path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        text=True,
+    )
+    assert completed.returncode == 2, (index, completed.returncode)
+    assert completed.stdout == "", (index, completed.stdout)
+    assert completed.stderr == (
+        "uberdev command workspace: unsafe_artifact\n"
+        'uberdev command workspace cleanup: '
+        '{"artifact_classes":["file"],"code":"workspace_rollback_failed"}\n'
+    ), (index, completed.stderr)
+print("command-workspace-cli-cleanup-diagnostic-ok")
+PY
+
 make_carrier() {
   local workflow="$1" issue="$2" repo="$3" run="$4" request decision metadata context_out context sha
   mkdir -p "$run"

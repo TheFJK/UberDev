@@ -100,12 +100,14 @@ assert not glob.glob(os.path.join(os.path.dirname(output_path), ".watcher-error.
 PY
 
 python3 -I - "$LIB" "$TMP/run/windows-agent-status.json" <<'PY'
+import errno
 import glob
 import json
 import os
 import stat
 import sys
 import tempfile
+import time
 import types
 
 source_path, output_path = sys.argv[1:]
@@ -118,34 +120,232 @@ end = source.index("\nPY\n}", start)
 snippet = source[start:end]
 original_name = os.name
 original_fchmod = getattr(os, "fchmod", None)
+original_replace = os.replace
+original_monotonic = time.monotonic
+original_sleep = time.sleep
 original_msvcrt = sys.modules.get("msvcrt")
+clock = [0.0]
+sleep_calls = []
+
+def monotonic():
+    clock[0] += 0.0001
+    return clock[0]
+
+def sleep(seconds):
+    assert seconds > 0
+    sleep_calls.append(seconds)
+    clock[0] += seconds
+
+def publish(path, mode, state, exit_code):
+    sys.argv = [
+        "agent-status", path, mode, "codex", state, exit_code, "handle-1",
+        "", "", "", "", "", "", "", "", "", "", "0",
+    ]
+    exec(compile(snippet, "agent-status-publisher", "exec"), {})
+
+def windows_replace_error(winerror):
+    error = PermissionError(errno.EACCES, "fixture destination is temporarily locked")
+    error.winerror = winerror
+    return error
+
+def unrelated_replace_error():
+    error = OSError(errno.EIO, "fixture replacement failed for an unrelated reason")
+    error.winerror = 5
+    return error
+
+def assert_status(path, state, exit_code):
+    with open(path, encoding="utf-8") as handle:
+        payload = json.load(handle)
+    assert payload["state"] == state and payload["exit_code"] == exit_code, payload
+
+def assert_no_staging_files():
+    assert not glob.glob(os.path.join(os.path.dirname(output_path), ".agent-status.*"))
+
 os.name = "nt"
 if original_fchmod is not None:
     del os.fchmod
+time.monotonic = monotonic
+time.sleep = sleep
 sys.modules["msvcrt"] = types.SimpleNamespace(
     LK_NBLCK=1,
     LK_UNLCK=2,
     locking=lambda descriptor, mode, size: None,
 )
 try:
-    sys.argv = ["agent-status", output_path, "create", "codex", "running", "", "handle-1", "", "", "", "", "", "", "", "", "", "", "0"]
-    exec(compile(snippet, "agent-status-publisher", "exec"), {})
-    sys.argv = ["agent-status", output_path, "create", "codex", "running", "", "handle-1", "", "", "", "", "", "", "", "", "", "", "0"]
-    exec(compile(snippet, "agent-status-publisher", "exec"), {})
-    sys.argv = ["agent-status", output_path, "replace", "codex", "completed", "0", "handle-1", "", "", "", "", "", "", "", "", "", "", "0"]
-    exec(compile(snippet, "agent-status-publisher", "exec"), {})
+    publish(output_path, "create", "running", "")
+    publish(output_path, "create", "running", "")
+
+    replace_plan = [5, 32, None]
+    replace_attempts = []
+    def transient_replace(source, destination):
+        winerror = replace_plan.pop(0)
+        replace_attempts.append(winerror)
+        if winerror is not None:
+            raise windows_replace_error(winerror)
+        return original_replace(source, destination)
+    os.replace = transient_replace
+    publish(output_path, "replace", "completed", "0")
+    assert replace_attempts == [5, 32, None], replace_attempts
+    assert len(sleep_calls) == 2, sleep_calls
+    assert_status(output_path, "completed", 0)
+    assert_no_staging_files()
+
+    for contract in (
+        "WINDOWS_STATUS_REPLACE_TIMEOUT_SECONDS",
+        "WINDOWS_STATUS_REPLACE_RETRY_INTERVAL_SECONDS",
+        "WINDOWS_TRANSIENT_REPLACE_WINERRORS",
+        "time.monotonic()",
+    ):
+        assert contract in snippet, contract
+
+    replaced_path = os.path.join(
+        os.path.dirname(output_path), "windows-agent-status-replaced.json"
+    )
+    os.replace = original_replace
+    publish(replaced_path, "create", "running", "")
+    intruder_path = replaced_path + ".intruder"
+    intruder_content = b"replacement owned by another publisher\n"
+    with open(intruder_path, "wb") as handle:
+        handle.write(intruder_content)
+    os.chmod(intruder_path, 0o600)
+    replaced_attempts = []
+    sleep_calls.clear()
+    def destination_replaced(source, destination):
+        replaced_attempts.append((source, destination))
+        if len(replaced_attempts) == 1:
+            original_replace(intruder_path, destination)
+            raise windows_replace_error(5)
+        return original_replace(source, destination)
+    os.replace = destination_replaced
+    try:
+        publish(replaced_path, "replace", "completed", "0")
+    except SystemExit as error:
+        assert error.code == 2
+    else:
+        raise AssertionError("changed Windows status destination was overwritten")
+    assert len(replaced_attempts) == 1, replaced_attempts
+    assert len(sleep_calls) == 1, sleep_calls
+    with open(replaced_path, "rb") as handle:
+        assert handle.read() == intruder_content
+    assert_no_staging_files()
+
+    exhausted_path = os.path.join(
+        os.path.dirname(output_path), "windows-agent-status-exhausted.json"
+    )
+    os.replace = original_replace
+    publish(exhausted_path, "create", "running", "")
+    with open(exhausted_path, "rb") as handle:
+        exhausted_before = handle.read()
+    exhausted_attempts = []
+    exhausted_error = windows_replace_error(5)
+    sleep_calls.clear()
+    def exhausted_replace(source, destination):
+        exhausted_attempts.append((source, destination))
+        raise exhausted_error
+    os.replace = exhausted_replace
+    try:
+        publish(exhausted_path, "replace", "completed", "0")
+    except PermissionError as error:
+        assert error is exhausted_error
+    else:
+        raise AssertionError("persistent Windows access denial was swallowed")
+    assert 1 < len(exhausted_attempts) < 10000, len(exhausted_attempts)
+    assert len(sleep_calls) == len(exhausted_attempts) - 1, (
+        len(sleep_calls), len(exhausted_attempts)
+    )
+    with open(exhausted_path, "rb") as handle:
+        assert handle.read() == exhausted_before
+    assert_no_staging_files()
+
+    unrelated_path = os.path.join(
+        os.path.dirname(output_path), "windows-agent-status-unrelated.json"
+    )
+    os.replace = original_replace
+    publish(unrelated_path, "create", "running", "")
+    with open(unrelated_path, "rb") as handle:
+        unrelated_before = handle.read()
+    unrelated_attempts = []
+    sleep_calls.clear()
+    def unrelated_replace(source, destination):
+        unrelated_attempts.append((source, destination))
+        raise unrelated_replace_error()
+    os.replace = unrelated_replace
+    try:
+        publish(unrelated_path, "replace", "completed", "0")
+    except OSError as error:
+        assert type(error) is OSError and error.errno == errno.EIO
+    else:
+        raise AssertionError("unrelated Windows replacement error was swallowed")
+    assert len(unrelated_attempts) == 1, len(unrelated_attempts)
+    assert not sleep_calls, sleep_calls
+    with open(unrelated_path, "rb") as handle:
+        assert handle.read() == unrelated_before
+    assert_no_staging_files()
+
+    wrong_code_path = os.path.join(
+        os.path.dirname(output_path), "windows-agent-status-wrong-code.json"
+    )
+    os.replace = original_replace
+    publish(wrong_code_path, "create", "running", "")
+    with open(wrong_code_path, "rb") as handle:
+        wrong_code_before = handle.read()
+    wrong_code_attempts = []
+    wrong_code_error = windows_replace_error(87)
+    sleep_calls.clear()
+    def wrong_code_replace(source, destination):
+        wrong_code_attempts.append((source, destination))
+        raise wrong_code_error
+    os.replace = wrong_code_replace
+    try:
+        publish(wrong_code_path, "replace", "completed", "0")
+    except PermissionError as error:
+        assert error is wrong_code_error
+    else:
+        raise AssertionError("non-transient Windows permission error was swallowed")
+    assert len(wrong_code_attempts) == 1, wrong_code_attempts
+    assert not sleep_calls, sleep_calls
+    with open(wrong_code_path, "rb") as handle:
+        assert handle.read() == wrong_code_before
+    assert_no_staging_files()
+
+    if original_name != "nt":
+        posix_path = os.path.join(
+            os.path.dirname(output_path), "posix-agent-status-one-shot.json"
+        )
+        os.replace = original_replace
+        publish(posix_path, "create", "running", "")
+        os.name = original_name
+        if original_fchmod is not None:
+            os.fchmod = original_fchmod
+        posix_attempts = []
+        sleep_calls.clear()
+        def posix_replace(source, destination):
+            posix_attempts.append((source, destination))
+            raise windows_replace_error(5)
+        os.replace = posix_replace
+        try:
+            publish(posix_path, "replace", "completed", "0")
+        except PermissionError as error:
+            assert error.winerror == 5
+        else:
+            raise AssertionError("POSIX status replacement unexpectedly retried")
+        assert len(posix_attempts) == 1, posix_attempts
+        assert not sleep_calls, sleep_calls
+        assert_no_staging_files()
+        os.name = "nt"
+        if original_fchmod is not None:
+            del os.fchmod
 finally:
     os.name = original_name
+    os.replace = original_replace
+    time.monotonic = original_monotonic
+    time.sleep = original_sleep
     if original_fchmod is not None:
         os.fchmod = original_fchmod
     if original_msvcrt is None:
         del sys.modules["msvcrt"]
     else:
         sys.modules["msvcrt"] = original_msvcrt
-with open(output_path, encoding="utf-8") as handle:
-    payload = json.load(handle)
-assert payload["state"] == "completed" and payload["exit_code"] == 0
-assert not glob.glob(os.path.join(os.path.dirname(output_path), ".agent-status.*"))
 PY
 
 python3 -I - "$LIB" "$TMP/run" <<'PY'
@@ -204,6 +404,171 @@ finally:
     os.name = original_name
     if original_fchmod is not None:
         os.fchmod = original_fchmod
+PY
+
+python3 -I - "$LIB" "$TMP/windows-context-validation" <<'PY'
+import contextlib
+import hashlib
+import io
+import os
+import stat
+import sys
+
+source_path, run_root = sys.argv[1:]
+with open(source_path, encoding="utf-8") as handle:
+    source = handle.read()
+function = source.index("uberdev_agent_context_validate() {")
+prefix = "payload=\"$(python3 -I -B -c '\n"
+start = source.index(prefix, function) + len(prefix)
+end = source.index("\n' \"$1\" \"$2\" \"$3\")\"", start)
+snippet = source[start:end]
+
+run_root = os.path.realpath(run_root)
+state = os.path.join(run_root, ".agent-state-0")
+os.makedirs(state)
+context_path = os.path.join(state, "route-context-v1-windows-validator.json")
+payload = b'{"metadata":{"run_id":"windows-validator","workflow":"review-pr"}}'
+digest = hashlib.sha256(payload).hexdigest()
+with open(context_path, "wb") as handle:
+    handle.write(payload)
+# POSIX permission bits are not a meaningful native-Windows signal, so the
+# Windows branch intentionally does not enforce the 0600 POSIX mode gate.
+os.chmod(context_path, 0o644)
+
+real_open = os.open
+real_stat = os.stat
+real_lstat = os.lstat
+original_name = os.name
+original_normcase = os.path.normcase
+original_geteuid = getattr(os, "geteuid", None)
+original_supports_dir_fd = os.supports_dir_fd
+replacement_after_open = None
+case_only_lexical = None
+case_only_backing = None
+
+def absolute_open(path, flags, *args, **kwargs):
+    global replacement_after_open
+    assert "dir_fd" not in kwargs, "Windows validator used descriptor-relative os.open"
+    assert os.path.isabs(path), f"Windows validator opened a relative path: {path!r}"
+    actual_path = (
+        case_only_backing
+        if case_only_lexical is not None and os.path.abspath(path) == case_only_lexical
+        else path
+    )
+    descriptor = real_open(actual_path, flags, *args, **kwargs)
+    if (
+        replacement_after_open is not None
+        and os.path.normcase(os.path.abspath(path))
+        == os.path.normcase(os.path.abspath(context_path))
+        and flags & os.O_ACCMODE == os.O_RDONLY
+    ):
+        os.replace(replacement_after_open, context_path)
+        replacement_after_open = None
+    return descriptor
+
+def absolute_stat(path, *args, **kwargs):
+    assert "dir_fd" not in kwargs, "Windows validator used descriptor-relative os.stat"
+    assert os.path.isabs(path), f"Windows validator statted a relative path: {path!r}"
+    return real_stat(path, *args, **kwargs)
+
+def absolute_lstat(path, *args, **kwargs):
+    assert os.path.isabs(path), f"Windows validator lstatted a relative path: {path!r}"
+    absolute = os.path.abspath(path)
+    if case_only_lexical is not None:
+        if absolute == case_only_lexical:
+            path = case_only_backing
+        elif absolute == os.path.dirname(case_only_lexical):
+            path = os.path.dirname(case_only_backing)
+    return real_lstat(path, *args, **kwargs)
+
+def validate(candidate=context_path, expected=digest, expected_rc=0):
+    sys.argv = ["route-context-validator", candidate, expected, run_root]
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    rc = 0
+    try:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            exec(compile(snippet, "route-context-validator", "exec"), {})
+    except SystemExit as exc:
+        rc = exc.code
+    assert rc == expected_rc, (rc, stdout.getvalue(), stderr.getvalue())
+    if expected_rc == 0:
+        assert stdout.getvalue().encode() == payload
+        assert stderr.getvalue() == ""
+    else:
+        assert stderr.getvalue() == (
+            "uberdev agent dispatch: route_context_validation_failed\n"
+        )
+
+os.name = "nt"
+os.path.normcase = lambda value: original_normcase(value).casefold()
+os.supports_dir_fd = set()
+os.open = absolute_open
+os.stat = absolute_stat
+os.lstat = absolute_lstat
+if original_geteuid is not None:
+    del os.geteuid
+try:
+    validate()
+
+    with open(context_path, "wb") as handle:
+        handle.write(b"tampered")
+    validate(expected_rc=2)
+    with open(context_path, "wb") as handle:
+        handle.write(payload)
+
+    hardlink_path = os.path.join(run_root, "context-hardlink")
+    os.link(context_path, hardlink_path)
+    validate(expected_rc=2)
+    os.unlink(hardlink_path)
+
+    backing_path = os.path.join(run_root, "context-backing")
+    os.replace(context_path, backing_path)
+    os.symlink(backing_path, context_path)
+    validate(expected_rc=2)
+    os.unlink(context_path)
+    os.replace(backing_path, context_path)
+
+    escaped_path = os.path.join(
+        run_root, "route-context-v1-windows-validator-escaped.json"
+    )
+    with open(escaped_path, "wb") as handle:
+        handle.write(payload)
+    validate(candidate=escaped_path, expected_rc=2)
+
+    # Emulate native Windows path resolution even when this test runs on macOS.
+    # Alternate casing of the real state directory must remain valid, while the
+    # same case-folded spelling backed by a distinct directory inode must fail.
+    case_only_lexical = os.path.join(
+        run_root, ".AGENT-STATE-0", "route-context-v1-windows-validator.json"
+    )
+    case_only_backing = context_path
+    validate(candidate=case_only_lexical)
+
+    case_only_backing = os.path.join(
+        run_root, ".case-sensitive-sibling", "route-context-v1-windows-validator.json"
+    )
+    os.makedirs(os.path.dirname(case_only_backing))
+    with open(case_only_backing, "wb") as handle:
+        handle.write(payload)
+    validate(candidate=case_only_lexical, expected_rc=2)
+    case_only_lexical = None
+    case_only_backing = None
+
+    replacement_path = os.path.join(run_root, "context-replacement")
+    with open(replacement_path, "wb") as handle:
+        handle.write(b"replacement")
+    replacement_after_open = replacement_path
+    validate(expected_rc=2)
+finally:
+    os.name = original_name
+    os.path.normcase = original_normcase
+    os.supports_dir_fd = original_supports_dir_fd
+    os.open = real_open
+    os.stat = real_stat
+    os.lstat = real_lstat
+    if original_geteuid is not None:
+        os.geteuid = original_geteuid
 PY
 
 REQUEST="$(python3 - "$TMP/run" <<'PY'
@@ -1989,14 +2354,72 @@ _uberdev_agent_dispatch_backend() {
   nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(5)' >/dev/null 2>&1 &
   DISPATCH_ID="$!"; DISPATCH_LOG=""
   printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" > "$6"; chmod 600 "$6"
-  nohup bash -c 'sleep 1; printf '\''{"backend":"codex","state":"completed","exit_code":0,"pid":"%s"}\\n'\'' "$1" > "$2"; chmod 600 "$2"' _ "$DISPATCH_ID" "$6" >/dev/null 2>&1 &
 }
 uberdev_agent_dispatch "$WATCH_REQUEST" "$WATCH_RUN/prompt.txt" "$WATCH_RUN/result.md" "$WATCH_RUN/status.json"
-for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$WATCH_RUN/status.json.watcher-error.json" ] && break; sleep 1; done
+WATCH_LEASE="$(python3 -I - "$WATCH_RUN/.agent-state-$(id -u)/semaphore-v1" <<'PY'
+import pathlib,sys
+root=pathlib.Path(sys.argv[1])
+matches=[]
+for path in sorted(root.glob("*.scope/*.lease")):
+    try:
+        fields=dict(line.split("=",1) for line in path.read_text().splitlines())
+    except (OSError,ValueError):
+        continue
+    if fields.get("run_id")=="adapter-watcher-finalize-failure":
+        matches.append(path)
+if len(matches)!=1:
+    candidates=[str(path.relative_to(root)) for path in sorted(root.glob("*.scope/*.lease"))[:5]]
+    raise SystemExit(f"watcher-finalize-failure lease resolution failed: matches={len(matches)} candidates={candidates}")
+print(matches[0])
+PY
+)"
+read -r WATCH_PROCESS_IDENTITY WATCH_LEASE_GENERATION < <(
+  python3 -I - "$WATCH_RUN/status.json" "$WATCH_LEASE" <<'PY'
+import json,pathlib,sys
+status=json.loads(pathlib.Path(sys.argv[1]).read_text())
+lease=dict(line.split("=",1) for line in pathlib.Path(sys.argv[2]).read_text().splitlines())
+assert status.get("state")=="running",status
+process_identity=status.get("process_identity")
+lease_generation=status.get("lease_generation")
+assert process_identity and lease_generation,status
+assert lease.get("run_id")=="adapter-watcher-finalize-failure",lease
+assert lease.get("generation")==lease_generation,(lease.get("generation"),lease_generation)
+print(process_identity,lease_generation)
+PY
+)
+WATCH_LEASE_NATIVE_IDENTITY="$(_uberdev_semaphore_lease_identity \
+  "$WATCH_LEASE" "$WATCH_LEASE_GENERATION")" || {
+  echo "watcher-finalize-failure exact lease identity capture failed: path=$WATCH_LEASE generation=$WATCH_LEASE_GENERATION" >&2
+  exit 1
+}
+_uberdev_agent_publish_status "$WATCH_RUN/status.json" codex "$DISPATCH_ID" completed 0 provider
+for _ in $(seq 1 100); do [ -s "$WATCH_RUN/status.json.watcher-error.json" ] && break; sleep 0.1; done
 python3 -I - "$WATCH_RUN/status.json.watcher-error.json" <<'PY'
 import json,sys
 row=json.load(open(sys.argv[1]))
 assert row['error']=='terminal_finalize_failed' and row['attempts']==3,row
+PY
+WATCH_LEASE_AFTER_IDENTITY="$(_uberdev_semaphore_lease_identity \
+  "$WATCH_LEASE" "$WATCH_LEASE_GENERATION")" || {
+  echo "watcher-finalize-failure exact lease did not remain live: path=$WATCH_LEASE generation=$WATCH_LEASE_GENERATION" >&2
+  exit 1
+}
+python3 -I - "$WATCH_RUN/status.json" "$WATCH_LEASE" \
+  "$WATCH_PROCESS_IDENTITY" "$WATCH_LEASE_GENERATION" \
+  "$WATCH_LEASE_NATIVE_IDENTITY" "$WATCH_LEASE_AFTER_IDENTITY" <<'PY'
+import json,pathlib,sys
+status_path,lease_path,process_identity,generation,before_identity,after_identity=sys.argv[1:]
+status=json.loads(pathlib.Path(status_path).read_text())
+lease=dict(line.split("=",1) for line in pathlib.Path(lease_path).read_text().splitlines())
+observed={key:status.get(key) for key in ("state","process_identity","lease_generation")}
+assert observed=={
+    "state":"completed",
+    "process_identity":process_identity,
+    "lease_generation":generation,
+},observed
+assert lease.get("run_id")=="adapter-watcher-finalize-failure",lease
+assert lease.get("generation")==generation,(lease.get("generation"),generation)
+assert after_identity==before_identity,(before_identity,after_identity)
 PY
 eval "$(declare -f _real_watcher_finalize_terminal | sed '1s/_real_watcher_finalize_terminal/_uberdev_agent_finalize_terminal/')"
 

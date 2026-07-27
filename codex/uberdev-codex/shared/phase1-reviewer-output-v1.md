@@ -19,7 +19,7 @@ single-line scalar grammar. Each value must be non-empty and have no leading or
 trailing whitespace or control characters. Use either a JSON-compatible
 double-quoted string, a YAML single-quoted string with embedded apostrophes
 doubled, or a plain scalar. Plain scalars may not begin with
-`-?:,[]{}#&*!|>@\``; contain `: ` or ` #`; or spell a YAML null, boolean, or
+`` -?:,[]{}#&*!|>@` ``; contain `: ` or ` #`; or spell a YAML null, boolean, or
 number token. YAML block scalars (`|` and `>`) and multi-line values are not
 accepted. Quote any value that is uncertain under these rules.
 

@@ -85,6 +85,597 @@ else
   fail "Linux process identity error classification" "$LINUX_IDENTITY_CLASSIFICATION"
 fi
 
+WINDOWS_PARENT_PROBE_SPLIT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
+import errno
+import importlib.util
+import json
+import pathlib
+import subprocess
+import sys
+import textwrap
+
+
+class Function:
+    def __init__(self, implementation):
+        self.implementation = implementation
+
+    def __call__(self, *args):
+        return self.implementation(*args)
+
+
+class Kernel32:
+    def __init__(self):
+        self.next_handle = 72
+        self.open_handles = set()
+        self.open_access = []
+        self.closed = []
+        self.signaled = False
+        self.wait_result = None
+        self.exit_checks = []
+        self.wait_checks = []
+        self.OpenProcess = Function(self.open_process)
+        self.GetExitCodeProcess = Function(self.get_exit_code)
+        self.WaitForSingleObject = Function(self.wait_for_single_object)
+        self.GetProcessTimes = Function(self.get_process_times)
+        self.CloseHandle = Function(self.close_handle)
+
+    def open_process(self, access, _inherit, _pid):
+        self.next_handle += 1
+        self.open_handles.add(self.next_handle)
+        self.open_access.append(access)
+        return self.next_handle
+
+    def get_exit_code(self, handle, exit_code):
+        assert handle in self.open_handles, handle
+        self.exit_checks.append(handle)
+        exit_code._obj.value = 259
+        return 1
+
+    def wait_for_single_object(self, handle, timeout):
+        assert handle in self.open_handles, handle
+        assert timeout == 0, timeout
+        result = (
+            self.wait_result
+            if self.wait_result is not None
+            else (0 if self.signaled else 258)
+        )
+        self.wait_checks.append(result)
+        return result
+
+    @staticmethod
+    def get_process_times(_handle, created, _exited, _kernel, _user):
+        created._obj.low = 41
+        created._obj.high = 1
+        return 1
+
+    def close_handle(self, handle):
+        assert handle in self.open_handles, handle
+        self.open_handles.remove(handle)
+        self.closed.append(handle)
+        return 1
+
+
+for index, module_path in enumerate(sys.argv[1:]):
+    spec = importlib.util.spec_from_file_location(f"run_manifest_windows_parent_split_{index}", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    kernel32 = Kernel32()
+    module.ctypes.WinDLL = lambda *_args, **_kwargs: kernel32
+    parent_calls = []
+
+    def snapshot_parent(pid):
+        assert kernel32.open_handles, "parent snapshot ran without a live process handle"
+        parent_calls.append(pid)
+        return 17
+
+    module._windows_parent_pid = snapshot_parent
+    module._native_process_record = module._windows_process_record
+    classification, identity = module._process_identity(424242)
+    assert classification == "captured" and identity is not None, classification
+    assert parent_calls == [], f"normal identity probe took a process-table snapshot: {parent_calls}"
+
+    original_platform = module.sys.platform
+    original_os_name = module.os.name
+    try:
+        module.sys.platform = "win32"
+        module.os.name = "nt"
+        parent, parent_creation_ticks = (
+            module._windows_guarded_parent_record(424242)
+        )
+    finally:
+        module.sys.platform = original_platform
+        module.os.name = original_os_name
+    assert parent == 17, parent
+    assert parent_creation_ticks == (1 << 32) | 41, parent_creation_ticks
+    assert parent_calls == [424242], parent_calls
+    assert not kernel32.open_handles, kernel32.open_handles
+    assert kernel32.closed == [73, 75, 74], kernel32.closed
+    assert kernel32.open_access == [0x101000] * 3, kernel32.open_access
+
+    race_kernel32 = Kernel32()
+    module.ctypes.WinDLL = lambda *_args, **_kwargs: race_kernel32
+
+    def exiting_snapshot(pid):
+        assert race_kernel32.open_handles, "snapshot ran without a live process handle"
+        race_kernel32.signaled = True
+        return 23
+
+    module._windows_parent_pid = exiting_snapshot
+    try:
+        module.sys.platform = "win32"
+        module.os.name = "nt"
+        try:
+            module._windows_guarded_parent_record(424242)
+        except ProcessLookupError:
+            pass
+        else:
+            raise AssertionError("parent accepted after guarded process exited")
+    finally:
+        module.sys.platform = original_platform
+        module.os.name = original_os_name
+    assert race_kernel32.wait_checks == [258, 0], race_kernel32.wait_checks
+    assert race_kernel32.exit_checks == [], race_kernel32.exit_checks
+    assert race_kernel32.open_access == [0x101000], race_kernel32.open_access
+    assert not race_kernel32.open_handles, race_kernel32.open_handles
+    assert race_kernel32.closed == [73], race_kernel32.closed
+
+    missing_kernel32 = Kernel32()
+    module.ctypes.WinDLL = lambda *_args, **_kwargs: missing_kernel32
+
+    def missing_snapshot(pid):
+        assert missing_kernel32.open_handles, "snapshot ran without a live process handle"
+        raise ProcessLookupError(pid)
+
+    module._windows_parent_pid = missing_snapshot
+    try:
+        module.sys.platform = "win32"
+        module.os.name = "nt"
+        try:
+            module._windows_guarded_parent_record(424242)
+        except OSError as error:
+            assert not isinstance(error, ProcessLookupError), type(error)
+            assert error.errno == errno.EAGAIN, error
+        else:
+            raise AssertionError("snapshot disappearance was not unavailable evidence")
+    finally:
+        module.sys.platform = original_platform
+        module.os.name = original_os_name
+    assert missing_kernel32.wait_checks == [258], missing_kernel32.wait_checks
+    assert missing_kernel32.exit_checks == [], missing_kernel32.exit_checks
+    assert not missing_kernel32.open_handles, missing_kernel32.open_handles
+    assert missing_kernel32.closed == [73], missing_kernel32.closed
+    assert missing_kernel32.closed.count(73) == 1, missing_kernel32.closed
+
+    had_get_last_error = hasattr(module.ctypes, "get_last_error")
+    original_get_last_error = getattr(module.ctypes, "get_last_error", None)
+    module.ctypes.get_last_error = lambda: 5
+    try:
+        for wait_result in (0xFFFFFFFF, 7):
+            unavailable_kernel32 = Kernel32()
+            unavailable_kernel32.wait_result = wait_result
+            module.ctypes.WinDLL = lambda *_args, **_kwargs: unavailable_kernel32
+            classification, identity = module._process_identity(424242)
+            assert classification == "unavailable" and identity is None, (
+                wait_result, classification, identity
+            )
+            assert unavailable_kernel32.wait_checks == [wait_result], (
+                unavailable_kernel32.wait_checks
+            )
+            assert unavailable_kernel32.exit_checks == [], (
+                unavailable_kernel32.exit_checks
+            )
+            assert unavailable_kernel32.open_access == [0x101000], (
+                unavailable_kernel32.open_access
+            )
+            assert unavailable_kernel32.closed == [73], (
+                unavailable_kernel32.closed
+            )
+    finally:
+        if had_get_last_error:
+            module.ctypes.get_last_error = original_get_last_error
+        else:
+            del module.ctypes.get_last_error
+
+    close_failure_kernel32 = Kernel32()
+
+    def false_close(handle):
+        assert handle in close_failure_kernel32.open_handles, handle
+        return 0
+
+    close_failure_kernel32.CloseHandle = Function(false_close)
+    module.ctypes.WinDLL = lambda *_args, **_kwargs: close_failure_kernel32
+    try:
+        with module._windows_live_process(424242):
+            pass
+    except module.ManifestRuntimeError as error:
+        assert str(error) == "windows_handle_close_failed", str(error)
+    else:
+        raise AssertionError("false CloseHandle result was accepted")
+    primary_close_error = ProcessLookupError(424242)
+    try:
+        with module._windows_live_process(424242):
+            raise primary_close_error
+    except ProcessLookupError as error:
+        assert error is primary_close_error, (error, primary_close_error)
+        assert module._cleanup_diagnostic(error) == {
+            "code": "windows_handle_close_failed"
+        }
+    else:
+        raise AssertionError("CloseHandle replaced the primary exception")
+
+    raw = pathlib.Path(module_path).read_text(encoding="utf-8")
+    assert ".add_note(" not in raw
+    assert "sys.exception(" not in raw
+    program = textwrap.dedent(
+        """
+        import importlib.util
+        import sys
+
+        module_path = sys.argv[1]
+        spec = importlib.util.spec_from_file_location("run_manifest_cli", module_path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        primary = ProcessLookupError(424242)
+        module._record_cleanup_diagnostic(
+            primary, "windows_handle_close_failed"
+        )
+        def injected_record(_pid):
+            raise primary
+        module._native_process_record = injected_record
+        raise SystemExit(module.main(["process-identity", "--pid", "424242"]))
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", program, module_path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        text=True,
+    )
+    assert completed.returncode == 1, (index, completed.returncode)
+    assert completed.stdout == "", (index, completed.stdout)
+    assert json.loads(completed.stderr) == {
+        "cleanup_diagnostic": {"code": "windows_handle_close_failed"},
+        "process_identity_status": "absent",
+        "status": "warning",
+    }, (index, completed.stderr)
+
+    print(
+        "captured/signaled-259-rejected/"
+        "snapshot-unavailable/wait-errors-unavailable/close-failures-visible"
+    )
+PY
+)"
+if [ "$WINDOWS_PARENT_PROBE_SPLIT" = $'captured/signaled-259-rejected/snapshot-unavailable/wait-errors-unavailable/close-failures-visible\ncaptured/signaled-259-rejected/snapshot-unavailable/wait-errors-unavailable/close-failures-visible' ]; then
+  pass "Windows liveness rejects signaled handles even when exit code is 259"
+else
+  fail "Windows process identity/parent lookup split" "$WINDOWS_PARENT_PROBE_SPLIT"
+fi
+
+WINDOWS_PARENT_GENERATION_BINDING="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
+import hashlib
+import importlib.util
+import pathlib
+import sys
+import tempfile
+
+
+class Function:
+    def __init__(self, implementation):
+        self.implementation = implementation
+
+    def __call__(self, *args):
+        return self.implementation(*args)
+
+
+class Kernel32:
+    def __init__(self, generations, parents, recycle_on_close=None):
+        self.generations = dict(generations)
+        self.parents = dict(parents)
+        self.recycle_on_close = dict(recycle_on_close or {})
+        self.next_handle = 72
+        self.open_handles = {}
+        self.open_calls = []
+        self.closed = []
+        self.snapshot_calls = []
+        self.OpenProcess = Function(self.open_process)
+        self.GetExitCodeProcess = Function(self.get_exit_code)
+        self.WaitForSingleObject = Function(self.wait_for_single_object)
+        self.GetProcessTimes = Function(self.get_process_times)
+        self.CloseHandle = Function(self.close_handle)
+
+    def open_process(self, access, _inherit, pid):
+        assert access == 0x101000, access
+        self.next_handle += 1
+        self.open_handles[self.next_handle] = pid
+        self.open_calls.append(pid)
+        return self.next_handle
+
+    def get_exit_code(self, handle, exit_code):
+        assert handle in self.open_handles, handle
+        exit_code._obj.value = 259
+        return 1
+
+    def wait_for_single_object(self, handle, timeout):
+        assert handle in self.open_handles, handle
+        assert timeout == 0, timeout
+        return 258
+
+    def get_process_times(self, handle, created, _exited, _kernel, _user):
+        pid = self.open_handles[handle]
+        ticks = self.generations[pid]
+        created._obj.low = ticks & 0xFFFFFFFF
+        created._obj.high = ticks >> 32
+        return 1
+
+    def close_handle(self, handle):
+        pid = self.open_handles.pop(handle)
+        self.closed.append(handle)
+        replacement = self.recycle_on_close.get(pid)
+        if replacement is not None:
+            replacement_pid, replacement_ticks = replacement
+            self.generations[replacement_pid] = replacement_ticks
+        return 1
+
+    def snapshot_parent(self, pid):
+        assert pid in self.open_handles.values(), (
+            "parent snapshot ran without the guarded child handle"
+        )
+        self.snapshot_calls.append(pid)
+        return self.parents[pid]
+
+
+def expected_identity(pid, creation_ticks):
+    digest = hashlib.sha256(f"windows:{creation_ticks}".encode()).hexdigest()
+    return f"{pid}|{pid}|{pid}|{digest}"
+
+
+for index, module_path in enumerate(sys.argv[1:]):
+    spec = importlib.util.spec_from_file_location(
+        f"run_manifest_windows_parent_generation_{index}", module_path
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    original_platform = module.sys.platform
+    original_os_name = module.os.name
+    original_getppid = module.os.getppid
+    had_windll = hasattr(module.ctypes, "WinDLL")
+    original_windll = getattr(module.ctypes, "WinDLL", None)
+    try:
+        temporary_parent = pathlib.Path(tempfile.gettempdir()).resolve()
+        with tempfile.TemporaryDirectory(dir=temporary_parent) as temporary:
+            root = pathlib.Path(temporary)
+            direct = root / "direct"
+            parent = root / "parent"
+            newer = root / "newer"
+            direct.touch(mode=0o600)
+            parent.touch(mode=0o600)
+            newer.touch(mode=0o600)
+
+            module.sys.platform = "win32"
+            module.os.name = "nt"
+            module.os.getppid = lambda: 100
+            direct_kernel = Kernel32(
+                {100: 300, 200: 200},
+                {100: 200},
+                {100: (200, 400)},
+            )
+            module.ctypes.WinDLL = lambda *_args, **_kwargs: direct_kernel
+            module._windows_parent_pid = direct_kernel.snapshot_parent
+            module._write_process_identity("direct", str(direct))
+            expected = f"200\n{expected_identity(200, 200)}\n".encode()
+            assert direct.read_bytes() == expected, direct.read_bytes()
+            assert direct_kernel.open_calls == [100, 200], direct_kernel.open_calls
+            assert direct_kernel.closed == [74, 73], direct_kernel.closed
+
+            parent_kernel = Kernel32(
+                {100: 300, 200: 200, 300: 100},
+                {100: 200, 200: 300},
+                {100: (200, 400)},
+            )
+            module.ctypes.WinDLL = lambda *_args, **_kwargs: parent_kernel
+            module._windows_parent_pid = parent_kernel.snapshot_parent
+            try:
+                module._write_process_identity("parent", str(parent))
+            except module.ManifestRuntimeError as error:
+                assert str(error) == "process_identity_parent_absent", str(error)
+            else:
+                raise AssertionError("recycled parent generation was traversed")
+            assert parent.read_bytes() == b""
+            assert parent_kernel.snapshot_calls == [100], parent_kernel.snapshot_calls
+            assert parent_kernel.open_calls == [100, 200, 200], parent_kernel.open_calls
+            assert parent_kernel.closed == [74, 73, 75], parent_kernel.closed
+
+            newer_kernel = Kernel32(
+                {100: 300, 200: 400},
+                {100: 200},
+            )
+            module.ctypes.WinDLL = lambda *_args, **_kwargs: newer_kernel
+            module._windows_parent_pid = newer_kernel.snapshot_parent
+            try:
+                module._write_process_identity("direct", str(newer))
+            except module.ManifestRuntimeError as error:
+                assert str(error) == "process_identity_parent_unavailable", str(error)
+            else:
+                raise AssertionError("parent created after child was accepted")
+            assert newer.read_bytes() == b""
+            assert newer_kernel.open_calls == [100, 200], newer_kernel.open_calls
+            assert newer_kernel.closed == [74, 73], newer_kernel.closed
+    finally:
+        module.sys.platform = original_platform
+        module.os.name = original_os_name
+        module.os.getppid = original_getppid
+        if had_windll:
+            module.ctypes.WinDLL = original_windll
+        elif hasattr(module.ctypes, "WinDLL"):
+            del module.ctypes.WinDLL
+    print("bound/recycled-rejected/newer-rejected")
+PY
+)"
+if [ "$WINDOWS_PARENT_GENERATION_BINDING" = $'bound/recycled-rejected/newer-rejected\nbound/recycled-rejected/newer-rejected' ]; then
+  pass "Windows parent traversal carries and validates bound process generations"
+else
+  fail "Windows parent generation binding" "$WINDOWS_PARENT_GENERATION_BINDING"
+fi
+
+SUPPORTED_PLATFORM_POLICY="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
+import importlib.util
+import sys
+
+for index, module_path in enumerate(sys.argv[1:]):
+    spec = importlib.util.spec_from_file_location(f"run_manifest_supported_platforms_{index}", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    assert module.SUPPORTED_PROCESS_IDENTITY_PLATFORMS == (
+        "linux", "darwin", "windows"
+    )
+    original_platform = module.sys.platform
+    original_os_name = module.os.name
+    try:
+        module.sys.platform = "freebsd14"
+        module.os.name = "posix"
+        try:
+            module._native_process_record(424242)
+        except OSError as error:
+            assert str(error) == (
+                "unsupported process identity platform; "
+                "supported platforms: linux, darwin, windows"
+            ), str(error)
+        else:
+            raise AssertionError("unsupported POSIX received a degraded identity")
+        assert module._process_identity(424242) == ("unavailable", None)
+    finally:
+        module.sys.platform = original_platform
+        module.os.name = original_os_name
+    print(",".join(module.SUPPORTED_PROCESS_IDENTITY_PLATFORMS))
+PY
+)"
+if [ "$SUPPORTED_PLATFORM_POLICY" = $'linux,darwin,windows\nlinux,darwin,windows' ]; then
+  pass "process identity explicitly supports only Linux, macOS, and Windows"
+else
+  fail "process identity supported-platform policy" "$SUPPORTED_PLATFORM_POLICY"
+fi
+if grep -Fq \
+    'Process-identity reconciliation is supported on Linux, macOS, and native Windows' \
+    "$ROOT/README.md"; then
+  pass "README states the process-identity supported-platform contract"
+else
+  fail "README process-identity supported-platform contract" "supported trio is undocumented"
+fi
+
+PROCESS_IDENTITY_CANDIDATE_SECURITY="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
+import importlib.util
+import pathlib
+import sys
+import tempfile
+
+for index, module_path in enumerate(sys.argv[1:]):
+    spec = importlib.util.spec_from_file_location(f"run_manifest_identity_candidate_{index}", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    module.os.getppid = lambda: 41
+    module._process_identity = lambda pid: (
+        "captured", f"{pid}|{pid}|{pid}|" + ("a" * 64)
+    )
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        candidate = root / "owner-candidate"
+        victim = root / "victim"
+        victim.write_bytes(b"unchanged")
+        candidate.symlink_to(victim)
+        try:
+            module._write_process_identity("direct", str(candidate))
+        except (module.ManifestRejected, module.ManifestRuntimeError):
+            pass
+        else:
+            raise AssertionError("symlinked process-identity candidate was accepted")
+        assert victim.read_bytes() == b"unchanged"
+
+        candidate.unlink()
+        candidate.touch(mode=0o600)
+        real_write = module.os.write
+        real_ftruncate = module.os.ftruncate
+        real_close = module.os.close
+        replacement_descriptors = []
+        replacement_close_offsets = []
+        rollback_calls = []
+        close_calls = []
+
+        def replace_during_write(descriptor, payload):
+            replacement_descriptors.append(descriptor)
+            replacement_close_offsets.append(len(close_calls))
+            candidate.unlink()
+            candidate.symlink_to(victim)
+            return real_write(descriptor, payload)
+
+        def track_ftruncate(descriptor, length):
+            rollback_calls.append((descriptor, length))
+            return real_ftruncate(descriptor, length)
+
+        def track_close(descriptor):
+            close_calls.append(descriptor)
+            return real_close(descriptor)
+
+        module.os.write = replace_during_write
+        module.os.ftruncate = track_ftruncate
+        module.os.close = track_close
+        try:
+            try:
+                module._write_process_identity("direct", str(candidate))
+            except module.ManifestRejected as error:
+                assert str(error) == "process_identity_candidate_replaced", str(error)
+            else:
+                raise AssertionError("replaced process-identity candidate was accepted")
+        finally:
+            module.os.write = real_write
+            module.os.ftruncate = real_ftruncate
+            module.os.close = real_close
+        assert len(replacement_descriptors) == 1, replacement_descriptors
+        original_descriptor = replacement_descriptors[0]
+        assert rollback_calls == [(original_descriptor, 0)], rollback_calls
+        assert close_calls[replacement_close_offsets[0]:] == [
+            original_descriptor
+        ], close_calls
+        assert victim.read_bytes() == b"unchanged"
+
+        candidate.unlink()
+        candidate.touch(mode=0o600)
+        real_write = module.os.write
+
+        def short_write(descriptor, payload):
+            return real_write(descriptor, payload[:1])
+
+        module.os.write = short_write
+        try:
+            try:
+                module._write_process_identity("direct", str(candidate))
+            except module.ManifestRuntimeError as error:
+                assert str(error) == "process_identity_short_write", str(error)
+            else:
+                raise AssertionError("short process-identity write succeeded")
+        finally:
+            module.os.write = real_write
+        assert candidate.read_bytes() == b""
+    print("candidate-secure")
+PY
+)"
+if [ "$PROCESS_IDENTITY_CANDIDATE_SECURITY" = $'candidate-secure\ncandidate-secure' ]; then
+  pass "process identity securely binds, verifies, and rolls back its pre-created candidate"
+else
+  fail "process identity candidate security" "$PROCESS_IDENTITY_CANDIDATE_SECURITY"
+fi
+
 printf '== run manifest: fixture verification ==\n'
 capture python3 "$MANIFEST" verify --manifest "$FIXTURES/valid.jsonl" --strict
 if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = '{"events":3,"runs":1,"status":"ok"}' ]; then

@@ -2234,7 +2234,10 @@ time.sleep(30)'\'' "$live_pid_file" &
     i=0; while [ ! -s "$live_pid_file" ] && [ "$i" -lt 200 ]; do sleep 0.025; i=$((i + 1)); done
     live_pid="$(cat "$live_pid_file" 2>/dev/null)"
     printf "{\"backend\":\"codex\",\"state\":\"completed\",\"exit_code\":0,\"pid\":\"%s\"}\n" "$live_pid" > "$UBERDEV_AGENT_STATUS_FILE"
-    ! _uberdev_dispatch_accept_immediate_terminal codex "$live_pid" "$UBERDEV_AGENT_STATUS_FILE" "$UBERDEV_AGENT_RESULT_FILE" >/dev/null 2>&1 || failures=$((failures + 1))
+    if _uberdev_dispatch_accept_immediate_terminal codex "$live_pid" "$UBERDEV_AGENT_STATUS_FILE" "$UBERDEV_AGENT_RESULT_FILE" >/dev/null 2>&1; then
+      failures=$((failures + 1))
+      details="$details known-live-native-pid-terminal-accepted pid=${live_pid:-missing} status=$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)"
+    fi
     _uberdev_dispatch_python -I -c '\''import os,signal,sys; os.kill(int(sys.argv[1]),signal.SIGTERM)'\'' "$live_pid" 2>/dev/null || true
     wait "$live_launch_pid" 2>/dev/null || true
     printf "failures=%s%s\n" "$failures" "$details"

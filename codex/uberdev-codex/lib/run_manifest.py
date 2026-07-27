@@ -12,6 +12,8 @@ The public CLI intentionally has three small operations:
 
 Only the Python standard library is used.  Manifest directories and files are
 made private before use, and direct symlink targets are rejected.
+Kernel creation identities are supported on Linux, macOS, and native Windows;
+other platforms fail closed instead of synthesizing a degraded fingerprint.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 try:
     import fcntl as _fcntl
@@ -54,6 +56,15 @@ TERMINAL_EVENTS = frozenset(
     {"completed", "failed", "timed_out", "cancelled", "abandoned"}
 )
 LIFECYCLE_EVENTS = frozenset({"route_decided", "agent_started"}) | TERMINAL_EVENTS
+SUPPORTED_PROCESS_IDENTITY_PLATFORMS = ("linux", "darwin", "windows")
+_WINDOWS_PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000
+_WINDOWS_SYNCHRONIZE = 0x00100000
+_WINDOWS_PROCESS_LIVENESS_ACCESS = (
+    _WINDOWS_PROCESS_QUERY_LIMITED_INFORMATION | _WINDOWS_SYNCHRONIZE
+)
+_WINDOWS_WAIT_OBJECT_0 = 0x00000000
+_WINDOWS_WAIT_TIMEOUT = 0x00000102
+_WINDOWS_WAIT_FAILED = 0xFFFFFFFF
 
 # RFC 0013 section 13 fields plus the minimal process metadata required to
 # reconcile an interrupted agent_started event.  This is deliberately closed:
@@ -217,6 +228,35 @@ class ManifestRejected(ValueError):
 
 class ManifestRuntimeError(RuntimeError):
     """The private manifest could not be safely read or written."""
+
+
+_CLEANUP_DIAGNOSTIC_ATTRIBUTE = "_uberdev_manifest_cleanup_code"
+_CLEANUP_DIAGNOSTIC_CODES = frozenset({"windows_handle_close_failed"})
+
+
+def _record_cleanup_diagnostic(primary: BaseException, code: str) -> None:
+    if code in _CLEANUP_DIAGNOSTIC_CODES:
+        setattr(primary, _CLEANUP_DIAGNOSTIC_ATTRIBUTE, code)
+
+
+def _cleanup_diagnostic(primary: BaseException) -> dict[str, str] | None:
+    code = getattr(primary, _CLEANUP_DIAGNOSTIC_ATTRIBUTE, None)
+    if code not in _CLEANUP_DIAGNOSTIC_CODES:
+        return None
+    return {"code": code}
+
+
+def _close_windows_handle(
+    kernel32: Any,
+    handle: Any,
+    primary: BaseException | None = None,
+) -> bool:
+    if kernel32.CloseHandle(handle):
+        return True
+    if primary is not None:
+        _record_cleanup_diagnostic(primary, "windows_handle_close_failed")
+        return False
+    raise ManifestRuntimeError("windows_handle_close_failed")
 
 
 @dataclass
@@ -919,11 +959,16 @@ def _windows_parent_pid(pid: int) -> int:
                 return int(entry.th32ParentProcessID)
             found = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
     finally:
-        kernel32.CloseHandle(snapshot)
+        _close_windows_handle(kernel32, snapshot, primary=sys.exc_info()[1])
     raise ProcessLookupError(pid)
 
 
-def _windows_process_record(pid: int) -> tuple[int, int, int, str]:
+@contextmanager
+def _windows_live_process(
+    pid: int,
+) -> Iterable[tuple[int, Callable[[], None]]]:
+    """Hold a validated live process handle while its identity is consumed."""
+
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
     class FileTime(ctypes.Structure):
@@ -931,8 +976,8 @@ def _windows_process_record(pid: int) -> tuple[int, int, int, str]:
 
     kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
     kernel32.OpenProcess.restype = ctypes.c_void_p
-    kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
-    kernel32.GetExitCodeProcess.restype = ctypes.c_int
+    kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel32.WaitForSingleObject.restype = ctypes.c_uint32
     kernel32.GetProcessTimes.argtypes = [
         ctypes.c_void_p, ctypes.POINTER(FileTime), ctypes.POINTER(FileTime),
         ctypes.POINTER(FileTime), ctypes.POINTER(FileTime),
@@ -940,18 +985,31 @@ def _windows_process_record(pid: int) -> tuple[int, int, int, str]:
     kernel32.GetProcessTimes.restype = ctypes.c_int
     kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
     kernel32.CloseHandle.restype = ctypes.c_int
-    handle = kernel32.OpenProcess(0x1000, False, pid)
+    handle = kernel32.OpenProcess(
+        _WINDOWS_PROCESS_LIVENESS_ACCESS, False, pid
+    )
     if not handle:
         error = ctypes.get_last_error()
         if error in {87, 1168}:
             raise ProcessLookupError(pid)
         raise OSError(error or errno.EIO, "OpenProcess failed")
     try:
-        exit_code = ctypes.c_uint32()
-        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-            raise OSError(ctypes.get_last_error(), "GetExitCodeProcess failed")
-        if exit_code.value != 259:
-            raise ProcessLookupError(pid)
+        def require_still_active() -> None:
+            wait_result = int(kernel32.WaitForSingleObject(handle, 0))
+            if wait_result == _WINDOWS_WAIT_TIMEOUT:
+                return
+            if wait_result == _WINDOWS_WAIT_OBJECT_0:
+                raise ProcessLookupError(pid)
+            if wait_result == _WINDOWS_WAIT_FAILED:
+                raise OSError(
+                    ctypes.get_last_error() or errno.EIO,
+                    "WaitForSingleObject failed",
+                )
+            raise OSError(
+                errno.EIO, "WaitForSingleObject returned an unexpected status"
+            )
+
+        require_still_active()
         created, exited, kernel, user = FileTime(), FileTime(), FileTime(), FileTime()
         if not kernel32.GetProcessTimes(
             handle, ctypes.byref(created), ctypes.byref(exited),
@@ -961,36 +1019,149 @@ def _windows_process_record(pid: int) -> tuple[int, int, int, str]:
         creation_ticks = (int(created.high) << 32) | int(created.low)
         if creation_ticks <= 0:
             raise OSError("process creation time unavailable")
+        yield creation_ticks, require_still_active
+        # Consumers may perform a process-table snapshot while this handle is
+        # open. Refuse its result if the handle was signaled in that window.
+        require_still_active()
     finally:
-        kernel32.CloseHandle(handle)
+        _close_windows_handle(kernel32, handle, primary=sys.exc_info()[1])
+
+
+def _windows_process_record(pid: int) -> tuple[int, int, int, str]:
+    with _windows_live_process(pid) as (creation_ticks, _require_still_active):
+        pass
     # Windows has no POSIX process groups or sessions. The PID is retained in
     # those schema slots while the kernel creation FILETIME provides the
     # authoritative anti-reuse identity.
-    return _windows_parent_pid(pid), pid, pid, f"windows:{creation_ticks}"
+    return pid, pid, pid, f"windows:{creation_ticks}"
+
+
+def _windows_guarded_parent_record(
+    pid: int,
+    expected_creation_ticks: int | None = None,
+) -> tuple[int, int]:
+    with _windows_live_process(pid) as (
+        child_creation_ticks,
+        require_child_still_active,
+    ):
+        if (
+            expected_creation_ticks is not None
+            and child_creation_ticks != expected_creation_ticks
+        ):
+            raise ProcessLookupError(pid)
+        try:
+            parent_pid = _windows_parent_pid(pid)
+        except ProcessLookupError as exc:
+            # The process handle, nonsignaled state, and creation time were
+            # validated before the snapshot. A later miss is unavailable
+            # evidence rather than proof that the process is absent.
+            raise OSError(
+                errno.EAGAIN, "live process missing from Toolhelp snapshot"
+            ) from exc
+        require_child_still_active()
+        try:
+            with _windows_live_process(parent_pid) as (
+                parent_creation_ticks,
+                _require_parent_still_active,
+            ):
+                if parent_creation_ticks > child_creation_ticks:
+                    raise OSError(
+                        errno.EAGAIN,
+                        "snapshot parent was created after its child",
+                    )
+        except ProcessLookupError as exc:
+            raise OSError(
+                errno.EAGAIN, "snapshot parent identity unavailable"
+            ) from exc
+        return parent_pid, parent_creation_ticks
+
+
+def _process_identity_platform() -> str | None:
+    if sys.platform.startswith("linux"):
+        return "linux"
+    if sys.platform == "darwin":
+        return "darwin"
+    if os.name == "nt":
+        return "windows"
+    return None
+
+
+def _uses_native_windows_filesystem() -> bool:
+    """Return whether this interpreter requires native-Windows file APIs.
+
+    Owner-depth model tests deliberately vary ``os.name``.  The interpreter's
+    native platform remains authoritative for filesystem capabilities, so a
+    Windows process must never enter the POSIX ``dir_fd`` walk while that model
+    is active.
+    """
+
+    return os.name == "nt" or sys.platform == "win32"
+
+
+def _unsupported_process_identity_platform() -> OSError:
+    supported = ", ".join(SUPPORTED_PROCESS_IDENTITY_PLATFORMS)
+    return OSError(
+        f"unsupported process identity platform; supported platforms: {supported}"
+    )
 
 
 def _native_process_record(pid: int) -> tuple[int, int, int, str]:
-    if sys.platform.startswith("linux"):
+    platform = _process_identity_platform()
+    if platform == "linux":
         return _linux_process_record(pid)
-    if sys.platform == "darwin":
+    if platform == "darwin":
         return _darwin_process_record(pid)
-    if os.name == "nt":
+    if platform == "windows":
         return _windows_process_record(pid)
-    raise OSError("unsupported process identity platform")
+    raise _unsupported_process_identity_platform()
 
 
-def _process_identity(pid: Any) -> tuple[str, str | None]:
+def _native_parent_pid(pid: int) -> int:
+    platform = _process_identity_platform()
+    if platform == "linux":
+        return _linux_process_record(pid)[0]
+    if platform == "darwin":
+        return _darwin_process_record(pid)[0]
+    if platform == "windows":
+        raise OSError(
+            errno.ENOTSUP,
+            "Windows parent traversal requires a bound creation identity",
+        )
+    raise _unsupported_process_identity_platform()
+
+
+def _format_process_identity(
+    pid: int,
+    pgid: int,
+    sid: int,
+    creation_identity: str,
+) -> str:
+    digest = hashlib.sha256(creation_identity.encode()).hexdigest()
+    return f"{pid}|{pgid}|{sid}|{digest}"
+
+
+def _process_identity(
+    pid: Any,
+    cleanup_diagnostics: list[dict[str, str]] | None = None,
+) -> tuple[str, str | None]:
     numeric_pid = _numeric_pid(pid)
     if numeric_pid is None:
         return "absent", None
     pid = numeric_pid
     try:
         _parent, pgid, sid, creation_identity = _native_process_record(pid)
-        digest = hashlib.sha256(creation_identity.encode()).hexdigest()
-        return "captured", f"{pid}|{pgid}|{sid}|{digest}"
-    except ProcessLookupError:
+        return "captured", _format_process_identity(
+            pid, pgid, sid, creation_identity
+        )
+    except ProcessLookupError as exc:
+        diagnostic = _cleanup_diagnostic(exc)
+        if diagnostic is not None and cleanup_diagnostics is not None:
+            cleanup_diagnostics.append(diagnostic)
         return "absent", None
-    except (AttributeError, OSError, ValueError):
+    except (AttributeError, OSError, ValueError) as exc:
+        diagnostic = _cleanup_diagnostic(exc)
+        if diagnostic is not None and cleanup_diagnostics is not None:
+            cleanup_diagnostics.append(diagnostic)
         return "unavailable", None
 
 
@@ -1004,18 +1175,81 @@ def _write_process_identity(mode: str, destination: str) -> None:
     if os.name == "nt":
         owner_depth += 1
     owner_pid = self_pid
+    platform = _process_identity_platform()
+    owner_creation_ticks: int | None = None
     try:
-        for _ in range(owner_depth):
-            owner_pid = _native_process_record(owner_pid)[0]
+        if platform == "windows":
+            for _ in range(owner_depth):
+                owner_pid, owner_creation_ticks = (
+                    _windows_guarded_parent_record(
+                        owner_pid, owner_creation_ticks
+                    )
+                )
+        else:
+            for _ in range(owner_depth):
+                owner_pid = _native_parent_pid(owner_pid)
     except ProcessLookupError as exc:
         raise ManifestRuntimeError("process_identity_parent_absent") from exc
     except (AttributeError, OSError, ValueError) as exc:
         raise ManifestRuntimeError("process_identity_parent_unavailable") from exc
-    status, identity = _process_identity(owner_pid)
-    if status != "captured" or identity is None:
-        raise ManifestRuntimeError(f"process_identity_{status}")
-    with open(destination, "w", encoding="ascii", newline="\n") as stream:
-        stream.write(f"{owner_pid}\n{identity}\n")
+    if platform == "windows":
+        if owner_creation_ticks is None:
+            raise ManifestRuntimeError("process_identity_parent_unavailable")
+        identity = _format_process_identity(
+            owner_pid,
+            owner_pid,
+            owner_pid,
+            f"windows:{owner_creation_ticks}",
+        )
+    else:
+        status, identity = _process_identity(owner_pid)
+        if status != "captured" or identity is None:
+            raise ManifestRuntimeError(f"process_identity_{status}")
+    destination = os.path.abspath(destination)
+    payload = f"{owner_pid}\n{identity}\n".encode("ascii")
+    descriptor = _secure_open_regular(destination, os.O_WRONLY, 0o600)
+    try:
+        opened = os.fstat(descriptor)
+        if opened.st_nlink != 1 or opened.st_size != 0:
+            raise ManifestRejected("process_identity_candidate_invalid")
+        if hasattr(os, "geteuid") and opened.st_uid != os.geteuid():
+            raise ManifestRejected("process_identity_candidate_not_owned")
+        if not _uses_native_windows_filesystem():
+            os.fchmod(descriptor, 0o600)
+
+        def rollback() -> None:
+            try:
+                os.ftruncate(descriptor, 0)
+            except OSError as exc:
+                raise ManifestRuntimeError(
+                    "process_identity_rollback_failed"
+                ) from exc
+
+        try:
+            written = os.write(descriptor, payload)
+        except OSError as exc:
+            rollback()
+            raise ManifestRuntimeError("process_identity_short_write") from exc
+        if written != len(payload):
+            rollback()
+            raise ManifestRuntimeError("process_identity_short_write")
+        try:
+            current = os.lstat(destination)
+        except OSError as exc:
+            rollback()
+            raise ManifestRejected(
+                "process_identity_candidate_replaced"
+            ) from exc
+        if (
+            stat.S_ISLNK(current.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or current.st_nlink != 1
+            or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            rollback()
+            raise ManifestRejected("process_identity_candidate_replaced")
+    finally:
+        os.close(descriptor)
 
 
 def _pid_live(pid: Any, expected_identity: str | None = None) -> bool | None:
@@ -1084,7 +1318,7 @@ def _secure_open_regular(path: str, flags: int, mode: int = 0o600) -> int:
     """Open a regular file relative to a no-follow parent directory handle."""
 
     absolute = os.path.abspath(path)
-    if os.name == "nt":
+    if _uses_native_windows_filesystem():
         # Native Windows has no dir_fd/O_NOFOLLOW support.  Reject reparse-point
         # ancestors before opening, then bind the opened handle to the lstat
         # identity.  The containing user temp/state directory supplies the ACL.
@@ -1997,7 +2231,21 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         if args.command == "process-identity":
-            status, identity = _process_identity(args.pid)
+            cleanup_diagnostics: list[dict[str, str]] = []
+            status, identity = _process_identity(
+                args.pid, cleanup_diagnostics=cleanup_diagnostics
+            )
+            if cleanup_diagnostics:
+                print(
+                    _compact_json(
+                        {
+                            "cleanup_diagnostic": cleanup_diagnostics[0],
+                            "process_identity_status": status,
+                            "status": "warning",
+                        }
+                    ),
+                    file=sys.stderr,
+                )
             if status == "captured" and identity is not None:
                 print(identity, end="")
                 return 0
@@ -2022,10 +2270,18 @@ def main(argv: list[str] | None = None) -> int:
         _emit(result)
         return return_code
     except ManifestRejected as exc:
-        _emit({"error": str(exc), "status": "rejected"})
+        payload: dict[str, Any] = {"error": str(exc), "status": "rejected"}
+        diagnostic = _cleanup_diagnostic(exc)
+        if diagnostic is not None:
+            payload["cleanup_diagnostic"] = diagnostic
+        _emit(payload)
         return 2
     except ManifestRuntimeError as exc:
-        _emit({"error": str(exc), "status": "error"})
+        payload = {"error": str(exc), "status": "error"}
+        diagnostic = _cleanup_diagnostic(exc)
+        if diagnostic is not None:
+            payload["cleanup_diagnostic"] = diagnostic
+        _emit(payload)
         return 1
 
 

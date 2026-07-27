@@ -719,7 +719,7 @@ fi
 
 echo "== Plugin manifest + marketplace JSON validity =="
 python3 - <<PY
-import json, os, sys
+import json, os, re, sys
 from pathlib import Path
 m = json.load(open("$MANIFEST"))
 ok = True
@@ -735,6 +735,49 @@ else:
     for k in required:
         if not iface.get(k):
             print(f"  FAIL  manifest interface missing key: {k}"); ok = False
+agent_count = sum(
+    path.is_file()
+    for path in (Path("$REPO_ROOT") / "codex" / "agents").glob("uberdev-*.toml")
+)
+advertised_agent_count = re.search(r"\b(\d+) subagents\b", m.get("description", ""))
+if agent_count == 0:
+    print("  FAIL  checked-in Codex agent inventory is empty"); ok = False
+elif advertised_agent_count is None:
+    print("  FAIL  manifest description does not advertise the shipped subagent count"); ok = False
+elif int(advertised_agent_count.group(1)) != agent_count:
+    print(
+        "  FAIL  manifest advertises "
+        f"{advertised_agent_count.group(1)} subagents, but ships {agent_count}"
+    ); ok = False
+codex_readme = (Path("$REPO_ROOT") / "codex" / "README.md").read_text(encoding="utf-8")
+readme_claim_patterns = (
+    re.compile(r"\b(\d+)\s+(?:custom\s+)?subagents\b"),
+    re.compile(r"\b(\d+)\s+uberdev-\*\.toml\b"),
+    re.compile(r"\b(\d+)\s+Codex\s+custom-agent TOML files\b"),
+    re.compile(r"\b(\d+)\s+specialized personas\b"),
+    re.compile(r"\b(\d+)\s+generated role TOMLs\b"),
+)
+readme_claims = []
+for pattern in readme_claim_patterns:
+    for match in pattern.finditer(codex_readme):
+        line_number = codex_readme.count("\n", 0, match.start(1)) + 1
+        readme_claims.append((line_number, int(match.group(1))))
+if not readme_claims:
+    print("  FAIL  Codex README does not advertise the shipped agent count"); ok = False
+else:
+    stale_readme_claims = [
+        (line_number, claim)
+        for line_number, claim in readme_claims
+        if claim != agent_count
+    ]
+    if stale_readme_claims:
+        details = ", ".join(
+            f"line {line_number}: {claim}"
+            for line_number, claim in stale_readme_claims
+        )
+        print(
+            f"  FAIL  Codex README agent counts drift from shipped {agent_count}: {details}"
+        ); ok = False
 mp = json.load(open("$MARKETPLACE"))
 p = mp["plugins"][0]
 if not os.path.isfile("codex/uberdev-codex/.codex-plugin/plugin.json"): ok = False

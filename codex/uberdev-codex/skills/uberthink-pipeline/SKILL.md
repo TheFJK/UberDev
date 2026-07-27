@@ -1448,17 +1448,9 @@ if [ "$NO_ISSUES" != "1" ] && [ -r "$RUN_DIR/ranked.yaml" ]; then
     || { echo "[uberthink] report.py --emit aggregate failed (rc=$?)" >&2; }
   echo "[uberthink] f2i-aggregate: $RUN_DIR/f2i-aggregate.md"
 
-  # Resolve repo_slug + HEAD sha for the issue body's Origin link.
-  ORIGIN_URL="$(git remote get-url origin 2>/dev/null)"
-  REPO_SLUG="$(printf '%s' "$ORIGIN_URL" | sed -E 's@.*github\.com[:/]([^/]+/[^/.]+)(\.git)?$@\1@')"
-  if [ -z "$REPO_SLUG" ] || [ "$REPO_SLUG" = "$ORIGIN_URL" ]; then
-    REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)"
-  fi
-  HEAD_SHA="$(git rev-parse HEAD 2>/dev/null)"
-
   DISPATCH_OK=1
-  if [ -z "$WORKING_DIR_ABS" ] || [ -z "$HEAD_SHA" ] || [ -z "$REPO_SLUG" ]; then
-    echo "[uberthink] error: could not resolve working_dir/HEAD/repo_slug; skipping issue filing" >&2
+  if [ -z "$WORKING_DIR_ABS" ]; then
+    echo "[uberthink] error: could not resolve working_dir; skipping issue filing" >&2
     DISPATCH_OK=0
   fi
 
@@ -1466,22 +1458,18 @@ if [ "$NO_ISSUES" != "1" ] && [ -r "$RUN_DIR/ranked.yaml" ]; then
   # DISPATCH POINT — findings-to-issues (single Task, single message)
   #
   # DISPATCH: findings-to-issues
-  #   run_id=$RUN_ID
-  #   working_dir=$WORKING_DIR_ABS          (REQUIRED — refuses without an absolute path inside the worktree)
-  #   repo_slug=$REPO_SLUG
-  #   pr_commit_sha=$HEAD_SHA
-  #   phase1_aggregate_path=$RUN_DIR/f2i-aggregate.md   (already wrapped in
-  #                                                       <external-untrusted-input source="uberthink-aggregate">
-  #                                                       by report.py)
-  #   phase2_aggregate_path=                (empty — single-aggregate run)
+  #   variant=legacy.uberthink
+  #   aggregate_path=$RUN_DIR/f2i-aggregate.md   (already wrapped in
+  #                                                <external-untrusted-input source="uberthink-aggregate">
+  #                                                by report.py)
+  #   working_dir=$WORKING_DIR_ABS
+  #   pr_number=0
   #   finding_label=uberthink-idea
   #   finding_marker_slug=uberthink
-  #   source_ref="/uberthink run $RUN_ID"
-  #   pr_number=                            (empty — /uberthink is not a PR-scoped run)
   #   max_new=$MAX_NEW
   # ===========================================================================
   if [ "$DISPATCH_OK" = "1" ]; then
-    echo "DISPATCH: findings-to-issues with run_id=$RUN_ID, working_dir=$WORKING_DIR_ABS, repo_slug=$REPO_SLUG, pr_commit_sha=$HEAD_SHA, phase1_aggregate_path=$RUN_DIR/f2i-aggregate.md, finding_label=uberthink-idea, finding_marker_slug=uberthink, source_ref=/uberthink run $RUN_ID, max_new=$MAX_NEW"
+    echo "DISPATCH: findings-to-issues with variant=legacy.uberthink, aggregate_path=$RUN_DIR/f2i-aggregate.md, working_dir=$WORKING_DIR_ABS, pr_number=0, finding_label=uberthink-idea, finding_marker_slug=uberthink, max_new=$MAX_NEW"
   fi
 elif [ "$NO_ISSUES" = "1" ]; then
   echo "[uberthink] --no-issues: skipping findings-to-issues dispatch"

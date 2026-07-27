@@ -426,17 +426,17 @@ function simplifyIssuesAggPrompt() {
 function f2iPrompt(aggregatePathAbs, sourceTag, prNumber) {
   // findings-to-issues (JUDGMENT — model omitted). Reads the aggregate by PATH;
   // the envelope source on disk is the source-of-record. The agent OWNS MAX_NEW /
-  // dedupe / halt. working_dir + repo backref are resolved BY THE AGENT via git.
+  // dedupe / halt. Repository origin fields are resolved BY THE AGENT via git.
+  const variant = mode === "simplify" ? "variant=legacy.ubersimplify" : "variant=legacy.uberscan";
+  const marker = mode === "simplify" ? "ubersimplify" : "uberscan";
   return "Read the agent instructions at " + pluginRootAbs + "/agents/findings-to-issues.md and follow "
     + "them exactly. File GitHub issues from the aggregate at this PATH (envelope source="
     + sourceTag + ", validated at read): " + aggregatePathAbs + "\n\n"
-    + "Resolve working_dir via `git rev-parse --show-toplevel` (REQUIRED — the agent refuses without an "
-    + "absolute working_dir), repo_slug + pr_commit_sha via git/gh. "
-    + "finding_label=" + (mode === "simplify" ? "ubersimplify" : "uberscan") + "-finding, "
-    + "finding_marker_slug=" + (mode === "simplify" ? "ubersimplify" : "uberscan") + ", "
-    + "source_ref=/" + (mode === "simplify" ? "ubersimplify" : "uberscan") + " run " + runId + ", "
-    + "pr_number=" + (prNumber ? prNumber : "") + ".\n\n"
-    + "Cap: create at most " + maxNew + " new issues (MAX_NEW). You OWN the MAX_NEW / dedupe / halt logic.\n\n"
+    + "Select " + variant + " with exactly these caller-owned inputs: "
+    + "aggregate_path=" + aggregatePathAbs + ", working_dir=" + repoRootAbs + ", "
+    + "pr_number=" + (prNumber || 0) + ", finding_label=" + marker + "-finding, "
+    + "finding_marker_slug=" + marker + ", max_new=" + maxNew + ". "
+    + "Derive repository origin and run metadata inside the agent. You OWN the MAX_NEW / dedupe / halt logic.\n\n"
     + "Return via StructuredOutput: issuesCreated (an array of the integer issue numbers you created) and "
     + "skipped (integer count of findings you skipped as duplicates or over the cap).";
 }

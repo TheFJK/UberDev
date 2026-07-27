@@ -90,7 +90,7 @@ codex plugin add uberdev-codex@uberdev
 ```
 
 This installs the **skills + session-start hook + Markdown agent prompt files** as
-a managed plugin (toggle on/off in `/plugins`, no file copying). The 42 Codex
+a managed plugin (toggle on/off in `/plugins`, no file copying). The 44 Codex
 custom-agent TOML files and the AGENTS.md primer are **not** part of the plugin —
 run the standalone installer for those.
 
@@ -143,7 +143,7 @@ Invoke explicitly with `$uberdev-cmd-issue`, or implicitly by describing the tas
 
 ### Subagents (`~/.codex/agents/uberdev-*.toml`)
 
-42 specialized personas the skills dispatch to. Codex custom-agent names are
+44 specialized personas the skills dispatch to. Codex custom-agent names are
 prefixed with `uberdev-`; roles include `code-reviewer`, `spec-writer`,
 `plan-writer`, `conflict-resolver`, `code-simplifier`, `silent-failure-hunter`,
 `type-design-analyzer`, the 8 `testers-*` squad personas, the 6 `research-*`

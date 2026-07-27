@@ -2,6 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
+TREE="$ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
 REVIEW="$ROOT/plugins/uberdev/commands/review-pr.md"
 SIMPLIFY="$ROOT/plugins/uberdev/commands/simplify.md"
 POST="$ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md"
@@ -9,12 +10,746 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
 . "$LIB"
 
+# Native Windows Git and Git Bash can spell the same directory differently.
+# The Windows-path fixture must compare shell-canonical paths rather than inode
+# identity through two incompatible path syntaxes.
+if grep -q -- '-''ef' "$0"; then
+  echo 'review-child-handoff: native Windows path fixture uses a non-portable file-identity assertion' >&2
+  exit 1
+fi
+
 if [ "${1:-}" = --windows-path-only ]; then
-  windows_context='C:\repo\.uberdev\runs\review-1\state\context.json'
-  windows_carrier="$(python3 -I -B -c 'import json,sys; print(json.dumps({"context_file":sys.argv[1]}),end="")' "$windows_context")"
-  serialized_context="$(_uberdev_agent_json_get "$windows_carrier" context_file)"
-  [ "$serialized_context" = "$windows_context" ]
-  [ "$(_uberdev_child_context_run_dir "$serialized_context")" = 'C:\repo\.uberdev\runs\review-1' ]
+  windows_shell_directory() { (cd "$1" && pwd -P); }
+  windows_handoff_stage() {
+    local stage="$1" rc
+    shift
+    case "$stage" in
+      workspace-valid|review-handoff-create|review-preflight|review-prepare)
+        ;;
+      review-validate|fix-handoff-create|fix-preflight|fix-prepare|context-json)
+        ;;
+      *)
+        printf '%s\n' \
+          'review-child-handoff: windows stage invalid-stage failed (rc=64)' >&2
+        return 64
+        ;;
+    esac
+    if "$@"; then
+      return 0
+    else
+      rc=$?
+    fi
+    printf 'review-child-handoff: windows stage %s failed (rc=%d)\n' \
+      "$stage" "$rc" >&2
+    return "$rc"
+  }
+  windows_create_verified_junction() {
+    local root="$1" target="$2" junction="$3" driver="${4:-native}"
+    python3 -I -B - "$root" "$target" "$junction" "$driver" <<'PY'
+import os,stat,subprocess,sys
+root,target,junction,driver=sys.argv[1:]
+
+def fail(reason):
+    print(f"review-child-handoff: junction {reason}",file=sys.stderr)
+    raise SystemExit(1)
+
+def run_junction_command(command,environment=None):
+    if driver=="launch-oserror":
+        raise OSError("injected launch failure")
+    if driver=="nonzero-exit":
+        return subprocess.CompletedProcess(command,1)
+    if driver=="command-contract":
+        expected_command=[
+            "powershell.exe","-NoLogo","-NoProfile","-NonInteractive","-Command",
+            "$ErrorActionPreference='Stop';"
+            "New-Item -ItemType Junction "
+            "-Path $env:UBERDEV_JUNCTION_PATH "
+            "-Target $env:UBERDEV_JUNCTION_TARGET | Out-Null",
+        ]
+        expected_environment={
+            "UBERDEV_JUNCTION_PATH":junction,
+            "UBERDEV_JUNCTION_TARGET":target,
+        }
+        if command != expected_command or environment is None or any(
+            environment.get(key) != value
+            for key,value in expected_environment.items()
+        ):
+            fail("command contract failed")
+        return subprocess.CompletedProcess(command,0)
+    if driver!="native":
+        fail("invalid test driver")
+    return subprocess.run(
+        command,env=environment,stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,check=False,
+    )
+
+try:
+    root,target,junction=map(os.path.abspath,(root,target,junction))
+    os.makedirs(root,exist_ok=True)
+except (OSError,ValueError):
+    fail("fixture setup failed")
+if os.name=="nt" or driver!="native":
+    environment=os.environ.copy()
+    environment["UBERDEV_JUNCTION_PATH"]=junction
+    environment["UBERDEV_JUNCTION_TARGET"]=target
+    command=[
+        "powershell.exe","-NoLogo","-NoProfile","-NonInteractive","-Command",
+        "$ErrorActionPreference='Stop';"
+        "New-Item -ItemType Junction "
+        "-Path $env:UBERDEV_JUNCTION_PATH "
+        "-Target $env:UBERDEV_JUNCTION_TARGET | Out-Null",
+    ]
+    try:
+        completed=run_junction_command(command,environment)
+    except (OSError,ValueError,subprocess.SubprocessError):
+        fail("command launch failed")
+    if completed.returncode != 0:
+        fail("command failed")
+    if driver=="command-contract":
+        raise SystemExit(0)
+else:
+    try:
+        os.symlink(target,junction,target_is_directory=True)
+    except (NotImplementedError,OSError,ValueError):
+        fail("creation failed")
+try:
+    entry=os.lstat(junction)
+    reparse=getattr(stat,"FILE_ATTRIBUTE_REPARSE_POINT",0x400)
+    is_reparse=stat.S_ISLNK(entry.st_mode) or bool(
+        getattr(entry,"st_file_attributes",0)&reparse
+    )
+    reaches_target=(
+        os.path.normcase(os.path.realpath(junction))
+        == os.path.normcase(os.path.realpath(target))
+    )
+except (OSError,ValueError):
+    fail("verification failed")
+if not is_reparse or not reaches_target:
+    fail("verification failed")
+PY
+  }
+  for WINDOWS_JUNCTION_FAILURE_CASE in \
+    'launch-oserror:command launch failed' 'nonzero-exit:command failed'; do
+    WINDOWS_JUNCTION_DRIVER="${WINDOWS_JUNCTION_FAILURE_CASE%%:*}"
+    WINDOWS_JUNCTION_REASON="${WINDOWS_JUNCTION_FAILURE_CASE#*:}"
+    WINDOWS_JUNCTION_TEST_ROOT="$TMP/junction-$WINDOWS_JUNCTION_DRIVER"
+    WINDOWS_JUNCTION_TEST_TARGET="$TMP/junction-$WINDOWS_JUNCTION_DRIVER-target"
+    WINDOWS_JUNCTION_TEST_PATH="$WINDOWS_JUNCTION_TEST_ROOT/state"
+    WINDOWS_JUNCTION_TEST_STDOUT="$TMP/junction-$WINDOWS_JUNCTION_DRIVER.stdout"
+    WINDOWS_JUNCTION_TEST_STDERR="$TMP/junction-$WINDOWS_JUNCTION_DRIVER.stderr"
+    set +e
+    windows_create_verified_junction \
+      "$WINDOWS_JUNCTION_TEST_ROOT" "$WINDOWS_JUNCTION_TEST_TARGET" \
+      "$WINDOWS_JUNCTION_TEST_PATH" "$WINDOWS_JUNCTION_DRIVER" \
+      >"$WINDOWS_JUNCTION_TEST_STDOUT" 2>"$WINDOWS_JUNCTION_TEST_STDERR"
+    WINDOWS_JUNCTION_TEST_RC=$?
+    set -e
+    if [ "$WINDOWS_JUNCTION_TEST_RC" -ne 1 ] \
+      || [ -s "$WINDOWS_JUNCTION_TEST_STDOUT" ] \
+      || [ "$(<"$WINDOWS_JUNCTION_TEST_STDERR")" != \
+        "review-child-handoff: junction $WINDOWS_JUNCTION_REASON" ] \
+      || [ "$(wc -c <"$WINDOWS_JUNCTION_TEST_STDERR" | tr -d ' ')" -gt 96 ]; then
+      echo "review-child-handoff: junction $WINDOWS_JUNCTION_DRIVER was not rejected with a bounded path-free diagnostic" >&2
+      exit 1
+    fi
+  done
+  WINDOWS_JUNCTION_CONTRACT_ROOT="$TMP/junction-command-contract"
+  WINDOWS_JUNCTION_CONTRACT_TARGET="$TMP/junction target & | ^ % ! (target)"
+  WINDOWS_JUNCTION_CONTRACT_PATH="$WINDOWS_JUNCTION_CONTRACT_ROOT/state & | ^ % ! (link)"
+  mkdir -p "$WINDOWS_JUNCTION_CONTRACT_TARGET"
+  windows_create_verified_junction \
+    "$WINDOWS_JUNCTION_CONTRACT_ROOT" "$WINDOWS_JUNCTION_CONTRACT_TARGET" \
+    "$WINDOWS_JUNCTION_CONTRACT_PATH" command-contract
+  windows_stage_contract_command() {
+    printf '%s' "$WINDOWS_STAGE_CONTRACT_STDOUT_PAYLOAD"
+    printf '%s\n' "$WINDOWS_STAGE_CONTRACT_EXISTING_STDERR" >&2
+    return 2
+  }
+  WINDOWS_STAGE_CONTRACT_STDOUT_PAYLOAD='stage-stdout:/dynamic path & content'
+  WINDOWS_STAGE_CONTRACT_EXISTING_STDERR='existing-helper:/dynamic path & content'
+  WINDOWS_STAGE_CONTRACT_LABEL='review-child-handoff: windows stage workspace-valid failed (rc=2)'
+  WINDOWS_STAGE_CONTRACT_STDOUT="$TMP/windows-stage-contract.stdout"
+  WINDOWS_STAGE_CONTRACT_STDERR="$TMP/windows-stage-contract.stderr"
+  WINDOWS_STAGE_CONTRACT_EXPECTED_STDERR="$TMP/windows-stage-contract.expected-stderr"
+  printf '%s\n' \
+    "$WINDOWS_STAGE_CONTRACT_EXISTING_STDERR" "$WINDOWS_STAGE_CONTRACT_LABEL" \
+    >"$WINDOWS_STAGE_CONTRACT_EXPECTED_STDERR"
+  set +e
+  windows_handoff_stage workspace-valid windows_stage_contract_command \
+    >"$WINDOWS_STAGE_CONTRACT_STDOUT" 2>"$WINDOWS_STAGE_CONTRACT_STDERR"
+  WINDOWS_STAGE_CONTRACT_RC=$?
+  set -e
+  if [ "$WINDOWS_STAGE_CONTRACT_RC" -ne 2 ] \
+    || [ "$(<"$WINDOWS_STAGE_CONTRACT_STDOUT")" != \
+      "$WINDOWS_STAGE_CONTRACT_STDOUT_PAYLOAD" ] \
+    || ! cmp -s "$WINDOWS_STAGE_CONTRACT_EXPECTED_STDERR" \
+      "$WINDOWS_STAGE_CONTRACT_STDERR" \
+    || [ "$(grep -Fxc "$WINDOWS_STAGE_CONTRACT_EXISTING_STDERR" \
+      "$WINDOWS_STAGE_CONTRACT_STDERR")" -ne 1 ] \
+    || [ "$(grep -Fxc "$WINDOWS_STAGE_CONTRACT_LABEL" \
+      "$WINDOWS_STAGE_CONTRACT_STDERR")" -ne 1 ] \
+    || [ "$(printf '%s\n' "$WINDOWS_STAGE_CONTRACT_LABEL" | wc -c | tr -d ' ')" \
+      -gt 96 ]; then
+    echo 'review-child-handoff: Windows stage diagnostic contract failed' >&2
+    exit 1
+  fi
+  WINDOWS_REPO="$TMP/windows-repo"; mkdir -p "$WINDOWS_REPO"
+  git -C "$WINDOWS_REPO" init -q
+  git -C "$WINDOWS_REPO" config user.email fixture@example.invalid
+  git -C "$WINDOWS_REPO" config user.name Fixture
+  printf 'fixture\n' >"$WINDOWS_REPO/README.md"
+  git -C "$WINDOWS_REPO" add README.md
+  git -C "$WINDOWS_REPO" commit -qm fixture
+  WINDOWS_REPO_ID="$(git -C "$WINDOWS_REPO" rev-parse --show-toplevel)"
+  WINDOWS_SHELL_ID="$(windows_shell_directory "$WINDOWS_REPO")"
+  [ "$(windows_shell_directory "$WINDOWS_REPO_ID")" = "$WINDOWS_SHELL_ID" ]
+  python3 -I -B - "$ROOT/plugins/uberdev/lib/command-workspace.py" "$WINDOWS_REPO_ID" <<'PY'
+import importlib.util,os,sys
+helper,repo=sys.argv[1:]
+if os.name!="nt":
+    raise SystemExit(0)
+spec=importlib.util.spec_from_file_location("windows_binding_probe",helper)
+module=importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+root_binding=module.portable_bind_existing_directory(repo,"repository_changed")
+child_binding=None
+probe=os.path.join(repo,".command-workspace-binding-probe")
+try:
+    child_binding,created=module.portable_bind_or_create_child(
+        root_binding,repo,".command-workspace-binding-probe"
+    )
+    assert created
+    try:
+        os.replace(probe,probe+"-replacement")
+    except OSError:
+        pass
+    else:
+        raise AssertionError("bound directory was replaceable")
+    assert module.windows_binding_matches_path(
+        probe,child_binding,"unsafe_directory"
+    )
+    module.windows_mark_directory_for_deletion(
+        child_binding,"unsafe_directory"
+    )
+finally:
+    if child_binding is not None:
+        module.close_directory_binding(child_binding)
+    module.close_directory_binding(root_binding)
+assert not os.path.lexists(probe)
+assert not os.path.lexists(probe+"-replacement")
+
+concurrent_probe=os.path.join(repo,".command-workspace-concurrency-probe")
+first_root=module.portable_bind_existing_directory(repo,"repository_changed")
+second_root=module.portable_bind_existing_directory(repo,"repository_changed")
+first_child=None
+second_child=None
+real_sleep=module.time.sleep
+sleep_calls=[]
+try:
+    first_child,first_created=module.portable_bind_or_create_child(
+        first_root,repo,".command-workspace-concurrency-probe"
+    )
+    assert first_created
+    expected_identity=first_child.handle_identity
+    def release_creator(delay):
+        sleep_calls.append(delay)
+        module.close_directory_binding(first_child)
+    module.time.sleep=release_creator
+    second_child,second_created=module.portable_bind_or_create_child(
+        second_root,repo,".command-workspace-concurrency-probe"
+    )
+    assert not second_created
+    assert sleep_calls
+    assert expected_identity==second_child.handle_identity
+    for operation in (
+        lambda: os.replace(concurrent_probe,concurrent_probe+"-replacement"),
+        lambda: os.rmdir(concurrent_probe),
+    ):
+        try:
+            operation()
+        except OSError:
+            pass
+        else:
+            raise AssertionError("fallback guard did not block rename/delete")
+finally:
+    module.time.sleep=real_sleep
+    if second_child is not None:
+        module.close_directory_binding(second_child)
+    if first_child is not None:
+        module.close_directory_binding(first_child)
+    module.close_directory_binding(second_root)
+    module.close_directory_binding(first_root)
+os.rmdir(concurrent_probe)
+assert not os.path.lexists(concurrent_probe+"-replacement")
+
+existing_probe=os.path.join(repo,".command-workspace-existing-probe")
+os.mkdir(existing_probe)
+existing_root=module.portable_bind_existing_directory(repo,"repository_changed")
+existing_child=None
+try:
+    existing_child,existing_created=module.portable_bind_or_create_child(
+        existing_root,repo,".command-workspace-existing-probe"
+    )
+    assert not existing_created
+    for operation in (
+        lambda: os.replace(existing_probe,existing_probe+"-replacement"),
+        lambda: os.rmdir(existing_probe),
+    ):
+        try:
+            operation()
+        except OSError:
+            pass
+        else:
+            raise AssertionError("fallback-only binding was replaceable")
+finally:
+    if existing_child is not None:
+        module.close_directory_binding(existing_child)
+    module.close_directory_binding(existing_root)
+os.rmdir(existing_probe)
+assert not os.path.lexists(existing_probe+"-replacement")
+
+mismatch_probe=os.path.join(repo,".command-workspace-mismatch-probe")
+mismatch_original=mismatch_probe+"-original"
+mismatch_creator_root=module.portable_bind_existing_directory(
+    repo,"repository_changed"
+)
+mismatch_waiter_root=module.portable_bind_existing_directory(
+    repo,"repository_changed"
+)
+mismatch_creator=None
+real_sleep=module.time.sleep
+try:
+    mismatch_creator,mismatch_created=module.portable_bind_or_create_child(
+        mismatch_creator_root,repo,".command-workspace-mismatch-probe"
+    )
+    assert mismatch_created
+    def replace_during_handoff(_delay):
+        module.close_directory_binding(mismatch_creator)
+        os.replace(mismatch_probe,mismatch_original)
+        os.mkdir(mismatch_probe)
+        with open(os.path.join(mismatch_probe,"attacker-marker"),"wb") as stream:
+            stream.write(b"replacement-must-survive")
+    module.time.sleep=replace_during_handoff
+    try:
+        module.portable_bind_or_create_child(
+            mismatch_waiter_root,repo,".command-workspace-mismatch-probe"
+        )
+    except module.Failure as error:
+        assert str(error)=="unsafe_directory"
+    else:
+        raise AssertionError("tracker-to-guard identity mismatch was accepted")
+finally:
+    module.time.sleep=real_sleep
+    if mismatch_creator is not None:
+        module.close_directory_binding(mismatch_creator)
+    module.close_directory_binding(mismatch_waiter_root)
+    module.close_directory_binding(mismatch_creator_root)
+with open(os.path.join(mismatch_probe,"attacker-marker"),"rb") as stream:
+    assert stream.read()==b"replacement-must-survive"
+os.unlink(os.path.join(mismatch_probe,"attacker-marker"))
+os.rmdir(mismatch_probe)
+os.rmdir(mismatch_original)
+
+timeout_probe=os.path.join(repo,".command-workspace-timeout-probe")
+timeout_creator_root=module.portable_bind_existing_directory(
+    repo,"repository_changed"
+)
+timeout_waiter_root=module.portable_bind_existing_directory(
+    repo,"repository_changed"
+)
+timeout_creator=None
+real_monotonic=module.time.monotonic
+try:
+    timeout_creator,timeout_created=module.portable_bind_or_create_child(
+        timeout_creator_root,repo,".command-workspace-timeout-probe"
+    )
+    assert timeout_created
+    ticks=iter((0.0,module.WINDOWS_DIRECTORY_BIND_TIMEOUT_SECONDS))
+    module.time.monotonic=lambda: next(ticks)
+    try:
+        module.portable_bind_or_create_child(
+            timeout_waiter_root,repo,".command-workspace-timeout-probe"
+        )
+    except module.Failure as error:
+        assert str(error)=="unsafe_directory"
+    else:
+        raise AssertionError("sharing timeout was accepted")
+    assert os.path.isdir(timeout_probe)
+    module.windows_mark_directory_for_deletion(
+        timeout_creator,"unsafe_directory"
+    )
+finally:
+    module.time.monotonic=real_monotonic
+    if timeout_creator is not None:
+        module.close_directory_binding(timeout_creator)
+    module.close_directory_binding(timeout_waiter_root)
+    module.close_directory_binding(timeout_creator_root)
+assert not os.path.lexists(timeout_probe)
+PY
+  WINDOWS_REQUESTED_ROOT="$(python3 -I -B - "$WINDOWS_REPO_ID" <<'PY'
+import os,sys
+path=sys.argv[1]
+if os.name=="nt":
+    characters=list(path)
+    for index,character in enumerate(characters):
+        if character.isalpha():
+            characters[index]=character.swapcase()
+    variant="".join(characters)
+    assert variant!=path
+    assert os.path.normcase(os.path.abspath(variant))==os.path.normcase(os.path.abspath(path))
+    assert os.path.samefile(variant,path)
+    print(variant,end="")
+else:
+    print(path,end="")
+PY
+)"
+
+  WINDOWS_RUN="$WINDOWS_REPO_ID/.uberdev/runs/windows-review-carrier"; mkdir -p "$WINDOWS_RUN"
+  WINDOWS_REQUEST="$(jq -cn --arg run "$WINDOWS_RUN" --arg repo "$WINDOWS_REPO_ID" \
+    '{schema_version:1,run_dir:$run,run_id:"windows-review-carrier",repository_id:$repo,backend:"codex",workflow:"review-pr",phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:91,issue_num:91,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
+  WINDOWS_DECISION="$(uberdev_agent_resolve_request "$WINDOWS_REQUEST")"
+  WINDOWS_METADATA="$(jq -cn --arg repo "$WINDOWS_REPO_ID" \
+    '{run_id:"windows-review-carrier",repository_id:$repo,workflow:"review-pr",backend:"codex",issue_num:91,task_tier:"medium",risk_signals:[]}')"
+  WINDOWS_CONTEXT_OUT="$(uberdev_agent_context_create "$WINDOWS_RUN" "$WINDOWS_REQUEST" "$WINDOWS_DECISION" \
+    '{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}' \
+    "$WINDOWS_METADATA" '2026-07-26T00:00:00Z')"
+  WINDOWS_CONTEXT="$(jq -r .context_file <<<"$WINDOWS_CONTEXT_OUT")"
+  WINDOWS_CONTEXT_SHA="$(jq -r .context_sha256 <<<"$WINDOWS_CONTEXT_OUT")"
+
+  windows_context_validation_must_reject() {
+    local label="$1" candidate="$2" expected="$3" run_root="$4"
+    local stdout_file="$TMP/windows-context-$label.stdout"
+    local stderr_file="$TMP/windows-context-$label.stderr"
+    local rc
+    set +e
+    uberdev_agent_context_validate "$candidate" "$expected" "$run_root" \
+      >"$stdout_file" 2>"$stderr_file"
+    rc=$?
+    set -e
+    if [ "$rc" -ne 2 ] || [ -s "$stdout_file" ] \
+      || ! grep -qx 'uberdev agent dispatch: route_context_validation_failed' "$stderr_file"; then
+      echo "review-child-handoff: route context $label was not rejected fail-closed (rc=$rc)" >&2
+      exit 1
+    fi
+  }
+
+  # This is the production validator, not a copied/extracted Python branch.
+  # On windows-latest the paths below are native drive paths returned across
+  # the Git Bash -> native Python boundary.
+  WINDOWS_CONTEXT_VALIDATION_STDERR="$TMP/windows-context-valid.stderr"
+  if ! WINDOWS_CONTEXT_VALIDATION="$(
+    uberdev_agent_context_validate "$WINDOWS_CONTEXT" "$WINDOWS_CONTEXT_SHA" "$WINDOWS_RUN" \
+      2>"$WINDOWS_CONTEXT_VALIDATION_STDERR"
+  )"; then
+    echo 'review-child-handoff: valid native route context was rejected' >&2
+    exit 1
+  fi
+  [ ! -s "$WINDOWS_CONTEXT_VALIDATION_STDERR" ]
+  jq -e --arg context "$WINDOWS_CONTEXT" --arg sha "$WINDOWS_CONTEXT_SHA" \
+    '.context_file==$context and .context_sha256==$sha and
+     .run_id=="windows-review-carrier" and .workflow=="review-pr"' \
+    <<<"$WINDOWS_CONTEXT_VALIDATION" >/dev/null
+  WINDOWS_NATIVE_PATHS="$(python3 -I -B - "$WINDOWS_CONTEXT" "$WINDOWS_RUN" <<'PY'
+import os,sys
+for path in sys.argv[1:]:
+    assert os.path.isabs(path), path
+    if os.name == "nt":
+        drive, _ = os.path.splitdrive(os.path.abspath(path))
+        assert drive, path
+print("1" if os.name == "nt" else "0", end="")
+PY
+)"
+  WINDOWS_REPARSE_REJECTIONS=0
+
+  # A same-file content mutation must be diagnosed only by the stable,
+  # non-secret validation error. Restore the exact bytes before later link
+  # identity probes.
+  WINDOWS_CONTEXT_BACKUP="$TMP/windows-route-context-original.json"
+  python3 -I -B - "$WINDOWS_CONTEXT" "$WINDOWS_CONTEXT_BACKUP" <<'PY'
+import json,pathlib,sys
+context,backup=map(pathlib.Path,sys.argv[1:])
+raw=context.read_bytes()
+assert raw
+backup.write_bytes(raw)
+tampered=json.loads(raw)
+tampered["metadata"]["run_id"] += "-tampered"
+context.write_text(
+    json.dumps(tampered,sort_keys=True,separators=(",",":")),
+    encoding="utf-8",
+)
+PY
+  windows_context_validation_must_reject \
+    digest-tamper "$WINDOWS_CONTEXT" "$WINDOWS_CONTEXT_SHA" "$WINDOWS_RUN"
+  python3 -I -B - "$WINDOWS_CONTEXT" "$WINDOWS_CONTEXT_BACKUP" <<'PY'
+import pathlib,sys
+path,backup=map(pathlib.Path,sys.argv[1:])
+path.write_bytes(backup.read_bytes())
+PY
+
+  WINDOWS_CONTEXT_STATE="$(python3 -I -B -c \
+    'import os,sys; print(os.path.dirname(sys.argv[1]),end="")' "$WINDOWS_CONTEXT")"
+  WINDOWS_CONTEXT_NAME="$(python3 -I -B -c \
+    'import os,sys; print(os.path.basename(sys.argv[1]),end="")' "$WINDOWS_CONTEXT")"
+
+  # Hard-link creation is filesystem-dependent, but a link that is actually
+  # created may never be skipped: prove the native link count changed, then
+  # require the production validator to reject the candidate.
+  WINDOWS_CONTEXT_HARDLINK="$(python3 -I -B -c \
+    'import os,sys; print(os.path.join(sys.argv[1],"route-context-v1-hardlink.json"),end="")' \
+    "$WINDOWS_CONTEXT_STATE")"
+  set +e
+  python3 -I -B - "$WINDOWS_CONTEXT" "$WINDOWS_CONTEXT_HARDLINK" <<'PY'
+import errno,os,sys
+source,candidate=sys.argv[1:]
+unsupported_errno={
+    value for value in (
+        getattr(errno,"EACCES",None),getattr(errno,"EPERM",None),
+        getattr(errno,"ENOSYS",None),getattr(errno,"ENOTSUP",None),
+        getattr(errno,"EOPNOTSUPP",None),getattr(errno,"EXDEV",None),
+    ) if value is not None
+}
+try:
+    os.link(source,candidate)
+except OSError as error:
+    if error.errno in unsupported_errno or getattr(error,"winerror",None) in {1,5,50,1314}:
+        raise SystemExit(77)
+    raise
+assert os.path.samefile(source,candidate)
+assert os.stat(source).st_nlink >= 2
+PY
+  WINDOWS_HARDLINK_RC=$?
+  set -e
+  case "$WINDOWS_HARDLINK_RC" in
+    0)
+      windows_context_validation_must_reject \
+        hardlink "$WINDOWS_CONTEXT_HARDLINK" "$WINDOWS_CONTEXT_SHA" "$WINDOWS_RUN"
+      python3 -I -B -c 'import os,sys; os.unlink(sys.argv[1])' "$WINDOWS_CONTEXT_HARDLINK"
+      ;;
+    77)
+      echo 'review-child-handoff windows path: hardlink capability unavailable (SKIP)' >&2
+      ;;
+    *)
+      echo "review-child-handoff: hardlink fixture failed (rc=$WINDOWS_HARDLINK_RC)" >&2
+      exit 1
+      ;;
+  esac
+
+  # Prefer a native file symlink/reparse point. If Windows policy forbids
+  # symlink creation, try an unprivileged directory junction and validate a
+  # context path through that reparse ancestor instead.
+  WINDOWS_CONTEXT_SYMLINK="$(python3 -I -B -c \
+    'import os,sys; print(os.path.join(sys.argv[1],"route-context-v1-symlink.json"),end="")' \
+    "$WINDOWS_CONTEXT_STATE")"
+  set +e
+  python3 -I -B - "$WINDOWS_CONTEXT" "$WINDOWS_CONTEXT_SYMLINK" <<'PY'
+import errno,os,stat,sys
+source,candidate=sys.argv[1:]
+unsupported_errno={
+    value for value in (
+        getattr(errno,"EACCES",None),getattr(errno,"EPERM",None),
+        getattr(errno,"ENOSYS",None),getattr(errno,"ENOTSUP",None),
+        getattr(errno,"EOPNOTSUPP",None),
+    ) if value is not None
+}
+try:
+    os.symlink(source,candidate,target_is_directory=False)
+except (NotImplementedError,OSError) as error:
+    if isinstance(error,NotImplementedError) or error.errno in unsupported_errno \
+       or getattr(error,"winerror",None) in {1,5,50,1314}:
+        raise SystemExit(77)
+    raise
+entry=os.lstat(candidate)
+reparse=getattr(stat,"FILE_ATTRIBUTE_REPARSE_POINT",0x400)
+assert stat.S_ISLNK(entry.st_mode) or bool(getattr(entry,"st_file_attributes",0)&reparse)
+PY
+  WINDOWS_SYMLINK_RC=$?
+  set -e
+  case "$WINDOWS_SYMLINK_RC" in
+    0)
+      windows_context_validation_must_reject \
+        symlink-reparse "$WINDOWS_CONTEXT_SYMLINK" "$WINDOWS_CONTEXT_SHA" "$WINDOWS_RUN"
+      WINDOWS_REPARSE_REJECTIONS=$((WINDOWS_REPARSE_REJECTIONS + 1))
+      python3 -I -B -c 'import os,sys; os.unlink(sys.argv[1])' "$WINDOWS_CONTEXT_SYMLINK"
+      ;;
+    77)
+      WINDOWS_JUNCTION_RUN="$(python3 -I -B -c \
+        'import os,sys; print(os.path.join(sys.argv[1],"windows-context-junction"),end="")' \
+        "$WINDOWS_RUN")"
+      WINDOWS_JUNCTION_STATE="$(python3 -I -B -c \
+        'import os,sys; print(os.path.join(sys.argv[1],sys.argv[2]),end="")' \
+        "$WINDOWS_JUNCTION_RUN" "$(python3 -I -B -c \
+          'import os,sys; print(os.path.basename(sys.argv[1]),end="")' "$WINDOWS_CONTEXT_STATE")")"
+      WINDOWS_JUNCTION_CONTEXT="$(python3 -I -B -c \
+        'import os,sys; print(os.path.join(sys.argv[1],sys.argv[2]),end="")' \
+        "$WINDOWS_JUNCTION_STATE" "$WINDOWS_CONTEXT_NAME")"
+      set +e
+      windows_create_verified_junction \
+        "$WINDOWS_JUNCTION_RUN" "$WINDOWS_CONTEXT_STATE" "$WINDOWS_JUNCTION_STATE"
+      WINDOWS_JUNCTION_RC=$?
+      set -e
+      case "$WINDOWS_JUNCTION_RC" in
+        0)
+          windows_context_validation_must_reject \
+            junction-reparse "$WINDOWS_JUNCTION_CONTEXT" "$WINDOWS_CONTEXT_SHA" "$WINDOWS_JUNCTION_RUN"
+          WINDOWS_REPARSE_REJECTIONS=$((WINDOWS_REPARSE_REJECTIONS + 1))
+          python3 -I -B - "$WINDOWS_JUNCTION_RUN" "$WINDOWS_JUNCTION_STATE" <<'PY'
+import os,sys
+root,junction=sys.argv[1:]
+if os.name=="nt":
+    os.rmdir(junction)
+else:
+    os.unlink(junction)
+os.rmdir(root)
+PY
+          ;;
+        *)
+          echo "review-child-handoff: junction fixture failed (rc=$WINDOWS_JUNCTION_RC)" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+    *)
+      echo "review-child-handoff: symlink fixture failed (rc=$WINDOWS_SYMLINK_RC)" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$WINDOWS_NATIVE_PATHS" = 1 ] && [ "$WINDOWS_REPARSE_REJECTIONS" -lt 1 ]; then
+    echo 'review-child-handoff: no native symlink or junction rejection assertion executed' >&2
+    exit 1
+  fi
+
+  # Reject an existing context-shaped file reached through an escaped path.
+  # On native Windows also reject a noncanonical spelling of the valid file
+  # itself, which specifically exercises the drive-path lexical equality gate.
+  WINDOWS_ESCAPED_CONTEXT="$(python3 -I -B - "$WINDOWS_CONTEXT_STATE" "$WINDOWS_RUN" <<'PY'
+import os,pathlib,sys
+state,root=sys.argv[1:]
+outside=os.path.join(root,"route-context-v1-escaped.json")
+pathlib.Path(outside).write_bytes(b'{"escaped":true}')
+candidate=os.path.join(state,"..",os.path.basename(outside))
+assert os.path.normcase(os.path.abspath(candidate))==os.path.normcase(os.path.abspath(outside))
+assert os.path.normcase(candidate)!=os.path.normcase(os.path.abspath(candidate))
+print(candidate,end="")
+PY
+)"
+  WINDOWS_ESCAPED_SHA="$(python3 -I -B -c \
+    'import hashlib,os,sys; print(hashlib.sha256(open(os.path.abspath(sys.argv[1]),"rb").read()).hexdigest(),end="")' \
+    "$WINDOWS_ESCAPED_CONTEXT")"
+  windows_context_validation_must_reject \
+    escaped-path "$WINDOWS_ESCAPED_CONTEXT" "$WINDOWS_ESCAPED_SHA" "$WINDOWS_RUN"
+  python3 -I -B -c \
+    'import os,sys; os.unlink(os.path.abspath(sys.argv[1]))' "$WINDOWS_ESCAPED_CONTEXT"
+  if [ "$WINDOWS_NATIVE_PATHS" = 1 ]; then
+    WINDOWS_NONCANONICAL_CONTEXT="$(python3 -I -B - "$WINDOWS_CONTEXT" <<'PY'
+import os,sys
+path=sys.argv[1]
+state=os.path.dirname(path)
+candidate=os.path.join(state,"..",os.path.basename(state),os.path.basename(path))
+assert os.path.normcase(os.path.abspath(candidate))==os.path.normcase(os.path.abspath(path))
+assert os.path.normcase(candidate)!=os.path.normcase(os.path.abspath(candidate))
+print(candidate,end="")
+PY
+)"
+    windows_context_validation_must_reject \
+      noncanonical-drive-path "$WINDOWS_NONCANONICAL_CONTEXT" "$WINDOWS_CONTEXT_SHA" "$WINDOWS_RUN"
+  fi
+
+  # The context remains usable after every rejected candidate.
+  uberdev_agent_context_validate \
+    "$WINDOWS_CONTEXT" "$WINDOWS_CONTEXT_SHA" "$WINDOWS_RUN" >/dev/null
+  UBERDEV_RUN_CARRIER_JSON="$(jq -cn --arg context "$WINDOWS_CONTEXT" --arg sha "$WINDOWS_CONTEXT_SHA" \
+    '{schema_version:1,run_id:"windows-review-carrier",workflow:"review-pr",issue_num:91,context_file:$context,context_sha256:$sha}')"
+  export UBERDEV_RUN_CARRIER_JSON
+  WINDOWS_WORKSPACE_JUNCTION_TARGET="$TMP/windows-workspace-junction-target"
+  WINDOWS_WORKSPACE_JUNCTION="$WINDOWS_REPO_ID/.uberdev/research"
+  mkdir -p "$WINDOWS_WORKSPACE_JUNCTION_TARGET"
+  windows_create_verified_junction \
+    "$WINDOWS_REPO_ID/.uberdev" "$WINDOWS_WORKSPACE_JUNCTION_TARGET" \
+    "$WINDOWS_WORKSPACE_JUNCTION"
+  if uberdev_command_workspace_prepare \
+      review-pr 91 medium '[]' 20260726-010203-abcdeef "$WINDOWS_REPO_ID" \
+      >/dev/null 2>&1; then
+    echo 'review-child-handoff: workspace research junction was accepted' >&2
+    exit 1
+  fi
+  python3 -I -B - "$WINDOWS_WORKSPACE_JUNCTION" "$WINDOWS_WORKSPACE_JUNCTION_TARGET" <<'PY'
+import os,sys
+junction,target=sys.argv[1:]
+if os.name=="nt":
+    os.rmdir(junction)
+else:
+    os.unlink(junction)
+os.rmdir(target)
+PY
+  WINDOWS_WORKSPACE="$(windows_handoff_stage workspace-valid \
+    uberdev_command_workspace_prepare review-pr 91 medium '[]' \
+    20260726-010203-abcdef0 "$WINDOWS_REQUESTED_ROOT")"
+  jq -e '.caller=="review-pr"' <<<"$WINDOWS_WORKSPACE" >/dev/null
+  WINDOWS_WORKSPACE_ROOT="$(jq -r .repository_root <<<"$WINDOWS_WORKSPACE")"
+  [ "$(windows_shell_directory "$WINDOWS_WORKSPACE_ROOT")" = "$WINDOWS_SHELL_ID" ]
+  python3 -I -B - "$WINDOWS_WORKSPACE" <<'PY'
+import json,os,stat,sys
+descriptor=json.loads(sys.argv[1])
+workspace=descriptor["research_dir"]
+expected={
+    "diff":b'<external-untrusted-input source="pr-diff">\n</external-untrusted-input>\n',
+    "criteria":b"",
+    "commit_range":b"",
+    "phase1_disposition":b"{}\n",
+    "phase2_disposition":b"{}\n",
+}
+assert set(descriptor["artifacts"])==set(expected)
+reparse=getattr(stat,"FILE_ATTRIBUTE_REPARSE_POINT",0x400)
+for key,path in descriptor["artifacts"].items():
+    assert os.path.normcase(os.path.commonpath((workspace,path)))==os.path.normcase(workspace)
+    entry=os.lstat(path)
+    assert stat.S_ISREG(entry.st_mode) and entry.st_nlink==1
+    assert not stat.S_ISLNK(entry.st_mode)
+    assert not bool(getattr(entry,"st_file_attributes",0)&reparse)
+    with open(path,"rb") as stream:
+        assert stream.read()==expected[key]
+PY
+
+  WINDOWS_REVIEW_INPUT="$(jq -cn --arg p "$WINDOWS_REPO_ID/README.md" \
+    '{changed_paths:["README.md"],diff_path:$p,criteria_path:$p,emphasis:[]}')"
+  windows_handoff_stage review-handoff-create \
+    uberdev_create_child_handoff review_pr.review.correctness \
+    windows-reviewer-iter1-attempt01 "$WINDOWS_REVIEW_INPUT" '[]' >/dev/null
+  WINDOWS_REVIEW_HANDOFF="$UBERDEV_CHILD_HANDOFF"; WINDOWS_REVIEW_RESULT="$UBERDEV_CHILD_RESULT"; WINDOWS_REVIEW_STATUS="$UBERDEV_CHILD_STATUS"
+  _uberdev_child_backend_cancellation_supported() { return 0; }
+  windows_handoff_stage review-preflight \
+    uberdev_preflight_child_batch "$WINDOWS_REVIEW_HANDOFF"
+  windows_handoff_stage review-prepare \
+    _uberdev_child_prepare review_pr.review.correctness \
+    "$WINDOWS_REVIEW_HANDOFF" "$WINDOWS_REVIEW_RESULT" \
+    "$WINDOWS_REVIEW_STATUS" dispatch >/dev/null
+  printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings: []' 'confidence: high' '```' >"$WINDOWS_REVIEW_RESULT"
+  WINDOWS_VALIDATED="$(dirname "$WINDOWS_REVIEW_RESULT")/validated-result.md"
+  WINDOWS_DIGEST="$(windows_handoff_stage review-validate \
+    uberdev_child_validate_phase1_review_result "$WINDOWS_REVIEW_RESULT" \
+    '["README.md"]' "$WINDOWS_VALIDATED")"
+  [[ "$WINDOWS_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+  cmp "$WINDOWS_REVIEW_RESULT" "$WINDOWS_VALIDATED"
+
+  WINDOWS_FIX_INPUT="$(jq -cn --arg p "$WINDOWS_REPO_ID/README.md" --arg d "$WINDOWS_REPO_ID" \
+    '{findings_path:$p,commit_range_path:$p,working_dir:$d,pr_number:91,disposition_path:$p}')"
+  windows_handoff_stage fix-handoff-create \
+    uberdev_create_child_handoff review_pr.fix.phase1 \
+    windows-fixer-iter1-attempt01 "$WINDOWS_FIX_INPUT" null >/dev/null
+  WINDOWS_FIX_HANDOFF="$UBERDEV_CHILD_HANDOFF"; WINDOWS_FIX_RESULT="$UBERDEV_CHILD_RESULT"; WINDOWS_FIX_STATUS="$UBERDEV_CHILD_STATUS"
+  windows_handoff_stage fix-preflight \
+    uberdev_preflight_child_batch "$WINDOWS_FIX_HANDOFF"
+  WINDOWS_FIX_PREPARED="$(windows_handoff_stage fix-prepare \
+    _uberdev_child_prepare review_pr.fix.phase1 "$WINDOWS_FIX_HANDOFF" \
+    "$WINDOWS_FIX_RESULT" "$WINDOWS_FIX_STATUS" dispatch)"
+  jq -e '.request.workspace_mode=="caller"' <<<"$WINDOWS_FIX_PREPARED" >/dev/null
+  WINDOWS_FIX_ROOT="$(jq -r .request.workspace_dir <<<"$WINDOWS_FIX_PREPARED")"
+  [ "$(windows_shell_directory "$WINDOWS_FIX_ROOT")" = "$WINDOWS_SHELL_ID" ]
+
+  serialized_context="$(windows_handoff_stage context-json \
+    _uberdev_agent_json_get "$UBERDEV_RUN_CARRIER_JSON" context_file)"
+  [ "$serialized_context" = "$WINDOWS_CONTEXT" ]
   ! _uberdev_child_context_run_dir 'C:\repo\.uberdev\runs\review-1\state\..\context.json' >/dev/null 2>&1
   echo 'review-child-handoff windows path: PASS'
   exit 0
@@ -49,6 +784,7 @@ context_out="$(uberdev_agent_context_create "$TMP/run" "$request" "$decision" \
 ctx="$(jq -r .context_file <<<"$context_out")"; sha="$(jq -r .context_sha256 <<<"$context_out")"
 UBERDEV_RUN_CARRIER_JSON="$(jq -cn --arg ctx "$ctx" --arg sha "$sha" '{schema_version:1,run_id:"review-contract",workflow:"review-pr",issue_num:1,context_file:$ctx,context_sha256:$sha}')"
 export UBERDEV_RUN_CARRIER_JSON
+REVIEW_CARRIER_JSON="$UBERDEV_RUN_CARRIER_JSON"
 
 mkdir -p "$TMP/simplify-run"
 simplify_request="$(jq -cn --arg run "$TMP/simplify-run" --arg repo "$TEST_REPO" '{schema_version:1,run_dir:$run,run_id:"simplify-contract",repository_id:$repo,backend:"codex",workflow:"simplify",phase:"simplify",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:0,issue_num:0,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
@@ -59,6 +795,61 @@ simplify_context_out="$(uberdev_agent_context_create "$TMP/simplify-run" "$simpl
   "$simplify_metadata" '2026-07-10T00:00:00Z')"
 simplify_ctx="$(jq -r .context_file <<<"$simplify_context_out")"; simplify_sha="$(jq -r .context_sha256 <<<"$simplify_context_out")"
 SIMPLIFY_CARRIER_JSON="$(jq -cn --arg ctx "$simplify_ctx" --arg sha "$simplify_sha" '{schema_version:1,run_id:"simplify-contract",workflow:"simplify",issue_num:0,context_file:$ctx,context_sha256:$sha}')"
+
+# The accepted input boundary comes from the shared manifest, and the complete
+# immutable handoff remains below the 65,536-byte reader ceiling at that
+# maximum.
+printf 'diff\n' >"$TEST_REPO/max-input.diff"
+MAX_INPUTS="$(python3 -I -B - "$TEST_REPO/max-input.diff" "$TREE" <<'PY'
+import json,sys
+limit=json.load(open(sys.argv[2]))['input_limits']['max_serialized_bytes']
+paths=[f"src/p{index:02d}-"+("x"*2990)+".ts" for index in range(16)]
+base={"changed_paths":paths,"diff_path":sys.argv[1],"criteria_path":sys.argv[1],"emphasis":[]}
+current=len(json.dumps(base,sort_keys=True,separators=(",",":")).encode())
+base["changed_paths"][-1]=base["changed_paths"][-1][:-3]+("x"*(limit-current))+".ts"
+payload=json.dumps(base,sort_keys=True,separators=(",",":"))
+assert len(payload.encode())==limit
+assert max(map(len,base["changed_paths"]))<=4096
+print(payload,end="")
+PY
+)"
+uberdev_create_child_handoff review_pr.review.correctness review-max-input-iter1-attempt01 "$MAX_INPUTS" '[]' >/dev/null
+[ "$(wc -c <"$UBERDEV_CHILD_HANDOFF" | tr -d ' ')" -lt 65536 ]
+_uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null
+
+# Derive a limit-plus-one input from that same manifest boundary and prove the
+# constructor rejects it before publishing a child directory.
+MAX_PLUS_ONE_INPUTS="$(python3 -I -B - "$MAX_INPUTS" "$TREE" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1])
+limit=json.load(open(sys.argv[2]))['input_limits']['max_serialized_bytes']
+value["changed_paths"][-1]=value["changed_paths"][-1][:-3]+"x.ts"
+payload=json.dumps(value,sort_keys=True,separators=(",",":"))
+assert len(payload.encode())==limit+1
+print(payload,end="")
+PY
+)"
+! uberdev_create_child_handoff review_pr.review.correctness review-constructor-plus-one-iter1-attempt01 "$MAX_PLUS_ONE_INPUTS" '[]' >/dev/null 2>&1
+[ ! -e "$TMP/run/children/review-constructor-plus-one-iter1-attempt01" ]
+
+# Independently tamper a valid maximum-sized handoff after construction to prove
+# the dispatcher enforces the shared limit instead of trusting the constructor.
+uberdev_create_child_handoff review_pr.review.correctness review-max-input-plus-one-iter1-attempt01 "$MAX_INPUTS" '[]' >/dev/null
+MAX_PLUS_ONE_HANDOFF="$UBERDEV_CHILD_HANDOFF"
+python3 -I -B - "$MAX_PLUS_ONE_HANDOFF" "$TREE" <<'PY'
+import json,sys
+path,manifest_path=sys.argv[1:]
+limit=json.load(open(manifest_path))['input_limits']['max_serialized_bytes']
+with open(path,encoding='utf-8') as stream:
+    value=json.load(stream)
+value['inputs']['changed_paths'][-1]=value['inputs']['changed_paths'][-1][:-3]+'x.ts'
+serialized=json.dumps(value['inputs'],sort_keys=True,separators=(',',':')).encode()
+assert len(serialized)==limit+1
+with open(path,'w',encoding='utf-8') as stream:
+    json.dump(value,stream,separators=(',',':'))
+PY
+! _uberdev_child_prepare review_pr.review.correctness "$MAX_PLUS_ONE_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+[ ! -e "$TMP/run/children/review-max-input-plus-one-iter1-attempt01" ]
 
 # Native Windows Python has neither getuid/geteuid nor descriptor-relative
 # filesystem operations. Exercise the real carrier -> handoff -> prepare path
@@ -468,6 +1259,78 @@ prompt=pathlib.Path(sys.argv[1]).read_bytes(); contract=pathlib.Path(sys.argv[2]
 needle=b'\n\n'+contract+b'\n\n## Immutable routed execution directive\n'
 assert prompt.count(contract)==1
 assert needle in prompt
+assert b'Return only a response matching the output contract above.' in prompt
+assert b'Return completed, blocked, or refused.' not in prompt
+PY
+
+# Reviewer validation is bound to the exact changed-path snapshot and emits a
+# byte-identical, digest-addressed canonical artifact for aggregation.
+VALID_RESULT="$TMP/reviewer-valid.md"
+OUT_OF_SCOPE_RESULT="$TMP/reviewer-out-of-scope.md"
+VALIDATED_RESULT="$TMP/reviewer-validated.md"
+cat >"$VALID_RESULT" <<'EOF_RESULT'
+```yaml
+verdict: REVISIONS_REQUIRED
+findings:
+  - severity: blocker
+    location: README.md:1
+    summary: bounded finding
+    detail: bounded detail
+confidence: high
+```
+EOF_RESULT
+cat >"$OUT_OF_SCOPE_RESULT" <<'EOF_RESULT'
+```yaml
+verdict: REVISIONS_REQUIRED
+findings:
+  - severity: blocker
+    location: src/outside.ts:1
+    summary: out of scope
+    detail: out of scope detail
+confidence: high
+```
+EOF_RESULT
+if uberdev_child_validate_phase1_review_result "$OUT_OF_SCOPE_RESULT" '["README.md"]' "$VALIDATED_RESULT" >/dev/null 2>&1; then
+  echo 'phase1 validator accepted a finding outside the reviewed path snapshot' >&2
+  exit 1
+fi
+VALIDATED_DIGEST="$(uberdev_child_validate_phase1_review_result "$VALID_RESULT" '["README.md"]' "$VALIDATED_RESULT")"
+[[ "$VALIDATED_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+cmp "$VALID_RESULT" "$VALIDATED_RESULT"
+[ "$(stat -c '%a' "$VALIDATED_RESULT" 2>/dev/null || stat -f '%Lp' "$VALIDATED_RESULT")" = 400 ]
+for publication_stage in create write sync harden readback; do
+  publication_target="$TMP/reviewer-publication-$publication_stage.md"
+  set +e
+  UBERDEV_CHILD_TEST_MODE=1 UBERDEV_TEST_VALIDATED_PUBLICATION_FAILURE="$publication_stage" \
+    uberdev_child_validate_phase1_review_result "$VALID_RESULT" '["README.md"]' "$publication_target" \
+      >"$TMP/reviewer-publication-$publication_stage.stdout" \
+      2>"$TMP/reviewer-publication-$publication_stage.stderr"
+  publication_rc=$?
+  set -e
+  [ "$publication_rc" -eq 74 ]
+  [ ! -e "$publication_target" ]
+  [ ! -s "$TMP/reviewer-publication-$publication_stage.stdout" ]
+  grep -qx 'review_result_publication_failed' "$TMP/reviewer-publication-$publication_stage.stderr"
+done
+for publication_mode in short-read native-mode; do
+  publication_target="$TMP/reviewer-publication-$publication_mode.md"
+  publication_digest="$(
+    UBERDEV_CHILD_TEST_MODE=1 UBERDEV_TEST_VALIDATED_PUBLICATION_FAILURE="$publication_mode" \
+      uberdev_child_validate_phase1_review_result "$VALID_RESULT" '["README.md"]' "$publication_target"
+  )"
+  [[ "$publication_digest" =~ ^[0-9a-f]{64}$ ]]
+  cmp "$VALID_RESULT" "$publication_target"
+done
+python3 -I -B - "$LIB" <<'PY'
+import pathlib,sys
+source=pathlib.Path(sys.argv[1]).read_text()
+start=source.index('uberdev_child_validate_phase1_review_result() {')
+end=source.index('\n_uberdev_child_find_lease() {',start)
+validator=source[start:end]
+assert validator.count("getattr(os,'O_BINARY',0)") >= 3
+assert "injected=='short-read'" in validator
+assert "premature publication readback EOF" in validator
+assert "publication readback overflow" in validator
 PY
 
 # Mutating review edges execute against the carrier-selected caller repository
@@ -487,6 +1350,68 @@ if uberdev_create_child_handoff review_pr.fix.phase1 review-mismatch-mode-iter1-
   echo 'caller workspace mismatch accepted' >&2
   exit 1
 fi
+
+# /solve and /turbo inherit the same immutable carrier through the actual
+# reviewer, caller-workspace fixer, and deferred-findings edge lifecycles.
+exercise_parent_review_carrier() {
+  local workflow="$1" issue="$2" suffix="$3" parent_run
+  parent_run="$TMP/$workflow-parent"
+  local request decision metadata context_out context_file context_sha carrier workspace
+  local reviewer_handoff reviewer_result reviewer_status reviewer_prepared
+  local fixer_handoff fixer_result fixer_status fixer_prepared
+  local defer_handoff defer_result defer_status defer_prepared
+  mkdir -p "$parent_run"
+  request="$(jq -cn --arg run "$parent_run" --arg repo "$TEST_REPO" --arg workflow "$workflow" --arg run_id "parent-$workflow" --argjson issue "$issue" \
+    '{schema_version:1,run_dir:$run,run_id:$run_id,repository_id:$repo,backend:"codex",workflow:$workflow,phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:$issue,issue_num:$issue,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
+  decision="$(uberdev_agent_resolve_request "$request")"
+  metadata="$(jq -cn --arg repo "$TEST_REPO" --arg workflow "$workflow" --arg run_id "parent-$workflow" --argjson issue "$issue" \
+    '{run_id:$run_id,repository_id:$repo,workflow:$workflow,backend:"codex",issue_num:$issue,task_tier:"medium",risk_signals:[]}')"
+  context_out="$(uberdev_agent_context_create "$parent_run" "$request" "$decision" \
+    '{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}' \
+    "$metadata" '2026-07-26T00:00:00Z')"
+  context_file="$(jq -r .context_file <<<"$context_out")"
+  context_sha="$(jq -r .context_sha256 <<<"$context_out")"
+  carrier="$(jq -cn --arg workflow "$workflow" --arg run_id "parent-$workflow" --arg context "$context_file" --arg sha "$context_sha" --argjson issue "$issue" \
+    '{schema_version:1,run_id:$run_id,workflow:$workflow,issue_num:$issue,context_file:$context,context_sha256:$sha}')"
+  UBERDEV_RUN_CARRIER_JSON="$carrier"; export UBERDEV_RUN_CARRIER_JSON
+  unset UBERDEV_COMMAND_WORKSPACE_JSON
+  workspace="$(uberdev_command_workspace_prepare review-pr "$issue" medium '[]' "20260726-01020${suffix}-abcdef0" "$TEST_REPO")"
+  jq -e --arg workflow "$workflow" --arg repo "$TEST_REPO" \
+    '.caller=="review-pr" and .carrier_workflow==$workflow and .repository_root==$repo' <<<"$workspace" >/dev/null
+
+  reviewer_input="$(jq -cn --arg p "$path" '{changed_paths:["README.md"],diff_path:$p,criteria_path:$p,emphasis:[]}')"
+  uberdev_create_child_handoff review_pr.review.correctness "$workflow-reviewer-iter1-attempt01" "$reviewer_input" '[]' >/dev/null
+  reviewer_handoff="$UBERDEV_CHILD_HANDOFF"; reviewer_result="$UBERDEV_CHILD_RESULT"; reviewer_status="$UBERDEV_CHILD_STATUS"
+  _uberdev_child_backend_cancellation_supported() { return 0; }
+  uberdev_preflight_child_batch "$reviewer_handoff"
+  reviewer_prepared="$(_uberdev_child_prepare review_pr.review.correctness "$reviewer_handoff" "$reviewer_result" "$reviewer_status" dispatch)"
+  jq -e --arg workflow "$workflow" --argjson issue "$issue" \
+    '.carrier.workflow==$workflow and .carrier.issue_num==$issue and .edge_id=="review_pr.review.correctness"' "$reviewer_handoff" >/dev/null
+  jq -e '.request.workspace_mode=="isolated"' <<<"$reviewer_prepared" >/dev/null
+
+  fixer_input="$(jq -cn --arg p "$path" --arg d "$TEST_REPO" --argjson pr "$issue" \
+    '{findings_path:$p,commit_range_path:$p,working_dir:$d,pr_number:$pr,disposition_path:$p}')"
+  uberdev_create_child_handoff review_pr.fix.phase1 "$workflow-fixer-iter1-attempt01" "$fixer_input" null >/dev/null
+  fixer_handoff="$UBERDEV_CHILD_HANDOFF"; fixer_result="$UBERDEV_CHILD_RESULT"; fixer_status="$UBERDEV_CHILD_STATUS"
+  uberdev_preflight_child_batch "$fixer_handoff"
+  fixer_prepared="$(_uberdev_child_prepare review_pr.fix.phase1 "$fixer_handoff" "$fixer_result" "$fixer_status" dispatch)"
+  jq -e --arg workflow "$workflow" --arg context "$context_file" --arg sha "$context_sha" \
+    '.carrier.workflow==$workflow and .carrier.context_file==$context and .carrier.context_sha256==$sha and .edge_id=="review_pr.fix.phase1"' "$fixer_handoff" >/dev/null
+  jq -e --arg repo "$TEST_REPO" '.request.workspace_mode=="caller" and .request.workspace_dir==$repo' <<<"$fixer_prepared" >/dev/null
+
+  defer_input="$(jq -cn --arg p "$path" --arg d "$TEST_REPO" --argjson pr "$issue" \
+    '{phase1_path:$p,phase2_path:"",phase1_disposition_path:$p,phase2_disposition_path:"",working_dir:$d,pr_number:$pr}')"
+  uberdev_create_child_handoff review_pr.defer.findings "$workflow-defer-iter1-attempt01" "$defer_input" null >/dev/null
+  defer_handoff="$UBERDEV_CHILD_HANDOFF"; defer_result="$UBERDEV_CHILD_RESULT"; defer_status="$UBERDEV_CHILD_STATUS"
+  uberdev_preflight_child_batch "$defer_handoff"
+  defer_prepared="$(_uberdev_child_prepare review_pr.defer.findings "$defer_handoff" "$defer_result" "$defer_status" dispatch)"
+  jq -e --arg workflow "$workflow" --arg context "$context_file" --arg sha "$context_sha" \
+    '.carrier.workflow==$workflow and .carrier.context_file==$context and .carrier.context_sha256==$sha and .edge_id=="review_pr.defer.findings"' "$defer_handoff" >/dev/null
+  jq -e '.request.workspace_mode=="isolated"' <<<"$defer_prepared" >/dev/null
+}
+exercise_parent_review_carrier solve 81 1
+exercise_parent_review_carrier turbo 82 2
+UBERDEV_RUN_CARRIER_JSON="$REVIEW_CARRIER_JSON"; export UBERDEV_RUN_CARRIER_JSON
 
 # A standalone simplify run may omit an additional focus hint.
 for lens in reuse quality efficiency; do
@@ -533,7 +1458,16 @@ ROSTER_EDGES=(
   review_pr.review.types review_pr.review.comments
   review_pr.review.tests review_pr.review.general
 )
-roster_row() { printf '{"edge":"%s"}\n' "$1"; }
+roster_row() {
+  local edge="$1" index
+  for index in "${!ROSTER_EDGES[@]}"; do
+    if [ "${ROSTER_EDGES[$index]}" = "$edge" ]; then
+      printf '{"edge":"%s","index":%s}\n' "$edge" "$((index + 1))"
+      return 0
+    fi
+  done
+  printf '{"edge":"%s","index":999}\n' "$edge"
+}
 roster_must_block_aggregation() {
   local records expected aggregate
   records="$1"
@@ -563,6 +1497,106 @@ roster_must_block_aggregation "$TMP/roster-unknown.records" 6
 head -1 "$ROSTER_VALID" >"$TMP/roster-truncated-repair.records"
 roster_must_block_aggregation "$TMP/roster-truncated-repair.records" 2
 
+# Validated evidence is independently bound to the exact launched roster.
+# Duplicate indices, impersonated instances, reused canonical artifacts, and
+# digest replacement must all fail before aggregation. A format repair keeps
+# the original edge/index but may prove itself with the fresh launched instance.
+awk '/^post_review_validated_evidence_complete\(\) \{/{active=1} active{print} active && /^\}/{exit}' \
+  "$POST" >"$TMP/evidence-runtime.sh"
+. "$TMP/evidence-runtime.sh"
+REVIEW_EDGES=("${ROSTER_EDGES[@]}")
+EVIDENCE_ROOT="$TMP/evidence"
+mkdir -p "$EVIDENCE_ROOT"
+python3 -I -B - "$EVIDENCE_ROOT" <<'PY'
+import hashlib,json,os,pathlib,sys
+root=pathlib.Path(os.path.realpath(sys.argv[1]))
+children=root/"children"; children.mkdir()
+edges=[
+ "review_pr.review.correctness","review_pr.review.silent_failures",
+ "review_pr.review.types","review_pr.review.comments",
+ "review_pr.review.tests","review_pr.review.general",
+]
+launched=[]; validated=[]
+for index,edge in enumerate(edges,1):
+ child=children/f"review-{index}-attempt01"; child.mkdir()
+ provider=child/"result.md"; provider.write_text("provider-owned\n")
+ canonical=child/"validated-result.md"; payload=f"validated-{index}\n".encode()
+ canonical.write_bytes(payload); canonical.chmod(0o400)
+ instance=f"review-{index}-attempt01"
+ (child/"status.json").write_text('{"state":"completed","exit_code":0}\n')
+ launched.append({"edge":edge,"index":index,"instance":instance,"receipt":"fixture",
+                  "result":str(provider),"status":str(child/"status.json")})
+ validated.append({"edge":edge,"index":index,"instance":instance,
+                   "result":str(canonical),"sha256":hashlib.sha256(payload).hexdigest()})
+for name,rows in (("initial",launched),("validated",validated)):
+ (root/name).write_text("".join(json.dumps(row,separators=(",",":"))+"\n" for row in rows))
+(root/"repair").write_text("")
+PY
+POST_REVIEW_VALIDATED_LEDGER="$EVIDENCE_ROOT/validated"
+REVIEW_LAUNCHED="$EVIDENCE_ROOT/initial"
+REPAIR_LAUNCHED="$EVIDENCE_ROOT/repair"
+post_review_validated_evidence_complete "$POST_REVIEW_VALIDATED_LEDGER" 6 \
+  "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED" "$EVIDENCE_ROOT"
+
+evidence_must_fail() {
+  local label="$1" ledger="$2" initial="$3" repair="$4" expected_class="$5"
+  local diagnostic="$EVIDENCE_ROOT/$label.stderr"
+  if post_review_validated_evidence_complete "$ledger" 6 "$initial" "$repair" "$EVIDENCE_ROOT" 2>"$diagnostic"; then
+    echo "evidence fixture unexpectedly passed: $label" >&2
+    return 1
+  fi
+  grep -q "class=$expected_class" "$diagnostic"
+}
+
+python3 -I -B - "$EVIDENCE_ROOT" <<'PY'
+import hashlib,json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+def rows(name): return [json.loads(line) for line in (root/name).read_text().splitlines()]
+def write(name,value): (root/name).write_text("".join(json.dumps(row,separators=(",",":"))+"\n" for row in value))
+value=rows("validated"); value[-1]["index"]=1; write("duplicate-index",value)
+value=rows("validated"); value[-1]["instance"]="foreign-attempt"; write("foreign-instance",value)
+value=rows("validated"); value[-1]["sha256"]="0"*64; write("bad-digest",value)
+initial=rows("initial"); value=rows("validated")
+initial[-1]["result"]=initial[0]["result"]; value[-1]["result"]=value[0]["result"]
+write("duplicate-path-initial",initial); write("duplicate-path",value)
+
+foreign=root/"foreign"; foreign.mkdir()
+child=foreign/"children"/value[-1]["instance"]; child.mkdir(parents=True)
+provider=child/"result.md"; provider.write_text("foreign provider\n")
+canonical=child/"validated-result.md"; payload=b"foreign validated\n"
+canonical.write_bytes(payload); canonical.chmod(0o400)
+(child/"status.json").write_text('{"state":"completed","exit_code":0}\n')
+initial=rows("initial"); value=rows("validated")
+initial[-1]["result"]=str(provider); initial[-1]["status"]=str(child/"status.json")
+value[-1]["result"]=str(canonical); value[-1]["sha256"]=hashlib.sha256(payload).hexdigest()
+write("foreign-path-initial",initial); write("foreign-path",value)
+PY
+evidence_must_fail duplicate-index "$EVIDENCE_ROOT/duplicate-index" "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED" malformed-ledger
+evidence_must_fail foreign-instance "$EVIDENCE_ROOT/foreign-instance" "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED" roster-mismatch
+evidence_must_fail bad-digest "$EVIDENCE_ROOT/bad-digest" "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED" digest-mismatch
+evidence_must_fail duplicate-path "$EVIDENCE_ROOT/duplicate-path" "$EVIDENCE_ROOT/duplicate-path-initial" "$REPAIR_LAUNCHED" duplicate-artifact
+evidence_must_fail foreign-path "$EVIDENCE_ROOT/foreign-path" "$EVIDENCE_ROOT/foreign-path-initial" "$REPAIR_LAUNCHED" unsafe-artifact
+
+python3 -I -B - "$EVIDENCE_ROOT" <<'PY'
+import hashlib,json,os,pathlib,sys
+root=pathlib.Path(os.path.realpath(sys.argv[1])); index=3
+rows=[json.loads(line) for line in (root/"validated").read_text().splitlines()]
+child=root/"children"/"review-3-attempt02"; child.mkdir()
+provider=child/"result.md"; provider.write_text("provider-owned repair\n")
+canonical=child/"validated-result.md"; payload=b"validated-repair-3\n"
+canonical.write_bytes(payload); canonical.chmod(0o400)
+instance="review-3-attempt02"
+(child/"status.json").write_text('{"state":"completed","exit_code":0}\n')
+repair={"edge":rows[index-1]["edge"],"index":index,"instance":instance,"receipt":"fixture",
+        "result":str(provider),"status":str(child/"status.json")}
+(root/"repair-valid").write_text(json.dumps(repair,separators=(",",":"))+"\n")
+rows[index-1]={"edge":repair["edge"],"index":index,"instance":instance,
+               "result":str(canonical),"sha256":hashlib.sha256(payload).hexdigest()}
+(root/"validated-repair").write_text("".join(json.dumps(row,separators=(",",":"))+"\n" for row in rows))
+PY
+post_review_validated_evidence_complete "$EVIDENCE_ROOT/validated-repair" 6 \
+  "$REVIEW_LAUNCHED" "$EVIDENCE_ROOT/repair-valid" "$EVIDENCE_ROOT"
+
 # The configured cap is enforced by the production wave runner, not merely
 # mentioned in prose. Cap one and cap two both wait before the next launch
 # wave, and preserve global result indices for later format repair.
@@ -577,25 +1611,33 @@ roster_must_block_aggregation "$TMP/roster-truncated-repair.records" 2
     cp "$1" "$2"; cp "$1" "$3"
   }
   post_review_wait_all() {
-    local count
+    local count indices
+    [ "$#" -eq 3 ]
     count="$(wc -l <"$1" | tr -d ' ')"
-    printf 'wait:%s:%s\n' "$count" "${4:-0}" >>"$CAP_EVENTS"
+    indices="$(jq -sr 'map(.index) | join(",")' "$1")"
+    printf 'wait:%s:%s\n' "$count" "$indices" >>"$CAP_EVENTS"
     : >"$3"
     POST_REVIEW_VALID_COUNT="$count"
     POST_REVIEW_FORMAT_FAILURE_COUNT=0
     POST_REVIEW_INFRA_FAILURE=0
   }
   CAP_RECORDS="$TMP/cap.records"
-  for edge in "${REVIEW_EDGES[@]}"; do printf '{"edge":"%s"}\n' "$edge"; done >"$CAP_RECORDS"
-  for cap in 1 2; do
+  for index in "${!REVIEW_EDGES[@]}"; do
+    printf '{"edge":"%s","index":%d}\n' "${REVIEW_EDGES[$index]}" "$((index + 1))"
+  done >"$CAP_RECORDS"
+  for cap in 1 2 4; do
     CAP_EVENTS="$TMP/cap-$cap.events"; : >"$CAP_EVENTS"
     post_review_run_capped "$CAP_RECORDS" 6 "$cap" "$TMP/cap-$cap.descriptors" \
       "$TMP/cap-$cap.launched" "$TMP/cap-$cap.failed" 10 "$TMP/cap-$cap"
     if [ "$cap" -eq 1 ]; then
-      printf '%s\n' dispatch:1 wait:1:0 dispatch:1 wait:1:1 dispatch:1 wait:1:2 \
-        dispatch:1 wait:1:3 dispatch:1 wait:1:4 dispatch:1 wait:1:5 >"$TMP/cap.expected"
+      printf '%s\n' dispatch:1 wait:1:1 dispatch:1 wait:1:2 dispatch:1 wait:1:3 \
+        dispatch:1 wait:1:4 dispatch:1 wait:1:5 dispatch:1 wait:1:6 >"$TMP/cap.expected"
+    elif [ "$cap" -eq 2 ]; then
+      printf '%s\n' dispatch:2 wait:2:1,2 dispatch:2 wait:2:3,4 \
+        dispatch:2 wait:2:5,6 >"$TMP/cap.expected"
     else
-      printf '%s\n' dispatch:2 wait:2:0 dispatch:2 wait:2:2 dispatch:2 wait:2:4 >"$TMP/cap.expected"
+      printf '%s\n' dispatch:4 wait:4:1,2,3,4 dispatch:2 wait:2:5,6 \
+        >"$TMP/cap.expected"
     fi
     cmp "$TMP/cap.expected" "$CAP_EVENTS"
     [ "$POST_REVIEW_VALID_COUNT" -eq 6 ]
@@ -819,8 +1861,8 @@ uberdev_unwind_child() {
   case "$1" in *second.status) return 9 ;; *) return 0 ;; esac
 }
 printf '%s\n' \
-  '{"edge":"first.edge","instance":"first","inputs":{},"risks":[]}' \
-  '{"edge":"second.edge","instance":"second","inputs":{},"risks":[]}' >"$run/records"
+  '{"edge":"first.edge","index":1,"instance":"first","inputs":{},"risks":[]}' \
+  '{"edge":"second.edge","index":2,"instance":"second","inputs":{},"risks":[]}' >"$run/records"
 set +e
 "$fanout" "$run/records" "$run/descriptors" "$run/launched" 29 >"$run/stdout" 2>"$run/stderr"
 rc=$?
@@ -853,21 +1895,29 @@ set -u
 runtime="$1"; wait_all="$2"; run="$3"; flavor="$4"; mkdir -p "$run"
 wait_log="$run/wait.log"; unwind_log="$run/unwind.log"; : >"$wait_log"; : >"$unwind_log"
 . "$runtime"
+if [ "$flavor" = post ]; then
+  CHANGED_PATHS_JSON='["README.md"]'
+  POST_REVIEW_VALIDATED_LEDGER="$run/validated"
+  : >"$POST_REVIEW_VALIDATED_LEDGER"
+fi
 uberdev_wait_child() {
   printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$wait_log"
   case "$1" in *wait-fail-first.status) return 7 ;; *wait-fail-second.status) return 8 ;; *) return 0 ;; esac
 }
 # This fixture exercises wait-drain ordering only; reviewer-result validation
 # has its own behavioral coverage in the six-child integration test.
-uberdev_child_validate_phase1_review_result() { return 0; }
+uberdev_child_validate_phase1_review_result() {
+  if [ -n "${3:-}" ]; then rm -f "$3"; printf 'validated fixture\n' >"$3"; chmod 400 "$3"; printf '%064d' 0; fi
+  return 0
+}
 uberdev_unwind_child() {
   printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$unwind_log"
   case "$1" in *wait-fail-first.status) return 9 ;; *) return 0 ;; esac
 }
 printf '%s\n' \
-  "{\"edge\":\"first.edge\",\"status\":\"$run/ok.status\",\"result\":\"$run/ok.result\"}" \
-  "{\"edge\":\"second.edge\",\"status\":\"$run/wait-fail-first.status\",\"result\":\"$run/wait-fail-first.result\"}" \
-  "{\"edge\":\"third.edge\",\"status\":\"$run/wait-fail-second.status\",\"result\":\"$run/wait-fail-second.result\"}" >"$run/launched"
+  "{\"edge\":\"first.edge\",\"index\":1,\"instance\":\"first\",\"status\":\"$run/ok.status\",\"result\":\"$run/ok.result\"}" \
+  "{\"edge\":\"second.edge\",\"index\":2,\"instance\":\"second\",\"status\":\"$run/wait-fail-first.status\",\"result\":\"$run/wait-fail-first.result\"}" \
+  "{\"edge\":\"third.edge\",\"index\":3,\"instance\":\"third\",\"status\":\"$run/wait-fail-second.status\",\"result\":\"$run/wait-fail-second.result\"}" >"$run/launched"
 unset FAILED_REVIEW_EDGE FAILED_REVIEW_INDEX
 set +e
 if [ "$flavor" = post ]; then
@@ -898,13 +1948,19 @@ cat >"$TMP/format-repair-ledger.sh" <<'SH'
 set -u
 runtime="$1"; run="$2"; mkdir -p "$run"
 . "$runtime"
+CHANGED_PATHS_JSON='["README.md"]'
+POST_REVIEW_VALIDATED_LEDGER="$run/validated"
+: >"$POST_REVIEW_VALIDATED_LEDGER"
 uberdev_wait_child() { return 0; }
-uberdev_child_validate_phase1_review_result() { case "$1" in *invalid.result) return 2 ;; *) return 0 ;; esac; }
+uberdev_child_validate_phase1_review_result() {
+  case "$1" in *invalid.result) return 2 ;; esac
+  rm -f "$3"; printf 'validated fixture\n' >"$3"; chmod 400 "$3"; printf '%064d' 0
+}
 uberdev_unwind_child() { return 0; }
 printf '%s\n' \
-  "{\"edge\":\"first.edge\",\"status\":\"$run/first.status\",\"result\":\"$run/first.result\"}" \
-  "{\"edge\":\"second.edge\",\"status\":\"$run/second.status\",\"result\":\"$run/invalid.result\"}" \
-  "{\"edge\":\"third.edge\",\"status\":\"$run/third.status\",\"result\":\"$run/third.result\"}" >"$run/launched"
+  "{\"edge\":\"first.edge\",\"index\":1,\"instance\":\"first\",\"status\":\"$run/first.status\",\"result\":\"$run/first.result\"}" \
+  "{\"edge\":\"second.edge\",\"index\":2,\"instance\":\"second\",\"status\":\"$run/second.status\",\"result\":\"$run/invalid.result\"}" \
+  "{\"edge\":\"third.edge\",\"index\":3,\"instance\":\"third\",\"status\":\"$run/third.status\",\"result\":\"$run/third.result\"}" >"$run/launched"
 set +e
 post_review_wait_all "$run/launched" 31 "$run/failed"
 rc=$?
@@ -930,8 +1986,8 @@ jq() {
 }
 uberdev_child_validate_phase1_review_result() { return 2; }
 printf '%s\n' \
-  "{\"edge\":\"first.edge\",\"status\":\"$run/first.status\",\"result\":\"$run/first.result\"}" \
-  "{\"edge\":\"second.edge\",\"status\":\"$run/second.status\",\"result\":\"$run/second.result\"}" >"$run/ledger-failure.launched"
+  "{\"edge\":\"first.edge\",\"index\":1,\"instance\":\"first\",\"status\":\"$run/first.status\",\"result\":\"$run/first.result\"}" \
+  "{\"edge\":\"second.edge\",\"index\":2,\"instance\":\"second\",\"status\":\"$run/second.status\",\"result\":\"$run/second.result\"}" >"$run/ledger-failure.launched"
 set +e
 post_review_wait_all "$run/ledger-failure.launched" 31 "$run/ledger-failure.failed"
 rc=$?
@@ -941,6 +1997,77 @@ set -e
 [ "$(wc -l <"$run/ledger-failure.failed" | tr -d ' ')" -eq 1 ]
 SH
 bash "$TMP/format-repair-ledger.sh" "$TMP/post-runtime.sh" "$TMP/format-repair-post"
+
+# Once reviewer output has passed validation, failure to persist its digest is
+# infrastructure failure. It must unwind the child without entering the
+# format-repair ledger or incrementing the format-failure count.
+cat >"$TMP/validated-ledger-failure.sh" <<'SH'
+set -u
+runtime="$1"; run="$2"; mkdir -p "$run"
+. "$runtime"
+CHANGED_PATHS_JSON='["README.md"]'
+POST_REVIEW_VALIDATED_LEDGER="$run/validated"
+: >"$POST_REVIEW_VALIDATED_LEDGER"
+unwind_log="$run/unwind"
+: >"$unwind_log"
+uberdev_wait_child() { return 0; }
+uberdev_child_validate_phase1_review_result() {
+  rm -f "$3"; printf 'validated fixture\n' >"$3"; chmod 400 "$3"; printf '%064d' 0
+}
+uberdev_unwind_child() {
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$unwind_log"
+  return 0
+}
+real_jq="$(command -v jq)"
+jq() {
+  case " $* " in
+    *' --arg sha256 '*) return 73 ;;
+  esac
+  command "$real_jq" "$@"
+}
+printf '%s\n' \
+  "{\"edge\":\"first.edge\",\"index\":1,\"instance\":\"first\",\"status\":\"$run/first.status\",\"result\":\"$run/first.result\"}" \
+  >"$run/launched"
+set +e
+post_review_wait_all "$run/launched" 31 "$run/failed"
+rc=$?
+set -e
+[ "$rc" -eq 73 ]
+[ "$POST_REVIEW_INFRA_FAILURE" -eq 1 ]
+[ "$POST_REVIEW_VALID_COUNT" -eq 0 ]
+[ "$POST_REVIEW_FORMAT_FAILURE_COUNT" -eq 0 ]
+[ ! -s "$run/failed" ]
+[ "$(wc -l <"$unwind_log" | tr -d ' ')" -eq 1 ]
+SH
+bash "$TMP/validated-ledger-failure.sh" "$TMP/post-runtime.sh" "$TMP/validated-ledger-post"
+
+# A validated-result publication I/O failure is also infrastructure failure,
+# not malformed reviewer output eligible for a format repair.
+cat >"$TMP/validated-publication-failure.sh" <<'SH'
+set -u
+runtime="$1"; run="$2"; mkdir -p "$run"
+. "$runtime"
+CHANGED_PATHS_JSON='["README.md"]'
+POST_REVIEW_VALIDATED_LEDGER="$run/validated"; : >"$POST_REVIEW_VALIDATED_LEDGER"
+unwind_log="$run/unwind"; : >"$unwind_log"
+uberdev_wait_child() { return 0; }
+uberdev_child_validate_phase1_review_result() { return 74; }
+uberdev_unwind_child() { printf '%s\n' "$1" >>"$unwind_log"; return 0; }
+printf '%s\n' \
+  "{\"edge\":\"first.edge\",\"index\":1,\"instance\":\"first\",\"status\":\"$run/first.status\",\"result\":\"$run/first.result\"}" \
+  >"$run/launched"
+set +e
+post_review_wait_all "$run/launched" 31 "$run/failed"
+rc=$?
+set -e
+[ "$rc" -eq 74 ]
+[ "$POST_REVIEW_INFRA_FAILURE" -eq 1 ]
+[ "$POST_REVIEW_VALID_COUNT" -eq 0 ]
+[ "$POST_REVIEW_FORMAT_FAILURE_COUNT" -eq 0 ]
+[ ! -s "$run/failed" ]
+[ "$(wc -l <"$unwind_log" | tr -d ' ')" -eq 1 ]
+SH
+bash "$TMP/validated-publication-failure.sh" "$TMP/post-runtime.sh" "$TMP/validated-publication-post"
 
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$REVIEW"
 grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$SIMPLIFY"

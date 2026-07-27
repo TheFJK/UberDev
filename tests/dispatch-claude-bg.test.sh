@@ -1132,9 +1132,27 @@ set +e
 CLAUDE_RELEASE_SCOPE="$(bash -c '. "$1"; _uberdev_dispatch_git_metadata_mutex_scope "$2"' \
   _ "$DISPATCH_LIB" "$CLAUDE_BOOT_TMP/repo")"
 set +e
-UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=1 bash -c \
-  '. "$1"; POST_IMPL_REVIEW_CAP=1; REVIEW_EXPECTED_COUNT=1; _uberdev_dispatch_git_metadata_mutex_acquire "$2" claude-bootstrap 1 && _uberdev_semaphore_mutex_release "$2"' \
-  _ "$DISPATCH_LIB" "$CLAUDE_RELEASE_SCOPE"
+CLAUDE_RELEASE_RECLAIM_RESULT="$(
+  UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=1 bash -c '
+    . "$1"
+    UBERDEV_SEMAPHORE_MUTEX_PROBE_ONLY=1
+    UBERDEV_SEMAPHORE_MUTEX_QUIET_BUSY=1
+    export UBERDEV_SEMAPHORE_MUTEX_PROBE_ONLY UBERDEV_SEMAPHORE_MUTEX_QUIET_BUSY
+    _uberdev_semaphore_mutex_acquire "$2" >/dev/null 2>&1
+    first_rc=$?
+    first_state="${_UBERDEV_SEMAPHORE_MUTEX_OBSERVED_STATE:-unknown}"
+    _uberdev_semaphore_mutex_acquire "$2" >/dev/null 2>&1
+    second_rc=$?
+    _uberdev_semaphore_mutex_release "$2" >/dev/null 2>&1
+    release_rc=$?
+    printf "first=%s state=%s second=%s release=%s" \
+      "$first_rc" "$first_state" "$second_rc" "$release_rc"
+    [ "$first_rc" -eq 75 ] \
+      && [ "$first_state" = reclaimed-published-dead ] \
+      && [ "$second_rc" -eq 0 ] \
+      && [ "$release_rc" -eq 0 ]
+  ' _ "$DISPATCH_LIB" "$CLAUDE_RELEASE_SCOPE"
+)"
 CLAUDE_RELEASE_RECLAIM_RC=$?
 set +e
 if [ "$CLAUDE_RELEASE_COMMAND_RC" -eq 0 ] \
@@ -1143,11 +1161,12 @@ if [ "$CLAUDE_RELEASE_COMMAND_RC" -eq 0 ] \
       "$CLAUDE_BOOT_TMP/runtime-release/solve-bg-stdout-339.log" \
     && [ "$(wc -l <"$CLAUDE_BOOT_TMP/release-provider.log" | tr -d ' ')" -eq 1 ] \
     && [ "$CLAUDE_RELEASE_RECLAIM_RC" -eq 0 ] \
+    && [ "$CLAUDE_RELEASE_RECLAIM_RESULT" = 'first=75 state=reclaimed-published-dead second=0 release=0' ] \
     && [ ! -e "$CLAUDE_RELEASE_SCOPE/.mutex" ]; then
-  echo "  PASS  Claude release failure preserves the strict marker handle and dead-owner reclaim"
+  echo "  PASS  Claude release failure preserves the handle across one-observation reclaim and next-poll acquire"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  Claude release-failure handle contract: result=$CLAUDE_RELEASE_RESULT reclaim=$CLAUDE_RELEASE_RECLAIM_RC"
+  echo "  FAIL  Claude release-failure handle contract: result=$CLAUDE_RELEASE_RESULT reclaim=$CLAUDE_RELEASE_RECLAIM_RESULT rc=$CLAUDE_RELEASE_RECLAIM_RC"
   FAIL=$((FAIL + 1))
 fi
 rm -rf "$CLAUDE_BOOT_TMP"
@@ -1553,6 +1572,32 @@ echo "== #175 D-iso: uberdev_dispatch_resolve_env populates env from a clean she
 ) ; read -r dP dF < "$TALLY_FILE"; PASS="$dP"; FAIL="$dF"
 
 echo
+echo "== Standalone claude-bg preflight guards its optional permissions helper =="
+permission_helper_contract="$(
+  set +eu
+  unset _UBERDEV_DISPATCH_LOADED _UBERDEV_AGENT_DISPATCH_LOADED
+  CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+  # shellcheck disable=SC1090
+  . "$DISPATCH_LIB"
+  _uberdev_dispatch_numeric_supervision_supported() { return 0; }
+  uberdev_dispatch_resolve_env() { return 0; }
+  unset -f _uberdev_agent_claude_permissions_preflight
+  uberdev_dispatch_preflight_backend claude-bg solve >/dev/null 2>&1
+  unavailable_rc=$?
+  _uberdev_agent_claude_permissions_preflight() { return 23; }
+  uberdev_dispatch_preflight_backend claude-bg solve >/dev/null 2>&1
+  guarded_rc=$?
+  printf '%s %s' "$unavailable_rc" "$guarded_rc"
+)"
+if [ "$permission_helper_contract" = "0 23" ]; then
+  echo "  PASS  standalone preflight skips an unavailable permissions helper and propagates an available helper's exact failure"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  standalone permissions helper contract returned: $permission_helper_contract (expected: 0 23)"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
 echo "== #246 D-perm: AUTO_PERMISSIONS=1 yields --dangerously-skip-permissions --permission-mode bypassPermissions (#243 + #246 pairing — bypass-mode pins the bg UI cycle ring; danger-skip short-circuits the checks) =="
 (
   set +u
@@ -1701,6 +1746,22 @@ fi
 
 echo
 echo "== #335 Claude cancellation is exact and bounded =="
+CANCEL_BACKEND_LOCALS="$(
+  awk '
+    /^_uberdev_dispatch_cancel_backend\(\)/ { in_function=1; next }
+    in_function && /^[[:space:]]*local / { print; exit }
+  ' "$DISPATCH_LIB"
+)"
+case " $CANCEL_BACKEND_LOCALS " in
+  (*" probe "*|*" cancel_rc "*)
+    echo "  FAIL  cancellation helper still declares dead probe/cancel_rc locals: $CANCEL_BACKEND_LOCALS"
+    FAIL=$((FAIL + 1))
+    ;;
+  (*)
+    echo "  PASS  cancellation helper declares no dead probe/cancel_rc locals"
+    PASS=$((PASS + 1))
+    ;;
+esac
 (
   set +u
   CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"

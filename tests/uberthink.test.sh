@@ -168,7 +168,20 @@ ck_msg "findings-to-issues.md Step-1 closed set includes uberthink-aggregate" \
   "[ '$F2I_IN_CLOSED_SET' -ge 1 ]" \
   "uberthink-aggregate not in the Step-1 closed-set allow-list of $F2I"
 
-echo "== U12: report.py tests pass (source tests/uberthink-report.test.sh) =="
+echo "== U12: standalone findings dispatch uses the closed caller contract =="
+UBERTHINK_F2I_REGION="$(awk 'index($0,"# DISPATCH POINT — findings-to-issues"){active=1} active{print} active && index($0,"elif [ \"$NO_ISSUES\""){exit}' "$SKILL")"
+ck "uberthink dispatch sends aggregate_path" \
+  "printf '%s' \"\$UBERTHINK_F2I_REGION\" | grep -q 'aggregate_path=.*f2i-aggregate.md'"
+ck "uberthink dispatch sends numeric pr_number=0" \
+  "printf '%s' \"\$UBERTHINK_F2I_REGION\" | grep -q 'pr_number=0'"
+ck "uberthink dispatch sends fixed label, marker, and max_new" \
+  "printf '%s' \"\$UBERTHINK_F2I_REGION\" | grep -q 'finding_label=uberthink-idea' \
+    && printf '%s' \"\$UBERTHINK_F2I_REGION\" | grep -q 'finding_marker_slug=uberthink' \
+    && printf '%s' \"\$UBERTHINK_F2I_REGION\" | grep -q 'max_new='"
+ck "uberthink dispatch omits agent-derived and legacy path fields" \
+  "! printf '%s' \"\$UBERTHINK_F2I_REGION\" | grep -qE '(run_id|repo_slug|pr_commit_sha|source_ref|phase1_aggregate_path)='"
+
+echo "== U13: report.py tests pass (source tests/uberthink-report.test.sh) =="
 # T1 owns report.py and its own unit tests in tests/uberthink-report.test.sh.
 # We do not duplicate those asserts here — we run that file and assert green +
 # 'ALL REPORT TESTS PASS' marker line in its stdout (the python heredoc inside

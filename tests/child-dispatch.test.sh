@@ -22,6 +22,11 @@ export UBERDEV_CHILD_TEST_MODE=1
 export UBERDEV_CHILD_MANIFEST_PATH="$ROOT/tests/_fixtures/child-run-tree-v1.json"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 [ -r "$LIB" ] || { echo "RED: child dispatch runtime missing" >&2; exit 1; }
+python3 -I -B - "$ROOT/plugins/uberdev/policy/solve-run-tree-v1.json" "$UBERDEV_CHILD_MANIFEST_PATH" <<'PY'
+import json,sys
+source,fixture=(json.load(open(path,encoding='utf-8')) for path in sys.argv[1:])
+assert fixture.get('input_limits')==source.get('input_limits')
+PY
 . "$LIB"
 
 make_context() {
