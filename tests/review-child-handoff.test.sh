@@ -751,6 +751,57 @@ PY
     _uberdev_agent_json_get "$UBERDEV_RUN_CARRIER_JSON" context_file)"
   [ "$serialized_context" = "$WINDOWS_CONTEXT" ]
   ! _uberdev_child_context_run_dir 'C:\repo\.uberdev\runs\review-1\state\..\context.json' >/dev/null 2>&1
+
+  WINDOWS_AGGREGATION_FUNCTIONS="$TMP/windows-aggregation-functions.sh"
+  awk '/^post_review_capture_aggregation_inputs\(\) \{/{active=1} active{print} active && /^\}/{exit}' \
+    "$POST" >"$WINDOWS_AGGREGATION_FUNCTIONS"
+  . "$WINDOWS_AGGREGATION_FUNCTIONS"
+  UBERDEV_REVIEW_PLUGIN_ROOT="$ROOT/plugins/uberdev"
+  WINDOWS_AGGREGATION_ROOT="$TMP/windows-aggregation"
+  mkdir -p "$WINDOWS_AGGREGATION_ROOT"
+  WINDOWS_AGGREGATION_LEDGER="$(python3 -I -B - \
+    "$ROOT/plugins/uberdev/lib/run_manifest.py" "$WINDOWS_AGGREGATION_ROOT" <<'PY'
+import hashlib,importlib.util,json,pathlib,sys
+module_path,root_path=sys.argv[1:]
+spec=importlib.util.spec_from_file_location("windows_aggregation_artifacts",module_path)
+if spec is None or spec.loader is None: raise SystemExit(2)
+artifacts=importlib.util.module_from_spec(spec)
+sys.modules[spec.name]=artifacts
+spec.loader.exec_module(artifacts)
+root=pathlib.Path(root_path)
+payload=b"windows captured reviewer bytes\n"
+digest=hashlib.sha256(payload).hexdigest()
+snapshot,_,_=artifacts.secure_publish_captured(str(root/f"01-{digest}.md"),payload)
+row={"edge":"review_pr.review.correctness","index":1,"instance":"windows-reviewer",
+     "result":snapshot,"sha256":digest}
+ledger_payload=(json.dumps(row,sort_keys=True,separators=(",",":"))+"\n").encode()
+ledger,_,_=artifacts.secure_publish_captured(str(root/"trusted-ledger.jsonl"),ledger_payload)
+print(ledger,end="")
+PY
+)"
+  WINDOWS_AGGREGATION_JSON="$(post_review_capture_aggregation_inputs \
+    "$WINDOWS_AGGREGATION_LEDGER" 1)"
+  python3 -I -B - "$WINDOWS_AGGREGATION_JSON" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1])
+assert value["schema_version"]==1 and len(value["rows"])==1
+assert value["rows"][0]["content"]=="windows captured reviewer bytes\n"
+PY
+  WINDOWS_AGGREGATION_SNAPSHOT="$(find "$WINDOWS_AGGREGATION_ROOT" -maxdepth 1 \
+    -type f -name '01-*.md.attempt-*' -print -quit)"
+  WINDOWS_AGGREGATION_REPLACEMENT="$TMP/windows-aggregation-replacement"
+  printf 'windows replacement must survive\n' >"$WINDOWS_AGGREGATION_REPLACEMENT"
+  chmod 600 "$WINDOWS_AGGREGATION_SNAPSHOT"
+  python3 -I -B - "$WINDOWS_AGGREGATION_REPLACEMENT" \
+    "$WINDOWS_AGGREGATION_SNAPSHOT" <<'PY'
+import os,sys
+os.replace(sys.argv[1],sys.argv[2])
+PY
+  if post_review_capture_aggregation_inputs "$WINDOWS_AGGREGATION_LEDGER" 1 >/dev/null 2>&1; then
+    echo 'review-child-handoff windows path: replaced aggregation snapshot was accepted' >&2
+    exit 1
+  fi
+  grep -qxF 'windows replacement must survive' "$WINDOWS_AGGREGATION_SNAPSHOT"
   echo 'review-child-handoff windows path: PASS'
   exit 0
 fi
@@ -1202,7 +1253,10 @@ edges+=(review_pr.ci.classify)
 inputs+=("$(jq -cn --arg p "$path" '{pr_number:1,run_id:"1",log_path:$p}')")
 risks+=('[]')
 edges+=(review_pr.ci.fix_code)
-inputs+=("$(jq -cn --arg p "$path" --arg d "$dir" '{classification_path:$p,log_path:$p,working_dir:$d,pr_number:1}')")
+inputs+=("$(jq -cn --arg d "$dir" \
+  '{failure_class:"code_bug",signal_anchor:"README.md:1",run_id:"1",
+    head_sha:"0123456789012345678901234567890123456789",
+    working_dir:$d,pr_number:1}')")
 risks+=(null)
 edges+=(review_pr.ci.rebase)
 inputs+=("$(jq -cn --arg d "$dir" '{working_dir:$d,pr_number:1,head_sha:"0123456789012345678901234567890123456789",base_sha:"abcdefabcdefabcdefabcdefabcdefabcdefabcd"}')")
@@ -1501,8 +1555,13 @@ roster_must_block_aggregation "$TMP/roster-truncated-repair.records" 2
 # Duplicate indices, impersonated instances, reused canonical artifacts, and
 # digest replacement must all fail before aggregation. A format repair keeps
 # the original edge/index but may prove itself with the fresh launched instance.
-awk '/^post_review_validated_evidence_complete\(\) \{/{active=1} active{print} active && /^\}/{exit}' \
-  "$POST" >"$TMP/evidence-runtime.sh"
+for EVIDENCE_FUNCTION in \
+  post_review_validated_evidence_complete \
+  post_review_capture_aggregation_inputs; do
+  awk -v function_name="$EVIDENCE_FUNCTION" \
+    '$0 == function_name "() {" {active=1} active{print} active && /^}/{exit}' \
+    "$POST" >>"$TMP/evidence-runtime.sh"
+done
 . "$TMP/evidence-runtime.sh"
 UBERDEV_REVIEW_PLUGIN_ROOT="$ROOT/plugins/uberdev"
 REVIEW_EDGES=("${ROSTER_EDGES[@]}")
@@ -1545,12 +1604,50 @@ REPAIR_LAUNCHED="$EVIDENCE_ROOT/repair"
 TRUSTED_EVIDENCE_LEDGER="$(post_review_validated_evidence_complete "$POST_REVIEW_VALIDATED_LEDGER" 6 \
   "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED" "$EVIDENCE_ROOT")"
 [ -f "$TRUSTED_EVIDENCE_LEDGER" ]
-TRUSTED_FIRST_RESULT="$(jq -r 'select(.index == 1) | .result' "$TRUSTED_EVIDENCE_LEDGER")"
+TRUSTED_AGGREGATION_INPUT="$(post_review_capture_aggregation_inputs \
+  "$TRUSTED_EVIDENCE_LEDGER" 6)"
+python3 -I -B - "$TRUSTED_AGGREGATION_INPUT" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1])
+assert set(value)=={"schema_version","ledger_sha256","rows"}
+assert value["schema_version"]==1 and len(value["rows"])==6
+assert value["rows"][0]["content"]=="validated-1\n"
+PY
 chmod 600 "$EVIDENCE_ROOT/children/review-1-attempt01/validated-result.md"
 printf 'replacement after evidence capture\n' >"$EVIDENCE_ROOT/children/review-1-attempt01/validated-result.md"
-printf 'validated-1\n' | cmp - "$TRUSTED_FIRST_RESULT"
 printf 'validated-1\n' >"$EVIDENCE_ROOT/children/review-1-attempt01/validated-result.md"
 chmod 400 "$EVIDENCE_ROOT/children/review-1-attempt01/validated-result.md"
+
+LEDGER_REPLACEMENT="$EVIDENCE_ROOT/ledger-replacement"
+printf 'ledger replacement must survive\n' >"$LEDGER_REPLACEMENT"
+chmod 600 "$TRUSTED_EVIDENCE_LEDGER"
+python3 -I -B - "$LEDGER_REPLACEMENT" "$TRUSTED_EVIDENCE_LEDGER" <<'PY'
+import os,sys
+os.replace(sys.argv[1],sys.argv[2])
+PY
+if post_review_capture_aggregation_inputs "$TRUSTED_EVIDENCE_LEDGER" 6 >/dev/null 2>&1; then
+  echo "post-gate ledger replacement reached aggregation" >&2
+  exit 1
+fi
+grep -qxF 'ledger replacement must survive' "$TRUSTED_EVIDENCE_LEDGER"
+
+SNAPSHOT_REPLACEMENT_LEDGER="$(post_review_validated_evidence_complete \
+  "$POST_REVIEW_VALIDATED_LEDGER" 6 "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED" \
+  "$EVIDENCE_ROOT")"
+SNAPSHOT_REPLACEMENT_PATH="$(find "$(dirname "$SNAPSHOT_REPLACEMENT_LEDGER")" \
+  -maxdepth 1 -type f -name '01-*.md.attempt-*' -print -quit)"
+SNAPSHOT_REPLACEMENT="$EVIDENCE_ROOT/snapshot-replacement"
+printf 'snapshot replacement must survive\n' >"$SNAPSHOT_REPLACEMENT"
+chmod 600 "$SNAPSHOT_REPLACEMENT_PATH"
+python3 -I -B - "$SNAPSHOT_REPLACEMENT" "$SNAPSHOT_REPLACEMENT_PATH" <<'PY'
+import os,sys
+os.replace(sys.argv[1],sys.argv[2])
+PY
+if post_review_capture_aggregation_inputs "$SNAPSHOT_REPLACEMENT_LEDGER" 6 >/dev/null 2>&1; then
+  echo "post-gate snapshot replacement reached aggregation" >&2
+  exit 1
+fi
+grep -qxF 'snapshot replacement must survive' "$SNAPSHOT_REPLACEMENT_PATH"
 
 evidence_must_fail() {
   local label="$1" ledger="$2" initial="$3" repair="$4" expected_class="$5"

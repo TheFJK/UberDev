@@ -44,7 +44,7 @@ Run a comprehensive pull request review using multiple specialized agents, each 
   "review_pr.fix.phase2":{"inputs":["findings_path","commit_range_path","working_dir","pr_number","disposition_path"],"optional_inputs":[],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"run","risk_argument":null},
   "review_pr.defer.findings":{"inputs":["phase1_path","phase2_path","phase1_disposition_path","phase2_disposition_path","working_dir","pr_number"],"optional_inputs":[],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"run","risk_argument":null},
   "review_pr.ci.classify":{"inputs":["pr_number","run_id","log_path"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
-  "review_pr.ci.fix_code":{"inputs":["classification_path","log_path","working_dir","pr_number"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "review_pr.ci.fix_code":{"inputs":["failure_class","signal_anchor","run_id","head_sha","working_dir","pr_number"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
   "review_pr.ci.rebase":{"inputs":["working_dir","pr_number","head_sha","base_sha"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
   "review_pr.ci.defer_refusal":{"inputs":["phase1_path","working_dir","pr_number"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
   "review_pr.ci.resolve_conflict":{"inputs":["file_path","working_dir","pr_branch","integration_branch","base_sha"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null}
@@ -1169,17 +1169,23 @@ PY
       exit 1
     }
     review_apply_ci_classification_status "$classification_status" "$classifier_rationale" || exit 1
+    # The pathname has completed its controller-only validation role. ROUTE
+    # carries only the closed scalars captured above and cannot reopen a later
+    # replacement of the classifier snapshot.
+    CI_CLASSIFICATION_PATH=
     ```
 
     ### 6c.4 ROUTE — failure_class → downstream agent
 
     ```bash
+    CI_HEAD_SHA="$(git rev-parse HEAD)"
     CI_FIX_INPUTS="$(uberdev_child_inputs_build review_pr.ci.fix_code \
-      classification_path "$(review_json_string "$CI_CLASSIFICATION_PATH")" \
-      log_path "$(review_json_string "$CI_LOG_ARTIFACT_PATH")" \
+      failure_class "$(review_json_string "$failure_class")" \
+      signal_anchor "$(review_json_string "$signal_anchor")" \
+      run_id "$(review_json_string "$CI_RUN_ID")" \
+      head_sha "$(review_json_string "$CI_HEAD_SHA")" \
       working_dir "$(review_json_string "$WORKTREE_ROOT")" \
       pr_number "$PR_NUMBER")"
-    CI_HEAD_SHA="$(git rev-parse HEAD)"
     CI_BASE_SHA="$(git merge-base HEAD "origin/${base_branch}")"
     CI_REBASE_INPUTS="$(uberdev_child_inputs_build review_pr.ci.rebase \
       working_dir "$(review_json_string "$WORKTREE_ROOT")" \

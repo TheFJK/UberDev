@@ -27,8 +27,9 @@ CLASSIFIER="$REPO_ROOT/plugins/uberdev/agents/ci-failure-classifier.md"
 CODE_FIXER_CI="$REPO_ROOT/plugins/uberdev/agents/ci-code-fixer.md"
 REBASE_HANDLER="$REPO_ROOT/plugins/uberdev/agents/ci-rebase-handler.md"
 MERGE_SKILL="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/SKILL.md"
+RUN_TREE="$REPO_ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
 
-for f in "$REVIEW_PR" "$CLASSIFIER" "$CODE_FIXER_CI" "$REBASE_HANDLER" "$MERGE_SKILL"; do
+for f in "$REVIEW_PR" "$CLASSIFIER" "$CODE_FIXER_CI" "$REBASE_HANDLER" "$MERGE_SKILL" "$RUN_TREE"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -579,6 +580,34 @@ assert_grep "$CODE_FIXER_CI" 'fix\(ci\):.*chore\(deps\):|chore\(deps\):.*fix\(ci
   "S11.4 — both commit-type prefixes (fix(ci):, chore(deps):) documented"
 assert_no_grep "$CODE_FIXER_CI" 'git push' \
   "S11.5 — agent never pushes (caller handles)"
+assert_no_grep "$REVIEW_PR" 'CI_FIX_INPUTS=.*classification_path|classification_path.*CI_CLASSIFICATION_PATH' \
+  "S11.6 — fixer handoff never carries the mutable classifier pathname"
+assert_grep "$REVIEW_PR" 'CI_FIX_INPUTS=.*failure_class|failure_class.*review_json_string' \
+  "S11.7 — fixer handoff carries the controller-validated failure class"
+assert_grep "$REVIEW_PR" 'CI_FIX_INPUTS=.*signal_anchor|signal_anchor.*review_json_string' \
+  "S11.8 — fixer handoff carries the controller-validated signal anchor"
+python3 -I -B - "$RUN_TREE" <<'PY'
+import json,sys
+edge=json.load(open(sys.argv[1],encoding="utf-8"))["edges"]["review_pr.ci.fix_code"]
+required=edge["required_inputs"]
+expected={
+    "failure_class":"string",
+    "signal_anchor":"string",
+    "run_id":"string",
+    "head_sha":"string",
+    "working_dir":"directory",
+    "pr_number":"integer",
+}
+if required!=expected or "classification_path" in required or "log_path" in required:
+    raise SystemExit("ci fixer policy does not bind the validated scalar contract")
+PY
+if [ "$?" -eq 0 ]; then
+  echo "  PASS  S11.9 — policy binds only validated classifier scalars and exact run/head metadata"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S11.9 — policy binds only validated classifier scalars and exact run/head metadata"
+  FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== S12: ci-rebase-handler agent shape =="

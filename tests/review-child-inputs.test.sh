@@ -687,11 +687,18 @@ wave=()
 review_wait_jobs "${wave[@]}"
 
 CI_CLASSIFICATION_PATH="$RESEARCH_DIR_ABS/ci-classification-${CI_FIX_LOOP_ITER:-1}.yaml"
-printf 'fixture classifier output\n' >"$CI_CLASSIFICATION_PATH"
+printf 'validated classifier output\n' >"$CI_CLASSIFICATION_PATH"
 chmod 600 "$CI_CLASSIFICATION_PATH"
 CLASSIFICATION_PATH="$CI_CLASSIFICATION_PATH"
+failure_class=code_bug
+signal_anchor=README.md:1
+# Model a replacement after the controller has captured and validated the
+# classifier scalars. The fixer handoff must not carry this pathname or reopen
+# its replacement.
+printf 'replacement classifier says env_drift at package-lock.json:1\n' \
+  >"$CI_CLASSIFICATION_PATH"
 
-CI_HEAD_SHA=$'head "quoted" \\sha*?[x]\t'
+CI_HEAD_SHA="$(git rev-parse HEAD)"
 CI_BASE_SHA=$'base "quoted" \\sha*?[x]\t'
 . "$TMP/review-ci-builders.sh"
 
@@ -995,6 +1002,7 @@ export HANDOFFS CHANGED_PATHS_JSON EMPHASIS_JSON DIFF_PATH CRITERIA_FIXTURE FORM
 export HOSTILE_DIR POST_FINAL SIMPLIFY_FINAL COMMIT_RANGE_FIXTURE
 export PHASE1_DISPOSITION_FIXTURE PHASE2_DISPOSITION_FIXTURE
 export CLASSIFICATION_PATH CI_LOG_ARTIFACT_PATH CI_REFUSED_AGGREGATE_PATH CONFLICT_PATH
+export failure_class signal_anchor
 export CI_RUN_ID FOCUS CI_HEAD_SHA CI_BASE_SHA pr_head_branch base_branch BASE_SHA
 
 # Exact payload assertions catch wrong callsite variable mappings while retaining
@@ -1103,8 +1111,10 @@ exact(
 exact(
     f"review-pr-{run_id}-ci-fix-iter3-attempt01",
     {
-        "classification_path": env["CLASSIFICATION_PATH"],
-        "log_path": env["CI_LOG_ARTIFACT_PATH"],
+        "failure_class": env["failure_class"],
+        "signal_anchor": env["signal_anchor"],
+        "run_id": env["CI_RUN_ID"],
+        "head_sha": env["CI_HEAD_SHA"],
         "working_dir": env["MUTATION_WORKTREE"],
         "pr_number": 73,
     },

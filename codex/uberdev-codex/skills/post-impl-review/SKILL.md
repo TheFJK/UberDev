@@ -664,9 +664,102 @@ except Exception:
  fail('unsafe-artifact')
 PY
 }
+post_review_capture_aggregation_inputs() {
+  python3 -I -B - "$1" "$2" "$UBERDEV_REVIEW_PLUGIN_ROOT" <<'PY'
+import hashlib,importlib.util,json,os,re,sys
+ledger,expected_text,plugin_root=sys.argv[1:]
+def fail(reason):
+ print(f'post_review_aggregation_failure class={reason}',file=sys.stderr)
+ raise SystemExit(1)
+def closed_object(pairs):
+ value={}
+ for key,item in pairs:
+  if key in value: raise ValueError('duplicate-key')
+  value[key]=item
+ return value
+try:
+ if re.fullmatch(r'[1-9][0-9]?',expected_text) is None:
+  fail('malformed-ledger')
+ expected=int(expected_text)
+ spec=importlib.util.spec_from_file_location(
+     'uberdev_review_aggregation_artifacts',os.path.join(plugin_root,'lib','run_manifest.py'))
+ if spec is None or spec.loader is None: fail('unsafe-artifact')
+ artifacts=importlib.util.module_from_spec(spec); sys.modules[spec.name]=artifacts
+ spec.loader.exec_module(artifacts)
+ if expected<1 or expected>64 or not os.path.isabs(ledger): fail('malformed-ledger')
+ ledger_name=re.fullmatch(
+     r'trusted-ledger\.jsonl\.attempt-[0-9a-f]{32}-([0-9a-f]{64})',
+     os.path.basename(ledger))
+ if ledger_name is None: fail('malformed-ledger')
+ ledger_digest=ledger_name.group(1)
+ ledger_payload,_=artifacts.secure_capture_published(
+     ledger,ledger_digest,1,1048576)
+ ledger_text=ledger_payload.decode('utf-8')
+ lines=ledger_text.splitlines()
+ if not ledger_text.endswith('\n') or not lines or any(not line for line in lines):
+  fail('malformed-ledger')
+ rows=[json.loads(line,object_pairs_hook=closed_object) for line in lines]
+ allowed={
+  'review_pr.review.correctness','review_pr.review.silent_failures',
+  'review_pr.review.types','review_pr.review.comments',
+  'review_pr.review.tests','review_pr.review.general',
+ }
+ if len(rows)!=expected: fail('roster-mismatch')
+ ledger_parent=os.path.dirname(os.path.abspath(ledger))
+ seen_edges=set(); seen_indexes=set(); captured_rows=[]
+ for row in rows:
+  if (type(row) is not dict
+      or set(row)!={'edge','index','instance','result','sha256'}
+      or type(row['index']) is not int or isinstance(row['index'],bool)
+      or row['index']<1 or row['index']>expected
+      or row['index'] in seen_indexes
+      or type(row['edge']) is not str or row['edge'] not in allowed
+      or row['edge'] in seen_edges
+      or type(row['instance']) is not str
+      or re.fullmatch(r'[A-Za-z0-9._-]{1,128}',row['instance']) is None
+      or type(row['result']) is not str or not os.path.isabs(row['result'])
+      or os.path.dirname(os.path.abspath(row['result']))!=ledger_parent
+      or type(row['sha256']) is not str
+      or re.fullmatch(r'[0-9a-f]{64}',row['sha256']) is None):
+   fail('malformed-ledger')
+  snapshot_name=re.fullmatch(
+      r'([0-9]{2})-([0-9a-f]{64})\.md\.attempt-[0-9a-f]{32}-([0-9a-f]{64})',
+      os.path.basename(row['result']))
+  if (snapshot_name is None or int(snapshot_name.group(1))!=row['index']
+      or snapshot_name.group(2)!=row['sha256']
+      or snapshot_name.group(3)!=row['sha256']):
+   fail('digest-mismatch')
+  snapshot,_=artifacts.secure_capture_published(
+      row['result'],row['sha256'],1,1048576)
+  content=snapshot.decode('utf-8')
+  if '\x00' in content: fail('unsafe-artifact')
+  seen_edges.add(row['edge']); seen_indexes.add(row['index'])
+  captured_rows.append({
+      'edge':row['edge'],'index':row['index'],'instance':row['instance'],
+      'sha256':row['sha256'],'content':content,
+  })
+ if seen_indexes!=set(range(1,expected+1)): fail('roster-mismatch')
+ captured_rows.sort(key=lambda row:row['index'])
+ print(json.dumps({
+     'schema_version':1,'ledger_sha256':ledger_digest,'rows':captured_rows,
+ },sort_keys=True,separators=(',',':')),end='')
+except SystemExit:
+ raise
+except (OSError,UnicodeError,ValueError,TypeError,json.JSONDecodeError):
+ fail('malformed-ledger')
+except Exception:
+ fail('unsafe-artifact')
+PY
+}
 if POST_REVIEW_TRUSTED_LEDGER="$(post_review_validated_evidence_complete "$POST_REVIEW_VALIDATED_LEDGER" "$REVIEW_EXPECTED_COUNT" \
     "$REVIEW_LAUNCHED" "$REPAIR_PREFIX.launched" "$UBERDEV_CARRIER_RUN_DIR")"; then
-  POST_REVIEW_VALIDATED_LEDGER="$POST_REVIEW_TRUSTED_LEDGER"
+  if POST_REVIEW_AGGREGATION_INPUT="$(post_review_capture_aggregation_inputs \
+      "$POST_REVIEW_TRUSTED_LEDGER" "$REVIEW_EXPECTED_COUNT")"; then
+    POST_REVIEW_VALIDATED_LEDGER=
+    unset POST_REVIEW_TRUSTED_LEDGER
+  else
+    REVIEW_WAVE_BLOCKED=1
+  fi
 else
   REVIEW_WAVE_BLOCKED=1
 fi
@@ -701,21 +794,26 @@ fi
 The executable boundary above gates the writer before interpreting any
 reviewer prose. A lifecycle failure or an exhausted format repair is not a
 review verdict and MUST NOT produce the ordinary six-row `Continue.` artifact.
-The gate replaces `POST_REVIEW_VALIDATED_LEDGER` with a parent-owned,
-digest-qualified publication inside a unique
-`.trusted-artifacts-<context>.attempt-*` directory. A published pathname is
-only a carrier: aggregation MUST call `secure_capture_published` with each
-recorded SHA-256 and interpret only the returned captured bytes. Aggregation
-consumes only validated artifacts returned by that capture. Never reopen a
-child-owned `validated-result.md` or provider-owned `result.md` during
-aggregation. Failed attempts remain isolated under their unique attempt
+The gate feeds the trusted ledger into the executable
+`post_review_capture_aggregation_inputs` boundary. That helper derives the
+ledger digest from its attempt name, calls `secure_capture_published`, validates
+the closed row schema, and digest-recaptures every snapshot. It emits
+`POST_REVIEW_AGGREGATION_INPUT` as one closed JSON object containing the
+captured reviewer text and no artifact path. The carrier variables are then
+cleared, so Step 4 MUST interpret only `POST_REVIEW_AGGREGATION_INPUT`; it never
+opens a ledger, snapshot, child-owned `validated-result.md`, or provider-owned
+`result.md`. Aggregation consumes only validated artifacts represented by those
+captured bytes. Failed attempts remain isolated under their unique attempt
 identity; retries create a fresh identity and never unlink or remove a
 pathname after a separate identity check. Evidence failures emit only the stable class
 `malformed-ledger`, `roster-mismatch`, `unsafe-artifact`,
 `duplicate-artifact`, or `digest-mismatch` plus the bounded edge/index (never a
 path or reviewer content).
 
-Aggregate the 6 returns into the table format below plus the bottom line `Aggregated: N blockers, M suggestions. Continue.`
+Aggregate the 6 captured `POST_REVIEW_AGGREGATION_INPUT.rows` into the table
+format below plus the bottom line
+`Aggregated: N blockers, M suggestions. Continue.` Do not use any pathname as
+aggregation authority.
 
 Write the aggregation to:
 - `.uberdev/research/$RUN_ID/post-impl-review-final.md` — the canonical findings artifact. `$RUN_ID` is the one minted by `/uberdev:review-pr` (the sole caller); see `commands/review-pr.md` "Run-ID format" subsection for the regex contract `^[0-9]{8}-[0-9]{6}-[a-f0-9]+$`. The `finish-branch` PR-body-composition glob `post-impl-review-*.md` (per `skills/finish-branch/SKILL.md`) matches both this filename and any legacy `post-impl-review-wave-final.md` artifacts left over from pre-refactor runs (zero-migration).

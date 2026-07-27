@@ -591,15 +591,19 @@
       "edge_id": "review_pr.ci.fix_code",
       "source": "plugins/uberdev/commands/review-pr.md",
       "required_inputs": [
-        "classification_path",
-        "log_path",
+        "failure_class",
+        "head_sha",
         "pr_number",
+        "run_id",
+        "signal_anchor",
         "working_dir"
       ],
       "required_input_types": {
-        "classification_path": "path",
-        "log_path": "path",
+        "failure_class": "string",
+        "head_sha": "string",
         "pr_number": "integer",
+        "run_id": "string",
+        "signal_anchor": "string",
         "working_dir": "directory"
       },
       "optional_inputs": [],

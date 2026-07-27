@@ -1024,8 +1024,10 @@
         "turbo"
       ],
       "required_inputs": {
-        "classification_path": "path",
-        "log_path": "path",
+        "failure_class": "string",
+        "signal_anchor": "string",
+        "run_id": "string",
+        "head_sha": "string",
         "working_dir": "directory",
         "pr_number": "integer"
       },

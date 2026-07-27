@@ -15,9 +15,10 @@ You apply a root-cause fix for a CI failure of class `code_bug` or `env_drift`. 
 
 ## Inputs
 
-- `failure_class` — `code_bug` | `env_drift` (trusted, classifier-emitted).
-- `signal_anchor` — `<file>:<line>` only. The classifier (`agents/ci-failure-classifier.md` Step 4) is constrained to emit this format for `code_bug`/`env_drift`; if no `(test_path):<line>` pattern is detectable in the log, the classifier downgrades to `AMBIGUOUS` rather than emitting `gh-run-<id>:<line-in-log>` for these classes. This agent MUST refuse with `rationale: "input-malformed"` on any signal_anchor that does not match the regex `^[^:]+:[0-9]+$` AND is not a real file under `$working_dir` (realpath-prefix-check, Step 1).
-- `pr_number`, `run_id`, `check_name` (trusted).
+- `failure_class` — `code_bug` | `env_drift`. This is the controller-validated scalar captured from the classifier result; no classifier pathname crosses this boundary.
+- `signal_anchor` — `<file>:<line>` only. This is the controller-validated scalar captured from the same result. The classifier (`agents/ci-failure-classifier.md` Step 4) is constrained to emit this format for `code_bug`/`env_drift`; if no `(test_path):<line>` pattern is detectable in the log, the classifier downgrades to `AMBIGUOUS` rather than emitting `gh-run-<id>:<line-in-log>` for these classes. This agent MUST refuse with `rationale: "input-malformed"` on any signal_anchor that does not match the regex `^[^:]+:[0-9]+$` AND is not a real file under `$working_dir` (realpath-prefix-check, Step 1).
+- `pr_number`, `run_id` — exact caller-captured PR and CI run metadata.
+- `head_sha` — full 40-hex worktree HEAD captured before dispatch.
 - `working_dir` — absolute worktree path.
 
 ## Tools authorised
@@ -47,7 +48,7 @@ The full list of forbidden-pattern rationales is enumerated above so callers can
 
 ## Process
 
-1. **Validate inputs.** Verify `working_dir` is inside the worktree (`git -C "$working_dir" rev-parse --is-inside-work-tree`). Verify `signal_anchor` resolves to a file inside `working_dir` via realpath-prefix-check (mirrors `agents/code-fixer.md` Step 3a–3b). On either failure: `status: REFUSED`, `rationale: "input-malformed"` or `rationale: "path-traversal-blocked"` respectively.
+1. **Validate inputs.** Require `failure_class ∈ {code_bug, env_drift}`, a positive integer `pr_number`, a non-empty bounded `run_id`, and a full 40-hex `head_sha`. Verify `working_dir` is inside the worktree (`git -C "$working_dir" rev-parse --is-inside-work-tree`) and `git -C "$working_dir" rev-parse HEAD` exactly equals `head_sha`. Verify `signal_anchor` resolves to a file inside `working_dir` via realpath-prefix-check (mirrors `agents/code-fixer.md` Step 3a–3b). On malformed scalars or a moved HEAD: `status: REFUSED`, `rationale: "input-malformed"` or `rationale: "head-moved-since-classify"` respectively. On path escape: `status: REFUSED`, `rationale: "path-traversal-blocked"`.
 2. **Read the file at signal_anchor.** Read 30 lines of context (15 above, 15 below the anchor line).
 3. **Propose a minimal diff.** Run the forbidden-pattern check against the proposed text. On match: refuse with the named rationale (e.g., `forbidden-pattern-no-verify`).
 4. **Apply edit.** Use Edit tool only; never Write. If the proposed change requires creating a new file, refuse with `forbidden-pattern-fix-creates-new-file`.
@@ -60,7 +61,7 @@ The full list of forbidden-pattern rationales is enumerated above so callers can
    git commit -m "$(cat <<'EOF'
    fix(ci): <summary>
 
-   Addresses CI failure in run #<run_id>, check "<check_name>".
+   Addresses CI failure in run #<run_id>.
    Signal: <signal_anchor>
    EOF
    )"
@@ -72,7 +73,8 @@ The full list of forbidden-pattern rationales is enumerated above so callers can
 
 Return overall `status: REFUSED` with `rationale: "<reason>"` if:
 
-- Trust envelope missing on classifier output (caller-mediated; surface as `refused-malformed-envelope`).
+- Controller-supplied scalar contract malformed → `input-malformed`.
+- Worktree HEAD differs from `head_sha` → `head-moved-since-classify`.
 - Forbidden-pattern detected in the proposed diff → use the named `forbidden-pattern-<name>` from the table above (e.g., `forbidden-pattern-no-verify`, `forbidden-pattern-test-skip`, `forbidden-pattern-error-swallow`, `forbidden-pattern-secret-mask`, `forbidden-pattern-fix-creates-new-file`).
 - Multi-file lockfile churn detected → `forbidden-pattern-multi-lockfile-churn`.
 - Realpath-prefix-check failure → `path-traversal-blocked`.
