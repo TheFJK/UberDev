@@ -1876,17 +1876,24 @@ for index,module_path in enumerate(sys.argv[1:3]):
     assert payload==b"verified bytes\n" and len(identity)==6
     replacement=root/"replacement"; replacement.write_bytes(b"replacement\n")
     original_open=module._secure_open_regular
+    replacement_completed=[False]
     def replace_after_open(path,flags,mode=0o600):
         descriptor=original_open(path,flags,mode)
-        os.replace(replacement,path)
+        try:
+            os.replace(replacement,path)
+        except PermissionError:
+            return descriptor
+        replacement_completed[0]=True
         return descriptor
     with mock.patch.object(module,"_secure_open_regular",replace_after_open):
         try:
-            module.secure_capture_regular(str(artifact),1,1024)
+            captured_payload,_=module.secure_capture_regular(str(artifact),1,1024)
         except module.ManifestRejected as error:
+            assert replacement_completed[0]
             assert str(error)=="artifact_replaced_during_capture"
         else:
-            raise AssertionError("replacement accepted")
+            assert not replacement_completed[0]
+            assert captured_payload==b"verified bytes\n"
 
     failures=[]
     unlink_target=root/"pre-unlink"
