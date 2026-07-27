@@ -723,6 +723,9 @@ import errno,json,os,re,stat,sys,tempfile,time
  issue,tier,provider_exit_raw,log,result,worktree,branch,workspace_mode,
  include_context)=sys.argv[1:]
 terminal_states={'completed','failed','timed_out','cancelled'}
+WINDOWS_STATUS_REPLACE_TIMEOUT_SECONDS=2.0
+WINDOWS_STATUS_REPLACE_RETRY_INTERVAL_SECONDS=0.01
+WINDOWS_TRANSIENT_REPLACE_WINERRORS=frozenset({5,32})
 if mode not in {'create','replace','provider'} or state not in terminal_states|{'running'}: raise SystemExit(2)
 try: exit_code=None if exit_raw in {'','null'} else int(exit_raw)
 except ValueError: raise SystemExit(2)
@@ -805,6 +808,28 @@ def read_current():
  except (UnicodeError,ValueError,json.JSONDecodeError): raise SystemExit(2)
  if not isinstance(value,dict): raise SystemExit(2)
  return entry,value
+def validate_replace_target(path,entry):
+ if entry is None:
+  if os.path.lexists(path): raise SystemExit(2)
+ else:
+  current=os.stat(path,follow_symlinks=False)
+  if (current.st_dev,current.st_ino)!=(entry.st_dev,entry.st_ino): raise SystemExit(2)
+def replace_status(temporary,path,entry):
+ if os.name!='nt':
+  validate_replace_target(path,entry)
+  os.replace(temporary,path)
+  return
+ deadline=time.monotonic()+WINDOWS_STATUS_REPLACE_TIMEOUT_SECONDS
+ while True:
+  validate_replace_target(path,entry)
+  try:
+   os.replace(temporary,path)
+   return
+  except PermissionError as error:
+   if getattr(error,'winerror',None) not in WINDOWS_TRANSIENT_REPLACE_WINERRORS: raise
+   remaining=deadline-time.monotonic()
+   if remaining<=0: raise
+   time.sleep(min(WINDOWS_STATUS_REPLACE_RETRY_INTERVAL_SECONDS,remaining))
 try:
  lock_entry(); acquire(); lock_entry()
  entry,existing=read_current(); replace=True
@@ -825,12 +850,7 @@ try:
    with os.fdopen(descriptor,'w',encoding='utf-8') as stream:
     descriptor=None; json.dump(payload,stream,sort_keys=True,separators=(',',':'))
     stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
-   if entry is None:
-    if os.path.lexists(path): raise SystemExit(2)
-   else:
-    current=os.stat(path,follow_symlinks=False)
-    if (current.st_dev,current.st_ino)!=(entry.st_dev,entry.st_ino): raise SystemExit(2)
-   os.replace(temporary,path)
+   replace_status(temporary,path,entry)
   finally:
    if descriptor is not None: os.close(descriptor)
    if os.path.exists(temporary): os.unlink(temporary)
