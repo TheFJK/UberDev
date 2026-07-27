@@ -1855,6 +1855,93 @@ else
 fi
 fi
 
+SECURE_CAPTURE_CLOSE_RESULT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" "$TMP" <<'PY'
+import importlib.util
+import pathlib
+import sys
+from unittest import mock
+
+failures=[]
+for index,module_path in enumerate(sys.argv[1:3]):
+    spec=importlib.util.spec_from_file_location(f"run_manifest_capture_close_{index}",module_path)
+    module=importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name]=module
+    spec.loader.exec_module(module)
+    root=pathlib.Path(sys.argv[3])/f"capture-close-{index}"; root.mkdir()
+    artifact=root/"artifact"; artifact.write_bytes(b"verified bytes\n")
+    original_open=module._secure_open_regular
+    real_close=module.os.close
+
+    primary_descriptor=[None]
+    def capture_primary_descriptor(path,flags,mode=0o600):
+        descriptor=original_open(path,flags,mode)
+        primary_descriptor[0]=descriptor
+        return descriptor
+    def fail_primary_close(descriptor):
+        if descriptor==primary_descriptor[0]:
+            raise OSError("deterministic capture close failure")
+        return real_close(descriptor)
+    primary_failure=module.ManifestRuntimeError("primary_capture_failure")
+    caught_primary=None
+    try:
+        try:
+            with mock.patch.object(module,"_secure_open_regular",capture_primary_descriptor), \
+                 mock.patch.object(module.os,"read",side_effect=primary_failure), \
+                 mock.patch.object(module.os,"close",fail_primary_close):
+                module.secure_capture_regular(str(artifact),1,1024)
+        except BaseException as error:
+            caught_primary=error
+    finally:
+        if primary_descriptor[0] is not None:
+            real_close(primary_descriptor[0])
+    if caught_primary is not primary_failure:
+        failures.append(f"{index}: capture close failure masked the primary failure")
+    if caught_primary is None or module._cleanup_diagnostic(caught_primary) != {
+        "code": "artifact_capture_close_failed"
+    }:
+        failures.append(f"{index}: capture close cleanup diagnostic was discarded")
+
+    close_only_descriptor=[None]
+    def capture_close_only_descriptor(path,flags,mode=0o600):
+        descriptor=original_open(path,flags,mode)
+        close_only_descriptor[0]=descriptor
+        return descriptor
+    def fail_close_only(descriptor):
+        if descriptor==close_only_descriptor[0]:
+            raise OSError("deterministic capture close-only failure")
+        return real_close(descriptor)
+    close_only_failure=None
+    try:
+        try:
+            with mock.patch.object(module,"_secure_open_regular",capture_close_only_descriptor), \
+                 mock.patch.object(module.os,"close",fail_close_only):
+                module.secure_capture_regular(str(artifact),1,1024)
+        except BaseException as error:
+            close_only_failure=error
+    finally:
+        if close_only_descriptor[0] is not None:
+            real_close(close_only_descriptor[0])
+    if (
+        not isinstance(close_only_failure,module.ManifestRuntimeError)
+        or str(close_only_failure)!="artifact_capture_close_failed"
+    ):
+        failures.append(
+            f"{index}: capture close-only failure escaped as "
+            f"{type(close_only_failure).__name__}: {close_only_failure}"
+        )
+
+if failures:
+    raise AssertionError("; ".join(failures))
+print("ok",end="")
+PY
+)"
+if [ "$SECURE_CAPTURE_CLOSE_RESULT" = ok ]; then
+  pass "artifact capture preserves primary failures and normalizes close-only failures in both mirrors"
+else
+  fail "artifact capture close failures" "$SECURE_CAPTURE_CLOSE_RESULT"
+fi
+
 SECURE_CAPTURE_RESULT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" "$TMP" <<'PY'
 import hashlib
 import importlib.util

@@ -232,7 +232,11 @@ class ManifestRuntimeError(RuntimeError):
 
 _CLEANUP_DIAGNOSTIC_ATTRIBUTE = "_uberdev_manifest_cleanup_code"
 _CLEANUP_DIAGNOSTIC_CODES = frozenset(
-    {"artifact_snapshot_close_failed", "windows_handle_close_failed"}
+    {
+        "artifact_capture_close_failed",
+        "artifact_snapshot_close_failed",
+        "windows_handle_close_failed",
+    }
 )
 
 
@@ -1394,6 +1398,8 @@ def secure_capture_regular(
     except OSError as exc:
         raise ManifestRuntimeError("artifact_inspect_failed") from exc
     descriptor: int | None = None
+    captured: tuple[bytes, tuple[int, int, int, int, int, int]] | None = None
+    failure: BaseException | None = None
     try:
         descriptor = _secure_open_regular(absolute, os.O_RDONLY)
         opened = os.fstat(descriptor)
@@ -1431,14 +1437,29 @@ def secure_capture_regular(
             or _artifact_identity(after_path) != identity
         ):
             raise ManifestRejected("artifact_replaced_during_capture")
-        return payload, identity
-    except (ManifestRejected, ManifestRuntimeError):
-        raise
+        captured = payload, identity
+    except (ManifestRejected, ManifestRuntimeError) as exc:
+        failure = exc
     except OSError as exc:
-        raise ManifestRuntimeError("artifact_capture_failed") from exc
+        failure = ManifestRuntimeError("artifact_capture_failed")
+        failure.__cause__ = exc
     finally:
         if descriptor is not None:
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                if failure is None:
+                    failure = ManifestRuntimeError("artifact_capture_close_failed")
+                    failure.__cause__ = exc
+                else:
+                    _record_cleanup_diagnostic(
+                        failure, "artifact_capture_close_failed"
+                    )
+    if failure is not None:
+        raise failure
+    if captured is None:
+        raise ManifestRuntimeError("artifact_capture_failed")
+    return captured
 
 
 def _artifact_inode_matches(
