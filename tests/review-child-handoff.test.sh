@@ -1202,6 +1202,26 @@ for publication_stage in create write sync harden readback; do
   [ ! -s "$TMP/reviewer-publication-$publication_stage.stdout" ]
   grep -qx 'review_result_publication_failed' "$TMP/reviewer-publication-$publication_stage.stderr"
 done
+for publication_mode in short-read native-mode; do
+  publication_target="$TMP/reviewer-publication-$publication_mode.md"
+  publication_digest="$(
+    UBERDEV_CHILD_TEST_MODE=1 UBERDEV_TEST_VALIDATED_PUBLICATION_FAILURE="$publication_mode" \
+      uberdev_child_validate_phase1_review_result "$VALID_RESULT" '["README.md"]' "$publication_target"
+  )"
+  [[ "$publication_digest" =~ ^[0-9a-f]{64}$ ]]
+  cmp "$VALID_RESULT" "$publication_target"
+done
+python3 -I -B - "$LIB" <<'PY'
+import pathlib,sys
+source=pathlib.Path(sys.argv[1]).read_text()
+start=source.index('uberdev_child_validate_phase1_review_result() {')
+end=source.index('\n_uberdev_child_find_lease() {',start)
+validator=source[start:end]
+assert validator.count("getattr(os,'O_BINARY',0)") >= 3
+assert "injected=='short-read'" in validator
+assert "premature publication readback EOF" in validator
+assert "publication readback overflow" in validator
+PY
 
 # Mutating review edges execute against the carrier-selected caller repository
 # identity and workspace binding. Reviewers remain isolated, and a different

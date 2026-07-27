@@ -880,6 +880,35 @@ else
 fi
 
 echo
+echo "== R27.1: post-escape expansion falls back below the child artifact ceiling =="
+if python3 -I -B - "$REVIEW_PR" <<'PY'
+import ast,pathlib,re,sys
+source=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+limit_match=re.search(r'^MAX_WRAPPED_DIFF_BYTES=(\d+)\*1024\*1024$',source,re.M)
+wrap_match=re.search(r'^def wrap_untrusted_diff\(payload\):\n(?:    .*\n)+',source,re.M)
+select_match=re.search(r'^def select_bounded_wrapped_diff\(payload, summary_factory\):\n(?:    .*\n)+',source,re.M)
+assert limit_match is not None, 'wrapped diff ceiling missing'
+assert wrap_match is not None, 'wrap helper missing'
+assert select_match is not None, 'bounded selection helper missing'
+namespace={'MAX_WRAPPED_DIFF_BYTES':int(limit_match.group(1))*1024*1024}
+exec(compile(ast.parse(wrap_match.group(0)+select_match.group(0)),'<review-pr-bounded-wrap>','exec'),namespace)
+raw=b'&'*(4*1024*1024)
+summary=b'[diff summarized after escaped artifact exceeded child handoff limit]\n'
+calls=[]
+wrapped=namespace['select_bounded_wrapped_diff'](raw,lambda: calls.append(True) or summary)
+assert calls==[True],calls
+assert wrapped==namespace['wrap_untrusted_diff'](summary)
+assert len(wrapped)<=namespace['MAX_WRAPPED_DIFF_BYTES']
+PY
+then
+  echo "  PASS  R27.1 — escaped ampersand expansion selects a bounded summarized handoff"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R27.1 — escaped diff can exceed the child artifact ceiling"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
 echo "== R25 (#302 / RFC 0012 §5): all 5 Phase-1 reviewer agent files inherit the session model =="
 # The 4 former lightweight-lens Haiku pins are retired — blocker verdicts feed an
 # auto-fixer, so every judgment lens inherits the flagship. code-reviewer was

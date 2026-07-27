@@ -412,6 +412,7 @@ import json,os,re,stat,subprocess,sys,tempfile
 root,base,diff_path,range_path=sys.argv[1:]
 MAX_DIFF_LINES=2000
 MAX_DIFF_BYTES=8*1024*1024
+MAX_WRAPPED_DIFF_BYTES=16*1024*1024
 if re.fullmatch(r'[0-9a-f]{40}',base) is None: raise SystemExit(2)
 head=subprocess.check_output(['git','-C',root,'rev-parse','HEAD'],text=True).strip()
 if re.fullmatch(r'[0-9a-f]{40}',head) is None: raise SystemExit(2)
@@ -424,6 +425,45 @@ for path in paths:
     if (path.startswith('/') or '\\' in path or any(part in ('','.','..') for part in parts)
             or any(ord(char)<32 or ord(char)==127 for char in path)):
         raise SystemExit(2)
+def wrap_untrusted_diff(payload):
+    escaped=payload.replace(b'&',b'&amp;').replace(b'<',b'&lt;')
+    opening=b'<external-untrusted-input source="pr-diff">'
+    closing=b'</external-untrusted-input>'
+    wrapped=opening+b'\n'+escaped+closing+b'\n'
+    if wrapped.count(opening)!=1 or wrapped.count(closing)!=1: raise ValueError()
+    return wrapped
+def build_diff_summary():
+    summary=['[diff summarized: full binary diff exceeded the 2000-line, 8-MiB raw, or 16-MiB wrapped review artifact limit]']
+    summary_bytes=len((summary[0]+'\n').encode())
+    summary_wrapped_bytes=len(wrap_untrusted_diff((summary[0]+'\n').encode()))
+    omission_reserve=128
+    stats=subprocess.Popen(['git','-C',root,'diff','--numstat','--no-renames',f'{base}..{head}'],
+                           stdout=subprocess.PIPE,text=True,encoding='utf-8',errors='strict')
+    omitted=0
+    for line in stats.stdout:
+        fields=line.rstrip('\n').split('\t',2)
+        if len(fields)!=3: raise SystemExit(2)
+        added,deleted,path=fields
+        detail='binary change' if added==deleted=='-' else f'{added} additions, {deleted} deletions'
+        row=f'{path} — {detail}'
+        encoded=(row+'\n').encode()
+        escaped_size=len(encoded)+4*encoded.count(b'&')+3*encoded.count(b'<')
+        if (summary_bytes+len(encoded)>MAX_DIFF_BYTES
+                or summary_wrapped_bytes+escaped_size+omission_reserve>MAX_WRAPPED_DIFF_BYTES):
+            omitted+=1
+            continue
+        summary.append(row)
+        summary_bytes+=len(encoded)
+        summary_wrapped_bytes+=escaped_size
+    if stats.wait()!=0: raise SystemExit(2)
+    if omitted: summary.append(f'[{omitted} additional file summaries omitted to preserve the artifact limit]')
+    return ('\n'.join(summary)+'\n').encode()
+def select_bounded_wrapped_diff(payload, summary_factory):
+    wrapped=wrap_untrusted_diff(payload)
+    if len(wrapped)<=MAX_WRAPPED_DIFF_BYTES: return wrapped
+    wrapped=wrap_untrusted_diff(summary_factory())
+    if len(wrapped)>MAX_WRAPPED_DIFF_BYTES: raise ValueError()
+    return wrapped
 process=subprocess.Popen(['git','-C',root,'diff','--binary','--no-ext-diff',f'{base}..{head}'],stdout=subprocess.PIPE)
 diff_buffer=bytearray(); diff_lines=0; summarized=False
 while True:
@@ -434,34 +474,8 @@ while True:
         summarized=True; process.kill(); break
 process.stdout.close(); process.wait()
 if not summarized and process.returncode!=0: raise SystemExit(2)
-if summarized:
-    summary=['[diff summarized: full binary diff exceeded the 2000-line or 8-MiB review artifact limit]']
-    stats=subprocess.Popen(['git','-C',root,'diff','--numstat','--no-renames',f'{base}..{head}'],
-                           stdout=subprocess.PIPE,text=True,encoding='utf-8',errors='strict')
-    summary_bytes=0; omitted=0
-    for line in stats.stdout:
-        fields=line.rstrip('\n').split('\t',2)
-        if len(fields)!=3: raise SystemExit(2)
-        added,deleted,path=fields
-        detail='binary change' if added==deleted=='-' else f'{added} additions, {deleted} deletions'
-        row=f'{path} — {detail}'
-        encoded=len(row.encode())+1
-        if summary_bytes+encoded>MAX_DIFF_BYTES:
-            omitted+=1
-            continue
-        summary.append(row); summary_bytes+=encoded
-    if stats.wait()!=0: raise SystemExit(2)
-    if omitted: summary.append(f'[{omitted} additional file summaries omitted to preserve the artifact limit]')
-    diff=('\n'.join(summary)+'\n').encode()
-else:
-    diff=bytes(diff_buffer)
-def wrap_untrusted_diff(payload):
-    escaped=payload.replace(b'&',b'&amp;').replace(b'<',b'&lt;')
-    opening=b'<external-untrusted-input source="pr-diff">'
-    closing=b'</external-untrusted-input>'
-    wrapped=opening+b'\n'+escaped+closing+b'\n'
-    if wrapped.count(opening)!=1 or wrapped.count(closing)!=1: raise ValueError()
-    return wrapped
+diff=build_diff_summary() if summarized else bytes(diff_buffer)
+wrapped_diff=select_bounded_wrapped_diff(diff,(lambda: diff) if summarized else build_diff_summary)
 def replace_private(path,payload):
     parent=os.path.dirname(path) or '.'
     fd,tmp=tempfile.mkstemp(prefix='.review-scope.',dir=parent)
@@ -473,7 +487,7 @@ def replace_private(path,payload):
     finally:
         try: os.unlink(tmp)
         except FileNotFoundError: pass
-replace_private(diff_path,wrap_untrusted_diff(diff))
+replace_private(diff_path,wrapped_diff)
 expected_range=f'{base}..{head}\n'.encode()
 replace_private(range_path,expected_range)
 if open(range_path,'rb').read()!=expected_range: raise SystemExit(2)

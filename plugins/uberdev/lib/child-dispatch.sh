@@ -1203,8 +1203,17 @@ try:
   descriptor=None; published_identity=None
   try:
    injected=os.environ.get('UBERDEV_TEST_VALIDATED_PUBLICATION_FAILURE','') if os.environ.get('UBERDEV_CHILD_TEST_MODE')=='1' else ''
+   test_binary_flag=(1<<29) if injected=='native-mode' else 0
+   def publication_open(target,flags,*args):
+    if test_binary_flag and not flags&test_binary_flag: raise OSError(5,'publication binary mode')
+    return os.open(target,flags&~test_binary_flag,*args)
    if injected=='create': raise OSError(28,'injected')
-   descriptor=os.open(validated_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),0o600)
+   descriptor=publication_open(
+    validated_path,
+    os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0)
+    |getattr(os,'O_BINARY',0)|test_binary_flag,
+    0o600,
+   )
    opened=os.fstat(descriptor); current=os.lstat(validated_path)
    if (stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1
        or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)): raise OSError(5,'publication identity')
@@ -1227,9 +1236,19 @@ try:
     raise OSError(5,'publication verification')
    os.close(descriptor); descriptor=None
    if injected=='readback': raise OSError(5,'injected')
-   read_descriptor=os.open(validated_path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
+   read_descriptor=publication_open(
+    validated_path,
+    os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_BINARY',0)|test_binary_flag,
+   )
    try:
-    read_opened=os.fstat(read_descriptor); readback=os.read(read_descriptor,1048577); read_final=os.fstat(read_descriptor)
+    read_opened=os.fstat(read_descriptor); chunks=[]; remaining=len(raw_bytes)
+    while remaining:
+     request=min(remaining,7) if injected=='short-read' else remaining
+     chunk=os.read(read_descriptor,request)
+     if not chunk: raise OSError(5,'premature publication readback EOF')
+     chunks.append(chunk); remaining-=len(chunk)
+    if os.read(read_descriptor,1): raise OSError(5,'publication readback overflow')
+    readback=b''.join(chunks); read_final=os.fstat(read_descriptor)
    finally: os.close(read_descriptor)
    read_current=os.lstat(validated_path)
    if ((read_opened.st_dev,read_opened.st_ino)!=(read_final.st_dev,read_final.st_ino)
