@@ -674,6 +674,58 @@ else
   fail "production acquisition calls the secure writer and propagates its failure" "rc=$CAPTURE_RC out=$CAPTURE_OUT marker=$(cat "$WRITER_SPY_MARKER" 2>/dev/null || true)"
 fi
 
+PYTHON_ISOLATION_CALLS="$TMP/python-isolation-calls"
+capture /bin/bash -c '
+  . "$1"
+  calls="$2"
+  lease="/tmp/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.lease"
+  writer_mode=empty
+  _uberdev_semaphore_manifest_tool() {
+    printf "%s\n" "/fixture/run_manifest.py"
+  }
+  _uberdev_semaphore_python() {
+    printf "%s\n" "$*" >>"$calls"
+    case " $* " in
+      *" probe-status "*)
+        printf "%s\n" terminal
+        return 0
+        ;;
+      *" secure-write-lease "*)
+        cat >/dev/null
+        [ "$writer_mode" != colonless ] || printf "%s\n" 123
+        return 0
+        ;;
+    esac
+    return 99
+  }
+  status="$(_uberdev_semaphore_status_kind /abs/status.json)"
+  status_rc=$?
+  _uberdev_semaphore_publish_lease /tmp/scope "$lease" run 1 owner "" "" 1 5 ""
+  empty_rc=$?
+  writer_mode=colonless
+  _uberdev_semaphore_publish_lease /tmp/scope "$lease" run 1 owner "" "" 1 5 ""
+  colonless_rc=$?
+  first_call="$(sed -n "1p" "$calls")"
+  second_call="$(sed -n "2p" "$calls")"
+  third_call="$(sed -n "3p" "$calls")"
+  printf "status=%s status_rc=%s empty_rc=%s colonless_rc=%s identity=%s first=%s second=%s third=%s\n" \
+    "$status" "$status_rc" "$empty_rc" "$colonless_rc" \
+    "${_UBERDEV_SEMAPHORE_PUBLISHED_IDENTITY:-}" "$first_call" "$second_call" "$third_call"
+  [ "$status" = terminal ] \
+    && [ "$status_rc" -eq 0 ] \
+    && [ "$empty_rc" -eq 2 ] \
+    && [ "$colonless_rc" -eq 2 ] \
+    && [ -z "${_UBERDEV_SEMAPHORE_PUBLISHED_IDENTITY:-}" ] \
+    && [ "$first_call" = "-I -B /fixture/run_manifest.py probe-status --status-path /abs/status.json" ] \
+    && [ "$second_call" = "-I -B /fixture/run_manifest.py secure-write-lease --lease-path $lease" ] \
+    && [ "$third_call" = "$second_call" ]
+' _ "$LIB" "$PYTHON_ISOLATION_CALLS"
+if [ "$CAPTURE_RC" -eq 0 ]; then
+  pass "status and lease publication isolate Python and require a canonical identity"
+else
+  fail "status and lease publication isolate Python and require a canonical identity" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+
 printf '== live semaphore: path and symlink attacks ==\n'
 OUTSIDE="$TMP/outside-target"
 mkdir "$OUTSIDE"
@@ -1339,6 +1391,40 @@ fi
 uberdev_semaphore_release "$prehandle_unknown_lease" >/dev/null 2>&1 || true
 
 printf '== live semaphore: bounded and recoverable mutex ==\n'
+PROBE_RECLAIM_SCOPE="$TMP/probe-reclaim-scope"
+PROBE_RECLAIM_CALLS="$TMP/probe-reclaim-calls"
+mkdir -p "$PROBE_RECLAIM_SCOPE/.mutex"
+capture /bin/bash -c '
+  . "$1"
+  scope="$2"
+  calls_file="$3"
+  printf "0\n" >"$calls_file"
+  _uberdev_semaphore_mutex_reclaim_dead() {
+    current="$(cat "$calls_file")"
+    current=$((current + 1))
+    printf "%s\n" "$current" >"$calls_file"
+    rmdir "$1/.mutex" || return 2
+    mkdir "$1/.mutex" || return 2
+    [ "$current" -lt 3 ] && return 0
+    return 2
+  }
+  UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=1
+  UBERDEV_SEMAPHORE_MUTEX_PROBE_ONLY=1
+  UBERDEV_SEMAPHORE_MUTEX_QUIET_BUSY=1
+  export UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES UBERDEV_SEMAPHORE_MUTEX_PROBE_ONLY
+  export UBERDEV_SEMAPHORE_MUTEX_QUIET_BUSY
+  _uberdev_semaphore_mutex_acquire "$scope"
+  rc=$?
+  calls="$(cat "$calls_file")"
+  printf "rc=%s calls=%s\n" "$rc" "$calls"
+  [ "$rc" -eq 75 ] && [ "$calls" -eq 1 ] && [ -d "$scope/.mutex" ]
+' _ "$LIB" "$PROBE_RECLAIM_SCOPE" "$PROBE_RECLAIM_CALLS"
+if [ "$CAPTURE_RC" -eq 0 ]; then
+  pass "probe-only reclaim consumes its single observation budget"
+else
+  fail "probe-only reclaim consumes its single observation budget" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+
 MUTEX_STATE="$TMP/mutex-state"
 mutex_lease="$(uberdev_semaphore_acquire "$MUTEX_STATE" repo codex 1 seed 5)"
 mutex_scope="$(dirname "$mutex_lease")"

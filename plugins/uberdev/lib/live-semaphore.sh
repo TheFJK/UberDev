@@ -626,7 +626,10 @@ _uberdev_semaphore_mutex_acquire() {
       _uberdev_semaphore_mutex_reclaim_dead "$scope" published
       reclaim_rc=$?
       [ "$reclaim_rc" -ne 2 ] || return 2
-      [ "$reclaim_rc" -eq 0 ] && continue
+      if [ "$reclaim_rc" -eq 0 ]; then
+        tries=$((tries + 1))
+        continue
+      fi
       [ "${UBERDEV_SEMAPHORE_MUTEX_QUIET_BUSY:-0}" = 1 ] || \
         _uberdev_semaphore_error 'mutex retry limit exceeded'
       return 75
@@ -911,7 +914,7 @@ _uberdev_semaphore_status_kind() {
   status_path="${1-}"
   [ -n "$status_path" ] || { printf '%s\n' unknown; return 0; }
   manifest_tool="$(_uberdev_semaphore_manifest_tool)" || return 2
-  output="$(_uberdev_semaphore_python "$manifest_tool" probe-status --status-path "$status_path" 2>/dev/null)" || {
+  output="$(_uberdev_semaphore_python -I -B "$manifest_tool" probe-status --status-path "$status_path" 2>/dev/null)" || {
     _uberdev_semaphore_error 'backend status is malformed, ambiguous, or unsafe'
     return 2
   }
@@ -1081,8 +1084,12 @@ _uberdev_semaphore_publish_lease() {
   published_identity="$(printf 'version=1\ngeneration=%s\nrun_id=%s\nowner_pid=%s\nowner_identity=%s\nbackend_handle=%s\nbackend_identity=%s\nstart_epoch=%s\ntimeout_s=%s\nstatus_path=%s\n' \
     "$generation" "$run_id" "$owner_pid" "$owner_identity" "$backend_handle" "$backend_identity" \
     "$start_epoch" "$timeout_s" "$status_path" \
-    | _uberdev_semaphore_python "$manifest_tool" secure-write-lease --lease-path "$lease")" || return 2
-  case "$published_identity" in *[!0-9:]*|:*|*:|*:*:*) return 2 ;; esac
+    | _uberdev_semaphore_python -I -B "$manifest_tool" secure-write-lease --lease-path "$lease")" || return 2
+  case "$published_identity" in
+    ''|*[!0-9:]*|:*|*:|*:*:*) return 2 ;;
+    *:*) ;;
+    *) return 2 ;;
+  esac
   _UBERDEV_SEMAPHORE_PUBLISHED_IDENTITY="$published_identity"
 }
 

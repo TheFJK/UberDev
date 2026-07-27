@@ -1132,9 +1132,27 @@ set +e
 CLAUDE_RELEASE_SCOPE="$(bash -c '. "$1"; _uberdev_dispatch_git_metadata_mutex_scope "$2"' \
   _ "$DISPATCH_LIB" "$CLAUDE_BOOT_TMP/repo")"
 set +e
-UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=1 bash -c \
-  '. "$1"; POST_IMPL_REVIEW_CAP=1; REVIEW_EXPECTED_COUNT=1; _uberdev_dispatch_git_metadata_mutex_acquire "$2" claude-bootstrap 1 && _uberdev_semaphore_mutex_release "$2"' \
-  _ "$DISPATCH_LIB" "$CLAUDE_RELEASE_SCOPE"
+CLAUDE_RELEASE_RECLAIM_RESULT="$(
+  UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=1 bash -c '
+    . "$1"
+    UBERDEV_SEMAPHORE_MUTEX_PROBE_ONLY=1
+    UBERDEV_SEMAPHORE_MUTEX_QUIET_BUSY=1
+    export UBERDEV_SEMAPHORE_MUTEX_PROBE_ONLY UBERDEV_SEMAPHORE_MUTEX_QUIET_BUSY
+    _uberdev_semaphore_mutex_acquire "$2" >/dev/null 2>&1
+    first_rc=$?
+    first_state="${_UBERDEV_SEMAPHORE_MUTEX_OBSERVED_STATE:-unknown}"
+    _uberdev_semaphore_mutex_acquire "$2" >/dev/null 2>&1
+    second_rc=$?
+    _uberdev_semaphore_mutex_release "$2" >/dev/null 2>&1
+    release_rc=$?
+    printf "first=%s state=%s second=%s release=%s" \
+      "$first_rc" "$first_state" "$second_rc" "$release_rc"
+    [ "$first_rc" -eq 75 ] \
+      && [ "$first_state" = reclaimed-published-dead ] \
+      && [ "$second_rc" -eq 0 ] \
+      && [ "$release_rc" -eq 0 ]
+  ' _ "$DISPATCH_LIB" "$CLAUDE_RELEASE_SCOPE"
+)"
 CLAUDE_RELEASE_RECLAIM_RC=$?
 set +e
 if [ "$CLAUDE_RELEASE_COMMAND_RC" -eq 0 ] \
@@ -1143,11 +1161,12 @@ if [ "$CLAUDE_RELEASE_COMMAND_RC" -eq 0 ] \
       "$CLAUDE_BOOT_TMP/runtime-release/solve-bg-stdout-339.log" \
     && [ "$(wc -l <"$CLAUDE_BOOT_TMP/release-provider.log" | tr -d ' ')" -eq 1 ] \
     && [ "$CLAUDE_RELEASE_RECLAIM_RC" -eq 0 ] \
+    && [ "$CLAUDE_RELEASE_RECLAIM_RESULT" = 'first=75 state=reclaimed-published-dead second=0 release=0' ] \
     && [ ! -e "$CLAUDE_RELEASE_SCOPE/.mutex" ]; then
-  echo "  PASS  Claude release failure preserves the strict marker handle and dead-owner reclaim"
+  echo "  PASS  Claude release failure preserves the handle across one-observation reclaim and next-poll acquire"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  Claude release-failure handle contract: result=$CLAUDE_RELEASE_RESULT reclaim=$CLAUDE_RELEASE_RECLAIM_RC"
+  echo "  FAIL  Claude release-failure handle contract: result=$CLAUDE_RELEASE_RESULT reclaim=$CLAUDE_RELEASE_RECLAIM_RESULT rc=$CLAUDE_RELEASE_RECLAIM_RC"
   FAIL=$((FAIL + 1))
 fi
 rm -rf "$CLAUDE_BOOT_TMP"
