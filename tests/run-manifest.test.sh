@@ -86,6 +86,7 @@ else
 fi
 
 WINDOWS_PARENT_PROBE_SPLIT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
+import errno
 import importlib.util
 import sys
 
@@ -193,11 +194,37 @@ for index, module_path in enumerate(sys.argv[1:]):
     assert race_kernel32.exit_checks == [True, False], race_kernel32.exit_checks
     assert not race_kernel32.open_handles, race_kernel32.open_handles
     assert race_kernel32.closed == [73], race_kernel32.closed
-    print("captured/guarded-parent/rechecked")
+
+    missing_kernel32 = Kernel32()
+    module.ctypes.WinDLL = lambda *_args, **_kwargs: missing_kernel32
+
+    def missing_snapshot(pid):
+        assert missing_kernel32.open_handles, "snapshot ran without a live process handle"
+        raise ProcessLookupError(pid)
+
+    module._windows_parent_pid = missing_snapshot
+    try:
+        module.sys.platform = "win32"
+        module.os.name = "nt"
+        try:
+            module._native_parent_pid(424242)
+        except OSError as error:
+            assert not isinstance(error, ProcessLookupError), type(error)
+            assert error.errno == errno.EAGAIN, error
+        else:
+            raise AssertionError("snapshot disappearance was not unavailable evidence")
+    finally:
+        module.sys.platform = original_platform
+        module.os.name = original_os_name
+    assert missing_kernel32.exit_checks == [True], missing_kernel32.exit_checks
+    assert not missing_kernel32.open_handles, missing_kernel32.open_handles
+    assert missing_kernel32.closed == [73], missing_kernel32.closed
+    assert missing_kernel32.closed.count(73) == 1, missing_kernel32.closed
+    print("captured/guarded-parent/rechecked/snapshot-unavailable")
 PY
 )"
-if [ "$WINDOWS_PARENT_PROBE_SPLIT" = $'captured/guarded-parent/rechecked\ncaptured/guarded-parent/rechecked' ]; then
-  pass "Windows liveness avoids snapshots and parent lookup rechecks its live process handle"
+if [ "$WINDOWS_PARENT_PROBE_SPLIT" = $'captured/guarded-parent/rechecked/snapshot-unavailable\ncaptured/guarded-parent/rechecked/snapshot-unavailable' ]; then
+  pass "Windows parent lookup rechecks liveness and closes snapshot misses exactly once"
 else
   fail "Windows process identity/parent lookup split" "$WINDOWS_PARENT_PROBE_SPLIT"
 fi
@@ -283,13 +310,31 @@ for index, module_path in enumerate(sys.argv[1:]):
         candidate.unlink()
         candidate.touch(mode=0o600)
         real_write = module.os.write
+        real_ftruncate = module.os.ftruncate
+        real_close = module.os.close
+        replacement_descriptors = []
+        replacement_close_offsets = []
+        rollback_calls = []
+        close_calls = []
 
         def replace_during_write(descriptor, payload):
+            replacement_descriptors.append(descriptor)
+            replacement_close_offsets.append(len(close_calls))
             candidate.unlink()
             candidate.symlink_to(victim)
             return real_write(descriptor, payload)
 
+        def track_ftruncate(descriptor, length):
+            rollback_calls.append((descriptor, length))
+            return real_ftruncate(descriptor, length)
+
+        def track_close(descriptor):
+            close_calls.append(descriptor)
+            return real_close(descriptor)
+
         module.os.write = replace_during_write
+        module.os.ftruncate = track_ftruncate
+        module.os.close = track_close
         try:
             try:
                 module._write_process_identity("direct", str(candidate))
@@ -299,6 +344,14 @@ for index, module_path in enumerate(sys.argv[1:]):
                 raise AssertionError("replaced process-identity candidate was accepted")
         finally:
             module.os.write = real_write
+            module.os.ftruncate = real_ftruncate
+            module.os.close = real_close
+        assert len(replacement_descriptors) == 1, replacement_descriptors
+        original_descriptor = replacement_descriptors[0]
+        assert rollback_calls == [(original_descriptor, 0)], rollback_calls
+        assert close_calls[replacement_close_offsets[0]:] == [
+            original_descriptor
+        ], close_calls
         assert victim.read_bytes() == b"unchanged"
 
         candidate.unlink()
