@@ -4,6 +4,20 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.40.3] — 2026-07-27
+
+### Fixed
+
+- Canonicalized review receipts and bound published evidence to validated artifact descriptors and digests.
+- Made publication attempts replacement-safe and uniquely identified, with retry behavior safe on native Windows.
+- Made Phase 1 aggregation executable without carrying artifact paths across trust boundaries.
+- Restricted Phase 3 CI-fixer dispatch to validated scalar inputs bound to the captured PR head.
+- Bound final review consumers to immutable local, live, and run-carrier SHAs before lifecycle advancement.
+
+### Tests
+
+- Added regression coverage for receipt and publication identity, immutable SHA binding, path-free aggregation, CI-fixer dispatch, and native-Windows retries.
+
 ## [0.40.2] — 2026-07-26
 
 ### Fixed
