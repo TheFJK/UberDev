@@ -636,6 +636,8 @@ try:
   evidence_key=(identity,hashlib.sha256(payload).hexdigest())
   provider_key=(provider_identity,hashlib.sha256(provider_payload).hexdigest())
   status_key=(status_identity,hashlib.sha256(status_payload).hexdigest())
+  if len({identity,provider_identity,status_identity})!=3:
+   fail('duplicate-artifact',row)
   if canonical_path in seen_paths or any(key in seen_evidence for key in (evidence_key,provider_key,status_key)):
    fail('duplicate-artifact',row)
   seen_paths.add(canonical_path); seen_evidence.update((evidence_key,provider_key,status_key))

@@ -18,6 +18,64 @@ if grep -q -- '-''ef' "$0"; then
   exit 1
 fi
 
+# The evidence gate receives identities captured at three separate boundaries.
+# This test helper keeps that capture/publication API while allowing those
+# identities to collide, so the gate's own pairwise check is exercised
+# independently of the lower-level link-count guard.
+write_evidence_identity_helper() {
+  local plugin_root="$1"
+  mkdir -p "$plugin_root/lib"
+  cat >"$plugin_root/lib/run_manifest.py" <<'PY'
+import hashlib
+import os
+import secrets
+import stat
+
+IDENTITY_MARKER = b"same-row-identity-marker"
+MARKED_IDENTITY = (991, 31337, 41, 43, 47, stat.S_IFREG | 0o400)
+
+
+def artifact_identity(entry):
+    return (
+        entry.st_dev,
+        entry.st_ino,
+        entry.st_size,
+        getattr(entry, "st_mtime_ns", int(entry.st_mtime * 1_000_000_000)),
+        getattr(entry, "st_ctime_ns", int(entry.st_ctime * 1_000_000_000)),
+        entry.st_mode,
+    )
+
+
+def secure_capture_regular(path, minimum_size, maximum_size):
+    with open(path, "rb") as stream:
+        payload = stream.read()
+    if not minimum_size <= len(payload) <= maximum_size:
+        raise ValueError("artifact_size_invalid")
+    entry = os.stat(path)
+    if not stat.S_ISREG(entry.st_mode):
+        raise ValueError("artifact_not_regular")
+    identity = MARKED_IDENTITY if IDENTITY_MARKER in payload else artifact_identity(entry)
+    return payload, identity
+
+
+def secure_publish_captured(path, payload):
+    digest = hashlib.sha256(payload).hexdigest()
+    candidate = f"{path}.attempt-{secrets.token_hex(16)}-{digest}"
+    with open(candidate, "xb") as stream:
+        stream.write(payload)
+    os.chmod(candidate, 0o600)
+    _, identity = secure_capture_regular(candidate, 0, len(payload))
+    return candidate, identity, digest
+
+
+def secure_capture_published(path, expected_digest, minimum_size, maximum_size):
+    payload, identity = secure_capture_regular(path, minimum_size, maximum_size)
+    if hashlib.sha256(payload).hexdigest() != expected_digest:
+        raise ValueError("artifact_digest_mismatch")
+    return payload, identity
+PY
+}
+
 if [ "${1:-}" = --windows-path-only ]; then
   windows_shell_directory() { (cd "$1" && pwd -P); }
   windows_handoff_stage() {
@@ -751,6 +809,76 @@ PY
     _uberdev_agent_json_get "$UBERDEV_RUN_CARRIER_JSON" context_file)"
   [ "$serialized_context" = "$WINDOWS_CONTEXT" ]
   ! _uberdev_child_context_run_dir 'C:\repo\.uberdev\runs\review-1\state\..\context.json' >/dev/null 2>&1
+
+  WINDOWS_EVIDENCE_FUNCTIONS="$TMP/windows-evidence-functions.sh"
+  awk '/^post_review_validated_evidence_complete\(\) \{/{active=1} active{print} active && /^\}/{exit}' \
+    "$POST" >"$WINDOWS_EVIDENCE_FUNCTIONS"
+  . "$WINDOWS_EVIDENCE_FUNCTIONS"
+  WINDOWS_IDENTITY_PLUGIN_ROOT="$TMP/windows-identity-plugin"
+  write_evidence_identity_helper "$WINDOWS_IDENTITY_PLUGIN_ROOT"
+  UBERDEV_REVIEW_PLUGIN_ROOT="$WINDOWS_IDENTITY_PLUGIN_ROOT"
+  REVIEW_EDGES=(review_pr.review.correctness)
+  WINDOWS_SAME_ROW_ROOT="$TMP/windows-same-row-identities"
+  python3 -I -B - "$WINDOWS_SAME_ROW_ROOT" <<'PY'
+import hashlib,json,os,pathlib,sys
+
+base=pathlib.Path(os.path.realpath(sys.argv[1])); base.mkdir()
+edge="review_pr.review.correctness"
+pairs={
+    "validated-provider":{"validated","provider"},
+    "provider-status":{"provider","status"},
+    "validated-status":{"validated","status"},
+}
+for label,marked in pairs.items():
+    root=base/label; child=root/"children"/f"windows-{label}"
+    child.mkdir(parents=True)
+    provider_payload=(
+        ("same-row-identity-marker\n" if "provider" in marked else "")
+        + "provider-owned result\n"
+    ).encode()
+    validated_payload=(
+        ("same-row-identity-marker\n" if "validated" in marked else "")
+        + "validated result\n"
+    ).encode()
+    status_value={"backend":"codex","state":"completed","exit_code":0,"pid":"4242"}
+    if "status" in marked:
+        status_value["identity_marker"]="same-row-identity-marker"
+    provider=child/"result.md"; provider.write_bytes(provider_payload)
+    canonical=child/"validated-result.md"; canonical.write_bytes(validated_payload)
+    canonical.chmod(0o400)
+    status=child/"status.json"
+    status.write_text(json.dumps(status_value,separators=(",",":"))+"\n")
+    instance=child.name
+    receipt=json.dumps({
+        "schema_version":1,"edge_id":edge,"instance_id":instance,
+        "backend":"codex","handle":"4242","state":"running",
+        "result_file":str(provider),"status_file":str(status),
+    },sort_keys=True,separators=(",",":"))
+    launch={"edge":edge,"index":1,"instance":instance,"receipt":receipt,
+            "result":str(provider),"status":str(status)}
+    validated={"edge":edge,"index":1,"instance":instance,
+               "result":str(canonical),
+               "sha256":hashlib.sha256(validated_payload).hexdigest()}
+    (root/"initial").write_text(json.dumps(launch,separators=(",",":"))+"\n")
+    (root/"validated").write_text(json.dumps(validated,separators=(",",":"))+"\n")
+    (root/"repair").write_text("")
+PY
+  for WINDOWS_IDENTITY_PAIR in validated-provider provider-status validated-status; do
+    WINDOWS_IDENTITY_CASE_ROOT="$WINDOWS_SAME_ROW_ROOT/$WINDOWS_IDENTITY_PAIR"
+    WINDOWS_IDENTITY_DIAGNOSTIC="$WINDOWS_IDENTITY_CASE_ROOT/diagnostic"
+    if post_review_validated_evidence_complete \
+        "$WINDOWS_IDENTITY_CASE_ROOT/validated" 1 \
+        "$WINDOWS_IDENTITY_CASE_ROOT/initial" \
+        "$WINDOWS_IDENTITY_CASE_ROOT/repair" \
+        "$WINDOWS_IDENTITY_CASE_ROOT" \
+        >"$WINDOWS_IDENTITY_CASE_ROOT/stdout" 2>"$WINDOWS_IDENTITY_DIAGNOSTIC"; then
+      echo "review-child-handoff windows path: same-row $WINDOWS_IDENTITY_PAIR identity alias was accepted" >&2
+      exit 1
+    fi
+    grep -q \
+      'class=duplicate-artifact edge=review_pr.review.correctness index=1' \
+      "$WINDOWS_IDENTITY_DIAGNOSTIC"
+  done
 
   WINDOWS_AGGREGATION_FUNCTIONS="$TMP/windows-aggregation-functions.sh"
   awk '/^post_review_capture_aggregation_inputs\(\) \{/{active=1} active{print} active && /^\}/{exit}' \
@@ -1658,6 +1786,51 @@ evidence_must_fail() {
   fi
   grep -q "class=$expected_class" "$diagnostic"
 }
+
+POSIX_ALIAS_ROOT="$TMP/posix-same-row-hardlink"
+POSIX_IDENTITY_PLUGIN_ROOT="$TMP/posix-identity-plugin"
+write_evidence_identity_helper "$POSIX_IDENTITY_PLUGIN_ROOT"
+python3 -I -B - "$POSIX_ALIAS_ROOT" <<'PY'
+import hashlib,json,os,pathlib,sys
+
+root=pathlib.Path(os.path.realpath(sys.argv[1])); root.mkdir()
+edge="review_pr.review.correctness"; instance="posix-hardlink-attempt01"
+child=root/"children"/instance; child.mkdir(parents=True)
+provider=child/"result.md"; payload=b"provider and validated hard-link\n"
+provider.write_bytes(payload)
+canonical=child/"validated-result.md"; os.link(provider,canonical)
+canonical.chmod(0o400)
+assert os.path.samefile(provider,canonical)
+assert os.stat(provider).st_nlink==2
+status=child/"status.json"
+status.write_text('{"backend":"codex","state":"completed","exit_code":0,"pid":"4242"}\n')
+receipt=json.dumps({
+    "schema_version":1,"edge_id":edge,"instance_id":instance,
+    "backend":"codex","handle":"4242","state":"running",
+    "result_file":str(provider),"status_file":str(status),
+},sort_keys=True,separators=(",",":"))
+launch={"edge":edge,"index":1,"instance":instance,"receipt":receipt,
+        "result":str(provider),"status":str(status)}
+validated={"edge":edge,"index":1,"instance":instance,
+           "result":str(canonical),"sha256":hashlib.sha256(payload).hexdigest()}
+(root/"initial").write_text(json.dumps(launch,separators=(",",":"))+"\n")
+(root/"validated").write_text(json.dumps(validated,separators=(",",":"))+"\n")
+(root/"repair").write_text("")
+PY
+UBERDEV_REVIEW_PLUGIN_ROOT="$POSIX_IDENTITY_PLUGIN_ROOT"
+REVIEW_EDGES=(review_pr.review.correctness)
+POSIX_ALIAS_DIAGNOSTIC="$POSIX_ALIAS_ROOT/diagnostic"
+if post_review_validated_evidence_complete \
+    "$POSIX_ALIAS_ROOT/validated" 1 "$POSIX_ALIAS_ROOT/initial" \
+    "$POSIX_ALIAS_ROOT/repair" "$POSIX_ALIAS_ROOT" \
+    >"$POSIX_ALIAS_ROOT/stdout" 2>"$POSIX_ALIAS_DIAGNOSTIC"; then
+  echo "same-row validated/provider hard-link identity was accepted" >&2
+  exit 1
+fi
+grep -q 'class=duplicate-artifact edge=review_pr.review.correctness index=1' \
+  "$POSIX_ALIAS_DIAGNOSTIC"
+UBERDEV_REVIEW_PLUGIN_ROOT="$ROOT/plugins/uberdev"
+REVIEW_EDGES=("${ROSTER_EDGES[@]}")
 
 python3 -I -B - "$EVIDENCE_ROOT" <<'PY'
 import hashlib,json,pathlib,sys
