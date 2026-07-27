@@ -293,7 +293,7 @@ echo "== run manifest: Windows reconciliation uses a non-signaling native probe 
 if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" \
     "$REPO_ROOT/plugins/uberdev/lib/live-semaphore.sh" \
     "$REPO_ROOT/plugins/uberdev/lib/agent-dispatch.sh" <<'PY'
-import importlib.util,pathlib,sys,tempfile
+import hashlib,importlib.util,pathlib,sys,tempfile
 from unittest import mock
 tool,semaphore,agent=sys.argv[1:]
 source=pathlib.Path(tool).read_text(encoding='utf-8')
@@ -333,53 +333,97 @@ assert '_uberdev_semaphore_write_process_identity parent "$probe"' in agent_sour
 assert '_secure_open_regular(destination, os.O_WRONLY, 0o600)' in source
 assert 'open(destination, "w", encoding="ascii", newline="\\n")' not in source
 assert 'owner_pid = _native_parent_pid(owner_pid)' in source
+assert '_windows_guarded_parent_record(' in source
 assert 'if os.name == "nt":\n        owner_depth += 1' in source
 spec=importlib.util.spec_from_file_location('run_manifest_owner_depth_model',tool)
 module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module
 assert spec.loader is not None; spec.loader.exec_module(module)
-module._process_identity=lambda pid: ('captured',f'{pid}|{pid}|{pid}|'+('a'*64))
-with tempfile.TemporaryDirectory() as temporary:
- root=pathlib.Path(temporary)
- original_os_name=module.os.name
- try:
+original_os_name=module.os.name
+original_getppid=module.os.getppid
+original_platform_probe=module._process_identity_platform
+original_parent_pid=module._native_parent_pid
+original_guarded_parent=module._windows_guarded_parent_record
+original_process_identity=module._process_identity
+try:
+ with tempfile.TemporaryDirectory() as temporary:
+  root=pathlib.Path(temporary)
   for name in ('posix-direct','posix-parent','windows-direct','windows-parent'):
    (root/name).touch(mode=0o600)
+  module._process_identity=lambda pid: ('captured',f'{pid}|{pid}|{pid}|'+('a'*64))
   module.os.name='posix'
+  module._process_identity_platform=lambda: 'linux'
   module.os.getppid=lambda: 41
   module._native_parent_pid=lambda pid: {41:73,73:1}[pid]
   module._write_process_identity('direct',str(root/'posix-direct'))
   module._write_process_identity('parent',str(root/'posix-parent'))
+
+  windows_parent_calls=[]
+  def windows_guarded_parent(pid,expected_creation_ticks=None):
+   windows_parent_calls.append((pid,expected_creation_ticks))
+   return {
+    51:(61,6100),
+    61:(71,7100),
+   }[pid]
   module.os.name='nt'
+  module._process_identity_platform=lambda: 'windows'
   module.os.getppid=lambda: 51
-  module._native_parent_pid=lambda pid: {51:61,61:71,71:1}[pid]
+  module._native_parent_pid=lambda _pid: (_ for _ in ()).throw(
+   AssertionError('Windows owner traversal used the obsolete unbound parent probe')
+  )
+  module._windows_guarded_parent_record=windows_guarded_parent
   module._write_process_identity('direct',str(root/'windows-direct'))
   module._write_process_identity('parent',str(root/'windows-parent'))
- finally:
-  module.os.name=original_os_name
- for name,pid in (('posix-direct',41),('posix-parent',73),('windows-direct',61),('windows-parent',71)):
-  expected=f'{pid}\n{pid}|{pid}|{pid}|'+('a'*64)+'\n'
-  payload=(root/name).read_bytes()
-  assert payload==expected.encode('ascii') and b'\r' not in payload
- original_os_name=module.os.name
- try:
+  assert windows_parent_calls==[(51,None),(51,None),(61,6100)]
+
+  expected_records=(
+   ('posix-direct',41,None),
+   ('posix-parent',73,None),
+   ('windows-direct',61,6100),
+   ('windows-parent',71,7100),
+  )
+  for name,pid,creation_ticks in expected_records:
+   digest=('a'*64) if creation_ticks is None else hashlib.sha256(
+    f'windows:{creation_ticks}'.encode()
+   ).hexdigest()
+   expected=f'{pid}\n{pid}|{pid}|{pid}|{digest}\n'
+   payload=(root/name).read_bytes()
+   assert payload==expected.encode('ascii') and b'\r' not in payload
+
   module.os.name='posix'
+  module._process_identity_platform=lambda: 'linux'
+  module.os.getppid=lambda: 41
+  module._native_parent_pid=lambda pid: {41:73,73:1}[pid]
   candidate=root/'secure-open-contract'
   candidate.touch(mode=0o600)
   with mock.patch.object(module,'_secure_open_regular',wraps=module._secure_open_regular) as opened:
-   module.os.getppid=lambda: 41
    module._write_process_identity('direct',str(candidate))
- finally:
-  module.os.name=original_os_name
- opened.assert_called_once_with(str(candidate),module.os.O_WRONLY,0o600)
- module.os.getppid=lambda: 51
- module._native_parent_pid=lambda _pid: (_ for _ in ()).throw(ProcessLookupError())
- try: module._write_process_identity('parent',str(root/'absent-parent'))
- except module.ManifestRuntimeError as error: assert str(error)=='process_identity_parent_absent'
- else: raise AssertionError('absent parent did not fail closed')
- module._native_parent_pid=lambda _pid: (_ for _ in ()).throw(OSError())
- try: module._write_process_identity('parent',str(root/'unavailable-parent'))
- except module.ManifestRuntimeError as error: assert str(error)=='process_identity_parent_unavailable'
- else: raise AssertionError('unavailable parent did not fail closed')
+  opened.assert_called_once_with(str(candidate),module.os.O_WRONLY,0o600)
+
+  module.os.name='nt'
+  module._process_identity_platform=lambda: 'windows'
+  module.os.getppid=lambda: 51
+  module._native_parent_pid=lambda _pid: (_ for _ in ()).throw(
+   AssertionError('Windows error mapping used the obsolete unbound parent probe')
+  )
+  module._windows_guarded_parent_record=lambda _pid,_expected=None: (
+   (_ for _ in ()).throw(ProcessLookupError())
+  )
+  try: module._write_process_identity('parent',str(root/'absent-parent'))
+  except module.ManifestRuntimeError as error: assert str(error)=='process_identity_parent_absent'
+  else: raise AssertionError('absent parent did not fail closed')
+  module._windows_guarded_parent_record=lambda _pid,_expected=None: (
+   (_ for _ in ()).throw(OSError())
+  )
+  try: module._write_process_identity('parent',str(root/'unavailable-parent'))
+  except module.ManifestRuntimeError as error: assert str(error)=='process_identity_parent_unavailable'
+  else: raise AssertionError('unavailable parent did not fail closed')
+finally:
+ module.os.name=original_os_name
+ module.os.getppid=original_getppid
+ module._process_identity_platform=original_platform_probe
+ module._native_parent_pid=original_parent_pid
+ module._windows_guarded_parent_record=original_guarded_parent
+ module._process_identity=original_process_identity
 PY
 then
   echo "  PASS  owner mode and mutex candidate bridge select the live native parent identity"
