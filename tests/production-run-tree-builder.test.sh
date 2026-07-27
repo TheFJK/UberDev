@@ -50,6 +50,7 @@ def value(kind,run,key,index):
  if kind=='integer': return 1
  if kind=='boolean': return True
  if kind=='string': return f'value-{key}'
+ if kind=='bounded_text': return f'value-{key}'
  if kind=='optional_string': return ''
  if kind=='directory': return str(run)
  if kind in {'path','optional_path'}:
@@ -88,6 +89,15 @@ for contract in contracts:
   run,carrier=context(workflow,issue)
   workspace_mode=row.get('workspace_mode','isolated')
   inputs={key:value(fixture_types[key],repository if workspace_mode=='caller' and key=='working_dir' else run,key,index) for key in required+optional}
+  if edge=='review_pr.ci.classify':
+   content=f'<external-untrusted-input source="github-actions-log-pr-{issue}-run-1">\nfailed assertion\n</external-untrusted-input>\n'
+   inputs.update(
+    pr_number=issue,
+    run_id='1',
+    head_sha='0123456789abcdef0123456789abcdef01234567',
+    log_content=content,
+    log_sha256=hashlib.sha256(content.encode()).hexdigest(),
+   )
   argv_path=root/'argv'/f'{index:03d}.tsv'; argv_path.parent.mkdir(exist_ok=True)
   argv_path.write_text(''.join(f'{key}\t{json.dumps(inputs[key],separators=(",",":"))}\n' for key in required+optional))
   risks=None if risk_scope=='run' else []

@@ -287,6 +287,10 @@ try:
  carrier=json.loads(carrier_raw); inputs=json.loads(inputs_raw); risks=json.loads(risks_raw)
  manifest=json.loads(read_regular_once(manifest_path,1048576,'invalid_builder_input'))
 except Exception: fail('invalid_builder_input')
+input_limits=manifest.get('input_limits')
+max_input_bytes=input_limits.get('max_serialized_bytes') if isinstance(input_limits,dict) else None
+if type(max_input_bytes) is not int or not 0<max_input_bytes<65536: fail('invalid_builder_input')
+if not isinstance(inputs,dict) or len(json.dumps(inputs,sort_keys=True,separators=(',',':')).encode())>max_input_bytes: fail('invalid_builder_input')
 if not EDGE.fullmatch(edge) or not IDENT.fullmatch(instance): fail('invalid_identity')
 if set(carrier)!={'schema_version','run_id','workflow','issue_num','context_file','context_sha256'} or carrier.get('schema_version')!=1: fail('invalid_carrier_schema')
 if carrier.get('workflow') not in {'solve','turbo','review-pr','simplify'}: fail('invalid_carrier')
@@ -354,6 +358,11 @@ def scalar(value,kind):
  if kind in {'string','optional_string'}:
   if not isinstance(value,str) or (kind=='string' and not value) or len(value)>8192 or any(c in value for c in '\r\n\0'): fail('input_type_mismatch')
   return
+ if kind=='bounded_text':
+  if not isinstance(value,str) or not value or '\x00' in value: fail('input_type_mismatch')
+  try: value.encode('utf-8')
+  except UnicodeEncodeError: fail('input_type_mismatch')
+  return
  if kind=='string_array':
   if not isinstance(value,list) or len(value)>128 or any(not isinstance(x,str) or not x or len(x)>8192 or any(c in x for c in '\r\n\0') for x in value): fail('input_type_mismatch')
   return
@@ -375,6 +384,23 @@ def scalar(value,kind):
   elif not stat.S_ISREG(pe.st_mode) or pe.st_nlink!=1 or pe.st_size>16777216: fail('input_type_mismatch')
 types={**required,**optional}
 for key,value in inputs.items(): scalar(value,types[key])
+def classifier_authority():
+ if edge!='review_pr.ci.classify': return
+ pr_number=inputs.get('pr_number'); run_id=inputs.get('run_id')
+ head_sha=inputs.get('head_sha'); content=inputs.get('log_content'); digest=inputs.get('log_sha256')
+ if (type(pr_number) is not int or pr_number<=0 or pr_number!=issue or not isinstance(run_id,str)
+     or re.fullmatch(r'[1-9][0-9]*',run_id) is None or not isinstance(head_sha,str)
+     or re.fullmatch(r'[0-9a-f]{40}',head_sha) is None or not isinstance(digest,str)
+     or re.fullmatch(r'[0-9a-f]{64}',digest) is None or not isinstance(content,str)): fail('classifier_authority_mismatch')
+ opening=f'<external-untrusted-input source="github-actions-log-pr-{pr_number}-run-{run_id}">\n'
+ closing='\n</external-untrusted-input>\n'
+ if not content.startswith(opening) or not content.endswith(closing): fail('classifier_authority_mismatch')
+ body=content[len(opening):-len(closing)]
+ if not body or '<' in body or '\x00' in body: fail('classifier_authority_mismatch')
+ try: captured=content.encode('utf-8')
+ except UnicodeEncodeError: fail('classifier_authority_mismatch')
+ if hashlib.sha256(captured).hexdigest()!=digest: fail('classifier_authority_digest_mismatch')
+classifier_authority()
 if workspace_mode=='caller':
  working_dir=inputs.get('working_dir'); repository_id=meta.get('repository_id')
  if (not isinstance(working_dir,str) or not isinstance(repository_id,str)
@@ -644,6 +670,11 @@ def validate_typed(item,kind):
     if kind in {'string','optional_string'}:
         if not isinstance(item,str) or (kind=='string' and not item) or len(item)>8192 or '\x00' in item or '\r' in item or '\n' in item: fail('input_type_mismatch')
         return
+    if kind=='bounded_text':
+        if not isinstance(item,str) or not item or '\x00' in item: fail('input_type_mismatch')
+        try: item.encode('utf-8')
+        except UnicodeEncodeError: fail('input_type_mismatch')
+        return
     if kind=='string_array':
         if not isinstance(item,list) or len(item)>128 or any(not isinstance(x,str) or not x or len(x)>8192 or any(c in x for c in '\r\n\0') for x in item): fail('input_type_mismatch')
         return
@@ -665,6 +696,23 @@ def validate_typed(item,kind):
         elif not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1 or entry.st_size>16777216: fail('input_type_mismatch')
 input_types={**required_inputs,**optional_inputs}
 for key,item in inputs.items(): validate_typed(item,input_types[key])
+def classifier_authority():
+    if edge!='review_pr.ci.classify': return
+    pr_number=inputs.get('pr_number'); run_id=inputs.get('run_id')
+    head_sha=inputs.get('head_sha'); content=inputs.get('log_content'); digest=inputs.get('log_sha256')
+    if (type(pr_number) is not int or pr_number<=0 or pr_number!=carrier['issue_num'] or not isinstance(run_id,str)
+        or re.fullmatch(r'[1-9][0-9]*',run_id) is None or not isinstance(head_sha,str)
+        or re.fullmatch(r'[0-9a-f]{40}',head_sha) is None or not isinstance(digest,str)
+        or re.fullmatch(r'[0-9a-f]{64}',digest) is None or not isinstance(content,str)): fail('classifier_authority_mismatch')
+    opening=f'<external-untrusted-input source="github-actions-log-pr-{pr_number}-run-{run_id}">\n'
+    closing='\n</external-untrusted-input>\n'
+    if not content.startswith(opening) or not content.endswith(closing): fail('classifier_authority_mismatch')
+    body=content[len(opening):-len(closing)]
+    if not body or '<' in body or '\x00' in body: fail('classifier_authority_mismatch')
+    try: captured=content.encode('utf-8')
+    except UnicodeEncodeError: fail('classifier_authority_mismatch')
+    if hashlib.sha256(captured).hexdigest()!=digest: fail('classifier_authority_digest_mismatch')
+classifier_authority()
 workspace_dir=''
 if workspace_mode=='caller':
     working_dir=inputs.get('working_dir')

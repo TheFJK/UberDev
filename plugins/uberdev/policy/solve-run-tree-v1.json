@@ -1005,7 +1005,9 @@
       "required_inputs": {
         "pr_number": "integer",
         "run_id": "string",
-        "log_path": "path"
+        "head_sha": "string",
+        "log_content": "bounded_text",
+        "log_sha256": "string"
       },
       "optional_inputs": {}
     },

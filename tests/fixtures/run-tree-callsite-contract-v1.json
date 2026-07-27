@@ -545,12 +545,16 @@
       "edge_id": "review_pr.ci.classify",
       "source": "plugins/uberdev/commands/review-pr.md",
       "required_inputs": [
-        "log_path",
+        "head_sha",
+        "log_content",
+        "log_sha256",
         "pr_number",
         "run_id"
       ],
       "required_input_types": {
-        "log_path": "path",
+        "head_sha": "string",
+        "log_content": "bounded_text",
+        "log_sha256": "string",
         "pr_number": "integer",
         "run_id": "string"
       },

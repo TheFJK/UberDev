@@ -13,7 +13,7 @@ python3 -I -B - "$TREE" <<'PY'
 import json,sys
 tree=json.load(open(sys.argv[1])); providers={k:v for k,v in tree['edges'].items() if v['kind']=='provider'}
 assert tree.get('input_limits')=={'max_serialized_bytes':49152}
-types={'integer','string','optional_string','boolean','path','optional_path','directory','string_array','path_array','optional_path_array','repo_path_array'}
+types={'integer','string','bounded_text','optional_string','boolean','path','optional_path','directory','string_array','path_array','optional_path_array','repo_path_array'}
 assert providers
 for edge,row in providers.items():
     assert row.get('workspace_mode','isolated') in {'isolated','caller'}, edge

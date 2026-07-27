@@ -2,6 +2,7 @@
 """Manifest-derived construction and validation for routed child inputs."""
 
 import argparse
+import hashlib
 import json
 import posixpath
 import re
@@ -14,6 +15,7 @@ SUPPORTED_TYPES = {
     "integer",
     "boolean",
     "string",
+    "bounded_text",
     "path",
     "directory",
     "optional_string",
@@ -106,6 +108,14 @@ def validate_value(key: str, value: Any, kind: str) -> None:
         if not isinstance(value, str) or not value:
             fail(f"input {key} must be a non-empty {kind}")
         return
+    if kind == "bounded_text":
+        if not isinstance(value, str) or not value or "\x00" in value:
+            fail(f"input {key} must be non-empty bounded text")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            fail(f"input {key} must be valid UTF-8 text")
+        return
     if kind in {"optional_string", "optional_path"}:
         if not isinstance(value, str):
             fail(f"input {key} must be a string")
@@ -138,6 +148,44 @@ def validate_value(key: str, value: Any, kind: str) -> None:
     fail(f"unsupported type for input {key}")
 
 
+def validate_ci_classifier_authority(edge_id: str, inputs: dict[str, Any]) -> None:
+    if edge_id != "review_pr.ci.classify":
+        return
+    pr_number = inputs.get("pr_number")
+    run_id = inputs.get("run_id")
+    head_sha = inputs.get("head_sha")
+    log_content = inputs.get("log_content")
+    log_sha256 = inputs.get("log_sha256")
+    if (
+        type(pr_number) is not int
+        or pr_number <= 0
+        or not isinstance(run_id, str)
+        or re.fullmatch(r"[1-9][0-9]*", run_id) is None
+        or not isinstance(head_sha, str)
+        or re.fullmatch(r"[0-9a-f]{40}", head_sha) is None
+        or not isinstance(log_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", log_sha256) is None
+        or not isinstance(log_content, str)
+    ):
+        fail("classifier authority identity mismatch")
+    opening = (
+        f'<external-untrusted-input source="github-actions-log-pr-{pr_number}'
+        f'-run-{run_id}">\n'
+    )
+    closing = "\n</external-untrusted-input>\n"
+    if not log_content.startswith(opening) or not log_content.endswith(closing):
+        fail("classifier authority identity mismatch")
+    body = log_content[len(opening) : -len(closing)]
+    if not body or "<" in body or "\x00" in body:
+        fail("classifier authority identity mismatch")
+    try:
+        captured = log_content.encode("utf-8")
+    except UnicodeEncodeError:
+        fail("classifier authority identity mismatch")
+    if hashlib.sha256(captured).hexdigest() != log_sha256:
+        fail("classifier authority digest mismatch")
+
+
 def validate_inputs(manifest: dict[str, Any], edge_id: str, inputs: Any) -> dict[str, Any]:
     required, optional, _ = edge_schema(manifest, edge_id)
     if not isinstance(inputs, dict):
@@ -152,6 +200,7 @@ def validate_inputs(manifest: dict[str, Any], edge_id: str, inputs: Any) -> dict
     schema = {**required, **optional}
     for key, value in inputs.items():
         validate_value(key, value, schema[key])
+    validate_ci_classifier_authority(edge_id, inputs)
     if len(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode("utf-8")) > input_byte_limit(manifest):
         fail("child inputs exceed immutable handoff budget")
     return inputs

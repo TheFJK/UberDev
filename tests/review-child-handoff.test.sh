@@ -1377,8 +1377,18 @@ done
 edges+=(review_pr.defer.findings)
 inputs+=("$(jq -cn --arg p "$path" --arg d "$dir" '{phase1_path:$p,phase2_path:$p,phase1_disposition_path:$p,phase2_disposition_path:$p,working_dir:$d,pr_number:1}')")
 risks+=(null)
+ci_log_source="$TMP/review-ci-classifier-source.log"
+printf '%s\n' 'original failed assertion' >"$ci_log_source"
+ci_log_content=$'<external-untrusted-input source="github-actions-log-pr-1-run-1">\noriginal failed assertion\n</external-untrusted-input>\n'
+ci_log_sha256="$(python3 -I -B -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest(),end="")' "$ci_log_content")"
+ci_head_sha=0123456789abcdef0123456789abcdef01234567
+ci_inputs="$(jq -cn \
+  --arg head "$ci_head_sha" \
+  --arg content "$ci_log_content" \
+  --arg digest "$ci_log_sha256" \
+  '{pr_number:1,run_id:"1",head_sha:$head,log_content:$content,log_sha256:$digest}')"
 edges+=(review_pr.ci.classify)
-inputs+=("$(jq -cn --arg p "$path" '{pr_number:1,run_id:"1",log_path:$p}')")
+inputs+=("$ci_inputs")
 risks+=('[]')
 edges+=(review_pr.ci.fix_code)
 inputs+=("$(jq -cn --arg d "$dir" \
@@ -1401,6 +1411,55 @@ for i in "${!edges[@]}"; do
   uberdev_create_child_handoff "${edges[$i]}" "$instance" "${inputs[$i]}" "${risks[$i]}" >/dev/null
   jq -e --arg edge "${edges[$i]}" '.edge_id==$edge and (.inputs|type)=="object"' "$UBERDEV_CHILD_HANDOFF" >/dev/null
 done
+
+# The source log is controller-only. Once the immutable handoff is prepared,
+# replacing that source cannot change the child-visible classifier bytes.
+uberdev_create_child_handoff review_pr.ci.classify review-ci-authority-stable-iter1-attempt01 "$ci_inputs" '[]' >/dev/null
+ci_authority_handoff="$UBERDEV_CHILD_HANDOFF"
+ci_authority_result="$UBERDEV_CHILD_RESULT"
+ci_authority_status="$UBERDEV_CHILD_STATUS"
+_uberdev_child_prepare review_pr.ci.classify "$ci_authority_handoff" "$ci_authority_result" "$ci_authority_status" dispatch >/dev/null
+printf '%s\n' 'replacement platform outage' >"$ci_log_source"
+python3 -I -B - "$(dirname "$ci_authority_result")/handoff.v1.json" "$ci_log_content" "$ci_log_sha256" "$ci_log_source" <<'PY'
+import hashlib,json,sys
+handoff,expected,digest,source=sys.argv[1:]
+value=json.load(open(handoff,encoding="utf-8"))
+inputs=value["inputs"]
+assert "log_path" not in inputs and source not in json.dumps(inputs)
+assert inputs["log_content"]==expected
+assert inputs["log_sha256"]==digest
+assert hashlib.sha256(inputs["log_content"].encode()).hexdigest()==digest
+PY
+
+# Consumption independently revalidates the PR/run identity instead of trusting
+# the builder's earlier receipt.
+uberdev_create_child_handoff review_pr.ci.classify review-ci-authority-misbound-iter1-attempt01 "$ci_inputs" '[]' >/dev/null
+ci_misbound_handoff="$UBERDEV_CHILD_HANDOFF"
+python3 -I -B - "$ci_misbound_handoff" <<'PY'
+import json,sys
+path=sys.argv[1]
+value=json.load(open(path,encoding="utf-8"))
+value["inputs"]["run_id"]="2"
+with open(path,"w",encoding="utf-8") as stream:
+    json.dump(value,stream,separators=(",",":"))
+PY
+if _uberdev_child_prepare review_pr.ci.classify "$ci_misbound_handoff" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1; then
+  echo "misbound classifier log identity was accepted at consumption" >&2
+  exit 1
+fi
+ci_foreign_pr="$(python3 -I -B - "$ci_inputs" <<'PY'
+import hashlib,json,sys
+value=json.loads(sys.argv[1])
+value["pr_number"]=2
+value["log_content"]=value["log_content"].replace("github-actions-log-pr-1-", "github-actions-log-pr-2-")
+value["log_sha256"]=hashlib.sha256(value["log_content"].encode()).hexdigest()
+print(json.dumps(value,separators=(",",":")),end="")
+PY
+)"
+if uberdev_create_child_handoff review_pr.ci.classify review-ci-authority-foreign-pr-iter1-attempt01 "$ci_foreign_pr" '[]' >/dev/null 2>&1; then
+  echo "classifier authority for another PR was accepted against this carrier" >&2
+  exit 1
+fi
 
 # Every required reviewer supports one unique, exact-input format retry.
 for i in 0 1 2 3 4 5; do

@@ -305,7 +305,7 @@ export RUN_ID
 export REVIEW_ITERATION=7
 export REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-5}"
 export CI_FIX_LOOP_ITER=3
-export CI_RUN_ID=$'run "quoted" \\id *?[x]\t'
+export CI_RUN_ID=9001
 export FOCUS=$'focus "quoted" \\glob*?[x]\t'
 
 . "$TMP/review-setup.sh"
@@ -549,7 +549,7 @@ COMMIT_RANGE_FIXTURE="$HOSTILE_DIR"$'/commit "range" \\path*.txt'
 PHASE1_DISPOSITION_FIXTURE="$HOSTILE_DIR"$'/phase1 "disposition" \\path*.json'
 PHASE2_DISPOSITION_FIXTURE="$HOSTILE_DIR"$'/phase2 "disposition" \\path*.json'
 CLASSIFICATION_PATH="$HOSTILE_DIR"$'/classification "quoted" \\path*.yaml'
-CI_LOG_ARTIFACT_PATH="$HOSTILE_DIR"$'/ci "log" \\path*.txt'
+CI_LOG_SOURCE_PATH="$HOSTILE_DIR"$'/ci "log" \\source*?[x].txt'
 CI_REFUSED_AGGREGATE_PATH="$HOSTILE_DIR"$'/refused "aggregate" \\path*.md'
 CONFLICT_PATH="$HOSTILE_DIR"$'/conflict "quoted" \\path*.ts'
 
@@ -557,11 +557,27 @@ for fixture in \
   "$DIFF_PATH" "$CRITERIA_FIXTURE" "$FORMAT_EXAMPLE" \
   "$POST_FINAL" "$SIMPLIFY_FINAL" "$COMMIT_RANGE_FIXTURE" \
   "$PHASE1_DISPOSITION_FIXTURE" "$PHASE2_DISPOSITION_FIXTURE" \
-  "$CLASSIFICATION_PATH" "$CI_LOG_ARTIFACT_PATH" "$CI_REFUSED_AGGREGATE_PATH" \
+  "$CLASSIFICATION_PATH" "$CI_REFUSED_AGGREGATE_PATH" \
   "$CONFLICT_PATH"; do
   printf 'private hostile review fixture: %s\n' "${fixture##*/}" >"$fixture"
   chmod 600 "$fixture"
 done
+printf '%s\n' 'original & <failed assertion>' >"$CI_LOG_SOURCE_PATH"
+chmod 600 "$CI_LOG_SOURCE_PATH"
+CI_LOG_CONTENT=$'<external-untrusted-input source="github-actions-log-pr-73-run-9001">\noriginal &amp; &lt;failed assertion>\n</external-untrusted-input>\n'
+CI_LOG_SHA256="$(python3 -I -B -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest(),end="")' "$CI_LOG_CONTENT")"
+CI_CLASSIFICATION_HEAD_SHA="$(git rev-parse HEAD)"
+REVIEW_REPO_SLUG=owner/repo
+gh() {
+  [ "$#" -eq 6 ] \
+    && [ "$1" = run ] \
+    && [ "$2" = view ] \
+    && [ "$3" = "$CI_RUN_ID" ] \
+    && [ "$4" = --repo ] \
+    && [ "$5" = "$REVIEW_REPO_SLUG" ] \
+    && [ "$6" = --log ] || return 2
+  cat "$CI_LOG_SOURCE_PATH"
+}
 
 CHANGED_PATHS_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1:],separators=(",",":")),end="")' "$CHANGED_ONE" "$CHANGED_TWO")"
 EMPHASIS_JSON="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1:],separators=(",",":")),end="")' \
@@ -685,6 +701,14 @@ wave=()
 (. "$TMP/review-defer.sh") & wave+=("$!")
 (. "$TMP/review-classify.sh") & wave+=("$!")
 review_wait_jobs "${wave[@]}"
+[ ! -e "$RESEARCH_DIR_ABS/ci-log-run-${CI_RUN_ID}-iter${CI_FIX_LOOP_ITER}.raw" ] || {
+  echo 'review-child-inputs: controller raw CI log capture survived inline handoff construction' >&2
+  exit 1
+}
+
+# Replacing the controller-only source after dispatch cannot change the inline
+# bytes already published in the immutable classifier handoff.
+printf '%s\n' 'replacement platform outage' >"$CI_LOG_SOURCE_PATH"
 
 CI_CLASSIFICATION_PATH="$RESEARCH_DIR_ABS/ci-classification-${CI_FIX_LOOP_ITER:-1}.yaml"
 printf 'validated classifier output\n' >"$CI_CLASSIFICATION_PATH"
@@ -698,7 +722,6 @@ signal_anchor=README.md:1
 printf 'replacement classifier says env_drift at package-lock.json:1\n' \
   >"$CI_CLASSIFICATION_PATH"
 
-CI_CLASSIFICATION_HEAD_SHA="$(git rev-parse HEAD)"
 CI_BASE_SHA=$'base "quoted" \\sha*?[x]\t'
 . "$TMP/review-ci-builders.sh"
 
@@ -1001,7 +1024,7 @@ PY
 export HANDOFFS CHANGED_PATHS_JSON EMPHASIS_JSON DIFF_PATH CRITERIA_FIXTURE FORMAT_EXAMPLE
 export HOSTILE_DIR POST_FINAL SIMPLIFY_FINAL COMMIT_RANGE_FIXTURE
 export PHASE1_DISPOSITION_FIXTURE PHASE2_DISPOSITION_FIXTURE
-export CLASSIFICATION_PATH CI_LOG_ARTIFACT_PATH CI_REFUSED_AGGREGATE_PATH CONFLICT_PATH
+export CLASSIFICATION_PATH CI_LOG_CONTENT CI_LOG_SHA256 CI_REFUSED_AGGREGATE_PATH CONFLICT_PATH
 export failure_class signal_anchor
 export CI_RUN_ID FOCUS CI_CLASSIFICATION_HEAD_SHA CI_BASE_SHA pr_head_branch base_branch BASE_SHA
 
@@ -1105,7 +1128,9 @@ exact(
     {
         "pr_number": 73,
         "run_id": env["CI_RUN_ID"],
-        "log_path": env["CI_LOG_ARTIFACT_PATH"],
+        "head_sha": env["CI_CLASSIFICATION_HEAD_SHA"],
+        "log_content": env["CI_LOG_CONTENT"],
+        "log_sha256": env["CI_LOG_SHA256"],
     },
 )
 exact(

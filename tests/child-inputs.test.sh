@@ -153,6 +153,62 @@ unset UBERDEV_CHILD_MANIFEST_PATH
 canonical="$(uberdev_child_inputs_build brainstorm.research.codebase \
   working_dir '"/tmp/work"' summary_path '"/tmp/summary"' question '"why"')"
 assert_eq 'canonical manifest is resolved internally' "$canonical" '{"question":"why","summary_path":"/tmp/summary","working_dir":"/tmp/work"}'
+
+CI_HEAD_SHA=0123456789abcdef0123456789abcdef01234567
+CI_LOG_CONTENT=$'<external-untrusted-input source="github-actions-log-pr-73-run-9001">\noriginal failed assertion\n</external-untrusted-input>\n'
+CI_LOG_SHA256="$(python3 -I -B -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest(),end="")' "$CI_LOG_CONTENT")"
+CI_AUTHORITY="$(uberdev_child_inputs_build review_pr.ci.classify \
+  pr_number 73 \
+  run_id '"9001"' \
+  head_sha "\"$CI_HEAD_SHA\"" \
+  log_content "$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1]),end="")' "$CI_LOG_CONTENT")" \
+  log_sha256 "\"$CI_LOG_SHA256\"")"
+python3 -I -B - "$CI_AUTHORITY" "$CI_LOG_CONTENT" "$CI_LOG_SHA256" <<'PY'
+import hashlib,json,sys
+value=json.loads(sys.argv[1]); expected=sys.argv[2]; digest=sys.argv[3]
+assert value["log_content"]==expected
+assert value["log_sha256"]==digest
+assert hashlib.sha256(value["log_content"].encode()).hexdigest()==digest
+PY
+pass 'classifier authority preserves exact immutable log bytes'
+
+CI_WRONG_RUN="$(python3 -I -B - "$CI_AUTHORITY" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1]); value["run_id"]="9002"
+print(json.dumps(value,separators=(",",":")),end="")
+PY
+)"
+assert_fails_cleanly 'classifier authority rejects a log envelope bound to another run' \
+  'classifier authority identity mismatch' \
+  uberdev_child_inputs_validate review_pr.ci.classify "$CI_WRONG_RUN"
+
+CI_MUTATED_LOG="$(python3 -I -B - "$CI_AUTHORITY" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1]); value["log_content"]=value["log_content"].replace("original","replacement")
+print(json.dumps(value,separators=(",",":")),end="")
+PY
+)"
+assert_fails_cleanly 'classifier authority rejects log bytes changed after digest capture' \
+  'classifier authority digest mismatch' \
+  uberdev_child_inputs_validate review_pr.ci.classify "$CI_MUTATED_LOG"
+
+CI_OVERSIZE_AUTHORITY="$(python3 -I -B - "$CI_HEAD_SHA" <<'PY'
+import hashlib,json,sys
+content='<external-untrusted-input source="github-actions-log-pr-73-run-9001">\n' + ('x' * 49152) + '\n</external-untrusted-input>\n'
+value={
+    "pr_number":73,
+    "run_id":"9001",
+    "head_sha":sys.argv[1],
+    "log_content":content,
+    "log_sha256":hashlib.sha256(content.encode()).hexdigest(),
+}
+print(json.dumps(value,separators=(",",":")),end="")
+PY
+)"
+assert_fails_cleanly 'classifier authority rejects a coherent log record over the immutable handoff budget' \
+  'child inputs exceed immutable handoff budget' \
+  uberdev_child_inputs_validate review_pr.ci.classify "$CI_OVERSIZE_AUTHORITY"
+
 export UBERDEV_CHILD_MANIFEST_PATH="$FIXTURE"
 [ -f "$canonical_manifest" ] || fail 'canonical manifest exists' "$canonical_manifest missing"
 pass 'canonical manifest exists'

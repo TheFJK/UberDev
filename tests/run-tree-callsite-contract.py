@@ -30,6 +30,7 @@ FORMAT_INPUTS = {"format_example_path", "format_retry"}
 TYPE_MAP_KEYS = {"required_input_types", "optional_input_types"}
 INPUT_TYPES = {
     "boolean",
+    "bounded_text",
     "directory",
     "integer",
     "optional_path",

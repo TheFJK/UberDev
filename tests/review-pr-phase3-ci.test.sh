@@ -215,6 +215,36 @@ assert_no_grep "$REVIEW_PR" 'CI_CLASSIFICATION_PATH="\$RESEARCH_DIR_ABS/ci-class
   "S10.10b — classifier validation does not read an artifact no child writes"
 assert_grep "$REVIEW_PR" 'os\.write\(fd,payload\)' \
   "S10.10c — refusal aggregate serializes a concrete envelope and finding row"
+assert_no_grep "$REVIEW_PR" 'review_pr\.ci\.classify.*log_path|log_path.*review_pr\.ci\.classify' \
+  "S10.10d — classifier handoff carries no mutable log pathname"
+assert_grep "$REVIEW_PR" 'review_pr\.ci\.classify.*log_content|log_content.*CI_LOG_AUTHORITY_JSON' \
+  "S10.10e — classifier handoff carries the captured log bytes inline"
+assert_grep "$REVIEW_PR" 'review_pr\.ci\.classify.*log_sha256|log_sha256.*CI_LOG_AUTHORITY_JSON' \
+  "S10.10f — classifier handoff binds the exact captured log digest"
+assert_grep "$REVIEW_PR" 'review_pr\.ci\.classify.*head_sha|head_sha.*CI_CLASSIFICATION_HEAD_SHA' \
+  "S10.10g — classifier handoff binds the validated PR head"
+assert_grep "$CLASSIFIER" 'log_sha256.*SHA-256|SHA-256.*log_sha256' \
+  "S10.10h — classifier contract names the exact content digest"
+python3 -I -B - "$RUN_TREE" <<'PY'
+import json,sys
+required=json.load(open(sys.argv[1],encoding="utf-8"))["edges"]["review_pr.ci.classify"]["required_inputs"]
+expected={
+    "pr_number":"integer",
+    "run_id":"string",
+    "head_sha":"string",
+    "log_content":"bounded_text",
+    "log_sha256":"string",
+}
+if required!=expected or "log_path" in required:
+    raise SystemExit("classifier authority is not closed over identity and bytes")
+PY
+if [ "$?" -eq 0 ]; then
+  echo "  PASS  S10.10i — policy closes classifier authority over PR/run/head and bounded bytes"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.10i — policy closes classifier authority over PR/run/head and bounded bytes"
+  FAIL=$((FAIL + 1))
+fi
 
 CLASSIFY_LIFECYCLE_FIXTURE="$(mktemp)"
 CLASSIFY_LIFECYCLE_LOG="$(mktemp)"
@@ -233,10 +263,12 @@ dispatch_fixer
 SH
 set +e
 CLASSIFY_LIFECYCLE_LOG="$CLASSIFY_LIFECYCLE_LOG" \
-PR_NUMBER=1 CI_RUN_ID=123 CI_LOG_ARTIFACT_PATH=/tmp/log RUN_ID=fixture \
+PR_NUMBER=1 CI_RUN_ID=123 RUN_ID=fixture \
+CI_LOG_AUTHORITY_JSON='{"pr_number":1,"run_id":"123","head_sha":"0123456789abcdef0123456789abcdef01234567","log_content":"wrapped","log_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}' \
 CI_FIX_LOOP_ITER=2 RESEARCH_DIR_ABS=/tmp/research REVIEW_PR_TIMEOUT=9 \
 bash -c '
   review_json_string() { printf "\"%s\"" "$1"; }
+  review_json_member() { python3 -I -B -c '"'"'import json,sys; print(json.dumps(json.loads(sys.argv[1])[sys.argv[2]]),end="")'"'"' "$1" "$2"; }
   uberdev_child_inputs_build() { printf "{}"; }
   uberdev_child_instance_id() { printf "%s" "$1"; }
   review_child_single() { printf "child\n" >>"$CLASSIFY_LIFECYCLE_LOG"; return 37; }
@@ -1203,6 +1235,117 @@ else
   FAIL=$((FAIL + 1))
 fi
 rm -f "$POST_MONITOR_REFRESH_FIXTURE" "$POST_MONITOR_REFRESH_LOG"
+
+echo
+echo "== S20-RUNTIME: failed log capture cleans its private partial artifact =="
+CI_LOG_CAPTURE_FIXTURE="$(mktemp)"
+awk -v wanted="review_capture_ci_log_authority" '
+  $0 ~ "^[[:space:]]*" wanted "\\(\\) \\{" { active=1 }
+  active { print }
+  active && /^PY$/ { heredoc_done=1 }
+  active && heredoc_done && /^    \}$/ { exit }
+' "$REVIEW_PR" >"$CI_LOG_CAPTURE_FIXTURE"
+CI_LOG_CAPTURE_DIR="$(mktemp -d)"
+set +e
+CI_LOG_CAPTURE_RESULT="$(
+  CI_LOG_CAPTURE_DIR="$CI_LOG_CAPTURE_DIR" ROOT="$REPO_ROOT" bash -c '
+    . "$1"
+    RESEARCH_DIR_ABS="$CI_LOG_CAPTURE_DIR"
+    REVIEW_REPO_SLUG=owner/repo
+    PR_NUMBER=73
+    CI_RUN_ID=991
+    CI_FIX_LOOP_ITER=2
+    CI_CLASSIFICATION_HEAD_SHA=0123456789abcdef0123456789abcdef01234567
+    UBERDEV_REVIEW_PLUGIN_ROOT="$ROOT/plugins/uberdev"
+    gh() {
+      printf "partial failed log\n"
+      return 1
+    }
+    review_capture_ci_log_authority
+  ' _ "$CI_LOG_CAPTURE_FIXTURE"
+)"
+CI_LOG_CAPTURE_RC=$?
+set -e
+if [ "$CI_LOG_CAPTURE_RC" -ne 0 ] \
+    && [ "$CI_LOG_CAPTURE_RESULT" = classification_log_capture_failed ] \
+    && [ ! -e "$CI_LOG_CAPTURE_DIR/ci-log-run-991-iter2.raw" ]; then
+  echo "  PASS  S20-RT — failed capture is terminal and removes the partial raw log"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S20-RT — failed capture stranded or misreported its partial raw log"
+  echo "        rc: $CI_LOG_CAPTURE_RC"
+  echo "        result: $CI_LOG_CAPTURE_RESULT"
+  FAIL=$((FAIL + 1))
+fi
+
+set +e
+CI_LOG_OVERSIZE_RESULT="$(
+  CI_LOG_CAPTURE_DIR="$CI_LOG_CAPTURE_DIR" ROOT="$REPO_ROOT" bash -c '
+    . "$1"
+    RESEARCH_DIR_ABS="$CI_LOG_CAPTURE_DIR"
+    REVIEW_REPO_SLUG=owner/repo
+    PR_NUMBER=73
+    CI_RUN_ID=992
+    CI_FIX_LOOP_ITER=2
+    CI_CLASSIFICATION_HEAD_SHA=0123456789abcdef0123456789abcdef01234567
+    UBERDEV_REVIEW_PLUGIN_ROOT="$ROOT/plugins/uberdev"
+    gh() {
+      python3 -I -B -c '\''import sys; sys.stdout.write("x"*49153)'\''
+    }
+    review_capture_ci_log_authority
+  ' _ "$CI_LOG_CAPTURE_FIXTURE"
+)"
+CI_LOG_OVERSIZE_RC=$?
+set -e
+if [ "$CI_LOG_OVERSIZE_RC" -ne 0 ] \
+    && [ "$CI_LOG_OVERSIZE_RESULT" = classification_log_input_oversize ] \
+    && [ ! -e "$CI_LOG_CAPTURE_DIR/ci-log-run-992-iter2.raw" ]; then
+  echo "  PASS  S20-RT.2 — oversized raw capture is rejected and removed"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S20-RT.2 — oversized raw capture survived or was accepted"
+  echo "        rc: $CI_LOG_OVERSIZE_RC"
+  echo "        result: $CI_LOG_OVERSIZE_RESULT"
+  FAIL=$((FAIL + 1))
+fi
+
+CI_LOG_PREEXISTING_PATH="$CI_LOG_CAPTURE_DIR/ci-log-run-993-iter2.raw"
+CI_LOG_PREEXISTING_EXPECTED="$CI_LOG_CAPTURE_DIR/preexisting.expected"
+printf 'pre-existing controller artifact\n' >"$CI_LOG_PREEXISTING_PATH"
+cp "$CI_LOG_PREEXISTING_PATH" "$CI_LOG_PREEXISTING_EXPECTED"
+chmod 600 "$CI_LOG_PREEXISTING_PATH" "$CI_LOG_PREEXISTING_EXPECTED"
+set +e
+CI_LOG_PREEXISTING_RESULT="$(
+  CI_LOG_CAPTURE_DIR="$CI_LOG_CAPTURE_DIR" ROOT="$REPO_ROOT" bash -c '
+    . "$1"
+    RESEARCH_DIR_ABS="$CI_LOG_CAPTURE_DIR"
+    REVIEW_REPO_SLUG=owner/repo
+    PR_NUMBER=73
+    CI_RUN_ID=993
+    CI_FIX_LOOP_ITER=2
+    CI_CLASSIFICATION_HEAD_SHA=0123456789abcdef0123456789abcdef01234567
+    UBERDEV_REVIEW_PLUGIN_ROOT="$ROOT/plugins/uberdev"
+    gh() {
+      printf "replacement failed log\n"
+    }
+    review_capture_ci_log_authority
+  ' _ "$CI_LOG_CAPTURE_FIXTURE"
+)"
+CI_LOG_PREEXISTING_RC=$?
+set -e
+if [ "$CI_LOG_PREEXISTING_RC" -ne 0 ] \
+    && [ "$CI_LOG_PREEXISTING_RESULT" = classification_log_cleanup_failed ] \
+    && cmp -s "$CI_LOG_PREEXISTING_PATH" "$CI_LOG_PREEXISTING_EXPECTED"; then
+  echo "  PASS  S20-RT.3 — failed exclusive creation preserves a pre-existing path byte-for-byte"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S20-RT.3 — failed exclusive creation deleted or changed a pre-existing path"
+  echo "        rc: $CI_LOG_PREEXISTING_RC"
+  echo "        result: $CI_LOG_PREEXISTING_RESULT"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$CI_LOG_CAPTURE_FIXTURE"
+rm -rf "$CI_LOG_CAPTURE_DIR"
 
 echo
 echo "== Summary =="

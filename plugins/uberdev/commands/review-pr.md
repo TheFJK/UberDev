@@ -23,7 +23,7 @@ Run a comprehensive pull request review using multiple specialized agents, each 
   "review_pr.simplify.efficiency":{"inputs":["diff_path","lens"],"optional_inputs":["focus"],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
   "review_pr.fix.phase2":{"inputs":["findings_path","commit_range_path","working_dir","pr_number","disposition_path"],"optional_inputs":[],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"run","risk_argument":null},
   "review_pr.defer.findings":{"inputs":["phase1_path","phase2_path","phase1_disposition_path","phase2_disposition_path","working_dir","pr_number"],"optional_inputs":[],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"run","risk_argument":null},
-  "review_pr.ci.classify":{"inputs":["pr_number","run_id","log_path"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "review_pr.ci.classify":{"inputs":["pr_number","run_id","head_sha","log_content","log_sha256"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
   "review_pr.ci.fix_code":{"inputs":["failure_class","signal_anchor","run_id","head_sha","working_dir","pr_number"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
   "review_pr.ci.rebase":{"inputs":["working_dir","pr_number","head_sha","base_sha"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
   "review_pr.ci.defer_refusal":{"inputs":["phase1_path","working_dir","pr_number"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
@@ -1257,7 +1257,12 @@ PY
     fi
     ```
 
-    Read the failed check's log via `gh run view <run-id> --log`. The log content MUST be wrapped in:
+    Read the failed check's log via `gh run view <run-id> --log`. The
+    controller truncates it to `CI_LOG_TRUNCATE_LINES=500`, escapes `<` and
+    `&`, and captures the resulting wrapped bytes inline. The private raw
+    capture is securely removed before the child input is built; no log
+    pathname crosses the handoff boundary. The exact inline content MUST be
+    wrapped in:
 
     ```
     <external-untrusted-input source="github-actions-log-pr-<N>-run-<id>">
@@ -1265,13 +1270,223 @@ PY
     </external-untrusted-input>
     ```
 
-    Dispatch the classifier:
+    The immutable classifier authority is the exact tuple
+    (`pr_number`, `run_id`, `head_sha`, `log_content`, `log_sha256`).
+    `log_sha256` covers the exact UTF-8 bytes the child receives. The builder,
+    handoff publisher, and handoff consumer each independently require the
+    envelope's PR/run identity and digest to match, and each enforces the
+    49,152-byte serialized input ceiling.
+
+    Capture and dispatch the classifier:
 
     ```bash
+    review_json_member() {
+      [ "$#" -eq 2 ] || return 2
+      python3 -I -B -c '
+import json,sys
+value=json.loads(sys.argv[1])
+if not isinstance(value,dict) or sys.argv[2] not in value: raise SystemExit(2)
+print(json.dumps(value[sys.argv[2]],separators=(",",":")),end="")
+' "$1" "$2"
+    }
+    review_capture_ci_log_authority() {
+      local capture_path="$RESEARCH_DIR_ABS/ci-log-run-${CI_RUN_ID}-iter${CI_FIX_LOOP_ITER:-1}.raw"
+      local capture_rc=0 capture_receipt=
+      CI_LOG_TRUNCATE_LINES=500
+      if capture_receipt="$(
+        umask 077
+        set -o pipefail
+        gh run view "$CI_RUN_ID" --repo "$REVIEW_REPO_SLUG" --log 2>/dev/null \
+          | tail -n "$CI_LOG_TRUNCATE_LINES" \
+          | python3 -I -B -c '
+import json,os,sys
+path=sys.argv[1]
+descriptor=None
+receipt=None
+sink_status="ok"
+exit_code=0
+try:
+    flags=os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0)
+    descriptor=os.open(path,flags,0o600)
+    if os.name!="nt":
+        os.fchmod(descriptor,0o600)
+    entry=os.fstat(descriptor)
+    receipt={"dev":int(entry.st_dev),"ino":int(entry.st_ino)}
+    total=0
+    while True:
+        chunk=sys.stdin.buffer.read(65536)
+        if not chunk:
+            break
+        if total<49153:
+            piece=chunk[:49153-total]
+            view=memoryview(piece)
+            while view:
+                written=os.write(descriptor,view)
+                if written<=0:
+                    raise OSError()
+                view=view[written:]
+            total+=len(piece)
+        if total>=49153:
+            sink_status="oversize"
+    os.fsync(descriptor)
+except FileExistsError:
+    raise SystemExit(4)
+except (OSError,ValueError):
+    sink_status="write_failed"
+    exit_code=5
+finally:
+    if descriptor is not None:
+        try:
+            os.close(descriptor)
+        except OSError:
+            sink_status="write_failed"
+            exit_code=5
+if receipt is not None:
+    receipt["status"]=sink_status
+    print(json.dumps(receipt,sort_keys=True,separators=(",",":")),end="")
+if exit_code:
+    raise SystemExit(exit_code)
+if sink_status=="oversize":
+    raise SystemExit(3)
+' "$capture_path"
+      )"; then
+        :
+      else
+        capture_rc=$?
+      fi
+      python3 -I -B - "$capture_path" "$RESEARCH_DIR_ABS" "$PR_NUMBER" \
+        "$CI_RUN_ID" "$CI_CLASSIFICATION_HEAD_SHA" "$UBERDEV_REVIEW_PLUGIN_ROOT" \
+        "$capture_rc" "$capture_receipt" <<'PY'
+import hashlib,importlib.util,json,os,re,stat,sys
+path,research_dir,pr_number,run_id,head_sha,plugin_root,capture_rc,capture_receipt=sys.argv[1:]
+def fail(reason):
+    print(reason,end='')
+    raise SystemExit(2)
+failure=None
+captured_identity=None
+created_identity=None
+sink_status=None
+if (re.fullmatch(r'[1-9][0-9]*',pr_number) is None
+        or re.fullmatch(r'[1-9][0-9]*',run_id) is None
+        or re.fullmatch(r'[0-9a-f]{40}',head_sha) is None):
+    failure='classification_log_identity_mismatch'
+expected_name=f'ci-log-run-{run_id}-iter'
+path_is_expected=(
+    os.path.isabs(path)
+    and os.path.realpath(os.path.dirname(path))==os.path.realpath(research_dir)
+    and os.path.basename(path).startswith(expected_name)
+    and os.path.basename(path).endswith('.raw')
+)
+if not path_is_expected:
+    failure='classification_log_capture_invalid'
+if re.fullmatch(r'[0-9]+',capture_rc) is None:
+    failure='classification_log_capture_invalid'
+if capture_receipt:
+    try:
+        receipt=json.loads(capture_receipt)
+    except (TypeError,ValueError):
+        receipt=None
+    if (not isinstance(receipt,dict) or set(receipt)!={'dev','ino','status'}
+            or type(receipt.get('dev')) is not int or receipt['dev']<0
+            or type(receipt.get('ino')) is not int or receipt['ino']<0
+            or receipt.get('status') not in {'ok','oversize','write_failed'}):
+        failure='classification_log_capture_invalid'
+    else:
+        created_identity=(receipt['dev'],receipt['ino'])
+        sink_status=receipt['status']
+elif capture_rc=='0':
+    failure='classification_log_capture_invalid'
+if sink_status=='oversize' and failure is None:
+    failure='classification_log_input_oversize'
+elif sink_status=='write_failed' and failure is None:
+    failure='classification_log_capture_invalid'
+elif capture_rc!='0' and failure is None:
+    failure='classification_log_capture_failed'
+if failure is None:
+    spec=importlib.util.spec_from_file_location(
+        'uberdev_ci_log_capture',os.path.join(plugin_root,'lib','run_manifest.py'))
+    if spec is None or spec.loader is None:
+        failure='classification_log_capture_invalid'
+if failure is None:
+    artifacts=importlib.util.module_from_spec(spec); sys.modules[spec.name]=artifacts
+    try:
+        spec.loader.exec_module(artifacts)
+        raw,captured_identity=artifacts.secure_capture_regular(path,1,49152)
+    except Exception:
+        failure='classification_log_capture_invalid'
+if failure is None:
+    escaped=raw.replace(b'&',b'&amp;').replace(b'<',b'&lt;')
+    try:
+        body=escaped.decode('utf-8')
+    except UnicodeDecodeError:
+        failure='classification_log_capture_invalid'
+if failure is None and not body:
+    failure='classification_log_capture_invalid'
+serialized=''
+if failure is None:
+    opening=f'<external-untrusted-input source="github-actions-log-pr-{pr_number}-run-{run_id}">'
+    content=opening+'\n'+body
+    if not content.endswith('\n'):
+        content+='\n'
+    content+='</external-untrusted-input>\n'
+    digest=hashlib.sha256(content.encode('utf-8')).hexdigest()
+    inputs={
+        'pr_number':int(pr_number),
+        'run_id':run_id,
+        'head_sha':head_sha,
+        'log_content':content,
+        'log_sha256':digest,
+    }
+    serialized=json.dumps(inputs,sort_keys=True,separators=(',',':'))
+    if len(serialized.encode('utf-8'))>49152:
+        failure='classification_log_input_oversize'
+if created_identity is None:
+    if os.path.lexists(path):
+        fail('classification_log_cleanup_failed')
+else:
+    try:
+        entry=os.lstat(path)
+        uid=os.geteuid() if callable(getattr(os,'geteuid',None)) else None
+        entry_identity=(
+            entry.st_dev,entry.st_ino,entry.st_size,
+            getattr(entry,'st_mtime_ns',int(entry.st_mtime*1_000_000_000)),
+            getattr(entry,'st_ctime_ns',int(entry.st_ctime*1_000_000_000)),
+            entry.st_mode,
+        )
+        if (not path_is_expected or stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode)
+                or entry.st_nlink!=1 or (uid is not None and entry.st_uid!=uid)
+                or (entry.st_dev,entry.st_ino)!=created_identity):
+            raise OSError()
+        if captured_identity is not None and entry_identity!=captured_identity:
+            raise OSError()
+        os.unlink(path)
+        if os.path.lexists(path):
+            raise OSError()
+    except OSError:
+        fail('classification_log_cleanup_failed')
+if failure is not None:
+    fail(failure)
+print(serialized,end='')
+PY
+    }
+    if CI_LOG_AUTHORITY_JSON="$(review_capture_ci_log_authority)"; then
+      :
+    else
+      CI_LOG_AUTHORITY_FAILURE="${CI_LOG_AUTHORITY_JSON:-classification_log_capture_failed}"
+      case "$CI_LOG_AUTHORITY_FAILURE" in
+        classification_log_capture_failed|classification_log_identity_mismatch|classification_log_capture_invalid|classification_log_input_oversize|classification_log_cleanup_failed) ;;
+        *) CI_LOG_AUTHORITY_FAILURE=classification_log_capture_failed ;;
+      esac
+      audit ci_classify_returned subreason="$CI_LOG_AUTHORITY_FAILURE"
+      OUTCOME=halted
+      exit 1
+    fi
     CI_CLASSIFY_INPUTS="$(uberdev_child_inputs_build review_pr.ci.classify \
-      pr_number "$PR_NUMBER" \
-      run_id "$(review_json_string "$CI_RUN_ID")" \
-      log_path "$(review_json_string "$CI_LOG_ARTIFACT_PATH")")"
+      pr_number "$(review_json_member "$CI_LOG_AUTHORITY_JSON" pr_number)" \
+      run_id "$(review_json_member "$CI_LOG_AUTHORITY_JSON" run_id)" \
+      head_sha "$(review_json_member "$CI_LOG_AUTHORITY_JSON" head_sha)" \
+      log_content "$(review_json_member "$CI_LOG_AUTHORITY_JSON" log_content)" \
+      log_sha256 "$(review_json_member "$CI_LOG_AUTHORITY_JSON" log_sha256)")"
     if review_child_single review_pr.ci.classify "$(uberdev_child_instance_id "review-pr-${RUN_ID}-ci-classify-iter${CI_FIX_LOOP_ITER:-1}-attempt01")" "$CI_CLASSIFY_INPUTS" '[]' "$RESEARCH_DIR_ABS/ci-classify" "$REVIEW_PR_TIMEOUT"; then
       :
     else

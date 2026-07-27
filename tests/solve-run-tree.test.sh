@@ -31,7 +31,7 @@ for edge_id,edge in edges.items():
         assert isinstance(required_inputs,dict) and isinstance(optional_inputs,dict), edge_id
         assert not set(required_inputs)&set(optional_inputs), edge_id
         assert set(required_inputs.values())|set(optional_inputs.values()) <= {
-            'string','optional_string','integer','boolean','path','optional_path',
+            'string','bounded_text','optional_string','integer','boolean','path','optional_path',
             'directory','path_array','optional_path_array','repo_path_array','string_array'
         }, edge_id
         allowed=edge.get('allowed_workflows')
