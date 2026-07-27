@@ -20,6 +20,29 @@ fi
 
 if [ "${1:-}" = --windows-path-only ]; then
   windows_shell_directory() { (cd "$1" && pwd -P); }
+  windows_handoff_stage() {
+    local stage="$1" rc
+    shift
+    case "$stage" in
+      workspace-valid|review-handoff-create|review-preflight|review-prepare)
+        ;;
+      review-validate|fix-handoff-create|fix-preflight|fix-prepare|context-json)
+        ;;
+      *)
+        printf '%s\n' \
+          'review-child-handoff: windows stage invalid-stage failed (rc=64)' >&2
+        return 64
+        ;;
+    esac
+    if "$@"; then
+      return 0
+    else
+      rc=$?
+    fi
+    printf 'review-child-handoff: windows stage %s failed (rc=%d)\n' \
+      "$stage" "$rc" >&2
+    return "$rc"
+  }
   windows_create_verified_junction() {
     local root="$1" target="$2" junction="$3" driver="${4:-native}"
     python3 -I -B - "$root" "$target" "$junction" "$driver" <<'PY'
@@ -137,6 +160,39 @@ PY
   windows_create_verified_junction \
     "$WINDOWS_JUNCTION_CONTRACT_ROOT" "$WINDOWS_JUNCTION_CONTRACT_TARGET" \
     "$WINDOWS_JUNCTION_CONTRACT_PATH" command-contract
+  windows_stage_contract_command() {
+    printf '%s' "$WINDOWS_STAGE_CONTRACT_STDOUT_PAYLOAD"
+    printf '%s\n' "$WINDOWS_STAGE_CONTRACT_EXISTING_STDERR" >&2
+    return 2
+  }
+  WINDOWS_STAGE_CONTRACT_STDOUT_PAYLOAD='stage-stdout:/dynamic path & content'
+  WINDOWS_STAGE_CONTRACT_EXISTING_STDERR='existing-helper:/dynamic path & content'
+  WINDOWS_STAGE_CONTRACT_LABEL='review-child-handoff: windows stage workspace-valid failed (rc=2)'
+  WINDOWS_STAGE_CONTRACT_STDOUT="$TMP/windows-stage-contract.stdout"
+  WINDOWS_STAGE_CONTRACT_STDERR="$TMP/windows-stage-contract.stderr"
+  WINDOWS_STAGE_CONTRACT_EXPECTED_STDERR="$TMP/windows-stage-contract.expected-stderr"
+  printf '%s\n' \
+    "$WINDOWS_STAGE_CONTRACT_EXISTING_STDERR" "$WINDOWS_STAGE_CONTRACT_LABEL" \
+    >"$WINDOWS_STAGE_CONTRACT_EXPECTED_STDERR"
+  set +e
+  windows_handoff_stage workspace-valid windows_stage_contract_command \
+    >"$WINDOWS_STAGE_CONTRACT_STDOUT" 2>"$WINDOWS_STAGE_CONTRACT_STDERR"
+  WINDOWS_STAGE_CONTRACT_RC=$?
+  set -e
+  if [ "$WINDOWS_STAGE_CONTRACT_RC" -ne 2 ] \
+    || [ "$(<"$WINDOWS_STAGE_CONTRACT_STDOUT")" != \
+      "$WINDOWS_STAGE_CONTRACT_STDOUT_PAYLOAD" ] \
+    || ! cmp -s "$WINDOWS_STAGE_CONTRACT_EXPECTED_STDERR" \
+      "$WINDOWS_STAGE_CONTRACT_STDERR" \
+    || [ "$(grep -Fxc "$WINDOWS_STAGE_CONTRACT_EXISTING_STDERR" \
+      "$WINDOWS_STAGE_CONTRACT_STDERR")" -ne 1 ] \
+    || [ "$(grep -Fxc "$WINDOWS_STAGE_CONTRACT_LABEL" \
+      "$WINDOWS_STAGE_CONTRACT_STDERR")" -ne 1 ] \
+    || [ "$(printf '%s\n' "$WINDOWS_STAGE_CONTRACT_LABEL" | wc -c | tr -d ' ')" \
+      -gt 96 ]; then
+    echo 'review-child-handoff: Windows stage diagnostic contract failed' >&2
+    exit 1
+  fi
   WINDOWS_REPO="$TMP/windows-repo"; mkdir -p "$WINDOWS_REPO"
   git -C "$WINDOWS_REPO" init -q
   git -C "$WINDOWS_REPO" config user.email fixture@example.invalid
@@ -626,7 +682,9 @@ else:
     os.unlink(junction)
 os.rmdir(target)
 PY
-  WINDOWS_WORKSPACE="$(uberdev_command_workspace_prepare review-pr 91 medium '[]' 20260726-010203-abcdef0 "$WINDOWS_REQUESTED_ROOT")"
+  WINDOWS_WORKSPACE="$(windows_handoff_stage workspace-valid \
+    uberdev_command_workspace_prepare review-pr 91 medium '[]' \
+    20260726-010203-abcdef0 "$WINDOWS_REQUESTED_ROOT")"
   jq -e '.caller=="review-pr"' <<<"$WINDOWS_WORKSPACE" >/dev/null
   WINDOWS_WORKSPACE_ROOT="$(jq -r .repository_root <<<"$WINDOWS_WORKSPACE")"
   [ "$(windows_shell_directory "$WINDOWS_WORKSPACE_ROOT")" = "$WINDOWS_SHELL_ID" ]
@@ -655,28 +713,42 @@ PY
 
   WINDOWS_REVIEW_INPUT="$(jq -cn --arg p "$WINDOWS_REPO_ID/README.md" \
     '{changed_paths:["README.md"],diff_path:$p,criteria_path:$p,emphasis:[]}')"
-  uberdev_create_child_handoff review_pr.review.correctness windows-reviewer-iter1-attempt01 "$WINDOWS_REVIEW_INPUT" '[]' >/dev/null
+  windows_handoff_stage review-handoff-create \
+    uberdev_create_child_handoff review_pr.review.correctness \
+    windows-reviewer-iter1-attempt01 "$WINDOWS_REVIEW_INPUT" '[]' >/dev/null
   WINDOWS_REVIEW_HANDOFF="$UBERDEV_CHILD_HANDOFF"; WINDOWS_REVIEW_RESULT="$UBERDEV_CHILD_RESULT"; WINDOWS_REVIEW_STATUS="$UBERDEV_CHILD_STATUS"
   _uberdev_child_backend_cancellation_supported() { return 0; }
-  uberdev_preflight_child_batch "$WINDOWS_REVIEW_HANDOFF"
-  _uberdev_child_prepare review_pr.review.correctness "$WINDOWS_REVIEW_HANDOFF" "$WINDOWS_REVIEW_RESULT" "$WINDOWS_REVIEW_STATUS" dispatch >/dev/null
+  windows_handoff_stage review-preflight \
+    uberdev_preflight_child_batch "$WINDOWS_REVIEW_HANDOFF"
+  windows_handoff_stage review-prepare \
+    _uberdev_child_prepare review_pr.review.correctness \
+    "$WINDOWS_REVIEW_HANDOFF" "$WINDOWS_REVIEW_RESULT" \
+    "$WINDOWS_REVIEW_STATUS" dispatch >/dev/null
   printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings: []' 'confidence: high' '```' >"$WINDOWS_REVIEW_RESULT"
   WINDOWS_VALIDATED="$(dirname "$WINDOWS_REVIEW_RESULT")/validated-result.md"
-  WINDOWS_DIGEST="$(uberdev_child_validate_phase1_review_result "$WINDOWS_REVIEW_RESULT" '["README.md"]' "$WINDOWS_VALIDATED")"
+  WINDOWS_DIGEST="$(windows_handoff_stage review-validate \
+    uberdev_child_validate_phase1_review_result "$WINDOWS_REVIEW_RESULT" \
+    '["README.md"]' "$WINDOWS_VALIDATED")"
   [[ "$WINDOWS_DIGEST" =~ ^[0-9a-f]{64}$ ]]
   cmp "$WINDOWS_REVIEW_RESULT" "$WINDOWS_VALIDATED"
 
   WINDOWS_FIX_INPUT="$(jq -cn --arg p "$WINDOWS_REPO_ID/README.md" --arg d "$WINDOWS_REPO_ID" \
     '{findings_path:$p,commit_range_path:$p,working_dir:$d,pr_number:91,disposition_path:$p}')"
-  uberdev_create_child_handoff review_pr.fix.phase1 windows-fixer-iter1-attempt01 "$WINDOWS_FIX_INPUT" null >/dev/null
+  windows_handoff_stage fix-handoff-create \
+    uberdev_create_child_handoff review_pr.fix.phase1 \
+    windows-fixer-iter1-attempt01 "$WINDOWS_FIX_INPUT" null >/dev/null
   WINDOWS_FIX_HANDOFF="$UBERDEV_CHILD_HANDOFF"; WINDOWS_FIX_RESULT="$UBERDEV_CHILD_RESULT"; WINDOWS_FIX_STATUS="$UBERDEV_CHILD_STATUS"
-  uberdev_preflight_child_batch "$WINDOWS_FIX_HANDOFF"
-  WINDOWS_FIX_PREPARED="$(_uberdev_child_prepare review_pr.fix.phase1 "$WINDOWS_FIX_HANDOFF" "$WINDOWS_FIX_RESULT" "$WINDOWS_FIX_STATUS" dispatch)"
+  windows_handoff_stage fix-preflight \
+    uberdev_preflight_child_batch "$WINDOWS_FIX_HANDOFF"
+  WINDOWS_FIX_PREPARED="$(windows_handoff_stage fix-prepare \
+    _uberdev_child_prepare review_pr.fix.phase1 "$WINDOWS_FIX_HANDOFF" \
+    "$WINDOWS_FIX_RESULT" "$WINDOWS_FIX_STATUS" dispatch)"
   jq -e '.request.workspace_mode=="caller"' <<<"$WINDOWS_FIX_PREPARED" >/dev/null
   WINDOWS_FIX_ROOT="$(jq -r .request.workspace_dir <<<"$WINDOWS_FIX_PREPARED")"
   [ "$(windows_shell_directory "$WINDOWS_FIX_ROOT")" = "$WINDOWS_SHELL_ID" ]
 
-  serialized_context="$(_uberdev_agent_json_get "$UBERDEV_RUN_CARRIER_JSON" context_file)"
+  serialized_context="$(windows_handoff_stage context-json \
+    _uberdev_agent_json_get "$UBERDEV_RUN_CARRIER_JSON" context_file)"
   [ "$serialized_context" = "$WINDOWS_CONTEXT" ]
   ! _uberdev_child_context_run_dir 'C:\repo\.uberdev\runs\review-1\state\..\context.json' >/dev/null 2>&1
   echo 'review-child-handoff windows path: PASS'
