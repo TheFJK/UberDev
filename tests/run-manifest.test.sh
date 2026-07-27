@@ -103,6 +103,8 @@ class Kernel32:
         self.next_handle = 72
         self.open_handles = set()
         self.closed = []
+        self.live = True
+        self.exit_checks = []
         self.OpenProcess = Function(self.open_process)
         self.GetExitCodeProcess = Function(self.get_exit_code)
         self.GetProcessTimes = Function(self.get_process_times)
@@ -113,9 +115,10 @@ class Kernel32:
         self.open_handles.add(self.next_handle)
         return self.next_handle
 
-    @staticmethod
-    def get_exit_code(_handle, exit_code):
-        exit_code._obj.value = 259
+    def get_exit_code(self, handle, exit_code):
+        assert handle in self.open_handles, handle
+        self.exit_checks.append(self.live)
+        exit_code._obj.value = 259 if self.live else 0
         return 1
 
     @staticmethod
@@ -165,11 +168,36 @@ for index, module_path in enumerate(sys.argv[1:]):
     assert parent_calls == [424242], parent_calls
     assert not kernel32.open_handles, kernel32.open_handles
     assert kernel32.closed == [73, 74], kernel32.closed
-    print("captured/guarded-parent")
+
+    race_kernel32 = Kernel32()
+    module.ctypes.WinDLL = lambda *_args, **_kwargs: race_kernel32
+
+    def exiting_snapshot(pid):
+        assert race_kernel32.open_handles, "snapshot ran without a live process handle"
+        race_kernel32.live = False
+        return 23
+
+    module._windows_parent_pid = exiting_snapshot
+    try:
+        module.sys.platform = "win32"
+        module.os.name = "nt"
+        try:
+            module._native_parent_pid(424242)
+        except ProcessLookupError:
+            pass
+        else:
+            raise AssertionError("parent accepted after guarded process exited")
+    finally:
+        module.sys.platform = original_platform
+        module.os.name = original_os_name
+    assert race_kernel32.exit_checks == [True, False], race_kernel32.exit_checks
+    assert not race_kernel32.open_handles, race_kernel32.open_handles
+    assert race_kernel32.closed == [73], race_kernel32.closed
+    print("captured/guarded-parent/rechecked")
 PY
 )"
-if [ "$WINDOWS_PARENT_PROBE_SPLIT" = $'captured/guarded-parent\ncaptured/guarded-parent' ]; then
-  pass "Windows liveness avoids snapshots while parent lookup holds a live process handle"
+if [ "$WINDOWS_PARENT_PROBE_SPLIT" = $'captured/guarded-parent/rechecked\ncaptured/guarded-parent/rechecked' ]; then
+  pass "Windows liveness avoids snapshots and parent lookup rechecks its live process handle"
 else
   fail "Windows process identity/parent lookup split" "$WINDOWS_PARENT_PROBE_SPLIT"
 fi

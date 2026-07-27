@@ -953,11 +953,14 @@ def _windows_live_process(pid: int) -> Iterable[int]:
             raise ProcessLookupError(pid)
         raise OSError(error or errno.EIO, "OpenProcess failed")
     try:
-        exit_code = ctypes.c_uint32()
-        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-            raise OSError(ctypes.get_last_error(), "GetExitCodeProcess failed")
-        if exit_code.value != 259:
-            raise ProcessLookupError(pid)
+        def require_still_active() -> None:
+            exit_code = ctypes.c_uint32()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                raise OSError(ctypes.get_last_error(), "GetExitCodeProcess failed")
+            if exit_code.value != 259:
+                raise ProcessLookupError(pid)
+
+        require_still_active()
         created, exited, kernel, user = FileTime(), FileTime(), FileTime(), FileTime()
         if not kernel32.GetProcessTimes(
             handle, ctypes.byref(created), ctypes.byref(exited),
@@ -968,6 +971,9 @@ def _windows_live_process(pid: int) -> Iterable[int]:
         if creation_ticks <= 0:
             raise OSError("process creation time unavailable")
         yield creation_ticks
+        # Consumers may perform a process-table snapshot while this handle is
+        # open. Refuse its result if the guarded process exited in that window.
+        require_still_active()
     finally:
         kernel32.CloseHandle(handle)
 
