@@ -136,10 +136,12 @@ if [ "$stress" = 1 ] && [ "$is_common_probe" -eq 1 ] \
   pre="$SIX_CHILD_GIT_PREACQUIRE_DIR"
   mkdir -p "$pre"
   mkdir "$pre/arrival-$PPID" 2>/dev/null || true
-  printf 'pending\towner=%s\n' "$PPID" >>"$SIX_CHILD_GIT_ARRIVAL_LOG"
+  printf 'pending\tcase=%s\towner=%s\n' "$SIX_CHILD_CASE_TAG" "$PPID" \
+    >>"$SIX_CHILD_GIT_ARRIVAL_LOG"
   arrivals="$(find "$pre" -mindepth 1 -maxdepth 1 -type d -name 'arrival-*' | wc -l | tr -d ' ')"
   if [ "$arrivals" -ge 5 ] && mkdir "$pre/released" 2>/dev/null; then
-    printf 'barrier-release\tcount=%s\n' "$arrivals" >>"$SIX_CHILD_GIT_ARRIVAL_LOG"
+    printf 'barrier-release\tcase=%s\tcount=%s\n' "$SIX_CHILD_CASE_TAG" "$arrivals" \
+      >>"$SIX_CHILD_GIT_ARRIVAL_LOG"
   fi
   tries=0
   while [ ! -d "$pre/released" ] && [ "$tries" -lt 2000 ]; do
@@ -147,7 +149,8 @@ if [ "$stress" = 1 ] && [ "$is_common_probe" -eq 1 ] \
     sleep 0.01
   done
   if [ ! -d "$pre/released" ]; then
-    printf 'barrier-timeout\towner=%s\tarrivals=%s\n' "$PPID" "$arrivals" \
+    printf 'barrier-timeout\tcase=%s\towner=%s\tarrivals=%s\n' \
+      "$SIX_CHILD_CASE_TAG" "$PPID" "$arrivals" \
       >>"$SIX_CHILD_GIT_COLLISION_LOG"
     exit 88
   fi
@@ -159,6 +162,7 @@ fi
 
 phase=''
 case "${1:-}:${2:-}" in
+  worktree:add) phase=add ;;
   worktree:remove) phase=remove ;;
   worktree:list) phase=list ;;
   branch:-D) phase=branch ;;
@@ -176,8 +180,9 @@ collision() {
   reason="$1"
   shift
   actual="$(cat "$owner_file" 2>/dev/null || printf missing)"
-  printf 'overlap\treason=%s\towner=%s\tactual=%s\tphase=%s\targv=%s\n' \
-    "$reason" "${transaction_owner:-unprotected-pid:$PPID}" "$actual" "$phase" "$*" \
+  printf 'overlap\tcase=%s\treason=%s\towner=%s\tactual=%s\tphase=%s\targv=%s\n' \
+    "$SIX_CHILD_CASE_TAG" "$reason" "${transaction_owner:-unprotected-pid:$PPID}" \
+    "$actual" "$phase" "$*" \
     >>"$SIX_CHILD_GIT_COLLISION_LOG"
   exit 89
 }
@@ -225,15 +230,38 @@ done
   || collision changed-owner "$@"
 transaction_owner="$mutex_owner_pid:$mutex_generation"
 
-if [ "$phase" = remove ]; then
-  if ! mkdir "$sentinel" 2>/dev/null; then collision sentinel-overlap "$@"; fi
-  chmod 700 "$sentinel"
-  printf '%s\n' "$transaction_owner" >"$owner_file"
-else
+# Before provider release, the protected registry probe and worktree add belong
+# to creation, not cleanup. They still must prove a live exact mutex generation,
+# but they must not claim the cleanup sentinel.
+if [ ! -e "$CODEX_STUB_RELEASE_DIR/.all" ]; then
+  case "$phase" in list|add) ;; *) collision unexpected-creation-phase "$@" ;; esac
+  printf 'creation\tcase=%s\towner=%s\tphase=%s\n' \
+    "$SIX_CHILD_CASE_TAG" "$transaction_owner" "$phase" >>"$SIX_CHILD_GIT_ARRIVAL_LOG"
+  if "$SIX_CHILD_REAL_GIT" "$@"; then exit 0; else exit $?; fi
+fi
+
+# Cleanup now classifies the registry before removal. That first protected list
+# establishes the exact-generation sentinel; remove, the post-remove list, and
+# branch deletion must all remain in the same transaction.
+case "$phase" in
+  list)
+    if [ ! -e "$sentinel" ]; then
+      if ! mkdir "$sentinel" 2>/dev/null; then collision sentinel-overlap "$@"; fi
+      chmod 700 "$sentinel"
+      printf '%s\n' "$transaction_owner" >"$owner_file"
+    else
+      [ -f "$owner_file" ] || collision missing-sentinel "$@"
+      [ "$(cat "$owner_file")" = "$transaction_owner" ] || collision changed-generation "$@"
+    fi
+    ;;
+  remove|branch)
   [ -f "$owner_file" ] || collision missing-sentinel "$@"
   [ "$(cat "$owner_file")" = "$transaction_owner" ] || collision changed-generation "$@"
-fi
-printf 'critical\towner=%s\tphase=%s\n' "$transaction_owner" "$phase" >>"$SIX_CHILD_GIT_ARRIVAL_LOG"
+    ;;
+  *) collision unexpected-cleanup-phase "$@" ;;
+esac
+printf 'critical\tcase=%s\towner=%s\tphase=%s\n' \
+  "$SIX_CHILD_CASE_TAG" "$transaction_owner" "$phase" >>"$SIX_CHILD_GIT_ARRIVAL_LOG"
 
 # Case 3 launches one unrelated worktree-list probe after the first protected
 # remove enters. Hold that generation until the probe records its fail-loud
@@ -270,7 +298,8 @@ fi
 
 if "$SIX_CHILD_REAL_GIT" "$@"; then rc=0; else rc=$?; fi
 if [ "$phase" = branch ]; then
-  printf 'critical\towner=%s\tphase=release\n' "$transaction_owner" >>"$SIX_CHILD_GIT_ARRIVAL_LOG"
+  printf 'critical\tcase=%s\towner=%s\tphase=release\n' \
+    "$SIX_CHILD_CASE_TAG" "$transaction_owner" >>"$SIX_CHILD_GIT_ARRIVAL_LOG"
   rm -f "$owner_file"
   rmdir "$sentinel"
 fi
@@ -451,22 +480,38 @@ dump_git_mutation_diagnostics() {
   done
 }
 
-if [ "$readiness_rc" -ne 0 ]; then
-  printf 'readiness coordinator: %s\n' "$(cat "$CODEX_STUB_BARRIER_REPORT" 2>/dev/null || printf 'missing report')" >&2
-fi
+readiness_report="$(cat "$CODEX_STUB_BARRIER_REPORT" 2>/dev/null || printf 'missing report')"
+unexpected_readiness() {
+  printf 'case=%s unexpected readiness: rc=%s report=%s\n' \
+    "$case_name" "$readiness_rc" "$readiness_report" >&2
+  dump_git_mutation_diagnostics
+  exit 1
+}
 if [ -n "$pre_ready_fail_instance" ]; then
-  [ "$readiness_rc" -eq 70 ]
-  grep -Fq 'reason=terminal-before-readiness' "$CODEX_STUB_BARRIER_REPORT"
+  [ "$readiness_rc" -eq 70 ] || unexpected_readiness
+  grep -Fq 'reason=terminal-before-readiness' "$CODEX_STUB_BARRIER_REPORT" \
+    || unexpected_readiness
 elif [ -n "$skip_ready_instance" ]; then
-  [ "$readiness_rc" -eq 124 ]
-  grep -Fq 'reason=readiness-timeout ready=5' "$CODEX_STUB_BARRIER_REPORT"
+  [ "$readiness_rc" -eq 124 ] || unexpected_readiness
+  grep -Fq 'reason=readiness-timeout ready=5' "$CODEX_STUB_BARRIER_REPORT" \
+    || unexpected_readiness
 else
-  [ "$readiness_rc" -eq 0 ]
+  [ "$readiness_rc" -eq 0 ] || unexpected_readiness
 fi
 if [ -n "$fail_instance$timeout_instance$pre_ready_fail_instance" ]; then
-  [ "$post_setup_rc" -eq 70 ]
+  if [ "$post_setup_rc" -ne 70 ]; then
+    printf 'case=%s unexpected post-setup rc=%s expected=70\n' \
+      "$case_name" "$post_setup_rc" >&2
+    dump_git_mutation_diagnostics
+    exit 1
+  fi
 else
-  [ "$post_setup_rc" -eq 0 ]
+  if [ "$post_setup_rc" -ne 0 ]; then
+    printf 'case=%s unexpected post-setup rc=%s expected=0\n' \
+      "$case_name" "$post_setup_rc" >&2
+    dump_git_mutation_diagnostics
+    exit 1
+  fi
 fi
 
 edges=(correctness silent_failures types comments tests general)
@@ -684,28 +729,45 @@ assert {row["run_id"] for row in terminals} == set(instances) | {repair}, termin
 PY
 if [ "${SIX_CHILD_GIT_MUTATION_STRESS:-0}" = 1 ]; then
   python3 -I -B - "$SIX_CHILD_GIT_ARRIVAL_LOG" "$SIX_CHILD_GIT_COLLISION_LOG" \
-    "$SIX_CHILD_GIT_NEGATIVE_RESULT" <<'PY'
+    "$SIX_CHILD_GIT_NEGATIVE_RESULT" "$case_name" <<'PY'
 import collections,pathlib,re,sys
 lines=pathlib.Path(sys.argv[1]).read_text().splitlines()
-pending=[line.split("owner=",1)[1] for line in lines if line.startswith("pending\towner=")]
+case=sys.argv[4]
+def fields(line):
+ return dict(field.split("=",1) for field in line.split("\t")[1:])
+pending_rows=[fields(line) for line in lines if line.startswith("pending\t")]
+assert all(row.get("case")==case for row in pending_rows),pending_rows
+pending=[row["owner"] for row in pending_rows]
 assert len(pending)==len(set(pending))==6,pending
-releases=[line for line in lines if line.startswith("barrier-release\tcount=")]
-assert releases==["barrier-release\tcount=5"],releases
+releases=[fields(line) for line in lines if line.startswith("barrier-release\t")]
+assert len(releases)==1 and releases[0].get("case")==case,releases
+# The selected timeout case deliberately releases the five non-timeout siblings
+# before the timed-out sixth joins cleanup; keep that scheduling proof exact.
+assert releases[0].get("count")=="5",releases
+
+creation=collections.defaultdict(list)
 events=collections.defaultdict(list)
 for line in lines:
-    if not line.startswith("critical\t"): continue
-    fields=dict(field.split("=",1) for field in line.split("\t")[1:])
-    events[fields["owner"]].append(fields["phase"])
+    if line.startswith("creation\t"):
+        row=fields(line); assert row.get("case")==case,row
+        creation[row["owner"]].append(row["phase"])
+    elif line.startswith("critical\t"):
+        row=fields(line); assert row.get("case")==case,row
+        events[row["owner"]].append(row["phase"])
+assert len(creation)==6,creation
+assert all(phases==["list","add"] for phases in creation.values()),creation
 assert len(events)==6,events
-assert all(phases==["remove","list","branch","release"] for phases in events.values()),events
+assert all(phases==["list","remove","list","branch","release"] for phases in events.values()),events
+assert set(creation).isdisjoint(events),(creation,events)
 assert all(re.fullmatch(r"[1-9][0-9]*:[0-9a-f]{32}",owner) for owner in events),events
 
 collisions=pathlib.Path(sys.argv[2]).read_text().splitlines()
 assert len(collisions)==1,collisions
-fields=dict(field.split("=",1) for field in collisions[0].split("\t")[1:])
-assert fields["reason"]=="unprotected-owner" and fields["phase"]=="list",fields
-assert re.fullmatch(r"unprotected-pid:[1-9][0-9]*",fields["owner"]),fields
-assert re.fullmatch(r"[1-9][0-9]*:[0-9a-f]{32}",fields["actual"]),fields
+row=fields(collisions[0])
+assert row.get("case")==case,row
+assert row["reason"]=="unprotected-owner" and row["phase"]=="list",row
+assert re.fullmatch(r"unprotected-pid:[1-9][0-9]*",row["owner"]),row
+assert re.fullmatch(r"[1-9][0-9]*:[0-9a-f]{32}",row["actual"]),row
 assert pathlib.Path(sys.argv[3]).read_text()=="rc=89\n"
 PY
   [ ! -e "$repo/.git/.uberdev-six-child-git-critical" ]
@@ -860,6 +922,7 @@ run_case() {
     git_mutation_stress=1
     expect_unprotected_probe=1
   fi
+  printf 'case-start name=%s\n' "$name"
   env -i HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
     SIX_CHILD_REAL_GIT="$REAL_GIT" SIX_CHILD_GIT_COLLISION_LOG="$runtime/git-collisions.log" \
     SIX_CHILD_GIT_ARRIVAL_LOG="$runtime/git-arrivals.log" \
@@ -867,6 +930,7 @@ run_case() {
     SIX_CHILD_GIT_MUTATION_STRESS="$git_mutation_stress" \
     SIX_CHILD_GIT_EXPECT_UNPROTECTED_PROBE="$expect_unprotected_probe" \
     SIX_CHILD_GIT_NEGATIVE_RESULT="$runtime/unprotected-probe.result" \
+    SIX_CHILD_CASE_TAG="$name" \
     PLUGIN_ROOT="$RUNTIME_ROOT" WORKTREE_ROOT="$repo" \
     UBERDEV_TMPDIR="$runtime" PRKIT_TMPDIR="$runtime" \
     CODEX_STUB_LOG="$codex_log" CLAUDE_STUB_LOG="$claude_log" \
@@ -881,6 +945,7 @@ run_case() {
     bash "$RUN_CASE_SCRIPT" "$name" "$repo" "$TMP/setup.sh" \
       "$TMP/post-setup.sh" "$TMP/post-boundary.sh" "$fail_instance" "$timeout_instance" \
       "$skip_ready_instance" "$pre_ready_fail_instance"
+  printf 'case-complete name=%s\n' "$name"
 }
 
 case "${SIX_CHILD_CASE:-all}" in
