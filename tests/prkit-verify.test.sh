@@ -42,6 +42,45 @@ expect_fail "V5 residual prkit:goal fails"                  'printf "chain to /p
 expect_fail "V6 dangling out-of-set prkit:brainstorm fails" 'printf "see prkit:brainstorm for ideation\n" >> "$d/plugins/prkit/commands/review-pr.md"'
 expect_fail "V7 unrendered {{VERSION}} placeholder fails"   'printf "version {{VERSION}} here\n" >> "$d/README.md"'
 expect_fail "V8 empty marketplace.json fails"               ': > "$d/.claude-plugin/marketplace.json"'
+expect_fail "V8b missing native Codex marketplace fails"     'rm -f "$d/.agents/plugins/marketplace.json"'
+expect_fail "V8c empty native Codex marketplace fails"       'mkdir -p "$d/.agents/plugins"; : > "$d/.agents/plugins/marketplace.json"'
+expect_fail "V8d wrong native marketplace name fails"        'python3 - "$d/.agents/plugins/marketplace.json" <<'"'"'PY'"'"'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); tree=json.loads(p.read_text()); tree["name"]="wrong"; p.write_text(json.dumps(tree))
+PY'
+expect_fail "V8e wrong native plugin name fails"             'python3 - "$d/.agents/plugins/marketplace.json" <<'"'"'PY'"'"'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); tree=json.loads(p.read_text()); tree["plugins"][0]["name"]="wrong"; p.write_text(json.dumps(tree))
+PY'
+expect_fail "V8f wrong native plugin source fails"           'python3 - "$d/.agents/plugins/marketplace.json" <<'"'"'PY'"'"'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); tree=json.loads(p.read_text()); tree["plugins"][0]["source"]["path"]="./wrong"; p.write_text(json.dumps(tree))
+PY'
+expect_fail "V8g wrong native plugin availability fails"     'python3 - "$d/.agents/plugins/marketplace.json" <<'"'"'PY'"'"'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); tree=json.loads(p.read_text()); tree["plugins"][0]["policy"]["installation"]="UNAVAILABLE"; p.write_text(json.dumps(tree))
+PY'
+expect_fail "V8h changed README marketplace selector fails"   'python3 - "$d/codex/README.md" <<'"'"'PY'"'"'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); p.write_text(p.read_text().replace("codex plugin add prkit-codex@prkit","codex plugin add prkit-codex@wrong"))
+PY'
+expect_fail "V8i duplicated README marketplace selector fails" 'printf "\ncodex plugin add prkit-codex@prkit\n" >> "$d/codex/README.md"'
+expect_fail "V8j suffixed README marketplace selector fails"  'python3 - "$d/codex/README.md" <<'"'"'PY'"'"'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); p.write_text(p.read_text().replace("codex plugin add prkit-codex@prkit","codex plugin add prkit-codex@prkit-evil"))
+PY'
+expect_fail "V8k root scaffold directory fails"               'rm -f "$d/README.md"; mkdir "$d/README.md"; printf "sentinel\n" > "$d/README.md/sentinel.txt"'
+expect_fail "V8l root scaffold symlink fails"                 'rm -f "$d/NOTICE"; ln -s "$d/LICENSE" "$d/NOTICE"'
+expect_fail "V8m root scaffold ancestor symlink fails"        'mkdir -p "$dp/outside-agents/plugins"; cp "$d/.agents/plugins/marketplace.json" "$dp/outside-agents/plugins/marketplace.json"; rm -rf "$d/.agents"; ln -s "$dp/outside-agents" "$d/.agents"'
+expect_fail "V8n generated-tree ancestor symlink fails"       'mv "$d/plugins" "$dp/outside-plugins"; ln -s "$dp/outside-plugins" "$d/plugins"'
+expect_fail "V8o nested generated-tree symlink fails"         'printf "outside\n" > "$dp/outside-file"; ln -s "$dp/outside-file" "$d/codex/nested-link"'
+expect_fail "V8p nested generated-tree special file fails"    'mkfifo "$d/codex/nested-pipe"'
 expect_fail "V9 removed all agents (non-vacuity/ref-int) fails" 'rm -rf "$d/plugins/prkit/agents"'
 expect_fail "V10 removed Claude reviewer contract fails" 'rm -f "$d/plugins/prkit/shared/phase1-reviewer-output-v1.md"'
 expect_fail "V11 removed Codex solve run tree fails" 'rm -f "$d/codex/prkit-codex/policy/solve-run-tree-v1.json"'
@@ -111,6 +150,27 @@ from pathlib import Path
 for name in sys.argv[1:]:
  p=Path(name); tree=json.loads(p.read_text()); tree["edges"]["review_pr.fix.phase1"]["output_contract"]="phase1-reviewer-v1"; p.write_text(json.dumps(tree,sort_keys=True,indent=2)+"\n")
 PY'
+
+# V25 — a placeholder scan error is unavailable evidence, never proof that the
+# generated output is clean. The wrapper passes every earlier grep through and
+# fails only the final placeholder-pattern invocation.
+dp="$(mktemp -d)"; d="$dp/t"; cp -R "$BASE" "$d"; mkdir "$dp/bin"
+cat > "$dp/bin/grep" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *A-Za-z_*) exit 2 ;;
+esac
+exec "$PRKIT_REAL_GREP" "$@"
+SH
+chmod +x "$dp/bin/grep"
+real_grep="$(command -v grep)"
+if PATH="$dp/bin:$PATH" PRKIT_REAL_GREP="$real_grep" \
+     bash "$VERIFY" "$d" >/dev/null 2>&1; then
+  no "V25 placeholder scan error fails closed (verify wrongly PASSED)"
+else
+  ok "V25 placeholder scan error fails closed"
+fi
+rm -rf "$dp"
 
 echo "  Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -1855,6 +1855,224 @@ else
 fi
 fi
 
+WINDOWS_ARTIFACT_IDENTITY_RESULT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" "$TMP" <<'PY'
+import importlib.util
+import os
+import pathlib
+import stat
+import sys
+from unittest import mock
+
+
+EXECUTE_BITS = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+BIRTHTIME_NS = 1_700_000_000_123_456_789
+PATH_CTIME_NS = 1_700_000_000_223_456_789
+FD_CTIME_NS = 1_700_000_000_323_456_789
+
+
+class StatView:
+    def __init__(self, entry, **overrides):
+        self._entry = entry
+        self._overrides = overrides
+
+    def __getattr__(self, name):
+        if name in self._overrides:
+            return self._overrides[name]
+        return getattr(self._entry, name)
+
+
+def windows_path_view(entry):
+    return StatView(
+        entry,
+        st_birthtime_ns=BIRTHTIME_NS,
+        st_birthtime=BIRTHTIME_NS / 1_000_000_000,
+        st_ctime_ns=PATH_CTIME_NS,
+        st_ctime=PATH_CTIME_NS / 1_000_000_000,
+        st_mode=entry.st_mode | EXECUTE_BITS,
+    )
+
+
+def windows_fd_view(entry, *, ctime_ns=FD_CTIME_NS, mode=None):
+    return StatView(
+        entry,
+        st_birthtime_ns=BIRTHTIME_NS,
+        st_birthtime=BIRTHTIME_NS / 1_000_000_000,
+        st_ctime_ns=ctime_ns,
+        st_ctime=ctime_ns / 1_000_000_000,
+        st_mode=entry.st_mode if mode is None else mode,
+    )
+
+
+failures = []
+for index, module_path in enumerate(sys.argv[1:3]):
+    spec = importlib.util.spec_from_file_location(
+        f"run_manifest_windows_artifact_identity_{index}", module_path
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    root = pathlib.Path(sys.argv[3]) / f"windows-artifact-identity-{index}"
+    root.mkdir()
+    artifact = root / "artifact"
+    artifact.write_bytes(b"verified bytes\n")
+    real_open = module.os.open
+    real_lstat = module.os.lstat
+    real_fstat = module.os.fstat
+
+    base = real_lstat(artifact)
+    path_state = windows_path_view(base)
+    fd_state = windows_fd_view(base)
+    with mock.patch.object(module, "_uses_native_windows_filesystem", return_value=False):
+        posix_identity = module._artifact_identity(path_state)
+        raw_descriptor_state = module._artifact_raw_fd_state(path_state)
+        expected_posix_identity = (
+            path_state.st_dev,
+            path_state.st_ino,
+            path_state.st_size,
+            path_state.st_mtime_ns,
+            path_state.st_ctime_ns,
+            path_state.st_mode,
+        )
+        if posix_identity != expected_posix_identity:
+            failures.append(f"{index}: non-Windows public identity changed")
+        if (
+            type(posix_identity) is not getattr(module, "ArtifactIdentity", None)
+            or not isinstance(posix_identity, tuple)
+        ):
+            failures.append(f"{index}: public identity lacks its immutable tuple type")
+        if (
+            type(raw_descriptor_state)
+            is not getattr(module, "RawArtifactDescriptorState", None)
+            or not isinstance(raw_descriptor_state, tuple)
+        ):
+            failures.append(
+                f"{index}: raw descriptor state lacks its immutable tuple type"
+            )
+        if type(posix_identity) is type(raw_descriptor_state):
+            failures.append(f"{index}: public and raw descriptor states share one type")
+    with mock.patch.object(module, "_uses_native_windows_filesystem", return_value=True):
+        if module._artifact_identity(path_state) != module._artifact_identity(fd_state):
+            failures.append(
+                f"{index}: native Windows path/fd birthtime and execute-bit views diverged"
+            )
+
+    def direct_open(path, flags, mode=0o600):
+        return real_open(path, flags, mode)
+
+    def path_lstat(path):
+        return windows_path_view(real_lstat(path))
+
+    def descriptor_fstat(descriptor):
+        return windows_fd_view(real_fstat(descriptor))
+
+    with mock.patch.object(module.os, "name", "nt"), \
+         mock.patch.object(module, "_secure_open_regular", direct_open), \
+         mock.patch.object(module.os, "lstat", path_lstat), \
+         mock.patch.object(module.os, "fstat", descriptor_fstat):
+        try:
+            payload, capture_identity = module.secure_capture_regular(
+                str(artifact), 1, 1024
+            )
+        except (module.ManifestRejected, module.ManifestRuntimeError) as error:
+            failures.append(
+                f"{index}: stable native Windows capture failed "
+                f"({type(error).__name__}: {error})"
+            )
+        else:
+            if payload != b"verified bytes\n":
+                failures.append(f"{index}: stable native Windows capture changed bytes")
+            if getattr(capture_identity, "identity_time_ns", None) != BIRTHTIME_NS:
+                failures.append(f"{index}: native Windows identity omitted birthtime")
+            if getattr(capture_identity, "mode", 0) & EXECUTE_BITS:
+                failures.append(f"{index}: native Windows identity retained execute bits")
+
+    def mutation_lstat(path):
+        entry = real_lstat(path)
+        return windows_fd_view(entry)
+
+    for mutation_field in ("ctime", "mode"):
+        mutation = root / f"same-handle-{mutation_field}-mutation"
+        mutation.write_bytes(b"same bytes\n")
+        fstat_calls = [0]
+
+        def mutation_fstat(
+            descriptor, *, field=mutation_field, calls=fstat_calls
+        ):
+            entry = real_fstat(descriptor)
+            calls[0] += 1
+            if calls[0] == 1:
+                return windows_fd_view(entry)
+            if field == "ctime":
+                return windows_fd_view(entry, ctime_ns=FD_CTIME_NS + 1)
+            return windows_fd_view(entry, mode=entry.st_mode | EXECUTE_BITS)
+
+        with mock.patch.object(module.os, "name", "nt"), \
+             mock.patch.object(module, "_secure_open_regular", direct_open), \
+             mock.patch.object(module.os, "lstat", mutation_lstat), \
+             mock.patch.object(module.os, "fstat", mutation_fstat):
+            try:
+                module.secure_capture_regular(str(mutation), 1, 1024)
+            except module.ManifestRejected as error:
+                if str(error) != "artifact_replaced_during_capture":
+                    failures.append(
+                        f"{index}: same-handle {mutation_field} mutation used "
+                        f"unexpected verdict {error}"
+                    )
+            else:
+                failures.append(
+                    f"{index}: same-handle raw {mutation_field} mutation was accepted"
+                )
+
+    publication_target = root / "publication"
+    attempt_counter = [0]
+
+    def direct_publication_open(requested_path, digest):
+        attempt_counter[0] += 1
+        candidate = f"{requested_path}.windows-fixture-{attempt_counter[0]}-{digest}"
+        descriptor = real_open(
+            candidate, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600
+        )
+        return candidate, descriptor
+
+    with mock.patch.object(module.os, "name", "nt"), \
+         mock.patch.object(module, "_secure_open_regular", direct_open), \
+         mock.patch.object(module, "_open_publication_attempt", direct_publication_open), \
+         mock.patch.object(module.os, "lstat", path_lstat), \
+         mock.patch.object(module.os, "fstat", descriptor_fstat):
+        try:
+            published_path, published_identity, digest = (
+                module.secure_publish_captured(
+                    str(publication_target), b"published bytes\n"
+                )
+            )
+            recaptured, recaptured_identity = module.secure_capture_published(
+                published_path, digest, 1, 1024
+            )
+        except (module.ManifestRejected, module.ManifestRuntimeError) as error:
+            failures.append(
+                f"{index}: native Windows publish/recapture failed "
+                f"({type(error).__name__}: {error})"
+            )
+        else:
+            if recaptured != b"published bytes\n":
+                failures.append(f"{index}: native Windows recapture changed bytes")
+            if published_identity != recaptured_identity:
+                failures.append(
+                    f"{index}: native Windows publication identity was not stable"
+                )
+
+if failures:
+    raise AssertionError("; ".join(failures))
+print("ok", end="")
+PY
+)"
+if [ "$WINDOWS_ARTIFACT_IDENTITY_RESULT" = ok ]; then
+  pass "native Windows artifact identity normalizes path/fd semantics without hiding handle mutations"
+else
+  fail "native Windows artifact identity normalization" "$WINDOWS_ARTIFACT_IDENTITY_RESULT"
+fi
+
 SECURE_CAPTURE_CLOSE_RESULT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" "$TMP" <<'PY'
 import importlib.util
 import pathlib

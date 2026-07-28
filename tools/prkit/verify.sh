@@ -2,7 +2,7 @@
 # tools/prkit/verify.sh — prkit generation verify gate (RFC 0014 §5.6 + Codex addendum).
 #   verify.sh <target-repo-root>
 # Exit 0 iff the generated tree is correct. Prints each check. Covers the Claude
-# plugin (plugins/prkit, always) and the Codex port (codex/, when generated).
+# plugin (plugins/prkit) and the mandatory native Codex port (codex/).
 #
 # Design invariant (issue #334 review): NO check may pass VACUOUSLY. An empty scan,
 # an errored grep (rc>=2), or a zero-file find is treated as a FAIL, never silently
@@ -11,13 +11,85 @@
 set -u
 set -o pipefail
 
+HERE="$(cd "$(dirname "$0")" && pwd -P)"
+PATH_GUARD="$HERE/managed-path-guard.py"
 ROOT="${1:-}"
-[ -n "$ROOT" ] && [ -d "$ROOT/plugins/prkit" ] || { echo "verify: no plugins/prkit under '$ROOT'"; exit 2; }
+[ -n "$ROOT" ] || { echo "verify: target repo root required"; exit 2; }
+[ -r "$PATH_GUARD" ] \
+  || { echo "verify: managed path guard missing/unreadable: $PATH_GUARD"; exit 2; }
+
+# Canonicalize the parent while preserving the root's final directory entry.
+# The shared lstat guard can therefore reject a symlink/reparse-point root,
+# rather than resolving it away before validation.
+ROOT_PARENT="$(dirname "$ROOT")"
+ROOT_NAME="$(basename "$ROOT")"
+ROOT_PARENT="$(cd "$ROOT_PARENT" && pwd -P)" \
+  || { echo "verify: cannot resolve target parent: $ROOT_PARENT"; exit 2; }
+ROOT="$ROOT_PARENT/$ROOT_NAME"
+
+check_managed_path(){
+  python3 -I -B "$PATH_GUARD" "$ROOT" "$1" "$2"
+}
+
+CLAUDE_REQUIRED=(
+  "commands/review-pr.md"
+  "commands/simplify.md"
+  "commands/merge.md"
+  "skills/post-impl-review/SKILL.md"
+  "skills/merge-pipeline/SKILL.md"
+  "policy/model-routing-v1.json"
+  "policy/solve-run-tree-v1.json"
+  "shared/phase1-reviewer-output-v1.md"
+  ".claude-plugin/plugin.json"
+)
+CODEX_REQUIRED=(
+  "codex/prkit-codex/.codex-plugin/plugin.json"
+  "codex/prkit-codex/skills/prkit-cmd-review-pr/SKILL.md"
+  "codex/prkit-codex/skills/prkit-cmd-simplify/SKILL.md"
+  "codex/prkit-codex/skills/prkit-cmd-merge/SKILL.md"
+  "codex/prkit-codex/skills/prkit-post-impl-review/SKILL.md"
+  "codex/prkit-codex/skills/prkit-merge-pipeline/SKILL.md"
+  "codex/prkit-codex/policy/solve-run-tree-v1.json"
+  "codex/prkit-codex/shared/phase1-reviewer-output-v1.md"
+  "codex/install-codex.sh"
+  "codex/README.md"
+  "codex/AGENTS.md"
+)
+SCAFFOLD_REQUIRED=(
+  "README.md"
+  "LICENSE"
+  "NOTICE"
+  "CHANGELOG.md"
+  ".gitignore"
+  ".github/workflows/ci.yml"
+  ".claude-plugin/marketplace.json"
+  ".agents/plugins/marketplace.json"
+)
+
+# Containment is established before the first recursive find/grep. Root trees
+# and known files must exist; a final sealed-tree walk rejects every nested
+# link, Windows reparse point, socket/FIFO/device, or other special entry.
+for tree in "plugins/prkit" "codex"; do
+  check_managed_path "$tree" required-tree \
+    || { echo "verify: unsafe/missing generated tree: $tree"; exit 2; }
+done
+for req in "${CLAUDE_REQUIRED[@]}"; do
+  check_managed_path "plugins/prkit/$req" required-file \
+    || { echo "verify: unsafe/missing Claude file: $req"; exit 2; }
+done
+for req in "${CODEX_REQUIRED[@]}" "${SCAFFOLD_REQUIRED[@]}"; do
+  check_managed_path "$req" required-file \
+    || { echo "verify: unsafe/missing generated file: $req"; exit 2; }
+done
+for tree in "plugins/prkit" "codex"; do
+  check_managed_path "$tree" sealed-tree \
+    || { echo "verify: generated tree is not sealed: $tree"; exit 2; }
+done
+
 P="$ROOT/plugins/prkit"
-# Scan roots: the Claude plugin (always) + the Codex port (if generated). Array
+# Scan roots: the Claude plugin + the mandatory Codex port. Array
 # form keeps this space-safe for target paths like "/Volumes/FJK SSD/...".
-SCAN=("$P")
-[ -d "$ROOT/codex" ] && SCAN+=("$ROOT/codex")
+SCAN=("$P" "$ROOT/codex")
 rc=0
 fail(){ echo "  FAIL  $1"; rc=1; }
 ok(){ echo "  OK    $1"; }
@@ -113,32 +185,21 @@ if [ -d "$ROOT/codex" ]; then
 fi
 
 # --- 7. Required tree shape ---
-for req in "commands/review-pr.md" "commands/simplify.md" "commands/merge.md" \
-           "skills/post-impl-review/SKILL.md" "skills/merge-pipeline/SKILL.md" \
-           "policy/model-routing-v1.json" "policy/solve-run-tree-v1.json" \
-           "shared/phase1-reviewer-output-v1.md" ".claude-plugin/plugin.json"; do
-  [ -e "$P/$req" ] || fail "shape: missing $req"
+for req in "${CLAUDE_REQUIRED[@]}"; do
+  check_managed_path "plugins/prkit/$req" required-file \
+    || fail "shape: missing/non-regular/link/reparse $req"
 done
 ok "shape: claude required-file presence checked"
-if [ -d "$ROOT/codex" ]; then
-  for req in "codex/prkit-codex/.codex-plugin/plugin.json" \
-             "codex/prkit-codex/skills/prkit-cmd-review-pr/SKILL.md" \
-             "codex/prkit-codex/skills/prkit-cmd-simplify/SKILL.md" \
-             "codex/prkit-codex/skills/prkit-cmd-merge/SKILL.md" \
-             "codex/prkit-codex/skills/prkit-post-impl-review/SKILL.md" \
-             "codex/prkit-codex/skills/prkit-merge-pipeline/SKILL.md" \
-             "codex/prkit-codex/policy/solve-run-tree-v1.json" \
-             "codex/prkit-codex/shared/phase1-reviewer-output-v1.md" \
-             "codex/install-codex.sh" "codex/README.md" "codex/AGENTS.md"; do
-    [ -e "$ROOT/$req" ] || fail "shape: missing $req"
-  done
-  # Coexistence: NO un-prefixed skill dir may exist in the flat Codex skills space
-  # (would collide with an UberDev-for-Codex install in ~/.agents/skills/).
-  for bad in post-impl-review merge-pipeline; do
-    [ -e "$ROOT/codex/prkit-codex/skills/$bad" ] && fail "shape: un-prefixed codex skill dir '$bad' would collide"
-  done
-  ok "shape: codex required-file presence + prkit-prefixed skills checked"
-fi
+for req in "${CODEX_REQUIRED[@]}"; do
+  check_managed_path "$req" required-file \
+    || fail "shape: missing/non-regular/link/reparse $req"
+done
+# Coexistence: NO un-prefixed skill dir may exist in the flat Codex skills space
+# (would collide with an UberDev-for-Codex install in ~/.agents/skills/).
+for bad in post-impl-review merge-pipeline; do
+  [ -e "$ROOT/codex/prkit-codex/skills/$bad" ] && fail "shape: un-prefixed codex skill dir '$bad' would collide"
+done
+ok "shape: codex required-file presence + prkit-prefixed skills checked"
 
 # --- 7b. Standalone review-policy integrity: strict JSON, review-only closure,
 # shipped provider roles/workflows/contracts, deterministic serialization, and
@@ -267,16 +328,84 @@ then ok "review-policy: strict deterministic closure, shipped roles/workflows/co
 else fail "review-policy: projection, strict JSON, runtime parity, or contract scoping drift"; fi
 
 # --- 8. Root scaffold files (outside the SCAN roots) — present, non-empty, valid ---
-for req in README.md LICENSE NOTICE CHANGELOG.md .gitignore \
-           .github/workflows/ci.yml .claude-plugin/marketplace.json; do
-  [ -s "$ROOT/$req" ] || fail "scaffold: missing/empty $req"
+for req in "${SCAFFOLD_REQUIRED[@]}"; do
+  { check_managed_path "$req" required-file && [ -s "$ROOT/$req" ]; } \
+    || fail "scaffold: missing/empty/non-regular/link/reparse $req"
 done
 jq empty "$ROOT/.claude-plugin/marketplace.json" 2>/dev/null || fail "scaffold: marketplace.json is not valid JSON"
-ok "scaffold: root files present, non-empty, marketplace.json valid"
+jq empty "$ROOT/.agents/plugins/marketplace.json" 2>/dev/null || fail "scaffold: native Codex marketplace.json is not valid JSON"
+if python3 -I -B - "$ROOT/.agents/plugins/marketplace.json" "$ROOT/codex/README.md" <<'PY'
+import json
+import pathlib
+import sys
+
+marketplace_path = pathlib.Path(sys.argv[1])
+readme_path = pathlib.Path(sys.argv[2])
+
+def reject_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f'duplicate JSON key: {key}')
+        result[key] = value
+    return result
+
+try:
+    marketplace = json.loads(
+        marketplace_path.read_text(encoding='utf-8'),
+        object_pairs_hook=reject_pairs,
+        parse_constant=lambda value: (_ for _ in ()).throw(
+            ValueError(f'non-finite JSON constant: {value}')
+        ),
+    )
+    readme = readme_path.read_text(encoding='utf-8')
+except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+    raise SystemExit(f'native Codex marketplace parse failed: {exc}')
+
+expected = {
+    'name': 'prkit',
+    'interface': {'displayName': 'prkit'},
+    'plugins': [{
+        'name': 'prkit-codex',
+        'source': {
+            'source': 'local',
+            'path': './codex/prkit-codex',
+        },
+        'policy': {
+            'installation': 'AVAILABLE',
+            'authentication': 'ON_INSTALL',
+        },
+        'category': 'workflow',
+    }],
+}
+if marketplace != expected:
+    raise SystemExit('native Codex marketplace shape or values differ from the canonical contract')
+selector = f"{marketplace['plugins'][0]['name']}@{marketplace['name']}"
+if selector != 'prkit-codex@prkit':
+    raise SystemExit(f'native Codex marketplace selector mismatch: {selector}')
+expected_command = f'codex plugin add {selector}'
+plugin_add_commands = [
+    line.strip()
+    for line in readme.splitlines()
+    if line.strip().startswith('codex plugin add ')
+]
+if plugin_add_commands != [expected_command]:
+    raise SystemExit('codex README must contain exactly one canonical marketplace selector')
+PY
+then ok "scaffold: root files present; both marketplaces valid; native selector canonical"
+else fail "scaffold: native Codex marketplace schema, availability, source, or README selector drift"; fi
 
 # --- 9. No unrendered template placeholders leaked into generated output ---
-PLH=$(grep -rlE '\{\{[A-Za-z_]+\}\}' "${SCAN[@]}" "$ROOT/README.md" "$ROOT/CHANGELOG.md" "$ROOT/.claude-plugin/marketplace.json" 2>/dev/null || true)
-[ -z "$PLH" ] && ok "placeholders: no unrendered {{...}} in output" || { fail "placeholders: unrendered {{...}} in:"; echo "$PLH" | sed 's/^/         /'; }
+PLH=$(grep -rlE '\{\{[A-Za-z_]+\}\}' "${SCAN[@]}" "$ROOT/README.md" "$ROOT/CHANGELOG.md" "$ROOT/.claude-plugin/marketplace.json" "$ROOT/.agents/plugins/marketplace.json" 2>/dev/null)
+placeholder_status=$?
+case "$placeholder_status" in
+  0)
+    fail "placeholders: unrendered {{...}} in:"
+    echo "$PLH" | sed 's/^/         /'
+    ;;
+  1) ok "placeholders: no unrendered {{...}} in output" ;;
+  *) fail "placeholders: scan errored (grep rc=$placeholder_status) — cannot certify clean" ;;
+esac
 
 echo "  Result: $([ "$rc" -eq 0 ] && echo PASS || echo FAIL)"
 exit "$rc"

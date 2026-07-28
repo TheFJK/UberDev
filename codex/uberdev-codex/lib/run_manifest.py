@@ -32,7 +32,7 @@ import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, NamedTuple
 
 try:
     import fcntl as _fcntl
@@ -1367,20 +1367,72 @@ def _secure_open_regular(path: str, flags: int, mode: int = 0o600) -> int:
     return descriptor
 
 
-def _artifact_identity(entry: os.stat_result) -> tuple[int, int, int, int, int, int]:
-    return (
-        entry.st_dev,
-        entry.st_ino,
-        entry.st_size,
-        getattr(entry, "st_mtime_ns", int(entry.st_mtime * 1_000_000_000)),
-        getattr(entry, "st_ctime_ns", int(entry.st_ctime * 1_000_000_000)),
-        entry.st_mode,
+class ArtifactIdentity(NamedTuple):
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+    identity_time_ns: int
+    mode: int
+
+
+class RawArtifactDescriptorState(NamedTuple):
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    mode: int
+
+
+def _artifact_raw_fd_state(entry: os.stat_result) -> RawArtifactDescriptorState:
+    return RawArtifactDescriptorState(
+        device=entry.st_dev,
+        inode=entry.st_ino,
+        size=entry.st_size,
+        mtime_ns=getattr(
+            entry, "st_mtime_ns", int(entry.st_mtime * 1_000_000_000)
+        ),
+        ctime_ns=getattr(
+            entry, "st_ctime_ns", int(entry.st_ctime * 1_000_000_000)
+        ),
+        mode=entry.st_mode,
+    )
+
+
+def _artifact_identity(entry: os.stat_result) -> ArtifactIdentity:
+    raw_state = _artifact_raw_fd_state(entry)
+    if not _uses_native_windows_filesystem():
+        return ArtifactIdentity(
+            device=raw_state.device,
+            inode=raw_state.inode,
+            size=raw_state.size,
+            mtime_ns=raw_state.mtime_ns,
+            identity_time_ns=raw_state.ctime_ns,
+            mode=raw_state.mode,
+        )
+    birthtime_ns = getattr(entry, "st_birthtime_ns", None)
+    if birthtime_ns is None:
+        birthtime = getattr(entry, "st_birthtime", None)
+        birthtime_ns = (
+            int(birthtime * 1_000_000_000)
+            if birthtime is not None
+            else raw_state.ctime_ns
+        )
+    execute_bits = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+    return ArtifactIdentity(
+        device=raw_state.device,
+        inode=raw_state.inode,
+        size=raw_state.size,
+        mtime_ns=raw_state.mtime_ns,
+        identity_time_ns=int(birthtime_ns),
+        mode=raw_state.mode & ~execute_bits,
     )
 
 
 def secure_capture_regular(
     path: str, minimum_size: int, maximum_size: int
-) -> tuple[bytes, tuple[int, int, int, int, int, int]]:
+) -> tuple[bytes, ArtifactIdentity]:
     """Capture bounded bytes while proving one owned regular-file identity."""
 
     if (
@@ -1398,7 +1450,7 @@ def secure_capture_regular(
     except OSError as exc:
         raise ManifestRuntimeError("artifact_inspect_failed") from exc
     descriptor: int | None = None
-    captured: tuple[bytes, tuple[int, int, int, int, int, int]] | None = None
+    captured: tuple[bytes, ArtifactIdentity] | None = None
     failure: BaseException | None = None
     try:
         descriptor = _secure_open_regular(absolute, os.O_RDONLY)
@@ -1407,6 +1459,7 @@ def secure_capture_regular(
         uid_fn = getattr(os, "geteuid", None)
         uid = uid_fn() if uid_fn is not None else None
         identity = _artifact_identity(opened)
+        opened_raw_state = _artifact_raw_fd_state(opened)
         if _artifact_identity(before) != identity or _artifact_identity(current) != identity:
             raise ManifestRejected("artifact_replaced_during_capture")
         if (
@@ -1433,7 +1486,7 @@ def secure_capture_regular(
         after_open = os.fstat(descriptor)
         after_path = os.lstat(absolute)
         if (
-            _artifact_identity(after_open) != identity
+            _artifact_raw_fd_state(after_open) != opened_raw_state
             or _artifact_identity(after_path) != identity
         ):
             raise ManifestRejected("artifact_replaced_during_capture")
@@ -1463,13 +1516,13 @@ def secure_capture_regular(
 
 
 def _artifact_inode_matches(
-    entry: os.stat_result, identity: tuple[int, int, int, int, int, int]
+    entry: os.stat_result, identity: ArtifactIdentity
 ) -> bool:
-    return entry.st_dev == identity[0] and entry.st_ino == identity[1]
+    return entry.st_dev == identity.device and entry.st_ino == identity.inode
 
 
 def secure_remove_published_regular(
-    path: str, identity: tuple[int, int, int, int, int, int]
+    path: str, identity: ArtifactIdentity
 ) -> bool:
     """Refuse pathname-only rollback even when a snapshot still matches."""
 
@@ -1494,7 +1547,7 @@ def secure_remove_published_regular(
 
 
 def secure_remove_published_directory(
-    path: str, identity: tuple[int, int, int, int, int, int]
+    path: str, identity: ArtifactIdentity
 ) -> bool:
     """Refuse pathname-only directory rollback even after an identity match."""
 
@@ -1517,7 +1570,7 @@ def secure_capture_published(
     expected_digest: str,
     minimum_size: int,
     maximum_size: int,
-) -> tuple[bytes, tuple[int, int, int, int, int, int]]:
+) -> tuple[bytes, ArtifactIdentity]:
     """Capture published bytes and bind them to the caller's SHA-256 receipt."""
 
     if re.fullmatch(r"[0-9a-f]{64}", expected_digest or "") is None:
@@ -1548,7 +1601,7 @@ def _open_publication_attempt(
 
 def secure_publish_captured(
     path: str, payload: bytes
-) -> tuple[str, tuple[int, int, int, int, int, int], str]:
+) -> tuple[str, ArtifactIdentity, str]:
     """Publish captured bytes under a unique, digest-qualified attempt path.
 
     The returned pathname is a carrier, not an immutable trust primitive.
@@ -1562,7 +1615,7 @@ def secure_publish_captured(
     digest = hashlib.sha256(payload).hexdigest()
     candidate: str | None = None
     descriptor: int | None = None
-    published_identity: tuple[int, int, int, int, int, int] | None = None
+    published_identity: ArtifactIdentity | None = None
     failure: BaseException | None = None
     try:
         candidate, descriptor = _open_publication_attempt(absolute, digest)
