@@ -18,13 +18,13 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Preserved primary artifact-capture failures and structured cleanup diagnostics when descriptor closure also fails.
 - Retired worktree receipts durably with shared atomic, no-overwrite moves so an existing terminal receipt can never be replaced.
 - Kept an already-observed red CI result terminal when the post-monitor metadata refresh is unavailable.
-- Bound every routed child handoff to a controller-retained whole-file digest before preflight or dispatch.
-- Normalized native-Windows path and descriptor artifact identities, including descriptor link-count portability, without weakening same-handle mutation or replacement detection.
+- Bound every routed child handoff to a controller-retained whole-file digest before preflight parsing or dispatch.
+- Normalized Git Bash authority paths before native-Windows receipt creation and normalized native descriptor artifact identities, including descriptor link-count portability, without weakening same-handle mutation or replacement detection.
 - Added native Codex marketplace metadata and its canonical install selector to generated prkit output, and made the Codex source, manifest, and marketplace contract mandatory generation inputs.
 - Made standalone generation fail closed on dirty, ignored, uninspectable, or non-empty non-Git targets; `--force` remains the explicit managed-path replacement override and never bypasses containment or the generation lock.
 - Rejected symbolic-link, reparse-point, special, and Windows-reserved managed paths before replacement and during final verification; sealed generated trees before recursive deletion.
 - Published copied and rendered files atomically from destination-local temporaries, propagated publication failures instead of accepting stale output, verified executable-mode postconditions, and pinned the generated CI checkout action by immutable SHA.
-- Raised the Linux shape-check timeout from 25 to 30 minutes after the complete matrix repeatedly reached the old ceiling, preserving a bounded hang guard with measured hosted-runner headroom.
+- Raised the Linux shape-check timeout to 40 minutes after a green 91/0 suite exhausted the 30-minute ceiling, preserving a bounded hang guard with measured hosted-runner headroom.
 
 ### Tests
 
