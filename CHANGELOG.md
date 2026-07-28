@@ -23,10 +23,11 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Made standalone generation fail closed on dirty, ignored, uninspectable, or non-empty non-Git targets; `--force` remains the explicit managed-path replacement override and never bypasses containment or the generation lock.
 - Rejected symbolic-link, reparse-point, special, and Windows-reserved managed paths before replacement and during final verification; sealed generated trees before recursive deletion.
 - Published copied and rendered files atomically from destination-local temporaries, propagated publication failures instead of accepting stale output, verified executable-mode postconditions, and pinned the generated CI checkout action by immutable SHA.
+- Raised the Linux shape-check timeout from 25 to 30 minutes after the complete matrix repeatedly reached the old ceiling, preserving a bounded hang guard with measured hosted-runner headroom.
 
 ### Tests
 
-- Added regression coverage for receipt and publication identity, immutable SHA binding, path-free aggregation, authoritative CI-run selection and reselection, direct-stream classifier limits and encoding failures, coherent handoff mutation, fail-closed post-monitor refresh, capture cleanup diagnostics, CI-fixer dispatch, native-Windows retries and stat semantics, prkit Codex marketplace validation, dirty/ignored target preservation, non-Git force semantics, symbolic-link/reparse and special-path containment, Windows reserved names, cooperative locking, immutable CI action pins, and atomic publication failures.
+- Added regression coverage for receipt and publication identity, immutable SHA binding, path-free aggregation, authoritative CI-run selection and reselection, direct-stream classifier limits and encoding failures, coherent handoff mutation, fail-closed post-monitor refresh, capture cleanup diagnostics, CI-fixer dispatch, native-Windows retries and stat semantics, prkit Codex marketplace validation, dirty/ignored target preservation, non-Git force semantics, symbolic-link/reparse and special-path containment, Windows reserved names, cooperative locking, immutable CI action pins, atomic publication failures, and the Linux CI timeout budget.
 
 ## [0.40.2] — 2026-07-26
 

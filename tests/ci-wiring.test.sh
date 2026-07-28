@@ -20,7 +20,8 @@
 #         Unix-only fixture cannot be added to ubuntu without also being
 #         declared in the marker block, and the marker block cannot drift
 #         from the actual skip set.
-#   W5  — the Windows job retains its evidence-based 15-minute hang guard.
+#   W5  — the Linux job retains its evidence-based 30-minute hang guard.
+#   W6  — the Windows job retains its evidence-based 15-minute hang guard.
 #
 # Portable: bash + awk + grep + sed + sort + comm. Runs on ubuntu-latest
 # (native bash) and windows-latest (Git Bash) without any extra deps.
@@ -50,7 +51,13 @@ if [ ! -d "$REPO_ROOT/tests" ]; then
   echo "  ABORT — tests/ directory missing: $REPO_ROOT/tests"; exit 99
 fi
 
+LINUX_TIMEOUT_MINUTES=30
 WINDOWS_TIMEOUT_MINUTES=15
+linux_job_block=$(awk '
+  /^  shape-checks:[[:space:]]*$/ { in_job=1; next }
+  in_job && /^  [[:alnum:]_-]+:[[:space:]]*$/ { exit }
+  in_job { print }
+' "$WORKFLOW")
 windows_job_block=$(awk '
   /^  shape-checks-windows:[[:space:]]*$/ { in_job=1; next }
   in_job && /^  [[:alnum:]_-]+:[[:space:]]*$/ { exit }
@@ -153,16 +160,30 @@ else
   FAIL=$((FAIL+1))
 fi
 
-# W5 — observed timing projects about eleven minutes for the complete portable
+# W5 — the complete Linux matrix has repeatedly reached the old 25-minute
+# ceiling. Keep bounded headroom without falling back to Actions' 360-minute
+# default.
+linux_timeout_rows=$(printf '%s\n' "$linux_job_block" \
+  | sed -n 's/^    timeout-minutes:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p')
+if [ "$linux_timeout_rows" = "$LINUX_TIMEOUT_MINUTES" ]; then
+  echo "  PASS  W5 the linux job timeout is ${LINUX_TIMEOUT_MINUTES} minutes"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  W5 the linux job must have exactly one ${LINUX_TIMEOUT_MINUTES}-minute timeout"
+  echo "         observed timeout rows: ${linux_timeout_rows:-<none>}"
+  FAIL=$((FAIL+1))
+fi
+
+# W6 — observed timing projects about eleven minutes for the complete portable
 # suite; keep enough hosted-runner headroom without falling back to Actions'
 # 360-minute default or weakening the Linux/macOS job-specific guards.
 windows_timeout_rows=$(printf '%s\n' "$windows_job_block" \
   | sed -n 's/^    timeout-minutes:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p')
 if [ "$windows_timeout_rows" = "$WINDOWS_TIMEOUT_MINUTES" ]; then
-  echo "  PASS  W5 the windows job timeout is ${WINDOWS_TIMEOUT_MINUTES} minutes"
+  echo "  PASS  W6 the windows job timeout is ${WINDOWS_TIMEOUT_MINUTES} minutes"
   PASS=$((PASS+1))
 else
-  echo "  FAIL  W5 the windows job must have exactly one ${WINDOWS_TIMEOUT_MINUTES}-minute timeout"
+  echo "  FAIL  W6 the windows job must have exactly one ${WINDOWS_TIMEOUT_MINUTES}-minute timeout"
   echo "         observed timeout rows: ${windows_timeout_rows:-<none>}"
   FAIL=$((FAIL+1))
 fi
