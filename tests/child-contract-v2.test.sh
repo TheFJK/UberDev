@@ -176,6 +176,177 @@ with tempfile.TemporaryDirectory() as temporary:
         def __getattr__(self,name):
             return getattr(self._entry,name)
 
+    class StatView:
+        def __init__(self,entry,*,missing=(),**overrides):
+            self._entry=entry
+            self._missing=frozenset(missing)
+            self._overrides=overrides
+        def __getattr__(self,name):
+            if name in self._missing:
+                raise AttributeError(name)
+            if name in self._overrides:
+                return self._overrides[name]
+            return getattr(self._entry,name)
+
+    windows_birthtime_ns=1_700_000_000_123_456_789
+    windows_path_ctime_ns=1_700_000_000_223_456_789
+    windows_fd_ctime_ns=1_700_000_000_323_456_789
+
+    def identity_view(
+        entry,
+        *,
+        birthtime_ns,
+        ctime_ns,
+        birthtime_available=True,
+        device_offset=0,
+        inode_offset=0,
+    ):
+        birthtime_fields=("st_birthtime_ns","st_birthtime")
+        overrides={
+            "st_ctime_ns":ctime_ns,
+            "st_ctime":ctime_ns/1_000_000_000,
+            "st_dev":entry.st_dev+device_offset,
+            "st_ino":entry.st_ino+inode_offset,
+        }
+        if birthtime_available:
+            overrides.update(
+                st_birthtime_ns=birthtime_ns,
+                st_birthtime=birthtime_ns/1_000_000_000,
+            )
+        return StatView(
+            entry,
+            missing=() if birthtime_available else birthtime_fields,
+            **overrides,
+        )
+
+    def execute_identity_case(
+        *,
+        path_birthtimes=(windows_birthtime_ns,windows_birthtime_ns),
+        descriptor_birthtimes=(windows_birthtime_ns,windows_birthtime_ns),
+        path_ctimes=(windows_path_ctime_ns,windows_path_ctime_ns),
+        descriptor_ctimes=(windows_fd_ctime_ns,windows_fd_ctime_ns),
+        path_device_offsets=(0,0),
+        descriptor_device_offsets=(0,0),
+        path_inode_offsets=(0,0),
+        descriptor_inode_offsets=(0,0),
+        birthtime_available=True,
+        platform="win32",
+        os_name=None,
+    ):
+        fstat_calls=[0]
+        lstat_calls=[0]
+        def modeled_fstat(descriptor):
+            entry=original_fstat(descriptor)
+            snapshot=fstat_calls[0]
+            fstat_calls[0]+=1
+            return identity_view(
+                entry,
+                birthtime_ns=descriptor_birthtimes[snapshot],
+                ctime_ns=descriptor_ctimes[snapshot],
+                birthtime_available=birthtime_available,
+                device_offset=descriptor_device_offsets[snapshot],
+                inode_offset=descriptor_inode_offsets[snapshot],
+            )
+        def modeled_lstat(path):
+            snapshot=lstat_calls[0]
+            lstat_calls[0]+=1
+            return identity_view(
+                original_lstat(path),
+                birthtime_ns=path_birthtimes[snapshot],
+                ctime_ns=path_ctimes[snapshot],
+                birthtime_available=birthtime_available,
+                device_offset=path_device_offsets[snapshot],
+                inode_offset=path_inode_offsets[snapshot],
+            )
+        rc,opened,closed=execute_with_io(
+            fstat_hook=modeled_fstat,
+            lstat_hook=modeled_lstat,
+            platform=platform,
+            os_name=os_name,
+        )
+        return rc,fstat_calls[0],lstat_calls[0],opened,closed
+
+    def require_identity_case(label,result,expected_rc):
+        rc,fstat_calls,lstat_calls,opened,closed=result
+        if rc!=expected_rc or (fstat_calls,lstat_calls)!=(2,2):
+            failures.append(
+                f"phase1 validator {label}: rc={rc} "
+                f"calls={(fstat_calls,lstat_calls)} expected_rc={expected_rc}"
+            )
+        if not opened or opened!=closed:
+            failures.append(
+                f"phase1 validator leaked its descriptor for {label}: "
+                f"opened={opened} closed={closed}"
+            )
+
+    require_identity_case(
+        "rejected an unchanged native-Windows result when path birthtime "
+        "matched the descriptor but raw ctime views differed",
+        execute_identity_case(),
+        0,
+    )
+    require_identity_case(
+        "accepted an initial native-Windows pathname/descriptor birthtime mismatch",
+        execute_identity_case(
+            path_birthtimes=(windows_birthtime_ns+1,windows_birthtime_ns),
+        ),
+        2,
+    )
+    require_identity_case(
+        "accepted a final native-Windows pathname/descriptor birthtime mismatch",
+        execute_identity_case(
+            path_birthtimes=(windows_birthtime_ns,windows_birthtime_ns+1),
+        ),
+        2,
+    )
+    require_identity_case(
+        "accepted an initial native-Windows pathname/descriptor device replacement",
+        execute_identity_case(path_device_offsets=(1,0)),
+        2,
+    )
+    require_identity_case(
+        "accepted an initial native-Windows pathname/descriptor inode replacement",
+        execute_identity_case(path_inode_offsets=(1,0)),
+        2,
+    )
+    require_identity_case(
+        "accepted a final native-Windows pathname/descriptor device replacement",
+        execute_identity_case(path_device_offsets=(0,1)),
+        2,
+    )
+    require_identity_case(
+        "accepted a final native-Windows pathname/descriptor inode replacement",
+        execute_identity_case(path_inode_offsets=(0,1)),
+        2,
+    )
+    require_identity_case(
+        "accepted a POSIX pathname/descriptor raw ctime mismatch despite "
+        "matching synthetic birthtimes",
+        execute_identity_case(
+            path_ctimes=(windows_path_ctime_ns,windows_fd_ctime_ns),
+            platform="darwin",
+            os_name="posix",
+        ),
+        2,
+    )
+    require_identity_case(
+        "accepted a native-Windows raw ctime mismatch when birthtime fields "
+        "were unavailable",
+        execute_identity_case(
+            path_ctimes=(windows_path_ctime_ns,windows_fd_ctime_ns),
+            birthtime_available=False,
+        ),
+        2,
+    )
+    require_identity_case(
+        "accepted a native-Windows same-descriptor raw ctime mutation between "
+        "fd snapshots",
+        execute_identity_case(
+            descriptor_ctimes=(windows_fd_ctime_ns,windows_fd_ctime_ns+1),
+        ),
+        2,
+    )
+
     case_number=[0]
     def execute_link_case(
         *,

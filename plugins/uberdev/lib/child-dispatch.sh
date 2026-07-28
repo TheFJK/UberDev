@@ -1159,10 +1159,19 @@ def linked(entry):
  return stat.S_ISLNK(entry.st_mode) or bool(getattr(entry,'st_file_attributes',0)&reparse_point)
 def owned(entry):
  return uid is None or not hasattr(entry,'st_uid') or entry.st_uid==uid
-def stable(entry):
+native_windows=os.name=='nt' or sys.platform=='win32'
+def raw_descriptor_state(entry):
  return (entry.st_dev,entry.st_ino,entry.st_size,entry.st_mtime_ns,entry.st_ctime_ns)
+def artifact_identity(entry):
+ raw=raw_descriptor_state(entry)
+ if not native_windows: return raw
+ birthtime_ns=getattr(entry,'st_birthtime_ns',None)
+ if birthtime_ns is None:
+  birthtime=getattr(entry,'st_birthtime',None)
+  birthtime_ns=int(birthtime*1_000_000_000) if birthtime is not None else raw[-1]
+ return (*raw[:4],int(birthtime_ns))
 def descriptor_link_count_valid(entry):
- return entry.st_nlink==1 or (entry.st_nlink==0 and (os.name=='nt' or sys.platform=='win32'))
+ return entry.st_nlink==1 or (entry.st_nlink==0 and native_windows)
 def parse_scalar(raw):
  if not raw or raw.strip()!=raw or any(ord(char)<32 or ord(char)==127 for char in raw): raise ValueError()
  def validated(value):
@@ -1211,8 +1220,9 @@ try:
       or not owned(item) for item in (opened,final,current))
      or not descriptor_link_count_valid(opened) or not descriptor_link_count_valid(final)
      or current.st_nlink!=1
-     or stable(opened)!=stable(entry) or stable(final)!=stable(opened)
-     or stable(current)!=stable(final)): raise ValueError()
+     or artifact_identity(opened)!=artifact_identity(entry)
+     or raw_descriptor_state(final)!=raw_descriptor_state(opened)
+     or artifact_identity(current)!=artifact_identity(final)): raise ValueError()
  raw=raw_bytes.decode('utf-8')
  match=re.fullmatch(r'\s*```yaml[ \t]*\r?\n(.*?)\r?\n```[ \t]*\s*',raw,re.S)
  if not match: raise ValueError()
