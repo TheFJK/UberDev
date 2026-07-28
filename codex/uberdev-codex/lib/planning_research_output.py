@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import argparse
-import ctypes
 import errno
+import importlib.util
 import json
 import os
 import secrets
@@ -26,6 +26,27 @@ READABLE_BITS = stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
 PRIVATE_MODE = stat.S_IRUSR | stat.S_IWUSR
 TOKEN_LENGTH = 32
 CAPABILITY_VERSION = "v1"
+
+
+def _load_atomic_rename_noreplace():
+    helper_path = Path(__file__).resolve().with_name("atomic_move.py")
+    spec = importlib.util.spec_from_file_location(
+        "uberdev_planning_atomic_move", helper_path
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("atomic move helper unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    helper = getattr(module, "atomic_rename_noreplace", None)
+    if not callable(helper):
+        raise RuntimeError("atomic move helper unavailable")
+    return helper
+
+
+try:
+    _SHARED_ATOMIC_RENAME_NOREPLACE = _load_atomic_rename_noreplace()
+except Exception:
+    _SHARED_ATOMIC_RENAME_NOREPLACE = None
 
 
 class ValidationFailure(Exception):
@@ -151,10 +172,14 @@ def _validate_existing_target(
                 sibling_stat = sibling.lstat()
             except OSError:
                 _fail("canonicalize")
-            if stat.S_ISREG(sibling_stat.st_mode) and (
-                sibling_stat.st_dev,
-                sibling_stat.st_ino,
-            ) == output_inode:
+            if (
+                stat.S_ISREG(sibling_stat.st_mode)
+                and (
+                    sibling_stat.st_dev,
+                    sibling_stat.st_ino,
+                )
+                == output_inode
+            ):
                 _fail("hardlink_alias")
     elif mode == "postwrite":
         _fail("missing")
@@ -224,44 +249,18 @@ def _atomic_rename_noreplace(
 ) -> None:
     """Atomically rename one dirfd-relative entry without overwriting data."""
 
-    libc = ctypes.CDLL(None, use_errno=True)
-    source = os.fsencode(source_name)
-    destination = os.fsencode(destination_name)
-    ctypes.set_errno(0)
-
-    if sys.platform == "darwin" and hasattr(libc, "renameatx_np"):
-        rename_call = libc.renameatx_np
-        rename_call.argtypes = (
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint,
-        )
-        rename_call.restype = ctypes.c_int
-        result = rename_call(dir_fd, source, dir_fd, destination, 0x00000004)
-    elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
-        rename_call = libc.renameat2
-        rename_call.argtypes = (
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint,
-        )
-        rename_call.restype = ctypes.c_int
-        result = rename_call(dir_fd, source, dir_fd, destination, 0x00000001)
-    else:
+    if _SHARED_ATOMIC_RENAME_NOREPLACE is None:
         _fail("platform_safety")
-
-    if result == 0:
-        return
-    error_number = ctypes.get_errno()
-    if error_number == errno.EEXIST:
-        raise FileExistsError(error_number, os.strerror(error_number))
-    if error_number == errno.ENOENT:
-        raise FileNotFoundError(error_number, os.strerror(error_number))
-    raise OSError(error_number, os.strerror(error_number))
+    try:
+        _SHARED_ATOMIC_RENAME_NOREPLACE(source_name, destination_name, dir_fd=dir_fd)
+    except OSError as exc:
+        unsupported = {
+            getattr(errno, "ENOTSUP", -1),
+            getattr(errno, "EOPNOTSUPP", -1),
+        }
+        if exc.errno in unsupported:
+            _fail("platform_safety")
+        raise
 
 
 def _allocate(args: argparse.Namespace) -> dict[str, object]:
@@ -306,9 +305,8 @@ def _validate_staging_name(staging: Path, expected: str) -> str:
     prefix = f".{expected}.stage-"
     name = staging.name
     token = name[len(prefix) :] if name.startswith(prefix) else ""
-    if (
-        len(token) != TOKEN_LENGTH
-        or any(character not in "0123456789abcdef" for character in token)
+    if len(token) != TOKEN_LENGTH or any(
+        character not in "0123456789abcdef" for character in token
     ):
         _fail("staging_name")
     return name
@@ -372,9 +370,7 @@ def _allocated_staging_context(
     if staging_parent != summary:
         _fail("run_dir_confinement")
     staging_name = _validate_staging_name(staging, expected)
-    allocation_inode = _parse_allocation_token(
-        allocation_token, staging_name, expected
-    )
+    allocation_inode = _parse_allocation_token(allocation_token, staging_name, expected)
     return summary, staging_name, allocation_inode
 
 
@@ -416,9 +412,7 @@ def _unlink_owned_staging(
 
     _fsync_directory(dir_fd)
     try:
-        quarantined = os.stat(
-            quarantine_name, dir_fd=dir_fd, follow_symlinks=False
-        )
+        quarantined = os.stat(quarantine_name, dir_fd=dir_fd, follow_symlinks=False)
     except OSError:
         _fail("cleanup_failed")
 
@@ -548,9 +542,7 @@ def _publish(args: argparse.Namespace) -> dict[str, object]:
         try:
             source_fd = os.open(staging_name, os.O_RDONLY | nofollow, dir_fd=dir_fd)
             staging_stat = os.fstat(source_fd)
-            staging_entry = os.stat(
-                staging_name, dir_fd=dir_fd, follow_symlinks=False
-            )
+            staging_entry = os.stat(staging_name, dir_fd=dir_fd, follow_symlinks=False)
         except OSError:
             _fail("staging_invalid")
         if (staging_stat.st_dev, staging_stat.st_ino) != allocation_inode:
@@ -582,9 +574,12 @@ def _publish(args: argparse.Namespace) -> dict[str, object]:
 
         # Unlink only after the open descriptor and directory entry are proven
         # to identify the same single-link file. The descriptor remains readable.
-        if _unlink_owned_staging(
-            dir_fd, staging_name, allocation_inode, args.expected_basename
-        ) != "removed":
+        if (
+            _unlink_owned_staging(
+                dir_fd, staging_name, allocation_inode, args.expected_basename
+            )
+            != "removed"
+        ):
             _fail("staging_race")
 
         private_name, private_fd = _create_private(
@@ -700,6 +695,8 @@ def _parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = _parser().parse_args()
     try:
+        if _SHARED_ATOMIC_RENAME_NOREPLACE is None:
+            _fail("platform_safety")
         if args.operation == "validate":
             payload = _validate(args)
         elif args.operation == "allocate":

@@ -84,15 +84,16 @@ prkit/                                   # repo root
 │   ├── skills/
 │   │   ├── post-impl-review/SKILL.md
 │   │   └── merge-pipeline/SKILL.md + lib/discover.sh
-│   ├── lib/       (11)
-│   └── policy/model-routing-v1.json
+│   ├── lib/       (13)
+│   ├── policy/    (2)
+│   └── shared/phase1-reviewer-output-v1.md
 ├── README.md  LICENSE  NOTICE  CHANGELOG.md  .gitignore
 └── .github/workflows/ci.yml            # bash -n + ast.parse + jq + tomllib + inline uberdev grep
 ```
 
 Mirroring `plugins/prkit/` (vs. plugin-at-repo-root) keeps generator copy paths uniform (`plugins/uberdev/X` → `plugins/prkit/X`) and matches the marketplace `source: ./plugins/<name>` pattern already used in UberDev.
 
-### 5.3 Copy manifest (the PR-phase subgraph — 32 files)
+### 5.3 Copy manifest (the PR-phase subgraph — 36 files)
 
 Source paths under `plugins/uberdev/`. Authoritative, verified copy set.
 
@@ -107,11 +108,19 @@ Source paths under `plugins/uberdev/`. Authoritative, verified copy set.
 
 **skills/ (2 + skill-local lib):** `post-impl-review/SKILL.md`, `merge-pipeline/SKILL.md`, `merge-pipeline/lib/discover.sh`
 
-**lib/ (11):** `child-dispatch.sh`, `agent-dispatch.sh`, `dispatch.sh`, `config-read.sh`, `model_routing.py`, `run_manifest.py`, `live-semaphore.sh`, `child-receipts.py`, `child-inputs.py`, `command-workspace.py`, `secret-scan.sh`
+**lib/ (13):** `child-dispatch.sh`, `agent-dispatch.sh`, `dispatch.sh`, `config-read.sh`, `model_routing.py`, `run_manifest.py`, `atomic_move.py`, `worktree_receipts.py`, `live-semaphore.sh`, `child-receipts.py`, `child-inputs.py`, `command-workspace.py`, `secret-scan.sh`
 
-**policy/ (1):** `model-routing-v1.json` — default routing policy resolved via `${CLAUDE_PLUGIN_ROOT}/policy/model-routing-v1.json`. **Correction over the initial dependency trace** (missed because it is a runtime data file loaded by path, not a Python import).
+**policy/ (2):** `model-routing-v1.json`, `solve-run-tree-v1.json` — default routing policy and canonical child run-tree projection loaded by copied runtime code.
 
-**Explicitly excluded:** `policy/solve-run-tree-v1.json` (solve-only), `lib/goal-state.sh` (consumer-side, read by `/goal`), all hooks, `lib/aliases-sync.sh` + `commands/install-aliases.md`, everything else in UberDev.
+**shared/ (1):** `phase1-reviewer-output-v1.md` — the routed Phase 1 reviewer output contract.
+
+`atomic_move.py` and `worktree_receipts.py` are a coupled runtime dependency:
+the former supplies the platform-native, same-directory no-overwrite move; the
+latter owns receipt creation, inspection, and durable retirement. Both helpers
+ship in the Claude and Codex packages so standalone prkit preserves the same
+terminal-receipt authority contract as UberDev.
+
+**Explicitly excluded:** `lib/goal-state.sh` (consumer-side, read by `/goal`), all hooks, `lib/aliases-sync.sh` + `commands/install-aliases.md`, everything else in UberDev.
 
 The manifest is stored declaratively (`tools/prkit/manifest.txt`) so the copy set is auditable and the verify gate can cross-check it.
 
@@ -251,16 +260,16 @@ Terminal step of brainstorm: invoke `uberdev:write-plan` to produce the wave-dec
 UberDev supports **two runtimes**: Claude Code (`plugins/uberdev/`) and the OpenAI Codex CLI (`codex/uberdev-codex/` native plugin + `codex/install-codex.sh` one-liner). The Claude-only extraction above left prkit unusable on Codex, so the generator was extended to also emit a Codex port — same SSOT extract+rewrite model.
 
 ### 14.1 Approach
-UberDev's Codex tree is already Codex-adapted (commands→`uberdev-cmd-*` command-skills, agents→TOML via `codex/tools/convert-agents.py`, paths fixed to `~/.codex`/`CODEX_HOME`/`.codex-plugin`). So prkit's Codex port is extracted **from `codex/uberdev-codex/`** (not re-transformed from scratch): a second manifest (`tools/prkit/manifest-codex.txt`, count-locked at **51**) drives a copy stage that rewrites both the **destination path** and the **content** with `uberdev`→`prkit`. The existing blanket rewrite already handles every Codex-specific literal — `uberdev-codex`→`prkit-codex`, `uberdev-cmd-`→`prkit-cmd-`, the TOML agent names, the `uberdev-codex-primer` sentinel.
+UberDev's Codex tree is already Codex-adapted (commands→`uberdev-cmd-*` command-skills, agents→TOML via `codex/tools/convert-agents.py`, paths fixed to `~/.codex`/`CODEX_HOME`/`.codex-plugin`). So prkit's Codex port is extracted **from `codex/uberdev-codex/`** (not re-transformed from scratch): a second manifest (`tools/prkit/manifest-codex.txt`, count-locked at **55**) drives a copy stage that rewrites both the **destination path** and the **content** with `uberdev`→`prkit`. The existing blanket rewrite already handles every Codex-specific literal — `uberdev-codex`→`prkit-codex`, `uberdev-cmd-`→`prkit-cmd-`, the TOML agent names, the `uberdev-codex-primer` sentinel.
 
 ### 14.2 New rewrite rule (fixes both trees)
 Repo-slug rule, ordered before the CamelCase pass: `TheFJK/UberDev`→`TheFJK/prkit` (lowercase), so clone/marketplace URLs in `install-codex.sh` resolve. Without it the CamelCase rule would mangle the slug to `TheFJK/Prkit` (a nonexistent repo).
 
-### 14.3 Codex copy set (51) + scaffold
-`codex/prkit-codex/`: 3 `prkit-cmd-*` command-skills, 3 support-skill files (`post-impl-review`, `merge-pipeline` + `lib/discover.sh`), 14 agent `.md`, 11 lib, 1 policy, `.codex-plugin` manifest (templated), `hooks/` (2), `shared/` (1); `codex/agents/prkit-*.toml` (14, reference); `codex/install-codex.sh` + `codex/tools/convert-agents.py` (the installer path that carries the agents — required because the Codex plugin manifest has no `agents` field). Three scaffold docs are **authored templates** (`codex-plugin.json.tmpl`, `codex-README.md.tmpl`, `codex-AGENTS.md.tmpl`) with prkit-correct counts (3 commands, 14 agents, 5 skills) rather than extract+rewrite, so they don't inherit UberDev's stale "44 subagents".
+### 14.3 Codex copy set (55) + scaffold
+`codex/prkit-codex/`: 3 `prkit-cmd-*` command-skills, 3 support-skill files (`post-impl-review`, `merge-pipeline` + `lib/discover.sh`), 14 agent `.md`, 13 lib (including `atomic_move.py` and `worktree_receipts.py`), 2 policy files, `hooks/` (2), and `shared/` (2); `codex/agents/prkit-*.toml` (14, reference); `codex/install-codex.sh` + `codex/tools/convert-agents.py` (the installer path that carries the agents — required because the Codex plugin manifest has no `agents` field). The `.codex-plugin` manifest and three scaffold docs are **authored templates** (`codex-plugin.json.tmpl`, `codex-README.md.tmpl`, `codex-AGENTS.md.tmpl`) with prkit-correct counts (3 commands, 14 agents, 5 skills) rather than extract+rewrite, so they don't inherit UberDev's stale "44 subagents".
 
 ### 14.4 Verify + tests
-`verify.sh` now scans both trees (space-safe arrays), adds TOML validation (`tomllib`, skipped gracefully if absent) and a Codex shape check. Tests: `tests/prkit-codex-manifest.test.sh` (completeness + count-lock 51) + `prkit-generate.test.sh` G6–G8 (codex tree presence, uberdev-free, determinism). The verify gate caught 3 real gaps during bring-up (template `UberDev` mentions leaking into scanned `codex/`).
+`verify.sh` now scans both trees (space-safe arrays), adds TOML validation (`tomllib`, skipped gracefully if absent) and a Codex shape check. Tests: `tests/prkit-codex-manifest.test.sh` (completeness + count-lock 55) + `prkit-generate.test.sh` G6–G8 (codex tree presence, uberdev-free, determinism). The verify gate caught 3 real gaps during bring-up (template `UberDev` mentions leaking into scanned `codex/`).
 
 ### 14.5 Resolves open item §12
 The `config-read.sh` codex-fallback path (`uberdev-codex`→`prkit-codex`) is handled by the blanket rewrite (not dropped) — the composite `${CODEX_HOME}/plugins/prkit-codex/...` correctly points at prkit's Codex runtime dir.

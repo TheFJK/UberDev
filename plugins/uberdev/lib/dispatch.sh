@@ -57,6 +57,9 @@ _UBERDEV_DISPATCH_LOADED=1
 _UBERDEV_CODEX_CLEANUP_MAX_ATTEMPTS=3
 _UBERDEV_CODEX_CLEANUP_RETRY_DELAY_1_S=0.05
 _UBERDEV_CODEX_CLEANUP_RETRY_DELAY_2_S=0.10
+_UBERDEV_CODEX_CREATE_MAX_ATTEMPTS=3
+_UBERDEV_CODEX_CREATE_RETRY_DELAY_1_S=0.05
+_UBERDEV_CODEX_CREATE_RETRY_DELAY_2_S=0.10
 _UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT_DEFAULT_S=60
 _UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT_MAX_S=300
 _UBERDEV_GIT_METADATA_MUTEX_FAST_POLLS=8
@@ -150,9 +153,9 @@ _uberdev_dispatch_native_cli_path() {
 # to 0700. Native Windows relies on the current-user ACL only when this helper
 # creates the default directory; a pre-existing default or caller override is
 # checked for directory and ordinary-link safety but is not asserted private
-# here. The reparse-aware boundaries are child-receipts.py:is_link_or_reparse
-# and run_manifest.py:_secure_open_regular; the worktree receipt helpers below
-# check ordinary links plus stable file identity, not Windows reparse flags.
+# here. Reparse-aware artifact boundaries live in
+# child-receipts.py:is_link_or_reparse, run_manifest.py:_secure_open_regular,
+# and worktree_receipts.py:_is_link_or_reparse.
 _uberdev_dispatch_runtime_root() {
   local target
   if [ -n "${UBERDEV_TMPDIR:-}" ]; then
@@ -371,9 +374,10 @@ _uberdev_dispatch_with_git_metadata_mutex() {
     rc=$?
     _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1
     release_rc=$?
-    [ "$release_rc" -eq 0 ] || printf \
-      'uberdev git metadata mutex: release failed after %s (rc=%s); command rc=%s remains authoritative\n' \
-      "$phase" "$release_rc" "$rc" >&2
+    [ "$release_rc" -eq 0 ] \
+      || printf 'uberdev git metadata mutex: release failed after transaction\n' >&2 \
+      || true
+    [ "$release_rc" -eq 0 ] || [ "$rc" -ne 0 ] || rc=2
     [ "$release_rc" -ne 0 ] || trap - EXIT
     exit "$rc"
   )
@@ -419,178 +423,273 @@ else:
 PY
 }
 
-# Create a private ownership receipt before `git worktree add`. Cleanup accepts
-# only the exact repo/path/branch/token tuple recorded here, preventing a stale
-# or substituted path from being removed as if it belonged to this child.
+# Receipt authority is created before `git worktree add`, classified only while
+# the repository metadata mutex is held, and retired (P -> immutable T) before
+# that mutex is released.  Invoke the sibling helper by its resolved absolute
+# path so PATH or the caller's working directory cannot substitute authority.
+_uberdev_dispatch_worktree_receipt_helper() {
+  local helper="$_UBERDEV_DISPATCH_LIB_DIR/worktree_receipts.py"
+  case "$helper" in /*|[A-Za-z]:[\\/]*) ;; *) return 2 ;; esac
+  [ -f "$helper" ] || return 2
+  _uberdev_dispatch_python -I -B "$helper" "$@"
+}
+
+_uberdev_dispatch_parse_codex_worktree_create_output() {
+  local output="$1" start_head="$2" parsed
+  parsed="$(_uberdev_dispatch_python -I -B - "$output" "$start_head" <<'PY'
+import json,re,sys
+try: value=json.loads(sys.argv[1])
+except (TypeError,json.JSONDecodeError): raise SystemExit(3)
+if not isinstance(value,dict) or set(value)!={"state","token"}: raise SystemExit(3)
+state=value.get("state"); token=value.get("token"); start=sys.argv[2]
+if state not in {"active","active_unconfirmed"}: raise SystemExit(3)
+if not isinstance(token,str) or re.fullmatch(r"[0-9a-f]{32}:[0-9a-f]{40}",token) is None or token.rsplit(":",1)[1]!=start: raise SystemExit(3)
+print(state+"\t"+token,end="")
+PY
+)" || return 3
+  _UBERDEV_CODEX_CREATE_STATE="${parsed%%$'\t'*}"
+  _UBERDEV_CODEX_CREATE_TOKEN="${parsed#*$'\t'}"
+}
+
+_uberdev_dispatch_create_codex_worktree_receipt_at_head() {
+  local repo_root="$1" relative="$2" branch="$3" receipt="$4" start_head="$5"
+  local output='' rc
+  _UBERDEV_CODEX_CREATE_STATE=''
+  _UBERDEV_CODEX_CREATE_TOKEN=''
+  if output="$(_uberdev_dispatch_worktree_receipt_helper create \
+      --repo "$repo_root" --relative "$relative" --branch "$branch" \
+      --receipt "$receipt" --start-head "$start_head")"; then
+    _uberdev_dispatch_parse_codex_worktree_create_output "$output" "$start_head" || return $?
+    [ "$_UBERDEV_CODEX_CREATE_STATE" = active ] || return 3
+    return 0
+  else
+    rc=$?
+    case "$rc" in
+      2)
+        [ -n "$output" ] || return 2
+        _uberdev_dispatch_parse_codex_worktree_create_output "$output" "$start_head" || return 3
+        [ "$_UBERDEV_CODEX_CREATE_STATE" = active_unconfirmed ] || return 3
+        return 2
+        ;;
+      3) return 3 ;;
+      *) return 2 ;;
+    esac
+  fi
+}
+
 _uberdev_dispatch_create_codex_worktree_receipt() {
-  local start_head
-  start_head="$(git -C "$1" rev-parse HEAD 2>/dev/null)" || return 2
-  _uberdev_dispatch_python -I -B - "$1" "$2" "$3" "$4" "$start_head" <<'PY'
-import json,os,posixpath,re,secrets,stat,subprocess,sys
-repo_arg,relative,branch,receipt,start_head=sys.argv[1:]
-repo=os.path.realpath(repo_arg)
-if not os.path.isabs(repo_arg) or not os.path.isdir(repo) or os.path.isabs(relative): raise SystemExit(2)
-if not re.fullmatch(r'[0-9a-f]{40}',start_head): raise SystemExit(2)
-normalized=posixpath.normpath(relative)
-basename=posixpath.basename(normalized)
-if (normalized!=relative or not normalized.startswith(".claude/worktrees/solve-issue-")
-    or branch!="worktree-"+basename): raise SystemExit(2)
-root=os.path.join(repo,".claude","worktrees")
-target=os.path.abspath(os.path.join(repo,*normalized.split('/')))
-if os.path.commonpath((root,target))!=root: raise SystemExit(2)
-if os.path.lexists(target): raise SystemExit(2)
-branch_probe=subprocess.run(['git','-C',repo,'show-ref','--verify','--quiet','refs/heads/'+branch])
-if branch_probe.returncode!=1: raise SystemExit(2)
-receipt=os.path.abspath(receipt); parent=os.path.dirname(receipt)
-parent_entry=os.lstat(parent); uid_fn=getattr(os,"geteuid",None); uid=uid_fn() if uid_fn else None
-if stat.S_ISLNK(parent_entry.st_mode) or not stat.S_ISDIR(parent_entry.st_mode) or (uid is not None and parent_entry.st_uid!=uid): raise SystemExit(2)
-token=secrets.token_hex(16)+":"+start_head
-payload={"schema_version":1,"repo":repo,"relative":normalized,"worktree":target,"branch":branch,"start_head":start_head,"token":token,"path_absent_at_receipt":True,"branch_absent_at_receipt":True}
-flags=os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0)
-descriptor=os.open(receipt,flags,0o600)
-try:
- if os.name!="nt": os.fchmod(descriptor,0o600)
- raw=(json.dumps(payload,sort_keys=True,separators=(",",":"))+"\n").encode()
- if os.write(descriptor,raw)!=len(raw): raise OSError("short receipt write")
- os.fsync(descriptor)
-finally: os.close(descriptor)
-print(token,end="")
+  local repo_root="$1" relative="$2" branch="$3" receipt="$4" start_head rc
+  start_head="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null)" || return 2
+  if _uberdev_dispatch_create_codex_worktree_receipt_at_head \
+      "$repo_root" "$relative" "$branch" "$receipt" "$start_head"; then
+    printf '%s' "$_UBERDEV_CODEX_CREATE_TOKEN"
+    return 0
+  else
+    rc=$?
+  fi
+  [ -z "$_UBERDEV_CODEX_CREATE_TOKEN" ] || printf '%s' "$_UBERDEV_CODEX_CREATE_TOKEN"
+  return "$rc"
+}
+
+_uberdev_dispatch_inspect_codex_worktree_receipt() {
+  local repo_root="$1" relative="$2" branch="$3" receipt="$4" token="$5" start_head="$6"
+  local output normalized rc
+  if output="$(_uberdev_dispatch_worktree_receipt_helper inspect \
+      --repo "$repo_root" --relative "$relative" --branch "$branch" \
+      --receipt "$receipt" --start-head "$start_head" --token "$token")"; then
+    :
+  else
+    rc=$?
+    case "$rc" in 2|3) return "$rc" ;; *) return 2 ;; esac
+  fi
+  normalized="$(_uberdev_dispatch_python -I -B - "$output" "$repo_root" "$relative" "$start_head" <<'PY'
+import json,os,sys
+try: value=json.loads(sys.argv[1])
+except (TypeError,json.JSONDecodeError): raise SystemExit(3)
+state=value.get("state") if isinstance(value,dict) else None
+if state=="retired":
+ if value!={"state":"retired"}: raise SystemExit(3)
+elif state=="active":
+ if set(value)!={"state","start_head","worktree"} or value.get("start_head")!=sys.argv[4]: raise SystemExit(3)
+ expected=os.path.abspath(os.path.join(os.path.realpath(sys.argv[2]),*sys.argv[3].split("/")))
+ worktree=value.get("worktree")
+ if not isinstance(worktree,str) or os.path.normcase(os.path.normpath(worktree))!=os.path.normcase(os.path.normpath(expected)): raise SystemExit(3)
+else: raise SystemExit(3)
+print(json.dumps(value,ensure_ascii=True,separators=(",",":"),sort_keys=True),end="")
+PY
+)" || return 3
+  _UBERDEV_CODEX_RECEIPT_STATE="$(_uberdev_dispatch_python -I -B -c \
+    'import json,sys; print(json.loads(sys.argv[1])["state"],end="")' "$normalized")" || return 3
+  _UBERDEV_CODEX_RECEIPT_START_HEAD=''
+  _UBERDEV_CODEX_RECEIPT_WORKTREE=''
+  if [ "$_UBERDEV_CODEX_RECEIPT_STATE" = active ]; then
+    _UBERDEV_CODEX_RECEIPT_START_HEAD="$(_uberdev_dispatch_python -I -B -c \
+      'import json,sys; print(json.loads(sys.argv[1])["start_head"],end="")' "$normalized")" || return 3
+    _UBERDEV_CODEX_RECEIPT_WORKTREE="$(_uberdev_dispatch_python -I -B -c \
+      'import json,sys; print(json.loads(sys.argv[1])["worktree"],end="")' "$normalized")" || return 3
+  fi
+}
+
+_uberdev_dispatch_retire_codex_worktree_receipt() {
+  local repo_root="$1" relative="$2" branch="$3" receipt="$4" token="$5" start_head="$6"
+  local output rc
+  if output="$(_uberdev_dispatch_worktree_receipt_helper retire \
+      --repo "$repo_root" --relative "$relative" --branch "$branch" \
+      --receipt "$receipt" --start-head "$start_head" --token "$token")"; then
+    :
+  else
+    rc=$?
+    case "$rc" in 2|3) return "$rc" ;; *) return 2 ;; esac
+  fi
+  _uberdev_dispatch_python -I -B - "$output" <<'PY'
+import json,sys
+try: value=json.loads(sys.argv[1])
+except (TypeError,json.JSONDecodeError): raise SystemExit(3)
+if value!={"state":"retired"}: raise SystemExit(3)
 PY
 }
 
-_uberdev_dispatch_discard_codex_worktree_receipt() {
-  _uberdev_dispatch_python -I -B - "$1" "$2" <<'PY'
-import json,os,stat,sys
-path,token=sys.argv[1:]; parent,name=os.path.dirname(path),os.path.basename(path)
-if os.name=="nt":
- before=os.lstat(path)
- if os.path.islink(path) or not stat.S_ISREG(before.st_mode) or before.st_nlink!=1: raise SystemExit(2)
- descriptor=os.open(path,os.O_RDONLY|getattr(os,"O_BINARY",0)|getattr(os,"O_NOINHERIT",0))
- try:
-  opened=os.fstat(descriptor); current=os.lstat(path)
-  if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1
-      or (opened.st_dev,opened.st_ino)!=(before.st_dev,before.st_ino)
-      or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)): raise SystemExit(2)
-  raw=os.read(descriptor,65537)
-  if len(raw)>65536 or json.loads(raw).get("token")!=token: raise SystemExit(2)
-  current=os.lstat(path)
-  if os.path.islink(path) or (current.st_dev,current.st_ino)!=(opened.st_dev,opened.st_ino): raise SystemExit(2)
- finally: os.close(descriptor)
- os.unlink(path)
- raise SystemExit(0)
-parent_fd=os.open(parent,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0)); descriptor=None
-try:
- descriptor=os.open(name,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0),dir_fd=parent_fd)
- opened=os.fstat(descriptor); current=os.stat(name,dir_fd=parent_fd,follow_symlinks=False)
- uid_fn=getattr(os,"geteuid",None); uid=uid_fn() if uid_fn else None
- if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1 or (uid is not None and opened.st_uid!=uid)
-     or (os.name!="nt" and stat.S_IMODE(opened.st_mode)!=0o600)
-     or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)): raise SystemExit(2)
- raw=os.read(descriptor,65537)
- if len(raw)>65536 or json.loads(raw).get("token")!=token: raise SystemExit(2)
- current=os.stat(name,dir_fd=parent_fd,follow_symlinks=False)
- if (current.st_dev,current.st_ino)!=(opened.st_dev,opened.st_ino): raise SystemExit(2)
- os.unlink(name,dir_fd=parent_fd)
-finally:
- if descriptor is not None: os.close(descriptor)
- os.close(parent_fd)
+_uberdev_dispatch_classify_codex_worktree_registry() {
+  local repo_root="$1" target="$2" branch="$3" listing classified
+  listing="$(cd "$repo_root" && git worktree list --porcelain)" || return 2
+  classified="$(_uberdev_dispatch_python -I -B - "$target" "$branch" "$listing" <<'PY'
+import os,sys
+target,branch,raw=sys.argv[1:]
+expected_ref="refs/heads/"+branch
+records=[]
+for block in raw.split("\n\n"):
+ if not block: continue
+ lines=block.splitlines()
+ if not lines or not lines[0].startswith("worktree "): raise SystemExit(2)
+ path=lines[0][9:]
+ refs=[line[7:] for line in lines[1:] if line.startswith("branch ")]
+ if len(refs)>1: raise SystemExit(2)
+ records.append((path,refs[0] if refs else ""))
+key=lambda value: os.path.normcase(os.path.normpath(value))
+exact=[record for record in records if key(record[0])==key(target)]
+if len(exact)>1: raise SystemExit(2)
+exact_state="absent" if not exact else ("expected" if exact[0][1]==expected_ref else "wrong")
+branch_state="present" if any(ref==expected_ref for _,ref in records) else "absent"
+print(exact_state+"\t"+branch_state,end="")
+PY
+)" || return 2
+  _UBERDEV_CODEX_REGISTRY_EXACT="${classified%%$'\t'*}"
+  _UBERDEV_CODEX_REGISTRY_BRANCH="${classified#*$'\t'}"
+  case "$_UBERDEV_CODEX_REGISTRY_EXACT:$_UBERDEV_CODEX_REGISTRY_BRANCH" in
+    absent:absent|absent:present|expected:present|wrong:absent|wrong:present) ;;
+    *) return 2 ;;
+  esac
+}
+
+_uberdev_dispatch_validate_codex_worktree_directory() {
+  _uberdev_dispatch_python -I -B - "$1" <<'PY'
+import os,stat,sys
+path=sys.argv[1]
+try: entry=os.lstat(path)
+except OSError: raise SystemExit(2)
+uid_fn=getattr(os,"geteuid",None); uid=uid_fn() if uid_fn else None
+reparse=getattr(stat,"FILE_ATTRIBUTE_REPARSE_POINT",0x400)
+if (os.path.islink(path) or stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode)
+    or bool(getattr(entry,"st_file_attributes",0)&reparse)
+    or (uid is not None and entry.st_uid!=uid)): raise SystemExit(3)
 PY
 }
 
 _uberdev_dispatch_cleanup_codex_worktree_locked() {
   local repo_root="$1" relative="$2" branch="$3" receipt="$4" token="$5" terminal="$6"
-  local target_record target start_head
-  case "$terminal" in completed|failed|timed_out|cancelled|setup_failed) ;; *) return 2 ;; esac
-  target_record="$(_uberdev_dispatch_python -I -B - "$repo_root" "$relative" "$branch" "$receipt" "$token" <<'PY'
-import json,os,re,stat,sys
-repo_arg,relative,branch,path,token=sys.argv[1:]
-repo=os.path.realpath(repo_arg); parent,name=os.path.dirname(path),os.path.basename(path)
-try: token_start=token.rsplit(':',1)[1]
-except (AttributeError,IndexError): raise SystemExit(2)
-if not re.fullmatch(r'[0-9a-f]{40}',token_start): raise SystemExit(2)
-if os.name=="nt":
- before=os.lstat(path)
- if os.path.islink(path) or not stat.S_ISREG(before.st_mode) or before.st_nlink!=1: raise SystemExit(2)
- descriptor=os.open(path,os.O_RDONLY|getattr(os,"O_BINARY",0)|getattr(os,"O_NOINHERIT",0))
- try:
-  opened=os.fstat(descriptor); current=os.lstat(path)
-  if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1
-      or (opened.st_dev,opened.st_ino)!=(before.st_dev,before.st_ino)
-      or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)): raise SystemExit(2)
-  raw=os.read(descriptor,65537)
-  if len(raw)>65536: raise SystemExit(2)
-  value=json.loads(raw)
- finally: os.close(descriptor)
- expected={"schema_version":1,"repo":repo,"relative":relative,"worktree":os.path.abspath(os.path.join(repo,*relative.split('/'))),"branch":branch,"start_head":token_start,"token":token,"path_absent_at_receipt":True,"branch_absent_at_receipt":True}
- if value!=expected: raise SystemExit(2)
- target=value["worktree"]; root=os.path.join(repo,".claude","worktrees")
- if os.path.commonpath((root,target))!=root or branch!="worktree-"+relative.rsplit('/',1)[-1]: raise SystemExit(2)
- if os.path.lexists(target):
-  entry=os.lstat(target)
-  if os.path.islink(target) or not stat.S_ISDIR(entry.st_mode): raise SystemExit(2)
- print(target+'\t'+token_start,end="")
- raise SystemExit(0)
-parent_fd=os.open(parent,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0)); descriptor=None
-try:
- descriptor=os.open(name,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0),dir_fd=parent_fd)
- opened=os.fstat(descriptor); current=os.stat(name,dir_fd=parent_fd,follow_symlinks=False)
- uid_fn=getattr(os,"geteuid",None); uid=uid_fn() if uid_fn else None
- if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1 or (uid is not None and opened.st_uid!=uid)
-     or (os.name!="nt" and stat.S_IMODE(opened.st_mode)!=0o600)
-     or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)): raise SystemExit(2)
- raw=os.read(descriptor,65537)
- if len(raw)>65536: raise SystemExit(2)
- value=json.loads(raw)
- expected={"schema_version":1,"repo":repo,"relative":relative,"worktree":os.path.abspath(os.path.join(repo,relative)),"branch":branch,"start_head":token_start,"token":token,"path_absent_at_receipt":True,"branch_absent_at_receipt":True}
- if value!=expected: raise SystemExit(2)
- target=value["worktree"]; root=os.path.join(repo,".claude","worktrees")
- if os.path.commonpath((root,target))!=root or branch!="worktree-"+os.path.basename(relative): raise SystemExit(2)
- if os.path.lexists(target):
-  entry=os.lstat(target)
-  if stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode) or (uid is not None and entry.st_uid!=uid): raise SystemExit(2)
- print(target+'\t'+token_start,end="")
-finally:
- if descriptor is not None: os.close(descriptor)
- os.close(parent_fd)
-PY
-)" || return 2
-  target="${target_record%%$'\t'*}"
-  start_head="${target_record#*$'\t'}"
-  [ -n "$target" ] && [ -n "$start_head" ] && [ "$target" != "$start_head" ] || return 2
-  (
-    cd "$repo_root" || exit 2
-    branch_exists=0
-    if git show-ref --verify --quiet "refs/heads/$branch"; then
-      branch_exists=1
+  local start_head target branch_exists=0 show_ref_rc branch_head local_status target_head native_target rc
+  case "$terminal" in completed|failed|timed_out|cancelled|setup_failed) ;; *) return 3 ;; esac
+  start_head="${token##*:}"
+  _uberdev_dispatch_inspect_codex_worktree_receipt \
+    "$repo_root" "$relative" "$branch" "$receipt" "$token" "$start_head" || return $?
+  if [ "$_UBERDEV_CODEX_RECEIPT_STATE" = retired ]; then
+    target="$(_uberdev_dispatch_python -I -B -c \
+      'import os,sys; print(os.path.abspath(os.path.join(os.path.realpath(sys.argv[1]),*sys.argv[2].split("/"))),end="")' \
+      "$repo_root" "$relative")" || return 2
+    [ ! -e "$target" ] && [ ! -L "$target" ] || return 3
+    _uberdev_dispatch_classify_codex_worktree_registry "$repo_root" "$target" "$branch" || return $?
+    [ "$_UBERDEV_CODEX_REGISTRY_EXACT" = absent ] \
+      && [ "$_UBERDEV_CODEX_REGISTRY_BRANCH" = absent ] || return 3
+    if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; then
+      return 3
     else
       show_ref_rc=$?
-      [ "$show_ref_rc" -eq 1 ] || exit 2
+      [ "$show_ref_rc" -eq 1 ] || return 2
     fi
-    if [ -e "$target" ] || [ -L "$target" ]; then
-      local_status="$(git -C "$target" status --porcelain --untracked-files=all)" || exit 2
-      [ -z "$local_status" ] || exit 3
-      target_head="$(git -C "$target" rev-parse HEAD)" || exit 2
-      [ "$target_head" = "$start_head" ] || exit 3
-      git worktree remove --force "$target" || exit 2
-      [ ! -e "$target" ] && [ ! -L "$target" ] || exit 2
+    _uberdev_dispatch_retire_codex_worktree_receipt \
+      "$repo_root" "$relative" "$branch" "$receipt" "$token" "$start_head"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      _UBERDEV_CODEX_CLEANUP_RETIRE_FAILED=1
+      return "$rc"
     fi
-    if [ "$branch_exists" -eq 1 ]; then
-      branch_head="$(git rev-parse "refs/heads/$branch")" || exit 2
-      [ "$branch_head" = "$start_head" ] || exit 3
-      worktree_list="$(git worktree list --porcelain)" || exit 2
-      if printf '%s\n' "$worktree_list" | grep -Fqx "branch refs/heads/$branch"; then exit 2; fi
-      git branch -D "$branch" >/dev/null || exit 2
-    fi
-  )
-  return $?
+    _UBERDEV_CODEX_CLEANUP_RETIRE_FAILED=0
+    return 0
+  fi
+  [ "$_UBERDEV_CODEX_RECEIPT_STATE" = active ] || return 3
+  target="$_UBERDEV_CODEX_RECEIPT_WORKTREE"
+  [ "$_UBERDEV_CODEX_RECEIPT_START_HEAD" = "$start_head" ] || return 3
+
+  if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; then
+    branch_exists=1
+    branch_head="$(git -C "$repo_root" rev-parse "refs/heads/$branch")" || return 2
+    [ "$branch_head" = "$start_head" ] || return 3
+  else
+    show_ref_rc=$?
+    [ "$show_ref_rc" -eq 1 ] || return 2
+  fi
+  _uberdev_dispatch_classify_codex_worktree_registry "$repo_root" "$target" "$branch" || return $?
+  case "$_UBERDEV_CODEX_REGISTRY_EXACT:$_UBERDEV_CODEX_REGISTRY_BRANCH" in
+    expected:present) [ "$branch_exists" -eq 1 ] || return 3 ;;
+    absent:absent) ;;
+    *) return 3 ;;
+  esac
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    [ "$_UBERDEV_CODEX_REGISTRY_EXACT" = expected ] || return 3
+    _uberdev_dispatch_validate_codex_worktree_directory "$target" || return $?
+    local_status="$(git -C "$target" status --porcelain --untracked-files=all)" || return 2
+    [ -z "$local_status" ] || return 3
+    target_head="$(git -C "$target" rev-parse HEAD)" || return 2
+    [ "$target_head" = "$start_head" ] || return 3
+  fi
+  if [ "$_UBERDEV_CODEX_REGISTRY_EXACT" = expected ]; then
+    native_target="$(_uberdev_dispatch_native_cli_path "$target")" || return 2
+    cd "$repo_root" || return 2
+    MSYS_NO_PATHCONV=1 git worktree remove --force "$native_target" || return 2
+  fi
+  [ ! -e "$target" ] && [ ! -L "$target" ] || return 2
+  _uberdev_dispatch_classify_codex_worktree_registry "$repo_root" "$target" "$branch" || return $?
+  [ "$_UBERDEV_CODEX_REGISTRY_EXACT" = absent ] \
+    && [ "$_UBERDEV_CODEX_REGISTRY_BRANCH" = absent ] || return 2
+  if [ "$branch_exists" -eq 1 ]; then
+    branch_head="$(git -C "$repo_root" rev-parse "refs/heads/$branch")" || return 2
+    [ "$branch_head" = "$start_head" ] || return 3
+    cd "$repo_root" || return 2
+    git branch -D "$branch" >/dev/null || return 2
+  fi
+  if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; then
+    return 2
+  else
+    show_ref_rc=$?
+    [ "$show_ref_rc" -eq 1 ] || return 2
+  fi
+  _uberdev_dispatch_retire_codex_worktree_receipt \
+    "$repo_root" "$relative" "$branch" "$receipt" "$token" "$start_head"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    _UBERDEV_CODEX_CLEANUP_RETIRE_FAILED=1
+    return "$rc"
+  fi
+  return 0
 }
 
 _uberdev_dispatch_cleanup_codex_worktree() {
-  local repo_root="$1" receipt="$4" token="$5" scope rc release_rc attempt=1 retry_delay
+  local repo_root="$1" scope rc release_rc attempt=1 retry_delay
   scope="$(_uberdev_dispatch_git_metadata_mutex_scope "$repo_root")" || return 2
   (
     _uberdev_semaphore_mutex_acquire "$scope" || exit $?
     trap '_uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true' EXIT
+    _UBERDEV_CODEX_CLEANUP_RETIRE_FAILED=0
     while :; do
       if _uberdev_dispatch_cleanup_codex_worktree_locked "$@"; then rc=0; else rc=$?; fi
       if [ "$rc" -ne 2 ] || [ "$attempt" -ge "$_UBERDEV_CODEX_CLEANUP_MAX_ATTEMPTS" ]; then
@@ -606,6 +705,9 @@ _uberdev_dispatch_cleanup_codex_worktree() {
       sleep "$retry_delay" || { rc=2; break; }
       attempt=$((attempt + 1))
     done
+    if [ "$rc" -ne 0 ] && [ "$_UBERDEV_CODEX_CLEANUP_RETIRE_FAILED" -eq 1 ]; then
+      printf 'uberdev codex cleanup: receipt retirement failed after cleanup transaction\n' >&2 || true
+    fi
     _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1
     release_rc=$?
     [ "$release_rc" -eq 0 ] \
@@ -613,13 +715,157 @@ _uberdev_dispatch_cleanup_codex_worktree() {
       || true
     [ "$release_rc" -eq 0 ] || [ "$rc" -ne 0 ] || rc=2
     [ "$release_rc" -ne 0 ] || trap - EXIT
-    [ "$rc" -eq 0 ] || exit "$rc"
-    _uberdev_dispatch_discard_codex_worktree_receipt "$receipt" "$token" || {
-      printf 'uberdev codex cleanup: ownership receipt discard failed after cleanup transaction\n' >&2 \
-        || true
-      exit 2
-    }
+    exit "$rc"
   )
+}
+
+_uberdev_dispatch_emit_codex_worktree_transaction() {
+  local state="$1" token="$2"
+  case "$state" in active|active_unconfirmed|retired) ;; *) return 3 ;; esac
+  printf '{"state":"%s","token":"%s"}\n' "$state" "$token"
+}
+
+_uberdev_dispatch_parse_codex_worktree_transaction() {
+  local output="$1" parsed
+  parsed="$(_uberdev_dispatch_python -I -B - "$output" <<'PY'
+import json,re,sys
+try: value=json.loads(sys.argv[1])
+except (TypeError,json.JSONDecodeError): raise SystemExit(3)
+if not isinstance(value,dict) or set(value)!={"state","token"}: raise SystemExit(3)
+state=value.get("state"); token=value.get("token")
+if state not in {"active","active_unconfirmed","retired"}: raise SystemExit(3)
+if not isinstance(token,str) or re.fullmatch(r"[0-9a-f]{32}:[0-9a-f]{40}",token) is None: raise SystemExit(3)
+print(state+"\t"+token,end="")
+PY
+)" || return 3
+  _UBERDEV_CODEX_WORKTREE_TRANSACTION_STATE="${parsed%%$'\t'*}"
+  _UBERDEV_CODEX_WORKTREE_TRANSACTION_TOKEN="${parsed#*$'\t'}"
+}
+
+_uberdev_dispatch_retry_codex_cleanup_locked() {
+  local rc attempt=1 retry_delay
+  _UBERDEV_CODEX_CLEANUP_RETIRE_FAILED=0
+  while :; do
+    if _uberdev_dispatch_cleanup_codex_worktree_locked "$@"; then
+      return 0
+    else
+      rc=$?
+    fi
+    [ "$rc" -eq 2 ] && [ "$attempt" -lt "$_UBERDEV_CODEX_CLEANUP_MAX_ATTEMPTS" ] \
+      || return "$rc"
+    case "$attempt" in
+      1) retry_delay="$_UBERDEV_CODEX_CLEANUP_RETRY_DELAY_1_S" ;;
+      2) retry_delay="$_UBERDEV_CODEX_CLEANUP_RETRY_DELAY_2_S" ;;
+      *) return 2 ;;
+    esac
+    sleep "$retry_delay" || return 2
+    attempt=$((attempt + 1))
+  done
+}
+
+_uberdev_dispatch_codex_worktree_absent_locked() {
+  local repo_root="$1" target="$2" branch="$3" show_ref_rc
+  [ ! -e "$target" ] && [ ! -L "$target" ] || return 3
+  if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; then
+    return 3
+  else
+    show_ref_rc=$?
+    [ "$show_ref_rc" -eq 1 ] || return 2
+  fi
+  _uberdev_dispatch_classify_codex_worktree_registry "$repo_root" "$target" "$branch" || return $?
+  [ "$_UBERDEV_CODEX_REGISTRY_EXACT" = absent ] \
+    && [ "$_UBERDEV_CODEX_REGISTRY_BRANCH" = absent ] || return 3
+}
+
+_uberdev_dispatch_create_codex_worktree_locked() {
+  local repo_root="$1" relative="$2" branch="$3" receipt="$4" log_file="$5"
+  local actual_root requested_root start_head target native_target create_rc cleanup_rc add_rc
+  local attempt=1 retry_delay token=''
+  actual_root="$(git -C "$repo_root" rev-parse --show-toplevel 2>/dev/null)" || return 2
+  actual_root="$(cd "$actual_root" 2>/dev/null && pwd -P)" || return 2
+  requested_root="$(cd "$repo_root" 2>/dev/null && pwd -P)" || return 2
+  [ "$actual_root" = "$requested_root" ] || return 3
+  start_head="$(git -C "$repo_root" rev-parse --verify HEAD 2>/dev/null)" || return 2
+  case "$start_head" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+    *) return 3 ;;
+  esac
+  target="$(_uberdev_dispatch_python -I -B -c \
+    'import os,sys; print(os.path.abspath(os.path.join(os.path.realpath(sys.argv[1]),*sys.argv[2].split("/"))),end="")' \
+    "$repo_root" "$relative")" || return 2
+  _uberdev_dispatch_codex_worktree_absent_locked "$repo_root" "$target" "$branch" || return $?
+
+  while :; do
+    if _uberdev_dispatch_create_codex_worktree_receipt_at_head \
+        "$repo_root" "$relative" "$branch" "$receipt" "$start_head"; then
+      token="$_UBERDEV_CODEX_CREATE_TOKEN"
+      break
+    else
+      create_rc=$?
+    fi
+    if [ "$create_rc" -eq 3 ]; then
+      return 3
+    fi
+    [ "$create_rc" -eq 2 ] || return 2
+    if [ "$_UBERDEV_CODEX_CREATE_STATE" = active_unconfirmed ] \
+        && [ -n "$_UBERDEV_CODEX_CREATE_TOKEN" ]; then
+      token="$_UBERDEV_CODEX_CREATE_TOKEN"
+      if _uberdev_dispatch_retry_codex_cleanup_locked \
+          "$repo_root" "$relative" "$branch" "$receipt" "$token" setup_failed; then
+        :
+      else
+        cleanup_rc=$?
+        _uberdev_dispatch_emit_codex_worktree_transaction active_unconfirmed "$token" || true
+        return "$cleanup_rc"
+      fi
+      token=''
+    elif [ -n "$_UBERDEV_CODEX_CREATE_STATE" ] || [ -n "$_UBERDEV_CODEX_CREATE_TOKEN" ]; then
+      return 3
+    fi
+    [ "$attempt" -lt "$_UBERDEV_CODEX_CREATE_MAX_ATTEMPTS" ] || return 2
+    case "$attempt" in
+      1) retry_delay="$_UBERDEV_CODEX_CREATE_RETRY_DELAY_1_S" ;;
+      2) retry_delay="$_UBERDEV_CODEX_CREATE_RETRY_DELAY_2_S" ;;
+      *) return 2 ;;
+    esac
+    sleep "$retry_delay" || return 2
+    attempt=$((attempt + 1))
+    _uberdev_dispatch_codex_worktree_absent_locked "$repo_root" "$target" "$branch" || return $?
+  done
+
+  native_target="$(_uberdev_dispatch_native_cli_path "$target")" || {
+    _uberdev_dispatch_emit_codex_worktree_transaction active "$token" || true
+    return 2
+  }
+  cd "$repo_root" || {
+    _uberdev_dispatch_emit_codex_worktree_transaction active "$token" || true
+    return 2
+  }
+  MSYS_NO_PATHCONV=1 git worktree add "$native_target" -b "$branch" "$start_head" \
+    >"$log_file" 2>&1
+  add_rc=$?
+  if [ "$add_rc" -eq 0 ]; then
+    _uberdev_dispatch_emit_codex_worktree_transaction active "$token"
+    return 0
+  fi
+  if _uberdev_dispatch_retry_codex_cleanup_locked \
+      "$repo_root" "$relative" "$branch" "$receipt" "$token" setup_failed; then
+    _uberdev_dispatch_emit_codex_worktree_transaction retired "$token" || true
+    return "$add_rc"
+  else
+    cleanup_rc=$?
+  fi
+  _uberdev_dispatch_emit_codex_worktree_transaction active "$token" || true
+  return "$cleanup_rc"
+}
+
+_uberdev_dispatch_create_codex_worktree() {
+  local repo_root="$1"
+  _uberdev_dispatch_with_git_metadata_mutex "$repo_root" codex-worktree-create \
+    _uberdev_dispatch_create_codex_worktree_locked "$@"
 }
 
 # The dispatch_backend enum — identical to the --backend= flag's accepted set.
@@ -2024,6 +2270,7 @@ _uberdev_dispatch_codex() {
   local ROUTE_SANDBOX="${UBERDEV_AGENT_SANDBOX:-workspace-write}"
   local EFFECTIVE_POLICY="${UBERDEV_AGENT_EFFECTIVE_POLICY:-${UBERDEV_AGENT_ROUTING_MODE:-adaptive}}"
   local REPOSITORY_ROOT WORKTREE_RECEIPT WORKTREE_TOKEN='' ABORT_PID ABORT_CANDIDATE WORKTREE_ADD_RC=0
+  local WORKTREE_TRANSACTION_OUTPUT='' WORKTREE_TRANSACTION_RC=0
   local CHILD_OWNED="${UBERDEV_AGENT_CHILD_OWNED:-0}"
   REPOSITORY_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)" || { DISPATCH_RC=1; return 1; }
   WORKTREE_DIR="$REPOSITORY_ROOT/$WORKTREE_RELATIVE"
@@ -2061,25 +2308,56 @@ _uberdev_dispatch_codex() {
     DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
   fi
   if [ "$WORKSPACE_MODE" = isolated ] && [ "$CHILD_OWNED" = "1" ]; then
-    WORKTREE_TOKEN="$(_uberdev_dispatch_create_codex_worktree_receipt \
-      "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$WORKTREE_RECEIPT")" || {
-        DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3;
-      }
+    if WORKTREE_TRANSACTION_OUTPUT="$(_uberdev_dispatch_create_codex_worktree \
+        "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" \
+        "$WORKTREE_RECEIPT" "$LOG_FILE")"; then
+      WORKTREE_TRANSACTION_RC=0
+    else
+      WORKTREE_TRANSACTION_RC=$?
+    fi
+    _UBERDEV_CODEX_WORKTREE_TRANSACTION_STATE=''
+    _UBERDEV_CODEX_WORKTREE_TRANSACTION_TOKEN=''
+    if [ -n "$WORKTREE_TRANSACTION_OUTPUT" ] \
+        && ! _uberdev_dispatch_parse_codex_worktree_transaction "$WORKTREE_TRANSACTION_OUTPUT"; then
+      DISPATCH_RC=74; DISPATCH_LOG="$LOG_FILE"; return 74
+    fi
+    if [ "$WORKTREE_TRANSACTION_RC" -eq 0 ]; then
+      if [ "$_UBERDEV_CODEX_WORKTREE_TRANSACTION_STATE" != active ]; then
+        DISPATCH_RC=74; DISPATCH_LOG="$LOG_FILE"; return 74
+      fi
+      WORKTREE_TOKEN="$_UBERDEV_CODEX_WORKTREE_TRANSACTION_TOKEN"
+    else
+      case "$_UBERDEV_CODEX_WORKTREE_TRANSACTION_STATE" in
+        active|active_unconfirmed)
+          WORKTREE_TOKEN="$_UBERDEV_CODEX_WORKTREE_TRANSACTION_TOKEN"
+          printf 'uberdev codex setup: recoverable worktree transaction failure\n' >>"$LOG_FILE" 2>/dev/null || true
+          DISPATCH_RC=74
+          ;;
+        retired)
+          DISPATCH_RC=1
+          ;;
+        '')
+          case "$WORKTREE_TRANSACTION_RC" in
+            2|3) DISPATCH_RC="$WORKTREE_TRANSACTION_RC" ;;
+            *) DISPATCH_RC=1 ;;
+          esac
+          ;;
+        *) DISPATCH_RC=74 ;;
+      esac
+      DISPATCH_LOG="$LOG_FILE"
+      _uberdev_dispatch_audit dispatch_setup_failed \
+        "{\"issue\":$ISSUE_NUM,\"phase\":\"worktree\",\"backend\":\"codex\",\"rc\":$DISPATCH_RC}"
+      return "$DISPATCH_RC"
+    fi
   fi
   # Explicit dispatcher-controlled worktree (same rationale as the background
   # arm — sidesteps backend-specific worktree handling; MSYS_NO_PATHCONV for
   # Git Bash on Windows).
-  if [ "$WORKSPACE_MODE" = isolated ]; then
+  if [ "$WORKSPACE_MODE" = isolated ] && [ "$CHILD_OWNED" != "1" ]; then
     _uberdev_dispatch_git_worktree_add "$REPOSITORY_ROOT" "$WORKTREE_DIR" "$WORKTREE_BRANCH" "$LOG_FILE" \
       || WORKTREE_ADD_RC=$?
   fi
   if [ "$WORKTREE_ADD_RC" -ne 0 ]; then
-    if [ "$CHILD_OWNED" = "1" ] && ! _uberdev_dispatch_report_codex_setup_cleanup_failure "$ISSUE_NUM" setup_failed \
-        "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" "$LOG_FILE"; then
-      DISPATCH_RC=74
-      DISPATCH_LOG="$LOG_FILE"
-      return 74
-    fi
     DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
     _uberdev_dispatch_audit dispatch_setup_failed \

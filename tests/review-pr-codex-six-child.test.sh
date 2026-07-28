@@ -39,19 +39,82 @@ pathlib.Path(sys.argv[2]).write_text(setup)
 pathlib.Path(sys.argv[3]).write_text(one(f'{namespace}-executable'))
 PY
 
-# Keep the exact Bash 3.2-sensitive cleanup shape in scope: remove is direct,
-# while list runs in command substitution before branch deletion. The runtime
-# assertions below prove all three Git processes resolve one mutex generation.
-python3 -I -B - "$RUNTIME_ROOT/lib/dispatch.sh" <<'PY'
-import pathlib,sys
+# Lock the cleanup authority model without depending on line wrapping or local
+# variable placement. Receipt inspection must precede mutation, registry
+# classification must bracket removal, Git must receive the translated native
+# target (never the logical pathname), and durable retirement must be last.
+python3 -I -B - "$RUNTIME_ROOT/lib/dispatch.sh" "$RUNTIME_NAMESPACE" <<'PY'
+import pathlib,re,sys
+
 source=pathlib.Path(sys.argv[1]).read_text()
-start=source.index("_dispatch_cleanup_codex_worktree_locked()")
-end=source.index("_dispatch_cleanup_codex_worktree()",start)
-cleanup=source[start:end]
-remove=cleanup.index('git worktree remove --force "$target"')
-listing=cleanup.index('worktree_list="$(git worktree list --porcelain)"')
-branch=cleanup.index('git branch -D "$branch"')
-assert remove < listing < branch,(remove,listing,branch)
+namespace=sys.argv[2]
+prefix=f"_{namespace}_dispatch_"
+upper=namespace.upper()
+
+def function_body(name):
+    match=re.search(rf"(?m)^{re.escape(name)}\(\)[ \t]*\{{[ \t]*$",source)
+    assert match is not None,name
+    following=re.search(r"(?m)^[_A-Za-z][_A-Za-z0-9]*\(\)[ \t]*\{[ \t]*$",source[match.end():])
+    end=len(source) if following is None else match.end()+following.start()
+    return source[match.start():end]
+
+helper_name=prefix+"worktree_receipt_helper"
+helper=function_body(helper_name)
+assert re.search(rf"\$_{upper}_DISPATCH_LIB_DIR/worktree_receipts\.py\b",helper),helper
+assert prefix+"python" in helper and "-I -B" in helper,helper
+
+for action,suffix in (
+    ("create","create_codex_worktree_receipt_at_head"),
+    ("inspect","inspect_codex_worktree_receipt"),
+    ("retire","retire_codex_worktree_receipt"),
+):
+    body=function_body(prefix+suffix)
+    assert re.search(rf"{re.escape(helper_name)}\s+{action}\b",body),action
+
+classifier_name=prefix+"classify_codex_worktree_registry"
+classifier=function_body(classifier_name)
+assert re.search(r"git\s+worktree\s+list\s+--porcelain",classifier),classifier
+assert f"_{upper}_CODEX_REGISTRY_EXACT" in classifier,classifier
+assert f"_{upper}_CODEX_REGISTRY_BRANCH" in classifier,classifier
+
+cleanup=function_body(prefix+"cleanup_codex_worktree_locked")
+inspect_name=prefix+"inspect_codex_worktree_receipt"
+retire_name=prefix+"retire_codex_worktree_receipt"
+native_name=prefix+"native_cli_path"
+
+inspect=cleanup.find(inspect_name)
+retire=cleanup.rfind(retire_name)
+remove_matches=list(re.finditer(r"git\s+worktree\s+remove\s+--force\s+\"?\$([_A-Za-z][_A-Za-z0-9]*)\"?",cleanup))
+assert len(remove_matches)==1,remove_matches
+remove=remove_matches[0].start()
+assert remove_matches[0].group(1)=="native_target",remove_matches[0].group(0)
+assert re.search(
+    rf"native_target\s*=\s*\"\$\({re.escape(native_name)}\s+\"\$target\"\)\"",
+    cleanup,
+),cleanup
+assert re.search(
+    r"MSYS_NO_PATHCONV=1\s+git\s+worktree\s+remove\s+--force\s+\"?\$native_target\"?",
+    cleanup,
+),cleanup
+assert not re.search(r"git\s+worktree\s+remove\s+--force\s+\"?\$target\"?",cleanup),cleanup
+assert "worktree_list" not in cleanup,cleanup
+
+classifications=[match.start() for match in re.finditer(re.escape(classifier_name),cleanup)]
+before=[position for position in classifications if position<remove]
+after=[position for position in classifications if position>remove]
+assert before and after,classifications
+pre_registry=cleanup[max(before):remove]
+post_registry=cleanup[min(after):retire]
+exact=f"_{upper}_CODEX_REGISTRY_EXACT"
+branch=f"_{upper}_CODEX_REGISTRY_BRANCH"
+assert exact in pre_registry and "expected" in pre_registry and "present" in pre_registry,pre_registry
+assert exact in post_registry and branch in post_registry and post_registry.count("absent")>=2,post_registry
+
+branch_delete_match=re.search(r"git\s+branch\s+-D\s+\"?\$branch\"?",cleanup)
+assert branch_delete_match is not None,cleanup
+branch_delete=branch_delete_match.start()
+assert 0<=inspect<max(before)<remove<min(after)<branch_delete<retire,(inspect,before,remove,after,branch_delete,retire)
+assert re.search(r'start_head\s*=\s*"\$\{token##\*:\}"',cleanup),cleanup
 PY
 
 mkdir -p "$TMP/bin" "$TMP/home"

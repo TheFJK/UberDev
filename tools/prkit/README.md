@@ -34,8 +34,8 @@ git -C ../prkit add -A && git -C ../prkit commit -m "chore: initial prkit 0.1.0"
 
 | File | Role |
 |---|---|
-| `manifest.txt` | Claude copy set (count-locked at 34 by `tests/prkit-manifest.test.sh`) |
-| `manifest-codex.txt` | Codex copy set (count-locked at 53 by `tests/prkit-codex-manifest.test.sh`) |
+| `manifest.txt` | Claude copy set (count-locked at 36 by `tests/prkit-manifest.test.sh`) |
+| `manifest-codex.txt` | Codex copy set (count-locked at 55 by `tests/prkit-codex-manifest.test.sh`) |
 | `managed-path-guard.py` | Shared generator/verifier containment guard: component-wise `lstat`, Windows reparse/reserved-name checks, required postconditions, and sealed-tree scans |
 | `rewrite.sh` | `prkit_neutralize` (de-namespace out-of-set) + `prkit_apply_rewrites` (slug + blanket); sourced |
 | `templates/` | Standalone-only scaffold files (`{{VERSION}}`/`{{DATE}}`), incl. `codex-*` |
@@ -65,7 +65,7 @@ documentation intentionally do not claim protection against that actor.
 ## Adding a file to prkit
 
 1. Add its path to `manifest.txt` (Claude) or `manifest-codex.txt` (Codex), and bump
-   the count assert in the matching `tests/prkit-*-manifest.test.sh` (34 / 53).
+   the count assert in the matching `tests/prkit-*-manifest.test.sh` (36 / 55).
 2. If it introduces a new `uberdev` pattern the blanket rule misses, or a new
    out-of-set `prkit:<name>` ref, the verify gate fails generation — extend
    `rewrite.sh` (never weaken the guard).

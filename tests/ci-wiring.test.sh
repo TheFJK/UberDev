@@ -22,6 +22,7 @@
 #         from the actual skip set.
 #   W5  — the Linux job retains its evidence-based 30-minute hang guard.
 #   W6  — the Windows job retains its evidence-based 15-minute hang guard.
+#   W7  — receipt retirement runs on Linux, macOS, and native Windows.
 #
 # Portable: bash + awk + grep + sed + sort + comm. Runs on ubuntu-latest
 # (native bash) and windows-latest (Git Bash) without any extra deps.
@@ -34,7 +35,8 @@ REPO_ROOT="$(cd "$THIS_DIR/.." && pwd)"
 WORKFLOW="$REPO_ROOT/.github/workflows/test.yml"
 
 macos_supervision_block=$(awk '/^  supervision-smoke-macos:/,/^  shape-checks-windows:/' "$WORKFLOW")
-for required in review-pr-codex-entry.test.sh agent-dispatch.test.sh review-pr-codex-six-child.test.sh; do
+for required in review-pr-codex-entry.test.sh agent-dispatch.test.sh \
+                review-pr-codex-six-child.test.sh worktree-receipts.test.sh; do
   if ! grep -q "bash tests/$required" <<<"$macos_supervision_block"; then
     echo "  FAIL  macOS supervision smoke job is missing $required"
     exit 1
@@ -185,6 +187,29 @@ if [ "$windows_timeout_rows" = "$WINDOWS_TIMEOUT_MINUTES" ]; then
 else
   echo "  FAIL  W6 the windows job must have exactly one ${WINDOWS_TIMEOUT_MINUTES}-minute timeout"
   echo "         observed timeout rows: ${windows_timeout_rows:-<none>}"
+  FAIL=$((FAIL+1))
+fi
+
+# W7 — the receipt-retirement helper exercises real filesystem semantics on
+# every supported runner, including native Windows rather than only Git Bash
+# shape inspection on Unix.
+receipt_test='bash tests/worktree-receipts.test.sh'
+missing_receipt_jobs=''
+for job_and_block in \
+  "Linux|$linux_job_block" \
+  "macOS|$macos_supervision_block" \
+  "Windows|$windows_job_block"; do
+  job=${job_and_block%%|*}
+  block=${job_and_block#*|}
+  if ! grep -qF "$receipt_test" <<<"$block"; then
+    missing_receipt_jobs="${missing_receipt_jobs}${missing_receipt_jobs:+, }$job"
+  fi
+done
+if [ -z "$missing_receipt_jobs" ]; then
+  echo "  PASS  W7 worktree receipt retirement runs on Linux, macOS, and native Windows"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  W7 worktree receipt retirement is missing from: $missing_receipt_jobs"
   FAIL=$((FAIL+1))
 fi
 

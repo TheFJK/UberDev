@@ -23,10 +23,10 @@ done < "$MANIFEST"
 [ "$missing" -eq 0 ] && ok "C1 every codex-manifest path exists at repo root" \
   || no "C1 $missing codex-manifest path(s) do not exist"
 
-# C2 — count of real entries is 53
+# C2 — count of real entries is 55
 count=$(grep -cvE '^\s*(#|$)' "$MANIFEST")
-[ "$count" -eq 53 ] && ok "C2 codex manifest lists exactly 53 files" \
-  || no "C2 codex manifest lists $count files (expected 53)"
+[ "$count" -eq 55 ] && ok "C2 codex manifest lists exactly 55 files" \
+  || no "C2 codex manifest lists $count files (expected 55)"
 
 # C3 — excluded files are NOT listed
 for bad in codex/uberdev-codex/skills/uberdev-cmd-solve/SKILL.md \
@@ -54,6 +54,16 @@ done
 grep -qxF codex/uberdev-codex/policy/solve-run-tree-v1.json "$MANIFEST" \
   && grep -qxF codex/uberdev-codex/shared/phase1-reviewer-output-v1.md "$MANIFEST" \
   && ok "C5 canonical policy projection source + reviewer output contract present"
+
+# C6 — native Codex packaging carries the same receipt-retirement helpers as
+# the Claude runtime.
+for req in codex/uberdev-codex/lib/atomic_move.py \
+           codex/uberdev-codex/lib/worktree_receipts.py; do
+  grep -qxF "$req" "$MANIFEST" || no "C6 missing receipt-retirement helper: $req"
+done
+grep -qxF codex/uberdev-codex/lib/atomic_move.py "$MANIFEST" \
+  && grep -qxF codex/uberdev-codex/lib/worktree_receipts.py "$MANIFEST" \
+  && ok "C6 both Codex receipt-retirement helpers are packaged"
 
 echo "  Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

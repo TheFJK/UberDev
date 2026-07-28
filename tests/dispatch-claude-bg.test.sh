@@ -603,7 +603,7 @@ for CLAUDE_SHELL in "${CLAUDE_SHELLS[@]}"; do
 done
 rm -rf "$CLAUDE_STDIN_TMP"
 
-echo "== Claude bootstrap timeout and release-failure handle preservation =="
+echo "== Claude bootstrap timeout and release-failure supervision =="
 CLAUDE_TIMEOUT_CONTRACT="$(bash -c '
   . "$1"
   unset UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT
@@ -1156,17 +1156,19 @@ CLAUDE_RELEASE_RECLAIM_RESULT="$(
 CLAUDE_RELEASE_RECLAIM_RC=$?
 set +e
 if [ "$CLAUDE_RELEASE_COMMAND_RC" -eq 0 ] \
-    && [[ "$CLAUDE_RELEASE_RESULT" == *'rc=0 id=c0de335a'* ]] \
-    && grep -Fq 'release failed after claude-bootstrap (rc=31)' \
+    && [ "$CLAUDE_RELEASE_RESULT" = 'rc=2 id=' ] \
+    && [ "$(grep -Fxc 'uberdev git metadata mutex: release failed after transaction' \
+      "$CLAUDE_BOOT_TMP/runtime-release/solve-bg-stdout-339.log")" -eq 1 ] \
+    && ! grep -Fq 'release failed after claude-bootstrap' \
       "$CLAUDE_BOOT_TMP/runtime-release/solve-bg-stdout-339.log" \
     && [ "$(wc -l <"$CLAUDE_BOOT_TMP/release-provider.log" | tr -d ' ')" -eq 1 ] \
     && [ "$CLAUDE_RELEASE_RECLAIM_RC" -eq 0 ] \
     && [ "$CLAUDE_RELEASE_RECLAIM_RESULT" = 'first=75 state=reclaimed-published-dead second=0 release=0' ] \
     && [ ! -e "$CLAUDE_RELEASE_SCOPE/.mutex" ]; then
-  echo "  PASS  Claude release failure preserves the handle across one-observation reclaim and next-poll acquire"
+  echo "  PASS  Claude release failure returns infrastructure rc2 without a false handle and remains reclaimable"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  Claude release-failure handle contract: result=$CLAUDE_RELEASE_RESULT reclaim=$CLAUDE_RELEASE_RECLAIM_RESULT rc=$CLAUDE_RELEASE_RECLAIM_RC"
+  echo "  FAIL  Claude release-failure supervision contract: result=$CLAUDE_RELEASE_RESULT reclaim=$CLAUDE_RELEASE_RECLAIM_RESULT rc=$CLAUDE_RELEASE_RECLAIM_RC"
   FAIL=$((FAIL + 1))
 fi
 rm -rf "$CLAUDE_BOOT_TMP"
