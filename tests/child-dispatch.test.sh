@@ -78,6 +78,8 @@ PY
 )"
 uberdev_create_child_handoff sdd.task.implement sdd-w1-t1-implement-a1 "$BUILDER_INPUTS" '[]' >"$TMP/builder-receipt.json"
 BUILDER_OUT="$(cat "$TMP/builder-receipt.json")"
+PREFLIGHT_HANDOFF="$UBERDEV_CHILD_HANDOFF"
+PREFLIGHT_HANDOFF_SHA256="$UBERDEV_CHILD_HANDOFF_SHA256"
 CANON_RUN="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$TMP/run")"
 [ "$UBERDEV_CHILD_HANDOFF" = "$CANON_RUN/handoffs/sdd-w1-t1-implement-a1.json" ]
 [ "$UBERDEV_CHILD_RESULT" = "$CANON_RUN/children/sdd-w1-t1-implement-a1/result.md" ]
@@ -100,7 +102,130 @@ PY
 uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256"
 [ ! -e "$TMP/run/children/sdd-w1-t1-implement-a1" ]
 
-# Batch preflight derives the run directory while it parses the handoff. It
+# Preflight must authenticate a bounded, stable regular-file capture before it
+# decodes even the edge/run-directory fields used to call the full validator.
+preflight_must_reject() {
+  local label="$1" path="$2" expected_sha256="$3" diagnostic="$4" output rc
+  set +e
+  output="$(uberdev_preflight_child_batch "$path" "$expected_sha256" 2>&1)"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || {
+    echo "child-dispatch: $label preflight returned rc=$rc" >&2
+    return 1
+  }
+  printf '%s\n' "$output" | grep -Fq "$diagnostic" || {
+    echo "child-dispatch: $label preflight missed diagnostic $diagnostic" >&2
+    return 1
+  }
+}
+
+MALFORMED_HANDOFF="$TMP/preflight-malformed.json"
+printf '{not-json\n' >"$MALFORMED_HANDOFF"
+MALFORMED_SHA256="$(file_sha256 "$MALFORMED_HANDOFF")"
+preflight_must_reject malformed-before-digest "$MALFORMED_HANDOFF" \
+  0000000000000000000000000000000000000000000000000000000000000000 \
+  handoff_digest_mismatch
+preflight_must_reject malformed-after-digest "$MALFORMED_HANDOFF" \
+  "$MALFORMED_SHA256" invalid_handoff
+preflight_must_reject invalid-digest "$MALFORMED_HANDOFF" malformed \
+  invalid_handoff_digest
+
+SYMLINK_HANDOFF="$TMP/preflight-symlink.json"
+ln -s "$PREFLIGHT_HANDOFF" "$SYMLINK_HANDOFF"
+preflight_must_reject symlink "$SYMLINK_HANDOFF" \
+  "$PREFLIGHT_HANDOFF_SHA256" invalid_handoff
+
+OVERSIZED_HANDOFF="$TMP/preflight-oversized.json"
+python3 -I -B - "$OVERSIZED_HANDOFF" <<'PY'
+import pathlib,sys
+pathlib.Path(sys.argv[1]).write_bytes(b'{' + b'x' * 65536)
+PY
+OVERSIZED_SHA256="$(file_sha256 "$OVERSIZED_HANDOFF")"
+preflight_must_reject oversized "$OVERSIZED_HANDOFF" \
+  "$OVERSIZED_SHA256" invalid_handoff
+
+# A FIFO with a syntactically valid digest must be rejected from lstat without
+# blocking in open()/json.load(). Run it out of process so a regression has a
+# deterministic two-second wall rather than hanging the suite.
+FIFO_HANDOFF="$TMP/preflight-fifo.json"
+mkfifo "$FIFO_HANDOFF"
+python3 -I -B - "$LIB" "$FIFO_HANDOFF" \
+  0000000000000000000000000000000000000000000000000000000000000000 \
+  "$UBERDEV_CHILD_MANIFEST_PATH" <<'PY'
+import os,subprocess,sys
+library,handoff,digest,manifest=sys.argv[1:]
+environment=os.environ.copy()
+environment.update({
+    'UBERDEV_CHILD_TEST_MODE':'1',
+    'UBERDEV_CHILD_MANIFEST_PATH':manifest,
+})
+try:
+    result=subprocess.run(
+        ['bash','-c','. "$1"; uberdev_preflight_child_batch "$2" "$3"',
+         '_',library,handoff,digest],
+        capture_output=True,text=True,env=environment,timeout=2,
+    )
+except subprocess.TimeoutExpired as error:
+    raise SystemExit('child preflight blocked while opening a FIFO') from error
+if result.returncode != 2 or 'invalid_handoff' not in result.stderr:
+    raise SystemExit(
+        f'FIFO preflight returned rc={result.returncode} stderr={result.stderr!r}'
+    )
+PY
+
+# Replace the pathname with byte-identical content immediately after the secure
+# descriptor opens. Identity drift must fail even though the digest still
+# matches. The Python wrapper is test-local; production code has no race hook.
+PREFLIGHT_RACE="$TMP/preflight-race.json"
+PREFLIGHT_RACE_SWAP="$TMP/preflight-race.swap.json"
+cp "$PREFLIGHT_HANDOFF" "$PREFLIGHT_RACE"
+cp "$PREFLIGHT_HANDOFF" "$PREFLIGHT_RACE_SWAP"
+PREFLIGHT_RACE_SHA256="$(file_sha256 "$PREFLIGHT_RACE")"
+REAL_PREFLIGHT_PYTHON="$(command -v python3)"
+python3() {
+  if [ "${UBERDEV_TEST_PREFLIGHT_SWAP_PATH:-}" = "${5:-}" ] \
+      && [ "$#" -eq 11 ] && [ "${1:-}" = -I ] && [ "${2:-}" = -B ] \
+      && [ "${3:-}" = - ] && [ "${11:-}" = preflight ]; then
+    local source_file rc replacement="$UBERDEV_TEST_PREFLIGHT_SWAP_WITH"
+    source_file="$(mktemp "$TMP/preflight-source.XXXXXX")"
+    cat >"$source_file"
+    shift 3
+    set +e
+    command "$REAL_PREFLIGHT_PYTHON" -I -B -c '
+import os,sys
+source_path,replacement,*arguments=sys.argv[1:]
+target=arguments[1]
+source=open(source_path,encoding="utf-8").read()
+real_open=os.open
+swapped=False
+def race_open(path,flags,*args,**kwargs):
+    global swapped
+    descriptor=real_open(path,flags,*args,**kwargs)
+    if (not swapped and isinstance(path,str)
+            and os.path.abspath(path)==os.path.abspath(target)
+            and flags & os.O_ACCMODE == os.O_RDONLY):
+        swapped=True
+        os.replace(replacement,target)
+    return descriptor
+os.open=race_open
+sys.argv=["-"]+arguments
+exec(compile(source,source_path,"exec"),{"__name__":"__main__"})
+' "$source_file" "$replacement" "$@"
+    rc=$?
+    set -e
+    rm -f "$source_file"
+    return "$rc"
+  fi
+  command "$REAL_PREFLIGHT_PYTHON" "$@"
+}
+UBERDEV_TEST_PREFLIGHT_SWAP_PATH="$PREFLIGHT_RACE" \
+UBERDEV_TEST_PREFLIGHT_SWAP_WITH="$PREFLIGHT_RACE_SWAP" \
+  preflight_must_reject replacement-race "$PREFLIGHT_RACE" \
+    "$PREFLIGHT_RACE_SHA256" invalid_handoff
+unset -f python3
+
+# Batch preflight delegates discovery to the authenticated full validator. It
 # must not launch the standalone context-path helper for every child.
 eval "$(declare -f _uberdev_child_context_run_dir | sed '1s/_uberdev_child_context_run_dir/_saved_child_context_run_dir/')"
 _uberdev_child_context_run_dir() { return 97; }

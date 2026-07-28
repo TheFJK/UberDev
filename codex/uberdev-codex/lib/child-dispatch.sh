@@ -571,7 +571,6 @@ def read_regular_once(path,max_bytes,code,exact_mode=None,nonempty=False):
     finally: os.close(descriptor)
     if len(raw)>max_bytes or (nonempty and not raw): fail(code)
     return raw
-if not EDGE.fullmatch(edge): fail('invalid_edge_id')
 if re.fullmatch(r'[0-9a-f]{64}',expected_sha256) is None: fail('invalid_handoff_digest')
 handoff=os.path.abspath(handoff_arg)
 try:
@@ -590,7 +589,10 @@ if not isinstance(value,dict) or set(value)!=required or value.get('schema_versi
 carrier=value.get('carrier')
 carrier_keys={'schema_version','run_id','workflow','issue_num','context_file','context_sha256'}
 if not isinstance(carrier,dict) or set(carrier)!=carrier_keys or carrier.get('schema_version')!=1: fail('invalid_carrier_schema')
-if value.get('edge_id')!=edge: fail('edge_mismatch')
+handoff_edge=value.get('edge_id')
+if mode=='preflight' and edge=='': edge=handoff_edge
+if not isinstance(edge,str) or not EDGE.fullmatch(edge): fail('invalid_edge_id')
+if handoff_edge!=edge: fail('edge_mismatch')
 for field in ('run_id','instance_id','parent_run_id'):
     if not isinstance(value.get(field) if field!='run_id' else carrier.get(field),str): fail('invalid_identity')
 if not IDENT.fullmatch(carrier['run_id']) or not IDENT.fullmatch(value['instance_id']) or not IDENT.fullmatch(value['parent_run_id']): fail('invalid_identity')
@@ -732,11 +734,11 @@ role_raw=read_regular_once(role_path,262144,'unsafe_path')
 children_name='children'; instance=value['instance_id']
 child_dir=os.path.join(run_real,children_name,instance)
 expected_result=os.path.join(child_dir,'result.md'); expected_status=os.path.join(child_dir,'status.json')
-if os.path.realpath(result_arg)!=expected_result or os.path.realpath(status_arg)!=expected_status: fail('caller_path_mismatch')
 if mode=='preflight':
     print(json.dumps({'backend':context['metadata']['backend'],'edge_id':edge,'instance_id':instance},sort_keys=True,separators=(',',':')))
     raise SystemExit(0)
 if mode!='dispatch': fail('invalid_prepare_mode')
+if os.path.realpath(result_arg)!=expected_result or os.path.realpath(status_arg)!=expected_status: fail('caller_path_mismatch')
 created_child=False; childrenfd=None; childfd=None
 if descriptor_relative:
     runfd=os.open(run_real,os.O_RDONLY|os.O_DIRECTORY|getattr(os,'O_NOFOLLOW',0))
@@ -938,28 +940,13 @@ uberdev_preflight_child_batch() {
     _uberdev_child_error 'expected HANDOFF_JSON_FILE EXPECTED_SHA256 pairs'
     return 2
   }
-  local handoff expected_sha256 info edge instance run_dir result status prepared backend seen='|'
+  local handoff expected_sha256 instance prepared backend seen='|'
   while [ "$#" -gt 0 ]; do
     handoff="$1"; expected_sha256="$2"; shift 2
-    info="$(python3 -I -B - "$handoff" <<'PY'
-import json,ntpath,os,re,sys
-try:
- v=json.load(open(sys.argv[1])); carrier=v['carrier']
- path=carrier['context_file']
- if not path or any(ord(char)<32 or ord(char)==127 for char in path): raise ValueError()
- path_module=ntpath if os.name=='nt' or re.match(r'^[A-Za-z]:[\\/]',path) or path.startswith(('\\\\','//')) else os.path
- if not path_module.isabs(path) or any(part in {'.','..'} for part in re.split(r'[\\/]',path)): raise ValueError()
- state_dir=path_module.dirname(path); run_dir=path_module.dirname(state_dir)
- if not state_dir or not run_dir or run_dir==state_dir: raise ValueError()
- print(json.dumps({'edge':v['edge_id'],'instance':v['instance_id'],'run_dir':run_dir},sort_keys=True,separators=(',',':')),end='')
-except Exception: raise SystemExit(2)
-PY
-)" || return 2
-    edge="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["edge"],end="")' "$info")" || return 2
-    instance="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["instance"],end="")' "$info")" || return 2
-    run_dir="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["run_dir"],end="")' "$info")" || return 2
-    result="$run_dir/children/$instance/result.md"; status="$run_dir/children/$instance/status.json"
-    prepared="$(_uberdev_child_prepare "$edge" "$handoff" "$expected_sha256" "$result" "$status" preflight)" || return $?
+    # Empty routing/path arguments select side-effect-free discovery: the full
+    # validator derives the edge only after authenticating the handoff bytes.
+    prepared="$(_uberdev_child_prepare '' "$handoff" "$expected_sha256" '' '' preflight)" || return $?
+    instance="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["instance_id"],end="")' "$prepared")" || return 2
     case "$seen" in *"|$instance|"*) _uberdev_child_error 'duplicate batch instance'; return 2 ;; esac
     seen="${seen}${instance}|"
     backend="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["backend"],end="")' "$prepared")" || return 2

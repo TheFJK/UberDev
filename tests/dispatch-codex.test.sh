@@ -131,6 +131,95 @@ for receipt_dispatch_mirror in "$DISPATCH_LIB" "$CODEX_DISPATCH_LIB"; do
     "dispatch never path-unlinks an ownership receipt ($(basename "$(dirname "$(dirname "$receipt_dispatch_mirror")")"))"
 done
 
+echo "== Native receipt helper converts only absolute authority paths =="
+NATIVE_AUTHORITY_TMP="$(mktemp -d)"
+for receipt_dispatch_mirror in "$DISPATCH_LIB" "$CODEX_DISPATCH_LIB"; do
+  mirror_name="$(basename "$(dirname "$(dirname "$receipt_dispatch_mirror")")")"
+  native_authority_args="$NATIVE_AUTHORITY_TMP/$mirror_name.args"
+  native_authority_conversions="$NATIVE_AUTHORITY_TMP/$mirror_name.conversions"
+  if MSYSTEM=MINGW64 bash -c '
+    . "$1"
+    args_file="$2"
+    conversions_file="$3"
+    cygpath() {
+      [ "$1" = -m ] || return 91
+      printf "%s\n" "$2" >>"$conversions_file"
+      case "$2" in
+        /git-bash/repo) printf "C:/Native/Repo" ;;
+        /git-bash/runtime/receipt.json) printf "C:/Native/Runtime/receipt.json" ;;
+        *) return 92 ;;
+      esac
+    }
+    _uberdev_dispatch_python() {
+      printf "%s\n" "$@" >"$args_file"
+    }
+    _uberdev_dispatch_worktree_receipt_helper create \
+      --repo /git-bash/repo \
+      --relative .claude/worktrees/solve-issue-335-native-authority \
+      --branch worktree-solve-issue-335-native-authority \
+      --receipt /git-bash/runtime/receipt.json \
+      --start-head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  ' _ "$receipt_dispatch_mirror" "$native_authority_args" "$native_authority_conversions" \
+      && native_python -I -B - \
+        "$native_authority_args" "$native_authority_conversions" \
+        "$(dirname "$receipt_dispatch_mirror")/worktree_receipts.py" <<'PY'
+import pathlib
+import sys
+
+args_path, conversions_path, helper_path = map(pathlib.Path, sys.argv[1:])
+assert args_path.read_text().splitlines() == [
+    "-I",
+    "-B",
+    str(helper_path),
+    "create",
+    "--repo",
+    "C:/Native/Repo",
+    "--relative",
+    ".claude/worktrees/solve-issue-335-native-authority",
+    "--branch",
+    "worktree-solve-issue-335-native-authority",
+    "--receipt",
+    "C:/Native/Runtime/receipt.json",
+    "--start-head",
+    "a" * 40,
+]
+assert conversions_path.read_text().splitlines() == [
+    "/git-bash/repo",
+    "/git-bash/runtime/receipt.json",
+]
+PY
+  then
+    pass_msg "receipt helper converts repo/receipt and preserves relative ($mirror_name)"
+  else
+    fail_msg "receipt helper converts only absolute authority paths" "$mirror_name"
+  fi
+
+  native_authority_fail_marker="$NATIVE_AUTHORITY_TMP/$mirror_name.python-called"
+  if MSYSTEM=MINGW64 bash -c '
+    . "$1"
+    marker="$2"
+    cygpath() {
+      [ "$1" = -m ] || return 91
+      [ "$2" = /git-bash/repo ] && { printf "C:/Native/Repo"; return 0; }
+      return 93
+    }
+    _uberdev_dispatch_python() { : >"$marker"; }
+    _uberdev_dispatch_worktree_receipt_helper create \
+      --repo /git-bash/repo \
+      --relative .claude/worktrees/solve-issue-335-native-authority \
+      --branch worktree-solve-issue-335-native-authority \
+      --receipt /git-bash/runtime/receipt.json \
+      --start-head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  ' _ "$receipt_dispatch_mirror" "$native_authority_fail_marker" >/dev/null 2>&1; then
+    fail_msg "receipt helper fails closed when native conversion fails" "$mirror_name returned success"
+  elif [ -e "$native_authority_fail_marker" ]; then
+    fail_msg "receipt helper fails before invoking native Python" "$mirror_name invoked Python"
+  else
+    pass_msg "receipt helper fails closed before native Python on conversion failure ($mirror_name)"
+  fi
+done
+rm -rf "$NATIVE_AUTHORITY_TMP"
+
 for codex_dispatch_mirror in "$DISPATCH_LIB" "$CODEX_DISPATCH_LIB"; do
   if extract_function_body _uberdev_dispatch_codex "$codex_dispatch_mirror" \
       | grep -Fq '${BG_TURBO_ENV[@]+"${BG_TURBO_ENV[@]}"}'; then
@@ -159,12 +248,34 @@ if [ "$(native_python -I -B -c 'import os; print(os.name, end="")')" = nt ]; the
   windows_boundary_branch='worktree-solve-issue-335-windows-boundary'
   windows_boundary_receipt="$WINDOWS_BOUNDARY_TMP/RuntimeCanonical/windows-boundary.owner.json"
   windows_boundary_stderr="$WINDOWS_BOUNDARY_TMP/RuntimeCanonical/windows-boundary.stderr"
-  windows_boundary_output="$(native_python -I -B "$WORKTREE_RECEIPTS" create \
+  windows_raw_receipt="$WINDOWS_BOUNDARY_TMP/RuntimeCanonical/windows-raw.owner.json"
+  windows_raw_stderr="$WINDOWS_BOUNDARY_TMP/RuntimeCanonical/windows-raw.stderr"
+  windows_raw_output="$(native_python -I -B "$WORKTREE_RECEIPTS" create \
     --repo "$WINDOWS_BOUNDARY_TMP/RepoCanonical" \
     --relative "$windows_boundary_relative" \
     --branch "$windows_boundary_branch" \
-    --receipt "$windows_boundary_receipt" \
+    --receipt "$windows_raw_receipt" \
     --start-head "$windows_boundary_head" \
+    2>"$windows_raw_stderr")"
+  windows_raw_rc=$?
+  if [ "$windows_raw_rc" -eq 3 ] \
+      && [ -z "$windows_raw_output" ] \
+      && [ ! -e "$windows_raw_receipt" ] \
+      && [ "$(cat "$windows_raw_stderr")" = 'uberdev worktree receipt: invalid authority' ]; then
+    pass_msg "raw Git Bash paths remain invalid native-Python authority"
+  else
+    fail_msg "raw Git Bash paths remain rejected before native receipt creation" \
+      "rc=$windows_raw_rc stdout=$windows_raw_output stderr=$(tr '\n' ';' <"$windows_raw_stderr")"
+  fi
+
+  windows_boundary_output="$(bash -c '
+    . "$1"
+    _uberdev_dispatch_worktree_receipt_helper create \
+      --repo "$2" --relative "$3" --branch "$4" \
+      --receipt "$5" --start-head "$6"
+  ' _ "$DISPATCH_LIB" "$WINDOWS_BOUNDARY_TMP/RepoCanonical" \
+    "$windows_boundary_relative" "$windows_boundary_branch" \
+    "$windows_boundary_receipt" "$windows_boundary_head" \
     2>"$windows_boundary_stderr")"
   windows_boundary_rc=$?
   windows_boundary_state="$(printf '%s' "$windows_boundary_output" \
@@ -192,12 +303,15 @@ if [ "$(native_python -I -B -c 'import os; print(os.name, end="")')" = nt ]; the
       windows_case_receipt="$windows_case_parent/case-$windows_case_mode.owner.json"
     fi
     windows_case_stderr="$WINDOWS_BOUNDARY_TMP/RuntimeCanonical/case-$windows_case_mode.stderr"
-    native_python -I -B "$WORKTREE_RECEIPTS" create \
-      --repo "$windows_case_repo" \
-      --relative ".claude/worktrees/solve-issue-335-windows-case-$windows_case_mode" \
-      --branch "worktree-solve-issue-335-windows-case-$windows_case_mode" \
-      --receipt "$windows_case_receipt" \
-      --start-head "$windows_boundary_head" \
+    bash -c '
+      . "$1"
+      _uberdev_dispatch_worktree_receipt_helper create \
+        --repo "$2" --relative "$3" --branch "$4" \
+        --receipt "$5" --start-head "$6"
+    ' _ "$DISPATCH_LIB" "$windows_case_repo" \
+      ".claude/worktrees/solve-issue-335-windows-case-$windows_case_mode" \
+      "worktree-solve-issue-335-windows-case-$windows_case_mode" \
+      "$windows_case_receipt" "$windows_boundary_head" \
       >"$WINDOWS_BOUNDARY_TMP/RuntimeCanonical/case-$windows_case_mode.stdout" \
       2>"$windows_case_stderr"
     windows_case_rc=$?

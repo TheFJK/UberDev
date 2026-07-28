@@ -248,6 +248,8 @@ try:
     for alias in (
         "Repo\\Runtime",
         "Repo/Runtime",
+        "/tmp/Runtime/receipt.json",
+        "/d/a/UberDev/Runtime/receipt.json",
         "C:\\Repo\\.\\Runtime",
         "C:/Repo/./Runtime",
         "C:\\Repo\\Runtime\\..\\Receipt",

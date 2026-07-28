@@ -428,10 +428,29 @@ PY
 # that mutex is released.  Invoke the sibling helper by its resolved absolute
 # path so PATH or the caller's working directory cannot substitute authority.
 _uberdev_dispatch_worktree_receipt_helper() {
-  local helper="$_UBERDEV_DISPATCH_LIB_DIR/worktree_receipts.py"
+  local helper="$_UBERDEV_DISPATCH_LIB_DIR/worktree_receipts.py" converted
+  local -a helper_args=()
   case "$helper" in /*|[A-Za-z]:[\\/]*) ;; *) return 2 ;; esac
   [ -f "$helper" ] || return 2
-  _uberdev_dispatch_python -I -B "$helper" "$@"
+  # Git Bash paths are shell authority until they cross into native Python.
+  # Convert only absolute pathname fields; --relative remains the canonical
+  # POSIX worktree identity consumed by worktree_receipts.py.
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --repo|--receipt)
+        [ "$#" -ge 2 ] || return 3
+        case "$2" in /*|[A-Za-z]:[\\/]*) ;; *) return 3 ;; esac
+        converted="$(_uberdev_dispatch_native_cli_path "$2")" || return $?
+        helper_args+=( "$1" "$converted" )
+        shift 2
+        ;;
+      *)
+        helper_args+=( "$1" )
+        shift
+        ;;
+    esac
+  done
+  _uberdev_dispatch_python -I -B "$helper" "${helper_args[@]}"
 }
 
 _uberdev_dispatch_parse_codex_worktree_create_output() {
