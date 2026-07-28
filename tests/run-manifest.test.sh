@@ -1962,26 +1962,26 @@ for index, module_path in enumerate(sys.argv[1:3]):
         accepted_link_counts = {
             link_count
             for link_count in (0, 1, 2)
-            if module._artifact_publication_descriptor_link_count_valid(
+            if module._artifact_descriptor_link_count_valid(
                 StatView(base, st_nlink=link_count)
             )
         }
         if accepted_link_counts != {0, 1}:
             failures.append(
-                f"{index}: native Windows publication descriptor accepted "
+                f"{index}: native Windows artifact descriptor accepted "
                 f"st_nlink={sorted(accepted_link_counts)!r}, expected [0, 1]"
             )
     with mock.patch.object(module, "_uses_native_windows_filesystem", return_value=False):
         accepted_link_counts = {
             link_count
             for link_count in (0, 1, 2)
-            if module._artifact_publication_descriptor_link_count_valid(
+            if module._artifact_descriptor_link_count_valid(
                 StatView(base, st_nlink=link_count)
             )
         }
         if accepted_link_counts != {1}:
             failures.append(
-                f"{index}: POSIX publication descriptor accepted "
+                f"{index}: POSIX artifact descriptor accepted "
                 f"st_nlink={sorted(accepted_link_counts)!r}, expected [1]"
             )
 
@@ -1993,6 +1993,113 @@ for index, module_path in enumerate(sys.argv[1:3]):
             | getattr(os, "O_NOINHERIT", 0),
             mode,
         )
+
+    def modeled_capture(native_windows, descriptor_link_counts, path_link_counts):
+        descriptor_snapshot = [0]
+        path_snapshot = [0]
+
+        def modeled_lstat(path):
+            entry = real_lstat(path)
+            if native_windows:
+                entry = windows_path_view(entry)
+            snapshot = path_snapshot[0]
+            path_snapshot[0] += 1
+            return StatView(entry, st_nlink=path_link_counts[snapshot])
+
+        def modeled_fstat(descriptor):
+            entry = real_fstat(descriptor)
+            snapshot = descriptor_snapshot[0]
+            descriptor_snapshot[0] += 1
+            link_count = descriptor_link_counts[snapshot]
+            if native_windows:
+                return windows_fd_view(
+                    entry, link_count=link_count
+                )
+            return StatView(entry, st_nlink=link_count)
+
+        error = None
+        try:
+            with mock.patch.object(
+                module,
+                "_uses_native_windows_filesystem",
+                return_value=native_windows,
+            ), mock.patch.object(
+                module, "_secure_open_regular", direct_open
+            ), mock.patch.object(
+                module.os, "lstat", modeled_lstat
+            ), mock.patch.object(
+                module.os, "fstat", modeled_fstat
+            ):
+                payload, _ = module.secure_capture_regular(
+                    str(artifact), 1, 1024
+                )
+        except (module.ManifestRejected, module.ManifestRuntimeError) as caught:
+            error = caught
+        else:
+            if payload != b"verified bytes\n":
+                error = AssertionError("modeled capture changed bytes")
+        return error, descriptor_snapshot[0], path_snapshot[0]
+
+    capture_error, descriptor_calls, path_calls = modeled_capture(
+        True, (0, 0), (1, 1, 1)
+    )
+    if capture_error is not None or (descriptor_calls, path_calls) != (2, 3):
+        failures.append(
+            f"{index}: native Windows descriptor st_nlink=0 capture failed "
+            f"with calls={descriptor_calls}/{path_calls} "
+            f"({type(capture_error).__name__}: {capture_error})"
+        )
+    for native_windows, descriptor_link_counts, label in (
+        (False, (0, 1), "POSIX descriptor st_nlink=0"),
+        (True, (2, 1), "native Windows descriptor st_nlink=2"),
+    ):
+        capture_error, descriptor_calls, path_calls = modeled_capture(
+            native_windows, descriptor_link_counts, (1, 1, 1)
+        )
+        if not (
+            isinstance(capture_error, module.ManifestRejected)
+            and str(capture_error) == "artifact_not_owned_regular"
+            and (descriptor_calls, path_calls) == (1, 2)
+        ):
+            failures.append(
+                f"{index}: {label} was not rejected "
+                f"at the initial snapshot with calls="
+                f"{descriptor_calls}/{path_calls} "
+                f"({type(capture_error).__name__}: {capture_error})"
+            )
+    capture_error, descriptor_calls, path_calls = modeled_capture(
+        True, (1, 2), (1, 1, 1)
+    )
+    if not (
+        isinstance(capture_error, module.ManifestRejected)
+        and str(capture_error) == "artifact_not_owned_regular"
+        and (descriptor_calls, path_calls) == (2, 3)
+    ):
+        failures.append(
+            f"{index}: native Windows descriptor st_nlink=1->2 transition "
+            f"was not rejected at after_open with calls="
+            f"{descriptor_calls}/{path_calls} "
+            f"({type(capture_error).__name__}: {capture_error})"
+        )
+    for snapshot, snapshot_name in enumerate(("before", "current", "after_path")):
+        for path_link_count in (0, 2):
+            path_link_counts = [1, 1, 1]
+            path_link_counts[snapshot] = path_link_count
+            capture_error, descriptor_calls, path_calls = modeled_capture(
+                True, (1, 1), tuple(path_link_counts)
+            )
+            expected_calls = (1, 2) if snapshot < 2 else (2, 3)
+            if not (
+                isinstance(capture_error, module.ManifestRejected)
+                and str(capture_error) == "artifact_not_owned_regular"
+                and (descriptor_calls, path_calls) == expected_calls
+            ):
+                failures.append(
+                    f"{index}: native Windows {snapshot_name} pathname "
+                    f"st_nlink={path_link_count} was not rejected "
+                    f"with calls={descriptor_calls}/{path_calls} "
+                    f"({type(capture_error).__name__}: {capture_error})"
+                )
 
     def path_lstat(path):
         return windows_path_view(real_lstat(path))
@@ -2081,6 +2188,111 @@ for index, module_path in enumerate(sys.argv[1:3]):
         publication_candidate[0] = candidate
         publication_descriptor_open[0] = True
         return candidate, descriptor
+
+    def modeled_publication(
+        descriptor_link_counts, scenario, path_link_count=1
+    ):
+        descriptor_snapshot = [0]
+        path_snapshot = [0]
+        modeled_candidate = [None]
+
+        def modeled_publication_open(requested_path, digest):
+            candidate = f"{requested_path}.{scenario}-{digest}"
+            descriptor = real_open(
+                candidate,
+                os.O_RDWR
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NOINHERIT", 0),
+                0o600,
+            )
+            modeled_candidate[0] = candidate
+            return candidate, descriptor
+
+        def modeled_publication_fstat(descriptor):
+            entry = real_fstat(descriptor)
+            snapshot = descriptor_snapshot[0]
+            descriptor_snapshot[0] += 1
+            return windows_fd_view(
+                entry, link_count=descriptor_link_counts[snapshot]
+            )
+
+        def modeled_publication_lstat(path):
+            path_snapshot[0] += 1
+            return StatView(
+                windows_path_view(real_lstat(path)),
+                st_nlink=path_link_count,
+            )
+
+        error = None
+        try:
+            with mock.patch.object(
+                module.os, "name", "nt"
+            ), mock.patch.object(
+                module,
+                "_uses_native_windows_filesystem",
+                return_value=True,
+            ), mock.patch.object(
+                module,
+                "_open_publication_attempt",
+                modeled_publication_open,
+            ), mock.patch.object(
+                module.os, "lstat", modeled_publication_lstat
+            ), mock.patch.object(
+                module.os, "fstat", modeled_publication_fstat
+            ):
+                module.secure_publish_captured(
+                    str(root / f"publication-{scenario}"),
+                    b"modeled publication\n",
+                )
+        except (module.ManifestRejected, module.ManifestRuntimeError) as caught:
+            error = caught
+        finally:
+            if (
+                modeled_candidate[0] is not None
+                and pathlib.Path(modeled_candidate[0]).exists()
+            ):
+                pathlib.Path(modeled_candidate[0]).unlink()
+        return error, descriptor_snapshot[0], path_snapshot[0]
+
+    for descriptor_link_counts, expected_calls, scenario in (
+        ((2, 1), (1, 0), "opened-link-two"),
+        ((1, 2), (2, 1), "finalized-link-two"),
+    ):
+        publication_error, descriptor_calls, path_calls = modeled_publication(
+            descriptor_link_counts, scenario
+        )
+        if not (
+            isinstance(publication_error, module.ManifestRejected)
+            and str(publication_error) == "artifact_snapshot_invalid"
+            and (descriptor_calls, path_calls) == expected_calls
+        ):
+            failures.append(
+                f"{index}: publication {scenario} was not rejected at its "
+                f"descriptor helper site with calls="
+                f"{descriptor_calls}/{path_calls} "
+                f"({type(publication_error).__name__}: {publication_error})"
+            )
+
+    for path_link_count in (0, 2):
+        publication_error, descriptor_calls, path_calls = modeled_publication(
+            (1, 1),
+            f"path-link-{path_link_count}",
+            path_link_count=path_link_count,
+        )
+        if not (
+            isinstance(publication_error, module.ManifestRejected)
+            and str(publication_error) == "artifact_snapshot_invalid"
+            and (descriptor_calls, path_calls) == (2, 1)
+        ):
+            failures.append(
+                f"{index}: publication final pathname "
+                f"st_nlink={path_link_count} was not rejected with valid "
+                f"descriptor snapshots and calls={descriptor_calls}/"
+                f"{path_calls} "
+                f"({type(publication_error).__name__}: {publication_error})"
+            )
 
     def publication_descriptor_fstat(descriptor):
         entry = real_fstat(descriptor)

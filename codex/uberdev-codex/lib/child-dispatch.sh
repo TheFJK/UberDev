@@ -1161,6 +1161,8 @@ def owned(entry):
  return uid is None or not hasattr(entry,'st_uid') or entry.st_uid==uid
 def stable(entry):
  return (entry.st_dev,entry.st_ino,entry.st_size,entry.st_mtime_ns,entry.st_ctime_ns)
+def descriptor_link_count_valid(entry):
+ return entry.st_nlink==1 or (entry.st_nlink==0 and (os.name=='nt' or sys.platform=='win32'))
 def parse_scalar(raw):
  if not raw or raw.strip()!=raw or any(ord(char)<32 or ord(char)==127 for char in raw): raise ValueError()
  def validated(value):
@@ -1206,7 +1208,9 @@ try:
  finally:
   if descriptor is not None: os.close(descriptor)
  if (len(raw_bytes)>1048576 or any(linked(item) or not stat.S_ISREG(item.st_mode)
-      or not owned(item) or item.st_nlink!=1 for item in (opened,final,current))
+      or not owned(item) for item in (opened,final,current))
+     or not descriptor_link_count_valid(opened) or not descriptor_link_count_valid(final)
+     or current.st_nlink!=1
      or stable(opened)!=stable(entry) or stable(final)!=stable(opened)
      or stable(current)!=stable(final)): raise ValueError()
  raw=raw_bytes.decode('utf-8')
@@ -1275,7 +1279,8 @@ try:
     0o600,
    )
    opened=os.fstat(descriptor); current=os.lstat(validated_path)
-   if (stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1
+   if (stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(opened.st_mode)
+       or not descriptor_link_count_valid(opened) or current.st_nlink!=1
        or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)): raise OSError(5,'publication identity')
    published_identity=(opened.st_dev,opened.st_ino)
    view=memoryview(raw_bytes)
@@ -1291,7 +1296,7 @@ try:
    final_opened=os.fstat(descriptor); final_current=os.lstat(validated_path)
    if ((final_opened.st_dev,final_opened.st_ino)!=(final_current.st_dev,final_current.st_ino)
        or final_opened.st_size!=len(raw_bytes) or final_current.st_size!=len(raw_bytes)
-       or final_opened.st_nlink!=1 or final_current.st_nlink!=1
+       or not descriptor_link_count_valid(final_opened) or final_current.st_nlink!=1
        or (os.name!='nt' and (stat.S_IMODE(final_opened.st_mode)!=0o400 or stat.S_IMODE(final_current.st_mode)!=0o400))):
     raise OSError(5,'publication verification')
    os.close(descriptor); descriptor=None
@@ -1313,6 +1318,8 @@ try:
    read_current=os.lstat(validated_path)
    if ((read_opened.st_dev,read_opened.st_ino)!=(read_final.st_dev,read_final.st_ino)
        or (read_final.st_dev,read_final.st_ino)!=(read_current.st_dev,read_current.st_ino)
+       or not descriptor_link_count_valid(read_opened) or not descriptor_link_count_valid(read_final)
+       or read_current.st_nlink!=1
        or len(readback)>1048576 or readback!=raw_bytes):
     raise OSError(5,'publication readback')
   except BaseException:

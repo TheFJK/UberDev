@@ -1430,16 +1430,16 @@ def _artifact_identity(entry: os.stat_result) -> ArtifactIdentity:
     )
 
 
-def _artifact_publication_descriptor_link_count_valid(
+def _artifact_descriptor_link_count_valid(
     entry: os.stat_result,
 ) -> bool:
-    """Validate the still-open descriptor for one unique publication carrier."""
+    """Validate one still-open artifact descriptor's unique-carrier view."""
 
     if entry.st_nlink == 1:
         return True
-    # Native Windows can expose st_nlink=0 through fstat() while a freshly
-    # created carrier handle remains open. The pathname snapshots below must
-    # still report exactly one link and bind to this descriptor identity.
+    # Native Windows can expose st_nlink=0 through fstat() while an artifact
+    # handle remains open. Every pathname snapshot must still report exactly
+    # one link and bind to this descriptor identity.
     return _uses_native_windows_filesystem() and entry.st_nlink == 0
 
 
@@ -1480,7 +1480,7 @@ def secure_capture_regular(
             or not stat.S_ISREG(opened.st_mode)
             or not stat.S_ISREG(current.st_mode)
             or before.st_nlink != 1
-            or opened.st_nlink != 1
+            or not _artifact_descriptor_link_count_valid(opened)
             or current.st_nlink != 1
             or (uid is not None and opened.st_uid != uid)
         ):
@@ -1503,6 +1503,11 @@ def secure_capture_regular(
             or _artifact_identity(after_path) != identity
         ):
             raise ManifestRejected("artifact_replaced_during_capture")
+        if (
+            not _artifact_descriptor_link_count_valid(after_open)
+            or after_path.st_nlink != 1
+        ):
+            raise ManifestRejected("artifact_not_owned_regular")
         captured = payload, identity
     except (ManifestRejected, ManifestRuntimeError) as exc:
         failure = exc
@@ -1642,7 +1647,7 @@ def secure_publish_captured(
         opened = os.fstat(descriptor)
         if (
             not stat.S_ISREG(opened.st_mode)
-            or not _artifact_publication_descriptor_link_count_valid(opened)
+            or not _artifact_descriptor_link_count_valid(opened)
             or opened.st_size != len(payload)
         ):
             raise ManifestRejected("artifact_snapshot_invalid")
@@ -1674,7 +1679,7 @@ def secure_publish_captured(
         if (
             not stat.S_ISREG(finalized.st_mode)
             or not stat.S_ISREG(current.st_mode)
-            or not _artifact_publication_descriptor_link_count_valid(finalized)
+            or not _artifact_descriptor_link_count_valid(finalized)
             or current.st_nlink != 1
             or finalized.st_size != len(payload)
             or current.st_size != len(payload)
