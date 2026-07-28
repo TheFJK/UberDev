@@ -1986,7 +1986,13 @@ for index, module_path in enumerate(sys.argv[1:3]):
             )
 
     def direct_open(path, flags, mode=0o600):
-        return real_open(path, flags, mode)
+        return real_open(
+            path,
+            flags
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOINHERIT", 0),
+            mode,
+        )
 
     def path_lstat(path):
         return windows_path_view(real_lstat(path))
@@ -2064,7 +2070,13 @@ for index, module_path in enumerate(sys.argv[1:3]):
         attempt_counter[0] += 1
         candidate = f"{requested_path}.windows-fixture-{attempt_counter[0]}-{digest}"
         descriptor = real_open(
-            candidate, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600
+            candidate,
+            os.O_RDWR
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOINHERIT", 0),
+            0o600,
         )
         publication_candidate[0] = candidate
         publication_descriptor_open[0] = True
