@@ -164,9 +164,12 @@ exec "$PRKIT_REAL_GREP" "$@"
 SH
 chmod +x "$dp/bin/grep"
 real_grep="$(command -v grep)"
-if PATH="$dp/bin:$PATH" PRKIT_REAL_GREP="$real_grep" \
-     bash "$VERIFY" "$d" >/dev/null 2>&1; then
+V25_OUTPUT=""
+if V25_OUTPUT="$(PATH="$dp/bin:$PATH" PRKIT_REAL_GREP="$real_grep" \
+     bash "$VERIFY" "$d" 2>&1)"; then
   no "V25 placeholder scan error fails closed (verify wrongly PASSED)"
+elif ! printf '%s\n' "$V25_OUTPUT" | grep -qF 'placeholders: scan errored'; then
+  no "V25 placeholder scan error fails closed (expected diagnostic missing)"
 else
   ok "V25 placeholder scan error fails closed"
 fi

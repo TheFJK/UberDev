@@ -4,12 +4,12 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import ntpath
 import os
 import pathlib
 import stat
 import sys
-from typing import Callable
 
 
 REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -64,7 +64,9 @@ def _relative_parts(relative: str | os.PathLike[str]) -> tuple[str, ...]:
         raise GuardError(f"managed relative path contains a backslash: {raw!r}")
     drive, _ = ntpath.splitdrive(raw)
     if drive or raw.startswith("/"):
-        raise GuardError(f"managed path must be relative, not drive/UNC/absolute: {raw!r}")
+        raise GuardError(
+            f"managed path must be relative, not drive/UNC/absolute: {raw!r}"
+        )
     parts = tuple(raw.split("/"))
     if any(part in {"", ".", ".."} for part in parts):
         raise GuardError(f"managed relative path has an unsafe component: {raw!r}")
@@ -99,7 +101,9 @@ def _validate_sealed_tree(
                     path = pathlib.Path(entry.path)
                     metadata = _lstat_or_none(path, lstat_fn)
                     if metadata is None:
-                        raise GuardError(f"managed tree entry vanished during scan: {path}")
+                        raise GuardError(
+                            f"managed tree entry vanished during scan: {path}"
+                        )
                     if _is_link_or_reparse(metadata):
                         raise GuardError(
                             f"managed tree contains a link or reparse point: {path}"

@@ -229,7 +229,7 @@ assert_grep "$REVIEW_PR" 'review_pr\.ci\.classify.*head_sha|head_sha.*CI_CLASSIF
   "S10.10g — classifier handoff binds the validated PR head"
 assert_grep "$CLASSIFIER" 'log_sha256.*SHA-256|SHA-256.*log_sha256' \
   "S10.10h — classifier contract names the exact content digest"
-python3 -I -B - "$RUN_TREE" <<'PY'
+if python3 -I -B - "$RUN_TREE" <<'PY'
 import json,sys
 required=json.load(open(sys.argv[1],encoding="utf-8"))["edges"]["review_pr.ci.classify"]["required_inputs"]
 expected={
@@ -242,7 +242,7 @@ expected={
 if required!=expected or "log_path" in required:
     raise SystemExit("classifier authority is not closed over identity and bytes")
 PY
-if [ "$?" -eq 0 ]; then
+then
   echo "  PASS  S10.10i — policy closes classifier authority over PR/run/head and bounded bytes"
   PASS=$((PASS + 1))
 else
@@ -1172,6 +1172,7 @@ else
   set +e
   UNRELATED_RESULT="$(run_capture_fixture pull_request "$UNRELATED_RUN_JSON")"
   UNRELATED_RC=$?
+  set -e
   if [ "$UNRELATED_RC" -ne 0 ] && [ "$UNRELATED_RESULT" = classification_run_pr_mismatch ]; then
     echo "  PASS  S18-RT.5 — unrelated pull_request run fails closed"; PASS=$((PASS + 1))
   else
@@ -1182,6 +1183,7 @@ else
   set +e
   PUSH_STALE_RESULT="$(run_capture_fixture push "$PUSH_STALE_JSON")"
   PUSH_STALE_RC=$?
+  set -e
   if [ "$PUSH_STALE_RC" -ne 0 ] && [ "$PUSH_STALE_RESULT" = classification_run_head_mismatch ]; then
     echo "  PASS  S18-RT.6 — stale push run still requires direct branch-SHA equality"; PASS=$((PASS + 1))
   else
@@ -1190,10 +1192,10 @@ else
 
   ORIGINAL_HEAD=0123456789012345678901234567890123456789
   MOVED_HEAD=abcdefabcdefabcdefabcdefabcdefabcdefabcd
-  LOCAL_MOVE_RESULT="$(run_capture_fixture pull_request "$SYNTHETIC_MERGE_JSON" "$ORIGINAL_HEAD" "$MOVED_HEAD" "$ORIGINAL_HEAD")"
-  LIVE_MOVE_RESULT="$(run_capture_fixture pull_request "$SYNTHETIC_MERGE_JSON" "$ORIGINAL_HEAD" "$ORIGINAL_HEAD" "$MOVED_HEAD")"
+  LOCAL_MOVE_RESULT="$(run_capture_fixture pull_request "$SYNTHETIC_MERGE_JSON" "$ORIGINAL_HEAD" "$MOVED_HEAD" "$ORIGINAL_HEAD")" || true
+  LIVE_MOVE_RESULT="$(run_capture_fixture pull_request "$SYNTHETIC_MERGE_JSON" "$ORIGINAL_HEAD" "$ORIGINAL_HEAD" "$MOVED_HEAD")" || true
   MOVED_ASSOCIATION_JSON='{"id":991,"event":"pull_request","head_sha":"abcdefabcdefabcdefabcdefabcdefabcdefabcd","head_branch":"feature/current","repository":{"full_name":"owner/repo"},"pull_requests":[{"number":73,"head":{"sha":"abcdefabcdefabcdefabcdefabcdefabcdefabcd","ref":"feature/current"}}]}'
-  ASSOCIATION_MOVE_RESULT="$(run_capture_fixture pull_request "$MOVED_ASSOCIATION_JSON" "$ORIGINAL_HEAD")"
+  ASSOCIATION_MOVE_RESULT="$(run_capture_fixture pull_request "$MOVED_ASSOCIATION_JSON" "$ORIGINAL_HEAD")" || true
   if [ "$LOCAL_MOVE_RESULT" = classification_local_head_moved ] \
       && [ "$LIVE_MOVE_RESULT" = classification_live_head_moved ] \
       && [ "$ASSOCIATION_MOVE_RESULT" = classification_run_pr_moved ]; then
@@ -1237,6 +1239,7 @@ awk '
   }
 ' "$REVIEW_PR" >"$POST_MONITOR_REFRESH_FIXTURE"
 POST_MONITOR_REFRESH_LOG="$(mktemp)"
+set +e
 POST_MONITOR_REFRESH_OUTPUT="$(
   POST_MONITOR_REFRESH_LOG="$POST_MONITOR_REFRESH_LOG" bash -c '
     audit(){ printf "%s\n" "$*" >>"$POST_MONITOR_REFRESH_LOG"; }
@@ -1252,6 +1255,7 @@ POST_MONITOR_REFRESH_OUTPUT="$(
   ' _ "$POST_MONITOR_REFRESH_FIXTURE"
 )"
 POST_MONITOR_REFRESH_RC=$?
+set -e
 if grep -q '^unset PROBE_RC$' "$POST_MONITOR_REFRESH_FIXTURE" \
     && [ "$POST_MONITOR_REFRESH_RC" -ne 0 ] \
     && grep -qxF 'ci_phase_outcome outcome=halted subreason=post_monitor_refresh_failed' \
