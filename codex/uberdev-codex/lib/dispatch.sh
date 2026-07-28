@@ -608,10 +608,17 @@ _uberdev_dispatch_cleanup_codex_worktree() {
     done
     _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1
     release_rc=$?
+    [ "$release_rc" -eq 0 ] \
+      || printf 'uberdev codex cleanup: mutex release failed after cleanup transaction\n' >&2 \
+      || true
     [ "$release_rc" -eq 0 ] || [ "$rc" -ne 0 ] || rc=2
     [ "$release_rc" -ne 0 ] || trap - EXIT
     [ "$rc" -eq 0 ] || exit "$rc"
-    _uberdev_dispatch_discard_codex_worktree_receipt "$receipt" "$token" || exit 2
+    _uberdev_dispatch_discard_codex_worktree_receipt "$receipt" "$token" || {
+      printf 'uberdev codex cleanup: ownership receipt discard failed after cleanup transaction\n' >&2 \
+        || true
+      exit 2
+    }
   )
 }
 

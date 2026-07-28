@@ -398,21 +398,26 @@ fi
 retry_mutex_cleanup
 
 make_mutex_cleanup_fixture release-failure
+MUTEX_RELEASE_STDERR="$CLEANUP_TMP/runtime/mutex-release-failure.stderr"
 set +e
 bash -c '
   . "$1"
   _uberdev_semaphore_mutex_release() { return 31; }
   _uberdev_dispatch_cleanup_codex_worktree "$2" "$3" "$4" "$5" "$6" completed
-' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$MUTEX_RELATIVE" "$MUTEX_BRANCH" "$MUTEX_RECEIPT" "$MUTEX_TOKEN"
+' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$MUTEX_RELATIVE" "$MUTEX_BRANCH" "$MUTEX_RECEIPT" "$MUTEX_TOKEN" \
+  2>"$MUTEX_RELEASE_STDERR"
 MUTEX_RELEASE_RC=$?
 set -e
 if [ "$MUTEX_RELEASE_RC" -eq 2 ] \
     && [ ! -e "$CLEANUP_TMP/repo/$MUTEX_RELATIVE" ] \
     && ! git -C "$CLEANUP_TMP/repo" show-ref --verify --quiet "refs/heads/$MUTEX_BRANCH" \
-    && [ -f "$MUTEX_RECEIPT" ]; then
-  pass_msg "git metadata mutex release failure preserves the ownership receipt"
+    && [ -f "$MUTEX_RECEIPT" ] \
+    && [ "$(cat "$MUTEX_RELEASE_STDERR")" = \
+      'uberdev codex cleanup: mutex release failed after cleanup transaction' ]; then
+  pass_msg "git metadata mutex release failure is bounded, distinct, and preserves the ownership receipt"
 else
-  fail_msg "git metadata mutex release failure preserves recovery evidence" "rc=$MUTEX_RELEASE_RC"
+  fail_msg "git metadata mutex release failure is bounded, distinct, and preserves recovery evidence" \
+    "rc=$MUTEX_RELEASE_RC diagnostic=$(tr '\n' ';' <"$MUTEX_RELEASE_STDERR")"
 fi
 if retry_mutex_cleanup && [ ! -e "$MUTEX_RECEIPT" ]; then
   pass_msg "cleanup retry reclaims a dead mutex and commits the retained receipt"
@@ -421,21 +426,26 @@ else
 fi
 
 make_mutex_cleanup_fixture receipt-failure
+MUTEX_RECEIPT_STDERR="$CLEANUP_TMP/runtime/mutex-receipt-failure.stderr"
 set +e
 bash -c '
   . "$1"
   _uberdev_dispatch_discard_codex_worktree_receipt() { return 29; }
   _uberdev_dispatch_cleanup_codex_worktree "$2" "$3" "$4" "$5" "$6" completed
-' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$MUTEX_RELATIVE" "$MUTEX_BRANCH" "$MUTEX_RECEIPT" "$MUTEX_TOKEN"
+' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$MUTEX_RELATIVE" "$MUTEX_BRANCH" "$MUTEX_RECEIPT" "$MUTEX_TOKEN" \
+  2>"$MUTEX_RECEIPT_STDERR"
 MUTEX_RECEIPT_RC=$?
 set -e
 if [ "$MUTEX_RECEIPT_RC" -eq 2 ] \
     && [ ! -e "$CLEANUP_TMP/repo/$MUTEX_RELATIVE" ] \
     && ! git -C "$CLEANUP_TMP/repo" show-ref --verify --quiet "refs/heads/$MUTEX_BRANCH" \
-    && [ -f "$MUTEX_RECEIPT" ]; then
-  pass_msg "receipt commit failure is surfaced with recovery evidence retained"
+    && [ -f "$MUTEX_RECEIPT" ] \
+    && [ "$(cat "$MUTEX_RECEIPT_STDERR")" = \
+      'uberdev codex cleanup: ownership receipt discard failed after cleanup transaction' ]; then
+  pass_msg "receipt commit failure is bounded, distinct, and retains recovery evidence"
 else
-  fail_msg "receipt commit failure is surfaced with recovery evidence retained" "rc=$MUTEX_RECEIPT_RC"
+  fail_msg "receipt commit failure is bounded, distinct, and retains recovery evidence" \
+    "rc=$MUTEX_RECEIPT_RC diagnostic=$(tr '\n' ';' <"$MUTEX_RECEIPT_STDERR")"
 fi
 retry_mutex_cleanup
 
