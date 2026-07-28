@@ -160,7 +160,7 @@ simplify_fixer_result="$(
         pr_number 0 \
         disposition_path "$(json_string "$PHASE2_DISPOSITION_PATH")")"
       uberdev_create_child_handoff review_pr.fix.phase2 simplify-fixer-iter1-attempt01 "$inputs" null >/dev/null
-      prepared="$(_uberdev_child_prepare review_pr.fix.phase2 "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch)"
+      prepared="$(_uberdev_child_prepare review_pr.fix.phase2 "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch)"
       python3 -I -B -c '\''import json,sys; v=json.loads(sys.argv[1]); print(v["request"]["backend"]+":"+v["request"]["workspace_mode"]+":"+v["request"]["workspace_dir"],end="")'\'' "$prepared"
     ' _ "$TMP/simplify-setup.sh" "$TMP/repo" "$TMP/runtime-simplify"
 )"

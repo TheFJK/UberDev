@@ -472,6 +472,8 @@ RESULT_PATH_TMP="$(mktemp -d)"
 RESULT_PATH_TMP="$(cd "$RESULT_PATH_TMP" && pwd -P)"
 export UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
 export UBERDEV_CARRIER_RUN_DIR="$RESULT_PATH_TMP/run"
+export _UBERDEV_DISPATCH_BACKEND_ENUM='auto|claude-bg|wezterm|background|codex'
+export UBERDEV_CARRIER_BACKEND=codex
 awk '
   /^review_child_result_path\(\) \{/ { capture=1 }
   capture { print }
@@ -489,12 +491,14 @@ RESULT_PATH_INVALID=0
 if bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify >/dev/null' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER"; then
   RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 fi
-python3 -I -B - "$RESULT_LEDGER" "$RESULT_PATH" "$RESULT_STATUS" <<'PY'
+write_result_carrier_fixture() {
+  local backend="$1"
+  python3 -I -B - "$RESULT_LEDGER" "$RESULT_PATH" "$RESULT_STATUS" "$backend" <<'PY'
 import json,pathlib,sys
-ledger,result,status=sys.argv[1:]
+ledger,result,status,backend=sys.argv[1:]
 receipt={
  "schema_version":1,"edge_id":"review_pr.ci.classify","instance_id":"classifier",
- "backend":"codex","handle":"4242","state":"running",
+ "backend":backend,"handle":"4242","state":"running",
  "result_file":result,"status_file":status,
 }
 row={
@@ -503,13 +507,39 @@ row={
  "result":result,"status":status,
 }
 pathlib.Path(ledger).write_text(json.dumps(row,separators=(",",":"))+"\n")
+pathlib.Path(status).write_text(json.dumps({
+ "backend":backend,"state":"completed","exit_code":0,"pid":"4242",
+},separators=(",",":"))+"\n")
 PY
+}
+write_result_carrier_fixture codex
 RESULT_PATH_RESOLVED="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER")"
 [ "$RESULT_PATH_RESOLVED" != "$RESULT_PATH" ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 [ -f "$RESULT_PATH_RESOLVED" ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 cmp "$RESULT_PATH" "$RESULT_PATH_RESOLVED" >/dev/null || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 SNAPSHOT_CLASSIFICATION="$(bash -c '. "$1"; review_validate_ci_classification "$2" "$3"' _ "$CLASSIFY_HELPER" "$RESULT_PATH_RESOLVED" "$REPO_ROOT")"
 [ "$SNAPSHOT_CLASSIFICATION" = $'CLASSIFIED\tcode_bug\tREADME.md:42\t-' ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+
+RESULT_REASON="$(env _UBERDEV_DISPATCH_BACKEND_ENUM='auto|codex|codex' \
+  UBERDEV_CARRIER_BACKEND=codex \
+  bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' \
+    _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \
+  && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+[ "$RESULT_REASON" = classification_carrier_mismatch ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+RESULT_REASON="$(env \
+  _UBERDEV_DISPATCH_BACKEND_ENUM='auto|claude-bg|wezterm|background|codex' \
+  UBERDEV_CARRIER_BACKEND=auto \
+  bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' \
+    _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \
+  && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+[ "$RESULT_REASON" = classification_carrier_mismatch ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+write_result_carrier_fixture background
+RESULT_REASON="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' \
+  _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \
+  && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+[ "$RESULT_REASON" = classification_receipt_mismatch ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+write_result_carrier_fixture codex
+
 chmod 600 "$RESULT_PATH_RESOLVED"
 write_classifier_case AMBIGUOUS null null '"replacement after discovery"'
 cp "$CLASSIFY_CASE" "$RESULT_PATH_RESOLVED"

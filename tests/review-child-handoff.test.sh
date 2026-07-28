@@ -10,6 +10,13 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
 . "$LIB"
 
+file_sha256() {
+  [ "$#" -eq 1 ] || return 2
+  python3 -I -B -c \
+    'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest(),end="")' \
+    "$1"
+}
+
 # Native Windows Git and Git Bash can spell the same directory differently.
 # The Windows-path fixture must compare shell-canonical paths rather than inode
 # identity through two incompatible path syntaxes.
@@ -774,13 +781,14 @@ PY
   windows_handoff_stage review-handoff-create \
     uberdev_create_child_handoff review_pr.review.correctness \
     windows-reviewer-iter1-attempt01 "$WINDOWS_REVIEW_INPUT" '[]' >/dev/null
-  WINDOWS_REVIEW_HANDOFF="$UBERDEV_CHILD_HANDOFF"; WINDOWS_REVIEW_RESULT="$UBERDEV_CHILD_RESULT"; WINDOWS_REVIEW_STATUS="$UBERDEV_CHILD_STATUS"
+  WINDOWS_REVIEW_HANDOFF="$UBERDEV_CHILD_HANDOFF"; WINDOWS_REVIEW_HANDOFF_SHA256="$UBERDEV_CHILD_HANDOFF_SHA256"
+  WINDOWS_REVIEW_RESULT="$UBERDEV_CHILD_RESULT"; WINDOWS_REVIEW_STATUS="$UBERDEV_CHILD_STATUS"
   _uberdev_child_backend_cancellation_supported() { return 0; }
   windows_handoff_stage review-preflight \
-    uberdev_preflight_child_batch "$WINDOWS_REVIEW_HANDOFF"
+    uberdev_preflight_child_batch "$WINDOWS_REVIEW_HANDOFF" "$WINDOWS_REVIEW_HANDOFF_SHA256"
   windows_handoff_stage review-prepare \
     _uberdev_child_prepare review_pr.review.correctness \
-    "$WINDOWS_REVIEW_HANDOFF" "$WINDOWS_REVIEW_RESULT" \
+    "$WINDOWS_REVIEW_HANDOFF" "$WINDOWS_REVIEW_HANDOFF_SHA256" "$WINDOWS_REVIEW_RESULT" \
     "$WINDOWS_REVIEW_STATUS" dispatch >/dev/null
   printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings: []' 'confidence: high' '```' >"$WINDOWS_REVIEW_RESULT"
   WINDOWS_VALIDATED="$(dirname "$WINDOWS_REVIEW_RESULT")/validated-result.md"
@@ -795,12 +803,13 @@ PY
   windows_handoff_stage fix-handoff-create \
     uberdev_create_child_handoff review_pr.fix.phase1 \
     windows-fixer-iter1-attempt01 "$WINDOWS_FIX_INPUT" null >/dev/null
-  WINDOWS_FIX_HANDOFF="$UBERDEV_CHILD_HANDOFF"; WINDOWS_FIX_RESULT="$UBERDEV_CHILD_RESULT"; WINDOWS_FIX_STATUS="$UBERDEV_CHILD_STATUS"
+  WINDOWS_FIX_HANDOFF="$UBERDEV_CHILD_HANDOFF"; WINDOWS_FIX_HANDOFF_SHA256="$UBERDEV_CHILD_HANDOFF_SHA256"
+  WINDOWS_FIX_RESULT="$UBERDEV_CHILD_RESULT"; WINDOWS_FIX_STATUS="$UBERDEV_CHILD_STATUS"
   windows_handoff_stage fix-preflight \
-    uberdev_preflight_child_batch "$WINDOWS_FIX_HANDOFF"
+    uberdev_preflight_child_batch "$WINDOWS_FIX_HANDOFF" "$WINDOWS_FIX_HANDOFF_SHA256"
   WINDOWS_FIX_PREPARED="$(windows_handoff_stage fix-prepare \
     _uberdev_child_prepare review_pr.fix.phase1 "$WINDOWS_FIX_HANDOFF" \
-    "$WINDOWS_FIX_RESULT" "$WINDOWS_FIX_STATUS" dispatch)"
+    "$WINDOWS_FIX_HANDOFF_SHA256" "$WINDOWS_FIX_RESULT" "$WINDOWS_FIX_STATUS" dispatch)"
   jq -e '.request.workspace_mode=="caller"' <<<"$WINDOWS_FIX_PREPARED" >/dev/null
   WINDOWS_FIX_ROOT="$(jq -r .request.workspace_dir <<<"$WINDOWS_FIX_PREPARED")"
   [ "$(windows_shell_directory "$WINDOWS_FIX_ROOT")" = "$WINDOWS_SHELL_ID" ]
@@ -814,6 +823,8 @@ PY
   awk '/^post_review_validated_evidence_complete\(\) \{/{active=1} active{print} active && /^\}/{exit}' \
     "$POST" >"$WINDOWS_EVIDENCE_FUNCTIONS"
   . "$WINDOWS_EVIDENCE_FUNCTIONS"
+  _UBERDEV_DISPATCH_BACKEND_ENUM='auto|claude-bg|wezterm|background|codex'
+  UBERDEV_CARRIER_BACKEND=codex
   WINDOWS_IDENTITY_PLUGIN_ROOT="$TMP/windows-identity-plugin"
   write_evidence_identity_helper "$WINDOWS_IDENTITY_PLUGIN_ROOT"
   UBERDEV_REVIEW_PLUGIN_ROOT="$WINDOWS_IDENTITY_PLUGIN_ROOT"
@@ -994,7 +1005,8 @@ PY
 )"
 uberdev_create_child_handoff review_pr.review.correctness review-max-input-iter1-attempt01 "$MAX_INPUTS" '[]' >/dev/null
 [ "$(wc -c <"$UBERDEV_CHILD_HANDOFF" | tr -d ' ')" -lt 65536 ]
-_uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null
+_uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" \
+  "$UBERDEV_CHILD_HANDOFF_SHA256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null
 
 # Derive a limit-plus-one input from that same manifest boundary and prove the
 # constructor rejects it before publishing a child directory.
@@ -1027,7 +1039,9 @@ assert len(serialized)==limit+1
 with open(path,'w',encoding='utf-8') as stream:
     json.dump(value,stream,separators=(',',':'))
 PY
-! _uberdev_child_prepare review_pr.review.correctness "$MAX_PLUS_ONE_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+MAX_PLUS_ONE_SHA256="$(file_sha256 "$MAX_PLUS_ONE_HANDOFF")"
+! _uberdev_child_prepare review_pr.review.correctness "$MAX_PLUS_ONE_HANDOFF" \
+  "$MAX_PLUS_ONE_SHA256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
 [ ! -e "$TMP/run/children/review-max-input-plus-one-iter1-attempt01" ]
 
 # Native Windows Python has neither getuid/geteuid nor descriptor-relative
@@ -1235,7 +1249,8 @@ finally:
   uberdev_create_child_handoff review_pr.review.correctness portable-prepare-rollback-iter1-attempt01 "$portable_input" '[]' >/dev/null
   prepare_rollback_error="$(UBERDEV_TEST_PORTABLE_PUBLICATION_FAIL_NAME=prompt.txt \
     UBERDEV_TEST_PORTABLE_PUBLICATION_ERRNO=28 UBERDEV_TEST_PORTABLE_UNLINK_FAIL_NAME=prompt.txt \
-    _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch 2>&1)" \
+    _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" \
+      "$UBERDEV_CHILD_HANDOFF_SHA256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch 2>&1)" \
     && { echo 'child prepare with rollback failure was accepted' >&2; exit 1; }
   grep -q 'unsafe_child_dir' <<<"$prepare_rollback_error"
   grep -q 'rollback_failed' <<<"$prepare_rollback_error"
@@ -1255,7 +1270,8 @@ finally:
   cp "$portable_manifest" "$portable_manifest_swap"
   ! UBERDEV_CHILD_TEST_MODE=1 UBERDEV_CHILD_MANIFEST_PATH="$portable_manifest" \
     UBERDEV_TEST_PORTABLE_MANIFEST_SWAP_PATH="$portable_manifest" UBERDEV_TEST_PORTABLE_MANIFEST_SWAP_WITH="$portable_manifest_swap" \
-    _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+    _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" \
+      "$UBERDEV_CHILD_HANDOFF_SHA256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
   [ ! -e "$portable_run/children/portable-manifest-prepare-swap-iter1-attempt01" ]
 
   handoff_parent="$portable_run/handoffs"
@@ -1292,37 +1308,46 @@ finally:
 
   uberdev_create_child_handoff review_pr.review.correctness portable-valid-iter1-attempt01 "$portable_input" '[]' >/dev/null
   UBERDEV_TEST_PORTABLE_SAMESTAT_FAIL=1 \
-    _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null
+    _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" \
+      "$UBERDEV_CHILD_HANDOFF_SHA256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null
   [ -s "$portable_run/children/portable-valid-iter1-attempt01/handoff.v1.json" ]
   [ -s "$portable_run/children/portable-valid-iter1-attempt01/prompt.txt" ]
 
   uberdev_create_child_handoff review_pr.review.correctness portable-symlink-iter1-attempt01 "$portable_input" '[]' >/dev/null
-  symlink_handoff="$UBERDEV_CHILD_HANDOFF"; mv "$symlink_handoff" "$symlink_handoff.real"; ln -s "$symlink_handoff.real" "$symlink_handoff"
-  ! _uberdev_child_prepare review_pr.review.correctness "$symlink_handoff" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+  symlink_handoff="$UBERDEV_CHILD_HANDOFF"; symlink_sha256="$UBERDEV_CHILD_HANDOFF_SHA256"
+  mv "$symlink_handoff" "$symlink_handoff.real"; ln -s "$symlink_handoff.real" "$symlink_handoff"
+  ! _uberdev_child_prepare review_pr.review.correctness "$symlink_handoff" \
+    "$symlink_sha256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
   [ ! -e "$portable_run/children/portable-symlink-iter1-attempt01" ]
 
   uberdev_create_child_handoff review_pr.review.correctness portable-replaced-iter1-attempt01 "$portable_input" '[]' >/dev/null
-  replaced_handoff="$UBERDEV_CHILD_HANDOFF"; cp "$replaced_handoff" "$replaced_handoff.swap"
+  replaced_handoff="$UBERDEV_CHILD_HANDOFF"; replaced_sha256="$UBERDEV_CHILD_HANDOFF_SHA256"
+  cp "$replaced_handoff" "$replaced_handoff.swap"
   ! UBERDEV_TEST_PORTABLE_SWAP_PATH="$replaced_handoff" UBERDEV_TEST_PORTABLE_SWAP_WITH="$replaced_handoff.swap" \
-    _uberdev_child_prepare review_pr.review.correctness "$replaced_handoff" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+    _uberdev_child_prepare review_pr.review.correctness "$replaced_handoff" \
+      "$replaced_sha256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
   [ ! -e "$portable_run/children/portable-replaced-iter1-attempt01" ]
 
   uberdev_create_child_handoff review_pr.review.correctness portable-post-read-replaced-iter1-attempt01 "$portable_input" '[]' >/dev/null
-  post_read_handoff="$UBERDEV_CHILD_HANDOFF"; cp "$post_read_handoff" "$post_read_handoff.swap"
+  post_read_handoff="$UBERDEV_CHILD_HANDOFF"; post_read_sha256="$UBERDEV_CHILD_HANDOFF_SHA256"
+  cp "$post_read_handoff" "$post_read_handoff.swap"
   ! UBERDEV_TEST_PORTABLE_SWAP_AFTER_READ_PATH="$post_read_handoff" UBERDEV_TEST_PORTABLE_SWAP_AFTER_READ_WITH="$post_read_handoff.swap" \
-    _uberdev_child_prepare review_pr.review.correctness "$post_read_handoff" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+    _uberdev_child_prepare review_pr.review.correctness "$post_read_handoff" \
+      "$post_read_sha256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
   [ ! -e "$portable_run/children/portable-post-read-replaced-iter1-attempt01" ]
 
   uberdev_create_child_handoff review_pr.review.correctness portable-created-replaced-iter1-attempt01 "$portable_input" '[]' >/dev/null
   ! UBERDEV_TEST_PORTABLE_REPLACE_CREATED_NAME=handoff.v1.json \
-    _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+    _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" \
+      "$UBERDEV_CHILD_HANDOFF_SHA256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
   [ ! -e "$portable_run/children/portable-created-replaced-iter1-attempt01" ]
 
   uberdev_create_child_handoff review_pr.review.correctness portable-parent-replaced-iter1-attempt01 "$portable_input" '[]' >/dev/null
   parent_replacement="$TMP/portable-parent-replacement"; mkdir "$parent_replacement"
   portable_child_dir="$portable_run/children/portable-parent-replaced-iter1-attempt01"
   ! UBERDEV_TEST_PORTABLE_PARENT_SWAP_PATH="$portable_child_dir" UBERDEV_TEST_PORTABLE_PARENT_SWAP_WITH="$parent_replacement" \
-    _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+    _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" \
+      "$UBERDEV_CHILD_HANDOFF_SHA256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
   [ ! -e "$parent_replacement/handoff.v1.json" ]
   [ ! -e "$parent_replacement/prompt.txt" ]
   [ ! -e "$portable_child_dir" ]
@@ -1333,7 +1358,8 @@ finally:
   portable_prompt_child="$portable_run/children/portable-prompt-parent-replaced-iter1-attempt01"
   ! UBERDEV_TEST_PORTABLE_PARENT_SWAP_PATH="$portable_prompt_child" UBERDEV_TEST_PORTABLE_PARENT_SWAP_WITH="$prompt_parent_replacement" \
     UBERDEV_TEST_PORTABLE_PARENT_SWAP_ORIGINAL="$prompt_parent_original" UBERDEV_TEST_PORTABLE_PARENT_SWAP_ON_NAME=prompt.txt \
-    _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+    _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" \
+      "$UBERDEV_CHILD_HANDOFF_SHA256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
   [ ! -e "$prompt_parent_replacement/handoff.v1.json" ]
   [ ! -e "$prompt_parent_replacement/prompt.txt" ]
   [ ! -e "$prompt_parent_original/handoff.v1.json" ]
@@ -1350,7 +1376,9 @@ with open(path,encoding='utf-8') as stream: value=json.load(stream)
 value['edge_id']='review_pr.review.types'
 with open(path,'w',encoding='utf-8') as stream: json.dump(value,stream,separators=(',',':'))
 PY
-  ! _uberdev_child_prepare review_pr.review.correctness "$tampered_handoff" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
+  tampered_sha256="$(file_sha256 "$tampered_handoff")"
+  ! _uberdev_child_prepare review_pr.review.correctness "$tampered_handoff" \
+    "$tampered_sha256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1
   [ ! -e "$portable_run/children/portable-tampered-iter1-attempt01" ]
 )
 
@@ -1416,9 +1444,11 @@ done
 # replacing that source cannot change the child-visible classifier bytes.
 uberdev_create_child_handoff review_pr.ci.classify review-ci-authority-stable-iter1-attempt01 "$ci_inputs" '[]' >/dev/null
 ci_authority_handoff="$UBERDEV_CHILD_HANDOFF"
+ci_authority_sha256="$UBERDEV_CHILD_HANDOFF_SHA256"
 ci_authority_result="$UBERDEV_CHILD_RESULT"
 ci_authority_status="$UBERDEV_CHILD_STATUS"
-_uberdev_child_prepare review_pr.ci.classify "$ci_authority_handoff" "$ci_authority_result" "$ci_authority_status" dispatch >/dev/null
+_uberdev_child_prepare review_pr.ci.classify "$ci_authority_handoff" \
+  "$ci_authority_sha256" "$ci_authority_result" "$ci_authority_status" dispatch >/dev/null
 printf '%s\n' 'replacement platform outage' >"$ci_log_source"
 python3 -I -B - "$(dirname "$ci_authority_result")/handoff.v1.json" "$ci_log_content" "$ci_log_sha256" "$ci_log_source" <<'PY'
 import hashlib,json,sys
@@ -1443,10 +1473,52 @@ value["inputs"]["run_id"]="2"
 with open(path,"w",encoding="utf-8") as stream:
     json.dump(value,stream,separators=(",",":"))
 PY
-if _uberdev_child_prepare review_pr.ci.classify "$ci_misbound_handoff" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1; then
+ci_misbound_sha256="$(file_sha256 "$ci_misbound_handoff")"
+if _uberdev_child_prepare review_pr.ci.classify "$ci_misbound_handoff" \
+    "$ci_misbound_sha256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null 2>&1; then
   echo "misbound classifier log identity was accepted at consumption" >&2
   exit 1
 fi
+
+# A same-UID writer can coherently replace both classifier log bytes and their
+# inner digest without changing the handoff inode. Only the creation-time
+# digest retained outside the handoff can distinguish those self-consistent
+# replacement bytes from the exact bytes the controller approved.
+uberdev_create_child_handoff review_pr.ci.classify review-ci-coherent-rewrite-iter1-attempt01 "$ci_inputs" '[]' >/dev/null
+ci_coherent_handoff="$UBERDEV_CHILD_HANDOFF"
+ci_coherent_expected="$UBERDEV_CHILD_HANDOFF_SHA256"
+ci_coherent_result="$UBERDEV_CHILD_RESULT"
+ci_coherent_status="$UBERDEV_CHILD_STATUS"
+ci_coherent_current="$(python3 -I -B - "$ci_coherent_handoff" <<'PY'
+import hashlib,json,sys
+path=sys.argv[1]
+with open(path,encoding="utf-8") as stream:
+    value=json.load(stream)
+content=value["inputs"]["log_content"].replace(
+    "original failed assertion", "coherent replacement assertion"
+)
+value["inputs"]["log_content"]=content
+value["inputs"]["log_sha256"]=hashlib.sha256(content.encode()).hexdigest()
+raw=json.dumps(value,sort_keys=True,separators=(",",":")).encode()+b"\n"
+with open(path,"wb") as stream:
+    stream.write(raw)
+print(hashlib.sha256(raw).hexdigest(),end="")
+PY
+)"
+_uberdev_child_prepare review_pr.ci.classify "$ci_coherent_handoff" "$ci_coherent_current" \
+  "$ci_coherent_result" "$ci_coherent_status" preflight >/dev/null
+ci_coherent_error="$(
+  _uberdev_child_prepare review_pr.ci.classify "$ci_coherent_handoff" "$ci_coherent_expected" \
+    "$ci_coherent_result" "$ci_coherent_status" preflight 2>&1
+)" && {
+  echo "coherently rewritten classifier handoff was accepted with its creation-time digest" >&2
+  exit 1
+}
+[ "$ci_coherent_error" = "uberdev child dispatch: handoff_digest_mismatch" ] || {
+  echo "coherent classifier rewrite failed for a reason other than the external digest: $ci_coherent_error" >&2
+  exit 1
+}
+
 ci_foreign_pr="$(python3 -I -B - "$ci_inputs" <<'PY'
 import hashlib,json,sys
 value=json.loads(sys.argv[1])
@@ -1492,7 +1564,8 @@ done
 contract="$ROOT/plugins/uberdev/shared/phase1-reviewer-output-v1.md"
 contract_input="$(jq -cn --arg p "$path" '{changed_paths:["README.md"],diff_path:$p,criteria_path:$p,emphasis:[]}')"
 uberdev_create_child_handoff review_pr.review.correctness review-contract-prompt-iter1-attempt01 "$contract_input" '[]' >/dev/null
-_uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null
+_uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" \
+  "$UBERDEV_CHILD_HANDOFF_SHA256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null
 prompt="$(dirname "$UBERDEV_CHILD_RESULT")/prompt.txt"
 python3 -I -B - "$prompt" "$contract" <<'PY'
 import pathlib,sys
@@ -1579,11 +1652,13 @@ PY
 # working_dir is rejected before dispatch.
 caller_input="$(jq -cn --arg p "$path" --arg d "$TEST_REPO" '{findings_path:$p,commit_range_path:$p,working_dir:$d,pr_number:1,disposition_path:$p}')"
 uberdev_create_child_handoff review_pr.fix.phase1 review-caller-mode-iter1-attempt01 "$caller_input" null >/dev/null
-caller_prepared="$(_uberdev_child_prepare review_pr.fix.phase1 "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch)"
+caller_prepared="$(_uberdev_child_prepare review_pr.fix.phase1 "$UBERDEV_CHILD_HANDOFF" \
+  "$UBERDEV_CHILD_HANDOFF_SHA256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch)"
 jq -e --arg repo "$TEST_REPO" '.request.workspace_mode=="caller" and .request.workspace_dir==$repo' <<<"$caller_prepared" >/dev/null
 reviewer_input="$(jq -cn --arg p "$path" '{changed_paths:["README.md"],diff_path:$p,criteria_path:$p,emphasis:[]}')"
 uberdev_create_child_handoff review_pr.review.types review-isolated-mode-iter1-attempt01 "$reviewer_input" '[]' >/dev/null
-reviewer_prepared="$(_uberdev_child_prepare review_pr.review.types "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch)"
+reviewer_prepared="$(_uberdev_child_prepare review_pr.review.types "$UBERDEV_CHILD_HANDOFF" \
+  "$UBERDEV_CHILD_HANDOFF_SHA256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch)"
 jq -e '.request.workspace_mode=="isolated" and (.request|has("workspace_dir")|not)' <<<"$reviewer_prepared" >/dev/null
 OTHER_REPO="$TMP/other-repo"; mkdir -p "$OTHER_REPO"
 mismatch_input="$(jq -cn --arg p "$path" --arg d "$OTHER_REPO" '{findings_path:$p,commit_range_path:$p,working_dir:$d,pr_number:1,disposition_path:$p}')"
@@ -1598,9 +1673,9 @@ exercise_parent_review_carrier() {
   local workflow="$1" issue="$2" suffix="$3" parent_run
   parent_run="$TMP/$workflow-parent"
   local request decision metadata context_out context_file context_sha carrier workspace
-  local reviewer_handoff reviewer_result reviewer_status reviewer_prepared
-  local fixer_handoff fixer_result fixer_status fixer_prepared
-  local defer_handoff defer_result defer_status defer_prepared
+  local reviewer_handoff reviewer_sha256 reviewer_result reviewer_status reviewer_prepared
+  local fixer_handoff fixer_sha256 fixer_result fixer_status fixer_prepared
+  local defer_handoff defer_sha256 defer_result defer_status defer_prepared
   mkdir -p "$parent_run"
   request="$(jq -cn --arg run "$parent_run" --arg repo "$TEST_REPO" --arg workflow "$workflow" --arg run_id "parent-$workflow" --argjson issue "$issue" \
     '{schema_version:1,run_dir:$run,run_id:$run_id,repository_id:$repo,backend:"codex",workflow:$workflow,phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:$issue,issue_num:$issue,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
@@ -1622,10 +1697,12 @@ exercise_parent_review_carrier() {
 
   reviewer_input="$(jq -cn --arg p "$path" '{changed_paths:["README.md"],diff_path:$p,criteria_path:$p,emphasis:[]}')"
   uberdev_create_child_handoff review_pr.review.correctness "$workflow-reviewer-iter1-attempt01" "$reviewer_input" '[]' >/dev/null
-  reviewer_handoff="$UBERDEV_CHILD_HANDOFF"; reviewer_result="$UBERDEV_CHILD_RESULT"; reviewer_status="$UBERDEV_CHILD_STATUS"
+  reviewer_handoff="$UBERDEV_CHILD_HANDOFF"; reviewer_sha256="$UBERDEV_CHILD_HANDOFF_SHA256"
+  reviewer_result="$UBERDEV_CHILD_RESULT"; reviewer_status="$UBERDEV_CHILD_STATUS"
   _uberdev_child_backend_cancellation_supported() { return 0; }
-  uberdev_preflight_child_batch "$reviewer_handoff"
-  reviewer_prepared="$(_uberdev_child_prepare review_pr.review.correctness "$reviewer_handoff" "$reviewer_result" "$reviewer_status" dispatch)"
+  uberdev_preflight_child_batch "$reviewer_handoff" "$reviewer_sha256"
+  reviewer_prepared="$(_uberdev_child_prepare review_pr.review.correctness "$reviewer_handoff" \
+    "$reviewer_sha256" "$reviewer_result" "$reviewer_status" dispatch)"
   jq -e --arg workflow "$workflow" --argjson issue "$issue" \
     '.carrier.workflow==$workflow and .carrier.issue_num==$issue and .edge_id=="review_pr.review.correctness"' "$reviewer_handoff" >/dev/null
   jq -e '.request.workspace_mode=="isolated"' <<<"$reviewer_prepared" >/dev/null
@@ -1633,9 +1710,11 @@ exercise_parent_review_carrier() {
   fixer_input="$(jq -cn --arg p "$path" --arg d "$TEST_REPO" --argjson pr "$issue" \
     '{findings_path:$p,commit_range_path:$p,working_dir:$d,pr_number:$pr,disposition_path:$p}')"
   uberdev_create_child_handoff review_pr.fix.phase1 "$workflow-fixer-iter1-attempt01" "$fixer_input" null >/dev/null
-  fixer_handoff="$UBERDEV_CHILD_HANDOFF"; fixer_result="$UBERDEV_CHILD_RESULT"; fixer_status="$UBERDEV_CHILD_STATUS"
-  uberdev_preflight_child_batch "$fixer_handoff"
-  fixer_prepared="$(_uberdev_child_prepare review_pr.fix.phase1 "$fixer_handoff" "$fixer_result" "$fixer_status" dispatch)"
+  fixer_handoff="$UBERDEV_CHILD_HANDOFF"; fixer_sha256="$UBERDEV_CHILD_HANDOFF_SHA256"
+  fixer_result="$UBERDEV_CHILD_RESULT"; fixer_status="$UBERDEV_CHILD_STATUS"
+  uberdev_preflight_child_batch "$fixer_handoff" "$fixer_sha256"
+  fixer_prepared="$(_uberdev_child_prepare review_pr.fix.phase1 "$fixer_handoff" \
+    "$fixer_sha256" "$fixer_result" "$fixer_status" dispatch)"
   jq -e --arg workflow "$workflow" --arg context "$context_file" --arg sha "$context_sha" \
     '.carrier.workflow==$workflow and .carrier.context_file==$context and .carrier.context_sha256==$sha and .edge_id=="review_pr.fix.phase1"' "$fixer_handoff" >/dev/null
   jq -e --arg repo "$TEST_REPO" '.request.workspace_mode=="caller" and .request.workspace_dir==$repo' <<<"$fixer_prepared" >/dev/null
@@ -1643,9 +1722,11 @@ exercise_parent_review_carrier() {
   defer_input="$(jq -cn --arg p "$path" --arg d "$TEST_REPO" --argjson pr "$issue" \
     '{phase1_path:$p,phase2_path:"",phase1_disposition_path:$p,phase2_disposition_path:"",working_dir:$d,pr_number:$pr}')"
   uberdev_create_child_handoff review_pr.defer.findings "$workflow-defer-iter1-attempt01" "$defer_input" null >/dev/null
-  defer_handoff="$UBERDEV_CHILD_HANDOFF"; defer_result="$UBERDEV_CHILD_RESULT"; defer_status="$UBERDEV_CHILD_STATUS"
-  uberdev_preflight_child_batch "$defer_handoff"
-  defer_prepared="$(_uberdev_child_prepare review_pr.defer.findings "$defer_handoff" "$defer_result" "$defer_status" dispatch)"
+  defer_handoff="$UBERDEV_CHILD_HANDOFF"; defer_sha256="$UBERDEV_CHILD_HANDOFF_SHA256"
+  defer_result="$UBERDEV_CHILD_RESULT"; defer_status="$UBERDEV_CHILD_STATUS"
+  uberdev_preflight_child_batch "$defer_handoff" "$defer_sha256"
+  defer_prepared="$(_uberdev_child_prepare review_pr.defer.findings "$defer_handoff" \
+    "$defer_sha256" "$defer_result" "$defer_status" dispatch)"
   jq -e --arg workflow "$workflow" --arg context "$context_file" --arg sha "$context_sha" \
     '.carrier.workflow==$workflow and .carrier.context_file==$context and .carrier.context_sha256==$sha and .edge_id=="review_pr.defer.findings"' "$defer_handoff" >/dev/null
   jq -e '.request.workspace_mode=="isolated"' <<<"$defer_prepared" >/dev/null
@@ -1751,6 +1832,8 @@ for EVIDENCE_FUNCTION in \
 done
 . "$TMP/evidence-runtime.sh"
 UBERDEV_REVIEW_PLUGIN_ROOT="$ROOT/plugins/uberdev"
+_UBERDEV_DISPATCH_BACKEND_ENUM='auto|claude-bg|wezterm|background|codex'
+UBERDEV_CARRIER_BACKEND=codex
 REVIEW_EDGES=("${ROSTER_EDGES[@]}")
 EVIDENCE_ROOT="$TMP/evidence"
 mkdir -p "$EVIDENCE_ROOT"
@@ -1845,6 +1928,43 @@ evidence_must_fail() {
   fi
   grep -q "class=$expected_class" "$diagnostic"
 }
+
+evidence_carrier_config_must_fail() {
+  local label="$1" policy="$2" expected_backend="$3"
+  local diagnostic="$EVIDENCE_ROOT/$label.stderr"
+  if _UBERDEV_DISPATCH_BACKEND_ENUM="$policy" UBERDEV_CARRIER_BACKEND="$expected_backend" \
+      post_review_validated_evidence_complete "$POST_REVIEW_VALIDATED_LEDGER" 6 \
+        "$REVIEW_LAUNCHED" "$REPAIR_LAUNCHED" "$EVIDENCE_ROOT" \
+        >"$EVIDENCE_ROOT/$label.stdout" 2>"$diagnostic"; then
+    echo "evidence carrier fixture unexpectedly passed: $label" >&2
+    return 1
+  fi
+  grep -q 'class=roster-mismatch edge=unknown index=unknown' "$diagnostic"
+}
+
+evidence_carrier_config_must_fail invalid-backend-policy \
+  'auto|codex|codex' codex
+evidence_carrier_config_must_fail invalid-expected-backend \
+  'auto|claude-bg|wezterm|background|codex' auto
+
+WRONG_BACKEND_LAUNCHED="$EVIDENCE_ROOT/wrong-backend-initial"
+WRONG_BACKEND_STATUS="$EVIDENCE_ROOT/children/review-1-attempt01/status.json"
+python3 -I -B - "$REVIEW_LAUNCHED" "$WRONG_BACKEND_LAUNCHED" "$WRONG_BACKEND_STATUS" <<'PY'
+import json,pathlib,sys
+
+source,target,status_path=map(pathlib.Path,sys.argv[1:])
+rows=[json.loads(line) for line in source.read_text().splitlines()]
+receipt=json.loads(rows[0]["receipt"])
+receipt["backend"]="background"
+rows[0]["receipt"]=json.dumps(receipt,sort_keys=True,separators=(",",":"))
+target.write_text("".join(json.dumps(row,separators=(",",":"))+"\n" for row in rows))
+status_path.write_text('{"backend":"background","state":"completed","exit_code":0,"pid":"4242"}\n')
+PY
+evidence_must_fail wrong-carrier-backend "$POST_REVIEW_VALIDATED_LEDGER" \
+  "$WRONG_BACKEND_LAUNCHED" "$REPAIR_LAUNCHED" roster-mismatch
+printf '%s\n' \
+  '{"backend":"codex","state":"completed","exit_code":0,"pid":"4242"}' \
+  >"$WRONG_BACKEND_STATUS"
 
 POSIX_ALIAS_ROOT="$TMP/posix-same-row-hardlink"
 POSIX_IDENTITY_PLUGIN_ROOT="$TMP/posix-identity-plugin"
@@ -2180,13 +2300,43 @@ cat >"$TMP/lifecycle.sh" <<'SH'
 set -euo pipefail
 . "$1"
 log="$2"; run="$3"; mkdir -p "$run"
+mock_file_sha256() {
+  python3 -I -B -c \
+    'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest(),end="")' \
+    "$1"
+}
 uberdev_create_child_handoff() {
   printf 'create %s\n' "$1" >>"$log"
   UBERDEV_CHILD_HANDOFF="$run/$2.handoff"; UBERDEV_CHILD_RESULT="$run/$2.result"; UBERDEV_CHILD_STATUS="$run/$2.status"
-  : >"$UBERDEV_CHILD_HANDOFF"
+  printf '%s' "$2" >"$UBERDEV_CHILD_HANDOFF"
+  UBERDEV_CHILD_HANDOFF_SHA256="$(mock_file_sha256 "$UBERDEV_CHILD_HANDOFF")"
 }
-uberdev_preflight_child_batch() { printf 'preflight %s\n' "$#" >>"$log"; [ "$#" -eq 2 ]; }
-uberdev_dispatch_child() { printf 'dispatch %s\n' "$1" >>"$log"; [ "$1" != second.edge ] || return 9; printf 'receipt'; }
+uberdev_preflight_child_batch() {
+  local path expected
+  printf 'preflight %s\n' "$#" >>"$log"
+  [ "$#" -eq 4 ] || return 2
+  while [ "$#" -gt 0 ]; do
+    path="$1"; expected="$2"; shift 2
+    [ "$(mock_file_sha256 "$path")" = "$expected" ] || return 3
+  done
+  python3 -I -B - "$descriptors" <<'PY'
+import json,sys
+path=sys.argv[1]
+rows=[json.loads(line) for line in open(path,encoding="utf-8") if line.strip()]
+for row in rows:
+    row["handoff_sha256"]="f"*64
+with open(path,"w",encoding="utf-8") as stream:
+    for row in rows:
+        stream.write(json.dumps(row,sort_keys=True,separators=(",",":"))+"\n")
+PY
+}
+uberdev_dispatch_child() {
+  printf 'dispatch %s %s\n' "$1" "$#" >>"$log"
+  [ "$#" -eq 5 ] || return 4
+  [ "$(mock_file_sha256 "$2")" = "$3" ] || return 5
+  [ "$1" != second.edge ] || return 9
+  printf 'receipt'
+}
 uberdev_unwind_child() { printf 'unwind %s %s %s\n' "$1" "$2" "$3" >>"$log"; [ "$3" -gt 0 ]; }
 uberdev_wait_child() { return 0; }
 records="$run/records"; : >"$records"
@@ -2197,7 +2347,10 @@ SH
 bash "$TMP/lifecycle.sh" "$TMP/builder.sh" "$TMP/lifecycle.log" "$TMP/lifecycle"
 [ "$(grep -n '^preflight ' "$TMP/lifecycle.log" | cut -d: -f1)" -lt "$(grep -n '^dispatch ' "$TMP/lifecycle.log" | head -1 | cut -d: -f1)" ]
 [ "$(grep -c '^create ' "$TMP/lifecycle.log")" -eq 2 ]
-grep -q '^preflight 2$' "$TMP/lifecycle.log"
+grep -q '^preflight 4$' "$TMP/lifecycle.log"
+grep -q '^dispatch first.edge 5$' "$TMP/lifecycle.log"
+grep -q '^dispatch second.edge 5$' "$TMP/lifecycle.log"
+jq -se 'length==2 and all(.handoff_sha256==("f"*64))' "$TMP/lifecycle/descriptors" >/dev/null
 grep -Eq '^unwind .+ .+ 17$' "$TMP/lifecycle.log"
 
 # If receipt-ledger serialization fails after dispatch returns success, the
@@ -2216,6 +2369,11 @@ log="$run/unwind.log"; marker="$run/fail-next-ledger"; dispatches="$run/dispatch
 : >"$log"; : >"$dispatches"
 REAL_PYTHON="$(command -v python3)"; REAL_JQ="$(command -v jq)"
 . "$runtime"
+mock_file_sha256() {
+  python3 -I -B -c \
+    'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest(),end="")' \
+    "$1"
+}
 python3() {
   local arg
   for arg in "$@"; do
@@ -2229,10 +2387,20 @@ jq() {
 }
 uberdev_create_child_handoff() {
   UBERDEV_CHILD_HANDOFF="$run/$2.handoff"; UBERDEV_CHILD_RESULT="$run/$2.result"; UBERDEV_CHILD_STATUS="$run/$2.status"
-  : >"$UBERDEV_CHILD_HANDOFF"
+  printf '%s' "$2" >"$UBERDEV_CHILD_HANDOFF"
+  UBERDEV_CHILD_HANDOFF_SHA256="$(mock_file_sha256 "$UBERDEV_CHILD_HANDOFF")"
 }
-uberdev_preflight_child_batch() { [ "$#" -eq 2 ]; }
+uberdev_preflight_child_batch() {
+  local path expected
+  [ "$#" -eq 4 ] || return 2
+  while [ "$#" -gt 0 ]; do
+    path="$1"; expected="$2"; shift 2
+    [ "$(mock_file_sha256 "$path")" = "$expected" ] || return 3
+  done
+}
 uberdev_dispatch_child() {
+  [ "$#" -eq 5 ] || return 4
+  [ "$(mock_file_sha256 "$2")" = "$3" ] || return 5
   printf '%s\n' "$1" >>"$dispatches"
   if [ "$(wc -l <"$dispatches" | tr -d ' ')" -eq 2 ]; then : >"$marker"; fi
   printf 'receipt-%s' "$1"
@@ -2450,9 +2618,15 @@ set -e
 SH
 bash "$TMP/validated-publication-failure.sh" "$TMP/post-runtime.sh" "$TMP/validated-publication-post"
 
-grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$REVIEW"
-grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$SIMPLIFY"
-grep -q 'uberdev_preflight_child_batch "${handoffs\[@\]}"' "$POST"
+for doc in "$REVIEW" "$SIMPLIFY" "$POST"; do
+  grep -Fq 'preflight_refs+=("$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256")' "$doc"
+  grep -Fq 'uberdev_preflight_child_batch "${preflight_refs[@]}"' "$doc"
+  grep -Fq 'launch_handoff_sha256s+=("$UBERDEV_CHILD_HANDOFF_SHA256")' "$doc"
+  grep -Fq 'uberdev_dispatch_child "$edge" "$handoff" "$handoff_sha256" "$result" "$status"' "$doc"
+done
+grep -Fq "'handoff_sha256':handoff_sha256" "$REVIEW"
+grep -Fq "'handoff_sha256':handoff_sha256" "$SIMPLIFY"
+grep -Fq 'handoff_sha256:$handoff_sha256' "$POST"
 grep -q 'REVIEW_WAIT_RC.*-ne 1' "$POST"
 [ "$(grep -c 'post_review_run_capped "' "$POST")" -eq 2 ]
 grep -q 'post_review_roster_complete "$REVIEW_LAUNCHED" "$REVIEW_EXPECTED_COUNT"' "$POST"

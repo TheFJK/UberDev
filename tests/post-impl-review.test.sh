@@ -78,6 +78,18 @@ assert_grep "$POST_IMPL" 'dispatch-all-before-wait|dispatch.*before waiting' \
   "dispatch-before-wait invariant documented"
 assert_grep "$POST_IMPL" 'configured wave|each wave|within.*wave' \
   "fanout invariant is scoped to each configured wave"
+assert_grep "$POST_IMPL" 'launch_handoff_sha256s=\(\)' \
+  "fanout retains handoff digests in controller-resident launch state"
+assert_grep "$POST_IMPL" 'handoff_sha256:\$handoff_sha256' \
+  "descriptor audit rows retain each creation-time handoff digest"
+assert_grep "$POST_IMPL" 'uberdev_preflight_child_batch "\$\{preflight_refs\[@\]\}"' \
+  "preflight receives controller-held handoff/digest pairs"
+assert_grep "$POST_IMPL" 'uberdev_dispatch_child "\$edge" "\$handoff" "\$handoff_sha256" "\$result" "\$status"' \
+  "dispatch receives the controller-held creation-time digest"
+assert_grep "$POST_IMPL" '"\$_UBERDEV_DISPATCH_BACKEND_ENUM" "\$UBERDEV_CARRIER_BACKEND"' \
+  "evidence validation receives the closed backend policy and carrier-selected backend"
+assert_grep "$POST_IMPL" "receipt.get\\('backend'\\)!=expected_backend" \
+  "evidence validation requires the receipt backend to match the carrier exactly"
 
 echo
 echo "== Aspect emphasis input + Step 1 brief assembly (#73) =="
@@ -394,7 +406,7 @@ if (
     : >"$root/unwind.log"
     TEST_AGGREGATE_LAUNCHED="$root/launched"
     post_review_fanout() {
-      printf '%s\n' '{"edge":"review.edge","index":1,"instance":"fixture","handoff":"h","result":"r","status":"s"}' >"$2"
+      printf '%s\n' '{"edge":"review.edge","index":1,"instance":"fixture","handoff":"h","handoff_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","result":"r","status":"s"}' >"$2"
       if [ "$mode" = roster ]; then
         printf '%s\n' '{"edge":"wrong.edge","index":1,"instance":"fixture","receipt":"x","result":"r","status":"s"}' >"$3"
       else
@@ -443,11 +455,16 @@ if (
     '{"edge":"review.two","index":2,"instance":"two","inputs":{},"risks":[]}' >"$root/records"
   uberdev_create_child_handoff() {
     UBERDEV_CHILD_HANDOFF="$1.handoff"
+    UBERDEV_CHILD_HANDOFF_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     UBERDEV_CHILD_RESULT="$1.result"
     UBERDEV_CHILD_STATUS="$1.status"
   }
-  uberdev_preflight_child_batch() { return 0; }
+  uberdev_preflight_child_batch() {
+    [ "$#" -eq 4 ] && [ "$2" = "$UBERDEV_CHILD_HANDOFF_SHA256" ] \
+      && [ "$4" = "$UBERDEV_CHILD_HANDOFF_SHA256" ]
+  }
   uberdev_dispatch_child() {
+    [ "$#" -eq 5 ] && [ "$3" = "$UBERDEV_CHILD_HANDOFF_SHA256" ] || return 96
     [ "$1" = review.one ] && { printf '%s\n' receipt-one; return 0; }
     return 17
   }
@@ -484,10 +501,15 @@ if (
   . "$POST_REVIEW_LEDGER_FUNCTIONS"
   root="$POST_REVIEW_LEDGER_TMP/runtime"
   mkdir -p "$root/descriptors"
-  printf '%s\n' '{"edge":"stale.edge","handoff":"stale","result":"stale","status":"stale"}' >"$root/launched"
+  printf '%s\n' '{"edge":"stale.edge","handoff":"stale","handoff_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","result":"stale","status":"stale"}' >"$root/launched"
   printf '%s\n' '{"edge":"review.edge","index":1,"instance":"fresh","inputs":{},"risks":[]}' >"$root/records"
   dispatched="$root/dispatched"
-  uberdev_create_child_handoff() { UBERDEV_CHILD_HANDOFF=h; UBERDEV_CHILD_RESULT=r; UBERDEV_CHILD_STATUS=s; }
+  uberdev_create_child_handoff() {
+    UBERDEV_CHILD_HANDOFF=h
+    UBERDEV_CHILD_HANDOFF_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    UBERDEV_CHILD_RESULT=r
+    UBERDEV_CHILD_STATUS=s
+  }
   uberdev_preflight_child_batch() { : >"$dispatched"; }
   uberdev_dispatch_child() { : >"$dispatched"; }
   ! post_review_fanout "$root/records" "$root/descriptors" "$root/launched" 10
@@ -518,7 +540,10 @@ if (
   printf '%s\n' '{"edge":"review.edge","index":1,"instance":"fresh","inputs":{},"risks":[]}' >"$root/records"
   dispatched="$root/dispatched"
   uberdev_create_child_handoff() {
-    UBERDEV_CHILD_HANDOFF=h; UBERDEV_CHILD_RESULT=r; UBERDEV_CHILD_STATUS=s
+    UBERDEV_CHILD_HANDOFF=h
+    UBERDEV_CHILD_HANDOFF_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    UBERDEV_CHILD_RESULT=r
+    UBERDEV_CHILD_STATUS=s
     rm -f "$root/descriptors"; mkdir "$root/descriptors"
   }
   uberdev_preflight_child_batch() { : >"$dispatched"; }

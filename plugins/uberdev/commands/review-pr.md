@@ -78,8 +78,10 @@ with open(path,'a') as f: f.write(json.dumps({'edge':edge,'instance':instance,'i
 PY
 }
 review_child_fanout() {
-  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff result status receipt dispatch_rc ledger_rc cleanup_rc
-  local handoffs=()
+  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff handoff_sha256 result status receipt dispatch_rc ledger_rc cleanup_rc index
+  local preflight_refs=()
+  local launch_edges=() launch_instances=() launch_handoffs=()
+  local launch_handoff_sha256s=() launch_results=() launch_statuses=()
   : >"$descriptors"; : >"$launched"
   while IFS= read -r row; do
     edge="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["edge"])' "$row")"
@@ -87,21 +89,24 @@ review_child_fanout() {
     inputs="$(python3 -I -B -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["inputs"],separators=(",",":")))' "$row")"
     risks="$(python3 -I -B -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["risks"],separators=(",",":")))' "$row")"
     uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks" >/dev/null || return $?
-    python3 -I -B - "$edge" "$instance" "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" "$descriptors" <<'PY'
+    python3 -I -B - "$edge" "$instance" "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" "$descriptors" <<'PY'
 import json,sys
-edge,instance,handoff,result,status,path=sys.argv[1:]
-with open(path,'a') as f:f.write(json.dumps({'edge':edge,'instance':instance,'handoff':handoff,'result':result,'status':status},sort_keys=True,separators=(',',':'))+'\n')
+edge,instance,handoff,handoff_sha256,result,status,path=sys.argv[1:]
+with open(path,'a') as f:f.write(json.dumps({'edge':edge,'instance':instance,'handoff':handoff,'handoff_sha256':handoff_sha256,'result':result,'status':status},sort_keys=True,separators=(',',':'))+'\n')
 PY
-    handoffs+=("$UBERDEV_CHILD_HANDOFF")
+    preflight_refs+=("$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256")
+    launch_edges+=("$edge"); launch_instances+=("$instance")
+    launch_handoffs+=("$UBERDEV_CHILD_HANDOFF")
+    launch_handoff_sha256s+=("$UBERDEV_CHILD_HANDOFF_SHA256")
+    launch_results+=("$UBERDEV_CHILD_RESULT"); launch_statuses+=("$UBERDEV_CHILD_STATUS")
   done <"$records"
-  uberdev_preflight_child_batch "${handoffs[@]}" || return $?
-  while IFS= read -r row; do
-    edge="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["edge"])' "$row")"
-    instance="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["instance"])' "$row")"
-    handoff="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["handoff"])' "$row")"
-    result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
-    status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
-    if receipt="$(uberdev_dispatch_child "$edge" "$handoff" "$result" "$status")"; then
+  uberdev_preflight_child_batch "${preflight_refs[@]}" || return $?
+  for ((index=0; index<${#launch_handoffs[@]}; index++)); do
+    edge="${launch_edges[$index]}"; instance="${launch_instances[$index]}"
+    handoff="${launch_handoffs[$index]}"
+    handoff_sha256="${launch_handoff_sha256s[$index]}"
+    result="${launch_results[$index]}"; status="${launch_statuses[$index]}"
+    if receipt="$(uberdev_dispatch_child "$edge" "$handoff" "$handoff_sha256" "$result" "$status")"; then
       :
     else
       dispatch_rc=$?; cleanup_rc=0
@@ -131,7 +136,7 @@ PY
       [ "$cleanup_rc" -eq 0 ] || echo "error: current child cleanup failed after receipt ledger write edge=$edge" >&2
       return "$ledger_rc"
     fi
-  done <"$descriptors"
+  done
 }
 review_child_wait_all() {
   local launched="$1" timeout_s="$2" row result status wait_rc first_rc=0 cleanup_rc=0
@@ -154,12 +159,20 @@ review_child_wait_all() {
 }
 review_child_result_path() {
   local launched="$1" edge="$2"
-  python3 -I -B - "$launched" "$edge" "$UBERDEV_REVIEW_PLUGIN_ROOT" "$UBERDEV_CARRIER_RUN_DIR" <<'PY'
+  python3 -I -B - "$launched" "$edge" "$UBERDEV_REVIEW_PLUGIN_ROOT" "$UBERDEV_CARRIER_RUN_DIR" \
+    "$_UBERDEV_DISPATCH_BACKEND_ENUM" "$UBERDEV_CARRIER_BACKEND" <<'PY'
 import hashlib,importlib.util,json,os,stat,sys
-ledger,edge,plugin_root,carrier_run_dir=sys.argv[1:]
+ledger,edge,plugin_root,carrier_run_dir,backend_policy,expected_backend=sys.argv[1:]
 def fail(reason):
     print(reason,end='')
     raise SystemExit(2)
+policy_backends=backend_policy.split('|')
+if (not policy_backends or any(not item for item in policy_backends)
+        or len(policy_backends)!=len(set(policy_backends)) or 'auto' not in policy_backends):
+    fail('classification_carrier_mismatch')
+allowed_backends=set(policy_backends); allowed_backends.remove('auto')
+if expected_backend not in allowed_backends:
+    fail('classification_carrier_mismatch')
 spec=importlib.util.spec_from_file_location('uberdev_review_artifacts',os.path.join(plugin_root,'lib','run_manifest.py'))
 if spec is None or spec.loader is None: fail('classification_ledger_unreadable')
 artifacts=importlib.util.module_from_spec(spec); sys.modules[spec.name]=artifacts
@@ -201,7 +214,7 @@ receipt_keys={'schema_version','edge_id','instance_id','backend','handle','state
 if (not isinstance(receipt,dict) or set(receipt)!=receipt_keys or receipt.get('schema_version')!=1
         or receipt.get('edge_id')!=edge or receipt.get('instance_id')!=instance
         or receipt.get('result_file')!=path or receipt.get('status_file')!=status
-        or receipt.get('backend') not in {'codex','claude-bg','background','wezterm'}
+        or receipt.get('backend')!=expected_backend
         or not isinstance(receipt.get('handle'),str) or not receipt['handle']
         or receipt.get('state') not in {'running','completed'}):
     fail('classification_receipt_mismatch')

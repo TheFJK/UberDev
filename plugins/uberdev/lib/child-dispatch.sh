@@ -432,6 +432,7 @@ handoff_name=instance+'.json'
 handoff=os.path.join(handoff_dir,handoff_name)
 value={'schema_version':1,'carrier':carrier,'edge_id':edge,'instance_id':instance,'parent_run_id':carrier['run_id'],'role':row['role'],'phase':row['phase'],'risk_scope':row['risk_scope'],'risk_signals':risks,'inputs':inputs}
 raw=json.dumps(value,sort_keys=True,separators=(',',':')).encode()+b'\n'
+handoff_sha256=hashlib.sha256(raw).hexdigest()
 opened=None
 def publication_reason(error):
  if isinstance(error,FileExistsError): return 'instance_exists'
@@ -477,13 +478,14 @@ try: os.chdir(previous_dir)
 except BaseException as error:
  report_publication_failure(publication_reason(error),not rollback_handoff())
 child=os.path.join(run_dir,'children',instance)
-print(json.dumps({'edge_id':edge,'instance_id':instance,'required':row['required'],'handoff_file':handoff,'result_file':os.path.join(child,'result.md'),'status_file':os.path.join(child,'status.json')},sort_keys=True,separators=(',',':')),end='')
+print(json.dumps({'edge_id':edge,'instance_id':instance,'required':row['required'],'handoff_file':handoff,'handoff_sha256':handoff_sha256,'result_file':os.path.join(child,'result.md'),'status_file':os.path.join(child,'status.json')},sort_keys=True,separators=(',',':')),end='')
 PY
 )" || return $?
   UBERDEV_CHILD_HANDOFF="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["handoff_file"],end="")' "$output")" || return 2
+  UBERDEV_CHILD_HANDOFF_SHA256="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["handoff_sha256"],end="")' "$output")" || return 2
   UBERDEV_CHILD_RESULT="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result_file"],end="")' "$output")" || return 2
   UBERDEV_CHILD_STATUS="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status_file"],end="")' "$output")" || return 2
-  export UBERDEV_CHILD_HANDOFF UBERDEV_CHILD_RESULT UBERDEV_CHILD_STATUS
+  export UBERDEV_CHILD_HANDOFF UBERDEV_CHILD_HANDOFF_SHA256 UBERDEV_CHILD_RESULT UBERDEV_CHILD_STATUS
   _uberdev_child_receipt_emit_handoff handoff "$edge" "$UBERDEV_CHILD_HANDOFF" || return $?
   printf '%s' "$output"
 }
@@ -492,11 +494,15 @@ PY
 # directory, and emit the descendant routing request. All mutable files are
 # opened relative to verified directory descriptors by the helper.
 _uberdev_child_prepare() {
-  local edge="$1" handoff="$2" result="$3" status_file="$4" mode="${5:-dispatch}" manifest_path
+  [ "$#" -eq 5 ] || [ "$#" -eq 6 ] || {
+    _uberdev_child_error 'expected EDGE_ID HANDOFF_JSON_FILE EXPECTED_SHA256 RESULT_FILE STATUS_FILE [MODE]'
+    return 2
+  }
+  local edge="$1" handoff="$2" expected_sha256="$3" result="$4" status_file="$5" mode="${6:-dispatch}" manifest_path
   manifest_path="$(_uberdev_child_manifest_path)" || return 2
-  python3 -I -B - "$edge" "$handoff" "$result" "$status_file" "$_UBERDEV_CHILD_ROOT" "$manifest_path" "$mode" <<'PY'
+  python3 -I -B - "$edge" "$handoff" "$expected_sha256" "$result" "$status_file" "$_UBERDEV_CHILD_ROOT" "$manifest_path" "$mode" <<'PY'
 import hashlib,html,json,os,posixpath,re,secrets,stat,sys
-edge,handoff_arg,result_arg,status_arg,plugin_root,manifest_path,mode=sys.argv[1:]
+edge,handoff_arg,expected_sha256,result_arg,status_arg,plugin_root,manifest_path,mode=sys.argv[1:]
 FORBIDDEN={'command','commands','shell','model','route','effort','reasoning_effort','service','service_tier','sandbox','environment','env'}
 RISKS={'authentication','authorization','concurrency','cryptography','data-loss','destructive-operations','force-push','public-api-compatibility','release-infrastructure','schema-migration','security'}
 IDENT=re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
@@ -566,6 +572,7 @@ def read_regular_once(path,max_bytes,code,exact_mode=None,nonempty=False):
     if len(raw)>max_bytes or (nonempty and not raw): fail(code)
     return raw
 if not EDGE.fullmatch(edge): fail('invalid_edge_id')
+if re.fullmatch(r'[0-9a-f]{64}',expected_sha256) is None: fail('invalid_handoff_digest')
 handoff=os.path.abspath(handoff_arg)
 try:
     manifest=json.loads(read_regular_once(manifest_path,1048576,'invalid_run_tree_manifest'))
@@ -575,6 +582,7 @@ max_input_bytes=input_limits.get('max_serialized_bytes') if isinstance(input_lim
 if type(max_input_bytes) is not int or not 0<max_input_bytes<65536: fail('invalid_run_tree_manifest')
 try:
     raw=read_regular_once(handoff,65536,'invalid_handoff')
+    if hashlib.sha256(raw).hexdigest()!=expected_sha256: fail('handoff_digest_mismatch')
     value=json.loads(raw)
 except Exception: fail('invalid_handoff')
 required={'schema_version','carrier','edge_id','instance_id','parent_run_id','role','phase','risk_scope','risk_signals','inputs'}
@@ -924,11 +932,15 @@ except (OSError,ValueError,subprocess.SubprocessError): raise SystemExit(2)
 
 # Validate an entire immutable handoff batch and the selected provider's
 # cancellation capability before the caller launches the first child.
-# Usage: uberdev_preflight_child_batch HANDOFF_JSON_FILE [...]
+# Usage: uberdev_preflight_child_batch HANDOFF_JSON_FILE EXPECTED_SHA256 [...]
 uberdev_preflight_child_batch() {
-  [ "$#" -gt 0 ] || { _uberdev_child_error 'expected at least one HANDOFF_JSON_FILE'; return 2; }
-  local handoff info edge instance run_dir result status prepared backend seen='|'
-  for handoff in "$@"; do
+  [ "$#" -gt 0 ] && [ $(( $# % 2 )) -eq 0 ] || {
+    _uberdev_child_error 'expected HANDOFF_JSON_FILE EXPECTED_SHA256 pairs'
+    return 2
+  }
+  local handoff expected_sha256 info edge instance run_dir result status prepared backend seen='|'
+  while [ "$#" -gt 0 ]; do
+    handoff="$1"; expected_sha256="$2"; shift 2
     info="$(python3 -I -B - "$handoff" <<'PY'
 import json,ntpath,os,re,sys
 try:
@@ -947,7 +959,7 @@ PY
     instance="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["instance"],end="")' "$info")" || return 2
     run_dir="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["run_dir"],end="")' "$info")" || return 2
     result="$run_dir/children/$instance/result.md"; status="$run_dir/children/$instance/status.json"
-    prepared="$(_uberdev_child_prepare "$edge" "$handoff" "$result" "$status" preflight)" || return $?
+    prepared="$(_uberdev_child_prepare "$edge" "$handoff" "$expected_sha256" "$result" "$status" preflight)" || return $?
     case "$seen" in *"|$instance|"*) _uberdev_child_error 'duplicate batch instance'; return 2 ;; esac
     seen="${seen}${instance}|"
     backend="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["backend"],end="")' "$prepared")" || return 2
@@ -968,9 +980,9 @@ _uberdev_child_fail_after_launch() {
 }
 
 uberdev_dispatch_child() {
-  local edge="${1:-}" handoff="${2:-}" result="${3:-}" status_file="${4:-}" prepared request prompt rc receipt provider_handle
-  [ "$#" -eq 4 ] || { _uberdev_child_error 'expected EDGE_ID HANDOFF_JSON_FILE RESULT_FILE STATUS_FILE'; return 2; }
-  prepared="$(_uberdev_child_prepare "$edge" "$handoff" "$result" "$status_file")" || return $?
+  local edge="${1:-}" handoff="${2:-}" expected_sha256="${3:-}" result="${4:-}" status_file="${5:-}" prepared request prompt rc receipt provider_handle
+  [ "$#" -eq 5 ] || { _uberdev_child_error 'expected EDGE_ID HANDOFF_JSON_FILE EXPECTED_SHA256 RESULT_FILE STATUS_FILE'; return 2; }
+  prepared="$(_uberdev_child_prepare "$edge" "$handoff" "$expected_sha256" "$result" "$status_file")" || return $?
   request="$(python3 -I -B -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["request"],sort_keys=True,separators=(",",":")),end="")' "$prepared")" || return 2
   prompt="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["prompt"],end="")' "$prepared")" || return 2
   _uberdev_child_receipt_emit_handoff dispatch "$edge" "${prompt%/*}/handoff.v1.json" || return $?

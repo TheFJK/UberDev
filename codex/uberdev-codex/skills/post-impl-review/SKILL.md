@@ -200,23 +200,32 @@ post_review_unwind_ledger() {
   [ "$cleanup_failed" -eq 0 ] || return 70
 }
 post_review_fanout() {
-  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge index instance inputs risks handoff result status receipt dispatch_rc ledger_rc cleanup_rc
-  local handoffs=()
+  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge index instance inputs risks handoff handoff_sha256 result status receipt dispatch_rc ledger_rc cleanup_rc launch_index
+  local preflight_refs=()
+  local launch_edges=() launch_indexes=() launch_instances=()
+  local launch_handoffs=() launch_handoff_sha256s=()
+  local launch_results=() launch_statuses=()
   post_review_init_ledger "$descriptors" || return 2
   post_review_init_ledger "$launched" || return 2
   while IFS= read -r row; do
     edge="$(jq -r .edge <<<"$row")"; index="$(jq -r .index <<<"$row")"; instance="$(jq -r .instance <<<"$row")"
     inputs="$(jq -c .inputs <<<"$row")"; risks="$(jq -c .risks <<<"$row")"
     uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks" >/dev/null || return $?
-    jq -cn --arg edge "$edge" --argjson index "$index" --arg instance "$instance" --arg handoff "$UBERDEV_CHILD_HANDOFF" --arg result "$UBERDEV_CHILD_RESULT" --arg status "$UBERDEV_CHILD_STATUS" \
-      '{edge:$edge,index:$index,instance:$instance,handoff:$handoff,result:$result,status:$status}' >>"$descriptors" || return $?
-    handoffs+=("$UBERDEV_CHILD_HANDOFF")
+    jq -cn --arg edge "$edge" --argjson index "$index" --arg instance "$instance" --arg handoff "$UBERDEV_CHILD_HANDOFF" --arg handoff_sha256 "$UBERDEV_CHILD_HANDOFF_SHA256" --arg result "$UBERDEV_CHILD_RESULT" --arg status "$UBERDEV_CHILD_STATUS" \
+      '{edge:$edge,index:$index,instance:$instance,handoff:$handoff,handoff_sha256:$handoff_sha256,result:$result,status:$status}' >>"$descriptors" || return $?
+    preflight_refs+=("$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256")
+    launch_edges+=("$edge"); launch_indexes+=("$index"); launch_instances+=("$instance")
+    launch_handoffs+=("$UBERDEV_CHILD_HANDOFF")
+    launch_handoff_sha256s+=("$UBERDEV_CHILD_HANDOFF_SHA256")
+    launch_results+=("$UBERDEV_CHILD_RESULT"); launch_statuses+=("$UBERDEV_CHILD_STATUS")
   done <"$records"
-  uberdev_preflight_child_batch "${handoffs[@]}" || return $?
-  while IFS= read -r row; do
-    edge="$(jq -r .edge <<<"$row")"; index="$(jq -r .index <<<"$row")"; instance="$(jq -r .instance <<<"$row")"; handoff="$(jq -r .handoff <<<"$row")"
-    result="$(jq -r .result <<<"$row")"; status="$(jq -r .status <<<"$row")"
-    if receipt="$(uberdev_dispatch_child "$edge" "$handoff" "$result" "$status")"; then
+  uberdev_preflight_child_batch "${preflight_refs[@]}" || return $?
+  for ((launch_index=0; launch_index<${#launch_handoffs[@]}; launch_index++)); do
+    edge="${launch_edges[$launch_index]}"; index="${launch_indexes[$launch_index]}"
+    instance="${launch_instances[$launch_index]}"; handoff="${launch_handoffs[$launch_index]}"
+    handoff_sha256="${launch_handoff_sha256s[$launch_index]}"
+    result="${launch_results[$launch_index]}"; status="${launch_statuses[$launch_index]}"
+    if receipt="$(uberdev_dispatch_child "$edge" "$handoff" "$handoff_sha256" "$result" "$status")"; then
       :
     else
       dispatch_rc=$?
@@ -233,7 +242,7 @@ post_review_fanout() {
       [ "$cleanup_rc" -eq 0 ] || return 70
       return "$ledger_rc"
     fi
-  done <"$descriptors"
+  done
 }
 post_review_wait_all() {
   local launched="$1" timeout_s="$2" failed_path="${3:-}" row edge index instance status result wait_rc validation_rc ledger_rc unwind_rc first_rc=0 valid_count=0 format_failures=0
@@ -534,9 +543,10 @@ if [ "$REVIEW_WAVE_BLOCKED" -eq 0 ] && [ -s "$REVIEW_FAILED" ]; then
 fi
 if [ $((REVIEW_INITIAL_VALID_COUNT + REVIEW_REPAIR_VALID_COUNT)) -ne "$REVIEW_EXPECTED_COUNT" ]; then REVIEW_WAVE_BLOCKED=1; fi
 post_review_validated_evidence_complete() {
-  python3 -I -B - "$1" "$2" "$3" "$4" "$5" "$UBERDEV_REVIEW_PLUGIN_ROOT" "${REVIEW_EDGES[@]}" <<'PY'
+  python3 -I -B - "$1" "$2" "$3" "$4" "$5" "$UBERDEV_REVIEW_PLUGIN_ROOT" \
+    "$_UBERDEV_DISPATCH_BACKEND_ENUM" "$UBERDEV_CARRIER_BACKEND" "${REVIEW_EDGES[@]}" <<'PY'
 import hashlib,importlib.util,json,os,re,stat,sys,tempfile
-ledger,expected,initial_ledger,repair_ledger,carrier_run_dir,plugin_root,*allowed=sys.argv[1:]; expected=int(expected)
+ledger,expected,initial_ledger,repair_ledger,carrier_run_dir,plugin_root,backend_policy,expected_backend,*allowed=sys.argv[1:]; expected=int(expected)
 def fail(reason,row=None):
  edge=(row or {}).get('edge','unknown')
  index=(row or {}).get('index','unknown')
@@ -556,6 +566,12 @@ def json_lines(payload):
  return [json.loads(line) for line in payload.decode('utf-8').splitlines() if line.strip()]
 try:
  artifacts=load_helper()
+ policy_backends=backend_policy.split('|')
+ if (not policy_backends or any(not item for item in policy_backends)
+     or len(policy_backends)!=len(set(policy_backends)) or 'auto' not in policy_backends):
+  fail('roster-mismatch')
+ allowed_backends=set(policy_backends); allowed_backends.remove('auto')
+ if expected_backend not in allowed_backends: fail('roster-mismatch')
  carrier_run=os.path.realpath(carrier_run_dir)
  if not os.path.isabs(carrier_run_dir) or not os.path.isdir(carrier_run): fail('unsafe-artifact')
  carrier_entry=os.lstat(carrier_run)
@@ -612,7 +628,7 @@ try:
   if (not isinstance(receipt,dict) or set(receipt)!=receipt_keys or receipt.get('schema_version')!=1
       or receipt.get('edge_id')!=row['edge'] or receipt.get('instance_id')!=row['instance']
       or receipt.get('result_file')!=launched_result or receipt.get('status_file')!=launched_status
-      or receipt.get('backend') not in {'codex','claude-bg','background','wezterm'}
+      or receipt.get('backend')!=expected_backend
       or not isinstance(receipt.get('handle'),str) or not receipt['handle']
       or receipt.get('state') not in {'running','completed'}):
    fail('roster-mismatch',row)

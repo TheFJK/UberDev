@@ -13,10 +13,15 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Made Phase 1 aggregation executable without carrying artifact paths across trust boundaries.
 - Restricted Phase 3 CI-fixer dispatch to validated scalar inputs bound to the captured PR head.
 - Bound final review consumers to immutable local, live, and run-carrier SHAs before lifecycle advancement.
+- Bound CI run selection to authoritative pull-request checks and reselected after every head-changing repair.
+- Streamed bounded failed-job logs directly into an immutable PR/run/head/digest authority record without mutable staging paths.
+- Preserved primary artifact-capture failures and structured cleanup diagnostics when descriptor closure also fails.
+- Kept an already-observed red CI result terminal when the post-monitor metadata refresh is unavailable.
+- Bound every routed child handoff to a controller-retained whole-file digest before preflight or dispatch.
 
 ### Tests
 
-- Added regression coverage for receipt and publication identity, immutable SHA binding, path-free aggregation, CI-fixer dispatch, and native-Windows retries.
+- Added regression coverage for receipt and publication identity, immutable SHA binding, path-free aggregation, authoritative CI-run selection and reselection, direct-stream classifier limits and encoding failures, coherent handoff mutation, fail-closed post-monitor refresh, capture cleanup diagnostics, CI-fixer dispatch, and native-Windows retries.
 
 ## [0.40.2] — 2026-07-26
 

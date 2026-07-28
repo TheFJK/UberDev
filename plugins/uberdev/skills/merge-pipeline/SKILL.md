@@ -77,7 +77,7 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `CI_PROBE_RATE_LIMIT_FLOOR` | `200` (prose constant, hard-coded) | `commands/review-pr.md` Phase 3 6c.1 PROBE pre-flight rate-limit guard |
 | `CI_MONITOR_TIMEOUT_SEC` | `1200` (prose constant, hard-coded) | `commands/review-pr.md` Phase 3 6c.2 MONITOR wall-clock cap |
 | `CI_WATCH_INTERVAL_SEC` | `30` (prose constant, hard-coded) | `commands/review-pr.md` Phase 3 6c.2 MONITOR `gh pr checks --watch` interval |
-| `CI_LOG_TRUNCATE_LINES` | `500` (prose constant, hard-coded) | `commands/review-pr.md` Phase 3 6c.3 CLASSIFY log truncation |
+| `CI_CLASSIFIER_INPUT_MAX_BYTES` | `49152` (policy SSOT: `policy/solve-run-tree-v1.json` → `input_limits.max_serialized_bytes`) | `commands/review-pr.md` Phase 3 6c.3 direct failed-log stream and the shared child-input builder; both raw captured bytes and canonical serialized inputs fail closed above this ceiling |
 | `CI_ROLLUP_SETTLE_RETRIES` | `3` (prose constant, hard-coded; bounded re-probe count when `statusCheckRollup` is null/empty on first read — transient null rollups on just-pushed PRs are a known class) | Step 1.4 pre-condition `ci_red` settle probe |
 | `CI_ROLLUP_SETTLE_INTERVAL_SEC` | `10` (prose constant, hard-coded; sleep between settle re-probes) | Step 1.4 pre-condition `ci_red` settle probe |
 

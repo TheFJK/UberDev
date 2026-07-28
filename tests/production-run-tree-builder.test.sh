@@ -184,7 +184,7 @@ while IFS="$(printf '\t')" read -r EDGE SOURCE INSTANCE CARRIER RISKS ARGV_FILE;
   export UBERDEV_RUN_CARRIER_JSON
   uberdev_create_child_handoff "$EDGE" "$INSTANCE" "$VALIDATED" "$RISKS" >/dev/null
   [ -f "$UBERDEV_CHILD_HANDOFF" ]
-  uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF"
+  uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256"
   [ ! -e "$UBERDEV_CHILD_STATUS" ]
   COUNT=$((COUNT + 1))
 done <"$TMP/cases.tsv"

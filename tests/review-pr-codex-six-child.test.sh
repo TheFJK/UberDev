@@ -416,6 +416,56 @@ while IFS= read -r row; do
 done <"$REVIEW_LAUNCHED"
 [ "${#instances[@]}" -eq 6 ]
 
+# A receipt/status pair may be internally consistent while naming a different
+# valid backend. Evidence acceptance must stay bound to the carrier-selected
+# backend, not merely to any member of the provider policy enum.
+if [ "$case_name" = 1 ]; then
+  wrong_backend="$(python3 -I -B - "$_UBERDEV_DISPATCH_BACKEND_ENUM" "$UBERDEV_CARRIER_BACKEND" <<'PY'
+import sys
+policy,expected=sys.argv[1:]
+print(next(item for item in policy.split('|') if item not in {'auto',expected}),end='')
+PY
+)"
+  wrong_backend_launched="$RESEARCH_DIR_ABS/post-review-wrong-backend.launched"
+  wrong_backend_status_backup="$RESEARCH_DIR_ABS/post-review-wrong-backend.status.backup"
+  wrong_backend_status="$(python3 -I -B - "$REVIEW_LAUNCHED" "$wrong_backend_launched" \
+    "$wrong_backend_status_backup" "$UBERDEV_CARRIER_BACKEND" "$wrong_backend" <<'PY'
+import json,os,pathlib,sys
+source,target,backup,expected,replacement=sys.argv[1:]
+rows=[json.loads(line) for line in pathlib.Path(source).read_text().splitlines() if line]
+receipt=json.loads(rows[0]['receipt'])
+assert receipt['backend']==expected and replacement!=expected
+receipt['backend']=replacement
+rows[0]['receipt']=json.dumps(receipt,sort_keys=True,separators=(',',':'))
+target_path=pathlib.Path(target)
+target_path.write_text(''.join(json.dumps(row,sort_keys=True,separators=(',',':'))+'\n' for row in rows))
+os.chmod(target_path,0o600)
+status_path=pathlib.Path(rows[0]['status'])
+status_bytes=status_path.read_bytes()
+pathlib.Path(backup).write_bytes(status_bytes)
+status=json.loads(status_bytes)
+assert status['backend']==expected
+status['backend']=replacement
+status_path.write_text(json.dumps(status,sort_keys=True,separators=(',',':'))+'\n')
+print(status_path,end='')
+PY
+)"
+  set +e
+  post_review_validated_evidence_complete "$RESEARCH_DIR_ABS/post-review.validated" \
+    "$REVIEW_EXPECTED_COUNT" "$wrong_backend_launched" "$REPAIR_PREFIX.launched" \
+    "$UBERDEV_CARRIER_RUN_DIR" >"$RESEARCH_DIR_ABS/wrong-backend.stdout" \
+    2>"$RESEARCH_DIR_ABS/wrong-backend.stderr"
+  wrong_backend_rc=$?
+  set -e
+  python3 -I -B - "$wrong_backend_status_backup" "$wrong_backend_status" <<'PY'
+import pathlib,sys
+pathlib.Path(sys.argv[2]).write_bytes(pathlib.Path(sys.argv[1]).read_bytes())
+PY
+  [ "$wrong_backend_rc" -eq 2 ]
+  grep -Fq 'post_review_evidence_failure class=roster-mismatch edge=review_pr.review.correctness index=1' \
+    "$RESEARCH_DIR_ABS/wrong-backend.stderr"
+fi
+
 if [ -n "$timeout_instance" ]; then
   if [ "${REVIEW_WAIT_RC:-}" -ne 124 ]; then
     echo "production review timeout returned rc=${REVIEW_WAIT_RC:-missing}, expected 124" >&2
@@ -464,8 +514,9 @@ repair_inputs="$(uberdev_child_inputs_build review_pr.fix.phase1 \
 uberdev_create_child_handoff review_pr.fix.phase1 "$repair_instance" "$repair_inputs" null >/dev/null
 repair_result="$UBERDEV_CHILD_RESULT"
 repair_status="$UBERDEV_CHILD_STATUS"
-uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF"
-uberdev_dispatch_child review_pr.fix.phase1 "$UBERDEV_CHILD_HANDOFF" "$repair_result" "$repair_status" >/dev/null
+uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256"
+uberdev_dispatch_child review_pr.fix.phase1 "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" \
+  "$repair_result" "$repair_status" >/dev/null
 uberdev_wait_child "$repair_status" "$repair_result" 20
 after_repair="$(git rev-parse HEAD)"
 [ "$after_repair" != "$before_repair" ] || { echo "caller repair did not advance the branch" >&2; exit 1; }
@@ -615,7 +666,8 @@ format_retry_case() {
   first_instance="review-pr-e2e-${case_name}-format-retry-${outcome}-attempt01"
   uberdev_create_child_handoff "$edge" "$first_instance" "$inputs" '[]' >/dev/null
   first_result="$UBERDEV_CHILD_RESULT"; first_status="$UBERDEV_CHILD_STATUS"
-  uberdev_dispatch_child "$edge" "$UBERDEV_CHILD_HANDOFF" "$first_result" "$first_status" >/dev/null
+  uberdev_dispatch_child "$edge" "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" \
+    "$first_result" "$first_status" >/dev/null
   uberdev_wait_child "$first_status" "$first_result" 20
   ! uberdev_child_validate_phase1_review_result "$first_result"
 
@@ -623,7 +675,8 @@ format_retry_case() {
   repair_instance="review-pr-e2e-${case_name}-format-retry-${outcome}-attempt02"
   uberdev_create_child_handoff "$edge" "$repair_instance" "$repair_inputs" '[]' >/dev/null
   repair_result="$UBERDEV_CHILD_RESULT"; repair_status="$UBERDEV_CHILD_STATUS"
-  uberdev_dispatch_child "$edge" "$UBERDEV_CHILD_HANDOFF" "$repair_result" "$repair_status" >/dev/null
+  uberdev_dispatch_child "$edge" "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" \
+    "$repair_result" "$repair_status" >/dev/null
   uberdev_wait_child "$repair_status" "$repair_result" 20
   if [ "$outcome" = valid ]; then
     uberdev_child_validate_phase1_review_result "$repair_result"
@@ -645,7 +698,7 @@ _uberdev_agent_dispatch_backend() {
     *) _real_prehandle_dispatch_backend "$@" ;;
   esac
 }
-pre_handoffs=(); pre_results=(); pre_statuses=(); pre_instances=()
+pre_handoffs=(); pre_handoff_sha256s=(); pre_results=(); pre_statuses=(); pre_instances=()
 for lens in "${edges[@]}"; do
   edge="review_pr.review.$lens"
   instance="review-pr-e2e-${case_name}-prehandle-${lens}-attempt01"
@@ -660,13 +713,20 @@ for lens in "${edges[@]}"; do
       criteria_path "$(review_json_string "$CRITERIA_PATH")" emphasis '[]')"
   fi
   uberdev_create_child_handoff "$edge" "$instance" "$inputs" '[]' >/dev/null
-  pre_handoffs+=("$UBERDEV_CHILD_HANDOFF"); pre_results+=("$UBERDEV_CHILD_RESULT"); pre_statuses+=("$UBERDEV_CHILD_STATUS")
+  pre_handoffs+=("$UBERDEV_CHILD_HANDOFF")
+  pre_handoff_sha256s+=("$UBERDEV_CHILD_HANDOFF_SHA256")
+  pre_results+=("$UBERDEV_CHILD_RESULT"); pre_statuses+=("$UBERDEV_CHILD_STATUS")
 done
-uberdev_preflight_child_batch "${pre_handoffs[@]}"
+preflight_refs=()
+for i in "${!pre_handoffs[@]}"; do
+  preflight_refs+=("${pre_handoffs[$i]}" "${pre_handoff_sha256s[$i]}")
+done
+uberdev_preflight_child_batch "${preflight_refs[@]}"
 launched_count=0
 for i in "${!edges[@]}"; do
   if uberdev_dispatch_child "review_pr.review.${edges[$i]}" \
-      "${pre_handoffs[$i]}" "${pre_results[$i]}" "${pre_statuses[$i]}" >/dev/null; then
+      "${pre_handoffs[$i]}" "${pre_handoff_sha256s[$i]}" \
+      "${pre_results[$i]}" "${pre_statuses[$i]}" >/dev/null; then
     launched_count=$((launched_count + 1))
     continue
   else

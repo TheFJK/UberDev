@@ -105,7 +105,8 @@ set -euo pipefail
 UBERDEV_BRAINSTORM_PLUGIN_ROOT="${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}"
 . "$UBERDEV_BRAINSTORM_PLUGIN_ROOT/lib/child-dispatch.sh"
 UBERDEV_BRAINSTORM_PREPARED_EDGES=(); UBERDEV_BRAINSTORM_PREPARED_INSTANCES=()
-UBERDEV_BRAINSTORM_PREPARED_HANDOFFS=(); UBERDEV_BRAINSTORM_PREPARED_RESULTS=()
+UBERDEV_BRAINSTORM_PREPARED_HANDOFFS=(); UBERDEV_BRAINSTORM_PREPARED_HANDOFF_SHA256S=()
+UBERDEV_BRAINSTORM_PREPARED_RESULTS=()
 UBERDEV_BRAINSTORM_PREPARED_STATUSES=(); UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS=()
 UBERDEV_BRAINSTORM_RECEIPT_STATUSES=(); UBERDEV_BRAINSTORM_RECEIPT_RESULTS=()
 UBERDEV_BRAINSTORM_WAITED_INSTANCES=()
@@ -114,7 +115,8 @@ UBERDEV_BRAINSTORM_UNWIND_TIMEOUT="${UBERDEV_BRAINSTORM_UNWIND_TIMEOUT:-300}"
 case "$UBERDEV_BRAINSTORM_UNWIND_TIMEOUT" in ''|*[!0-9]*|0) return 2 ;; esac
 uberdev_brainstorm_reset_batch() {
   UBERDEV_BRAINSTORM_PREPARED_EDGES=(); UBERDEV_BRAINSTORM_PREPARED_INSTANCES=()
-  UBERDEV_BRAINSTORM_PREPARED_HANDOFFS=(); UBERDEV_BRAINSTORM_PREPARED_RESULTS=()
+  UBERDEV_BRAINSTORM_PREPARED_HANDOFFS=(); UBERDEV_BRAINSTORM_PREPARED_HANDOFF_SHA256S=()
+  UBERDEV_BRAINSTORM_PREPARED_RESULTS=()
   UBERDEV_BRAINSTORM_PREPARED_STATUSES=(); UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS=()
   UBERDEV_BRAINSTORM_RECEIPT_STATUSES=(); UBERDEV_BRAINSTORM_RECEIPT_RESULTS=()
   UBERDEV_BRAINSTORM_WAITED_INSTANCES=()
@@ -148,7 +150,7 @@ uberdev_brainstorm_drain_after_wait_failure() {
 }
 uberdev_brainstorm_dispatch() {
   local edge="$1" instance="$2" role="$3" inputs_json="$4"
-  local risks_json='[]' handoff result status create_rc cleanup_rc
+  local risks_json='[]' handoff handoff_sha256 result status create_rc cleanup_rc
   : "$role" # the registered edge manifest selects the role
   if uberdev_create_child_handoff "$edge" "$instance" "$inputs_json" "$risks_json"; then
     :
@@ -159,27 +161,35 @@ uberdev_brainstorm_dispatch() {
     return "$create_rc"
   fi
   handoff="$UBERDEV_CHILD_HANDOFF"
+  handoff_sha256="$UBERDEV_CHILD_HANDOFF_SHA256"
   result="$UBERDEV_CHILD_RESULT"
   status="$UBERDEV_CHILD_STATUS"
   UBERDEV_BRAINSTORM_PREPARED_EDGES+=("$edge")
   UBERDEV_BRAINSTORM_PREPARED_INSTANCES+=("$instance")
   UBERDEV_BRAINSTORM_PREPARED_HANDOFFS+=("$handoff")
+  UBERDEV_BRAINSTORM_PREPARED_HANDOFF_SHA256S+=("$handoff_sha256")
   UBERDEV_BRAINSTORM_PREPARED_RESULTS+=("$result")
   UBERDEV_BRAINSTORM_PREPARED_STATUSES+=("$status")
 }
 uberdev_brainstorm_launch_batch() {
-  local index edge instance handoff result status dispatch_rc cleanup_rc
+  local index edge instance handoff handoff_sha256 result status dispatch_rc cleanup_rc
+  local preflight_refs=()
   [ "${#UBERDEV_BRAINSTORM_PREPARED_HANDOFFS[@]}" -gt 0 ] || return 2
-  uberdev_preflight_child_batch "${UBERDEV_BRAINSTORM_PREPARED_HANDOFFS[@]}" || {
+  [ "${#UBERDEV_BRAINSTORM_PREPARED_HANDOFFS[@]}" -eq "${#UBERDEV_BRAINSTORM_PREPARED_HANDOFF_SHA256S[@]}" ] || return 2
+  for ((index=0; index<${#UBERDEV_BRAINSTORM_PREPARED_HANDOFFS[@]}; index++)); do
+    preflight_refs+=("${UBERDEV_BRAINSTORM_PREPARED_HANDOFFS[$index]}" "${UBERDEV_BRAINSTORM_PREPARED_HANDOFF_SHA256S[$index]}")
+  done
+  uberdev_preflight_child_batch "${preflight_refs[@]}" || {
     dispatch_rc=$?; uberdev_brainstorm_reset_batch; return "$dispatch_rc"
   }
   for ((index=0; index<${#UBERDEV_BRAINSTORM_PREPARED_HANDOFFS[@]}; index++)); do
     edge="${UBERDEV_BRAINSTORM_PREPARED_EDGES[$index]}"
     instance="${UBERDEV_BRAINSTORM_PREPARED_INSTANCES[$index]}"
     handoff="${UBERDEV_BRAINSTORM_PREPARED_HANDOFFS[$index]}"
+    handoff_sha256="${UBERDEV_BRAINSTORM_PREPARED_HANDOFF_SHA256S[$index]}"
     result="${UBERDEV_BRAINSTORM_PREPARED_RESULTS[$index]}"
     status="${UBERDEV_BRAINSTORM_PREPARED_STATUSES[$index]}"
-    if uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null; then
+    if uberdev_dispatch_child "$edge" "$handoff" "$handoff_sha256" "$result" "$status" >/dev/null; then
       UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS+=("$instance")
       UBERDEV_BRAINSTORM_RECEIPT_STATUSES+=("$status")
       UBERDEV_BRAINSTORM_RECEIPT_RESULTS+=("$result")

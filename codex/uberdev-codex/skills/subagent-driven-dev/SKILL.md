@@ -134,15 +134,18 @@ PY
 }
 
 SDD_PREPARED_EDGES=(); SDD_PREPARED_INSTANCES=(); SDD_PREPARED_HANDOFFS=()
+SDD_PREPARED_HANDOFF_SHA256S=()
 SDD_PREPARED_RESULTS=(); SDD_PREPARED_STATUSES=()
 SDD_RECEIPT_INSTANCES=(); SDD_RECEIPT_STATUSES=(); SDD_RECEIPT_RESULTS=()
 sdd_reset_batch() {
   SDD_PREPARED_EDGES=(); SDD_PREPARED_INSTANCES=(); SDD_PREPARED_HANDOFFS=()
+  SDD_PREPARED_HANDOFF_SHA256S=()
   SDD_PREPARED_RESULTS=(); SDD_PREPARED_STATUSES=()
   SDD_RECEIPT_INSTANCES=(); SDD_RECEIPT_STATUSES=(); SDD_RECEIPT_RESULTS=()
 }
 sdd_begin_batch() {
   [ "${#SDD_PREPARED_HANDOFFS[@]}" -eq 0 ] || return 2
+  [ "${#SDD_PREPARED_HANDOFF_SHA256S[@]}" -eq 0 ] || return 2
   [ "${#SDD_RECEIPT_INSTANCES[@]}" -eq 0 ] || return 2
   [ "${#SDD_RECEIPT_STATUSES[@]}" -eq 0 ] || return 2
   [ "${#SDD_RECEIPT_RESULTS[@]}" -eq 0 ] || return 2
@@ -160,7 +163,7 @@ sdd_unwind_child_receipts() {
 
 sdd_dispatch_prepared() {
   local edge_id="$1" instance_id="$2" inputs_json="$3" risk_json="$4"
-  local handoff result status create_rc cleanup_rc
+  local handoff handoff_sha256 result status create_rc cleanup_rc
   if uberdev_create_child_handoff "$edge_id" "$instance_id" "$inputs_json" "$risk_json"; then
     :
   else
@@ -169,23 +172,31 @@ sdd_dispatch_prepared() {
     [ "$cleanup_rc" -eq 0 ] || echo "error: SDD receipt unwind failed after handoff edge=$edge_id instance=$instance_id" >&2
     return "$create_rc"
   fi
-  handoff="$UBERDEV_CHILD_HANDOFF"; result="$UBERDEV_CHILD_RESULT"; status="$UBERDEV_CHILD_STATUS"
+  handoff="$UBERDEV_CHILD_HANDOFF"; handoff_sha256="$UBERDEV_CHILD_HANDOFF_SHA256"
+  result="$UBERDEV_CHILD_RESULT"; status="$UBERDEV_CHILD_STATUS"
   SDD_PREPARED_EDGES+=("$edge_id"); SDD_PREPARED_INSTANCES+=("$instance_id")
-  SDD_PREPARED_HANDOFFS+=("$handoff"); SDD_PREPARED_RESULTS+=("$result")
+  SDD_PREPARED_HANDOFFS+=("$handoff"); SDD_PREPARED_HANDOFF_SHA256S+=("$handoff_sha256")
+  SDD_PREPARED_RESULTS+=("$result")
   SDD_PREPARED_STATUSES+=("$status")
 }
 
 sdd_launch_prepared_batch() {
-  local index edge instance handoff result status dispatch_rc cleanup_rc
+  local index edge instance handoff handoff_sha256 result status dispatch_rc cleanup_rc
+  local preflight_refs=()
   [ "${#SDD_PREPARED_HANDOFFS[@]}" -gt 0 ] || return 2
-  uberdev_preflight_child_batch "${SDD_PREPARED_HANDOFFS[@]}" || {
+  [ "${#SDD_PREPARED_HANDOFFS[@]}" -eq "${#SDD_PREPARED_HANDOFF_SHA256S[@]}" ] || return 2
+  for ((index=0; index<${#SDD_PREPARED_HANDOFFS[@]}; index++)); do
+    preflight_refs+=("${SDD_PREPARED_HANDOFFS[$index]}" "${SDD_PREPARED_HANDOFF_SHA256S[$index]}")
+  done
+  uberdev_preflight_child_batch "${preflight_refs[@]}" || {
     dispatch_rc=$?; sdd_reset_batch; return "$dispatch_rc"
   }
   for ((index=0; index<${#SDD_PREPARED_HANDOFFS[@]}; index++)); do
     edge="${SDD_PREPARED_EDGES[$index]}"; instance="${SDD_PREPARED_INSTANCES[$index]}"
-    handoff="${SDD_PREPARED_HANDOFFS[$index]}"; result="${SDD_PREPARED_RESULTS[$index]}"
+    handoff="${SDD_PREPARED_HANDOFFS[$index]}"; handoff_sha256="${SDD_PREPARED_HANDOFF_SHA256S[$index]}"
+    result="${SDD_PREPARED_RESULTS[$index]}"
     status="${SDD_PREPARED_STATUSES[$index]}"
-    if uberdev_dispatch_child "$edge" "$handoff" "$result" "$status"; then
+    if uberdev_dispatch_child "$edge" "$handoff" "$handoff_sha256" "$result" "$status"; then
       SDD_RECEIPT_INSTANCES+=("$instance")
       SDD_RECEIPT_STATUSES+=("$status")
       SDD_RECEIPT_RESULTS+=("$result")

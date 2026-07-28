@@ -58,8 +58,10 @@ with open(path,'a') as f:f.write(json.dumps({'edge':edge,'instance':instance,'in
 PY
 }
 review_child_fanout() {
-  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff result status receipt dispatch_rc ledger_rc cleanup_rc
-  local handoffs=()
+  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff handoff_sha256 result status receipt dispatch_rc ledger_rc cleanup_rc index
+  local preflight_refs=()
+  local launch_edges=() launch_handoffs=() launch_handoff_sha256s=()
+  local launch_results=() launch_statuses=()
   : >"$descriptors"; : >"$launched"
   while IFS= read -r row; do
     edge="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["edge"])' "$row")"
@@ -67,20 +69,22 @@ review_child_fanout() {
     inputs="$(python3 -I -B -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["inputs"],separators=(",",":")))' "$row")"
     risks="$(python3 -I -B -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["risks"],separators=(",",":")))' "$row")"
     uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks" >/dev/null || return $?
-    python3 -I -B - "$edge" "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" "$descriptors" <<'PY'
+    python3 -I -B - "$edge" "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" "$descriptors" <<'PY'
 import json,sys
-edge,handoff,result,status,path=sys.argv[1:]
-with open(path,'a') as f:f.write(json.dumps({'edge':edge,'handoff':handoff,'result':result,'status':status},sort_keys=True,separators=(',',':'))+'\n')
+edge,handoff,handoff_sha256,result,status,path=sys.argv[1:]
+with open(path,'a') as f:f.write(json.dumps({'edge':edge,'handoff':handoff,'handoff_sha256':handoff_sha256,'result':result,'status':status},sort_keys=True,separators=(',',':'))+'\n')
 PY
-    handoffs+=("$UBERDEV_CHILD_HANDOFF")
+    preflight_refs+=("$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256")
+    launch_edges+=("$edge"); launch_handoffs+=("$UBERDEV_CHILD_HANDOFF")
+    launch_handoff_sha256s+=("$UBERDEV_CHILD_HANDOFF_SHA256")
+    launch_results+=("$UBERDEV_CHILD_RESULT"); launch_statuses+=("$UBERDEV_CHILD_STATUS")
   done <"$records"
-  uberdev_preflight_child_batch "${handoffs[@]}" || return $?
-  while IFS= read -r row; do
-    edge="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["edge"])' "$row")"
-    handoff="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["handoff"])' "$row")"
-    result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
-    status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
-    if receipt="$(uberdev_dispatch_child "$edge" "$handoff" "$result" "$status")"; then
+  uberdev_preflight_child_batch "${preflight_refs[@]}" || return $?
+  for ((index=0; index<${#launch_handoffs[@]}; index++)); do
+    edge="${launch_edges[$index]}"; handoff="${launch_handoffs[$index]}"
+    handoff_sha256="${launch_handoff_sha256s[$index]}"
+    result="${launch_results[$index]}"; status="${launch_statuses[$index]}"
+    if receipt="$(uberdev_dispatch_child "$edge" "$handoff" "$handoff_sha256" "$result" "$status")"; then
       :
     else
       dispatch_rc=$?; cleanup_rc=0
@@ -110,7 +114,7 @@ PY
       [ "$cleanup_rc" -eq 0 ] || echo "error: current child cleanup failed after receipt ledger write edge=$edge" >&2
       return "$ledger_rc"
     fi
-  done <"$descriptors"
+  done
 }
 review_child_wait_all() {
   local launched="$1" timeout_s="$2" row result status wait_rc first_rc=0 cleanup_rc=0
