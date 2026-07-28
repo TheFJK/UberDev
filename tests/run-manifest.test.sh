@@ -2056,6 +2056,7 @@ for index, module_path in enumerate(sys.argv[1:3]):
     attempt_counter = [0]
     publication_descriptor_open = [False]
     publication_descriptor_link_counts = []
+    publication_descriptor_states = []
     publication_candidate = [None]
     publication_path_link_counts = []
 
@@ -2077,6 +2078,14 @@ for index, module_path in enumerate(sys.argv[1:3]):
             # pathname view and every reopened descriptor still report one.
             entry = windows_fd_view(entry, link_count=0)
             publication_descriptor_link_counts.append(entry.st_nlink)
+            publication_descriptor_states.append(
+                (
+                    stat.S_ISREG(entry.st_mode),
+                    entry.st_mode,
+                    entry.st_size,
+                    entry.st_nlink,
+                )
+            )
             return entry
         return windows_fd_view(entry)
 
@@ -2107,8 +2116,8 @@ for index, module_path in enumerate(sys.argv[1:3]):
         except (module.ManifestRejected, module.ManifestRuntimeError) as error:
             failures.append(
                 f"{index}: native Windows publish/recapture failed "
-                f"with open-carrier st_nlink="
-                f"{publication_descriptor_link_counts!r} and live-path "
+                f"with open-carrier states="
+                f"{publication_descriptor_states!r} and live-path "
                 f"st_nlink={publication_path_link_counts!r} "
                 f"({type(error).__name__}: {error})"
             )
