@@ -1430,6 +1430,19 @@ def _artifact_identity(entry: os.stat_result) -> ArtifactIdentity:
     )
 
 
+def _artifact_publication_descriptor_link_count_valid(
+    entry: os.stat_result,
+) -> bool:
+    """Validate the still-open descriptor for one unique publication carrier."""
+
+    if entry.st_nlink == 1:
+        return True
+    # Native Windows can expose st_nlink=0 through fstat() while a freshly
+    # created carrier handle remains open. The pathname snapshots below must
+    # still report exactly one link and bind to this descriptor identity.
+    return _uses_native_windows_filesystem() and entry.st_nlink == 0
+
+
 def secure_capture_regular(
     path: str, minimum_size: int, maximum_size: int
 ) -> tuple[bytes, ArtifactIdentity]:
@@ -1629,7 +1642,7 @@ def secure_publish_captured(
         opened = os.fstat(descriptor)
         if (
             not stat.S_ISREG(opened.st_mode)
-            or opened.st_nlink != 1
+            or not _artifact_publication_descriptor_link_count_valid(opened)
             or opened.st_size != len(payload)
         ):
             raise ManifestRejected("artifact_snapshot_invalid")
@@ -1661,7 +1674,7 @@ def secure_publish_captured(
         if (
             not stat.S_ISREG(finalized.st_mode)
             or not stat.S_ISREG(current.st_mode)
-            or finalized.st_nlink != 1
+            or not _artifact_publication_descriptor_link_count_valid(finalized)
             or current.st_nlink != 1
             or finalized.st_size != len(payload)
             or current.st_size != len(payload)

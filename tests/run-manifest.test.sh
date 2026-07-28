@@ -1892,7 +1892,9 @@ def windows_path_view(entry):
     )
 
 
-def windows_fd_view(entry, *, ctime_ns=FD_CTIME_NS, mode=None):
+def windows_fd_view(
+    entry, *, ctime_ns=FD_CTIME_NS, mode=None, link_count=None
+):
     return StatView(
         entry,
         st_birthtime_ns=BIRTHTIME_NS,
@@ -1900,6 +1902,7 @@ def windows_fd_view(entry, *, ctime_ns=FD_CTIME_NS, mode=None):
         st_ctime_ns=ctime_ns,
         st_ctime=ctime_ns / 1_000_000_000,
         st_mode=entry.st_mode if mode is None else mode,
+        st_nlink=entry.st_nlink if link_count is None else link_count,
     )
 
 
@@ -1955,6 +1958,31 @@ for index, module_path in enumerate(sys.argv[1:3]):
         if module._artifact_identity(path_state) != module._artifact_identity(fd_state):
             failures.append(
                 f"{index}: native Windows path/fd birthtime and execute-bit views diverged"
+            )
+        accepted_link_counts = {
+            link_count
+            for link_count in (0, 1, 2)
+            if module._artifact_publication_descriptor_link_count_valid(
+                StatView(base, st_nlink=link_count)
+            )
+        }
+        if accepted_link_counts != {0, 1}:
+            failures.append(
+                f"{index}: native Windows publication descriptor accepted "
+                f"st_nlink={sorted(accepted_link_counts)!r}, expected [0, 1]"
+            )
+    with mock.patch.object(module, "_uses_native_windows_filesystem", return_value=False):
+        accepted_link_counts = {
+            link_count
+            for link_count in (0, 1, 2)
+            if module._artifact_publication_descriptor_link_count_valid(
+                StatView(base, st_nlink=link_count)
+            )
+        }
+        if accepted_link_counts != {1}:
+            failures.append(
+                f"{index}: POSIX publication descriptor accepted "
+                f"st_nlink={sorted(accepted_link_counts)!r}, expected [1]"
             )
 
     def direct_open(path, flags, mode=0o600):
@@ -2026,6 +2054,10 @@ for index, module_path in enumerate(sys.argv[1:3]):
 
     publication_target = root / "publication"
     attempt_counter = [0]
+    publication_descriptor_open = [False]
+    publication_descriptor_link_counts = []
+    publication_candidate = [None]
+    publication_path_link_counts = []
 
     def direct_publication_open(requested_path, digest):
         attempt_counter[0] += 1
@@ -2033,28 +2065,64 @@ for index, module_path in enumerate(sys.argv[1:3]):
         descriptor = real_open(
             candidate, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600
         )
+        publication_candidate[0] = candidate
+        publication_descriptor_open[0] = True
         return candidate, descriptor
+
+    def publication_descriptor_fstat(descriptor):
+        entry = real_fstat(descriptor)
+        if publication_descriptor_open[0]:
+            # CPython's native-Windows descriptor view can report zero links
+            # until this newly-created carrier handle closes. Its live
+            # pathname view and every reopened descriptor still report one.
+            entry = windows_fd_view(entry, link_count=0)
+            publication_descriptor_link_counts.append(entry.st_nlink)
+            return entry
+        return windows_fd_view(entry)
+
+    def publication_path_lstat(path):
+        entry = windows_path_view(real_lstat(path))
+        if (
+            publication_descriptor_open[0]
+            and str(path) == publication_candidate[0]
+        ):
+            publication_path_link_counts.append(entry.st_nlink)
+        return entry
 
     with mock.patch.object(module.os, "name", "nt"), \
          mock.patch.object(module, "_secure_open_regular", direct_open), \
          mock.patch.object(module, "_open_publication_attempt", direct_publication_open), \
-         mock.patch.object(module.os, "lstat", path_lstat), \
-         mock.patch.object(module.os, "fstat", descriptor_fstat):
+         mock.patch.object(module.os, "lstat", publication_path_lstat), \
+         mock.patch.object(module.os, "fstat", publication_descriptor_fstat):
         try:
             published_path, published_identity, digest = (
                 module.secure_publish_captured(
                     str(publication_target), b"published bytes\n"
                 )
             )
+            publication_descriptor_open[0] = False
             recaptured, recaptured_identity = module.secure_capture_published(
                 published_path, digest, 1, 1024
             )
         except (module.ManifestRejected, module.ManifestRuntimeError) as error:
             failures.append(
                 f"{index}: native Windows publish/recapture failed "
+                f"with open-carrier st_nlink="
+                f"{publication_descriptor_link_counts!r} and live-path "
+                f"st_nlink={publication_path_link_counts!r} "
                 f"({type(error).__name__}: {error})"
             )
         else:
+            if publication_descriptor_link_counts != [0, 0]:
+                failures.append(
+                    f"{index}: fixture did not exercise two open-carrier "
+                    f"st_nlink=0 snapshots: {publication_descriptor_link_counts!r}"
+                )
+            if publication_path_link_counts != [1]:
+                failures.append(
+                    f"{index}: fixture did not retain one live-path "
+                    f"st_nlink=1 snapshot: {publication_path_link_counts!r}"
+                )
             if recaptured != b"published bytes\n":
                 failures.append(f"{index}: native Windows recapture changed bytes")
             if published_identity != recaptured_identity:
