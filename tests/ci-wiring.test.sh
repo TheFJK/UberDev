@@ -20,7 +20,7 @@
 #         Unix-only fixture cannot be added to ubuntu without also being
 #         declared in the marker block, and the marker block cannot drift
 #         from the actual skip set.
-#   W5  — the Linux job retains its evidence-based 30-minute hang guard.
+#   W5  — the Linux job retains its evidence-based 40-minute hang guard.
 #   W6  — the Windows job retains its evidence-based 15-minute hang guard.
 #   W7  — receipt retirement runs on Linux, macOS, and native Windows.
 #
@@ -53,7 +53,7 @@ if [ ! -d "$REPO_ROOT/tests" ]; then
   echo "  ABORT — tests/ directory missing: $REPO_ROOT/tests"; exit 99
 fi
 
-LINUX_TIMEOUT_MINUTES=30
+LINUX_TIMEOUT_MINUTES=40
 WINDOWS_TIMEOUT_MINUTES=15
 linux_job_block=$(awk '
   /^  shape-checks:[[:space:]]*$/ { in_job=1; next }
@@ -162,9 +162,9 @@ else
   FAIL=$((FAIL+1))
 fi
 
-# W5 — the complete Linux matrix has repeatedly reached the old 25-minute
-# ceiling. Keep bounded headroom without falling back to Actions' 360-minute
-# default.
+# W5 — the complete Linux matrix exhausted the 30-minute budget even though
+# its final suite reported 91/0 immediately before cancellation. Preserve a
+# bounded ten-minute recovery margin without falling back to Actions' default.
 linux_timeout_rows=$(printf '%s\n' "$linux_job_block" \
   | sed -n 's/^    timeout-minutes:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p')
 if [ "$linux_timeout_rows" = "$LINUX_TIMEOUT_MINUTES" ]; then

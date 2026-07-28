@@ -408,10 +408,15 @@ mkdir -p "$CODEX_STUB_READY_DIR" "$CODEX_STUB_RELEASE_DIR"
 (
   barrier_timeout="${REVIEW_BARRIER_TIMEOUT_OVERRIDE:-60}"
   startup_timeout="${REVIEW_BARRIER_STARTUP_TIMEOUT_OVERRIDE:-60}"
-  case "$barrier_timeout:$startup_timeout" in *[!0-9:]*|0:*|*:0) exit 2 ;; esac
+  lease_visibility_delay="${REVIEW_BARRIER_LEASE_VISIBILITY_DELAY_OVERRIDE:-0}"
+  case "$barrier_timeout:$startup_timeout:$lease_visibility_delay" in
+    *[!0-9:]*|0:*|*:0:*) exit 2 ;;
+  esac
   barrier_release() { : >"$CODEX_STUB_RELEASE_DIR/.all"; }
   trap barrier_release EXIT
-  barrier_deadline=$(( $(date +%s) + startup_timeout ))
+  barrier_started="$(date +%s)"
+  barrier_deadline=$((barrier_started + startup_timeout))
+  lease_visibility_deadline=$((barrier_started + lease_visibility_delay))
   fully_dispatched=0
   barrier_rc=0; barrier_reason=ready; ready_count=0; lease_count=0
   while :; do
@@ -422,6 +427,13 @@ mkdir -p "$CODEX_STUB_READY_DIR" "$CODEX_STUB_RELEASE_DIR"
         lease_count=$((lease_count + 1))
       fi
     done < <(find "$UBERDEV_CARRIER_RUN_DIR" -path '*/semaphore-v1/*.scope/*.lease' -type f 2>/dev/null)
+    barrier_now="$(date +%s)"
+    # Deterministic case-4 regression fixture: model one backend identity whose
+    # lease visibility reaches the coordinator late on a loaded macOS runner.
+    if [ "$lease_visibility_delay" -gt 0 ] && [ "$barrier_now" -lt "$lease_visibility_deadline" ] \
+        && [ "$lease_count" -eq 6 ]; then
+      lease_count=5
+    fi
     if [ "$ready_count" -eq 6 ] && [ "$lease_count" -eq 6 ]; then break; fi
     terminal=0
     while IFS= read -r status; do
@@ -437,7 +449,6 @@ mkdir -p "$CODEX_STUB_READY_DIR" "$CODEX_STUB_RELEASE_DIR"
       terminal=1
     fi
     if [ "$terminal" -eq 1 ]; then barrier_rc=70; barrier_reason=terminal-before-readiness; break; fi
-    barrier_now="$(date +%s)"
     if [ "$lease_count" -eq 6 ] && [ "$fully_dispatched" -eq 0 ]; then
       barrier_deadline=$((barrier_now + barrier_timeout)); fully_dispatched=1
     fi
@@ -493,7 +504,7 @@ if [ -n "$pre_ready_fail_instance" ]; then
     || unexpected_readiness
 elif [ -n "$skip_ready_instance" ]; then
   [ "$readiness_rc" -eq 124 ] || unexpected_readiness
-  grep -Fq 'reason=readiness-timeout ready=5' "$CODEX_STUB_BARRIER_REPORT" \
+  grep -Fq 'reason=readiness-timeout ready=5 leases=6' "$CODEX_STUB_BARRIER_REPORT" \
     || unexpected_readiness
 else
   [ "$readiness_rc" -eq 0 ] || unexpected_readiness
@@ -911,13 +922,22 @@ make_repo() {
 
 run_case() {
   local name="$1" fail_instance="${2-}" timeout_instance="${3-}" skip_ready_instance="${4-}" pre_ready_fail_instance="${5-}"
-  local repo runtime codex_log claude_log barrier_timeout=60 git_mutation_stress=0 expect_unprotected_probe=0
+  local repo runtime codex_log claude_log barrier_timeout=60 barrier_startup_timeout=60
+  local lease_visibility_delay=0 review_timeout=10 git_mutation_stress=0 expect_unprotected_probe=0
   repo="$TMP/repo-$name"; runtime="$TMP/runtime-$name"
   codex_log="$TMP/codex-$name.log"; claude_log="$TMP/claude-$name.log"
   make_repo "$repo"
   mkdir -p "$runtime" "$runtime/git-preacquire"
   ready_dir="$runtime/ready"; release_dir="$runtime/release"
   [ -z "$skip_ready_instance" ] || barrier_timeout=2
+  if [ "$name" = 4 ]; then
+    barrier_startup_timeout=60
+    lease_visibility_delay=30
+    # The child wait must outlive the coordinator's complete startup + release
+    # budget. Otherwise slow lease visibility makes the harness time out its own
+    # providers before the coordinator can release them (macOS CI #30404587111).
+    review_timeout=$((barrier_startup_timeout + barrier_timeout + 10))
+  fi
   if [ "$name" = 3 ]; then
     git_mutation_stress=1
     expect_unprotected_probe=1
@@ -940,6 +960,9 @@ run_case() {
     CODEX_STUB_SKIP_READY_INSTANCE="$skip_ready_instance" \
     CODEX_STUB_PRE_READY_FAIL_INSTANCE="$pre_ready_fail_instance" \
     REVIEW_BARRIER_TIMEOUT_OVERRIDE="$barrier_timeout" \
+    REVIEW_BARRIER_STARTUP_TIMEOUT_OVERRIDE="$barrier_startup_timeout" \
+    REVIEW_BARRIER_LEASE_VISIBILITY_DELAY_OVERRIDE="$lease_visibility_delay" \
+    REVIEW_PR_TIMEOUT_OVERRIDE="$review_timeout" \
     RUN_ID="20260716-00000${name}-abcdef0" \
     PR_NUMBER=335 ARGUMENTS='' SOLVE_TIMEOUT=120 UBERDEV_AGENT_CAPACITY=6 PRKIT_AGENT_CAPACITY=6 \
     bash "$RUN_CASE_SCRIPT" "$name" "$repo" "$TMP/setup.sh" \

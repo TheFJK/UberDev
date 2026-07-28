@@ -34,14 +34,14 @@ jobs:
   shape-checks:
     name: shape-checks
     runs-on: ubuntu-latest
-    # Routed lifecycle, semaphore-race, and provider-contract fixtures now make
-    # the complete Linux suite legitimately exceed ten minutes on hosted runners.
-    # Thirty minutes preserves the hang guard while leaving measured headroom
-    # above the complete matrix's observed 25-minute hosted-runner runtime.
-    # wired below (ci-wiring.test.sh keeps that list complete).
+    # Routed lifecycle, semaphore-race, and provider-contract fixtures made the
+    # complete Linux suite exhaust its 30-minute budget even though the final
+    # suite reported 91/0 only 89 ms before cancellation. Forty minutes retains
+    # a bounded hang guard with ten minutes of runner-variance/recovery headroom.
+    # ci-wiring.test.sh locks that exact budget so it cannot silently regress.
     # Caps the default 360-min budget so a hung test from a fork PR can't burn
     # the public-repo Actions allowance. Bump if the suite legitimately grows.
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install zsh
