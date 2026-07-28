@@ -26,6 +26,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import ntpath
 import os
 import pathlib
 import shutil
@@ -210,6 +211,80 @@ finally:
     receipts.require_atomic_rename_noreplace_support = old_support_check
     receipts._validated_context = old_validate_context
 assert not context_reached
+
+# Native Windows accepts Git Bash's alternate separators only when replacing
+# '/' with '\\' yields the exact spelling returned by abspath. No broader
+# normalization or case folding may turn an alias into authority.
+class WindowsPathModel:
+    sep = "\\"
+    altsep = "/"
+    isabs = staticmethod(ntpath.isabs)
+
+    @staticmethod
+    def abspath(value):
+        return ntpath.abspath(value)
+
+    @staticmethod
+    def realpath(value):
+        resolved = ntpath.abspath(value)
+        if resolved.startswith("c:"):
+            resolved = "C:" + resolved[2:]
+        if resolved.startswith("C:\\repo"):
+            resolved = "C:\\Repo" + resolved[len("C:\\repo"):]
+        resolved = resolved.replace("\\runtime", "\\Runtime", 1)
+        return resolved
+
+
+saved_path_module = receipts.os.path
+saved_native_windows = receipts._native_windows
+receipts.os.path = WindowsPathModel
+receipts._native_windows = lambda: True
+try:
+    for raw, expected in (
+        ("C:\\Repo\\Runtime", "C:\\Repo\\Runtime"),
+        ("C:/Repo\\Runtime/receipt.json", "C:\\Repo\\Runtime\\receipt.json"),
+    ):
+        assert receipts._canonical_absolute_input(raw) == expected
+    for alias in (
+        "Repo\\Runtime",
+        "Repo/Runtime",
+        "C:\\Repo\\.\\Runtime",
+        "C:/Repo/./Runtime",
+        "C:\\Repo\\Runtime\\..\\Receipt",
+        "C:/Repo\\Runtime/../Receipt",
+        "C:\\Repo\\\\Runtime",
+        "C:/Repo//Runtime",
+        "C:\\Repo\\Runtime\\",
+        "C:/Repo\\Runtime/",
+    ):
+        try:
+            receipts._canonical_absolute_input(alias)
+        except receipts.TerminalReceiptError:
+            pass
+        else:
+            raise AssertionError(f"Windows path alias reached authority: {alias!r}")
+    assert receipts._canonical_absolute_input("c:/Repo\\Runtime") == "c:\\Repo\\Runtime"
+    for canonical in ("C:\\Repo", "C:\\Repo\\Runtime"):
+        assert receipts._canonical_windows_final_spelling(canonical) == canonical
+    for case_alias in (
+        "c:\\Repo",
+        "c:/Repo",
+        "C:\\repo",
+        "C:/repo",
+        "C:\\Repo\\runtime",
+        "C:/Repo/runtime",
+    ):
+        try:
+            receipts._canonical_windows_final_spelling(case_alias)
+        except receipts.TerminalReceiptError:
+            pass
+        else:
+            raise AssertionError(
+                f"Windows final-path case alias reached authority: {case_alias!r}"
+            )
+finally:
+    receipts.os.path = saved_path_module
+    receipts._native_windows = saved_native_windows
 
 # Windows publication uses the native no-replace primitive with write-through
 # durability. The flag contract is modeled on every host and the actual call is

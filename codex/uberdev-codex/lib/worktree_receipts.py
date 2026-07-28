@@ -172,6 +172,56 @@ def _native_windows() -> bool:
     return os.name == "nt" and sys.platform == "win32"
 
 
+def _canonical_absolute_input(value: Any) -> str:
+    if not isinstance(value, str) or not os.path.isabs(value):
+        _terminal()
+    if _native_windows():
+        alternate_separator = os.path.altsep
+        normalized = (
+            value.replace(alternate_separator, os.path.sep)
+            if alternate_separator is not None
+            else value
+        )
+        canonical = os.path.abspath(value)
+        if normalized != canonical:
+            _terminal()
+        return canonical
+    if os.path.abspath(value) != value:
+        _terminal()
+    return value
+
+
+def _canonical_windows_final_spelling(value: str) -> str:
+    try:
+        canonical = os.path.realpath(value)
+    except OSError as exc:
+        _raise_os_failure(exc)
+    if canonical != value:
+        _terminal()
+    return canonical
+
+
+def _canonical_windows_existing_directory(value: str) -> str:
+    try:
+        before = os.lstat(value)
+    except OSError as exc:
+        _raise_os_failure(exc)
+    if _is_link_or_reparse(value, before) or not stat.S_ISDIR(before.st_mode):
+        _terminal()
+    canonical = _canonical_windows_final_spelling(value)
+    try:
+        after = os.lstat(canonical)
+    except OSError as exc:
+        _raise_os_failure(exc)
+    if (
+        _is_link_or_reparse(canonical, after)
+        or not stat.S_ISDIR(after.st_mode)
+        or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+    ):
+        _terminal()
+    return canonical
+
+
 def _require_atomic_move() -> None:
     if not _ATOMIC_MOVE_AVAILABLE:
         _internal()
@@ -304,19 +354,26 @@ def _validated_context(
     start_head: str,
     token: str,
 ) -> tuple[str, str, str, bytes]:
+    canonical_repo_input = _canonical_absolute_input(repo)
+    canonical_receipt = _canonical_absolute_input(receipt)
+    if _native_windows():
+        canonical_repo = _canonical_windows_existing_directory(canonical_repo_input)
+        receipt_parent = os.path.dirname(canonical_receipt)
+        canonical_receipt_parent = _canonical_windows_existing_directory(receipt_parent)
+        final_receipt = os.path.join(
+            canonical_receipt_parent, os.path.basename(canonical_receipt)
+        )
+        if final_receipt != canonical_receipt:
+            _terminal()
+        canonical_receipt = final_receipt
+    else:
+        canonical_repo = os.path.realpath(canonical_repo_input)
     if (
-        not isinstance(repo, str)
-        or not os.path.isabs(repo)
-        or os.path.abspath(repo) != repo
-        or not isinstance(receipt, str)
-        or not os.path.isabs(receipt)
-        or os.path.abspath(receipt) != receipt
-        or os.path.normpath(receipt) != receipt
-        or not os.path.basename(receipt)
+        os.path.normpath(canonical_receipt) != canonical_receipt
+        or not os.path.basename(canonical_receipt)
         or not _valid_token(token, start_head)
     ):
         _terminal()
-    canonical_repo = os.path.realpath(repo)
     try:
         repo_entry = os.lstat(canonical_repo)
     except OSError as exc:
@@ -344,12 +401,12 @@ def _validated_context(
     if not contained:
         _terminal()
     expected = _expected_payload(
-        canonical_repo, normalized, branch, receipt, start_head, token
+        canonical_repo, normalized, branch, canonical_receipt, start_head, token
     )
     return (
         canonical_repo,
-        receipt,
-        _tombstone_path(receipt, token),
+        canonical_receipt,
+        _tombstone_path(canonical_receipt, token),
         _canonical_bytes(expected),
     )
 

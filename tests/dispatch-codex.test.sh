@@ -49,6 +49,14 @@ else
 fi
 export _UBERDEV_PYTHON_EXE _UBERDEV_PYTHON_PREFIX
 
+native_python() {
+  if [ -n "$_UBERDEV_PYTHON_PREFIX" ]; then
+    "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$@"
+  else
+    "$_UBERDEV_PYTHON_EXE" "$@"
+  fi
+}
+
 PASS=0
 FAIL=0
 
@@ -131,6 +139,85 @@ for codex_dispatch_mirror in "$DISPATCH_LIB" "$CODEX_DISPATCH_LIB"; do
     fail_msg "Codex optional turbo env is safe under Bash 3.2 nounset" "$codex_dispatch_mirror"
   fi
 done
+
+if [ "$(native_python -I -B -c 'import os; print(os.name, end="")')" = nt ]; then
+  echo "== Native Windows Git Bash receipt boundary =="
+  WINDOWS_BOUNDARY_TMP="$(mktemp -d)"
+  mkdir -p "$WINDOWS_BOUNDARY_TMP/RepoCanonical" "$WINDOWS_BOUNDARY_TMP/RuntimeCanonical"
+  chmod 700 "$WINDOWS_BOUNDARY_TMP/RuntimeCanonical"
+  (
+    cd "$WINDOWS_BOUNDARY_TMP/RepoCanonical" || exit 1
+    git init -q
+    git config user.name 'UberDev Windows Boundary'
+    git config user.email 'uberdev-windows-boundary@example.invalid'
+    printf 'base\n' >base.txt
+    git add base.txt
+    git commit -qm base
+  )
+  windows_boundary_head="$(git -C "$WINDOWS_BOUNDARY_TMP/RepoCanonical" rev-parse HEAD)"
+  windows_boundary_relative='.claude/worktrees/solve-issue-335-windows-boundary'
+  windows_boundary_branch='worktree-solve-issue-335-windows-boundary'
+  windows_boundary_receipt="$WINDOWS_BOUNDARY_TMP/RuntimeCanonical/windows-boundary.owner.json"
+  windows_boundary_stderr="$WINDOWS_BOUNDARY_TMP/RuntimeCanonical/windows-boundary.stderr"
+  windows_boundary_output="$(native_python -I -B "$WORKTREE_RECEIPTS" create \
+    --repo "$WINDOWS_BOUNDARY_TMP/RepoCanonical" \
+    --relative "$windows_boundary_relative" \
+    --branch "$windows_boundary_branch" \
+    --receipt "$windows_boundary_receipt" \
+    --start-head "$windows_boundary_head" \
+    2>"$windows_boundary_stderr")"
+  windows_boundary_rc=$?
+  windows_boundary_state="$(printf '%s' "$windows_boundary_output" \
+    | native_python -I -B -c 'import json,sys; print(json.load(sys.stdin).get("state", ""), end="")' \
+      2>/dev/null)"
+  if [ "$windows_boundary_rc" -eq 0 ] \
+      && [ "$windows_boundary_state" = active ] \
+      && [ -f "$windows_boundary_receipt" ] \
+      && [ ! -s "$windows_boundary_stderr" ]; then
+    pass_msg "Git Bash POSIX-spelled paths reach native Python receipt creation"
+  else
+    fail_msg "Git Bash POSIX-spelled paths reach native Python receipt creation" \
+      "rc=$windows_boundary_rc state=$windows_boundary_state stderr=$(tr '\n' ';' <"$windows_boundary_stderr")"
+  fi
+
+  windows_case_errors=''
+  for windows_case_mode in repo parent; do
+    windows_case_receipt="$WINDOWS_BOUNDARY_TMP/RuntimeCanonical/case-$windows_case_mode.owner.json"
+    windows_case_repo="$WINDOWS_BOUNDARY_TMP/RepoCanonical"
+    windows_case_parent="$WINDOWS_BOUNDARY_TMP/RuntimeCanonical"
+    if [ "$windows_case_mode" = repo ]; then
+      windows_case_repo="$WINDOWS_BOUNDARY_TMP/repocanonical"
+    else
+      windows_case_parent="$WINDOWS_BOUNDARY_TMP/runtimecanonical"
+      windows_case_receipt="$windows_case_parent/case-$windows_case_mode.owner.json"
+    fi
+    windows_case_stderr="$WINDOWS_BOUNDARY_TMP/RuntimeCanonical/case-$windows_case_mode.stderr"
+    native_python -I -B "$WORKTREE_RECEIPTS" create \
+      --repo "$windows_case_repo" \
+      --relative ".claude/worktrees/solve-issue-335-windows-case-$windows_case_mode" \
+      --branch "worktree-solve-issue-335-windows-case-$windows_case_mode" \
+      --receipt "$windows_case_receipt" \
+      --start-head "$windows_boundary_head" \
+      >"$WINDOWS_BOUNDARY_TMP/RuntimeCanonical/case-$windows_case_mode.stdout" \
+      2>"$windows_case_stderr"
+    windows_case_rc=$?
+    [ "$windows_case_rc" -eq 3 ] \
+      || windows_case_errors="$windows_case_errors $windows_case_mode-rc-$windows_case_rc"
+    [ ! -e "$windows_case_receipt" ] \
+      || windows_case_errors="$windows_case_errors $windows_case_mode-receipt"
+    [ ! -s "$WINDOWS_BOUNDARY_TMP/RuntimeCanonical/case-$windows_case_mode.stdout" ] \
+      || windows_case_errors="$windows_case_errors $windows_case_mode-stdout"
+    [ "$(cat "$windows_case_stderr")" = 'uberdev worktree receipt: invalid authority' ] \
+      || windows_case_errors="$windows_case_errors $windows_case_mode-stderr"
+  done
+  if [ -z "$windows_case_errors" ]; then
+    pass_msg "native Windows rejects differently cased repo and receipt-parent aliases"
+  else
+    fail_msg "native Windows rejects differently cased repo and receipt-parent aliases" \
+      "$windows_case_errors"
+  fi
+  rm -rf "$WINDOWS_BOUNDARY_TMP"
+fi
 
 echo "== Secure default runtime and unique Codex child identities =="
 RUNTIME_TMP="$(mktemp -d)"
