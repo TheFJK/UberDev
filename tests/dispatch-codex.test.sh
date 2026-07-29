@@ -73,6 +73,31 @@ canonical_test_path() {
     "$path"
 }
 
+# Canonical authority arguments deliberately keep native C:/... spelling on
+# Windows. PATH is a shell path list, however, where that drive colon would be
+# parsed as a separator by Git Bash. Convert only PATH entries at that boundary.
+shell_path_list_entry() {
+  local path="$1" converted
+  case "${MSYSTEM:-}:$(uname -s 2>/dev/null)" in
+    MINGW*:*|MSYS*:*|CYGWIN*:*|*:MINGW*|*:MSYS*|*:CYGWIN*)
+      if ! converted="$(cygpath -u "$path")"; then
+        printf 'error: failed to convert shell PATH entry: %s\n' "$path" >&2
+        return 1
+      fi
+      case "$converted" in
+        /*) ;;
+        *)
+          printf 'error: shell PATH conversion was not absolute: %s -> %s\n' \
+            "$path" "$converted" >&2
+          return 1
+          ;;
+      esac
+      printf '%s' "$converted"
+      ;;
+    *) printf '%s' "$path" ;;
+  esac
+}
+
 PASS=0
 FAIL=0
 
@@ -1398,13 +1423,31 @@ mv "$CLEANUP_TMP/repo/$CONTRACT_RELATIVE" \
 cleanup_with_mutator_log 3 actual "$retired_log" \
     "$CLEANUP_TMP/repo" "$CONTRACT_RELATIVE" "$CONTRACT_BRANCH" "$CONTRACT_RECEIPT" "$CONTRACT_TOKEN" \
   || retired_conflict_errors="$retired_conflict_errors registry-rc"
-contract_registry_target="$(python3 -I -B -c \
-  'import os,sys; print(os.path.abspath(os.path.join(os.path.realpath(sys.argv[1]),*sys.argv[2].split("/"))),end="")' \
-  "$CLEANUP_TMP/repo" "$CONTRACT_RELATIVE")"
-git -C "$CLEANUP_TMP/repo" worktree list --porcelain \
-  | grep -Fqx "worktree $contract_registry_target" \
-  && git -C "$CLEANUP_TMP/repo" show-ref --verify --quiet "refs/heads/$CONTRACT_BRANCH" \
-  && [ ! -s "$retired_log" ] || retired_conflict_errors="$retired_conflict_errors registry-preservation"
+contract_registry_porcelain=''
+if contract_registry_porcelain="$(git -C "$CLEANUP_TMP/repo" worktree list --porcelain)" \
+    && printf '%s\n' "$contract_registry_porcelain" | native_python -I -B -c '
+import os,sys
+repo,relative=sys.argv[1:]
+expected=os.path.normcase(os.path.normpath(
+    os.path.join(os.path.realpath(repo),*relative.split("/"))))
+records=[]
+for raw in sys.stdin:
+    line=raw.rstrip("\r\n")
+    if not line.startswith("worktree "):
+        continue
+    value=line[len("worktree "):]
+    if not value:
+        raise SystemExit(2)
+    records.append(os.path.normcase(os.path.normpath(value)))
+matches=[value for value in records if value==expected]
+raise SystemExit(0 if len(matches)==1 else 1)
+' "$CLEANUP_TMP/repo" "$CONTRACT_RELATIVE" \
+    && git -C "$CLEANUP_TMP/repo" show-ref --verify --quiet "refs/heads/$CONTRACT_BRANCH" \
+    && [ ! -s "$retired_log" ]; then
+  :
+else
+  retired_conflict_errors="$retired_conflict_errors registry-preservation"
+fi
 git -C "$CLEANUP_TMP/repo" worktree remove --force "$CONTRACT_RELATIVE"
 git -C "$CLEANUP_TMP/repo" branch -D "$CONTRACT_BRANCH" >/dev/null
 if [ -z "$retired_conflict_errors" ]; then
@@ -1591,11 +1634,13 @@ retire_preserved_fixture "$CLEANUP_TMP/repo" "$committed_relative" "$committed_b
   "$committed_receipt" "$committed_token"
 
 mkdir -p "$CLEANUP_TMP/bin"
+CLEANUP_BIN_PATH="$(shell_path_list_entry "$CLEANUP_TMP/bin")" || exit 1
 REAL_CLEANUP_GIT="$(command -v git)"
 cat > "$CLEANUP_TMP/bin/git" <<'SH'
 #!/usr/bin/env bash
 for arg in "$@"; do
   if [ "$arg" = "${FAIL_GIT_PROBE:-}" ]; then
+    printf 'failed-probe=%s\n' "$arg" >>"${GIT_PROBE_MARKER:?}"
     exit 2
   fi
 done
@@ -1607,19 +1652,30 @@ for failed_probe in status show-ref; do
   probe_relative=".claude/worktrees/solve-issue-335-$probe_slug"
   probe_branch="worktree-solve-issue-335-$probe_slug"
   probe_receipt="$CLEANUP_TMP/runtime/probe-$failed_probe.owner.json"
+  probe_marker="$CLEANUP_TMP/runtime/probe-$failed_probe.invocations"
+  : >"$probe_marker"
   probe_token="$(bash -c '. "$1"; _uberdev_dispatch_create_codex_worktree_receipt "$2" "$3" "$4" "$5"' \
     _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$probe_relative" "$probe_branch" "$probe_receipt")"
   git -C "$CLEANUP_TMP/repo" worktree add -q "$probe_relative" -b "$probe_branch"
-  if PATH="$CLEANUP_TMP/bin:$PATH" REAL_CLEANUP_GIT="$REAL_CLEANUP_GIT" FAIL_GIT_PROBE="$failed_probe" \
-      bash -c '. "$1"; _uberdev_dispatch_cleanup_codex_worktree "$2" "$3" "$4" "$5" "$6" completed' \
-        _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$probe_relative" "$probe_branch" "$probe_receipt" "$probe_token"; then
-    fail_msg "failed git $failed_probe probe preserves cleanup evidence" "cleanup returned success"
-  elif [ -d "$CLEANUP_TMP/repo/$probe_relative" ] \
-      && git -C "$CLEANUP_TMP/repo" show-ref --verify --quiet "refs/heads/$probe_branch" \
-      && [ -f "$probe_receipt" ]; then
+  probe_rc=0
+  PATH="$CLEANUP_BIN_PATH:$PATH" REAL_CLEANUP_GIT="$REAL_CLEANUP_GIT" \
+    FAIL_GIT_PROBE="$failed_probe" GIT_PROBE_MARKER="$probe_marker" \
+    bash -c '. "$1"; _uberdev_dispatch_cleanup_codex_worktree "$2" "$3" "$4" "$5" "$6" completed' \
+      _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$probe_relative" "$probe_branch" "$probe_receipt" "$probe_token" \
+    || probe_rc=$?
+  probe_errors=''
+  [ "$probe_rc" -ne 0 ] || probe_errors="$probe_errors cleanup-returned-success"
+  grep -Fxq "failed-probe=$failed_probe" "$probe_marker" \
+    || probe_errors="$probe_errors stub-not-invoked"
+  [ -d "$CLEANUP_TMP/repo/$probe_relative" ] \
+    && git -C "$CLEANUP_TMP/repo" show-ref --verify --quiet "refs/heads/$probe_branch" \
+    && [ -f "$probe_receipt" ] \
+    || probe_errors="$probe_errors evidence-lost"
+  if [ -z "$probe_errors" ]; then
     pass_msg "failed git $failed_probe probe preserves cleanup evidence"
   else
-    fail_msg "failed git $failed_probe probe preserves cleanup evidence" "worktree, branch, or ownership receipt was lost"
+    fail_msg "failed git $failed_probe probe preserves cleanup evidence" \
+      "rc=$probe_rc errors=$probe_errors markers=$(tr '\n' ';' <"$probe_marker")"
   fi
   git -C "$CLEANUP_TMP/repo" worktree remove --force "$probe_relative"
   git -C "$CLEANUP_TMP/repo" branch -D "$probe_branch" >/dev/null
@@ -2054,6 +2110,7 @@ fi
 echo "== Non-child add and child cleanup share one Git metadata transaction =="
 CONCURRENT_BIN="$CLEANUP_TMP/concurrent-bin"
 mkdir -p "$CONCURRENT_BIN"
+CONCURRENT_BIN_PATH="$(shell_path_list_entry "$CONCURRENT_BIN")" || exit 1
 cat >"$CONCURRENT_BIN/git" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -2169,7 +2226,7 @@ run_add_cleanup_round() {
   : >"$events"; : >"$collisions"
 
   if [ "$mode" = bypass ]; then
-    PATH="$CONCURRENT_BIN:$PATH" CONCURRENT_REAL_GIT="$REAL_CLEANUP_GIT" \
+    PATH="$CONCURRENT_BIN_PATH:$PATH" CONCURRENT_REAL_GIT="$REAL_CLEANUP_GIT" \
       CONCURRENT_GIT_PREACQUIRE_DIR="$pre" CONCURRENT_GIT_EVENT_LOG="$events" \
       CONCURRENT_GIT_COLLISION_LOG="$collisions" CONCURRENT_GIT_EXPECT_COLLISION=1 \
       bash -c '
@@ -2181,7 +2238,7 @@ run_add_cleanup_round() {
       ' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$CLEANUP_TMP/repo/$add_relative" \
         "$add_branch" "$add_log" &
     add_pid=$!
-    PATH="$CONCURRENT_BIN:$PATH" CONCURRENT_REAL_GIT="$REAL_CLEANUP_GIT" \
+    PATH="$CONCURRENT_BIN_PATH:$PATH" CONCURRENT_REAL_GIT="$REAL_CLEANUP_GIT" \
       CONCURRENT_GIT_PREACQUIRE_DIR="$pre" CONCURRENT_GIT_EVENT_LOG="$events" \
       CONCURRENT_GIT_COLLISION_LOG="$collisions" CONCURRENT_GIT_EXPECT_COLLISION=1 \
       bash -c '
@@ -2191,7 +2248,7 @@ run_add_cleanup_round() {
       ' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$child_relative" "$child_branch" "$child_receipt" "$child_token" &
     cleanup_pid=$!
   else
-    PATH="$CONCURRENT_BIN:$PATH" CONCURRENT_REAL_GIT="$REAL_CLEANUP_GIT" \
+    PATH="$CONCURRENT_BIN_PATH:$PATH" CONCURRENT_REAL_GIT="$REAL_CLEANUP_GIT" \
       CONCURRENT_GIT_PREACQUIRE_DIR="$pre" CONCURRENT_GIT_EVENT_LOG="$events" \
       CONCURRENT_GIT_COLLISION_LOG="$collisions" \
       bash -c '
@@ -2231,7 +2288,7 @@ run_add_cleanup_round() {
       ' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$CLEANUP_TMP/repo/$add_relative" "$add_branch" "$add_log" "$label" \
         "$provider_started" "$provider_held" "$provider_released" "$provider_pid" &
     add_pid=$!
-    PATH="$CONCURRENT_BIN:$PATH" CONCURRENT_REAL_GIT="$REAL_CLEANUP_GIT" \
+    PATH="$CONCURRENT_BIN_PATH:$PATH" CONCURRENT_REAL_GIT="$REAL_CLEANUP_GIT" \
       CONCURRENT_GIT_PREACQUIRE_DIR="$pre" CONCURRENT_GIT_EVENT_LOG="$events" \
       CONCURRENT_GIT_COLLISION_LOG="$collisions" \
       bash -c '. "$1"; _uberdev_dispatch_cleanup_codex_worktree "$2" "$3" "$4" "$5" "$6" completed' \
@@ -2400,6 +2457,7 @@ fi
 # proven, so this partial-creation path cannot silently discard its evidence.
 PARTIAL_BIN="$SETUP_FAILURE_TMP/partial-bin"
 mkdir -p "$PARTIAL_BIN"
+PARTIAL_BIN_PATH="$(shell_path_list_entry "$PARTIAL_BIN")" || exit 1
 PARTIAL_REAL_GIT="$(command -v git)"
 cat > "$PARTIAL_BIN/git" <<'SH'
 #!/usr/bin/env bash
@@ -2418,7 +2476,7 @@ partial_status="$SETUP_FAILURE_TMP/runtime/partial-status.json"
 set +e
 (
   cd "$SETUP_FAILURE_TMP/repo/nested/invocation"
-  PATH="$PARTIAL_BIN:$PATH" PARTIAL_REAL_GIT="$PARTIAL_REAL_GIT" \
+  PATH="$PARTIAL_BIN_PATH:$PATH" PARTIAL_REAL_GIT="$PARTIAL_REAL_GIT" \
     UBERDEV_AGENT_STATUS_FILE="$partial_status" \
     UBERDEV_AGENT_RESULT_FILE="$SETUP_FAILURE_TMP/runtime/partial-result.md" \
     UBERDEV_AGENT_CHILD_OWNED=1 UBERDEV_AGENT_INSTANCE_ID="$partial_instance" \
@@ -2485,6 +2543,7 @@ rm -rf "$SETUP_FAILURE_TMP"
 echo "== Codex supervisor PID-capture failure is fully unwound =="
 PID_CAPTURE_TMP="$(canonical_test_path "$(mktemp -d)")" || exit 1
 mkdir -p "$PID_CAPTURE_TMP/repo" "$PID_CAPTURE_TMP/run" "$PID_CAPTURE_TMP/bin" "$PID_CAPTURE_TMP/tmp"
+PID_CAPTURE_BIN_PATH="$(shell_path_list_entry "$PID_CAPTURE_TMP/bin")" || exit 1
 chmod 700 "$PID_CAPTURE_TMP/run" "$PID_CAPTURE_TMP/tmp"
 (
   cd "$PID_CAPTURE_TMP/repo"
@@ -2536,7 +2595,7 @@ if [ "$PID_CAPTURE_NUMERIC_SUPPORTED" -eq 0 ]; then
   PID_CAPTURE_UNSUPPORTED_ERRORS=''
   if PID_CAPTURE_PREFLIGHT_OUT="$(
     cd "$PID_CAPTURE_TMP/repo"
-    PATH="$PID_CAPTURE_TMP/bin:$PATH" UBERDEV_DISPATCH_BACKEND_REQUESTED=codex \
+    PATH="$PID_CAPTURE_BIN_PATH:$PATH" UBERDEV_DISPATCH_BACKEND_REQUESTED=codex \
       bash -c '
         . "$1"
         unset UBERDEV_RESOLVED_BACKEND
@@ -2586,7 +2645,7 @@ PID_CAPTURE_INSTANCE=codex-pid-capture-failure
 PID_CAPTURE_SLUG="$(UBERDEV_AGENT_INSTANCE_ID="$PID_CAPTURE_INSTANCE" bash -c '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"
 PID_CAPTURE_OUT="$(
   cd "$PID_CAPTURE_TMP/repo"
-  PATH="$PID_CAPTURE_TMP/bin:$PATH" UBERDEV_TMPDIR="$PID_CAPTURE_TMP/tmp" \
+  PATH="$PID_CAPTURE_BIN_PATH:$PATH" UBERDEV_TMPDIR="$PID_CAPTURE_TMP/tmp" \
     PID_CAPTURE_PROVIDER_PID_FILE="$PID_CAPTURE_TMP/provider.pid" \
     bash -c '
       . "$1"
@@ -3105,6 +3164,7 @@ rm -rf "$TMPD"
 echo "== _uberdev_dispatch_codex behavior with real git and stubbed codex =="
 BEH_TMP="$(canonical_test_path "$(mktemp -d)")" || exit 1
 mkdir -p "$BEH_TMP/bin" "$BEH_TMP/repo" "$BEH_TMP/tmp"
+BEH_BIN_PATH="$(shell_path_list_entry "$BEH_TMP/bin")" || exit 1
 chmod 700 "$BEH_TMP/tmp"
 BEH_GIT="$(command -v git)"
 BEH_GIT_DIR="$(dirname "$BEH_GIT")"
@@ -3157,7 +3217,7 @@ chmod +x "$BEH_TMP/bin/py"
 for runtime_command in env nohup cat sleep rm uname grep stat id ps basename dirname mkdir; do
   ln -s "$(command -v "$runtime_command")" "$BEH_TMP/bin/$runtime_command"
 done
-BEH_RUNTIME_PATH="$BEH_TMP/bin:$BEH_GIT_DIR:/usr/bin:/bin"
+BEH_RUNTIME_PATH="$BEH_BIN_PATH:$BEH_GIT_DIR:/usr/bin:/bin"
 printf 'prompt body for codex' > "$BEH_TMP/prompt.txt"
 BEH_OUT="$(
   cd "$BEH_TMP/repo" && \
