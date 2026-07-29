@@ -1947,6 +1947,9 @@ EXECUTE_BITS = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
 BIRTHTIME_NS = 1_700_000_000_123_456_789
 PATH_CTIME_NS = 1_700_000_000_223_456_789
 FD_CTIME_NS = 1_700_000_000_323_456_789
+POSIX_PATH_CTIME_NS = 1_700_000_000_423_456_789
+POSIX_FD_CTIME_NS = 1_700_000_000_523_456_789
+POSIX_IDENTITY_CTIME_NS = 1_700_000_000_623_456_789
 
 
 class StatView:
@@ -2005,6 +2008,20 @@ for index, module_path in enumerate(sys.argv[1:3]):
     base = real_lstat(artifact)
     path_state = windows_path_view(base)
     fd_state = windows_fd_view(base)
+
+    def posix_identity_view(entry):
+        return StatView(
+            entry,
+            st_dev=base.st_dev,
+            st_ino=base.st_ino,
+            st_size=base.st_size,
+            st_mtime_ns=base.st_mtime_ns,
+            st_mtime=base.st_mtime,
+            st_ctime_ns=POSIX_IDENTITY_CTIME_NS,
+            st_ctime=POSIX_IDENTITY_CTIME_NS / 1_000_000_000,
+            st_mode=base.st_mode,
+        )
+
     with mock.patch.object(module, "_uses_native_windows_filesystem", return_value=False):
         posix_identity = module._artifact_identity(path_state)
         raw_descriptor_state = module._artifact_raw_fd_state(path_state)
@@ -2076,11 +2093,23 @@ for index, module_path in enumerate(sys.argv[1:3]):
     def modeled_capture(native_windows, descriptor_link_counts, path_link_counts):
         descriptor_snapshot = [0]
         path_snapshot = [0]
+        injected_path_identities = []
+        injected_descriptor_identities = []
 
         def modeled_lstat(path):
             entry = real_lstat(path)
             if native_windows:
                 entry = windows_path_view(entry)
+            else:
+                entry = StatView(
+                    entry,
+                    st_ctime_ns=POSIX_PATH_CTIME_NS,
+                    st_ctime=POSIX_PATH_CTIME_NS / 1_000_000_000,
+                )
+                injected_path_identities.append(
+                    module._artifact_raw_fd_state(entry)
+                )
+                entry = posix_identity_view(entry)
             snapshot = path_snapshot[0]
             path_snapshot[0] += 1
             return StatView(entry, st_nlink=path_link_counts[snapshot])
@@ -2094,6 +2123,15 @@ for index, module_path in enumerate(sys.argv[1:3]):
                 return windows_fd_view(
                     entry, link_count=link_count
                 )
+            entry = StatView(
+                entry,
+                st_ctime_ns=POSIX_FD_CTIME_NS,
+                st_ctime=POSIX_FD_CTIME_NS / 1_000_000_000,
+            )
+            injected_descriptor_identities.append(
+                module._artifact_raw_fd_state(entry)
+            )
+            entry = posix_identity_view(entry)
             return StatView(entry, st_nlink=link_count)
 
         error = None
@@ -2117,6 +2155,13 @@ for index, module_path in enumerate(sys.argv[1:3]):
         else:
             if payload != b"verified bytes\n":
                 error = AssertionError("modeled capture changed bytes")
+        if not native_windows:
+            assert injected_path_identities
+            assert injected_descriptor_identities
+            assert (
+                injected_path_identities[0]
+                != injected_descriptor_identities[0]
+            )
         return error, descriptor_snapshot[0], path_snapshot[0]
 
     capture_error, descriptor_calls, path_calls = modeled_capture(
