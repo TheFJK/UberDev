@@ -7,6 +7,27 @@ HELPER="$ROOT/plugins/uberdev/lib/command-workspace.py"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+python3 -I -B - "$HELPER" <<'PY'
+import importlib.util
+import sys
+import typing
+
+module_path = sys.argv[1]
+spec = importlib.util.spec_from_file_location("command_workspace_type_contract", module_path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+assert getattr(module, "NoReturn", None) is typing.NoReturn, (
+    f"NoReturn import is {getattr(module, 'NoReturn', None)!r}"
+)
+fail_hints = typing.get_type_hints(module.fail)
+assert fail_hints["return"] is typing.NoReturn, (
+    f"fail return is {fail_hints['return']!r}"
+)
+PY
+
 . "$LIB"
 
 file_mode() {

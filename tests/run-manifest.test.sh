@@ -38,6 +38,85 @@ if [ ! -f "$MANIFEST" ]; then
   printf '  FAIL  run_manifest.py is missing: %s\n' "$MANIFEST"
   exit 1
 fi
+
+TYPE_HINT_CONTRACT="$(python3 -I -B - "$MANIFEST" 2>&1 <<'PY'
+import ast
+import importlib.util
+import pathlib
+import sys
+import typing
+from collections.abc import Callable, Iterable, Iterator
+
+module_path = sys.argv[1]
+tree = ast.parse(pathlib.Path(module_path).read_text(encoding="utf-8"))
+expected_source_members = {
+    "collections.abc": {
+        ("Callable", None),
+        ("Iterable", None),
+        ("Iterator", None),
+    },
+    "typing": {("Any", None), ("NamedTuple", None)},
+}
+actual_source_members = {source: set() for source in expected_source_members}
+tracked_membership = {
+    name: set()
+    for members in expected_source_members.values()
+    for name, _alias in members
+}
+for node in ast.walk(tree):
+    if not isinstance(node, ast.ImportFrom):
+        continue
+    source = "." * node.level + (node.module or "")
+    for imported in node.names:
+        member = (imported.name, imported.asname)
+        if source in actual_source_members:
+            actual_source_members[source].add(member)
+        if imported.name in tracked_membership:
+            tracked_membership[imported.name].add((source, imported.asname))
+
+expected_membership = {
+    name: {(source, alias)}
+    for source, members in expected_source_members.items()
+    for name, alias in members
+}
+assert actual_source_members == expected_source_members, (
+    f"type import source members are {actual_source_members!r}"
+)
+assert tracked_membership == expected_membership, (
+    f"type import membership is {tracked_membership!r}"
+)
+
+spec = importlib.util.spec_from_file_location("run_manifest_type_contract", module_path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+assert module.Callable is Callable, module.Callable
+assert module.Iterable is Iterable, module.Iterable
+assert module.Iterator is Iterator, module.Iterator
+
+windows_hints = typing.get_type_hints(module._windows_live_process.__wrapped__)
+windows_expected = Iterator[tuple[int, Callable[[], None]]]
+assert windows_hints["return"] == windows_expected, (
+    f"_windows_live_process return is {windows_hints['return']!r}"
+)
+
+locked_hints = typing.get_type_hints(module._locked_manifest.__wrapped__)
+locked_expected = Iterator[int]
+assert locked_hints["return"] == locked_expected, (
+    f"_locked_manifest return is {locked_hints['return']!r}"
+)
+
+print("ok", end="")
+PY
+)"
+if [ "$TYPE_HINT_CONTRACT" = ok ]; then
+  pass "canonical context managers expose exact collections.abc Iterator contracts"
+else
+  fail "canonical context-manager type contract" "$TYPE_HINT_CONTRACT"
+fi
+
 if [ "${1:-}" != "--artifact-publication-only" ]; then
 SELF_IDENTITY="$(python3 "$MANIFEST" process-identity --pid "$$")" || exit 1
 

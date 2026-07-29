@@ -12,7 +12,7 @@ import stat
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, NoReturn
 
 PRIVATE_DIR = 0o700
 PRIVATE_FILE = 0o600
@@ -157,7 +157,7 @@ def owned_by_current_user(entry: os.stat_result) -> bool:
     return uid is not None and entry.st_uid == uid
 
 
-def fail(reason: str) -> None:
+def fail(reason: str) -> NoReturn:
     raise Failure(reason)
 
 
