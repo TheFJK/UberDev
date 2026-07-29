@@ -761,8 +761,8 @@ expected={
     "diff":b'<external-untrusted-input source="pr-diff">\n</external-untrusted-input>\n',
     "criteria":b"",
     "commit_range":b"",
-    "phase1_disposition":b"{}\n",
-    "phase2_disposition":b"{}\n",
+    "phase1_disposition":b"",
+    "phase2_disposition":b"",
 }
 assert set(descriptor["artifacts"])==set(expected)
 reparse=getattr(stat,"FILE_ATTRIBUTE_REPARSE_POINT",0x400)
@@ -773,7 +773,10 @@ for key,path in descriptor["artifacts"].items():
     assert not stat.S_ISLNK(entry.st_mode)
     assert not bool(getattr(entry,"st_file_attributes",0)&reparse)
     with open(path,"rb") as stream:
-        assert stream.read()==expected[key]
+        actual=stream.read()
+    assert actual==expected[key], (
+        f"artifact payload mismatch for {key}: actual={actual!r}, expected={expected[key]!r}"
+    )
 PY
 
   WINDOWS_REVIEW_INPUT="$(jq -cn --arg p "$WINDOWS_REPO_ID/README.md" \
