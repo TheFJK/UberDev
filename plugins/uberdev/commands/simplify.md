@@ -388,9 +388,9 @@ if [ "$STANDALONE_ELIGIBLE_COUNT" = "0" ]; then
     --snapshot-sha256 "$STANDALONE_SNAPSHOT_SHA256" \
     --working-dir "$WORKTREE_ROOT" \
     --disposition-path "$PHASE2_DISPOSITION_PATH")" || return 74
-  SIMPLIFY_FIXER_DISPOSITION_SHA256="$(python3 -I -B -c 'import json,re,sys
+  SIMPLIFY_FIXER_DISPOSITION_SHA256="$(python3 -I -B -c 'import json,os,re,sys
 value=json.loads(sys.argv[1]); expected={"disposition_path","disposition_sha256","applied_paths"}
-if set(value)!=expected or value["disposition_path"]!=sys.argv[2] or value["applied_paths"]!=[] or re.fullmatch(r"[0-9a-f]{64}",value["disposition_sha256"]) is None: raise SystemExit(74)
+if set(value)!=expected or value["disposition_path"]!=os.path.realpath(os.path.abspath(sys.argv[2])) or value["applied_paths"]!=[] or re.fullmatch(r"[0-9a-f]{64}",value["disposition_sha256"]) is None: raise SystemExit(74)
 print(value["disposition_sha256"],end="")' "$REVIEW_ONLY_RECEIPT" "$PHASE2_DISPOSITION_PATH")" || return 74
   REVIEW_ONLY_FINDING_COUNT="$(python3 -I -B -c 'import json,sys
 value=json.load(open(sys.argv[1],encoding="utf-8")); print(len(value["findings_disposition"]),end="")' "$PHASE2_DISPOSITION_PATH")" || return 74

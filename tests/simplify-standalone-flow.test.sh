@@ -15,7 +15,7 @@ awk '/# BEGIN simplify-standalone-controller-v2/{active=1;next} /# END simplify-
 bash -n "$BUILDER"
 bash -n "$CONTROLLER"
 
-python3 -I -B - "$CONTRACT" "$0" "$TEST_ROOT" <<'PY'
+python3 -I -B - "$CONTRACT" "$SIMPLIFY" "$0" "$TEST_ROOT" <<'PY'
 import contextlib
 import builtins
 import importlib.util
@@ -26,7 +26,8 @@ import os
 import pathlib
 import sys
 
-contract_path, fixture_path, test_root = sys.argv[1:]
+contract_path, simplify_path, fixture_path, test_root = sys.argv[1:]
+simplify_source = pathlib.Path(simplify_path).read_text(encoding="utf-8")
 fixture_source = pathlib.Path(fixture_path).read_text(encoding="utf-8")
 status_output = os.path.join(test_root, "modeled-windows-status.json")
 
@@ -67,6 +68,18 @@ def execute_fixture_python(source, arguments, execution_globals=None):
     return output.getvalue()
 
 
+def review_only_receipt_parser():
+    prefix = (
+        'SIMPLIFY_FIXER_DISPOSITION_SHA256="$(python3 -I -B -c \''
+    )
+    suffix = (
+        '\' "$REVIEW_ONLY_RECEIPT" "$PHASE2_DISPOSITION_PATH")" || return 74'
+    )
+    body_at = simplify_source.index(prefix) + len(prefix)
+    body_end = simplify_source.index(suffix, body_at)
+    return simplify_source[body_at:body_end]
+
+
 class WindowsPathModel:
     sep = "\\"
     altsep = "/"
@@ -105,6 +118,12 @@ receipt_source = fixture_python_body(
 status_source = fixture_python_body(
     ("path,handle,worktree,", "result=sys.argv[1:]")
 )
+terminal_status_source = fixture_python_body(
+    (
+        "path=sys.argv[1]; value=json.",
+        'load(open(path,encoding="utf-8"))',
+    )
+)
 result_source = fixture_python_body(
     ("disposition,status,commit_sha,", "path=sys.argv[1:]")
 )
@@ -125,6 +144,14 @@ canonical_status = WindowsPathModel.realpath(WindowsPathModel.abspath(raw_status
 assert WindowsPathModel.abspath(raw_worktree) != canonical_worktree
 assert WindowsPathModel.abspath(raw_result) != canonical_result
 assert WindowsPathModel.abspath(raw_status) != canonical_status
+raw_disposition = (
+    "C:/Program Files/Git/tmp/prkit-simplify/repo/.uberdev/research/"
+    "20260728-010208-abcdef0/phase2-disposition.json"
+)
+canonical_disposition = WindowsPathModel.realpath(
+    WindowsPathModel.abspath(raw_disposition)
+)
+assert WindowsPathModel.abspath(raw_disposition) != canonical_disposition
 edge_id = "simplify.fix.phase2"
 instance_id = "fixture-instance"
 raw_receipt = {
@@ -138,6 +165,69 @@ raw_receipt = {
     "status_file": raw_status,
 }
 
+review_only_receipt = json.dumps(
+    {
+        "applied_paths": [],
+        "disposition_path": canonical_disposition,
+        "disposition_sha256": "b" * 64,
+    },
+    sort_keys=True,
+    separators=(",", ":"),
+)
+review_parser_source = review_only_receipt_parser()
+
+
+def run_review_parser(disposition_path):
+    saved_argv = sys.argv
+    saved_os_path = os.path
+    output = io.StringIO()
+    original_import = builtins.__import__
+
+    def modeled_import(name, *arguments, **keywords):
+        module = original_import(name, *arguments, **keywords)
+        if name == "os":
+            module.path = WindowsPathModel
+        return module
+
+    modeled_builtins = dict(vars(builtins))
+    modeled_builtins["__import__"] = modeled_import
+    try:
+        sys.argv = [
+            "review-only-receipt-parser",
+            review_only_receipt,
+            disposition_path,
+        ]
+        with contextlib.redirect_stdout(output):
+            try:
+                exec(
+                    compile(
+                        review_parser_source,
+                        "<review-only-receipt-parser>",
+                        "exec",
+                    ),
+                    {"__builtins__": modeled_builtins},
+                )
+            except SystemExit as error:
+                return int(error.code), output.getvalue()
+        return 0, output.getvalue()
+    finally:
+        sys.argv = saved_argv
+        os.path = saved_os_path
+
+
+canonical_review_rc, canonical_review_output = run_review_parser(
+    canonical_disposition
+)
+assert canonical_review_rc == 0
+assert canonical_review_output == "b" * 64
+raw_review_rc, raw_review_output = run_review_parser(raw_disposition)
+if raw_review_rc != 0:
+    raise AssertionError(
+        "actual review-only receipt parser rejected an equivalent raw C:/ "
+        "Windows spelling after accepting the same-rule canonical spelling"
+    )
+assert raw_review_output == "b" * 64
+
 result_disposition = os.path.join(test_root, "modeled-windows-disposition.json")
 result_output = os.path.join(test_root, "modeled-windows-fixer-result.md")
 with builtins.open(result_disposition, "w", encoding="utf-8", newline="\n") as stream:
@@ -146,8 +236,9 @@ result_chunks = []
 
 
 class WindowsTextWriter:
-    def __init__(self, newline):
+    def __init__(self, newline, chunks):
         self.newline = newline
+        self.chunks = chunks
 
     def write(self, value):
         if self.newline is None:
@@ -156,14 +247,31 @@ class WindowsTextWriter:
             translated = value
         else:
             translated = value.replace("\n", self.newline)
-        result_chunks.append(translated)
+        self.chunks.append(translated)
         return len(value)
 
 
 def windows_open(path, mode="r", *arguments, **keywords):
     if os.fspath(path) == result_output and mode == "w":
-        return WindowsTextWriter(keywords.get("newline"))
+        return WindowsTextWriter(keywords.get("newline"), result_chunks)
     return builtins.open(path, mode, *arguments, **keywords)
+
+
+def execute_modeled_windows_text_writer(source, arguments, initial_payload=None):
+    output_path = os.fspath(arguments[0])
+    chunks = []
+
+    def modeled_open(path, mode="r", *open_arguments, **open_keywords):
+        if os.fspath(path) != output_path:
+            return builtins.open(path, mode, *open_arguments, **open_keywords)
+        if mode == "w":
+            return WindowsTextWriter(open_keywords.get("newline"), chunks)
+        if mode == "r" and initial_payload is not None:
+            return io.StringIO(initial_payload)
+        raise AssertionError(f"unexpected modeled open mode: {mode!r}")
+
+    execute_fixture_python(source, arguments, {"open": modeled_open})
+    return "".join(chunks).encode("utf-8")
 
 
 execute_fixture_python(
@@ -190,6 +298,23 @@ saved_capture = contract._capture_regular
 try:
     contract.os.path = WindowsPathModel
     contract._capture_regular = lambda *_arguments: (b"{}", ())
+    modeled_initial_status = execute_modeled_windows_text_writer(
+        status_source,
+        [status_output, "12345", raw_worktree, raw_result],
+    )
+    if b"\r" in modeled_initial_status:
+        raise AssertionError(
+            "initial fixture status producer emitted platform CRLF"
+        )
+    modeled_terminal_status = execute_modeled_windows_text_writer(
+        terminal_status_source,
+        [status_output],
+        modeled_initial_status.decode("utf-8"),
+    )
+    if b"\r" in modeled_terminal_status:
+        raise AssertionError(
+            "terminal-identity fixture status producer emitted platform CRLF"
+        )
     try:
         contract.bind_launch_receipt(
             receipt=canonical_json(raw_receipt),
@@ -410,7 +535,7 @@ value={
     "workspace_mode":"caller",
     "worktree":worktree,
 }
-open(path,"w",encoding="utf-8").write(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n")
+open(path,"w",encoding="utf-8",newline="\n").write(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n")
 PY
   }
   uberdev_dispatch_child_capture() {
@@ -431,7 +556,7 @@ PY
 import json,sys
 path=sys.argv[1]; value=json.load(open(path,encoding="utf-8"))
 value["process_identity"]="54321|54321|54321|abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-open(path,"w",encoding="utf-8").write(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n")
+open(path,"w",encoding="utf-8",newline="\n").write(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n")
 PY
     fi
     return 0
