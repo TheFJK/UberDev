@@ -19,7 +19,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Retired worktree receipts durably with shared atomic, no-overwrite moves so an existing terminal receipt can never be replaced.
 - Kept an already-observed red CI result terminal when the post-monitor metadata refresh is unavailable.
 - Bound every routed child handoff to a controller-retained whole-file digest before preflight parsing or dispatch.
-- Normalized Git Bash authority paths before native-Windows receipt creation and normalized native descriptor artifact identities, including descriptor link-count portability, without weakening same-handle mutation or replacement detection.
+- Preserved receipt-authority argv byte-for-byte across Git Bash native-Python launches so raw short-name, case, symlink, and junction aliases remain rejectable, and normalized native descriptor artifact identities, including descriptor link-count portability, without weakening same-handle mutation or replacement detection.
 - Added native Codex marketplace metadata and its canonical install selector to generated prkit output, and made the Codex source, manifest, and marketplace contract mandatory generation inputs.
 - Made standalone generation fail closed on dirty, ignored, uninspectable, or non-empty non-Git targets; `--force` remains the explicit managed-path replacement override and never bypasses containment or the generation lock.
 - Rejected symbolic-link, reparse-point, special, and Windows-reserved managed paths before replacement and during final verification; sealed generated trees before recursive deletion.

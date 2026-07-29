@@ -213,26 +213,46 @@ finally:
 assert not context_reached
 
 # Native Windows accepts Git Bash's alternate separators only when replacing
-# '/' with '\\' yields the exact spelling returned by abspath. No broader
-# normalization or case folding may turn an alias into authority.
+# '/' with '\\' yields the exact spelling returned by abspath. Python 3.13
+# changed ntpath.isabs so a single leading slash is no longer absolute, while
+# host-side ntpath.abspath cannot supply the current Windows drive. Pin both
+# parts of the fake model so /tmp and /d/a aliases are rejected identically on
+# every Python version without weakening native final-spelling checks.
 class WindowsPathModel:
     sep = "\\"
     altsep = "/"
-    isabs = staticmethod(ntpath.isabs)
+    current_drive = "C:"
+
+    @staticmethod
+    def isabs(value):
+        drive, tail = ntpath.splitdrive(value)
+        return bool(drive and tail.startswith(("\\", "/")))
 
     @staticmethod
     def abspath(value):
+        drive, tail = ntpath.splitdrive(ntpath.normpath(value))
+        if not drive and tail.startswith("\\"):
+            return WindowsPathModel.current_drive + tail
         return ntpath.abspath(value)
 
     @staticmethod
     def realpath(value):
-        resolved = ntpath.abspath(value)
+        resolved = WindowsPathModel.abspath(value)
         if resolved.startswith("c:"):
             resolved = "C:" + resolved[2:]
         if resolved.startswith("C:\\repo"):
             resolved = "C:\\Repo" + resolved[len("C:\\repo"):]
         resolved = resolved.replace("\\runtime", "\\Runtime", 1)
         return resolved
+
+
+assert not WindowsPathModel.isabs("/tmp/Runtime/receipt.json")
+assert WindowsPathModel.abspath("/tmp/Runtime/receipt.json") == (
+    "C:\\tmp\\Runtime\\receipt.json"
+)
+assert WindowsPathModel.abspath("/d/a/UberDev/Runtime/receipt.json") == (
+    "C:\\d\\a\\UberDev\\Runtime\\receipt.json"
+)
 
 
 saved_path_module = receipts.os.path
