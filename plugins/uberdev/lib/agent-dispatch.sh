@@ -723,10 +723,20 @@ import errno,json,os,re,stat,sys,tempfile,time
  issue,tier,provider_exit_raw,log,result,worktree,branch,workspace_mode,
  include_context)=sys.argv[1:]
 terminal_states={'completed','failed','timed_out','cancelled'}
+status_context_keys=('log','result','worktree','branch','workspace_mode')
+allowed_status_keys={'issue','tier','backend','state','exit_code','pid','provider_exit_code',
+                     'process_identity','lease_generation',*status_context_keys}
 WINDOWS_STATUS_REPLACE_TIMEOUT_SECONDS=2.0
 WINDOWS_STATUS_REPLACE_RETRY_INTERVAL_SECONDS=0.01
 WINDOWS_TRANSIENT_REPLACE_WINERRORS=frozenset({5,32})
-if mode not in {'create','replace','provider'} or state not in terminal_states|{'running'}: raise SystemExit(2)
+def canonical_handle(value):
+ if isinstance(value,bool): return None
+ if isinstance(value,int): return str(value) if value>0 else None
+ if not isinstance(value,str) or not value: return None
+ numeric=value[4:] if value.startswith('pid:') else value
+ if numeric.isdigit(): return numeric if re.fullmatch(r'[1-9][0-9]*',numeric) else None
+ return value if re.fullmatch(r'[A-Za-z0-9$][A-Za-z0-9$._:/@+\-]{0,255}',value) else None
+if mode not in {'attest','create','replace','provider'} or state not in terminal_states|{'running'}: raise SystemExit(2)
 try: exit_code=None if exit_raw in {'','null'} else int(exit_raw)
 except ValueError: raise SystemExit(2)
 if state=='running' and exit_code is not None: raise SystemExit(2)
@@ -752,6 +762,7 @@ if provider_exit_raw not in {'','null'}:
 if include_context=='1':
  payload.update(log=log,result=result,worktree=worktree,branch=branch,workspace_mode=workspace_mode)
 elif include_context!='0': raise SystemExit(2)
+if mode=='attest' and (state not in terminal_states or include_context!='1'): raise SystemExit(2)
 lock_path=path+'.transition-lock-v2'
 lock_flags=os.O_RDWR|os.O_CREAT|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_BINARY',0)
 lock_fd=os.open(lock_path,lock_flags,0o600); acquired=False
@@ -833,13 +844,28 @@ def replace_status(temporary,path,entry):
 try:
  lock_entry(); acquire(); lock_entry()
  entry,existing=read_current(); replace=True
- if mode=='provider' and existing is not None:
+ if mode=='attest':
+  if existing is None or set(existing)-allowed_status_keys: raise SystemExit(2)
+  existing_exit=existing.get('exit_code')
+  existing_handle=canonical_handle(existing.get('pid'))
+  expected_handle=canonical_handle(pid)
+  same_handle=(existing_handle is not None and expected_handle is not None
+               and existing_handle==expected_handle)
+  valid_exit=(not isinstance(existing_exit,bool) and isinstance(existing_exit,int)
+              and ((state=='completed' and existing_exit==0)
+                   or (state!='completed' and existing_exit!=0)))
+  if (existing.get('backend')!=backend or existing.get('state')!=state
+      or not same_handle or not valid_exit): raise SystemExit(3)
+  payload={key:value for key,value in existing.items() if key not in status_context_keys}
+  payload.update({key:value for key,value in zip(status_context_keys,(log,result,worktree,branch,workspace_mode))})
+  replace=payload!=existing
+ elif mode=='provider' and existing is not None:
   for key in ('process_identity','lease_generation'):
    if key in existing and key not in payload: payload[key]=existing[key]
- if existing is not None and existing.get('state') in terminal_states:
+ if mode!='attest' and existing is not None and existing.get('state') in terminal_states:
   if mode in {'create','provider'} or existing.get('state')==state: replace=False
   else: raise SystemExit(3)
- elif mode=='create' and existing is not None:
+ elif mode!='attest' and mode=='create' and existing is not None:
   candidate_pid=int(pid) if pid.isdigit() else pid
   replace=(existing.get('state')=='running' and existing.get('backend')==backend
            and existing.get('pid') in (None,'',pid,candidate_pid))
@@ -1139,7 +1165,18 @@ if len(started) != 1:
 
 _uberdev_agent_finalize_terminal() {
   local manifest="$1" lease="$2" lease_identity="$3" status_file="$4" backend="$5" handle="$6"
-  local request_json="$7" decision="$8" terminal_event="$9" terminal_rc event_json
+  local request_json="$7" decision="$8" terminal_event="$9" error_class="${10:-}"
+  local include_context="${11:-0}" context_log="${12:-}" context_result="${13:-}"
+  local context_worktree="${14:-}" context_branch="${15:-}" context_workspace_mode="${16:-}"
+  local terminal_rc event_json
+  case "$include_context" in
+    0) ;;
+    1)
+      [ -n "$context_log" ] && [ -n "$context_result" ] && [ -n "$context_worktree" ] || return 2
+      case "$context_workspace_mode" in isolated|caller) ;; *) return 2 ;; esac
+      ;;
+    *) return 2 ;;
+  esac
   case "$terminal_event" in
     completed) terminal_rc=0 ;;
     failed|timed_out|cancelled|abandoned) terminal_rc=1 ;;
@@ -1148,9 +1185,16 @@ _uberdev_agent_finalize_terminal() {
   local published
   published="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
   if [ "$published" != "$terminal_event" ]; then
-    _uberdev_agent_publish_status "$status_file" "$backend" "$handle" "$terminal_event" "$terminal_rc" replace || return 2
+    _uberdev_agent_publish_status_record "$status_file" replace "$backend" "$terminal_event" "$terminal_rc" "$handle" \
+      '' '' '' '' '' "$context_log" "$context_result" "$context_worktree" "$context_branch" \
+      "$context_workspace_mode" "$include_context" || return 2
   fi
-  event_json="$(_uberdev_agent_event_json "$terminal_event" "$request_json" "$decision" "$handle" "$status_file" "$terminal_rc" "${10:-}")" || return 2
+  if [ "$include_context" = 1 ]; then
+    _uberdev_agent_publish_status_record "$status_file" attest "$backend" "$terminal_event" "$terminal_rc" "$handle" \
+      '' '' '' '' '' "$context_log" "$context_result" "$context_worktree" "$context_branch" \
+      "$context_workspace_mode" 1 || return 2
+  fi
+  event_json="$(_uberdev_agent_event_json "$terminal_event" "$request_json" "$decision" "$handle" "$status_file" "$terminal_rc" "$error_class")" || return 2
   if ! _uberdev_agent_append_event "$manifest" "$event_json"; then
     _uberdev_agent_manifest_terminal_matches "$manifest" "$request_json" "$terminal_event" || return 2
   fi
@@ -1299,7 +1343,9 @@ PY
 
 _uberdev_agent_start_watcher() {
   local manifest="$1" lease="$2" lease_identity="$3" status_file="$4" backend="$5" handle="$6" request_json="$7" decision="$8"
-  local process_identity="${9:-}" watcher_pid watcher_instance watcher_fallback
+  local process_identity="${9:-}" include_context="${10:-0}" context_log="${11:-}" context_result="${12:-}"
+  local context_worktree="${13:-}" context_branch="${14:-}" context_workspace_mode="${15:-}"
+  local watcher_pid watcher_instance watcher_fallback
   watcher_instance="$(_uberdev_agent_json_get "$request_json" run_id)" || return 2
   watcher_fallback="$(dirname "$manifest")/$watcher_instance.watcher-error.json"
   (
@@ -1470,7 +1516,9 @@ _uberdev_agent_start_watcher() {
     [ "$terminal_event" != failed ] || [ -n "$error_class" ] || error_class=provider_execution_failed
     while [ "$finalize_attempt" -le 3 ]; do
       if _uberdev_agent_finalize_terminal "$manifest" "$lease" "$lease_identity" "$status_file" \
-          "$backend" "$handle" "$request_json" "$decision" "$terminal_event" "$error_class"; then
+          "$backend" "$handle" "$request_json" "$decision" "$terminal_event" "$error_class" \
+          "$include_context" "$context_log" "$context_result" "$context_worktree" "$context_branch" \
+          "$context_workspace_mode"; then
         exit 0
       fi
       [ "$finalize_attempt" -ge 3 ] || sleep 0.1
@@ -1576,6 +1624,8 @@ _uberdev_agent_finalize_prelaunch_failure() {
 
 _uberdev_agent_abort_after_launch() {
   local manifest="$1" lease="$2" lease_identity="$3" status_file="$4" result_file="$5" backend="$6" handle="$7" request_json="$8" decision="$9" reason="${10}"
+  local include_context="${11:-0}" context_log="${12:-}" context_result="${13:-}"
+  local context_worktree="${14:-}" context_branch="${15:-}" context_workspace_mode="${16:-}"
   local process_identity terminal_event cleanup_rc=0 fallback_file run_id provider_gone=0 cancel_rc=0
   run_id="$(_uberdev_agent_json_get "$request_json" run_id 2>/dev/null || true)"
   fallback_file="$(dirname "$manifest")/${run_id:-post-launch}.watcher-error.json"
@@ -1583,7 +1633,9 @@ _uberdev_agent_abort_after_launch() {
   terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
   if [ -n "$terminal_event" ]; then
     if ! _uberdev_agent_finalize_terminal "$manifest" "$lease" "$lease_identity" "$status_file" \
-        "$backend" "$handle" "$request_json" "$decision" "$terminal_event" dispatch_setup_failed; then
+        "$backend" "$handle" "$request_json" "$decision" "$terminal_event" dispatch_setup_failed \
+        "$include_context" "$context_log" "$context_result" "$context_worktree" "$context_branch" \
+        "$context_workspace_mode"; then
       _uberdev_agent_persist_watcher_error_retry "$status_file" "$fallback_file" "$backend" "$handle" "$terminal_event" 1 || \
         _uberdev_agent_error "failed to persist post-launch terminal finalization error: $reason"
     fi
@@ -1616,7 +1668,9 @@ _uberdev_agent_abort_after_launch() {
   terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
   case "$terminal_event" in completed|failed|timed_out|cancelled) ;; *) terminal_event=failed ;; esac
   _uberdev_agent_finalize_terminal "$manifest" "$lease" "$lease_identity" "$status_file" \
-    "$backend" "$handle" "$request_json" "$decision" "$terminal_event" dispatch_setup_failed || cleanup_rc=2
+    "$backend" "$handle" "$request_json" "$decision" "$terminal_event" dispatch_setup_failed \
+    "$include_context" "$context_log" "$context_result" "$context_worktree" "$context_branch" \
+    "$context_workspace_mode" || cleanup_rc=2
   if [ "$cleanup_rc" -ne 0 ]; then
     _uberdev_agent_persist_watcher_error_retry "$status_file" "$fallback_file" "$backend" "$handle" "$terminal_event" 1 || \
       _uberdev_agent_error "failed to persist post-launch cleanup error: $reason"
@@ -1630,6 +1684,7 @@ uberdev_agent_dispatch() {
   local run_dir run_id repository_id backend workflow issue_num tier capacity timeout_s workspace_mode workspace_dir
   local prompt_file result_file status_file state_dir manifest decision lease lease_record lease_identity registered_identity event_json rc handle lease_handle terminal_event paths_json lease_failure_reason cleanup_identity
   local context_file context_sha context_validation persisted_decision supplied_root supplied_parent context_run_id parent_run_id agent_id process_identity lease_generation identity_probe_rc owner_record
+  local status_context status_log status_result status_worktree status_branch status_workspace_mode
   local _UBERDEV_AGENT_OWNER_PID='' _UBERDEV_AGENT_OWNER_IDENTITY=''
   [ "$#" -eq 4 ] || { _uberdev_agent_error 'expected REQUEST_JSON PROMPT_FILE RESULT_FILE STATUS_FILE'; return 2; }
   if [ -n "${ZSH_VERSION:-}" ]; then
@@ -1813,17 +1868,52 @@ uberdev_agent_dispatch() {
   UBERDEV_AGENT_WORKSPACE_DIR="$workspace_dir"
   export UBERDEV_AGENT_DECISION_JSON UBERDEV_AGENT_RESULT_FILE UBERDEV_AGENT_STATUS_FILE UBERDEV_AGENT_INSTANCE_ID UBERDEV_AGENT_CHILD_OWNED
   export UBERDEV_AGENT_WORKSPACE_MODE UBERDEV_AGENT_WORKSPACE_DIR
+  DISPATCH_STATUS_CONTEXT=0
+  DISPATCH_STATUS_LOG=''
+  DISPATCH_STATUS_RESULT=''
+  DISPATCH_STATUS_WORKTREE=''
+  DISPATCH_STATUS_BRANCH=''
+  DISPATCH_STATUS_WORKSPACE_MODE=''
   if _uberdev_agent_dispatch_backend "$backend" "$issue_num" "$tier" "$prompt_file" "$result_file" "$status_file" "$decision"; then
     rc=0
   else
     rc=$?
   fi
+  status_context="${DISPATCH_STATUS_CONTEXT:-0}"
+  status_log="${DISPATCH_STATUS_LOG:-}"
+  status_result="${DISPATCH_STATUS_RESULT:-}"
+  status_worktree="${DISPATCH_STATUS_WORKTREE:-}"
+  status_branch="${DISPATCH_STATUS_BRANCH:-}"
+  status_workspace_mode="${DISPATCH_STATUS_WORKSPACE_MODE:-}"
+  case "$status_context" in
+    0)
+      status_log=''; status_result=''; status_worktree=''; status_branch=''; status_workspace_mode=''
+      ;;
+    1)
+      if [ -z "$status_log" ] || [ -z "$status_result" ] || [ -z "$status_worktree" ]; then
+        _uberdev_agent_error 'provider returned incomplete post-launch status context'
+        status_context=0; rc=2
+      fi
+      case "$status_workspace_mode" in
+        isolated|caller) ;;
+        *)
+          _uberdev_agent_error 'provider returned invalid post-launch workspace mode'
+          status_context=0; rc=2
+          ;;
+      esac
+      ;;
+    *)
+      _uberdev_agent_error 'provider returned invalid post-launch status context flag'
+      status_context=0; rc=2
+      ;;
+  esac
   handle="${DISPATCH_ID:-}"
   if [ "$rc" -ne 0 ] || [ -z "$handle" ]; then
     [ "$rc" -ne 0 ] || rc=1
     if [ -n "$handle" ]; then
       _uberdev_agent_abort_after_launch "$manifest" "$lease" "$lease_identity" "$status_file" "$result_file" \
-        "$backend" "$handle" "$request_json" "$decision" provider_launch
+        "$backend" "$handle" "$request_json" "$decision" provider_launch \
+        "$status_context" "$status_log" "$status_result" "$status_worktree" "$status_branch" "$status_workspace_mode"
       return $?
     fi
     if ! _uberdev_agent_finalize_launch_failure "$manifest" "$lease" "$lease_identity" "$status_file" \
@@ -1855,7 +1945,8 @@ uberdev_agent_dispatch() {
               if [ -z "$terminal_event" ]; then
                 _uberdev_agent_error "cannot verify process identity for $backend pid $handle (probe rc=$identity_probe_rc)"
                 _uberdev_agent_abort_after_launch "$manifest" "$lease" "$lease_identity" "$status_file" "$result_file" \
-                  "$backend" "$handle" "$request_json" "$decision" process_identity_capture
+                  "$backend" "$handle" "$request_json" "$decision" process_identity_capture \
+                  "$status_context" "$status_log" "$status_result" "$status_worktree" "$status_branch" "$status_workspace_mode"
                 return $?
               fi
             fi
@@ -1872,25 +1963,33 @@ uberdev_agent_dispatch() {
       exact-identity lease_identity "$process_identity"; then
     cleanup_identity="${lease_identity:-$registered_identity}"
     _uberdev_agent_abort_after_launch "$manifest" "$lease" "$cleanup_identity" "$status_file" "$result_file" \
-      "$backend" "$handle" "$request_json" "$decision" lease_handle_update
+      "$backend" "$handle" "$request_json" "$decision" lease_handle_update \
+      "$status_context" "$status_log" "$status_result" "$status_worktree" "$status_branch" "$status_workspace_mode"
     return $?
   fi
   if [ -z "$lease_identity" ]; then
     _uberdev_agent_abort_after_launch "$manifest" "$lease" "$registered_identity" "$status_file" "$result_file" \
-      "$backend" "$handle" "$request_json" "$decision" lease_identity
+      "$backend" "$handle" "$request_json" "$decision" lease_identity \
+      "$status_context" "$status_log" "$status_result" "$status_worktree" "$status_branch" "$status_workspace_mode"
     return $?
   fi
   lease_generation="${lease_identity##*:}"
   if [ -n "$terminal_event" ]; then
     _uberdev_agent_finalize_terminal "$manifest" "$lease" "$lease_identity" "$status_file" \
-      "$backend" "$handle" "$request_json" "$decision" "$terminal_event" || return 2
+      "$backend" "$handle" "$request_json" "$decision" "$terminal_event" '' \
+      "$status_context" "$status_log" "$status_result" "$status_worktree" "$status_branch" "$status_workspace_mode" || return 2
   else
-    _uberdev_agent_publish_status "$status_file" "$backend" "$lease_handle" running '' create "$process_identity" "$lease_generation" || {
+    _uberdev_agent_publish_status_record "$status_file" create "$backend" running '' "$lease_handle" \
+      "$process_identity" "$lease_generation" '' '' '' "$status_log" "$status_result" "$status_worktree" \
+      "$status_branch" "$status_workspace_mode" "$status_context" || {
       _uberdev_agent_abort_after_launch "$manifest" "$lease" "$lease_identity" "$status_file" "$result_file" \
-        "$backend" "$handle" "$request_json" "$decision" status_publication
+        "$backend" "$handle" "$request_json" "$decision" status_publication \
+        "$status_context" "$status_log" "$status_result" "$status_worktree" "$status_branch" "$status_workspace_mode"
       return $?
     }
-    _uberdev_agent_start_watcher "$manifest" "$lease" "$lease_identity" "$status_file" "$backend" "$lease_handle" "$request_json" "$decision" "$process_identity"
+    _uberdev_agent_start_watcher "$manifest" "$lease" "$lease_identity" "$status_file" "$backend" "$lease_handle" \
+      "$request_json" "$decision" "$process_identity" "$status_context" "$status_log" "$status_result" \
+      "$status_worktree" "$status_branch" "$status_workspace_mode"
   fi
   DISPATCH_RC=0
   return 0

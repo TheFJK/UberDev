@@ -1255,6 +1255,12 @@ uberdev_dispatch_preflight_backend() {
 _uberdev_agent_dispatch_backend() {
   local backend="$1" issue_num="$2" tier="$3" prompt_file="$4"
   local result_file="$5" status_file="$6" decision="$7"
+  DISPATCH_STATUS_CONTEXT=0
+  DISPATCH_STATUS_LOG=''
+  DISPATCH_STATUS_RESULT=''
+  DISPATCH_STATUS_WORKTREE=''
+  DISPATCH_STATUS_BRANCH=''
+  DISPATCH_STATUS_WORKSPACE_MODE=''
   UBERDEV_AGENT_ROUTING_MODE="$(_uberdev_agent_json_get "$decision" routing_mode 2>/dev/null || true)"
   UBERDEV_AGENT_EFFECTIVE_POLICY="$(_uberdev_agent_json_get "$decision" effective_policy 2>/dev/null || true)"
   UBERDEV_AGENT_ROUTE_MODEL="$(_uberdev_agent_json_get "$decision" model 2>/dev/null || true)"
@@ -2258,6 +2264,12 @@ _uberdev_dispatch_codex() {
   local ISSUE_NUM="$1" TIER="$2" PROMPT_FILE="$3"
   DISPATCH_RC=0
   DISPATCH_ID=""
+  DISPATCH_STATUS_CONTEXT=0
+  DISPATCH_STATUS_LOG=''
+  DISPATCH_STATUS_RESULT=''
+  DISPATCH_STATUS_WORKTREE=''
+  DISPATCH_STATUS_BRANCH=''
+  DISPATCH_STATUS_WORKSPACE_MODE=''
   local INSTANCE_SLUG
   INSTANCE_SLUG="$(_uberdev_dispatch_instance_slug)" || { DISPATCH_RC=1; return 1; }
   local STATUS_FILE="${UBERDEV_AGENT_STATUS_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-codex-status-$ISSUE_NUM.json}"
@@ -2577,6 +2589,12 @@ os.execvp("bash",argv)' '
     >"$LOG_FILE" 2>&1 &
   DISPATCH_RC=$?
   local LAUNCH_PID="$!"
+  DISPATCH_STATUS_CONTEXT=1
+  DISPATCH_STATUS_LOG="$LOG_FILE"
+  DISPATCH_STATUS_RESULT="$RESULT_FILE"
+  DISPATCH_STATUS_WORKTREE="$EXECUTION_DIR"
+  DISPATCH_STATUS_BRANCH="$WORKTREE_BRANCH"
+  DISPATCH_STATUS_WORKSPACE_MODE="$WORKSPACE_MODE"
   disown 2>/dev/null || true
   if ! DISPATCH_ID="$(_uberdev_dispatch_capture_supervisor_pid "$LAUNCH_PID" "$STATUS_FILE.pid")"; then
     ABORT_PID="$LAUNCH_PID"
