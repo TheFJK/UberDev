@@ -17,6 +17,7 @@ bash -n "$CONTROLLER"
 
 python3 -I -B - "$CONTRACT" "$0" "$TEST_ROOT" <<'PY'
 import contextlib
+import builtins
 import importlib.util
 import io
 import json
@@ -51,13 +52,16 @@ def fixture_python_body(marker_parts):
     return fixture_source[body_at:body_end]
 
 
-def execute_fixture_python(source, arguments):
+def execute_fixture_python(source, arguments, execution_globals=None):
     saved_argv = sys.argv
     output = io.StringIO()
     try:
         sys.argv = ["fixture-producer", *arguments]
         with contextlib.redirect_stdout(output):
-            exec(compile(source, "<fixture-producer>", "exec"), {})
+            exec(
+                compile(source, "<fixture-producer>", "exec"),
+                {} if execution_globals is None else dict(execution_globals),
+            )
     finally:
         sys.argv = saved_argv
     return output.getvalue()
@@ -101,6 +105,9 @@ receipt_source = fixture_python_body(
 status_source = fixture_python_body(
     ("path,handle,worktree,", "result=sys.argv[1:]")
 )
+result_source = fixture_python_body(
+    ("disposition,status,commit_sha,", "path=sys.argv[1:]")
+)
 raw_worktree = "C:/Program Files/Git/tmp/prkit-simplify/repo"
 raw_result = (
     "C:/Program Files/Git/tmp/prkit-simplify/repo/.uberdev/research/"
@@ -130,6 +137,53 @@ raw_receipt = {
     "result_file": raw_result,
     "status_file": raw_status,
 }
+
+result_disposition = os.path.join(test_root, "modeled-windows-disposition.json")
+result_output = os.path.join(test_root, "modeled-windows-fixer-result.md")
+with builtins.open(result_disposition, "w", encoding="utf-8", newline="\n") as stream:
+    json.dump({"findings_disposition": []}, stream)
+result_chunks = []
+
+
+class WindowsTextWriter:
+    def __init__(self, newline):
+        self.newline = newline
+
+    def write(self, value):
+        if self.newline is None:
+            translated = value.replace("\n", "\r\n")
+        elif self.newline in {"", "\n"}:
+            translated = value
+        else:
+            translated = value.replace("\n", self.newline)
+        result_chunks.append(translated)
+        return len(value)
+
+
+def windows_open(path, mode="r", *arguments, **keywords):
+    if os.fspath(path) == result_output and mode == "w":
+        return WindowsTextWriter(keywords.get("newline"))
+    return builtins.open(path, mode, *arguments, **keywords)
+
+
+execute_fixture_python(
+    result_source,
+    [result_disposition, "APPLIED", "a" * 40, result_output],
+    {"open": windows_open},
+)
+result_payload = "".join(result_chunks).encode("utf-8")
+try:
+    parsed_result = contract._parse_fixer_result(result_payload, "phase2", "refactor")
+except contract.ContractFailure as error:
+    if b"\r" not in result_payload or str(error) != "fixer_result_invalid":
+        raise
+    raise AssertionError(
+        "fixture fixer-result producer emitted CRLF and the real parser rejected it"
+    ) from error
+if b"\r" in result_payload:
+    raise AssertionError("fixture fixer-result producer emitted CRLF")
+assert parsed_result["status"] == "APPLIED"
+assert parsed_result["commits"][0]["sha"] == "a" * 40
 
 saved_path = contract.os.path
 saved_capture = contract._capture_regular
@@ -335,7 +389,7 @@ if rows:
         lines += [f"  - finding_index: {row['finding_index']}",f"    location: {row['location']}",f"    summary_sha256: {row['summary_sha256']}",f"    disposition: {row['disposition']}",f"    behavior_tag: {row['behavior_tag']}",f"    reason: {row['reason']}"]
 else: lines.append("findings_disposition: []")
 lines += ["risks: []","```"]
-open(path,"w",encoding="utf-8").write("\n".join(lines)+"\n")
+open(path,"w",encoding="utf-8",newline="\n").write("\n".join(lines)+"\n")
 PY
     local status_handle=12345
     [ "$replacement" != foreign_handle ] || status_handle=54321
